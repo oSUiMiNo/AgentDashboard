@@ -18,6 +18,15 @@ pub const ENV_PREFIX: &str = "[fake-claude] env: ";
 pub const DUMP_END_MARKER: &str = "[fake-claude] dump-end";
 /// `flood` の出力が終わったことを示すマーカー。
 pub const FLOOD_END_MARKER: &str = "[fake-claude] flood-end";
+/// `hook` がフックコマンドを実行し終えたことを示す行頭。
+///
+/// 実行が終わってから出すので、テストはこれを待てば「ダッシュボード側が受け取り終えた」と
+/// みなせる。マーカーが無いと、状態が変わるより先に検証へ進んでしまう。
+pub const HOOK_SENT_PREFIX: &str = "[fake-claude] hook-sent: ";
+/// `hook` に失敗したことを示す行頭（設定が読めない・イベントが無い等）。
+pub const HOOK_FAILED_PREFIX: &str = "[fake-claude] hook-failed: ";
+/// `crash` で自ら異常終了する直前のマーカー。
+pub const CRASH_MARKER: &str = "[fake-claude] crash";
 /// 終了時のマーカー。
 pub const BYE_MARKER: &str = "[fake-claude] bye";
 /// `flood` が繰り返し吐くパターン。ASCII のみで、端末の制御シーケンスを含まない。
@@ -27,23 +36,7 @@ pub const BYE_MARKER: &str = "[fake-claude] bye";
 /// 見えにくくなる。
 pub const FLOOD_PATTERN: &[u8] = b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abc\n";
 
-/// `fake-claude` 実行ファイルの場所を、いま動いているテストバイナリから割り出す。
-///
-/// `CARGO_BIN_EXE_*` はバイナリを定義したパッケージの統合テストにしか渡らないため、
-/// 別クレート（core）のテストからは使えない。cargo はテストバイナリを
-/// `target/<profile>/deps/` に置き、実行ファイルを `target/<profile>/` に置くので、
-/// テストバイナリの位置から辿るのが移植性のある方法になる。
+/// `fake-claude` 実行ファイルの場所。
 pub fn path() -> PathBuf {
-    let mut dir = std::env::current_exe().expect("テストバイナリの場所を取得できること");
-    dir.pop(); // 実行ファイル名を落とす
-    if dir.ends_with("deps") {
-        dir.pop();
-    }
-    let binary = dir.join("fake-claude");
-    assert!(
-        binary.is_file(),
-        "fake-claude が見つかりません: {}。testkit をビルドしてから実行してください",
-        binary.display()
-    );
-    binary
+    crate::binary_path("fake-claude")
 }

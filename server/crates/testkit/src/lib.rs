@@ -18,9 +18,37 @@ use axum::{
 use std::{
     io::{Read as _, Write as _},
     net::SocketAddr,
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
+
+/// ワークスペースがビルドした実行ファイルの場所を、いま動いているテストバイナリから割り出す。
+///
+/// `CARGO_BIN_EXE_*` を使わないのには2つ理由がある。
+///
+/// - あの環境変数はバイナリを定義したパッケージの統合テストにしか渡らないため、
+///   別クレートのテストからは使えない
+/// - **コンパイル時のパスが焼き込まれる**。本PJTは cargo をコンテナで動かすので、
+///   焼き込まれるのはコンテナ内の絶対パス。ホストでテストバイナリを実行する
+///   （実CLI統合テスト）と、存在しないパスを指してしまう
+///
+/// cargo はテストバイナリを `target/<profile>/deps/` に、実行ファイルを
+/// `target/<profile>/` に置く。実行時に自分の位置から辿れば、どちらの環境でも当たる。
+pub fn binary_path(name: &str) -> PathBuf {
+    let mut dir = std::env::current_exe().expect("テストバイナリの場所を取得できること");
+    dir.pop(); // 実行ファイル名を落とす
+    if dir.ends_with("deps") {
+        dir.pop();
+    }
+    let binary = dir.join(name);
+    assert!(
+        binary.is_file(),
+        "{name} が見つかりません: {}。ワークスペースをビルドしてから実行してください",
+        binary.display()
+    );
+    binary
+}
 
 /// モックサーバが受信した1件のフック。
 #[derive(Debug, Clone, PartialEq)]
@@ -150,13 +178,24 @@ async fn receive_hook(
 
 /// 依存を増やさずに JSON を POST するための最小HTTPクライアント。
 ///
-/// テストからモックサーバを叩くためだけのもの。HTTPステータスコードを返す。
+/// テストからモックサーバや core の受信口を叩くためだけのもの。
 pub fn post_json(addr: SocketAddr, path: &str, body: &str) -> anyhow::Result<u16> {
-    let mut stream = std::net::TcpStream::connect(addr)?;
     let request = format!(
         "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
+    Ok(request_raw(addr, &request)?.0)
+}
+
+/// 同じく最小の GET。ステータスコードと本文を返す。
+pub fn get(addr: SocketAddr, path: &str) -> anyhow::Result<(u16, String)> {
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    request_raw(addr, &request)
+}
+
+/// 組み立て済みのリクエストをそのまま送り、`(ステータス, 本文)` を返す。
+fn request_raw(addr: SocketAddr, request: &str) -> anyhow::Result<(u16, String)> {
+    let mut stream = std::net::TcpStream::connect(addr)?;
     stream.write_all(request.as_bytes())?;
     stream.flush()?;
 
@@ -168,5 +207,11 @@ pub fn post_json(addr: SocketAddr, path: &str, body: &str) -> anyhow::Result<u16
         .nth(1)
         .and_then(|code| code.parse::<u16>().ok())
         .ok_or_else(|| anyhow::anyhow!("HTTPステータス行を読めません: {response:?}"))?;
-    Ok(status)
+
+    // ヘッダと本文の境目は空行。チャンク転送は使われない想定（Content-Length 応答のみ）
+    let body = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_string())
+        .unwrap_or_default();
+    Ok((status, body))
 }
