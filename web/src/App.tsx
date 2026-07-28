@@ -1,16 +1,27 @@
 /**
- * フェーズ1（M1: 動くターミナル）の最小ダッシュボード。
+ * 画面の組み立てとルーティング（設計§10）。
  *
- * セッションを起動し、ブラウザのターミナルから操作できることを確かめるための画面。
- * 一覧を小窓（タイル）で並べる本来の司令塔ビューはフェーズ2、グループの横並びと
- * 見た目のリッチ化はフェーズ4で作る。ここでは経路が通っていることを優先している。
+ * URL は3つ。
+ *
+ * | URL | 画面 |
+ * |---|---|
+ * | `/` | 一覧（司令塔ビュー）。プロジェクト単位にまとめた小窓 |
+ * | `/p/:projectId` | プロジェクト内の全セッション（中身はフェーズ4） |
+ * | `/s/:cardId` | セッション専用画面 |
+ *
+ * WebSocket の接続はここで1度だけ張る。画面を移っても繋ぎ直さないよう、ルーティングの
+ * 内側ではなく外側に置いている。
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
+import { BrowserRouter, Link, Route, Routes, useParams } from 'react-router'
 import { Button } from '@/components/ui/button'
-import { TerminalPane } from '@/components/TerminalPane/TerminalPane'
-import { isEnded, statusLabel } from '@/lib/protocol'
-import type { CardId, SessionMeta } from '@/lib/protocol'
+import { GroupView } from '@/components/GroupView/GroupView'
+import { SessionView } from '@/components/SessionView/SessionView'
+import { TileGrid } from '@/components/TileGrid/TileGrid'
+import { SpawnForm } from '@/components/SpawnForm/SpawnForm'
+import { HOME } from '@/lib/routes'
+import { useNow } from '@/lib/sessions'
 import { useWsStore } from '@/stores/ws'
 
 const CONNECTION_LABEL: Record<string, string> = {
@@ -20,32 +31,29 @@ const CONNECTION_LABEL: Record<string, string> = {
 }
 
 function App() {
+  return (
+    <BrowserRouter>
+      <Shell />
+    </BrowserRouter>
+  )
+}
+
+function Shell() {
   const status = useWsStore((state) => state.status)
-  const sessions = useWsStore((state) => state.sessions)
   const lastError = useWsStore((state) => state.lastError)
   const connect = useWsStore((state) => state.connect)
   const clearError = useWsStore((state) => state.clearError)
 
-  const [cwd, setCwd] = useState('')
-  const [selected, setSelected] = useState<CardId | null>(null)
-
   useEffect(() => {
-    connect()
+    void connect()
   }, [connect])
-
-  // 消えたカードを選んだままにしない
-  useEffect(() => {
-    if (selected && !sessions.some((session) => session.card_id === selected)) {
-      setSelected(null)
-    }
-  }, [sessions, selected])
-
-  const current = sessions.find((session) => session.card_id === selected) ?? null
 
   return (
     <main className="flex h-svh flex-col gap-4 p-6">
       <header className="flex items-center gap-3">
-        <h1 className="text-xl font-semibold tracking-tight">AgentDashboard</h1>
+        <Link to={HOME} className="text-xl font-semibold tracking-tight">
+          <h1>AgentDashboard</h1>
+        </Link>
         <span
           data-testid="connection-status"
           data-status={status}
@@ -67,143 +75,70 @@ function App() {
         </div>
       )}
 
-      <SpawnForm cwd={cwd} onChangeCwd={setCwd} disabled={status !== 'open'} />
-
-      <div className="flex min-h-0 flex-1 gap-4">
-        <SessionList
-          sessions={sessions}
-          selected={selected}
-          onSelect={setSelected}
-        />
-        <section className="flex min-h-0 flex-1 flex-col gap-2">
-          {current ? (
-            <>
-              <div className="flex items-center gap-2 text-sm">
-                <span className="font-medium">{current.project}</span>
-                <span className="text-muted-foreground">
-                  {statusLabel(current.status)}
-                </span>
-              </div>
-              {/* カードごとに端末を作り直すため key を付ける */}
-              <TerminalPane key={current.card_id} cardId={current.card_id} />
-            </>
-          ) : (
-            <p className="text-muted-foreground m-auto text-sm">
-              セッションを選ぶとターミナルが開きます
-            </p>
-          )}
-        </section>
-      </div>
+      <Routes>
+        <Route path="/" element={<HomePage />} />
+        <Route path="/p/:projectId" element={<GroupPage />} />
+        <Route path="/s/:cardId" element={<SessionPage />} />
+        <Route path="*" element={<NotFoundPage />} />
+      </Routes>
     </main>
   )
 }
 
-function SpawnForm({
-  cwd,
-  onChangeCwd,
-  disabled,
-}: {
-  cwd: string
-  onChangeCwd: (value: string) => void
-  disabled: boolean
-}) {
-  const spawn = useWsStore((state) => state.spawn)
+function HomePage() {
+  const sessions = useWsStore((state) => state.sessions)
+  const status = useWsStore((state) => state.status)
 
   return (
-    <form
-      className="flex items-center gap-2"
-      onSubmit={(event) => {
-        event.preventDefault()
-        const trimmed = cwd.trim()
-        if (trimmed) {
-          spawn(trimmed)
-        }
-      }}
-    >
-      <input
-        data-testid="cwd-input"
-        aria-label="作業ディレクトリ"
-        placeholder="/home/example/dev/プロジェクト"
-        value={cwd}
-        onChange={(event) => onChangeCwd(event.target.value)}
-        className="border-input bg-background focus-visible:ring-ring flex-1 rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:outline-none"
-      />
-      <Button type="submit" disabled={disabled || cwd.trim() === ''}>
-        セッションを起動
-      </Button>
-    </form>
+    <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto">
+      <SpawnForm disabled={status !== 'open'} />
+      <TileGrid sessions={sessions} />
+    </div>
   )
 }
 
-function SessionList({
-  sessions,
-  selected,
-  onSelect,
-}: {
-  sessions: SessionMeta[]
-  selected: CardId | null
-  onSelect: (cardId: CardId) => void
-}) {
-  const kill = useWsStore((state) => state.kill)
-  const archive = useWsStore((state) => state.archive)
-
-  if (sessions.length === 0) {
-    return (
-      <aside className="w-72 shrink-0">
-        <p className="text-muted-foreground text-sm">
-          セッションはまだありません
-        </p>
-      </aside>
-    )
-  }
+function GroupPage() {
+  const { projectId } = useParams()
+  const sessions = useWsStore((state) => state.sessions)
+  // react-router が符号を戻してくれるので、そのまま作業ディレクトリの絶対パスになる
+  const project = projectId ?? ''
 
   return (
-    <aside
-      data-testid="session-list"
-      className="flex w-72 shrink-0 flex-col gap-2 overflow-y-auto"
-    >
-      {sessions.map((session) => (
-        <div
-          key={session.card_id}
-          data-testid="session-card"
-          data-card-id={session.card_id}
-          data-status={session.status.kind}
-          className={`rounded-md border p-3 text-sm ${
-            session.card_id === selected ? 'border-primary' : 'border-input'
-          }`}
-        >
-          <button
-            type="button"
-            className="w-full text-left"
-            onClick={() => onSelect(session.card_id)}
-          >
-            <span className="block truncate font-medium">
-              {session.project}
-            </span>
-            <span className="text-muted-foreground block">
-              {statusLabel(session.status)}
-            </span>
-          </button>
-          <div className="mt-2 flex gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={isEnded(session.status)}
-              onClick={() => kill(session.card_id)}
-            >
-              終了
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => archive(session.card_id)}
-            >
-              削除
-            </Button>
-          </div>
-        </div>
-      ))}
-    </aside>
+    <GroupView
+      project={project}
+      sessions={sessions.filter((session) => session.project === project)}
+    />
+  )
+}
+
+function SessionPage() {
+  const { cardId } = useParams()
+  const sessions = useWsStore((state) => state.sessions)
+  const now = useNow()
+  const session = sessions.find((item) => item.card_id === cardId)
+
+  if (!session) {
+    return (
+      <NotFound message="このセッションは見つかりません（削除されたか、まだ届いていません）" />
+    )
+  }
+  return <SessionView session={session} now={now} />
+}
+
+function NotFoundPage() {
+  return <NotFound message="そのURLの画面はありません" />
+}
+
+function NotFound({ message }: { message: string }) {
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-3">
+      <p data-testid="not-found" className="text-muted-foreground text-sm">
+        {message}
+      </p>
+      <Link to={HOME} className="text-primary text-sm underline">
+        一覧へ戻る
+      </Link>
+    </div>
   )
 }
 

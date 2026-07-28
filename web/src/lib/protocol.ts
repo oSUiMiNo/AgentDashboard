@@ -73,7 +73,7 @@ export type ServerMessage =
 export function statusLabel(status: SessionStatus): string {
   switch (status.kind) {
     case 'starting':
-      // フックによる状態検知はフェーズ2。それまでは起動した以上のことは分からない
+      // 起動はしたが SessionStart フックがまだ届いていない、ごく短い期間
       return '起動中'
     case 'working':
       return '作業中'
@@ -88,6 +88,43 @@ export function statusLabel(status: SessionStatus): string {
     case 'unknown':
       return '不明'
   }
+}
+
+/**
+ * 状態インジケータの色。
+ *
+ * 一覧の主役は「AIが止まらずちゃんと働いているか」を一瞥で確かめることなので、
+ * **人の対処が要る状態（権限確認待ち・停滞・異常終了）を目立たせる**配色にしている。
+ * 順調に動いているものが騒がしいと、本当に見るべきものが埋もれる。
+ */
+export function statusTone(status: SessionStatus): string {
+  switch (status.kind) {
+    case 'working':
+      return 'bg-emerald-500'
+    case 'waiting_permission':
+      // 人が対処しないと先に進まない。一番強く出す
+      return 'bg-amber-400'
+    case 'stalled':
+      return 'bg-orange-500'
+    case 'waiting_input':
+      return 'bg-sky-500'
+    case 'starting':
+      return 'bg-slate-400'
+    case 'ended':
+      return status.ok ? 'bg-slate-500' : 'bg-red-500'
+    case 'unknown':
+      return 'bg-red-500'
+  }
+}
+
+/** 人の対処を待っている状態か（一覧で目立たせるかの判定）。 */
+export function needsAttention(status: SessionStatus): boolean {
+  return (
+    status.kind === 'waiting_permission' ||
+    status.kind === 'stalled' ||
+    status.kind === 'unknown' ||
+    (status.kind === 'ended' && !status.ok)
+  )
 }
 
 /** 終了しているか（archive してよいか）の判定。 */

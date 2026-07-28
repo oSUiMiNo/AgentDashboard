@@ -8,6 +8,12 @@
  * （[`subscribeTerminal`] で登録したコールバック）。React の状態に載せるのは、
  * 更新頻度の低い接続状態とセッション一覧だけ。
  *
+ * # 一覧は「REST で全体 → WS で差分」
+ *
+ * 接続するとき、まず `GET /api/sessions` で現在の全体像を取り、そのあとに WebSocket を
+ * 開く（設計§4）。順序を逆にすると、遅れて届いた REST の結果が新しい状態を古い値で
+ * 上書きしてしまう。真実は常にサーバ側にあり、ブラウザはその写しを持つだけ。
+ *
  * 自動再接続はフェーズ4の担当。ここでは切れたことを画面に出すところまで。
  */
 
@@ -41,7 +47,7 @@ interface WsState {
   /** 直近の失敗。ユーザに見せたら消す */
   lastError: string | null
 
-  connect: () => void
+  connect: () => Promise<void>
   disconnect: () => void
   spawn: (cwd: string) => void
   kill: (cardId: CardId) => void
@@ -100,11 +106,15 @@ export const useWsStore = create<WsState>((set) => ({
   flowLow: 32 * 1024,
   lastError: null,
 
-  connect: () => {
+  connect: async () => {
     if (socket && socket.readyState !== WebSocket.CLOSED) {
       return
     }
     set({ status: 'connecting' })
+
+    // 先に全体像を取ってから WebSocket を開く。逆順だと、遅れて届いた
+    // スナップショットが差分より後に適用され、状態が巻き戻って見える
+    await loadSnapshot(set)
 
     const next = new WebSocket(socketUrl())
     // PTY のバイトをコピーせず扱うために ArrayBuffer で受け取る
@@ -163,6 +173,23 @@ export const useWsStore = create<WsState>((set) => ({
 
 type SetState = (partial: Partial<WsState>) => void
 
+/**
+ * `GET /api/sessions` で現在の一覧を取り込む（設計§4 の初期スナップショット）。
+ *
+ * サーバが居ない状態でも画面は出したいので、失敗しても接続処理は続ける。
+ */
+async function loadSnapshot(set: SetState) {
+  try {
+    const response = await fetch('/api/sessions')
+    if (!response.ok) {
+      return
+    }
+    set({ sessions: (await response.json()) as SessionMeta[] })
+  } catch {
+    // 接続できないこと自体は WebSocket 側の onerror で画面に出る
+  }
+}
+
 function handleJson(raw: string, set: SetState) {
   let message: ServerMessage
   try {
@@ -186,11 +213,27 @@ function handleJson(raw: string, set: SetState) {
           .sessions.filter((item) => item.card_id !== message.card_id),
       })
       break
+    case 'status':
+      // 状態だけの差分。フックはツールコールのたびに飛んでくるので、
+      // カード全体を送り直すのはそれ以外が変わったときに限られる（設計§4）
+      set({
+        sessions: useWsStore.getState().sessions.map((item) =>
+          item.card_id === message.card_id
+            ? {
+                ...item,
+                status: message.status,
+                subagent_active: message.subagent_active,
+                last_activity_at: message.last_activity_at,
+              }
+            : item,
+        ),
+      })
+      break
     case 'error':
       set({ lastError: message.message })
       break
     default:
-      // フェーズ2以降で実装する種別。届いても落ちないように黙って受け流す
+      // フェーズ3以降で実装する種別。届いても落ちないように黙って受け流す
       break
   }
 }
