@@ -8,6 +8,8 @@
 //! - `fake-claude` バイナリ … PTY 越しに決められた応答を返す擬似 CLI。本物の claude を
 //!   起動せずに PTY のライフサイクル（起動→読み書き→終了）を検証するためのハーネス
 
+pub mod fake_claude;
+
 use axum::{
     Router,
     extract::{Path, State},
