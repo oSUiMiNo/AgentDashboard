@@ -8,6 +8,7 @@
 
 use agentdashboard_core::{
     config::Config,
+    parser::ParserSupervisor,
     session::{Session, SessionManager},
     ws::AppState,
 };
@@ -44,6 +45,14 @@ pub fn hook_program() -> PathBuf {
     testkit::binary_path("agentdashboard")
 }
 
+/// パーサの実行ファイル（ビルド済みの `transcript-parser`）。
+///
+/// `hook_program` と同じ理由で明示的に渡す。本番は `current_exe()` の隣を見るが、
+/// 統合テストでは core がライブラリとして動くのでテストバイナリの隣を探してしまう。
+pub fn parser_program() -> PathBuf {
+    testkit::binary_path("transcript-parser")
+}
+
 pub fn manager_with(config: Config) -> Arc<SessionManager> {
     SessionManager::with_programs(
         Arc::new(config),
@@ -60,6 +69,8 @@ pub fn manager() -> Arc<SessionManager> {
 pub struct TestServer {
     pub manager: Arc<SessionManager>,
     pub addr: SocketAddr,
+    /// 立ち上げた場合のみ。パーサを使わないテストでは None
+    pub parser: Option<Arc<ParserSupervisor>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -77,16 +88,48 @@ impl TestServer {
     }
 
     /// 起動する CLI を明示して立ち上げる（実CLI統合テストが本物の claude を指すため）。
-    pub async fn start_with_program(mut config: Config, program: String) -> Self {
+    /// パーサ（transcript-parser の子プロセス）も立ち上げて起動する。
+    ///
+    /// 構造化ビューを端から端まで通すテスト専用。パーサを使わないテストで毎回
+    /// 子プロセスを起こすと、テストの本数だけ無駄なプロセスが増える。
+    pub async fn start_with_parser(config: Config) -> Self {
+        let server = Self::build(config, fake_claude().to_string_lossy().into_owned(), true).await;
+        // 起動直後は指示を受け付けられないので、パーサが立ち上がる間を置く
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        server
+    }
+
+    pub async fn start_with_program(config: Config, program: String) -> Self {
+        Self::build(config, program, false).await
+    }
+
+    async fn build(mut config: Config, program: String, with_parser: bool) -> Self {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("空きポートで待ち受けられること");
         let addr = listener.local_addr().expect("待ち受け先を取れること");
         config.port = addr.port();
 
-        let manager =
-            SessionManager::with_programs(Arc::new(config.clone()), program, hook_program());
-        let state = AppState::new(Arc::clone(&manager), Arc::new(config));
+        let config = Arc::new(config);
+        let manager = SessionManager::with_programs(Arc::clone(&config), program, hook_program());
+
+        let mut state = AppState::new(Arc::clone(&manager), Arc::clone(&config));
+        let parser = if with_parser {
+            // 本番と同じ入口（環境変数）でビルド済みのパーサを指す
+            unsafe {
+                std::env::set_var(
+                    agentdashboard_core::parser::PARSER_BIN_ENV,
+                    parser_program(),
+                );
+            }
+            let parser = ParserSupervisor::start(Arc::clone(&manager), Arc::clone(&config));
+            manager.attach_parser(parser.handle());
+            state = state.with_parser(Arc::clone(&parser));
+            Some(parser)
+        } else {
+            None
+        };
+
         let task = tokio::spawn(async move {
             let _ = axum::serve(listener, agentdashboard_core::build_router(state)).await;
         });
@@ -94,6 +137,7 @@ impl TestServer {
         Self {
             manager,
             addr,
+            parser,
             task,
         }
     }

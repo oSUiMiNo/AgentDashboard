@@ -230,7 +230,9 @@ impl SessionThreader {
         let mut last_emitted: Option<NodeId> = None;
 
         for (index, block) in blocks.into_iter().enumerate() {
-            let node_id = NodeId(format!("{uuid}#{index}"));
+            // 区切りに `#` を使わない。ノードIDは履歴の遡り（`?before=<id>`）で URL に
+            // 載るため、`#` だとフラグメント扱いになって値が途中で切れる
+            let node_id = NodeId(format!("{uuid}.{index}"));
             match block {
                 Block::UserText(text) => {
                     // 新しい指示が来たらターンが変わる。以後のツールコールは

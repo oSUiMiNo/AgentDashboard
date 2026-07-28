@@ -23,12 +23,14 @@ pub mod pty;
 use crate::{
     config::Config,
     state::{self, Changed, HookInput},
+    transcript::{Anchor, TranscriptWindow},
 };
 use bytes::Bytes;
 use hooks_settings::HookSettings;
 use protocol::{
-    CardId, ClaudeSessionId, ProjectId, SessionMeta, SessionStatus, Timestamp,
+    CardId, ClaudeSessionId, NodeId, ProjectId, SessionMeta, SessionStatus, Timestamp, TreeNode,
     frame::{self, FrameKind},
+    ipc::ParsedNode,
     ws::ServerMessage,
 };
 use pty::{PtyExit, PtyProcess};
@@ -60,6 +62,12 @@ pub const OUTPUT_QUEUE_FRAMES: usize = 128;
 
 /// 一覧の更新通知の待ち行列（メッセージ数）。
 const EVENT_QUEUE_MESSAGES: usize = 256;
+
+/// 履歴購読1本あたりの配信待ち行列（メッセージ数）。
+///
+/// 履歴はツールコールの頻度で流れるので PTY ほど高頻度ではない。溢れたクライアントは
+/// ウィンドウ全体を送り直せば追いつける（同じIDは上書きなので重複は害にならない）。
+pub const TRANSCRIPT_QUEUE_MESSAGES: usize = 64;
 
 /// 起動直後の端末サイズ。ブラウザがターミナルを開いた時点で `resize` が届く。
 const INITIAL_COLS: u16 = 80;
@@ -151,8 +159,16 @@ pub struct Session {
     pause_requests: Mutex<HashSet<u64>>,
     /// このセッションに注入したフック設定（一時ファイルとトークン）。
     settings: HookSettings,
-    /// SessionStart フックが知らせてきた JSONL の場所。監視はフェーズ3のパーサが行う。
+    /// SessionStart フックが知らせてきた JSONL の場所。パーサに監視を頼む先でもある。
     transcript_path: Mutex<Option<String>>,
+    /// 構造化ビュー用の履歴。メモリに持つのは直近ウィンドウだけ（設計§4）
+    transcript: Mutex<TranscriptWindow>,
+    /// 履歴の配信。PTY と違い**購読しているクライアントにだけ**流す。
+    ///
+    /// 一覧しか開いていないクライアントにまで履歴を送ると、12セッション同時稼働のときに
+    /// 無関係な JSON で送信キューが埋まる。PTY の配信（[`Session::output`]）と対称に、
+    /// カード単位のチャネルを持たせている。
+    transcript_tx: broadcast::Sender<Arc<String>>,
     /// 終了が「想定内」であることの印。
     ///
     /// ダッシュボードから終了させた場合、子プロセスは強制終了されるので終了コードは
@@ -276,19 +292,93 @@ impl Session {
             .clone()
     }
 
+    /// 履歴の購読を、いま持っているぶんの取得と**同じロックの中で**始める。
+    ///
+    /// PTY の [`Session::subscribe_with_snapshot`] と同じ理由。取得と購読開始がずれると、
+    /// その隙間に届いたノードを取りこぼす。逆側にずれた場合は同じノードが二度届くが、
+    /// 履歴は「同じIDは上書き」の約束なので害が無い。**迷ったら重ねる側に倒す。**
+    pub fn subscribe_transcript(&self) -> (Vec<TreeNode>, broadcast::Receiver<Arc<String>>) {
+        let window = self.transcript.lock().expect("ロックが壊れていない");
+        let receiver = self.transcript_tx.subscribe();
+        (window.snapshot(), receiver)
+    }
+
+    /// パーサが読んだノードを取り込み、購読者へ配る。
+    pub fn append_transcript(&self, source: &str, nodes: &[ParsedNode]) {
+        if nodes.is_empty() {
+            return;
+        }
+        let mut window = self.transcript.lock().expect("ロックが壊れていない");
+        window.append(source, nodes);
+        self.broadcast_transcript(&ServerMessage::TranscriptAppend {
+            card_id: self.card_id,
+            nodes: nodes.iter().map(|parsed| parsed.node.clone()).collect(),
+        });
+    }
+
+    /// 巻き戻り（`/rewind`）を受けて履歴を捨てる。
+    pub fn reset_transcript(&self) {
+        let mut window = self.transcript.lock().expect("ロックが壊れていない");
+        window.clear();
+        self.broadcast_transcript(&ServerMessage::TranscriptReset {
+            card_id: self.card_id,
+        });
+    }
+
+    /// 購読者が居るときだけ直列化して配る。
+    ///
+    /// 巨大な Edit の結果を JSON にする処理がコストの本体なので、誰も見ていないカードで
+    /// それをやらない。ウィンドウの更新は購読の有無に関わらず続ける（開いた瞬間に
+    /// 履歴が出るのはこのため）。
+    fn broadcast_transcript(&self, message: &ServerMessage) {
+        if self.transcript_tx.receiver_count() == 0 {
+            return;
+        }
+        if let Ok(text) = serde_json::to_string(message) {
+            let _ = self.transcript_tx.send(Arc::new(text));
+        }
+    }
+
+    /// 取りこぼした購読者を作り直すための、ウィンドウ全体。
+    pub fn transcript_snapshot(&self) -> Vec<TreeNode> {
+        self.transcript
+            .lock()
+            .expect("ロックが壊れていない")
+            .snapshot()
+    }
+
+    /// ウィンドウの中だけで「このノードより前」に答えられるなら答える。
+    pub fn transcript_before(&self, before: &NodeId, limit: usize) -> Option<Vec<TreeNode>> {
+        self.transcript
+            .lock()
+            .expect("ロックが壊れていない")
+            .before_in_window(before, limit)
+    }
+
+    /// ウィンドウの外を読み直すための起点。
+    pub fn transcript_anchor(&self, before: &NodeId) -> Option<Anchor> {
+        self.transcript
+            .lock()
+            .expect("ロックが壊れていない")
+            .anchor_for(before)
+    }
+
     /// 届いたフック1件を状態機械へ通す（設計§5）。
     ///
     /// 判定そのものは [`crate::state::apply`] に閉じている。ここがやるのは
     /// 「時計を読む」「ロックを取る」「JSONL の場所を控える」という周辺の世話だけ。
-    fn apply_hook(&self, input: &HookInput) -> Changed {
+    /// 変わった場合は、新しい JSONL の場所も返す（パーサへ監視を頼む引き金になる）。
+    fn apply_hook(&self, input: &HookInput) -> (Changed, Option<String>) {
+        let mut new_path = None;
         if let Some(path) = input.transcript_path() {
             let mut current = self.transcript_path.lock().expect("ロックが壊れていない");
             if current.as_deref() != Some(path) {
                 *current = Some(path.to_string());
+                new_path = Some(path.to_string());
             }
         }
         let mut meta = self.meta.lock().expect("ロックが壊れていない");
-        state::apply(&mut meta, input, now_ms())
+        (state::apply(&mut meta, input, now_ms()), new_path)
     }
 
     /// 停滞していないか見る（設計§5 のタイマー）。
@@ -317,6 +407,11 @@ pub struct SessionManager {
     /// 書き換えられてしまうため。合言葉はセッションごとのランダム値にする。
     tokens: Mutex<HashMap<String, CardId>>,
     events: broadcast::Sender<ServerMessage>,
+    /// パーサへ監視を頼む口。パーサが立ち上がってから差し込まれる。
+    ///
+    /// 逆参照（パーサ → SessionManager）はここには持たせない。フックの処理を止めない
+    /// ために、送信は待たない `try_send` にしてある（[`crate::parser::ParserHandle`]）。
+    parser: Mutex<Option<crate::parser::ParserHandle>>,
 }
 
 impl SessionManager {
@@ -342,6 +437,7 @@ impl SessionManager {
             sessions: Mutex::new(HashMap::new()),
             tokens: Mutex::new(HashMap::new()),
             events,
+            parser: Mutex::new(None),
         })
     }
 
@@ -461,6 +557,8 @@ impl SessionManager {
             pause_requests: Mutex::new(HashSet::new()),
             settings,
             transcript_path: Mutex::new(None),
+            transcript: Mutex::new(TranscriptWindow::new(self.config.transcript_window_nodes)),
+            transcript_tx: broadcast::channel(TRANSCRIPT_QUEUE_MESSAGES).0,
             expected_exit: AtomicBool::new(false),
         });
 
@@ -515,6 +613,9 @@ impl SessionManager {
         // セッションが解放されない（合流タスクは待ち行列が閉じたときに終わる）
         session.kill();
         hooks_settings::cleanup(&session.settings);
+        if let Some(parser) = self.parser.lock().expect("ロックが壊れていない").as_ref() {
+            parser.unwatch(card_id);
+        }
         let _ = self.events.send(ServerMessage::SessionRemoved { card_id });
         Ok(())
     }
@@ -540,8 +641,28 @@ impl SessionManager {
         if input.event == state::HookEvent::SessionEnd {
             session.expected_exit.store(true, Ordering::SeqCst);
         }
-        let changed = session.apply_hook(input);
+        let (changed, new_transcript) = session.apply_hook(input);
+        // JSONL の場所が分かった／変わった時点でパーサへ監視を頼む。resume で別ファイルに
+        // なった場合も同じ経路で張り替わる（設計§6）
+        if let Some(path) = new_transcript {
+            if let Some(parser) = self.parser.lock().expect("ロックが壊れていない").as_ref()
+            {
+                parser.watch(session.card_id, path);
+            }
+        }
         self.publish(session, changed);
+    }
+
+    /// パーサへの口を差し込む。
+    ///
+    /// 起動順の都合で、SessionManager を作ってからパーサを立ち上げるため後から渡す。
+    pub fn attach_parser(&self, handle: crate::parser::ParserHandle) {
+        *self.parser.lock().expect("ロックが壊れていない") = Some(handle);
+    }
+
+    /// 一覧を見ている全クライアントへ流す（カード単位でない通知に使う）。
+    pub fn broadcast(&self, message: ServerMessage) {
+        let _ = self.events.send(message);
     }
 
     fn publish(&self, session: &Arc<Session>, changed: Changed) {

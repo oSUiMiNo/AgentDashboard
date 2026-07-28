@@ -18,6 +18,8 @@ const DEFAULT_FLOW_LOW: usize = 32 * 1024;
 const DEFAULT_CANARY_MODEL: &str = "haiku";
 const DEFAULT_SELFHEAL_RETRY: u32 = 3;
 const DEFAULT_SELFHEAL_COOLDOWN_HOURS: u64 = 24;
+const DEFAULT_TRANSCRIPT_WINDOW_NODES: usize = 2000;
+const DEFAULT_TRANSCRIPT_PAGE_LIMIT: usize = 200;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -60,6 +62,16 @@ pub struct Config {
     pub selfheal_retry: u32,
     /// 同一バージョンへの再挑戦を抑制する時間
     pub selfheal_cooldown_hours: u64,
+    /// メモリに保持する履歴の直近ウィンドウ（ノード数、設計§4）
+    pub transcript_window_nodes: usize,
+    /// 履歴ページングの1回あたりの上限（ノード数）
+    pub transcript_page_limit: usize,
+    /// 再開位置などの状態を置く場所。
+    ///
+    /// 既定は `$XDG_STATE_HOME/agentdashboard`（無ければ `~/.local/state/agentdashboard`）。
+    /// 一時ディレクトリやビルド成果物の隣に置いてはいけない — 消えると再開位置を失い、
+    /// 起動のたびに全再パースになってブラウザへ履歴が二重に届く。
+    pub state_dir: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -75,6 +87,9 @@ impl Default for Config {
             repair_model: None,
             selfheal_retry: DEFAULT_SELFHEAL_RETRY,
             selfheal_cooldown_hours: DEFAULT_SELFHEAL_COOLDOWN_HOURS,
+            transcript_window_nodes: DEFAULT_TRANSCRIPT_WINDOW_NODES,
+            transcript_page_limit: DEFAULT_TRANSCRIPT_PAGE_LIMIT,
+            state_dir: None,
         }
     }
 }
@@ -123,6 +138,28 @@ impl Config {
         Ok(config)
     }
 
+    /// 状態ファイル（パーサの再開位置など）を置く場所を決める。
+    ///
+    /// 実行ファイルの隣やビルド成果物の中には置かない。開発中のバイナリは
+    /// `server/target/debug/` にあり、`make clean` で消えると再開位置も一緒に消える。
+    /// 消えると起動のたびに全再パースになり、ブラウザへ履歴が二重に届く。
+    pub fn resolved_state_dir(&self) -> PathBuf {
+        if let Some(dir) = &self.state_dir {
+            return dir.clone();
+        }
+        match std::env::var("XDG_STATE_HOME") {
+            Ok(dir) if !dir.is_empty() => PathBuf::from(dir).join("agentdashboard"),
+            _ => match std::env::var("HOME") {
+                Ok(home) if !home.is_empty() => PathBuf::from(home)
+                    .join(".local")
+                    .join("state")
+                    .join("agentdashboard"),
+                // HOME すら無い環境。消えても動作は続くので一時領域で妥協する
+                _ => std::env::temp_dir().join("agentdashboard"),
+            },
+        }
+    }
+
     /// 型が合っていても意味的に成立しない組み合わせを弾く。
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.port == 0 {
@@ -156,6 +193,16 @@ impl Config {
         if self.selfheal_retry == 0 {
             return Err(ConfigError::Invalid(
                 "selfheal_retry は 1 以上である必要があります".to_string(),
+            ));
+        }
+        if self.transcript_window_nodes == 0 {
+            return Err(ConfigError::Invalid(
+                "transcript_window_nodes は 1 以上である必要があります".to_string(),
+            ));
+        }
+        if self.transcript_page_limit == 0 {
+            return Err(ConfigError::Invalid(
+                "transcript_page_limit は 1 以上である必要があります".to_string(),
             ));
         }
         Ok(())

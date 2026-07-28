@@ -11,8 +11,10 @@ pub mod config;
 pub mod embed;
 pub mod hook_post;
 pub mod hooks;
+pub mod parser;
 pub mod session;
 pub mod state;
+pub mod transcript;
 pub mod ws;
 
 use axum::{
@@ -33,6 +35,10 @@ pub fn build_router(state: ws::AppState) -> Router {
     Router::new()
         .route("/ws", get(ws::ws_handler))
         .route("/api/sessions", get(ws::api_sessions))
+        .route(
+            "/api/sessions/{card_id}/transcript",
+            get(ws::api_transcript),
+        )
         .route("/hook/{token}/{event}", post(hooks::receive))
         .fallback(get(static_handler))
         .with_state(state)
@@ -50,7 +56,11 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     // 「作業中」の表示のまま実はハングしている、という見落としを防ぐ見張り（設計§5）
     manager.start_stalled_sweeper();
 
-    let state = ws::AppState::new(manager, Arc::clone(&config));
+    // 履歴を読むパーサは別プロセス。落ちてもターミナルと状態表示は無傷（設計§11）
+    let parser = parser::ParserSupervisor::start(Arc::clone(&manager), Arc::clone(&config));
+    manager.attach_parser(parser.handle());
+
+    let state = ws::AppState::new(manager, Arc::clone(&config)).with_parser(parser);
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, config.port)).await?;
     let address = listener.local_addr()?;
 

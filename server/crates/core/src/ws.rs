@@ -19,23 +19,26 @@
 
 use crate::{
     config::Config,
+    parser::ParserSupervisor,
     session::{Session, SessionManager},
 };
 use axum::{
     Json,
     extract::{
-        State,
+        Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
+    http::StatusCode,
     response::Response,
 };
 use bytes::Bytes;
 use futures_util::{SinkExt as _, StreamExt as _};
 use protocol::{
-    CardId, SessionMeta,
+    CardId, NodeId, SessionMeta, TreeNode,
     frame::{self, FrameKind},
     ws::{ClientMessage, FlowState, ServerMessage},
 };
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     sync::{
@@ -55,6 +58,10 @@ const OUTBOUND_QUEUE_MESSAGES: usize = 64;
 pub struct AppState {
     pub manager: Arc<SessionManager>,
     pub config: Arc<Config>,
+    /// パーサの世話役。**居なくても core は動く**（構造化ビューだけが縮退する）。
+    ///
+    /// 設計§11 の「パーサが停止しても、ターミナルと指示送信は通常動作」を型で表している。
+    pub parser: Option<Arc<ParserSupervisor>>,
     next_client_id: Arc<AtomicU64>,
 }
 
@@ -63,8 +70,15 @@ impl AppState {
         Self {
             manager,
             config,
+            parser: None,
             next_client_id: Arc::new(AtomicU64::new(1)),
         }
+    }
+
+    /// パーサを繋いだ状態にする。
+    pub fn with_parser(mut self, parser: Arc<ParserSupervisor>) -> Self {
+        self.parser = Some(parser);
+        self
     }
 }
 
@@ -78,6 +92,86 @@ pub async fn ws_handler(State(state): State<AppState>, upgrade: WebSocketUpgrade
 /// 真実は常にサーバ側にあるので、リロードしても同じ画面へ戻れる（フェーズ4で使う土台）。
 pub async fn api_sessions(State(state): State<AppState>) -> Json<Vec<SessionMeta>> {
     Json(state.manager.list())
+}
+
+/// `GET /api/sessions/{card_id}/transcript` の絞り込み。
+#[derive(Debug, Default, Deserialize)]
+pub struct TranscriptQuery {
+    /// このノードより前を遡る。省略なら手元の最新から
+    pub before: Option<String>,
+    pub limit: Option<usize>,
+}
+
+/// 履歴1ページ分。
+#[derive(Debug, Serialize)]
+pub struct TranscriptPage {
+    pub nodes: Vec<TreeNode>,
+    /// さらに前があるかもしれない
+    pub has_more: bool,
+}
+
+/// `GET /api/sessions/{card_id}/transcript` — 履歴の遡り（設計§4）。
+///
+/// core がメモリに持つのは直近ウィンドウだけなので、それより前を求められたら
+/// パーサに読み直してもらう。**パーサが縮退しているときは 503 を返す**。
+/// 待ち続けて画面を固めるより、「これ以上遡れない」と伝えるほうがよい。
+pub async fn api_transcript(
+    State(state): State<AppState>,
+    Path(card_id): Path<String>,
+    Query(query): Query<TranscriptQuery>,
+) -> Result<Json<TranscriptPage>, StatusCode> {
+    let card_id = card_id
+        .parse::<uuid::Uuid>()
+        .map(CardId)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let session = state.manager.get(card_id).ok_or(StatusCode::NOT_FOUND)?;
+
+    // 上限を切らないと、1回の要求で全履歴を求められてしまう
+    let limit = query
+        .limit
+        .unwrap_or(state.config.transcript_page_limit)
+        .clamp(1, state.config.transcript_page_limit);
+
+    let Some(before) = query.before.map(NodeId) else {
+        // 起点の指定なし＝手元の最新ぶん
+        let mut nodes = session.transcript_snapshot();
+        let has_more = nodes.len() > limit;
+        if has_more {
+            nodes = nodes.split_off(nodes.len() - limit);
+        }
+        return Ok(Json(TranscriptPage { nodes, has_more }));
+    };
+
+    // 手元のウィンドウで答えられるならパーサへ行かない
+    if let Some(nodes) = session.transcript_before(&before, limit) {
+        let has_more = nodes.len() == limit;
+        return Ok(Json(TranscriptPage { nodes, has_more }));
+    }
+
+    let Some(anchor) = session.transcript_anchor(&before) else {
+        // どこにも位置の記録が無い＝これ以上は遡れない
+        return Ok(Json(TranscriptPage {
+            nodes: Vec::new(),
+            has_more: false,
+        }));
+    };
+    let parser = state
+        .parser
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let mut parsed = parser
+        .read_range(card_id, anchor.source, anchor.offset)
+        .await
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+
+    let has_more = parsed.len() > limit;
+    if has_more {
+        parsed = parsed.split_off(parsed.len() - limit);
+    }
+    Ok(Json(TranscriptPage {
+        nodes: parsed.into_iter().map(|parsed| parsed.node).collect(),
+        has_more,
+    }))
 }
 
 async fn client_loop(state: AppState, socket: WebSocket) {
@@ -114,6 +208,9 @@ async fn client_loop(state: AppState, socket: WebSocket) {
 
     // 購読中のターミナル。切断時にまとめて畳む
     let mut terminals: HashMap<CardId, JoinHandle<()>> = HashMap::new();
+    // 購読中の履歴。ターミナルと対称に、クライアントごとに持つ。
+    // 一覧の配信（events）に混ぜると、履歴を見ていないクライアントにまで流れてしまう
+    let mut transcripts: HashMap<CardId, JoinHandle<()>> = HashMap::new();
 
     while let Some(Ok(message)) = stream.next().await {
         match message {
@@ -131,7 +228,15 @@ async fn client_loop(state: AppState, socket: WebSocket) {
                     .await;
                     continue;
                 };
-                handle_request(&state, client_id, request, &outbound, &mut terminals).await;
+                handle_request(
+                    &state,
+                    client_id,
+                    request,
+                    &outbound,
+                    &mut terminals,
+                    &mut transcripts,
+                )
+                .await;
             }
             Message::Binary(bytes) => handle_pty_input(&state, &bytes, &outbound).await,
             Message::Close(_) => break,
@@ -148,6 +253,9 @@ async fn client_loop(state: AppState, socket: WebSocket) {
             session.release_client(client_id);
         }
     }
+    for (_, task) in transcripts {
+        task.abort();
+    }
     event_task.abort();
     drop(outbound);
     let _ = writer.await;
@@ -159,6 +267,7 @@ async fn handle_request(
     request: ClientMessage,
     outbound: &mpsc::Sender<Message>,
     terminals: &mut HashMap<CardId, JoinHandle<()>>,
+    transcripts: &mut HashMap<CardId, JoinHandle<()>>,
 ) {
     match request {
         ClientMessage::Spawn { cwd } => match state.manager.spawn(&cwd) {
@@ -184,6 +293,9 @@ async fn handle_request(
 
         ClientMessage::Archive { card_id } => {
             if let Some(task) = terminals.remove(&card_id) {
+                task.abort();
+            }
+            if let Some(task) = transcripts.remove(&card_id) {
                 task.abort();
             }
             if let Err(err) = state.manager.archive(card_id) {
@@ -245,15 +357,62 @@ async fn handle_request(
             }
         }
 
-        // 以降はフェーズ3〜4で実装する。受け取ったこと自体は伝えて、無反応にはしない
-        ClientMessage::SubTranscript { card_id }
-        | ClientMessage::UnsubTranscript { card_id }
-        | ClientMessage::SendInput { card_id, .. } => {
+        ClientMessage::SubTranscript { card_id } => {
+            let Some(session) = state.manager.get(card_id) else {
+                send_error(outbound, Some(card_id), "セッションが見つかりません".into()).await;
+                return;
+            };
+            // 二重購読を防ぐ。同じカードを開き直したときは古い方を畳む
+            if let Some(previous) = transcripts.remove(&card_id) {
+                previous.abort();
+            }
+
+            let (snapshot, receiver) = session.subscribe_transcript();
+            // まず作り直しを指示してから中身を送る。こうすると再購読が冪等になり、
+            // 開き直しても順序や展開状態が混ざらない
+            send_json(outbound, ServerMessage::TranscriptReset { card_id }).await;
+            if !snapshot.is_empty() {
+                send_json(
+                    outbound,
+                    ServerMessage::TranscriptAppend {
+                        card_id,
+                        nodes: snapshot,
+                    },
+                )
+                .await;
+            }
+            // パーサが縮退しているならその旨も伝える（開いた直後に分かるように）
+            if let Some(parser) = state.parser.as_ref() {
+                send_json(
+                    outbound,
+                    ServerMessage::ParserStatus {
+                        state: parser.state(),
+                        detail: None,
+                    },
+                )
+                .await;
+            }
+
+            let task = tokio::spawn(pump_transcript(
+                Arc::clone(&session),
+                receiver,
+                outbound.clone(),
+            ));
+            transcripts.insert(card_id, task);
+        }
+
+        ClientMessage::UnsubTranscript { card_id } => {
+            if let Some(task) = transcripts.remove(&card_id) {
+                task.abort();
+            }
+        }
+
+        // 指示送信はフェーズ4。受け取ったこと自体は伝えて、無反応にはしない
+        ClientMessage::SendInput { card_id, .. } => {
             send_error(
                 outbound,
                 Some(card_id),
-                "この操作はまだ実装されていません（構造化ビューはフェーズ3、指示送信はフェーズ4）"
-                    .into(),
+                "この操作はまだ実装されていません（指示送信はフェーズ4）".into(),
             )
             .await;
         }
@@ -343,6 +502,49 @@ async fn pump_terminal(
                     .send(Message::Binary(session.snapshot_frame()))
                     .await
                     .is_err()
+                {
+                    break;
+                }
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
+/// 1つのセッションの履歴をクライアントへ流す。
+///
+/// [`pump_terminal`] と対称。違いは復帰の仕方で、履歴は**同じIDのノードは上書き**という
+/// 約束（設計§4）があるため、取りこぼしたらウィンドウ全体を送り直せば収束する。
+/// 端末のように「途中を落とすと表示が割れる」性質が無いので、作り直しの指示は要らない。
+async fn pump_transcript(
+    session: Arc<Session>,
+    mut nodes: broadcast::Receiver<Arc<String>>,
+    outbound: mpsc::Sender<Message>,
+) {
+    loop {
+        match nodes.recv().await {
+            Ok(text) => {
+                if outbound
+                    .send(Message::text(text.as_str().to_string()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(_)) => {
+                let snapshot = session.transcript_snapshot();
+                if snapshot.is_empty() {
+                    continue;
+                }
+                if !send_json(
+                    &outbound,
+                    ServerMessage::TranscriptAppend {
+                        card_id: session.card_id,
+                        nodes: snapshot,
+                    },
+                )
+                .await
                 {
                     break;
                 }
