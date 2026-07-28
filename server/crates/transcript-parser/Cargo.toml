@@ -1,0 +1,21 @@
+[package]
+name = "transcript-parser"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "transcript_parser"
+path = "src/lib.rs"
+
+[[bin]]
+name = "transcript-parser"
+path = "src/main.rs"
+
+[dependencies]
+protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+notify.workspace = true
