@@ -26,6 +26,9 @@ const NOISE_TYPES: &[&str] = &[
     "mode",
     "permission-mode",
     "file-history-snapshot",
+    // `file-history-snapshot` と対になる差分側。ファイルを1つ編集するたびに1件出る。
+    // 対話モードでしか現れないため、ヘッドレスで採ったフィクスチャには入っていない
+    "file-history-delta",
     "summary",
 ];
 
@@ -178,6 +181,15 @@ mod tests {
         assert_eq!(classify("queue-operation"), Kind::Noise);
         assert_eq!(classify("ai-title"), Kind::Noise);
         assert_eq!(classify("brand-new-type"), Kind::Unknown);
+    }
+
+    #[test]
+    fn ファイル履歴の記録はノイズとして捨てる() {
+        // 対話モードで実測したところ、ファイルを1つ編集するたびに delta が1件出る。
+        // 取りこぼすと `uuid` を持たないので合成IDで root に積まれ、編集のたびに
+        // 「不明なイベント」が履歴へ混ざる
+        assert_eq!(classify("file-history-snapshot"), Kind::Noise);
+        assert_eq!(classify("file-history-delta"), Kind::Noise);
     }
 
     #[test]
