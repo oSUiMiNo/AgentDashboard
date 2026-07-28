@@ -5,6 +5,7 @@
 //! 未知のフォーマットは必ず [`Node::Unknown`] へ写像することで、この制約と両立させる。
 
 pub mod frame;
+pub mod ipc;
 pub mod ws;
 
 use serde::{Deserialize, Serialize};
@@ -151,12 +152,19 @@ pub enum Node {
     AssistantText {
         text: String,
     },
+    /// アシスタントの思考（`thinking` ブロック）。
+    ///
+    /// 実データでは assistant の content ブロックの相当数を占めるため、受け皿が無いと
+    /// 思考が丸ごと [`Node::Unknown`] に落ちる。表示は既定で折り畳む想定。
+    Thinking {
+        text: String,
+    },
     ToolCall {
         name: String,
         input: serde_json::Value,
         result: Option<serde_json::Value>,
         status: ToolStatus,
-        /// Task 系ツールの場合、子ツリーのマウント先情報が入る
+        /// サブエージェントを起動するツールの場合、子ツリーのマウント先情報が入る
         subagent: Option<SubagentRef>,
     },
     Subagent {
@@ -254,6 +262,9 @@ mod tests {
             Node::AssistantText {
                 text: "了解しました".to_string(),
             },
+            Node::Thinking {
+                text: "まず失敗しているテストを確認する".to_string(),
+            },
             Node::ToolCall {
                 name: "Edit".to_string(),
                 input: json!({ "old_string": "a", "new_string": "b" }),
@@ -261,8 +272,9 @@ mod tests {
                 status: ToolStatus::Ok,
                 subagent: None,
             },
+            // サブエージェント起動ツールの実名は v2.1.220 の実データでは `Agent`
             Node::ToolCall {
-                name: "Task".to_string(),
+                name: "Agent".to_string(),
                 input: json!({ "prompt": "調査して" }),
                 result: None,
                 status: ToolStatus::Pending,

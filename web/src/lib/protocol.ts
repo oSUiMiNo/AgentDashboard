@@ -32,6 +32,50 @@ export interface SessionMeta {
   created_at: number
 }
 
+/** JSONL レコードの `uuid` に対応するノードID。 */
+export type NodeId = string
+
+/** ツールコールの完了状態。 */
+export type ToolStatus = 'pending' | 'ok' | 'error'
+
+/** 親のツールコールにぶら下がるサブエージェントの参照情報。 */
+export interface SubagentRef {
+  agent_type: string
+  /** `<セッションID>/subagents/agent-*.jsonl` へのパス */
+  transcript_path: string
+  spawn_depth: number
+}
+
+/**
+ * 構造化ビューの1ノード（設計§3）。
+ *
+ * Rust 側 `crates/protocol/src/lib.rs` の `Node` と対応する。`#[serde(tag = "kind")]`
+ * なので、状態（`SessionStatus`）と同じ判別共用体の形で届く。
+ */
+export type Node =
+  | { kind: 'user_message'; text: string }
+  | { kind: 'assistant_text'; text: string }
+  | { kind: 'thinking'; text: string }
+  | {
+      kind: 'tool_call'
+      name: string
+      input: unknown
+      result: unknown | null
+      status: ToolStatus
+      subagent: SubagentRef | null
+    }
+  | { kind: 'subagent'; agent_type: string; spawn_depth: number }
+  /** 寛容パースの受け皿。知らない構造でも情報を落とさずに運ばれてくる */
+  | { kind: 'unknown'; record_type: string; raw: unknown }
+
+/** スレッディング層が組み立てるツリーの1ノード。 */
+export interface TreeNode {
+  id: NodeId
+  parent: NodeId | null
+  node: Node
+  ts: number
+}
+
 /** ターミナルのフロー制御の指示（設計§10）。 */
 export type FlowState = 'pause' | 'resume'
 
@@ -64,7 +108,7 @@ export type ServerMessage =
       subagent_active: number
       last_activity_at: number
     }
-  | { t: 'transcript_append'; card_id: CardId; nodes: unknown[] }
+  | { t: 'transcript_append'; card_id: CardId; nodes: TreeNode[] }
   | { t: 'transcript_reset'; card_id: CardId }
   | { t: 'parser_status'; state: 'ok' | 'degraded'; detail: string | null }
   | { t: 'selfheal'; phase: string; detail: string | null }

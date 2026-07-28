@@ -41,6 +41,10 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 rust-embed = { version = "8", features = ["debug-embed"] }
 portable-pty = "0.9"
 notify = "8"
+# トランスクリプトの ISO8601 タイムスタンプを epoch ミリ秒へ直すためだけに使う。
+# 自前で暦の計算を書くと閏年やうるう秒の周りで静かに間違え、画面の「N分前」が
+# ずれる形でしか気づけない。transcript-parser だけが依存する。
+time = { version = "0.3", default-features = false, features = ["parsing", "std"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
