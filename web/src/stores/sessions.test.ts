@@ -3,6 +3,7 @@ import type { SessionMeta } from '@/lib/protocol'
 import {
   applySessionSnapshot,
   clearSessions,
+  getSession,
   patchSessionStatus,
   removeSession,
   upsertSession,
@@ -193,5 +194,19 @@ describe('一覧ストア', () => {
 
     const { result } = renderHook(() => useProjectGroups())
     expect(result.current[0].cards).toEqual([B])
+  })
+
+  it('スナップショットはフレームを待たずにその場で反映される', () => {
+    // 「接続済みと出ているのに一覧がまだ空」という隙間を作らないための約束。
+    // ここが崩れると、一覧が出るより先に「カードは0枚」と判断されてしまう
+    const frames: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frames.push(callback)
+      return frames.length
+    })
+
+    applySessionSnapshot([meta(A)])
+    // rAF を1度も回していないのに、もう読める
+    expect(getSession(A)).toBeDefined()
   })
 })

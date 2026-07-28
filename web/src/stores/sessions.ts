@@ -196,9 +196,19 @@ function enqueue(op: Op) {
   schedule()
 }
 
-/** `GET /api/sessions` の結果を取り込む（接続時・再接続時の作り直し）。 */
+/**
+ * `GET /api/sessions` の結果を取り込む（接続時・再接続時の作り直し）。
+ *
+ * **これだけは束ねずにその場で反映する。** スナップショットは接続1回につき1度しか
+ * 来ないので束ねる意味が無く、束ねると「接続済みと出ているのに一覧がまだ空」という
+ * 隙間が生まれる。実際、この隙間で E2E の後片付けが「カードは0枚」と判断して
+ * 早々に切り上げ、残ったカードが次のテストへ漏れていた。
+ *
+ * 待ち行列に積んでから流すのは、先に積まれている差分との順序を崩さないため。
+ */
 export function applySessionSnapshot(list: SessionMeta[]) {
-  enqueue({ kind: 'snapshot', list })
+  pending.push({ kind: 'snapshot', list })
+  flush()
 }
 
 /** `session_upsert` を取り込む。 */
