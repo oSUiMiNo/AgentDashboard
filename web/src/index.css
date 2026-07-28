@@ -1,4 +1,7 @@
 @import 'tailwindcss';
+/* 差分表示（react-diff-view）の既定スタイル。読み込まないと追加行と削除行が
+   同じ見た目になり、差分として読めない */
+@import 'react-diff-view/style/index.css';
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
@@ -127,4 +130,16 @@
   html {
     @apply font-sans;
     }
+}
+/* 差分の色。ライブラリの既定は明るい背景向けなので、両方のテーマで読めるように上書きする */
+.diff {
+  --diff-background-color: transparent;
+  --diff-text-color: var(--color-foreground);
+  --diff-gutter-insert-background-color: color-mix(in oklch, green 22%, transparent);
+  --diff-gutter-delete-background-color: color-mix(in oklch, red 22%, transparent);
+  --diff-code-insert-background-color: color-mix(in oklch, green 14%, transparent);
+  --diff-code-delete-background-color: color-mix(in oklch, red 14%, transparent);
+  --diff-code-insert-text-color: var(--color-foreground);
+  --diff-code-delete-text-color: var(--color-foreground);
+  --diff-code-selected-background-color: color-mix(in oklch, gold 18%, transparent);
 }
