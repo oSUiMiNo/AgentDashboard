@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# 本物の claude を相手にする統合テスト（テスト計画フェーズ4）を実行する。
+#
+# 本PJTは cargo をコンテナへ隔離しているが、**本物の claude と認証情報はホストにある**。
+# コンテナへ認証情報をマウントするとホスト側の秘密をコンテナへ渡すことになるため、
+# 「ビルドはコンテナ、実行はホスト」に分ける。
+#
+#   1) コンテナで `cargo test --no-run` し、テスト実行ファイルだけを作る
+#   2) 出来上がった実行ファイルをホストで動かす（PATH 上の claude を使う）
+#
+# コンテナのベースは bookworm（glibc 2.36）で、ホストはそれ以降の glibc なので、
+# ここで作った実行ファイルはホストでそのまま動く（フェーズ0で検証済み）。
+#
+# これらのテストは #[ignore] を付けてあるので `make test` では走らない。**本物の claude が
+# 起動し、あなたのアカウントのクォータを消費する**ため、明示的に叩いたときだけ実行する。
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TEST_TARGET="real_cli"
+
+if ! command -v claude >/dev/null 2>&1; then
+    echo "エラー: 本物の claude が PATH にありません。実CLI統合テストはホストで実行します。" >&2
+    exit 1
+fi
+
+echo "==> テスト実行ファイルをコンテナでビルドします"
+BUILD_LOG="$(mktemp)"
+trap 'rm -f "${BUILD_LOG}"' EXIT
+"${REPO_ROOT}/scripts/cargo" test \
+    --package agentdashboard-core \
+    --test "${TEST_TARGET}" \
+    --no-run \
+    --message-format=json >"${BUILD_LOG}"
+
+# cargo は JSON Lines で成果物を報告する。テスト実行ファイルの場所だけを取り出す。
+# 出てくるパスはコンテナ内のもの（/repo/...）なので、ホスト側のパスへ読み替える。
+CONTAINER_PATH="$(python3 - "${BUILD_LOG}" "${TEST_TARGET}" <<'PY'
+import json, sys
+
+log_path, target_name = sys.argv[1], sys.argv[2]
+found = None
+with open(log_path, encoding="utf-8") as log:
+    for line in log:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("reason") != "compiler-artifact":
+            continue
+        if record.get("target", {}).get("name") != target_name:
+            continue
+        if record.get("executable"):
+            found = record["executable"]
+
+if not found:
+    sys.exit(f"テスト実行ファイルが見つかりません（target={target_name}）")
+print(found)
+PY
+)"
+
+HOST_PATH="${REPO_ROOT}${CONTAINER_PATH#/repo}"
+if [[ ! -x "${HOST_PATH}" ]]; then
+    echo "エラー: ビルドしたテスト実行ファイルが見つかりません: ${HOST_PATH}" >&2
+    exit 1
+fi
+
+# フックが叩く agentdashboard 本体も要る（テストは実行ファイルの位置から辿って探す）
+"${REPO_ROOT}/scripts/cargo" build --package agentdashboard-core --bin agentdashboard
+
+echo "==> ホストで実行します（本物の claude を起動します）"
+# --test-threads=1 にするのは、複数の claude を同時に起動して待ち時間と出力が
+# 混ざるのを避けるため。実CLIテストは1本ずつ順番に流す。
+exec "${HOST_PATH}" --ignored --test-threads=1 --nocapture "$@"

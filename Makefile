@@ -14,7 +14,7 @@ DEBUG_BIN := server/target/debug/agentdashboard
 .DEFAULT_GOAL := help
 
 .PHONY: help setup setup-rust setup-web dev dev-web dev-server \
-        test test-rust test-web e2e build-debug \
+        test test-rust test-web test-cli e2e build-debug \
         lint lint-rust lint-web fmt \
         build build-web build-server ci fixtures clean
 
@@ -57,6 +57,13 @@ test-rust: ## Rust テスト（コンテナ内・nextest でテスト毎にプ�
 
 test-web: ## web の単体テスト（Vitest）
 	cd web && npm run test
+
+# 本物の claude を相手にする統合テスト（テスト計画フェーズ4）。
+# ビルドはコンテナ、実行はホスト。認証情報をコンテナへ渡さずに済ませるための分担で、
+# 詳細は scripts/test-cli を参照。#[ignore] 付きなので make test では走らない。
+# 実行するとあなたのアカウントのクォータを消費する。
+test-cli: ## 実CLI統合テスト（本物の claude をホストで起動する）
+	./scripts/test-cli
 
 # E2E は実際の core サーバに繋いで動かす（web/playwright.config.ts）。
 # web → core の順にビルドするのは、core が web/dist をコンパイル時に取り込むため。
