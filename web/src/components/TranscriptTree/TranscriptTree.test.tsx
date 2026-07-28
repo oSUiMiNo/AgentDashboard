@@ -34,8 +34,13 @@ async function waitForRows(count: number) {
   })
 }
 
-function node(id: string, parent: string | null, inner: Node): TreeNode {
-  return { id, parent, node: inner, ts: 0 }
+function node(
+  id: string,
+  parent: string | null,
+  inner: Node,
+  branch = 0,
+): TreeNode {
+  return { id, parent, node: inner, ts: 0, branch }
 }
 
 /** ユーザ → アシスタント → ツールコール → サブエージェント → その中のツールコール。 */

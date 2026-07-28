@@ -109,6 +109,34 @@ test('サブエージェントの中まで掘れる', async ({ page }) => {
   ).toBeVisible()
 })
 
+test('巻き戻し前のやりとりは畳まれ、開けば読める', async ({ page }) => {
+  // `/rewind` は JSONL を物理的に巻き戻さず、同じファイルに2つ目の根として追記する
+  // （設計§16 の実測）。そのまま全部並べると「巻き戻したのに前のやりとりが見えている」
+  // という見え方になる
+  await startSession(page)
+
+  await showTerminal(page)
+  await fireHook(page, 'SessionStart')
+  await writeTranscript(page, 'synthetic/rewound/session.jsonl')
+  await showTranscript(page)
+
+  const rewound = page.locator('[data-testid="transcript-row"][data-kind="rewound"]')
+  await expect(rewound).toBeVisible({ timeout: 30_000 })
+  await expect(rewound).toContainText('巻き戻し前のやりとり 2件')
+
+  // 畳んでいる間は、最新の枝の発言だけが見える
+  await expect(
+    page.getByText('やっぱり2つ目の TODO のほうを書き換えて。').first(),
+  ).toBeVisible()
+  await expect(page.getByText('notes.md の1つ目の TODO を DONE に書き換えて。')).toHaveCount(0)
+
+  // 開けば読める（捨ててはいない）
+  await page.getByTestId('rewound-toggle').click()
+  await expect(
+    page.getByText('notes.md の1つ目の TODO を DONE に書き換えて。').first(),
+  ).toBeVisible()
+})
+
 test('タブを往復してもターミナルの内容が残る', async ({ page }) => {
   // 切り替えのたびに端末を作り直すと、スクロールバックが消えて操作の続きができなくなる
   await startSession(page)

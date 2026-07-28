@@ -179,6 +179,7 @@ mod tests {
                     text: id.to_string(),
                 },
                 ts: 0,
+                branch: 0,
             },
             offset,
         }
@@ -197,6 +198,7 @@ mod tests {
                     subagent: None,
                 },
                 ts: 0,
+                branch: 0,
             },
             offset,
         }

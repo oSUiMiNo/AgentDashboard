@@ -3,20 +3,26 @@ import {
   appendNodes,
   clearAllTranscripts,
   getNode,
+  getRows,
   resetTranscript,
   toggleNode,
+  toggleRewound,
 } from './transcript'
 
 /**
  * 構造化ビューのストア（テスト計画フェーズ5「ストア」「TranscriptTree」）。
  *
- * ここが守るべき約束は3つ。
+ * ここが守るべき約束は4つ。
  * - 同じノードIDは**上書き**（ツールコールは結果が届いてから送り直される）
  * - 平らにした並びが**展開状態を反映**する（掘れる表示の土台）
  * - 巻き戻しで**全部捨てる**
+ * - `/rewind` で分岐した**古い枝は畳む**（設計§16）
  */
 
 const CARD = '11111111-2222-3333-4444-555555555555'
+
+/** いまの行の並び。 */
+const rowsOf = getRows
 
 /** ストアは rAF でまとめてから反映するので、テストでは即座に流す。 */
 beforeEach(() => {
@@ -32,8 +38,13 @@ afterEach(() => {
   clearAllTranscripts()
 })
 
-function node(id: string, parent: string | null, inner: Node): TreeNode {
-  return { id, parent, node: inner, ts: 0 }
+function node(
+  id: string,
+  parent: string | null,
+  inner: Node,
+  branch = 0,
+): TreeNode {
+  return { id, parent, node: inner, ts: 0, branch }
 }
 
 function tool(status: 'pending' | 'ok'): Node {
@@ -75,6 +86,43 @@ describe('履歴ストア', () => {
     // 順不同で届くことがある。捨てると履歴が欠ける
     appendNodes(CARD, [node('child', 'missing-parent', { kind: 'thinking', text: '考え中' })])
     expect(getNode(CARD, 'child')).toBeDefined()
+  })
+
+  it('巻き戻し前の枝は既定で畳まれ、開けば読める', () => {
+    // `/rewind` は JSONL を巻き戻さず、同じファイルに2つ目の根として追記する（設計§16）。
+    // そのまま全部並べると「巻き戻したのに前のやりとりが見えている」ことになる
+    appendNodes(CARD, [
+      node('u1', null, { kind: 'user_message', text: '最初の指示' }, 0),
+      node('a1', null, { kind: 'assistant_text', text: 'やりました' }, 0),
+      node('u2', null, { kind: 'user_message', text: 'やり直しの指示' }, 1),
+      node('a2', null, { kind: 'assistant_text', text: '了解' }, 1),
+    ])
+
+    const folded = rowsOf(CARD)
+    expect(folded[0]).toMatchObject({ kind: 'rewound', count: 2, expanded: false })
+    // 見えるのは見出し1行＋最新の枝2行だけ
+    expect(folded.filter((row) => row.kind === 'node').map((row) => row.id)).toEqual([
+      'u2',
+      'a2',
+    ])
+
+    toggleRewound(CARD)
+    const opened = rowsOf(CARD)
+    expect(opened[0]).toMatchObject({ kind: 'rewound', expanded: true })
+    expect(opened.filter((row) => row.kind === 'node').map((row) => row.id)).toEqual([
+      'u1',
+      'a1',
+      'u2',
+      'a2',
+    ])
+  })
+
+  it('巻き戻していなければ見出し行は出ない', () => {
+    appendNodes(CARD, [
+      node('u1', null, { kind: 'user_message', text: 'やって' }, 0),
+      node('a1', null, { kind: 'assistant_text', text: 'はい' }, 0),
+    ])
+    expect(rowsOf(CARD).some((row) => row.kind === 'rewound')).toBe(false)
   })
 
   it('カードごとに独立している', () => {

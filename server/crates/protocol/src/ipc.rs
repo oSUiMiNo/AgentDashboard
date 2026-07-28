@@ -176,6 +176,7 @@ mod tests {
                     text: "テストを流して".to_string(),
                 },
                 ts: 1_700_000_000_000,
+                branch: 0,
             },
             offset: 4096,
         }

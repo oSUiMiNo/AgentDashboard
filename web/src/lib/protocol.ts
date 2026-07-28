@@ -81,6 +81,13 @@ export interface TreeNode {
   parent: NodeId | null
   node: Node
   ts: number
+  /**
+   * 何本目の会話の枝に属するか（0 始まり）。
+   *
+   * `/rewind` は JSONL を物理的に巻き戻さず、同じファイルの末尾に2つ目の根として
+   * 追記する（設計§16）。巻き戻して捨てたはずのやりとりを畳むための番号。
+   */
+  branch: number
 }
 
 /** ターミナルのフロー制御の指示（設計§10）。 */

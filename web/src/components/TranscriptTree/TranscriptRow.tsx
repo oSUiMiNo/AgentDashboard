@@ -12,12 +12,13 @@ import { Diff, Hunk } from 'react-diff-view'
 import type { CardId, Node } from '@/lib/protocol'
 import { countChanges, toDiffSource } from '@/lib/diff'
 import { tokenizeHunks } from '@/lib/highlight'
-import type { FlatRow } from '@/stores/transcript'
+import type { FlatRow, NodeRow, RewoundRow } from '@/stores/transcript'
 
 interface Props {
   cardId: CardId
   row: FlatRow
-  onToggle: (id: string) => void
+  /** 行そのものを渡す。巻き戻しの見出し行はノードではないので、IDでは足りない */
+  onToggle: (row: FlatRow) => void
 }
 
 /** 種別ごとの見出し（記号・ラベル・色）。 */
@@ -85,6 +86,64 @@ function summarizeInput(input: unknown): string {
 }
 
 export function TranscriptRow({ cardId, row, onToggle }: Props) {
+  if (row.kind === 'rewound') {
+    return <RewoundHeader row={row} onToggle={() => onToggle(row)} />
+  }
+  return <NodeRowView cardId={cardId} row={row} onToggle={() => onToggle(row)} />
+}
+
+/**
+ * 巻き戻し前のやりとりをまとめた見出し（設計§16）。
+ *
+ * `/rewind` したのに前のやりとりが並んでいると「巻き戻せていないのでは」と読める。
+ * かといって消すと、何をやり直したのかが追えなくなる。既定で畳み、開けば読める形にする。
+ */
+function RewoundHeader({
+  row,
+  onToggle,
+}: {
+  row: RewoundRow
+  onToggle: () => void
+}) {
+  return (
+    <div
+      data-testid="transcript-row"
+      data-kind="rewound"
+      data-expanded={row.expanded}
+      className="border-border/40 border-b py-1 text-sm"
+    >
+      <button
+        type="button"
+        data-testid="rewound-toggle"
+        onClick={onToggle}
+        className="hover:bg-muted/40 flex w-full items-start gap-2 rounded px-1 text-left"
+      >
+        <span aria-hidden className="text-muted-foreground w-3 shrink-0 text-xs">
+          {row.expanded ? '▾' : '▸'}
+        </span>
+        <span aria-hidden className="shrink-0">
+          ⟲
+        </span>
+        <span className="shrink-0 font-medium text-slate-400">
+          巻き戻し前のやりとり {row.count}件
+        </span>
+        <span className="text-muted-foreground min-w-0 flex-1 truncate">
+          {row.expanded ? '' : '（クリックで表示）'}
+        </span>
+      </button>
+    </div>
+  )
+}
+
+function NodeRowView({
+  cardId,
+  row,
+  onToggle,
+}: {
+  cardId: CardId
+  row: NodeRow
+  onToggle: () => void
+}) {
   const { icon, label, tone } = heading(row.node)
   const mark = toolMark(row.node)
 
@@ -101,7 +160,7 @@ export function TranscriptRow({ cardId, row, onToggle }: Props) {
       <button
         type="button"
         disabled={!row.expandable}
-        onClick={() => onToggle(row.id)}
+        onClick={onToggle}
         className="hover:bg-muted/40 flex w-full items-start gap-2 rounded px-1 text-left disabled:cursor-default"
       >
         <span aria-hidden className="w-3 shrink-0 text-xs text-muted-foreground">

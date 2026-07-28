@@ -195,6 +195,16 @@ pub struct TreeNode {
     pub parent: Option<NodeId>,
     pub node: Node,
     pub ts: Timestamp,
+    /// 何本目の会話の枝に属するか（0 始まり）。
+    ///
+    /// `/rewind` は JSONL を物理的に巻き戻さず、**同じファイルの末尾に2つ目の根として
+    /// 追記する**（設計§16 の実測）。そのため巻き戻して捨てたはずのやりとりも履歴に
+    /// 残り続ける。番号を振っておくと、画面が「最新の枝以外は畳む」判断をできる。
+    ///
+    /// 増えるのは本体ファイルに `parentUuid` を持たないユーザ発言が現れたとき。
+    /// サブエージェントのファイルは、起動元のツールコールの枝を引き継ぐ。
+    #[serde(default)]
+    pub branch: u32,
 }
 
 #[cfg(test)]
@@ -331,6 +341,7 @@ mod tests {
                 text: "done".to_string(),
             },
             ts: 1_700_000_000_123,
+            branch: 1,
         };
         assert_eq!(roundtrip(&node), node);
     }

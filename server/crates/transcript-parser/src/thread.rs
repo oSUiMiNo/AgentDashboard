@@ -67,6 +67,8 @@ struct ToolCallState {
     status: ToolStatus,
     subagent: Option<SubagentRef>,
     ts: i64,
+    /// 発行した時点の会話の枝。サブエージェントはこれを引き継ぐ
+    branch: u32,
 }
 
 impl ToolCallState {
@@ -82,6 +84,7 @@ impl ToolCallState {
                 subagent: self.subagent.clone(),
             },
             ts: self.ts,
+            branch: self.branch,
         }
     }
 }
@@ -96,6 +99,13 @@ struct FileState {
     turn_anchor: Option<NodeId>,
     /// レコードの `uuid` → 実際に発行したノード。未知レコードの置き場所の解決に使う
     resolved: HashMap<String, Option<NodeId>>,
+    /// このファイルのノードが属する会話の枝。
+    ///
+    /// 本体ファイルでは根が切り替わるたびに進み、サブエージェントのファイルでは
+    /// 起動元のツールコールの枝で固定される。
+    branch: u32,
+    /// 本体ファイルで観測した「根になるユーザ発言」の数。2件目以降が巻き戻しの跡
+    roots_seen: u32,
 }
 
 /// 1セッション（本体＋サブエージェント群）ぶんのスレッディング。
@@ -114,6 +124,8 @@ pub struct SessionThreader {
     agent_to_tool_use: HashMap<String, String>,
     /// agentId → そのエージェントのルートノード
     agent_roots: HashMap<String, NodeId>,
+    /// agentId → そのエージェントが属する会話の枝（深さ2以上の引き継ぎに使う）
+    agent_branches: HashMap<String, u32>,
     /// マウント先がまだ決まらない meta。新しい索引が増えるたびに再挑戦する
     pending_metas: Vec<AgentMeta>,
     /// `uuid` を持たない未知レコードに振る通し番号
@@ -199,6 +211,11 @@ impl SessionThreader {
         self.files.entry(source.to_string()).or_default()
     }
 
+    /// そのファイルのノードが属する会話の枝。
+    fn branch_of(&self, source: &str) -> u32 {
+        self.files.get(source).map_or(0, |file| file.branch)
+    }
+
     /// レコードの `parentUuid` から、実際に発行済みのノードを引く。
     ///
     /// 透過種別を挟んでいても [`Self::feed_record`] が解決済みの値を入れているので、
@@ -229,6 +246,22 @@ impl SessionThreader {
         let mut emitted = Vec::new();
         let mut last_emitted: Option<NodeId> = None;
 
+        // 本体ファイルに `parentUuid` を持たないユーザ発言が現れたら、そこが会話の根。
+        // 2件目以降は `/rewind` で分岐した跡なので、枝の番号を進める（設計§16）。
+        // サブエージェントのファイル（root あり）と sidechain は会話の根ではない
+        if root.is_none()
+            && record.parent_uuid.is_none()
+            && !record.is_sidechain
+            && blocks
+                .iter()
+                .any(|block| matches!(block, Block::UserText(_)))
+        {
+            let file = self.file(source);
+            file.roots_seen += 1;
+            file.branch = file.roots_seen.saturating_sub(1);
+        }
+        let branch = self.branch_of(source);
+
         for (index, block) in blocks.into_iter().enumerate() {
             // 区切りに `#` を使わない。ノードIDは履歴の遡り（`?before=<id>`）で URL に
             // 載るため、`#` だとフラグメント扱いになって値が途中で切れる
@@ -243,6 +276,7 @@ impl SessionThreader {
                         parent: root.clone(),
                         node: Node::UserMessage { text },
                         ts,
+                        branch,
                     });
                     last_emitted = Some(node_id);
                 }
@@ -253,6 +287,7 @@ impl SessionThreader {
                         parent: root.clone(),
                         node: Node::AssistantText { text },
                         ts,
+                        branch,
                     });
                     last_emitted = Some(node_id);
                 }
@@ -262,6 +297,7 @@ impl SessionThreader {
                         parent: root.clone(),
                         node: Node::Thinking { text },
                         ts,
+                        branch,
                     });
                     last_emitted = Some(node_id);
                 }
@@ -280,6 +316,7 @@ impl SessionThreader {
                         status: ToolStatus::Pending,
                         subagent: None,
                         ts,
+                        branch,
                     };
                     emitted.push(state.to_tree_node());
                     if !id.is_empty() {
@@ -330,6 +367,7 @@ impl SessionThreader {
         };
         self.stats.unknown_type(record_type);
 
+        let branch = self.branch_of(source);
         let parent = self.resolve(source, record.parent_uuid.as_deref());
         let node_id = match &record.uuid {
             Some(uuid) => NodeId(uuid.clone()),
@@ -348,6 +386,7 @@ impl SessionThreader {
                 raw: record.raw.clone(),
             },
             ts,
+            branch,
         }]
     }
 
@@ -400,9 +439,11 @@ impl SessionThreader {
             .clone()
             .or_else(|| self.agent_to_tool_use.get(&meta.agent_id).cloned());
 
-        let (parent, depth_hint) = if let Some(tool_use_id) = tool_use_id.as_ref() {
+        // 枝は起動元から引き継ぐ。サブエージェントのファイルはあとから読まれることが
+        // あり、そのときの本体の枝（巻き戻し後かもしれない）を拾うと嘘になる
+        let (parent, depth_hint, branch) = if let Some(tool_use_id) = tool_use_id.as_ref() {
             match self.tool_calls.get(tool_use_id) {
-                Some(state) => (Some(state.node_id.clone()), Some(1)),
+                Some(state) => (Some(state.node_id.clone()), Some(1), state.branch),
                 None => {
                     // ツールコールがまだ読めていない。捨てずに待たせる
                     self.pending_metas.push(meta.clone());
@@ -412,7 +453,14 @@ impl SessionThreader {
         } else if let Some(parent_agent_id) = &meta.parent_agent_id {
             // 経路3: 深さ2以上。親エージェントのルートへぶら下げる
             match self.agent_roots.get(parent_agent_id).cloned() {
-                Some(parent) => (Some(parent), None),
+                Some(parent) => (
+                    Some(parent),
+                    None,
+                    self.agent_branches
+                        .get(parent_agent_id)
+                        .copied()
+                        .unwrap_or_default(),
+                ),
                 None => {
                     self.pending_metas.push(meta.clone());
                     return;
@@ -420,12 +468,13 @@ impl SessionThreader {
             }
         } else {
             // 手掛かりが何も無い。根へ吊るす（消さないことが大事）
-            (None, None)
+            (None, None, 0)
         };
 
         let spawn_depth = meta.spawn_depth.or(depth_hint).unwrap_or(1);
         self.agent_roots
             .insert(meta.agent_id.clone(), node_id.clone());
+        self.agent_branches.insert(meta.agent_id.clone(), branch);
 
         emitted.push(TreeNode {
             id: node_id.clone(),
@@ -435,6 +484,7 @@ impl SessionThreader {
                 spawn_depth,
             },
             ts: self.last_ts,
+            branch,
         });
 
         // 親のツールコールに「ここに子ツリーがある」ことを書き戻す（upsert）
@@ -449,10 +499,10 @@ impl SessionThreader {
             }
         }
 
-        // 既に読み込み済みのサブエージェントのファイルへ、根を教え直す
-        if let Some(file) = self.files.get_mut(&meta.transcript_path) {
-            file.root = Some(node_id);
-        }
+        // 既に読み込み済みのサブエージェントのファイルへ、根と枝を教え直す
+        let file = self.files.entry(meta.transcript_path.clone()).or_default();
+        file.root = Some(node_id);
+        file.branch = branch;
     }
 }
 
@@ -506,6 +556,84 @@ mod tests {
         assert_eq!(tool[0].parent.as_ref(), Some(&assistant[0].id));
         // ユーザとアシスタントは根に並ぶ（深さが会話の長さに比例しない）
         assert!(assistant[0].parent.is_none());
+    }
+
+    #[test]
+    fn 巻き戻しで2つ目の根が生えると枝の番号が進む() {
+        // `/rewind` は JSONL を物理的に巻き戻さず、同じファイルの末尾に
+        // `parentUuid: null` のユーザ発言を追記する（設計§16 の実測）
+        let mut threader = SessionThreader::new();
+        let first = feed(
+            &mut threader,
+            r#"{"type":"user","uuid":"u1","message":{"content":"最初の指示"}}"#,
+        );
+        let reply = feed(
+            &mut threader,
+            r#"{"type":"assistant","uuid":"u2","parentUuid":"u1","message":{"content":[
+                {"type":"text","text":"やりました"}]}}"#,
+        );
+        assert_eq!(first[0].branch, 0);
+        assert_eq!(reply[0].branch, 0, "同じ枝の続きは番号が変わらない");
+
+        // 巻き戻して言い直した
+        let second = feed(
+            &mut threader,
+            r#"{"type":"user","uuid":"u3","message":{"content":"やり直しの指示"}}"#,
+        );
+        let after = feed(
+            &mut threader,
+            r#"{"type":"assistant","uuid":"u4","parentUuid":"u3","message":{"content":[
+                {"type":"text","text":"了解"}]}}"#,
+        );
+        assert_eq!(second[0].branch, 1, "2つ目の根から新しい枝");
+        assert_eq!(after[0].branch, 1);
+    }
+
+    #[test]
+    fn サブエージェントは起動元の枝を引き継ぐ() {
+        // 子ファイルは後から読まれる。そのときの本体の枝（巻き戻し後かもしれない）を
+        // 拾うと、古い枝の作業が最新の枝に属していることになってしまう
+        let mut threader = SessionThreader::new();
+        feed(
+            &mut threader,
+            r#"{"type":"user","uuid":"u1","message":{"content":"最初の指示"}}"#,
+        );
+        let call = feed(
+            &mut threader,
+            r#"{"type":"assistant","uuid":"u2","parentUuid":"u1","message":{"content":[
+                {"type":"tool_use","id":"toolu_1","name":"Agent","input":{}}]}}"#,
+        );
+        assert_eq!(call[0].branch, 0);
+
+        // 巻き戻して枝が進んだあとに、古い枝のサブエージェントを読み込む
+        feed(
+            &mut threader,
+            r#"{"type":"user","uuid":"u3","message":{"content":"やり直しの指示"}}"#,
+        );
+        let mounted = threader.feed_meta(AgentMeta {
+            agent_id: "agent-1".to_string(),
+            agent_type: "Explore".to_string(),
+            tool_use_id: Some("toolu_1".to_string()),
+            parent_agent_id: None,
+            spawn_depth: Some(1),
+            transcript_path: "/p/s/subagents/agent-1.jsonl".to_string(),
+        });
+        let subagent = mounted
+            .iter()
+            .find(|node| matches!(node.node, Node::Subagent { .. }))
+            .expect("サブエージェントのノードが出ること");
+        assert_eq!(subagent.branch, 0, "起動元の枝のまま");
+
+        // 子ファイルの中身も同じ枝になる
+        let inside = threader.feed_record(
+            "/p/s/subagents/agent-1.jsonl",
+            Some("agent-1"),
+            &parse_line(
+                r#"{"type":"assistant","uuid":"a1","message":{"content":[
+                {"type":"text","text":"調べました"}]}}"#,
+            ),
+        );
+        assert_eq!(inside[0].branch, 0);
     }
 
     #[test]

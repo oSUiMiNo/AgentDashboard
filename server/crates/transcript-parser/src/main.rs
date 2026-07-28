@@ -230,6 +230,7 @@ mod tests {
                     text: String::new(),
                 },
                 ts: 0,
+                branch: 0,
             },
             offset,
         }

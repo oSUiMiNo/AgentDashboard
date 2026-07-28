@@ -247,6 +247,7 @@ mod tests {
                         text: "了解しました".to_string(),
                     },
                     ts: 1_700_000_000_000,
+                    branch: 0,
                 }],
             },
             ServerMessage::TranscriptReset { card_id },
