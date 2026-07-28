@@ -1,0 +1,31 @@
+# Rust ツールチェーンをホストへ入れずに済ませるための隔離イメージ。
+# ホスト側には cargo / rustc を一切インストールせず、cargo の呼び出しは
+# すべて scripts/cargo（このイメージを docker run するラッパー）を経由させる。
+#
+# ベースを bookworm(glibc 2.36) にしているのは意図的：
+# ここでビルドしたバイナリを、より新しい glibc を持つホスト（Ubuntu 24.04 / glibc 2.39）で
+# そのまま実行できるようにするため（glibc の互換性は「新しい側が古い側を実行できる」方向にある）。
+FROM rust:1.97.1-slim-bookworm
+
+# リンクとビルドスクリプトに必要な最低限のツールのみ入れる
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pkg-config \
+        ca-certificates \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# cargo-nextest：テストごとにプロセスを分離し、個別タイムアウトを掛けられる。
+# 本PJTは PTY を扱うテストが増えていくため、1本のハングが全体を巻き込む事故を防ぐ目的で導入する。
+# ソースからのビルドは遅いのでプリビルドバイナリを配置する。
+RUN curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C /usr/local/cargo/bin
+
+# lint 用コンポーネント
+RUN rustup component add rustfmt clippy
+
+# scripts/cargo は --user <ホストのuid:gid> でコンテナを起動する。
+# レジストリキャッシュ用の名前付きボリュームをここへマウントするため、
+# 非 root からも書けるようにディレクトリを用意しておく。
+RUN mkdir -p /usr/local/cargo/registry /usr/local/cargo/git \
+    && chmod -R a+w /usr/local/cargo
+
+WORKDIR /repo/server

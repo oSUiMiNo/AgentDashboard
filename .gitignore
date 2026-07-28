@@ -1,0 +1,30 @@
+# Rust
+/server/target/
+
+# Node
+node_modules/
+
+# Web ビルド成果物。rust-embed がコンパイル時にこのフォルダの実体を要求するが、
+# ディレクトリの存在保証は scripts/cargo が mkdir -p で行うため git では追跡しない
+/web/dist/
+
+# Playwright
+/web/test-results/
+/web/playwright-report/
+/web/.playwright/
+
+# ローカル実行時の設定（config.toml.example をコピーして使う）
+/config.toml
+
+# 環境変数
+.env
+.env.*
+!.env.example
+
+# ローカルイシューと開発ドキュメント。issue_sync でリモートイシューと同期する運用のため
+# git では追跡しない（PJTガイドライン「ローカルイシューのドキュメントを編集するとき」参照）
+/MyDocs/
+
+# OS / エディタ
+.DS_Store
+*.swp

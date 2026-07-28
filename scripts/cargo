@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# cargo を「ホストに入れずに」呼ぶための唯一の入口。
+#
+# 本PJTではホストに Rust ツールチェーンを入れない方針のため、cargo は常に
+# docker/Dockerfile.rust から作ったイメージの中で実行する。Makefile も、将来の
+# 自己修復機構（設計§9）のテストゲートも、cargo を直接呼ばずにこのラッパーを使うこと。
+#
+# 使い方: scripts/cargo <cargo のサブコマンドと引数>
+#   例) scripts/cargo build --release
+#       scripts/cargo nextest run
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+IMAGE_TAG="agentdashboard-rust:1.97.1"
+
+# rust-embed は web/dist を「コンパイル時に」読むため、フォルダが無いとビルドが失敗する。
+# vite は build のたびに dist を作り直す（= 一度消える）ので、git で空ディレクトリを
+# 追跡する方式は壊れやすい。cargo の唯一の入口であるここで必ず存在を保証する。
+mkdir -p "${REPO_ROOT}/web/dist"
+
+# リポジトリ全体をマウントする。server/ だけでは足りないのは、core が rust-embed で
+# web/dist を「コンパイル時に」読むため（設計§2 の単一バイナリ同梱）。
+docker run --rm \
+    --user "$(id -u):$(id -g)" \
+    --volume "${REPO_ROOT}:/repo" \
+    --volume "agentdashboard-cargo-registry:/usr/local/cargo/registry" \
+    --volume "agentdashboard-cargo-git:/usr/local/cargo/git" \
+    --workdir /repo/server \
+    --env CARGO_TERM_COLOR=always \
+    "${IMAGE_TAG}" \
+    cargo "$@"
