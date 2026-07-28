@@ -12,6 +12,8 @@ node_modules/
 /web/test-results/
 /web/playwright-report/
 /web/.playwright/
+# Playwright MCP がブラウザ操作の記録を書き出す先
+/.playwright-mcp/
 
 # ローカル実行時の設定（config.toml.example をコピーして使う）
 /config.toml

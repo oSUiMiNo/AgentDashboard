@@ -39,8 +39,35 @@ scripts/cargo tree -i tokio-tungstenite -e normal
 
 `cargo: command not found` が出たら、ラッパーを経由し忘れている。Makefile も自己修復機構もこの1つの入口に集約する方針なので、新しい経路を作らないこと。詳細は `.claude/docs/knowledge/開発環境とツールチェーン.md`。
 
+### web を変更したら core を作り直す必要がある
+`agentdashboard` バイナリは `web/dist` を**コンパイル時に**取り込む。フロントを直しただけでは
+バイナリの中身は古いままなので、動作確認は必ず `make build`（または `make e2e`）を通すこと。
+`crates/core/build.rs` が `web/dist` の変更を cargo に伝えるようにしてあるので、ビルド順さえ
+守れば自動で作り直される。
+
 ### ビルドした成果物はホストで動かす
 コンテナはツールチェーンの置き場所に徹しており、`agentdashboard` バイナリはホストで実行する。本アプリは PTY で本物の claude CLI を起動し、ホストの `~/.claude` とユーザのプロジェクトを触るのが本質のため。
+
+---
+<br/>
+<br/>
+
+## サーバ⇔ブラウザのメッセージを増減するとき
+WebSocket のメッセージ型は Rust と TypeScript で**手書きで二重に定義**している。片方だけ直すと
+コンパイルは通るのに動かない、という追いにくい状態になる。1つ増減するたびに次の4箇所を揃えること。
+
+| 直す場所 | ファイル |
+|---|---|
+| Rust の型 | `server/crates/protocol/src/ws.rs` |
+| Rust の往復テスト | 同ファイルの `tests` モジュール |
+| TypeScript の型 | `web/src/lib/protocol.ts` |
+| TypeScript の突き合わせテスト | `web/src/lib/protocol.test.ts` |
+
+両側のテストは「同じ JSON 文字列になること」を確かめている。ここが唯一のズレ検出手段なので、
+種別を増やしたら必ずテストにも足す。
+
+設計に無いメッセージを足す場合は、**設計.md §4 の表にも追記**する。実装と設計が食い違ったまま
+次のフェーズへ進むと、どちらが正なのか判断できなくなる。
 
 ---
 <br/>
