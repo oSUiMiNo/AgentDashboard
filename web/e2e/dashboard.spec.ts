@@ -97,12 +97,28 @@ test('小窓とグループ余白でクリックの意味が変わる', async ({
   await expect(page).toHaveURL(/\/s\/[0-9a-f-]{36}$/)
   await expect(page.getByTestId('session-view')).toHaveCount(1)
 
-  // グループの余白をクリック → プロジェクトの画面へ（横並びの中身はフェーズ4）
+  // グループの余白をクリック → 全セッションが横並びで開く
   await page.goto('/')
   await page.getByTestId('project-group').click({ position: { x: 5, y: 5 } })
   await expect(page).toHaveURL(`/p/${encodeURIComponent(WORK_DIR)}`)
   await expect(page.getByTestId('group-view')).toBeVisible()
-  await expect(page.getByTestId('group-member')).toHaveCount(2)
+
+  // 「一覧」ではなく専用画面そのものが2枚並ぶ（見比べられる状態になっている）
+  const views = page.getByTestId('session-view')
+  await expect(views).toHaveCount(2)
+  await expect(views.first()).toBeVisible()
+  await expect(views.last()).toBeVisible()
+
+  // 縦積みではなく横並びであること。左端の位置が違い、上端が揃っている
+  const left = await views.first().boundingBox()
+  const right = await views.last().boundingBox()
+  expect(left).not.toBeNull()
+  expect(right).not.toBeNull()
+  expect(right!.x).toBeGreaterThan(left!.x)
+  expect(Math.abs(right!.y - left!.y)).toBeLessThan(4)
+
+  // 溢れたぶんは横スクロールで届く（表示数の上限は設けていない）
+  await expect(page.getByTestId('group-rail')).toHaveCSS('overflow-x', 'auto')
 })
 
 test('リロードしても一覧はサーバの状態から作り直される', async ({ page }) => {

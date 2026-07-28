@@ -1,15 +1,27 @@
 /**
- * プロジェクト内の全セッションを横並びにする画面（設計§10）。
+ * プロジェクト内の全セッションを横並びにする画面（要件「グループの余白クリック」／設計§10）。
  *
- * 兄弟セッションを見比べるための画面。**レイアウトの作り込みはフェーズ4**（計画）なので、
- * ここでは「どのセッションが対象になるか」が分かるところまでを出す。ルーティングと
- * クリックの作り分けはフェーズ2の担当なので、遷移先として先に用意しておく。
+ * 同じフォルダで並列に走らせた兄弟セッションを**見比べる**ための画面。1本ずつ開いて
+ * 行き来すると、どちらが先に進んでいるのかが分からなくなる。
+ *
+ * # 表示数に上限を設けない
+ *
+ * 設計§13 が「最大表示数・レイアウトはフェーズ4で決める」としていた点。**上限は設けず、
+ * 全件を横スクロールで並べる**ことにした。個人ツールで、同じフォルダの並列は多くて
+ * 数本という前提のため。上限を設けると「見比べたい相手が切り捨てられる」という、
+ * この画面の存在意義そのものを損なう失敗が起きうる。
+ *
+ * # 兄弟は既定でターミナル
+ *
+ * 並べたときに知りたいのは「いま何が起きているか」なので、[`SessionView`] の
+ * `compact` はターミナルから始まる（その判断はコンポーネント側にある）。
  */
 
 import { Link } from 'react-router'
+import { SessionView } from '@/components/SessionView/SessionView'
 import type { SessionMeta } from '@/lib/protocol'
-import { statusLabel, statusTone } from '@/lib/protocol'
-import { HOME, sessionPath } from '@/lib/routes'
+import { HOME } from '@/lib/routes'
+import { useNow } from '@/lib/sessions'
 
 interface Props {
   project: string
@@ -17,6 +29,9 @@ interface Props {
 }
 
 export function GroupView({ project, sessions }: Props) {
+  // 経過時間の時計は親が1つだけ持つ。セッションごとに持たせると数だけタイマーが増える
+  const now = useNow()
+
   return (
     <section
       data-testid="group-view"
@@ -40,29 +55,20 @@ export function GroupView({ project, sessions }: Props) {
           このプロジェクトのセッションはありません
         </p>
       ) : (
-        <ul className="flex flex-wrap gap-3">
+        <div
+          data-testid="group-rail"
+          className="flex min-h-0 flex-1 gap-4 overflow-x-auto pb-2"
+        >
           {sessions.map((session) => (
-            <li key={session.card_id}>
-              <Link
-                to={sessionPath(session.card_id)}
-                data-testid="group-member"
-                data-card-id={session.card_id}
-                className="border-input hover:border-primary/60 flex items-center gap-2 rounded-lg border px-3 py-2 text-sm"
-              >
-                <span
-                  aria-hidden
-                  className={`size-2.5 rounded-full ${statusTone(session.status)}`}
-                />
-                {statusLabel(session.status)}
-              </Link>
-            </li>
+            <SessionView
+              key={session.card_id}
+              session={session}
+              now={now}
+              compact
+            />
           ))}
-        </ul>
+        </div>
       )}
-
-      <p className="text-muted-foreground text-xs">
-        全セッションを横並びで表示する画面はフェーズ4で作ります。
-      </p>
     </section>
   )
 }
