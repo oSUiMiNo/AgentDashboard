@@ -24,6 +24,11 @@ const fakeClaude = path.join(repoRoot, 'server/target/debug/fake-claude')
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: false,
+  // core サーバは全テストで1つを共有する。並列に走らせると、別のテストが起動した
+  // セッションが一覧に混ざるだけでなく、同じ端末へキー入力が交互に届いて壊れる
+  // （実際に「hook SessionStart」と「こんにちは」が1本の端末で混線した）。
+  // ファイルをまたいだ並列も止めるため、ワーカーは1本に固定する
+  workers: 1,
   forbidOnly: !!process.env.CI,
   retries: 0,
   reporter: 'list',
