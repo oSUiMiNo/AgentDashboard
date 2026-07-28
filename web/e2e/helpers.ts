@@ -133,24 +133,43 @@ export async function writeTranscript(page: Page, fixture: string, lines?: numbe
   await expectTerminalToContain(page, '[fake-claude] jsonl-appended: ')
 }
 
+/** サーバが持っているカードの一覧（画面ではなくサーバに直接聞く）。 */
+async function serverCardIds(page: Page): Promise<string[]> {
+  const response = await page.request.get('/api/sessions')
+  const sessions = (await response.json()) as { card_id: string }[]
+  return sessions.map((session) => session.card_id)
+}
+
 /**
  * 残っているカードを片付ける。
  *
  * サーバは全テストで共有されるため、片付けないと「前のテストが作ったカードがある状態」を
  * 前提にしたテストになってしまい、単体で流したときと通しで流したときで結果が変わる。
+ *
+ * # 片付いたかどうかは**サーバに聞く**
+ *
+ * 画面の小窓を数えて判断すると、「まだ描かれていないだけ」を「もう無い」と読み違える。
+ * 実際、これで残ったカードが次のテストへ漏れ、**別のテストが日替わりで落ちる**という
+ * 追いにくい形になっていた。真実は常にサーバ側にあるので、そちらを見る。
+ *
+ * 消す対象もIDで名指しする。`.first()` で選ぶと、消したい相手と押した相手がずれうる。
  */
 export async function archiveAll(page: Page) {
   // 上限を切っておく。消せないカードがあったときに無限に回り続けないため
   for (let guard = 0; guard < 20; guard += 1) {
-    await openDashboard(page)
-    const tiles = page.getByTestId('session-tile')
-    if ((await tiles.count()) === 0) {
+    const remaining = await serverCardIds(page)
+    if (remaining.length === 0) {
       return
     }
-    await tiles.first().click()
+    await page.goto(`/s/${remaining[0]}`)
     await page.getByRole('button', { name: '削除' }).click()
     // 消えると専用画面は「見つかりません」に変わる。これを消えた合図にする
     await expect(page.getByTestId('not-found')).toBeVisible()
+    await expect
+      .poll(async () => (await serverCardIds(page)).includes(remaining[0]), {
+        message: 'サーバ側からもカードが消えること',
+      })
+      .toBe(false)
   }
   throw new Error('カードを片付けきれませんでした')
 }
