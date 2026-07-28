@@ -1,11 +1,9 @@
-//! AgentDashboard の core サーバ（設計§1）。
+//! AgentDashboard の実行ファイル。
 //!
-//! フェーズ0時点では土台のみ。Session Manager / Hook Ingest / WS Gateway 等の実装は
-//! フェーズ1以降で本ファイルへ足していく。
+//! 引数なしで起動するとサーバが立ち上がり、ブラウザからセッションを操作できるようになる。
+//! 中身は [`agentdashboard_core`] 側にあり、ここは CLI の解釈だけを担う。
 
-mod config;
-mod embed;
-
+use agentdashboard_core::{config::Config, embed, serve};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -36,9 +34,10 @@ enum Command {
     },
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let config = config::Config::load(cli.config.as_deref())?;
+    let config = Config::load(cli.config.as_deref())?;
 
     match cli.command {
         Some(Command::Config) => {
@@ -59,14 +58,13 @@ fn main() -> anyhow::Result<()> {
             std::io::stdout().write_all(&data)?;
         }
         None => {
-            // サーバ起動はフェーズ1（M1: 動くターミナル）で実装する。
-            // ここで黙って何もしないと「起動したつもり」の誤解を生むため明示的に伝える。
-            println!(
-                "AgentDashboard {} — 土台のみ（フェーズ0）。サーバ起動はフェーズ1で実装します。",
-                env!("CARGO_PKG_VERSION")
-            );
-            println!("待ち受け予定ポート: {}", config.port);
-            println!("同梱アセット: {} 件", embed::list().len());
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| "info".into()),
+                )
+                .init();
+            serve(config).await?;
         }
     }
     Ok(())
