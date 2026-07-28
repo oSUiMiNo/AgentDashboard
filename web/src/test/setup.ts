@@ -14,6 +14,20 @@ import '@testing-library/jest-dom/vitest'
 const VIEWPORT = { width: 800, height: 600 }
 const ROW = 30
 
+// xterm.js は端末を開くときに画面の解像度倍率を `matchMedia` で見る。jsdom には無い
+if (typeof globalThis.matchMedia !== 'function') {
+  globalThis.matchMedia = ((query: string) => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
+  })) as unknown as typeof globalThis.matchMedia
+}
+
 if (typeof globalThis.ResizeObserver === 'undefined') {
   globalThis.ResizeObserver = class {
     private readonly callback: ResizeObserverCallback

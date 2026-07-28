@@ -7,13 +7,8 @@
  * # ウォーターマーク式のフロー制御
  *
  * `term.write(data, callback)` のコールバックは、そのデータを**実際に処理し終えたとき**に
- * 呼ばれる。呼ばれるまでの合計バイト数（＝端末の処理待ち）を数えておき、
- *
- * - `flow_high` を超えたら サーバへ `pause`（サーバは PTY の読み取りを止める）
- * - `flow_low` を下回ったら `resume`
- *
- * とすることで、ブラウザが処理しきれない量を溜め込まずに済む。しきい値をサーバから
- * 受け取っているのは、`config.toml` の設定を実際に効かせるため。
+ * 呼ばれる。その数を数えて止める・再開するの判定を [`createFlowController`] に任せる。
+ * しきい値をサーバから受け取っているのは、`config.toml` の設定を実際に効かせるため。
  */
 
 import { useEffect, useRef } from 'react'
@@ -21,6 +16,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { Terminal } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
+import { createFlowController } from '@/lib/flow'
 import { KIND_PTY_SNAPSHOT } from '@/lib/frame'
 import type { CardId } from '@/lib/protocol'
 import { useWsStore } from '@/stores/ws'
@@ -86,41 +82,34 @@ export function TerminalPane({ cardId }: Props) {
     fit.fit()
 
     // --- フロー制御 -------------------------------------------------------
-    // 端末がまだ処理し終えていないバイト数。write のコールバックで減っていく
-    let pending = 0
-    let paused = false
-    let pauseCount = 0
-    let totalBytes = 0
+    const flow = createFlowController({
+      thresholds: () => {
+        const store = useWsStore.getState()
+        return { high: store.flowHigh, low: store.flowLow }
+      },
+      onPause: () => useWsStore.getState().setFlow(cardId, 'pause'),
+      onResume: () => useWsStore.getState().setFlow(cardId, 'resume'),
+    })
 
     const updateFlowIndicator = () => {
       const status = statusRef.current
       if (!status) {
         return
       }
-      status.setAttribute('data-pending', String(pending))
-      status.setAttribute('data-flow', paused ? 'paused' : 'running')
+      status.setAttribute('data-pending', String(flow.pending()))
+      status.setAttribute('data-flow', flow.paused() ? 'paused' : 'running')
       // 一度でも止めたかは、瞬間の値を見張るより累計で見るほうが取りこぼさない
-      status.setAttribute('data-pause-count', String(pauseCount))
-      status.setAttribute('data-total-bytes', String(totalBytes))
+      status.setAttribute('data-pause-count', String(flow.pauseCount()))
+      status.setAttribute('data-total-bytes', String(flow.totalBytes()))
     }
 
     const write = (payload: Uint8Array) => {
       const size = payload.length
-      pending += size
-      totalBytes += size
+      flow.begin(size)
       term.write(payload, () => {
-        pending = Math.max(0, pending - size)
-        if (paused && pending < useWsStore.getState().flowLow) {
-          paused = false
-          useWsStore.getState().setFlow(cardId, 'resume')
-        }
+        flow.done(size)
         updateFlowIndicator()
       })
-      if (!paused && pending > useWsStore.getState().flowHigh) {
-        paused = true
-        pauseCount += 1
-        useWsStore.getState().setFlow(cardId, 'pause')
-      }
       updateFlowIndicator()
     }
 

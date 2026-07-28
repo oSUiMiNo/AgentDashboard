@@ -14,7 +14,7 @@ DEBUG_BIN := server/target/debug/agentdashboard
 .DEFAULT_GOAL := help
 
 .PHONY: help setup setup-rust setup-web dev dev-web dev-server \
-        test test-rust test-web test-cli e2e build-debug \
+        test test-rust test-web test-cli e2e build-debug perf \
         lint lint-rust lint-web fmt \
         build build-web build-server ci fixtures clean
 
@@ -73,6 +73,18 @@ e2e: build-web build-debug ## E2E テスト（Playwright / chromium・実サー�
 
 build-debug: ## core をデバッグビルドする（E2E が使うバイナリ）
 	$(CARGO) build
+
+# 性能の「数値」を採るための入口（テスト計画フェーズ6）。
+#
+# 合否の判定は make test / make e2e に入っている（機械の速さに左右されない性質だけを
+# 見ている）。こちらは fps・状態反映の遅延・フレーム数といった**実測値**を出すためのもので、
+# 結果は実行レポートへ書き写す。数値を合否にしないのは、他の作業の負荷で落ちるテストは
+# 役に立たないため。
+perf: build-web build-debug ## 性能の実測値を採る（合否ではなく記録用）
+	@echo "=== サーバ側（コアレッシング効果・巨大履歴・遅いクライアント）==="
+	$(CARGO) nextest run -p agentdashboard-core --test perf --no-capture
+	@echo "=== ブラウザ側（12セッション同時稼働）==="
+	cd web && npx playwright test perf.spec.ts
 
 # --- 静的検査 -----------------------------------------------------------------
 
