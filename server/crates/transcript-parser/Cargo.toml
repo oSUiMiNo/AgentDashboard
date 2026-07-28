@@ -19,3 +19,4 @@ serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 notify.workspace = true
+time.workspace = true
