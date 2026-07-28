@@ -26,6 +26,7 @@ import type {
   ServerMessage,
   SessionMeta,
 } from '@/lib/protocol'
+import { appendNodes, resetTranscript } from '@/stores/transcript'
 
 export type ConnectionStatus = 'connecting' | 'open' | 'closed'
 
@@ -46,6 +47,9 @@ interface WsState {
   flowLow: number
   /** 直近の失敗。ユーザに見せたら消す */
   lastError: string | null
+  /** 構造化ビューの健康状態。縮退していてもターミナルは動く（設計§11） */
+  parserState: 'ok' | 'degraded'
+  parserDetail: string | null
 
   connect: () => Promise<void>
   disconnect: () => void
@@ -62,6 +66,8 @@ interface WsState {
     rows: number,
     listener: TerminalListener,
   ) => () => void
+  /** 履歴の購読を始める。戻り値を呼ぶと購読を止める */
+  subscribeTranscript: (cardId: CardId) => () => void
   clearError: () => void
 }
 
@@ -105,6 +111,8 @@ export const useWsStore = create<WsState>((set) => ({
   flowHigh: 256 * 1024,
   flowLow: 32 * 1024,
   lastError: null,
+  parserState: 'ok',
+  parserDetail: null,
 
   connect: async () => {
     if (socket && socket.readyState !== WebSocket.CLOSED) {
@@ -165,6 +173,15 @@ export const useWsStore = create<WsState>((set) => ({
     return () => {
       terminalListeners.delete(cardId)
       send({ t: 'unsub_pty', card_id: cardId })
+    }
+  },
+
+  // 履歴はターミナルと違い、受け取り口を渡さない。届いたノードは transcript ストアが
+  // 直接受け取る（画面はそちらを購読する）
+  subscribeTranscript: (cardId) => {
+    send({ t: 'sub_transcript', card_id: cardId })
+    return () => {
+      send({ t: 'unsub_transcript', card_id: cardId })
     }
   },
 
@@ -229,11 +246,21 @@ function handleJson(raw: string, set: SetState) {
         ),
       })
       break
+    case 'transcript_append':
+      appendNodes(message.card_id, message.nodes)
+      break
+    case 'transcript_reset':
+      // 巻き戻り、または購読し直し。どちらも「作り直す」で正しい
+      resetTranscript(message.card_id)
+      break
+    case 'parser_status':
+      set({ parserState: message.state, parserDetail: message.detail })
+      break
     case 'error':
       set({ lastError: message.message })
       break
     default:
-      // フェーズ3以降で実装する種別。届いても落ちないように黙って受け流す
+      // フェーズ5で実装する種別（selfheal）。届いても落ちないように黙って受け流す
       break
   }
 }
