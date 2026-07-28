@@ -17,6 +17,7 @@
  * というのが要件の使い方なので、送るたびにターミナルへ切り替えさせない。
  */
 
+import { motion } from 'motion/react'
 import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Composer } from '@/components/Composer/Composer'
@@ -100,11 +101,24 @@ export function SessionView({ cardId, compact = false }: Props) {
         </div>
       </header>
 
-      <div role="tablist" className="flex gap-1 text-sm">
-        <ViewTab current={view} value="transcript" onSelect={setView}>
+      <div
+        role="tablist"
+        className="border-border bg-background/60 flex w-fit gap-1 rounded-lg border p-0.5 text-sm"
+      >
+        <ViewTab
+          current={view}
+          value="transcript"
+          onSelect={setView}
+          cardId={cardId}
+        >
           構造化ビュー
         </ViewTab>
-        <ViewTab current={view} value="terminal" onSelect={setView}>
+        <ViewTab
+          current={view}
+          value="terminal"
+          onSelect={setView}
+          cardId={cardId}
+        >
           ターミナル
         </ViewTab>
       </div>
@@ -126,11 +140,14 @@ function ViewTab({
   current,
   value,
   onSelect,
+  cardId,
   children,
 }: {
   current: View
   value: View
   onSelect: (view: View) => void
+  /** 下地の共有IDに混ぜる。横並び表示では同じ画面に複数のタブ列が並ぶため */
+  cardId: CardId
   children: React.ReactNode
 }) {
   const active = current === value
@@ -141,13 +158,19 @@ function ViewTab({
       aria-selected={active}
       data-testid={`view-tab-${value}`}
       onClick={() => onSelect(value)}
-      className={`rounded-md px-2 py-1 ${
-        active
-          ? 'bg-muted text-foreground'
-          : 'text-muted-foreground hover:text-foreground'
+      className={`relative rounded-md px-3 py-1 transition-colors ${
+        active ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'
       }`}
     >
-      {children}
+      {/* 選択中の下地だけを動かす。切り替えたことが分かればよく、中身は動かさない */}
+      {active && (
+        <motion.span
+          layoutId={`view-tab-active-${cardId}`}
+          transition={{ type: 'spring', stiffness: 400, damping: 32 }}
+          className="bg-muted absolute inset-0 rounded-md shadow-sm"
+        />
+      )}
+      <span className="relative">{children}</span>
     </button>
   )
 }

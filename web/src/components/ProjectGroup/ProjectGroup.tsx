@@ -9,8 +9,11 @@
  * 同じ場所に2つの意味を持たせているので、小窓側は `stopPropagation` で親へ伝えない
  * （[`SessionTile`]）。兄弟セッションを見比べたいときと、1本に集中したいときの
  * 使い分けが、追加のボタン無しで成立する。
+ *
+ * 破線の枠にしてあるのは、**枠の内側そのものが押せる**ことを見た目で示すため。
  */
 
+import { AnimatePresence } from 'motion/react'
 import { useNavigate } from 'react-router'
 import { SessionTile } from '@/components/SessionTile/SessionTile'
 import type { CardId } from '@/lib/protocol'
@@ -30,7 +33,7 @@ export function ProjectGroup({ project, cards }: Props) {
       data-testid="project-group"
       data-project={project}
       onClick={() => navigate(projectPath(project))}
-      className="border-input hover:border-primary/40 cursor-pointer rounded-xl border border-dashed p-3 transition-colors"
+      className="border-border hover:border-primary/40 hover:bg-muted/20 cursor-pointer rounded-xl border border-dashed p-3 transition-colors"
     >
       <header className="mb-2 flex items-baseline gap-2">
         <h2 className="truncate text-sm font-semibold" title={project}>
@@ -42,9 +45,12 @@ export function ProjectGroup({ project, cards }: Props) {
       </header>
 
       <div className="flex flex-wrap gap-3">
-        {cards.map((cardId) => (
-          <SessionTile key={cardId} cardId={cardId} />
-        ))}
+        {/* 起動と削除が分かるように出入りだけ動かす（増減はめったに起きない） */}
+        <AnimatePresence initial={false}>
+          {cards.map((cardId) => (
+            <SessionTile key={cardId} cardId={cardId} />
+          ))}
+        </AnimatePresence>
       </div>
     </section>
   )

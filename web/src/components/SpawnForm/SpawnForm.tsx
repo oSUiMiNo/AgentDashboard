@@ -7,6 +7,7 @@
 
 import { useState } from 'react'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { useWsStore } from '@/stores/ws'
 
 interface Props {
@@ -28,13 +29,13 @@ export function SpawnForm({ disabled }: Props) {
         }
       }}
     >
-      <input
+      <Input
         data-testid="cwd-input"
         aria-label="作業ディレクトリ"
         placeholder="/home/example/dev/プロジェクト"
         value={cwd}
         onChange={(event) => setCwd(event.target.value)}
-        className="border-input bg-background focus-visible:ring-ring flex-1 rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:outline-none"
+        className="flex-1"
       />
       <Button type="submit" disabled={disabled || cwd.trim() === ''}>
         セッションを起動

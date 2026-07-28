@@ -11,9 +11,17 @@
  *
  * カードIDだけを受け取り、中身はストアから直接購読する（設計§10）。親から中身を配ると、
  * 1枚の状態が変わっただけで親が作り直され、他の小窓まで再レンダリングの判定に入る。
+ *
+ * # 動きを付けてよい場所
+ *
+ * 動かすのは**カードの出入りと、人の対処を待っている印**だけ。状態の変化はフックの
+ * 頻度（ツールコールごと）で来るので、そこに演出を足すと画面が騒がしくなり、
+ * 「本当に見るべきもの」が埋もれる。要件が言う一覧の目的と逆行する。
  */
 
+import { motion } from 'motion/react'
 import { useNavigate } from 'react-router'
+import { Badge } from '@/components/ui/badge'
 import { formatElapsed } from '@/lib/time'
 import {
   isHookSilent,
@@ -42,8 +50,15 @@ export function SessionTile({ cardId }: Props) {
   const attention = needsAttention(session.status)
 
   return (
-    <button
+    <motion.button
       type="button"
+      // `layout` は付けない。並びが変わるたびに小窓が動き続けることになり、
+      // 押そうとした瞬間に的が逃げる。一覧は「押して開く」ための画面なので、
+      // 見栄えより狙いやすさを優先する
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, scale: 0.97 }}
+      transition={{ duration: 0.18, ease: 'easeOut' }}
       data-testid="session-tile"
       data-card-id={session.card_id}
       data-status={session.status.kind}
@@ -53,28 +68,38 @@ export function SessionTile({ cardId }: Props) {
         event.stopPropagation()
         navigate(sessionPath(session.card_id))
       }}
-      className={`flex w-64 flex-col gap-2 rounded-lg border p-3 text-left transition-colors ${
+      className={`bg-card flex w-64 flex-col gap-2 rounded-xl border p-3 text-left shadow-sm transition-colors ${
         attention
           ? 'border-amber-500/70 bg-amber-500/5'
-          : 'border-input hover:border-primary/60'
+          : 'border-border hover:border-primary/60'
       }`}
     >
       <div className="flex items-center gap-2">
-        <span
-          data-testid="status-dot"
-          aria-hidden
-          className={`size-2.5 shrink-0 rounded-full ${statusTone(session.status)}`}
-        />
+        <span className="relative flex size-2.5 shrink-0">
+          {/* 人の対処を待っている間だけ脈打たせる。放っておくと止まったままになる状態 */}
+          {attention && (
+            <span
+              aria-hidden
+              className={`absolute inline-flex size-full animate-ping rounded-full opacity-60 ${statusTone(session.status)}`}
+            />
+          )}
+          <span
+            data-testid="status-dot"
+            aria-hidden
+            className={`relative inline-flex size-2.5 rounded-full transition-colors ${statusTone(session.status)}`}
+          />
+        </span>
         <span className="text-sm font-medium">
           {statusLabel(session.status)}
         </span>
         {session.subagent_active > 0 && (
-          <span
+          <Badge
             data-testid="subagent-badge"
-            className="ml-auto rounded-full bg-violet-500/15 px-2 py-0.5 text-xs text-violet-300"
+            variant="secondary"
+            className="ml-auto text-violet-300"
           >
             サブエージェント {session.subagent_active}
-          </span>
+          </Badge>
         )}
       </div>
 
@@ -97,6 +122,6 @@ export function SessionTile({ cardId }: Props) {
           {session.last_assistant_message}
         </p>
       )}
-    </button>
+    </motion.button>
   )
 }

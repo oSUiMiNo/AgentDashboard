@@ -17,6 +17,7 @@
 
 import { useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
+import { Textarea } from '@/components/ui/textarea'
 import { isEnded, type SessionStatus } from '@/lib/protocol'
 import type { CardId } from '@/lib/protocol'
 import { useWsStore } from '@/stores/ws'
@@ -50,7 +51,7 @@ export function Composer({ cardId, status }: Props) {
         submit()
       }}
     >
-      <textarea
+      <Textarea
         ref={inputRef}
         data-testid="composer-input"
         value={text}
@@ -70,7 +71,7 @@ export function Composer({ cardId, status }: Props) {
           event.preventDefault()
           submit()
         }}
-        className="border-input bg-background placeholder:text-muted-foreground focus-visible:border-primary/60 min-h-0 flex-1 resize-none rounded-md border px-3 py-2 text-sm outline-none disabled:opacity-50"
+        className="min-h-0 flex-1 resize-none"
       />
       <Button type="submit" size="sm" disabled={ended}>
         送信
