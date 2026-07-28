@@ -21,7 +21,11 @@ pub const FLOOD_END_MARKER: &str = "[fake-claude] flood-end";
 /// 終了時のマーカー。
 pub const BYE_MARKER: &str = "[fake-claude] bye";
 /// `flood` が繰り返し吐くパターン。ASCII のみで、端末の制御シーケンスを含まない。
-pub const FLOOD_PATTERN: &[u8] = b"0123456789abcdef";
+///
+/// 64バイトごとに改行を入れているのは、実際の CLI 出力に近づけるため。改行の無い
+/// 数MBの1行はブラウザ側の折り返し処理だけが重くなり、測りたいもの（配信とフロー制御）が
+/// 見えにくくなる。
+pub const FLOOD_PATTERN: &[u8] = b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abc\n";
 
 /// `fake-claude` 実行ファイルの場所を、いま動いているテストバイナリから割り出す。
 ///

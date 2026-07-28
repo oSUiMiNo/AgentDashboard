@@ -35,7 +35,10 @@ tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws"] }
 # axum の WebSocket を送信側・受信側へ分割し、送信をタスク1つに集約するために使う
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
-rust-embed = "8"
+# debug-embed を付けているのは、デバッグビルドでも「コンパイル時に埋め込む」ため。
+# 既定ではデバッグ時だけ実行時にフォルダを読みに行く挙動になり、cargo をコンテナで
+# 動かしている本PJTではコンテナ内の絶対パスを探して失敗する（ホストには存在しない）。
+rust-embed = { version = "8", features = ["debug-embed"] }
 portable-pty = "0.9"
 notify = "8"
 tracing = "0.1"

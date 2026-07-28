@@ -14,7 +14,7 @@ DEBUG_BIN := server/target/debug/agentdashboard
 .DEFAULT_GOAL := help
 
 .PHONY: help setup setup-rust setup-web dev dev-web dev-server \
-        test test-rust test-web e2e \
+        test test-rust test-web e2e build-debug \
         lint lint-rust lint-web fmt \
         build build-web build-server ci fixtures clean
 
@@ -35,9 +35,13 @@ setup-web: ## web の依存と Playwright の chromium を入れる
 
 # --- 開発 ---------------------------------------------------------------------
 
-dev: dev-web ## 開発サーバを起動する（現状は web のみ。core のサーバ実装はフェーズ1）
+dev: ## 開発時の進め方を表示する（core と vite は別々の端末で動かす）
+	@echo "端末を2つ使う："
+	@echo "  1) make dev-server  … core を 127.0.0.1:8787 で起動する"
+	@echo "  2) make dev-web     … Vite 開発サーバ。/ws と /api は core へ中継される"
+	@echo "ブラウザは Vite 側（既定 5173）を開くと HMR が効く。"
 
-dev-web: ## Vite 開発サーバ
+dev-web: ## Vite 開発サーバ（/ws と /api は core へ中継）
 	cd web && npm run dev
 
 dev-server: ## core をデバッグビルドしてホストで実行する
@@ -54,8 +58,14 @@ test-rust: ## Rust テスト（コンテナ内・nextest でテスト毎にプ�
 test-web: ## web の単体テスト（Vitest）
 	cd web && npm run test
 
-e2e: ## E2E テスト（Playwright / chromium）
+# E2E は実際の core サーバに繋いで動かす（web/playwright.config.ts）。
+# web → core の順にビルドするのは、core が web/dist をコンパイル時に取り込むため。
+# 順序を崩すと古い画面が配信され、直したはずの不具合が再現し続ける。
+e2e: build-web build-debug ## E2E テスト（Playwright / chromium・実サーバに接続）
 	cd web && npm run e2e
+
+build-debug: ## core をデバッグビルドする（E2E が使うバイナリ）
+	$(CARGO) build
 
 # --- 静的検査 -----------------------------------------------------------------
 
