@@ -103,6 +103,13 @@ impl TestServer {
         Self::build(config, program, false).await
     }
 
+    /// 起動する CLI を明示したうえで、パーサも立ち上げる（実CLI×構造化ビュー用）。
+    pub async fn start_with_parser_and_program(config: Config, program: String) -> Self {
+        let server = Self::build(config, program, true).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        server
+    }
+
     async fn build(mut config: Config, program: String, with_parser: bool) -> Self {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await

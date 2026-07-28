@@ -16,6 +16,7 @@
 //!   dump          自分の起動引数と環境変数を1行ずつ書き出す
 //!   flood <N>     N バイトをまとめて吐き出す（フロー制御と大量出力の検証用）
 //!   hook <名前> [JSON]  注入された settings のフックを実際に起動する
+//!   jsonl <元ファイル> [行数]  フックが運ぶトランスクリプトへ JSONL を追記する
 //!   crash <N>     終了コード N で自ら異常終了する
 //!   exit          終了する
 //!   その他        受け取った行を返す
@@ -24,12 +25,15 @@ use std::io::{BufRead as _, Write};
 use std::process::{Command, Stdio};
 use testkit::fake_claude::{
     ARGV_PREFIX, BYE_MARKER, CRASH_MARKER, DUMP_END_MARKER, ENV_PREFIX, FLOOD_END_MARKER,
-    FLOOD_PATTERN, HOOK_FAILED_PREFIX, HOOK_SENT_PREFIX, READY_MARKER, RECEIVED_PREFIX,
+    FLOOD_PATTERN, HOOK_FAILED_PREFIX, HOOK_SENT_PREFIX, JSONL_APPENDED_PREFIX,
+    JSONL_FAILED_PREFIX, READY_MARKER, RECEIVED_PREFIX,
 };
 
 /// 起動時に受け取った、フック実行に必要な情報。
 struct Injected {
     session_id: String,
+    /// `--transcript` で渡された書き出し先。フックが運ぶ値もこれになる
+    transcript: Option<String>,
     settings: Option<serde_json::Value>,
 }
 
@@ -39,6 +43,7 @@ fn main() {
     let mut echo_only = false;
     let mut session_id = String::new();
     let mut settings_path: Option<String> = None;
+    let mut transcript_path: Option<String> = None;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -63,12 +68,19 @@ fn main() {
                 settings_path = args.get(index + 1).cloned();
                 index += 2;
             }
+            // 本物には無い。フックが運ぶ transcript_path を実在するパスにして、
+            // `jsonl` 命令で中身を書けるようにするためのテスト用の入口
+            "--transcript" => {
+                transcript_path = args.get(index + 1).cloned();
+                index += 2;
+            }
             _ => index += 1,
         }
     }
 
     let injected = Injected {
         session_id,
+        transcript: transcript_path,
         settings: settings_path
             .as_deref()
             .and_then(|path| std::fs::read_to_string(path).ok())
@@ -106,6 +118,11 @@ fn main() {
             continue;
         }
 
+        if let Some(rest) = line.strip_prefix("jsonl ") {
+            append_jsonl(&mut out, &injected, rest.trim());
+            continue;
+        }
+
         if let Some(code) = line.strip_prefix("crash ") {
             let _ = writeln!(out, "{CRASH_MARKER}");
             let _ = out.flush();
@@ -118,6 +135,100 @@ fn main() {
             let _ = writeln!(out, "{RECEIVED_PREFIX}{line}");
         }
         let _ = out.flush();
+    }
+}
+
+/// トランスクリプトへ JSONL を追記する（`jsonl <元ファイル> [行数]`）。
+///
+/// 本物の claude が書くものをテストから再現するための入口。行数を指定できるのは、
+/// **書きかけの状態**を作れるようにするため。増分読み取りと末尾追従は「途中まで
+/// 書かれている」状況でこそ検証の値がある。
+///
+/// 書き出し先はフックが運ぶ `transcript_path` と同じ場所（[`transcript_path`]）。
+fn append_jsonl(out: &mut impl Write, injected: &Injected, argument: &str) {
+    let mut parts = argument.splitn(2, char::is_whitespace);
+    let source = parts.next().unwrap_or_default();
+    let take = parts
+        .next()
+        .and_then(|value| value.trim().parse::<usize>().ok());
+
+    // 書き出し先は、フックが運ぶ値と必ず同じにする。ずれると「フックは届くのに
+    // 履歴が出ない」という追いにくい状態になる
+    let target = transcript_path(injected);
+    let target = target.as_str();
+    let Ok(text) = std::fs::read_to_string(source) else {
+        let _ = writeln!(out, "{JSONL_FAILED_PREFIX}元ファイルを読めません: {source}");
+        let _ = out.flush();
+        return;
+    };
+
+    // 既に書いた行数を数え、その続きから追記する。同じ行を二度書かない
+    let written = std::fs::read_to_string(target)
+        .map(|current| current.lines().count())
+        .unwrap_or(0);
+    let lines: Vec<&str> = text.lines().skip(written).collect();
+    let lines = match take {
+        Some(count) => &lines[..count.min(lines.len())],
+        None => &lines[..],
+    };
+
+    if let Some(parent) = std::path::Path::new(target).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(target);
+    let Ok(mut file) = file else {
+        let _ = writeln!(out, "{JSONL_FAILED_PREFIX}書き込めません: {target}");
+        let _ = out.flush();
+        return;
+    };
+    for line in lines {
+        let _ = writeln!(file, "{line}");
+    }
+    let _ = file.flush();
+
+    // サブエージェントのファイル群も一緒に置く。本物は `<セッションID>/subagents/` に
+    // 別ファイルで書くので、本体だけ写しても子ツリーがマウントされない
+    copy_session_dir(source, target);
+
+    let _ = writeln!(out, "{JSONL_APPENDED_PREFIX}{}", lines.len());
+    let _ = out.flush();
+}
+
+/// `<元>.jsonl` の隣にある `<元>/` を、`<先>.jsonl` の隣へ写す。
+fn copy_session_dir(source: &str, target: &str) {
+    let source = std::path::Path::new(source);
+    let target = std::path::Path::new(target);
+    let (Some(from), Some(to)) = (sibling_dir(source), sibling_dir(target)) else {
+        return;
+    };
+    if !from.is_dir() || to.exists() {
+        return;
+    }
+    copy_tree(&from, &to);
+}
+
+fn sibling_dir(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    Some(path.parent()?.join(path.file_stem()?))
+}
+
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    if std::fs::create_dir_all(to).is_err() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(from) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let source = entry.path();
+        let target = to.join(entry.file_name());
+        if source.is_dir() {
+            copy_tree(&source, &target);
+        } else {
+            let _ = std::fs::copy(&source, &target);
+        }
     }
 }
 
@@ -203,7 +314,7 @@ fn hook(out: &mut impl Write, injected: &Injected, rest: &str) {
 fn build_payload(injected: &Injected, event: &str, extra: &str) -> String {
     let mut payload = serde_json::json!({
         "session_id": injected.session_id,
-        "transcript_path": transcript_path(&injected.session_id),
+        "transcript_path": transcript_path(injected),
         "hook_event_name": event,
     });
 
@@ -218,14 +329,18 @@ fn build_payload(injected: &Injected, event: &str, extra: &str) -> String {
     payload.to_string()
 }
 
-/// 本物が使う場所に似せた、存在しなくてよいパス。
+/// フックが運ぶトランスクリプトの場所。
 ///
-/// フェーズ2の時点では「フックがこの値を運んでくること」だけが検証対象で、
-/// 中身を読むのはフェーズ3のパーサの仕事。
-fn transcript_path(session_id: &str) -> String {
+/// `--transcript` を渡されていればそれを使う（`jsonl` 命令で中身を書ける）。
+/// 渡されていなければ本物に似せた、存在しなくてよいパスを返す。**存在しないことは
+/// 異常ではない**（JSONL は結果整合のチャネルで、フックより遅れて現れる）。
+fn transcript_path(injected: &Injected) -> String {
+    if let Some(path) = &injected.transcript {
+        return path.clone();
+    }
     std::env::temp_dir()
         .join("fake-claude")
-        .join(format!("{session_id}.jsonl"))
+        .join(format!("{}.jsonl", injected.session_id))
         .to_string_lossy()
         .into_owned()
 }

@@ -422,3 +422,45 @@ fn 表示対象外のレコードが混ざっていても孤児を作らない()
         assert_eq!(parsed.count("unknown"), 0, "{name} で未知ノードが出た");
     }
 }
+
+#[test]
+fn 多段ネストのサブエージェントが親子で繋がる() {
+    // テスト計画フェーズ3「spawnDepth 多段ネストの再現」。
+    //
+    // 実データで確認できたこと: 深さ2の meta は `toolUseId` と `parentAgentId` の
+    // **両方**を持つ。`toolUseId` は親エージェントのファイルの中のツールコールを指すので、
+    // ツールコールの索引をファイルをまたいで持っていないと解けない。
+    let parsed = Parsed::of(fixture("v2.1.220/nested-subagent/session.jsonl"));
+
+    let mut subagents: Vec<&protocol::TreeNode> = parsed
+        .nodes
+        .values()
+        .filter(|node| matches!(node.node, Node::Subagent { .. }))
+        .collect();
+    subagents.sort_by_key(|node| match node.node {
+        Node::Subagent { spawn_depth, .. } => spawn_depth,
+        _ => 0,
+    });
+    assert_eq!(subagents.len(), 2, "深さ1と深さ2のサブエージェントが揃う");
+
+    let depths: Vec<u32> = subagents
+        .iter()
+        .map(|node| match node.node {
+            Node::Subagent { spawn_depth, .. } => spawn_depth,
+            _ => 0,
+        })
+        .collect();
+    assert_eq!(depths, vec![1, 2]);
+
+    // 深さ2は、深さ1のエージェントの中のツールコールにぶら下がる
+    let inner_parent = subagents[1].parent.as_ref().expect("マウント先がある");
+    let parent_node = parsed.nodes.get(&inner_parent.0).expect("親が発行済み");
+    assert!(
+        matches!(parent_node.node, Node::ToolCall { .. }),
+        "深さ2の親がツールコールではありません: {:?}",
+        parent_node.node
+    );
+
+    // 孤児を作らずに繋がっていること
+    assert_eq!(parsed.orphans(), 0);
+}

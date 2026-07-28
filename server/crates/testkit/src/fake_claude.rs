@@ -25,6 +25,13 @@ pub const FLOOD_END_MARKER: &str = "[fake-claude] flood-end";
 pub const HOOK_SENT_PREFIX: &str = "[fake-claude] hook-sent: ";
 /// `hook` に失敗したことを示す行頭（設定が読めない・イベントが無い等）。
 pub const HOOK_FAILED_PREFIX: &str = "[fake-claude] hook-failed: ";
+/// `jsonl` がトランスクリプトへ追記し終えたことを示す行頭。
+///
+/// 追記が済んでから出すので、テストはこれを待てば「パーサが読める状態になった」あとの
+/// 検証へ進める。マーカーが無いと、書き終わる前に画面を見に行ってしまう。
+pub const JSONL_APPENDED_PREFIX: &str = "[fake-claude] jsonl-appended: ";
+/// `jsonl` に失敗したことを示す行頭。
+pub const JSONL_FAILED_PREFIX: &str = "[fake-claude] jsonl-failed: ";
 /// `crash` で自ら異常終了する直前のマーカー。
 pub const CRASH_MARKER: &str = "[fake-claude] crash";
 /// 終了時のマーカー。

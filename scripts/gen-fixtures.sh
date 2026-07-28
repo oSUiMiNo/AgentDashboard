@@ -76,7 +76,7 @@ run_session() {
                 --session-id "${session_id}" \
                 --model "${MODEL}" \
                 --permission-mode acceptEdits \
-                --allowed-tools Read Edit Write Bash Glob Grep Task \
+                --allowed-tools Read Edit Write Bash Glob Grep Task Agent \
                 -p "${prompt}" \
             > "${WORK_DIR}/${label}.stdout" 2>&1
     ) || {
@@ -113,11 +113,29 @@ collect() {
     echo "採取しました: ${dest}"
 }
 
-run_session "basic-tools" \
+# 引数でラベルを絞れる。既に採ってあるものを採り直すと、ゴールデンスナップショットの
+# 期待値がずれて無関係なテストが落ちるため、追加採取のときは絞って呼ぶ。
+should_run() {
+    [[ $# -eq 0 ]] && return 0
+    local wanted="$1"
+    shift
+    for label in "$@"; do
+        [[ "${label}" == "${wanted}" ]] && return 0
+    done
+    return 1
+}
+
+should_run "basic-tools" "$@" && run_session "basic-tools" \
     'notes.md を Read で読み、1つ目の TODO 行を Edit ツールで "DONE:" に書き換えてください。次に Bash で ls -la を実行し、最後に summary.txt を Write で作成して作業内容を1行で書いてください。'
 
-run_session "subagent" \
+should_run "subagent" "$@" && run_session "subagent" \
     'Task ツールでサブエージェントを1つ起動し、このディレクトリにある .py ファイルの関数一覧を調べさせてください。サブエージェントの報告を受け取ったら、その内容を1行で要約して答えてください。'
+
+# 多段ネスト（spawnDepth 2以上）を採る。深さ1の meta は toolUseId で親のツールコールに
+# 繋がるが、深さ2以上は parentAgentId で親エージェントに繋がる。鍵が変わるので、
+# 実物が無いとマウント処理を検証できない。
+should_run "nested-subagent" "$@" && run_session "nested-subagent" \
+    'サブエージェントを1つ起動してください。そのサブエージェントには「さらに自分でサブエージェントをもう1つ起動して、このディレクトリの notes.md を読ませ、その結果を報告させる」よう指示してください。最終的な報告を1行で要約して答えてください。'
 
 # --- 採取結果の点検 ---------------------------------------------------------------
 echo
@@ -136,6 +154,8 @@ check "ツール結果"          'toolUseResult'
 check "Edit の差分"         'old_string'
 check "sidechain"           '"isSidechain":true'
 check "サブエージェント"    'subagents'
+check "多段ネスト"          '"spawnDepth":2'
+check "親エージェント参照"  'parentAgentId'
 
 echo
 echo "=== 機微情報の除去 ==="

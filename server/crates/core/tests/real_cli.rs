@@ -455,3 +455,92 @@ async fn 終了はフック経路とプロセス終了経路の両方で検知�
         server.manager.archive(card).expect("片付けられること");
     }
 }
+
+#[tokio::test]
+#[ignore = "本物の claude を起動し、アカウントのクォータを消費する（make test-cli）"]
+async fn サブエージェントの稼働と子ツリーのマウントを検知できる() {
+    // テスト計画フェーズ4「サブエージェント」。バッジのカウンタ（フック由来）と
+    // 構造化ビューのマウント（JSONL 由来）は別系統なので、両方を1本で通して確かめる。
+    let dir = WorkDir::new("subagent");
+    let state_dir = dir.path().join("state");
+    let config = Config {
+        state_dir: Some(state_dir),
+        ..Config::default()
+    };
+    // 権限確認で止まらないよう、編集を許すモードで起動する
+    let wrapper = claude_wrapper(&dir, &["--permission-mode", "acceptEdits"]);
+    let server = common::TestServer::start_with_parser_and_program(
+        config,
+        wrapper.to_string_lossy().into_owned(),
+    )
+    .await;
+
+    std::fs::write(
+        dir.path().join("notes.md"),
+        "# メモ\n- [ ] TODO: 集計処理のテストを書く\n",
+    )
+    .expect("題材を置けること");
+
+    let session = server
+        .manager
+        .spawn(&dir.as_str())
+        .expect("セッションを起動できること");
+    let mut watcher = common::Watcher::attach(&session);
+    accept_trust_prompt_if_any(&session, &mut watcher).await;
+
+    // サブエージェントを1つ起動させる
+    common::send_line(
+        &session,
+        "サブエージェントを1つ起動して、このディレクトリの notes.md の中身を報告させてください。",
+    );
+
+    // バッジのカウンタはフック（SubagentStart / SubagentStop）由来
+    let deadline = Instant::now() + CLI_TIMEOUT;
+    let mut saw_subagent = false;
+    while Instant::now() < deadline {
+        if session.meta().subagent_active > 0 {
+            saw_subagent = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        saw_subagent,
+        "SubagentStart を受け取らず、稼働中のバッジが立ちませんでした"
+    );
+
+    // 子ツリーのマウントは JSONL 由来。パーサが subagents/ を見つけて繋ぐ
+    let deadline = Instant::now() + CLI_TIMEOUT;
+    let mut mounted = None;
+    while Instant::now() < deadline {
+        let nodes = session.transcript_snapshot();
+        if let Some(node) = nodes
+            .iter()
+            .find(|node| matches!(node.node, protocol::Node::Subagent { .. }))
+        {
+            mounted = Some(node.clone());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let mounted = mounted.expect("サブエージェントのノードが構造化ビューに現れること");
+
+    // 親のツールコールにぶら下がっていること（＝掘っていける形になっていること）
+    let parent = mounted.parent.expect("マウント先がある");
+    let nodes = session.transcript_snapshot();
+    let parent_node = nodes
+        .iter()
+        .find(|node| node.id == parent)
+        .expect("親も届いている");
+    assert!(
+        matches!(parent_node.node, protocol::Node::ToolCall { .. }),
+        "サブエージェントの親がツールコールではありません: {:?}",
+        parent_node.node
+    );
+
+    session.kill();
+    server
+        .manager
+        .archive(session.card_id)
+        .expect("片付けられること");
+}
