@@ -7,6 +7,10 @@
 //! 単体テストはパーサの中身しか見ないので、プロセスの起動・IPC・再開位置の受け渡しは
 //! この層でしか確かめられない。
 
+// テスト名は日本語で書いている。英大文字（JSONL / REST 等）が混ざると snake_case 判定に
+// 引っかかるだけで実害はないため、このファイルに限って許可する。
+#![allow(non_snake_case)]
+
 mod common;
 
 use agentdashboard_core::config::Config;
