@@ -20,7 +20,7 @@
 use crate::{
     config::Config,
     parser::ParserSupervisor,
-    session::{Session, SessionManager},
+    session::{Session, SessionManager, input},
 };
 use axum::{
     Json,
@@ -407,14 +407,21 @@ async fn handle_request(
             }
         }
 
-        // 指示送信はフェーズ4。受け取ったこと自体は伝えて、無反応にはしない
-        ClientMessage::SendInput { card_id, .. } => {
-            send_error(
-                outbound,
-                Some(card_id),
-                "この操作はまだ実装されていません（指示送信はフェーズ4）".into(),
-            )
-            .await;
+        // Composer からの指示送信（設計§6）。実体は PTY への書き込みなので、
+        // スラッシュコマンドも自然文も同じ経路を通る
+        ClientMessage::SendInput { card_id, text } => {
+            let Some(session) = state.manager.get(card_id) else {
+                send_error(outbound, Some(card_id), "セッションが見つかりません".into()).await;
+                return;
+            };
+            if let Err(err) = session.write_input(&input::encode_input(&text)) {
+                send_error(
+                    outbound,
+                    Some(card_id),
+                    format!("指示を送れませんでした: {err:#}"),
+                )
+                .await;
+            }
         }
     }
 }

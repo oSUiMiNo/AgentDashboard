@@ -28,7 +28,7 @@ mod common;
 
 use agentdashboard_core::{
     config::Config,
-    session::{Session, hooks_settings, lifecycle},
+    session::{Session, hooks_settings, input, lifecycle},
 };
 use protocol::SessionStatus;
 use std::{
@@ -454,6 +454,84 @@ async fn 終了はフック経路とプロセス終了経路の両方で検知�
     for card in [by_command.card_id, by_dashboard.card_id] {
         server.manager.archive(card).expect("片付けられること");
     }
+}
+
+// ---------------------------------------------------------------------------
+// 6. Composer からの指示送信（単一行 / 複数行 / スラッシュコマンド）
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "本物の claude を起動し、アカウントのクォータを消費する（make test-cli）"]
+async fn 指示送信は複数行もスラッシュコマンドも本物のtuiへ正しく届く() {
+    // テスト計画フェーズ4「指示送信」。擬似 claude は TUI ではないので、bracketed paste が
+    // 本当に「1つの指示」として解釈されるかは本物でしか確かめられない。包まずに送ると
+    // 1行目だけが送信され、残りが次の指示として順に実行される。
+    let dir = WorkDir::new("send-input");
+    let state_dir = dir.path().join("state");
+    let config = Config {
+        state_dir: Some(state_dir),
+        ..Config::default()
+    };
+    // 利用者のグローバル設定のフックを外す。入れたままだと、そちらが起動するスキルの
+    // 権限確認がこちらの送った文字を吸ってしまう（PJTガイドライン）
+    let wrapper = claude_wrapper(&dir, &["--setting-sources", "project,local"]);
+    let server = common::TestServer::start_with_parser_and_program(
+        config,
+        wrapper.to_string_lossy().into_owned(),
+    )
+    .await;
+
+    let session = server
+        .manager
+        .spawn(&dir.as_str())
+        .expect("セッションを起動できること");
+    let mut watcher = common::Watcher::attach(&session);
+    accept_trust_prompt_if_any(&session, &mut watcher).await;
+    wait_for_status(&session, SessionStatus::WaitingInput).await;
+
+    // --- 複数行（bracketed paste で包む経路）--------------------------------
+    const FIRST: &str = "アルファ";
+    const SECOND: &str = "ブラボー";
+    session
+        .write_input(&input::encode_input(&format!(
+            "次の2語をそのまま順に書き出すだけで答えて。説明は不要。\n{FIRST}\n{SECOND}"
+        )))
+        .expect("端末へ書き込めること");
+
+    // 履歴に載った「ユーザの発言」が1件で、両方の語を含んでいれば、
+    // 2行が1つの指示として届いたことになる
+    let deadline = Instant::now() + CLI_TIMEOUT;
+    let mut prompt = None;
+    while Instant::now() < deadline {
+        let nodes = session.transcript_snapshot();
+        if let Some(text) = nodes.iter().find_map(|node| match &node.node {
+            protocol::Node::UserMessage { text } if text.contains(FIRST) => Some(text.clone()),
+            _ => None,
+        }) {
+            prompt = Some(text);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let prompt = prompt.expect("ユーザの発言が構造化ビューに現れること");
+    println!("届いた指示: {prompt:?}");
+    assert!(
+        prompt.contains(SECOND),
+        "2行目が同じ指示に含まれていません（bracketed paste で包めていない）: {prompt:?}"
+    );
+
+    // --- 単一行のスラッシュコマンド（CR で確定する経路）---------------------
+    // `/exit` を選んだのは、成否が状態としてはっきり出るから（追加の課金も無い）
+    wait_for_status(&session, SessionStatus::WaitingInput).await;
+    session
+        .write_input(&input::encode_input("/exit"))
+        .expect("端末へ書き込めること");
+    wait_for_status(&session, SessionStatus::Ended { ok: true }).await;
+
+    server
+        .manager
+        .archive(session.card_id)
+        .expect("片付けられること");
 }
 
 #[tokio::test]

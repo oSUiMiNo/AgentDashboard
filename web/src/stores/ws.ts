@@ -59,6 +59,8 @@ interface WsState {
   resize: (cardId: CardId, cols: number, rows: number) => void
   setFlow: (cardId: CardId, state: FlowState) => void
   sendPtyInput: (cardId: CardId, data: Uint8Array) => void
+  /** Composer からの指示送信。改行の扱いはサーバ側で決まる（設計§6） */
+  sendInput: (cardId: CardId, text: string) => void
   /** ターミナルの購読を始める。戻り値を呼ぶと購読を止める */
   subscribeTerminal: (
     cardId: CardId,
@@ -159,6 +161,7 @@ export const useWsStore = create<WsState>((set) => ({
   resize: (cardId, cols, rows) =>
     send({ t: 'resize', card_id: cardId, cols, rows }),
   setFlow: (cardId, state) => send({ t: 'pty_flow', card_id: cardId, state }),
+  sendInput: (cardId, text) => send({ t: 'send_input', card_id: cardId, text }),
 
   sendPtyInput: (cardId, data) => {
     if (socket?.readyState !== WebSocket.OPEN) {

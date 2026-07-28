@@ -13,11 +13,13 @@
  * 隠している間はターミナルの寸法が 0 になるが、`TerminalPane` の見張りは
  * 「大きさ 0 のときは採寸しない」ようにしてあるので、再表示で自動的に測り直される。
  *
- * 指示送信の Composer はフェーズ4で足す。
+ * 指示を送る [`Composer`] はタブの**外側**に常設する。構造化ビューを見ながら指示を出す、
+ * というのが要件の使い方なので、送るたびにターミナルへ切り替えさせない。
  */
 
 import { useState } from 'react'
 import { Button } from '@/components/ui/button'
+import { Composer } from '@/components/Composer/Composer'
 import { TerminalPane } from '@/components/TerminalPane/TerminalPane'
 import { TranscriptTree } from '@/components/TranscriptTree/TranscriptTree'
 import { formatElapsed } from '@/lib/time'
@@ -100,6 +102,8 @@ export function SessionView({ session, now, compact = false }: Props) {
       <div className={`flex min-h-0 flex-1 flex-col ${view === 'terminal' ? '' : 'hidden'}`}>
         <TerminalPane key={session.card_id} cardId={session.card_id} />
       </div>
+
+      <Composer cardId={session.card_id} status={session.status} />
     </section>
   )
 }

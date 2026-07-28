@@ -17,6 +17,7 @@
 //! リングバッファのスナップショット（フレーム種別 `0x03`）を送り直して復帰させる。
 
 pub mod hooks_settings;
+pub mod input;
 pub mod lifecycle;
 pub mod pty;
 
