@@ -24,23 +24,32 @@ import { TerminalPane } from '@/components/TerminalPane/TerminalPane'
 import { TranscriptTree } from '@/components/TranscriptTree/TranscriptTree'
 import { formatElapsed } from '@/lib/time'
 import { isEnded, statusLabel, statusTone } from '@/lib/protocol'
-import type { SessionMeta } from '@/lib/protocol'
+import type { CardId } from '@/lib/protocol'
+import { useNow } from '@/lib/sessions'
+import { useSessionCard } from '@/stores/sessions'
 import { useWsStore } from '@/stores/ws'
 
 type View = 'transcript' | 'terminal'
 
 interface Props {
-  session: SessionMeta
-  now: number
+  cardId: CardId
   /** 横並び表示（グループビュー）で使うときは幅を固定する */
   compact?: boolean
 }
 
-export function SessionView({ session, now, compact = false }: Props) {
+export function SessionView({ cardId, compact = false }: Props) {
   const kill = useWsStore((state) => state.kill)
   const archive = useWsStore((state) => state.archive)
+  // 中身は自分で購読する。横並びのとき、隣のセッションの状態変化で作り直されないため
+  const session = useSessionCard(cardId)
+  const now = useNow()
   // 単独で開いたときは履歴が主役。横並びのときは一望して即操作したいのでターミナル
   const [view, setView] = useState<View>(compact ? 'terminal' : 'transcript')
+
+  if (!session) {
+    // 消えた直後の一瞬。単独表示のときは呼び出し側が「見つかりません」を出す
+    return null
+  }
 
   return (
     <section

@@ -13,16 +13,16 @@
 
 import { useNavigate } from 'react-router'
 import { SessionTile } from '@/components/SessionTile/SessionTile'
-import type { SessionMeta } from '@/lib/protocol'
+import type { CardId } from '@/lib/protocol'
 import { projectPath } from '@/lib/routes'
 
 interface Props {
   project: string
-  sessions: SessionMeta[]
-  now: number
+  /** この箱に入るカードID。中身は小窓が自分で購読する（設計§10） */
+  cards: CardId[]
 }
 
-export function ProjectGroup({ project, sessions, now }: Props) {
+export function ProjectGroup({ project, cards }: Props) {
   const navigate = useNavigate()
 
   return (
@@ -37,13 +37,13 @@ export function ProjectGroup({ project, sessions, now }: Props) {
           {project}
         </h2>
         <span className="text-muted-foreground text-xs">
-          {sessions.length}セッション
+          {cards.length}セッション
         </span>
       </header>
 
       <div className="flex flex-wrap gap-3">
-        {sessions.map((session) => (
-          <SessionTile key={session.card_id} session={session} now={now} />
+        {cards.map((cardId) => (
+          <SessionTile key={cardId} cardId={cardId} />
         ))}
       </div>
     </section>

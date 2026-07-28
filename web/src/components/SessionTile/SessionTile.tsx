@@ -6,26 +6,34 @@
  *
  * 経過時間を必ず並べるのは、「作業中」の表示のままハングしているケースを見逃さないため。
  * 状態ラベルだけでは、動いているのか固まっているのかが区別できない。
+ *
+ * # 自分のカードだけを購読する
+ *
+ * カードIDだけを受け取り、中身はストアから直接購読する（設計§10）。親から中身を配ると、
+ * 1枚の状態が変わっただけで親が作り直され、他の小窓まで再レンダリングの判定に入る。
  */
 
 import { useNavigate } from 'react-router'
 import { formatElapsed } from '@/lib/time'
-import {
-  needsAttention,
-  statusLabel,
-  statusTone,
-  type SessionMeta,
-} from '@/lib/protocol'
+import { needsAttention, statusLabel, statusTone } from '@/lib/protocol'
+import type { CardId } from '@/lib/protocol'
 import { sessionPath } from '@/lib/routes'
+import { useNow } from '@/lib/sessions'
+import { useSessionCard } from '@/stores/sessions'
 
 interface Props {
-  session: SessionMeta
-  /** 親から配られる現在時刻。小窓ごとにタイマーを持たせないための値 */
-  now: number
+  cardId: CardId
 }
 
-export function SessionTile({ session, now }: Props) {
+export function SessionTile({ cardId }: Props) {
   const navigate = useNavigate()
+  const session = useSessionCard(cardId)
+  const now = useNow()
+
+  if (!session) {
+    // 消えた直後の一瞬。構造の更新が届けば親から外れる
+    return null
+  }
   const attention = needsAttention(session.status)
 
   return (

@@ -6,7 +6,7 @@
  * | URL | 画面 |
  * |---|---|
  * | `/` | 一覧（司令塔ビュー）。プロジェクト単位にまとめた小窓 |
- * | `/p/:projectId` | プロジェクト内の全セッション（中身はフェーズ4） |
+ * | `/p/:projectId` | プロジェクト内の全セッションを横並び |
  * | `/s/:cardId` | セッション専用画面 |
  *
  * WebSocket の接続はここで1度だけ張る。画面を移っても繋ぎ直さないよう、ルーティングの
@@ -21,7 +21,7 @@ import { SessionView } from '@/components/SessionView/SessionView'
 import { TileGrid } from '@/components/TileGrid/TileGrid'
 import { SpawnForm } from '@/components/SpawnForm/SpawnForm'
 import { HOME } from '@/lib/routes'
-import { useNow } from '@/lib/sessions'
+import { useSessionCard } from '@/stores/sessions'
 import { useWsStore } from '@/stores/ws'
 
 const CONNECTION_LABEL: Record<string, string> = {
@@ -86,43 +86,32 @@ function Shell() {
 }
 
 function HomePage() {
-  const sessions = useWsStore((state) => state.sessions)
   const status = useWsStore((state) => state.status)
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto">
       <SpawnForm disabled={status !== 'open'} />
-      <TileGrid sessions={sessions} />
+      <TileGrid />
     </div>
   )
 }
 
 function GroupPage() {
   const { projectId } = useParams()
-  const sessions = useWsStore((state) => state.sessions)
   // react-router が符号を戻してくれるので、そのまま作業ディレクトリの絶対パスになる
-  const project = projectId ?? ''
-
-  return (
-    <GroupView
-      project={project}
-      sessions={sessions.filter((session) => session.project === project)}
-    />
-  )
+  return <GroupView project={projectId ?? ''} />
 }
 
 function SessionPage() {
   const { cardId } = useParams()
-  const sessions = useWsStore((state) => state.sessions)
-  const now = useNow()
-  const session = sessions.find((item) => item.card_id === cardId)
+  const session = useSessionCard(cardId ?? '')
 
   if (!session) {
     return (
       <NotFound message="このセッションは見つかりません（削除されたか、まだ届いていません）" />
     )
   }
-  return <SessionView session={session} now={now} />
+  return <SessionView cardId={session.card_id} />
 }
 
 function NotFoundPage() {

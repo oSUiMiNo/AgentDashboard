@@ -1,48 +1,56 @@
 /**
- * 一覧のためのセッションの並べ替えと、経過時間の時計。
+ * 経過時間の表示に使う共有の時計。
  *
- * コンポーネントから切り離してあるのは、並べ方の規則だけを単体テストで確かめられるように
- * するため（画面を描かずに済む）。
+ * 小窓は「最終活動 3分前」を1秒刻みで出す。これは**セッションの状態とは無関係に
+ * 進み続ける**値なので、セッションのストア（[`@/stores/sessions`]）とは別に持つ。
+ *
+ * # タイマーは何個購読されても1本
+ *
+ * 小窓ごとに `setInterval` を持たせると、セッションが増えるほどタイマーが増えて
+ * 更新の時刻が散らばる。かといって一覧の親が1つ持って配ると、毎秒親が作り直され、
+ * 状態が変わっていない小窓まで巻き込んで再レンダリングされる。
+ *
+ * そこで **React の外に1本だけ持ち、各コンポーネントが直接購読する**形にした。
+ * タイマーは1本のまま、毎秒の再描画は「経過時間を出している要素」だけに閉じる。
+ * 購読者が居なくなればタイマーも止まる。
  */
 
-import { useEffect, useState } from 'react'
-import type { SessionMeta } from '@/lib/protocol'
+import { useSyncExternalStore } from 'react'
 
-export interface ProjectGrouping {
-  project: string
-  sessions: SessionMeta[]
-}
+/** 1秒刻み。小窓の経過時間表示の粒度に合わせている。 */
+const TICK_MS = 1000
 
-/**
- * 作業ディレクトリごとにまとめる（要件「同一プロジェクト内の並列セッション」）。
- *
- * 並び順は最初に現れた順で安定させる。一覧は常に見ているものなので、更新のたびに
- * 箱の位置が入れ替わると、目で追えなくなる。
- */
-export function groupByProject(sessions: SessionMeta[]): ProjectGrouping[] {
-  const groups: ProjectGrouping[] = []
-  for (const session of sessions) {
-    const found = groups.find((group) => group.project === session.project)
-    if (found) {
-      found.sessions.push(session)
-    } else {
-      groups.push({ project: session.project, sessions: [session] })
+let now = Date.now()
+const listeners = new Set<() => void>()
+let timer: ReturnType<typeof setInterval> | undefined
+
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener)
+  if (timer === undefined) {
+    // 購読が途切れている間は時刻が止まる（タイマーを畳んでいるため）。再開の瞬間に
+    // 現在時刻へ合わせ直さないと、しばらく古い経過時間が出たままになる
+    now = Date.now()
+    timer = setInterval(() => {
+      now = Date.now()
+      for (const each of listeners) {
+        each()
+      }
+    }, TICK_MS)
+  }
+  return () => {
+    listeners.delete(listener)
+    if (listeners.size === 0 && timer !== undefined) {
+      clearInterval(timer)
+      timer = undefined
     }
   }
-  return groups
 }
 
-/**
- * 1秒ごとに進む現在時刻。
- *
- * 小窓ごとにタイマーを持たせると、セッションが増えるほどタイマーが増えて更新が散らばる。
- * 一覧の親が1つだけ持ち、全部の小窓へ配る形にしている。
- */
+/** 1秒ごとに進む現在時刻。 */
 export function useNow(): number {
-  const [now, setNow] = useState(() => Date.now())
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 1000)
-    return () => window.clearInterval(timer)
-  }, [])
-  return now
+  return useSyncExternalStore(
+    subscribe,
+    () => now,
+    () => now,
+  )
 }

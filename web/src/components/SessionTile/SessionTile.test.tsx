@@ -3,19 +3,37 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { SessionTile } from './SessionTile'
 import type { SessionMeta, SessionStatus } from '@/lib/protocol'
+import { applySessionSnapshot, clearSessions } from '@/stores/sessions'
 
 /**
  * 小窓の表示（テスト計画フェーズ5「小窓」）。
  *
  * 一覧の主役は状態インジケータなので、6つの状態それぞれが区別できること、人の対処が
  * 要る状態が見分けられること、経過時間が出ることを確かめる。
+ *
+ * 小窓は中身をストアから購読するので、描く前にストアへ置く。経過時間は共有の時計
+ * （[`useNow`]）が返す**実時刻**から求まるので、確かめるときは実時刻を起点に置く。
  */
 
 const NOW = 1_700_000_000_000
+const CARD = '11111111-2222-3333-4444-555555555555'
+
+beforeEach(() => {
+  clearSessions()
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+    callback(0)
+    return 0
+  })
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  clearSessions()
+})
 
 function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
   return {
-    card_id: '11111111-2222-3333-4444-555555555555',
+    card_id: CARD,
     project: '/home/example/dev/app',
     claude_session_id: null,
     status: { kind: 'working' },
@@ -28,10 +46,11 @@ function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
 }
 
 function renderTile(session: SessionMeta) {
+  applySessionSnapshot([session])
   return render(
     <MemoryRouter initialEntries={['/']}>
       <Routes>
-        <Route path="/" element={<SessionTile session={session} now={NOW} />} />
+        <Route path="/" element={<SessionTile cardId={session.card_id} />} />
         <Route path="/s/:cardId" element={<p>専用画面</p>} />
       </Routes>
     </MemoryRouter>,
@@ -78,7 +97,7 @@ describe('SessionTile', () => {
   })
 
   it('最終活動からの経過時間が出る', () => {
-    renderTile(meta({ last_activity_at: NOW - 3 * 60_000 }))
+    renderTile(meta({ last_activity_at: Date.now() - 3 * 60_000 }))
     expect(screen.getByTestId('elapsed')).toHaveTextContent('最終活動 3分前')
   })
 

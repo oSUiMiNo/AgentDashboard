@@ -1,12 +1,17 @@
 /**
- * サーバとの WebSocket 接続と、そこから届くセッション一覧の保持（設計§10）。
+ * サーバとの WebSocket 接続（設計§10）。
  *
- * # PTY のバイトを React の状態に入れない
+ * # 届いたものを3つの行き先に振り分ける
  *
- * ターミナルの出力は毎秒100フレーム規模で届く。これを React の状態にすると再レンダリングが
- * 追いつかず、体感速度が一気に落ちる。そこで**バイナリフレームは購読者へ直接渡す**
- * （[`subscribeTerminal`] で登録したコールバック）。React の状態に載せるのは、
- * 更新頻度の低い接続状態とセッション一覧だけ。
+ * | 届くもの | 行き先 |
+ * |---|---|
+ * | PTY のバイナリフレーム | [`subscribeTerminal`] で登録した受け取り口へ直接 |
+ * | セッションの増減と状態 | [`@/stores/sessions`]（rAF でまとめてカード単位に通知） |
+ * | 履歴のノード | [`@/stores/transcript`] |
+ *
+ * どれも **React の状態には載せない**。ターミナルの出力は毎秒100フレーム規模、状態は
+ * ツールコールのたびに届くので、React の再レンダリングを通すと追いつかない。
+ * ここが React の状態として持つのは、接続の様子のように更新頻度が低いものだけ。
  *
  * # 一覧は「REST で全体 → WS で差分」
  *
@@ -26,6 +31,12 @@ import type {
   ServerMessage,
   SessionMeta,
 } from '@/lib/protocol'
+import {
+  applySessionSnapshot,
+  patchSessionStatus,
+  removeSession,
+  upsertSession,
+} from '@/stores/sessions'
 import { appendNodes, resetTranscript } from '@/stores/transcript'
 
 export type ConnectionStatus = 'connecting' | 'open' | 'closed'
@@ -40,8 +51,6 @@ export type TerminalListener = (kind: number, payload: Uint8Array) => void
 
 interface WsState {
   status: ConnectionStatus
-  /** 作成順に並べたセッション一覧 */
-  sessions: SessionMeta[]
   /** サーバから受け取ったフロー制御のしきい値（バイト） */
   flowHigh: number
   flowLow: number
@@ -95,20 +104,8 @@ function send(message: ClientMessage) {
   socket.send(JSON.stringify(message))
 }
 
-/** 作成順を保ったまま1枚を差し替える（無ければ足す）。 */
-function upsert(sessions: SessionMeta[], session: SessionMeta): SessionMeta[] {
-  const index = sessions.findIndex((item) => item.card_id === session.card_id)
-  if (index >= 0) {
-    const next = sessions.slice()
-    next[index] = session
-    return next
-  }
-  return [...sessions, session].sort((a, b) => a.created_at - b.created_at)
-}
-
 export const useWsStore = create<WsState>((set) => ({
   status: 'closed',
-  sessions: [],
   // サーバの hello が届くまでの暫定値（設計§12 の既定値と同じ）
   flowHigh: 256 * 1024,
   flowLow: 32 * 1024,
@@ -198,13 +195,13 @@ type SetState = (partial: Partial<WsState>) => void
  *
  * サーバが居ない状態でも画面は出したいので、失敗しても接続処理は続ける。
  */
-async function loadSnapshot(set: SetState) {
+async function loadSnapshot(_set: SetState) {
   try {
     const response = await fetch('/api/sessions')
     if (!response.ok) {
       return
     }
-    set({ sessions: (await response.json()) as SessionMeta[] })
+    applySessionSnapshot((await response.json()) as SessionMeta[])
   } catch {
     // 接続できないこと自体は WebSocket 側の onerror で画面に出る
   }
@@ -224,30 +221,15 @@ function handleJson(raw: string, set: SetState) {
       set({ flowHigh: message.flow_high, flowLow: message.flow_low })
       break
     case 'session_upsert':
-      set({ sessions: upsert(useWsStore.getState().sessions, message.session) })
+      upsertSession(message.session)
       break
     case 'session_removed':
-      set({
-        sessions: useWsStore
-          .getState()
-          .sessions.filter((item) => item.card_id !== message.card_id),
-      })
+      removeSession(message.card_id)
       break
     case 'status':
       // 状態だけの差分。フックはツールコールのたびに飛んでくるので、
       // カード全体を送り直すのはそれ以外が変わったときに限られる（設計§4）
-      set({
-        sessions: useWsStore.getState().sessions.map((item) =>
-          item.card_id === message.card_id
-            ? {
-                ...item,
-                status: message.status,
-                subagent_active: message.subagent_active,
-                last_activity_at: message.last_activity_at,
-              }
-            : item,
-        ),
-      })
+      patchSessionStatus(message)
       break
     case 'transcript_append':
       appendNodes(message.card_id, message.nodes)

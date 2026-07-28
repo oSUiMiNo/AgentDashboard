@@ -1,47 +1,12 @@
 import { act, renderHook } from '@testing-library/react'
-import { groupByProject, useNow } from './sessions'
-import type { SessionMeta } from './protocol'
+import { useNow } from './sessions'
 
-function session(cardId: string, project: string): SessionMeta {
-  return {
-    card_id: cardId,
-    project,
-    claude_session_id: null,
-    status: { kind: 'working' },
-    subagent_active: 0,
-    last_activity_at: 0,
-    last_assistant_message: null,
-    created_at: 0,
-  }
-}
-
-describe('groupByProject', () => {
-  it('同じ作業ディレクトリのセッションが1つの箱にまとまる', () => {
-    const groups = groupByProject([
-      session('a', '/dev/app'),
-      session('b', '/dev/other'),
-      session('c', '/dev/app'),
-    ])
-
-    expect(groups).toHaveLength(2)
-    expect(groups[0].project).toBe('/dev/app')
-    expect(groups[0].sessions.map((item) => item.card_id)).toEqual(['a', 'c'])
-    expect(groups[1].sessions.map((item) => item.card_id)).toEqual(['b'])
-  })
-
-  it('箱の並びは最初に現れた順で安定する', () => {
-    // 更新のたびに箱の位置が入れ替わると、見ている側が目で追えなくなる
-    const groups = groupByProject([
-      session('a', '/dev/zzz'),
-      session('b', '/dev/aaa'),
-    ])
-    expect(groups.map((group) => group.project)).toEqual(['/dev/zzz', '/dev/aaa'])
-  })
-
-  it('セッションが無ければ箱も無い', () => {
-    expect(groupByProject([])).toEqual([])
-  })
-})
+/**
+ * 経過時間の時計（テスト計画フェーズ5「小窓」の土台）。
+ *
+ * 守るべき約束は2つ。**購読者が何人いてもタイマーは1本**であること
+ * （小窓の数だけタイマーが増えない）と、**誰も見ていなければ止まる**こと。
+ */
 
 describe('useNow', () => {
   beforeEach(() => {
@@ -65,6 +30,22 @@ describe('useNow', () => {
       vi.advanceTimersByTime(2000)
     })
     expect(result.current).toBeGreaterThanOrEqual(first + 3000)
+  })
+
+  it('何人が購読してもタイマーは1本しか動かない', () => {
+    // 小窓ごとにタイマーを持たせると、セッションが増えるほど更新の時刻が散らばる
+    const first = renderHook(() => useNow())
+    const second = renderHook(() => useNow())
+    const third = renderHook(() => useNow())
+
+    expect(vi.getTimerCount()).toBe(1)
+
+    first.unmount()
+    second.unmount()
+    expect(vi.getTimerCount()).toBe(1)
+
+    third.unmount()
+    expect(vi.getTimerCount()).toBe(0)
   })
 
   it('画面から外れたらタイマーを止める', () => {

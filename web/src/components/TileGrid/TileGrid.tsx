@@ -4,21 +4,18 @@
  * セッションをプロジェクト単位にまとめて並べる。同じフォルダで並列に走らせることが
  * 多いので、プロジェクトごとの箱にしておかないと、どれがどれの兄弟なのか分からなくなる。
  *
- * 並べ方の規則と経過時間の時計は [`@/lib/sessions`] にある。
+ * 購読するのは**構造だけ**（どの箱にどのカードが入るか）。状態の変化はここまで
+ * 伝わってこないので、ツールコールのたびに一覧全体が作り直されることはない。
+ * まとまりの組み立てと並びの安定は [`@/stores/sessions`] が持つ。
  */
 
 import { ProjectGroup } from '@/components/ProjectGroup/ProjectGroup'
-import type { SessionMeta } from '@/lib/protocol'
-import { groupByProject, useNow } from '@/lib/sessions'
+import { useProjectGroups } from '@/stores/sessions'
 
-interface Props {
-  sessions: SessionMeta[]
-}
+export function TileGrid() {
+  const groups = useProjectGroups()
 
-export function TileGrid({ sessions }: Props) {
-  const now = useNow()
-
-  if (sessions.length === 0) {
+  if (groups.length === 0) {
     return (
       <p className="text-muted-foreground text-sm">
         セッションはまだありません
@@ -28,12 +25,11 @@ export function TileGrid({ sessions }: Props) {
 
   return (
     <div data-testid="tile-grid" className="flex flex-col gap-4">
-      {groupByProject(sessions).map((group) => (
+      {groups.map((group) => (
         <ProjectGroup
           key={group.project}
           project={group.project}
-          sessions={group.sessions}
-          now={now}
+          cards={group.cards}
         />
       ))}
     </div>

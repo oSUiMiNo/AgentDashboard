@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router'
 import { ProjectGroup } from './ProjectGroup'
 import type { SessionMeta } from '@/lib/protocol'
+import { applySessionSnapshot, clearSessions } from '@/stores/sessions'
 
 /**
  * クリックの作り分け（テスト計画フェーズ5「クリック挙動」の単体側）。
@@ -14,6 +15,19 @@ import type { SessionMeta } from '@/lib/protocol'
 
 const NOW = 1_700_000_000_000
 const PROJECT = '/home/example/dev/app'
+
+beforeEach(() => {
+  clearSessions()
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+    callback(0)
+    return 0
+  })
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  clearSessions()
+})
 
 function meta(cardId: string): SessionMeta {
   return {
@@ -35,6 +49,7 @@ function ShowLocation() {
 }
 
 function renderGroup(sessions: SessionMeta[]) {
+  applySessionSnapshot(sessions)
   return render(
     <MemoryRouter initialEntries={['/']}>
       <ShowLocation />
@@ -42,7 +57,10 @@ function renderGroup(sessions: SessionMeta[]) {
         <Route
           path="/"
           element={
-            <ProjectGroup project={PROJECT} sessions={sessions} now={NOW} />
+            <ProjectGroup
+              project={PROJECT}
+              cards={sessions.map((session) => session.card_id)}
+            />
           }
         />
         <Route path="*" element={null} />

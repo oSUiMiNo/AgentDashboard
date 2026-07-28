@@ -15,22 +15,22 @@
  *
  * 並べたときに知りたいのは「いま何が起きているか」なので、[`SessionView`] の
  * `compact` はターミナルから始まる（その判断はコンポーネント側にある）。
+ *
+ * 購読するのは**この箱に入るカードIDの並び**だけ。中身は [`SessionView`] が自分で
+ * 購読するので、1本の状態が変わっても隣が作り直されない。
  */
 
 import { Link } from 'react-router'
 import { SessionView } from '@/components/SessionView/SessionView'
-import type { SessionMeta } from '@/lib/protocol'
 import { HOME } from '@/lib/routes'
-import { useNow } from '@/lib/sessions'
+import { useProjectCards } from '@/stores/sessions'
 
 interface Props {
   project: string
-  sessions: SessionMeta[]
 }
 
-export function GroupView({ project, sessions }: Props) {
-  // 経過時間の時計は親が1つだけ持つ。セッションごとに持たせると数だけタイマーが増える
-  const now = useNow()
+export function GroupView({ project }: Props) {
+  const cards = useProjectCards(project)
 
   return (
     <section
@@ -43,14 +43,14 @@ export function GroupView({ project, sessions }: Props) {
           {project}
         </h2>
         <span className="text-muted-foreground text-xs">
-          {sessions.length}セッション
+          {cards.length}セッション
         </span>
         <Link to={HOME} className="text-primary ml-auto text-xs underline">
           一覧へ戻る
         </Link>
       </header>
 
-      {sessions.length === 0 ? (
+      {cards.length === 0 ? (
         <p className="text-muted-foreground text-sm">
           このプロジェクトのセッションはありません
         </p>
@@ -59,13 +59,8 @@ export function GroupView({ project, sessions }: Props) {
           data-testid="group-rail"
           className="flex min-h-0 flex-1 gap-4 overflow-x-auto pb-2"
         >
-          {sessions.map((session) => (
-            <SessionView
-              key={session.card_id}
-              session={session}
-              now={now}
-              compact
-            />
+          {cards.map((cardId) => (
+            <SessionView key={cardId} cardId={cardId} compact />
           ))}
         </div>
       )}
