@@ -9,14 +9,17 @@
 
 pub mod config;
 pub mod embed;
+pub mod hook_post;
+pub mod hooks;
 pub mod session;
+pub mod state;
 pub mod ws;
 
 use axum::{
     Router,
     http::{StatusCode, Uri, header},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use config::Config;
 use session::SessionManager;
@@ -24,10 +27,13 @@ use std::{net::Ipv4Addr, sync::Arc};
 
 /// サーバのルーティングを組み立てる。
 ///
-/// `/ws` だけが WebSocket で、残りはすべて同梱した web アセットの配信にまわる。
+/// 口は3つだけ。`/ws` が WebSocket、`/api/*` がブラウザ向けのスナップショット、
+/// `/hook/*` がフックからの通知（設計§7）。残りはすべて同梱した web アセットの配信にまわる。
 pub fn build_router(state: ws::AppState) -> Router {
     Router::new()
         .route("/ws", get(ws::ws_handler))
+        .route("/api/sessions", get(ws::api_sessions))
+        .route("/hook/{token}/{event}", post(hooks::receive))
         .fallback(get(static_handler))
         .with_state(state)
 }
@@ -40,6 +46,9 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     let config = Arc::new(config);
     let manager = SessionManager::new(Arc::clone(&config));
     tracing::info!("起動する CLI: {}", manager.program());
+
+    // 「作業中」の表示のまま実はハングしている、という見落としを防ぐ見張り（設計§5）
+    manager.start_stalled_sweeper();
 
     let state = ws::AppState::new(manager, Arc::clone(&config));
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, config.port)).await?;

@@ -22,6 +22,7 @@ use crate::{
     session::{Session, SessionManager},
 };
 use axum::{
+    Json,
     extract::{
         State,
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -31,7 +32,7 @@ use axum::{
 use bytes::Bytes;
 use futures_util::{SinkExt as _, StreamExt as _};
 use protocol::{
-    CardId,
+    CardId, SessionMeta,
     frame::{self, FrameKind},
     ws::{ClientMessage, FlowState, ServerMessage},
 };
@@ -69,6 +70,14 @@ impl AppState {
 
 pub async fn ws_handler(State(state): State<AppState>, upgrade: WebSocketUpgrade) -> Response {
     upgrade.on_upgrade(move |socket| client_loop(state, socket))
+}
+
+/// `GET /api/sessions` — 現在のカード一覧（設計§4 の初期スナップショット）。
+///
+/// ブラウザは接続時にこれで「いまの全体」を取り、以後は WebSocket の差分だけを見る。
+/// 真実は常にサーバ側にあるので、リロードしても同じ画面へ戻れる（フェーズ4で使う土台）。
+pub async fn api_sessions(State(state): State<AppState>) -> Json<Vec<SessionMeta>> {
+    Json(state.manager.list())
 }
 
 async fn client_loop(state: AppState, socket: WebSocket) {

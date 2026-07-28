@@ -89,16 +89,36 @@ pub fn sanitized_env() -> Vec<(String, String)> {
 /// 起動してからフックが届くまでの間「このPTYがどのセッションなのか」が分からない時間が
 /// できてしまう。自己採番なら起動した瞬間から対応が確定する。
 ///
-/// なお `--settings` によるフック注入（設計§7）はフェーズ2で足す。
-pub fn build_command(program: &str, cwd: &Path, session_id: ClaudeSessionId) -> CommandBuilder {
-    build_command_with_env(program, cwd, session_id, sanitized_env())
+/// `--settings` にはセッション専用のフック設定を渡す（設計§7）。これは利用者の
+/// グローバル設定を**書き換えずに追加で読み込ませる**オプションなので、ダッシュボードが
+/// 起動したセッションにだけフックが効く。
+pub fn build_command(
+    program: &str,
+    cwd: &Path,
+    start: SessionStart,
+    settings: &Path,
+) -> CommandBuilder {
+    build_command_with_env(program, cwd, start, settings, sanitized_env())
+}
+
+/// セッションを「新しく始める」のか「続きから始める」のか（設計§6）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionStart {
+    /// ダッシュボードが採番したIDで新規に始める
+    Fresh(ClaudeSessionId),
+    /// 既存のセッションを引き継ぐ。
+    ///
+    /// このとき**IDは自己採番できない**。CLI 側が新しいIDを振る可能性があるため、
+    /// カードに結びつくIDは最初のフックが運んでくるまで決まらない（設計§6 の張り替え）。
+    Resume(ClaudeSessionId),
 }
 
 /// 環境変数を明示して起動コマンドを組み立てる（テスト用の入口）。
 pub fn build_command_with_env(
     program: &str,
     cwd: &Path,
-    session_id: ClaudeSessionId,
+    start: SessionStart,
+    settings: &Path,
     env: Vec<(String, String)>,
 ) -> CommandBuilder {
     let mut cmd = CommandBuilder::new(program);
@@ -110,8 +130,18 @@ pub fn build_command_with_env(
         cmd.env(name, value);
     }
 
-    cmd.arg("--session-id");
-    cmd.arg(session_id.to_string());
+    match start {
+        SessionStart::Fresh(session_id) => {
+            cmd.arg("--session-id");
+            cmd.arg(session_id.to_string());
+        }
+        SessionStart::Resume(session_id) => {
+            cmd.arg("--resume");
+            cmd.arg(session_id.to_string());
+        }
+    }
+    cmd.arg("--settings");
+    cmd.arg(settings);
     cmd.cwd(cwd);
     cmd
 }
@@ -189,7 +219,8 @@ mod tests {
         let cmd = build_command_with_env(
             "/bin/true",
             Path::new("/tmp"),
-            ClaudeSessionId::new(),
+            SessionStart::Fresh(ClaudeSessionId::new()),
+            Path::new("/tmp/settings.json"),
             sanitize_env(vars(&[
                 ("PATH", "/usr/bin"),
                 ("CLAUDE_CODE_SESSION_ID", "継承されてはいけない値"),
@@ -208,26 +239,57 @@ mod tests {
     }
 
     #[test]
-    fn session_idが起動引数に渡る() {
+    fn session_idとsettingsが起動引数に渡る() {
         let session_id = ClaudeSessionId(uuid::uuid!("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"));
-        let cmd = build_command_with_env("claude", Path::new("/tmp"), session_id, vec![]);
+        let cmd = build_command_with_env(
+            "claude",
+            Path::new("/tmp"),
+            SessionStart::Fresh(session_id),
+            Path::new("/tmp/ad/settings.json"),
+            vec![],
+        );
 
-        let argv: Vec<String> = cmd
-            .get_argv()
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
         assert_eq!(
-            argv,
+            argv_of(&cmd),
             [
                 "claude",
                 "--session-id",
                 "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                "--settings",
+                "/tmp/ad/settings.json",
             ]
         );
         assert_eq!(
             cmd.get_cwd().map(|cwd| cwd.to_string_lossy().into_owned()),
             Some("/tmp".to_string())
         );
+    }
+
+    #[test]
+    fn 引き継ぎ起動ではidを自己採番しない() {
+        // resume では CLI 側が新しいIDを振りうるので、こちらから決めてはいけない。
+        // カードに結びつくIDは最初のフックが運んでくる（設計§6）
+        let session_id = ClaudeSessionId(uuid::uuid!("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"));
+        let cmd = build_command_with_env(
+            "claude",
+            Path::new("/tmp"),
+            SessionStart::Resume(session_id),
+            Path::new("/tmp/ad/settings.json"),
+            vec![],
+        );
+
+        let argv = argv_of(&cmd);
+        assert!(argv.contains(&"--resume".to_string()), "実際: {argv:?}");
+        assert!(
+            !argv.contains(&"--session-id".to_string()),
+            "実際: {argv:?}"
+        );
+    }
+
+    fn argv_of(cmd: &CommandBuilder) -> Vec<String> {
+        cmd.get_argv()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
     }
 }

@@ -9,13 +9,15 @@
 use agentdashboard_core::{
     config::Config,
     session::{Session, SessionManager},
+    ws::AppState,
 };
 use bytes::Bytes;
 use protocol::{
     SessionStatus,
     frame::{self, FrameKind},
+    ws::ServerMessage,
 };
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{
     sync::broadcast,
     time::{Instant, timeout},
@@ -34,15 +36,135 @@ pub fn fake_claude() -> PathBuf {
     testkit::fake_claude::path()
 }
 
+/// フックが叩く実行ファイル（ビルド済みの `agentdashboard`）。
+///
+/// 本番では `std::env::current_exe()` が自分自身を指すが、統合テストでは core が
+/// ライブラリとして動くのでテストバイナリを指してしまう。ここで明示的に渡す。
+pub fn hook_program() -> PathBuf {
+    testkit::binary_path("agentdashboard")
+}
+
 pub fn manager_with(config: Config) -> Arc<SessionManager> {
-    SessionManager::with_program(
+    SessionManager::with_programs(
         Arc::new(config),
         fake_claude().to_string_lossy().into_owned(),
+        hook_program(),
     )
 }
 
 pub fn manager() -> Arc<SessionManager> {
     manager_with(Config::default())
+}
+
+/// 実際に待ち受けている core サーバ。フックの受信を端から端まで通すために使う。
+pub struct TestServer {
+    pub manager: Arc<SessionManager>,
+    pub addr: SocketAddr,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl TestServer {
+    /// 空きポートで core を起動する。
+    ///
+    /// **先にポートを確定させてから設定を作る**のが要点。注入する settings には
+    /// フックの宛先URLが焼き込まれるため、後からポートが変わると届かなくなる。
+    pub async fn start() -> Self {
+        Self::start_with(Config::default()).await
+    }
+
+    pub async fn start_with(config: Config) -> Self {
+        Self::start_with_program(config, fake_claude().to_string_lossy().into_owned()).await
+    }
+
+    /// 起動する CLI を明示して立ち上げる（実CLI統合テストが本物の claude を指すため）。
+    pub async fn start_with_program(mut config: Config, program: String) -> Self {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("空きポートで待ち受けられること");
+        let addr = listener.local_addr().expect("待ち受け先を取れること");
+        config.port = addr.port();
+
+        let manager =
+            SessionManager::with_programs(Arc::new(config.clone()), program, hook_program());
+        let state = AppState::new(Arc::clone(&manager), Arc::new(config));
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, agentdashboard_core::build_router(state)).await;
+        });
+
+        Self {
+            manager,
+            addr,
+            task,
+        }
+    }
+
+    /// フックの受信口を直接叩く（擬似 claude を介さない経路の確認用）。
+    ///
+    /// HTTP クライアントがブロッキングなので、必ず専用スレッドへ逃がす。テストの
+    /// スレッドで直接待つと、同じランタイムで動いているサーバが応答できなくなり、
+    /// 自分の応答を自分で待ち続ける形で止まってしまう。
+    pub async fn post_hook(&self, token: &str, event: &str, body: &str) -> u16 {
+        let (addr, path, body) = (
+            self.addr,
+            format!("/hook/{token}/{event}"),
+            body.to_string(),
+        );
+        tokio::task::spawn_blocking(move || testkit::post_json(addr, &path, &body))
+            .await
+            .expect("送信スレッドが正常に終わること")
+            .expect("受信口へ送れること")
+    }
+
+    pub async fn get(&self, path: &str) -> (u16, String) {
+        let (addr, path) = (self.addr, path.to_string());
+        tokio::task::spawn_blocking(move || testkit::get(addr, &path))
+            .await
+            .expect("送信スレッドが正常に終わること")
+            .expect("応答が返ること")
+    }
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// 一覧の更新通知を受け取り、目的の種類が来るまで待つ。
+pub struct EventWatcher {
+    receiver: broadcast::Receiver<ServerMessage>,
+}
+
+impl EventWatcher {
+    pub fn attach(manager: &SessionManager) -> Self {
+        Self {
+            receiver: manager.subscribe_events(),
+        }
+    }
+
+    /// 条件に合うメッセージが届くまで受信を続ける。
+    pub async fn wait_for(
+        &mut self,
+        what: &str,
+        matches: impl Fn(&ServerMessage) -> bool,
+    ) -> ServerMessage {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match timeout(remaining, self.receiver.recv()).await {
+                Ok(Ok(message)) => {
+                    if matches(&message) {
+                        return message;
+                    }
+                }
+                Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(broadcast::error::RecvError::Closed)) => {
+                    panic!("配信が閉じられました。{what} を待っていました")
+                }
+                Err(_) => panic!("{TIMEOUT:?} 以内に {what} が届きませんでした"),
+            }
+        }
+    }
 }
 
 /// 起動する作業ディレクトリ。擬似 claude は中身を見ないので一時ディレクトリで足りる。
@@ -181,4 +303,24 @@ pub fn send_line(session: &Session, line: &str) {
     session
         .write_input(format!("{line}\r").as_bytes())
         .expect("端末へ書き込めること");
+}
+
+/// 擬似 claude に、注入された settings のフックを実際に起動させる。
+///
+/// 実行が終わったことを示すマーカーを待ってから戻るので、呼び出し側は
+/// 「ダッシュボードが受け取り終わった状態」で検証に進める。`extra` にはイベント固有の
+/// フィールド（`notification_type` など）を JSON で渡す。
+pub async fn fire_hook(session: &Session, watcher: &mut Watcher, event: &str, extra: &str) {
+    let command = if extra.is_empty() {
+        format!("hook {event}")
+    } else {
+        format!("hook {event} {extra}")
+    };
+    send_line(session, &command);
+    watcher
+        .wait_for(&format!(
+            "{}{event}",
+            testkit::fake_claude::HOOK_SENT_PREFIX
+        ))
+        .await;
 }

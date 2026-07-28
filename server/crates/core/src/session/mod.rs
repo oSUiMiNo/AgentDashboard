@@ -16,11 +16,16 @@
 //! `Lagged` が返る。これがそのまま「遅いクライアントの検知」になり、検知したら
 //! リングバッファのスナップショット（フレーム種別 `0x03`）を送り直して復帰させる。
 
+pub mod hooks_settings;
 pub mod lifecycle;
 pub mod pty;
 
-use crate::config::Config;
+use crate::{
+    config::Config,
+    state::{self, Changed, HookInput},
+};
 use bytes::Bytes;
+use hooks_settings::HookSettings;
 use protocol::{
     CardId, ClaudeSessionId, ProjectId, SessionMeta, SessionStatus, Timestamp,
     frame::{self, FrameKind},
@@ -30,7 +35,10 @@ use pty::{PtyExit, PtyProcess};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{broadcast, mpsc};
@@ -57,6 +65,12 @@ const EVENT_QUEUE_MESSAGES: usize = 256;
 const INITIAL_COLS: u16 = 80;
 const INITIAL_ROWS: u16 = 24;
 
+/// 停滞（ハング）の見張りが一巡する間隔。
+///
+/// 判定そのもののしきい値は `config.stalled_threshold_secs`（既定120秒）で、こちらは
+/// 「何秒おきに見に行くか」。小窓の経過時間表示は1秒刻みなので、同じ粒度にしてある。
+const STALLED_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+
 pub fn now_ms() -> Timestamp {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -74,6 +88,8 @@ pub enum SessionError {
     Spawn(String),
     #[error("セッションが見つかりません: {0}")]
     NotFound(CardId),
+    #[error("フック設定を用意できませんでした: {0}")]
+    Settings(String),
 }
 
 /// スクロールバック用の固定容量バッファ。
@@ -133,6 +149,16 @@ pub struct Session {
     /// 判定材料をターミナル購読クライアントに限るのは設計§10 の指示。構造化ビューしか
     /// 見ていないクライアントの都合で端末が止まると、全体が停滞してしまう。
     pause_requests: Mutex<HashSet<u64>>,
+    /// このセッションに注入したフック設定（一時ファイルとトークン）。
+    settings: HookSettings,
+    /// SessionStart フックが知らせてきた JSONL の場所。監視はフェーズ3のパーサが行う。
+    transcript_path: Mutex<Option<String>>,
+    /// 終了が「想定内」であることの印。
+    ///
+    /// ダッシュボードから終了させた場合、子プロセスは強制終了されるので終了コードは
+    /// 非ゼロになる。それをそのまま「異常終了」と表示すると、利用者が自分で終わらせたのに
+    /// 落ちたように見えてしまうため、指示した側で印を立てておく。
+    expected_exit: AtomicBool,
 }
 
 /// スクロールバックの中身まで出すと数MBの表示になるので、要点だけを出す。
@@ -231,7 +257,50 @@ impl Session {
     }
 
     pub fn kill(&self) {
+        // 「利用者が終わらせた」ことを先に記録してから落とす。逆順だと、終了検知が
+        // 先に走って異常終了として表示されてしまう
+        self.expected_exit.store(true, Ordering::SeqCst);
         self.process.kill();
+    }
+
+    /// フックの受信URLに埋め込まれる、このセッション限りの合言葉。
+    pub fn token(&self) -> &str {
+        &self.settings.token
+    }
+
+    /// SessionStart フックが知らせてきた JSONL の場所（フェーズ3で使う）。
+    pub fn transcript_path(&self) -> Option<String> {
+        self.transcript_path
+            .lock()
+            .expect("ロックが壊れていない")
+            .clone()
+    }
+
+    /// 届いたフック1件を状態機械へ通す（設計§5）。
+    ///
+    /// 判定そのものは [`crate::state::apply`] に閉じている。ここがやるのは
+    /// 「時計を読む」「ロックを取る」「JSONL の場所を控える」という周辺の世話だけ。
+    fn apply_hook(&self, input: &HookInput) -> Changed {
+        if let Some(path) = input.transcript_path() {
+            let mut current = self.transcript_path.lock().expect("ロックが壊れていない");
+            if current.as_deref() != Some(path) {
+                *current = Some(path.to_string());
+            }
+        }
+        let mut meta = self.meta.lock().expect("ロックが壊れていない");
+        state::apply(&mut meta, input, now_ms())
+    }
+
+    /// 停滞していないか見る（設計§5 のタイマー）。
+    fn sweep_stalled(&self, threshold_secs: u64) -> bool {
+        let mut meta = self.meta.lock().expect("ロックが壊れていない");
+        state::sweep_stalled(&mut meta, now_ms(), threshold_secs)
+    }
+
+    /// 差分配信用の値をまとめて取り出す。
+    fn status_snapshot(&self) -> (SessionStatus, u32, Timestamp) {
+        let meta = self.meta.lock().expect("ロックが壊れていない");
+        (meta.status, meta.subagent_active, meta.last_activity_at)
     }
 }
 
@@ -239,7 +308,14 @@ impl Session {
 pub struct SessionManager {
     config: Arc<Config>,
     program: String,
+    /// フックが起動する実行ファイル。既定は自分自身（設計§7）。
+    hook_program: PathBuf,
     sessions: Mutex<HashMap<CardId, Arc<Session>>>,
+    /// フックの合言葉 → どのカードのものか。
+    ///
+    /// 受信URLにカードIDをそのまま載せない理由は、推測できる値だと外から状態を
+    /// 書き換えられてしまうため。合言葉はセッションごとのランダム値にする。
+    tokens: Mutex<HashMap<String, CardId>>,
     events: broadcast::Sender<ServerMessage>,
 }
 
@@ -248,16 +324,23 @@ impl SessionManager {
         Self::with_program(config, lifecycle::claude_program())
     }
 
-    /// 起動する実行ファイルを明示して作る。
-    ///
-    /// テストから擬似 claude を指すための入口。環境変数を書き換えずに済むので、
-    /// テスト同士が互いの環境を壊さない。
+    /// 起動する CLI を明示して作る。
     pub fn with_program(config: Arc<Config>, program: String) -> Arc<Self> {
+        Self::with_programs(config, program, hooks_settings::hook_program())
+    }
+
+    /// 起動する CLI と、フックが叩く実行ファイルの両方を明示して作る。
+    ///
+    /// テストから擬似 claude とビルド済みの `agentdashboard` を指すための入口。
+    /// プロセスの環境変数を書き換えずに済むので、テスト同士が互いを壊さない。
+    pub fn with_programs(config: Arc<Config>, program: String, hook_program: PathBuf) -> Arc<Self> {
         let (events, _) = broadcast::channel(EVENT_QUEUE_MESSAGES);
         Arc::new(Self {
             config,
             program,
+            hook_program,
             sessions: Mutex::new(HashMap::new()),
+            tokens: Mutex::new(HashMap::new()),
             events,
         })
     }
@@ -295,6 +378,27 @@ impl SessionManager {
 
     /// 指定した作業ディレクトリで新しいセッションを起動する。
     pub fn spawn(self: &Arc<Self>, cwd: &str) -> Result<Arc<Session>, SessionError> {
+        self.spawn_with(cwd, None)
+    }
+
+    /// 既存のセッションを引き継いで起動する（設計§6 の resume）。
+    ///
+    /// カードは新しく作られるが、CLI 側のセッションIDは**こちらでは決められない**。
+    /// 引き継いだ結果として CLI が別のIDを名乗る場合があるため、最初のフックが
+    /// 運んでくる値で確定させる。UI からの導線はまだ無く、core の入口だけを用意している。
+    pub fn resume(
+        self: &Arc<Self>,
+        cwd: &str,
+        session_id: ClaudeSessionId,
+    ) -> Result<Arc<Session>, SessionError> {
+        self.spawn_with(cwd, Some(session_id))
+    }
+
+    fn spawn_with(
+        self: &Arc<Self>,
+        cwd: &str,
+        resume: Option<ClaudeSessionId>,
+    ) -> Result<Arc<Session>, SessionError> {
         let path = PathBuf::from(cwd);
         if !path.exists() {
             return Err(SessionError::CwdNotFound(cwd.to_string()));
@@ -306,8 +410,16 @@ impl SessionManager {
         let project_path = path.canonicalize().unwrap_or(path);
 
         let card_id = CardId::new();
-        let claude_session_id = ClaudeSessionId::new();
-        let command = lifecycle::build_command(&self.program, &project_path, claude_session_id);
+        let start = match resume {
+            Some(session_id) => lifecycle::SessionStart::Resume(session_id),
+            None => lifecycle::SessionStart::Fresh(ClaudeSessionId::new()),
+        };
+
+        // フック設定は起動より前に書き出しておく。CLI は起動時に --settings を読むので、
+        // 後から書いても間に合わない
+        let settings = hooks_settings::write(card_id, self.config.port, &self.hook_program)
+            .map_err(|err| SessionError::Settings(format!("{err:#}")))?;
+        let command = lifecycle::build_command(&self.program, &project_path, start, &settings.path);
 
         let (chunk_tx, chunk_rx) = mpsc::channel(CHUNK_QUEUE);
         let (process, exit_rx) = PtyProcess::spawn(
@@ -329,9 +441,14 @@ impl SessionManager {
             meta: Mutex::new(SessionMeta {
                 card_id,
                 project: ProjectId(project_path.to_string_lossy().into_owned()),
-                claude_session_id: Some(claude_session_id),
-                // フックを注入するのはフェーズ2。それまでは「起動した」以上のことは
-                // 分からないので、設計§5 の定義どおり Starting のままにする
+                claude_session_id: match start {
+                    // 自己採番なら起動した瞬間から対応が確定している
+                    lifecycle::SessionStart::Fresh(id) => Some(id),
+                    // 引き継ぎでは CLI 側が決めるので、最初のフックが届くまで空
+                    lifecycle::SessionStart::Resume(_) => None,
+                },
+                // SessionStart フックが届くまでは「起動した」以上のことが分からない。
+                // 設計§5 の定義どおり Starting から始める
                 status: SessionStatus::Starting,
                 subagent_active: 0,
                 last_activity_at: created_at,
@@ -342,8 +459,15 @@ impl SessionManager {
             ring: Mutex::new(RingBuffer::new(self.config.pty_ring_buffer)),
             output,
             pause_requests: Mutex::new(HashSet::new()),
+            settings,
+            transcript_path: Mutex::new(None),
+            expected_exit: AtomicBool::new(false),
         });
 
+        self.tokens
+            .lock()
+            .expect("ロックが壊れていない")
+            .insert(session.token().to_string(), card_id);
         self.sessions
             .lock()
             .expect("ロックが壊れていない")
@@ -382,11 +506,93 @@ impl SessionManager {
             .remove(&card_id)
             .ok_or(SessionError::NotFound(card_id))?;
 
+        self.tokens
+            .lock()
+            .expect("ロックが壊れていない")
+            .remove(session.token());
+
         // 先に止めないと、読み取りスレッド → 合流タスクが Arc を握ったままになり
         // セッションが解放されない（合流タスクは待ち行列が閉じたときに終わる）
         session.kill();
+        hooks_settings::cleanup(&session.settings);
         let _ = self.events.send(ServerMessage::SessionRemoved { card_id });
         Ok(())
+    }
+
+    /// 合言葉からカードを引く（[`crate::hooks`] の受信口が使う）。
+    pub fn resolve_token(&self, token: &str) -> Option<Arc<Session>> {
+        let card_id = *self
+            .tokens
+            .lock()
+            .expect("ロックが壊れていない")
+            .get(token)?;
+        self.get(card_id)
+    }
+
+    /// フック1件を適用し、変わった分だけを配信する。
+    ///
+    /// 差分（`status`）で足りるか、カード全体（`session_upsert`）を送り直すかは
+    /// [`crate::state::apply`] の戻り値で決まる。フックはツールコールのたびに飛んで
+    /// くるので、毎回カード全体を送ると無駄が大きい。
+    pub fn handle_hook(&self, session: &Arc<Session>, input: &HookInput) {
+        // SessionEnd を受けたら「自分で終了した」ことが分かる。この後に PTY の終了が
+        // 届いても異常終了として上書きしないための印でもある
+        if input.event == state::HookEvent::SessionEnd {
+            session.expected_exit.store(true, Ordering::SeqCst);
+        }
+        let changed = session.apply_hook(input);
+        self.publish(session, changed);
+    }
+
+    fn publish(&self, session: &Arc<Session>, changed: Changed) {
+        if changed.meta {
+            self.broadcast_meta(session);
+        } else if changed.status {
+            let (status, subagent_active, last_activity_at) = session.status_snapshot();
+            let _ = self.events.send(ServerMessage::Status {
+                card_id: session.card_id,
+                status,
+                subagent_active,
+                last_activity_at,
+            });
+        }
+    }
+
+    /// 停滞の見張りを始める（設計§5 のタイマー）。
+    ///
+    /// セッションごとにタイマーを持たせるとフックが届くたびに張り直すことになるので、
+    /// 全体を一定間隔で見て回る方式にしている。
+    pub fn start_stalled_sweeper(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let manager = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(STALLED_SWEEP_INTERVAL);
+            loop {
+                ticker.tick().await;
+                manager.sweep_stalled_once();
+            }
+        })
+    }
+
+    /// 見張りの1周分。テストから直接呼べるように分けてある。
+    pub fn sweep_stalled_once(&self) {
+        let sessions: Vec<Arc<Session>> = self
+            .sessions
+            .lock()
+            .expect("ロックが壊れていない")
+            .values()
+            .cloned()
+            .collect();
+        for session in sessions {
+            if session.sweep_stalled(self.config.stalled_threshold_secs) {
+                self.publish(
+                    &session,
+                    Changed {
+                        status: true,
+                        meta: false,
+                    },
+                );
+            }
+        }
     }
 
     fn on_exit(&self, card_id: CardId, exit: PtyExit) {
@@ -395,7 +601,14 @@ impl SessionManager {
         };
         {
             let mut meta = session.meta.lock().expect("ロックが壊れていない");
-            meta.status = SessionStatus::Ended { ok: exit.ok };
+            // SessionEnd フックで既に終了扱いになっているなら、そちらの判定を尊重する
+            if matches!(meta.status, SessionStatus::Ended { .. }) {
+                return;
+            }
+            // ダッシュボードから終了させた場合、強制終了なので終了コードは非ゼロになる。
+            // それを異常終了として出すと、利用者が自分で終わらせたのに落ちたように見える
+            let ok = exit.ok || session.expected_exit.load(Ordering::SeqCst);
+            meta.status = SessionStatus::Ended { ok };
             meta.last_activity_at = now_ms();
         }
         self.broadcast_meta(&session);

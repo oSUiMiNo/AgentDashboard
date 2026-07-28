@@ -49,11 +49,25 @@ async fn 起動して入出力とリサイズができ正常終了で_ended_に�
 }
 
 #[tokio::test]
-async fn killした場合は異常終了として_ended_になる() {
+async fn ダッシュボードから終了させた場合は正常終了として扱われる() {
+    // 強制終了なので終了コードは非ゼロになるが、利用者が自分で終わらせたものを
+    // 「異常終了」と表示すると落ちたように見えてしまう（フェーズ1からの引き継ぎ事項）
     let manager = common::manager();
     let (session, _watcher) = common::start_session(&manager).await;
 
     session.kill();
+    common::wait_for_status(&session, SessionStatus::Ended { ok: true }).await;
+}
+
+#[tokio::test]
+async fn 誰も指示していない異常終了は異常終了のまま出る() {
+    // 「利用者が終わらせた」と「落ちた」を取り違えないことの確認。
+    // kill を経由せず、子プロセス自身が非ゼロで終わる経路をたどらせる
+    let manager = common::manager();
+    let (session, mut watcher) = common::start_session(&manager).await;
+
+    common::send_line(&session, "crash 9");
+    watcher.wait_for(fake_claude::CRASH_MARKER).await;
     common::wait_for_status(&session, SessionStatus::Ended { ok: false }).await;
 }
 
@@ -68,7 +82,7 @@ async fn 停止中のセッションをkillしても終了を検知できる() {
     assert!(session.is_paused());
 
     session.kill();
-    common::wait_for_status(&session, SessionStatus::Ended { ok: false }).await;
+    common::wait_for_status(&session, SessionStatus::Ended { ok: true }).await;
 }
 
 #[tokio::test]
