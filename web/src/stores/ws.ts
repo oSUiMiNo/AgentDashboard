@@ -1,11 +1,11 @@
 /**
- * サーバとの WebSocket 接続（設計§10）。
+ * サーバとの WebSocket 接続（設計§10・§11）。
  *
  * # 届いたものを3つの行き先に振り分ける
  *
  * | 届くもの | 行き先 |
  * |---|---|
- * | PTY のバイナリフレーム | [`subscribeTerminal`] で登録した受け取り口へ直接 |
+ * | PTY のバイナリフレーム | [`WsState.subscribeTerminal`] で登録した受け取り口へ直接 |
  * | セッションの増減と状態 | [`@/stores/sessions`]（rAF でまとめてカード単位に通知） |
  * | 履歴のノード | [`@/stores/transcript`] |
  *
@@ -13,13 +13,18 @@
  * ツールコールのたびに届くので、React の再レンダリングを通すと追いつかない。
  * ここが React の状態として持つのは、接続の様子のように更新頻度が低いものだけ。
  *
- * # 一覧は「REST で全体 → WS で差分」
+ * # 復元はいつも同じ手順
  *
- * 接続するとき、まず `GET /api/sessions` で現在の全体像を取り、そのあとに WebSocket を
- * 開く（設計§4）。順序を逆にすると、遅れて届いた REST の結果が新しい状態を古い値で
- * 上書きしてしまう。真実は常にサーバ側にあり、ブラウザはその写しを持つだけ。
+ * 「REST で全体を取る → WebSocket を開く → 開いていた購読を出し直す」。この順序は
+ * **初回接続・ブラウザのリロード・自動再接続のすべてで同じ**（設計§4/§11）。
+ * 逆順にすると、遅れて届いた REST の結果が新しい差分を古い値で上書きしてしまう。
+ * 真実は常にサーバ側にあり、ブラウザはその写しを持つだけなので、迷ったら取り直す。
  *
- * 自動再接続はフェーズ4の担当。ここでは切れたことを画面に出すところまで。
+ * # 購読は接続ではなくストアが覚えている
+ *
+ * どのカードのターミナル・履歴を見ているかは**モジュールが持つ台帳**にある。接続が
+ * 切れても台帳は消えないので、繋ぎ直したあとに同じ購読を出し直せる。台帳を持たずに
+ * 「送ったら忘れる」ようにすると、再接続はできても画面が二度と更新されない。
  */
 
 import { create } from 'zustand'
@@ -48,6 +53,10 @@ export type ConnectionStatus = 'connecting' | 'open' | 'closed'
  * （画面をリセットしてから書く）のどちらか。
  */
 export type TerminalListener = (kind: number, payload: Uint8Array) => void
+
+/** 再接続の待ち時間。倍々に伸ばして上限で頭打ちにする。 */
+const RECONNECT_BASE_MS = 500
+const RECONNECT_MAX_MS = 10_000
 
 interface WsState {
   status: ConnectionStatus
@@ -89,8 +98,21 @@ interface WsState {
  */
 let socket: WebSocket | null = null
 
-/** ターミナルの受け取り口。カードID → コールバック。 */
-const terminalListeners = new Map<CardId, TerminalListener>()
+/** 開いているターミナルの台帳。カードID → 受け取り口と端末の大きさ。 */
+interface TerminalEntry {
+  listener: TerminalListener
+  cols: number
+  rows: number
+}
+const terminals = new Map<CardId, TerminalEntry>()
+
+/** 開いている履歴の台帳。 */
+const transcripts = new Set<CardId>()
+
+/** 自分から切ったのか、落ちたのか。落ちたときだけ繋ぎ直す。 */
+let closedByUs = false
+let retryTimer: ReturnType<typeof setTimeout> | undefined
+let retryAttempt = 0
 
 function socketUrl(): string {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -104,6 +126,94 @@ function send(message: ClientMessage) {
   socket.send(JSON.stringify(message))
 }
 
+type SetState = (partial: Partial<WsState>) => void
+
+/**
+ * `GET /api/sessions` で現在の一覧を取り込む（設計§4 の初期スナップショット）。
+ *
+ * サーバが居ない状態でも画面は出したいので、失敗しても接続処理は続ける。
+ */
+async function loadSnapshot() {
+  try {
+    const response = await fetch('/api/sessions')
+    if (!response.ok) {
+      return
+    }
+    applySessionSnapshot((await response.json()) as SessionMeta[])
+  } catch {
+    // 接続できないこと自体は WebSocket 側の onerror で画面に出る
+  }
+}
+
+/**
+ * 台帳にある購読を出し直す。
+ *
+ * ターミナルは `sub_pty` の応答としてスクロールバックのスナップショットが届き、履歴は
+ * `transcript_reset` に続けて手元ぶんが届く。どちらも**サーバが持っている内容で
+ * 作り直す**ので、切れている間に進んだぶんも含めて画面が現在に追いつく。
+ */
+function resubscribe() {
+  for (const [cardId, entry] of terminals) {
+    send({ t: 'sub_pty', card_id: cardId, cols: entry.cols, rows: entry.rows })
+  }
+  for (const cardId of transcripts) {
+    send({ t: 'sub_transcript', card_id: cardId })
+  }
+}
+
+/** 落ちた接続を、待ち時間を伸ばしながら繋ぎ直す。 */
+function scheduleReconnect(set: SetState) {
+  if (closedByUs || retryTimer !== undefined) {
+    return
+  }
+  const wait = Math.min(RECONNECT_BASE_MS * 2 ** retryAttempt, RECONNECT_MAX_MS)
+  retryAttempt += 1
+  retryTimer = setTimeout(() => {
+    retryTimer = undefined
+    void openSocket(set)
+  }, wait)
+}
+
+async function openSocket(set: SetState) {
+  if (socket && socket.readyState !== WebSocket.CLOSED) {
+    return
+  }
+  set({ status: 'connecting' })
+
+  // 先に全体像を取ってから WebSocket を開く。逆順だと、遅れて届いた
+  // スナップショットが差分より後に適用され、状態が巻き戻って見える
+  await loadSnapshot()
+
+  const next = new WebSocket(socketUrl())
+  // PTY のバイトをコピーせず扱うために ArrayBuffer で受け取る
+  next.binaryType = 'arraybuffer'
+  socket = next
+
+  next.onopen = () => {
+    retryAttempt = 0
+    set({ status: 'open', lastError: null })
+    // 開き直したときに台帳の購読を出し直す。初回は台帳が空なので何も起きない
+    resubscribe()
+  }
+
+  next.onclose = () => {
+    // 台帳は消さない。消すと繋ぎ直せても画面が二度と更新されない
+    set({ status: 'closed' })
+    scheduleReconnect(set)
+  }
+
+  next.onerror = () =>
+    set({ lastError: 'サーバへ接続できません。起動しているか確認してください' })
+
+  next.onmessage = (event) => {
+    if (typeof event.data === 'string') {
+      handleJson(event.data, set)
+      return
+    }
+    handleBinary(event.data as ArrayBuffer, set)
+  }
+}
+
 export const useWsStore = create<WsState>((set) => ({
   status: 'closed',
   // サーバの hello が届くまでの暫定値（設計§12 の既定値と同じ）
@@ -114,49 +224,38 @@ export const useWsStore = create<WsState>((set) => ({
   parserDetail: null,
 
   connect: async () => {
-    if (socket && socket.readyState !== WebSocket.CLOSED) {
-      return
-    }
-    set({ status: 'connecting' })
-
-    // 先に全体像を取ってから WebSocket を開く。逆順だと、遅れて届いた
-    // スナップショットが差分より後に適用され、状態が巻き戻って見える
-    await loadSnapshot(set)
-
-    const next = new WebSocket(socketUrl())
-    // PTY のバイトをコピーせず扱うために ArrayBuffer で受け取る
-    next.binaryType = 'arraybuffer'
-    socket = next
-
-    next.onopen = () => set({ status: 'open' })
-    next.onclose = () => {
-      set({ status: 'closed' })
-      terminalListeners.clear()
-    }
-    next.onerror = () =>
-      set({ lastError: 'サーバへ接続できません。起動しているか確認してください' })
-
-    next.onmessage = (event) => {
-      if (typeof event.data === 'string') {
-        handleJson(event.data, set)
-        return
-      }
-      handleBinary(event.data as ArrayBuffer, set)
-    }
+    closedByUs = false
+    await openSocket(set)
   },
 
   disconnect: () => {
+    closedByUs = true
+    if (retryTimer !== undefined) {
+      clearTimeout(retryTimer)
+      retryTimer = undefined
+    }
+    retryAttempt = 0
     socket?.close()
     socket = null
-    terminalListeners.clear()
+    terminals.clear()
+    transcripts.clear()
     set({ status: 'closed' })
   },
 
   spawn: (cwd) => send({ t: 'spawn', cwd }),
   kill: (cardId) => send({ t: 'kill', card_id: cardId }),
   archive: (cardId) => send({ t: 'archive', card_id: cardId }),
-  resize: (cardId, cols, rows) =>
-    send({ t: 'resize', card_id: cardId, cols, rows }),
+
+  resize: (cardId, cols, rows) => {
+    // 台帳の大きさも更新する。繋ぎ直したときに古い大きさで購読し直さないため
+    const entry = terminals.get(cardId)
+    if (entry) {
+      entry.cols = cols
+      entry.rows = rows
+    }
+    send({ t: 'resize', card_id: cardId, cols, rows })
+  },
+
   setFlow: (cardId, state) => send({ t: 'pty_flow', card_id: cardId, state }),
   sendInput: (cardId, text) => send({ t: 'send_input', card_id: cardId, text }),
 
@@ -168,10 +267,10 @@ export const useWsStore = create<WsState>((set) => ({
   },
 
   subscribeTerminal: (cardId, cols, rows, listener) => {
-    terminalListeners.set(cardId, listener)
+    terminals.set(cardId, { listener, cols, rows })
     send({ t: 'sub_pty', card_id: cardId, cols, rows })
     return () => {
-      terminalListeners.delete(cardId)
+      terminals.delete(cardId)
       send({ t: 'unsub_pty', card_id: cardId })
     }
   },
@@ -179,33 +278,16 @@ export const useWsStore = create<WsState>((set) => ({
   // 履歴はターミナルと違い、受け取り口を渡さない。届いたノードは transcript ストアが
   // 直接受け取る（画面はそちらを購読する）
   subscribeTranscript: (cardId) => {
+    transcripts.add(cardId)
     send({ t: 'sub_transcript', card_id: cardId })
     return () => {
+      transcripts.delete(cardId)
       send({ t: 'unsub_transcript', card_id: cardId })
     }
   },
 
   clearError: () => set({ lastError: null }),
 }))
-
-type SetState = (partial: Partial<WsState>) => void
-
-/**
- * `GET /api/sessions` で現在の一覧を取り込む（設計§4 の初期スナップショット）。
- *
- * サーバが居ない状態でも画面は出したいので、失敗しても接続処理は続ける。
- */
-async function loadSnapshot(_set: SetState) {
-  try {
-    const response = await fetch('/api/sessions')
-    if (!response.ok) {
-      return
-    }
-    applySessionSnapshot((await response.json()) as SessionMeta[])
-  } catch {
-    // 接続できないこと自体は WebSocket 側の onerror で画面に出る
-  }
-}
 
 function handleJson(raw: string, set: SetState) {
   let message: ServerMessage
@@ -262,5 +344,5 @@ function handleBinary(buffer: ArrayBuffer, set: SetState) {
     // 入力フレームはブラウザ→サーバの向きにしか存在しない
     return
   }
-  terminalListeners.get(frame.cardId)?.(frame.kind, frame.payload)
+  terminals.get(frame.cardId)?.listener(frame.kind, frame.payload)
 }
