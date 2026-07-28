@@ -54,7 +54,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     tracing::info!("起動する CLI: {}", manager.program());
 
     // 「作業中」の表示のまま実はハングしている、という見落としを防ぐ見張り（設計§5）
-    manager.start_stalled_sweeper();
+    manager.start_sweeper();
 
     // 履歴を読むパーサは別プロセス。落ちてもターミナルと状態表示は無傷（設計§11）
     let parser = parser::ParserSupervisor::start(Arc::clone(&manager), Arc::clone(&config));

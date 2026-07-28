@@ -41,6 +41,8 @@ function App() {
 function Shell() {
   const status = useWsStore((state) => state.status)
   const lastError = useWsStore((state) => state.lastError)
+  const parserState = useWsStore((state) => state.parserState)
+  const parserDetail = useWsStore((state) => state.parserDetail)
   const connect = useWsStore((state) => state.connect)
   const clearError = useWsStore((state) => state.clearError)
 
@@ -72,6 +74,25 @@ function Shell() {
           <Button variant="ghost" size="sm" onClick={clearError}>
             閉じる
           </Button>
+        </div>
+      )}
+
+      {/*
+        構造化ビューだけが壊れている状態を、はっきり見せる（設計§11）。
+        「履歴が出ないのでツールごと使えない」と思わせないことが目的で、
+        ターミナルと指示送信が無傷であることを明記する
+      */}
+      {parserState === 'degraded' && (
+        <div
+          data-testid="parser-banner"
+          className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm"
+        >
+          構造化ビューは縮退中です。ターミナルと指示送信はそのまま使えます。
+          {parserDetail && (
+            <span className="text-muted-foreground ml-2 text-xs">
+              {parserDetail}
+            </span>
+          )}
         </div>
       )}
 

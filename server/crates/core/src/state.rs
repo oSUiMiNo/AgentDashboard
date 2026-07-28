@@ -150,6 +150,13 @@ pub fn apply(meta: &mut SessionMeta, input: &HookInput, now: Timestamp) -> Chang
         return changed;
     }
 
+    // フックが届いたという事実そのものを控える。設計§11 の「フック未受信」警告は
+    // これが立たないことを根拠にする
+    if !meta.hooks_seen {
+        meta.hooks_seen = true;
+        changed.meta = true;
+    }
+
     // どのフックでも「生きている証拠」にはなる。小窓の「最終活動 N分前」の元になる値
     if meta.last_activity_at != now {
         meta.last_activity_at = now;
@@ -248,6 +255,32 @@ pub fn sweep_stalled(meta: &mut SessionMeta, now: Timestamp, threshold_secs: u64
     true
 }
 
+/// フックが1件も届かないまま動いているセッションを「判断できない」に落とす（設計§11）。
+///
+/// **PTY からは出力があるのにフックが0件**という組み合わせは、CLI は動いているのに
+/// 注入した設定が効いていないことを意味する。この状態を「起動中」のまま放置すると、
+/// 一覧はいつまでも灰色で、利用者は原因に気づけない。フックが来ないのは設定の注入漏れや
+/// ポートの塞がりが典型で、いずれも利用者が直せる。
+///
+/// 起点は `created_at`。まだ何も出力していないセッション（`saw_output` が false）は
+/// 単に起動が遅いだけなので対象にしない。
+pub fn sweep_hook_silence(
+    meta: &mut SessionMeta,
+    now: Timestamp,
+    threshold_secs: u64,
+    saw_output: bool,
+) -> bool {
+    if meta.hooks_seen || !saw_output || meta.status != SessionStatus::Starting {
+        return false;
+    }
+    let elapsed_ms = now.saturating_sub(meta.created_at);
+    if elapsed_ms < (threshold_secs as i64).saturating_mul(1000) {
+        return false;
+    }
+    meta.status = SessionStatus::Unknown;
+    true
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(non_snake_case)]
@@ -268,6 +301,7 @@ mod tests {
             last_activity_at: NOW - 5_000,
             last_assistant_message: None,
             created_at: NOW - 60_000,
+            hooks_seen: false,
         }
     }
 
@@ -518,6 +552,60 @@ mod tests {
             let mut meta = meta_with(status);
             meta.last_activity_at = NOW - 999_999;
             assert!(!sweep_stalled(&mut meta, NOW, 120), "{status:?}");
+        }
+    }
+
+    #[test]
+    fn 出力があるのにフックが来なければ判断できない状態になる() {
+        // 設計§11。CLI は動いているのに注入した設定が効いていない、という状況を
+        // 「起動中」のまま放置すると、利用者は原因に気づけない
+        let mut meta = meta_with(SessionStatus::Starting);
+        meta.created_at = NOW - 120_000;
+
+        assert!(
+            !sweep_hook_silence(&mut meta, NOW - 1, 120, true),
+            "境界の直前では出ない"
+        );
+        assert!(sweep_hook_silence(&mut meta, NOW, 120, true));
+        assert_eq!(meta.status, SessionStatus::Unknown);
+
+        // 二度目は変化なし（同じ通知を配信し続けない）
+        assert!(!sweep_hook_silence(&mut meta, NOW, 120, true));
+    }
+
+    #[test]
+    fn 出力がまだ無いセッションは判断できない状態にしない() {
+        // 単に起動が遅いだけかもしれない。警告を出すには早すぎる
+        let mut meta = meta_with(SessionStatus::Starting);
+        meta.created_at = NOW - 999_999;
+        assert!(!sweep_hook_silence(&mut meta, NOW, 120, false));
+        assert_eq!(meta.status, SessionStatus::Starting);
+    }
+
+    #[test]
+    fn フックが1件でも届いていれば判断できない状態にしない() {
+        let mut meta = meta_with(SessionStatus::Starting);
+        meta.created_at = NOW - 999_999;
+        apply(&mut meta, &hook(HookEvent::SubagentStart), NOW);
+        assert!(meta.hooks_seen, "フックの受信そのものが印になる");
+
+        assert!(!sweep_hook_silence(&mut meta, NOW, 120, true));
+    }
+
+    #[test]
+    fn 起動中以外は判断できない状態にしない() {
+        // 一度でも状態が決まったなら、フックは届いている
+        for status in [
+            SessionStatus::Working,
+            SessionStatus::WaitingInput,
+            SessionStatus::WaitingPermission,
+            SessionStatus::Stalled,
+            SessionStatus::Ended { ok: true },
+            SessionStatus::Unknown,
+        ] {
+            let mut meta = meta_with(status);
+            meta.created_at = NOW - 999_999;
+            assert!(!sweep_hook_silence(&mut meta, NOW, 120, true), "{status:?}");
         }
     }
 

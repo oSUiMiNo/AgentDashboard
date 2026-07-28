@@ -176,6 +176,11 @@ pub struct Session {
     /// 非ゼロになる。それをそのまま「異常終了」と表示すると、利用者が自分で終わらせたのに
     /// 落ちたように見えてしまうため、指示した側で印を立てておく。
     expected_exit: AtomicBool,
+    /// PTY が何か出力したか（設計§11 の「フック未受信」判定の片側）。
+    ///
+    /// 「CLI は動いているのにフックが1件も来ない」を見分けるために要る。出力が無い
+    /// だけなら単に起動が遅いだけかもしれず、警告を出すのは早すぎる。
+    saw_output: AtomicBool,
 }
 
 /// スクロールバックの中身まで出すと数MBの表示になるので、要点だけを出す。
@@ -230,6 +235,10 @@ impl Session {
 
     /// 合流済みのバイトをスクロールバックへ追記し、購読者へ配る。
     fn publish_output(&self, payload: &[u8]) {
+        // 「CLI は動いている」ことの証拠。フックが来ないときの判定材料になる（設計§11）。
+        // 一覧のロックは取らない（毎フレーム取ると高頻度な出力で一覧が詰まる）
+        self.saw_output.store(true, Ordering::Relaxed);
+
         // 追記と配信を同じロックの中で行うことで、購読開始との間に隙間を作らない
         let mut ring = self.ring.lock().expect("ロックが壊れていない");
         ring.push(payload);
@@ -383,9 +392,14 @@ impl Session {
     }
 
     /// 停滞していないか見る（設計§5 のタイマー）。
-    fn sweep_stalled(&self, threshold_secs: u64) -> bool {
+    /// 見張りの1周ぶんをこのセッションに適用する（停滞とフック未受信）。
+    fn sweep(&self, threshold_secs: u64) -> bool {
+        let saw_output = self.saw_output.load(Ordering::Relaxed);
+        let now = now_ms();
         let mut meta = self.meta.lock().expect("ロックが壊れていない");
-        state::sweep_stalled(&mut meta, now_ms(), threshold_secs)
+        let stalled = state::sweep_stalled(&mut meta, now, threshold_secs);
+        let silent = state::sweep_hook_silence(&mut meta, now, threshold_secs, saw_output);
+        stalled || silent
     }
 
     /// 差分配信用の値をまとめて取り出す。
@@ -551,6 +565,7 @@ impl SessionManager {
                 last_activity_at: created_at,
                 last_assistant_message: None,
                 created_at,
+                hooks_seen: false,
             }),
             process,
             ring: Mutex::new(RingBuffer::new(self.config.pty_ring_buffer)),
@@ -561,6 +576,7 @@ impl SessionManager {
             transcript: Mutex::new(TranscriptWindow::new(self.config.transcript_window_nodes)),
             transcript_tx: broadcast::channel(TRANSCRIPT_QUEUE_MESSAGES).0,
             expected_exit: AtomicBool::new(false),
+            saw_output: AtomicBool::new(false),
         });
 
         self.tokens
@@ -680,23 +696,24 @@ impl SessionManager {
         }
     }
 
-    /// 停滞の見張りを始める（設計§5 のタイマー）。
+    /// 見張りを始める（設計§5 の停滞タイマーと設計§11 のフック未受信）。
     ///
     /// セッションごとにタイマーを持たせるとフックが届くたびに張り直すことになるので、
-    /// 全体を一定間隔で見て回る方式にしている。
-    pub fn start_stalled_sweeper(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+    /// 全体を一定間隔で見て回る方式にしている。どちらの判定も「一定時間なにも起きて
+    /// いないこと」を根拠にするので、見て回る場所を1つにまとめている。
+    pub fn start_sweeper(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let manager = Arc::clone(self);
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(STALLED_SWEEP_INTERVAL);
             loop {
                 ticker.tick().await;
-                manager.sweep_stalled_once();
+                manager.sweep_once();
             }
         })
     }
 
     /// 見張りの1周分。テストから直接呼べるように分けてある。
-    pub fn sweep_stalled_once(&self) {
+    pub fn sweep_once(&self) {
         let sessions: Vec<Arc<Session>> = self
             .sessions
             .lock()
@@ -705,7 +722,7 @@ impl SessionManager {
             .cloned()
             .collect();
         for session in sessions {
-            if session.sweep_stalled(self.config.stalled_threshold_secs) {
+            if session.sweep(self.config.stalled_threshold_secs) {
                 self.publish(
                     &session,
                     Changed {

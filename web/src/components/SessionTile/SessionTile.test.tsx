@@ -41,6 +41,7 @@ function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
     last_activity_at: NOW,
     last_assistant_message: null,
     created_at: NOW - 60_000,
+    hooks_seen: true,
     ...overrides,
   }
 }
@@ -121,6 +122,19 @@ describe('SessionTile', () => {
     expect(screen.getByTestId('last-message')).toHaveTextContent(
       'テストが通りました',
     )
+  })
+
+  it('フックが1件も来ていない不明には理由が出る', () => {
+    // ただの「不明」では利用者は打つ手が分からない（設計§11）
+    const { unmount } = renderTile(
+      meta({ status: { kind: 'unknown' }, hooks_seen: false }),
+    )
+    expect(screen.getByTestId('hook-warning')).toHaveTextContent('フック未受信')
+    unmount()
+
+    // フックは届いているのに不明、という別の理由のときは名指ししない
+    renderTile(meta({ status: { kind: 'unknown' }, hooks_seen: true }))
+    expect(screen.queryByTestId('hook-warning')).not.toBeInTheDocument()
   })
 
   it('小窓をクリックすると専用画面へ移る', async () => {

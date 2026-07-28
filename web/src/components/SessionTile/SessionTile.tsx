@@ -15,7 +15,12 @@
 
 import { useNavigate } from 'react-router'
 import { formatElapsed } from '@/lib/time'
-import { needsAttention, statusLabel, statusTone } from '@/lib/protocol'
+import {
+  isHookSilent,
+  needsAttention,
+  statusLabel,
+  statusTone,
+} from '@/lib/protocol'
 import type { CardId } from '@/lib/protocol'
 import { sessionPath } from '@/lib/routes'
 import { useNow } from '@/lib/sessions'
@@ -76,6 +81,13 @@ export function SessionTile({ cardId }: Props) {
       <span data-testid="elapsed" className="text-muted-foreground text-xs">
         最終活動 {formatElapsed(now - session.last_activity_at)}
       </span>
+
+      {/* 「不明」の理由を名指しする。原因は利用者が直せるものが多い（設計§11） */}
+      {isHookSilent(session) && (
+        <span data-testid="hook-warning" className="text-xs text-amber-400">
+          フック未受信（設定の注入が効いていない可能性）
+        </span>
+      )}
 
       {session.last_assistant_message && (
         <p

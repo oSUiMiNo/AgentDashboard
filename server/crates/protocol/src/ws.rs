@@ -60,7 +60,11 @@ pub enum ClientMessage {
     Spawn {
         cwd: String,
     },
-    /// Composer からの指示送信。実装はフェーズ4
+    /// Composer からの指示送信。
+    ///
+    /// 改行の扱いはサーバ側が決める（`crates/core/src/session/input.rs`）。単一行は
+    /// CR を付けて確定し、複数行は bracketed paste で包む。加工をブラウザ側と両方で
+    /// やると、どちらが正なのか分からなくなるので、ここでは生の文字列だけを運ぶ。
     SendInput {
         card_id: CardId,
         text: String,
@@ -172,6 +176,7 @@ mod tests {
             last_activity_at: 1_700_000_000_000,
             last_assistant_message: None,
             created_at: 1_699_999_000_000,
+            hooks_seen: true,
         }
     }
 

@@ -30,6 +30,13 @@ export interface SessionMeta {
   last_activity_at: number
   last_assistant_message: string | null
   created_at: number
+  /**
+   * フックを1件でも受け取ったか（設計§11 の「フック未受信」警告）。
+   *
+   * `unknown` には「フックが来ない」以外の理由もありうるので、*なぜ* 判断できないのかを
+   * 画面に出すにはこの印が要る。
+   */
+  hooks_seen: boolean
 }
 
 /** JSONL レコードの `uuid` に対応するノードID。 */
@@ -174,4 +181,16 @@ export function needsAttention(status: SessionStatus): boolean {
 /** 終了しているか（archive してよいか）の判定。 */
 export function isEnded(status: SessionStatus): boolean {
   return status.kind === 'ended'
+}
+
+/**
+ * フックが1件も届いていないことによる「不明」か（設計§11）。
+ *
+ * PTY からは出力があるのにフックが0件、という状況をサーバが `unknown` に落としてくる。
+ * ただの「不明」と出すと利用者は打つ手が分からないので、**原因を名指しできるときは
+ * 名指しする**。フックが届かないのは設定の注入漏れやポートの塞がりが典型で、
+ * どちらも利用者が直せる。
+ */
+export function isHookSilent(session: SessionMeta): boolean {
+  return session.status.kind === 'unknown' && !session.hooks_seen
 }

@@ -1,8 +1,9 @@
-import { isEnded, statusLabel } from './protocol'
+import { isEnded, isHookSilent, statusLabel } from './protocol'
 import type {
   ClientMessage,
   Node,
   ServerMessage,
+  SessionMeta,
   SessionStatus,
   TreeNode,
 } from './protocol'
@@ -59,6 +60,30 @@ describe('サーバと同じ JSON になること', () => {
 
     const status = JSON.parse('{"kind":"ended","ok":false}') as SessionStatus
     expect(statusLabel(status)).toBe('異常終了')
+  })
+
+  it('send_input', () => {
+    const message: ClientMessage = {
+      t: 'send_input',
+      card_id: CARD_ID,
+      text: '/rewind',
+    }
+    expect(JSON.stringify(message)).toBe(
+      `{"t":"send_input","card_id":"${CARD_ID}","text":"/rewind"}`,
+    )
+  })
+
+  it('SessionMeta は hooks_seen を持つ', () => {
+    // Rust 側 `session_metaが往復する` と同じ形。片方だけ足すと
+    // 「繋がるのに警告が出ない」状態になる
+    const raw =
+      '{"card_id":"' +
+      CARD_ID +
+      '","project":"/dev/app","claude_session_id":null,' +
+      '"status":{"kind":"unknown"},"subagent_active":0,"last_activity_at":1,' +
+      '"last_assistant_message":null,"created_at":1,"hooks_seen":false}'
+    const meta = JSON.parse(raw) as SessionMeta
+    expect(meta.hooks_seen).toBe(false)
   })
 })
 
@@ -138,5 +163,23 @@ describe('状態のラベル', () => {
     expect(isEnded({ kind: 'ended', ok: true })).toBe(true)
     expect(isEnded({ kind: 'ended', ok: false })).toBe(true)
     expect(isEnded({ kind: 'working' })).toBe(false)
+  })
+
+  it('フック未受信による不明だけを見分けられる', () => {
+    // ただの「不明」と出すと利用者は打つ手が分からない。原因を名指しできるときはする
+    const base: SessionMeta = {
+      card_id: CARD_ID,
+      project: '/dev/app',
+      claude_session_id: null,
+      status: { kind: 'unknown' },
+      subagent_active: 0,
+      last_activity_at: 0,
+      last_assistant_message: null,
+      created_at: 0,
+      hooks_seen: false,
+    }
+    expect(isHookSilent(base)).toBe(true)
+    expect(isHookSilent({ ...base, hooks_seen: true })).toBe(false)
+    expect(isHookSilent({ ...base, status: { kind: 'working' } })).toBe(false)
   })
 })

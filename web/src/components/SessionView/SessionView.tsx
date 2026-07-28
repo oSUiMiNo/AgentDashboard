@@ -23,7 +23,7 @@ import { Composer } from '@/components/Composer/Composer'
 import { TerminalPane } from '@/components/TerminalPane/TerminalPane'
 import { TranscriptTree } from '@/components/TranscriptTree/TranscriptTree'
 import { formatElapsed } from '@/lib/time'
-import { isEnded, statusLabel, statusTone } from '@/lib/protocol'
+import { isEnded, isHookSilent, statusLabel, statusTone } from '@/lib/protocol'
 import type { CardId } from '@/lib/protocol'
 import { useNow } from '@/lib/sessions'
 import { useSessionCard } from '@/stores/sessions'
@@ -75,6 +75,11 @@ export function SessionView({ cardId, compact = false }: Props) {
         <span className="text-muted-foreground text-xs">
           最終活動 {formatElapsed(now - session.last_activity_at)}
         </span>
+        {isHookSilent(session) && (
+          <span data-testid="hook-warning" className="text-xs text-amber-400">
+            フック未受信
+          </span>
+        )}
 
         <div className="ml-auto flex gap-2">
           <Button

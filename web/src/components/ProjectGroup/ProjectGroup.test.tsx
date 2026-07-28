@@ -39,6 +39,7 @@ function meta(cardId: string): SessionMeta {
     last_activity_at: NOW,
     last_assistant_message: null,
     created_at: NOW,
+    hooks_seen: true,
   }
 }
 

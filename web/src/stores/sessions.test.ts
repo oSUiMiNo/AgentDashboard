@@ -49,6 +49,7 @@ function meta(cardId: string, overrides: Partial<SessionMeta> = {}): SessionMeta
     last_activity_at: 1_700_000_000_000,
     last_assistant_message: null,
     created_at: 1_700_000_000_000,
+    hooks_seen: true,
     ...overrides,
   }
 }

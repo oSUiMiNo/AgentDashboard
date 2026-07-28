@@ -200,12 +200,39 @@ async fn 作業中のまま無音が続くと停滞として表示される() {
     common::wait_for_status(&session, SessionStatus::Working).await;
 
     tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
-    server.manager.sweep_stalled_once();
+    server.manager.sweep_once();
     assert_eq!(session.status(), SessionStatus::Stalled);
 
     // 何かフックが届けば作業中へ戻る
     server.post_hook(session.token(), "PostToolUse", "{}").await;
     common::wait_for_status(&session, SessionStatus::Working).await;
+}
+
+#[tokio::test]
+async fn 出力はあるのにフックが来なければ判断できない状態になる() {
+    // 設計§11。注入した settings が効いていない（ポートが塞がっている等）とき、
+    // 一覧が「起動中」のまま灰色で止まると、利用者は原因に気づけない
+    let config = agentdashboard_core::config::Config {
+        stalled_threshold_secs: 1,
+        ..Default::default()
+    };
+
+    let server = common::TestServer::start_with(config).await;
+    // 起動マーカーを待つ＝PTY から出力が届いている状態
+    let (session, _watcher) = common::start_session(&server.manager).await;
+    assert_eq!(session.status(), SessionStatus::Starting);
+    assert!(!session.meta().hooks_seen);
+
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    server.manager.sweep_once();
+    assert_eq!(session.status(), SessionStatus::Unknown);
+
+    // フックが届き始めれば普通の状態表示に戻る
+    server
+        .post_hook(session.token(), "UserPromptSubmit", "{}")
+        .await;
+    common::wait_for_status(&session, SessionStatus::Working).await;
+    assert!(session.meta().hooks_seen);
 }
 
 #[tokio::test]

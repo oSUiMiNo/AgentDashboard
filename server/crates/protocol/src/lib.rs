@@ -110,6 +110,12 @@ pub struct SessionMeta {
     /// Stop フックの `last_assistant_message`。JSONL を読まずに小窓へ要約を出せる
     pub last_assistant_message: Option<String>,
     pub created_at: Timestamp,
+    /// フックを1件でも受け取ったか（設計§11 の「フック未受信」警告の判定材料）。
+    ///
+    /// [`SessionStatus::Unknown`] には「フックが来ない」以外の理由もありうるので、
+    /// *なぜ* 判断できないのかを画面に出すにはこの印が要る。フックが届かない原因は
+    /// 設定の注入漏れやポートの塞がりで、利用者が直せるものが多い。
+    pub hooks_seen: bool,
 }
 
 /// JSONL レコードの `uuid` に対応するノードID。
@@ -249,6 +255,7 @@ mod tests {
             last_activity_at: 1_700_000_000_000,
             last_assistant_message: Some("実装が完了しました".to_string()),
             created_at: 1_699_999_000_000,
+            hooks_seen: true,
         };
         assert_eq!(roundtrip(&meta), meta);
     }
