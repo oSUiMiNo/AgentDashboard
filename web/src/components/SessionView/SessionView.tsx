@@ -67,22 +67,30 @@ export function SessionView({ cardId, compact = false }: Props) {
           aria-hidden
           className={`size-2.5 shrink-0 rounded-full ${statusTone(session.status)}`}
         />
-        <span className="truncate font-medium" title={session.project}>
+        {/*
+          縮んでよいのは作業ディレクトリだけ。`min-w-0` を付けないと flex の子は
+          中身の幅より小さくならず、`truncate` が効かない。実際、長いパスのときに
+          状態のラベルが「入力 待ち」と縦に割れていた（**一番読みたいものが読めない**）
+        */}
+        <span className="min-w-0 truncate font-medium" title={session.project}>
           {session.project}
         </span>
-        <span className="text-muted-foreground">
+        <span className="text-muted-foreground shrink-0">
           {statusLabel(session.status)}
         </span>
-        <span className="text-muted-foreground text-xs">
+        <span className="text-muted-foreground shrink-0 text-xs">
           最終活動 {formatElapsed(now - session.last_activity_at)}
         </span>
         {isHookSilent(session) && (
-          <span data-testid="hook-warning" className="text-xs text-amber-400">
+          <span
+            data-testid="hook-warning"
+            className="shrink-0 text-xs text-amber-400"
+          >
             フック未受信
           </span>
         )}
 
-        <div className="ml-auto flex gap-2">
+        <div className="ml-auto flex shrink-0 gap-2">
           <Button
             variant="outline"
             size="sm"

@@ -36,10 +36,12 @@ export function ProjectGroup({ project, cards }: Props) {
       className="border-border hover:border-primary/40 hover:bg-muted/20 cursor-pointer rounded-xl border border-dashed p-3 transition-colors"
     >
       <header className="mb-2 flex items-baseline gap-2">
-        <h2 className="truncate text-sm font-semibold" title={project}>
+        {/* 縮んでよいのはパスだけ。`min-w-0` が無いと `truncate` が効かず、
+            隣のセッション数が縦に割れる */}
+        <h2 className="min-w-0 truncate text-sm font-semibold" title={project}>
           {project}
         </h2>
-        <span className="text-muted-foreground text-xs">
+        <span className="text-muted-foreground shrink-0 text-xs">
           {cards.length}セッション
         </span>
       </header>

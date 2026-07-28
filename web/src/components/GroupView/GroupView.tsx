@@ -39,13 +39,16 @@ export function GroupView({ project }: Props) {
       className="flex min-h-0 flex-1 flex-col gap-3"
     >
       <header className="flex items-baseline gap-3">
-        <h2 className="truncate text-sm font-semibold" title={project}>
+        <h2 className="min-w-0 truncate text-sm font-semibold" title={project}>
           {project}
         </h2>
-        <span className="text-muted-foreground text-xs">
+        <span className="text-muted-foreground shrink-0 text-xs">
           {cards.length}セッション
         </span>
-        <Link to={HOME} className="text-primary ml-auto text-xs underline">
+        <Link
+          to={HOME}
+          className="text-primary ml-auto shrink-0 text-xs underline"
+        >
           一覧へ戻る
         </Link>
       </header>
