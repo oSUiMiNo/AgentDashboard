@@ -1,15 +1,48 @@
 import { render, screen } from '@testing-library/react'
 import App from './App'
 
-// テスト基盤（Vitest + Testing Library + jsdom）が実際に動くことの確認。
-// フェーズ0の時点では画面の中身より「テストが書けて走る状態になっていること」が目的。
+/**
+ * jsdom には本物の WebSocket サーバがないので、接続だけを差し替える。
+ * ここで確かめたいのは画面が組み上がることであって、通信そのものではない
+ * （通信を含めた確認は Playwright の E2E が実サーバ相手に行う）。
+ */
+class FakeWebSocket {
+  static readonly OPEN = 1
+  binaryType = 'blob'
+  readyState = 0
+  onopen: (() => void) | null = null
+  onclose: (() => void) | null = null
+  onerror: (() => void) | null = null
+  onmessage: ((event: MessageEvent) => void) | null = null
+  send() {}
+  close() {}
+}
+
+beforeEach(() => {
+  vi.stubGlobal('WebSocket', FakeWebSocket)
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
+
 describe('App', () => {
-  it('土台の画面が描画され shadcn/ui のボタンが出る', () => {
+  it('起動フォームとセッション一覧の枠が表示される', () => {
     render(<App />)
 
     expect(
       screen.getByRole('heading', { name: 'AgentDashboard' }),
     ).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '準備OK' })).toBeInTheDocument()
+    expect(screen.getByLabelText('作業ディレクトリ')).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'セッションを起動' }),
+    ).toBeInTheDocument()
+    expect(screen.getByText('セッションはまだありません')).toBeInTheDocument()
+  })
+
+  it('作業ディレクトリが空のうちは起動できない', () => {
+    render(<App />)
+
+    expect(screen.getByRole('button', { name: 'セッションを起動' })).toBeDisabled()
   })
 })

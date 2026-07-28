@@ -1,0 +1,193 @@
+/**
+ * ブラウザ内のターミナル（設計§10）。
+ *
+ * xterm.js に WebGL レンダラを載せて GPU で描く。設計が「Ghostty / WezTerm 級の軽快さ」を
+ * 目標にしている以上、描画は CPU で回さない。
+ *
+ * # ウォーターマーク式のフロー制御
+ *
+ * `term.write(data, callback)` のコールバックは、そのデータを**実際に処理し終えたとき**に
+ * 呼ばれる。呼ばれるまでの合計バイト数（＝端末の処理待ち）を数えておき、
+ *
+ * - `flow_high` を超えたら サーバへ `pause`（サーバは PTY の読み取りを止める）
+ * - `flow_low` を下回ったら `resume`
+ *
+ * とすることで、ブラウザが処理しきれない量を溜め込まずに済む。しきい値をサーバから
+ * 受け取っているのは、`config.toml` の設定を実際に効かせるため。
+ */
+
+import { useEffect, useRef } from 'react'
+import { FitAddon } from '@xterm/addon-fit'
+import { WebglAddon } from '@xterm/addon-webgl'
+import { Terminal } from '@xterm/xterm'
+import '@xterm/xterm/css/xterm.css'
+import { KIND_PTY_SNAPSHOT } from '@/lib/frame'
+import type { CardId } from '@/lib/protocol'
+import { useWsStore } from '@/stores/ws'
+
+interface Props {
+  cardId: CardId
+}
+
+/** E2E が端末の内容を読むための取り出し口を持った要素。 */
+type TerminalContainer = HTMLDivElement & { __terminal?: Terminal }
+
+export function TerminalPane({ cardId }: Props) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  // E2E から観測するための値。React の再レンダリングとは無関係に更新する
+  const statusRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) {
+      return
+    }
+
+    const store = useWsStore.getState()
+    const term = new Terminal({
+      convertEol: false,
+      cursorBlink: true,
+      fontSize: 13,
+      fontFamily:
+        'ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", monospace',
+      theme: { background: '#0b0f14' },
+      // xterm 自身のスクロールバックはサーバのリングバッファとは別物。
+      // 画面内の遡り用に控えめに確保する
+      scrollback: 5000,
+    })
+
+    const fit = new FitAddon()
+    term.loadAddon(fit)
+    term.open(container)
+
+    const setRendererLabel = (renderer: 'webgl' | 'dom') => {
+      statusRef.current?.setAttribute('data-renderer', renderer)
+    }
+
+    // WebGL は環境によっては使えない（ヘッドレスや古いGPU）。使えなければ既定の
+    // DOM レンダラのまま動くので、失敗しても止めない
+    let webgl: WebglAddon | null = null
+    try {
+      const addon = new WebglAddon()
+      addon.onContextLoss(() => {
+        // コンテキストを失ったまま放置すると描画が止まる。捨てて DOM レンダラへ戻す
+        addon.dispose()
+        webgl = null
+        setRendererLabel('dom')
+      })
+      term.loadAddon(addon)
+      webgl = addon
+      setRendererLabel('webgl')
+    } catch {
+      webgl = null
+      setRendererLabel('dom')
+    }
+
+    fit.fit()
+
+    // --- フロー制御 -------------------------------------------------------
+    // 端末がまだ処理し終えていないバイト数。write のコールバックで減っていく
+    let pending = 0
+    let paused = false
+    let pauseCount = 0
+    let totalBytes = 0
+
+    const updateFlowIndicator = () => {
+      const status = statusRef.current
+      if (!status) {
+        return
+      }
+      status.setAttribute('data-pending', String(pending))
+      status.setAttribute('data-flow', paused ? 'paused' : 'running')
+      // 一度でも止めたかは、瞬間の値を見張るより累計で見るほうが取りこぼさない
+      status.setAttribute('data-pause-count', String(pauseCount))
+      status.setAttribute('data-total-bytes', String(totalBytes))
+    }
+
+    const write = (payload: Uint8Array) => {
+      const size = payload.length
+      pending += size
+      totalBytes += size
+      term.write(payload, () => {
+        pending = Math.max(0, pending - size)
+        if (paused && pending < useWsStore.getState().flowLow) {
+          paused = false
+          useWsStore.getState().setFlow(cardId, 'resume')
+        }
+        updateFlowIndicator()
+      })
+      if (!paused && pending > useWsStore.getState().flowHigh) {
+        paused = true
+        pauseCount += 1
+        useWsStore.getState().setFlow(cardId, 'pause')
+      }
+      updateFlowIndicator()
+    }
+
+    // --- サーバとの接続 ---------------------------------------------------
+    const unsubscribe = store.subscribeTerminal(
+      cardId,
+      term.cols,
+      term.rows,
+      (kind, payload) => {
+        if (kind === KIND_PTY_SNAPSHOT) {
+          // 「ここまでの画面はこれで正しい」という指示。作り直してから書く
+          term.reset()
+        }
+        write(payload)
+      },
+    )
+
+    const encoder = new TextEncoder()
+    const dataSubscription = term.onData((data) => {
+      useWsStore.getState().sendPtyInput(cardId, encoder.encode(data))
+    })
+    const resizeSubscription = term.onResize(({ cols, rows }) => {
+      useWsStore.getState().resize(cardId, cols, rows)
+    })
+
+    const observer = new ResizeObserver(() => {
+      // 要素の大きさが 0 のときに fit すると例外になることがある
+      if (container.clientWidth > 0 && container.clientHeight > 0) {
+        fit.fit()
+      }
+    })
+    observer.observe(container)
+
+    // E2E から端末の内容を読むための取り出し口。
+    //
+    // WebGL や canvas で描いていると画面の文字は DOM に存在しないため、
+    // 「ブラウザで実際に何が見えているか」をテストから確かめる手段が他に無い。
+    // グローバルを汚さないよう、この要素にだけ生やしている（読み取り専用の用途）。
+    ;(container as TerminalContainer).__terminal = term
+
+    term.focus()
+
+    return () => {
+      observer.disconnect()
+      dataSubscription.dispose()
+      resizeSubscription.dispose()
+      unsubscribe()
+      webgl?.dispose()
+      term.dispose()
+      delete (container as TerminalContainer).__terminal
+    }
+  }, [cardId])
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div
+        ref={statusRef}
+        data-testid="terminal-status"
+        data-flow="running"
+        data-pending="0"
+        className="sr-only"
+      />
+      <div
+        ref={containerRef}
+        data-testid="terminal"
+        className="min-h-0 flex-1 overflow-hidden rounded-md bg-[#0b0f14] p-2"
+      />
+    </div>
+  )
+}
