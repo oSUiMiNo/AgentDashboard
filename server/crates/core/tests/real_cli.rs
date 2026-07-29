@@ -733,8 +733,10 @@ async fn 本物のclaudeがパーサを直しゲートを通ってから差し�
     let config = Config {
         state_dir: Some(dir.path().join("state")),
         selfheal_repo_dir: Some(repo.clone()),
-        // 実物は時間がかかるので、訓練では1回だけ挑戦させる
-        selfheal_retry: 1,
+        // 2回にしてあるのは、**1回目で落ちているフィクスチャを消しにいく**ことが
+        // 実際にあるため（それでは対応したことにならないので突き返す）。
+        // 突き返したあとにやり直せるだけの余地を残す
+        selfheal_retry: 2,
         ..Config::default()
     };
     let ops = std::sync::Arc::new(PlantedCanary {

@@ -59,6 +59,11 @@ struct FakeOps {
     calls: Mutex<Vec<String>>,
     /// カナリアが薄いサンプルを返す回数（採り直しの検証用）
     thin_canaries: Mutex<u32>,
+    /// 合否をサンプルの有無で決める（実物のゲートと同じ振る舞い）。
+    ///
+    /// 本物のゲートは「そのサンプルが読めるか」を見るので、サンプルを消せば通る。
+    /// 消して通す抜け道を確かめるテストでは、そこを模していないと意味がない
+    gate_follows_sample: Mutex<bool>,
 }
 
 impl FakeOps {
@@ -74,7 +79,17 @@ impl FakeOps {
             ]),
             calls: Mutex::new(Vec::new()),
             thin_canaries: Mutex::new(0),
+            gate_follows_sample: Mutex::new(false),
         })
+    }
+
+    /// カナリアが置くサンプルの場所。
+    fn sample_path(&self) -> PathBuf {
+        self.worktree
+            .join("fixtures")
+            .join("v9.9.9")
+            .join("canary")
+            .join("session.jsonl")
     }
 
     fn record(&self, what: &str) {
@@ -124,6 +139,18 @@ impl SelfhealOps for FakeOps {
 
     fn run_gate(&self, _worktree: &Path) -> GateOutcome {
         self.record("gate");
+        if *self
+            .gate_follows_sample
+            .lock()
+            .expect("ロックが壊れていない")
+        {
+            // 実物と同じ：そのサンプルが読めなければ落ちる＝消せば通る
+            let present = self.sample_path().is_file();
+            return GateOutcome {
+                passed: !present,
+                output: "test すべてのフィクスチャ ... FAILED".to_string(),
+            };
+        }
         let mut remaining = self.gate_failures.lock().expect("ロックが壊れていない");
         if *remaining > 0 {
             *remaining -= 1;
@@ -424,19 +451,15 @@ async fn 落ちているサンプルを消して通そうとしても採用し�
     // 追跡対象外なので、消しても git status には出ない（＝範囲の検査では捕まらない）
     let dir = work_dir("sample-deleted");
     let ops = FakeOps::new(&dir);
-    ops.fail_gate(1);
+    // 実物と同じく「そのサンプルが読めるか」で合否が決まるようにする
+    *ops.gate_follows_sample.lock().unwrap() = true;
     let server = TestServer::start_with_selfheal(config_for(&dir), ops.clone()).await;
     let (_session, transcript) = start_watched(&server, &dir).await;
 
     append_records(&transcript, 3, "9.9.9", 0);
 
     // 修復役がサンプルを消してからターンを終える
-    let sample = ops
-        .worktree
-        .join("fixtures")
-        .join("v9.9.9")
-        .join("canary")
-        .join("session.jsonl");
+    let sample = ops.sample_path();
     let card = wait_for_repair_card(&server).await;
     let session = server.manager.get(card).expect("修復セッションが居る");
     let mut watcher = common::Watcher::attach(&session);
@@ -446,18 +469,15 @@ async fn 落ちているサンプルを消して通そうとしても採用し�
     fire(&server, &session, "PreToolUse").await;
     fire(&server, &session, "Stop").await;
 
-    // 消したことに気づいて突き返す。2回目も消えたままなので、そのまま諦める
-    watcher.wait_for("消えているか書き換えられています").await;
+    // 消したことに気づいて突き返す。**消した本人には戻せない**ので、こちらで戻す
+    watcher.wait_for("こちらで元の内容に戻しました").await;
+    assert!(sample.is_file(), "戻したと言いながら戻っていない");
+
+    // 2回目は何もしないので、ゲートは回るが直っていない
     fire(&server, &session, "PreToolUse").await;
     fire(&server, &session, "Stop").await;
     wait_for_call(&ops, "changed", 2).await;
 
-    assert_eq!(
-        ops.count("gate"),
-        1,
-        "サンプルが消えているのにゲートを回している: {:?}",
-        ops.calls()
-    );
     assert_eq!(ops.count("build"), 0, "対応していないのに差し替えている");
 }
 

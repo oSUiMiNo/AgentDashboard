@@ -380,9 +380,13 @@ async fn run_cycle(selfheal: &Arc<Selfheal>, trigger: Trigger) {
     }
 
     // 落ちているサンプルを消せばテストは通ってしまう。渡したものがそのまま残っている
-    // ことを機械で確かめるために、この時点の指紋を控える（§17）
+    // ことを機械で確かめるために、この時点の指紋と中身を控える（§17）
     let sample_file = sample.dir.join("session.jsonl");
-    let sample_mark = repair::fingerprint(&sample_file);
+    let sample = Sample {
+        mark: repair::fingerprint(&sample_file),
+        bytes: std::fs::read(&sample_file).ok(),
+        path: sample_file,
+    };
 
     repair_loop(
         selfheal,
@@ -391,10 +395,7 @@ async fn run_cycle(selfheal: &Arc<Selfheal>, trigger: Trigger) {
         &reason,
         &version,
         gate.output,
-        Sample {
-            path: sample_file,
-            mark: sample_mark,
-        },
+        sample,
     )
     .await;
 }
@@ -403,6 +404,31 @@ async fn run_cycle(selfheal: &Arc<Selfheal>, trigger: Trigger) {
 struct Sample {
     path: PathBuf,
     mark: Option<u64>,
+    /// 渡した時点の中身。消されたら**こちらで戻す**ために持つ
+    bytes: Option<Vec<u8>>,
+}
+
+impl Sample {
+    /// 消されたり書き換えられたりしていないか。
+    fn intact(&self) -> bool {
+        repair::fingerprint(&self.path) == self.mark
+    }
+
+    /// 元の中身に戻す。
+    ///
+    /// 戻すのをこちら側でやるのは、**消した本人には戻せない**から。採取したサンプルの
+    /// 中身はエージェントの手元に無く、「元に戻して」と言うだけでは詰んでしまう。
+    fn restore(&self) -> bool {
+        let Some(bytes) = &self.bytes else {
+            return false;
+        };
+        if let Some(dir) = self.path.parent()
+            && std::fs::create_dir_all(dir).is_err()
+        {
+            return false;
+        }
+        std::fs::write(&self.path, bytes).is_ok()
+    }
 }
 
 /// 修復セッションを起こし、通るまで（上限まで）繰り返す。
@@ -481,11 +507,18 @@ async fn repair_loop(
 
         // 落ちているサンプルを消せばテストは通る。それは対応したことにならない。
         // 採りたてのファイルは追跡対象外なので、消しても `git status` には出ない
-        if repair::fingerprint(&sample.path) != sample.mark {
+        if !sample.intact() {
+            let restored = sample.restore();
             gate_output = format!(
-                "検証用のサンプル {} が消えているか書き換えられています。\
-                元の内容に戻したうえで、パーサ側で読めるようにしてください。",
-                sample.path.display()
+                "検証用のサンプル {} が消えているか書き換えられていました。{}\
+                このサンプルが読めるようになって初めて、新しい形式に対応したと言えます。\
+                フィクスチャではなく **パーサ側** を直してください。",
+                sample.path.display(),
+                if restored {
+                    "こちらで元の内容に戻しました。"
+                } else {
+                    ""
+                }
             );
             continue;
         }
