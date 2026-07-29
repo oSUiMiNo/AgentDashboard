@@ -114,6 +114,20 @@ impl TestServer {
         config: Config,
         ops: Arc<dyn agentdashboard_core::selfheal::ops::SelfhealOps>,
     ) -> Self {
+        Self::start_with_selfheal_and_program(
+            config,
+            ops,
+            fake_claude().to_string_lossy().into_owned(),
+        )
+        .await
+    }
+
+    /// 起動する CLI を明示して自己修復も立ち上げる（実CLIの訓練用）。
+    pub async fn start_with_selfheal_and_program(
+        config: Config,
+        ops: Arc<dyn agentdashboard_core::selfheal::ops::SelfhealOps>,
+        program: String,
+    ) -> Self {
         // 差し替えの検証をするので、パーサの場所は**ポインタ経由**で決めさせる。
         // 環境変数で名指しすると探索順の先頭にあたり、差し替えても効かなくなる
         let state_dir = config.resolved_state_dir();
@@ -124,13 +138,7 @@ impl TestServer {
         )
         .expect("ポインタを書けること");
 
-        let mut server = Self::build_with(
-            config,
-            fake_claude().to_string_lossy().into_owned(),
-            true,
-            false,
-        )
-        .await;
+        let mut server = Self::build_with(config, program, true, false).await;
         server.selfheal = Some(agentdashboard_core::selfheal::Selfheal::start(
             Arc::clone(&server.manager),
             Arc::clone(server.parser.as_ref().expect("パーサを起動している")),

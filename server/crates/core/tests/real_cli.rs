@@ -622,3 +622,204 @@ async fn サブエージェントの稼働と子ツリーのマウントを検�
         .archive(session.card_id)
         .expect("片付けられること");
 }
+
+// ---------------------------------------------------------------------------
+// 8. 自己修復を本物の claude で通す（テスト計画フェーズ7「修復フロー」）
+// ---------------------------------------------------------------------------
+
+/// リポジトリのルート（`scripts/cargo` を持つ場所）を、テストバイナリの位置から辿る。
+fn repo_root() -> PathBuf {
+    let binary = testkit::binary_path("agentdashboard");
+    binary
+        .ancestors()
+        .find(|dir| dir.join("scripts").join("cargo").is_file())
+        .map(Path::to_path_buf)
+        .expect("リポジトリのルートが見つかること")
+}
+
+/// カナリアだけを「わざと非互換なサンプル」に差し替えた本物の口。
+///
+/// 実物のフォーマット変更を待つわけにいかないので、**新しい形式を模したフィクスチャ**を
+/// worktree へ置く。ここから先——ゲート・修復セッション・ビルド・差し替え・コミット——は
+/// すべて本物を通す。
+struct PlantedCanary {
+    inner: agentdashboard_core::selfheal::ops::HostOps,
+}
+
+impl agentdashboard_core::selfheal::ops::SelfhealOps for PlantedCanary {
+    fn prepare_worktree(&self, branch: &str) -> anyhow::Result<PathBuf> {
+        self.inner.prepare_worktree(branch)
+    }
+
+    fn run_canary(
+        &self,
+        _model: &str,
+        worktree: &Path,
+    ) -> anyhow::Result<agentdashboard_core::selfheal::ops::CanarySample> {
+        // 「レコード種別が改名された」という、実際に起こりうる形の非互換。
+        // いまのパーサはこれを未知の種別として数えるので、ゲートが落ちる
+        let dir = worktree.join("fixtures").join("v9.9.9").join("canary");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(
+            dir.join("session.jsonl"),
+            concat!(
+                r#"{"type":"user-message","uuid":"c1","parentUuid":null,"timestamp":"2026-07-29T00:00:00.000Z","version":"9.9.9","message":{"role":"user","content":"新しい形式のテスト"}}"#,
+                "\n",
+                r#"{"type":"assistant","uuid":"c2","parentUuid":"c1","timestamp":"2026-07-29T00:00:01.000Z","version":"9.9.9","message":{"role":"assistant","content":[{"type":"text","text":"了解しました"}]}}"#,
+                "\n",
+            ),
+        )?;
+        Ok(agentdashboard_core::selfheal::ops::CanarySample {
+            version: "9.9.9".to_string(),
+            dir,
+            has_tool_use: true,
+            has_subagent: true,
+        })
+    }
+
+    fn run_gate(&self, worktree: &Path) -> agentdashboard_core::selfheal::ops::GateOutcome {
+        self.inner.run_gate(worktree)
+    }
+
+    fn build_parser(&self, worktree: &Path) -> anyhow::Result<PathBuf> {
+        self.inner.build_parser(worktree)
+    }
+
+    fn changed_files(&self, worktree: &Path) -> anyhow::Result<Vec<String>> {
+        self.inner.changed_files(worktree)
+    }
+
+    fn commit(&self, worktree: &Path, message: &str) -> anyhow::Result<()> {
+        self.inner.commit(worktree, message)
+    }
+}
+
+/// 前回の訓練が残した worktree とブランチを片付ける。
+///
+/// 本番では前回の修復を積み上げるのが正しい（直した内容を捨てない）が、訓練は毎回
+/// **同じ出発点**から始まらないと結果が変わってしまう。
+fn reset_maintenance_worktree(repo: &Path) {
+    let name = agentdashboard_core::selfheal::MAINTENANCE_NAME;
+    let worktree = repo
+        .join(agentdashboard_core::selfheal::ops::WORKTREE_DIR)
+        .join(name);
+    let _ = Command::new("git")
+        .args(["worktree", "remove", "--force"])
+        .arg(&worktree)
+        .current_dir(repo)
+        .status();
+    let _ = std::fs::remove_dir_all(&worktree);
+    let _ = Command::new("git")
+        .args(["worktree", "prune"])
+        .current_dir(repo)
+        .status();
+    let _ = Command::new("git")
+        .args(["branch", "-D", name])
+        .current_dir(repo)
+        .status();
+}
+
+#[tokio::test]
+#[ignore = "本物の claude を起動し、アカウントのクォータを消費する（make test-cli）"]
+async fn 本物のclaudeがパーサを直しゲートを通ってから差し替わる() {
+    // テスト計画フェーズ7「修復フロー」を実物で通す。擬似 claude の訓練
+    // （tests/selfheal.rs）が確かめるのは順序と受け渡しで、**本当に直せるのか**は
+    // ここでしか分からない。課題は「新しい形式に対応しつつ、過去のフィクスチャを
+    // 1つも壊さない」という、実際のフォーマット変更と同じ形にしてある。
+    let repo = repo_root();
+    reset_maintenance_worktree(&repo);
+
+    let dir = WorkDir::new("selfheal");
+    let config = Config {
+        state_dir: Some(dir.path().join("state")),
+        selfheal_repo_dir: Some(repo.clone()),
+        // 実物は時間がかかるので、訓練では1回だけ挑戦させる
+        selfheal_retry: 1,
+        ..Config::default()
+    };
+    let ops = std::sync::Arc::new(PlantedCanary {
+        inner: agentdashboard_core::selfheal::ops::HostOps::new(repo.clone(), "claude".to_string()),
+    });
+    let server =
+        common::TestServer::start_with_selfheal_and_program(config, ops, "claude".to_string())
+            .await;
+
+    // 検知させるための見張り対象。指示は送らないので、ここでは考えさせない
+    let watched = server
+        .manager
+        .spawn(&dir.as_str())
+        .expect("セッションを起動できること");
+    let mut watcher = common::Watcher::attach(&watched);
+    accept_trust_prompt_if_any(&watched, &mut watcher).await;
+
+    let transcript = dir.path().join("session.jsonl");
+    let payload = serde_json::json!({
+        "session_id": "11111111-2222-3333-4444-555555555555",
+        "transcript_path": transcript.to_string_lossy(),
+        "hook_event_name": "SessionStart",
+    });
+    let status = server
+        .post_hook(watched.token(), "SessionStart", &payload.to_string())
+        .await;
+    assert_eq!(status, 204);
+
+    // 知らない版を初めて見た、という状況を作る
+    std::fs::write(
+        &transcript,
+        concat!(
+            r#"{"type":"user","uuid":"u1","timestamp":"2026-07-29T00:00:00.000Z","version":"9.9.9","message":{"role":"user","content":"こんにちは"}}"#,
+            "\n",
+        ),
+    )
+    .expect("トランスクリプトを書けること");
+
+    // 本物のビルドと本物のセッションが動くので、待ちは分単位で見る
+    let deadline = Instant::now() + Duration::from_secs(45 * 60);
+    let pointer = dir
+        .path()
+        .join("state")
+        .join(agentdashboard_core::parser::PARSER_POINTER);
+    let original = std::fs::read_to_string(&pointer).expect("最初のポインタが書かれている");
+    let worktree = repo
+        .join(agentdashboard_core::selfheal::ops::WORKTREE_DIR)
+        .join(agentdashboard_core::selfheal::MAINTENANCE_NAME);
+
+    loop {
+        let now = std::fs::read_to_string(&pointer).unwrap_or_default();
+        if !now.is_empty() && now != original {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "45分以内にパーサが差し替わりませんでした。worktree: {}",
+            worktree.display()
+        );
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+
+    // 対応表に載っている
+    let state =
+        agentdashboard_core::selfheal::state::SelfhealState::load(&dir.path().join("state"));
+    assert!(
+        state.known_versions.contains("9.9.9"),
+        "差し替えたのに対応表へ載っていない"
+    );
+
+    // 直した結果が worktree にコミットされている（プッシュはしない）
+    let log = Command::new("git")
+        .args(["log", "--oneline", "-1"])
+        .current_dir(&worktree)
+        .output()
+        .expect("git log を実行できること");
+    let log = String::from_utf8_lossy(&log.stdout);
+    assert!(
+        log.contains("transcript-parser"),
+        "修復のコミットが見当たらない: {log}"
+    );
+
+    watched.kill();
+    server
+        .manager
+        .archive(watched.meta().card_id)
+        .expect("片付けられること");
+}
