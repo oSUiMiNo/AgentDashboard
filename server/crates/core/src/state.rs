@@ -13,7 +13,7 @@
 //! だけの関数で、時計も配信も触らない。おかげで設計§5 の遷移表をそのまま表駆動テストに
 //! 落とせる。実際に時計を読んで配信するのは [`crate::session::SessionManager`] の仕事。
 
-use protocol::{ClaudeSessionId, SessionMeta, SessionStatus, Timestamp};
+use protocol::{ClaudeSessionId, PermissionMode, SessionMeta, SessionStatus, Timestamp};
 use serde_json::Value;
 
 /// Claude Code に注入するフックイベント（設計§5 の9種）。
@@ -116,6 +116,18 @@ impl HookInput {
     pub fn last_assistant_message(&self) -> Option<&str> {
         self.text("last_assistant_message")
     }
+
+    /// いまの権限モード。
+    ///
+    /// **全てのフックが運んでくるわけではない**（設計§11 の実測）。運ぶのは
+    /// UserPromptSubmit / PreToolUse / PostToolUse / Stop の4つで、`SessionStart` /
+    /// `Notification` / `SessionEnd` には入らない。無いことは異常ではないので、
+    /// 届いたときだけ更新する。
+    ///
+    /// 値は CLI 側の正規値（「毎回確認する」は `manual` ではなく `default`）で来る。
+    pub fn permission_mode(&self) -> Option<PermissionMode> {
+        self.text("permission_mode").map(PermissionMode::new)
+    }
 }
 
 /// 権限確認を表す `notification_type`（公式ドキュメントに明記された値）。
@@ -174,6 +186,15 @@ pub fn apply(meta: &mut SessionMeta, input: &HookInput, now: Timestamp) -> Chang
         && meta.claude_session_id != Some(session_id)
     {
         meta.claude_session_id = Some(session_id);
+        changed.meta = true;
+    }
+
+    // 権限モードは CLI 側が正（設計§1）。届いたときだけ、しかも**変わったときだけ**
+    // 更新する。フックはツールコールのたびに飛んでくるので、毎回配信すると無駄が大きい
+    if let Some(mode) = input.permission_mode()
+        && meta.permission_mode.as_ref() != Some(&mode)
+    {
+        meta.permission_mode = Some(mode);
         changed.meta = true;
     }
 
@@ -296,6 +317,7 @@ mod tests {
             card_id: CardId::new(),
             project: ProjectId("/home/example/dev/app".to_string()),
             claude_session_id: None,
+            permission_mode: None,
             status,
             subagent_active: 0,
             last_activity_at: NOW - 5_000,
@@ -484,6 +506,66 @@ mod tests {
             Some("テストが通りました")
         );
         assert!(changed.meta, "差分では運べないのでカード全体を送り直す");
+    }
+
+    #[test]
+    fn 権限モードはフックで張り替えられる() {
+        let mut meta = meta_with(SessionStatus::Working);
+        let changed = apply(
+            &mut meta,
+            &HookInput::new(
+                HookEvent::PreToolUse,
+                json!({ "permission_mode": "acceptEdits" }),
+            ),
+            NOW,
+        );
+        assert_eq!(
+            meta.permission_mode,
+            Some(PermissionMode::new("acceptEdits"))
+        );
+        assert!(changed.meta, "差分では運べないのでカード全体を送り直す");
+    }
+
+    #[test]
+    fn 同じ権限モードのフックでは配信しない() {
+        // フックはツールコールのたびに飛んでくる。毎回カード全体を送ると無駄が大きい
+        let mut meta = meta_with(SessionStatus::Working);
+        meta.permission_mode = Some(PermissionMode::new("default"));
+        meta.hooks_seen = true;
+        meta.last_activity_at = NOW;
+
+        let changed = apply(
+            &mut meta,
+            &HookInput::new(
+                HookEvent::PostToolUse,
+                json!({ "permission_mode": "default" }),
+            ),
+            NOW,
+        );
+        assert!(!changed.meta, "変わっていないのに送り直してはいけない");
+    }
+
+    #[test]
+    fn 権限モードを運ばないフックでは消さない() {
+        // SessionStart / Notification / SessionEnd には載らない（設計§11 の実測）。
+        // 「無い」を「不明になった」と解釈すると、表示が点滅する
+        let mut meta = meta_with(SessionStatus::Working);
+        meta.permission_mode = Some(PermissionMode::new("plan"));
+
+        apply(&mut meta, &hook(HookEvent::Notification), NOW);
+        assert_eq!(meta.permission_mode, Some(PermissionMode::new("plan")));
+    }
+
+    #[test]
+    fn フックのmanualは正規値へ寄る() {
+        // CLI とフックで綴りが違う。寄せないと切り替わったように見える
+        let mut meta = meta_with(SessionStatus::Working);
+        apply(
+            &mut meta,
+            &HookInput::new(HookEvent::Stop, json!({ "permission_mode": "manual" })),
+            NOW,
+        );
+        assert_eq!(meta.permission_mode, Some(PermissionMode::new("default")));
     }
 
     #[test]

@@ -19,6 +19,7 @@
 pub mod hooks_settings;
 pub mod input;
 pub mod lifecycle;
+pub mod permission;
 pub mod pty;
 
 use crate::{
@@ -29,7 +30,8 @@ use crate::{
 use bytes::Bytes;
 use hooks_settings::HookSettings;
 use protocol::{
-    CardId, ClaudeSessionId, NodeId, ProjectId, SessionMeta, SessionStatus, Timestamp, TreeNode,
+    CardId, ClaudeSessionId, NodeId, PermissionMode, ProjectId, SessionMeta, SessionStatus,
+    Timestamp, TreeNode,
     frame::{self, FrameKind},
     ipc::ParsedNode,
     ws::ServerMessage,
@@ -86,6 +88,25 @@ const STALLED_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 /// CR まで飲み込む。人の打鍵より十分速く、TUI の取りこぼしより十分遅い値にする。
 const INSTRUCTION_SETTLE: Duration = Duration::from_millis(30);
 
+/// フッタを探すときに読むスクロールバックの末尾の長さ（バイト）。
+///
+/// フッタは画面が更新されるたびに書き直されるので、末尾さえ見れば足りる。全体
+/// （既定 1MiB）を毎秒コピーすると、セッション数だけ無駄が積み上がる。
+const FOOTER_TAIL: usize = 32 * 1024;
+
+/// Shift+Tab（backtab）。TUI の権限モードを1つ進める。
+const CYCLE_KEY: &[u8] = b"\x1b[Z";
+
+/// 切替で Shift+Tab を押す上限。
+///
+/// 実測した巡回は最大4モード（bypassPermissions 起動時。設計§11）なので、一巡して
+/// 戻ったことは押す回数より前に検知できる。上限は暴走を止めるための最後の歯止め。
+const CYCLE_LIMIT: usize = 8;
+
+/// 1回押したあと、画面が落ち着くのを待つ上限。
+const CYCLE_SETTLE: Duration = Duration::from_millis(1_500);
+const CYCLE_STEP: Duration = Duration::from_millis(100);
+
 pub fn now_ms() -> Timestamp {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -105,6 +126,24 @@ pub enum SessionError {
     NotFound(CardId),
     #[error("フック設定を用意できませんでした: {0}")]
     Settings(String),
+}
+
+/// 権限モードの切替に失敗した理由（設計§6）。
+///
+/// **黙って諦めない**ための型。「押したのに変わらない、理由も分からない」が一番困るので、
+/// 何が起きたのかをそのまま画面へ出せる文にする。
+#[derive(Debug, thiserror::Error)]
+pub enum SwitchError {
+    #[error("いまのモードを読み取れませんでした。ターミナルの表示を確認してください")]
+    Unreadable,
+    #[error(
+        "このセッションでは {0} へ切り替えられません。\
+        Shift+Tab の巡回に入らないモードです（確認しないモードは起動時にしか選べず、\
+        全承認をスキップは起動時に選んだセッションでだけ切り替えられます）"
+    )]
+    Unreachable(String),
+    #[error("端末へ書き込めませんでした: {0}")]
+    Write(String),
 }
 
 /// スクロールバック用の固定容量バッファ。
@@ -141,6 +180,15 @@ impl RingBuffer {
 
     pub fn snapshot(&self) -> Vec<u8> {
         self.buffer.iter().copied().collect()
+    }
+
+    /// 末尾の `limit` バイトだけを取り出す。
+    ///
+    /// フッタを探すだけなら全体を複製する必要が無い。見張りは1秒ごとに全セッションを
+    /// 見て回るので、ここで 1MiB を複製すると本数だけ無駄が積み上がる。
+    pub fn tail(&self, limit: usize) -> Vec<u8> {
+        let skip = self.buffer.len().saturating_sub(limit);
+        self.buffer.iter().skip(skip).copied().collect()
     }
 
     pub fn len(&self) -> usize {
@@ -257,6 +305,103 @@ impl Session {
     pub fn scrollback_text(&self) -> String {
         let payload = self.ring.lock().expect("ロックが壊れていない").snapshot();
         String::from_utf8_lossy(&payload).into_owned()
+    }
+
+    /// 端末の**末尾だけ**を文字列として覗く。
+    ///
+    /// 権限モードのフッタを読むための口（設計§11）。フッタは画面が更新されるたびに
+    /// 書き直されるので末尾に必ず現れる。1秒周期の見張りから毎回呼ばれるため、
+    /// [`Session::scrollback_text`] のように全体を複製してはいけない。
+    pub fn scrollback_tail(&self, limit: usize) -> String {
+        let payload = self.ring.lock().expect("ロックが壊れていない").tail(limit);
+        String::from_utf8_lossy(&payload).into_owned()
+    }
+
+    /// いまの権限モード（分かっていれば）。
+    pub fn permission_mode(&self) -> Option<PermissionMode> {
+        self.meta
+            .lock()
+            .expect("ロックが壊れていない")
+            .permission_mode
+            .clone()
+    }
+
+    /// 端末に出ている内容から、いまのモードを読む。
+    fn read_footer_mode(&self) -> Option<PermissionMode> {
+        permission::parse_footer(&self.scrollback_tail(FOOTER_TAIL))
+    }
+
+    /// モードを控える。変わっていれば `true`。
+    fn store_permission_mode(&self, mode: PermissionMode) -> bool {
+        let mut meta = self.meta.lock().expect("ロックが壊れていない");
+        if meta.permission_mode.as_ref() == Some(&mode) {
+            return false;
+        }
+        meta.permission_mode = Some(mode);
+        true
+    }
+
+    /// 権限モードを目的の値へ切り替える（設計§6）。
+    ///
+    /// # 巡回順を決め打ちしない
+    ///
+    /// Shift+Tab の巡回に入るモードは起動条件とアカウントで変わり、`dontAsk` は
+    /// そもそも入らない（設計§11 の実測）。そこで **1回押すごとに読んで、目的に着くまで
+    /// 繰り返す**。出発点へ戻ったら一巡＝到達できないと判定して打ち切る。
+    ///
+    /// # 送る前に画面を確かめる
+    ///
+    /// 現在のモードが読めない＝フッタが出ていない（メニューや確認が出ている）ときは
+    /// **送らない**。このPJTは、画面を見ずにキーを送って別の相手に届いた事故を
+    /// 実測している（初期実装フェーズ3）。
+    pub async fn switch_permission_mode(
+        &self,
+        target: &PermissionMode,
+    ) -> Result<PermissionMode, SwitchError> {
+        let start = self.read_footer_mode().ok_or(SwitchError::Unreadable)?;
+        if &start == target {
+            self.store_permission_mode(start.clone());
+            return Ok(start);
+        }
+
+        for _ in 0..CYCLE_LIMIT {
+            self.write_input(CYCLE_KEY)
+                .map_err(|err| SwitchError::Write(format!("{err:#}")))?;
+            let Some(current) = self.wait_for_footer_change().await else {
+                continue;
+            };
+            if &current == target {
+                self.store_permission_mode(current.clone());
+                return Ok(current);
+            }
+            if current == start {
+                // 一巡して戻ってきた。これ以上押しても同じところを回るだけ
+                self.store_permission_mode(current);
+                return Err(SwitchError::Unreachable(target.to_string()));
+            }
+        }
+
+        if let Some(current) = self.read_footer_mode() {
+            self.store_permission_mode(current);
+        }
+        Err(SwitchError::Unreachable(target.to_string()))
+    }
+
+    /// 1回押したあと、フッタの表示が落ち着くまで待って読む。
+    ///
+    /// 描画の途中で読むと、書き換わる前の古いフッタを掴む。初期実装フェーズ5で
+    /// 「描画中に流し込んだ指示が静かに消える」事故を実測しているのと同じ性質の話。
+    async fn wait_for_footer_change(&self) -> Option<PermissionMode> {
+        let before = self.read_footer_mode();
+        let deadline = tokio::time::Instant::now() + CYCLE_SETTLE;
+        while tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(CYCLE_STEP).await;
+            let current = self.read_footer_mode();
+            if current.is_some() && current != before {
+                return current;
+            }
+        }
+        self.read_footer_mode()
     }
 
     /// 合流済みのバイトをスクロールバックへ追記し、購読者へ配る。
@@ -436,15 +581,30 @@ impl Session {
         (state::apply(&mut meta, input, now_ms()), new_path)
     }
 
-    /// 停滞していないか見る（設計§5 のタイマー）。
-    /// 見張りの1周ぶんをこのセッションに適用する（停滞とフック未受信）。
-    fn sweep(&self, threshold_secs: u64) -> bool {
+    /// 見張りの1周ぶんをこのセッションに適用する（停滞・フック未受信・権限モード）。
+    ///
+    /// 権限モードの読み取りをここへ相乗りさせているのは、**フックだけでは追従できない**
+    /// ため（設計§11）。`SessionStart` は `permission_mode` を運ばず、Shift+Tab では
+    /// フックが1件も発火しない。つまり起動直後と、利用者がターミナルで切り替えた直後は、
+    /// 端末のフッタを読む以外に知る手段が無い。
+    ///
+    /// 戻り値は「状態の差分を配信すべきか」。モードは差分メッセージ（`status`）に
+    /// 載らないので、変わったときはカード全体を送り直す必要がある（[`Changed::meta`]）。
+    fn sweep(&self, threshold_secs: u64) -> Changed {
+        let mode_changed = match self.read_footer_mode() {
+            Some(mode) => self.store_permission_mode(mode),
+            None => false,
+        };
+
         let saw_output = self.saw_output.load(Ordering::Relaxed);
         let now = now_ms();
         let mut meta = self.meta.lock().expect("ロックが壊れていない");
         let stalled = state::sweep_stalled(&mut meta, now, threshold_secs);
         let silent = state::sweep_hook_silence(&mut meta, now, threshold_secs, saw_output);
-        stalled || silent
+        Changed {
+            status: stalled || silent,
+            meta: mode_changed,
+        }
     }
 
     /// 差分配信用の値をまとめて取り出す。
@@ -534,7 +694,24 @@ impl SessionManager {
 
     /// 指定した作業ディレクトリで新しいセッションを起動する。
     pub fn spawn(self: &Arc<Self>, cwd: &str) -> Result<Arc<Session>, SessionError> {
-        self.spawn_with(cwd, None, &[])
+        self.spawn_with(cwd, None, &[], None)
+    }
+
+    /// 権限モードを指定してセッションを起動する（設計§4）。
+    ///
+    /// `mode` が `None` なら CLI に**何も渡さない**。利用者の `permissions.defaultMode` を
+    /// 尊重するという意味なので、`manual` を勝手に補ってはいけない。
+    ///
+    /// 指定した値は [`SessionMeta`] の**初期値**として控える。ただし本当にそのモードで
+    /// 起動するとは限らない（`auto` は条件を満たさないと静かに `manual` になる。設計§11）
+    /// ので、正はあくまで CLI 側にある。1秒周期の見張りがフッタを読んで実態へ訂正する。
+    pub fn spawn_with_mode(
+        self: &Arc<Self>,
+        cwd: &str,
+        mode: Option<PermissionMode>,
+    ) -> Result<Arc<Session>, SessionError> {
+        let args = lifecycle::permission_mode_args(mode.as_ref());
+        self.spawn_with(cwd, None, &args, mode)
     }
 
     /// 起動引数を足してセッションを起動する（設計§9 の修復セッション）。
@@ -546,7 +723,7 @@ impl SessionManager {
         cwd: &str,
         extra_args: &[String],
     ) -> Result<Arc<Session>, SessionError> {
-        self.spawn_with(cwd, None, extra_args)
+        self.spawn_with(cwd, None, extra_args, None)
     }
 
     /// 既存のセッションを引き継いで起動する（設計§6 の resume）。
@@ -559,7 +736,7 @@ impl SessionManager {
         cwd: &str,
         session_id: ClaudeSessionId,
     ) -> Result<Arc<Session>, SessionError> {
-        self.spawn_with(cwd, Some(session_id), &[])
+        self.spawn_with(cwd, Some(session_id), &[], None)
     }
 
     fn spawn_with(
@@ -567,6 +744,7 @@ impl SessionManager {
         cwd: &str,
         resume: Option<ClaudeSessionId>,
         extra_args: &[String],
+        initial_mode: Option<PermissionMode>,
     ) -> Result<Arc<Session>, SessionError> {
         let path = PathBuf::from(cwd);
         if !path.exists() {
@@ -622,6 +800,9 @@ impl SessionManager {
                     // 引き継ぎでは CLI 側が決めるので、最初のフックが届くまで空
                     lifecycle::SessionStart::Resume(_) => None,
                 },
+                // 起動時に指定した値は初期値でしかない（設計§11）。フックとフッタが
+                // 実態へ訂正するまでの間、画面を空にしないために持つ
+                permission_mode: initial_mode.clone(),
                 // SessionStart フックが届くまでは「起動した」以上のことが分からない。
                 // 設計§5 の定義どおり Starting から始める
                 status: SessionStatus::Starting,
@@ -664,6 +845,12 @@ impl SessionManager {
                 manager.on_exit(card_id, exit);
             }
         });
+
+        // 全承認をスキップで起動した初回だけ、TUI が責任の受諾を尋ねてくる。
+        // 答えるまで先へ進まないので、こちらで答える（利用者の判断）
+        if initial_mode.as_ref().map(PermissionMode::as_str) == Some("bypassPermissions") {
+            tokio::spawn(answer_bypass_notice(Arc::clone(&session)));
+        }
 
         self.broadcast_meta(&session);
         Ok(session)
@@ -759,6 +946,13 @@ impl SessionManager {
         let _ = self.events.send(message);
     }
 
+    /// カード1枚を全クライアントへ送り直す。
+    ///
+    /// 権限モードのように**差分メッセージ（`status`）に載らない項目**が変わったときに使う。
+    pub fn broadcast_session(&self, session: &Session) {
+        self.broadcast_meta(session);
+    }
+
     fn publish(&self, session: &Arc<Session>, changed: Changed) {
         if changed.meta {
             self.broadcast_meta(session);
@@ -799,14 +993,9 @@ impl SessionManager {
             .cloned()
             .collect();
         for session in sessions {
-            if session.sweep(self.config.stalled_threshold_secs) {
-                self.publish(
-                    &session,
-                    Changed {
-                        status: true,
-                        meta: false,
-                    },
-                );
+            let changed = session.sweep(self.config.stalled_threshold_secs);
+            if changed.any() {
+                self.publish(&session, changed);
             }
         }
     }
@@ -877,6 +1066,63 @@ where
 
 async fn coalesce_loop(session: Arc<Session>, chunks: mpsc::Receiver<Vec<u8>>, window: Duration) {
     coalesce_stream(chunks, window, |merged| session.publish_output(merged)).await;
+}
+
+/// 全承認をスキップで起動したときの、責任の受諾を尋ねる画面に答える（利用者の判断）。
+///
+/// # なぜダッシュボードが答えるのか
+///
+/// 起動ボタンで「全承認をスキップ」を選んだ時点で意思表示は済んでいる、という判断。
+/// ただし**答え方は自己修復と同じ**にする — その画面が出ていることを確かめ、さらに
+/// 「はい」と書かれた選択肢の番号を読んでから、その数字だけを送る。
+///
+/// # 決め打ちで確定を送らない
+///
+/// この画面の既定の選択肢は「いいえ（終了する）」とされている。時間で区切って闇雲に
+/// Enter を送ると、**起動したはずのセッションが黙って終了する**。選択肢を読めなければ
+/// 何も送らず、利用者がターミナルビューで答えられる状態のまま残す。
+async fn answer_bypass_notice(session: Arc<Session>) {
+    /// 画面が出るのを待つ上限。本物の CLI は起動に十数秒かかることがある。
+    const DEADLINE: Duration = Duration::from_secs(60);
+    const STEP: Duration = Duration::from_millis(300);
+
+    let deadline = tokio::time::Instant::now() + DEADLINE;
+    while tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(STEP).await;
+
+        let screen = session.scrollback_tail(FOOTER_TAIL);
+        let lowered = permission::strip_ansi(&screen).to_lowercase();
+        let looks_like_notice = permission::BYPASS_NOTICE_MARKERS
+            .iter()
+            .any(|marker| lowered.contains(marker));
+
+        if !looks_like_notice {
+            // フッタが読めた＝もう通常の画面。一度受け入れた環境では確認自体が出ない
+            if session.read_footer_mode().is_some() {
+                return;
+            }
+            continue;
+        }
+
+        match permission::accept_option_key(&screen) {
+            Some(key) => {
+                tracing::info!(
+                    card_id = %session.card_id,
+                    "全承認をスキップの確認に答えます（選択肢 {key}）"
+                );
+                let _ = session.write_input(key.to_string().as_bytes());
+                // 番号を選んだあとに確定が要る作りもあるので、間を置いて確定を送る
+                tokio::time::sleep(INSTRUCTION_SETTLE).await;
+                let _ = session.write_input(b"\r");
+            }
+            None => tracing::warn!(
+                card_id = %session.card_id,
+                "全承認をスキップの確認が出ていますが、受け入れる選択肢を読み取れませんでした。\
+                ターミナルビューから答えてください"
+            ),
+        }
+        return;
+    }
 }
 
 #[cfg(test)]

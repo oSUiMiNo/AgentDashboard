@@ -12,8 +12,9 @@
 //! 環境を組み立てる関数は「親の環境を読む部分」と「絞り込む部分」を分けてある。絞り込みは
 //! 引数で受け取った変数だけを見る純粋な関数なので、テストがプロセスの環境を書き換えずに済む。
 
+use super::permission;
 use portable_pty::CommandBuilder;
-use protocol::ClaudeSessionId;
+use protocol::{ClaudeSessionId, PermissionMode};
 use std::path::Path;
 
 /// 起動する CLI の実行ファイルを差し替えるための環境変数。
@@ -118,6 +119,25 @@ pub fn build_command_with_extra(
         cmd.arg(arg);
     }
     cmd
+}
+
+/// 権限モードの起動引数を組み立てる（設計§4）。
+///
+/// **指定なしのときは何も付けない。** 空文字や `manual` を明示的に渡さないのが要点で、
+/// 「指定なし」は利用者の設定（`~/.claude/settings.json` の `permissions.defaultMode`）を
+/// 尊重するという意味だから。こちらで `manual` に固定すると、その設定を黙って無視することになる。
+///
+/// **`--dangerously-skip-permissions` は組み立てない。** `--permission-mode
+/// bypassPermissions` と同義の別名だが、同じことを2通りで指定できる状態を持ち込むと、
+/// どちらが使われたかで挙動が違うのではという疑いが常に残る。
+pub fn permission_mode_args(mode: Option<&PermissionMode>) -> Vec<String> {
+    match mode {
+        Some(mode) => vec![
+            "--permission-mode".to_string(),
+            permission::cli_argument(mode),
+        ],
+        None => Vec::new(),
+    }
 }
 
 /// セッションを「新しく始める」のか「続きから始める」のか（設計§6）。
@@ -302,6 +322,65 @@ mod tests {
         assert!(
             !argv.contains(&"--session-id".to_string()),
             "実際: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn モードを指定すると起動引数が2つ増える() {
+        assert_eq!(
+            permission_mode_args(Some(&PermissionMode::new("acceptEdits"))),
+            ["--permission-mode", "acceptEdits"]
+        );
+        // 正規値 default は、CLI が受け付ける綴り manual に直してから渡す
+        assert_eq!(
+            permission_mode_args(Some(&PermissionMode::new("default"))),
+            ["--permission-mode", "manual"]
+        );
+    }
+
+    #[test]
+    fn 指定なしなら起動引数を付けない() {
+        // 利用者の permissions.defaultMode を尊重する。manual を勝手に補わない
+        assert!(permission_mode_args(None).is_empty());
+    }
+
+    #[test]
+    fn 危険な別名はどの経路でも組み立てられない() {
+        // --dangerously-skip-permissions は bypassPermissions と同義だが、
+        // 同じことを2通りで指定できる状態を持ち込まない
+        for mode in [
+            "manual",
+            "acceptEdits",
+            "plan",
+            "auto",
+            "dontAsk",
+            "bypassPermissions",
+        ] {
+            let args = permission_mode_args(Some(&PermissionMode::new(mode)));
+            assert!(
+                !args.iter().any(|arg| arg.contains("dangerously")),
+                "{mode} で危険な別名が出た: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn モードの引数は起動コマンドの末尾に足せる() {
+        let cmd = build_command_with_env(
+            "claude",
+            Path::new("/tmp"),
+            SessionStart::Fresh(ClaudeSessionId::new()),
+            Path::new("/tmp/settings.json"),
+            vec![],
+        );
+        let mut cmd = cmd;
+        for arg in permission_mode_args(Some(&PermissionMode::new("bypassPermissions"))) {
+            cmd.arg(arg);
+        }
+        let argv = argv_of(&cmd);
+        assert_eq!(
+            &argv[argv.len() - 2..],
+            ["--permission-mode", "bypassPermissions"]
         );
     }
 
