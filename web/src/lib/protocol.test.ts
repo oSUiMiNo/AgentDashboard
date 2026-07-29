@@ -1,4 +1,13 @@
-import { isEnded, isHookSilent, selfhealLabel, statusLabel } from './protocol'
+import {
+  isEnded,
+  isHookSilent,
+  PERMISSION_MODES,
+  permissionModeInfo,
+  permissionModeLabel,
+  permissionModeTone,
+  selfhealLabel,
+  statusLabel,
+} from './protocol'
 import type {
   ClientMessage,
   Node,
@@ -87,6 +96,40 @@ describe('サーバと同じ JSON になること', () => {
     )
   })
 
+  it('spawn は権限モードを一緒に運ぶ', () => {
+    // 指定なしは null。空文字や "manual" を送るのとは意味が違い、
+    // 「CLI に何も渡さない＝利用者の既定を尊重する」という意思表示になる
+    const none: ClientMessage = {
+      t: 'spawn',
+      cwd: '/home/example/dev/app',
+      permission_mode: null,
+    }
+    expect(JSON.stringify(none)).toBe(
+      '{"t":"spawn","cwd":"/home/example/dev/app","permission_mode":null}',
+    )
+
+    const bypass: ClientMessage = {
+      t: 'spawn',
+      cwd: '/home/example/dev/app',
+      permission_mode: 'bypassPermissions',
+    }
+    expect(JSON.stringify(bypass)).toBe(
+      '{"t":"spawn","cwd":"/home/example/dev/app","permission_mode":"bypassPermissions"}',
+    )
+  })
+
+  it('set_permission_mode', () => {
+    const message: ClientMessage = {
+      t: 'set_permission_mode',
+      card_id: CARD_ID,
+      // 運ぶのは正規値。CLI の別名 manual に寄せるのはサーバ側の仕事
+      mode: 'default',
+    }
+    expect(JSON.stringify(message)).toBe(
+      `{"t":"set_permission_mode","card_id":"${CARD_ID}","mode":"default"}`,
+    )
+  })
+
   it('SessionMeta は hooks_seen を持つ', () => {
     // Rust 側 `session_metaが往復する` と同じ形。片方だけ足すと
     // 「繋がるのに警告が出ない」状態になる
@@ -94,7 +137,7 @@ describe('サーバと同じ JSON になること', () => {
       '{"card_id":"' +
       CARD_ID +
       '","project":"/dev/app","claude_session_id":null,' +
-      '"status":{"kind":"unknown"},"subagent_active":0,"last_activity_at":1,' +
+      '"permission_mode":null,"status":{"kind":"unknown"},"subagent_active":0,"last_activity_at":1,' +
       '"last_assistant_message":null,"created_at":1,"hooks_seen":false}'
     const meta = JSON.parse(raw) as SessionMeta
     expect(meta.hooks_seen).toBe(false)
@@ -179,12 +222,49 @@ describe('状態のラベル', () => {
     expect(isEnded({ kind: 'working' })).toBe(false)
   })
 
+  it('権限モードの表から表示名と危険度を引ける', () => {
+    expect(permissionModeLabel('default')).toBe('手動確認')
+    expect(permissionModeLabel('bypassPermissions')).toBe('全承認をスキップ')
+    // まだ分からない状態を「不明」と出せること（空欄にしない）
+    expect(permissionModeLabel(null)).toBe('不明')
+
+    // 危険なモードほど目立つ見た目になる
+    expect(permissionModeTone('bypassPermissions')).not.toBe(
+      permissionModeTone('default'),
+    )
+    expect(permissionModeTone('dontAsk')).toBe(
+      permissionModeTone('bypassPermissions'),
+    )
+  })
+
+  it('表に無いモードでも落ちずにそのまま表示する', () => {
+    // CLI がモードを増やしても画面が壊れないこと（union 型にしない理由そのもの）
+    const info = permissionModeInfo('まだ知らないモード')
+    expect(info.label).toBe('まだ知らないモード')
+    expect(permissionModeLabel('まだ知らないモード')).toBe('まだ知らないモード')
+    expect(permissionModeTone('まだ知らないモード')).not.toBe('')
+  })
+
+  it('切替で到達できないモードが表に印として入っている', () => {
+    // Shift+Tab の巡回は起動条件とアカウントで変わる（設計§11 の実測）。
+    // 押す前に分かることは押す前に出す
+    const reach = (value: string) =>
+      PERMISSION_MODES.find((mode) => mode.value === value)?.reach
+    expect(reach('default')).toBe('cycle')
+    expect(reach('acceptEdits')).toBe('cycle')
+    expect(reach('plan')).toBe('cycle')
+    expect(reach('auto')).toBe('conditional')
+    expect(reach('dontAsk')).toBe('launch-only')
+    expect(reach('bypassPermissions')).toBe('launch-required')
+  })
+
   it('フック未受信による不明だけを見分けられる', () => {
     // ただの「不明」と出すと利用者は打つ手が分からない。原因を名指しできるときはする
     const base: SessionMeta = {
       card_id: CARD_ID,
       project: '/dev/app',
       claude_session_id: null,
+      permission_mode: null,
       status: { kind: 'unknown' },
       subagent_active: 0,
       last_activity_at: 0,

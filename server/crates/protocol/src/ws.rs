@@ -12,7 +12,7 @@
 //! 1ファイルで見渡せるようにするためと、フロントエンドとの型のズレをテストで
 //! 検出できるようにするため。ハンドラの実装は該当フェーズで足していく。
 
-use crate::{CardId, SessionMeta, SessionStatus, Timestamp, TreeNode};
+use crate::{CardId, PermissionMode, SessionMeta, SessionStatus, Timestamp, TreeNode};
 use serde::{Deserialize, Serialize};
 
 /// ターミナルのフロー制御の指示（設計§10 のウォーターマーク方式）。
@@ -86,9 +86,24 @@ pub enum ClientMessage {
     UnsubPty {
         card_id: CardId,
     },
-    /// 指定した作業ディレクトリで新しいセッションを起動する
+    /// 指定した作業ディレクトリで新しいセッションを起動する。
+    ///
+    /// `permission_mode` が `None` のときは **CLI に何も渡さない**。空文字や `manual` を
+    /// 明示的に渡すのとは意味が違い、利用者の `permissions.defaultMode` を尊重するという
+    /// 意思表示になる。
     Spawn {
         cwd: String,
+        permission_mode: Option<PermissionMode>,
+    },
+    /// 走っているセッションの権限モードを切り替える。
+    ///
+    /// 実体は PTY 上の TUI なので、サーバが Shift+Tab を送って**目的のモードへ着くまで
+    /// 繰り返す**（設計§6）。着けない組み合わせがある（`dontAsk` は巡回に入らない、
+    /// `bypassPermissions` は起動時に有効化した場合だけ）ので、結果は
+    /// [`ServerMessage::Error`] で返りうる。
+    SetPermissionMode {
+        card_id: CardId,
+        mode: PermissionMode,
     },
     /// Composer からの指示送信。
     ///
@@ -189,7 +204,7 @@ mod tests {
     #![allow(non_snake_case)]
 
     use super::*;
-    use crate::{ClaudeSessionId, Node, NodeId, ProjectId};
+    use crate::{ClaudeSessionId, Node, NodeId, PermissionMode, ProjectId};
 
     fn roundtrip<T>(value: &T) -> T
     where
@@ -204,6 +219,7 @@ mod tests {
             card_id: CardId::new(),
             project: ProjectId("/home/example/dev/app".to_string()),
             claude_session_id: Some(ClaudeSessionId::new()),
+            permission_mode: Some(PermissionMode::new("acceptEdits")),
             status: SessionStatus::Working,
             subagent_active: 1,
             last_activity_at: 1_700_000_000_000,
@@ -227,6 +243,15 @@ mod tests {
             ClientMessage::UnsubPty { card_id },
             ClientMessage::Spawn {
                 cwd: "/home/example/dev/app".to_string(),
+                permission_mode: None,
+            },
+            ClientMessage::Spawn {
+                cwd: "/home/example/dev/app".to_string(),
+                permission_mode: Some(PermissionMode::new("bypassPermissions")),
+            },
+            ClientMessage::SetPermissionMode {
+                card_id,
+                mode: PermissionMode::new("acceptEdits"),
             },
             ClientMessage::SendInput {
                 card_id,
@@ -334,6 +359,28 @@ mod tests {
         assert_eq!(
             text,
             format!(r#"{{"t":"pty_flow","card_id":"{card_id}","state":"pause"}}"#)
+        );
+
+        // 起動の指定なしは `null` として運ぶ。ブラウザ側も同じ形で組み立てる
+        let text = serde_json::to_string(&ClientMessage::Spawn {
+            cwd: "/home/example/dev/app".to_string(),
+            permission_mode: None,
+        })
+        .unwrap();
+        assert_eq!(
+            text,
+            r#"{"t":"spawn","cwd":"/home/example/dev/app","permission_mode":null}"#
+        );
+
+        let text = serde_json::to_string(&ClientMessage::SetPermissionMode {
+            card_id,
+            mode: PermissionMode::new("manual"),
+        })
+        .unwrap();
+        assert_eq!(
+            text,
+            format!(r#"{{"t":"set_permission_mode","card_id":"{card_id}","mode":"default"}}"#),
+            "CLI の別名 manual は正規値 default に寄せてから運ぶ"
         );
 
         let text = serde_json::to_string(&ServerMessage::Hello {

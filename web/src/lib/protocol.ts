@@ -19,12 +19,29 @@ export type SessionStatus =
   | { kind: 'ended'; ok: boolean }
   | { kind: 'unknown' }
 
+/**
+ * セッションの権限モード（`--permission-mode` の値）。
+ *
+ * Rust 側 `PermissionMode` と同じく**ただの文字列**。CLI がモードを増やしても
+ * 古い画面が落ちないよう、union 型にはしない。知らない値はそのまま表示する。
+ *
+ * 運ばれてくるのは常に**正規値**（「毎回確認する」モードは `manual` ではなく
+ * `default`）。寄せるのはサーバ側の仕事なので、ここでは変換しない。
+ */
+export type PermissionMode = string
+
 /** 一覧の小窓1枚分の情報。 */
 export interface SessionMeta {
   card_id: CardId
   /** 作業ディレクトリの絶対パス。一覧のグループ化キーになる */
   project: string
   claude_session_id: string | null
+  /**
+   * いまの権限モード。`null` は「まだ分からない」。
+   *
+   * 空欄にせず「不明」と出せるようにするための `null`（`hooks_seen` と同じ理由）。
+   */
+  permission_mode: PermissionMode | null
   status: SessionStatus
   subagent_active: number
   last_activity_at: number
@@ -97,7 +114,9 @@ export type FlowState = 'pause' | 'resume'
 export type ClientMessage =
   | { t: 'sub_pty'; card_id: CardId; cols: number; rows: number }
   | { t: 'unsub_pty'; card_id: CardId }
-  | { t: 'spawn'; cwd: string }
+  /** `permission_mode` が null のときは CLI に何も渡さない（利用者の既定を尊重する） */
+  | { t: 'spawn'; cwd: string; permission_mode: PermissionMode | null }
+  | { t: 'set_permission_mode'; card_id: CardId; mode: PermissionMode }
   | { t: 'resize'; card_id: CardId; cols: number; rows: number }
   | { t: 'pty_flow'; card_id: CardId; state: FlowState }
   | { t: 'kill'; card_id: CardId }
@@ -168,6 +187,136 @@ export function selfhealLabel(phase: SelfhealPhase): string {
       return '自動修復に失敗しました'
     case 'cooldown':
       return '同じ版への再挑戦を控えています'
+  }
+}
+
+/** 権限モードの危険度。表示の強さを決めるのに使う。 */
+export type PermissionDanger = 'low' | 'medium' | 'high'
+
+/**
+ * セッション画面から Shift+Tab で**そのモードへ行けるか**。
+ *
+ * CLI の巡回は `default → acceptEdits → plan` が基本で、`bypassPermissions` は
+ * 起動時に有効化した場合だけ、`auto` はアカウントの条件を満たす場合だけ加わる。
+ * `dontAsk` は**巡回に一切入らない**（起動時にしか選べない）。押す前に分かることは
+ * 押す前に出す、という判断のための印。
+ */
+export type PermissionReach =
+  /** いつでも巡回に入っている */
+  | 'cycle'
+  /** アカウントの条件次第で巡回に入る */
+  | 'conditional'
+  /** 起動時に選んだセッションでだけ巡回に入る */
+  | 'launch-required'
+  /** 巡回に入らない。起動時にしか選べない */
+  | 'launch-only'
+
+export interface PermissionModeInfo {
+  value: PermissionMode
+  label: string
+  description: string
+  danger: PermissionDanger
+  reach: PermissionReach
+}
+
+/**
+ * Claude Code の権限モード表（`claude --help` の choices と公式ドキュメント）。
+ *
+ * **サービスごとの表**という形にしてある。codex 等を後から対象に足すときは、
+ * 同じ形の表をもう1つ持てばよい（今回は Claude Code の分だけを埋める）。
+ *
+ * 値は**正規値**で持つ。「毎回確認する」モードは CLI では `manual` と綴るが、
+ * フックと設定では `default` になる（サーバ側が寄せてから届く）。
+ */
+export const PERMISSION_MODES: PermissionModeInfo[] = [
+  {
+    value: 'default',
+    label: '手動確認',
+    description: 'ツールごとに確認を出す（既定）',
+    danger: 'low',
+    reach: 'cycle',
+  },
+  {
+    value: 'acceptEdits',
+    label: '編集を自動承認',
+    description: 'ファイル編集だけ確認を飛ばす',
+    danger: 'medium',
+    reach: 'cycle',
+  },
+  {
+    value: 'plan',
+    label: 'プラン',
+    description: '計画を立てるだけで変更しない',
+    danger: 'low',
+    reach: 'cycle',
+  },
+  {
+    value: 'auto',
+    label: '自動',
+    description: '分類器の判断で自動実行する',
+    danger: 'medium',
+    reach: 'conditional',
+  },
+  {
+    value: 'dontAsk',
+    label: '確認しない',
+    description: '事前に許可したツールだけを実行する',
+    danger: 'high',
+    reach: 'launch-only',
+  },
+  {
+    value: 'bypassPermissions',
+    label: '全承認をスキップ',
+    description: '権限確認そのものを行わない',
+    danger: 'high',
+    reach: 'launch-required',
+  },
+]
+
+/**
+ * モードの情報を引く。**表に無い値でも落ちない。**
+ *
+ * CLI がモードを増やしたときに画面が壊れないことを優先する。知らない値は
+ * 受け取った文字列をそのまま表示名にし、危険度は判断できないので中間に置く。
+ */
+export function permissionModeInfo(mode: PermissionMode): PermissionModeInfo {
+  const known = PERMISSION_MODES.find((entry) => entry.value === mode)
+  if (known) {
+    return known
+  }
+  return {
+    value: mode,
+    label: mode,
+    description: 'このダッシュボードが知らないモードです',
+    danger: 'medium',
+    reach: 'conditional',
+  }
+}
+
+/** モードの表示名。まだ分からない場合は「不明」。 */
+export function permissionModeLabel(mode: PermissionMode | null): string {
+  return mode === null ? '不明' : permissionModeInfo(mode).label
+}
+
+/**
+ * モードのバッジの見た目。
+ *
+ * **危険なモードほど目立たせ、既定のモードは静かに出す。** 一覧の目的は
+ * 「見るべきものが埋もれないこと」なので、全承認をスキップしているセッションが
+ * 並んでいるのに気づかない、という状態を作らない。逆に全部を目立たせると
+ * 何も目立たなくなる。
+ */
+export function permissionModeTone(mode: PermissionMode | null): string {
+  if (mode === null) {
+    return 'border-border text-muted-foreground'
+  }
+  switch (permissionModeInfo(mode).danger) {
+    case 'high':
+      return 'border-red-500/60 bg-red-500/15 text-red-300'
+    case 'medium':
+      return 'border-amber-500/50 bg-amber-500/10 text-amber-300'
+    case 'low':
+      return 'border-border text-muted-foreground'
   }
 }
 

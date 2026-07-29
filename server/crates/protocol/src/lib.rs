@@ -79,6 +79,50 @@ impl fmt::Display for ProjectId {
     }
 }
 
+/// セッションの権限モード（`--permission-mode` の値）。
+///
+/// **列挙型にしない。** CLI 側はモードを増やしてきた実績があり（`auto` / `dontAsk` は
+/// 比較的新しい）、知らない値で古いダッシュボードが落ちるほうが困る。知らない値は
+/// **知らないまま運んで、そのまま表示する**（[`Node::Unknown`] と同じ考え方）。
+/// 表示名・危険度・CLI へ渡す形は、受け手側が表で引く。
+///
+/// # 正規値は `default`、CLI へ渡す形は `manual`
+///
+/// 「毎回確認する」モードは、フックの payload と設定ファイルでは **`default`**、
+/// CLI の `--permission-mode` では **`manual`** という2つの名前を持つ（`--help` の
+/// choices に `default` は無い）。混ざると「manual で起動したのにフックが default と
+/// 言ってきて、別のモードへ変わったように見える」ので、**運ぶ値は常に正規値へ寄せる**。
+/// 変換規則をここに置いているのは、サーバもブラウザも同じ規則で判断する必要があるため。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PermissionMode(pub String);
+
+impl PermissionMode {
+    /// CLI が別名として受け付ける綴り。
+    pub const MANUAL_ALIAS: &'static str = "manual";
+    /// フックと設定ファイルが使う正規の綴り。
+    pub const DEFAULT: &'static str = "default";
+
+    /// 受け取った文字列を正規値へ寄せて包む。知らない値はそのまま通す。
+    pub fn new(raw: impl Into<String>) -> Self {
+        let raw = raw.into();
+        if raw == Self::MANUAL_ALIAS {
+            return Self(Self::DEFAULT.to_string());
+        }
+        Self(raw)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for PermissionMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// 小窓に表示するセッションの状態（設計§5 の導出結果）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -103,6 +147,12 @@ pub struct SessionMeta {
     pub card_id: CardId,
     pub project: ProjectId,
     pub claude_session_id: Option<ClaudeSessionId>,
+    /// いまの権限モード。
+    ///
+    /// `None` は「まだ分からない」— 起動時に指定せず、フックも端末フッタも
+    /// まだ何も教えてくれていない状態。空欄にするのではなく **分からないことを
+    /// 分からないと表示できる**ようにするための `Option`（`hooks_seen` と同じ理由）。
+    pub permission_mode: Option<PermissionMode>,
     pub status: SessionStatus,
     /// 稼働中サブエージェント数。バッジ表示用で、status とは独立に増減する
     pub subagent_active: u32,
@@ -260,6 +310,7 @@ mod tests {
             card_id: CardId::new(),
             project: ProjectId("/home/example/dev/app".to_string()),
             claude_session_id: Some(ClaudeSessionId::new()),
+            permission_mode: Some(PermissionMode::new("acceptEdits")),
             status: SessionStatus::WaitingPermission,
             subagent_active: 2,
             last_activity_at: 1_700_000_000_000,
@@ -268,6 +319,27 @@ mod tests {
             hooks_seen: true,
         };
         assert_eq!(roundtrip(&meta), meta);
+    }
+
+    #[test]
+    fn manualは正規値のdefaultへ寄せられる() {
+        // CLI では manual、フックと設定では default。混ざると「起動したモードと
+        // フックが言うモードが違う」ように見えるので、運ぶ値は片方へ寄せる
+        assert_eq!(PermissionMode::new("manual").as_str(), "default");
+        assert_eq!(PermissionMode::new("default").as_str(), "default");
+    }
+
+    #[test]
+    fn 知らないモードはそのまま運ばれる() {
+        // CLI がモードを増やしても古いダッシュボードが落ちないこと（列挙型にしない理由）
+        let unknown = PermissionMode::new("まだ知らないモード");
+        assert_eq!(unknown.as_str(), "まだ知らないモード");
+        assert_eq!(roundtrip(&unknown), unknown);
+        assert_eq!(
+            serde_json::to_string(&unknown).unwrap(),
+            r#""まだ知らないモード""#,
+            "裸の文字列として運ばれること"
+        );
     }
 
     #[test]
