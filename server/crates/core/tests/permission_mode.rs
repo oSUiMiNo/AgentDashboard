@@ -447,3 +447,33 @@ async fn 修復セッションの起動引数は変わっていない() {
     assert!(argv.contains(&"--setting-sources"), "{argv:?}");
     assert!(argv.contains(&"project,local"), "{argv:?}");
 }
+
+/// 押しても画面が変わらないときは、「到達できません」ではなく**そう言う**こと。
+///
+/// 描画が遅れただけの場合に「出発点へ戻った＝一巡した」と読むと、**本当は行ける
+/// モードを行けないと報告する**。理由が違えば利用者の打つ手も違う。
+#[tokio::test]
+async fn キーに反応しないときは到達不能と混同しない() {
+    let manager = common::manager();
+    let (session, _watcher) = common::start_session(&manager).await;
+    manager.sweep_once();
+
+    // 擬似 claude を止めて、押しても画面が変わらない状況を作る
+    session.kill();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let error = session
+        .switch_permission_mode(&PermissionMode::new("plan"))
+        .await
+        .expect_err("反応しないので失敗すること");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("画面が変わりませんでした"),
+        "反応が無いことと到達できないことは別の話: {message}"
+    );
+    assert!(
+        !message.contains("切り替えられません"),
+        "行けるモードを行けないと言ってはいけない: {message}"
+    );
+}

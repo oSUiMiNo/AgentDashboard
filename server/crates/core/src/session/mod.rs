@@ -103,8 +103,11 @@ const CYCLE_KEY: &[u8] = b"\x1b[Z";
 /// 戻ったことは押す回数より前に検知できる。上限は暴走を止めるための最後の歯止め。
 const CYCLE_LIMIT: usize = 8;
 
-/// 1回押したあと、画面が落ち着くのを待つ上限。
-const CYCLE_SETTLE: Duration = Duration::from_millis(1_500);
+/// 1回押したあと、フッタが書き変わるのを待つ上限。
+///
+/// 本物の TUI は再描画が遅れることがある。短く切ると「押しても変わらない」と
+/// 誤って判定する。
+const CYCLE_SETTLE: Duration = Duration::from_millis(3_000);
 const CYCLE_STEP: Duration = Duration::from_millis(100);
 
 pub fn now_ms() -> Timestamp {
@@ -142,6 +145,11 @@ pub enum SwitchError {
         全承認をスキップは起動時に選んだセッションでだけ切り替えられます）"
     )]
     Unreachable(String),
+    #[error(
+        "モードを切り替えるキーを送りましたが、画面が変わりませんでした。\
+        メニューや確認が出ていないか、ターミナルビューで確かめてください"
+    )]
+    NoResponse,
     #[error("端末へ書き込めませんでした: {0}")]
     Write(String),
 }
@@ -364,26 +372,31 @@ impl Session {
             return Ok(start);
         }
 
+        // 1回押すごとに「押す前」と比べる。**押した結果が描かれる前に次を押してはいけない** —
+        // 飛び越して目的地を通り過ぎる
+        let mut previous = start.clone();
         for _ in 0..CYCLE_LIMIT {
             self.write_input(CYCLE_KEY)
                 .map_err(|err| SwitchError::Write(format!("{err:#}")))?;
-            let Some(current) = self.wait_for_footer_change().await else {
-                continue;
+
+            let Some(current) = self.wait_for_footer_move(&previous).await else {
+                // 押しても画面が変わらない。到達できないのとは別の話（メニューが出ている、
+                // 描画が極端に遅い等）なので、**そう言う**。ここで「到達できません」と
+                // 返すと、実際には行けるモードを行けないと嘘をつくことになる
+                return Err(SwitchError::NoResponse);
             };
+            self.store_permission_mode(current.clone());
+
             if &current == target {
-                self.store_permission_mode(current.clone());
                 return Ok(current);
             }
             if current == start {
                 // 一巡して戻ってきた。これ以上押しても同じところを回るだけ
-                self.store_permission_mode(current);
                 return Err(SwitchError::Unreachable(target.to_string()));
             }
+            previous = current;
         }
 
-        if let Some(current) = self.read_footer_mode() {
-            self.store_permission_mode(current);
-        }
         Err(SwitchError::Unreachable(target.to_string()))
     }
 
@@ -391,17 +404,22 @@ impl Session {
     ///
     /// 描画の途中で読むと、書き換わる前の古いフッタを掴む。初期実装フェーズ5で
     /// 「描画中に流し込んだ指示が静かに消える」事故を実測しているのと同じ性質の話。
-    async fn wait_for_footer_change(&self) -> Option<PermissionMode> {
-        let before = self.read_footer_mode();
+    /// 押す前のモードから**動いた**ことを確かめてから読む。
+    ///
+    /// 動かないまま時間切れになったら `None`。ここで「いまの値」を返してしまうと、
+    /// 描画が遅れただけの場合に呼び出し側が「出発点へ戻った＝一巡した」と誤読し、
+    /// **本当は行けるモードを行けないと報告する**。
+    async fn wait_for_footer_move(&self, previous: &PermissionMode) -> Option<PermissionMode> {
         let deadline = tokio::time::Instant::now() + CYCLE_SETTLE;
         while tokio::time::Instant::now() < deadline {
             tokio::time::sleep(CYCLE_STEP).await;
-            let current = self.read_footer_mode();
-            if current.is_some() && current != before {
-                return current;
+            if let Some(current) = self.read_footer_mode()
+                && &current != previous
+            {
+                return Some(current);
             }
         }
-        self.read_footer_mode()
+        None
     }
 
     /// 合流済みのバイトをスクロールバックへ追記し、購読者へ配る。
