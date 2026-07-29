@@ -120,5 +120,8 @@ ci: lint test build ## ローカルCI。静的検査 → テスト → ビルド
 fixtures: ## ゴールデンフィクスチャを採取して匿名化する（本物の claude をホストで実行）
 	./scripts/gen-fixtures.sh
 
-clean: ## ビルド成果物を消す
+clean: ## ビルド成果物を消す（自己修復の作業場所も含む）
 	rm -rf server/target web/dist web/node_modules
+	git worktree remove --force .selfheal/worktrees/dashboard-maintenance 2>/dev/null || true
+	git worktree prune 2>/dev/null || true
+	rm -rf .selfheal
