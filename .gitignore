@@ -19,6 +19,11 @@ node_modules/
 /web/.playwright/
 # Playwright MCP がブラウザ操作の記録を書き出す先
 /.playwright-mcp/
+# 出力先を指定し忘れると、スクリーンショットがリポジトリのルートに落ちる。
+# 実際にフェーズ5で2枚コミットされていた（本リポジトリは公開）。
+# 図版を意図して置くときは png 以外の場所（docs/ 等）を作ってそちらへ入れる
+/*.png
+/*.jpeg
 
 # ローカル実行時の設定（config.toml.example をコピーして使う）
 /config.toml
