@@ -278,6 +278,50 @@ mod tests {
     }
 
     #[test]
+    fn 雛形は全キーを網羅し既定値と一致する() {
+        // `config.toml.example` は利用者が最初に読む設定の一覧であり、README の設定表の
+        // 元ネタでもある。ここが実装より遅れていると、増えたキーの存在に誰も気づけない
+        // （実際にフェーズ5で増えた3キーが雛形に載らないまま残っていた）。
+        //
+        // 「読める」だけでなく「全キーが書かれている」ことまで見るのが要点。
+        // 既定値が入るだけの `from_toml_str` は、キーが抜けていても通ってしまう。
+        let example = include_str!("../../../config.toml.example");
+        let config = Config::from_toml_str(example).expect("雛形が読めること");
+        assert_eq!(
+            config,
+            Config::default(),
+            "雛形の値が既定値と食い違っている"
+        );
+
+        let written: toml::Table = example.parse().expect("雛形が TOML として妥当なこと");
+        let toml::Value::Table(with_values) =
+            toml::Value::try_from(Config::default()).expect("既定値を TOML へ変換できること")
+        else {
+            unreachable!("Config は構造体なのでテーブルになる");
+        };
+        for key in with_values.keys() {
+            assert!(
+                written.contains_key(key),
+                "{key} が config.toml.example に書かれていない"
+            );
+        }
+
+        // Option 型のキーは既定が「未指定」で、TOML へ変換すると消えるため上の走査に乗らない。
+        // 値を書くと利用者の環境に存在しないパスを指すことになるので、雛形では
+        // **コメントとして例示**する。名指しでしか確かめられないので、ここに列挙する
+        for key in ["selfheal_repo_dir", "state_dir"] {
+            assert!(
+                !with_values.contains_key(key),
+                "{key} に既定値が付いた。この列挙から外して通常の走査へ移すこと"
+            );
+            assert!(
+                example.contains(&format!("# {key} =")),
+                "{key} が config.toml.example にコメントとして例示されていない"
+            );
+        }
+    }
+
+    #[test]
     fn 明示したリポジトリが存在しなければ使わない() {
         // 設定の打ち間違いに気づかず「修復したつもり」で別の場所を触るほうが危ない。
         // 実在しないなら None にして、検知の通知だけに落とす
