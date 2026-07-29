@@ -726,9 +726,22 @@ impl SessionManager {
         // JSONL の場所が分かった／変わった時点でパーサへ監視を頼む。resume で別ファイルに
         // なった場合も同じ経路で張り替わる（設計§6）
         if let Some(path) = new_transcript {
-            if let Some(parser) = self.parser.lock().expect("ロックが壊れていない").as_ref()
-            {
-                parser.watch(session.card_id, path);
+            match self.parser.lock().expect("ロックが壊れていない").as_ref() {
+                Some(parser) => {
+                    tracing::info!(
+                        card_id = %session.card_id,
+                        %path,
+                        "パーサへ履歴の監視を頼みました"
+                    );
+                    parser.watch(session.card_id, path);
+                }
+                // ここを黙って落とすと、構造化ビューだけが永久に空のまま残る。
+                // 一覧もターミナルも動くので、利用者からは原因が見えない
+                None => tracing::warn!(
+                    card_id = %session.card_id,
+                    %path,
+                    "パーサが繋がっていないため履歴の監視を頼めません"
+                ),
             }
         }
         self.publish(session, changed);

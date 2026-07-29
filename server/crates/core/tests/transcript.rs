@@ -246,3 +246,46 @@ async fn 知らないカードの履歴は404になる() {
         .await;
     assert_eq!(status, 404);
 }
+
+#[tokio::test]
+async fn 同じサーバの2本目以降のセッションにも履歴が届く() {
+    // フェーズ6の受け入れテストで見つけた破綻の回帰テスト。
+    //
+    // このファイルの他のテストは**1サーバにつき1セッション**しか起動していない。
+    // そのため「2本目のカードの transcript_path がパーサへ渡るか」が一度も踏まれず、
+    // 実運用で2本目以降の構造化ビューが**永久に空のまま**になっていた。
+    // 一覧・ターミナル・状態表示は動くので、気づきにくい壊れ方をする。
+    let dir = work_dir("multi");
+    let server = TestServer::start_with_parser(config_for(&dir)).await;
+
+    let mut sessions = Vec::new();
+    for index in 0..3 {
+        let cwd = dir.join(format!("proj{index}"));
+        std::fs::create_dir_all(&cwd).expect("作業ディレクトリを作れること");
+        let session = server
+            .manager
+            .spawn(&cwd.to_string_lossy())
+            .expect("セッションを起動できること");
+
+        let transcript = cwd.join("session.jsonl");
+        let payload = serde_json::json!({
+            "session_id": format!("11111111-2222-3333-4444-00000000000{index}"),
+            "transcript_path": transcript.to_string_lossy(),
+            "hook_event_name": "SessionStart",
+        });
+        let status = server
+            .post_hook(session.token(), "SessionStart", &payload.to_string())
+            .await;
+        assert_eq!(status, 204, "{index} 本目のフックが受理されること");
+
+        append(&transcript, &sample_lines());
+        sessions.push((index, session));
+    }
+
+    // 起動した順ではなく**全部**について確かめる。1本目だけ通って残りが空、という
+    // のがまさに見つかった壊れ方なので、最後の1本まで見ないと意味がない
+    for (index, session) in &sessions {
+        let nodes = wait_for_nodes(session, 3).await;
+        assert_eq!(nodes.len(), 3, "{index} 本目の履歴が揃っていません");
+    }
+}
