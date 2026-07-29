@@ -190,6 +190,49 @@ fn 拒否されたツールはエラーとして残る() {
 }
 
 #[test]
+fn ツール自身が失敗した場合もエラーとして残る() {
+    // 上の「拒否された」ケースとは別物。拒否は `toolUseResult` が文字列になるが、
+    // ツール自身の失敗は結果ブロックの `is_error` で表される。取り違えると
+    // 「失敗したのに成功の印が付く」形で表に出る（画面では気づけない）。
+    let parsed = Parsed::of(fixture("v2.1.220/failing-tools/session.jsonl"));
+
+    let failed: Vec<&protocol::TreeNode> = parsed
+        .tool_calls()
+        .into_iter()
+        .filter(|node| {
+            matches!(
+                node.node,
+                Node::ToolCall {
+                    status: protocol::ToolStatus::Error,
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert_eq!(
+        failed.len(),
+        1,
+        "存在しないファイルの Read が1件だけ失敗する"
+    );
+
+    // 残りは成功として残る。ひとまとめに失敗扱いされていないこと
+    let ok = parsed
+        .tool_calls()
+        .into_iter()
+        .filter(|node| {
+            matches!(
+                node.node,
+                Node::ToolCall {
+                    status: protocol::ToolStatus::Ok,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(ok, 4, "Read 2件と Edit 2件は成功");
+}
+
+#[test]
 fn ツールコールは直前のアシスタント本文の子になる() {
     // 会話の鎖をそのまま親子にすると階段になるので、意味で親を決めている。
     // 実データで「根がユーザとアシスタントだけ」になることを確認する

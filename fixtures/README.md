@@ -16,23 +16,41 @@ Claude Code が実際に書き出したトランスクリプト（JSONL）の実
 ## ディレクトリ構成
 ```
 fixtures/
-└ v<Claude Code のバージョン>/
-   ├ basic-tools/
-   │   └ session.jsonl              ツールコール・Edit差分・Bash・Write を含む本体
-   └ subagent/
-       ├ session.jsonl              サブエージェントを起動した親セッション
-       └ session/
-           └ subagents/
-               ├ agent-<id>.jsonl      サブエージェント側のトランスクリプト
-               └ agent-<id>.meta.json  親のツールコールIDとエージェント種別
+├ v<Claude Code のバージョン>/
+│  ├ basic-tools/
+│  │   └ session.jsonl              ツールコール・Edit差分・Bash・Write を含む本体
+│  ├ failing-tools/
+│  │   └ session.jsonl              ツール自身が失敗した形（結果ブロックの is_error）と
+│  │                                1ターンで複数ファイルを編集した並び
+│  ├ subagent/
+│  │   ├ session.jsonl              サブエージェントを起動した親セッション
+│  │   └ session/
+│  │       └ subagents/
+│  │           ├ agent-<id>.jsonl      サブエージェント側のトランスクリプト
+│  │           └ agent-<id>.meta.json  親のツールコールIDとエージェント種別
+│  └ nested-subagent/               深さ2以上（meta の鍵が parentAgentId に変わる）
+└ synthetic/                        手書き（下記）
+   ├ rewound/
+   └ interactive-only/
 ```
 
 `agent-*.meta.json` は `agentType` / `toolUseId` / `spawnDepth` を持つ。パーサはこの `toolUseId` を頼りに、親セッションの該当ツールコールへ子ツリーをマウントする（設計§8）。
 
-### `synthetic/` は例外で、手で書いたもの
-`synthetic/` 配下だけは**実採取ではなく手書き**である。`rewound/` は `/rewind` で会話が分岐した状態（同じファイルに `parentUuid: null` の根が2つある）を最小の形で表す。
+「ツールが失敗した」形が2種類あることに注意する。**利用者に拒否された**場合は `toolUseResult` が文字列になり（`basic-tools` の Skill）、**ツール自身が失敗した**場合は結果ブロックの `is_error` が立つ（`failing-tools` の Read）。オブジェクト前提で書くと前者で落ち、`is_error` を見ないと後者が成功として表示される。
 
-手書きにしているのは、この状態の実採取物が対話モードでしか作れず、採取すると環境情報が混入するため（公開リポジトリに置けない）。バージョン別ディレクトリに置いていないのは、特定バージョンの実物ではないことを取り違えないようにするため。**自己修復のテストゲート（過去バージョンの互換確認）には数えない。**
+### `synthetic/` は例外で、手で書いたもの
+`synthetic/` 配下だけは**実採取ではなく手書き**である。
+
+| ラベル | 何を表すか |
+|---|---|
+| `rewound/` | `/rewind` で会話が分岐した状態（同じファイルに `parentUuid: null` の根が2つある）を最小の形で |
+| `interactive-only/` | **対話モードでしか現れないレコード種別**（`file-history-snapshot` / `file-history-delta` / `mode` / `permission-mode` / `summary`）が本文の間に挟まった状態 |
+
+手書きにしているのは、どちらも実採取物が対話モードでしか作れず、採取すると環境情報が混入するため（公開リポジトリに置けない）。バージョン別ディレクトリに置いていないのは、特定バージョンの実物ではないことを取り違えないようにするため。**「過去バージョンを壊していないこと」の担保には数えない**（実物ではないので、バージョン間の互換の証拠にならない）。
+
+ただし**ゲートの巡回対象ではある**。`fixtures/*/*/session.jsonl` を発見して回る作りなので、これらも「不明なイベントを出さずに読めること」を毎回確かめられる。`interactive-only/` を置いている理由がまさにそこにあって、これらの種別は**ヘッドレス採取のフィクスチャには1件も入らない**ため、分類から漏れてもゲートは何も言わない。実際にフェーズ3で `file-history-delta` が漏れており、ファイルを1つ編集するたびに「不明なイベント」が履歴へ混ざっていた。
+
+`interactive-only/` のレコードのうち、キー構成は実物から採った（値は入れ替えてある）。`summary` だけは手元の実データに現れなかったため最小の形にしてあるが、分類は `type` だけで決まるのでゲートの役目は果たす。
 
 ---
 <br/>

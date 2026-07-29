@@ -137,6 +137,12 @@ should_run "subagent" "$@" && run_session "subagent" \
 should_run "nested-subagent" "$@" && run_session "nested-subagent" \
     'サブエージェントを1つ起動してください。そのサブエージェントには「さらに自分でサブエージェントをもう1つ起動して、このディレクトリの notes.md を読ませ、その結果を報告させる」よう指示してください。最終的な報告を1行で要約して答えてください。'
 
+# 失敗したツールコールを採る。basic-tools が持っているのは「利用者に拒否された」形
+# （toolUseResult が文字列になる）で、**ツール自身が失敗した**形は別物。あわせて
+# 1ターンで複数ファイルを編集させ、Edit が連続する並びも入れておく。
+should_run "failing-tools" "$@" && run_session "failing-tools" \
+    'まず missing-file.md を Read ツールで読んでください（このファイルは存在しないので失敗します）。失敗を確認したら、notes.md の2つ目の TODO 行を Edit で "DONE:" に書き換え、続けて calc.py の add 関数の中に説明のコメント行を Edit で1行足してください。最後に何をしたか1行で答えてください。'
+
 # --- 採取結果の点検 ---------------------------------------------------------------
 echo
 echo "=== 採取カバレッジの確認 ==="
@@ -156,6 +162,7 @@ check "sidechain"           '"isSidechain":true'
 check "サブエージェント"    'subagents'
 check "多段ネスト"          '"spawnDepth":2'
 check "親エージェント参照"  'parentAgentId'
+check "失敗したツールコール" '"is_error":true'
 
 echo
 echo "=== 機微情報の除去 ==="
