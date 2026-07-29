@@ -66,4 +66,28 @@ describe('App', () => {
     await screen.findByText('セッションはまだありません')
     expect(fetch).toHaveBeenCalledWith('/api/sessions')
   })
+
+  it('自己修復の進行が段階つきで出る', () => {
+    // 「勝手に直った」を黙って起こさないための表示（設計§9）
+    useWsStore.setState({
+      selfheal: { phase: 'repairing', detail: '1/3 回目' },
+    })
+    render(<App />)
+
+    const banner = screen.getByTestId('selfheal-banner')
+    expect(banner).toHaveTextContent('修復セッションが作業しています')
+    expect(banner).toHaveTextContent('1/3 回目')
+    expect(banner.dataset.phase).toBe('repairing')
+  })
+
+  it('直せなかったときは人が気づける見た目にする', () => {
+    // 直った・進行中と、人の手が要る状態を同じ見た目にすると見落とす
+    useWsStore.setState({
+      selfheal: { phase: 'failed', detail: null },
+    })
+    render(<App />)
+
+    const banner = screen.getByTestId('selfheal-banner')
+    expect(banner.className).toContain('red')
+  })
 })
