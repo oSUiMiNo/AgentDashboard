@@ -8,10 +8,43 @@
 # 使い方: scripts/cargo <cargo のサブコマンドと引数>
 #   例) scripts/cargo build --release
 #       scripts/cargo nextest run
+#
+# 自己修復（設計§9）は同じ入口を、リポジトリ内の別ディレクトリ（修復用の git worktree）
+# に対して使う。そのための切り替えが次の2つ。どちらも**リポジトリからの相対パス**で渡す。
+#   AGENTDASHBOARD_CARGO_DIR         cargo を動かす場所（既定 server）
+#   AGENTDASHBOARD_CARGO_TARGET_DIR  ビルド成果物の置き場所（既定はそれぞれの target/）
+# コンテナへはリポジトリ全体をマウントしているので、worktree もこの1つの入口で扱える。
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE_TAG="agentdashboard-rust:1.97.1"
+CARGO_DIR="${AGENTDASHBOARD_CARGO_DIR:-server}"
+TARGET_DIR="${AGENTDASHBOARD_CARGO_TARGET_DIR:-}"
+
+# 作業場所の指定はリポジトリの中に限る。外を指されるとコンテナから見えない場所を
+# 掴むことになり、「動いているのに何も起きない」という分かりにくい失敗になる。
+case "${CARGO_DIR}" in
+    /* | *..*)
+        echo "エラー: AGENTDASHBOARD_CARGO_DIR はリポジトリ相対で指定してください: ${CARGO_DIR}" >&2
+        exit 1
+        ;;
+esac
+if [[ ! -d "${REPO_ROOT}/${CARGO_DIR}" ]]; then
+    echo "エラー: 作業場所が見つかりません: ${REPO_ROOT}/${CARGO_DIR}" >&2
+    exit 1
+fi
+
+DOCKER_ENV=()
+if [[ -n "${TARGET_DIR}" ]]; then
+    case "${TARGET_DIR}" in
+        /* | *..*)
+            echo "エラー: AGENTDASHBOARD_CARGO_TARGET_DIR はリポジトリ相対で指定してください: ${TARGET_DIR}" >&2
+            exit 1
+            ;;
+    esac
+    mkdir -p "${REPO_ROOT}/${TARGET_DIR}"
+    DOCKER_ENV+=(--env "CARGO_TARGET_DIR=/repo/${TARGET_DIR}")
+fi
 
 # rust-embed は web/dist を「コンパイル時に」読むため、フォルダが無いとビルドが失敗する。
 # vite は build のたびに dist を作り直す（= 一度消える）ので、git で空ディレクトリを
@@ -25,7 +58,8 @@ docker run --rm \
     --volume "${REPO_ROOT}:/repo" \
     --volume "agentdashboard-cargo-registry:/usr/local/cargo/registry" \
     --volume "agentdashboard-cargo-git:/usr/local/cargo/git" \
-    --workdir /repo/server \
+    --workdir "/repo/${CARGO_DIR}" \
     --env CARGO_TERM_COLOR=always \
+    "${DOCKER_ENV[@]}" \
     "${IMAGE_TAG}" \
     cargo "$@"

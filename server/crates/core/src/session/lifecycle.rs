@@ -101,6 +101,25 @@ pub fn build_command(
     build_command_with_env(program, cwd, start, settings, sanitized_env())
 }
 
+/// 起動引数を足して組み立てる（設計§9 の修復セッション用）。
+///
+/// 足すのは修復セッションだけで、利用者が起動する通常のセッションには何も足さない。
+/// 無人で走らせる都合の設定（権限・読み込む設定ソース）を全セッションに広げると、
+/// 利用者の意図しない挙動になる。
+pub fn build_command_with_extra(
+    program: &str,
+    cwd: &Path,
+    start: SessionStart,
+    settings: &Path,
+    extra: &[String],
+) -> CommandBuilder {
+    let mut cmd = build_command_with_env(program, cwd, start, settings, sanitized_env());
+    for arg in extra {
+        cmd.arg(arg);
+    }
+    cmd
+}
+
 /// セッションを「新しく始める」のか「続きから始める」のか（設計§6）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionStart {

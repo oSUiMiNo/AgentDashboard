@@ -489,7 +489,19 @@ impl SessionManager {
 
     /// 指定した作業ディレクトリで新しいセッションを起動する。
     pub fn spawn(self: &Arc<Self>, cwd: &str) -> Result<Arc<Session>, SessionError> {
-        self.spawn_with(cwd, None)
+        self.spawn_with(cwd, None, &[])
+    }
+
+    /// 起動引数を足してセッションを起動する（設計§9 の修復セッション）。
+    ///
+    /// 通常のセッションと同じ扱いで一覧に出る。修復のあいだ何が起きているかを
+    /// 隠さないのが設計の意図なので、専用の入れ物は作らない。
+    pub fn spawn_with_args(
+        self: &Arc<Self>,
+        cwd: &str,
+        extra_args: &[String],
+    ) -> Result<Arc<Session>, SessionError> {
+        self.spawn_with(cwd, None, extra_args)
     }
 
     /// 既存のセッションを引き継いで起動する（設計§6 の resume）。
@@ -502,13 +514,14 @@ impl SessionManager {
         cwd: &str,
         session_id: ClaudeSessionId,
     ) -> Result<Arc<Session>, SessionError> {
-        self.spawn_with(cwd, Some(session_id))
+        self.spawn_with(cwd, Some(session_id), &[])
     }
 
     fn spawn_with(
         self: &Arc<Self>,
         cwd: &str,
         resume: Option<ClaudeSessionId>,
+        extra_args: &[String],
     ) -> Result<Arc<Session>, SessionError> {
         let path = PathBuf::from(cwd);
         if !path.exists() {
@@ -530,7 +543,13 @@ impl SessionManager {
         // 後から書いても間に合わない
         let settings = hooks_settings::write(card_id, self.config.port, &self.hook_program)
             .map_err(|err| SessionError::Settings(format!("{err:#}")))?;
-        let command = lifecycle::build_command(&self.program, &project_path, start, &settings.path);
+        let command = lifecycle::build_command_with_extra(
+            &self.program,
+            &project_path,
+            start,
+            &settings.path,
+            extra_args,
+        );
 
         let (chunk_tx, chunk_rx) = mpsc::channel(CHUNK_QUEUE);
         let (process, exit_rx) = PtyProcess::spawn(

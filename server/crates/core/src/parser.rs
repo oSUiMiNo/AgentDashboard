@@ -103,6 +103,23 @@ pub struct ParserSupervisor {
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Vec<ParsedNode>>>>>,
     next_req: AtomicU64,
     state: Arc<Mutex<ParserState>>,
+    /// 差し替え後に立て直しを頼む口（設計§9）
+    restarts: mpsc::Sender<()>,
+    /// stats の届け先。自己修復が居るときだけ差し込まれる
+    stats_sink: Mutex<Option<mpsc::Sender<StatsReport>>>,
+}
+
+/// パーサが報告してきた健康状態を、自己修復へ渡すときの形。
+///
+/// `ParserEvent` をそのまま渡さないのは、受け手が IPC の型に依存しないようにするため。
+#[derive(Debug, Clone)]
+pub struct StatsReport {
+    pub card_id: CardId,
+    pub records_total: u64,
+    pub parse_errors: u64,
+    pub unknown_types: BTreeMap<String, u64>,
+    pub orphans: u64,
+    pub versions: std::collections::BTreeSet<String>,
 }
 
 impl ParserSupervisor {
@@ -110,6 +127,8 @@ impl ParserSupervisor {
     pub fn start(manager: Arc<SessionManager>, config: Arc<Config>) -> Arc<Self> {
         let (requests, request_rx) = mpsc::channel(REQUEST_QUEUE);
         let (commands, command_rx) = mpsc::channel(REQUEST_QUEUE);
+        // 立て直しの依頼は溜める意味が無い（1回入っていれば十分）
+        let (restarts, restart_rx) = mpsc::channel(1);
 
         let supervisor = Arc::new(Self {
             manager: Arc::clone(&manager),
@@ -119,10 +138,30 @@ impl ParserSupervisor {
             pending: Arc::new(Mutex::new(HashMap::new())),
             next_req: AtomicU64::new(1),
             state: Arc::new(Mutex::new(ParserState::Ok)),
+            restarts,
+            stats_sink: Mutex::new(None),
         });
 
-        tokio::spawn(run(Arc::clone(&supervisor), request_rx, command_rx));
+        tokio::spawn(run(
+            Arc::clone(&supervisor),
+            request_rx,
+            command_rx,
+            restart_rx,
+        ));
         supervisor
+    }
+
+    /// 健康状態の届け先を差し込む（自己修復が起動したときに呼ばれる）。
+    pub fn attach_stats_sink(&self, sink: mpsc::Sender<StatsReport>) {
+        *self.stats_sink.lock().expect("ロックが壊れていない") = Some(sink);
+    }
+
+    /// パーサを立て直す（差し替えたバイナリを使わせる）。
+    ///
+    /// 再開位置は core が持っているので、立て直しても履歴は欠けない。落ちたときの
+    /// 立て直しと同じ道を通るので、監視中のカードは自動で登録し直される。
+    pub fn restart(&self) {
+        let _ = self.restarts.try_send(());
     }
 
     pub fn handle(&self) -> ParserHandle {
@@ -196,12 +235,32 @@ impl ParserSupervisor {
     }
 }
 
+/// 自己修復が差し替えたパーサを指すポインタファイルの名前（[`Config::resolved_state_dir`] 配下）。
+///
+/// 中身は実行ファイルの絶対パス1行。symlink ではなくファイルにしてあるのは、
+/// 「いま何を使っているか」を人が開いて確かめられるようにするため。
+pub const PARSER_POINTER: &str = "parser-current";
+
 /// パーサ実行ファイルの場所を決める。
 ///
-/// 隣を先に見るのが、開発時（`target/debug`）と配布形態の両方で当たる唯一の形。
-pub fn parser_program() -> PathBuf {
+/// 探索順は **環境変数 → ポインタ → 実行ファイルの隣 → PATH**。
+///
+/// - 環境変数が先頭なのは、テストがビルド済みのパーサを名指しできるようにするため
+/// - ポインタが隣より先なのは、自己修復が差し替えた新しいパーサを使わせるため。
+///   ポインタの指す先が消えていたら既定へ戻る（起動できなくなるほうが困る）
+pub fn parser_program(config: &Config) -> PathBuf {
     if let Ok(path) = std::env::var(PARSER_BIN_ENV) {
         return PathBuf::from(path);
+    }
+    if let Ok(text) = std::fs::read_to_string(config.resolved_state_dir().join(PARSER_POINTER)) {
+        let path = PathBuf::from(text.trim());
+        if path.is_file() {
+            return path;
+        }
+        tracing::warn!(
+            "差し替え済みのパーサが見つかりません（既定に戻します）: {}",
+            path.display()
+        );
     }
     if let Ok(current) = std::env::current_exe() {
         if let Some(dir) = current.parent() {
@@ -219,6 +278,7 @@ async fn run(
     supervisor: Arc<ParserSupervisor>,
     mut requests: mpsc::Receiver<ParserRequest>,
     mut commands: mpsc::Receiver<ParserCommand>,
+    mut restarts: mpsc::Receiver<()>,
 ) {
     let store = OffsetStore::new(supervisor.config.resolved_state_dir());
     let mut offsets = store.load();
@@ -227,7 +287,7 @@ async fn run(
     let mut attempt = 0usize;
 
     loop {
-        match spawn_parser().await {
+        match spawn_parser(&supervisor.config).await {
             Ok(child) => {
                 attempt = 0;
                 supervisor.set_state(ParserState::Ok, None);
@@ -236,6 +296,7 @@ async fn run(
                     child,
                     &mut requests,
                     &mut commands,
+                    &mut restarts,
                     &mut offsets,
                     &mut watched,
                     &store,
@@ -243,6 +304,8 @@ async fn run(
                 .await;
                 match reason {
                     PumpEnd::Shutdown => return,
+                    // 差し替えによる立て直しは異常ではないので、縮退にも待ちにも入らない
+                    PumpEnd::Restart => continue,
                     PumpEnd::ParserGone => {
                         supervisor.set_state(
                             ParserState::Degraded,
@@ -270,10 +333,12 @@ enum PumpEnd {
     Shutdown,
     /// パーサが死んだので立て直す
     ParserGone,
+    /// 自己修復が差し替えたので、こちらから立て直す
+    Restart,
 }
 
-async fn spawn_parser() -> std::io::Result<tokio::process::Child> {
-    tokio::process::Command::new(parser_program())
+async fn spawn_parser(config: &Config) -> std::io::Result<tokio::process::Child> {
+    tokio::process::Command::new(parser_program(config))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -288,6 +353,7 @@ async fn pump(
     mut child: tokio::process::Child,
     requests: &mut mpsc::Receiver<ParserRequest>,
     commands: &mut mpsc::Receiver<ParserCommand>,
+    restarts: &mut mpsc::Receiver<()>,
     offsets: &mut Offsets,
     watched: &mut HashMap<CardId, String>,
     store: &OffsetStore,
@@ -370,6 +436,17 @@ async fn pump(
                 Some(event) => handle_event(supervisor, event, offsets, watched, store),
                 // パーサの stdout が閉じた＝プロセスが終わった
                 None => return PumpEnd::ParserGone,
+            },
+
+            restart = restarts.recv() => match restart {
+                Some(()) => {
+                    // 読みかけを畳ませてから落とす。応答を待たないのは、差し替えの目的が
+                    // 「新しいバイナリに変わること」であって、綺麗に終わることではないため
+                    let _ = write_command(&mut stdin, &ParserCommand::Shutdown).await;
+                    let _ = child.kill().await;
+                    return PumpEnd::Restart;
+                }
+                None => return PumpEnd::Shutdown,
             },
 
             status = child.wait() => {
@@ -476,8 +553,32 @@ fn handle_event(
             }
         }
 
-        ParserEvent::Stats { .. } => {
-            // 率の判定と自己修復の起動はフェーズ5。ここでは受け取るだけにしておく
+        ParserEvent::Stats {
+            card_id,
+            records_total,
+            parse_errors,
+            unknown_types,
+            orphans,
+            versions,
+        } => {
+            // 率の判定は core（自己修復）の仕事。ここは中継するだけで、
+            // 届け先が居なければ何もしない（設計§9）
+            if let Some(sink) = supervisor
+                .stats_sink
+                .lock()
+                .expect("ロックが壊れていない")
+                .as_ref()
+            {
+                // 溢れたら捨てる。健康状態は次の報告でも届くので、ここで待つ理由が無い
+                let _ = sink.try_send(StatsReport {
+                    card_id,
+                    records_total,
+                    parse_errors,
+                    unknown_types,
+                    orphans,
+                    versions,
+                });
+            }
         }
 
         ParserEvent::Error {
@@ -513,26 +614,11 @@ impl OffsetStore {
     }
 
     fn load(&self) -> Offsets {
-        std::fs::read_to_string(&self.path)
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
+        crate::jsonfile::load_or_default(&self.path)
     }
 
     fn save(&self, offsets: &Offsets) {
-        let Some(dir) = self.path.parent() else {
-            return;
-        };
-        if std::fs::create_dir_all(dir).is_err() {
-            return;
-        }
-        let Ok(text) = serde_json::to_string(offsets) else {
-            return;
-        };
-        let temporary = self.path.with_extension("json.tmp");
-        if std::fs::write(&temporary, text).is_ok() {
-            let _ = std::fs::rename(&temporary, &self.path);
-        }
+        crate::jsonfile::save(&self.path, offsets);
     }
 }
 

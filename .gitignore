@@ -1,6 +1,11 @@
 # Rust
 /server/target/
 
+# 自己修復（設計§9）の作業場所。修復セッション用の git worktree とビルド成果物を置く。
+# リポジトリの外に置けないのは、cargo がコンテナの中で動いており、
+# scripts/cargo がリポジトリだけをマウントするため（外に作るとコンテナから見えない）
+/.selfheal/
+
 # Node
 node_modules/
 

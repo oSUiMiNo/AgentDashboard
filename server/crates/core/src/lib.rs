@@ -11,7 +11,9 @@ pub mod config;
 pub mod embed;
 pub mod hook_post;
 pub mod hooks;
+pub mod jsonfile;
 pub mod parser;
+pub mod selfheal;
 pub mod session;
 pub mod state;
 pub mod transcript;
@@ -59,6 +61,27 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     // 履歴を読むパーサは別プロセス。落ちてもターミナルと状態表示は無傷（設計§11）
     let parser = parser::ParserSupervisor::start(Arc::clone(&manager), Arc::clone(&config));
     manager.attach_parser(parser.handle());
+
+    // フォーマット変更に自分で追随する仕組み（設計§9）。
+    // 修復には Docker とダッシュボード自身のソースが要る。無い環境では検知の通知だけ行う
+    let ops = match config.resolved_repo_dir() {
+        Some(repo) => Some(Arc::new(selfheal::ops::HostOps::new(
+            repo,
+            manager.program().to_string(),
+        )) as Arc<dyn selfheal::ops::SelfhealOps>),
+        None => {
+            tracing::warn!(
+                "ダッシュボード自身のソースが見つかりません。自己修復は検知の通知だけになります"
+            );
+            None
+        }
+    };
+    selfheal::Selfheal::start(
+        Arc::clone(&manager),
+        Arc::clone(&parser),
+        Arc::clone(&config),
+        ops,
+    );
 
     let state = ws::AppState::new(manager, Arc::clone(&config)).with_parser(parser);
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, config.port)).await?;
