@@ -721,6 +721,65 @@ fn reset_maintenance_worktree(repo: &Path) {
 
 #[tokio::test]
 #[ignore = "本物の claude を起動し、アカウントのクォータを消費する（make test-cli）"]
+async fn カナリアが構造の全部入りのサンプルを採れる() {
+    // テスト計画フェーズ7「検知（バージョン）」の裏側。擬似 claude はトランスクリプトを
+    // 書かないので、**カナリアが本当に使えるサンプルを採れるか**は本物でしか分からない。
+    //
+    // 「使える」とは、ツールコールとサブエージェントの**両方**が入っていること。
+    // ここが欠けたサンプルでゲートを通しても、一番壊れやすい部分を確かめないまま
+    // 「対応済み」と記録することになる。
+    let repo = repo_root();
+    let dir = WorkDir::new("canary");
+    // `run_canary` は渡した場所の `fixtures/` 配下へ置くだけなので、使い捨ての
+    // ディレクトリを worktree の代わりに渡せばリポジトリを汚さない
+    let workspace = dir.path().to_path_buf();
+
+    let ops = agentdashboard_core::selfheal::ops::HostOps::new(repo, "claude".to_string());
+    let model = "haiku".to_string();
+    let sample = tokio::task::spawn_blocking(move || {
+        use agentdashboard_core::selfheal::ops::SelfhealOps as _;
+        ops.run_canary(&model, &workspace)
+    })
+    .await
+    .expect("採取スレッドが正常に終わること")
+    .expect("カナリアが成功すること");
+
+    let body = std::fs::read_to_string(sample.dir.join("session.jsonl"))
+        .expect("採ったサンプルを読めること");
+    let types: std::collections::BTreeSet<&str> = body
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|record| {
+            record
+                .get("type")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+        .collect::<std::collections::BTreeSet<String>>()
+        .iter()
+        .map(|name| Box::leak(name.clone().into_boxed_str()) as &str)
+        .collect();
+    // 何が採れたのかを残す（--nocapture で実行するので出力が記録に残る）
+    println!(
+        "採取: 版={} 行数={} 種別={:?} ツールコール={} サブエージェント={}",
+        sample.version,
+        body.lines().count(),
+        types,
+        sample.has_tool_use,
+        sample.has_subagent
+    );
+
+    assert!(
+        !sample.is_thin(),
+        "既定のモデルでは構造の全部入りにならなかった（ツールコール={} / サブエージェント={}）。\
+        canary_model の既定を上げることを検討する",
+        sample.has_tool_use,
+        sample.has_subagent
+    );
+}
+
+#[tokio::test]
+#[ignore = "本物の claude を起動し、アカウントのクォータを消費する（make test-cli）"]
 async fn 本物のclaudeがパーサを直しゲートを通ってから差し替わる() {
     // テスト計画フェーズ7「修復フロー」を実物で通す。擬似 claude の訓練
     // （tests/selfheal.rs）が確かめるのは順序と受け渡しで、**本当に直せるのか**は
