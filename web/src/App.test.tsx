@@ -44,9 +44,8 @@ describe('App', () => {
       screen.getByRole('heading', { name: 'AgentDashboard' }),
     ).toBeInTheDocument()
     expect(screen.getByLabelText('作業ディレクトリ')).toBeInTheDocument()
-    expect(
-      screen.getByRole('button', { name: 'セッションを起動' }),
-    ).toBeInTheDocument()
+    // 起動ボタンは権限モードの選択でもある（設計§8）。既定は3つ
+    expect(screen.getAllByTestId('spawn-button')).toHaveLength(3)
     expect(
       await screen.findByText('セッションはまだありません'),
     ).toBeInTheDocument()
@@ -55,9 +54,9 @@ describe('App', () => {
   it('作業ディレクトリが空のうちは起動できない', () => {
     render(<App />)
 
-    expect(
-      screen.getByRole('button', { name: 'セッションを起動' }),
-    ).toBeDisabled()
+    for (const button of screen.getAllByTestId('spawn-button')) {
+      expect(button).toBeDisabled()
+    }
   })
 
   it('接続時に一覧のスナップショットを取りにいく', async () => {

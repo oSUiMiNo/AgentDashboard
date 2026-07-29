@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { cleanup, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { SessionTile } from './SessionTile'
@@ -36,6 +36,7 @@ function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
     card_id: CARD,
     project: '/home/example/dev/app',
     claude_session_id: null,
+    permission_mode: null,
     status: { kind: 'working' },
     subagent_active: 0,
     last_activity_at: NOW,
@@ -141,5 +142,35 @@ describe('SessionTile', () => {
     renderTile(meta())
     await userEvent.click(screen.getByTestId('session-tile'))
     expect(screen.getByText('専用画面')).toBeInTheDocument()
+  })
+})
+
+describe('SessionTile の権限モード', () => {
+  it('モードが分かっていれば小窓にも出る', () => {
+    // 要件「各小窓と各セッション画面に表示してほしい」の小窓側
+    renderTile(meta({ permission_mode: 'bypassPermissions' }))
+
+    const badge = screen.getByTestId('permission-mode')
+    expect(badge).toHaveTextContent('全承認をスキップ')
+    expect(badge.dataset.mode).toBe('bypassPermissions')
+  })
+
+  it('危険なモードは既定のモードより目立つ', () => {
+    // 全承認をスキップしているセッションが並んでいるのに気づかない、を作らない
+    renderTile(meta({ permission_mode: 'bypassPermissions' }))
+    const danger = screen.getByTestId('permission-mode').className
+    cleanup()
+
+    renderTile(meta({ permission_mode: 'default' }))
+    const calm = screen.getByTestId('permission-mode').className
+
+    expect(danger).not.toBe(calm)
+    expect(danger).toContain('red')
+  })
+
+  it('モードが分からないうちは何も出さない', () => {
+    // 状態の「不明」と並ぶと、どちらが不明なのか読み取れなくなる
+    renderTile(meta({ permission_mode: null }))
+    expect(screen.queryByTestId('permission-mode')).not.toBeInTheDocument()
   })
 })

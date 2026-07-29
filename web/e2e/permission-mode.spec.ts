@@ -1,0 +1,180 @@
+import { expect, test } from '@playwright/test'
+import {
+  archiveAll,
+  expectTerminalToContain,
+  openDashboard,
+  openSession,
+  spawnSession,
+  WORK_DIR,
+} from './helpers'
+
+/**
+ * 権限モードの通し確認（テスト計画フェーズ5・6のブラウザ側）。
+ *
+ * 相手は擬似 claude だが、**本物と同じ形のフッタを出し、Shift+Tab で同じ順序に巡回する**
+ * （設計§11 の実測に合わせてある）ので、「起動 → 表示 → 切替 → 一覧へ反映」までを
+ * 課金なしで通せる。
+ */
+
+test.afterEach(async ({ page }) => {
+  // **設定を先に戻す。** 後片付けの途中で失敗しても、トグルだけは必ず戻る。
+  // 設定は config.toml へ書き戻されるので、残ると次のテストの起動ボタンが
+  // 「全承認をスキップ」1つに変わり、無関係なテストが全承認スキップで
+  // セッションを起こすことになる（実際に一度そうなった）
+  await page.request.put('/api/settings', {
+    data: { always_bypass_permissions: false },
+  })
+  await archiveAll(page)
+})
+
+test('起動ボタンは3つあり、選んだモードが小窓に出る', async ({ page }) => {
+  await openDashboard(page)
+  await expect(page.getByTestId('spawn-button')).toHaveCount(3)
+
+  await page.getByTestId('cwd-input').fill(WORK_DIR)
+  await page.getByTestId('spawn-button').nth(1).click() // 編集の承認のみスキップ
+  await expect(page.getByTestId('session-tile')).toHaveCount(1)
+
+  const tile = page.getByTestId('session-tile').first()
+  await expect(tile.getByTestId('permission-mode')).toHaveAttribute(
+    'data-mode',
+    'acceptEdits',
+  )
+  await expect(tile.getByTestId('permission-mode')).toHaveText('編集を自動承認')
+})
+
+test('セッション画面から切り替えると一覧の小窓にも反映される', async ({
+  page,
+}) => {
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  await openSession(page, tile)
+
+  const view = page.getByTestId('session-view')
+  // 起動直後はフッタから読まれる（SessionStart フックはモードを運ばない）
+  await expect(view.getByTestId('permission-mode-picker')).toHaveAttribute(
+    'data-mode',
+    'default',
+    { timeout: 15_000 },
+  )
+
+  await view.getByTestId('permission-mode-picker').selectOption('plan')
+  await expect(view.getByTestId('permission-mode-picker')).toHaveAttribute(
+    'data-mode',
+    'plan',
+    { timeout: 15_000 },
+  )
+
+  // 要件が名指ししている点：切替の結果が一覧の小窓にも出ること
+  await page.goto('/')
+  const back = page.getByTestId('session-tile').first()
+  await expect(back.getByTestId('permission-mode')).toHaveAttribute(
+    'data-mode',
+    'plan',
+  )
+})
+
+test('巡回に入らないモードを選ぶと理由が画面に出る', async ({ page }) => {
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  await openSession(page, tile)
+
+  const view = page.getByTestId('session-view')
+  await expect(view.getByTestId('permission-mode-picker')).toHaveAttribute(
+    'data-mode',
+    'default',
+    { timeout: 15_000 },
+  )
+
+  // dontAsk は起動時にしか選べない（設計§11）。黙って何も起きないのが一番困る
+  await view.getByTestId('permission-mode-picker').selectOption('dontAsk')
+  await expect(page.getByTestId('error-banner')).toContainText(
+    '切り替えられません',
+    { timeout: 30_000 },
+  )
+})
+
+test('片方を切り替えても、もう片方の表示は変わらない', async ({ page }) => {
+  await openDashboard(page)
+  const first = await spawnSession(page)
+  const second = await spawnSession(page)
+  const firstId = await first.getAttribute('data-card-id')
+  const secondId = await second.getAttribute('data-card-id')
+
+  // どちらもフッタから読まれるまで待つ
+  for (const id of [firstId, secondId]) {
+    await expect(
+      page.locator(`[data-testid="session-tile"][data-card-id="${id}"]`)
+        .getByTestId('permission-mode'),
+    ).toHaveAttribute('data-mode', 'default', { timeout: 15_000 })
+  }
+
+  await page.goto(`/s/${firstId}`)
+  await page
+    .getByTestId('permission-mode-picker')
+    .selectOption('acceptEdits')
+  await expect(page.getByTestId('permission-mode-picker')).toHaveAttribute(
+    'data-mode',
+    'acceptEdits',
+    { timeout: 15_000 },
+  )
+
+  await page.goto('/')
+  await expect(
+    page.locator(`[data-testid="session-tile"][data-card-id="${firstId}"]`)
+      .getByTestId('permission-mode'),
+  ).toHaveAttribute('data-mode', 'acceptEdits')
+  await expect(
+    page.locator(`[data-testid="session-tile"][data-card-id="${secondId}"]`)
+      .getByTestId('permission-mode'),
+  ).toHaveAttribute('data-mode', 'default')
+})
+
+test('設定のトグルはリロードしても別タブでも保たれる', async ({ page, context }) => {
+  await openDashboard(page)
+  await page.getByTestId('settings-link').click()
+  await expect(page.getByTestId('settings-page')).toBeVisible()
+
+  await page.getByTestId('always-bypass-toggle').check()
+  await expect(page.getByTestId('always-bypass-toggle')).toBeChecked()
+
+  // 保存先はサーバなので、開き直しても残る
+  await page.reload()
+  await expect(page.getByTestId('always-bypass-toggle')).toBeChecked()
+
+  // 一覧の起動ボタンが1つになる
+  await page.goto('/')
+  await expect(page.getByTestId('spawn-button')).toHaveCount(1)
+  await expect(page.getByTestId('spawn-button')).toHaveAttribute(
+    'data-mode',
+    'bypassPermissions',
+  )
+
+  // 別のタブでも同じ値になる（ブラウザごとに食い違わない）
+  const other = await context.newPage()
+  await other.goto('/settings')
+  await expect(other.getByTestId('always-bypass-toggle')).toBeChecked()
+  await other.close()
+})
+
+test('全承認をスキップで起動すると、確認に自動で答えて起動しきる', async ({
+  page,
+}) => {
+  await openDashboard(page)
+  await page.getByTestId('cwd-input').fill(WORK_DIR)
+  await page.getByTestId('spawn-button').nth(2).click() // 全承認をスキップ
+  await expect(page.getByTestId('session-tile')).toHaveCount(1)
+
+  await page.getByTestId('session-tile').first().click()
+  await expect(page.getByTestId('session-view')).toBeVisible()
+  await page.getByTestId('view-tab-terminal').click()
+
+  // 責任の受諾を尋ねる画面に、こちらで答えている（既定は「いいえ」なので決め打ち禁止）
+  await expectTerminalToContain(page, '[fake-claude] bypass-accepted')
+
+  // 一覧へ戻って、そのモードで動いていることが小窓からも分かること
+  await page.goto('/')
+  await expect(
+    page.getByTestId('session-tile').first().getByTestId('permission-mode'),
+  ).toHaveAttribute('data-mode', 'bypassPermissions', { timeout: 15_000 })
+})

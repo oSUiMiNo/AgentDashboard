@@ -83,7 +83,7 @@ test('存在しない作業ディレクトリを指定すると理由が表示�
   await openDashboard(page)
 
   await page.getByTestId('cwd-input').fill('/存在しないはずのディレクトリ')
-  await page.getByRole('button', { name: 'セッションを起動' }).click()
+  await page.locator('[data-testid="spawn-button"][data-mode=""]').click()
 
   await expect(page.getByTestId('error-banner')).toContainText(
     '作業ディレクトリが存在しません',

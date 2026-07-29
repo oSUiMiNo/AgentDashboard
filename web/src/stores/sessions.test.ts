@@ -45,6 +45,7 @@ function meta(cardId: string, overrides: Partial<SessionMeta> = {}): SessionMeta
     card_id: cardId,
     project: PROJECT,
     claude_session_id: null,
+    permission_mode: null,
     status: { kind: 'working' },
     subagent_active: 0,
     last_activity_at: 1_700_000_000_000,

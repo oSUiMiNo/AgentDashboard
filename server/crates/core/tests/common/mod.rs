@@ -138,7 +138,7 @@ impl TestServer {
         )
         .expect("ポインタを書けること");
 
-        let mut server = Self::build_with(config, program, true, false).await;
+        let mut server = Self::build_with(config, program, true, false, None).await;
         server.selfheal = Some(agentdashboard_core::selfheal::Selfheal::start(
             Arc::clone(&server.manager),
             Arc::clone(server.parser.as_ref().expect("パーサを起動している")),
@@ -157,7 +157,21 @@ impl TestServer {
     }
 
     async fn build(config: Config, program: String, with_parser: bool) -> Self {
-        Self::build_with(config, program, with_parser, true).await
+        Self::build_with(config, program, with_parser, true, None).await
+    }
+
+    /// 設定の書き換え（`/api/settings`）を確かめるために、設定の持ち主も立てる。
+    ///
+    /// 書き戻し先はテストが渡す一時ファイル。**利用者の config.toml は絶対に触らない**。
+    pub async fn start_with_settings(config: Config, settings_path: PathBuf) -> Self {
+        Self::build_with(
+            config,
+            fake_claude().to_string_lossy().into_owned(),
+            false,
+            true,
+            Some(settings_path),
+        )
+        .await
     }
 
     /// `name_parser_by_env` を false にすると、パーサの場所をポインタに決めさせる
@@ -167,6 +181,7 @@ impl TestServer {
         program: String,
         with_parser: bool,
         name_parser_by_env: bool,
+        settings_path: Option<PathBuf>,
     ) -> Self {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -195,6 +210,15 @@ impl TestServer {
         } else {
             None
         };
+
+        if let Some(path) = settings_path {
+            // 本番と同じく `--help` からモードを読む（擬似 claude も choices を出す）
+            let modes =
+                agentdashboard_core::session::permission::supported_modes(manager.program());
+            state = state.with_settings(Arc::new(
+                agentdashboard_core::settings::SettingsStore::new(path, &config, modes),
+            ));
+        }
 
         let task = tokio::spawn(async move {
             let _ = axum::serve(listener, agentdashboard_core::build_router(state)).await;
@@ -225,6 +249,15 @@ impl TestServer {
             .await
             .expect("送信スレッドが正常に終わること")
             .expect("受信口へ送れること")
+    }
+
+    /// JSON を PUT する（設定の書き換え）。ブロッキングなので専用スレッドへ逃がす。
+    pub async fn put(&self, path: &str, body: &str) -> (u16, String) {
+        let (addr, path, body) = (self.addr, path.to_string(), body.to_string());
+        tokio::task::spawn_blocking(move || testkit::put_json(addr, &path, &body))
+            .await
+            .expect("送信スレッドが正常に終わること")
+            .expect("応答が返ること")
     }
 
     pub async fn get(&self, path: &str) -> (u16, String) {

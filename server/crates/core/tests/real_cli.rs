@@ -926,3 +926,121 @@ async fn 本物のclaudeがパーサを直しゲートを通ってから差し�
         .archive(watched.meta().card_id)
         .expect("片付けられること");
 }
+
+// ---------------------------------------------------------------------------
+// 8. 権限モード（テスト計画フェーズ4）
+// ---------------------------------------------------------------------------
+//
+// 擬似 claude では確かめられない継ぎ目はここでも同じ。「こちらが渡した
+// `--permission-mode` を本物の CLI が本当に受け取るか」「本物のフッタから
+// 本当にモードを読めるか」「Shift+Tab が本当に効くか」の3つ。
+//
+// 1セッションに詰め込んであるのは、実 claude は同時1本までという運用の約束
+// （PJTガイドライン「実 claude を起動して検証するとき」）に沿うため。
+
+/// フッタが読めるまで待つ。本物の CLI は起動に十数秒かかることがある。
+async fn wait_for_mode(session: &Session, expected: &str) -> protocol::PermissionMode {
+    let expected = protocol::PermissionMode::new(expected);
+    let deadline = Instant::now() + CLI_TIMEOUT;
+    loop {
+        let current =
+            agentdashboard_core::session::permission::parse_footer(&session.scrollback_text());
+        if current.as_ref() == Some(&expected) {
+            return expected;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{CLI_TIMEOUT:?} 以内に {expected} になりませんでした。実際: {current:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "本物の claude を起動し、アカウントのクォータを消費する（make test-cli）"]
+async fn 指定した権限モードで起動しフッタから読み取れる() {
+    let dir = WorkDir::new("permission-mode");
+    // 利用者のグローバル設定（permissions.defaultMode）に左右されないよう外す
+    let program = claude_wrapper(&dir, &["--setting-sources", "project,local"]);
+    let server = common::TestServer::start_with_program(
+        Config::default(),
+        program.to_string_lossy().into_owned(),
+    )
+    .await;
+
+    // 起動ボタンの1つ目に対応する「編集の承認のみスキップ」で起こす
+    let session = server
+        .manager
+        .spawn_with_mode(
+            &dir.as_str(),
+            Some(protocol::PermissionMode::new("acceptEdits")),
+        )
+        .expect("セッションを起動できること");
+    let mut watcher = common::Watcher::attach(&session);
+    accept_trust_prompt_if_any(&session, &mut watcher).await;
+
+    // 指定したモードで本当に立ち上がったこと（フッタが唯一の証拠）
+    wait_for_mode(&session, "acceptEdits").await;
+
+    // 画面からの切替が本物の TUI に効くこと。巡回に入っているモードを選ぶ
+    watcher.drain_quiet_for(Duration::from_secs(1)).await;
+    let reached = session
+        .switch_permission_mode(&protocol::PermissionMode::new("plan"))
+        .await
+        .expect("巡回に入っているので着けること");
+    assert_eq!(reached, protocol::PermissionMode::new("plan"));
+    wait_for_mode(&session, "plan").await;
+
+    // 巡回に入らないモードは、黙らずに理由つきで失敗すること
+    watcher.drain_quiet_for(Duration::from_secs(1)).await;
+    let error = session
+        .switch_permission_mode(&protocol::PermissionMode::new("dontAsk"))
+        .await
+        .expect_err("dontAsk は巡回に入らない（設計§11）");
+    assert!(
+        error.to_string().contains("切り替えられません"),
+        "理由が分かる文になっていない: {error}"
+    );
+
+    server
+        .manager
+        .archive(session.card_id)
+        .expect("片付けられること");
+}
+
+#[tokio::test]
+#[ignore = "本物の claude を起動し、アカウントのクォータを消費する（make test-cli）"]
+async fn 指定なしでは利用者の設定どおりのモードで起動する() {
+    let dir = WorkDir::new("permission-mode-default");
+    // ラッパーで manual を明示し、「利用者の設定」を再現する。
+    // ダッシュボードが勝手に上書きしないことを見るのが目的
+    let program = claude_wrapper(
+        &dir,
+        &[
+            "--setting-sources",
+            "project,local",
+            "--permission-mode",
+            "acceptEdits",
+        ],
+    );
+    let server = common::TestServer::start_with_program(
+        Config::default(),
+        program.to_string_lossy().into_owned(),
+    )
+    .await;
+
+    let session = server
+        .manager
+        .spawn_with_mode(&dir.as_str(), None)
+        .expect("セッションを起動できること");
+    let mut watcher = common::Watcher::attach(&session);
+    accept_trust_prompt_if_any(&session, &mut watcher).await;
+
+    // こちらが何も渡していないので、ラッパー側の指定がそのまま効く
+    wait_for_mode(&session, "acceptEdits").await;
+
+    server
+        .manager
+        .archive(session.card_id)
+        .expect("片付けられること");
+}

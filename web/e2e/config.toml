@@ -17,3 +17,7 @@ state_dir = "test-results/state"
 pty_ring_buffer = 262144
 flow_high = 65536
 flow_low = 8192
+
+# 設定画面の書き戻し先。E2E は毎回 false へ戻すが、キーを先に置いておくと
+# 書き戻しが「値の差し替え」になり、追記でファイルが伸びていかない
+always_bypass_permissions = false

@@ -65,14 +65,24 @@ export async function openDashboard(page: Page) {
   )
 }
 
-/** セッションを1つ起動して、その小窓を返す。 */
+/**
+ * セッションを1つ起動して、その小窓を返す。
+ *
+ * 起動ボタンは権限モードの選択でもあるので複数ある（設計§8）。ここは
+ * **「スキップの指定は無し」を名指しで押す**。
+ *
+ * `.first()` で選ばないのは、設定のトグルが ON のときに1つ目が「全承認をスキップ」に
+ * 変わるため。前のテストがトグルを戻し損ねると、**関係の無いテストが黙って
+ * 全承認スキップのセッションを起こす**ことになる（実際に一度そうなった）。
+ * 名指しにしておけば、その場合は「ボタンが無い」で即座に落ちて原因が分かる。
+ */
 export async function spawnSession(
   page: Page,
   cwd: string = WORK_DIR,
 ): Promise<Locator> {
   const before = await page.getByTestId('session-tile').count()
   await page.getByTestId('cwd-input').fill(cwd)
-  await page.getByRole('button', { name: 'セッションを起動' }).click()
+  await page.locator('[data-testid="spawn-button"][data-mode=""]').click()
   await expect(page.getByTestId('session-tile')).toHaveCount(before + 1)
   return page.getByTestId('session-tile').nth(before)
 }
