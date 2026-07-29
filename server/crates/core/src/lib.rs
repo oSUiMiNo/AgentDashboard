@@ -15,6 +15,7 @@ pub mod jsonfile;
 pub mod parser;
 pub mod selfheal;
 pub mod session;
+pub mod settings;
 pub mod state;
 pub mod transcript;
 pub mod ws;
@@ -41,6 +42,11 @@ pub fn build_router(state: ws::AppState) -> Router {
             "/api/sessions/{card_id}/transcript",
             get(ws::api_transcript),
         )
+        // 設定は接続のたびに流すほど変わらないので、WebSocket ではなく REST に置く
+        .route(
+            "/api/settings",
+            get(ws::api_settings).put(ws::api_update_settings),
+        )
         .route("/hook/{token}/{event}", post(hooks::receive))
         .fallback(get(static_handler))
         .with_state(state)
@@ -50,10 +56,27 @@ pub fn build_router(state: ws::AppState) -> Router {
 ///
 /// バインド先は **127.0.0.1 のみ**（設計§7）。個人用のローカルツールなので、外部から
 /// 触れる経路をそもそも作らない。
-pub async fn serve(config: Config) -> anyhow::Result<()> {
+pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
     let config = Arc::new(config);
     let manager = SessionManager::new(Arc::clone(&config));
     tracing::info!("起動する CLI: {}", manager.program());
+
+    // その CLI が受け付ける権限モードを1回だけ読む（設計§3）。`--help` はモデルへ
+    // 問い合わせないのでクォータを使わない。読めなければ既知の表へ落ちる
+    let available_modes = session::permission::supported_modes(manager.program());
+    tracing::info!(
+        "権限モード: {}",
+        available_modes
+            .iter()
+            .map(protocol::PermissionMode::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let settings = Arc::new(settings::SettingsStore::new(
+        config_path,
+        &config,
+        available_modes,
+    ));
 
     // 「作業中」の表示のまま実はハングしている、という見落としを防ぐ見張り（設計§5）
     manager.start_sweeper();
@@ -83,7 +106,9 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         ops,
     );
 
-    let state = ws::AppState::new(manager, Arc::clone(&config)).with_parser(parser);
+    let state = ws::AppState::new(manager, Arc::clone(&config))
+        .with_parser(parser)
+        .with_settings(settings);
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, config.port)).await?;
     let address = listener.local_addr()?;
 

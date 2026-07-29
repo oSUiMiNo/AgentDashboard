@@ -25,6 +25,7 @@ uuid.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 toml.workspace = true
+toml_edit.workspace = true
 clap.workspace = true
 tokio.workspace = true
 axum.workspace = true

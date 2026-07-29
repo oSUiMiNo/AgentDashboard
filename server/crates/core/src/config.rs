@@ -56,6 +56,14 @@ pub struct Config {
     pub flow_high: usize,
     /// フロー制御の下側しきい値。ここまで減ったら resume（バイト）
     pub flow_low: usize,
+    /// 一覧の起動ボタンを「全承認をスキップ」の1つだけにするか。
+    ///
+    /// 既定は `false`（3つ出す：全承認をスキップ／編集の承認のみスキップ／指定なし）。
+    /// **権限確認を飛ばす機能なので、既定はスキップしない側**に置く。選ぶのは利用者。
+    ///
+    /// このキーだけは画面（`/settings`）から書き戻される（設計§7）。他のキーは
+    /// 起動時に読むだけ。
+    pub always_bypass_permissions: bool,
     /// 自己修復（設計§9）を動かすか。
     ///
     /// 切れる口を用意しているのは、この機能が**本物の claude を無人で起動して
@@ -108,6 +116,7 @@ impl Default for Config {
             pty_ring_buffer: DEFAULT_PTY_RING_BUFFER,
             flow_high: DEFAULT_FLOW_HIGH,
             flow_low: DEFAULT_FLOW_LOW,
+            always_bypass_permissions: false,
             selfheal_enabled: true,
             canary_model: DEFAULT_CANARY_MODEL.to_string(),
             canary_fallback_model: DEFAULT_CANARY_FALLBACK_MODEL.to_string(),
@@ -319,6 +328,14 @@ mod tests {
                 "{key} が config.toml.example にコメントとして例示されていない"
             );
         }
+    }
+
+    #[test]
+    fn 権限確認スキップの既定はオフ() {
+        // 権限確認を飛ばす機能なので、既定は必ずスキップしない側に置く（設計§9）
+        assert!(!Config::default().always_bypass_permissions);
+        let config = Config::from_toml_str("always_bypass_permissions = true").unwrap();
+        assert!(config.always_bypass_permissions);
     }
 
     #[test]

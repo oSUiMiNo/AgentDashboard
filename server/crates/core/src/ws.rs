@@ -21,6 +21,7 @@ use crate::{
     config::Config,
     parser::ParserSupervisor,
     session::{Session, SessionManager},
+    settings::{SettingsStore, SettingsView},
 };
 use axum::{
     Json,
@@ -62,6 +63,9 @@ pub struct AppState {
     ///
     /// 設計§11 の「パーサが停止しても、ターミナルと指示送信は通常動作」を型で表している。
     pub parser: Option<Arc<ParserSupervisor>>,
+    /// 画面から書き換えられる設定（設計§7）。**居なくても core は動く**ので、
+    /// 統合テストは設定画面を立てずにセッションの検証だけができる。
+    pub settings: Option<Arc<SettingsStore>>,
     next_client_id: Arc<AtomicU64>,
 }
 
@@ -71,6 +75,7 @@ impl AppState {
             manager,
             config,
             parser: None,
+            settings: None,
             next_client_id: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -79,6 +84,52 @@ impl AppState {
     pub fn with_parser(mut self, parser: Arc<ParserSupervisor>) -> Self {
         self.parser = Some(parser);
         self
+    }
+
+    /// 設定の持ち主を繋いだ状態にする。
+    pub fn with_settings(mut self, settings: Arc<SettingsStore>) -> Self {
+        self.settings = Some(settings);
+        self
+    }
+}
+
+/// `GET /api/settings` — 画面が読む設定（設計§7・§8）。
+///
+/// 起動ボタンの数と切替UIの選択肢がこれで決まる。**保存先がサーバなので、別のタブで
+/// 開いても同じ値になる。**
+pub async fn api_settings(State(state): State<AppState>) -> Result<Json<SettingsView>, StatusCode> {
+    let settings = state.settings.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(settings.view()))
+}
+
+/// `PUT /api/settings` の本文。
+#[derive(Debug, Deserialize)]
+pub struct SettingsUpdate {
+    pub always_bypass_permissions: bool,
+}
+
+/// `PUT /api/settings` — トグルを書き換えて `config.toml` へ書き戻す（設計§7）。
+pub async fn api_update_settings(
+    State(state): State<AppState>,
+    Json(update): Json<SettingsUpdate>,
+) -> Result<Json<SettingsView>, (StatusCode, String)> {
+    let settings = state
+        .settings
+        .as_ref()
+        .ok_or((StatusCode::NOT_FOUND, "設定を扱えません".to_string()))?;
+
+    // 書き込みはブロッキング。テストのスレッドで待つと自分の応答を自分で待つ形になるので、
+    // 専用スレッドへ逃がす（初期実装フェーズ2でテスト一式が固まった件と同じ理由）
+    let settings = Arc::clone(settings);
+    let value = update.always_bypass_permissions;
+    let result = tokio::task::spawn_blocking(move || settings.set_always_bypass_permissions(value))
+        .await
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+
+    match result {
+        Ok(view) => Ok(Json(view)),
+        // 黙って失敗すると「変えたのに戻る」という追いにくい形になる
+        Err(err) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("{err:#}"))),
     }
 }
 
@@ -270,7 +321,10 @@ async fn handle_request(
     transcripts: &mut HashMap<CardId, JoinHandle<()>>,
 ) {
     match request {
-        ClientMessage::Spawn { cwd } => match state.manager.spawn(&cwd) {
+        ClientMessage::Spawn {
+            cwd,
+            permission_mode,
+        } => match state.manager.spawn_with_mode(&cwd, permission_mode) {
             // 起動できた場合の通知は一覧の購読経由で届くので、ここでは何もしない
             Ok(_) => {}
             Err(err) => {
@@ -284,6 +338,29 @@ async fn handle_request(
                 .await;
             }
         },
+
+        // 走っているセッションのモードを切り替える（設計§6）。
+        // 実体は TUI へのキー送出なので時間がかかる。**待たずに別のタスクへ逃がす**。
+        // ここで待つと、切替のあいだ同じブラウザからの他の操作が全部止まる
+        ClientMessage::SetPermissionMode { card_id, mode } => {
+            let Some(session) = state.manager.get(card_id) else {
+                send_error(outbound, Some(card_id), "セッションが見つかりません".into()).await;
+                return;
+            };
+            let manager = Arc::clone(&state.manager);
+            let outbound = outbound.clone();
+            tokio::spawn(async move {
+                match session.switch_permission_mode(&mode).await {
+                    // 着いたことは SessionMeta 経由で全クライアントへ届く
+                    Ok(_) => manager.broadcast_session(&session),
+                    Err(err) => {
+                        // 途中まで動いた結果も配る（いまどこに居るかは伝わったほうがよい）
+                        manager.broadcast_session(&session);
+                        send_error(&outbound, Some(card_id), err.to_string()).await;
+                    }
+                }
+            });
+        }
 
         ClientMessage::Kill { card_id } => {
             if let Err(err) = state.manager.kill(card_id) {

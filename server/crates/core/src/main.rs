@@ -3,7 +3,7 @@
 //! 引数なしで起動するとサーバが立ち上がり、ブラウザからセッションを操作できるようになる。
 //! 中身は [`agentdashboard_core`] 側にあり、ここは CLI の解釈だけを担う。
 
-use agentdashboard_core::{config::Config, embed, hook_post, serve};
+use agentdashboard_core::{config, config::Config, embed, hook_post, serve};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -55,6 +55,12 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let config = Config::load(cli.config.as_deref())?;
+    // 設定画面からの書き戻し先（設計§7）。`--config` が無ければカレントの config.toml を
+    // 指す。まだ存在しなくてよい — 書き換えたときに作る
+    let config_path = cli
+        .config
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(config::DEFAULT_FILE_NAME));
 
     match cli.command {
         Some(Command::Config) => {
@@ -83,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
                         .unwrap_or_else(|_| "info".into()),
                 )
                 .init();
-            serve(config).await?;
+            serve(config, config_path).await?;
         }
     }
     Ok(())
