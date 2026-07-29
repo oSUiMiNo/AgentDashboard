@@ -16,6 +16,7 @@
 //! `Lagged` が返る。これがそのまま「遅いクライアントの検知」になり、検知したら
 //! リングバッファのスナップショット（フレーム種別 `0x03`）を送り直して復帰させる。
 
+pub mod cwd;
 pub mod hooks_settings;
 pub mod input;
 pub mod lifecycle;
@@ -764,13 +765,24 @@ impl SessionManager {
         extra_args: &[String],
         initial_mode: Option<PermissionMode>,
     ) -> Result<Arc<Session>, SessionError> {
-        let path = PathBuf::from(cwd);
-        if !path.exists() {
-            return Err(SessionError::CwdNotFound(cwd.to_string()));
-        }
-        if !path.is_dir() {
-            return Err(SessionError::CwdNotDirectory(cwd.to_string()));
-        }
+        // 入力は利用者が手で打つか Windows 側から貼ったものなので、区切りや先頭の
+        // スラッシュが揃っていないことがある。試すべき解釈は [`cwd`] が並べる
+        let path = match cwd::resolve(cwd) {
+            cwd::Resolution::Found(path) => path,
+            cwd::Resolution::NotDirectory(path) => {
+                return Err(SessionError::CwdNotDirectory(
+                    path.to_string_lossy().into_owned(),
+                ));
+            }
+            // 何として読んだのかを添える。読み替えが効いていないのか、読み替えた先が
+            // 無いのかを、利用者が画面のエラーだけで見分けられるようにする
+            cwd::Resolution::NotFound { interpreted } => {
+                return Err(SessionError::CwdNotFound(match interpreted {
+                    Some(path) => format!("{cwd}（{} として解釈しました）", path.display()),
+                    None => cwd.to_string(),
+                }));
+            }
+        };
         // 一覧のグループ化キーになるので、シンボリックリンク等を解決して絶対パスに揃える
         let project_path = path.canonicalize().unwrap_or(path);
 

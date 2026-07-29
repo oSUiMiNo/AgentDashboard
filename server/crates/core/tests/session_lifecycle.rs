@@ -151,6 +151,83 @@ async fn 存在しない作業ディレクトリでは起動せずエラーを�
     assert!(manager.list().is_empty(), "カードは作られないこと");
 }
 
+// 以下4件は、利用者が実際に打つ・貼る形をそのまま受け取れることの担保。
+// 本アプリは WSL の上で動き、パスは Windows 側のエクスプローラから来ることがある。
+
+#[tokio::test]
+async fn バックスラッシュ区切りの作業ディレクトリでも起動できる() {
+    let manager = common::manager();
+    let typed = common::work_dir().replace('/', "\\");
+
+    let session = manager.spawn(&typed).expect("セッションを起動できること");
+    let mut watcher = common::Watcher::attach(&session);
+    watcher.wait_for(fake_claude::READY_MARKER).await;
+
+    // 一覧のグループ化キーは、入力した形ではなく解決後の絶対パスになること。
+    // ここが入力のままだと、同じフォルダなのに打ち方の違いで別グループに割れる
+    let expected = std::path::Path::new(&common::work_dir())
+        .canonicalize()
+        .expect("一時ディレクトリを解決できること");
+    assert_eq!(session.meta().project.0, expected.to_string_lossy());
+
+    session.kill();
+    common::wait_for_status(&session, SessionStatus::Ended { ok: true }).await;
+}
+
+#[tokio::test]
+async fn 先頭の区切りが抜けていても起動できる() {
+    let manager = common::manager();
+    let typed = common::work_dir().trim_start_matches('/').to_string();
+
+    let session = manager.spawn(&typed).expect("セッションを起動できること");
+    let mut watcher = common::Watcher::attach(&session);
+    watcher.wait_for(fake_claude::READY_MARKER).await;
+
+    let expected = std::path::Path::new(&common::work_dir())
+        .canonicalize()
+        .expect("一時ディレクトリを解決できること");
+    assert_eq!(session.meta().project.0, expected.to_string_lossy());
+
+    session.kill();
+    common::wait_for_status(&session, SessionStatus::Ended { ok: true }).await;
+}
+
+#[tokio::test]
+async fn フォルダではないものを指したときは存在しない場合と理由が分かれる() {
+    // 読み替えは効くが存在の判定は緩めていない、ということの確認でもある。
+    // 読み替えが効いていなければ「存在しません」になってしまう
+    let path = std::env::temp_dir().join(format!(
+        "agentdashboard-cwd-{}-{}.txt",
+        std::process::id(),
+        line!()
+    ));
+    std::fs::write(&path, b"").expect("一時ファイルを作れること");
+    let typed = path.to_string_lossy().replace('/', "\\");
+
+    let manager = common::manager();
+    let err = manager.spawn(&typed).expect_err("エラーになること");
+    assert!(
+        err.to_string().contains("フォルダではありません"),
+        "実際: {err}"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn 見つからないときは何として解釈したかを添える() {
+    // 読み替えが効いていないのか、読み替えた先が無いのかを画面のエラーだけで見分けられること
+    let manager = common::manager();
+    let err = manager
+        .spawn(r"\存在しないはずの\ディレクトリ")
+        .expect_err("エラーになること");
+    assert!(
+        err.to_string()
+            .contains("/存在しないはずの/ディレクトリ として解釈しました"),
+        "実際: {err}"
+    );
+}
+
 #[tokio::test]
 async fn archiveでカードが一覧から消える() {
     let manager = common::manager();

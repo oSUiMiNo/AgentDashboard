@@ -73,6 +73,10 @@ export function SpawnForm({ disabled }: Props) {
         data-testid="cwd-input"
         aria-label="作業ディレクトリ"
         placeholder="/home/example/dev/プロジェクト"
+        title={
+          'Windows 側から貼ったパスも受け取ります（\\ 区切り／先頭の区切り抜け／' +
+          '\\\\wsl.localhost\\... ／ C:\\...）'
+        }
         value={cwd}
         onChange={(event) => setCwd(event.target.value)}
         className="min-w-64 flex-1"

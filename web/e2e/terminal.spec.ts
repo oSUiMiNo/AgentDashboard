@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test'
 import {
+  WORK_DIR,
   archiveAll,
   expectTerminalToContain,
   openDashboard,
@@ -89,4 +90,19 @@ test('存在しない作業ディレクトリを指定すると理由が表示�
     '作業ディレクトリが存在しません',
   )
   await expect(page.getByTestId('session-tile')).toHaveCount(0)
+})
+
+test('Windows 側から貼ったバックスラッシュ区切りのパスでも起動できる', async ({
+  page,
+}) => {
+  await openDashboard(page)
+
+  // 利用者がエクスプローラのアドレス欄からそのまま貼る形
+  await spawnSession(page, WORK_DIR.replaceAll('/', '\\'))
+
+  // グループ化キーは入力した形ではなく解決後の絶対パスになること。
+  // ここが入力のままだと、同じフォルダなのに打ち方の違いで別グループに割れる
+  await expect(
+    page.locator(`[data-testid="project-group"][data-project="${WORK_DIR}"]`),
+  ).toHaveCount(1)
 })
