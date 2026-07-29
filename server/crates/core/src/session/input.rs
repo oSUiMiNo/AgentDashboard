@@ -20,6 +20,7 @@
 //!
 //! 1. 行数によらず bracketed paste で包む（改行を本文として渡すため）
 //! 2. 確定の CR は**本文とは別の書き込み**で送る（貼り付けの処理に飲まれないため）
+//! 3. 入れる前に**入力行を空にする**（残っているものへ追記させないため。[`CLEAR_LINE`]）
 //!
 //! # なぜ純粋関数なのか
 //!
@@ -35,9 +36,20 @@ const PASTE_END: &str = "\x1b[201~";
 /// 送信の確定。ターミナルの Enter は LF ではなく CR。
 const SUBMIT: &str = "\r";
 
+/// 入力行を消す（readline の kill-line、`Ctrl+U`）。
+///
+/// 送る前に必ず1回打つ。TUI の入力欄に**何か残っていると、そこへ追記される**からで、
+/// これは実害として観測している。`/rewind` は巻き戻した発言を入力欄へ戻す仕様なので、
+/// そのまま Composer から次の指示を送ると「巻き戻した指示＋新しい指示」が1つの発言に
+/// なって届き、**取り消したはずの作業がやり直される**（フェーズ6の受け入れテストで実測）。
+///
+/// 送信が失敗して本文が入力欄に残っている場合も同じことが起きる。Composer から送った
+/// ものは「入力欄に打ったそのもの」であるべきなので、先に空にしてから入れる。
+const CLEAR_LINE: &str = "\x15";
+
 /// Composer の1回の送信を、**貼り付け本体**と**確定**の2つに分けて返す。
 ///
-/// - 本文あり … (`ESC[200~ 本文 ESC[201~`, `CR`)
+/// - 本文あり … (`Ctrl+U ESC[200~ 本文 ESC[201~`, `CR`)
 /// - 空文字 … (空, `CR`)（TUI のメニューを確定させる用途に使える）
 ///
 /// 分けて返すのは、**呼び出し側に別々の書き込みをさせる**ため（理由はモジュールの説明）。
@@ -50,11 +62,12 @@ pub fn encode_parts(text: &str) -> (Vec<u8>, Vec<u8>) {
     let body = sanitize(text);
     let submit = SUBMIT.as_bytes().to_vec();
 
+    // 空送信は「メニューを確定させる」用途なので、入力行に触ってはいけない
     if body.is_empty() {
         return (Vec::new(), submit);
     }
     (
-        format!("{PASTE_BEGIN}{body}{PASTE_END}").into_bytes(),
+        format!("{CLEAR_LINE}{PASTE_BEGIN}{body}{PASTE_END}").into_bytes(),
         submit,
     )
 }
@@ -100,13 +113,16 @@ mod tests {
         // 繋げて1回で書くと、TUI が貼り付けの処理で CR まで飲み込んで確定しない。
         // 「分かれていること」自体がこの関数の存在理由なので、ここで固定する
         let (body, submit) = encode_parts("こんにちは");
-        assert_eq!(body, "\u{1b}[200~こんにちは\u{1b}[201~".as_bytes());
+        assert_eq!(body, "\u{15}\u{1b}[200~こんにちは\u{1b}[201~".as_bytes());
         assert_eq!(submit, b"\r");
     }
 
     #[test]
     fn 単一行もbracketed_pasteで包む() {
-        assert_eq!(encoded("こんにちは"), "\u{1b}[200~こんにちは\u{1b}[201~\r");
+        assert_eq!(
+            encoded("こんにちは"),
+            "\u{15}\u{1b}[200~こんにちは\u{1b}[201~\r"
+        );
     }
 
     #[test]
@@ -116,21 +132,27 @@ mod tests {
         // 短い側だけ試していると気づけないので、境目をまたぐ2つを並べて固定する
         let short = "0".repeat(48);
         let long = "0".repeat(200);
-        assert_eq!(encoded(&short), format!("\u{1b}[200~{short}\u{1b}[201~\r"));
-        assert_eq!(encoded(&long), format!("\u{1b}[200~{long}\u{1b}[201~\r"));
+        assert_eq!(
+            encoded(&short),
+            format!("\u{15}\u{1b}[200~{short}\u{1b}[201~\r")
+        );
+        assert_eq!(
+            encoded(&long),
+            format!("\u{15}\u{1b}[200~{long}\u{1b}[201~\r")
+        );
     }
 
     #[test]
     fn スラッシュコマンドも特別扱いしない() {
         // 実体が本物の CLI なので、そのまま流せば解釈される（要件「あらゆるスラッシュコマンド」）
-        assert_eq!(encoded("/rewind"), "\u{1b}[200~/rewind\u{1b}[201~\r");
+        assert_eq!(encoded("/rewind"), "\u{15}\u{1b}[200~/rewind\u{1b}[201~\r");
     }
 
     #[test]
     fn 複数行もbracketed_pasteで包む() {
         assert_eq!(
             encoded("1行目\n2行目"),
-            "\u{1b}[200~1行目\n2行目\u{1b}[201~\r"
+            "\u{15}\u{1b}[200~1行目\n2行目\u{1b}[201~\r"
         );
     }
 
@@ -140,23 +162,40 @@ mod tests {
         // 貼り付けの中に CR が混ざり、CLI 側で確定と解釈されうる
         assert_eq!(
             encoded("1行目\r\n2行目"),
-            "\u{1b}[200~1行目\n2行目\u{1b}[201~\r"
+            "\u{15}\u{1b}[200~1行目\n2行目\u{1b}[201~\r"
         );
     }
 
     #[test]
     fn 末尾の改行は落とす() {
-        assert_eq!(encoded("ひとこと\n"), "\u{1b}[200~ひとこと\u{1b}[201~\r");
+        assert_eq!(
+            encoded("ひとこと\n"),
+            "\u{15}\u{1b}[200~ひとこと\u{1b}[201~\r"
+        );
         assert_eq!(
             encoded("ひとこと\n\n\n"),
-            "\u{1b}[200~ひとこと\u{1b}[201~\r"
+            "\u{15}\u{1b}[200~ひとこと\u{1b}[201~\r"
         );
     }
 
     #[test]
     fn 空文字はCRだけを送る() {
+        // メニューの確定に使う経路。ここで入力行を消しにいくと、選択中の
+        // メニューに余計なキーを打ち込むことになる
         assert_eq!(encoded(""), "\r");
         assert_eq!(encoded("\n\n"), "\r");
+    }
+
+    #[test]
+    fn 送る前に入力行を消す() {
+        // 入力欄に残っていると、そこへ追記される。`/rewind` は巻き戻した発言を
+        // 入力欄へ戻すので、消さずに送ると「巻き戻した指示＋新しい指示」が1つの
+        // 発言として届き、取り消したはずの作業がやり直される（実測）
+        let (body, _) = encode_parts("新しい指示");
+        assert!(
+            body.starts_with(b"\x15"),
+            "先頭が kill-line で始まっていない: {body:?}"
+        );
     }
 
     #[test]
@@ -164,7 +203,7 @@ mod tests {
         // 貼り付けの終了記号を本文から打ち込めないことの確認
         assert_eq!(
             encoded("わるいこ\u{1b}[201~ここは本文"),
-            "\u{1b}[200~わるいこ[201~ここは本文\u{1b}[201~\r"
+            "\u{15}\u{1b}[200~わるいこ[201~ここは本文\u{1b}[201~\r"
         );
     }
 }
