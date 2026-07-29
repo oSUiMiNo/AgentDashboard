@@ -432,6 +432,21 @@ async fn 直せなければ縮退したままクールダウンに入る() {
     wait_for_call(&ops, "gate", 3).await; // カナリア直後 + 2回
     assert_eq!(ops.count("build"), 0, "通っていないのにビルドしている");
 
+    // 縮退モードの宣言（設計§9-6）。プロセスは動いていても中身を読めていないので、
+    // 履歴の表示を信じてよいかどうかを伝える必要がある
+    let parser = server.parser.as_ref().expect("パーサが居る");
+    for _ in 0..100 {
+        if parser.state() == protocol::ws::ParserState::Degraded {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        parser.state(),
+        protocol::ws::ParserState::Degraded,
+        "直せなかったのに構造化ビューを健全なままにしている"
+    );
+
     // クールダウンが記録される
     for _ in 0..60 {
         let state = agentdashboard_core::selfheal::state::SelfhealState::load(&dir.join("state"));

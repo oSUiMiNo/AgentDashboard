@@ -54,13 +54,17 @@ const STATS_QUEUE: usize = 64;
 /// 無人で走らせる以上、返ってこないセッションを永久に待つわけにいかない。
 const TURN_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
-/// 起動直後、最初の入力待ちになるまで待つ時間。
+/// 起動から「指示を受け付けられる状態」になるまで待つ上限。
 ///
-/// これを過ぎても入力待ちにならない場合、初回起動のフォルダ信頼の確認のような
-/// **確定キー待ちの画面**で止まっている可能性がある。1回だけ確定を送って様子を見る。
-/// 闇雲にキーを送らないのは、フェーズ3で「送ったキーが別の相手に吸われる」事故を
-/// 実測しているため（PJTガイドライン）。
-const READY_TIMEOUT: Duration = Duration::from_secs(20);
+/// 本物の CLI は起動に十数秒かかることがあり、初回のフォルダ信頼の確認も挟まる。
+/// 短く切ると、まだ準備できていない画面へ指示を打ち込むことになる。
+const READY_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// フォルダ信頼の確認が出ていると判断する目印（小文字で照合する）。
+///
+/// **新しい worktree では必ずこれが出る。答えるまで `SessionStart` フックは発火しない**
+/// （実測）。つまり「フックを待つ」だけでは永久に進まない。
+const TRUST_PROMPT_MARKERS: [&str; 2] = ["trust this folder", "do you trust"];
 
 /// 修復セッションの worktree とブランチの名前。
 ///
@@ -528,6 +532,11 @@ fn finish_failure(selfheal: &Arc<Selfheal>, version: &str) {
     state.record_failure(version, now_ms(), selfheal.config.selfheal_cooldown_hours);
     state.save(&selfheal.state_dir);
 
+    // 縮退モードの宣言（設計§9-6）。パーサのプロセスは動いていても、中身を正しく
+    // 読めていない以上、履歴の表示を信じてよいかどうかは伝えなければならない
+    selfheal.parser.degrade(format!(
+        "{version} のフォーマットに追随できていません。ターミナルと指示送信は使えます"
+    ));
     selfheal.notify(
         SelfhealPhase::Failed,
         Some(format!(
@@ -598,28 +607,51 @@ async fn start_repair_session(selfheal: &Arc<Selfheal>, worktree: &Path) -> anyh
 
     // 起動直後に入力待ちへ入らない場合、フォルダ信頼の確認のような確定待ちの画面で
     // 止まっている可能性がある。状態を見たうえで1回だけ確定を送る
-    if !wait_ready(selfheal, card_id, READY_TIMEOUT).await {
-        tracing::info!("修復セッションが入力待ちになりません。確定キーを1回送ります");
-        let _ = session.write_input(b"\r");
-        wait_ready(selfheal, card_id, READY_TIMEOUT).await;
+    if !wait_ready(selfheal, &session, card_id).await {
+        anyhow::bail!("修復セッションが指示を受け付ける状態になりませんでした");
     }
     Ok(card_id)
 }
 
 /// 起動が済んで指示を受け付けられる状態になるまで待つ。
-async fn wait_ready(selfheal: &Arc<Selfheal>, card_id: CardId, timeout: Duration) -> bool {
-    let mut events = selfheal.manager.subscribe_events();
-    // 購読を始める前に入力待ちへ入っていることもある。先に今の状態を見る
-    match selfheal
-        .manager
-        .get(card_id)
-        .map(|session| session.status())
-    {
-        Some(SessionStatus::WaitingInput) => return true,
-        Some(SessionStatus::Ended { .. }) | None => return false,
-        _ => {}
+///
+/// # 画面を見てから答える
+///
+/// 新しい worktree では**フォルダ信頼の確認**が必ず出る。そして**答えるまで
+/// `SessionStart` フックは発火しない**（実測）。つまりフックだけを待っていると
+/// 永久に進まない。かといって時間で区切って闇雲に確定キーを送ると、別の画面へ
+/// 届いて意図しない選択をしてしまう（フェーズ3で実測した事故）。
+/// **その画面が出ていることを確かめてから**答える。
+async fn wait_ready(
+    selfheal: &Arc<Selfheal>,
+    session: &Arc<crate::session::Session>,
+    card_id: CardId,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
+    let mut answered_trust = false;
+
+    while tokio::time::Instant::now() < deadline {
+        match selfheal.manager.get(card_id).map(|found| found.status()) {
+            // SessionStart が届いた＝指示を受け付けられる
+            Some(SessionStatus::WaitingInput) => return true,
+            Some(SessionStatus::Ended { .. }) | None => return false,
+            _ => {}
+        }
+
+        if !answered_trust {
+            let screen = session.scrollback_text().to_lowercase();
+            if TRUST_PROMPT_MARKERS
+                .iter()
+                .any(|marker| screen.contains(marker))
+            {
+                tracing::info!("修復セッションのフォルダ信頼の確認に答えます");
+                let _ = session.write_input(b"\r");
+                answered_trust = true;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
     }
-    wait_for_waiting_input(&mut events, card_id, timeout).await
+    false
 }
 
 /// 指示を送り、そのターンが終わる（＝入力待ちに戻る）まで待つ。
