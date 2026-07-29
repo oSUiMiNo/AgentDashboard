@@ -682,10 +682,8 @@ async fn start_repair_session(selfheal: &Arc<Selfheal>, worktree: &Path) -> anyh
         "--setting-sources".to_string(),
         "project,local".to_string(),
     ];
-    if let Some(model) = &selfheal.config.repair_model {
-        args.push("--model".to_string());
-        args.push(model.clone());
-    }
+    args.push("--model".to_string());
+    args.push(selfheal.config.repair_model.clone());
 
     let session = selfheal
         .manager

@@ -17,6 +17,7 @@ const DEFAULT_FLOW_HIGH: usize = 256 * 1024;
 const DEFAULT_FLOW_LOW: usize = 32 * 1024;
 const DEFAULT_CANARY_MODEL: &str = "haiku";
 const DEFAULT_CANARY_FALLBACK_MODEL: &str = "sonnet";
+const DEFAULT_REPAIR_MODEL: &str = "sonnet";
 const DEFAULT_SELFHEAL_RETRY: u32 = 3;
 const DEFAULT_SELFHEAL_COOLDOWN_HOURS: u64 = 24;
 const DEFAULT_TRANSCRIPT_WINDOW_NODES: usize = 2000;
@@ -69,8 +70,13 @@ pub struct Config {
     /// 小さいモデルだと指示を素通りしてサブエージェントを起動しないことがある。
     /// 採れた中身を見て足りなければ、こちらで採り直す。
     pub canary_fallback_model: String,
-    /// 修復セッションで使うモデル。None なら通常モデル
-    pub repair_model: Option<String>,
+    /// 修復セッションで使うモデル。
+    ///
+    /// 既定を**エイリアス**（`sonnet`）にしてあるのは、CLI 側が「その時点の最新の
+    /// Sonnet」へ解決してくれるため。具体的な版を書くと、モデルが新しくなるたびに
+    /// 設定を直して回ることになる。パーサを直す作業は読み書きと推論の両方を要求する
+    /// ので、いちばん小さいモデルでは力不足になりやすい。
+    pub repair_model: String,
     /// 修復の再試行上限
     pub selfheal_retry: u32,
     /// 同一バージョンへの再挑戦を抑制する時間
@@ -105,7 +111,7 @@ impl Default for Config {
             selfheal_enabled: true,
             canary_model: DEFAULT_CANARY_MODEL.to_string(),
             canary_fallback_model: DEFAULT_CANARY_FALLBACK_MODEL.to_string(),
-            repair_model: None,
+            repair_model: DEFAULT_REPAIR_MODEL.to_string(),
             selfheal_retry: DEFAULT_SELFHEAL_RETRY,
             selfheal_cooldown_hours: DEFAULT_SELFHEAL_COOLDOWN_HOURS,
             selfheal_repo_dir: None,
@@ -263,7 +269,7 @@ mod tests {
         assert_eq!(config.flow_high, 256 * 1024);
         assert_eq!(config.flow_low, 32 * 1024);
         assert_eq!(config.canary_model, "haiku");
-        assert_eq!(config.repair_model, None);
+        assert_eq!(config.repair_model, "sonnet");
         assert_eq!(config.selfheal_retry, 3);
         assert_eq!(config.selfheal_cooldown_hours, 24);
         assert!(config.selfheal_enabled);
@@ -291,7 +297,7 @@ mod tests {
         .unwrap();
         assert_eq!(config.port, 9999);
         assert_eq!(config.coalesce_ms, 16);
-        assert_eq!(config.repair_model.as_deref(), Some("opus"));
+        assert_eq!(config.repair_model, "opus");
         // 触っていないキーは既定値のまま
         assert_eq!(config.stalled_threshold_secs, 120);
     }
