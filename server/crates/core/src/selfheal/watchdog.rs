@@ -102,11 +102,10 @@ struct CardWindow {
 impl CardWindow {
     /// 新しい累計を受け取り、窓を更新する。
     fn observe(&mut self, current: Counters) {
-        let previous = self.previous.replace(current);
-        let Some(previous) = previous else {
-            // 初回は差分が取れない。パーサが再起動して数え直した場合も同じ扱いになる
-            return;
-        };
+        // 初回は 0 からの差分として扱う。パーサは core が起動する子プロセスなので、
+        // カウンタは**必ず 0 から始まる**。ここを「差分が取れない」と捨てると、
+        // 差し替え直後に読んだ最初の一群が検知の目に入らなくなる
+        let previous = self.previous.replace(current).unwrap_or_default();
         // パーサを差し替えるとカウンタは 0 から数え直しになる。減っていたら窓を捨てる
         if current.records_total < previous.records_total {
             self.reset();
@@ -127,8 +126,11 @@ impl CardWindow {
         self.orphans += delta.orphans;
         self.deltas.push_back(delta);
 
-        // 窓からはみ出したぶんを古い方から落とす
-        while self.records > WINDOW_RECORDS {
+        // 窓からはみ出したぶんを古い方から落とす。
+        // 直近の1件だけは必ず残す — 1回の報告が窓より大きいことがあり（巨大な
+        // トランスクリプトを一気に読んだ場合）、全部落とすと窓が空になって
+        // 「標本が足りない」と判断し続けてしまう
+        while self.records > WINDOW_RECORDS && self.deltas.len() > 1 {
             let Some(oldest) = self.deltas.pop_front() else {
                 break;
             };
@@ -254,13 +256,15 @@ mod tests {
     }
 
     #[test]
-    fn 初回の観測だけでは発報しない() {
-        // 累計しか届いていない時点では、それが「直近の」失敗なのか分からない
+    fn 初回の観測も0からの差分として数える() {
+        // パーサは core が起動する子プロセスなので、カウンタは必ず 0 から始まる。
+        // 初回を捨てると、差し替えた直後に読んだ最初の一群を見逃す
         let mut watchdog = Watchdog::new();
         let known = versions(&["2.1.220"]);
-        assert_eq!(
-            observe(&mut watchdog, counters(5_000, 4_000, 0), &known),
-            None
+        let trigger = observe(&mut watchdog, counters(5_000, 4_000, 0), &known);
+        assert!(
+            matches!(trigger, Some(Trigger::ParseErrors { .. })),
+            "実際: {trigger:?}"
         );
     }
 

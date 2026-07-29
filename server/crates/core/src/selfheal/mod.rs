@@ -79,8 +79,14 @@ pub struct Selfheal {
     watchdog: Mutex<Watchdog>,
     /// 修復中は次の検知を受け付けない。並行して2本走らせても混ざるだけ
     busy: Arc<AtomicBool>,
-    /// 差し替え直前の失敗率。悪化したかどうかの物差し
+    /// 差し替えた直後の「保護観察」。
+    ///
+    /// 中身は**差し替える前の失敗率**で、これより悪くなったら戻す。観察を終える条件は
+    /// 「一度でも健全な窓を通り抜けたら」。永久に見張り続けると、何か月も先に別の理由で
+    /// 起きた異常で、古いパーサへ戻してしまう。
     baseline: Mutex<Option<f64>>,
+    /// 発報した時点の失敗率。差し替えたときに保護観察の物差しになる
+    ratio_at_trigger: Mutex<f64>,
 }
 
 impl Selfheal {
@@ -105,6 +111,7 @@ impl Selfheal {
             watchdog: Mutex::new(Watchdog::new()),
             busy: Arc::new(AtomicBool::new(false)),
             baseline: Mutex::new(None),
+            ratio_at_trigger: Mutex::new(0.0),
         });
 
         let (sink, reports) = mpsc::channel(STATS_QUEUE);
@@ -150,6 +157,24 @@ async fn watch(selfheal: Arc<Selfheal>, mut reports: mpsc::Receiver<StatsReport>
             check_rollback(&selfheal, &card);
             continue;
         };
+
+        // 保護観察中に率の異常が出たのなら、差し替えたパーサが悪い。直しにいくのではなく
+        // 戻す。ここで修復へ進むと、悪いパーサを載せたまま何度も直そうとしてしまう
+        let on_probation = selfheal
+            .baseline
+            .lock()
+            .expect("ロックが壊れていない")
+            .is_some();
+        if on_probation && !matches!(trigger, Trigger::UnknownVersion { .. }) {
+            rollback(&selfheal, &trigger.detail());
+            selfheal
+                .watchdog
+                .lock()
+                .expect("ロックが壊れていない")
+                .forget(&card);
+            continue;
+        }
+
         // 走っている最中の発報は捨てる。同じ理由で何本も修復を起こしても混ざるだけ
         if selfheal
             .busy
@@ -157,6 +182,14 @@ async fn watch(selfheal: Arc<Selfheal>, mut reports: mpsc::Receiver<StatsReport>
             .is_err()
         {
             continue;
+        }
+        // 差し替えたときの物差しになるので、窓を畳む前に控えておく
+        {
+            let watchdog = selfheal.watchdog.lock().expect("ロックが壊れていない");
+            *selfheal
+                .ratio_at_trigger
+                .lock()
+                .expect("ロックが壊れていない") = watchdog.error_ratio(&card).unwrap_or(0.0);
         }
         selfheal
             .watchdog
@@ -173,6 +206,9 @@ async fn watch(selfheal: Arc<Selfheal>, mut reports: mpsc::Receiver<StatsReport>
 }
 
 /// 差し替えたあとに悪化していないかを見る（設計§9 のロールバック）。
+///
+/// 発報するほどではない失敗の増え方も見逃さないための経路。閾値を超えた場合は
+/// [`watch`] 側で戻す。
 fn check_rollback(selfheal: &Arc<Selfheal>, card: &str) {
     let baseline = *selfheal.baseline.lock().expect("ロックが壊れていない");
     let Some(baseline) = baseline else {
@@ -184,41 +220,50 @@ fn check_rollback(selfheal: &Arc<Selfheal>, card: &str) {
         .expect("ロックが壊れていない")
         .error_ratio(card)
     else {
+        // 標本が足りないうちは判断しない。少ない標本で戻すほうが害が大きい
         return;
     };
-    if current <= baseline {
+
+    if current > baseline {
+        rollback(
+            selfheal,
+            &format!(
+                "失敗率が {:.1}% から {:.1}% へ悪化しました",
+                baseline * 100.0,
+                current * 100.0
+            ),
+        );
         return;
     }
 
+    // 健全な窓を1つ通り抜けた。ここで観察を終えないと、ずっと先に別の理由で起きた
+    // 異常で古いパーサへ戻してしまう
+    *selfheal.baseline.lock().expect("ロックが壊れていない") = None;
+    tracing::info!("差し替えたパーサが健全に動いています。保護観察を終えます");
+}
+
+/// 前のパーサへ戻す。
+fn rollback(selfheal: &Arc<Selfheal>, reason: &str) {
     let mut state = SelfhealState::load(&selfheal.state_dir);
     let previous = state.previous_parser.take();
     *selfheal.baseline.lock().expect("ロックが壊れていない") = None;
+    // 戻した直後にもう一度直しにいかせない。読めないデータが原因なら、
+    // 何度やり直しても同じところで戻ることになる
+    state.hold_off(now_ms(), selfheal.config.selfheal_cooldown_hours);
+    state.save(&selfheal.state_dir);
 
-    match previous {
-        Some(previous) => {
-            write_pointer(&selfheal.state_dir, Some(&previous));
-            state.save(&selfheal.state_dir);
-            selfheal.parser.restart();
-            selfheal.notify(
-                SelfhealPhase::RolledBack,
-                Some(format!(
-                    "差し替え後に失敗率が悪化しました（{:.1}% → {:.1}%）。前のパーサへ戻しました",
-                    baseline * 100.0,
-                    current * 100.0
-                )),
-            );
-        }
-        None => {
-            // 戻す先が無い＝もともと同梱のパーサ。ポインタを外せば既定に戻る
-            write_pointer(&selfheal.state_dir, None);
-            state.save(&selfheal.state_dir);
-            selfheal.parser.restart();
-            selfheal.notify(
-                SelfhealPhase::RolledBack,
-                Some("差し替え後に悪化したため、同梱のパーサへ戻しました".to_string()),
-            );
-        }
-    }
+    // 戻す先が無い＝もともと同梱のパーサだった。ポインタを外せば既定に戻る
+    write_pointer(&selfheal.state_dir, previous.as_deref());
+    selfheal.parser.restart();
+
+    let destination = match previous {
+        Some(_) => "前のパーサ",
+        None => "同梱のパーサ",
+    };
+    selfheal.notify(
+        SelfhealPhase::RolledBack,
+        Some(format!("{reason}。{destination}へ戻しました")),
+    );
 }
 
 /// 検知から差し替えまでの1本道（設計§9 のシーケンス）。
@@ -244,18 +289,28 @@ async fn run_cycle(selfheal: &Arc<Selfheal>, trigger: Trigger) {
         return;
     };
 
-    // 版が分かっている検知なら、クールダウン中かどうかをここで見る
-    if let Trigger::UnknownVersion { version } = &trigger {
-        let state = SelfhealState::load(&selfheal.state_dir);
-        if state.in_cooldown(version, now_ms()) {
-            selfheal.notify(
-                SelfhealPhase::Cooldown,
-                Some(format!(
-                    "{version} は先に失敗しているため、しばらく再挑戦しません"
-                )),
-            );
-            return;
-        }
+    let state = SelfhealState::load(&selfheal.state_dir);
+    // 直前に諦めた／戻したあとは、版に関わらずしばらく始めない。
+    // これが無いと、どのパーサでも読めないデータが混ざっているときに
+    // 「直す → 戻す → また直す」が止まらず、クォータを使い切る
+    if !state.can_start(now_ms()) {
+        selfheal.notify(
+            SelfhealPhase::Cooldown,
+            Some("直前の修復から間を置いています".to_string()),
+        );
+        return;
+    }
+    // 版が分かっている検知なら、その版のクールダウンも見る
+    if let Trigger::UnknownVersion { version } = &trigger
+        && state.in_cooldown(version, now_ms())
+    {
+        selfheal.notify(
+            SelfhealPhase::Cooldown,
+            Some(format!(
+                "{version} は先に失敗しているため、しばらく再挑戦しません"
+            )),
+        );
+        return;
     }
 
     let worktree = match blocking(&ops, |ops| ops.prepare_worktree(MAINTENANCE_NAME)).await {
@@ -446,8 +501,12 @@ async fn swap_parser(
     state.save(&selfheal.state_dir);
     write_pointer(&selfheal.state_dir, Some(&destination));
 
-    // 差し替え前の失敗率を控えてから立て直す。悪化したかどうかはこれと比べて決める
-    *selfheal.baseline.lock().expect("ロックが壊れていない") = Some(0.0);
+    // 差し替え前の失敗率を物差しにして保護観察に入る（悪化したら戻す）
+    let before = *selfheal
+        .ratio_at_trigger
+        .lock()
+        .expect("ロックが壊れていない");
+    *selfheal.baseline.lock().expect("ロックが壊れていない") = Some(before);
     selfheal.parser.restart();
 
     commit(
@@ -539,61 +598,84 @@ async fn start_repair_session(selfheal: &Arc<Selfheal>, worktree: &Path) -> anyh
 
     // 起動直後に入力待ちへ入らない場合、フォルダ信頼の確認のような確定待ちの画面で
     // 止まっている可能性がある。状態を見たうえで1回だけ確定を送る
-    if !wait_for_status(selfheal, card_id, READY_TIMEOUT).await {
+    if !wait_ready(selfheal, card_id, READY_TIMEOUT).await {
         tracing::info!("修復セッションが入力待ちになりません。確定キーを1回送ります");
         let _ = session.write_input(b"\r");
-        wait_for_status(selfheal, card_id, READY_TIMEOUT).await;
+        wait_ready(selfheal, card_id, READY_TIMEOUT).await;
     }
     Ok(card_id)
 }
 
-/// 指示を送り、そのターンが終わるまで待つ。
+/// 起動が済んで指示を受け付けられる状態になるまで待つ。
+async fn wait_ready(selfheal: &Arc<Selfheal>, card_id: CardId, timeout: Duration) -> bool {
+    let mut events = selfheal.manager.subscribe_events();
+    // 購読を始める前に入力待ちへ入っていることもある。先に今の状態を見る
+    match selfheal
+        .manager
+        .get(card_id)
+        .map(|session| session.status())
+    {
+        Some(SessionStatus::WaitingInput) => return true,
+        Some(SessionStatus::Ended { .. }) | None => return false,
+        _ => {}
+    }
+    wait_for_waiting_input(&mut events, card_id, timeout).await
+}
+
+/// 指示を送り、そのターンが終わる（＝入力待ちに戻る）まで待つ。
+///
+/// **送る前に購読を始める**のが要点。状態を覗きにいく方式だと、作業がごく短いときに
+/// 「作業中」を見逃して始まりを待ち続けてしまう。イベントで受ければ、通り過ぎた変化も
+/// 順番どおりに拾える。
 async fn send_and_wait(selfheal: &Arc<Selfheal>, card_id: CardId, message: &str) -> bool {
     let Some(session) = selfheal.manager.get(card_id) else {
         return false;
     };
+    let mut events = selfheal.manager.subscribe_events();
     if session
         .write_input(&crate::session::input::encode_input(message))
         .is_err()
     {
         return false;
     }
-    // 送った直後はまだ入力待ちのままなので、作業に入るのを待ってから終わりを待つ
-    wait_for_working(selfheal, card_id).await;
-    wait_for_status(selfheal, card_id, TURN_TIMEOUT).await
+    wait_for_waiting_input(&mut events, card_id, TURN_TIMEOUT).await
 }
 
-/// 作業中になるまで待つ（取りこぼしても先へ進む）。
-async fn wait_for_working(selfheal: &Arc<Selfheal>, card_id: CardId) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-    while tokio::time::Instant::now() < deadline {
-        match selfheal
-            .manager
-            .get(card_id)
-            .map(|session| session.status())
-        {
-            Some(SessionStatus::Working) | Some(SessionStatus::Ended { .. }) | None => return,
-            _ => tokio::time::sleep(Duration::from_millis(100)).await,
-        }
-    }
-}
-
-/// 入力待ち（＝ターンが終わった）か、終了になるまで待つ。
-async fn wait_for_status(selfheal: &Arc<Selfheal>, card_id: CardId, timeout: Duration) -> bool {
+/// そのカードが入力待ちになるまでイベントを待つ。終了したら false。
+async fn wait_for_waiting_input(
+    events: &mut tokio::sync::broadcast::Receiver<ServerMessage>,
+    card_id: CardId,
+    timeout: Duration,
+) -> bool {
     let deadline = tokio::time::Instant::now() + timeout;
-    while tokio::time::Instant::now() < deadline {
-        match selfheal
-            .manager
-            .get(card_id)
-            .map(|session| session.status())
-        {
-            Some(SessionStatus::WaitingInput) => return true,
-            // 終了したセッションにこれ以上頼めることは無い
-            Some(SessionStatus::Ended { .. }) | None => return false,
-            _ => tokio::time::sleep(Duration::from_millis(200)).await,
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        let status = match tokio::time::timeout(remaining, events.recv()).await {
+            Ok(Ok(ServerMessage::Status {
+                card_id: id,
+                status,
+                ..
+            })) if id == card_id => status,
+            // ターンの終わりでは直前の応答の要約も変わるので、カード全体で届くことがある
+            Ok(Ok(ServerMessage::SessionUpsert { session })) if session.card_id == card_id => {
+                session.status
+            }
+            Ok(Ok(ServerMessage::SessionRemoved { card_id: id })) if id == card_id => return false,
+            // 取りこぼしても、次の変化で拾い直せる
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+            Ok(Err(_)) | Err(_) => return false,
+            _ => continue,
+        };
+        match status {
+            SessionStatus::WaitingInput => return true,
+            // 終わったセッションにこれ以上頼めることは無い
+            SessionStatus::Ended { .. } => return false,
+            _ => continue,
         }
     }
-    false
 }
 
 /// 修復セッションを終わらせる。

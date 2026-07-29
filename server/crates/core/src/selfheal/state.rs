@@ -35,6 +35,13 @@ pub struct SelfhealState {
     pub failures: BTreeMap<String, Failure>,
     /// 差し替え前に使っていたパーサ。悪化したときに戻す先
     pub previous_parser: Option<PathBuf>,
+    /// この時刻までは、版に関わらず新しい修復を始めない（エポックミリ秒）。
+    ///
+    /// 版ごとのクールダウンだけでは足りない。**どのパーサでも読めないデータ**が
+    /// 混ざっている場合、率の検知は版に関係なく何度でも発報するので、
+    /// 「直す → 戻す → また直す」を延々と繰り返してカナリアと修復セッションを
+    /// 起こし続けてしまう（クォータを使い切る）。
+    pub next_attempt_at: Timestamp,
 }
 
 impl SelfhealState {
@@ -65,7 +72,18 @@ impl SelfhealState {
     pub fn record_failure(&mut self, version: &str, now: Timestamp, cooldown_hours: u64) {
         let failure = self.failures.entry(version.to_string()).or_default();
         failure.attempts += 1;
-        failure.cooldown_until = now + (cooldown_hours as i64) * 60 * 60 * 1_000;
+        failure.cooldown_until = now + hours(cooldown_hours);
+        self.hold_off(now, cooldown_hours);
+    }
+
+    /// 版に関わらず、しばらく新しい修復を始めないようにする。
+    pub fn hold_off(&mut self, now: Timestamp, cooldown_hours: u64) {
+        self.next_attempt_at = self.next_attempt_at.max(now + hours(cooldown_hours));
+    }
+
+    /// いま新しい修復を始めてよいか。
+    pub fn can_start(&self, now: Timestamp) -> bool {
+        now >= self.next_attempt_at
     }
 
     /// 対応できたので、その版を対応表へ入れて失敗の記録を消す。
@@ -73,6 +91,10 @@ impl SelfhealState {
         self.known_versions.insert(version.to_string());
         self.failures.remove(version);
     }
+}
+
+fn hours(count: u64) -> Timestamp {
+    (count as i64) * 60 * 60 * 1_000
 }
 
 #[cfg(test)]
@@ -113,6 +135,32 @@ mod tests {
         assert!(state.in_cooldown("2.1.221", now));
         assert!(state.in_cooldown("2.1.221", now + 23 * 60 * 60 * 1_000));
         assert!(!state.in_cooldown("2.1.221", now + 25 * 60 * 60 * 1_000));
+    }
+
+    #[test]
+    fn 戻したあとはしばらくどの版でも始めない() {
+        // どのパーサでも読めないデータが混ざっていると、率の検知は版に関係なく
+        // 何度でも発報する。版ごとの記録だけでは「直す → 戻す → また直す」が止まらない
+        let mut state = SelfhealState::default();
+        let now = 1_700_000_000_000;
+
+        state.hold_off(now, 24);
+
+        assert!(!state.can_start(now));
+        assert!(!state.can_start(now + 23 * 60 * 60 * 1_000));
+        assert!(state.can_start(now + 25 * 60 * 60 * 1_000));
+    }
+
+    #[test]
+    fn 待ち時間は短いほうへ縮まらない() {
+        // 後から短いクールダウンを足しても、先に決まった待ちを縮めない
+        let mut state = SelfhealState::default();
+        let now = 1_700_000_000_000;
+
+        state.hold_off(now, 24);
+        state.hold_off(now, 1);
+
+        assert!(!state.can_start(now + 2 * 60 * 60 * 1_000));
     }
 
     #[test]

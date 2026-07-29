@@ -71,6 +71,9 @@ pub struct TestServer {
     pub addr: SocketAddr,
     /// 立ち上げた場合のみ。パーサを使わないテストでは None
     pub parser: Option<Arc<ParserSupervisor>>,
+    /// 立ち上げた場合のみ（自己修復のテストだけ）
+    pub selfheal: Option<Arc<agentdashboard_core::selfheal::Selfheal>>,
+    pub config: Arc<Config>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -103,6 +106,41 @@ impl TestServer {
         Self::build(config, program, false).await
     }
 
+    /// パーサに加えて自己修復も立ち上げる（設計§9）。
+    ///
+    /// 外の世界へ出る操作（cargo・git・本物の claude）は呼び出し側が差し替える。
+    /// コンテナの中から docker は叩けないので、ここは差し替えが前提になる。
+    pub async fn start_with_selfheal(
+        config: Config,
+        ops: Arc<dyn agentdashboard_core::selfheal::ops::SelfhealOps>,
+    ) -> Self {
+        // 差し替えの検証をするので、パーサの場所は**ポインタ経由**で決めさせる。
+        // 環境変数で名指しすると探索順の先頭にあたり、差し替えても効かなくなる
+        let state_dir = config.resolved_state_dir();
+        std::fs::create_dir_all(&state_dir).expect("状態の置き場所を作れること");
+        std::fs::write(
+            state_dir.join(agentdashboard_core::parser::PARSER_POINTER),
+            parser_program().to_string_lossy().as_bytes(),
+        )
+        .expect("ポインタを書けること");
+
+        let mut server = Self::build_with(
+            config,
+            fake_claude().to_string_lossy().into_owned(),
+            true,
+            false,
+        )
+        .await;
+        server.selfheal = Some(agentdashboard_core::selfheal::Selfheal::start(
+            Arc::clone(&server.manager),
+            Arc::clone(server.parser.as_ref().expect("パーサを起動している")),
+            Arc::clone(&server.config),
+            Some(ops),
+        ));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        server
+    }
+
     /// 起動する CLI を明示したうえで、パーサも立ち上げる（実CLI×構造化ビュー用）。
     pub async fn start_with_parser_and_program(config: Config, program: String) -> Self {
         let server = Self::build(config, program, true).await;
@@ -110,7 +148,18 @@ impl TestServer {
         server
     }
 
-    async fn build(mut config: Config, program: String, with_parser: bool) -> Self {
+    async fn build(config: Config, program: String, with_parser: bool) -> Self {
+        Self::build_with(config, program, with_parser, true).await
+    }
+
+    /// `name_parser_by_env` を false にすると、パーサの場所をポインタに決めさせる
+    /// （自己修復の差し替えを検証するテスト用）。
+    async fn build_with(
+        mut config: Config,
+        program: String,
+        with_parser: bool,
+        name_parser_by_env: bool,
+    ) -> Self {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("空きポートで待ち受けられること");
@@ -123,11 +172,13 @@ impl TestServer {
         let mut state = AppState::new(Arc::clone(&manager), Arc::clone(&config));
         let parser = if with_parser {
             // 本番と同じ入口（環境変数）でビルド済みのパーサを指す
-            unsafe {
-                std::env::set_var(
-                    agentdashboard_core::parser::PARSER_BIN_ENV,
-                    parser_program(),
-                );
+            if name_parser_by_env {
+                unsafe {
+                    std::env::set_var(
+                        agentdashboard_core::parser::PARSER_BIN_ENV,
+                        parser_program(),
+                    );
+                }
             }
             let parser = ParserSupervisor::start(Arc::clone(&manager), Arc::clone(&config));
             manager.attach_parser(parser.handle());
@@ -145,6 +196,8 @@ impl TestServer {
             manager,
             addr,
             parser,
+            selfheal: None,
+            config,
             task,
         }
     }
