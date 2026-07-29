@@ -330,3 +330,68 @@ async fn statusLineを切るとモデルは不明のままになる() {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     assert_eq!(session.meta().model, None, "モデルは不明のまま");
 }
+
+#[tokio::test]
+async fn 確定が来なければ楽観更新は取り消される() {
+    // **画面が嘘をつき続けないための歯止め**（設計§5）。CLI が切替を拒否すると
+    // 確定は永久に届かないので、要求値を出したままにすると「切り替わった」と
+    // 見せ続けることになる。
+    //
+    // statusLine を切って「確定が絶対に来ない」状況を作る。
+    // 15秒待つので、このファイルでいちばん遅いテストになる
+    let config = Config {
+        inject_status_line: false,
+        ..Config::default()
+    };
+    let (_path, server) = common::server_with_fake_global("give-up", GLOBAL, config).await;
+    let (session, _watcher) = common::start_session(&server.manager).await;
+
+    // 確定が来ないので、モデルは不明のまま
+    assert_eq!(session.meta().model, None);
+
+    server
+        .manager
+        .switch_model(&session, &ModelId::new("opus"))
+        .await
+        .expect("送ること自体は成功する");
+
+    // 取り消されて、切替前の表示（ここでは「不明」）へ戻っていること
+    assert_eq!(
+        session.meta().model_requested,
+        None,
+        "楽観更新が残り続けると、切り替わったと嘘をつき続けることになる"
+    );
+    assert_eq!(session.meta().model, None);
+}
+
+#[tokio::test]
+async fn 画面が読めないときは送らずに理由を返す() {
+    // 送る前に端末を確かめる、という原則（設計§5）。このPJTは画面を見ずにキーを送って
+    // 別の相手に吸われる事故を2回実測している。
+    //
+    // 起動直後、擬似 claude がフッタを書く前を狙う。**ready を待たない**のが要点
+    let (_path, server) =
+        common::server_with_fake_global("unreadable", GLOBAL, refresh_config()).await;
+    let session = server
+        .manager
+        .spawn(&common::work_dir())
+        .expect("セッションを起動できること");
+
+    let error = server
+        .manager
+        .switch_model(&session, &ModelId::new("opus"))
+        .await
+        .expect_err("画面が読めないので送らないこと");
+
+    // 黙って諦めない。理由がそのまま画面に出せる文であること
+    let message = error.to_string();
+    assert!(
+        message.contains("ターミナル"),
+        "利用者が次に何を見ればよいか分かる文であること。実際: {message}"
+    );
+    assert_eq!(
+        session.meta().model_requested,
+        None,
+        "送っていないので楽観更新も立たないこと"
+    );
+}

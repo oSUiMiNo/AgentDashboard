@@ -24,6 +24,11 @@
 //! - **フォルダ信頼の確認に答える**。使い捨てディレクトリで起動すると TUI が信頼を
 //!   尋ねてくるので、出てきたら Enter で確定する
 
+// テスト名は日本語で書く。`statusLine` のように英大文字が混ざると snake_case 判定に
+// 引っかかるだけで実害はないため、このファイルに限って許可する
+// （`selfheal.rs` / `transcript.rs` / `model.rs` と同じ扱い）
+#![allow(non_snake_case)]
+
 mod common;
 
 use agentdashboard_core::{
@@ -1040,6 +1045,109 @@ async fn 指定なしでは利用者の設定どおりのモードで起動す�
 
     // こちらが何も渡していないので、ラッパー側の指定がそのまま効く
     wait_for_mode(&session, "acceptEdits").await;
+
+    server
+        .manager
+        .archive(session.card_id)
+        .expect("片付けられること");
+}
+
+#[tokio::test]
+#[ignore = "本物の claude を起動し、アカウントのクォータを消費する（make test-cli）"]
+async fn 注入したstatusLineから本物のCLIがモデルを名乗る() {
+    // テスト計画フェーズ4。**擬似 claude では確かめられない継ぎ目**がここ——
+    // 注入した settings の statusLine を本物の CLI が本当に読み、こちらの
+    // model-post を子プロセスとして起こし、期待した形の JSON を渡してくるか。
+    //
+    // ターンは回さないので**トークンは使わない**（statusLine も /model もローカル実行。
+    // 公式ドキュメント明記、設計§11 で実測）。
+    let dir = WorkDir::new("model");
+
+    // ダッシュボードが読み書きするグローバル既定は使い捨てのファイルにする。
+    // **利用者の本物の設定を対象にしない**ための差し替え（設計§11）。
+    // 本物の claude 自身は $HOME を見るので、そちら側の汚れは
+    // scripts/test-cli の trap が戻す
+    let fake_global = dir.path().join("claude-settings.json");
+    std::fs::write(&fake_global, "{\n  \"model\": \"haiku\"\n}\n")
+        .expect("擬似のグローバル設定を書けること");
+
+    let config = Config {
+        claude_settings_path: Some(fake_global.clone()),
+        // 切替の確定が届くまでの時間はこの値で決まる（モデル変更は契機に入っていない）
+        status_line_refresh_secs: 1,
+        ..Config::default()
+    };
+    let program = claude_wrapper(&dir, &["--setting-sources", "project,local"]);
+    let server =
+        common::TestServer::start_with_program(config, program.to_string_lossy().into_owned())
+            .await;
+
+    let session = server
+        .manager
+        .spawn(&dir.as_str())
+        .expect("セッションを起動できること");
+    let mut watcher = common::Watcher::attach(&session);
+    accept_trust_prompt_if_any(&session, &mut watcher).await;
+
+    // 注入した model で始まること（設計§6 の主の仕掛け）。
+    // id の形は環境で変わりうるので、系統名だけを見る
+    let deadline = Instant::now() + CLI_TIMEOUT;
+    loop {
+        if let Some(model) = session.meta().model
+            && model.as_str().contains("haiku")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "注入した model で始まりませんでした。実際: {:?}",
+            session.meta().model
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // 表示名は**版番号入り**で届くこと（設計§12 の要）。
+    // ここが `Haiku` のように版番号無しだと、画面に版番号を出せない
+    let label = session.meta().model_label.expect("表示名が届いていること");
+    assert!(
+        label.chars().any(|ch| ch.is_ascii_digit()),
+        "表示名に版番号が入っていること。実際: {label}"
+    );
+
+    // 画面からの切替が本物の TUI に効くこと
+    watcher.drain_quiet_for(Duration::from_secs(1)).await;
+    server
+        .manager
+        .switch_model(&session, &protocol::ModelId::new("sonnet"))
+        .await
+        .expect("切り替えられること");
+
+    let deadline = Instant::now() + CLI_TIMEOUT;
+    loop {
+        if let Some(model) = session.meta().model
+            && model.as_str().contains("sonnet")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "切替が効きませんでした。実際: {:?}",
+            session.meta().model
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // 別名の解決先を覚えたこと（設計§12）
+    let resolved = server
+        .manager
+        .aliases()
+        .resolve(&protocol::ModelId::new("sonnet"));
+    assert!(resolved.is_some(), "切替の結果を覚えていること");
+
+    // 擬似のグローバル既定が元へ戻っていること（設計§6 の副の仕掛け）。
+    // 本物の claude が書くのは $HOME 側なので、ここは「余計に書かない」ことの確認
+    let after = std::fs::read_to_string(&fake_global).expect("読めること");
+    assert_eq!(after, "{\n  \"model\": \"haiku\"\n}\n", "実際:\n{after}");
 
     server
         .manager
