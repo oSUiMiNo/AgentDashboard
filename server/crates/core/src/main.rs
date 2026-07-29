@@ -3,7 +3,7 @@
 //! 引数なしで起動するとサーバが立ち上がり、ブラウザからセッションを操作できるようになる。
 //! 中身は [`agentdashboard_core`] 側にあり、ここは CLI の解釈だけを担う。
 
-use agentdashboard_core::{config, config::Config, embed, hook_post, serve};
+use agentdashboard_core::{config, config::Config, embed, hook_post, model_post, serve};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -40,6 +40,16 @@ enum Command {
         #[arg(long, value_name = "URL")]
         url: String,
     },
+    /// 注入した statusLine から起動され、いまのモデルをダッシュボードへ転送する（設計§4）
+    ///
+    /// `hook-post` と違い、**標準出力にモデルの表示名を書く**。statusLine の標準出力は
+    /// 会話ではなく端末の表示になるので、書かないとその行が空になる。
+    /// こちらも失敗しても終了コード 0 で終わる。
+    ModelPost {
+        /// 転送先。`http://127.0.0.1:<port>/model/<token>`
+        #[arg(long, value_name = "URL")]
+        url: String,
+    },
 }
 
 #[tokio::main]
@@ -51,6 +61,11 @@ async fn main() -> anyhow::Result<()> {
     // 設定の読み込みで失敗し、フックが非ゼロ終了してしまう
     if let Some(Command::HookPost { url }) = &cli.command {
         hook_post::run(url);
+        return Ok(());
+    }
+    // statusLine も同じ理由で設定より前に処理する（利用者のプロジェクトが cwd になる）
+    if let Some(Command::ModelPost { url }) = &cli.command {
+        model_post::run(url);
         return Ok(());
     }
 
@@ -81,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
             std::io::stdout().write_all(&data)?;
         }
         // 上で先に処理して戻っている
-        Some(Command::HookPost { .. }) => unreachable!(),
+        Some(Command::HookPost { .. }) | Some(Command::ModelPost { .. }) => unreachable!(),
         None => {
             tracing_subscriber::fmt()
                 .with_env_filter(

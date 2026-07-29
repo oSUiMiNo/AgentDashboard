@@ -119,7 +119,11 @@ pub fn parse_footer(text: &str) -> Option<PermissionMode> {
 }
 
 /// 空白（改行を含む）を全部取り除く。
-fn squeeze(text: &str) -> String {
+///
+/// 端末の生バイト列と目印を突き合わせるときは、必ずここを通す。TUI は語ごとに別々の
+/// 書き込みをして間をカーソル移動で埋めるので、生の並びでは語間の空白が消える
+/// （設計§11 の実測）。折り返しで語が行をまたいで割れる件も同じ理屈で吸収できる。
+pub fn squeeze(text: &str) -> String {
     text.chars().filter(|ch| !ch.is_whitespace()).collect()
 }
 

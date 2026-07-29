@@ -362,6 +362,26 @@ async fn handle_request(
             });
         }
 
+        // 走っているセッションのモデルを切り替える（設計§5）。
+        // 権限モードと同じく時間がかかるので別タスクへ逃がすが、**逃がした先で
+        // プロセス全体のロックを取る**のが違い。切替は利用者のグローバル既定
+        // `~/.claude/settings.json` を汚すので、並走すると元の値が失われる（設計§6）。
+        ClientMessage::SetModel { card_id, model } => {
+            let Some(session) = state.manager.get(card_id) else {
+                send_error(outbound, Some(card_id), "セッションが見つかりません".into()).await;
+                return;
+            };
+            let manager = Arc::clone(&state.manager);
+            let outbound = outbound.clone();
+            tokio::spawn(async move {
+                if let Err(err) = manager.switch_model(&session, &model).await {
+                    // 途中まで動いた結果も配る（楽観更新が立っていれば、それも伝わる）
+                    manager.broadcast_session(&session);
+                    send_error(&outbound, Some(card_id), err.to_string()).await;
+                }
+            });
+        }
+
         ClientMessage::Kill { card_id } => {
             if let Err(err) = state.manager.kill(card_id) {
                 send_error(outbound, Some(card_id), err.to_string()).await;

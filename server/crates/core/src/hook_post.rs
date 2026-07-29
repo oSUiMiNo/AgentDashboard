@@ -59,7 +59,10 @@ fn parse_url(url: &str) -> anyhow::Result<Target> {
     })
 }
 
-fn post(url: &str, body: &str) -> anyhow::Result<()> {
+/// 127.0.0.1 のダッシュボードへ1本 POST する。
+///
+/// [`crate::model_post`] も同じ宛先・同じ制約（失敗しても黙る）なので共用する。
+pub(crate) fn post(url: &str, body: &str) -> anyhow::Result<()> {
     let target = parse_url(url)?;
     let address = target
         .authority

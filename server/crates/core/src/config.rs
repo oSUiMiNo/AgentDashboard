@@ -22,6 +22,11 @@ const DEFAULT_SELFHEAL_RETRY: u32 = 3;
 const DEFAULT_SELFHEAL_COOLDOWN_HOURS: u64 = 24;
 const DEFAULT_TRANSCRIPT_WINDOW_NODES: usize = 2000;
 const DEFAULT_TRANSCRIPT_PAGE_LIMIT: usize = 200;
+/// `statusLine` を再実行する間隔（秒）。
+///
+/// 実測で `refreshInterval: 3` はきっちり3.0秒間隔で走った（設計§11 前提6）。
+/// 1秒にするとセッション数だけ毎秒プロセスが起動するので、3秒を既定にしている。
+const DEFAULT_STATUS_LINE_REFRESH_SECS: u64 = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -105,6 +110,18 @@ pub struct Config {
     /// 一時ディレクトリやビルド成果物の隣に置いてはいけない — 消えると再開位置を失い、
     /// 起動のたびに全再パースになってブラウザへ履歴が二重に届く。
     pub state_dir: Option<PathBuf>,
+    /// セッションへ `statusLine` を注入するか（設計§4）。
+    ///
+    /// これがモデル名の唯一の取得経路なので、切ると**モデルは「不明」のまま**になる。
+    /// 切れるようにしてあるのは、`--settings` がコマンドライン引数の層にあるせいで
+    /// **利用者自身の `statusLine` を上書きしてしまう**ため（設計§11 前提5 で実測）。
+    /// 自分の statusLine を優先したい人のための逃げ道。
+    pub inject_status_line: bool,
+    /// 注入する `statusLine` の `refreshInterval`（秒、最小1）。
+    ///
+    /// `statusLine` が走る契機に**モデル変更は入っていない**（設計§11 前提6）。
+    /// 切り替えた結果が画面に反映されるまでの時間は、事実上この値で決まる。
+    pub status_line_refresh_secs: u64,
 }
 
 impl Default for Config {
@@ -127,6 +144,8 @@ impl Default for Config {
             transcript_window_nodes: DEFAULT_TRANSCRIPT_WINDOW_NODES,
             transcript_page_limit: DEFAULT_TRANSCRIPT_PAGE_LIMIT,
             state_dir: None,
+            inject_status_line: true,
+            status_line_refresh_secs: DEFAULT_STATUS_LINE_REFRESH_SECS,
         }
     }
 }

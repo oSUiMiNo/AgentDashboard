@@ -123,6 +123,46 @@ impl fmt::Display for PermissionMode {
     }
 }
 
+/// セッションが使っている LLM モデル（`/model` の値、または CLI が名乗るフルID）。
+///
+/// **列挙型にしない。** 理由は [`PermissionMode`] と同じだが、こちらのほうが強く効く。
+/// モデルは権限モードよりずっと頻繁に増えるので、列挙型にすると Anthropic が新しい
+/// モデルを出した瞬間に古いダッシュボードが未知の値で落ちる。
+///
+/// # 2つの顔があることに注意
+///
+/// この型が運ぶ文字列には、出どころの違う2種類がある。
+///
+/// | 出どころ | 例 | どこで使うか |
+/// |---|---|---|
+/// | 切り替え先として利用者が選ぶ**別名** | `opus` / `sonnet` / `default` | `/model <値>` として送る |
+/// | CLI が名乗る**フルID** | `claude-opus-5` | いま動いているモデルとして受け取る |
+///
+/// 別名を送ってもフルIDが返ってくるので、**送った値と返る値は一致しない**。
+/// 「いま何で動いているか」の正は常に CLI 側にある（設計§1）。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ModelId(pub String);
+
+impl ModelId {
+    /// 指定を消してアカウントの既定へ戻す特別な値。モデル名ではない。
+    pub const DEFAULT: &'static str = "default";
+
+    pub fn new(raw: impl Into<String>) -> Self {
+        Self(raw.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ModelId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// 小窓に表示するセッションの状態（設計§5 の導出結果）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -153,6 +193,28 @@ pub struct SessionMeta {
     /// まだ何も教えてくれていない状態。空欄にするのではなく **分からないことを
     /// 分からないと表示できる**ようにするための `Option`（`hooks_seen` と同じ理由）。
     pub permission_mode: Option<PermissionMode>,
+    /// CLI が名乗った、いま動いているモデルのフルID（設計§4）。
+    ///
+    /// `None` は「モデルが無い」ではなく **まだ CLI が名乗っていない**。注入した
+    /// `statusLine` が最初の値を送ってくるまでは必ずここから始まるので、画面は
+    /// これを「不明」と出す。
+    pub model: Option<ModelId>,
+    /// 画面に出すモデルの名前（`Opus 5` など）。
+    ///
+    /// [`SessionMeta::model`] と2つ持つのは、**版番号をこちらで管理しないため**。
+    /// 別名がどの版に解決されるかはプロバイダによって違う（`opus` は Anthropic API
+    /// なら Opus 5、Microsoft Foundry なら Opus 4.6）ので、こちらの表には書けない。
+    /// CLI が `statusLine` 経由で `display_name` をくれるので、それをそのまま出す。
+    pub model_label: Option<String>,
+    /// 切替を要求したが、まだ CLI が名乗り直していない値（設計§5 の楽観更新）。
+    ///
+    /// `statusLine` が走る契機に**モデル変更は入っていない**ので、`/model` を送った
+    /// 直後は確定値が古いままになる。その間「押した手応え」を返すために要求値を先に
+    /// 出すが、これは推測でしかないので確定値とは**別のフィールドに分けて持つ**。
+    /// 画面はこれがあるあいだ、確定した値とは違う見た目にする。
+    ///
+    /// bool の印ではなく値そのものを持つのは、「Sonnet へ切替中」と具体的に出せるため。
+    pub model_requested: Option<ModelId>,
     pub status: SessionStatus,
     /// 稼働中サブエージェント数。バッジ表示用で、status とは独立に増減する
     pub subagent_active: u32,
@@ -311,6 +373,9 @@ mod tests {
             project: ProjectId("/home/example/dev/app".to_string()),
             claude_session_id: Some(ClaudeSessionId::new()),
             permission_mode: Some(PermissionMode::new("acceptEdits")),
+            model: Some(ModelId::new("claude-opus-5")),
+            model_label: Some("Opus 5".to_string()),
+            model_requested: Some(ModelId::new("sonnet")),
             status: SessionStatus::WaitingPermission,
             subagent_active: 2,
             last_activity_at: 1_700_000_000_000,
@@ -327,6 +392,76 @@ mod tests {
         // フックが言うモードが違う」ように見えるので、運ぶ値は片方へ寄せる
         assert_eq!(PermissionMode::new("manual").as_str(), "default");
         assert_eq!(PermissionMode::new("default").as_str(), "default");
+    }
+
+    #[test]
+    fn モデルは裸の文字列として運ばれ知らない値も通る() {
+        // モデルは権限モードよりずっと頻繁に増える。知らない値で落ちてはいけない
+        // （列挙型にしない理由そのもの）
+        let known = ModelId::new("claude-opus-5");
+        assert_eq!(roundtrip(&known), known);
+        assert_eq!(
+            serde_json::to_string(&known).unwrap(),
+            r#""claude-opus-5""#,
+            "裸の文字列として運ばれること"
+        );
+
+        let unknown = ModelId::new("まだ知らないモデル");
+        assert_eq!(unknown.as_str(), "まだ知らないモデル");
+        assert_eq!(roundtrip(&unknown), unknown);
+    }
+
+    #[test]
+    fn 確定したモデルと切替を要求した値は別のフィールドで運ばれる() {
+        // 楽観更新した値が確定値と同じ顔をすると、CLI に拒否されたときに
+        // 画面が嘘をつき続ける（設計§5）
+        let meta = SessionMeta {
+            card_id: CardId::new(),
+            project: ProjectId("/home/example/dev/app".to_string()),
+            claude_session_id: None,
+            permission_mode: None,
+            model: Some(ModelId::new("claude-haiku-4-5")),
+            model_label: Some("Haiku 4.5".to_string()),
+            model_requested: Some(ModelId::new("opus")),
+            status: SessionStatus::Working,
+            subagent_active: 0,
+            last_activity_at: 1,
+            last_assistant_message: None,
+            created_at: 1,
+            hooks_seen: false,
+        };
+        let back = roundtrip(&meta);
+        assert_eq!(back.model, meta.model);
+        assert_eq!(back.model_requested, meta.model_requested);
+        assert_ne!(
+            back.model, back.model_requested,
+            "確定値と要求値が同じ入れ物に潰れていないこと"
+        );
+    }
+
+    #[test]
+    fn まだ名乗っていないモデルはnullとして運ばれる() {
+        // 「モデルが無い」ではなく「まだ CLI が名乗っていない」を表す null。
+        // フロントの `ModelId | null` と1対1で対応させるため、キーごと消してはいけない
+        let meta = SessionMeta {
+            card_id: CardId::new(),
+            project: ProjectId("/tmp".to_string()),
+            claude_session_id: None,
+            permission_mode: None,
+            model: None,
+            model_label: None,
+            model_requested: None,
+            status: SessionStatus::Starting,
+            subagent_active: 0,
+            last_activity_at: 1,
+            last_assistant_message: None,
+            created_at: 1,
+            hooks_seen: false,
+        };
+        let text = serde_json::to_string(&meta).unwrap();
+        assert!(text.contains(r#""model":null"#), "実際: {text}");
+        assert!(text.contains(r#""model_label":null"#), "実際: {text}");
+        assert!(text.contains(r#""model_requested":null"#), "実際: {text}");
     }
 
     #[test]

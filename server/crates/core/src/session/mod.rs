@@ -20,6 +20,7 @@ pub mod cwd;
 pub mod hooks_settings;
 pub mod input;
 pub mod lifecycle;
+pub mod model;
 pub mod permission;
 pub mod pty;
 
@@ -31,8 +32,8 @@ use crate::{
 use bytes::Bytes;
 use hooks_settings::HookSettings;
 use protocol::{
-    CardId, ClaudeSessionId, NodeId, PermissionMode, ProjectId, SessionMeta, SessionStatus,
-    Timestamp, TreeNode,
+    CardId, ClaudeSessionId, ModelId, NodeId, PermissionMode, ProjectId, SessionMeta,
+    SessionStatus, Timestamp, TreeNode,
     frame::{self, FrameKind},
     ipc::ParsedNode,
     ws::ServerMessage,
@@ -111,6 +112,21 @@ const CYCLE_LIMIT: usize = 8;
 const CYCLE_SETTLE: Duration = Duration::from_millis(3_000);
 const CYCLE_STEP: Duration = Duration::from_millis(100);
 
+/// 楽観更新を取り消すまでの上限（設計§5）。
+///
+/// `statusLine` が走る契機に**モデル変更は入っていない**（設計§11 の実測）ので、
+/// 確定値は `refreshInterval`（既定3秒）の次の周期で届く。それを何度か待てる長さにする。
+///
+/// ここで諦めるのは、CLI が切替を拒否した場合（組織の制限など）に**楽観更新が
+/// 上書きされずに残り続けて嘘になる**のを防ぐため。
+const MODEL_SETTLE: Duration = Duration::from_secs(15);
+const MODEL_STEP: Duration = Duration::from_millis(200);
+
+/// 切替の確認画面が出るのを待つ上限（設計§11）。
+///
+/// 会話が進んでいるときだけ出る。出ないほうが普通なので、短く切って先へ進む。
+const MODEL_CONFIRM_WAIT: Duration = Duration::from_secs(4);
+
 pub fn now_ms() -> Timestamp {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -151,6 +167,22 @@ pub enum SwitchError {
         メニューや確認が出ていないか、ターミナルビューで確かめてください"
     )]
     NoResponse,
+    #[error("端末へ書き込めませんでした: {0}")]
+    Write(String),
+}
+
+/// モデルの切替に失敗した理由（設計§5）。
+///
+/// 権限モードと別の型にしているのは、**起こりうる失敗が違う**ため。モデルは巡回では
+/// なく `/model` の一撃で切り替わるので「到達できない」が無く、代わりに
+/// 「送ったが CLI が名乗り直さない」（組織の制限で拒否された等）がある。
+#[derive(Debug, thiserror::Error)]
+pub enum ModelSwitchError {
+    #[error(
+        "いま画面に何が出ているか読み取れないので、モデルの切替を送りませんでした。\
+        メニューや確認が出ていないか、ターミナルビューで確かめてください"
+    )]
+    Unreadable,
     #[error("端末へ書き込めませんでした: {0}")]
     Write(String),
 }
@@ -399,6 +431,135 @@ impl Session {
         }
 
         Err(SwitchError::Unreachable(target.to_string()))
+    }
+
+    /// モデルの切替を要求する（設計§5 の手順1〜4）。
+    ///
+    /// 戻り値は「実際に送ったか」。`false` は**もう目的のモデルだった**という意味で、
+    /// 失敗ではない。
+    ///
+    /// # 送る前に画面を確かめる
+    ///
+    /// 権限モードと同じ原則（設計§5）。フッタが読めない＝メニューや確認が出ている
+    /// 状態でキーを送ると、別の相手に吸われる。このPJTは同じ事故を2回実測している。
+    /// モデルの取得に端末を読まなくなっても、**送ってよい画面かの判断には端末を読む**。
+    ///
+    /// # 送ったら楽観更新を立てる
+    ///
+    /// 確定値が届くのは次の `refreshInterval` の周期なので、その間ずっと古い値を
+    /// 出すと「押したのに反応しない」ように見える。要求値を別フィールドに立てて
+    /// 手応えを返す。確定と混ざらないよう、入れ物は分けてある。
+    pub async fn request_model(
+        &self,
+        target: &ModelId,
+        resolved: Option<&ModelId>,
+    ) -> Result<bool, ModelSwitchError> {
+        if self.read_footer_mode().is_none() {
+            return Err(ModelSwitchError::Unreadable);
+        }
+
+        let current = self.meta().model;
+        if model::is_already_current(target, resolved, current.as_ref()) {
+            return Ok(false);
+        }
+
+        self.send_instruction(&model::switch_command(target))
+            .await
+            .map_err(|err| ModelSwitchError::Write(format!("{err:#}")))?;
+        self.store_model_requested(Some(target.clone()));
+        Ok(true)
+    }
+
+    /// 送ったあとの後始末（設計§5 の手順6）。
+    ///
+    /// 1. 確認画面が出ていたら答える（会話が進んでいるときだけ出る。設計§11）
+    /// 2. `statusLine` からの確定を待つ
+    /// 3. 待っても来なければ**楽観更新を取り消す**
+    ///
+    /// 戻り値は「確定したか」。取り消した場合は `false` で、画面は確定値（多くは
+    /// 切替前のモデル）に戻る。CLI が拒否したのに切り替わったように見せ続けるより、
+    /// 元に戻って「変わらなかった」と分かるほうがよい。
+    pub async fn settle_model_switch(&self) -> bool {
+        self.answer_switch_confirmation().await;
+
+        let deadline = tokio::time::Instant::now() + MODEL_SETTLE;
+        while tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(MODEL_STEP).await;
+            // 確定は受信口（[`crate::model_post`] の受け側）が消す。ここは消えたことを見るだけ
+            if self.meta().model_requested.is_none() {
+                return true;
+            }
+        }
+
+        tracing::warn!(
+            card_id = %self.card_id,
+            "モデルの切替を送りましたが、CLI が名乗り直しませんでした。切替前の表示へ戻します"
+        );
+        self.store_model_requested(None);
+        false
+    }
+
+    /// 会話が進んだ状態で出る「Switch model?」に答える（設計§11）。
+    ///
+    /// **画面を読んでから送る。** 既定のカーソルは「はい」の側にあるが、決め打ちで
+    /// Enter を送ると、確認が出ていない場合に**入力欄の中身を確定させてしまう**。
+    /// 全承認スキップの確認と同じ作法にしてある（[`answer_bypass_notice`]）。
+    ///
+    /// 確認が出ないほうが普通なので、待たずに帰るのが既定の道筋。
+    async fn answer_switch_confirmation(&self) {
+        let deadline = tokio::time::Instant::now() + MODEL_CONFIRM_WAIT;
+        while tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(MODEL_STEP).await;
+
+            let screen = self.scrollback_tail(FOOTER_TAIL);
+            if !model::looks_like_confirmation(&screen) {
+                continue;
+            }
+            match permission::accept_option_key(&screen) {
+                Some(key) => {
+                    tracing::info!(
+                        card_id = %self.card_id,
+                        "モデル切替の確認に答えます（選択肢 {key}）"
+                    );
+                    let _ = self.write_input(key.to_string().as_bytes());
+                    tokio::time::sleep(INSTRUCTION_SETTLE).await;
+                    let _ = self.write_input(b"\r");
+                }
+                // 読めないなら何も送らない。利用者がターミナルビューから答えられる
+                None => tracing::warn!(
+                    card_id = %self.card_id,
+                    "モデル切替の確認が出ていますが、受け入れる選択肢を読み取れませんでした。\
+                    ターミナルビューから答えてください"
+                ),
+            }
+            return;
+        }
+    }
+
+    /// CLI が名乗ったモデルを控える。変わったときだけ `true`。
+    ///
+    /// **ここが「正」の入り口**（設計§1）。`statusLine` から届いた値だけがここを通る。
+    /// 値が動いたら楽観更新は役目を終えるので、同時に落とす。
+    pub fn store_model(&self, id: ModelId, label: Option<String>) -> bool {
+        let mut meta = self.meta.lock().expect("ロックが壊れていない");
+        let same = meta.model.as_ref() == Some(&id) && meta.model_label == label;
+        if same {
+            // 値が動いていないなら、楽観更新も残したままにする。ここで落とすと
+            // 「切替を送った直後の同じ値の通知」で手応えが消える
+            return false;
+        }
+        meta.model = Some(id);
+        meta.model_label = label;
+        meta.model_requested = None;
+        true
+    }
+
+    /// 切替の要求値を立てる／落とす。
+    fn store_model_requested(&self, requested: Option<ModelId>) {
+        self.meta
+            .lock()
+            .expect("ロックが壊れていない")
+            .model_requested = requested;
     }
 
     /// 1回押したあと、フッタの表示が落ち着くまで待って読む。
@@ -651,6 +812,13 @@ pub struct SessionManager {
     /// 逆参照（パーサ → SessionManager）はここには持たせない。フックの処理を止めない
     /// ために、送信は待たない `try_send` にしてある（[`crate::parser::ParserHandle`]）。
     parser: Mutex<Option<crate::parser::ParserHandle>>,
+    /// 利用者のグローバル既定を守る役（設計§6）。
+    ///
+    /// **セッションではなくマネージャが持つ。** 対象がプロセスに1つしかないファイルなので、
+    /// セッションごとに持つと直列化の意味が無くなる。
+    claude_settings: Arc<crate::claude_settings::ClaudeSettings>,
+    /// 別名がこの環境で何に解決されるかの実測（設計§12）。
+    aliases: Arc<crate::model_aliases::ModelAliases>,
 }
 
 impl SessionManager {
@@ -669,6 +837,9 @@ impl SessionManager {
     /// プロセスの環境変数を書き換えずに済むので、テスト同士が互いを壊さない。
     pub fn with_programs(config: Arc<Config>, program: String, hook_program: PathBuf) -> Arc<Self> {
         let (events, _) = broadcast::channel(EVENT_QUEUE_MESSAGES);
+        let aliases = Arc::new(crate::model_aliases::ModelAliases::load(Some(
+            config.resolved_state_dir(),
+        )));
         Arc::new(Self {
             config,
             program,
@@ -677,12 +848,46 @@ impl SessionManager {
             tokens: Mutex::new(HashMap::new()),
             events,
             parser: Mutex::new(None),
+            claude_settings: Arc::new(crate::claude_settings::ClaudeSettings::discover()),
+            aliases,
         })
     }
 
     /// 起動する実行ファイル名（画面や調査で確認できるように公開する）。
     pub fn program(&self) -> &str {
         &self.program
+    }
+
+    /// 利用者のグローバル既定を守る役。
+    pub fn claude_settings(&self) -> &Arc<crate::claude_settings::ClaudeSettings> {
+        &self.claude_settings
+    }
+
+    /// 別名の実測結果（画面の選択肢に版番号を併記するために配る）。
+    pub fn aliases(&self) -> &Arc<crate::model_aliases::ModelAliases> {
+        &self.aliases
+    }
+
+    /// グローバル既定と別名の置き場所を差し替える（テスト用）。
+    ///
+    /// **本物の `~/.claude/settings.json` をテストが触らないための入口。**
+    /// 環境変数を書き換える方式にすると、並行して走る他のテストを巻き込む。
+    pub fn with_claude_settings(
+        self: &Arc<Self>,
+        settings: Arc<crate::claude_settings::ClaudeSettings>,
+        aliases: Arc<crate::model_aliases::ModelAliases>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            config: Arc::clone(&self.config),
+            program: self.program.clone(),
+            hook_program: self.hook_program.clone(),
+            sessions: Mutex::new(HashMap::new()),
+            tokens: Mutex::new(HashMap::new()),
+            events: self.events.clone(),
+            parser: Mutex::new(None),
+            claude_settings: settings,
+            aliases,
+        })
     }
 
     /// 一覧の更新通知を購読する。
@@ -792,10 +997,21 @@ impl SessionManager {
             None => lifecycle::SessionStart::Fresh(ClaudeSessionId::new()),
         };
 
+        // 注入するモデルは**セッションを起こすたびに読み直す**（設計§6 の主の仕掛け）。
+        // 起動時に1回だけ読むと、利用者が途中で既定を変えたときに追従できない。
+        // 回復に失敗している間は読みに行かず、覚えている値を使う（汚れた値を
+        // 利用者の既定として取り込まないため）
+        let injection = hooks_settings::ModelInjection {
+            status_line: self.config.inject_status_line,
+            refresh_secs: self.config.status_line_refresh_secs,
+            model: self.claude_settings.refresh_default(),
+        };
+
         // フック設定は起動より前に書き出しておく。CLI は起動時に --settings を読むので、
         // 後から書いても間に合わない
-        let settings = hooks_settings::write(card_id, self.config.port, &self.hook_program)
-            .map_err(|err| SessionError::Settings(format!("{err:#}")))?;
+        let settings =
+            hooks_settings::write(card_id, self.config.port, &self.hook_program, &injection)
+                .map_err(|err| SessionError::Settings(format!("{err:#}")))?;
         let command = lifecycle::build_command_with_extra(
             &self.program,
             &project_path,
@@ -833,6 +1049,12 @@ impl SessionManager {
                 // 起動時に指定した値は初期値でしかない（設計§11）。フックとフッタが
                 // 実態へ訂正するまでの間、画面を空にしないために持つ
                 permission_mode: initial_mode.clone(),
+                // モデルは**起動時には分からない**（設計§4）。権限モードと違って
+                // 起動引数から埋められる値が無く、注入した `statusLine` が最初の値を
+                // 送ってくるまでは名乗りようがない。ここで推測で埋めてはいけない
+                model: None,
+                model_label: None,
+                model_requested: None,
                 // SessionStart フックが届くまでは「起動した」以上のことが分からない。
                 // 設計§5 の定義どおり Starting から始める
                 status: SessionStatus::Starting,
@@ -986,6 +1208,81 @@ impl SessionManager {
     /// カード1枚を全クライアントへ送り直す。
     ///
     /// 権限モードのように**差分メッセージ（`status`）に載らない項目**が変わったときに使う。
+    /// モデルの切替を最後まで面倒みる（設計§5・§6）。
+    ///
+    /// # なぜマネージャの仕事なのか
+    ///
+    /// 切替は**利用者のグローバル既定 `~/.claude/settings.json` を汚す**（設計§11 前提3
+    /// で実測）。対象はプロセスに1つしかないファイルなので、**プロセス全体で1本の
+    /// ロック**の下で「送る → 確定を待つ → 回復する」を通しで行う必要がある。
+    /// セッション1本の中に閉じた話ではないので、ここに置く。
+    ///
+    /// 直列化しないと設計§6 の4手が起きる。
+    ///
+    /// ```text
+    /// A：opus を控える → A：/model sonnet   → CLI が sonnet を書く
+    /// B：控える（★sonnet を「元の値」だと思い込む）→ B：/model haiku
+    /// A：値が違うので諦める → B：sonnet へ戻す → opus が二度と戻らない
+    /// ```
+    ///
+    /// 「読んだ時点と違ったら書かない」という自衛だけでは、汚染を防ぐのではなく
+    /// **汚染を固定する**ことになる。
+    ///
+    /// このロックは**同一セッションへの連打**も同時に片付ける。
+    pub async fn switch_model(
+        self: &Arc<Self>,
+        session: &Arc<Session>,
+        target: &ModelId,
+    ) -> Result<(), ModelSwitchError> {
+        // 切替と回復の一連をプロセス全体で直列化する。ガードはこの関数を抜けるまで持つ
+        let _guard = self.claude_settings.lock_switch().await;
+
+        let resolved = self.aliases.resolve(target);
+        if !session.request_model(target, resolved.as_ref()).await? {
+            // もう目的のモデルだった。送っていないのでグローバル既定も汚れていない
+            return Ok(());
+        }
+
+        // 押した手応えを即返す（楽観更新。設計§5）
+        self.broadcast_session(session);
+
+        // **回復は成否によらず必ず走らせる。** 送った時点でグローバル既定は汚れうる
+        session.settle_model_switch().await;
+        let outcome = self.claude_settings.recover(target);
+        tracing::debug!(card_id = %session.card_id, "グローバル既定の回復: {outcome:?}");
+
+        self.broadcast_session(session);
+        Ok(())
+    }
+
+    /// `statusLine` が知らせてきたモデルを取り込む（設計§4）。
+    ///
+    /// **ここが「いま何で動いているか」の唯一の入り口**。値が動いたときだけ配信する
+    /// （フックの `permission_mode` と同じ考え方。毎回配ると無駄が大きい）。
+    ///
+    /// あわせて、切替を要求していた別名の解決先を覚える（設計§12）。送った別名と
+    /// CLI が名乗り返したフルIDが結び付くのは、**この瞬間しかない**。
+    pub fn apply_model_report(&self, session: &Arc<Session>, id: ModelId, label: Option<String>) {
+        let requested = session.meta().model_requested;
+        if !session.store_model(id.clone(), label.clone()) {
+            return;
+        }
+
+        // 値が動いた＝要求した切替が効いた、とみなして対応を覚える。
+        // 推測で埋めないので、要求が無いときは何も覚えない
+        if let Some(alias) = requested
+            && let Some(display_name) = label.as_deref()
+            && self.aliases.learn(&alias, &id, display_name)
+        {
+            tracing::info!(
+                card_id = %session.card_id,
+                "別名の解決先を覚えました: {alias} -> {id}（{display_name}）"
+            );
+        }
+
+        self.broadcast_session(session);
+    }
+
     pub fn broadcast_session(&self, session: &Session) {
         self.broadcast_meta(session);
     }

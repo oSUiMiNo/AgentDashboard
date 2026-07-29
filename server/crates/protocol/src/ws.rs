@@ -12,7 +12,7 @@
 //! 1ファイルで見渡せるようにするためと、フロントエンドとの型のズレをテストで
 //! 検出できるようにするため。ハンドラの実装は該当フェーズで足していく。
 
-use crate::{CardId, PermissionMode, SessionMeta, SessionStatus, Timestamp, TreeNode};
+use crate::{CardId, ModelId, PermissionMode, SessionMeta, SessionStatus, Timestamp, TreeNode};
 use serde::{Deserialize, Serialize};
 
 /// ターミナルのフロー制御の指示（設計§10 のウォーターマーク方式）。
@@ -104,6 +104,18 @@ pub enum ClientMessage {
     SetPermissionMode {
         card_id: CardId,
         mode: PermissionMode,
+    },
+    /// 走っているセッションのモデルを切り替える（設計§5）。
+    ///
+    /// 実体は TUI へ `/model <値>` を送ることなので、権限モードと同じく時間がかかり、
+    /// 失敗しうる。運ぶのは**切り替え先の別名**（`opus` など）で、CLI が名乗り返す
+    /// フルID（`claude-opus-5`）とは別物である点に注意（[`ModelId`] のドキュメント）。
+    ///
+    /// 会話が進んだ状態では CLI が確認を求めてくるので、着地までに数手かかる。
+    /// 結果は [`ServerMessage::Error`] で返りうる。
+    SetModel {
+        card_id: CardId,
+        model: ModelId,
     },
     /// Composer からの指示送信。
     ///
@@ -220,6 +232,9 @@ mod tests {
             project: ProjectId("/home/example/dev/app".to_string()),
             claude_session_id: Some(ClaudeSessionId::new()),
             permission_mode: Some(PermissionMode::new("acceptEdits")),
+            model: Some(ModelId::new("claude-opus-5")),
+            model_label: Some("Opus 5".to_string()),
+            model_requested: None,
             status: SessionStatus::Working,
             subagent_active: 1,
             last_activity_at: 1_700_000_000_000,
@@ -252,6 +267,10 @@ mod tests {
             ClientMessage::SetPermissionMode {
                 card_id,
                 mode: PermissionMode::new("acceptEdits"),
+            },
+            ClientMessage::SetModel {
+                card_id,
+                model: ModelId::new("opus"),
             },
             ClientMessage::SendInput {
                 card_id,
@@ -381,6 +400,17 @@ mod tests {
             text,
             format!(r#"{{"t":"set_permission_mode","card_id":"{card_id}","mode":"default"}}"#),
             "CLI の別名 manual は正規値 default に寄せてから運ぶ"
+        );
+
+        // モデルは権限モードと違って寄せる別名が無い。受け取った値をそのまま運ぶ
+        let text = serde_json::to_string(&ClientMessage::SetModel {
+            card_id,
+            model: ModelId::new("opus"),
+        })
+        .unwrap();
+        assert_eq!(
+            text,
+            format!(r#"{{"t":"set_model","card_id":"{card_id}","model":"opus"}}"#)
         );
 
         let text = serde_json::to_string(&ServerMessage::Hello {

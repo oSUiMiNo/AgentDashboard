@@ -157,6 +157,8 @@ async fn ヘッドレスで起動するとフックが届き必須フィール�
         &testkit::binary_path("agentdashboard"),
         mock.addr().port(),
         &token,
+        // ここで見たいのはフックが届くことだけ。statusLine とモデルの注入は別のテスト
+        &hooks_settings::ModelInjection::default(),
     );
     std::fs::write(
         &settings_path,

@@ -7,11 +7,14 @@
 //! こうしているのは、統合テストからサーバの組み立てをそのまま呼べるようにするため
 //! （バイナリだけのクレートは `tests/` から参照できない）。
 
+pub mod claude_settings;
 pub mod config;
 pub mod embed;
 pub mod hook_post;
 pub mod hooks;
 pub mod jsonfile;
+pub mod model_aliases;
+pub mod model_post;
 pub mod parser;
 pub mod selfheal;
 pub mod session;
@@ -48,6 +51,8 @@ pub fn build_router(state: ws::AppState) -> Router {
             get(ws::api_settings).put(ws::api_update_settings),
         )
         .route("/hook/{token}/{event}", post(hooks::receive))
+        // 注入した statusLine がいまのモデルを知らせてくる（設計§4）
+        .route("/model/{token}", post(hooks::receive_model))
         .fallback(get(static_handler))
         .with_state(state)
 }

@@ -51,3 +51,52 @@ pub async fn receive(
 
     StatusCode::NO_CONTENT
 }
+
+/// `POST /model/{token}` の受け口（設計§4）。
+///
+/// 注入した `statusLine` が、セッションの JSON をそのまま送ってくる。フックと同じ
+/// 合言葉を使い回すので、認証の考え方も同じ（127.0.0.1 のみ＋推測できない合言葉）。
+///
+/// # 使うのは3つのキーだけ
+///
+/// 届く JSON には12個のキーが入っている（設計§11 前提1）が、読むのは `model.id` と
+/// `model.display_name` だけ。**残りは読まない。** CLI 側がキーを増減しても、
+/// ここが壊れないようにするため。
+///
+/// # 変わったときだけ配る
+///
+/// `refreshInterval` の周期で届くので、毎回カードを送り直すとセッション数だけ無駄が
+/// 積み上がる。値が動いたときだけ配信する（フックの `permission_mode` と同じ判断）。
+pub async fn receive_model(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+    body: String,
+) -> StatusCode {
+    let Some(session) = state.manager.resolve_token(&token) else {
+        return StatusCode::NOT_FOUND;
+    };
+
+    // 壊れた JSON でも受け流す。statusLine を止めない方が大事
+    let payload = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
+    let Some(id) = payload
+        .get("model")
+        .and_then(|model| model.get("id"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+    else {
+        tracing::debug!("statusLine の payload に model.id がありません");
+        return StatusCode::NO_CONTENT;
+    };
+    let label = payload
+        .get("model")
+        .and_then(|model| model.get("display_name"))
+        .and_then(Value::as_str)
+        .filter(|label| !label.is_empty())
+        .map(str::to_string);
+
+    state
+        .manager
+        .apply_model_report(&session, protocol::ModelId::new(id), label);
+
+    StatusCode::NO_CONTENT
+}
