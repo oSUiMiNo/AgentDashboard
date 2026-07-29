@@ -801,10 +801,7 @@ async fn send_and_wait(selfheal: &Arc<Selfheal>, card_id: CardId, message: &str)
         return false;
     };
     let mut events = selfheal.manager.subscribe_events();
-    if session
-        .write_input(&crate::session::input::encode_input(message))
-        .is_err()
-    {
+    if session.send_instruction(message).await.is_err() {
         return false;
     }
     wait_for_waiting_input(&mut events, card_id, TURN_TIMEOUT).await

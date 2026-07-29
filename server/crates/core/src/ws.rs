@@ -20,7 +20,7 @@
 use crate::{
     config::Config,
     parser::ParserSupervisor,
-    session::{Session, SessionManager, input},
+    session::{Session, SessionManager},
 };
 use axum::{
     Json,
@@ -414,7 +414,7 @@ async fn handle_request(
                 send_error(outbound, Some(card_id), "セッションが見つかりません".into()).await;
                 return;
             };
-            if let Err(err) = session.write_input(&input::encode_input(&text)) {
+            if let Err(err) = session.send_instruction(&text).await {
                 send_error(
                     outbound,
                     Some(card_id),

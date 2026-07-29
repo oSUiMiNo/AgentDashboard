@@ -28,7 +28,7 @@ mod common;
 
 use agentdashboard_core::{
     config::Config,
-    session::{Session, hooks_settings, input, lifecycle},
+    session::{Session, hooks_settings, lifecycle},
 };
 use protocol::SessionStatus;
 use std::{
@@ -493,9 +493,10 @@ async fn 指示送信は複数行もスラッシュコマンドも本物のtui�
     const FIRST: &str = "アルファ";
     const SECOND: &str = "ブラボー";
     session
-        .write_input(&input::encode_input(&format!(
+        .send_instruction(&format!(
             "次の2語をそのまま順に書き出すだけで答えて。説明は不要。\n{FIRST}\n{SECOND}"
-        )))
+        ))
+        .await
         .expect("端末へ書き込めること");
 
     // 履歴に載った「ユーザの発言」が1件で、両方の語を含んでいれば、
@@ -520,11 +521,52 @@ async fn 指示送信は複数行もスラッシュコマンドも本物のtui�
         "2行目が同じ指示に含まれていません（bracketed paste で包めていない）: {prompt:?}"
     );
 
-    // --- 単一行のスラッシュコマンド（CR で確定する経路）---------------------
+    // --- 長い単一行 ---------------------------------------------------------
+    // フェーズ6の受け入れテストで見つけた破綻の回帰テスト。かつては単一行を包まずに
+    // `本文 + CR` で送っていたため、**一定の長さを超えると TUI が貼り付けと判定して
+    // 末尾の CR まで飲み込み、確定しなかった**。文字は入力欄に残り、エラーも出ない。
+    //
+    // 短い単一行では起きないので、ここは**必ず境目より長い**本文で試す（実測した境目は
+    // 57〜64 バイトの間）。上の複数行だけを試していると、この経路は一度も踏まれない。
+    const LONG_MARK: &str = "チャーリー";
+    wait_for_status(&session, SessionStatus::WaitingInput).await;
+    let long_line = format!(
+        "次の指示は改行をひとつも含まない長い1行です。説明は不要なので、この語だけをそのまま書き出して答えてください: {LONG_MARK}"
+    );
+    assert!(
+        long_line.len() > 64,
+        "境目より短い本文では破綻を再現できない: {} バイト",
+        long_line.len()
+    );
+    session
+        .send_instruction(&long_line)
+        .await
+        .expect("端末へ書き込めること");
+
+    let deadline = Instant::now() + CLI_TIMEOUT;
+    let mut long_prompt = None;
+    while Instant::now() < deadline {
+        let nodes = session.transcript_snapshot();
+        if let Some(text) = nodes.iter().find_map(|node| match &node.node {
+            protocol::Node::UserMessage { text } if text.contains(LONG_MARK) => Some(text.clone()),
+            _ => None,
+        }) {
+            long_prompt = Some(text);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(
+        long_prompt.is_some(),
+        "長い単一行が確定されませんでした（入力欄に残ったまま送信されていない）"
+    );
+
+    // --- 単一行のスラッシュコマンド（短い経路）-----------------------------
     // `/exit` を選んだのは、成否が状態としてはっきり出るから（追加の課金も無い）
     wait_for_status(&session, SessionStatus::WaitingInput).await;
     session
-        .write_input(&input::encode_input("/exit"))
+        .send_instruction("/exit")
+        .await
         .expect("端末へ書き込めること");
     wait_for_status(&session, SessionStatus::Ended { ok: true }).await;
 

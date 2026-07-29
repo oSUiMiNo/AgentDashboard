@@ -80,6 +80,12 @@ const INITIAL_ROWS: u16 = 24;
 /// 「何秒おきに見に行くか」。小窓の経過時間表示は1秒刻みなので、同じ粒度にしてある。
 const STALLED_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 
+/// 指示の本文を書いてから、確定の CR を書くまでの間（設計§18）。
+///
+/// 0 にすると2つの書き込みが1回の読み取りにまとまり、TUI が貼り付けの処理で
+/// CR まで飲み込む。人の打鍵より十分速く、TUI の取りこぼしより十分遅い値にする。
+const INSTRUCTION_SETTLE: Duration = Duration::from_millis(30);
+
 pub fn now_ms() -> Timestamp {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -271,6 +277,25 @@ impl Session {
 
     pub fn write_input(&self, bytes: &[u8]) -> anyhow::Result<()> {
         self.process.write_input(bytes)
+    }
+
+    /// Composer やダッシュボードからの指示を1つ送る（設計§6）。
+    ///
+    /// **本文と確定を別々に書く**のが要点。1回に繋げて書くと、本物の TUI が
+    /// 貼り付けの処理で末尾の CR まで飲み込み、**指示が入力欄に残ったまま何も
+    /// 起きない**（フェーズ6で実測。詳細は [`input`] のモジュール説明）。
+    ///
+    /// 指示を送る経路はここに集約する。`write_input` を直に呼んで組み立て直すと、
+    /// 同じ壊れ方が別の場所で再発する。
+    pub async fn send_instruction(&self, text: &str) -> anyhow::Result<()> {
+        let (body, submit) = input::encode_parts(text);
+        if !body.is_empty() {
+            self.write_input(&body)?;
+            // 貼り付けを受け取り終えてから確定を渡す。ここを詰めると、
+            // 2つの書き込みが1回の読み取りにまとまって元の破綻へ戻る
+            tokio::time::sleep(INSTRUCTION_SETTLE).await;
+        }
+        self.write_input(&submit)
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> anyhow::Result<()> {
