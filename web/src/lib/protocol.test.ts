@@ -1,4 +1,4 @@
-import { isEnded, isHookSilent, statusLabel } from './protocol'
+import { isEnded, isHookSilent, selfhealLabel, statusLabel } from './protocol'
 import type {
   ClientMessage,
   Node,
@@ -40,6 +40,20 @@ describe('サーバと同じ JSON になること', () => {
     expect(JSON.stringify(message)).toBe(
       `{"t":"pty_flow","card_id":"${CARD_ID}","state":"pause"}`,
     )
+  })
+
+  it('selfheal の段階が Rust と同じ綴りで届く', () => {
+    // Rust 側は rolled_back のようにスネークケースで書き出す。ここが食い違うと
+    // 進行が画面に出ないだけで、繋がっているように見えてしまう
+    const raw = '{"t":"selfheal","phase":"rolled_back","detail":null}'
+    const message = JSON.parse(raw) as ServerMessage
+    expect(message.t).toBe('selfheal')
+    if (message.t === 'selfheal') {
+      expect(message.phase).toBe('rolled_back')
+      expect(selfhealLabel(message.phase)).toBe(
+        '悪化したため前のパーサへ戻しました',
+      )
+    }
   })
 
   it('hello を解釈できる', () => {

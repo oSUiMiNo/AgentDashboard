@@ -16,6 +16,7 @@ const DEFAULT_PTY_RING_BUFFER: usize = 1024 * 1024;
 const DEFAULT_FLOW_HIGH: usize = 256 * 1024;
 const DEFAULT_FLOW_LOW: usize = 32 * 1024;
 const DEFAULT_CANARY_MODEL: &str = "haiku";
+const DEFAULT_CANARY_FALLBACK_MODEL: &str = "sonnet";
 const DEFAULT_SELFHEAL_RETRY: u32 = 3;
 const DEFAULT_SELFHEAL_COOLDOWN_HOURS: u64 = 24;
 const DEFAULT_TRANSCRIPT_WINDOW_NODES: usize = 2000;
@@ -54,14 +55,32 @@ pub struct Config {
     pub flow_high: usize,
     /// フロー制御の下側しきい値。ここまで減ったら resume（バイト）
     pub flow_low: usize,
+    /// 自己修復（設計§9）を動かすか。
+    ///
+    /// 切れる口を用意しているのは、この機能が**本物の claude を無人で起動して
+    /// 自分のソースを書き換える**ためで、事情があるときに機能ごと止められないと困るため。
+    /// 止めても検知の通知だけは出る（黙って何もしないのが一番困る）。
+    pub selfheal_enabled: bool,
     /// カナリアセッションで使うモデル
     pub canary_model: String,
+    /// カナリアのサンプルが要素不足だったときに、1回だけ採り直すモデル。
+    ///
+    /// カナリアは「ツールコールとサブエージェントを含む JSONL」を採るのが目的なので、
+    /// 小さいモデルだと指示を素通りしてサブエージェントを起動しないことがある。
+    /// 採れた中身を見て足りなければ、こちらで採り直す。
+    pub canary_fallback_model: String,
     /// 修復セッションで使うモデル。None なら通常モデル
     pub repair_model: Option<String>,
     /// 修復の再試行上限
     pub selfheal_retry: u32,
     /// 同一バージョンへの再挑戦を抑制する時間
     pub selfheal_cooldown_hours: u64,
+    /// ダッシュボード自身のソースリポジトリ。
+    ///
+    /// 自己修復はここに git worktree を作り、`scripts/cargo` でテストとビルドを行う
+    /// （設計§9 の実行環境の前提）。None なら起動時のカレントディレクトリから
+    /// 上へ辿って探す。見つからなければ自己修復は検知の通知だけに留まる。
+    pub selfheal_repo_dir: Option<PathBuf>,
     /// メモリに保持する履歴の直近ウィンドウ（ノード数、設計§4）
     pub transcript_window_nodes: usize,
     /// 履歴ページングの1回あたりの上限（ノード数）
@@ -83,10 +102,13 @@ impl Default for Config {
             pty_ring_buffer: DEFAULT_PTY_RING_BUFFER,
             flow_high: DEFAULT_FLOW_HIGH,
             flow_low: DEFAULT_FLOW_LOW,
+            selfheal_enabled: true,
             canary_model: DEFAULT_CANARY_MODEL.to_string(),
+            canary_fallback_model: DEFAULT_CANARY_FALLBACK_MODEL.to_string(),
             repair_model: None,
             selfheal_retry: DEFAULT_SELFHEAL_RETRY,
             selfheal_cooldown_hours: DEFAULT_SELFHEAL_COOLDOWN_HOURS,
+            selfheal_repo_dir: None,
             transcript_window_nodes: DEFAULT_TRANSCRIPT_WINDOW_NODES,
             transcript_page_limit: DEFAULT_TRANSCRIPT_PAGE_LIMIT,
             state_dir: None,
@@ -160,6 +182,24 @@ impl Config {
         }
     }
 
+    /// 自己修復が作業するリポジトリを決める（設計§9）。
+    ///
+    /// 明示が無ければカレントディレクトリから上へ辿り、`scripts/cargo` を持つ場所を探す。
+    /// この1本を目印にするのは、**cargo を呼べること**が自己修復の成立条件そのものだから。
+    /// リポジトリの形（`.git` の有無）ではなく能力で判定する。
+    ///
+    /// 見つからない場合は `None`。呼び出し側は「検知はするが修復には進まない」に落とす。
+    pub fn resolved_repo_dir(&self) -> Option<PathBuf> {
+        if let Some(dir) = &self.selfheal_repo_dir {
+            return dir.is_dir().then(|| dir.clone());
+        }
+        let start = std::env::current_dir().ok()?;
+        start
+            .ancestors()
+            .find(|dir| dir.join("scripts").join("cargo").is_file())
+            .map(Path::to_path_buf)
+    }
+
     /// 型が合っていても意味的に成立しない組み合わせを弾く。
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.port == 0 {
@@ -226,6 +266,17 @@ mod tests {
         assert_eq!(config.repair_model, None);
         assert_eq!(config.selfheal_retry, 3);
         assert_eq!(config.selfheal_cooldown_hours, 24);
+        assert!(config.selfheal_enabled);
+        assert_eq!(config.canary_fallback_model, "sonnet");
+        assert_eq!(config.selfheal_repo_dir, None);
+    }
+
+    #[test]
+    fn 明示したリポジトリが存在しなければ使わない() {
+        // 設定の打ち間違いに気づかず「修復したつもり」で別の場所を触るほうが危ない。
+        // 実在しないなら None にして、検知の通知だけに落とす
+        let config = Config::from_toml_str(r#"selfheal_repo_dir = "/nonexistent/repo""#).unwrap();
+        assert_eq!(config.resolved_repo_dir(), None);
     }
 
     #[test]

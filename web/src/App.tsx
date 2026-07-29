@@ -20,6 +20,7 @@ import { GroupView } from '@/components/GroupView/GroupView'
 import { SessionView } from '@/components/SessionView/SessionView'
 import { TileGrid } from '@/components/TileGrid/TileGrid'
 import { SpawnForm } from '@/components/SpawnForm/SpawnForm'
+import { selfhealLabel } from '@/lib/protocol'
 import { HOME } from '@/lib/routes'
 import { useSessionCard } from '@/stores/sessions'
 import { useWsStore } from '@/stores/ws'
@@ -96,6 +97,8 @@ function Shell() {
         </div>
       )}
 
+      <SelfhealBanner />
+
       <Routes>
         <Route path="/" element={<HomePage />} />
         <Route path="/p/:projectId" element={<GroupPage />} />
@@ -103,6 +106,51 @@ function Shell() {
         <Route path="*" element={<NotFoundPage />} />
       </Routes>
     </main>
+  )
+}
+
+/**
+ * 自己修復の進み具合を出す（設計§9）。
+ *
+ * 「勝手に直った」ことを黙って起こさないための表示。修復セッション自体は一覧に
+ * 通常のセッションとして現れるので、ここで出すのは**いま何段目か**だけにしてある。
+ *
+ * 更新はフォーマット変更のときにしか来ない低頻度の出来事なので、まとめて反映する
+ * 仕組みも動きも付けない（一覧やターミナルの経路とは性質が違う）。
+ */
+function SelfhealBanner() {
+  const selfheal = useWsStore((state) => state.selfheal)
+  const clearSelfheal = useWsStore((state) => state.clearSelfheal)
+
+  if (!selfheal) {
+    return null
+  }
+  // 直せなかった・戻したは、人が次の一手を決める必要があるので目立たせる
+  const needsAttention =
+    selfheal.phase === 'failed' || selfheal.phase === 'rolled_back'
+
+  return (
+    <div
+      data-testid="selfheal-banner"
+      data-phase={selfheal.phase}
+      className={`flex items-center justify-between gap-4 rounded-md border px-3 py-2 text-sm ${
+        needsAttention
+          ? 'border-red-500/40 bg-red-500/10'
+          : 'border-sky-500/40 bg-sky-500/10'
+      }`}
+    >
+      <span>
+        自己修復：{selfhealLabel(selfheal.phase)}
+        {selfheal.detail && (
+          <span className="text-muted-foreground ml-2 text-xs">
+            {selfheal.detail}
+          </span>
+        )}
+      </span>
+      <Button variant="ghost" size="sm" onClick={clearSelfheal}>
+        閉じる
+      </Button>
+    </div>
   )
 }
 

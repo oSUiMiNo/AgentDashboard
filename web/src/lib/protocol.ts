@@ -125,7 +125,51 @@ export type ServerMessage =
   | { t: 'transcript_append'; card_id: CardId; nodes: TreeNode[] }
   | { t: 'transcript_reset'; card_id: CardId }
   | { t: 'parser_status'; state: 'ok' | 'degraded'; detail: string | null }
-  | { t: 'selfheal'; phase: string; detail: string | null }
+  | { t: 'selfheal'; phase: SelfhealPhase; detail: string | null }
+
+/**
+ * 自己修復の進み具合（設計§9）。
+ *
+ * Rust 側の `SelfhealPhase` と同じ綴りでなければならない。文字列のままにすると
+ * 綴り違いが型検査を通り、「進行が画面に出ない」という追いにくい形でしか表に出ない。
+ */
+export type SelfhealPhase =
+  | 'detected'
+  | 'canary'
+  | 'testing'
+  | 'repairing'
+  | 'verifying'
+  | 'passed'
+  | 'swapped'
+  | 'rolled_back'
+  | 'failed'
+  | 'cooldown'
+
+/** 自己修復の段階を日本語のラベルにする。 */
+export function selfhealLabel(phase: SelfhealPhase): string {
+  switch (phase) {
+    case 'detected':
+      return '履歴の異常を検知しました'
+    case 'canary':
+      return '新しい版のサンプルを採っています'
+    case 'testing':
+      return 'サンプルでパーサを検証しています'
+    case 'repairing':
+      return '修復セッションが作業しています'
+    case 'verifying':
+      return '修復の結果を検証しています'
+    case 'passed':
+      return '対応済みでした（修復は不要）'
+    case 'swapped':
+      return 'パーサを差し替えました'
+    case 'rolled_back':
+      return '悪化したため前のパーサへ戻しました'
+    case 'failed':
+      return '自動修復に失敗しました'
+    case 'cooldown':
+      return '同じ版への再挑戦を控えています'
+  }
+}
 
 /** 状態を日本語のラベルにする。 */
 export function statusLabel(status: SessionStatus): string {

@@ -33,6 +33,7 @@ import type {
   CardId,
   ClientMessage,
   FlowState,
+  SelfhealPhase,
   ServerMessage,
   SessionMeta,
 } from '@/lib/protocol'
@@ -68,6 +69,13 @@ interface WsState {
   /** 構造化ビューの健康状態。縮退していてもターミナルは動く（設計§11） */
   parserState: 'ok' | 'degraded'
   parserDetail: string | null
+  /**
+   * 自己修復の進み具合（設計§9）。まだ一度も起きていなければ null。
+   *
+   * 履歴を持たず**最新の1件だけ**にしてある。ここは「いま何をしているか」を伝える
+   * ための表示で、経過を追いたいときは修復セッション自体が一覧に出ている
+   */
+  selfheal: { phase: SelfhealPhase; detail: string | null } | null
 
   connect: () => Promise<void>
   disconnect: () => void
@@ -89,6 +97,7 @@ interface WsState {
   /** 履歴の購読を始める。戻り値を呼ぶと購読を止める */
   subscribeTranscript: (cardId: CardId) => () => void
   clearError: () => void
+  clearSelfheal: () => void
 }
 
 /**
@@ -222,6 +231,7 @@ export const useWsStore = create<WsState>((set) => ({
   lastError: null,
   parserState: 'ok',
   parserDetail: null,
+  selfheal: null,
 
   connect: async () => {
     closedByUs = false
@@ -287,6 +297,8 @@ export const useWsStore = create<WsState>((set) => ({
   },
 
   clearError: () => set({ lastError: null }),
+
+  clearSelfheal: () => set({ selfheal: null }),
 }))
 
 function handleJson(raw: string, set: SetState) {
@@ -323,11 +335,11 @@ function handleJson(raw: string, set: SetState) {
     case 'parser_status':
       set({ parserState: message.state, parserDetail: message.detail })
       break
+    case 'selfheal':
+      set({ selfheal: { phase: message.phase, detail: message.detail } })
+      break
     case 'error':
       set({ lastError: message.message })
-      break
-    default:
-      // フェーズ5で実装する種別（selfheal）。届いても落ちないように黙って受け流す
       break
   }
 }

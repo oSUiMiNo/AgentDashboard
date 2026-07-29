@@ -36,6 +36,36 @@ pub enum ParserState {
     Degraded,
 }
 
+/// 自己修復の進み具合（設計§9）。
+///
+/// 文字列ではなく型にしてあるのは、送り手と受け手が別々の言語で手書きされているため。
+/// 綴り違いはコンパイルを通ってしまい、「進行が画面に出ない」という追いにくい形でしか
+/// 表に出ない。段階の増減は [`ServerMessage::Selfheal`] と同じく4箇所同期の対象。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SelfhealPhase {
+    /// パースの異常、または知らない版を見つけた
+    Detected,
+    /// カナリアで新しい版のサンプルを採っている
+    Canary,
+    /// 採ったサンプルでゴールデンテストを実行している
+    Testing,
+    /// 修復セッションが作業している
+    Repairing,
+    /// 修復の結果を core 側で検証している（エージェントの自己申告は使わない）
+    Verifying,
+    /// 直す必要が無かった。対応表に登録して終わり
+    Passed,
+    /// 新しいパーサへ差し替えた
+    Swapped,
+    /// 差し替えたあとに悪化したので、前のパーサへ戻した
+    RolledBack,
+    /// 直せなかった。構造化ビューは縮退のまま
+    Failed,
+    /// 同じ版への再挑戦を抑えている
+    Cooldown,
+}
+
 /// ブラウザ → サーバ。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
@@ -136,9 +166,12 @@ pub enum ServerMessage {
         state: ParserState,
         detail: Option<String>,
     },
-    /// 自己修復の進行通知。実装はフェーズ5
+    /// 自己修復の進行通知（設計§9）。
+    ///
+    /// `detail` には、人が読んで次の一手を決められる手掛かりを入れる（失敗したテストの
+    /// 抜粋・見つけた新しい版など）。段階だけでは「何が起きたのか」が分からない。
     Selfheal {
-        phase: String,
+        phase: SelfhealPhase,
         detail: Option<String>,
     },
     /// 操作が失敗したことをユーザへ伝える。
@@ -256,8 +289,12 @@ mod tests {
                 detail: Some("パーサプロセスが応答しません".to_string()),
             },
             ServerMessage::Selfheal {
-                phase: "canary".to_string(),
+                phase: SelfhealPhase::Canary,
                 detail: None,
+            },
+            ServerMessage::Selfheal {
+                phase: SelfhealPhase::Swapped,
+                detail: Some("transcript-parser を差し替えました".to_string()),
             },
             ServerMessage::Error {
                 card_id: Some(card_id),
@@ -305,6 +342,40 @@ mod tests {
         })
         .unwrap();
         assert_eq!(text, r#"{"t":"hello","flow_high":262144,"flow_low":32768}"#);
+
+        // 自己修復の段階も、TypeScript 側と同じ綴りになることを固定する
+        let text = serde_json::to_string(&ServerMessage::Selfheal {
+            phase: SelfhealPhase::RolledBack,
+            detail: None,
+        })
+        .unwrap();
+        assert_eq!(
+            text,
+            r#"{"t":"selfheal","phase":"rolled_back","detail":null}"#
+        );
+    }
+
+    #[test]
+    fn 自己修復の段階は全部スネークケースで往復する() {
+        let all = [
+            (SelfhealPhase::Detected, "detected"),
+            (SelfhealPhase::Canary, "canary"),
+            (SelfhealPhase::Testing, "testing"),
+            (SelfhealPhase::Repairing, "repairing"),
+            (SelfhealPhase::Verifying, "verifying"),
+            (SelfhealPhase::Passed, "passed"),
+            (SelfhealPhase::Swapped, "swapped"),
+            (SelfhealPhase::RolledBack, "rolled_back"),
+            (SelfhealPhase::Failed, "failed"),
+            (SelfhealPhase::Cooldown, "cooldown"),
+        ];
+        for (phase, name) in all {
+            assert_eq!(
+                serde_json::to_string(&phase).unwrap(),
+                format!(r#""{name}""#)
+            );
+            assert_eq!(roundtrip(&phase), phase);
+        }
     }
 
     #[test]
