@@ -26,6 +26,8 @@ import { formatElapsed } from '@/lib/time'
 import {
   isHookSilent,
   needsAttention,
+  permissionModeLabel,
+  permissionModeTone,
   statusLabel,
   statusTone,
 } from '@/lib/protocol'
@@ -103,9 +105,29 @@ export function SessionTile({ cardId }: Props) {
         )}
       </div>
 
-      <span data-testid="elapsed" className="text-muted-foreground text-xs">
-        最終活動 {formatElapsed(now - session.last_activity_at)}
-      </span>
+      <div className="flex items-center gap-2">
+        <span data-testid="elapsed" className="text-muted-foreground text-xs">
+          最終活動 {formatElapsed(now - session.last_activity_at)}
+        </span>
+        {/*
+          権限モードは一覧にも出す（要件）。**危険なモードほど目立たせ、既定のモードは
+          静かに出す** — 全承認をスキップしているセッションが並んでいるのに気づかない、
+          という状態を作らないため（設計§8）。
+
+          まだ分からない間は**何も出さない**。状態の「不明」と並ぶと、どちらが不明なのか
+          読み取れなくなる。分からないのは起動直後の一瞬（フッタを読むまで）で、
+          理由を名指しする必要があるのはセッション画面のほう（そちらは選択肢に出す）
+        */}
+        {session.permission_mode !== null && (
+          <span
+            data-testid="permission-mode"
+            data-mode={session.permission_mode}
+            className={`ml-auto shrink-0 rounded border px-1.5 py-0.5 text-[0.7rem] ${permissionModeTone(session.permission_mode)}`}
+          >
+            {permissionModeLabel(session.permission_mode)}
+          </span>
+        )}
+      </div>
 
       {/* 「不明」の理由を名指しする。原因は利用者が直せるものが多い（設計§11） */}
       {isHookSilent(session) && (

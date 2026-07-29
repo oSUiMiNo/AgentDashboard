@@ -33,6 +33,7 @@ import type {
   CardId,
   ClientMessage,
   FlowState,
+  PermissionMode,
   SelfhealPhase,
   ServerMessage,
   SessionMeta,
@@ -79,7 +80,20 @@ interface WsState {
 
   connect: () => Promise<void>
   disconnect: () => void
-  spawn: (cwd: string) => void
+  /**
+   * セッションを起動する。
+   *
+   * `mode` を省略（`null`）すると CLI へ何も渡さない。利用者の `permissions.defaultMode`
+   * を尊重するという意味なので、ここで既定のモードを補ってはいけない。
+   */
+  spawn: (cwd: string, mode?: PermissionMode | null) => void
+  /**
+   * 走っているセッションの権限モードを切り替える（設計§6）。
+   *
+   * サーバが TUI へ Shift+Tab を送って目的のモードへ着くまで繰り返す。着けない場合は
+   * `error` が返り、画面に理由が出る（巡回に入らないモードがあるため）。
+   */
+  setPermissionMode: (cardId: CardId, mode: PermissionMode) => void
   kill: (cardId: CardId) => void
   archive: (cardId: CardId) => void
   resize: (cardId: CardId, cols: number, rows: number) => void
@@ -252,7 +266,10 @@ export const useWsStore = create<WsState>((set) => ({
     set({ status: 'closed' })
   },
 
-  spawn: (cwd) => send({ t: 'spawn', cwd }),
+  spawn: (cwd, mode = null) =>
+    send({ t: 'spawn', cwd, permission_mode: mode }),
+  setPermissionMode: (cardId, mode) =>
+    send({ t: 'set_permission_mode', card_id: cardId, mode }),
   kill: (cardId) => send({ t: 'kill', card_id: cardId }),
   archive: (cardId) => send({ t: 'archive', card_id: cardId }),
 

@@ -19,3 +19,6 @@ export function sessionPath(cardId: CardId): string {
 export function projectPath(project: string): string {
   return `/p/${encodeURIComponent(project)}`
 }
+
+/** 設定画面。一覧と同じ階層に置く（一覧の主役を埋もれさせないため） */
+export const SETTINGS = '/settings'

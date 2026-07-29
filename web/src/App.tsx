@@ -18,11 +18,13 @@ import { BrowserRouter, Link, Route, Routes, useParams } from 'react-router'
 import { Button } from '@/components/ui/button'
 import { GroupView } from '@/components/GroupView/GroupView'
 import { SessionView } from '@/components/SessionView/SessionView'
+import { SettingsPage } from '@/components/Settings/SettingsPage'
 import { TileGrid } from '@/components/TileGrid/TileGrid'
 import { SpawnForm } from '@/components/SpawnForm/SpawnForm'
 import { selfhealLabel } from '@/lib/protocol'
-import { HOME } from '@/lib/routes'
+import { HOME, SETTINGS } from '@/lib/routes'
 import { useSessionCard } from '@/stores/sessions'
+import { useSettingsStore } from '@/stores/settings'
 import { useWsStore } from '@/stores/ws'
 
 const CONNECTION_LABEL: Record<string, string> = {
@@ -46,10 +48,13 @@ function Shell() {
   const parserDetail = useWsStore((state) => state.parserDetail)
   const connect = useWsStore((state) => state.connect)
   const clearError = useWsStore((state) => state.clearError)
+  const loadSettings = useSettingsStore((state) => state.load)
 
   useEffect(() => {
     void connect()
-  }, [connect])
+    // 起動ボタンの数と切替の選択肢がこれで決まるので、接続と同時に読む
+    void loadSettings()
+  }, [connect, loadSettings])
 
   return (
     <main className="flex h-svh flex-col gap-4 p-6">
@@ -64,6 +69,13 @@ function Shell() {
         >
           {CONNECTION_LABEL[status]}
         </span>
+        <Link
+          to={SETTINGS}
+          data-testid="settings-link"
+          className="text-muted-foreground hover:text-foreground ml-auto text-sm underline"
+        >
+          設定
+        </Link>
       </header>
 
       {lastError && (
@@ -103,6 +115,7 @@ function Shell() {
         <Route path="/" element={<HomePage />} />
         <Route path="/p/:projectId" element={<GroupPage />} />
         <Route path="/s/:cardId" element={<SessionPage />} />
+        <Route path="/settings" element={<SettingsPage />} />
         <Route path="*" element={<NotFoundPage />} />
       </Routes>
     </main>

@@ -21,6 +21,7 @@ import { motion } from 'motion/react'
 import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Composer } from '@/components/Composer/Composer'
+import { PermissionModePicker } from '@/components/PermissionModePicker/PermissionModePicker'
 import { TerminalPane } from '@/components/TerminalPane/TerminalPane'
 import { TranscriptTree } from '@/components/TranscriptTree/TranscriptTree'
 import { formatElapsed } from '@/lib/time'
@@ -90,7 +91,11 @@ export function SessionView({ cardId, compact = false }: Props) {
           </span>
         )}
 
-        <div className="ml-auto flex shrink-0 gap-2">
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          {/* モードは小窓とセッション画面の両方に出す（要件）。ここは切替も兼ねる */}
+          {!isEnded(session.status) && (
+            <PermissionModePicker cardId={session.card_id} />
+          )}
           <Button
             variant="outline"
             size="sm"
