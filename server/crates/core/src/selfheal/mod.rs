@@ -697,7 +697,36 @@ async fn start_repair_session(selfheal: &Arc<Selfheal>, worktree: &Path) -> anyh
     if !wait_ready(selfheal, &session, card_id).await {
         anyhow::bail!("修復セッションが指示を受け付ける状態になりませんでした");
     }
+    // フックが「入力待ち」を告げても、TUI がまだ描画中のことがある。そこへ貼り付けを
+    // 流し込むと、括弧付き貼り付けの合図がただの文字として解釈され、**指示が送られない
+    // まま静かに終わる**（実測。画面には出ているのに会話が始まらない）
+    wait_until_settled(&session).await;
     Ok(card_id)
+}
+
+/// 端末の描画が落ち着くまで待つ。
+///
+/// 出力が増えなくなったら落ち着いたとみなす。判断を長さで行うのは、内容を毎回
+/// 文字列へ起こすとスクロールバックを何度も複製することになるため。
+async fn wait_until_settled(session: &Arc<crate::session::Session>) {
+    const QUIET: Duration = Duration::from_secs(2);
+    const CAP: Duration = Duration::from_secs(30);
+    const STEP: Duration = Duration::from_millis(250);
+
+    let deadline = tokio::time::Instant::now() + CAP;
+    let mut last = session.scrollback_len();
+    let mut quiet_since = tokio::time::Instant::now();
+
+    while tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(STEP).await;
+        let now = session.scrollback_len();
+        if now != last {
+            last = now;
+            quiet_since = tokio::time::Instant::now();
+        } else if quiet_since.elapsed() >= QUIET {
+            return;
+        }
+    }
 }
 
 /// 起動が済んで指示を受け付けられる状態になるまで待つ。
