@@ -184,14 +184,52 @@ fn spawn_stdin_reader(tx: Sender<Message>) {
 }
 
 fn spawn_ticker(tx: Sender<Message>) {
+    let born_under = parent_pid();
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(POLL_INTERVAL);
+            // core が消えたら道連れで終わる（下記参照）
+            if orphaned(born_under) {
+                let _ = tx.send(Message::Stop);
+                break;
+            }
             if tx.send(Message::Poke).is_err() {
                 break;
             }
         }
     });
+}
+
+/// 自分の親プロセスID。取れなければ `None`。
+///
+/// `/proc` を読むのは、この1点のために libc を足したくないため。Linux 専用だが、
+/// 本アプリはもともと Linux でしか動かさない。
+fn parent_pid() -> Option<u32> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("PPid:"))
+        .and_then(|value| value.trim().parse().ok())
+}
+
+/// 起動時の親が居なくなっていたら true。
+///
+/// # なぜ要るのか
+///
+/// core は `kill_on_drop` でこの子プロセスを畳むが、それが効くのは Child が
+/// **drop されたとき**だけ。core が SIGTERM や SIGKILL で即死するとデストラクタは
+/// 走らず、パーサだけが生き残る。実際にフェーズ6で、core を落としたあとも36分
+/// 生き続けている孤児を観測した。core を落とすたびに1つずつ積み上がる。
+///
+/// 親の消滅は**起動時の親と今の親を比べる**ことで判定する。「親が 1 番か」で
+/// 判定しないのは、WSL のように 1 番が `/init` でない再親付け先を持つ環境が
+/// あるため（実際に観測した孤児の親は 1 ではなかった）。
+fn orphaned(born_under: Option<u32>) -> bool {
+    let Some(born_under) = born_under else {
+        // 親が分からない環境では、この見張りは黙って無効にする
+        return false;
+    };
+    parent_pid().is_some_and(|now| now != born_under)
 }
 
 /// ファイル監視を立ち上げる。使えなくても致命傷にはしない（巡回だけで動く）。
@@ -281,6 +319,27 @@ mod tests {
             }
             other => panic!("Nodes ではない: {other:?}"),
         }
+    }
+
+    #[test]
+    fn 親が変わっていなければ孤児とみなさない() {
+        let now = parent_pid();
+        assert!(now.is_some(), "Linux では自分の親IDが読めること");
+        assert!(!orphaned(now), "起動時と同じ親なら生き続ける");
+    }
+
+    #[test]
+    fn 親が変わったら孤児とみなす() {
+        // core が SIGTERM で即死すると kill_on_drop が効かず、この見張りだけが
+        // パーサを畳む手段になる。実際に36分生き残った孤児を観測している
+        let bogus = parent_pid().map(|pid| pid.wrapping_add(1));
+        assert!(orphaned(bogus), "起動時と違う親になったら終わる");
+    }
+
+    #[test]
+    fn 親が分からない環境では見張りを止める() {
+        // /proc が無い環境で「常に孤児」と判定すると、起動した瞬間に終わってしまう
+        assert!(!orphaned(None));
     }
 
     #[test]
