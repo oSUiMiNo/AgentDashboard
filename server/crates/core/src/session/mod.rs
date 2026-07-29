@@ -836,10 +836,27 @@ impl SessionManager {
     /// テストから擬似 claude とビルド済みの `agentdashboard` を指すための入口。
     /// プロセスの環境変数を書き換えずに済むので、テスト同士が互いを壊さない。
     pub fn with_programs(config: Arc<Config>, program: String, hook_program: PathBuf) -> Arc<Self> {
-        let (events, _) = broadcast::channel(EVENT_QUEUE_MESSAGES);
         let aliases = Arc::new(crate::model_aliases::ModelAliases::load(Some(
             config.resolved_state_dir(),
         )));
+        let claude_settings = Arc::new(crate::claude_settings::ClaudeSettings::discover());
+        Self::with_everything(config, program, hook_program, claude_settings, aliases)
+    }
+
+    /// グローバル既定と別名の置き場所まで明示して作る。
+    ///
+    /// **テストが本物の `~/.claude/settings.json` を触らないための入口。**
+    /// 既定の [`crate::claude_settings::ClaudeSettings::discover`] は利用者の本物の
+    /// ファイルを指すので、テストからは必ずこちらを使って一時ファイルへ逃がす。
+    /// 環境変数を書き換える方式にすると、並行して走る他のテストを巻き込む。
+    pub fn with_everything(
+        config: Arc<Config>,
+        program: String,
+        hook_program: PathBuf,
+        claude_settings: Arc<crate::claude_settings::ClaudeSettings>,
+        aliases: Arc<crate::model_aliases::ModelAliases>,
+    ) -> Arc<Self> {
+        let (events, _) = broadcast::channel(EVENT_QUEUE_MESSAGES);
         Arc::new(Self {
             config,
             program,
@@ -848,7 +865,7 @@ impl SessionManager {
             tokens: Mutex::new(HashMap::new()),
             events,
             parser: Mutex::new(None),
-            claude_settings: Arc::new(crate::claude_settings::ClaudeSettings::discover()),
+            claude_settings,
             aliases,
         })
     }
@@ -866,28 +883,6 @@ impl SessionManager {
     /// 別名の実測結果（画面の選択肢に版番号を併記するために配る）。
     pub fn aliases(&self) -> &Arc<crate::model_aliases::ModelAliases> {
         &self.aliases
-    }
-
-    /// グローバル既定と別名の置き場所を差し替える（テスト用）。
-    ///
-    /// **本物の `~/.claude/settings.json` をテストが触らないための入口。**
-    /// 環境変数を書き換える方式にすると、並行して走る他のテストを巻き込む。
-    pub fn with_claude_settings(
-        self: &Arc<Self>,
-        settings: Arc<crate::claude_settings::ClaudeSettings>,
-        aliases: Arc<crate::model_aliases::ModelAliases>,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            config: Arc::clone(&self.config),
-            program: self.program.clone(),
-            hook_program: self.hook_program.clone(),
-            sessions: Mutex::new(HashMap::new()),
-            tokens: Mutex::new(HashMap::new()),
-            events: self.events.clone(),
-            parser: Mutex::new(None),
-            claude_settings: settings,
-            aliases,
-        })
     }
 
     /// 一覧の更新通知を購読する。

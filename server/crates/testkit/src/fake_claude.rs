@@ -91,6 +91,55 @@ pub fn footer_for(mode: &str) -> &'static str {
         .unwrap_or("⏸ manual mode on")
 }
 
+/// `/model <値>` を受け取ったことを示す行頭。
+pub const MODEL_SET_PREFIX: &str = "[fake-claude] model-set: ";
+
+/// 注入された `statusLine` を実行し終えたことを示す行頭。
+///
+/// **出すのは応答契機のときだけ。** `refreshInterval` の周期実行は別スレッドで走るので、
+/// そちらから標準出力へ書くと本文と混ざる。周期のほうは「ダッシュボードの
+/// `SessionMeta` が更新される」ことで観測する。
+pub const STATUS_LINE_SENT_PREFIX: &str = "[fake-claude] statusline-sent: ";
+
+/// 会話が進んだ状態でモデルを変えようとしたときに本物が出す確認画面（設計§11 で実測）。
+///
+/// 選択肢の番号を読んでから答える、というダッシュボード側の作法を検証するために出す。
+/// **既定のカーソルは「はい」の側**という点も本物に合わせてある。
+pub const MODEL_SWITCH_NOTICE: &str = "\
+Switch model?
+This conversation is cached for the current model. Switching means the full history
+gets re-read on your next message.
+❯ 1. Yes, switch
+  2. No, go back";
+
+/// モデルの別名が解決される先（本物の実測。設計§11）。
+///
+/// `(別名, CLI が名乗るフルID, 表示名)` の3つ組。**日付が付くものと付かないものがある**
+/// のも実物どおりで、`id` から版番号を取り出してはいけないことの根拠になっている。
+pub const MODEL_RESOLUTIONS: &[(&str, &str, &str)] = &[
+    ("default", "claude-sonnet-5", "Sonnet 5"),
+    ("best", "claude-fable-5", "Fable 5"),
+    ("fable", "claude-fable-5", "Fable 5"),
+    ("opus", "claude-opus-5", "Opus 5"),
+    ("sonnet", "claude-sonnet-5", "Sonnet 5"),
+    ("haiku", "claude-haiku-4-5-20251001", "Haiku 4.5"),
+    ("opusplan", "claude-opus-5", "Opus 5"),
+    ("opus[1m]", "claude-opus-5", "Opus 5"),
+    ("sonnet[1m]", "claude-sonnet-5", "Sonnet 5"),
+];
+
+/// 別名を `(フルID, 表示名)` に解決する。
+///
+/// 表に無い値は**そのまま通す**。本物も知らない別名を受け取りうる（利用者がフルIDを
+/// 直に打つ場合など）ので、ここで弾くと擬似のほうが厳しくなってしまう。
+pub fn resolve_model(alias: &str) -> (String, String) {
+    MODEL_RESOLUTIONS
+        .iter()
+        .find(|(value, _, _)| *value == alias)
+        .map(|(_, id, label)| (id.to_string(), label.to_string()))
+        .unwrap_or_else(|| (alias.to_string(), alias.to_string()))
+}
+
 /// `fake-claude` 実行ファイルの場所。
 pub fn path() -> PathBuf {
     crate::binary_path("fake-claude")

@@ -7,7 +7,9 @@
 #![allow(dead_code)]
 
 use agentdashboard_core::{
+    claude_settings::ClaudeSettings,
     config::Config,
+    model_aliases::ModelAliases,
     parser::ParserSupervisor,
     session::{Session, SessionManager},
     ws::AppState,
@@ -59,6 +61,70 @@ pub fn manager_with(config: Config) -> Arc<SessionManager> {
         fake_claude().to_string_lossy().into_owned(),
         hook_program(),
     )
+}
+
+/// 使い捨てのグローバル設定を持つ、待ち受け中のサーバ。
+///
+/// **本物の `~/.claude/settings.json` を絶対に触らせないための入口。**
+/// 既定のマネージャは利用者の本物のファイルを指すので、モデル切替を含むテストは
+/// 必ずこちらを使う。
+///
+/// サーバを立てるのは、注入した `statusLine` が **HTTP でモデルを送ってくる**ため。
+/// マネージャだけではその受信口が無く、モデルが永久に「不明」のままになる。
+///
+/// 返り値の `PathBuf` が擬似のグローバル設定で、テストはこれを読んで「戻ったか」を確かめる。
+pub async fn server_with_fake_global(
+    label: &str,
+    body: &str,
+    config: Config,
+) -> (PathBuf, TestServer) {
+    let dir = std::env::temp_dir().join(format!(
+        "agentdashboard-model-test-{label}-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("一時ディレクトリを作れること");
+    let path = dir.join("settings.json");
+    std::fs::write(&path, body).expect("擬似のグローバル設定を書けること");
+
+    let mut config = config;
+    let server = TestServer::build_full(
+        &mut config,
+        fake_claude().to_string_lossy().into_owned(),
+        false,
+        true,
+        None,
+        Some(Arc::new(ClaudeSettings::new(path.clone()))),
+    )
+    .await;
+    (path, server)
+}
+
+/// 擬似のグローバル設定から `model` を読む。
+pub fn global_model(path: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    value.get("model")?.as_str().map(str::to_string)
+}
+
+/// カードのモデルが期待どおりになるまで待つ。
+///
+/// `statusLine` は `refreshInterval` の周期で届くので、送った直後には確定していない。
+/// マーカーではなく**状態そのもの**を待つ（設計§5 の楽観更新と確定の順序を、
+/// テスト側で先回りして決めつけないため）。
+pub async fn wait_for_model(session: &Arc<Session>, expected: &str) {
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let model = session.meta().model;
+        if model.as_ref().map(protocol::ModelId::as_str) == Some(expected) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{TIMEOUT:?} 以内にモデルが {expected} になりませんでした。実際: {model:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 pub fn manager() -> Arc<SessionManager> {
@@ -183,14 +249,43 @@ impl TestServer {
         name_parser_by_env: bool,
         settings_path: Option<PathBuf>,
     ) -> Self {
+        Self::build_full(
+            &mut config,
+            program,
+            with_parser,
+            name_parser_by_env,
+            settings_path,
+            None,
+        )
+        .await
+    }
+
+    async fn build_full(
+        config: &mut Config,
+        program: String,
+        with_parser: bool,
+        name_parser_by_env: bool,
+        settings_path: Option<PathBuf>,
+        claude_settings: Option<Arc<ClaudeSettings>>,
+    ) -> Self {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("空きポートで待ち受けられること");
         let addr = listener.local_addr().expect("待ち受け先を取れること");
         config.port = addr.port();
 
-        let config = Arc::new(config);
-        let manager = SessionManager::with_programs(Arc::clone(&config), program, hook_program());
+        let config = Arc::new(config.clone());
+        let manager = match claude_settings {
+            // モデルを扱うテストは**本物の ~/.claude/settings.json を触らない**
+            Some(claude_settings) => SessionManager::with_everything(
+                Arc::clone(&config),
+                program,
+                hook_program(),
+                claude_settings,
+                Arc::new(ModelAliases::in_memory()),
+            ),
+            None => SessionManager::with_programs(Arc::clone(&config), program, hook_program()),
+        };
 
         let mut state = AppState::new(Arc::clone(&manager), Arc::clone(&config));
         let parser = if with_parser {

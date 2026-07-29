@@ -80,9 +80,12 @@ build-debug: ## core をデバッグビルドする（E2E が使うバイナリ�
 # 見ている）。こちらは fps・状態反映の遅延・フレーム数といった**実測値**を出すためのもので、
 # 結果は実行レポートへ書き写す。数値を合否にしないのは、他の作業の負荷で落ちるテストは
 # 役に立たないため。
+#
+# その方針どおり、負荷に左右される実測値は `#[ignore]` を付けて make test から外し、
+# ここでだけ `--run-ignored all` で走らせる。
 perf: build-web build-debug ## 性能の実測値を採る（合否ではなく記録用）
 	@echo "=== サーバ側（コアレッシング効果・巨大履歴・遅いクライアント）==="
-	$(CARGO) nextest run -p agentdashboard-core --test perf --no-capture
+	$(CARGO) nextest run -p agentdashboard-core --test perf --no-capture --run-ignored all
 	@echo "=== ブラウザ側（12セッション同時稼働）==="
 	cd web && npx playwright test perf.spec.ts
 

@@ -38,11 +38,13 @@
 
 use std::io::{Read as _, Write};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use testkit::fake_claude::{
     ARGV_PREFIX, BYE_MARKER, BYPASS_ACCEPTED_MARKER, BYPASS_NOTICE, CRASH_MARKER, CYCLE_MODES,
     DUMP_END_MARKER, ENV_PREFIX, FLOOD_END_MARKER, FLOOD_PATTERN, FOOTER_PREFIX,
-    HOOK_FAILED_PREFIX, HOOK_SENT_PREFIX, JSONL_APPENDED_PREFIX, JSONL_FAILED_PREFIX, READY_MARKER,
-    RECEIVED_PREFIX, footer_for,
+    HOOK_FAILED_PREFIX, HOOK_SENT_PREFIX, JSONL_APPENDED_PREFIX, JSONL_FAILED_PREFIX,
+    MODEL_SET_PREFIX, MODEL_SWITCH_NOTICE, READY_MARKER, RECEIVED_PREFIX, STATUS_LINE_SENT_PREFIX,
+    footer_for, resolve_model,
 };
 
 /// 起動時に受け取った、フック実行に必要な情報。
@@ -55,7 +57,21 @@ struct Injected {
     mode: String,
     /// 起動時に全承認をスキップを指定したか。**巡回に bypass が入るかどうかが変わる**
     launched_bypass: bool,
+    /// いま名乗っているモデル。注入設定の `model` が初期値になる（設計§6 の主の仕掛け）。
+    ///
+    /// **複数スレッドから触る。** `refreshInterval` の周期実行が別スレッドで走るので、
+    /// 本体が `/model` で書き換えるのと同時に読まれうる
+    model: Arc<Mutex<String>>,
+    /// 最後に statusLine を走らせた時刻。デバウンスの判定に使う
+    last_status_line: Option<std::time::Instant>,
 }
+
+/// statusLine のデバウンス幅。
+///
+/// 本物は 300ms でまとめる（公式ドキュメント明記）。**ここを省くと1行ごとに子プロセスが
+/// 起きる**ので、行を多く送るテストが軒並み重くなり、資源を取り合う別のテストが
+/// 巻き添えで落ちる（実際にコアレッシングの測定が不安定になった）。
+const STATUS_LINE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(300);
 
 impl Injected {
     /// Shift+Tab の巡回に入るモードを、実測の順序で並べる（設計§11）。
@@ -66,6 +82,23 @@ impl Injected {
         }
         modes.extend(CYCLE_MODES);
         modes
+    }
+
+    /// 注入設定から `statusLine` のコマンド行を取り出す。
+    fn status_line_command(&self) -> Option<String> {
+        self.settings.as_ref()?["statusLine"]["command"]
+            .as_str()
+            .map(str::to_string)
+    }
+
+    /// 注入設定から `refreshInterval`（秒）を取り出す。
+    fn refresh_secs(&self) -> Option<u64> {
+        self.settings.as_ref()?["statusLine"]["refreshInterval"].as_u64()
+    }
+
+    /// いま名乗っているモデルの別名。
+    fn model(&self) -> String {
+        self.model.lock().expect("ロックが壊れていない").clone()
     }
 
     /// 1つ進めた先のモード。いまのモードが巡回に入っていなければ先頭へ。
@@ -149,16 +182,26 @@ fn main() {
     }
 
     let launched_bypass = mode.as_deref() == Some("bypassPermissions");
+    let settings: Option<serde_json::Value> = settings_path
+        .as_deref()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str(&text).ok());
+    // 注入設定の `model` を初期値として名乗る（設計§6 の主の仕掛け）。
+    // 指定が無ければ本物と同じくアカウントの既定＝`default` で始まる
+    let initial_model = settings
+        .as_ref()
+        .and_then(|value| value["model"].as_str())
+        .unwrap_or("default")
+        .to_string();
     let mut injected = Injected {
         session_id,
         transcript: transcript_path,
-        settings: settings_path
-            .as_deref()
-            .and_then(|path| std::fs::read_to_string(path).ok())
-            .and_then(|text| serde_json::from_str(&text).ok()),
+        settings,
         // 指定が無ければ本物と同じく既定（毎回確認する）で始まる
         mode: mode.unwrap_or_else(|| "default".to_string()),
         launched_bypass,
+        model: Arc::new(Mutex::new(initial_model)),
+        last_status_line: None,
     };
 
     // 行編集を切る。Shift+Tab は改行を伴わないので、これが無いと切替のキーが届かない。
@@ -182,6 +225,15 @@ fn main() {
         let _ = writeln!(out, "{FOOTER_PREFIX}{}", footer_for(&injected.mode));
     }
     let _ = out.flush();
+
+    // 本物は「セッション開始時」に statusLine を1回走らせる（設計§11 前提6）
+    send_status_line(&mut out, &mut injected, true);
+    start_refresh_ticker(&injected);
+
+    // 会話が進んだかどうか。**進んでいるときだけ**モデル切替の確認画面が出る（本物と同じ）
+    let mut conversation_started = false;
+    // 確認画面を出している間、答えを待っている切替先
+    let mut awaiting_model_choice: Option<String> = None;
 
     for input in InputReader::new() {
         let line = match input {
@@ -211,10 +263,41 @@ fn main() {
             continue;
         }
 
+        // モデル切替の確認画面が出ている間は、選択肢の番号だけを受け付ける
+        if let Some(target) = awaiting_model_choice.clone() {
+            match line.trim() {
+                "1" => {
+                    awaiting_model_choice = None;
+                    apply_model(&mut out, &injected, &target);
+                }
+                "2" => {
+                    awaiting_model_choice = None;
+                    let _ = writeln!(out, "{MODEL_SET_PREFIX}（取りやめ）");
+                    let _ = out.flush();
+                }
+                _ => {}
+            }
+            continue;
+        }
+
         if line == "exit" {
             let _ = writeln!(out, "{BYE_MARKER}");
             let _ = out.flush();
             break;
+        }
+
+        // 本物と同じく `/model <値>` でモデルを切り替える。
+        // **会話が進んでいると確認を求める**（設計§11 前提2 で実測）
+        if let Some(target) = line.strip_prefix("/model ") {
+            let target = target.trim().to_string();
+            if conversation_started {
+                let _ = writeln!(out, "{MODEL_SWITCH_NOTICE}");
+                let _ = out.flush();
+                awaiting_model_choice = Some(target);
+            } else {
+                apply_model(&mut out, &injected, &target);
+            }
+            continue;
         }
 
         if line == "dump" {
@@ -249,7 +332,96 @@ fn main() {
             let _ = writeln!(out, "{RECEIVED_PREFIX}{line}");
         }
         let _ = out.flush();
+
+        // 本物は「新しいアシスタントメッセージが届いたとき」に statusLine を走らせる
+        conversation_started = true;
+        send_status_line(&mut out, &mut injected, true);
     }
+}
+
+/// モデルを切り替えて名乗り直す。
+///
+/// # 切り替えただけでは statusLine を走らせない
+///
+/// **本物の契機にモデル変更は入っていない**（設計§11 前提6 で実測）。ここで走らせて
+/// しまうと、ダッシュボード側の楽観更新と `refreshInterval` による確定という経路
+/// （設計§5）が一度も試されないまま「動いているように見える」テストになる。
+fn apply_model(out: &mut impl Write, injected: &Injected, target: &str) {
+    *injected.model.lock().expect("ロックが壊れていない") = target.to_string();
+    let _ = writeln!(out, "{MODEL_SET_PREFIX}{target}");
+    let _ = out.flush();
+}
+
+/// 注入された `statusLine` を子プロセスとして実行する（設計§4）。
+///
+/// 本物と同じ形の JSON を標準入力へ渡す。キーは実測した12個のうち、ダッシュボードが
+/// 読む3つ（`session_id` / `transcript_path` / `model`）を中心に揃えてある。
+fn send_status_line(out: &mut impl Write, injected: &mut Injected, announce: bool) {
+    // 本物と同じ 300ms のデバウンス。連続した契機は1回にまとめる
+    let now = std::time::Instant::now();
+    if let Some(last) = injected.last_status_line
+        && now.duration_since(last) < STATUS_LINE_DEBOUNCE
+    {
+        return;
+    }
+    let Some(command) = injected.status_line_command() else {
+        return;
+    };
+    injected.last_status_line = Some(now);
+    let alias = injected.model();
+    let (id, display_name) = resolve_model(&alias);
+    let payload = serde_json::json!({
+        "session_id": injected.session_id,
+        "transcript_path": transcript_path(injected),
+        "cwd": std::env::current_dir().unwrap_or_default().to_string_lossy(),
+        "model": { "id": id, "display_name": display_name },
+        "version": "2.1.220",
+    });
+
+    let result = run_hook(&command, &payload.to_string());
+    if announce {
+        match result {
+            Ok(_) => {
+                let _ = writeln!(out, "{STATUS_LINE_SENT_PREFIX}{id}");
+            }
+            Err(reason) => {
+                let _ = writeln!(out, "{HOOK_FAILED_PREFIX}statusLine: {reason}");
+            }
+        }
+        let _ = out.flush();
+    }
+}
+
+/// `refreshInterval` の周期実行を始める（設計§11 前提6）。
+///
+/// **標準出力には何も書かない。** 本体の書き込みと混ざると、テストが待っている
+/// マーカーの途中に別の行が割り込む。周期実行が効いていることは、ダッシュボードの
+/// `SessionMeta` が更新されることで観測する。
+fn start_refresh_ticker(injected: &Injected) {
+    let Some(secs) = injected.refresh_secs().filter(|secs| *secs > 0) else {
+        return;
+    };
+    let Some(command) = injected.status_line_command() else {
+        return;
+    };
+    let session_id = injected.session_id.clone();
+    let transcript = transcript_path(injected);
+    let model = Arc::clone(&injected.model);
+
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(secs));
+            let alias = model.lock().expect("ロックが壊れていない").clone();
+            let (id, display_name) = resolve_model(&alias);
+            let payload = serde_json::json!({
+                "session_id": session_id,
+                "transcript_path": transcript,
+                "model": { "id": id, "display_name": display_name },
+                "version": "2.1.220",
+            });
+            let _ = run_hook(&command, &payload.to_string());
+        }
+    });
 }
 
 /// 標準入力から読み取った1件。

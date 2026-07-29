@@ -722,4 +722,103 @@ mod tests {
             Some(ModelId::new("claude-fable-5[1m]"))
         );
     }
+
+    // ---- 直列化（本イシューでいちばん重要なテスト）--------------------------------
+
+    /// CLI が `/model <値>` を保存する動きを真似る。
+    ///
+    /// 実物では claude 側がこれをやる（設計§11 前提3 で実測）。擬似 claude は利用者の
+    /// HOME を安全に差し替えられないので汚さない。**汚れたあとどうなるかを見るには、
+    /// ここで汚す役を自分でやるしかない。**
+    fn cli_saves(store: &ClaudeSettings, model: &str) {
+        store.write_model(Some(&ModelId::new(model))).unwrap();
+    }
+
+    #[tokio::test]
+    async fn 二本が同時に切り替えても元の既定が失われない() {
+        // 設計§6 に書いた4手の並びを再現する。**このテストが本イシューでいちばん重要**。
+        //
+        //   A：opus を控える → A：/model sonnet   → CLI が sonnet を書く
+        //   B：控える（★sonnet を「元の値」だと思い込む）→ B：/model haiku
+        //   A：値が違うので諦める → B：sonnet へ戻す → opus が二度と戻らない
+        //
+        // ロックが1本あればこの並びは起きない。
+        let (_dir, store) = temp_settings("serialize", SAMPLE);
+        let store = std::sync::Arc::new(store);
+        store.refresh_default();
+        let original = store.remembered_default();
+        assert_eq!(original, Some(ModelId::new("claude-fable-5[1m]")));
+
+        let a = {
+            let store = std::sync::Arc::clone(&store);
+            tokio::spawn(async move {
+                let _guard = store.lock_switch().await;
+                cli_saves(&store, "sonnet");
+                // 相手に割り込む隙を与える。ロックが効いていればここでは入れない
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                store.recover(&ModelId::new("sonnet"))
+            })
+        };
+        let b = {
+            let store = std::sync::Arc::clone(&store);
+            tokio::spawn(async move {
+                let _guard = store.lock_switch().await;
+                cli_saves(&store, "haiku");
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                store.recover(&ModelId::new("haiku"))
+            })
+        };
+        let (first, second) = tokio::join!(a, b);
+        first.unwrap();
+        second.unwrap();
+
+        assert_eq!(
+            store.read_model().unwrap(),
+            original,
+            "並行して切り替えても、利用者の既定が失われないこと"
+        );
+        assert_eq!(store.remembered_default(), original);
+    }
+
+    #[tokio::test]
+    async fn ロックはプロセス全体で1本になっている() {
+        // セッションごとに持つと、対象がプロセスに1つしかないファイルを守れない
+        let (_dir, store) = temp_settings("one-lock", SAMPLE);
+        let guard = store.lock_switch().await;
+
+        let blocked =
+            tokio::time::timeout(std::time::Duration::from_millis(100), store.lock_switch()).await;
+        assert!(blocked.is_err(), "先客がいる間は待たされること");
+
+        drop(guard);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), store.lock_switch())
+                .await
+                .is_ok(),
+            "解放されたら取れること"
+        );
+    }
+
+    #[tokio::test]
+    async fn 直列化されていれば汚染が固定されない() {
+        // 「読んだ時点と違ったら書かない」という自衛だけでは、汚染を防ぐのではなく
+        // **汚染を固定する**ことになる（設計§6）。順番に行えば必ず元へ戻る
+        let (_dir, store) = temp_settings("sequential", SAMPLE);
+        store.refresh_default();
+
+        for model in ["sonnet", "haiku", "opus"] {
+            let _guard = store.lock_switch().await;
+            cli_saves(&store, model);
+            assert_eq!(
+                store.recover(&ModelId::new(model)),
+                Recovery::Restored {
+                    to: Some(ModelId::new("claude-fable-5[1m]"))
+                }
+            );
+        }
+        assert_eq!(
+            store.read_model().unwrap(),
+            Some(ModelId::new("claude-fable-5[1m]"))
+        );
+    }
 }

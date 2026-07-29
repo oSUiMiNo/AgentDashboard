@@ -53,10 +53,19 @@ async fn 遅いクライアントは他のクライアントとptyの読み取�
 }
 
 #[tokio::test]
+// `make perf` でだけ走らせる（`make test` からは外す）。
+//
+// **比なら機械の速さに左右されない、という前提が成り立たないことが分かった。**
+// 他のテストと資源を取り合うと、合流なし（0ms）の側も OS とパイプの都合で勝手に
+// まとまるため、比が縮んで落ちる。実測では 合流=18 / 素=33〜35 まで詰まった
+// （単独で走らせれば素の側はずっと多い）。
+//
+// Makefile が「数値を合否にしないのは、他の作業の負荷で落ちるテストは役に立たない
+// ため」と書いているとおりの状況なので、判定ではなく記録の側へ寄せる。
+#[ignore = "負荷に左右される実測値。make perf で採る"]
 async fn コアレッシングでフレーム数が実際に減る() {
     // テスト計画フェーズ6「コアレッシング効果」。CLI は1文字ずつ書くことがあるので、
-    // まとめずに送るとフレーム数が爆発してブラウザが追いつかない。
-    // 比で見るのは、絶対値が機械の速さで変わるのに対し**比は変わらない**ため
+    // まとめずに送るとフレーム数が爆発してブラウザが追いつかない
     let merged = frames_with_window(8).await;
     let raw = frames_with_window(0).await;
 
@@ -71,6 +80,10 @@ async fn コアレッシングでフレーム数が実際に減る() {
 async fn frames_with_window(coalesce_ms: u64) -> usize {
     let config = Config {
         coalesce_ms,
+        // 測っているのは PTY のフレーム合流であって statusLine ではない。
+        // 注入したままだと、擬似 claude が数秒ごとに子プロセスを起こして
+        // 測定対象と資源を取り合う（実際に本数が揺れて落ちた）
+        inject_status_line: false,
         ..Config::default()
     };
     let manager = common::manager_with(config);
