@@ -847,8 +847,15 @@ impl SessionManager {
         });
 
         // 全承認をスキップで起動した初回だけ、TUI が責任の受諾を尋ねてくる。
-        // 答えるまで先へ進まないので、こちらで答える（利用者の判断）
-        if initial_mode.as_ref().map(PermissionMode::as_str) == Some("bypassPermissions") {
+        // 答えるまで先へ進まないので、こちらで答える（利用者の判断）。
+        //
+        // 起動引数のほうも見るのは、**自己修復の修復セッションが同じモードを
+        // `spawn_with_args` 経由で渡している**ため（設計§17）。無人で走らせる機能なので、
+        // ここで答えられないと確認の画面で永久に止まる
+        let wants_bypass = initial_mode.as_ref().map(PermissionMode::as_str)
+            == Some("bypassPermissions")
+            || extra_args.iter().any(|arg| arg == "bypassPermissions");
+        if wants_bypass {
             tokio::spawn(answer_bypass_notice(Arc::clone(&session)));
         }
 

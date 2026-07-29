@@ -9,8 +9,9 @@
 //!   fake-claude                    対話モード。1行受け取るごとに応答を返す
 //!   fake-claude --exit-code <N>    何もせず終了コード N で終了する（異常終了の検証用）
 //!   fake-claude --echo-only        受け取った行をそのまま返す（余計な装飾なし）
-//!   （本物と同じく `--session-id <UUID>` と `--settings <PATH>` を付けて起動される。
-//!     知らないオプションは黙って無視する）
+//!   fake-claude --help             本物に似せた使い方を出す（権限モードの choices を含む）
+//!   （本物と同じく `--session-id <UUID>` `--settings <PATH>` `--permission-mode <MODE>` を
+//!     付けて起動される。知らないオプションは黙って無視する）
 //!
 //! 対話モードで受け付ける命令:
 //!   dump          自分の起動引数と環境変数を1行ずつ書き出す
@@ -20,13 +21,28 @@
 //!   crash <N>     終了コード N で自ら異常終了する
 //!   exit          終了する
 //!   その他        受け取った行を返す
+//!
+//! # 権限モードの模擬（設計§11 の実測に合わせる）
+//!
+//! 本物の TUI は画面下部にフッタ（`⏸ manual mode on` 等）を出し続け、Shift+Tab で
+//! モードを巡回する。ダッシュボードはフッタからモードを読み、Shift+Tab を送って
+//! 切り替えるので、**その2つを擬似 claude でも本物と同じ形で再現する**。これができないと、
+//! 切替の検証が本物の claude を起こす経路（＝クォータを使う経路）でしかできなくなる。
+//!
+//! # 行単位ではなくバイト単位で読む
+//!
+//! Shift+Tab（`ESC [ Z`）は**改行を伴わない**。端末が既定の行編集モード（icanon）の
+//! ままだと、改行が来るまで子プロセスへ届かず、切替のキーが永久に読めない。起動時に
+//! `stty -icanon` で行編集だけを切り、**エコーは残す**（ブラウザの端末に打った文字が
+//! 出るのは行編集ではなくエコーの働きで、既存のテストがそれを見ている）。
 
-use std::io::{BufRead as _, Write};
+use std::io::{Read as _, Write};
 use std::process::{Command, Stdio};
 use testkit::fake_claude::{
-    ARGV_PREFIX, BYE_MARKER, CRASH_MARKER, DUMP_END_MARKER, ENV_PREFIX, FLOOD_END_MARKER,
-    FLOOD_PATTERN, HOOK_FAILED_PREFIX, HOOK_SENT_PREFIX, JSONL_APPENDED_PREFIX,
-    JSONL_FAILED_PREFIX, READY_MARKER, RECEIVED_PREFIX,
+    ARGV_PREFIX, BYE_MARKER, BYPASS_ACCEPTED_MARKER, BYPASS_NOTICE, CRASH_MARKER, CYCLE_MODES,
+    DUMP_END_MARKER, ENV_PREFIX, FLOOD_END_MARKER, FLOOD_PATTERN, FOOTER_PREFIX,
+    HOOK_FAILED_PREFIX, HOOK_SENT_PREFIX, JSONL_APPENDED_PREFIX, JSONL_FAILED_PREFIX, READY_MARKER,
+    RECEIVED_PREFIX, footer_for,
 };
 
 /// 起動時に受け取った、フック実行に必要な情報。
@@ -35,18 +51,72 @@ struct Injected {
     /// `--transcript` で渡された書き出し先。フックが運ぶ値もこれになる
     transcript: Option<String>,
     settings: Option<serde_json::Value>,
+    /// いまの権限モード（正規値）。フックの payload にもこれを載せる
+    mode: String,
+    /// 起動時に全承認をスキップを指定したか。**巡回に bypass が入るかどうかが変わる**
+    launched_bypass: bool,
 }
+
+impl Injected {
+    /// Shift+Tab の巡回に入るモードを、実測の順序で並べる（設計§11）。
+    fn cycle(&self) -> Vec<&'static str> {
+        let mut modes: Vec<&'static str> = Vec::new();
+        if self.launched_bypass {
+            modes.push("bypassPermissions");
+        }
+        modes.extend(CYCLE_MODES);
+        modes
+    }
+
+    /// 1つ進めた先のモード。いまのモードが巡回に入っていなければ先頭へ。
+    fn next_mode(&self) -> String {
+        let cycle = self.cycle();
+        let at = cycle.iter().position(|mode| *mode == self.mode);
+        match at {
+            Some(at) => cycle[(at + 1) % cycle.len()].to_string(),
+            None => cycle[0].to_string(),
+        }
+    }
+}
+
+/// 本物に似せた `--help`。`--permission-mode` の choices の形だけを合わせる。
+///
+/// 折り返しをまたぐのも本物と同じにしてある（そこを解析できることが検証の対象）。
+const HELP_TEXT: &str = "\
+Usage: fake-claude [options]
+
+Options:
+  --permission-mode <mode>              Permission mode to use for the session
+                                        (choices: \"acceptEdits\", \"auto\",
+                                        \"bypassPermissions\", \"manual\",
+                                        \"dontAsk\", \"plan\")
+  --session-id <uuid>                   Use a specific session ID
+";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    if args.iter().any(|arg| arg == "--help") {
+        print!("{HELP_TEXT}");
+        return;
+    }
 
     let mut echo_only = false;
     let mut session_id = String::new();
     let mut settings_path: Option<String> = None;
     let mut transcript_path: Option<String> = None;
+    let mut mode: Option<String> = None;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
+            // 本物と同じく権限モードを受け取る。CLI の別名 manual は正規値へ寄せる
+            "--permission-mode" => {
+                mode = args.get(index + 1).map(|value| match value.as_str() {
+                    "manual" => "default".to_string(),
+                    other => other.to_string(),
+                });
+                index += 2;
+            }
             "--exit-code" => {
                 let code = args
                     .get(index + 1)
@@ -78,24 +148,68 @@ fn main() {
         }
     }
 
-    let injected = Injected {
+    let launched_bypass = mode.as_deref() == Some("bypassPermissions");
+    let mut injected = Injected {
         session_id,
         transcript: transcript_path,
         settings: settings_path
             .as_deref()
             .and_then(|path| std::fs::read_to_string(path).ok())
             .and_then(|text| serde_json::from_str(&text).ok()),
+        // 指定が無ければ本物と同じく既定（毎回確認する）で始まる
+        mode: mode.unwrap_or_else(|| "default".to_string()),
+        launched_bypass,
     };
+
+    // 行編集を切る。Shift+Tab は改行を伴わないので、これが無いと切替のキーが届かない。
+    // エコーは残す（ブラウザの端末に打った文字が出るのはエコーの働き）
+    let _ = Command::new("stty")
+        .args(["-icanon", "min", "1", "time", "0"])
+        .status();
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    let _ = writeln!(out, "{READY_MARKER}");
+
+    // 全承認をスキップで起動した初回だけ、本物は責任の受諾を尋ねてくる。
+    // **答えるまで起動は完了しない**ので、`ready` もフッタもまだ出さない。
+    // ここを先に出してしまうと、受諾より先に指示が届いて黙って捨てられる
+    // （テストからは「フックが飛ばない」という分かりにくい形でしか見えない）
+    let mut awaiting_accept = launched_bypass;
+    if awaiting_accept {
+        let _ = writeln!(out, "{BYPASS_NOTICE}");
+    } else {
+        let _ = writeln!(out, "{READY_MARKER}");
+        let _ = writeln!(out, "{FOOTER_PREFIX}{}", footer_for(&injected.mode));
+    }
     let _ = out.flush();
 
-    let stdin = std::io::stdin();
-    for line in stdin.lock().lines() {
-        let Ok(line) = line else { break };
+    for input in InputReader::new() {
+        let line = match input {
+            // Shift+Tab。モードを1つ進めてフッタを出し直す
+            Input::Cycle => {
+                if awaiting_accept {
+                    continue;
+                }
+                injected.mode = injected.next_mode();
+                let _ = writeln!(out, "{FOOTER_PREFIX}{}", footer_for(&injected.mode));
+                let _ = out.flush();
+                continue;
+            }
+            Input::Line(line) => line,
+        };
         let line = line.trim_end_matches('\r');
+
+        // 受諾の画面が出ている間は、選択肢の番号だけを受け付ける
+        if awaiting_accept {
+            if line.trim() == "2" {
+                awaiting_accept = false;
+                let _ = writeln!(out, "{BYPASS_ACCEPTED_MARKER}");
+                let _ = writeln!(out, "{READY_MARKER}");
+                let _ = writeln!(out, "{FOOTER_PREFIX}{}", footer_for(&injected.mode));
+                let _ = out.flush();
+            }
+            continue;
+        }
 
         if line == "exit" {
             let _ = writeln!(out, "{BYE_MARKER}");
@@ -135,6 +249,82 @@ fn main() {
             let _ = writeln!(out, "{RECEIVED_PREFIX}{line}");
         }
         let _ = out.flush();
+    }
+}
+
+/// 標準入力から読み取った1件。
+enum Input {
+    /// 改行で区切られた1行
+    Line(String),
+    /// Shift+Tab（`ESC [ Z`）。改行を伴わないので行としては読めない
+    Cycle,
+}
+
+/// 標準入力を**バイト単位**で読み、行と Shift+Tab に振り分ける。
+///
+/// 行編集を切ってあるので、1バイトずつ届く。改行を待たずに制御シーケンスを拾えるのが要点。
+struct InputReader {
+    buffer: Vec<u8>,
+}
+
+impl InputReader {
+    fn new() -> Self {
+        Self { buffer: Vec::new() }
+    }
+
+    fn read_byte(&mut self) -> Option<u8> {
+        let mut byte = [0u8; 1];
+        match std::io::stdin().read(&mut byte) {
+            Ok(0) | Err(_) => None,
+            Ok(_) => Some(byte[0]),
+        }
+    }
+}
+
+impl InputReader {
+    /// `ESC [` の続きを**終端バイトまで**読み切って、その中身を返す。
+    ///
+    /// 途中で読むのをやめてはいけない。貼り付けの合図（`ESC [ 2 0 0 ~`）を
+    /// 途中まで食べると、残りの `0 0 ~` が本文へ紛れ込む。本物の TUI は
+    /// 制御シーケンスを解釈して**表示にも本文にも出さない**ので、そちらに合わせる。
+    fn read_csi(&mut self) -> Option<String> {
+        let mut body = String::new();
+        loop {
+            let byte = self.read_byte()?;
+            body.push(byte as char);
+            // CSI の終端は 0x40〜0x7E（`Z` や `~` など）
+            if (0x40..=0x7e).contains(&byte) {
+                return Some(body);
+            }
+        }
+    }
+}
+
+impl Iterator for InputReader {
+    type Item = Input;
+
+    fn next(&mut self) -> Option<Input> {
+        loop {
+            let byte = self.read_byte()?;
+            match byte {
+                // 入力行を消す（Ctrl+U）。本物の TUI と同じく、溜めていた本文を捨てる。
+                // ダッシュボードは指示を送る前にこれを打つ（設計§18）
+                0x15 => self.buffer.clear(),
+                // ESC で始まる並び。`[Z` だけが Shift+Tab で、他は解釈して捨てる
+                0x1b => {
+                    if self.read_byte()? == b'[' && self.read_csi()? == "Z" {
+                        return Some(Input::Cycle);
+                    }
+                }
+                // 端末の作法では確定は CR。行編集を切っているので自分で扱う
+                b'\n' | b'\r' => {
+                    let line =
+                        String::from_utf8_lossy(&std::mem::take(&mut self.buffer)).into_owned();
+                    return Some(Input::Line(line));
+                }
+                other => self.buffer.push(other),
+            }
+        }
     }
 }
 
@@ -317,6 +507,20 @@ fn build_payload(injected: &Injected, event: &str, extra: &str) -> String {
         "transcript_path": transcript_path(injected),
         "hook_event_name": event,
     });
+
+    // 本物は一部のイベントにだけ載せる（設計§11 の実測）。運ぶ側のイベントを模して、
+    // ダッシュボードが「載っていれば拾い、無ければ触らない」ことを検証できるようにする。
+    // テストが `{"permission_mode": ...}` を明示した場合は下の合流で上書きされる
+    if matches!(
+        event,
+        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "Stop"
+    ) && let Some(target) = payload.as_object_mut()
+    {
+        target.insert(
+            "permission_mode".to_string(),
+            serde_json::Value::String(injected.mode.clone()),
+        );
+    }
 
     if !extra.is_empty()
         && let Ok(serde_json::Value::Object(fields)) = serde_json::from_str(extra)

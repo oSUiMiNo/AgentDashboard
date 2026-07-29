@@ -43,6 +43,54 @@ pub const BYE_MARKER: &str = "[fake-claude] bye";
 /// 見えにくくなる。
 pub const FLOOD_PATTERN: &[u8] = b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abc\n";
 
+/// 権限モードのフッタを書き出すときの行頭。
+///
+/// 本物の TUI は `⏸ manual mode on · ? for shortcuts` のような行を画面下部に出し続ける。
+/// ダッシュボードはそこからモードを読む（設計§11）ので、擬似 claude も**本物と同じ語句**を
+/// 出す。語句が違うと、擬似では読めるのに本物では読めない（またはその逆）という
+/// 一番たちの悪いずれ方になる。
+pub const FOOTER_PREFIX: &str = "[fake-claude] footer: ";
+
+/// 権限モード（正規値）と、本物が出すフッタの語句の対応。
+///
+/// 巡回の順序でもある。本物の実測（設計§11）に合わせて
+/// `default → acceptEdits → plan` を基本とし、`bypassPermissions` は**起動時に
+/// 指定した場合だけ**先頭へ加わる。`dontAsk` と `auto` は巡回に入らない。
+pub const FOOTER_LABELS: &[(&str, &str)] = &[
+    ("default", "⏸ manual mode on"),
+    ("acceptEdits", "⏵⏵ accept edits on"),
+    ("plan", "⏸ plan mode on"),
+    ("auto", "⏵⏵ auto mode on"),
+    ("dontAsk", "⏵⏵ don't ask on"),
+    ("bypassPermissions", "⏵⏵ bypass permissions on"),
+];
+
+/// Shift+Tab の巡回に入るモード（`bypassPermissions` 起動時を除く）。
+pub const CYCLE_MODES: &[&str] = &["default", "acceptEdits", "plan"];
+
+/// 全承認をスキップで起動したときに出す、責任の受諾を尋ねる画面。
+///
+/// 本物では一度受け入れると以後出ないため実測できていない（設計§11）。ここでは
+/// **必ず出す**ことで、ダッシュボード側の自動応答を毎回検証できるようにする。
+/// 既定の選択肢が「いいえ」である点も本物の説明に合わせてある。
+pub const BYPASS_NOTICE: &str = "\
+WARNING: Claude Code running in Bypass Permissions mode
+By proceeding, you accept all responsibility for actions taken without permission checks
+❯ 1. No, exit
+  2. Yes, I accept";
+
+/// 受諾の選択肢が選ばれたことを示すマーカー。
+pub const BYPASS_ACCEPTED_MARKER: &str = "[fake-claude] bypass-accepted";
+
+/// モードの正規値からフッタの語句を引く。
+pub fn footer_for(mode: &str) -> &'static str {
+    FOOTER_LABELS
+        .iter()
+        .find(|(value, _)| *value == mode)
+        .map(|(_, label)| *label)
+        .unwrap_or("⏸ manual mode on")
+}
+
 /// `fake-claude` 実行ファイルの場所。
 pub fn path() -> PathBuf {
     crate::binary_path("fake-claude")

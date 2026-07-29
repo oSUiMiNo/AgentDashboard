@@ -187,6 +187,15 @@ pub fn post_json(addr: SocketAddr, path: &str, body: &str) -> anyhow::Result<u16
     Ok(request_raw(addr, &request)?.0)
 }
 
+/// 同じく最小の PUT。設定の書き換え（`PUT /api/settings`）の確認に使う。
+pub fn put_json(addr: SocketAddr, path: &str, body: &str) -> anyhow::Result<(u16, String)> {
+    let request = format!(
+        "PUT {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    request_raw(addr, &request)
+}
+
 /// 同じく最小の GET。ステータスコードと本文を返す。
 pub fn get(addr: SocketAddr, path: &str) -> anyhow::Result<(u16, String)> {
     let request = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
