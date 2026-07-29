@@ -96,6 +96,8 @@ pub struct Selfheal {
     /// 状態ファイルに残さないのは、利用者が設定を直したりソースを置いたりしたら
     /// すぐ効いてほしいため。起動しなおせば伝え直す。
     unavailable_notified: AtomicBool,
+    /// 直前に伝えた進み具合。同じ内容を繰り返さないための控え
+    last_notice: Mutex<Option<(SelfhealPhase, Option<String>)>>,
 }
 
 impl Selfheal {
@@ -122,6 +124,7 @@ impl Selfheal {
             baseline: Mutex::new(None),
             ratio_at_trigger: Mutex::new(0.0),
             unavailable_notified: AtomicBool::new(false),
+            last_notice: Mutex::new(None),
         });
 
         let (sink, reports) = mpsc::channel(STATS_QUEUE);
@@ -130,7 +133,21 @@ impl Selfheal {
         selfheal
     }
 
+    /// 進み具合を伝える。**直前と同じ内容なら黙る。**
+    ///
+    /// クールダウン中は健康状態が届くたびに同じ判断へ辿り着くので、素通しにすると
+    /// 「検知しました」「間を置いています」が延々と出続ける。利用者から見ると
+    /// バナーが消えなくなるだけで、新しく分かることは何も無い。進展があれば
+    /// 段階か中身のどちらかは必ず変わる。
     fn notify(&self, phase: SelfhealPhase, detail: Option<String>) {
+        let notice = (phase, detail.clone());
+        {
+            let mut last = self.last_notice.lock().expect("ロックが壊れていない");
+            if last.as_ref() == Some(&notice) {
+                return;
+            }
+            *last = Some(notice);
+        }
         tracing::info!("自己修復 {phase:?}: {}", detail.clone().unwrap_or_default());
         self.manager
             .broadcast(ServerMessage::Selfheal { phase, detail });
@@ -279,8 +296,11 @@ fn rollback(selfheal: &Arc<Selfheal>, reason: &str) {
 /// 検知から差し替えまでの1本道（設計§9 のシーケンス）。
 async fn run_cycle(selfheal: &Arc<Selfheal>, trigger: Trigger) {
     let reason = trigger.detail();
-    selfheal.notify(SelfhealPhase::Detected, Some(reason.clone()));
 
+    // **何もしないと決まっているなら「検知しました」は出さない。**
+    // 健康状態は数秒おきに届くので、出してから断ると「検知」と「断り」が交互に並び、
+    // 画面のバナーが消えなくなる。断りの中に理由を含めれば、伝わる中身は変わらない
+    //
     // 「そもそも修復できない」ことは1度だけ伝える。検知のたびに同じ断りを出しても
     // 増えるのは雑音だけで、利用者が打てる手は変わらない
     if !selfheal.config.selfheal_enabled {
@@ -312,7 +332,7 @@ async fn run_cycle(selfheal: &Arc<Selfheal>, trigger: Trigger) {
     if !state.can_start(now_ms()) {
         selfheal.notify(
             SelfhealPhase::Cooldown,
-            Some("直前の修復から間を置いています".to_string()),
+            Some(format!("{reason}。直前の修復から間を置いています")),
         );
         return;
     }
@@ -328,6 +348,9 @@ async fn run_cycle(selfheal: &Arc<Selfheal>, trigger: Trigger) {
         );
         return;
     }
+
+    // ここまで来たら実際に手を動かす。この時点で初めて「検知しました」を出す
+    selfheal.notify(SelfhealPhase::Detected, Some(reason.clone()));
 
     let worktree = match blocking(&ops, |ops| ops.prepare_worktree(MAINTENANCE_NAME)).await {
         Ok(path) => path,
