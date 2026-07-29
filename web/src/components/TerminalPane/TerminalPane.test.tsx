@@ -1,5 +1,5 @@
 import { render, screen, waitFor } from '@testing-library/react'
-import { TerminalPane } from './TerminalPane'
+import { TERMINAL_OPTIONS, TerminalPane } from './TerminalPane'
 import { useWsStore } from '@/stores/ws'
 
 /**
@@ -53,5 +53,11 @@ describe('TerminalPane', () => {
 
     await waitFor(() => expect(status).toHaveAttribute('data-renderer', 'dom'))
     expect(disposed).toBe(true)
+  })
+
+  // xterm の既定はブロックで、カーソル位置の文字を塗り潰すため上書きモードに見える。
+  // WebGL レンダラのカーソルは canvas 描画なので CSS では戻せない。ここが唯一の指定箇所
+  it('カーソルは挿入モードに見えるバーにする', () => {
+    expect(TERMINAL_OPTIONS.cursorStyle).toBe('bar')
   })
 })

@@ -14,7 +14,7 @@
 import { useEffect, useRef } from 'react'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
-import { Terminal } from '@xterm/xterm'
+import { Terminal, type ITerminalOptions } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
 import { createFlowController } from '@/lib/flow'
 import { KIND_PTY_SNAPSHOT } from '@/lib/frame'
@@ -28,6 +28,28 @@ interface Props {
 /** E2E が端末の内容を読むための取り出し口を持った要素。 */
 type TerminalContainer = HTMLDivElement & { __terminal?: Terminal }
 
+/**
+ * 端末の見た目。単体テストから見えるように外へ出してある。
+ *
+ * カーソルはブロックにしない。xterm の既定はブロックで、カーソル位置の文字を塗り潰すため
+ * **上書きモードで打っているように見える**（実際の行編集は CLI 側の責務で挿入モードのまま）。
+ * 非フォーカス時の `cursorInactiveStyle` は既定の枠線のままにする。ここまでバーにすると、
+ * どの端末に入力が届くのかが見分けられなくなる。
+ */
+export const TERMINAL_OPTIONS: ITerminalOptions = {
+  convertEol: false,
+  cursorBlink: true,
+  cursorStyle: 'bar',
+  cursorWidth: 2,
+  fontSize: 13,
+  fontFamily:
+    'ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", monospace',
+  theme: { background: '#0b0f14' },
+  // xterm 自身のスクロールバックはサーバのリングバッファとは別物。
+  // 画面内の遡り用に控えめに確保する
+  scrollback: 5000,
+}
+
 export function TerminalPane({ cardId }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   // E2E から観測するための値。React の再レンダリングとは無関係に更新する
@@ -40,17 +62,7 @@ export function TerminalPane({ cardId }: Props) {
     }
 
     const store = useWsStore.getState()
-    const term = new Terminal({
-      convertEol: false,
-      cursorBlink: true,
-      fontSize: 13,
-      fontFamily:
-        'ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", monospace',
-      theme: { background: '#0b0f14' },
-      // xterm 自身のスクロールバックはサーバのリングバッファとは別物。
-      // 画面内の遡り用に控えめに確保する
-      scrollback: 5000,
-    })
+    const term = new Terminal(TERMINAL_OPTIONS)
 
     const fit = new FitAddon()
     term.loadAddon(fit)
