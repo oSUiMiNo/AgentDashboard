@@ -101,18 +101,26 @@ pub fn cli_argument(mode: &PermissionMode) -> String {
 /// フッタは画面が更新されるたびに書き直されるので、スクロールバックには古いフッタが
 /// 何度も残っている。**いちばん後ろに現れた目印**が現在のモードにあたる。
 ///
-/// # 先に ANSI を落とす
+/// # 空白は当てにしない
 ///
-/// 読む対象は端末の生のバイト列で、語句の途中に色の指定が挟まりうる。そのまま
-/// 文字列一致を掛けると、見えている文字は同じなのに一致しない、という追いにくい
-/// 失敗になる。
+/// 読む対象は端末の**生のバイト列**であって、レンダリング後の画面ではない。本物の TUI は
+/// フッタを語ごとに別々に書き、間をカーソル移動で埋めるので、生の並びは
+/// `⏵⏵accepteditson` のように**語間の空白が消える**（実測。設計§11）。画面で見えている
+/// 形のまま照合すると、いつまでも一致しない。
+///
+/// そこで**両側から空白を取り除いてから**探す。色の指定などの制御シーケンスも先に落とす。
 pub fn parse_footer(text: &str) -> Option<PermissionMode> {
-    let plain = strip_ansi(text);
+    let plain = squeeze(&strip_ansi(text));
     CLAUDE_MODES
         .iter()
-        .filter_map(|entry| plain.rfind(entry.footer).map(|at| (at, entry)))
+        .filter_map(|entry| plain.rfind(&squeeze(entry.footer)).map(|at| (at, entry)))
         .max_by_key(|(at, _)| *at)
         .map(|(_, entry)| PermissionMode::new(entry.canonical))
+}
+
+/// 空白（改行を含む）を全部取り除く。
+fn squeeze(text: &str) -> String {
+    text.chars().filter(|ch| !ch.is_whitespace()).collect()
 }
 
 /// 端末の制御シーケンスを落として、見えている文字だけを残す。
@@ -334,6 +342,25 @@ mod tests {
         // 残っているので、いちばん後ろを見ないと切替が反映されない
         let scrollback = "⏸ manual mode on\n出力\n⏵⏵ accept edits on\n出力\n⏸ plan mode on\n";
         assert_eq!(parse_footer(scrollback), Some(PermissionMode::new("plan")));
+    }
+
+    #[test]
+    fn 生のバイト列のように空白が消えていても読める() {
+        // 本物の TUI はフッタを語ごとに別々に書き、間はカーソル移動で埋める。
+        // 生の並びには空白が入らない（実測。設計§11）。画面で見えている形しか
+        // 照合できないと、実物では永久に読めない
+        let raw = "⏵⏵accepteditson (shift+tabtocycle)·←foragents";
+        assert_eq!(parse_footer(raw), Some(PermissionMode::new("acceptEdits")));
+
+        let raw = "⏸manualmodeon·?forshortcuts";
+        assert_eq!(parse_footer(raw), Some(PermissionMode::new("default")));
+
+        // 語が行をまたいで割れていても読める（折り返しで改行が入る）
+        let raw = "⏵⏵bypass\npermissions\non";
+        assert_eq!(
+            parse_footer(raw),
+            Some(PermissionMode::new("bypassPermissions"))
+        );
     }
 
     #[test]
