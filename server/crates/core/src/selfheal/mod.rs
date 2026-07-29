@@ -91,6 +91,11 @@ pub struct Selfheal {
     baseline: Mutex<Option<f64>>,
     /// 発報した時点の失敗率。差し替えたときに保護観察の物差しになる
     ratio_at_trigger: Mutex<f64>,
+    /// 「そもそも修復できない」ことを既に伝えたか（設定で止めている／ソースが無い）。
+    ///
+    /// 状態ファイルに残さないのは、利用者が設定を直したりソースを置いたりしたら
+    /// すぐ効いてほしいため。起動しなおせば伝え直す。
+    unavailable_notified: AtomicBool,
 }
 
 impl Selfheal {
@@ -116,6 +121,7 @@ impl Selfheal {
             busy: Arc::new(AtomicBool::new(false)),
             baseline: Mutex::new(None),
             ratio_at_trigger: Mutex::new(0.0),
+            unavailable_notified: AtomicBool::new(false),
         });
 
         let (sink, reports) = mpsc::channel(STATS_QUEUE);
@@ -275,21 +281,27 @@ async fn run_cycle(selfheal: &Arc<Selfheal>, trigger: Trigger) {
     let reason = trigger.detail();
     selfheal.notify(SelfhealPhase::Detected, Some(reason.clone()));
 
+    // 「そもそも修復できない」ことは1度だけ伝える。検知のたびに同じ断りを出しても
+    // 増えるのは雑音だけで、利用者が打てる手は変わらない
     if !selfheal.config.selfheal_enabled {
-        selfheal.notify(
-            SelfhealPhase::Failed,
-            Some("自己修復は設定で止められています（selfheal_enabled = false）".to_string()),
-        );
+        if !selfheal.unavailable_notified.swap(true, Ordering::SeqCst) {
+            selfheal.notify(
+                SelfhealPhase::Failed,
+                Some("自己修復は設定で止められています（selfheal_enabled = false）".to_string()),
+            );
+        }
         return;
     }
     let Some(ops) = selfheal.ops.clone() else {
-        selfheal.notify(
-            SelfhealPhase::Failed,
-            Some(
-                "修復にはダッシュボード自身のソースと Docker が要ります。検知のみ行いました"
-                    .to_string(),
-            ),
-        );
+        if !selfheal.unavailable_notified.swap(true, Ordering::SeqCst) {
+            selfheal.notify(
+                SelfhealPhase::Failed,
+                Some(
+                    "修復にはダッシュボード自身のソースと Docker が要ります。検知のみ行いました"
+                        .to_string(),
+                ),
+            );
+        }
         return;
     };
 
@@ -320,10 +332,7 @@ async fn run_cycle(selfheal: &Arc<Selfheal>, trigger: Trigger) {
     let worktree = match blocking(&ops, |ops| ops.prepare_worktree(MAINTENANCE_NAME)).await {
         Ok(path) => path,
         Err(error) => {
-            selfheal.notify(
-                SelfhealPhase::Failed,
-                Some(format!("作業場所を用意できません: {error}")),
-            );
+            give_up(selfheal, &format!("作業場所を用意できません: {error}"));
             return;
         }
     };
@@ -339,10 +348,7 @@ async fn run_cycle(selfheal: &Arc<Selfheal>, trigger: Trigger) {
     let sample = match canary(selfheal, &ops, &worktree).await {
         Ok(sample) => sample,
         Err(error) => {
-            selfheal.notify(
-                SelfhealPhase::Failed,
-                Some(format!("カナリアに失敗しました: {error}")),
-            );
+            give_up(selfheal, &format!("カナリアに失敗しました: {error}"));
             return;
         }
     };
@@ -373,10 +379,34 @@ async fn run_cycle(selfheal: &Arc<Selfheal>, trigger: Trigger) {
         return;
     }
 
-    repair_loop(selfheal, &ops, &worktree, &reason, &version, gate.output).await;
+    // 落ちているサンプルを消せばテストは通ってしまう。渡したものがそのまま残っている
+    // ことを機械で確かめるために、この時点の指紋を控える（§17）
+    let sample_file = sample.dir.join("session.jsonl");
+    let sample_mark = repair::fingerprint(&sample_file);
+
+    repair_loop(
+        selfheal,
+        &ops,
+        &worktree,
+        &reason,
+        &version,
+        gate.output,
+        Sample {
+            path: sample_file,
+            mark: sample_mark,
+        },
+    )
+    .await;
+}
+
+/// 修復が終わったあとも、そのまま残っていなければならないサンプル。
+struct Sample {
+    path: PathBuf,
+    mark: Option<u64>,
 }
 
 /// 修復セッションを起こし、通るまで（上限まで）繰り返す。
+#[allow(clippy::too_many_arguments)]
 async fn repair_loop(
     selfheal: &Arc<Selfheal>,
     ops: &Arc<dyn SelfhealOps>,
@@ -384,6 +414,7 @@ async fn repair_loop(
     reason: &str,
     version: &str,
     mut gate_output: String,
+    sample: Sample,
 ) {
     let retry_limit = selfheal.config.selfheal_retry;
     let mut card: Option<CardId> = None;
@@ -444,6 +475,17 @@ async fn repair_loop(
                 "変更してよい範囲の外に手が入っています: {}。\
                 これらを元に戻してから、パーサとフィクスチャだけで直してください。",
                 violations.join(", ")
+            );
+            continue;
+        }
+
+        // 落ちているサンプルを消せばテストは通る。それは対応したことにならない。
+        // 採りたてのファイルは追跡対象外なので、消しても `git status` には出ない
+        if repair::fingerprint(&sample.path) != sample.mark {
+            gate_output = format!(
+                "検証用のサンプル {} が消えているか書き換えられています。\
+                元の内容に戻したうえで、パーサ側で読めるようにしてください。",
+                sample.path.display()
             );
             continue;
         }
@@ -524,6 +566,18 @@ async fn swap_parser(
         Some(format!("{version} に対応したパーサへ差し替えました")),
     );
     true
+}
+
+/// 版に辿り着く前に諦めたときの後始末。
+///
+/// **必ず間を置く。** 置かないと、claude が居ない・git が使えないといった直らない事情の
+/// ときに、健康状態が届くたび何度でも同じことを試すことになる（カナリアは本物の CLI を
+/// 起動するので、そのぶんクォータを使う）。
+fn give_up(selfheal: &Arc<Selfheal>, reason: &str) {
+    let mut state = SelfhealState::load(&selfheal.state_dir);
+    state.hold_off(now_ms(), selfheal.config.selfheal_cooldown_hours);
+    state.save(&selfheal.state_dir);
+    selfheal.notify(SelfhealPhase::Failed, Some(reason.to_string()));
 }
 
 /// 諦めたときの後始末。縮退のまま、同じ版はしばらく触らない。

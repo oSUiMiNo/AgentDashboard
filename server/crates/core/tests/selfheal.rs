@@ -418,6 +418,50 @@ async fn 範囲外を触ったらテストの結果によらず不合格にす�
 }
 
 #[tokio::test]
+async fn 落ちているサンプルを消して通そうとしても採用しない() {
+    // 実際の訓練で本物のエージェントがこれをやった。落ちているフィクスチャを消せば
+    // ゲートは通るが、新しい形式に対応したことにはならない。採りたてのファイルは
+    // 追跡対象外なので、消しても git status には出ない（＝範囲の検査では捕まらない）
+    let dir = work_dir("sample-deleted");
+    let ops = FakeOps::new(&dir);
+    ops.fail_gate(1);
+    let server = TestServer::start_with_selfheal(config_for(&dir), ops.clone()).await;
+    let (_session, transcript) = start_watched(&server, &dir).await;
+
+    append_records(&transcript, 3, "9.9.9", 0);
+
+    // 修復役がサンプルを消してからターンを終える
+    let sample = ops
+        .worktree
+        .join("fixtures")
+        .join("v9.9.9")
+        .join("canary")
+        .join("session.jsonl");
+    let card = wait_for_repair_card(&server).await;
+    let session = server.manager.get(card).expect("修復セッションが居る");
+    let mut watcher = common::Watcher::attach(&session);
+    fire(&server, &session, "SessionStart").await;
+    watcher.wait_for("挑戦 1/").await;
+    std::fs::remove_file(&sample).expect("サンプルを消せること");
+    fire(&server, &session, "PreToolUse").await;
+    fire(&server, &session, "Stop").await;
+
+    // 消したことに気づいて突き返す。2回目も消えたままなので、そのまま諦める
+    watcher.wait_for("消えているか書き換えられています").await;
+    fire(&server, &session, "PreToolUse").await;
+    fire(&server, &session, "Stop").await;
+    wait_for_call(&ops, "changed", 2).await;
+
+    assert_eq!(
+        ops.count("gate"),
+        1,
+        "サンプルが消えているのにゲートを回している: {:?}",
+        ops.calls()
+    );
+    assert_eq!(ops.count("build"), 0, "対応していないのに差し替えている");
+}
+
+#[tokio::test]
 async fn 直せなければ縮退したままクールダウンに入る() {
     let dir = work_dir("give-up");
     let ops = FakeOps::new(&dir);

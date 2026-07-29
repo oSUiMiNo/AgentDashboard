@@ -6,6 +6,14 @@
 
 port = 4173
 
+# 状態の置き場所をテスト専用にする。
+#
+# 既定は `$XDG_STATE_HOME/agentdashboard`＝**利用者が普段使っている場所**なので、
+# 指定しないと E2E がパーサの再開位置や自己修復の記録（対応表・クールダウン）を
+# 実運用と共有してしまう。E2E の擬似 claude が採れないカナリアの失敗が、実運用の
+# 自己修復を24時間止める、といった形で表に出る。
+state_dir = "test-results/state"
+
 pty_ring_buffer = 262144
 flow_high = 65536
 flow_low = 8192

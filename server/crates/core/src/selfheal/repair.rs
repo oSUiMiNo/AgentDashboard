@@ -70,6 +70,9 @@ pub fn repair_prompt(context: &RepairContext) -> String {
         ## 守ること\n\
         - **変更してよいのは `server/crates/transcript-parser/` と `fixtures/` だけ**です。\
         ほかを変更した場合、テストの結果によらず不合格になります\n\
+        - **落ちているフィクスチャを消したり書き換えたりして通してはいけません。**\
+        それは新しい形式に対応したことになりません（消したことはこちらで検出します）。\
+        フィクスチャは足すのは構いませんが、渡されたものはそのまま読めるようにしてください\n\
         - `server/crates/protocol` は変更禁止です。core との取り決めなので、\
         片側だけ変えると噛み合わなくなります。**知らない構造は Unknown ノードへ写像**してください\n\
         - 完了条件は「テストが全部通ること」です。通ったら、何を直したのかを1〜2行で報告して\
@@ -106,6 +109,20 @@ pub fn scope_violations(changed: &[String]) -> Vec<String> {
         })
         .cloned()
         .collect()
+}
+
+/// ファイルの指紋。中身が変われば変わる。
+///
+/// **落ちているフィクスチャを消せばテストは通る。** それは新しい形式に対応したことでは
+/// ないので、渡したサンプルがそのまま残っていることを機械で確かめる。実際の訓練で、
+/// 修復エージェントがサンプルを削除してゲートを通そうとした（消したことは
+/// `git status` に出ない — 採取したてのファイルは追跡対象外だから）。
+pub fn fingerprint(path: &std::path::Path) -> Option<u64> {
+    use std::hash::{Hash as _, Hasher as _};
+    let bytes = std::fs::read(path).ok()?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Some(hasher.finish())
 }
 
 /// 文字列の末尾を、文字境界を壊さずに切り出す。
@@ -185,6 +202,27 @@ mod tests {
             violations,
             ["server/crates/protocol/src/ipc.rs", "Makefile"]
         );
+    }
+
+    #[test]
+    fn サンプルを消したり書き換えたりすると指紋が変わる() {
+        let dir =
+            std::env::temp_dir().join(format!("agentdashboard-fingerprint-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.jsonl");
+        std::fs::write(&path, b"{\"type\":\"user\"}\n").unwrap();
+
+        let before = fingerprint(&path);
+        assert!(before.is_some());
+        assert_eq!(fingerprint(&path), before, "触っていなければ変わらない");
+
+        std::fs::write(&path, b"{\"type\":\"user\"} \n").unwrap();
+        assert_ne!(fingerprint(&path), before, "書き換えを見逃している");
+
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(fingerprint(&path), None, "削除を見逃している");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
