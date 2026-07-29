@@ -19,6 +19,7 @@
 //! **1つの値だけをここで持つ**のが釣り合う。
 
 use crate::config::Config;
+use crate::model_aliases::AliasSeen;
 use protocol::PermissionMode;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -36,6 +37,15 @@ pub struct SettingsView {
     /// 起動時に `claude --help` から読む。読めなければ既知の表へ落ちる（設計§3）。
     /// 画面の起動ボタンと切替UIの選択肢はこれを見る。
     pub available_modes: Vec<PermissionMode>,
+    /// 別名がこの環境で何に解決されたかの実測（設計§12）。
+    ///
+    /// モデルの選択肢へ版番号を併記するために配る。**表に版番号を持たない**という
+    /// 判断（設計§3）を保ったまま「Opus（Opus 5）」と出すための材料で、
+    /// 一度も選んでいない別名はここに現れない（推測で埋めない）。
+    ///
+    /// WebSocket のメッセージを増やさず設定に載せているのは、更新が滅多に起きないため。
+    #[serde(default)]
+    pub model_aliases: Vec<AliasSeen>,
 }
 
 /// 画面から変えられる設定の持ち主。
@@ -56,11 +66,20 @@ impl SettingsStore {
         }
     }
 
-    pub fn view(&self) -> SettingsView {
+    /// 画面へ配る形にまとめる。
+    ///
+    /// 別名の実測は [`crate::session::SessionManager`] が持っているので、呼び出し側から
+    /// 渡してもらう。設定の持ち主がマネージャを参照すると、両者が互いを指すことになる。
+    pub fn view_with(&self, model_aliases: Vec<AliasSeen>) -> SettingsView {
         SettingsView {
             always_bypass_permissions: self.always_bypass_permissions.load(Ordering::Relaxed),
             available_modes: self.available_modes.clone(),
+            model_aliases,
         }
+    }
+
+    pub fn view(&self) -> SettingsView {
+        self.view_with(Vec::new())
     }
 
     /// トグルを書き換える。**ファイルとメモリの両方**を更新する。

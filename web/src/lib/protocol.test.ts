@@ -130,6 +130,52 @@ describe('サーバと同じ JSON になること', () => {
     )
   })
 
+  it('set_model', () => {
+    const message: ClientMessage = {
+      t: 'set_model',
+      card_id: CARD_ID,
+      // 運ぶのは切り替え先の別名。CLI はフルID（claude-opus-5）を名乗り返すので、
+      // 送った値と返る値は一致しない
+      model: 'opus',
+    }
+    expect(JSON.stringify(message)).toBe(
+      `{"t":"set_model","card_id":"${CARD_ID}","model":"opus"}`,
+    )
+  })
+
+  it('SessionMeta はモデルを3つのフィールドで運ぶ', () => {
+    // 確定値と要求値を同じ入れ物に潰すと、CLI に拒否されたときに画面が
+    // 嘘をつき続ける（設計§5）。Rust 側の
+    // `確定したモデルと切替を要求した値は別のフィールドで運ばれる` と対になる
+    const raw =
+      '{"card_id":"' +
+      CARD_ID +
+      '","project":"/dev/app","claude_session_id":null,' +
+      '"permission_mode":null,"model":"claude-opus-5","model_label":"Opus 5",' +
+      '"model_requested":"sonnet","status":{"kind":"unknown"},"subagent_active":0,' +
+      '"last_activity_at":1,"last_assistant_message":null,"created_at":1,"hooks_seen":false}'
+    const meta = JSON.parse(raw) as SessionMeta
+    expect(meta.model).toBe('claude-opus-5')
+    expect(meta.model_label).toBe('Opus 5')
+    expect(meta.model_requested).toBe('sonnet')
+  })
+
+  it('まだ名乗っていないモデルは null で届く', () => {
+    // キーごと消えるのではなく null。「モデルが無い」ではなく
+    // 「まだ CLI が名乗っていない」を表す
+    const raw =
+      '{"card_id":"' +
+      CARD_ID +
+      '","project":"/dev/app","claude_session_id":null,' +
+      '"permission_mode":null,"model":null,"model_label":null,"model_requested":null,' +
+      '"status":{"kind":"starting"},"subagent_active":0,' +
+      '"last_activity_at":1,"last_assistant_message":null,"created_at":1,"hooks_seen":false}'
+    const meta = JSON.parse(raw) as SessionMeta
+    expect(meta.model).toBeNull()
+    expect(meta.model_label).toBeNull()
+    expect(meta.model_requested).toBeNull()
+  })
+
   it('SessionMeta は hooks_seen を持つ', () => {
     // Rust 側 `session_metaが往復する` と同じ形。片方だけ足すと
     // 「繋がるのに警告が出ない」状態になる
@@ -265,6 +311,9 @@ describe('状態のラベル', () => {
       project: '/dev/app',
       claude_session_id: null,
       permission_mode: null,
+      model: null,
+      model_label: null,
+      model_requested: null,
       status: { kind: 'unknown' },
       subagent_active: 0,
       last_activity_at: 0,

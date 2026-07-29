@@ -19,6 +19,7 @@
  * 「本当に見るべきもの」が埋もれる。要件が言う一覧の目的と逆行する。
  */
 
+import { modelLabel } from '@/lib/models'
 import { motion } from 'motion/react'
 import { useNavigate } from 'react-router'
 import { Badge } from '@/components/ui/badge'
@@ -118,11 +119,27 @@ export function SessionTile({ cardId }: Props) {
           読み取れなくなる。分からないのは起動直後の一瞬（フッタを読むまで）で、
           理由を名指しする必要があるのはセッション画面のほう（そちらは選択肢に出す）
         */}
+        {/*
+          モデルも一覧に出す（要件「切り替えた結果が一覧の小窓にも反映される」）。
+          出すのは CLI が名乗った表示名で、版番号が入る（設計§12）。
+          モードと同じく、**まだ分からない間は何も出さない** — 状態の「不明」と
+          並ぶと、どちらが不明なのか読み取れなくなる
+        */}
+        {session.model !== null && (
+          <span
+            data-testid="model"
+            data-model={session.model}
+            className="ml-auto max-w-28 shrink-0 truncate rounded border border-border px-1.5 py-0.5 text-[0.7rem] text-muted-foreground"
+            title={session.model}
+          >
+            {modelLabel(session.model, session.model_label)}
+          </span>
+        )}
         {session.permission_mode !== null && (
           <span
             data-testid="permission-mode"
             data-mode={session.permission_mode}
-            className={`ml-auto shrink-0 rounded border px-1.5 py-0.5 text-[0.7rem] ${permissionModeTone(session.permission_mode)}`}
+            className={`shrink-0 rounded border px-1.5 py-0.5 text-[0.7rem] ${permissionModeTone(session.permission_mode)}`}
           >
             {permissionModeLabel(session.permission_mode)}
           </span>

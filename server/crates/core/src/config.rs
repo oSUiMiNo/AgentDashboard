@@ -117,6 +117,13 @@ pub struct Config {
     /// **利用者自身の `statusLine` を上書きしてしまう**ため（設計§11 前提5 で実測）。
     /// 自分の statusLine を優先したい人のための逃げ道。
     pub inject_status_line: bool,
+    /// 利用者のグローバル設定 `~/.claude/settings.json` の場所。
+    ///
+    /// 既定は `$HOME/.claude/settings.json`。**E2E とテストはここを差し替える。**
+    /// モデルを切り替えるとこのファイルが汚れるので（設計§11 前提3）、指定しないと
+    /// テストが利用者の本物の設定を読み書きすることになる。`state_dir` を
+    /// 差し替えられるようにしてあるのと同じ理由。
+    pub claude_settings_path: Option<PathBuf>,
     /// 注入する `statusLine` の `refreshInterval`（秒、最小1）。
     ///
     /// `statusLine` が走る契機に**モデル変更は入っていない**（設計§11 前提6）。
@@ -145,6 +152,7 @@ impl Default for Config {
             transcript_page_limit: DEFAULT_TRANSCRIPT_PAGE_LIMIT,
             state_dir: None,
             inject_status_line: true,
+            claude_settings_path: None,
             status_line_refresh_secs: DEFAULT_STATUS_LINE_REFRESH_SECS,
         }
     }
@@ -337,7 +345,7 @@ mod tests {
         // Option 型のキーは既定が「未指定」で、TOML へ変換すると消えるため上の走査に乗らない。
         // 値を書くと利用者の環境に存在しないパスを指すことになるので、雛形では
         // **コメントとして例示**する。名指しでしか確かめられないので、ここに列挙する
-        for key in ["selfheal_repo_dir", "state_dir"] {
+        for key in ["selfheal_repo_dir", "state_dir", "claude_settings_path"] {
             assert!(
                 !with_values.contains_key(key),
                 "{key} に既定値が付いた。この列挙から外して通常の走査へ移すこと"

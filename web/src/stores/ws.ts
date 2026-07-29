@@ -33,6 +33,7 @@ import type {
   CardId,
   ClientMessage,
   FlowState,
+  ModelId,
   PermissionMode,
   SelfhealPhase,
   ServerMessage,
@@ -94,6 +95,17 @@ interface WsState {
    * `error` が返り、画面に理由が出る（巡回に入らないモードがあるため）。
    */
   setPermissionMode: (cardId: CardId, mode: PermissionMode) => void
+  /**
+   * 走っているセッションのモデルを切り替える（設計§5）。
+   *
+   * サーバが端末へ `/model <値>` を送る。会話が進んでいると CLI が確認を求めてくるので、
+   * 着地まで数秒かかる。**送るのは別名**（`opus`）で、CLI が名乗り返すのはフルID
+   * （`claude-opus-5`）なので一致しない。
+   *
+   * 楽観更新はここではしない。サーバが `model_requested` を立てて配信するので、
+   * 手応えはそちらから届く。**ブラウザ側にも持つと2箇所が食い違う。**
+   */
+  setModel: (cardId: CardId, model: ModelId) => void
   kill: (cardId: CardId) => void
   archive: (cardId: CardId) => void
   resize: (cardId: CardId, cols: number, rows: number) => void
@@ -270,6 +282,8 @@ export const useWsStore = create<WsState>((set) => ({
     send({ t: 'spawn', cwd, permission_mode: mode }),
   setPermissionMode: (cardId, mode) =>
     send({ t: 'set_permission_mode', card_id: cardId, mode }),
+
+  setModel: (cardId, model) => send({ t: 'set_model', card_id: cardId, model }),
   kill: (cardId) => send({ t: 'kill', card_id: cardId }),
   archive: (cardId) => send({ t: 'archive', card_id: cardId }),
 

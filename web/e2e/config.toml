@@ -14,6 +14,17 @@ port = 4173
 # 自己修復を24時間止める、といった形で表に出る。
 state_dir = "test-results/state"
 
+# 利用者のグローバル設定を**絶対に触らせない**。
+#
+# モデルを切り替えると CLI がこのファイルを書き換えるので、指定しないと E2E が
+# 実運用の ~/.claude/settings.json を読み書きすることになる。state_dir と同じ理由で、
+# テスト専用の場所を指す。中身は E2E の起動前に作られていなくてよい
+# （読めなければ何もしない、が claude_settings の約束）
+claude_settings_path = "test-results/state/claude-settings.json"
+
+# statusLine の再実行間隔。既定の3秒だと切替の確認だけで毎回3秒待つことになる
+status_line_refresh_secs = 1
+
 pty_ring_buffer = 262144
 flow_high = 65536
 flow_low = 8192

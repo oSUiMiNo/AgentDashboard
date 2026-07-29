@@ -14,6 +14,7 @@
  */
 
 import { create } from 'zustand'
+import type { ModelAliasSeen } from '@/lib/models'
 import { PERMISSION_MODES, type PermissionMode } from '@/lib/protocol'
 
 /** `GET /api/settings` の応答。 */
@@ -22,6 +23,12 @@ export interface Settings {
   always_bypass_permissions: boolean
   /** その CLI が受け付けるモード（正規値）。起動時に `claude --help` から読んだもの */
   available_modes: PermissionMode[]
+  /**
+   * 別名がこの環境で何に解決されたかの実測（設計§12）。
+   *
+   * モデルの選択肢へ版番号を併記するために使う。一度も選んでいない別名は入っていない。
+   */
+  model_aliases: ModelAliasSeen[]
 }
 
 interface SettingsState {
@@ -42,6 +49,8 @@ interface SettingsState {
 const FALLBACK: Settings = {
   always_bypass_permissions: false,
   available_modes: PERMISSION_MODES.map((mode) => mode.value),
+  // 実測が無い状態が正しい初期値。推測で埋めると、選択肢に嘘の版番号が出る
+  model_aliases: [],
 }
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
@@ -56,7 +65,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         set({ loading: false })
         return
       }
-      set({ settings: (await response.json()) as Settings, loading: false })
+      const settings = (await response.json()) as Settings
+      // 古いサーバはこのキーを返さない。undefined のまま持つと画面が落ちる
+      settings.model_aliases ??= []
+      set({ settings, loading: false })
     } catch {
       // 読めなくても画面は出す。既定値のまま（＝スキップしない側）で動く
       set({ loading: false })

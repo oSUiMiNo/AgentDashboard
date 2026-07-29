@@ -19,6 +19,7 @@ function setToggle(value: boolean) {
     settings: {
       always_bypass_permissions: value,
       available_modes: ['default', 'acceptEdits', 'bypassPermissions'],
+      model_aliases: [],
     },
     loading: false,
   })

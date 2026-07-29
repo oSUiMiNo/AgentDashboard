@@ -24,6 +24,9 @@ function meta(cardId: string, overrides: Partial<SessionMeta> = {}): SessionMeta
     project: '/home/example/dev/app',
     claude_session_id: null,
     permission_mode: 'default',
+    model: null,
+    model_label: null,
+    model_requested: null,
     status: { kind: 'working' },
     subagent_active: 0,
     last_activity_at: NOW,
@@ -51,6 +54,7 @@ beforeEach(() => {
         'dontAsk',
         'bypassPermissions',
       ],
+      model_aliases: [],
     },
     loading: false,
   })

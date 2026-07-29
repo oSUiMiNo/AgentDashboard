@@ -839,7 +839,10 @@ impl SessionManager {
         let aliases = Arc::new(crate::model_aliases::ModelAliases::load(Some(
             config.resolved_state_dir(),
         )));
-        let claude_settings = Arc::new(crate::claude_settings::ClaudeSettings::discover());
+        let claude_settings = Arc::new(match &config.claude_settings_path {
+            Some(path) => crate::claude_settings::ClaudeSettings::new(path.clone()),
+            None => crate::claude_settings::ClaudeSettings::discover(),
+        });
         Self::with_everything(config, program, hook_program, claude_settings, aliases)
     }
 

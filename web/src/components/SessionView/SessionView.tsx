@@ -21,6 +21,7 @@ import { motion } from 'motion/react'
 import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Composer } from '@/components/Composer/Composer'
+import { ModelPicker } from '@/components/ModelPicker/ModelPicker'
 import { PermissionModePicker } from '@/components/PermissionModePicker/PermissionModePicker'
 import { TerminalPane } from '@/components/TerminalPane/TerminalPane'
 import { TranscriptTree } from '@/components/TranscriptTree/TranscriptTree'
@@ -92,9 +93,16 @@ export function SessionView({ cardId, compact = false }: Props) {
         )}
 
         <div className="ml-auto flex shrink-0 items-center gap-2">
-          {/* モードは小窓とセッション画面の両方に出す（要件）。ここは切替も兼ねる */}
+          {/*
+            モードとモデルは小窓とセッション画面の両方に出す（要件）。ここは切替も兼ねる。
+            並びは モデル → モード。モデルのほうが長い文字列になるので、
+            幅の変動を右端の固定幅ボタンから遠ざける
+          */}
           {!isEnded(session.status) && (
-            <PermissionModePicker cardId={session.card_id} />
+            <>
+              <ModelPicker cardId={session.card_id} />
+              <PermissionModePicker cardId={session.card_id} />
+            </>
           )}
           <Button
             variant="outline"

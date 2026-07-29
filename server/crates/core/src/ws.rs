@@ -99,7 +99,7 @@ impl AppState {
 /// 開いても同じ値になる。**
 pub async fn api_settings(State(state): State<AppState>) -> Result<Json<SettingsView>, StatusCode> {
     let settings = state.settings.as_ref().ok_or(StatusCode::NOT_FOUND)?;
-    Ok(Json(settings.view()))
+    Ok(Json(settings.view_with(state.manager.aliases().all())))
 }
 
 /// `PUT /api/settings` の本文。
@@ -127,7 +127,13 @@ pub async fn api_update_settings(
         .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
 
     match result {
-        Ok(view) => Ok(Json(view)),
+        Ok(_) => Ok(Json(
+            state
+                .settings
+                .as_ref()
+                .expect("直前に取り出せている")
+                .view_with(state.manager.aliases().all()),
+        )),
         // 黙って失敗すると「変えたのに戻る」という追いにくい形になる
         Err(err) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("{err:#}"))),
     }

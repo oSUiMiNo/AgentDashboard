@@ -8,6 +8,11 @@
 //! グローバル既定の扱いを見るテストなので、対象を間違えると**利用者の設定が壊れる**。
 //! すべて `common::server_with_fake_global` を通し、一時ファイルを相手にする。
 
+// テスト名は日本語で書く。`statusLine` のように英大文字が混ざると snake_case 判定に
+// 引っかかるだけで実害はないため、このファイルに限って許可する
+// （`selfheal.rs` / `transcript.rs` と同じ扱い）
+#![allow(non_snake_case)]
+
 mod common;
 
 use agentdashboard_core::config::Config;

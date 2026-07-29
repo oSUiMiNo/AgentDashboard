@@ -30,6 +30,24 @@ export type SessionStatus =
  */
 export type PermissionMode = string
 
+/**
+ * セッションが使っている LLM モデル。
+ *
+ * Rust 側 `ModelId` と同じく**ただの文字列**。理由は `PermissionMode` と同じだが、
+ * モデルは権限モードよりずっと頻繁に増えるので、union 型にしない判断はより強く効く。
+ *
+ * # 2つの顔があることに注意
+ *
+ * | 出どころ | 例 | どこで使うか |
+ * |---|---|---|
+ * | 切り替え先として選ぶ**別名** | `opus` / `sonnet` / `default` | `set_model` で送る |
+ * | CLI が名乗る**フルID** | `claude-opus-5` | いま動いているモデルとして受け取る |
+ *
+ * 別名を送ってもフルIDが返るので、**送った値と返る値は一致しない**。
+ * 「いま何で動いているか」の正は常に CLI 側にある。
+ */
+export type ModelId = string
+
 /** 一覧の小窓1枚分の情報。 */
 export interface SessionMeta {
   card_id: CardId
@@ -42,6 +60,29 @@ export interface SessionMeta {
    * 空欄にせず「不明」と出せるようにするための `null`（`hooks_seen` と同じ理由）。
    */
   permission_mode: PermissionMode | null
+  /**
+   * CLI が名乗った、いま動いているモデルのフルID。`null` は「まだ名乗っていない」。
+   *
+   * 「モデルが無い」ではない点に注意。注入した `statusLine` が最初の値を送ってくる
+   * までは必ずここから始まる。
+   */
+  model: ModelId | null
+  /**
+   * 画面に出すモデルの名前（`Opus 5` など）。
+   *
+   * `model` と2つ持つのは、**版番号をこちらで管理しないため**。別名がどの版に解決
+   * されるかはプロバイダによって違うので、こちらの表には書けない。CLI がくれる
+   * `display_name` をそのまま出す。
+   */
+  model_label: string | null
+  /**
+   * 切替を要求したが、まだ CLI が名乗り直していない値（楽観更新）。
+   *
+   * `statusLine` はモデル変更では走らないので、送った直後は確定値が古いままになる。
+   * その間の「押した手応え」を返すための推測値なので、**確定値とは別に持ち、画面でも
+   * 見分けが付くようにする**。
+   */
+  model_requested: ModelId | null
   status: SessionStatus
   subagent_active: number
   last_activity_at: number
@@ -117,6 +158,8 @@ export type ClientMessage =
   /** `permission_mode` が null のときは CLI に何も渡さない（利用者の既定を尊重する） */
   | { t: 'spawn'; cwd: string; permission_mode: PermissionMode | null }
   | { t: 'set_permission_mode'; card_id: CardId; mode: PermissionMode }
+  /** 運ぶのは切り替え先の**別名**（`opus` など）。CLI が名乗り返すフルIDとは別物 */
+  | { t: 'set_model'; card_id: CardId; model: ModelId }
   | { t: 'resize'; card_id: CardId; cols: number; rows: number }
   | { t: 'pty_flow'; card_id: CardId; state: FlowState }
   | { t: 'kill'; card_id: CardId }
