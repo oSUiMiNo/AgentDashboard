@@ -94,6 +94,13 @@ impl Parsed {
         }
     }
 
+    fn parse_errors(&self) -> u64 {
+        match &self.stats {
+            Some(ParserEvent::Stats { parse_errors, .. }) => *parse_errors,
+            _ => 0,
+        }
+    }
+
     fn unknown_types(&self) -> BTreeMap<String, u64> {
         match &self.stats {
             Some(ParserEvent::Stats { unknown_types, .. }) => unknown_types.clone(),
@@ -463,4 +470,76 @@ fn 多段ネストのサブエージェントが親子で繋がる() {
 
     // 孤児を作らずに繋がっていること
     assert_eq!(parsed.orphans(), 0);
+}
+
+/// `fixtures/` にあるトランスクリプトを全部見つける。
+///
+/// パスを直書きしないのが要点。自己修復（設計§9）はカナリアで採った**新しい版の
+/// サンプルをここへ足す**ので、名前を知らないファイルが増えていく。列挙を手で書くと、
+/// 足したサンプルが誰にも検証されないまま「対応済み」と記録されてしまう。
+fn discover() -> Vec<PathBuf> {
+    let root = fixture("");
+    let mut found = Vec::new();
+    for version in read_dir(&root) {
+        for label in read_dir(&version) {
+            let session = label.join("session.jsonl");
+            if session.is_file() {
+                found.push(session);
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+fn read_dir(dir: &std::path::Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect()
+}
+
+#[test]
+fn すべてのフィクスチャが不明なイベントを出さずに読める() {
+    // ここが**自己修復のテストゲートの実体**（設計§9 安全条件2）。
+    //
+    // 修復セッションが直したパーサは、このテストを通ったときだけ採用される。
+    // 「新しい形式が読める」だけでなく「過去バージョンを壊していない」ことを
+    // 同時に見るために、個別のフィクスチャではなく**全部**を対象にしている。
+    let all = discover();
+    assert!(
+        all.len() >= 4,
+        "フィクスチャを見つけられていません（探した場所: {}）",
+        fixture("").display()
+    );
+
+    for session in all {
+        let name = session
+            .strip_prefix(fixture(""))
+            .unwrap_or(&session)
+            .display()
+            .to_string();
+        let parsed = Parsed::of(session.clone());
+
+        assert_eq!(
+            parsed.unknown_types(),
+            BTreeMap::new(),
+            "{name}: 知らないレコード種別があります"
+        );
+        assert_eq!(parsed.count("unknown"), 0, "{name}: 不明なノードが出ました");
+        assert_eq!(
+            parsed.parse_errors(),
+            0,
+            "{name}: パースに失敗した行があります"
+        );
+        assert_eq!(
+            parsed.orphans(),
+            0,
+            "{name}: 親に繋がらないレコードがあります"
+        );
+    }
 }
