@@ -147,14 +147,14 @@ pub fn scope_violations(changed: &[String]) -> Vec<String> {
 pub fn table_violations(source: &str, observed: &[String]) -> Vec<String> {
     let mut problems = Vec::new();
 
-    if !source.contains("export const MODELS") {
+    let Some(body) = models_body(source) else {
         problems.push("MODELS の定義が見当たらない".to_string());
         return problems;
-    }
+    };
 
     let counts: Vec<usize> = REQUIRED_KEYS
         .iter()
-        .map(|key| source.matches(key).count())
+        .map(|key| body.matches(key).count())
         .collect();
     let entries = counts[0];
     if entries == 0 {
@@ -169,13 +169,58 @@ pub fn table_violations(source: &str, observed: &[String]) -> Vec<String> {
     }
 
     for alias in observed {
-        if !source.contains(&format!("value: '{alias}'"))
-            && !source.contains(&format!("value: \"{alias}\""))
+        if !body.contains(&format!("value: '{alias}'"))
+            && !body.contains(&format!("value: \"{alias}\""))
         {
             problems.push(format!("実際に使われた別名 {alias} が消えている"));
         }
     }
     problems
+}
+
+/// `export const MODELS = [ ... ]` の**中身だけ**を切り出す。
+///
+/// # 全体を数えてはいけない
+///
+/// 以前はキーの出現数を `source` 全体で数えていた。表の外にある
+/// `interface ModelInfo { value: ModelId, ... }` や、`value` という名前の**関数の引数**まで
+/// 数に入るので、`value:` だけが他より多くなる。**実物の表がその状態で、見直しは
+/// 何を書いても「形が壊れている」で棄却されていた**（画面側のゲートを直して初めて、
+/// その先にあるこれが見えた）。
+///
+/// 開き括弧は `=` より後ろを探す。`ModelInfo[]` の `[` を掴むと中身が空になる。
+fn models_body(source: &str) -> Option<&str> {
+    let start = source.find("export const MODELS")?;
+    let eq = start + source[start..].find('=')?;
+    let open = eq + source[eq..].find('[')?;
+
+    // 別名には `opus[1m]` のように括弧を含むものがある。文字列の中は数えない
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (offset, ch) in source[open..].char_indices() {
+        if let Some(open_quote) = quote {
+            match ch {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                _ if ch == open_quote => quote = None,
+                _ => {}
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' | '`' => quote = Some(ch),
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&source[open + 1..open + offset]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -244,6 +289,47 @@ export const MODELS: ModelInfo[] = [
     #[test]
     fn 形が保たれていれば通る() {
         assert!(table_violations(TABLE, &["opus".to_string()]).is_empty());
+    }
+
+    /// 実物の表。**検査が実物を通すことは、実物で確かめるしかない。**
+    const REAL_TABLE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../",
+        "web/src/lib/models.ts"
+    ));
+
+    #[test]
+    fn 実物の表が検査を通る() {
+        // これが無かったせいで、**どんな見直しも必ず棄却される**状態に気づけなかった。
+        // 表の外にある `interface ModelInfo` や関数の引数の `value:` まで数えていたため。
+        // 小さな見本だけで試していると、実物にしか無い形は永久に見えない
+        let problems = table_violations(REAL_TABLE, &["opus".to_string(), "sonnet".to_string()]);
+        assert!(problems.is_empty(), "実物の表が落ちている: {problems:?}");
+    }
+
+    #[test]
+    fn 表の外にある同名のキーは数えない() {
+        let source = format!(
+            "export interface ModelInfo {{\n  value: ModelId\n  label: string\n}}\n{TABLE}\n\
+             export function modelInfo(value: ModelId) {{ return value }}\n"
+        );
+        assert!(
+            table_violations(&source, &[]).is_empty(),
+            "実際: {:?}",
+            table_violations(&source, &[])
+        );
+    }
+
+    #[test]
+    fn 括弧を含む別名があっても表の終わりを見失わない() {
+        // `opus[1m]` の `]` で切り上げると、以降のエントリが数から漏れる
+        let table = r#"
+export const MODELS: ModelInfo[] = [
+  { value: 'opus[1m]', label: 'Opus 1M', description: '長い文脈', fixed: true },
+  { value: 'haiku', label: 'Haiku', description: '軽い作業', fixed: true },
+]
+"#;
+        assert!(table_violations(table, &["haiku".to_string()]).is_empty());
     }
 
     #[test]
