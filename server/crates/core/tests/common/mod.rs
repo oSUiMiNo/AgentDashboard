@@ -7,12 +7,12 @@
 #![allow(dead_code)]
 
 use agentdashboard_core::{
+    LocalServer,
     claude_settings::ClaudeSettings,
     config::Config,
     model_aliases::ModelAliases,
     parser::ParserSupervisor,
     session::{Session, SessionManager},
-    ws::AppState,
 };
 use bytes::Bytes;
 use protocol::{
@@ -340,7 +340,7 @@ impl TestServer {
             None => build_manager(Arc::clone(&config), program),
         };
 
-        let mut state = AppState::new(Arc::clone(&manager), Arc::clone(&server_config));
+        let mut server = LocalServer::new(Arc::clone(&manager), Arc::clone(&server_config));
         let parser = if with_parser {
             // 本番と同じ入口（環境変数）でビルド済みのパーサを指す
             if name_parser_by_env {
@@ -353,7 +353,7 @@ impl TestServer {
             }
             let parser = ParserSupervisor::start(Arc::clone(&manager), Arc::clone(&agent_config));
             manager.attach_parser(parser.handle());
-            state = state.with_parser(Arc::clone(&parser));
+            server = server.with_parser(Arc::clone(&parser));
             Some(parser)
         } else {
             None
@@ -363,8 +363,8 @@ impl TestServer {
             // 本番と同じく `--help` からモードを読む（擬似 claude も choices を出す）
             let modes =
                 agentdashboard_core::session::permission::supported_modes(manager.program());
-            state =
-                state.with_settings(Arc::new(agentdashboard_core::settings::SettingsStore::new(
+            server =
+                server.with_settings(Arc::new(agentdashboard_core::settings::SettingsStore::new(
                     path,
                     &agent_config,
                     modes,
@@ -374,7 +374,7 @@ impl TestServer {
         }
 
         let task = tokio::spawn(async move {
-            let _ = axum::serve(listener, agentdashboard_core::build_router(state)).await;
+            let _ = axum::serve(listener, server.router()).await;
         });
 
         Self {

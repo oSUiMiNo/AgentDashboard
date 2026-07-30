@@ -39,13 +39,12 @@ version = "0.1.0"
 dependencies = [
  "agent-core",
  "anyhow",
+ "async-trait",
  "axum",
  "bytes",
  "clap",
- "futures-util",
  "portable-pty",
  "protocol",
- "rust-embed",
  "serde",
  "serde_json",
  "server-core",
@@ -53,7 +52,6 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "toml",
- "toml_edit",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -123,6 +121,17 @@ name = "anyhow"
 version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+
+[[package]]
+name = "async-trait"
+version = "0.1.91"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae36dc4177970ef04fde5178d3e2429882def40e57a451f919c098f72baa6cec"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
+]
 
 [[package]]
 name = "atomic-waker"
@@ -1128,6 +1137,7 @@ dependencies = [
 name = "server-core"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "bytes",
  "futures-util",

@@ -1,62 +1,100 @@
-//! AgentDashboard の core（設計§1）。
+//! ローカルモードの AgentDashboard（設計§1・セルフホスト化設計§1-1）。
 //!
-//! セッションの起動と管理（[`session`]）、ブラウザとの WebSocket（[`ws`]）、設定の読み込み
-//! （[`config`]）、フロントエンドの同梱配信（[`embed`]）を持つ。
+//! PC 側（[`agent_core`]）とサーバ側（[`server_core`]）を**1つのプロセスで束ねる**層。
+//! 実体は次の3つしかない。
+//!
+//! - [`local::LocalAgent`] … サーバ側から見た「PC 側」を、同じプロセスの `agent_core` へ直結する
+//! - [`LocalServer::router`] … ブラウザ向け・フック受信・設定の3つのルータを合成する
+//! - [`config::Config`] … 1つの `config.toml` から両側の設定を作る
+//!
+//! セルフホストモードでは、この束ねる層の代わりにネットワークが入る（フェーズ3）。
+//! **どちらのモードでもブラウザから見た口は変わらない**というのが、この分け方の狙い。
 //!
 //! 実行ファイル（`agentdashboard`）は薄い入口で、中身はすべてこのライブラリ側にある。
 //! こうしているのは、統合テストからサーバの組み立てをそのまま呼べるようにするため
 //! （バイナリだけのクレートは `tests/` から参照できない）。
 
 pub mod config;
-pub mod embed;
-pub mod ws;
+pub mod local;
+pub mod settings_api;
 
-// PC 側の一式は [`agent_core`] へ移った（セルフホスト化フェーズ1）。ここで名前を
-// 出し直しているのは、既存の呼び出し側（実行ファイル・統合テスト）を1つのコミットで
-// 全部書き換えずに済ませるため。**移設が済んだら外す**。
+// PC 側の一式は [`agent_core`] へ、ブラウザ配信は [`server_core`] へ移った
+// （セルフホスト化フェーズ1）。ここで名前を出し直しているのは、既存の呼び出し側
+// （実行ファイル・統合テスト）を1つのコミットで全部書き換えずに済ませるため。
 pub use agent_core::{
     claude_settings, hook_post, hooks, jsonfile, model_aliases, model_catalog, model_post, parser,
     selfheal, session, settings, state, transcript,
 };
+pub use server_core::{embed, ws};
 
-use axum::{
-    Router,
-    http::{StatusCode, Uri, header},
-    response::{IntoResponse, Response},
-    routing::get,
-};
+use agent_core::{parser::ParserSupervisor, session::SessionManager, settings::SettingsStore};
+use axum::Router;
 use config::Config;
-use session::SessionManager;
+use local::LocalAgent;
+use server_core::config::ServerConfig;
+use settings_api::SettingsState;
 use std::{net::Ipv4Addr, sync::Arc};
 
-/// サーバのルーティングを組み立てる。
+/// ローカルモードで動くサーバ一式。
 ///
-/// 口は3つだけ。`/ws` が WebSocket、`/api/*` がブラウザ向けのスナップショット、
-/// `/hook/*` がフックからの通知（設計§7）。残りはすべて同梱した web アセットの配信にまわる。
-///
-/// # 2つのルータを合成している
-///
-/// ブラウザ向け（この関数）とフック受信（[`agent_core::hooks::routes`]）は**別々に
-/// 組み立ててから合わせる**。フックの宛先はどちらのモードでも「エージェントの
-/// 127.0.0.1」で、セルフホストモードでは別プロセスの別ポートになる（セルフホスト化
-/// 設計§5-3）。いまは同じポートに同居しているが、分けられる形にしておく。
-pub fn build_router(state: ws::AppState) -> Router {
-    let manager = Arc::clone(&state.manager);
-    Router::new()
-        .route("/ws", get(ws::ws_handler))
-        .route("/api/sessions", get(ws::api_sessions))
-        .route(
-            "/api/sessions/{card_id}/transcript",
-            get(ws::api_transcript),
-        )
-        // 設定は接続のたびに流すほど変わらないので、WebSocket ではなく REST に置く
-        .route(
-            "/api/settings",
-            get(ws::api_settings).put(ws::api_update_settings),
-        )
-        .fallback(get(static_handler))
-        .with_state(state)
-        .merge(hooks::routes(manager))
+/// 両側の部品を持ち、[`Self::router`] で1つの待ち受けへ合成する。
+pub struct LocalServer {
+    manager: Arc<SessionManager>,
+    config: Arc<ServerConfig>,
+    /// パーサの世話役。**居なくても動く**（構造化ビューだけが縮退する）。
+    ///
+    /// 設計§11 の「パーサが停止しても、ターミナルと指示送信は通常動作」を型で表している。
+    parser: Option<Arc<ParserSupervisor>>,
+    /// 画面から書き換えられる設定（設計§7）。**居なくても動く**ので、統合テストは
+    /// 設定画面を立てずにセッションの検証だけができる。
+    settings: Option<Arc<SettingsStore>>,
+}
+
+impl LocalServer {
+    pub fn new(manager: Arc<SessionManager>, config: Arc<ServerConfig>) -> Self {
+        Self {
+            manager,
+            config,
+            parser: None,
+            settings: None,
+        }
+    }
+
+    /// パーサを繋いだ状態にする。
+    pub fn with_parser(mut self, parser: Arc<ParserSupervisor>) -> Self {
+        self.parser = Some(parser);
+        self
+    }
+
+    /// 設定の持ち主を繋いだ状態にする。
+    pub fn with_settings(mut self, settings: Arc<SettingsStore>) -> Self {
+        self.settings = Some(settings);
+        self
+    }
+
+    /// 3つのルータを合成する。
+    ///
+    /// | ルータ | 出どころ | なぜ分かれているか |
+    /// |---|---|---|
+    /// | `/ws`・`/api/sessions`・web アセット | [`server_core::routes`] | ブラウザ向け。セルフホストではクラウド側へ移る |
+    /// | `/hook/*`・`/model/*` | [`agent_core::hooks::routes`] | 宛先はどちらのモードでもエージェントの 127.0.0.1（セルフホスト化設計§5-3） |
+    /// | `/api/settings` | [`settings_api::routes`] | 応答の中身が PC 側にしか無い（§13-4 で作り替える予定） |
+    ///
+    /// いまは同じポートに同居しているが、**分けられる形にしておく**のがこの合成の意味。
+    pub fn router(&self) -> Router {
+        let mut agent = LocalAgent::new(Arc::clone(&self.manager));
+        if let Some(parser) = &self.parser {
+            agent = agent.with_parser(Arc::clone(parser));
+        }
+        let ws_state = ws::AppState::new(Arc::new(agent), Arc::clone(&self.config));
+
+        server_core::routes(ws_state)
+            .merge(hooks::routes(Arc::clone(&self.manager)))
+            .merge(settings_api::routes(SettingsState {
+                store: self.settings.clone(),
+                manager: Arc::clone(&self.manager),
+            }))
+    }
 }
 
 /// 設定からサーバ一式を組み立てて起動する。
@@ -136,7 +174,7 @@ pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::R
         catalog.cli_version().to_string(),
     );
 
-    let state = ws::AppState::new(manager, Arc::clone(&server_config))
+    let server = LocalServer::new(manager, Arc::clone(&server_config))
         .with_parser(parser)
         .with_settings(settings);
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, server_config.port)).await?;
@@ -150,34 +188,6 @@ pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::R
         );
     }
 
-    axum::serve(listener, build_router(state)).await?;
+    axum::serve(listener, server.router()).await?;
     Ok(())
-}
-
-/// 同梱した web アセットを配信する。
-///
-/// 見つからないパスのうち、拡張子を持たないものは SPA のルーティング（`/s/<id>` など）と
-/// みなして `index.html` を返す。拡張子があるのに見つからない場合は本当に無いので 404 に
-/// する（欠けた JS の代わりに HTML を返すと、原因の分からない実行時エラーになる）。
-pub async fn static_handler(uri: Uri) -> Response {
-    let path = uri.path().trim_start_matches('/');
-    let path = if path.is_empty() { "index.html" } else { path };
-
-    if let Some(data) = embed::get(path) {
-        return ([(header::CONTENT_TYPE, embed::content_type(path))], data).into_response();
-    }
-
-    let looks_like_file = path
-        .rsplit('/')
-        .next()
-        .is_some_and(|name| name.contains('.'));
-    if !looks_like_file && let Some(data) = embed::get("index.html") {
-        return (
-            [(header::CONTENT_TYPE, embed::content_type("index.html"))],
-            data,
-        )
-            .into_response();
-    }
-
-    (StatusCode::NOT_FOUND, format!("見つかりません: /{path}")).into_response()
 }

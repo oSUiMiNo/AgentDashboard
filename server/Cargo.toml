@@ -44,6 +44,11 @@ tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws"] }
 # axum の WebSocket を送信側・受信側へ分割し、送信をタスク1つに集約するために使う
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# サーバ側と PC 側の境界（`server_core::agent::AgentHost`）を `Arc<dyn _>` で持つために使う。
+# Rust の `async fn` はトレイトに書けるが、**dyn にすると呼べない**（返る Future の大きさが
+# 決まらないため）。境界の向こうがローカル直結か A2S 越しかを実行時に差し替えるのが
+# セルフホスト化の要なので、ここは dyn である必要がある。
+async-trait = "0.1"
 # debug-embed を付けているのは、デバッグビルドでも「コンパイル時に埋め込む」ため。
 # 既定ではデバッグ時だけ実行時にフォルダを読みに行く挙動になり、cargo をコンテナで
 # 動かしている本PJTではコンテナ内の絶対パスを探して失敗する（ホストには存在しない）。
