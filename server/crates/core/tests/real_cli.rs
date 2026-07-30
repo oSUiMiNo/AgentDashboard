@@ -31,10 +31,8 @@
 
 mod common;
 
-use agentdashboard_core::{
-    config::Config,
-    session::{Session, hooks_settings, lifecycle},
-};
+use agent_core::session::{Session, hooks_settings, lifecycle};
+use agentdashboard_core::config::Config;
 use protocol::SessionStatus;
 use std::{
     path::{Path, PathBuf},
@@ -692,10 +690,10 @@ fn repo_root() -> PathBuf {
 /// worktree へ置く。ここから先——ゲート・修復セッション・ビルド・差し替え・コミット——は
 /// すべて本物を通す。
 struct PlantedCanary {
-    inner: agentdashboard_core::selfheal::ops::HostOps,
+    inner: agent_core::selfheal::ops::HostOps,
 }
 
-impl agentdashboard_core::selfheal::ops::SelfhealOps for PlantedCanary {
+impl agent_core::selfheal::ops::SelfhealOps for PlantedCanary {
     fn prepare_worktree(&self, branch: &str) -> anyhow::Result<PathBuf> {
         self.inner.prepare_worktree(branch)
     }
@@ -704,7 +702,7 @@ impl agentdashboard_core::selfheal::ops::SelfhealOps for PlantedCanary {
         &self,
         _model: &str,
         worktree: &Path,
-    ) -> anyhow::Result<agentdashboard_core::selfheal::ops::CanarySample> {
+    ) -> anyhow::Result<agent_core::selfheal::ops::CanarySample> {
         // 「レコード種別が改名された」という、実際に起こりうる形の非互換。
         // いまのパーサはこれを未知の種別として数えるので、ゲートが落ちる
         let dir = worktree.join("fixtures").join("v9.9.9").join("canary");
@@ -718,7 +716,7 @@ impl agentdashboard_core::selfheal::ops::SelfhealOps for PlantedCanary {
                 "\n",
             ),
         )?;
-        Ok(agentdashboard_core::selfheal::ops::CanarySample {
+        Ok(agent_core::selfheal::ops::CanarySample {
             version: "9.9.9".to_string(),
             dir,
             has_tool_use: true,
@@ -726,7 +724,7 @@ impl agentdashboard_core::selfheal::ops::SelfhealOps for PlantedCanary {
         })
     }
 
-    fn run_gate(&self, worktree: &Path) -> agentdashboard_core::selfheal::ops::GateOutcome {
+    fn run_gate(&self, worktree: &Path) -> agent_core::selfheal::ops::GateOutcome {
         self.inner.run_gate(worktree)
     }
 
@@ -752,9 +750,9 @@ impl agentdashboard_core::selfheal::ops::SelfhealOps for PlantedCanary {
 /// 本番では前回の修復を積み上げるのが正しい（直した内容を捨てない）が、訓練は毎回
 /// **同じ出発点**から始まらないと結果が変わってしまう。
 fn reset_maintenance_worktree(repo: &Path) {
-    let name = agentdashboard_core::selfheal::MAINTENANCE_NAME;
+    let name = agent_core::selfheal::MAINTENANCE_NAME;
     let worktree = repo
-        .join(agentdashboard_core::selfheal::ops::WORKTREE_DIR)
+        .join(agent_core::selfheal::ops::WORKTREE_DIR)
         .join(name);
     let _ = Command::new("git")
         .args(["worktree", "remove", "--force"])
@@ -787,10 +785,10 @@ async fn カナリアが構造の全部入りのサンプルを採れる() {
     // ディレクトリを worktree の代わりに渡せばリポジトリを汚さない
     let workspace = dir.path().to_path_buf();
 
-    let ops = agentdashboard_core::selfheal::ops::HostOps::new(repo, "claude".to_string());
+    let ops = agent_core::selfheal::ops::HostOps::new(repo, "claude".to_string());
     let model = "haiku".to_string();
     let sample = tokio::task::spawn_blocking(move || {
-        use agentdashboard_core::selfheal::ops::SelfhealOps as _;
+        use agent_core::selfheal::ops::SelfhealOps as _;
         ops.run_canary(&model, &workspace)
     })
     .await
@@ -852,7 +850,7 @@ async fn 本物のclaudeがパーサを直しゲートを通ってから差し�
         ..Config::default()
     };
     let ops = std::sync::Arc::new(PlantedCanary {
-        inner: agentdashboard_core::selfheal::ops::HostOps::new(repo.clone(), "claude".to_string()),
+        inner: agent_core::selfheal::ops::HostOps::new(repo.clone(), "claude".to_string()),
     });
     let server =
         common::TestServer::start_with_selfheal_and_program(config, ops, "claude".to_string())
@@ -892,11 +890,11 @@ async fn 本物のclaudeがパーサを直しゲートを通ってから差し�
     let pointer = dir
         .path()
         .join("state")
-        .join(agentdashboard_core::parser::PARSER_POINTER);
+        .join(agent_core::parser::PARSER_POINTER);
     let original = std::fs::read_to_string(&pointer).expect("最初のポインタが書かれている");
     let worktree = repo
-        .join(agentdashboard_core::selfheal::ops::WORKTREE_DIR)
-        .join(agentdashboard_core::selfheal::MAINTENANCE_NAME);
+        .join(agent_core::selfheal::ops::WORKTREE_DIR)
+        .join(agent_core::selfheal::MAINTENANCE_NAME);
 
     loop {
         let now = std::fs::read_to_string(&pointer).unwrap_or_default();
@@ -912,8 +910,7 @@ async fn 本物のclaudeがパーサを直しゲートを通ってから差し�
     }
 
     // 対応表に載っている
-    let state =
-        agentdashboard_core::selfheal::state::SelfhealState::load(&dir.path().join("state"));
+    let state = agent_core::selfheal::state::SelfhealState::load(&dir.path().join("state"));
     assert!(
         state.known_versions.contains("9.9.9"),
         "差し替えたのに対応表へ載っていない"
@@ -954,8 +951,7 @@ async fn wait_for_mode(session: &Session, expected: &str) -> protocol::Permissio
     let expected = protocol::PermissionMode::new(expected);
     let deadline = Instant::now() + CLI_TIMEOUT;
     loop {
-        let current =
-            agentdashboard_core::session::permission::parse_footer(&session.scrollback_text());
+        let current = agent_core::session::permission::parse_footer(&session.scrollback_text());
         if current.as_ref() == Some(&expected) {
             return expected;
         }

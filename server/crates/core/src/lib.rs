@@ -18,20 +18,14 @@ pub mod config;
 pub mod local;
 pub mod settings_api;
 
-// PC 側の一式は [`agent_core`] へ、ブラウザ配信は [`server_core`] へ移った
-// （セルフホスト化フェーズ1）。ここで名前を出し直しているのは、既存の呼び出し側
-// （実行ファイル・統合テスト）を1つのコミットで全部書き換えずに済ませるため。
-pub use agent_core::{
-    claude_settings, hook_post, hooks, jsonfile, model_aliases, model_catalog, model_post, parser,
-    selfheal, session, settings, state, transcript,
+use agent_core::{
+    hooks, model_catalog, parser, parser::ParserSupervisor, selfheal, session,
+    session::SessionManager, settings, settings::SettingsStore,
 };
-pub use server_core::{embed, ws};
-
-use agent_core::{parser::ParserSupervisor, session::SessionManager, settings::SettingsStore};
 use axum::Router;
 use config::Config;
 use local::LocalAgent;
-use server_core::config::ServerConfig;
+use server_core::{config::ServerConfig, embed, ws};
 use settings_api::SettingsState;
 use std::{net::Ipv4Addr, sync::Arc};
 

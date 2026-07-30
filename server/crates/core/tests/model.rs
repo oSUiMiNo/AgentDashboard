@@ -15,9 +15,9 @@
 
 mod common;
 
-use agentdashboard_core::{
-    claude_settings::ClaudeSettings, config::Config, session::ModelSwitchError,
-};
+use agent_core::config::AgentConfig;
+use agent_core::{claude_settings::ClaudeSettings, session::ModelSwitchError};
+use agentdashboard_core::config::Config;
 use protocol::ModelId;
 
 /// テスト用の設定。
@@ -70,9 +70,9 @@ fn 設定を明示しないテストでも本物のグローバル設定を指�
 fn 明示された設定のパスはそのまま使われる() {
     // 使い捨てへ逃がす仕掛けが、テストが自分で用意したファイルを横取りしないこと
     let expected = std::env::temp_dir().join("agentdashboard-explicit-global.json");
-    let manager = common::manager_with(Config {
+    let manager = common::manager_with(AgentConfig {
         claude_settings_path: Some(expected.clone()),
-        ..Config::default()
+        ..AgentConfig::default()
     });
     assert_eq!(manager.claude_settings().path(), expected);
 }

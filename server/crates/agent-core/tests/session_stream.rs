@@ -9,7 +9,7 @@
 
 mod common;
 
-use agentdashboard_core::config::Config;
+use agent_core::config::AgentConfig;
 use common::Watcher;
 use protocol::frame::{self, FrameKind};
 use std::time::Duration;
@@ -100,9 +100,9 @@ async fn 後から開いた端末にはスクロールバックが最初に届�
 
 #[tokio::test]
 async fn スクロールバックは上限を超えず末尾が残る() {
-    let config = Config {
+    let config = AgentConfig {
         pty_ring_buffer: 64 * 1024,
-        ..Config::default()
+        ..AgentConfig::default()
     };
     let manager = common::manager_with(config);
     let (session, mut watcher) = common::start_session(&manager).await;
@@ -154,7 +154,7 @@ async fn 大量出力でもサーバ側のメモリが有界に保たれる() {
         .len();
     assert_eq!(
         payload_len,
-        Config::default().pty_ring_buffer,
+        AgentConfig::default().pty_ring_buffer,
         "保持量が設定の上限に収まっていること"
     );
 

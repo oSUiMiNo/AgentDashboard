@@ -15,7 +15,7 @@
 
 mod common;
 
-use agentdashboard_core::config::Config;
+use agent_core::config::AgentConfig;
 use protocol::{CardId, Node, NodeId, TreeNode};
 use std::time::Duration;
 use testkit::fake_claude;
@@ -78,13 +78,13 @@ async fn コアレッシングでフレーム数が実際に減る() {
 
 /// 指定した合流の窓で一定量を流し、届いたフレーム数を返す。
 async fn frames_with_window(coalesce_ms: u64) -> usize {
-    let config = Config {
+    let config = AgentConfig {
         coalesce_ms,
         // 測っているのは PTY のフレーム合流であって statusLine ではない。
         // 注入したままだと、擬似 claude が数秒ごとに子プロセスを起こして
         // 測定対象と資源を取り合う（実際に本数が揺れて落ちた）
         inject_status_line: false,
-        ..Config::default()
+        ..AgentConfig::default()
     };
     let manager = common::manager_with(config);
     let (session, mut watcher) = common::start_session(&manager).await;
@@ -103,9 +103,9 @@ async fn 巨大な履歴でも保持量は直近ウィンドウに収まる() {
     // テスト計画フェーズ6「巨大JSONL」のサーバ側。先行事例では数GBのトランスクリプトで
     // メモリが破綻した例があるため、**届いた量に比例して太らない**ことを固定する
     let window = 2_000;
-    let config = Config {
+    let config = AgentConfig {
         transcript_window_nodes: window,
-        ..Config::default()
+        ..AgentConfig::default()
     };
     let manager = common::manager_with(config);
     let (session, _watcher) = common::start_session(&manager).await;

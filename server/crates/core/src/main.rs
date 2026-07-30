@@ -3,8 +3,10 @@
 //! 引数なしで起動するとサーバが立ち上がり、ブラウザからセッションを操作できるようになる。
 //! 中身は [`agentdashboard_core`] 側にあり、ここは CLI の解釈だけを担う。
 
-use agentdashboard_core::{config, config::Config, embed, hook_post, model_post, serve};
+use agent_core::{hook_post, model_post};
+use agentdashboard_core::{config, config::Config, serve};
 use clap::{Parser, Subcommand};
+use server_core::embed;
 use std::path::PathBuf;
 
 #[derive(Parser)]

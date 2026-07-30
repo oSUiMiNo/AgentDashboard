@@ -67,7 +67,7 @@ fn append(path: &std::path::Path, lines: &[String]) {
 
 /// 履歴が届くまで待つ。
 async fn wait_for_nodes(
-    session: &std::sync::Arc<agentdashboard_core::session::Session>,
+    session: &std::sync::Arc<agent_core::session::Session>,
     at_least: usize,
 ) -> Vec<protocol::TreeNode> {
     for _ in 0..200 {
@@ -87,7 +87,7 @@ async fn start_session_with_transcript(
     dir: &std::path::Path,
 ) -> (
     TestServer,
-    std::sync::Arc<agentdashboard_core::session::Session>,
+    std::sync::Arc<agent_core::session::Session>,
     PathBuf,
 ) {
     let server = TestServer::start_with_parser(config_for(dir)).await;

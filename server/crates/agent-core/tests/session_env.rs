@@ -11,7 +11,7 @@
 
 mod common;
 
-use agentdashboard_core::session::lifecycle;
+use agent_core::session::lifecycle;
 use testkit::fake_claude;
 
 /// `dump` の出力から、指定した行頭を持つ行の中身を集める。

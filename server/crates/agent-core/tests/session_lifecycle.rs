@@ -7,7 +7,7 @@
 
 mod common;
 
-use agentdashboard_core::session::pty::PtyProcess;
+use agent_core::session::pty::PtyProcess;
 use portable_pty::{CommandBuilder, PtySize};
 use protocol::SessionStatus;
 use testkit::fake_claude;
