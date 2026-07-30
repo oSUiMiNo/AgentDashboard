@@ -33,6 +33,9 @@ function meta(cardId: string, overrides: Partial<SessionMeta> = {}): SessionMeta
     last_assistant_message: null,
     created_at: NOW,
     hooks_seen: true,
+    agent_id: null,
+    agent_connected: true,
+    account: null,
     ...overrides,
   }
 }

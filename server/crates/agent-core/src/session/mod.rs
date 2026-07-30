@@ -1230,6 +1230,14 @@ impl SessionManager {
                 last_assistant_message: None,
                 created_at,
                 hooks_seen: false,
+                // エージェント（PC）側は**自分の帰属を知らない**。どの PC のものか・
+                // どのアカウントのものかを決めるのはサーバの仕事（設計§5-1 の手順4）で、
+                // ここで推測して埋めると2箇所が同じことを決めることになる
+                agent_id: None,
+                account: None,
+                // 報告している時点で生きている。鮮度を判断するのは受け取る側（§6-3）で、
+                // 切断は「報告が来なくなったこと」としてしか観測できない
+                agent_connected: true,
             }),
             process,
             ring: Mutex::new(RingBuffer::new(self.config.pty_ring_buffer)),
@@ -1586,7 +1594,7 @@ impl SessionManager {
 
     fn broadcast_meta(&self, session: &Session) {
         self.events.emit(ServerMessage::SessionUpsert {
-            session: session.meta(),
+            session: Box::new(session.meta()),
         });
     }
 }

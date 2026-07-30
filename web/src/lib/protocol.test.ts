@@ -153,7 +153,8 @@ describe('サーバと同じ JSON になること', () => {
       '","project":"/dev/app","claude_session_id":null,' +
       '"permission_mode":null,"model":"claude-opus-5","model_label":"Opus 5",' +
       '"model_requested":"sonnet","status":{"kind":"unknown"},"subagent_active":0,' +
-      '"last_activity_at":1,"last_assistant_message":null,"created_at":1,"hooks_seen":false}'
+      '"last_activity_at":1,"last_assistant_message":null,"created_at":1,"hooks_seen":false,' +
+      '"agent_id":null,"agent_connected":true,"account":null}'
     const meta = JSON.parse(raw) as SessionMeta
     expect(meta.model).toBe('claude-opus-5')
     expect(meta.model_label).toBe('Opus 5')
@@ -169,7 +170,8 @@ describe('サーバと同じ JSON になること', () => {
       '","project":"/dev/app","claude_session_id":null,' +
       '"permission_mode":null,"model":null,"model_label":null,"model_requested":null,' +
       '"status":{"kind":"starting"},"subagent_active":0,' +
-      '"last_activity_at":1,"last_assistant_message":null,"created_at":1,"hooks_seen":false}'
+      '"last_activity_at":1,"last_assistant_message":null,"created_at":1,"hooks_seen":false,' +
+      '"agent_id":null,"agent_connected":true,"account":null}'
     const meta = JSON.parse(raw) as SessionMeta
     expect(meta.model).toBeNull()
     expect(meta.model_label).toBeNull()
@@ -184,9 +186,49 @@ describe('サーバと同じ JSON になること', () => {
       CARD_ID +
       '","project":"/dev/app","claude_session_id":null,' +
       '"permission_mode":null,"status":{"kind":"unknown"},"subagent_active":0,"last_activity_at":1,' +
-      '"last_assistant_message":null,"created_at":1,"hooks_seen":false}'
+      '"last_assistant_message":null,"created_at":1,"hooks_seen":false,' +
+      '"agent_id":null,"agent_connected":true,"account":null}'
     const meta = JSON.parse(raw) as SessionMeta
     expect(meta.hooks_seen).toBe(false)
+  })
+
+  it('SessionMeta は PC の帰属と接続の鮮度を運ぶ', () => {
+    // Rust 側 `session_metaのPCまわりは省略できない` と対になる。
+    // `agent_connected` は `status` を上書きせず、その鮮度だけを表す——
+    // 「作業中（接続断）」と見えるのが要件2-3 の充足形
+    const raw =
+      '{"card_id":"' +
+      CARD_ID +
+      '","project":"/dev/app","claude_session_id":null,' +
+      '"permission_mode":null,"model":null,"model_label":null,"model_requested":null,' +
+      '"status":{"kind":"working"},"subagent_active":0,"last_activity_at":1,' +
+      '"last_assistant_message":null,"created_at":1,"hooks_seen":true,' +
+      '"agent_id":"11111111-1111-1111-1111-111111111111",' +
+      '"agent_connected":false,"account":"mao"}'
+    const meta = JSON.parse(raw) as SessionMeta
+    expect(meta.agent_id).toBe('11111111-1111-1111-1111-111111111111')
+    expect(meta.agent_connected).toBe(false)
+    expect(meta.account).toBe('mao')
+    // 切断していても、最後に知っていた状態はそのまま残る
+    expect(meta.status.kind).toBe('working')
+  })
+
+  it('ローカルモードでは PC の帰属が null で届く', () => {
+    // エージェントという単位が存在しないので、埋めるべき値が無い。
+    // 「1台だけの PC」を表す ID を作って埋めてはいけない（後から本物が繋がったときに
+    // 区別できなくなる）
+    const raw =
+      '{"card_id":"' +
+      CARD_ID +
+      '","project":"/dev/app","claude_session_id":null,' +
+      '"permission_mode":null,"model":null,"model_label":null,"model_requested":null,' +
+      '"status":{"kind":"starting"},"subagent_active":0,"last_activity_at":1,' +
+      '"last_assistant_message":null,"created_at":1,"hooks_seen":false,' +
+      '"agent_id":null,"agent_connected":true,"account":null}'
+    const meta = JSON.parse(raw) as SessionMeta
+    expect(meta.agent_id).toBeNull()
+    expect(meta.account).toBeNull()
+    expect(meta.agent_connected).toBe(true)
   })
 })
 
@@ -320,6 +362,9 @@ describe('状態のラベル', () => {
       last_assistant_message: null,
       created_at: 0,
       hooks_seen: false,
+      agent_id: null,
+      agent_connected: true,
+      account: null,
     }
     expect(isHookSilent(base)).toBe(true)
     expect(isHookSilent({ ...base, hooks_seen: true })).toBe(false)

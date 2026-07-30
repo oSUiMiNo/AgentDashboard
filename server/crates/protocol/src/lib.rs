@@ -68,6 +68,34 @@ impl fmt::Display for ClaudeSessionId {
     }
 }
 
+/// 登録済みの PC（エージェント）のID（セルフホスト化設計§3-1）。
+///
+/// ローカルモードでは**エージェントという単位が存在しない**ので、セッションの
+/// [`SessionMeta::agent_id`] は `None` になる。「1台だけの PC」を表す ID を作って
+/// 埋めることはしない——ローカルには結び付ける相手（`agents` の行）が無く、
+/// 存在しないものを指す ID は、後から本物の PC が繋がったときに区別できなくなる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AgentId(pub Uuid);
+
+impl AgentId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl Default for AgentId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for AgentId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// 作業ディレクトリの絶対パス。一覧画面のグループ化キーになる。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -228,6 +256,27 @@ pub struct SessionMeta {
     /// *なぜ* 判断できないのかを画面に出すにはこの印が要る。フックが届かない原因は
     /// 設定の注入漏れやポートの塞がりで、利用者が直せるものが多い。
     pub hooks_seen: bool,
+    /// どの PC のセッションか（セルフホスト化設計§3-1）。**ローカルモードは `None`**。
+    ///
+    /// 一覧に PC 名バッジを出すための材料（要件4-4「どの PC のセッションかは一覧で
+    /// 判別できる」）。名前ではなく ID を運ぶのは、PC の名前が後から変わりうるため。
+    pub agent_id: Option<AgentId>,
+    /// この記録を持っている PC と、いま繋がっているか（セルフホスト化設計§6-3）。
+    ///
+    /// # なぜ [`SessionStatus`] の一種にしないのか
+    ///
+    /// 切断は「最後に知っていた状態」を**上書きする情報ではなく、その鮮度に関する
+    /// 情報**だから。要件2-3 の「作業中のまま固まってはならない」は、状態を偽らずに
+    /// 「古いこと」を明示することで満たす——画面には「作業中（接続断）」と出る。
+    ///
+    /// ローカルモードでも意味を持つ。DB が真実になったので、**再起動前のカードが
+    /// 記録として戻ってくる**（PTY は道連れで死んでいる）。それを `false` で示す。
+    pub agent_connected: bool,
+    /// 帰属アカウント名（表示用。セルフホスト化設計§3-1）。
+    ///
+    /// 権限そのものではない——**権限の源はペアリングトークン**（§8-5）で、これは
+    /// 画面に出すための名前。ローカルモードはアカウントを表に出さないので `None`。
+    pub account: Option<String>,
 }
 
 /// JSONL レコードの `uuid` に対応するノードID。
@@ -382,8 +431,40 @@ mod tests {
             last_assistant_message: Some("実装が完了しました".to_string()),
             created_at: 1_699_999_000_000,
             hooks_seen: true,
+            agent_id: Some(AgentId::new()),
+            agent_connected: false,
+            account: Some("mao".to_string()),
         };
         assert_eq!(roundtrip(&meta), meta);
+    }
+
+    #[test]
+    fn session_metaのPCまわりは省略できない() {
+        // TypeScript 側と手で二重に定義しているので（PJTガイドライン）、片方だけ
+        // 直しても Rust は通ってしまう。**JSON の形そのもの**を突き合わせて、
+        // 増えた3つが確かに線を渡っていることを見る
+        let meta = SessionMeta {
+            card_id: CardId(uuid::uuid!("00000000-0000-0000-0000-000000000001")),
+            project: ProjectId("/p".to_string()),
+            claude_session_id: None,
+            permission_mode: None,
+            model: None,
+            model_label: None,
+            model_requested: None,
+            status: SessionStatus::Working,
+            subagent_active: 0,
+            last_activity_at: 1,
+            last_assistant_message: None,
+            created_at: 1,
+            hooks_seen: false,
+            agent_id: None,
+            agent_connected: true,
+            account: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&meta).unwrap(),
+            r#"{"card_id":"00000000-0000-0000-0000-000000000001","project":"/p","claude_session_id":null,"permission_mode":null,"model":null,"model_label":null,"model_requested":null,"status":{"kind":"working"},"subagent_active":0,"last_activity_at":1,"last_assistant_message":null,"created_at":1,"hooks_seen":false,"agent_id":null,"agent_connected":true,"account":null}"#
+        );
     }
 
     #[test]
@@ -429,6 +510,9 @@ mod tests {
             last_assistant_message: None,
             created_at: 1,
             hooks_seen: false,
+            agent_id: None,
+            agent_connected: true,
+            account: None,
         };
         let back = roundtrip(&meta);
         assert_eq!(back.model, meta.model);
@@ -457,6 +541,9 @@ mod tests {
             last_assistant_message: None,
             created_at: 1,
             hooks_seen: false,
+            agent_id: None,
+            agent_connected: true,
+            account: None,
         };
         let text = serde_json::to_string(&meta).unwrap();
         assert!(text.contains(r#""model":null"#), "実際: {text}");

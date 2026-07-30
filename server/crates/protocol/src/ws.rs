@@ -154,8 +154,15 @@ pub enum ServerMessage {
     /// フロー制御のしきい値は `config.toml`（設計§12）にあるがウォーターマークの判定は
     /// ブラウザ側で行うため、値を渡さないと設定が効かない。
     Hello { flow_high: usize, flow_low: usize },
-    /// セッション1枚分の情報。新規・更新の区別なく全体を送る
-    SessionUpsert { session: SessionMeta },
+    /// セッション1枚分の情報。新規・更新の区別なく全体を送る。
+    ///
+    /// # なぜ `Box` なのか
+    ///
+    /// この列挙は**購読者ごとに複製されて配信の待ち行列へ積まれる**（1接続あたり
+    /// 64件×クライアント数）。[`SessionMeta`] は他のバリアントより桁違いに大きいので、
+    /// 直に持つと `Status` のような小さな知らせまで同じ大きさで積まれることになる。
+    /// JSON の形は変わらない（`Box` は透過的に直列化される）ので、線の上は同じ。
+    SessionUpsert { session: Box<SessionMeta> },
     /// カードが一覧から消えたことを伝える（`archive` の結果）。
     ///
     /// 消えたことを伝える手段が無いと、`archive` したブラウザ以外の画面にカードが
@@ -241,6 +248,9 @@ mod tests {
             last_assistant_message: None,
             created_at: 1_699_999_000_000,
             hooks_seen: true,
+            agent_id: None,
+            agent_connected: true,
+            account: None,
         }
     }
 
@@ -306,7 +316,7 @@ mod tests {
                 flow_low: 32_768,
             },
             ServerMessage::SessionUpsert {
-                session: sample_meta(),
+                session: Box::new(sample_meta()),
             },
             ServerMessage::SessionRemoved { card_id },
             ServerMessage::Status {

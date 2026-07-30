@@ -156,7 +156,13 @@ async fn client_loop(state: AppState, socket: WebSocket) {
     )
     .await;
     for meta in state.agent.list() {
-        send_json(&outbound, ServerMessage::SessionUpsert { session: meta }).await;
+        send_json(
+            &outbound,
+            ServerMessage::SessionUpsert {
+                session: Box::new(meta),
+            },
+        )
+        .await;
     }
 
     let event_task = tokio::spawn(pump_events(events, outbound.clone()));

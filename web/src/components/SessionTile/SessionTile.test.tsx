@@ -46,6 +46,9 @@ function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
     last_assistant_message: null,
     created_at: NOW - 60_000,
     hooks_seen: true,
+    agent_id: null,
+    agent_connected: true,
+    account: null,
     ...overrides,
   }
 }

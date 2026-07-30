@@ -327,6 +327,9 @@ mod tests {
             last_assistant_message: None,
             created_at: NOW - 60_000,
             hooks_seen: false,
+            agent_id: None,
+            agent_connected: true,
+            account: None,
         }
     }
 
