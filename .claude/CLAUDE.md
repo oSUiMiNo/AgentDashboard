@@ -74,4 +74,7 @@ issue-sync は、ユーザーが行うので不要。必要かどうかユーザ
 | `server/crates/transcript-parser/` | 自己修復が唯一書き換えてよい範囲（設計§9） |
 | `server/crates/testkit/` | フック受信モックサーバと擬似 claude |
 | `server/config.toml.example` | 設定の雛形 |
-| `fixtures/` | ゴールデンフィクスチャ（自己修復のテストゲートを兼ねる） |
+| `fixtures/` | ゴールデンフィクスチャ（自己修復のテストゲートを兼ねる）と端末録画 |
+| `server/crates/agent-core/tests/pty_record.rs` | 実 claude の TUI を製品と同じ PTY 経路で録画する（`make record-terminal`）。**本物の claude を起動しクォータを消費する** |
+| `server/crates/agent-core/tests/screen_probe.rs` | 端末エミュレータ（vt100）の再現性と画面サイズの実測（`make probe-screen`）。合否ではなく数値を出す |
+| `scripts/sanitize-fixtures.py` | フィクスチャの匿名化と残存検査。**公開リポジトリへ置く前に必ず通す** |
