@@ -1,0 +1,32 @@
+# 永続化層を PostgreSQL に対して流すための最小構成（セルフホスト化設計§15-3）。
+#
+# ローカルは SQLite・セルフホストは PostgreSQL で**スキーマとコードを共有する**のが
+# 本設計の前提なので、「SQLite では通るのに PostgreSQL で落ちる」を手前で捕まえる相手が要る。
+# 型の厳密さ・JSON の扱い・主キーの制約は、片方でしか出ない。
+#
+# 起動と後片付けは `scripts/test-compose`（`make test-compose`）が面倒を見る。
+# **CI 既定（`make ci`）には入れない** — docker が要るため。
+#
+# セルフホストの本番構成（dashboard＋PostgreSQL＋Valkey）はフェーズ6。ここはテスト用に
+# データベースだけを立てる。
+
+name: agentdashboard-test
+
+services:
+  postgres:
+    # PG18 からデータの置き場所が /var/lib/postgresql に変わった（/data を付けた
+    # 旧来の書き方は壊れる）。本番構成（設計§14-1）と同じ版を使い、ここで先に踏んでおく
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: agentdashboard
+      POSTGRES_PASSWORD: agentdashboard
+      POSTGRES_DB: agentdashboard
+    # テストのたびに使い捨てるのでディスクへ残さない。速さのためでもある
+    tmpfs:
+      - /var/lib/postgresql
+    healthcheck:
+      # 待たずに繋ぐと「まだ起動中」を接続失敗と読み違える
+      test: ['CMD-SHELL', 'pg_isready -U agentdashboard -d agentdashboard']
+      interval: 1s
+      timeout: 3s
+      retries: 60

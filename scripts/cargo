@@ -14,6 +14,11 @@
 #   AGENTDASHBOARD_CARGO_DIR         cargo を動かす場所（既定 server）
 #   AGENTDASHBOARD_CARGO_TARGET_DIR  ビルド成果物の置き場所（既定はそれぞれの target/）
 # コンテナへはリポジトリ全体をマウントしているので、worktree もこの1つの入口で扱える。
+#
+# PostgreSQL を相手にするテスト（`scripts/test-compose`）は、**コンテナの中から別の
+# コンテナへ繋ぐ**必要がある。既定のブリッジのままでは届かないので、次の2つで面倒を見る。
+#   AGENTDASHBOARD_CARGO_NETWORK        参加する docker ネットワーク名
+#   AGENTDASHBOARD_TEST_DATABASE_URL    テストへ渡す接続先（コンテナ内から見た名前）
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -35,6 +40,18 @@ if [[ ! -d "${REPO_ROOT}/${CARGO_DIR}" ]]; then
 fi
 
 DOCKER_ENV=()
+DOCKER_NET=()
+
+# テストの接続先。指定が無ければ渡さない（テスト側は SQLite だけで走る）
+if [[ -n "${AGENTDASHBOARD_TEST_DATABASE_URL:-}" ]]; then
+    DOCKER_ENV+=(--env "AGENTDASHBOARD_TEST_DATABASE_URL=${AGENTDASHBOARD_TEST_DATABASE_URL}")
+fi
+
+# 参加するネットワーク。サービス名で相手を引けるようにするためだけに使う
+if [[ -n "${AGENTDASHBOARD_CARGO_NETWORK:-}" ]]; then
+    DOCKER_NET+=(--network "${AGENTDASHBOARD_CARGO_NETWORK}")
+fi
+
 if [[ -n "${TARGET_DIR}" ]]; then
     case "${TARGET_DIR}" in
         /* | *..*)
@@ -61,5 +78,6 @@ docker run --rm \
     --workdir "/repo/${CARGO_DIR}" \
     --env CARGO_TERM_COLOR=always \
     "${DOCKER_ENV[@]}" \
+    "${DOCKER_NET[@]}" \
     "${IMAGE_TAG}" \
     cargo "$@"

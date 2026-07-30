@@ -14,7 +14,7 @@ DEBUG_BIN := server/target/debug/agentdashboard
 .DEFAULT_GOAL := help
 
 .PHONY: help setup setup-rust setup-web dev dev-web dev-server \
-        test test-rust test-web test-cli e2e build-debug perf \
+        test test-rust test-web test-cli test-compose e2e build-debug perf \
         lint lint-rust lint-web fmt \
         build build-web build-server ci fixtures record-terminal probe-screen clean
 
@@ -64,6 +64,13 @@ test-web: ## web の単体テスト（Vitest）
 # 実行するとあなたのアカウントのクォータを消費する。
 test-cli: ## 実CLI統合テスト（本物の claude をホストで起動する）
 	./scripts/test-cli
+
+# 永続化層を PostgreSQL に対しても流す（テスト計画フェーズ2 の最終項目）。
+# ローカルは SQLite・セルフホストは PostgreSQL で**スキーマとコードを共有する**のが前提
+# なので、「SQLite では通るのに PostgreSQL で落ちる」を手前で捕まえる。docker が要るため
+# CI 既定（make ci）には入れない（設計§15-3）。
+test-compose: ## 永続化層のテストを PostgreSQL に対しても流す（docker compose が要る）
+	./scripts/test-compose
 
 # E2E は実際の core サーバに繋いで動かす（web/playwright.config.ts）。
 # web → core の順にビルドするのは、core が web/dist をコンパイル時に取り込むため。

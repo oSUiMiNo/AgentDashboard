@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# 永続化層のテストを **PostgreSQL に対しても** 流す（セルフホスト化設計§15-3）。
+#
+# `make ci` は SQLite だけで走る。こちらは docker compose で PostgreSQL を立て、
+# **同じテストコード**をそちらへも通す。「共有するのはスキーマ」という前提が本当か、
+# ローカルで書いた段階で確かめるための相手。
+#
+# # なぜ cargo のコンテナを compose のネットワークへ入れるのか
+#
+# テストはコンテナの中（`scripts/cargo`）で走るので、既定のブリッジのままでは
+# PostgreSQL のコンテナへ届かない。ポートをホストへ公開して回り道することもできるが、
+# **利用者のホストで 5432 が空いている保証が無い**（普段使いの PostgreSQL と衝突する）。
+# 同じネットワークへ入れてサービス名で引くほうが、環境に依存しない。
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+COMPOSE_FILE="${REPO_ROOT}/docker/compose.test.yml"
+PROJECT="agentdashboard-test"
+# compose が作るネットワークの名前（`name:` ＋ `_default`）
+NETWORK="${PROJECT}_default"
+# コンテナ間はサービス名で引ける。**管理用のデータベースを指す** — テストはここから
+# 使い捨てのデータベースを1本ずつ作る（並行して走るテストが互いの行を見ないため）
+ADMIN_URL="postgres://agentdashboard:agentdashboard@postgres:5432/agentdashboard"
+
+if ! docker compose version >/dev/null 2>&1; then
+    echo "エラー: docker compose が使えません。この検証には docker が要ります。" >&2
+    exit 1
+fi
+
+cleanup() {
+    echo "==> PostgreSQL を片付けます"
+    docker compose -f "${COMPOSE_FILE}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+}
+# テストが落ちても Ctrl+C でも必ず畳む。残すと次回の起動がポートで衝突する
+trap cleanup EXIT
+
+echo "==> PostgreSQL を起動します（healthcheck が通るまで待ちます）"
+docker compose -f "${COMPOSE_FILE}" up -d --wait
+
+echo "==> 永続化層のテストを PostgreSQL に対して流します"
+AGENTDASHBOARD_CARGO_NETWORK="${NETWORK}" \
+    AGENTDASHBOARD_TEST_DATABASE_URL="${ADMIN_URL}" \
+    "${REPO_ROOT}/scripts/cargo" nextest run -p server-core "$@"
