@@ -252,3 +252,65 @@ async fn 知らないカードの履歴は捨てる() {
         backend.finish().await;
     }
 }
+
+#[tokio::test]
+async fn モデルの3つは未設定のまま往復する() {
+    // 設計§3-2 の論点表：切替中という一時状態（model_requested）も保存する。
+    // DB の境界でフィールドを間引くと「どれが一時状態か」を知る第2の場所が生まれる。
+    // 切断中に「切替要求中」という最後の既知状態が見えるのは §6-3 の哲学と同型で、
+    // 再接続後の最初の SessionUpsert が自己修正する
+    for backend in common::backends("model").await {
+        let bare = CardId::new();
+        let filled = CardId::new();
+        {
+            let registry = SessionRegistry::load(backend.db.clone(), WINDOW)
+                .await
+                .expect("記録層を立てられること");
+            registry.apply(upsert(bare)).await;
+
+            let mut with_model = meta(filled);
+            with_model.model = Some(protocol::ModelId::new("claude-opus-5"));
+            with_model.model_label = Some("Opus 5".to_string());
+            with_model.model_requested = Some(protocol::ModelId::new("sonnet"));
+            registry
+                .apply(ServerMessage::SessionUpsert {
+                    session: Box::new(with_model),
+                })
+                .await;
+        }
+
+        let restored = SessionRegistry::load(backend.db.clone(), WINDOW)
+            .await
+            .expect("立て直せること");
+
+        let bare = restored.get(bare).expect("記録があること").meta();
+        assert_eq!(bare.model, None, "[{}] 未設定が埋まった", backend.name);
+        assert_eq!(bare.model_label, None, "[{}]", backend.name);
+        assert_eq!(bare.model_requested, None, "[{}]", backend.name);
+
+        let filled = restored.get(filled).expect("記録があること").meta();
+        assert_eq!(
+            filled.model.as_ref().map(protocol::ModelId::as_str),
+            Some("claude-opus-5"),
+            "[{}]",
+            backend.name
+        );
+        assert_eq!(
+            filled.model_label.as_deref(),
+            Some("Opus 5"),
+            "[{}]",
+            backend.name
+        );
+        assert_eq!(
+            filled
+                .model_requested
+                .as_ref()
+                .map(protocol::ModelId::as_str),
+            Some("sonnet"),
+            "[{}] 切替中という一時状態が落ちた",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}

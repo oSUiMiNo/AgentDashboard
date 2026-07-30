@@ -130,3 +130,36 @@ async fn 外したカードは再起動しても戻らない() {
     assert_eq!(status, 200);
     assert_eq!(body.trim(), "[]", "外したカードが戻ってきた: {body}");
 }
+
+#[tokio::test]
+async fn パーサが居なくても履歴は返る() {
+    // 設計§3-3 の改善点。初期実装では、窓から落ちた範囲をパーサに JSONL を読み直して
+    // もらっていたので、**パーサが縮退すると遡れず 503** だった。読み先が DB へ変わり、
+    // 「DB にある範囲は常に返せる」になった。
+    //
+    // ここではパーサを一切立てずに（＝いちばん強い縮退）確かめる
+    let server = common::TestServer::start().await;
+    let (session, _watcher) = common::start_session(&server.manager).await;
+    server
+        .wait_for_listed("1枚出る", |listed| listed.len() == 1)
+        .await;
+
+    assert!(
+        server.parser.is_none(),
+        "この検証はパーサを立てない状態で行う"
+    );
+
+    let (status, body) = server
+        .get(&format!(
+            "/api/sessions/{}/transcript?limit=10",
+            session.card_id
+        ))
+        .await;
+    assert_eq!(
+        status, 200,
+        "パーサが居ないだけで遡れなくなっている: {body}"
+    );
+    assert!(body.contains("\"nodes\""), "ページの形で返ること: {body}");
+
+    session.kill();
+}

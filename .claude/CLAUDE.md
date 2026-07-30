@@ -67,13 +67,16 @@ issue-sync は、ユーザーが行うので不要。必要かどうかユーザ
 | `server/crates/protocol/src/lib.rs` | サーバ・フロント・パーサが共有するドメインモデル（設計§3） |
 | `server/crates/agent-core/` | PC 側の一式（PTY・フック受信・状態導出・パース・自己修復）。**portable-pty を持つのはここだけ** |
 | `server/crates/server-core/` | ブラウザ配信（WebSocket・REST・web アセット）。PTY に触らない |
+| `server/crates/server-core/src/db/` | 記録の置き場所（設計§3）。**DB を持つのはここだけ**。表を増やしたら migration にも足す |
+| `server/crates/server-core/src/registry.rs` | カードの記録。エージェントの報告を**DB へ書いてからブラウザへ配る**（設計§9-1） |
 | `server/crates/core/src/local.rs` | 両者を1プロセスで束ねる配線（`server_core::agent::AgentHost` のローカル実装） |
 | `server/crates/core/src/config.rs` | `config.toml` の読み込みと、両側への射影（設計§12・セルフホスト化設計§13-2） |
 | `server/crates/server-core/src/embed.rs` | web アセットの単一バイナリ同梱 |
 | `server/crates/core/tests/dependencies.rs` | crate 境界（依存の逆流）の機械検査。**新しい依存を入れたらここへ足す** |
 | `server/crates/transcript-parser/` | 自己修復が唯一書き換えてよい範囲（設計§9） |
 | `server/crates/testkit/` | フック受信モックサーバと擬似 claude |
-| `server/config.toml.example` | 設定の雛形 |
+| `server/config.toml.example` | 設定の雛形。**全キーが `AGENTDASHBOARD_<キー>` で上書きできる**（設計§14-1） |
+| `docker/compose.test.yml` ／ `scripts/test-compose` | 永続化層を PostgreSQL に対しても流す（`make test-compose`）。**新しい DB テストは両方へ通す** |
 | `fixtures/` | ゴールデンフィクスチャ（自己修復のテストゲートを兼ねる）と端末録画 |
 | `server/crates/agent-core/tests/pty_record.rs` | 実 claude の TUI を製品と同じ PTY 経路で録画する（`make record-terminal`）。**本物の claude を起動しクォータを消費する** |
 | `server/crates/agent-core/tests/screen_probe.rs` | 端末エミュレータ（vt100）の再現性と画面サイズの実測（`make probe-screen`）。合否ではなく数値を出す |
