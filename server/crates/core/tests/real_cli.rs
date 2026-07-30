@@ -509,7 +509,7 @@ async fn 指示送信は複数行もスラッシュコマンドも本物のtui�
     let deadline = Instant::now() + CLI_TIMEOUT;
     let mut prompt = None;
     while Instant::now() < deadline {
-        let nodes = session.transcript_snapshot();
+        let nodes = server.transcript_of(session.card_id);
         if let Some(text) = nodes.iter().find_map(|node| match &node.node {
             protocol::Node::UserMessage { text } if text.contains(FIRST) => Some(text.clone()),
             _ => None,
@@ -551,7 +551,7 @@ async fn 指示送信は複数行もスラッシュコマンドも本物のtui�
     let deadline = Instant::now() + CLI_TIMEOUT;
     let mut long_prompt = None;
     while Instant::now() < deadline {
-        let nodes = session.transcript_snapshot();
+        let nodes = server.transcript_of(session.card_id);
         if let Some(text) = nodes.iter().find_map(|node| match &node.node {
             protocol::Node::UserMessage { text } if text.contains(LONG_MARK) => Some(text.clone()),
             _ => None,
@@ -638,7 +638,7 @@ async fn サブエージェントの稼働と子ツリーのマウントを検�
     let deadline = Instant::now() + CLI_TIMEOUT;
     let mut mounted = None;
     while Instant::now() < deadline {
-        let nodes = session.transcript_snapshot();
+        let nodes = server.transcript_of(session.card_id);
         if let Some(node) = nodes
             .iter()
             .find(|node| matches!(node.node, protocol::Node::Subagent { .. }))
@@ -652,7 +652,7 @@ async fn サブエージェントの稼働と子ツリーのマウントを検�
 
     // 親のツールコールにぶら下がっていること（＝掘っていける形になっていること）
     let parent = mounted.parent.expect("マウント先がある");
-    let nodes = session.transcript_snapshot();
+    let nodes = server.transcript_of(session.card_id);
     let parent_node = nodes
         .iter()
         .find(|node| node.id == parent)

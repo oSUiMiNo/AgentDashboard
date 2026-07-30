@@ -1,0 +1,254 @@
+//! 記録層の振る舞い（セルフホスト化設計§3-2・§3-3）。
+//!
+//! エージェントの報告を受けて「DB へ書いてからブラウザへ配る」（§9-1）ところを、
+//! 報告を直に流し込んで確かめる。**SQLite と PostgreSQL の両方へ同じコードを通す**。
+
+#![allow(non_snake_case)]
+
+mod common;
+
+use protocol::{
+    CardId, Node, NodeId, ProjectId, SessionMeta, SessionStatus, TreeNode, ws::ServerMessage,
+};
+use server_core::registry::SessionRegistry;
+
+const WINDOW: usize = 100;
+
+fn meta(card_id: CardId) -> SessionMeta {
+    SessionMeta {
+        card_id,
+        project: ProjectId("/tmp/project".to_string()),
+        claude_session_id: None,
+        permission_mode: None,
+        model: None,
+        model_label: None,
+        model_requested: None,
+        status: SessionStatus::Working,
+        subagent_active: 0,
+        last_activity_at: 1,
+        last_assistant_message: None,
+        created_at: 1,
+        hooks_seen: false,
+        agent_id: None,
+        agent_connected: true,
+        account: None,
+    }
+}
+
+fn upsert(card_id: CardId) -> ServerMessage {
+    ServerMessage::SessionUpsert {
+        session: Box::new(meta(card_id)),
+    }
+}
+
+fn text_node(id: &str) -> TreeNode {
+    TreeNode {
+        id: NodeId(id.to_string()),
+        parent: None,
+        node: Node::AssistantText {
+            text: id.to_string(),
+        },
+        ts: 0,
+        branch: 0,
+    }
+}
+
+#[tokio::test]
+async fn 報告は書いてから配られる() {
+    // 配信を受け取った時点で DB に入っていること（設計§9-1）。逆だと、ブラウザには
+    // 出ているのに再読み込みで消えるという嘘になる
+    for backend in common::backends("apply").await {
+        let registry = SessionRegistry::load(backend.db.clone(), WINDOW)
+            .await
+            .expect("記録層を立てられること");
+        let mut events = registry.subscribe_events();
+        let card_id = CardId::new();
+
+        registry.apply(upsert(card_id)).await;
+
+        let message = events.recv().await.expect("配信されること");
+        assert!(
+            matches!(message, ServerMessage::SessionUpsert { .. }),
+            "[{}] 実際: {message:?}",
+            backend.name
+        );
+        // 配信を受け取った時点で、別に立てた記録層（＝DB だけを見る側）にも見えている
+        let other = SessionRegistry::load(backend.db.clone(), WINDOW)
+            .await
+            .expect("同じ DB から立て直せること");
+        assert_eq!(
+            other.list().len(),
+            1,
+            "[{}] DB に入っていない",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 外したカードは後から届いた報告で戻らない() {
+    // **回帰テスト。** 外す（archive）と記録は落ちるが、報告の待ち行列にはまだその
+    // カードのぶんが残っている（切替の結果配信・見張りの1周・処理中のフック）。
+    // それを素直に取り込むと記録が作り直され、消したはずのカードが一覧へ戻る。
+    //
+    // 実際に E2E がこれで壊れた——片付けたはずのカードが次のテストへ漏れ、
+    // 通しで流すと一覧の枚数が合わなくなる形で出た
+    for backend in common::backends("archived").await {
+        let registry = SessionRegistry::load(backend.db.clone(), WINDOW)
+            .await
+            .expect("記録層を立てられること");
+        let card_id = CardId::new();
+
+        registry.apply(upsert(card_id)).await;
+        assert_eq!(registry.list().len(), 1, "[{}]", backend.name);
+
+        registry
+            .apply(ServerMessage::SessionRemoved { card_id })
+            .await;
+        assert!(
+            registry.list().is_empty(),
+            "[{}] 外れていない",
+            backend.name
+        );
+
+        // 遅れて届いた報告
+        registry.apply(upsert(card_id)).await;
+        assert!(
+            registry.list().is_empty(),
+            "[{}] 外したカードが戻ってきた",
+            backend.name
+        );
+
+        // 立て直しても戻らない（DB 側にも外した印が残っている）
+        let again = SessionRegistry::load(backend.db.clone(), WINDOW)
+            .await
+            .expect("立て直せること");
+        assert!(
+            again.list().is_empty(),
+            "[{}] 再起動で戻ってきた",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 再起動しても履歴は残り接続していない印が付く() {
+    // 利用者判断：戻ってきたカードは一覧に出す。ただし PTY は道連れで死んでいるので、
+    // **鮮度が落ちていること**を `agent_connected=false` で示す（設計§6-3 と同型）
+    for backend in common::backends("restore").await {
+        let card_id = CardId::new();
+        {
+            let registry = SessionRegistry::load(backend.db.clone(), WINDOW)
+                .await
+                .expect("記録層を立てられること");
+            registry.apply(upsert(card_id)).await;
+            registry
+                .apply(ServerMessage::TranscriptAppend {
+                    card_id,
+                    nodes: vec![text_node("n1"), text_node("n2")],
+                })
+                .await;
+        }
+
+        // サーバだけを起動し直した状態
+        let restored = SessionRegistry::load(backend.db.clone(), WINDOW)
+            .await
+            .expect("立て直せること");
+
+        let listed = restored.list();
+        assert_eq!(listed.len(), 1, "[{}] 復元されていない", backend.name);
+        assert!(
+            !listed[0].agent_connected,
+            "[{}] 生きているように見えている",
+            backend.name
+        );
+        // 状態そのものは書き換えない（最後の既知状態のまま）
+        assert_eq!(
+            listed[0].status,
+            SessionStatus::Working,
+            "[{}]",
+            backend.name
+        );
+
+        // 履歴は読める。窓は DB の直近ぶんで満たされている
+        let record = restored.get(card_id).expect("記録があること");
+        let ids: Vec<String> = record
+            .transcript_snapshot()
+            .into_iter()
+            .map(|node| node.id.0)
+            .collect();
+        assert_eq!(ids, ["n1", "n2"], "[{}]", backend.name);
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 巻き戻りのあとも番号は最初から振り直される() {
+    // 巻き戻し（/rewind）で全部消えるので、続きの番号から始めると並びに穴が空いたまま
+    // 大きな値へ飛ぶ。消したなら番号も戻す
+    for backend in common::backends("rewind").await {
+        let registry = SessionRegistry::load(backend.db.clone(), WINDOW)
+            .await
+            .expect("記録層を立てられること");
+        let card_id = CardId::new();
+        registry.apply(upsert(card_id)).await;
+
+        registry
+            .apply(ServerMessage::TranscriptAppend {
+                card_id,
+                nodes: vec![text_node("a"), text_node("b")],
+            })
+            .await;
+        registry
+            .apply(ServerMessage::TranscriptReset { card_id })
+            .await;
+        registry
+            .apply(ServerMessage::TranscriptAppend {
+                card_id,
+                nodes: vec![text_node("c")],
+            })
+            .await;
+
+        let page = registry
+            .transcript_page(card_id, None, 10)
+            .await
+            .expect("読めること");
+        let ids: Vec<String> = page.nodes.into_iter().map(|node| node.id.0).collect();
+        assert_eq!(ids, ["c"], "[{}] 巻き戻りが効いていない", backend.name);
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 知らないカードの履歴は捨てる() {
+    // 外した直後に届いたノードで一覧を汚さない
+    for backend in common::backends("orphan").await {
+        let registry = SessionRegistry::load(backend.db.clone(), WINDOW)
+            .await
+            .expect("記録層を立てられること");
+        let card_id = CardId::new();
+
+        registry
+            .apply(ServerMessage::TranscriptAppend {
+                card_id,
+                nodes: vec![text_node("x")],
+            })
+            .await;
+
+        assert!(registry.list().is_empty(), "[{}]", backend.name);
+        assert_eq!(
+            registry.transcript_page(card_id, None, 10).await.err(),
+            Some(server_core::registry::PageError::NotFound),
+            "[{}]",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}

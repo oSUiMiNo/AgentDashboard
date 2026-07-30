@@ -22,16 +22,15 @@
 use crate::config::AgentConfig;
 use crate::session::SessionManager;
 use protocol::CardId;
-use protocol::ipc::{PROTOCOL_VERSION, ParsedNode, ParserCommand, ParserEvent};
+use protocol::ipc::{PROTOCOL_VERSION, ParserCommand, ParserEvent};
 use protocol::ws::{ParserState, ServerMessage};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 /// パーサ実行ファイルを差し替えるための環境変数。
 ///
@@ -45,9 +44,6 @@ const RESTART_BACKOFF_MS: [u64; 5] = [200, 500, 1_000, 2_000, 5_000];
 
 /// 指示の待ち行列。
 const REQUEST_QUEUE: usize = 256;
-
-/// 過去範囲の読み直しを待つ上限。返らないときに画面を固めない。
-const READ_RANGE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// SessionManager からパーサへ出す依頼。
 ///
@@ -98,10 +94,6 @@ pub struct ParserSupervisor {
     manager: Arc<SessionManager>,
     config: Arc<AgentConfig>,
     requests: mpsc::Sender<ParserRequest>,
-    commands: mpsc::Sender<ParserCommand>,
-    /// `read_range` の応答待ち
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Vec<ParsedNode>>>>>,
-    next_req: AtomicU64,
     state: Arc<Mutex<ParserState>>,
     /// 差し替え後に立て直しを頼む口（設計§9）
     restarts: mpsc::Sender<()>,
@@ -126,7 +118,6 @@ impl ParserSupervisor {
     /// パーサを起動し、世話をする常駐タスクを立てる。
     pub fn start(manager: Arc<SessionManager>, config: Arc<AgentConfig>) -> Arc<Self> {
         let (requests, request_rx) = mpsc::channel(REQUEST_QUEUE);
-        let (commands, command_rx) = mpsc::channel(REQUEST_QUEUE);
         // 立て直しの依頼は溜める意味が無い（1回入っていれば十分）
         let (restarts, restart_rx) = mpsc::channel(1);
 
@@ -134,20 +125,12 @@ impl ParserSupervisor {
             manager: Arc::clone(&manager),
             config: Arc::clone(&config),
             requests,
-            commands,
-            pending: Arc::new(Mutex::new(HashMap::new())),
-            next_req: AtomicU64::new(1),
             state: Arc::new(Mutex::new(ParserState::Ok)),
             restarts,
             stats_sink: Mutex::new(None),
         });
 
-        tokio::spawn(run(
-            Arc::clone(&supervisor),
-            request_rx,
-            command_rx,
-            restart_rx,
-        ));
+        tokio::spawn(run(Arc::clone(&supervisor), request_rx, restart_rx));
         supervisor
     }
 
@@ -182,53 +165,6 @@ impl ParserSupervisor {
 
     pub fn state(&self) -> ParserState {
         *self.state.lock().expect("ロックが壊れていない")
-    }
-
-    /// 過去の範囲をパーサに読み直してもらう。
-    ///
-    /// 返らないまま待ち続けると画面が固まるので、必ず上限を切る。パーサが縮退している
-    /// あいだは `None` を返し、呼び出し側は「これ以上遡れない」と伝える。
-    pub async fn read_range(
-        &self,
-        card_id: CardId,
-        source: String,
-        to_offset: u64,
-    ) -> Option<Vec<ParsedNode>> {
-        let req_id = self.next_req.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = oneshot::channel();
-        self.pending
-            .lock()
-            .expect("ロックが壊れていない")
-            .insert(req_id, tx);
-
-        let sent = self
-            .commands
-            .send(ParserCommand::ReadRange {
-                req_id,
-                card_id,
-                source,
-                from_offset: 0,
-                to_offset,
-            })
-            .await;
-        if sent.is_err() {
-            self.pending
-                .lock()
-                .expect("ロックが壊れていない")
-                .remove(&req_id);
-            return None;
-        }
-
-        match tokio::time::timeout(READ_RANGE_TIMEOUT, rx).await {
-            Ok(Ok(nodes)) => Some(nodes),
-            _ => {
-                self.pending
-                    .lock()
-                    .expect("ロックが壊れていない")
-                    .remove(&req_id);
-                None
-            }
-        }
     }
 
     fn set_state(&self, next: ParserState, detail: Option<String>) {
@@ -287,7 +223,6 @@ pub fn parser_program(config: &AgentConfig) -> PathBuf {
 async fn run(
     supervisor: Arc<ParserSupervisor>,
     mut requests: mpsc::Receiver<ParserRequest>,
-    mut commands: mpsc::Receiver<ParserCommand>,
     mut restarts: mpsc::Receiver<()>,
 ) {
     let store = OffsetStore::new(supervisor.config.resolved_state_dir());
@@ -305,7 +240,6 @@ async fn run(
                     &supervisor,
                     child,
                     &mut requests,
-                    &mut commands,
                     &mut restarts,
                     &mut offsets,
                     &mut watched,
@@ -362,7 +296,6 @@ async fn pump(
     supervisor: &Arc<ParserSupervisor>,
     mut child: tokio::process::Child,
     requests: &mut mpsc::Receiver<ParserRequest>,
-    commands: &mut mpsc::Receiver<ParserCommand>,
     restarts: &mut mpsc::Receiver<()>,
     offsets: &mut Offsets,
     watched: &mut HashMap<CardId, String>,
@@ -431,15 +364,6 @@ async fn pump(
                     let _ = write_command(&mut stdin, &ParserCommand::Shutdown).await;
                     return PumpEnd::Shutdown;
                 }
-            },
-
-            command = commands.recv() => match command {
-                Some(command) => {
-                    if write_command(&mut stdin, &command).await.is_err() {
-                        return PumpEnd::ParserGone;
-                    }
-                }
-                None => return PumpEnd::Shutdown,
             },
 
             event = events.recv() => match event {
@@ -523,9 +447,11 @@ fn handle_event(
             nodes,
             next_offset,
         } => {
-            if let Some(session) = supervisor.manager.get(card_id) {
-                session.append_transcript(&source, &nodes);
-            }
+            // **窓へ書くのではなく、上へ報告する**（セルフホスト化設計§3-3）。
+            // 履歴の持ち主はサーバ側の記録（DB）になったので、こちらは読んだものを
+            // そのまま渡すだけ。フェーズ3 では同じ報告が A2S を渡って
+            // TranscriptBatch になる（§6-1）
+            supervisor.manager.report_transcript(card_id, &nodes);
             // 配ったあとに位置を書く。前に書くと、その隙間で落ちたノードが静かに消える
             if let Some(path) = watched.get(&card_id) {
                 let entry =
@@ -545,23 +471,15 @@ fn handle_event(
         }
 
         ParserEvent::Reset { card_id } => {
-            if let Some(session) = supervisor.manager.get(card_id) {
-                session.reset_transcript();
-            }
+            supervisor.manager.report_transcript_reset(card_id);
             offsets.cards.remove(&card_id.to_string());
             store.save(offsets);
         }
 
-        ParserEvent::Range { req_id, nodes } => {
-            let waiting = supervisor
-                .pending
-                .lock()
-                .expect("ロックが壊れていない")
-                .remove(&req_id);
-            if let Some(waiting) = waiting {
-                let _ = waiting.send(nodes);
-            }
-        }
+        // 過去範囲の読み直しは**もう頼まない**（セルフホスト化設計§3-3）。
+        // 遡りの読み先が JSONL から DB へ変わったので、この応答は来ない。
+        // `ipc.rs` は凍結境界（設計§4-4）なので、変種そのものは残っている
+        ParserEvent::Range { .. } => {}
 
         ParserEvent::Stats {
             card_id,
@@ -591,20 +509,8 @@ fn handle_event(
             }
         }
 
-        ParserEvent::Error {
-            req_id, message, ..
-        } => {
+        ParserEvent::Error { message, .. } => {
             tracing::warn!("パーサからのエラー: {message}");
-            if let Some(req_id) = req_id {
-                let waiting = supervisor
-                    .pending
-                    .lock()
-                    .expect("ロックが壊れていない")
-                    .remove(&req_id);
-                if let Some(waiting) = waiting {
-                    let _ = waiting.send(Vec::new());
-                }
-            }
         }
     }
 }

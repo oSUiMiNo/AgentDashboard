@@ -24,8 +24,9 @@
 //! （セルフホスト化設計§2-3）。
 
 use crate::{
-    agent::{AgentHost, PageError, TranscriptPage},
+    agent::AgentHost,
     config::ServerConfig,
+    registry::{PageError, SessionRecord, SessionRegistry, TranscriptPage},
 };
 use axum::{
     Json,
@@ -61,16 +62,26 @@ const OUTBOUND_QUEUE_MESSAGES: usize = 64;
 
 #[derive(Clone)]
 pub struct AppState {
-    /// PC 側への口（セルフホスト化設計§2-3）。
+    /// PC 側への口（セルフホスト化設計§2-3）。**実体（PTY）に頼むことだけ**を持つ
     pub agent: Arc<dyn AgentHost>,
+    /// カードの記録（セルフホスト化設計§3）。一覧と履歴はこちらから読む。
+    ///
+    /// 実体と記録が別なのがフェーズ2 の要点。**記録は DB にあるので、実体が
+    /// 死んでいても一覧と履歴は出る**（再起動後の復元がまさにその状態）。
+    pub registry: Arc<SessionRegistry>,
     pub config: Arc<ServerConfig>,
     next_client_id: Arc<AtomicU64>,
 }
 
 impl AppState {
-    pub fn new(agent: Arc<dyn AgentHost>, config: Arc<ServerConfig>) -> Self {
+    pub fn new(
+        agent: Arc<dyn AgentHost>,
+        registry: Arc<SessionRegistry>,
+        config: Arc<ServerConfig>,
+    ) -> Self {
         Self {
             agent,
+            registry,
             config,
             next_client_id: Arc::new(AtomicU64::new(1)),
         }
@@ -86,7 +97,7 @@ pub async fn ws_handler(State(state): State<AppState>, upgrade: WebSocketUpgrade
 /// ブラウザは接続時にこれで「いまの全体」を取り、以後は WebSocket の差分だけを見る。
 /// 真実は常にサーバ側にあるので、リロードしても同じ画面へ戻れる。
 pub async fn api_sessions(State(state): State<AppState>) -> Json<Vec<SessionMeta>> {
-    Json(state.agent.list())
+    Json(state.registry.list())
 }
 
 /// `GET /api/sessions/{card_id}/transcript` の絞り込み。
@@ -97,11 +108,11 @@ pub struct TranscriptQuery {
     pub limit: Option<usize>,
 }
 
-/// `GET /api/sessions/{card_id}/transcript` — 履歴の遡り（設計§4）。
+/// `GET /api/sessions/{card_id}/transcript` — 履歴の遡り（設計§4・§3-3）。
 ///
-/// メモリに持つのは直近ウィンドウだけなので、それより前を求められたらファイルを
-/// 読み直してもらう。**読み直せないときは 503 を返す**。待ち続けて画面を固めるより、
-/// 「これ以上遡れない」と伝えるほうがよい。
+/// 読み先は DB。**パーサが縮退していても遡れる**のがフェーズ2 での変化で、
+/// 503 になるのは DB に聞けなかったときだけになった（初期実装では、窓から落ちた範囲を
+/// パーサに JSONL を読み直してもらっていたので、パーサが止まると遡れなかった）。
 pub async fn api_transcript(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
@@ -119,7 +130,7 @@ pub async fn api_transcript(
         .clamp(1, state.config.transcript_page_limit);
 
     state
-        .agent
+        .registry
         .transcript_page(card_id, query.before.map(NodeId), limit)
         .await
         .map(Json)
@@ -145,7 +156,7 @@ async fn client_loop(state: AppState, socket: WebSocket) {
 
     // 一覧の購読を先に始めてから現在の一覧を送る。逆順にすると、その隙間に起動した
     // セッションを取りこぼす。順序を守れば重複するだけで、upsert は重複しても害がない
-    let events = state.agent.subscribe_events();
+    let events = state.registry.subscribe_events();
 
     send_json(
         &outbound,
@@ -155,7 +166,7 @@ async fn client_loop(state: AppState, socket: WebSocket) {
         },
     )
     .await;
-    for meta in state.agent.list() {
+    for meta in state.registry.list() {
         send_json(
             &outbound,
             ServerMessage::SessionUpsert {
@@ -352,18 +363,17 @@ async fn handle_request(
             .set_flow(card_id, client_id, matches!(flow, FlowState::Pause)),
 
         ClientMessage::SubTranscript { card_id } => {
-            if !state.agent.exists(card_id) {
-                send_error(outbound, Some(card_id), "セッションが見つかりません".into()).await;
-                return;
-            }
+            // **生きているかではなく、記録があるかで判断する。** 前回の起動が残した
+            // カードは PTY を持たないが、履歴は DB に残っていて読める（設計§3-2）
             // 二重購読を防ぐ。同じカードを開き直したときは古い方を畳む
             if let Some(previous) = transcripts.remove(&card_id) {
                 previous.abort();
             }
-            let Some((snapshot, receiver)) = state.agent.subscribe_transcript(card_id) else {
+            let Some(record) = state.registry.get(card_id) else {
                 send_error(outbound, Some(card_id), "セッションが見つかりません".into()).await;
                 return;
             };
+            let (snapshot, receiver) = record.subscribe_transcript();
             // まず作り直しを指示してから中身を送る。こうすると再購読が冪等になり、
             // 開き直しても順序や展開状態が混ざらない
             send_json(outbound, ServerMessage::TranscriptReset { card_id }).await;
@@ -389,12 +399,7 @@ async fn handle_request(
                 .await;
             }
 
-            let task = tokio::spawn(pump_transcript(
-                Arc::clone(&state.agent),
-                card_id,
-                receiver,
-                outbound.clone(),
-            ));
+            let task = tokio::spawn(pump_transcript(record, receiver, outbound.clone()));
             transcripts.insert(card_id, task);
         }
 
@@ -508,8 +513,7 @@ async fn pump_terminal(
 /// 約束（設計§4）があるため、取りこぼしたらウィンドウ全体を送り直せば収束する。
 /// 端末のように「途中を落とすと表示が割れる」性質が無いので、作り直しの指示は要らない。
 async fn pump_transcript(
-    agent: Arc<dyn AgentHost>,
-    card_id: CardId,
+    record: Arc<SessionRecord>,
     mut nodes: broadcast::Receiver<Arc<String>>,
     outbound: mpsc::Sender<Message>,
 ) {
@@ -525,16 +529,14 @@ async fn pump_transcript(
                 }
             }
             Err(broadcast::error::RecvError::Lagged(_)) => {
-                let Some(snapshot) = agent.transcript_snapshot(card_id) else {
-                    break;
-                };
+                let snapshot = record.transcript_snapshot();
                 if snapshot.is_empty() {
                     continue;
                 }
                 if !send_json(
                     &outbound,
                     ServerMessage::TranscriptAppend {
-                        card_id,
+                        card_id: record.card_id,
                         nodes: snapshot,
                     },
                 )

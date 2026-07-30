@@ -42,7 +42,18 @@ export default defineConfig({
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: {
-    command: `${serverBinary} --config e2e/config.toml`,
+    // 記録の DB（設計§3-2）を**起動の直前に**消す。
+    //
+    // DB が真実になったので、サーバは起動時に前回のカードを一覧へ復元する（PTY は
+    // 道連れで死んでいるが記録は残る、という新しい約束）。実運用ではそれが正しいが、
+    // E2E は「まだ何も起動していない」から始まる前提なので、前回の残骸が混ざると
+    // ほぼ全部のテストが落ちる。
+    //
+    // **`globalSetup` では消せない。** Playwright は webServer を先に起動するので、
+    // そこで消すと**開いたままのファイルを消す**ことになり、SQLite が
+    // 「attempt to write a readonly database」（DBMOVED）を返し続ける。
+    // 消す側と開く側の順序は、同じコマンド行に並べて初めて保証できる。
+    command: `rm -f test-results/state/dashboard.db* && ${serverBinary} --config e2e/config.toml`,
     env: {
       // 本物の claude ではなく擬似 claude を起動させる
       AGENTDASHBOARD_CLAUDE_BIN: fakeClaude,

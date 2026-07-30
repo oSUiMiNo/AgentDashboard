@@ -28,13 +28,12 @@ use crate::{
     config::AgentConfig,
     events::{EventSink, LocalEventBus},
     state::{self, Changed, HookInput},
-    transcript::{Anchor, TranscriptWindow},
 };
 use bytes::Bytes;
 use hooks_settings::HookSettings;
 use protocol::{
-    CardId, ClaudeSessionId, ModelId, NodeId, PermissionMode, ProjectId, SessionMeta,
-    SessionStatus, Timestamp, TreeNode,
+    CardId, ClaudeSessionId, ModelId, PermissionMode, ProjectId, SessionMeta, SessionStatus,
+    Timestamp,
     frame::{self, FrameKind},
     ipc::ParsedNode,
     ws::ServerMessage,
@@ -65,12 +64,6 @@ const MAX_COALESCED_FRAME: usize = 128 * 1024;
 /// 8ms 窓なら毎秒 125 フレーム程度なので、およそ1秒分の余裕にあたる。これを超えて
 /// 遅れたクライアントはスナップショットで作り直す。
 pub const OUTPUT_QUEUE_FRAMES: usize = 128;
-
-/// 履歴購読1本あたりの配信待ち行列（メッセージ数）。
-///
-/// 履歴はツールコールの頻度で流れるので PTY ほど高頻度ではない。溢れたクライアントは
-/// ウィンドウ全体を送り直せば追いつける（同じIDは上書きなので重複は害にならない）。
-pub const TRANSCRIPT_QUEUE_MESSAGES: usize = 64;
 
 /// 起動直後の端末サイズ。ブラウザがターミナルを開いた時点で `resize` が届く。
 const INITIAL_COLS: u16 = 80;
@@ -284,15 +277,10 @@ pub struct Session {
     /// このセッションに注入したフック設定（一時ファイルとトークン）。
     settings: HookSettings,
     /// SessionStart フックが知らせてきた JSONL の場所。パーサに監視を頼む先でもある。
-    transcript_path: Mutex<Option<String>>,
-    /// 構造化ビュー用の履歴。メモリに持つのは直近ウィンドウだけ（設計§4）
-    transcript: Mutex<TranscriptWindow>,
-    /// 履歴の配信。PTY と違い**購読しているクライアントにだけ**流す。
     ///
-    /// 一覧しか開いていないクライアントにまで履歴を送ると、12セッション同時稼働のときに
-    /// 無関係な JSON で送信キューが埋まる。PTY の配信（[`Session::output`]）と対称に、
-    /// カード単位のチャネルを持たせている。
-    transcript_tx: broadcast::Sender<Arc<String>>,
+    /// **サーバ側へは移さない**（設計§2-2 からの読み替え）。これは PC 上のファイルの
+    /// 場所で、サーバに JSONL は存在しない（§3-3）ため、向こうへ置いても使えない。
+    transcript_path: Mutex<Option<String>>,
     /// 終了が「想定内」であることの印。
     ///
     /// ダッシュボードから終了させた場合、子プロセスは強制終了されるので終了コードは
@@ -810,77 +798,6 @@ impl Session {
             .clone()
     }
 
-    /// 履歴の購読を、いま持っているぶんの取得と**同じロックの中で**始める。
-    ///
-    /// PTY の [`Session::subscribe_with_snapshot`] と同じ理由。取得と購読開始がずれると、
-    /// その隙間に届いたノードを取りこぼす。逆側にずれた場合は同じノードが二度届くが、
-    /// 履歴は「同じIDは上書き」の約束なので害が無い。**迷ったら重ねる側に倒す。**
-    pub fn subscribe_transcript(&self) -> (Vec<TreeNode>, broadcast::Receiver<Arc<String>>) {
-        let window = self.transcript.lock().expect("ロックが壊れていない");
-        let receiver = self.transcript_tx.subscribe();
-        (window.snapshot(), receiver)
-    }
-
-    /// パーサが読んだノードを取り込み、購読者へ配る。
-    pub fn append_transcript(&self, source: &str, nodes: &[ParsedNode]) {
-        if nodes.is_empty() {
-            return;
-        }
-        let mut window = self.transcript.lock().expect("ロックが壊れていない");
-        window.append(source, nodes);
-        self.broadcast_transcript(&ServerMessage::TranscriptAppend {
-            card_id: self.card_id,
-            nodes: nodes.iter().map(|parsed| parsed.node.clone()).collect(),
-        });
-    }
-
-    /// 巻き戻り（`/rewind`）を受けて履歴を捨てる。
-    pub fn reset_transcript(&self) {
-        let mut window = self.transcript.lock().expect("ロックが壊れていない");
-        window.clear();
-        self.broadcast_transcript(&ServerMessage::TranscriptReset {
-            card_id: self.card_id,
-        });
-    }
-
-    /// 購読者が居るときだけ直列化して配る。
-    ///
-    /// 巨大な Edit の結果を JSON にする処理がコストの本体なので、誰も見ていないカードで
-    /// それをやらない。ウィンドウの更新は購読の有無に関わらず続ける（開いた瞬間に
-    /// 履歴が出るのはこのため）。
-    fn broadcast_transcript(&self, message: &ServerMessage) {
-        if self.transcript_tx.receiver_count() == 0 {
-            return;
-        }
-        if let Ok(text) = serde_json::to_string(message) {
-            let _ = self.transcript_tx.send(Arc::new(text));
-        }
-    }
-
-    /// 取りこぼした購読者を作り直すための、ウィンドウ全体。
-    pub fn transcript_snapshot(&self) -> Vec<TreeNode> {
-        self.transcript
-            .lock()
-            .expect("ロックが壊れていない")
-            .snapshot()
-    }
-
-    /// ウィンドウの中だけで「このノードより前」に答えられるなら答える。
-    pub fn transcript_before(&self, before: &NodeId, limit: usize) -> Option<Vec<TreeNode>> {
-        self.transcript
-            .lock()
-            .expect("ロックが壊れていない")
-            .before_in_window(before, limit)
-    }
-
-    /// ウィンドウの外を読み直すための起点。
-    pub fn transcript_anchor(&self, before: &NodeId) -> Option<Anchor> {
-        self.transcript
-            .lock()
-            .expect("ロックが壊れていない")
-            .anchor_for(before)
-    }
-
     /// 届いたフック1件を状態機械へ通す（設計§5）。
     ///
     /// 判定そのものは [`crate::state::apply`] に閉じている。ここがやるのは
@@ -968,6 +885,25 @@ impl SessionManager {
         Self::with_program(config, lifecycle::claude_program())
     }
 
+    /// 報告先を明示して作る（セルフホスト化設計§2-3）。
+    ///
+    /// ローカルモードでは、束ねる層が「DB へ書いてからブラウザへ配る」報告先を渡す。
+    /// フェーズ3 では A2S へ転送する実装に変わる。**流し先をここで決めない**のが
+    /// [`EventSink`] を置いた理由なので、入口も分けてある。
+    pub fn with_sink(config: Arc<AgentConfig>, events: Arc<dyn EventSink>) -> Arc<Self> {
+        let program = lifecycle::claude_program();
+        let hook_program = hooks_settings::hook_program();
+        let (claude_settings, aliases) = Self::user_files(&config);
+        Self::with_everything(
+            config,
+            program,
+            hook_program,
+            claude_settings,
+            aliases,
+            events,
+        )
+    }
+
     /// 起動する CLI を明示して作る。
     pub fn with_program(config: Arc<AgentConfig>, program: String) -> Arc<Self> {
         Self::with_programs(config, program, hooks_settings::hook_program())
@@ -982,13 +918,7 @@ impl SessionManager {
         program: String,
         hook_program: PathBuf,
     ) -> Arc<Self> {
-        let aliases = Arc::new(crate::model_aliases::ModelAliases::load(Some(
-            config.resolved_state_dir(),
-        )));
-        let claude_settings = Arc::new(match &config.claude_settings_path {
-            Some(path) => crate::claude_settings::ClaudeSettings::new(path.clone()),
-            None => crate::claude_settings::ClaudeSettings::discover(),
-        });
+        let (claude_settings, aliases) = Self::user_files(&config);
         Self::with_everything(
             config,
             program,
@@ -997,6 +927,23 @@ impl SessionManager {
             aliases,
             Arc::new(LocalEventBus::new()),
         )
+    }
+
+    /// 利用者の PC 上のファイル（グローバル既定・別名の実測）を開く。
+    fn user_files(
+        config: &AgentConfig,
+    ) -> (
+        Arc<crate::claude_settings::ClaudeSettings>,
+        Arc<crate::model_aliases::ModelAliases>,
+    ) {
+        let aliases = Arc::new(crate::model_aliases::ModelAliases::load(Some(
+            config.resolved_state_dir(),
+        )));
+        let claude_settings = Arc::new(match &config.claude_settings_path {
+            Some(path) => crate::claude_settings::ClaudeSettings::new(path.clone()),
+            None => crate::claude_settings::ClaudeSettings::discover(),
+        });
+        (claude_settings, aliases)
     }
 
     /// グローバル既定と別名の置き場所まで明示して作る。
@@ -1245,8 +1192,6 @@ impl SessionManager {
             pause_requests: Mutex::new(HashSet::new()),
             settings,
             transcript_path: Mutex::new(None),
-            transcript: Mutex::new(TranscriptWindow::new(self.config.transcript_window_nodes)),
-            transcript_tx: broadcast::channel(TRANSCRIPT_QUEUE_MESSAGES).0,
             expected_exit: AtomicBool::new(false),
             saw_output: AtomicBool::new(false),
             model_alias: Mutex::new(initial_alias),
@@ -1368,6 +1313,30 @@ impl SessionManager {
             }
         }
         self.publish(session, changed);
+    }
+
+    /// パーサが読んだノードを**上へ報告する**（セルフホスト化設計§3-3・§6-1）。
+    ///
+    /// フェーズ1 まではセッションが持つ窓へ直接書いていたが、DB が真実になったので
+    /// 履歴の持ち主はサーバ側の記録に移った。エージェントは読んで渡すだけになる。
+    ///
+    /// 知らないカードのぶんは捨てる。外した直後に届いたノードで一覧を汚さないため。
+    pub fn report_transcript(&self, card_id: CardId, nodes: &[ParsedNode]) {
+        if nodes.is_empty() || self.get(card_id).is_none() {
+            return;
+        }
+        self.events.emit(ServerMessage::TranscriptAppend {
+            card_id,
+            nodes: nodes.iter().map(|parsed| parsed.node.clone()).collect(),
+        });
+    }
+
+    /// 巻き戻り（`/rewind`）を上へ報告する。
+    pub fn report_transcript_reset(&self, card_id: CardId) {
+        if self.get(card_id).is_none() {
+            return;
+        }
+        self.events.emit(ServerMessage::TranscriptReset { card_id });
     }
 
     /// パーサへの口を差し込む。

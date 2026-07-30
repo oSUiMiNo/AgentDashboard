@@ -13,6 +13,7 @@ const DEFAULT_PORT: u16 = 8787;
 const DEFAULT_FLOW_HIGH: usize = 256 * 1024;
 const DEFAULT_FLOW_LOW: usize = 32 * 1024;
 const DEFAULT_TRANSCRIPT_PAGE_LIMIT: usize = 200;
+const DEFAULT_TRANSCRIPT_WINDOW_NODES: usize = 2000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
@@ -24,6 +25,17 @@ pub struct ServerConfig {
     pub flow_low: usize,
     /// 履歴ページングの1回あたりの上限（ノード数）
     pub transcript_page_limit: usize,
+    /// メモリに置く履歴の読みキャッシュの大きさ（ノード数。設計§3-3）。
+    ///
+    /// フェーズ1 まではエージェント側の設定だった（窓が履歴の持ち主だったため）。
+    /// **DB が真実になったので、窓ごとサーバ側へ移った**。
+    pub transcript_window_nodes: usize,
+    /// 記録の置き場所（設計§13-2）。
+    ///
+    /// 既定は `sqlite://<state_dir>/dashboard.db`。`state_dir` はエージェント側の
+    /// キーなので、既定値の解決は両側を束ねる層が行う（[`ServerConfig::default`] は
+    /// それを知らないため `None` のまま）。
+    pub database_url: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -33,6 +45,8 @@ impl Default for ServerConfig {
             flow_high: DEFAULT_FLOW_HIGH,
             flow_low: DEFAULT_FLOW_LOW,
             transcript_page_limit: DEFAULT_TRANSCRIPT_PAGE_LIMIT,
+            transcript_window_nodes: DEFAULT_TRANSCRIPT_WINDOW_NODES,
+            database_url: None,
         }
     }
 }

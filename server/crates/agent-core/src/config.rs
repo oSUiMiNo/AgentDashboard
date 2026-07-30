@@ -24,7 +24,6 @@ const DEFAULT_CANARY_FALLBACK_MODEL: &str = "sonnet";
 const DEFAULT_REPAIR_MODEL: &str = "sonnet";
 const DEFAULT_SELFHEAL_RETRY: u32 = 3;
 const DEFAULT_SELFHEAL_COOLDOWN_HOURS: u64 = 24;
-const DEFAULT_TRANSCRIPT_WINDOW_NODES: usize = 2000;
 /// `statusLine` を再実行する間隔（秒）。
 ///
 /// 実測で `refreshInterval: 3` はきっちり3.0秒間隔で走った（設計§11 前提6）。
@@ -85,12 +84,6 @@ pub struct AgentConfig {
     /// （設計§9 の実行環境の前提）。None なら起動時のカレントディレクトリから
     /// 上へ辿って探す。見つからなければ自己修復は検知の通知だけに留まる。
     pub selfheal_repo_dir: Option<PathBuf>,
-    /// メモリに保持する履歴の直近ウィンドウ（ノード数、設計§4）。
-    ///
-    /// セルフホスト化設計§13-2 はこのキーを `ServerConfig` に置いているが、それは
-    /// `TranscriptWindow` がサーバ側へ移ったあとの姿。窓の持ち主が
-    /// [`crate::session::Session`] であるうちはエージェント側で読む（フェーズ2 で窓ごと移す）。
-    pub transcript_window_nodes: usize,
     /// 再開位置などの状態を置く場所。
     ///
     /// 既定は `$XDG_STATE_HOME/agentdashboard`（無ければ `~/.local/state/agentdashboard`）。
@@ -137,7 +130,6 @@ impl Default for AgentConfig {
             selfheal_retry: DEFAULT_SELFHEAL_RETRY,
             selfheal_cooldown_hours: DEFAULT_SELFHEAL_COOLDOWN_HOURS,
             selfheal_repo_dir: None,
-            transcript_window_nodes: DEFAULT_TRANSCRIPT_WINDOW_NODES,
             state_dir: None,
             claude_settings_path: None,
             inject_status_line: true,

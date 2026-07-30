@@ -461,15 +461,15 @@ async fn 未知の版を見つけたら修復セッションを起こして差�
     );
 
     // 差し替えたあとも履歴が続きから届く（再開位置は core が持っているので無欠落）
-    let before = session.transcript_snapshot().len();
+    let before = server.transcript_of(session.card_id).len();
     append_records(&transcript, 2, "9.9.9", 100);
     for _ in 0..200 {
-        if session.transcript_snapshot().len() >= before + 2 {
+        if server.transcript_of(session.card_id).len() >= before + 2 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let nodes = session.transcript_snapshot();
+    let nodes = server.transcript_of(session.card_id);
     assert_eq!(
         nodes.len(),
         5,
@@ -669,12 +669,15 @@ async fn パーサが居なくなってもターミナルと状態表示は無�
 
     append_records(&transcript, 3, "2.1.220", 0);
     for _ in 0..100 {
-        if !session.transcript_snapshot().is_empty() {
+        if !server.transcript_of(session.card_id).is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(!session.transcript_snapshot().is_empty(), "まず履歴が届く");
+    assert!(
+        !server.transcript_of(session.card_id).is_empty(),
+        "まず履歴が届く"
+    );
 
     // パーサを「起動した瞬間に落ちるもの」へ差し替えて立て直す（＝居なくなった状態）
     std::fs::write(pointer_path(&dir), b"/bin/false").expect("ポインタを書けること");

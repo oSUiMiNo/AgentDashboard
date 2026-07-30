@@ -64,6 +64,7 @@ pub struct Config {
     pub transcript_window_nodes: usize,
     pub transcript_page_limit: usize,
     pub state_dir: Option<PathBuf>,
+    pub database_url: Option<String>,
     pub inject_status_line: bool,
     pub claude_settings_path: Option<PathBuf>,
     pub status_line_refresh_secs: u64,
@@ -90,9 +91,10 @@ impl Default for Config {
             selfheal_retry: agent.selfheal_retry,
             selfheal_cooldown_hours: agent.selfheal_cooldown_hours,
             selfheal_repo_dir: agent.selfheal_repo_dir,
-            transcript_window_nodes: agent.transcript_window_nodes,
+            transcript_window_nodes: server.transcript_window_nodes,
             transcript_page_limit: server.transcript_page_limit,
             state_dir: agent.state_dir,
+            database_url: server.database_url,
             inject_status_line: agent.inject_status_line,
             claude_settings_path: agent.claude_settings_path,
             status_line_refresh_secs: agent.status_line_refresh_secs,
@@ -162,7 +164,6 @@ impl Config {
             selfheal_retry: self.selfheal_retry,
             selfheal_cooldown_hours: self.selfheal_cooldown_hours,
             selfheal_repo_dir: self.selfheal_repo_dir.clone(),
-            transcript_window_nodes: self.transcript_window_nodes,
             state_dir: self.state_dir.clone(),
             claude_settings_path: self.claude_settings_path.clone(),
             inject_status_line: self.inject_status_line,
@@ -178,7 +179,25 @@ impl Config {
             flow_high: self.flow_high,
             flow_low: self.flow_low,
             transcript_page_limit: self.transcript_page_limit,
+            transcript_window_nodes: self.transcript_window_nodes,
+            // 既定は状態の置き場所の隣。**エージェント側のキーから決まる**ので、
+            // 両側を知っているこの層でしか解決できない（`ServerConfig::default` は
+            // `state_dir` を知らないため `None` のまま）
+            database_url: Some(self.resolved_database_url()),
         }
+    }
+
+    /// 記録の置き場所を決める（設計§13-2）。
+    ///
+    /// 明示が無ければ状態の置き場所（`state_dir`）の隣に SQLite ファイルを作る。
+    /// ビルド成果物の中や一時ディレクトリに置かないのは再開位置と同じ理由——
+    /// 消えると**一覧と履歴が丸ごと消える**。
+    pub fn resolved_database_url(&self) -> String {
+        if let Some(url) = &self.database_url {
+            return url.clone();
+        }
+        let path = self.agent().resolved_state_dir().join("dashboard.db");
+        format!("sqlite://{}", path.display())
     }
 
     /// 型が合っていても意味的に成立しない組み合わせを弾く。
@@ -404,6 +423,7 @@ mod tests {
             transcript_window_nodes = 33
             transcript_page_limit = 44
             state_dir = "/tmp/state"
+            database_url = "sqlite:///tmp/db/dashboard.db"
             inject_status_line = false
             claude_settings_path = "/tmp/settings.json"
             status_line_refresh_secs = 5
@@ -423,7 +443,6 @@ mod tests {
         assert_eq!(agent.selfheal_retry, 7);
         assert_eq!(agent.selfheal_cooldown_hours, 11);
         assert_eq!(agent.selfheal_repo_dir, Some(PathBuf::from("/tmp/repo")));
-        assert_eq!(agent.transcript_window_nodes, 33);
         assert_eq!(agent.state_dir, Some(PathBuf::from("/tmp/state")));
         assert_eq!(
             agent.claude_settings_path,
@@ -437,6 +456,11 @@ mod tests {
         assert_eq!(server.flow_high, 4096);
         assert_eq!(server.flow_low, 1024);
         assert_eq!(server.transcript_page_limit, 44);
+        assert_eq!(server.transcript_window_nodes, 33);
+        assert_eq!(
+            server.database_url.as_deref(),
+            Some("sqlite:///tmp/db/dashboard.db")
+        );
     }
 
     #[test]

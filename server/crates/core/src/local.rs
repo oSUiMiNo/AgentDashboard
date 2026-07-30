@@ -17,15 +17,16 @@
 //! ローカルモードの体感速度は初期実装フェーズ4 の実測（12セッションで61fps）が前提なので、
 //! 境界を挟んだぶんの手数を足してはいけない。
 
-use agent_core::{parser::ParserSupervisor, session::SessionManager};
-use bytes::Bytes;
-use protocol::{
-    CardId, ModelId, NodeId, PermissionMode, SessionMeta, TreeNode,
-    ws::{ParserState, ServerMessage},
+use agent_core::{
+    events::{EventSink, LocalEventBus},
+    parser::ParserSupervisor,
+    session::SessionManager,
 };
-use server_core::agent::{AgentHost, PageError, TranscriptPage};
+use bytes::Bytes;
+use protocol::{CardId, ModelId, PermissionMode, ws::ParserState, ws::ServerMessage};
+use server_core::{agent::AgentHost, registry::SessionRegistry};
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
 /// 見つからないカードを指されたときの説明。
 const NOT_FOUND: &str = "セッションが見つかりません";
@@ -55,16 +56,8 @@ impl LocalAgent {
 
 #[async_trait::async_trait]
 impl AgentHost for LocalAgent {
-    fn list(&self) -> Vec<SessionMeta> {
-        self.manager.list()
-    }
-
     fn exists(&self, card_id: CardId) -> bool {
         self.manager.get(card_id).is_some()
-    }
-
-    fn subscribe_events(&self) -> broadcast::Receiver<ServerMessage> {
-        self.manager.subscribe_events()
     }
 
     fn spawn(&self, cwd: &str, permission_mode: Option<PermissionMode>) -> Result<CardId, String> {
@@ -115,64 +108,6 @@ impl AgentHost for LocalAgent {
         }
     }
 
-    fn subscribe_transcript(
-        &self,
-        card_id: CardId,
-    ) -> Option<(Vec<TreeNode>, broadcast::Receiver<Arc<String>>)> {
-        Some(self.manager.get(card_id)?.subscribe_transcript())
-    }
-
-    fn transcript_snapshot(&self, card_id: CardId) -> Option<Vec<TreeNode>> {
-        Some(self.manager.get(card_id)?.transcript_snapshot())
-    }
-
-    async fn transcript_page(
-        &self,
-        card_id: CardId,
-        before: Option<NodeId>,
-        limit: usize,
-    ) -> Result<TranscriptPage, PageError> {
-        let session = self.manager.get(card_id).ok_or(PageError::NotFound)?;
-
-        let Some(before) = before else {
-            // 起点の指定なし＝手元の最新ぶん
-            let mut nodes = session.transcript_snapshot();
-            let has_more = nodes.len() > limit;
-            if has_more {
-                nodes = nodes.split_off(nodes.len() - limit);
-            }
-            return Ok(TranscriptPage { nodes, has_more });
-        };
-
-        // 手元のウィンドウで答えられるならパーサへ行かない
-        if let Some(nodes) = session.transcript_before(&before, limit) {
-            let has_more = nodes.len() == limit;
-            return Ok(TranscriptPage { nodes, has_more });
-        }
-
-        let Some(anchor) = session.transcript_anchor(&before) else {
-            // どこにも位置の記録が無い＝これ以上は遡れない
-            return Ok(TranscriptPage {
-                nodes: Vec::new(),
-                has_more: false,
-            });
-        };
-        let parser = self.parser.as_ref().ok_or(PageError::Unavailable)?;
-        let mut parsed = parser
-            .read_range(card_id, anchor.source, anchor.offset)
-            .await
-            .ok_or(PageError::Unavailable)?;
-
-        let has_more = parsed.len() > limit;
-        if has_more {
-            parsed = parsed.split_off(parsed.len() - limit);
-        }
-        Ok(TranscriptPage {
-            nodes: parsed.into_iter().map(|parsed| parsed.node).collect(),
-            has_more,
-        })
-    }
-
     fn parser_state(&self) -> Option<ParserState> {
         self.parser.as_ref().map(|parser| parser.state())
     }
@@ -209,4 +144,63 @@ impl AgentHost for LocalAgent {
             }
         }
     }
+}
+
+/// エージェントの報告を**記録層へ運ぶ**報告先（セルフホスト化設計§2-3・§3-3）。
+///
+/// フェーズ1 では、エージェントの報告はそのままブラウザへ配られていた。フェーズ2 で
+/// DB が真実になったので、間に記録層（[`SessionRegistry`]）が入る。
+///
+/// ```text
+/// SessionManager --emit--> ReportingSink --(待ち行列)--> SessionRegistry
+///                                                         ├ DB へ書く
+///                                                         └ ブラウザへ配る
+/// ```
+///
+/// # 待ち行列に上限を置かない
+///
+/// DB への書き込みは非同期なので、報告（同期）と書き込みの間に待ち行列が要る。ここを
+/// **上限つきにして溢れたら捨てる**形にはできない——捨てた履歴は二度と来ないので、
+/// 「欠落なし」（要件の非機能）が壊れる。設計§6-1 が「欠落より重複を選ぶ」と決めている
+/// のと同じ判断で、**遅れは許容し、欠落は許容しない**。
+///
+/// # 手元の配信も残す
+///
+/// 自己修復は、自分が起こしたセッションの様子を**同じプロセスの中で**見ながら進む
+/// （`selfheal`）。記録層へ流すだけにすると、その購読者が居なくなる。
+pub struct ReportingSink {
+    /// 同じプロセス内の購読者（自己修復）向け
+    bus: LocalEventBus,
+    /// 記録層への待ち行列
+    reports: mpsc::UnboundedSender<ServerMessage>,
+}
+
+impl EventSink for ReportingSink {
+    fn emit(&self, event: ServerMessage) {
+        // 記録層が落ちている（受け口が閉じた）場合でも、手元の購読者へは配り続ける
+        let _ = self.reports.send(event.clone());
+        self.bus.emit(event);
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<ServerMessage> {
+        self.bus.subscribe()
+    }
+}
+
+/// 記録層へ繋いだ報告先を作り、運ぶ役を1本立てる。
+///
+/// 呼び出し側は**この1本を [`SessionManager`] へ渡すだけ**でよい。
+pub fn reporting(registry: Arc<SessionRegistry>) -> Arc<ReportingSink> {
+    let (reports, mut inbox) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        // 1本のタスクで順に処理する。**順序がそのまま DB への書き込み順になる**ので、
+        // 巻き戻し（TranscriptReset）がバッチを追い越さない（設計§6-2）
+        while let Some(message) = inbox.recv().await {
+            registry.apply(message).await;
+        }
+    });
+    Arc::new(ReportingSink {
+        bus: LocalEventBus::new(),
+        reports,
+    })
 }

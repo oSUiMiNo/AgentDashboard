@@ -90,6 +90,19 @@ pub fn claude_settings_for(config: &AgentConfig) -> Arc<ClaudeSettings> {
 /// **開発者の本物の状態ディレクトリ**（`~/.local/state/agentdashboard`）になる。
 /// グローバル設定と同じ性質の漏れなので、まとめて塞ぐ。
 pub fn build_manager(config: Arc<AgentConfig>, program: String) -> Arc<SessionManager> {
+    build_manager_with(config, program, Arc::new(LocalEventBus::new()))
+}
+
+/// 報告先を明示して作る。
+///
+/// ブラウザ配信まで通すテスト（束ねる層）は、報告を記録層（DB）へ運ぶ実装を渡す。
+/// **エージェント単体のテストは手元の配信のままでよい**——確かめたいのが PTY と
+/// フックの往復で、記録はその先の話だから。
+pub fn build_manager_with(
+    config: Arc<AgentConfig>,
+    program: String,
+    events: Arc<dyn agent_core::events::EventSink>,
+) -> Arc<SessionManager> {
     let claude_settings = claude_settings_for(&config);
     SessionManager::with_everything(
         config,
@@ -97,7 +110,7 @@ pub fn build_manager(config: Arc<AgentConfig>, program: String) -> Arc<SessionMa
         hook_program(),
         claude_settings,
         Arc::new(ModelAliases::in_memory()),
-        Arc::new(LocalEventBus::new()),
+        events,
     )
 }
 

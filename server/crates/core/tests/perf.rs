@@ -110,32 +110,27 @@ async fn frames_with_window(coalesce_ms: u64) -> usize {
     watcher.output_frames
 }
 
-#[tokio::test]
-async fn 巨大な履歴でも保持量は直近ウィンドウに収まる() {
+#[test]
+fn 巨大な履歴でも保持量は直近ウィンドウに収まる() {
     // テスト計画フェーズ6「巨大JSONL」のサーバ側。先行事例では数GBのトランスクリプトで
-    // メモリが破綻した例があるため、**届いた量に比例して太らない**ことを固定する
+    // メモリが破綻した例があるため、**届いた量に比例して太らない**ことを固定する。
+    //
+    // フェーズ2 で窓の持ち主がサーバ側へ移った（設計§3-3）ので、見る対象も移した。
+    // 窓へ直接流し込むのは、**有界性は窓の性質**であって経路の性質ではないため——
+    // DB を挟むと数十万件の書き込み待ちになり、測っているものが変わってしまう。
+    // 経路そのものは transcript.rs（端から端まで）が見ている。
     let window = 2_000;
-    let config = AgentConfig {
-        transcript_window_nodes: window,
-        ..AgentConfig::default()
-    };
-    let manager = common::manager_with(config);
-    let (session, _watcher) = common::start_session(&manager).await;
+    let mut held = server_core::transcript::TranscriptWindow::new(window);
 
     // 数十万行に相当するノードを、パーサから届いたのと同じ形で流し込む
     let total = 200_000;
     let chunk = 1_000;
     for start in (0..total).step_by(chunk) {
-        let nodes: Vec<protocol::ipc::ParsedNode> = (start..start + chunk)
-            .map(|index| protocol::ipc::ParsedNode {
-                node: text_node(index),
-                offset: index as u64 * 128,
-            })
-            .collect();
-        session.append_transcript("/p/s.jsonl", &nodes);
+        let nodes: Vec<TreeNode> = (start..start + chunk).map(text_node).collect();
+        held.append(&nodes);
     }
 
-    let snapshot = session.transcript_snapshot();
+    let snapshot = held.snapshot();
     assert_eq!(
         snapshot.len(),
         window,
@@ -146,14 +141,8 @@ async fn 巨大な履歴でも保持量は直近ウィンドウに収まる() {
     let last = snapshot.last().expect("最後のノードがあること");
     assert_eq!(last.id, NodeId(format!("n{}", total - 1)));
 
-    // 捨てた範囲を遡ると、どこから読み直せばよいかは分かる（パーサへ頼む手掛かり）
-    let anchor_id = NodeId(format!("n{}", total - window));
-    assert!(
-        session.transcript_anchor(&anchor_id).is_some(),
-        "捨てた範囲の位置は控えてあること"
-    );
-
-    session.kill();
+    // 窓から落ちた範囲へは DB で遡る（設計§3-3）。まばらな索引は要らなくなった——
+    // 位置がバイトオフセットではなく seq になり、DB が並びを持っているため
 }
 
 fn text_node(index: usize) -> TreeNode {
@@ -196,7 +185,12 @@ async fn 十二セッションを同時に起動しても状態が全部届く()
         common::wait_for_status(session, protocol::SessionStatus::Working).await;
     }
 
-    // 一覧の口からも12枚そろって見えること
+    // 一覧の口からも12枚そろって見えること。
+    // 実体が Working になっても記録へ渡るのは1段あと（設計§9-1 の「書いてから配る」）
+    // なので、**取りこぼしていないこと**を見るにはそちらが追いつくのを待つ
+    server
+        .wait_for_listed("12枚そろう", |listed| listed.len() == 12)
+        .await;
     let (status, body) = server.get("/api/sessions").await;
     assert_eq!(status, 200);
     let listed: Vec<protocol::SessionMeta> =

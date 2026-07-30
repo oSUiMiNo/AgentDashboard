@@ -24,51 +24,22 @@
 //! 表示は変わらない。
 
 use bytes::Bytes;
-use protocol::{
-    CardId, ModelId, NodeId, PermissionMode, SessionMeta, TreeNode,
-    ws::{ParserState, ServerMessage},
-};
-use serde::Serialize;
-use std::sync::Arc;
+use protocol::{CardId, ModelId, PermissionMode, ws::ParserState};
 use tokio::sync::broadcast;
-
-/// 履歴1ページ分（`GET /api/sessions/{card_id}/transcript` の応答）。
-#[derive(Debug, Serialize)]
-pub struct TranscriptPage {
-    pub nodes: Vec<TreeNode>,
-    /// さらに前があるかもしれない
-    pub has_more: bool,
-}
-
-/// 履歴のページを作れなかった理由。
-#[derive(Debug, PartialEq, Eq)]
-pub enum PageError {
-    /// そのカードが無い
-    NotFound,
-    /// 読み直しを頼む相手（パーサ）が居ない・応答しない。
-    ///
-    /// **待たせずに 503 を返す**のが約束。待ち続けると画面が固まる（設計§4）。
-    Unavailable,
-}
 
 #[async_trait::async_trait]
 pub trait AgentHost: Send + Sync + 'static {
-    // --- 一覧 -----------------------------------------------------------------
+    // --- 生存確認 -------------------------------------------------------------
 
-    /// 現在のカード一覧（作成順）。
-    fn list(&self) -> Vec<SessionMeta>;
-
-    /// そのカードが居るか。
+    /// そのカードが**いま生きているか**。
+    ///
+    /// 記録として残っているかとは別物である点に注意。DB から復元したカード
+    /// （前回の起動が残したもの）は一覧にも履歴にも出るが、PTY を持たないので
+    /// ここでは `false` になり、指示送信や切替は「見つかりません」で断られる。
     ///
     /// 時間のかかる操作（切替）を別タスクへ逃がす**前に**、居ないことだけは即座に
     /// 返すために要る。逃がしたあとで気づくと、押しても何も起きない時間ができる。
     fn exists(&self, card_id: CardId) -> bool;
-
-    /// 一覧の更新通知を購読する。
-    ///
-    /// **購読を始めてから [`Self::list`] を呼ぶ**こと。逆順にすると、その隙間に起動した
-    /// セッションを取りこぼす（順序を守れば重複するだけで、upsert は重複しても害がない）。
-    fn subscribe_events(&self) -> broadcast::Receiver<ServerMessage>;
 
     // --- 生存操作 -------------------------------------------------------------
 
@@ -98,28 +69,10 @@ pub trait AgentHost: Send + Sync + 'static {
 
     // --- 履歴 -----------------------------------------------------------------
 
-    /// 手元の履歴と、その続きを受け取る口を同時に取る。
-    fn subscribe_transcript(
-        &self,
-        card_id: CardId,
-    ) -> Option<(Vec<TreeNode>, broadcast::Receiver<Arc<String>>)>;
-
-    /// 取りこぼしたクライアントへ送り直すための、手元の履歴全体。
-    fn transcript_snapshot(&self, card_id: CardId) -> Option<Vec<TreeNode>>;
-
-    /// 履歴を1ページ分作る。
-    ///
-    /// 「手元のウィンドウで足りるか」「足りなければファイルを読み直せるか」の判断は
-    /// **データを持っている側**が行う。サーバ側はページの形しか知らない
-    /// （フェーズ2 でここが DB クエリに変わる。設計§3-3）。
-    async fn transcript_page(
-        &self,
-        card_id: CardId,
-        before: Option<NodeId>,
-        limit: usize,
-    ) -> Result<TranscriptPage, PageError>;
-
     /// パーサの健康状態。居なければ `None`（縮退の通知そのものを出さない）。
+    ///
+    /// 履歴そのものはここを通らない。**記録の持ち主はサーバ**（[`crate::registry`]）で、
+    /// PC 側は読んだノードを報告するだけになった（設計§3-3・§6-1）。
     fn parser_state(&self) -> Option<ParserState>;
 
     // --- 指示・切替 -----------------------------------------------------------

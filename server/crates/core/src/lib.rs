@@ -25,7 +25,7 @@ use agent_core::{
 use axum::Router;
 use config::Config;
 use local::LocalAgent;
-use server_core::{config::ServerConfig, embed, ws};
+use server_core::{config::ServerConfig, embed, registry::SessionRegistry, ws};
 use settings_api::SettingsState;
 use std::{net::Ipv4Addr, sync::Arc};
 
@@ -34,6 +34,9 @@ use std::{net::Ipv4Addr, sync::Arc};
 /// 両側の部品を持ち、[`Self::router`] で1つの待ち受けへ合成する。
 pub struct LocalServer {
     manager: Arc<SessionManager>,
+    /// カードの記録（セルフホスト化設計§3）。**実体（PTY）とは別物**で、
+    /// こちらは DB に裏付けられている。再起動しても残るのはこちら
+    registry: Arc<SessionRegistry>,
     config: Arc<ServerConfig>,
     /// パーサの世話役。**居なくても動く**（構造化ビューだけが縮退する）。
     ///
@@ -45,9 +48,14 @@ pub struct LocalServer {
 }
 
 impl LocalServer {
-    pub fn new(manager: Arc<SessionManager>, config: Arc<ServerConfig>) -> Self {
+    pub fn new(
+        manager: Arc<SessionManager>,
+        registry: Arc<SessionRegistry>,
+        config: Arc<ServerConfig>,
+    ) -> Self {
         Self {
             manager,
+            registry,
             config,
             parser: None,
             settings: None,
@@ -80,7 +88,11 @@ impl LocalServer {
         if let Some(parser) = &self.parser {
             agent = agent.with_parser(Arc::clone(parser));
         }
-        let ws_state = ws::AppState::new(Arc::new(agent), Arc::clone(&self.config));
+        let ws_state = ws::AppState::new(
+            Arc::new(agent),
+            Arc::clone(&self.registry),
+            Arc::clone(&self.config),
+        );
 
         server_core::routes(ws_state)
             .merge(hooks::routes(Arc::clone(&self.manager)))
@@ -101,7 +113,21 @@ pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::R
     // ほとんど動かさずに済む
     let agent_config = Arc::new(config.agent());
     let server_config = Arc::new(config.server());
-    let manager = SessionManager::new(Arc::clone(&agent_config));
+
+    // **繋げなければ起動しない**（利用者判断）。DB が真実である以上、無い状態で
+    // 動かすと一覧も履歴も嘘になる。設計§12 の「DB 断」は稼働中に落ちた場合の縮退の
+    // 話で、起動時の検査とは別に扱う——ここで失敗するのはたいてい設定の打ち間違いで、
+    // そのときに黙って動くほうが害が大きい
+    let database_url = config.resolved_database_url();
+    let db = server_core::db::connect(&database_url).await?;
+    let registry = SessionRegistry::load(db, server_config.transcript_window_nodes).await?;
+
+    // 報告先を記録層へ繋いでからマネージャを作る。**報告 → DB → ブラウザ**の順序が
+    // ここで決まる（設計§9-1「耐久データは DB へ書いてから publish する」）
+    let manager = SessionManager::with_sink(
+        Arc::clone(&agent_config),
+        local::reporting(Arc::clone(&registry)),
+    );
     tracing::info!("起動する CLI: {}", manager.program());
 
     // 起動している CLI へ問い合わせる2つを、まとめてブロッキング用のスレッドへ逃がす。
@@ -168,7 +194,7 @@ pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::R
         catalog.cli_version().to_string(),
     );
 
-    let server = LocalServer::new(manager, Arc::clone(&server_config))
+    let server = LocalServer::new(manager, registry, Arc::clone(&server_config))
         .with_parser(parser)
         .with_settings(settings);
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, server_config.port)).await?;

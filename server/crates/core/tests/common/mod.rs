@@ -14,13 +14,13 @@ pub use session::*;
 
 use agent_core::{
     claude_settings::ClaudeSettings,
-    events::LocalEventBus,
     model_aliases::ModelAliases,
     parser::ParserSupervisor,
     session::{Session, SessionManager},
 };
-use agentdashboard_core::{LocalServer, config::Config};
+use agentdashboard_core::{LocalServer, config::Config, local};
 use protocol::ws::ServerMessage;
+use server_core::registry::SessionRegistry;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{
     sync::broadcast,
@@ -102,6 +102,9 @@ pub async fn wait_for_model(session: &Arc<Session>, expected: &str) {
 /// 実際に待ち受けている core サーバ。フックの受信を端から端まで通すために使う。
 pub struct TestServer {
     pub manager: Arc<SessionManager>,
+    /// カードの記録（DB 裏付け）。**ブラウザが見るのはこちら**（設計§3-3）。
+    /// `manager` は実体（PTY）側なので、履歴の中身はここから読む
+    pub registry: Arc<SessionRegistry>,
     pub addr: SocketAddr,
     /// 立ち上げた場合のみ。パーサを使わないテストでは None
     pub parser: Option<Arc<ParserSupervisor>>,
@@ -246,10 +249,33 @@ impl TestServer {
         let addr = listener.local_addr().expect("待ち受け先を取れること");
         config.port = addr.port();
 
+        // **使い捨ての DB を使う。** 既定は `state_dir` の隣＝開発者の本物の状態
+        // ディレクトリになるので、指定しないとテストが実環境へ書き込む
+        // （`claude_settings_for` と同じ性質の漏れ）
+        let db_dir = std::env::temp_dir().join(format!(
+            "agentdashboard-test-db-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&db_dir).expect("DB の置き場所を作れること");
+        config.database_url = Some(format!(
+            "sqlite://{}",
+            db_dir.join("dashboard.db").display()
+        ));
+
         let config = Arc::new(config.clone());
         // 本番（`serve`）と同じく、1つの設定ファイルから両側の射影を作る
         let agent_config = Arc::new(config.agent());
         let server_config = Arc::new(config.server());
+
+        let db = server_core::db::connect(&config.resolved_database_url())
+            .await
+            .expect("使い捨ての DB へ繋げること");
+        let registry = SessionRegistry::load(db, server_config.transcript_window_nodes)
+            .await
+            .expect("記録層を立てられること");
+        let events = local::reporting(Arc::clone(&registry));
+
         let manager = match claude_settings {
             // モデルを扱うテストは**本物の ~/.claude/settings.json を触らない**
             Some(claude_settings) => SessionManager::with_everything(
@@ -258,13 +284,17 @@ impl TestServer {
                 hook_program(),
                 claude_settings,
                 Arc::new(ModelAliases::in_memory()),
-                Arc::new(LocalEventBus::new()),
+                events,
             ),
             // 明示が無くても本物へは落とさない（[`claude_settings_for`]）
-            None => build_manager(Arc::new(config.agent()), program),
+            None => build_manager_with(Arc::new(config.agent()), program, events),
         };
 
-        let mut server = LocalServer::new(Arc::clone(&manager), Arc::clone(&server_config));
+        let mut server = LocalServer::new(
+            Arc::clone(&manager),
+            Arc::clone(&registry),
+            Arc::clone(&server_config),
+        );
         let parser = if with_parser {
             // 本番と同じ入口（環境変数）でビルド済みのパーサを指す
             if name_parser_by_env {
@@ -298,11 +328,75 @@ impl TestServer {
 
         Self {
             manager,
+            registry,
             addr,
             parser,
             selfheal: None,
             config,
             task,
+        }
+    }
+
+    /// 一覧に載ったカードが条件を満たすまで待つ。
+    ///
+    /// **エージェント側の状態が変わった直後には、まだ一覧に出ていない**ことがある。
+    /// フェーズ2 で報告が「DB へ書いてから配る」経路（設計§9-1）を通るようになり、
+    /// 実体の状態と記録の状態の間に1段の遅れができた。ブラウザから見える形を
+    /// 確かめるテストは、実体ではなくこちらを待つ。
+    pub async fn wait_for_listed(
+        &self,
+        what: &str,
+        matches: impl Fn(&[protocol::SessionMeta]) -> bool,
+    ) -> Vec<protocol::SessionMeta> {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            let listed = self.registry.list();
+            if matches(&listed) {
+                return listed;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{TIMEOUT:?} 以内に一覧が {what} になりませんでした（{} 枚）",
+                listed.len()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// カードの記録から履歴を読む。
+    ///
+    /// 実体（`manager`）ではなく記録から読むのがフェーズ2 での変化。**履歴の持ち主は
+    /// サーバ側**になったので、セッションに聞いても持っていない（設計§3-3）。
+    pub fn transcript_of(&self, card_id: protocol::CardId) -> Vec<protocol::TreeNode> {
+        self.registry
+            .get(card_id)
+            .map(|record| record.transcript_snapshot())
+            .unwrap_or_default()
+    }
+
+    /// 履歴が条件を満たすまで待つ。
+    ///
+    /// 報告が DB を経由してから記録に載るので、**フックが届いた直後にはまだ空**の
+    /// ことがある。`manager` の窓を直接見ていた頃には無かった待ちで、経路が
+    /// 1段伸びたぶんの遅れにあたる。
+    pub async fn wait_for_transcript(
+        &self,
+        card_id: protocol::CardId,
+        what: &str,
+        matches: impl Fn(&[protocol::TreeNode]) -> bool,
+    ) -> Vec<protocol::TreeNode> {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            let nodes = self.transcript_of(card_id);
+            if matches(&nodes) {
+                return nodes;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{TIMEOUT:?} 以内に履歴が {what} になりませんでした（{} 件）",
+                nodes.len()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
 
@@ -353,6 +447,15 @@ pub struct EventWatcher {
 }
 
 impl EventWatcher {
+    /// **エージェントが何を報告したか**を購読する。
+    ///
+    /// 記録層の配信（[`SessionRegistry::subscribe_events`]）ではなくこちらを見るのは、
+    /// 「差分（`Status`）で足りるか、カード全体（`SessionUpsert`）を送り直すか」の
+    /// 判断が**エージェント側の性質**だから（`SessionManager::publish`）。記録層は
+    /// それを転送するだけなので、間に DB を挟むぶん遅れが乗り、直前の別の報告が
+    /// 窓に入り込む。
+    ///
+    /// ブラウザから見える形を確かめたいときは [`TestServer::wait_for_listed`] を使う。
     pub fn attach(manager: &SessionManager) -> Self {
         Self {
             receiver: manager.subscribe_events(),

@@ -248,6 +248,13 @@ async fn api_sessionsが現在の一覧を返す() {
         .post_hook(session.token(), "UserPromptSubmit", "{}")
         .await;
     common::wait_for_status(&session, SessionStatus::Working).await;
+    // 実体が Working になっても、記録へ渡るのは1段あと（設計§9-1 の「書いてから配る」）。
+    // ここで確かめたいのは**ブラウザから見える一覧**なので、そちらを待つ
+    server
+        .wait_for_listed("1枚が作業中", |listed| {
+            listed.len() == 1 && listed[0].status == SessionStatus::Working
+        })
+        .await;
 
     let (status, body) = server.get("/api/sessions").await;
     assert_eq!(status, 200);

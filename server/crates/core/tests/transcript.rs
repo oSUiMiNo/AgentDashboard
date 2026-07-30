@@ -66,21 +66,20 @@ fn append(path: &std::path::Path, lines: &[String]) {
 }
 
 /// 履歴が届くまで待つ。
+///
+/// **読む先はセッションではなく記録**（セルフホスト化設計§3-3）。フェーズ2 で履歴の
+/// 持ち主がサーバ側へ移り、エージェントは読んだノードを報告するだけになった。
+/// そのぶん経路が1段伸びているので、フックが届いた直後にはまだ空のことがある。
 async fn wait_for_nodes(
-    session: &std::sync::Arc<agent_core::session::Session>,
+    server: &TestServer,
+    card_id: protocol::CardId,
     at_least: usize,
 ) -> Vec<protocol::TreeNode> {
-    for _ in 0..200 {
-        let nodes = session.transcript_snapshot();
-        if nodes.len() >= at_least {
-            return nodes;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!(
-        "履歴が {at_least} 件に届きませんでした（現在 {} 件）",
-        session.transcript_snapshot().len()
-    );
+    server
+        .wait_for_transcript(card_id, &format!("{at_least} 件以上"), |nodes| {
+            nodes.len() >= at_least
+        })
+        .await
 }
 
 async fn start_session_with_transcript(
@@ -114,10 +113,10 @@ async fn start_session_with_transcript(
 #[tokio::test]
 async fn フックが運んだJSONLをパーサが読んで履歴が届く() {
     let dir = work_dir("basic");
-    let (_server, session, transcript) = start_session_with_transcript(&dir).await;
+    let (server, session, transcript) = start_session_with_transcript(&dir).await;
 
     append(&transcript, &sample_lines());
-    let nodes = wait_for_nodes(&session, 3).await;
+    let nodes = wait_for_nodes(&server, session.card_id, 3).await;
 
     let kinds: Vec<&str> = nodes
         .iter()
@@ -139,24 +138,24 @@ async fn ファイルが後から現れてもエラーにならない() {
     // transcript_path はフックが先に運んでくるが、その時点でファイルはまだ無い。
     // 「無い＝異常」と扱うと構造化ビューが起動直後に必ず壊れる（フェーズ2の実測）
     let dir = work_dir("late-file");
-    let (_server, session, transcript) = start_session_with_transcript(&dir).await;
+    let (server, session, transcript) = start_session_with_transcript(&dir).await;
 
     assert!(!transcript.exists(), "この時点ではまだファイルが無い");
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(session.transcript_snapshot().is_empty());
+    assert!(server.transcript_of(session.card_id).is_empty());
 
     append(&transcript, &sample_lines());
-    let nodes = wait_for_nodes(&session, 3).await;
+    let nodes = wait_for_nodes(&server, session.card_id, 3).await;
     assert_eq!(nodes.len(), 3, "後から現れたファイルを読める");
 }
 
 #[tokio::test]
 async fn ツールコールの結果は同じノードを更新して届く() {
     let dir = work_dir("tool-result");
-    let (_server, session, transcript) = start_session_with_transcript(&dir).await;
+    let (server, session, transcript) = start_session_with_transcript(&dir).await;
 
     append(&transcript, &sample_lines());
-    let before = wait_for_nodes(&session, 3).await;
+    let before = wait_for_nodes(&server, session.card_id, 3).await;
     let tool_id = before[2].id.clone();
     assert!(matches!(
         before[2].node,
@@ -168,7 +167,7 @@ async fn ツールコールの結果は同じノードを更新して届く() {
 
     append(&transcript, &[result_line()]);
     for _ in 0..200 {
-        let nodes = session.transcript_snapshot();
+        let nodes = server.transcript_of(session.card_id);
         let updated = nodes.iter().find(|node| node.id == tool_id);
         if let Some(node) = updated {
             if let Node::ToolCall { status, .. } = &node.node {
@@ -189,14 +188,14 @@ async fn 巻き戻りを検知したら履歴を捨てる() {
     // `/rewind` でファイルが縮んだときの防御。捨てずに続けると、消えたはずの
     // やり取りが画面に残り続ける
     let dir = work_dir("reset");
-    let (_server, session, transcript) = start_session_with_transcript(&dir).await;
+    let (server, session, transcript) = start_session_with_transcript(&dir).await;
 
     append(&transcript, &sample_lines());
-    wait_for_nodes(&session, 3).await;
+    wait_for_nodes(&server, session.card_id, 3).await;
 
     std::fs::write(&transcript, "").expect("縮められること");
     for _ in 0..200 {
-        if session.transcript_snapshot().is_empty() {
+        if server.transcript_of(session.card_id).is_empty() {
             return;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -210,7 +209,7 @@ async fn 履歴のRESTページングが遡れる() {
     let (server, session, transcript) = start_session_with_transcript(&dir).await;
 
     append(&transcript, &sample_lines());
-    let nodes = wait_for_nodes(&session, 3).await;
+    let nodes = wait_for_nodes(&server, session.card_id, 3).await;
 
     // 起点の指定なし＝手元の最新から
     let (status, body) = server
@@ -285,7 +284,7 @@ async fn 同じサーバの2本目以降のセッションにも履歴が届く(
     // 起動した順ではなく**全部**について確かめる。1本目だけ通って残りが空、という
     // のがまさに見つかった壊れ方なので、最後の1本まで見ないと意味がない
     for (index, session) in &sessions {
-        let nodes = wait_for_nodes(session, 3).await;
+        let nodes = wait_for_nodes(&server, session.card_id, 3).await;
         assert_eq!(nodes.len(), 3, "{index} 本目の履歴が揃っていません");
     }
 }
