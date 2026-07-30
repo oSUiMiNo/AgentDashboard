@@ -65,8 +65,12 @@ issue-sync は、ユーザーが行うので不要。必要かどうかユーザ
 | `docker/Dockerfile.rust` | Rust ツールチェーンの隔離イメージ |
 | `Makefile` | 開発コマンド一式 |
 | `server/crates/protocol/src/lib.rs` | サーバ・フロント・パーサが共有するドメインモデル（設計§3） |
-| `server/crates/core/src/config.rs` | `config.toml` の読み込み（設計§12） |
-| `server/crates/core/src/embed.rs` | web アセットの単一バイナリ同梱 |
+| `server/crates/agent-core/` | PC 側の一式（PTY・フック受信・状態導出・パース・自己修復）。**portable-pty を持つのはここだけ** |
+| `server/crates/server-core/` | ブラウザ配信（WebSocket・REST・web アセット）。PTY に触らない |
+| `server/crates/core/src/local.rs` | 両者を1プロセスで束ねる配線（`server_core::agent::AgentHost` のローカル実装） |
+| `server/crates/core/src/config.rs` | `config.toml` の読み込みと、両側への射影（設計§12・セルフホスト化設計§13-2） |
+| `server/crates/server-core/src/embed.rs` | web アセットの単一バイナリ同梱 |
+| `server/crates/core/tests/dependencies.rs` | crate 境界（依存の逆流）の機械検査。**新しい依存を入れたらここへ足す** |
 | `server/crates/transcript-parser/` | 自己修復が唯一書き換えてよい範囲（設計§9） |
 | `server/crates/testkit/` | フック受信モックサーバと擬似 claude |
 | `server/config.toml.example` | 設定の雛形 |
