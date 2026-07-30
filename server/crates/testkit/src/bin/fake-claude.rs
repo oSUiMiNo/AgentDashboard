@@ -482,12 +482,17 @@ impl Iterator for InputReader {
                 // 入力行を消す（Ctrl+U）。本物の TUI と同じく、溜めていた本文を捨てる。
                 // ダッシュボードは指示を送る前にこれを打つ（設計§18）
                 0x15 => self.buffer.clear(),
-                // ESC で始まる並び。`[Z` だけが Shift+Tab で、他は解釈して捨てる
-                0x1b => {
-                    if self.read_byte()? == b'[' && self.read_csi()? == "Z" {
-                        return Some(Input::Cycle);
-                    }
-                }
+                // ESC で始まる並び。`[Z` が Shift+Tab、`CR` が改行で、他は解釈して捨てる
+                0x1b => match self.read_byte()? {
+                    // Shift+Enter（と Option+Enter）。**確定ではなく改行**。
+                    //
+                    // 本物がこの並びを改行として扱うことは、claude のバイナリが
+                    // `/terminal-setup` で VS Code へ書き込む keybinding で確かめた。
+                    // `{ key: "shift+enter", ..., args: { text: "\x1B\r" } }`（v2.1.220）
+                    b'\r' | b'\n' => self.buffer.push(b'\n'),
+                    b'[' if self.read_csi()? == "Z" => return Some(Input::Cycle),
+                    _ => {}
+                },
                 // 端末の作法では確定は CR。行編集を切っているので自分で扱う
                 b'\n' | b'\r' => {
                     let line =
