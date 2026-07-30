@@ -18,6 +18,7 @@ import { Terminal, type ITerminalOptions } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
 import { createFlowController } from '@/lib/flow'
 import { KIND_PTY_SNAPSHOT } from '@/lib/frame'
+import { terminalKeyOverride } from '@/lib/keys'
 import type { CardId } from '@/lib/protocol'
 import { useWsStore } from '@/stores/ws'
 
@@ -138,6 +139,24 @@ export function TerminalPane({ cardId }: Props) {
         write(payload)
       },
     )
+
+    // xterm が送るバイト列では足りないキーを読み替える（[`terminalKeyOverride`]）。
+    //
+    // **`term.input` を通すのが要点。** ここで `sendPtyInput` を直に呼ぶと送信口が
+    // 2つになり、片方だけ直して片方が取り残される形の不具合を作る
+    term.attachCustomKeyEventHandler((event) => {
+      const override = terminalKeyOverride(event)
+      if (override === null) {
+        return true
+      }
+      term.input(override)
+      // **ブラウザの既定も止める。** xterm は隠しテキストエリアで入力を受けており、
+      // 止めないと Shift+Enter がそこへ改行を入れ、それが別の入力として送られる
+      // （こちらの ESC+CR の直後に改行が届き、結局そこで確定してしまう）
+      event.preventDefault()
+      // xterm の既定（Shift を無視して CR を送る）も止める。止めないと二重に届く
+      return false
+    })
 
     const encoder = new TextEncoder()
     const dataSubscription = term.onData((data) => {
