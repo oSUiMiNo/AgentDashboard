@@ -116,7 +116,7 @@ impl Config {
                 if default_path.is_file() {
                     Self::from_file(default_path)
                 } else {
-                    Ok(Self::default())
+                    Self::from_toml_str("")
                 }
             }
         }
@@ -137,13 +137,88 @@ impl Config {
     }
 
     /// TOML 文字列から読む。書式エラーと値エラーを別々に返す。
+    ///
+    /// **読んだあと、環境変数で上書きする**（[`Self::apply_env`]）。ファイルより
+    /// 環境変数が強いのは、compose では設定ファイルを配らずに環境変数で渡すのが
+    /// 自然だから（設計§14-1）。
     pub fn from_toml_str(text: &str) -> Result<Self, ConfigError> {
-        let config: Config = toml::from_str(text).map_err(|source| ConfigError::Parse {
+        let mut table: toml::Table = toml::from_str(text).map_err(|source| ConfigError::Parse {
             path: PathBuf::from("<inline>"),
             source,
         })?;
+        Self::apply_env(&mut table)?;
+
+        // 表へ起こしてから読み直しても `deny_unknown_fields` は効く（知らないキーは
+        // ここで弾かれる）。打ち間違いを黙って無視しないという約束は保たれている
+        let config: Config =
+            toml::Value::Table(table)
+                .try_into()
+                .map_err(|source| ConfigError::Parse {
+                    path: PathBuf::from("<inline>"),
+                    source,
+                })?;
         config.validate()?;
         Ok(config)
+    }
+
+    /// 環境変数での上書きを当てる（設計§14-1）。
+    ///
+    /// # なぜキーを書き並べないのか
+    ///
+    /// 対応表を手で持つと、**キーを増やしたときに足し忘れる**。足し忘れは
+    /// 「compose では設定できないキーが1つだけある」という形でしか表に出ず、
+    /// 気づくのは配ったあとになる。そこで [`Config`] 自身を TOML の表へ起こし、
+    /// **そこにあるキーを全部見る**。以後の新キーは何もしなくても対応する。
+    ///
+    /// 型は既定値から決める。`AGENTDASHBOARD_PORT=abc` のような値は、素通しして
+    /// 後で分かりにくく壊れるより、その場で理由付きで断る。
+    fn apply_env(table: &mut toml::Table) -> Result<(), ConfigError> {
+        for (key, shape) in Self::key_shapes() {
+            let Some(raw) = Self::env_lookup(&key) else {
+                continue;
+            };
+            table.insert(key.clone(), parse_env_value(&key, &raw, &shape)?);
+        }
+        Ok(())
+    }
+
+    /// そのキーに対応する環境変数を読む。
+    ///
+    /// 既定は `AGENTDASHBOARD_<大文字のキー>` の一本。加えて、**慣行として裸の名前が
+    /// 定着しているものだけ**別名を受ける（`DATABASE_URL` など。設計§14-1 の compose
+    /// 例がその形で書かれている）。裸の名前は他のソフトウェアと衝突しうるので、
+    /// 接頭辞つきを先に見る。
+    fn env_lookup(key: &str) -> Option<String> {
+        let prefixed = format!("AGENTDASHBOARD_{}", key.to_uppercase());
+        if let Ok(value) = std::env::var(&prefixed) {
+            return Some(value);
+        }
+        let alias = BARE_ENV_ALIASES
+            .iter()
+            .find(|(name, _)| *name == key)
+            .map(|(_, alias)| *alias)?;
+        std::env::var(alias).ok()
+    }
+
+    /// 全キーと、その値の形。
+    ///
+    /// 未指定が既定のキー（`Option`）は既定値の表から消えてしまうので、**全部を
+    /// 埋めた見本**から取り出す。ここが漏れるとそのキーだけ環境変数で設定できなくなる
+    /// ——それを見つけるのが `全キーが環境変数で上書きできる` のテスト。
+    fn key_shapes() -> Vec<(String, toml::Value)> {
+        let probe = Config {
+            selfheal_repo_dir: Some(PathBuf::from("/probe")),
+            state_dir: Some(PathBuf::from("/probe")),
+            claude_settings_path: Some(PathBuf::from("/probe")),
+            database_url: Some("sqlite://probe".to_string()),
+            ..Config::default()
+        };
+        let toml::Value::Table(table) =
+            toml::Value::try_from(probe).expect("既定値を TOML へ変換できること")
+        else {
+            unreachable!("Config は構造体なのでテーブルになる");
+        };
+        table.into_iter().collect()
     }
 
     /// エージェント（PC 側）が使う分だけを取り出す。
@@ -249,6 +324,36 @@ impl Config {
     }
 }
 
+/// 接頭辞なしでも受ける環境変数（設計§14-1 の compose 例）。
+///
+/// **例外だけをここに並べる。** 既定は `AGENTDASHBOARD_<キー>` で、そちらは
+/// [`Config::key_shapes`] が自動で拾う。
+const BARE_ENV_ALIASES: &[(&str, &str)] = &[("database_url", "DATABASE_URL")];
+
+/// 環境変数の文字列を、そのキーの形に合わせた TOML の値へ直す。
+fn parse_env_value(key: &str, raw: &str, shape: &toml::Value) -> Result<toml::Value, ConfigError> {
+    let invalid = |expected: &str| {
+        ConfigError::Invalid(format!(
+            "環境変数で指定した {key} が{expected}として読めません: {raw}"
+        ))
+    };
+    match shape {
+        toml::Value::Integer(_) => raw
+            .trim()
+            .parse::<i64>()
+            .map(toml::Value::Integer)
+            .map_err(|_| invalid("整数")),
+        toml::Value::Boolean(_) => raw
+            .trim()
+            .parse::<bool>()
+            .map(toml::Value::Boolean)
+            .map_err(|_| invalid("真偽値（true / false）")),
+        // 文字列とパスは素通し。**引用符を要求しない**——compose の環境変数に
+        // TOML の書式を持ち込ませないため
+        _ => Ok(toml::Value::String(raw.to_string())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,7 +408,12 @@ mod tests {
         // Option 型のキーは既定が「未指定」で、TOML へ変換すると消えるため上の走査に乗らない。
         // 値を書くと利用者の環境に存在しないパスを指すことになるので、雛形では
         // **コメントとして例示**する。名指しでしか確かめられないので、ここに列挙する
-        for key in ["selfheal_repo_dir", "state_dir", "claude_settings_path"] {
+        for key in [
+            "selfheal_repo_dir",
+            "state_dir",
+            "claude_settings_path",
+            "database_url",
+        ] {
             assert!(
                 !with_values.contains_key(key),
                 "{key} に既定値が付いた。この列挙から外して通常の走査へ移すこと"
@@ -460,6 +570,118 @@ mod tests {
         assert_eq!(
             server.database_url.as_deref(),
             Some("sqlite:///tmp/db/dashboard.db")
+        );
+    }
+
+    /// そのキーへ入れて意味のある値（既定と必ず違うもの）。
+    fn probe_value(key: &str, shape: &toml::Value) -> String {
+        match (key, shape) {
+            // フロー制御は2つで1組。片方だけ極端な値にすると `flow_low < flow_high` を
+            // 破って値エラーになり、**上書きが効いたのか値が弾かれたのか**が分からなくなる
+            ("flow_high", _) => "999999".to_string(),
+            ("flow_low", _) => "42".to_string(),
+            (_, toml::Value::Integer(_)) => "4242".to_string(),
+            // 既定の逆を入れる。同じ値だと「上書きが効いた」ことにならない
+            (_, toml::Value::Boolean(value)) => (!value).to_string(),
+            _ => "/tmp/env-probe".to_string(),
+        }
+    }
+
+    #[test]
+    fn 全キーが環境変数で上書きできる() {
+        // compose は設定ファイルを配らず環境変数で渡す（設計§14-1）。1つでも
+        // 対応していないキーがあると「そのキーだけコンテナで設定できない」という、
+        // 配ってからでないと気づけない穴になる。
+        //
+        // **キーの一覧を手で持たない**のが要点。実装（`Config`）から取り出しているので、
+        // 今後キーを増やしてもこのテストは自動でそれを見る
+        for (key, shape) in Config::key_shapes() {
+            let name = format!("AGENTDASHBOARD_{}", key.to_uppercase());
+            let raw = probe_value(&key, &shape);
+            unsafe { std::env::set_var(&name, &raw) };
+
+            let config = Config::from_toml_str("")
+                .unwrap_or_else(|err| panic!("{key} を環境変数で指定したら読めなくなった: {err}"));
+            let toml::Value::Table(written) =
+                toml::Value::try_from(config).expect("TOML へ変換できること")
+            else {
+                unreachable!("Config は構造体なのでテーブルになる");
+            };
+            let expected = super::parse_env_value(&key, &raw, &shape).expect("読めること");
+            assert_eq!(
+                written.get(&key),
+                Some(&expected),
+                "{key} が環境変数で上書きされていない"
+            );
+
+            unsafe { std::env::remove_var(&name) };
+        }
+    }
+
+    #[test]
+    fn 環境変数はファイルより強い() {
+        // 設定ファイルを同梱したイメージへ、環境変数だけで別の値を渡せること
+        unsafe { std::env::set_var("AGENTDASHBOARD_PORT", "9100") };
+        let config = Config::from_toml_str("port = 8787").unwrap();
+        assert_eq!(config.port, 9100);
+        unsafe { std::env::remove_var("AGENTDASHBOARD_PORT") };
+    }
+
+    #[test]
+    fn 裸の名前の環境変数も受けるが接頭辞つきが勝つ() {
+        // compose の慣行（設計§14-1 の例）に合わせる。ただし裸の名前は他のソフトウェアと
+        // 衝突しうるので、こちらの名前を先に見る
+        unsafe { std::env::set_var("DATABASE_URL", "postgres://bare/db") };
+        assert_eq!(
+            Config::from_toml_str("").unwrap().database_url.as_deref(),
+            Some("postgres://bare/db")
+        );
+
+        unsafe { std::env::set_var("AGENTDASHBOARD_DATABASE_URL", "postgres://prefixed/db") };
+        assert_eq!(
+            Config::from_toml_str("").unwrap().database_url.as_deref(),
+            Some("postgres://prefixed/db")
+        );
+
+        unsafe { std::env::remove_var("DATABASE_URL") };
+        unsafe { std::env::remove_var("AGENTDASHBOARD_DATABASE_URL") };
+    }
+
+    #[test]
+    fn 環境変数の型が合わなければ理由を出して断る() {
+        // 素通しして「設定したのに効かない」になるより、その場で断るほうがよい
+        unsafe { std::env::set_var("AGENTDASHBOARD_PORT", "はちななはちなな") };
+        let err = Config::from_toml_str("").unwrap_err();
+        let ConfigError::Invalid(message) = &err else {
+            panic!("値エラーにならなかった: {err:?}");
+        };
+        assert!(message.contains("port"), "どのキーか分かること: {message}");
+        assert!(
+            message.contains("整数"),
+            "何を期待したか分かること: {message}"
+        );
+        unsafe { std::env::remove_var("AGENTDASHBOARD_PORT") };
+    }
+
+    #[test]
+    fn 記録の置き場所は状態の置き場所の隣になる() {
+        // 消えると**一覧と履歴が丸ごと消える**ので、再開位置と同じ扱いにする
+        let config = Config::from_toml_str(r#"state_dir = "/tmp/adash-state""#).unwrap();
+        assert_eq!(
+            config.resolved_database_url(),
+            "sqlite:///tmp/adash-state/dashboard.db"
+        );
+        // 明示があればそちらが勝つ
+        let config = Config::from_toml_str(
+            r#"
+            state_dir = "/tmp/adash-state"
+            database_url = "postgres://db/agentdashboard"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.resolved_database_url(),
+            "postgres://db/agentdashboard"
         );
     }
 
