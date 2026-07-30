@@ -55,6 +55,45 @@ pub fn switch_command(target: &ModelId) -> String {
     format!("/model {target}")
 }
 
+/// 切替先として送ってよい長さの上限。
+///
+/// 実在する中でいちばん長いのは `claude-haiku-4-5-20251001` の24文字なので、
+/// 倍以上の余裕がある。将来モデル名が伸びても当分は当たらない。
+pub const TARGET_MAX_LEN: usize = 64;
+
+/// 切替先として受け取ってよい値か。駄目なら**理由**を返す。
+///
+/// # なぜ許可リストにできないのか
+///
+/// [`ModelId`] を列挙型にしなかったのと同じ理由で、**知らない値も運べないといけない**
+/// （利用者が端末でフルIDを打つ、新しいモデルが出る、など）。そこで「これは駄目」と
+/// 言えるものだけを拒否する。
+///
+/// # なぜ検査が要るのか
+///
+/// 切替先はそのまま `/model <値>` になり、bracketed paste で入力欄へ貼られたあと
+/// CR で確定される。[`super::input`] が本文から落とすのは ESC だけで**改行は残る**ので、
+/// `sonnet\n（任意の指示）` を渡すと**全体が1つのプロンプトとして送信される**。
+/// 選択肢から選ぶ画面ではまず起きないが、値を運ぶ口（`SetModel`）は誰でも叩ける。
+pub fn target_problem(target: &ModelId) -> Option<String> {
+    let value = target.as_str();
+    if value.is_empty() {
+        return Some("空です".to_string());
+    }
+    // 改行・タブ・ESC をまとめて落とす。空白も混ぜないのは、`/model` の引数が
+    // そこで切れて別の意味になるため（実在のモデル名に空白は入らない）
+    if value.chars().any(|ch| ch.is_control() || ch == ' ') {
+        return Some("空白や制御文字が入っています".to_string());
+    }
+    let length = value.chars().count();
+    if length > TARGET_MAX_LEN {
+        return Some(format!(
+            "長すぎます（{length} 文字。上限は {TARGET_MAX_LEN} 文字）"
+        ));
+    }
+    None
+}
+
 /// 選んだ別名が、いま動いているモデルと同じものを指しているか。
 ///
 /// 同じなら送らない。無駄に `/model` を送ると、会話が進んでいる場合に確認画面が
@@ -97,6 +136,43 @@ mod tests {
     fn 送るのはmodelコマンドの1行() {
         assert_eq!(switch_command(&id("opus")), "/model opus");
         assert_eq!(switch_command(&id("opus[1m]")), "/model opus[1m]");
+    }
+
+    #[test]
+    fn 普通の切替先はそのまま通す() {
+        // 知らない値も運べることが前提（列挙型にしなかった理由そのもの）
+        for value in [
+            "opus",
+            "sonnet",
+            "default",
+            "opus[1m]",
+            "claude-haiku-4-5-20251001",
+            "まだ存在しないモデル",
+            &"a".repeat(TARGET_MAX_LEN),
+        ] {
+            assert_eq!(target_problem(&id(value)), None, "{value} は通ること");
+        }
+    }
+
+    #[test]
+    fn 改行を含む切替先は弾く() {
+        // **本イシューでいちばん重要な1本。** 改行が残ると `/model` の行がそこで切れ、
+        // 続きが本物の Claude への指示として確定される
+        assert!(target_problem(&id("sonnet\n悪意ある指示")).is_some());
+        assert!(target_problem(&id("sonnet\r\n悪意ある指示")).is_some());
+    }
+
+    #[test]
+    fn 制御文字や空白を含む切替先は弾く() {
+        assert!(target_problem(&id("sonnet\u{1b}[201~")).is_some());
+        assert!(target_problem(&id("sonnet\tx")).is_some());
+        assert!(target_problem(&id("sonnet --dangerously-skip-permissions")).is_some());
+    }
+
+    #[test]
+    fn 空や長すぎる切替先は弾く() {
+        assert!(target_problem(&id("")).is_some());
+        assert!(target_problem(&id(&"a".repeat(TARGET_MAX_LEN + 1))).is_some());
     }
 
     #[test]

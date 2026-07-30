@@ -183,6 +183,9 @@ pub enum ModelSwitchError {
         メニューや確認が出ていないか、ターミナルビューで確かめてください"
     )]
     Unreadable,
+    /// 切替先として受け取れない値だった。**端末へは何も送っていない**
+    #[error("モデルの切替先として受け取れませんでした（{0}）。端末へは何も送っていません")]
+    InvalidTarget(String),
     #[error("端末へ書き込めませんでした: {0}")]
     Write(String),
 }
@@ -484,6 +487,12 @@ impl Session {
     /// 戻り値は「どの位置で送ったか」。`None` は**もう目的のモデルだった**という意味で、
     /// 失敗ではない。返した目印は [`Session::settle_model_switch`] へそのまま渡す。
     ///
+    /// # 送る前に値を確かめる
+    ///
+    /// 切替先はそのまま `/model <値>` として端末へ貼られる。改行が混ざっていると
+    /// **末尾の確定で全体が1つのプロンプトになる**ので、送る前に弾く（[`model::target_problem`]）。
+    /// 画面の判定より先に見るのは、理由が入れ替わらないようにするため。
+    ///
     /// # 送る前に画面を確かめる
     ///
     /// 権限モードと同じ原則（設計§5）。フッタが読めない＝メニューや確認が出ている
@@ -500,6 +509,9 @@ impl Session {
         target: &ModelId,
         resolved: Option<&ModelId>,
     ) -> Result<Option<u64>, ModelSwitchError> {
+        if let Some(problem) = model::target_problem(target) {
+            return Err(ModelSwitchError::InvalidTarget(problem));
+        }
         if self.read_footer_mode().is_none() {
             return Err(ModelSwitchError::Unreadable);
         }

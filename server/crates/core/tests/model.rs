@@ -340,6 +340,40 @@ async fn 前の切替で出た確認の残骸には答えない() {
 }
 
 #[tokio::test]
+async fn 改行を含む切替先は端末へ届く前に弾かれる() {
+    // `/model <値>` は入力欄へ貼られて CR で確定される。改行が残ると**続きが
+    // 本物への指示として送信される**ので、送る前に弾く
+    let (_path, server) =
+        common::server_with_fake_global("invalid-target", GLOBAL, refresh_config()).await;
+    let manager = &server.manager;
+    let (session, mut watcher) = common::start_session(manager).await;
+    common::wait_for_model(&session, "claude-fable-5[1m]").await;
+
+    let error = manager
+        .switch_model(&session, &ModelId::new("sonnet\n悪意ある指示"))
+        .await
+        .expect_err("受け取ってはいけない値");
+    assert!(
+        error.to_string().contains("受け取れませんでした"),
+        "理由が画面に出せる形であること。実際: {error}"
+    );
+
+    watcher
+        .drain_quiet_for(std::time::Duration::from_millis(300))
+        .await;
+    assert!(
+        !watcher.seen().contains("悪意ある指示"),
+        "端末へ1バイトも届いていないこと。実際の画面:\n{}",
+        watcher.seen()
+    );
+    assert_eq!(
+        session.meta().model_requested,
+        None,
+        "送っていないので楽観更新も立たないこと"
+    );
+}
+
+#[tokio::test]
 async fn 表に無いモデルを指定しても運べる() {
     // 列挙型にしなかった理由そのもの。利用者が端末でフルIDを打つ場面も同じ経路
     let (_path, server) =
