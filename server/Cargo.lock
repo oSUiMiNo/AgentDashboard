@@ -3,6 +3,37 @@
 version = 4
 
 [[package]]
+name = "agent-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bytes",
+ "portable-pty",
+ "protocol",
+ "serde",
+ "serde_json",
+ "testkit",
+ "thiserror 2.0.19",
+ "tokio",
+ "toml",
+ "toml_edit",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "agentdashboard-agent"
+version = "0.1.0"
+dependencies = [
+ "agent-core",
+ "anyhow",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "agentdashboard-core"
 version = "0.1.0"
 dependencies = [
@@ -1089,6 +1120,22 @@ dependencies = [
  "cfg-if",
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "server-core"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "bytes",
+ "futures-util",
+ "protocol",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

@@ -2,7 +2,10 @@
 resolver = "3"
 members = [
     "crates/protocol",
+    "crates/agent-core",
+    "crates/server-core",
     "crates/core",
+    "crates/agent",
     "crates/transcript-parser",
     "crates/testkit",
 ]
@@ -17,6 +20,8 @@ publish = false
 # 各クレートは `foo.workspace = true` で参照すること。
 [workspace.dependencies]
 protocol = { path = "crates/protocol" }
+agent-core = { path = "crates/agent-core" }
+server-core = { path = "crates/server-core" }
 testkit = { path = "crates/testkit" }
 
 serde = { version = "1", features = ["derive"] }
