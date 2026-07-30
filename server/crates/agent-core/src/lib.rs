@@ -20,6 +20,7 @@
 
 pub mod claude_settings;
 pub mod config;
+pub mod events;
 pub mod hook_post;
 pub mod hooks;
 pub mod jsonfile;

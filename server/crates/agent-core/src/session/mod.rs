@@ -26,6 +26,7 @@ pub mod pty;
 
 use crate::{
     config::AgentConfig,
+    events::{EventSink, LocalEventBus},
     state::{self, Changed, HookInput},
     transcript::{Anchor, TranscriptWindow},
 };
@@ -64,9 +65,6 @@ const MAX_COALESCED_FRAME: usize = 128 * 1024;
 /// 8ms 窓なら毎秒 125 フレーム程度なので、およそ1秒分の余裕にあたる。これを超えて
 /// 遅れたクライアントはスナップショットで作り直す。
 pub const OUTPUT_QUEUE_FRAMES: usize = 128;
-
-/// 一覧の更新通知の待ち行列（メッセージ数）。
-const EVENT_QUEUE_MESSAGES: usize = 256;
 
 /// 履歴購読1本あたりの配信待ち行列（メッセージ数）。
 ///
@@ -946,7 +944,11 @@ pub struct SessionManager {
     /// 受信URLにカードIDをそのまま載せない理由は、推測できる値だと外から状態を
     /// 書き換えられてしまうため。合言葉はセッションごとのランダム値にする。
     tokens: Mutex<HashMap<String, CardId>>,
-    events: broadcast::Sender<ServerMessage>,
+    /// 上へ報告する口（セルフホスト化設計§2-3）。
+    ///
+    /// ローカルモードはプロセス内の配信そのもの、セルフホストモードでは A2S 越しの
+    /// 実装に差し替わる。**流し先をここに焼き付けない**ためにトレイトで持つ。
+    events: Arc<dyn EventSink>,
     /// パーサへ監視を頼む口。パーサが立ち上がってから差し込まれる。
     ///
     /// 逆参照（パーサ → SessionManager）はここには持たせない。フックの処理を止めない
@@ -987,7 +989,14 @@ impl SessionManager {
             Some(path) => crate::claude_settings::ClaudeSettings::new(path.clone()),
             None => crate::claude_settings::ClaudeSettings::discover(),
         });
-        Self::with_everything(config, program, hook_program, claude_settings, aliases)
+        Self::with_everything(
+            config,
+            program,
+            hook_program,
+            claude_settings,
+            aliases,
+            Arc::new(LocalEventBus::new()),
+        )
     }
 
     /// グローバル既定と別名の置き場所まで明示して作る。
@@ -1002,8 +1011,8 @@ impl SessionManager {
         hook_program: PathBuf,
         claude_settings: Arc<crate::claude_settings::ClaudeSettings>,
         aliases: Arc<crate::model_aliases::ModelAliases>,
+        events: Arc<dyn EventSink>,
     ) -> Arc<Self> {
-        let (events, _) = broadcast::channel(EVENT_QUEUE_MESSAGES);
         Arc::new(Self {
             config,
             program,
@@ -1303,7 +1312,7 @@ impl SessionManager {
         if let Some(parser) = self.parser.lock().expect("ロックが壊れていない").as_ref() {
             parser.unwatch(card_id);
         }
-        let _ = self.events.send(ServerMessage::SessionRemoved { card_id });
+        self.events.emit(ServerMessage::SessionRemoved { card_id });
         Ok(())
     }
 
@@ -1362,7 +1371,7 @@ impl SessionManager {
 
     /// 一覧を見ている全クライアントへ流す（カード単位でない通知に使う）。
     pub fn broadcast(&self, message: ServerMessage) {
-        let _ = self.events.send(message);
+        self.events.emit(message);
     }
 
     /// カード1枚を全クライアントへ送り直す。
@@ -1514,7 +1523,7 @@ impl SessionManager {
             self.broadcast_meta(session);
         } else if changed.status {
             let (status, subagent_active, last_activity_at) = session.status_snapshot();
-            let _ = self.events.send(ServerMessage::Status {
+            self.events.emit(ServerMessage::Status {
                 card_id: session.card_id,
                 status,
                 subagent_active,
@@ -1576,7 +1585,7 @@ impl SessionManager {
     }
 
     fn broadcast_meta(&self, session: &Session) {
-        let _ = self.events.send(ServerMessage::SessionUpsert {
+        self.events.emit(ServerMessage::SessionUpsert {
             session: session.meta(),
         });
     }

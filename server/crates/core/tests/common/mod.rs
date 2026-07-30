@@ -6,6 +6,7 @@
 
 #![allow(dead_code)]
 
+use agent_core::events::LocalEventBus;
 use agentdashboard_core::{
     LocalServer,
     claude_settings::ClaudeSettings,
@@ -98,6 +99,7 @@ fn build_manager(config: Arc<Config>, program: String) -> Arc<SessionManager> {
         hook_program(),
         claude_settings,
         Arc::new(ModelAliases::in_memory()),
+        Arc::new(LocalEventBus::new()),
     )
 }
 
@@ -335,6 +337,7 @@ impl TestServer {
                 hook_program(),
                 claude_settings,
                 Arc::new(ModelAliases::in_memory()),
+                Arc::new(LocalEventBus::new()),
             ),
             // 明示が無くても本物へは落とさない（[`claude_settings_for`]）
             None => build_manager(Arc::clone(&config), program),
