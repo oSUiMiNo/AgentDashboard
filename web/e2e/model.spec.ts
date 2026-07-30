@@ -18,6 +18,29 @@ test.afterEach(async ({ page }) => {
   await archiveAll(page)
 })
 
+/**
+ * `e2e/global-setup.ts` が置く既定。**注入が効かなかったときの値と違う**ものを
+ * 選んであるので、この値が出れば注入が本当に動いたことになる。
+ */
+const INJECTED = { model: 'claude-opus-5', label: 'Opus 5' }
+
+test('利用者のグローバル既定が注入されて、起こしたセッションがその値で始まる', async ({
+  page,
+}) => {
+  // **設計§6 の主の仕掛け**。これが効いていなければ、擬似 claude は組み込み既定
+  // （`default` → Sonnet 5）で始まる。以前の E2E はその状態を見ていたので、
+  // 注入と回復の実装を丸ごと消しても緑のままだった
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+
+  await expect(tile.getByTestId('model')).toHaveAttribute(
+    'data-model',
+    INJECTED.model,
+    { timeout: SETTLE },
+  )
+  await expect(tile.getByTestId('model')).toHaveText(INJECTED.label)
+})
+
 test('セッション画面から切り替えると一覧の小窓にも反映される', async ({ page }) => {
   await openDashboard(page)
   const tile = await spawnSession(page)
@@ -110,14 +133,15 @@ test('横並び画面でも片方だけが変わる', async ({ page }) => {
   await expect(pickers.first()).not.toHaveAttribute('data-model', '', {
     timeout: SETTLE,
   })
-  await pickers.first().selectOption('opus')
-  await expect(pickers.first()).toHaveAttribute('data-model', 'claude-opus-5', {
-    timeout: SETTLE,
-  })
-  await expect(pickers.nth(1)).not.toHaveAttribute(
+  // **注入された既定と違うモデルを選ぶ。** 2本とも既定で始まっているので、
+  // 既定と同じものを選ぶと何も起きず、「連動しなかった」ことを確かめられない
+  await pickers.first().selectOption('haiku')
+  await expect(pickers.first()).toHaveAttribute(
     'data-model',
-    'claude-opus-5',
+    'claude-haiku-4-5-20251001',
+    { timeout: SETTLE },
   )
+  await expect(pickers.nth(1)).toHaveAttribute('data-model', INJECTED.model)
 })
 
 test('切り替えたあとに起こしたセッションは元の既定で始まる', async ({ page }) => {
@@ -127,7 +151,11 @@ test('切り替えたあとに起こしたセッションは元の既定で始�
   await openSession(page, first)
 
   const picker = page.getByTestId('session-view').getByTestId('model-picker')
-  await expect(picker).not.toHaveAttribute('data-model', '', { timeout: SETTLE })
+  // 出発点が**注入された既定**であることを名指しで押さえる。ここを緩めると、
+  // 注入が死んでいても「2本とも組み込み既定で同じ」で緑になってしまう
+  await expect(picker).toHaveAttribute('data-model', INJECTED.model, {
+    timeout: SETTLE,
+  })
   const original = await picker.getAttribute('data-model')
   await picker.selectOption('haiku')
   await expect(picker).toHaveAttribute(

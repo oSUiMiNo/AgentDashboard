@@ -23,6 +23,9 @@ const fakeClaude = path.join(repoRoot, 'server/target/debug/fake-claude')
 // ブラウザバイナリのダウンロード量を抑える判断（テスト計画フェーズ1）。
 export default defineConfig({
   testDir: './e2e',
+  // 利用者のグローバル設定にあたるファイルを先に置く。これが無いとサーバ側の
+  // 注入（設計§6 の主の仕掛け）が一度も動かず、モデルのテストが空振りする
+  globalSetup: './e2e/global-setup.ts',
   fullyParallel: false,
   // core サーバは全テストで1つを共有する。並列に走らせると、別のテストが起動した
   // セッションが一覧に混ざるだけでなく、同じ端末へキー入力が交互に届いて壊れる
