@@ -55,11 +55,56 @@ pub fn parser_program() -> PathBuf {
     testkit::binary_path("transcript-parser")
 }
 
+/// 使い捨ての置き場所に一意な名前を付けるための連番。
+///
+/// nextest はテストごとにプロセスを分けるのでプロセスIDだけでも足りるが、
+/// 1つのテストが複数のマネージャを作る場合に備えて連番も足しておく。
+static THROWAWAY_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// テストが**本物の `~/.claude/settings.json` を読みに行かない**ようにする。
+///
+/// [`SessionManager::with_programs`] は設定が指定されていないと
+/// [`ClaudeSettings::discover`]＝利用者の本物のファイルへ落ちる。書き込みは
+/// テストごとに一時ファイルを渡して塞いでいたが、**読み込みが塞がれていなかった**。
+/// 開発者の設定に `model` があると、その値が擬似 claude へ注入され、
+/// 設定ファイルを持たない CI とは違う経路を通ることになる。
+///
+/// 指し先のファイルは**作らない**。読めなければ何もしないのが `claude_settings` の
+/// 約束なので、これで「グローバル既定は指定なし」＝CI と同じ状態になる。
+fn claude_settings_for(config: &Config) -> Arc<ClaudeSettings> {
+    // テストが自分で使い捨てのファイルを指定しているならそれを尊重する
+    if let Some(path) = &config.claude_settings_path {
+        return Arc::new(ClaudeSettings::new(path.clone()));
+    }
+    let seq = THROWAWAY_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "agentdashboard-no-global-{}-{seq}",
+        std::process::id()
+    ));
+    Arc::new(ClaudeSettings::new(dir.join("settings.json")))
+}
+
+/// テスト用のマネージャを組み立てる。
+///
+/// 別名の置き場所も in_memory へ寄せる。[`SessionManager::with_programs`] は
+/// `config.resolved_state_dir()` を使うが、`Config::default()` ではそれが
+/// **開発者の本物の状態ディレクトリ**（`~/.local/state/agentdashboard`）になる。
+/// グローバル設定と同じ性質の漏れなので、まとめて塞ぐ。
+fn build_manager(config: Arc<Config>, program: String) -> Arc<SessionManager> {
+    let claude_settings = claude_settings_for(&config);
+    SessionManager::with_everything(
+        config,
+        program,
+        hook_program(),
+        claude_settings,
+        Arc::new(ModelAliases::in_memory()),
+    )
+}
+
 pub fn manager_with(config: Config) -> Arc<SessionManager> {
-    SessionManager::with_programs(
+    build_manager(
         Arc::new(config),
         fake_claude().to_string_lossy().into_owned(),
-        hook_program(),
     )
 }
 
@@ -284,7 +329,8 @@ impl TestServer {
                 claude_settings,
                 Arc::new(ModelAliases::in_memory()),
             ),
-            None => SessionManager::with_programs(Arc::clone(&config), program, hook_program()),
+            // 明示が無くても本物へは落とさない（[`claude_settings_for`]）
+            None => build_manager(Arc::clone(&config), program),
         };
 
         let mut state = AppState::new(Arc::clone(&manager), Arc::clone(&config));

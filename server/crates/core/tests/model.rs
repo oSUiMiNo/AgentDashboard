@@ -15,7 +15,7 @@
 
 mod common;
 
-use agentdashboard_core::config::Config;
+use agentdashboard_core::{claude_settings::ClaudeSettings, config::Config};
 use protocol::ModelId;
 
 /// テスト用の設定。
@@ -37,6 +37,43 @@ const GLOBAL: &str = r#"{
   "effortLevel": "xhigh"
 }
 "#;
+
+#[test]
+fn 設定を明示しないテストでも本物のグローバル設定を指さない() {
+    // **書き込みは塞いだが、読み込みが塞がれていなかった**（コードレビュー C-2）。
+    // 既定の入口は `ClaudeSettings::discover()`＝利用者の本物のファイルへ落ちるので、
+    // 設定を明示しないテストは開発者の `model` を擬似 claude へ注入していた。
+    // 設定ファイルを持たない CI とは違う経路を通ることになる
+    let manager = common::manager();
+    let path = manager.claude_settings().path().to_path_buf();
+
+    assert!(
+        path.starts_with(std::env::temp_dir()),
+        "使い捨ての置き場所を指すこと。実際: {}",
+        path.display()
+    );
+    // 名指しで避けたい相手はこれ。`$HOME` そのものを見て判定すると、HOME が `/` の
+    // コンテナでは一時領域まで巻き込んでしまう
+    assert_ne!(
+        path,
+        ClaudeSettings::discover().path(),
+        "利用者の本物の設定を指してはいけない"
+    );
+    // 指すだけで作らない。読めなければ何もしないのが claude_settings の約束で、
+    // 「グローバル既定は指定なし」の状態がそのまま再現される
+    assert!(!path.exists(), "利用者の設定ファイルを生やしてはいけない");
+}
+
+#[test]
+fn 明示された設定のパスはそのまま使われる() {
+    // 使い捨てへ逃がす仕掛けが、テストが自分で用意したファイルを横取りしないこと
+    let expected = std::env::temp_dir().join("agentdashboard-explicit-global.json");
+    let manager = common::manager_with(Config {
+        claude_settings_path: Some(expected.clone()),
+        ..Config::default()
+    });
+    assert_eq!(manager.claude_settings().path(), expected);
+}
 
 #[tokio::test]
 async fn 起動直後はモデルが不明で始まる() {
