@@ -54,6 +54,31 @@ async-trait = "0.1"
 # 動かしている本PJTではコンテナ内の絶対パスを探して失敗する（ホストには存在しない）。
 rust-embed = { version = "8", features = ["debug-embed"] }
 portable-pty = "0.9"
+# DB（セルフホスト化設計§3-2）。**server-core だけが持つ**——PC 側が DB を触ると、
+# 「セッションの実体は PC・記録はサーバ」という分け方が崩れる。境界は
+# crates/core/tests/dependencies.rs が機械で検査する。
+#
+# ドライバを2つとも入れているのは、**ローカルは SQLite・セルフホストは PostgreSQL で
+# スキーマとコードを共有する**ため（設計§3-2 の「共有するのはスキーマ」）。
+# 片方だけ入れて他方を feature で切り替える形にすると、同じテストコードを両方へ
+# 通す（テスト計画F2）ができなくなる。
+sea-orm = { version = "2", default-features = false, features = [
+    "sqlx-sqlite",
+    "sqlx-postgres",
+    "runtime-tokio-rustls",
+    "macros",
+    "with-uuid",
+    "with-json",
+] }
+sea-orm-migration = { version = "2", default-features = false, features = [
+    "sqlx-sqlite",
+    "sqlx-postgres",
+    "runtime-tokio-rustls",
+] }
+# ブラウザのログインセッション（設計§8-2）。**フェーズ2 で入れるのは置き場所（web_sessions）
+# の実装だけ**で、ログインへの結線はフェーズ5。既製の tower-sessions-sqlx-store を使わない
+# 理由は設計§8-2（更新停止・版の非互換・sqlx の二重ビルド）。
+tower-sessions = "0.15"
 # 端末エミュレータ（セルフホスト化設計§7-1）。フェーズ0 の実機検証では**まだ dev-dependency**
 # で、録画を食わせて再現性と画面サイズを測るためだけに使う。製品コードへ入るのはフェーズ4。
 # 依存を「使うフェーズまで入れない」方針どおり、通常依存への昇格もそのときに行う。
