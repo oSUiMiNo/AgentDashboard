@@ -78,6 +78,13 @@ pub struct ClaudeSettings {
     ///
     /// 切替は人が押す操作なので、直列化しても実害は無い。
     switch_lock: tokio::sync::Mutex<()>,
+    /// 切替の一連が走っている間だけ立つ。
+    ///
+    /// **セッションの起動は同期の経路で、非同期のロックを取れない。** そのため
+    /// [`Self::refresh_default`] は「ロックを待つ」代わりに「立っていたら読みに行かない」で
+    /// 身を守る。切替中のファイルには CLI が書いた汚れた値が入っているので、
+    /// そのまま読むと**それを利用者の既定として取り込んでしまう**（設計§6 の4手の別経路）。
+    switching: std::sync::atomic::AtomicBool,
     state: Mutex<Remembered>,
 }
 
@@ -86,6 +93,7 @@ impl ClaudeSettings {
         Self {
             path,
             switch_lock: tokio::sync::Mutex::new(()),
+            switching: std::sync::atomic::AtomicBool::new(false),
             state: Mutex::new(Remembered::default()),
         }
     }
@@ -104,8 +112,14 @@ impl ClaudeSettings {
     ///
     /// 呼び出し側はこのガードを持ったまま「送る → 確定を待つ → 回復する」を行う。
     /// ガードを落とすまで、他のセッションの切替は待たされる。
-    pub async fn lock_switch(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.switch_lock.lock().await
+    pub async fn lock_switch(&self) -> SwitchGuard<'_> {
+        let guard = self.switch_lock.lock().await;
+        self.switching
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        SwitchGuard {
+            owner: self,
+            _guard: guard,
+        }
     }
 
     /// いまのグローバル既定を読み直して覚える。セッションを起こすたびに呼ぶ。
@@ -113,6 +127,10 @@ impl ClaudeSettings {
     /// **回復に失敗している間は読みに行かない。** 汚れた値をそのまま「利用者の既定」
     /// として取り込むと、以後ずっと汚れた値を注入し続けることになる。
     pub fn refresh_default(&self) -> Option<ModelId> {
+        // 切替中のファイルには CLI が書いた汚れた値が入っている。**読んではいけない。**
+        if self.switching.load(std::sync::atomic::Ordering::SeqCst) {
+            return self.remembered_default();
+        }
         {
             let state = self.state.lock().expect("ロックが壊れていない");
             if state.broken {
@@ -174,6 +192,13 @@ impl ClaudeSettings {
     /// 設計§11）。意味は同じなので追いかけない。「戻したのに一致しない」を異常として
     /// 扱わないこと。
     pub fn recover(&self, switched_to: &ModelId) -> Recovery {
+        // 回復に失敗している間は**読みに行かない**。[`Self::refresh_default`] と揃える。
+        // ここだけ読むと、隔離したはずの汚れた値を「利用者が変えた」として取り込む
+        if self.is_broken() {
+            return Recovery::Skipped {
+                reason: "回復に失敗した状態なので読みに行きません".to_string(),
+            };
+        }
         let current = match self.read_model() {
             Ok(current) => current,
             Err(reason) => return Recovery::Skipped { reason },
@@ -253,6 +278,20 @@ impl ClaudeSettings {
             .map_err(|err| format!("書き換えた結果が JSON になりませんでした: {err}"))?;
 
         std::fs::write(&self.path, updated).map_err(|err| err.to_string())
+    }
+}
+
+/// 切替の一連を包むガード。落ちると「切替中」の印も下りる。
+pub struct SwitchGuard<'a> {
+    owner: &'a ClaudeSettings,
+    _guard: tokio::sync::MutexGuard<'a, ()>,
+}
+
+impl Drop for SwitchGuard<'_> {
+    fn drop(&mut self) {
+        self.owner
+            .switching
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -819,6 +858,50 @@ mod tests {
         assert_eq!(
             store.read_model().unwrap(),
             Some(ModelId::new("claude-fable-5[1m]"))
+        );
+    }
+
+    #[tokio::test]
+    async fn 切替中は既定を読みに行かない() {
+        // **設計§6 の4手の別経路。** セッションの起動は同期なので非同期のロックを
+        // 取れず、素朴に読むと切替中の汚れた値を利用者の既定として取り込む
+        let (_dir, store) = temp_settings("in-flight", SAMPLE);
+        store.refresh_default();
+        let original = store.remembered_default();
+
+        let guard = store.lock_switch().await;
+        // CLI が /model sonnet を保存した状態
+        cli_saves(&store, "sonnet");
+
+        assert_eq!(
+            store.refresh_default(),
+            original,
+            "切替中に読むと、汚れた値を既定として取り込んでしまう"
+        );
+        assert_eq!(store.remembered_default(), original);
+
+        drop(guard);
+        // 切替が終われば、また読みに行く
+        assert_eq!(store.refresh_default(), Some(ModelId::new("sonnet")));
+    }
+
+    #[test]
+    fn 回復に失敗している間はrecoverも読みに行かない() {
+        // refresh_default だけ塞いでも、recover が読んで Adopted すれば同じこと
+        let (_dir, store) = temp_settings("broken-recover", SAMPLE);
+        store.refresh_default();
+        let original = store.remembered_default();
+        store.state.lock().unwrap().broken = true;
+
+        cli_saves(&store, "sonnet");
+        assert!(matches!(
+            store.recover(&ModelId::new("haiku")),
+            Recovery::Skipped { .. }
+        ));
+        assert_eq!(
+            store.remembered_default(),
+            original,
+            "隔離したはずの汚れた値を取り込んではいけない"
         );
     }
 }
