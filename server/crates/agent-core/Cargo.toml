@@ -31,3 +31,6 @@ tracing.workspace = true
 
 [dev-dependencies]
 testkit.workspace = true
+# 実機検証（計画.md フェーズ0）で端末録画を食わせて測るためだけに使う。
+# 製品コードからは参照しない——通常依存になるのは画面配信を実装するフェーズ4。
+vt100.workspace = true

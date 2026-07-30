@@ -16,7 +16,7 @@ DEBUG_BIN := server/target/debug/agentdashboard
 .PHONY: help setup setup-rust setup-web dev dev-web dev-server \
         test test-rust test-web test-cli e2e build-debug perf \
         lint lint-rust lint-web fmt \
-        build build-web build-server ci fixtures record-terminal clean
+        build build-web build-server ci fixtures record-terminal probe-screen clean
 
 help: ## このヘルプを表示する
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -130,6 +130,11 @@ fixtures: ## ゴールデンフィクスチャを採取して匿名化する（�
 # コンテナ内で完結し、何度でも走らせてよい。
 record-terminal: ## 実 claude の TUI を録画してフィクスチャにする（ホストで実行・クォータ消費）
 	./scripts/record-terminal.sh
+
+# perf と同じ扱い。合否ではなく実測値を出すためのものなので `#[ignore]` を付けて
+# make test から外し、ここでだけ `--run-ignored all` で走らせる。
+probe-screen: ## 端末エミュレータ（vt100）の再現性と画面サイズを実測する
+	$(CARGO) nextest run -p agent-core --test screen_probe --no-capture --run-ignored all
 
 clean: ## ビルド成果物を消す（自己修復の作業場所も含む）
 	rm -rf server/target web/dist web/node_modules
