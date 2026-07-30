@@ -20,6 +20,7 @@ function setToggle(value: boolean) {
       always_bypass_permissions: value,
       available_modes: ['default', 'acceptEdits', 'bypassPermissions'],
       model_aliases: [],
+      model_catalog: [],
     },
     loading: false,
   })

@@ -48,6 +48,7 @@ beforeEach(() => {
       always_bypass_permissions: false,
       available_modes: ['default'],
       model_aliases: [],
+      model_catalog: [],
     },
     loading: false,
   })
@@ -105,8 +106,8 @@ describe('ModelPicker', () => {
     expect(picker).toHaveTextContent('へ切替中')
   })
 
-  it('一度選んだ別名には実測した版番号を併記する', () => {
-    // 表に版番号を書かないまま版番号を出すための仕掛け（設計§12）
+  it('一度選んだ別名は、CLI が名乗った名前で出る', () => {
+    // 括弧で併記せず置き換える（`Opus` ではなく `Opus 5`）
     useSettingsStore.setState({
       settings: {
         always_bypass_permissions: false,
@@ -114,17 +115,58 @@ describe('ModelPicker', () => {
         model_aliases: [
           { alias: 'opus', id: 'claude-opus-5', display_name: 'Opus 5' },
         ],
+        model_catalog: [],
       },
       loading: false,
     })
     applySessionSnapshot([meta(CARD)])
     render(<ModelPicker cardId={CARD} />)
 
-    expect(
-      screen.getByRole('option', { name: 'Opus（Opus 5）' }),
-    ).toBeInTheDocument()
-    // まだ選んでいない別名は括弧が付かない（推測で埋めない）
+    // いま動いているモデルが別名で言い当てられるので、その行が選択状態になる。
+    // 「現在値」の行を別に足すと `Opus 5` が2行並んで紛らわしい
+    expect(screen.getByTestId('model-picker')).toHaveValue('opus')
+    expect(screen.getAllByRole('option', { name: 'Opus 5' })).toHaveLength(1)
+    // まだ選んでいない別名は素のまま（実測も対応表も無い）
     expect(screen.getByRole('option', { name: 'Sonnet' })).toBeInTheDocument()
+  })
+
+  it('一度も選んでいない別名にも、対応表があれば版番号が出る', () => {
+    // 設計§13。CLI 自身から取り出した対応表で、使う前から版番号が分かる
+    useSettingsStore.setState({
+      settings: {
+        always_bypass_permissions: false,
+        available_modes: ['default'],
+        model_aliases: [],
+        model_catalog: [
+          { id: 'claude-sonnet-5', family: 'sonnet', display_name: 'Sonnet 5' },
+          { id: 'claude-haiku-4-5', family: 'haiku', display_name: 'Haiku 4.5' },
+        ],
+      },
+      loading: false,
+    })
+    applySessionSnapshot([meta(CARD)])
+    render(<ModelPicker cardId={CARD} />)
+
+    expect(screen.getByRole('option', { name: 'Sonnet 5' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Haiku 4.5' })).toBeInTheDocument()
+    // 解決先が状況で変わる別名には出さない
+    expect(screen.getByRole('option', { name: '既定' })).toBeInTheDocument()
+    expect(
+      screen.getByRole('option', { name: 'プラン=Opus / 実行=Sonnet' }),
+    ).toBeInTheDocument()
+  })
+
+  it('選択肢にマウスを乗せると説明が出る', () => {
+    applySessionSnapshot([meta(CARD)])
+    render(<ModelPicker cardId={CARD} />)
+
+    expect(screen.getByRole('option', { name: 'Haiku' })).toHaveAttribute(
+      'title',
+      '軽い作業',
+    )
+    expect(
+      screen.getByRole('option', { name: 'プラン=Opus / 実行=Sonnet' }),
+    ).toHaveAttribute('title', expect.stringContaining('モードであって'))
   })
 
   it('表に無いモデルが来ても選択肢から消えない', () => {

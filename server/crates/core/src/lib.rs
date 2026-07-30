@@ -14,6 +14,7 @@ pub mod hook_post;
 pub mod hooks;
 pub mod jsonfile;
 pub mod model_aliases;
+pub mod model_catalog;
 pub mod model_post;
 pub mod parser;
 pub mod selfheal;
@@ -77,10 +78,15 @@ pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::R
             .collect::<Vec<_>>()
             .join(", ")
     );
+    // 正式名と通称の対応表を、起動している CLI 自身から取り出す（設計§13）。
+    // 画面の選択肢へ版番号を出すための材料で、**取れなくても何も壊れない**
+    let catalog =
+        model_catalog::ModelCatalog::resolve(manager.program(), Some(config.resolved_state_dir()));
     let settings = Arc::new(settings::SettingsStore::new(
         config_path,
         &config,
         available_modes,
+        catalog.models().to_vec(),
     ));
 
     // 「作業中」の表示のまま実はハングしている、という見落としを防ぐ見張り（設計§5）

@@ -24,7 +24,13 @@
  * 一致しないので、`<select>` の値として成立させるには**現在値の選択肢を先頭に足す**しかない。
  */
 
-import { MODELS, modelLabel, modelOptionLabel } from '@/lib/models'
+import {
+  MODELS,
+  aliasForCurrent,
+  modelInfo,
+  modelLabel,
+  modelOptionLabel,
+} from '@/lib/models'
 import type { CardId } from '@/lib/protocol'
 import { useSessionCard } from '@/stores/sessions'
 import { useSettingsStore } from '@/stores/settings'
@@ -38,6 +44,7 @@ export function ModelPicker({ cardId }: Props) {
   const session = useSessionCard(cardId)
   const setModel = useWsStore((state) => state.setModel)
   const seen = useSettingsStore((state) => state.settings.model_aliases)
+  const catalog = useSettingsStore((state) => state.settings.model_catalog)
 
   if (!session) {
     return null
@@ -47,7 +54,10 @@ export function ModelPicker({ cardId }: Props) {
   // 切替中は要求した別名を出す。**確定した値と同じ顔をさせない**（設計§5）。
   // CLI に拒否されると確定は届かないので、これを確定と混ぜると画面が嘘をつき続ける
   const switching = requested !== null
-  const shown = switching ? modelLabel(requested, null) : modelLabel(model, label)
+  // いま動いているモデルが表の別名で言い当てられるなら、その行を選択状態にする。
+  // 言い当てられないときだけ「現在値」の行を先頭へ足す（足すと同じ名前が2行並ぶため）
+  const alias = aliasForCurrent(model, seen)
+  const needsOwnRow = switching || alias === null
 
   return (
     <label className="flex min-w-0 shrink-0 items-center gap-1.5 text-xs">
@@ -56,25 +66,29 @@ export function ModelPicker({ cardId }: Props) {
         data-testid="model-picker"
         data-model={model ?? ''}
         data-requested={requested ?? ''}
-        aria-label="モデル"
-        value={model ?? ''}
+        value={needsOwnRow ? (model ?? '') : alias}
         onChange={(event) => setModel(cardId, event.target.value)}
-        className={`max-w-40 truncate rounded border px-1.5 py-0.5 text-xs ${
+        aria-label="モデル"
+        className={`max-w-48 truncate rounded border px-1.5 py-0.5 text-xs ${
           switching
             ? 'border-amber-500/40 text-amber-300'
             : 'border-border text-muted-foreground'
         }`}
       >
-        {/*
-          いま動いているモデル。値はフルID、表示は版番号入りの名前。
-          切替中はここに「〜へ切替中」と出して、確定と見分けが付くようにする
-        */}
-        <option value={model ?? ''}>
-          {switching ? `${shown} へ切替中…` : shown}
-        </option>
+        {needsOwnRow && (
+          <option value={model ?? ''}>
+            {switching
+              ? `${modelLabel(requested, null)} へ切替中…`
+              : modelLabel(model, label)}
+          </option>
+        )}
         {MODELS.map((entry) => (
-          <option key={entry.value} value={entry.value}>
-            {modelOptionLabel(entry.value, seen)}
+          <option
+            key={entry.value}
+            value={entry.value}
+            title={modelInfo(entry.value).description}
+          >
+            {modelOptionLabel(entry.value, seen, catalog)}
           </option>
         ))}
       </select>

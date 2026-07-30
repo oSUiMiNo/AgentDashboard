@@ -55,6 +55,7 @@ beforeEach(() => {
         'bypassPermissions',
       ],
       model_aliases: [],
+      model_catalog: [],
     },
     loading: false,
   })

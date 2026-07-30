@@ -310,9 +310,14 @@ impl TestServer {
             // 本番と同じく `--help` からモードを読む（擬似 claude も choices を出す）
             let modes =
                 agentdashboard_core::session::permission::supported_modes(manager.program());
-            state = state.with_settings(Arc::new(
-                agentdashboard_core::settings::SettingsStore::new(path, &config, modes),
-            ));
+            state =
+                state.with_settings(Arc::new(agentdashboard_core::settings::SettingsStore::new(
+                    path,
+                    &config,
+                    modes,
+                    // 擬似 claude は対応表を持たない。空で通す
+                    Vec::new(),
+                )));
         }
 
         let task = tokio::spawn(async move {

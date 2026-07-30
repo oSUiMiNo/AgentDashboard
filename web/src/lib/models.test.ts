@@ -1,9 +1,11 @@
 import {
   MODELS,
+  aliasForCurrent,
   modelInfo,
   modelLabel,
   modelOptionLabel,
   type ModelAliasSeen,
+  type ModelCatalogEntry,
 } from './models'
 
 describe('モデルの別名表', () => {
@@ -53,28 +55,93 @@ describe('いま動いているモデルの表示', () => {
   })
 })
 
-describe('選択肢への版番号の併記', () => {
+describe('選択肢に出す名前', () => {
   const seen: ModelAliasSeen[] = [
     { alias: 'opus', id: 'claude-opus-5', display_name: 'Opus 5' },
-    { alias: 'fable', id: 'claude-fable-5', display_name: 'Fable 5' },
+    {
+      alias: 'opus[1m]',
+      id: 'claude-opus-5[1m]',
+      display_name: 'Opus 5 (1M context)',
+    },
+  ]
+  const catalog: ModelCatalogEntry[] = [
+    { id: 'claude-opus-4-6', family: 'opus', display_name: 'Opus 4.6' },
+    { id: 'claude-opus-5', family: 'opus', display_name: 'Opus 5' },
+    { id: 'claude-sonnet-4-6', family: 'sonnet', display_name: 'Sonnet 4.6' },
+    { id: 'claude-sonnet-5', family: 'sonnet', display_name: 'Sonnet 5' },
+    { id: 'claude-3-5-haiku', family: 'haiku', display_name: 'Haiku 3.5' },
+    { id: 'claude-haiku-4-5', family: 'haiku', display_name: 'Haiku 4.5' },
   ]
 
-  it('一度選んだ別名には実測した版番号が付く', () => {
-    expect(modelOptionLabel('opus', seen)).toBe('Opus（Opus 5）')
-    expect(modelOptionLabel('fable', seen)).toBe('Fable（Fable 5）')
+  it('実測があればそれをそのまま出す', () => {
+    // 括弧で併記せず置き換える。`Opus 5` と `Opus 5 (1M context)` の違いが
+    // そのまま見分けになる
+    expect(modelOptionLabel('opus', seen, catalog)).toBe('Opus 5')
+    expect(modelOptionLabel('opus[1m]', seen, catalog)).toBe('Opus 5 (1M context)')
   })
 
-  it('まだ選んでいない別名には何も付かない', () => {
-    // 推測で埋めない。この環境でその別名が何に解決されるかを知らないため
-    expect(modelOptionLabel('sonnet', seen)).toBe('Sonnet')
-    expect(modelOptionLabel('haiku', [])).toBe('Haiku')
+  it('実測が無くても対応表から版番号を出せる', () => {
+    // **一度も選んでいない別名にも版番号が出る**（設計§13）。
+    // 対応表は CLI 自身から取り出したもので、こちらの表には版番号を持たない
+    expect(modelOptionLabel('sonnet', [], catalog)).toBe('Sonnet 5')
+    expect(modelOptionLabel('haiku', [], catalog)).toBe('Haiku 4.5')
   })
 
-  it('別名と表示名が同じなら括弧を付けない', () => {
-    // `Sonnet（Sonnet）` のような無意味な括弧を出さない
-    const same: ModelAliasSeen[] = [
-      { alias: 'sonnet', id: 'claude-sonnet-5', display_name: 'Sonnet' },
+  it('系統でいちばん新しいものを選ぶ', () => {
+    // 並び順ではなく数字で比べる。`claude-3-5-haiku` と `claude-haiku-4-5` のように
+    // 桁の並びが違う古い形式が混ざっている
+    expect(modelOptionLabel('opus', [], catalog)).toBe('Opus 5')
+    expect(modelOptionLabel('haiku', [], catalog)).toBe('Haiku 4.5')
+  })
+
+  it('1M 版は対応表に無いので、系統の最新へこちらの印を足す', () => {
+    expect(modelOptionLabel('sonnet[1m]', [], catalog)).toBe('Sonnet 5（1M）')
+  })
+
+  it('実測は対応表より優先される', () => {
+    // 対応表は「別名＝系統の最新」という推測。組織の設定で候補が絞られていれば外れる
+    const measured: ModelAliasSeen[] = [
+      { alias: 'opus', id: 'claude-opus-4-6', display_name: 'Opus 4.6' },
     ]
-    expect(modelOptionLabel('sonnet', same)).toBe('Sonnet')
+    expect(modelOptionLabel('opus', measured, catalog)).toBe('Opus 4.6')
+  })
+
+  it('何も分からなければ表のラベルを出す', () => {
+    expect(modelOptionLabel('sonnet', [], [])).toBe('Sonnet')
+  })
+
+  it('解決先が状況で変わる別名には版番号を出さない', () => {
+    // `最良` を `Fable 5` と出すと `Fable` と見分けが付かなくなる。
+    // `opusplan` はモードなので、1つのモデル名にすると誤解される
+    const meta: ModelAliasSeen[] = [
+      { alias: 'best', id: 'claude-fable-5', display_name: 'Fable 5' },
+      { alias: 'opusplan', id: 'claude-sonnet-5', display_name: 'Sonnet 5' },
+    ]
+    expect(modelOptionLabel('best', meta, catalog)).toBe('最良')
+    expect(modelOptionLabel('opusplan', meta, catalog)).toBe(
+      'プラン=Opus / 実行=Sonnet',
+    )
+    expect(modelOptionLabel('default', meta, catalog)).toBe('既定')
+  })
+})
+
+describe('いま動いているモデルに対応する別名', () => {
+  const seen: ModelAliasSeen[] = [
+    { alias: 'opus', id: 'claude-opus-5', display_name: 'Opus 5' },
+    { alias: 'best', id: 'claude-fable-5', display_name: 'Fable 5' },
+  ]
+
+  it('実測から引ける', () => {
+    expect(aliasForCurrent('claude-opus-5', seen)).toBe('opus')
+  })
+
+  it('覚えていなければ引けない', () => {
+    expect(aliasForCurrent('claude-haiku-4-5', seen)).toBeNull()
+    expect(aliasForCurrent(null, seen)).toBeNull()
+  })
+
+  it('状況で変わる別名は候補にしない', () => {
+    // `best` と `fable` は同じモデルへ解決されうるので、どちらを指すのか決められない
+    expect(aliasForCurrent('claude-fable-5', seen)).toBeNull()
   })
 })

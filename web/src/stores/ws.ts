@@ -39,6 +39,7 @@ import type {
   ServerMessage,
   SessionMeta,
 } from '@/lib/protocol'
+import { useSettingsStore } from '@/stores/settings'
 import {
   applySessionSnapshot,
   patchSessionStatus,
@@ -347,6 +348,9 @@ function handleJson(raw: string, set: SetState) {
       break
     case 'session_upsert':
       upsertSession(message.session)
+      // 別名の実測はサーバが覚えるので、**切り替えた直後は画面の手元が古い**。
+      // 知らないモデルを見たら設定を取り直す（設計§12）
+      useSettingsStore.getState().noteModelSeen(message.session.model)
       break
     case 'session_removed':
       removeSession(message.card_id)

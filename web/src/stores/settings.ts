@@ -14,7 +14,7 @@
  */
 
 import { create } from 'zustand'
-import type { ModelAliasSeen } from '@/lib/models'
+import type { ModelAliasSeen, ModelCatalogEntry } from '@/lib/models'
 import { PERMISSION_MODES, type PermissionMode } from '@/lib/protocol'
 
 /** `GET /api/settings` の応答。 */
@@ -29,6 +29,13 @@ export interface Settings {
    * モデルの選択肢へ版番号を併記するために使う。一度も選んでいない別名は入っていない。
    */
   model_aliases: ModelAliasSeen[]
+  /**
+   * CLI 自身から取り出した、正式名と通称の対応表（設計§13）。
+   *
+   * **まだ一度も選んでいない別名にも版番号を出す**ための材料。取れなければ空で、
+   * そのときは別名のラベルが出るだけ。
+   */
+  model_catalog: ModelCatalogEntry[]
 }
 
 interface SettingsState {
@@ -37,6 +44,16 @@ interface SettingsState {
   loading: boolean
   lastError: string | null
   load: () => Promise<void>
+  /**
+   * セッションが名乗ったモデルを見て、必要なら設定を取り直す（設計§12）。
+   *
+   * 別名の実測はサーバが覚えるので、**切り替えた直後は画面の手元が古い**。
+   * 取り直さないとリロードするまで選択肢の名前が更新されない（実際にそうなっていた）。
+   *
+   * 同じ値で何度も取りに行かないよう、一度試した ID は覚えておく。サーバが結局
+   * 覚えなかった値（利用者が端末でフルIDを直に打った等）でも、聞くのは1回きり。
+   */
+  noteModelSeen: (model: string | null) => void
   setAlwaysBypassPermissions: (value: boolean) => Promise<void>
 }
 
@@ -51,12 +68,27 @@ const FALLBACK: Settings = {
   available_modes: PERMISSION_MODES.map((mode) => mode.value),
   // 実測が無い状態が正しい初期値。推測で埋めると、選択肢に嘘の版番号が出る
   model_aliases: [],
+  model_catalog: [],
 }
+
+/** 一度取り直しを試した model の ID。無限に聞きに行かないための歯止め */
+const asked = new Set<string>()
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   settings: FALLBACK,
   loading: true,
   lastError: null,
+
+  noteModelSeen: (model) => {
+    if (model === null || asked.has(model)) {
+      return
+    }
+    if (get().settings.model_aliases.some((entry) => entry.id === model)) {
+      return
+    }
+    asked.add(model)
+    void get().load()
+  },
 
   load: async () => {
     try {
@@ -68,6 +100,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       const settings = (await response.json()) as Settings
       // 古いサーバはこのキーを返さない。undefined のまま持つと画面が落ちる
       settings.model_aliases ??= []
+      settings.model_catalog ??= []
       set({ settings, loading: false })
     } catch {
       // 読めなくても画面は出す。既定値のまま（＝スキップしない側）で動く

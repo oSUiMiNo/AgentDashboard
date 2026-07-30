@@ -20,6 +20,7 @@
 
 use crate::config::Config;
 use crate::model_aliases::AliasSeen;
+use crate::model_catalog::CatalogEntry;
 use protocol::PermissionMode;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -46,6 +47,13 @@ pub struct SettingsView {
     /// WebSocket のメッセージを増やさず設定に載せているのは、更新が滅多に起きないため。
     #[serde(default)]
     pub model_aliases: Vec<AliasSeen>,
+    /// 起動している CLI 自身から取り出した、正式名と通称の対応表（設計§13）。
+    ///
+    /// `claude-opus-5` → `Opus 5`。**まだ一度も選んでいない別名にも版番号を出す**ための材料で、
+    /// `family` から「その系統でいちばん新しいもの」を引く。
+    /// 取れなければ空で、そのときは別名のラベル（`Opus`）が出るだけ。
+    #[serde(default)]
+    pub model_catalog: Vec<CatalogEntry>,
 }
 
 /// 画面から変えられる設定の持ち主。
@@ -55,14 +63,21 @@ pub struct SettingsStore {
     path: PathBuf,
     always_bypass_permissions: AtomicBool,
     available_modes: Vec<PermissionMode>,
+    model_catalog: Vec<CatalogEntry>,
 }
 
 impl SettingsStore {
-    pub fn new(path: PathBuf, config: &Config, available_modes: Vec<PermissionMode>) -> Self {
+    pub fn new(
+        path: PathBuf,
+        config: &Config,
+        available_modes: Vec<PermissionMode>,
+        model_catalog: Vec<CatalogEntry>,
+    ) -> Self {
         Self {
             path,
             always_bypass_permissions: AtomicBool::new(config.always_bypass_permissions),
             available_modes,
+            model_catalog,
         }
     }
 
@@ -75,6 +90,7 @@ impl SettingsStore {
             always_bypass_permissions: self.always_bypass_permissions.load(Ordering::Relaxed),
             available_modes: self.available_modes.clone(),
             model_aliases,
+            model_catalog: self.model_catalog.clone(),
         }
     }
 
@@ -237,6 +253,8 @@ stalled_threshold_secs = 120
             path.clone(),
             &Config::default(),
             vec![PermissionMode::new("default")],
+            // 対応表はここでは関係ない（画面へ配るだけの値）
+            Vec::new(),
         );
         assert!(!store.view().always_bypass_permissions);
 
