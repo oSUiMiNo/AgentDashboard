@@ -378,12 +378,23 @@ WebGL レンダラを載せているので、カーソルも文字も **canvas �
 並びを決める指定は**必ず描かれる入れ物**のほうへ持たせる。入れ物ごと消える場合も、
 「中身が1つも無ければ入れ物も出さない」と書けば余白だけが残ることもない。
 
-### 端末の Enter は読み替えている（改行が Enter、送信が Ctrl+Enter）
-xterm は Enter に修飾キーを見ておらず、Shift+Enter でも素の Enter と同じ CR を送る。
-受け取る CLI から見れば**同じバイト列**なので区別のしようがない。
+### Enter の割り当ては、端末と入力欄で必ず揃える
+**Enter と Shift+Enter が改行、Ctrl+Enter が送信。** 判断は `lib/keys.ts` に集約してあり、
+端末（`TerminalPane` → `terminalKeyOverride`）と入力欄（`Composer` → `isComposerSubmit`）の
+両方がここを見る。
 
-いまの割り当ては `lib/keys.ts` にある。**Enter と Shift+Enter が改行（ESC+CR）、
-Ctrl+Enter が送信（CR）**。読み替えは `TerminalPane` の
+**片方だけ直してはいけない。** セッション専用画面には入力口が2つあり、しかも同時に見えて
+いる（入力欄はタブの外側に常設）。押し分けが食い違うと、同じキーの結果が「いまどちらに
+焦点があるか」で変わることになり、**打っている本人には原因が分からない**。実際に、端末側
+だけを先に読み替えて入力欄が取り残された状態が出荷されている。
+
+送るものは2つで違う。**端末はバイト列**（改行 `ESC+CR` / 送信 `CR`）、**入力欄は素の
+テキストに改行が入るだけ**で、包むのはサーバの仕事（`session/input.rs`）。判断だけを
+共有し、送り方は各自が持つ。
+
+#### 端末側（読み替え）の注意
+xterm は Enter に修飾キーを見ておらず、Shift+Enter でも素の Enter と同じ CR を送る。
+受け取る CLI から見れば**同じバイト列**なので区別のしようがない。読み替えは
 `attachCustomKeyEventHandler` 1箇所で行う。実装するときの注意が2つある。
 
 - **`term.input()` を通す。** `sendPtyInput` を直に呼ぶと送信口が2つになる
@@ -393,6 +404,11 @@ Ctrl+Enter が送信（CR）**。読み替えは `TerminalPane` の
 
 送るべき並びは推測しない。**CLI のバイナリが `/terminal-setup` で書き込む keybinding**
 に答えが入っていることがある（改行は `\x1b\r` だった）。
+
+#### 入力欄側の注意
+素の Enter では **`preventDefault()` を呼ばない**。textarea の既定がそのまま改行になり、
+`<form>` の中でも textarea の Enter は submit を起こさない。押し分けの判断材料
+（`EnterKeyState`）に `shiftKey` を**入れていない**のも同じ考えで、見えないものは効かない。
 
 ### 端末を自動操作するときは Enter で送信できない
 上の割り当ての結果、**選択ダイアログの確定も Ctrl+Enter になる**（実測：フォルダ信頼の
