@@ -25,10 +25,15 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TEST_TARGET="real_cli"
+
+# 「コンテナでビルド → ホストで実行」の分業は、本物の claude を相手にする検証すべてに要る。
+# 実CLI統合テスト以外（フェーズ0 の PTY 録画など）からも使えるよう、対象を差し替えられる
+# ようにしてある。既定は実CLI統合テストのままなので `make test-cli` の挙動は変わらない。
+TEST_PACKAGE="${TEST_PACKAGE:-agentdashboard-core}"
+TEST_TARGET="${TEST_TARGET:-real_cli}"
 
 if ! command -v claude >/dev/null 2>&1; then
-    echo "エラー: 本物の claude が PATH にありません。実CLI統合テストはホストで実行します。" >&2
+    echo "エラー: 本物の claude が PATH にありません。この検証はホストで実行します。" >&2
     exit 1
 fi
 
@@ -58,7 +63,7 @@ trap cleanup EXIT
 
 echo "==> テスト実行ファイルをコンテナでビルドします"
 "${REPO_ROOT}/scripts/cargo" test \
-    --package agentdashboard-core \
+    --package "${TEST_PACKAGE}" \
     --test "${TEST_TARGET}" \
     --no-run \
     --message-format=json >"${BUILD_LOG}"

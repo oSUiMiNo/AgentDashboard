@@ -16,7 +16,7 @@ DEBUG_BIN := server/target/debug/agentdashboard
 .PHONY: help setup setup-rust setup-web dev dev-web dev-server \
         test test-rust test-web test-cli e2e build-debug perf \
         lint lint-rust lint-web fmt \
-        build build-web build-server ci fixtures clean
+        build build-web build-server ci fixtures record-terminal clean
 
 help: ## このヘルプを表示する
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -122,6 +122,14 @@ ci: lint test build ## ローカルCI。静的検査 → テスト → ビルド
 
 fixtures: ## ゴールデンフィクスチャを採取して匿名化する（本物の claude をホストで実行）
 	./scripts/gen-fixtures.sh
+
+# --- 端末エミュレーションの実機検証（計画.md フェーズ0）------------------------
+#
+# 採る側と測る側で走らせ方が違う。録画は**本物の claude をホストで**動かすので
+# クォータを消費する（`make fixtures` と同じ性質）。測る側は録画を読むだけなので
+# コンテナ内で完結し、何度でも走らせてよい。
+record-terminal: ## 実 claude の TUI を録画してフィクスチャにする（ホストで実行・クォータ消費）
+	./scripts/record-terminal.sh
 
 clean: ## ビルド成果物を消す（自己修復の作業場所も含む）
 	rm -rf server/target web/dist web/node_modules
