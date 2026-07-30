@@ -27,6 +27,7 @@
 //! 6. `selfheal_enabled = false` で機能ごと止められる
 //! 7. **プッシュはしない**（コミットまで）
 
+pub mod model_table;
 pub mod ops;
 pub mod repair;
 pub mod state;
@@ -130,6 +131,17 @@ impl Selfheal {
         let (sink, reports) = mpsc::channel(STATS_QUEUE);
         parser.attach_stats_sink(sink);
         tokio::spawn(watch(Arc::clone(&selfheal), reports));
+
+        // CLI が上がっていたら、モデル別名の表を見直す（設計§14）。
+        // **契機は観測ではなくバージョン変化。** 誰も使っていない新しい別名は
+        // 観測されないので、観測を待っていると永久に気づけない
+        if selfheal.config.selfheal_enabled && selfheal.ops.is_some() {
+            let version =
+                crate::model_catalog::cli_version(selfheal.manager.program()).unwrap_or_default();
+            if model_table::needs_review(&selfheal.state_dir, &version) {
+                tokio::spawn(review_model_table(Arc::clone(&selfheal), version));
+            }
+        }
         selfheal
     }
 
@@ -691,6 +703,147 @@ async fn canary(
             tracing::warn!("カナリアの採り直しに失敗しました: {error}");
             Ok(sample)
         }
+    }
+}
+
+/// 別名の表を、公式ドキュメントから見直させる（設計§14）。
+///
+/// # なぜパーサの修復と別の流れなのか
+///
+/// 直す対象も、壊れているかの判断も、ゲートも違う。パーサは「テストが落ちている」
+/// という**明確な故障**から始まるが、こちらは「CLI が上がったので古いかもしれない」
+/// という**疑い**から始まる。落ちているものが無いので、カナリアも再試行も要らない。
+///
+/// 1回で済ませ、通らなければ何もしなかったことにする。
+async fn review_model_table(selfheal: Arc<Selfheal>, cli_version: String) {
+    let Some(ops) = selfheal.ops.clone() else {
+        return;
+    };
+    // パーサの修復と同時に走らせない。worktree もセッションも取り合う
+    if selfheal
+        .busy
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    // **成否によらず、この版では二度と起こさない。** 同じ版で繰り返しても結果は同じで、
+    // 無人セッションを撃ち続けることになる
+    model_table::mark_reviewed(&selfheal.state_dir, &cli_version);
+
+    let observed: Vec<String> = selfheal
+        .manager
+        .aliases()
+        .all()
+        .into_iter()
+        .map(|entry| entry.alias.0)
+        .collect();
+
+    selfheal.notify(
+        SelfhealPhase::Repairing,
+        Some(format!(
+            "CLI が {cli_version} に上がったので、モデル別名の表を見直します"
+        )),
+    );
+
+    let outcome = run_model_review(&selfheal, &ops, &cli_version, &observed).await;
+    match outcome {
+        Ok(true) => selfheal.notify(
+            SelfhealPhase::Swapped,
+            Some("モデル別名の表を更新しました".to_string()),
+        ),
+        Ok(false) => selfheal.notify(
+            SelfhealPhase::Passed,
+            Some("モデル別名の表は最新でした".to_string()),
+        ),
+        Err(error) => {
+            tracing::warn!("モデル別名の表を見直せませんでした: {error:#}");
+            selfheal.notify(
+                SelfhealPhase::Failed,
+                Some(format!("モデル別名の表を見直せませんでした: {error}")),
+            );
+        }
+    }
+    selfheal.busy.store(false, Ordering::SeqCst);
+}
+
+/// 見直しの本体。変更を採用したら `Ok(true)`。
+async fn run_model_review(
+    selfheal: &Arc<Selfheal>,
+    ops: &Arc<dyn SelfhealOps>,
+    cli_version: &str,
+    observed: &[String],
+) -> anyhow::Result<bool> {
+    let branch = format!("{MAINTENANCE_NAME}-models");
+    let worktree = {
+        let branch = branch.clone();
+        blocking(ops, move |ops| ops.prepare_worktree(&branch)).await?
+    };
+
+    let card = start_repair_session(selfheal, &worktree).await.ok();
+    let Some(card_id) = card else {
+        anyhow::bail!("見直しセッションを起動できませんでした");
+    };
+
+    let answered = send_and_wait(
+        selfheal,
+        card_id,
+        &model_table::review_prompt(cli_version, observed),
+    )
+    .await;
+    close_session(selfheal, card);
+    if !answered {
+        anyhow::bail!("見直しセッションが応答しませんでした");
+    }
+
+    let changed = {
+        let worktree = worktree.clone();
+        blocking(ops, move |ops| ops.changed_files(&worktree)).await?
+    };
+    if changed.is_empty() {
+        // 変える必要が無かった。これは失敗ではない
+        return Ok(false);
+    }
+
+    // **言葉ではなく機械で見る。** 触った範囲と表の形の両方を確かめる
+    let violations = model_table::scope_violations(&changed);
+    if !violations.is_empty() {
+        revert_table(&worktree);
+        anyhow::bail!("範囲外を変更しました: {}", violations.join(", "));
+    }
+    let source = std::fs::read_to_string(worktree.join(model_table::TABLE_PATH))?;
+    let problems = model_table::table_violations(&source, observed);
+    if !problems.is_empty() {
+        revert_table(&worktree);
+        anyhow::bail!("表の形が壊れています: {}", problems.join(", "));
+    }
+
+    let gate = {
+        let worktree = worktree.clone();
+        blocking(ops, move |ops| Ok(ops.run_web_gate(&worktree))).await?
+    };
+    if !gate.passed {
+        revert_table(&worktree);
+        anyhow::bail!("画面側のゲートが通りませんでした");
+    }
+
+    commit(
+        ops,
+        &worktree,
+        &format!("chore(web): モデル別名の表を CLI {cli_version} に合わせる"),
+    )
+    .await;
+    Ok(true)
+}
+
+/// 表への変更を捨てる。**採用しないと決めたら必ずここを通る。**
+///
+/// 触ってよいのは1ファイルだけなので、そのファイルを消して worktree ごと置いていく。
+/// 次の見直しは `prepare_worktree` が作り直すところから始まる。
+fn revert_table(worktree: &Path) {
+    let path = worktree.join(model_table::TABLE_PATH);
+    if let Err(error) = std::fs::remove_file(&path) {
+        tracing::warn!(path = %path.display(), "採用しなかった変更を消せませんでした: {error}");
     }
 }
 

@@ -141,7 +141,7 @@ impl ModelCatalog {
 ///
 /// `--help` から権限モードを読んでいるのと同じ作法で、**モデルへ問い合わせないので
 /// クォータを使わない**。
-fn cli_version(program: &str) -> Option<String> {
+pub fn cli_version(program: &str) -> Option<String> {
     let output = std::process::Command::new(program)
         .arg("--version")
         // **標準入力を塞ぐ。** `--version` を知らない CLI は対話ループへ落ちるので、

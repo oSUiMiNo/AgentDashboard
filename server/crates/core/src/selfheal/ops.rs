@@ -58,6 +58,17 @@ pub trait SelfhealOps: Send + Sync {
     /// ゴールデンテスト（自己修復のゲート）を worktree に対して実行する。
     fn run_gate(&self, worktree: &Path) -> GateOutcome;
 
+    /// 画面側のゲート（型検査と単体テスト）を worktree に対して実行する。
+    ///
+    /// モデル別名の表を書き換えたときに使う（設計§14）。既定では**不合格**にしてある。
+    /// 実装していない環境で「通った」ことにすると、確かめずに採用してしまう。
+    fn run_web_gate(&self, _worktree: &Path) -> GateOutcome {
+        GateOutcome {
+            passed: false,
+            output: "この環境では画面側のゲートを実行できません".to_string(),
+        }
+    }
+
     /// パーサをビルドし、出来上がった実行ファイルの場所を返す。
     fn build_parser(&self, worktree: &Path) -> anyhow::Result<PathBuf>;
 
@@ -100,6 +111,9 @@ const CANARY_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// git 操作の待ち上限。
 const GIT_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// 画面側のゲートに許す時間。npm install 済みの前提で、型検査とテストだけ。
+const WEB_GATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
 /// カナリアに投げる既定のプロンプト（設計§9）。
 ///
 /// ツールコールとサブエージェントの両方を必ず通らせるのが狙い。ここで採ったサンプルが
@@ -138,6 +152,13 @@ impl HostOps {
                 .env(CARGO_TARGET_ENV, &target_dir),
             CARGO_TIMEOUT,
         )
+    }
+
+    /// worktree の中でシェル1行を走らせる。
+    fn shell(&self, cwd: &Path, line: &str, timeout: Duration) -> Outcome {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(line).current_dir(cwd);
+        run(&mut command, timeout)
     }
 
     fn git(&self, cwd: &Path, args: &[&str], timeout: Duration) -> Outcome {
@@ -266,6 +287,20 @@ impl SelfhealOps for HostOps {
 
     fn run_gate(&self, worktree: &Path) -> GateOutcome {
         let outcome = self.cargo(worktree, &["nextest", "run", "-p", "transcript-parser"]);
+        GateOutcome {
+            passed: outcome.success,
+            output: outcome.output,
+        }
+    }
+
+    fn run_web_gate(&self, worktree: &Path) -> GateOutcome {
+        // 型検査と単体テストを1回で。cargo と違って Docker には入っていないので
+        // ホストの npm をそのまま使う（web の開発は元からホストで行う）
+        let outcome = self.shell(
+            worktree,
+            "cd web && npx tsc -b && npm run test",
+            WEB_GATE_TIMEOUT,
+        );
         GateOutcome {
             passed: outcome.success,
             output: outcome.output,
