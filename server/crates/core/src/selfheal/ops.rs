@@ -173,6 +173,55 @@ impl HostOps {
     }
 }
 
+/// web の依存が置かれる場所（リポジトリ相対）。
+const NODE_MODULES: &str = "web/node_modules";
+
+/// 本体側の `web/node_modules` を worktree から見えるようにする。
+///
+/// # なぜ複製ではなくリンクなのか
+///
+/// worktree ごとに `npm ci` を走らせると、見直しのたびに数分とネットワークが要る。
+/// 見ているのは**同じコミットの同じ `package-lock.json`** なので、本体側に入っている
+/// ものと中身は一致する。リンクなら一瞬で済み、ディスクも増えない。
+///
+/// 本体側に無いときは**エラーにする**。黙って飛ばすと「依存が無いので確かめられません」が
+/// 「確かめたら通りました」に化ける。
+fn link_node_modules(repo: &Path, worktree: &Path) -> anyhow::Result<()> {
+    let source = repo.join(NODE_MODULES);
+    if !source.is_dir() {
+        anyhow::bail!(
+            "本体側に {} がありません（web の依存を入れてください）",
+            source.display()
+        );
+    }
+
+    let link = worktree.join(NODE_MODULES);
+    // `is_dir` はリンクを辿るので、正しく張られていればここで帰る
+    if link.is_dir() {
+        return Ok(());
+    }
+    // 辿れないのに何かある＝壊れたリンクか別物。張り直す前にどける
+    if link.symlink_metadata().is_ok() {
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&link);
+    }
+    if let Some(parent) = link.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    symlink_dir(&source, &link)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn symlink_dir(source: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(source, link)
+}
+
+#[cfg(not(unix))]
+fn symlink_dir(source: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_dir(source, link)
+}
+
 fn leaf(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -294,11 +343,26 @@ impl SelfhealOps for HostOps {
     }
 
     fn run_web_gate(&self, worktree: &Path) -> GateOutcome {
+        // **worktree には node_modules が無い。** `.gitignore` で除外されているので
+        // git は持ってこない。本体側の実体を見せてやらないと `vitest: not found` で
+        // 必ず落ちる（これに気づかないまま出荷して、自動追随が全環境で死んでいた）
+        if let Err(error) = link_node_modules(&self.repo, worktree) {
+            return GateOutcome {
+                passed: false,
+                output: format!("画面側のゲートを実行できません: {error:#}"),
+            };
+        }
+
         // 型検査と単体テストを1回で。cargo と違って Docker には入っていないので
-        // ホストの npm をそのまま使う（web の開発は元からホストで行う）
+        // ホストの npm をそのまま使う（web の開発は元からホストで行う）。
+        //
+        // `--force` を付けるのは、増分ビルド情報の置き場所（`tsBuildInfoFile`）が
+        // `node_modules/.tmp/` を指しているため。リンクを張ると本体と worktree で
+        // それを共有するので、増分判定に任せると**変更したのに型検査を飛ばして
+        // 「通った」**が起こりうる。ゲートは毎回きっちり見るのが仕事である
         let outcome = self.shell(
             worktree,
-            "cd web && npx tsc -b && npm run test",
+            "cd web && npx tsc -b --force && npm run test",
             WEB_GATE_TIMEOUT,
         );
         GateOutcome {
@@ -500,6 +564,77 @@ mod tests {
         let error = outcome.into_result("試験").unwrap_err().to_string();
         assert!(error.contains("試験 に失敗しました"), "実際: {error}");
         assert!(error.contains("だめでした"), "実際: {error}");
+    }
+
+    // ---- 依存のリンク（設計§14 の画面側ゲートの前提）--------------------------------
+
+    /// 本体と worktree に見立てた2つの場所を作る。
+    fn link_fixture(label: &str, with_source: bool) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "agentdashboard-link-{label}-{}-{}",
+            std::process::id(),
+            protocol::CardId::new()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let (repo, worktree) = (root.join("repo"), root.join("worktree"));
+        std::fs::create_dir_all(worktree.join("web")).unwrap();
+        if with_source {
+            std::fs::create_dir_all(repo.join(NODE_MODULES).join(".bin")).unwrap();
+            std::fs::write(
+                repo.join(NODE_MODULES).join(".bin").join("vitest"),
+                "#!/bin/sh",
+            )
+            .unwrap();
+        }
+        (repo, worktree)
+    }
+
+    #[test]
+    fn 本体の依存が_worktree_から見えるようになる() {
+        let (repo, worktree) = link_fixture("fresh", true);
+        link_node_modules(&repo, &worktree).expect("張れること");
+        // 辿った先に本体の中身があること。リンクが張られただけでは意味がない
+        assert!(
+            worktree
+                .join(NODE_MODULES)
+                .join(".bin")
+                .join("vitest")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn すでに張ってあれば触らない() {
+        // 見直しは同じ worktree を使い回すので、2回目以降が壊れないこと
+        let (repo, worktree) = link_fixture("again", true);
+        link_node_modules(&repo, &worktree).expect("1回目");
+        link_node_modules(&repo, &worktree).expect("2回目");
+        assert!(worktree.join(NODE_MODULES).join(".bin").is_dir());
+    }
+
+    #[test]
+    fn 壊れたリンクが残っていたら張り直す() {
+        // 本体を入れ直したあとなど、前のリンクが宙に浮いていることがある
+        let (repo, worktree) = link_fixture("broken", true);
+        symlink_dir(
+            Path::new("/存在しないはずの場所"),
+            &worktree.join(NODE_MODULES),
+        )
+        .unwrap();
+
+        link_node_modules(&repo, &worktree).expect("張り直せること");
+        assert!(worktree.join(NODE_MODULES).join(".bin").is_dir());
+    }
+
+    #[test]
+    fn 本体に依存が無ければ理由が読めるエラーになる() {
+        // 「確かめられなかった」を「通った」にしないための入口
+        let (repo, worktree) = link_fixture("missing", false);
+        let error = link_node_modules(&repo, &worktree)
+            .expect_err("エラーになること")
+            .to_string();
+        assert!(error.contains("web/node_modules"), "実際: {error}");
+        assert!(!worktree.join(NODE_MODULES).exists());
     }
 
     #[test]

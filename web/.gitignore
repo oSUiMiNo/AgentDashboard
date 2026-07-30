@@ -7,6 +7,10 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# 末尾に `/` を付けないこと。自己修復の worktree には、ここへ本体側の実体を指す
+# **シンボリックリンク**を張って画面側のゲートを走らせる（設計§14）。git はリンクを
+# ディレクトリとして扱わないので、`node_modules/` と書くと無視されなくなり、
+# 変更範囲の検査に引っかかったうえ `git clean -fd` で消える
 node_modules
 dist
 dist-ssr
