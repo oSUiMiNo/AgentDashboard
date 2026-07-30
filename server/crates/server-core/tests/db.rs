@@ -431,3 +431,122 @@ async fn 設定はアカウントとサーバ全体で別々に持てる() {
         backend.finish().await;
     }
 }
+
+/// ログインセッションの置き場所（設計§8-2）。**結線はフェーズ5**だが、置き場所は
+/// 統合前に単体で固める（テスト計画F2）。
+mod ログインセッション {
+    use super::*;
+    use server_core::db::web_session_store::DbSessionStore;
+    use std::collections::HashMap;
+    use time::OffsetDateTime;
+    use tower_sessions::session::{Id, Record};
+    use tower_sessions::session_store::{ExpiredDeletion, SessionStore};
+
+    fn record(id: i128, expires_in_secs: i64) -> Record {
+        Record {
+            id: Id(id),
+            data: HashMap::from([("who".to_string(), serde_json::json!("mao"))]),
+            expiry_date: OffsetDateTime::now_utc() + time::Duration::seconds(expires_in_secs),
+        }
+    }
+
+    #[tokio::test]
+    async fn 作って読んで書き換えて消せる() {
+        for backend in common::backends("websession").await {
+            let store = DbSessionStore::new(backend.db.clone());
+            let mut row = record(1, 3600);
+
+            store.create(&mut row).await.expect("作れること");
+            let loaded = store
+                .load(&row.id)
+                .await
+                .expect("読めること")
+                .unwrap_or_else(|| panic!("[{}] 作った直後に読めない", backend.name));
+            assert_eq!(loaded.data, row.data, "[{}]", backend.name);
+
+            row.data
+                .insert("who".to_string(), serde_json::json!("別の人"));
+            store.save(&row).await.expect("書き換えられること");
+            assert_eq!(
+                store.load(&row.id).await.unwrap().unwrap().data,
+                row.data,
+                "[{}] 書き換えが効いていない",
+                backend.name
+            );
+
+            store.delete(&row.id).await.expect("消せること");
+            assert!(
+                store.load(&row.id).await.unwrap().is_none(),
+                "[{}] 消えていない",
+                backend.name
+            );
+
+            backend.finish().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn 期限切れは掃除を待たずに読めなくなる() {
+        // 掃除は1時間ごと。その間に失効したセッションが通ると TTL（設計§8-3 の5時間）が
+        // 意味を失う
+        for backend in common::backends("expiry").await {
+            let store = DbSessionStore::new(backend.db.clone());
+            let mut alive = record(10, 3600);
+            let mut dead = record(11, -60);
+            store.create(&mut alive).await.unwrap();
+            store.create(&mut dead).await.unwrap();
+
+            assert!(
+                store.load(&dead.id).await.unwrap().is_none(),
+                "[{}] 期限切れが読めてしまう",
+                backend.name
+            );
+            assert!(
+                store.load(&alive.id).await.unwrap().is_some(),
+                "[{}] 生きているセッションまで消えた",
+                backend.name
+            );
+
+            // 掃除は期限切れだけを落とす（溜まり続けないため）
+            store.delete_expired().await.expect("掃除できること");
+            assert!(
+                store.load(&alive.id).await.unwrap().is_some(),
+                "[{}] 掃除が巻き添えにした",
+                backend.name
+            );
+
+            backend.finish().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn 既にあるIDを踏んだら採番し直す() {
+        // 上書きにすると、たまたま同じIDが出たときに**他人のセッションを乗っ取る**。
+        // トレイトが create と save を分けているのはこのため
+        for backend in common::backends("collision").await {
+            let store = DbSessionStore::new(backend.db.clone());
+            let mut first = record(42, 3600);
+            store.create(&mut first).await.unwrap();
+
+            let mut collided = record(42, 3600);
+            collided
+                .data
+                .insert("who".to_string(), serde_json::json!("あとから来た人"));
+            store.create(&mut collided).await.unwrap();
+
+            assert_ne!(
+                collided.id, first.id,
+                "[{}] 採番し直していない",
+                backend.name
+            );
+            assert_eq!(
+                store.load(&first.id).await.unwrap().unwrap().data,
+                first.data,
+                "[{}] 先にあったセッションが書き換わった",
+                backend.name
+            );
+
+            backend.finish().await;
+        }
+    }
+}

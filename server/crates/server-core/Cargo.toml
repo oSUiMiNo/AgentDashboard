@@ -29,3 +29,4 @@ tracing.workspace = true
 sea-orm.workspace = true
 sea-orm-migration.workspace = true
 tower-sessions.workspace = true
+time.workspace = true

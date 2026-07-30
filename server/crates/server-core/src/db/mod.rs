@@ -21,6 +21,7 @@ pub mod entity;
 mod migration;
 pub mod settings;
 pub mod transcript;
+pub mod web_session_store;
 
 use sea_orm::{ActiveValue::Set, ConnectOptions, Database, DatabaseConnection, EntityTrait};
 use sea_orm_migration::MigratorTrait as _;
