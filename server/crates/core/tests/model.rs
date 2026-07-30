@@ -395,3 +395,35 @@ async fn 画面が読めないときは送らずに理由を返す() {
         "送っていないので楽観更新も立たないこと"
     );
 }
+
+#[tokio::test]
+async fn 起動引数でモデルを指定したときは注入しない() {
+    // 両方で指定すると、本物の CLI は起動しきらずに入力を受け付ける状態へ入らない
+    // （自己修復の見直しセッションが実機で 180 秒待って落ちた）
+    let (_path, server) =
+        common::server_with_fake_global("explicit-model", GLOBAL, refresh_config()).await;
+    let session = server
+        .manager
+        .spawn_with_args(
+            &common::work_dir(),
+            &["--model".to_string(), "sonnet".to_string()],
+        )
+        .expect("セッションを起動できること");
+    let mut watcher = common::Watcher::attach(&session);
+    watcher.wait_for(testkit::fake_claude::READY_MARKER).await;
+
+    let settings = std::fs::read_to_string(
+        std::env::temp_dir()
+            .join("agentdashboard")
+            .join(session.card_id.to_string())
+            .join("settings.json"),
+    )
+    .expect("注入した設定を読めること");
+    let value: serde_json::Value = serde_json::from_str(&settings).unwrap();
+    assert!(
+        value.get("model").is_none(),
+        "起動引数で指定しているので注入してはいけない: {settings}"
+    );
+    // statusLine のほうは注入されたままであること（モデルの取得は生きている）
+    assert!(value.get("statusLine").is_some());
+}

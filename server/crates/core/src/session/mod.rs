@@ -1002,7 +1002,15 @@ impl SessionManager {
         let injection = hooks_settings::ModelInjection {
             status_line: self.config.inject_status_line,
             refresh_secs: self.config.status_line_refresh_secs,
-            model: self.claude_settings.refresh_default(),
+            // **呼び出し側が `--model` を明示しているなら注入しない。**
+            // 起動引数と注入設定の両方でモデルを指定すると、CLI は起動しきらずに
+            // 入力を受け付ける状態へ入らない（自己修復の見直しセッションで実測）。
+            // 明示された指定のほうが具体的なので、そちらを立てる
+            model: if extra_args.iter().any(|arg| arg == "--model") {
+                None
+            } else {
+                self.claude_settings.refresh_default()
+            },
         };
 
         // フック設定は起動より前に書き出しておく。CLI は起動時に --settings を読むので、
