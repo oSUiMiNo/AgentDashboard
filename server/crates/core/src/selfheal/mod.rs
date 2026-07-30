@@ -67,6 +67,12 @@ const READY_TIMEOUT: Duration = Duration::from_secs(180);
 /// （実測）。つまり「フックを待つ」だけでは永久に進まない。
 const TRUST_PROMPT_MARKERS: [&str; 2] = ["trust this folder", "do you trust"];
 
+/// 信頼の確認を探すときに読むスクロールバックの末尾の長さ（バイト）。
+///
+/// 全体（既定 1MiB）を 300ms ごとに複製すると、180秒で 600 回コピーすることになる。
+/// 確認は起動直後の画面に出るので、末尾だけで足りる。
+const TRUST_TAIL: usize = 32 * 1024;
+
 /// 修復セッションの worktree とブランチの名前。
 ///
 /// 一覧では作業ディレクトリがグループ名になるので、この名前がそのまま
@@ -929,11 +935,18 @@ async fn wait_ready(
         }
 
         if !answered_trust {
-            let screen = session.scrollback_text().to_lowercase();
-            if TRUST_PROMPT_MARKERS
-                .iter()
-                .any(|marker| screen.contains(marker))
-            {
+            // **空白を当てにしない。** TUI は語ごとに別々に書き、間をカーソル移動で埋めるので、
+            // 生のバイト列では `trust this folder` が `trustthisfolder` になる
+            // （PJTガイドライン「端末の表示を読んで判断するとき」）。
+            // ここを素の contains で見ていたせいで、確認が出ている実機で
+            // 180秒待って落ちていた。**開発環境では既に信頼済みで確認が出ず、気づけなかった**
+            let screen = crate::session::permission::squeeze(
+                &crate::session::permission::strip_ansi(&session.scrollback_tail(TRUST_TAIL)),
+            )
+            .to_lowercase();
+            if TRUST_PROMPT_MARKERS.iter().any(|marker| {
+                screen.contains(&crate::session::permission::squeeze(marker).to_lowercase())
+            }) {
                 tracing::info!("修復セッションのフォルダ信頼の確認に答えます");
                 let _ = session.write_input(b"\r");
                 answered_trust = true;
@@ -1084,5 +1097,46 @@ mod tests {
 
         assert_eq!(read_pointer(&dir), None);
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod trust_tests {
+    #![allow(non_snake_case)]
+
+    use super::TRUST_PROMPT_MARKERS;
+    use crate::session::permission::{squeeze, strip_ansi};
+
+    /// `wait_ready` が行っている照合と同じ手順。
+    fn matches(raw: &str) -> bool {
+        let screen = squeeze(&strip_ansi(raw)).to_lowercase();
+        TRUST_PROMPT_MARKERS
+            .iter()
+            .any(|marker| screen.contains(&squeeze(marker).to_lowercase()))
+    }
+
+    #[test]
+    fn 実機に出た信頼の確認を見分けられる() {
+        // 実機のダッシュボードで実際に止まっていた画面
+        let screen = "\
+Quick safety check: Is this a project you created or one you trust?
+❯ 1. Yes, I trust this folder
+  2. No, exit
+Enter to confirm · Esc to cancel";
+        assert!(matches(screen));
+    }
+
+    #[test]
+    fn 語間の空白が消えていても見分けられる() {
+        // **これができていなかった。** TUI は語ごとに別々に書くので、生のバイト列では
+        // 空白が落ちる。素の contains で見ていたせいで実機で 180 秒待って落ちた
+        assert!(matches("Yes,Itrustthisfolder"));
+        assert!(matches("\u{1b}[32mDo you\u{1b}[0m trust this folder?"));
+    }
+
+    #[test]
+    fn 関係のない画面は信頼の確認と間違えない() {
+        assert!(!matches(""));
+        assert!(!matches("⏵⏵ accept edits on\n> 何かしますか"));
     }
 }
