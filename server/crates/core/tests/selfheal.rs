@@ -64,6 +64,8 @@ struct FakeOps {
     /// 本物のゲートは「そのサンプルが読めるか」を見るので、サンプルを消せば通る。
     /// 消して通す抜け道を確かめるテストでは、そこを模していないと意味がない
     gate_follows_sample: Mutex<bool>,
+    /// 画面側のゲート（別名表の見直しで使う）の合否
+    web_gate_passes: Mutex<bool>,
 }
 
 impl FakeOps {
@@ -80,7 +82,20 @@ impl FakeOps {
             calls: Mutex::new(Vec::new()),
             thin_canaries: Mutex::new(0),
             gate_follows_sample: Mutex::new(false),
+            web_gate_passes: Mutex::new(true),
         })
+    }
+
+    /// 別名表の見直しの筋書きを整える。
+    ///
+    /// 表そのものは worktree の実ファイルを読むので、**中身も置く**。
+    /// `changed` は「エージェントが何を触ったか」の代わり。
+    fn stage_review(&self, table: &str, changed: &[&str]) {
+        let path = self.worktree.join("web/src/lib/models.ts");
+        std::fs::create_dir_all(path.parent().expect("親がある")).expect("置き場所を作れること");
+        std::fs::write(&path, table).expect("表を書けること");
+        *self.changed.lock().expect("ロックが壊れていない") =
+            changed.iter().map(|path| path.to_string()).collect();
     }
 
     /// カナリアが置くサンプルの場所。
@@ -177,8 +192,26 @@ impl SelfhealOps for FakeOps {
         Ok(self.changed.lock().expect("ロックが壊れていない").clone())
     }
 
+    fn run_web_gate(&self, _worktree: &Path) -> GateOutcome {
+        self.record("web-gate");
+        let passed = *self.web_gate_passes.lock().expect("ロックが壊れていない");
+        GateOutcome {
+            passed,
+            output: if passed {
+                "12 tests passed".to_string()
+            } else {
+                "src/lib/models.ts(9,5): error TS2322".to_string()
+            },
+        }
+    }
+
     fn commit(&self, _worktree: &Path, _message: &str) -> anyhow::Result<()> {
         self.record("commit");
+        Ok(())
+    }
+
+    fn discard_changes(&self, _worktree: &Path) -> anyhow::Result<()> {
+        self.record("discard");
         Ok(())
     }
 }
@@ -270,6 +303,42 @@ async fn play_repair_agent(server: &TestServer, attempts: u32) {
         // ターンを終えた
         fire(server, &session, "Stop").await;
     }
+}
+
+/// 別名表の見直しセッションを演じる。指示を受け取り、1ターンで終える。
+///
+/// [`play_repair_agent`] と同じ作法。**実際に何を変えたかは演じない** ——
+/// 触った範囲は `FakeOps::changed`、表の中身は worktree の実ファイルが持つ。
+/// エージェントの言葉ではなく機械で見る、という設計をテスト側でもなぞっている。
+async fn play_review_agent(server: &TestServer) {
+    let card = wait_for_repair_card(server).await;
+    let session = server.manager.get(card).expect("見直しセッションが居る");
+    let mut watcher = common::Watcher::attach(&session);
+
+    fire(server, &session, "SessionStart").await;
+    // 見直しの指示が届いたことを確かめてから答える（修復の指示と取り違えない）
+    watcher.wait_for("モデル別名表").await;
+    fire(server, &session, "PreToolUse").await;
+    fire(server, &session, "Stop").await;
+}
+
+/// 形の整った別名表。見直しの検査を通る最小の中身。
+const SOUND_TABLE: &str = r#"
+export const MODELS: ModelInfo[] = [
+  { value: 'default', label: '既定', description: '指定を消す', fixed: false },
+  { value: 'opus', label: 'Opus', description: '複雑な推論', fixed: true, family: 'opus' },
+]
+"#;
+
+/// 別名表の見直しを1回走らせ、終わるまで待つ。
+async fn run_review(server: &TestServer) {
+    let selfheal = Arc::clone(server.selfheal.as_ref().expect("自己修復が居る"));
+    let review = tokio::spawn(agentdashboard_core::selfheal::review_model_table(
+        selfheal,
+        "9.9.9".to_string(),
+    ));
+    play_review_agent(server).await;
+    review.await.expect("見直しが終わること");
 }
 
 async fn fire(
@@ -663,4 +732,96 @@ async fn パースが壊れ始めたら実行時の検知が働く() {
     append_broken(&transcript, 300);
 
     wait_for_call(&ops, "worktree", 1).await;
+}
+
+// ---- 別名表の見直し（設計§14）------------------------------------------------------
+//
+// この流れは**出荷まで一度も通していなかった**。画面側のゲートが worktree に無い
+// node_modules を当てにしていて必ず落ちる、という不具合（コードレビュー B-1）に
+// 気づけなかったのはそのため。棄却と採用の分岐をここで固定する。
+//
+// 起動時の契機（CLI の版が上がったとき）は擬似 claude では踏めない——`--version` を
+// 答えないので版が空になり、`needs_review` が常に false になる。だから
+// `review_model_table` を直接呼ぶ。
+
+#[tokio::test]
+async fn 別名表の見直しが通れば変更が採用される() {
+    let dir = work_dir("review-adopt");
+    let ops = FakeOps::new(&dir);
+    ops.stage_review(SOUND_TABLE, &["web/src/lib/models.ts"]);
+    let server = TestServer::start_with_selfheal(config_for(&dir), ops.clone()).await;
+
+    run_review(&server).await;
+
+    assert_eq!(ops.count("web-gate"), 1, "画面側のゲートを通ること");
+    assert_eq!(ops.count("commit"), 1, "採用したらコミットすること");
+    assert_eq!(ops.count("discard"), 0, "採用したのに戻してはいけない");
+}
+
+#[tokio::test]
+async fn 範囲外を触っていたら戻して採用しない() {
+    // 触ってよいのは表の1ファイルだけ（設計§14）。守られなかったら worktree ごと戻す
+    let dir = work_dir("review-scope");
+    let ops = FakeOps::new(&dir);
+    ops.stage_review(
+        SOUND_TABLE,
+        &["web/src/lib/models.ts", "server/crates/protocol/src/lib.rs"],
+    );
+    let server = TestServer::start_with_selfheal(config_for(&dir), ops.clone()).await;
+
+    run_review(&server).await;
+
+    assert_eq!(ops.count("discard"), 1, "範囲外を触ったら戻すこと");
+    assert_eq!(ops.count("commit"), 0, "採用してはいけない");
+    assert_eq!(
+        ops.count("web-gate"),
+        0,
+        "範囲の検査で落ちたならゲートまで進まない"
+    );
+}
+
+#[tokio::test]
+async fn 表の形が壊れていたら戻して採用しない() {
+    let dir = work_dir("review-shape");
+    let ops = FakeOps::new(&dir);
+    // 表ごと別物にされた状態
+    ops.stage_review("export const OTHER = []\n", &["web/src/lib/models.ts"]);
+    let server = TestServer::start_with_selfheal(config_for(&dir), ops.clone()).await;
+
+    run_review(&server).await;
+
+    assert_eq!(ops.count("discard"), 1, "形が壊れていたら戻すこと");
+    assert_eq!(ops.count("commit"), 0, "採用してはいけない");
+}
+
+#[tokio::test]
+async fn 画面側のゲートが落ちたら戻して採用しない() {
+    // **B-1 が化けていた場所。** ここを通らないまま採用してしまうと、
+    // 型が合わない表がそのまま入る
+    let dir = work_dir("review-gate");
+    let ops = FakeOps::new(&dir);
+    ops.stage_review(SOUND_TABLE, &["web/src/lib/models.ts"]);
+    *ops.web_gate_passes.lock().unwrap() = false;
+    let server = TestServer::start_with_selfheal(config_for(&dir), ops.clone()).await;
+
+    run_review(&server).await;
+
+    assert_eq!(ops.count("web-gate"), 1, "ゲートは走ること");
+    assert_eq!(ops.count("discard"), 1, "落ちたら戻すこと");
+    assert_eq!(ops.count("commit"), 0, "採用してはいけない");
+}
+
+#[tokio::test]
+async fn 変えるものが無ければゲートもコミットも走らない() {
+    // 「変更不要」は失敗ではない。無理に何かさせないのが設計の意図
+    let dir = work_dir("review-nochange");
+    let ops = FakeOps::new(&dir);
+    ops.stage_review(SOUND_TABLE, &[]);
+    let server = TestServer::start_with_selfheal(config_for(&dir), ops.clone()).await;
+
+    run_review(&server).await;
+
+    assert_eq!(ops.count("web-gate"), 0);
+    assert_eq!(ops.count("commit"), 0);
+    assert_eq!(ops.count("discard"), 0, "触っていないものを戻す必要はない");
 }

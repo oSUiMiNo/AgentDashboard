@@ -721,7 +721,14 @@ async fn canary(
 /// という**疑い**から始まる。落ちているものが無いので、カナリアも再試行も要らない。
 ///
 /// 1回で済ませ、通らなければ何もしなかったことにする。
-async fn review_model_table(selfheal: Arc<Selfheal>, cli_version: String) {
+///
+/// # 公開しているのはテストのため
+///
+/// 本番の契機は [`Selfheal::start`] の中にしかない（CLI の版が上がったとき）。
+/// 擬似 claude は `--version` を答えないので版が空になり、テストからはその契機を
+/// 踏めない。**流れを一度も通さないまま出荷したのが B-1 の教訓**なので、
+/// ここを直接呼べるようにして棄却と採用の分岐をテストで固定する。
+pub async fn review_model_table(selfheal: Arc<Selfheal>, cli_version: String) {
     let Some(ops) = selfheal.ops.clone() else {
         return;
     };
@@ -814,13 +821,20 @@ async fn run_model_review(
     // **言葉ではなく機械で見る。** 触った範囲と表の形の両方を確かめる
     let violations = model_table::scope_violations(&changed);
     if !violations.is_empty() {
-        revert_table(&worktree);
+        discard(ops, &worktree).await;
         anyhow::bail!("範囲外を変更しました: {}", violations.join(", "));
     }
-    let source = std::fs::read_to_string(worktree.join(model_table::TABLE_PATH))?;
+    let source = match std::fs::read_to_string(worktree.join(model_table::TABLE_PATH)) {
+        Ok(source) => source,
+        // 表ごと消された場合もここへ来る。読めないまま帰ると変更が残る
+        Err(error) => {
+            discard(ops, &worktree).await;
+            anyhow::bail!("表を読めません: {error}");
+        }
+    };
     let problems = model_table::table_violations(&source, observed);
     if !problems.is_empty() {
-        revert_table(&worktree);
+        discard(ops, &worktree).await;
         anyhow::bail!("表の形が壊れています: {}", problems.join(", "));
     }
 
@@ -829,7 +843,8 @@ async fn run_model_review(
         blocking(ops, move |ops| Ok(ops.run_web_gate(&worktree))).await?
     };
     if !gate.passed {
-        revert_table(&worktree);
+        tracing::warn!("画面側のゲートの出力: {}", gate.output);
+        discard(ops, &worktree).await;
         anyhow::bail!("画面側のゲートが通りませんでした");
     }
 
@@ -842,14 +857,22 @@ async fn run_model_review(
     Ok(true)
 }
 
-/// 表への変更を捨てる。**採用しないと決めたら必ずここを通る。**
+/// 採用しない変更を捨てて、worktree を HEAD の状態へ戻す。
 ///
-/// 触ってよいのは1ファイルだけなので、そのファイルを消して worktree ごと置いていく。
-/// 次の見直しは `prepare_worktree` が作り直すところから始まる。
-fn revert_table(worktree: &Path) {
-    let path = worktree.join(model_table::TABLE_PATH);
-    if let Err(error) = std::fs::remove_file(&path) {
-        tracing::warn!(path = %path.display(), "採用しなかった変更を消せませんでした: {error}");
+/// **採用しないと決めたら必ずここを通る。** 以前はここが「表のファイルを消す」だったが、
+/// それでは戻したことにならない——**範囲外を触られていた場合、そちらが残る**。
+/// 触ってよい範囲を1ファイルに限っているのは検査を簡単にするためであって、
+/// 相手が守った前提で後始末を書いてよい理由にはならない。
+///
+/// 戻せなくても致命ではない（次の `prepare_worktree` が作り直す）ので、
+/// ここで流れは止めずに警告だけ残す。
+async fn discard(ops: &Arc<dyn SelfhealOps>, worktree: &Path) {
+    let target = worktree.to_path_buf();
+    if let Err(error) = blocking(ops, move |ops| ops.discard_changes(&target)).await {
+        tracing::warn!(
+            worktree = %worktree.display(),
+            "採用しなかった変更を戻せませんでした: {error:#}"
+        );
     }
 }
 

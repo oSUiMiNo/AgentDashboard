@@ -741,6 +741,10 @@ impl agentdashboard_core::selfheal::ops::SelfhealOps for PlantedCanary {
     fn commit(&self, worktree: &Path, message: &str) -> anyhow::Result<()> {
         self.inner.commit(worktree, message)
     }
+
+    fn discard_changes(&self, worktree: &Path) -> anyhow::Result<()> {
+        self.inner.discard_changes(worktree)
+    }
 }
 
 /// 前回の訓練が残した worktree とブランチを片付ける。

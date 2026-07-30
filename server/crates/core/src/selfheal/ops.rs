@@ -69,6 +69,13 @@ pub trait SelfhealOps: Send + Sync {
         }
     }
 
+    /// worktree の変更を丸ごと捨てて、HEAD の状態へ戻す。
+    ///
+    /// **採用しないと決めたら必ずここを通る。** 消す（`remove_file`）のでは戻したことに
+    /// ならない。範囲外のファイルまで触られていた場合、消す実装ではそちらが残ってしまい、
+    /// 次の見直しが「前回の残り」を持ち込んだ状態から始まる。
+    fn discard_changes(&self, worktree: &Path) -> anyhow::Result<()>;
+
     /// パーサをビルドし、出来上がった実行ファイルの場所を返す。
     fn build_parser(&self, worktree: &Path) -> anyhow::Result<PathBuf>;
 
@@ -234,10 +241,7 @@ impl SelfhealOps for HostOps {
 
         if worktree.join(".git").exists() {
             // 使い回す。前回の修復の残りを持ち込むと、変更範囲の検査が意味を失う
-            self.git(&worktree, &["reset", "--hard", "HEAD"], GIT_TIMEOUT)
-                .into_result("git reset")?;
-            self.git(&worktree, &["clean", "-fd"], GIT_TIMEOUT)
-                .into_result("git clean")?;
+            self.discard_changes(&worktree)?;
             return Ok(worktree);
         }
 
@@ -369,6 +373,16 @@ impl SelfhealOps for HostOps {
             passed: outcome.success,
             output: outcome.output,
         }
+    }
+
+    fn discard_changes(&self, worktree: &Path) -> anyhow::Result<()> {
+        self.git(worktree, &["reset", "--hard", "HEAD"], GIT_TIMEOUT)
+            .into_result("git reset")?;
+        // 追跡していないファイルも落とす。`-x` は付けない——付けると
+        // node_modules のリンクのような**無視されている置き土産まで消える**
+        self.git(worktree, &["clean", "-fd"], GIT_TIMEOUT)
+            .into_result("git clean")?;
+        Ok(())
     }
 
     fn build_parser(&self, worktree: &Path) -> anyhow::Result<PathBuf> {
