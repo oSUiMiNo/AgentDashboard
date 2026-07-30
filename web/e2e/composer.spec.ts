@@ -27,7 +27,8 @@ test('入力欄から送った指示が PTY まで届く', async ({ page }) => {
   await openSession(page, tile)
 
   await page.getByTestId('composer-input').fill('こんにちは')
-  await page.keyboard.press('Enter')
+  // 送信は Ctrl+Enter（端末と同じ割り当て。`lib/keys.ts`）
+  await page.keyboard.press('Control+Enter')
 
   await expectTerminalToContain(page, '[fake-claude] received: こんにちは')
   // 送ったら入力欄は空に戻る（同じ指示を二重に送る事故を防ぐ）
@@ -40,7 +41,7 @@ test('スラッシュコマンドも加工せずそのまま届く', async ({ pa
   await openSession(page, tile)
 
   await page.getByTestId('composer-input').fill('/status')
-  await page.keyboard.press('Enter')
+  await page.keyboard.press('Control+Enter')
 
   await expectTerminalToContain(page, '[fake-claude] received: /status')
 })
@@ -52,12 +53,13 @@ test('複数行の指示は bracketed paste で包まれて届く', async ({ pag
 
   const input = page.getByTestId('composer-input')
   await input.fill('1行目')
-  // Shift+Enter は送信ではなく改行
-  await page.keyboard.press('Shift+Enter')
+  // **素の Enter は送信ではなく改行**。ここで送信されていれば入力欄は空になるので、
+  // 次の検査がそのまま「Enter で送らない」ことの回帰になる
+  await page.keyboard.press('Enter')
   await page.keyboard.type('2行目')
   await expect(input).toHaveValue('1行目\n2行目')
 
-  await page.keyboard.press('Enter')
+  await page.keyboard.press('Control+Enter')
 
   // 貼り付けの開始記号が端末まで届いていれば、サーバが包んだことが分かる。
   // 包まないと1行目だけが確定してしまう
