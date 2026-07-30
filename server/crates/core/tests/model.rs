@@ -506,4 +506,117 @@ async fn 起動引数でモデルを指定したときは注入しない() {
     );
     // statusLine のほうは注入されたままであること（モデルの取得は生きている）
     assert!(value.get("statusLine").is_some());
+    assert_eq!(
+        session.model_alias(),
+        Some(ModelId::new("sonnet")),
+        "起動引数で指定した値が、起動時に効いている別名になること"
+    );
+}
+
+#[tokio::test]
+async fn 解決先が同じでも別名が違えば送る() {
+    // **B-2。** `opus` と `opus[1m]` はどちらも `claude-opus-5` へ落ちる。解決先だけで
+    // 比べると「もう目的のモデル」と判定され、**エラーも出さずに無視される**。
+    // 利用者から見ると「選んでも戻る」になる。
+    //
+    // グローバル既定を `opus[1m]` にして起こすと、効いている別名がそれになる。
+    // 移動先の `opus` は「以前に選んだことがある」状態を作るために覚えさせておく
+    let (_path, server) = common::server_with_fake_global(
+        "alias-move",
+        r#"{ "model": "opus[1m]" }"#,
+        refresh_config(),
+    )
+    .await;
+    let manager = &server.manager;
+    manager.aliases().learn(
+        &ModelId::new("opus"),
+        &ModelId::new("claude-opus-5"),
+        "Opus 5",
+    );
+
+    let (session, mut watcher) = common::start_session(manager).await;
+    common::wait_for_model(&session, "claude-opus-5").await;
+    assert_eq!(
+        session.model_alias(),
+        Some(ModelId::new("opus[1m]")),
+        "注入した既定が、起動時に効いている別名になること"
+    );
+
+    manager
+        .switch_model(&session, &ModelId::new("opus"))
+        .await
+        .expect("切り替えられること");
+
+    watcher
+        .drain_quiet_for(std::time::Duration::from_millis(300))
+        .await;
+    assert!(
+        watcher
+            .seen()
+            .contains(&format!("{}opus", testkit::fake_claude::MODEL_SET_PREFIX)),
+        "別名が違うので送られること。実際の画面:\n{}",
+        watcher.seen()
+    );
+    assert_eq!(
+        session.model_alias(),
+        Some(ModelId::new("opus")),
+        "効いている別名が入れ替わること"
+    );
+}
+
+#[tokio::test]
+async fn 名乗る値が変わらない切替でも確定する() {
+    // B-2 の組は**定義からして同じフルIDへ落ちる**ので、切り替わっても名乗りが動かない。
+    // 「値が動いたか」だけを見ていると確定に気づけず、楽観更新が15秒残って
+    // 「切替中…」が出たまま元へ戻る
+    let (_path, server) = common::server_with_fake_global(
+        "quiet-confirm",
+        r#"{ "model": "opus[1m]" }"#,
+        refresh_config(),
+    )
+    .await;
+    let manager = &server.manager;
+    let (session, _watcher) = common::start_session(manager).await;
+    common::wait_for_model(&session, "claude-opus-5").await;
+
+    let mark = session
+        .request_model(&ModelId::new("opus"), None)
+        .await
+        .expect("送れること")
+        .expect("別名が違うので送られること");
+    assert!(
+        session.settle_model_switch(mark).await,
+        "名乗りが変わらなくても、要求と辻褄が合えば確定とみなすこと"
+    );
+    assert_eq!(session.meta().model, Some(ModelId::new("claude-opus-5")));
+    assert_eq!(session.meta().model_requested, None);
+}
+
+#[tokio::test]
+async fn 特定のモデルを指さない別名は覚えない() {
+    // **C-1。** 要求中にモデルが動いたからといって、それが要求の結果とは限らない
+    // （CLI は利用制限のフォールバックでも変える）。`opusplan` はモードであって
+    // 特定のモデル1つを指さないので、1回の実測で対応を決めると嘘になる
+    let (_path, server) =
+        common::server_with_fake_global("no-learn", GLOBAL, refresh_config()).await;
+    let manager = &server.manager;
+    let (session, _watcher) = common::start_session(manager).await;
+    common::wait_for_model(&session, "claude-fable-5[1m]").await;
+
+    manager
+        .switch_model(&session, &ModelId::new("opusplan"))
+        .await
+        .expect("切り替えられること");
+    common::wait_for_model(&session, "claude-opus-5").await;
+
+    assert_eq!(
+        manager.aliases().resolve(&ModelId::new("opusplan")),
+        None,
+        "名乗りが別名を説明しないので覚えないこと"
+    );
+    assert!(
+        manager.aliases().all().is_empty(),
+        "実測: {:?}",
+        manager.aliases().all()
+    );
 }

@@ -303,6 +303,18 @@ pub struct Session {
     /// 「CLI は動いているのにフックが1件も来ない」を見分けるために要る。出力が無い
     /// だけなら単に起動が遅いだけかもしれず、警告を出すのは早すぎる。
     saw_output: AtomicBool,
+    /// いま効いていると分かっている**別名**。分からなければ `None`（設計§5）。
+    ///
+    /// [`SessionMeta::model`] が持つのは CLI が名乗った**フルID**で、別名とは別物である。
+    /// 違う別名が同じフルIDへ落ちることがある（`opus` と `opus[1m]`）ので、
+    /// 「もう目的のモデルか」をフルIDだけで判断すると、その組の間を移動できない。
+    ///
+    /// **`SessionMeta` には載せない。** 画面に出す必要が無く、protocol は共有境界で
+    /// 変更のハードルが高い。
+    ///
+    /// 分からなくなったら**素直に `None` へ戻す**。分かっているふりで持つと、
+    /// 送るべき切替を送らない判断に使われる。
+    model_alias: Mutex<Option<ModelId>>,
 }
 
 /// スクロールバックの中身まで出すと数MBの表示になるので、要点だけを出す。
@@ -517,7 +529,12 @@ impl Session {
         }
 
         let current = self.meta().model;
-        if model::is_already_current(target, resolved, current.as_ref()) {
+        if model::is_already_current(
+            target,
+            self.model_alias().as_ref(),
+            resolved,
+            current.as_ref(),
+        ) {
             return Ok(None);
         }
 
@@ -560,6 +577,8 @@ impl Session {
             "モデルの切替を送りましたが、CLI が名乗り直しませんでした。切替前の表示へ戻します"
         );
         self.store_model_requested(None);
+        // 効いたのか拒否されたのか分からない。**分かっているふりで持たない**
+        self.store_model_alias(None);
         false
     }
 
@@ -631,6 +650,19 @@ impl Session {
             .lock()
             .expect("ロックが壊れていない")
             .model_requested = requested;
+    }
+
+    /// いま効いていると分かっている別名。
+    pub fn model_alias(&self) -> Option<ModelId> {
+        self.model_alias
+            .lock()
+            .expect("ロックが壊れていない")
+            .clone()
+    }
+
+    /// 効いている別名を控える／忘れる。
+    pub fn store_model_alias(&self, alias: Option<ModelId>) {
+        *self.model_alias.lock().expect("ロックが壊れていない") = alias;
     }
 
     /// 1回押したあと、フッタの表示が落ち着くまで待って読む。
@@ -1070,6 +1102,7 @@ impl SessionManager {
         // 起動時に1回だけ読むと、利用者が途中で既定を変えたときに追従できない。
         // 回復に失敗している間は読みに行かず、覚えている値を使う（汚れた値を
         // 利用者の既定として取り込まないため）
+        let explicit_model = model_arg(extra_args);
         let injection = hooks_settings::ModelInjection {
             status_line: self.config.inject_status_line,
             refresh_secs: self.config.status_line_refresh_secs,
@@ -1077,12 +1110,15 @@ impl SessionManager {
             // 起動引数と注入設定の両方でモデルを指定すると、CLI は起動しきらずに
             // 入力を受け付ける状態へ入らない（自己修復の見直しセッションで実測）。
             // 明示された指定のほうが具体的なので、そちらを立てる
-            model: if extra_args.iter().any(|arg| arg == "--model") {
+            model: if explicit_model.is_some() {
                 None
             } else {
                 self.claude_settings.refresh_default()
             },
         };
+        // その値で CLI が始まるので、**それが起動時に効いている別名**になる（設計§5）。
+        // ここを埋めておくと、一度も切り替えていないセッションでも別名で判定できる
+        let initial_alias = explicit_model.or_else(|| injection.model.clone());
 
         // フック設定は起動より前に書き出しておく。CLI は起動時に --settings を読むので、
         // 後から書いても間に合わない
@@ -1151,6 +1187,7 @@ impl SessionManager {
             transcript_tx: broadcast::channel(TRANSCRIPT_QUEUE_MESSAGES).0,
             expected_exit: AtomicBool::new(false),
             saw_output: AtomicBool::new(false),
+            model_alias: Mutex::new(initial_alias),
         });
 
         self.tokens
@@ -1342,22 +1379,71 @@ impl SessionManager {
     ///
     /// あわせて、切替を要求していた別名の解決先を覚える（設計§12）。送った別名と
     /// CLI が名乗り返したフルIDが結び付くのは、**この瞬間しかない**。
+    ///
+    /// # 名乗る値が動かない切替がある
+    ///
+    /// 違う別名が同じフルIDへ落ちる組（`opus` と `opus[1m]`）では、切り替わっても
+    /// 名乗りが変わらない。**「値が動いたか」だけを見ていると確定に気づけず**、
+    /// 楽観更新が時間切れまで残って「切替中…」が15秒続く。要求と辻褄が合う名乗りなら、
+    /// 値が動いていなくても確定として扱う。
+    ///
+    /// # 動いたからといって、要求の結果とは限らない
+    ///
+    /// CLI は自分の都合でもモデルを変える（利用制限のフォールバック等）。要求中に
+    /// 起きたそれを要求の結果として覚えると、`opus → Sonnet 5` のような対応が
+    /// **永続化される**。覚えるのは名乗りが別名を説明するときだけにする
+    /// （[`model::id_matches_alias`]）。
     pub fn apply_model_report(&self, session: &Arc<Session>, id: ModelId, label: Option<String>) {
         let requested = session.meta().model_requested;
-        if !session.store_model(id.clone(), label.clone()) {
-            return;
+        let moved = session.store_model(id.clone(), label.clone());
+        // 要求した別名で名乗りの説明が付くか。確定の判断にも、覚えてよいかの判断にも使う
+        let explained = requested.as_ref().is_some_and(|alias| {
+            model::report_explains(alias, self.aliases.resolve(alias).as_ref(), &id)
+        });
+
+        if !moved {
+            // 値が動いていないのに要求と辻褄が合う＝名乗りが変わらない切替が効いた。
+            // 説明が付かないなら CLI が拒否した可能性が残るので、時間切れの側へ任せる
+            if !explained {
+                return;
+            }
+            session.store_model_requested(None);
         }
 
-        // 値が動いた＝要求した切替が効いた、とみなして対応を覚える。
-        // 推測で埋めないので、要求が無いときは何も覚えない
-        if let Some(alias) = requested
-            && let Some(display_name) = label.as_deref()
-            && self.aliases.learn(&alias, &id, display_name)
-        {
-            tracing::info!(
-                card_id = %session.card_id,
-                "別名の解決先を覚えました: {alias} -> {id}（{display_name}）"
-            );
+        match requested {
+            // 効いた別名が分かった。次の「もう目的のモデルか」の判定はこれで行う
+            Some(alias) => {
+                if explained {
+                    if let Some(display_name) = label.as_deref()
+                        && model::id_matches_alias(&alias, &id)
+                        && self.aliases.learn(&alias, &id, display_name)
+                    {
+                        tracing::info!(
+                            card_id = %session.card_id,
+                            "別名の解決先を覚えました: {alias} -> {id}（{display_name}）"
+                        );
+                    }
+                    session.store_model_alias(Some(alias));
+                } else {
+                    // 要求の裏で CLI が乗り換えた。どの別名で動いているのか分からない
+                    tracing::info!(
+                        card_id = %session.card_id,
+                        "{alias} を要求しましたが、CLI は {id} を名乗りました。要求の結果とはみなしません"
+                    );
+                    session.store_model_alias(None);
+                }
+            }
+            // 要求していないのに動いた。起動後の最初の名乗りもここを通るので、
+            // **一律に忘れてはいけない**（注入した別名で始まっていることが分かっている）。
+            // いまの別名で名乗りの説明が付かなくなったときだけ忘れる
+            None => {
+                let stale = session.model_alias().is_some_and(|alias| {
+                    !model::report_explains(&alias, self.aliases.resolve(&alias).as_ref(), &id)
+                });
+                if stale {
+                    session.store_model_alias(None);
+                }
+            }
         }
 
         self.broadcast_session(session);
@@ -1438,6 +1524,17 @@ impl SessionManager {
             session: session.meta(),
         });
     }
+}
+
+/// 起動引数から `--model <値>` の値を取り出す。
+///
+/// 有無だけでなく値も要るのは、**その値が起動時に効いている別名になる**ため（設計§5）。
+/// 自己修復の見直しセッションが `--model` を明示して起こす経路がこれにあたる。
+fn model_arg(extra_args: &[String]) -> Option<ModelId> {
+    let at = extra_args.iter().position(|arg| arg == "--model")?;
+    extra_args
+        .get(at + 1)
+        .map(|value| ModelId::new(value.as_str()))
 }
 
 /// PTY の細切れチャンクを時間窓でまとめて、まとまるたびに `sink` へ渡す（設計§10）。

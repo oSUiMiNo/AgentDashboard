@@ -94,22 +94,80 @@ pub fn target_problem(target: &ModelId) -> Option<String> {
     None
 }
 
-/// 選んだ別名が、いま動いているモデルと同じものを指しているか。
+/// CLI が名乗ったフルIDが、送った別名で説明が付くか（設計§12）。
+///
+/// **別名の語幹が、名乗られたフルIDに含まれるか**を見るだけ。
+///
+/// | 別名 | 名乗り | 判定 | |
+/// |---|---|---|---|
+/// | `opus` | `claude-opus-5` | 説明が付く | |
+/// | `opus[1m]` | `claude-opus-5` | 説明が付く | 角括弧より前で見る |
+/// | `haiku` | `claude-haiku-4-5-20251001` | 説明が付く | 日付が付いていても通る |
+/// | `claude-opus-5` | `claude-opus-5` | 説明が付く | フルIDを直に指定した場合 |
+/// | `opus` | `claude-sonnet-5` | **付かない** | 要求と無関係に CLI が乗り換えた形 |
+/// | `opusplan` / `default` / `best` | 何であれ | **付かない** | 特定のモデル1つを指す別名ではない |
+///
+/// # なぜ要るのか
+///
+/// 「切替を要求している間にモデルが動いたら、それは要求の結果」とみなすと、CLI が
+/// 自分の都合で変えたもの（利用制限のフォールバック、`opusplan` がプランから実行へ
+/// 移る等）まで要求の結果として扱ってしまう。**`opus → Sonnet 5` を覚えると、
+/// 選択肢の Opus 行が「Sonnet 5」と表示される**。
+///
+/// # 説明が付かない別名を切り捨てても、画面は何も失わない
+///
+/// `default` / `best` / `opusplan` は解決先が状況で変わるので、**そもそも実測値を
+/// 表示に使っていない**（`web/src/lib/models.ts` の `ModelInfo.fixed`）。学習の対象から
+/// 外れても選択肢のラベルは変わらない。
+///
+/// 将来この語幹の作法から外れた ID が出たら、その別名が学習されなくなるだけで、
+/// 選択肢は CLI の対応表からの推測へ落ちる。壊れずに退化する。
+pub fn id_matches_alias(alias: &ModelId, id: &ModelId) -> bool {
+    let stem = base_name(alias).to_ascii_lowercase();
+    if stem.is_empty() {
+        return false;
+    }
+    id.as_str().to_ascii_lowercase().contains(&stem)
+}
+
+/// 角括弧の修飾（`[1m]` など）を落とした部分。
+fn base_name(model: &ModelId) -> &str {
+    model
+        .as_str()
+        .split_once('[')
+        .map_or(model.as_str(), |(base, _)| base)
+}
+
+/// 選んだ別名が、いま効いているものと同じか。
 ///
 /// 同じなら送らない。無駄に `/model` を送ると、会話が進んでいる場合に確認画面が
 /// 出てきて、利用者が何も変えていないのに操作を求められる。
 ///
-/// | `current`（CLI が名乗った値） | `resolved`（別名の解決先として覚えている値） | 判定 |
-/// |---|---|---|
-/// | 不明 | — | **送る**（分からないので確かめようがない） |
-/// | `target` と同じ文字列 | — | 送らない（フルIDを直に指定した場合） |
-/// | あり | `current` と同じ | 送らない |
-/// | あり | 覚えていない／違う | **送る** |
+/// # 比べるのは別名どうし。フルIDでは足りない
+///
+/// **違う別名が同じフルIDへ落ちることがある**（`opus` と `opus[1m]`、`sonnet` と
+/// 実行フェーズの `opusplan`）。解決先だけで比べると、その組の間を移動しようとしても
+/// 「もう目的のモデル」と判定されて**無言で無視される**。利用者から見ると
+/// 「選んでも戻る」になる。
+///
+/// | 状況 | 判定 |
+/// |---|---|
+/// | `current` が不明 | **送る**（分からないので確かめようがない） |
+/// | `target` と `current` が同じ文字列 | 送らない（フルIDを直に指定した場合） |
+/// | 別名が分かっていて、`target` と違う | **送る** |
+/// | 別名が分かっていて `target` と同じ、かつ名乗りと辻褄が合う | 送らない |
+/// | 別名が分かっていて `target` と同じ、だが名乗りと辻褄が合わない | **送る** |
+/// | 別名が分からない | 解決先どうしで比べる |
+///
+/// 最後から2番目の行が要る理由は、**要求の裏で CLI が別のモデルへ乗り換えることが
+/// ある**から。「別名が同じ」だけを根拠に送らないと、乗り換えられたあと同じ別名を
+/// 選び直しても二度と戻れなくなる。
 ///
 /// 迷ったら送る側に倒している。送って同じだった場合の害は小さい（切り替わらないだけ）
 /// が、送らずに切り替わらないと「押したのに反応しない」になる。
 pub fn is_already_current(
     target: &ModelId,
+    in_effect: Option<&ModelId>,
     resolved: Option<&ModelId>,
     current: Option<&ModelId>,
 ) -> bool {
@@ -119,7 +177,19 @@ pub fn is_already_current(
     if target == current {
         return true;
     }
-    resolved == Some(current)
+    match in_effect {
+        Some(in_effect) => in_effect == target && report_explains(target, resolved, current),
+        // どの別名で動いているか分からない。解決先で比べるしかない
+        None => resolved == Some(current),
+    }
+}
+
+/// CLI が名乗っている値が、その別名で説明が付くか。
+///
+/// 覚えている解決先と一致するか、語幹で説明が付くか（[`id_matches_alias`]）のどちらか。
+/// 実測を先に見るのは、そちらが**この環境で実際に起きたこと**だから。
+pub fn report_explains(alias: &ModelId, resolved: Option<&ModelId>, id: &ModelId) -> bool {
+    resolved == Some(id) || id_matches_alias(alias, id)
 }
 
 #[cfg(test)]
@@ -176,22 +246,90 @@ mod tests {
     }
 
     #[test]
+    fn 名乗りが別名を説明するかを語幹で見る() {
+        for (alias, reported) in [
+            ("opus", "claude-opus-5"),
+            ("opus[1m]", "claude-opus-5"),
+            ("sonnet[1m]", "claude-sonnet-5"),
+            ("haiku", "claude-haiku-4-5-20251001"),
+            ("claude-opus-5", "claude-opus-5"),
+            ("OPUS", "claude-opus-5"),
+        ] {
+            assert!(
+                id_matches_alias(&id(alias), &id(reported)),
+                "{alias} は {reported} で説明が付くこと"
+            );
+        }
+    }
+
+    #[test]
+    fn 要求と食い違う名乗りは説明が付かない() {
+        // **C-1 が捕まえたい形。** 要求の裏で CLI が乗り換えたものを、要求の結果として
+        // 覚えると `opus → Sonnet 5` が永続化される
+        assert!(!id_matches_alias(&id("opus"), &id("claude-sonnet-5")));
+    }
+
+    #[test]
+    fn 特定のモデルを指さない別名は説明が付かない() {
+        // 解決先が状況で変わる3つ。実測1回で決めつけると嘘になる
+        assert!(!id_matches_alias(&id("default"), &id("claude-sonnet-5")));
+        assert!(!id_matches_alias(&id("best"), &id("claude-fable-5")));
+        assert!(!id_matches_alias(&id("opusplan"), &id("claude-opus-5")));
+    }
+
+    #[test]
     fn いまのモデルが分からないときは送る() {
         // 確かめようがないので送る。送らずに切り替わらないほうが困る
-        assert!(!is_already_current(&id("opus"), None, None));
+        assert!(!is_already_current(&id("opus"), None, None, None));
         assert!(!is_already_current(
             &id("opus"),
+            Some(&id("opus")),
             Some(&id("claude-opus-5")),
             None
         ));
     }
 
     #[test]
-    fn 別名の解決先が一致していれば送らない() {
-        // 送る値は別名、CLI が名乗る値はフルID。文字列は一致しないので、
-        // 覚えている解決先どうしで比べる
+    fn 別名が違えば解決先が同じでも送る() {
+        // **B-2。** `opus` と `opus[1m]` はどちらも `claude-opus-5` へ落ちる。
+        // 解決先だけで比べると、この組の間を移動できない
+        assert!(!is_already_current(
+            &id("opus"),
+            Some(&id("opus[1m]")),
+            Some(&id("claude-opus-5")),
+            Some(&id("claude-opus-5")),
+        ));
+    }
+
+    #[test]
+    fn 同じ別名を選び直したときは送らない() {
         assert!(is_already_current(
             &id("opus"),
+            Some(&id("opus")),
+            Some(&id("claude-opus-5")),
+            Some(&id("claude-opus-5")),
+        ));
+    }
+
+    #[test]
+    fn 別名は同じでも名乗りと辻褄が合わなければ送る() {
+        // 要求の裏で CLI が Sonnet へ乗り換えた状態。ここで送らないと、
+        // 利用者が Opus を選び直しても二度と戻れない
+        assert!(!is_already_current(
+            &id("opus"),
+            Some(&id("opus")),
+            None,
+            Some(&id("claude-sonnet-5")),
+        ));
+    }
+
+    #[test]
+    fn 別名の解決先が一致していれば送らない() {
+        // 送る値は別名、CLI が名乗る値はフルID。文字列は一致しないので、
+        // 覚えている解決先どうしで比べる（いまの別名が分からないときの道筋）
+        assert!(is_already_current(
+            &id("opus"),
+            None,
             Some(&id("claude-opus-5")),
             Some(&id("claude-opus-5")),
         ));
@@ -202,6 +340,7 @@ mod tests {
         assert!(!is_already_current(
             &id("opus"),
             None,
+            None,
             Some(&id("claude-opus-5"))
         ));
     }
@@ -210,6 +349,7 @@ mod tests {
     fn 解決先が違えば送る() {
         assert!(!is_already_current(
             &id("sonnet"),
+            None,
             Some(&id("claude-sonnet-5")),
             Some(&id("claude-opus-5")),
         ));
@@ -220,6 +360,7 @@ mod tests {
         // 利用者が端末で `/model claude-opus-5` と打った後など
         assert!(is_already_current(
             &id("claude-opus-5"),
+            None,
             None,
             Some(&id("claude-opus-5")),
         ));
