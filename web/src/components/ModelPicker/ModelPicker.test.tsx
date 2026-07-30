@@ -106,6 +106,22 @@ describe('ModelPicker', () => {
     expect(picker).toHaveTextContent('へ切替中')
   })
 
+  it('切替中は選び直せない', () => {
+    // 連打するとサーバ側でロック待ちの行列ができ、他のカードの切替まで後ろへずれる。
+    // サーバも同じ理由で断るが、押せてしまう画面のままだと理由が分からない
+    applySessionSnapshot([meta(CARD, { model_requested: 'sonnet' })])
+    render(<ModelPicker cardId={CARD} />)
+
+    expect(screen.getByTestId('model-picker')).toBeDisabled()
+  })
+
+  it('確定すればまた選べる', () => {
+    applySessionSnapshot([meta(CARD, { model_requested: null })])
+    render(<ModelPicker cardId={CARD} />)
+
+    expect(screen.getByTestId('model-picker')).toBeEnabled()
+  })
+
   it('一度選んだ別名は、CLI が名乗った名前で出る', () => {
     // 括弧で併記せず置き換える（`Opus` ではなく `Opus 5`）
     useSettingsStore.setState({

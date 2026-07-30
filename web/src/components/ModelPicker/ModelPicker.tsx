@@ -69,6 +69,9 @@ export function ModelPicker({ cardId }: Props) {
         value={needsOwnRow ? (model ?? '') : alias}
         onChange={(event) => setModel(cardId, event.target.value)}
         aria-label="モデル"
+        // 切替が終わるまで受け付けない。サーバも同じ理由で断るので（連打がロック待ちの
+        // 行列になり、他のカードの切替まで後ろへずれる）、ここはその写しにあたる
+        disabled={switching}
         className={`max-w-48 truncate rounded border px-1.5 py-0.5 text-xs ${
           switching
             ? 'border-amber-500/40 text-amber-300'

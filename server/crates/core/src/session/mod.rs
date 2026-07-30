@@ -186,6 +186,9 @@ pub enum ModelSwitchError {
     /// 切替先として受け取れない値だった。**端末へは何も送っていない**
     #[error("モデルの切替先として受け取れませんでした（{0}）。端末へは何も送っていません")]
     InvalidTarget(String),
+    /// このセッションで既に切替が走っている。**待たせずにその場で断る**
+    #[error("このセッションはモデルを切替中です。終わってからもう一度選んでください")]
+    Busy,
     #[error("端末へ書き込めませんでした: {0}")]
     Write(String),
 }
@@ -315,6 +318,26 @@ pub struct Session {
     /// 分からなくなったら**素直に `None` へ戻す**。分かっているふりで持つと、
     /// 送るべき切替を送らない判断に使われる。
     model_alias: Mutex<Option<ModelId>>,
+    /// モデルの切替が走っている間だけ立つ。
+    ///
+    /// 切替は確認待ち（4秒）と確定待ち（15秒）を**プロセス全体のロックを持ったまま**
+    /// 過ごす。印が無いと、連打したぶんだけタスクがロック待ちの行列に並び、
+    /// **他のカードの切替まで全部その後ろで待つ**（5回で約76秒）。
+    ///
+    /// [`SessionMeta::model_requested`] を印の代わりにはしない。あれは端末へ送った
+    /// **あと**に立つので、送る前の隙間を2本目が通り抜ける。
+    model_switching: AtomicBool,
+}
+
+/// モデル切替が走っていることの印。落ちると印も下りる。
+struct SwitchInFlight<'a> {
+    session: &'a Session,
+}
+
+impl Drop for SwitchInFlight<'_> {
+    fn drop(&mut self) {
+        self.session.model_switching.store(false, Ordering::SeqCst);
+    }
 }
 
 /// スクロールバックの中身まで出すと数MBの表示になるので、要点だけを出す。
@@ -663,6 +686,20 @@ impl Session {
     /// 効いている別名を控える／忘れる。
     pub fn store_model_alias(&self, alias: Option<ModelId>) {
         *self.model_alias.lock().expect("ロックが壊れていない") = alias;
+    }
+
+    /// モデル切替の権利を1つだけ取る。**既に走っていれば `None`**。
+    ///
+    /// 取れた側だけが先へ進み、取れなかった側はその場で断られる。ここで断らずに
+    /// プロセス全体のロックを待たせると、待っている本数だけ**他のカードの切替も
+    /// 後ろへずれる**（設計§6 のロックはプロセスに1本しかない）。
+    ///
+    /// 返すガードを落とすと印も下りる。途中で早期 return しても取り残されない。
+    fn begin_model_switch(&self) -> Option<SwitchInFlight<'_>> {
+        self.model_switching
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| SwitchInFlight { session: self })
     }
 
     /// 1回押したあと、フッタの表示が落ち着くまで待って読む。
@@ -1188,6 +1225,7 @@ impl SessionManager {
             expected_exit: AtomicBool::new(false),
             saw_output: AtomicBool::new(false),
             model_alias: Mutex::new(initial_alias),
+            model_switching: AtomicBool::new(false),
         });
 
         self.tokens
@@ -1342,12 +1380,22 @@ impl SessionManager {
     /// 「読んだ時点と違ったら書かない」という自衛だけでは、汚染を防ぐのではなく
     /// **汚染を固定する**ことになる。
     ///
-    /// このロックは**同一セッションへの連打**も同時に片付ける。
+    /// # 同一セッションへの連打は、ロックの手前で断る
+    ///
+    /// ロックだけに任せると、連打したぶんが**行列に並ぶ**。1本あたり最長19秒
+    /// （確認待ち4秒＋確定待ち15秒）なので、5回押せば5回目は約76秒後になり、
+    /// しかもロックはプロセスに1本なので**他のカードの切替も全部その後ろ**になる。
+    ///
+    /// 待たせて順番に叶えるより、**その場で断って選び直してもらう**ほうがよい。
     pub async fn switch_model(
         self: &Arc<Self>,
         session: &Arc<Session>,
         target: &ModelId,
     ) -> Result<(), ModelSwitchError> {
+        // **ロックを取る前に**権利を1つだけ取る。ここで断らないと行列ができる
+        let Some(_in_flight) = session.begin_model_switch() else {
+            return Err(ModelSwitchError::Busy);
+        };
         // 切替と回復の一連をプロセス全体で直列化する。ガードはこの関数を抜けるまで持つ
         let _guard = self.claude_settings.lock_switch().await;
 

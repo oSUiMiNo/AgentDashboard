@@ -15,7 +15,9 @@
 
 mod common;
 
-use agentdashboard_core::{claude_settings::ClaudeSettings, config::Config};
+use agentdashboard_core::{
+    claude_settings::ClaudeSettings, config::Config, session::ModelSwitchError,
+};
 use protocol::ModelId;
 
 /// テスト用の設定。
@@ -479,6 +481,76 @@ async fn 確定が来なければ楽観更新は取り消される() {
         "楽観更新が残り続けると、切り替わったと嘘をつき続けることになる"
     );
     assert_eq!(session.meta().model, None);
+}
+
+#[tokio::test]
+async fn 切替中の連打は待たされずにその場で断られる() {
+    // **ロック待ちの行列を作らない**（コードレビュー C-3）。切替1本は最長19秒を
+    // プロセス全体のロックを持ったまま過ごすので、待たせると5回で約76秒になり、
+    // しかも他のカードの切替まで全部その後ろへずれる。
+    //
+    // statusLine を切って「確定が絶対に来ない」状況を作る。1本目が15秒居座るので、
+    // 2本目を撃つ余裕が確実にできる
+    let config = Config {
+        inject_status_line: false,
+        ..Config::default()
+    };
+    let (_path, server) = common::server_with_fake_global("busy", GLOBAL, config).await;
+    let (session, _watcher) = common::start_session(&server.manager).await;
+
+    let first = {
+        let manager = std::sync::Arc::clone(&server.manager);
+        let session = std::sync::Arc::clone(&session);
+        tokio::spawn(async move { manager.switch_model(&session, &ModelId::new("opus")).await })
+    };
+
+    // 1本目が端末へ送り終える（＝要求が立つ）まで待つ。ここまで来ていれば
+    // 確定待ちに入っているので、2本目は必ずぶつかる
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while session.meta().model_requested.is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "1本目が送られませんでした"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    // **待たされないこと自体が検査の対象**。行列に並ぶ実装だと15秒返ってこない
+    let start = std::time::Instant::now();
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        server
+            .manager
+            .switch_model(&session, &ModelId::new("haiku")),
+    )
+    .await
+    .expect("待たされずに返ること")
+    .expect_err("切替中なので断られること");
+
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(1),
+        "行列に並ばずその場で返ること。実際: {:?}",
+        start.elapsed()
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("切替中"),
+        "何が起きているか分かる文であること。実際: {message}"
+    );
+
+    // 1本目が終われば権利は返っている。**確かめるのに15秒待つ必要はない** —
+    // 受け取れない値を渡せば、権利を取ったあとの検査で弾かれる。ここで `Busy` が
+    // 返るなら権利が返っていないということなので、それだけで区別が付く
+    first.await.expect("1本目が畳めること").expect("送れること");
+    let error = server
+        .manager
+        .switch_model(&session, &ModelId::new("haiku\n余計な指示"))
+        .await
+        .expect_err("受け取れない値なので弾かれること");
+    assert!(
+        matches!(error, ModelSwitchError::InvalidTarget(_)),
+        "権利が返っていれば切替先の検査まで進む。実際: {error:?}"
+    );
 }
 
 #[tokio::test]
