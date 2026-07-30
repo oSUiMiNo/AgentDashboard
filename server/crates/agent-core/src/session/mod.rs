@@ -25,7 +25,7 @@ pub mod permission;
 pub mod pty;
 
 use crate::{
-    config::Config,
+    config::AgentConfig,
     state::{self, Changed, HookInput},
     transcript::{Anchor, TranscriptWindow},
 };
@@ -936,7 +936,7 @@ impl Session {
 
 /// 全セッションの管理者。
 pub struct SessionManager {
-    config: Arc<Config>,
+    config: Arc<AgentConfig>,
     program: String,
     /// フックが起動する実行ファイル。既定は自分自身（設計§7）。
     hook_program: PathBuf,
@@ -962,12 +962,12 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
-    pub fn new(config: Arc<Config>) -> Arc<Self> {
+    pub fn new(config: Arc<AgentConfig>) -> Arc<Self> {
         Self::with_program(config, lifecycle::claude_program())
     }
 
     /// 起動する CLI を明示して作る。
-    pub fn with_program(config: Arc<Config>, program: String) -> Arc<Self> {
+    pub fn with_program(config: Arc<AgentConfig>, program: String) -> Arc<Self> {
         Self::with_programs(config, program, hooks_settings::hook_program())
     }
 
@@ -975,7 +975,11 @@ impl SessionManager {
     ///
     /// テストから擬似 claude とビルド済みの `agentdashboard` を指すための入口。
     /// プロセスの環境変数を書き換えずに済むので、テスト同士が互いを壊さない。
-    pub fn with_programs(config: Arc<Config>, program: String, hook_program: PathBuf) -> Arc<Self> {
+    pub fn with_programs(
+        config: Arc<AgentConfig>,
+        program: String,
+        hook_program: PathBuf,
+    ) -> Arc<Self> {
         let aliases = Arc::new(crate::model_aliases::ModelAliases::load(Some(
             config.resolved_state_dir(),
         )));
@@ -993,7 +997,7 @@ impl SessionManager {
     /// ファイルを指すので、テストからは必ずこちらを使って一時ファイルへ逃がす。
     /// 環境変数を書き換える方式にすると、並行して走る他のテストを巻き込む。
     pub fn with_everything(
-        config: Arc<Config>,
+        config: Arc<AgentConfig>,
         program: String,
         hook_program: PathBuf,
         claude_settings: Arc<crate::claude_settings::ClaudeSettings>,
@@ -1159,9 +1163,13 @@ impl SessionManager {
 
         // フック設定は起動より前に書き出しておく。CLI は起動時に --settings を読むので、
         // 後から書いても間に合わない
-        let settings =
-            hooks_settings::write(card_id, self.config.port, &self.hook_program, &injection)
-                .map_err(|err| SessionError::Settings(format!("{err:#}")))?;
+        let settings = hooks_settings::write(
+            card_id,
+            self.config.hook_port,
+            &self.hook_program,
+            &injection,
+        )
+        .map_err(|err| SessionError::Settings(format!("{err:#}")))?;
         let command = lifecycle::build_command_with_extra(
             &self.program,
             &project_path,

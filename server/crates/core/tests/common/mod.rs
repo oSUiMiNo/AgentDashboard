@@ -93,7 +93,7 @@ fn claude_settings_for(config: &Config) -> Arc<ClaudeSettings> {
 fn build_manager(config: Arc<Config>, program: String) -> Arc<SessionManager> {
     let claude_settings = claude_settings_for(&config);
     SessionManager::with_everything(
-        config,
+        Arc::new(config.agent()),
         program,
         hook_program(),
         claude_settings,
@@ -241,7 +241,7 @@ impl TestServer {
     ) -> Self {
         // 差し替えの検証をするので、パーサの場所は**ポインタ経由**で決めさせる。
         // 環境変数で名指しすると探索順の先頭にあたり、差し替えても効かなくなる
-        let state_dir = config.resolved_state_dir();
+        let state_dir = config.agent().resolved_state_dir();
         std::fs::create_dir_all(&state_dir).expect("状態の置き場所を作れること");
         std::fs::write(
             state_dir.join(agentdashboard_core::parser::PARSER_POINTER),
@@ -253,7 +253,7 @@ impl TestServer {
         server.selfheal = Some(agentdashboard_core::selfheal::Selfheal::start(
             Arc::clone(&server.manager),
             Arc::clone(server.parser.as_ref().expect("パーサを起動している")),
-            Arc::clone(&server.config),
+            Arc::new(server.config.agent()),
             Some(ops),
             // 擬似 claude は `--version` に答えないので、本番でもここは空になる。
             // 空だと別名の表の見直しは起きない（比べる相手が無い）。表の見直しを
@@ -324,10 +324,13 @@ impl TestServer {
         config.port = addr.port();
 
         let config = Arc::new(config.clone());
+        // 本番（`serve`）と同じく、1つの設定ファイルから両側の射影を作る
+        let agent_config = Arc::new(config.agent());
+        let server_config = Arc::new(config.server());
         let manager = match claude_settings {
             // モデルを扱うテストは**本物の ~/.claude/settings.json を触らない**
             Some(claude_settings) => SessionManager::with_everything(
-                Arc::clone(&config),
+                Arc::clone(&agent_config),
                 program,
                 hook_program(),
                 claude_settings,
@@ -337,7 +340,7 @@ impl TestServer {
             None => build_manager(Arc::clone(&config), program),
         };
 
-        let mut state = AppState::new(Arc::clone(&manager), Arc::clone(&config));
+        let mut state = AppState::new(Arc::clone(&manager), Arc::clone(&server_config));
         let parser = if with_parser {
             // 本番と同じ入口（環境変数）でビルド済みのパーサを指す
             if name_parser_by_env {
@@ -348,7 +351,7 @@ impl TestServer {
                     );
                 }
             }
-            let parser = ParserSupervisor::start(Arc::clone(&manager), Arc::clone(&config));
+            let parser = ParserSupervisor::start(Arc::clone(&manager), Arc::clone(&agent_config));
             manager.attach_parser(parser.handle());
             state = state.with_parser(Arc::clone(&parser));
             Some(parser)
@@ -363,7 +366,7 @@ impl TestServer {
             state =
                 state.with_settings(Arc::new(agentdashboard_core::settings::SettingsStore::new(
                     path,
-                    &config,
+                    &agent_config,
                     modes,
                     // 擬似 claude は対応表を持たない。空で通す
                     Vec::new(),

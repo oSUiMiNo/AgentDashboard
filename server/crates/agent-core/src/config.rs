@@ -1,66 +1,51 @@
-//! `config.toml` の読み込み（設計§12）。
+//! エージェント（PC 側）が使う設定（セルフホスト化設計§13-2）。
 //!
-//! キー名は設計§12 の表記をそのまま採用している。サイズ系（`pty_ring_buffer` /
-//! `flow_high` / `flow_low`）はバイト数の整数で受ける。
+//! # ファイルは読まない
+//!
+//! `config.toml` を読むのは、両側を束ねるローカルモードの実行ファイル
+//! （`agentdashboard_core::config::Config`）の仕事で、ここはその**射影**を受け取るだけ。
+//! こう分けたのは、フェーズ3 でエージェントが別プロセスになると設定ファイル自体が
+//! 別（`agent.toml`）になるため。読む場所を持たないでおけば、その差し替えが
+//! ここまで波及しない。
+//!
+//! # キーの割り当て
+//!
+//! 「接続と機械に属するもの」のうち、**利用者の PC にあるものを触る**キーがここへ来る
+//! （PTY・自己修復・`~/.claude`・状態の置き場所）。ブラウザへの配信に関わるキー
+//! （`port` / `flow_*` / `transcript_page_limit`）は `server_core::config::ServerConfig`。
 
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// 設定の既定ファイル名。カレントディレクトリから探す。
-pub const DEFAULT_FILE_NAME: &str = "config.toml";
-
-const DEFAULT_PORT: u16 = 8787;
 const DEFAULT_STALLED_THRESHOLD_SECS: u64 = 120;
 const DEFAULT_COALESCE_MS: u64 = 8;
 const DEFAULT_PTY_RING_BUFFER: usize = 1024 * 1024;
-const DEFAULT_FLOW_HIGH: usize = 256 * 1024;
-const DEFAULT_FLOW_LOW: usize = 32 * 1024;
 const DEFAULT_CANARY_MODEL: &str = "haiku";
 const DEFAULT_CANARY_FALLBACK_MODEL: &str = "sonnet";
 const DEFAULT_REPAIR_MODEL: &str = "sonnet";
 const DEFAULT_SELFHEAL_RETRY: u32 = 3;
 const DEFAULT_SELFHEAL_COOLDOWN_HOURS: u64 = 24;
 const DEFAULT_TRANSCRIPT_WINDOW_NODES: usize = 2000;
-const DEFAULT_TRANSCRIPT_PAGE_LIMIT: usize = 200;
 /// `statusLine` を再実行する間隔（秒）。
 ///
 /// 実測で `refreshInterval: 3` はきっちり3.0秒間隔で走った（設計§11 前提6）。
 /// 1秒にするとセッション数だけ毎秒プロセスが起動するので、3秒を既定にしている。
 const DEFAULT_STATUS_LINE_REFRESH_SECS: u64 = 3;
+/// フックの受信ポートの既定。
+///
+/// いまはブラウザの待ち受けと同じポートに同居しているので
+/// [`server_core::config::ServerConfig`] の既定と同じ値にしてある（一致していることは
+/// `agentdashboard_core` 側のテストが見ている）。フェーズ3 でエージェントが別プロセスに
+/// なると、ここは独立に決まる（設計§5-3）。
+const DEFAULT_HOOK_PORT: u16 = 8787;
 
-#[derive(Debug, thiserror::Error)]
-pub enum ConfigError {
-    #[error("設定ファイルを読めません: {path}")]
-    Read {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("設定ファイルの書式が不正です: {path}")]
-    Parse {
-        path: PathBuf,
-        #[source]
-        source: toml::de::Error,
-    },
-    #[error("設定値が不正です: {0}")]
-    Invalid(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct Config {
-    /// ダッシュボードの待ち受けポート。127.0.0.1 のみにバインドする（設計§7）
-    pub port: u16,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentConfig {
     /// Working のままこの秒数イベントが途絶したら Stalled とみなす
     pub stalled_threshold_secs: u64,
     /// PTY 出力をまとめてから送るまでの窓（ミリ秒）
     pub coalesce_ms: u64,
     /// セッションごとの scrollback リングバッファ（バイト）
     pub pty_ring_buffer: usize,
-    /// フロー制御の上側しきい値。未書き込みバイトがこれを超えたら pause（バイト）
-    pub flow_high: usize,
-    /// フロー制御の下側しきい値。ここまで減ったら resume（バイト）
-    pub flow_low: usize,
     /// 一覧の起動ボタンを「全承認をスキップ」の1つだけにするか。
     ///
     /// 既定は `false`（3つ出す：全承認をスキップ／編集の承認のみスキップ／指定なし）。
@@ -100,23 +85,18 @@ pub struct Config {
     /// （設計§9 の実行環境の前提）。None なら起動時のカレントディレクトリから
     /// 上へ辿って探す。見つからなければ自己修復は検知の通知だけに留まる。
     pub selfheal_repo_dir: Option<PathBuf>,
-    /// メモリに保持する履歴の直近ウィンドウ（ノード数、設計§4）
+    /// メモリに保持する履歴の直近ウィンドウ（ノード数、設計§4）。
+    ///
+    /// セルフホスト化設計§13-2 はこのキーを `ServerConfig` に置いているが、それは
+    /// `TranscriptWindow` がサーバ側へ移ったあとの姿。窓の持ち主が
+    /// [`crate::session::Session`] であるうちはエージェント側で読む（フェーズ2 で窓ごと移す）。
     pub transcript_window_nodes: usize,
-    /// 履歴ページングの1回あたりの上限（ノード数）
-    pub transcript_page_limit: usize,
     /// 再開位置などの状態を置く場所。
     ///
     /// 既定は `$XDG_STATE_HOME/agentdashboard`（無ければ `~/.local/state/agentdashboard`）。
     /// 一時ディレクトリやビルド成果物の隣に置いてはいけない — 消えると再開位置を失い、
     /// 起動のたびに全再パースになってブラウザへ履歴が二重に届く。
     pub state_dir: Option<PathBuf>,
-    /// セッションへ `statusLine` を注入するか（設計§4）。
-    ///
-    /// これがモデル名の唯一の取得経路なので、切ると**モデルは「不明」のまま**になる。
-    /// 切れるようにしてあるのは、`--settings` がコマンドライン引数の層にあるせいで
-    /// **利用者自身の `statusLine` を上書きしてしまう**ため（設計§11 前提5 で実測）。
-    /// 自分の statusLine を優先したい人のための逃げ道。
-    pub inject_status_line: bool,
     /// 利用者のグローバル設定 `~/.claude/settings.json` の場所。
     ///
     /// 既定は `$HOME/.claude/settings.json`。**E2E とテストはここを差し替える。**
@@ -124,22 +104,31 @@ pub struct Config {
     /// テストが利用者の本物の設定を読み書きすることになる。`state_dir` を
     /// 差し替えられるようにしてあるのと同じ理由。
     pub claude_settings_path: Option<PathBuf>,
+    /// セッションへ `statusLine` を注入するか（設計§4）。
+    ///
+    /// これがモデル名の唯一の取得経路なので、切ると**モデルは「不明」のまま**になる。
+    /// 切れるようにしてあるのは、`--settings` がコマンドライン引数の層にあるせいで
+    /// **利用者自身の `statusLine` を上書きしてしまう**ため（設計§11 前提5 で実測）。
+    /// 自分の statusLine を優先したい人のための逃げ道。
+    pub inject_status_line: bool,
     /// 注入する `statusLine` の `refreshInterval`（秒、最小1）。
     ///
     /// `statusLine` が走る契機に**モデル変更は入っていない**（設計§11 前提6）。
     /// 切り替えた結果が画面に反映されるまでの時間は、事実上この値で決まる。
     pub status_line_refresh_secs: u64,
+    /// フックと `statusLine` の宛先ポート（セルフホスト化設計§5-3）。
+    ///
+    /// セッション起動時に settings へ**焼き込まれる**ので、後から変えても走っている
+    /// セッションには効かない。ローカルモードではブラウザの待ち受けと同じ値が入る。
+    pub hook_port: u16,
 }
 
-impl Default for Config {
+impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            port: DEFAULT_PORT,
             stalled_threshold_secs: DEFAULT_STALLED_THRESHOLD_SECS,
             coalesce_ms: DEFAULT_COALESCE_MS,
             pty_ring_buffer: DEFAULT_PTY_RING_BUFFER,
-            flow_high: DEFAULT_FLOW_HIGH,
-            flow_low: DEFAULT_FLOW_LOW,
             always_bypass_permissions: false,
             selfheal_enabled: true,
             canary_model: DEFAULT_CANARY_MODEL.to_string(),
@@ -149,59 +138,16 @@ impl Default for Config {
             selfheal_cooldown_hours: DEFAULT_SELFHEAL_COOLDOWN_HOURS,
             selfheal_repo_dir: None,
             transcript_window_nodes: DEFAULT_TRANSCRIPT_WINDOW_NODES,
-            transcript_page_limit: DEFAULT_TRANSCRIPT_PAGE_LIMIT,
             state_dir: None,
-            inject_status_line: true,
             claude_settings_path: None,
+            inject_status_line: true,
             status_line_refresh_secs: DEFAULT_STATUS_LINE_REFRESH_SECS,
+            hook_port: DEFAULT_HOOK_PORT,
         }
     }
 }
 
-impl Config {
-    /// 設定を解決する。
-    ///
-    /// 探索順は次のとおり。
-    /// 1. `explicit`（`--config` で明示された場合）— 存在しなければエラー
-    /// 2. カレントディレクトリの `config.toml` — 無ければ既定値
-    pub fn load(explicit: Option<&Path>) -> Result<Self, ConfigError> {
-        match explicit {
-            Some(path) => Self::from_file(path),
-            None => {
-                let default_path = Path::new(DEFAULT_FILE_NAME);
-                if default_path.is_file() {
-                    Self::from_file(default_path)
-                } else {
-                    Ok(Self::default())
-                }
-            }
-        }
-    }
-
-    pub fn from_file(path: &Path) -> Result<Self, ConfigError> {
-        let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        Self::from_toml_str(&text).map_err(|err| match err {
-            ConfigError::Parse { source, .. } => ConfigError::Parse {
-                path: path.to_path_buf(),
-                source,
-            },
-            other => other,
-        })
-    }
-
-    /// TOML 文字列から読む。書式エラーと値エラーを別々に返す。
-    pub fn from_toml_str(text: &str) -> Result<Self, ConfigError> {
-        let config: Config = toml::from_str(text).map_err(|source| ConfigError::Parse {
-            path: PathBuf::from("<inline>"),
-            source,
-        })?;
-        config.validate()?;
-        Ok(config)
-    }
-
+impl AgentConfig {
     /// 状態ファイル（パーサの再開位置など）を置く場所を決める。
     ///
     /// 実行ファイルの隣やビルド成果物の中には置かない。開発中のバイナリは
@@ -241,54 +187,6 @@ impl Config {
             .find(|dir| dir.join("scripts").join("cargo").is_file())
             .map(Path::to_path_buf)
     }
-
-    /// 型が合っていても意味的に成立しない組み合わせを弾く。
-    pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.port == 0 {
-            return Err(ConfigError::Invalid(
-                "port は 1 以上である必要があります".to_string(),
-            ));
-        }
-        if self.coalesce_ms == 0 {
-            return Err(ConfigError::Invalid(
-                "coalesce_ms は 1 以上である必要があります".to_string(),
-            ));
-        }
-        if self.stalled_threshold_secs == 0 {
-            return Err(ConfigError::Invalid(
-                "stalled_threshold_secs は 1 以上である必要があります".to_string(),
-            ));
-        }
-        if self.pty_ring_buffer == 0 {
-            return Err(ConfigError::Invalid(
-                "pty_ring_buffer は 1 以上である必要があります".to_string(),
-            ));
-        }
-        // 下側しきい値が上側以上だと pause と resume が同時に成立してしまい、
-        // フロー制御が振動する（設計§10）。
-        if self.flow_low >= self.flow_high {
-            return Err(ConfigError::Invalid(format!(
-                "flow_low({}) は flow_high({}) より小さい必要があります",
-                self.flow_low, self.flow_high
-            )));
-        }
-        if self.selfheal_retry == 0 {
-            return Err(ConfigError::Invalid(
-                "selfheal_retry は 1 以上である必要があります".to_string(),
-            ));
-        }
-        if self.transcript_window_nodes == 0 {
-            return Err(ConfigError::Invalid(
-                "transcript_window_nodes は 1 以上である必要があります".to_string(),
-            ));
-        }
-        if self.transcript_page_limit == 0 {
-            return Err(ConfigError::Invalid(
-                "transcript_page_limit は 1 以上である必要があります".to_string(),
-            ));
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -296,145 +194,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn 空のtomlは設計12の既定値になる() {
-        let config = Config::from_toml_str("").unwrap();
-        assert_eq!(config, Config::default());
-        assert_eq!(config.stalled_threshold_secs, 120);
-        assert_eq!(config.coalesce_ms, 8);
-        assert_eq!(config.pty_ring_buffer, 1024 * 1024);
-        assert_eq!(config.flow_high, 256 * 1024);
-        assert_eq!(config.flow_low, 32 * 1024);
-        assert_eq!(config.canary_model, "haiku");
-        assert_eq!(config.repair_model, "sonnet");
-        assert_eq!(config.selfheal_retry, 3);
-        assert_eq!(config.selfheal_cooldown_hours, 24);
-        assert!(config.selfheal_enabled);
-        assert_eq!(config.canary_fallback_model, "sonnet");
-        assert_eq!(config.selfheal_repo_dir, None);
-    }
-
-    #[test]
-    fn 雛形は全キーを網羅し既定値と一致する() {
-        // `config.toml.example` は利用者が最初に読む設定の一覧であり、README の設定表の
-        // 元ネタでもある。ここが実装より遅れていると、増えたキーの存在に誰も気づけない
-        // （実際にフェーズ5で増えた3キーが雛形に載らないまま残っていた）。
-        //
-        // 「読める」だけでなく「全キーが書かれている」ことまで見るのが要点。
-        // 既定値が入るだけの `from_toml_str` は、キーが抜けていても通ってしまう。
-        let example = include_str!("../../../config.toml.example");
-        let config = Config::from_toml_str(example).expect("雛形が読めること");
-        assert_eq!(
-            config,
-            Config::default(),
-            "雛形の値が既定値と食い違っている"
-        );
-
-        let written: toml::Table = example.parse().expect("雛形が TOML として妥当なこと");
-        let toml::Value::Table(with_values) =
-            toml::Value::try_from(Config::default()).expect("既定値を TOML へ変換できること")
-        else {
-            unreachable!("Config は構造体なのでテーブルになる");
-        };
-        for key in with_values.keys() {
-            assert!(
-                written.contains_key(key),
-                "{key} が config.toml.example に書かれていない"
-            );
-        }
-
-        // Option 型のキーは既定が「未指定」で、TOML へ変換すると消えるため上の走査に乗らない。
-        // 値を書くと利用者の環境に存在しないパスを指すことになるので、雛形では
-        // **コメントとして例示**する。名指しでしか確かめられないので、ここに列挙する
-        for key in ["selfheal_repo_dir", "state_dir", "claude_settings_path"] {
-            assert!(
-                !with_values.contains_key(key),
-                "{key} に既定値が付いた。この列挙から外して通常の走査へ移すこと"
-            );
-            assert!(
-                example.contains(&format!("# {key} =")),
-                "{key} が config.toml.example にコメントとして例示されていない"
-            );
-        }
-    }
-
-    #[test]
     fn 権限確認スキップの既定はオフ() {
         // 権限確認を飛ばす機能なので、既定は必ずスキップしない側に置く（設計§9）
-        assert!(!Config::default().always_bypass_permissions);
-        let config = Config::from_toml_str("always_bypass_permissions = true").unwrap();
-        assert!(config.always_bypass_permissions);
+        assert!(!AgentConfig::default().always_bypass_permissions);
     }
 
     #[test]
     fn 明示したリポジトリが存在しなければ使わない() {
         // 設定の打ち間違いに気づかず「修復したつもり」で別の場所を触るほうが危ない。
         // 実在しないなら None にして、検知の通知だけに落とす
-        let config = Config::from_toml_str(r#"selfheal_repo_dir = "/nonexistent/repo""#).unwrap();
+        let config = AgentConfig {
+            selfheal_repo_dir: Some(PathBuf::from("/nonexistent/repo")),
+            ..AgentConfig::default()
+        };
         assert_eq!(config.resolved_repo_dir(), None);
     }
 
     #[test]
-    fn 指定したキーだけが上書きされる() {
-        let config = Config::from_toml_str(
-            r#"
-            port = 9999
-            coalesce_ms = 16
-            repair_model = "opus"
-            "#,
-        )
-        .unwrap();
-        assert_eq!(config.port, 9999);
-        assert_eq!(config.coalesce_ms, 16);
-        assert_eq!(config.repair_model, "opus");
-        // 触っていないキーは既定値のまま
-        assert_eq!(config.stalled_threshold_secs, 120);
-    }
-
-    #[test]
-    fn 型不一致は書式エラーになる() {
-        let err = Config::from_toml_str(r#"port = "8787""#).unwrap_err();
-        assert!(matches!(err, ConfigError::Parse { .. }), "実際: {err:?}");
-    }
-
-    #[test]
-    fn 知らないキーは書式エラーになる() {
-        // 打ち間違いを黙って無視すると「設定したのに効かない」事故になるため弾く
-        let err = Config::from_toml_str("porrt = 8787").unwrap_err();
-        assert!(matches!(err, ConfigError::Parse { .. }), "実際: {err:?}");
-    }
-
-    #[test]
-    fn 範囲外の値は値エラーになる() {
-        for text in [
-            "port = 0",
-            "coalesce_ms = 0",
-            "stalled_threshold_secs = 0",
-            "pty_ring_buffer = 0",
-            "selfheal_retry = 0",
-        ] {
-            let err = Config::from_toml_str(text).unwrap_err();
-            assert!(
-                matches!(err, ConfigError::Invalid(_)),
-                "{text} で Invalid にならなかった: {err:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn flow_lowがflow_high以上なら値エラーになる() {
-        let err = Config::from_toml_str(
-            r#"
-            flow_high = 1024
-            flow_low = 1024
-            "#,
-        )
-        .unwrap_err();
-        assert!(matches!(err, ConfigError::Invalid(_)), "実際: {err:?}");
-    }
-
-    #[test]
-    fn 存在しないファイルを明示指定したら読み取りエラーになる() {
-        let err = Config::load(Some(Path::new("/nonexistent/config.toml"))).unwrap_err();
-        assert!(matches!(err, ConfigError::Read { .. }), "実際: {err:?}");
+    fn 状態の置き場所は明示があればそれを使う() {
+        let config = AgentConfig {
+            state_dir: Some(PathBuf::from("/tmp/agentdashboard-test")),
+            ..AgentConfig::default()
+        };
+        assert_eq!(
+            config.resolved_state_dir(),
+            PathBuf::from("/tmp/agentdashboard-test")
+        );
     }
 }

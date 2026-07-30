@@ -18,7 +18,6 @@
 //! 割れて表示が崩れるため、落としたら全体を渡し直すのが唯一の正しい復帰になる。
 
 use crate::{
-    config::Config,
     parser::ParserSupervisor,
     session::{Session, SessionManager},
     settings::{SettingsStore, SettingsView},
@@ -40,6 +39,7 @@ use protocol::{
     ws::{ClientMessage, FlowState, ServerMessage},
 };
 use serde::{Deserialize, Serialize};
+use server_core::config::ServerConfig;
 use std::{
     collections::HashMap,
     sync::{
@@ -58,7 +58,7 @@ const OUTBOUND_QUEUE_MESSAGES: usize = 64;
 #[derive(Clone)]
 pub struct AppState {
     pub manager: Arc<SessionManager>,
-    pub config: Arc<Config>,
+    pub config: Arc<ServerConfig>,
     /// パーサの世話役。**居なくても core は動く**（構造化ビューだけが縮退する）。
     ///
     /// 設計§11 の「パーサが停止しても、ターミナルと指示送信は通常動作」を型で表している。
@@ -70,7 +70,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(manager: Arc<SessionManager>, config: Arc<Config>) -> Self {
+    pub fn new(manager: Arc<SessionManager>, config: Arc<ServerConfig>) -> Self {
         Self {
             manager,
             config,

@@ -11,7 +11,7 @@
 //! # 再開位置は core が持つ
 //!
 //! パーサを差し替えても履歴が欠けないよう、どこまで読んだかは core 側で永続化する。
-//! 置き場所は `$XDG_STATE_HOME/agentdashboard/offsets.json`（[`Config::resolved_state_dir`]）。
+//! 置き場所は `$XDG_STATE_HOME/agentdashboard/offsets.json`（[`AgentConfig::resolved_state_dir`]）。
 //! 一時ディレクトリやビルド成果物の隣に置くと、消えた瞬間に全再パースになり、
 //! ブラウザへ履歴が二重に届く。
 //!
@@ -19,7 +19,7 @@
 //! 静かに消える。後に書けば最悪もう一度届くだけで、同じIDは上書きされるので害が無い。
 //! **欠落より重複を選ぶ。**
 
-use crate::config::Config;
+use crate::config::AgentConfig;
 use crate::session::SessionManager;
 use protocol::CardId;
 use protocol::ipc::{PROTOCOL_VERSION, ParsedNode, ParserCommand, ParserEvent};
@@ -96,7 +96,7 @@ struct CardOffsets {
 /// パーサ子プロセスの世話役。
 pub struct ParserSupervisor {
     manager: Arc<SessionManager>,
-    config: Arc<Config>,
+    config: Arc<AgentConfig>,
     requests: mpsc::Sender<ParserRequest>,
     commands: mpsc::Sender<ParserCommand>,
     /// `read_range` の応答待ち
@@ -124,7 +124,7 @@ pub struct StatsReport {
 
 impl ParserSupervisor {
     /// パーサを起動し、世話をする常駐タスクを立てる。
-    pub fn start(manager: Arc<SessionManager>, config: Arc<Config>) -> Arc<Self> {
+    pub fn start(manager: Arc<SessionManager>, config: Arc<AgentConfig>) -> Arc<Self> {
         let (requests, request_rx) = mpsc::channel(REQUEST_QUEUE);
         let (commands, command_rx) = mpsc::channel(REQUEST_QUEUE);
         // 立て直しの依頼は溜める意味が無い（1回入っていれば十分）
@@ -245,7 +245,7 @@ impl ParserSupervisor {
     }
 }
 
-/// 自己修復が差し替えたパーサを指すポインタファイルの名前（[`Config::resolved_state_dir`] 配下）。
+/// 自己修復が差し替えたパーサを指すポインタファイルの名前（[`AgentConfig::resolved_state_dir`] 配下）。
 ///
 /// 中身は実行ファイルの絶対パス1行。symlink ではなくファイルにしてあるのは、
 /// 「いま何を使っているか」を人が開いて確かめられるようにするため。
@@ -258,7 +258,7 @@ pub const PARSER_POINTER: &str = "parser-current";
 /// - 環境変数が先頭なのは、テストがビルド済みのパーサを名指しできるようにするため
 /// - ポインタが隣より先なのは、自己修復が差し替えた新しいパーサを使わせるため。
 ///   ポインタの指す先が消えていたら既定へ戻る（起動できなくなるほうが困る）
-pub fn parser_program(config: &Config) -> PathBuf {
+pub fn parser_program(config: &AgentConfig) -> PathBuf {
     if let Ok(path) = std::env::var(PARSER_BIN_ENV) {
         return PathBuf::from(path);
     }
@@ -347,7 +347,7 @@ enum PumpEnd {
     Restart,
 }
 
-async fn spawn_parser(config: &Config) -> std::io::Result<tokio::process::Child> {
+async fn spawn_parser(config: &AgentConfig) -> std::io::Result<tokio::process::Child> {
     tokio::process::Command::new(parser_program(config))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

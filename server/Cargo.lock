@@ -48,6 +48,7 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
+ "server-core",
  "testkit",
  "thiserror 2.0.19",
  "tokio",

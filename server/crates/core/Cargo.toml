@@ -19,6 +19,7 @@ path = "src/main.rs"
 [dependencies]
 protocol.workspace = true
 agent-core.workspace = true
+server-core.workspace = true
 bytes.workspace = true
 serde.workspace = true
 serde_json.workspace = true

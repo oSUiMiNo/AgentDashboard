@@ -33,7 +33,7 @@ pub mod repair;
 pub mod state;
 pub mod watchdog;
 
-use crate::config::Config;
+use crate::config::AgentConfig;
 use crate::parser::{ParserSupervisor, StatsReport};
 use crate::session::{SessionManager, now_ms};
 use ops::SelfhealOps;
@@ -83,7 +83,7 @@ pub const MAINTENANCE_NAME: &str = "dashboard-maintenance";
 pub struct Selfheal {
     manager: Arc<SessionManager>,
     parser: Arc<ParserSupervisor>,
-    config: Arc<Config>,
+    config: Arc<AgentConfig>,
     /// 外の世界へ出る口。前提（Docker とソース）が無い環境では `None`
     ops: Option<Arc<dyn SelfhealOps>>,
     state_dir: PathBuf,
@@ -122,7 +122,7 @@ impl Selfheal {
     pub fn start(
         manager: Arc<SessionManager>,
         parser: Arc<ParserSupervisor>,
-        config: Arc<Config>,
+        config: Arc<AgentConfig>,
         ops: Option<Arc<dyn SelfhealOps>>,
         cli_version: String,
     ) -> Arc<Self> {

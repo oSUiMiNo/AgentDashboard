@@ -7,6 +7,7 @@
 //! こうしているのは、統合テストからサーバの組み立てをそのまま呼べるようにするため
 //! （バイナリだけのクレートは `tests/` から参照できない）。
 
+pub mod config;
 pub mod embed;
 pub mod ws;
 
@@ -14,8 +15,8 @@ pub mod ws;
 // 出し直しているのは、既存の呼び出し側（実行ファイル・統合テスト）を1つのコミットで
 // 全部書き換えずに済ませるため。**移設が済んだら外す**。
 pub use agent_core::{
-    claude_settings, config, hook_post, hooks, jsonfile, model_aliases, model_catalog, model_post,
-    parser, selfheal, session, settings, state, transcript,
+    claude_settings, hook_post, hooks, jsonfile, model_aliases, model_catalog, model_post, parser,
+    selfheal, session, settings, state, transcript,
 };
 
 use axum::{
@@ -63,8 +64,12 @@ pub fn build_router(state: ws::AppState) -> Router {
 /// バインド先は **127.0.0.1 のみ**（設計§7）。個人用のローカルツールなので、外部から
 /// 触れる経路をそもそも作らない。
 pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
-    let config = Arc::new(config);
-    let manager = SessionManager::new(Arc::clone(&config));
+    // 1つのファイルから、エージェント側とサーバ側の2つへ射影する（セルフホスト化設計§13-2）。
+    // 分けておくと、フェーズ3 で両者が別プロセスになったときに、この行より下は
+    // ほとんど動かさずに済む
+    let agent_config = Arc::new(config.agent());
+    let server_config = Arc::new(config.server());
+    let manager = SessionManager::new(Arc::clone(&agent_config));
     tracing::info!("起動する CLI: {}", manager.program());
 
     // 起動している CLI へ問い合わせる2つを、まとめてブロッキング用のスレッドへ逃がす。
@@ -78,7 +83,7 @@ pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::R
     // クォータは使わない
     let (available_modes, catalog) = {
         let program = manager.program().to_string();
-        let state_dir = config.resolved_state_dir();
+        let state_dir = agent_config.resolved_state_dir();
         tokio::task::spawn_blocking(move || {
             let modes = session::permission::supported_modes(&program);
             let catalog = model_catalog::ModelCatalog::resolve(&program, Some(state_dir));
@@ -96,7 +101,7 @@ pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::R
     );
     let settings = Arc::new(settings::SettingsStore::new(
         config_path,
-        &config,
+        &agent_config,
         available_modes,
         catalog.models().to_vec(),
     ));
@@ -105,12 +110,12 @@ pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::R
     manager.start_sweeper();
 
     // 履歴を読むパーサは別プロセス。落ちてもターミナルと状態表示は無傷（設計§11）
-    let parser = parser::ParserSupervisor::start(Arc::clone(&manager), Arc::clone(&config));
+    let parser = parser::ParserSupervisor::start(Arc::clone(&manager), Arc::clone(&agent_config));
     manager.attach_parser(parser.handle());
 
     // フォーマット変更に自分で追随する仕組み（設計§9）。
     // 修復には Docker とダッシュボード自身のソースが要る。無い環境では検知の通知だけ行う
-    let ops = match config.resolved_repo_dir() {
+    let ops = match agent_config.resolved_repo_dir() {
         Some(repo) => Some(Arc::new(selfheal::ops::HostOps::new(
             repo,
             manager.program().to_string(),
@@ -125,16 +130,16 @@ pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::R
     selfheal::Selfheal::start(
         Arc::clone(&manager),
         Arc::clone(&parser),
-        Arc::clone(&config),
+        Arc::clone(&agent_config),
         ops,
         // 版は対応表を取り出したときに読んである。ここで読み直すと CLI を2回起こす
         catalog.cli_version().to_string(),
     );
 
-    let state = ws::AppState::new(manager, Arc::clone(&config))
+    let state = ws::AppState::new(manager, Arc::clone(&server_config))
         .with_parser(parser)
         .with_settings(settings);
-    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, config.port)).await?;
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, server_config.port)).await?;
     let address = listener.local_addr()?;
 
     tracing::info!("AgentDashboard を起動しました: http://{address}");

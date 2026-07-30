@@ -12,13 +12,13 @@
 //! まま特定のキーだけを差し替えられる。**触るのはそのキーだけ**にして、他のキーや
 //! 並び順には手を出さない。
 //!
-//! # 共有の `Config` は不変のまま
+//! # 共有の `AgentConfig` は不変のまま
 //!
-//! このキーを読むのは画面だけで、サーバの動作には影響しない。`Arc<Config>` を
+//! このキーを読むのは画面だけで、サーバの動作には影響しない。`Arc<AgentConfig>` を
 //! `RwLock` へ広げると、全く関係の無い経路にまでロックを持ち込むことになる。
 //! **1つの値だけをここで持つ**のが釣り合う。
 
-use crate::config::Config;
+use crate::config::AgentConfig;
 use crate::model_aliases::AliasSeen;
 use crate::model_catalog::CatalogEntry;
 use protocol::PermissionMode;
@@ -69,7 +69,7 @@ pub struct SettingsStore {
 impl SettingsStore {
     pub fn new(
         path: PathBuf,
-        config: &Config,
+        config: &AgentConfig,
         available_modes: Vec<PermissionMode>,
         model_catalog: Vec<CatalogEntry>,
     ) -> Self {
@@ -183,10 +183,15 @@ stalled_threshold_secs = 120
             "{after}"
         );
 
-        // 書き戻した結果が、そのまま設定として読み直せること
-        let config = Config::from_toml_str(&after).unwrap();
-        assert!(config.always_bypass_permissions);
-        assert_eq!(config.port, 8787);
+        // 書き戻した結果が、そのまま TOML として読み直せること。
+        // ここで `Config`（全キーの読み込み）を使わないのは、それがローカルモードの
+        // 実行ファイル側の型になったため。見たいのは**書いたファイルの中身**なので、
+        // 素の TOML として読むほうが検証としても直接的になる
+        let table: toml::Table = after
+            .parse()
+            .expect("書き戻した結果が TOML として妥当なこと");
+        assert_eq!(table[ALWAYS_BYPASS_KEY].as_bool(), Some(true));
+        assert_eq!(table["port"].as_integer(), Some(8787));
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -224,11 +229,10 @@ stalled_threshold_secs = 120
 
         write_bool(&path, ALWAYS_BYPASS_KEY, true).unwrap();
         let after = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            Config::from_toml_str(&after)
-                .unwrap()
-                .always_bypass_permissions
-        );
+        let table: toml::Table = after
+            .parse()
+            .expect("書き出した結果が TOML として妥当なこと");
+        assert_eq!(table[ALWAYS_BYPASS_KEY].as_bool(), Some(true));
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -251,7 +255,7 @@ stalled_threshold_secs = 120
         let path = temp_file("memory");
         let store = SettingsStore::new(
             path.clone(),
-            &Config::default(),
+            &AgentConfig::default(),
             vec![PermissionMode::new("default")],
             // 対応表はここでは関係ない（画面へ配るだけの値）
             Vec::new(),
