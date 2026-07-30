@@ -125,24 +125,37 @@ export function SessionTile({ cardId }: Props) {
           モードと同じく、**まだ分からない間は何も出さない** — 状態の「不明」と
           並ぶと、どちらが不明なのか読み取れなくなる
         */}
-        {session.model !== null && (
-          <span
-            data-testid="model"
-            data-model={session.model}
-            className="ml-auto max-w-28 shrink-0 truncate rounded border border-border px-1.5 py-0.5 text-[0.7rem] text-muted-foreground"
-            title={session.model}
+        {/*
+          右端へ寄せるのは**入れ物のほう**。個々のバッジに `ml-auto` を付けると、
+          そのバッジが出ないときに寄せ先ごと消えて並びが崩れる。モデルは起動から
+          最初の statusLine までは必ず不明で、`inject_status_line = false` の間は
+          ずっと不明なので、片方だけ出る時間は短くない
+        */}
+        {(session.model !== null || session.permission_mode !== null) && (
+          <div
+            data-testid="tile-badges"
+            className="ml-auto flex min-w-0 items-center gap-2"
           >
-            {modelLabel(session.model, session.model_label)}
-          </span>
-        )}
-        {session.permission_mode !== null && (
-          <span
-            data-testid="permission-mode"
-            data-mode={session.permission_mode}
-            className={`shrink-0 rounded border px-1.5 py-0.5 text-[0.7rem] ${permissionModeTone(session.permission_mode)}`}
-          >
-            {permissionModeLabel(session.permission_mode)}
-          </span>
+            {session.model !== null && (
+              <span
+                data-testid="model"
+                data-model={session.model}
+                className="max-w-28 shrink-0 truncate rounded border border-border px-1.5 py-0.5 text-[0.7rem] text-muted-foreground"
+                title={session.model}
+              >
+                {modelLabel(session.model, session.model_label)}
+              </span>
+            )}
+            {session.permission_mode !== null && (
+              <span
+                data-testid="permission-mode"
+                data-mode={session.permission_mode}
+                className={`shrink-0 rounded border px-1.5 py-0.5 text-[0.7rem] ${permissionModeTone(session.permission_mode)}`}
+              >
+                {permissionModeLabel(session.permission_mode)}
+              </span>
+            )}
+          </div>
         )}
       </div>
 

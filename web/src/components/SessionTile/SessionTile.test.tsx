@@ -177,3 +177,50 @@ describe('SessionTile の権限モード', () => {
     expect(screen.queryByTestId('permission-mode')).not.toBeInTheDocument()
   })
 })
+
+describe('SessionTile のモデル', () => {
+  it('モデルが分かっていれば小窓にも出る', () => {
+    // 要件「切り替えた結果が一覧の小窓にも反映される」の小窓側
+    renderTile(meta({ model: 'claude-opus-5', model_label: 'Opus 5' }))
+
+    const badge = screen.getByTestId('model')
+    expect(badge).toHaveTextContent('Opus 5')
+    expect(badge.dataset.model).toBe('claude-opus-5')
+  })
+
+  it('モデルが分からないうちは何も出さない', () => {
+    renderTile(meta({ model: null }))
+    expect(screen.queryByTestId('model')).not.toBeInTheDocument()
+  })
+
+  it('モデルが不明でも権限モードのバッジは右端に付く', () => {
+    // 寄せる指定を個々のバッジに付けると、そのバッジが出ないときに寄せ先ごと
+    // 消えて並びが崩れる。モデルは起動から最初の statusLine まで必ず不明
+    renderTile(meta({ model: null, permission_mode: 'default' }))
+
+    expect(screen.getByTestId('permission-mode').parentElement).toHaveClass(
+      'ml-auto',
+    )
+  })
+
+  it('両方あるときも同じ入れ物に並ぶ', () => {
+    renderTile(
+      meta({
+        model: 'claude-opus-5',
+        model_label: 'Opus 5',
+        permission_mode: 'default',
+      }),
+    )
+
+    const badges = screen.getByTestId('tile-badges')
+    expect(badges).toHaveClass('ml-auto')
+    expect(badges).toContainElement(screen.getByTestId('model'))
+    expect(badges).toContainElement(screen.getByTestId('permission-mode'))
+  })
+
+  it('どちらも分からなければ入れ物ごと出さない', () => {
+    // 空の要素を残すと、そのぶん余白（gap）が1つ増える
+    renderTile(meta({ model: null, permission_mode: null }))
+    expect(screen.queryByTestId('tile-badges')).not.toBeInTheDocument()
+  })
+})
