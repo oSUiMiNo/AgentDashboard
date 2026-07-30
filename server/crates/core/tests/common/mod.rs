@@ -252,16 +252,21 @@ impl TestServer {
         // **使い捨ての DB を使う。** 既定は `state_dir` の隣＝開発者の本物の状態
         // ディレクトリになるので、指定しないとテストが実環境へ書き込む
         // （`claude_settings_for` と同じ性質の漏れ）
-        let db_dir = std::env::temp_dir().join(format!(
-            "agentdashboard-test-db-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4().simple()
-        ));
-        std::fs::create_dir_all(&db_dir).expect("DB の置き場所を作れること");
-        config.database_url = Some(format!(
-            "sqlite://{}",
-            db_dir.join("dashboard.db").display()
-        ));
+        //
+        // **呼び出し側が指定していればそれを尊重する。** 同じ DB を指した2つのサーバを
+        // 順に立てると「サーバだけ再起動した」状態を作れる（`restart.rs`）
+        if config.database_url.is_none() {
+            let db_dir = std::env::temp_dir().join(format!(
+                "agentdashboard-test-db-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4().simple()
+            ));
+            std::fs::create_dir_all(&db_dir).expect("DB の置き場所を作れること");
+            config.database_url = Some(format!(
+                "sqlite://{}",
+                db_dir.join("dashboard.db").display()
+            ));
+        }
 
         let config = Arc::new(config.clone());
         // 本番（`serve`）と同じく、1つの設定ファイルから両側の射影を作る
