@@ -195,6 +195,11 @@ pub enum ModelSwitchError {
 pub struct RingBuffer {
     buffer: VecDeque<u8>,
     capacity: usize,
+    /// これまでに書き込まれた累計バイト数。**捨てた分も数え続ける**。
+    ///
+    /// [`RingBuffer::len`] は容量で頭打ちになるので、位置の目印には使えない。
+    /// 「この時点より後に届いたものだけを見る」を成り立たせるために持つ。
+    written: u64,
 }
 
 impl RingBuffer {
@@ -202,10 +207,15 @@ impl RingBuffer {
         Self {
             buffer: VecDeque::new(),
             capacity,
+            written: 0,
         }
     }
 
     pub fn push(&mut self, data: &[u8]) {
+        // 捨てるかどうかに関わらず「届いた」ことは数える。先に足しておかないと、
+        // 容量を超える1回の書き込みで数え落とす
+        self.written += data.len() as u64;
+
         if data.len() >= self.capacity {
             // 1回の書き込みだけで容量を超える場合は、末尾の容量分だけを残す
             self.buffer.clear();
@@ -230,6 +240,20 @@ impl RingBuffer {
     pub fn tail(&self, limit: usize) -> Vec<u8> {
         let skip = self.buffer.len().saturating_sub(limit);
         self.buffer.iter().skip(skip).copied().collect()
+    }
+
+    /// いままでに届いた累計バイト数。位置の目印として控えるための値。
+    pub fn written(&self) -> u64 {
+        self.written
+    }
+
+    /// `mark` より後に届いたぶんだけを、多くても `limit` バイト取り出す。
+    ///
+    /// 目印より後の一部が既に捨てられている場合は、残っているものが全部返る
+    /// （残っているバイトはすべて目印より後なので、それで正しい）。
+    pub fn since(&self, mark: u64, limit: usize) -> Vec<u8> {
+        let fresh = self.written.saturating_sub(mark);
+        self.tail(fresh.min(limit as u64) as usize)
     }
 
     pub fn len(&self) -> usize {
@@ -358,6 +382,28 @@ impl Session {
         String::from_utf8_lossy(&payload).into_owned()
     }
 
+    /// いまの位置に目印を打つ。
+    ///
+    /// 「ここから後に届いたものだけを見たい」ときに、先に控えておく値。
+    /// [`Session::scrollback_len`] と違って**捨てた分も数え続ける**ので、
+    /// 時間が経っても位置の比較に使える。
+    pub fn scrollback_mark(&self) -> u64 {
+        self.ring.lock().expect("ロックが壊れていない").written()
+    }
+
+    /// 目印より後に届いた出力だけを覗く。
+    ///
+    /// [`Session::scrollback_tail`] との違いは**過去を巻き込まないこと**。画面の残骸に
+    /// 反応してキーを送る事故（モデル切替の確認ダイアログで実測）を防ぐためにある。
+    pub fn scrollback_since(&self, mark: u64, limit: usize) -> String {
+        let payload = self
+            .ring
+            .lock()
+            .expect("ロックが壊れていない")
+            .since(mark, limit);
+        String::from_utf8_lossy(&payload).into_owned()
+    }
+
     /// いまの権限モード（分かっていれば）。
     pub fn permission_mode(&self) -> Option<PermissionMode> {
         self.meta
@@ -435,8 +481,8 @@ impl Session {
 
     /// モデルの切替を要求する（設計§5 の手順1〜4）。
     ///
-    /// 戻り値は「実際に送ったか」。`false` は**もう目的のモデルだった**という意味で、
-    /// 失敗ではない。
+    /// 戻り値は「どの位置で送ったか」。`None` は**もう目的のモデルだった**という意味で、
+    /// 失敗ではない。返した目印は [`Session::settle_model_switch`] へそのまま渡す。
     ///
     /// # 送る前に画面を確かめる
     ///
@@ -453,21 +499,24 @@ impl Session {
         &self,
         target: &ModelId,
         resolved: Option<&ModelId>,
-    ) -> Result<bool, ModelSwitchError> {
+    ) -> Result<Option<u64>, ModelSwitchError> {
         if self.read_footer_mode().is_none() {
             return Err(ModelSwitchError::Unreadable);
         }
 
         let current = self.meta().model;
         if model::is_already_current(target, resolved, current.as_ref()) {
-            return Ok(false);
+            return Ok(None);
         }
 
+        // **書く直前に目印を打つ。** これより後に届いたものだけが「この切替への反応」で、
+        // 前回の切替で出た確認ダイアログの残骸は目印より前に落ちる
+        let mark = self.scrollback_mark();
         self.send_instruction(&model::switch_command(target))
             .await
             .map_err(|err| ModelSwitchError::Write(format!("{err:#}")))?;
         self.store_model_requested(Some(target.clone()));
-        Ok(true)
+        Ok(Some(mark))
     }
 
     /// 送ったあとの後始末（設計§5 の手順6）。
@@ -479,8 +528,11 @@ impl Session {
     /// 戻り値は「確定したか」。取り消した場合は `false` で、画面は確定値（多くは
     /// 切替前のモデル）に戻る。CLI が拒否したのに切り替わったように見せ続けるより、
     /// 元に戻って「変わらなかった」と分かるほうがよい。
-    pub async fn settle_model_switch(&self) -> bool {
-        self.answer_switch_confirmation().await;
+    ///
+    /// `since` は [`Session::request_model`] が返した目印。確認画面を探す範囲を
+    /// **送ったあとに届いたぶんへ限る**ために要る。
+    pub async fn settle_model_switch(&self, since: u64) -> bool {
+        self.answer_switch_confirmation(since).await;
 
         let deadline = tokio::time::Instant::now() + MODEL_SETTLE;
         while tokio::time::Instant::now() < deadline {
@@ -505,13 +557,20 @@ impl Session {
     /// Enter を送ると、確認が出ていない場合に**入力欄の中身を確定させてしまう**。
     /// 全承認スキップの確認と同じ作法にしてある（[`answer_bypass_notice`]）。
     ///
+    /// # 見るのは「送ったあとに届いたぶん」だけ
+    ///
+    /// ダイアログは切替のたびにスクロールバックへ残る。末尾から探すと、**2回目以降の
+    /// 切替で前回の残骸に一致する**。確認は出ていないので入力欄は空のままで、そこへ
+    /// 送った `1` は**本物の Claude への指示として確定される**（ターンを1回消費し、
+    /// 履歴も汚れる）。目印より後だけを見れば、この経路が塞がる。
+    ///
     /// 確認が出ないほうが普通なので、待たずに帰るのが既定の道筋。
-    async fn answer_switch_confirmation(&self) {
+    async fn answer_switch_confirmation(&self, since: u64) {
         let deadline = tokio::time::Instant::now() + MODEL_CONFIRM_WAIT;
         while tokio::time::Instant::now() < deadline {
             tokio::time::sleep(MODEL_STEP).await;
 
-            let screen = self.scrollback_tail(FOOTER_TAIL);
+            let screen = self.scrollback_since(since, FOOTER_TAIL);
             if !model::looks_like_confirmation(&screen) {
                 continue;
             }
@@ -1244,16 +1303,16 @@ impl SessionManager {
         let _guard = self.claude_settings.lock_switch().await;
 
         let resolved = self.aliases.resolve(target);
-        if !session.request_model(target, resolved.as_ref()).await? {
+        let Some(mark) = session.request_model(target, resolved.as_ref()).await? else {
             // もう目的のモデルだった。送っていないのでグローバル既定も汚れていない
             return Ok(());
-        }
+        };
 
         // 押した手応えを即返す（楽観更新。設計§5）
         self.broadcast_session(session);
 
         // **回復は成否によらず必ず走らせる。** 送った時点でグローバル既定は汚れうる
-        session.settle_model_switch().await;
+        session.settle_model_switch(mark).await;
         // 解決先は**ここで引き直す。** 確定の過程で [`Self::apply_model_report`] が
         // 別名の解決先を覚えている可能性があり、送る前の値より新しい
         let resolved = self.aliases.resolve(target);
@@ -1424,6 +1483,13 @@ async fn coalesce_loop(session: Arc<Session>, chunks: mpsc::Receiver<Vec<u8>>, w
 /// この画面の既定の選択肢は「いいえ（終了する）」とされている。時間で区切って闇雲に
 /// Enter を送ると、**起動したはずのセッションが黙って終了する**。選択肢を読めなければ
 /// 何も送らず、利用者がターミナルビューで答えられる状態のまま残す。
+///
+/// # ここは末尾を見たままでよい
+///
+/// モデル切替の確認（[`Session::answer_switch_confirmation`]）は、残骸に一致して
+/// 誤爆するので目印より後だけを見るようにした。こちらは**起動直後に1回だけ**走り、
+/// その時点でスクロールバックは空なので拾う残骸がそもそも無い。加えてフッタが
+/// 読めた時点で切り上げる片道処理になっている。片方だけ直っているのは意図的。
 async fn answer_bypass_notice(session: Arc<Session>) {
     /// 画面が出るのを待つ上限。本物の CLI は起動に十数秒かかることがある。
     const DEADLINE: Duration = Duration::from_secs(60);
@@ -1498,6 +1564,62 @@ mod tests {
         let ring = RingBuffer::new(16);
         assert!(ring.is_empty());
         assert!(ring.snapshot().is_empty());
+    }
+
+    #[test]
+    fn 目印より後に届いたぶんだけを取り出す() {
+        // モデル切替の確認を探す範囲を限るための土台。ここが崩れると、
+        // 前回の切替で出たダイアログの残骸に反応して端末へキーを送ってしまう
+        let mut ring = RingBuffer::new(64);
+        ring.push(b"Switch model?");
+        let mark = ring.written();
+        ring.push("新しい出力".as_bytes());
+
+        let fresh = ring.since(mark, 64);
+        assert_eq!(fresh, "新しい出力".as_bytes());
+        assert!(
+            !String::from_utf8_lossy(&fresh).contains("Switch model?"),
+            "目印より前は見えてはいけない"
+        );
+    }
+
+    #[test]
+    fn 目印を打った直後は何も返らない() {
+        let mut ring = RingBuffer::new(64);
+        ring.push(b"abcde");
+        let mark = ring.written();
+        assert!(ring.since(mark, 64).is_empty());
+    }
+
+    #[test]
+    fn 目印より後でも上限を超えたぶんは返らない() {
+        let mut ring = RingBuffer::new(64);
+        let mark = ring.written();
+        ring.push(b"123456789");
+        assert_eq!(ring.since(mark, 4), b"6789", "末尾から上限ぶんだけ");
+    }
+
+    #[test]
+    fn 目印より後の一部が捨てられていたら残りが全部返る() {
+        // 目印以降が容量を超えた場合。残っているバイトはすべて目印より後なので、
+        // 全部返すのが正しい（過去を巻き込む心配は無い）
+        let mut ring = RingBuffer::new(4);
+        ring.push(b"ab");
+        let mark = ring.written();
+        ring.push(b"cdefgh");
+
+        assert_eq!(ring.since(mark, 64), b"efgh");
+    }
+
+    #[test]
+    fn 累計は捨てたぶんも数え続ける() {
+        // len() は容量で頭打ちになるので、位置の目印には使えない
+        let mut ring = RingBuffer::new(4);
+        ring.push(b"abcdef");
+        ring.push(b"gh");
+
+        assert_eq!(ring.len(), 4);
+        assert_eq!(ring.written(), 8, "1回で容量を超えた書き込みも数える");
     }
 
     /// 合流結果を順番に集めながら [`coalesce_stream`] を回す。

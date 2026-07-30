@@ -294,6 +294,52 @@ async fn 会話が進んでいると確認に答えてから切り替わる() {
 }
 
 #[tokio::test]
+async fn 前の切替で出た確認の残骸には答えない() {
+    // **端末へ余計なものを送らないための1本。** 確認ダイアログはスクロールバックへ
+    // 残り続けるので、末尾から探すと2回目以降の切替で残骸に一致する。確認は出て
+    // いないので入力欄は空のままで、そこへ送った `1` は**本物への指示として確定される**。
+    let (_path, server) =
+        common::server_with_fake_global("stale-confirm", GLOBAL, refresh_config()).await;
+    let manager = &server.manager;
+    let (session, mut watcher) = common::start_session(manager).await;
+    common::wait_for_model(&session, "claude-fable-5[1m]").await;
+
+    // 1回切り替えて、確認ダイアログをスクロールバックへ残す
+    common::send_line(&session, "こんにちは");
+    watcher
+        .wait_for(&format!(
+            "{}こんにちは",
+            testkit::fake_claude::RECEIVED_PREFIX
+        ))
+        .await;
+    manager
+        .switch_model(&session, &ModelId::new("haiku"))
+        .await
+        .expect("確認に答えて切り替えられること");
+    common::wait_for_model(&session, "claude-haiku-4-5-20251001").await;
+    watcher.wait_for("Switch model?").await;
+
+    // ここから「送ったが確認は出なかった」場面を作る。擬似 claude は会話が進んで
+    // いる限り毎回ダイアログを出すので通しの経路では作れず、`switch_model` が
+    // 送信後に行うことだけを取り出して呼ぶ
+    let mark = session.scrollback_mark();
+    session.settle_model_switch(mark).await;
+
+    // 番号待ちでないときに `1` が届けば、擬似 claude は普通の入力として echo する。
+    // 直す前のコードなら、ここに必ず現れる
+    watcher
+        .drain_quiet_for(std::time::Duration::from_millis(300))
+        .await;
+    assert!(
+        !watcher
+            .seen()
+            .contains(&format!("{}1", testkit::fake_claude::RECEIVED_PREFIX)),
+        "残骸に反応して端末へ 1 を送ってはいけない。実際の画面:\n{}",
+        watcher.seen()
+    );
+}
+
+#[tokio::test]
 async fn 表に無いモデルを指定しても運べる() {
     // 列挙型にしなかった理由そのもの。利用者が端末でフルIDを打つ場面も同じ経路
     let (_path, server) =
