@@ -37,6 +37,7 @@ dependencies = [
 name = "agentdashboard-core"
 version = "0.1.0"
 dependencies = [
+ "agent-core",
  "anyhow",
  "axum",
  "bytes",

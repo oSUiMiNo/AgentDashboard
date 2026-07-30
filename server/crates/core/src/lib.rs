@@ -7,28 +7,22 @@
 //! こうしているのは、統合テストからサーバの組み立てをそのまま呼べるようにするため
 //! （バイナリだけのクレートは `tests/` から参照できない）。
 
-pub mod claude_settings;
-pub mod config;
 pub mod embed;
-pub mod hook_post;
-pub mod hooks;
-pub mod jsonfile;
-pub mod model_aliases;
-pub mod model_catalog;
-pub mod model_post;
-pub mod parser;
-pub mod selfheal;
-pub mod session;
-pub mod settings;
-pub mod state;
-pub mod transcript;
 pub mod ws;
+
+// PC 側の一式は [`agent_core`] へ移った（セルフホスト化フェーズ1）。ここで名前を
+// 出し直しているのは、既存の呼び出し側（実行ファイル・統合テスト）を1つのコミットで
+// 全部書き換えずに済ませるため。**移設が済んだら外す**。
+pub use agent_core::{
+    claude_settings, config, hook_post, hooks, jsonfile, model_aliases, model_catalog, model_post,
+    parser, selfheal, session, settings, state, transcript,
+};
 
 use axum::{
     Router,
     http::{StatusCode, Uri, header},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::get,
 };
 use config::Config;
 use session::SessionManager;
@@ -38,7 +32,15 @@ use std::{net::Ipv4Addr, sync::Arc};
 ///
 /// 口は3つだけ。`/ws` が WebSocket、`/api/*` がブラウザ向けのスナップショット、
 /// `/hook/*` がフックからの通知（設計§7）。残りはすべて同梱した web アセットの配信にまわる。
+///
+/// # 2つのルータを合成している
+///
+/// ブラウザ向け（この関数）とフック受信（[`agent_core::hooks::routes`]）は**別々に
+/// 組み立ててから合わせる**。フックの宛先はどちらのモードでも「エージェントの
+/// 127.0.0.1」で、セルフホストモードでは別プロセスの別ポートになる（セルフホスト化
+/// 設計§5-3）。いまは同じポートに同居しているが、分けられる形にしておく。
 pub fn build_router(state: ws::AppState) -> Router {
+    let manager = Arc::clone(&state.manager);
     Router::new()
         .route("/ws", get(ws::ws_handler))
         .route("/api/sessions", get(ws::api_sessions))
@@ -51,11 +53,9 @@ pub fn build_router(state: ws::AppState) -> Router {
             "/api/settings",
             get(ws::api_settings).put(ws::api_update_settings),
         )
-        .route("/hook/{token}/{event}", post(hooks::receive))
-        // 注入した statusLine がいまのモデルを知らせてくる（設計§4）
-        .route("/model/{token}", post(hooks::receive_model))
         .fallback(get(static_handler))
         .with_state(state)
+        .merge(hooks::routes(manager))
 }
 
 /// 設定からサーバ一式を組み立てて起動する。

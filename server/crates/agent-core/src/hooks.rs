@@ -18,18 +18,43 @@
 //!   ダッシュボードが 4xx を返してログを汚すようなことにはしない
 
 use crate::{
+    session::SessionManager,
     state::{HookEvent, HookInput},
-    ws::AppState,
 };
 use axum::{
+    Router,
     extract::{Path, State},
     http::StatusCode,
+    routing::post,
 };
 use serde_json::Value;
+use std::sync::Arc;
+
+/// 受信口が必要とするもの。**ブラウザ向けの状態（`AppState`）とは別に持つ。**
+///
+/// フックの宛先はどちらのモードでも「エージェントの 127.0.0.1」であり（設計§7）、
+/// セルフホストモードではサーバ側の待ち受けとは**別のプロセス・別のポート**になる
+/// （設計§5-3）。ここがブラウザ配信側の状態に相乗りしていると、その分離ができない。
+#[derive(Clone)]
+pub struct HookState {
+    pub manager: Arc<SessionManager>,
+}
+
+/// フックと `statusLine` の受信口をまとめたルータ。
+///
+/// ローカルモードではブラウザ向けのルータと同じポートへ合成され（`agentdashboard_core`）、
+/// セルフホストモードではエージェント自身のポートで単独に立つ（フェーズ3）。
+pub fn routes(manager: Arc<SessionManager>) -> Router {
+    Router::new()
+        .route("/hook/{token}/{event}", post(receive))
+        // 注入した statusLine がいまのモデルを知らせてくる（設計§4）
+        .route("/model/{token}", post(receive_model))
+        .with_state(HookState { manager })
+}
 
 /// `POST /hook/{token}/{event}` の受け口。
 pub async fn receive(
-    State(state): State<AppState>,
+    State(state): State<HookState>,
     Path((token, event)): Path<(String, String)>,
     body: String,
 ) -> StatusCode {
@@ -68,7 +93,7 @@ pub async fn receive(
 /// `refreshInterval` の周期で届くので、毎回カードを送り直すとセッション数だけ無駄が
 /// 積み上がる。値が動いたときだけ配信する（フックの `permission_mode` と同じ判断）。
 pub async fn receive_model(
-    State(state): State<AppState>,
+    State(state): State<HookState>,
     Path(token): Path<String>,
     body: String,
 ) -> StatusCode {

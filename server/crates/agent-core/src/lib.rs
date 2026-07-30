@@ -1,8 +1,9 @@
 //! PC 側（エージェント）のロジック一式（セルフホスト化設計§2-1）。
 //!
-//! セッションの起動と管理・フックの受信・状態の導出・トランスクリプトのパース・自己修復
+//! セッションの起動と管理（[`session`]）、フックの受信（[`hooks`]）、状態の導出
+//! （[`state`]）、トランスクリプトのパース（[`parser`]）、自己修復（[`selfheal`]）
 //! ——つまり**利用者の PC にあるもの**（本物の CLI・PTY・`~/.claude`・プロジェクトの
-//! ファイル）に触る仕事は、すべてこちら側に置く。
+//! ファイル）に触る仕事は、すべてこちら側にある。
 //!
 //! # なぜ crate を分けるのか
 //!
@@ -11,6 +12,23 @@
 //! 「サーバ側が PTY に触る」ような依存の逆流を**コンパイラに止めさせる**ため。
 //! 境界が守られていることは `crates/core/tests/dependencies.rs` が機械で検査する。
 //!
-//! フェーズ1（crate 再編成）の時点では中身の移設はまだ行っていない。
+//! # サーバ側との繋ぎ方
+//!
+//! ブラウザへ配信するのはサーバ側（`server-core`）の仕事で、こちらはそこを知らない。
+//! ローカルモードでは両者を [`agentdashboard_core`] が同じプロセスで束ね、
+//! セルフホストモードでは同じ境界の向こうが A2S 越しのサーバに変わる（フェーズ3）。
 
-// 移設はフェーズ1 の後続コミットで行う（計画.md フェーズ1）。
+pub mod claude_settings;
+pub mod config;
+pub mod hook_post;
+pub mod hooks;
+pub mod jsonfile;
+pub mod model_aliases;
+pub mod model_catalog;
+pub mod model_post;
+pub mod parser;
+pub mod selfheal;
+pub mod session;
+pub mod settings;
+pub mod state;
+pub mod transcript;
