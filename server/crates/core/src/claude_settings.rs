@@ -178,20 +178,27 @@ impl ClaudeSettings {
     ///
     /// # 判断
     ///
-    /// > グローバル既定が、**ダッシュボードが直近に切り替えた値**と一致していたら、
+    /// > グローバル既定が、**ダッシュボードが直近に切り替えた値で説明が付く**なら、
     /// > こちらが起こした汚染とみなして覚えている値へ戻す。
-    /// > 一致しなければ**利用者が自分で変えたもの**とみなし、戻さずに覚え直す。
+    /// > 説明が付かなければ**利用者が自分で変えたもの**とみなし、戻さずに覚え直す。
     ///
     /// この区別が要るのは、**利用者が意図して変えた既定をダッシュボードが勝手に
     /// 取り消してはいけない**から。稀に「利用者の変更先」と「こちらの切替先」が偶然
     /// 一致して誤って戻すことがあるが、そのときは覚え直しの経路に乗るので次で追いつく。
     ///
+    /// # 「説明が付く」は厳密一致ではない
+    ///
+    /// CLI は送った別名をそのまま保存するとは限らない（`opus` → `opus[1m]` を実測。
+    /// 設計§11）。**厳密一致で見ると、正規化された値を「利用者が変えたもの」と
+    /// 読み違えて汚染を採用してしまう。** 何を説明が付くとみなすかは
+    /// [`explains_pollution`] にまとめてある。`resolved` は送った別名の解決先で、
+    /// [`crate::model_aliases::ModelAliases::resolve`] から渡す。
+    ///
     /// # 戻した値がそのまま残るとは限らない
     ///
-    /// 起動に伴って CLI が綴りを正規化することがある（`opus` → `opus[1m]` を実測。
-    /// 設計§11）。意味は同じなので追いかけない。「戻したのに一致しない」を異常として
-    /// 扱わないこと。
-    pub fn recover(&self, switched_to: &ModelId) -> Recovery {
+    /// 戻したあとにも同じ正規化が起きる。意味は同じなので追いかけない。
+    /// 「戻したのに一致しない」を異常として扱わないこと。
+    pub fn recover(&self, switched_to: &ModelId, resolved: Option<&ModelId>) -> Recovery {
         // 回復に失敗している間は**読みに行かない**。[`Self::refresh_default`] と揃える。
         // ここだけ読むと、隔離したはずの汚れた値を「利用者が変えた」として取り込む
         if self.is_broken() {
@@ -204,12 +211,16 @@ impl ClaudeSettings {
             Err(reason) => return Recovery::Skipped { reason },
         };
 
-        if current.as_ref() != Some(switched_to) {
-            // 利用者が自分で変えた（あるいはそもそも保存されなかった）
+        let restore_to = self.remembered_default();
+        // 覚えている値のままなら、戻すことも覚え直すことも無い。
+        // **汚染かどうかを判断する前に片付く**ので、以降の分岐は「動いた」場合だけを見る
+        if current == restore_to {
+            return Recovery::Clean;
+        }
+
+        if !explains_pollution(current.as_ref(), switched_to, resolved) {
+            // 利用者が自分で変えた
             let mut state = self.state.lock().expect("ロックが壊れていない");
-            if current == state.default_model {
-                return Recovery::Clean;
-            }
             tracing::info!(
                 path = %self.path.display(),
                 "グローバル既定が利用者によって変わっていたので、新しい既定として覚えます: {:?} -> {:?}",
@@ -220,13 +231,6 @@ impl ClaudeSettings {
             state.loaded = true;
             return Recovery::Adopted { model: current };
         }
-
-        let restore_to = self
-            .state
-            .lock()
-            .expect("ロックが壊れていない")
-            .default_model
-            .clone();
 
         // **書く前の値をログに残す。** 事故が起きたときに手で戻せるようにする（設計§9）
         tracing::info!(
@@ -293,6 +297,49 @@ impl Drop for SwitchGuard<'_> {
             .switching
             .store(false, std::sync::atomic::Ordering::SeqCst);
     }
+}
+
+/// ファイルにある値が、こちらの切替で説明が付くか（設計§6 の回復の判断）。
+///
+/// 説明が付くとみなすのは次の3つ。**厳密一致だけを見てはいけない。**
+///
+/// | 形 | 例 | なぜ |
+/// |---|---|---|
+/// | 送った別名と同じ | `opus` ← `opus` | いちばん普通の姿 |
+/// | 送った別名の解決先 | `claude-opus-5` ← `opus` | CLI がフルIDで保存した場合 |
+/// | キーが消えた＋送ったのが `default` | なし ← `default` | 指定を消す操作なので、消えるのが正しい |
+///
+/// 比べるのは**角括弧より前**だけ。CLI が `opus` を `opus[1m]` へ正規化して保存する
+/// のを実測しており（設計§11）、そのまま比べると一致しない。
+///
+/// # 迷ったら「説明が付く」側へ倒す
+///
+/// 汚染を利用者の既定として採用すると、**元の値がファイルからもメモリからも消える**。
+/// 誤って戻した場合は覚え直しの経路で次の切替に追いつくので、損害が非対称である。
+fn explains_pollution(
+    current: Option<&ModelId>,
+    switched_to: &ModelId,
+    resolved: Option<&ModelId>,
+) -> bool {
+    let Some(current) = current else {
+        // キーごと消えている。指定を消す操作を送ったときだけ、こちらの仕業と言える
+        return switched_to.as_str() == ModelId::DEFAULT;
+    };
+    same_model(current, switched_to)
+        || resolved.is_some_and(|resolved| same_model(current, resolved))
+}
+
+/// 綴りの違いを無視して同じモデルを指しているか。
+fn same_model(left: &ModelId, right: &ModelId) -> bool {
+    base_name(left) == base_name(right)
+}
+
+/// 角括弧の修飾（`[1m]` など）を落とした部分。
+fn base_name(model: &ModelId) -> &str {
+    model
+        .as_str()
+        .split_once('[')
+        .map_or(model.as_str(), |(base, _)| base)
 }
 
 /// トップレベルの文字列キーを差し替える。`value` が `None` ならキーごと消す。
@@ -440,16 +487,32 @@ fn skip_whitespace(bytes: &[u8], from: usize) -> usize {
 }
 
 /// キー1つ分を、前後どちらかのカンマごと取り除く。
+///
+/// # 行を占めているなら行ごと消す
+///
+/// 手前の改行とインデントを残すと、**空白だけの行が1本残る**。元々 `model` キーを
+/// 持たない利用者は切替のたびに「挿す→消す」を繰り返すので、そのままだと
+/// **切替1回につき1行ずつファイルが伸びていく**。「触らなかったバイトは1つも
+/// 動かない」という約束は、消したあとの形にも掛かっている。
 fn remove_span(text: &str, span: &KeySpan) -> String {
     let bytes = text.as_bytes();
 
     // 後ろにカンマがあればそれごと消す（残ると `,}` になって壊れる）
     let after = skip_whitespace(bytes, span.value_end);
     if after < bytes.len() && bytes[after] == b',' {
-        let mut out = String::with_capacity(text.len());
-        out.push_str(&text[..span.key_start]);
-        out.push_str(text[after + 1..].trim_start_matches([' ', '\t']));
-        return out;
+        let end = after + 1;
+        return match whole_line(bytes, span.key_start, end) {
+            // 行ごと消す。**残りには手を付けない** — 次の行のインデントは
+            // その行のものであって、消したキーの後始末ではない
+            Some((start, end)) => format!("{}{}", &text[..start], &text[end..]),
+            // 1行に複数のキーが並ぶ書式。行ごと消すと巻き添えになるので、
+            // キーからカンマまでを抜いて、詰まった先頭の空白だけ落とす
+            None => format!(
+                "{}{}",
+                &text[..span.key_start],
+                text[end..].trim_start_matches([' ', '\t'])
+            ),
+        };
     }
 
     // 最後の要素だった。前のカンマを消す
@@ -458,12 +521,41 @@ fn remove_span(text: &str, span: &KeySpan) -> String {
         before -= 1;
     }
     if before > 0 && bytes[before - 1] == b',' {
-        before -= 1;
+        return format!("{}{}", &text[..before - 1], &text[span.value_end..]);
     }
-    let mut out = String::with_capacity(text.len());
-    out.push_str(&text[..before]);
-    out.push_str(&text[span.value_end..]);
-    out
+
+    // 手前にカンマが無い＝これが唯一のキーだった。**中身の空白ごと落として `{}` に戻す。**
+    // ここを残すと、空のオブジェクトでも「挿す→消す」のたびに改行が1つずつ増える
+    let rest = skip_whitespace(bytes, span.value_end);
+    format!("{}{}", &text[..before], &text[rest..])
+}
+
+/// キーが自分の行を占めているなら、消すべき範囲を「手前のインデントから行末の改行まで」で返す。
+///
+/// 占めていない（同じ行に他のキーがある）ときは `None`。
+fn whole_line(bytes: &[u8], key_start: usize, entry_end: usize) -> Option<(usize, usize)> {
+    let line_start = bytes[..key_start]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |at| at + 1);
+    // 行頭からキーまでがインデントだけであること
+    if !bytes[line_start..key_start]
+        .iter()
+        .all(|byte| matches!(byte, b' ' | b'\t'))
+    {
+        return None;
+    }
+    // 行末までに他の中身が無いこと
+    let mut end = entry_end;
+    while end < bytes.len() && matches!(bytes[end], b' ' | b'\t') {
+        end += 1;
+    }
+    if end < bytes.len() && bytes[end] == b'\n' {
+        end += 1;
+    } else if end < bytes.len() {
+        return None;
+    }
+    Some((line_start, end))
 }
 
 /// トップレベルの先頭へキーを1つ挿す。
@@ -609,6 +701,121 @@ mod tests {
         assert_eq!(model_of(&updated).as_deref(), Some(r#"変な"値\"#));
     }
 
+    #[test]
+    fn 挿してから消すと元のバイト列に戻る() {
+        // 元から `model` を持たない利用者は、切替のたびに「挿す→消す」を繰り返す。
+        // 1バイトでもずれると、それが切替の回数だけ積み上がる
+        for original in [
+            "{\n  \"effortLevel\": \"xhigh\"\n}\n",
+            "{\n  \"a\": 1,\n  \"b\": 2\n}\n",
+            "{}",
+        ] {
+            let inserted = set_top_level_string(original, "model", Some("sonnet")).unwrap();
+            let removed = set_top_level_string(&inserted, "model", None).unwrap();
+            assert_eq!(removed, original, "挿し込み後: {inserted:?}");
+        }
+    }
+
+    #[test]
+    fn 挿す消すを繰り返してもファイルが伸びない() {
+        // 空白だけの行が1本ずつ増えていくのが、この不具合の見え方だった
+        for original in ["{\n  \"effortLevel\": \"xhigh\"\n}\n", "{}", "{\"a\":1}"] {
+            let mut text = original.to_string();
+            let mut lengths = Vec::new();
+            for _ in 0..3 {
+                text = set_top_level_string(&text, "model", Some("sonnet")).unwrap();
+                text = set_top_level_string(&text, "model", None).unwrap();
+                lengths.push(text.len());
+            }
+            assert!(
+                lengths.windows(2).all(|pair| pair[0] == pair[1]),
+                "{original:?} で伸びた: {lengths:?}\n{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn 一行に詰めた書式では隣のキーを巻き込まない() {
+        // 行ごと消してよいのは、キーがその行を占めているときだけ
+        let text = r#"{"a": 1, "model": "opus", "b": 2}"#;
+        let updated = set_top_level_string(text, "model", None).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&updated).unwrap();
+        assert!(parsed.get("model").is_none(), "実際: {updated}");
+        assert_eq!(parsed["a"], 1);
+        assert_eq!(parsed["b"], 2);
+    }
+
+    #[test]
+    fn 消したあとに空白だけの行が残らない() {
+        for text in [
+            SAMPLE,
+            "{\n  \"model\": \"opus\",\n  \"a\": 1\n}\n",
+            "{\n  \"a\": 1,\n  \"model\": \"opus\"\n}\n",
+        ] {
+            let updated = set_top_level_string(text, "model", None).unwrap();
+            serde_json::from_str::<serde_json::Value>(&updated)
+                .unwrap_or_else(|err| panic!("JSON として読めること: {err}\n{updated}"));
+            assert!(
+                !updated
+                    .lines()
+                    .any(|line| line.trim().is_empty() && !line.is_empty()),
+                "空白だけの行が残った: {updated:?}"
+            );
+        }
+    }
+
+    // ---- 汚染の判定（A-2）--------------------------------------------------------
+
+    #[test]
+    fn 正規化された綴りも自分の汚染として見分ける() {
+        // CLI は送った別名をそのまま保存するとは限らない（設計§11）。
+        // ここを厳密一致で見ると、汚染を「利用者が変えたもの」として採用してしまう
+        let sent = ModelId::new("opus");
+        assert!(explains_pollution(
+            Some(&ModelId::new("opus[1m]")),
+            &sent,
+            None
+        ));
+        assert!(explains_pollution(Some(&ModelId::new("opus")), &sent, None));
+        // 逆向き（修飾付きを送って、修飾なしで保存された）も同じ
+        assert!(explains_pollution(
+            Some(&ModelId::new("opus")),
+            &ModelId::new("opus[1m]"),
+            None
+        ));
+    }
+
+    #[test]
+    fn フルIDで保存されていても自分の汚染として見分ける() {
+        assert!(explains_pollution(
+            Some(&ModelId::new("claude-opus-5")),
+            &ModelId::new("opus"),
+            Some(&ModelId::new("claude-opus-5")),
+        ));
+        // 解決先を覚えていなければ言い当てられない。**そのときは覚え直す側へ落ちる**
+        assert!(!explains_pollution(
+            Some(&ModelId::new("claude-opus-5")),
+            &ModelId::new("opus"),
+            None,
+        ));
+    }
+
+    #[test]
+    fn 指定を消す切替ではキーが消えるのが正しい姿() {
+        assert!(explains_pollution(None, &ModelId::new("default"), None));
+        // 別のモデルを送ったのにキーが消えたなら、それは利用者の操作
+        assert!(!explains_pollution(None, &ModelId::new("opus"), None));
+    }
+
+    #[test]
+    fn 別のモデルへ変わっていたら自分の汚染とはみなさない() {
+        assert!(!explains_pollution(
+            Some(&ModelId::new("opus[1m]")),
+            &ModelId::new("sonnet"),
+            Some(&ModelId::new("claude-sonnet-5")),
+        ));
+    }
+
     // ---- ファイルを相手にする側 ------------------------------------------------
 
     /// 既存の `settings.rs` のテストと同じ作法。依存を増やさない。
@@ -640,9 +847,72 @@ mod tests {
         // CLI が /model sonnet で汚した状態を作る
         store.write_model(Some(&ModelId::new("sonnet"))).unwrap();
 
-        let outcome = store.recover(&ModelId::new("sonnet"));
+        let outcome = store.recover(&ModelId::new("sonnet"), None);
         assert_eq!(
             outcome,
+            Recovery::Restored {
+                to: Some(ModelId::new("claude-fable-5[1m]"))
+            }
+        );
+        assert_eq!(
+            store.read_model().unwrap(),
+            Some(ModelId::new("claude-fable-5[1m]"))
+        );
+    }
+
+    #[test]
+    fn cliが正規化して保存しても覚えている値へ戻す() {
+        // **A-2。** 送った別名と保存された綴りが違うだけで「利用者が変えた」と読み違えると、
+        // 汚染をそのまま新しい既定として採用し、以後すべての新規セッションへ注入し続ける
+        let (_dir, store) = temp_settings("normalized", SAMPLE);
+        store.refresh_default();
+
+        // /model opus を送ったら opus[1m] で保存された（設計§11 で実測した形）
+        store.write_model(Some(&ModelId::new("opus[1m]"))).unwrap();
+
+        assert_eq!(
+            store.recover(&ModelId::new("opus"), None),
+            Recovery::Restored {
+                to: Some(ModelId::new("claude-fable-5[1m]"))
+            }
+        );
+        assert_eq!(
+            store.read_model().unwrap(),
+            Some(ModelId::new("claude-fable-5[1m]"))
+        );
+        assert_eq!(
+            store.remembered_default(),
+            Some(ModelId::new("claude-fable-5[1m]")),
+            "汚れた値を利用者の既定として覚えてはいけない"
+        );
+    }
+
+    #[test]
+    fn フルidで保存されていても覚えている値へ戻す() {
+        let (_dir, store) = temp_settings("fullid", SAMPLE);
+        store.refresh_default();
+        store
+            .write_model(Some(&ModelId::new("claude-opus-5")))
+            .unwrap();
+
+        assert_eq!(
+            store.recover(&ModelId::new("opus"), Some(&ModelId::new("claude-opus-5"))),
+            Recovery::Restored {
+                to: Some(ModelId::new("claude-fable-5[1m]"))
+            }
+        );
+    }
+
+    #[test]
+    fn 指定を消す切替でキーが消えても覚えている値へ戻す() {
+        // `default` は「指定を消してアカウントの既定へ」なので、キーが消えるのが正しい姿。
+        // これを利用者の操作と読むと、利用者の既定が消えたまま覚え直されてしまう
+        let (_dir, store) = temp_settings("default-switch", SAMPLE);
+        store.refresh_default();
+        store.write_model(None).unwrap();
+
+        assert_eq!(
+            store.recover(&ModelId::new(ModelId::DEFAULT), None),
             Recovery::Restored {
                 to: Some(ModelId::new("claude-fable-5[1m]"))
             }
@@ -662,7 +932,7 @@ mod tests {
         // 利用者が自分のターミナルで opus にした
         store.write_model(Some(&ModelId::new("opus"))).unwrap();
 
-        let outcome = store.recover(&ModelId::new("sonnet"));
+        let outcome = store.recover(&ModelId::new("sonnet"), None);
         assert_eq!(
             outcome,
             Recovery::Adopted {
@@ -680,7 +950,7 @@ mod tests {
 
         store.write_model(Some(&ModelId::new("sonnet"))).unwrap();
         assert_eq!(
-            store.recover(&ModelId::new("sonnet")),
+            store.recover(&ModelId::new("sonnet"), None),
             Recovery::Restored { to: None }
         );
         assert_eq!(store.read_model().unwrap(), None);
@@ -699,7 +969,7 @@ mod tests {
 
         assert_eq!(store.refresh_default(), None);
         assert!(matches!(
-            store.recover(&ModelId::new("sonnet")),
+            store.recover(&ModelId::new("sonnet"), None),
             Recovery::Skipped { .. }
         ));
         assert!(!path.exists(), "利用者の設定ファイルを生やしてはいけない");
@@ -710,7 +980,7 @@ mod tests {
         let (_dir, store) = temp_settings("broken", "{ これは JSON ではない");
         assert_eq!(store.refresh_default(), None);
         assert!(matches!(
-            store.recover(&ModelId::new("sonnet")),
+            store.recover(&ModelId::new("sonnet"), None),
             Recovery::Skipped { .. }
         ));
         assert_eq!(
@@ -724,7 +994,10 @@ mod tests {
     fn 汚れていなければ何もしない() {
         let (_dir, store) = temp_settings("clean", SAMPLE);
         store.refresh_default();
-        assert_eq!(store.recover(&ModelId::new("sonnet")), Recovery::Clean);
+        assert_eq!(
+            store.recover(&ModelId::new("sonnet"), None),
+            Recovery::Clean
+        );
     }
 
     #[test]
@@ -744,7 +1017,7 @@ mod tests {
         perms.set_mode(0o400);
         std::fs::set_permissions(&path, perms).unwrap();
 
-        let outcome = store.recover(&ModelId::new("sonnet"));
+        let outcome = store.recover(&ModelId::new("sonnet"), None);
 
         let mut perms = std::fs::metadata(&path).unwrap().permissions();
         perms.set_mode(0o600);
@@ -795,7 +1068,7 @@ mod tests {
                 cli_saves(&store, "sonnet");
                 // 相手に割り込む隙を与える。ロックが効いていればここでは入れない
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                store.recover(&ModelId::new("sonnet"))
+                store.recover(&ModelId::new("sonnet"), None)
             })
         };
         let b = {
@@ -804,7 +1077,7 @@ mod tests {
                 let _guard = store.lock_switch().await;
                 cli_saves(&store, "haiku");
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                store.recover(&ModelId::new("haiku"))
+                store.recover(&ModelId::new("haiku"), None)
             })
         };
         let (first, second) = tokio::join!(a, b);
@@ -849,7 +1122,7 @@ mod tests {
             let _guard = store.lock_switch().await;
             cli_saves(&store, model);
             assert_eq!(
-                store.recover(&ModelId::new(model)),
+                store.recover(&ModelId::new(model), None),
                 Recovery::Restored {
                     to: Some(ModelId::new("claude-fable-5[1m]"))
                 }
@@ -895,7 +1168,7 @@ mod tests {
 
         cli_saves(&store, "sonnet");
         assert!(matches!(
-            store.recover(&ModelId::new("haiku")),
+            store.recover(&ModelId::new("haiku"), None),
             Recovery::Skipped { .. }
         ));
         assert_eq!(

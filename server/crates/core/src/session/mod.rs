@@ -1254,7 +1254,10 @@ impl SessionManager {
 
         // **回復は成否によらず必ず走らせる。** 送った時点でグローバル既定は汚れうる
         session.settle_model_switch().await;
-        let outcome = self.claude_settings.recover(target);
+        // 解決先は**ここで引き直す。** 確定の過程で [`Self::apply_model_report`] が
+        // 別名の解決先を覚えている可能性があり、送る前の値より新しい
+        let resolved = self.aliases.resolve(target);
+        let outcome = self.claude_settings.recover(target, resolved.as_ref());
         tracing::debug!(card_id = %session.card_id, "グローバル既定の回復: {outcome:?}");
 
         self.broadcast_session(session);
