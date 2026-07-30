@@ -67,9 +67,25 @@ pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::R
     let manager = SessionManager::new(Arc::clone(&config));
     tracing::info!("起動する CLI: {}", manager.program());
 
-    // その CLI が受け付ける権限モードを1回だけ読む（設計§3）。`--help` はモデルへ
-    // 問い合わせないのでクォータを使わない。読めなければ既知の表へ落ちる
-    let available_modes = session::permission::supported_modes(manager.program());
+    // 起動している CLI へ問い合わせる2つを、まとめてブロッキング用のスレッドへ逃がす。
+    //
+    // - 受け付ける権限モード（`--help`。設計§3）
+    // - 正式名と通称の対応表（バイナリの走査。設計§13）
+    //
+    // どちらも子プロセスの起動と大きなファイル読みで、**待ち受けを始める前とはいえ
+    // async の上で直接やる仕事ではない**。対応表の走査は版が読めない環境だと
+    // 275MB を頭から読むことがある。なお `--help` も対応表もモデルへ問い合わせないので
+    // クォータは使わない
+    let (available_modes, catalog) = {
+        let program = manager.program().to_string();
+        let state_dir = config.resolved_state_dir();
+        tokio::task::spawn_blocking(move || {
+            let modes = session::permission::supported_modes(&program);
+            let catalog = model_catalog::ModelCatalog::resolve(&program, Some(state_dir));
+            (modes, catalog)
+        })
+        .await?
+    };
     tracing::info!(
         "権限モード: {}",
         available_modes
@@ -78,10 +94,6 @@ pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::R
             .collect::<Vec<_>>()
             .join(", ")
     );
-    // 正式名と通称の対応表を、起動している CLI 自身から取り出す（設計§13）。
-    // 画面の選択肢へ版番号を出すための材料で、**取れなくても何も壊れない**
-    let catalog =
-        model_catalog::ModelCatalog::resolve(manager.program(), Some(config.resolved_state_dir()));
     let settings = Arc::new(settings::SettingsStore::new(
         config_path,
         &config,
@@ -115,6 +127,8 @@ pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::R
         Arc::clone(&parser),
         Arc::clone(&config),
         ops,
+        // 版は対応表を取り出したときに読んである。ここで読み直すと CLI を2回起こす
+        catalog.cli_version().to_string(),
     );
 
     let state = ws::AppState::new(manager, Arc::clone(&config))

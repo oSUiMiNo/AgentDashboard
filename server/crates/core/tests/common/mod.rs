@@ -255,6 +255,10 @@ impl TestServer {
             Arc::clone(server.parser.as_ref().expect("パーサを起動している")),
             Arc::clone(&server.config),
             Some(ops),
+            // 擬似 claude は `--version` に答えないので、本番でもここは空になる。
+            // 空だと別名の表の見直しは起きない（比べる相手が無い）。表の見直しを
+            // 見るテストは `review_model_table` を直接呼んでいる
+            String::new(),
         ));
         tokio::time::sleep(Duration::from_millis(200)).await;
         server

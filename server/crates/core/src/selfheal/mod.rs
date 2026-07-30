@@ -113,11 +113,18 @@ impl Selfheal {
     /// `ops` が `None` のときは検知の通知だけを行う。設計§9 の実行環境の前提
     /// （Docker とダッシュボード自身のソース）が無い環境で、黙って何もしないより、
     /// 「気づいたが直せない」と伝えるほうが利用者は次の手を打てる。
+    ///
+    /// `cli_version` は**呼び出し側が読んで渡す**。ここで読むと、対応表を取り出すときの
+    /// 1回と合わせて起動のたびに CLI を2回起こすことになる。同じプロセスで版が
+    /// 変わるわけがないので、[`crate::model_catalog::ModelCatalog::cli_version`] を回す。
+    /// 読めなかった場合は空文字で、そのときは見直しを起こさない
+    /// （比べる相手が無いので「上がった」と判断できない）。
     pub fn start(
         manager: Arc<SessionManager>,
         parser: Arc<ParserSupervisor>,
         config: Arc<Config>,
         ops: Option<Arc<dyn SelfhealOps>>,
+        cli_version: String,
     ) -> Arc<Self> {
         let state_dir = config.resolved_state_dir();
         let selfheal = Arc::new(Self {
@@ -141,12 +148,11 @@ impl Selfheal {
         // CLI が上がっていたら、モデル別名の表を見直す（設計§14）。
         // **契機は観測ではなくバージョン変化。** 誰も使っていない新しい別名は
         // 観測されないので、観測を待っていると永久に気づけない
-        if selfheal.config.selfheal_enabled && selfheal.ops.is_some() {
-            let version =
-                crate::model_catalog::cli_version(selfheal.manager.program()).unwrap_or_default();
-            if model_table::needs_review(&selfheal.state_dir, &version) {
-                tokio::spawn(review_model_table(Arc::clone(&selfheal), version));
-            }
+        if selfheal.config.selfheal_enabled
+            && selfheal.ops.is_some()
+            && model_table::needs_review(&selfheal.state_dir, &cli_version)
+        {
+            tokio::spawn(review_model_table(Arc::clone(&selfheal), cli_version));
         }
         selfheal
     }

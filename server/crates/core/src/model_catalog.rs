@@ -69,6 +69,12 @@ struct Stored {
 #[derive(Debug, Default)]
 pub struct ModelCatalog {
     models: Vec<CatalogEntry>,
+    /// 取り出したときの CLI の版。**読めなければ空**。
+    ///
+    /// ここで持って回るのは、**同じプロセスで版を2回読む意味が無い**から。
+    /// 自己修復は「CLI が上がったか」を見るのに同じ値を要るが、別々に読むと
+    /// CLI をもう1回起こすことになる（設計§14 の契機はバージョン変化）。
+    cli_version: String,
 }
 
 impl ModelCatalog {
@@ -85,56 +91,97 @@ impl ModelCatalog {
         self.models.is_empty()
     }
 
+    /// 対応表を取り出したときの CLI の版。読めなければ空文字。
+    pub fn cli_version(&self) -> &str {
+        &self.cli_version
+    }
+
     /// 状態ディレクトリのキャッシュを使いつつ、必要なら CLI から取り直す。
     ///
     /// **失敗しても空で返る。** 対応表が無くても切替も表示も動く（別名のラベルが
     /// 出るだけ）ので、ここで起動を止める理由が無い。
+    ///
+    /// 版を読むのはここだけ。取れた値は [`Self::cli_version`] から配る。
     pub fn resolve(program: &str, state_dir: Option<PathBuf>) -> Self {
-        let path = state_dir.map(|dir| dir.join(FILE_NAME));
-        let version = cli_version(program).unwrap_or_default();
+        let cli_version = cli_version(program).unwrap_or_default();
+        let models = load_models(program, state_dir, &cli_version);
+        Self {
+            models,
+            cli_version,
+        }
+    }
+}
 
-        if let Some(path) = path.as_deref() {
-            let cached = jsonfile::load_or_default::<Stored>(path);
-            // バージョンが同じなら取り直さない。ラインナップはそのときしか変わらない
-            if !cached.models.is_empty() && cached.cli_version == version && !version.is_empty() {
+/// 保存してある対応表をそのまま使ってよいか。
+///
+/// | 保存した版 | いま読めた版 | 判断 |
+/// |---|---|---|
+/// | 同じ | — | 使う |
+/// | 違う | 読めた | 取り直す（ラインナップが変わったかもしれない） |
+/// | 何でも | **読めない（空）** | **使う** |
+///
+/// 最後の行が要点。ラッパースクリプト越しに起動している等で `--version` が読めないと、
+/// 版を比べようがない。**比べられないことを理由に毎回275MBを読み直すより、前回の結果を
+/// 使うほうがよい** — 表が古くて困るのは画面のラベルだけで、実際に切り替えれば実測が
+/// 上書きする（設計§12）。
+fn cache_is_usable(cached: &Stored, version: &str) -> bool {
+    if cached.models.is_empty() {
+        return false;
+    }
+    version.is_empty() || cached.cli_version == version
+}
+
+/// キャッシュか CLI のバイナリから対応表を決める。
+fn load_models(program: &str, state_dir: Option<PathBuf>, version: &str) -> Vec<CatalogEntry> {
+    let path = state_dir.map(|dir| dir.join(FILE_NAME));
+
+    if let Some(path) = path.as_deref() {
+        let cached = jsonfile::load_or_default::<Stored>(path);
+        if cache_is_usable(&cached, version) {
+            if version.is_empty() {
+                // 黙って使うと「なぜ古い表が出るのか」を追えなくなる
+                tracing::info!(
+                    "CLI の版を読めないので、保存してあるモデル対応表をそのまま使います（{} 件・保存時 CLI {}）",
+                    cached.models.len(),
+                    cached.cli_version,
+                );
+            } else {
                 tracing::debug!(
                     "モデル対応表をキャッシュから読みました（{} 件・CLI {version}）",
                     cached.models.len()
                 );
-                return Self {
-                    models: cached.models,
-                };
             }
+            return cached.models;
         }
-
-        let Some(binary) = locate(program) else {
-            tracing::debug!("CLI の実体を見つけられないので、モデル対応表は空のままにします");
-            return Self::empty();
-        };
-        let models = extract(&binary);
-        if models.is_empty() {
-            tracing::info!(
-                path = %binary.display(),
-                "CLI からモデル対応表を取り出せませんでした。別名のラベルで表示します"
-            );
-            return Self::empty();
-        }
-
-        tracing::info!(
-            "モデル対応表を {} 件取り出しました（CLI {version}）",
-            models.len()
-        );
-        if let Some(path) = path.as_deref() {
-            jsonfile::save(
-                path,
-                &Stored {
-                    cli_version: version,
-                    models: models.clone(),
-                },
-            );
-        }
-        Self { models }
     }
+
+    let Some(binary) = locate(program) else {
+        tracing::debug!("CLI の実体を見つけられないので、モデル対応表は空のままにします");
+        return Vec::new();
+    };
+    let models = extract(&binary);
+    if models.is_empty() {
+        tracing::info!(
+            path = %binary.display(),
+            "CLI からモデル対応表を取り出せませんでした。別名のラベルで表示します"
+        );
+        return Vec::new();
+    }
+
+    tracing::info!(
+        "モデル対応表を {} 件取り出しました（CLI {version}）",
+        models.len()
+    );
+    if let Some(path) = path.as_deref() {
+        jsonfile::save(
+            path,
+            &Stored {
+                cli_version: version.to_string(),
+                models: models.clone(),
+            },
+        );
+    }
+    models
 }
 
 /// `<program> --version` を1回だけ叩いて版を読む。
@@ -342,5 +389,65 @@ mod tests {
         // 擬似 claude がまさにこれ。空でも切替と表示は動く
         let catalog = ModelCatalog::resolve("sh", None);
         assert!(catalog.is_empty());
+    }
+
+    // ---- キャッシュを使ってよいかの判断 -----------------------------------------
+
+    fn stored(version: &str, count: usize) -> Stored {
+        Stored {
+            cli_version: version.to_string(),
+            models: (0..count)
+                .map(|index| CatalogEntry {
+                    id: format!("claude-model-{index}"),
+                    family: "model".to_string(),
+                    display_name: format!("Model {index}"),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn 版が同じならキャッシュを使う() {
+        assert!(cache_is_usable(&stored("2.1.220", 3), "2.1.220"));
+    }
+
+    #[test]
+    fn 版が違えば取り直す() {
+        // ラインナップが変わるのはバージョンが上がったときだけ（設計§13）
+        assert!(!cache_is_usable(&stored("2.1.220", 3), "2.2.0"));
+    }
+
+    #[test]
+    fn 版が読めないときはキャッシュを使う() {
+        // **比べられないことを理由に毎回275MBを読み直さない。**
+        // ラッパースクリプト越しだと `--version` が読めず、以前はここで必ず走査していた
+        assert!(cache_is_usable(&stored("2.1.220", 3), ""));
+        assert!(cache_is_usable(&stored("", 3), ""));
+    }
+
+    #[test]
+    fn 表が空ならキャッシュを使わない() {
+        // 「取れなかった」を覚え込んで永久に空を返し続けてはいけない
+        assert!(!cache_is_usable(&stored("2.1.220", 0), "2.1.220"));
+        assert!(!cache_is_usable(&stored("", 0), ""));
+    }
+
+    #[test]
+    fn 版が読めなくてもキャッシュがあれば走査せずに返る() {
+        // 実体を見つけられない実行ファイル＝走査は絶対にできない。それでも表が返るなら、
+        // キャッシュだけで済ませたことになる
+        let dir = std::env::temp_dir().join(format!(
+            "agentdashboard-catalog-cache-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("一時ディレクトリを作れること");
+        crate::jsonfile::save(&dir.join(FILE_NAME), &stored("2.1.220", 2));
+
+        let catalog = ModelCatalog::resolve("この名前の実行ファイルは無い", Some(dir.clone()));
+
+        assert_eq!(catalog.models().len(), 2, "実際: {:?}", catalog.models());
+        assert_eq!(catalog.cli_version(), "", "版は読めていないこと");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
