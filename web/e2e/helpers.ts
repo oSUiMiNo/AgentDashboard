@@ -112,11 +112,16 @@ export async function showTranscript(page: Page) {
   await expect(page.getByTestId('session-view')).toHaveAttribute('data-view', 'transcript')
 }
 
-/** 端末へ1行打ち込む。 */
+/**
+ * 端末へ1行打ち込んで送る。
+ *
+ * **送信は Ctrl+Enter**（`lib/keys.ts`）。端末では Enter と Shift+Enter を改行に
+ * 割り当てているので、素の Enter で送ろうとすると改行が入るだけで先へ進まない。
+ */
 export async function typeLine(page: Page, line: string) {
   await page.getByTestId('terminal').click()
   await page.keyboard.type(line)
-  await page.keyboard.press('Enter')
+  await page.keyboard.press('Control+Enter')
 }
 
 /**

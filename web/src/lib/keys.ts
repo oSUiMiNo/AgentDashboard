@@ -1,11 +1,16 @@
 /**
- * ブラウザの端末（[`TerminalPane`]）で、xterm の既定では足りないキーを読み替える。
+ * ブラウザの端末（[`TerminalPane`]）で、Enter まわりのキーを読み替える。
  *
- * # なぜ要るのか
+ * # 何をどう変えているか
  *
- * xterm は Enter に対して Shift を見ておらず、**Shift+Enter でも素の Enter と同じ
- * CR（`\r`）を送る**。受け取る CLI から見れば両者は完全に同じバイト列なので、
- * 区別のしようがない。その結果、改行したいのに送信されてしまう。
+ * | キー | 送る並び | 意味 |
+ * |---|---|---|
+ * | Enter | `ESC CR` | **改行**（既定では送信になってしまう） |
+ * | Shift+Enter | `ESC CR` | 改行（xterm は Shift を見ておらず、素の Enter と同じ CR を送る） |
+ * | Ctrl+Enter | `CR` | **送信** |
+ *
+ * 長い指示を端末へ直に打つことが多いので、**改行を押しやすいキーへ、送信を意図の要る
+ * キーへ**という割り当てにしている（利用者の指定）。
  *
  * # 送る並びは推測ではなく実測
  *
@@ -20,32 +25,42 @@
  * つまり **ESC + CR** を送れば本物は改行として扱う。公式ドキュメントが言う
  * 「Option+Enter で改行」も、Option を Meta として送る＝ESC 前置なので同じ並びになる。
  *
- * なお `Ctrl+J`（0x0A）は読み替え無しでいまも効く。xterm がそのまま送るため。
+ * # 選択ダイアログの確定も Ctrl+Enter になる
+ *
+ * CLI の TUI は「Yes / No」のような選択も Enter で確定する。Enter を改行にした以上、
+ * **その確定も Ctrl+Enter で行うことになる**。押し分けが要るのはこの割り当ての代償で、
+ * 隠さずここに書いておく。
+ *
+ * なお `Ctrl+J`（0x0A）は読み替え無しでいまも改行として効く。xterm がそのまま送るため。
  */
 
-/** Shift+Enter で送る並び（ESC + CR）。 */
-export const SHIFT_ENTER = '\x1b\r'
+/** 改行として送る並び（ESC + CR）。 */
+export const NEWLINE = '\x1b\r'
+
+/** 送信として送る並び（CR）。端末の作法どおり確定は CR。 */
+export const SUBMIT = '\r'
 
 /**
  * 端末へ送る前にキーを読み替える。読み替えが要らなければ `null`。
  *
- * 対象は **keydown の Shift+Enter だけ**に絞る。絞らないと次の事故が起きる。
+ * 対象は **keydown の Enter だけ**に絞る。絞らないと次の事故が起きる。
  *
  * | 除く対象 | 理由 |
  * |---|---|
  * | `keydown` 以外 | 横取りの口は keypress でも呼ばれるので、二重に送ってしまう |
- * | 他の修飾キーが一緒 | Ctrl+Shift+Enter などは別の意味を持ちうる。奪わない |
+ * | Alt / Meta が一緒 | Alt+Enter は端末の作法で既に ESC 前置になる。奪うと二重に前置する |
  * | IME の変換中 | 変換確定の Enter を改行と取り違える（Composer が見ているのと同じ理由） |
  */
 export function terminalKeyOverride(event: KeyboardEvent): string | null {
   if (event.type !== 'keydown' || event.isComposing) {
     return null
   }
-  if (event.key !== 'Enter' || !event.shiftKey) {
+  if (event.key !== 'Enter') {
     return null
   }
-  if (event.altKey || event.ctrlKey || event.metaKey) {
+  if (event.altKey || event.metaKey) {
     return null
   }
-  return SHIFT_ENTER
+  // Shift の有無は改行かどうかに影響しない。押し分けるのは Ctrl だけ
+  return event.ctrlKey ? SUBMIT : NEWLINE
 }

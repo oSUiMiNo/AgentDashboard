@@ -140,7 +140,8 @@ export function TerminalPane({ cardId }: Props) {
       },
     )
 
-    // xterm が送るバイト列では足りないキーを読み替える（[`terminalKeyOverride`]）。
+    // Enter まわりを読み替える（[`terminalKeyOverride`]）。
+    // Enter と Shift+Enter は改行、Ctrl+Enter が送信になる。
     //
     // **`term.input` を通すのが要点。** ここで `sendPtyInput` を直に呼ぶと送信口が
     // 2つになり、片方だけ直して片方が取り残される形の不具合を作る

@@ -41,23 +41,27 @@ test('セッションを起動してブラウザのターミナルから操作�
   await expect(page.getByText('終了', { exact: true }).first()).toBeVisible()
 })
 
-test('Shift+Enter は送信せずに改行する', async ({ page }) => {
-  // xterm は Enter に Shift を見ておらず、素の Enter と同じ CR を送る。受け取る CLI から
-  // 見れば同じバイト列なので、**改行したいのに送信される**。読み替えを外すと、
-  // `received: abc` と `received: def` の2本に割れてここが落ちる
+test('Enter と Shift+Enter は改行し、Ctrl+Enter で送信する', async ({
+  page,
+}) => {
+  // xterm の既定では Enter も Shift+Enter も同じ CR を送る。受け取る CLI から見れば
+  // 同じバイト列なので、**改行したいのに送信される**。読み替えを外すと、`received` が
+  // 3本（abc / def / ghi）に割れてここが落ちる
   await openDashboard(page)
   const tile = await spawnSession(page)
   await openSession(page, tile)
 
   await page.getByTestId('terminal').click()
   await page.keyboard.type('abc')
-  await page.keyboard.press('Shift+Enter')
-  await page.keyboard.type('def')
   await page.keyboard.press('Enter')
+  await page.keyboard.type('def')
+  await page.keyboard.press('Shift+Enter')
+  await page.keyboard.type('ghi')
+  await page.keyboard.press('Control+Enter')
 
   // 1回の指示として届くこと。擬似 claude は受け取った本文をそのまま書き戻すので、
-  // 改行が保たれていれば2行に分かれて出る
-  await expectTerminalToContain(page, '[fake-claude] received: abc\ndef')
+  // 改行が保たれていれば3行に分かれて出る
+  await expectTerminalToContain(page, '[fake-claude] received: abc\ndef\nghi')
 })
 
 test('大量出力でフロー制御が働き、最後まで取りこぼさず届く', async ({
