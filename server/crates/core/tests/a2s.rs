@@ -220,6 +220,7 @@ struct A2s {
     /// エージェント側
     manager: Arc<SessionManager>,
     link: Arc<AgentLink>,
+    parser: Arc<agent_core::parser::ParserSupervisor>,
     sniffer: Option<Arc<wire::Sniffer>>,
     server_task: tokio::task::JoinHandle<()>,
 }
@@ -348,6 +349,7 @@ impl A2s {
             registry,
             hub,
             account_id,
+            parser,
             browser,
             manager,
             link,
@@ -499,11 +501,21 @@ async fn ブラウザからの指示が_PC_まで届く() {
     // 報告を新規登録として扱う
     assert!(a2s.manager.get(card_id).is_some(), "PC 側に実体が無い");
 
-    // 指示送信も渡る
+    // 指示送信も渡る。**PTY まで届いたこと**を PC 側で確かめる——ここで止まっていると、
+    // 画面には出ているのに CLI は何も受け取っていない、という形で壊れる
     a2s.browser
-        .send_input(card_id, "hello".to_string())
+        .send_input(card_id, "こんにちは".to_string())
         .await
         .expect("指示を送れること");
+    let session = a2s.manager.get(card_id).expect("実体があること");
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    while !session.scrollback_text().contains("こんにちは") {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{TIMEOUT:?} 以内に指示が PTY へ届きませんでした"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     // 外す指示も渡り、一覧から消える
     a2s.browser.archive(card_id).expect("外せること");
@@ -769,6 +781,77 @@ async fn 同期間隔の変更は次の接続を待たずに効く() {
 
     let nodes = a2s.wait_for_nodes(session.card_id, 3).await;
     assert_eq!(nodes.len(), 3);
+
+    session.kill();
+}
+
+#[tokio::test]
+async fn パーサの縮退と自己修復の進みはブラウザまで中継される() {
+    // 自己修復は **PC の中で完結する**（設計§10-1）。分離で変わるのは「進み具合が
+    // ブラウザまで届くか」だけなので、そこを見る。届かないと、修復が走っていることに
+    // 誰も気づけないまま構造化ビューだけが空になる
+    let a2s = A2s::start("selfheal-relay").await;
+    let mut events = a2s.registry.subscribe_events();
+
+    // パーサの縮退。**自己修復が修復に失敗したときに通る道と同じ**入口を使う
+    a2s.parser.degrade("テストのため縮退させました".to_string());
+    // 自己修復の進み。`Selfheal::notify` が内部で呼ぶのと同じ経路
+    a2s.manager
+        .broadcast(protocol::ws::ServerMessage::Selfheal {
+            phase: protocol::ws::SelfhealPhase::Repairing,
+            detail: Some("パーサを直しています".to_string()),
+        });
+
+    let mut saw_parser = false;
+    let mut saw_selfheal = false;
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    while !(saw_parser && saw_selfheal) {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let message = tokio::time::timeout(remaining, events.recv())
+            .await
+            .unwrap_or_else(|_| panic!("{TIMEOUT:?} 以内に中継されませんでした"))
+            .expect("配信が閉じていないこと");
+        match message {
+            protocol::ws::ServerMessage::ParserStatus { state, detail } => {
+                assert_eq!(state, protocol::ws::ParserState::Degraded);
+                assert!(detail.is_some(), "理由が落ちている（画面に出せない）");
+                saw_parser = true;
+            }
+            protocol::ws::ServerMessage::Selfheal { phase, detail } => {
+                assert_eq!(phase, protocol::ws::SelfhealPhase::Repairing);
+                assert_eq!(detail.as_deref(), Some("パーサを直しています"));
+                saw_selfheal = true;
+            }
+            _ => continue,
+        }
+    }
+}
+
+#[tokio::test]
+async fn モデル切替の指示が渡り_押した手応えが返る() {
+    // 切替そのもの（TUI へのキー送出・グローバル既定の保護）は PC の中で完結していて、
+    // ローカルモードのテストが受け持つ。ここで見るのは**指示が渡り、押した手応え
+    // （楽観更新）が記録まで戻ってくる**こと（設計§5-6）
+    let a2s = A2s::start("set-model").await;
+    let (session, _transcript) = a2s.start_session();
+    a2s.wait_for_listed("1枚出る", |listed| listed.len() == 1)
+        .await;
+
+    a2s.browser
+        .set_model(session.card_id, protocol::ModelId::new("opus"))
+        .await
+        .expect("切替を指示できること");
+
+    let listed = a2s
+        .wait_for_listed("切替中の印が付く", |listed| {
+            listed
+                .first()
+                .and_then(|meta| meta.model_requested.as_ref())
+                .map(protocol::ModelId::as_str)
+                == Some("opus")
+        })
+        .await;
+    assert_eq!(listed[0].card_id, session.card_id);
 
     session.kill();
 }
