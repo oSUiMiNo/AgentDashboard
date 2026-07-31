@@ -180,30 +180,56 @@ async fn receive_hook(
 ///
 /// テストからモックサーバや core の受信口を叩くためだけのもの。
 pub fn post_json(addr: SocketAddr, path: &str, body: &str) -> anyhow::Result<u16> {
-    let request = format!(
-        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    Ok(request_raw(addr, &request)?.0)
+    Ok(request(addr, "POST", path, Some(body), None)?.status)
 }
 
 /// 同じく最小の PUT。設定の書き換え（`PUT /api/settings`）の確認に使う。
 pub fn put_json(addr: SocketAddr, path: &str, body: &str) -> anyhow::Result<(u16, String)> {
-    let request = format!(
-        "PUT {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    request_raw(addr, &request)
+    let response = request(addr, "PUT", path, Some(body), None)?;
+    Ok((response.status, response.body))
 }
 
 /// 同じく最小の GET。ステータスコードと本文を返す。
 pub fn get(addr: SocketAddr, path: &str) -> anyhow::Result<(u16, String)> {
-    let request = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
-    request_raw(addr, &request)
+    let response = request(addr, "GET", path, None, None)?;
+    Ok((response.status, response.body))
 }
 
-/// 組み立て済みのリクエストをそのまま送り、`(ステータス, 本文)` を返す。
-fn request_raw(addr: SocketAddr, request: &str) -> anyhow::Result<(u16, String)> {
+/// 1往復ぶんの応答。
+pub struct Response {
+    pub status: u16,
+    pub body: String,
+    /// `Set-Cookie` の**先頭の1つ**（`名前=値` の部分だけ）。
+    ///
+    /// 属性（`HttpOnly` 等）を落として値だけ持つのは、次のリクエストの `Cookie:`
+    /// ヘッダへそのまま載せるため。ブラウザの Cookie 管理を真似るのが目的ではない。
+    pub cookie: Option<String>,
+}
+
+/// 1往復ぶんを組み立てて送る。**Cookie を運べる**のがこれまでとの違い。
+///
+/// 認証が入って以降、テストは「ログインして、その入館証で叩く」形になる。
+/// ここが Cookie を運べないと、ブラウザの役をするテストが**認証の入った経路を
+/// 一度も踏めない**（＝実装を消しても緑になる）。
+pub fn request(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    cookie: Option<&str>,
+) -> anyhow::Result<Response> {
+    let mut head = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n");
+    if let Some(cookie) = cookie {
+        head.push_str(&format!("Cookie: {cookie}\r\n"));
+    }
+    let request = match body {
+        Some(body) => format!(
+            "{head}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ),
+        None => format!("{head}\r\n"),
+    };
+
     let mut stream = std::net::TcpStream::connect(addr)?;
     stream.write_all(request.as_bytes())?;
     stream.flush()?;
@@ -218,9 +244,23 @@ fn request_raw(addr: SocketAddr, request: &str) -> anyhow::Result<(u16, String)>
         .ok_or_else(|| anyhow::anyhow!("HTTPステータス行を読めません: {response:?}"))?;
 
     // ヘッダと本文の境目は空行。チャンク転送は使われない想定（Content-Length 応答のみ）
-    let body = response
+    let (headers, body) = response
         .split_once("\r\n\r\n")
-        .map(|(_, body)| body.to_string())
-        .unwrap_or_default();
-    Ok((status, body))
+        .map(|(headers, body)| (headers.to_string(), body.to_string()))
+        .unwrap_or_else(|| (response.clone(), String::new()));
+
+    let cookie = headers
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("set-cookie: ")
+                .or(line.strip_prefix("Set-Cookie: "))
+        })
+        .and_then(|value| value.split(';').next())
+        .map(str::to_string);
+
+    Ok(Response {
+        status,
+        body,
+        cookie,
+    })
 }

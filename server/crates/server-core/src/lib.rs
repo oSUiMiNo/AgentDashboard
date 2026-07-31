@@ -11,6 +11,7 @@
 //! [`agent_core`]: https://docs.rs/agent-core
 
 pub mod agent;
+pub mod auth;
 pub mod config;
 pub mod db;
 pub mod embed;
@@ -25,6 +26,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
+use std::sync::Arc;
 
 /// ブラウザ向けのルート一式。
 ///
@@ -34,16 +36,36 @@ use axum::{
 /// フックの受信（`/hook/*`・`/model/*`）は**ここには入らない**。宛先はどちらのモードでも
 /// エージェントの 127.0.0.1 で、セルフホストモードでは別プロセスの別ポートになる
 /// （セルフホスト化設計§5-3）。合成するのは両者を束ねる側の仕事。
-pub fn routes(state: ws::AppState) -> Router {
-    Router::new()
+///
+/// # 鍵がかかるのは中身のある口だけ
+///
+/// web アセット（[`static_handler`]）と認証の口（[`auth::routes`]）は素通しにしてある。
+/// 画面そのものを 401 にすると「ログイン画面を出す」手段が無くなるし、認証の要否を
+/// 知るのに認証が要るという循環もできる。**中身は返さないが、扉は開ける。**
+pub fn routes(state: ws::AppState, auth: Arc<auth::AuthContext>) -> Router {
+    let protected = Router::new()
         .route("/ws", get(ws::ws_handler))
         .route("/api/sessions", get(ws::api_sessions))
         .route(
             "/api/sessions/{card_id}/transcript",
             get(ws::api_transcript),
         )
+        .with_state(state);
+
+    guard(protected, Arc::clone(&auth))
+        .merge(auth::routes(auth))
         .fallback(get(static_handler))
-        .with_state(state)
+}
+
+/// 鍵をかける（設計§8-6）。
+///
+/// enforcement の要求は「漏れなく総当たり」なので、**通す口を1つの関数の向こうへ集める**。
+/// ルータごとに middleware を書き並べると、新しい口を足したときに付け忘れる。
+pub fn guard(router: Router, auth: Arc<auth::AuthContext>) -> Router {
+    router.layer(axum::middleware::from_fn_with_state(
+        auth,
+        auth::require_identity,
+    ))
 }
 
 /// 同梱した web アセットを配信する。

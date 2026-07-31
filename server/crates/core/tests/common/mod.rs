@@ -68,6 +68,7 @@ pub async fn server_with_fake_global(
         true,
         None,
         Some(Arc::new(ClaudeSettings::new(path.clone()))),
+        None,
     )
     .await;
     (path, server)
@@ -112,6 +113,11 @@ pub struct TestServer {
     /// 立ち上げた場合のみ（自己修復のテストだけ）
     pub selfheal: Option<Arc<agent_core::selfheal::Selfheal>>,
     pub config: Arc<Config>,
+    /// ログイン後の入館証（設計§8-2）。
+    ///
+    /// REST も `/ws` も同じ Cookie で通すので、**ここに入れておけば以後の要求に載る**。
+    /// 鍵の無いローカルモード（`Open`）では最後まで `None` のまま。
+    pub cookie: Option<String>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -232,10 +238,30 @@ impl TestServer {
             name_parser_by_env,
             settings_path,
             None,
+            None,
         )
         .await
     }
 
+    /// **LAN の向こうから来たふりで**立ち上げる（設計§8-3 の検証用）。
+    ///
+    /// 本番は接続そのものからピアアドレスを取る。テストの接続元は必ず 127.0.0.1 に
+    /// なるので、それだけでは「免除される側」しか踏めない。ここで差し替えられる形に
+    /// してあるのは、**免除されない側**を確かめるため。
+    pub async fn start_from(mut config: Config, peer: SocketAddr) -> Self {
+        Self::build_full(
+            &mut config,
+            fake_claude().to_string_lossy().into_owned(),
+            false,
+            true,
+            None,
+            None,
+            Some(peer),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn build_full(
         config: &mut Config,
         program: String,
@@ -243,6 +269,7 @@ impl TestServer {
         name_parser_by_env: bool,
         settings_path: Option<PathBuf>,
         claude_settings: Option<Arc<ClaudeSettings>>,
+        pretend_peer: Option<SocketAddr>,
     ) -> Self {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -277,6 +304,9 @@ impl TestServer {
         let db = server_core::db::connect(&config.resolved_database_url())
             .await
             .expect("使い捨ての DB へ繋げること");
+        // 入口の鍵も**本番と同じ組み立て**で作る。テストだけ素通しにすると、
+        // 認証を通る経路が一度も踏まれないまま緑になる
+        let auth = server_core::auth::AuthContext::local(db.clone(), &server_config);
         let registry = SessionRegistry::load(db, server_config.transcript_window_nodes)
             .await
             .expect("記録層を立てられること");
@@ -303,6 +333,7 @@ impl TestServer {
             Arc::clone(&manager),
             Arc::clone(&registry),
             Arc::clone(&server_config),
+            Arc::clone(&auth),
         );
         let parser = if with_parser {
             // 本番と同じ入口（環境変数）でビルド済みのパーサを指す
@@ -335,8 +366,29 @@ impl TestServer {
             )));
         }
 
+        // 接続元を差し替えるなら、**一番外側**で入れ替える。鍵の判定はこれより内側に
+        // あるので、こちらが後から入れた値を見ることになる
+        let mut router = server.router();
+        if let Some(peer) = pretend_peer {
+            router = router.layer(axum::middleware::from_fn(
+                move |mut request: axum::extract::Request, next: axum::middleware::Next| async move {
+                    request
+                        .extensions_mut()
+                        .insert(axum::extract::ConnectInfo(peer));
+                    next.run(request).await
+                },
+            ));
+        }
+
+        // **接続元を渡す形で待ち受ける**（本番の `serve_router` と同じ）。
+        // ここを素の `axum::serve` にすると、127.0.0.1 の免除（設計§8-3）が
+        // テストでだけ効かず、開発環境でしか出ない差分になる
         let task = tokio::spawn(async move {
-            let _ = axum::serve(listener, server.router()).await;
+            let _ = axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await;
         });
 
         Self {
@@ -346,8 +398,61 @@ impl TestServer {
             parser,
             selfheal: None,
             config,
+            cookie: None,
             task,
         }
+    }
+
+    /// 入館証を載せて1往復する。**ログインしていなければ載せるものが無いだけ**なので、
+    /// 鍵の無いローカルモードでもそのまま使える。
+    pub async fn request(&self, method: &str, path: &str, body: Option<&str>) -> (u16, String) {
+        let (addr, method, path) = (self.addr, method.to_string(), path.to_string());
+        let (body, cookie) = (body.map(str::to_string), self.cookie.clone());
+        let response = tokio::task::spawn_blocking(move || {
+            testkit::request(addr, &method, &path, body.as_deref(), cookie.as_deref())
+        })
+        .await
+        .expect("HTTPスレッドが落ちないこと")
+        .expect("応答を読めること");
+        (response.status, response.body)
+    }
+
+    /// 入館証を受け取る要求（ログイン・セットアップ）。**Cookie を覚える。**
+    async fn authenticate(&mut self, path: &str, body: String) -> (u16, String) {
+        let addr = self.addr;
+        let cookie = self.cookie.clone();
+        let path = path.to_string();
+        let response = tokio::task::spawn_blocking(move || {
+            testkit::request(addr, "POST", &path, Some(&body), cookie.as_deref())
+        })
+        .await
+        .expect("HTTPスレッドが落ちないこと")
+        .expect("応答を読めること");
+        if let Some(cookie) = response.cookie {
+            self.cookie = Some(cookie);
+        }
+        (response.status, response.body)
+    }
+
+    /// 最初の管理者を作る（設計§8-2）。
+    pub async fn setup(&mut self, name: &str, password: &str) -> (u16, String) {
+        let body = serde_json::json!({ "name": name, "password": password }).to_string();
+        self.authenticate("/api/setup", body).await
+    }
+
+    /// ログインする。`name` が `None` なら LAN の共有パスワード（§8-3）。
+    pub async fn login(&mut self, name: Option<&str>, password: &str) -> (u16, String) {
+        let body = match name {
+            Some(name) => serde_json::json!({ "name": name, "password": password }),
+            None => serde_json::json!({ "password": password }),
+        };
+        self.authenticate("/api/login", body.to_string()).await
+    }
+
+    pub async fn logout(&mut self) -> (u16, String) {
+        let result = self.authenticate("/api/logout", "{}".to_string()).await;
+        self.cookie = None;
+        result
     }
 
     /// 一覧に載ったカードが条件を満たすまで待つ。
@@ -432,19 +537,11 @@ impl TestServer {
 
     /// JSON を PUT する（設定の書き換え）。ブロッキングなので専用スレッドへ逃がす。
     pub async fn put(&self, path: &str, body: &str) -> (u16, String) {
-        let (addr, path, body) = (self.addr, path.to_string(), body.to_string());
-        tokio::task::spawn_blocking(move || testkit::put_json(addr, &path, &body))
-            .await
-            .expect("送信スレッドが正常に終わること")
-            .expect("応答が返ること")
+        self.request("PUT", path, Some(body)).await
     }
 
     pub async fn get(&self, path: &str) -> (u16, String) {
-        let (addr, path) = (self.addr, path.to_string());
-        tokio::task::spawn_blocking(move || testkit::get(addr, &path))
-            .await
-            .expect("送信スレッドが正常に終わること")
-            .expect("応答が返ること")
+        self.request("GET", path, None).await
     }
 }
 

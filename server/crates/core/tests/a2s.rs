@@ -329,10 +329,23 @@ impl A2s {
             .await
             .expect("空きポートで待ち受けられること");
         let addr: SocketAddr = listener.local_addr().expect("待ち受け先を取れること");
-        let router = server_core::routes(ws_state)
-            .merge(server_core::gateway::agent_routes(Arc::clone(&hub)));
+        // ここはローカルの 127.0.0.1 相当（＝鍵なし）で立てる。認証そのものは
+        // `auth.rs` の単体と `tenancy.rs` の総当たりが受け持つ
+        let auth = server_core::auth::AuthContext::local(
+            db.clone(),
+            &server_core::config::ServerConfig::default(),
+        );
+        let router = server_core::auth::with_sessions(
+            server_core::routes(ws_state, Arc::clone(&auth))
+                .merge(server_core::gateway::agent_routes(Arc::clone(&hub))),
+            &auth,
+        );
         let server_task = tokio::spawn(async move {
-            let _ = axum::serve(listener, router).await;
+            let _ = axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await;
         });
 
         // --- エージェント側 -------------------------------------------------

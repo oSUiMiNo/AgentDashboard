@@ -34,7 +34,13 @@ struct Pair {
     addr: SocketAddr,
     server: Child,
     agent: Option<Child>,
+    /// ログイン後の入館証。REST も `/ws` も同じ Cookie で通す（設計§8-2）
+    cookie: Option<String>,
 }
+
+/// セットアップで作る管理者。**テストの中だけの値**なので伏せる意味は無い。
+const ACCOUNT: &str = "テスト管理者";
+const PASSWORD: &str = "つよいあいことば";
 
 impl Drop for Pair {
     fn drop(&mut self) {
@@ -118,18 +124,24 @@ impl Pair {
             .spawn()
             .expect("サーバを起動できること");
 
-        let pair = Self {
+        let mut pair = Self {
             dir: dir.clone(),
             addr,
             server,
             agent: None,
+            cookie: None,
         };
+        // 認証は「認証が要るかどうか」を答える口だけ素通し（設計§8-2）。
+        // 起動待ちにはこちらを使う——`/api/sessions` は鍵の向こうなので、
+        // 待ちに使うと「まだ起きていない」と「ログインしていない」が同じ 401 になる
         wait_for("サーバが応答する", || async {
-            pair.get("/api/sessions")
+            pair.get("/api/me")
                 .await
                 .is_some_and(|(code, _)| code == 200)
         })
         .await;
+        // 3. 管理者を作って入る（5分セットアップの手順2）。**開いているのは最初の一度きり**
+        pair.setup_admin().await;
 
         (pair, token)
     }
@@ -182,12 +194,34 @@ impl Pair {
             .unwrap_or_default()
     }
 
+    /// 最初の管理者を作り、その入館証を持ち回る。
+    ///
+    /// セルフホストは**ログインしないと何も見えない**（§8-6）ので、ブラウザの役をする
+    /// テストはここを通る必要がある。素通しにすると、認証の入った経路を一度も踏まないまま
+    /// 緑になる。
+    async fn setup_admin(&mut self) {
+        let addr = self.addr;
+        let body = serde_json::json!({ "name": ACCOUNT, "password": PASSWORD }).to_string();
+        let response = tokio::task::spawn_blocking(move || {
+            testkit::request(addr, "POST", "/api/setup", Some(&body), None)
+        })
+        .await
+        .expect("スレッドが落ちないこと")
+        .expect("セットアップの応答を読めること");
+        assert_eq!(response.status, 200, "管理者を作れない: {}", response.body);
+        self.cookie = response.cookie;
+        assert!(self.cookie.is_some(), "入館証が発行されていない");
+    }
+
     async fn get(&self, path: &str) -> Option<(u16, String)> {
-        let (addr, path) = (self.addr, path.to_string());
-        tokio::task::spawn_blocking(move || testkit::get(addr, &path))
-            .await
-            .ok()?
-            .ok()
+        let (addr, path, cookie) = (self.addr, path.to_string(), self.cookie.clone());
+        tokio::task::spawn_blocking(move || {
+            testkit::request(addr, "GET", &path, None, cookie.as_deref())
+        })
+        .await
+        .ok()?
+        .ok()
+        .map(|response| (response.status, response.body))
     }
 
     async fn sessions(&self) -> Vec<SessionMeta> {
@@ -199,7 +233,22 @@ impl Pair {
 
     /// ブラウザの役で `/ws` へ繋ぐ。
     async fn browser(&self) -> Browser {
-        let (socket, _) = tokio_tungstenite::connect_async(format!("ws://{}/ws", self.addr))
+        // **入館証を載せて繋ぐ。** `/ws` も REST と同じ Cookie で認証する（§8-2）ので、
+        // 載せないと upgrade の手前で 401 になる
+        let request = tokio_tungstenite::tungstenite::http::Request::builder()
+            .uri(format!("ws://{}/ws", self.addr))
+            .header("Host", self.addr.to_string())
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Sec-WebSocket-Version", "13")
+            .header(
+                "Sec-WebSocket-Key",
+                tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+            )
+            .header("Cookie", self.cookie.clone().unwrap_or_default())
+            .body(())
+            .expect("要求を組み立てられること");
+        let (socket, _) = tokio_tungstenite::connect_async(request)
             .await
             .expect("ブラウザとして繋げること");
         Browser { socket }

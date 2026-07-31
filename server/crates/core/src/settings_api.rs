@@ -17,8 +17,9 @@ use agent_core::{
     session::SessionManager,
     settings::{SettingsStore, SettingsView},
 };
-use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
+use axum::{Extension, Json, Router, extract::State, http::StatusCode, routing::get};
 use serde::Deserialize;
+use server_core::auth::Identity;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -28,6 +29,8 @@ pub struct SettingsState {
     pub store: Option<Arc<SettingsStore>>,
     /// 別名の実測は [`SessionManager`] が持っているので、応答を作るときに引く。
     pub manager: Arc<SessionManager>,
+    /// 入口の鍵（セルフホスト化設計§8-1）。LAN パスワードの読み書きに要る
+    pub auth: Arc<server_core::auth::AuthContext>,
 }
 
 pub fn routes(state: SettingsState) -> Router {
@@ -108,9 +111,18 @@ async fn api_server_settings(
 }
 
 /// `PUT /api/settings` の本文。
-#[derive(Debug, Deserialize)]
+///
+/// **全部が省略できる。** 画面は触った項目だけを送る——1項目のために全部を送り直すと、
+/// 別のタブが同時に開いていたときに、そちらの変更を巻き戻すことになる。
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 pub struct SettingsUpdate {
-    pub always_bypass_permissions: bool,
+    pub always_bypass_permissions: Option<bool>,
+    /// LAN 開放の共有パスワード（設計§8-3）。**平文で受けてここでハッシュにする。**
+    ///
+    /// 受け付けるのは**ローカルモードの 127.0.0.1 から**だけ。LAN の向こうから
+    /// 変えられると、いま入っている誰かが鍵を掛け替えられることになる。
+    pub lan_password: Option<String>,
 }
 
 /// `GET /api/settings` — 画面が読む設定（設計§7・§8）。
@@ -124,33 +136,53 @@ pub async fn api_settings(
     Ok(Json(settings.view_with(state.manager.aliases().all())))
 }
 
-/// `PUT /api/settings` — トグルを書き換えて `config.toml` へ書き戻す（設計§7）。
+/// `PUT /api/settings` — 触った項目だけを書き換える（設計§7・§8-3）。
 pub async fn api_update_settings(
     State(state): State<SettingsState>,
+    Extension(identity): Extension<Identity>,
     Json(update): Json<SettingsUpdate>,
 ) -> Result<Json<SettingsView>, (StatusCode, String)> {
-    let settings = state
-        .store
-        .as_ref()
-        .ok_or((StatusCode::NOT_FOUND, "設定を扱えません".to_string()))?;
+    if let Some(password) = &update.lan_password {
+        // **登録できるのは 127.0.0.1 からだけ**（設計§8-3）。LAN の向こうから
+        // 変えられると、いま入っている誰かが鍵を掛け替えられる
+        if !identity.from_loopback {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "LAN のパスワードは、この PC のブラウザ（127.0.0.1）からのみ変更できます"
+                    .to_string(),
+            ));
+        }
+        server_core::auth::set_lan_password(state.auth.db(), password).await?;
+    }
 
-    // 書き込みはブロッキング。テストのスレッドで待つと自分の応答を自分で待つ形になるので、
-    // 専用スレッドへ逃がす（初期実装フェーズ2でテスト一式が固まった件と同じ理由）
-    let settings = Arc::clone(settings);
-    let value = update.always_bypass_permissions;
-    let result = tokio::task::spawn_blocking(move || settings.set_always_bypass_permissions(value))
-        .await
-        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+    if let Some(value) = update.always_bypass_permissions {
+        let settings = state
+            .store
+            .as_ref()
+            .ok_or((StatusCode::NOT_FOUND, "設定を扱えません".to_string()))?;
 
-    match result {
-        Ok(_) => Ok(Json(
-            state
-                .store
-                .as_ref()
-                .expect("直前に取り出せている")
-                .view_with(state.manager.aliases().all()),
-        )),
+        // 書き込みはブロッキング。テストのスレッドで待つと自分の応答を自分で待つ形になるので、
+        // 専用スレッドへ逃がす（初期実装フェーズ2でテスト一式が固まった件と同じ理由）
+        let settings = Arc::clone(settings);
+        let result =
+            tokio::task::spawn_blocking(move || settings.set_always_bypass_permissions(value))
+                .await
+                .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
         // 黙って失敗すると「変えたのに戻る」という追いにくい形になる
-        Err(err) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("{err:#}"))),
+        result.map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, format!("{err:#}")))?;
+    }
+
+    match state.store.as_ref() {
+        Some(store) => Ok(Json(store.view_with(state.manager.aliases().all()))),
+        // 設定の持ち主が居なくても、LAN パスワードの登録だけは成立する
+        // （画面が立っていない構成でも鍵はかけられる）
+        None => Ok(Json(SettingsView {
+            always_bypass_permissions: false,
+            available_modes: Vec::new(),
+            model_aliases: Vec::new(),
+            model_catalog: Vec::new(),
+            model_tables: std::collections::BTreeMap::new(),
+            screen_interval_ms: None,
+        })),
     }
 }

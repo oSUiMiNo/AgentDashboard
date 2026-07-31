@@ -25,7 +25,10 @@ use agent_core::{
 use axum::Router;
 use config::Config;
 use local::LocalAgent;
-use server_core::{config::ServerConfig, embed, gateway::AgentHub, registry::SessionRegistry, ws};
+use server_core::{
+    auth::AuthContext, config::ServerConfig, embed, gateway::AgentHub, registry::SessionRegistry,
+    ws,
+};
 use settings_api::SettingsState;
 use std::sync::Arc;
 
@@ -45,6 +48,9 @@ pub struct LocalServer {
     /// 画面から書き換えられる設定（設計§7）。**居なくても動く**ので、統合テストは
     /// 設定画面を立てずにセッションの検証だけができる。
     settings: Option<Arc<SettingsStore>>,
+    /// 入口の鍵（セルフホスト化設計§8-1）。**待ち受けの広さで中身が決まる**——
+    /// 127.0.0.1 だけなら鍵なし、広げているなら LAN の共有パスワード。
+    auth: Arc<AuthContext>,
 }
 
 impl LocalServer {
@@ -52,6 +58,7 @@ impl LocalServer {
         manager: Arc<SessionManager>,
         registry: Arc<SessionRegistry>,
         config: Arc<ServerConfig>,
+        auth: Arc<AuthContext>,
     ) -> Self {
         Self {
             manager,
@@ -59,6 +66,7 @@ impl LocalServer {
             config,
             parser: None,
             settings: None,
+            auth,
         }
     }
 
@@ -83,6 +91,12 @@ impl LocalServer {
     /// | `/api/settings` | [`settings_api::routes`] | 応答の中身が PC 側にしか無い（§13-4 で作り替える予定） |
     ///
     /// いまは同じポートに同居しているが、**分けられる形にしておく**のがこの合成の意味。
+    ///
+    /// # フックの受信だけは鍵をかけない
+    ///
+    /// 叩くのは CLI が起動する `hook-post` で、宛先は 127.0.0.1、URL にセッションごとの
+    /// トークンが入っている（設計§5-3）。ブラウザの Cookie を持ちようが無いので、
+    /// ここに鍵をかけると**フックが1件も届かなくなる**。
     pub fn router(&self) -> Router {
         let mut agent = LocalAgent::new(Arc::clone(&self.manager));
         if let Some(parser) = &self.parser {
@@ -94,12 +108,19 @@ impl LocalServer {
             Arc::clone(&self.config),
         );
 
-        server_core::routes(ws_state)
-            .merge(hooks::routes(Arc::clone(&self.manager)))
-            .merge(settings_api::routes(SettingsState {
+        let settings = server_core::guard(
+            settings_api::routes(SettingsState {
                 store: self.settings.clone(),
                 manager: Arc::clone(&self.manager),
-            }))
+                auth: Arc::clone(&self.auth),
+            }),
+            Arc::clone(&self.auth),
+        );
+
+        let router = server_core::routes(ws_state, Arc::clone(&self.auth))
+            .merge(hooks::routes(Arc::clone(&self.manager)))
+            .merge(settings);
+        server_core::auth::with_sessions(router, &self.auth)
     }
 }
 
@@ -115,14 +136,21 @@ pub async fn serve_server(config: Config) -> anyhow::Result<()> {
 
     let db = server_core::db::connect(&config.resolved_database_url()).await?;
     let registry = SessionRegistry::load(db.clone(), server_config.transcript_window_nodes).await?;
+    let auth = AuthContext::server(db.clone(), &server_config);
     let hub = AgentHub::new(db, Arc::clone(&registry));
 
     let agent: Arc<dyn server_core::agent::AgentHost> =
         Arc::new(server_core::gateway::RemoteAgent::new(Arc::clone(&hub)));
     let ws_state = ws::AppState::new(agent, Arc::clone(&registry), Arc::clone(&server_config));
-    let router = server_core::routes(ws_state)
+    let router = server_core::routes(ws_state, Arc::clone(&auth))
+        // エージェントの受け口は**ブラウザとは別の鍵**（ペアリングトークン。§8-4）。
+        // Cookie の middleware をかけると、PC が Cookie を持たないだけで断られる
         .merge(server_core::gateway::agent_routes(Arc::clone(&hub)))
-        .merge(settings_api::server_routes(Arc::clone(&hub)));
+        .merge(server_core::guard(
+            settings_api::server_routes(Arc::clone(&hub)),
+            Arc::clone(&auth),
+        ));
+    let router = server_core::auth::with_sessions(router, &auth);
 
     let listener = bind(&server_config).await?;
     tracing::info!(
@@ -167,6 +195,13 @@ pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::R
     // そのときに黙って動くほうが害が大きい
     let database_url = config.resolved_database_url();
     let db = server_core::db::connect(&database_url).await?;
+
+    // **鍵なしで開ける事故を仕組みで防ぐ**（要件1-1・設計§8-3）。待ち受けを広げて
+    // いるのに LAN のパスワードが無いなら、警告ではなく起動そのものを止める——
+    // 警告は読まれないことがあるし、読まれたときには既に開いている
+    server_core::auth::ensure_lan_password(&db, &server_config).await?;
+    let auth = server_core::auth::AuthContext::local(db.clone(), &server_config);
+
     let registry = SessionRegistry::load(db, server_config.transcript_window_nodes).await?;
 
     // 再開位置の置き場所は、パーサの世話役（読む側）と報告の運び手（進める側）で
@@ -247,7 +282,7 @@ pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::R
         catalog.cli_version().to_string(),
     );
 
-    let server = LocalServer::new(manager, registry, Arc::clone(&server_config))
+    let server = LocalServer::new(manager, registry, Arc::clone(&server_config), auth)
         .with_parser(parser)
         .with_settings(settings);
     let listener = bind(&server_config).await?;

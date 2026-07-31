@@ -52,6 +52,19 @@ impl DbSessionStore {
         })
     }
 
+    /// 入館証を**全部**捨てる（設計§8-3・利用者判断）。
+    ///
+    /// LAN のパスワードを変えたときに呼ぶ。変える動機はたいてい「漏れたかもしれない」
+    /// なので、変えたのに既に入っている端末が居座れては意味が無い。
+    ///
+    /// 対象を LAN のぶんに絞らないのは、**中身を読まずに済ませるため**。絞るには全行の
+    /// JSON を開いて種別を見ることになり、そのために「どう保存されているか」を
+    /// ここが知る必要が出る。捨てすぎても、もう一度ログインすれば済む。
+    pub async fn delete_all(db: &DatabaseConnection) -> std::result::Result<(), DbErr> {
+        web_sessions::Entity::delete_many().exec(db).await?;
+        Ok(())
+    }
+
     fn encode(record: &Record) -> Result<Vec<u8>> {
         serde_json::to_vec(record).map_err(|err| Error::Encode(err.to_string()))
     }
