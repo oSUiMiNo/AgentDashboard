@@ -329,7 +329,16 @@ async fn handle_request(
             state.agent.resize(card_id, cols, rows);
 
             let Some((snapshot, receiver)) = state.agent.subscribe_pty(card_id) else {
-                send_error(outbound, Some(card_id), "セッションが見つかりません".into()).await;
+                // **生きているのに端末が開けない**＝別の PC のカード。セルフホストの画面は
+                // エージェント内の端末エミュレータが作るので、生バイトの購読口が無い
+                // （セルフホスト化設計§7）。ローカルでは、直前の生存確認との隙間に
+                // セッションが終わった場合だけここへ来る
+                send_error(
+                    outbound,
+                    Some(card_id),
+                    "この PC の端末はまだ開けません".into(),
+                )
+                .await;
                 return;
             };
             let task = tokio::spawn(pump_terminal(
