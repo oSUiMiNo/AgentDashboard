@@ -128,3 +128,35 @@ describe('App', () => {
     expect(banner.className).toContain('red')
   })
 })
+
+describe('通っていない間の見え方（セルフホスト化設計§8-2）', () => {
+  it('ログイン前は接続の様子も導線も出さない', async () => {
+    // **動作は正しいのに見た目が嘘をつく**形の回帰テスト。繋ぎに行くのは通ってから
+    // なので、出すと必ず「切断」と表示される（実物を見て気づいた）
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) =>
+        url === '/api/me'
+          ? new Response(
+              JSON.stringify({
+                mode: 'account',
+                authenticated: false,
+                account: null,
+                is_admin: false,
+                setup_open: true,
+                from_loopback: true,
+              }),
+              { status: 200 },
+            )
+          : new Response('[]', { status: 200 }),
+      ),
+    )
+    render(<App />)
+
+    // 最初のセットアップが出る（管理者がまだ居ない）
+    expect(await screen.findByTestId('setup-form')).toBeInTheDocument()
+    expect(screen.queryByTestId('connection-status')).toBeNull()
+    expect(screen.queryByTestId('settings-link')).toBeNull()
+    expect(screen.queryByTestId('account-link')).toBeNull()
+  })
+})

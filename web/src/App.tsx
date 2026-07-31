@@ -78,31 +78,41 @@ function Shell() {
         <Link to={HOME} className="text-xl font-semibold tracking-tight">
           <h1>AgentDashboard</h1>
         </Link>
-        <span
-          data-testid="connection-status"
-          data-status={status}
-          className="text-muted-foreground text-sm"
-        >
-          {CONNECTION_LABEL[status]}
-        </span>
-        <div className="ml-auto flex items-center gap-3">
-          {auth.mode === 'account' && auth.authenticated && (
-            <Link
-              to={ACCOUNT}
-              data-testid="account-link"
-              className="text-muted-foreground hover:text-foreground text-sm underline"
+        {/*
+          **通っていない間は接続の様子も導線も出さない。** 繋ぎに行くのは通ってから
+          なので、出すと必ず「切断」と表示される——動作は正しいのに、**見た目だけが
+          「壊れている」と嘘をつく**。設定への導線も、押した先で同じログイン画面へ
+          戻るだけになる
+        */}
+        {entered && (
+          <>
+            <span
+              data-testid="connection-status"
+              data-status={status}
+              className="text-muted-foreground text-sm"
             >
-              アカウント
-            </Link>
-          )}
-          <Link
-            to={SETTINGS}
-            data-testid="settings-link"
-            className="text-muted-foreground hover:text-foreground text-sm underline"
-          >
-            設定
-          </Link>
-        </div>
+              {CONNECTION_LABEL[status]}
+            </span>
+            <div className="ml-auto flex items-center gap-3">
+              {auth.mode === 'account' && (
+                <Link
+                  to={ACCOUNT}
+                  data-testid="account-link"
+                  className="text-muted-foreground hover:text-foreground text-sm underline"
+                >
+                  アカウント
+                </Link>
+              )}
+              <Link
+                to={SETTINGS}
+                data-testid="settings-link"
+                className="text-muted-foreground hover:text-foreground text-sm underline"
+              >
+                設定
+              </Link>
+            </div>
+          </>
+        )}
       </header>
 
       {lastError && (
