@@ -80,6 +80,19 @@ async fn api_server_settings(
         }
     }
 
+    // いま効いている画面の更新間隔（§11-3）。**繋がっている PC のアカウントから引く**——
+    // 誰も繋がっていなければ出しようがないので既定を返す
+    let account_id = connected.first().map(|conn| conn.account_id);
+    let screen_interval_ms = match account_id {
+        Some(account_id) => {
+            server_core::db::settings::intervals(hub.db(), account_id)
+                .await
+                .unwrap_or_default()
+                .screen_interval_ms
+        }
+        None => server_core::db::settings::Intervals::default().screen_interval_ms,
+    };
+
     Json(SettingsView {
         // 起動ボタンの数を決めるトグル。**PC ごとの設定**なので、1台でも
         // 「スキップだけ出す」なら画面もそれに従う（迷う組み合わせは PC 選択が
@@ -90,6 +103,7 @@ async fn api_server_settings(
         model_aliases: Vec::new(),
         model_catalog: Vec::new(),
         model_tables,
+        screen_interval_ms: Some(screen_interval_ms),
     })
 }
 

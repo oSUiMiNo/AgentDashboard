@@ -36,6 +36,14 @@ export interface Settings {
    * そのときは別名のラベルが出るだけ。
    */
   model_catalog: ModelCatalogEntry[]
+  /**
+   * いま効いている画面の更新間隔（ミリ秒。セルフホスト化設計§11-3）。
+   *
+   * **ローカルモードでは返ってこない**（画面配信そのものが動かず、生バイトを直に配るため）。
+   * 別の PC のセッションを開いているときだけヘッダに小さく出して、画面が止まっているのか
+   * 間引かれているのかを利用者が区別できるようにする。
+   */
+  screen_interval_ms?: number | null
 }
 
 interface SettingsState {
@@ -69,6 +77,8 @@ const FALLBACK: Settings = {
   // 実測が無い状態が正しい初期値。推測で埋めると、選択肢に嘘の版番号が出る
   model_aliases: [],
   model_catalog: [],
+  // ローカルモードと同じ扱いにしておく（読めるまで更新間隔の表示を出さない）
+  screen_interval_ms: null,
 }
 
 /** 一度取り直しを試した model の ID。無限に聞きに行かないための歯止め */

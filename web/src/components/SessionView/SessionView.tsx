@@ -25,11 +25,12 @@ import { ModelPicker } from '@/components/ModelPicker/ModelPicker'
 import { PermissionModePicker } from '@/components/PermissionModePicker/PermissionModePicker'
 import { TerminalPane } from '@/components/TerminalPane/TerminalPane'
 import { TranscriptTree } from '@/components/TranscriptTree/TranscriptTree'
-import { formatElapsed } from '@/lib/time'
+import { formatElapsed, formatScreenInterval } from '@/lib/time'
 import { isEnded, isHookSilent, statusLabel, statusTone } from '@/lib/protocol'
 import type { CardId } from '@/lib/protocol'
 import { useNow } from '@/lib/sessions'
 import { useSessionCard } from '@/stores/sessions'
+import { useSettingsStore } from '@/stores/settings'
 import { useWsStore } from '@/stores/ws'
 
 type View = 'transcript' | 'terminal'
@@ -122,26 +123,29 @@ export function SessionView({ cardId, compact = false }: Props) {
         </div>
       </header>
 
-      <div
-        role="tablist"
-        className="border-border bg-background/60 flex w-fit gap-1 rounded-lg border p-0.5 text-sm"
-      >
-        <ViewTab
-          current={view}
-          value="transcript"
-          onSelect={setView}
-          cardId={cardId}
+      <div className="flex items-center gap-2">
+        <div
+          role="tablist"
+          className="border-border bg-background/60 flex w-fit gap-1 rounded-lg border p-0.5 text-sm"
         >
-          構造化ビュー
-        </ViewTab>
-        <ViewTab
-          current={view}
-          value="terminal"
-          onSelect={setView}
-          cardId={cardId}
-        >
-          ターミナル
-        </ViewTab>
+          <ViewTab
+            current={view}
+            value="transcript"
+            onSelect={setView}
+            cardId={cardId}
+          >
+            構造化ビュー
+          </ViewTab>
+          <ViewTab
+            current={view}
+            value="terminal"
+            onSelect={setView}
+            cardId={cardId}
+          >
+            ターミナル
+          </ViewTab>
+        </div>
+        <ScreenInterval remote={session.agent_id !== null} shown={view === 'terminal'} />
       </div>
 
       {/* 表示していない側もマウントしたまま隠す（作り直さないため） */}
@@ -154,6 +158,35 @@ export function SessionView({ cardId, compact = false }: Props) {
 
       <Composer cardId={session.card_id} status={session.status} />
     </section>
+  )
+}
+
+/**
+ * 別の PC の画面がどれくらいの間隔で届くかを小さく出す（セルフホスト化設計§11-3）。
+ *
+ * # 出さないと区別がつかない
+ *
+ * 無操作のあいだ、リモートの画面は間隔をあけて届く（既定20秒）。数字が無いと
+ * **「相手が止まっている」と「間引かれているだけ」が同じに見える**。入力した直後だけは
+ * 細かく届く（ホットウィンドウ。§7-5）ので、ここに出るのは「何もしていないとき」の話。
+ *
+ * この PC のセッション（ローカル）では生バイトがそのまま届くので、出す値が無い。
+ */
+function ScreenInterval({ remote, shown }: { remote: boolean; shown: boolean }) {
+  const intervalMs = useSettingsStore(
+    (state) => state.settings.screen_interval_ms,
+  )
+  if (!remote || !shown || intervalMs == null) {
+    return null
+  }
+  return (
+    <span
+      data-testid="screen-interval"
+      className="text-muted-foreground text-xs"
+      title="別の PC の画面は、何もしていない間はこの間隔で届きます（入力した直後は細かく届きます）"
+    >
+      更新間隔 {formatScreenInterval(intervalMs)}
+    </span>
   )
 }
 

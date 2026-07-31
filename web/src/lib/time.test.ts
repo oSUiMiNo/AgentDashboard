@@ -1,4 +1,4 @@
-import { formatElapsed } from './time'
+import { formatElapsed, formatScreenInterval } from './time'
 
 /**
  * 経過時間の表示（テスト計画フェーズ5「小窓」の経過時間表示）。
@@ -34,5 +34,18 @@ describe('formatElapsed', () => {
   it('時計のずれで負になっても壊れない', () => {
     // サーバとブラウザの時計は完全には一致しない
     expect(formatElapsed(-5_000)).toBe('たった今')
+  })
+})
+
+describe('formatScreenInterval', () => {
+  it('秒に直して読ませる', () => {
+    // 既定は20秒（設計§13-3）
+    expect(formatScreenInterval(20_000)).toBe('20秒')
+    expect(formatScreenInterval(1_000)).toBe('1秒')
+  })
+
+  it('1秒未満は小数のままにする', () => {
+    // いちばん細かい選択肢。ミリ秒で出すと他の選択肢と桁が揃わない
+    expect(formatScreenInterval(50)).toBe('0.05秒')
   })
 })

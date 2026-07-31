@@ -65,6 +65,13 @@ pub struct SettingsView {
     /// 切り替えたときに上の2つを落とす（§21 読み替え4）。
     #[serde(default)]
     pub model_tables: std::collections::BTreeMap<String, serde_json::Value>,
+    /// いま効いている画面の更新間隔（ミリ秒。セルフホスト化設計§11-3）。
+    ///
+    /// **ローカルモードでは `None`。** 画面配信そのものが動かない（生バイトを直に配る）ので、
+    /// 出す値が存在しない。リモートのカードを開いているときだけヘッダに小さく出して、
+    /// **画面が止まっているのか間引かれているのか**を利用者が区別できるようにする。
+    #[serde(default)]
+    pub screen_interval_ms: Option<u64>,
 }
 
 /// ローカルモードのモデル表のキー（設計§13-4）。
@@ -133,6 +140,8 @@ impl SettingsStore {
             model_aliases,
             model_catalog: self.model_catalog.clone(),
             model_tables,
+            // ローカルモードには画面配信そのものが無い（設計§7-2）
+            screen_interval_ms: None,
         }
     }
 
