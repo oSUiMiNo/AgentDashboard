@@ -5,6 +5,7 @@ import type { SessionMeta } from '@/lib/protocol'
 import { applySessionSnapshot, clearSessions, getSession } from '@/stores/sessions'
 import { useSettingsStore } from '@/stores/settings'
 import { useWsStore } from '@/stores/ws'
+import { localModelTable, settingsFixture } from '@/test/fixtures'
 
 /**
  * セッション画面のモデル切替（テスト計画フェーズ5「表示」「切替」「購読の粒度」）。
@@ -48,12 +49,7 @@ beforeEach(() => {
     return 0
   })
   useSettingsStore.setState({
-    settings: {
-      always_bypass_permissions: false,
-      available_modes: ['default'],
-      model_aliases: [],
-      model_catalog: [],
-    },
+    settings: settingsFixture({ always_bypass_permissions: false, available_modes: ['default'] }),
     loading: false,
   })
 })
@@ -129,14 +125,9 @@ describe('ModelPicker', () => {
   it('一度選んだ別名は、CLI が名乗った名前で出る', () => {
     // 括弧で併記せず置き換える（`Opus` ではなく `Opus 5`）
     useSettingsStore.setState({
-      settings: {
-        always_bypass_permissions: false,
-        available_modes: ['default'],
-        model_aliases: [
+      settings: settingsFixture({ always_bypass_permissions: false, available_modes: ['default'], ...localModelTable([
           { alias: 'opus', id: 'claude-opus-5', display_name: 'Opus 5' },
-        ],
-        model_catalog: [],
-      },
+        ], []) }),
       loading: false,
     })
     applySessionSnapshot([meta(CARD)])
@@ -153,15 +144,10 @@ describe('ModelPicker', () => {
   it('一度も選んでいない別名にも、対応表があれば版番号が出る', () => {
     // 設計§13。CLI 自身から取り出した対応表で、使う前から版番号が分かる
     useSettingsStore.setState({
-      settings: {
-        always_bypass_permissions: false,
-        available_modes: ['default'],
-        model_aliases: [],
-        model_catalog: [
+      settings: settingsFixture({ always_bypass_permissions: false, available_modes: ['default'], ...localModelTable([], [
           { id: 'claude-sonnet-5', family: 'sonnet', display_name: 'Sonnet 5' },
           { id: 'claude-haiku-4-5', family: 'haiku', display_name: 'Haiku 4.5' },
-        ],
-      },
+        ]) }),
       loading: false,
     })
     applySessionSnapshot([meta(CARD)])

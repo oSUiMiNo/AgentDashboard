@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { SpawnForm } from './SpawnForm'
 import { useSettingsStore } from '@/stores/settings'
 import { useWsStore } from '@/stores/ws'
+import { settingsFixture } from '@/test/fixtures'
 
 /**
  * 起動ボタン（テスト計画フェーズ5「起動ボタン」）。
@@ -16,12 +17,10 @@ const WORK_DIR = '/home/example/dev/app'
 
 function setToggle(value: boolean) {
   useSettingsStore.setState({
-    settings: {
+    settings: settingsFixture({
       always_bypass_permissions: value,
       available_modes: ['default', 'acceptEdits', 'bypassPermissions'],
-      model_aliases: [],
-      model_catalog: [],
-    },
+    }),
     loading: false,
   })
 }

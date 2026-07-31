@@ -147,7 +147,11 @@ pub async fn serve_server(config: Config) -> anyhow::Result<()> {
         // Cookie の middleware をかけると、PC が Cookie を持たないだけで断られる
         .merge(server_core::gateway::agent_routes(Arc::clone(&hub)))
         .merge(server_core::guard(
-            settings_api::server_routes(Arc::clone(&hub)),
+            settings_api::server_routes(Arc::clone(&hub))
+                // アカウント画面（トークンの発行・失効・PC 一覧。§11-1）。
+                // **ローカルモードには無い**——A2S の受け口が無いので、繋いでくる
+                // PC が存在せず、鍵を配る相手も居ない
+                .merge(server_core::account::routes(Arc::clone(&hub))),
             Arc::clone(&auth),
         ));
     let router = server_core::auth::with_sessions(router, &auth);

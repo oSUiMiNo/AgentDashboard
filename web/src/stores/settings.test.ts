@@ -79,7 +79,7 @@ describe('設定ストア', () => {
     )
     vi.stubGlobal('fetch', fetchMock)
 
-    await useSettingsStore.getState().setAlwaysBypassPermissions(true)
+    await useSettingsStore.getState().update({ always_bypass_permissions: true })
 
     const [url, init] = fetchMock.mock.calls[0]
     expect(url).toBe('/api/settings')
@@ -97,7 +97,7 @@ describe('設定ストア', () => {
       vi.fn(async () => new Response('書き込めません', { status: 500 })),
     )
 
-    await useSettingsStore.getState().setAlwaysBypassPermissions(true)
+    await useSettingsStore.getState().update({ always_bypass_permissions: true })
 
     expect(useSettingsStore.getState().lastError).toContain('保存できません')
     expect(useSettingsStore.getState().settings.always_bypass_permissions).toBe(

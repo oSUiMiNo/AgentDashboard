@@ -15,6 +15,11 @@
  * | 切り替え先 | こちらが持つ別名の表 | `Opus` |
  * | 選択肢の括弧 | その別名で切り替えたときの実測 | `Opus（Opus 5）` |
  *
+ * # 表は PC ごと
+ *
+ * CLI の版は PC ごとに違うので、選択肢の材料は**そのセッションが属する PC の表**から
+ * 取る（セルフホスト化設計§13-4）。1台ぶんで全部を作ると、その PC に無いモデルが並ぶ。
+ *
  * **版番号はどれも表からは来ない**（設計§3）。別名の解決先はプロバイダで変わるので、
  * 表に正しい版番号は書けない。だから CLI が名乗った値と、実測して覚えた値だけを使う。
  *
@@ -33,7 +38,7 @@ import {
 } from '@/lib/models'
 import type { CardId } from '@/lib/protocol'
 import { useSessionCard } from '@/stores/sessions'
-import { useSettingsStore } from '@/stores/settings'
+import { modelTableFor, useSettingsStore } from '@/stores/settings'
 import { useWsStore } from '@/stores/ws'
 
 interface Props {
@@ -43,12 +48,18 @@ interface Props {
 export function ModelPicker({ cardId }: Props) {
   const session = useSessionCard(cardId)
   const setModel = useWsStore((state) => state.setModel)
-  const seen = useSettingsStore((state) => state.settings.model_aliases)
-  const catalog = useSettingsStore((state) => state.settings.model_catalog)
+  const tables = useSettingsStore((state) => state.settings.model_tables)
 
   if (!session) {
     return null
   }
+
+  // **そのセッションが属する PC の表を見る**（設計§13-4）。CLI の版は PC ごとに
+  // 違うので、どれか1台の表で全部の選択肢を作ると、その PC に無いモデルが並ぶ。
+  // ローカルモードには PC という単位が無いので `"local"` の1本を引く
+  const table = modelTableFor(tables, session.agent_id)
+  const seen = table.aliases ?? []
+  const catalog = table.catalog ?? []
 
   const { model, model_label: label, model_requested: requested } = session
   // 切替中は要求した別名を出す。**確定した値と同じ顔をさせない**（設計§5）。

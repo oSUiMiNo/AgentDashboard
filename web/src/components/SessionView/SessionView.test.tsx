@@ -3,6 +3,7 @@ import { SessionView } from './SessionView'
 import type { SessionMeta } from '@/lib/protocol'
 import { applySessionSnapshot, clearSessions } from '@/stores/sessions'
 import { useSettingsStore } from '@/stores/settings'
+import { settingsFixture } from '@/test/fixtures'
 
 /**
  * 別の PC の画面が「どれくらいの間隔で届くか」の表示（セルフホスト化設計§11-3）。
@@ -43,15 +44,15 @@ function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
   }
 }
 
-function settings(screen_interval_ms: number | null) {
+function settings(screen_interval_ms: number) {
   useSettingsStore.setState({
-    settings: {
-      always_bypass_permissions: false,
-      available_modes: ['default'],
-      model_aliases: [],
-      model_catalog: [],
-      screen_interval_ms,
-    },
+    settings: settingsFixture({
+      intervals: {
+        sync_interval_secs: 20,
+        screen_interval_ms,
+        scrollback_lines: 1000,
+      },
+    }),
     loading: false,
   })
 }

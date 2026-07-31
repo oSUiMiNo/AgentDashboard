@@ -70,6 +70,11 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct AgentConn {
     pub agent_id: AgentId,
     pub account_id: Uuid,
+    /// この接続を認めたトークン（設計§8-4）。
+    ///
+    /// **失効を接続中にも効かせるため**に持つ。外したはずの PC が繋がり続けるなら、
+    /// 失効はほとんど意味を持たない（次に切れるまで待つことになる）。
+    pub token_id: Uuid,
     pub name: String,
     /// この PC の CLI が受け付ける権限モード（§21 読み替え1）。
     ///
@@ -97,6 +102,15 @@ impl AgentConn {
         self.outbound
             .try_send(Message::Binary(bytes.into()))
             .is_ok()
+    }
+
+    /// この接続を畳ませる（設計§8-4 の「接続中なら切断」）。
+    ///
+    /// 待ち行列へ Close を積むだけ。**こちらから TCP を殴らない**のは、送信タスクが
+    /// 積まれた指示を書き終えてから畳むほうが、相手にとって理由の分かる終わり方に
+    /// なるため。
+    pub fn disconnect(&self) {
+        let _ = self.outbound.try_send(Message::Close(None));
     }
 }
 
@@ -204,19 +218,7 @@ impl AgentHub {
         account_id: Uuid,
         intervals: db::settings::Intervals,
     ) -> Result<(), sea_orm::DbErr> {
-        for (key, value) in [
-            (
-                db::settings::SYNC_INTERVAL_SECS,
-                intervals.sync_interval_secs,
-            ),
-            (
-                db::settings::SCREEN_INTERVAL_MS,
-                intervals.screen_interval_ms,
-            ),
-            (db::settings::SCROLLBACK_LINES, intervals.scrollback_lines),
-        ] {
-            db::settings::put(&self.db, account_id, key, serde_json::json!(value)).await?;
-        }
+        db::settings::put_intervals(&self.db, account_id, intervals).await?;
 
         let message = ServerToAgent::SetIntervals {
             intervals: to_protocol(intervals),
@@ -370,6 +372,26 @@ impl AgentHub {
         };
         let browser = protocol::frame::encode(frame.kind.to_browser(), frame.card_id, payload);
         let _ = relay.frames.send(Bytes::from(browser));
+    }
+
+    /// そのトークンで繋がっている PC を全部畳む（設計§8-4）。
+    ///
+    /// 失効の直後に呼ぶ。**次の接続は upgrade で断られる**（トークンが引けない）ので、
+    /// ここで畳めば「外したはずの PC が繋がり続ける」状態が残らない。
+    pub fn disconnect_token(&self, token_id: Uuid) -> usize {
+        let doomed: Vec<Arc<AgentConn>> = self
+            .conns
+            .lock()
+            .expect("ロックが壊れていない")
+            .values()
+            .filter(|conn| conn.token_id == token_id)
+            .cloned()
+            .collect();
+        for conn in &doomed {
+            tracing::info!(agent_id = %conn.agent_id, "失効したトークンの接続を切ります");
+            conn.disconnect();
+        }
+        doomed.len()
     }
 
     fn register(&self, conn: Arc<AgentConn>) -> Option<Arc<AgentConn>> {
@@ -625,9 +647,9 @@ pub async fn agent_ws_handler(
         _ => String::new(),
     };
 
-    upgrade
-        .protocols([A2S_PROTOCOL])
-        .on_upgrade(move |socket| agent_loop(hub, owner.account_id, account, socket))
+    upgrade.protocols([A2S_PROTOCOL]).on_upgrade(move |socket| {
+        agent_loop(hub, owner.account_id, owner.token_id, account, socket)
+    })
 }
 
 /// `Sec-WebSocket-Protocol` に目的の版が含まれるか。
@@ -652,7 +674,13 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
     (!token.is_empty()).then(|| token.to_string())
 }
 
-async fn agent_loop(hub: Arc<AgentHub>, account_id: Uuid, account_name: String, socket: WebSocket) {
+async fn agent_loop(
+    hub: Arc<AgentHub>,
+    account_id: Uuid,
+    token_id: Uuid,
+    account_name: String,
+    socket: WebSocket,
+) {
     let (mut sink, mut stream) = socket.split();
     let (outbound, mut outbound_rx) = mpsc::channel::<Message>(OUTBOUND_QUEUE_MESSAGES);
 
@@ -712,6 +740,7 @@ async fn agent_loop(hub: Arc<AgentHub>, account_id: Uuid, account_name: String, 
     let conn = Arc::new(AgentConn {
         agent_id,
         account_id,
+        token_id,
         name: agent_name.clone(),
         available_modes,
         always_bypass_permissions,

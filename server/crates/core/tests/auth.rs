@@ -131,7 +131,13 @@ async fn 偽装したヘッダでは免除を得られない() {
 async fn 共有パスワードを通れば広げた先からも入れる() {
     // 動線の確認（設計§8-3）：127.0.0.1 で登録 → LAN から要求される → 通れば入れる
     let config = opened_config();
-    let here = common::TestServer::start_with(config.clone()).await;
+    // **設定の持ち主も立てる**（本番のローカルモードは必ず立っている）。立てないと
+    // `/api/settings` が 404 になり、確かめたい経路の手前で終わる
+    let toml = std::env::temp_dir().join(format!(
+        "agentdashboard-lan-{}.toml",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let here = common::TestServer::start_with_settings(config.clone(), toml.clone()).await;
     let (status, body) = here
         .put(
             "/api/settings",
@@ -141,6 +147,7 @@ async fn 共有パスワードを通れば広げた先からも入れる() {
     assert_eq!(status, 200, "127.0.0.1 から登録できない: {body}");
     let database_url = here.config.resolved_database_url();
     drop(here);
+    let _ = std::fs::remove_file(&toml);
 
     // 同じ DB を指す別のサーバを、LAN の向こうから見る
     let mut there = common::TestServer::start_from(

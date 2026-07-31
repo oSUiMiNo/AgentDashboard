@@ -5,6 +5,7 @@ import type { SessionMeta } from '@/lib/protocol'
 import { applySessionSnapshot, clearSessions, getSession } from '@/stores/sessions'
 import { useSettingsStore } from '@/stores/settings'
 import { useWsStore } from '@/stores/ws'
+import { settingsFixture } from '@/test/fixtures'
 
 /**
  * セッション画面のモード切替（テスト計画フェーズ5「表示」「購読の粒度」）。
@@ -48,19 +49,14 @@ beforeEach(() => {
     return 0
   })
   useSettingsStore.setState({
-    settings: {
-      always_bypass_permissions: false,
-      available_modes: [
+    settings: settingsFixture({ always_bypass_permissions: false, available_modes: [
         'default',
         'acceptEdits',
         'plan',
         'auto',
         'dontAsk',
         'bypassPermissions',
-      ],
-      model_aliases: [],
-      model_catalog: [],
-    },
+      ] }),
     loading: false,
   })
 })

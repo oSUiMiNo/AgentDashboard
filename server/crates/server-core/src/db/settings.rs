@@ -118,6 +118,26 @@ pub async fn intervals(db: &DatabaseConnection, account: Uuid) -> Result<Interva
     Ok(intervals)
 }
 
+/// 間隔を3つまとめて書く。
+///
+/// 1つずつ書く形を呼び出し側に持たせると、**書く順序とキー名がそこへ散る**。
+/// 配る相手（PC）が居る場合は [`crate::gateway::AgentHub::set_intervals`] を通ること
+/// （こちらは保存だけで、接続中の PC へは配らない）。
+pub async fn put_intervals(
+    db: &DatabaseConnection,
+    account: Uuid,
+    intervals: Intervals,
+) -> Result<(), DbErr> {
+    for (key, value) in [
+        (SYNC_INTERVAL_SECS, intervals.sync_interval_secs),
+        (SCREEN_INTERVAL_MS, intervals.screen_interval_ms),
+        (SCROLLBACK_LINES, intervals.scrollback_lines),
+    ] {
+        put(db, account, key, serde_json::json!(value)).await?;
+    }
+    Ok(())
+}
+
 /// LAN 開放の共有パスワード（ハッシュ）。設定されていなければ `None`。
 pub async fn lan_password_hash(db: &DatabaseConnection) -> Result<Option<String>, DbErr> {
     Ok(get(db, super::SERVER_SCOPE_ID, LAN_PASSWORD_HASH)

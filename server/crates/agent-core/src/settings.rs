@@ -22,57 +22,11 @@ use crate::config::AgentConfig;
 use crate::model_aliases::AliasSeen;
 use crate::model_catalog::CatalogEntry;
 use protocol::PermissionMode;
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// 書き戻す対象のキー。
 const ALWAYS_BYPASS_KEY: &str = "always_bypass_permissions";
-
-/// 画面が読む設定の全体。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SettingsView {
-    pub always_bypass_permissions: bool,
-    /// この CLI が受け付ける権限モード（正規値）。
-    ///
-    /// 起動時に `claude --help` から読む。読めなければ既知の表へ落ちる（設計§3）。
-    /// 画面の起動ボタンと切替UIの選択肢はこれを見る。
-    pub available_modes: Vec<PermissionMode>,
-    /// 別名がこの環境で何に解決されたかの実測（設計§12）。
-    ///
-    /// モデルの選択肢へ版番号を併記するために配る。**表に版番号を持たない**という
-    /// 判断（設計§3）を保ったまま「Opus（Opus 5）」と出すための材料で、
-    /// 一度も選んでいない別名はここに現れない（推測で埋めない）。
-    ///
-    /// WebSocket のメッセージを増やさず設定に載せているのは、更新が滅多に起きないため。
-    #[serde(default)]
-    pub model_aliases: Vec<AliasSeen>,
-    /// 起動している CLI 自身から取り出した、正式名と通称の対応表（設計§13）。
-    ///
-    /// `claude-opus-5` → `Opus 5`。**まだ一度も選んでいない別名にも版番号を出す**ための材料で、
-    /// `family` から「その系統でいちばん新しいもの」を引く。
-    /// 取れなければ空で、そのときは別名のラベル（`Opus`）が出るだけ。
-    #[serde(default)]
-    pub model_catalog: Vec<CatalogEntry>,
-    /// PC ごとのモデルの表（セルフホスト化設計§13-4）。キーは `agent_id`、
-    /// **ローカルモードは `"local"` の1本**。
-    ///
-    /// 上の2つ（`model_aliases` / `model_catalog`）と中身は同じで、違うのは
-    /// **どの PC のものか**が分かること。CLI の版は PC ごとに違うので、
-    /// ModelPicker はセッションが属する PC の表を見なければならない。
-    ///
-    /// 両方を返しているのは、参照先の切替（ModelPicker 側）がまだこれからだから。
-    /// 切り替えたときに上の2つを落とす（§21 読み替え4）。
-    #[serde(default)]
-    pub model_tables: std::collections::BTreeMap<String, serde_json::Value>,
-    /// いま効いている画面の更新間隔（ミリ秒。セルフホスト化設計§11-3）。
-    ///
-    /// **ローカルモードでは `None`。** 画面配信そのものが動かない（生バイトを直に配る）ので、
-    /// 出す値が存在しない。リモートのカードを開いているときだけヘッダに小さく出して、
-    /// **画面が止まっているのか間引かれているのか**を利用者が区別できるようにする。
-    #[serde(default)]
-    pub screen_interval_ms: Option<u64>,
-}
 
 /// ローカルモードのモデル表のキー（設計§13-4）。
 pub const LOCAL_TABLE_KEY: &str = "local";
@@ -125,39 +79,38 @@ impl SettingsStore {
         })
     }
 
-    /// 画面へ配る形にまとめる。
+    /// この PC のモデル表を、`agent_id` をキーにした形で1本だけ返す（設計§13-4）。
     ///
-    /// 別名の実測は [`crate::session::SessionManager`] が持っているので、呼び出し側から
-    /// 渡してもらう。設定の持ち主がマネージャを参照すると、両者が互いを指すことになる。
-    pub fn view_with(&self, model_aliases: Vec<AliasSeen>) -> SettingsView {
-        let model_tables = std::collections::BTreeMap::from([(
+    /// ローカルモードには PC という単位が無いので、キーは常に [`LOCAL_TABLE_KEY`]。
+    /// **応答の組み立て（`/api/settings`）は両者を束ねる層の仕事**なので、ここは
+    /// 材料を渡すところまでにしてある。
+    pub fn local_model_tables(
+        &self,
+        model_aliases: &[AliasSeen],
+    ) -> std::collections::BTreeMap<String, serde_json::Value> {
+        std::collections::BTreeMap::from([(
             LOCAL_TABLE_KEY.to_string(),
-            self.model_table(&model_aliases),
-        )]);
-        SettingsView {
-            always_bypass_permissions: self.always_bypass_permissions.load(Ordering::Relaxed),
-            available_modes: self.available_modes.clone(),
-            model_aliases,
-            model_catalog: self.model_catalog.clone(),
-            model_tables,
-            // ローカルモードには画面配信そのものが無い（設計§7-2）
-            screen_interval_ms: None,
-        }
+            self.model_table(model_aliases),
+        )])
     }
 
-    pub fn view(&self) -> SettingsView {
-        self.view_with(Vec::new())
+    pub fn always_bypass_permissions(&self) -> bool {
+        self.always_bypass_permissions.load(Ordering::Relaxed)
+    }
+
+    pub fn available_modes(&self) -> &[PermissionMode] {
+        &self.available_modes
     }
 
     /// トグルを書き換える。**ファイルとメモリの両方**を更新する。
     ///
     /// ファイルだけ書いても動いているサーバは古い値を持ったままなので、次の起動を
     /// 待たせることになる。逆にメモリだけでは、開き直したときに戻ってしまう。
-    pub fn set_always_bypass_permissions(&self, value: bool) -> anyhow::Result<SettingsView> {
+    pub fn set_always_bypass_permissions(&self, value: bool) -> anyhow::Result<()> {
         write_bool(&self.path, ALWAYS_BYPASS_KEY, value)?;
         self.always_bypass_permissions
             .store(value, Ordering::Relaxed);
-        Ok(self.view())
+        Ok(())
     }
 }
 
@@ -311,15 +264,11 @@ stalled_threshold_secs = 120
             // 対応表はここでは関係ない（画面へ配るだけの値）
             Vec::new(),
         );
-        assert!(!store.view().always_bypass_permissions);
+        assert!(!store.always_bypass_permissions());
 
-        let view = store.set_always_bypass_permissions(true).unwrap();
-        assert!(view.always_bypass_permissions);
-        assert!(store.view().always_bypass_permissions);
-        assert_eq!(
-            store.view().available_modes,
-            [PermissionMode::new("default")]
-        );
+        store.set_always_bypass_permissions(true).unwrap();
+        assert!(store.always_bypass_permissions());
+        assert_eq!(store.available_modes(), [PermissionMode::new("default")]);
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }

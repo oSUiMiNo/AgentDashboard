@@ -174,9 +174,9 @@ export function SessionView({ cardId, compact = false }: Props) {
  */
 function ScreenInterval({ remote, shown }: { remote: boolean; shown: boolean }) {
   const intervalMs = useSettingsStore(
-    (state) => state.settings.screen_interval_ms,
+    (state) => state.settings.intervals.screen_interval_ms,
   )
-  if (!remote || !shown || intervalMs == null) {
+  if (!remote || !shown) {
     return null
   }
   return (
