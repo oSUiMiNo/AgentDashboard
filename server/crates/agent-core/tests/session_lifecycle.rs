@@ -238,3 +238,37 @@ async fn archiveでカードが一覧から消える() {
     assert!(manager.list().is_empty());
     assert!(manager.get(session.card_id).is_none());
 }
+
+#[tokio::test]
+async fn 起こしたセッションは_toml_が名乗る名前を申告する() {
+    // 正当系（テスト計画フェーズ5）。**申告するだけ**で、帰属を決めるのはサーバ側
+    // （設計§8-5）。ここで見るのは「線に載る」ところまで
+    let root = std::env::temp_dir().join(format!(
+        "agentdashboard-toml-account-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let deep = root.join("app");
+    std::fs::create_dir_all(&deep).expect("作業ディレクトリを作れること");
+    std::fs::write(
+        root.join(agent_core::session::account_toml::FILE_NAME),
+        "account = \"わたし\"\n",
+    )
+    .expect("書けること");
+
+    let manager = common::manager();
+    let session = manager
+        .spawn(&deep.to_string_lossy())
+        .expect("セッションを起動できること");
+
+    // 上へ辿って根の1枚が効くこと（cwd 直下に置かなくてよい）
+    assert_eq!(
+        session.meta().toml_account.as_deref(),
+        Some("わたし"),
+        "申告が線に載っていない"
+    );
+    // 申告と帰属は別。エージェント側は自分の帰属を知らない（設計§5-1 の手順4）
+    assert_eq!(session.meta().account, None);
+
+    session.kill();
+    let _ = std::fs::remove_dir_all(root);
+}

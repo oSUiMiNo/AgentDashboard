@@ -16,6 +16,7 @@
 //! `Lagged` が返る。これがそのまま「遅いクライアントの検知」になり、検知したら
 //! リングバッファのスナップショット（フレーム種別 `0x03`）を送り直して復帰させる。
 
+pub mod account_toml;
 pub mod cwd;
 pub mod hooks_settings;
 pub mod input;
@@ -1298,8 +1299,11 @@ impl SessionManager {
                 // 報告している時点で生きている。鮮度を判断するのは受け取る側（§6-3）で、
                 // 切断は「報告が来なくなったこと」としてしか観測できない
                 agent_connected: true,
-                // 申告は上の帰属とは別（設計§8-5）。値を入れるのは次の工程
-                toml_account: None,
+                // **申告するだけ。** 帰属を決めるのはサーバなので、ここに他人の名前が
+                // 書いてあっても通らない（設計§8-5）。読むのは起こす瞬間の1回だけで、
+                // 途中でファイルを書き換えても走っているセッションは動かない——
+                // 帰属が実行中に変わると、見えていたカードが黙って消えることになる
+                toml_account: account_toml::lookup(&project_path),
             }),
             process,
             ring: Mutex::new(RingBuffer::new(self.config.pty_ring_buffer)),
