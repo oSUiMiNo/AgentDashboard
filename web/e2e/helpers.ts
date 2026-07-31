@@ -59,11 +59,39 @@ export async function expectTerminalToContain(page: Page, marker: string) {
 export async function openDashboard(page: Page) {
   await page.goto('/')
   await expect(page).toHaveTitle('AgentDashboard')
+  await signInIfAsked(page)
   await expect(page.getByTestId('connection-status')).toHaveAttribute(
     'data-status',
     'open',
   )
 }
+
+/**
+ * ログイン画面が出ていたら通る（セルフホスト構成だけ。設計§8-2）。
+ *
+ * ローカルモードの構成では鍵が無いので、この関数は**何もせずに戻る**。
+ * 呼び出し側でモードを分けないのは、どちらの構成でも同じヘルパを通したいため——
+ * 分けると、片方でしか踏まない道ができる。
+ */
+export async function signInIfAsked(page: Page) {
+  const form = page.getByTestId('login-form')
+  // **「どちらかが出る」まで待ってから見る。** 画面はまず `GET /api/me` を聞いてから
+  // 何を出すか決めるので、聞いている間はどちらも出ていない。待たずに数えると
+  // 0 が返り、ログインを飛ばして「繋がらない」で落ちる——しかも**実行環境の速さ次第**で
+  // 通ったり落ちたりする（単体では通るのに通しで落ちる形）
+  await expect(form.or(page.getByTestId('spawn-form'))).toBeVisible()
+  if ((await form.count()) === 0) {
+    return
+  }
+  await page.getByTestId('login-name').fill(REMOTE_ACCOUNT)
+  await page.getByTestId('login-password').fill(REMOTE_PASSWORD)
+  await page.getByRole('button', { name: '入る' }).click()
+  await expect(form).toHaveCount(0)
+}
+
+/** `scripts/e2e-remote` が作る管理者。**テストの中だけの値**。 */
+export const REMOTE_ACCOUNT = 'e2e'
+export const REMOTE_PASSWORD = 'e2eのあいことば'
 
 /**
  * セッションを1つ起動して、その小窓を返す。

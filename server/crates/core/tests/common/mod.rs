@@ -543,6 +543,19 @@ impl TestServer {
     pub async fn get(&self, path: &str) -> (u16, String) {
         self.request("GET", path, None).await
     }
+
+    /// DB に入っている間隔（設計§13-3）。
+    ///
+    /// `/api/settings` を読むのではなく DB を直に見るのは、**設定の持ち主
+    /// （`config.toml` 側）を立てていないテストでも確かめたい**ため。
+    pub async fn registry_intervals(
+        &self,
+    ) -> Result<server_core::db::settings::Intervals, sea_orm::DbErr> {
+        let db = server_core::db::connect(&self.config.resolved_database_url())
+            .await
+            .expect("同じ DB へ繋げること");
+        server_core::db::settings::intervals(&db, server_core::db::LOCAL_ACCOUNT_ID).await
+    }
 }
 
 impl Drop for TestServer {

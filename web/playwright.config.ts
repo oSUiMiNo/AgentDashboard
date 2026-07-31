@@ -45,7 +45,7 @@ export default defineConfig({
       name: 'chromium',
       use: { ...devices['Desktop Chrome'] },
       // セルフホスト構成のぶんは別のサーバ（4174）へ繋ぐ
-      testIgnore: /remote\.spec\.ts/,
+      testIgnore: /(remote|account)\.spec\.ts/,
     },
     {
       // 別の PC のセッションを、実物のブラウザで見る（セルフホスト化設計§7）。
@@ -53,7 +53,9 @@ export default defineConfig({
       // 「エージェントが作った画面が xterm.js で再現される」はここでしか確かめられない
       name: 'chromium-remote',
       use: { ...devices['Desktop Chrome'], baseURL: 'http://127.0.0.1:4174' },
-      testMatch: /remote\.spec\.ts/,
+      // 入口の鍵とアカウント画面も、**この構成にしか存在しない**（ローカルは鍵が無く、
+      // 繋いでくる PC も居ない）
+      testMatch: /(remote|account)\.spec\.ts/,
     },
   ],
   webServer: [

@@ -20,6 +20,9 @@ FAKE_CLAUDE="${REPO_ROOT}/server/target/debug/fake-claude"
 STATE="${REPO_ROOT}/web/test-results/remote"
 SERVER_CONFIG="${REPO_ROOT}/web/e2e/remote-server.toml"
 AGENT_CONFIG="${REPO_ROOT}/web/e2e/remote-agent.toml"
+# ブラウザで入るアカウント。**テストの中だけの値**なので伏せる意味は無い
+ACCOUNT="e2e"
+PASSWORD="e2eのあいことば"
 
 for binary in "${BIN}" "${AGENT_BIN}" "${FAKE_CLAUDE}"; do
     if [[ ! -x "${binary}" ]]; then
@@ -42,8 +45,11 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # 1. トークンを発行する（5分セットアップの手順3）。**サーバの起動より先でよい**——
-# 発行は DB を直に触るので、待ち受けている必要が無い
-token="$("${BIN}" --config "${SERVER_CONFIG}" pair-token --account e2e | tr -d '[:space:]')"
+# 発行は DB を直に触るので、待ち受けている必要が無い。
+#
+# **ブラウザで入るアカウントと同じ名前にする。** 違うアカウントのトークンで繋いだ PC の
+# カードは、そのアカウントでログインしないと見えない（設計§8-6）
+token="$("${BIN}" --config "${SERVER_CONFIG}" pair-token --account "${ACCOUNT}" | tr -d '[:space:]')"
 if [[ -z "${token}" ]]; then
     echo "エラー: ペアリングトークンを発行できませんでした。" >&2
     exit 1
@@ -54,15 +60,27 @@ fi
 server_pid=$!
 
 # 応答するまで待つ。ここを待たずにエージェントを起こすと、初回の接続が必ず失敗して
-# バックオフのぶんだけテストの開始が遅れる
+# バックオフのぶんだけテストの開始が遅れる。
+#
+# **待ちに使うのは `/api/me`。** `/api/sessions` は鍵の向こうなので、待ちに使うと
+# 「まだ起きていない」と「ログインしていない」が同じ 401 になり、永久に待つ
 for _ in $(seq 1 100); do
-    if curl -sf "http://127.0.0.1:4174/api/sessions" >/dev/null 2>&1; then
+    if curl -sf "http://127.0.0.1:4174/api/me" >/dev/null 2>&1; then
         break
     fi
     sleep 0.1
 done
 
-# 3. エージェント（PTY・フック・パースを持つ側）。**相手にするのは擬似 claude**
+# 3. 最初の管理者を作る（5分セットアップの手順2）。**開いているのは最初の一度きり**
+# なので、記録を消して起こし直すこのスクリプトでは毎回ここを通る
+if ! curl -sf -X POST "http://127.0.0.1:4174/api/setup" \
+    -H 'Content-Type: application/json' \
+    -d "{\"name\":\"${ACCOUNT}\",\"password\":\"${PASSWORD}\"}" >/dev/null; then
+    echo "エラー: 管理者を作れませんでした。" >&2
+    exit 1
+fi
+
+# 4. エージェント（PTY・フック・パースを持つ側）。**相手にするのは擬似 claude**
 AGENTDASHBOARD_CLAUDE_BIN="${FAKE_CLAUDE}" \
     AGENTDASHBOARD_PAIRING_TOKEN="${token}" \
     "${AGENT_BIN}" --config "${AGENT_CONFIG}" &

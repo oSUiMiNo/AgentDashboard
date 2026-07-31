@@ -289,6 +289,23 @@ pub async fn api_update_settings(
             .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, format!("{err:#}")))?;
     }
 
+    // **設定の持ち主が居なくても、DB のぶんは保存できている。** 居ないことを理由に
+    // 404 を返すと、保存されたのに失敗したように見える（統合テストは画面を立てずに
+    // セッションだけを確かめることがある）
+    if state.store.is_none() {
+        let intervals = db::settings::intervals(state.auth.db(), identity.account_id)
+            .await
+            .unwrap_or_default();
+        return Ok(Json(SettingsView {
+            always_bypass_permissions: false,
+            always_bypass_editable: false,
+            available_modes: Vec::new(),
+            model_tables: BTreeMap::new(),
+            agents: server_core::account::no_agents(),
+            intervals: intervals.into(),
+            lan_password: lan_password_view(&state.auth, &identity).await,
+        }));
+    }
     api_settings(State(state), Extension(identity)).await
 }
 

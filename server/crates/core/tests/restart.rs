@@ -163,3 +163,36 @@ async fn パーサが居なくても履歴は返る() {
 
     session.kill();
 }
+
+#[tokio::test]
+async fn 画面から変えた設定は再起動しても残る() {
+    // 検収条件「〜設定でき、アプリ再起動後も保持される」（設計§13-1）。
+    // 置き場所を DB にした狙いがこれで、**同じ DB を指す2回目の起動で読めること**が
+    // 満たされた形にあたる（`config.toml` へ書き戻す必要が無い）
+    let config = config_for("settings");
+
+    {
+        let server = common::TestServer::start_with(config.clone()).await;
+        let (status, body) = server
+            .put(
+                "/api/settings",
+                &serde_json::json!({
+                    "sync_interval_secs": 5,
+                    "screen_interval_ms": 1000,
+                    "scrollback_lines": 300,
+                })
+                .to_string(),
+            )
+            .await;
+        // 設定の持ち主（`config.toml` 側）は立てていないので、応答は DB のぶんだけ。
+        // 保存そのものは通る
+        assert_eq!(status, 200, "保存できない: {body}");
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let server = common::TestServer::start_with(config).await;
+    let intervals = server.registry_intervals().await.expect("間隔を読めること");
+    assert_eq!(intervals.sync_interval_secs, 5);
+    assert_eq!(intervals.screen_interval_ms, 1000);
+    assert_eq!(intervals.scrollback_lines, 300);
+}
