@@ -598,6 +598,59 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn 大きさが変わると全画面を送り直す() {
+        // 設計§7-4。差分では追いつけない（相手の画面の桁がもう違う）
+        let (screen, sink) = emulator(ScreenSettings {
+            screen_ms: 60_000,
+            scrollback_lines: 100,
+        });
+        screen.subscribe(20, 5);
+        tokio::task::yield_now().await;
+
+        screen.feed(b"hello");
+        let _ = screen.resize(40, 10);
+        screen.refresh();
+
+        assert_eq!(
+            sink.kinds(),
+            vec![FrameKind::ScreenFull, FrameKind::ScreenFull],
+            "大きさが変わったのに全画面が出ていない"
+        );
+        screen.unsubscribe();
+    }
+
+    #[test]
+    fn 差分が上限を超えたら全画面へ切り替える() {
+        // 設計§9-5。巨大な差分を運ぶくらいなら、画面を作り直したほうが小さい。
+        // 1セルずつ色を変えて塗ると、差分は桁数×行数ぶんの色指定になって膨らむ
+        let sink = Arc::new(Frames::default());
+        let screen = TermEmulator::new(
+            CardId::new(),
+            Arc::clone(&sink) as Arc<dyn EventSink>,
+            400,
+            200,
+            ScreenSettings::default(),
+        );
+
+        let mut paint = Vec::new();
+        for row in 0..200u16 {
+            paint.extend_from_slice(format!("\x1b[{};1H", row + 1).as_bytes());
+            for col in 0..400u16 {
+                paint.extend_from_slice(format!("\x1b[38;5;{}m#", col % 256).as_bytes());
+            }
+        }
+        screen.feed(&paint);
+
+        let (kind, payload) = screen.next_update().expect("画面が出ること");
+        assert_eq!(
+            kind,
+            FrameKind::ScreenFull,
+            "差分のまま送ろうとしています（{} バイト）",
+            payload.len()
+        );
+    }
+
     #[test]
     fn 大きさを変えると差分の基準も作り直す() {
         let (screen, _sink) = emulator(ScreenSettings::default());
