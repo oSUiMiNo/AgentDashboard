@@ -31,6 +31,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use bytes::Bytes;
 use futures_util::{SinkExt as _, StreamExt as _};
 use protocol::{
     AgentId, CardId, PermissionMode,
@@ -39,11 +40,11 @@ use protocol::{
 };
 use sea_orm::EntityTrait as _;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
 /// エージェント1接続あたりの送信待ち行列（メッセージ数）。
@@ -99,6 +100,36 @@ impl AgentConn {
     }
 }
 
+/// カード1枚ぶんの画面の中継（設計§7-4）。
+///
+/// # 誰が見ているかを数えるのはサーバの仕事
+///
+/// エージェントは「送れ」と言われたぶんだけ送る。**誰も見ていないときに止める**判断は、
+/// 視聴者を知っている側——つまりここ——にしか下せない（要件5-2）。
+///
+/// 数えるのを個数ではなく **client_id の集合**にしてあるのは、同じ端末を開き直したとき
+/// （`SubPty` が2回来る）に二重に数えないため。1つ多く数えたまま閉じると、
+/// 誰も見ていないのに画面が流れ続ける。
+struct ScreenRelay {
+    viewers: Mutex<HashSet<u64>>,
+    /// 最後に伝えた端末の大きさ。購読を出し直すときに要る
+    size: Mutex<(u16, u16)>,
+    /// ブラウザ向けに移し替えたフレーム
+    frames: broadcast::Sender<Bytes>,
+}
+
+impl ScreenRelay {
+    fn size(&self) -> (u16, u16) {
+        *self.size.lock().expect("ロックが壊れていない")
+    }
+}
+
+/// 画面1枚ぶんの配信待ち行列（フレーム数）。
+///
+/// 画面は最短でも 50ms 間隔（ホットウィンドウ。§7-5）なので、これで数秒ぶんにあたる。
+/// 溢れた購読者は作り直しへ回す（[`RemoteAgent::pty_snapshot`]）。
+const SCREEN_QUEUE_FRAMES: usize = 64;
+
 /// 繋がっている PC の集まり。
 ///
 /// **接続は DB に持たない**（§3-2）。ここに居るかどうかがそのまま「いま繋がっているか」で、
@@ -107,6 +138,9 @@ pub struct AgentHub {
     db: sea_orm::DatabaseConnection,
     registry: Arc<SessionRegistry>,
     conns: Mutex<HashMap<AgentId, Arc<AgentConn>>>,
+    /// カードごとの画面の中継。**接続と同じくメモリだけに持つ**（誰が見ているかは
+    /// このインスタンスの事実で、落ちれば消えるのが正しい。跨ぐ場合の合算は§9-4＝フェーズ6）
+    screens: Mutex<HashMap<CardId, Arc<ScreenRelay>>>,
 }
 
 impl AgentHub {
@@ -115,6 +149,7 @@ impl AgentHub {
             db,
             registry,
             conns: Mutex::new(HashMap::new()),
+            screens: Mutex::new(HashMap::new()),
         })
     }
 
@@ -192,6 +227,149 @@ impl AgentHub {
             }
         }
         Ok(())
+    }
+
+    /// カードの画面の中継を引く（無ければ作る）。
+    fn screen(&self, card_id: CardId) -> Arc<ScreenRelay> {
+        Arc::clone(
+            self.screens
+                .lock()
+                .expect("ロックが壊れていない")
+                .entry(card_id)
+                .or_insert_with(|| {
+                    let (frames, _) = broadcast::channel(SCREEN_QUEUE_FRAMES);
+                    Arc::new(ScreenRelay {
+                        viewers: Mutex::new(HashSet::new()),
+                        size: Mutex::new((80, 24)),
+                        frames,
+                    })
+                }),
+        )
+    }
+
+    /// 見る人が増えた（§7-4）。
+    fn add_viewer(
+        &self,
+        card_id: CardId,
+        client_id: u64,
+        cols: u16,
+        rows: u16,
+    ) -> broadcast::Receiver<Bytes> {
+        let relay = self.screen(card_id);
+        *relay.size.lock().expect("ロックが壊れていない") = (cols, rows);
+        relay
+            .viewers
+            .lock()
+            .expect("ロックが壊れていない")
+            .insert(client_id);
+
+        // **2人目以降でも頼み直す。** 配信は1本の流れを分けて配る形なので、後から
+        // 入った端末は差分だけを受け取っても何も描けない。頼み直すと全画面から始まる。
+        // 大きさも最後に開いた端末に合わせる（last-writer-wins。§7-4）
+        self.request_screen(card_id, cols, rows);
+        relay.frames.subscribe()
+    }
+
+    /// 見る人が減った。**誰も居なくなったときだけ**止める（§7-4）。
+    fn remove_viewer(&self, card_id: CardId, client_id: u64) {
+        let Some(relay) = self
+            .screens
+            .lock()
+            .expect("ロックが壊れていない")
+            .get(&card_id)
+            .cloned()
+        else {
+            return;
+        };
+        let empty = {
+            let mut viewers = relay.viewers.lock().expect("ロックが壊れていない");
+            viewers.remove(&client_id);
+            viewers.is_empty()
+        };
+        if empty && let Some(conn) = self.conn_for_card(card_id) {
+            conn.send(&ServerToAgent::UnsubScreen { card_id });
+        }
+    }
+
+    /// 画面を出して（出し直して）もらう。
+    fn request_screen(&self, card_id: CardId, cols: u16, rows: u16) {
+        if let Some(conn) = self.conn_for_card(card_id) {
+            conn.send(&ServerToAgent::SubScreen {
+                card_id,
+                cols,
+                rows,
+            });
+        }
+    }
+
+    /// 繋ぎ直した PC へ、いま見られているカードの購読を出し直す（§6-4）。
+    ///
+    /// エージェント側は切れた時点で全部止めている——**誰が見ているかを知っているのは
+    /// こちら**なので、こちらから頼み直さないと画面が戻らない。
+    fn resubscribe_screens(&self, agent_id: AgentId) {
+        let watched: Vec<(CardId, (u16, u16))> = self
+            .screens
+            .lock()
+            .expect("ロックが壊れていない")
+            .iter()
+            .filter(|(_, relay)| {
+                !relay
+                    .viewers
+                    .lock()
+                    .expect("ロックが壊れていない")
+                    .is_empty()
+            })
+            .map(|(card_id, relay)| (*card_id, *relay.size.lock().expect("ロックが壊れていない")))
+            .collect();
+
+        for (card_id, (cols, rows)) in watched {
+            // その PC のカードだけ。他人の PC のカードを頼んでも届かない
+            if self.registry.get(card_id).and_then(|r| r.meta().agent_id) == Some(agent_id) {
+                self.request_screen(card_id, cols, rows);
+            }
+        }
+    }
+
+    /// エージェントから届いた画面のフレームを、ブラウザ向けへ移し替えて配る（設計§4-3）。
+    ///
+    /// やることは**種別の移し替えと通し番号を剥がすこと**だけ。中身（エスケープ列）は
+    /// 一切解釈しない——だからこそブラウザ側は1行も変わらない（§7-3）。
+    fn deliver_screen(&self, bytes: &[u8]) {
+        let frame = match protocol::frame::decode(bytes) {
+            Ok(frame) => frame,
+            Err(err) => {
+                tracing::warn!("壊れた画面のフレームを受け取りました: {err}");
+                return;
+            }
+        };
+        if !matches!(
+            frame.kind,
+            protocol::frame::FrameKind::ScreenFull | protocol::frame::FrameKind::ScreenDiff
+        ) {
+            tracing::warn!(
+                "エージェントから送られてよい種別ではありません: {:?}",
+                frame.kind
+            );
+            return;
+        }
+        // 番号は**ここで剥がす**。ブラウザは知らないし、知る必要も無い（§4-3）
+        let Ok((_seq, payload)) = protocol::frame::split_seq(frame.payload) else {
+            tracing::warn!("番号の無い画面のフレームを受け取りました");
+            return;
+        };
+
+        let Some(relay) = self
+            .screens
+            .lock()
+            .expect("ロックが壊れていない")
+            .get(&frame.card_id)
+            .cloned()
+        else {
+            // 誰も見ていないカードの画面。止める指示と行き違ったぶんなので捨ててよい
+            return;
+        };
+        let browser = protocol::frame::encode(frame.kind.to_browser(), frame.card_id, payload);
+        let _ = relay.frames.send(Bytes::from(browser));
     }
 
     fn register(&self, conn: Arc<AgentConn>) -> Option<Arc<AgentConn>> {
@@ -281,20 +459,42 @@ impl crate::agent::AgentHost for RemoteAgent {
         self.relay(card_id, ServerToAgent::Archive { card_id })
     }
 
-    /// **リモートの端末はまだ開けない。**
+    /// 画面の配信を始める（設計§7-4）。
     ///
-    /// セルフホストモードの画面はエージェント内の端末エミュレータが作る（§7）ので、
-    /// 生バイトの購読口は存在しない。ローカル用の経路をここで流用しないのは、
-    /// §7-2 がそれを明確に否定しており、要件5-2（表示中のものだけ配る）とも衝突するため。
+    /// 返すスナップショットは**空**である。リモートに「いまの生バイト」は存在せず、
+    /// 画面はエージェントが作って送ってくるものだから——ここで空の 0x03（画面を消せ）を
+    /// 返しておくと、直後に届く全画面がその上に描かれて辻褄が合う。
     fn subscribe_pty(
         &self,
-        _card_id: CardId,
-    ) -> Option<(bytes::Bytes, tokio::sync::broadcast::Receiver<bytes::Bytes>)> {
-        None
+        card_id: CardId,
+        client_id: u64,
+        cols: u16,
+        rows: u16,
+    ) -> Option<(bytes::Bytes, broadcast::Receiver<bytes::Bytes>)> {
+        // 繋がっていない PC のカードは端末を開けない（開いても永久に空のまま）
+        self.hub.conn_for_card(card_id)?;
+        let frames = self.hub.add_viewer(card_id, client_id, cols, rows);
+        let blank = bytes::Bytes::from(protocol::frame::encode(
+            protocol::frame::FrameKind::PtySnapshot,
+            card_id,
+            b"",
+        ));
+        Some((blank, frames))
     }
 
-    fn pty_snapshot(&self, _card_id: CardId) -> Option<bytes::Bytes> {
-        None
+    /// 取りこぼした端末を作り直す。
+    ///
+    /// **古い全画面を渡してはいけない。** その上に新しい差分が乗ると、画面は
+    /// 「途中まで古い・途中から新しい」という壊れ方をする。一度消して、
+    /// エージェントに全画面を出し直してもらうのが唯一正しい復帰になる（§7-4 のデシンク）。
+    fn pty_snapshot(&self, card_id: CardId) -> Option<bytes::Bytes> {
+        let (cols, rows) = self.hub.screen(card_id).size();
+        self.hub.request_screen(card_id, cols, rows);
+        Some(bytes::Bytes::from(protocol::frame::encode(
+            protocol::frame::FrameKind::PtySnapshot,
+            card_id,
+            b"",
+        )))
     }
 
     fn write_input(&self, card_id: CardId, bytes: &[u8]) -> Result<(), String> {
@@ -326,7 +526,10 @@ impl crate::agent::AgentHost for RemoteAgent {
     /// リモートでは画面を間隔で送る（§7-5）ので、詰まりを止める必要そのものが無い。
     fn set_flow(&self, _card_id: CardId, _client_id: u64, _paused: bool) {}
 
-    fn release_client(&self, _card_id: CardId, _client_id: u64) {}
+    /// 端末を閉じた・ブラウザが切れた。**忘れると誰も見ていない画面が流れ続ける。**
+    fn release_client(&self, card_id: CardId, client_id: u64) {
+        self.hub.remove_viewer(card_id, client_id);
+    }
 
     /// パーサの健康状態は**エージェントから届く**（`ParserStatus`）ので、サーバは
     /// 持っていない。購読を始めた瞬間に縮退を知らせることはできないが、次の変化で届く。
@@ -516,6 +719,9 @@ async fn agent_loop(hub: Arc<AgentHub>, account_id: Uuid, account_name: String, 
     // 全セッションの SessionUpsert が復帰手順（§6-4）で必ず来るので、生きているものは
     // そこで印が戻る
     hub.registry.set_agent_live(agent_id, false);
+    // まだ見られている端末があれば、画面を出し直してもらう（§6-4）。エージェントは
+    // 切れた時点で全部止めているので、**こちらから頼まないと画面が戻らない**
+    hub.resubscribe_screens(agent_id);
 
     let mut ping = tokio::time::interval(PING_INTERVAL);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -596,9 +802,9 @@ async fn handle_message(
             handle_report(hub, conn, origin, report).await;
             true
         }
-        // 画面のフレーム（0x04 / 0x05）。**中身の扱いはフェーズ4**
+        // 画面のフレーム（0x04 / 0x05）。種別を移し替えてブラウザへ流す（§4-3）
         Message::Binary(bytes) => {
-            tracing::debug!("画面のフレームを受け取りました（{} バイト）", bytes.len());
+            hub.deliver_screen(&bytes);
             true
         }
         Message::Close(_) => false,

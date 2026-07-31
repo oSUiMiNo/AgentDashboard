@@ -76,7 +76,15 @@ impl AgentHost for LocalAgent {
         self.manager.archive(card_id).map_err(|err| err.to_string())
     }
 
-    fn subscribe_pty(&self, card_id: CardId) -> Option<(Bytes, broadcast::Receiver<Bytes>)> {
+    /// **見ている人数は数えない。** ローカルは生バイトをそのまま配るので、
+    /// 何人が見ていようと PTY の読み取りは同じように動く（設計§7-2）。
+    fn subscribe_pty(
+        &self,
+        card_id: CardId,
+        _client_id: u64,
+        _cols: u16,
+        _rows: u16,
+    ) -> Option<(Bytes, broadcast::Receiver<Bytes>)> {
         Some(self.manager.get(card_id)?.subscribe_with_snapshot())
     }
 

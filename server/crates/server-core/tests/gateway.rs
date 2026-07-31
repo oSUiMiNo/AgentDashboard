@@ -116,6 +116,15 @@ impl AgentSocket {
             .expect("送れること");
     }
 
+    /// 画面のフレームを送る（設計§4-3。JSON に包まずバイナリのまま）。
+    async fn send_screen(&mut self, kind: protocol::frame::FrameKind, card_id: CardId, seq: u64) {
+        let bytes = protocol::frame::encode_screen(kind, card_id, seq, b"\x1b[2J\x1b[Hhello");
+        self.socket
+            .send(tungstenite::Message::Binary(bytes.into()))
+            .await
+            .expect("送れること");
+    }
+
     /// 条件に合う指示が来るまで受け取り続ける。
     async fn wait_for(
         &mut self,
@@ -499,5 +508,122 @@ async fn wait_for_listed(
             listed.len()
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn 画面は種別を移し替えて配られ_見る人が居なくなると止まる() {
+    // 設計§4-3・§7-4。サーバがするのは**種別の移し替えと番号を剥がすこと**だけで、
+    // 中身（エスケープ列）は一切解釈しない。これが「フロント無改修」の中身にあたる
+    for backend in common::backends("gw-screen").await {
+        let gateway = TestGateway::start(backend.db.clone()).await;
+        let token = issue(&backend.db, "テスト用").await;
+        let mut socket = gateway.connect_as(&token, "仕事用ノート").await;
+        socket
+            .wait_for("名乗りの応答", |message| {
+                matches!(message, ServerToAgent::Hello { .. })
+            })
+            .await;
+
+        let card_id = CardId::new();
+        socket
+            .send(&AgentMessage::SessionUpsert {
+                session: Box::new(meta(card_id)),
+            })
+            .await;
+        wait_for_listed(&gateway.registry, "1枚出る", |listed| listed.len() == 1).await;
+
+        // --- 見る人が現れた -------------------------------------------------
+        let browser = server_core::gateway::RemoteAgent::new(Arc::clone(&gateway.hub));
+        let (blank, mut frames) =
+            server_core::agent::AgentHost::subscribe_pty(&browser, card_id, 1, 100, 30)
+                .unwrap_or_else(|| panic!("[{}] 端末を開けること", backend.name));
+        assert!(
+            protocol::frame::decode(&blank)
+                .expect("分解できること")
+                .payload
+                .is_empty(),
+            "[{}] リモートに“いまの生バイト”は無いはず",
+            backend.name
+        );
+
+        let sub = socket
+            .wait_for("画面の購読", |message| {
+                matches!(message, ServerToAgent::SubScreen { .. })
+            })
+            .await;
+        assert!(
+            matches!(
+                sub,
+                ServerToAgent::SubScreen {
+                    cols: 100,
+                    rows: 30,
+                    ..
+                }
+            ),
+            "[{}] 端末の大きさが渡っていない: {sub:?}",
+            backend.name
+        );
+
+        // --- 画面が流れる ---------------------------------------------------
+        socket
+            .send_screen(protocol::frame::FrameKind::ScreenFull, card_id, 7)
+            .await;
+        let received = tokio::time::timeout(TIMEOUT, frames.recv())
+            .await
+            .unwrap_or_else(|_| panic!("[{}] 画面が届きませんでした", backend.name))
+            .expect("配信が生きていること");
+        let frame = protocol::frame::decode(&received).expect("分解できること");
+        assert_eq!(
+            frame.kind,
+            protocol::frame::FrameKind::PtySnapshot,
+            "[{}] 全画面はブラウザ向けに 0x03 へ移し替える",
+            backend.name
+        );
+        assert_eq!(
+            frame.payload, b"\x1b[2J\x1b[Hhello",
+            "[{}] 番号が剥がれていない（または中身をいじっている）",
+            backend.name
+        );
+
+        socket
+            .send_screen(protocol::frame::FrameKind::ScreenDiff, card_id, 8)
+            .await;
+        let received = tokio::time::timeout(TIMEOUT, frames.recv())
+            .await
+            .unwrap_or_else(|_| panic!("[{}] 差分が届きませんでした", backend.name))
+            .expect("配信が生きていること");
+        assert_eq!(
+            protocol::frame::decode(&received)
+                .expect("分解できること")
+                .kind,
+            protocol::frame::FrameKind::PtyOutput,
+            "[{}] 差分はブラウザ向けに 0x01 へ移し替える",
+            backend.name
+        );
+
+        // --- 2人目が入っても、1人残っていれば止めない ----------------------
+        let _second = server_core::agent::AgentHost::subscribe_pty(&browser, card_id, 2, 100, 30);
+        socket
+            .wait_for("2人目ぶんの購読", |message| {
+                matches!(message, ServerToAgent::SubScreen { .. })
+            })
+            .await;
+        server_core::agent::AgentHost::release_client(&browser, card_id, 1);
+
+        // --- 最後の1人が去ったら止める --------------------------------------
+        server_core::agent::AgentHost::release_client(&browser, card_id, 2);
+        let stop = socket
+            .wait_for("画面の停止", |message| {
+                matches!(message, ServerToAgent::UnsubScreen { .. })
+            })
+            .await;
+        assert!(
+            matches!(stop, ServerToAgent::UnsubScreen { card_id: stopped } if stopped == card_id),
+            "[{}] 別のカードを止めています: {stop:?}",
+            backend.name
+        );
+
+        backend.finish().await;
     }
 }

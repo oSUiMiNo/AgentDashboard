@@ -303,6 +303,9 @@ async fn handle_request(
         ClientMessage::Archive { card_id } => {
             if let Some(task) = terminals.remove(&card_id) {
                 task.abort();
+                // 見ていたことも取り下げる。**忘れると、外したカードを見ている人が
+                // 1人居ることになり**、リモートでは画面が作られ続ける
+                state.agent.release_client(card_id, client_id);
             }
             if let Some(task) = transcripts.remove(&card_id) {
                 task.abort();
@@ -328,7 +331,9 @@ async fn handle_request(
             // 端末の大きさは最後に届いた指示が勝つ（設計§10 の last-writer-wins）
             state.agent.resize(card_id, cols, rows);
 
-            let Some((snapshot, receiver)) = state.agent.subscribe_pty(card_id) else {
+            let Some((snapshot, receiver)) =
+                state.agent.subscribe_pty(card_id, client_id, cols, rows)
+            else {
                 // **生きているのに端末が開けない**＝別の PC のカード。セルフホストの画面は
                 // エージェント内の端末エミュレータが作るので、生バイトの購読口が無い
                 // （セルフホスト化設計§7）。ローカルでは、直前の生存確認との隙間に

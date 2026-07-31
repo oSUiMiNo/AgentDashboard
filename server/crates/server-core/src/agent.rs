@@ -58,7 +58,20 @@ pub trait AgentHost: Send + Sync + 'static {
     ///
     /// 2つに分けて取ると、間に流れたバイトを取りこぼすか二重に書くことになり、
     /// どちらも端末の表示を壊す。
-    fn subscribe_pty(&self, card_id: CardId) -> Option<(Bytes, broadcast::Receiver<Bytes>)>;
+    ///
+    /// # 誰が・どの大きさで見るのかまで渡す
+    ///
+    /// リモートでは、見ている人が居るあいだだけエージェントが画面を作る（設計§7-4）。
+    /// 「誰が」が要るのは**開き直しで二重に数えないため**、「どの大きさ」が要るのは
+    /// エージェント側の端末をその桁に揃えるため。ローカルではどちらも使わない
+    /// （生バイトをそのまま配るので、見ている人数と関係が無い）。
+    fn subscribe_pty(
+        &self,
+        card_id: CardId,
+        client_id: u64,
+        cols: u16,
+        rows: u16,
+    ) -> Option<(Bytes, broadcast::Receiver<Bytes>)>;
 
     /// いまの画面だけを取る（取りこぼしたクライアントを作り直すため）。
     fn pty_snapshot(&self, card_id: CardId) -> Option<Bytes>;

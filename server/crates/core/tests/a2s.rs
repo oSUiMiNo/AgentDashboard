@@ -38,6 +38,8 @@ const WINDOW: usize = 2000;
 const TIMEOUT: Duration = Duration::from_secs(20);
 /// テストの履歴同期間隔（秒）。既定の20秒だと1本ごとにそれだけ待つことになる
 const SYNC_SECS: u64 = 1;
+/// テストの画面更新間隔（ミリ秒）。同じ理由で詰める（既定は20秒。設計§13-3）
+const SCREEN_MS: u64 = 100;
 
 /// 線の上を覗き見する中継（検収条件「生 JSONL が流れない」の検査用）。
 ///
@@ -48,7 +50,10 @@ const SYNC_SECS: u64 = 1;
 /// 文字列検索で確かめると、**何も流れていなくても通ってしまう**。ここではフレームを
 /// 解いてマスクを外し、**実際に運ばれた中身**を記録する。
 mod wire {
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::sync::broadcast;
 
@@ -58,6 +63,8 @@ mod wire {
         /// エージェント → サーバ方向に流れた文字フレーム
         pub sent: Arc<Mutex<Vec<String>>>,
         cut: broadcast::Sender<()>,
+        /// 立っている間は**新しい接続も通さない**（下記）
+        blocked: AtomicBool,
     }
 
     impl Sniffer {
@@ -71,11 +78,18 @@ mod wire {
                 addr,
                 sent: Arc::new(Mutex::new(Vec::new())),
                 cut,
+                blocked: AtomicBool::new(false),
             });
 
             let accepting = Arc::clone(&sniffer);
             tokio::spawn(async move {
                 while let Ok((downstream, _)) = listener.accept().await {
+                    // 塞いでいる間は繋がせない。**繋ぎ直しを止められないと、
+                    // 「切れている状態」を観測できない**（下記 [`Sniffer::block`]）
+                    if accepting.blocked.load(Ordering::SeqCst) {
+                        drop(downstream);
+                        continue;
+                    }
                     let Ok(up) = tokio::net::TcpStream::connect(upstream).await else {
                         continue;
                     };
@@ -104,6 +118,24 @@ mod wire {
         /// いま繋がっているものを切る（電波断・スリープの再現）。
         pub fn cut(&self) {
             let _ = self.cut.send(());
+        }
+
+        /// 切ったうえで、**繋ぎ直しも通さない**（電波が戻らない状態）。
+        ///
+        /// # なぜ塞ぐ必要があるのか
+        ///
+        /// エージェントは1度目の繋ぎ直しを待たずに試す（設計§6-3 の指数バックオフは
+        /// **失敗してから**効く）。切っただけだと数十ミリ秒で戻ってしまい、
+        /// 「接続断の印が付く」ことを観測できるかどうかが実行環境の速さ次第になる。
+        /// 実際、塞がずに書いていたテストは**単体で走らせると必ず落ちる**状態だった。
+        pub fn block(&self) {
+            self.blocked.store(true, Ordering::SeqCst);
+            self.cut();
+        }
+
+        /// また通す（電波が戻る）。
+        pub fn unblock(&self) {
+            self.blocked.store(false, Ordering::SeqCst);
         }
 
         pub fn sent_frames(&self) -> Vec<String> {
@@ -272,6 +304,17 @@ impl A2s {
         )
         .await
         .expect("同期間隔を書けること");
+        // 画面の既定は20秒（§13-3）。無操作で1枚届くのを待てないので詰めておく。
+        // **入力があったときの即時配信は間隔と無関係**なので、こちらを詰めても
+        // ホットウィンドウの検証は成り立つ
+        db_settings::put(
+            &db,
+            account_id,
+            db_settings::SCREEN_INTERVAL_MS,
+            serde_json::json!(SCREEN_MS),
+        )
+        .await
+        .expect("画面の間隔を書けること");
         let token = pairing::issue_token(&db, account_id, "テスト")
             .await
             .expect("トークンを発行できること");
@@ -674,7 +717,9 @@ async fn 切断すると接続断の印が付き_状態は書き換わらない(
     })
     .await;
 
-    sniffer.cut();
+    // **繋ぎ直しごと塞ぐ。** 切るだけだと即座に戻ってしまい、印が付いたことを
+    // 観測できるかどうかが実行環境の速さ次第になる
+    sniffer.block();
 
     let listed = a2s
         .wait_for_listed("接続断になる", |listed| {
@@ -688,6 +733,7 @@ async fn 切断すると接続断の印が付き_状態は書き換わらない(
     );
 
     // 繋ぎ直せば印は戻る（復帰手順で全セッションが送り直される）
+    sniffer.unblock();
     let listed = a2s
         .wait_for_listed("繋がり直す", |listed| {
             listed.len() == 1 && listed[0].agent_connected
@@ -852,6 +898,179 @@ async fn モデル切替の指示が渡り_押した手応えが返る() {
         })
         .await;
     assert_eq!(listed[0].card_id, session.card_id);
+
+    session.kill();
+}
+
+// ---------------------------------------------------------------------------
+// 画面配信（設計§7、テスト計画フェーズ4）
+// ---------------------------------------------------------------------------
+
+/// ブラウザの役で受け取ったフレームを、xterm.js の代わりに vt100 へ書く。
+///
+/// **フレームの意味論をブラウザと同じに解釈する**のが要点（設計§4-3）。
+/// 0x03 は画面を作り直してから書く、0x01 は書き足す——`TerminalPane` の実装と同じ約束で、
+/// これが成り立っていることが「フロント無改修」の中身になる。
+struct Mirror {
+    parser: vt100::Parser,
+    cols: u16,
+    rows: u16,
+    snapshots: usize,
+    outputs: usize,
+}
+
+impl Mirror {
+    fn new(cols: u16, rows: u16) -> Self {
+        Self {
+            parser: vt100::Parser::new(rows, cols, 1000),
+            cols,
+            rows,
+            snapshots: 0,
+            outputs: 0,
+        }
+    }
+
+    fn apply(&mut self, framed: &[u8]) {
+        let frame = protocol::frame::decode(framed).expect("フレームを分解できること");
+        match frame.kind {
+            protocol::frame::FrameKind::PtySnapshot => {
+                // 「画面をリセットしてから書け」
+                self.parser = vt100::Parser::new(self.rows, self.cols, 1000);
+                self.parser.process(frame.payload);
+                self.snapshots += 1;
+            }
+            protocol::frame::FrameKind::PtyOutput => {
+                self.parser.process(frame.payload);
+                self.outputs += 1;
+            }
+            other => panic!("ブラウザ向けの経路に画面のフレームが漏れています: {other:?}"),
+        }
+    }
+
+    fn text(&self) -> String {
+        self.parser.screen().contents()
+    }
+}
+
+/// 目印が画面に現れるまでフレームを受け取り続ける。
+async fn wait_for_screen(
+    frames: &mut tokio::sync::broadcast::Receiver<bytes::Bytes>,
+    mirror: &mut Mirror,
+    marker: &str,
+) {
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    while !mirror.text().contains(marker) {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let received = tokio::time::timeout(remaining, frames.recv())
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "{TIMEOUT:?} 以内に {marker:?} が画面へ現れませんでした。実際の画面:\n{}",
+                    mirror.text()
+                )
+            });
+        match received {
+            Ok(framed) => mirror.apply(&framed),
+            Err(err) => panic!("画面の配信が切れました: {err}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn 端末を開くと画面が届き_閉じると止まる() {
+    // 検収「配信対象」。**誰も見ていないセッションの画面は1バイトも出ない**（要件5-2）
+    let a2s = A2s::start("screen").await;
+    let (session, _transcript) = a2s.start_session();
+    a2s.wait_for_listed("1枚出る", |listed| listed.len() == 1)
+        .await;
+    let card_id = session.card_id;
+
+    let (blank, mut frames) = a2s
+        .browser
+        .subscribe_pty(card_id, 1, 100, 30)
+        .expect("端末を開けること");
+
+    // 最初に渡されるのは「画面を消せ」だけ。リモートに“いまの生バイト”は存在しない
+    let frame = protocol::frame::decode(&blank).expect("フレームを分解できること");
+    assert_eq!(frame.kind, protocol::frame::FrameKind::PtySnapshot);
+    assert!(frame.payload.is_empty(), "空でない画面が渡されています");
+
+    // PC の中で組み立てられた画面が、ブラウザの意味論のまま再現される
+    let mut mirror = Mirror::new(100, 30);
+    wait_for_screen(&mut frames, &mut mirror, testkit::fake_claude::READY_MARKER).await;
+    assert!(mirror.snapshots > 0, "全画面から始まっていません");
+
+    // 閉じると止まる
+    a2s.browser.release_client(card_id, 1);
+    tokio::time::sleep(Duration::from_millis(SCREEN_MS * 4)).await;
+    while frames.try_recv().is_ok() {}
+    common::send_line(&session, "echo とまったはず");
+    tokio::time::sleep(Duration::from_millis(SCREEN_MS * 4)).await;
+    assert!(
+        frames.try_recv().is_err(),
+        "閉じたのに画面が流れ続けています"
+    );
+
+    session.kill();
+}
+
+#[tokio::test]
+async fn 入力すると待たずに画面が追いつく() {
+    // 設計§7-5 のホットウィンドウ。TUI の描き直しは入力から遅れて届くので、
+    // 「入力を受けたら1回だけ返す」では描く前の画面を掴む
+    let a2s = A2s::start("screen-hot").await;
+    let (session, _transcript) = a2s.start_session();
+    a2s.wait_for_listed("1枚出る", |listed| listed.len() == 1)
+        .await;
+
+    let (_blank, mut frames) = a2s
+        .browser
+        .subscribe_pty(session.card_id, 1, 100, 30)
+        .expect("端末を開けること");
+    let mut mirror = Mirror::new(100, 30);
+    wait_for_screen(&mut frames, &mut mirror, testkit::fake_claude::READY_MARKER).await;
+
+    // ブラウザからのキー入力（0x02）と同じ経路で送る
+    a2s.browser
+        .write_input(session.card_id, "echo ホットウィンドウ\r".as_bytes())
+        .expect("端末へ書けること");
+
+    wait_for_screen(&mut frames, &mut mirror, "ホットウィンドウ").await;
+    assert!(mirror.outputs > 0, "差分ではなく全画面ばかり送っています");
+
+    session.kill();
+}
+
+#[tokio::test]
+async fn 大きさを変えると画面が作り直される() {
+    // 設計§7-4。PC 側の端末を同じ桁に揃えてから全画面を送り直す
+    let a2s = A2s::start("screen-resize").await;
+    let (session, _transcript) = a2s.start_session();
+    a2s.wait_for_listed("1枚出る", |listed| listed.len() == 1)
+        .await;
+
+    let (_blank, mut frames) = a2s
+        .browser
+        .subscribe_pty(session.card_id, 1, 100, 30)
+        .expect("端末を開けること");
+    let mut mirror = Mirror::new(100, 30);
+    wait_for_screen(&mut frames, &mut mirror, testkit::fake_claude::READY_MARKER).await;
+    let before = mirror.snapshots;
+
+    // 開き直し＝新しい大きさでの購読（ブラウザ側の `SubPty` はこの形で届く）
+    let (_blank, mut frames) = a2s
+        .browser
+        .subscribe_pty(session.card_id, 1, 60, 20)
+        .expect("端末を開けること");
+    let mut mirror = Mirror::new(60, 20);
+    wait_for_screen(&mut frames, &mut mirror, testkit::fake_claude::READY_MARKER).await;
+
+    assert!(
+        mirror.snapshots > 0,
+        "大きさを変えたのに全画面が来ていません（前回 {before} 枚）"
+    );
+    let (rows, cols) = mirror.parser.screen().size();
+    assert_eq!((cols, rows), (60, 20), "画面の大きさが揃っていません");
 
     session.kill();
 }
