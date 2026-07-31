@@ -19,8 +19,8 @@ pub mod local;
 pub mod settings_api;
 
 use agent_core::{
-    hooks, model_catalog, parser, parser::ParserSupervisor, selfheal, session,
-    session::SessionManager, settings, settings::SettingsStore,
+    hooks, model_catalog, offsets::OffsetStore, parser, parser::ParserSupervisor, selfheal,
+    session, session::SessionManager, settings, settings::SettingsStore,
 };
 use axum::Router;
 use config::Config;
@@ -122,11 +122,15 @@ pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::R
     let db = server_core::db::connect(&database_url).await?;
     let registry = SessionRegistry::load(db, server_config.transcript_window_nodes).await?;
 
+    // 再開位置の置き場所は、パーサの世話役（読む側）と報告の運び手（進める側）で
+    // 共有する。**進めてよいのは記録に入ってから**（設計§6-1）
+    let offsets = OffsetStore::open(agent_config.resolved_state_dir());
+
     // 報告先を記録層へ繋いでからマネージャを作る。**報告 → DB → ブラウザ**の順序が
     // ここで決まる（設計§9-1「耐久データは DB へ書いてから publish する」）
     let manager = SessionManager::with_sink(
         Arc::clone(&agent_config),
-        local::reporting(Arc::clone(&registry)),
+        local::reporting(Arc::clone(&registry), Arc::clone(&offsets)),
     );
     tracing::info!("起動する CLI: {}", manager.program());
 
@@ -168,7 +172,8 @@ pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::R
     manager.start_sweeper();
 
     // 履歴を読むパーサは別プロセス。落ちてもターミナルと状態表示は無傷（設計§11）
-    let parser = parser::ParserSupervisor::start(Arc::clone(&manager), Arc::clone(&agent_config));
+    let parser =
+        parser::ParserSupervisor::start(Arc::clone(&manager), Arc::clone(&agent_config), offsets);
     manager.attach_parser(parser.handle());
 
     // フォーマット変更に自分で追随する仕組み（設計§9）。

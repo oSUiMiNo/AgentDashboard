@@ -36,6 +36,10 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 testkit.workspace = true
+# **DB 断を注入するためだけ**に使う（tests/offsets.rs）。製品コードから DB を触るのは
+# server-core の仕事で、その境界は crates/core/tests/dependencies.rs が見張っている。
+# 落ちたときの振る舞い（位置を進めない）は、本当に落として確かめないと固められない
+sea-orm.workspace = true
 # 統合テストだけが直に使う。**通常の依存には入れない** — 製品コードから PTY を触るのは
 # agent-core の仕事で、その境界は crates/core/tests/dependencies.rs が見張っている
 portable-pty.workspace = true

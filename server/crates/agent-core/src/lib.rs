@@ -27,6 +27,7 @@ pub mod jsonfile;
 pub mod model_aliases;
 pub mod model_catalog;
 pub mod model_post;
+pub mod offsets;
 pub mod parser;
 pub mod selfheal;
 pub mod session;

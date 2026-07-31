@@ -8,23 +8,23 @@
 //! 分かれている必要がある。パーサが落ちてもターミナルと状態表示は無傷、というのが
 //! 縮退の仕様（設計§11）でもある。
 //!
-//! # 再開位置は core が持つ
+//! # 再開位置はエージェントが持つ。ただし進めるのは運び手
 //!
-//! パーサを差し替えても履歴が欠けないよう、どこまで読んだかは core 側で永続化する。
-//! 置き場所は `$XDG_STATE_HOME/agentdashboard/offsets.json`（[`AgentConfig::resolved_state_dir`]）。
-//! 一時ディレクトリやビルド成果物の隣に置くと、消えた瞬間に全再パースになり、
-//! ブラウザへ履歴が二重に届く。
+//! パーサを差し替えても履歴が欠けないよう、どこまで読んだかはエージェント側で
+//! 永続化する（[`crate::offsets::OffsetStore`]）。ここが読むのは**監視を頼むとき**だけで、
+//! 進めるのは報告の運び手——**記録に入ったことを確かめてから**（セルフホスト化設計§6-1）。
 //!
-//! 書き込みは**ノードを配ったあと**にする。前に書くと、その隙間で落ちたときにノードが
-//! 静かに消える。後に書けば最悪もう一度届くだけで、同じIDは上書きされるので害が無い。
-//! **欠落より重複を選ぶ。**
+//! フェーズ2 までは「配った直後」に書いていた。配る先がメモリの窓だったころはそれで
+//! 足りたが、記録が DB になり、さらにネットワークを跨ぐようになると「配った」と
+//! 「残った」の間が開く。その間に落ちるとノードが静かに消えるので、条件を揃えた。
+//! **欠落より重複を選ぶ**という原則そのものは変わっていない。
 
 use crate::config::AgentConfig;
+use crate::offsets::OffsetStore;
 use crate::session::SessionManager;
 use protocol::CardId;
 use protocol::ipc::{PROTOCOL_VERSION, ParserCommand, ParserEvent};
 use protocol::ws::{ParserState, ServerMessage};
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -76,23 +76,12 @@ impl ParserHandle {
     }
 }
 
-/// 永続化する再開位置。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct Offsets {
-    /// カード → そのセッションのファイルごとの再開位置
-    cards: HashMap<String, CardOffsets>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct CardOffsets {
-    path: String,
-    files: BTreeMap<String, u64>,
-}
-
 /// パーサ子プロセスの世話役。
 pub struct ParserSupervisor {
     manager: Arc<SessionManager>,
     config: Arc<AgentConfig>,
+    /// 再開位置。**読むのはここ、進めるのは運び手**（設計§6-1）
+    offsets: Arc<OffsetStore>,
     requests: mpsc::Sender<ParserRequest>,
     state: Arc<Mutex<ParserState>>,
     /// 差し替え後に立て直しを頼む口（設計§9）
@@ -116,7 +105,14 @@ pub struct StatsReport {
 
 impl ParserSupervisor {
     /// パーサを起動し、世話をする常駐タスクを立てる。
-    pub fn start(manager: Arc<SessionManager>, config: Arc<AgentConfig>) -> Arc<Self> {
+    ///
+    /// 再開位置の置き場所は**外から渡す**。読むのはここだが進めるのは報告の運び手なので、
+    /// 2人が同じ置き場所を見る必要がある（設計§6-1）。
+    pub fn start(
+        manager: Arc<SessionManager>,
+        config: Arc<AgentConfig>,
+        offsets: Arc<OffsetStore>,
+    ) -> Arc<Self> {
         let (requests, request_rx) = mpsc::channel(REQUEST_QUEUE);
         // 立て直しの依頼は溜める意味が無い（1回入っていれば十分）
         let (restarts, restart_rx) = mpsc::channel(1);
@@ -124,6 +120,7 @@ impl ParserSupervisor {
         let supervisor = Arc::new(Self {
             manager: Arc::clone(&manager),
             config: Arc::clone(&config),
+            offsets,
             requests,
             state: Arc::new(Mutex::new(ParserState::Ok)),
             restarts,
@@ -225,8 +222,6 @@ async fn run(
     mut requests: mpsc::Receiver<ParserRequest>,
     mut restarts: mpsc::Receiver<()>,
 ) {
-    let store = OffsetStore::new(supervisor.config.resolved_state_dir());
-    let mut offsets = store.load();
     // カード → 本体トランスクリプトのパス。再起動のたびに登録し直すために持つ
     let mut watched: HashMap<CardId, String> = HashMap::new();
     let mut attempt = 0usize;
@@ -241,9 +236,7 @@ async fn run(
                     child,
                     &mut requests,
                     &mut restarts,
-                    &mut offsets,
                     &mut watched,
-                    &store,
                 )
                 .await;
                 match reason {
@@ -291,15 +284,12 @@ async fn spawn_parser(config: &AgentConfig) -> std::io::Result<tokio::process::C
         .spawn()
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn pump(
     supervisor: &Arc<ParserSupervisor>,
     mut child: tokio::process::Child,
     requests: &mut mpsc::Receiver<ParserRequest>,
     restarts: &mut mpsc::Receiver<()>,
-    offsets: &mut Offsets,
     watched: &mut HashMap<CardId, String>,
-    store: &OffsetStore,
 ) -> PumpEnd {
     let Some(mut stdin) = child.stdin.take() else {
         return PumpEnd::ParserGone;
@@ -335,7 +325,7 @@ async fn pump(
 
     // 立て直し後は、監視していたカードを保存済みの位置から登録し直す（無欠落再開）
     for (card_id, path) in watched.iter() {
-        let command = watch_command(*card_id, path.clone(), offsets);
+        let command = watch_command(&supervisor.offsets, *card_id, path.clone());
         if write_command(&mut stdin, &command).await.is_err() {
             return PumpEnd::ParserGone;
         }
@@ -346,15 +336,14 @@ async fn pump(
             request = requests.recv() => match request {
                 Some(ParserRequest::Watch { card_id, path }) => {
                     watched.insert(card_id, path.clone());
-                    let command = watch_command(card_id, path, offsets);
+                    let command = watch_command(&supervisor.offsets, card_id, path);
                     if write_command(&mut stdin, &command).await.is_err() {
                         return PumpEnd::ParserGone;
                     }
                 }
                 Some(ParserRequest::Unwatch { card_id }) => {
                     watched.remove(&card_id);
-                    offsets.cards.remove(&card_id.to_string());
-                    store.save(offsets);
+                    supervisor.offsets.forget(card_id);
                     if write_command(&mut stdin, &ParserCommand::Unwatch { card_id }).await.is_err() {
                         return PumpEnd::ParserGone;
                     }
@@ -367,7 +356,7 @@ async fn pump(
             },
 
             event = events.recv() => match event {
-                Some(event) => handle_event(supervisor, event, offsets, watched, store),
+                Some(event) => handle_event(supervisor, event, watched),
                 // パーサの stdout が閉じた＝プロセスが終わった
                 None => return PumpEnd::ParserGone,
             },
@@ -391,13 +380,8 @@ async fn pump(
     }
 }
 
-fn watch_command(card_id: CardId, path: String, offsets: &Offsets) -> ParserCommand {
-    let from_offsets = offsets
-        .cards
-        .get(&card_id.to_string())
-        .filter(|saved| saved.path == path)
-        .map(|saved| saved.files.clone())
-        .unwrap_or_default();
+fn watch_command(offsets: &OffsetStore, card_id: CardId, path: String) -> ParserCommand {
+    let from_offsets = offsets.resume(card_id, &path);
     ParserCommand::Watch {
         card_id,
         path,
@@ -418,9 +402,7 @@ async fn write_command(
 fn handle_event(
     supervisor: &Arc<ParserSupervisor>,
     event: ParserEvent,
-    offsets: &mut Offsets,
     watched: &HashMap<CardId, String>,
-    store: &OffsetStore,
 ) {
     match event {
         ParserEvent::Hello {
@@ -448,32 +430,22 @@ fn handle_event(
             next_offset,
         } => {
             // **窓へ書くのではなく、上へ報告する**（セルフホスト化設計§3-3）。
-            // 履歴の持ち主はサーバ側の記録（DB）になったので、こちらは読んだものを
-            // そのまま渡すだけ。フェーズ3 では同じ報告が A2S を渡って
-            // TranscriptBatch になる（§6-1）
-            supervisor.manager.report_transcript(card_id, &nodes);
-            // 配ったあとに位置を書く。前に書くと、その隙間で落ちたノードが静かに消える
-            if let Some(path) = watched.get(&card_id) {
-                let entry =
-                    offsets
-                        .cards
-                        .entry(card_id.to_string())
-                        .or_insert_with(|| CardOffsets {
-                            path: path.clone(),
-                            files: BTreeMap::new(),
-                        });
-                entry.path = path.clone();
-                if next_offset > 0 {
-                    entry.files.insert(source, next_offset);
-                }
-                store.save(offsets);
-            }
+            // 履歴の持ち主はサーバ側の記録（DB）なので、こちらは読んだものと
+            // 「入ったら進めてよい位置」を渡すだけ。セルフホストでは同じ報告が
+            // A2S を渡って TranscriptBatch になる（§6-1）
+            let Some(path) = watched.get(&card_id) else {
+                // 監視していないカードの報告。位置の持ち主が決まらないので捨てる
+                return;
+            };
+            supervisor
+                .manager
+                .report_transcript(card_id, path, &source, next_offset, &nodes);
         }
 
         ParserEvent::Reset { card_id } => {
+            // 位置を忘れるのも**記録に入ってから**。ここで忘れると、消せなかった
+            // ときに読み直す手掛かりまで失う
             supervisor.manager.report_transcript_reset(card_id);
-            offsets.cards.remove(&card_id.to_string());
-            store.save(offsets);
         }
 
         // 過去範囲の読み直しは**もう頼まない**（セルフホスト化設計§3-3）。
@@ -515,91 +487,40 @@ fn handle_event(
     }
 }
 
-/// 再開位置の永続化。
-///
-/// 一時ファイルへ書いてから置き換える。途中で落ちても、壊れた JSON を残さない。
-struct OffsetStore {
-    path: PathBuf,
-}
-
-impl OffsetStore {
-    fn new(dir: PathBuf) -> Self {
-        Self {
-            path: dir.join("offsets.json"),
-        }
-    }
-
-    fn load(&self) -> Offsets {
-        crate::jsonfile::load_or_default(&self.path)
-    }
-
-    fn save(&self, offsets: &Offsets) {
-        crate::jsonfile::save(&self.path, offsets);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(non_snake_case)]
 
     use super::*;
 
+    /// 監視を頼むときの「ここから読め」は、保存済みの位置をそのまま渡す。
+    ///
+    /// 位置そのものの振る舞い（パスが変わったら使わない・巻き戻したら忘れる）は
+    /// [`crate::offsets`] 側で固めてある。ここで見るのは**受け渡しの形**だけ。
     #[test]
-    fn 再開位置を書いて読み直せる() {
-        let dir =
-            std::env::temp_dir().join(format!("agentdashboard-offsets-{}", std::process::id()));
-        let store = OffsetStore::new(dir.clone());
-        let card_id = CardId::new();
-
-        let mut offsets = Offsets::default();
-        offsets.cards.insert(
-            card_id.to_string(),
-            CardOffsets {
-                path: "/p/s.jsonl".to_string(),
-                files: BTreeMap::from([("/p/s.jsonl".to_string(), 1234)]),
-            },
-        );
-        store.save(&offsets);
-
-        let loaded = OffsetStore::new(dir.clone()).load();
-        assert_eq!(
-            loaded.cards.get(&card_id.to_string()).unwrap().files["/p/s.jsonl"],
-            1234
-        );
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn 壊れた保存ファイルは既定値として読む() {
-        // 位置が読めないなら先頭から読み直せばよい。ここで落ちると起動できなくなる
+    fn 保存済みの位置から読み直しを頼む() {
         let dir = std::env::temp_dir().join(format!(
-            "agentdashboard-offsets-broken-{}",
-            std::process::id()
+            "agentdashboard-parser-watch-{}",
+            uuid::Uuid::new_v4().simple()
         ));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("offsets.json"), "{壊れている").unwrap();
-
-        let loaded = OffsetStore::new(dir.clone()).load();
-        assert!(loaded.cards.is_empty());
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn パスが変わったカードは保存位置を使わない() {
-        // resume でトランスクリプトが別ファイルに変わったら、先頭から読み直す
+        std::fs::create_dir_all(&dir).expect("一時ディレクトリを作れること");
+        let offsets = OffsetStore::open(dir.clone());
         let card_id = CardId::new();
-        let mut offsets = Offsets::default();
-        offsets.cards.insert(
-            card_id.to_string(),
-            CardOffsets {
-                path: "/p/old.jsonl".to_string(),
-                files: BTreeMap::from([("/p/old.jsonl".to_string(), 999)]),
-            },
-        );
+        offsets.commit(card_id, "/p/s.jsonl", "/p/s.jsonl", 42);
 
-        match watch_command(card_id, "/p/new.jsonl".to_string(), &offsets) {
+        match watch_command(&offsets, card_id, "/p/s.jsonl".to_string()) {
+            ParserCommand::Watch { from_offsets, .. } => {
+                assert_eq!(from_offsets["/p/s.jsonl"], 42);
+            }
+            other => panic!("Watch ではない: {other:?}"),
+        }
+
+        // まだ何も読んでいないカードは先頭から
+        match watch_command(&offsets, CardId::new(), "/p/other.jsonl".to_string()) {
             ParserCommand::Watch { from_offsets, .. } => assert!(from_offsets.is_empty()),
             other => panic!("Watch ではない: {other:?}"),
         }
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -46,6 +46,7 @@ dependencies = [
  "clap",
  "portable-pty",
  "protocol",
+ "sea-orm",
  "serde",
  "serde_json",
  "server-core",

@@ -18,7 +18,8 @@
 //! 境界を挟んだぶんの手数を足してはいけない。
 
 use agent_core::{
-    events::{EventSink, LocalEventBus},
+    events::{EventSink, LocalEventBus, TranscriptReport},
+    offsets::OffsetStore,
     parser::ParserSupervisor,
     session::SessionManager,
 };
@@ -172,34 +173,90 @@ pub struct ReportingSink {
     /// 同じプロセス内の購読者（自己修復）向け
     bus: LocalEventBus,
     /// 記録層への待ち行列
-    reports: mpsc::UnboundedSender<ServerMessage>,
+    reports: mpsc::UnboundedSender<Report>,
+}
+
+/// 記録層へ運ぶもの1件。
+///
+/// 履歴だけ別扱いなのは、**取り込めたら位置を進める**という後始末が付くため（§6-1）。
+enum Report {
+    /// 状態や自己修復の知らせ。取り込めたかどうかで何かが変わることはない
+    Volatile(ServerMessage),
+    Transcript(TranscriptReport),
+    Reset(protocol::CardId),
 }
 
 impl EventSink for ReportingSink {
     fn emit(&self, event: ServerMessage) {
         // 記録層が落ちている（受け口が閉じた）場合でも、手元の購読者へは配り続ける
-        let _ = self.reports.send(event.clone());
+        let _ = self.reports.send(Report::Volatile(event.clone()));
         self.bus.emit(event);
     }
 
     fn subscribe(&self) -> broadcast::Receiver<ServerMessage> {
         self.bus.subscribe()
     }
+
+    fn report_transcript(&self, report: TranscriptReport) {
+        // **手元の配信へは流さない。** 同じプロセスの購読者は自己修復だけで、見ているのは
+        // セッションの状態（`Status`）である。履歴を配ると、ノードを丸ごと複製する仕事が
+        // 誰も読まないまま毎回増える
+        let _ = self.reports.send(Report::Transcript(report));
+    }
+
+    fn reset_transcript(&self, card_id: protocol::CardId) {
+        let _ = self.reports.send(Report::Reset(card_id));
+    }
 }
 
 /// 記録層へ繋いだ報告先を作り、運ぶ役を1本立てる。
 ///
 /// 呼び出し側は**この1本を [`SessionManager`] へ渡すだけ**でよい。
-pub fn reporting(registry: Arc<SessionRegistry>) -> Arc<ReportingSink> {
-    let (reports, mut inbox) = mpsc::unbounded_channel();
+///
+/// # 位置を進めるのはここ
+///
+/// 記録層が「書けた」と答えたときだけ、再開位置を進める（設計§6-1）。ローカルモードにも
+/// この規約を通してあるのは、**保証がモードで食い違うと、ローカルで緑なのにセルフホストで
+/// 欠ける**という一番たちの悪い形になるため。取り込む先が無かったもの（外した直後の
+/// カード宛て）も「終わった」と扱う——二度と書ける見込みが無いものを待ち続けると、
+/// そのカードの位置が永久に止まる。
+pub fn reporting(registry: Arc<SessionRegistry>, offsets: Arc<OffsetStore>) -> Arc<ReportingSink> {
+    let (reports, mut inbox) = mpsc::unbounded_channel::<Report>();
     tokio::spawn(async move {
         // 報告の出どころは常に同じ（このプロセスの中の1台）。セルフホストモードでは
         // 接続ごとに変わるが、ローカルには PC という単位が無いので `agent_id` は無い
         let origin = server_core::registry::ReportOrigin::local();
         // 1本のタスクで順に処理する。**順序がそのまま DB への書き込み順になる**ので、
-        // 巻き戻し（TranscriptReset）がバッチを追い越さない（設計§6-2）
-        while let Some(message) = inbox.recv().await {
-            registry.apply(&origin, message).await;
+        // 巻き戻し（TranscriptReset）が履歴を追い越さない（設計§6-2）
+        while let Some(report) = inbox.recv().await {
+            match report {
+                Report::Volatile(message) => {
+                    registry.apply(&origin, message).await;
+                }
+                Report::Transcript(report) => {
+                    let TranscriptReport {
+                        card_id,
+                        transcript_path,
+                        source,
+                        next_offset,
+                        nodes,
+                    } = report;
+                    if registry
+                        .apply(&origin, ServerMessage::TranscriptAppend { card_id, nodes })
+                        .await
+                    {
+                        offsets.commit(card_id, &transcript_path, &source, next_offset);
+                    }
+                }
+                Report::Reset(card_id) => {
+                    if registry
+                        .apply(&origin, ServerMessage::TranscriptReset { card_id })
+                        .await
+                    {
+                        offsets.forget(card_id);
+                    }
+                }
+            }
         }
     });
     Arc::new(ReportingSink {

@@ -15,6 +15,7 @@ pub use session::*;
 use agent_core::{
     claude_settings::ClaudeSettings,
     model_aliases::ModelAliases,
+    offsets::OffsetStore,
     parser::ParserSupervisor,
     session::{Session, SessionManager},
 };
@@ -279,7 +280,10 @@ impl TestServer {
         let registry = SessionRegistry::load(db, server_config.transcript_window_nodes)
             .await
             .expect("記録層を立てられること");
-        let events = local::reporting(Arc::clone(&registry));
+        // 再開位置は、読む側（パーサの世話役）と進める側（報告の運び手）で共有する。
+        // 置き場所は `state_dir` の下なので、テストごとの使い捨てになる
+        let offsets = OffsetStore::open(agent_config.resolved_state_dir());
+        let events = local::reporting(Arc::clone(&registry), Arc::clone(&offsets));
 
         let manager = match claude_settings {
             // モデルを扱うテストは**本物の ~/.claude/settings.json を触らない**
@@ -307,7 +311,11 @@ impl TestServer {
                     std::env::set_var(agent_core::parser::PARSER_BIN_ENV, parser_program());
                 }
             }
-            let parser = ParserSupervisor::start(Arc::clone(&manager), Arc::clone(&agent_config));
+            let parser = ParserSupervisor::start(
+                Arc::clone(&manager),
+                Arc::clone(&agent_config),
+                Arc::clone(&offsets),
+            );
             manager.attach_parser(parser.handle());
             server = server.with_parser(Arc::clone(&parser));
             Some(parser)

@@ -26,7 +26,7 @@ pub mod pty;
 
 use crate::{
     config::AgentConfig,
-    events::{EventSink, LocalEventBus},
+    events::{EventSink, LocalEventBus, TranscriptReport},
     state::{self, Changed, HookInput},
 };
 use bytes::Bytes;
@@ -1321,12 +1321,25 @@ impl SessionManager {
     /// 履歴の持ち主はサーバ側の記録に移った。エージェントは読んで渡すだけになる。
     ///
     /// 知らないカードのぶんは捨てる。外した直後に届いたノードで一覧を汚さないため。
-    pub fn report_transcript(&self, card_id: CardId, nodes: &[ParsedNode]) {
+    ///
+    /// 「進めてよい位置」を一緒に運ぶのは、**位置を進めるのが運び手の仕事**になったため
+    /// （§6-1）。読んだ側には、記録に入ったかどうかを知る術が無い。
+    pub fn report_transcript(
+        &self,
+        card_id: CardId,
+        transcript_path: &str,
+        source: &str,
+        next_offset: u64,
+        nodes: &[ParsedNode],
+    ) {
         if nodes.is_empty() || self.get(card_id).is_none() {
             return;
         }
-        self.events.emit(ServerMessage::TranscriptAppend {
+        self.events.report_transcript(TranscriptReport {
             card_id,
+            transcript_path: transcript_path.to_string(),
+            source: source.to_string(),
+            next_offset,
             nodes: nodes.iter().map(|parsed| parsed.node.clone()).collect(),
         });
     }
@@ -1336,7 +1349,7 @@ impl SessionManager {
         if self.get(card_id).is_none() {
             return;
         }
-        self.events.emit(ServerMessage::TranscriptReset { card_id });
+        self.events.reset_transcript(card_id);
     }
 
     /// パーサへの口を差し込む。
