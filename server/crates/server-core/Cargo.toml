@@ -39,3 +39,6 @@ base64.workspace = true
 # 依存には入れない——接続は常に PC 側から張るので、サーバ側にクライアントは要らない。
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
+# 越境の総当たり（設計§8-6）で、ブラウザの役として REST を Cookie 付きで叩くため。
+# **依存を増やさない最小の HTTP** がここにある（testkit::request）
+testkit.workspace = true

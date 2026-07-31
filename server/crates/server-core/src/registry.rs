@@ -98,9 +98,22 @@ pub enum PageError {
     Unavailable,
 }
 
+/// 一覧の更新通知。**誰のカードの話か**を添えて配る。
+///
+/// 配信の口を1本にしたまま、購読側が自分のアカウントのぶんだけを拾えるようにするための形
+/// （設計§8-6）。アカウントごとにチャネルを分けるのはインスタンスを跨ぐとき（§9-2）の話で、
+/// 1インスタンスのうちは**配るときに絞る**ほうが、購読の作りが1つで済む。
+#[derive(Debug, Clone)]
+pub struct AccountEvent {
+    pub account_id: Uuid,
+    pub message: ServerMessage,
+}
+
 /// カード1枚の記録。
 pub struct SessionRecord {
     pub card_id: CardId,
+    /// 誰のカードか（設計§8-6）。**帰属は接続が決める**ので、ここは書き換わらない
+    pub account_id: Uuid,
     meta: Mutex<SessionMeta>,
     /// 直近ぶんの写し（設計§3-3）。真実は DB
     window: Mutex<TranscriptWindow>,
@@ -116,9 +129,16 @@ pub struct SessionRecord {
 }
 
 impl SessionRecord {
-    fn new(meta: SessionMeta, window_nodes: usize, next_seq: i64, live: bool) -> Self {
+    fn new(
+        meta: SessionMeta,
+        account_id: Uuid,
+        window_nodes: usize,
+        next_seq: i64,
+        live: bool,
+    ) -> Self {
         Self {
             card_id: meta.card_id,
+            account_id,
             meta: Mutex::new(meta),
             window: Mutex::new(TranscriptWindow::new(window_nodes)),
             transcript_tx: broadcast::channel(TRANSCRIPT_QUEUE_MESSAGES).0,
@@ -173,7 +193,7 @@ impl SessionRecord {
 pub struct SessionRegistry {
     db: DatabaseConnection,
     records: Mutex<HashMap<CardId, Arc<SessionRecord>>>,
-    events: broadcast::Sender<ServerMessage>,
+    events: broadcast::Sender<AccountEvent>,
     window_nodes: usize,
 }
 
@@ -185,8 +205,9 @@ impl SessionRegistry {
     /// 履歴は読めるが PTY は道連れで死んでいる（設計§1-3）。セルフホストモードでは、
     /// エージェントが繋ぎ直してくるまでの間がこの状態になる（§6-3 と同じ見え方）。
     ///
-    /// アカウントで絞らずに全部読むのは、**見ている人が誰かをまだ知らない**ため。
-    /// ログイン（§8-2）が入るフェーズ5 で、配るときに絞る形になる（§8-6）。
+    /// **全アカウントぶんを読む。** このインスタンスは誰のブラウザも受けるので、
+    /// 読む時点で絞る相手が決まっていない。絞るのは配るとき・返すときで、
+    /// その判定は [`SessionRecord::account_id`] が持つ（§8-6）。
     pub async fn load(
         db: DatabaseConnection,
         window_nodes: usize,
@@ -197,9 +218,23 @@ impl SessionRegistry {
             .all(&db)
             .await?;
 
+        // 画面に出すアカウント名（`SessionMeta::account`）は行に持っていないので、
+        // まとめて引いておく。カードごとに引くと、復元するだけで枚数ぶんの問い合わせになる
+        let names: HashMap<Uuid, String> = entity::accounts::Entity::find()
+            .all(&db)
+            .await?
+            .into_iter()
+            .map(|row| (row.id, row.name))
+            .collect();
+
         let mut records = HashMap::new();
         for row in rows {
-            let meta = meta_from_row(row);
+            let account_id = row.account_id;
+            let mut meta = meta_from_row(row);
+            // ローカルのアカウントは画面に出さない（アカウントという単位が無い）
+            if account_id != db::LOCAL_ACCOUNT_ID {
+                meta.account = names.get(&account_id).cloned();
+            }
             let card_id = meta.card_id;
             let next_seq = db_transcript::next_seq(&db, card_id).await?;
             // 窓を DB の直近ぶんで満たす。空のままだと、購読を始めたクライアントに
@@ -207,7 +242,7 @@ impl SessionRegistry {
             // **読み終えてからロックを取る**（ロックを持ったまま待たない）
             let latest = db_transcript::latest(&db, card_id, window_nodes).await?;
             // 前回の起動が残したカードなので live=false
-            let record = SessionRecord::new(meta, window_nodes, next_seq, false);
+            let record = SessionRecord::new(meta, account_id, window_nodes, next_seq, false);
             record
                 .window
                 .lock()
@@ -227,25 +262,43 @@ impl SessionRegistry {
         }))
     }
 
-    /// 一覧の更新通知を購読する。
+    /// 一覧の更新通知を購読する。**どのアカウントのぶんかは受け取る側が捨てる。**
     ///
     /// **購読を始めてから [`Self::list`] を呼ぶ**こと。逆順にすると、その隙間に起動した
     /// セッションを取りこぼす（順序を守れば重複するだけで、upsert は重複しても害がない）。
-    pub fn subscribe_events(&self) -> broadcast::Receiver<ServerMessage> {
+    pub fn subscribe_events(&self) -> broadcast::Receiver<AccountEvent> {
         self.events.subscribe()
     }
 
-    /// 現在のカード一覧を作成順に返す。
-    pub fn list(&self) -> Vec<SessionMeta> {
+    /// そのアカウントのカード一覧を作成順に返す（設計§8-6）。
+    pub fn list(&self, account_id: Uuid) -> Vec<SessionMeta> {
         let mut metas: Vec<SessionMeta> = self
             .records
             .lock()
             .expect("ロックが壊れていない")
             .values()
+            .filter(|record| record.account_id == account_id)
             .map(|record| record.meta())
             .collect();
         metas.sort_by_key(|meta| meta.created_at);
         metas
+    }
+
+    /// そのカードの持ち主。知らないカードなら `None`。
+    ///
+    /// 操作の可否（§8-6 の WS 操作の行）はこれ1つで判断する。**「実体が居るか」とは
+    /// 別物**で、前回の起動が残した記録にも持ち主は居る。
+    pub fn owner_of(&self, card_id: CardId) -> Option<Uuid> {
+        self.get(card_id).map(|record| record.account_id)
+    }
+
+    /// 自分のカードとして扱ってよいときだけ記録を返す。
+    ///
+    /// **他人のカードと知らないカードを呼び分けない。** 分けると、IDを総当たりして
+    /// 「そのカードは存在する」ことだけを調べられる。
+    pub fn owned(&self, account_id: Uuid, card_id: CardId) -> Option<Arc<SessionRecord>> {
+        self.get(card_id)
+            .filter(|record| record.account_id == account_id)
     }
 
     /// その PC のカードの**鮮度の印**を切り替えて配り直す（設計§6-3）。
@@ -269,10 +322,21 @@ impl SessionRegistry {
                 continue;
             }
             record.live.store(live, Ordering::Relaxed);
-            let _ = self.events.send(ServerMessage::SessionUpsert {
-                session: Box::new(record.meta()),
-            });
+            self.publish(
+                record.account_id,
+                ServerMessage::SessionUpsert {
+                    session: Box::new(record.meta()),
+                },
+            );
         }
+    }
+
+    /// 一覧の更新を配る。**誰のカードの話かを必ず添える**（設計§8-6）。
+    fn publish(&self, account_id: Uuid, message: ServerMessage) {
+        let _ = self.events.send(AccountEvent {
+            account_id,
+            message,
+        });
     }
 
     /// その PC が持っているカードの一覧（切断時の掃除と、指示の宛先探しに使う）。
@@ -295,13 +359,17 @@ impl SessionRegistry {
     }
 
     /// 履歴を1ページ分作る（設計§3-3）。読み先は DB。
+    ///
+    /// **自分のカードでなければ「無い」と答える**（§8-6）。他人のカードだと分かる
+    /// 返し方をすると、IDの総当たりで存在を調べられる。
     pub async fn transcript_page(
         &self,
+        account_id: Uuid,
         card_id: CardId,
         before: Option<NodeId>,
         limit: usize,
     ) -> Result<TranscriptPage, PageError> {
-        if self.get(card_id).is_none() {
+        if self.owned(account_id, card_id).is_none() {
             return Err(PageError::NotFound);
         }
         match db_transcript::page(&self.db, card_id, before.as_ref(), limit).await {
@@ -325,21 +393,24 @@ impl SessionRegistry {
     pub async fn apply(&self, origin: &ReportOrigin, message: ServerMessage) -> bool {
         let outcome = match message {
             ServerMessage::SessionUpsert { session } => self.upsert(origin, *session).await,
-            ServerMessage::SessionRemoved { card_id } => self.archive(card_id).await,
+            ServerMessage::SessionRemoved { card_id } => self.archive(origin, card_id).await,
             ServerMessage::Status {
                 card_id,
                 status,
                 subagent_active,
                 last_activity_at,
             } => {
-                self.status(card_id, status, subagent_active, last_activity_at)
+                self.status(origin, card_id, status, subagent_active, last_activity_at)
                     .await
             }
-            ServerMessage::TranscriptAppend { card_id, nodes } => self.append(card_id, nodes).await,
-            ServerMessage::TranscriptReset { card_id } => self.reset(card_id).await,
-            // 揮発の知らせ。真実として残す性質のものではないので素通しする
+            ServerMessage::TranscriptAppend { card_id, nodes } => {
+                self.append(origin, card_id, nodes).await
+            }
+            ServerMessage::TranscriptReset { card_id } => self.reset(origin, card_id).await,
+            // 揮発の知らせ。真実として残す性質のものではないので素通しする。
+            // **配る先は報告してきたアカウントの中だけ**（§8-6 の A2S の行）
             other => {
-                let _ = self.events.send(other);
+                self.publish(origin.account_id, other);
                 Ok(())
             }
         };
@@ -350,10 +421,13 @@ impl SessionRegistry {
                 // 書けなかったものは配らない（画面に出るのに再読み込みで消えるのを防ぐ）。
                 // 代わりに理由を出す——黙って落とすと「一覧が更新されない」としか見えない
                 tracing::error!("記録を書けませんでした: {err}");
-                let _ = self.events.send(ServerMessage::Error {
-                    card_id: None,
-                    message: format!("記録を保存できませんでした: {err}"),
-                });
+                self.publish(
+                    origin.account_id,
+                    ServerMessage::Error {
+                        card_id: None,
+                        message: format!("記録を保存できませんでした: {err}"),
+                    },
+                );
                 false
             }
         }
@@ -368,8 +442,21 @@ impl SessionRegistry {
         //
         // 記録が手元に無いときだけ DB を見るので、通常の更新に問い合わせは増えない。
         // CardId は UUIDv4 なので、外したIDが後から別のセッションに割り当たることもない
-        if self.get(meta.card_id).is_none() && self.is_archived(meta.card_id).await? {
-            return Ok(());
+        match self.get(meta.card_id) {
+            Some(record) => {
+                if self.refuse_crossing(&origin.account_id, record.account_id, meta.card_id) {
+                    return Ok(());
+                }
+            }
+            None => match self.stored(meta.card_id).await? {
+                Some((owner, _))
+                    if self.refuse_crossing(&origin.account_id, owner, meta.card_id) =>
+                {
+                    return Ok(());
+                }
+                Some((_, true)) => return Ok(()),
+                _ => {}
+            },
         }
 
         // **帰属を決めるのはサーバの仕事**（設計§5-1 の手順4）。エージェントが申告した
@@ -377,44 +464,77 @@ impl SessionRegistry {
         // 名乗られても通らないのは、ここで見ているのが**申告ではなく接続**だから（§8-5）
         meta.agent_id = origin.agent_id;
         meta.account = origin.account.clone();
+        // 申告が持ち主と食い違ったら**記録には残すが帰属は動かさない**。警告を出すのは、
+        // 利用者から見ると「toml に書いたのに効かない」だけに見えるため
+        if let (Some(claimed), Some(actual)) = (&meta.toml_account, &origin.account)
+            && claimed != actual
+        {
+            tracing::warn!(
+                card_id = %meta.card_id,
+                "`.agent-dashboard.toml` は「{claimed}」と名乗りましたが、この接続は「{actual}」のものです。申告は無視します"
+            );
+        }
 
         self.write_session(origin, &meta).await?;
 
-        let record = self.record_for(meta.card_id).await?;
+        let record = self.record_for(origin.account_id, meta.card_id).await?;
         record.store_meta(meta);
-        let _ = self.events.send(ServerMessage::SessionUpsert {
-            session: Box::new(record.meta()),
-        });
+        self.publish(
+            record.account_id,
+            ServerMessage::SessionUpsert {
+                session: Box::new(record.meta()),
+            },
+        );
         Ok(())
     }
 
-    async fn archive(&self, card_id: CardId) -> Result<(), DbErr> {
+    /// 他人のカードへの報告を断るか（設計§8-6 の A2S の行）。
+    ///
+    /// **`false`（＝取り込まない）でも ack は返す**（呼び出し側が `Ok` にする）。
+    /// 返さないと、二度と書ける見込みの無いものをエージェントが永久に再送する。
+    fn refuse_crossing(&self, reporting: &Uuid, owner: Uuid, card_id: CardId) -> bool {
+        if *reporting == owner {
+            return false;
+        }
+        tracing::warn!(%card_id, "他のアカウントのカードへの報告を無視しました");
+        true
+    }
+
+    async fn archive(&self, origin: &ReportOrigin, card_id: CardId) -> Result<(), DbErr> {
+        if let Some(record) = self.get(card_id)
+            && self.refuse_crossing(&origin.account_id, record.account_id, card_id)
+        {
+            return Ok(());
+        }
         // 行は消さない。**履歴を残すため**——カードを一覧から外しても、
-        // 何をしたセッションだったかは辿れる
+        // 何をしたセッションだったかは辿れる。**持ち主も条件に入れる**ので、
+        // 他人のカードのIDを名指しして消すことはできない
         entity::sessions::Entity::update_many()
             .col_expr(
                 entity::sessions::Column::Archived,
                 sea_orm::sea_query::Expr::value(true),
             )
             .filter(entity::sessions::Column::CardId.eq(card_id.0))
+            .filter(entity::sessions::Column::AccountId.eq(origin.account_id))
             .exec(&self.db)
             .await?;
         self.records
             .lock()
             .expect("ロックが壊れていない")
             .remove(&card_id);
-        let _ = self.events.send(ServerMessage::SessionRemoved { card_id });
+        self.publish(origin.account_id, ServerMessage::SessionRemoved { card_id });
         Ok(())
     }
 
     async fn status(
         &self,
+        origin: &ReportOrigin,
         card_id: CardId,
         status: SessionStatus,
         subagent_active: u32,
         last_activity_at: i64,
     ) -> Result<(), DbErr> {
-        let Some(record) = self.get(card_id) else {
+        let Some(record) = self.owned(origin.account_id, card_id) else {
             return Ok(());
         };
         entity::sessions::Entity::update_many()
@@ -443,17 +563,25 @@ impl SessionRegistry {
             meta.last_activity_at = last_activity_at;
         }
         record.live.store(true, Ordering::Relaxed);
-        let _ = self.events.send(ServerMessage::Status {
-            card_id,
-            status,
-            subagent_active,
-            last_activity_at,
-        });
+        self.publish(
+            record.account_id,
+            ServerMessage::Status {
+                card_id,
+                status,
+                subagent_active,
+                last_activity_at,
+            },
+        );
         Ok(())
     }
 
-    async fn append(&self, card_id: CardId, nodes: Vec<TreeNode>) -> Result<(), DbErr> {
-        let Some(record) = self.get(card_id) else {
+    async fn append(
+        &self,
+        origin: &ReportOrigin,
+        card_id: CardId,
+        nodes: Vec<TreeNode>,
+    ) -> Result<(), DbErr> {
+        let Some(record) = self.owned(origin.account_id, card_id) else {
             // 知らないカードの履歴は捨てる。外した直後に届いたぶんで一覧を汚さない
             return Ok(());
         };
@@ -470,8 +598,8 @@ impl SessionRegistry {
         Ok(())
     }
 
-    async fn reset(&self, card_id: CardId) -> Result<(), DbErr> {
-        let Some(record) = self.get(card_id) else {
+    async fn reset(&self, origin: &ReportOrigin, card_id: CardId) -> Result<(), DbErr> {
+        let Some(record) = self.owned(origin.account_id, card_id) else {
             return Ok(());
         };
         {
@@ -510,7 +638,7 @@ impl SessionRegistry {
             created_at: Set(meta.created_at),
             hooks_seen: Set(meta.hooks_seen),
             archived: Set(false),
-            toml_account: Set(None),
+            toml_account: Set(meta.toml_account.clone()),
         };
         entity::sessions::Entity::insert(row)
             .on_conflict(
@@ -528,8 +656,11 @@ impl SessionRegistry {
                         entity::sessions::Column::LastActivityAt,
                         entity::sessions::Column::LastAssistantMessage,
                         entity::sessions::Column::HooksSeen,
+                        entity::sessions::Column::TomlAccount,
                         // `Archived` は**更新しない**。外したことは後から届く報告で
-                        // 取り消されてはいけない（上の `upsert` の門と対になっている）
+                        // 取り消されてはいけない（上の `upsert` の門と対になっている）。
+                        // `AccountId` も**更新しない**。帰属は最初の報告で決まり、
+                        // 後から別のアカウントの PC が同じIDを名乗っても動かない（§8-6）
                     ])
                     .to_owned(),
             )
@@ -538,16 +669,23 @@ impl SessionRegistry {
         Ok(())
     }
 
-    /// そのカードが既に外されているか。行が無ければ「外していない」。
-    async fn is_archived(&self, card_id: CardId) -> Result<bool, DbErr> {
+    /// DB に残っているそのカードの `(持ち主, 外したか)`。行が無ければ `None`。
+    ///
+    /// 記録が手元に無いときだけ引く。**持ち主と外した印を一度に取る**のは、
+    /// 別々に引くと2回問い合わせることになり、しかも間に状態が変わりうるため。
+    async fn stored(&self, card_id: CardId) -> Result<Option<(Uuid, bool)>, DbErr> {
         Ok(entity::sessions::Entity::find_by_id(card_id.0)
             .one(&self.db)
             .await?
-            .is_some_and(|row| row.archived))
+            .map(|row| (row.account_id, row.archived)))
     }
 
     /// そのカードの記録を取り出す。無ければ作る。
-    async fn record_for(&self, card_id: CardId) -> Result<Arc<SessionRecord>, DbErr> {
+    async fn record_for(
+        &self,
+        account_id: Uuid,
+        card_id: CardId,
+    ) -> Result<Arc<SessionRecord>, DbErr> {
         if let Some(record) = self.get(card_id) {
             return Ok(record);
         }
@@ -562,6 +700,7 @@ impl SessionRegistry {
         }
         let record = Arc::new(SessionRecord::new(
             placeholder_meta(card_id),
+            account_id,
             self.window_nodes,
             next_seq,
             true,

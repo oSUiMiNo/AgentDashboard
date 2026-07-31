@@ -10,15 +10,17 @@
 
 mod common;
 
-use futures_util::{SinkExt as _, StreamExt as _};
 use protocol::{
-    CardId, ProjectId, SessionMeta, SessionStatus,
+    CardId, SessionMeta, SessionStatus,
     a2s::{A2S_PROTOCOL, A2S_VERSION, AgentMessage, BatchId, ServerToAgent},
 };
 use sea_orm::DatabaseConnection;
 use server_core::{db::pairing, gateway::AgentHub, registry::SessionRegistry};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio_tungstenite::tungstenite;
+use uuid::Uuid;
+
+use common::{AgentSocket, hello, meta};
 
 const WINDOW: usize = 100;
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -101,98 +103,15 @@ impl Drop for TestGateway {
     }
 }
 
-struct AgentSocket {
-    socket: tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-}
-
-impl AgentSocket {
-    async fn send(&mut self, message: &AgentMessage) {
-        let text = serde_json::to_string(message).expect("組み立てられること");
-        self.socket
-            .send(tungstenite::Message::text(text))
-            .await
-            .expect("送れること");
-    }
-
-    /// 画面のフレームを送る（設計§4-3。JSON に包まずバイナリのまま）。
-    async fn send_screen(&mut self, kind: protocol::frame::FrameKind, card_id: CardId, seq: u64) {
-        let bytes = protocol::frame::encode_screen(kind, card_id, seq, b"\x1b[2J\x1b[Hhello");
-        self.socket
-            .send(tungstenite::Message::Binary(bytes.into()))
-            .await
-            .expect("送れること");
-    }
-
-    /// 条件に合う指示が来るまで受け取り続ける。
-    async fn wait_for(
-        &mut self,
-        what: &str,
-        matches: impl Fn(&ServerToAgent) -> bool,
-    ) -> ServerToAgent {
-        let deadline = tokio::time::Instant::now() + TIMEOUT;
-        loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            let next = tokio::time::timeout(remaining, self.socket.next())
-                .await
-                .unwrap_or_else(|_| panic!("{TIMEOUT:?} 以内に {what} が届きませんでした"));
-            match next {
-                Some(Ok(tungstenite::Message::Text(text))) => {
-                    let message = serde_json::from_str::<ServerToAgent>(&text)
-                        .unwrap_or_else(|err| panic!("解釈できません（{err}）: {text}"));
-                    if matches(&message) {
-                        return message;
-                    }
-                }
-                Some(Ok(_)) => continue,
-                other => panic!("{what} を待っている間に切れました: {other:?}"),
-            }
-        }
-    }
-}
-
-fn hello(name: &str) -> AgentMessage {
-    AgentMessage::Hello {
-        protocol_version: A2S_VERSION,
-        agent_version: "テスト".to_string(),
-        agent_name: name.to_string(),
-        available_modes: vec![protocol::PermissionMode::new("default")],
-        always_bypass_permissions: false,
-    }
-}
-
-fn meta(card_id: CardId) -> SessionMeta {
-    SessionMeta {
-        card_id,
-        project: ProjectId("/tmp/project".to_string()),
-        claude_session_id: None,
-        permission_mode: None,
-        model: None,
-        model_label: None,
-        model_requested: None,
-        status: SessionStatus::Working,
-        subagent_active: 0,
-        last_activity_at: 1,
-        last_assistant_message: None,
-        created_at: 1,
-        hooks_seen: false,
-        // **エージェントが何を書いて寄越しても**、記録に残る帰属は接続が決める（§8-5）
-        agent_id: Some(protocol::AgentId::new()),
-        agent_connected: true,
-        account: Some("なりすまし".to_string()),
-        toml_account: None,
-    }
-}
-
-/// 発行済みのトークンを1本用意する。
-async fn issue(db: &DatabaseConnection, account: &str) -> String {
+/// 発行済みのトークンを1本用意する。**帰属の確認に要るのでアカウントIDも返す。**
+async fn issue(db: &DatabaseConnection, account: &str) -> (String, Uuid) {
     let account_id = pairing::ensure_account(db, account)
         .await
         .expect("アカウントを用意できること");
-    pairing::issue_token(db, account_id, "テスト")
+    let token = pairing::issue_token(db, account_id, "テスト")
         .await
-        .expect("トークンを発行できること")
+        .expect("トークンを発行できること");
+    (token, account_id)
 }
 
 /// HTTP の応答コードを取り出す（繋げなかった理由の確認用）。
@@ -209,7 +128,7 @@ async fn 知らない版は接続の前に断られる() {
     // たちが悪いので、upgrade の前に理由を返す（設計§4-1）
     for backend in common::backends("gw-version").await {
         let gateway = TestGateway::start(backend.db.clone()).await;
-        let token = issue(&backend.db, "テスト用").await;
+        let (token, _account_id) = issue(&backend.db, "テスト用").await;
 
         let error = gateway
             .connect(Some(&token), Some("adash-a2s-v0"))
@@ -289,7 +208,7 @@ async fn 名乗ると_PC_が登録され同じ名前なら同じIDに戻る() {
     // 再起動のたびに新しい `agent_id` を振ると、**そのPCのカードの帰属が切れる**
     for backend in common::backends("gw-hello").await {
         let gateway = TestGateway::start(backend.db.clone()).await;
-        let token = issue(&backend.db, "テスト用").await;
+        let (token, _account_id) = issue(&backend.db, "テスト用").await;
 
         let mut socket = gateway.connect_as(&token, "仕事用ノート").await;
         let first = socket
@@ -345,7 +264,7 @@ async fn 名乗ると_PC_が登録され同じ名前なら同じIDに戻る() {
 async fn 報告は記録層へ入り帰属は接続が決める() {
     for backend in common::backends("gw-report").await {
         let gateway = TestGateway::start(backend.db.clone()).await;
-        let token = issue(&backend.db, "みんとぶるー").await;
+        let (token, account_id) = issue(&backend.db, "みんとぶるー").await;
         let mut socket = gateway.connect_as(&token, "仕事用ノート").await;
         let ServerToAgent::Hello { agent_id, .. } = socket
             .wait_for("名乗りの応答", |message| {
@@ -363,8 +282,10 @@ async fn 報告は記録層へ入り帰属は接続が決める() {
             })
             .await;
 
-        let listed =
-            wait_for_listed(&gateway.registry, "1枚出る", |listed| listed.len() == 1).await;
+        let listed = wait_for_listed(&gateway.registry, account_id, "1枚出る", |listed| {
+            listed.len() == 1
+        })
+        .await;
         assert_eq!(listed[0].card_id, card_id, "[{}]", backend.name);
         assert_eq!(
             listed[0].agent_id,
@@ -389,7 +310,7 @@ async fn 履歴のバッチは書けてから_ack_が返る() {
     // 書けていないものの位置を進めて履歴が欠ける
     for backend in common::backends("gw-ack").await {
         let gateway = TestGateway::start(backend.db.clone()).await;
-        let token = issue(&backend.db, "テスト用").await;
+        let (token, account_id) = issue(&backend.db, "テスト用").await;
         let mut socket = gateway.connect_as(&token, "仕事用ノート").await;
         socket
             .wait_for("名乗りの応答", |message| {
@@ -428,7 +349,7 @@ async fn 履歴のバッチは書けてから_ack_が返る() {
         // ack を受け取った時点で、DB を見るだけの側からも読める
         let page = gateway
             .registry
-            .transcript_page(card_id, None, 10)
+            .transcript_page(account_id, card_id, None, 10)
             .await
             .expect("読めること");
         assert_eq!(page.nodes.len(), 1, "[{}] DB に入っていない", backend.name);
@@ -443,7 +364,7 @@ async fn 切断すると鮮度の印だけが落ちる() {
     // いた状態＋接続断の印、が充足形（設計§6-3）
     for backend in common::backends("gw-offline").await {
         let gateway = TestGateway::start(backend.db.clone()).await;
-        let token = issue(&backend.db, "テスト用").await;
+        let (token, account_id) = issue(&backend.db, "テスト用").await;
         let mut socket = gateway.connect_as(&token, "仕事用ノート").await;
         socket
             .wait_for("名乗りの応答", |message| {
@@ -457,9 +378,12 @@ async fn 切断すると鮮度の印だけが落ちる() {
                 session: Box::new(meta(card_id)),
             })
             .await;
-        let listed = wait_for_listed(&gateway.registry, "繋がっている", |listed| {
-            listed.len() == 1 && listed[0].agent_connected
-        })
+        let listed = wait_for_listed(
+            &gateway.registry,
+            account_id,
+            "繋がっている",
+            |listed| listed.len() == 1 && listed[0].agent_connected,
+        )
         .await;
         assert_eq!(
             listed[0].status,
@@ -470,9 +394,12 @@ async fn 切断すると鮮度の印だけが落ちる() {
 
         drop(socket);
 
-        let listed = wait_for_listed(&gateway.registry, "接続断になる", |listed| {
-            listed.len() == 1 && !listed[0].agent_connected
-        })
+        let listed = wait_for_listed(
+            &gateway.registry,
+            account_id,
+            "接続断になる",
+            |listed| listed.len() == 1 && !listed[0].agent_connected,
+        )
         .await;
         assert_eq!(
             listed[0].status,
@@ -494,12 +421,13 @@ async fn 切断すると鮮度の印だけが落ちる() {
 /// 一覧が条件を満たすまで待つ（報告は待ち行列と DB を通るので即座ではない）。
 async fn wait_for_listed(
     registry: &Arc<SessionRegistry>,
+    account_id: Uuid,
     what: &str,
     matches: impl Fn(&[SessionMeta]) -> bool,
 ) -> Vec<SessionMeta> {
     let deadline = tokio::time::Instant::now() + TIMEOUT;
     loop {
-        let listed = registry.list();
+        let listed = registry.list(account_id);
         if matches(&listed) {
             return listed;
         }
@@ -518,7 +446,7 @@ async fn 画面は種別を移し替えて配られ_見る人が居なくなる�
     // 中身（エスケープ列）は一切解釈しない。これが「フロント無改修」の中身にあたる
     for backend in common::backends("gw-screen").await {
         let gateway = TestGateway::start(backend.db.clone()).await;
-        let token = issue(&backend.db, "テスト用").await;
+        let (token, account_id) = issue(&backend.db, "テスト用").await;
         let mut socket = gateway.connect_as(&token, "仕事用ノート").await;
         socket
             .wait_for("名乗りの応答", |message| {
@@ -532,7 +460,10 @@ async fn 画面は種別を移し替えて配られ_見る人が居なくなる�
                 session: Box::new(meta(card_id)),
             })
             .await;
-        wait_for_listed(&gateway.registry, "1枚出る", |listed| listed.len() == 1).await;
+        wait_for_listed(&gateway.registry, account_id, "1枚出る", |listed| {
+            listed.len() == 1
+        })
+        .await;
 
         // --- 見る人が現れた -------------------------------------------------
         let browser = server_core::gateway::RemoteAgent::new(Arc::clone(&gateway.hub));

@@ -437,9 +437,15 @@ impl crate::agent::AgentHost for RemoteAgent {
             permission_mode: request.permission_mode,
         };
 
-        // 宛先が指名されているなら、その PC が繋がっているかだけを見る
+        // 宛先が指名されているなら、その PC が繋がっているかだけを見る。
+        // **他人の PC は「繋がっていない」と同じ扱い**（設計§8-6）——言い分けると、
+        // IDの総当たりで他人の PC の存在を調べられる
         if let Some(target) = request.target {
-            let Some(conn) = self.hub.conn(target) else {
+            let Some(conn) = self
+                .hub
+                .conn(target)
+                .filter(|conn| conn.account_id == request.account_id)
+            else {
                 return Err("指定された PC が繋がっていません".to_string());
             };
             conn.send(&message);
@@ -447,8 +453,14 @@ impl crate::agent::AgentHost for RemoteAgent {
         }
 
         // 指名が無いときは、**選ぶ余地が無い場合だけ**通す。黙って1台目へ送ると、
-        // 意図しない PC で本物の claude が起動する
-        let connected = self.hub.connected();
+        // 意図しない PC で本物の claude が起動する。数えるのは**自分の PC だけ**で、
+        // 他人の PC が繋がっているせいで「選んでください」と言われるのはおかしい
+        let connected: Vec<_> = self
+            .hub
+            .connected()
+            .into_iter()
+            .filter(|conn| conn.account_id == request.account_id)
+            .collect();
         match connected.len() {
             1 => {
                 connected[0].send(&message);

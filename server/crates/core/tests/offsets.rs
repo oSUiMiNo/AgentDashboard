@@ -128,7 +128,7 @@ async fn 記録に入ってから位置が進む() {
     // 位置が進んだ時点で、記録の側にも入っている（順序が逆なら欠落しうる）
     let page = harness
         .registry
-        .transcript_page(card_id, None, 10)
+        .transcript_page(server_core::db::LOCAL_ACCOUNT_ID, card_id, None, 10)
         .await
         .expect("読めること");
     assert_eq!(page.nodes.len(), 1);
@@ -175,7 +175,10 @@ async fn 取り込む先が無くても位置は進む() {
 
     wait_for_offset(&harness.offsets, card_id, 120).await;
     assert!(
-        harness.registry.list().is_empty(),
+        harness
+            .registry
+            .list(server_core::db::LOCAL_ACCOUNT_ID)
+            .is_empty(),
         "知らないカードが記録に増えている"
     );
 

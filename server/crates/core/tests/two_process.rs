@@ -101,8 +101,10 @@ impl Pair {
             .arg("--config")
             .arg(&config_path)
             .arg("pair-token")
+            // **ブラウザで入るアカウントと同じにする。** 違うアカウントのトークンで
+            // 繋いだ PC のカードは、そのアカウントでログインしないと見えない（§8-6）
             .arg("--account")
-            .arg("テスト用")
+            .arg(ACCOUNT)
             .output()
             .expect("トークンを発行できること");
         assert!(
@@ -336,7 +338,8 @@ async fn ペアリングして起動しフックまで通る() {
         session.agent_id.is_some(),
         "どの PC のカードか分からないまま記録されている"
     );
-    assert_eq!(session.account.as_deref(), Some("テスト用"));
+    // 帰属はトークンのアカウント。**ログインしているのと同じアカウントだから見えている**
+    assert_eq!(session.account.as_deref(), Some(ACCOUNT));
 
     // 擬似 claude に、**注入された settings のフックを実際に起動させる**。
     // ここが通れば「焼き込み → エージェントの 127.0.0.1 → 状態導出 → A2S → 記録」が

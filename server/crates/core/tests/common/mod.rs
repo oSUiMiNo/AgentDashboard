@@ -468,7 +468,7 @@ impl TestServer {
     ) -> Vec<protocol::SessionMeta> {
         let deadline = Instant::now() + TIMEOUT;
         loop {
-            let listed = self.registry.list();
+            let listed = self.registry.list(server_core::db::LOCAL_ACCOUNT_ID);
             if matches(&listed) {
                 return listed;
             }

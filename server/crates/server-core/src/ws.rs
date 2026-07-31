@@ -25,11 +25,12 @@
 
 use crate::{
     agent::AgentHost,
+    auth::Identity,
     config::ServerConfig,
-    registry::{PageError, SessionRecord, SessionRegistry, TranscriptPage},
+    registry::{AccountEvent, PageError, SessionRecord, SessionRegistry, TranscriptPage},
 };
 use axum::{
-    Json,
+    Extension, Json,
     extract::{
         Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -88,16 +89,25 @@ impl AppState {
     }
 }
 
-pub async fn ws_handler(State(state): State<AppState>, upgrade: WebSocketUpgrade) -> Response {
-    upgrade.on_upgrade(move |socket| client_loop(state, socket))
+pub async fn ws_handler(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    upgrade.on_upgrade(move |socket| client_loop(state, identity, socket))
 }
 
 /// `GET /api/sessions` — 現在のカード一覧（設計§4 の初期スナップショット）。
 ///
 /// ブラウザは接続時にこれで「いまの全体」を取り、以後は WebSocket の差分だけを見る。
 /// 真実は常にサーバ側にあるので、リロードしても同じ画面へ戻れる。
-pub async fn api_sessions(State(state): State<AppState>) -> Json<Vec<SessionMeta>> {
-    Json(state.registry.list())
+///
+/// **返すのはログイン中のアカウントのぶんだけ**（設計§8-6 の REST の行）。
+pub async fn api_sessions(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+) -> Json<Vec<SessionMeta>> {
+    Json(state.registry.list(identity.account_id))
 }
 
 /// `GET /api/sessions/{card_id}/transcript` の絞り込み。
@@ -115,6 +125,7 @@ pub struct TranscriptQuery {
 /// パーサに JSONL を読み直してもらっていたので、パーサが止まると遡れなかった）。
 pub async fn api_transcript(
     State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
     Path(card_id): Path<String>,
     Query(query): Query<TranscriptQuery>,
 ) -> Result<Json<TranscriptPage>, StatusCode> {
@@ -131,7 +142,12 @@ pub async fn api_transcript(
 
     state
         .registry
-        .transcript_page(card_id, query.before.map(NodeId), limit)
+        .transcript_page(
+            identity.account_id,
+            card_id,
+            query.before.map(NodeId),
+            limit,
+        )
         .await
         .map(Json)
         .map_err(|err| match err {
@@ -140,7 +156,7 @@ pub async fn api_transcript(
         })
 }
 
-async fn client_loop(state: AppState, socket: WebSocket) {
+async fn client_loop(state: AppState, identity: Identity, socket: WebSocket) {
     let client_id = state.next_client_id.fetch_add(1, Ordering::Relaxed);
     let (mut sink, mut stream) = socket.split();
     let (outbound, mut outbound_rx) = mpsc::channel::<Message>(OUTBOUND_QUEUE_MESSAGES);
@@ -166,7 +182,7 @@ async fn client_loop(state: AppState, socket: WebSocket) {
         },
     )
     .await;
-    for meta in state.registry.list() {
+    for meta in state.registry.list(identity.account_id) {
         send_json(
             &outbound,
             ServerMessage::SessionUpsert {
@@ -176,7 +192,7 @@ async fn client_loop(state: AppState, socket: WebSocket) {
         .await;
     }
 
-    let event_task = tokio::spawn(pump_events(events, outbound.clone()));
+    let event_task = tokio::spawn(pump_events(identity.account_id, events, outbound.clone()));
 
     // 購読中のターミナル。切断時にまとめて畳む
     let mut terminals: HashMap<CardId, JoinHandle<()>> = HashMap::new();
@@ -202,6 +218,7 @@ async fn client_loop(state: AppState, socket: WebSocket) {
                 };
                 handle_request(
                     &state,
+                    &identity,
                     client_id,
                     request,
                     &outbound,
@@ -210,7 +227,7 @@ async fn client_loop(state: AppState, socket: WebSocket) {
                 )
                 .await;
             }
-            Message::Binary(bytes) => handle_pty_input(&state, &bytes, &outbound).await,
+            Message::Binary(bytes) => handle_pty_input(&state, &identity, &bytes, &outbound).await,
             Message::Close(_) => break,
             // Ping / Pong は axum が自動で処理する
             _ => {}
@@ -231,20 +248,35 @@ async fn client_loop(state: AppState, socket: WebSocket) {
     let _ = writer.await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_request(
     state: &AppState,
+    identity: &Identity,
     client_id: u64,
     request: ClientMessage,
     outbound: &mpsc::Sender<Message>,
     terminals: &mut HashMap<CardId, JoinHandle<()>>,
     transcripts: &mut HashMap<CardId, JoinHandle<()>>,
 ) {
+    // **どのカードへの操作かが分かるものは、まずここで持ち主を確かめる**（設計§8-6）。
+    // 個々の分岐で書くと、口を1つ足したときに付け忘れる——そして付け忘れは、
+    // 他人のカードを操作できるという形でしか表に出ない
+    if let Some(card_id) = target_card(&request)
+        && state.registry.owned(identity.account_id, card_id).is_none()
+    {
+        // **他人のカードと知らないカードを呼び分けない**（IDの総当たりで存在を
+        // 調べられないように）
+        send_error(outbound, Some(card_id), NOT_FOUND.to_string()).await;
+        return;
+    }
+
     match request {
         ClientMessage::Spawn {
             cwd,
             permission_mode,
             agent_id,
         } => match state.agent.spawn(crate::agent::SpawnRequest {
+            account_id: identity.account_id,
             target: agent_id,
             cwd: &cwd,
             permission_mode,
@@ -268,7 +300,7 @@ async fn handle_request(
         // ここで待つと、切替のあいだ同じブラウザからの他の操作が全部止まる
         ClientMessage::SetPermissionMode { card_id, mode } => {
             if !state.agent.exists(card_id) {
-                send_error(outbound, Some(card_id), "セッションが見つかりません".into()).await;
+                send_error(outbound, Some(card_id), NOT_FOUND.to_string()).await;
                 return;
             }
             let agent = Arc::clone(&state.agent);
@@ -287,7 +319,7 @@ async fn handle_request(
         // `~/.claude/settings.json` を汚すので、並走すると元の値が失われる（設計§6）。
         ClientMessage::SetModel { card_id, model } => {
             if !state.agent.exists(card_id) {
-                send_error(outbound, Some(card_id), "セッションが見つかりません".into()).await;
+                send_error(outbound, Some(card_id), NOT_FOUND.to_string()).await;
                 return;
             }
             let agent = Arc::clone(&state.agent);
@@ -326,7 +358,7 @@ async fn handle_request(
             rows,
         } => {
             if !state.agent.exists(card_id) {
-                send_error(outbound, Some(card_id), "セッションが見つかりません".into()).await;
+                send_error(outbound, Some(card_id), NOT_FOUND.to_string()).await;
                 return;
             }
             // 二重購読を防ぐ。同じカードを開き直したときは古い方を畳む
@@ -388,8 +420,8 @@ async fn handle_request(
             if let Some(previous) = transcripts.remove(&card_id) {
                 previous.abort();
             }
-            let Some(record) = state.registry.get(card_id) else {
-                send_error(outbound, Some(card_id), "セッションが見つかりません".into()).await;
+            let Some(record) = state.registry.owned(identity.account_id, card_id) else {
+                send_error(outbound, Some(card_id), NOT_FOUND.to_string()).await;
                 return;
             };
             let (snapshot, receiver) = record.subscribe_transcript();
@@ -438,8 +470,42 @@ async fn handle_request(
     }
 }
 
+/// そのメッセージが名指ししているカード（無ければ `None`）。
+///
+/// **持ち主の確認を1箇所で済ませるための一覧**（設計§8-6）。ここに載せ忘れた種別は
+/// 検査を通らずに素通りするので、`ClientMessage` を増やしたら必ず足すこと——
+/// 網羅の match にしてあるのは、足し忘れをコンパイラに数えさせるため。
+fn target_card(request: &ClientMessage) -> Option<CardId> {
+    match request {
+        ClientMessage::SubTranscript { card_id }
+        | ClientMessage::UnsubTranscript { card_id }
+        | ClientMessage::SubPty { card_id, .. }
+        | ClientMessage::UnsubPty { card_id }
+        | ClientMessage::SetPermissionMode { card_id, .. }
+        | ClientMessage::SetModel { card_id, .. }
+        | ClientMessage::SendInput { card_id, .. }
+        | ClientMessage::Resize { card_id, .. }
+        | ClientMessage::PtyFlow { card_id, .. }
+        | ClientMessage::Kill { card_id }
+        | ClientMessage::Archive { card_id } => Some(*card_id),
+        // まだカードが無い（作る側）
+        ClientMessage::Spawn { .. } => None,
+    }
+}
+
+/// 見つからないときの言い分。
+///
+/// **他人のカードにも同じ言葉を返す。** 「あなたのものではありません」と言い分けると、
+/// IDを総当たりして「そのカードは存在する」ことだけを調べられる。
+const NOT_FOUND: &str = "セッションが見つかりません";
+
 /// ブラウザからのキー入力を PTY へ書き込む。
-async fn handle_pty_input(state: &AppState, bytes: &[u8], outbound: &mpsc::Sender<Message>) {
+async fn handle_pty_input(
+    state: &AppState,
+    identity: &Identity,
+    bytes: &[u8],
+    outbound: &mpsc::Sender<Message>,
+) {
     let frame = match frame::decode(bytes) {
         Ok(frame) => frame,
         Err(err) => {
@@ -464,7 +530,16 @@ async fn handle_pty_input(state: &AppState, bytes: &[u8], outbound: &mpsc::Sende
         .await;
         return;
     }
-    // 居ないカードへの入力は黙って捨てる（閉じた直後に届いたぶんで画面を汚さない）
+    // **他人のカードへの入力は黙って捨てる**（設計§8-6 の WS 操作の行）。
+    // キー入力は1打鍵ごとに来るので、断る返事を出すと画面がエラーで埋まる
+    if state
+        .registry
+        .owned(identity.account_id, frame.card_id)
+        .is_none()
+    {
+        return;
+    }
+    // 居ないカードへの入力も黙って捨てる（閉じた直後に届いたぶんで画面を汚さない）
     if !state.agent.exists(frame.card_id) {
         return;
     }
@@ -473,15 +548,22 @@ async fn handle_pty_input(state: &AppState, bytes: &[u8], outbound: &mpsc::Sende
     }
 }
 
-/// 一覧の更新をそのままクライアントへ流す。
+/// 一覧の更新を、**自分のアカウントのぶんだけ**クライアントへ流す（設計§8-6）。
+///
+/// 配信の口は1本のままで、受け取る側が捨てる。アカウントごとにチャネルを分けるのは
+/// インスタンスを跨ぐとき（§9-2）の話で、1インスタンスのうちはここで足りる。
 async fn pump_events(
-    mut events: broadcast::Receiver<ServerMessage>,
+    account_id: uuid::Uuid,
+    mut events: broadcast::Receiver<AccountEvent>,
     outbound: mpsc::Sender<Message>,
 ) {
     loop {
         match events.recv().await {
-            Ok(message) => {
-                if !send_json(&outbound, message).await {
+            Ok(event) => {
+                if event.account_id != account_id {
+                    continue;
+                }
+                if !send_json(&outbound, event.message).await {
                     break;
                 }
             }

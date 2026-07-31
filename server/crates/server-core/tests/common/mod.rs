@@ -146,3 +146,146 @@ fn replace_database(url: &str, name: &str) -> String {
         None => format!("{stem}/{name}"),
     }
 }
+
+// --- エージェントの役をするための道具（`gateway.rs` と `tenancy.rs` が使う）---------
+//
+// **写さずに共有する。** 同じものを2つ持つと片方だけが古くなり、しかもここは
+// 「他人のカードへ報告しても通らない」を確かめる側なので、古い写しが通ってしまうと
+// 検査そのものが嘘になる。
+
+use futures_util::{SinkExt as _, StreamExt as _};
+use protocol::{
+    CardId, ProjectId, SessionMeta, SessionStatus,
+    a2s::{A2S_PROTOCOL, A2S_VERSION, AgentMessage, ServerToAgent},
+};
+use std::time::Duration;
+use tokio_tungstenite::tungstenite;
+
+/// 待ち合わせの上限。
+pub const AGENT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// エージェントとして繋ぐ。版とトークンは呼び出し側が決める（断られ方も試すため）。
+pub async fn connect_agent(
+    addr: std::net::SocketAddr,
+    token: Option<&str>,
+    protocol: Option<&str>,
+) -> Result<AgentSocket, tungstenite::Error> {
+    let mut request = tungstenite::client::IntoClientRequest::into_client_request(format!(
+        "ws://{addr}/agent/ws"
+    ))
+    .expect("要求を組み立てられること");
+    if let Some(protocol) = protocol {
+        request.headers_mut().insert(
+            "sec-websocket-protocol",
+            protocol.parse().expect("ヘッダに載る値であること"),
+        );
+    }
+    if let Some(token) = token {
+        request.headers_mut().insert(
+            "authorization",
+            format!("Bearer {token}")
+                .parse()
+                .expect("ヘッダに載る値であること"),
+        );
+    }
+    let (socket, _) = tokio_tungstenite::connect_async(request).await?;
+    Ok(AgentSocket { socket })
+}
+
+/// 名乗りまで済ませて繋ぐ（普通の使い方）。
+pub async fn connect_agent_as(addr: std::net::SocketAddr, token: &str, name: &str) -> AgentSocket {
+    let mut socket = connect_agent(addr, Some(token), Some(A2S_PROTOCOL))
+        .await
+        .expect("繋げること");
+    socket.send(&hello(name)).await;
+    socket
+}
+
+pub struct AgentSocket {
+    pub socket: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+}
+
+impl AgentSocket {
+    pub async fn send(&mut self, message: &AgentMessage) {
+        let text = serde_json::to_string(message).expect("組み立てられること");
+        self.socket
+            .send(tungstenite::Message::text(text))
+            .await
+            .expect("送れること");
+    }
+
+    /// 画面のフレームを送る（設計§4-3。JSON に包まずバイナリのまま）。
+    pub async fn send_screen(
+        &mut self,
+        kind: protocol::frame::FrameKind,
+        card_id: CardId,
+        seq: u64,
+    ) {
+        let bytes = protocol::frame::encode_screen(kind, card_id, seq, b"\x1b[2J\x1b[Hhello");
+        self.socket
+            .send(tungstenite::Message::Binary(bytes.into()))
+            .await
+            .expect("送れること");
+    }
+
+    /// 条件に合う指示が来るまで受け取り続ける。
+    pub async fn wait_for(
+        &mut self,
+        what: &str,
+        matches: impl Fn(&ServerToAgent) -> bool,
+    ) -> ServerToAgent {
+        let deadline = tokio::time::Instant::now() + AGENT_TIMEOUT;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let next = tokio::time::timeout(remaining, self.socket.next())
+                .await
+                .unwrap_or_else(|_| panic!("{AGENT_TIMEOUT:?} 以内に {what} が届きませんでした"));
+            match next {
+                Some(Ok(tungstenite::Message::Text(text))) => {
+                    let message = serde_json::from_str::<ServerToAgent>(&text)
+                        .unwrap_or_else(|err| panic!("解釈できません（{err}）: {text}"));
+                    if matches(&message) {
+                        return message;
+                    }
+                }
+                Some(Ok(_)) => continue,
+                other => panic!("{what} を待っている間に切れました: {other:?}"),
+            }
+        }
+    }
+}
+
+pub fn hello(name: &str) -> AgentMessage {
+    AgentMessage::Hello {
+        protocol_version: A2S_VERSION,
+        agent_version: "テスト".to_string(),
+        agent_name: name.to_string(),
+        available_modes: vec![protocol::PermissionMode::new("default")],
+        always_bypass_permissions: false,
+    }
+}
+
+pub fn meta(card_id: CardId) -> SessionMeta {
+    SessionMeta {
+        card_id,
+        project: ProjectId("/tmp/project".to_string()),
+        claude_session_id: None,
+        permission_mode: None,
+        model: None,
+        model_label: None,
+        model_requested: None,
+        status: SessionStatus::Working,
+        subagent_active: 0,
+        last_activity_at: 1,
+        last_assistant_message: None,
+        created_at: 1,
+        hooks_seen: false,
+        // **エージェントが何を書いて寄越しても**、記録に残る帰属は接続が決める（§8-5）
+        agent_id: Some(protocol::AgentId::new()),
+        agent_connected: true,
+        account: Some("なりすまし".to_string()),
+        toml_account: None,
+    }
+}

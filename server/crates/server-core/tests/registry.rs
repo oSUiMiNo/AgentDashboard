@@ -76,18 +76,25 @@ async fn 報告は書いてから配られる() {
 
         registry.apply(&local(), upsert(card_id)).await;
 
-        let message = events.recv().await.expect("配信されること");
-        assert!(
-            matches!(message, ServerMessage::SessionUpsert { .. }),
-            "[{}] 実際: {message:?}",
+        let event = events.recv().await.expect("配信されること");
+        assert_eq!(
+            event.account_id,
+            server_core::db::LOCAL_ACCOUNT_ID,
+            "[{}] 誰のカードの話かが添えられていない",
             backend.name
+        );
+        assert!(
+            matches!(event.message, ServerMessage::SessionUpsert { .. }),
+            "[{}] 実際: {:?}",
+            backend.name,
+            event.message
         );
         // 配信を受け取った時点で、別に立てた記録層（＝DB だけを見る側）にも見えている
         let other = SessionRegistry::load(backend.db.clone(), WINDOW)
             .await
             .expect("同じ DB から立て直せること");
         assert_eq!(
-            other.list().len(),
+            other.list(server_core::db::LOCAL_ACCOUNT_ID).len(),
             1,
             "[{}] DB に入っていない",
             backend.name
@@ -112,13 +119,18 @@ async fn 外したカードは後から届いた報告で戻らない() {
         let card_id = CardId::new();
 
         registry.apply(&local(), upsert(card_id)).await;
-        assert_eq!(registry.list().len(), 1, "[{}]", backend.name);
+        assert_eq!(
+            registry.list(server_core::db::LOCAL_ACCOUNT_ID).len(),
+            1,
+            "[{}]",
+            backend.name
+        );
 
         registry
             .apply(&local(), ServerMessage::SessionRemoved { card_id })
             .await;
         assert!(
-            registry.list().is_empty(),
+            registry.list(server_core::db::LOCAL_ACCOUNT_ID).is_empty(),
             "[{}] 外れていない",
             backend.name
         );
@@ -126,7 +138,7 @@ async fn 外したカードは後から届いた報告で戻らない() {
         // 遅れて届いた報告
         registry.apply(&local(), upsert(card_id)).await;
         assert!(
-            registry.list().is_empty(),
+            registry.list(server_core::db::LOCAL_ACCOUNT_ID).is_empty(),
             "[{}] 外したカードが戻ってきた",
             backend.name
         );
@@ -136,7 +148,7 @@ async fn 外したカードは後から届いた報告で戻らない() {
             .await
             .expect("立て直せること");
         assert!(
-            again.list().is_empty(),
+            again.list(server_core::db::LOCAL_ACCOUNT_ID).is_empty(),
             "[{}] 再起動で戻ってきた",
             backend.name
         );
@@ -172,7 +184,7 @@ async fn 再起動しても履歴は残り接続していない印が付く() {
             .await
             .expect("立て直せること");
 
-        let listed = restored.list();
+        let listed = restored.list(server_core::db::LOCAL_ACCOUNT_ID);
         assert_eq!(listed.len(), 1, "[{}] 復元されていない", backend.name);
         assert!(
             !listed[0].agent_connected,
@@ -234,7 +246,7 @@ async fn 巻き戻りのあとも番号は最初から振り直される() {
             .await;
 
         let page = registry
-            .transcript_page(card_id, None, 10)
+            .transcript_page(server_core::db::LOCAL_ACCOUNT_ID, card_id, None, 10)
             .await
             .expect("読めること");
         let ids: Vec<String> = page.nodes.into_iter().map(|node| node.id.0).collect();
@@ -263,9 +275,16 @@ async fn 知らないカードの履歴は捨てる() {
             )
             .await;
 
-        assert!(registry.list().is_empty(), "[{}]", backend.name);
+        assert!(
+            registry.list(server_core::db::LOCAL_ACCOUNT_ID).is_empty(),
+            "[{}]",
+            backend.name
+        );
         assert_eq!(
-            registry.transcript_page(card_id, None, 10).await.err(),
+            registry
+                .transcript_page(server_core::db::LOCAL_ACCOUNT_ID, card_id, None, 10)
+                .await
+                .err(),
             Some(server_core::registry::PageError::NotFound),
             "[{}]",
             backend.name

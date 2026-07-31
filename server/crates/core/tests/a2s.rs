@@ -422,7 +422,7 @@ impl A2s {
     ) -> Vec<protocol::SessionMeta> {
         let deadline = tokio::time::Instant::now() + TIMEOUT;
         loop {
-            let listed = self.registry.list();
+            let listed = self.registry.list(self.account_id);
             if matches(&listed) {
                 return listed;
             }
@@ -547,6 +547,7 @@ async fn ブラウザからの指示が_PC_まで届く() {
 
     a2s.browser
         .spawn(server_core::agent::SpawnRequest {
+            account_id: a2s.account_id,
             // 繋がっているのは1台だけなので、宛先を選ばずに通る
             target: None,
             cwd: &a2s.dir.to_string_lossy(),
@@ -619,7 +620,7 @@ async fn 履歴はバッチで渡り_DB_に入る() {
     // REST の遡りも DB から返る（パーサはエージェント側に居て、サーバは知らない）
     let page = a2s
         .registry
-        .transcript_page(session.card_id, None, 10)
+        .transcript_page(a2s.account_id, session.card_id, None, 10)
         .await
         .expect("読めること");
     assert_eq!(page.nodes.len(), 3);
@@ -871,11 +872,11 @@ async fn パーサの縮退と自己修復の進みはブラウザまで中継�
     let deadline = tokio::time::Instant::now() + TIMEOUT;
     while !(saw_parser && saw_selfheal) {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let message = tokio::time::timeout(remaining, events.recv())
+        let event = tokio::time::timeout(remaining, events.recv())
             .await
             .unwrap_or_else(|_| panic!("{TIMEOUT:?} 以内に中継されませんでした"))
             .expect("配信が閉じていないこと");
-        match message {
+        match event.message {
             protocol::ws::ServerMessage::ParserStatus { state, detail } => {
                 assert_eq!(state, protocol::ws::ParserState::Degraded);
                 assert!(detail.is_some(), "理由が落ちている（画面に出せない）");

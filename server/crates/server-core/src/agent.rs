@@ -33,6 +33,8 @@ use tokio::sync::broadcast;
 /// 位置引数のままだと、`Option<AgentId>` と `Option<PermissionMode>` が並んで
 /// 取り違えても型で気づけない。
 pub struct SpawnRequest<'a> {
+    /// 頼んだ人のアカウント。**他人の PC を宛先にできない**ことをここで確かめる（§8-6）
+    pub account_id: uuid::Uuid,
     /// どの PC で起こすか。`None` は「選ばれていない」
     pub target: Option<AgentId>,
     pub cwd: &'a str,
