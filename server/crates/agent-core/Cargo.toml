@@ -28,6 +28,10 @@ tokio.workspace = true
 axum.workspace = true
 portable-pty.workspace = true
 tracing.workspace = true
+# ダッシュボードサーバへの常時接続（A2S。セルフホスト化設計§4-1）。**接続は常に
+# PC 側から張る**ので、クライアントを持つのはこのクレートだけ
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
 
 [dev-dependencies]
 testkit.workspace = true

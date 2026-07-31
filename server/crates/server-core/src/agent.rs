@@ -43,7 +43,12 @@ pub trait AgentHost: Send + Sync + 'static {
 
     // --- 生存操作 -------------------------------------------------------------
 
-    fn spawn(&self, cwd: &str, permission_mode: Option<PermissionMode>) -> Result<CardId, String>;
+    /// 新しいセッションを起こす。
+    ///
+    /// **できた CardId は返さない。** 採番するのはエージェント側（設計§5-2）で、
+    /// ネットワークを跨ぐと同期には返せない。起動できたことは `SessionUpsert` が
+    /// 記録層へ届いた時点で分かる——ブラウザ配信は元からその形で待っている。
+    fn spawn(&self, cwd: &str, permission_mode: Option<PermissionMode>) -> Result<(), String>;
     fn kill(&self, card_id: CardId) -> Result<(), String>;
     fn archive(&self, card_id: CardId) -> Result<(), String>;
 

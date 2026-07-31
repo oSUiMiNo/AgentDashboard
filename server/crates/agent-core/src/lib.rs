@@ -24,6 +24,7 @@ pub mod events;
 pub mod hook_post;
 pub mod hooks;
 pub mod jsonfile;
+pub mod link;
 pub mod model_aliases;
 pub mod model_catalog;
 pub mod model_post;

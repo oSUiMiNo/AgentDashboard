@@ -61,10 +61,10 @@ impl AgentHost for LocalAgent {
         self.manager.get(card_id).is_some()
     }
 
-    fn spawn(&self, cwd: &str, permission_mode: Option<PermissionMode>) -> Result<CardId, String> {
+    fn spawn(&self, cwd: &str, permission_mode: Option<PermissionMode>) -> Result<(), String> {
         self.manager
             .spawn_with_mode(cwd, permission_mode)
-            .map(|session| session.card_id)
+            .map(|_| ())
             .map_err(|err| err.to_string())
     }
 

@@ -178,6 +178,142 @@ impl AgentHub {
     }
 }
 
+/// ブラウザから見た「PC 側」を、A2S 越しのエージェントへ繋ぐ実装（設計§2-3）。
+///
+/// ローカルモードの `LocalAgent` と同じ口（[`AgentHost`]）を満たすので、**ブラウザ配信
+/// （[`crate::ws`]）はどちらが向こうに居るかを知らない**。
+///
+/// # 届いたかどうかは返さない
+///
+/// 指示は fire-and-forget（§5-6）。切断中は届かず失われ、結果は `SessionUpsert` の
+/// 再配信で返る。ack を足さないのは、**既存の操作と保証を揃える**ため——ローカルでも
+/// 「押した結果は状態が変わることで分かる」という形になっている。
+pub struct RemoteAgent {
+    hub: Arc<AgentHub>,
+}
+
+impl RemoteAgent {
+    pub fn new(hub: Arc<AgentHub>) -> Self {
+        Self { hub }
+    }
+
+    /// そのカードを持つ PC へ1つ送る。居なければ理由を返す。
+    fn relay(&self, card_id: CardId, message: ServerToAgent) -> Result<(), String> {
+        let Some(conn) = self.hub.conn_for_card(card_id) else {
+            return Err(NOT_CONNECTED.to_string());
+        };
+        conn.send(&message);
+        Ok(())
+    }
+}
+
+/// そのカードを持つ PC が居ないときの説明。
+const NOT_CONNECTED: &str = "セッションが見つかりません（PC が繋がっていません）";
+
+#[async_trait::async_trait]
+impl crate::agent::AgentHost for RemoteAgent {
+    fn exists(&self, card_id: CardId) -> bool {
+        self.hub.conn_for_card(card_id).is_some()
+    }
+
+    fn spawn(&self, cwd: &str, permission_mode: Option<PermissionMode>) -> Result<(), String> {
+        // **どの PC で起こすかを選ぶ口がまだ無い。** `ClientMessage::Spawn` に宛先が
+        // 無く、選ぶ UI はフェーズ5（§11-2 の PC 名バッジと同時）。黙って1台目へ送ると
+        // 意図しない PC でセッションが起きるので、迷う状況では断って理由を出す
+        let connected = self.hub.connected();
+        match connected.len() {
+            1 => {
+                connected[0].send(&ServerToAgent::Spawn {
+                    cwd: cwd.to_string(),
+                    permission_mode,
+                });
+                Ok(())
+            }
+            0 => Err("繋がっている PC がありません".to_string()),
+            many => Err(format!(
+                "どの PC で起動するか選べません（{many} 台が繋がっています）。PC の選択はこれから実装します"
+            )),
+        }
+    }
+
+    fn kill(&self, card_id: CardId) -> Result<(), String> {
+        self.relay(card_id, ServerToAgent::Kill { card_id })
+    }
+
+    fn archive(&self, card_id: CardId) -> Result<(), String> {
+        self.relay(card_id, ServerToAgent::Archive { card_id })
+    }
+
+    /// **リモートの端末はまだ開けない。**
+    ///
+    /// セルフホストモードの画面はエージェント内の端末エミュレータが作る（§7）ので、
+    /// 生バイトの購読口は存在しない。ローカル用の経路をここで流用しないのは、
+    /// §7-2 がそれを明確に否定しており、要件5-2（表示中のものだけ配る）とも衝突するため。
+    fn subscribe_pty(
+        &self,
+        _card_id: CardId,
+    ) -> Option<(bytes::Bytes, tokio::sync::broadcast::Receiver<bytes::Bytes>)> {
+        None
+    }
+
+    fn pty_snapshot(&self, _card_id: CardId) -> Option<bytes::Bytes> {
+        None
+    }
+
+    fn write_input(&self, card_id: CardId, bytes: &[u8]) -> Result<(), String> {
+        let Some(conn) = self.hub.conn_for_card(card_id) else {
+            return Err(NOT_CONNECTED.to_string());
+        };
+        // 生入力は JSON に包まずバイナリのまま運ぶ（設計§4-3）
+        conn.send_binary(protocol::frame::encode(
+            protocol::frame::FrameKind::PtyInput,
+            card_id,
+            bytes,
+        ));
+        Ok(())
+    }
+
+    fn resize(&self, card_id: CardId, cols: u16, rows: u16) {
+        let _ = self.relay(
+            card_id,
+            ServerToAgent::Resize {
+                card_id,
+                cols,
+                rows,
+            },
+        );
+    }
+
+    /// フロー制御はローカルの生バイト配信の仕組み（初期実装§10）。
+    ///
+    /// リモートでは画面を間隔で送る（§7-5）ので、詰まりを止める必要そのものが無い。
+    fn set_flow(&self, _card_id: CardId, _client_id: u64, _paused: bool) {}
+
+    fn release_client(&self, _card_id: CardId, _client_id: u64) {}
+
+    /// パーサの健康状態は**エージェントから届く**（`ParserStatus`）ので、サーバは
+    /// 持っていない。購読を始めた瞬間に縮退を知らせることはできないが、次の変化で届く。
+    fn parser_state(&self) -> Option<protocol::ws::ParserState> {
+        None
+    }
+
+    async fn send_input(&self, card_id: CardId, text: String) -> Result<(), String> {
+        self.relay(card_id, ServerToAgent::SendInput { card_id, text })
+    }
+
+    async fn set_permission_mode(
+        &self,
+        card_id: CardId,
+        mode: PermissionMode,
+    ) -> Result<(), String> {
+        self.relay(card_id, ServerToAgent::SetPermissionMode { card_id, mode })
+    }
+
+    async fn set_model(&self, card_id: CardId, model: protocol::ModelId) -> Result<(), String> {
+        self.relay(card_id, ServerToAgent::SetModel { card_id, model })
+    }
+}
+
 /// エージェント向けのルート。**ブラウザ向け（[`crate::routes`]）とは別に合成する。**
 ///
 /// 分けてあるのは、セルフホストモードでこの2つが別の経路（リバースプロキシの

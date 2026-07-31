@@ -52,6 +52,33 @@ pub fn routes(manager: Arc<SessionManager>) -> Router {
         .with_state(HookState { manager })
 }
 
+/// フックの受信口を**自分のポートで**開く（セルフホスト化設計§5-3）。
+///
+/// # 先にポートを確定させてから設定を作る
+///
+/// 注入する settings にはフックの宛先 URL が焼き込まれるので、**セッションを起こす前に
+/// 番号が決まっていないと届かない**。だから「開く」と「配る」を2つに分けてある——
+/// 呼び出し側は [`bind`] で番号を取り、その番号を `AgentConfig::hook_port` に入れて
+/// マネージャを作り、最後に [`serve`] を呼ぶ。
+///
+/// 待ち受けは **127.0.0.1 のみ**。フックの宛先はどちらのモードでも PC の中で、
+/// ネットワークへ出す理由が無い（要件7）。
+pub async fn bind(port: u16) -> std::io::Result<(tokio::net::TcpListener, u16)> {
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
+    let bound = listener.local_addr()?.port();
+    Ok((listener, bound))
+}
+
+/// [`bind`] で取った待ち受けでフックを受け始める。
+pub fn serve(listener: tokio::net::TcpListener, manager: Arc<SessionManager>) {
+    tokio::spawn(async move {
+        if let Err(err) = axum::serve(listener, routes(manager)).await {
+            // ここが落ちると状態が永久に「不明」のままになる。黙って終わらない
+            tracing::error!("フックの受信口が止まりました: {err}");
+        }
+    });
+}
+
 /// `POST /hook/{token}/{event}` の受け口。
 pub async fn receive(
     State(state): State<HookState>,

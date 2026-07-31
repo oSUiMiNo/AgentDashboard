@@ -978,6 +978,14 @@ impl SessionManager {
         &self.program
     }
 
+    /// フックと `statusLine` の宛先ポート（セルフホスト化設計§5-3）。
+    ///
+    /// セッションを起こすときに settings へ焼き込まれる値そのもの。**焼き込んだ先と
+    /// 受けている場所が同じか**は分離後の要になるので、外から確かめられるようにしてある。
+    pub fn hook_port(&self) -> u16 {
+        self.config.hook_port
+    }
+
     /// 利用者のグローバル既定を守る役。
     pub fn claude_settings(&self) -> &Arc<crate::claude_settings::ClaudeSettings> {
         &self.claude_settings
