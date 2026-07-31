@@ -230,6 +230,25 @@ impl AgentSocket {
             .expect("送れること");
     }
 
+    /// 畳まれるまで待つ（失効の確認用）。
+    ///
+    /// **「何も来ないこと」ではなく「終わったこと」を見る。** 前者は待ち時間の
+    /// 長さでしか言えないが、後者は相手が閉じたという事実として観測できる。
+    pub async fn expect_closed(&mut self) {
+        let deadline = tokio::time::Instant::now() + AGENT_TIMEOUT;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let next = tokio::time::timeout(remaining, self.socket.next())
+                .await
+                .unwrap_or_else(|_| panic!("{AGENT_TIMEOUT:?} 以内に畳まれませんでした"));
+            match next {
+                Some(Ok(tungstenite::Message::Close(_))) | None => return,
+                Some(Err(_)) => return,
+                Some(Ok(_)) => continue,
+            }
+        }
+    }
+
     /// 条件に合う指示が来るまで受け取り続ける。
     pub async fn wait_for(
         &mut self,

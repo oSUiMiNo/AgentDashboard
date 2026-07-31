@@ -53,6 +53,8 @@ struct Arena {
     addr: SocketAddr,
     db: DatabaseConnection,
     registry: Arc<SessionRegistry>,
+    /// 繋がっている PC の集まり。失効を接続中へ効かせる確認に要る
+    hub: Arc<AgentHub>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -77,7 +79,7 @@ impl Arena {
 
         let router = server_core::auth::with_sessions(
             server_core::routes(ws_state, Arc::clone(&auth))
-                .merge(server_core::gateway::agent_routes(hub)),
+                .merge(server_core::gateway::agent_routes(Arc::clone(&hub))),
             &auth,
         );
 
@@ -97,6 +99,7 @@ impl Arena {
             addr,
             db,
             registry,
+            hub,
             task,
         }
     }
@@ -587,6 +590,148 @@ async fn 他人の_PC_を宛先にした起動は断られる() {
             backend.name
         );
         let _ = mine;
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn tomlに他人の名前を書いても帰属は動かない() {
+    // 検収「権限」——**持っていない権限は名乗れない**（設計§8-5）。申告そのものは
+    // 記録に残す（利用者が「書いたのに効かない」を確かめられるように）が、
+    // 帰属は接続のもののまま
+    for backend in common::backends("tenancy-toml").await {
+        let arena = Arena::start(backend.db.clone()).await;
+        let (theirs, _their_agent) = arena.tenant("よそのひと").await;
+        let (mine, mut mine_agent) = arena.tenant("わたし").await;
+
+        let card_id = CardId::new();
+        let mut claim = common::meta(card_id);
+        claim.toml_account = Some("よそのひと".to_string());
+        mine_agent
+            .send(&AgentMessage::SessionUpsert {
+                session: Box::new(claim),
+            })
+            .await;
+
+        let listed = arena.wait_for_listed(mine.account_id, 2).await;
+        let card = listed
+            .iter()
+            .find(|meta| meta.card_id == card_id)
+            .expect("自分の一覧に出ること");
+        // 申告はそのまま残る（画面に出して、書いた本人が気づけるように）
+        assert_eq!(card.toml_account.as_deref(), Some("よそのひと"));
+        // **帰属は動かない。** 見ているのは申告ではなく接続
+        assert_eq!(
+            card.account.as_deref(),
+            Some("わたし"),
+            "[{}]",
+            backend.name
+        );
+        // 名指しされた側の一覧にも現れない
+        assert_eq!(
+            arena.registry.list(theirs.account_id).len(),
+            1,
+            "[{}] 名乗っただけで相手の一覧へ入り込んだ",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 失効させると繋がっている_PC_も切れる() {
+    // 設計§8-4。**立てるだけでは足りない**——外したはずの PC が次に切れるまで
+    // 繋がり続けるなら、失効はほとんど意味を持たない
+    for backend in common::backends("tenancy-revoke").await {
+        let arena = Arena::start(backend.db.clone()).await;
+        let account_id = pairing::ensure_account(&backend.db, "わたし")
+            .await
+            .expect("アカウントを用意できること");
+        let token = pairing::issue_token(&backend.db, account_id, "捨てる予定")
+            .await
+            .expect("発行できること");
+        let token_id = pairing::resolve_token(&backend.db, &token)
+            .await
+            .expect("引けること")
+            .expect("有効であること")
+            .token_id;
+
+        let mut socket = common::connect_agent_as(arena.addr, &token, "外す予定のPC").await;
+        socket
+            .wait_for("名乗りの応答", |message| {
+                matches!(message, protocol::a2s::ServerToAgent::Hello { .. })
+            })
+            .await;
+
+        pairing::revoke_token(&backend.db, token_id)
+            .await
+            .expect("失効させられること");
+        let cut = arena.hub.disconnect_token(token_id);
+        assert_eq!(
+            cut, 1,
+            "[{}] 繋がっている接続を見つけられていない",
+            backend.name
+        );
+
+        // 相手からは**畳まれた**ように見える
+        socket.expect_closed().await;
+
+        // 失効後は繋ぎ直せない（upgrade の段階で断られる）
+        let denied =
+            common::connect_agent(arena.addr, Some(&token), Some(protocol::a2s::A2S_PROTOCOL))
+                .await;
+        assert!(
+            denied.is_err(),
+            "[{}] 失効したトークンで繋がった",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 同じアカウントへ3台以上を同時に繋げる() {
+    // 検収「複数 PC を同一アカウントに登録」＋非機能「3台以上」（設計§8-4）。
+    // トークンは1台1本にしておくと、1台ぶんを外すときに他を巻き添えにしない
+    for backend in common::backends("tenancy-many").await {
+        let arena = Arena::start(backend.db.clone()).await;
+        let account_id = pairing::ensure_account(&backend.db, "わたし")
+            .await
+            .expect("アカウントを用意できること");
+
+        let mut sockets = Vec::new();
+        for name in ["仕事用ノート", "自宅デスクトップ", "手元のミニPC"] {
+            let token = pairing::issue_token(&backend.db, account_id, name)
+                .await
+                .expect("発行できること");
+            let mut socket = common::connect_agent_as(arena.addr, &token, name).await;
+            socket
+                .wait_for("名乗りの応答", |message| {
+                    matches!(message, protocol::a2s::ServerToAgent::Hello { .. })
+                })
+                .await;
+            socket
+                .send(&AgentMessage::SessionUpsert {
+                    session: Box::new(common::meta(CardId::new())),
+                })
+                .await;
+            sockets.push(socket);
+        }
+
+        // 3台ぶんのカードが同じアカウントの一覧に並ぶ
+        let listed = arena.wait_for_listed(account_id, 3).await;
+        let mut agent_ids: Vec<_> = listed.iter().filter_map(|meta| meta.agent_id).collect();
+        agent_ids.sort();
+        agent_ids.dedup();
+        assert_eq!(
+            agent_ids.len(),
+            3,
+            "[{}] 別々の PC として登録されていない",
+            backend.name
+        );
 
         backend.finish().await;
     }
