@@ -80,9 +80,13 @@ issue-sync は、ユーザーが行うので不要。必要かどうかユーザ
 | `server/crates/core/tests/dependencies.rs` | crate 境界（依存の逆流）の機械検査。**新しい依存を入れたらここへ足す** |
 | `server/crates/transcript-parser/` | 自己修復が唯一書き換えてよい範囲（設計§9） |
 | `server/crates/testkit/` | フック受信モックサーバと擬似 claude |
+| `server/crates/agent-core/src/session/screen.rs` | 端末エミュレータと画面の配信（設計§7）。**vt100 を持つのはここだけ**——サーバへ漏れていないかは `dependencies.rs` が見張る |
+| `server/crates/server-core/src/gateway.rs` | エージェントの受け口。画面のフレームはここで種別を移し替えてブラウザへ流す（0x04→0x03 / 0x05→0x01） |
 | `server/config.toml.example` | 設定の雛形。**全キーが `AGENTDASHBOARD_<キー>` で上書きできる**（設計§14-1） |
 | `docker/compose.test.yml` ／ `scripts/test-compose` | 永続化層を PostgreSQL に対しても流す（`make test-compose`）。**新しい DB テストは両方へ通す** |
-| `fixtures/` | ゴールデンフィクスチャ（自己修復のテストゲートを兼ねる）と端末録画 |
+| `fixtures/` | ゴールデンフィクスチャ（自己修復のテストゲートを兼ねる）・端末録画（`.cast`）・画面のゴールデン（`.screen`） |
+| `server/crates/agent-core/tests/screen_golden.rs` | 録画から描いた画面のゴールデン比較。作り直すのは `AGENTDASHBOARD_UPDATE_SCREEN_GOLDEN=1`。**作り直したら必ず `scripts/sanitize-fixtures.py` を通す** |
+| `scripts/e2e-remote` ／ `web/e2e/remote.spec.ts` | セルフホスト構成（サーバ＋エージェント）の E2E。**ローカルモードでは画面配信の経路を通らない**ので、実物のブラウザで確かめるのはここだけ |
 | `server/crates/agent-core/tests/pty_record.rs` | 実 claude の TUI を製品と同じ PTY 経路で録画する（`make record-terminal`）。**本物の claude を起動しクォータを消費する** |
 | `server/crates/agent-core/tests/screen_probe.rs` | 端末エミュレータ（vt100）の再現性と画面サイズの実測（`make probe-screen`）。合否ではなく数値を出す |
 | `scripts/sanitize-fixtures.py` | フィクスチャの匿名化と残存検査。**公開リポジトリへ置く前に必ず通す** |
