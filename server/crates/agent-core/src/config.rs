@@ -1,20 +1,109 @@
 //! エージェント（PC 側）が使う設定（セルフホスト化設計§13-2）。
 //!
-//! # ファイルは読まない
+//! # 2つの入口がある
 //!
-//! `config.toml` を読むのは、両側を束ねるローカルモードの実行ファイル
-//! （`agentdashboard_core::config::Config`）の仕事で、ここはその**射影**を受け取るだけ。
-//! こう分けたのは、フェーズ3 でエージェントが別プロセスになると設定ファイル自体が
-//! 別（`agent.toml`）になるため。読む場所を持たないでおけば、その差し替えが
-//! ここまで波及しない。
+//! | モード | 誰が読むか |
+//! |---|---|
+//! | ローカル（同居） | `config.toml` を `agentdashboard_core::config::Config` が読み、ここへ**射影**する |
+//! | セルフホスト（分離） | `agent.toml` を [`AgentConfig::load`] が読む |
+//!
+//! フェーズ2 までは前者だけだったので「ファイルは読まない」と書いてあったが、
+//! エージェントが別プロセスになると**読む主体が他に無い**（§21 読み替え8）。
+//! 実行ファイル側に置くと 15 キーの構造体が2つになり、片方だけが古くなる。
 //!
 //! # キーの割り当て
 //!
 //! 「接続と機械に属するもの」のうち、**利用者の PC にあるものを触る**キーがここへ来る
 //! （PTY・自己修復・`~/.claude`・状態の置き場所）。ブラウザへの配信に関わるキー
 //! （`port` / `flow_*` / `transcript_page_limit`）は `server_core::config::ServerConfig`。
+//!
+//! 接続の3つ（`server_url` / `pairing_token` / `agent_name`）と `hook_port` は
+//! **`agent.toml` にだけ置く**。ローカルモードでは繋ぐ相手が自分自身で、フックの宛先も
+//! ブラウザと同じポートなので、`config.toml` に並べても意味を持たない——書けてしまうと
+//! 「ローカルでも繋げるのか」と読めてしまう。
 
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+
+/// 環境変数での上書き（設計§14-1・§20-2）。
+///
+/// **2つの設定ファイル（`config.toml` と `agent.toml`）で同じ仕組みを使う。** 片方だけに
+/// 実装があると、「compose では設定できないキーがある」という形でしか表に出ない差が
+/// 生まれる。ここに置いたのは、両方から見える crate がここだけだから。
+pub mod env {
+    use serde::Serialize;
+
+    /// 環境変数を当てる。**ファイルより環境変数が強い**（compose では設定ファイルを
+    /// 配らずに環境変数で渡すのが自然なため）。
+    pub fn apply(
+        table: &mut toml::Table,
+        shapes: &[(String, toml::Value)],
+        aliases: &[(&str, &str)],
+    ) -> Result<(), String> {
+        for (key, shape) in shapes {
+            let Some(raw) = lookup(key, aliases) else {
+                continue;
+            };
+            table.insert(key.clone(), parse_value(key, &raw, shape)?);
+        }
+        Ok(())
+    }
+
+    /// そのキーに対応する環境変数を読む。
+    ///
+    /// 既定は `AGENTDASHBOARD_<大文字のキー>` の一本。加えて、**慣行として裸の名前が
+    /// 定着しているものだけ**別名を受ける（`DATABASE_URL` など）。裸の名前は他の
+    /// ソフトウェアと衝突しうるので、接頭辞つきを先に見る。
+    pub fn lookup(key: &str, aliases: &[(&str, &str)]) -> Option<String> {
+        let prefixed = format!("AGENTDASHBOARD_{}", key.to_uppercase());
+        if let Ok(value) = std::env::var(&prefixed) {
+            return Some(value);
+        }
+        let alias = aliases
+            .iter()
+            .find(|(name, _)| *name == key)
+            .map(|(_, alias)| *alias)?;
+        std::env::var(alias).ok()
+    }
+
+    /// 全キーと、その値の形。
+    ///
+    /// 未指定が既定のキー（`Option`）は既定値の表から消えてしまうので、**全部を
+    /// 埋めた見本**から取り出す。ここが漏れるとそのキーだけ環境変数で設定できなくなる。
+    pub fn shapes_of<T: Serialize>(probe: &T) -> Result<Vec<(String, toml::Value)>, String> {
+        let toml::Value::Table(table) = toml::Value::try_from(probe)
+            .map_err(|err| format!("見本を TOML へ直せません: {err}"))?
+        else {
+            return Err("設定は構造体でなければなりません".to_string());
+        };
+        Ok(table.into_iter().collect())
+    }
+
+    /// 環境変数の文字列を、そのキーの形に合わせた TOML の値へ直す。
+    ///
+    /// 型は既定値から決める。`AGENTDASHBOARD_PORT=abc` のような値は、素通しして
+    /// 後で分かりにくく壊れるより、その場で理由付きで断る。
+    pub fn parse_value(key: &str, raw: &str, shape: &toml::Value) -> Result<toml::Value, String> {
+        let invalid = |expected: &str| {
+            format!("環境変数で指定した {key} が{expected}として読めません: {raw}")
+        };
+        match shape {
+            toml::Value::Integer(_) => raw
+                .trim()
+                .parse::<i64>()
+                .map(toml::Value::Integer)
+                .map_err(|_| invalid("整数")),
+            toml::Value::Boolean(_) => raw
+                .trim()
+                .parse::<bool>()
+                .map(toml::Value::Boolean)
+                .map_err(|_| invalid("真偽値（true / false）")),
+            // 文字列とパスは素通し。**引用符を要求しない**——compose の環境変数に
+            // TOML の書式を持ち込ませないため
+            _ => Ok(toml::Value::String(raw.to_string())),
+        }
+    }
+}
 
 const DEFAULT_STALLED_THRESHOLD_SECS: u64 = 120;
 const DEFAULT_COALESCE_MS: u64 = 8;
@@ -29,15 +118,18 @@ const DEFAULT_SELFHEAL_COOLDOWN_HOURS: u64 = 24;
 /// 実測で `refreshInterval: 3` はきっちり3.0秒間隔で走った（設計§11 前提6）。
 /// 1秒にするとセッション数だけ毎秒プロセスが起動するので、3秒を既定にしている。
 const DEFAULT_STATUS_LINE_REFRESH_SECS: u64 = 3;
-/// フックの受信ポートの既定。
+/// フックの受信ポートの既定。**0 は「動的に確保する」**（設計§5-3）。
 ///
-/// いまはブラウザの待ち受けと同じポートに同居しているので
-/// [`server_core::config::ServerConfig`] の既定と同じ値にしてある（一致していることは
-/// `agentdashboard_core` 側のテストが見ている）。フェーズ3 でエージェントが別プロセスに
-/// なると、ここは独立に決まる（設計§5-3）。
-const DEFAULT_HOOK_PORT: u16 = 8787;
+/// 固定の番号を既定にすると、その番号が塞がっている PC でだけ「フックが届かない」
+/// という分かりにくい失敗になる。ローカルモードでは束ねる層がブラウザの待ち受けと
+/// 同じ値を入れる（同居しているため）。
+const DEFAULT_HOOK_PORT: u16 = 0;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// 設定の既定ファイル名（エージェント単体で動くとき）。
+pub const DEFAULT_AGENT_FILE_NAME: &str = "agent.toml";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
 pub struct AgentConfig {
     /// Working のままこの秒数イベントが途絶したら Stalled とみなす
     pub stalled_threshold_secs: u64,
@@ -113,7 +205,22 @@ pub struct AgentConfig {
     ///
     /// セッション起動時に settings へ**焼き込まれる**ので、後から変えても走っている
     /// セッションには効かない。ローカルモードではブラウザの待ち受けと同じ値が入る。
+    ///
+    /// **既定は 0＝動的確保**（設計§5-3）。固定の番号を既定にすると、その番号が
+    /// 塞がっている PC で「フックが届かない」という分かりにくい失敗になる。
     pub hook_port: u16,
+    /// 繋ぎに行くダッシュボードサーバ（`http://host:port`）。
+    ///
+    /// **`agent.toml` にだけ意味がある。** ローカルモードは同じプロセスに同居しており、
+    /// 繋ぐ相手が自分自身なので使わない。
+    pub server_url: Option<String>,
+    /// ペアリングトークン（設計§8-4）。アカウント画面で発行したものを貼る。
+    pub pairing_token: Option<String>,
+    /// この PC の名前。
+    ///
+    /// **アカウントの中でこの名前が PC の同一性**になる（§8-4）。変えると別の PC として
+    /// 登録され、それまでのカードの帰属が切れる。未指定ならホスト名から決める。
+    pub agent_name: Option<String>,
 }
 
 impl Default for AgentConfig {
@@ -135,11 +242,83 @@ impl Default for AgentConfig {
             inject_status_line: true,
             status_line_refresh_secs: DEFAULT_STATUS_LINE_REFRESH_SECS,
             hook_port: DEFAULT_HOOK_PORT,
+            server_url: None,
+            pairing_token: None,
+            agent_name: None,
         }
     }
 }
 
 impl AgentConfig {
+    /// `agent.toml` を読む（セルフホストモードのエージェント）。
+    ///
+    /// 探索順は `explicit`（`--config`）→ カレントの `agent.toml` → 既定値。
+    pub fn load(explicit: Option<&Path>) -> anyhow::Result<Self> {
+        match explicit {
+            Some(path) => Self::from_file(path),
+            None => {
+                let default_path = Path::new(DEFAULT_AGENT_FILE_NAME);
+                if default_path.is_file() {
+                    Self::from_file(default_path)
+                } else {
+                    Self::from_toml_str("")
+                }
+            }
+        }
+    }
+
+    pub fn from_file(path: &Path) -> anyhow::Result<Self> {
+        let text = std::fs::read_to_string(path).map_err(|err| {
+            anyhow::anyhow!("設定ファイルを読めません（{}）: {err}", path.display())
+        })?;
+        Self::from_toml_str(&text).map_err(|err| anyhow::anyhow!("{}: {err}", path.display()))
+    }
+
+    /// TOML 文字列から読み、**環境変数で上書きする**（§14-1・§20-2）。
+    pub fn from_toml_str(text: &str) -> anyhow::Result<Self> {
+        let mut table: toml::Table = toml::from_str(text)?;
+        let probe = Self {
+            selfheal_repo_dir: Some(PathBuf::from("/probe")),
+            state_dir: Some(PathBuf::from("/probe")),
+            claude_settings_path: Some(PathBuf::from("/probe")),
+            server_url: Some("http://probe".to_string()),
+            pairing_token: Some("probe".to_string()),
+            agent_name: Some("probe".to_string()),
+            ..Self::default()
+        };
+        let shapes = env::shapes_of(&probe).map_err(|err| anyhow::anyhow!(err))?;
+        env::apply(&mut table, &shapes, &[]).map_err(|err| anyhow::anyhow!(err))?;
+
+        // 表へ起こしてから読み直しても `deny_unknown_fields` は効く。打ち間違いを
+        // 黙って無視しないという約束は保たれている
+        let config: Self = toml::Value::Table(table).try_into()?;
+        Ok(config)
+    }
+
+    /// この PC の名前を決める（設計§8-4）。
+    ///
+    /// 未指定ならホスト名を使う。**利用者に必ず名前を書かせない**のは、5分セットアップ
+    /// （§14-4）で書く項目を1つでも減らすため。名前は後から設定で変えられる。
+    pub fn resolved_agent_name(&self) -> String {
+        if let Some(name) = &self.agent_name
+            && !name.trim().is_empty()
+        {
+            return name.trim().to_string();
+        }
+        for key in ["HOSTNAME", "COMPUTERNAME"] {
+            if let Ok(value) = std::env::var(key)
+                && !value.trim().is_empty()
+            {
+                return value.trim().to_string();
+            }
+        }
+        std::fs::read_to_string("/etc/hostname")
+            .ok()
+            .map(|text| text.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "agent".to_string())
+    }
+
     /// 状態ファイル（パーサの再開位置など）を置く場所を決める。
     ///
     /// 実行ファイルの隣やビルド成果物の中には置かない。開発中のバイナリは
@@ -184,6 +363,78 @@ impl AgentConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 雛形は全キーを網羅し既定値と一致する() {
+        // `agent.toml.example` は、PC へエージェントを入れる人が最初に読む一覧。
+        // ここが実装より遅れていると、増えたキーの存在に誰も気づけない
+        // （`config.toml.example` 側で実際に起きた）
+        let example = include_str!("../../../agent.toml.example");
+        let config = AgentConfig::from_toml_str(example).expect("雛形が読めること");
+        assert_eq!(
+            config,
+            AgentConfig::default(),
+            "雛形の値が既定値と食い違っている"
+        );
+
+        let written: toml::Table = example.parse().expect("雛形が TOML として妥当なこと");
+        let toml::Value::Table(with_values) =
+            toml::Value::try_from(AgentConfig::default()).expect("既定値を TOML へ変換できること")
+        else {
+            unreachable!("AgentConfig は構造体なのでテーブルになる");
+        };
+        for key in with_values.keys() {
+            assert!(
+                written.contains_key(key),
+                "{key} が agent.toml.example に書かれていない"
+            );
+        }
+
+        // 既定が「未指定」のキーは TOML へ変換すると消えるので上の走査に乗らない。
+        // 値を書くと利用者の環境に無いものを指すことになるため、雛形では
+        // **コメントとして例示**する。名指しでしか確かめられないので列挙する
+        for key in [
+            "server_url",
+            "pairing_token",
+            "agent_name",
+            "selfheal_repo_dir",
+            "state_dir",
+            "claude_settings_path",
+        ] {
+            assert!(
+                !with_values.contains_key(key),
+                "{key} に既定値が付いた。この列挙から外して通常の走査へ移すこと"
+            );
+            assert!(
+                example.contains(&format!("# {key} =")),
+                "{key} が agent.toml.example にコメントとして例示されていない"
+            );
+        }
+    }
+
+    #[test]
+    fn 知らないキーは黙って無視しない() {
+        // 打ち間違いを黙って無視すると「設定したのに効かない」事故になる
+        assert!(AgentConfig::from_toml_str("coalesce_ms = 8").is_ok());
+        assert!(AgentConfig::from_toml_str("coalesce_mss = 8").is_err());
+    }
+
+    #[test]
+    fn 名前は指定が無ければホスト名から決まる() {
+        // 5分セットアップ（§14-4）で書く項目を1つでも減らすため。指定があれば必ず優先する
+        let named = AgentConfig {
+            agent_name: Some("  仕事用ノート  ".to_string()),
+            ..AgentConfig::default()
+        };
+        assert_eq!(named.resolved_agent_name(), "仕事用ノート");
+
+        // 空白だけの指定は「指定なし」と同じ扱い（貼り付けの事故で名前が消えないように）
+        let blank = AgentConfig {
+            agent_name: Some("   ".to_string()),
+            ..AgentConfig::default()
+        };
+        assert!(!blank.resolved_agent_name().is_empty());
+    }
 
     #[test]
     fn 権限確認スキップの既定はオフ() {

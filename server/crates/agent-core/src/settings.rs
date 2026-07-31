@@ -54,7 +54,21 @@ pub struct SettingsView {
     /// 取れなければ空で、そのときは別名のラベル（`Opus`）が出るだけ。
     #[serde(default)]
     pub model_catalog: Vec<CatalogEntry>,
+    /// PC ごとのモデルの表（セルフホスト化設計§13-4）。キーは `agent_id`、
+    /// **ローカルモードは `"local"` の1本**。
+    ///
+    /// 上の2つ（`model_aliases` / `model_catalog`）と中身は同じで、違うのは
+    /// **どの PC のものか**が分かること。CLI の版は PC ごとに違うので、
+    /// ModelPicker はセッションが属する PC の表を見なければならない。
+    ///
+    /// 両方を返しているのは、参照先の切替（ModelPicker 側）がまだこれからだから。
+    /// 切り替えたときに上の2つを落とす（§21 読み替え4）。
+    #[serde(default)]
+    pub model_tables: std::collections::BTreeMap<String, serde_json::Value>,
 }
+
+/// ローカルモードのモデル表のキー（設計§13-4）。
+pub const LOCAL_TABLE_KEY: &str = "local";
 
 /// 画面から変えられる設定の持ち主。
 #[derive(Debug)]
@@ -64,6 +78,8 @@ pub struct SettingsStore {
     always_bypass_permissions: AtomicBool,
     available_modes: Vec<PermissionMode>,
     model_catalog: Vec<CatalogEntry>,
+    /// 起動している CLI の版（モデルの表に添えて配る。設計§13-4）
+    cli_version: String,
 }
 
 impl SettingsStore {
@@ -73,12 +89,33 @@ impl SettingsStore {
         available_modes: Vec<PermissionMode>,
         model_catalog: Vec<CatalogEntry>,
     ) -> Self {
+        Self::with_version(path, config, available_modes, model_catalog, String::new())
+    }
+
+    /// CLI の版まで明示して作る（モデルの表に添える。設計§13-4）。
+    pub fn with_version(
+        path: PathBuf,
+        config: &AgentConfig,
+        available_modes: Vec<PermissionMode>,
+        model_catalog: Vec<CatalogEntry>,
+        cli_version: String,
+    ) -> Self {
         Self {
             path,
             always_bypass_permissions: AtomicBool::new(config.always_bypass_permissions),
             available_modes,
             model_catalog,
+            cli_version,
         }
+    }
+
+    /// この PC のモデルの表（`agents.model_table` へ入るのと同じ形）。
+    pub fn model_table(&self, model_aliases: &[AliasSeen]) -> serde_json::Value {
+        serde_json::json!({
+            "cli_version": self.cli_version,
+            "catalog": self.model_catalog,
+            "aliases": model_aliases,
+        })
     }
 
     /// 画面へ配る形にまとめる。
@@ -86,11 +123,16 @@ impl SettingsStore {
     /// 別名の実測は [`crate::session::SessionManager`] が持っているので、呼び出し側から
     /// 渡してもらう。設定の持ち主がマネージャを参照すると、両者が互いを指すことになる。
     pub fn view_with(&self, model_aliases: Vec<AliasSeen>) -> SettingsView {
+        let model_tables = std::collections::BTreeMap::from([(
+            LOCAL_TABLE_KEY.to_string(),
+            self.model_table(&model_aliases),
+        )]);
         SettingsView {
             always_bypass_permissions: self.always_bypass_permissions.load(Ordering::Relaxed),
             available_modes: self.available_modes.clone(),
             model_aliases,
             model_catalog: self.model_catalog.clone(),
+            model_tables,
         }
     }
 

@@ -10,6 +10,8 @@
 //! [`AgentConfig`]: https://docs.rs/agent-core
 
 const DEFAULT_PORT: u16 = 8787;
+/// 待ち受けるアドレスの既定。**外から触れる経路をそもそも作らない**（設計§7）。
+const DEFAULT_BIND_ADDR: &str = "127.0.0.1";
 const DEFAULT_FLOW_HIGH: usize = 256 * 1024;
 const DEFAULT_FLOW_LOW: usize = 32 * 1024;
 const DEFAULT_TRANSCRIPT_PAGE_LIMIT: usize = 200;
@@ -17,8 +19,17 @@ const DEFAULT_TRANSCRIPT_WINDOW_NODES: usize = 2000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
-    /// ダッシュボードの待ち受けポート。127.0.0.1 のみにバインドする（設計§7）
+    /// ダッシュボードの待ち受けポート
     pub port: u16,
+    /// 待ち受けるアドレス（セルフホスト化設計§13-2）。
+    ///
+    /// 既定は `127.0.0.1`——個人用のローカルツールとして、外から触れる経路をそもそも
+    /// 作らない（設計§7）。セルフホストのコンテナでは `0.0.0.0` を渡す（§14-1）。
+    ///
+    /// **ここを広げるとブラウザが誰からでも開ける。** 鍵（ログインと LAN パスワード）は
+    /// これから実装するので、それまでは信頼できるネットワークの中だけで広げること。
+    /// 起動時に警告を出す。
+    pub bind_addr: String,
     /// フロー制御の上側しきい値。未書き込みバイトがこれを超えたら pause（バイト）
     pub flow_high: usize,
     /// フロー制御の下側しきい値。ここまで減ったら resume（バイト）
@@ -42,6 +53,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             port: DEFAULT_PORT,
+            bind_addr: DEFAULT_BIND_ADDR.to_string(),
             flow_high: DEFAULT_FLOW_HIGH,
             flow_low: DEFAULT_FLOW_LOW,
             transcript_page_limit: DEFAULT_TRANSCRIPT_PAGE_LIMIT,

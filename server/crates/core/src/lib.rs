@@ -25,9 +25,9 @@ use agent_core::{
 use axum::Router;
 use config::Config;
 use local::LocalAgent;
-use server_core::{config::ServerConfig, embed, registry::SessionRegistry, ws};
+use server_core::{config::ServerConfig, embed, gateway::AgentHub, registry::SessionRegistry, ws};
 use settings_api::SettingsState;
-use std::{net::Ipv4Addr, sync::Arc};
+use std::sync::Arc;
 
 /// ローカルモードで動くサーバ一式。
 ///
@@ -103,10 +103,53 @@ impl LocalServer {
     }
 }
 
-/// 設定からサーバ一式を組み立てて起動する。
+/// ダッシュボードサーバだけを起動する（セルフホスト化設計§1-1）。
 ///
-/// バインド先は **127.0.0.1 のみ**（設計§7）。個人用のローカルツールなので、外部から
-/// 触れる経路をそもそも作らない。
+/// **PC 側を作らない**のがローカルモードとの違い。PTY もフックの受信口も持たず、
+/// セッションの実体は A2S の向こう（[`server_core::gateway`]）にある。
+///
+/// 落ちても、繋がっている PC のセッションは無傷（§9-6）。エージェントは繋ぎ直し、
+/// 未 ack のぶんを送り直して追いつく（§6-4）。
+pub async fn serve_server(config: Config) -> anyhow::Result<()> {
+    let server_config = Arc::new(config.server());
+
+    let db = server_core::db::connect(&config.resolved_database_url()).await?;
+    let registry = SessionRegistry::load(db.clone(), server_config.transcript_window_nodes).await?;
+    let hub = AgentHub::new(db, Arc::clone(&registry));
+
+    let agent: Arc<dyn server_core::agent::AgentHost> =
+        Arc::new(server_core::gateway::RemoteAgent::new(Arc::clone(&hub)));
+    let ws_state = ws::AppState::new(agent, Arc::clone(&registry), Arc::clone(&server_config));
+    let router = server_core::routes(ws_state)
+        .merge(server_core::gateway::agent_routes(Arc::clone(&hub)))
+        .merge(settings_api::server_routes(Arc::clone(&hub)));
+
+    let listener = bind(&server_config).await?;
+    tracing::info!(
+        "AgentDashboard（サーバ）を起動しました: http://{}",
+        listener.local_addr()?
+    );
+    axum::serve(listener, router).await?;
+    Ok(())
+}
+
+/// 待ち受けを開く。**広げるときは警告を出す**。
+///
+/// ブラウザ側の鍵（ログインと LAN パスワード。設計§8-2・§8-3）はこれから実装する。
+/// それまでは、広げた瞬間に**誰でも開ける状態**になる——黙って開けないために、
+/// 起動のたびに言う。
+async fn bind(config: &ServerConfig) -> anyhow::Result<tokio::net::TcpListener> {
+    if config.bind_addr != "127.0.0.1" && config.bind_addr != "localhost" {
+        tracing::warn!(
+            "{} で待ち受けます。ブラウザ側の認証はまだ入っていないので、信頼できるネットワークの中だけで使ってください",
+            config.bind_addr
+        );
+    }
+    let listener = tokio::net::TcpListener::bind((config.bind_addr.as_str(), config.port)).await?;
+    Ok(listener)
+}
+
+/// 設定からサーバ一式を組み立てて起動する（ローカルモード）。
 pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
     // 1つのファイルから、エージェント側とサーバ側の2つへ射影する（セルフホスト化設計§13-2）。
     // 分けておくと、フェーズ3 で両者が別プロセスになったときに、この行より下は
@@ -161,11 +204,12 @@ pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::R
             .collect::<Vec<_>>()
             .join(", ")
     );
-    let settings = Arc::new(settings::SettingsStore::new(
+    let settings = Arc::new(settings::SettingsStore::with_version(
         config_path,
         &agent_config,
         available_modes,
         catalog.models().to_vec(),
+        catalog.cli_version().to_string(),
     ));
 
     // 「作業中」の表示のまま実はハングしている、という見落としを防ぐ見張り（設計§5）
@@ -202,7 +246,7 @@ pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::R
     let server = LocalServer::new(manager, registry, Arc::clone(&server_config))
         .with_parser(parser)
         .with_settings(settings);
-    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, server_config.port)).await?;
+    let listener = bind(&server_config).await?;
     let address = listener.local_addr()?;
 
     tracing::info!("AgentDashboard を起動しました: http://{address}");

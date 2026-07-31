@@ -1,0 +1,87 @@
+# AgentDashboard の **PC 側エージェント**（`agentdashboard-agent`）の設定
+# （セルフホスト化設計§13-2）。
+#
+# このファイルをエージェントを動かす PC へ `agent.toml` としてコピーして使う。
+# 全キーに既定値があるため、変えたい項目だけ書けばよい。知らないキーを書くと
+# エラーになる（打ち間違いを黙って無視すると「設定したのに効かない」事故になるため）。
+#
+# **どのキーも環境変数で上書きできる。** 名前は `AGENTDASHBOARD_<大文字のキー>`
+# （例：`AGENTDASHBOARD_PAIRING_TOKEN=adp_...`）。ファイルより環境変数が強い。
+#
+# 1台で完結する使い方（ローカルモード）ではこのファイルを使わない。そちらは
+# `config.toml` 1つで両側の設定を持つ。
+
+# --- 接続 ---------------------------------------------------------------------
+
+# 繋ぎに行くダッシュボードサーバ。`https://` ならエージェントは `wss://` で繋ぐ
+# server_url = "https://dash.example.com"
+
+# ペアリングトークン（設計§8-4）。サーバ側で
+# `agentdashboard pair-token --account <名前>` を実行すると発行される。
+# **表示は一度きり**なので、その場でここへ貼ること
+# pairing_token = "adp_..."
+
+# この PC の名前。未指定ならホスト名を使う。
+# **アカウントの中でこの名前が PC の同一性になる** — 変えると別の PC として登録され、
+# それまでのカードの帰属が切れる
+# agent_name = "仕事用ノート"
+
+# フックと statusLine の受信ポート（127.0.0.1 のみ）。
+# 0 は「起動のたびに空いている番号を取る」。固定したいときだけ番号を書く
+hook_port = 0
+
+# --- ターミナル（体感速度の生命線） -------------------------------------------
+
+# PTY 出力をまとめてから送るまでの窓（ミリ秒）
+coalesce_ms = 8
+
+# セッションごとの scrollback（バイト）
+pty_ring_buffer = 1048576
+
+# --- セッション ---------------------------------------------------------------
+
+# Working のままこの秒数イベントが途絶したら Stalled（停滞）とみなす
+stalled_threshold_secs = 120
+
+# 一覧の起動ボタンを「全承認をスキップ」の1つだけにするか。
+# 権限確認を飛ばす機能なので、既定はスキップしない側
+always_bypass_permissions = false
+
+# セッションへ statusLine を注入するか。切るとモデルは「不明」のままになる
+inject_status_line = true
+
+# 注入する statusLine の実行間隔（秒）
+status_line_refresh_secs = 3
+
+# 利用者のグローバル設定の場所。既定は $HOME/.claude/settings.json
+# claude_settings_path = "/home/you/.claude/settings.json"
+
+# --- 自己修復（設計§9・§10） --------------------------------------------------
+
+# 自己修復を動かすか。止めても検知の通知だけは出る
+selfheal_enabled = true
+
+# カナリアセッションで使うモデル
+canary_model = "haiku"
+
+# カナリアの採取が要素不足だったときに、1回だけ採り直すモデル
+canary_fallback_model = "sonnet"
+
+# 修復セッションで使うモデル
+repair_model = "sonnet"
+
+# 修復の再試行上限
+selfheal_retry = 3
+
+# 同一バージョンへの再挑戦を抑制する時間
+selfheal_cooldown_hours = 24
+
+# ダッシュボード自身のソースリポジトリ。未指定ならカレントから上へ辿って探す。
+# 見つからなければ自己修復は検知の通知だけに留まる
+# selfheal_repo_dir = "/home/you/Dev/AgentDashboard"
+
+# --- 状態の置き場所 -----------------------------------------------------------
+
+# 再開位置・自己修復の対応表・差し替えたパーサを置く場所。
+# 未指定なら $XDG_STATE_HOME/agentdashboard（無ければ ~/.local/state/agentdashboard）
+# state_dir = "/home/you/.local/state/agentdashboard"

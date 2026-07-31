@@ -87,10 +87,31 @@ pub struct AgentLink {
     /// 同じプロセス内の購読者（自己修復）向け
     bus: LocalEventBus,
     outgoing: mpsc::UnboundedSender<Outgoing>,
-    /// モデルの表（§13-4）。接続直後と変化時に送る
-    model_table: Mutex<Option<AgentMessage>>,
+    /// モデルの表（§13-4）。接続直後と変化時に送る。
+    ///
+    /// **部品のまま持つ。** 変わるのは別名の側だけ（実測の学習）なので、
+    /// 差し替えてから組み立て直す
+    model_table: Mutex<Option<ModelTable>>,
     /// 常駐タスクへ渡す受け口。[`AgentLink::attach`] で取り出す
     inbox: Mutex<Option<mpsc::UnboundedReceiver<Outgoing>>>,
+}
+
+/// エージェントが名乗るモデルの表（§13-4）。
+#[derive(Clone)]
+struct ModelTable {
+    cli_version: String,
+    catalog: serde_json::Value,
+    aliases: serde_json::Value,
+}
+
+impl ModelTable {
+    fn message(&self) -> AgentMessage {
+        AgentMessage::ModelTable {
+            cli_version: self.cli_version.clone(),
+            catalog: self.catalog.clone(),
+            aliases: self.aliases.clone(),
+        }
+    }
 }
 
 /// 上へ運ぶもの1件。
@@ -144,12 +165,13 @@ impl AgentLink {
         catalog: serde_json::Value,
         aliases: serde_json::Value,
     ) {
-        let message = AgentMessage::ModelTable {
+        let table = ModelTable {
             cli_version,
             catalog,
             aliases,
         };
-        *self.model_table.lock().expect("ロックが壊れていない") = Some(message.clone());
+        let message = table.message();
+        *self.model_table.lock().expect("ロックが壊れていない") = Some(table);
         let _ = self.outgoing.send(Outgoing::ModelTable(message));
     }
 }
@@ -173,6 +195,20 @@ impl EventSink for AgentLink {
 
     fn reset_transcript(&self, card_id: CardId) {
         let _ = self.outgoing.send(Outgoing::Reset(card_id));
+    }
+
+    fn model_aliases_changed(&self, aliases: serde_json::Value) {
+        let message = {
+            let mut table = self.model_table.lock().expect("ロックが壊れていない");
+            // まだ表を持っていないなら、送る形にできない（起動直後の一瞬だけ）。
+            // 次の接続で改めて全部送るので、ここで作りかけを送る必要は無い
+            let Some(table) = table.as_mut() else {
+                return;
+            };
+            table.aliases = aliases;
+            table.message()
+        };
+        let _ = self.outgoing.send(Outgoing::ModelTable(message));
     }
 }
 
@@ -574,9 +610,9 @@ async fn connected(
         .model_table
         .lock()
         .expect("ロックが壊れていない")
-        .clone()
+        .as_ref()
     {
-        initial.push(table);
+        initial.push(table.message());
     }
     initial.extend(outbox.resend());
     for message in initial {

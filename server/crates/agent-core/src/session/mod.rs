@@ -1485,6 +1485,11 @@ impl SessionManager {
                             card_id = %session.card_id,
                             "別名の解決先を覚えました: {alias} -> {id}（{display_name}）"
                         );
+                        // 表が変わったので上へ知らせる（設計§13-4）。運ぶ相手が
+                        // 居なければ何も起きない
+                        if let Ok(aliases) = serde_json::to_value(self.aliases.all()) {
+                            self.events.model_aliases_changed(aliases);
+                        }
                     }
                     session.store_model_alias(Some(alias));
                 } else {

@@ -27,7 +27,12 @@ use server_core::{
     gateway::{AgentHub, RemoteAgent},
     registry::SessionRegistry,
 };
-use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 const WINDOW: usize = 2000;
 const TIMEOUT: Duration = Duration::from_secs(20);
@@ -232,6 +237,11 @@ impl A2s {
 
     /// `through_sniffer` を立てると、線の上を覗ける中継を間に挟む。
     async fn start_with(label: &str, through_sniffer: bool) -> Self {
+        Self::start_full(label, through_sniffer, SYNC_SECS).await
+    }
+
+    /// 履歴の同期間隔まで決めて立てる（設定の即時反映を見るテスト用）。
+    async fn start_full(label: &str, through_sniffer: bool, sync_secs: u64) -> Self {
         let dir = std::env::temp_dir().join(format!(
             "agentdashboard-a2s-{label}-{}",
             uuid::Uuid::new_v4().simple()
@@ -257,7 +267,7 @@ impl A2s {
             &db,
             account_id,
             db_settings::SYNC_INTERVAL_SECS,
-            serde_json::json!(SYNC_SECS),
+            serde_json::json!(sync_secs),
         )
         .await
         .expect("同期間隔を書けること");
@@ -399,7 +409,7 @@ impl A2s {
         (session, cwd.join("session.jsonl"))
     }
 
-    async fn tell_transcript(&self, session: &agent_core::session::Session, transcript: &PathBuf) {
+    async fn tell_transcript(&self, session: &agent_core::session::Session, transcript: &Path) {
         let payload = serde_json::json!({
             "session_id": "11111111-2222-3333-4444-555555555555",
             "transcript_path": transcript.to_string_lossy(),
@@ -687,21 +697,78 @@ async fn モデルの表は_PC_ごとに保存される() {
         serde_json::json!([{ "alias": "opus", "resolved": "claude-opus-5" }]),
     );
 
+    let table = wait_for_model_table(&a2s, |table| table["cli_version"] == "2.1.220").await;
+    assert_eq!(table["catalog"][0]["id"], "claude-opus-5");
+    assert_eq!(table["aliases"][0]["alias"], "opus");
+
+    // **別名の実測が変わったら送り直す**（§13-4）。実際の契機は「初めて選んだ別名が
+    // 何に解決されたか分かったとき」で、そこから呼ばれるのがこの口
+    a2s.link.model_aliases_changed(serde_json::json!([
+        { "alias": "sonnet", "resolved": "claude-sonnet-5" }
+    ]));
+
+    let table = wait_for_model_table(&a2s, |table| table["aliases"][0]["alias"] == "sonnet").await;
+    assert_eq!(
+        table["cli_version"], "2.1.220",
+        "別名だけを差し替えるはずが、表ごと作り直している"
+    );
+}
+
+/// 保存されたモデルの表が条件を満たすまで待つ。
+async fn wait_for_model_table(
+    a2s: &A2s,
+    matches: impl Fn(&serde_json::Value) -> bool,
+) -> serde_json::Value {
     let deadline = tokio::time::Instant::now() + TIMEOUT;
     loop {
         let tables = pairing::model_tables(a2s.hub.db(), a2s.account_id)
             .await
             .expect("読めること");
-        if let Some((_, table)) = tables.first() {
-            assert_eq!(table["cli_version"], "2.1.220");
-            assert_eq!(table["catalog"][0]["id"], "claude-opus-5");
-            assert_eq!(table["aliases"][0]["alias"], "opus");
-            return;
+        if let Some((_, table)) = tables.first()
+            && matches(table)
+        {
+            return table.clone();
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "{TIMEOUT:?} 以内にモデルの表が保存されませんでした"
+            "{TIMEOUT:?} 以内にモデルの表が期待どおりになりませんでした"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+#[tokio::test]
+async fn 同期間隔の変更は次の接続を待たずに効く() {
+    // 設定を変えたのに「次に繋ぎ直すまで古い間隔で送り続ける」のでは、変えた意味が
+    // 半分無くなる（設計§13-3）。**間隔が長い状態から始めて、押し込んだら届く**ことを見る
+    let a2s = A2s::start_full("intervals", false, 600).await;
+    let (session, transcript) = a2s.start_session();
+    a2s.tell_transcript(&session, &transcript).await;
+    append(&transcript, &sample_lines());
+
+    // 10分間隔なので、待っても来ない
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(
+        a2s.registry
+            .get(session.card_id)
+            .map(|record| record.transcript_snapshot().is_empty())
+            .unwrap_or(true),
+        "長い間隔を指定したのに、すぐ送られてきている"
+    );
+
+    a2s.hub
+        .set_intervals(
+            a2s.account_id,
+            server_core::db::settings::Intervals {
+                sync_interval_secs: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("設定を変えられること");
+
+    let nodes = a2s.wait_for_nodes(session.card_id, 3).await;
+    assert_eq!(nodes.len(), 3);
+
+    session.kill();
 }

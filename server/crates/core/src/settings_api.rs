@@ -37,6 +37,62 @@ pub fn routes(state: SettingsState) -> Router {
         .with_state(state)
 }
 
+/// サーバモードの設定（セルフホスト化設計§13-4・§21 読み替え1）。
+///
+/// # 材料が PC 側にしか無い
+///
+/// 応答の中身——受け付ける権限モード・トグル・モデルの表——は、**起動している CLI が
+/// ある場所**にしか無い。サーバモードにはローカルの CLI が居ないので、繋がっている PC が
+/// 名乗ったもの（Hello）と、保存してある表（`agents.model_table`）から組み立てる。
+///
+/// 書き換え（`PUT`）はここでは受けない。トグルの持ち主はエージェントの `agent.toml` で、
+/// **サーバから書き戻す口はまだ無い**（アカウント単位化は §16-2 の持ち越し）。
+pub fn server_routes(hub: Arc<server_core::gateway::AgentHub>) -> Router {
+    Router::new()
+        .route("/api/settings", get(api_server_settings))
+        .with_state(hub)
+}
+
+async fn api_server_settings(
+    State(hub): State<Arc<server_core::gateway::AgentHub>>,
+) -> Json<SettingsView> {
+    let connected = hub.connected();
+
+    // **受け付けるモードは合併する。** PC ごとに CLI の版が違えば選択肢も違うので、
+    // どれか1台に揃えると他の PC で選べないモードが消える。選んだモードが通るかは
+    // 送った先の PC が決める（通らなければ `Error` が返る）
+    let mut available_modes: Vec<protocol::PermissionMode> = Vec::new();
+    for conn in &connected {
+        for mode in &conn.available_modes {
+            if !available_modes.contains(mode) {
+                available_modes.push(mode.clone());
+            }
+        }
+    }
+
+    let mut model_tables = std::collections::BTreeMap::new();
+    for conn in &connected {
+        let tables = server_core::db::pairing::model_tables(hub.db(), conn.account_id)
+            .await
+            .unwrap_or_default();
+        for (agent_id, table) in tables {
+            model_tables.insert(agent_id.to_string(), table);
+        }
+    }
+
+    Json(SettingsView {
+        // 起動ボタンの数を決めるトグル。**PC ごとの設定**なので、1台でも
+        // 「スキップだけ出す」なら画面もそれに従う（迷う組み合わせは PC 選択が
+        // 入るフェーズ5 で整理する）
+        always_bypass_permissions: connected.iter().any(|conn| conn.always_bypass_permissions),
+        available_modes,
+        // フラットな2つは**ローカルモードのための互換**。リモートの表は下の map にある
+        model_aliases: Vec::new(),
+        model_catalog: Vec::new(),
+        model_tables,
+    })
+}
+
 /// `PUT /api/settings` の本文。
 #[derive(Debug, Deserialize)]
 pub struct SettingsUpdate {

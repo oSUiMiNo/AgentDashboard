@@ -14,7 +14,7 @@
 //! `deny_unknown_fields` が効かなくなり**、「知らないキーを書いたらエラー」という
 //! 約束が静かに壊れる（打ち間違いを黙って無視すると「設定したのに効かない」事故になる）。
 
-use agent_core::config::AgentConfig;
+use agent_core::config::{AgentConfig, env};
 use serde::{Deserialize, Serialize};
 use server_core::config::ServerConfig;
 use std::path::{Path, PathBuf};
@@ -48,6 +48,7 @@ pub enum ConfigError {
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
     pub port: u16,
+    pub bind_addr: String,
     pub stalled_threshold_secs: u64,
     pub coalesce_ms: u64,
     pub pty_ring_buffer: usize,
@@ -78,6 +79,7 @@ impl Default for Config {
         let server = ServerConfig::default();
         Self {
             port: server.port,
+            bind_addr: server.bind_addr,
             stalled_threshold_secs: agent.stalled_threshold_secs,
             coalesce_ms: agent.coalesce_ms,
             pty_ring_buffer: agent.pty_ring_buffer,
@@ -170,34 +172,10 @@ impl Config {
     /// 気づくのは配ったあとになる。そこで [`Config`] 自身を TOML の表へ起こし、
     /// **そこにあるキーを全部見る**。以後の新キーは何もしなくても対応する。
     ///
-    /// 型は既定値から決める。`AGENTDASHBOARD_PORT=abc` のような値は、素通しして
-    /// 後で分かりにくく壊れるより、その場で理由付きで断る。
+    /// 仕組みそのものは [`agent_core::config::env`] にある。`agent.toml`（エージェント
+    /// 単体の設定）でも同じ形が要るので、**両方から見える場所へ置いてある**。
     fn apply_env(table: &mut toml::Table) -> Result<(), ConfigError> {
-        for (key, shape) in Self::key_shapes() {
-            let Some(raw) = Self::env_lookup(&key) else {
-                continue;
-            };
-            table.insert(key.clone(), parse_env_value(&key, &raw, &shape)?);
-        }
-        Ok(())
-    }
-
-    /// そのキーに対応する環境変数を読む。
-    ///
-    /// 既定は `AGENTDASHBOARD_<大文字のキー>` の一本。加えて、**慣行として裸の名前が
-    /// 定着しているものだけ**別名を受ける（`DATABASE_URL` など。設計§14-1 の compose
-    /// 例がその形で書かれている）。裸の名前は他のソフトウェアと衝突しうるので、
-    /// 接頭辞つきを先に見る。
-    fn env_lookup(key: &str) -> Option<String> {
-        let prefixed = format!("AGENTDASHBOARD_{}", key.to_uppercase());
-        if let Ok(value) = std::env::var(&prefixed) {
-            return Some(value);
-        }
-        let alias = BARE_ENV_ALIASES
-            .iter()
-            .find(|(name, _)| *name == key)
-            .map(|(_, alias)| *alias)?;
-        std::env::var(alias).ok()
+        env::apply(table, &Self::key_shapes(), BARE_ENV_ALIASES).map_err(ConfigError::Invalid)
     }
 
     /// 全キーと、その値の形。
@@ -213,12 +191,7 @@ impl Config {
             database_url: Some("sqlite://probe".to_string()),
             ..Config::default()
         };
-        let toml::Value::Table(table) =
-            toml::Value::try_from(probe).expect("既定値を TOML へ変換できること")
-        else {
-            unreachable!("Config は構造体なのでテーブルになる");
-        };
-        table.into_iter().collect()
+        env::shapes_of(&probe).expect("既定値を TOML へ変換できること")
     }
 
     /// エージェント（PC 側）が使う分だけを取り出す。
@@ -244,6 +217,11 @@ impl Config {
             inject_status_line: self.inject_status_line,
             status_line_refresh_secs: self.status_line_refresh_secs,
             hook_port: self.port,
+            // 接続の3つは `agent.toml` にだけ意味がある（セルフホスト化設計§21 読み替え8）。
+            // ローカルモードは同じプロセスに同居していて、繋ぐ相手が自分自身になる
+            server_url: None,
+            pairing_token: None,
+            agent_name: None,
         }
     }
 
@@ -251,6 +229,7 @@ impl Config {
     pub fn server(&self) -> ServerConfig {
         ServerConfig {
             port: self.port,
+            bind_addr: self.bind_addr.clone(),
             flow_high: self.flow_high,
             flow_low: self.flow_low,
             transcript_page_limit: self.transcript_page_limit,
@@ -329,30 +308,6 @@ impl Config {
 /// **例外だけをここに並べる。** 既定は `AGENTDASHBOARD_<キー>` で、そちらは
 /// [`Config::key_shapes`] が自動で拾う。
 const BARE_ENV_ALIASES: &[(&str, &str)] = &[("database_url", "DATABASE_URL")];
-
-/// 環境変数の文字列を、そのキーの形に合わせた TOML の値へ直す。
-fn parse_env_value(key: &str, raw: &str, shape: &toml::Value) -> Result<toml::Value, ConfigError> {
-    let invalid = |expected: &str| {
-        ConfigError::Invalid(format!(
-            "環境変数で指定した {key} が{expected}として読めません: {raw}"
-        ))
-    };
-    match shape {
-        toml::Value::Integer(_) => raw
-            .trim()
-            .parse::<i64>()
-            .map(toml::Value::Integer)
-            .map_err(|_| invalid("整数")),
-        toml::Value::Boolean(_) => raw
-            .trim()
-            .parse::<bool>()
-            .map(toml::Value::Boolean)
-            .map_err(|_| invalid("真偽値（true / false）")),
-        // 文字列とパスは素通し。**引用符を要求しない**——compose の環境変数に
-        // TOML の書式を持ち込ませないため
-        _ => Ok(toml::Value::String(raw.to_string())),
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -607,7 +562,7 @@ mod tests {
             else {
                 unreachable!("Config は構造体なのでテーブルになる");
             };
-            let expected = super::parse_env_value(&key, &raw, &shape).expect("読めること");
+            let expected = env::parse_value(&key, &raw, &shape).expect("読めること");
             assert_eq!(
                 written.get(&key),
                 Some(&expected),

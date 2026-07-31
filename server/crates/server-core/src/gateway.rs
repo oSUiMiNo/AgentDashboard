@@ -150,11 +150,48 @@ impl AgentHub {
         self.conn(agent_id)
     }
 
-    /// 接続中の全 PC へ同じ指示を配る（設定変更の即時反映など）。
+    /// 接続中の全 PC へ同じ指示を配る。
     pub fn broadcast(&self, message: &ServerToAgent) {
         for conn in self.connected() {
             conn.send(message);
         }
+    }
+
+    /// 間隔の設定を変え、**そのアカウントの PC へ即時に配る**（設計§13-3）。
+    ///
+    /// # 書いてから配る
+    ///
+    /// 保存が先なのは、**そのとき繋がっていなかった PC** のため。次に繋いだときの
+    /// 名乗りの応答（Hello）で同じ値を受け取るので、配れなかったぶんもそこで揃う。
+    /// 順序が逆だと、保存に失敗したのに配ってしまい、繋ぎ直した瞬間に古い値へ戻る。
+    pub async fn set_intervals(
+        &self,
+        account_id: Uuid,
+        intervals: db::settings::Intervals,
+    ) -> Result<(), sea_orm::DbErr> {
+        for (key, value) in [
+            (
+                db::settings::SYNC_INTERVAL_SECS,
+                intervals.sync_interval_secs,
+            ),
+            (
+                db::settings::SCREEN_INTERVAL_MS,
+                intervals.screen_interval_ms,
+            ),
+            (db::settings::SCROLLBACK_LINES, intervals.scrollback_lines),
+        ] {
+            db::settings::put(&self.db, account_id, key, serde_json::json!(value)).await?;
+        }
+
+        let message = ServerToAgent::SetIntervals {
+            intervals: to_protocol(intervals),
+        };
+        for conn in self.connected() {
+            if conn.account_id == account_id {
+                conn.send(&message);
+            }
+        }
+        Ok(())
     }
 
     fn register(&self, conn: Arc<AgentConn>) -> Option<Arc<AgentConn>> {

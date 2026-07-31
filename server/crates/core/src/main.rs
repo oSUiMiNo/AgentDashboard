@@ -4,8 +4,8 @@
 //! 中身は [`agentdashboard_core`] 側にあり、ここは CLI の解釈だけを担う。
 
 use agent_core::{hook_post, model_post};
-use agentdashboard_core::{config, config::Config, serve};
-use clap::{Parser, Subcommand};
+use agentdashboard_core::{config, config::Config, serve, serve_server};
+use clap::{Parser, Subcommand, ValueEnum};
 use server_core::embed;
 use std::path::PathBuf;
 
@@ -20,8 +20,20 @@ struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     config: Option<PathBuf>,
 
+    /// 動かし方（セルフホスト化設計§1-1）
+    #[arg(long, value_enum, default_value = "local")]
+    mode: Mode,
+
     #[command(subcommand)]
     command: Option<Command>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Mode {
+    /// 1台で完結する使い方。PC 側とサーバ側が同じプロセスに同居する
+    Local,
+    /// ダッシュボードサーバだけ。セッションの実体は繋いできた PC の中にある
+    Server,
 }
 
 #[derive(Subcommand)]
@@ -51,6 +63,18 @@ enum Command {
         /// 転送先。`http://127.0.0.1:<port>/model/<token>`
         #[arg(long, value_name = "URL")]
         url: String,
+    },
+    /// PC を繋ぐためのペアリングトークンを発行する（セルフホスト化設計§8-4）
+    ///
+    /// **平文はここでしか手に入らない**（DB にはハッシュしか置かない）。発行の画面は
+    /// これから作るので、それまでの入口がこのコマンドになる。
+    PairToken {
+        /// 誰のものにするか。無ければ作る（パスワードは持たないので画面には入れない）
+        #[arg(long, value_name = "NAME", default_value = "local")]
+        account: String,
+        /// どの PC 用かを後から見分けるための札
+        #[arg(long, value_name = "LABEL", default_value = "")]
+        label: String,
     },
 }
 
@@ -97,6 +121,17 @@ async fn main() -> anyhow::Result<()> {
             use std::io::Write as _;
             std::io::stdout().write_all(&data)?;
         }
+        Some(Command::PairToken { account, label }) => {
+            let db = server_core::db::connect(&config.resolved_database_url()).await?;
+            let account_id = server_core::db::pairing::ensure_account(&db, &account).await?;
+            let token = server_core::db::pairing::issue_token(&db, account_id, &label).await?;
+            // **1回だけ表示する。** 控えを取り損ねたら、作り直してもらうほうが安全
+            println!("{token}");
+            eprintln!(
+                "アカウント「{account}」のトークンを発行しました。\n\
+                 PC 側の agent.toml へ pairing_token として貼ってください（この表示は一度きりです）。"
+            );
+        }
         // 上で先に処理して戻っている
         Some(Command::HookPost { .. }) | Some(Command::ModelPost { .. }) => unreachable!(),
         None => {
@@ -106,7 +141,10 @@ async fn main() -> anyhow::Result<()> {
                         .unwrap_or_else(|_| "info".into()),
                 )
                 .init();
-            serve(config, config_path).await?;
+            match cli.mode {
+                Mode::Local => serve(config, config_path).await?,
+                Mode::Server => serve_server(config).await?,
+            }
         }
     }
     Ok(())
