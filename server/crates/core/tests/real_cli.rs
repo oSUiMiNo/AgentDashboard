@@ -1154,3 +1154,613 @@ async fn 注入したstatusLineから本物のCLIがモデルを名乗る() {
         .archive(session.card_id)
         .expect("片付けられること");
 }
+
+// ---------------------------------------------------------------------------
+// 10. セルフホスト構成（2プロセス）で、本物の TUI をリモートの画面越しに操作する
+// ---------------------------------------------------------------------------
+//
+// テスト計画フェーズ4 の実CLI 3項目と、実機検証#3（入力→画面の往復）の確定測定。
+//
+// # なぜ2プロセスで、しかも本物の CLI なのか
+//
+// 擬似 claude には TUI が無い。`/rewind` のメニューも権限確認のダイアログも、
+// **画面に描かれて初めて存在する**ので、
+//
+// ```text
+// 本物の TUI → PTY → vt100 → 画面/差分 → A2S → サーバ → 0x03/0x01 → 端末
+// ```
+//
+// この経路を端から端まで通さないと「リモートから操作できる」は確かめられない。
+// 費用を抑えるためモデルは haiku に固定する（利用者の判断）。
+
+/// リモート構成の一式（サーバ＋エージェントを別プロセスで起こす）。
+struct RemotePair {
+    dir: WorkDir,
+    addr: std::net::SocketAddr,
+    server: std::process::Child,
+    agent: std::process::Child,
+}
+
+impl Drop for RemotePair {
+    fn drop(&mut self) {
+        let _ = self.agent.kill();
+        let _ = self.agent.wait();
+        let _ = self.server.kill();
+        let _ = self.server.wait();
+    }
+}
+
+impl RemotePair {
+    /// 本物の claude を相手に、2プロセス構成を起こす。
+    async fn start(label: &str, extra: &[&str]) -> Self {
+        let dir = WorkDir::new(label);
+        std::fs::create_dir_all(dir.path().join("server")).expect("置き場所を作れること");
+        std::fs::create_dir_all(dir.path().join("agent")).expect("置き場所を作れること");
+
+        let port = free_port();
+        let addr: std::net::SocketAddr = format!("127.0.0.1:{port}")
+            .parse()
+            .expect("番号を読めること");
+        let server_config = dir.path().join("server.toml");
+        std::fs::write(
+            &server_config,
+            format!(
+                "port = {port}\nstate_dir = \"{state}\"\ndatabase_url = \"sqlite://{db}\"\n",
+                state = dir.path().join("server").display(),
+                db = dir.path().join("server/dashboard.db").display(),
+            ),
+        )
+        .expect("サーバの設定を書けること");
+
+        // トークンの発行は DB を直に触るので、待ち受けの前でよい
+        let issued = Command::new(testkit::binary_path("agentdashboard"))
+            .arg("--config")
+            .arg(&server_config)
+            .arg("pair-token")
+            .arg("--account")
+            .arg("実CLI")
+            .output()
+            .expect("トークンを発行できること");
+        let token = String::from_utf8_lossy(&issued.stdout).trim().to_string();
+        assert!(token.starts_with("adp_"), "実際: {token}");
+
+        let server = Command::new(testkit::binary_path("agentdashboard"))
+            .arg("--config")
+            .arg(&server_config)
+            .arg("--mode")
+            .arg("server")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("サーバを起動できること");
+
+        // **モデルは haiku に固定する。** 実CLI のテストはクォータを消費するので、
+        // 見たいもの（TUI の描画と操作）に必要な最小の費用で通す
+        let mut args: Vec<&str> = vec!["--model", "haiku"];
+        args.extend_from_slice(extra);
+        let wrapper = claude_wrapper(&dir, &args);
+
+        let agent_config = dir.path().join("agent.toml");
+        std::fs::write(
+            &agent_config,
+            format!(
+                "server_url = \"http://127.0.0.1:{port}\"\n\
+                 pairing_token = \"{token}\"\n\
+                 agent_name = \"実CLI用PC\"\n\
+                 state_dir = \"{state}\"\n\
+                 claude_settings_path = \"{settings}\"\n\
+                 status_line_refresh_secs = 1\n\
+                 selfheal_enabled = false\n",
+                state = dir.path().join("agent").display(),
+                settings = dir.path().join("agent/claude-settings.json").display(),
+            ),
+        )
+        .expect("エージェントの設定を書けること");
+
+        let agent = Command::new(testkit::binary_path("agentdashboard-agent"))
+            .arg("--config")
+            .arg(&agent_config)
+            .env(lifecycle::CLAUDE_BIN_ENV, &wrapper)
+            .env(agent_core::parser::PARSER_BIN_ENV, common::parser_program())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("エージェントを起動できること");
+
+        let pair = Self {
+            dir,
+            addr,
+            server,
+            agent,
+        };
+
+        // 名乗りが済むと、PC の能力（権限モード）が設定に現れる
+        let deadline = Instant::now() + CLI_TIMEOUT;
+        loop {
+            if !pair.available_modes().await.is_empty() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{CLI_TIMEOUT:?} 以内に PC が名乗りませんでした"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        pair
+    }
+
+    async fn available_modes(&self) -> Vec<String> {
+        let Some((_, body)) = self.get("/api/settings").await else {
+            return Vec::new();
+        };
+        let view: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+        view["available_modes"]
+            .as_array()
+            .map(|modes| {
+                modes
+                    .iter()
+                    .filter_map(|mode| mode.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    async fn get(&self, path: &str) -> Option<(u16, String)> {
+        let (addr, path) = (self.addr, path.to_string());
+        tokio::task::spawn_blocking(move || testkit::get(addr, &path))
+            .await
+            .ok()?
+            .ok()
+    }
+
+    /// ブラウザの役で繋ぐ。
+    async fn browser(&self) -> Browser {
+        let (socket, _) = tokio_tungstenite::connect_async(format!("ws://{}/ws", self.addr))
+            .await
+            .expect("ブラウザとして繋げること");
+        Browser {
+            socket,
+            mirror: vt100::Parser::new(SCREEN_ROWS, SCREEN_COLS, 1000),
+            snapshots: 0,
+            card: None,
+        }
+    }
+}
+
+/// 実CLI のリモート検証で使う端末の大きさ。
+const SCREEN_COLS: u16 = 120;
+const SCREEN_ROWS: u16 = 40;
+
+/// 空いているポートを1つ借りる。
+fn free_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("空きポートを取れること");
+    listener.local_addr().expect("番号を読めること").port()
+}
+
+/// ブラウザの役。**xterm.js と同じ意味論で画面を組み立てる**（設計§4-3）。
+struct Browser {
+    socket: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    mirror: vt100::Parser,
+    snapshots: usize,
+    /// いま手元に持っているカード。
+    ///
+    /// **`SessionUpsert` だけを見ていては足りない。** 状態の変化は差分（`Status`）で
+    /// 飛んでくるので（設計§4）、本物の画面（`stores/sessions.ts`）と同じように
+    /// 両方を当てないと「権限確認待ちになった」を観測できない。
+    card: Option<protocol::SessionMeta>,
+}
+
+impl Browser {
+    async fn send(&mut self, message: &protocol::ws::ClientMessage) {
+        use futures_util::SinkExt as _;
+        let text = serde_json::to_string(message).expect("組み立てられること");
+        self.socket
+            .send(tokio_tungstenite::tungstenite::Message::text(text))
+            .await
+            .expect("送れること");
+    }
+
+    /// キー入力（0x02）。**ブラウザの端末が送るのと同じ形**で送る。
+    async fn key(&mut self, bytes: &[u8], card_id: protocol::CardId) {
+        use futures_util::SinkExt as _;
+        let frame = protocol::frame::encode(protocol::frame::FrameKind::PtyInput, card_id, bytes);
+        self.socket
+            .send(tokio_tungstenite::tungstenite::Message::Binary(
+                frame.into(),
+            ))
+            .await
+            .expect("送れること");
+    }
+
+    /// 届いたものを1つ処理する。画面なら組み立て、カードの知らせなら返す。
+    async fn pump(&mut self, timeout: Duration) -> Option<protocol::ws::ServerMessage> {
+        use futures_util::StreamExt as _;
+        let next = tokio::time::timeout(timeout, self.socket.next())
+            .await
+            .ok()?;
+        match next {
+            Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
+                let message = serde_json::from_str::<protocol::ws::ServerMessage>(&text).ok()?;
+                self.apply(&message);
+                Some(message)
+            }
+            Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(bytes))) => {
+                let frame = protocol::frame::decode(&bytes).expect("フレームを分解できること");
+                match frame.kind {
+                    // 0x03＝作り直してから書く
+                    protocol::frame::FrameKind::PtySnapshot => {
+                        self.mirror = vt100::Parser::new(SCREEN_ROWS, SCREEN_COLS, 1000);
+                        self.mirror.process(frame.payload);
+                        self.snapshots += 1;
+                    }
+                    // 0x01＝書き足す
+                    protocol::frame::FrameKind::PtyOutput => self.mirror.process(frame.payload),
+                    other => panic!("ブラウザへ来てはいけない種別です: {other:?}"),
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// 届いた知らせを手元のカードへ当てる（本物の画面と同じ扱い）。
+    fn apply(&mut self, message: &protocol::ws::ServerMessage) {
+        match message {
+            protocol::ws::ServerMessage::SessionUpsert { session } => {
+                self.card = Some((**session).clone());
+            }
+            // **状態は差分で飛んでくる。** カード全体を毎回送らないための作りなので、
+            // 当てないと「作業中になった」も「権限確認待ちになった」も観測できない
+            protocol::ws::ServerMessage::Status {
+                card_id,
+                status,
+                subagent_active,
+                last_activity_at,
+            } => {
+                if let Some(card) = self.card.as_mut()
+                    && card.card_id == *card_id
+                {
+                    card.status = *status;
+                    card.subagent_active = *subagent_active;
+                    card.last_activity_at = *last_activity_at;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn screen(&self) -> String {
+        self.mirror.screen().contents()
+    }
+
+    /// 使い捨てディレクトリで出るフォルダ信頼の確認に、**リモートの画面越しに**答える。
+    ///
+    /// 出るまでに十数秒かかることがあり、出ない環境（既に信頼済み）もある。
+    /// 「出たら答える・出なければそのまま進む」の形にしておかないと、環境によって
+    /// 落ちたり永遠に待ったりする。
+    ///
+    /// ここが**画面配信の最初の実証**でもある——答えるには画面が読めていなければならない。
+    async fn accept_trust_if_any(&mut self, card_id: protocol::CardId) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < deadline {
+            self.pump(Duration::from_millis(500)).await;
+            let screen = self.screen().to_lowercase();
+            if screen.contains("do you trust") || screen.contains("trust this folder") {
+                self.key(b"\r", card_id).await;
+                // 確定したあと画面が描き直される。落ち着くまで受け取り続ける
+                for _ in 0..10 {
+                    self.pump(Duration::from_millis(300)).await;
+                }
+                return;
+            }
+            // 確認が出ない環境では、そのまま普通の画面になる
+            if screen.contains("welcome") || screen.contains("bypassing permissions") {
+                return;
+            }
+        }
+    }
+
+    /// 画面に目印が現れるまで受け取り続ける。
+    async fn wait_for_screen(&mut self, marker: &str) {
+        let deadline = Instant::now() + CLI_TIMEOUT;
+        while !self.screen().contains(marker) {
+            assert!(
+                Instant::now() < deadline,
+                "{CLI_TIMEOUT:?} 以内に画面へ {marker:?} が現れませんでした。実際の画面:\n{}",
+                self.screen()
+            );
+            self.pump(Duration::from_millis(500)).await;
+        }
+    }
+
+    /// カードが条件を満たすまで受け取り続ける（画面も並行して組み立てる）。
+    async fn wait_for_card(
+        &mut self,
+        what: &str,
+        matches: impl Fn(&protocol::SessionMeta) -> bool,
+    ) -> protocol::SessionMeta {
+        let deadline = Instant::now() + CLI_TIMEOUT;
+        loop {
+            if let Some(card) = self.card.as_ref().filter(|card| matches(card)) {
+                return card.clone();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{CLI_TIMEOUT:?} 以内にカードが {what} になりませんでした（いまの状態: {:?}）。実際の画面:\n{}",
+                self.card.as_ref().map(|card| card.status),
+                self.screen()
+            );
+            self.pump(Duration::from_millis(500)).await;
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "本物の claude を起動し、アカウントのクォータを消費する（make test-cli）"]
+async fn リモートの画面越しに権限確認へ答えると作業中へ戻る() {
+    // 検収「権限プロンプトにリモートから応答できる」。**画面を読んで、キーを送る**——
+    // 途中に生バイトが1バイトも無い経路で、これが成り立つかどうかを見る
+    // 利用者のグローバル設定を読み込ませない。`permissions.defaultMode` が `auto` だと
+    // **読み取り専用に見えるコマンドは確認なしで通る**ので、確認そのものが出ない
+    let pair = RemotePair::start(
+        "remote-permission",
+        &[
+            "--permission-mode",
+            "manual",
+            "--setting-sources",
+            "project,local",
+        ],
+    )
+    .await;
+    let mut browser = pair.browser().await;
+
+    browser
+        .send(&protocol::ws::ClientMessage::Spawn {
+            cwd: pair.dir.as_str(),
+            permission_mode: None,
+        })
+        .await;
+    let card = browser.wait_for_card("現れる", |_| true).await;
+    browser
+        .send(&protocol::ws::ClientMessage::SubPty {
+            card_id: card.card_id,
+            cols: SCREEN_COLS,
+            rows: SCREEN_ROWS,
+        })
+        .await;
+
+    // 使い捨てディレクトリなので、フォルダ信頼の確認が出ることがある
+    browser.accept_trust_if_any(card.card_id).await;
+    browser
+        .wait_for_card("入力待ちになる", |meta| {
+            meta.status == SessionStatus::WaitingInput
+        })
+        .await;
+
+    // **副作用のある操作を頼む。** `echo` のような読み取り専用に見えるものは、
+    // 版によっては確認なしで通ってしまい、確かめたい経路を1度も踏まない（実際に踏んだ）
+    browser
+        .send(&protocol::ws::ClientMessage::SendInput {
+            card_id: card.card_id,
+            text: "report.txt というファイルを作って、中身は ok の1行にして。".to_string(),
+        })
+        .await;
+
+    browser
+        .wait_for_card("権限確認待ちになる", |meta| {
+            meta.status == SessionStatus::WaitingPermission
+        })
+        .await;
+
+    // **画面に確認が出ていること**をリモート側の再現画面で確かめてから答える。
+    // ここが空だと「状態は変わったが画面は届いていない」ことになる
+    browser.wait_for_screen("report.txt").await;
+    println!("リモートで見えている画面:\n{}", browser.screen());
+
+    browser.key(b"\r", card.card_id).await;
+    browser
+        .wait_for_card("作業中へ戻る", |meta| {
+            meta.status == SessionStatus::Working
+        })
+        .await;
+}
+
+#[tokio::test]
+#[ignore = "本物の claude を起動し、アカウントのクォータを消費する（make test-cli）"]
+async fn リモートの画面越しに_rewind_のメニューを操作できる() {
+    // 検収「ターミナルビュー」。`/rewind` は**メニューを矢印キーで動かす**ので、
+    // 画面が届くだけでなく、xterm.js が正しい符号でキーを送れなければ成立しない。
+    // 入力モード（カーソルキーの送り方）を画面と一緒に運んでいるのはこのため（§22 読み替え5）
+    let pair = RemotePair::start("remote-rewind", &["--setting-sources", "project,local"]).await;
+    let mut browser = pair.browser().await;
+
+    browser
+        .send(&protocol::ws::ClientMessage::Spawn {
+            cwd: pair.dir.as_str(),
+            permission_mode: None,
+        })
+        .await;
+    let card = browser.wait_for_card("現れる", |_| true).await;
+    browser
+        .send(&protocol::ws::ClientMessage::SubPty {
+            card_id: card.card_id,
+            cols: SCREEN_COLS,
+            rows: SCREEN_ROWS,
+        })
+        .await;
+
+    browser.accept_trust_if_any(card.card_id).await;
+    browser
+        .wait_for_card("入力待ちになる", |meta| {
+            meta.status == SessionStatus::WaitingInput
+        })
+        .await;
+
+    // 戻れる地点を作る（1往復ぶんの会話）
+    browser
+        .send(&protocol::ws::ClientMessage::SendInput {
+            card_id: card.card_id,
+            text: "「あお」とだけ答えて。説明は不要。".to_string(),
+        })
+        .await;
+    browser
+        .wait_for_card("答え終わる", |meta| {
+            meta.status == SessionStatus::WaitingInput && meta.last_assistant_message.is_some()
+        })
+        .await;
+
+    // メニューを開く
+    browser
+        .send(&protocol::ws::ClientMessage::SendInput {
+            card_id: card.card_id,
+            text: "/rewind".to_string(),
+        })
+        .await;
+    browser.wait_for_screen("rewind").await;
+    println!("メニューの画面:\n{}", browser.screen());
+
+    // 矢印キーで動かして閉じる。**カーソルキーの符号が違うと何も起きない**ので、
+    // 「動いたこと」が符号が合っていることの証拠になる
+    let before = browser.screen();
+    browser.key(b"\x1b[B", card.card_id).await;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while browser.screen() == before && Instant::now() < deadline {
+        browser.pump(Duration::from_millis(500)).await;
+    }
+    assert_ne!(
+        browser.screen(),
+        before,
+        "矢印キーで画面が動きませんでした（カーソルキーの符号が届いていない）"
+    );
+
+    // 閉じて元の画面へ戻る
+    browser.key(b"\x1b", card.card_id).await;
+    browser
+        .wait_for_card("入力待ちへ戻る", |meta| {
+            meta.status == SessionStatus::WaitingInput
+        })
+        .await;
+}
+
+#[tokio::test]
+#[ignore = "本物の claude を起動し、アカウントのクォータを消費する（make test-cli）"]
+async fn エージェント経由でも注入したstatusLineからモデルが名乗られる() {
+    // テスト計画フェーズ4「実CLI statusLine 実測（agent 経由）」。
+    // **注入されるコマンドは実行ファイル自身**（§21）なので、エージェントとして動くと
+    // `agentdashboard-agent model-post` が起動する。ローカルモードで通っていても、
+    // こちらで転送の口を持っていなければ1つも届かない
+    let pair =
+        RemotePair::start("remote-statusline", &["--setting-sources", "project,local"]).await;
+    let mut browser = pair.browser().await;
+
+    browser
+        .send(&protocol::ws::ClientMessage::Spawn {
+            cwd: pair.dir.as_str(),
+            permission_mode: None,
+        })
+        .await;
+    let card = browser.wait_for_card("現れる", |_| true).await;
+    browser
+        .send(&protocol::ws::ClientMessage::SubPty {
+            card_id: card.card_id,
+            cols: SCREEN_COLS,
+            rows: SCREEN_ROWS,
+        })
+        .await;
+    browser.accept_trust_if_any(card.card_id).await;
+
+    // statusLine → model-post → エージェント → A2S → サーバ、と渡ってカードに載る
+    let named = browser
+        .wait_for_card("モデルを名乗る", |meta| meta.model.is_some())
+        .await;
+    let model = named.model.expect("モデルが載っていること");
+    println!(
+        "名乗ったモデル: {} / 表示名: {:?}",
+        model.as_str(),
+        named.model_label
+    );
+    assert!(
+        model.as_str().contains("haiku"),
+        "起動時に指定したモデルで始まっていない: {}",
+        model.as_str()
+    );
+    assert!(
+        named
+            .model_label
+            .as_ref()
+            .is_some_and(|label| label.chars().any(|ch| ch.is_ascii_digit())),
+        "表示名に版番号が入っていない: {:?}",
+        named.model_label
+    );
+}
+
+#[tokio::test]
+#[ignore = "実測（make test-cli）。本物の claude を起動し、アカウントのクォータを消費する"]
+async fn 実機検証3_リモート越しの入力から画面までの往復を測る() {
+    // 設計§16-1 #3 の確定測定。フェーズ0 では**手元の PTY だけ**で測っていて
+    // （最大185ms。§19-4）、リモートの往復は含まれていなかった。ホットウィンドウ
+    // （1.5秒・50ms。§7-5）がその条件でも十分かをここで確かめる。
+    //
+    // **合否ではなく数値を出す**（`make perf` と同じ扱い）。環境の速さに左右される
+    // 数字を合否にすると、直すべきものが無いのに落ちるテストになる
+    let pair = RemotePair::start("remote-latency", &["--setting-sources", "project,local"]).await;
+    let mut browser = pair.browser().await;
+
+    browser
+        .send(&protocol::ws::ClientMessage::Spawn {
+            cwd: pair.dir.as_str(),
+            permission_mode: None,
+        })
+        .await;
+    let card = browser.wait_for_card("現れる", |_| true).await;
+    browser
+        .send(&protocol::ws::ClientMessage::SubPty {
+            card_id: card.card_id,
+            cols: SCREEN_COLS,
+            rows: SCREEN_ROWS,
+        })
+        .await;
+    browser.accept_trust_if_any(card.card_id).await;
+    browser
+        .wait_for_card("入力待ちになる", |meta| {
+            meta.status == SessionStatus::WaitingInput
+        })
+        .await;
+
+    // 1文字打っては、画面が動くまでの時間を測る。**打つのは入力欄だけを動かす文字**に
+    // して、ターンを回さない（＝トークンを使わない）
+    let mut delays: Vec<u128> = Vec::new();
+    for index in 0..10u8 {
+        let before = browser.screen();
+        let at = Instant::now();
+        browser.key(&[b'a' + index % 26], card.card_id).await;
+
+        let deadline = at + Duration::from_secs(5);
+        while browser.screen() == before && Instant::now() < deadline {
+            browser.pump(Duration::from_millis(50)).await;
+        }
+        if browser.screen() != before {
+            delays.push(at.elapsed().as_millis());
+        }
+        // 次の打鍵まで少し空ける（ホットウィンドウの中に居続けないため）
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+
+    assert!(!delays.is_empty(), "画面が一度も動きませんでした");
+    delays.sort_unstable();
+    let at = |ratio: f64| delays[((delays.len() as f64 - 1.0) * ratio).round() as usize];
+    println!(
+        "入力→画面の往復（{} 回）: p50 {}ms / p90 {}ms / 最大 {}ms",
+        delays.len(),
+        at(0.5),
+        at(0.9),
+        delays[delays.len() - 1]
+    );
+    println!(
+        "ホットウィンドウ（1500ms）に収まった割合: {}/{}",
+        delays.iter().filter(|delay| **delay <= 1_500).count(),
+        delays.len()
+    );
+}

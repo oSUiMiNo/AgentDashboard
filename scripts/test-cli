@@ -100,8 +100,15 @@ if [[ ! -x "${HOST_PATH}" ]]; then
     exit 1
 fi
 
-# フックが叩く agentdashboard 本体も要る（テストは実行ファイルの位置から辿って探す）
-"${REPO_ROOT}/scripts/cargo" build --package agentdashboard-core --bin agentdashboard
+# テストが起動する実行ファイルも要る（どれも実行ファイルの位置から辿って探す）。
+#
+# - `agentdashboard`：フックが叩く本体と、ペアリングトークンの発行
+# - `agentdashboard-agent`：セルフホスト構成の PC 側（フェーズ4 の画面配信）
+# - `transcript-parser`：履歴の読み手。**居ないとエージェントが起動時に落ちる**
+"${REPO_ROOT}/scripts/cargo" build \
+    --package agentdashboard-core --bin agentdashboard \
+    --package agentdashboard-agent --bin agentdashboard-agent \
+    --package transcript-parser --bin transcript-parser
 
 echo "==> ホストで実行します（本物の claude を起動します）"
 # --test-threads=1 にするのは、複数の claude を同時に起動して待ち時間と出力が
