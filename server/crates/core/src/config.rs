@@ -66,6 +66,8 @@ pub struct Config {
     pub transcript_page_limit: usize,
     pub state_dir: Option<PathBuf>,
     pub database_url: Option<String>,
+    pub cookie_secure: bool,
+    pub lan_session_ttl_hours: u64,
     pub inject_status_line: bool,
     pub claude_settings_path: Option<PathBuf>,
     pub status_line_refresh_secs: u64,
@@ -97,6 +99,8 @@ impl Default for Config {
             transcript_page_limit: server.transcript_page_limit,
             state_dir: agent.state_dir,
             database_url: server.database_url,
+            cookie_secure: server.cookie_secure,
+            lan_session_ttl_hours: server.lan_session_ttl_hours,
             inject_status_line: agent.inject_status_line,
             claude_settings_path: agent.claude_settings_path,
             status_line_refresh_secs: agent.status_line_refresh_secs,
@@ -238,6 +242,8 @@ impl Config {
             // 両側を知っているこの層でしか解決できない（`ServerConfig::default` は
             // `state_dir` を知らないため `None` のまま）
             database_url: Some(self.resolved_database_url()),
+            cookie_secure: self.cookie_secure,
+            lan_session_ttl_hours: self.lan_session_ttl_hours,
         }
     }
 
@@ -297,6 +303,14 @@ impl Config {
         if self.transcript_page_limit == 0 {
             return Err(ConfigError::Invalid(
                 "transcript_page_limit は 1 以上である必要があります".to_string(),
+            ));
+        }
+        // 0 だと「発行した瞬間に切れる入館証」になり、LAN からは永久に入れない。
+        // 期限を無くしたい要望はここではなく §16 の持ち越し（共有パスワードのまま
+        // 無期限にするのは、置き忘れた端末がそのまま鍵になることを意味する）
+        if self.lan_session_ttl_hours == 0 {
+            return Err(ConfigError::Invalid(
+                "lan_session_ttl_hours は 1 以上である必要があります".to_string(),
             ));
         }
         Ok(())

@@ -16,6 +16,8 @@ const DEFAULT_FLOW_HIGH: usize = 256 * 1024;
 const DEFAULT_FLOW_LOW: usize = 32 * 1024;
 const DEFAULT_TRANSCRIPT_PAGE_LIMIT: usize = 200;
 const DEFAULT_TRANSCRIPT_WINDOW_NODES: usize = 2000;
+/// LAN 開放で入館証が切れるまで（時間。設計§8-3）。
+const DEFAULT_LAN_SESSION_TTL_HOURS: u64 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
@@ -47,6 +49,21 @@ pub struct ServerConfig {
     /// キーなので、既定値の解決は両側を束ねる層が行う（[`ServerConfig::default`] は
     /// それを知らないため `None` のまま）。
     pub database_url: Option<String>,
+    /// ログインの Cookie に `Secure` を付けるか（設計§8-2・§13-2）。
+    ///
+    /// **既定は `false`。** `Secure` を付けた Cookie は HTTPS でしか送られないので、
+    /// 平文で動かす手元やLAN では**付けた瞬間にログインできなくなる**。TLS を終端する
+    /// リバースプロキシの裏に置いたときだけ `true` にする（§14-2）。
+    ///
+    /// 逆向きの既定（常に付ける）にしないのは、この設定を知らない利用者が最初に踏むのが
+    /// 手元の平文だから。安全側の既定が「動かない」になると、外して使われることになる。
+    pub cookie_secure: bool,
+    /// LAN 開放で入館証が切れるまでの時間（設計§8-3）。
+    ///
+    /// パスワードは共有の1本なので、入りっぱなしにできると**その端末を持っている限り
+    /// 誰でも入れる**状態が続く。作業のひと区切りより長く、置き忘れた端末が翌日まで
+    /// 生き残らない長さとして既定5時間。
+    pub lan_session_ttl_hours: u64,
 }
 
 impl Default for ServerConfig {
@@ -59,6 +76,58 @@ impl Default for ServerConfig {
             transcript_page_limit: DEFAULT_TRANSCRIPT_PAGE_LIMIT,
             transcript_window_nodes: DEFAULT_TRANSCRIPT_WINDOW_NODES,
             database_url: None,
+            cookie_secure: false,
+            lan_session_ttl_hours: DEFAULT_LAN_SESSION_TTL_HOURS,
+        }
+    }
+}
+
+impl ServerConfig {
+    /// 待ち受けが**この機械の外から届きうるか**（設計§8-3）。
+    ///
+    /// ローカルモードでは、これが `true` のときだけ LAN パスワードを要求する。
+    /// 判定を1箇所に置いているのは、`bind_addr` の書き方が何通りもあるため——
+    /// `localhost` も `::1` も外へ出ていないので、綴りごとに条件を書くと必ず抜ける。
+    pub fn reachable_from_lan(&self) -> bool {
+        !matches!(
+            self.bind_addr.as_str(),
+            "127.0.0.1" | "localhost" | "::1" | "[::1]"
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(non_snake_case)]
+
+    use super::*;
+
+    fn bound_to(addr: &str) -> ServerConfig {
+        ServerConfig {
+            bind_addr: addr.to_string(),
+            ..ServerConfig::default()
+        }
+    }
+
+    #[test]
+    fn 手元だけの綴りは_LAN_から届かないと判定する() {
+        // 綴りごとに条件を書くと必ず抜ける。**判定を1箇所に置く**こと自体が、
+        // 「鍵なしで開ける事故を仕組みで防ぐ」（要件1-1）の担保になっている
+        for addr in ["127.0.0.1", "localhost", "::1", "[::1]"] {
+            assert!(
+                !bound_to(addr).reachable_from_lan(),
+                "{addr} を外向きと判定している"
+            );
+        }
+    }
+
+    #[test]
+    fn 広げた待ち受けは_LAN_から届くと判定する() {
+        for addr in ["0.0.0.0", "192.168.1.10", "::"] {
+            assert!(
+                bound_to(addr).reachable_from_lan(),
+                "{addr} を手元だけと判定している（鍵なしで開けてしまう）"
+            );
         }
     }
 }

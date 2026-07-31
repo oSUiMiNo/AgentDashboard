@@ -129,24 +129,28 @@ pub async fn serve_server(config: Config) -> anyhow::Result<()> {
         "AgentDashboard（サーバ）を起動しました: http://{}",
         listener.local_addr()?
     );
-    axum::serve(listener, router).await?;
-    Ok(())
+    serve_router(listener, router).await
 }
 
-/// 待ち受けを開く。**広げるときは警告を出す**。
-///
-/// ブラウザ側の鍵（ログインと LAN パスワード。設計§8-2・§8-3）はこれから実装する。
-/// それまでは、広げた瞬間に**誰でも開ける状態**になる——黙って開けないために、
-/// 起動のたびに言う。
+/// 待ち受けを開く。
 async fn bind(config: &ServerConfig) -> anyhow::Result<tokio::net::TcpListener> {
-    if config.bind_addr != "127.0.0.1" && config.bind_addr != "localhost" {
-        tracing::warn!(
-            "{} で待ち受けます。ブラウザ側の認証はまだ入っていないので、信頼できるネットワークの中だけで使ってください",
-            config.bind_addr
-        );
-    }
     let listener = tokio::net::TcpListener::bind((config.bind_addr.as_str(), config.port)).await?;
     Ok(listener)
+}
+
+/// 待ち受けを始める。**接続元のアドレスを渡す形で**動かす。
+///
+/// 素の `axum::serve` はピアアドレスをハンドラへ渡さない。LAN 開放の
+/// 「127.0.0.1 は常に免除」（設計§8-3）は**接続そのもの**を見て決める必要があり、
+/// `X-Forwarded-For` のようなヘッダで代用してはいけない——偽装ヘッダ一発で
+/// 免除が取れる穴になる。
+async fn serve_router(listener: tokio::net::TcpListener, router: Router) -> anyhow::Result<()> {
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
+    Ok(())
 }
 
 /// 設定からサーバ一式を組み立てて起動する（ローカルモード）。
@@ -257,6 +261,5 @@ pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::R
         );
     }
 
-    axum::serve(listener, server.router()).await?;
-    Ok(())
+    serve_router(listener, server.router()).await
 }
