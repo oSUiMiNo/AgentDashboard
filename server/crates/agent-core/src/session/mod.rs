@@ -23,6 +23,7 @@ pub mod lifecycle;
 pub mod model;
 pub mod permission;
 pub mod pty;
+pub mod screen;
 
 use crate::{
     config::AgentConfig,
@@ -304,6 +305,11 @@ pub struct Session {
     /// 分からなくなったら**素直に `None` へ戻す**。分かっているふりで持つと、
     /// 送るべき切替を送らない判断に使われる。
     model_alias: Mutex<Option<ModelId>>,
+    /// この端末の画面を作る相手（セルフホストモードだけ。設計§7-2）。
+    ///
+    /// ローカルモードでは `None`。生バイトをそのまま配れる相手（同じ PC のブラウザ）が
+    /// 居るので、画面を作る理由が無い——**作ると CPU とメモリを黙って食う**だけになる。
+    screen: Option<Arc<screen::TermEmulator>>,
     /// モデルの切替が走っている間だけ立つ。
     ///
     /// 切替は確認待ち（4秒）と確定待ち（15秒）を**プロセス全体のロックを持ったまま**
@@ -727,7 +733,17 @@ impl Session {
     }
 
     pub fn write_input(&self, bytes: &[u8]) -> anyhow::Result<()> {
+        // 何か打った直後は画面が動く。ここでホットウィンドウを開ける（設計§7-5）。
+        // ブラウザのキー入力（0x02）も Composer の指示送信も、必ずここを通る
+        if let Some(screen) = &self.screen {
+            screen.note_input();
+        }
         self.process.write_input(bytes)
+    }
+
+    /// この端末の画面を作っている相手（セルフホストモードだけ居る。設計§7-2）。
+    pub fn screen(&self) -> Option<&Arc<screen::TermEmulator>> {
+        self.screen.as_ref()
     }
 
     /// Composer やダッシュボードからの指示を1つ送る（設計§6）。
@@ -750,7 +766,28 @@ impl Session {
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> anyhow::Result<()> {
+        // PTY とエミュレータは同じ大きさでなければならない（設計§7-4）。片方だけ
+        // 変えると、CLI が描いた位置と画面の桁がずれる
+        if let Some(screen) = &self.screen
+            && screen.resize(cols, rows)
+        {
+            // 大きさが変わったら画面を作り直して送る。差分では追いつけない
+            screen.refresh();
+        }
         self.process.resize(cols, rows)
+    }
+
+    /// 遡れる行数を変える（設計§13-3）。作り直しになるので、手元の生バイトから復元する。
+    pub fn set_scrollback_lines(&self, lines: usize) {
+        let Some(screen) = &self.screen else {
+            return;
+        };
+        if screen.scrollback_lines() == lines {
+            return;
+        }
+        let seed = self.ring.lock().expect("ロックが壊れていない").snapshot();
+        screen.rebuild(lines, &seed);
+        screen.refresh();
     }
 
     /// クライアント単位のフロー制御要求を受け付ける。
@@ -878,6 +915,11 @@ pub struct SessionManager {
     claude_settings: Arc<crate::claude_settings::ClaudeSettings>,
     /// 別名がこの環境で何に解決されるかの実測（設計§12）。
     aliases: Arc<crate::model_aliases::ModelAliases>,
+    /// 画面配信の設定（セルフホスト化設計§13-3）。サーバから届いた値をここへ置く。
+    ///
+    /// **これから起こすセッションのため**に持つ。すでに動いているセッションへは
+    /// [`SessionManager::set_screen_settings`] がその場で配るので、両方が要る。
+    screen_settings: Mutex<screen::ScreenSettings>,
 }
 
 impl SessionManager {
@@ -970,7 +1012,70 @@ impl SessionManager {
             parser: Mutex::new(None),
             claude_settings,
             aliases,
+            screen_settings: Mutex::new(screen::ScreenSettings::default()),
         })
+    }
+
+    /// 画面配信の設定を差し替える（設計§13-3）。
+    ///
+    /// 名乗りの応答（Hello）と設定変更（SetIntervals）の両方から呼ばれる。**動いている
+    /// セッションにもその場で効かせる**——次に繋ぎ直すまで古い間隔で送り続けると、
+    /// 「設定したのに変わらない」という一番分かりにくい形になる。
+    pub fn set_screen_settings(&self, settings: screen::ScreenSettings) {
+        *self.screen_settings.lock().expect("ロックが壊れていない") = settings;
+        for session in self.sessions() {
+            if let Some(screen) = session.screen() {
+                screen.set_screen_ms(settings.screen_ms);
+            }
+            // 遡り行数は端末を作り直すことになるので、変わったときだけ
+            session.set_scrollback_lines(settings.scrollback_lines);
+        }
+    }
+
+    fn screen_settings(&self) -> screen::ScreenSettings {
+        *self.screen_settings.lock().expect("ロックが壊れていない")
+    }
+
+    /// 画面の配信を始める（設計§7-4）。**視聴者が現れたときだけ**呼ばれる。
+    pub fn subscribe_screen(&self, card_id: CardId, cols: u16, rows: u16) {
+        let Some(session) = self.get(card_id) else {
+            return;
+        };
+        // PTY の大きさも揃える。見ている端末の桁で CLI に描いてもらう
+        let _ = session.resize(cols, rows);
+        if let Some(screen) = session.screen() {
+            screen.subscribe(cols, rows);
+        }
+    }
+
+    /// 画面の配信を止める。視聴者が居なくなったときだけ呼ばれる。
+    pub fn unsubscribe_screen(&self, card_id: CardId) {
+        if let Some(screen) = self.get(card_id).as_ref().and_then(|s| s.screen()) {
+            screen.unsubscribe();
+        }
+    }
+
+    /// 画面の配信を全部止める。
+    ///
+    /// サーバとの接続が切れたときに呼ぶ。**誰が見ているかを知っているのはサーバ**
+    /// （設計§7-4 の視聴者数）なので、切れた時点でこちらの手元にある「見られている」は
+    /// 根拠を失う。繋ぎ直したらサーバが出し直す（§6-4）。
+    pub fn unsubscribe_all_screens(&self) {
+        for session in self.sessions() {
+            if let Some(screen) = session.screen() {
+                screen.unsubscribe();
+            }
+        }
+    }
+
+    /// 生きているセッションを全部。
+    fn sessions(&self) -> Vec<Arc<Session>> {
+        self.sessions
+            .lock()
+            .expect("ロックが壊れていない")
+            .values()
+            .cloned()
+            .collect()
     }
 
     /// 起動する実行ファイル名（画面や調査で確認できるように公開する）。
@@ -1204,6 +1309,16 @@ impl SessionManager {
             saw_output: AtomicBool::new(false),
             model_alias: Mutex::new(initial_alias),
             model_switching: AtomicBool::new(false),
+            // 画面を作るかどうかは**報告先が決める**（設計§7-2・§22 読み替え2）
+            screen: self.events.screens_enabled().then(|| {
+                screen::TermEmulator::new(
+                    card_id,
+                    Arc::clone(&self.events),
+                    INITIAL_COLS,
+                    INITIAL_ROWS,
+                    self.screen_settings(),
+                )
+            }),
         });
 
         self.tokens
@@ -1266,6 +1381,11 @@ impl SessionManager {
             .expect("ロックが壊れていない")
             .remove(session.token());
 
+        // 画面の配信も畳む。カードが消えたあとに1枚でも出ると、サーバ側では
+        // 「居ないカードのフレーム」になって捨てられるだけの無駄になる
+        if let Some(screen) = session.screen() {
+            screen.unsubscribe();
+        }
         // 先に止めないと、読み取りスレッド → 合流タスクが Arc を握ったままになり
         // セッションが解放されない（合流タスクは待ち行列が閉じたときに終わる）
         session.kill();
@@ -1611,8 +1731,20 @@ fn model_arg(extra_args: &[String]) -> Option<ModelId> {
 /// ブラウザ側の処理が追いつかなくなる。`window` の間に届いたものを1つにまとめてから送る。
 ///
 /// セッションから切り離してあるのは、時間窓の挙動を PTY 無しで検証できるようにするため。
-pub async fn coalesce_stream<F>(mut chunks: mpsc::Receiver<Vec<u8>>, window: Duration, mut sink: F)
-where
+///
+/// # 途中に口が2つある
+///
+/// `tap` は**合流する前**の1チャンクごと、`sink` は合流した結果。端末エミュレータは
+/// 前者を使う（設計§7-2）。合流後の経路（リングバッファ・配信）は溢れたら落とす作りに
+/// なっていて、**落ちたバイトを食わせると ANSI の状態機械が壊れる**ため、
+/// 「落とさない側」から取らなければならない。
+pub async fn coalesce_stream<T, F>(
+    mut chunks: mpsc::Receiver<Vec<u8>>,
+    window: Duration,
+    mut tap: T,
+    mut sink: F,
+) where
+    T: FnMut(&[u8]),
     F: FnMut(&[u8]),
 {
     loop {
@@ -1620,13 +1752,17 @@ where
         let Some(first) = chunks.recv().await else {
             break;
         };
+        tap(&first);
         let mut merged = first;
         let deadline = tokio::time::Instant::now() + window;
         let mut input_closed = false;
 
         while merged.len() < MAX_COALESCED_FRAME {
             match tokio::time::timeout_at(deadline, chunks.recv()).await {
-                Ok(Some(chunk)) => merged.extend_from_slice(&chunk),
+                Ok(Some(chunk)) => {
+                    tap(&chunk);
+                    merged.extend_from_slice(&chunk);
+                }
                 Ok(None) => {
                     input_closed = true;
                     break;
@@ -1644,7 +1780,17 @@ where
 }
 
 async fn coalesce_loop(session: Arc<Session>, chunks: mpsc::Receiver<Vec<u8>>, window: Duration) {
-    coalesce_stream(chunks, window, |merged| session.publish_output(merged)).await;
+    coalesce_stream(
+        chunks,
+        window,
+        |chunk| {
+            if let Some(screen) = &session.screen {
+                screen.feed(chunk);
+            }
+        },
+        |merged| session.publish_output(merged),
+    )
+    .await;
 }
 
 /// 全承認をスキップで起動したときの、責任の受諾を尋ねる画面に答える（利用者の判断）。
@@ -1804,20 +1950,68 @@ mod tests {
         window: Duration,
         feed: impl FnOnce(mpsc::Sender<Vec<u8>>) -> tokio::task::JoinHandle<()>,
     ) -> Vec<Vec<u8>> {
+        collect_both(window, feed).await.1
+    }
+
+    /// 合流前（タップ）と合流後（配信）の両方を集める。
+    async fn collect_both(
+        window: Duration,
+        feed: impl FnOnce(mpsc::Sender<Vec<u8>>) -> tokio::task::JoinHandle<()>,
+    ) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
         let (tx, rx) = mpsc::channel(16);
+        let tapped = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
         let merged = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
 
+        let tap_sink = Arc::clone(&tapped);
         let sink = Arc::clone(&merged);
         let feeder = feed(tx);
-        coalesce_stream(rx, window, move |bytes| {
-            sink.lock()
-                .expect("ロックが壊れていない")
-                .push(bytes.to_vec());
-        })
+        coalesce_stream(
+            rx,
+            window,
+            move |chunk| {
+                tap_sink
+                    .lock()
+                    .expect("ロックが壊れていない")
+                    .push(chunk.to_vec());
+            },
+            move |bytes| {
+                sink.lock()
+                    .expect("ロックが壊れていない")
+                    .push(bytes.to_vec());
+            },
+        )
         .await;
         feeder.await.expect("送信側が正常に終わること");
 
-        merged.lock().expect("ロックが壊れていない").clone()
+        let tapped = tapped.lock().expect("ロックが壊れていない").clone();
+        let merged = merged.lock().expect("ロックが壊れていない").clone();
+        (tapped, merged)
+    }
+
+    #[tokio::test]
+    async fn 合流前のバイトは全量が順序どおり流れる() {
+        // 設計§7-2。端末エミュレータはこちら側から食う。**合流の窓や上限で1バイトも
+        // 落ちない**ことが、ANSI の状態機械を壊さない前提になっている
+        let (tapped, merged) = collect_both(Duration::from_millis(8), |tx| {
+            tokio::spawn(async move {
+                for index in 0..64u8 {
+                    tx.send(vec![index]).await.expect("送れること");
+                }
+            })
+        })
+        .await;
+
+        let flat: Vec<u8> = tapped.concat();
+        assert_eq!(
+            flat,
+            (0..64u8).collect::<Vec<u8>>(),
+            "順序か全量が崩れている"
+        );
+        assert_eq!(
+            flat,
+            merged.concat(),
+            "合流の前後で中身が食い違っている（どちらかが落としている）"
+        );
     }
 
     #[tokio::test]

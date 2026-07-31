@@ -32,7 +32,7 @@ import socket
 import sys
 from pathlib import Path
 
-TARGET_SUFFIXES = {".jsonl", ".json", ".txt", ".md", ".cast"}
+TARGET_SUFFIXES = {".jsonl", ".json", ".txt", ".md", ".cast", ".screen"}
 
 # 端末録画（asciicast v2）だけに要る追加の検査。
 #
@@ -366,10 +366,20 @@ def assemble_cast(path: Path) -> str:
 
 
 def find_cast_leaks(root: Path, rules: list[tuple[str, str]], secrets: set[str]) -> list[str]:
-    """端末録画を「つなぎ直した状態」と「エスケープを落とした状態」で検査する。"""
+    """端末録画を「つなぎ直した状態」と「エスケープを落とした状態」で検査する。
+
+    画面のゴールデン（`.screen`）も同じ検査に掛ける。中身は録画から作った**描画済みの
+    画面**で、エスケープシーケンスが文字列の途中に挟まる点は録画と同じだからである。
+    通常の残存検査（[`find_leaks`]）は素のまま見るので、そちらだけでは
+    「カーソル移動で分断された名前」を見落とす。
+    """
     leaks: list[str] = []
-    for path in sorted(root.rglob("*.cast")):
-        joined = assemble_cast(path)
+    for path in sorted(root.rglob("*.cast")) + sorted(root.rglob("*.screen")):
+        joined = (
+            assemble_cast(path)
+            if path.suffix == ".cast"
+            else path.read_text(encoding="utf-8", errors="surrogateescape")
+        )
         plain = ANSI_PATTERN.sub("", joined)
         for view, text in (("連結", joined), ("エスケープ除去後", plain)):
             for old, new in rules:

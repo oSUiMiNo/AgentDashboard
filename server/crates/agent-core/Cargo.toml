@@ -32,9 +32,9 @@ tracing.workspace = true
 # PC 側から張る**ので、クライアントを持つのはこのクレートだけ
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
+# セッションごとの端末エミュレータ（セルフホスト化設計§7-1）。**PC 側だけが持つ**——
+# サーバへ漏れていないことは crates/core/tests/dependencies.rs が機械で見ている
+vt100.workspace = true
 
 [dev-dependencies]
 testkit.workspace = true
-# 実機検証（計画.md フェーズ0）で端末録画を食わせて測るためだけに使う。
-# 製品コードからは参照しない——通常依存になるのは画面配信を実装するフェーズ4。
-vt100.workspace = true

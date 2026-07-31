@@ -1,0 +1,27 @@
+[?25h[m[H[J[38;2;215;119;87m╭───[CClaude[CCode[C[38;2;153;153;153mv2.1.220[C[38;2;215;119;87m─────────────────────────────────────────────────────────────────────────────────────────────╮
+│[52C[2m│[C[1mTips[Cfor[Cgetting[Cstarted[40C[22m│
+│[17C[39;1mWelcome[Cback[Cdashboard-user![7C[38;2;215;119;87;2m│[C[mRun[C/init[Cto[Ccreate[Ca[CCLAUDE.md[Cfile[Cwith[Cinstructions[Cfor[CCla…[C[38;2;215;119;87m│
+│[52C[2m│[C[22m───────────────────────────────────────────────────────────────[C│
+│[23C▐[48;2;0;0;0m▛███▜[49m▌[22C[2m│[C[1mWhat's[Cnew[54C[22m│
+│[22C▝▜[48;2;0;0;0m█████[49m▛▘[21C[2m│[C[mBug[Cfixes[Cand[Creliability[Cimprovements[26C[38;2;215;119;87m│
+│[24C▘▘[C▝▝[23C[2m│[C[mAdded[CClaude[COpus[C5[C(`claude-opus-5`),[Cnow[Cthe[Cdefault[COpus[Cmo…[C[38;2;215;119;87m│
+│[3C[38;2;153;153;153mHaiku[C4.5[C·[CClaude[CMax[C·[Credacted@example.invalid[38;2;215;119;87;2m│[38;2;153;153;153;22ms[mAdded[C`sandbox.network.strictAllowlist`[Csetting[Cto[Cdeny[Cnon-al…[C[38;2;215;119;87m│
+│[3C[38;2;153;153;153mOrganization[37C[38;2;215;119;87;2m│[C[38;2;153;153;153;22;3m/release-notes[Cfor[Cmore[41C[38;2;215;119;87;23m│
+│[4C[38;2;153;153;153m/tmp/agentdashboard-record-interactive-45733[4C[38;2;215;119;87;2m│[65C[22m│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯[14;1H[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[m❯ [38;2;177;185;249m/exit
+[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[38;2;177;185;249m/exit                         Exit the CLI
+[38;2;153;153;153m/context  [C    [C              Visualize current context usage as a colored grid
+/usage-credits[16CConfigure[Cusage[Ccredits[Cor[Crequest[Cthem[Cfrom[Cyour[Cadmin[Cwhen[Cyou[Chit[Ca[Climit
+/doctor[23CHealth-check[Cthe[Cuser's[CClaude[CCode[Csetup[Cand[Cfix[Cissues:[Cdiagnose[Cinstallation[Chealth[21;31H—[Cwhat[Cthe[C`claude[Cdoctor`[Cterminal[Cdiagnostics[Ccover[C—[Cfrom[Clocal[Cdata[C(duplicate[Cor…
+/verify[23CVerify[Cthat[Ca[Ccode[Cchange[Cactually[Cdoes[Cwhat[Cit's[Csupposed[Cto[Cby[Cexercising[Cit[23;31Hend-to-end[Cand[Cobserving[Cbehavior[C—[Cdrive[Cthe[Caffected[Cflow,[Cnot[Cjust[Ctests[Cor[Ctypech…
+/agents[23C(removed)[CAsk[CClaude[Cto[Ccreate/manage[Csubagents,[Cor[Cedit[C.claude/agents/
+/memory[23COpen[Ca[Cmemory[Cfile[Cin[Cyour[Ceditor
+/ultraplan[20CDraft[Can[Ceditable[Cplan[Cin[CClaude[CCode[Con[Cthe[Cweb[C(a[Cfew[Cminutes)[C·[CSee[27;31Hhttps://code.claude.com/docs/en/claude-code-on-the-web
+/passes[23CShare[Ca[Cfree[Cweek[Cof[CClaude[CCode[Cwith[Cfriends[Cand[Cearn[Cusage[Ccredits
+/subtask[22CSend[Ca[Csubagent[Coff[Cwith[Cyour[Cfull[Ccontext;[Cits[Cresult[Ccomes[Cback[Chere
+/clear[24CStart[Ca[Cnew[Csession[Cwith[Cempty[Ccontext;[Cprevious[Csession[Cstays[Con[Cdisk[C(resumable[Cwith[31;31H/resume)
+/compact[22CFree[Cup[Ccontext[Cby[Csummarizing[Cthe[Cconversation[Cso[Cfar[38;1H[39;2mResume this session with:
+claude --resume 85844eb4-9d33-4a57-a589-8987c572abf7
+[m>[?1l[?2004l

@@ -123,6 +123,11 @@ enum Outgoing {
     Reset(CardId),
     /// モデルの表（接続していなければ、次に繋がったときに送る）
     ModelTable(AgentMessage),
+    /// 画面のフレーム（0x04 / 0x05）。**切断中は捨てる**。
+    ///
+    /// 履歴と違って画面は「いま」しか意味を持たない。溜めて後から送ると、繋がった
+    /// 瞬間に古い差分が順に流れて画面が踊る。繋ぎ直したら全画面から送り直す（§6-4）
+    Screen(Vec<u8>),
 }
 
 impl AgentLink {
@@ -209,6 +214,15 @@ impl EventSink for AgentLink {
             table.message()
         };
         let _ = self.outgoing.send(Outgoing::ModelTable(message));
+    }
+
+    /// **この報告先が居ることが、セルフホストモードであることの定義**（設計§7-2・§22 読み替え2）。
+    fn screens_enabled(&self) -> bool {
+        true
+    }
+
+    fn screen_frame(&self, frame: Vec<u8>) {
+        let _ = self.outgoing.send(Outgoing::Screen(frame));
     }
 }
 
@@ -459,6 +473,9 @@ async fn run(
                     &mut intervals,
                 )
                 .await;
+                // 見ている相手が居るかどうかを知っているのはサーバ側なので、切れたら
+                // 一旦全部止める。作り続けても行き先が無い（§7-4）
+                manager.unsubscribe_all_screens();
                 tracing::warn!(
                     "ダッシュボードサーバとの接続が切れました（未送信 {} 件）",
                     outbox.pending_count()
@@ -509,7 +526,7 @@ async fn connect_waiting(
 fn absorb(outbox: &mut Outbox, outgoing: Outgoing) {
     match outgoing {
         // 切断中の状態の知らせは捨てる。復帰したら全部送り直す（§6-4）
-        Outgoing::Volatile(_) | Outgoing::ModelTable(_) => {}
+        Outgoing::Volatile(_) | Outgoing::ModelTable(_) | Outgoing::Screen(_) => {}
         Outgoing::Transcript(report) => outbox.push(report),
         Outgoing::Reset(card_id) => outbox.push_reset(card_id),
     }
@@ -598,6 +615,10 @@ async fn connected(
 ) {
     let (mut sink, mut stream) = socket.split();
 
+    // 名乗りの応答が持ってきた設定を先に効かせる（§6-4）。切れていた間に変わっていても、
+    // ここで揃う——**繋がっていなかった PC のぶんは、この経路でしか届かない**
+    manager.set_screen_settings((*intervals).into());
+
     // 復帰手順（§6-4）：全セッションを送り直す → 未 ack を送り直す
     let mut initial: Vec<AgentMessage> = manager
         .list()
@@ -637,6 +658,12 @@ async fn connected(
                 }
                 Some(Outgoing::Transcript(report)) => outbox.push(report),
                 Some(Outgoing::Reset(card_id)) => outbox.push_reset(card_id),
+                // 画面はバイナリのまま運ぶ（設計§4-3）。JSON に包むと base64 で 4/3 に膨らむ
+                Some(Outgoing::Screen(bytes)) => {
+                    if sink.send(tungstenite::Message::Binary(bytes.into())).await.is_err() {
+                        return;
+                    }
+                }
                 // 送り口が全部落ちた＝プロセスが畳まれている
                 None => return,
             },
@@ -720,7 +747,14 @@ fn apply_command(
             *intervals = updated;
             *flush = tokio::time::interval(Duration::from_secs(updated.sync_secs.max(1)));
             flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            tracing::info!("履歴の同期間隔が {} 秒になりました", updated.sync_secs);
+            // 画面のほうは動いているセッションへその場で配る（§13-3）
+            manager.set_screen_settings(updated.into());
+            tracing::info!(
+                "同期間隔が変わりました（履歴 {} 秒 / 画面 {} ミリ秒 / 遡り {} 行）",
+                updated.sync_secs,
+                updated.screen_ms,
+                updated.scrollback_lines
+            );
         }
 
         ServerToAgent::Spawn {
@@ -803,10 +837,13 @@ fn apply_command(
             });
         }
 
-        // 画面の配信（§7-4）。**中身はフェーズ4**
-        ServerToAgent::SubScreen { .. } | ServerToAgent::UnsubScreen { .. } => {
-            tracing::debug!("画面の購読はまだ実装していません（フェーズ4）");
-        }
+        // 画面の配信（§7-4）。視聴者が現れた・居なくなった、の2つしか来ない
+        ServerToAgent::SubScreen {
+            card_id,
+            cols,
+            rows,
+        } => manager.subscribe_screen(card_id, cols, rows),
+        ServerToAgent::UnsubScreen { card_id } => manager.unsubscribe_screen(card_id),
     }
 }
 

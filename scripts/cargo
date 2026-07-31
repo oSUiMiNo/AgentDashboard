@@ -42,10 +42,18 @@ fi
 DOCKER_ENV=()
 DOCKER_NET=()
 
-# テストの接続先。指定が無ければ渡さない（テスト側は SQLite だけで走る）
-if [[ -n "${AGENTDASHBOARD_TEST_DATABASE_URL:-}" ]]; then
-    DOCKER_ENV+=(--env "AGENTDASHBOARD_TEST_DATABASE_URL=${AGENTDASHBOARD_TEST_DATABASE_URL}")
-fi
+# テストへ渡す指定はコンテナの中へ持ち込む。
+#
+# `AGENTDASHBOARD_CARGO_*` は**このラッパー自身の制御**（作業場所・成果物の置き場所・
+# 参加するネットワーク）なので持ち込まない。それ以外の `AGENTDASHBOARD_*` は
+# テストが読むもの（接続先・ゴールデンの作り直し）なので、1つ増えるたびにここを
+# 直さずに済むよう、まとめて渡す。
+while IFS='=' read -r name _; do
+    case "${name}" in
+        AGENTDASHBOARD_CARGO_*) continue ;;
+        AGENTDASHBOARD_*) DOCKER_ENV+=(--env "${name}") ;;
+    esac
+done < <(env)
 
 # 参加するネットワーク。サービス名で相手を引けるようにするためだけに使う
 if [[ -n "${AGENTDASHBOARD_CARGO_NETWORK:-}" ]]; then
