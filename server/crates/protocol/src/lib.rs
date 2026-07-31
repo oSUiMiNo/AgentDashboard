@@ -4,6 +4,7 @@
 //! 変更してよいのは transcript-parser だけで、このクレートは変更禁止の共有境界にあたる。
 //! 未知のフォーマットは必ず [`Node::Unknown`] へ写像することで、この制約と両立させる。
 
+pub mod a2s;
 pub mod frame;
 pub mod ipc;
 pub mod ws;
