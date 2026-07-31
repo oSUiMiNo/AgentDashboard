@@ -69,6 +69,11 @@ issue-sync は、ユーザーが行うので不要。必要かどうかユーザ
 | `server/crates/server-core/` | ブラウザ配信（WebSocket・REST・web アセット）。PTY に触らない |
 | `server/crates/server-core/src/db/` | 記録の置き場所（設計§3）。**DB を持つのはここだけ**。表を増やしたら migration にも足す |
 | `server/crates/server-core/src/registry.rs` | カードの記録。エージェントの報告を**DB へ書いてからブラウザへ配る**（設計§9-1） |
+| `server/crates/server-core/src/gateway.rs` | エージェントの受け口（`/agent/ws`）。版交渉・トークン照合・帰属の決定。ブラウザ向けの指示を A2S へ中継する `RemoteAgent` もここ |
+| `server/crates/agent-core/src/link.rs` | PC からサーバへ繋ぐ側。履歴を束ねて送り、**ack が返ってから位置を進める**（設計§6-1） |
+| `server/crates/agent-core/src/offsets.rs` | 「どこまで読んだか」の置き場所。**読む側（パーサ）と進める側（運び手）で共有する** |
+| `server/crates/agent/src/main.rs` | PC 側エージェントの実行ファイル。フックの受信口を自分で開く（設計§5-3） |
+| `server/agent.toml.example` | エージェント単体の設定の雛形。**接続の3キーと hook_port はこちらにだけ置く**（§21 読み替え8） |
 | `server/crates/core/src/local.rs` | 両者を1プロセスで束ねる配線（`server_core::agent::AgentHost` のローカル実装） |
 | `server/crates/core/src/config.rs` | `config.toml` の読み込みと、両側への射影（設計§12・セルフホスト化設計§13-2） |
 | `server/crates/server-core/src/embed.rs` | web アセットの単一バイナリ同梱 |
