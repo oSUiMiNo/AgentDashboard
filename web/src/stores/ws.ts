@@ -39,6 +39,7 @@ import type {
   ServerMessage,
   SessionMeta,
 } from '@/lib/protocol'
+import { useAuthStore } from '@/stores/auth'
 import { useSettingsStore } from '@/stores/settings'
 import {
   applySessionSnapshot,
@@ -88,7 +89,11 @@ interface WsState {
    * `mode` を省略（`null`）すると CLI へ何も渡さない。利用者の `permissions.defaultMode`
    * を尊重するという意味なので、ここで既定のモードを補ってはいけない。
    */
-  spawn: (cwd: string, mode?: PermissionMode | null) => void
+  spawn: (
+    cwd: string,
+    mode?: PermissionMode | null,
+    agentId?: string | null,
+  ) => void
   /**
    * 走っているセッションの権限モードを切り替える（設計§6）。
    *
@@ -172,6 +177,12 @@ type SetState = (partial: Partial<WsState>) => void
 async function loadSnapshot() {
   try {
     const response = await fetch('/api/sessions')
+    if (response.status === 401) {
+      // **401 は障害ではない。** 入館証が切れただけなので、赤いバナーを出さずに
+      // ログイン画面へ戻す（バナーを出しても利用者にできることが無い）
+      useAuthStore.getState().markSignedOut()
+      return
+    }
     if (!response.ok) {
       return
     }
@@ -279,8 +290,15 @@ export const useWsStore = create<WsState>((set) => ({
     set({ status: 'closed' })
   },
 
-  spawn: (cwd, mode = null) =>
-    send({ t: 'spawn', cwd, permission_mode: mode }),
+  spawn: (cwd, mode = null, agentId = null) =>
+    // 宛先は**選ばれているときだけ**載せる。載せない形（1台構成・ローカル）と
+    // 同じ JSON になるよう、null のときはキーごと省く（`protocol.test.ts` が
+    // その形を固定している）
+    send(
+      agentId === null
+        ? { t: 'spawn', cwd, permission_mode: mode }
+        : { t: 'spawn', cwd, permission_mode: mode, agent_id: agentId },
+    ),
   setPermissionMode: (cardId, mode) =>
     send({ t: 'set_permission_mode', card_id: cardId, mode }),
 

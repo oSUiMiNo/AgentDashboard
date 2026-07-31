@@ -36,6 +36,7 @@ import type { CardId } from '@/lib/protocol'
 import { sessionPath } from '@/lib/routes'
 import { useNow } from '@/lib/sessions'
 import { useSessionCard } from '@/stores/sessions'
+import { agentName, useSettingsStore } from '@/stores/settings'
 
 interface Props {
   cardId: CardId
@@ -44,6 +45,7 @@ interface Props {
 export function SessionTile({ cardId }: Props) {
   const navigate = useNavigate()
   const session = useSessionCard(cardId)
+  const agents = useSettingsStore((state) => state.settings.agents)
   const now = useNow()
 
   if (!session) {
@@ -51,6 +53,12 @@ export function SessionTile({ cardId }: Props) {
     return null
   }
   const attention = needsAttention(session.status)
+  // **どの PC のセッションかは一覧で判別できる**（要件4-4）。名前は起動時に読む
+  // 設定から引く（`agent_id` は変わらないが、名前は後から変わりうるため）
+  const pc = agentName(agents, session.agent_id)
+  // 繋がっていないカードは**薄くして印を付ける**。状態そのものは書き換えない——
+  // 「作業中（接続断）」が要件2-3 の充足形で、最後に知っていた状態は残す（設計§6-3）
+  const stale = !session.agent_connected
 
   return (
     <motion.button
@@ -65,6 +73,7 @@ export function SessionTile({ cardId }: Props) {
       data-testid="session-tile"
       data-card-id={session.card_id}
       data-status={session.status.kind}
+      data-connected={session.agent_connected}
       onClick={(event) => {
         // 小窓をクリックしたときは、その1枚だけを開く。止めないと親（グループの余白）へ
         // 伝わってしまい、常に全員の横並びが開いてしまう（仕様§10 の作り分け）
@@ -75,7 +84,7 @@ export function SessionTile({ cardId }: Props) {
         attention
           ? 'border-amber-500/70 bg-amber-500/5'
           : 'border-border hover:border-primary/60'
-      }`}
+      } ${stale ? 'opacity-60' : ''}`}
     >
       <div className="flex items-center gap-2">
         <span className="relative flex size-2.5 shrink-0">
@@ -95,6 +104,16 @@ export function SessionTile({ cardId }: Props) {
         <span className="text-sm font-medium">
           {statusLabel(session.status)}
         </span>
+        {stale && (
+          <Badge
+            data-testid="disconnected-badge"
+            variant="secondary"
+            className="text-muted-foreground"
+            title="この PC からの報告が届いていません。表示は最後に分かっていた状態です"
+          >
+            接続断
+          </Badge>
+        )}
         {session.subagent_active > 0 && (
           <Badge
             data-testid="subagent-badge"
@@ -131,11 +150,32 @@ export function SessionTile({ cardId }: Props) {
           最初の statusLine までは必ず不明で、`inject_status_line = false` の間は
           ずっと不明なので、片方だけ出る時間は短くない
         */}
-        {(session.model !== null || session.permission_mode !== null) && (
+        {(session.model !== null ||
+          session.permission_mode !== null ||
+          pc !== null ||
+          session.toml_account !== null) && (
           <div
             data-testid="tile-badges"
             className="ml-auto flex min-w-0 items-center gap-2"
           >
+            {pc !== null && (
+              <span
+                data-testid="agent-badge"
+                className="text-muted-foreground min-w-0 truncate text-xs"
+                title={`この セッションは「${pc}」で動いています`}
+              >
+                {pc}
+              </span>
+            )}
+            {session.toml_account !== null && (
+              <span
+                data-testid="toml-account-badge"
+                className="text-muted-foreground min-w-0 truncate text-xs"
+                title=".agent-dashboard.toml がこのプロジェクトについて名乗った名前です"
+              >
+                @{session.toml_account}
+              </span>
+            )}
             {session.model !== null && (
               <span
                 data-testid="model"

@@ -1,5 +1,6 @@
 import { render, screen } from '@testing-library/react'
 import App from './App'
+import { useAuthStore } from '@/stores/auth'
 import { useWsStore } from '@/stores/ws'
 
 /**
@@ -20,12 +21,45 @@ class FakeWebSocket {
   close() {}
 }
 
+/**
+ * 鍵の無いローカルモード（実機と同じ形）の `GET /api/me`。
+ *
+ * **ここを返さないとログイン画面が出る。** 画面は「何を出すべきか」をこの応答だけで
+ * 決めており（セルフホスト化設計§8-1）、ブラウザ側で構成を推測しないため。
+ */
+const OPEN_MODE = JSON.stringify({
+  mode: 'open',
+  authenticated: true,
+  account: null,
+  is_admin: false,
+  setup_open: false,
+  from_loopback: true,
+})
+
 beforeEach(() => {
+  // **鍵の状態を毎回まっさらに戻す。** ストアはモジュールに1つなので、前のテストで
+  // 通った状態が残ると「聞く前から入れている」テストができてしまう
+  useAuthStore.setState({
+    auth: {
+      mode: 'open',
+      authenticated: false,
+      account: null,
+      is_admin: false,
+      setup_open: false,
+      from_loopback: false,
+    },
+    loading: true,
+    lastError: null,
+  })
   vi.stubGlobal('WebSocket', FakeWebSocket)
-  // 接続時に取りにいく初期スナップショット（設計§4）
+  // 接続時に取りにいく初期スナップショット（設計§4）と、入口の鍵の状態
   vi.stubGlobal(
     'fetch',
-    vi.fn(async () => new Response('[]', { status: 200 })),
+    vi.fn(async (url: string) =>
+      url === '/api/me'
+        ? new Response(OPEN_MODE, { status: 200 })
+        : new Response('[]', { status: 200 }),
+    ),
   )
 })
 
@@ -43,7 +77,9 @@ describe('App', () => {
     expect(
       screen.getByRole('heading', { name: 'AgentDashboard' }),
     ).toBeInTheDocument()
-    expect(screen.getByLabelText('作業ディレクトリ')).toBeInTheDocument()
+    // **聞いてから描く。** 何を出すかはサーバの構成で決まるので、最初の1描画では
+     // まだ決まっていない（`GET /api/me` の応答を待つ）
+    expect(await screen.findByLabelText('作業ディレクトリ')).toBeInTheDocument()
     // 起動ボタンは権限モードの選択でもある（設計§8）。既定は3つ
     expect(screen.getAllByTestId('spawn-button')).toHaveLength(3)
     expect(
@@ -51,9 +87,10 @@ describe('App', () => {
     ).toBeInTheDocument()
   })
 
-  it('作業ディレクトリが空のうちは起動できない', () => {
+  it('作業ディレクトリが空のうちは起動できない', async () => {
     render(<App />)
 
+    await screen.findByLabelText('作業ディレクトリ')
     for (const button of screen.getAllByTestId('spawn-button')) {
       expect(button).toBeDisabled()
     }
@@ -67,7 +104,8 @@ describe('App', () => {
   })
 
   it('自己修復の進行が段階つきで出る', () => {
-    // 「勝手に直った」を黙って起こさないための表示（設計§9）
+    // 「勝手に直った」を黙って起こさないための表示（設計§9）。
+    // バナーは鍵の外側にある（通っていなくても、直っていることは見せる）
     useWsStore.setState({
       selfheal: { phase: 'repairing', detail: '1/3 回目' },
     })

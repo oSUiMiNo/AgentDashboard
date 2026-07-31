@@ -21,6 +21,7 @@
 import { create } from 'zustand'
 import type { ModelAliasSeen, ModelCatalogEntry } from '@/lib/models'
 import { PERMISSION_MODES, type PermissionMode } from '@/lib/protocol'
+import { useAuthStore } from '@/stores/auth'
 
 /** 登録済みの PC（セルフホスト化設計§11-1）。 */
 export interface AgentInfo {
@@ -160,6 +161,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   load: async () => {
     try {
       const response = await fetch('/api/settings')
+      if (response.status === 401) {
+        useAuthStore.getState().markSignedOut()
+        set({ loading: false })
+        return
+      }
       if (!response.ok) {
         set({ loading: false })
         return

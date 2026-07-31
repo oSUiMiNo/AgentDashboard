@@ -16,6 +16,12 @@
  *
  * 並びは左から順に危険度が上がる。Enter で送ったときは**いちばん左**（＝いちばん安全な
  * 選択肢）で起動する。権限確認を飛ばす選択をダッシュボードが勝手にしないため。
+ *
+ * # どの PC で起こすかを選ぶ（セルフホスト化設計§5-1）
+ *
+ * 繋がっている PC が**2台以上のときだけ**選択肢を出す。1台のときとローカルモードでは
+ * 選ぶ余地が無いので、出すと迷わせるだけになる。選ばずに送るとサーバが断る——
+ * 黙って1台目へ送ると、意図しない PC で本物の claude が起動する。
  */
 
 import { useState } from 'react'
@@ -52,11 +58,19 @@ export function SpawnForm({ disabled }: Props) {
   const alwaysBypass = useSettingsStore(
     (state) => state.settings.always_bypass_permissions,
   )
+  const agents = useSettingsStore((state) => state.settings.agents)
   const [cwd, setCwd] = useState('')
+  const [target, setTarget] = useState('')
+
+  // 繋がっている PC だけを候補にする。切れている PC を選べても起動できない
+  const connected = agents.filter((agent) => agent.connected)
+  const needsTarget = connected.length > 1
+  // 1台のときは選ばせない（サーバも選ぶ余地が無いときだけ通す）
+  const agentId = needsTarget ? target : null
 
   const buttons = alwaysBypass ? BYPASS_ONLY : ALL_BUTTONS
   const trimmed = cwd.trim()
-  const blocked = disabled || trimmed === ''
+  const blocked = disabled || trimmed === '' || (needsTarget && target === '')
 
   return (
     <form
@@ -64,8 +78,8 @@ export function SpawnForm({ disabled }: Props) {
       className="flex flex-wrap items-center gap-2"
       onSubmit={(event) => {
         event.preventDefault()
-        if (trimmed) {
-          spawn(trimmed, buttons[0].mode)
+        if (!blocked) {
+          spawn(trimmed, buttons[0].mode, agentId)
         }
       }}
     >
@@ -81,6 +95,26 @@ export function SpawnForm({ disabled }: Props) {
         onChange={(event) => setCwd(event.target.value)}
         className="min-w-64 flex-1"
       />
+      {needsTarget && (
+        <label className="flex items-center gap-1.5 text-xs">
+          <span className="text-muted-foreground">起動する PC</span>
+          <select
+            data-testid="spawn-target"
+            className="border-border rounded border px-1.5 py-1 text-xs"
+            value={target}
+            onChange={(event) => setTarget(event.target.value)}
+            aria-label="起動する PC"
+          >
+            {/* **既定を作らない。** 勝手に1台目を選ぶと、意図しない PC で起動する */}
+            <option value="">選んでください</option>
+            {connected.map((agent) => (
+              <option key={agent.id} value={agent.id}>
+                {agent.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       {buttons.map((button) => (
         <Button
           key={button.mode ?? 'none'}
@@ -94,7 +128,7 @@ export function SpawnForm({ disabled }: Props) {
               ? '利用者の設定（permissions.defaultMode）どおりに起動します'
               : `${permissionModeLabel(button.mode)} で起動します`
           }
-          onClick={() => spawn(trimmed, button.mode)}
+          onClick={() => spawn(trimmed, button.mode, agentId)}
         >
           {button.label}
         </Button>

@@ -203,3 +203,38 @@ describe('ModelPicker', () => {
     expect(otherBefore?.model).toBe('claude-opus-5')
   })
 })
+
+describe('モデルの表は PC ごと（セルフホスト化設計§13-4）', () => {
+  const PC = '11111111-1111-1111-1111-111111111111'
+
+  it('そのセッションが属する PC の表を見る', () => {
+    // **1台ぶんで全部の選択肢を作ると、その PC に無いモデルが並ぶ。** CLI の版は
+    // PC ごとに違うので、引くのは `agent_id` の表（ローカルは `"local"`）
+    useSettingsStore.setState({
+      settings: settingsFixture({
+        model_tables: {
+          local: {
+            aliases: [
+              { alias: 'opus', id: 'claude-opus-4', display_name: 'Opus 4' },
+            ],
+          },
+          [PC]: {
+            aliases: [
+              { alias: 'opus', id: 'claude-opus-5', display_name: 'Opus 5' },
+            ],
+          },
+        },
+      }),
+      loading: false,
+    })
+    applySessionSnapshot([meta(CARD, { agent_id: PC })])
+
+    render(<ModelPicker cardId={CARD} />)
+
+    const picker = screen.getByTestId('model-picker') as HTMLSelectElement
+    const labels = [...picker.options].map((option) => option.textContent)
+    expect(labels.join('\n')).toContain('Opus 5')
+    // **手元（ローカル）の表は混ざらない**
+    expect(labels.join('\n')).not.toContain('Opus 4')
+  })
+})

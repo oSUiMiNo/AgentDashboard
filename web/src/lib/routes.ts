@@ -22,3 +22,11 @@ export function projectPath(project: string): string {
 
 /** 設定画面。一覧と同じ階層に置く（一覧の主役を埋もれさせないため） */
 export const SETTINGS = '/settings'
+
+/**
+ * アカウント画面（セルフホスト化設計§11-1）。
+ *
+ * **ローカルモードには出さない。** 繋いでくる PC が存在しないので、鍵を配る相手も
+ * ログアウトする相手も居ない。
+ */
+export const ACCOUNT = '/account'

@@ -56,6 +56,17 @@ const metas = new Map<CardId, SessionMeta>()
 let order: CardId[] = []
 let groups: ProjectGrouping[] = []
 
+/**
+ * 一覧に出す名乗り（`.agent-dashboard.toml` の `account`）の並び。
+ *
+ * ローカルモードでは**認証ではなく自己整理**として使う（設計§8-5）。攻撃者の居ない
+ * 環境で「いまはこのプロジェクト群だけ見たい」を叶えるためのもので、権限とは無関係。
+ */
+let accounts: string[] = []
+
+/** 絞り込み中の名乗り。`null` は絞り込まない。 */
+let accountFilter: string | null = null
+
 const cardListeners = new Map<CardId, Set<() => void>>()
 const structureListeners = new Set<() => void>()
 
@@ -89,9 +100,18 @@ function notifyStructure() {
  */
 function rebuildGroups() {
   const next: ProjectGrouping[] = []
+  const names = new Set<string>()
   for (const cardId of order) {
     const meta = metas.get(cardId)
     if (!meta) {
+      continue
+    }
+    if (meta.toml_account !== null) {
+      names.add(meta.toml_account)
+    }
+    // 絞り込みが効いているときは、名乗りが一致するカードだけを箱へ入れる。
+    // **箱そのものも消す**（空の箱が並ぶと、絞り込んだのに何も減っていないように見える）
+    if (accountFilter !== null && meta.toml_account !== accountFilter) {
       continue
     }
     const found = next.find((group) => group.project === meta.project)
@@ -102,6 +122,11 @@ function rebuildGroups() {
     }
   }
   groups = next
+  const sorted = [...names].sort()
+  // 同じ内容なら同じ配列を返し続ける（`useSyncExternalStore` が無限に回らないため）
+  if (sorted.length !== accounts.length || sorted.some((name, at) => name !== accounts[at])) {
+    accounts = sorted
+  }
 }
 
 /** 待ち行列を確定済みの状態へ流し込む。 */
@@ -231,6 +256,8 @@ export function clearSessions() {
   metas.clear()
   order = []
   groups = []
+  accounts = []
+  accountFilter = null
   pending = []
   scheduled = false
 }
@@ -265,6 +292,34 @@ export function useSessionCard(cardId: CardId): SessionMeta | undefined {
 }
 
 /** プロジェクト単位のまとまりを購読する（構造が変わったときだけ変わる）。 */
+/** 一覧に出せる名乗りの一覧（絞り込みの選択肢）。 */
+export function useTomlAccounts(): string[] {
+  return useSyncExternalStore(
+    subscribeStructure,
+    () => accounts,
+    () => accounts,
+  )
+}
+
+/** いま絞り込んでいる名乗り。 */
+export function useAccountFilter(): string | null {
+  return useSyncExternalStore(
+    subscribeStructure,
+    () => accountFilter,
+    () => accountFilter,
+  )
+}
+
+/** 絞り込みを切り替える。**表示だけの操作**で、サーバへは何も送らない。 */
+export function setAccountFilter(account: string | null) {
+  if (accountFilter === account) {
+    return
+  }
+  accountFilter = account
+  rebuildGroups()
+  notifyStructure()
+}
+
 export function useProjectGroups(): ProjectGrouping[] {
   return useSyncExternalStore(
     subscribeStructure,

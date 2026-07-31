@@ -4,6 +4,8 @@ import { MemoryRouter, Route, Routes } from 'react-router'
 import { SessionTile } from './SessionTile'
 import type { SessionMeta, SessionStatus } from '@/lib/protocol'
 import { applySessionSnapshot, clearSessions } from '@/stores/sessions'
+import { useSettingsStore } from '@/stores/settings'
+import { settingsFixture } from '@/test/fixtures'
 
 /**
  * 小窓の表示（テスト計画フェーズ5「小窓」）。
@@ -226,5 +228,52 @@ describe('SessionTile のモデル', () => {
     // 空の要素を残すと、そのぶん余白（gap）が1つ増える
     renderTile(meta({ model: null, permission_mode: null }))
     expect(screen.queryByTestId('tile-badges')).not.toBeInTheDocument()
+  })
+})
+
+describe('どの PC のセッションかと、その鮮度（セルフホスト化設計§11-2）', () => {
+  const PC = '11111111-1111-1111-1111-111111111111'
+
+  it('PC 名を出し、繋がっていなければ印を付ける', () => {
+    // **状態そのものは書き換えない。** 「作業中（接続断）」が要件2-3 の充足形で、
+    // 最後に知っていた状態を消してしまうと、何をしていたかが分からなくなる
+    useSettingsStore.setState({
+      settings: settingsFixture({
+        agents: [
+          { id: PC, name: '仕事用ノート', last_seen_at: 1, connected: false },
+        ],
+      }),
+      loading: false,
+    })
+    renderTile(
+      meta({ agent_id: PC, agent_connected: false, status: { kind: 'working' } }),
+    )
+
+    expect(screen.getByTestId('agent-badge')).toHaveTextContent('仕事用ノート')
+    expect(screen.getByTestId('disconnected-badge')).toBeInTheDocument()
+    // 状態は最後に知っていたまま
+    expect(screen.getByTestId('session-tile').dataset.status).toBe('working')
+    expect(screen.getByTestId('session-tile').dataset.connected).toBe('false')
+  })
+
+  it('繋がっていれば接続断の印は出ない', () => {
+    useSettingsStore.setState({
+      settings: settingsFixture({
+        agents: [
+          { id: PC, name: '仕事用ノート', last_seen_at: 1, connected: true },
+        ],
+      }),
+      loading: false,
+    })
+    renderTile(meta({ agent_id: PC, agent_connected: true }))
+
+    expect(screen.queryByTestId('disconnected-badge')).toBeNull()
+  })
+
+  it('toml が名乗った名前を出す', () => {
+    // 帰属（`account`）とは別物。**申告として**そのまま出す（設計§8-5）
+    renderTile(meta({ toml_account: 'しごと' }))
+
+    expect(screen.getByTestId('toml-account-badge')).toHaveTextContent('@しごと')
   })
 })

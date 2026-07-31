@@ -16,13 +16,16 @@
 import { useEffect } from 'react'
 import { BrowserRouter, Link, Route, Routes, useParams } from 'react-router'
 import { Button } from '@/components/ui/button'
+import { AccountPage } from '@/components/Account/AccountPage'
+import { AuthGate } from '@/components/Auth/AuthGate'
 import { GroupView } from '@/components/GroupView/GroupView'
 import { SessionView } from '@/components/SessionView/SessionView'
 import { SettingsPage } from '@/components/Settings/SettingsPage'
 import { TileGrid } from '@/components/TileGrid/TileGrid'
 import { SpawnForm } from '@/components/SpawnForm/SpawnForm'
 import { selfhealLabel } from '@/lib/protocol'
-import { HOME, SETTINGS } from '@/lib/routes'
+import { ACCOUNT, HOME, SETTINGS } from '@/lib/routes'
+import { canEnter, useAuthStore } from '@/stores/auth'
 import { useSessionCard } from '@/stores/sessions'
 import { useSettingsStore } from '@/stores/settings'
 import { useWsStore } from '@/stores/ws'
@@ -49,12 +52,25 @@ function Shell() {
   const connect = useWsStore((state) => state.connect)
   const clearError = useWsStore((state) => state.clearError)
   const loadSettings = useSettingsStore((state) => state.load)
+  const auth = useAuthStore((state) => state.auth)
+  const authLoading = useAuthStore((state) => state.loading)
+  const loadAuth = useAuthStore((state) => state.load)
 
+  // **まず「何を出すべきか」を聞く。** 鍵の有無はサーバの構成で決まるので、
+  // 繋いでから 401 で気づく形にすると、一瞬だけ空の一覧が描かれる
   useEffect(() => {
+    void loadAuth()
+  }, [loadAuth])
+
+  const entered = canEnter(auth, authLoading)
+  useEffect(() => {
+    if (!entered) {
+      return
+    }
     void connect()
     // 起動ボタンの数と切替の選択肢がこれで決まるので、接続と同時に読む
     void loadSettings()
-  }, [connect, loadSettings])
+  }, [entered, connect, loadSettings])
 
   return (
     <main className="flex h-svh flex-col gap-4 p-6">
@@ -69,13 +85,24 @@ function Shell() {
         >
           {CONNECTION_LABEL[status]}
         </span>
-        <Link
-          to={SETTINGS}
-          data-testid="settings-link"
-          className="text-muted-foreground hover:text-foreground ml-auto text-sm underline"
-        >
-          設定
-        </Link>
+        <div className="ml-auto flex items-center gap-3">
+          {auth.mode === 'account' && auth.authenticated && (
+            <Link
+              to={ACCOUNT}
+              data-testid="account-link"
+              className="text-muted-foreground hover:text-foreground text-sm underline"
+            >
+              アカウント
+            </Link>
+          )}
+          <Link
+            to={SETTINGS}
+            data-testid="settings-link"
+            className="text-muted-foreground hover:text-foreground text-sm underline"
+          >
+            設定
+          </Link>
+        </div>
       </header>
 
       {lastError && (
@@ -111,13 +138,22 @@ function Shell() {
 
       <SelfhealBanner />
 
-      <Routes>
-        <Route path="/" element={<HomePage />} />
-        <Route path="/p/:projectId" element={<GroupPage />} />
-        <Route path="/s/:cardId" element={<SessionPage />} />
-        <Route path="/settings" element={<SettingsPage />} />
-        <Route path="*" element={<NotFoundPage />} />
-      </Routes>
+      {/*
+        通っていない間は中身を出さない。**扉は開いているが中は返さない**という
+        サーバ側の作り（設計§8-2）と、画面側でも形を揃えてある
+      */}
+      {authLoading ? null : entered ? (
+        <Routes>
+          <Route path="/" element={<HomePage />} />
+          <Route path="/p/:projectId" element={<GroupPage />} />
+          <Route path="/s/:cardId" element={<SessionPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/account" element={<AccountPage />} />
+          <Route path="*" element={<NotFoundPage />} />
+        </Routes>
+      ) : (
+        <AuthGate />
+      )}
     </main>
   )
 }
