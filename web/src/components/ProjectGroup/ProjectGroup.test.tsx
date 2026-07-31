@@ -47,6 +47,7 @@ function meta(cardId: string): SessionMeta {
     agent_id: null,
     agent_connected: true,
     account: null,
+    toml_account: null,
   }
 }
 

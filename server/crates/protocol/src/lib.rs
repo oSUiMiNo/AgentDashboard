@@ -278,6 +278,17 @@ pub struct SessionMeta {
     /// 権限そのものではない——**権限の源はペアリングトークン**（§8-5）で、これは
     /// 画面に出すための名前。ローカルモードはアカウントを表に出さないので `None`。
     pub account: Option<String>,
+    /// `.agent-dashboard.toml` がこのセッションについて名乗ったアカウント名（設計§8-5）。
+    ///
+    /// # [`SessionMeta::account`] と分けて持つ理由
+    ///
+    /// あちらは**サーバが決めた帰属**、こちらは**エージェントが申告した希望**。
+    /// 同じ欄に入れると、上書きされたのか一致したのかを後から区別できなくなる。
+    /// セルフホストでは食い違いが警告の材料になり、ローカルモードでは一覧の
+    /// 絞り込み（攻撃者のいない自己整理機能）としてだけ働く。
+    ///
+    /// **持っていない権限は名乗れない。** ここに他人の名前を書いても帰属は動かない。
+    pub toml_account: Option<String>,
 }
 
 /// JSONL レコードの `uuid` に対応するノードID。
@@ -435,6 +446,7 @@ mod tests {
             agent_id: Some(AgentId::new()),
             agent_connected: false,
             account: Some("mao".to_string()),
+            toml_account: None,
         };
         assert_eq!(roundtrip(&meta), meta);
     }
@@ -443,7 +455,7 @@ mod tests {
     fn session_metaのPCまわりは省略できない() {
         // TypeScript 側と手で二重に定義しているので（PJTガイドライン）、片方だけ
         // 直しても Rust は通ってしまう。**JSON の形そのもの**を突き合わせて、
-        // 増えた3つが確かに線を渡っていることを見る
+        // 増えた4つが確かに線を渡っていることを見る
         let meta = SessionMeta {
             card_id: CardId(uuid::uuid!("00000000-0000-0000-0000-000000000001")),
             project: ProjectId("/p".to_string()),
@@ -461,11 +473,45 @@ mod tests {
             agent_id: None,
             agent_connected: true,
             account: None,
+            toml_account: None,
         };
         assert_eq!(
             serde_json::to_string(&meta).unwrap(),
-            r#"{"card_id":"00000000-0000-0000-0000-000000000001","project":"/p","claude_session_id":null,"permission_mode":null,"model":null,"model_label":null,"model_requested":null,"status":{"kind":"working"},"subagent_active":0,"last_activity_at":1,"last_assistant_message":null,"created_at":1,"hooks_seen":false,"agent_id":null,"agent_connected":true,"account":null}"#
+            r#"{"card_id":"00000000-0000-0000-0000-000000000001","project":"/p","claude_session_id":null,"permission_mode":null,"model":null,"model_label":null,"model_requested":null,"status":{"kind":"working"},"subagent_active":0,"last_activity_at":1,"last_assistant_message":null,"created_at":1,"hooks_seen":false,"agent_id":null,"agent_connected":true,"account":null,"toml_account":null}"#
         );
+    }
+
+    #[test]
+    fn 申告したアカウントと帰属したアカウントは別々に運ばれる() {
+        // 同じ欄に入れると、**上書きされたのか一致したのか**を後から区別できない。
+        // 「持っていない権限は名乗れない」（§8-5）を確かめる側が、申告の原文を
+        // 見られなくなる
+        let meta = SessionMeta {
+            toml_account: Some("よその人".to_string()),
+            account: Some("わたし".to_string()),
+            ..SessionMeta {
+                card_id: CardId::new(),
+                project: ProjectId("/p".to_string()),
+                claude_session_id: None,
+                permission_mode: None,
+                model: None,
+                model_label: None,
+                model_requested: None,
+                status: SessionStatus::Unknown,
+                subagent_active: 0,
+                last_activity_at: 0,
+                last_assistant_message: None,
+                created_at: 0,
+                hooks_seen: false,
+                agent_id: None,
+                agent_connected: false,
+                account: None,
+                toml_account: None,
+            }
+        };
+        let back = roundtrip(&meta);
+        assert_eq!(back.account.as_deref(), Some("わたし"));
+        assert_eq!(back.toml_account.as_deref(), Some("よその人"));
     }
 
     #[test]
@@ -514,6 +560,7 @@ mod tests {
             agent_id: None,
             agent_connected: true,
             account: None,
+            toml_account: None,
         };
         let back = roundtrip(&meta);
         assert_eq!(back.model, meta.model);
@@ -545,6 +592,7 @@ mod tests {
             agent_id: None,
             agent_connected: true,
             account: None,
+            toml_account: None,
         };
         let text = serde_json::to_string(&meta).unwrap();
         assert!(text.contains(r#""model":null"#), "実際: {text}");

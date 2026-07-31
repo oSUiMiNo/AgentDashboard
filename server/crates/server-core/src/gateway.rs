@@ -431,22 +431,32 @@ impl crate::agent::AgentHost for RemoteAgent {
         self.hub.conn_for_card(card_id).is_some()
     }
 
-    fn spawn(&self, cwd: &str, permission_mode: Option<PermissionMode>) -> Result<(), String> {
-        // **どの PC で起こすかを選ぶ口がまだ無い。** `ClientMessage::Spawn` に宛先が
-        // 無く、選ぶ UI はフェーズ5（§11-2 の PC 名バッジと同時）。黙って1台目へ送ると
-        // 意図しない PC でセッションが起きるので、迷う状況では断って理由を出す
+    fn spawn(&self, request: crate::agent::SpawnRequest<'_>) -> Result<(), String> {
+        let message = ServerToAgent::Spawn {
+            cwd: request.cwd.to_string(),
+            permission_mode: request.permission_mode,
+        };
+
+        // 宛先が指名されているなら、その PC が繋がっているかだけを見る
+        if let Some(target) = request.target {
+            let Some(conn) = self.hub.conn(target) else {
+                return Err("指定された PC が繋がっていません".to_string());
+            };
+            conn.send(&message);
+            return Ok(());
+        }
+
+        // 指名が無いときは、**選ぶ余地が無い場合だけ**通す。黙って1台目へ送ると、
+        // 意図しない PC で本物の claude が起動する
         let connected = self.hub.connected();
         match connected.len() {
             1 => {
-                connected[0].send(&ServerToAgent::Spawn {
-                    cwd: cwd.to_string(),
-                    permission_mode,
-                });
+                connected[0].send(&message);
                 Ok(())
             }
             0 => Err("繋がっている PC がありません".to_string()),
             many => Err(format!(
-                "どの PC で起動するか選べません（{many} 台が繋がっています）。PC の選択はこれから実装します"
+                "どの PC で起動するか選んでください（{many} 台が繋がっています）"
             )),
         }
     }

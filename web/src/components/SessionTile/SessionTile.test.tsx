@@ -49,6 +49,7 @@ function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
     agent_id: null,
     agent_connected: true,
     account: null,
+    toml_account: null,
     ...overrides,
   }
 }

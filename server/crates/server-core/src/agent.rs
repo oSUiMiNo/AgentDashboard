@@ -24,8 +24,20 @@
 //! 表示は変わらない。
 
 use bytes::Bytes;
-use protocol::{CardId, ModelId, PermissionMode, ws::ParserState};
+use protocol::{AgentId, CardId, ModelId, PermissionMode, ws::ParserState};
 use tokio::sync::broadcast;
+
+/// 新しいセッションを起こす頼み（設計§5-1）。
+///
+/// 引数を並べずに1つの型へまとめてあるのは、**宛先とアカウントが後から増えた**ため。
+/// 位置引数のままだと、`Option<AgentId>` と `Option<PermissionMode>` が並んで
+/// 取り違えても型で気づけない。
+pub struct SpawnRequest<'a> {
+    /// どの PC で起こすか。`None` は「選ばれていない」
+    pub target: Option<AgentId>,
+    pub cwd: &'a str,
+    pub permission_mode: Option<PermissionMode>,
+}
 
 #[async_trait::async_trait]
 pub trait AgentHost: Send + Sync + 'static {
@@ -48,7 +60,11 @@ pub trait AgentHost: Send + Sync + 'static {
     /// **できた CardId は返さない。** 採番するのはエージェント側（設計§5-2）で、
     /// ネットワークを跨ぐと同期には返せない。起動できたことは `SessionUpsert` が
     /// 記録層へ届いた時点で分かる——ブラウザ配信は元からその形で待っている。
-    fn spawn(&self, cwd: &str, permission_mode: Option<PermissionMode>) -> Result<(), String>;
+    ///
+    /// `target` はどの PC で起こすか（設計§5-1）。**ローカルモードは常に `None`**
+    /// （PC という単位が無い）。セルフホストで `None` が来たら、繋がっているのが
+    /// 1台のときだけ通す——黙って1台目へ送ると、意図しない PC で本物の claude が動く。
+    fn spawn(&self, request: SpawnRequest<'_>) -> Result<(), String>;
     fn kill(&self, card_id: CardId) -> Result<(), String>;
     fn archive(&self, card_id: CardId) -> Result<(), String>;
 

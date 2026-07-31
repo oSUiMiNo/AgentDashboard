@@ -598,6 +598,7 @@ fn placeholder_meta(card_id: CardId) -> SessionMeta {
         agent_id: None,
         agent_connected: true,
         account: None,
+        toml_account: None,
     }
 }
 
@@ -621,5 +622,6 @@ fn meta_from_row(row: entity::sessions::Model) -> SessionMeta {
         // 読み出した時点では「繋がっていない」。報告が来たら立つ
         agent_connected: false,
         account: None,
+        toml_account: row.toml_account,
     }
 }

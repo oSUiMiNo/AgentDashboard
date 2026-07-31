@@ -114,6 +114,14 @@ export interface SessionMeta {
   agent_connected: boolean
   /** 帰属アカウント名（表示用）。ローカルモードは `null` */
   account: string | null
+  /**
+   * `.agent-dashboard.toml` がこのセッションについて名乗ったアカウント名（設計§8-5）。
+   *
+   * `account`（サーバが決めた帰属）とは別物で、こちらは**エージェントの申告**。
+   * セルフホストでは食い違っても帰属は動かない（持っていない権限は名乗れない）。
+   * ローカルモードには認証が無いので、一覧の絞り込みとしてだけ使う。
+   */
+  toml_account: string | null
 }
 
 /** JSONL レコードの `uuid` に対応するノードID。 */
@@ -174,8 +182,19 @@ export type FlowState = 'pause' | 'resume'
 export type ClientMessage =
   | { t: 'sub_pty'; card_id: CardId; cols: number; rows: number }
   | { t: 'unsub_pty'; card_id: CardId }
-  /** `permission_mode` が null のときは CLI に何も渡さない（利用者の既定を尊重する） */
-  | { t: 'spawn'; cwd: string; permission_mode: PermissionMode | null }
+  /**
+   * `permission_mode` が null のときは CLI に何も渡さない（利用者の既定を尊重する）。
+   *
+   * `agent_id` はどの PC で起こすか。**ローカルモードと、繋がっているのが1台のときは
+   * `null`**（選ぶ余地が無いので画面にも出さない）。複数台が繋がっているのに null で
+   * 送ると、サーバは黙って1台目へ送らずに断る。
+   */
+  | {
+      t: 'spawn'
+      cwd: string
+      permission_mode: PermissionMode | null
+      agent_id?: string | null
+    }
   | { t: 'set_permission_mode'; card_id: CardId; mode: PermissionMode }
   /** 運ぶのは切り替え先の**別名**（`opus` など）。CLI が名乗り返すフルIDとは別物 */
   | { t: 'set_model'; card_id: CardId; model: ModelId }

@@ -1520,6 +1520,8 @@ async fn リモートの画面越しに権限確認へ答えると作業中へ�
         .send(&protocol::ws::ClientMessage::Spawn {
             cwd: pair.dir.as_str(),
             permission_mode: None,
+            // 繋がっているのは1台だけなので、宛先は選ばない
+            agent_id: None,
         })
         .await;
     let card = browser.wait_for_card("現れる", |_| true).await;
@@ -1580,6 +1582,8 @@ async fn リモートの画面越しに_rewind_のメニューを操作できる
         .send(&protocol::ws::ClientMessage::Spawn {
             cwd: pair.dir.as_str(),
             permission_mode: None,
+            // 繋がっているのは1台だけなので、宛先は選ばない
+            agent_id: None,
         })
         .await;
     let card = browser.wait_for_card("現れる", |_| true).await;
@@ -1659,6 +1663,8 @@ async fn エージェント経由でも注入したstatusLineからモデルが�
         .send(&protocol::ws::ClientMessage::Spawn {
             cwd: pair.dir.as_str(),
             permission_mode: None,
+            // 繋がっているのは1台だけなので、宛先は選ばない
+            agent_id: None,
         })
         .await;
     let card = browser.wait_for_card("現れる", |_| true).await;
@@ -1712,6 +1718,8 @@ async fn 実機検証3_リモート越しの入力から画面までの往復を
         .send(&protocol::ws::ClientMessage::Spawn {
             cwd: pair.dir.as_str(),
             permission_mode: None,
+            // 繋がっているのは1台だけなので、宛先は選ばない
+            agent_id: None,
         })
         .await;
     let card = browser.wait_for_card("現れる", |_| true).await;

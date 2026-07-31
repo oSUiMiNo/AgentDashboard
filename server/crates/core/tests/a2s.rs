@@ -533,7 +533,12 @@ async fn ブラウザからの指示が_PC_まで届く() {
     let a2s = A2s::start("relay").await;
 
     a2s.browser
-        .spawn(&a2s.dir.to_string_lossy(), None)
+        .spawn(server_core::agent::SpawnRequest {
+            // 繋がっているのは1台だけなので、宛先を選ばずに通る
+            target: None,
+            cwd: &a2s.dir.to_string_lossy(),
+            permission_mode: None,
+        })
         .expect("起動の指示を出せること");
 
     let listed = a2s

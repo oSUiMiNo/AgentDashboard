@@ -181,6 +181,7 @@ fn meta(card_id: CardId) -> SessionMeta {
         agent_id: Some(protocol::AgentId::new()),
         agent_connected: true,
         account: Some("なりすまし".to_string()),
+        toml_account: None,
     }
 }
 

@@ -94,6 +94,20 @@ pub enum ClientMessage {
     Spawn {
         cwd: String,
         permission_mode: Option<PermissionMode>,
+        /// どの PC で起こすか（セルフホスト化設計§5-1）。
+        ///
+        /// **ローカルモードと、繋がっているのが1台のときは `None`**。省略できるように
+        /// してあるのは、PC という単位が存在しない使い方（ローカル）と、選ぶ余地の無い
+        /// 使い方（1台）で、画面に選択肢を出さずに済ませるため。
+        ///
+        /// 複数台が繋がっているのに `None` で来たら**断る**。黙って1台目へ送ると、
+        /// 意図しない PC で本物の claude が起動する。
+        ///
+        /// `default` と `skip_serializing_if` を**組で**付けている。ブラウザは選択肢の
+        /// 無い場面でキーごと省くので、片方だけだと「同じ JSON になること」を見ている
+        /// 両側のテスト（PJTガイドライン）が食い違う。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<crate::AgentId>,
     },
     /// 走っているセッションの権限モードを切り替える。
     ///
@@ -251,6 +265,7 @@ mod tests {
             agent_id: None,
             agent_connected: true,
             account: None,
+            toml_account: None,
         }
     }
 
@@ -269,10 +284,12 @@ mod tests {
             ClientMessage::Spawn {
                 cwd: "/home/example/dev/app".to_string(),
                 permission_mode: None,
+                agent_id: None,
             },
             ClientMessage::Spawn {
                 cwd: "/home/example/dev/app".to_string(),
                 permission_mode: Some(PermissionMode::new("bypassPermissions")),
+                agent_id: Some(crate::AgentId::new()),
             },
             ClientMessage::SetPermissionMode {
                 card_id,
@@ -390,15 +407,30 @@ mod tests {
             format!(r#"{{"t":"pty_flow","card_id":"{card_id}","state":"pause"}}"#)
         );
 
-        // 起動の指定なしは `null` として運ぶ。ブラウザ側も同じ形で組み立てる
+        // 起動の指定なしは `null` として運ぶ。ブラウザ側も同じ形で組み立てる。
+        // **宛先はキーごと消える**（選ぶ余地の無い場面でブラウザが送らないのと同じ形）
         let text = serde_json::to_string(&ClientMessage::Spawn {
             cwd: "/home/example/dev/app".to_string(),
             permission_mode: None,
+            agent_id: None,
         })
         .unwrap();
         assert_eq!(
             text,
             r#"{"t":"spawn","cwd":"/home/example/dev/app","permission_mode":null}"#
+        );
+
+        let text = serde_json::to_string(&ClientMessage::Spawn {
+            cwd: "/home/example/dev/app".to_string(),
+            permission_mode: None,
+            agent_id: Some(crate::AgentId(uuid::uuid!(
+                "11111111-1111-1111-1111-111111111111"
+            ))),
+        })
+        .unwrap();
+        assert_eq!(
+            text,
+            r#"{"t":"spawn","cwd":"/home/example/dev/app","permission_mode":null,"agent_id":"11111111-1111-1111-1111-111111111111"}"#
         );
 
         let text = serde_json::to_string(&ClientMessage::SetPermissionMode {

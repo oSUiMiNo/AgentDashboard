@@ -243,7 +243,12 @@ async fn handle_request(
         ClientMessage::Spawn {
             cwd,
             permission_mode,
-        } => match state.agent.spawn(&cwd, permission_mode) {
+            agent_id,
+        } => match state.agent.spawn(crate::agent::SpawnRequest {
+            target: agent_id,
+            cwd: &cwd,
+            permission_mode,
+        }) {
             // 起動できた場合の通知は一覧の購読経由で届くので、ここでは何もしない
             Ok(_) => {}
             Err(message) => {

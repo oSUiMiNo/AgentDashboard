@@ -330,6 +330,7 @@ mod tests {
             agent_id: None,
             agent_connected: true,
             account: None,
+            toml_account: None,
         }
     }
 

@@ -1298,6 +1298,8 @@ impl SessionManager {
                 // 報告している時点で生きている。鮮度を判断するのは受け取る側（§6-3）で、
                 // 切断は「報告が来なくなったこと」としてしか観測できない
                 agent_connected: true,
+                // 申告は上の帰属とは別（設計§8-5）。値を入れるのは次の工程
+                toml_account: None,
             }),
             process,
             ring: Mutex::new(RingBuffer::new(self.config.pty_ring_buffer)),

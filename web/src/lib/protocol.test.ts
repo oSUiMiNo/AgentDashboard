@@ -118,6 +118,21 @@ describe('サーバと同じ JSON になること', () => {
     )
   })
 
+  it('spawn は起動先の PC を運べる', () => {
+    // 複数台が繋がっているときだけ要る。Rust 側は `#[serde(default)]` なので、
+    // **キーごと送らない形も受け付ける**（1台構成とローカルモードがそれ）
+    const targeted: ClientMessage = {
+      t: 'spawn',
+      cwd: '/home/example/dev/app',
+      permission_mode: null,
+      agent_id: '11111111-1111-1111-1111-111111111111',
+    }
+    expect(JSON.stringify(targeted)).toBe(
+      '{"t":"spawn","cwd":"/home/example/dev/app","permission_mode":null,' +
+        '"agent_id":"11111111-1111-1111-1111-111111111111"}',
+    )
+  })
+
   it('set_permission_mode', () => {
     const message: ClientMessage = {
       t: 'set_permission_mode',
@@ -154,7 +169,7 @@ describe('サーバと同じ JSON になること', () => {
       '"permission_mode":null,"model":"claude-opus-5","model_label":"Opus 5",' +
       '"model_requested":"sonnet","status":{"kind":"unknown"},"subagent_active":0,' +
       '"last_activity_at":1,"last_assistant_message":null,"created_at":1,"hooks_seen":false,' +
-      '"agent_id":null,"agent_connected":true,"account":null}'
+      '"agent_id":null,"agent_connected":true,"account":null,"toml_account":null}'
     const meta = JSON.parse(raw) as SessionMeta
     expect(meta.model).toBe('claude-opus-5')
     expect(meta.model_label).toBe('Opus 5')
@@ -171,7 +186,7 @@ describe('サーバと同じ JSON になること', () => {
       '"permission_mode":null,"model":null,"model_label":null,"model_requested":null,' +
       '"status":{"kind":"starting"},"subagent_active":0,' +
       '"last_activity_at":1,"last_assistant_message":null,"created_at":1,"hooks_seen":false,' +
-      '"agent_id":null,"agent_connected":true,"account":null}'
+      '"agent_id":null,"agent_connected":true,"account":null,"toml_account":null}'
     const meta = JSON.parse(raw) as SessionMeta
     expect(meta.model).toBeNull()
     expect(meta.model_label).toBeNull()
@@ -187,7 +202,7 @@ describe('サーバと同じ JSON になること', () => {
       '","project":"/dev/app","claude_session_id":null,' +
       '"permission_mode":null,"status":{"kind":"unknown"},"subagent_active":0,"last_activity_at":1,' +
       '"last_assistant_message":null,"created_at":1,"hooks_seen":false,' +
-      '"agent_id":null,"agent_connected":true,"account":null}'
+      '"agent_id":null,"agent_connected":true,"account":null,"toml_account":null}'
     const meta = JSON.parse(raw) as SessionMeta
     expect(meta.hooks_seen).toBe(false)
   })
@@ -204,7 +219,7 @@ describe('サーバと同じ JSON になること', () => {
       '"status":{"kind":"working"},"subagent_active":0,"last_activity_at":1,' +
       '"last_assistant_message":null,"created_at":1,"hooks_seen":true,' +
       '"agent_id":"11111111-1111-1111-1111-111111111111",' +
-      '"agent_connected":false,"account":"mao"}'
+      '"agent_connected":false,"account":"mao","toml_account":null}'
     const meta = JSON.parse(raw) as SessionMeta
     expect(meta.agent_id).toBe('11111111-1111-1111-1111-111111111111')
     expect(meta.agent_connected).toBe(false)
@@ -224,11 +239,30 @@ describe('サーバと同じ JSON になること', () => {
       '"permission_mode":null,"model":null,"model_label":null,"model_requested":null,' +
       '"status":{"kind":"starting"},"subagent_active":0,"last_activity_at":1,' +
       '"last_assistant_message":null,"created_at":1,"hooks_seen":false,' +
-      '"agent_id":null,"agent_connected":true,"account":null}'
+      '"agent_id":null,"agent_connected":true,"account":null,"toml_account":null}'
     const meta = JSON.parse(raw) as SessionMeta
     expect(meta.agent_id).toBeNull()
     expect(meta.account).toBeNull()
     expect(meta.agent_connected).toBe(true)
+  })
+
+  it('申告したアカウントと帰属したアカウントは別々に届く', () => {
+    // Rust 側 `申告したアカウントと帰属したアカウントは別々に運ばれる` と対になる。
+    // toml に他人の名前を書いても帰属（account）は動かない——**見ているのが
+    // 申告ではなく接続だから**（設計§8-5）。両方が線を渡ってくるので、
+    // 画面は「名乗った名前」と「実際の持ち主」を並べて出せる
+    const raw =
+      '{"card_id":"' +
+      CARD_ID +
+      '","project":"/dev/app","claude_session_id":null,' +
+      '"permission_mode":null,"model":null,"model_label":null,"model_requested":null,' +
+      '"status":{"kind":"idle"},"subagent_active":0,"last_activity_at":1,' +
+      '"last_assistant_message":null,"created_at":1,"hooks_seen":true,' +
+      '"agent_id":null,"agent_connected":true,' +
+      '"account":"わたし","toml_account":"よその人"}'
+    const meta = JSON.parse(raw) as SessionMeta
+    expect(meta.account).toBe('わたし')
+    expect(meta.toml_account).toBe('よその人')
   })
 })
 
@@ -365,6 +399,7 @@ describe('状態のラベル', () => {
       agent_id: null,
       agent_connected: true,
       account: null,
+      toml_account: null,
     }
     expect(isHookSilent(base)).toBe(true)
     expect(isHookSilent({ ...base, hooks_seen: true })).toBe(false)

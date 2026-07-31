@@ -269,6 +269,8 @@ async fn ペアリングして起動しフックまで通る() {
         .send(&ClientMessage::Spawn {
             cwd: cwd.to_string_lossy().into_owned(),
             permission_mode: None,
+            // 繋がっているのは1台だけなので、宛先は選ばない
+            agent_id: None,
         })
         .await;
 
