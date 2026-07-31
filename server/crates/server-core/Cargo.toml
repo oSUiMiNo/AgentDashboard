@@ -30,3 +30,11 @@ sea-orm.workspace = true
 sea-orm-migration.workspace = true
 tower-sessions.workspace = true
 time.workspace = true
+sha2.workspace = true
+base64.workspace = true
+
+[dev-dependencies]
+# エージェントの受け口（`/agent/ws`）を**本物の WebSocket で**叩くため。製品コードの
+# 依存には入れない——接続は常に PC 側から張るので、サーバ側にクライアントは要らない。
+tokio-tungstenite.workspace = true
+futures-util.workspace = true

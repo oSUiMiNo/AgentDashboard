@@ -172,6 +172,15 @@ impl Watcher {
             }
             FrameKind::PtyOutput => self.output_frames += 1,
             FrameKind::PtyInput => panic!("サーバから入力フレームが届くことはない"),
+            // 画面のフレームはエージェント→サーバの区間にしか存在せず、ブラウザへ渡る
+            // 前に `PtySnapshot` / `PtyOutput` へ移し替えられる（設計§4-3）。ここに
+            // 届いたなら移し替えを忘れている
+            FrameKind::ScreenFull | FrameKind::ScreenDiff => {
+                panic!(
+                    "画面のフレームがブラウザ向けの経路へ漏れている: {:?}",
+                    frame.kind
+                )
+            }
         }
         self.total_bytes += frame.payload.len();
 

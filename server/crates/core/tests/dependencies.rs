@@ -36,6 +36,37 @@ const FORBIDDEN: &[(&str, &[&str])] = &[
     ),
 ];
 
+/// 「この crate の `Cargo.toml` に、通常の依存として**直に**書いてはいけない」。
+///
+/// 到達可能性（[`FORBIDDEN`]）では捕まえられない相手がここに入る。**禁じたいのが
+/// 「使うこと」であって「同じ木に居ること」ではない**場合がそれにあたる。
+///
+/// 例：`axum` の WebSocket 機能は、実装（`tokio-tungstenite`）を通常の依存として
+/// 引き込む。だからサーバ側からはどうやっても到達できてしまうが、禁じたいのは
+/// **サーバが自分でクライアントとして繋ぎに行くこと**（設計§4-1「接続は常に PC 側から」）
+/// なので、宣言そのものを見るほうが意図に合う。
+const FORBIDDEN_DIRECT: &[(&str, &[&str])] = &[
+    // A2S を張るのは PC 側だけ。利用者の PC はたいてい NAT の内側にあり、サーバから
+    // 繋ぎに行く経路は存在しない。**テストは本物の WS で叩くので dev-dependencies には
+    // 入る**が、それは「使う」に当たらない
+    ("server-core", &["tokio-tungstenite"]),
+];
+
+#[test]
+fn 直に持ってはいけない依存を宣言していない() {
+    let metadata = metadata();
+    for (from, forbidden) in FORBIDDEN_DIRECT {
+        let declared = direct_normal_dependencies(&metadata, from);
+        for banned in *forbidden {
+            assert!(
+                !declared.contains(*banned),
+                "{from} が {banned} を通常の依存として宣言しています。\
+                 使ってよい場所ではありません（dev-dependencies なら数えません）"
+            );
+        }
+    }
+}
+
 #[test]
 fn 依存の逆流が起きていない() {
     let metadata = metadata();
@@ -95,6 +126,23 @@ fn package_names(metadata: &Value) -> HashMap<String, String> {
                     .to_string(),
             )
         })
+        .collect()
+}
+
+/// その crate が**自分の `Cargo.toml` に書いている**通常の依存の名前。
+fn direct_normal_dependencies(metadata: &Value, package: &str) -> HashSet<String> {
+    metadata["packages"]
+        .as_array()
+        .expect("packages があること")
+        .iter()
+        .find(|entry| entry["name"].as_str() == Some(package))
+        .unwrap_or_else(|| panic!("crate が見つかりません: {package}"))["dependencies"]
+        .as_array()
+        .expect("dependencies があること")
+        .iter()
+        // `kind` は通常の依存だけ null。dev / build は名前が入る
+        .filter(|dep| dep["kind"].is_null())
+        .filter_map(|dep| dep["name"].as_str().map(str::to_string))
         .collect()
 }
 

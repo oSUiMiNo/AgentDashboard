@@ -75,6 +75,24 @@ sea-orm-migration = { version = "2", default-features = false, features = [
     "sqlx-postgres",
     "runtime-tokio-rustls",
 ] }
+# A2S（セルフホスト化設計§4-1）の WebSocket **クライアント**。**PC 側だけが持つ**——
+# 接続は常に PC から張るので、サーバ側は axum の upgrade だけで足りる。
+#
+# 版を "0.29" に固定しているのは、**axum 0.8.9 が内部で使っているのと同じ版**だから。
+# 別の版を書くと同じ実装が2つビルドされ、配布バイナリ（設計§14-3）が理由もなく太る。
+# axum を上げるときは `scripts/cargo tree -i tungstenite` で揃っているか見ること。
+#
+# TLS を入れてあるのは、エージェントがインターネット越しに繋ぐため（設計§14-2 の
+# リバースプロキシ構成では `wss://` になる）。native-tls ではなく rustls を選ぶのは、
+# musl 静的リンク（設計§14-3）で OpenSSL を引き込まないため。
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+# ペアリングトークンの見た目（設計§8-4）。利用者が agent.toml へ貼る文字列なので、
+# 16進（64文字）より短い base64url（43文字）にする。
+base64 = "0.22"
+# ペアリングトークンの照合（設計§8-4）。**低速ハッシュにしない**——トークンは 256bit の
+# 乱数なので辞書攻撃が成立せず、接続のたびにハッシュ一致で引ける必要があるため。
+# 利用者のパスワード（argon2id）とは要求が違うので、同じ道具を使い回さない。
+sha2 = "0.10"
 # ブラウザのログインセッション（設計§8-2）。**フェーズ2 で入れるのは置き場所（web_sessions）
 # の実装だけ**で、ログインへの結線はフェーズ5。既製の tower-sessions-sqlx-store を使わない
 # 理由は設計§8-2（更新停止・版の非互換・sqlx の二重ビルド）。

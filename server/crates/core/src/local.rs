@@ -193,10 +193,13 @@ impl EventSink for ReportingSink {
 pub fn reporting(registry: Arc<SessionRegistry>) -> Arc<ReportingSink> {
     let (reports, mut inbox) = mpsc::unbounded_channel();
     tokio::spawn(async move {
+        // 報告の出どころは常に同じ（このプロセスの中の1台）。セルフホストモードでは
+        // 接続ごとに変わるが、ローカルには PC という単位が無いので `agent_id` は無い
+        let origin = server_core::registry::ReportOrigin::local();
         // 1本のタスクで順に処理する。**順序がそのまま DB への書き込み順になる**ので、
         // 巻き戻し（TranscriptReset）がバッチを追い越さない（設計§6-2）
         while let Some(message) = inbox.recv().await {
-            registry.apply(message).await;
+            registry.apply(&origin, message).await;
         }
     });
     Arc::new(ReportingSink {

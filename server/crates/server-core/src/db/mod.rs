@@ -19,6 +19,7 @@
 
 pub mod entity;
 mod migration;
+pub mod pairing;
 pub mod settings;
 pub mod transcript;
 pub mod web_session_store;

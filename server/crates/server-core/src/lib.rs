@@ -14,6 +14,7 @@ pub mod agent;
 pub mod config;
 pub mod db;
 pub mod embed;
+pub mod gateway;
 pub mod registry;
 pub mod transcript;
 pub mod ws;

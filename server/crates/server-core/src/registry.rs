@@ -26,7 +26,7 @@ use crate::{
     transcript::TranscriptWindow,
 };
 use protocol::{
-    CardId, ClaudeSessionId, ModelId, NodeId, PermissionMode, ProjectId, SessionMeta,
+    AgentId, CardId, ClaudeSessionId, ModelId, NodeId, PermissionMode, ProjectId, SessionMeta,
     SessionStatus, TreeNode, ws::ServerMessage,
 };
 use sea_orm::sea_query::OnConflict;
@@ -59,6 +59,31 @@ pub struct TranscriptPage {
     pub nodes: Vec<TreeNode>,
     /// さらに前があるかもしれない
     pub has_more: bool,
+}
+
+/// 報告の出どころ（セルフホスト化設計§5-1 の手順4）。
+///
+/// **帰属を決めるのはサーバの仕事**なので、エージェントが `SessionMeta` に何を書いて
+/// 寄越しても、記録に残る `agent_id` と `account_id` はここの値で上書きする。ローカル
+/// モードは「1つのアカウントの、PC という単位が無い報告」として同じ形に流し込む。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportOrigin {
+    pub account_id: Uuid,
+    /// どの PC からか。**ローカルモードは `None`**（結び付ける `agents` の行が無い）
+    pub agent_id: Option<AgentId>,
+    /// 画面に出すアカウント名。ローカルはアカウントを表に出さないので `None`
+    pub account: Option<String>,
+}
+
+impl ReportOrigin {
+    /// ローカルモードの出どころ。
+    pub fn local() -> Self {
+        Self {
+            account_id: db::LOCAL_ACCOUNT_ID,
+            agent_id: None,
+            account: None,
+        }
+    }
 }
 
 /// 履歴のページを作れなかった理由。
@@ -150,9 +175,6 @@ pub struct SessionRegistry {
     records: Mutex<HashMap<CardId, Arc<SessionRecord>>>,
     events: broadcast::Sender<ServerMessage>,
     window_nodes: usize,
-    /// このサーバが扱うアカウント。ローカルモードは1つだけ（設計§8-6 の絞り込みを
-    /// 両モードで同じ形にするための土台。アカウントの出し分けはフェーズ5）
-    account_id: Uuid,
 }
 
 impl SessionRegistry {
@@ -160,13 +182,16 @@ impl SessionRegistry {
     ///
     /// 外していない（`archived=false`）カードを読み戻し、**すべて「接続していない」印**で
     /// 一覧に出す。ローカルモードでは、これが前回の起動が残した記録にあたる——
-    /// 履歴は読めるが PTY は道連れで死んでいる（設計§1-3）。
+    /// 履歴は読めるが PTY は道連れで死んでいる（設計§1-3）。セルフホストモードでは、
+    /// エージェントが繋ぎ直してくるまでの間がこの状態になる（§6-3 と同じ見え方）。
+    ///
+    /// アカウントで絞らずに全部読むのは、**見ている人が誰かをまだ知らない**ため。
+    /// ログイン（§8-2）が入るフェーズ5 で、配るときに絞る形になる（§8-6）。
     pub async fn load(
         db: DatabaseConnection,
         window_nodes: usize,
     ) -> Result<Arc<Self>, anyhow::Error> {
         let rows = entity::sessions::Entity::find()
-            .filter(entity::sessions::Column::AccountId.eq(db::LOCAL_ACCOUNT_ID))
             .filter(entity::sessions::Column::Archived.eq(false))
             .order_by_asc(entity::sessions::Column::CreatedAt)
             .all(&db)
@@ -199,7 +224,6 @@ impl SessionRegistry {
             records: Mutex::new(records),
             events: broadcast::channel(EVENT_QUEUE_MESSAGES).0,
             window_nodes,
-            account_id: db::LOCAL_ACCOUNT_ID,
         }))
     }
 
@@ -222,6 +246,44 @@ impl SessionRegistry {
             .collect();
         metas.sort_by_key(|meta| meta.created_at);
         metas
+    }
+
+    /// その PC のカードの**鮮度の印**を切り替えて配り直す（設計§6-3）。
+    ///
+    /// **`status` は書き換えない。** 切断は「最後に知っていた状態」を上書きする情報では
+    /// なく、その鮮度に関する情報だから（§3-1）。画面には「作業中（接続断）」と出る。
+    ///
+    /// DB にも書かない（§20 読み替え4）。接続はインスタンスローカルの事実で、保存すると
+    /// **落ちた瞬間の値が残る**——次に起動したサーバが「繋がっている」と信じてしまう。
+    pub fn set_agent_live(&self, agent_id: AgentId, live: bool) {
+        let all: Vec<Arc<SessionRecord>> = self
+            .records
+            .lock()
+            .expect("ロックが壊れていない")
+            .values()
+            .cloned()
+            .collect();
+        for record in all {
+            let meta = record.meta();
+            if meta.agent_id != Some(agent_id) || meta.agent_connected == live {
+                continue;
+            }
+            record.live.store(live, Ordering::Relaxed);
+            let _ = self.events.send(ServerMessage::SessionUpsert {
+                session: Box::new(record.meta()),
+            });
+        }
+    }
+
+    /// その PC が持っているカードの一覧（切断時の掃除と、指示の宛先探しに使う）。
+    pub fn cards_of(&self, agent_id: AgentId) -> Vec<CardId> {
+        self.records
+            .lock()
+            .expect("ロックが壊れていない")
+            .values()
+            .filter(|record| record.meta().agent_id == Some(agent_id))
+            .map(|record| record.card_id)
+            .collect()
     }
 
     pub fn get(&self, card_id: CardId) -> Option<Arc<SessionRecord>> {
@@ -252,9 +314,17 @@ impl SessionRegistry {
     }
 
     /// エージェントからの報告を1件取り込む。**書いてから配る。**
-    pub async fn apply(&self, message: ServerMessage) {
+    ///
+    /// 戻り値は「**取り込みが終わったか**」で、そのまま ack を返してよいかの判断になる
+    /// （設計§6-1）。`false` のときは黙って返さない——ack を返さないこと自体が
+    /// 「まだ書けていない」の合図で、エージェントは持っているぶんを再送する（§12 の DB 断）。
+    ///
+    /// 取り込む先が無かった場合（外した直後のカード宛て）も `true` を返す。ここで
+    /// `false` にすると、**二度と書ける見込みが無いものを永久に再送させる**ことになり、
+    /// そのカードのオフセットが止まったままになる。
+    pub async fn apply(&self, origin: &ReportOrigin, message: ServerMessage) -> bool {
         let outcome = match message {
-            ServerMessage::SessionUpsert { session } => self.upsert(*session).await,
+            ServerMessage::SessionUpsert { session } => self.upsert(origin, *session).await,
             ServerMessage::SessionRemoved { card_id } => self.archive(card_id).await,
             ServerMessage::Status {
                 card_id,
@@ -274,18 +344,22 @@ impl SessionRegistry {
             }
         };
 
-        if let Err(err) = outcome {
-            // 書けなかったものは配らない（画面に出るのに再読み込みで消えるのを防ぐ）。
-            // 代わりに理由を出す——黙って落とすと「一覧が更新されない」としか見えない
-            tracing::error!("記録を書けませんでした: {err}");
-            let _ = self.events.send(ServerMessage::Error {
-                card_id: None,
-                message: format!("記録を保存できませんでした: {err}"),
-            });
+        match outcome {
+            Ok(()) => true,
+            Err(err) => {
+                // 書けなかったものは配らない（画面に出るのに再読み込みで消えるのを防ぐ）。
+                // 代わりに理由を出す——黙って落とすと「一覧が更新されない」としか見えない
+                tracing::error!("記録を書けませんでした: {err}");
+                let _ = self.events.send(ServerMessage::Error {
+                    card_id: None,
+                    message: format!("記録を保存できませんでした: {err}"),
+                });
+                false
+            }
         }
     }
 
-    async fn upsert(&self, mut meta: SessionMeta) -> Result<(), DbErr> {
+    async fn upsert(&self, origin: &ReportOrigin, mut meta: SessionMeta) -> Result<(), DbErr> {
         // **外したカードは戻さない。**
         //
         // 外す（`archive`）と記録は落ちるが、**報告の待ち行列にはまだそのカードのぶんが
@@ -299,12 +373,12 @@ impl SessionRegistry {
         }
 
         // **帰属を決めるのはサーバの仕事**（設計§5-1 の手順4）。エージェントが申告した
-        // 値をそのまま信じない形にしておくと、フェーズ5 の絞り込み（§8-5）が
-        // ここへ入るだけで済む
-        meta.agent_id = None;
-        meta.account = None;
+        // 値は捨て、接続そのものが含意する出どころで上書きする。他アカウントの名前を
+        // 名乗られても通らないのは、ここで見ているのが**申告ではなく接続**だから（§8-5）
+        meta.agent_id = origin.agent_id;
+        meta.account = origin.account.clone();
 
-        self.write_session(&meta).await?;
+        self.write_session(origin, &meta).await?;
 
         let record = self.record_for(meta.card_id).await?;
         record.store_meta(meta);
@@ -412,11 +486,11 @@ impl SessionRegistry {
     }
 
     /// 記録を DB へ書く（無ければ作る）。
-    async fn write_session(&self, meta: &SessionMeta) -> Result<(), DbErr> {
+    async fn write_session(&self, origin: &ReportOrigin, meta: &SessionMeta) -> Result<(), DbErr> {
         let row = entity::sessions::ActiveModel {
             card_id: Set(meta.card_id.0),
             agent_id: Set(meta.agent_id.map(|id| id.0)),
-            account_id: Set(self.account_id),
+            account_id: Set(origin.account_id),
             project: Set(meta.project.0.clone()),
             claude_session_id: Set(meta.claude_session_id.map(|id| id.0)),
             permission_mode: Set(meta

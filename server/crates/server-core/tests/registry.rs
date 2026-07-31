@@ -10,9 +10,18 @@ mod common;
 use protocol::{
     CardId, Node, NodeId, ProjectId, SessionMeta, SessionStatus, TreeNode, ws::ServerMessage,
 };
-use server_core::registry::SessionRegistry;
+use server_core::registry::{ReportOrigin, SessionRegistry};
 
 const WINDOW: usize = 100;
+
+/// このテストの報告はすべてローカルモードの出どころから来る。
+///
+/// **セルフホストの出どころ（PC 付き）は `crates/core/tests/a2s.rs` が受け持つ** —— 記録層の
+/// 側から見ると違いは `agent_id` が入るかどうかだけで、ここで確かめたいのは書き込みの
+/// 順序と門であるため。
+fn local() -> ReportOrigin {
+    ReportOrigin::local()
+}
 
 fn meta(card_id: CardId) -> SessionMeta {
     SessionMeta {
@@ -64,7 +73,7 @@ async fn 報告は書いてから配られる() {
         let mut events = registry.subscribe_events();
         let card_id = CardId::new();
 
-        registry.apply(upsert(card_id)).await;
+        registry.apply(&local(), upsert(card_id)).await;
 
         let message = events.recv().await.expect("配信されること");
         assert!(
@@ -101,11 +110,11 @@ async fn 外したカードは後から届いた報告で戻らない() {
             .expect("記録層を立てられること");
         let card_id = CardId::new();
 
-        registry.apply(upsert(card_id)).await;
+        registry.apply(&local(), upsert(card_id)).await;
         assert_eq!(registry.list().len(), 1, "[{}]", backend.name);
 
         registry
-            .apply(ServerMessage::SessionRemoved { card_id })
+            .apply(&local(), ServerMessage::SessionRemoved { card_id })
             .await;
         assert!(
             registry.list().is_empty(),
@@ -114,7 +123,7 @@ async fn 外したカードは後から届いた報告で戻らない() {
         );
 
         // 遅れて届いた報告
-        registry.apply(upsert(card_id)).await;
+        registry.apply(&local(), upsert(card_id)).await;
         assert!(
             registry.list().is_empty(),
             "[{}] 外したカードが戻ってきた",
@@ -145,12 +154,15 @@ async fn 再起動しても履歴は残り接続していない印が付く() {
             let registry = SessionRegistry::load(backend.db.clone(), WINDOW)
                 .await
                 .expect("記録層を立てられること");
-            registry.apply(upsert(card_id)).await;
+            registry.apply(&local(), upsert(card_id)).await;
             registry
-                .apply(ServerMessage::TranscriptAppend {
-                    card_id,
-                    nodes: vec![text_node("n1"), text_node("n2")],
-                })
+                .apply(
+                    &local(),
+                    ServerMessage::TranscriptAppend {
+                        card_id,
+                        nodes: vec![text_node("n1"), text_node("n2")],
+                    },
+                )
                 .await;
         }
 
@@ -196,22 +208,28 @@ async fn 巻き戻りのあとも番号は最初から振り直される() {
             .await
             .expect("記録層を立てられること");
         let card_id = CardId::new();
-        registry.apply(upsert(card_id)).await;
+        registry.apply(&local(), upsert(card_id)).await;
 
         registry
-            .apply(ServerMessage::TranscriptAppend {
-                card_id,
-                nodes: vec![text_node("a"), text_node("b")],
-            })
+            .apply(
+                &local(),
+                ServerMessage::TranscriptAppend {
+                    card_id,
+                    nodes: vec![text_node("a"), text_node("b")],
+                },
+            )
             .await;
         registry
-            .apply(ServerMessage::TranscriptReset { card_id })
+            .apply(&local(), ServerMessage::TranscriptReset { card_id })
             .await;
         registry
-            .apply(ServerMessage::TranscriptAppend {
-                card_id,
-                nodes: vec![text_node("c")],
-            })
+            .apply(
+                &local(),
+                ServerMessage::TranscriptAppend {
+                    card_id,
+                    nodes: vec![text_node("c")],
+                },
+            )
             .await;
 
         let page = registry
@@ -235,10 +253,13 @@ async fn 知らないカードの履歴は捨てる() {
         let card_id = CardId::new();
 
         registry
-            .apply(ServerMessage::TranscriptAppend {
-                card_id,
-                nodes: vec![text_node("x")],
-            })
+            .apply(
+                &local(),
+                ServerMessage::TranscriptAppend {
+                    card_id,
+                    nodes: vec![text_node("x")],
+                },
+            )
             .await;
 
         assert!(registry.list().is_empty(), "[{}]", backend.name);
@@ -266,16 +287,19 @@ async fn モデルの3つは未設定のまま往復する() {
             let registry = SessionRegistry::load(backend.db.clone(), WINDOW)
                 .await
                 .expect("記録層を立てられること");
-            registry.apply(upsert(bare)).await;
+            registry.apply(&local(), upsert(bare)).await;
 
             let mut with_model = meta(filled);
             with_model.model = Some(protocol::ModelId::new("claude-opus-5"));
             with_model.model_label = Some("Opus 5".to_string());
             with_model.model_requested = Some(protocol::ModelId::new("sonnet"));
             registry
-                .apply(ServerMessage::SessionUpsert {
-                    session: Box::new(with_model),
-                })
+                .apply(
+                    &local(),
+                    ServerMessage::SessionUpsert {
+                        session: Box::new(with_model),
+                    },
+                )
                 .await;
         }
 
