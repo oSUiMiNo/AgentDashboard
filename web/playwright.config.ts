@@ -40,8 +40,24 @@ export default defineConfig({
     baseURL: 'http://127.0.0.1:4173',
     trace: 'on-first-retry',
   },
-  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
-  webServer: {
+  projects: [
+    {
+      name: 'chromium',
+      use: { ...devices['Desktop Chrome'] },
+      // セルフホスト構成のぶんは別のサーバ（4174）へ繋ぐ
+      testIgnore: /remote\.spec\.ts/,
+    },
+    {
+      // 別の PC のセッションを、実物のブラウザで見る（セルフホスト化設計§7）。
+      // **ローカルモードでは画面配信の経路を1バイトも通らない**ので、
+      // 「エージェントが作った画面が xterm.js で再現される」はここでしか確かめられない
+      name: 'chromium-remote',
+      use: { ...devices['Desktop Chrome'], baseURL: 'http://127.0.0.1:4174' },
+      testMatch: /remote\.spec\.ts/,
+    },
+  ],
+  webServer: [
+    {
     // 記録の DB（設計§3-2）を**起動の直前に**消す。
     //
     // DB が真実になったので、サーバは起動時に前回のカードを一覧へ復元する（PTY は
@@ -64,5 +80,18 @@ export default defineConfig({
     stdout: 'pipe',
     stderr: 'pipe',
     timeout: 60_000,
-  },
+    },
+    {
+      // セルフホスト構成（サーバ＋エージェント）。**順序を持った起動**なので、
+      // トークンの発行から後始末まで1本のスクリプトに寄せてある
+      command: `${repoRoot}/scripts/e2e-remote`,
+      cwd: repoRoot,
+      env: { RUST_LOG: 'info' },
+      url: 'http://127.0.0.1:4174',
+      reuseExistingServer: !process.env.CI,
+      stdout: 'pipe',
+      stderr: 'pipe',
+      timeout: 60_000,
+    },
+  ],
 })

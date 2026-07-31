@@ -1,0 +1,11 @@
+# セルフホスト構成の E2E：**サーバ側**（設計§1-1）。
+#
+# PC 側（PTY・フック・パース）は持たない。セッションの実体は A2S の向こうにある。
+# ローカルモードの E2E（`config.toml`）とは別のポート・別の置き場所にして、
+# 2つを同時に走らせても干渉しないようにしてある。
+
+port = 4174
+
+# 記録の置き場所。`scripts/e2e-remote` が起動のたびに消す
+state_dir = "web/test-results/remote/server"
+database_url = "sqlite://web/test-results/remote/server/dashboard.db"

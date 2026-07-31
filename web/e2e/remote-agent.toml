@@ -1,0 +1,20 @@
+# セルフホスト構成の E2E：**PC 側エージェント**（設計§1-1）。
+#
+# ペアリングトークンは起動のたびに変わるので、`scripts/e2e-remote` が環境変数で渡す
+# （`AGENTDASHBOARD_PAIRING_TOKEN`。設計§14-1 の 1:1 対応）。
+
+server_url = "http://127.0.0.1:4174"
+agent_name = "E2E用PC"
+
+# 状態の置き場所を**サーバと分ける**。同じ場所を指すと、パーサの再開位置を
+# 2つのプロセスが取り合うことになる
+state_dir = "web/test-results/remote/agent"
+
+# 利用者のグローバル設定を絶対に触らせない（ローカルモードの E2E と同じ理由）
+claude_settings_path = "web/test-results/remote/agent/claude-settings.json"
+
+# statusLine の再実行間隔。既定の3秒だと切替の確認だけで毎回3秒待つ
+status_line_refresh_secs = 1
+
+# 自己修復は E2E の対象外。走らせると擬似 claude でカナリアが失敗し続ける
+selfheal_enabled = false

@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# セルフホスト構成（サーバ＋エージェントの2プロセス）を E2E のために起こす。
+#
+# # なぜ1本のスクリプトなのか
+#
+# Playwright は `webServer` を並列に起こすので、「トークンを発行してから繋ぐ」という
+# **順序を持った起動**は表現できない。ここで順番に起こし、どちらかが落ちたら両方畳む。
+#
+# # なぜ2プロセスを本当に起こすのか
+#
+# ローカルモードのブラウザは PTY の生バイトをそのまま受け取っていて、**画面配信の経路を
+# 1バイトも通らない**（設計§7-2）。「エージェントが作った画面が xterm.js で再現される」
+# ——フェーズ4 の中心の約束——は、この構成でしか確かめられない。
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BIN="${REPO_ROOT}/server/target/debug/agentdashboard"
+AGENT_BIN="${REPO_ROOT}/server/target/debug/agentdashboard-agent"
+FAKE_CLAUDE="${REPO_ROOT}/server/target/debug/fake-claude"
+STATE="${REPO_ROOT}/web/test-results/remote"
+SERVER_CONFIG="${REPO_ROOT}/web/e2e/remote-server.toml"
+AGENT_CONFIG="${REPO_ROOT}/web/e2e/remote-agent.toml"
+
+for binary in "${BIN}" "${AGENT_BIN}" "${FAKE_CLAUDE}"; do
+    if [[ ! -x "${binary}" ]]; then
+        echo "エラー: ${binary} がありません。`make build-debug` を先に実行してください。" >&2
+        exit 1
+    fi
+done
+
+# 前回の記録を消す。**E2E は「まだ何も起動していない」から始まる前提**なので、
+# 前回のカードが残っていると枚数を数えるテストが軒並み落ちる（フェーズ2 で踏んだ）
+rm -rf "${STATE}"
+mkdir -p "${STATE}/server" "${STATE}/agent"
+
+server_pid=""
+agent_pid=""
+cleanup() {
+    [[ -n "${agent_pid}" ]] && kill "${agent_pid}" 2>/dev/null || true
+    [[ -n "${server_pid}" ]] && kill "${server_pid}" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+# 1. トークンを発行する（5分セットアップの手順3）。**サーバの起動より先でよい**——
+# 発行は DB を直に触るので、待ち受けている必要が無い
+token="$("${BIN}" --config "${SERVER_CONFIG}" pair-token --account e2e | tr -d '[:space:]')"
+if [[ -z "${token}" ]]; then
+    echo "エラー: ペアリングトークンを発行できませんでした。" >&2
+    exit 1
+fi
+
+# 2. サーバ（PC 側を持たない）
+"${BIN}" --config "${SERVER_CONFIG}" --mode server &
+server_pid=$!
+
+# 応答するまで待つ。ここを待たずにエージェントを起こすと、初回の接続が必ず失敗して
+# バックオフのぶんだけテストの開始が遅れる
+for _ in $(seq 1 100); do
+    if curl -sf "http://127.0.0.1:4174/api/sessions" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+
+# 3. エージェント（PTY・フック・パースを持つ側）。**相手にするのは擬似 claude**
+AGENTDASHBOARD_CLAUDE_BIN="${FAKE_CLAUDE}" \
+    AGENTDASHBOARD_PAIRING_TOKEN="${token}" \
+    "${AGENT_BIN}" --config "${AGENT_CONFIG}" &
+agent_pid=$!
+
+# どちらかが終わったら両方畳む（片方だけ生き残ると次の起動がポートで衝突する）
+wait -n "${server_pid}" "${agent_pid}"
