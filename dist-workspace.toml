@@ -43,8 +43,12 @@ install-path = "~/.local/bin"
 
 # **cargo の前に web をビルドする**（§25 読み替え6）。`agentdashboard` は web/dist を
 # コンパイル時に焼き込むので、これが無いと**起動はするが画面が空**のバイナリができる。
-# パスは `.github/workflows/` からの相対
-github-build-setup = "build-setup.yml"
+#
+# パスは `.github/workflows/` からの相対。**1つ上へ置いてある**のは、これが
+# 差し込む断片であって単体で走らせるものではないため——`.github/workflows/` に
+# 置くと GitHub がワークフローとして登録し、`on:` が無いので**プッシュのたびに
+# 失敗が1件積み上がる**（実際にそうなった）。中身は変えずに場所だけ移せば消える
+github-build-setup = "../build-setup.yml"
 
 # セルフホストのサーバを箱（コンテナイメージ）としても配る（設計§26 読み替え2）。
 # 実体は `.github/workflows/docker-image.yml`。**中でビルドし直さず**、ここで作った
