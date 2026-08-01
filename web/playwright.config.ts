@@ -135,6 +135,14 @@ export default defineConfig({
       stdout: 'pipe',
       stderr: 'pipe',
       timeout: 60_000,
+      // **終わるときに猶予を渡す。** 既定では process group ごと強制終了されるため、
+      // スクリプトの後片付けが走らない。テストが起こし直した PC は**別の group に
+      // 居る**（`fleet-control.ts` が切り離して起こす）ので、group を殺しても
+      // 生き残り、1回の実行ごとに2つずつ溜まっていく（実際に8つ溜めた）。
+      //
+      // 溜まったぶんは死んだサーバへ延々と繋ぎ直そうとし続ける。**画面には何も
+      // 出ない**ので、`ps` を見るまで気づけない
+      gracefulShutdown: { signal: 'SIGTERM', timeout: 5_000 },
     },
   ],
 })
