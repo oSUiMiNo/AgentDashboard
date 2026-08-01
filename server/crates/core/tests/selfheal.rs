@@ -615,6 +615,75 @@ async fn 設定で止めていれば検知しても修復に進まない() {
     assert_eq!(ops.calls(), Vec::<String>::new(), "止めているのに動いた");
 }
 
+/// 配ったバイナリで動いている PC（設計§10-2・テスト計画F7）。
+///
+/// リポジトリも Docker も無いので直せない。**それでも検知は動き続ける**——止めて
+/// しまうと、フォーマットが変わったあと構造化ビューだけが黙って死んだままになり、
+/// 利用者からは「なぜか履歴が出ない」としか見えない。
+mod ソースの無い環境 {
+    use super::*;
+    use protocol::ws::{SelfhealPhase, ServerMessage};
+
+    /// 検知が発火するまで待ち、そのとき届いた自己修復の知らせを返す。
+    async fn 検知させて知らせを受け取る(name: &str) -> (common::TestServer, String) {
+        let dir = work_dir(name);
+        // 版を渡すのは、別名表の見直し（第2系統）が起きないことまで見るため
+        let server = TestServer::start_without_selfheal_ops(config_for(&dir), "9.9.9").await;
+        let mut events = common::EventWatcher::attach(&server.manager);
+        let (_session, transcript) = start_watched(&server, &dir).await;
+
+        append_records(&transcript, 3, "9.9.9", 0);
+
+        let message = events
+            .wait_for("自己修復の知らせ", |message| {
+                matches!(message, ServerMessage::Selfheal { .. })
+            })
+            .await;
+        let ServerMessage::Selfheal { phase, detail } = message else {
+            unreachable!("Selfheal だけを待っている");
+        };
+        assert_eq!(
+            phase,
+            SelfhealPhase::Failed,
+            "直せないことは失敗として伝える"
+        );
+        (server, detail.unwrap_or_default())
+    }
+
+    #[tokio::test]
+    async fn 直せなくても検知は動き次の一手を伝える() {
+        // 「修復に失敗しました」で終わると、利用者は何をすればいいのか分からない。
+        // この PC で打てる手は**新しいバイナリを取ってくる**ことなので、そう書く
+        let (_server, detail) = 検知させて知らせを受け取る("no-ops").await;
+        assert!(
+            detail.contains("パーサの更新が必要"),
+            "次の一手が書かれていない: {detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn 修復セッションは起こさない() {
+        // 直せない環境で修復に進むと、無い cargo と無いリポジトリを相手に暴れる。
+        // 起きてはいけないことなので、時間を置いて「起きていない」ことを見る
+        let (server, _detail) = 検知させて知らせを受け取る("no-ops-quiet").await;
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert!(
+            server
+                .manager
+                .list()
+                .iter()
+                .all(|meta| !meta.project.0.contains("worktree")),
+            "直せない環境で修復セッションが起動した"
+        );
+    }
+
+    // 「同じ断りを繰り返さない」ことは実装側にある（`unavailable_notified` と、直前と
+    // 同じ知らせを黙る仕組みの2枚）。ここでは機械にしていない——この訓練台では検知を
+    // 2回起こせず、**抑制を両方外しても通ってしまう**テストになる。落ちないテストは
+    // 「守られている」という誤解だけを残すので、置かないほうがよい（ガイドライン
+    // 「テストが『たまたま通っている』ことに気づく」）。
+}
+
 #[tokio::test]
 async fn 差し替えたパーサが悪ければ自動で戻す() {
     // テスト計画フェーズ7「ロールバック」。直したつもりが悪化していた場合、

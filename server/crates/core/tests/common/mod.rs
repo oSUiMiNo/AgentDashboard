@@ -166,6 +166,35 @@ impl TestServer {
         .await
     }
 
+    /// 外の世界へ出る手立てを**持たせずに**自己修復を立ち上げる（設計§10-2）。
+    ///
+    /// 配ったバイナリで動いている PC がこれにあたる——リポジトリも Docker も無いので
+    /// 直せないが、**検知は動き続ける**。`cli_version` を渡せるようにしてあるのは、
+    /// 別名表の見直し（第2系統）が起きないことまで確かめるため。空文字だと
+    /// 「比べる相手が無い」という別の理由で起きなくなり、検証にならない。
+    pub async fn start_without_selfheal_ops(config: Config, cli_version: &str) -> Self {
+        // 差し替えは起きない環境なので、パーサの場所は**環境変数で名指しする**。
+        // ポインタ経由にすると、それを書き忘れたときにパーサが見つからず、
+        // 「検知が動かない」を「直せないので動かない」と読み違えることになる（実際に踏んだ）
+        let mut server = Self::build_with(
+            config,
+            fake_claude().to_string_lossy().into_owned(),
+            true,
+            true,
+            None,
+        )
+        .await;
+        server.selfheal = Some(agent_core::selfheal::Selfheal::start(
+            Arc::clone(&server.manager),
+            Arc::clone(server.parser.as_ref().expect("パーサを起動している")),
+            Arc::new(server.config.agent()),
+            None,
+            cli_version.to_string(),
+        ));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        server
+    }
+
     /// 起動する CLI を明示して自己修復も立ち上げる（実CLIの訓練用）。
     pub async fn start_with_selfheal_and_program(
         config: Config,

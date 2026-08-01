@@ -303,8 +303,12 @@ pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::R
             manager.program().to_string(),
         )) as Arc<dyn selfheal::ops::SelfhealOps>),
         None => {
+            // **ここでは画面へ出さない**（設計§25 読み替え3）。パースは正常なのに
+            // 起動しただけで縮退バナーが出ると、配ったバイナリでは出っぱなしになる。
+            // 伝えるのは実際に検知が発火したとき
             tracing::warn!(
-                "ダッシュボード自身のソースが見つかりません。自己修復は検知の通知だけになります"
+                "ダッシュボード自身のソースが見つかりません。自己修復は検知の通知だけになります\
+                 （パーサの更新が要るときは画面に出ます）"
             );
             None
         }

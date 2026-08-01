@@ -337,13 +337,16 @@ async fn run_cycle(selfheal: &Arc<Selfheal>, trigger: Trigger) {
         return;
     }
     let Some(ops) = selfheal.ops.clone() else {
+        // 配ったバイナリで動いている PC（設計§10-2）。**検知は動かし続け、直せない
+        // ことだけを伝える。** 利用者が打てる手は「新しいバイナリを取ってくる」なので、
+        // 「修復に失敗しました」ではなく**次の一手**を書く
         if !selfheal.unavailable_notified.swap(true, Ordering::SeqCst) {
             selfheal.notify(
                 SelfhealPhase::Failed,
-                Some(
-                    "修復にはダッシュボード自身のソースと Docker が要ります。検知のみ行いました"
-                        .to_string(),
-                ),
+                Some(format!(
+                    "パーサの更新が必要です。この PC では直せません\
+                     （ダッシュボード自身のソースと Docker が要ります）。{reason}"
+                )),
             );
         }
         return;
