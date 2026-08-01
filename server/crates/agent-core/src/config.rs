@@ -274,9 +274,15 @@ impl AgentConfig {
         Self::from_toml_str(&text).map_err(|err| anyhow::anyhow!("{}: {err}", path.display()))
     }
 
-    /// TOML 文字列から読み、**環境変数で上書きする**（§14-1・§20-2）。
-    pub fn from_toml_str(text: &str) -> anyhow::Result<Self> {
-        let mut table: toml::Table = toml::from_str(text)?;
+    /// 全キーと、その値の形。
+    ///
+    /// 未指定が既定のキー（`Option`）は既定値の表から消えてしまうので、**全部を
+    /// 埋めた見本**から取り出す。ここが漏れるとそのキーだけ環境変数で設定できなくなる
+    /// ——それを見つけるのが `全キーが環境変数で上書きできる` のテスト。
+    ///
+    /// **配るのはこちら側**（設計§14-3）。手元では `agent.toml` を置けばよいが、
+    /// 配った先では環境変数しか渡せない場面がある（サービスとして常駐させる等）。
+    fn key_shapes() -> Vec<(String, toml::Value)> {
         let probe = Self {
             selfheal_repo_dir: Some(PathBuf::from("/probe")),
             state_dir: Some(PathBuf::from("/probe")),
@@ -286,8 +292,13 @@ impl AgentConfig {
             agent_name: Some("probe".to_string()),
             ..Self::default()
         };
-        let shapes = env::shapes_of(&probe).map_err(|err| anyhow::anyhow!(err))?;
-        env::apply(&mut table, &shapes, &[]).map_err(|err| anyhow::anyhow!(err))?;
+        env::shapes_of(&probe).expect("既定値を TOML へ変換できること")
+    }
+
+    /// TOML 文字列から読み、**環境変数で上書きする**（§14-1・§20-2）。
+    pub fn from_toml_str(text: &str) -> anyhow::Result<Self> {
+        let mut table: toml::Table = toml::from_str(text)?;
+        env::apply(&mut table, &Self::key_shapes(), &[]).map_err(|err| anyhow::anyhow!(err))?;
 
         // 表へ起こしてから読み直しても `deny_unknown_fields` は効く。打ち間違いを
         // 黙って無視しないという約束は保たれている
@@ -417,6 +428,86 @@ mod tests {
         // 打ち間違いを黙って無視すると「設定したのに効かない」事故になる
         assert!(AgentConfig::from_toml_str("coalesce_ms = 8").is_ok());
         assert!(AgentConfig::from_toml_str("coalesce_mss = 8").is_err());
+    }
+
+    /// そのキーへ入れて意味のある値（既定と必ず違うもの）。
+    fn probe_value(shape: &toml::Value) -> String {
+        match shape {
+            toml::Value::Integer(_) => "4242".to_string(),
+            // 既定の逆を入れる。同じ値だと「上書きが効いた」ことにならない
+            toml::Value::Boolean(value) => (!value).to_string(),
+            _ => "/tmp/env-probe".to_string(),
+        }
+    }
+
+    #[test]
+    fn 全キーが環境変数で上書きできる() {
+        // **配るのはこちら側**（設計§14-3）。手元なら `agent.toml` を置けばよいが、
+        // 配った先では環境変数しか渡せない場面がある（サービスとして常駐させる等）。
+        // 1つでも対応していないキーがあると「そのキーだけ設定できない」という、
+        // 配ってからでないと気づけない穴になる。
+        //
+        // **キーの一覧を手で持たない**のが要点。実装（`AgentConfig`）から取り出して
+        // いるので、今後キーを増やしてもこのテストは自動でそれを見る
+        let shapes = AgentConfig::key_shapes();
+
+        // ただし「未指定が既定」のキーは、見本（`key_shapes` の probe）を埋め忘れると
+        // 一覧そのものから消え、**この繰り返しの目にも入らない**。繋ぐための3キーは
+        // 落ちると配った PC が一切繋がらなくなるので、名指しでも見る（§21 読み替え8）
+        for required in ["server_url", "pairing_token", "hook_port"] {
+            assert!(
+                shapes.iter().any(|(key, _)| key == required),
+                "{required} が一覧に居ません。key_shapes の見本を埋め忘れています"
+            );
+        }
+
+        for (key, shape) in shapes {
+            let name = format!("AGENTDASHBOARD_{}", key.to_uppercase());
+            let raw = probe_value(&shape);
+            unsafe { std::env::set_var(&name, &raw) };
+
+            let config = AgentConfig::from_toml_str("")
+                .unwrap_or_else(|err| panic!("{key} を環境変数で指定したら読めなくなった: {err}"));
+            let toml::Value::Table(written) =
+                toml::Value::try_from(config).expect("TOML へ変換できること")
+            else {
+                unreachable!("AgentConfig は構造体なのでテーブルになる");
+            };
+            let expected = env::parse_value(&key, &raw, &shape).expect("読めること");
+            assert_eq!(
+                written.get(&key),
+                Some(&expected),
+                "{key} が環境変数で上書きされていない"
+            );
+
+            unsafe { std::env::remove_var(&name) };
+        }
+    }
+
+    #[test]
+    fn 環境変数はファイルより強い() {
+        // 設定ファイルを置いた PC へ、環境変数だけで別の値を渡せること
+        unsafe { std::env::set_var("AGENTDASHBOARD_HOOK_PORT", "9100") };
+        let config = AgentConfig::from_toml_str("hook_port = 8787").expect("読めること");
+        assert_eq!(config.hook_port, 9100);
+        unsafe { std::env::remove_var("AGENTDASHBOARD_HOOK_PORT") };
+    }
+
+    #[test]
+    fn 環境変数の型が合わなければ理由を出して断る() {
+        // 素通しして「設定したのに効かない」になるより、その場で断るほうがよい
+        unsafe { std::env::set_var("AGENTDASHBOARD_HOOK_PORT", "きゅうせん") };
+        let err = AgentConfig::from_toml_str("").expect_err("値エラーになること");
+        let message = err.to_string();
+        assert!(
+            message.contains("hook_port"),
+            "どのキーか分かること: {message}"
+        );
+        assert!(
+            message.contains("整数"),
+            "何を期待したか分かること: {message}"
+        );
+        unsafe { std::env::remove_var("AGENTDASHBOARD_HOOK_PORT") };
     }
 
     #[test]
