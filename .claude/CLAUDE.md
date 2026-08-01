@@ -75,7 +75,11 @@ issue-sync は、ユーザーが行うので不要。必要かどうかユーザ
 | `server/crates/server-core/src/gateway.rs` | エージェントの受け口（`/agent/ws`）。版交渉・トークン照合・帰属の決定。ブラウザ向けの指示を A2S へ中継する `RemoteAgent` もここ |
 | `server/crates/agent-core/src/link.rs` | PC からサーバへ繋ぐ側。履歴を束ねて送り、**ack が返ってから位置を進める**（設計§6-1） |
 | `server/crates/agent-core/src/offsets.rs` | 「どこまで読んだか」の置き場所。**読む側（パーサ）と進める側（運び手）で共有する** |
-| `server/crates/agent/src/main.rs` | PC 側エージェントの実行ファイル。フックの受信口を自分で開く（設計§5-3） |
+| `server/crates/agent/src/lib.rs` | PC 側エージェントの中身。フックの受信口を自分で開く（設計§5-3）。**実行ファイルは `crates/dist` が持つ** |
+| `server/crates/dist/` | 利用者へ配る一式。実行ファイル3本の**入口だけ**（各1行）を持つ（§25 読み替え1）。中身を書かないこと |
+| `dist-workspace.toml` ／ `scripts/dist` | 配布物の作り方。**`.github/workflows/release.yml` は `dist generate` が作る**ので手で書き換えない |
+| `.github/workflows/build-setup.yml` | CI のビルド前に差し込む手順（web の焼き込み）。**こちらは手で書く**。`working-directory:` は使えない（§25 読み替え6） |
+| `docs/setup/` ／ `docs/proxy/` | 手順書4種と、前段の設定。**`docs/proxy/` は compose が実際にマウントする実物**（§25 読み替え4） |
 | `server/agent.toml.example` | エージェント単体の設定の雛形。**接続の3キーと hook_port はこちらにだけ置く**（§21 読み替え8） |
 | `server/crates/core/src/local.rs` | 両者を1プロセスで束ねる配線（`server_core::agent::AgentHost` のローカル実装） |
 | `server/crates/core/src/config.rs` | `config.toml` の読み込みと、両側への射影（設計§12・セルフホスト化設計§13-2） |
@@ -88,7 +92,8 @@ issue-sync は、ユーザーが行うので不要。必要かどうかユーザ
 | `server/config.toml.example` | 設定の雛形。**全キーが `AGENTDASHBOARD_<キー>` で上書きできる**（設計§14-1） |
 | `docker/compose.test.yml` ／ `scripts/test-compose` | 永続化層を PostgreSQL に対しても流す（`make test-compose`）。**新しい DB テストは両方へ通す** |
 | `docker/compose.yml` ／ `docker/Dockerfile.server` | セルフホストの本番構成。イメージへ入れるのは `make build` が作った実行ファイル1本だけ |
-| `docker/compose.e2e.yml` ／ `scripts/e2e-compose` | サーバ2台＋PostgreSQL＋Valkey をブラウザで通す（`make e2e-compose`）。**ブラウザ→A・PC→B の配置でしか出ない壊れ方**を捕まえる |
+| `docker/compose.e2e.yml` ／ `scripts/e2e-compose` | サーバ2台＋PostgreSQL＋Valkey＋前段（Caddy・nginx）をブラウザで通す（`make e2e-compose`）。**ブラウザ→A・PC→B の配置でしか出ない壊れ方**を捕まえる |
+| `server/crates/dist/tests/artifacts.rs` ／ `guides.rs` | 配布物の顔ぶれと、手順書が名指ししているものの実在。**配ってからしか気づけない失敗**を `make ci` で捕まえる |
 | `fixtures/` | ゴールデンフィクスチャ（自己修復のテストゲートを兼ねる）・端末録画（`.cast`）・画面のゴールデン（`.screen`） |
 | `server/crates/agent-core/tests/screen_golden.rs` | 録画から描いた画面のゴールデン比較。作り直すのは `AGENTDASHBOARD_UPDATE_SCREEN_GOLDEN=1`。**作り直したら必ず `scripts/sanitize-fixtures.py` を通す** |
 | `scripts/e2e-remote` ／ `web/e2e/remote.spec.ts` | セルフホスト構成（サーバ＋エージェント）の E2E。**ローカルモードでは画面配信の経路を通らない**ので、実物のブラウザで確かめるのはここだけ |
