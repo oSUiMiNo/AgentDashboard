@@ -50,7 +50,7 @@ github-build-setup = "build-setup.yml"
 # **自動の拾い上げは切る**——入れるものをこの1行で読み切れるようにするため
 # （切らないと同じ README が2回入る）
 auto-includes = false
-include = ["README.md"]
+include = ["README.md", "docs/setup"]
 
 # 自動更新の道具は入れない。更新の仕組みは持ち越し（設計§16-2）で、入れると
 # 「更新できると書いてあるのに更新されない」ことになる
