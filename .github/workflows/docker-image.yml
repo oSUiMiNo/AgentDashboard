@@ -1,0 +1,118 @@
+# セルフホストのサーバを箱（コンテナイメージ）としても配る（設計§14-1・§26 読み替え2）。
+#
+# # なぜ要るのか
+#
+# 手順書の道②は「献立表を1枚取ってきて `docker compose up -d`」だが、**箱がどこにも
+# 置いていないと Docker は自分で作ろうとして失敗する**（材料＝ソースを持っているのは
+# 開発者だけ）。検収条件「`docker compose up -d` で起動し、ブラウザからログインできる」は、
+# これが無いと開発者の立場でしか成立しない。
+#
+# # 中でビルドしない
+#
+# 入れるのは**リリースに上がった実行ファイルそのもの**。作り直すと「配ったもの」と
+# 「箱の中身」が別々にビルドされた2つになり、片方だけ壊れる余地ができる。
+# ここで取ってくるのは `dist` が作った成果物で、利用者がダウンロードするものと同一。
+#
+# # 呼ばれ方
+#
+# `dist-workspace.toml` の `publish-jobs` から**再利用ワークフロー**として呼ばれる。
+# `release.yml` を手で書き換えないのはこのため（書き換えても次の生成で黙って戻る。
+# §25-1 の約束）。権限は `github-custom-job-permissions` で足している——呼び出し側が
+# 渡す以上の権限は取れないので、あちらに書かないと push で 403 になる。
+
+name: Docker image
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+jobs:
+  docker-image:
+    name: 箱を作って棚へ置く
+    runs-on: ubuntu-22.04
+    env:
+      PLAN: ${{ inputs.plan }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      # 箱の作り方（`docker/Dockerfile.server`）だけが要る。ソースはビルドに使わない
+      - name: 配布物を取ってくる
+        uses: actions/download-artifact@v8
+        with:
+          pattern: artifacts-*
+          path: artifacts/
+          merge-multiple: true
+
+      - name: リリースした実行ファイルを箱へ入れる場所に置く
+        run: |
+          set -euo pipefail
+          archive="artifacts/agentdashboard-x86_64-unknown-linux-gnu.tar.xz"
+          if [[ ! -f "${archive}" ]]; then
+            echo "::error::linux のアーカイブがありません: ${archive}" >&2
+            ls -la artifacts/ >&2
+            exit 1
+          fi
+          mkdir -p extracted
+          tar -xJf "${archive}" -C extracted
+          # アーカイブの中の並びに依存しない。**先頭のディレクトリが付く形へ変わっても
+          # 黙って壊れない**ようにする
+          found="$(find extracted -type f -name agentdashboard | head -1)"
+          if [[ -z "${found}" ]]; then
+            echo "::error::アーカイブに agentdashboard が入っていません" >&2
+            find extracted -type f >&2
+            exit 1
+          fi
+          # `docker/Dockerfile.server` が見に行く場所。**Dockerfile は無改修**にして
+          # 「ここに置いてあるものを入れる」という1つの決まりを保つ
+          mkdir -p server/target/release
+          cp "${found}" server/target/release/agentdashboard
+          chmod +x server/target/release/agentdashboard
+
+      - name: 名前と版を決める
+        id: name
+        run: |
+          set -euo pipefail
+          # 版は配布物と同じもの。献立表（`docker/compose.yml`）が固定して書いている値と
+          # 一致することは `make ci` が見ている
+          version="$(jq -r '.releases[0].app_version' <<< "${PLAN}")"
+          prerelease="$(jq -r '.announcement_is_prerelease' <<< "${PLAN}")"
+          # **棚の名前は小文字しか受け付けない。** 持ち主の名前に大文字が混ざっていると
+          # push だけが失敗する（ビルドまでは通るので気づきにくい）
+          owner="$(tr '[:upper:]' '[:lower:]' <<< "${GITHUB_REPOSITORY_OWNER}")"
+          echo "image=ghcr.io/${owner}/agentdashboard" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
+
+      - name: 箱を作る
+        run: |
+          set -euo pipefail
+          docker build \
+            -f docker/Dockerfile.server \
+            -t "${{ steps.name.outputs.image }}:${{ steps.name.outputs.version }}" \
+            .
+
+      # **作った箱を実際に起こす。** 土台（debian）と実行ファイルの作られた環境で
+      # OS の共通部品の版がずれると、ビルドは通るのに**起動した瞬間に動かない**。
+      # 配ってからでは原因が読めない類の壊れ方なので、ここで即死させる
+      - name: 起こしてみる
+        run: |
+          set -euo pipefail
+          docker run --rm "${{ steps.name.outputs.image }}:${{ steps.name.outputs.version }}" --version
+
+      - name: 棚へ置く
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          image="${{ steps.name.outputs.image }}"
+          version="${{ steps.name.outputs.version }}"
+          docker push "${image}:${version}"
+          # 事前版に `latest` を付けない。**取り直しただけで試験版へ上がる**ことになる
+          if [[ "${{ steps.name.outputs.prerelease }}" == "false" ]]; then
+            docker tag "${image}:${version}" "${image}:latest"
+            docker push "${image}:latest"
+          fi

@@ -46,6 +46,15 @@ install-path = "~/.local/bin"
 # パスは `.github/workflows/` からの相対
 github-build-setup = "build-setup.yml"
 
+# セルフホストのサーバを箱（コンテナイメージ）としても配る（設計§26 読み替え2）。
+# 実体は `.github/workflows/docker-image.yml`。**中でビルドし直さず**、ここで作った
+# 実行ファイルをそのまま入れるので、配ったものと箱の中身が同一になる。
+#
+# 権限は別途足す必要がある。**呼び出し側が渡す以上の権限は取れない**ので、
+# 呼ばれる側にだけ書いても push が 403 になる
+publish-jobs = ["./docker-image"]
+github-custom-job-permissions = { "docker-image" = { contents = "read", packages = "write" } }
+
 # アーカイブに入れる読み物。手順はここから辿れる。
 # **自動の拾い上げは切る**——入れるものをこの1行で読み切れるようにするため
 # （切らないと同じ README が2回入る）

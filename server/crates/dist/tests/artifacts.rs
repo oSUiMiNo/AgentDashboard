@@ -32,6 +32,16 @@ const TARGETS: &[&str] = &[
     "x86_64-unknown-linux-gnu",
 ];
 
+/// 利用者が取ってくる献立表（設計§26 読み替え2）。
+const COMPOSE: &str = "docker/compose.yml";
+
+/// 棚に置く箱の名前。
+///
+/// **リポジトリの持ち主から機械的に決まる**（`.github/workflows/docker-image.yml` が
+/// 持ち主の名前を小文字にして組み立てる）。引っ越したら両方を一緒に直すことになるので、
+/// 片方だけ直したことに気づけるよう、ここに全部書いておく。
+const IMAGE: &str = "ghcr.io/osuimino/agentdashboard";
+
 #[test]
 fn どのアーカイブにも実行ファイルが3本とも入っている() {
     // パーサは `agentdashboard` と `agentdashboard-agent` の**どちらの隣にも**居る
@@ -106,6 +116,48 @@ fn 生成済みのワークフローが設定と食い違っていない() {
     );
 }
 
+#[test]
+fn 献立表は配る箱を版ごと名指ししている() {
+    // 版を上げると、箱の版と献立表が食い違いうる。食い違っても**献立表は動く**
+    // （古い箱がまだ棚にあるので立つ）ため、症状が出ない。出るのは
+    // 「直したはずの不具合が直っていない」という形で、原因まで辿れない。
+    //
+    // あわせて `latest` に戻っていないことも見ている。あちらは取り直しただけで
+    // 記録の表の形が上がり、**戻す道が無い**
+    let text = without_comments(&compose());
+    let expected = format!("image: {IMAGE}:{}", env!("CARGO_PKG_VERSION"));
+    assert!(
+        text.contains(&expected),
+        "献立表が指す箱がワークスペースの版と食い違っています。期待: {expected}"
+    );
+}
+
+#[test]
+fn 献立表はソースからビルドしない() {
+    // `build:` があると、箱が手元に無いとき Docker は**自分で作ろうとする**。
+    // 材料（ソース）を持っているのは開発者だけなので、献立表1枚だけ取ってきた
+    // 利用者はそこで詰まる。検収「`docker compose up -d` で起動」が
+    // 開発者の立場でしか成立しなくなる（実際にそうなっていた）
+    let text = without_comments(&compose());
+    assert!(
+        !text.contains("build:"),
+        "本番の献立表にソースからのビルドが残っています（利用者はソースを持っていません）"
+    );
+}
+
+/// 献立表の中身。
+fn compose() -> String {
+    std::fs::read_to_string(repo_root().join(COMPOSE)).expect("献立表を読めること")
+}
+
+/// 注釈を落とす。**説明のために書いた語**を仕様と読み違えないため。
+fn without_comments(text: &str) -> String {
+    text.lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// 予定の一覧を JSON で取る。
 fn plan() -> Value {
     let output = dist(&["plan", "--output-format=json"]);
@@ -130,15 +182,20 @@ fn archives(plan: &Value) -> Vec<(&str, &Value)> {
     found
 }
 
-/// リポジトリのルートで `dist` を動かす。設定はそこに置いてある（§25 読み替え5）。
-fn dist(args: &[&str]) -> std::process::Output {
-    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+/// リポジトリのルート。
+fn repo_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(3)
-        .expect("crates/dist から3つ上がリポジトリのルート");
+        .expect("crates/dist から3つ上がリポジトリのルート")
+        .to_path_buf()
+}
+
+/// リポジトリのルートで `dist` を動かす。設定はそこに置いてある（§25 読み替え5）。
+fn dist(args: &[&str]) -> std::process::Output {
     std::process::Command::new("dist")
         .args(args)
-        .current_dir(repo_root)
+        .current_dir(repo_root())
         .output()
         .unwrap_or_else(|err| {
             panic!("dist を実行できません（cargo は scripts/cargo 経由で呼んでいますか）: {err}")
