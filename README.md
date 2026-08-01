@@ -1,5 +1,7 @@
 # AgentDashboard
-複数プロジェクト・複数セッションの Claude Code を一望する、個人用の司令塔ダッシュボード。ローカルで動く Web アプリとして提供し、ブラウザから閲覧・操作する。
+複数プロジェクト・複数セッションの Claude Code を一望する、個人用の司令塔ダッシュボード。Web アプリとして提供し、ブラウザから閲覧・操作する。
+
+自分の PC 1台で完結させることも、サーバを1台立てて**複数の PC を集める**こともできる。後者なら、外出先のスマホから家の PC のセッションを見て操作できる。
 
 ---
 <br/>
@@ -40,13 +42,14 @@ AgentDashboard は**その両方を同時に成立させる**ことを目的に�
 <br/>
 
 ## 前提
-| 要るもの | 用途 |
+使うだけなら、要るのは**本物の `claude` と認証**だけ。ダッシュボードが PTY 上で起動する対象そのものなので、動かす機械に入っている必要がある。
+
+そのうえで、次の2つは「あると効く」もの。
+
+| もの | 何のために |
 |---|---|
-| Docker | Rust ツールチェーン一式。**ホストには入れない**方針で、コンテナに隔離してある |
-| Node.js（npm） | フロントエンドのビルドとテスト。ホストのものをそのまま使う |
-| 本物の `claude` と認証 | ダッシュボードが PTY 上で起動する対象。ホストに入っていること |
-| Git | 自己修復が worktree を作るために使う |
-| **本リポジトリのソース一式** | 自己修復はここのパーサを書き換えてビルドし直す。**ソースの無い場所へバイナリだけ置くと、検知はするが修復には進まない**（通知のみに縮退する） |
+| Docker | セルフホスト（サーバを1台立てて複数の PC を集める使い方）。`docker compose up -d` で立つ |
+| **本リポジトリのソース一式**＋Docker＋Git | 自己修復。パーサを書き換えてビルドし直すので、**ソースの無い場所へバイナリだけ置くと検知の通知だけになる**（[既知の制約](#配布したバイナリでは自己修復が検知だけになる)） |
 
 動作を確認しているのは Linux（WSL2 上の Ubuntu 24.04）。
 
@@ -55,6 +58,25 @@ AgentDashboard は**その両方を同時に成立させる**ことを目的に�
 <br/>
 
 ## セットアップ
+```
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/oSUiMiNo/AgentDashboard/releases/latest/download/agentdashboard-installer.sh | sh
+agentdashboard
+```
+
+ブラウザで **http://127.0.0.1:8787** を開く。`~/.local/bin` へ3つ入る——ローカル用の `agentdashboard`、PC 側エージェントの `agentdashboard-agent`、履歴を読む `transcript-parser`。**3つは隣同士に置いたままにすること**（互いを隣で探す）。
+
+使い方は目的で分かれる。
+
+| したいこと | 読むもの |
+|---|---|
+| 自分の PC 1台で使う | [ローカルで使う](docs/setup/local.md) |
+| サーバを立てて複数の PC を集める | [セルフホストで使う](docs/setup/selfhost.md) |
+| PC をサーバへ繋ぐ | [ペアリング](docs/setup/pairing.md) |
+| インターネットから使う（TLS） | [リバースプロキシ](docs/setup/reverse-proxy.md) |
+
+### ソースから建てる
+自己修復を動かすならこちら（開発するときも同じ）。
+
 ```
 git clone https://github.com/oSUiMiNo/AgentDashboard.git
 cd AgentDashboard
@@ -65,8 +87,6 @@ make build                          # web をビルド → 単一バイナリへ
 
 ./server/target/release/agentdashboard
 ```
-
-起動したらブラウザで **http://127.0.0.1:8787** を開く。
 
 `config.toml` は**リポジトリルート**（＝起動時のカレントディレクトリ）から読む。別の場所を使うなら `--config <パス>` で指定する。
 
@@ -256,8 +276,15 @@ Claude Code のバージョンが上がると、ダッシュボードは2つを�
 ## 既知の制約
 道具として使う前に知っておいたほうがよいものを挙げる。
 
-### core を再起動すると全セッションが終了する
-claude の PTY はダッシュボードの子プロセスなので、サーバを落とすと道連れになる。**サーバは落とさない運用**が前提。セッションをサーバから切り離す構成（session-host 分離）は次フェーズの課題。
+### ローカルモードでは、再起動すると全セッションが終了する
+claude の PTY はダッシュボードの子プロセスなので、落とすと道連れになる。**落とさない運用**が前提。
+
+セルフホストでは事情が変わる。PTY を持っているのは PC 側のエージェントなので、**ダッシュボードサーバは何度落としても、走っている Claude Code は死なない**。道連れになるのはエージェントを落としたときだけ。
+
+### 配布したバイナリでは自己修復が検知だけになる
+自己修復は、ダッシュボード自身のソースと Docker を使ってパーサを直す。ワンライナーで入れた PC にはどちらも無いので、そこでは**直せない**。
+
+止まるのは直す工程だけで、**検知は動き続ける**。フォーマットが変わると「パーサの更新が必要です」と画面に出るので、新しい版を入れ直す。黙って構造化ビューが死ぬよりはよい、という割り切り。
 
 ### 初回起動でカナリアが1回だけ走る
 自己修復は「知らない版を初めて見たらサンプルを採って確かめる」作りになっている。対応表が空の初回起動では、**いま使っている版すら「知らない版」**なので、`canary_model`（既定 haiku）で claude が1回起動し、アカウントのクォータを1回分使う。想定どおりの動作だが、初めて起動すると唐突に見える。避けたければ `selfheal_enabled = false` にする。
@@ -310,17 +337,22 @@ rm   ~/.local/state/agentdashboard/parser-current   # 同梱のパーサへ戻�
 
 ### コマンド
 ```
-make setup     初回セットアップ（Docker イメージ・npm・Playwright の chromium）
-make dev       開発時の進め方を表示する（core と Vite を別々の端末で動かす）
-make test      Rust と Web のテスト（課金なし。擬似 claude を相手にする）
-make test-cli  実CLI統合テスト（★本物の claude が起動し、クォータを消費する）
-make e2e       ブラウザからの通し確認（Playwright / 擬似 claude 相手・課金なし）
-make perf      性能の実測値を採る（合否ではなく記録用）
-make lint      rustfmt / clippy / tsc / oxlint
-make build     web ビルド → 単一バイナリ
-make ci        lint → test → build を通しで
-make fixtures  ゴールデンフィクスチャの採取と匿名化
-make clean     ビルド成果物と自己修復の作業場所を消す
+make setup        初回セットアップ（Docker イメージ・npm・Playwright の chromium）
+make dev          開発時の進め方を表示する（core と Vite を別々の端末で動かす）
+make test         Rust と Web のテスト（課金なし。擬似 claude を相手にする）
+make test-cli     実CLI統合テスト（★本物の claude が起動し、クォータを消費する）
+make e2e          ブラウザからの通し確認（Playwright / 擬似 claude 相手・課金なし）
+make perf         性能の実測値を採る（合否ではなく記録用）
+make lint         rustfmt / clippy / tsc / oxlint
+make build        web ビルド → 単一バイナリ
+make ci           lint → test → build を通しで
+make fixtures     ゴールデンフィクスチャの採取と匿名化
+make clean        ビルド成果物と自己修復の作業場所を消す
+
+  docker が要るもの（CI の既定には入れていない）
+make test-compose  永続化層を PostgreSQL に対しても流す
+make e2e-compose   サーバ2台＋PostgreSQL＋Valkey をブラウザで通す（前段の Caddy・nginx も）
+make dist-local    手元の OS 向けの配布アーカイブを1つ作る
 ```
 
 `make test` は本物の claude を起動しない。**擬似 claude**（`server/crates/testkit`）を相手にすることで、フックの注入から状態機械・WebSocket・画面までを課金なしで毎回通せるようにしてある。本物を相手にするのは `make test-cli` だけで、こちらは `#[ignore]` 付きなので明示的に叩いたときにしか走らない。
@@ -328,14 +360,22 @@ make clean     ビルド成果物と自己修復の作業場所を消す
 ### 構成
 ```
 server/                Cargo workspace
-  crates/core/           セッション管理・フック受信・状態機械・WebSocket・自己修復・静的配信
+  crates/agent-core/       PC 側の一式。PTY・フック受信・状態導出・パース・自己修復
+  crates/server-core/      ブラウザ配信。WebSocket・REST・DB・アカウント・連絡係
+  crates/core/             両者を1プロセスで束ねる配線（ローカルモード）と CLI
+  crates/agent/            PC 側エージェントの中身
   crates/transcript-parser/  JSONL → 表示用ツリー。**自己修復が唯一書き換えてよい範囲**
-  crates/protocol/       サーバ・フロント・パーサが共有する型
-  crates/testkit/        フック受信モックと擬似 claude
+  crates/protocol/         サーバ・フロント・パーサが共有する型
+  crates/dist/             配る一式。実行ファイル3本の入口だけを持つ
+  crates/testkit/          フック受信モックと擬似 claude
 web/                   React 19 + TypeScript + Vite + Tailwind v4
+docs/                  セットアップの手順書と、前段（Caddy・nginx）の設定
+docker/                隔離ビルド用イメージと compose 一式
 fixtures/              ゴールデンフィクスチャ（自己修復のテストゲートを兼ねる）
-scripts/               cargo ラッパー・フィクスチャ採取・匿名化
+scripts/               cargo・dist のラッパー、フィクスチャ採取・匿名化
 ```
+
+**PTY を持つのは `agent-core` だけ、DB と連絡係を持つのは `server-core` だけ。** この線はコンパイラが守っており、破れていないことを `crates/core/tests/dependencies.rs` が機械で見ている。
 
 パーサを別プロセスに切り出しているのは自己修復のためだ。「フォーマットが変わったらパーサを直して差し替える」が成立するには、**直す対象**と**動き続けなければならないもの**（PTY 上の生きたセッション）がプロセスとして分かれている必要がある。
 
@@ -353,11 +393,14 @@ scripts/               cargo ラッパー・フィクスチャ採取・匿名化
 
 | パス | 中身 |
 |---|---|
+| `docs/setup/` | セットアップの手順書4種（ローカル・セルフホスト・ペアリング・リバースプロキシ） |
+| `docs/proxy/` | Caddy と nginx の設定。**検証で実際に読ませているファイルそのもの** |
 | `.claude/CLAUDE.md` | プロジェクトの概要と品質ガイドライン |
 | `.claude/docs/guideline.md` | 「この場面ではこうする」という約束事 |
 | `.claude/docs/knowledge/` | 開発環境・ツールチェーン・依存バージョン方針 |
 | `fixtures/README.md` | ゴールデンフィクスチャの採取と匿名化 |
-| `server/config.toml.example` | 設定の全キー |
+| `server/config.toml.example` | ダッシュボード側の設定の全キー |
+| `server/agent.toml.example` | PC 側エージェントの設定の全キー |
 
 ---
 <br/>

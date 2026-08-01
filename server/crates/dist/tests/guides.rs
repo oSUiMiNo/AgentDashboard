@@ -57,6 +57,33 @@ fn 手順書のリンク先が実在する() {
 }
 
 #[test]
+fn 入口の案内が実在する() {
+    // 入口は README で、そこから手順書へ渡す。**一番見られるところの切れたリンク**は
+    // 一番早く信用を落とすので、同じ検査をこちらにも掛ける
+    let root = repo_root();
+    let text = std::fs::read_to_string(root.join("README.md")).expect("README を読めること");
+
+    for target in link_targets(&text) {
+        if target.starts_with('#') || target.starts_with("http") {
+            continue;
+        }
+        let (file, _anchor) = target.split_once('#').unwrap_or((target.as_str(), ""));
+        let resolved = normalize(&root.join(file));
+        assert!(
+            resolved.exists(),
+            "README のリンク先がありません: {target}（{}）",
+            resolved.display()
+        );
+    }
+    for named in repo_paths(&text) {
+        assert!(
+            root.join(&named).exists(),
+            "README が名指ししているものがありません: {named}"
+        );
+    }
+}
+
+#[test]
 fn 手順書が名指ししているファイルが実在する() {
     // リンクではなく、地の文で `docker/compose.yml` のように名指ししているもの。
     // **名前を変えたときに気づけない**のはこちらのほう（リンクと違って見た目が壊れない）
