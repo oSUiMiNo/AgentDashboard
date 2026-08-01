@@ -219,7 +219,7 @@ impl Selfhost {
                 .expect("使い捨ての DB へ繋げること");
 
         let config = std::sync::Arc::new(server_core::config::ServerConfig::default());
-        let registry = server_core::registry::SessionRegistry::load(db.clone(), 100)
+        let registry = server_core::registry::SessionRegistry::load(db.clone(), 100, None)
             .await
             .expect("記録層を立てられること");
         let auth = server_core::auth::AuthContext::server(db.clone(), &config);

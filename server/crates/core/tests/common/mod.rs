@@ -307,7 +307,7 @@ impl TestServer {
         // 入口の鍵も**本番と同じ組み立て**で作る。テストだけ素通しにすると、
         // 認証を通る経路が一度も踏まれないまま緑になる
         let auth = server_core::auth::AuthContext::local(db.clone(), &server_config);
-        let registry = SessionRegistry::load(db, server_config.transcript_window_nodes)
+        let registry = SessionRegistry::load(db, server_config.transcript_window_nodes, None)
             .await
             .expect("記録層を立てられること");
         // 再開位置は、読む側（パーサの世話役）と進める側（報告の運び手）で共有する。

@@ -43,7 +43,7 @@ async fn harness(label: &str) -> Harness {
     let db = server_core::db::connect(&format!("sqlite://{}", dir.join("dashboard.db").display()))
         .await
         .expect("使い捨ての DB へ繋げること");
-    let registry = SessionRegistry::load(db.clone(), WINDOW)
+    let registry = SessionRegistry::load(db.clone(), WINDOW, None)
         .await
         .expect("記録層を立てられること");
     let offsets = OffsetStore::open(dir.clone());

@@ -22,6 +22,7 @@
 //! 素通しする。真実として残す性質のものではない。
 
 use crate::{
+    bus::{self, Bus},
     db::{self, entity, transcript as db_transcript},
     transcript::TranscriptWindow,
 };
@@ -154,9 +155,14 @@ impl SessionRecord {
         meta
     }
 
+    /// カード情報を入れ替える。**鮮度の印は渡された値に従う。**
+    ///
+    /// 自分の受け口から来た報告は「いま届いた」ので必ず繋がっている（エージェント側が
+    /// `true` を立てて寄越す）。他インスタンスから回ってきたものは向こうの見立てが正で、
+    /// ここで `true` に塗り替えると**切断の知らせが跨いだ瞬間に消える**。
     fn store_meta(&self, meta: SessionMeta) {
+        self.live.store(meta.agent_connected, Ordering::Relaxed);
         *self.meta.lock().expect("ロックが壊れていない") = meta;
-        self.live.store(true, Ordering::Relaxed);
     }
 
     /// 履歴の購読を、いま持っているぶんの取得と**同じロックの中で**始める。
@@ -195,6 +201,18 @@ pub struct SessionRegistry {
     records: Mutex<HashMap<CardId, Arc<SessionRecord>>>,
     events: broadcast::Sender<AccountEvent>,
     window_nodes: usize,
+    /// インスタンスを跨ぐ連絡係（設計§9）。**無ければプロセスの中で完結する**——
+    /// ローカルモードと、インスタンスが1台だけのセルフホストがこれにあたる
+    bus: Option<Arc<dyn Bus>>,
+    /// このインスタンスの通し番号。**自分が出した知らせを自分で取り込まない**ための印
+    instance_id: Uuid,
+    /// アカウントごとの、いま繋がっているブラウザの数。
+    ///
+    /// 0→1 で知らせの購読を開け、1→0 で閉じる（設計§9-2）。**全アカウントを
+    /// まとめて購読しない**のは、そうするとチャネル名でアカウントを分けた意味が
+    /// 無くなるため（§8-6）——他人のチャネルは名前を作れないから購読できない、
+    /// という形が分離の実体になっている
+    browsers: Mutex<HashMap<Uuid, usize>>,
 }
 
 impl SessionRegistry {
@@ -211,6 +229,7 @@ impl SessionRegistry {
     pub async fn load(
         db: DatabaseConnection,
         window_nodes: usize,
+        bus: Option<Arc<dyn Bus>>,
     ) -> Result<Arc<Self>, anyhow::Error> {
         let rows = entity::sessions::Entity::find()
             .filter(entity::sessions::Column::Archived.eq(false))
@@ -259,7 +278,19 @@ impl SessionRegistry {
             records: Mutex::new(records),
             events: broadcast::channel(EVENT_QUEUE_MESSAGES).0,
             window_nodes,
+            bus,
+            instance_id: Uuid::new_v4(),
+            browsers: Mutex::new(HashMap::new()),
         }))
+    }
+
+    /// このインスタンスの通し番号（視聴リースの名乗りにも使う。設計§9-4）。
+    pub fn instance_id(&self) -> Uuid {
+        self.instance_id
+    }
+
+    pub fn bus(&self) -> Option<&Arc<dyn Bus>> {
+        self.bus.as_ref()
     }
 
     /// 一覧の更新通知を購読する。**どのアカウントのぶんかは受け取る側が捨てる。**
@@ -332,11 +363,265 @@ impl SessionRegistry {
     }
 
     /// 一覧の更新を配る。**誰のカードの話かを必ず添える**（設計§8-6）。
+    ///
+    /// 自分のブラウザへ配ってから、連絡係にも流す（設計§9-2）。順序がこうなのは、
+    /// **手元の配信を跨ぎの都合で遅らせない**ため。連絡係が居なければ後半は何もしない。
     fn publish(&self, account_id: Uuid, message: ServerMessage) {
+        self.publish_bus(account_id, &message);
+        self.publish_local(account_id, message);
+    }
+
+    /// このインスタンスの中だけへ配る。
+    ///
+    /// **他インスタンスから回ってきたものはこちらを使う。** `publish` を使うと、
+    /// 受け取ったものをそのまま配り直し、それがまた返ってきて止まらなくなる。
+    fn publish_local(&self, account_id: Uuid, message: ServerMessage) {
         let _ = self.events.send(AccountEvent {
             account_id,
             message,
         });
+    }
+
+    /// 連絡係へ流す（他インスタンスのブラウザ向け）。
+    fn publish_bus(&self, account_id: Uuid, message: &ServerMessage) {
+        let Some(bus) = &self.bus else {
+            return;
+        };
+        bus.publish(
+            &bus::account_events(account_id),
+            bus::encode_json(self.instance_id, message),
+        );
+    }
+
+    /// 他インスタンスから回ってきた知らせを取り込む（設計§9-2）。
+    ///
+    /// # ここでは DB へ書かない
+    ///
+    /// 書いたのは発信元のインスタンスで、真実はもう DB にある。二重に書くと、
+    /// 履歴の通し番号（`seq`）が両方で進んで**並びが飛ぶ**。ここでやるのは、
+    /// このインスタンスのブラウザへ見せるための手元の写しを合わせることだけ。
+    ///
+    /// **持ち主はチャネル名で決まる**（`account_id` は呼び出し側が名前から取る）。
+    /// 封筒の中身を信じると、名前でアカウントを分けた意味が無くなる。
+    pub async fn adopt(&self, account_id: Uuid, message: ServerMessage) {
+        match message {
+            ServerMessage::SessionUpsert { session } => {
+                let card_id = session.card_id;
+                let record = match self.record_for(account_id, card_id).await {
+                    Ok(record) => record,
+                    Err(err) => {
+                        tracing::warn!(%card_id, "跨ぎで届いたカードを用意できません: {err}");
+                        return;
+                    }
+                };
+                // 他人のカードとして届いたものは取り込まない。チャネルは持ち主ごとに
+                // 分かれているので通常は起こらないが、**名前と中身が食い違ったときに
+                // 名前を正とする**ことをここでも守る
+                if record.account_id != account_id {
+                    return;
+                }
+                record.store_meta(*session);
+                self.publish_local(
+                    account_id,
+                    ServerMessage::SessionUpsert {
+                        session: Box::new(record.meta()),
+                    },
+                );
+            }
+
+            ServerMessage::SessionRemoved { card_id } => {
+                if self.owned(account_id, card_id).is_none() {
+                    return;
+                }
+                self.records
+                    .lock()
+                    .expect("ロックが壊れていない")
+                    .remove(&card_id);
+                self.publish_local(account_id, ServerMessage::SessionRemoved { card_id });
+            }
+
+            ServerMessage::Status {
+                card_id,
+                status,
+                subagent_active,
+                last_activity_at,
+            } => {
+                let Some(record) = self.owned(account_id, card_id) else {
+                    return;
+                };
+                {
+                    let mut meta = record.meta.lock().expect("ロックが壊れていない");
+                    meta.status = status;
+                    meta.subagent_active = subagent_active;
+                    meta.last_activity_at = last_activity_at;
+                }
+                // 状態が届くということは、向こうで報告が続いている
+                record.live.store(true, Ordering::Relaxed);
+                self.publish_local(
+                    account_id,
+                    ServerMessage::Status {
+                        card_id,
+                        status,
+                        subagent_active,
+                        last_activity_at,
+                    },
+                );
+            }
+
+            ServerMessage::TranscriptAppend { card_id, nodes } => {
+                let Some(record) = self.owned(account_id, card_id) else {
+                    return;
+                };
+                record
+                    .window
+                    .lock()
+                    .expect("ロックが壊れていない")
+                    .append(&nodes);
+                record.fanout(&ServerMessage::TranscriptAppend { card_id, nodes });
+            }
+
+            ServerMessage::TranscriptReset { card_id } => {
+                let Some(record) = self.owned(account_id, card_id) else {
+                    return;
+                };
+                record.window.lock().expect("ロックが壊れていない").clear();
+                record.fanout(&ServerMessage::TranscriptReset { card_id });
+            }
+
+            // 揮発の知らせはそのまま流す
+            other => self.publish_local(account_id, other),
+        }
+    }
+
+    /// ブラウザが1つ繋がった。**最初の1人でそのアカウントの知らせを購読する**（設計§9-2）。
+    ///
+    /// 購読を開けた瞬間より前に流れたものは届かない（pub/sub は at-most-once）。
+    /// だから開けた直後に DB を読み直して埋める——**真実は DB にある**ので、
+    /// 取りこぼしはこれで必ず追いつく（§9-1）。
+    pub async fn attach_browser(&self, account_id: Uuid) {
+        let first = {
+            let mut browsers = self.browsers.lock().expect("ロックが壊れていない");
+            let count = browsers.entry(account_id).or_insert(0);
+            *count += 1;
+            *count == 1
+        };
+        if !first {
+            return;
+        }
+        let Some(bus) = &self.bus else {
+            return;
+        };
+        bus.subscribe(&bus::account_events(account_id));
+        if let Err(err) = self.reload_account(account_id).await {
+            tracing::warn!(%account_id, "記録を読み直せません: {err}");
+        }
+    }
+
+    /// ブラウザが1つ去った。**最後の1人で購読を閉じる。**
+    pub fn detach_browser(&self, account_id: Uuid) {
+        let last = {
+            let mut browsers = self.browsers.lock().expect("ロックが壊れていない");
+            match browsers.get_mut(&account_id) {
+                Some(count) => {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        browsers.remove(&account_id);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                None => false,
+            }
+        };
+        if last && let Some(bus) = &self.bus {
+            bus.unsubscribe(&bus::account_events(account_id));
+        }
+    }
+
+    /// 連絡係が戻ってきたので、見ているアカウントを全部読み直す（設計§9-1 の規約）。
+    ///
+    /// 自動再購読は**取りこぼしを埋めない**——切れている間に流れたものは消えている。
+    /// 購読が戻ったことと、中身が揃っていることは別の話になる。
+    pub async fn resnapshot(&self) {
+        let accounts: Vec<Uuid> = self
+            .browsers
+            .lock()
+            .expect("ロックが壊れていない")
+            .keys()
+            .copied()
+            .collect();
+        for account_id in accounts {
+            if let Err(err) = self.reload_account(account_id).await {
+                tracing::warn!(%account_id, "記録を読み直せません: {err}");
+            }
+        }
+    }
+
+    /// そのアカウントの記録を DB と突き合わせ直す。
+    ///
+    /// 消えたものは外し、知らないものは足し、あるものは DB の中身で上書きする。
+    /// **鮮度の印（`agent_connected`）だけは手元の値を残す**——接続はこのインスタンスと
+    /// 他インスタンスの見立てであって、DB には書いていない（設計§20 読み替え4）。
+    pub async fn reload_account(&self, account_id: Uuid) -> Result<(), DbErr> {
+        let rows = entity::sessions::Entity::find()
+            .filter(entity::sessions::Column::AccountId.eq(account_id))
+            .filter(entity::sessions::Column::Archived.eq(false))
+            .order_by_asc(entity::sessions::Column::CreatedAt)
+            .all(&self.db)
+            .await?;
+        let account_name = entity::accounts::Entity::find_by_id(account_id)
+            .one(&self.db)
+            .await?
+            .map(|row| row.name);
+
+        let alive: std::collections::HashSet<CardId> =
+            rows.iter().map(|row| CardId(row.card_id)).collect();
+
+        // DB に無いものは外れている。**手元にだけ残っていると、外したカードが
+        // このインスタンスのブラウザにだけ出続ける**
+        let stale: Vec<CardId> = self
+            .records
+            .lock()
+            .expect("ロックが壊れていない")
+            .values()
+            .filter(|record| record.account_id == account_id && !alive.contains(&record.card_id))
+            .map(|record| record.card_id)
+            .collect();
+        for card_id in stale {
+            self.records
+                .lock()
+                .expect("ロックが壊れていない")
+                .remove(&card_id);
+            self.publish_local(account_id, ServerMessage::SessionRemoved { card_id });
+        }
+
+        for row in rows {
+            let card_id = CardId(row.card_id);
+            let mut meta = meta_from_row(row);
+            if account_id != db::LOCAL_ACCOUNT_ID {
+                meta.account = account_name.clone();
+            }
+            // DB は接続を知らない（`meta_from_row` は必ず false を返す）ので、
+            // 手元の見立てを残す。**知らないカードは繋がっていない扱い**——
+            // 記録があることと、いま報告してきていることは別（設計§6-3）
+            let known = self.get(card_id);
+            meta.agent_connected = known
+                .as_ref()
+                .is_some_and(|record| record.meta().agent_connected);
+            let record = match known {
+                Some(record) => record,
+                None => self.record_for(account_id, card_id).await?,
+            };
+            record.store_meta(meta);
+            self.publish_local(
+                account_id,
+                ServerMessage::SessionUpsert {
+                    session: Box::new(record.meta()),
+                },
+            );
+        }
+        Ok(())
     }
 
     /// その PC が持っているカードの一覧（切断時の掃除と、指示の宛先探しに使う）。
@@ -594,7 +879,12 @@ impl SessionRegistry {
             .lock()
             .expect("ロックが壊れていない")
             .append(&nodes);
-        record.fanout(&ServerMessage::TranscriptAppend { card_id, nodes });
+        // 履歴は一覧の口（`events`）ではなく、そのカードを見ている人だけへ流す。
+        // **跨ぎのぶんは連絡係へ別に流す**——向こうのインスタンスで見ている人が
+        // 居るかどうかは、こちらからは分からない
+        let message = ServerMessage::TranscriptAppend { card_id, nodes };
+        self.publish_bus(record.account_id, &message);
+        record.fanout(&message);
         Ok(())
     }
 
@@ -609,7 +899,11 @@ impl SessionRegistry {
             *next = 0;
         }
         record.window.lock().expect("ロックが壊れていない").clear();
-        record.fanout(&ServerMessage::TranscriptReset { card_id });
+        // 作り直しと追記は**同じ列**を通る（連絡係が順序を守る）。逆になると、
+        // 消したはずの履歴が残ったまま続きが積まれる（設計§6-2）
+        let message = ServerMessage::TranscriptReset { card_id };
+        self.publish_bus(record.account_id, &message);
+        record.fanout(&message);
         Ok(())
     }
 

@@ -67,7 +67,7 @@ impl Drop for Arena {
 impl Arena {
     async fn start(db: DatabaseConnection) -> Self {
         let config = Arc::new(server_core::config::ServerConfig::default());
-        let registry = SessionRegistry::load(db.clone(), WINDOW)
+        let registry = SessionRegistry::load(db.clone(), WINDOW, None)
             .await
             .expect("記録層を立てられること");
         let auth = server_core::auth::AuthContext::server(db.clone(), &config);

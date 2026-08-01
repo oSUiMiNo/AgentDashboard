@@ -68,7 +68,7 @@ async fn 報告は書いてから配られる() {
     // 配信を受け取った時点で DB に入っていること（設計§9-1）。逆だと、ブラウザには
     // 出ているのに再読み込みで消えるという嘘になる
     for backend in common::backends("apply").await {
-        let registry = SessionRegistry::load(backend.db.clone(), WINDOW)
+        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
             .await
             .expect("記録層を立てられること");
         let mut events = registry.subscribe_events();
@@ -90,7 +90,7 @@ async fn 報告は書いてから配られる() {
             event.message
         );
         // 配信を受け取った時点で、別に立てた記録層（＝DB だけを見る側）にも見えている
-        let other = SessionRegistry::load(backend.db.clone(), WINDOW)
+        let other = SessionRegistry::load(backend.db.clone(), WINDOW, None)
             .await
             .expect("同じ DB から立て直せること");
         assert_eq!(
@@ -113,7 +113,7 @@ async fn 外したカードは後から届いた報告で戻らない() {
     // 実際に E2E がこれで壊れた——片付けたはずのカードが次のテストへ漏れ、
     // 通しで流すと一覧の枚数が合わなくなる形で出た
     for backend in common::backends("archived").await {
-        let registry = SessionRegistry::load(backend.db.clone(), WINDOW)
+        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
             .await
             .expect("記録層を立てられること");
         let card_id = CardId::new();
@@ -144,7 +144,7 @@ async fn 外したカードは後から届いた報告で戻らない() {
         );
 
         // 立て直しても戻らない（DB 側にも外した印が残っている）
-        let again = SessionRegistry::load(backend.db.clone(), WINDOW)
+        let again = SessionRegistry::load(backend.db.clone(), WINDOW, None)
             .await
             .expect("立て直せること");
         assert!(
@@ -164,7 +164,7 @@ async fn 再起動しても履歴は残り接続していない印が付く() {
     for backend in common::backends("restore").await {
         let card_id = CardId::new();
         {
-            let registry = SessionRegistry::load(backend.db.clone(), WINDOW)
+            let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
                 .await
                 .expect("記録層を立てられること");
             registry.apply(&local(), upsert(card_id)).await;
@@ -180,7 +180,7 @@ async fn 再起動しても履歴は残り接続していない印が付く() {
         }
 
         // サーバだけを起動し直した状態
-        let restored = SessionRegistry::load(backend.db.clone(), WINDOW)
+        let restored = SessionRegistry::load(backend.db.clone(), WINDOW, None)
             .await
             .expect("立て直せること");
 
@@ -217,7 +217,7 @@ async fn 巻き戻りのあとも番号は最初から振り直される() {
     // 巻き戻し（/rewind）で全部消えるので、続きの番号から始めると並びに穴が空いたまま
     // 大きな値へ飛ぶ。消したなら番号も戻す
     for backend in common::backends("rewind").await {
-        let registry = SessionRegistry::load(backend.db.clone(), WINDOW)
+        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
             .await
             .expect("記録層を立てられること");
         let card_id = CardId::new();
@@ -260,7 +260,7 @@ async fn 巻き戻りのあとも番号は最初から振り直される() {
 async fn 知らないカードの履歴は捨てる() {
     // 外した直後に届いたノードで一覧を汚さない
     for backend in common::backends("orphan").await {
-        let registry = SessionRegistry::load(backend.db.clone(), WINDOW)
+        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
             .await
             .expect("記録層を立てられること");
         let card_id = CardId::new();
@@ -304,7 +304,7 @@ async fn モデルの3つは未設定のまま往復する() {
         let bare = CardId::new();
         let filled = CardId::new();
         {
-            let registry = SessionRegistry::load(backend.db.clone(), WINDOW)
+            let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
                 .await
                 .expect("記録層を立てられること");
             registry.apply(&local(), upsert(bare)).await;
@@ -323,7 +323,7 @@ async fn モデルの3つは未設定のまま往復する() {
                 .await;
         }
 
-        let restored = SessionRegistry::load(backend.db.clone(), WINDOW)
+        let restored = SessionRegistry::load(backend.db.clone(), WINDOW, None)
             .await
             .expect("立て直せること");
 

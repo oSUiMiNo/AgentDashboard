@@ -173,6 +173,9 @@ async fn client_loop(state: AppState, identity: Identity, socket: WebSocket) {
     // 一覧の購読を先に始めてから現在の一覧を送る。逆順にすると、その隙間に起動した
     // セッションを取りこぼす。順序を守れば重複するだけで、upsert は重複しても害がない
     let events = state.registry.subscribe_events();
+    // 他インスタンスの知らせも、この時点から受け取れるようにする（設計§9-2）。
+    // **中で DB を読み直す**ので、購読を開ける前に流れたぶんもここで揃う
+    state.registry.attach_browser(identity.account_id).await;
 
     send_json(
         &outbound,
@@ -244,6 +247,9 @@ async fn client_loop(state: AppState, identity: Identity, socket: WebSocket) {
         task.abort();
     }
     event_task.abort();
+    // 最後の1人なら跨ぎの購読も閉じる。**忘れると、誰も見ていないアカウントの
+    // 知らせを受け取り続ける**
+    state.registry.detach_browser(identity.account_id);
     drop(outbound);
     let _ = writer.await;
 }

@@ -135,9 +135,35 @@ pub async fn serve_server(config: Config) -> anyhow::Result<()> {
     let server_config = Arc::new(config.server());
 
     let db = server_core::db::connect(&config.resolved_database_url()).await?;
-    let registry = SessionRegistry::load(db.clone(), server_config.transcript_window_nodes).await?;
+
+    // インスタンスを跨ぐ連絡係（設計§9）。**無ければプロセスの中で完結する**——
+    // インスタンスが1台なら本当にそれで足りるので、必須にはしない
+    let (incoming_tx, incoming_rx) = tokio::sync::mpsc::unbounded_channel();
+    let bus = match &server_config.valkey_url {
+        Some(url) => {
+            let bus = server_core::bus::valkey::ValkeyBus::connect(url, incoming_tx).await?;
+            Some(bus as Arc<dyn server_core::bus::Bus>)
+        }
+        None => {
+            tracing::info!(
+                "valkey_url が無いので連絡係を持ちません（インスタンスは1台の前提で動きます）"
+            );
+            None
+        }
+    };
+
+    let registry = SessionRegistry::load(
+        db.clone(),
+        server_config.transcript_window_nodes,
+        bus.clone(),
+    )
+    .await?;
     let auth = AuthContext::server(db.clone(), &server_config);
     let hub = AgentHub::new(db, Arc::clone(&registry));
+
+    if let Some(bus) = &bus {
+        server_core::cluster::start(Arc::clone(&registry), incoming_rx, bus.state());
+    }
 
     let agent: Arc<dyn server_core::agent::AgentHost> =
         Arc::new(server_core::gateway::RemoteAgent::new(Arc::clone(&hub)));
@@ -206,7 +232,7 @@ pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::R
     server_core::auth::ensure_lan_password(&db, &server_config).await?;
     let auth = server_core::auth::AuthContext::local(db.clone(), &server_config);
 
-    let registry = SessionRegistry::load(db, server_config.transcript_window_nodes).await?;
+    let registry = SessionRegistry::load(db, server_config.transcript_window_nodes, None).await?;
 
     // 再開位置の置き場所は、パーサの世話役（読む側）と報告の運び手（進める側）で
     // 共有する。**進めてよいのは記録に入ってから**（設計§6-1）

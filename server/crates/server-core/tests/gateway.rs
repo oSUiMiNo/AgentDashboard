@@ -35,7 +35,7 @@ struct TestGateway {
 
 impl TestGateway {
     async fn start(db: DatabaseConnection) -> Self {
-        let registry = SessionRegistry::load(db.clone(), WINDOW)
+        let registry = SessionRegistry::load(db.clone(), WINDOW, None)
             .await
             .expect("記録層を立てられること");
         let hub = AgentHub::new(db, Arc::clone(&registry));
