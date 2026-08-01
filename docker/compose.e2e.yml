@@ -47,6 +47,36 @@ services:
     <<: *dashboard
     ports:
       - '4176:8787'
+    networks:
+      default:
+        # **前段（Caddy・nginx）から見た名前。** 手順書に載せる設定ファイルを
+        # そのまま読ませるために、あちらが書いている転送先の名前をここで用意する
+        # （設計§25 読み替え4）。別名を作らないと、手順書側を「compose 用の名前」へ
+        # 書き換えることになり、**利用者が読むものと動かすものが別物**になる
+        aliases:
+          - dashboard
+
+  # 手順書（`docs/setup/reverse-proxy.md`）に載せる設定の実物を読ませる。
+  # **前に置くのは B**——PC 側エージェントが繋がっている側なので、ブラウザ用の `/ws` と
+  # PC 用の `/agent/ws` の両方をこの1台で通せる。
+  caddy:
+    image: caddy:2-alpine
+    volumes:
+      - ../docs/proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+    ports:
+      - '4177:80'
+    depends_on:
+      dashboard-b: { condition: service_healthy }
+
+  nginx:
+    image: nginx:1-alpine
+    volumes:
+      # `conf.d` の中は `http { }` へ読み込まれる。手順書もその置き場所を案内している
+      - ../docs/proxy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - '4178:80'
+    depends_on:
+      dashboard-b: { condition: service_healthy }
 
   postgres:
     image: postgres:18-alpine

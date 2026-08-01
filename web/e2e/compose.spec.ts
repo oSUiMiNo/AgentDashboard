@@ -18,6 +18,10 @@ import {
 /** もう一方のインスタンス（PC が繋がっている側）。 */
 const OTHER_INSTANCE = 'http://127.0.0.1:4176/'
 
+/** 手順書の設定で立てた前段。どちらも B（PC が繋がっている側）へ流す。 */
+const THROUGH_CADDY = 'http://127.0.0.1:4177/'
+const THROUGH_NGINX = 'http://127.0.0.1:4178'
+
 /**
  * インスタンスを2台並べた通し確認（セルフホスト化設計§9・§15-2 #4）。
  *
@@ -179,4 +183,74 @@ test('DB が落ちている間の報告は、戻ってから追いつく', async
     await openDashboard(page)
   }).toPass({ timeout: 60_000 })
   await expect(page.getByTestId('session-tile')).toHaveCount(1)
+})
+
+test('手順書の前段の設定で、2本の WebSocket がどちらも通る', async ({ page }) => {
+  // 検収「セットアップガイド4種」のうちリバースプロキシ（設計§14-2）。**手順書に
+  // 載せている設定ファイルの実物**（`docs/proxy/`）を Caddy と nginx へ読ませ、
+  // その経路で本当に動くことを見る。貼り付けた例は必ず腐るので、動くものを載せる。
+  //
+  // ダッシュボードは WebSocket を**2本**使う。ブラウザ用の `/ws` と PC 側用の
+  // `/agent/ws` で、片方だけ通す設定にすると「画面は出るのに PC が繋がらない」
+  // という半分だけ動く状態になる。だから両方を1つのテストで通す。
+
+  // 1本目：ブラウザ → Caddy → B（`/ws`）。
+  // **`openDashboard` は使えない**——あれは baseURL（A）を開くので前段を素通りする
+  await page.goto(THROUGH_CADDY)
+  await signInIfAsked(page)
+  await expect(page.getByTestId('connection-status')).toHaveAttribute(
+    'data-status',
+    'open',
+  )
+
+  // **前のテストの片付けが届くまで待つ。** 畳んだのは A で、ここで見ているのは B。
+  // 待たずに数えると「1枚ある」と読んだ直後に取り消しが届き、起こした1枚と差し引きで
+  // 枚数が変わらない——「起こしたのに増えない」に見える（実際に取りこぼした）
+  await expect(page.getByTestId('session-tile')).toHaveCount(0)
+
+  // 画面が動くところまで見る。繋がっただけでは、Upgrade のあとフレームが
+  // 流れ続けるかどうかが分からない
+  const tile = await spawnSession(page)
+  await openSession(page, tile)
+  await typeLine(page, 'Caddy ごしに')
+  await expectTerminalToContain(page, '[fake-claude] received: Caddy ごしに')
+
+  // 2本目：PC → nginx → B（`/agent/ws`）。**同じ B へ繋ぎ直す**ので、
+  // このあとのテストから見た配置は変わらない。
+  //
+  // **切れたことを見届けてから起こし直す。** 落としてすぐ繋ぎ直すと、サーバがまだ
+  // 前の接続を握っているうちに新しい接続が来る。同じ PC として名乗るので登録は
+  // 通るが、起動の指示が**死んだほうの接続へ渡って黙って消える**——画面には
+  // 「起こしたのにカードが増えない」としか出ない（実際に取りこぼした）
+  killAgent()
+  await expect(async () => {
+    const response = await page.request.get(`${THROUGH_CADDY}api/settings`)
+    const view = (await response.json()) as { agents: { connected: boolean }[] }
+    expect(view.agents.every((agent) => !agent.connected)).toBe(true)
+  }).toPass({ timeout: 60_000 })
+
+  startAgent(THROUGH_NGINX)
+  await expect(async () => {
+    const response = await page.request.get(`${THROUGH_CADDY}api/settings`)
+    const view = (await response.json()) as { agents: { connected: boolean }[] }
+    expect(view.agents.some((agent) => agent.connected)).toBe(true)
+  }).toPass({ timeout: 60_000 })
+
+  // 繋がっただけでなく、その経路で指示が往復すること。
+  //
+  // **一覧へ戻ってから起こす**——専用画面には起動の入力欄が無い。そして
+  // **繋がるまで待ってから押す**。読み込み直した直後は一覧がまだ届いておらず、
+  // 押しても何も起きないまま次の確認へ進んでしまう（実際に取りこぼした）
+  await page.goto(THROUGH_CADDY)
+  await expect(page.getByTestId('connection-status')).toHaveAttribute(
+    'data-status',
+    'open',
+  )
+  const revived = await spawnSession(page)
+  await openSession(page, revived)
+  await typeLine(page, 'nginx ごしに')
+  await expectTerminalToContain(page, '[fake-claude] received: nginx ごしに')
+
+  // 片付けは A 側で行う（afterEach が baseURL を見る）
+  await page.goto('/')
 })

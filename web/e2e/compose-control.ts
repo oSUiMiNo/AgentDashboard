@@ -77,8 +77,12 @@ export function killAgent(): void {
  *
  * **同じトークンで繋ぎ直す。** 新しく発行すると別の PC として登録され、
  * 「切れた PC が戻ってきた」ではなく「2台目が来た」になってしまう。
+ *
+ * `serverUrl` を渡すと繋ぎ先を変えられる。前段（nginx）越しでも繋がることを
+ * 確かめるために使う——**PC 側の WebSocket（`/agent/ws`）はブラウザとは別の口**なので、
+ * 画面が出ることを確かめても、こちらが通る保証にはならない（設計§14-2）。
  */
-export function startAgent(): void {
+export function startAgent(serverUrl?: string): void {
   const config = env()
   const child = spawn(config.agentBin, ['--config', config.agentConfig], {
     cwd: config.repoRoot,
@@ -86,7 +90,7 @@ export function startAgent(): void {
       ...process.env,
       AGENTDASHBOARD_CLAUDE_BIN: config.fakeClaude,
       AGENTDASHBOARD_PAIRING_TOKEN: config.token,
-      AGENTDASHBOARD_SERVER_URL: config.agentUrl,
+      AGENTDASHBOARD_SERVER_URL: serverUrl ?? config.agentUrl,
     },
     detached: true,
     stdio: 'ignore',
