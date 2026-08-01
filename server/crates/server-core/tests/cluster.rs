@@ -561,3 +561,184 @@ async fn 連絡係が切れている間の跨ぎの指示は理由を返す() {
         backend.finish().await;
     }
 }
+
+// --- 画面（設計§9-2 の `card:{id}:screen`・§9-3・§9-4）------------------------
+
+/// 画面のフレームが1つ来るまで待つ。
+async fn wait_frame(
+    frames: &mut broadcast::Receiver<bytes::Bytes>,
+    what: &str,
+) -> protocol::frame::FrameKind {
+    let bytes = tokio::time::timeout(TIMEOUT, frames.recv())
+        .await
+        .unwrap_or_else(|_| panic!("{what} が届きませんでした"))
+        .expect("配信が閉じていないこと");
+    protocol::frame::decode(&bytes)
+        .expect("フレームとして読めること")
+        .kind
+}
+
+#[tokio::test]
+async fn 別のインスタンスに繋がった_PC_の画面が見える() {
+    // 検収「別インスタンスに接続していてもターミナル操作が成立」の表示側。
+    // ローカルモードでは画面配信の経路を1バイトも通らないので、この配置でしか出ない
+    for backend in common::backends("cluster-screen").await {
+        let broker = MemoryBroker::new();
+        let (a, _b, mut agent, card_id, _account) = split(&backend.db, &broker).await;
+
+        let remote = RemoteAgent::new(Arc::clone(&a.hub));
+        let (_blank, mut frames) = remote
+            .subscribe_pty(card_id, 1, 80, 24)
+            .expect("端末を開けること");
+
+        // 開いたことが PC まで届く（跨いで SubScreen が回る）
+        agent
+            .wait_for("画面の要求", |message| {
+                matches!(message, protocol::a2s::ServerToAgent::SubScreen { .. })
+            })
+            .await;
+
+        agent
+            .send_screen(protocol::frame::FrameKind::ScreenFull, card_id, 0)
+            .await;
+        assert_eq!(
+            wait_frame(&mut frames, "全画面").await,
+            protocol::frame::FrameKind::PtySnapshot,
+            "[{}] ブラウザ向けの種別へ移し替えられていない",
+            backend.name
+        );
+
+        agent
+            .send_screen(protocol::frame::FrameKind::ScreenDiff, card_id, 1)
+            .await;
+        assert_eq!(
+            wait_frame(&mut frames, "差分").await,
+            protocol::frame::FrameKind::PtyOutput,
+            "[{}]",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 画面の番号が飛んだら出し直してもらう() {
+    // pub/sub は at-most-once なので途中が消えうる（設計§9-3）。**消えたまま続きを
+    // 流すと、画面は動いているのに中身が壊れている**という一番気づきにくい形になる
+    for backend in common::backends("cluster-seq").await {
+        let broker = MemoryBroker::new();
+        let (a, _b, mut agent, card_id, _account) = split(&backend.db, &broker).await;
+
+        let remote = RemoteAgent::new(Arc::clone(&a.hub));
+        let (_blank, mut frames) = remote
+            .subscribe_pty(card_id, 1, 80, 24)
+            .expect("端末を開けること");
+        agent
+            .wait_for("最初の画面の要求", |message| {
+                matches!(message, protocol::a2s::ServerToAgent::SubScreen { .. })
+            })
+            .await;
+
+        agent
+            .send_screen(protocol::frame::FrameKind::ScreenFull, card_id, 0)
+            .await;
+        wait_frame(&mut frames, "全画面").await;
+
+        // 1通落として番号を飛ばす
+        broker.drop_next(&server_core::bus::card_screen(card_id));
+        agent
+            .send_screen(protocol::frame::FrameKind::ScreenDiff, card_id, 1)
+            .await;
+        agent
+            .send_screen(protocol::frame::FrameKind::ScreenDiff, card_id, 2)
+            .await;
+
+        // 出し直しを頼むこと
+        agent
+            .wait_for("出し直しの要求", |message| {
+                matches!(message, protocol::a2s::ServerToAgent::SubScreen { .. })
+            })
+            .await;
+        // **飛んだ後の差分は流さない**（届いていたら壊れた画面が出ている）
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), frames.recv())
+                .await
+                .is_err(),
+            "[{}] 飛んだ後の差分が流れています",
+            backend.name
+        );
+
+        // 全画面が来たら再開する
+        agent
+            .send_screen(protocol::frame::FrameKind::ScreenFull, card_id, 10)
+            .await;
+        assert_eq!(
+            wait_frame(&mut frames, "出し直された全画面").await,
+            protocol::frame::FrameKind::PtySnapshot,
+            "[{}]",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 見ている人が居なくなって初めて画面が止まる() {
+    // 視聴リース（設計§9-4）。手元が空になっただけで止めると、**別のインスタンスで
+    // 見ている人の画面が黙って止まる**
+    for backend in common::backends("cluster-lease").await {
+        let broker = MemoryBroker::new();
+        let (a, b, mut agent, card_id, _account) = split(&backend.db, &broker).await;
+
+        // A と B の両方に視聴者を1人ずつ置く
+        RemoteAgent::new(Arc::clone(&a.hub))
+            .subscribe_pty(card_id, 1, 80, 24)
+            .expect("A で端末を開けること");
+        RemoteAgent::new(Arc::clone(&b.hub))
+            .subscribe_pty(card_id, 2, 80, 24)
+            .expect("B で端末を開けること");
+        agent
+            .wait_for("画面の要求", |message| {
+                matches!(message, protocol::a2s::ServerToAgent::SubScreen { .. })
+            })
+            .await;
+
+        // A の視聴者が去っても、B に居るので止めない
+        RemoteAgent::new(Arc::clone(&a.hub)).release_client(card_id, 1);
+        agent
+            .expect_none_of(
+                Duration::from_millis(500),
+                "早すぎる画面の停止",
+                |message| matches!(message, protocol::a2s::ServerToAgent::UnsubScreen { .. }),
+            )
+            .await;
+        assert_eq!(
+            broker_viewers(&broker, card_id).await,
+            1,
+            "[{}] 印の数が合わない",
+            backend.name
+        );
+
+        // 最後の1人が去ったら止める
+        RemoteAgent::new(Arc::clone(&b.hub)).release_client(card_id, 2);
+        agent
+            .wait_for("画面の停止", |message| {
+                matches!(message, protocol::a2s::ServerToAgent::UnsubScreen { .. })
+            })
+            .await;
+
+        backend.finish().await;
+    }
+}
+
+/// いま何人（何インスタンス）が見ていることになっているか。
+async fn broker_viewers(broker: &Arc<MemoryBroker>, card_id: CardId) -> u64 {
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let probe = broker.connect(tx);
+    probe
+        .lease_sweep(&server_core::bus::screen_viewers(card_id), 0)
+        .await
+        .expect("数えられること")
+}

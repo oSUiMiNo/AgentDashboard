@@ -75,6 +75,8 @@ pub const PRESENCE_INTERVAL: Duration = Duration::from_secs(10);
 /// 記す間隔の3倍にしてある。1回の取りこぼしで消えると、**繋がっているのに
 /// 「居ない」と見える**時間ができる。
 const PRESENCE_TTL_MS: i64 = 30_000;
+/// 視聴の印も同じ寿命で扱う（設計§9-4 の「30 秒以内に自然に掃除される」）。
+const VIEWING_TTL_MS: i64 = 30_000;
 
 /// 繋がっている PC 1台ぶん。
 pub struct AgentConn {
@@ -179,6 +181,16 @@ struct ScreenRelay {
     size: Mutex<(u16, u16)>,
     /// ブラウザ向けに移し替えたフレーム
     frames: broadcast::Sender<Bytes>,
+    /// 次に来るはずの通し番号（連絡係から受け取る側だけが使う。設計§9-3）。
+    ///
+    /// **同じインスタンスの PC から直に届く分には要らない**——そちらは TCP なので
+    /// 途中が消えない。消えうるのは pub/sub を挟んだときだけ（at-most-once）。
+    expected_seq: Mutex<Option<u64>>,
+    /// 出し直しを待っている間は中継しない（設計§9-3）。
+    ///
+    /// 飛んだ後の差分をそのまま流すと、**画面は動いているのに中身が壊れている**という
+    /// 一番気づきにくい形になる。全画面が来るまで捨てるほうが正しい。
+    stalled: std::sync::atomic::AtomicBool,
 }
 
 impl ScreenRelay {
@@ -202,8 +214,14 @@ pub struct AgentHub {
     registry: Arc<SessionRegistry>,
     conns: Mutex<HashMap<AgentId, Arc<AgentConn>>>,
     /// カードごとの画面の中継。**接続と同じくメモリだけに持つ**（誰が見ているかは
-    /// このインスタンスの事実で、落ちれば消えるのが正しい。跨ぐ場合の合算は§9-4＝フェーズ6）
+    /// このインスタンスの事実で、落ちれば消えるのが正しい。インスタンスを跨いだ
+    /// 合算は連絡係の視聴リースで行う。§9-4）
     screens: Mutex<HashMap<CardId, Arc<ScreenRelay>>>,
+    /// いま PC に画面を作らせているカード（設計§9-4 の掃除の対象）。
+    ///
+    /// **数えるのはここに居るカードだけ。** 全カードを10秒ごとに数えると、遊んでいる
+    /// カードの数だけ連絡係へ問い合わせが出る。
+    streaming: Mutex<HashSet<CardId>>,
 }
 
 impl AgentHub {
@@ -213,6 +231,7 @@ impl AgentHub {
             registry,
             conns: Mutex::new(HashMap::new()),
             screens: Mutex::new(HashMap::new()),
+            streaming: Mutex::new(HashSet::new()),
         })
     }
 
@@ -341,6 +360,9 @@ impl AgentHub {
         };
         match command {
             AgentCommand::Message(message) => {
+                // 別のインスタンスから頼まれた画面も**掃除の対象に入れる**。
+                // 入れ忘れると、頼んだ側が落ちたときに誰も止められなくなる
+                self.note_streaming(&message);
                 conn.send(&message);
             }
             AgentCommand::Input { data } => {
@@ -423,6 +445,10 @@ impl AgentHub {
                         viewers: Mutex::new(HashSet::new()),
                         size: Mutex::new((80, 24)),
                         frames,
+                        expected_seq: Mutex::new(None),
+                        // **全画面が来るまでは何も流さない。** 途中の差分から始めると、
+                        // 何も描かれていない画面に部分的な書き換えが乗る
+                        stalled: std::sync::atomic::AtomicBool::new(true),
                     })
                 }),
         )
@@ -430,7 +456,7 @@ impl AgentHub {
 
     /// 見る人が増えた（§7-4）。
     fn add_viewer(
-        &self,
+        self: &Arc<Self>,
         card_id: CardId,
         client_id: u64,
         cols: u16,
@@ -438,11 +464,20 @@ impl AgentHub {
     ) -> broadcast::Receiver<Bytes> {
         let relay = self.screen(card_id);
         *relay.size.lock().expect("ロックが壊れていない") = (cols, rows);
-        relay
-            .viewers
-            .lock()
-            .expect("ロックが壊れていない")
-            .insert(client_id);
+        let first = {
+            let mut viewers = relay.viewers.lock().expect("ロックが壊れていない");
+            viewers.insert(client_id);
+            viewers.len() == 1
+        };
+
+        if first && let Some(bus) = self.registry.bus() {
+            // その PC が別のインスタンスに繋がっている場合、画面はここへ流れてくる
+            bus.subscribe(&bus::card_screen(card_id));
+            // 「うちにも見ている人が居る」と記す。**待たない**——数えるのに
+            // 端末を開く手を止めさせない
+            let hub = Arc::clone(self);
+            tokio::spawn(async move { hub.touch_viewing(card_id).await });
+        }
 
         // **2人目以降でも頼み直す。** 配信は1本の流れを分けて配る形なので、後から
         // 入った端末は差分だけを受け取っても何も描けない。頼み直すと全画面から始まる。
@@ -452,7 +487,11 @@ impl AgentHub {
     }
 
     /// 見る人が減った。**誰も居なくなったときだけ**止める（§7-4）。
-    fn remove_viewer(&self, card_id: CardId, client_id: u64) {
+    ///
+    /// 連絡係が居るときは、止めてよいかを**他のインスタンスと合算して**決める
+    /// （§9-4）。手元が空になっただけで止めると、別のインスタンスで見ている人の
+    /// 画面が黙って止まる。
+    fn remove_viewer(self: &Arc<Self>, card_id: CardId, client_id: u64) {
         let Some(relay) = self
             .screens
             .lock()
@@ -467,20 +506,160 @@ impl AgentHub {
             viewers.remove(&client_id);
             viewers.is_empty()
         };
-        if empty && let Some(conn) = self.conn_for_card(card_id) {
-            conn.send(&ServerToAgent::UnsubScreen { card_id });
+        if !empty {
+            return;
+        }
+        match self.registry.bus() {
+            None => self.request_unsub(card_id),
+            Some(bus) => {
+                bus.unsubscribe(&bus::card_screen(card_id));
+                let hub = Arc::clone(self);
+                tokio::spawn(async move { hub.release_viewing(card_id).await });
+            }
         }
     }
 
-    /// 画面を出して（出し直して）もらう。
+    /// 「うちにも見ている人が居る」と記す（§9-4）。
+    async fn touch_viewing(&self, card_id: CardId) {
+        let Some(bus) = self.registry.bus() else {
+            return;
+        };
+        let member = self.registry.instance_id().to_string();
+        if let Err(err) = bus
+            .lease_touch(&bus::screen_viewers(card_id), &member, db::now_ms())
+            .await
+        {
+            tracing::warn!(%card_id, "視聴の印を置けません: {err}");
+        }
+    }
+
+    /// 印を消し、**他に見ている人が居なければ**止めさせる（§9-4）。
+    async fn release_viewing(self: Arc<Self>, card_id: CardId) {
+        let Some(bus) = self.registry.bus() else {
+            return;
+        };
+        let member = self.registry.instance_id().to_string();
+        let key = bus::screen_viewers(card_id);
+        let _ = bus.lease_release(&key, &member).await;
+        match bus.lease_sweep(&key, db::now_ms() - VIEWING_TTL_MS).await {
+            Ok(0) => self.request_unsub(card_id),
+            // 数えられないなら止めない。**止めて画面が消えるより、余分に流れるほうが
+            // 害が小さい**（利用者から見て「壊れた」に見えるのは前者）
+            Ok(_) => {}
+            Err(err) => tracing::warn!(%card_id, "見ている人を数えられません: {err}"),
+        }
+    }
+
+    /// 見ている人が居るあいだ、印を記し直す（§9-4）。
+    async fn touch_viewings(&self) {
+        let watched: Vec<CardId> = self
+            .screens
+            .lock()
+            .expect("ロックが壊れていない")
+            .iter()
+            .filter(|(_, relay)| {
+                !relay
+                    .viewers
+                    .lock()
+                    .expect("ロックが壊れていない")
+                    .is_empty()
+            })
+            .map(|(card_id, _)| *card_id)
+            .collect();
+        for card_id in watched {
+            self.touch_viewing(card_id).await;
+        }
+    }
+
+    /// 送らせているカードのうち、誰も見ていないものを止める（§9-4）。
+    ///
+    /// **異常終了したインスタンスの掃除がここで効く。** 明示的な解放を待たない作りなので、
+    /// 落ちた側の印はただ古くなり、30秒以内にここで落ちる。
+    async fn sweep_viewings(self: &Arc<Self>) {
+        let Some(bus) = self.registry.bus() else {
+            return;
+        };
+        let streaming: Vec<CardId> = self
+            .streaming
+            .lock()
+            .expect("ロックが壊れていない")
+            .iter()
+            .copied()
+            .collect();
+        for card_id in streaming {
+            let key = bus::screen_viewers(card_id);
+            match bus.lease_sweep(&key, db::now_ms() - VIEWING_TTL_MS).await {
+                Ok(0) => self.request_unsub(card_id),
+                Ok(_) => {}
+                Err(err) => tracing::warn!(%card_id, "見ている人を数えられません: {err}"),
+            }
+        }
+    }
+
+    /// 画面を出して（出し直して）もらう。**別のインスタンスの PC にも届く。**
     fn request_screen(&self, card_id: CardId, cols: u16, rows: u16) {
-        if let Some(conn) = self.conn_for_card(card_id) {
-            conn.send(&ServerToAgent::SubScreen {
+        self.tell_agent(
+            card_id,
+            ServerToAgent::SubScreen {
                 card_id,
                 cols,
                 rows,
-            });
+            },
+        );
+    }
+
+    /// 画面を止めてもらう。
+    fn request_unsub(&self, card_id: CardId) {
+        self.tell_agent(card_id, ServerToAgent::UnsubScreen { card_id });
+    }
+
+    /// 画面の開始・停止を PC へ伝え、**送らせているカードの控えを合わせる。**
+    fn tell_agent(&self, card_id: CardId, message: ServerToAgent) {
+        self.note_streaming(&message);
+        if let Some(conn) = self.conn_for_card(card_id) {
+            conn.send(&message);
+            return;
         }
+        // 別のインスタンスに繋がっている PC へ回す。届かなくても画面が出ないだけで、
+        // 次に開き直せばまた頼まれる
+        if let Some(agent_id) = self
+            .registry
+            .get(card_id)
+            .and_then(|record| record.meta().agent_id)
+        {
+            let _ = self.relay_across(agent_id, AgentCommand::Message(Box::new(message)));
+        }
+    }
+
+    /// 「いま送らせているカード」を覚える（掃除の対象を絞るため）。
+    fn note_streaming(&self, message: &ServerToAgent) {
+        let mut streaming = self.streaming.lock().expect("ロックが壊れていない");
+        match message {
+            ServerToAgent::SubScreen { card_id, .. } => {
+                streaming.insert(*card_id);
+            }
+            ServerToAgent::UnsubScreen { card_id } => {
+                streaming.remove(card_id);
+            }
+            _ => {}
+        }
+    }
+
+    /// 視聴リースの見張りを始める（連絡係が居るときだけ）。
+    pub fn start_viewing_lease(self: &Arc<Self>) {
+        if self.registry.bus().is_none() {
+            return;
+        }
+        let hub = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(PRESENCE_INTERVAL);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                hub.touch_viewings().await;
+                hub.sweep_viewings().await;
+            }
+        });
     }
 
     /// 繋ぎ直した PC へ、いま見られているカードの購読を出し直す（§6-4）。
@@ -539,6 +718,15 @@ impl AgentHub {
             return;
         };
 
+        // 別のインスタンスで見ている人へも回す。**通し番号を付けたまま**流すのが要点で、
+        // 受け取る側はそれを見て取りこぼしに気づく（設計§9-2・§9-3）
+        if let Some(bus) = self.registry.bus() {
+            bus.publish(
+                &bus::card_screen(frame.card_id),
+                bus::encode_binary(self.registry.instance_id(), bytes),
+            );
+        }
+
         let Some(relay) = self
             .screens
             .lock()
@@ -550,6 +738,80 @@ impl AgentHub {
             return;
         };
         let browser = protocol::frame::encode(frame.kind.to_browser(), frame.card_id, payload);
+        let _ = relay.frames.send(Bytes::from(browser));
+    }
+
+    /// 連絡係から届いた画面を、自分のブラウザへ流す（設計§9-2・§9-3）。
+    ///
+    /// # 番号が飛んだら中継を止める
+    ///
+    /// pub/sub は at-most-once なので、途中の差分が消えることがある。**消えたまま
+    /// 続きを流すと、画面は動いているのに中身が壊れている**という一番気づきにくい形に
+    /// なる。飛びを見つけたら流すのをやめ、全画面を出し直してもらってから再開する。
+    pub fn deliver_bus_screen(&self, payload: &[u8]) {
+        let Some((from, bytes)) = bus::decode_binary(payload) else {
+            return;
+        };
+        // 自分が出したものは、既に手元のブラウザへ配ってある
+        if from == self.registry.instance_id() {
+            return;
+        }
+        let Ok(frame) = protocol::frame::decode(bytes) else {
+            return;
+        };
+        let is_full = frame.kind == protocol::frame::FrameKind::ScreenFull;
+        if !is_full && frame.kind != protocol::frame::FrameKind::ScreenDiff {
+            return;
+        }
+        let Ok((seq, inner)) = protocol::frame::split_seq(frame.payload) else {
+            return;
+        };
+        let Some(relay) = self
+            .screens
+            .lock()
+            .expect("ロックが壊れていない")
+            .get(&frame.card_id)
+            .cloned()
+        else {
+            // うちでは誰も見ていない。止める指示と行き違ったぶん
+            return;
+        };
+
+        {
+            let mut expected = relay.expected_seq.lock().expect("ロックが壊れていない");
+            if is_full {
+                // 全画面はどこから始まってもよい。**ここが唯一の再開点**
+                relay
+                    .stalled
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                *expected = Some(seq.wrapping_add(1));
+            } else {
+                if relay.stalled.load(std::sync::atomic::Ordering::Relaxed) {
+                    // 出し直しを待っている間の差分は捨てる
+                    return;
+                }
+                match *expected {
+                    Some(next) if next == seq => *expected = Some(seq.wrapping_add(1)),
+                    _ => {
+                        tracing::warn!(
+                            card_id = %frame.card_id,
+                            "画面の番号が飛びました。出し直してもらいます"
+                        );
+                        relay
+                            .stalled
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        *expected = None;
+                        let (cols, rows) = relay.size();
+                        // ロックを持ったまま指示を出さない
+                        drop(expected);
+                        self.request_screen(frame.card_id, cols, rows);
+                        return;
+                    }
+                }
+            }
+        }
+
+        let browser = protocol::frame::encode(frame.kind.to_browser(), frame.card_id, inner);
         let _ = relay.frames.send(Bytes::from(browser));
     }
 
@@ -735,8 +997,11 @@ impl crate::agent::AgentHost for RemoteAgent {
         cols: u16,
         rows: u16,
     ) -> Option<(bytes::Bytes, broadcast::Receiver<bytes::Bytes>)> {
-        // 繋がっていない PC のカードは端末を開けない（開いても永久に空のまま）
-        self.hub.conn_for_card(card_id)?;
+        // 繋がっていない PC のカードは端末を開けない（開いても永久に空のまま）。
+        // **どこかのインスタンスに繋がっていればよい**——うちに繋がっている必要は無い
+        if !self.exists(card_id) {
+            return None;
+        }
         let frames = self.hub.add_viewer(card_id, client_id, cols, rows);
         let blank = bytes::Bytes::from(protocol::frame::encode(
             protocol::frame::FrameKind::PtySnapshot,

@@ -31,12 +31,15 @@ pub fn start(
 ) {
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     let (cmds_tx, cmds_rx) = mpsc::unbounded_channel();
+    let (frames_tx, frames_rx) = mpsc::unbounded_channel();
     tokio::spawn(events_loop(Arc::clone(&registry), events_rx));
     tokio::spawn(cmds_loop(Arc::clone(&hub), Arc::clone(&registry), cmds_rx));
-    tokio::spawn(route(incoming, events_tx, cmds_tx));
+    tokio::spawn(frames_loop(Arc::clone(&hub), frames_rx));
+    tokio::spawn(route(incoming, events_tx, cmds_tx, frames_tx));
     tokio::spawn(watch_state(registry, state));
-    // 「この PC はうちに繋がっている」と記し続ける（設計§9-4）
+    // 「この PC はうちに繋がっている」「このカードをうちで見ている」と記し続ける（§9-4）
     hub.start_presence();
+    hub.start_viewing_lease();
 }
 
 /// 届いたものを、チャネル名で行き先へ振り分ける。
@@ -44,6 +47,7 @@ async fn route(
     mut incoming: mpsc::UnboundedReceiver<BusMessage>,
     events: mpsc::UnboundedSender<BusMessage>,
     cmds: mpsc::UnboundedSender<BusMessage>,
+    frames: mpsc::UnboundedSender<BusMessage>,
 ) {
     while let Some(message) = incoming.recv().await {
         // 名前を読めないものは捨てる。知らない版のインスタンスが増やしたチャネルで
@@ -52,12 +56,24 @@ async fn route(
             events.send(message)
         } else if bus::parse_agent_cmd(&message.channel).is_some() {
             cmds.send(message)
+        } else if bus::parse_card_screen(&message.channel).is_some() {
+            frames.send(message)
         } else {
             continue;
         };
         if sent.is_err() {
             break;
         }
+    }
+}
+
+/// 画面を自分のブラウザへ流す。
+///
+/// **知らせとは別の列**にしてある。知らせは稀で重く（DB を引くことがある）、画面は
+/// 頻繁で軽い——同じ列に並べると、知らせ1件の処理で画面が止まる。
+async fn frames_loop(hub: Arc<AgentHub>, mut frames: mpsc::UnboundedReceiver<BusMessage>) {
+    while let Some(message) = frames.recv().await {
+        hub.deliver_bus_screen(&message.payload);
     }
 }
 

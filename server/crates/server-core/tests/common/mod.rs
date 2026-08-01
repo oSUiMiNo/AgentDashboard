@@ -275,6 +275,39 @@ impl AgentSocket {
         }
     }
 
+    /// しばらく受け取り続けて、条件に合う指示が**来ないこと**を確かめる。
+    ///
+    /// 「何も来ないこと」ではなく「その指示が来ないこと」を見る。他の指示（購読の
+    /// 出し直しや生存確認）は普通に流れているので、素朴に「1通も来ない」で書くと
+    /// **何も検証していないのに落ちる**テストになる。
+    pub async fn expect_none_of(
+        &mut self,
+        window: Duration,
+        what: &str,
+        matches: impl Fn(&ServerToAgent) -> bool,
+    ) {
+        let deadline = tokio::time::Instant::now() + window;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return;
+            }
+            match tokio::time::timeout(remaining, self.socket.next()).await {
+                Ok(Some(Ok(tungstenite::Message::Text(text)))) => {
+                    if let Ok(message) = serde_json::from_str::<ServerToAgent>(&text)
+                        && matches(&message)
+                    {
+                        panic!("{what} が届いてしまいました: {message:?}");
+                    }
+                }
+                Ok(Some(Ok(_))) => continue,
+                // 時間切れ＝来なかった（期待どおり）
+                Err(_) => return,
+                other => panic!("{what} を待っている間に切れました: {other:?}"),
+            }
+        }
+    }
+
     /// 画面や生入力のフレーム（バイナリ）が来るまで受け取り続ける。
     ///
     /// [`Self::wait_for`] は JSON だけを見るので、**base64 で包んで跨いだ入力**を
