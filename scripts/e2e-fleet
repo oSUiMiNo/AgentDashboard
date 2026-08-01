@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# PC を3台つないだ構成を E2E のために起こす（セルフホスト化設計§26 読み替え3）。
+#
+# # なぜ専用に立てるのか
+#
+# 検収の非機能に「複数 PC 対応」があり、確かめたいのは**混線しないこと**——
+# 起動先が入れ替わらない、入力が別の PC へ届かない、1台落としても他が無事、である。
+#
+# これは1台構成の E2E（`scripts/e2e-remote`）には足せない。**PC が2台以上に
+# なると起動フォームに「起動する PC」の選択が現れる**ので、選ばずにボタンを押して
+# いる既存のテストが軒並み落ちる。画面の前提が変わる以上、土台を分けるしかない。
+#
+# # 誰がどこで動くか
+#
+# 全部ホストで動く。**docker は要らない**ので `make e2e` の既定に含めてある——
+# 走らないテストは腐るし、ここで守っているのは配線ではなく画面の振る舞いなので、
+# ふだんの E2E と一緒に流れているのが正しい。
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BIN="${REPO_ROOT}/server/target/debug/agentdashboard"
+AGENT_BIN="${REPO_ROOT}/server/target/debug/agentdashboard-agent"
+FAKE_CLAUDE="${REPO_ROOT}/server/target/debug/fake-claude"
+SERVER_CONFIG="${REPO_ROOT}/web/e2e/fleet-server.toml"
+AGENT_CONFIG="${REPO_ROOT}/web/e2e/fleet-agent.toml"
+STATE="${REPO_ROOT}/web/test-results/fleet"
+BASE_URL="http://127.0.0.1:4177"
+# テストの中だけの値なので伏せる意味は無い
+ACCOUNT="e2e"
+PASSWORD="e2eのあいことば"
+# **台数を変えるのはここだけ。** 設定ファイルは1枚のまま増減できる
+AGENT_COUNT=3
+
+for binary in "${BIN}" "${AGENT_BIN}" "${FAKE_CLAUDE}"; do
+    if [[ ! -x "${binary}" ]]; then
+        echo "エラー: ${binary} がありません。make build-debug を先に実行してください。" >&2
+        exit 1
+    fi
+done
+
+# 前回の記録を消す。**E2E は「まだ何も起動していない」から始まる前提**
+rm -rf "${STATE}"
+mkdir -p "${STATE}/server"
+
+pids=()
+cleanup() {
+    # テストの中で起こし直したぶんは pid が変わっている（`web/e2e/fleet-control.ts`）
+    # ので、控えのほうも見る。**畳み忘れると、次回の起動で余分な PC が現れる**
+    for pidfile in "${STATE}"/agent-*.pid; do
+        [[ -f "${pidfile}" ]] && kill "$(cat "${pidfile}")" 2>/dev/null || true
+    done
+    for pid in "${pids[@]:-}"; do
+        [[ -n "${pid}" ]] && kill "${pid}" 2>/dev/null || true
+    done
+}
+# どれか1つでも生き残ると、次の起動がポートと再開位置で衝突する
+trap cleanup EXIT INT TERM
+
+# 1. トークンを**PC ごとに1本**発行する。手順書がそう勧めている形と揃えてある
+#    （失くしたときにその1台だけを止められる）。サーバの起動より先でよい——
+#    発行は記録を直に触るので、待ち受けている必要が無い
+tokens=()
+for index in $(seq 1 "${AGENT_COUNT}"); do
+    token="$("${BIN}" --config "${SERVER_CONFIG}" pair-token \
+        --account "${ACCOUNT}" --label "検証PC-${index}" | tr -d '[:space:]')"
+    if [[ -z "${token}" ]]; then
+        echo "エラー: 検証PC-${index} のペアリングトークンを発行できませんでした。" >&2
+        exit 1
+    fi
+    tokens+=("${token}")
+done
+
+# 2. サーバ（PC 側を持たない）
+"${BIN}" --config "${SERVER_CONFIG}" --mode server &
+server_pid=$!
+pids+=("${server_pid}")
+
+# **待ちに使うのは `/api/me`。** `/api/sessions` は鍵の向こうなので、待ちに使うと
+# 「まだ起きていない」と「ログインしていない」が同じ 401 になり、永久に待つ
+for _ in $(seq 1 100); do
+    if curl -sf "${BASE_URL}/api/me" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+
+# 3. 最初の管理者を作る。**開いているのは最初の一度きり**なので、記録を消して
+#    起こし直すこのスクリプトでは毎回ここを通る
+if ! curl -sf -X POST "${BASE_URL}/api/setup" \
+    -H 'Content-Type: application/json' \
+    -d "{\"name\":\"${ACCOUNT}\",\"password\":\"${PASSWORD}\"}" >/dev/null; then
+    echo "エラー: 管理者を作れませんでした。" >&2
+    exit 1
+fi
+
+# 4. エージェントを台数ぶん起こす。**台ごとに違うのは3つだけ**で、どれも
+#    環境変数で上書きする（設定ファイルは1枚）。
+#
+#    置き場所を分けるのが要点——同じ場所を指すと、再開位置を3プロセスで
+#    取り合うことになる
+for index in $(seq 1 "${AGENT_COUNT}"); do
+    AGENTDASHBOARD_CLAUDE_BIN="${FAKE_CLAUDE}" \
+        AGENTDASHBOARD_PAIRING_TOKEN="${tokens[index - 1]}" \
+        AGENTDASHBOARD_AGENT_NAME="検証PC-${index}" \
+        AGENTDASHBOARD_STATE_DIR="${STATE}/agent-${index}" \
+        AGENTDASHBOARD_CLAUDE_SETTINGS_PATH="${STATE}/agent-${index}/claude-settings.json" \
+        "${AGENT_BIN}" --config "${AGENT_CONFIG}" &
+    agent_pid=$!
+    pids+=("${agent_pid}")
+    # 特定の1台だけを落とす検証（`web/e2e/fleet-control.ts`）のための控え。
+    # **落とさずには確かめられない**——他の2台が無事であることは、正常に
+    # 動いている相手からは一度も引き出せない
+    echo "${agent_pid}" > "${STATE}/agent-${index}.pid"
+done
+
+# 起こし直す側へ渡す控え。**同じトークンで繋ぎ直す**ことが要る——新しく発行すると
+# 別の PC として登録され、「切れた PC が戻ってきた」ではなく「4台目が来た」になる
+{
+    printf '{\n'
+    printf '  "repoRoot": "%s",\n' "${REPO_ROOT}"
+    printf '  "agentBin": "%s",\n' "${AGENT_BIN}"
+    printf '  "fakeClaude": "%s",\n' "${FAKE_CLAUDE}"
+    printf '  "agentConfig": "%s",\n' "${AGENT_CONFIG}"
+    printf '  "stateDir": "%s",\n' "${STATE}"
+    printf '  "agentCount": %s,\n' "${AGENT_COUNT}"
+    printf '  "tokens": ['
+    for index in $(seq 1 "${AGENT_COUNT}"); do
+        [[ "${index}" -gt 1 ]] && printf ', '
+        printf '"%s"' "${tokens[index - 1]}"
+    done
+    printf ']\n}\n'
+} > "${STATE}/env.json"
+
+# **待つのはサーバだけ。** エージェントも待つ形にすると、テストが1台を落とした
+# 瞬間にこのスクリプトごと終わり、他の2台まで道連れになる——確かめたいのは
+# まさに「1台落としても他が無事」なので、それでは何も見られない
+wait "${server_pid}"

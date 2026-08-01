@@ -1,0 +1,12 @@
+# PC を3台つないだ検証：**サーバ側**（セルフホスト化設計§26 読み替え3）。
+#
+# 役どころは `remote-server.toml` と同じ（PC 側を持たないサーバ）で、違うのは
+# **繋いでくる PC が3台居る**ことだけ。PC が2台以上になると起動フォームに
+# 「起動する PC」の選択が現れるので、1台構成の E2E とは画面の前提が変わる。
+# だから同じサーバを共有せず、ポートも置き場所も分けてある。
+
+port = 4177
+
+# 記録の置き場所。`scripts/e2e-fleet` が起動のたびに消す
+state_dir = "web/test-results/fleet/server"
+database_url = "sqlite://web/test-results/fleet/server/dashboard.db"

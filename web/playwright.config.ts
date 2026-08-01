@@ -44,8 +44,9 @@ export default defineConfig({
     {
       name: 'chromium',
       use: { ...devices['Desktop Chrome'] },
-      // セルフホスト構成のぶんは別のサーバ（4174）、2台構成のぶんは compose（4175）
-      testIgnore: /(remote|account|compose)\.spec\.ts/,
+      // セルフホスト構成のぶんは別のサーバ（4174）、2台構成のぶんは compose（4175）、
+      // PC 3台のぶんはさらに別のサーバ（4177）
+      testIgnore: /(remote|account|compose|fleet)\.spec\.ts/,
     },
     {
       // 別の PC のセッションを、実物のブラウザで見る（セルフホスト化設計§7）。
@@ -70,6 +71,14 @@ export default defineConfig({
       name: 'chromium-compose',
       use: { ...devices['Desktop Chrome'], baseURL: 'http://127.0.0.1:4175' },
       testMatch: /compose\.spec\.ts/,
+    },
+    {
+      // PC を3台つないだ構成（セルフホスト化設計§26 読み替え3）。**PC が2台以上に
+      // なると起動フォームに「起動する PC」の選択が現れる**ので、1台構成の画面とは
+      // 前提が違う。混線しないことは、この配置でしか確かめられない
+      name: 'chromium-fleet',
+      use: { ...devices['Desktop Chrome'], baseURL: 'http://127.0.0.1:4177' },
+      testMatch: /fleet\.spec\.ts/,
     },
   ],
   // compose の検証（`make e2e-compose`）では**1つも起こさない**。
@@ -109,6 +118,19 @@ export default defineConfig({
       cwd: repoRoot,
       env: { RUST_LOG: 'info' },
       url: 'http://127.0.0.1:4174',
+      reuseExistingServer: !process.env.CI,
+      stdout: 'pipe',
+      stderr: 'pipe',
+      timeout: 60_000,
+    },
+    {
+      // PC を3台つないだ構成。**docker が要らない**ので既定に含めてある
+      // （compose 系と違うのはここ）。トークンを台数ぶん発行してから繋ぐという
+      // 順序を持つので、こちらも1本のスクリプトに寄せてある
+      command: `${repoRoot}/scripts/e2e-fleet`,
+      cwd: repoRoot,
+      env: { RUST_LOG: 'info' },
+      url: 'http://127.0.0.1:4177',
       reuseExistingServer: !process.env.CI,
       stdout: 'pipe',
       stderr: 'pipe',

@@ -107,9 +107,31 @@ export const REMOTE_PASSWORD = 'e2eのあいことば'
 export async function spawnSession(
   page: Page,
   cwd: string = WORK_DIR,
+  /**
+   * 起動先の PC の名前。
+   *
+   * **繋がっている PC が2台以上のときだけ選べる**（1台なら選択欄そのものが
+   * 出ない。設計§5-1）。省略すると選ばずに押すので、2台以上の構成では
+   * サーバに断られる——そうなるのが正しい（黙って1台目へ送ると、意図しない
+   * PC で本物の claude が起動する）。
+   */
+  agentName?: string,
 ): Promise<Locator> {
-  const before = await page.getByTestId('session-tile').count()
+  // **数える前に、描き終わるのを待つ。** 一覧へ移った直後は小窓がまだ1本も
+  // 描かれておらず、そこで数えると 0 が返る。すると起こしたセッションを
+  // `.nth(0)` で拾うことになり、**前からあったカードを掴む**。
+  //
+  // 症状は「起こしたばかりのセッションが、なぜか前の値を持っている」で、
+  // 原因までまず辿れない。しかも実行環境の速さ次第で出たり出なかったりする
+  // （E2E の土台を1つ増やしたら出た）。真実は常にサーバ側にあるので、
+  // そちらの枚数に追いつくまで待ってから数える（`archiveAll` と同じ理由）
+  const before = (await serverCardIds(page)).length
+  await expect(page.getByTestId('session-tile')).toHaveCount(before)
+
   await page.getByTestId('cwd-input').fill(cwd)
+  if (agentName !== undefined) {
+    await page.getByTestId('spawn-target').selectOption({ label: agentName })
+  }
   await page.locator('[data-testid="spawn-button"][data-mode=""]').click()
   await expect(page.getByTestId('session-tile')).toHaveCount(before + 1)
   return page.getByTestId('session-tile').nth(before)
