@@ -63,7 +63,7 @@ impl AgentHost for LocalAgent {
 
     /// **宛先は見ない。** ローカルモードに PC という単位は存在しないので、
     /// 指名されていたとしても送る先はここしか無い（画面も選択肢を出さない）。
-    fn spawn(&self, request: server_core::agent::SpawnRequest<'_>) -> Result<(), String> {
+    async fn spawn(&self, request: server_core::agent::SpawnRequest<'_>) -> Result<(), String> {
         self.manager
             .spawn_with_mode(request.cwd, request.permission_mode)
             .map(|_| ())

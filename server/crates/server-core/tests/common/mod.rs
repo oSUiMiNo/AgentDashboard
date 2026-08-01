@@ -274,6 +274,25 @@ impl AgentSocket {
             }
         }
     }
+
+    /// 画面や生入力のフレーム（バイナリ）が来るまで受け取り続ける。
+    ///
+    /// [`Self::wait_for`] は JSON だけを見るので、**base64 で包んで跨いだ入力**を
+    /// 確かめるにはこちらが要る。
+    pub async fn wait_for_binary(&mut self, what: &str) -> Vec<u8> {
+        let deadline = tokio::time::Instant::now() + AGENT_TIMEOUT;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let next = tokio::time::timeout(remaining, self.socket.next())
+                .await
+                .unwrap_or_else(|_| panic!("{AGENT_TIMEOUT:?} 以内に {what} が届きませんでした"));
+            match next {
+                Some(Ok(tungstenite::Message::Binary(bytes))) => return bytes.to_vec(),
+                Some(Ok(_)) => continue,
+                other => panic!("{what} を待っている間に切れました: {other:?}"),
+            }
+        }
+    }
 }
 
 pub fn hello(name: &str) -> AgentMessage {

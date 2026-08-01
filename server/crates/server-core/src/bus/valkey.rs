@@ -131,6 +131,16 @@ impl Bus for ValkeyBus {
         self.finish(result)
     }
 
+    async fn lease_members(&self, key: &str, newer_than_ms: i64) -> Result<Vec<String>, BusError> {
+        let mut conn = self.commands.clone();
+        // 古いものを消さずに読み飛ばす。**掃除は持ち主の仕事**で、読む側が消すと
+        // 一瞬遅れているだけの相手を消してしまう
+        let result = conn
+            .zrangebyscore(key, format!("({newer_than_ms}"), "+inf")
+            .await;
+        self.finish(result)
+    }
+
     async fn lease_sweep(&self, key: &str, older_than_ms: i64) -> Result<u64, BusError> {
         let mut conn = self.commands.clone();
         let result = async {

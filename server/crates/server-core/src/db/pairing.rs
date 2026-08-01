@@ -167,6 +167,9 @@ pub async fn ensure_agent(
         created_at: Set(now_ms()),
         last_seen_at: Set(Some(now_ms())),
         model_table: Set(None),
+        // 名乗りはこの直後に届く。ここで空の表を入れると「まだ名乗っていない」と
+        // 「何もできない PC」が同じ形になる
+        capabilities: Set(None),
     })
     .exec(db)
     .await?;
@@ -218,6 +221,43 @@ pub async fn model_tables(
     Ok(rows
         .into_iter()
         .filter_map(|row| row.model_table.map(|table| (AgentId(row.id), table)))
+        .collect())
+}
+
+/// PC が名乗った「できること」を保存する（設計§9-2）。
+///
+/// 名乗りのたびに上書きする。**CLI を更新すれば選択肢も変わる**ので、
+/// 古い値を残すと出せないモードが選べてしまう。
+pub async fn save_capabilities(
+    db: &DatabaseConnection,
+    agent_id: AgentId,
+    capabilities: serde_json::Value,
+) -> Result<(), DbErr> {
+    entity::agents::Entity::update_many()
+        .col_expr(
+            entity::agents::Column::Capabilities,
+            sea_orm::sea_query::Expr::value(capabilities),
+        )
+        .filter(entity::agents::Column::Id.eq(agent_id.0))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
+/// そのアカウントの PC が名乗った「できること」を全部集める。
+///
+/// **他のアカウントの PC は含めない**（§8-6）。
+pub async fn capabilities_of(
+    db: &DatabaseConnection,
+    account_id: Uuid,
+) -> Result<Vec<(AgentId, serde_json::Value)>, DbErr> {
+    let rows = entity::agents::Entity::find()
+        .filter(entity::agents::Column::AccountId.eq(account_id))
+        .all(db)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| row.capabilities.map(|value| (AgentId(row.id), value)))
         .collect())
 }
 

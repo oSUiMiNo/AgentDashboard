@@ -205,6 +205,22 @@ impl Bus for MemoryBus {
         Ok(())
     }
 
+    async fn lease_members(&self, key: &str, newer_than_ms: i64) -> Result<Vec<String>, BusError> {
+        Ok(self
+            .broker
+            .lease()?
+            .leases
+            .get(key)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(|(_, at)| **at > newer_than_ms)
+                    .map(|(member, _)| member.clone())
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
     async fn lease_sweep(&self, key: &str, older_than_ms: i64) -> Result<u64, BusError> {
         let mut inner = self.broker.lease()?;
         let entries = inner.leases.entry(key.to_string()).or_default();

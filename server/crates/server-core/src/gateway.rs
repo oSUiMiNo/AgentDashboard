@@ -20,6 +20,7 @@
 //! **見ているのが申告ではなく接続だから**（§8-5）。
 
 use crate::{
+    bus::{self, BusState},
     db::{self, pairing},
     registry::{ReportOrigin, SessionRegistry},
 };
@@ -31,6 +32,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use base64::Engine as _;
 use bytes::Bytes;
 use futures_util::{SinkExt as _, StreamExt as _};
 use protocol::{
@@ -65,6 +67,14 @@ const PING_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 名乗り（Hello）を待つ上限。黙り込む接続を溜めないための門。
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 「この PC はうちに繋がっている」と記し直す間隔（設計§9-4）。
+pub const PRESENCE_INTERVAL: Duration = Duration::from_secs(10);
+/// 記してから、これだけ経った印は死んだものとみなす（ミリ秒）。
+///
+/// 記す間隔の3倍にしてある。1回の取りこぼしで消えると、**繋がっているのに
+/// 「居ない」と見える**時間ができる。
+const PRESENCE_TTL_MS: i64 = 30_000;
 
 /// 繋がっている PC 1台ぶん。
 pub struct AgentConn {
@@ -112,6 +122,45 @@ impl AgentConn {
     pub fn disconnect(&self) {
         let _ = self.outbound.try_send(Message::Close(None));
     }
+}
+
+/// その PC の CLI ができること（設計§9-2）。
+///
+/// 名乗り（Hello）で届き、`agents.capabilities` へ JSON のまま入る。**インスタンスを
+/// 跨いでも見えるように**保存する——メモリにだけ持つと、ブラウザが繋がったインスタンスに
+/// その PC が居ないときに起動ボタンの選択肢が空になる。
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Capabilities {
+    #[serde(default)]
+    pub available_modes: Vec<PermissionMode>,
+    #[serde(default)]
+    pub always_bypass_permissions: bool,
+}
+
+/// 他インスタンスから回ってくる、PC への指示（設計§9-2 の `agent:{id}:cmd`）。
+///
+/// # なぜ A2S の型をそのまま流さないのか
+///
+/// 生の入力（キー打鍵）は JSON に包まずバイナリで運ぶ約束（設計§4-3）なので、
+/// `ServerToAgent` には入る場所が無い。**そのために A2S へ変種を足すと、
+/// エージェントが知らなくてよいものを共有境界へ持ち込む**ことになる。ここは
+/// サーバ同士の内輪の取り決めなので、server-core の中で完結させる。
+///
+/// 生入力は数十バイトなので base64 で内包してよい（設計§9-2 の但し書き。
+/// base64 を禁じているのは大容量の PTY 出力に対する規約）。
+///
+/// # 種別を「隣」に置く理由
+///
+/// 中に入る [`ServerToAgent`] も種別を `t` という名前で持っている。同じ入れ物へ
+/// 混ぜる書き方（internally tagged）にすると**内側の `t` が外側の `t` を上書きし、
+/// 読み直せなくなる**。しかもエラーにならず、届かないだけという形で出る。
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "body", rename_all = "snake_case")]
+pub enum AgentCommand {
+    /// JSON の指示そのまま
+    Message(Box<ServerToAgent>),
+    /// PTY への生入力（フレームごと base64）
+    Input { data: String },
 }
 
 /// カード1枚ぶんの画面の中継（設計§7-4）。
@@ -173,6 +222,136 @@ impl AgentHub {
 
     pub fn db(&self) -> &sea_orm::DatabaseConnection {
         &self.db
+    }
+
+    /// **どこかのインスタンスに**繋がっている PC を全部（設計§9-4）。
+    ///
+    /// 自分の接続表と、連絡係に置かれた印を合わせる。印は置いた側が10秒ごとに
+    /// 記し直すので、**インスタンスが異常終了しても古くなって自然に消える**——
+    /// 落ちた瞬間に誰かが片付ける必要が無いのがこの持ち方の狙い。
+    pub async fn online(&self) -> Vec<AgentId> {
+        let mut ids: Vec<AgentId> = self.connected().iter().map(|conn| conn.agent_id).collect();
+        let Some(bus) = self.registry.bus() else {
+            return ids;
+        };
+        let cutoff = db::now_ms() - PRESENCE_TTL_MS;
+        match bus.lease_members(bus::agents_online(), cutoff).await {
+            Ok(members) => {
+                for member in members {
+                    let Ok(id) = member.parse().map(AgentId) else {
+                        continue;
+                    };
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
+                }
+            }
+            // 読めないなら自分の分だけで答える。**繋がっている PC を隠すより、
+            // 他インスタンスの分が見えないほうが害が小さい**（操作は断られるだけ）
+            Err(err) => tracing::warn!("繋がっている PC を数えられません: {err}"),
+        }
+        ids
+    }
+
+    /// そのアカウントの、どこかに繋がっている PC。
+    ///
+    /// 印はアカウントで分けていないので、**DB の `agents` と突き合わせて絞る**
+    /// （§8-6 の絞り込みは DB 側で効かせる）。
+    pub async fn online_of(&self, account_id: Uuid) -> Vec<AgentId> {
+        let online = self.online().await;
+        let mine = pairing::agent_names(&self.db, account_id)
+            .await
+            .unwrap_or_default();
+        mine.into_iter()
+            .map(|(id, _)| id)
+            .filter(|id| online.contains(id))
+            .collect()
+    }
+
+    /// 自分の接続表にある PC を「繋がっている」と記し直す。
+    async fn touch_presence(&self) {
+        let Some(bus) = self.registry.bus() else {
+            return;
+        };
+        let now = db::now_ms();
+        for conn in self.connected() {
+            if let Err(err) = bus
+                .lease_touch(bus::agents_online(), &conn.agent_id.0.to_string(), now)
+                .await
+            {
+                tracing::warn!(agent_id = %conn.agent_id, "在席を記せません: {err}");
+            }
+        }
+    }
+
+    /// 印を消す（切断したとき）。
+    async fn release_presence(&self, agent_id: AgentId) {
+        let Some(bus) = self.registry.bus() else {
+            return;
+        };
+        let _ = bus
+            .lease_release(bus::agents_online(), &agent_id.0.to_string())
+            .await;
+    }
+
+    /// 在席を記し続ける見張りを始める（連絡係が居るときだけ）。
+    pub fn start_presence(self: &Arc<Self>) {
+        if self.registry.bus().is_none() {
+            return;
+        }
+        let hub = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(PRESENCE_INTERVAL);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                hub.touch_presence().await;
+            }
+        });
+    }
+
+    /// 他インスタンスに繋がっている PC へ指示を回す（設計§9-2）。
+    ///
+    /// **黙って落とさない。** 届かない理由を返せば画面に出る——押したのに何も
+    /// 起きない状態が一番たちが悪い。
+    pub fn relay_across(&self, agent_id: AgentId, command: AgentCommand) -> Result<(), String> {
+        let Some(bus) = self.registry.bus() else {
+            return Err(NOT_CONNECTED.to_string());
+        };
+        if *bus.state().borrow() == BusState::Degraded {
+            return Err(
+                "この PC は別のインスタンスに繋がっています（連絡係が切れているため、いま指示を届けられません）"
+                    .to_string(),
+            );
+        }
+        bus.publish(
+            &bus::agent_cmd(agent_id),
+            bus::encode_json(self.registry.instance_id(), &command),
+        );
+        Ok(())
+    }
+
+    /// 他インスタンスから回ってきた指示を、自分が持っている接続へ渡す。
+    ///
+    /// その PC を持っていなければ**何もしない**。宛先ごとにチャネルが分かれているので
+    /// 通常は届かないが、置き換わった直後などに行き違うことがある。
+    pub fn deliver_command(&self, agent_id: AgentId, command: AgentCommand) {
+        let Some(conn) = self.conn(agent_id) else {
+            return;
+        };
+        match command {
+            AgentCommand::Message(message) => {
+                conn.send(&message);
+            }
+            AgentCommand::Input { data } => {
+                match base64::engine::general_purpose::STANDARD.decode(&data) {
+                    Ok(bytes) => {
+                        conn.send_binary(bytes);
+                    }
+                    Err(err) => tracing::warn!("跨ぎで届いた入力を読めません: {err}"),
+                }
+            }
+        }
     }
 
     /// 繋がっている PC を全部。
@@ -435,12 +614,35 @@ impl RemoteAgent {
     }
 
     /// そのカードを持つ PC へ1つ送る。居なければ理由を返す。
+    ///
+    /// **自分の接続表に無くても諦めない**（設計§9-2）。記録が「繋がっている」と
+    /// 言うなら、その PC は別のインスタンスに繋がっている——連絡係へ回せば届く。
     fn relay(&self, card_id: CardId, message: ServerToAgent) -> Result<(), String> {
-        let Some(conn) = self.hub.conn_for_card(card_id) else {
-            return Err(NOT_CONNECTED.to_string());
-        };
-        conn.send(&message);
-        Ok(())
+        if let Some(conn) = self.hub.conn_for_card(card_id) {
+            conn.send(&message);
+            return Ok(());
+        }
+        let agent_id = self.remote_agent_of(card_id)?;
+        self.hub
+            .relay_across(agent_id, AgentCommand::Message(Box::new(message)))
+    }
+
+    /// そのカードを持つ PC が**別のインスタンスに**繋がっているなら、その PC。
+    ///
+    /// 記録の鮮度の印を見る。これは報告が回ってきているかどうかで、**どのインスタンスに
+    /// 繋がっているかまでは分からない**——分からなくてよく、宛先ごとのチャネルへ
+    /// 流せば持っているインスタンスだけが拾う。
+    fn remote_agent_of(&self, card_id: CardId) -> Result<AgentId, String> {
+        let meta = self
+            .hub
+            .registry
+            .get(card_id)
+            .map(|record| record.meta())
+            .ok_or_else(|| NOT_CONNECTED.to_string())?;
+        match (meta.agent_id, meta.agent_connected) {
+            (Some(agent_id), true) => Ok(agent_id),
+            _ => Err(NOT_CONNECTED.to_string()),
+        }
     }
 }
 
@@ -449,11 +651,18 @@ const NOT_CONNECTED: &str = "セッションが見つかりません（PC が繋
 
 #[async_trait::async_trait]
 impl crate::agent::AgentHost for RemoteAgent {
+    /// そのカードを**どこかのインスタンスが**持っているか。
+    ///
+    /// 見るのは自分の接続表ではなく記録の鮮度の印（設計§9-2）。接続表を見ると、
+    /// **別のインスタンスに繋がっている PC のカードが全部「無い」ことになる**。
     fn exists(&self, card_id: CardId) -> bool {
-        self.hub.conn_for_card(card_id).is_some()
+        self.hub
+            .registry
+            .get(card_id)
+            .is_some_and(|record| record.meta().agent_connected)
     }
 
-    fn spawn(&self, request: crate::agent::SpawnRequest<'_>) -> Result<(), String> {
+    async fn spawn(&self, request: crate::agent::SpawnRequest<'_>) -> Result<(), String> {
         let message = ServerToAgent::Spawn {
             cwd: request.cwd.to_string(),
             permission_mode: request.permission_mode,
@@ -463,31 +672,42 @@ impl crate::agent::AgentHost for RemoteAgent {
         // **他人の PC は「繋がっていない」と同じ扱い**（設計§8-6）——言い分けると、
         // IDの総当たりで他人の PC の存在を調べられる
         if let Some(target) = request.target {
-            let Some(conn) = self
+            if let Some(conn) = self
                 .hub
                 .conn(target)
                 .filter(|conn| conn.account_id == request.account_id)
-            else {
+            {
+                conn.send(&message);
+                return Ok(());
+            }
+            // 自分の接続表に無くても、別のインスタンスに繋がっていることがある
+            if !self
+                .hub
+                .online_of(request.account_id)
+                .await
+                .contains(&target)
+            {
                 return Err("指定された PC が繋がっていません".to_string());
-            };
-            conn.send(&message);
-            return Ok(());
+            }
+            return self
+                .hub
+                .relay_across(target, AgentCommand::Message(Box::new(message)));
         }
 
         // 指名が無いときは、**選ぶ余地が無い場合だけ**通す。黙って1台目へ送ると、
         // 意図しない PC で本物の claude が起動する。数えるのは**自分の PC だけ**で、
         // 他人の PC が繋がっているせいで「選んでください」と言われるのはおかしい
-        let connected: Vec<_> = self
-            .hub
-            .connected()
-            .into_iter()
-            .filter(|conn| conn.account_id == request.account_id)
-            .collect();
-        match connected.len() {
-            1 => {
-                connected[0].send(&message);
-                Ok(())
-            }
+        let online = self.hub.online_of(request.account_id).await;
+        match online.len() {
+            1 => match self.hub.conn(online[0]) {
+                Some(conn) => {
+                    conn.send(&message);
+                    Ok(())
+                }
+                None => self
+                    .hub
+                    .relay_across(online[0], AgentCommand::Message(Box::new(message))),
+            },
             0 => Err("繋がっている PC がありません".to_string()),
             many => Err(format!(
                 "どの PC で起動するか選んでください（{many} 台が繋がっています）"
@@ -542,16 +762,21 @@ impl crate::agent::AgentHost for RemoteAgent {
     }
 
     fn write_input(&self, card_id: CardId, bytes: &[u8]) -> Result<(), String> {
-        let Some(conn) = self.hub.conn_for_card(card_id) else {
-            return Err(NOT_CONNECTED.to_string());
-        };
         // 生入力は JSON に包まずバイナリのまま運ぶ（設計§4-3）
-        conn.send_binary(protocol::frame::encode(
-            protocol::frame::FrameKind::PtyInput,
-            card_id,
-            bytes,
-        ));
-        Ok(())
+        let framed = protocol::frame::encode(protocol::frame::FrameKind::PtyInput, card_id, bytes);
+        if let Some(conn) = self.hub.conn_for_card(card_id) {
+            conn.send_binary(framed);
+            return Ok(());
+        }
+        // 跨ぐときだけ base64 で包む（設計§9-2）。1打鍵ぶんの数十バイトなので、
+        // 増える3割は問題にならない——**画面（数十KB）と同じ扱いにしない**のが要点
+        let agent_id = self.remote_agent_of(card_id)?;
+        self.hub.relay_across(
+            agent_id,
+            AgentCommand::Input {
+                data: base64::engine::general_purpose::STANDARD.encode(&framed),
+            },
+        )
     }
 
     fn resize(&self, card_id: CardId, cols: u16, rows: u16) {
@@ -737,6 +962,22 @@ async fn agent_loop(
         }
     };
 
+    // 名乗った中身を残す。**接続を持っていないインスタンスからも見えるように**
+    // （設計§9-2）——ここを飛ばすと、ブラウザが別のインスタンスに繋がっているとき
+    // 起動ボタンの選択肢が空になる
+    let capabilities = Capabilities {
+        available_modes: available_modes.clone(),
+        always_bypass_permissions,
+    };
+    match serde_json::to_value(&capabilities) {
+        Ok(value) => {
+            if let Err(err) = pairing::save_capabilities(&hub.db, agent_id, value).await {
+                tracing::warn!(%agent_id, "PC の名乗りを保存できません: {err}");
+            }
+        }
+        Err(err) => tracing::error!("名乗りをシリアライズできません: {err}"),
+    }
+
     let conn = Arc::new(AgentConn {
         agent_id,
         account_id,
@@ -773,6 +1014,15 @@ async fn agent_loop(
     // まだ見られている端末があれば、画面を出し直してもらう（§6-4）。エージェントは
     // 切れた時点で全部止めているので、**こちらから頼まないと画面が戻らない**
     hub.resubscribe_screens(agent_id);
+    // 他のインスタンスからも「この PC は繋がっている」と見えるようにする（§9-4）。
+    // 見張りの1周（10秒）を待たずに記すのは、**繋いだ直後に起動できない時間**を
+    // 作らないため
+    hub.touch_presence().await;
+    if let Some(bus) = hub.registry.bus() {
+        // この PC 宛ての指示を受け取る（§9-2）。ブラウザは別のインスタンスに
+        // 繋がっていてよい
+        bus.subscribe(&bus::agent_cmd(agent_id));
+    }
 
     let mut ping = tokio::time::interval(PING_INTERVAL);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -807,6 +1057,10 @@ async fn agent_loop(
     if hub.unregister(&conn) {
         // 置き換えられた古い接続は掃除しない（新しい接続が生きているため）
         hub.registry.set_agent_live(agent_id, false);
+        hub.release_presence(agent_id).await;
+        if let Some(bus) = hub.registry.bus() {
+            bus.unsubscribe(&bus::agent_cmd(agent_id));
+        }
         tracing::info!(%agent_id, %agent_name, "PC が切断しました");
     }
     drop(outbound);
@@ -1034,5 +1288,43 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer  "));
         assert_eq!(bearer_token(&headers), None, "空のトークンは無いのと同じ");
+    }
+}
+
+#[cfg(test)]
+mod envelope_tests {
+    #![allow(non_snake_case)]
+
+    use super::*;
+
+    #[test]
+    fn 指示の封筒は中身ごと往復する() {
+        // **回帰テスト。** 種別の名前が中の型とぶつかると、書けるのに読めないという
+        // 形で壊れる——エラーは出ず、指示が届かないだけになる
+        let command = AgentCommand::Message(Box::new(ServerToAgent::SendInput {
+            card_id: CardId::new(),
+            text: "こんにちは".to_string(),
+        }));
+        let bytes = bus::encode_json(Uuid::new_v4(), &command);
+        let (_, back) = bus::decode_json::<AgentCommand>(&bytes).expect("読めること");
+        match (command, back) {
+            (AgentCommand::Message(before), AgentCommand::Message(after)) => {
+                assert_eq!(before, after)
+            }
+            (before, after) => panic!("種別が変わっています: {before:?} → {after:?}"),
+        }
+    }
+
+    #[test]
+    fn 生入力の封筒も往復する() {
+        let command = AgentCommand::Input {
+            data: "AAEC".to_string(),
+        };
+        let bytes = bus::encode_json(Uuid::new_v4(), &command);
+        let (_, back) = bus::decode_json::<AgentCommand>(&bytes).expect("読めること");
+        match back {
+            AgentCommand::Input { data } => assert_eq!(data, "AAEC"),
+            other => panic!("種別が変わっています: {other:?}"),
+        }
     }
 }

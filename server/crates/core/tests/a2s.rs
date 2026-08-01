@@ -553,6 +553,7 @@ async fn ブラウザからの指示が_PC_まで届く() {
             cwd: &a2s.dir.to_string_lossy(),
             permission_mode: None,
         })
+        .await
         .expect("起動の指示を出せること");
 
     let listed = a2s

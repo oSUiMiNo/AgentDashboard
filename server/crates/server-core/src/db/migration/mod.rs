@@ -7,6 +7,7 @@
 //! 冪等なので、既に適用済みの環境で再実行しても何も起きない。
 
 mod m20260731_000001_init;
+mod m20260801_000002_agent_capabilities;
 
 use sea_orm_migration::prelude::*;
 
@@ -15,6 +16,9 @@ pub struct Migrator;
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![Box::new(m20260731_000001_init::Migration)]
+        vec![
+            Box::new(m20260731_000001_init::Migration),
+            Box::new(m20260801_000002_agent_capabilities::Migration),
+        ]
     }
 }

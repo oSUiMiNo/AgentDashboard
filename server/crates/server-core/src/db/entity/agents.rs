@@ -22,6 +22,12 @@ pub struct Model {
     pub last_seen_at: Option<i64>,
     /// モデル表（正式名⇔通称・別名の実測解決先）。**フェーズ3 で中身が入る。**
     pub model_table: Option<Json>,
+    /// その PC の CLI ができること（受け付ける権限モード・起動ボタンのトグル）。
+    ///
+    /// 名乗り（Hello）で届く。**インスタンスを跨いでも見えるように**ここへ置く——
+    /// メモリにだけ持つと、ブラウザが繋がったインスタンスにその PC が居ないときに
+    /// 起動ボタンの選択肢が空になる（設計§9-2）。まだ名乗っていない PC は `None`
+    pub capabilities: Option<Json>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

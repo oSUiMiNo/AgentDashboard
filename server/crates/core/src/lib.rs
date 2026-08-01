@@ -162,7 +162,12 @@ pub async fn serve_server(config: Config) -> anyhow::Result<()> {
     let hub = AgentHub::new(db, Arc::clone(&registry));
 
     if let Some(bus) = &bus {
-        server_core::cluster::start(Arc::clone(&registry), incoming_rx, bus.state());
+        server_core::cluster::start(
+            Arc::clone(&registry),
+            Arc::clone(&hub),
+            incoming_rx,
+            bus.state(),
+        );
     }
 
     let agent: Arc<dyn server_core::agent::AgentHost> =

@@ -66,7 +66,10 @@ pub trait AgentHost: Send + Sync + 'static {
     /// `target` はどの PC で起こすか（設計§5-1）。**ローカルモードは常に `None`**
     /// （PC という単位が無い）。セルフホストで `None` が来たら、繋がっているのが
     /// 1台のときだけ通す——黙って1台目へ送ると、意図しない PC で本物の claude が動く。
-    fn spawn(&self, request: SpawnRequest<'_>) -> Result<(), String>;
+    ///
+    /// **待つ形にしてある**のは、繋がっている PC を数えるのに連絡係と DB を引く
+    /// ことがあるため（設計§9-4）。ローカルモードでは即座に返る。
+    async fn spawn(&self, request: SpawnRequest<'_>) -> Result<(), String>;
     fn kill(&self, card_id: CardId) -> Result<(), String>;
     fn archive(&self, card_id: CardId) -> Result<(), String>;
 

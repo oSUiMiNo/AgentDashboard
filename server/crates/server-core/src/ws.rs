@@ -281,12 +281,16 @@ async fn handle_request(
             cwd,
             permission_mode,
             agent_id,
-        } => match state.agent.spawn(crate::agent::SpawnRequest {
-            account_id: identity.account_id,
-            target: agent_id,
-            cwd: &cwd,
-            permission_mode,
-        }) {
+        } => match state
+            .agent
+            .spawn(crate::agent::SpawnRequest {
+                account_id: identity.account_id,
+                target: agent_id,
+                cwd: &cwd,
+                permission_mode,
+            })
+            .await
+        {
             // 起動できた場合の通知は一覧の購読経由で届くので、ここでは何もしない
             Ok(_) => {}
             Err(message) => {

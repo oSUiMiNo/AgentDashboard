@@ -93,6 +93,12 @@ pub trait Bus: Send + Sync + 'static {
     /// 自分の印を消す（見るのをやめた）。
     async fn lease_release(&self, key: &str, member: &str) -> Result<(), BusError>;
 
+    /// 生きている印だけを名前で取り出す（掃除はしない）。
+    ///
+    /// 数えるだけでは足りない相手がある——**どの PC が繋がっているか**は、
+    /// 数ではなく名前で要る（設計§9-2 の `agent:{id}:cmd` の宛先探し）。
+    async fn lease_members(&self, key: &str, newer_than_ms: i64) -> Result<Vec<String>, BusError>;
+
     /// 古い印を掃除して、残った数を返す。
     ///
     /// 0 が返ったら**誰も見ていない**ので、画面を作るのをやめてよい（設計§7-4）。
@@ -115,6 +121,10 @@ const AGENT_SUFFIX: &str = ":cmd";
 const CARD_PREFIX: &str = "card:";
 const CARD_SUFFIX: &str = ":screen";
 const VIEWERS_PREFIX: &str = "screen_viewers:";
+/// 繋がっている PC の控え（sorted set の鍵）。**アカウントでは分けない**——
+/// 名前（UUID）が偶然ぶつかることは無く、読む側は必ず自分のアカウントの `agents` と
+/// 突き合わせてから使う（設計§8-6 の絞り込みは DB 側で効く）。
+const AGENTS_ONLINE: &str = "agents_online";
 
 /// そのアカウントのブラウザ向けの知らせ。
 pub fn account_events(account_id: Uuid) -> String {
@@ -134,6 +144,11 @@ pub fn card_screen(card_id: CardId) -> String {
 /// そのカードを見ているインスタンスの控え（sorted set の鍵）。
 pub fn screen_viewers(card_id: CardId) -> String {
     format!("{VIEWERS_PREFIX}{}", card_id.0)
+}
+
+/// 繋がっている PC の控え。
+pub fn agents_online() -> &'static str {
+    AGENTS_ONLINE
 }
 
 /// アカウントの知らせのチャネルなら、そのアカウント。

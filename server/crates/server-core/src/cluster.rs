@@ -14,6 +14,7 @@
 
 use crate::{
     bus::{self, BusMessage, BusState},
+    gateway::{AgentCommand, AgentHub},
     registry::SessionRegistry,
 };
 use std::sync::Arc;
@@ -24,26 +25,61 @@ use tokio::sync::{mpsc, watch};
 /// 呼ぶのは組み立てる側（`agentdashboard_core`）で、**連絡係が居るときだけ**。
 pub fn start(
     registry: Arc<SessionRegistry>,
+    hub: Arc<AgentHub>,
     incoming: mpsc::UnboundedReceiver<BusMessage>,
     state: watch::Receiver<BusState>,
 ) {
     let (events_tx, events_rx) = mpsc::unbounded_channel();
+    let (cmds_tx, cmds_rx) = mpsc::unbounded_channel();
     tokio::spawn(events_loop(Arc::clone(&registry), events_rx));
-    tokio::spawn(route(incoming, events_tx));
+    tokio::spawn(cmds_loop(Arc::clone(&hub), Arc::clone(&registry), cmds_rx));
+    tokio::spawn(route(incoming, events_tx, cmds_tx));
     tokio::spawn(watch_state(registry, state));
+    // 「この PC はうちに繋がっている」と記し続ける（設計§9-4）
+    hub.start_presence();
 }
 
 /// 届いたものを、チャネル名で行き先へ振り分ける。
 async fn route(
     mut incoming: mpsc::UnboundedReceiver<BusMessage>,
     events: mpsc::UnboundedSender<BusMessage>,
+    cmds: mpsc::UnboundedSender<BusMessage>,
 ) {
     while let Some(message) = incoming.recv().await {
         // 名前を読めないものは捨てる。知らない版のインスタンスが増やしたチャネルで
         // ありうるので、**接続ごと落とさない**
-        if bus::parse_account_events(&message.channel).is_some() && events.send(message).is_err() {
+        let sent = if bus::parse_account_events(&message.channel).is_some() {
+            events.send(message)
+        } else if bus::parse_agent_cmd(&message.channel).is_some() {
+            cmds.send(message)
+        } else {
+            continue;
+        };
+        if sent.is_err() {
             break;
         }
+    }
+}
+
+/// PC への指示を、自分が持っている接続へ渡す。
+async fn cmds_loop(
+    hub: Arc<AgentHub>,
+    registry: Arc<SessionRegistry>,
+    mut cmds: mpsc::UnboundedReceiver<BusMessage>,
+) {
+    while let Some(message) = cmds.recv().await {
+        let Some(agent_id) = bus::parse_agent_cmd(&message.channel) else {
+            continue;
+        };
+        let Some((from, command)) = bus::decode_json::<AgentCommand>(&message.payload) else {
+            continue;
+        };
+        // 自分が出したものは、出す前に自分の接続表を見て直に送っている。
+        // ここへ来るのは行き違いなので、二度送らない
+        if from == registry.instance_id() {
+            continue;
+        }
+        hub.deliver_command(agent_id, command);
     }
 }
 

@@ -184,11 +184,14 @@ pub async fn agents_of(
         .await
         .map_err(unavailable)?;
 
+    // **どこかのインスタンスに繋がっていれば「繋がっている」**（設計§9-4）。
+    // 自分の接続表だけを見ると、別のインスタンスに繋いだ PC が一覧で
+    // 「切断」に見え、しかも操作は通るという食い違いが出る
     let connected: Vec<Uuid> = hub
-        .connected()
-        .iter()
-        .filter(|conn| conn.account_id == account_id)
-        .map(|conn| conn.agent_id.0)
+        .online_of(account_id)
+        .await
+        .into_iter()
+        .map(|id| id.0)
         .collect();
 
     Ok(rows

@@ -118,18 +118,26 @@ async fn api_server_settings(
     State(hub): State<Arc<server_core::gateway::AgentHub>>,
     Extension(identity): Extension<Identity>,
 ) -> Result<Json<SettingsView>, (StatusCode, String)> {
-    let connected: Vec<_> = hub
-        .connected()
-        .into_iter()
-        .filter(|conn| conn.account_id == identity.account_id)
-        .collect();
+    // 名乗った中身は DB にある（`agents.capabilities`）。**接続表ではなく保存を見る**
+    // のは、ブラウザが繋がったインスタンスにその PC が居ないことがあるため（設計§9-2）。
+    // 出すのは**いまどこかに繋がっている PC のぶんだけ**——落ちている PC のモードを
+    // 出すと、選んでから「繋がっていません」と断られる
+    let online = hub.online_of(identity.account_id).await;
+    let capabilities: Vec<server_core::gateway::Capabilities> =
+        db::pairing::capabilities_of(hub.db(), identity.account_id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(agent_id, _)| online.contains(agent_id))
+            .filter_map(|(_, value)| serde_json::from_value(value).ok())
+            .collect();
 
     // **受け付けるモードは合併する。** PC ごとに CLI の版が違えば選択肢も違うので、
     // どれか1台に揃えると他の PC で選べないモードが消える。選んだモードが通るかは
     // 送った先の PC が決める（通らなければ `Error` が返る）
     let mut available_modes: Vec<protocol::PermissionMode> = Vec::new();
-    for conn in &connected {
-        for mode in &conn.available_modes {
+    for capability in &capabilities {
+        for mode in &capability.available_modes {
             if !available_modes.contains(mode) {
                 available_modes.push(mode.clone());
             }
@@ -152,7 +160,9 @@ async fn api_server_settings(
     Ok(Json(SettingsView {
         // 起動ボタンの数を決めるトグル。**PC ごとの設定**なので、1台でも
         // 「スキップだけ出す」なら画面もそれに従う
-        always_bypass_permissions: connected.iter().any(|conn| conn.always_bypass_permissions),
+        always_bypass_permissions: capabilities
+            .iter()
+            .any(|capability| capability.always_bypass_permissions),
         // 持ち主は PC 側の `agent.toml`。サーバから書き戻す口はまだ無い（§16-2）
         always_bypass_editable: false,
         available_modes,

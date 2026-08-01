@@ -24,11 +24,13 @@ use protocol::{
     CardId, Node, NodeId, ProjectId, SessionMeta, SessionStatus, TreeNode, ws::ServerMessage,
 };
 use server_core::{
+    agent::AgentHost as _,
     bus::{Bus, memory::MemoryBroker},
     cluster,
+    gateway::{AgentHub, RemoteAgent},
     registry::{AccountEvent, ReportOrigin, SessionRegistry},
 };
-use std::{sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::{broadcast, mpsc};
 
 const WINDOW: usize = 100;
@@ -82,19 +84,96 @@ fn text_node(id: &str) -> TreeNode {
     }
 }
 
-/// 記録層を1つ立てて、連絡係へ繋ぐ（＝インスタンス1台ぶん）。
-async fn instance(
-    db: &sea_orm::DatabaseConnection,
-    broker: &Arc<MemoryBroker>,
-) -> Arc<SessionRegistry> {
+/// サーバ1台ぶん。記録層・受け口・エージェントの待ち受けを1組で持つ。
+struct Instance {
+    registry: Arc<SessionRegistry>,
+    hub: Arc<AgentHub>,
+    addr: SocketAddr,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for Instance {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// 記録層をそのまま呼べるようにする（`node.list(..)` のように書けるほうが読みやすい）。
+impl std::ops::Deref for Instance {
+    type Target = SessionRegistry;
+
+    fn deref(&self) -> &Self::Target {
+        &self.registry
+    }
+}
+
+/// インスタンスを1台立てて、連絡係へ繋ぐ。
+async fn instance(db: &sea_orm::DatabaseConnection, broker: &Arc<MemoryBroker>) -> Instance {
     let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
     let bus = broker.connect(incoming_tx);
     let state = bus.state();
     let registry = SessionRegistry::load(db.clone(), WINDOW, Some(bus as Arc<dyn Bus>))
         .await
         .expect("記録層を立てられること");
-    cluster::start(Arc::clone(&registry), incoming_rx, state);
-    registry
+    let hub = AgentHub::new(db.clone(), Arc::clone(&registry));
+
+    // エージェントの受け口も本当に開ける。**繋ぐ先を選べる**ようにしないと、
+    // 「ブラウザは A・PC は B」という配置そのものが作れない
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("空きポートで待ち受けられること");
+    let addr = listener.local_addr().expect("待ち受け先を取れること");
+    let router = server_core::gateway::agent_routes(Arc::clone(&hub));
+    let task = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    cluster::start(Arc::clone(&registry), Arc::clone(&hub), incoming_rx, state);
+    Instance {
+        registry,
+        hub,
+        addr,
+        task,
+    }
+}
+
+/// エージェントとして繋ぎ、名乗りまで済ませる。
+async fn connect_agent(addr: SocketAddr, token: &str, name: &str) -> common::AgentSocket {
+    let mut request =
+        tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(format!(
+            "ws://{addr}/agent/ws"
+        ))
+        .expect("要求を組み立てられること");
+    request.headers_mut().insert(
+        "sec-websocket-protocol",
+        protocol::a2s::A2S_PROTOCOL
+            .parse()
+            .expect("ヘッダに載る値であること"),
+    );
+    request.headers_mut().insert(
+        "authorization",
+        format!("Bearer {token}")
+            .parse()
+            .expect("ヘッダに載る値であること"),
+    );
+    let (socket, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("繋げること");
+    let mut socket = common::AgentSocket { socket };
+    socket.send(&common::hello(name)).await;
+    socket
+}
+
+/// カードの記録がそのインスタンスへ届くまで待つ。
+async fn wait_card(registry: &Arc<SessionRegistry>, card_id: CardId) {
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    while registry.get(card_id).is_none() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "カードが届きませんでした"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 /// 条件を満たす知らせが届くまで待つ。
@@ -335,6 +414,147 @@ async fn 切れている間に外されたカードは戻ったときに消え�
         assert!(
             b.get(card_id).is_none(),
             "[{}] 外したカードが手元に残っている",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+// --- ここから、PC を本当に繋いだうえでの跨ぎ（設計§9-2 の `agent:{id}:cmd`）------
+
+/// アカウントを1つ作り、ペアリングトークンを1本発行する。
+async fn issue(db: &sea_orm::DatabaseConnection) -> (String, uuid::Uuid) {
+    let account_id = server_core::db::pairing::ensure_account(db, "テスト")
+        .await
+        .expect("アカウントを用意できること");
+    let token = server_core::db::pairing::issue_token(db, account_id, "テスト")
+        .await
+        .expect("トークンを発行できること");
+    (token, account_id)
+}
+
+/// PC は B に、ブラウザは A に、という配置を作る。
+async fn split(
+    db: &sea_orm::DatabaseConnection,
+    broker: &Arc<MemoryBroker>,
+) -> (Instance, Instance, common::AgentSocket, CardId, uuid::Uuid) {
+    let (token, account_id) = issue(db).await;
+    let a = instance(db, broker).await;
+    let b = instance(db, broker).await;
+
+    let mut agent = connect_agent(b.addr, &token, "PC-B").await;
+    // ブラウザは A に居る。**PC が繋がっているのは B** なので、A の接続表は空のまま
+    a.attach_browser(account_id).await;
+
+    let card_id = CardId::new();
+    agent
+        .send(&protocol::a2s::AgentMessage::SessionUpsert {
+            session: Box::new(common::meta(card_id)),
+        })
+        .await;
+    wait_card(&a.registry, card_id).await;
+
+    (a, b, agent, card_id, account_id)
+}
+
+#[tokio::test]
+async fn 別のインスタンスに繋がった_PC_へ指示が届く() {
+    // 検収「別インスタンスに接続していてもターミナル操作が成立」。ブラウザが繋がった
+    // 側に PC が居ないという、**1台構成では絶対に起きない配置**を作って確かめる
+    for backend in common::backends("cluster-cmd").await {
+        let broker = MemoryBroker::new();
+        let (a, _b, mut agent, card_id, _account) = split(&backend.db, &broker).await;
+
+        RemoteAgent::new(Arc::clone(&a.hub))
+            .send_input(card_id, "こんにちは".to_string())
+            .await
+            .expect("指示を出せること");
+
+        let message = agent
+            .wait_for("跨ぎで届く指示", |message| {
+                matches!(message, protocol::a2s::ServerToAgent::SendInput { .. })
+            })
+            .await;
+        match message {
+            protocol::a2s::ServerToAgent::SendInput { text, .. } => {
+                assert_eq!(text, "こんにちは", "[{}]", backend.name)
+            }
+            other => panic!("[{}] 実際: {other:?}", backend.name),
+        }
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 跨いでもキー入力はバイナリのまま届く() {
+    // 生入力は跨ぐときだけ base64 で包む（設計§9-2）。**包みを解いた結果が
+    // 元のフレームと1バイトも違わない**ことを見る——ここがずれると、端末に
+    // 化けた文字が入る形でしか気づけない
+    for backend in common::backends("cluster-input").await {
+        let broker = MemoryBroker::new();
+        let (a, _b, mut agent, card_id, _account) = split(&backend.db, &broker).await;
+
+        RemoteAgent::new(Arc::clone(&a.hub))
+            .write_input(card_id, b"\x1b[A")
+            .expect("入力を出せること");
+
+        let bytes = agent.wait_for_binary("跨ぎで届く入力").await;
+        let frame = protocol::frame::decode(&bytes).expect("フレームとして読めること");
+        assert_eq!(frame.kind, protocol::frame::FrameKind::PtyInput);
+        assert_eq!(frame.card_id, card_id);
+        assert_eq!(frame.payload, b"\x1b[A", "[{}]", backend.name);
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 別のインスタンスに繋がった_PC_でもセッションを起こせる() {
+    // 起動はカードを名指ししない（まだ無い）ので、**繋がっている PC を数える**
+    // ところから跨ぐ必要がある（設計§9-4 の在席）
+    for backend in common::backends("cluster-spawn").await {
+        let broker = MemoryBroker::new();
+        let (a, _b, mut agent, _card_id, account_id) = split(&backend.db, &broker).await;
+
+        RemoteAgent::new(Arc::clone(&a.hub))
+            .spawn(server_core::agent::SpawnRequest {
+                account_id,
+                // 繋がっているのは1台だけなので、宛先を選ばずに通る
+                target: None,
+                cwd: "/tmp",
+                permission_mode: None,
+            })
+            .await
+            .expect("起動の指示を出せること");
+
+        agent
+            .wait_for("跨ぎで届く起動", |message| {
+                matches!(message, protocol::a2s::ServerToAgent::Spawn { .. })
+            })
+            .await;
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 連絡係が切れている間の跨ぎの指示は理由を返す() {
+    // **黙って落とさない。** 押したのに何も起きない状態が一番たちが悪いので、
+    // 届けられないことを画面に出せる形で返す（設計§12）
+    for backend in common::backends("cluster-cmd-cut").await {
+        let broker = MemoryBroker::new();
+        let (a, _b, _agent, card_id, _account) = split(&backend.db, &broker).await;
+
+        broker.cut();
+        let err = RemoteAgent::new(Arc::clone(&a.hub))
+            .send_input(card_id, "届かない".to_string())
+            .await
+            .expect_err("断られること");
+        assert!(
+            err.contains("連絡係"),
+            "[{}] 理由が分からない: {err}",
             backend.name
         );
 
