@@ -198,9 +198,17 @@ export async function writeTranscript(page: Page, fixture: string, lines?: numbe
   await expectTerminalToContain(page, '[fake-claude] jsonl-appended: ')
 }
 
-/** サーバが持っているカードの一覧（画面ではなくサーバに直接聞く）。 */
+/**
+ * サーバが持っているカードの一覧（画面ではなくサーバに直接聞く）。
+ *
+ * **聞く相手は「いま見ている画面が話している相手」。** baseURL に固定すると、
+ * 前段（リバースプロキシ）越しに別のインスタンスを見ているときに、画面と
+ * 別のサーバへ聞くことになる。2台は記録を共有しているが**届く順は揃わない**ので、
+ * 一致するまで待つ用途では、食い違ったまま永久に待つことになる。
+ */
 async function serverCardIds(page: Page): Promise<string[]> {
-  const response = await page.request.get('/api/sessions')
+  const origin = new URL(page.url()).origin
+  const response = await page.request.get(`${origin}/api/sessions`)
   const sessions = (await response.json()) as { card_id: string }[]
   return sessions.map((session) => session.card_id)
 }
