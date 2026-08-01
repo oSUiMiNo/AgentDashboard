@@ -32,7 +32,11 @@ pub fn start(
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     let (cmds_tx, cmds_rx) = mpsc::unbounded_channel();
     let (frames_tx, frames_rx) = mpsc::unbounded_channel();
-    tokio::spawn(events_loop(Arc::clone(&registry), events_rx));
+    tokio::spawn(events_loop(
+        Arc::clone(&registry),
+        Arc::clone(&hub),
+        events_rx,
+    ));
     tokio::spawn(cmds_loop(Arc::clone(&hub), Arc::clone(&registry), cmds_rx));
     tokio::spawn(frames_loop(Arc::clone(&hub), frames_rx));
     tokio::spawn(route(incoming, events_tx, cmds_tx, frames_tx));
@@ -102,6 +106,7 @@ async fn cmds_loop(
 /// アカウントの知らせを取り込む。
 async fn events_loop(
     registry: Arc<SessionRegistry>,
+    hub: Arc<AgentHub>,
     mut events: mpsc::UnboundedReceiver<BusMessage>,
 ) {
     while let Some(message) = events.recv().await {
@@ -110,7 +115,7 @@ async fn events_loop(
         let Some(account_id) = bus::parse_account_events(&message.channel) else {
             continue;
         };
-        let Some((from, body)) = bus::decode_json(&message.payload) else {
+        let Some((from, body)) = bus::decode_json::<bus::AccountMessage>(&message.payload) else {
             continue;
         };
         // 自分が出したものは既に手元へ配ってある。取り込むと二重になり、しかも
@@ -118,7 +123,12 @@ async fn events_loop(
         if from == registry.instance_id() {
             continue;
         }
-        registry.adopt(account_id, body).await;
+        match body {
+            bus::AccountMessage::Event(event) => registry.adopt(account_id, *event).await,
+            // 立ち上げ直したインスタンスからの頼み。**自分に繋がっている PC の
+            // カードだけ**を名乗り直す
+            bus::AccountMessage::Resync => hub.reannounce(account_id),
+        }
     }
 }
 

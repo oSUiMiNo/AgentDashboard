@@ -15,6 +15,10 @@ node_modules/
 
 # Playwright
 /web/test-results/
+# compose の検証で使う控えと、ホストで動かすエージェントの置き場所。
+# **test-results の下に置けない** — Playwright は走る前にあそこを消すので、
+# 立ち上げ側が置いた控えが実行の直前に消える
+/web/.e2e-compose/
 /web/playwright-report/
 /web/.playwright/
 # Playwright MCP がブラウザ操作の記録を書き出す先

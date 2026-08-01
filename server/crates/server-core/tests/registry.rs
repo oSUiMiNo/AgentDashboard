@@ -358,3 +358,68 @@ async fn モデルの3つは未設定のまま往復する() {
         backend.finish().await;
     }
 }
+
+#[tokio::test]
+async fn 実体が居ないカードもブラウザから外せる() {
+    // **回帰テスト。** 外す指示は普段エージェントへ頼むが、前回の起動が残したカードや
+    // PC ごと落ちたあとのカードには頼む相手が居ない。行を消さない設計（履歴を残すため）
+    // と噛み合うと、そういうカードは**一覧から二度と消せなくなる**——記録が残ることの
+    // 利点ではなく害になる（compose で PC を落として実際に踏んだ）
+    for backend in common::backends("archive-owned").await {
+        let card_id = CardId::new();
+        {
+            let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+                .await
+                .expect("記録層を立てられること");
+            registry.apply(&local(), upsert(card_id)).await;
+        }
+
+        // 立て直す＝実体がどこにも居ない状態
+        let restored = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+            .await
+            .expect("同じ DB から立て直せること");
+        assert_eq!(restored.list(server_core::db::LOCAL_ACCOUNT_ID).len(), 1);
+
+        restored
+            .archive_owned(server_core::db::LOCAL_ACCOUNT_ID, card_id)
+            .await
+            .expect("外せること");
+        assert!(
+            restored.list(server_core::db::LOCAL_ACCOUNT_ID).is_empty(),
+            "[{}] 外したのに一覧へ残っている",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 他人のカードは名指ししても外せない() {
+    // 実体の居ないカードを外す口を開けたので、**そこにも持ち主の確認が要る**。
+    // 無いと、IDを名指しするだけで他人のカードを一覧から消せる（§8-6）
+    for backend in common::backends("archive-owned-cross").await {
+        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+            .await
+            .expect("記録層を立てられること");
+        let card_id = CardId::new();
+        registry.apply(&local(), upsert(card_id)).await;
+
+        let stranger = server_core::db::pairing::ensure_account(&backend.db, "他人")
+            .await
+            .expect("アカウントを用意できること");
+        registry
+            .archive_owned(stranger, card_id)
+            .await
+            .expect("問い合わせ自体は成功すること");
+
+        assert_eq!(
+            registry.list(server_core::db::LOCAL_ACCOUNT_ID).len(),
+            1,
+            "[{}] 他人に外されている",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}

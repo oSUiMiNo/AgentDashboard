@@ -103,7 +103,7 @@ async fn apply_migrations(db: &DatabaseConnection) -> anyhow::Result<()> {
 }
 
 /// マイグレーションを直列化するための助言ロックの番号。
-const MIGRATION_LOCK: i64 = 7_391_2026;
+const MIGRATION_LOCK: i64 = 73_912_026;
 
 /// ローカルモードのアカウント行を用意する。既にあれば何もしない。
 async fn ensure_local_account(db: &DatabaseConnection) -> anyhow::Result<()> {

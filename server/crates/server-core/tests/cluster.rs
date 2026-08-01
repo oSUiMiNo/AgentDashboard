@@ -799,3 +799,213 @@ async fn 連絡係が切れると縮退がブラウザまで届く() {
         backend.finish().await;
     }
 }
+
+#[tokio::test]
+async fn 知らせは_7_種類とも跨ぐ() {
+    // 設計§9-2 の payload 表を**そのまま消し込む**。1つでも配り忘れると、その種別の
+    // 更新だけが片方のブラウザに来ないという、症状から原因の分からない形になる
+    for backend in common::backends("cluster-kinds").await {
+        let broker = MemoryBroker::new();
+        let a = instance(&backend.db, &broker).await;
+        let b = instance(&backend.db, &broker).await;
+        b.attach_browser(account()).await;
+        let mut events = b.subscribe_events();
+
+        let card_id = CardId::new();
+        // 1. SessionUpsert
+        a.apply(&local(), upsert(card_id)).await;
+        wait_event(&mut events, "SessionUpsert", |message| {
+            matches!(message, ServerMessage::SessionUpsert { .. })
+        })
+        .await;
+
+        // 2. Status
+        a.apply(
+            &local(),
+            ServerMessage::Status {
+                card_id,
+                status: SessionStatus::WaitingInput,
+                subagent_active: 2,
+                last_activity_at: 42,
+            },
+        )
+        .await;
+        wait_event(&mut events, "Status", |message| {
+            matches!(
+                message,
+                ServerMessage::Status {
+                    status: SessionStatus::WaitingInput,
+                    subagent_active: 2,
+                    ..
+                }
+            )
+        })
+        .await;
+
+        // 3・4. TranscriptAppend / TranscriptReset は購読しているカードへ流れる
+        let record = b.get(card_id).expect("B にも記録があること");
+        let (_, mut transcript) = record.subscribe_transcript();
+        a.apply(
+            &local(),
+            ServerMessage::TranscriptAppend {
+                card_id,
+                nodes: vec![text_node("1")],
+            },
+        )
+        .await;
+        a.apply(&local(), ServerMessage::TranscriptReset { card_id })
+            .await;
+        for what in ["TranscriptAppend", "TranscriptReset"] {
+            tokio::time::timeout(TIMEOUT, transcript.recv())
+                .await
+                .unwrap_or_else(|_| panic!("{what} が届きませんでした"))
+                .expect("配信が閉じていないこと");
+        }
+
+        // 5・6・7. 揮発の知らせ（DB へ書かずに素通しするもの）
+        a.apply(
+            &local(),
+            ServerMessage::ParserStatus {
+                state: protocol::ws::ParserState::Degraded,
+                detail: None,
+            },
+        )
+        .await;
+        wait_event(&mut events, "ParserStatus", |message| {
+            matches!(message, ServerMessage::ParserStatus { .. })
+        })
+        .await;
+
+        a.apply(
+            &local(),
+            ServerMessage::Selfheal {
+                phase: protocol::ws::SelfhealPhase::Detected,
+                detail: None,
+            },
+        )
+        .await;
+        wait_event(&mut events, "Selfheal", |message| {
+            matches!(message, ServerMessage::Selfheal { .. })
+        })
+        .await;
+
+        a.apply(
+            &local(),
+            ServerMessage::Error {
+                card_id: Some(card_id),
+                message: "しくじりました".to_string(),
+            },
+        )
+        .await;
+        wait_event(&mut events, "Error", |message| {
+            matches!(message, ServerMessage::Error { .. })
+        })
+        .await;
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 連絡係が切れても自分のブラウザへの配信は続く() {
+    // 設計§12 の Valkey 断の行。**止まるのは跨ぎの更新だけ**で、そのインスタンスの
+    // 中で完結する配信は動き続ける——ここが止まると「片方だけ古い」ではなく
+    // 「全部止まった」になり、縮退として成立しない
+    for backend in common::backends("cluster-inner").await {
+        let broker = MemoryBroker::new();
+        let a = instance(&backend.db, &broker).await;
+        a.attach_browser(account()).await;
+        let mut events = a.subscribe_events();
+
+        broker.cut();
+        let card_id = CardId::new();
+        a.apply(&local(), upsert(card_id)).await;
+
+        wait_event(&mut events, "手元への配信", |message| {
+            matches!(message, ServerMessage::SessionUpsert { session } if session.card_id == card_id)
+        })
+        .await;
+        assert_eq!(
+            a.list(account()).len(),
+            1,
+            "[{}] 手元の一覧が止まっている",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn モデルの切替も跨いで届く() {
+    // 指示は種別ごとに別の道を通らない（すべて `relay` を通る）が、テスト計画が
+    // 名指ししているので消し込んでおく
+    for backend in common::backends("cluster-model").await {
+        let broker = MemoryBroker::new();
+        let (a, _b, mut agent, card_id, _account) = split(&backend.db, &broker).await;
+
+        RemoteAgent::new(Arc::clone(&a.hub))
+            .set_model(card_id, protocol::ModelId::new("opus"))
+            .await
+            .expect("指示を出せること");
+
+        let message = agent
+            .wait_for("跨ぎで届く切替", |message| {
+                matches!(message, protocol::a2s::ServerToAgent::SetModel { .. })
+            })
+            .await;
+        match message {
+            protocol::a2s::ServerToAgent::SetModel { model, .. } => {
+                assert_eq!(model.as_str(), "opus", "[{}]", backend.name)
+            }
+            other => panic!("[{}] 実際: {other:?}", backend.name),
+        }
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 外したカードは跨ぎの知らせでも戻らない() {
+    // **回帰テスト。** 外した直後に他インスタンスから流れてきたぶんや、名乗り直しと
+    // 行き違ったぶんを素直に取り込むと、記録が作り直されて一覧へ戻ってくる。しかも
+    // 一覧はメモリの記録を見るので、**DB では外れているのに画面には出続ける**という
+    // 食い違いになる（compose で PC を落として起こし直したときに実際に踏んだ）
+    for backend in common::backends("cluster-resurrect").await {
+        let broker = MemoryBroker::new();
+        let a = instance(&backend.db, &broker).await;
+        let b = instance(&backend.db, &broker).await;
+        a.attach_browser(account()).await;
+        b.attach_browser(account()).await;
+        let mut events = b.subscribe_events();
+
+        let card_id = CardId::new();
+        a.apply(&local(), upsert(card_id)).await;
+        wait_event(&mut events, "B へのカードの到着", |message| {
+            matches!(message, ServerMessage::SessionUpsert { session } if session.card_id == card_id)
+        })
+        .await;
+
+        // 外したあとに、行き違いの知らせが1通届く
+        a.apply(&local(), ServerMessage::SessionRemoved { card_id })
+            .await;
+        wait_event(&mut events, "B での取り下げ", |message| {
+            matches!(message, ServerMessage::SessionRemoved { card_id: id } if *id == card_id)
+        })
+        .await;
+        b.adopt(account(), upsert(card_id)).await;
+
+        assert!(
+            b.get(card_id).is_none(),
+            "[{}] 外したカードが跨ぎの知らせで戻っている",
+            backend.name
+        );
+        assert!(
+            b.list(account()).is_empty(),
+            "[{}] 一覧にも戻っている",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}

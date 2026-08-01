@@ -5,7 +5,7 @@
 # | | 本番 | ここ |
 # |---|---|---|
 # | dashboard | 1台 | **2台**（別々のポートで公開する） |
-# | PostgreSQL のデータ | ボリューム | tmpfs（毎回捨てる） |
+# | PostgreSQL のデータ | 残す | 毎回捨てる（`down --volumes`） |
 # | 再起動 | unless-stopped | しない（落ちたら落ちたと分かるように） |
 #
 # **2台を別のポートで公開するのが要点。** ブラウザは A、PC は B、という配置を作れて
@@ -54,9 +54,12 @@ services:
       POSTGRES_USER: agentdashboard
       POSTGRES_PASSWORD: agentdashboard
       POSTGRES_DB: agentdashboard
-    # 毎回捨てるのでディスクへ残さない（速さのためでもある）
-    tmpfs:
-      - /var/lib/postgresql
+    # **tmpfs にしてはいけない。** 止めた瞬間に中身ごと消えるので、DB 断の検証が
+    # 「落ちて戻った」ではなく「まっさらになった」になる——マイグレーションは起動時に
+    # しか走らないので、表が無いまま誰も直せない状態で固まる（実際に踏んだ）。
+    # 名前付きの置き場所にして、片付けは `down --volumes` に任せる
+    volumes:
+      - pgdata:/var/lib/postgresql
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U agentdashboard -d agentdashboard']
       interval: 1s
@@ -71,3 +74,7 @@ services:
       interval: 1s
       timeout: 3s
       retries: 60
+
+volumes:
+  # 毎回捨てる。捨てるのは `scripts/e2e-compose` の `down --volumes`
+  pgdata:

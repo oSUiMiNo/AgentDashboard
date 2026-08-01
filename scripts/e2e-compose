@@ -27,7 +27,9 @@ PROJECT="agentdashboard-e2e"
 AGENT_BIN="${REPO_ROOT}/server/target/debug/agentdashboard-agent"
 FAKE_CLAUDE="${REPO_ROOT}/server/target/debug/fake-claude"
 AGENT_CONFIG="${REPO_ROOT}/web/e2e/compose-agent.toml"
-STATE="${REPO_ROOT}/web/test-results/compose"
+# **`test-results/` の下には置けない。** Playwright は走る前にあそこを丸ごと消すので、
+# ここで置いた控えが実行の直前に消える（実際に踏んだ）
+STATE="${REPO_ROOT}/web/.e2e-compose"
 # ブラウザは A（4175）、PC は B（4176）
 BROWSER_URL="http://127.0.0.1:4175"
 AGENT_URL="http://127.0.0.1:4176"
@@ -52,6 +54,11 @@ fi
 
 agent_pid=""
 cleanup() {
+    # テストの中で起こし直したぶんは pid が変わっている（`compose-control.ts`）ので、
+    # 控えのほうを見る。**畳み忘れると次回の起動でカードが2台ぶん出る**
+    if [[ -f "${STATE}/agent.pid" ]]; then
+        kill "$(cat "${STATE}/agent.pid")" 2>/dev/null || true
+    fi
     [[ -n "${agent_pid}" ]] && kill "${agent_pid}" 2>/dev/null || true
     echo "==> compose を片付けます"
     docker compose -p "${PROJECT}" -f "${COMPOSE_FILE}" down --volumes --remove-orphans >/dev/null 2>&1 || true
@@ -92,9 +99,31 @@ AGENTDASHBOARD_CLAUDE_BIN="${FAKE_CLAUDE}" \
     AGENTDASHBOARD_SERVER_URL="${AGENT_URL}" \
     "${AGENT_BIN}" --config "${AGENT_CONFIG}" &
 agent_pid=$!
+echo "${agent_pid}" > "${STATE}/agent.pid"
+
+# 4. 壊す側（`web/e2e/compose-control.ts`）へ控えを渡す。
+# **止める・起こすはテストの中から行う**——障害の見え方は、壊さずには確かめられない
+cat > "${STATE}/env.json" <<JSON
+{
+  "repoRoot": "${REPO_ROOT}",
+  "composeFile": "${COMPOSE_FILE}",
+  "project": "${PROJECT}",
+  "agentBin": "${AGENT_BIN}",
+  "fakeClaude": "${FAKE_CLAUDE}",
+  "agentConfig": "${AGENT_CONFIG}",
+  "agentUrl": "${AGENT_URL}",
+  "token": "${token}"
+}
+JSON
 
 echo "==> ブラウザで通します（A に繋ぎます）"
 cd "${REPO_ROOT}/web"
 # **他の構成のサーバを起こさせない。** Playwright は project を選んでも `webServer` を
 # 全部立ち上げるので、印を付けて空にする（`playwright.config.ts`）
-AGENTDASHBOARD_E2E_COMPOSE=1 npx playwright test --project=chromium-compose "$@"
+if ! AGENTDASHBOARD_E2E_COMPOSE=1 npx playwright test --project=chromium-compose "$@"; then
+    # **落ちたらサーバ側のログを出す。** 画面から見えるのは症状だけで、跨ぎの経路の
+    # どこで止まったのかはコンテナのログにしか出ない
+    echo "==> 落ちたのでサーバのログを出します" >&2
+    docker compose -p "${PROJECT}" -f "${COMPOSE_FILE}" logs --tail 80 dashboard-a dashboard-b >&2
+    exit 1
+fi

@@ -73,8 +73,8 @@ pub const PRESENCE_INTERVAL: Duration = Duration::from_secs(10);
 /// 記してから、これだけ経った印は死んだものとみなす（ミリ秒）。
 ///
 /// 記す間隔の3倍にしてある。1回の取りこぼしで消えると、**繋がっているのに
-/// 「居ない」と見える**時間ができる。
-const PRESENCE_TTL_MS: i64 = 30_000;
+/// 「居ない」と見える**時間ができる。**読む側（記録層）と同じ値を使う。**
+use crate::registry::PRESENCE_TTL_MS;
 /// 視聴の印も同じ寿命で扱う（設計§9-4 の「30 秒以内に自然に掃除される」）。
 const VIEWING_TTL_MS: i64 = 30_000;
 
@@ -348,6 +348,26 @@ impl AgentHub {
             bus::encode_json(self.registry.instance_id(), &command),
         );
         Ok(())
+    }
+
+    /// 「いま持っているカードを名乗り直してほしい」に応える（設計§6-4 のサーバ版）。
+    ///
+    /// **自分に繋がっている PC のカードだけ**を名乗る。他インスタンスから回ってきて
+    /// 手元に写しがあるだけのカードまで名乗ると、同じことを全員が言い合うことになる。
+    pub fn reannounce(&self, account_id: Uuid) {
+        let mine: Vec<AgentId> = self
+            .connected()
+            .iter()
+            .filter(|conn| conn.account_id == account_id)
+            .map(|conn| conn.agent_id)
+            .collect();
+        for agent_id in mine {
+            for card_id in self.registry.cards_of(agent_id) {
+                if let Some(record) = self.registry.get(card_id) {
+                    self.registry.announce_card(account_id, record.meta());
+                }
+            }
+        }
     }
 
     /// 他インスタンスから回ってきた指示を、自分が持っている接続へ渡す。

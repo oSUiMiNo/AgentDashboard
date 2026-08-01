@@ -181,6 +181,26 @@ fn parse_between<'a>(value: &'a str, prefix: &str, suffix: &str) -> Option<&'a s
     value.strip_prefix(prefix)?.strip_suffix(suffix)
 }
 
+/// アカウントのチャネルを流れるもの（設計§9-2）。
+///
+/// # なぜ知らせ以外も流すのか
+///
+/// 立ち上げ直したインスタンスは、**どのカードがいま生きているかを知らない**。DB には
+/// 「そのカードが存在する」ことしか書いておらず、生きているかどうかは PC を持っている
+/// インスタンスにしか分からない（設計§20 読み替え4）。
+///
+/// エージェントが繋ぎ直したときに全セッションを名乗り直す（§6-4）のと同じことを、
+/// サーバ同士でもできるようにする。**待っていても来ない**——動きの無いセッションは
+/// 報告を出さないので、こちらから頼むしかない。
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "body", rename_all = "snake_case")]
+pub enum AccountMessage {
+    /// ブラウザへ配る知らせ
+    Event(Box<protocol::ws::ServerMessage>),
+    /// 「いま持っているカードをもう一度名乗ってほしい」
+    Resync,
+}
+
 // --- 封筒 --------------------------------------------------------------------
 
 /// 発信元を添えて JSON にする。

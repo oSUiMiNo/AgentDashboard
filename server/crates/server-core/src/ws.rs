@@ -366,8 +366,25 @@ async fn handle_request(
             if let Some(task) = transcripts.remove(&card_id) {
                 task.abort();
             }
-            if let Err(message) = state.agent.archive(card_id) {
-                send_error(outbound, Some(card_id), message).await;
+            // **実体が居ないカードも外せないといけない。** 前回の起動が残したカードや、
+            // PC ごと落ちたあとのカードには頼む相手が居ない。エージェントへ頼む形だけに
+            // すると、そういうカードは一覧から二度と消せなくなる
+            if state.agent.exists(card_id) {
+                if let Err(message) = state.agent.archive(card_id) {
+                    send_error(outbound, Some(card_id), message).await;
+                }
+            } else if let Err(err) = state
+                .registry
+                .archive_owned(identity.account_id, card_id)
+                .await
+            {
+                tracing::error!(%card_id, "記録を外せません: {err}");
+                send_error(
+                    outbound,
+                    Some(card_id),
+                    "記録を外せませんでした".to_string(),
+                )
+                .await;
             }
         }
 

@@ -51,6 +51,12 @@ use uuid::Uuid;
 /// ここで待たない。一覧の更新がセッションの実行を遅らせてはいけない。
 const EVENT_QUEUE_MESSAGES: usize = 256;
 
+/// 在席の印がこれだけ古くなったら死んだものとみなす（ミリ秒。設計§9-4）。
+///
+/// 記す側（[`crate::gateway`]）と同じ値でなければならない。ずれると、記し直す前に
+/// 消えたり、落ちた PC がいつまでも生きて見えたりする。
+pub const PRESENCE_TTL_MS: i64 = 30_000;
+
 /// 履歴購読1本あたりの配信待ち行列（メッセージ数）。
 pub const TRANSCRIPT_QUEUE_MESSAGES: usize = 64;
 
@@ -411,7 +417,38 @@ impl SessionRegistry {
         };
         bus.publish(
             &bus::account_events(account_id),
-            bus::encode_json(self.instance_id, message),
+            bus::encode_json(
+                self.instance_id,
+                &bus::AccountMessage::Event(Box::new(message.clone())),
+            ),
+        );
+    }
+
+    /// 「いま持っているカードを名乗り直してほしい」と頼む（設計§6-4 のサーバ版）。
+    ///
+    /// 立ち上げ直した直後は、**どのカードが生きているかを知らない**。動きの無い
+    /// セッションは報告を出さないので、待っていても来ない。
+    pub fn request_resync(&self, account_id: Uuid) {
+        let Some(bus) = &self.bus else {
+            return;
+        };
+        bus.publish(
+            &bus::account_events(account_id),
+            bus::encode_json(self.instance_id, &bus::AccountMessage::Resync),
+        );
+    }
+
+    /// そのカードの記録へ、外から「いまの姿」を入れ直す（名乗り直しの受け口）。
+    pub fn announce_card(&self, account_id: Uuid, meta: SessionMeta) {
+        let Some(record) = self.owned(account_id, meta.card_id) else {
+            return;
+        };
+        record.store_meta(meta);
+        self.publish(
+            account_id,
+            ServerMessage::SessionUpsert {
+                session: Box::new(record.meta()),
+            },
         );
     }
 
@@ -429,6 +466,16 @@ impl SessionRegistry {
         match message {
             ServerMessage::SessionUpsert { session } => {
                 let card_id = session.card_id;
+                // **外したカードは戻さない。** 跨ぎの経路にも同じ門が要る
+                // （`upsert` と対）——外した直後に他インスタンスから流れてきたぶんや、
+                // 名乗り直しと行き違ったぶんを素直に取り込むと、記録が作り直されて
+                // 一覧へ戻ってくる。しかも `list` はメモリの記録を見るので、
+                // **DB では外れているのに画面には出続ける**という食い違いになる
+                if self.get(card_id).is_none()
+                    && matches!(self.stored(card_id).await, Ok(Some((_, true))))
+                {
+                    return;
+                }
                 let record = match self.record_for(account_id, card_id).await {
                     Ok(record) => record,
                     Err(err) => {
@@ -537,6 +584,9 @@ impl SessionRegistry {
         if let Err(err) = self.reload_account(account_id).await {
             tracing::warn!(%account_id, "記録を読み直せません: {err}");
         }
+        // DB からは「どのカードが生きているか」が分からない。PC を持っている
+        // インスタンスに名乗り直してもらう（設計§6-4 のサーバ版）
+        self.request_resync(account_id);
     }
 
     /// ブラウザが1つ去った。**最後の1人で購読を閉じる。**
@@ -563,6 +613,9 @@ impl SessionRegistry {
 
     /// 連絡係が戻ってきたので、見ているアカウントを全部読み直す（設計§9-1 の規約）。
     ///
+    /// 読み直しに続けて名乗り直しも頼む。切れている間に生き死にが変わっていても、
+    /// DB にはその区別が書いていない。
+    ///
     /// 自動再購読は**取りこぼしを埋めない**——切れている間に流れたものは消えている。
     /// 購読が戻ったことと、中身が揃っていることは別の話になる。
     pub async fn resnapshot(&self) {
@@ -577,6 +630,7 @@ impl SessionRegistry {
             if let Err(err) = self.reload_account(account_id).await {
                 tracing::warn!(%account_id, "記録を読み直せません: {err}");
             }
+            self.request_resync(account_id);
         }
     }
 
@@ -625,8 +679,10 @@ impl SessionRegistry {
                 meta.account = account_name.clone();
             }
             // DB は接続を知らない（`meta_from_row` は必ず false を返す）ので、
-            // 手元の見立てを残す。**知らないカードは繋がっていない扱い**——
-            // 記録があることと、いま報告してきていることは別（設計§6-3）
+            // 手元の見立てを残す。**知らないカードは繋がっていない扱い**で始め、
+            // 生きているものは名乗り直し（[`Self::request_resync`]）で印が戻る——
+            // **PC が繋がっていることと、そのカードが生きていることは別**。PC ごと
+            // 落ちたあとのカードは、PC が戻っても死んだままになる（設計§1-3）
             let known = self.get(card_id);
             meta.agent_connected = known
                 .as_ref()
@@ -805,6 +861,28 @@ impl SessionRegistry {
         }
         tracing::warn!(%card_id, "他のアカウントのカードへの報告を無視しました");
         true
+    }
+
+    /// ブラウザからの指示でカードを外す（実体がもう居ない場合）。
+    ///
+    /// # 実体が死んでいるカードも外せないといけない
+    ///
+    /// 通常はエージェントへ頼み、向こうが片付けてから `SessionRemoved` を報告してくる。
+    /// だが**前回の起動が残したカード**や、PC ごと落ちたあとのカードには頼む相手が
+    /// 居ない。そのままだと一覧から二度と消せず、履歴を残すために行を消さない設計
+    /// （下の [`Self::archive`]）と噛み合って**永久に残る**。
+    ///
+    /// 持ち主は必ず確かめる。他人のカードのIDを名指しして消せてはいけない（§8-6）。
+    pub async fn archive_owned(&self, account_id: Uuid, card_id: CardId) -> Result<(), DbErr> {
+        self.archive(
+            &ReportOrigin {
+                account_id,
+                agent_id: None,
+                account: None,
+            },
+            card_id,
+        )
+        .await
     }
 
     async fn archive(&self, origin: &ReportOrigin, card_id: CardId) -> Result<(), DbErr> {
