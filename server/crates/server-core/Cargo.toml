@@ -16,6 +16,7 @@ path = "src/lib.rs"
 [dependencies]
 protocol.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 serde.workspace = true

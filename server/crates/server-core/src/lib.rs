@@ -13,6 +13,7 @@
 pub mod account;
 pub mod agent;
 pub mod auth;
+pub mod bus;
 pub mod config;
 pub mod db;
 pub mod embed;
