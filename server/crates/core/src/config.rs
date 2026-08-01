@@ -66,6 +66,7 @@ pub struct Config {
     pub transcript_page_limit: usize,
     pub state_dir: Option<PathBuf>,
     pub database_url: Option<String>,
+    pub valkey_url: Option<String>,
     pub cookie_secure: bool,
     pub lan_session_ttl_hours: u64,
     pub inject_status_line: bool,
@@ -99,6 +100,7 @@ impl Default for Config {
             transcript_page_limit: server.transcript_page_limit,
             state_dir: agent.state_dir,
             database_url: server.database_url,
+            valkey_url: server.valkey_url,
             cookie_secure: server.cookie_secure,
             lan_session_ttl_hours: server.lan_session_ttl_hours,
             inject_status_line: agent.inject_status_line,
@@ -193,6 +195,7 @@ impl Config {
             state_dir: Some(PathBuf::from("/probe")),
             claude_settings_path: Some(PathBuf::from("/probe")),
             database_url: Some("sqlite://probe".to_string()),
+            valkey_url: Some("redis://probe".to_string()),
             ..Config::default()
         };
         env::shapes_of(&probe).expect("既定値を TOML へ変換できること")
@@ -242,6 +245,9 @@ impl Config {
             // 両側を知っているこの層でしか解決できない（`ServerConfig::default` は
             // `state_dir` を知らないため `None` のまま）
             database_url: Some(self.resolved_database_url()),
+            // **既定を作らない。** 繋ぐ先を勝手に決めると、書き間違いが「別の
+            // Valkey に繋がっている」ではなく「繋がらない」として出る
+            valkey_url: self.valkey_url.clone(),
             cookie_secure: self.cookie_secure,
             lan_session_ttl_hours: self.lan_session_ttl_hours,
         }
@@ -321,7 +327,10 @@ impl Config {
 ///
 /// **例外だけをここに並べる。** 既定は `AGENTDASHBOARD_<キー>` で、そちらは
 /// [`Config::key_shapes`] が自動で拾う。
-const BARE_ENV_ALIASES: &[(&str, &str)] = &[("database_url", "DATABASE_URL")];
+const BARE_ENV_ALIASES: &[(&str, &str)] = &[
+    ("database_url", "DATABASE_URL"),
+    ("valkey_url", "VALKEY_URL"),
+];
 
 #[cfg(test)]
 mod tests {
@@ -486,6 +495,9 @@ mod tests {
         let config = Config::from_toml_str(
             r#"
             port = 9001
+            bind_addr = "0.0.0.0"
+            cookie_secure = true
+            lan_session_ttl_hours = 3
             stalled_threshold_secs = 61
             coalesce_ms = 9
             pty_ring_buffer = 2048
@@ -503,6 +515,7 @@ mod tests {
             transcript_page_limit = 44
             state_dir = "/tmp/state"
             database_url = "sqlite:///tmp/db/dashboard.db"
+            valkey_url = "redis://127.0.0.1:6379"
             inject_status_line = false
             claude_settings_path = "/tmp/settings.json"
             status_line_refresh_secs = 5
@@ -540,6 +553,10 @@ mod tests {
             server.database_url.as_deref(),
             Some("sqlite:///tmp/db/dashboard.db")
         );
+        assert_eq!(server.bind_addr, "0.0.0.0");
+        assert!(server.cookie_secure);
+        assert_eq!(server.lan_session_ttl_hours, 3);
+        assert_eq!(server.valkey_url.as_deref(), Some("redis://127.0.0.1:6379"));
     }
 
     /// そのキーへ入れて意味のある値（既定と必ず違うもの）。

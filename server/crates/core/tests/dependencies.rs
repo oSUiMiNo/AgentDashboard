@@ -34,12 +34,21 @@ const FORBIDDEN: &[(&str, &[&str])] = &[
     // ブラウザの鍵（設計§8-2）もサーバ側だけ。PC 側は**ペアリングトークン**で
     // 名乗るので、利用者のパスワードを扱う道具（argon2id）を持つ理由が無い
     ("agent-core", &["password-auth", "tower-sessions"]),
+    // インスタンスの間の連絡係（設計§9-1）もサーバ側だけ。PC 側は**1つのサーバとしか
+    // 話さない**ので、インスタンスが何台あるかを知る必要そのものが無い
+    ("agent-core", &["redis"]),
     // 配布するエージェントは、サーバ側の荷物を1つも引き込まない。
     // 利用者の PC へ配る単一バイナリを軽く保ち、musl 静的リンク（設計§14-3）を
     // 成立させるため
     (
         "agentdashboard-agent",
-        &["rust-embed", "sea-orm", "tower-sessions", "password-auth"],
+        &[
+            "rust-embed",
+            "sea-orm",
+            "tower-sessions",
+            "password-auth",
+            "redis",
+        ],
     ),
 ];
 

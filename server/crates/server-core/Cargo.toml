@@ -34,6 +34,7 @@ password-auth.workspace = true
 time.workspace = true
 sha2.workspace = true
 base64.workspace = true
+redis.workspace = true
 
 [dev-dependencies]
 # エージェントの受け口（`/agent/ws`）を**本物の WebSocket で**叩くため。製品コードの

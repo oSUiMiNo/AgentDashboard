@@ -11,8 +11,8 @@
 # **どのキーも環境変数で上書きできる。** 名前は `AGENTDASHBOARD_<大文字のキー>`
 # （例：`AGENTDASHBOARD_PORT=9000`）。ファイルより環境変数が強い。コンテナでは
 # 設定ファイルを配らずに環境変数で渡すのが自然なため（設計§14-1）。
-# `database_url` だけは慣行に合わせて裸の `DATABASE_URL` も受ける
-# （両方あるときは `AGENTDASHBOARD_` 付きが勝つ）。
+# `database_url` と `valkey_url` は慣行に合わせて裸の `DATABASE_URL` /
+# `VALKEY_URL` も受ける（両方あるときは `AGENTDASHBOARD_` 付きが勝つ）。
 
 # --- サーバ -------------------------------------------------------------------
 
@@ -141,3 +141,11 @@ selfheal_cooldown_hours = 24
 # postgres://user:pass@host/dbname の形で指定する（スキーマは共通）。
 # 消えると一覧と履歴が丸ごと消えるので、state_dir と同じ扱いにすること
 # database_url = "sqlite:///home/you/.local/state/agentdashboard/dashboard.db"
+
+# インスタンスの間の連絡係（Valkey）の居場所。
+# 未指定なら連絡係を持たず、配信はこのプロセスの中で完結する。ローカルモードと、
+# インスタンスが1台だけのセルフホストはこれで足りる。
+# 2台以上を並べるなら必須 — 設定し忘れると起動も接続も成功したまま、
+# 片方のブラウザにだけ更新が届かない形で「どこへ繋いでも同じ結果」が静かに破れる。
+# protocol=resp3 は付けなくてよい（付いていなければ自動で足す）
+# valkey_url = "redis://127.0.0.1:6379"

@@ -34,6 +34,7 @@
 //! 信じないのはこのためで、[`parse_account_events`] が**チャネル名の方を正**とする。
 
 pub mod memory;
+pub mod valkey;
 
 use bytes::Bytes;
 use protocol::{AgentId, CardId};

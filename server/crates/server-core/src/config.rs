@@ -49,6 +49,13 @@ pub struct ServerConfig {
     /// キーなので、既定値の解決は両側を束ねる層が行う（[`ServerConfig::default`] は
     /// それを知らないため `None` のまま）。
     pub database_url: Option<String>,
+    /// インスタンスの間の連絡係の居場所（設計§13-2・§9-1）。
+    ///
+    /// **無ければ連絡係を持たない。** ローカルモードと、インスタンスが1台だけの
+    /// セルフホストはこれで足りる（配信はプロセスの中で完結する）。2台以上を並べる
+    /// なら必須で、**設定し忘れると「どこへ繋いでも同じ結果」が静かに破れる**——
+    /// 起動も接続も成功し、片方のブラウザにだけ更新が届かない形で現れる。
+    pub valkey_url: Option<String>,
     /// ログインの Cookie に `Secure` を付けるか（設計§8-2・§13-2）。
     ///
     /// **既定は `false`。** `Secure` を付けた Cookie は HTTPS でしか送られないので、
@@ -76,6 +83,7 @@ impl Default for ServerConfig {
             transcript_page_limit: DEFAULT_TRANSCRIPT_PAGE_LIMIT,
             transcript_window_nodes: DEFAULT_TRANSCRIPT_WINDOW_NODES,
             database_url: None,
+            valkey_url: None,
             cookie_secure: false,
             lan_session_ttl_hours: DEFAULT_LAN_SESSION_TTL_HOURS,
         }
