@@ -185,6 +185,15 @@ async fn client_loop(state: AppState, identity: Identity, socket: WebSocket) {
         },
     )
     .await;
+    // 縮退している最中に開いたブラウザにも伝える。**変化のときだけ配ると、
+    // 切れている間に開いた画面には何も出ない**
+    if state.registry.bus_state() == Some(crate::bus::BusState::Degraded) {
+        send_json(
+            &outbound,
+            crate::cluster::banner(crate::bus::BusState::Degraded),
+        )
+        .await;
+    }
     for meta in state.registry.list(identity.account_id) {
         send_json(
             &outbound,

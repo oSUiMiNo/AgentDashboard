@@ -49,6 +49,8 @@ function Shell() {
   const lastError = useWsStore((state) => state.lastError)
   const parserState = useWsStore((state) => state.parserState)
   const parserDetail = useWsStore((state) => state.parserDetail)
+  const busState = useWsStore((state) => state.busState)
+  const busDetail = useWsStore((state) => state.busDetail)
   const connect = useWsStore((state) => state.connect)
   const clearError = useWsStore((state) => state.clearError)
   const loadSettings = useSettingsStore((state) => state.load)
@@ -141,6 +143,26 @@ function Shell() {
           {parserDetail && (
             <span className="text-muted-foreground ml-2 text-xs">
               {parserDetail}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/*
+        サーバ同士の連絡が切れている状態を、はっきり見せる（セルフホスト化設計§12）。
+        このサーバの中で完結する更新は届き続けるので、症状は「一部だけ古い」という
+        分かりにくい形になる。何が止まっているかまで書かないと読み解けない
+      */}
+      {busState === 'degraded' && (
+        <div
+          data-testid="bus-banner"
+          className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm"
+        >
+          サーバ同士の連絡が切れています。別のサーバに繋がっている PC
+          の更新だけが止まります。
+          {busDetail && (
+            <span className="text-muted-foreground ml-2 text-xs">
+              {busDetail}
             </span>
           )}
         </div>

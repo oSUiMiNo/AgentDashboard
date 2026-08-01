@@ -225,6 +225,7 @@ export type ServerMessage =
   | { t: 'transcript_append'; card_id: CardId; nodes: TreeNode[] }
   | { t: 'transcript_reset'; card_id: CardId }
   | { t: 'parser_status'; state: 'ok' | 'degraded'; detail: string | null }
+  | { t: 'bus_status'; state: 'ok' | 'degraded'; detail: string | null }
   | { t: 'selfheal'; phase: SelfhealPhase; detail: string | null }
 
 /**

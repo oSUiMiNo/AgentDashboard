@@ -65,6 +65,20 @@ describe('サーバと同じ JSON になること', () => {
     }
   })
 
+  it('連絡係の縮退が Rust と同じ綴りで届く', () => {
+    // 綴りが食い違うと、**バナーが出ないだけで繋がっているように見える**——
+    // 「片方のブラウザにだけ更新が来ない」という一番読み解きにくい状態が、
+    // 理由の分からないまま残る
+    const raw =
+      '{"t":"bus_status","state":"degraded","detail":"連絡係に繋がりません"}'
+    const message = JSON.parse(raw) as ServerMessage
+    expect(message.t).toBe('bus_status')
+    if (message.t === 'bus_status') {
+      expect(message.state).toBe('degraded')
+      expect(message.detail).toBe('連絡係に繋がりません')
+    }
+  })
+
   it('hello を解釈できる', () => {
     const raw = '{"t":"hello","flow_high":262144,"flow_low":32768}'
     const message = JSON.parse(raw) as ServerMessage

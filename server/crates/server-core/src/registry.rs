@@ -382,6 +382,28 @@ impl SessionRegistry {
         });
     }
 
+    /// いま繋がっている全ブラウザへ知らせる（連絡係の縮退など、カードに紐づかない話）。
+    ///
+    /// **連絡係へは流さない。** 縮退はインスタンスごとの事実で、しかも流す相手が
+    /// 切れているときに出す知らせなので、跨いで配ること自体が成り立たない。
+    pub fn announce(&self, message: ServerMessage) {
+        let accounts: Vec<Uuid> = self
+            .browsers
+            .lock()
+            .expect("ロックが壊れていない")
+            .keys()
+            .copied()
+            .collect();
+        for account_id in accounts {
+            self.publish_local(account_id, message.clone());
+        }
+    }
+
+    /// 連絡係がいま繋がっているか。**持っていなければ `None`**（縮退という概念が無い）。
+    pub fn bus_state(&self) -> Option<crate::bus::BusState> {
+        self.bus.as_ref().map(|bus| *bus.state().borrow())
+    }
+
     /// 連絡係へ流す（他インスタンスのブラウザ向け）。
     fn publish_bus(&self, account_id: Uuid, message: &ServerMessage) {
         let Some(bus) = &self.bus else {

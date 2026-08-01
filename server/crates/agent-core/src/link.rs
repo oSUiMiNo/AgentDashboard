@@ -261,9 +261,12 @@ fn to_agent_message(event: &ServerMessage) -> Option<AgentMessage> {
             card_id: *card_id,
             message: message.clone(),
         },
+        // `BusStatus` はサーバ同士の話（インスタンスの間の連絡係。設計§12）。
+        // **PC は自分が繋いだ1台としか話さない**ので、運ぶ意味も運ぶ手段も無い
         ServerMessage::Hello { .. }
         | ServerMessage::TranscriptAppend { .. }
-        | ServerMessage::TranscriptReset { .. } => return None,
+        | ServerMessage::TranscriptReset { .. }
+        | ServerMessage::BusStatus { .. } => return None,
     })
 }
 

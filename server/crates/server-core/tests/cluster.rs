@@ -195,11 +195,25 @@ async fn wait_event(
     }
 }
 
-/// しばらく待っても何も届かないこと。
+/// しばらく待っても**カードの話が**届かないこと。
+///
+/// 連絡係の縮退（`BusStatus`）は数えない。切れたこと自体はバナーとして必ず流れるので、
+/// 素朴に「1通も来ない」で書くと、**連絡係を切る検証そのものが書けなくなる**。
 async fn expect_silence(events: &mut broadcast::Receiver<AccountEvent>, what: &str) {
-    match tokio::time::timeout(Duration::from_millis(200), events.recv()).await {
-        Ok(Ok(event)) => panic!("{what}: 届いてしまいました: {:?}", event.message),
-        _ => { /* 何も来ない＝期待どおり */ }
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(200);
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return;
+        }
+        match tokio::time::timeout(left, events.recv()).await {
+            Ok(Ok(event)) => match event.message {
+                ServerMessage::BusStatus { .. } => continue,
+                other => panic!("{what}: 届いてしまいました: {other:?}"),
+            },
+            Ok(Err(_)) => return,
+            Err(_) => return,
+        }
     }
 }
 
@@ -741,4 +755,47 @@ async fn broker_viewers(broker: &Arc<MemoryBroker>, card_id: CardId) -> u64 {
         .lease_sweep(&server_core::bus::screen_viewers(card_id), 0)
         .await
         .expect("数えられること")
+}
+
+#[tokio::test]
+async fn 連絡係が切れると縮退がブラウザまで届く() {
+    // 縮退の症状は「一部だけ古い」という分かりにくい形になる（設計§12）。
+    // **何が止まっているのかを言わないと、利用者には読み解けない**
+    for backend in common::backends("cluster-banner").await {
+        let broker = MemoryBroker::new();
+        let a = instance(&backend.db, &broker).await;
+        a.attach_browser(account()).await;
+        let mut events = a.subscribe_events();
+
+        broker.cut();
+        let message = wait_event(&mut events, "縮退の知らせ", |message| {
+            matches!(message, ServerMessage::BusStatus { .. })
+        })
+        .await;
+        assert!(
+            matches!(
+                message,
+                ServerMessage::BusStatus {
+                    state: protocol::ws::BusState::Degraded,
+                    ..
+                }
+            ),
+            "[{}] 実際: {message:?}",
+            backend.name
+        );
+
+        broker.restore();
+        wait_event(&mut events, "復帰の知らせ", |message| {
+            matches!(
+                message,
+                ServerMessage::BusStatus {
+                    state: protocol::ws::BusState::Ok,
+                    ..
+                }
+            )
+        })
+        .await;
+
+        backend.finish().await;
+    }
 }

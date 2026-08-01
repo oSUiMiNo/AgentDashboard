@@ -74,6 +74,14 @@ interface WsState {
   parserState: 'ok' | 'degraded'
   parserDetail: string | null
   /**
+   * インスタンスの間の連絡係の健康状態（セルフホスト化設計§12）。
+   *
+   * 縮退しても**このサーバの中で完結する更新は届き続ける**。止まるのは、別のサーバに
+   * 繋がっている PC の分だけ。連絡係を持たない構成では一度も届かないので `ok` のまま。
+   */
+  busState: 'ok' | 'degraded'
+  busDetail: string | null
+  /**
    * 自己修復の進み具合（設計§9）。まだ一度も起きていなければ null。
    *
    * 履歴を持たず**最新の1件だけ**にしてある。ここは「いま何をしているか」を伝える
@@ -269,6 +277,8 @@ export const useWsStore = create<WsState>((set) => ({
   lastError: null,
   parserState: 'ok',
   parserDetail: null,
+  busState: 'ok',
+  busDetail: null,
   selfheal: null,
 
   connect: async () => {
@@ -387,6 +397,9 @@ function handleJson(raw: string, set: SetState) {
       break
     case 'parser_status':
       set({ parserState: message.state, parserDetail: message.detail })
+      break
+    case 'bus_status':
+      set({ busState: message.state, busDetail: message.detail })
       break
     case 'selfheal':
       set({ selfheal: { phase: message.phase, detail: message.detail } })

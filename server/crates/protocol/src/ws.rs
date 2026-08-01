@@ -36,6 +36,14 @@ pub enum ParserState {
     Degraded,
 }
 
+/// インスタンスの間の連絡係の健全性（セルフホスト化設計§12）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BusState {
+    Ok,
+    Degraded,
+}
+
 /// 自己修復の進み具合（設計§9）。
 ///
 /// 文字列ではなく型にしてあるのは、送り手と受け手が別々の言語で手書きされているため。
@@ -214,6 +222,17 @@ pub enum ServerMessage {
         state: ParserState,
         detail: Option<String>,
     },
+    /// インスタンスの間の連絡係の縮退通知（セルフホスト化設計§12・§9-1）。
+    ///
+    /// **止まるのは跨ぎの更新だけ**で、そのインスタンスの中で完結する配信は動き続ける。
+    /// バナーに出すのは「片方のブラウザにだけ更新が来ない」という、症状からは
+    /// 原因の分からない状態を利用者が読み解けるようにするため。
+    ///
+    /// 連絡係を持たない構成（ローカルモード・インスタンス1台）では**一度も送らない**。
+    BusStatus {
+        state: BusState,
+        detail: Option<String>,
+    },
     /// 自己修復の進行通知（設計§9）。
     ///
     /// `detail` には、人が読んで次の一手を決められる手掛かりを入れる（失敗したテストの
@@ -355,6 +374,10 @@ mod tests {
                 }],
             },
             ServerMessage::TranscriptReset { card_id },
+            ServerMessage::BusStatus {
+                state: BusState::Degraded,
+                detail: Some("連絡係に繋がりません".to_string()),
+            },
             ServerMessage::ParserStatus {
                 state: ParserState::Degraded,
                 detail: Some("パーサプロセスが応答しません".to_string()),

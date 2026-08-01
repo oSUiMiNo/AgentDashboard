@@ -131,10 +131,30 @@ async fn watch_state(registry: Arc<SessionRegistry>, mut state: watch::Receiver<
     let mut previous = *state.borrow();
     while state.changed().await.is_ok() {
         let current = *state.borrow_and_update();
+        if previous == current {
+            continue;
+        }
+        // 画面へ出す。**症状が「一部だけ古い」という分かりにくい形**になるので、
+        // 何が止まっているのかを利用者が読み解けるようにする（設計§12）
+        registry.announce(banner(current));
         if previous == BusState::Degraded && current == BusState::Ok {
             tracing::info!("連絡係が戻りました。記録を読み直します");
             registry.resnapshot().await;
         }
         previous = current;
+    }
+}
+
+/// 連絡係の状態を、画面へ出す形にする。
+pub fn banner(state: BusState) -> protocol::ws::ServerMessage {
+    protocol::ws::ServerMessage::BusStatus {
+        state: match state {
+            BusState::Ok => protocol::ws::BusState::Ok,
+            BusState::Degraded => protocol::ws::BusState::Degraded,
+        },
+        detail: match state {
+            BusState::Ok => None,
+            BusState::Degraded => Some("連絡係（Valkey）に繋がりません".to_string()),
+        },
     }
 }
