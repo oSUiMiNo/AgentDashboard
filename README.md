@@ -48,7 +48,7 @@ AgentDashboard は**その両方を同時に成立させる**ことを目的に�
 
 | もの | 何のために |
 |---|---|
-| Docker | セルフホスト（サーバを1台立てて複数の PC を集める使い方）。`docker compose up -d` で立つ |
+| Docker | セルフホストを compose で運用する場合。**必須ではない**——サーバは同じ実行ファイルを `--mode server` で起こすだけでも立つ |
 | **本リポジトリのソース一式**＋Docker＋Git | 自己修復。パーサを書き換えてビルドし直すので、**ソースの無い場所へバイナリだけ置くと検知の通知だけになる**（[既知の制約](#配布したバイナリでは自己修復が検知だけになる)） |
 
 動作を確認しているのは Linux（WSL2 上の Ubuntu 24.04）。
@@ -70,7 +70,7 @@ agentdashboard
 | したいこと | 読むもの |
 |---|---|
 | 自分の PC 1台で使う | [ローカルで使う](docs/setup/local.md) |
-| サーバを立てて複数の PC を集める | [セルフホストで使う](docs/setup/selfhost.md) |
+| サーバを立てて複数の PC を集める | [セルフホストで使う](docs/setup/selfhost.md)（**立て方は2つ**——実行ファイルだけ／docker compose） |
 | PC をサーバへ繋ぐ | [ペアリング](docs/setup/pairing.md) |
 | インターネットから使う（TLS） | [リバースプロキシ](docs/setup/reverse-proxy.md) |
 

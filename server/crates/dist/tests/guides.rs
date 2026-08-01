@@ -21,6 +21,9 @@ const GUIDES: &[&str] = &["local.md", "selfhost.md", "pairing.md", "reverse-prox
 /// 実在を求めない。
 const REPO_ROOTS: &[&str] = &["docs/", "server/", "docker/", "web/", "scripts/"];
 
+/// 常駐の雛形（セルフホストの道①）。
+const UNIT: &str = "docs/service/agentdashboard.service";
+
 #[test]
 fn 手順書は4種とも在る() {
     // 検収条件が数えているのはこの4つ。名前を変えるならこちらも変える
@@ -98,6 +101,35 @@ fn 手順書が名指ししているファイルが実在する() {
             );
         }
     }
+}
+
+#[test]
+fn 常駐の雛形が手順書と同じ起こし方をしている() {
+    // 雛形はコピーして使われる。**手元で試せないもの**（systemd は CI に無い）なので、
+    // せめて「手順書が案内している起こし方と食い違っていない」ことだけは機械で見る。
+    //
+    // 食い違うと、コピーした人の機械でだけ起動に失敗する——書いた側には何も起きない。
+    let unit = std::fs::read_to_string(repo_root().join(UNIT)).expect("常駐の雛形を読めること");
+    let exec = unit
+        .lines()
+        .find(|line| line.starts_with("ExecStart="))
+        .expect("ExecStart があること");
+
+    // 配る実行ファイルの名前。改名したらここで気づく
+    assert!(
+        exec.contains("/agentdashboard "),
+        "ExecStart が配る実行ファイルを指していない: {exec}"
+    );
+    // **ローカルモードで起こしてはいけない。** サーバの役だけを持たせる指定が要る
+    assert!(
+        exec.contains("--mode server"),
+        "ExecStart に --mode server が無い: {exec}"
+    );
+    // 待ち受けを広げないと、常駐させても外から届かない（手順書の道①はこれを前提にしている）
+    assert!(
+        unit.contains("Environment=AGENTDASHBOARD_BIND_ADDR=0.0.0.0"),
+        "待ち受けを広げる指定が無い（常駐させても外から届かない）"
+    );
 }
 
 /// `[表示](行き先)` の行き先を集める。

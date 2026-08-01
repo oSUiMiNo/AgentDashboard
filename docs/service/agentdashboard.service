@@ -1,0 +1,54 @@
+# セルフホストのサーバを常駐させる（セットアップガイド `docs/setup/selfhost.md` の道①）。
+#
+# # なぜ要るのか
+#
+# 道①は実行ファイルを手で起こすだけなので、**機械を再起動すると止まったまま**になる。
+# 道②（docker compose）は `restart: unless-stopped` がその面倒を見ているが、
+# こちらには相当するものが無い。落ちて気づかない状態を残さないために置く。
+#
+# # 使い方
+#
+#   sudo cp docs/service/agentdashboard.service /etc/systemd/system/
+#   sudo systemctl enable --now agentdashboard
+#
+# # 書き換えるところは2つだけ
+#
+# `User=` と `ExecStart=` の利用者名。**インストーラは `~/.local/bin` へ置く**ので、
+# 起動する利用者の家の下を指す必要がある。ここを直さないと起動に失敗する
+# （`systemctl status agentdashboard` に「そんなファイルは無い」と出る）。
+
+[Unit]
+Description=AgentDashboard（セルフホストのサーバ）
+Documentation=https://github.com/oSUiMiNo/AgentDashboard
+# **繋がるのを待ってから起こす。** ネットワークが上がる前に起こすと、
+# 待ち受けを広げられずに終了する
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# ここを書き換える（1/2）
+User=youruser
+
+# ここを書き換える（2/2）。**`transcript-parser` が隣に居ることが条件**なので、
+# 実行ファイルだけを別の場所へ移さないこと
+ExecStart=/home/youruser/.local/bin/agentdashboard --mode server
+
+# 外から届かせる。**鍵はアカウントのログイン**なので、広げること自体は危険ではない
+Environment=AGENTDASHBOARD_BIND_ADDR=0.0.0.0
+
+# 記録の置き場所。書かなければ利用者の家の下（`~/.local/state/agentdashboard/`）に
+# 作られる。**消えると一覧と履歴が丸ごと消える**ので、控える対象を決めておくとよい
+#Environment=AGENTDASHBOARD_STATE_DIR=/var/lib/agentdashboard
+
+# 前段で TLS を終端しているなら外す（付けないと入館証が平文でも送られる）
+#Environment=AGENTDASHBOARD_COOKIE_SECURE=true
+
+# **落ちたら起こし直す。** セッションの実体は PC 側にあるので、
+# ここが落ちても走っている claude は死なない——起こし直せば追いつく
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
