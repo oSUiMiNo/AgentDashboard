@@ -1,0 +1,83 @@
+# セルフホストの本番構成（セルフホスト化設計§14-1）。
+#
+# `docker compose -f docker/compose.yml up -d` で立つ。スキーマは起動時に自動で
+# 当たる（`MigratorTrait::up`）ので、マイグレーションのコマンドを手で叩く工程は無い。
+#
+# # 立てたあとにやること
+#
+# 1. ブラウザで `http://<ホスト>:8787/setup` を開き、最初の管理者を作る
+# 2. アカウント画面でペアリングトークンを発行する
+# 3. 利用者の PC で `agentdashboard-agent` を起動し、そのトークンを渡す
+#
+# TLS は**この構成に含めない**。前段にリバースプロキシを置いて終端する（§14-2）。
+# その場合は `AGENTDASHBOARD_COOKIE_SECURE=true` を足すこと——付けないと、
+# HTTPS で開いているのに Cookie が平文でも送られる。
+#
+# # インスタンスを増やすとき
+#
+# `dashboard` を複数立てて前段で振り分ける。**そのときだけ Valkey が要る**
+# （1台なら配信はプロセスの中で完結するので、`VALKEY_URL` は無くてよい）。
+# 揃えるのは `DATABASE_URL` と `VALKEY_URL` の2つで、それ以外は台ごとに違ってよい。
+
+name: agentdashboard
+
+services:
+  dashboard:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.server
+    image: agentdashboard/server
+    environment:
+      # 待ち受けを広げないとコンテナの外から届かない。**鍵はアカウントのログイン**
+      # なので、広げること自体は危険ではない（設計§8-1）
+      AGENTDASHBOARD_BIND_ADDR: 0.0.0.0
+      # 慣行に合わせて裸の名前でも受ける（`AGENTDASHBOARD_` 付きが勝つ）
+      DATABASE_URL: postgres://agentdashboard:agentdashboard@postgres:5432/agentdashboard
+      VALKEY_URL: redis://valkey:6379
+      RUST_LOG: info
+    ports:
+      - '8787:8787'
+    healthcheck:
+      # **鍵の外側の口で見る。** `/api/sessions` は鍵の向こうなので、待ちに使うと
+      # 「まだ起きていない」と「ログインしていない」が同じ 401 になり永久に待つ
+      test: ['CMD', 'curl', '-sf', 'http://127.0.0.1:8787/api/me']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    depends_on:
+      postgres: { condition: service_healthy }
+      valkey: { condition: service_healthy }
+    restart: unless-stopped
+
+  postgres:
+    # PG18 からデータの置き場所が /var/lib/postgresql に変わった。
+    # **/data を付けた旧来の書き方は壊れる**（起動はするが毎回空になる）
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: agentdashboard
+      POSTGRES_PASSWORD: agentdashboard
+      POSTGRES_DB: agentdashboard
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      # 待たずに繋ぐと「まだ起動中」を接続失敗と読み違える
+      test: ['CMD-SHELL', 'pg_isready -U agentdashboard -d agentdashboard']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  valkey:
+    image: valkey/valkey:9.1-alpine
+    # pub/sub 専用。**永続化は要らない**——耐久データは DB にあり、ここを流れるのは
+    # 揮発の知らせだけ（設計§9-1）。保存しようとするとディスクを食うだけになる
+    command: ['valkey-server', '--save', '']
+    healthcheck:
+      test: ['CMD', 'valkey-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  pgdata:

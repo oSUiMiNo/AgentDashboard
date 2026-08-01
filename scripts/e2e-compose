@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# インスタンスを2台並べた構成をブラウザで通す（セルフホスト化設計§15-2 #4）。
+#
+# # この構成でしか出ないもの
+#
+# ローカルモードにも1台構成にも「別のインスタンスに繋がっている PC」は存在しない。
+# ブラウザが繋がった側に PC が居ないという配置は、**2台立てて初めて作れる**。
+# 検収条件の「別インスタンスに接続していてもターミナル操作が成立」「どこへ接続しても
+# 同じ結果」「片方を落としても継続」は、どれもここでしか確かめられない。
+#
+# # 誰がどこで動くか
+#
+# | 役 | どこ | なぜ |
+# |---|---|---|
+# | dashboard×2・PostgreSQL・Valkey | compose | 本番と同じ組み合わせを通すため |
+# | エージェント（PC 側） | **ホスト** | 相手にするのが擬似 claude で、PTY を持つため |
+# | ブラウザ（Playwright） | ホスト | 公開ポート越しに A へ繋ぐ |
+#
+# エージェントをコンテナへ入れないのは、そこで得られるものが無いため——PC 側は
+# フェーズ3・4 で既に別プロセスとして通してあり、ここで見たいのは**サーバが2台ある
+# こと**だけになる。
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+COMPOSE_FILE="${REPO_ROOT}/docker/compose.e2e.yml"
+PROJECT="agentdashboard-e2e"
+AGENT_BIN="${REPO_ROOT}/server/target/debug/agentdashboard-agent"
+FAKE_CLAUDE="${REPO_ROOT}/server/target/debug/fake-claude"
+AGENT_CONFIG="${REPO_ROOT}/web/e2e/compose-agent.toml"
+STATE="${REPO_ROOT}/web/test-results/compose"
+# ブラウザは A（4175）、PC は B（4176）
+BROWSER_URL="http://127.0.0.1:4175"
+AGENT_URL="http://127.0.0.1:4176"
+# テストの中だけの値なので伏せる意味は無い
+ACCOUNT="e2e"
+PASSWORD="e2eのあいことば"
+
+if ! docker compose version >/dev/null 2>&1; then
+    echo "エラー: docker compose が使えません。この検証には docker が要ります。" >&2
+    exit 1
+fi
+for binary in "${AGENT_BIN}" "${FAKE_CLAUDE}"; do
+    if [[ ! -x "${binary}" ]]; then
+        echo "エラー: ${binary} がありません。make build-debug を先に実行してください。" >&2
+        exit 1
+    fi
+done
+if [[ ! -x "${REPO_ROOT}/server/target/release/agentdashboard" ]]; then
+    echo "エラー: リリースの実行ファイルがありません。make build を先に実行してください。" >&2
+    exit 1
+fi
+
+agent_pid=""
+cleanup() {
+    [[ -n "${agent_pid}" ]] && kill "${agent_pid}" 2>/dev/null || true
+    echo "==> compose を片付けます"
+    docker compose -p "${PROJECT}" -f "${COMPOSE_FILE}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+}
+# 落ちても Ctrl+C でも必ず畳む。残すと次回の起動がポートで衝突する
+trap cleanup EXIT INT TERM
+
+# 前回の記録を消す。**E2E は「まだ何も起動していない」から始まる前提**
+rm -rf "${STATE}"
+mkdir -p "${STATE}/agent"
+
+echo "==> サーバ2台・PostgreSQL・Valkey を起動します（healthcheck が通るまで待ちます）"
+docker compose -p "${PROJECT}" -f "${COMPOSE_FILE}" up -d --build --wait
+
+# 1. 最初の管理者を作る（5分セットアップの手順2）。**開いているのは一度きり**
+echo "==> 管理者を作ります"
+if ! curl -sf -X POST "${BROWSER_URL}/api/setup" \
+    -H 'Content-Type: application/json' \
+    -d "{\"name\":\"${ACCOUNT}\",\"password\":\"${PASSWORD}\"}" >/dev/null; then
+    echo "エラー: 管理者を作れませんでした。" >&2
+    exit 1
+fi
+
+# 2. トークンを発行する。**コンテナの中で発行する**——平文はここでしか手に入らず、
+# 発行は DB を直に触るので、どちらのインスタンスから叩いても同じ結果になる
+echo "==> ペアリングトークンを発行します"
+token="$(docker compose -p "${PROJECT}" -f "${COMPOSE_FILE}" exec -T dashboard-a \
+    agentdashboard pair-token --account "${ACCOUNT}" --label compose | tr -d '[:space:]')"
+if [[ -z "${token}" ]]; then
+    echo "エラー: ペアリングトークンを発行できませんでした。" >&2
+    exit 1
+fi
+
+# 3. エージェントは **B へ**繋ぐ。ブラウザが繋ぐ A とは別のインスタンスになる
+echo "==> エージェントを起動します（繋ぎ先は B）"
+AGENTDASHBOARD_CLAUDE_BIN="${FAKE_CLAUDE}" \
+    AGENTDASHBOARD_PAIRING_TOKEN="${token}" \
+    AGENTDASHBOARD_SERVER_URL="${AGENT_URL}" \
+    "${AGENT_BIN}" --config "${AGENT_CONFIG}" &
+agent_pid=$!
+
+echo "==> ブラウザで通します（A に繋ぎます）"
+cd "${REPO_ROOT}/web"
+# **他の構成のサーバを起こさせない。** Playwright は project を選んでも `webServer` を
+# 全部立ち上げるので、印を付けて空にする（`playwright.config.ts`）
+AGENTDASHBOARD_E2E_COMPOSE=1 npx playwright test --project=chromium-compose "$@"

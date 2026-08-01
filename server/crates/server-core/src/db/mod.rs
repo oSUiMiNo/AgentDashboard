@@ -60,13 +60,50 @@ pub async fn connect(url: &str) -> anyhow::Result<DatabaseConnection> {
         .await
         .map_err(|err| anyhow::anyhow!("DB へ接続できません（{}）: {err}", masked(&url)))?;
 
-    migration::Migrator::up(&db, None)
-        .await
-        .map_err(|err| anyhow::anyhow!("DB のスキーマを適用できません: {err}"))?;
-
+    migrate(&db).await?;
     ensure_local_account(&db).await?;
     Ok(db)
 }
+
+/// スキーマを揃える。**インスタンスが同時に起動しても1台ずつ通す。**
+///
+/// # 同時に立ち上げると衝突する
+///
+/// マイグレーションは「まだ当たっていないものを当てる」形なので、2台が同時に読むと
+/// 両方が「当たっていない」と判断して同じ表を作りにいく。後から着いたほうが
+/// 「その表はもうある」で落ちて、**起動そのものが失敗する**（compose で2台立てて
+/// 実際に踏んだ）。
+///
+/// PostgreSQL の助言ロックを取ってから当てることで、待たせて1台ずつにする。取るのは
+/// トランザクションに紐づく側で、途中で落ちても必ず解ける——明示的に解く形にすると、
+/// 落ちた瞬間にロックが残って**他の全インスタンスが起動できなくなる**。
+///
+/// SQLite では要らない（同じファイルを複数プロセスが掴む使い方をしない）。
+async fn migrate(db: &DatabaseConnection) -> anyhow::Result<()> {
+    use sea_orm::{ConnectionTrait as _, TransactionTrait as _};
+
+    if db.get_database_backend() != sea_orm::DatabaseBackend::Postgres {
+        return apply_migrations(db).await;
+    }
+
+    let lock = db.begin().await?;
+    // 番号はこのプロジェクト専用の任意の値。**他の用途と被らなければ何でもよい**が、
+    // 変えると古い版と新しい版が同時に立ったときに直列化されなくなる
+    lock.execute_unprepared(&format!("SELECT pg_advisory_xact_lock({MIGRATION_LOCK})"))
+        .await?;
+    let outcome = apply_migrations(db).await;
+    lock.commit().await?;
+    outcome
+}
+
+async fn apply_migrations(db: &DatabaseConnection) -> anyhow::Result<()> {
+    migration::Migrator::up(db, None)
+        .await
+        .map_err(|err| anyhow::anyhow!("DB のスキーマを適用できません: {err}"))
+}
+
+/// マイグレーションを直列化するための助言ロックの番号。
+const MIGRATION_LOCK: i64 = 7_391_2026;
 
 /// ローカルモードのアカウント行を用意する。既にあれば何もしない。
 async fn ensure_local_account(db: &DatabaseConnection) -> anyhow::Result<()> {

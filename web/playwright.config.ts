@@ -44,8 +44,8 @@ export default defineConfig({
     {
       name: 'chromium',
       use: { ...devices['Desktop Chrome'] },
-      // セルフホスト構成のぶんは別のサーバ（4174）へ繋ぐ
-      testIgnore: /(remote|account)\.spec\.ts/,
+      // セルフホスト構成のぶんは別のサーバ（4174）、2台構成のぶんは compose（4175）
+      testIgnore: /(remote|account|compose)\.spec\.ts/,
     },
     {
       // 別の PC のセッションを、実物のブラウザで見る（セルフホスト化設計§7）。
@@ -57,8 +57,27 @@ export default defineConfig({
       // 繋いでくる PC も居ない）
       testMatch: /(remote|account)\.spec\.ts/,
     },
+    {
+      // インスタンスを2台並べた構成（セルフホスト化設計§9）。**ブラウザが繋がった側に
+      // PC が居ない**という配置は、2台立てて初めて作れる。
+      //
+      // 立ち上げは compose で、しかも順序を持つので `scripts/e2e-compose` が面倒を見る。
+      // **この project は `make e2e` では走らない**——docker が要るので既定に含めない
+      // （設計§15-3）
+      // **`make e2e` では走らない。** project を名指ししてあるのは、docker が
+      // 要るものを既定に混ぜないため（設計§15-3）——混ぜると、docker の無い環境で
+      // `make ci` の隣が必ず落ちる
+      name: 'chromium-compose',
+      use: { ...devices['Desktop Chrome'], baseURL: 'http://127.0.0.1:4175' },
+      testMatch: /compose\.spec\.ts/,
+    },
   ],
-  webServer: [
+  // compose の検証（`make e2e-compose`）では**1つも起こさない**。
+  //
+  // Playwright は project を選んでも `webServer` を全部起こすので、そのままだと
+  // ローカルモードとセルフホスト構成のサーバまで立ち上がる。要らないだけでなく、
+  // 同じ擬似 claude とポートを取り合って落ちる原因になる。
+  webServer: process.env.AGENTDASHBOARD_E2E_COMPOSE ? [] : [
     {
     // 記録の DB（設計§3-2）を**起動の直前に**消す。
     //

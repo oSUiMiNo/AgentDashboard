@@ -64,14 +64,11 @@ impl ValkeyBus {
 
         // 届いたものを受け取る口。**購読用の接続にだけ**付ける
         let (push_tx, push_rx) = mpsc::unbounded_channel::<PushInfo>();
-        let subscriber = ConnectionManager::new_with_config(
-            client.clone(),
-            manager_config().set_push_sender(push_tx),
-        )
-        .await?;
+        let subscriber =
+            ConnectionManager::new_with_config(client.clone(), subscriber_config(push_tx)).await?;
         // 配る側と視聴リースは別の接続にする。購読中の接続へ大きな publish を混ぜると、
         // 出力バッファの上限（設計§9-5）に押し出されて**サーバ側から切られる**
-        let commands = ConnectionManager::new_with_config(client, manager_config()).await?;
+        let commands = ConnectionManager::new_with_config(client, command_config()).await?;
 
         let state = Arc::new(watch::Sender::new(BusState::Ok));
         let (ops, op_rx) = mpsc::unbounded_channel();
@@ -249,15 +246,25 @@ fn mark(state: &watch::Sender<BusState>, ok: bool) {
     }
 }
 
-/// 接続の設定。**自動再購読をここで必ず有効にする。**
+/// 配る側・視聴リース側の接続の設定。
+///
+/// **自動再購読を付けてはいけない。** 受け取り口（push sender）を持たない接続に
+/// 付けると、redis は接続そのものを断る（`Cannot set resubscribe_automatically
+/// without setting a push sender`）——compose で2台立てて実際に踏んだ。
+pub fn command_config() -> ConnectionManagerConfig {
+    ConnectionManagerConfig::new()
+        .set_connection_timeout(Some(CONNECT_TIMEOUT))
+        .set_response_timeout(Some(RESPONSE_TIMEOUT))
+}
+
+/// 購読側の接続の設定。**自動再購読をここで必ず有効にする。**
 ///
 /// 既定は無効で、忘れると繋ぎ直した後に購読だけが静かに失われる（エラーは出ない）。
 /// 有効であることは下のテストが機械で確かめる。
-pub fn manager_config() -> ConnectionManagerConfig {
-    ConnectionManagerConfig::new()
+pub fn subscriber_config(push: mpsc::UnboundedSender<PushInfo>) -> ConnectionManagerConfig {
+    command_config()
+        .set_push_sender(push)
         .set_automatic_resubscription()
-        .set_connection_timeout(Some(CONNECT_TIMEOUT))
-        .set_response_timeout(Some(RESPONSE_TIMEOUT))
 }
 
 /// 接続先に RESP3 を指定する（無ければ足す）。
@@ -293,12 +300,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn 自動再購読を必ず有効にしている() {
+    fn 購読側は自動再購読を必ず有効にしている() {
         // **既定は無効**。ここが false のまま出荷すると、繋ぎ直した後で購読だけが
         // 静かに失われる——エラーは出ず、ただ何も届かなくなる（テスト計画F6）
+        let (push, _rx) = mpsc::unbounded_channel();
         assert!(
-            manager_config().automatic_resubscription(),
+            subscriber_config(push).automatic_resubscription(),
             "自動再購読が無効のままです"
+        );
+    }
+
+    #[test]
+    fn 配る側には自動再購読を付けない() {
+        // 受け取り口を持たない接続に付けると、redis は**接続そのものを断る**。
+        // 「両方に同じ設定を渡す」書き方にすると、起動した瞬間に全部止まる
+        assert!(
+            !command_config().automatic_resubscription(),
+            "受け取り口の無い接続に自動再購読が付いています"
         );
     }
 

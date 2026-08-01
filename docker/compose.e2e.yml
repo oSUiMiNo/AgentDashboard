@@ -1,0 +1,73 @@
+# インスタンスを2台並べた検証用の構成（セルフホスト化設計§15-2 #4）。
+#
+# 本番構成（`compose.yml`）との違いは3つだけ。
+#
+# | | 本番 | ここ |
+# |---|---|---|
+# | dashboard | 1台 | **2台**（別々のポートで公開する） |
+# | PostgreSQL のデータ | ボリューム | tmpfs（毎回捨てる） |
+# | 再起動 | unless-stopped | しない（落ちたら落ちたと分かるように） |
+#
+# **2台を別のポートで公開するのが要点。** ブラウザは A、PC は B、という配置を作れて
+# 初めて「別インスタンスに接続していてもターミナル操作が成立」（検収条件）が確かめられる。
+# 前段で振り分けてしまうと、どちらに繋がったのかテストから決められない。
+#
+# 起動と後片付けは `scripts/e2e-compose`（`make e2e-compose`）が面倒を見る。
+
+name: agentdashboard-e2e
+
+x-dashboard: &dashboard
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile.server
+  image: agentdashboard/server
+  environment: &dashboard-env
+    AGENTDASHBOARD_BIND_ADDR: 0.0.0.0
+    DATABASE_URL: postgres://agentdashboard:agentdashboard@postgres:5432/agentdashboard
+    VALKEY_URL: redis://valkey:6379
+    RUST_LOG: info
+  depends_on:
+    postgres: { condition: service_healthy }
+    valkey: { condition: service_healthy }
+  healthcheck:
+    # **鍵の外側の口で見る。** `/api/sessions` は鍵の向こうなので、待ちに使うと
+    # 「まだ起きていない」と「ログインしていない」が同じ 401 になり永久に待つ
+    test: ['CMD', 'curl', '-sf', 'http://127.0.0.1:8787/api/me']
+    interval: 2s
+    timeout: 3s
+    retries: 30
+
+services:
+  dashboard-a:
+    <<: *dashboard
+    ports:
+      - '4175:8787'
+
+  dashboard-b:
+    <<: *dashboard
+    ports:
+      - '4176:8787'
+
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: agentdashboard
+      POSTGRES_PASSWORD: agentdashboard
+      POSTGRES_DB: agentdashboard
+    # 毎回捨てるのでディスクへ残さない（速さのためでもある）
+    tmpfs:
+      - /var/lib/postgresql
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U agentdashboard -d agentdashboard']
+      interval: 1s
+      timeout: 3s
+      retries: 60
+
+  valkey:
+    image: valkey/valkey:9.1-alpine
+    command: ['valkey-server', '--save', '']
+    healthcheck:
+      test: ['CMD', 'valkey-cli', 'ping']
+      interval: 1s
+      timeout: 3s
+      retries: 60

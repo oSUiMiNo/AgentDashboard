@@ -1,0 +1,39 @@
+# セルフホストのダッシュボードを動かすイメージ（セルフホスト化設計§14-1）。
+#
+# # ここではビルドしない
+#
+# 入れるのは `make build` が作った実行ファイル1本だけ。イメージの中で cargo を走らせる
+# 書き方にすると、**compose 用のビルドキャッシュがもう1系統できる**——ソースを1行
+# 触るたびに数分待つことになり、開発の回転が落ちる。
+#
+# 配って動かすイメージ（フェーズ7・cargo-dist）も中身は「作った実行ファイルが1本」なので、
+# 形としてはこちらが本番と同じになる。
+#
+# # 土台を合わせる
+#
+# ビルド側（`docker/Dockerfile.rust`）が bookworm なので、こちらも bookworm にする。
+# glibc の互換は「新しい側が古い側を実行できる」方向にしか無いので、土台がずれると
+# **起動した瞬間に動かない**という形で出る。
+FROM debian:bookworm-slim
+
+# 入れるのは2つだけ。
+#
+# - ca-certificates … 外部の TLS を終端する構成（設計§14-2）で証明書を引くため。
+#   compose の中だけなら要らないが、無いと「本番構成に持っていくと繋がらない」になる
+# - curl … healthcheck（設計§14-1 の depends_on）のため。**外から叩けるかを外から
+#   確かめる**のが目的なので、プロセスが居るかどうかでは代わりにならない
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# web アセットは実行ファイルへ同梱済み（rust-embed）。**別に配らない**
+COPY server/target/release/agentdashboard /usr/local/bin/agentdashboard
+
+# 設定は全部環境変数で渡す（設計§14-1）。ファイルを配らないのは、コンテナでは
+# 環境変数のほうが自然で、`AGENTDASHBOARD_<キー>` で全キーに 1:1 対応しているため
+ENV AGENTDASHBOARD_BIND_ADDR=0.0.0.0
+
+EXPOSE 8787
+ENTRYPOINT ["/usr/local/bin/agentdashboard"]
+CMD ["--mode", "server"]

@@ -14,7 +14,7 @@ DEBUG_BIN := server/target/debug/agentdashboard
 .DEFAULT_GOAL := help
 
 .PHONY: help setup setup-rust setup-web dev dev-web dev-server \
-        test test-rust test-web test-cli test-compose e2e build-debug perf \
+        test test-rust test-web test-cli test-compose e2e e2e-compose build-debug perf \
         lint lint-rust lint-web fmt \
         build build-web build-server ci fixtures record-terminal probe-screen clean
 
@@ -71,6 +71,16 @@ test-cli: ## 実CLI統合テスト（本物の claude をホストで起動す�
 # CI 既定（make ci）には入れない（設計§15-3）。
 test-compose: ## 永続化層のテストを PostgreSQL に対しても流す（docker compose が要る）
 	./scripts/test-compose
+
+# インスタンスを2台並べた構成をブラウザで通す（テスト計画フェーズ6 の最終項目）。
+# **test-compose とは別のターゲットにしてある** — あちらは PostgreSQL に対する
+# 永続化層の検証で1分程度、こちらは compose を立ててブラウザまで通すので数分かかる。
+# 混ぜると「型だけ確かめたい」ときに毎回ブラウザの分まで待つことになる。
+#
+# 依存は build（リリースの実行ファイルをイメージへ入れる）と build-debug
+# （ホストで動かすエージェントと擬似 claude）の両方。
+e2e-compose: build build-debug ## サーバ2台＋PostgreSQL＋Valkey をブラウザで通す（docker が要る）
+	./scripts/e2e-compose
 
 # E2E は実際の core サーバに繋いで動かす（web/playwright.config.ts）。
 # web → core の順にビルドするのは、core が web/dist をコンパイル時に取り込むため。
