@@ -91,12 +91,15 @@ issue-sync は、ユーザーが行うので不要。必要かどうかユーザ
 | `server/crates/server-core/src/gateway.rs` | エージェントの受け口。画面のフレームはここで種別を移し替えてブラウザへ流す（0x04→0x03 / 0x05→0x01） |
 | `server/config.toml.example` | 設定の雛形。**全キーが `AGENTDASHBOARD_<キー>` で上書きできる**（設計§14-1） |
 | `docker/compose.test.yml` ／ `scripts/test-compose` | 永続化層を PostgreSQL に対しても流す（`make test-compose`）。**新しい DB テストは両方へ通す** |
-| `docker/compose.yml` ／ `docker/Dockerfile.server` | セルフホストの本番構成。イメージへ入れるのは `make build` が作った実行ファイル1本だけ |
+| `docker/compose.yml` ／ `docker/Dockerfile.server` | セルフホストの本番構成。**利用者が取ってくる1枚**なので `build:` を書かない（材料を持っているのは開発者だけ）。指す箱の版はワークスペースと揃える |
+| `.github/workflows/docker-image.yml` | サーバの箱を GHCR へ置く（`publish-jobs` から呼ばれる再利用ワークフロー）。**中でビルドし直さない**——リリースに上がった実行ファイルをそのまま入れる。作った箱は必ず起こして確かめる |
+| `docs/setup/` ／ `docs/service/` | セットアップの手順書4種と常駐の雛形。**セルフホストの入口は2つ**（実行ファイルだけ／compose）。手順書に載せる設定は実体を置き、そのファイルを検証が読む |
 | `docker/compose.e2e.yml` ／ `scripts/e2e-compose` | サーバ2台＋PostgreSQL＋Valkey＋前段（Caddy・nginx）をブラウザで通す（`make e2e-compose`）。**ブラウザ→A・PC→B の配置でしか出ない壊れ方**を捕まえる |
 | `server/crates/dist/tests/artifacts.rs` ／ `guides.rs` | 配布物の顔ぶれと、手順書が名指ししているものの実在。**配ってからしか気づけない失敗**を `make ci` で捕まえる |
 | `fixtures/` | ゴールデンフィクスチャ（自己修復のテストゲートを兼ねる）・端末録画（`.cast`）・画面のゴールデン（`.screen`） |
 | `server/crates/agent-core/tests/screen_golden.rs` | 録画から描いた画面のゴールデン比較。作り直すのは `AGENTDASHBOARD_UPDATE_SCREEN_GOLDEN=1`。**作り直したら必ず `scripts/sanitize-fixtures.py` を通す** |
 | `scripts/e2e-remote` ／ `web/e2e/remote.spec.ts` | セルフホスト構成（サーバ＋エージェント）の E2E。**ローカルモードでは画面配信の経路を通らない**ので、実物のブラウザで確かめるのはここだけ |
+| `scripts/e2e-fleet` ／ `web/e2e/fleet.spec.ts` | PC を3台つないだ E2E（`make e2e` に含む）。**PC が2台以上だと起動フォームに選択が現れる**ので、1台構成の土台には足せない。台数を変えるのはスクリプトの数字1つ |
 | `server/crates/agent-core/tests/pty_record.rs` | 実 claude の TUI を製品と同じ PTY 経路で録画する（`make record-terminal`）。**本物の claude を起動しクォータを消費する** |
 | `server/crates/agent-core/tests/screen_probe.rs` | 端末エミュレータ（vt100）の再現性と画面サイズの実測（`make probe-screen`）。合否ではなく数値を出す |
 | `scripts/sanitize-fixtures.py` | フィクスチャの匿名化と残存検査。**公開リポジトリへ置く前に必ず通す** |
