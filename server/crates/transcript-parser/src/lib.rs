@@ -12,6 +12,7 @@
 //! 非同期ランタイムは入れていない。やることは「ファイルを読む」「stdin/stdout」だけで、
 //! tokio が解く問題がここには無い。
 
+pub mod cli;
 pub mod normalize;
 pub mod parse;
 pub mod session;

@@ -1,0 +1,45 @@
+[package]
+# 利用者へ配る一式（セルフホスト化設計§14-3・§25 読み替え1）。
+#
+# # なぜ3本が同じパッケージに居るのか
+#
+# cargo-dist は**パッケージの境界を跨いでバイナリを1つのアーカイブへ入れられない**
+# （別パッケージ＝別アプリ＝別アーカイブ）。そして同じ名前の bin を2つのパッケージへ
+# 置くと cargo が衝突する。パーサは `agentdashboard` と `agentdashboard-agent` の
+# **どちらの隣にも**居なければならない（設計§10-3 の「実行ファイルの隣」探索）ので、
+# 3本を1つのパッケージへ集める以外に成立させる形が無い。
+#
+# # ここに中身を書かないこと
+#
+# 各 bin は呼び出しの1行だけ。境界（設計§2-1）はコンパイラが lib の依存グラフで
+# 守っており、ここへロジックを書くとその外側に出てしまう。
+# 1行であることは `crates/core/tests/dependencies.rs` が機械で見ている。
+name = "agentdashboard"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Claude Code セッションの司令塔ダッシュボード"
+repository = "https://github.com/oSUiMiNo/AgentDashboard"
+
+# workspace が publish = false なので、明示しないと dist に無視される
+[package.metadata.dist]
+dist = true
+
+[[bin]]
+name = "agentdashboard"
+path = "src/bin/agentdashboard.rs"
+
+[[bin]]
+name = "agentdashboard-agent"
+path = "src/bin/agentdashboard-agent.rs"
+
+[[bin]]
+name = "transcript-parser"
+path = "src/bin/transcript-parser.rs"
+
+[dependencies]
+agentdashboard-core = { path = "../core" }
+agentdashboard-agent = { path = "../agent" }
+transcript-parser = { path = "../transcript-parser" }
+anyhow.workspace = true

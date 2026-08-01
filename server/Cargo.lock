@@ -26,6 +26,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentdashboard"
+version = "0.1.0"
+dependencies = [
+ "agentdashboard-agent",
+ "agentdashboard-core",
+ "anyhow",
+ "transcript-parser",
+]
+
+[[package]]
 name = "agentdashboard-agent"
 version = "0.1.0"
 dependencies = [

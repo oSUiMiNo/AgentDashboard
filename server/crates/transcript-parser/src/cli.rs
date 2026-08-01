@@ -1,4 +1,9 @@
-//! transcript-parser プロセスの入口。
+//! transcript-parser プロセスの中身。
+//!
+//! 実行ファイルそのものは**配布用のパッケージ**（`crates/dist`）が持っている。
+//! パーサは `agentdashboard` と `agentdashboard-agent` の**どちらの隣にも居る**必要があり
+//! （設計§10-3）、cargo-dist はパッケージを跨いでバイナリを同梱できないため、3本を
+//! 1つのパッケージへ集めてある（§25 読み替え1）。
 //!
 //! core とは stdin/stdout の JSON Lines で会話する（設計§8）。別プロセスに分離しているのは、
 //! 自己修復でこのバイナリだけを差し替え・再起動できるようにするため。core と生きている PTY には
@@ -16,6 +21,8 @@
 //! 利用者からは原因が分からない）。巡回1回のコストは `metadata()` 数回ぶんで、
 //! この一群の不具合を消せるなら安い。
 
+use crate::session::{self, SessionState};
+use crate::tail::DirWatcher;
 use protocol::CardId;
 use protocol::ipc::{PROTOCOL_VERSION, ParsedNode, ParserCommand, ParserEvent};
 use std::collections::HashMap;
@@ -23,8 +30,6 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
-use transcript_parser::session::{self, SessionState};
-use transcript_parser::tail::DirWatcher;
 
 /// 巡回の間隔。notify の取りこぼしに対する保険。
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -39,7 +44,8 @@ enum Message {
     Stop,
 }
 
-fn main() -> anyhow::Result<()> {
+/// パーサプロセスの入口。
+pub fn run() -> anyhow::Result<()> {
     let (tx, rx) = mpsc::channel();
     spawn_stdin_reader(tx.clone());
     spawn_ticker(tx.clone());
@@ -50,11 +56,12 @@ fn main() -> anyhow::Result<()> {
         parser_version: env!("CARGO_PKG_VERSION").to_string(),
     });
 
-    run(rx, watcher);
+    pump(rx, watcher);
     Ok(())
 }
 
-fn run(rx: Receiver<Message>, mut watcher: Option<DirWatcher>) {
+/// 指示と合図を1本の列で受けて捌く。
+fn pump(rx: Receiver<Message>, mut watcher: Option<DirWatcher>) {
     let mut sessions: HashMap<CardId, SessionState> = HashMap::new();
 
     while let Ok(message) = rx.recv() {

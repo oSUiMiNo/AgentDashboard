@@ -68,6 +68,60 @@ const FORBIDDEN_DIRECT: &[(&str, &[&str])] = &[
     ("server-core", &["tokio-tungstenite"]),
 ];
 
+/// 配布用パッケージの入口が置いてある場所（このテストから見た相対パス）。
+const DIST_BINS: &str = "../dist/src/bin";
+
+/// そこに在るべき入口と、それぞれが呼ぶ先。
+const ENTRY_POINTS: &[(&str, &str)] = &[
+    ("agentdashboard.rs", "agentdashboard_core::cli::run()"),
+    ("agentdashboard-agent.rs", "agentdashboard_agent::run()"),
+    ("transcript-parser.rs", "transcript_parser::cli::run()"),
+];
+
+#[test]
+fn 配布用の入口は呼ぶだけになっている() {
+    // 実行ファイル3本は1つのパッケージに集めてある（セルフホスト化設計§25 読み替え1）。
+    // そのパッケージは**両側の lib へ依存する**ので、上の [`FORBIDDEN`] のような
+    // 「到達できないこと」の証明が効かない唯一の場所になる。
+    //
+    // 効かないなら狭める。入口が**呼び出しの1行だけ**であるうちは、そこへ書ける
+    // ロジックが存在しない——境界の外に立っているのは1行であって、コードではない。
+    // ここが緩むと、たとえば配るエージェントの入口からサーバ側の関数を呼べてしまい、
+    // 「配布バイナリを軽く保つ」（`crates/agent/Cargo.toml`）が黙って破れる。
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(DIST_BINS);
+
+    let mut found: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|err| panic!("配布用の入口を読めません（{}）: {err}", dir.display()))
+        .filter_map(|entry| Some(entry.ok()?.file_name().to_string_lossy().into_owned()))
+        .collect();
+    found.sort();
+    let mut expected: Vec<String> = ENTRY_POINTS
+        .iter()
+        .map(|(name, _)| (*name).to_string())
+        .collect();
+    expected.sort();
+    assert_eq!(
+        found, expected,
+        "配布用の入口が増減しています。増やすなら ENTRY_POINTS へも足すこと"
+    );
+
+    for (name, call) in ENTRY_POINTS {
+        let source = std::fs::read_to_string(dir.join(name))
+            .unwrap_or_else(|err| panic!("{name} を読めません: {err}"));
+        // 注釈は何行あってもよい。数えるのは**実際に走る行**だけ
+        let code: Vec<&str> = source
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with("//"))
+            .collect();
+        assert_eq!(
+            code,
+            vec!["fn main() -> anyhow::Result<()> {", call, "}"],
+            "{name} が呼び出しの1行だけではありません。中身は lib 側へ置くこと"
+        );
+    }
+}
+
 #[test]
 fn 直に持ってはいけない依存を宣言していない() {
     let metadata = metadata();

@@ -1,16 +1,18 @@
 [package]
-# PC 側エージェントの実行ファイル（セルフホスト化設計§2-1）。
-# 本体はフェーズ3（A2S）で入る。ここでは**依存の境界を先に立てる**ためだけに置いてある。
+# PC 側エージェントの中身（セルフホスト化設計§2-1）。
 # 配布バイナリを軽く保つため、rust-embed（web アセットの同梱）は決して足さないこと。
+# **この crate の依存グラフが、配るエージェントの軽さの証明そのもの**
+# （`crates/core/tests/dependencies.rs`）。実行ファイルは crates/dist が持つが、
+# あちらは呼び出しの1行だけなので、証明の対象はここのままでよい。
 name = "agentdashboard-agent"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
-[[bin]]
-name = "agentdashboard-agent"
-path = "src/main.rs"
+[lib]
+name = "agentdashboard_agent"
+path = "src/lib.rs"
 
 [dependencies]
 agent-core.workspace = true

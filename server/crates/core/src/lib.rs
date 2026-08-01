@@ -14,6 +14,7 @@
 //! こうしているのは、統合テストからサーバの組み立てをそのまま呼べるようにするため
 //! （バイナリだけのクレートは `tests/` から参照できない）。
 
+pub mod cli;
 pub mod config;
 pub mod local;
 pub mod settings_api;

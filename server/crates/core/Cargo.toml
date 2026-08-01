@@ -12,9 +12,9 @@ publish.workspace = true
 name = "agentdashboard_core"
 path = "src/lib.rs"
 
-[[bin]]
-name = "agentdashboard"
-path = "src/main.rs"
+# 実行ファイルはここには無い。3本を1つのアーカイブへ入れるため、`crates/dist` が
+# まとめて持っている（セルフホスト化設計§25 読み替え1）。コマンドラインの解釈まで
+# 含めて中身は `src/cli.rs` にあり、あちらは呼び出しの1行だけ。
 
 [dependencies]
 protocol.workspace = true

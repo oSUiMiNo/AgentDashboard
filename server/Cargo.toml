@@ -8,6 +8,9 @@ members = [
     "crates/agent",
     "crates/transcript-parser",
     "crates/testkit",
+    # 利用者へ配る一式。実行ファイル3本を1つのアーカイブへ入れるための集合場所で、
+    # 中身は持たない（セルフホスト化設計§25 読み替え1）
+    "crates/dist",
 ]
 
 [workspace.package]

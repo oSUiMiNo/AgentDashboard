@@ -9,9 +9,9 @@ publish.workspace = true
 name = "transcript_parser"
 path = "src/lib.rs"
 
-[[bin]]
-name = "transcript-parser"
-path = "src/main.rs"
+# 実行ファイルはここには無い。`agentdashboard` と `agentdashboard-agent` の
+# **どちらの隣にも**居る必要があるので、3本まとめて crates/dist が持っている
+# （セルフホスト化設計§25 読み替え1）。
 
 [dependencies]
 protocol.workspace = true

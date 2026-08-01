@@ -1,13 +1,19 @@
-//! AgentDashboard の実行ファイル。
+//! `agentdashboard` の中身（コマンドラインの解釈と、そこから先の入口）。
 //!
 //! 引数なしで起動するとサーバが立ち上がり、ブラウザからセッションを操作できるようになる。
-//! 中身は [`agentdashboard_core`] 側にあり、ここは CLI の解釈だけを担う。
+//!
+//! # なぜ実行ファイルの側に置かないのか
+//!
+//! 実行ファイルは**配布用のパッケージ**（`crates/dist`）が持っている。3本の実行ファイルを
+//! 1つのアーカイブへ入れるには同じパッケージに置くしかなく（セルフホスト化設計§25 読み替え1）、
+//! そちら側には呼び出しの1行しか置かない約束にしてある。中身がこちらにあるのは、その約束の側。
 
 use agent_core::{hook_post, model_post};
-use agentdashboard_core::{config, config::Config, serve, serve_server};
 use clap::{Parser, Subcommand, ValueEnum};
 use server_core::embed;
 use std::path::PathBuf;
+
+use crate::{config, config::Config, serve, serve_server};
 
 #[derive(Parser)]
 #[command(
@@ -78,8 +84,9 @@ enum Command {
     },
 }
 
+/// `agentdashboard` の入口。
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+pub async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // フック転送だけは設定の読み込みより前に処理する。フックは利用者のプロジェクトを
