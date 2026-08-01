@@ -1,0 +1,60 @@
+# 配布物の作り方（セルフホスト化設計§14-3・§25）。
+#
+# `dist`（旧 cargo-dist）が読む設定。3 OS 分のアーカイブとワンライナーのインストーラを
+# 作り、それを作るための GitHub Actions のワークフローも生成する。
+#
+# # なぜここに置くのか
+#
+# cargo の workspace は `server/` にあり、git のルートはここ。`dist-workspace.toml` は
+# この入れ子を表現できる唯一の形で、`members` に「どの言語のどこ」を並べる（§25 読み替え5）。
+#
+# # 触ったら
+#
+# `make dist-check` を通すこと。生成物の一覧（`dist plan`）と、生成済みのワークフローが
+# 設定と食い違っていないこと（`dist generate --check`）を見る。**ワークフローを手で
+# 書き換えない**——次の生成で黙って戻る。
+
+[workspace]
+members = ["cargo:server"]
+
+[dist]
+# 生成に使った dist の版。**docker/Dockerfile.rust が入れる版と揃えること**。
+# 食い違うと `dist generate --check` が落ちて気づける
+cargo-dist-version = "0.32.0"
+
+# 配布物を作る場所
+ci = "github"
+
+# 3 OS 分。macOS は universal を作らず、x86_64 と aarch64 を別々に作って
+# インストーラが選ぶ（§25 読み替え7）
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+
+# ワンライナーの2種類だけ。homebrew・npm・msi は利用者の前提を増やすので作らない
+installers = ["shell", "powershell"]
+
+# 入れる場所。**~/.cargo/bin にしない**——利用者に Rust が入っている前提を持ち込まない。
+# PATH への追加はインストーラが面倒を見る
+install-path = "~/.local/bin"
+
+# **cargo の前に web をビルドする**（§25 読み替え6）。`agentdashboard` は web/dist を
+# コンパイル時に焼き込むので、これが無いと**起動はするが画面が空**のバイナリができる。
+# パスは `.github/workflows/` からの相対
+github-build-setup = "build-setup.yml"
+
+# アーカイブに入れる読み物。手順はここから辿れる。
+# **自動の拾い上げは切る**——入れるものをこの1行で読み切れるようにするため
+# （切らないと同じ README が2回入る）
+auto-includes = false
+include = ["README.md"]
+
+# 自動更新の道具は入れない。更新の仕組みは持ち越し（設計§16-2）で、入れると
+# 「更新できると書いてあるのに更新されない」ことになる
+install-updater = false
+
+# ビルドに使う Rust は `server/rust-toolchain.toml` で決める。ここに書く
+# `rust-toolchain-version` は非推奨で、手元（隔離イメージ）と CI で版がずれる

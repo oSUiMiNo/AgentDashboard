@@ -7,7 +7,8 @@
 
 SHELL := /bin/bash
 CARGO := ./scripts/cargo
-DOCKER_IMAGE := agentdashboard-rust:1.97.1
+# scripts/cargo の IMAGE_TAG と必ず揃えること（食い違うと作ったイメージが使われない）
+DOCKER_IMAGE := agentdashboard-rust:1.97.1-2
 RELEASE_BIN := server/target/release/agentdashboard
 DEBUG_BIN := server/target/debug/agentdashboard
 
@@ -16,7 +17,7 @@ DEBUG_BIN := server/target/debug/agentdashboard
 .PHONY: help setup setup-rust setup-web dev dev-web dev-server \
         test test-rust test-web test-cli test-compose e2e e2e-compose build-debug perf \
         lint lint-rust lint-web fmt \
-        build build-web build-server ci fixtures record-terminal probe-screen clean
+        build build-web build-server dist-local ci fixtures record-terminal probe-screen clean
 
 help: ## このヘルプを表示する
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -127,6 +128,19 @@ build: build-web build-server ## 単一バイナリを作る（web ビルド →
 
 build-web: ## フロントエンドを web/dist へビルドする
 	cd web && npm run build
+
+# 配布物を手元で1つだけ実際に作る（セルフホスト化設計§14-3）。
+#
+# 3 OS 分を作れるのは GitHub Actions だけ（macOS へのクロスコンパイルは dist が断る）。
+# ここで作れるのは手元の OS 向けの1本で、**アーカイブの中身が本当に揃っているか**を
+# 目で見るためのもの。予定の一覧と OS の顔ぶれは `make test` の中で毎回見ている
+# （`server/crates/dist/tests/artifacts.rs`）。
+#
+# build-web が先に要る。web/dist が空のままだと、画面の入っていない実行ファイルが
+# アーカイブへ入る（起動はするので、配ってからでないと気づけない）。
+dist-local: build-web ## 手元の OS 向けの配布アーカイブを1つ作る
+	./scripts/dist build --artifacts=local --target=x86_64-unknown-linux-gnu
+	@echo "生成物: target/distrib/"
 
 build-server: ## core をリリースビルドする（web/dist を同梱する）
 	$(CARGO) build --release

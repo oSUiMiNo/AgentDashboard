@@ -22,7 +22,10 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-IMAGE_TAG="agentdashboard-rust:1.97.1"
+# 末尾の数字は**イメージの中身**の版（Makefile の DOCKER_IMAGE と揃えること）。
+# 道具を足したら上げる。上げると手元の古いイメージでは動かなくなり、下の検査が
+# 「作り直してください」と言う——黙って古い道具で動くほうが分かりにくい
+IMAGE_TAG="agentdashboard-rust:1.97.1-2"
 CARGO_DIR="${AGENTDASHBOARD_CARGO_DIR:-server}"
 TARGET_DIR="${AGENTDASHBOARD_CARGO_TARGET_DIR:-}"
 
@@ -36,6 +39,13 @@ case "${CARGO_DIR}" in
 esac
 if [[ ! -d "${REPO_ROOT}/${CARGO_DIR}" ]]; then
     echo "エラー: 作業場所が見つかりません: ${REPO_ROOT}/${CARGO_DIR}" >&2
+    exit 1
+fi
+
+# イメージが無ければ docker は Docker Hub を探しに行き、「見つからない」という
+# こちらの事情と無関係な理由で失敗する。先に見て、やることを名指しで伝える
+if ! docker image inspect "${IMAGE_TAG}" >/dev/null 2>&1; then
+    echo "エラー: ${IMAGE_TAG} がありません。make setup-rust を実行してください。" >&2
     exit 1
 fi
 

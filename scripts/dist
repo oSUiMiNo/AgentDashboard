@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# dist（旧 cargo-dist）を「ホストに入れずに」呼ぶための入口。
+#
+# cargo と同じ理由でコンテナに隔離してある（scripts/cargo と同じイメージ）。違いは
+# **作業場所がリポジトリのルート**であること——設定（`dist-workspace.toml`）が
+# cargo の workspace より1つ上に居るため（セルフホスト化設計§25 読み替え5）。
+#
+# 使い方: scripts/dist <dist のサブコマンドと引数>
+#   例) scripts/dist plan
+#       scripts/dist generate --check
+#       scripts/dist build --artifacts=local
+#
+# `dist build` は実際にコンパイルするので、**先に `make build-web` を通しておくこと**。
+# web/dist が空のままだと、画面の入っていない実行ファイルがアーカイブへ入る。
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# scripts/cargo の IMAGE_TAG と揃えること
+IMAGE_TAG="agentdashboard-rust:1.97.1-2"
+
+if ! docker image inspect "${IMAGE_TAG}" >/dev/null 2>&1; then
+    echo "エラー: ${IMAGE_TAG} がありません。make setup-rust を実行してください。" >&2
+    exit 1
+fi
+
+# rust-embed は web/dist を「コンパイル時に」読むため、フォルダが無いとビルドが失敗する
+mkdir -p "${REPO_ROOT}/web/dist"
+
+docker run --rm \
+    --user "$(id -u):$(id -g)" \
+    --volume "${REPO_ROOT}:/repo" \
+    --volume "agentdashboard-cargo-registry:/usr/local/cargo/registry" \
+    --volume "agentdashboard-cargo-git:/usr/local/cargo/git" \
+    --workdir "/repo" \
+    --env CARGO_TERM_COLOR=always \
+    "${IMAGE_TAG}" \
+    dist "$@"

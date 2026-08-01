@@ -43,3 +43,7 @@ agentdashboard-core = { path = "../core" }
 agentdashboard-agent = { path = "../agent" }
 transcript-parser = { path = "../transcript-parser" }
 anyhow.workspace = true
+
+[dev-dependencies]
+# 配布物の予定（`dist plan`）を読むためだけに使う
+serde_json.workspace = true

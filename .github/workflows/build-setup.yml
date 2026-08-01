@@ -1,0 +1,32 @@
+# 配布物をビルドする直前に差し込む手順（セルフホスト化設計§25 読み替え6）。
+#
+# `dist-workspace.toml` の `github-build-setup` から参照され、生成される
+# `release.yml` のビルドの仕事へそのまま埋め込まれる。**ここだけは手で書く**
+# （`release.yml` 側は `dist generate` が作るので、手を入れても次の生成で戻る）。
+#
+# # なぜ要るのか
+#
+# `agentdashboard` は画面（`web/dist`）を**コンパイル時に**実行ファイルへ焼き込む
+# （rust-embed）。dist が既定で呼ぶのは cargo だけなので、これが無いと空のフォルダを
+# 焼き込むことになり、**起動はするが画面が真っ白**なバイナリができあがる。ビルドも
+# テストも通り、配ってから気づく類の壊れ方になる。
+#
+# # 書き方の制約が2つある
+#
+# 1. **`working-directory:` は使えない。** dist は手順を読み直して埋め込むので、
+#    知らないキーは黙って落ちる（実際に落ちて、リポジトリのルートで `npm ci` が
+#    走る形になった）。場所を移すなら `run:` の中で `cd` すること
+# 2. 3 OS 分の runner すべてで走る。Linux と macOS は bash、Windows は PowerShell
+#    なので、**どちらでも同じ意味になる書き方**に限る（`cd` と `npm` はどちらでも動く）
+- name: Node を用意する
+  uses: actions/setup-node@v4
+  with:
+    node-version: '24'
+    cache: npm
+    cache-dependency-path: web/package-lock.json
+
+- name: web をビルドする
+  run: |
+    cd web
+    npm ci
+    npm run build

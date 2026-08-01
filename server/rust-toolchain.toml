@@ -1,0 +1,12 @@
+# ビルドに使う Rust を1つに固定する。
+#
+# **docker/Dockerfile.rust が入れている版と揃えること。** 手元は隔離イメージの中で
+# 動くのでそちらが正だが、配布物を作る GitHub Actions にはイメージが無い。dist が
+# 生成するワークフローは rustup にこのファイルを読ませるので、**両方が同じ版で
+# ビルドされる**ことがここ1枚で担保される。
+#
+# 版を上げるときに触る場所は3つ：ここ・`docker/Dockerfile.rust`・`Makefile` と
+# `scripts/cargo` のイメージのタグ。
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]

@@ -7,17 +7,34 @@
 # そのまま実行できるようにするため（glibc の互換性は「新しい側が古い側を実行できる」方向にある）。
 FROM rust:1.97.1-slim-bookworm
 
-# リンクとビルドスクリプトに必要な最低限のツールのみ入れる
+# リンクとビルドスクリプトに必要な最低限のツールのみ入れる。
+#
+# git は dist がリリースの版とタグを読むために使う。**リポジトリの持ち主が違っても
+# 読めるようにしておく**——コンテナはホストの uid で走るので、マウント越しでは
+# git が「持ち主が怪しい」と言って止まることがある。
+# xz-utils は dist の配布物（.tar.xz）を開くため。
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config \
         ca-certificates \
         curl \
-    && rm -rf /var/lib/apt/lists/*
+        git \
+        xz-utils \
+    && rm -rf /var/lib/apt/lists/* \
+    && git config --system --add safe.directory '*'
 
 # cargo-nextest：テストごとにプロセスを分離し、個別タイムアウトを掛けられる。
 # 本PJTは PTY を扱うテストが増えていくため、1本のハングが全体を巻き込む事故を防ぐ目的で導入する。
 # ソースからのビルドは遅いのでプリビルドバイナリを配置する。
 RUN curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C /usr/local/cargo/bin
+
+# dist（旧 cargo-dist）：配布物の生成とリリース CI の生成（セルフホスト化設計§14-3）。
+# 版を固定するのは、生成した `.github/workflows/release.yml` に自分の版が焼き込まれるため。
+# 上げるときは設定（`dist-workspace.toml` の `cargo-dist-version`）と一緒に上げ、
+# `dist generate` を掛け直すこと——`make dist-check` が食い違いを見つける。
+#
+# musl 版を取るのは、このイメージの glibc に縛られないため（nextest と同じ扱い）。
+RUN curl -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-x86_64-unknown-linux-musl.tar.xz \
+        | tar -xJf - --strip-components=1 -C /usr/local/cargo/bin cargo-dist-x86_64-unknown-linux-musl/dist
 
 # lint 用コンポーネント
 RUN rustup component add rustfmt clippy
