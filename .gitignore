@@ -45,6 +45,11 @@ node_modules/
 # git では追跡しない（PJTガイドライン「ローカルイシューのドキュメントを編集するとき」参照）
 /MyDocs/
 
+# 配布物を作るときに `dist` がルートへ置く写し（実体は scripts/ にある）。
+# 追跡すると、**古い写しを本物と取り違える**経路ができる
+/agentdashboard-uninstaller.sh
+/agentdashboard-uninstaller.ps1
+
 # OS / エディタ
 .DS_Store
 *.swp

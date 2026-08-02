@@ -104,6 +104,31 @@ fn 決めた顔ぶれのアーカイブとワンライナーが並ぶ() {
 }
 
 #[test]
+fn 消す道もリリースに並ぶ() {
+    // 入れる道と対で配る（設計§27）。ここから静かに落ちると、**利用者は消し方を
+    // 自分で調べることになる**——そして調べた結果が正しいとは限らない
+    // （記録まで消して、一覧と履歴を戻せなくする形が一番あぶない）
+    let plan = plan();
+    let extras: BTreeSet<&str> = plan["artifacts"]
+        .as_object()
+        .expect("artifacts があること")
+        .iter()
+        .filter(|(_, artifact)| artifact["kind"] == "extra-artifact")
+        .map(|(name, _)| name.as_str())
+        .collect();
+
+    for expected in [
+        "agentdashboard-uninstaller.sh",
+        "agentdashboard-uninstaller.ps1",
+    ] {
+        assert!(
+            extras.contains(expected),
+            "{expected} がリリースに並びません: {extras:?}"
+        );
+    }
+}
+
+#[test]
 fn 生成済みのワークフローが設定と食い違っていない() {
     // `.github/workflows/release.yml` は `dist generate` が作る。手で書き換えても
     // 次の生成で黙って戻るので、**書き換えたことに気づける形**にしておく。

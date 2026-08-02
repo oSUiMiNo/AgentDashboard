@@ -69,5 +69,18 @@ include = ["README.md", "docs/setup"]
 # 「更新できると書いてあるのに更新されない」ことになる
 install-updater = false
 
+# 消す道もリリースへ上げる（設計§27）。**dist のインストーラに消す機能は無い**ので、
+# 自前で書いたものを、入れる側と同じ形（ワンライナー）で配る。
+#
+# リポジトリでの名前は `uninstall.sh` だが、配る名前は `agentdashboard-installer.sh` と
+# 揃える——利用者が並べて見たときに、対になっていると分かるようにするため。
+[[dist.extra-artifacts]]
+artifacts = ["agentdashboard-uninstaller.sh"]
+build = ["cp", "scripts/uninstall.sh", "agentdashboard-uninstaller.sh"]
+
+[[dist.extra-artifacts]]
+artifacts = ["agentdashboard-uninstaller.ps1"]
+build = ["cp", "scripts/uninstall.ps1", "agentdashboard-uninstaller.ps1"]
+
 # ビルドに使う Rust は `server/rust-toolchain.toml` で決める。ここに書く
 # `rust-toolchain-version` は非推奨で、手元（隔離イメージ）と CI で版がずれる
