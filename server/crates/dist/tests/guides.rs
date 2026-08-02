@@ -12,8 +12,18 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-/// 在るべき手順書（設計§14-2 の4種）。
-const GUIDES: &[&str] = &["local.md", "selfhost.md", "pairing.md", "reverse-proxy.md"];
+/// 在るべき手順書。
+///
+/// 検収条件が数えているのは前の4つ（設計§14-2）。`uninstall.md` は**入れる道と
+/// 対で要る**ものとして後から足した（設計§27）——消し方が書いていないと、利用者は
+/// 自分で調べることになり、**記録まで消して戻せなくする**形が一番あぶない。
+const GUIDES: &[&str] = &[
+    "local.md",
+    "selfhost.md",
+    "pairing.md",
+    "reverse-proxy.md",
+    "uninstall.md",
+];
 
 /// リポジトリの中を指していると判断する頭。
 ///
@@ -25,8 +35,8 @@ const REPO_ROOTS: &[&str] = &["docs/", "server/", "docker/", "web/", "scripts/"]
 const UNIT: &str = "docs/service/agentdashboard.service";
 
 #[test]
-fn 手順書は4種とも在る() {
-    // 検収条件が数えているのはこの4つ。名前を変えるならこちらも変える
+fn 手順書がそろっている() {
+    // 検収条件が数えているのは最初の4つ。名前を変えるならこちらも変える
     let dir = setup_dir();
     for guide in GUIDES {
         assert!(

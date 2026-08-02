@@ -93,7 +93,9 @@ issue-sync は、ユーザーが行うので不要。必要かどうかユーザ
 | `docker/compose.test.yml` ／ `scripts/test-compose` | 永続化層を PostgreSQL に対しても流す（`make test-compose`）。**新しい DB テストは両方へ通す** |
 | `docker/compose.yml` ／ `docker/Dockerfile.server` | セルフホストの本番構成。**利用者が取ってくる1枚**なので `build:` を書かない（材料を持っているのは開発者だけ）。指す箱の版はワークスペースと揃える |
 | `.github/workflows/docker-image.yml` | サーバの箱を GHCR へ置く（`publish-jobs` から呼ばれる再利用ワークフロー）。**中でビルドし直さない**——リリースに上がった実行ファイルをそのまま入れる。作った箱は必ず起こして確かめる |
-| `docs/setup/` ／ `docs/service/` | セットアップの手順書4種と常駐の雛形。**セルフホストの入口は2つ**（実行ファイルだけ／compose）。手順書に載せる設定は実体を置き、そのファイルを検証が読む |
+| `docs/setup/` ／ `docs/service/` | セットアップの手順書と常駐の雛形。**セルフホストの入口は2つ**（実行ファイルだけ／compose）。手順書に載せる設定は実体を置き、そのファイルを検証が読む |
+| `scripts/uninstall.sh` ／ `.ps1` | 消す道。**入れる側を触ったら同じコミットでこちらも直す**。記録は既定で残し、共有の場所（`~/.local/bin/env`・rcfile）には触らない |
+| `server/crates/dist/tests/uninstall.rs` | 消す道の門。**偽のインストール一式を作って実際に走らせる**。置き場所は実装と `dist-workspace.toml` から引くので、片方を直すともう片方が落ちる |
 | `docker/compose.e2e.yml` ／ `scripts/e2e-compose` | サーバ2台＋PostgreSQL＋Valkey＋前段（Caddy・nginx）をブラウザで通す（`make e2e-compose`）。**ブラウザ→A・PC→B の配置でしか出ない壊れ方**を捕まえる |
 | `server/crates/dist/tests/artifacts.rs` ／ `guides.rs` | 配布物の顔ぶれと、手順書が名指ししているものの実在。**配ってからしか気づけない失敗**を `make ci` で捕まえる |
 | `fixtures/` | ゴールデンフィクスチャ（自己修復のテストゲートを兼ねる）・端末録画（`.cast`）・画面のゴールデン（`.screen`） |

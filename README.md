@@ -73,6 +73,7 @@ agentdashboard
 | サーバを立てて複数の PC を集める | [セルフホストで使う](docs/setup/selfhost.md)（**立て方は2つ**——実行ファイルだけ／docker compose） |
 | PC をサーバへ繋ぐ | [ペアリング](docs/setup/pairing.md) |
 | インターネットから使う（TLS） | [リバースプロキシ](docs/setup/reverse-proxy.md) |
+| 消す | [消す](docs/setup/uninstall.md)（**記録は既定では消しません**） |
 
 ### ソースから建てる
 自己修復を動かすならこちら（開発するときも同じ）。
