@@ -68,6 +68,16 @@ $StateDirFallback = if ($env:XDG_STATE_HOME) {
     Join-Path $HOME ".local\state\$AppName"
 }
 
+# 版の保管庫と、それに付く小物（記録の置き場所の中にある）。
+#
+# **記録とは扱いが違う。** あちらの基準は「戻せないものは残す」だが、保管庫の中身は
+# 実行ファイルなので**落とし直せる＝戻せる**。だから `-Purge` を待たずに消す——
+# 残すと版1つあたり数十MB が誰にも気づかれずに溜まり続ける。
+#
+# 名前は実装（`agent_core::version`）と揃える。食い違いは `crates/dist/tests/uninstall.rs` が見張る
+$VersionsDirName = 'versions'
+$VersionFileNames = @('version-current', 'version-attempt', 'version-state.json')
+
 # **古い置き場所。** v0.1.0 には Windows の道が無く、`HOME` も無いので記録が
 # 一時領域（`%LOCALAPPDATA%\Temp\`）へ落ちていた。いまの実行ファイルはそこを
 # 知らないので、聞いても返ってこない。
@@ -174,6 +184,21 @@ if ((-not $DryRun) -and (Test-Path -LiteralPath $ReceiptDir)) {
         Write-Host "  消しました: $ReceiptDir"
     }
 }
+
+Write-Host ''
+Write-Host '== 版の保管庫 =='
+# 記録の中にあるが、中身は実行ファイルなので**落とし直せる**。`-Purge` を待たない。
+# ポインタと小物も一緒に消す——**残すと入れ直したときに、消えた版を指したまま
+# 「指す先が見つかりません」が出続ける**
+$versionFound = $false
+foreach ($name in @($VersionsDirName) + $VersionFileNames) {
+    $target = Join-Path $StateDir $name
+    if (Test-Path -LiteralPath $target) {
+        $versionFound = $true
+        Remove-Target $target
+    }
+}
+if (-not $versionFound) { Write-Host '  ありませんでした' }
 
 Write-Host ''
 Write-Host '== 記録（一覧・履歴） =='

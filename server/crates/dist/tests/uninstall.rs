@@ -47,6 +47,15 @@ const RCFILES: &[&str] = &[
 /// 残すと**消えた `env.fish` を読み続けて fish が毎回エラーを出す**。
 const FISH_CONF: &str = ".config/fish/conf.d/agentdashboard.env.fish";
 
+/// 版の保管庫に付く小物（記録の置き場所の直下）。
+///
+/// **保管庫ごと消す対象。** 残すと、入れ直したときに消えた版を指したまま
+/// 「指す先が見つかりません」が出続ける。
+const VERSION_FILES: &[&str] = &["version-current", "version-attempt", "version-state.json"];
+
+/// 保管庫に置く版の名前（偽のインストール一式で使う）。
+const STORED_VERSION: &str = "0.1.0";
+
 #[test]
 fn 既定では実行ファイルと控えだけが消える() {
     let home = fake_install("default");
@@ -79,6 +88,20 @@ fn 既定では実行ファイルと控えだけが消える() {
         !home.join(FISH_CONF).exists(),
         "fish の設定（アプリ専用）が残っています:\n{out}"
     );
+
+    // **版の保管庫は記録の中にあるが、中身は実行ファイル。** あちらの基準は
+    // 「戻せないものは残す」で、保管庫は落とし直せる＝戻せる。残すと版1つあたり
+    // 数十MB が誰にも気づかれずに溜まり続ける
+    assert!(
+        !home.join(".local/state/agentdashboard/versions").exists(),
+        "版の保管庫が残っています（--purge 無しでも消すこと）:\n{out}"
+    );
+    for name in VERSION_FILES {
+        assert!(
+            !home.join(".local/state/agentdashboard").join(name).exists(),
+            "{name} が残っています（消えた版を指したままになる）:\n{out}"
+        );
+    }
 }
 
 #[test]
@@ -202,6 +225,79 @@ fn dry_runでは何も消えない() {
         home.join(".local/state/agentdashboard").exists(),
         "--dry-run なのに記録が消えています:\n{out}"
     );
+    assert!(
+        home.join(".local/state/agentdashboard/versions").exists(),
+        "--dry-run なのに版の保管庫が消えています:\n{out}"
+    );
+}
+
+#[test]
+fn 版の保管庫はpurge無しでも消え記録は残る() {
+    // 消す側の表の基準は「戻せないものは残す」。保管庫の中身は実行ファイルなので
+    // **落とし直せる＝戻せる**。記録（一覧・履歴）と同じ場所に居るが扱いは逆になる
+    let home = fake_install("versions");
+
+    let out = run(&home, &[]);
+
+    let state = home.join(".local/state/agentdashboard");
+    assert!(
+        !state.join("versions").exists(),
+        "保管庫が残っています。版1つあたり数十MB が誰にも気づかれずに溜まります:\n{out}"
+    );
+    assert!(
+        state.join("dashboard.db").exists(),
+        "保管庫を消すついでに記録まで消しています:\n{out}"
+    );
+}
+
+#[test]
+fn dry_runでは保管庫が行そのもので名指しされる() {
+    // **行そのもので見る。** 部分一致で探すと、記録の置き場所（`--purge` のときに
+    // 出る `<state_dir>` の行）に当たってしまい、**保管庫を掃く処理を消しても
+    // 緑のまま通る**（同じ轍を一度踏んでいる）
+    let home = fake_install("versions-dry");
+
+    let out = run(&home, &["--dry-run"]);
+
+    let state = home.join(".local/state/agentdashboard");
+    let mut expected: Vec<String> = vec![format!("消す予定: {}", state.join("versions").display())];
+    expected.extend(
+        VERSION_FILES
+            .iter()
+            .map(|name| format!("消す予定: {}", state.join(name).display())),
+    );
+    for line in expected {
+        assert!(
+            out.lines().any(|printed| printed.trim() == line),
+            "消す対象にしていません（{line} が出ていない）:\n{out}"
+        );
+    }
+}
+
+#[test]
+fn 保管庫の置き場所が実装と食い違っていない() {
+    // 実装が名前を変えたのに消す側が古い名前のままだと、**保管庫だけが取り残される**。
+    // しかも消す道は「完了しました」と言うので、誰も気づけない
+    use agent_core::version::{VERSION_POINTER, VERSIONS_DIR_NAME};
+
+    let unix = script_text("uninstall.sh");
+    let windows = script_text("uninstall.ps1");
+
+    assert!(
+        unix.contains(&format!("VERSIONS_DIR_NAME=\"{VERSIONS_DIR_NAME}\"")),
+        "消す側（sh）の保管庫の名前が実装（{VERSIONS_DIR_NAME}）と違います"
+    );
+    assert!(
+        windows.contains(&format!("$VersionsDirName = '{VERSIONS_DIR_NAME}'")),
+        "消す側（ps1）の保管庫の名前が実装（{VERSIONS_DIR_NAME}）と違います"
+    );
+    for (label, script) in [("sh", &unix), ("ps1", &windows)] {
+        assert!(
+            script.contains(VERSION_POINTER),
+            "消す側（{label}）がポインタ（{VERSION_POINTER}）を消しません。\
+             残すと、入れ直したときに消えた版を指したままになります"
+        );
+    }
 }
 
 #[test]
@@ -268,6 +364,15 @@ fn 入れる場所の既定が配布設定と食い違っていない() {
 #[test]
 fn 配る実行ファイルの顔ぶれが一致している() {
     // 4本目が増えたのに消す側が3本のままだと、1本だけ残る
+    //
+    // **実装も同じ顔ぶれを持っている**（保管庫へ控えるのも3本揃いを確かめるのも
+    // あちらの仕事）。3つが揃っていることをここで一度に見る
+    assert_eq!(
+        agent_core::version::BINARIES.as_slice(),
+        BINARIES,
+        "実装（agent_core::version::BINARIES）と消す道の顔ぶれが違います"
+    );
+
     let script = script_text("uninstall.sh");
     let line = script
         .lines()
@@ -541,6 +646,17 @@ fn fake_install(label: &str) -> FakeHome {
     )
     .expect("書けること");
     std::fs::write(state.join("dashboard.db"), "db").expect("書けること");
+
+    // 版の保管庫一式。**記録と同じ場所に居るが扱いが違う**ので、両方置いて
+    // 「保管庫だけ消えて記録は残る」を1本のテストで見られるようにする
+    let stored = state.join("versions").join(STORED_VERSION);
+    std::fs::create_dir_all(&stored).expect("作れること");
+    for binary in BINARIES {
+        std::fs::write(stored.join(binary), "x").expect("書けること");
+    }
+    for name in VERSION_FILES {
+        std::fs::write(state.join(name), "x").expect("書けること");
+    }
 
     home
 }

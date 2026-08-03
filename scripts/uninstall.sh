@@ -52,6 +52,16 @@ RECEIPT="${RECEIPT_DIR}/${APP_NAME}-receipt.json"
 # 部品（`.local/state` と名前）は Rust 側の定数と門で突き合わせている。
 STATE_DIR_FALLBACK="${XDG_STATE_HOME:-${HOME}/.local/state}/${APP_NAME}"
 
+# 版の保管庫と、それに付く小物（記録の置き場所の中にある）。
+#
+# **記録とは扱いが違う。** あちらの基準は「戻せないものは残す」だが、保管庫の中身は
+# 実行ファイルなので**落とし直せる＝戻せる**。だから `--purge` を待たずに消す——
+# 残すと版1つあたり数十MB が誰にも気づかれずに溜まり続ける。
+#
+# 名前は実装（`agent_core::version`）と揃える。食い違いは `crates/dist/tests/uninstall.rs` が見張る
+VERSIONS_DIR_NAME="versions"
+VERSION_FILE_NAMES="version-current version-attempt version-state.json"
+
 # fish だけは**アプリ専用の設定ファイル**を作られる。他のツールと共有していないので、
 # 入れる側が作ったものは消す側も消す（`~/.local/bin/env.fish` のほうは共有なので残す）
 FISH_CONF="${XDG_CONFIG_HOME:-${HOME}/.config}/fish/conf.d/${APP_NAME}.env.fish"
@@ -203,6 +213,21 @@ remove "${RECEIPT}"
 if [ "${DRY_RUN}" -eq 0 ] && [ -d "${RECEIPT_DIR}" ]; then
     rmdir "${RECEIPT_DIR}" 2>/dev/null && say "  消しました: ${RECEIPT_DIR}" || true
 fi
+
+say ""
+say "== 版の保管庫 =="
+# 記録の中にあるが、中身は実行ファイルなので**落とし直せる**。`--purge` を待たない。
+# ポインタと小物も一緒に消す——**残すと入れ直したときに、消えた版を指したまま
+# 「指す先が見つかりません」が出続ける**
+version_found=0
+for name in "${VERSIONS_DIR_NAME}" ${VERSION_FILE_NAMES}; do
+    target="${STATE_DIR}/${name}"
+    if [ -e "${target}" ]; then
+        version_found=1
+        remove "${target}"
+    fi
+done
+[ "${version_found}" -eq 0 ] && say "  ありませんでした"
 
 say ""
 say "== 記録（一覧・履歴） =="
