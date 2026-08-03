@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agent-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -27,7 +27,7 @@ dependencies = [
 
 [[package]]
 name = "agentdashboard"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agent-core",
  "agentdashboard-agent",
@@ -39,7 +39,7 @@ dependencies = [
 
 [[package]]
 name = "agentdashboard-agent"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agent-core",
  "anyhow",
@@ -53,7 +53,7 @@ dependencies = [
 
 [[package]]
 name = "agentdashboard-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agent-core",
  "anyhow",
@@ -2198,7 +2198,7 @@ dependencies = [
 
 [[package]]
 name = "protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2839,7 +2839,7 @@ dependencies = [
 
 [[package]]
 name = "server-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3277,7 +3277,7 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
 name = "testkit"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3698,7 +3698,7 @@ dependencies = [
 
 [[package]]
 name = "transcript-parser"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "notify",
