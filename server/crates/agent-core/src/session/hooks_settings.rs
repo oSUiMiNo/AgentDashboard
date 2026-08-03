@@ -35,9 +35,20 @@ use std::path::{Path, PathBuf};
 
 /// フックが起動する実行ファイルを差し替えるための環境変数。
 ///
-/// 既定は自分自身（`std::env::current_exe()`）。統合テストでは core が**ライブラリとして**
-/// 動くため `current_exe()` がテストバイナリを指してしまうので、ビルド済みの
-/// `agentdashboard` を指すためにこの入口が要る。
+/// 既定は自分自身（`std::env::current_exe()`）。
+///
+/// # もとはテスト用、いまは製品の経路でも使う
+///
+/// 元の理由は統合テストで、core が**ライブラリとして**動くため `current_exe()` が
+/// テストバイナリを指してしまう、というものだった。
+///
+/// 版の切替（CICD設計§5）が入ってからは、**製品の経路でも常用する**。乗り換えると
+/// `current_exe()` が保管庫の版フォルダを指すので、そのまま焼き込むと**版を消した瞬間に
+/// 生きているセッションのフックが全滅する**。しかもフックは `"async": true` で呼ばれる
+/// ため claude は止まらず、状態だけが更新されなくなって「作業中のまま固まる」になる。
+///
+/// そこで乗り換えるとき、**乗り換える前の自分**（＝入れる側が置いた入口。版が変わっても
+/// 消えない）をここへ入れて渡す。既に立っていれば上書きしない。
 pub const HOOK_BIN_ENV: &str = "AGENTDASHBOARD_HOOK_BIN";
 
 /// 生成したセッション専用 settings の置き場所と認証トークン。
@@ -53,10 +64,21 @@ pub struct HookSettings {
 
 /// フックが起動する実行ファイルを決める。
 pub fn hook_program() -> PathBuf {
-    if let Ok(path) = std::env::var(HOOK_BIN_ENV) {
+    hook_program_from(
+        std::env::var(HOOK_BIN_ENV).ok(),
+        std::env::current_exe().ok(),
+    )
+}
+
+/// 決め方（材料を受け取る純粋関数）。
+///
+/// 分けてあるのは、テストが環境変数を書き換えずに両方の道を通せるようにするため。
+/// **どちらの道も製品で通る**（乗り換えると指定側、乗り換えなければ自分自身）。
+pub fn hook_program_from(configured: Option<String>, current_exe: Option<PathBuf>) -> PathBuf {
+    if let Some(path) = configured.filter(|path| !path.is_empty()) {
         return PathBuf::from(path);
     }
-    std::env::current_exe().unwrap_or_else(|_| PathBuf::from("agentdashboard"))
+    current_exe.unwrap_or_else(|| PathBuf::from("agentdashboard"))
 }
 
 /// セッション限りのランダムなトークンを作る。
@@ -185,6 +207,33 @@ mod tests {
             refresh_secs: 3,
             model: Some(ModelId::new("claude-fable-5[1m]")),
         }
+    }
+
+    #[test]
+    fn 指定があればそちらを焼き込む() {
+        // 版を切り替えると `current_exe()` は保管庫の版フォルダを指す。そのまま
+        // 焼き込むと、**版を消した瞬間に生きているセッションのフックが全滅する**
+        // （CICD設計§5）。乗り換える側が「消えない入口」をここへ渡す
+        assert_eq!(
+            hook_program_from(
+                Some("/home/x/.local/bin/agentdashboard".to_string()),
+                Some(PathBuf::from("/state/versions/0.2.0/agentdashboard")),
+            ),
+            PathBuf::from("/home/x/.local/bin/agentdashboard")
+        );
+    }
+
+    #[test]
+    fn 指定が無ければ自分自身を焼き込む() {
+        assert_eq!(
+            hook_program_from(None, Some(PathBuf::from("/opt/agentdashboard"))),
+            PathBuf::from("/opt/agentdashboard")
+        );
+        // 自分の場所すら分からないときは PATH 頼み。**フックが黙って落ちるよりはよい**
+        assert_eq!(
+            hook_program_from(Some(String::new()), None),
+            PathBuf::from("agentdashboard")
+        );
     }
 
     fn settings() -> Value {
