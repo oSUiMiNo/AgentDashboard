@@ -44,7 +44,7 @@ test('起動先を選ぶまで起動できない', async ({ page }) => {
   await openDashboard(page)
   await page.getByTestId('cwd-input').fill('/tmp')
 
-  const button = page.locator('[data-testid="spawn-button"][data-mode=""]')
+  const button = page.getByTestId('spawn-button')
   await expect(button).toBeDisabled()
 
   // 選んだ瞬間に押せるようになる

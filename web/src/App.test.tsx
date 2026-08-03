@@ -80,8 +80,10 @@ describe('App', () => {
     // **聞いてから描く。** 何を出すかはサーバの構成で決まるので、最初の1描画では
      // まだ決まっていない（`GET /api/me` の応答を待つ）
     expect(await screen.findByLabelText('作業ディレクトリ')).toBeInTheDocument()
-    // 起動ボタンは権限モードの選択でもある（設計§8）。既定は3つ
-    expect(screen.getAllByTestId('spawn-button')).toHaveLength(3)
+    // 権限モードは選んでから起こす（設計§8）。選択肢は3つ、起動ボタンは1つ
+    const mode = screen.getByTestId('spawn-mode') as HTMLSelectElement
+    expect(mode.options).toHaveLength(3)
+    expect(screen.getByTestId('spawn-button')).toBeInTheDocument()
     expect(
       await screen.findByText('セッションはまだありません'),
     ).toBeInTheDocument()
@@ -91,9 +93,7 @@ describe('App', () => {
     render(<App />)
 
     await screen.findByLabelText('作業ディレクトリ')
-    for (const button of screen.getAllByTestId('spawn-button')) {
-      expect(button).toBeDisabled()
-    }
+    expect(screen.getByTestId('spawn-button')).toBeDisabled()
   })
 
   it('接続時に一覧のスナップショットを取りにいく', async () => {

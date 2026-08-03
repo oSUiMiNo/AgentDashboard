@@ -18,8 +18,8 @@ import {
 
 test.afterEach(async ({ page }) => {
   // **設定を先に戻す。** 後片付けの途中で失敗しても、トグルだけは必ず戻る。
-  // 設定は config.toml へ書き戻されるので、残ると次のテストの起動ボタンが
-  // 「全承認をスキップ」1つに変わり、無関係なテストが全承認スキップで
+  // 設定は config.toml へ書き戻されるので、残ると次のテストの権限モードの既定が
+  // 「全承認をスキップ」に変わり、無関係なテストが全承認スキップで
   // セッションを起こすことになる（実際に一度そうなった）
   await page.request.put('/api/settings', {
     data: { always_bypass_permissions: false },
@@ -27,12 +27,13 @@ test.afterEach(async ({ page }) => {
   await archiveAll(page)
 })
 
-test('起動ボタンは3つあり、選んだモードが小窓に出る', async ({ page }) => {
+test('ドロップダウンで選んだモードが小窓に出る', async ({ page }) => {
   await openDashboard(page)
-  await expect(page.getByTestId('spawn-button')).toHaveCount(3)
+  await expect(page.getByTestId('spawn-mode').locator('option')).toHaveCount(3)
 
   await page.getByTestId('cwd-input').fill(WORK_DIR)
-  await page.getByTestId('spawn-button').nth(1).click() // 編集の承認のみスキップ
+  await page.getByTestId('spawn-mode').selectOption('acceptEdits')
+  await page.getByTestId('spawn-button').click()
   await expect(page.getByTestId('session-tile')).toHaveCount(1)
 
   const tile = page.getByTestId('session-tile').first()
@@ -142,13 +143,13 @@ test('設定のトグルはリロードしても別タブでも保たれる', as
   await page.reload()
   await expect(page.getByTestId('always-bypass-toggle')).toBeChecked()
 
-  // 一覧の起動ボタンが1つになる
+  // 一覧の権限モードの既定が「全承認をスキップ」になる（選択肢は減らない）
   await page.goto('/')
-  await expect(page.getByTestId('spawn-button')).toHaveCount(1)
-  await expect(page.getByTestId('spawn-button')).toHaveAttribute(
+  await expect(page.getByTestId('spawn-mode')).toHaveAttribute(
     'data-mode',
     'bypassPermissions',
   )
+  await expect(page.getByTestId('spawn-mode').locator('option')).toHaveCount(3)
 
   // 別のタブでも同じ値になる（ブラウザごとに食い違わない）
   const other = await context.newPage()
@@ -157,12 +158,43 @@ test('設定のトグルはリロードしても別タブでも保たれる', as
   await other.close()
 })
 
+test('既定が全承認スキップでも別のモードで起こせて、起動後は既定へ戻る', async ({
+  page,
+}) => {
+  // トグルが決めるのは**既定**であって選択肢の数ではない。そして選んだ値は
+  // 起動のたびに捨てる——残すと、次の1本を意図しないモードで起こすことになる
+  await page.request.put('/api/settings', {
+    data: { always_bypass_permissions: true },
+  })
+  await openDashboard(page)
+  await expect(page.getByTestId('spawn-mode')).toHaveAttribute(
+    'data-mode',
+    'bypassPermissions',
+  )
+
+  await page.getByTestId('cwd-input').fill(WORK_DIR)
+  await page.getByTestId('spawn-mode').selectOption('acceptEdits')
+  await page.getByTestId('spawn-button').click()
+  await expect(page.getByTestId('session-tile')).toHaveCount(1)
+
+  // 起こしたのは選んだモード
+  await expect(
+    page.getByTestId('session-tile').first().getByTestId('permission-mode'),
+  ).toHaveAttribute('data-mode', 'acceptEdits')
+  // そして選択は捨てられ、既定へ戻っている
+  await expect(page.getByTestId('spawn-mode')).toHaveAttribute(
+    'data-mode',
+    'bypassPermissions',
+  )
+})
+
 test('全承認をスキップで起動すると、確認に自動で答えて起動しきる', async ({
   page,
 }) => {
   await openDashboard(page)
   await page.getByTestId('cwd-input').fill(WORK_DIR)
-  await page.getByTestId('spawn-button').nth(2).click() // 全承認をスキップ
+  await page.getByTestId('spawn-mode').selectOption('bypassPermissions')
+  await page.getByTestId('spawn-button').click()
   await expect(page.getByTestId('session-tile')).toHaveCount(1)
 
   await page.getByTestId('session-tile').first().click()

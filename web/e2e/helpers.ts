@@ -96,13 +96,13 @@ export const REMOTE_PASSWORD = 'e2eのあいことば'
 /**
  * セッションを1つ起動して、その小窓を返す。
  *
- * 起動ボタンは権限モードの選択でもあるので複数ある（設計§8）。ここは
- * **「スキップの指定は無し」を名指しで押す**。
+ * 権限モードは選んでから起こす（設計§8）ので、ここは
+ * **「スキップの指定は無し」を名指しで選んでから**押す。
  *
- * `.first()` で選ばないのは、設定のトグルが ON のときに1つ目が「全承認をスキップ」に
+ * 既定に任せないのは、設定のトグルが ON のときに既定が「全承認をスキップ」へ
  * 変わるため。前のテストがトグルを戻し損ねると、**関係の無いテストが黙って
  * 全承認スキップのセッションを起こす**ことになる（実際に一度そうなった）。
- * 名指しにしておけば、その場合は「ボタンが無い」で即座に落ちて原因が分かる。
+ * 名指しにしておけば、トグルの状態によらず必ず安全側で起こる。
  */
 export async function spawnSession(
   page: Page,
@@ -132,7 +132,8 @@ export async function spawnSession(
   if (agentName !== undefined) {
     await page.getByTestId('spawn-target').selectOption({ label: agentName })
   }
-  await page.locator('[data-testid="spawn-button"][data-mode=""]').click()
+  await page.getByTestId('spawn-mode').selectOption('')
+  await page.getByTestId('spawn-button').click()
   await expect(page.getByTestId('session-tile')).toHaveCount(before + 1)
   return page.getByTestId('session-tile').nth(before)
 }

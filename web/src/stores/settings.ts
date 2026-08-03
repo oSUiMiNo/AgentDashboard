@@ -58,7 +58,7 @@ export interface LanPassword {
 
 /** `GET /api/settings` の応答。 */
 export interface Settings {
-  /** 起動ボタンを「全承認をスキップ」の1つだけにするか */
+  /** 起動時の権限モードの**既定の選択**を「全承認をスキップ」にするか（選択肢は減らない） */
   always_bypass_permissions: boolean
   /**
    * トグルを画面から変えられるか。
@@ -113,8 +113,8 @@ interface SettingsState {
 /**
  * サーバから読めるまでの暫定値。
  *
- * **既定はスキップしない側**（設計§9）。読めていない間に「全承認をスキップ」の
- * ボタンだけを出してしまうと、利用者が意図せず選ぶ余地を作る。
+ * **既定はスキップしない側**（設計§9）。読めていない間に「全承認をスキップ」を
+ * 選ばれた状態で出してしまうと、利用者が意図せずそのまま起こす余地を作る。
  */
 const FALLBACK: Settings = {
   always_bypass_permissions: false,
