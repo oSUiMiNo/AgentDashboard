@@ -256,8 +256,12 @@ pub fn is_other_binary(target: &Path) -> bool {
 /// 比べる——`canonicalize` はハードリンクを解決しないので、テストが版フォルダをリンクで
 /// 作っても実パスの比較は成立する（設計§21-7）。
 fn same_path(left: &Path, right: &Path) -> bool {
-    let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    real(left) == real(right)
+    real_path(left) == real_path(right)
+}
+
+/// 解決できるところまで解決したパス。解決できなければ書かれたまま。
+fn real_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// もう乗り換えたか（二度乗り換えないための印）。
@@ -656,6 +660,156 @@ pub fn snapshot(state_dir: &Path, source: &Path) -> anyhow::Result<Option<Versio
     Ok(Some(version))
 }
 
+/// 保管庫から版を消す（設計§12）。
+///
+/// 断るのは**いま走っている版だけ**。予約されている版は消せるが、その場合は
+/// **消す前にポインタを確かめ、消したら外す**——消してからポインタを直すと、
+/// その隙に起動した版が理由の分からないまま既定へ落ちる。
+///
+/// 入れる側が置いた3本は保管庫の外にあるので、**構造的に対象外**（消す道の持ち物であり、
+/// この関数はフォルダ名でしか版を受け取らない）。
+///
+/// 壊れた版（3本揃っていない・版が食い違う）は消せる。むしろ消せないと、置く途中で
+/// 切れた残骸を人が手で片付けることになる。
+pub fn remove_version(state_dir: &Path, version: &VersionId) -> Result<(), String> {
+    let dir = versions_dir(state_dir).join(version.as_str());
+    if !dir.is_dir() {
+        return Err(format!("保管庫にありません: {version}"));
+    }
+
+    let binary = dir.join(BINARIES[0]);
+    if std::env::current_exe().is_ok_and(|current| same_path(&binary, &current)) {
+        return Err("いま走っている版は消せません".to_string());
+    }
+
+    let selected =
+        read_pointer(state_dir).is_some_and(|pointer| real_path(&pointer).starts_with(real_path(&dir)));
+    if selected {
+        write_pointer(state_dir, None);
+    }
+
+    std::fs::remove_dir_all(&dir).map_err(|err| format!("消せません: {err}"))
+}
+
+/// 版の操作の錠の名前。
+pub const VERSION_LOCK: &str = "version-lock.json";
+
+/// 調べる手立てが無いときに錠を見切るまでの時間。
+///
+/// 取ってくる操作は数十秒かかりうるので、短くしすぎると正常な操作を横取りされる。
+const LOCK_STALE_AFTER_MS: Timestamp = 10 * 60 * 1000;
+
+/// 版の操作の錠（設計§13）。
+///
+/// **プロセスをまたぐ**（落として、新しいプロセスが立ち上がってくる）ので、プロセスの中の
+/// 錠では足りない。一方この機能では終了時の後片付けが走らない（シグナルを受け取る仕掛けが
+/// 無い）ので、**錠は必ず残る前提で作る**——記録の形を直すときの助言ロックが同じ罠を
+/// 書いている。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Lock {
+    pub pid: u32,
+    /// 取った相手の開始時刻。**PID は使い回されるので、これが無いと別物を
+    /// 「まだ居る」と誤判定する。**
+    pub started_at: Option<u64>,
+    /// 取った時刻（エポックミリ秒）。
+    pub at: Timestamp,
+}
+
+/// 錠を取った相手の様子（判定の材料）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Holder {
+    /// その PID が居て、開始時刻も一致する。
+    Alive,
+    /// もう居ない。
+    Gone,
+    /// 居るが別物（PID の使い回し）。
+    Replaced,
+    /// 調べる手立てが無い。
+    Unknown,
+}
+
+/// 残っている錠を無視してよいか（材料を受け取る純粋関数）。
+///
+/// 調べられないときに永久に断ると、**一度落ちただけで二度と操作できなくなる**。
+/// そこだけ時間で見切る。
+pub fn lock_is_stale(holder: Holder, age_ms: Timestamp) -> bool {
+    match holder {
+        Holder::Alive => false,
+        Holder::Gone | Holder::Replaced => true,
+        Holder::Unknown => age_ms > LOCK_STALE_AFTER_MS,
+    }
+}
+
+/// `/proc/<pid>/stat` から開始時刻（22番目の項目）を読む。
+///
+/// 2番目の項目は括弧で囲まれ、**中に空白や括弧を含みうる**ので、最後の `)` で切ってから
+/// 数える。`)` の次は3番目なので、22番目は19個先。
+fn start_time_from_stat(text: &str) -> Option<u64> {
+    let rest = text.rsplit_once(')')?.1;
+    rest.split_whitespace().nth(19)?.parse().ok()
+}
+
+/// その PID の開始時刻。読めなければ `None`。
+fn start_time_of(pid: u32) -> Option<u64> {
+    start_time_from_stat(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+}
+
+/// 錠を取った相手の様子を調べる（材料集め）。
+pub fn probe_holder(lock: &Lock) -> Holder {
+    if lock.pid == 0 {
+        return Holder::Gone;
+    }
+    if !Path::new("/proc/self/stat").is_file() {
+        // `/proc` を持たない OS。ここで `Gone` に倒すと、生きている相手の錠を奪う
+        return Holder::Unknown;
+    }
+    match (lock.started_at, start_time_of(lock.pid)) {
+        (_, None) => Holder::Gone,
+        (Some(recorded), Some(actual)) if recorded != actual => Holder::Replaced,
+        _ => Holder::Alive,
+    }
+}
+
+/// 錠の場所。
+pub fn lock_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(VERSION_LOCK)
+}
+
+fn read_lock(state_dir: &Path) -> Option<Lock> {
+    let path = lock_path(state_dir);
+    path.is_file()
+        .then(|| crate::jsonfile::load_or_default::<Lock>(&path))
+        .filter(|lock| lock.pid != 0)
+}
+
+/// 版の操作の錠を取る。取れなければ断る理由を返す。
+///
+/// 順番待ちはしない。**長く持つ錠の手前で待たせない**——押した人には、いま動いている
+/// ことをその場で伝えるほうがよい。
+pub fn acquire_lock(state_dir: &Path) -> Result<(), String> {
+    if let Some(existing) = read_lock(state_dir) {
+        if !lock_is_stale(probe_holder(&existing), now_ms().saturating_sub(existing.at)) {
+            return Err("いま別の版の操作が動いています".to_string());
+        }
+    }
+    let pid = std::process::id();
+    crate::jsonfile::save(
+        &lock_path(state_dir),
+        &Lock {
+            pid,
+            started_at: start_time_of(pid),
+            at: now_ms(),
+        },
+    );
+    Ok(())
+}
+
+/// 錠を返す。
+pub fn release_lock(state_dir: &Path) {
+    let _ = std::fs::remove_file(lock_path(state_dir));
+}
+
 /// 自己修復が差し替えたパーサのポインタを外す（設計§17・§20-4）。
 ///
 /// 差し替え済みのパーサは古いソースからビルドされているので、新しい本体と IPC の形が
@@ -878,6 +1032,115 @@ mod tests {
 
         assert_eq!(entries.len(), 1, "保管庫の中を退避元として渡しても増えない");
         assert_eq!(entries[0].origin, protocol::VersionOrigin::Stored);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 壊れた版も保管庫からは消せる() {
+        // 消せないと、置く途中で切れた残骸を人が手で片付けることになる
+        let dir = temp_dir("remove-broken");
+        let broken = versions_dir(&dir).join("0.2.0");
+        touch(&broken.join("agentdashboard"));
+
+        assert_eq!(remove_version(&dir, &VersionId::new("0.2.0")), Ok(()));
+        assert!(!broken.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 保管庫にない版は消せない() {
+        let dir = temp_dir("remove-absent");
+        assert!(remove_version(&dir, &VersionId::new("9.9.9")).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 予約されている版を消すとポインタも外れる() {
+        // 消してからポインタを直すと、その隙に起動した版が理由の分からないまま既定へ落ちる
+        let dir = temp_dir("remove-selected");
+        let stored = versions_dir(&dir).join("0.1.1");
+        write_fake_install(&stored, "0.1.1");
+        write_pointer(&dir, Some(&stored.join("agentdashboard")));
+        assert!(read_pointer(&dir).is_some(), "前提: 予約されている");
+
+        assert_eq!(remove_version(&dir, &VersionId::new("0.1.1")), Ok(()));
+        assert_eq!(read_pointer(&dir), None, "既定へ落ちる");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn いま走っている版は消せない() {
+        // `canonicalize` はシンボリックリンクを解決するので、いまの自分を指すリンクを
+        // 置けば「走っている版」を作れる
+        let dir = temp_dir("remove-running");
+        let stored = versions_dir(&dir).join("9.9.9");
+        std::fs::create_dir_all(&stored).unwrap();
+        std::os::unix::fs::symlink(
+            std::env::current_exe().unwrap(),
+            stored.join("agentdashboard"),
+        )
+        .unwrap();
+
+        let refused = remove_version(&dir, &VersionId::new("9.9.9")).expect_err("消せてしまった");
+        assert!(refused.contains("走っている"), "理由を書く: {refused}");
+        assert!(stored.exists(), "消えていない");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 残った錠は相手の様子で見切る() {
+        // この機能では後片付けが走らないので、**錠は必ず残る**
+        assert!(!lock_is_stale(Holder::Alive, 0));
+        assert!(lock_is_stale(Holder::Gone, 0));
+        assert!(lock_is_stale(Holder::Replaced, 0), "PID の使い回し");
+        // 調べられないときに永久に断ると、一度落ちただけで二度と操作できなくなる
+        assert!(!lock_is_stale(Holder::Unknown, 0));
+        assert!(lock_is_stale(Holder::Unknown, LOCK_STALE_AFTER_MS + 1));
+    }
+
+    #[test]
+    fn 開始時刻は名前に空白や括弧があっても読める() {
+        // 2番目の項目は括弧で囲まれ、中に空白や括弧を含みうる。
+        // 4番目以降は「値＝項目の番号」にしてあるので、22 が出れば正しく数えている
+        let fields: Vec<String> = (4..=52).map(|n| n.to_string()).collect();
+        let text = format!("42 (my )weird( prog) S {}", fields.join(" "));
+        assert_eq!(start_time_from_stat(&text), Some(22), "22番目を読む");
+        assert_eq!(start_time_from_stat("壊れている"), None);
+
+        // 実物とも突き合わせる。作った文字列だけで固めると、数え方の思い込みごと固まる
+        let own = std::fs::read_to_string("/proc/self/stat").unwrap();
+        assert_eq!(
+            start_time_from_stat(&own),
+            start_time_of(std::process::id()),
+            "実物の /proc からも同じ値が読める"
+        );
+        assert!(start_time_of(std::process::id()).is_some());
+    }
+
+    #[test]
+    fn 錠は取っている間だけ断る() {
+        let dir = temp_dir("lock-basic");
+        assert_eq!(acquire_lock(&dir), Ok(()));
+        assert!(acquire_lock(&dir).is_err(), "二重の操作は断る");
+
+        release_lock(&dir);
+        assert_eq!(acquire_lock(&dir), Ok(()), "返せばまた取れる");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 取った相手が居なければ錠を無視する() {
+        let dir = temp_dir("lock-stale");
+        crate::jsonfile::save(
+            &lock_path(&dir),
+            &Lock {
+                pid: u32::MAX,
+                started_at: Some(1),
+                at: now_ms(),
+            },
+        );
+        assert_eq!(acquire_lock(&dir), Ok(()), "居ない相手の錠は奪ってよい");
         let _ = std::fs::remove_dir_all(dir);
     }
 
