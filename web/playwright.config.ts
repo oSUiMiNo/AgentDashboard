@@ -103,6 +103,11 @@ export default defineConfig({
     env: {
       // 本物の claude ではなく擬似 claude を起動させる
       AGENTDASHBOARD_CLAUDE_BIN: fakeClaude,
+      // 版の切替を無害にしておく（CICD設計§4・§6）。**ホストで走るのはここだけ**なので、
+      // 塞がないと (1) 開発者の実環境のポインタを読んで別の版が起動し (2) 起こすたびに
+      // 実行ファイル3本ぶん（数十MB）を test-results へ控えにいく
+      AGENTDASHBOARD_VERSION_HANDED_OVER: '1',
+      AGENTDASHBOARD_VERSION_SUPPORTED: '0',
       RUST_LOG: 'info',
     },
     url: 'http://127.0.0.1:4173',

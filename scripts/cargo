@@ -58,9 +58,14 @@ DOCKER_NET=()
 # 参加するネットワーク）なので持ち込まない。それ以外の `AGENTDASHBOARD_*` は
 # テストが読むもの（接続先・ゴールデンの作り直し）なので、1つ増えるたびにここを
 # 直さずに済むよう、まとめて渡す。
+#
+# `AGENTDASHBOARD_VERSION*` も持ち込まない。**ホストの値は箱の中で意味を成さない**——
+# 乗り換え先や退避元はホストのパスなので、そのまま渡すと存在しない場所を指す。
+# `case` は先にマッチした側が勝つので、まとめて渡す行より前に置く。
 while IFS='=' read -r name _; do
     case "${name}" in
         AGENTDASHBOARD_CARGO_*) continue ;;
+        AGENTDASHBOARD_VERSION*) continue ;;
         AGENTDASHBOARD_*) DOCKER_ENV+=(--env "${name}") ;;
     esac
 done < <(env)

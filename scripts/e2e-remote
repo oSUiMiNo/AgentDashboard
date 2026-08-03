@@ -18,6 +18,12 @@ BIN="${REPO_ROOT}/server/target/debug/agentdashboard"
 AGENT_BIN="${REPO_ROOT}/server/target/debug/agentdashboard-agent"
 FAKE_CLAUDE="${REPO_ROOT}/server/target/debug/fake-claude"
 STATE="${REPO_ROOT}/web/test-results/remote"
+
+# 版の切替を無害にする（CICD設計§4・§6）。**ここはホストで本物のバイナリを起こす**ので、
+# 塞がないと (1) 開発者の実環境のポインタを読んで別の版が起動し (2) 起こすたびに
+# 実行ファイル3本ぶん（数十MB）を使い捨ての置き場所へ控えにいく
+export AGENTDASHBOARD_VERSION_HANDED_OVER=1
+export AGENTDASHBOARD_VERSION_SUPPORTED=0
 SERVER_CONFIG="${REPO_ROOT}/web/e2e/remote-server.toml"
 AGENT_CONFIG="${REPO_ROOT}/web/e2e/remote-agent.toml"
 # ブラウザで入るアカウント。**テストの中だけの値**なので伏せる意味は無い

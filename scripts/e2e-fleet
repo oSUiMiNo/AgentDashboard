@@ -25,6 +25,12 @@ SERVER_CONFIG="${REPO_ROOT}/web/e2e/fleet-server.toml"
 AGENT_CONFIG="${REPO_ROOT}/web/e2e/fleet-agent.toml"
 STATE="${REPO_ROOT}/web/test-results/fleet"
 BASE_URL="http://127.0.0.1:4177"
+
+# 版の切替を無害にする（CICD設計§4・§6）。**ここはホストで本物のバイナリを起こす**ので、
+# 塞がないと (1) 開発者の実環境のポインタを読んで別の版が起動し (2) 起こすたびに
+# 実行ファイル3本ぶん（数十MB）を使い捨ての置き場所へ控えにいく
+export AGENTDASHBOARD_VERSION_HANDED_OVER=1
+export AGENTDASHBOARD_VERSION_SUPPORTED=0
 # テストの中だけの値なので伏せる意味は無い
 ACCOUNT="e2e"
 PASSWORD="e2eのあいことば"
