@@ -17,6 +17,7 @@
 pub mod boot;
 pub mod cli;
 pub mod config;
+pub mod gate;
 pub mod local;
 pub mod settings_api;
 

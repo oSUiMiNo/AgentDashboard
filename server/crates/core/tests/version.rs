@@ -559,3 +559,105 @@ fn wait_until(mut check: impl FnMut() -> bool) -> bool {
     }
     false
 }
+
+// ---------------------------------------------------------------------------
+// 行き先に聞く門（設計§9）
+
+/// 3つの問いに答えるだけの偽の行き先を置く。`args` を記録するので、何を渡したかも見られる。
+fn write_gate_target(dir: &Path, name: &str, script: &str) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, script).unwrap();
+    make_executable(&path);
+    path
+}
+
+#[test]
+fn 門は行き先の三つの問いに答えを得る() {
+    // 本物の実行ファイルは3つとも答えられる。**サブコマンドなので乗り換えない**
+    let target = testkit::binary_path("agentdashboard");
+    let answers = agentdashboard_core::gate::ask(&target, None).expect("聞けること");
+    let names = answers.schema_names.expect("形の一覧が読めること");
+    assert!(!names.is_empty(), "1つも並んでいない");
+}
+
+#[test]
+fn 形を答えられない行き先は断らずに通す() {
+    // この機能より前の版は `migrations` を知らない。断ると、いちばん戻りたい先へ
+    // 永久に戻れなくなる
+    let fixture = Fixture::new("gate-old");
+    let old = write_gate_target(
+        &fixture.dir,
+        "agentdashboard",
+        "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'agentdashboard 0.1.0' ;;\n  config) echo 'port = 8787' ;;\n  *) echo 'error: unrecognized subcommand' >&2; exit 2 ;;\nesac\n",
+    );
+
+    let answers = agentdashboard_core::gate::ask(&old, None).expect("起動と設定には答えられる");
+    assert_eq!(answers.schema_names, None, "目印が無いので読めない");
+    assert!(
+        matches!(
+            agentdashboard_core::gate::judge(&answers, &["m1_init".to_string()]),
+            agentdashboard_core::gate::Verdict::Unverified { .. }
+        ),
+        "断ってしまっている"
+    );
+}
+
+#[test]
+fn 起動できない行き先は断る() {
+    let fixture = Fixture::new("gate-dead");
+    let dead = write_gate_target(
+        &fixture.dir,
+        "agentdashboard",
+        "#!/bin/sh\necho 'そんなライブラリはありません' >&2\nexit 127\n",
+    );
+
+    let refused = agentdashboard_core::gate::ask(&dead, None).expect_err("通してしまった");
+    assert!(refused.contains("起動できません"), "理由: {refused}");
+    assert!(refused.contains("ライブラリ"), "行き先の言い分を混ぜる: {refused}");
+}
+
+#[test]
+fn 設定を読めない行き先は断る() {
+    // 新しい版が増やしたキーが書かれていると、古い版は知らないキーで起動を拒む
+    let fixture = Fixture::new("gate-config");
+    let picky = write_gate_target(
+        &fixture.dir,
+        "agentdashboard",
+        "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'agentdashboard 0.1.0' ;;\n  *) echo '設定ファイルの書式が不正です' >&2; exit 1 ;;\nesac\n",
+    );
+
+    let refused = agentdashboard_core::gate::ask(&picky, None).expect_err("通してしまった");
+    assert!(refused.contains("設定を読めません"), "理由: {refused}");
+}
+
+#[test]
+fn 親が設定を受け取っていなければ行き先にも渡さない() {
+    // 常に渡すと、設定ファイルを置いていない利用者を「設定が壊れている」と誤判定する
+    // （`--config` 無しの起動は、カレントに設定が無くても空の設定として成功する）
+    let fixture = Fixture::new("gate-args");
+    let recorded = fixture.dir.join("見た引数");
+    let target = write_gate_target(
+        &fixture.dir,
+        "agentdashboard",
+        &format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\ncase \"$1\" in\n  --version) echo 'agentdashboard 0.1.0' ;;\n  *) echo 'ok' ;;\nesac\n",
+            recorded.display()
+        ),
+    );
+
+    agentdashboard_core::gate::ask(&target, None).expect("聞けること");
+    let seen = std::fs::read_to_string(&recorded).unwrap();
+    assert!(
+        !seen.contains("--config"),
+        "渡していないのに渡している:\n{seen}"
+    );
+
+    std::fs::remove_file(&recorded).unwrap();
+    let config = fixture.dir.join("config.toml");
+    agentdashboard_core::gate::ask(&target, Some(&config)).expect("聞けること");
+    let seen = std::fs::read_to_string(&recorded).unwrap();
+    assert!(
+        seen.contains("--config"),
+        "受け取ったのに渡していない:\n{seen}"
+    );
+}
