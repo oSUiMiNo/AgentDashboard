@@ -246,8 +246,18 @@ pub fn is_other_binary(target: &Path) -> bool {
     let Ok(current) = std::env::current_exe() else {
         return false;
     };
+    !same_path(target, &current)
+}
+
+/// 2つのパスが同じ実行ファイルを指すか。
+///
+/// **版名では比べない。** 同じ番号の版が複数の場所に居る（ソースから建てた版と配った版）
+/// ので、名前で比べると別物を同じと見なしてしまう。解決に失敗したパスは書かれたまま
+/// 比べる——`canonicalize` はハードリンクを解決しないので、テストが版フォルダをリンクで
+/// 作っても実パスの比較は成立する（設計§21-7）。
+fn same_path(left: &Path, right: &Path) -> bool {
     let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    real(target) != real(&current)
+    real(left) == real(right)
 }
 
 /// もう乗り換えたか（二度乗り換えないための印）。
@@ -425,10 +435,154 @@ pub fn version_of(binary: &Path) -> Option<VersionId> {
     }
 }
 
-/// 初回退避の元を決める。既定は `current_exe()` の親（＝入れる側が置いた場所）。
+/// そのフォルダの3本が、揃っていて同じ版を名乗るか（設計§6）。
+///
+/// [`is_complete`] は**在るかどうか**しか見ない。3本が別々の版だと、パーサだけ食い違った
+/// 状態で動き出す——落としてもいないのに構造化ビューが壊れる形なので、選ばせる前に断る。
+///
+/// 断る理由を文字列で返すのは、**選択肢から消さずに理由を添える**ため（設計§14）。
+/// 黙って消すと「置いたはずの版が出てこない」になり、利用者が原因まで辿れない。
+pub fn versions_agree(version_dir: &Path) -> Result<VersionId, String> {
+    let mut named: Vec<(&str, VersionId)> = Vec::new();
+    for name in BINARIES {
+        let path = version_dir.join(name);
+        if !path.is_file() {
+            return Err(format!("3本揃っていません（{name} がありません）"));
+        }
+        let Some(version) = version_of(&path) else {
+            return Err(format!("版を聞けません（{name}）"));
+        };
+        named.push((name, version));
+    }
+
+    let (_, first) = &named[0];
+    if named.iter().all(|(_, version)| version == first) {
+        return Ok(first.clone());
+    }
+
+    // どれが何を名乗ったかを全部書く。**片方を代表として選ばない**（設計§6）
+    let detail = named
+        .iter()
+        .map(|(name, version)| format!("{name} {version}"))
+        .collect::<Vec<_>>()
+        .join(" / ");
+    Err(format!("3本の版が食い違っています（{detail}）"))
+}
+
+/// 3本の合計の大きさ。**黙って溜まる形にしない**ため、画面へ出す（設計§14）。
+fn size_of(version_dir: &Path) -> u64 {
+    BINARIES
+        .iter()
+        .filter_map(|name| std::fs::metadata(version_dir.join(name)).ok())
+        .map(|meta| meta.len())
+        .sum()
+}
+
+/// 一覧の1行を作る。
+fn entry_of(
+    version_dir: &Path,
+    version: VersionId,
+    origin: protocol::VersionOrigin,
+    reason: Option<String>,
+    current_exe: Option<&Path>,
+    pointer: Option<&Path>,
+) -> protocol::VersionEntry {
+    let binary = version_dir.join(BINARIES[0]);
+    protocol::VersionEntry {
+        version,
+        origin,
+        running: current_exe.is_some_and(|current| same_path(&binary, current)),
+        selected: pointer.is_some_and(|pointer| same_path(&binary, pointer)),
+        usable: reason.is_none(),
+        size_bytes: size_of(version_dir),
+        path: binary.to_string_lossy().into_owned(),
+        reason,
+    }
+}
+
+/// 版の一覧を組み立てる（設計§6）。
+///
+/// 並ぶのは**出どころの違う3種類**——入れる側が置いた版・保管庫の版・いま走っている版。
+/// 後ろ2つは重なりうる（乗り換えていれば走っているのは保管庫の版）ので、行としては
+/// 「入れる側」と「保管庫」の2種類を出し、走っているかどうかは印で示す。
+///
+/// # 3本に版を聞くので、版の数だけプロセスが起きる
+///
+/// 1つの版あたり3回。保管庫の版数はせいぜい数個なので毎回聞いてよい（実測は設計§22）。
+/// 数が増えたら控えを持つことになるが、**先に測ってから決める。**
+pub fn list_versions(state_dir: &Path, source: Option<&Path>) -> Vec<protocol::VersionEntry> {
+    let current_exe = std::env::current_exe().ok();
+    let pointer = read_pointer(state_dir);
+    let mut entries = Vec::new();
+
+    for dir in stored_versions(state_dir) {
+        let Some(named) = version_of_stored(&dir.join(BINARIES[0])) else {
+            continue;
+        };
+        // 名乗りがフォルダ名と違えば、画面の表示が実際に走るものと食い違う。
+        // 選ぶのはパスでも、**人が見て選ぶのは名前**なので、ここは断る側へ倒す
+        let reason = match versions_agree(&dir) {
+            Ok(actual) if actual == named => None,
+            Ok(actual) => Some(format!("中身は {actual} です（フォルダ名と食い違っています）")),
+            Err(reason) => Some(reason),
+        };
+        entries.push(entry_of(
+            &dir,
+            named,
+            protocol::VersionOrigin::Stored,
+            reason,
+            current_exe.as_deref(),
+            pointer.as_deref(),
+        ));
+    }
+
+    if let Some(source) = source {
+        // 入れる側が置いた場所は保管庫の外にある。乗り換えた後は `current_exe()` が
+        // 保管庫を指すので、同じ行が二度並ばないよう出どころで弾く
+        let inside_store = source.starts_with(versions_dir(state_dir));
+        if !inside_store {
+            let agreed = versions_agree(source);
+            // 名乗れる版が1つも無ければ行にできない。**名前の無い行を並べない**
+            if let Some(version) = agreed
+                .as_ref()
+                .ok()
+                .cloned()
+                .or_else(|| version_of(&source.join(BINARIES[0])))
+            {
+                entries.push(entry_of(
+                    source,
+                    version,
+                    protocol::VersionOrigin::Installed,
+                    agreed.err(),
+                    current_exe.as_deref(),
+                    pointer.as_deref(),
+                ));
+            }
+        }
+    }
+
+    // 3つ組の順に並べる。同じ版名の行が複数並ぶので、出どころとパスで決着させる
+    entries.sort_by(|left, right| {
+        let key = |entry: &protocol::VersionEntry| {
+            (
+                matches!(entry.origin, protocol::VersionOrigin::Stored),
+                entry.path.clone(),
+            )
+        };
+        left.version
+            .cmp(&right.version)
+            .then_with(|| key(left).cmp(&key(right)))
+    });
+    entries
+}
+
+/// 初回退避と一覧が使う「入れる側が置いた場所」を決める。
 pub fn source_dir() -> Option<PathBuf> {
     source_dir_from(
         std::env::var(VERSION_SOURCE_ENV).ok(),
+        already_handed_over()
+            .then(|| std::env::var(crate::session::hooks_settings::HOOK_BIN_ENV).ok())
+            .flatten(),
         std::env::current_exe().ok(),
     )
 }
@@ -438,12 +592,25 @@ pub fn source_dir() -> Option<PathBuf> {
 /// 環境変数を先に見るのは [`crate::parser::parser_program`] と同じ理由——**差し替え口が
 /// 無いと、テストのたびに利用者の実インストールから数十MB がコピーされる。**
 /// 判定を分けてあるのは、テストが環境変数を書き換えずに両方の道を通せるようにするため。
+///
+/// # 乗り換えた後は `current_exe()` を使えない
+///
+/// 乗り換えると `current_exe()` は保管庫を指す。そのまま退避元にすると、保管庫から
+/// 保管庫へ控えることになり、一覧では**同じ行が「入れる側」としても並ぶ**。
+/// 乗り換える側は入口を [`crate::session::hooks_settings::HOOK_BIN_ENV`] へ渡している
+/// （設計§5）ので、**乗り換え済みのときだけ**そちらを使う。
 pub fn source_dir_from(
     configured: Option<String>,
+    handover_entry: Option<String>,
     current_exe: Option<PathBuf>,
 ) -> Option<PathBuf> {
     if let Some(raw) = configured.filter(|raw| !raw.is_empty()) {
         return Some(PathBuf::from(raw));
+    }
+    if let Some(entry) = handover_entry.filter(|raw| !raw.is_empty()) {
+        if let Some(parent) = PathBuf::from(entry).parent().map(Path::to_path_buf) {
+            return Some(parent);
+        }
     }
     current_exe?.parent().map(Path::to_path_buf)
 }
@@ -592,6 +759,129 @@ mod tests {
     }
 
     #[test]
+    fn 三本とも同じ版を名乗れば選べる() {
+        let dir = temp_dir("agree-ok");
+        write_fake_install(&dir, "0.1.1");
+        assert_eq!(versions_agree(&dir), Ok(VersionId::new("0.1.1")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 三本の版が食い違う版は選べない() {
+        // 揃っているかだけでは足りない。隣が別の版だと**パーサだけ食い違って動き出す**
+        let dir = temp_dir("agree-mixed");
+        write_fake_install(&dir, "0.1.1");
+        write_fake_install_of(&dir, "transcript-parser", "0.1.0");
+
+        let reason = versions_agree(&dir).expect_err("食い違いを見逃した");
+        assert!(
+            reason.contains("食い違って") && reason.contains("0.1.0") && reason.contains("0.1.1"),
+            "どれが何を名乗ったか全部書く（片方を代表にしない）: {reason}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 三本揃っていない版は理由つきで断られる() {
+        let dir = temp_dir("agree-missing");
+        write_fake_install(&dir, "0.1.1");
+        std::fs::remove_file(dir.join("transcript-parser")).unwrap();
+
+        let reason = versions_agree(&dir).expect_err("欠けを見逃した");
+        assert!(
+            reason.contains("transcript-parser"),
+            "何が足りないかを名指しする: {reason}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 一覧は入れる側と保管庫を並べる() {
+        let dir = temp_dir("list-both");
+        let installed = dir.join("bin");
+        write_fake_install(&installed, "0.1.0");
+        let stored = versions_dir(&dir).join("0.1.1");
+        write_fake_install(&stored, "0.1.1");
+        write_pointer(&dir, Some(&stored.join("agentdashboard")));
+
+        let entries = list_versions(&dir, Some(&installed));
+
+        assert_eq!(entries.len(), 2, "2行並ぶ: {entries:?}");
+        // 3つ組の順（0.1.0 → 0.1.1）。文字列順ではない
+        assert_eq!(entries[0].version, VersionId::new("0.1.0"));
+        assert_eq!(entries[0].origin, protocol::VersionOrigin::Installed);
+        assert!(entries[0].usable, "3本とも同じ版なら選べる");
+        assert!(!entries[0].selected);
+        assert!(entries[0].size_bytes > 0, "溜まる量が黙って隠れない");
+
+        assert_eq!(entries[1].version, VersionId::new("0.1.1"));
+        assert_eq!(entries[1].origin, protocol::VersionOrigin::Stored);
+        assert!(entries[1].selected, "ポインタが指している行に印が付く");
+        // いま走っているのはテストの実行ファイルなので、どの行も走ってはいない
+        assert!(entries.iter().all(|entry| !entry.running));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 入れる側の三本の版がずれていたら理由が出る() {
+        // **黙って片方の版を代表として出さない**（設計§6）
+        let dir = temp_dir("list-installed-mixed");
+        let installed = dir.join("bin");
+        write_fake_install(&installed, "0.1.1");
+        write_fake_install_of(&installed, "agentdashboard-agent", "0.1.0");
+
+        let entries = list_versions(&dir, Some(&installed));
+
+        assert_eq!(entries.len(), 1);
+        assert!(!entries[0].usable, "選ばせない");
+        let reason = entries[0].reason.as_deref().unwrap_or_default();
+        assert!(
+            reason.contains("agentdashboard-agent") && reason.contains("0.1.0"),
+            "どれが何を名乗ったかが画面へ出る: {reason}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 一覧はフォルダ名と中身の食い違いを断る() {
+        // 選ぶのはパスでも、**人が見て選ぶのは名前**。名前が嘘をつく行は選ばせない
+        let dir = temp_dir("list-name-lies");
+        let stored = versions_dir(&dir).join("0.2.0");
+        write_fake_install(&stored, "0.1.1");
+
+        let entries = list_versions(&dir, None);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].version, VersionId::new("0.2.0"), "名前は名前のまま");
+        assert!(!entries[0].usable);
+        assert!(
+            entries[0]
+                .reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("0.1.1"),
+            "中身が何かを書く: {:?}",
+            entries[0].reason
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 乗り換えた後の入れる側は保管庫と二重に並ばない() {
+        // 乗り換えると `current_exe()` は保管庫を指す。そのまま退避元にすると
+        // 同じ行が「入れる側」としても並ぶ
+        let dir = temp_dir("list-no-dup");
+        let stored = versions_dir(&dir).join("0.1.1");
+        write_fake_install(&stored, "0.1.1");
+
+        let entries = list_versions(&dir, Some(&stored));
+
+        assert_eq!(entries.len(), 1, "保管庫の中を退避元として渡しても増えない");
+        assert_eq!(entries[0].origin, protocol::VersionOrigin::Stored);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn 保管庫の実行ファイルからは版がフォルダ名で引ける() {
         let stored = versions_dir(Path::new("/state"))
             .join("0.1.1")
@@ -690,21 +980,25 @@ mod tests {
     fn write_fake_install(dir: &Path, version: &str) {
         std::fs::create_dir_all(dir).unwrap();
         for name in BINARIES {
-            let path = dir.join(name);
-            // パーサだけ `--version` を持たず、起こすと1行目に名乗る（設計§20-2）
-            let body = if name == "transcript-parser" {
-                format!(
-                    "#!/bin/sh\nprintf '{{\"ev\":\"hello\",\"parser_version\":\"{version}\"}}\\n'\n"
-                )
-            } else {
-                format!("#!/bin/sh\necho '{name} {version}'\n")
-            };
-            std::fs::write(&path, body).unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt as _;
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
+            write_fake_install_of(dir, name, version);
+        }
+    }
+
+    /// 3本のうち1本だけを置き直す（版がずれた一式を作るため）。
+    fn write_fake_install_of(dir: &Path, name: &str, version: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join(name);
+        // パーサだけ `--version` を持たず、起こすと1行目に名乗る（設計§20-2）
+        let body = if name == "transcript-parser" {
+            format!("#!/bin/sh\nprintf '{{\"ev\":\"hello\",\"parser_version\":\"{version}\"}}\\n'\n")
+        } else {
+            format!("#!/bin/sh\necho '{name} {version}'\n")
+        };
+        std::fs::write(&path, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
     }
 
@@ -715,6 +1009,7 @@ mod tests {
         assert_eq!(
             source_dir_from(
                 Some("/指定した場所".to_string()),
+                None,
                 Some(PathBuf::from("/bin/x"))
             ),
             Some(PathBuf::from("/指定した場所"))
@@ -723,14 +1018,39 @@ mod tests {
         assert_eq!(
             source_dir_from(
                 None,
+                None,
                 Some(PathBuf::from("/home/x/.local/bin/agentdashboard"))
             ),
             Some(PathBuf::from("/home/x/.local/bin"))
         );
         assert_eq!(
-            source_dir_from(Some(String::new()), None),
+            source_dir_from(Some(String::new()), None, None),
             None,
             "空は未指定"
+        );
+    }
+
+    #[test]
+    fn 乗り換えた後の退避元は乗り換え前の入口() {
+        // 乗り換えると `current_exe()` は保管庫を指す。そのまま退避元にすると保管庫から
+        // 保管庫へ控えることになり、一覧では**同じ行が「入れる側」としても並ぶ**
+        assert_eq!(
+            source_dir_from(
+                None,
+                Some("/home/x/.local/bin/agentdashboard".to_string()),
+                Some(PathBuf::from("/home/x/.local/state/agentdashboard/versions/0.2.0/agentdashboard")),
+            ),
+            Some(PathBuf::from("/home/x/.local/bin")),
+            "乗り換え前の入口の隣を見る"
+        );
+        // 指定があればそちらが勝つ（テストの差し替え口を塞がない）
+        assert_eq!(
+            source_dir_from(
+                Some("/指定した場所".to_string()),
+                Some("/home/x/.local/bin/agentdashboard".to_string()),
+                None,
+            ),
+            Some(PathBuf::from("/指定した場所"))
         );
     }
 
