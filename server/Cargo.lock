@@ -29,6 +29,7 @@ dependencies = [
 name = "agentdashboard"
 version = "0.1.0"
 dependencies = [
+ "agent-core",
  "agentdashboard-agent",
  "agentdashboard-core",
  "anyhow",

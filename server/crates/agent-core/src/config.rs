@@ -128,6 +128,33 @@ const DEFAULT_HOOK_PORT: u16 = 0;
 /// 設定の既定ファイル名（エージェント単体で動くとき）。
 pub const DEFAULT_AGENT_FILE_NAME: &str = "agent.toml";
 
+/// 記録と状態を置くフォルダの名前。
+///
+/// # なぜ公開しているのか
+///
+/// **入れる側と消す側が同じ場所を指す必要がある。** 消す側（`scripts/uninstall.sh` /
+/// `.ps1`）は実行ファイルへ聞く（`agentdashboard state-dir`）が、実行ファイルが
+/// 見つからないときの控えとして同じ組み立て方を持つ。ここを出しておけば、
+/// **片方を直したらもう片方が落ちる**形を門にできる（`crates/dist/tests/uninstall.rs`）。
+pub const STATE_DIR_NAME: &str = "agentdashboard";
+
+/// 置き場所を明示する環境変数（OS を問わず最優先）。
+pub const STATE_HOME_ENV: &str = "XDG_STATE_HOME";
+
+/// Unix での既定。`HOME` からの相対。
+pub const STATE_HOME_RELATIVE: &str = ".local/state";
+
+/// Windows での既定の土台。
+///
+/// **`HOME` は Windows に無い。** これが無いと一時領域へ落ち、ディスク掃除で
+/// 一覧と履歴が消えうる。
+pub const STATE_HOME_ENV_WINDOWS: &str = "LOCALAPPDATA";
+
+/// 中身のある環境変数だけを返す。**空文字は「無い」と同じ扱い**にする。
+fn non_empty_env(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|value| !value.is_empty())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct AgentConfig {
@@ -335,21 +362,51 @@ impl AgentConfig {
     /// 実行ファイルの隣やビルド成果物の中には置かない。開発中のバイナリは
     /// `server/target/debug/` にあり、`make clean` で消えると再開位置も一緒に消える。
     /// 消えると起動のたびに全再パースになり、ブラウザへ履歴が二重に届く。
+    ///
+    /// # 一時領域へは落とさない
+    ///
+    /// ここには記録の DB（一覧・履歴・アカウント）も同居する。**消えると戻せない**ので、
+    /// OS が掃除する場所を既定にしてはいけない。Windows には `HOME` が無く、
+    /// 分岐が無いと `%LOCALAPPDATA%\Temp\` へ落ちていた——ディスク掃除で一覧と履歴が
+    /// 消えうる形だった。
+    ///
+    /// # 組み立ての部品は定数で出してある
+    ///
+    /// **消す側（`scripts/uninstall.sh` / `.ps1`）も同じ場所を知る必要がある。**
+    /// あちらは実行ファイルへ聞く（`agentdashboard state-dir`）が、実行ファイルが
+    /// 見つからないときの控えとして同じ組み立て方を持つ。食い違わないよう、
+    /// 部品を [`STATE_DIR_NAME`] などで公開して門から突き合わせる。
+    ///
+    /// # `cfg(windows)` で分岐しない
+    ///
+    /// 分けると、**Linux の CI では Windows 側の分岐が消える**ので永久に確かめられない
+    /// （実際、分岐で書いたら「実装から Windows の道を消す」を検知できなかった）。
+    /// 環境変数の有無だけで決める形にしてあるので、`HOME` を外して `LOCALAPPDATA` を
+    /// 置けば、どの OS の上でも Windows の道を通せる。
+    ///
+    /// 順番にも意味がある。Git Bash は `HOME` を持つので `HOME` を先に見る——
+    /// そうすると Git Bash の利用者は `uninstall.sh` と、素の PowerShell の利用者は
+    /// `uninstall.ps1` と、それぞれ同じ場所を指すことになる。
     pub fn resolved_state_dir(&self) -> PathBuf {
         if let Some(dir) = &self.state_dir {
             return dir.clone();
         }
-        match std::env::var("XDG_STATE_HOME") {
-            Ok(dir) if !dir.is_empty() => PathBuf::from(dir).join("agentdashboard"),
-            _ => match std::env::var("HOME") {
-                Ok(home) if !home.is_empty() => PathBuf::from(home)
-                    .join(".local")
-                    .join("state")
-                    .join("agentdashboard"),
-                // HOME すら無い環境。消えても動作は続くので一時領域で妥協する
-                _ => std::env::temp_dir().join("agentdashboard"),
-            },
+        // 明示された置き場所は OS を問わず優先する（Windows でも設定できる）
+        if let Some(dir) = non_empty_env(STATE_HOME_ENV) {
+            return PathBuf::from(dir).join(STATE_DIR_NAME);
         }
+        if let Some(home) = non_empty_env("HOME") {
+            return PathBuf::from(home)
+                .join(STATE_HOME_RELATIVE)
+                .join(STATE_DIR_NAME);
+        }
+        // **`HOME` が無いのは Windows。** ここで諦めると一時領域へ落ちる
+        if let Some(base) = non_empty_env(STATE_HOME_ENV_WINDOWS) {
+            return PathBuf::from(base).join(STATE_DIR_NAME);
+        }
+        // 置き場所を決める手がかりが1つも無い環境。ここへ落ちること自体が異常なので、
+        // 消えても動作は続く一時領域で妥協する
+        std::env::temp_dir().join(STATE_DIR_NAME)
     }
 
     /// 自己修復が作業するリポジトリを決める（設計§9）。
@@ -374,9 +431,27 @@ impl AgentConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    /// 環境変数を触るテストを1本ずつにする錠。
+    ///
+    /// **環境変数はプロセス全体のもの**なので、同じプロセスの別スレッドが同時に触ると
+    /// 取り合いになる。`make test` は nextest（テストごとに別プロセス）なので緑のままだが、
+    /// **`cargo test` を直に叩くと落ちる**——実際に落ちた。
+    ///
+    /// 「あの走らせ方でしか通らない」は、いずれ誰かが踏む。消す道の門でも同じ錠を
+    /// 使っている（`crates/dist/tests/common/mod.rs`）。
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     #[test]
     fn 雛形は全キーを網羅し既定値と一致する() {
+        // 環境変数を触る他のテストと同時に走ると、上書きが混ざって落ちる
+        let _lock = env_lock();
         // `agent.toml.example` は、PC へエージェントを入れる人が最初に読む一覧。
         // ここが実装より遅れていると、増えたキーの存在に誰も気づけない
         // （`config.toml.example` 側で実際に起きた）
@@ -442,6 +517,7 @@ mod tests {
 
     #[test]
     fn 全キーが環境変数で上書きできる() {
+        let _lock = env_lock();
         // **配るのはこちら側**（設計§14-3）。手元なら `agent.toml` を置けばよいが、
         // 配った先では環境変数しか渡せない場面がある（サービスとして常駐させる等）。
         // 1つでも対応していないキーがあると「そのキーだけ設定できない」という、
@@ -486,6 +562,7 @@ mod tests {
 
     #[test]
     fn 環境変数はファイルより強い() {
+        let _lock = env_lock();
         // 設定ファイルを置いた PC へ、環境変数だけで別の値を渡せること
         unsafe { std::env::set_var("AGENTDASHBOARD_HOOK_PORT", "9100") };
         let config = AgentConfig::from_toml_str("hook_port = 8787").expect("読めること");
@@ -495,6 +572,7 @@ mod tests {
 
     #[test]
     fn 環境変数の型が合わなければ理由を出して断る() {
+        let _lock = env_lock();
         // 素通しして「設定したのに効かない」になるより、その場で断るほうがよい
         unsafe { std::env::set_var("AGENTDASHBOARD_HOOK_PORT", "きゅうせん") };
         let err = AgentConfig::from_toml_str("").expect_err("値エラーになること");
@@ -553,6 +631,50 @@ mod tests {
         assert_eq!(
             config.resolved_state_dir(),
             PathBuf::from("/tmp/agentdashboard-test")
+        );
+    }
+
+    #[test]
+    fn homeが無ければlocalappdataを使う() {
+        let _lock = env_lock();
+        // **Windows の道**。あちらに `HOME` は無いので、ここを通ることになる。
+        //
+        // `cfg(windows)` で分けると Linux の CI では消えてしまい、**この道を消しても
+        // 誰も気づけない**（実際に検知できなかった）。環境変数の有無だけで決める形に
+        // してあるので、Linux の上でも通せる。
+        //
+        // ここへ来られないと一時領域（`%LOCALAPPDATA%\Temp\`）へ落ちる。**ディスク掃除で
+        // 一覧と履歴が消えうる**ので、記録の置き場所として選んではいけない。
+        let saved_home = std::env::var_os("HOME");
+        let saved_xdg = std::env::var_os(STATE_HOME_ENV);
+        let saved_win = std::env::var_os(STATE_HOME_ENV_WINDOWS);
+
+        // SAFETY: 触った3つは、この関数を出る前に必ず戻す
+        unsafe {
+            std::env::remove_var("HOME");
+            std::env::remove_var(STATE_HOME_ENV);
+            std::env::set_var(STATE_HOME_ENV_WINDOWS, "/tmp/ローカルアプリデータ");
+        }
+        let resolved = AgentConfig::default().resolved_state_dir();
+        unsafe {
+            match saved_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match saved_xdg {
+                Some(value) => std::env::set_var(STATE_HOME_ENV, value),
+                None => std::env::remove_var(STATE_HOME_ENV),
+            }
+            match saved_win {
+                Some(value) => std::env::set_var(STATE_HOME_ENV_WINDOWS, value),
+                None => std::env::remove_var(STATE_HOME_ENV_WINDOWS),
+            }
+        }
+
+        assert_eq!(
+            resolved,
+            PathBuf::from("/tmp/ローカルアプリデータ").join(STATE_DIR_NAME),
+            "HOME が無いときに一時領域へ落ちています（記録が消えうる場所です）"
         );
     }
 }

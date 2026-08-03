@@ -46,9 +46,24 @@ $ReceiptDir = if ($env:XDG_CONFIG_HOME) {
     Join-Path $HOME ".config\$AppName"
 }
 $Receipt = Join-Path $ReceiptDir "$AppName-receipt.json"
-# 記録の置き場所。**実装の既定と揃える**
-$StateDir = if ($env:XDG_STATE_HOME) {
+
+# 記録の置き場所の**控え**。実行ファイルが見つからないときだけ使う。
+#
+# **本来は実行ファイルへ聞く**（`agentdashboard state-dir`）。こちらで組み立てると、
+# 実装の既定を変えたときに黙って食い違う。実際に食い違っていた——**Windows には
+# `HOME` が無い**ので、実装は一時領域（`%LOCALAPPDATA%\Temp\`）を使っていたのに、
+# こちらは `$HOME\.local\state` を消しに行っていた。`-Purge` が1バイトも消さない状態。
+#
+# 実装側に Windows 分岐（`LOCALAPPDATA`）を足したので、控えもそちらへ揃える。
+# **見るのは `$env:HOME`（環境変数）で、PowerShell の `$HOME` ではない。**
+# あちらは常に定義されているので、実装（環境変数を読む）と食い違う。
+# 順番も実装と揃える：XDG_STATE_HOME → HOME → LOCALAPPDATA
+$StateDirFallback = if ($env:XDG_STATE_HOME) {
     Join-Path $env:XDG_STATE_HOME $AppName
+} elseif ($env:HOME) {
+    Join-Path $env:HOME ".local\state\$AppName"
+} elseif ($env:LOCALAPPDATA) {
+    Join-Path $env:LOCALAPPDATA $AppName
 } else {
     Join-Path $HOME ".local\state\$AppName"
 }
@@ -92,6 +107,33 @@ if (-not [string]::IsNullOrWhiteSpace($ReceiptInstallDir)) {
     Write-Host '控えが読めないので、既定の場所だけを見ます'
 }
 Write-Host "見る場所: $($SearchDirs -join ' ')"
+
+# 記録の置き場所は**実行ファイルに聞く**。**消す前に聞く**——聞く相手を先に消したら
+# 二度と分からない。設定や環境変数で変えた場所も、これなら対象になる
+function Get-StateDirFromBinary {
+    foreach ($dir in $SearchDirs) {
+        foreach ($candidate in @((Join-Path $dir 'agentdashboard.exe'), (Join-Path (Join-Path $dir 'bin') 'agentdashboard.exe'))) {
+            if (-not (Test-Path -LiteralPath $candidate)) { continue }
+            try {
+                $answer = (& $candidate state-dir 2>$null | Select-Object -First 1)
+            } catch {
+                continue
+            }
+            if (-not [string]::IsNullOrWhiteSpace($answer)) { return $answer.Trim() }
+        }
+    }
+    return $null
+}
+
+$StateDir = Get-StateDirFromBinary
+if ($StateDir) {
+    Write-Host "記録の置き場所（実行ファイルに聞きました）: $StateDir"
+} else {
+    # **黙って既定を消しに行かない。** 聞けなかったことは言う
+    $StateDir = $StateDirFallback
+    Write-Host "記録の置き場所（実行ファイルに聞けないので既定）: $StateDir"
+    Write-Host '  設定で置き場所を変えていた場合は、そちらは消えません'
+}
 
 Write-Host ''
 Write-Host '== 実行ファイル =='

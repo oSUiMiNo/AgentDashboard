@@ -36,8 +36,21 @@ curl -LsSf https://github.com/oSUiMiNo/AgentDashboard/releases/latest/download/a
 |---|---|---|
 | 実行ファイル3本 | `~/.local/bin/`（入れた場所は控えから読む） | **消える** |
 | インストールの控え | `~/.config/agentdashboard/` | **消える** |
-| 記録（一覧・履歴・アカウント） | `~/.local/state/agentdashboard/` | **残る** |
+| fish の設定（fish を使っている場合） | `~/.config/fish/conf.d/agentdashboard.env.fish` | **消える** |
+| 記録（一覧・履歴・アカウント） | **実行ファイルに聞いた場所**（既定は `~/.local/state/agentdashboard/`） | **残る** |
 | PATH の通し方 | `~/.local/bin/env` とシェルの設定の1行 | **残る** |
+
+### 記録の場所は、こちらで決めない
+消す側は `agentdashboard state-dir` を叩いて、**そのインストールが実際に使っている場所**を聞きます。設定（`config.toml` の `state_dir`）や環境変数で変えていても、そこが対象になります。
+
+自分で組み立てていたときは既定しか見ておらず、**変えた人の記録は「完了しました」と言いながら残っていました**。
+
+実行ファイルが既に無いなど、聞けないときは既定へ落ちます。そのときは**聞けなかったことを表示**するので、置き場所を変えていた人はそこで気づけます。
+
+### fish のファイルだけ消すのは、アプリ専用だから
+他のシェルは既存の設定ファイルへ1行足すだけですが、**fish にだけはファイルごと新規に作ります**。名前がアプリ名そのもので他のツールと共有していないので、入れる側が作ったものは消す側も消します。
+
+残すと、下の案内どおりに `env.fish` を消した fish 利用者は、**シェルを開くたびにエラーを見ることになります**（消えたファイルを読み続けるため）。
 
 ### 記録を残すのは、戻せないから
 消えるのは**セッションの一覧・やりとりの履歴・アカウントとペアリングの記録**。入れ直しても戻りません。
@@ -48,7 +61,7 @@ curl -LsSf https://github.com/oSUiMiNo/AgentDashboard/releases/latest/download/a
 curl -LsSf https://…/agentdashboard-uninstaller.sh | sh -s -- --purge
 ```
 
-Windows は `-Purge`（いったん落としてから実行する）。
+Windows は `-Purge`（いったん落としてから実行する）。**Windows の記録は `%LOCALAPPDATA%\agentdashboard\` に置かれます**（`HOME` が無いため、Unix とは場所が違います）。
 
 ```
 irm https://…/agentdashboard-uninstaller.ps1 -OutFile uninstall.ps1

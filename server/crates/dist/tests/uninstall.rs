@@ -40,6 +40,13 @@ const RCFILES: &[&str] = &[
     ".zshenv",
 ];
 
+/// fish にだけ**新規に作られる**設定ファイル。
+///
+/// 他のシェルは既存のファイルへ1行足すだけだが、fish はこのファイルごと作られる。
+/// **名前がアプリ名そのもの**なので「他のツールと共有だから触らない」が当てはまらず、
+/// 残すと**消えた `env.fish` を読み続けて fish が毎回エラーを出す**。
+const FISH_CONF: &str = ".config/fish/conf.d/agentdashboard.env.fish";
+
 #[test]
 fn 既定では実行ファイルと控えだけが消える() {
     let home = fake_install("default");
@@ -64,6 +71,13 @@ fn 既定では実行ファイルと控えだけが消える() {
         home.join(".local/state/agentdashboard/dashboard.db")
             .exists(),
         "記録まで消えています（既定では残すこと）:\n{out}"
+    );
+
+    // **入れる側が作ったアプリ専用のファイルは、消す側も消す。** 残すと、手順書どおりに
+    // `env.fish` を消した fish 利用者は、起動のたびにエラーを見ることになる
+    assert!(
+        !home.join(FISH_CONF).exists(),
+        "fish の設定（アプリ専用）が残っています:\n{out}"
     );
 }
 
@@ -285,7 +299,6 @@ fn windows版が同じ場所を名指ししている() {
         ".local\\bin",
         "-receipt.json",
         "$AppName = 'agentdashboard'",
-        ".local\\state",
     ] {
         assert!(
             windows.contains(fragment),
@@ -297,6 +310,172 @@ fn windows版が同じ場所を名指ししている() {
         windows.contains("$Purge"),
         "Windows 版に記録を消すための明示の指定がありません"
     );
+}
+
+#[test]
+fn 控えの組み立て方が実装の部品と食い違っていない() {
+    // **ここが Windows 版の門。** 以前は「`.local\state` という字が入っているか」しか
+    // 見ておらず、実装と食い違っても緑のまま通った。実際に食い違っていた——
+    // **Windows に `HOME` は無い**ので実装は一時領域を使っていたのに、消す側は
+    // `$HOME\.local\state` を消しに行っていた（`-Purge` が1バイトも消さない）。
+    //
+    // いまは実行ファイルへ聞くので、この控えが使われるのは**聞けなかったときだけ**。
+    // それでも食い違えば同じことが起きるので、**実装が公開している部品**と突き合わせる。
+    // 実装側を直してこちらを直し忘れたら、ここで落ちる。
+    use agent_core::config::{
+        STATE_DIR_NAME, STATE_HOME_ENV, STATE_HOME_ENV_WINDOWS, STATE_HOME_RELATIVE,
+    };
+
+    // **控えを組み立てている場所だけを見る。** ファイル全体を見ると、控え（receipt）の
+    // 置き場所で使っている `LOCALAPPDATA` を拾ってしまい、**記録の側から抜けても
+    // 緑のまま通る**（実際に、範囲を絞る前はそうなっていた）
+    let unix = fallback_block(&script_text("uninstall.sh"), "STATE_DIR_FALLBACK=");
+    let windows = fallback_block(&script_text("uninstall.ps1"), "$StateDirFallback =");
+
+    // Unix 側：`XDG_STATE_HOME` を優先し、無ければ `HOME` からの相対
+    for part in [STATE_HOME_ENV, STATE_HOME_RELATIVE] {
+        assert!(
+            unix.contains(part),
+            "消す側（sh）の控えが実装の部品 {part} を使っていません:\n{unix}"
+        );
+    }
+    // Windows 側：`HOME` が無いので `LOCALAPPDATA` が要る。**ここが抜けると一時領域と
+    // 食い違う**
+    for part in [STATE_HOME_ENV, STATE_HOME_ENV_WINDOWS] {
+        assert!(
+            windows.contains(part),
+            "消す側（ps1）の控えが実装の部品 {part} を使っていません:\n{windows}"
+        );
+    }
+
+    // フォルダの名前は、どちらも変数で持っている。**その変数が実装の名前を指している**
+    // ことを見る（控えの中では `${APP_NAME}` としか書かれない）
+    assert!(
+        script_text("uninstall.sh").contains(&format!("APP_NAME=\"{STATE_DIR_NAME}\"")),
+        "消す側（sh）のフォルダ名が実装（{STATE_DIR_NAME}）と違います"
+    );
+    assert!(
+        script_text("uninstall.ps1").contains(&format!("$AppName = '{STATE_DIR_NAME}'")),
+        "消す側（ps1）のフォルダ名が実装（{STATE_DIR_NAME}）と違います"
+    );
+    for (label, block) in [("sh", &unix), ("ps1", &windows)] {
+        assert!(
+            block.to_lowercase().contains("app_name") || block.contains("AppName"),
+            "消す側（{label}）の控えがフォルダ名の変数を使っていません:\n{block}"
+        );
+    }
+}
+
+/// 控えを組み立てている塊だけを切り出す。
+///
+/// 始まりの行から、**空行が来るまで**。どちらのスクリプトも代入の直後に空行を置く形で
+/// 書いてあるので、これで1つの塊になる。
+fn fallback_block(script: &str, starts_with: &str) -> String {
+    let mut lines = script
+        .lines()
+        .skip_while(|line| !line.trim_start().starts_with(starts_with))
+        .peekable();
+    assert!(
+        lines.peek().is_some(),
+        "控えの組み立て（{starts_with}）が見つかりません"
+    );
+    lines
+        .take_while(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn 置き場所は実行ファイルに聞く() {
+    // **設定や環境変数で置き場所を変えた人**は、控えの組み立てでは拾えない。
+    // 自分で組み立てていたときは既定しか見ておらず、変えた人の記録は
+    // **「完了しました」と言いながら残っていた**。
+    //
+    // 実行ファイルへ聞く形になっていることを、**答えを差し替えて**確かめる。
+    let home = fake_install("asks-binary");
+    let answer = home.join("どこか/別の場所");
+    std::fs::create_dir_all(&answer).expect("作れること");
+
+    // 本物と同じ場所に、`state-dir` へ決まった答えを返す偽物を置く
+    let fake = home.join(".local/bin/agentdashboard");
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\n[ \"$1\" = state-dir ] && printf '%s\\n' '{}'\n",
+            answer.display()
+        ),
+    )
+    .expect("書けること");
+    make_executable(&fake);
+
+    let out = run(&home, &["--dry-run", "--purge"]);
+
+    assert!(
+        out.contains(&answer.display().to_string()),
+        "実行ファイルに聞いた場所を消す対象にしていません:\n{out}"
+    );
+    // 聞けたのに既定を消しに行っていないこと。**両方を消すと、聞く意味が無い**
+    assert!(
+        !out.contains(&home.resolved_state_dir().display().to_string()),
+        "実行ファイルに聞けたのに、既定の場所も消そうとしています:\n{out}"
+    );
+}
+
+#[test]
+fn 実行ファイルに聞けないときは既定へ落ちてそう言う() {
+    // **黙って既定を消しに行かない。** 設定で置き場所を変えていた人が、
+    // 「消えたはず」と思い込まないようにする
+    let home = fake_install("falls-back");
+
+    let out = run(&home, &["--dry-run", "--purge"]);
+
+    assert!(
+        out.contains(&home.resolved_state_dir().display().to_string()),
+        "既定へ落ちていません:\n{out}"
+    );
+    assert!(
+        out.contains("聞けない"),
+        "聞けなかったことを言っていません:\n{out}"
+    );
+}
+
+#[test]
+fn state_dirは実装の解決とそのまま一致する() {
+    // 聞かれる側の門。**印字が実装とずれたら、消す側は静かに別の場所を消す**
+    let home = FakeHome::new("state-dir-cmd");
+    // `FakeHome::new` は**場所を決めるだけ**で作らない。作業場所として渡すので、ここで作る
+    std::fs::create_dir_all(home.path()).expect("作れること");
+    let expected = home.resolved_state_dir();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_agentdashboard"))
+        .arg("state-dir")
+        .env("HOME", home.path())
+        .env_remove("XDG_STATE_HOME")
+        // **設定ファイルを拾わせない。** リポジトリで走らせるとカレントの
+        // `config.toml` が効いてしまい、見たいもの（既定の解決）がずれる
+        .current_dir(home.path())
+        .output()
+        .expect("state-dir を動かせること");
+
+    assert!(output.status.success(), "state-dir が失敗しました");
+    let printed = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        printed.trim(),
+        expected.display().to_string(),
+        "印字と実装の解決が食い違っています"
+    );
+    // **1行だけ**。スクリプトは先頭行を値として読む
+    assert_eq!(printed.lines().count(), 1, "1行だけを印字していません");
+}
+
+/// 偽の実行ファイルへ実行権を付ける。
+fn make_executable(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("付けられること");
+    }
 }
 
 /// 偽のインストール一式を作る。
@@ -320,6 +499,10 @@ fn fake_install(label: &str) -> FakeHome {
     for rcfile in RCFILES {
         std::fs::write(home.join(rcfile), ". \"$HOME/.local/bin/env\"\n").expect("書けること");
     }
+    // fish だけは**ファイルごと作られる**（他は既存へ1行足すだけ）
+    let fish_conf = home.join(FISH_CONF);
+    std::fs::create_dir_all(fish_conf.parent().expect("親があること")).expect("作れること");
+    std::fs::write(&fish_conf, ". \"$HOME/.local/bin/env.fish\"\n").expect("書けること");
 
     std::fs::write(
         receipt_dir.join("agentdashboard-receipt.json"),

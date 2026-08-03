@@ -47,3 +47,7 @@ anyhow.workspace = true
 [dev-dependencies]
 # 配布物の予定（`dist plan`）を読むためだけに使う
 serde_json.workspace = true
+# 記録の置き場所の**部品**（`STATE_DIR_NAME` など）を、消す道の門から突き合わせるため。
+# **dev なので境界の検査（`crates/core/tests/dependencies.rs`）には数えられない**——
+# あちらは通常の依存だけを辿る
+agent-core = { path = "../agent-core" }

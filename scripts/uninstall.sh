@@ -44,8 +44,17 @@ BINARIES="agentdashboard agentdashboard-agent transcript-parser"
 DEFAULT_INSTALL_DIR="${HOME}/.local/bin"
 RECEIPT_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/${APP_NAME}"
 RECEIPT="${RECEIPT_DIR}/${APP_NAME}-receipt.json"
-# 記録の置き場所。**実装の既定（AgentConfig::resolved_state_dir）と揃える**
-STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/${APP_NAME}"
+# 記録の置き場所の**控え**。実行ファイルが見つからないときだけ使う。
+#
+# **本来は実行ファイルへ聞く**（`agentdashboard state-dir`）。こちらで組み立てると、
+# 実装の既定を変えたときに黙って食い違い、**消したつもりで記録だけが残る**。
+# ここは `AgentConfig::resolved_state_dir` の Unix 分岐と同じ組み立て方で、
+# 部品（`.local/state` と名前）は Rust 側の定数と門で突き合わせている。
+STATE_DIR_FALLBACK="${XDG_STATE_HOME:-${HOME}/.local/state}/${APP_NAME}"
+
+# fish だけは**アプリ専用の設定ファイル**を作られる。他のツールと共有していないので、
+# 入れる側が作ったものは消す側も消す（`~/.local/bin/env.fish` のほうは共有なので残す）
+FISH_CONF="${XDG_CONFIG_HOME:-${HOME}/.config}/fish/conf.d/${APP_NAME}.env.fish"
 
 PURGE=0
 DRY_RUN=0
@@ -119,6 +128,36 @@ else
 fi
 say "見る場所: ${SEARCH_DIRS}"
 
+# 記録の置き場所は**実行ファイルに聞く**。**消す前に聞く**——聞く相手を先に消したら
+# 二度と分からない。
+#
+# こうしておくと、設定（`config.toml` の `state_dir`）や環境変数で変えた場所も対象に
+# なる。自分で組み立てていたときは既定しか見ておらず、**変えた人の記録は
+# 「完了しました」と言いながら残っていた**。
+state_dir_from_binary() {
+    for dir in ${SEARCH_DIRS}; do
+        for candidate in "${dir}/${APP_NAME}" "${dir}/bin/${APP_NAME}"; do
+            [ -x "${candidate}" ] || continue
+            answer="$("${candidate}" state-dir 2>/dev/null | head -1)" || continue
+            [ -n "${answer}" ] || continue
+            printf '%s\n' "${answer}"
+            return 0
+        done
+    done
+    return 1
+}
+
+STATE_DIR="$(state_dir_from_binary || true)"
+if [ -n "${STATE_DIR}" ]; then
+    say "記録の置き場所（実行ファイルに聞きました）: ${STATE_DIR}"
+else
+    # **黙って既定を消しに行かない。** 聞けなかったことは言う——設定で置き場所を
+    # 変えていた人は、ここで自分の場所を確かめられる
+    STATE_DIR="${STATE_DIR_FALLBACK}"
+    say "記録の置き場所（実行ファイルに聞けないので既定）: ${STATE_DIR}"
+    say "  設定で置き場所を変えていた場合は、そちらは消えません"
+fi
+
 say ""
 say "== 実行ファイル =="
 found=0
@@ -136,6 +175,18 @@ done
 # **全部の候補を見た後**に判定する。途中で打ち切ると、控えの場所に無かっただけで
 # 「もう消えている」と言ってしまう
 [ "${found}" -eq 0 ] && say "  見つかりませんでした（既に消えているようです）"
+
+say ""
+say "== シェルの設定（アプリ専用のものだけ） =="
+# **fish だけは事情が違う。** インストーラは fish に対してだけ
+# `conf.d/agentdashboard.env.fish` を**新規に作る**（他のシェルは既存のファイルへ
+# 1行足すだけ）。アプリ名そのもののファイルなので「他のツールと共有だから触らない」が
+# 当てはまらず、残すと**消えた env.fish を読み続けて fish が毎回エラーを出す**
+if [ -e "${FISH_CONF}" ]; then
+    remove "${FISH_CONF}"
+else
+    say "  ありませんでした（fish を使っていなければ作られません）"
+fi
 
 say ""
 say "== インストールの控え =="
@@ -167,6 +218,7 @@ say "  ${DEFAULT_INSTALL_DIR}/env"
 say "  次のうち存在するものへ書かれた 1 行:"
 say "    .profile / .bashrc / .bash_profile / .bash_login / .zshrc / .zshenv"
 say "  同じ仕組みで入れた他のツールと共有しているため、こちらでは消しません。"
+say "  （fish の ${FISH_CONF} だけはアプリ専用なので、上で消しています）"
 say "  他に使っているものが無ければ、その行と env を手で消してください。"
 
 say ""

@@ -46,6 +46,15 @@ enum Mode {
 enum Command {
     /// 解決後の設定を表示する
     Config,
+    /// 記録と状態の置き場所を表示する（`--purge` の対象になる場所）
+    ///
+    /// **消す側（`scripts/uninstall.sh` / `.ps1`）がここへ聞く。** あちらが自分で
+    /// 組み立てると、実装の既定を変えたときに黙って食い違い、**消したつもりで記録だけが
+    /// 残る**（Windows で実際に起きていた）。設定や環境変数で変えた場所もここに出る。
+    ///
+    /// 出力は**1行だけ**。`config` は TOML を出すが、未指定のキーは行ごと消えるので
+    /// 解決後の場所を知る用途には使えない。
+    StateDir,
     /// 単一バイナリへ同梱された web アセットを一覧・取り出しする
     Embedded {
         /// 指定したパスのファイル内容を標準出力へ書き出す
@@ -113,6 +122,10 @@ pub async fn run() -> anyhow::Result<()> {
     match cli.command {
         Some(Command::Config) => {
             println!("{}", toml::to_string_pretty(&config)?);
+        }
+        Some(Command::StateDir) => {
+            // **余計なものを書かない。** スクリプトが読むので、1行そのものが値になる
+            println!("{}", config.agent().resolved_state_dir().display());
         }
         Some(Command::Embedded { get: None }) => {
             let paths = embed::list();
