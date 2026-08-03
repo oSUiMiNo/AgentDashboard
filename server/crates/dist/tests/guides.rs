@@ -10,6 +10,9 @@
 //! ここで捕まえるのは**指している先が無い**という、一番安い失敗だけ。
 
 use std::collections::BTreeSet;
+
+mod common;
+use common::repo_root;
 use std::path::{Path, PathBuf};
 
 /// 在るべき手順書。
@@ -189,14 +192,6 @@ fn normalize(path: &Path) -> PathBuf {
         }
     }
     out
-}
-
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .expect("crates/dist から3つ上がリポジトリのルート")
-        .to_path_buf()
 }
 
 fn setup_dir() -> PathBuf {

@@ -16,15 +16,11 @@
 //! `dist-workspace.toml` から取って、スクリプトと突き合わせる。**片方を直したら
 //! もう片方が落ちる**形にしてある。
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
-/// 配る実行ファイル。`artifacts.rs` と同じ顔ぶれ。
-const BINARIES: &[&str] = &[
-    "agentdashboard",
-    "agentdashboard-agent",
-    "transcript-parser",
-];
+mod common;
+use common::{BINARIES, FakeHome, repo_root};
 
 /// 同じ `bin` に居る他人の道具。**巻き添えにしていないこと**を見るために置く。
 const OTHER_TOOL: &str = "ripgrep";
@@ -69,8 +65,6 @@ fn 既定では実行ファイルと控えだけが消える() {
             .exists(),
         "記録まで消えています（既定では残すこと）:\n{out}"
     );
-
-    cleanup(&home);
 }
 
 #[test]
@@ -95,8 +89,6 @@ fn 他人の道具と共有の設定を巻き添えにしない() {
         profile.contains(".local/bin/env"),
         "シェルの設定から行を消しています:\n{out}"
     );
-
-    cleanup(&home);
 }
 
 #[test]
@@ -122,8 +114,6 @@ fn インストーラが書く設定ファイルをどれも触らない() {
             "触っていないものの案内に {rcfile} が並んでいません:\n{out}"
         );
     }
-
-    cleanup(&home);
 }
 
 #[test]
@@ -167,8 +157,6 @@ fn 控えが別の場所を指していても既定の場所も掃く() {
         home.join(".local/bin").join(OTHER_TOOL).exists(),
         "他人の道具を消しています:\n{out}"
     );
-
-    cleanup(&home);
 }
 
 #[test]
@@ -181,8 +169,6 @@ fn purgeを付けると記録も消える() {
         !home.join(".local/state/agentdashboard").exists(),
         "--purge なのに記録が残っています:\n{out}"
     );
-
-    cleanup(&home);
 }
 
 #[test]
@@ -202,8 +188,6 @@ fn dry_runでは何も消えない() {
         home.join(".local/state/agentdashboard").exists(),
         "--dry-run なのに記録が消えています:\n{out}"
     );
-
-    cleanup(&home);
 }
 
 #[test]
@@ -233,8 +217,6 @@ fn 控えに書かれた場所から消す() {
             "控えの場所の {binary} が残っています:\n{out}"
         );
     }
-
-    cleanup(&home);
 }
 
 #[test]
@@ -243,14 +225,9 @@ fn 記録の置き場所が実装と食い違っていない() {
     // 記録だけが残る。症状は出ないので、機械で見るしかない
     let home = fake_install("state-agrees");
 
-    // 実装の既定を、この HOME のもとで求める（nextest はテストごとに別プロセス）
-    unsafe {
-        std::env::remove_var("XDG_STATE_HOME");
-        std::env::set_var("HOME", &home);
-    }
-    let expected = agentdashboard_core::config::Config::default()
-        .agent()
-        .resolved_state_dir();
+    // 実装の既定を、この HOME のもとで求める。**写しを作らない**——
+    // 「実装がどこを既定にしているか」を確かめるのが検査の中身なので
+    let expected = home.resolved_state_dir();
 
     // 消す対象として名指しされることを、`--dry-run --purge` の出力で見る
     let out = run(&home, &["--dry-run", "--purge"]);
@@ -259,8 +236,6 @@ fn 記録の置き場所が実装と食い違っていない() {
         "スクリプトが実装の既定（{}）を消す対象にしていません:\n{out}",
         expected.display()
     );
-
-    cleanup(&home);
 }
 
 #[test]
@@ -325,12 +300,8 @@ fn windows版が同じ場所を名指ししている() {
 }
 
 /// 偽のインストール一式を作る。
-fn fake_install(label: &str) -> PathBuf {
-    let home = std::env::temp_dir().join(format!(
-        "agentdashboard-uninstall-{label}-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&home);
+fn fake_install(label: &str) -> FakeHome {
+    let home = FakeHome::new(label);
 
     let bin = home.join(".local/bin");
     let receipt_dir = home.join(".config/agentdashboard");
@@ -363,18 +334,14 @@ fn fake_install(label: &str) -> PathBuf {
     home
 }
 
-fn cleanup(home: &Path) {
-    let _ = std::fs::remove_dir_all(home);
-}
-
 /// スクリプトを、その HOME のもとで走らせる。
-fn run(home: &Path, args: &[&str]) -> String {
+fn run(home: &FakeHome, args: &[&str]) -> String {
     let output = Command::new("sh")
         .arg(script_path("uninstall.sh"))
         .args(args)
         // **利用者の本物の HOME を絶対に渡さない。** テストが壊れたときに
         // 自分の環境が巻き添えになる経路を、そもそも作らない
-        .env("HOME", home)
+        .env("HOME", home.path())
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("XDG_STATE_HOME")
         .output()
@@ -386,14 +353,6 @@ fn run(home: &Path, args: &[&str]) -> String {
     );
     assert!(output.status.success(), "スクリプトが失敗しました:\n{text}");
     text
-}
-
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .expect("crates/dist から3つ上がリポジトリのルート")
-        .to_path_buf()
 }
 
 fn script_path(name: &str) -> PathBuf {

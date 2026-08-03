@@ -17,12 +17,8 @@
 use serde_json::Value;
 use std::collections::BTreeSet;
 
-/// 配るアーカイブに必ず入っていなければならない実行ファイル。
-const BINARIES: &[&str] = &[
-    "agentdashboard",
-    "agentdashboard-agent",
-    "transcript-parser",
-];
+mod common;
+use common::{BINARIES, repo_root};
 
 /// 作ると決めた OS（設計§14-3 の「3 OS」。macOS だけ2種類ある）。
 const TARGETS: &[&str] = &[
@@ -205,15 +201,6 @@ fn archives(plan: &Value) -> Vec<(&str, &Value)> {
         .collect();
     found.sort_by_key(|(name, _)| *name);
     found
-}
-
-/// リポジトリのルート。
-fn repo_root() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .expect("crates/dist から3つ上がリポジトリのルート")
-        .to_path_buf()
 }
 
 /// リポジトリのルートで `dist` を動かす。設定はそこに置いてある（§25 読み替え5）。
