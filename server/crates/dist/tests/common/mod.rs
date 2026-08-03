@@ -64,6 +64,17 @@ impl FakeHome {
         self.path.join(part)
     }
 
+    /// この HOME 専用の一時領域（消す道へ `TMPDIR` として渡す）。
+    ///
+    /// 古い置き場所は `${TMPDIR:-/tmp}/agentdashboard` で、**機械に1つしかない実在の
+    /// 場所**である。素通しにすると、`--purge` を実際に走らせる検査が開発機のそこを
+    /// 消してしまい、同じ場所を前提にしている別の検査と並行したときに片方が落ちる。
+    pub fn legacy_tmp(&self) -> PathBuf {
+        let path = self.path.join("tmp");
+        let _ = std::fs::create_dir_all(&path);
+        path
+    }
+
     /// 実装の既定を、この HOME のもとで求める。
     ///
     /// **写しを作らない。** 「実装がどこを既定にしているか」を確かめるのが検査の

@@ -430,24 +430,23 @@ fn 古い版が一時領域へ置いた記録も掃ける() {
     // 消えず、利用者からは「消したのに残っている」ことすら分からない。
     let home = fake_install("legacy-temp");
 
-    // 古い版が置いた記録に見立てる。**アプリ名そのもの**なので巻き添えの心配は無い
-    let legacy = std::env::temp_dir().join("agentdashboard");
+    // 古い版が置いた記録に見立てる。**本物の一時領域は使わない**——あそこは機械に
+    // 1つしかないので、`--purge` を実際に走らせる検査と並行すると相手に消される
+    // （実際に `make ci` で落ちた）。`run` が渡す `TMPDIR` と同じ場所へ置く
+    let legacy = home.legacy_tmp().join("agentdashboard");
     std::fs::create_dir_all(&legacy).expect("作れること");
     std::fs::write(legacy.join("dashboard.db"), "old").expect("書けること");
 
     let out = run(&home, &["--dry-run", "--purge"]);
 
-    // **行そのもので見る。** 偽の HOME は `/tmp/agentdashboard-uninstall-…` なので、
-    // 部分一致で探すと**古い置き場所（`/tmp/agentdashboard`）が前方一致で当たってしまい**、
-    // 掃く処理を消しても緑のまま通る（実際にそうなった）
+    // **行そのもので見る。** 部分一致で探すと、記録の置き場所（末尾が同じ
+    // `…/agentdashboard`）に当たってしまい、**掃く処理を消しても緑のまま通る**
+    // （実際にそうなった）
     let expected = format!("消す予定: {}", legacy.display());
     assert!(
         out.lines().any(|line| line.trim() == expected),
         "古い置き場所を掃く対象にしていません（{expected} が出ていない）:\n{out}"
     );
-
-    // 後片付け。**この検査だけは本物の一時領域を触る**ので、必ず戻す
-    let _ = std::fs::remove_dir_all(&legacy);
 }
 
 #[test]
@@ -554,6 +553,11 @@ fn run(home: &FakeHome, args: &[&str]) -> String {
         // **利用者の本物の HOME を絶対に渡さない。** テストが壊れたときに
         // 自分の環境が巻き添えになる経路を、そもそも作らない
         .env("HOME", home.path())
+        // 一時領域も同じ理由で偽物にする。古い置き場所（`${TMPDIR:-/tmp}/agentdashboard`）は
+        // **機械に1つしかない実在の場所**なので、渡さないと `--purge` を実際に走らせる
+        // 検査が開発機のそこを消す。しかも消える先を別の検査が使っているため、
+        // 並行して走ると**片方が相手の前提を崩す**（`make ci` で実際に落ちた）
+        .env("TMPDIR", home.legacy_tmp())
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("XDG_STATE_HOME")
         .output()
