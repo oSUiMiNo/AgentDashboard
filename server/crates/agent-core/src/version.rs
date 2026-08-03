@@ -427,13 +427,25 @@ pub fn version_of(binary: &Path) -> Option<VersionId> {
 
 /// 初回退避の元を決める。既定は `current_exe()` の親（＝入れる側が置いた場所）。
 pub fn source_dir() -> Option<PathBuf> {
-    if let Ok(raw) = std::env::var(VERSION_SOURCE_ENV) {
+    source_dir_from(
+        std::env::var(VERSION_SOURCE_ENV).ok(),
+        std::env::current_exe().ok(),
+    )
+}
+
+/// 退避元の決め方（材料を受け取る純粋関数）。
+///
+/// 環境変数を先に見るのは [`crate::parser::parser_program`] と同じ理由——**差し替え口が
+/// 無いと、テストのたびに利用者の実インストールから数十MB がコピーされる。**
+/// 判定を分けてあるのは、テストが環境変数を書き換えずに両方の道を通せるようにするため。
+pub fn source_dir_from(
+    configured: Option<String>,
+    current_exe: Option<PathBuf>,
+) -> Option<PathBuf> {
+    if let Some(raw) = configured.filter(|raw| !raw.is_empty()) {
         return Some(PathBuf::from(raw));
     }
-    std::env::current_exe()
-        .ok()?
-        .parent()
-        .map(Path::to_path_buf)
+    current_exe?.parent().map(Path::to_path_buf)
 }
 
 /// 入れる側が置いた3本を保管庫へ控える（設計§6）。
@@ -672,6 +684,118 @@ mod tests {
             }
             .supported()
         );
+    }
+
+    /// 版を名乗るだけの偽の一式を置く。
+    fn write_fake_install(dir: &Path, version: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        for name in BINARIES {
+            let path = dir.join(name);
+            // パーサだけ `--version` を持たず、起こすと1行目に名乗る（設計§20-2）
+            let body = if name == "transcript-parser" {
+                format!(
+                    "#!/bin/sh\nprintf '{{\"ev\":\"hello\",\"parser_version\":\"{version}\"}}\\n'\n"
+                )
+            } else {
+                format!("#!/bin/sh\necho '{name} {version}'\n")
+            };
+            std::fs::write(&path, body).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn 退避元は差し替えられる() {
+        // 差し替え口が無いと、**テストのたびに利用者の実インストールから数十MB が
+        // コピーされる**（PJTガイドライン「新しく外の状態を持ったら同時に差し替え口も作る」）
+        assert_eq!(
+            source_dir_from(
+                Some("/指定した場所".to_string()),
+                Some(PathBuf::from("/bin/x"))
+            ),
+            Some(PathBuf::from("/指定した場所"))
+        );
+        // 未指定なら本物へ落ちる（実行ファイルの隣＝入れる側が置いた場所）
+        assert_eq!(
+            source_dir_from(
+                None,
+                Some(PathBuf::from("/home/x/.local/bin/agentdashboard"))
+            ),
+            Some(PathBuf::from("/home/x/.local/bin"))
+        );
+        assert_eq!(
+            source_dir_from(Some(String::new()), None),
+            None,
+            "空は未指定"
+        );
+    }
+
+    #[test]
+    fn 初回は入れる側が置いた三本を控える() {
+        // これが無いと、機能を入れた瞬間の選択肢は1つしか無い。「戻せます」と
+        // 書いてあるのに**いちばん戻りたい先へ戻れない**
+        let dir = temp_dir("snapshot");
+        let source = dir.join("bin");
+        write_fake_install(&source, "0.3.0");
+        let state = dir.join("state");
+
+        let taken = snapshot(&state, &source).expect("控えられること");
+
+        assert_eq!(taken, Some(VersionId::new("0.3.0")));
+        assert!(is_complete(&versions_dir(&state).join("0.3.0")));
+        // **ポインタは書かない。** 書くと、利用者が何も選んでいないのに走る実行ファイルが変わる
+        assert_eq!(
+            read_pointer(&state),
+            None,
+            "退避は選べる先を増やすだけの操作"
+        );
+        // 置いている途中の名残が残らない
+        assert!(
+            stored_versions(&state)
+                .iter()
+                .all(|path| !path.to_string_lossy().contains(STAGING_PREFIX)),
+            "置いている途中のフォルダが残っています"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 同じ版が既にあれば控え直さない() {
+        // 上書きしないのは戻す先を残すため（設計§3）。ソースから建てている機械では、
+        // 作り直すたびに数十MB を書き直さないためでもある
+        let dir = temp_dir("snapshot-twice");
+        let source = dir.join("bin");
+        write_fake_install(&source, "0.3.0");
+        let state = dir.join("state");
+
+        assert_eq!(
+            snapshot(&state, &source).unwrap(),
+            Some(VersionId::new("0.3.0"))
+        );
+        assert_eq!(
+            snapshot(&state, &source).unwrap(),
+            None,
+            "二度目は何もしない"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 三本揃っていない場所は退避元にしない() {
+        // 箱の中には1本しか入っていない。**そこは入れる側の置き場所ではない**
+        let dir = temp_dir("snapshot-partial");
+        let source = dir.join("bin");
+        std::fs::create_dir_all(&source).unwrap();
+        touch(&source.join("agentdashboard"));
+        let state = dir.join("state");
+
+        assert_eq!(snapshot(&state, &source).unwrap(), None);
+        assert!(stored_versions(&state).is_empty());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
