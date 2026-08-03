@@ -234,7 +234,7 @@ fn 門が叩くサブコマンドは乗り換えない() {
     fixture.point_at(&target);
     let config = fixture.write_config("sqlite:///dev/null/dashboard.db", free_port());
 
-    for subcommand in ["state-dir", "config"] {
+    for subcommand in ["state-dir", "config", "migrations"] {
         let out = fixture.run_with_config(&config, &[subcommand]);
         let text = text_of(&out);
         assert!(
@@ -250,6 +250,52 @@ fn 門が叩くサブコマンドは乗り換えない() {
         printed.trim(),
         fixture.state_dir().display().to_string(),
         "消す道が読む答えが変わっています"
+    );
+}
+
+#[test]
+fn 形の名前は目印つきで一行ずつ出る() {
+    // 門は**目印の形が読めるかどうか**で「聞けた」を判定する（設計§9）。
+    // 終了コードで見分けようとすると、知らないサブコマンド・起動できない・
+    // 将来の版が正当な理由で失敗した、を取り違える
+    let fixture = Fixture::new("schema-names");
+    let out = fixture.run(&["migrations".as_ref()]);
+
+    assert!(out.status.success(), "答えられていない:\n{}", text_of(&out));
+    let printed = String::from_utf8_lossy(&out.stdout);
+    let mut lines = printed.lines();
+    assert_eq!(
+        lines.next(),
+        Some(agentdashboard_core::cli::SCHEMA_NAMES_MARKER),
+        "先頭は目印:\n{printed}"
+    );
+    let names: Vec<&str> = lines.collect();
+    assert!(!names.is_empty(), "1つも並んでいない:\n{printed}");
+    assert!(
+        names.iter().all(|name| !name.trim().is_empty()),
+        "1行1つ（空行を混ぜない）:\n{printed}"
+    );
+}
+
+#[test]
+fn 形の名前は設定が壊れていても答えられる() {
+    // 門は「その設定を読めるか」も**別に**聞く。ここで設定の失敗に巻き込まれると
+    // 2つの問いの答えが混ざり、設定が壊れているだけの版を「確かめられません」にしてしまう
+    let fixture = Fixture::new("schema-names-broken");
+    let broken = fixture.dir.join("broken.toml");
+    std::fs::write(&broken, "知らないキー = 1\n").unwrap();
+
+    let out = fixture.run(&["--config".as_ref(), broken.as_os_str(), "migrations".as_ref()]);
+
+    assert!(
+        out.status.success(),
+        "壊れた設定に巻き込まれている:\n{}",
+        text_of(&out)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).starts_with(agentdashboard_core::cli::SCHEMA_NAMES_MARKER),
+        "目印が出ていない:\n{}",
+        text_of(&out)
     );
 }
 

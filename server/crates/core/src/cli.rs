@@ -15,6 +15,13 @@ use std::path::PathBuf;
 
 use crate::{boot, config, config::Config, serve, serve_server};
 
+/// `migrations` の出力の先頭に置く目印（CICD設計§9）。
+///
+/// **答えられたことを、目印の形が読めるかどうかで判定する。** 終了コードで見分けようと
+/// すると、「知らないサブコマンド」と「起動できない」と「将来の版が正当な理由で失敗した」
+/// を取り違える。末尾の数字は形が変わったときに上げる。
+pub const SCHEMA_NAMES_MARKER: &str = "schema-names 1";
+
 #[derive(Parser)]
 #[command(
     name = "agentdashboard",
@@ -79,6 +86,17 @@ enum Command {
         #[arg(long, value_name = "URL")]
         url: String,
     },
+    /// この実行ファイルが知っている記録の形の名前を並べる（CICD設計§9）
+    ///
+    /// **版を戻してよいかを決める門がここへ聞く。** 適用済みの形の中に、行き先の
+    /// バイナリが知らないものが混じっていると、その版は**起動できない**（記録の道具が
+    /// 拒む）。画面が出ないとポインタも直せないので、押す前に止めるしかない。
+    ///
+    /// 出力は先頭1行が [`SCHEMA_NAMES_MARKER`]、以降が1行1つ。**終了コードは当てにしない**
+    /// ——この版より前のバイナリは「知らないサブコマンド」で断るが、起動できない場合や
+    /// 将来の版が正当な理由で失敗する場合と区別が付かない。目印の形で読めたときだけ
+    /// 「聞けた」と判定する。
+    Migrations,
     /// PC を繋ぐためのペアリングトークンを発行する（セルフホスト化設計§8-4）
     ///
     /// **平文はここでしか手に入らない**（DB にはハッシュしか置かない）。発行の画面は
@@ -116,6 +134,16 @@ pub fn run() -> anyhow::Result<()> {
     // statusLine も同じ理由で設定より前に処理する（利用者のプロジェクトが cwd になる）
     if let Some(Command::ModelPost { url }) = &cli.command {
         model_post::run(url);
+        return Ok(());
+    }
+    // 形の名前も設定より前。**壊れた設定を渡されても答えられる必要がある**——門は
+    // 「その設定を読めるか」も別に聞くので、ここで設定の失敗に巻き込まれると
+    // 2つの問いの答えが混ざる（CICD設計§9）
+    if matches!(cli.command, Some(Command::Migrations)) {
+        println!("{SCHEMA_NAMES_MARKER}");
+        for name in server_core::db::migration_names() {
+            println!("{name}");
+        }
         return Ok(());
     }
 
@@ -180,7 +208,9 @@ async fn run_async(cli: Cli, config: Config, config_path: PathBuf) -> anyhow::Re
             );
         }
         // 上で先に処理して戻っている
-        Some(Command::HookPost { .. }) | Some(Command::ModelPost { .. }) => unreachable!(),
+        Some(Command::HookPost { .. })
+        | Some(Command::ModelPost { .. })
+        | Some(Command::Migrations) => unreachable!(),
         None => {
             tracing_subscriber::fmt()
                 .with_env_filter(
