@@ -20,6 +20,7 @@ pub mod config;
 pub mod gate;
 pub mod local;
 pub mod settings_api;
+pub mod versions_api;
 
 use agent_core::{
     hooks, model_catalog, offsets::OffsetStore, parser, parser::ParserSupervisor, selfheal,
@@ -54,6 +55,9 @@ pub struct LocalServer {
     /// 入口の鍵（セルフホスト化設計§8-1）。**待ち受けの広さで中身が決まる**——
     /// 127.0.0.1 だけなら鍵なし、広げているなら LAN の共有パスワード。
     auth: Arc<AuthContext>,
+    /// 版の保管庫の置き場所（CICD設計§14）。**居なくても動く**ので、既存の統合テストは
+    /// 版の口を立てずにセッションの検証だけができる。
+    state_dir: Option<std::path::PathBuf>,
 }
 
 impl LocalServer {
@@ -70,6 +74,7 @@ impl LocalServer {
             parser: None,
             settings: None,
             auth,
+            state_dir: None,
         }
     }
 
@@ -82,6 +87,12 @@ impl LocalServer {
     /// 設定の持ち主を繋いだ状態にする。
     pub fn with_settings(mut self, settings: Arc<SettingsStore>) -> Self {
         self.settings = Some(settings);
+        self
+    }
+
+    /// 版の保管庫を繋いだ状態にする。
+    pub fn with_state_dir(mut self, state_dir: std::path::PathBuf) -> Self {
+        self.state_dir = Some(state_dir);
         self
     }
 
@@ -120,9 +131,18 @@ impl LocalServer {
             Arc::clone(&self.auth),
         );
 
-        let router = server_core::routes(ws_state, Arc::clone(&self.auth))
+        let mut router = server_core::routes(ws_state, Arc::clone(&self.auth))
             .merge(hooks::routes(Arc::clone(&self.manager)))
             .merge(settings);
+        if let Some(state_dir) = &self.state_dir {
+            router = router.merge(server_core::guard(
+                versions_api::routes(versions_api::VersionsState {
+                    state_dir: state_dir.clone(),
+                    auth: Arc::clone(&self.auth),
+                }),
+                Arc::clone(&self.auth),
+            ));
+        }
         server_core::auth::with_sessions(router, &self.auth)
     }
 }
@@ -185,7 +205,13 @@ pub async fn serve_server(config: Config) -> anyhow::Result<()> {
                 // アカウント画面（トークンの発行・失効・PC 一覧。§11-1）。
                 // **ローカルモードには無い**——A2S の受け口が無いので、繋いでくる
                 // PC が存在せず、鍵を配る相手も居ない
-                .merge(server_core::account::routes(Arc::clone(&hub))),
+                .merge(server_core::account::routes(Arc::clone(&hub)))
+                // 版の切替はサーバモードでも要る。**PTY は持たないが、版を
+                // 切り替えられる主体であることは変わらない**（CICD設計§14）
+                .merge(versions_api::routes(versions_api::VersionsState {
+                    state_dir: config.agent().resolved_state_dir(),
+                    auth: Arc::clone(&auth),
+                })),
             Arc::clone(&auth),
         ));
     let router = server_core::auth::with_sessions(router, &auth);
@@ -329,7 +355,8 @@ pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::R
 
     let server = LocalServer::new(manager, registry, Arc::clone(&server_config), auth)
         .with_parser(parser)
-        .with_settings(settings);
+        .with_settings(settings)
+        .with_state_dir(agent_config.resolved_state_dir());
     let listener = bind(&server_config).await?;
     // **待ち受けを確保できた時点で、乗り換えの印を消す**（CICD設計§11）。ここより後ろへ
     // ずらすと、印を消す前に落ちる隙間が広がる

@@ -231,7 +231,14 @@ impl Selfhost {
 
         let router = server_core::auth::with_sessions(
             server_core::routes(ws_state, std::sync::Arc::clone(&auth)).merge(server_core::guard(
-                agentdashboard_core::settings_api::server_routes(hub),
+                agentdashboard_core::settings_api::server_routes(hub).merge(
+                    agentdashboard_core::versions_api::routes(
+                        agentdashboard_core::versions_api::VersionsState {
+                            state_dir: dir.clone(),
+                            auth: std::sync::Arc::clone(&auth),
+                        },
+                    ),
+                ),
                 std::sync::Arc::clone(&auth),
             )),
             &auth,
@@ -305,6 +312,37 @@ impl Selfhost {
         self.cookie = None;
     }
 
+    /// 管理者ではないアカウントを1つ足す。
+    ///
+    /// パスワードは管理者のハッシュをそのまま写す。**ハッシュを作る道具を持ち込まずに
+    /// 済ませる**ためで、同じ合言葉で入れるようになる。
+    async fn add_member(&self, name: &str) {
+        use sea_orm::{ColumnTrait as _, EntityTrait as _, QueryFilter as _, QuerySelect as _};
+        use server_core::db::entity::accounts;
+
+        let account_id = server_core::db::pairing::ensure_account(&self.db, name)
+            .await
+            .expect("アカウントを作れること");
+        let hash: Option<Option<String>> = accounts::Entity::find()
+            .filter(accounts::Column::IsAdmin.eq(true))
+            .select_only()
+            .column(accounts::Column::PasswordHash)
+            .into_tuple()
+            .one(&self.db)
+            .await
+            .expect("管理者を読めること");
+        let hash = hash.flatten().expect("管理者はパスワードを持つこと");
+        accounts::Entity::update_many()
+            .col_expr(
+                accounts::Column::PasswordHash,
+                sea_orm::sea_query::Expr::value(hash),
+            )
+            .filter(accounts::Column::Id.eq(account_id))
+            .exec(&self.db)
+            .await
+            .expect("パスワードを付けられること");
+    }
+
     async fn me(&self) -> serde_json::Value {
         let (status, body) = self.get("/api/me").await;
         assert_eq!(status, 200, "認証の要否を聞けない: {body}");
@@ -325,7 +363,7 @@ async fn ログインしないと何も見えない() {
     assert_eq!(view["authenticated"], false);
     assert_eq!(view["setup_open"], true, "まだ管理者が居ないので開いている");
 
-    for path in ["/api/sessions", "/api/settings"] {
+    for path in ["/api/sessions", "/api/settings", "/api/versions"] {
         let (status, _) = server.get(path).await;
         assert_eq!(status, 401, "{path} が鍵の向こうにない");
     }
@@ -458,4 +496,66 @@ async fn 鍵の無いまま広げようとしたら起動を拒否する() {
         .expect("登録したのに拒否された");
 
     let _ = std::fs::remove_dir_all(dir);
+}
+
+// --- 版の切替は誰が押せるか（CICD設計§13） -----------------------------------
+
+/// 一覧の応答を読む。
+async fn versions(body: &str) -> serde_json::Value {
+    serde_json::from_str(body).expect("VersionsView として読めること")
+}
+
+#[tokio::test]
+async fn ローカルでは同じ機械からだけ版を触れる() {
+    // 版の入れ替えは、突き詰めれば**外から実行ファイルを取ってきて走らせる**こと。
+    // ログインを通っただけの相手に開ける操作ではない
+    let here = common::TestServer::start().await;
+    let (status, body) = here.get("/api/versions").await;
+    assert_eq!(status, 200, "一覧を読めない: {body}");
+    assert_eq!(
+        versions(&body).await["editable"],
+        true,
+        "127.0.0.1 からは押せる"
+    );
+
+    let there =
+        common::TestServer::start_from(agentdashboard_core::config::Config::default(), lan_peer())
+            .await;
+    let (status, body) = there.get("/api/versions").await;
+    assert_eq!(status, 200, "見るのは誰でもよい（見えないと押せないことも分からない）");
+    assert_eq!(
+        versions(&body).await["editable"],
+        false,
+        "LAN の向こうからは押せない"
+    );
+
+    let (status, body) = there.request("DELETE", "/api/versions/0.0.1", None).await;
+    assert_eq!(status, 403, "断られていない: {body}");
+    assert!(body.contains("127.0.0.1"), "どこからなら通るかを書く: {body}");
+}
+
+#[tokio::test]
+async fn セルフホストでは管理者だけが版を触れる() {
+    let mut server = selfhost().await;
+    server.setup("あるじ", "とてもながいあいことば").await;
+
+    let (status, body) = server.get("/api/versions").await;
+    assert_eq!(status, 200, "一覧を読めない: {body}");
+    assert_eq!(versions(&body).await["editable"], true, "管理者は押せる");
+
+    server.add_member("ひとり").await;
+    let (status, body) = server.login("ひとり", "とてもながいあいことば").await;
+    assert_eq!(status, 200, "入れない: {body}");
+
+    let (status, body) = server.get("/api/versions").await;
+    assert_eq!(status, 200, "見るのは誰でもよい: {body}");
+    assert_eq!(
+        versions(&body).await["editable"],
+        false,
+        "管理者でなければ押せない"
+    );
+
+    let (status, body) = server.request("DELETE", "/api/versions/0.0.1", None).await;
+    assert_eq!(status, 403, "断られていない: {body}");
+    assert!(body.contains("管理者"), "誰なら押せるかを書く: {body}");
 }

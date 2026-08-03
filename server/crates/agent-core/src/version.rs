@@ -660,6 +660,15 @@ pub fn snapshot(state_dir: &Path, source: &Path) -> anyhow::Result<Option<Versio
     Ok(Some(version))
 }
 
+/// 保管庫のその版のフォルダ。無ければ `None`。
+///
+/// 「在るかどうか」と「消せるかどうか」を分けてあるのは、**口が断り方を言い分けられる
+/// ようにする**ため（無いものは「無い」、走っているものは「いま使っている」）。
+pub fn stored_version_dir(state_dir: &Path, version: &VersionId) -> Option<PathBuf> {
+    let dir = versions_dir(state_dir).join(version.as_str());
+    dir.is_dir().then_some(dir)
+}
+
 /// 保管庫から版を消す（設計§12）。
 ///
 /// 断るのは**いま走っている版だけ**。予約されている版は消せるが、その場合は
@@ -672,10 +681,9 @@ pub fn snapshot(state_dir: &Path, source: &Path) -> anyhow::Result<Option<Versio
 /// 壊れた版（3本揃っていない・版が食い違う）は消せる。むしろ消せないと、置く途中で
 /// 切れた残骸を人が手で片付けることになる。
 pub fn remove_version(state_dir: &Path, version: &VersionId) -> Result<(), String> {
-    let dir = versions_dir(state_dir).join(version.as_str());
-    if !dir.is_dir() {
+    let Some(dir) = stored_version_dir(state_dir, version) else {
         return Err(format!("保管庫にありません: {version}"));
-    }
+    };
 
     let binary = dir.join(BINARIES[0]);
     if std::env::current_exe().is_ok_and(|current| same_path(&binary, &current)) {

@@ -380,7 +380,10 @@ impl TestServer {
             Arc::clone(&registry),
             Arc::clone(&server_config),
             Arc::clone(&auth),
-        );
+        )
+        // 版の口も本番と同じ形で立てる。**置き場所は使い捨て**なので、開発者の
+        // 実環境の保管庫を読むことはない（CICD設計§21-6）
+        .with_state_dir(agent_config.resolved_state_dir());
         let parser = if with_parser {
             // 本番と同じ入口（環境変数）でビルド済みのパーサを指す
             if name_parser_by_env {
