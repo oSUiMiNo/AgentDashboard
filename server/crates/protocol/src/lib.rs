@@ -192,6 +192,98 @@ impl fmt::Display for ModelId {
     }
 }
 
+/// ダッシュボード自身の版（CICD設計§2）。
+///
+/// **列挙型にしない。** 理由は [`PermissionMode`] や [`ModelId`] と同じで、これから出る
+/// 版を古い画面が知らないのは当たり前だから。知らない値でも**表示だけはできる**必要がある。
+///
+/// # 並び順は自前で3つ組にする
+///
+/// `semver` クレートは入れない（実行時の直接依存を増やさない）。素の文字列比較だと
+/// `0.10.0 < 0.9.0` になってしまうので、`0.10.2` のような3つ組として読んで比べる。
+/// **3つ組として読めない版**（試作版の接尾辞など）は大小を判定せず、**末尾へ置く**——
+/// 並び順が分からないことと、選べないことは別。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct VersionId(pub String);
+
+impl VersionId {
+    pub fn new(raw: impl Into<String>) -> Self {
+        Self(raw.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// `0.10.2` のような3つ組として読む。読めなければ `None`。
+    pub fn triple(&self) -> Option<(u64, u64, u64)> {
+        let mut parts = self.0.split('.');
+        let major = parts.next()?.parse().ok()?;
+        let minor = parts.next()?.parse().ok()?;
+        let patch = parts.next()?.parse().ok()?;
+        // 4つ目があるものは3つ組ではない。読めたふりをしない
+        parts.next().is_none().then_some((major, minor, patch))
+    }
+}
+
+impl Ord for VersionId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        match (self.triple(), other.triple()) {
+            // 3つ組が同じでも綴りが違えば別物なので、綴りで決着させる（`Eq` と揃える）
+            (Some(left), Some(right)) => left.cmp(&right).then_with(|| self.0.cmp(&other.0)),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => self.0.cmp(&other.0),
+        }
+    }
+}
+
+impl PartialOrd for VersionId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl fmt::Display for VersionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// 版の出どころ（CICD設計§6）。**消せるかどうかがここで決まる。**
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VersionOrigin {
+    /// 入れる側（配布インストーラ）が置いたもの。**消す道の持ち物なので消さない。**
+    Installed,
+    /// 保管庫（`<state_dir>/versions/`）にあるもの。
+    Stored,
+}
+
+/// 版の一覧の1行（CICD設計§2）。
+///
+/// **実パスを持つのは、同じ版名の行が複数並ぶため。** ソースからビルドした版と配った版は
+/// 同じ番号を名乗る（ワークスペースの版は1箇所にしかない）ので、開発者の機械では初日から
+/// 「入れる側」「保管庫」「走っている版」の3行が同名で並ぶ。名前だけでは選びようがない。
+///
+/// パスを `PathBuf` ではなく文字列で持つのは、これが**画面へ出すための値**だから。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersionEntry {
+    pub version: VersionId,
+    pub origin: VersionOrigin,
+    /// `agentdashboard` 実行ファイルの絶対パス。
+    pub path: String,
+    /// 3本揃っていて、3本とも同じ版を名乗るか（CICD設計§6）。
+    pub usable: bool,
+    /// いまこの実行ファイルで動いているか。
+    pub running: bool,
+    /// ポインタが指しているか（＝次に起こすときの版）。
+    pub selected: bool,
+    pub size_bytes: u64,
+}
+
 /// 小窓に表示するセッションの状態（設計§5 の導出結果）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -610,6 +702,71 @@ mod tests {
             serde_json::to_string(&unknown).unwrap(),
             r#""まだ知らないモード""#,
             "裸の文字列として運ばれること"
+        );
+    }
+
+    #[test]
+    fn 版は3つ組の大小で並ぶ() {
+        // **文字列比較だと 0.10.0 < 0.9.0 になる。** ここが逆だと、一覧で新しい版が
+        // 古い版の上に来なくなる
+        let mut versions = [
+            VersionId::new("0.9.0"),
+            VersionId::new("0.10.0"),
+            VersionId::new("0.1.2"),
+            VersionId::new("1.0.0"),
+        ];
+        versions.sort();
+        let sorted: Vec<&str> = versions.iter().map(VersionId::as_str).collect();
+        assert_eq!(sorted, ["0.1.2", "0.9.0", "0.10.0", "1.0.0"]);
+    }
+
+    #[test]
+    fn 三つ組として読めない版は末尾へ置かれる() {
+        // 並び順が分からないことと、選べないことは別（設計§2）。落ちずに末尾へ寄せる
+        let mut versions = [
+            VersionId::new("0.2.0-rc1"),
+            VersionId::new("1.0.0"),
+            VersionId::new("nightly"),
+            VersionId::new("0.9.0"),
+        ];
+        versions.sort();
+        let sorted: Vec<&str> = versions.iter().map(VersionId::as_str).collect();
+        assert_eq!(
+            sorted,
+            ["0.9.0", "1.0.0", "0.2.0-rc1", "nightly"],
+            "読める版が先、読めない版は綴り順で末尾"
+        );
+
+        assert_eq!(VersionId::new("0.1.1").triple(), Some((0, 1, 1)));
+        assert_eq!(VersionId::new("0.1").triple(), None, "3つに満たない");
+        assert_eq!(VersionId::new("0.1.1.1").triple(), None, "4つ目がある");
+        assert_eq!(VersionId::new("0.1.x").triple(), None, "数字でない");
+    }
+
+    #[test]
+    fn 版の一覧の1行が往復する() {
+        // REST の応答なので**4箇所同期は要らない**（設計§15 で ServerMessage に載せないと
+        // 決めた）。Rust 側で往復することだけを見る
+        let entry = VersionEntry {
+            version: VersionId::new("0.1.1"),
+            origin: VersionOrigin::Stored,
+            path: "/home/example/.local/state/agentdashboard/versions/0.1.1/agentdashboard"
+                .to_string(),
+            usable: true,
+            running: false,
+            selected: true,
+            size_bytes: 29_884_416,
+        };
+        assert_eq!(roundtrip(&entry), entry);
+
+        let text = serde_json::to_string(&entry).unwrap();
+        assert!(
+            text.contains(r#""version":"0.1.1""#),
+            "版は裸の文字列: {text}"
+        );
+        assert!(
+            text.contains(r#""origin":"stored""#),
+            "出どころは小文字: {text}"
         );
     }
 
