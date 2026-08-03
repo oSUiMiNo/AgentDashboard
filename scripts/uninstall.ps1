@@ -69,33 +69,45 @@ function Remove-Target([string]$Target) {
 }
 
 # 入れた場所を控えから読む。既定と違う場所へ入れた人にも効かせるため
-$InstallDir = $null
+$ReceiptInstallDir = $null
 if (Test-Path -LiteralPath $Receipt) {
     try {
-        $InstallDir = (Get-Content -LiteralPath $Receipt -Raw | ConvertFrom-Json).install_prefix
+        $ReceiptInstallDir = (Get-Content -LiteralPath $Receipt -Raw | ConvertFrom-Json).install_prefix
     } catch {
-        $InstallDir = $null
+        $ReceiptInstallDir = $null
     }
 }
-if ([string]::IsNullOrWhiteSpace($InstallDir)) {
-    $InstallDir = $DefaultInstallDir
-    Write-Host "控えが読めないので、既定の場所を見ます: $InstallDir"
+
+# 探す場所は**控えと既定の両方**。片方だけにしない——控えが読めたときに既定を
+# 見なくすると、別の場所へ入れ直したあとに控えの書き込みが失敗した場合などに、
+# **既定の場所の3本が生き残ったまま「見つかりませんでした」と出る**
+$SearchDirs = @($DefaultInstallDir)
+if (-not [string]::IsNullOrWhiteSpace($ReceiptInstallDir)) {
+    Write-Host "控えに書かれた場所を見ます: $ReceiptInstallDir"
+    # 控えが既定を指していることもある。**同じ場所を2回走査しない**
+    if ($ReceiptInstallDir -ne $DefaultInstallDir) {
+        $SearchDirs = @($ReceiptInstallDir) + $SearchDirs
+    }
 } else {
-    Write-Host "控えに書かれた場所を見ます: $InstallDir"
+    Write-Host '控えが読めないので、既定の場所だけを見ます'
 }
+Write-Host "見る場所: $($SearchDirs -join ' ')"
 
 Write-Host ''
 Write-Host '== 実行ファイル =='
 $found = $false
-foreach ($binary in $Binaries) {
-    # 控えの install_prefix は、そのまま置き場所を指す形と、下に bin を持つ形がある
-    foreach ($candidate in @((Join-Path $InstallDir $binary), (Join-Path (Join-Path $InstallDir 'bin') $binary))) {
-        if (Test-Path -LiteralPath $candidate) {
-            $found = $true
-            Remove-Target $candidate
+foreach ($dir in $SearchDirs) {
+    foreach ($binary in $Binaries) {
+        # 控えの install_prefix は、そのまま置き場所を指す形と、下に bin を持つ形がある
+        foreach ($candidate in @((Join-Path $dir $binary), (Join-Path (Join-Path $dir 'bin') $binary))) {
+            if (Test-Path -LiteralPath $candidate) {
+                $found = $true
+                Remove-Target $candidate
+            }
         }
     }
 }
+# **全部の候補を見た後**に判定する
 if (-not $found) { Write-Host '  見つかりませんでした（既に消えているようです）' }
 
 Write-Host ''

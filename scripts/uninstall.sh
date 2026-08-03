@@ -102,26 +102,39 @@ install_dir_from_receipt() {
     printf '%s\n' "${prefix}"
 }
 
-INSTALL_DIR="$(install_dir_from_receipt || true)"
-if [ -z "${INSTALL_DIR}" ]; then
-    INSTALL_DIR="${DEFAULT_INSTALL_DIR}"
-    say "控えが読めないので、既定の場所を見ます: ${INSTALL_DIR}"
+# 探す場所は**控えと既定の両方**。片方だけにしない——控えが読めたときに既定を
+# 見なくすると、別の場所へ入れ直したあとに控えの書き込みが失敗した場合などに、
+# **既定の場所の3本が生き残ったまま「見つかりませんでした」と出る**
+SEARCH_DIRS="${DEFAULT_INSTALL_DIR}"
+RECEIPT_DIR_FOUND="$(install_dir_from_receipt || true)"
+if [ -n "${RECEIPT_DIR_FOUND}" ]; then
+    say "控えに書かれた場所を見ます: ${RECEIPT_DIR_FOUND}"
+    # 控えが既定を指していることもある。**同じ場所を2回走査しない**
+    # （表示が二重になり、消したものを数え間違える）
+    if [ "${RECEIPT_DIR_FOUND}" != "${DEFAULT_INSTALL_DIR}" ]; then
+        SEARCH_DIRS="${RECEIPT_DIR_FOUND} ${SEARCH_DIRS}"
+    fi
 else
-    say "控えに書かれた場所を見ます: ${INSTALL_DIR}"
+    say "控えが読めないので、既定の場所だけを見ます"
 fi
+say "見る場所: ${SEARCH_DIRS}"
 
 say ""
 say "== 実行ファイル =="
 found=0
-for binary in ${BINARIES}; do
-    # 控えの `install_prefix` は、そのまま置き場所を指す形と、下に `bin` を持つ形がある
-    for candidate in "${INSTALL_DIR}/${binary}" "${INSTALL_DIR}/bin/${binary}"; do
-        if [ -e "${candidate}" ] || [ -L "${candidate}" ]; then
-            found=1
-            remove "${candidate}"
-        fi
+for dir in ${SEARCH_DIRS}; do
+    for binary in ${BINARIES}; do
+        # 控えの `install_prefix` は、そのまま置き場所を指す形と、下に `bin` を持つ形がある
+        for candidate in "${dir}/${binary}" "${dir}/bin/${binary}"; do
+            if [ -e "${candidate}" ] || [ -L "${candidate}" ]; then
+                found=1
+                remove "${candidate}"
+            fi
+        done
     done
 done
+# **全部の候補を見た後**に判定する。途中で打ち切ると、控えの場所に無かっただけで
+# 「もう消えている」と言ってしまう
 [ "${found}" -eq 0 ] && say "  見つかりませんでした（既に消えているようです）"
 
 say ""
@@ -147,7 +160,12 @@ fi
 
 say ""
 say "== 触っていないもの =="
-say "  ${DEFAULT_INSTALL_DIR}/env と、シェルの設定ファイル（.profile / .bashrc / .zshrc 等）の1行"
+say "  ${DEFAULT_INSTALL_DIR}/env"
+# **インストーラが実際に書き込む顔ぶれをそのまま並べる。** 「等」で濁すと、
+# ここに出ていないファイル（.bash_profile など）を使っている人は、案内どおり
+# 掃除しても行が残り、シェルを開くたびにエラーになる
+say "  次のうち存在するものへ書かれた 1 行:"
+say "    .profile / .bashrc / .bash_profile / .bash_login / .zshrc / .zshenv"
 say "  同じ仕組みで入れた他のツールと共有しているため、こちらでは消しません。"
 say "  他に使っているものが無ければ、その行と env を手で消してください。"
 

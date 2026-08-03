@@ -29,6 +29,21 @@ const BINARIES: &[&str] = &[
 /// 同じ `bin` に居る他人の道具。**巻き添えにしていないこと**を見るために置く。
 const OTHER_TOOL: &str = "ripgrep";
 
+/// インストーラが PATH を通すために1行書き足すシェルの設定。
+///
+/// **顔ぶれは生成されるインストーラから写している。** あちらは `.profile` に加えて
+/// 存在する `.bashrc` `.bash_profile` `.bash_login` の**全部**と、`.zshrc` `.zshenv` の
+/// 先頭にあるものへ書く。ここが実物より少ないと、**案内に出てこないファイルへ行が残る**
+/// ——利用者は案内どおり掃除したのに、シェルを開くたびにエラーが出ることになる。
+const RCFILES: &[&str] = &[
+    ".profile",
+    ".bashrc",
+    ".bash_profile",
+    ".bash_login",
+    ".zshrc",
+    ".zshenv",
+];
+
 #[test]
 fn 既定では実行ファイルと控えだけが消える() {
     let home = fake_install("default");
@@ -79,6 +94,78 @@ fn 他人の道具と共有の設定を巻き添えにしない() {
     assert!(
         profile.contains(".local/bin/env"),
         "シェルの設定から行を消しています:\n{out}"
+    );
+
+    cleanup(&home);
+}
+
+#[test]
+fn インストーラが書く設定ファイルをどれも触らない() {
+    // `.profile` だけを見ていると、**他のファイルを消す実装になっても緑のまま**になる。
+    // インストーラが書き足す顔ぶれを全部置いて、1つも減っていないことを見る。
+    //
+    // あわせて、**案内文にその顔ぶれが並んでいる**ことも見る。「等」で濁すと、
+    // そこに出ていないファイルを使っている人は掃除しきれない
+    let home = fake_install("rcfiles");
+
+    let out = run(&home, &[]);
+
+    for rcfile in RCFILES {
+        let text = std::fs::read_to_string(home.join(rcfile))
+            .unwrap_or_else(|err| panic!("{rcfile} を読めること: {err}\n{out}"));
+        assert!(
+            text.contains(".local/bin/env"),
+            "{rcfile} から行を消しています:\n{out}"
+        );
+        assert!(
+            out.contains(rcfile),
+            "触っていないものの案内に {rcfile} が並んでいません:\n{out}"
+        );
+    }
+
+    cleanup(&home);
+}
+
+#[test]
+fn 控えが別の場所を指していても既定の場所も掃く() {
+    // 控えは**読めるとは限らず、正しいとも限らない**。別の場所へ入れ直したあとに
+    // 控えの書き込みが失敗すると、控えは古い場所を指したまま残る。
+    //
+    // そこで既定の場所を見なくすると、**3本が生き残ったまま「もう消えている」と
+    // 表示される**。利用者は消えたと信じて、PATH 上に古いものを残すことになる
+    let home = fake_install("both-dirs");
+
+    // 控えを、既定とは別の場所へ向け直す（そちらにも実体を置く）
+    let elsewhere = home.join("opt/tools");
+    std::fs::create_dir_all(&elsewhere).expect("作れること");
+    for binary in BINARIES {
+        std::fs::write(elsewhere.join(binary), "x").expect("書けること");
+    }
+    std::fs::write(
+        home.join(".config/agentdashboard/agentdashboard-receipt.json"),
+        format!(
+            r#"{{"binaries":["agentdashboard"],"install_prefix":"{}","version":"0.1.0"}}"#,
+            elsewhere.display()
+        ),
+    )
+    .expect("書けること");
+
+    let out = run(&home, &[]);
+
+    for binary in BINARIES {
+        assert!(
+            !elsewhere.join(binary).exists(),
+            "控えが指す場所の {binary} が残っています:\n{out}"
+        );
+        assert!(
+            !home.join(".local/bin").join(binary).exists(),
+            "既定の場所の {binary} が残っています（控えの場所しか見ていない）:\n{out}"
+        );
+    }
+    // 既定の場所にある他人の道具は、もちろん無事
+    assert!(
+        home.join(".local/bin").join(OTHER_TOOL).exists(),
+        "他人の道具を消しています:\n{out}"
     );
 
     cleanup(&home);
@@ -258,7 +345,10 @@ fn fake_install(label: &str) -> PathBuf {
     // 巻き添えを見るための、関係の無いもの
     std::fs::write(bin.join(OTHER_TOOL), "x").expect("書けること");
     std::fs::write(bin.join("env"), "# 共有").expect("書けること");
-    std::fs::write(home.join(".profile"), ". \"$HOME/.local/bin/env\"\n").expect("書けること");
+    // インストーラが書き足す**全部**を置く。1つだけ置くと、他を消す実装になっても気づけない
+    for rcfile in RCFILES {
+        std::fs::write(home.join(rcfile), ". \"$HOME/.local/bin/env\"\n").expect("書けること");
+    }
 
     std::fs::write(
         receipt_dir.join("agentdashboard-receipt.json"),

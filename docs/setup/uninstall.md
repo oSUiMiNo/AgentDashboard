@@ -64,11 +64,18 @@ irm https://…/agentdashboard-uninstaller.ps1 -OutFile uninstall.ps1
 rm ~/.local/bin/env ~/.local/bin/env.fish
 ```
 
-そのうえで、`~/.profile` `~/.bashrc` `~/.zshrc` などから次の行を消します。
+そのうえで、次の行を消します。
 
 ```
 . "$HOME/.local/bin/env"
 ```
+
+書き込まれている可能性があるのは、**次のうち存在するもの全部**です。`~/.profile` だけを見て終わりにすると、`~/.bash_profile` を使っている場合などに行が残り、**シェルを開くたびにエラーが出ます**。
+
+| シェル | ファイル |
+|---|---|
+| sh / bash | `~/.profile` ／ `~/.bashrc` ／ `~/.bash_profile` ／ `~/.bash_login` |
+| zsh | `~/.zshrc` ／ `~/.zshenv` |
 
 ---
 <br/>
