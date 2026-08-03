@@ -550,3 +550,82 @@ mod ログインセッション {
         }
     }
 }
+
+/// 版を戻すときの門が使う、スキーマの名前の口（CICD設計§9）。
+mod スキーマの名前 {
+    use super::*;
+    use sea_orm::ConnectionTrait as _;
+
+    /// 「適用済みだが、この実行ファイルは知らない」形を1件だけ作る。
+    async fn 知らないものを適用済みにする(db: &sea_orm::DatabaseConnection) -> String {
+        let unknown = "m99999999_000099_知らない形".to_string();
+        db.execute_unprepared(&format!(
+            "INSERT INTO seaql_migrations (version, applied_at) VALUES ('{unknown}', 0)"
+        ))
+        .await
+        .expect("記録の表へ書けること");
+        unknown
+    }
+
+    #[tokio::test]
+    async fn 自分が知っている名前を並べられる() {
+        let names = db::migration_names();
+        assert!(!names.is_empty(), "1つも知らないことはない");
+        assert!(
+            names.iter().all(|name| name.starts_with('m')),
+            "ファイル名がそのまま名前になる: {names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn 当てたあとは知っている名前と適用済みが揃う() {
+        for backend in common::backends("names").await {
+            let mut applied = db::applied_migration_names(&backend.db).await.unwrap();
+            let mut known = db::migration_names();
+            applied.sort();
+            known.sort();
+            assert_eq!(applied, known, "[{}] 揃っていない", backend.name);
+            backend.finish().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn 知らないものが適用済みでも生の行は読める() {
+        // **整った形で返すほう（get_applied_migrations）は、まさにこの状況で落ちる。**
+        // 門は「知らないものが適用済みか」を見たいので、記録の行をそのまま読む必要がある
+        for backend in common::backends("raw").await {
+            let unknown = 知らないものを適用済みにする(&backend.db).await;
+
+            let applied = db::applied_migration_names(&backend.db)
+                .await
+                .unwrap_or_else(|err| panic!("[{}] 生の行すら読めない: {err}", backend.name));
+
+            assert!(
+                applied.contains(&unknown),
+                "[{}] 知らないものが落ちている: {applied:?}",
+                backend.name
+            );
+            backend.finish().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn 知らないものが適用済みなら繋ぎ直せない() {
+        // 後退の症状は**静かな破損ではなく「起動できない」**（設計§20-3）。
+        // だから門の目的は破損を防ぐことではなく、袋小路を作らないことになる
+        for backend in common::backends("stuck").await {
+            知らないものを適用済みにする(&backend.db).await;
+
+            let err = db::connect(&backend.url)
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("[{}] 繋げてしまった", backend.name));
+            assert!(
+                err.to_string().contains("スキーマを適用できません"),
+                "[{}] 断り方が変わった: {err}",
+                backend.name
+            );
+            backend.finish().await;
+        }
+    }
+}

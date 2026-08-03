@@ -105,6 +105,36 @@ async fn apply_migrations(db: &DatabaseConnection) -> anyhow::Result<()> {
 /// マイグレーションを直列化するための助言ロックの番号。
 const MIGRATION_LOCK: i64 = 73_912_026;
 
+/// この実行ファイルが知っているスキーマの名前を並べる（CICD設計§9）。
+///
+/// 版を戻すときの門が使う。**公開するのはモジュールではなく、この薄い口だけ**——
+/// `core` が記録の道具の型を直接使い始めると、将来「その道具を直接使わない」という線を
+/// 引きたくなったときに引けなくなる。名前を `String` で返しているので、呼ぶ側は
+/// `sea-orm-migration` を知らなくてよい。
+pub fn migration_names() -> Vec<String> {
+    migration::Migrator::migrations()
+        .iter()
+        .map(|migration| migration.name().to_string())
+        .collect()
+}
+
+/// その DB に**適用済みとして記録されている**名前を並べる（CICD設計§9）。
+///
+/// # 整った形で返すほうは使えない
+///
+/// `get_applied_migrations` は内部で手元の定義との突き合わせを通るので、
+/// **まさに検査したい状況（知らないものが適用済み）でエラーになる**。記録の行を
+/// そのまま返す `get_migration_models` を使う（設計§20-3）。
+///
+/// なおこの関数は先頭で記録用の表の作成を試みるので、**読み取りのつもりで書き込みを
+/// 含む**。接続時に既に当ててあるなら無害。
+pub async fn applied_migration_names(db: &DatabaseConnection) -> anyhow::Result<Vec<String>> {
+    let rows = migration::Migrator::get_migration_models(db)
+        .await
+        .map_err(|err| anyhow::anyhow!("適用済みのスキーマを読めません: {err}"))?;
+    Ok(rows.into_iter().map(|row| row.version).collect())
+}
+
 /// ローカルモードのアカウント行を用意する。既にあれば何もしない。
 async fn ensure_local_account(db: &DatabaseConnection) -> anyhow::Result<()> {
     use entity::accounts;
