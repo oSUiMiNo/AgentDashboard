@@ -68,6 +68,18 @@ $StateDirFallback = if ($env:XDG_STATE_HOME) {
     Join-Path $HOME ".local\state\$AppName"
 }
 
+# **古い置き場所。** v0.1.0 には Windows の道が無く、`HOME` も無いので記録が
+# 一時領域（`%LOCALAPPDATA%\Temp\`）へ落ちていた。いまの実行ファイルはそこを
+# 知らないので、聞いても返ってこない。
+#
+# 放っておくと**誰も消せない記録**になるので、`-Purge` のときだけ掃く。名前は
+# アプリ名そのものなので、巻き添えの心配は無い。
+$LegacyStateDir = if ($env:TEMP) {
+    Join-Path $env:TEMP $AppName
+} else {
+    Join-Path ([System.IO.Path]::GetTempPath()) $AppName
+}
+
 function Remove-Target([string]$Target) {
     if (-not (Test-Path -LiteralPath $Target)) { return }
     if ($DryRun) {
@@ -167,11 +179,22 @@ Write-Host ''
 Write-Host '== 記録（一覧・履歴） =='
 if ($Purge) {
     Remove-Target $StateDir
-} elseif (Test-Path -LiteralPath $StateDir) {
-    Write-Host "  残しました: $StateDir"
-    Write-Host '  （消すと一覧と履歴が戻せません。消すなら -Purge を付けてください）'
+    # 古い版が一時領域へ置いた記録も掃く。**いまの実行ファイルはここを知らない**ので、
+    # 聞いても返ってこない。放っておくと誰も消せない記録になる
+    if (($LegacyStateDir -ne $StateDir) -and (Test-Path -LiteralPath $LegacyStateDir)) {
+        Write-Host '  古い版が一時領域へ置いた記録も見つかりました'
+        Remove-Target $LegacyStateDir
+    }
 } else {
-    Write-Host '  ありませんでした'
+    if (Test-Path -LiteralPath $StateDir) {
+        Write-Host "  残しました: $StateDir"
+        Write-Host '  （消すと一覧と履歴が戻せません。消すなら -Purge を付けてください）'
+    } else {
+        Write-Host '  ありませんでした'
+    }
+    if (($LegacyStateDir -ne $StateDir) -and (Test-Path -LiteralPath $LegacyStateDir)) {
+        Write-Host "  残しました（古い版が一時領域へ置いたもの）: $LegacyStateDir"
+    }
 }
 
 Write-Host ''

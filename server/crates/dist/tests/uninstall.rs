@@ -422,6 +422,35 @@ fn 置き場所は実行ファイルに聞く() {
 }
 
 #[test]
+fn 古い版が一時領域へ置いた記録も掃ける() {
+    // **v0.1.0 には Windows の道が無く**、`HOME` も無いので記録が一時領域へ落ちていた。
+    // いまの実行ファイルはそこを知らないので、聞いても返ってこない。
+    //
+    // 掃かないと**誰も消せない記録**になる。入れ直しても見つからず、`--purge` でも
+    // 消えず、利用者からは「消したのに残っている」ことすら分からない。
+    let home = fake_install("legacy-temp");
+
+    // 古い版が置いた記録に見立てる。**アプリ名そのもの**なので巻き添えの心配は無い
+    let legacy = std::env::temp_dir().join("agentdashboard");
+    std::fs::create_dir_all(&legacy).expect("作れること");
+    std::fs::write(legacy.join("dashboard.db"), "old").expect("書けること");
+
+    let out = run(&home, &["--dry-run", "--purge"]);
+
+    // **行そのもので見る。** 偽の HOME は `/tmp/agentdashboard-uninstall-…` なので、
+    // 部分一致で探すと**古い置き場所（`/tmp/agentdashboard`）が前方一致で当たってしまい**、
+    // 掃く処理を消しても緑のまま通る（実際にそうなった）
+    let expected = format!("消す予定: {}", legacy.display());
+    assert!(
+        out.lines().any(|line| line.trim() == expected),
+        "古い置き場所を掃く対象にしていません（{expected} が出ていない）:\n{out}"
+    );
+
+    // 後片付け。**この検査だけは本物の一時領域を触る**ので、必ず戻す
+    let _ = std::fs::remove_dir_all(&legacy);
+}
+
+#[test]
 fn 実行ファイルに聞けないときは既定へ落ちてそう言う() {
     // **黙って既定を消しに行かない。** 設定で置き場所を変えていた人が、
     // 「消えたはず」と思い込まないようにする

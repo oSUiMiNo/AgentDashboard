@@ -56,6 +56,14 @@ STATE_DIR_FALLBACK="${XDG_STATE_HOME:-${HOME}/.local/state}/${APP_NAME}"
 # 入れる側が作ったものは消す側も消す（`~/.local/bin/env.fish` のほうは共有なので残す）
 FISH_CONF="${XDG_CONFIG_HOME:-${HOME}/.config}/fish/conf.d/${APP_NAME}.env.fish"
 
+# **古い置き場所。** v0.1.0 には Windows の道が無く、`HOME` も無いので記録が
+# 一時領域（`%LOCALAPPDATA%\Temp\`）へ落ちていた。いまの実行ファイルはそこを
+# 知らないので、聞いても返ってこない。
+#
+# 放っておくと**誰も消せない記録**になるので、`--purge` のときだけ掃く。名前は
+# アプリ名そのものなので、巻き添えの心配は無い。
+LEGACY_STATE_DIR="${TMPDIR:-/tmp}/${APP_NAME}"
+
 PURGE=0
 DRY_RUN=0
 
@@ -200,12 +208,21 @@ say ""
 say "== 記録（一覧・履歴） =="
 if [ "${PURGE}" -eq 1 ]; then
     remove "${STATE_DIR}"
+    # 古い版が一時領域へ置いた記録も掃く。**いまの実行ファイルはここを知らない**ので、
+    # 聞いても返ってこない。放っておくと誰も消せない記録になる
+    if [ -e "${LEGACY_STATE_DIR}" ] && [ "${LEGACY_STATE_DIR}" != "${STATE_DIR}" ]; then
+        say "  古い版が一時領域へ置いた記録も見つかりました"
+        remove "${LEGACY_STATE_DIR}"
+    fi
 else
     if [ -d "${STATE_DIR}" ]; then
         say "  残しました: ${STATE_DIR}"
         say "  （消すと一覧と履歴が戻せません。消すなら --purge を付けてください）"
     else
         say "  ありませんでした"
+    fi
+    if [ -d "${LEGACY_STATE_DIR}" ] && [ "${LEGACY_STATE_DIR}" != "${STATE_DIR}" ]; then
+        say "  残しました（古い版が一時領域へ置いたもの）: ${LEGACY_STATE_DIR}"
     fi
 fi
 
