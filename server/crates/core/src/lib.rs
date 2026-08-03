@@ -14,6 +14,7 @@
 //! こうしているのは、統合テストからサーバの組み立てをそのまま呼べるようにするため
 //! （バイナリだけのクレートは `tests/` から参照できない）。
 
+pub mod boot;
 pub mod cli;
 pub mod config;
 pub mod local;
@@ -189,6 +190,9 @@ pub async fn serve_server(config: Config) -> anyhow::Result<()> {
     let router = server_core::auth::with_sessions(router, &auth);
 
     let listener = bind(&server_config).await?;
+    // 乗り換えの印を消す（CICD設計§11）。**サーバモードでも同じ**——PTY は持たないが、
+    // 版を切り替えられる主体であることは変わらない
+    agent_core::version::confirm_started(&config.agent().resolved_state_dir());
     tracing::info!(
         "AgentDashboard（サーバ）を起動しました: http://{}",
         listener.local_addr()?
@@ -326,6 +330,9 @@ pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::R
         .with_parser(parser)
         .with_settings(settings);
     let listener = bind(&server_config).await?;
+    // **待ち受けを確保できた時点で、乗り換えの印を消す**（CICD設計§11）。ここより後ろへ
+    // ずらすと、印を消す前に落ちる隙間が広がる
+    agent_core::version::confirm_started(&agent_config.resolved_state_dir());
     let address = listener.local_addr()?;
 
     tracing::info!("AgentDashboard を起動しました: http://{address}");

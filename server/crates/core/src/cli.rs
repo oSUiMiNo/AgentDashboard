@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use server_core::embed;
 use std::path::PathBuf;
 
-use crate::{config, config::Config, serve, serve_server};
+use crate::{boot, config, config::Config, serve, serve_server};
 
 #[derive(Parser)]
 #[command(
@@ -94,8 +94,16 @@ enum Command {
 }
 
 /// `agentdashboard` の入口。
-#[tokio::main]
-pub async fn run() -> anyhow::Result<()> {
+///
+/// # なぜ同期と非同期に割ってあるのか
+///
+/// 版の乗り換え（CICD設計§4）は同期の処理しか含まない——引数を読み、ポインタを読み、
+/// 実行ファイルを差し替えるだけ。**非同期ランタイムを立てる理由が1つも無い**うえに、
+/// 乗り換えた先が改めて自分のランタイムを立てるので、こちらで立てたものは使われずに捨てられる。
+///
+/// `#[tokio::main]` は展開後に同期の `fn` になるので、`crates/dist` の入口（各1行）から
+/// 見た形は変わらない。
+pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // フック転送だけは設定の読み込みより前に処理する。フックは利用者のプロジェクトを
@@ -111,7 +119,20 @@ pub async fn run() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let config = Config::load(cli.config.as_deref())?;
+    // **設定の失敗をここでは出さない。** 素直に `?` を付けると、設定が壊れている利用者は
+    // 乗り換え判定へ辿り着けない——新しい版が増やしたキーを書いた状態で古い版を選ぶと、
+    // 古い版は知らないキーで起動を拒み、**新しい版へ戻ることもできなくなる**
+    // （画面が出ないのでポインタも直せない）。判定を通してから失敗させる（CICD設計§4）
+    let config = Config::load(cli.config.as_deref());
+
+    // **サブコマンドが無いときだけ乗り換える。** 門（CICD設計§9）が叩く `config` /
+    // `state-dir` / `pair-token` が乗り換えると、聞いた相手と答えた相手が変わる。
+    // とくに `state-dir` は消す道が叩くので、消す場所が版に振り回される
+    if cli.command.is_none() {
+        boot::hand_over_if_selected(config.as_ref().ok());
+    }
+
+    let config = config?;
     // 設定画面からの書き戻し先（設計§7）。`--config` が無ければカレントの config.toml を
     // 指す。まだ存在しなくてよい — 書き換えたときに作る
     let config_path = cli
@@ -119,6 +140,12 @@ pub async fn run() -> anyhow::Result<()> {
         .clone()
         .unwrap_or_else(|| PathBuf::from(config::DEFAULT_FILE_NAME));
 
+    run_async(cli, config, config_path)
+}
+
+/// ここから先は今までどおり。
+#[tokio::main]
+async fn run_async(cli: Cli, config: Config, config_path: PathBuf) -> anyhow::Result<()> {
     match cli.command {
         Some(Command::Config) => {
             println!("{}", toml::to_string_pretty(&config)?);
@@ -161,6 +188,16 @@ pub async fn run() -> anyhow::Result<()> {
                         .unwrap_or_else(|_| "info".into()),
                 )
                 .init();
+            // **どの実行ファイルで動いているかを最初に出す。** 版を切り替えられるように
+            // なると「更新したのに変わらない」が起こりうるが、画面へ版が出るのは先の
+            // フェーズなので、実機で異常が出たときの切り分けはここだけが頼りになる
+            tracing::info!(
+                "実行ファイル: {} （版 {}）",
+                std::env::current_exe()
+                    .unwrap_or_else(|_| PathBuf::from("不明"))
+                    .display(),
+                env!("CARGO_PKG_VERSION")
+            );
             match cli.mode {
                 Mode::Local => serve(config, config_path).await?,
                 Mode::Server => serve_server(config).await?,

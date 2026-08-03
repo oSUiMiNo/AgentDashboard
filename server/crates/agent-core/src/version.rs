@@ -287,6 +287,46 @@ pub fn clear_attempt(state_dir: &Path) {
     let _ = std::fs::remove_file(attempt_path(state_dir));
 }
 
+/// 待ち受けまで届いたことを記録する（設計§11）。
+///
+/// **印が残っていること自体が「乗り換えの途中である」印。** 待ち受けを確保した時点で
+/// 消し、同時に結末を「成功」で置き換える。こうしておくと、前回の失敗の記録が
+/// いつまでも残って古い知らせを出し続けることがない。
+///
+/// # 乗り換えていない起動では何もしない
+///
+/// 印を消す前に「自分が乗り換えた側か」を確かめる。統合テストの多くは core を
+/// **ライブラリとして**動かすので、確かめずに消すと**開発者の実環境の印**を
+/// 消しにいく（`state_dir` を指定し忘れたテストが1本あれば足りる）。印を書くのは
+/// 乗り換える側だけなので、この印が立っていない起動は必ず無関係である。
+pub fn confirm_started(state_dir: &Path) {
+    if !already_handed_over() {
+        return;
+    }
+    let Some(attempt) = take_attempt(state_dir) else {
+        return;
+    };
+    let target = PathBuf::from(&attempt.target);
+    write_outcome(
+        state_dir,
+        &Outcome {
+            attempted: version_of_stored(&target),
+            attempted_path: attempt.target,
+            running: running_version(),
+            failed_reason: None,
+            at: now_ms(),
+        },
+    );
+}
+
+/// いま走っている版。
+///
+/// ワークスペースの版は1箇所にしか無いので、どのクレートから読んでも実行ファイルの版と
+/// 一致する。
+pub fn running_version() -> VersionId {
+    VersionId::new(env!("CARGO_PKG_VERSION"))
+}
+
 /// 結末の場所。
 pub fn outcome_path(state_dir: &Path) -> PathBuf {
     state_dir.join(VERSION_STATE)
