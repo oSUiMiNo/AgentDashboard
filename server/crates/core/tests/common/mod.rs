@@ -325,6 +325,23 @@ impl TestServer {
             ));
         }
 
+        // **状態の置き場所も同じ性質の漏れ。** 既定は利用者の本物の状態ディレクトリ
+        // （`~/.local/state/agentdashboard`）なので、指定しないと再開位置・版の保管庫・
+        // 自己修復の記録を実環境から読み書きする。**個々のテストの心がけに頼らず、
+        // ここで使い捨てへ倒す**（PJTガイドライン）。
+        //
+        // 呼び出し側が指定していればそれを尊重するのは `database_url` と同じ——
+        // 同じ置き場所を指した2つのサーバを順に立てると「再起動した」状態を作れる
+        if config.state_dir.is_none() {
+            let state_dir = std::env::temp_dir().join(format!(
+                "agentdashboard-test-state-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4().simple()
+            ));
+            std::fs::create_dir_all(&state_dir).expect("状態の置き場所を作れること");
+            config.state_dir = Some(state_dir);
+        }
+
         let config = Arc::new(config.clone());
         // 本番（`serve`）と同じく、1つの設定ファイルから両側の射影を作る
         let agent_config = Arc::new(config.agent());
