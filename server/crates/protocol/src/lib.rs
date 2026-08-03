@@ -282,6 +282,13 @@ pub struct VersionEntry {
     /// ポインタが指しているか（＝次に起こすときの版）。
     pub selected: bool,
     pub size_bytes: u64,
+    /// 選べない理由（選べるときは `None`）。
+    ///
+    /// **選べない版を選択肢から消さず、理由を添える**（CICD設計§14）。消してしまうと
+    /// 「置いたはずの版が出てこない」になり、原因まで辿れない。理由を作れるのは
+    /// サーバ側だけ——3本の版が食い違っていることは、実行ファイルに聞かないと分からない。
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// 小窓に表示するセッションの状態（設計§5 の導出結果）。
@@ -756,6 +763,7 @@ mod tests {
             running: false,
             selected: true,
             size_bytes: 29_884_416,
+            reason: None,
         };
         assert_eq!(roundtrip(&entry), entry);
 
@@ -768,6 +776,23 @@ mod tests {
             text.contains(r#""origin":"stored""#),
             "出どころは小文字: {text}"
         );
+    }
+
+    #[test]
+    fn 選べない理由も往復する() {
+        // 理由は「選択肢から消さずに添える」ためのもの（設計§14）。落ちると
+        // 画面には選べない版が理由なしで並ぶ
+        let entry = VersionEntry {
+            version: VersionId::new("0.1.0"),
+            origin: VersionOrigin::Installed,
+            path: "/home/example/.local/bin/agentdashboard".to_string(),
+            usable: false,
+            running: false,
+            selected: false,
+            size_bytes: 0,
+            reason: Some("3本の版が食い違っています".to_string()),
+        };
+        assert_eq!(roundtrip(&entry), entry);
     }
 
     #[test]
