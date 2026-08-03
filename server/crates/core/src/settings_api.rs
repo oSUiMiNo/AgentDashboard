@@ -31,7 +31,7 @@ use std::{collections::BTreeMap, sync::Arc};
 /// `GET /api/settings` の応答。
 #[derive(Debug, Serialize)]
 pub struct SettingsView {
-    /// 起動ボタンを「全承認をスキップ」の1つだけにするか
+    /// 起動時の権限モードの既定の選択を「全承認をスキップ」にするか（選択肢は減らない）
     pub always_bypass_permissions: bool,
     /// トグルを画面から変えられるか。
     ///
@@ -158,8 +158,8 @@ async fn api_server_settings(
         .unwrap_or_default();
 
     Ok(Json(SettingsView {
-        // 起動ボタンの数を決めるトグル。**PC ごとの設定**なので、1台でも
-        // 「スキップだけ出す」なら画面もそれに従う
+        // 起動時の既定のモードを決めるトグル。**PC ごとの設定**なので、1台でも
+        // 「既定はスキップ」なら画面もそれに従う
         always_bypass_permissions: capabilities
             .iter()
             .any(|capability| capability.always_bypass_permissions),
@@ -220,7 +220,7 @@ impl SettingsUpdate {
 
 /// `GET /api/settings` — 画面が読む設定（設計§7・§8）。
 ///
-/// 起動ボタンの数と切替UIの選択肢がこれで決まる。**保存先がサーバなので、別のタブで
+/// 起動時の既定のモードと切替UIの選択肢がこれで決まる。**保存先がサーバなので、別のタブで
 /// 開いても同じ値になる。**
 pub async fn api_settings(
     State(state): State<SettingsState>,
