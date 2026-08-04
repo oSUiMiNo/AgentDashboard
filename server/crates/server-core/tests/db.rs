@@ -334,6 +334,58 @@ async fn 番号は既にある行の続きから振られる() {
 }
 
 #[tokio::test]
+async fn 更新確認を切る設定はサーバ全体で持つ() {
+    // アカウント単位に持つと「片方が切ったのにもう片方の画面にボタンが出る」という
+    // 食い違いが生まれる。更新すれば全員に効くので、持ち場もサーバ全体（CICD 設計§8）
+    for backend in common::backends("update-check").await {
+        // 行が無い＝既定（見に行く）
+        assert!(
+            settings::update_check_enabled(&backend.db).await.unwrap(),
+            "[{}] 既定で見に行かないことになっている",
+            backend.name
+        );
+
+        settings::set_update_check_enabled(&backend.db, false)
+            .await
+            .unwrap();
+        assert!(
+            !settings::update_check_enabled(&backend.db).await.unwrap(),
+            "[{}] 切ったのに効いていない",
+            backend.name
+        );
+
+        // アカウント側へ同じ綴りで書いても、サーバ全体の答えは動かない
+        settings::put(
+            &backend.db,
+            db::LOCAL_ACCOUNT_ID,
+            settings::UPDATE_CHECK_ENABLED,
+            serde_json::json!(true),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !settings::update_check_enabled(&backend.db).await.unwrap(),
+            "[{}] アカウント側の行に引きずられている",
+            backend.name
+        );
+
+        // 消せば既定へ戻る
+        settings::remove(
+            &backend.db,
+            db::SERVER_SCOPE_ID,
+            settings::UPDATE_CHECK_ENABLED,
+        )
+        .await
+        .unwrap();
+        assert!(
+            settings::update_check_enabled(&backend.db).await.unwrap(),
+            "[{}] 消しても既定へ戻らない",
+            backend.name
+        );
+    }
+}
+
+#[tokio::test]
 async fn 設定はアカウントとサーバ全体で別々に持てる() {
     // 設計§3-2 は主キーを (account_id nullable, key) としているが、PostgreSQL は
     // 主キーに NULL を許さない。nil UUID をサーバ全体スコープの印にしている

@@ -20,8 +20,10 @@
 //! `wget` の代替は作らない。引数の組み立ての門（`--insecure` の類を混ぜない）が2系統に
 //! なる費用に見合わないため。`curl` が無ければ [`Unavailable`] へ落ちる。
 
+use crate::jsonfile;
 use crate::proc::{Outcome, run};
-use protocol::VersionId;
+use protocol::{Timestamp, VersionId};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -363,6 +365,93 @@ pub fn triple_from(arch: &str, os: &str, env: &str) -> Option<String> {
     }
 }
 
+/// 更新確認の記録の名前。
+pub const VERSION_NOTICE: &str = "version-notice.json";
+
+/// 見に行く間隔。
+///
+/// **「起動時に1回」だけにすると、頻度の上限が再起動の回数になる。** 開発中は1日に
+/// 何十回も起こすので、そのたびに外へ出ることになる。前回から経っていなければ見に行かない。
+pub const CHECK_INTERVAL_MS: Timestamp = 24 * 60 * 60 * 1000;
+
+/// 更新確認の記録（`<state_dir>/version-notice.json`）。
+///
+/// **2つの値を分けて持つ。** `latest` は最後に読めた最新版で、画面が読む素の値
+/// （新着かどうかは画面が「走っている版より新しいか」で決める）。`notified_version` は
+/// **押しつけの知らせを出した版**で、同じ版で二度出さないためだけに使う。
+///
+/// 1つに畳むと「繋いだ瞬間に読める状態」（設計§11）と「二度知らせない」（設計§8）が
+/// 同じ値を取り合う。別々の問題への答えなので、値も分ける。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Notice {
+    /// 押しつけの知らせを出した版。**知らせる前に書く。**
+    #[serde(default)]
+    pub notified_version: String,
+    /// 最後に読めた最新版。
+    #[serde(default)]
+    pub latest: String,
+    /// その版が試作版か。
+    #[serde(default)]
+    pub prerelease: bool,
+    /// その版に自分の機械向けの箱があるか。
+    #[serde(default)]
+    pub has_artifact: bool,
+    /// 最後に見に行った時刻。
+    #[serde(default)]
+    pub checked_at: Timestamp,
+}
+
+fn notice_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(VERSION_NOTICE)
+}
+
+/// 記録を読む。読めなければ既定（何も知らない）。
+pub fn read_notice(state_dir: &Path) -> Notice {
+    jsonfile::load_or_default(&notice_path(state_dir))
+}
+
+/// 見に行く頃合いか（純粋関数）。
+pub fn due(notice: &Notice, now: Timestamp, interval_ms: Timestamp) -> bool {
+    notice.checked_at <= 0 || now.saturating_sub(notice.checked_at) >= interval_ms
+}
+
+/// 読めた最新版を控える。**`notified_version` には触らない。**
+pub fn record_latest(state_dir: &Path, latest: &Latest, now: Timestamp) {
+    let mut notice = read_notice(state_dir);
+    notice.latest = latest.version.as_str().to_string();
+    notice.prerelease = latest.prerelease;
+    notice.has_artifact = latest.has_artifact;
+    notice.checked_at = now;
+    jsonfile::save(&notice_path(state_dir), &notice);
+}
+
+/// その版について、押しつけの知らせをまだ出していないか。
+///
+/// 判定が `!=` なのは[`crate::selfheal::model_table::needs_review`] と同じ理由で、
+/// **下がった版でも出し直す**ため（戻したことは伝わったほうがよい）。
+pub fn needs_notice(state_dir: &Path, version: &VersionId) -> bool {
+    !version.as_str().is_empty() && read_notice(state_dir).notified_version != version.as_str()
+}
+
+/// 知らせたことを控える。**知らせる前に呼ぶ**（成否によらず同じ版では二度と出さない）。
+pub fn mark_notified(state_dir: &Path, version: &VersionId) {
+    let mut notice = read_notice(state_dir);
+    notice.notified_version = version.as_str().to_string();
+    jsonfile::save(&notice_path(state_dir), &notice);
+}
+
+/// 更新確認を1回だけ回す。**見に行くだけ。**
+///
+/// 取ってくることも入れ替えることもしない。読めなかったとき（回線が無い等）は
+/// **記録に触らない**——前に読めた値を消すと、画面から「最新版」が理由もなく消える。
+pub fn check_once(state_dir: &Path, ops: &dyn VersionOps, now: Timestamp) -> anyhow::Result<Latest> {
+    let json = ops.fetch_manifest()?;
+    let latest = parse_latest(&json, target_triple().as_deref())
+        .map_err(|reason| anyhow::anyhow!("{reason}"))?;
+    record_latest(state_dir, &latest, now);
+    Ok(latest)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,6 +598,127 @@ mod tests {
         );
         // 置き場所そのものの中には落とさない（後条件の「3本だけ」に引っかかる）
         assert_eq!(path.parent(), Path::new("/state/versions/.staging-0.2.0").parent());
+    }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "agentdashboard-notice-{label}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn 同じ版では二度知らせない() {
+        let state = temp_dir("twice");
+        let version = VersionId::new("0.2.0");
+        assert!(needs_notice(&state, &version), "初めての版なのに知らせない");
+
+        // **知らせる前にマークする。** 成否によらず同じ版では二度と出さない
+        mark_notified(&state, &version);
+        assert!(!needs_notice(&state, &version));
+    }
+
+    #[test]
+    fn 版が上がったらまた知らせる() {
+        let state = temp_dir("bump");
+        mark_notified(&state, &VersionId::new("0.2.0"));
+        assert!(needs_notice(&state, &VersionId::new("0.3.0")));
+    }
+
+    #[test]
+    fn 版が読めなければ知らせない() {
+        let state = temp_dir("empty");
+        assert!(!needs_notice(&state, &VersionId::new("")));
+    }
+
+    #[test]
+    fn 最新版を控えても知らせた印は動かない() {
+        // 2つの値は別々の問題への答えなので、片方の更新でもう片方が動いてはいけない
+        let state = temp_dir("independent");
+        mark_notified(&state, &VersionId::new("0.2.0"));
+        record_latest(
+            &state,
+            &Latest {
+                version: VersionId::new("0.3.0"),
+                prerelease: false,
+                has_artifact: true,
+            },
+            1_000,
+        );
+        let notice = read_notice(&state);
+        assert_eq!(notice.notified_version, "0.2.0");
+        assert_eq!(notice.latest, "0.3.0");
+        assert!(notice.has_artifact);
+        assert_eq!(notice.checked_at, 1_000);
+    }
+
+    #[test]
+    fn 見に行く頃合いは間隔で決まる() {
+        let mut notice = Notice::default();
+        // 一度も見に行っていなければ頃合い
+        assert!(due(&notice, 1_000, CHECK_INTERVAL_MS));
+
+        notice.checked_at = 1_000;
+        assert!(!due(&notice, 1_000 + CHECK_INTERVAL_MS - 1, CHECK_INTERVAL_MS));
+        assert!(due(&notice, 1_000 + CHECK_INTERVAL_MS, CHECK_INTERVAL_MS));
+    }
+
+    /// 献立表だけを返す窓口。
+    struct FakeManifest {
+        json: Option<String>,
+    }
+
+    impl VersionOps for FakeManifest {
+        fn fetch_manifest(&self) -> anyhow::Result<String> {
+            match &self.json {
+                Some(json) => Ok(json.clone()),
+                None => anyhow::bail!("回線がありません"),
+            }
+        }
+
+        fn install(&self, _version: &VersionId, _staging: &Path) -> Outcome {
+            Outcome::failed("この窓口は取ってこない".to_string())
+        }
+    }
+
+    #[test]
+    fn 見に行けなければ記録に触らない() {
+        // オフラインで黙って何もしない。**前に読めた値を消すと、画面から
+        // 「最新版」が理由もなく消える**
+        let state = temp_dir("offline");
+        record_latest(
+            &state,
+            &Latest {
+                version: VersionId::new("0.2.0"),
+                prerelease: false,
+                has_artifact: true,
+            },
+            1_000,
+        );
+
+        let ops = FakeManifest { json: None };
+        assert!(check_once(&state, &ops, 2_000).is_err());
+
+        let notice = read_notice(&state);
+        assert_eq!(notice.latest, "0.2.0", "読めなかったのに記録が消えている");
+        assert_eq!(notice.checked_at, 1_000, "読めなかったのに時刻が進んでいる");
+    }
+
+    #[test]
+    fn 見に行けたら最新版を控える() {
+        let state = temp_dir("online");
+        let ops = FakeManifest {
+            json: Some(MANIFEST.to_string()),
+        };
+        let latest = check_once(&state, &ops, 5_000).unwrap();
+        assert_eq!(latest.version, VersionId::new("0.2.0"));
+        assert_eq!(read_notice(&state).latest, "0.2.0");
+        assert_eq!(read_notice(&state).checked_at, 5_000);
+        // **見に行っただけでは知らせた印を立てない**（知らせるのは画面の仕事）
+        assert!(read_notice(&state).notified_version.is_empty());
     }
 
     #[test]

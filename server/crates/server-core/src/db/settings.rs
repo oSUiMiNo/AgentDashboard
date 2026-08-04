@@ -36,6 +36,15 @@ pub const DEFAULT_SCROLLBACK_LINES: u64 = 1_000;
 /// LAN 開放時の共有パスワード（argon2 ハッシュ）。**サーバ全体スコープ**（設計§8-3）。
 pub const LAN_PASSWORD_HASH: &str = "lan_password_hash";
 
+/// 新しい版が出ていないか見に行くか。**サーバ全体スコープ**（CICD 設計§8）。
+///
+/// アカウント単位に持たない。更新すれば全員に効くので、片方が切ったのに
+/// **もう片方の画面にボタンが出る**という食い違いが生まれる。
+///
+/// 既定は「見に行く」。**見に行くだけ**で、取ってくることも入れ替えることもしない。
+pub const UPDATE_CHECK_ENABLED: &str = "update_check_enabled";
+pub const DEFAULT_UPDATE_CHECK_ENABLED: bool = true;
+
 /// エージェントへ配る間隔の一式（設計§4-2 の SetIntervals と同じ組）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Intervals {
@@ -143,4 +152,27 @@ pub async fn lan_password_hash(db: &DatabaseConnection) -> Result<Option<String>
     Ok(get(db, super::SERVER_SCOPE_ID, LAN_PASSWORD_HASH)
         .await?
         .and_then(|value| value.as_str().map(str::to_string)))
+}
+
+/// 新しい版を見に行ってよいか。行が無ければ既定（見に行く）。
+///
+/// **薄いラッパを1本生やす**のは [`lan_password_hash`] と同じ作法。呼ぶ側に
+/// スコープとキーの綴りを持たせない——`crates/core` は記録の道具そのものを
+/// 通常依存に持っていないので、型を書かずに呼べる形が要る。
+pub async fn update_check_enabled(db: &DatabaseConnection) -> Result<bool, DbErr> {
+    Ok(get(db, super::SERVER_SCOPE_ID, UPDATE_CHECK_ENABLED)
+        .await?
+        .and_then(|value| value.as_bool())
+        .unwrap_or(DEFAULT_UPDATE_CHECK_ENABLED))
+}
+
+/// 新しい版を見に行くかを決める。
+pub async fn set_update_check_enabled(db: &DatabaseConnection, enabled: bool) -> Result<(), DbErr> {
+    put(
+        db,
+        super::SERVER_SCOPE_ID,
+        UPDATE_CHECK_ENABLED,
+        serde_json::json!(enabled),
+    )
+    .await
 }
