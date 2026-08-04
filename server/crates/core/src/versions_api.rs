@@ -128,6 +128,21 @@ pub struct VersionsView {
     /// 出口**になる。決め打ちの既定を書くと `state_dir` を移している利用者に
     /// 存在しないパスを案内することになり、出口が塞がる。
     pub pointer_path: String,
+
+    // --- ここから下は「このダッシュボードについて」の材料（バージョン表示イシュー）。
+    //     **`supported` が偽でも埋める。** 版の切替が使えない構成（箱）でこそ、
+    //     「いま何が動いていて、いつからここに在るか」を知りたい
+    /// いま走っている版。
+    pub running: VersionId,
+    /// 走っている実行ファイルができた時刻。読めなければ `None`。
+    ///
+    /// 配布物なら**その版が作られた時刻**、ソースビルドなら**自分がビルドした時刻**。
+    pub binary_at: Option<protocol::Timestamp>,
+    /// このプロセスが起きた時刻。
+    ///
+    /// [`Self::binary_at`] と対で見る。**更新したのか、再起動しただけなのか**が
+    /// この2つの差で分かる。
+    pub started_at: protocol::Timestamp,
 }
 
 /// 取ってくる仕事の段階（設計§15）。
@@ -268,18 +283,25 @@ async fn build_view(state: &VersionsState, identity: &Identity) -> VersionsView 
         .display()
         .to_string();
     if !supported {
-        // できないことをボタンにしない。走査そのものを省く
+        // できないことをボタンにしない。走査そのものを省く。
+        //
+        // **ただし「何が動いているか」は出す。** 版の切替が使えない構成でも、
+        // 最新版の確認そのものは走っており（記録は箱の中にもある）、捨てると
+        // 「更新されているか知りたいのに、いちばん知りたい画面に何も出ない」になる
         return VersionsView {
             supported,
             editable,
             entries: Vec::new(),
             selected: None,
             outcome: None,
-            latest: None,
+            latest: latest_of(&state.state_dir),
             stranded_cards: 0,
             install: None,
             install_unavailable: None,
             pointer_path,
+            running: version::running_version(),
+            binary_at: version::binary_at(),
+            started_at: version::started_at(),
         };
     }
 
@@ -306,6 +328,9 @@ async fn build_view(state: &VersionsState, identity: &Identity) -> VersionsView 
         install: state.install.lock().expect("ロックが壊れていない").clone(),
         install_unavailable: state.ops.unavailable_reason(),
         pointer_path,
+        running: version::running_version(),
+        binary_at: version::binary_at(),
+        started_at: version::started_at(),
     }
 }
 

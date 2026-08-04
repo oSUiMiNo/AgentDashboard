@@ -111,6 +111,45 @@ async fn 使えない構成では機能ごと出さない() {
 }
 
 #[tokio::test]
+async fn 使えない構成でも_いま何が動いているかは出す() {
+    // **箱の中でこそ知りたい。** 版を切り替えられないからといって「いま何が動いていて、
+    // いつからここに在るか」まで捨てると、更新されているか確かめる手段が画面から消える
+    unsafe { std::env::set_var(VERSION_SUPPORTED_ENV, "0") };
+    let server = common::TestServer::start().await;
+
+    let view = view(&server).await;
+    assert_eq!(view["supported"], false, "前提：使えない構成であること");
+
+    assert_eq!(
+        view["running"].as_str(),
+        Some(env!("CARGO_PKG_VERSION")),
+        "いま走っている版が出ていない: {view}"
+    );
+    let binary_at = view["binary_at"]
+        .as_u64()
+        .expect("実行ファイルの時刻が出ること");
+    let started_at = view["started_at"].as_u64().expect("起動時刻が出ること");
+    assert!(binary_at > 0 && started_at > 0, "{view}");
+    assert!(
+        binary_at <= started_at,
+        "実行ファイルより先にプロセスが起きているのはおかしい: {view}"
+    );
+}
+
+#[tokio::test]
+async fn 使える構成でも同じ3つが出る() {
+    // 構成で欠けたり増えたりすると、画面が2通りの読み方を持つことになる
+    pretend_supported();
+    let server = common::TestServer::start().await;
+
+    let view = view(&server).await;
+    assert_eq!(view["supported"], true, "前提：使える構成であること");
+    assert_eq!(view["running"].as_str(), Some(env!("CARGO_PKG_VERSION")));
+    assert!(view["binary_at"].as_u64().is_some(), "{view}");
+    assert!(view["started_at"].as_u64().is_some(), "{view}");
+}
+
+#[tokio::test]
 async fn 手で戻す出口はこの機械の実際の置き場所を指す() {
     // 戻した先には版を選ぶ画面が無いので、**ここが袋小路からの唯一の出口**（設計§9）。
     // 既定を決め打ちで書くと、置き場所を移している利用者に存在しないパスを案内して

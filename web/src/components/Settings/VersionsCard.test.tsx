@@ -38,6 +38,9 @@ function show(overrides: Partial<VersionsView> = {}) {
       install_unavailable: null,
       // 既定と違う場所を入れておく。**決め打ちに戻っても気づけるようにするため**
       pointer_path: '/tmp/使い捨て/version-current',
+      running: '9.9.9',
+      binary_at: 1_700_000_000_000,
+      started_at: 1_700_000_100_000,
       ...overrides,
     },
     loading: false,

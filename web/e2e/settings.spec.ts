@@ -136,3 +136,24 @@ test('関係ないファイルを選ぶと、理由が出て何も変わらな�
   await expect(page.getByTestId('portable-outcome')).toHaveCount(0)
   await expect(sync).toHaveValue('20')
 })
+
+test('版がタイトルの近くと設定画面の両方に出る', async ({ page }) => {
+  // **「アプデされているか分かる」がこの表示の目的**（バージョン表示イシュー）。
+  // 一覧を見ているだけで版が目に入り、設定画面では「いつのものか」まで辿れること
+  await openDashboard(page)
+
+  const badge = page.getByTestId('app-version')
+  await expect(badge).toBeVisible()
+  await expect(badge).toHaveText(/^v\d+\.\d+\.\d+$/)
+
+  await page.getByTestId('settings-link').click()
+  await expect(page.getByTestId('about')).toBeVisible()
+
+  // ヘッダの版と、カードの版が食い違わないこと
+  const header = (await badge.textContent())?.trim()
+  await expect(page.getByTestId('about-running')).toHaveText(header ?? '')
+
+  // 2つの時刻が「不明」ではなく実際の日時で出ること
+  await expect(page.getByTestId('about-binary-at')).toContainText(/\d{4}\/\d{2}\/\d{2}/)
+  await expect(page.getByTestId('about-started-at')).toContainText(/\d{4}\/\d{2}\/\d{2}/)
+})

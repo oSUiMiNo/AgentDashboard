@@ -28,6 +28,7 @@ import { permissionModeInfo } from '@/lib/protocol'
 import { formatScreenInterval } from '@/lib/time'
 import { HOME } from '@/lib/routes'
 import { useSettingsStore } from '@/stores/settings'
+import { AboutCard } from '@/components/Settings/AboutCard'
 import { PortableSettingsCard } from '@/components/Settings/PortableSettingsCard'
 import { VersionsCard } from '@/components/Settings/VersionsCard'
 
@@ -134,6 +135,8 @@ export function SettingsPage() {
       {settings.lan_password.supported && <LanPasswordCard />}
 
       <PortableSettingsCard />
+
+      <AboutCard />
 
       <VersionsCard />
 

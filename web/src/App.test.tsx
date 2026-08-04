@@ -103,6 +103,30 @@ describe('App', () => {
     expect(fetch).toHaveBeenCalledWith('/api/sessions')
   })
 
+  it('版がタイトルの近くに出る', async () => {
+    // **更新したつもりで古い画面を見ている**という取り違えがいちばん時間を溶かす。
+    // 値は認証の応答が既に運んでいるので、通信は増えていない
+    useAuthStore.setState({
+      auth: { ...useAuthStore.getState().auth, authenticated: true, version: '9.9.9' },
+      loading: false,
+    })
+    render(<App />)
+
+    expect(await screen.findByTestId('app-version')).toHaveTextContent('v9.9.9')
+  })
+
+  it('版を返さないサーバでは何も出さない', async () => {
+    // 古いサーバは返さない。**空の括弧を出すより、出さないほうがよい**
+    useAuthStore.setState({
+      auth: { ...useAuthStore.getState().auth, authenticated: true, version: undefined },
+      loading: false,
+    })
+    render(<App />)
+
+    await screen.findByTestId('connection-status')
+    expect(screen.queryByTestId('app-version')).toBeNull()
+  })
+
   it('自己修復の進行が段階つきで出る', () => {
     // 「勝手に直った」を黙って起こさないための表示（設計§9）。
     // バナーは鍵の外側にある（通っていなくても、直っていることは見せる）

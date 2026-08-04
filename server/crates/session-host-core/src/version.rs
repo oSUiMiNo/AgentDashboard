@@ -341,6 +341,48 @@ pub fn running_version() -> VersionId {
     VersionId::new(env!("CARGO_PKG_VERSION"))
 }
 
+/// 走っている実行ファイルができた時刻（ファイルの更新時刻）。読めなければ `None`。
+///
+/// # なぜ「リリース日」をこれで答えるのか
+///
+/// 献立表（`dist-manifest.json`）に日付は入っていない。GitHub の API には
+/// `published_at` があるが、あれは ISO8601 なので**暦を解釈する道具**が要る——その依存は
+/// 「`transcript-parser` だけが持つ」と決めてあり（`server/Cargo.toml`）、自前で計算すると
+/// 閏年の周りで静かに間違える。**ファイルの時刻なら epoch がそのまま取れる。**
+///
+/// 配った実行ファイルなら、これは CI がその版を作った時刻になる（実測で確認）。
+/// ソースからビルドしたものなら、自分がビルドした時刻。どちらも「**この実行ファイルは
+/// いつのものか**」に答えている。
+pub fn binary_at() -> Option<Timestamp> {
+    let path = std::env::current_exe().ok()?;
+    file_time(&path)
+}
+
+/// ファイルの更新時刻を epoch ミリ秒で読む。
+fn file_time(path: &Path) -> Option<Timestamp> {
+    std::fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|elapsed| elapsed.as_millis() as Timestamp)
+}
+
+/// このプロセスが起きた時刻。
+///
+/// **一度決まったら動かない。** 起動のいちばん早いところで一度触ることで、
+/// 「プロセスの起動時刻」として確定する（`crates/core/src/cli.rs`）。触られないまま
+/// 画面から呼ばれた場合はその時刻になるが、そのときは**起動から間もない**ので実害が無い。
+///
+/// 実行ファイルの時刻（[`binary_at`]）と対にして出す。箱で動かしていると前者は
+/// 「その版が作られた時刻」、こちらは「入れ替えた時刻」になり、**更新したのか
+/// 再起動しただけなのか**が区別できる。
+pub fn started_at() -> Timestamp {
+    static STARTED_AT: std::sync::OnceLock<Timestamp> = std::sync::OnceLock::new();
+    *STARTED_AT.get_or_init(crate::session::now_ms)
+}
+
 /// 結末の場所。
 pub fn outcome_path(state_dir: &Path) -> PathBuf {
     state_dir.join(VERSION_STATE)
@@ -1643,5 +1685,31 @@ mod tests {
             "版をまたいで生き残ると、前の版が作ったパーサへ戻してしまう"
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 実行ファイルの時刻が読めて_未来ではない() {
+        // 「この実行ファイルはいつのものか」を出す材料。テストの実行ファイル自身で見る
+        let at = binary_at().expect("走っている実行ファイルの時刻は読めること");
+        assert!(at > 0, "epoch ミリ秒として意味のある値であること");
+        assert!(
+            at <= crate::session::now_ms(),
+            "実行ファイルができた時刻が未来になっている: {at}"
+        );
+    }
+
+    #[test]
+    fn 無い場所の時刻は読めなくても落ちない() {
+        // **読めないことは異常ではない。** 画面は「不明」と出すだけで、他は動く
+        assert_eq!(file_time(Path::new("/nonexistent/agentdashboard")), None);
+    }
+
+    #[test]
+    fn 起動時刻は一度決まったら動かない() {
+        // 呼ぶたびに now を返すと、画面の「いつ起きたか」が毎回いまになる
+        let first = started_at();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert_eq!(started_at(), first);
+        assert!(first > 0);
     }
 }

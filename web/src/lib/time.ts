@@ -52,3 +52,32 @@ export function formatScreenInterval(intervalMs: number): string {
   }
   return `${Math.round(seconds)}秒`
 }
+
+/**
+ * epoch ミリ秒を「いつのことか」が読める絶対時刻にする。
+ *
+ * # なぜ相対表示だけでは足りないのか
+ *
+ * 「3日前」は近い過去には効くが、**版がいつのものか**を見るには弱い。数ヶ月前の版を
+ * 動かしていると「92日前」としか出ず、どの版の時期だったかを思い出せない。
+ * 版の話では絶対時刻のほうが手掛かりになるので、こちらを主に出して相対を添える。
+ *
+ * 0 と未定義は「分からない」として扱う。**推測で埋めない**——実行ファイルの時刻は
+ * 読めないことがあり、そこで嘘の日付を出すと更新の判断を誤らせる。
+ */
+export function formatDateTime(epochMs: number | null | undefined): string | null {
+  if (epochMs === null || epochMs === undefined || epochMs <= 0) {
+    return null
+  }
+  const at = new Date(epochMs)
+  if (Number.isNaN(at.getTime())) {
+    return null
+  }
+  return new Intl.DateTimeFormat('ja-JP', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(at)
+}

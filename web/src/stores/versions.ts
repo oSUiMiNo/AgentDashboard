@@ -88,6 +88,25 @@ export interface VersionsView {
    * 決め打ちで書くと、`state_dir` を移している利用者に存在しないパスを見せる。
    */
   pointer_path: string
+
+  /**
+   * いま走っている版。**`supported` が偽でも入る。**
+   *
+   * 版を切り替えられない構成（箱）でこそ「何が動いているか」を知りたい。
+   */
+  running: string
+  /**
+   * 走っている実行ファイルができた時刻。読めなければ `null`。
+   *
+   * 配布物なら**その版が作られた時刻**、ソースビルドなら**自分がビルドした時刻**。
+   */
+  binary_at: number | null
+  /**
+   * このプロセスが起きた時刻。
+   *
+   * `binary_at` と対で見る。**更新したのか、再起動しただけなのか**が差で分かる。
+   */
+  started_at: number
 }
 
 /** 同意を求めている相手。 */
@@ -131,6 +150,10 @@ const FALLBACK: VersionsView = {
   install_unavailable: null,
   // 読めていない間は出口を名指ししない。**知らない場所を書くより、書かないほうがよい**
   pointer_path: '',
+  // 同じ理由で版も時刻も埋めない。読めていないことは「不明」として画面へ出す
+  running: '',
+  binary_at: null,
+  started_at: 0,
 }
 
 /** 取ってくる仕事の様子を見に行く間隔。 */

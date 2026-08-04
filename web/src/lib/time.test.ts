@@ -1,4 +1,4 @@
-import { formatElapsed, formatScreenInterval } from './time'
+import { formatDateTime, formatElapsed, formatScreenInterval } from './time'
 
 /**
  * 経過時間の表示（テスト計画フェーズ5「小窓」の経過時間表示）。
@@ -47,5 +47,23 @@ describe('formatScreenInterval', () => {
   it('1秒未満は小数のままにする', () => {
     // いちばん細かい選択肢。ミリ秒で出すと他の選択肢と桁が揃わない
     expect(formatScreenInterval(50)).toBe('0.05秒')
+  })
+})
+
+describe('formatDateTime', () => {
+  it('epoch ミリ秒を読める絶対時刻にする', () => {
+    // 版の話では「3日前」より、いつのことかが分かるほうが手掛かりになる
+    const text = formatDateTime(1_785_888_000_000)
+    expect(text).not.toBeNull()
+    expect(text).toContain('2026')
+  })
+
+  it('読めないものは null にする（推測で埋めない）', () => {
+    // 実行ファイルの時刻は読めないことがある。嘘の日付は更新の判断を誤らせる
+    expect(formatDateTime(null)).toBeNull()
+    expect(formatDateTime(undefined)).toBeNull()
+    expect(formatDateTime(0)).toBeNull()
+    expect(formatDateTime(-1)).toBeNull()
+    expect(formatDateTime(Number.NaN)).toBeNull()
   })
 })

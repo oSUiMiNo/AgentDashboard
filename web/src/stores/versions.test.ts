@@ -16,6 +16,9 @@ function view(overrides: Partial<VersionsView> = {}): VersionsView {
     install: null,
     install_unavailable: null,
     pointer_path: '/tmp/使い捨て/version-current',
+    running: '9.9.9',
+    binary_at: 1_700_000_000_000,
+    started_at: 1_700_000_100_000,
     ...overrides,
   }
 }
