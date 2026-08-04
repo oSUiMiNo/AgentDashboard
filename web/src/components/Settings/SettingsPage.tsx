@@ -8,8 +8,9 @@
  *
  * # 保存先はサーバ
  *
- * トグルは `config.toml` へ、間隔と LAN パスワードは DB へ書き戻す。**別のタブで
- * 開いても同じ値**になり、アプリを開き直しても残る（要件3-2・5-3）。
+ * トグルも間隔も**アカウントごとの記録**へ書く（持ち出し設計§1）。**別のタブで
+ * 開いても、別の端末で開いても同じ値**になり、アプリを開き直しても残る（要件3-2・5-3）。
+ * LAN パスワードだけはサーバ全体のもので、ローカルモード専用。
  *
  * # 意味を持たない項目は出さない
  *
@@ -63,24 +64,16 @@ export function SettingsPage() {
 
       <div className="border-border flex flex-col gap-2 rounded-xl border p-4">
         {/*
-          変えられないときは**ラベルごと薄くする**。素のチェックボックスは暗い配色だと
-          無効の淡色化がほとんど見えず、文字が明るいままだと押せる顔が残る——実際に
-          「押しても反応しない」と受け取られた。理由の一文もすぐ下へ置く。
+          かつては構成によって押せないことがあり、そのための淡色化と断りを置いていた。
+          保存先がアカウントごとの記録になって**どの構成でも押せる**ようになったので、
+          出し分けごと外してある（持ち出し設計§6）。
         */}
-        <label
-          data-testid="always-bypass-label"
-          data-editable={settings.always_bypass_editable}
-          className={`flex items-center gap-3 ${
-            settings.always_bypass_editable
-              ? ''
-              : 'text-muted-foreground cursor-not-allowed opacity-60'
-          }`}
-        >
+        <label data-testid="always-bypass-label" className="flex items-center gap-3">
           <input
             type="checkbox"
             data-testid="always-bypass-toggle"
             className="size-4 disabled:cursor-not-allowed"
-            disabled={loading || !settings.always_bypass_editable}
+            disabled={loading}
             checked={settings.always_bypass_permissions}
             onChange={(event) =>
               void update({ always_bypass_permissions: event.target.checked })
@@ -90,11 +83,6 @@ export function SettingsPage() {
             常に権限確認スキップモードで開く
           </span>
         </label>
-        {!settings.always_bypass_editable && (
-          <p data-testid="always-bypass-readonly" className="text-muted-foreground text-xs">
-            この設定は PC 側（<code>agent.toml</code>）が持っています。ここからは変えられません。
-          </p>
-        )}
         <p className="text-muted-foreground text-xs">
           オンにすると、一覧の権限モードの既定が「全承認をスキップ」になります。
           オフのときの既定は「スキップの指定は無し」です。どちらの場合も選択肢は3つのままで、

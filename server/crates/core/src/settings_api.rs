@@ -2,10 +2,17 @@
 //!
 //! # なぜここが応答の形を持つのか
 //!
-//! 中身は**両側から集まる**——`config.toml` のトグルと権限モードは PC 側、間隔と
-//! LAN パスワードは DB（サーバ側）、PC の一覧は接続（サーバ側）。どちらか片方の
+//! 中身は**両側から集まる**——受け付ける権限モードとモデルの表は PC 側、画面から
+//! 変える設定は DB（サーバ側）、PC の一覧は接続（サーバ側）。どちらか片方の
 //! crate へ置くと、もう片方を参照させることになる。両者を束ねるこの層に置くのが、
 //! 依存の向きを増やさない唯一の場所になる（§18 読み替え2 の続き）。
+//!
+//! # 権限確認スキップの既定は「記録が正、無ければ PC 側」
+//!
+//! 保存先は他の3項目と同じ DB（持ち出し設計§2）。ただし**行が無い間だけ PC 側が
+//! 持っている値を初期値として使う**（同§3）——ローカルは `config.toml`、サーバモードは
+//! 名乗り。こうしないと、既に `true` にして使っている利用者の設定が引っ越しで黙って
+//! 戻る。**両側を見られるのはこの層だけ**なので、この判断もここに置く。
 //!
 //! # 画面が起動時に読む口はここ1つ
 //!
@@ -31,14 +38,11 @@ use std::{collections::BTreeMap, sync::Arc};
 /// `GET /api/settings` の応答。
 #[derive(Debug, Serialize)]
 pub struct SettingsView {
-    /// 起動時の権限モードの既定の選択を「全承認をスキップ」にするか（選択肢は減らない）
-    pub always_bypass_permissions: bool,
-    /// トグルを画面から変えられるか。
+    /// 起動時の権限モードの既定の選択を「全承認をスキップ」にするか（選択肢は減らない）。
     ///
-    /// **セルフホストでは変えられない。** 持ち主は PC 側の `agent.toml` で、サーバから
-    /// 書き戻す口がまだ無い（アカウント単位化は §16-2 の持ち越し）。読めるが触れない
-    /// ことを画面へ伝えないと、「押しても戻る」という説明の付かない動きになる。
-    pub always_bypass_editable: bool,
+    /// **どの構成でも画面から変えられる**（持ち出し設計§6）。「変えられるか」を運ぶ欄は
+    /// 置かない——区別が無くなったので、真偽を運ぶ意味も無い。
+    pub always_bypass_permissions: bool,
     /// その CLI が受け付ける権限モード（正規値）。繋がっている PC ぶんを合併したもの
     pub available_modes: Vec<protocol::PermissionMode>,
     /// PC ごとのモデル表（設計§13-4）。キーは `agent_id`、ローカルは `"local"`
@@ -158,13 +162,16 @@ async fn api_server_settings(
         .unwrap_or_default();
 
     Ok(Json(SettingsView {
-        // 起動時の既定のモードを決めるトグル。**PC ごとの設定**なので、1台でも
-        // 「既定はスキップ」なら画面もそれに従う
-        always_bypass_permissions: capabilities
-            .iter()
-            .any(|capability| capability.always_bypass_permissions),
-        // 持ち主は PC 側の `agent.toml`。サーバから書き戻す口はまだ無い（§16-2）
-        always_bypass_editable: false,
+        // 記録が正。**まだ画面から触っていなければ、名乗った値を初期値にする**
+        // （持ち出し設計§3）。1台でも「既定はスキップ」なら画面もそれに従う
+        always_bypass_permissions: db::settings::always_bypass_or(
+            hub.db(),
+            identity.account_id,
+            capabilities
+                .iter()
+                .any(|capability| capability.always_bypass_permissions),
+        )
+        .await,
         available_modes,
         model_tables,
         agents: server_core::account::agents_of(&hub, identity.account_id).await?,
@@ -235,9 +242,13 @@ pub async fn api_settings(
         .unwrap_or_default();
 
     Ok(Json(SettingsView {
-        always_bypass_permissions: store.always_bypass_permissions(),
-        // ローカルは `config.toml` が手元にあるので書き戻せる
-        always_bypass_editable: true,
+        // 記録が正。**まだ画面から触っていなければ `config.toml` の値**（同§3）
+        always_bypass_permissions: db::settings::always_bypass_or(
+            state.auth.db(),
+            identity.account_id,
+            store.always_bypass_permissions(),
+        )
+        .await,
         available_modes: store.available_modes().to_vec(),
         model_tables: store.local_model_tables(&state.manager.aliases().all()),
         // ローカルモードに PC という単位は無い（`"local"` を1台として並べない）
@@ -284,19 +295,9 @@ pub async fn api_update_settings(
     }
 
     if let Some(value) = update.always_bypass_permissions {
-        let settings = state
-            .store
-            .as_ref()
-            .ok_or((StatusCode::NOT_FOUND, "設定を扱えません".to_string()))?;
-
-        // 書き込みはブロッキング。テストのスレッドで待つと自分の応答を自分で待つ形になるので、
-        // 専用スレッドへ逃がす（初期実装フェーズ2でテスト一式が固まった件と同じ理由）
-        let settings = Arc::clone(settings);
-        tokio::task::spawn_blocking(move || settings.set_always_bypass_permissions(value))
+        db::settings::set_always_bypass_permissions(state.auth.db(), identity.account_id, value)
             .await
-            .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?
-            // 黙って失敗すると「変えたのに戻る」という追いにくい形になる
-            .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, format!("{err:#}")))?;
+            .map_err(save_failed)?;
     }
 
     // **設定の持ち主が居なくても、DB のぶんは保存できている。** 居ないことを理由に
@@ -307,8 +308,12 @@ pub async fn api_update_settings(
             .await
             .unwrap_or_default();
         return Ok(Json(SettingsView {
-            always_bypass_permissions: false,
-            always_bypass_editable: false,
+            always_bypass_permissions: db::settings::always_bypass_or(
+                state.auth.db(),
+                identity.account_id,
+                false,
+            )
+            .await,
             available_modes: Vec::new(),
             model_tables: BTreeMap::new(),
             agents: server_core::account::no_agents(),
@@ -319,22 +324,18 @@ pub async fn api_update_settings(
     api_settings(State(state), Extension(identity)).await
 }
 
-/// サーバモードの `PUT /api/settings`（間隔だけを受ける）。
+/// サーバモードの `PUT /api/settings`（LAN パスワード以外を受ける）。
 ///
-/// トグルの持ち主は PC 側の `agent.toml`（§13-2）で、LAN パスワードはローカル専用
-/// （§8-3）。**受けられないものは受けたふりをしない**——保存されないのに 200 を返すと、
-/// 画面には反映されたのに次の再読み込みで戻る。
+/// LAN パスワードはローカル専用（§8-3）。**受けられないものは受けたふりをしない**
+/// ——保存されないのに 200 を返すと、画面には反映されたのに次の再読み込みで戻る。
+///
+/// **トグルはこちらでも受ける**（持ち出し設計§6）。保存先が記録になったので、
+/// ローカルと同じ道で書ける。
 async fn api_server_update_settings(
     State(hub): State<Arc<server_core::gateway::AgentHub>>,
     Extension(identity): Extension<Identity>,
     Json(update): Json<SettingsUpdate>,
 ) -> Result<Json<SettingsView>, (StatusCode, String)> {
-    if update.always_bypass_permissions.is_some() {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "このトグルは PC 側の設定です（agent.toml）".to_string(),
-        ));
-    }
     if update.lan_password.is_some() {
         return Err((
             StatusCode::FORBIDDEN,
@@ -359,7 +360,26 @@ async fn api_server_update_settings(
             })?;
     }
 
+    if let Some(value) = update.always_bypass_permissions {
+        db::settings::set_always_bypass_permissions(hub.db(), identity.account_id, value)
+            .await
+            .map_err(save_failed)?;
+    }
+
     api_server_settings(State(hub), Extension(identity)).await
+}
+
+/// 保存に失敗したときの返し方。
+///
+/// **黙って失敗すると「変えたのに戻る」**という追いにくい形になるので、必ず断りを返す。
+/// 記録の道具の型を書かずに済ませるため、表示できるものなら何でも受ける
+/// （`crates/core` は sea-orm を通常依存に持っていない）。
+fn save_failed<E: std::fmt::Display>(err: E) -> (StatusCode, String) {
+    tracing::error!("設定を保存できません: {err}");
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "設定を保存できません".to_string(),
+    )
 }
 
 async fn lan_password_view(auth: &Arc<AuthContext>, identity: &Identity) -> LanPasswordView {

@@ -36,10 +36,6 @@ uuid = { version = "1", features = ["v4", "serde"] }
 anyhow = "1"
 thiserror = "2"
 toml = "0.9"
-# 設定の書き戻し用。`toml::to_string` で構造体から書き直すとファイル中のコメントが
-# 全部消える。config.toml.example は説明コメントが本体と言っていいほど厚く、利用者が
-# それをコピーして使う前提なので、書式とコメントを保ったまま1キーだけ触れる必要がある。
-toml_edit = "0.25"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 # axum 0.8 系。WebSocket の Message が Bytes ペイロードを持つ世代であることが

@@ -21,7 +21,6 @@ uuid.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 toml.workspace = true
-toml_edit.workspace = true
 tokio.workspace = true
 # フックの受信口（`POST /hook/...` と `POST /model/...`）を出すために使う。
 # ブラウザ向けの WebSocket は server-core の担当で、こちらには入れない。

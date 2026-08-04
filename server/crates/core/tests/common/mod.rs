@@ -244,7 +244,8 @@ impl TestServer {
 
     /// 設定の書き換え（`/api/settings`）を確かめるために、設定の持ち主も立てる。
     ///
-    /// 書き戻し先はテストが渡す一時ファイル。**利用者の config.toml は絶対に触らない**。
+    /// 渡す一時ファイルは**書き戻し先ではない**（保存先は記録。持ち出し設計§6）。
+    /// テスト側が「触られていないこと」を確かめるために持っている。
     pub async fn start_with_settings(config: Config, settings_path: PathBuf) -> Self {
         Self::build_with(
             config,
@@ -431,11 +432,13 @@ impl TestServer {
             None
         };
 
-        if let Some(path) = settings_path {
+        // **設定画面を立てるかどうかの合図**として使う。書き戻し先ではない
+        // （保存先は記録。持ち出し設計§6）——渡した path はテスト側が
+        // 「触られていないこと」を確かめるために持っている
+        if settings_path.is_some() {
             // 本番と同じく `--help` からモードを読む（擬似 claude も choices を出す）
             let modes = agent_core::session::permission::supported_modes(manager.program());
             server = server.with_settings(Arc::new(agent_core::settings::SettingsStore::new(
-                path,
                 &agent_config,
                 modes,
                 // 擬似 claude は対応表を持たない。空で通す

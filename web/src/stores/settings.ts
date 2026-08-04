@@ -60,15 +60,13 @@ export interface LanPassword {
 
 /** `GET /api/settings` の応答。 */
 export interface Settings {
-  /** 起動時の権限モードの**既定の選択**を「全承認をスキップ」にするか（選択肢は減らない） */
-  always_bypass_permissions: boolean
   /**
-   * トグルを画面から変えられるか。
+   * 起動時の権限モードの**既定の選択**を「全承認をスキップ」にするか（選択肢は減らない）。
    *
-   * セルフホストでは false。持ち主は PC 側の `agent.toml` で、サーバから書き戻す口が
-   * まだ無い。触れないことを画面に出さないと「押しても戻る」ように見える。
+   * **どの構成でも画面から変えられる**（持ち出し設計§6）。保存先はアカウントごとの
+   * 記録なので、別の端末で開いても同じ値になる。
    */
-  always_bypass_editable: boolean
+  always_bypass_permissions: boolean
   /** その CLI が受け付けるモード（正規値）。繋がっている PC ぶんを合併したもの */
   available_modes: PermissionMode[]
   /**
@@ -120,7 +118,6 @@ interface SettingsState {
  */
 const FALLBACK: Settings = {
   always_bypass_permissions: false,
-  always_bypass_editable: false,
   available_modes: PERMISSION_MODES.map((mode) => mode.value),
   // 実測が無い状態が正しい初期値。推測で埋めると、選択肢に嘘の版番号が出る
   model_tables: {},

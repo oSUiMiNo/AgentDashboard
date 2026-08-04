@@ -266,17 +266,27 @@ async fn 全承認スキップの確認に自動で答える() {
     );
 }
 
-/// 設定は読めて、書き換えるとファイルへ残り、その場で反映されること（設計§7）。
-#[tokio::test]
-async fn 設定は読み書きできてファイルに残る() {
+/// 設定ファイルを1つ用意して、その置き場所を返す。
+fn settings_file(label: &str) -> (PathBuf, PathBuf) {
     let dir = std::env::temp_dir().join(format!(
-        "agentdashboard-settings-api-{}-{}",
+        "agentdashboard-settings-api-{label}-{}-{}",
         std::process::id(),
         uuid::Uuid::new_v4().simple()
     ));
     std::fs::create_dir_all(&dir).expect("置き場所を作れること");
-    let path: PathBuf = dir.join("config.toml");
+    let path = dir.join("config.toml");
     std::fs::write(&path, "# 利用者が書いたコメント\nport = 8787\n").expect("書き出せること");
+    (dir, path)
+}
+
+/// 設定は読めて、書き換えるとその場で反映され、**設定ファイルは1バイトも動かない**
+/// こと（持ち出し設計§3・§6）。
+///
+/// 保存先が記録になったので、ここでファイルが変わるなら書き戻しが残っている。
+#[tokio::test]
+async fn 設定は読み書きできて設定ファイルは変わらない() {
+    let (dir, path) = settings_file("roundtrip");
+    let before = std::fs::read_to_string(&path).expect("読めること");
 
     let server = common::TestServer::start_with_settings(Config::default(), path.clone()).await;
 
@@ -288,6 +298,11 @@ async fn 設定は読み書きできてファイルに残る() {
     );
     // `--help` から読んだモードの一覧が届くこと（擬似 claude も choices を出す）
     assert!(body.contains("bypassPermissions"), "{body}");
+    // 「変えられるか」を運ぶ欄は無くなった（どの構成でも変えられる）
+    assert!(
+        !body.contains("always_bypass_editable"),
+        "出し分けの欄は残ってはいけない: {body}"
+    );
 
     let (status, body) = server
         .put("/api/settings", r#"{"always_bypass_permissions":true}"#)
@@ -305,15 +320,69 @@ async fn 設定は読み書きできてファイルに残る() {
         "{body}"
     );
 
-    // ファイルにも残り、利用者が書いたコメントが消えないこと
-    let written = std::fs::read_to_string(&path).expect("読み直せること");
-    assert!(written.contains("# 利用者が書いたコメント"), "{written}");
-    assert!(
-        written.contains("always_bypass_permissions = true"),
-        "{written}"
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("読み直せること"),
+        before,
+        "設定ファイルは触られてはいけない（保存先は記録）"
     );
-    assert!(written.contains("port = 8787"), "{written}");
 
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 記録に行が無い間だけ設定ファイルの値を初期値にすること（持ち出し設計§3）。
+///
+/// **引っ越しで一番危ないところ。** ここが `false` 固定になると、既に
+/// `config.toml` で有効にして使っている利用者の設定が黙って戻る。
+#[tokio::test]
+async fn 記録に行が無い間は設定ファイルの値が初期値になる() {
+    // ── 設定ファイルが true 側 ────────────────────────────────
+    let (dir, path) = settings_file("initial-true");
+    let config = Config {
+        always_bypass_permissions: true,
+        ..Config::default()
+    };
+    let server = common::TestServer::start_with_settings(config, path.clone()).await;
+
+    // 行が無い × PC 側が true → true
+    let (_, body) = server.get("/api/settings").await;
+    assert!(
+        body.contains("\"always_bypass_permissions\":true"),
+        "設定ファイルの値が初期値になること: {body}"
+    );
+
+    // 行 false × PC 側が true → false（画面で選んだほうが勝つ）
+    let (status, _) = server
+        .put("/api/settings", r#"{"always_bypass_permissions":false}"#)
+        .await;
+    assert_eq!(status, 200);
+    let (_, body) = server.get("/api/settings").await;
+    assert!(
+        body.contains("\"always_bypass_permissions\":false"),
+        "記録に行ができたら、そちらが正になること: {body}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+
+    // ── 設定ファイルが false 側 ───────────────────────────────
+    let (dir, path) = settings_file("initial-false");
+    let server = common::TestServer::start_with_settings(Config::default(), path).await;
+
+    // 行が無い × PC 側が false → false
+    let (_, body) = server.get("/api/settings").await;
+    assert!(
+        body.contains("\"always_bypass_permissions\":false"),
+        "{body}"
+    );
+
+    // 行 true × PC 側が false → true
+    let (status, _) = server
+        .put("/api/settings", r#"{"always_bypass_permissions":true}"#)
+        .await;
+    assert_eq!(status, 200);
+    let (_, body) = server.get("/api/settings").await;
+    assert!(
+        body.contains("\"always_bypass_permissions\":true"),
+        "{body}"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 

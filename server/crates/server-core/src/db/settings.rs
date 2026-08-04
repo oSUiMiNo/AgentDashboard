@@ -33,6 +33,17 @@ pub const DEFAULT_SCREEN_INTERVAL_MS: u64 = 20_000;
 pub const SCROLLBACK_LINES: &str = "scrollback_lines";
 pub const DEFAULT_SCROLLBACK_LINES: u64 = 1_000;
 
+/// 起動時の権限モードの「既定の選択」を「全承認をスキップ」にするか。
+///
+/// **アカウントスコープ**。LAN パスワードや更新確認と違い、サーバ全体で1つにしない——
+/// 「起動フォームの既定をどちらにするか」は完全に利用体験の話で、他人に影響しない。
+///
+/// **行が無いことに意味がある**（持ち出し設計§3）。まだ画面から触っていない間は
+/// PC 側が持っている値（`config.toml` ／ 名乗り）を初期値として使う。ここに行ができた
+/// 時点で、以後はこちらが正になる。
+pub const ALWAYS_BYPASS_PERMISSIONS: &str = "always_bypass_permissions";
+pub const DEFAULT_ALWAYS_BYPASS_PERMISSIONS: bool = false;
+
 /// LAN 開放時の共有パスワード（argon2 ハッシュ）。**サーバ全体スコープ**（設計§8-3）。
 pub const LAN_PASSWORD_HASH: &str = "lan_password_hash";
 
@@ -145,6 +156,53 @@ pub async fn put_intervals(
         put(db, account, key, serde_json::json!(value)).await?;
     }
     Ok(())
+}
+
+/// 権限確認スキップの既定。**選んでいなければ `None`**。
+///
+/// 既定で埋めて返さないのは、**「まだ選んでいない」と「オフを選んだ」を呼ぶ側が
+/// 区別する必要がある**ため（持ち出し設計§3）。前者のときだけ PC 側の値を見る。
+/// この判断ができるのは両側を見られる層（`crates/core`）だけなので、ここは
+/// 生の有無をそのまま返す。
+pub async fn always_bypass_permissions(
+    db: &DatabaseConnection,
+    account: Uuid,
+) -> Result<Option<bool>, DbErr> {
+    Ok(get(db, account, ALWAYS_BYPASS_PERMISSIONS)
+        .await?
+        .and_then(|value| value.as_bool()))
+}
+
+/// 権限確認スキップの既定を、行が無ければ `fallback` で埋めて返す。
+///
+/// **薄いラッパを1本生やす**のは [`lan_password_hash`] と同じ作法。`crates/core` は
+/// 記録の道具そのものを通常依存に持っていないので、**型を書かずに呼べる形**が要る。
+///
+/// 読めなかったときも `fallback` を返す。記録が読めない事故と「まだ選んでいない」で
+/// 落とし先が同じなので分ける意味が無く、ここで失敗を返すと設定画面ごと開かなくなる。
+pub async fn always_bypass_or(db: &DatabaseConnection, account: Uuid, fallback: bool) -> bool {
+    match always_bypass_permissions(db, account).await {
+        Ok(value) => value.unwrap_or(fallback),
+        Err(err) => {
+            tracing::warn!("権限確認スキップの既定を読めません: {err}");
+            fallback
+        }
+    }
+}
+
+/// 権限確認スキップの既定を決める。**ここで行ができ、以後は記録が正になる。**
+pub async fn set_always_bypass_permissions(
+    db: &DatabaseConnection,
+    account: Uuid,
+    value: bool,
+) -> Result<(), DbErr> {
+    put(
+        db,
+        account,
+        ALWAYS_BYPASS_PERMISSIONS,
+        serde_json::json!(value),
+    )
+    .await
 }
 
 /// LAN 開放の共有パスワード（ハッシュ）。設定されていなければ `None`。

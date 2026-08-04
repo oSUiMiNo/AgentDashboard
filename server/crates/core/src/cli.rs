@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use server_core::embed;
 use std::path::PathBuf;
 
-use crate::{boot, config, config::Config, serve, serve_server};
+use crate::{boot, config::Config, serve, serve_server};
 
 /// `migrations` の出力の先頭に置く目印（CICD設計§9）。
 ///
@@ -161,19 +161,12 @@ pub fn run() -> anyhow::Result<()> {
     }
 
     let config = config?;
-    // 設定画面からの書き戻し先（設計§7）。`--config` が無ければカレントの config.toml を
-    // 指す。まだ存在しなくてよい — 書き換えたときに作る
-    let config_path = cli
-        .config
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(config::DEFAULT_FILE_NAME));
-
-    run_async(cli, config, config_path)
+    run_async(cli, config)
 }
 
 /// ここから先は今までどおり。
 #[tokio::main]
-async fn run_async(cli: Cli, config: Config, config_path: PathBuf) -> anyhow::Result<()> {
+async fn run_async(cli: Cli, config: Config) -> anyhow::Result<()> {
     match cli.command {
         Some(Command::Config) => {
             println!("{}", toml::to_string_pretty(&config)?);
@@ -228,10 +221,10 @@ async fn run_async(cli: Cli, config: Config, config_path: PathBuf) -> anyhow::Re
                     .display(),
                 env!("CARGO_PKG_VERSION")
             );
-            // **書き戻し先（`config_path`）と、門が行き先へ渡す `--config` は別物**
-            // （CICD設計§9）。あちらは常に値を持つが、こちらは受け取ったときだけ渡す
+            // 渡すのは**門が行き先へ渡す `--config`**（CICD設計§9）。受け取ったときだけ渡す。
+            // 設定画面からの書き戻し先はもう無い——保存先は記録（持ち出し設計§6）
             match cli.mode {
-                Mode::Local => serve(config, config_path, cli.config).await?,
+                Mode::Local => serve(config, cli.config).await?,
                 Mode::Server => serve_server(config, cli.config).await?,
             }
         }

@@ -383,11 +383,7 @@ async fn serve_router(listener: tokio::net::TcpListener, router: Router) -> anyh
 }
 
 /// 設定からサーバ一式を組み立てて起動する（ローカルモード）。
-pub async fn serve(
-    config: Config,
-    config_path: std::path::PathBuf,
-    config_arg: Option<std::path::PathBuf>,
-) -> anyhow::Result<()> {
+pub async fn serve(config: Config, config_arg: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     // 1つのファイルから、エージェント側とサーバ側の2つへ射影する（セルフホスト化設計§13-2）。
     // 分けておくと、フェーズ3 で両者が別プロセスになったときに、この行より下は
     // ほとんど動かさずに済む
@@ -451,7 +447,6 @@ pub async fn serve(
             .join(", ")
     );
     let settings = Arc::new(settings::SettingsStore::with_version(
-        config_path,
         &agent_config,
         available_modes,
         catalog.models().to_vec(),
