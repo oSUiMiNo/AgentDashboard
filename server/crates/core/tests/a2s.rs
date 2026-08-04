@@ -397,8 +397,21 @@ impl A2s {
         );
         manager.attach_parser(parser.handle());
         link.attach(Arc::clone(&manager), offsets);
-        // パーサの立ち上がりと最初の接続を待つ
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // **最初の接続は、時間ではなく繋がったことで待つ。**
+        //
+        // 固定の待ち時間だと、負荷が高いとき（`make ci` は48個のテストバイナリを同時に
+        // 走らせる）に繋がる前を抜ける。そこから先の壊れ方は2通りあり、どちらも実際に
+        // 起きた——「PC が1台も居ないので `target: None` の指示が断られる」か、遅れて
+        // 繋がった拍子に**溜めていたぶんが一気に届いて**「長い間隔にしたのにすぐ来た」
+        // と見えるか。**再実行で通るので、直さないと本物の壊れ方を見落とす側へ倒れる**
+        let deadline = tokio::time::Instant::now() + TIMEOUT;
+        while hub.online_of(account_id).await.is_empty() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{TIMEOUT:?} 以内に PC が繋がりませんでした"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
 
         Self {
             dir,
