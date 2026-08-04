@@ -37,7 +37,7 @@
 <p class="lead">
   AgentDashboard に関係して、この機械や外で<strong>起動しっぱなしになっているもの</strong>の一覧。
   「どの URL がどれを指しているか」を取り違えると原因追跡が丸ごと空振りするので、そこを中心に書いてある。
-  <br>最終更新：2026-08-04（3台とも 0.1.3）
+  <br>最終更新：2026-08-05（3台とも 0.1.3 を名乗るが、<strong>手元の2台と AWS は中身が違う</strong>）
 </p>
 
 <h2>先に用語</h2>
@@ -112,6 +112,15 @@
   実際にこれを取り違えて、キャッシュを疑って強制リロードを3通り試す、という遠回りをした。
 </div>
 
+<div class="panel warn">
+  <strong>版番号が同じでも、中身は同じとは限らない。</strong>
+  手元の2台は<strong>ソースビルド<span class="mark">▽</span></strong>なので、版を上げなくても
+  <code>git pull</code> と <code>make build</code> のたびに中身が変わる。
+  一方 AWS は<strong>配った箱</strong>なので、<strong>リリースを出すまで何も変わらない</strong>。<br>
+  いまは3台とも <code>0.1.3</code> を名乗るが、<strong>設定の持ち出しが入っているのは手元の2台だけ</strong>。
+  画面に出る版だけを見て「同じものが動いている」と判断しないこと。
+</div>
+
 <h2>一覧</h2>
 <div class="scroll">
 <table>
@@ -119,13 +128,13 @@
   <tr>
     <td>実機</td>
     <td><code>127.0.0.1:8787</code></td>
-    <td><span class="tag t-ok">0.1.3</span></td>
+    <td><span class="tag t-ok">0.1.3</span><br><small>ソースビルド<span class="mark">▽</span>・設定の持ち出し入り</small></td>
     <td>ローカルモード<span class="mark">▽</span>。<code>~/AgentDashboard</code> で <code>make build</code> したものを引数なしで起動。ログは <code>~/agentdashboard-run.log</code></td>
   </tr>
   <tr>
     <td>trial</td>
     <td><code>127.0.0.1:8788</code></td>
-    <td><span class="tag t-ok">0.1.3</span></td>
+    <td><span class="tag t-ok">0.1.3</span><br><small>実機と同じ実行ファイル</small></td>
     <td>サーバモード<span class="mark">▽</span>。<code>--config ~/agentdashboard-trial/server.toml --mode server</code>、作業ディレクトリは <code>~/agentdashboard-trial</code></td>
   </tr>
   <tr>
@@ -137,7 +146,7 @@
   <tr>
     <td>AWS EC2</td>
     <td><code>flying-playback-not-lang.trycloudflare.com</code></td>
-    <td><span class="tag t-ok">0.1.3</span></td>
+    <td><span class="tag t-old">0.1.3</span><br><small>配った箱・<strong>設定の持ち出しは入っていない</strong></small></td>
     <td><strong>docker compose</strong>（道②）。<code>~/compose.yml</code> の <code>image:</code> で版を決める。terraform は <code>~/Dev/Test_AgentDashboard/</code>、SSH 鍵は同じ場所の <code>ssh_key.pem</code>、IP は <code>43.207.237.211</code></td>
   </tr>
 </table>
