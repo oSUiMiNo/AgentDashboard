@@ -660,6 +660,91 @@ pub fn snapshot(state_dir: &Path, source: &Path) -> anyhow::Result<Option<Versio
     Ok(Some(version))
 }
 
+/// 置いた先に3本以外が残っていないか。
+///
+/// 配布インストーラは**置き場所の中に一時フォルダを作り、その片付けは失敗を無視する**
+/// 作りになっている（実測）。途中で死ぬと残骸が入ったまま公開されてしまい、画面へ出す
+/// 使用量も嘘になる。[`versions_agree`] は3本の在・不在しか見ないので、ここで数える。
+fn only_binaries(dir: &Path) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir).map_err(|error| format!("置き場所を読めません: {error}"))?;
+    let mut extra: Vec<String> = entries
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| !BINARIES.contains(&name.as_str()))
+        .collect();
+    if extra.is_empty() {
+        return Ok(());
+    }
+    extra.sort();
+    Err(format!("3本のほかに残っています（{}）", extra.join(" / ")))
+}
+
+/// 取ってきて保管庫へ置く（設計§7）。
+///
+/// **後条件は窓口の向こうへ置かない。** 差し替えたテストでも検査が残るようにするためで、
+/// 窓口がやるのは「取ってきて `staging` へ展開する」ところまで。数えてから公開する。
+///
+/// 見るのは3つ。**3本だけであること**（残骸を公開しない）、**3本が同じ版を名乗ること**
+/// （パーサだけ食い違うと落としてもいないのに構造化ビューが壊れる）、そして**頼んだ版と
+/// 中身が一致すること**（名前が嘘をつく行を選ばせると「0.2.0 を選んだのに 0.1.1 が動く」
+/// になる）。
+///
+/// **ポインタは書かない。** [`snapshot`] と同じ約束で、取ってきただけで走る実行ファイルが
+/// 変わるのは要件が名指しで恐れている「勝手に更新される」そのものである。
+///
+/// 錠は取らない。[`remove_version`] と同じく**口の側が取る**——操作の直列化は口の仕事で、
+/// ここへ持たせると口が2通りの錠の掛け方を持つことになる。
+pub fn install_version(
+    state_dir: &Path,
+    ops: &dyn crate::version_ops::VersionOps,
+    version: &VersionId,
+) -> Result<VersionId, String> {
+    // 既にある版は取り直さない（[`snapshot`] と揃える）。取り直すには先に消す——
+    // 上書きの道を作ると「走っている版を置き換える」道が生まれる
+    if stored_version_dir(state_dir, version).is_some() {
+        return Err(format!(
+            "すでに保管庫にあります: {version}。取り直すなら先に消してください"
+        ));
+    }
+
+    let versions = versions_dir(state_dir);
+    std::fs::create_dir_all(&versions).map_err(|error| format!("保管庫を作れません: {error}"))?;
+    let staging = versions.join(format!("{STAGING_PREFIX}{version}"));
+    let _ = std::fs::remove_dir_all(&staging);
+
+    let outcome = ops.install(version, &staging);
+    if !outcome.success {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(format!("取ってこられません: {}", outcome.output));
+    }
+
+    let placed = only_binaries(&staging)
+        .and_then(|()| versions_agree(&staging))
+        .and_then(|placed| {
+            if &placed == version {
+                Ok(placed)
+            } else {
+                Err(format!(
+                    "頼んだ版と中身が違います（頼んだ {version} / 入っていた {placed}）"
+                ))
+            }
+        });
+    let placed = match placed {
+        Ok(placed) => placed,
+        Err(reason) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(reason);
+        }
+    };
+
+    // 揃えてからフォルダごと rename する（[`snapshot`] と同じ理由）
+    if let Err(error) = std::fs::rename(&staging, versions.join(version.as_str())) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(format!("保管庫へ移せません: {error}"));
+    }
+    Ok(placed)
+}
+
 /// 保管庫のその版のフォルダ。無ければ `None`。
 ///
 /// 「在るかどうか」と「消せるかどうか」を分けてあるのは、**口が断り方を言い分けられる
@@ -1271,6 +1356,129 @@ mod tests {
             use std::os::unix::fs::PermissionsExt as _;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
+    }
+
+    /// 取ってきたことにして、頼まれた場所へ一式を置く偽の窓口。
+    ///
+    /// **後条件は窓口の向こうに無い**ので、差し替えてもこちらの検査は全部通る。
+    struct FakeOps {
+        /// 実際に置く版。頼まれた版と違えて、中身が食い違う一式を作れる
+        places: Option<String>,
+        /// 余計な残骸も置くか（配布インストーラが作る一時フォルダを模す）
+        litter: bool,
+        /// 取ってくること自体に失敗するか
+        fails: bool,
+    }
+
+    impl FakeOps {
+        fn new() -> Self {
+            Self {
+                places: None,
+                litter: false,
+                fails: false,
+            }
+        }
+    }
+
+    impl crate::version_ops::VersionOps for FakeOps {
+        fn fetch_manifest(&self) -> anyhow::Result<String> {
+            anyhow::bail!("この窓口は献立表を持たない")
+        }
+
+        fn install(&self, version: &VersionId, staging: &Path) -> crate::proc::Outcome {
+            if self.fails {
+                return crate::proc::Outcome::failed("取ってこられません".to_string());
+            }
+            let placed = self
+                .places
+                .clone()
+                .unwrap_or_else(|| version.as_str().to_string());
+            write_fake_install(staging, &placed);
+            if self.litter {
+                std::fs::create_dir_all(staging.join("tmp.XXXXXXXXXX")).unwrap();
+            }
+            crate::proc::Outcome {
+                success: true,
+                output: String::new(),
+            }
+        }
+    }
+
+    #[test]
+    fn 取ってきた版が保管庫に並ぶ() {
+        let state = temp_dir("install-ok");
+        let placed = install_version(&state, &FakeOps::new(), &VersionId::new("0.2.0")).unwrap();
+        assert_eq!(placed, VersionId::new("0.2.0"));
+        assert_eq!(
+            versions_agree(&versions_dir(&state).join("0.2.0")),
+            Ok(VersionId::new("0.2.0"))
+        );
+        // 置いている途中の印は残っていない
+        assert!(!versions_dir(&state).join(".staging-0.2.0").exists());
+    }
+
+    #[test]
+    fn 取ってきてもポインタは書かれない() {
+        // **要件が名指しで恐れている「勝手に更新される」の最後の砦。**
+        // 取ってきただけで走る実行ファイルが変わってはいけない（snapshot と同じ約束）
+        let state = temp_dir("install-no-pointer");
+        install_version(&state, &FakeOps::new(), &VersionId::new("0.2.0")).unwrap();
+        assert!(
+            read_pointer(&state).is_none(),
+            "取ってきただけでポインタが書かれている"
+        );
+    }
+
+    #[test]
+    fn 三本のほかに残っていたら片付けて断る() {
+        // 配布インストーラは置き場所の中に一時フォルダを作り、その片付けは失敗を無視する
+        let state = temp_dir("install-litter");
+        let ops = FakeOps {
+            litter: true,
+            ..FakeOps::new()
+        };
+        let error = install_version(&state, &ops, &VersionId::new("0.2.0")).unwrap_err();
+        assert!(error.contains("3本のほかに残っています"), "{error}");
+        assert!(error.contains("tmp.XXXXXXXXXX"), "残骸を名指ししていない: {error}");
+        assert!(!versions_dir(&state).join("0.2.0").exists());
+        assert!(!versions_dir(&state).join(".staging-0.2.0").exists());
+    }
+
+    #[test]
+    fn 頼んだ版と中身が違えば片付けて断る() {
+        let state = temp_dir("install-mismatch");
+        let ops = FakeOps {
+            places: Some("0.1.1".to_string()),
+            ..FakeOps::new()
+        };
+        let error = install_version(&state, &ops, &VersionId::new("0.2.0")).unwrap_err();
+        assert!(error.contains("頼んだ版と中身が違います"), "{error}");
+        assert!(!versions_dir(&state).join("0.2.0").exists());
+        assert!(!versions_dir(&state).join(".staging-0.2.0").exists());
+    }
+
+    #[test]
+    fn 取ってこられなければ片付けて断る() {
+        let state = temp_dir("install-fail");
+        let ops = FakeOps {
+            fails: true,
+            ..FakeOps::new()
+        };
+        let error = install_version(&state, &ops, &VersionId::new("0.2.0")).unwrap_err();
+        assert!(error.contains("取ってこられません"), "{error}");
+        assert!(
+            !versions_dir(&state).join(".staging-0.2.0").exists(),
+            "置いている途中の残骸が残っている"
+        );
+    }
+
+    #[test]
+    fn すでにある版は取り直さない() {
+        let state = temp_dir("install-twice");
+        install_version(&state, &FakeOps::new(), &VersionId::new("0.2.0")).unwrap();
+        let error = install_version(&state, &FakeOps::new(), &VersionId::new("0.2.0")).unwrap_err();
+        assert!(error.contains("すでに保管庫にあります"), "{error}");
+        assert!(error.contains("先に消して"), "次の一手を書いていない: {error}");
     }
 
     #[test]
