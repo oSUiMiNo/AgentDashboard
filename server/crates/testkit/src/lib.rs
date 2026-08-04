@@ -50,14 +50,14 @@ pub fn binary_path(name: &str) -> PathBuf {
     binary
 }
 
-/// 乗り換え済みの印（`agent_core::version::VERSION_HANDOVER_ENV` と同じ綴り）。
+/// 乗り換え済みの印（`session_host_core::version::VERSION_HANDOVER_ENV` と同じ綴り）。
 ///
-/// **testkit から agent-core は参照しない。** あちらが testkit を dev 依存しているので、
-/// 向きを増やしたくない。綴りが食い違わないことは agent-core 側のテストが見張る
+/// **testkit から session-host-core は参照しない。** あちらが testkit を dev 依存しているので、
+/// 向きを増やしたくない。綴りが食い違わないことは session-host-core 側のテストが見張る
 /// （片方を直すともう片方が落ちる）。
 pub const VERSION_HANDOVER_ENV: &str = "AGENTDASHBOARD_VERSION_HANDED_OVER";
 
-/// 版の切替が使える構成かの上書き（`agent_core::version::VERSION_SUPPORTED_ENV` と同じ綴り）。
+/// 版の切替が使える構成かの上書き（`session_host_core::version::VERSION_SUPPORTED_ENV` と同じ綴り）。
 pub const VERSION_SUPPORTED_ENV: &str = "AGENTDASHBOARD_VERSION_SUPPORTED";
 
 /// ビルド済みの実行ファイルを起こす命令を、**版まわりを無害にした状態で**作る。

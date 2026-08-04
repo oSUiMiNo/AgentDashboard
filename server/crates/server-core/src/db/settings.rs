@@ -192,7 +192,7 @@ pub async fn intervals(db: &DatabaseConnection, account: Uuid) -> Result<Interva
 /// 間隔を3つまとめて書く。
 ///
 /// 1つずつ書く形を呼び出し側に持たせると、**書く順序とキー名がそこへ散る**。
-/// 配る相手（PC）が居る場合は [`crate::gateway::AgentHub::set_intervals`] を通ること
+/// 配る相手（PC）が居る場合は [`crate::gateway::SessionHostHub::set_intervals`] を通ること
 /// （こちらは保存だけで、接続中の PC へは配らない）。
 pub async fn put_intervals(
     db: &DatabaseConnection,

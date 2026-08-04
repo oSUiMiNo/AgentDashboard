@@ -58,7 +58,7 @@ STATE_DIR_FALLBACK="${XDG_STATE_HOME:-${HOME}/.local/state}/${APP_NAME}"
 # 実行ファイルなので**落とし直せる＝戻せる**。だから `--purge` を待たずに消す——
 # 残すと版1つあたり数十MB が誰にも気づかれずに溜まり続ける。
 #
-# 名前は実装（`agent_core::version`）と揃える。食い違いは `crates/dist/tests/uninstall.rs` が見張る
+# 名前は実装（`session_host_core::version`）と揃える。食い違いは `crates/dist/tests/uninstall.rs` が見張る
 VERSIONS_DIR_NAME="versions"
 VERSION_FILE_NAMES="version-current version-attempt version-state.json"
 

@@ -19,12 +19,12 @@
 //!
 //! # セッションの実体は知らない
 //!
-//! PTY も claude のプロセスも、このモジュールからは見えない。頼めるのは [`AgentHost`] に
+//! PTY も claude のプロセスも、このモジュールからは見えない。頼めるのは [`SessionHost`] に
 //! 書いてあることだけで、その向こうがローカル直結か A2S 越しかをここでは区別しない
 //! （セルフホスト化設計§2-3）。
 
 use crate::{
-    agent::AgentHost,
+    agent::SessionHost,
     auth::Identity,
     config::ServerConfig,
     registry::{AccountEvent, PageError, SessionRecord, SessionRegistry, TranscriptPage},
@@ -64,7 +64,7 @@ const OUTBOUND_QUEUE_MESSAGES: usize = 64;
 #[derive(Clone)]
 pub struct AppState {
     /// PC 側への口（セルフホスト化設計§2-3）。**実体（PTY）に頼むことだけ**を持つ
-    pub agent: Arc<dyn AgentHost>,
+    pub agent: Arc<dyn SessionHost>,
     /// カードの記録（セルフホスト化設計§3）。一覧と履歴はこちらから読む。
     ///
     /// 実体と記録が別なのがフェーズ2 の要点。**記録は DB にあるので、実体が
@@ -76,7 +76,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(
-        agent: Arc<dyn AgentHost>,
+        agent: Arc<dyn SessionHost>,
         registry: Arc<SessionRegistry>,
         config: Arc<ServerConfig>,
     ) -> Self {
@@ -612,7 +612,7 @@ async fn pump_events(
 
 /// 1つのターミナルの出力をクライアントへ流す。
 async fn pump_terminal(
-    agent: Arc<dyn AgentHost>,
+    agent: Arc<dyn SessionHost>,
     card_id: CardId,
     snapshot: Bytes,
     mut output: broadcast::Receiver<Bytes>,

@@ -79,7 +79,7 @@ use crate::registry::PRESENCE_TTL_MS;
 const VIEWING_TTL_MS: i64 = 30_000;
 
 /// 繋がっている PC 1台ぶん。
-pub struct AgentConn {
+pub struct SessionHostConn {
     pub agent_id: AgentId,
     pub account_id: Uuid,
     /// この接続を認めたトークン（設計§8-4）。
@@ -97,7 +97,7 @@ pub struct AgentConn {
     outbound: mpsc::Sender<Message>,
 }
 
-impl AgentConn {
+impl SessionHostConn {
     /// 指示を1つ送る。**待たない**（届かなければ捨てる）。
     pub fn send(&self, message: &ServerToAgent) -> bool {
         match serde_json::to_string(message) {
@@ -168,7 +168,7 @@ pub struct Capabilities {
 /// 読み直せなくなる**。しかもエラーにならず、届かないだけという形で出る。
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", content = "body", rename_all = "snake_case")]
-pub enum AgentCommand {
+pub enum SessionHostCommand {
     /// JSON の指示そのまま
     Message(Box<ServerToAgent>),
     /// PTY への生入力（フレームごと base64）
@@ -212,17 +212,17 @@ impl ScreenRelay {
 /// 画面1枚ぶんの配信待ち行列（フレーム数）。
 ///
 /// 画面は最短でも 50ms 間隔（ホットウィンドウ。§7-5）なので、これで数秒ぶんにあたる。
-/// 溢れた購読者は作り直しへ回す（[`RemoteAgent::pty_snapshot`]）。
+/// 溢れた購読者は作り直しへ回す（[`RemoteSessionHost::pty_snapshot`]）。
 const SCREEN_QUEUE_FRAMES: usize = 64;
 
 /// 繋がっている PC の集まり。
 ///
 /// **接続は DB に持たない**（§3-2）。ここに居るかどうかがそのまま「いま繋がっているか」で、
 /// プロセスが落ちれば全部消える——落ちた瞬間の値が残らないのが、この置き方の狙い。
-pub struct AgentHub {
+pub struct SessionHostHub {
     db: sea_orm::DatabaseConnection,
     registry: Arc<SessionRegistry>,
-    conns: Mutex<HashMap<AgentId, Arc<AgentConn>>>,
+    conns: Mutex<HashMap<AgentId, Arc<SessionHostConn>>>,
     /// カードごとの画面の中継。**接続と同じくメモリだけに持つ**（誰が見ているかは
     /// このインスタンスの事実で、落ちれば消えるのが正しい。インスタンスを跨いだ
     /// 合算は連絡係の視聴リースで行う。§9-4）
@@ -234,7 +234,7 @@ pub struct AgentHub {
     streaming: Mutex<HashSet<CardId>>,
 }
 
-impl AgentHub {
+impl SessionHostHub {
     pub fn new(db: sea_orm::DatabaseConnection, registry: Arc<SessionRegistry>) -> Arc<Self> {
         Arc::new(Self {
             db,
@@ -343,7 +343,11 @@ impl AgentHub {
     ///
     /// **黙って落とさない。** 届かない理由を返せば画面に出る——押したのに何も
     /// 起きない状態が一番たちが悪い。
-    pub fn relay_across(&self, agent_id: AgentId, command: AgentCommand) -> Result<(), String> {
+    pub fn relay_across(
+        &self,
+        agent_id: AgentId,
+        command: SessionHostCommand,
+    ) -> Result<(), String> {
         let Some(bus) = self.registry.bus() else {
             return Err(NOT_CONNECTED.to_string());
         };
@@ -384,18 +388,18 @@ impl AgentHub {
     ///
     /// その PC を持っていなければ**何もしない**。宛先ごとにチャネルが分かれているので
     /// 通常は届かないが、置き換わった直後などに行き違うことがある。
-    pub fn deliver_command(&self, agent_id: AgentId, command: AgentCommand) {
+    pub fn deliver_command(&self, agent_id: AgentId, command: SessionHostCommand) {
         let Some(conn) = self.conn(agent_id) else {
             return;
         };
         match command {
-            AgentCommand::Message(message) => {
+            SessionHostCommand::Message(message) => {
                 // 別のインスタンスから頼まれた画面も**掃除の対象に入れる**。
                 // 入れ忘れると、頼んだ側が落ちたときに誰も止められなくなる
                 self.note_streaming(&message);
                 conn.send(&message);
             }
-            AgentCommand::Input { data } => {
+            SessionHostCommand::Input { data } => {
                 match base64::engine::general_purpose::STANDARD.decode(&data) {
                     Ok(bytes) => {
                         conn.send_binary(bytes);
@@ -407,7 +411,7 @@ impl AgentHub {
     }
 
     /// 繋がっている PC を全部。
-    pub fn connected(&self) -> Vec<Arc<AgentConn>> {
+    pub fn connected(&self) -> Vec<Arc<SessionHostConn>> {
         self.conns
             .lock()
             .expect("ロックが壊れていない")
@@ -416,7 +420,7 @@ impl AgentHub {
             .collect()
     }
 
-    pub fn conn(&self, agent_id: AgentId) -> Option<Arc<AgentConn>> {
+    pub fn conn(&self, agent_id: AgentId) -> Option<Arc<SessionHostConn>> {
         self.conns
             .lock()
             .expect("ロックが壊れていない")
@@ -425,7 +429,7 @@ impl AgentHub {
     }
 
     /// そのカードを持っている PC。記録の `agent_id` から引く。
-    pub fn conn_for_card(&self, card_id: CardId) -> Option<Arc<AgentConn>> {
+    pub fn conn_for_card(&self, card_id: CardId) -> Option<Arc<SessionHostConn>> {
         let agent_id = self.registry.get(card_id)?.meta().agent_id?;
         self.conn(agent_id)
     }
@@ -657,7 +661,7 @@ impl AgentHub {
             .get(card_id)
             .and_then(|record| record.meta().agent_id)
         {
-            let _ = self.relay_across(agent_id, AgentCommand::Message(Box::new(message)));
+            let _ = self.relay_across(agent_id, SessionHostCommand::Message(Box::new(message)));
         }
     }
 
@@ -850,7 +854,7 @@ impl AgentHub {
     /// 失効の直後に呼ぶ。**次の接続は upgrade で断られる**（トークンが引けない）ので、
     /// ここで畳めば「外したはずの PC が繋がり続ける」状態が残らない。
     pub fn disconnect_token(&self, token_id: Uuid) -> usize {
-        let doomed: Vec<Arc<AgentConn>> = self
+        let doomed: Vec<Arc<SessionHostConn>> = self
             .conns
             .lock()
             .expect("ロックが壊れていない")
@@ -865,7 +869,7 @@ impl AgentHub {
         doomed.len()
     }
 
-    fn register(&self, conn: Arc<AgentConn>) -> Option<Arc<AgentConn>> {
+    fn register(&self, conn: Arc<SessionHostConn>) -> Option<Arc<SessionHostConn>> {
         self.conns
             .lock()
             .expect("ロックが壊れていない")
@@ -874,7 +878,7 @@ impl AgentHub {
 
     /// 自分の接続だけを外す。**入れ替わった後の掃除で新しい接続を消さない**ため、
     /// 誰が消すのかを送信口の同一性で確かめる。
-    fn unregister(&self, conn: &Arc<AgentConn>) -> bool {
+    fn unregister(&self, conn: &Arc<SessionHostConn>) -> bool {
         let mut conns = self.conns.lock().expect("ロックが壊れていない");
         match conns.get(&conn.agent_id) {
             Some(current) if Arc::ptr_eq(current, conn) => {
@@ -888,7 +892,7 @@ impl AgentHub {
 
 /// ブラウザから見た「PC 側」を、A2S 越しのセッションホストへ繋ぐ実装（設計§2-3）。
 ///
-/// ローカルモードの `LocalAgent` と同じ口（[`AgentHost`]）を満たすので、**ブラウザ配信
+/// ローカルモードの `LocalSessionHost` と同じ口（[`SessionHost`]）を満たすので、**ブラウザ配信
 /// （[`crate::ws`]）はどちらが向こうに居るかを知らない**。
 ///
 /// # 届いたかどうかは返さない
@@ -896,12 +900,12 @@ impl AgentHub {
 /// 指示は fire-and-forget（§5-6）。切断中は届かず失われ、結果は `SessionUpsert` の
 /// 再配信で返る。ack を足さないのは、**既存の操作と保証を揃える**ため——ローカルでも
 /// 「押した結果は状態が変わることで分かる」という形になっている。
-pub struct RemoteAgent {
-    hub: Arc<AgentHub>,
+pub struct RemoteSessionHost {
+    hub: Arc<SessionHostHub>,
 }
 
-impl RemoteAgent {
-    pub fn new(hub: Arc<AgentHub>) -> Self {
+impl RemoteSessionHost {
+    pub fn new(hub: Arc<SessionHostHub>) -> Self {
         Self { hub }
     }
 
@@ -916,7 +920,7 @@ impl RemoteAgent {
         }
         let agent_id = self.remote_agent_of(card_id)?;
         self.hub
-            .relay_across(agent_id, AgentCommand::Message(Box::new(message)))
+            .relay_across(agent_id, SessionHostCommand::Message(Box::new(message)))
     }
 
     /// そのカードを持つ PC が**別のインスタンスに**繋がっているなら、その PC。
@@ -942,7 +946,7 @@ impl RemoteAgent {
 const NOT_CONNECTED: &str = "セッションが見つかりません（PC が繋がっていません）";
 
 #[async_trait::async_trait]
-impl crate::agent::AgentHost for RemoteAgent {
+impl crate::agent::SessionHost for RemoteSessionHost {
     /// そのカードを**どこかのインスタンスが**持っているか。
     ///
     /// 見るのは自分の接続表ではなく記録の鮮度の印（設計§9-2）。接続表を見ると、
@@ -983,7 +987,7 @@ impl crate::agent::AgentHost for RemoteAgent {
             }
             return self
                 .hub
-                .relay_across(target, AgentCommand::Message(Box::new(message)));
+                .relay_across(target, SessionHostCommand::Message(Box::new(message)));
         }
 
         // 指名が無いときは、**選ぶ余地が無い場合だけ**通す。黙って1台目へ送ると、
@@ -998,7 +1002,7 @@ impl crate::agent::AgentHost for RemoteAgent {
                 }
                 None => self
                     .hub
-                    .relay_across(online[0], AgentCommand::Message(Box::new(message))),
+                    .relay_across(online[0], SessionHostCommand::Message(Box::new(message))),
             },
             0 => Err("繋がっている PC がありません".to_string()),
             many => Err(format!(
@@ -1068,7 +1072,7 @@ impl crate::agent::AgentHost for RemoteAgent {
         let agent_id = self.remote_agent_of(card_id)?;
         self.hub.relay_across(
             agent_id,
-            AgentCommand::Input {
+            SessionHostCommand::Input {
                 data: base64::engine::general_purpose::STANDARD.encode(&framed),
             },
         )
@@ -1122,14 +1126,14 @@ impl crate::agent::AgentHost for RemoteAgent {
 ///
 /// 分けてあるのは、セルフホストモードでこの2つが別の経路（リバースプロキシの
 /// 別ロケーション）に置かれうるため（設計§14-2 の「WS が2パス」）。
-pub fn agent_routes(hub: Arc<AgentHub>) -> axum::Router {
+pub fn agent_routes(hub: Arc<SessionHostHub>) -> axum::Router {
     axum::Router::new()
         .route("/agent/ws", axum::routing::get(agent_ws_handler))
         .with_state(hub)
 }
 
 pub async fn agent_ws_handler(
-    State(hub): State<Arc<AgentHub>>,
+    State(hub): State<Arc<SessionHostHub>>,
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
@@ -1195,7 +1199,7 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
 }
 
 async fn agent_loop(
-    hub: Arc<AgentHub>,
+    hub: Arc<SessionHostHub>,
     account_id: Uuid,
     token_id: Uuid,
     account_name: String,
@@ -1275,7 +1279,7 @@ async fn agent_loop(
         Err(err) => tracing::error!("名乗りをシリアライズできません: {err}"),
     }
 
-    let conn = Arc::new(AgentConn {
+    let conn = Arc::new(SessionHostConn {
         agent_id,
         account_id,
         token_id,
@@ -1385,8 +1389,8 @@ async fn next_hello(
 
 /// 1通処理する。`false` を返したら接続を畳む。
 async fn handle_message(
-    hub: &Arc<AgentHub>,
-    conn: &Arc<AgentConn>,
+    hub: &Arc<SessionHostHub>,
+    conn: &Arc<SessionHostConn>,
     origin: &ReportOrigin,
     message: Message,
 ) -> bool {
@@ -1416,8 +1420,8 @@ async fn handle_message(
 }
 
 async fn handle_report(
-    hub: &Arc<AgentHub>,
-    conn: &Arc<AgentConn>,
+    hub: &Arc<SessionHostHub>,
+    conn: &Arc<SessionHostConn>,
     origin: &ReportOrigin,
     report: AgentMessage,
 ) {
@@ -1516,7 +1520,7 @@ async fn handle_report(
 ///
 /// ここで諦めて接続ごと断らないのは、**間隔は動作の本質ではない**ため。読めなかった
 /// ときに繋がらないより、既定で動いて設定変更を待つほうが害が小さい。
-pub async fn intervals_for(hub: &Arc<AgentHub>, account_id: Uuid) -> Intervals {
+pub async fn intervals_for(hub: &Arc<SessionHostHub>, account_id: Uuid) -> Intervals {
     let stored = db::settings::intervals(&hub.db, account_id)
         .await
         .unwrap_or_else(|err| {
@@ -1598,14 +1602,14 @@ mod envelope_tests {
     fn 指示の封筒は中身ごと往復する() {
         // **回帰テスト。** 種別の名前が中の型とぶつかると、書けるのに読めないという
         // 形で壊れる——エラーは出ず、指示が届かないだけになる
-        let command = AgentCommand::Message(Box::new(ServerToAgent::SendInput {
+        let command = SessionHostCommand::Message(Box::new(ServerToAgent::SendInput {
             card_id: CardId::new(),
             text: "こんにちは".to_string(),
         }));
         let bytes = bus::encode_json(Uuid::new_v4(), &command);
-        let (_, back) = bus::decode_json::<AgentCommand>(&bytes).expect("読めること");
+        let (_, back) = bus::decode_json::<SessionHostCommand>(&bytes).expect("読めること");
         match (command, back) {
-            (AgentCommand::Message(before), AgentCommand::Message(after)) => {
+            (SessionHostCommand::Message(before), SessionHostCommand::Message(after)) => {
                 assert_eq!(before, after)
             }
             (before, after) => panic!("種別が変わっています: {before:?} → {after:?}"),
@@ -1614,13 +1618,13 @@ mod envelope_tests {
 
     #[test]
     fn 生入力の封筒も往復する() {
-        let command = AgentCommand::Input {
+        let command = SessionHostCommand::Input {
             data: "AAEC".to_string(),
         };
         let bytes = bus::encode_json(Uuid::new_v4(), &command);
-        let (_, back) = bus::decode_json::<AgentCommand>(&bytes).expect("読めること");
+        let (_, back) = bus::decode_json::<SessionHostCommand>(&bytes).expect("読めること");
         match back {
-            AgentCommand::Input { data } => assert_eq!(data, "AAEC"),
+            SessionHostCommand::Input { data } => assert_eq!(data, "AAEC"),
             other => panic!("種別が変わっています: {other:?}"),
         }
     }

@@ -3,7 +3,7 @@
 //!
 //! # なぜ両側を知っているこの層に置くのか
 //!
-//! 保管庫とポインタの読み書きは [`agent_core::version`] が持っている（記録の置き場所を
+//! 保管庫とポインタの読み書きは [`session_host_core::version`] が持っている（記録の置き場所を
 //! 決めるのはあちらなので）。一方「乗り換えるかどうか」は**コマンドラインの形**と
 //! `config.toml` の射影で決まる。どちらか片方の crate へ置くと、もう片方を参照させる
 //! ことになる（`settings_api` と同じ理由）。
@@ -15,10 +15,10 @@
 //! 見えてほしい情報でもある。
 
 use crate::config::Config;
-use agent_core::config::AgentConfig;
-use agent_core::session::hooks_settings::HOOK_BIN_ENV;
-use agent_core::session::now_ms;
-use agent_core::version::{self, Attempt, Capability, Outcome};
+use session_host_core::config::SessionHostConfig;
+use session_host_core::session::hooks_settings::HOOK_BIN_ENV;
+use session_host_core::session::now_ms;
+use session_host_core::version::{self, Attempt, Capability, Outcome};
 use std::path::{Path, PathBuf};
 
 /// 選ばれている版があれば、そちらへ乗り換える。
@@ -63,7 +63,7 @@ fn state_dir_for_boot(config: Option<&Config>) -> PathBuf {
     // 環境変数は効かせる（`AGENTDASHBOARD_STATE_DIR` で置き場所を移している利用者を
     // 取り違えないため）。`Config::from_toml_str` を使わないのは、あちらが値の検査を
     // 通るから——検査で落ちると、また判定へ辿り着けなくなる
-    AgentConfig::from_toml_str("")
+    SessionHostConfig::from_toml_str("")
         .unwrap_or_default()
         .resolved_state_dir()
 }
@@ -216,7 +216,7 @@ mod tests {
         // 設定の失敗で判定へ辿り着けないと、新しい版へ戻ることもできなくなる
         let fallback = state_dir_for_boot(None);
         assert!(
-            fallback.ends_with(agent_core::config::STATE_DIR_NAME),
+            fallback.ends_with(session_host_core::config::STATE_DIR_NAME),
             "既定の置き場所へ落ちること: {}",
             fallback.display()
         );

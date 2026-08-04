@@ -2,14 +2,14 @@
 # PC 側（セッションホスト）のロジック一式（セルフホスト化設計§2-1）。
 # PTY と本物の CLI に触れてよいのはこのクレートだけで、その境界は
 # 依存の宣言そのもので守る（crates/core/tests/dependencies.rs が機械で検査する）。
-name = "agent-core"
+name = "session-host-core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
 [lib]
-name = "agent_core"
+name = "session_host_core"
 path = "src/lib.rs"
 
 [dependencies]

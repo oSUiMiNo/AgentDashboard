@@ -8,7 +8,7 @@
 # 採った録画は実機検証#1・#2・#4 と #3 の前倒し計測（`make probe-screen`）の入力になり、
 # フェーズ4 では vt100 ゴールデンのフィクスチャを兼ねる。
 #
-# 録画そのものは Rust 側（server/crates/agent-core/tests/pty_record.rs）にある。製品と
+# 録画そのものは Rust 側（server/crates/session-host-core/tests/pty_record.rs）にある。製品と
 # 同じ PTY 経路で録らないと、本番でエミュレータに届くバイト列とは別物を録ることになるため。
 #
 # なぜ書き出し先がリポジトリの外なのか
@@ -46,7 +46,7 @@ rm -f "${OUT_DIR}"/*.cast
 # scripts/test-cli が持っている。対象だけ差し替えて再利用する。
 echo "==> 録画します（本物の claude を3セッション起動します）"
 export AGENTDASHBOARD_RECORD_DIR="${OUT_DIR}"
-TEST_PACKAGE="agent-core" TEST_TARGET="pty_record" "${REPO_ROOT}/scripts/test-cli" "$@"
+TEST_PACKAGE="session-host-core" TEST_TARGET="pty_record" "${REPO_ROOT}/scripts/test-cli" "$@"
 
 shopt -s nullglob
 CASTS=("${OUT_DIR}"/*.cast)

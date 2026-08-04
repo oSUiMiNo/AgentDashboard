@@ -72,7 +72,7 @@ fixtures/
 返るまで」を測れない。
 
 採取は `make record-terminal`（実体は `scripts/record-terminal.sh`）。録画そのものは
-`server/crates/agent-core/tests/pty_record.rs` にあり、**製品と同じ PTY 経路**（同じ TERM・
+`server/crates/session-host-core/tests/pty_record.rs` にあり、**製品と同じ PTY 経路**（同じ TERM・
 同じ環境変数の許可リスト・同じ読み取り粒度）で録る。ここがずれると、本番でエミュレータへ
 届くバイト列とは別物を録ることになる。
 

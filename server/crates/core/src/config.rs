@@ -5,7 +5,7 @@
 //!
 //! # 1つのファイルから2つの設定を作る
 //!
-//! 中身はセッションホスト側（[`AgentConfig`]）とサーバ側（[`ServerConfig`]）に分かれるが、
+//! 中身はセッションホスト側（[`SessionHostConfig`]）とサーバ側（[`ServerConfig`]）に分かれるが、
 //! **ローカルモードでは利用者が書くファイルは1つのまま**（セルフホスト化設計§13-2）。
 //! そこで、読み込みと検証はこの1つの構造体が受け持ち、[`Config::agent`] /
 //! [`Config::server`] が各側へ射影する。
@@ -14,9 +14,9 @@
 //! `deny_unknown_fields` が効かなくなり**、「知らないキーを書いたらエラー」という
 //! 約束が静かに壊れる（打ち間違いを黙って無視すると「設定したのに効かない」事故になる）。
 
-use agent_core::config::{AgentConfig, env};
 use serde::{Deserialize, Serialize};
 use server_core::config::ServerConfig;
+use session_host_core::config::{SessionHostConfig, env};
 use std::path::{Path, PathBuf};
 
 /// 設定の既定ファイル名。カレントディレクトリから探す。
@@ -42,7 +42,7 @@ pub enum ConfigError {
 
 /// `config.toml` の全キー。
 ///
-/// 個々のキーの意味は、射影先である [`AgentConfig`] と [`ServerConfig`] のドキュメントを
+/// 個々のキーの意味は、射影先である [`SessionHostConfig`] と [`ServerConfig`] のドキュメントを
 /// 参照する。ここに二重に書くと、片方だけ直された説明が残ることになる。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -78,7 +78,7 @@ impl Default for Config {
     /// 既定値は**射影先が持つ**。ここで値を書き直すと、片方だけ変えたときに
     /// 「ファイルを書かなかった場合」と「書いた場合」で挙動が分かれる。
     fn default() -> Self {
-        let agent = AgentConfig::default();
+        let agent = SessionHostConfig::default();
         let server = ServerConfig::default();
         Self {
             port: server.port,
@@ -178,7 +178,7 @@ impl Config {
     /// 気づくのは配ったあとになる。そこで [`Config`] 自身を TOML の表へ起こし、
     /// **そこにあるキーを全部見る**。以後の新キーは何もしなくても対応する。
     ///
-    /// 仕組みそのものは [`agent_core::config::env`] にある。`agent.toml`（セッションホスト
+    /// 仕組みそのものは [`session_host_core::config::env`] にある。`agent.toml`（セッションホスト
     /// 単体の設定）でも同じ形が要るので、**両方から見える場所へ置いてある**。
     fn apply_env(table: &mut toml::Table) -> Result<(), ConfigError> {
         env::apply(table, &Self::key_shapes(), BARE_ENV_ALIASES).map_err(ConfigError::Invalid)
@@ -206,8 +206,8 @@ impl Config {
     /// `hook_port` に待ち受けポートを入れているのは、ローカルモードではフックの宛先が
     /// ブラウザと同じポートに同居しているため。フェーズ3 で別プロセスになると、ここは
     /// セッションホスト自身の設定から来る（セルフホスト化設計§5-3）。
-    pub fn agent(&self) -> AgentConfig {
-        AgentConfig {
+    pub fn agent(&self) -> SessionHostConfig {
+        SessionHostConfig {
             stalled_threshold_secs: self.stalled_threshold_secs,
             coalesce_ms: self.coalesce_ms,
             pty_ring_buffer: self.pty_ring_buffer,

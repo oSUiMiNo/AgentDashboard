@@ -27,7 +27,7 @@ pub mod pty;
 pub mod screen;
 
 use crate::{
-    config::AgentConfig,
+    config::SessionHostConfig,
     events::{EventSink, LocalEventBus, TranscriptReport},
     state::{self, Changed, HookInput},
 };
@@ -889,7 +889,7 @@ impl Session {
 
 /// 全セッションの管理者。
 pub struct SessionManager {
-    config: Arc<AgentConfig>,
+    config: Arc<SessionHostConfig>,
     program: String,
     /// フックが起動する実行ファイル。既定は自分自身（設計§7）。
     hook_program: PathBuf,
@@ -924,7 +924,7 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
-    pub fn new(config: Arc<AgentConfig>) -> Arc<Self> {
+    pub fn new(config: Arc<SessionHostConfig>) -> Arc<Self> {
         Self::with_program(config, lifecycle::claude_program())
     }
 
@@ -933,7 +933,7 @@ impl SessionManager {
     /// ローカルモードでは、束ねる層が「DB へ書いてからブラウザへ配る」報告先を渡す。
     /// フェーズ3 では A2S へ転送する実装に変わる。**流し先をここで決めない**のが
     /// [`EventSink`] を置いた理由なので、入口も分けてある。
-    pub fn with_sink(config: Arc<AgentConfig>, events: Arc<dyn EventSink>) -> Arc<Self> {
+    pub fn with_sink(config: Arc<SessionHostConfig>, events: Arc<dyn EventSink>) -> Arc<Self> {
         let program = lifecycle::claude_program();
         let hook_program = hooks_settings::hook_program();
         let (claude_settings, aliases) = Self::user_files(&config);
@@ -948,7 +948,7 @@ impl SessionManager {
     }
 
     /// 起動する CLI を明示して作る。
-    pub fn with_program(config: Arc<AgentConfig>, program: String) -> Arc<Self> {
+    pub fn with_program(config: Arc<SessionHostConfig>, program: String) -> Arc<Self> {
         Self::with_programs(config, program, hooks_settings::hook_program())
     }
 
@@ -957,7 +957,7 @@ impl SessionManager {
     /// テストから擬似 claude とビルド済みの `agentdashboard` を指すための入口。
     /// プロセスの環境変数を書き換えずに済むので、テスト同士が互いを壊さない。
     pub fn with_programs(
-        config: Arc<AgentConfig>,
+        config: Arc<SessionHostConfig>,
         program: String,
         hook_program: PathBuf,
     ) -> Arc<Self> {
@@ -974,7 +974,7 @@ impl SessionManager {
 
     /// 利用者の PC 上のファイル（グローバル既定・別名の実測）を開く。
     fn user_files(
-        config: &AgentConfig,
+        config: &SessionHostConfig,
     ) -> (
         Arc<crate::claude_settings::ClaudeSettings>,
         Arc<crate::model_aliases::ModelAliases>,
@@ -996,7 +996,7 @@ impl SessionManager {
     /// ファイルを指すので、テストからは必ずこちらを使って一時ファイルへ逃がす。
     /// 環境変数を書き換える方式にすると、並行して走る他のテストを巻き込む。
     pub fn with_everything(
-        config: Arc<AgentConfig>,
+        config: Arc<SessionHostConfig>,
         program: String,
         hook_program: PathBuf,
         claude_settings: Arc<crate::claude_settings::ClaudeSettings>,

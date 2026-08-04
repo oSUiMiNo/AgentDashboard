@@ -1,38 +1,38 @@
 //! ローカルモードの配線（セルフホスト化設計§2-3）。
 //!
 //! サーバ側（[`server_core`]）から見た「PC 側」を、**同じプロセスの
-//! [`agent_core`] へ直結**する実装。セルフホストモードではここが A2S（WebSocket）越しの
+//! [`session_host_core`] へ直結**する実装。セルフホストモードではここが A2S（WebSocket）越しの
 //! 実装に差し替わるが、ブラウザから見た口は変わらない（フェーズ3）。
 //!
 //! # ここに判断を足さない
 //!
 //! このモジュールがやるのは**呼び替えだけ**にする。「手元のウィンドウで足りるか」
 //! 「パーサへ読み直しを頼むか」のような判断は、データを持っている
-//! [`agent_core`] 側か、画面の都合を知っている [`server_core`] 側のどちらかに置く。
+//! [`session_host_core`] 側か、画面の都合を知っている [`server_core`] 側のどちらかに置く。
 //! 中間の層に判断が溜まると、フェーズ3 で差し替えるときにその判断だけが取り残される。
 //!
 //! # 直列化もコピーも増やさない
 //!
-//! PTY のバイトは [`AgentHost::subscribe_pty`] が返す購読口からそのまま流れる。
+//! PTY のバイトは [`SessionHost::subscribe_pty`] が返す購読口からそのまま流れる。
 //! ローカルモードの体感速度は初期実装フェーズ4 の実測（12セッションで61fps）が前提なので、
 //! 境界を挟んだぶんの手数を足してはいけない。
 
-use agent_core::{
+use bytes::Bytes;
+use protocol::{CardId, ModelId, PermissionMode, ws::ParserState, ws::ServerMessage};
+use server_core::{agent::SessionHost, registry::SessionRegistry};
+use session_host_core::{
     events::{EventSink, LocalEventBus, TranscriptReport},
     offsets::OffsetStore,
     parser::ParserSupervisor,
     session::SessionManager,
 };
-use bytes::Bytes;
-use protocol::{CardId, ModelId, PermissionMode, ws::ParserState, ws::ServerMessage};
-use server_core::{agent::AgentHost, registry::SessionRegistry};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 
 /// 見つからないカードを指されたときの説明。
 const NOT_FOUND: &str = "セッションが見つかりません";
 
-pub struct LocalAgent {
+pub struct LocalSessionHost {
     manager: Arc<SessionManager>,
     /// パーサの世話役。**居なくても動く**（構造化ビューだけが縮退する）。
     ///
@@ -40,7 +40,7 @@ pub struct LocalAgent {
     parser: Option<Arc<ParserSupervisor>>,
 }
 
-impl LocalAgent {
+impl LocalSessionHost {
     pub fn new(manager: Arc<SessionManager>) -> Self {
         Self {
             manager,
@@ -56,7 +56,7 @@ impl LocalAgent {
 }
 
 #[async_trait::async_trait]
-impl AgentHost for LocalAgent {
+impl SessionHost for LocalSessionHost {
     fn exists(&self, card_id: CardId) -> bool {
         self.manager.get(card_id).is_some()
     }

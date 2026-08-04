@@ -15,17 +15,17 @@
 
 #![allow(dead_code)]
 
-use agent_core::{
-    claude_settings::ClaudeSettings,
-    config::AgentConfig,
-    events::LocalEventBus,
-    model_aliases::ModelAliases,
-    session::{Session, SessionManager},
-};
 use bytes::Bytes;
 use protocol::{
     SessionStatus,
     frame::{self, FrameKind},
+};
+use session_host_core::{
+    claude_settings::ClaudeSettings,
+    config::SessionHostConfig,
+    events::LocalEventBus,
+    model_aliases::ModelAliases,
+    session::{Session, SessionManager},
 };
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::{
@@ -70,7 +70,7 @@ static THROWAWAY_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::Atomic
 ///
 /// 指し先のファイルは**作らない**。読めなければ何もしないのが `claude_settings` の
 /// 約束なので、これで「グローバル既定は指定なし」＝CI と同じ状態になる。
-pub fn claude_settings_for(config: &AgentConfig) -> Arc<ClaudeSettings> {
+pub fn claude_settings_for(config: &SessionHostConfig) -> Arc<ClaudeSettings> {
     // テストが自分で使い捨てのファイルを指定しているならそれを尊重する
     if let Some(path) = &config.claude_settings_path {
         return Arc::new(ClaudeSettings::new(path.clone()));
@@ -86,10 +86,10 @@ pub fn claude_settings_for(config: &AgentConfig) -> Arc<ClaudeSettings> {
 /// テスト用のマネージャを組み立てる。
 ///
 /// 別名の置き場所も in_memory へ寄せる。[`SessionManager::with_programs`] は
-/// `config.resolved_state_dir()` を使うが、`AgentConfig::default()` ではそれが
+/// `config.resolved_state_dir()` を使うが、`SessionHostConfig::default()` ではそれが
 /// **開発者の本物の状態ディレクトリ**（`~/.local/state/agentdashboard`）になる。
 /// グローバル設定と同じ性質の漏れなので、まとめて塞ぐ。
-pub fn build_manager(config: Arc<AgentConfig>, program: String) -> Arc<SessionManager> {
+pub fn build_manager(config: Arc<SessionHostConfig>, program: String) -> Arc<SessionManager> {
     build_manager_with(config, program, Arc::new(LocalEventBus::new()))
 }
 
@@ -99,9 +99,9 @@ pub fn build_manager(config: Arc<AgentConfig>, program: String) -> Arc<SessionMa
 /// **セッションホスト単体のテストは手元の配信のままでよい**——確かめたいのが PTY と
 /// フックの往復で、記録はその先の話だから。
 pub fn build_manager_with(
-    config: Arc<AgentConfig>,
+    config: Arc<SessionHostConfig>,
     program: String,
-    events: Arc<dyn agent_core::events::EventSink>,
+    events: Arc<dyn session_host_core::events::EventSink>,
 ) -> Arc<SessionManager> {
     let claude_settings = claude_settings_for(&config);
     SessionManager::with_everything(
@@ -114,7 +114,7 @@ pub fn build_manager_with(
     )
 }
 
-pub fn manager_with(config: AgentConfig) -> Arc<SessionManager> {
+pub fn manager_with(config: SessionHostConfig) -> Arc<SessionManager> {
     build_manager(
         Arc::new(config),
         fake_claude().to_string_lossy().into_owned(),
@@ -122,7 +122,7 @@ pub fn manager_with(config: AgentConfig) -> Arc<SessionManager> {
 }
 
 pub fn manager() -> Arc<SessionManager> {
-    manager_with(AgentConfig::default())
+    manager_with(SessionHostConfig::default())
 }
 
 /// 起動する作業ディレクトリ。擬似 claude は中身を見ないので一時ディレクトリで足りる。

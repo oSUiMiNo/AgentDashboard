@@ -9,16 +9,16 @@
 
 #![allow(non_snake_case)]
 
-use agent_core::{
-    events::{EventSink, TranscriptReport},
-    offsets::OffsetStore,
-};
 use agentdashboard_core::local;
 use protocol::{
     CardId, Node, NodeId, ProjectId, SessionMeta, SessionStatus, TreeNode, ws::ServerMessage,
 };
 use sea_orm::DatabaseConnection;
 use server_core::registry::SessionRegistry;
+use session_host_core::{
+    events::{EventSink, TranscriptReport},
+    offsets::OffsetStore,
+};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 const WINDOW: usize = 100;

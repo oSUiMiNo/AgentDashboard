@@ -14,7 +14,7 @@
 //! 環境変数の許可リスト・読み取りの粒度が製品と1つでも違うと、**本番でエミュレータに届く
 //! バイト列とは別物**を録ることになり、フィクスチャとしての意味が無くなる。
 //!
-//! [`Session`](agent_core::session::Session) を使わないのも同じ理由。あちらの配信は
+//! [`Session`](session_host_core::session::Session) を使わないのも同じ理由。あちらの配信は
 //! 合流タスク（`coalesce_loop`）を通った後で、設計§7-2 が要求する「合流前の生バイト」では
 //! なくなっている。
 //!
@@ -44,12 +44,12 @@
 // テスト名は日本語で書く（`real_cli.rs` 等と同じ扱い）。
 #![allow(non_snake_case)]
 
-use agent_core::session::{
+use portable_pty::PtySize;
+use protocol::ClaudeSessionId;
+use session_host_core::session::{
     lifecycle::{self, SessionStart},
     pty::{PtyExit, PtyProcess},
 };
-use portable_pty::PtySize;
-use protocol::ClaudeSessionId;
 use std::{
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},

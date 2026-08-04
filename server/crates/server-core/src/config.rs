@@ -1,13 +1,13 @@
 //! ダッシュボードサーバが使う設定（セルフホスト化設計§13-2）。
 //!
 //! ブラウザへの配信に関わるキーだけを持つ。PTY・自己修復・利用者のファイルに関わるキーは
-//! `agent_core::config::AgentConfig` の担当で、こちらからは見えない。
+//! `session_host_core::config::SessionHostConfig` の担当で、こちらからは見えない。
 //!
-//! [`AgentConfig`] と同じく**ファイルは読まない**。`config.toml` を読むのは両側を束ねる
+//! [`SessionHostConfig`] と同じく**ファイルは読まない**。`config.toml` を読むのは両側を束ねる
 //! ローカルモードの実行ファイル（`agentdashboard_core::config::Config`）で、ここはその
 //! 射影を受け取る。フェーズ3 以降はサーバ自身の設定（環境変数・compose）から作られる。
 //!
-//! [`AgentConfig`]: https://docs.rs/agent-core
+//! [`SessionHostConfig`]: https://docs.rs/session-host-core
 
 const DEFAULT_PORT: u16 = 8787;
 /// 待ち受けるアドレスの既定。**外から触れる経路をそもそも作らない**（設計§7）。

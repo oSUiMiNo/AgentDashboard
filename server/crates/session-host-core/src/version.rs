@@ -46,7 +46,7 @@ pub const BINARIES: [&str; 3] = [
     "transcript-parser",
 ];
 
-/// 版ごとの実行ファイルを置くフォルダの名前（[`crate::config::AgentConfig::resolved_state_dir`] 配下）。
+/// 版ごとの実行ファイルを置くフォルダの名前（[`crate::config::SessionHostConfig::resolved_state_dir`] 配下）。
 pub const VERSIONS_DIR_NAME: &str = "versions";
 
 /// 次に起こすときの実行ファイルを指すポインタの名前。
@@ -97,7 +97,7 @@ pub const VERSION_SUPPORTED_ENV: &str = "AGENTDASHBOARD_VERSION_SUPPORTED";
 ///
 /// **判定の材料と判定そのものを分けてある。** まるごと `cfg` で囲むと Windows 側の
 /// 振る舞い（切り替えない）を Linux の CI で確かめられなくなる——
-/// [`crate::config::AgentConfig::resolved_state_dir`] が同じ轍を踏んで直した経緯がある。
+/// [`crate::config::SessionHostConfig::resolved_state_dir`] が同じ轍を踏んで直した経緯がある。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capability {
     /// 乗り換えの手段（自己 exec）があるか。Windows には無い（設計§20-5）。

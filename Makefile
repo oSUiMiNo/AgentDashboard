@@ -165,7 +165,7 @@ record-terminal: ## 実 claude の TUI を録画してフィクスチャにす�
 # perf と同じ扱い。合否ではなく実測値を出すためのものなので `#[ignore]` を付けて
 # make test から外し、ここでだけ `--run-ignored all` で走らせる。
 probe-screen: ## 端末エミュレータ（vt100）の再現性と画面サイズを実測する
-	$(CARGO) nextest run -p agent-core --test screen_probe --no-capture --run-ignored all
+	$(CARGO) nextest run -p session-host-core --test screen_probe --no-capture --run-ignored all
 
 clean: ## ビルド成果物を消す（自己修復の作業場所も含む）
 	rm -rf server/target web/dist web/node_modules

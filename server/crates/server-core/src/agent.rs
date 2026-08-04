@@ -6,12 +6,12 @@
 //!
 //! | モード | 実体 |
 //! |---|---|
-//! | ローカル | 同じプロセスの `agent_core` へ直結（`agentdashboard_core::local::LocalAgent`） |
+//! | ローカル | 同じプロセスの `session_host_core` へ直結（`agentdashboard_core::local::LocalSessionHost`） |
 //! | セルフホスト | A2S（WebSocket）越しのセッションホスト（フェーズ3） |
 //!
 //! # ここを通っても遅くならない
 //!
-//! PTY のバイトは [`AgentHost::subscribe_pty`] が返す [`broadcast::Receiver`] から
+//! PTY のバイトは [`SessionHost::subscribe_pty`] が返す [`broadcast::Receiver`] から
 //! そのまま流れる。**境界を挟んでも直列化もコピーも増えない**（同じ [`Bytes`] の
 //! 参照カウントが増えるだけ）。ローカルモードの体感速度は初期実装フェーズ4 の実測が
 //! 前提になっているので、ここに手数を足してはいけない。
@@ -42,7 +42,7 @@ pub struct SpawnRequest<'a> {
 }
 
 #[async_trait::async_trait]
-pub trait AgentHost: Send + Sync + 'static {
+pub trait SessionHost: Send + Sync + 'static {
     // --- 生存確認 -------------------------------------------------------------
 
     /// そのカードが**いま生きているか**。

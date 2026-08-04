@@ -31,9 +31,9 @@
 
 mod common;
 
-use agent_core::session::{Session, hooks_settings, lifecycle};
 use agentdashboard_core::config::Config;
 use protocol::SessionStatus;
+use session_host_core::session::{Session, hooks_settings, lifecycle};
 use std::{
     path::{Path, PathBuf},
     process::Command,
@@ -696,10 +696,10 @@ fn repo_root() -> PathBuf {
 /// worktree へ置く。ここから先——ゲート・修復セッション・ビルド・差し替え・コミット——は
 /// すべて本物を通す。
 struct PlantedCanary {
-    inner: agent_core::selfheal::ops::HostOps,
+    inner: session_host_core::selfheal::ops::HostOps,
 }
 
-impl agent_core::selfheal::ops::SelfhealOps for PlantedCanary {
+impl session_host_core::selfheal::ops::SelfhealOps for PlantedCanary {
     fn prepare_worktree(&self, branch: &str) -> anyhow::Result<PathBuf> {
         self.inner.prepare_worktree(branch)
     }
@@ -708,7 +708,7 @@ impl agent_core::selfheal::ops::SelfhealOps for PlantedCanary {
         &self,
         _model: &str,
         worktree: &Path,
-    ) -> anyhow::Result<agent_core::selfheal::ops::CanarySample> {
+    ) -> anyhow::Result<session_host_core::selfheal::ops::CanarySample> {
         // 「レコード種別が改名された」という、実際に起こりうる形の非互換。
         // いまのパーサはこれを未知の種別として数えるので、ゲートが落ちる
         let dir = worktree.join("fixtures").join("v9.9.9").join("canary");
@@ -722,7 +722,7 @@ impl agent_core::selfheal::ops::SelfhealOps for PlantedCanary {
                 "\n",
             ),
         )?;
-        Ok(agent_core::selfheal::ops::CanarySample {
+        Ok(session_host_core::selfheal::ops::CanarySample {
             version: "9.9.9".to_string(),
             dir,
             has_tool_use: true,
@@ -730,7 +730,7 @@ impl agent_core::selfheal::ops::SelfhealOps for PlantedCanary {
         })
     }
 
-    fn run_gate(&self, worktree: &Path) -> agent_core::selfheal::ops::GateOutcome {
+    fn run_gate(&self, worktree: &Path) -> session_host_core::selfheal::ops::GateOutcome {
         self.inner.run_gate(worktree)
     }
 
@@ -756,9 +756,9 @@ impl agent_core::selfheal::ops::SelfhealOps for PlantedCanary {
 /// 本番では前回の修復を積み上げるのが正しい（直した内容を捨てない）が、訓練は毎回
 /// **同じ出発点**から始まらないと結果が変わってしまう。
 fn reset_maintenance_worktree(repo: &Path) {
-    let name = agent_core::selfheal::MAINTENANCE_NAME;
+    let name = session_host_core::selfheal::MAINTENANCE_NAME;
     let worktree = repo
-        .join(agent_core::selfheal::ops::WORKTREE_DIR)
+        .join(session_host_core::selfheal::ops::WORKTREE_DIR)
         .join(name);
     let _ = Command::new("git")
         .args(["worktree", "remove", "--force"])
@@ -791,10 +791,10 @@ async fn カナリアが構造の全部入りのサンプルを採れる() {
     // ディレクトリを worktree の代わりに渡せばリポジトリを汚さない
     let workspace = dir.path().to_path_buf();
 
-    let ops = agent_core::selfheal::ops::HostOps::new(repo, "claude".to_string());
+    let ops = session_host_core::selfheal::ops::HostOps::new(repo, "claude".to_string());
     let model = "haiku".to_string();
     let sample = tokio::task::spawn_blocking(move || {
-        use agent_core::selfheal::ops::SelfhealOps as _;
+        use session_host_core::selfheal::ops::SelfhealOps as _;
         ops.run_canary(&model, &workspace)
     })
     .await
@@ -856,7 +856,7 @@ async fn 本物のclaudeがパーサを直しゲートを通ってから差し�
         ..Config::default()
     };
     let ops = std::sync::Arc::new(PlantedCanary {
-        inner: agent_core::selfheal::ops::HostOps::new(repo.clone(), "claude".to_string()),
+        inner: session_host_core::selfheal::ops::HostOps::new(repo.clone(), "claude".to_string()),
     });
     let server =
         common::TestServer::start_with_selfheal_and_program(config, ops, "claude".to_string())
@@ -896,11 +896,11 @@ async fn 本物のclaudeがパーサを直しゲートを通ってから差し�
     let pointer = dir
         .path()
         .join("state")
-        .join(agent_core::parser::PARSER_POINTER);
+        .join(session_host_core::parser::PARSER_POINTER);
     let original = std::fs::read_to_string(&pointer).expect("最初のポインタが書かれている");
     let worktree = repo
-        .join(agent_core::selfheal::ops::WORKTREE_DIR)
-        .join(agent_core::selfheal::MAINTENANCE_NAME);
+        .join(session_host_core::selfheal::ops::WORKTREE_DIR)
+        .join(session_host_core::selfheal::MAINTENANCE_NAME);
 
     loop {
         let now = std::fs::read_to_string(&pointer).unwrap_or_default();
@@ -916,7 +916,7 @@ async fn 本物のclaudeがパーサを直しゲートを通ってから差し�
     }
 
     // 対応表に載っている
-    let state = agent_core::selfheal::state::SelfhealState::load(&dir.path().join("state"));
+    let state = session_host_core::selfheal::state::SelfhealState::load(&dir.path().join("state"));
     assert!(
         state.known_versions.contains("9.9.9"),
         "差し替えたのに対応表へ載っていない"
@@ -957,7 +957,8 @@ async fn wait_for_mode(session: &Session, expected: &str) -> protocol::Permissio
     let expected = protocol::PermissionMode::new(expected);
     let deadline = Instant::now() + CLI_TIMEOUT;
     loop {
-        let current = agent_core::session::permission::parse_footer(&session.scrollback_text());
+        let current =
+            session_host_core::session::permission::parse_footer(&session.scrollback_text());
         if current.as_ref() == Some(&expected) {
             return expected;
         }
@@ -1267,7 +1268,10 @@ impl RemotePair {
             .arg("--config")
             .arg(&agent_config)
             .env(lifecycle::CLAUDE_BIN_ENV, &wrapper)
-            .env(agent_core::parser::PARSER_BIN_ENV, common::parser_program())
+            .env(
+                session_host_core::parser::PARSER_BIN_ENV,
+                common::parser_program(),
+            )
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -1846,11 +1850,14 @@ impl HandoverDashboard {
         let child = testkit::binary_command("agentdashboard")
             // 土台は既定で「乗り換え済み」の印を立てる（開発者の実環境を読まないため）。
             // ここは乗り換えそのものを試すので外す
-            .env_remove(agent_core::version::VERSION_HANDOVER_ENV)
+            .env_remove(session_host_core::version::VERSION_HANDOVER_ENV)
             // 保管庫は自分で用意したので、入れる側の3本を控える必要は無い
-            .env(agent_core::version::VERSION_SUPPORTED_ENV, "0")
+            .env(session_host_core::version::VERSION_SUPPORTED_ENV, "0")
             .env(lifecycle::CLAUDE_BIN_ENV, &wrapper)
-            .env(agent_core::parser::PARSER_BIN_ENV, common::parser_program())
+            .env(
+                session_host_core::parser::PARSER_BIN_ENV,
+                common::parser_program(),
+            )
             .arg("--config")
             .arg(&config)
             .stdout(std::process::Stdio::null())
@@ -1879,7 +1886,7 @@ impl HandoverDashboard {
         let deadline = Instant::now() + CLI_TIMEOUT;
         loop {
             let up = std::net::TcpStream::connect(self.addr).is_ok()
-                && !agent_core::version::attempt_path(&self.fixture.state_dir()).exists();
+                && !session_host_core::version::attempt_path(&self.fixture.state_dir()).exists();
             if up {
                 return;
             }

@@ -82,7 +82,7 @@ impl LinkConfig {
 }
 
 /// 報告の運び手（サーバへ繋ぐ側）。
-pub struct AgentLink {
+pub struct SessionHostLink {
     config: LinkConfig,
     /// 同じプロセス内の購読者（自己修復）向け
     bus: LocalEventBus,
@@ -92,7 +92,7 @@ pub struct AgentLink {
     /// **部品のまま持つ。** 変わるのは別名の側だけ（実測の学習）なので、
     /// 差し替えてから組み立て直す
     model_table: Mutex<Option<ModelTable>>,
-    /// 常駐タスクへ渡す受け口。[`AgentLink::attach`] で取り出す
+    /// 常駐タスクへ渡す受け口。[`SessionHostLink::attach`] で取り出す
     inbox: Mutex<Option<mpsc::UnboundedReceiver<Outgoing>>>,
 }
 
@@ -130,8 +130,8 @@ enum Outgoing {
     Screen(Vec<u8>),
 }
 
-impl AgentLink {
-    /// 口だけ作る。**繋ぎ始めるのは [`AgentLink::attach`] を呼んでから。**
+impl SessionHostLink {
+    /// 口だけ作る。**繋ぎ始めるのは [`SessionHostLink::attach`] を呼んでから。**
     ///
     /// 2段に分かれているのは、**セッションの持ち主（マネージャ）がこの口を受け取って
     /// から作られる**ため（パーサの世話役と同じ形）。順序は
@@ -181,7 +181,7 @@ impl AgentLink {
     }
 }
 
-impl EventSink for AgentLink {
+impl EventSink for SessionHostLink {
     fn emit(&self, event: ServerMessage) {
         if let Some(message) = to_agent_message(&event) {
             let _ = self.outgoing.send(Outgoing::Volatile(message));
@@ -448,7 +448,7 @@ async fn run(
     config: LinkConfig,
     manager: Arc<SessionManager>,
     offsets: Arc<OffsetStore>,
-    link: Arc<AgentLink>,
+    link: Arc<SessionHostLink>,
     mut inbox: mpsc::UnboundedReceiver<Outgoing>,
 ) {
     let mut outbox = Outbox::new(offsets);
@@ -611,7 +611,7 @@ async fn handshake(mut socket: Socket, config: &LinkConfig) -> anyhow::Result<(S
 async fn connected(
     socket: Socket,
     manager: &Arc<SessionManager>,
-    link: &Arc<AgentLink>,
+    link: &Arc<SessionHostLink>,
     inbox: &mut mpsc::UnboundedReceiver<Outgoing>,
     outbox: &mut Outbox,
     intervals: &mut Intervals,

@@ -1,9 +1,9 @@
 //! ローカルモードの AgentDashboard（設計§1・セルフホスト化設計§1-1）。
 //!
-//! PC 側（[`agent_core`]）とサーバ側（[`server_core`]）を**1つのプロセスで束ねる**層。
+//! PC 側（[`session_host_core`]）とサーバ側（[`server_core`]）を**1つのプロセスで束ねる**層。
 //! 実体は次の3つしかない。
 //!
-//! - [`local::LocalAgent`] … サーバ側から見た「PC 側」を、同じプロセスの `agent_core` へ直結する
+//! - [`local::LocalSessionHost`] … サーバ側から見た「PC 側」を、同じプロセスの `session_host_core` へ直結する
 //! - [`LocalServer::router`] … ブラウザ向け・フック受信・設定の3つのルータを合成する
 //! - [`config::Config`] … 1つの `config.toml` から両側の設定を作る
 //!
@@ -22,16 +22,16 @@ pub mod local;
 pub mod settings_api;
 pub mod versions_api;
 
-use agent_core::{
-    hooks, model_catalog, offsets::OffsetStore, parser, parser::ParserSupervisor, selfheal,
-    session, session::SessionManager, settings, settings::SettingsStore,
-};
 use axum::Router;
 use config::Config;
-use local::LocalAgent;
+use local::LocalSessionHost;
 use server_core::{
-    auth::AuthContext, config::ServerConfig, embed, gateway::AgentHub, registry::SessionRegistry,
-    ws,
+    auth::AuthContext, config::ServerConfig, embed, gateway::SessionHostHub,
+    registry::SessionRegistry, ws,
+};
+use session_host_core::{
+    hooks, model_catalog, offsets::OffsetStore, parser, parser::ParserSupervisor, selfheal,
+    session, session::SessionManager, settings, settings::SettingsStore,
 };
 use settings_api::SettingsState;
 use std::sync::Arc;
@@ -125,7 +125,7 @@ impl LocalServer {
     /// | ルータ | 出どころ | なぜ分かれているか |
     /// |---|---|---|
     /// | `/ws`・`/api/sessions`・web アセット | [`server_core::routes`] | ブラウザ向け。セルフホストではクラウド側へ移る |
-    /// | `/hook/*`・`/model/*` | [`agent_core::hooks::routes`] | 宛先はどちらのモードでもセッションホストの 127.0.0.1（セルフホスト化設計§5-3） |
+    /// | `/hook/*`・`/model/*` | [`session_host_core::hooks::routes`] | 宛先はどちらのモードでもセッションホストの 127.0.0.1（セルフホスト化設計§5-3） |
     /// | `/api/settings` | [`settings_api::routes`] | 応答の中身が PC 側にしか無い（§13-4 で作り替える予定） |
     ///
     /// いまは同じポートに同居しているが、**分けられる形にしておく**のがこの合成の意味。
@@ -136,7 +136,7 @@ impl LocalServer {
     /// トークンが入っている（設計§5-3）。ブラウザの Cookie を持ちようが無いので、
     /// ここに鍵をかけると**フックが1件も届かなくなる**。
     pub fn router(&self) -> Router {
-        let mut agent = LocalAgent::new(Arc::clone(&self.manager));
+        let mut agent = LocalSessionHost::new(Arc::clone(&self.manager));
         if let Some(parser) = &self.parser {
             agent = agent.with_parser(Arc::clone(parser));
         }
@@ -174,7 +174,7 @@ impl LocalServer {
                         Some(wiring) => Arc::clone(&wiring.applied),
                         None => versions_api::no_schemas(),
                     },
-                    ops: agent_core::version_ops::detect(),
+                    ops: session_host_core::version_ops::detect(),
                     install: Arc::new(std::sync::Mutex::new(None)),
                     stop: match &self.versions {
                         Some(wiring) => Arc::clone(&wiring.stop),
@@ -228,7 +228,7 @@ pub async fn serve_server(
     let auth = AuthContext::server(db.clone(), &server_config);
     let update_db = db.clone();
     let gate_db = db.clone();
-    let hub = AgentHub::new(db, Arc::clone(&registry));
+    let hub = SessionHostHub::new(db, Arc::clone(&registry));
 
     if let Some(bus) = &bus {
         server_core::cluster::start(
@@ -239,8 +239,9 @@ pub async fn serve_server(
         );
     }
 
-    let agent: Arc<dyn server_core::agent::AgentHost> =
-        Arc::new(server_core::gateway::RemoteAgent::new(Arc::clone(&hub)));
+    let agent: Arc<dyn server_core::agent::SessionHost> = Arc::new(
+        server_core::gateway::RemoteSessionHost::new(Arc::clone(&hub)),
+    );
     let ws_state = ws::AppState::new(agent, Arc::clone(&registry), Arc::clone(&server_config));
     let router = server_core::routes(ws_state, Arc::clone(&auth))
         // セッションホストの受け口は**ブラウザとは別の鍵**（ペアリングトークン。§8-4）。
@@ -273,7 +274,7 @@ pub async fn serve_server(
                             })
                         })
                     },
-                    ops: agent_core::version_ops::detect(),
+                    ops: session_host_core::version_ops::detect(),
                     install: Arc::new(std::sync::Mutex::new(None)),
                     stop: versions_api::exit_process(),
                 })),
@@ -284,7 +285,7 @@ pub async fn serve_server(
     let listener = bind(&server_config).await?;
     // 乗り換えの印を消す（CICD設計§11）。**サーバモードでも同じ**——PTY は持たないが、
     // 版を切り替えられる主体であることは変わらない
-    agent_core::version::confirm_started(&config.agent().resolved_state_dir());
+    session_host_core::version::confirm_started(&config.agent().resolved_state_dir());
     tokio::spawn(watch_updates(
         config.agent().resolved_state_dir(),
         move || {
@@ -309,7 +310,7 @@ pub async fn serve_server(
 /// 背景へ逃がす——献立表の取得は実測 0.6 秒だが、回線が遅ければその待ち時間が
 /// そのまま起動に乗る。
 ///
-/// 実際に外へ出るかは [`agent_core::version_ops::due`] が決める。**「起動時に1回」だけに
+/// 実際に外へ出るかは [`session_host_core::version_ops::due`] が決める。**「起動時に1回」だけに
 /// すると頻度の上限が再起動の回数になる**ので、前回から経っていなければ見に行かない。
 ///
 /// 設定の読み方を関数で受け取っているのは、`crates/core` が記録の道具を通常の依存に
@@ -321,10 +322,10 @@ where
     Fut: std::future::Future<Output = bool>,
 {
     /// 設定の入り切りに追随できるよう、様子を見に来る間隔。
-    /// 外へ出るかどうかは別（[`agent_core::version_ops::CHECK_INTERVAL_MS`]）。
+    /// 外へ出るかどうかは別（[`session_host_core::version_ops::CHECK_INTERVAL_MS`]）。
     const POLL: std::time::Duration = std::time::Duration::from_secs(3600);
 
-    let Ok(ops) = tokio::task::spawn_blocking(agent_core::version_ops::detect).await else {
+    let Ok(ops) = tokio::task::spawn_blocking(session_host_core::version_ops::detect).await else {
         return;
     };
     if let Some(reason) = ops.unavailable_reason() {
@@ -338,9 +339,9 @@ where
         if enabled().await {
             let state_dir = state_dir.clone();
             let ops = Arc::clone(&ops);
-            let now = agent_core::session::now_ms();
+            let now = session_host_core::session::now_ms();
             let checked = tokio::task::spawn_blocking(move || {
-                use agent_core::version_ops as v;
+                use session_host_core::version_ops as v;
                 if !v::due(&v::read_notice(&state_dir), now, v::CHECK_INTERVAL_MS) {
                     return None;
                 }
@@ -511,7 +512,7 @@ pub async fn serve(config: Config, config_arg: Option<std::path::PathBuf>) -> an
     let listener = bind(&server_config).await?;
     // **待ち受けを確保できた時点で、乗り換えの印を消す**（CICD設計§11）。ここより後ろへ
     // ずらすと、印を消す前に落ちる隙間が広がる
-    agent_core::version::confirm_started(&agent_config.resolved_state_dir());
+    session_host_core::version::confirm_started(&agent_config.resolved_state_dir());
     tokio::spawn(watch_updates(
         agent_config.resolved_state_dir(),
         move || {

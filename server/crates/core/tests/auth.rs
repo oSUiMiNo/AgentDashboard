@@ -223,9 +223,10 @@ impl Selfhost {
             .await
             .expect("記録層を立てられること");
         let auth = server_core::auth::AuthContext::server(db.clone(), &config);
-        let hub = server_core::gateway::AgentHub::new(db.clone(), std::sync::Arc::clone(&registry));
-        let agent: std::sync::Arc<dyn server_core::agent::AgentHost> = std::sync::Arc::new(
-            server_core::gateway::RemoteAgent::new(std::sync::Arc::clone(&hub)),
+        let hub =
+            server_core::gateway::SessionHostHub::new(db.clone(), std::sync::Arc::clone(&registry));
+        let agent: std::sync::Arc<dyn server_core::agent::SessionHost> = std::sync::Arc::new(
+            server_core::gateway::RemoteSessionHost::new(std::sync::Arc::clone(&hub)),
         );
         let ws_state = server_core::ws::AppState::new(agent, registry, config);
 
@@ -240,7 +241,7 @@ impl Selfhost {
                             registry: None,
                             config_arg: None,
                             applied: agentdashboard_core::versions_api::no_schemas(),
-                            ops: agent_core::version_ops::detect(),
+                            ops: session_host_core::version_ops::detect(),
                             install: std::sync::Arc::new(std::sync::Mutex::new(None)),
                             // ここで見るのは**押せる相手だけ**なので、落ちる道は塞ぐ
                             stop: agentdashboard_core::versions_api::no_stop(),

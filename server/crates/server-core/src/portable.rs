@@ -3,7 +3,7 @@
 //! # ここは解析と検査だけ
 //!
 //! **記録には触らない。** 書くのは既存の道（[`crate::db::settings::put_intervals`] と
-//! [`crate::gateway::AgentHub::set_intervals`]）を通す（同§12）。読み込みのためだけの
+//! [`crate::gateway::SessionHostHub::set_intervals`]）を通す（同§12）。読み込みのためだけの
 //! 書き込み経路を作ると、**接続中の PC へ配り直す処理がそちらにだけ無い**という食い違いが
 //! 生まれる。
 //!

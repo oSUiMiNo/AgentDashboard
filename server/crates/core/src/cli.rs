@@ -8,9 +8,9 @@
 //! 1つのアーカイブへ入れるには同じパッケージに置くしかなく（セルフホスト化設計§25 読み替え1）、
 //! そちら側には呼び出しの1行しか置かない約束にしてある。中身がこちらにあるのは、その約束の側。
 
-use agent_core::{hook_post, model_post};
 use clap::{Parser, Subcommand, ValueEnum};
 use server_core::embed;
+use session_host_core::{hook_post, model_post};
 use std::path::PathBuf;
 
 use crate::{boot, config::Config, serve, serve_server};

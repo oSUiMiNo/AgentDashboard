@@ -32,11 +32,11 @@ issue-sync は、ユーザーが行うので不要。必要かどうかユーザ
 | 区分 | 旧名 | 新名 |
 |---|---|---|
 | 呼称 | PC 側エージェント／エージェント | **セッションホスト**（文脈が明らかなら「ホスト」） |
-| crate | `agent-core` | `session-host-core` |
+| crate | `session-host-core` | `session-host-core` |
 | crate | `agentdashboard-agent`（`crates/agent`） | `session-host`（`crates/session-host`） |
-| 型 | `AgentHost` ／ `AgentHub` ／ `AgentConn` ／ `AgentCommand` | `SessionHost` ／ `SessionHostHub` ／ `SessionHostConn` ／ `SessionHostCommand` |
-| 型 | `RemoteAgent` ／ `LocalAgent` | `RemoteSessionHost` ／ `LocalSessionHost` |
-| 型 | `AgentConfig` ／ `AgentLink` ／ `AgentView` | `SessionHostConfig` ／ `SessionHostLink` ／ `SessionHostView` |
+| 型 | `SessionHost` ／ `SessionHostHub` ／ `SessionHostConn` ／ `SessionHostCommand` | `SessionHost` ／ `SessionHostHub` ／ `SessionHostConn` ／ `SessionHostCommand` |
+| 型 | `RemoteSessionHost` ／ `LocalSessionHost` | `RemoteSessionHost` ／ `LocalSessionHost` |
+| 型 | `SessionHostConfig` ／ `SessionHostLink` ／ `SessionHostView` | `SessionHostConfig` ／ `SessionHostLink` ／ `SessionHostView` |
 
 ### 据え置くもの（変えてはいけない）
 | 据え置くもの | なぜ |
@@ -99,29 +99,29 @@ issue-sync は、ユーザーが行うので不要。必要かどうかユーザ
 | `docker/Dockerfile.rust` | Rust ツールチェーンの隔離イメージ |
 | `Makefile` | 開発コマンド一式 |
 | `server/crates/protocol/src/lib.rs` | サーバ・フロント・パーサが共有するドメインモデル（設計§3） |
-| `server/crates/agent-core/` | PC 側の一式（PTY・フック受信・状態導出・パース・自己修復）。**portable-pty を持つのはここだけ** |
+| `server/crates/session-host-core/` | PC 側の一式（PTY・フック受信・状態導出・パース・自己修復）。**portable-pty を持つのはここだけ** |
 | `server/crates/server-core/` | ブラウザ配信（WebSocket・REST・web アセット）。PTY に触らない |
 | `server/crates/server-core/src/db/` | 記録の置き場所（設計§3）。**DB を持つのはここだけ**。表を増やしたら migration にも足す |
 | `server/crates/server-core/src/registry.rs` | カードの記録。エージェントの報告を**DB へ書いてからブラウザへ配る**（設計§9-1）。**アカウントの絞り込みはここの入口に集約**（§8-6） |
 | `server/crates/server-core/src/auth.rs` | 入口の鍵（設計§8-1〜§8-3）。**3通りのかけ方を1つの型で表す**。判定を通らずに答えを出す道を作らないこと |
 | `server/crates/server-core/src/account.rs` | ペアリングトークンの発行・失効と PC の一覧（§8-4・§11-1） |
 | `server/crates/server-core/tests/tenancy.rs` | アカウント分離の総当たり（§8-6 の表の全行）。**enforcement を足したらここへ足す** |
-| `server/crates/server-core/src/gateway.rs` | エージェントの受け口（`/agent/ws`）。版交渉・トークン照合・帰属の決定。ブラウザ向けの指示を A2S へ中継する `RemoteAgent` もここ |
-| `server/crates/agent-core/src/link.rs` | PC からサーバへ繋ぐ側。履歴を束ねて送り、**ack が返ってから位置を進める**（設計§6-1） |
-| `server/crates/agent-core/src/offsets.rs` | 「どこまで読んだか」の置き場所。**読む側（パーサ）と進める側（運び手）で共有する** |
+| `server/crates/server-core/src/gateway.rs` | エージェントの受け口（`/agent/ws`）。版交渉・トークン照合・帰属の決定。ブラウザ向けの指示を A2S へ中継する `RemoteSessionHost` もここ |
+| `server/crates/session-host-core/src/link.rs` | PC からサーバへ繋ぐ側。履歴を束ねて送り、**ack が返ってから位置を進める**（設計§6-1） |
+| `server/crates/session-host-core/src/offsets.rs` | 「どこまで読んだか」の置き場所。**読む側（パーサ）と進める側（運び手）で共有する** |
 | `server/crates/agent/src/lib.rs` | PC 側エージェントの中身。フックの受信口を自分で開く（設計§5-3）。**実行ファイルは `crates/dist` が持つ** |
 | `server/crates/dist/` | 利用者へ配る一式。実行ファイル3本の**入口だけ**（各1行）を持つ（§25 読み替え1）。中身を書かないこと |
 | `dist-workspace.toml` ／ `scripts/dist` | 配布物の作り方。**`.github/workflows/release.yml` は `dist generate` が作る**ので手で書き換えない |
 | `.github/build-setup.yml` | CI のビルド前に差し込む手順（web の焼き込み）。**こちらは手で書く**。`working-directory:` は使えない（§25 読み替え6）。**`workflows/` の外に置いてある**——あそこは GitHub がワークフローとして登録する場所で、`on:` を持たないこれを置くとプッシュのたびに失敗が1件積み上がる |
 | `docs/proxy/` | 前段（Caddy・nginx）の設定。**compose が実際にマウントする実物**（§25 読み替え4） |
 | `server/agent.toml.example` | エージェント単体の設定の雛形。**接続の3キーと hook_port はこちらにだけ置く**（§21 読み替え8） |
-| `server/crates/core/src/local.rs` | 両者を1プロセスで束ねる配線（`server_core::agent::AgentHost` のローカル実装） |
+| `server/crates/core/src/local.rs` | 両者を1プロセスで束ねる配線（`server_core::agent::SessionHost` のローカル実装） |
 | `server/crates/core/src/config.rs` | `config.toml` の読み込みと、両側への射影（設計§12・セルフホスト化設計§13-2） |
 | `server/crates/server-core/src/embed.rs` | web アセットの単一バイナリ同梱 |
 | `server/crates/core/tests/dependencies.rs` | crate 境界（依存の逆流）の機械検査。**新しい依存を入れたらここへ足す** |
 | `server/crates/transcript-parser/` | 自己修復が唯一書き換えてよい範囲（設計§9） |
 | `server/crates/testkit/` | フック受信モックサーバと擬似 claude |
-| `server/crates/agent-core/src/session/screen.rs` | 端末エミュレータと画面の配信（設計§7）。**vt100 を持つのはここだけ**——サーバへ漏れていないかは `dependencies.rs` が見張る |
+| `server/crates/session-host-core/src/session/screen.rs` | 端末エミュレータと画面の配信（設計§7）。**vt100 を持つのはここだけ**——サーバへ漏れていないかは `dependencies.rs` が見張る |
 | `server/crates/server-core/src/gateway.rs` | エージェントの受け口。画面のフレームはここで種別を移し替えてブラウザへ流す（0x04→0x03 / 0x05→0x01） |
 | `server/config.toml.example` | 設定の雛形。**全キーが `AGENTDASHBOARD_<キー>` で上書きできる**（設計§14-1） |
 | `docker/compose.test.yml` ／ `scripts/test-compose` | 永続化層を PostgreSQL に対しても流す（`make test-compose`）。**新しい DB テストは両方へ通す** |
@@ -133,9 +133,9 @@ issue-sync は、ユーザーが行うので不要。必要かどうかユーザ
 | `docker/compose.e2e.yml` ／ `scripts/e2e-compose` | サーバ2台＋PostgreSQL＋Valkey＋前段（Caddy・nginx）をブラウザで通す（`make e2e-compose`）。**ブラウザ→A・PC→B の配置でしか出ない壊れ方**を捕まえる |
 | `server/crates/dist/tests/artifacts.rs` ／ `guides.rs` | 配布物の顔ぶれと、手順書が名指ししているものの実在。**配ってからしか気づけない失敗**を `make ci` で捕まえる |
 | `fixtures/` | ゴールデンフィクスチャ（自己修復のテストゲートを兼ねる）・端末録画（`.cast`）・画面のゴールデン（`.screen`） |
-| `server/crates/agent-core/tests/screen_golden.rs` | 録画から描いた画面のゴールデン比較。作り直すのは `AGENTDASHBOARD_UPDATE_SCREEN_GOLDEN=1`。**作り直したら必ず `scripts/sanitize-fixtures.py` を通す** |
+| `server/crates/session-host-core/tests/screen_golden.rs` | 録画から描いた画面のゴールデン比較。作り直すのは `AGENTDASHBOARD_UPDATE_SCREEN_GOLDEN=1`。**作り直したら必ず `scripts/sanitize-fixtures.py` を通す** |
 | `scripts/e2e-remote` ／ `web/e2e/remote.spec.ts` | セルフホスト構成（サーバ＋エージェント）の E2E。**ローカルモードでは画面配信の経路を通らない**ので、実物のブラウザで確かめるのはここだけ |
 | `scripts/e2e-fleet` ／ `web/e2e/fleet.spec.ts` | PC を3台つないだ E2E（`make e2e` に含む）。**PC が2台以上だと起動フォームに選択が現れる**ので、1台構成の土台には足せない。台数を変えるのはスクリプトの数字1つ |
-| `server/crates/agent-core/tests/pty_record.rs` | 実 claude の TUI を製品と同じ PTY 経路で録画する（`make record-terminal`）。**本物の claude を起動しクォータを消費する** |
-| `server/crates/agent-core/tests/screen_probe.rs` | 端末エミュレータ（vt100）の再現性と画面サイズの実測（`make probe-screen`）。合否ではなく数値を出す |
+| `server/crates/session-host-core/tests/pty_record.rs` | 実 claude の TUI を製品と同じ PTY 経路で録画する（`make record-terminal`）。**本物の claude を起動しクォータを消費する** |
+| `server/crates/session-host-core/tests/screen_probe.rs` | 端末エミュレータ（vt100）の再現性と画面サイズの実測（`make probe-screen`）。合否ではなく数値を出す |
 | `scripts/sanitize-fixtures.py` | フィクスチャの匿名化と残存検査。**公開リポジトリへ置く前に必ず通す** |

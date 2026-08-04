@@ -18,9 +18,9 @@
 
 mod common;
 
-use agent_core::selfheal::ops::{CanarySample, GateOutcome, SelfhealOps};
 use agentdashboard_core::config::Config;
 use common::TestServer;
+use session_host_core::selfheal::ops::{CanarySample, GateOutcome, SelfhealOps};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -220,7 +220,7 @@ impl SelfhealOps for FakeOps {
 async fn start_watched(
     server: &TestServer,
     dir: &Path,
-) -> (Arc<agent_core::session::Session>, PathBuf) {
+) -> (Arc<session_host_core::session::Session>, PathBuf) {
     let session = server
         .manager
         .spawn(&dir.to_string_lossy())
@@ -333,7 +333,7 @@ export const MODELS: ModelInfo[] = [
 /// 別名表の見直しを1回走らせ、終わるまで待つ。
 async fn run_review(server: &TestServer) {
     let selfheal = Arc::clone(server.selfheal.as_ref().expect("自己修復が居る"));
-    let review = tokio::spawn(agent_core::selfheal::review_model_table(
+    let review = tokio::spawn(session_host_core::selfheal::review_model_table(
         selfheal,
         "9.9.9".to_string(),
     ));
@@ -341,7 +341,11 @@ async fn run_review(server: &TestServer) {
     review.await.expect("見直しが終わること");
 }
 
-async fn fire(server: &TestServer, session: &Arc<agent_core::session::Session>, event: &str) {
+async fn fire(
+    server: &TestServer,
+    session: &Arc<session_host_core::session::Session>,
+    event: &str,
+) {
     let payload = serde_json::json!({
         "session_id": "22222222-3333-4444-5555-666666666666",
         "hook_event_name": event,
@@ -370,7 +374,8 @@ async fn wait_for_repair_card(server: &TestServer) -> protocol::CardId {
 }
 
 fn pointer_path(dir: &Path) -> PathBuf {
-    dir.join("state").join(agent_core::parser::PARSER_POINTER)
+    dir.join("state")
+        .join(session_host_core::parser::PARSER_POINTER)
 }
 
 #[tokio::test]
@@ -577,10 +582,10 @@ async fn 直せなければ縮退したままクールダウンに入る() {
 
     // クールダウンが記録される
     for _ in 0..60 {
-        let state = agent_core::selfheal::state::SelfhealState::load(&dir.join("state"));
+        let state = session_host_core::selfheal::state::SelfhealState::load(&dir.join("state"));
         if state.failures.contains_key("9.9.9") {
             assert!(
-                state.in_cooldown("9.9.9", agent_core::session::now_ms()),
+                state.in_cooldown("9.9.9", session_host_core::session::now_ms()),
                 "失敗を記録したのに再挑戦を控えていない"
             );
             assert!(
@@ -790,7 +795,7 @@ async fn パースが壊れ始めたら実行時の検知が働く() {
     let (_session, transcript) = start_watched(&server, &dir).await;
 
     // 対応済みの版として登録しておく（版では発報させない）
-    let mut state = agent_core::selfheal::state::SelfhealState::default();
+    let mut state = session_host_core::selfheal::state::SelfhealState::default();
     state.record_success("2.1.220");
     state.save(&dir.join("state"));
 

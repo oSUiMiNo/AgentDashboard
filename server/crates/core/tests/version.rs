@@ -21,7 +21,7 @@
 
 mod common;
 
-use agent_core::version::{
+use session_host_core::version::{
     VERSION_HANDOVER_ENV, VERSION_POINTER, VERSION_SUPPORTED_ENV, VERSIONS_DIR_NAME,
 };
 use std::path::{Path, PathBuf};
@@ -126,7 +126,7 @@ impl Fixture {
             // 退避は起こさない。実行ファイル3本ぶんを毎回コピーすることになる
             .env(VERSION_SUPPORTED_ENV, "0")
             .env(
-                agent_core::session::lifecycle::CLAUDE_BIN_ENV,
+                session_host_core::session::lifecycle::CLAUDE_BIN_ENV,
                 testkit::fake_claude::path(),
             )
             .args(args);
@@ -353,7 +353,7 @@ fn 印が残っていたらポインタを無視して自分で続ける() {
     let fixture = Fixture::new("poisoned");
     let target = fixture.write_marker_version("0.9.9");
     fixture.point_at(&target);
-    agent_core::version::write_attempt(&fixture.state_dir(), &target);
+    session_host_core::version::write_attempt(&fixture.state_dir(), &target);
 
     let out = fixture.run_with_config(&fixture.config_that_cannot_start(), &[]);
     let text = text_of(&out);
@@ -368,14 +368,14 @@ fn 印が残っていたらポインタを無視して自分で続ける() {
     );
 
     // 無視したことは**状態として残る**（知らせでは、繋ぐ前に流れたぶんが届かない）
-    let outcome =
-        agent_core::version::read_outcome(&fixture.state_dir()).expect("結末が残っていること");
+    let outcome = session_host_core::version::read_outcome(&fixture.state_dir())
+        .expect("結末が残っていること");
     assert_eq!(outcome.attempted_path, target.display().to_string());
     assert!(outcome.failed_reason.is_some());
 
     // **印は取り出したら消える。** 残ると、直したあとも永久に無視され続ける
     assert!(
-        !agent_core::version::attempt_path(&fixture.state_dir()).exists(),
+        !session_host_core::version::attempt_path(&fixture.state_dir()).exists(),
         "印が残っています"
     );
 }
@@ -391,7 +391,7 @@ fn 乗り換える直前に印が書かれる() {
 
     // 行き先は待ち受けを確保しないまま終わるので、印は残ったまま
     assert!(
-        agent_core::version::attempt_path(&fixture.state_dir()).exists(),
+        session_host_core::version::attempt_path(&fixture.state_dir()).exists(),
         "乗り換えたのに印が書かれていません"
     );
 }
@@ -412,11 +412,11 @@ fn 乗り換えると自己修復のポインタと戻す先が落ちる() {
     let parser = fixture.dir.join("差し替えたパーサ");
     std::fs::write(&parser, b"x").expect("書けること");
     std::fs::write(
-        state_dir.join(agent_core::parser::PARSER_POINTER),
+        state_dir.join(session_host_core::parser::PARSER_POINTER),
         parser.to_string_lossy().as_bytes(),
     )
     .expect("書けること");
-    let mut selfheal = agent_core::selfheal::state::SelfhealState::load(&state_dir);
+    let mut selfheal = session_host_core::selfheal::state::SelfhealState::load(&state_dir);
     selfheal.previous_parser = Some(parser.clone());
     selfheal.save(&state_dir);
 
@@ -424,11 +424,13 @@ fn 乗り換えると自己修復のポインタと戻す先が落ちる() {
     assert!(text_of(&out).contains(MARKER));
 
     assert!(
-        !state_dir.join(agent_core::parser::PARSER_POINTER).exists(),
+        !state_dir
+            .join(session_host_core::parser::PARSER_POINTER)
+            .exists(),
         "自己修復のポインタが残っています"
     );
     assert_eq!(
-        agent_core::selfheal::state::SelfhealState::load(&state_dir).previous_parser,
+        session_host_core::selfheal::state::SelfhealState::load(&state_dir).previous_parser,
         None,
         "版をまたいで生き残ると、前の版が作ったパーサへ戻してしまう"
     );
@@ -501,7 +503,7 @@ fn 乗り換えた先が待ち受けまで届くと印は結末へ変わる() {
         .env_remove(VERSION_HANDOVER_ENV)
         .env(VERSION_SUPPORTED_ENV, "0")
         .env(
-            agent_core::session::lifecycle::CLAUDE_BIN_ENV,
+            session_host_core::session::lifecycle::CLAUDE_BIN_ENV,
             testkit::fake_claude::path(),
         )
         .arg("--config")
@@ -513,7 +515,7 @@ fn 乗り換えた先が待ち受けまで届くと印は結末へ変わる() {
 
     let started = wait_until(|| {
         std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
-            && !agent_core::version::attempt_path(&state_dir).exists()
+            && !session_host_core::version::attempt_path(&state_dir).exists()
     });
     let printed = std::fs::read_to_string(&log).unwrap_or_default();
     let _ = child.kill();
@@ -526,7 +528,8 @@ fn 乗り換えた先が待ち受けまで届くと印は結末へ変わる() {
         "乗り換えた先の実行ファイルを名乗っていません:\n{printed}"
     );
     // 印は結末へ変わる。**失敗の記録が残り続けない**
-    let outcome = agent_core::version::read_outcome(&state_dir).expect("結末が残っていること");
+    let outcome =
+        session_host_core::version::read_outcome(&state_dir).expect("結末が残っていること");
     assert_eq!(outcome.failed_reason, None, "成功として残ること");
     assert_eq!(outcome.attempted_path, target.display().to_string());
 }

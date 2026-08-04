@@ -11,11 +11,11 @@
 //! `config.toml` で `true` にして使っている利用者の設定を、引っ越しで黙って戻さない
 //! ためにある。
 //!
-//! # 共有の `AgentConfig` は不変のまま
+//! # 共有の `SessionHostConfig` は不変のまま
 //!
-//! 読むだけなので、`Arc<AgentConfig>` を `RwLock` へ広げる理由が最初から無い。
+//! 読むだけなので、`Arc<SessionHostConfig>` を `RwLock` へ広げる理由が最初から無い。
 
-use crate::config::AgentConfig;
+use crate::config::SessionHostConfig;
 use crate::model_aliases::AliasSeen;
 use crate::model_catalog::CatalogEntry;
 use protocol::PermissionMode;
@@ -36,7 +36,7 @@ pub struct SettingsStore {
 
 impl SettingsStore {
     pub fn new(
-        config: &AgentConfig,
+        config: &SessionHostConfig,
         available_modes: Vec<PermissionMode>,
         model_catalog: Vec<CatalogEntry>,
     ) -> Self {
@@ -45,7 +45,7 @@ impl SettingsStore {
 
     /// CLI の版まで明示して作る（モデルの表に添える。設計§13-4）。
     pub fn with_version(
-        config: &AgentConfig,
+        config: &SessionHostConfig,
         available_modes: Vec<PermissionMode>,
         model_catalog: Vec<CatalogEntry>,
         cli_version: String,
@@ -102,7 +102,7 @@ mod tests {
     fn 設定ファイルの値が初期値として読める() {
         // 記録に行が無いときの落とし先。**ここが `false` 固定になると、既に
         // `config.toml` で有効にしている利用者の設定が引っ越しで消える**
-        let mut config = AgentConfig::default();
+        let mut config = SessionHostConfig::default();
         assert!(!SettingsStore::new(&config, Vec::new(), Vec::new()).always_bypass_permissions());
 
         config.always_bypass_permissions = true;

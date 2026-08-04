@@ -15,8 +15,8 @@
 
 mod common;
 
-use agent_core::config::AgentConfig;
 use protocol::{CardId, Node, NodeId, TreeNode};
+use session_host_core::config::SessionHostConfig;
 use std::time::Duration;
 use testkit::fake_claude;
 
@@ -90,13 +90,13 @@ async fn コアレッシングでフレーム数が実際に減る() {
 
 /// 指定した合流の窓で一定量を流し、届いたフレーム数を返す。
 async fn frames_with_window(coalesce_ms: u64) -> usize {
-    let config = AgentConfig {
+    let config = SessionHostConfig {
         coalesce_ms,
         // 測っているのは PTY のフレーム合流であって statusLine ではない。
         // 注入したままだと、擬似 claude が数秒ごとに子プロセスを起こして
         // 測定対象と資源を取り合う（実際に本数が揺れて落ちた）
         inject_status_line: false,
-        ..AgentConfig::default()
+        ..SessionHostConfig::default()
     };
     let manager = common::manager_with(config);
     let (session, mut watcher) = common::start_session(&manager).await;

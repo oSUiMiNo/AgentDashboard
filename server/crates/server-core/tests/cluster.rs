@@ -24,10 +24,10 @@ use protocol::{
     CardId, Node, NodeId, ProjectId, SessionMeta, SessionStatus, TreeNode, ws::ServerMessage,
 };
 use server_core::{
-    agent::AgentHost as _,
+    agent::SessionHost as _,
     bus::{Bus, memory::MemoryBroker},
     cluster,
-    gateway::{AgentHub, RemoteAgent},
+    gateway::{RemoteSessionHost, SessionHostHub},
     registry::{AccountEvent, ReportOrigin, SessionRegistry},
 };
 use std::{net::SocketAddr, sync::Arc, time::Duration};
@@ -87,7 +87,7 @@ fn text_node(id: &str) -> TreeNode {
 /// サーバ1台ぶん。記録層・受け口・セッションホストの待ち受けを1組で持つ。
 struct Instance {
     registry: Arc<SessionRegistry>,
-    hub: Arc<AgentHub>,
+    hub: Arc<SessionHostHub>,
     addr: SocketAddr,
     task: tokio::task::JoinHandle<()>,
 }
@@ -115,7 +115,7 @@ async fn instance(db: &sea_orm::DatabaseConnection, broker: &Arc<MemoryBroker>) 
     let registry = SessionRegistry::load(db.clone(), WINDOW, Some(bus as Arc<dyn Bus>))
         .await
         .expect("記録層を立てられること");
-    let hub = AgentHub::new(db.clone(), Arc::clone(&registry));
+    let hub = SessionHostHub::new(db.clone(), Arc::clone(&registry));
 
     // セッションホストの受け口も本当に開ける。**繋ぐ先を選べる**ようにしないと、
     // 「ブラウザは A・PC は B」という配置そのものが作れない
@@ -138,7 +138,7 @@ async fn instance(db: &sea_orm::DatabaseConnection, broker: &Arc<MemoryBroker>) 
 }
 
 /// セッションホストとして繋ぎ、名乗りまで済ませる。
-async fn connect_agent(addr: SocketAddr, token: &str, name: &str) -> common::AgentSocket {
+async fn connect_agent(addr: SocketAddr, token: &str, name: &str) -> common::SessionHostSocket {
     let mut request =
         tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(format!(
             "ws://{addr}/agent/ws"
@@ -159,7 +159,7 @@ async fn connect_agent(addr: SocketAddr, token: &str, name: &str) -> common::Age
     let (socket, _) = tokio_tungstenite::connect_async(request)
         .await
         .expect("繋げること");
-    let mut socket = common::AgentSocket { socket };
+    let mut socket = common::SessionHostSocket { socket };
     socket.send(&common::hello(name)).await;
     socket
 }
@@ -452,7 +452,13 @@ async fn issue(db: &sea_orm::DatabaseConnection) -> (String, uuid::Uuid) {
 async fn split(
     db: &sea_orm::DatabaseConnection,
     broker: &Arc<MemoryBroker>,
-) -> (Instance, Instance, common::AgentSocket, CardId, uuid::Uuid) {
+) -> (
+    Instance,
+    Instance,
+    common::SessionHostSocket,
+    CardId,
+    uuid::Uuid,
+) {
     let (token, account_id) = issue(db).await;
     let a = instance(db, broker).await;
     let b = instance(db, broker).await;
@@ -480,7 +486,7 @@ async fn 別のインスタンスに繋がった_PC_へ指示が届く() {
         let broker = MemoryBroker::new();
         let (a, _b, mut agent, card_id, _account) = split(&backend.db, &broker).await;
 
-        RemoteAgent::new(Arc::clone(&a.hub))
+        RemoteSessionHost::new(Arc::clone(&a.hub))
             .send_input(card_id, "こんにちは".to_string())
             .await
             .expect("指示を出せること");
@@ -510,7 +516,7 @@ async fn 跨いでもキー入力はバイナリのまま届く() {
         let broker = MemoryBroker::new();
         let (a, _b, mut agent, card_id, _account) = split(&backend.db, &broker).await;
 
-        RemoteAgent::new(Arc::clone(&a.hub))
+        RemoteSessionHost::new(Arc::clone(&a.hub))
             .write_input(card_id, b"\x1b[A")
             .expect("入力を出せること");
 
@@ -532,7 +538,7 @@ async fn 別のインスタンスに繋がった_PC_でもセッションを起�
         let broker = MemoryBroker::new();
         let (a, _b, mut agent, _card_id, account_id) = split(&backend.db, &broker).await;
 
-        RemoteAgent::new(Arc::clone(&a.hub))
+        RemoteSessionHost::new(Arc::clone(&a.hub))
             .spawn(server_core::agent::SpawnRequest {
                 account_id,
                 // 繋がっているのは1台だけなので、宛先を選ばずに通る
@@ -562,7 +568,7 @@ async fn 連絡係が切れている間の跨ぎの指示は理由を返す() {
         let (a, _b, _agent, card_id, _account) = split(&backend.db, &broker).await;
 
         broker.cut();
-        let err = RemoteAgent::new(Arc::clone(&a.hub))
+        let err = RemoteSessionHost::new(Arc::clone(&a.hub))
             .send_input(card_id, "届かない".to_string())
             .await
             .expect_err("断られること");
@@ -600,7 +606,7 @@ async fn 別のインスタンスに繋がった_PC_の画面が見える() {
         let broker = MemoryBroker::new();
         let (a, _b, mut agent, card_id, _account) = split(&backend.db, &broker).await;
 
-        let remote = RemoteAgent::new(Arc::clone(&a.hub));
+        let remote = RemoteSessionHost::new(Arc::clone(&a.hub));
         let (_blank, mut frames) = remote
             .subscribe_pty(card_id, 1, 80, 24)
             .expect("端末を開けること");
@@ -644,7 +650,7 @@ async fn 画面の番号が飛んだら出し直してもらう() {
         let broker = MemoryBroker::new();
         let (a, _b, mut agent, card_id, _account) = split(&backend.db, &broker).await;
 
-        let remote = RemoteAgent::new(Arc::clone(&a.hub));
+        let remote = RemoteSessionHost::new(Arc::clone(&a.hub));
         let (_blank, mut frames) = remote
             .subscribe_pty(card_id, 1, 80, 24)
             .expect("端末を開けること");
@@ -707,10 +713,10 @@ async fn 見ている人が居なくなって初めて画面が止まる() {
         let (a, b, mut agent, card_id, _account) = split(&backend.db, &broker).await;
 
         // A と B の両方に視聴者を1人ずつ置く
-        RemoteAgent::new(Arc::clone(&a.hub))
+        RemoteSessionHost::new(Arc::clone(&a.hub))
             .subscribe_pty(card_id, 1, 80, 24)
             .expect("A で端末を開けること");
-        RemoteAgent::new(Arc::clone(&b.hub))
+        RemoteSessionHost::new(Arc::clone(&b.hub))
             .subscribe_pty(card_id, 2, 80, 24)
             .expect("B で端末を開けること");
         agent
@@ -720,7 +726,7 @@ async fn 見ている人が居なくなって初めて画面が止まる() {
             .await;
 
         // A の視聴者が去っても、B に居るので止めない
-        RemoteAgent::new(Arc::clone(&a.hub)).release_client(card_id, 1);
+        RemoteSessionHost::new(Arc::clone(&a.hub)).release_client(card_id, 1);
         agent
             .expect_none_of(
                 Duration::from_millis(500),
@@ -736,7 +742,7 @@ async fn 見ている人が居なくなって初めて画面が止まる() {
         );
 
         // 最後の1人が去ったら止める
-        RemoteAgent::new(Arc::clone(&b.hub)).release_client(card_id, 2);
+        RemoteSessionHost::new(Arc::clone(&b.hub)).release_client(card_id, 2);
         agent
             .wait_for("画面の停止", |message| {
                 matches!(message, protocol::a2s::ServerToAgent::UnsubScreen { .. })
@@ -944,7 +950,7 @@ async fn モデルの切替も跨いで届く() {
         let broker = MemoryBroker::new();
         let (a, _b, mut agent, card_id, _account) = split(&backend.db, &broker).await;
 
-        RemoteAgent::new(Arc::clone(&a.hub))
+        RemoteSessionHost::new(Arc::clone(&a.hub))
             .set_model(card_id, protocol::ModelId::new("opus"))
             .await
             .expect("指示を出せること");

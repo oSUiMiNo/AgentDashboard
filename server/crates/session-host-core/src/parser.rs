@@ -19,7 +19,7 @@
 //! 「残った」の間が開く。その間に落ちるとノードが静かに消えるので、条件を揃えた。
 //! **欠落より重複を選ぶ**という原則そのものは変わっていない。
 
-use crate::config::AgentConfig;
+use crate::config::SessionHostConfig;
 use crate::offsets::OffsetStore;
 use crate::session::SessionManager;
 use protocol::CardId;
@@ -79,7 +79,7 @@ impl ParserHandle {
 /// パーサ子プロセスの世話役。
 pub struct ParserSupervisor {
     manager: Arc<SessionManager>,
-    config: Arc<AgentConfig>,
+    config: Arc<SessionHostConfig>,
     /// 再開位置。**読むのはここ、進めるのは運び手**（設計§6-1）
     offsets: Arc<OffsetStore>,
     requests: mpsc::Sender<ParserRequest>,
@@ -110,7 +110,7 @@ impl ParserSupervisor {
     /// 2人が同じ置き場所を見る必要がある（設計§6-1）。
     pub fn start(
         manager: Arc<SessionManager>,
-        config: Arc<AgentConfig>,
+        config: Arc<SessionHostConfig>,
         offsets: Arc<OffsetStore>,
     ) -> Arc<Self> {
         let (requests, request_rx) = mpsc::channel(REQUEST_QUEUE);
@@ -178,7 +178,7 @@ impl ParserSupervisor {
     }
 }
 
-/// 自己修復が差し替えたパーサを指すポインタファイルの名前（[`AgentConfig::resolved_state_dir`] 配下）。
+/// 自己修復が差し替えたパーサを指すポインタファイルの名前（[`SessionHostConfig::resolved_state_dir`] 配下）。
 ///
 /// 中身は実行ファイルの絶対パス1行。symlink ではなくファイルにしてあるのは、
 /// 「いま何を使っているか」を人が開いて確かめられるようにするため。
@@ -191,7 +191,7 @@ pub const PARSER_POINTER: &str = "parser-current";
 /// - 環境変数が先頭なのは、テストがビルド済みのパーサを名指しできるようにするため
 /// - ポインタが隣より先なのは、自己修復が差し替えた新しいパーサを使わせるため。
 ///   ポインタの指す先が消えていたら既定へ戻る（起動できなくなるほうが困る）
-pub fn parser_program(config: &AgentConfig) -> PathBuf {
+pub fn parser_program(config: &SessionHostConfig) -> PathBuf {
     if let Ok(path) = std::env::var(PARSER_BIN_ENV) {
         return PathBuf::from(path);
     }
@@ -274,7 +274,7 @@ enum PumpEnd {
     Restart,
 }
 
-async fn spawn_parser(config: &AgentConfig) -> std::io::Result<tokio::process::Child> {
+async fn spawn_parser(config: &SessionHostConfig) -> std::io::Result<tokio::process::Child> {
     tokio::process::Command::new(parser_program(config))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

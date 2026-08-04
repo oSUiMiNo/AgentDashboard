@@ -5,7 +5,7 @@
 //! | モード | 誰が読むか |
 //! |---|---|
 //! | ローカル（同居） | `config.toml` を `agentdashboard_core::config::Config` が読み、ここへ**射影**する |
-//! | セルフホスト（分離） | `agent.toml` を [`AgentConfig::load`] が読む |
+//! | セルフホスト（分離） | `agent.toml` を [`SessionHostConfig::load`] が読む |
 //!
 //! フェーズ2 までは前者だけだったので「ファイルは読まない」と書いてあったが、
 //! セッションホストが別プロセスになると**読む主体が他に無い**（§21 読み替え8）。
@@ -157,7 +157,7 @@ fn non_empty_env(key: &str) -> Option<String> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
-pub struct AgentConfig {
+pub struct SessionHostConfig {
     /// Working のままこの秒数イベントが途絶したら Stalled とみなす
     pub stalled_threshold_secs: u64,
     /// PTY 出力をまとめてから送るまでの窓（ミリ秒）
@@ -252,7 +252,7 @@ pub struct AgentConfig {
     pub agent_name: Option<String>,
 }
 
-impl Default for AgentConfig {
+impl Default for SessionHostConfig {
     fn default() -> Self {
         Self {
             stalled_threshold_secs: DEFAULT_STALLED_THRESHOLD_SECS,
@@ -278,7 +278,7 @@ impl Default for AgentConfig {
     }
 }
 
-impl AgentConfig {
+impl SessionHostConfig {
     /// `agent.toml` を読む（セルフホストモードのセッションホスト）。
     ///
     /// 探索順は `explicit`（`--config`）→ カレントの `agent.toml` → 既定値。
@@ -458,18 +458,18 @@ mod tests {
         // ここが実装より遅れていると、増えたキーの存在に誰も気づけない
         // （`config.toml.example` 側で実際に起きた）
         let example = include_str!("../../../agent.toml.example");
-        let config = AgentConfig::from_toml_str(example).expect("雛形が読めること");
+        let config = SessionHostConfig::from_toml_str(example).expect("雛形が読めること");
         assert_eq!(
             config,
-            AgentConfig::default(),
+            SessionHostConfig::default(),
             "雛形の値が既定値と食い違っている"
         );
 
         let written: toml::Table = example.parse().expect("雛形が TOML として妥当なこと");
-        let toml::Value::Table(with_values) =
-            toml::Value::try_from(AgentConfig::default()).expect("既定値を TOML へ変換できること")
+        let toml::Value::Table(with_values) = toml::Value::try_from(SessionHostConfig::default())
+            .expect("既定値を TOML へ変換できること")
         else {
-            unreachable!("AgentConfig は構造体なのでテーブルになる");
+            unreachable!("SessionHostConfig は構造体なのでテーブルになる");
         };
         for key in with_values.keys() {
             assert!(
@@ -507,8 +507,8 @@ mod tests {
         // （nextest はテストごとにプロセスを分けるので出ないが、素の `cargo test` で出る）
         let _lock = env_lock();
         // 打ち間違いを黙って無視すると「設定したのに効かない」事故になる
-        assert!(AgentConfig::from_toml_str("coalesce_ms = 8").is_ok());
-        assert!(AgentConfig::from_toml_str("coalesce_mss = 8").is_err());
+        assert!(SessionHostConfig::from_toml_str("coalesce_ms = 8").is_ok());
+        assert!(SessionHostConfig::from_toml_str("coalesce_mss = 8").is_err());
     }
 
     /// そのキーへ入れて意味のある値（既定と必ず違うもの）。
@@ -529,9 +529,9 @@ mod tests {
         // 1つでも対応していないキーがあると「そのキーだけ設定できない」という、
         // 配ってからでないと気づけない穴になる。
         //
-        // **キーの一覧を手で持たない**のが要点。実装（`AgentConfig`）から取り出して
+        // **キーの一覧を手で持たない**のが要点。実装（`SessionHostConfig`）から取り出して
         // いるので、今後キーを増やしてもこのテストは自動でそれを見る
-        let shapes = AgentConfig::key_shapes();
+        let shapes = SessionHostConfig::key_shapes();
 
         // ただし「未指定が既定」のキーは、見本（`key_shapes` の probe）を埋め忘れると
         // 一覧そのものから消え、**この繰り返しの目にも入らない**。繋ぐための3キーは
@@ -548,12 +548,12 @@ mod tests {
             let raw = probe_value(&shape);
             unsafe { std::env::set_var(&name, &raw) };
 
-            let config = AgentConfig::from_toml_str("")
+            let config = SessionHostConfig::from_toml_str("")
                 .unwrap_or_else(|err| panic!("{key} を環境変数で指定したら読めなくなった: {err}"));
             let toml::Value::Table(written) =
                 toml::Value::try_from(config).expect("TOML へ変換できること")
             else {
-                unreachable!("AgentConfig は構造体なのでテーブルになる");
+                unreachable!("SessionHostConfig は構造体なのでテーブルになる");
             };
             let expected = env::parse_value(&key, &raw, &shape).expect("読めること");
             assert_eq!(
@@ -571,7 +571,7 @@ mod tests {
         let _lock = env_lock();
         // 設定ファイルを置いた PC へ、環境変数だけで別の値を渡せること
         unsafe { std::env::set_var("AGENTDASHBOARD_HOOK_PORT", "9100") };
-        let config = AgentConfig::from_toml_str("hook_port = 8787").expect("読めること");
+        let config = SessionHostConfig::from_toml_str("hook_port = 8787").expect("読めること");
         assert_eq!(config.hook_port, 9100);
         unsafe { std::env::remove_var("AGENTDASHBOARD_HOOK_PORT") };
     }
@@ -581,7 +581,7 @@ mod tests {
         let _lock = env_lock();
         // 素通しして「設定したのに効かない」になるより、その場で断るほうがよい
         unsafe { std::env::set_var("AGENTDASHBOARD_HOOK_PORT", "きゅうせん") };
-        let err = AgentConfig::from_toml_str("").expect_err("値エラーになること");
+        let err = SessionHostConfig::from_toml_str("").expect_err("値エラーになること");
         let message = err.to_string();
         assert!(
             message.contains("hook_port"),
@@ -597,16 +597,16 @@ mod tests {
     #[test]
     fn 名前は指定が無ければホスト名から決まる() {
         // 5分セットアップ（§14-4）で書く項目を1つでも減らすため。指定があれば必ず優先する
-        let named = AgentConfig {
+        let named = SessionHostConfig {
             agent_name: Some("  仕事用ノート  ".to_string()),
-            ..AgentConfig::default()
+            ..SessionHostConfig::default()
         };
         assert_eq!(named.resolved_agent_name(), "仕事用ノート");
 
         // 空白だけの指定は「指定なし」と同じ扱い（貼り付けの事故で名前が消えないように）
-        let blank = AgentConfig {
+        let blank = SessionHostConfig {
             agent_name: Some("   ".to_string()),
-            ..AgentConfig::default()
+            ..SessionHostConfig::default()
         };
         assert!(!blank.resolved_agent_name().is_empty());
     }
@@ -614,7 +614,7 @@ mod tests {
     #[test]
     fn 権限確認スキップの既定はオフ() {
         // 権限確認を飛ばす機能なので、既定は必ずスキップしない側に置く（設計§9）
-        assert!(!AgentConfig::default().always_bypass_permissions);
+        assert!(!SessionHostConfig::default().always_bypass_permissions);
     }
 
     #[test]
@@ -624,8 +624,8 @@ mod tests {
         // **保存先は記録へ移ったが、キーは消していない**（持ち出し設計§4）。
         // `deny_unknown_fields` なので、消すとこのキーを書いている利用者の
         // セッションホストが起動しなくなる。ここに書く値は行が無いときの初期値
-        let config =
-            AgentConfig::from_toml_str("always_bypass_permissions = true").expect("読めること");
+        let config = SessionHostConfig::from_toml_str("always_bypass_permissions = true")
+            .expect("読めること");
         assert!(config.always_bypass_permissions);
     }
 
@@ -633,18 +633,18 @@ mod tests {
     fn 明示したリポジトリが存在しなければ使わない() {
         // 設定の打ち間違いに気づかず「修復したつもり」で別の場所を触るほうが危ない。
         // 実在しないなら None にして、検知の通知だけに落とす
-        let config = AgentConfig {
+        let config = SessionHostConfig {
             selfheal_repo_dir: Some(PathBuf::from("/nonexistent/repo")),
-            ..AgentConfig::default()
+            ..SessionHostConfig::default()
         };
         assert_eq!(config.resolved_repo_dir(), None);
     }
 
     #[test]
     fn 状態の置き場所は明示があればそれを使う() {
-        let config = AgentConfig {
+        let config = SessionHostConfig {
             state_dir: Some(PathBuf::from("/tmp/agentdashboard-test")),
-            ..AgentConfig::default()
+            ..SessionHostConfig::default()
         };
         assert_eq!(
             config.resolved_state_dir(),
@@ -673,7 +673,7 @@ mod tests {
             std::env::remove_var(STATE_HOME_ENV);
             std::env::set_var(STATE_HOME_ENV_WINDOWS, "/tmp/ローカルアプリデータ");
         }
-        let resolved = AgentConfig::default().resolved_state_dir();
+        let resolved = SessionHostConfig::default().resolved_state_dir();
         unsafe {
             match saved_home {
                 Some(value) => std::env::set_var("HOME", value),

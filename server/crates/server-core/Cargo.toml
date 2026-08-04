@@ -2,7 +2,7 @@
 # ダッシュボードサーバ側のロジック（セルフホスト化設計§2-1）。
 # **PTY に触らない**のがこのクレートの存在理由で、`portable-pty` を依存に持たないことを
 # crates/core/tests/dependencies.rs が機械で検査する。PC 側へは境界 trait
-# （[`agent::AgentHost`]）越しにしか触れない。
+# （[`agent::SessionHost`]）越しにしか触れない。
 name = "server-core"
 version.workspace = true
 edition.workspace = true

@@ -877,7 +877,7 @@ exit "${STATUS}"
 <br/>
 
 ## crate の境界を跨ぐとき（セルフホスト化フェーズ1 以降）
-`agent-core`（PC 側）と `server-core`（サーバ側）は、**互いを知らない**のが存在理由。
+`session-host-core`（PC 側）と `server-core`（サーバ側）は、**互いを知らない**のが存在理由。
 どちらかがもう一方を `Cargo.toml` に足した瞬間に、この分け方は意味を失う。
 
 ### 境界は「使ったら落ちる」では守れない。依存の宣言そのものを検査する
@@ -892,7 +892,7 @@ dev-dependencies と混ざっており、testkit が擬似 claude を PTY で起
 
 ### テストのハーネスは `#[path]` で共有する。コピーしない
 セッションを相手にするヘルパ（擬似 claude の起動・PTY の監視・状態待ち）は
-`agent-core/tests/common/mod.rs` にあり、ブラウザ配信まで通す側は `#[path]` で
+`session-host-core/tests/common/mod.rs` にあり、ブラウザ配信まで通す側は `#[path]` で
 それを読み込んで「待ち受けるサーバ」のぶんだけを足している。
 
 **素直に写すと 150 行のコピーができ、片方だけが古くなる。** crate をまたぐが

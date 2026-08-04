@@ -20,7 +20,6 @@
 //! 誰でもよい**——見えないと、押せないことすら分からない。
 
 use crate::gate;
-use agent_core::{version, version_ops::VersionOps};
 use axum::{
     Extension, Json, Router,
     extract::{Path, State},
@@ -31,6 +30,7 @@ use protocol::{VersionEntry, VersionId};
 use serde::{Deserialize, Serialize};
 use server_core::auth::{AuthContext, AuthMode, Identity};
 use server_core::registry::SessionRegistry;
+use session_host_core::{version, version_ops::VersionOps};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -132,7 +132,7 @@ pub struct VersionsView {
 
 /// 取ってくる仕事の段階（設計§15）。
 ///
-/// **3つしか無い。** 細かく刻むには [`agent_core::version::install_version`] の中へ
+/// **3つしか無い。** 細かく刻むには [`session_host_core::version::install_version`] の中へ
 /// 通知の口を通すことになるが、窓は数十秒なので割に合わない（設計§24）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -188,7 +188,7 @@ pub struct LatestView {
 
 /// 記録から最新版を組み立てる。一度も読めていなければ `None`。
 fn latest_of(state_dir: &std::path::Path) -> Option<LatestView> {
-    let notice = agent_core::version_ops::read_notice(state_dir);
+    let notice = session_host_core::version_ops::read_notice(state_dir);
     (!notice.latest.is_empty()).then(|| LatestView {
         version: VersionId::new(notice.latest),
         prerelease: notice.prerelease,

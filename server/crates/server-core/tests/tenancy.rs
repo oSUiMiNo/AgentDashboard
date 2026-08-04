@@ -32,7 +32,7 @@ use protocol::{
     ws::{ClientMessage, ServerMessage},
 };
 use sea_orm::DatabaseConnection;
-use server_core::{db::pairing, gateway::AgentHub, registry::SessionRegistry};
+use server_core::{db::pairing, gateway::SessionHostHub, registry::SessionRegistry};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio_tungstenite::tungstenite;
 use uuid::Uuid;
@@ -54,7 +54,7 @@ struct Arena {
     db: DatabaseConnection,
     registry: Arc<SessionRegistry>,
     /// 繋がっている PC の集まり。失効を接続中へ効かせる確認に要る
-    hub: Arc<AgentHub>,
+    hub: Arc<SessionHostHub>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -71,9 +71,10 @@ impl Arena {
             .await
             .expect("記録層を立てられること");
         let auth = server_core::auth::AuthContext::server(db.clone(), &config);
-        let hub = AgentHub::new(db.clone(), Arc::clone(&registry));
-        let agent: Arc<dyn server_core::agent::AgentHost> =
-            Arc::new(server_core::gateway::RemoteAgent::new(Arc::clone(&hub)));
+        let hub = SessionHostHub::new(db.clone(), Arc::clone(&registry));
+        let agent: Arc<dyn server_core::agent::SessionHost> = Arc::new(
+            server_core::gateway::RemoteSessionHost::new(Arc::clone(&hub)),
+        );
         let ws_state =
             server_core::ws::AppState::new(agent, Arc::clone(&registry), Arc::clone(&config));
 
@@ -105,7 +106,7 @@ impl Arena {
     }
 
     /// アカウントを1つ用意し、その PC を繋いでカードを1枚作る。
-    async fn tenant(&self, name: &'static str) -> (Tenant, common::AgentSocket) {
+    async fn tenant(&self, name: &'static str) -> (Tenant, common::SessionHostSocket) {
         let account_id = pairing::ensure_account(&self.db, name)
             .await
             .expect("アカウントを用意できること");

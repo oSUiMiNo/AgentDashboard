@@ -25,7 +25,6 @@
 //! §13-4 のとおり `model_tables`（`agent_id` キー、ローカルは `"local"`）へ一本化した。
 //! CLI の版は PC ごとに違うので、ModelPicker は**セッションが属する PC の表**を見る。
 
-use agent_core::{session::SessionManager, settings::SettingsStore};
 use axum::{
     Extension, Json, Router,
     extract::State,
@@ -35,10 +34,11 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use server_core::{
-    account::AgentView,
+    account::SessionHostView,
     auth::{AuthContext, AuthMode, Identity},
     db,
 };
+use session_host_core::{session::SessionManager, settings::SettingsStore};
 use std::{collections::BTreeMap, sync::Arc};
 
 /// `GET /api/settings` の応答。
@@ -54,7 +54,7 @@ pub struct SettingsView {
     /// PC ごとのモデル表（設計§13-4）。キーは `agent_id`、ローカルは `"local"`
     pub model_tables: BTreeMap<String, serde_json::Value>,
     /// 登録済みの PC（設計§11-1・§11-2）。**PC 名バッジの引き先**
-    pub agents: Vec<AgentView>,
+    pub agents: Vec<SessionHostView>,
     /// 画面から変えられる間隔一式（設計§13-3）
     pub intervals: IntervalsView,
     /// LAN 開放のパスワード（設計§8-3）。**ローカルモードでしか意味を持たない**
@@ -118,7 +118,7 @@ pub fn routes(state: SettingsState) -> Router {
 /// 権限モードとトグルは、**起動している CLI がある場所**にしか無い。サーバモードには
 /// ローカルの CLI が居ないので、繋がっている PC が名乗ったもの（Hello）と、保存して
 /// ある表（`agents.model_table`）から組み立てる。
-pub fn server_routes(hub: Arc<server_core::gateway::AgentHub>) -> Router {
+pub fn server_routes(hub: Arc<server_core::gateway::SessionHostHub>) -> Router {
     Router::new()
         .route(
             "/api/settings",
@@ -130,7 +130,7 @@ pub fn server_routes(hub: Arc<server_core::gateway::AgentHub>) -> Router {
 }
 
 async fn api_server_settings(
-    State(hub): State<Arc<server_core::gateway::AgentHub>>,
+    State(hub): State<Arc<server_core::gateway::SessionHostHub>>,
     Extension(identity): Extension<Identity>,
 ) -> Result<Json<SettingsView>, (StatusCode, String)> {
     // 名乗った中身は DB にある（`agents.capabilities`）。**接続表ではなく保存を見る**
@@ -364,7 +364,7 @@ pub async fn api_update_settings(
 /// **トグルはこちらでも受ける**（持ち出し設計§6）。保存先が記録になったので、
 /// ローカルと同じ道で書ける。
 async fn api_server_update_settings(
-    State(hub): State<Arc<server_core::gateway::AgentHub>>,
+    State(hub): State<Arc<server_core::gateway::SessionHostHub>>,
     Extension(identity): Extension<Identity>,
     Json(update): Json<SettingsUpdate>,
 ) -> Result<Json<SettingsView>, (StatusCode, String)> {
@@ -493,7 +493,7 @@ async fn api_import(
 
 /// `GET /api/settings/export` — サーバモード。
 async fn api_server_export(
-    State(hub): State<Arc<server_core::gateway::AgentHub>>,
+    State(hub): State<Arc<server_core::gateway::SessionHostHub>>,
     Extension(identity): Extension<Identity>,
 ) -> Result<Response, (StatusCode, String)> {
     let intervals = db::settings::intervals(hub.db(), identity.account_id)
@@ -509,7 +509,7 @@ async fn api_server_export(
 
 /// `POST /api/settings/import` — サーバモード。
 async fn api_server_import(
-    State(hub): State<Arc<server_core::gateway::AgentHub>>,
+    State(hub): State<Arc<server_core::gateway::SessionHostHub>>,
     Extension(identity): Extension<Identity>,
     body: String,
 ) -> Result<Json<ImportOutcome>, (StatusCode, String)> {

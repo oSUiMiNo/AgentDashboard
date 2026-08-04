@@ -7,9 +7,9 @@
 
 mod common;
 
-use agent_core::session::pty::PtyProcess;
 use portable_pty::{CommandBuilder, PtySize};
 use protocol::SessionStatus;
+use session_host_core::session::pty::PtyProcess;
 use testkit::fake_claude;
 use tokio::{sync::mpsc, time::timeout};
 
@@ -250,7 +250,7 @@ async fn 起こしたセッションは_toml_が名乗る名前を申告する()
     let deep = root.join("app");
     std::fs::create_dir_all(&deep).expect("作業ディレクトリを作れること");
     std::fs::write(
-        root.join(agent_core::session::account_toml::FILE_NAME),
+        root.join(session_host_core::session::account_toml::FILE_NAME),
         "account = \"わたし\"\n",
     )
     .expect("書けること");

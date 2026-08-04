@@ -17,13 +17,14 @@
 //!
 //! 1. **フックの受信口を先に開く**。注入する settings に宛先の URL が焼き込まれるので、
 //!    セッションを起こす前に番号が確定していないと届かない（§5-3）
-//! 2. 報告の運び手（[`AgentLink`]）を作る。セッションの持ち主はこれを受け取ってから作る
+//! 2. 報告の運び手（[`SessionHostLink`]）を作る。セッションの持ち主はこれを受け取ってから作る
 //! 3. マネージャ → パーサ → 自己修復 → 接続開始
 
-use agent_core::{
-    config::AgentConfig,
+use clap::{Parser, Subcommand};
+use session_host_core::{
+    config::SessionHostConfig,
     hook_post, hooks,
-    link::{AgentLink, LinkConfig},
+    link::{LinkConfig, SessionHostLink},
     model_catalog::ModelCatalog,
     model_post,
     offsets::OffsetStore,
@@ -31,7 +32,6 @@ use agent_core::{
     selfheal,
     session::{SessionManager, lifecycle, permission},
 };
-use clap::{Parser, Subcommand};
 use std::{path::PathBuf, sync::Arc};
 
 #[derive(Parser)]
@@ -57,7 +57,7 @@ struct Cli {
 /// PC に置かれているのは配布されたセッションホストだけなので、転送の口をここに持たないと
 /// 「注入したコマンドが存在しない」ことになり、フックが1つも届かない。
 ///
-/// 中身はローカルモードの `agentdashboard` と同じもの（`agent_core` の関数）。
+/// 中身はローカルモードの `agentdashboard` と同じもの（`session_host_core` の関数）。
 #[derive(Subcommand)]
 enum Command {
     /// フックから起動され、stdin の JSON をセッションホストへ転送する（設計§7）
@@ -105,7 +105,7 @@ pub async fn run() -> anyhow::Result<()> {
         )
         .init();
 
-    let config = AgentConfig::load(cli.config.as_deref())?;
+    let config = SessionHostConfig::load(cli.config.as_deref())?;
     let Some(link_config) = link_config(&config) else {
         // **繋ぎ先が無ければ起動しない。** 繋がらないまま黙って動くと、PTY だけが
         // 増えていって誰も見ていない状態になる
@@ -117,7 +117,7 @@ pub async fn run() -> anyhow::Result<()> {
 
     // 1. フックの受信口を先に開いて、番号を確定させる（§5-3）
     let (hook_listener, hook_port) = hooks::bind(config.hook_port).await?;
-    let config = Arc::new(AgentConfig {
+    let config = Arc::new(SessionHostConfig {
         hook_port,
         ..config
     });
@@ -149,7 +149,7 @@ pub async fn run() -> anyhow::Result<()> {
 
     // 3. 報告の運び手。**繋ぎ始めるのはマネージャを作ってから**
     let offsets = OffsetStore::open(config.resolved_state_dir());
-    let link = AgentLink::new(
+    let link = SessionHostLink::new(
         link_config.with_capabilities(available_modes, config.always_bypass_permissions),
     );
 
@@ -218,7 +218,7 @@ pub async fn run() -> anyhow::Result<()> {
 ///
 /// PC の能力（受け付ける権限モード）は、CLI へ問い合わせてから
 /// [`LinkConfig::with_capabilities`] で添える。
-fn link_config(config: &AgentConfig) -> Option<LinkConfig> {
+fn link_config(config: &SessionHostConfig) -> Option<LinkConfig> {
     Some(LinkConfig {
         server_url: config.server_url.clone()?,
         pairing_token: config.pairing_token.clone()?,

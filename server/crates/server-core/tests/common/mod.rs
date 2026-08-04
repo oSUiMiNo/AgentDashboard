@@ -169,7 +169,7 @@ pub async fn connect_agent(
     addr: std::net::SocketAddr,
     token: Option<&str>,
     protocol: Option<&str>,
-) -> Result<AgentSocket, tungstenite::Error> {
+) -> Result<SessionHostSocket, tungstenite::Error> {
     let mut request = tungstenite::client::IntoClientRequest::into_client_request(format!(
         "ws://{addr}/agent/ws"
     ))
@@ -189,11 +189,15 @@ pub async fn connect_agent(
         );
     }
     let (socket, _) = tokio_tungstenite::connect_async(request).await?;
-    Ok(AgentSocket { socket })
+    Ok(SessionHostSocket { socket })
 }
 
 /// 名乗りまで済ませて繋ぐ（普通の使い方）。
-pub async fn connect_agent_as(addr: std::net::SocketAddr, token: &str, name: &str) -> AgentSocket {
+pub async fn connect_agent_as(
+    addr: std::net::SocketAddr,
+    token: &str,
+    name: &str,
+) -> SessionHostSocket {
     let mut socket = connect_agent(addr, Some(token), Some(A2S_PROTOCOL))
         .await
         .expect("繋げること");
@@ -201,13 +205,13 @@ pub async fn connect_agent_as(addr: std::net::SocketAddr, token: &str, name: &st
     socket
 }
 
-pub struct AgentSocket {
+pub struct SessionHostSocket {
     pub socket: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
 }
 
-impl AgentSocket {
+impl SessionHostSocket {
     pub async fn send(&mut self, message: &AgentMessage) {
         let text = serde_json::to_string(message).expect("組み立てられること");
         self.socket

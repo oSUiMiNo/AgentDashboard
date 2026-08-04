@@ -13,7 +13,7 @@
 //! `--ignored` を明示したときだけ走る。
 //!
 //! ```text
-//! ./scripts/cargo nextest run -p agent-core --test version_fetch --run-ignored all
+//! ./scripts/cargo nextest run -p session-host-core --test version_fetch --run-ignored all
 //! ```
 //!
 //! # なぜ `0.1.0` を取ってくるのか
@@ -25,8 +25,8 @@
 
 #![allow(non_snake_case)]
 
-use agent_core::{version, version_ops};
 use protocol::VersionId;
+use session_host_core::{version, version_ops};
 
 /// 取ってくる相手。**実在する別の版**であること。
 const TARGET: &str = "0.1.0";

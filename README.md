@@ -421,7 +421,7 @@ make dist-local    手元の OS 向けの配布アーカイブを1つ作る
 ### 構成
 ```
 server/                Cargo workspace
-  crates/agent-core/       PC 側の一式。PTY・フック受信・状態導出・パース・自己修復
+  crates/session-host-core/       PC 側の一式。PTY・フック受信・状態導出・パース・自己修復
   crates/server-core/      ブラウザ配信。WebSocket・REST・DB・アカウント・連絡係
   crates/core/             両者を1プロセスで束ねる配線（ローカルモード）と CLI
   crates/agent/            セッションホストの中身
@@ -436,7 +436,7 @@ fixtures/              ゴールデンフィクスチャ（自己修復のテス
 scripts/               cargo・dist のラッパー、フィクスチャ採取・匿名化
 ```
 
-**PTY を持つのは `agent-core` だけ、DB と連絡係を持つのは `server-core` だけ。** この線はコンパイラが守っており、破れていないことを `crates/core/tests/dependencies.rs` が機械で見ている。
+**PTY を持つのは `session-host-core` だけ、DB と連絡係を持つのは `server-core` だけ。** この線はコンパイラが守っており、破れていないことを `crates/core/tests/dependencies.rs` が機械で見ている。
 
 パーサを別プロセスに切り出しているのは自己修復のためだ。「フォーマットが変わったらパーサを直して差し替える」が成立するには、**直す対象**と**動き続けなければならないもの**（PTY 上の生きたセッション）がプロセスとして分かれている必要がある。
 

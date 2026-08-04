@@ -17,7 +17,7 @@ use crate::gateway::Capabilities;
 use crate::{
     auth::Identity,
     db::{self, entity, pairing},
-    gateway::AgentHub,
+    gateway::SessionHostHub,
 };
 use axum::{
     Extension, Json, Router,
@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
-pub fn routes(hub: Arc<AgentHub>) -> Router {
+pub fn routes(hub: Arc<SessionHostHub>) -> Router {
     Router::new()
         .route("/api/account/tokens", get(list_tokens).post(issue_token))
         .route(
@@ -55,7 +55,7 @@ pub struct TokenView {
 
 /// 登録済みの PC の1件（設計§11-1）。
 #[derive(Debug, Serialize)]
-pub struct AgentView {
+pub struct SessionHostView {
     pub id: Uuid,
     pub name: String,
     pub last_seen_at: Option<i64>,
@@ -70,7 +70,7 @@ pub struct AgentView {
 }
 
 async fn list_tokens(
-    State(hub): State<Arc<AgentHub>>,
+    State(hub): State<Arc<SessionHostHub>>,
     Extension(identity): Extension<Identity>,
 ) -> Result<Json<Vec<TokenView>>, (StatusCode, String)> {
     let rows = entity::pairing_tokens::Entity::find()
@@ -110,7 +110,7 @@ pub struct IssuedToken {
 }
 
 async fn issue_token(
-    State(hub): State<Arc<AgentHub>>,
+    State(hub): State<Arc<SessionHostHub>>,
     Extension(identity): Extension<Identity>,
     Json(request): Json<IssueRequest>,
 ) -> Result<Json<IssuedToken>, (StatusCode, String)> {
@@ -141,7 +141,7 @@ async fn issue_token(
 }
 
 async fn revoke_token(
-    State(hub): State<Arc<AgentHub>>,
+    State(hub): State<Arc<SessionHostHub>>,
     Extension(identity): Extension<Identity>,
     Path(token_id): Path<Uuid>,
 ) -> Result<StatusCode, (StatusCode, String)> {
@@ -169,9 +169,9 @@ async fn revoke_token(
 }
 
 async fn list_agents(
-    State(hub): State<Arc<AgentHub>>,
+    State(hub): State<Arc<SessionHostHub>>,
     Extension(identity): Extension<Identity>,
-) -> Result<Json<Vec<AgentView>>, (StatusCode, String)> {
+) -> Result<Json<Vec<SessionHostView>>, (StatusCode, String)> {
     Ok(Json(agents_of(&hub, identity.account_id).await?))
 }
 
@@ -180,9 +180,9 @@ async fn list_agents(
 /// `/api/settings` も同じものを返す（PC 名バッジの引き先。§11-2）ので、組み立てを
 /// 1箇所に置いてある——2つの口が別々に作ると、名前の出どころが2つになる。
 pub async fn agents_of(
-    hub: &Arc<AgentHub>,
+    hub: &Arc<SessionHostHub>,
     account_id: Uuid,
-) -> Result<Vec<AgentView>, (StatusCode, String)> {
+) -> Result<Vec<SessionHostView>, (StatusCode, String)> {
     let rows = entity::agents::Entity::find()
         .filter(entity::agents::Column::AccountId.eq(account_id))
         .order_by_asc(entity::agents::Column::CreatedAt)
@@ -202,7 +202,7 @@ pub async fn agents_of(
 
     Ok(rows
         .into_iter()
-        .map(|row| AgentView {
+        .map(|row| SessionHostView {
             connected: connected.contains(&row.id),
             // 名乗りは**この行と一緒に引けている**ので、聞き直さない（CICD設計§16）
             version: row
@@ -222,7 +222,7 @@ pub async fn agents_of(
 /// **`agents` の行そのものが無い**（A2S の受け口を持たないので、繋いでくる PC が
 /// 存在しない）。空を返すのが正しく、`"local"` を1台として並べたりはしない——
 /// 一覧に「この PC」というバッジが出ると、他に PC があるように見える。
-pub fn no_agents() -> Vec<AgentView> {
+pub fn no_agents() -> Vec<SessionHostView> {
     Vec::new()
 }
 

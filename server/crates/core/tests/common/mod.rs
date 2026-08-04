@@ -1,27 +1,27 @@
 //! ブラウザ配信まで通す統合テストの共通ヘルパ。
 //!
 //! セッションを相手にする部分（擬似 claude の起動・PTY の監視・状態待ち）は
-//! **agent-core 側のハーネスをそのまま読み込んで使う**。同じ内容を2つ持つと片方だけが
+//! **session-host-core 側のハーネスをそのまま読み込んで使う**。同じ内容を2つ持つと片方だけが
 //! 古くなるので、コピーはしない。ここに足すのは「待ち受けているサーバ」のぶんだけ。
 
 #![allow(dead_code)]
 
 // セッション側のハーネス。crate をまたぐが、テストのソースを直に読み込む形なので
-// 製品の依存は増えない（agent-core を test 用に公開する必要がない）。
-#[path = "../../../agent-core/tests/common/mod.rs"]
+// 製品の依存は増えない（session-host-core を test 用に公開する必要がない）。
+#[path = "../../../session-host-core/tests/common/mod.rs"]
 mod session;
 pub use session::*;
 
-use agent_core::{
+use agentdashboard_core::{LocalServer, config::Config, local};
+use protocol::ws::ServerMessage;
+use server_core::registry::SessionRegistry;
+use session_host_core::{
     claude_settings::ClaudeSettings,
     model_aliases::ModelAliases,
     offsets::OffsetStore,
     parser::ParserSupervisor,
     session::{Session, SessionManager},
 };
-use agentdashboard_core::{LocalServer, config::Config, local};
-use protocol::ws::ServerMessage;
-use server_core::registry::SessionRegistry;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{
     sync::broadcast,
@@ -111,7 +111,7 @@ pub struct TestServer {
     /// 立ち上げた場合のみ。パーサを使わないテストでは None
     pub parser: Option<Arc<ParserSupervisor>>,
     /// 立ち上げた場合のみ（自己修復のテストだけ）
-    pub selfheal: Option<Arc<agent_core::selfheal::Selfheal>>,
+    pub selfheal: Option<Arc<session_host_core::selfheal::Selfheal>>,
     pub config: Arc<Config>,
     /// ログイン後の入館証（設計§8-2）。
     ///
@@ -161,7 +161,7 @@ impl TestServer {
     /// コンテナの中から docker は叩けないので、ここは差し替えが前提になる。
     pub async fn start_with_selfheal(
         config: Config,
-        ops: Arc<dyn agent_core::selfheal::ops::SelfhealOps>,
+        ops: Arc<dyn session_host_core::selfheal::ops::SelfhealOps>,
     ) -> Self {
         Self::start_with_selfheal_and_program(
             config,
@@ -189,7 +189,7 @@ impl TestServer {
             None,
         )
         .await;
-        server.selfheal = Some(agent_core::selfheal::Selfheal::start(
+        server.selfheal = Some(session_host_core::selfheal::Selfheal::start(
             Arc::clone(&server.manager),
             Arc::clone(server.parser.as_ref().expect("パーサを起動している")),
             Arc::new(server.config.agent()),
@@ -203,7 +203,7 @@ impl TestServer {
     /// 起動する CLI を明示して自己修復も立ち上げる（実CLIの訓練用）。
     pub async fn start_with_selfheal_and_program(
         config: Config,
-        ops: Arc<dyn agent_core::selfheal::ops::SelfhealOps>,
+        ops: Arc<dyn session_host_core::selfheal::ops::SelfhealOps>,
         program: String,
     ) -> Self {
         // 差し替えの検証をするので、パーサの場所は**ポインタ経由**で決めさせる。
@@ -211,13 +211,13 @@ impl TestServer {
         let state_dir = config.agent().resolved_state_dir();
         std::fs::create_dir_all(&state_dir).expect("状態の置き場所を作れること");
         std::fs::write(
-            state_dir.join(agent_core::parser::PARSER_POINTER),
+            state_dir.join(session_host_core::parser::PARSER_POINTER),
             parser_program().to_string_lossy().as_bytes(),
         )
         .expect("ポインタを書けること");
 
         let mut server = Self::build_with(config, program, true, false, None).await;
-        server.selfheal = Some(agent_core::selfheal::Selfheal::start(
+        server.selfheal = Some(session_host_core::selfheal::Selfheal::start(
             Arc::clone(&server.manager),
             Arc::clone(server.parser.as_ref().expect("パーサを起動している")),
             Arc::new(server.config.agent()),
@@ -417,7 +417,7 @@ impl TestServer {
             // 本番と同じ入口（環境変数）でビルド済みのパーサを指す
             if name_parser_by_env {
                 unsafe {
-                    std::env::set_var(agent_core::parser::PARSER_BIN_ENV, parser_program());
+                    std::env::set_var(session_host_core::parser::PARSER_BIN_ENV, parser_program());
                 }
             }
             let parser = ParserSupervisor::start(
@@ -437,13 +437,14 @@ impl TestServer {
         // 「触られていないこと」を確かめるために持っている
         if settings_path.is_some() {
             // 本番と同じく `--help` からモードを読む（擬似 claude も choices を出す）
-            let modes = agent_core::session::permission::supported_modes(manager.program());
-            server = server.with_settings(Arc::new(agent_core::settings::SettingsStore::new(
-                &agent_config,
-                modes,
-                // 擬似 claude は対応表を持たない。空で通す
-                Vec::new(),
-            )));
+            let modes = session_host_core::session::permission::supported_modes(manager.program());
+            server =
+                server.with_settings(Arc::new(session_host_core::settings::SettingsStore::new(
+                    &agent_config,
+                    modes,
+                    // 擬似 claude は対応表を持たない。空で通す
+                    Vec::new(),
+                )));
         }
 
         // 接続元を差し替えるなら、**一番外側**で入れ替える。鍵の判定はこれより内側に
@@ -739,9 +740,9 @@ impl VersionWorkDir {
     ///
     /// 返すのは `agentdashboard` の場所（＝ポインタが指す先）。
     pub fn link_stored_version(&self, version: &str) -> PathBuf {
-        let dir = agent_core::version::versions_dir(&self.state_dir()).join(version);
+        let dir = session_host_core::version::versions_dir(&self.state_dir()).join(version);
         std::fs::create_dir_all(&dir).expect("保管庫を作れること");
-        for name in agent_core::version::BINARIES {
+        for name in session_host_core::version::BINARIES {
             std::fs::hard_link(testkit::binary_path(name), dir.join(name))
                 .expect("ハードリンクを張れること");
         }
@@ -751,7 +752,7 @@ impl VersionWorkDir {
     /// 次に起こす版を指す。
     pub fn point_at(&self, target: &std::path::Path) {
         std::fs::write(
-            agent_core::version::pointer_path(&self.state_dir()),
+            session_host_core::version::pointer_path(&self.state_dir()),
             target.to_string_lossy().as_bytes(),
         )
         .expect("ポインタを書けること");

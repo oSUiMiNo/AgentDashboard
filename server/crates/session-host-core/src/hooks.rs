@@ -58,7 +58,7 @@ pub fn routes(manager: Arc<SessionManager>) -> Router {
 ///
 /// 注入する settings にはフックの宛先 URL が焼き込まれるので、**セッションを起こす前に
 /// 番号が決まっていないと届かない**。だから「開く」と「配る」を2つに分けてある——
-/// 呼び出し側は [`bind`] で番号を取り、その番号を `AgentConfig::hook_port` に入れて
+/// 呼び出し側は [`bind`] で番号を取り、その番号を `SessionHostConfig::hook_port` に入れて
 /// マネージャを作り、最後に [`serve`] を呼ぶ。
 ///
 /// 待ち受けは **127.0.0.1 のみ**。フックの宛先はどちらのモードでも PC の中で、

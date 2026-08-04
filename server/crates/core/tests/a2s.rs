@@ -13,19 +13,19 @@
 
 mod common;
 
-use agent_core::{
-    config::AgentConfig,
-    events::EventSink,
-    link::{AgentLink, LinkConfig},
-    offsets::OffsetStore,
-    session::SessionManager,
-};
 use protocol::{CardId, SessionStatus, TreeNode};
 use server_core::{
-    agent::AgentHost,
+    agent::SessionHost,
     db::{pairing, settings as db_settings},
-    gateway::{AgentHub, RemoteAgent},
+    gateway::{RemoteSessionHost, SessionHostHub},
     registry::SessionRegistry,
+};
+use session_host_core::{
+    config::SessionHostConfig,
+    events::EventSink,
+    link::{LinkConfig, SessionHostLink},
+    offsets::OffsetStore,
+    session::SessionManager,
 };
 use std::{
     net::SocketAddr,
@@ -247,14 +247,14 @@ struct A2s {
     /// ブラウザ役が REST を叩く先（設定の読み込みなど）
     addr: SocketAddr,
     registry: Arc<SessionRegistry>,
-    hub: Arc<AgentHub>,
+    hub: Arc<SessionHostHub>,
     /// ブラウザの代わり（`ws.rs` が使うのと同じ口）
-    browser: Arc<dyn AgentHost>,
+    browser: Arc<dyn SessionHost>,
     account_id: uuid::Uuid,
     /// セッションホスト側
     manager: Arc<SessionManager>,
-    link: Arc<AgentLink>,
-    parser: Arc<agent_core::parser::ParserSupervisor>,
+    link: Arc<SessionHostLink>,
+    parser: Arc<session_host_core::parser::ParserSupervisor>,
     sniffer: Option<Arc<wire::Sniffer>>,
     server_task: tokio::task::JoinHandle<()>,
 }
@@ -291,7 +291,7 @@ impl A2s {
         let registry = SessionRegistry::load(db.clone(), WINDOW, None)
             .await
             .expect("記録層を立てられること");
-        let hub = AgentHub::new(db.clone(), Arc::clone(&registry));
+        let hub = SessionHostHub::new(db.clone(), Arc::clone(&registry));
 
         // **鍵なしの構成が名乗るアカウント**を使う。ブラウザ役が REST を叩くとき、
         // `AuthContext::local` は必ずこの行を名乗るので、別の行を作ると
@@ -324,7 +324,7 @@ impl A2s {
             .await
             .expect("トークンを発行できること");
 
-        let browser: Arc<dyn AgentHost> = Arc::new(RemoteAgent::new(Arc::clone(&hub)));
+        let browser: Arc<dyn SessionHost> = Arc::new(RemoteSessionHost::new(Arc::clone(&hub)));
         let ws_state = server_core::ws::AppState::new(
             Arc::clone(&browser),
             Arc::clone(&registry),
@@ -372,23 +372,26 @@ impl A2s {
 
         // **先にポートを確定させてから設定を作る。** 注入する settings にフックの宛先が
         // 焼き込まれるので、後から番号が変わると届かない（設計§5-3）
-        let (hook_listener, hook_port) = agent_core::hooks::bind(0)
+        let (hook_listener, hook_port) = session_host_core::hooks::bind(0)
             .await
             .expect("フックの受信口を開けること");
-        let agent_config = Arc::new(AgentConfig {
+        let agent_config = Arc::new(SessionHostConfig {
             state_dir: Some(dir.join("state")),
             claude_settings_path: Some(dir.join("claude-settings.json")),
             hook_port,
-            ..AgentConfig::default()
+            ..SessionHostConfig::default()
         });
         let offsets = OffsetStore::open(agent_config.resolved_state_dir());
         // 本番と同じ入口（環境変数）でビルド済みのパーサを指す。統合テストは
         // ライブラリとして動くので、`current_exe()` の隣にはパーサが居ない
         unsafe {
-            std::env::set_var(agent_core::parser::PARSER_BIN_ENV, common::parser_program());
+            std::env::set_var(
+                session_host_core::parser::PARSER_BIN_ENV,
+                common::parser_program(),
+            );
         }
 
-        let link = AgentLink::new(LinkConfig {
+        let link = SessionHostLink::new(LinkConfig {
             server_url,
             pairing_token: token,
             agent_name: "テスト用PC".to_string(),
@@ -400,8 +403,8 @@ impl A2s {
             common::fake_claude().to_string_lossy().into_owned(),
             Arc::clone(&link) as Arc<dyn EventSink>,
         );
-        agent_core::hooks::serve(hook_listener, Arc::clone(&manager));
-        let parser = agent_core::parser::ParserSupervisor::start(
+        session_host_core::hooks::serve(hook_listener, Arc::clone(&manager));
+        let parser = session_host_core::parser::ParserSupervisor::start(
             Arc::clone(&manager),
             Arc::clone(&agent_config),
             Arc::clone(&offsets),
@@ -482,7 +485,7 @@ impl A2s {
     }
 
     /// セッションホスト側でセッションを1本起こし、トランスクリプトの場所を教える。
-    fn start_session(&self) -> (Arc<agent_core::session::Session>, PathBuf) {
+    fn start_session(&self) -> (Arc<session_host_core::session::Session>, PathBuf) {
         let cwd = self.dir.join("project");
         std::fs::create_dir_all(&cwd).expect("作業ディレクトリを作れること");
         let session = self
@@ -492,7 +495,11 @@ impl A2s {
         (session, cwd.join("session.jsonl"))
     }
 
-    async fn tell_transcript(&self, session: &agent_core::session::Session, transcript: &Path) {
+    async fn tell_transcript(
+        &self,
+        session: &session_host_core::session::Session,
+        transcript: &Path,
+    ) {
         let payload = serde_json::json!({
             "session_id": "11111111-2222-3333-4444-555555555555",
             "transcript_path": transcript.to_string_lossy(),
@@ -1196,7 +1203,7 @@ async fn 画面の設定を変えると動いているセッションにも効�
 #[tokio::test]
 async fn 読み込んだ間隔は次の接続を待たずに配られる() {
     // **読み込みだけ別の道を作らない**（持ち出し設計§12）。ファイルから入った間隔も
-    // `PUT` と同じ経路（`AgentHub::set_intervals`）を通るので、繋がっている PC へ
+    // `PUT` と同じ経路（`SessionHostHub::set_intervals`）を通るので、繋がっている PC へ
     // その場で届く。届かないと、次に繋ぎ直すまで古い間隔で送り続ける
     let a2s = A2s::start_full("import-intervals", false, 600).await;
     let (session, transcript) = a2s.start_session();

@@ -1,6 +1,6 @@
 //! 版を見る口と消す口（CICD設計§12・§13・§14、テスト計画フェーズ2・3）。
 //!
-//! 一覧の中身そのもの（3本の版が揃うか・並び順）は `agent-core` の単体で固めてある。
+//! 一覧の中身そのもの（3本の版が揃うか・並び順）は `session-host-core` の単体で固めてある。
 //! ここで見るのは**口としての振る舞い**——使えない構成では出さないこと、錠が効くこと、
 //! 消した結果が次の一覧へ反映されること。
 //!
@@ -20,8 +20,8 @@
 
 mod common;
 
-use agent_core::version::{self, VERSION_SUPPORTED_ENV};
 use protocol::VersionId;
+use session_host_core::version::{self, VERSION_SUPPORTED_ENV};
 use std::path::Path;
 
 /// 版を名乗るだけの一式を保管庫へ置く。
@@ -274,9 +274,9 @@ async fn 最後に読めた最新版が一覧に載る() {
     // 一度も見に行けていなければ載らない
     assert!(view(&server).await["latest"].is_null());
 
-    agent_core::version_ops::record_latest(
+    session_host_core::version_ops::record_latest(
         &state_dir,
-        &agent_core::version_ops::Latest {
+        &session_host_core::version_ops::Latest {
             version: VersionId::new("0.9.0"),
             prerelease: false,
             has_artifact: true,
@@ -515,7 +515,7 @@ chmod 755 "$d/agentdashboard" "$d/agentdashboard-agent" "$d/transcript-parser"
 
     unsafe {
         std::env::set_var(
-            agent_core::version_ops::RELEASE_BASE_ENV,
+            session_host_core::version_ops::RELEASE_BASE_ENV,
             format!("file://{}", dir.path().display()),
         )
     };

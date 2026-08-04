@@ -18,9 +18,9 @@ path = "src/lib.rs"
 
 [dependencies]
 protocol.workspace = true
-agent-core.workspace = true
+session-host-core.workspace = true
 server-core.workspace = true
-# 境界（server_core::agent::AgentHost）をローカル直結で実装するために使う
+# 境界（server_core::agent::SessionHost）をローカル直結で実装するために使う
 async-trait.workspace = true
 bytes.workspace = true
 serde.workspace = true
@@ -45,7 +45,7 @@ sea-orm.workspace = true
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
 # 統合テストだけが直に使う。**通常の依存には入れない** — 製品コードから PTY を触るのは
-# agent-core の仕事で、その境界は crates/core/tests/dependencies.rs が見張っている
+# session-host-core の仕事で、その境界は crates/core/tests/dependencies.rs が見張っている
 portable-pty.workspace = true
 # 画面配信のテストで**ブラウザ（xterm.js）の役**をさせる。届いたフレームを同じ意味論で
 # 書き戻し、画面が再現できることを機械で確かめるために使う（設計§7-3）

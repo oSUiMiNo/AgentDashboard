@@ -3,58 +3,21 @@
 version = 4
 
 [[package]]
-name = "agent-core"
-version = "0.1.4"
-dependencies = [
- "anyhow",
- "axum",
- "bytes",
- "futures-util",
- "portable-pty",
- "protocol",
- "serde",
- "serde_json",
- "testkit",
- "thiserror 2.0.19",
- "tokio",
- "tokio-tungstenite",
- "toml",
- "tracing",
- "uuid",
- "vt100",
-]
-
-[[package]]
 name = "agentdashboard"
 version = "0.1.4"
 dependencies = [
- "agent-core",
- "agentdashboard-agent",
  "agentdashboard-core",
  "anyhow",
  "serde_json",
+ "session-host",
+ "session-host-core",
  "transcript-parser",
-]
-
-[[package]]
-name = "agentdashboard-agent"
-version = "0.1.4"
-dependencies = [
- "agent-core",
- "anyhow",
- "clap",
- "protocol",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
 name = "agentdashboard-core"
 version = "0.1.4"
 dependencies = [
- "agent-core",
  "anyhow",
  "async-trait",
  "axum",
@@ -67,6 +30,7 @@ dependencies = [
  "serde",
  "serde_json",
  "server-core",
+ "session-host-core",
  "testkit",
  "thiserror 2.0.19",
  "tokio",
@@ -2863,6 +2827,42 @@ dependencies = [
  "tower-sessions",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "session-host"
+version = "0.1.4"
+dependencies = [
+ "anyhow",
+ "clap",
+ "protocol",
+ "serde_json",
+ "session-host-core",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "session-host-core"
+version = "0.1.4"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bytes",
+ "futures-util",
+ "portable-pty",
+ "protocol",
+ "serde",
+ "serde_json",
+ "testkit",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-tungstenite",
+ "toml",
+ "tracing",
+ "uuid",
+ "vt100",
 ]
 
 [[package]]

@@ -1,14 +1,14 @@
 //! ダッシュボードサーバ側のロジック（セルフホスト化設計§2-1）。
 //!
 //! ブラウザとの WebSocket・REST・web アセットの配信を持つ。**PTY には触らない**のが
-//! このクレートの存在理由で、PC 側へは境界 trait（[`agent::AgentHost`]）越しにしか
+//! このクレートの存在理由で、PC 側へは境界 trait（[`agent::SessionHost`]）越しにしか
 //! 触れない。境界が守られていることは `crates/core/tests/dependencies.rs` が機械で検査する。
 //!
-//! ローカルモードでは [`agent_core`] と同じプロセスに同居し、境界はプロセス内の直結に
+//! ローカルモードでは [`session_host_core`] と同じプロセスに同居し、境界はプロセス内の直結に
 //! なる。セルフホストモードでは同じ境界の向こうが A2S 越しのセッションホストに変わる
 //! （設計§2-3）。**どちらのモードでもブラウザから見た口は変わらない。**
 //!
-//! [`agent_core`]: https://docs.rs/agent-core
+//! [`session_host_core`]: https://docs.rs/session-host-core
 
 pub mod account;
 pub mod agent;

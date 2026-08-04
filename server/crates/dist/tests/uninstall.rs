@@ -278,7 +278,7 @@ fn dry_runでは保管庫が行そのもので名指しされる() {
 fn 保管庫の置き場所が実装と食い違っていない() {
     // 実装が名前を変えたのに消す側が古い名前のままだと、**保管庫だけが取り残される**。
     // しかも消す道は「完了しました」と言うので、誰も気づけない
-    use agent_core::version::{VERSION_POINTER, VERSIONS_DIR_NAME};
+    use session_host_core::version::{VERSION_POINTER, VERSIONS_DIR_NAME};
 
     let unix = script_text("uninstall.sh");
     let windows = script_text("uninstall.ps1");
@@ -368,9 +368,9 @@ fn 配る実行ファイルの顔ぶれが一致している() {
     // **実装も同じ顔ぶれを持っている**（保管庫へ控えるのも3本揃いを確かめるのも
     // あちらの仕事）。3つが揃っていることをここで一度に見る
     assert_eq!(
-        agent_core::version::BINARIES.as_slice(),
+        session_host_core::version::BINARIES.as_slice(),
         BINARIES,
-        "実装（agent_core::version::BINARIES）と消す道の顔ぶれが違います"
+        "実装（session_host_core::version::BINARIES）と消す道の顔ぶれが違います"
     );
 
     let script = script_text("uninstall.sh");
@@ -427,7 +427,7 @@ fn 控えの組み立て方が実装の部品と食い違っていない() {
     // いまは実行ファイルへ聞くので、この控えが使われるのは**聞けなかったときだけ**。
     // それでも食い違えば同じことが起きるので、**実装が公開している部品**と突き合わせる。
     // 実装側を直してこちらを直し忘れたら、ここで落ちる。
-    use agent_core::config::{
+    use session_host_core::config::{
         STATE_DIR_NAME, STATE_HOME_ENV, STATE_HOME_ENV_WINDOWS, STATE_HOME_RELATIVE,
     };
 

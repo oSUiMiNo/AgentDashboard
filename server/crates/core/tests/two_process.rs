@@ -447,10 +447,13 @@ fn spawn_agent(config: &Path) -> Child {
         .arg("--config")
         .arg(config)
         .env(
-            agent_core::session::lifecycle::CLAUDE_BIN_ENV,
+            session_host_core::session::lifecycle::CLAUDE_BIN_ENV,
             common::fake_claude(),
         )
-        .env(agent_core::parser::PARSER_BIN_ENV, common::parser_program())
+        .env(
+            session_host_core::parser::PARSER_BIN_ENV,
+            common::parser_program(),
+        )
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()

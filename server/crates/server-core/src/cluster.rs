@@ -14,7 +14,7 @@
 
 use crate::{
     bus::{self, BusMessage, BusState},
-    gateway::{AgentCommand, AgentHub},
+    gateway::{SessionHostCommand, SessionHostHub},
     registry::SessionRegistry,
 };
 use std::sync::Arc;
@@ -25,7 +25,7 @@ use tokio::sync::{mpsc, watch};
 /// 呼ぶのは組み立てる側（`agentdashboard_core`）で、**連絡係が居るときだけ**。
 pub fn start(
     registry: Arc<SessionRegistry>,
-    hub: Arc<AgentHub>,
+    hub: Arc<SessionHostHub>,
     incoming: mpsc::UnboundedReceiver<BusMessage>,
     state: watch::Receiver<BusState>,
 ) {
@@ -75,7 +75,7 @@ async fn route(
 ///
 /// **知らせとは別の列**にしてある。知らせは稀で重く（DB を引くことがある）、画面は
 /// 頻繁で軽い——同じ列に並べると、知らせ1件の処理で画面が止まる。
-async fn frames_loop(hub: Arc<AgentHub>, mut frames: mpsc::UnboundedReceiver<BusMessage>) {
+async fn frames_loop(hub: Arc<SessionHostHub>, mut frames: mpsc::UnboundedReceiver<BusMessage>) {
     while let Some(message) = frames.recv().await {
         hub.deliver_bus_screen(&message.payload);
     }
@@ -83,7 +83,7 @@ async fn frames_loop(hub: Arc<AgentHub>, mut frames: mpsc::UnboundedReceiver<Bus
 
 /// PC への指示を、自分が持っている接続へ渡す。
 async fn cmds_loop(
-    hub: Arc<AgentHub>,
+    hub: Arc<SessionHostHub>,
     registry: Arc<SessionRegistry>,
     mut cmds: mpsc::UnboundedReceiver<BusMessage>,
 ) {
@@ -91,7 +91,7 @@ async fn cmds_loop(
         let Some(agent_id) = bus::parse_agent_cmd(&message.channel) else {
             continue;
         };
-        let Some((from, command)) = bus::decode_json::<AgentCommand>(&message.payload) else {
+        let Some((from, command)) = bus::decode_json::<SessionHostCommand>(&message.payload) else {
             continue;
         };
         // 自分が出したものは、出す前に自分の接続表を見て直に送っている。
@@ -106,7 +106,7 @@ async fn cmds_loop(
 /// アカウントの知らせを取り込む。
 async fn events_loop(
     registry: Arc<SessionRegistry>,
-    hub: Arc<AgentHub>,
+    hub: Arc<SessionHostHub>,
     mut events: mpsc::UnboundedReceiver<BusMessage>,
 ) {
     while let Some(message) = events.recv().await {

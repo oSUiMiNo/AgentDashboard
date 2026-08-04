@@ -79,7 +79,7 @@ pub trait EventSink: Send + Sync + 'static {
     ///
     /// 画面を作るのは**セルフホストモードだけ**で、ローカルモードは生バイトを直接配る
     /// （要件5-1）。この2つを分けているのは、他でもない「報告先が誰か」である——
-    /// A2S の向こうへ運ぶ実装（[`crate::link::AgentLink`]）が居ることが、そのまま
+    /// A2S の向こうへ運ぶ実装（[`crate::link::SessionHostLink`]）が居ることが、そのまま
     /// セルフホストモードの定義になっている。設定キーを増やして二重に決めると、
     /// 食い違ったときにどちらが正か分からなくなる。
     ///
@@ -105,7 +105,7 @@ pub trait EventSink: Send + Sync + 'static {
 /// 結果として、この報告先を使うプロセスは次の起動で読み直す——**欠落より重複**（§6-1）。
 ///
 /// 製品の経路（ローカルモードは `agentdashboard_core::local::ReportingSink`、
-/// セルフホストは [`crate::link::AgentLink`]）は、どちらも記録に入ってから進める。
+/// セルフホストは [`crate::link::SessionHostLink`]）は、どちらも記録に入ってから進める。
 #[derive(Debug)]
 pub struct LocalEventBus {
     events: broadcast::Sender<ServerMessage>,

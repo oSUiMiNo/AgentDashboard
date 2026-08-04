@@ -86,7 +86,7 @@ async fn start_session_with_transcript(
     dir: &std::path::Path,
 ) -> (
     TestServer,
-    std::sync::Arc<agent_core::session::Session>,
+    std::sync::Arc<session_host_core::session::Session>,
     PathBuf,
 ) {
     let server = TestServer::start_with_parser(config_for(dir)).await;

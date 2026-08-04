@@ -15,12 +15,12 @@ use protocol::{
     a2s::{A2S_PROTOCOL, A2S_VERSION, AgentMessage, BatchId, ServerToAgent},
 };
 use sea_orm::DatabaseConnection;
-use server_core::{db::pairing, gateway::AgentHub, registry::SessionRegistry};
+use server_core::{db::pairing, gateway::SessionHostHub, registry::SessionRegistry};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio_tungstenite::tungstenite;
 use uuid::Uuid;
 
-use common::{AgentSocket, hello, meta};
+use common::{SessionHostSocket, hello, meta};
 
 const WINDOW: usize = 100;
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -28,7 +28,7 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 /// 待ち受けているセッションホスト受け口。
 struct TestGateway {
     addr: SocketAddr,
-    hub: Arc<AgentHub>,
+    hub: Arc<SessionHostHub>,
     registry: Arc<SessionRegistry>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -38,7 +38,7 @@ impl TestGateway {
         let registry = SessionRegistry::load(db.clone(), WINDOW, None)
             .await
             .expect("記録層を立てられること");
-        let hub = AgentHub::new(db, Arc::clone(&registry));
+        let hub = SessionHostHub::new(db, Arc::clone(&registry));
 
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -62,7 +62,7 @@ impl TestGateway {
         &self,
         token: Option<&str>,
         protocol: Option<&str>,
-    ) -> Result<AgentSocket, tungstenite::Error> {
+    ) -> Result<SessionHostSocket, tungstenite::Error> {
         let mut request = tungstenite::client::IntoClientRequest::into_client_request(format!(
             "ws://{}/agent/ws",
             self.addr
@@ -83,11 +83,11 @@ impl TestGateway {
             );
         }
         let (socket, _) = tokio_tungstenite::connect_async(request).await?;
-        Ok(AgentSocket { socket })
+        Ok(SessionHostSocket { socket })
     }
 
     /// 名乗りまで済ませて繋ぐ（普通の使い方）。
-    async fn connect_as(&self, token: &str, name: &str) -> AgentSocket {
+    async fn connect_as(&self, token: &str, name: &str) -> SessionHostSocket {
         let mut socket = self
             .connect(Some(token), Some(A2S_PROTOCOL))
             .await
@@ -466,9 +466,9 @@ async fn 画面は種別を移し替えて配られ_見る人が居なくなる�
         .await;
 
         // --- 見る人が現れた -------------------------------------------------
-        let browser = server_core::gateway::RemoteAgent::new(Arc::clone(&gateway.hub));
+        let browser = server_core::gateway::RemoteSessionHost::new(Arc::clone(&gateway.hub));
         let (blank, mut frames) =
-            server_core::agent::AgentHost::subscribe_pty(&browser, card_id, 1, 100, 30)
+            server_core::agent::SessionHost::subscribe_pty(&browser, card_id, 1, 100, 30)
                 .unwrap_or_else(|| panic!("[{}] 端末を開けること", backend.name));
         assert!(
             protocol::frame::decode(&blank)
@@ -535,16 +535,16 @@ async fn 画面は種別を移し替えて配られ_見る人が居なくなる�
         );
 
         // --- 2人目が入っても、1人残っていれば止めない ----------------------
-        let _second = server_core::agent::AgentHost::subscribe_pty(&browser, card_id, 2, 100, 30);
+        let _second = server_core::agent::SessionHost::subscribe_pty(&browser, card_id, 2, 100, 30);
         socket
             .wait_for("2人目ぶんの購読", |message| {
                 matches!(message, ServerToAgent::SubScreen { .. })
             })
             .await;
-        server_core::agent::AgentHost::release_client(&browser, card_id, 1);
+        server_core::agent::SessionHost::release_client(&browser, card_id, 1);
 
         // --- 最後の1人が去ったら止める --------------------------------------
-        server_core::agent::AgentHost::release_client(&browser, card_id, 2);
+        server_core::agent::SessionHost::release_client(&browser, card_id, 2);
         let stop = socket
             .wait_for("画面の停止", |message| {
                 matches!(message, ServerToAgent::UnsubScreen { .. })

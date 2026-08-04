@@ -40,7 +40,7 @@ path = "src/bin/transcript-parser.rs"
 
 [dependencies]
 agentdashboard-core = { path = "../core" }
-agentdashboard-agent = { path = "../agent" }
+session-host = { path = "../session-host" }
 transcript-parser = { path = "../transcript-parser" }
 anyhow.workspace = true
 
@@ -50,4 +50,4 @@ serde_json.workspace = true
 # 記録の置き場所の**部品**（`STATE_DIR_NAME` など）を、消す道の門から突き合わせるため。
 # **dev なので境界の検査（`crates/core/tests/dependencies.rs`）には数えられない**——
 # あちらは通常の依存だけを辿る
-agent-core = { path = "../agent-core" }
+session-host-core = { path = "../session-host-core" }

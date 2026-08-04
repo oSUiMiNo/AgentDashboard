@@ -18,7 +18,7 @@
 //! # 作り直し方
 //!
 //! ```text
-//! AGENTDASHBOARD_UPDATE_SCREEN_GOLDEN=1 scripts/cargo test -p agent-core --test screen_golden
+//! AGENTDASHBOARD_UPDATE_SCREEN_GOLDEN=1 scripts/cargo test -p session-host-core --test screen_golden
 //! ```
 //!
 //! 作り直したら**必ず** `scripts/sanitize-fixtures.py` を通す（公開リポジトリなので、
