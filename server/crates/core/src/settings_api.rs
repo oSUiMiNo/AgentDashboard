@@ -204,6 +204,25 @@ pub struct SettingsUpdate {
 }
 
 impl SettingsUpdate {
+    /// 入れてよい値かを確かめる。**ファイルからの読み込みと同じ検査を通す**（持ち出し
+    /// 設計§9）。
+    ///
+    /// 画面は選択肢と入力欄で値を絞っているが、REST は直に叩ける。ここを通さないと
+    /// `sync_interval_secs = 0` のような値がそのまま入る。
+    fn check(&self) -> Result<(), (StatusCode, String)> {
+        for (key, value) in [
+            (db::settings::SYNC_INTERVAL_SECS, self.sync_interval_secs),
+            (db::settings::SCREEN_INTERVAL_MS, self.screen_interval_ms),
+            (db::settings::SCROLLBACK_LINES, self.scrollback_lines),
+        ] {
+            if let Some(value) = value {
+                db::settings::check(key, &serde_json::json!(value))
+                    .map_err(|reason| (StatusCode::BAD_REQUEST, reason))?;
+            }
+        }
+        Ok(())
+    }
+
     /// 間隔の指定が1つでもあるか。
     fn touches_intervals(&self) -> bool {
         self.sync_interval_secs.is_some()
@@ -264,6 +283,8 @@ pub async fn api_update_settings(
     Extension(identity): Extension<Identity>,
     Json(update): Json<SettingsUpdate>,
 ) -> Result<Json<SettingsView>, (StatusCode, String)> {
+    update.check()?;
+
     if let Some(password) = &update.lan_password {
         // **登録できるのは 127.0.0.1 からだけ**（設計§8-3）。LAN の向こうから
         // 変えられると、いま入っている誰かが鍵を掛け替えられる
@@ -336,6 +357,8 @@ async fn api_server_update_settings(
     Extension(identity): Extension<Identity>,
     Json(update): Json<SettingsUpdate>,
 ) -> Result<Json<SettingsView>, (StatusCode, String)> {
+    update.check()?;
+
     if update.lan_password.is_some() {
         return Err((
             StatusCode::FORBIDDEN,

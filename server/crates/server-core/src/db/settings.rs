@@ -56,6 +56,57 @@ pub const LAN_PASSWORD_HASH: &str = "lan_password_hash";
 pub const UPDATE_CHECK_ENABLED: &str = "update_check_enabled";
 pub const DEFAULT_UPDATE_CHECK_ENABLED: bool = true;
 
+/// アカウントに属する設定のキー（持ち出し設計§7）。**書き出す対象はこれで決まる。**
+///
+/// サーバ全体スコープのもの（LAN パスワード・更新確認）はここに入らないので、
+/// **秘密が持ち出しへ混ざる余地が構造的に無い**。裏返すと、**アカウントスコープへ
+/// 秘密を置いてはいけない**——ここが持ち出しの対象そのものになる。
+pub const ACCOUNT_KEYS: [&str; 4] = [
+    ALWAYS_BYPASS_PERMISSIONS,
+    SYNC_INTERVAL_SECS,
+    SCREEN_INTERVAL_MS,
+    SCROLLBACK_LINES,
+];
+
+/// 入れてよい間隔の範囲。画面の選択肢を含む、余裕のある幅にしてある。
+///
+/// **上限を置くのは、事故の桁を止めるため**。0 は「休みなく送る」と読めてしまうので
+/// 下限も要る。
+pub const SYNC_INTERVAL_SECS_RANGE: std::ops::RangeInclusive<u64> = 1..=86_400;
+pub const SCREEN_INTERVAL_MS_RANGE: std::ops::RangeInclusive<u64> = 10..=600_000;
+pub const SCROLLBACK_LINES_RANGE: std::ops::RangeInclusive<u64> = 1..=1_000_000;
+
+/// その値を入れてよいか。**入口が違っても同じ答えになる**ように、検査はここ1か所に置く
+/// （持ち出し設計§9）。
+///
+/// 画面からの `PUT` も、ファイルからの読み込みも、書く前にここを通る。片方だけ厳しいと、
+/// **同じ値が入口によって通ったり通らなかったりする**——追いにくい食い違いになる。
+///
+/// 断る理由は**どのキーがどう駄目か**が分かる文にする。そのまま利用者へ見せる。
+pub fn check(key: &str, value: &serde_json::Value) -> Result<(), String> {
+    let number = |range: &std::ops::RangeInclusive<u64>| -> Result<(), String> {
+        match value.as_u64() {
+            Some(number) if range.contains(&number) => Ok(()),
+            Some(number) => Err(format!(
+                "{key} は {}〜{} の範囲で指定してください（{number} が入っています）",
+                range.start(),
+                range.end()
+            )),
+            None => Err(format!("{key} には数値を指定してください")),
+        }
+    };
+    match key {
+        ALWAYS_BYPASS_PERMISSIONS => value
+            .as_bool()
+            .map(|_| ())
+            .ok_or_else(|| format!("{key} には true か false を指定してください")),
+        SYNC_INTERVAL_SECS => number(&SYNC_INTERVAL_SECS_RANGE),
+        SCREEN_INTERVAL_MS => number(&SCREEN_INTERVAL_MS_RANGE),
+        SCROLLBACK_LINES => number(&SCROLLBACK_LINES_RANGE),
+        _ => Err(format!("{key} は知らない設定です")),
+    }
+}
+
 /// エージェントへ配る間隔の一式（設計§4-2 の SetIntervals と同じ組）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Intervals {
@@ -233,4 +284,76 @@ pub async fn set_update_check_enabled(db: &DatabaseConnection, enabled: bool) ->
         serde_json::json!(enabled),
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(non_snake_case)]
+
+    use super::*;
+
+    #[test]
+    fn 入れてよい値だけが通る() {
+        assert!(check(ALWAYS_BYPASS_PERMISSIONS, &serde_json::json!(true)).is_ok());
+        assert!(check(SYNC_INTERVAL_SECS, &serde_json::json!(20)).is_ok());
+        assert!(check(SCREEN_INTERVAL_MS, &serde_json::json!(20_000)).is_ok());
+        assert!(check(SCROLLBACK_LINES, &serde_json::json!(1_000)).is_ok());
+    }
+
+    #[test]
+    fn 範囲の両端は通り_その外は断る() {
+        // 境界を跨ぐところで挙動が変わることを固定する（片側だけ直すと気付けない）
+        for (key, range) in [
+            (SYNC_INTERVAL_SECS, SYNC_INTERVAL_SECS_RANGE),
+            (SCREEN_INTERVAL_MS, SCREEN_INTERVAL_MS_RANGE),
+            (SCROLLBACK_LINES, SCROLLBACK_LINES_RANGE),
+        ] {
+            assert!(check(key, &serde_json::json!(range.start())).is_ok(), "{key}");
+            assert!(check(key, &serde_json::json!(range.end())).is_ok(), "{key}");
+            assert!(
+                check(key, &serde_json::json!(range.start() - 1)).is_err(),
+                "{key}"
+            );
+            assert!(
+                check(key, &serde_json::json!(range.end() + 1)).is_err(),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn 断る理由にキーの名前が入る() {
+        // そのまま利用者へ見せる文なので、どれが駄目かが分かること
+        let reason = check(SYNC_INTERVAL_SECS, &serde_json::json!(0)).unwrap_err();
+        assert!(reason.contains(SYNC_INTERVAL_SECS), "{reason}");
+
+        let reason = check(SCROLLBACK_LINES, &serde_json::json!("たくさん")).unwrap_err();
+        assert!(reason.contains(SCROLLBACK_LINES), "{reason}");
+
+        let reason = check(ALWAYS_BYPASS_PERMISSIONS, &serde_json::json!(1)).unwrap_err();
+        assert!(reason.contains(ALWAYS_BYPASS_PERMISSIONS), "{reason}");
+    }
+
+    #[test]
+    fn 知らないキーは断る() {
+        assert!(check("lan_password_hash", &serde_json::json!("x")).is_err());
+        assert!(check("update_check_enabled", &serde_json::json!(true)).is_err());
+    }
+
+    #[test]
+    fn 持ち出しの対象にサーバ全体のものが入らない() {
+        // **秘密が混ざる余地を、選び方で断つ**（持ち出し設計§7）。ここに
+        // サーバ全体スコープのキーが入ると、書き出しへそのまま乗る
+        assert!(!ACCOUNT_KEYS.contains(&LAN_PASSWORD_HASH));
+        assert!(!ACCOUNT_KEYS.contains(&UPDATE_CHECK_ENABLED));
+        // 持ち出しの対象なら、必ず検査を持っていること。**キーを足して検査を
+        // 足し忘れると、読み込みで何でも入る**
+        for key in ACCOUNT_KEYS {
+            let reason = check(key, &serde_json::json!(null)).unwrap_err();
+            assert!(
+                !reason.contains("知らない設定"),
+                "{key} が検査を持っていない: {reason}"
+            );
+        }
+    }
 }
