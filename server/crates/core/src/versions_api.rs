@@ -29,6 +29,7 @@ use axum::{
 use protocol::{VersionEntry, VersionId};
 use serde::Serialize;
 use server_core::auth::{AuthContext, AuthMode, Identity};
+use server_core::registry::SessionRegistry;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -50,6 +51,15 @@ pub struct VersionsView {
     pub outcome: Option<version::Outcome>,
     /// 最後に読めた最新版。一度も見に行けていなければ `None`（設計§8）。
     pub latest: Option<LatestView>,
+    /// **いま入れ替えると抜け殻になるカードの枚数**（設計§10）。
+    ///
+    /// 押す前に数で見せるための値。ローカルモードでは PTY が道連れで死ぬが**カードは
+    /// 記録に残る**ので、戻ってきた画面は空ではなく「履歴だけが読める抜け殻が N 枚
+    /// 並んだ画面」になる。サーバモードは PTY を持たないので常に 0。
+    ///
+    /// 既に繋がっていないカードは**既に抜け殻**なので数えない。ここが数えるのは
+    /// **これから失うぶん**だけ。
+    pub stranded_cards: usize,
 }
 
 /// 最後に読めた最新版（設計§8）。
@@ -89,6 +99,11 @@ pub struct VersionsState {
     pub state_dir: PathBuf,
     /// 入口の鍵。**押せる相手の決め方がモードで変わる**ので要る。
     pub auth: Arc<AuthContext>,
+    /// カードの記録。**この機械が PTY を持っているときだけ `Some`**（設計§10）。
+    ///
+    /// 鍵のモードで見分ける道もあるが、あれは**鍵のかけ方**であって PTY の持ち主では
+    /// ない。`None` が「この機械は誰も道連れにしない」を型で言うほうが読み違えにくい。
+    pub registry: Option<Arc<SessionRegistry>>,
 }
 
 pub fn routes(state: VersionsState) -> Router {
@@ -133,6 +148,7 @@ async fn build_view(state: &VersionsState, identity: &Identity) -> VersionsView 
             selected: None,
             outcome: None,
             latest: None,
+            stranded_cards: 0,
         };
     }
 
@@ -155,7 +171,22 @@ async fn build_view(state: &VersionsState, identity: &Identity) -> VersionsView 
         selected,
         outcome: version::read_outcome(&state.state_dir),
         latest: latest_of(&state.state_dir),
+        stranded_cards: stranded_cards(state, identity),
     }
+}
+
+/// いま入れ替えると抜け殻になるカードの枚数（設計§10）。
+///
+/// PTY を持たない構成（サーバモード）では**数える相手が居ない**ので 0。
+fn stranded_cards(state: &VersionsState, identity: &Identity) -> usize {
+    let Some(registry) = &state.registry else {
+        return 0;
+    };
+    registry
+        .list(identity.account_id)
+        .iter()
+        .filter(|meta| meta.agent_connected)
+        .count()
 }
 
 async fn api_versions(

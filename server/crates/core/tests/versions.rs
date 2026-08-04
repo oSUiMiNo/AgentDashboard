@@ -234,3 +234,32 @@ async fn 最後に読めた最新版が一覧に載る() {
         "サーバが新着かどうかを決めてしまっている"
     );
 }
+
+#[tokio::test]
+async fn 入れ替えで抜け殻になる枚数が押す前に分かる() {
+    // 押す前に**数で**見せる（設計§10）。「セッションが死にます」ではなく
+    // 「N 枚が抜け殻になります」——戻ってきた画面は空ではなく、履歴だけが読める
+    // カードが N 枚並んだ状態になるため
+    pretend_supported();
+    let server = common::TestServer::start().await;
+
+    // 何も起こしていなければ失うものが無い
+    assert_eq!(
+        view(&server).await["stranded_cards"],
+        0,
+        "起こしていないのに数えている"
+    );
+
+    let (_session, _watcher) = common::start_session(&server.manager).await;
+    server
+        .wait_for_listed("1枚が繋がっている", |listed| {
+            listed.iter().filter(|meta| meta.agent_connected).count() == 1
+        })
+        .await;
+
+    assert_eq!(
+        view(&server).await["stranded_cards"],
+        1,
+        "落とすと道連れになるカードを数えていない"
+    );
+}

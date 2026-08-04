@@ -139,6 +139,9 @@ impl LocalServer {
                 versions_api::routes(versions_api::VersionsState {
                     state_dir: state_dir.clone(),
                     auth: Arc::clone(&self.auth),
+                    // **こちらは PTY の持ち主**。落とすと道連れになるカードがあるので、
+                    // 押す前に数えられるようにする（CICD設計§10）
+                    registry: Some(Arc::clone(&self.registry)),
                 }),
                 Arc::clone(&self.auth),
             ));
@@ -212,6 +215,9 @@ pub async fn serve_server(config: Config) -> anyhow::Result<()> {
                 .merge(versions_api::routes(versions_api::VersionsState {
                     state_dir: config.agent().resolved_state_dir(),
                     auth: Arc::clone(&auth),
+                    // **PTY を持たないので道連れにするものが無い。** 記録は持っている
+                    // が、あれは PC 側が生かし続けるセッションの写し（CICD設計§10）
+                    registry: None,
                 })),
             Arc::clone(&auth),
         ));

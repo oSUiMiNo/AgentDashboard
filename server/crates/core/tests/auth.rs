@@ -236,6 +236,8 @@ impl Selfhost {
                         agentdashboard_core::versions_api::VersionsState {
                             state_dir: dir.clone(),
                             auth: std::sync::Arc::clone(&auth),
+                            // サーバモードを模しているので PTY の持ち主ではない
+                            registry: None,
                         },
                     ),
                 ),
