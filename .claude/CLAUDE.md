@@ -25,6 +25,38 @@ issue-sync は、ユーザーが行うので不要。必要かどうかユーザ
 <br/>
 <br/>
 
+## 用語
+**この道具はコーディングエージェント（claude）を複数動かして管理するもの**なので、「エージェント」という語は claude の側に取ってある。それを抱えている常駐プログラムを同じ語で呼ぶと、読むたびにどちらの話か考えることになる。
+
+### 言い換えの表
+| 区分 | 旧名 | 新名 |
+|---|---|---|
+| 呼称 | PC 側エージェント／エージェント | **セッションホスト**（文脈が明らかなら「ホスト」） |
+| crate | `agent-core` | `session-host-core` |
+| crate | `agentdashboard-agent`（`crates/agent`） | `session-host`（`crates/session-host`） |
+| 型 | `AgentHost` ／ `AgentHub` ／ `AgentConn` ／ `AgentCommand` | `SessionHost` ／ `SessionHostHub` ／ `SessionHostConn` ／ `SessionHostCommand` |
+| 型 | `RemoteAgent` ／ `LocalAgent` | `RemoteSessionHost` ／ `LocalSessionHost` |
+| 型 | `AgentConfig` ／ `AgentLink` ／ `AgentView` | `SessionHostConfig` ／ `SessionHostLink` ／ `SessionHostView` |
+
+### 据え置くもの（変えてはいけない）
+| 据え置くもの | なぜ |
+|---|---|
+| バイナリ `agentdashboard-agent` | **既に入れた人の環境が壊れる**（入れる側・消す側・手順書がこの名前を指している） |
+| 設定ファイル `agent.toml` | 同上 |
+| URL `/agent/ws`・JSON の `agent_id` | **版交渉の相手（古い PC）が繋がらなくなる** |
+| DB の `agents` 表・`agent_id` 列 | 移行が要る |
+| `crates/protocol` の型（`AgentMessage` ／ `ServerToAgent` ／ `AgentId`） | 共有境界で変更のハードルが高く、**据え置く線の名前と対**になっている。型だけ変えると型と線の名前がずれる |
+| `AgentMeta`（`transcript-parser`） | **これは本当にコーディングエージェント**（claude のサブエージェント）。残すのが正しい |
+
+### 守ること
+- **旧名を見つけ次第、その場で直す。** 別の作業の途中でも、目に入ったら直す。一括置換の日を待たない
+- **一括置換で直さない。** 「エージェント」には**コーディングエージェントを指す正しい用法**が混ざっている（実装方針の文、`transcript-parser` の親子関係の説明、`protocol.ts` の申告の説明など）。1件ずつ意味を見る
+- **新しく紛らわしい語が出たら、この表へ足してから言い換える。** 表に無い言い換えを勝手に始めない——人によって別の名前を使い始めると、旧名より状況が悪くなる
+
+---
+<br/>
+<br/>
+
 ## ドキュメント参照ガイドライン
 仕様の正は `MyDocs/ローカルイシュー/初期実装/` にある。読む順序は次のとおり。
 
