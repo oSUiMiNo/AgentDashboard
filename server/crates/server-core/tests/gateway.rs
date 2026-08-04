@@ -468,7 +468,7 @@ async fn 画面は種別を移し替えて配られ_見る人が居なくなる�
         // --- 見る人が現れた -------------------------------------------------
         let browser = server_core::gateway::RemoteSessionHost::new(Arc::clone(&gateway.hub));
         let (blank, mut frames) =
-            server_core::agent::SessionHost::subscribe_pty(&browser, card_id, 1, 100, 30)
+            server_core::session_host::SessionHost::subscribe_pty(&browser, card_id, 1, 100, 30)
                 .unwrap_or_else(|| panic!("[{}] 端末を開けること", backend.name));
         assert!(
             protocol::frame::decode(&blank)
@@ -535,16 +535,17 @@ async fn 画面は種別を移し替えて配られ_見る人が居なくなる�
         );
 
         // --- 2人目が入っても、1人残っていれば止めない ----------------------
-        let _second = server_core::agent::SessionHost::subscribe_pty(&browser, card_id, 2, 100, 30);
+        let _second =
+            server_core::session_host::SessionHost::subscribe_pty(&browser, card_id, 2, 100, 30);
         socket
             .wait_for("2人目ぶんの購読", |message| {
                 matches!(message, ServerToAgent::SubScreen { .. })
             })
             .await;
-        server_core::agent::SessionHost::release_client(&browser, card_id, 1);
+        server_core::session_host::SessionHost::release_client(&browser, card_id, 1);
 
         // --- 最後の1人が去ったら止める --------------------------------------
-        server_core::agent::SessionHost::release_client(&browser, card_id, 2);
+        server_core::session_host::SessionHost::release_client(&browser, card_id, 2);
         let stop = socket
             .wait_for("画面の停止", |message| {
                 matches!(message, ServerToAgent::UnsubScreen { .. })

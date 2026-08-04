@@ -225,7 +225,7 @@ impl Selfhost {
         let auth = server_core::auth::AuthContext::server(db.clone(), &config);
         let hub =
             server_core::gateway::SessionHostHub::new(db.clone(), std::sync::Arc::clone(&registry));
-        let agent: std::sync::Arc<dyn server_core::agent::SessionHost> = std::sync::Arc::new(
+        let agent: std::sync::Arc<dyn server_core::session_host::SessionHost> = std::sync::Arc::new(
             server_core::gateway::RemoteSessionHost::new(std::sync::Arc::clone(&hub)),
         );
         let ws_state = server_core::ws::AppState::new(agent, registry, config);

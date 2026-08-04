@@ -946,7 +946,7 @@ impl RemoteSessionHost {
 const NOT_CONNECTED: &str = "セッションが見つかりません（PC が繋がっていません）";
 
 #[async_trait::async_trait]
-impl crate::agent::SessionHost for RemoteSessionHost {
+impl crate::session_host::SessionHost for RemoteSessionHost {
     /// そのカードを**どこかのインスタンスが**持っているか。
     ///
     /// 見るのは自分の接続表ではなく記録の鮮度の印（設計§9-2）。接続表を見ると、
@@ -958,7 +958,7 @@ impl crate::agent::SessionHost for RemoteSessionHost {
             .is_some_and(|record| record.meta().agent_connected)
     }
 
-    async fn spawn(&self, request: crate::agent::SpawnRequest<'_>) -> Result<(), String> {
+    async fn spawn(&self, request: crate::session_host::SpawnRequest<'_>) -> Result<(), String> {
         let message = ServerToAgent::Spawn {
             cwd: request.cwd.to_string(),
             permission_mode: request.permission_mode,

@@ -15,10 +15,10 @@ mod common;
 
 use protocol::{CardId, SessionStatus, TreeNode};
 use server_core::{
-    agent::SessionHost,
     db::{pairing, settings as db_settings},
     gateway::{RemoteSessionHost, SessionHostHub},
     registry::SessionRegistry,
+    session_host::SessionHost,
 };
 use session_host_core::{
     config::SessionHostConfig,
@@ -581,7 +581,7 @@ async fn ブラウザからの指示が_PC_まで届く() {
     let a2s = A2s::start("relay").await;
 
     a2s.browser
-        .spawn(server_core::agent::SpawnRequest {
+        .spawn(server_core::session_host::SpawnRequest {
             account_id: a2s.account_id,
             // 繋がっているのは1台だけなので、宛先を選ばずに通る
             target: None,

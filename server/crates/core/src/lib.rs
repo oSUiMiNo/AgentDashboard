@@ -239,7 +239,7 @@ pub async fn serve_server(
         );
     }
 
-    let agent: Arc<dyn server_core::agent::SessionHost> = Arc::new(
+    let agent: Arc<dyn server_core::session_host::SessionHost> = Arc::new(
         server_core::gateway::RemoteSessionHost::new(Arc::clone(&hub)),
     );
     let ws_state = ws::AppState::new(agent, Arc::clone(&registry), Arc::clone(&server_config));

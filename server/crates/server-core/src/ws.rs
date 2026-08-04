@@ -24,10 +24,10 @@
 //! （セルフホスト化設計§2-3）。
 
 use crate::{
-    agent::SessionHost,
     auth::Identity,
     config::ServerConfig,
     registry::{AccountEvent, PageError, SessionRecord, SessionRegistry, TranscriptPage},
+    session_host::SessionHost,
 };
 use axum::{
     Extension, Json,
@@ -292,7 +292,7 @@ async fn handle_request(
             agent_id,
         } => match state
             .agent
-            .spawn(crate::agent::SpawnRequest {
+            .spawn(crate::session_host::SpawnRequest {
                 account_id: identity.account_id,
                 target: agent_id,
                 cwd: &cwd,

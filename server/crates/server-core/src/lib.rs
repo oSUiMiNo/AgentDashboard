@@ -1,7 +1,7 @@
 //! ダッシュボードサーバ側のロジック（セルフホスト化設計§2-1）。
 //!
 //! ブラウザとの WebSocket・REST・web アセットの配信を持つ。**PTY には触らない**のが
-//! このクレートの存在理由で、PC 側へは境界 trait（[`agent::SessionHost`]）越しにしか
+//! このクレートの存在理由で、PC 側へは境界 trait（[`session_host::SessionHost`]）越しにしか
 //! 触れない。境界が守られていることは `crates/core/tests/dependencies.rs` が機械で検査する。
 //!
 //! ローカルモードでは [`session_host_core`] と同じプロセスに同居し、境界はプロセス内の直結に
@@ -11,7 +11,6 @@
 //! [`session_host_core`]: https://docs.rs/session-host-core
 
 pub mod account;
-pub mod agent;
 pub mod auth;
 pub mod bus;
 pub mod cluster;
@@ -21,6 +20,7 @@ pub mod embed;
 pub mod gateway;
 pub mod portable;
 pub mod registry;
+pub mod session_host;
 pub mod transcript;
 pub mod ws;
 

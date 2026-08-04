@@ -72,7 +72,7 @@ impl Arena {
             .expect("記録層を立てられること");
         let auth = server_core::auth::AuthContext::server(db.clone(), &config);
         let hub = SessionHostHub::new(db.clone(), Arc::clone(&registry));
-        let agent: Arc<dyn server_core::agent::SessionHost> = Arc::new(
+        let agent: Arc<dyn server_core::session_host::SessionHost> = Arc::new(
             server_core::gateway::RemoteSessionHost::new(Arc::clone(&hub)),
         );
         let ws_state =

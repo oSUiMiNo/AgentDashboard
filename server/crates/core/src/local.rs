@@ -19,7 +19,7 @@
 
 use bytes::Bytes;
 use protocol::{CardId, ModelId, PermissionMode, ws::ParserState, ws::ServerMessage};
-use server_core::{agent::SessionHost, registry::SessionRegistry};
+use server_core::{registry::SessionRegistry, session_host::SessionHost};
 use session_host_core::{
     events::{EventSink, LocalEventBus, TranscriptReport},
     offsets::OffsetStore,
@@ -63,7 +63,10 @@ impl SessionHost for LocalSessionHost {
 
     /// **宛先は見ない。** ローカルモードに PC という単位は存在しないので、
     /// 指名されていたとしても送る先はここしか無い（画面も選択肢を出さない）。
-    async fn spawn(&self, request: server_core::agent::SpawnRequest<'_>) -> Result<(), String> {
+    async fn spawn(
+        &self,
+        request: server_core::session_host::SpawnRequest<'_>,
+    ) -> Result<(), String> {
         self.manager
             .spawn_with_mode(request.cwd, request.permission_mode)
             .map(|_| ())

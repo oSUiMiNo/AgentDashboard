@@ -24,11 +24,11 @@ use protocol::{
     CardId, Node, NodeId, ProjectId, SessionMeta, SessionStatus, TreeNode, ws::ServerMessage,
 };
 use server_core::{
-    agent::SessionHost as _,
     bus::{Bus, memory::MemoryBroker},
     cluster,
     gateway::{RemoteSessionHost, SessionHostHub},
     registry::{AccountEvent, ReportOrigin, SessionRegistry},
+    session_host::SessionHost as _,
 };
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::{broadcast, mpsc};
@@ -539,7 +539,7 @@ async fn 別のインスタンスに繋がった_PC_でもセッションを起�
         let (a, _b, mut agent, _card_id, account_id) = split(&backend.db, &broker).await;
 
         RemoteSessionHost::new(Arc::clone(&a.hub))
-            .spawn(server_core::agent::SpawnRequest {
+            .spawn(server_core::session_host::SpawnRequest {
                 account_id,
                 // 繋がっているのは1台だけなので、宛先を選ばずに通る
                 target: None,

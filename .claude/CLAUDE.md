@@ -109,13 +109,13 @@ issue-sync は、ユーザーが行うので不要。必要かどうかユーザ
 | `server/crates/server-core/src/gateway.rs` | エージェントの受け口（`/agent/ws`）。版交渉・トークン照合・帰属の決定。ブラウザ向けの指示を A2S へ中継する `RemoteSessionHost` もここ |
 | `server/crates/session-host-core/src/link.rs` | PC からサーバへ繋ぐ側。履歴を束ねて送り、**ack が返ってから位置を進める**（設計§6-1） |
 | `server/crates/session-host-core/src/offsets.rs` | 「どこまで読んだか」の置き場所。**読む側（パーサ）と進める側（運び手）で共有する** |
-| `server/crates/agent/src/lib.rs` | PC 側エージェントの中身。フックの受信口を自分で開く（設計§5-3）。**実行ファイルは `crates/dist` が持つ** |
+| `server/crates/session-host/src/lib.rs` | セッションホストの中身。フックの受信口を自分で開く（設計§5-3）。**実行ファイルは `crates/dist` が持つ** |
 | `server/crates/dist/` | 利用者へ配る一式。実行ファイル3本の**入口だけ**（各1行）を持つ（§25 読み替え1）。中身を書かないこと |
 | `dist-workspace.toml` ／ `scripts/dist` | 配布物の作り方。**`.github/workflows/release.yml` は `dist generate` が作る**ので手で書き換えない |
 | `.github/build-setup.yml` | CI のビルド前に差し込む手順（web の焼き込み）。**こちらは手で書く**。`working-directory:` は使えない（§25 読み替え6）。**`workflows/` の外に置いてある**——あそこは GitHub がワークフローとして登録する場所で、`on:` を持たないこれを置くとプッシュのたびに失敗が1件積み上がる |
 | `docs/proxy/` | 前段（Caddy・nginx）の設定。**compose が実際にマウントする実物**（§25 読み替え4） |
 | `server/agent.toml.example` | エージェント単体の設定の雛形。**接続の3キーと hook_port はこちらにだけ置く**（§21 読み替え8） |
-| `server/crates/core/src/local.rs` | 両者を1プロセスで束ねる配線（`server_core::agent::SessionHost` のローカル実装） |
+| `server/crates/core/src/local.rs` | 両者を1プロセスで束ねる配線（`server_core::session_host::SessionHost` のローカル実装） |
 | `server/crates/core/src/config.rs` | `config.toml` の読み込みと、両側への射影（設計§12・セルフホスト化設計§13-2） |
 | `server/crates/server-core/src/embed.rs` | web アセットの単一バイナリ同梱 |
 | `server/crates/core/tests/dependencies.rs` | crate 境界（依存の逆流）の機械検査。**新しい依存を入れたらここへ足す** |
