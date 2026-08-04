@@ -36,6 +36,8 @@ function show(overrides: Partial<VersionsView> = {}) {
       stranded_cards: 0,
       install: null,
       install_unavailable: null,
+      // 既定と違う場所を入れておく。**決め打ちに戻っても気づけるようにするため**
+      pointer_path: '/tmp/使い捨て/version-current',
       ...overrides,
     },
     loading: false,
@@ -189,8 +191,15 @@ describe('版のカード', () => {
     })
 
     const dialog = await screen.findByTestId('versions-confirm')
-    expect(dialog).toHaveTextContent('version-current')
     expect(dialog).toHaveTextContent('画面からは戻ってこられなくなります')
+
+    // **サーバが答えた実際の場所**を出す。既定を決め打ちで書くと、置き場所を
+    // 移している利用者に存在しないパスを案内することになり、唯一の出口が塞がる
+    // **そのまま貼れる形**であることまで見たいので、空白を潰さない生の中身で照合する
+    const escape = await screen.findByTestId('versions-confirm-escape')
+    expect(escape.textContent).toContain('cat  /tmp/使い捨て/version-current')
+    expect(escape.textContent).toContain('rm   /tmp/使い捨て/version-current')
+    expect(escape.textContent).not.toContain('~/.local/state/agentdashboard')
   })
 
   it('走っている版は消せない', async () => {

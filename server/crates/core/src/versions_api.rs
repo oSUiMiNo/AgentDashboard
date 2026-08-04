@@ -121,6 +121,13 @@ pub struct VersionsView {
     /// 「取ってこられるか」。混ぜると画面が2つを区別できなくなる——版を選ぶことは
     /// できるが取ってくることはできない、という組み合わせが普通にある。
     pub install_unavailable: Option<String>,
+    /// ポインタの実際の置き場所。
+    ///
+    /// **画面が「手で消す2行」を出すために要る**（設計§9 の最終節）。この機能より
+    /// 前の版へ戻ると版を選ぶ画面ごと無くなるので、**ここが袋小路からの唯一の
+    /// 出口**になる。決め打ちの既定を書くと `state_dir` を移している利用者に
+    /// 存在しないパスを案内することになり、出口が塞がる。
+    pub pointer_path: String,
 }
 
 /// 取ってくる仕事の段階（設計§15）。
@@ -256,6 +263,10 @@ fn refusal(auth: &AuthContext) -> (StatusCode, String) {
 async fn build_view(state: &VersionsState, identity: &Identity) -> VersionsView {
     let editable = may_operate(&state.auth, identity);
     let supported = version::Capability::detect().supported();
+    // 出口の案内は走査の前に決まる。**出せない構成でも嘘は書かない**
+    let pointer_path = version::pointer_path(&state.state_dir)
+        .display()
+        .to_string();
     if !supported {
         // できないことをボタンにしない。走査そのものを省く
         return VersionsView {
@@ -268,6 +279,7 @@ async fn build_view(state: &VersionsState, identity: &Identity) -> VersionsView 
             stranded_cards: 0,
             install: None,
             install_unavailable: None,
+            pointer_path,
         };
     }
 
@@ -293,6 +305,7 @@ async fn build_view(state: &VersionsState, identity: &Identity) -> VersionsView 
         stranded_cards: stranded_cards(state, identity),
         install: state.install.lock().expect("ロックが壊れていない").clone(),
         install_unavailable: state.ops.unavailable_reason(),
+        pointer_path,
     }
 }
 

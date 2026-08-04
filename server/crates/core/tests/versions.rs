@@ -111,6 +111,31 @@ async fn 使えない構成では機能ごと出さない() {
 }
 
 #[tokio::test]
+async fn 手で戻す出口はこの機械の実際の置き場所を指す() {
+    // 戻した先には版を選ぶ画面が無いので、**ここが袋小路からの唯一の出口**（設計§9）。
+    // 既定を決め打ちで書くと、置き場所を移している利用者に存在しないパスを案内して
+    // しまい、出口が塞がる
+    pretend_supported();
+    let server = common::TestServer::start().await;
+
+    let expected = version::pointer_path(&server.config.agent().resolved_state_dir());
+    let view = view(&server).await;
+
+    assert_eq!(
+        view["pointer_path"].as_str(),
+        Some(expected.display().to_string().as_str()),
+        "出口が実際の置き場所を指していない: {view}"
+    );
+    assert!(
+        !view["pointer_path"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("~/"),
+        "展開していない書き方を返している（そのまま貼っても効かない）: {view}"
+    );
+}
+
+#[tokio::test]
 async fn 保管庫の版が一覧に並ぶ() {
     pretend_supported();
     let server = common::TestServer::start().await;

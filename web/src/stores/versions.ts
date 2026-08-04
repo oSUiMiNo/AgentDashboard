@@ -81,6 +81,13 @@ export interface VersionsView {
   install: InstallProgress | null
   /** 取ってくる道具が無いときの理由。**`supported` とは別物** */
   install_unavailable: string | null
+  /**
+   * ポインタの実際の置き場所。
+   *
+   * **袋小路からの唯一の出口**を案内するために要る（設計§9 の最終節）。既定を
+   * 決め打ちで書くと、`state_dir` を移している利用者に存在しないパスを見せる。
+   */
+  pointer_path: string
 }
 
 /** 同意を求めている相手。 */
@@ -122,6 +129,8 @@ const FALLBACK: VersionsView = {
   stranded_cards: 0,
   install: null,
   install_unavailable: null,
+  // 読めていない間は出口を名指ししない。**知らない場所を書くより、書かないほうがよい**
+  pointer_path: '',
 }
 
 /** 取ってくる仕事の様子を見に行く間隔。 */

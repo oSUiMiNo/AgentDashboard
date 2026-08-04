@@ -15,6 +15,7 @@ function view(overrides: Partial<VersionsView> = {}): VersionsView {
     stranded_cards: 0,
     install: null,
     install_unavailable: null,
+    pointer_path: '/tmp/使い捨て/version-current',
     ...overrides,
   }
 }

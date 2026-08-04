@@ -184,8 +184,11 @@ export function VersionsCard() {
             </strong>{' '}
             手で戻すには次の2行を実行してください。
           </p>
-          <pre className="text-muted-foreground overflow-x-auto text-[11px]">
-            {`cat  ~/.local/state/agentdashboard/version-current\nrm   ~/.local/state/agentdashboard/version-current`}
+          <pre
+            data-testid="versions-confirm-escape"
+            className="text-muted-foreground overflow-x-auto text-[11px]"
+          >
+            {`cat  ${versions.pointer_path}\nrm   ${versions.pointer_path}`}
           </pre>
           <div className="flex gap-2">
             <Button
