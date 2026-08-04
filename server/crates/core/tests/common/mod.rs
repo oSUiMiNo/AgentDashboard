@@ -687,3 +687,84 @@ impl EventWatcher {
         }
     }
 }
+
+/// 版の乗り換えを**実バイナリで**試すための使い捨ての作業場所（CICD設計§4）。
+///
+/// # なぜ実行ファイルの隣なのか
+///
+/// 版フォルダは**ハードリンク**で作る。素直にコピーすると1本あたり数十MB（デバッグ
+/// ビルドは 281MB）で実用にならない。そしてハードリンクは**同じファイルシステムの中
+/// でしか張れない**——一時領域と `target/` は別なので、作業場所を実行ファイルの隣に
+/// 置く。`canonicalize` はハードリンクを解決しないので、実パスの比較（設計§4）は
+/// そのまま成立する（symlink だと同じパスへ潰れて乗り換えが起きない）。
+///
+/// 乗り換えは**ライブラリとして動かしていては踏めない**（`current_exe()` がテスト
+/// バイナリを指す）ので、これを使うテストは実行ファイルを子プロセスとして起こす。
+pub struct VersionWorkDir {
+    dir: PathBuf,
+}
+
+impl Drop for VersionWorkDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+impl VersionWorkDir {
+    pub fn beside_binaries(label: &str) -> Self {
+        let base = testkit::binary_path("agentdashboard")
+            .parent()
+            .expect("実行ファイルの親があること")
+            .to_path_buf();
+        let dir = base.join(format!(
+            "agentdashboard-version-{label}-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(dir.join("state")).expect("作業ディレクトリを作れること");
+        Self { dir }
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.dir
+    }
+
+    pub fn state_dir(&self) -> PathBuf {
+        self.dir.join("state")
+    }
+
+    /// いまのビルドの3本を、保管庫の版として**ハードリンクで**控える。
+    ///
+    /// 返すのは `agentdashboard` の場所（＝ポインタが指す先）。
+    pub fn link_stored_version(&self, version: &str) -> PathBuf {
+        let dir = agent_core::version::versions_dir(&self.state_dir()).join(version);
+        std::fs::create_dir_all(&dir).expect("保管庫を作れること");
+        for name in agent_core::version::BINARIES {
+            std::fs::hard_link(testkit::binary_path(name), dir.join(name))
+                .expect("ハードリンクを張れること");
+        }
+        dir.join("agentdashboard")
+    }
+
+    /// 次に起こす版を指す。
+    pub fn point_at(&self, target: &std::path::Path) {
+        std::fs::write(
+            agent_core::version::pointer_path(&self.state_dir()),
+            target.to_string_lossy().as_bytes(),
+        )
+        .expect("ポインタを書けること");
+    }
+
+    /// 設定を1つ書いて、その場所を返す。
+    pub fn write_config(&self, database_url: &str, port: u16, extra: &str) -> PathBuf {
+        let path = self.dir.join("config.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "port = {port}\nstate_dir = \"{state}\"\ndatabase_url = \"{database_url}\"\n{extra}",
+                state = self.state_dir().display(),
+            ),
+        )
+        .expect("設定を書けること");
+        path
+    }
+}

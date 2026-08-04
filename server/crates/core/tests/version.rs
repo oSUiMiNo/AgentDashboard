@@ -19,6 +19,8 @@
 
 #![allow(non_snake_case)]
 
+mod common;
+
 use agent_core::version::{
     VERSION_HANDOVER_ENV, VERSION_POINTER, VERSION_SUPPORTED_ENV, VERSIONS_DIR_NAME,
 };
@@ -46,19 +48,6 @@ impl Drop for Fixture {
 impl Fixture {
     fn new(label: &str) -> Self {
         Self::at(std::env::temp_dir(), label)
-    }
-
-    /// 実行ファイルの隣に作業場所を作る。
-    ///
-    /// **ハードリンクは同じファイルシステムの中でしか張れない。** 一時領域と
-    /// `target/` は別のファイルシステムなので、版を控えるのにリンクを使うテストは
-    /// こちらを使う。素直にコピーすると1本 281MB（デバッグビルド）になる。
-    fn beside_binaries(label: &str) -> Self {
-        let binaries = testkit::binary_path("agentdashboard")
-            .parent()
-            .expect("実行ファイルの親があること")
-            .to_path_buf();
-        Self::at(binaries, label)
     }
 
     fn at(base: PathBuf, label: &str) -> Self {
@@ -494,27 +483,20 @@ fn 乗り換えた先が待ち受けまで届くと印は結末へ変わる() {
     // ここだけ本物どうしで繋ぐ。**`current_exe()` が保管庫の版フォルダを指すこと**
     // （前提6）と、印の一生（書く→消える→結末になる）を実物で確かめる。
     //
-    // 版フォルダは**ハードリンク**で作る。素直にコピーすると1版あたり数十MB になり、
-    // `canonicalize` はハードリンクを解決しないので実パスの比較はそのまま成立する
-    // （symlink だと同じパスへ潰れて乗り換えが起きない）
-    let fixture = Fixture::beside_binaries("real-handover");
+    // 場所と版の控え方は実CLIの乗り換えテストと同じものを使う（コピーしない）
+    let fixture = common::VersionWorkDir::beside_binaries("real-handover");
     let state_dir = fixture.state_dir();
-    let stored = state_dir.join(VERSIONS_DIR_NAME).join("9.9.9");
-    std::fs::create_dir_all(&stored).expect("保管庫を作れること");
-    for name in agent_core::version::BINARIES {
-        std::fs::hard_link(testkit::binary_path(name), stored.join(name))
-            .expect("ハードリンクを張れること");
-    }
-    let target = stored.join("agentdashboard");
+    let target = fixture.link_stored_version("9.9.9");
     fixture.point_at(&target);
 
     let port = free_port();
     let config = fixture.write_config(
-        &format!("sqlite://{}", fixture.dir.join("dashboard.db").display()),
+        &format!("sqlite://{}", fixture.path().join("dashboard.db").display()),
         port,
+        "",
     );
 
-    let log = fixture.dir.join("server.log");
+    let log = fixture.path().join("server.log");
     let mut child = testkit::binary_command("agentdashboard")
         .env_remove(VERSION_HANDOVER_ENV)
         .env(VERSION_SUPPORTED_ENV, "0")

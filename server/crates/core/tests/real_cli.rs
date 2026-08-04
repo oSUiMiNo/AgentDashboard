@@ -79,7 +79,13 @@ impl Drop for WorkDir {
 /// 手を入れずに済ませるための工夫で、`AGENTDASHBOARD_CLAUDE_BIN` と同じ差し替えの
 /// 仕組みに乗っている。
 fn claude_wrapper(dir: &WorkDir, extra: &[&str]) -> PathBuf {
-    let path = dir.path().join("claude-wrapper.sh");
+    claude_wrapper_at(dir.path(), extra)
+}
+
+/// 置き場所を直に指す版。**乗り換えのテストは作業場所が実行ファイルの隣**
+/// （ハードリンクが張れる場所）なので、`WorkDir` を取れない。
+fn claude_wrapper_at(dir: &Path, extra: &[&str]) -> PathBuf {
+    let path = dir.join("claude-wrapper.sh");
     let args = extra.join(" ");
     std::fs::write(&path, format!("#!/bin/sh\nexec claude {args} \"$@\"\n"))
         .expect("ラッパーを書き出せること");
@@ -1315,15 +1321,20 @@ impl RemotePair {
 
     /// ブラウザの役で繋ぐ。
     async fn browser(&self) -> Browser {
-        let (socket, _) = tokio_tungstenite::connect_async(format!("ws://{}/ws", self.addr))
-            .await
-            .expect("ブラウザとして繋げること");
-        Browser {
-            socket,
-            mirror: vt100::Parser::new(SCREEN_ROWS, SCREEN_COLS, 1000),
-            snapshots: 0,
-            card: None,
-        }
+        browser_at(self.addr).await
+    }
+}
+
+/// 待ち受けている相手へ、ブラウザの役で繋ぐ。
+async fn browser_at(addr: std::net::SocketAddr) -> Browser {
+    let (socket, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .expect("ブラウザとして繋げること");
+    Browser {
+        socket,
+        mirror: vt100::Parser::new(SCREEN_ROWS, SCREEN_COLS, 1000),
+        snapshots: 0,
+        card: None,
     }
 }
 
@@ -1770,5 +1781,237 @@ async fn 実機検証3_リモート越しの入力から画面までの往復を
         "ホットウィンドウ（1500ms）に収まった割合: {}/{}",
         delays.iter().filter(|delay| **delay <= 1_500).count(),
         delays.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 12. 乗り換えた先の版で、本物の claude が動き続ける（CICD テスト計画フェーズ4）
+
+/// 保管庫へ控える版の名前。**いまの版と違う名前**にして、乗り換えが起きたことを
+/// 名前でも見分けられるようにする。
+const STORED_VERSION: &str = "9.9.9";
+
+/// 乗り換えた先の版で待ち受けているダッシュボード。
+///
+/// **ライブラリとして動かしていては踏めない。** `current_exe()` がテストバイナリを
+/// 指してしまい、乗り換えの判定そのものが成立しないので、実行ファイルを子プロセスと
+/// して起こす（CICD設計§4）。
+struct HandoverDashboard {
+    fixture: common::VersionWorkDir,
+    /// 乗り換え先の `agentdashboard`（保管庫の中）。
+    target: PathBuf,
+    addr: std::net::SocketAddr,
+    /// セッションを起こす先。
+    workspace: WorkDir,
+    child: std::process::Child,
+    log: PathBuf,
+}
+
+impl Drop for HandoverDashboard {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl HandoverDashboard {
+    async fn start(label: &str) -> Self {
+        let fixture = common::VersionWorkDir::beside_binaries(label);
+        let target = fixture.link_stored_version(STORED_VERSION);
+        fixture.point_at(&target);
+
+        let port = free_port();
+        let addr: std::net::SocketAddr = format!("127.0.0.1:{port}")
+            .parse()
+            .expect("番号を読めること");
+        let config = fixture.write_config(
+            &format!("sqlite://{}", fixture.path().join("dashboard.db").display()),
+            port,
+            &format!(
+                "claude_settings_path = \"{settings}\"\n\
+                 selfheal_enabled = false\n\
+                 status_line_refresh_secs = 1\n",
+                settings = fixture.path().join("claude-settings.json").display(),
+            ),
+        );
+
+        // **モデルは haiku に固定する。** 見たいのは乗り換えの継ぎ目であって賢さではない。
+        // 権限モードも固定して、利用者のグローバル設定に左右されないようにする
+        let wrapper = claude_wrapper_at(
+            fixture.path(),
+            &["--model", "haiku", "--permission-mode", "manual"],
+        );
+
+        let log = fixture.path().join("server.log");
+        let child = testkit::binary_command("agentdashboard")
+            // 土台は既定で「乗り換え済み」の印を立てる（開発者の実環境を読まないため）。
+            // ここは乗り換えそのものを試すので外す
+            .env_remove(agent_core::version::VERSION_HANDOVER_ENV)
+            // 保管庫は自分で用意したので、入れる側の3本を控える必要は無い
+            .env(agent_core::version::VERSION_SUPPORTED_ENV, "0")
+            .env(lifecycle::CLAUDE_BIN_ENV, &wrapper)
+            .env(agent_core::parser::PARSER_BIN_ENV, common::parser_program())
+            .arg("--config")
+            .arg(&config)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::fs::File::create(&log).expect("ログを作れること"))
+            .spawn()
+            .expect("起こせること");
+
+        let dashboard = Self {
+            fixture,
+            target,
+            addr,
+            workspace: WorkDir::new(label),
+            child,
+            log,
+        };
+        dashboard.wait_until_listening().await;
+        dashboard.assert_handed_over();
+        dashboard
+    }
+
+    fn printed(&self) -> String {
+        std::fs::read_to_string(&self.log).unwrap_or_default()
+    }
+
+    async fn wait_until_listening(&self) {
+        let deadline = Instant::now() + CLI_TIMEOUT;
+        loop {
+            let up = std::net::TcpStream::connect(self.addr).is_ok()
+                && !agent_core::version::attempt_path(&self.fixture.state_dir()).exists();
+            if up {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{CLI_TIMEOUT:?} 以内に待ち受けまで届きませんでした:\n{}",
+                self.printed()
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    /// 乗り換えが実際に起きたことを、起動が名乗った実行ファイルで確かめる。
+    fn assert_handed_over(&self) {
+        let printed = self.printed();
+        assert!(
+            printed.contains(&self.target.display().to_string()),
+            "乗り換えた先の実行ファイルを名乗っていません（乗り換えていない可能性）:\n{printed}"
+        );
+    }
+
+    /// 保管庫の版フォルダを消す。
+    ///
+    /// **画面からは消せない**（走っている版は断られる）ので直に消す。Unix では
+    /// 起動済みのプロセスは消えたファイルの実体を掴んだまま走り続けるので、ここで
+    /// 生死を分けるのは**フックの入口が版に縛られているかどうか**だけになる。
+    fn remove_stored_version(&self) {
+        let dir = self.target.parent().expect("版フォルダがあること");
+        std::fs::remove_dir_all(dir).expect("版フォルダを消せること");
+        assert!(!dir.exists(), "消えていない: {}", dir.display());
+    }
+
+    async fn browser(&self) -> Browser {
+        browser_at(self.addr).await
+    }
+
+    /// セッションを1本起こし、入力待ちになるまで見届ける。
+    async fn open_session(&self, browser: &mut Browser) -> protocol::SessionMeta {
+        browser
+            .send(&protocol::ws::ClientMessage::Spawn {
+                cwd: self.workspace.as_str(),
+                permission_mode: None,
+                agent_id: None,
+            })
+            .await;
+        let card = browser.wait_for_card("現れる", |_| true).await;
+        // **画面を購読しないとフレームが1つも来ない。** 信頼の確認に答えるのも、
+        // 画面が読めていることが前提になる
+        browser
+            .send(&protocol::ws::ClientMessage::SubPty {
+                card_id: card.card_id,
+                cols: SCREEN_COLS,
+                rows: SCREEN_ROWS,
+            })
+            .await;
+        browser.accept_trust_if_any(card.card_id).await;
+        browser
+            .wait_for_card("入力待ちになる", |card| {
+                card.status == SessionStatus::WaitingInput
+            })
+            .await
+    }
+}
+
+#[tokio::test]
+#[ignore = "本物の claude を起動し、アカウントのクォータを消費する（make test-cli）"]
+async fn 乗り換えた先の版で本物のセッションが起こせフックも届く() {
+    // テスト計画フェーズ4 の1つ目と2つ目。擬似 claude では「乗り換えた先で本物の
+    // TUI が動く」ところが確かめられない
+    let dash = HandoverDashboard::start("handover-session").await;
+    let mut browser = dash.browser().await;
+
+    let card = dash.open_session(&mut browser).await;
+
+    // 入力待ちに届いた時点で PTY は生きている（画面を読んで信頼の確認に答えている）
+    assert!(
+        !browser.screen().trim().is_empty(),
+        "画面が1文字も描かれていません"
+    );
+    // **状態が動くのはフックが届いたときだけ**（設計§5）。起こした直後は `Starting` で、
+    // `WaitingInput` へ動くのは `SessionStart` を受けたとき——つまり入力待ちに
+    // 届いていること自体が、乗り換えた先から注入したフックが戻ってきた証拠になる
+    assert!(
+        card.hooks_seen,
+        "フックを受けた印が立っていません: {card:?}"
+    );
+    assert_eq!(
+        card.status,
+        SessionStatus::WaitingInput,
+        "SessionStart が届いていません: {card:?}"
+    );
+    assert!(
+        card.last_activity_at > 0,
+        "フック由来の時刻が更新されていません: {card:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "本物の claude を起動し、アカウントのクォータを消費する（make test-cli）"]
+async fn 版を消しても生きているセッションのフックは届き続ける() {
+    // **設計§5 の肝。** 乗り換えると `current_exe()` は保管庫を指すので、素直に
+    // 焼き込むとフックのコマンド行が版に縛られる。版を消した瞬間にフックが全滅し、
+    // しかも `"async": true` なので **claude は止まらない**——止まらないまま状態だけ
+    // 更新されなくなり、「作業中のまま固まる」になる。要件が最も恐れている形
+    let dash = HandoverDashboard::start("handover-remove").await;
+    let mut browser = dash.browser().await;
+
+    let card = dash.open_session(&mut browser).await;
+    let before = card.last_activity_at;
+
+    dash.remove_stored_version();
+
+    // 消したあとに1往復させる。**フックでしか動かない値**が進むことを見る
+    browser
+        .send(&protocol::ws::ClientMessage::SendInput {
+            card_id: card.card_id,
+            text: "1+1 は？ 数字だけ答えて".to_string(),
+        })
+        .await;
+
+    let after = browser
+        .wait_for_card("版を消したあとにも動く", |card| {
+            card.last_activity_at > before
+        })
+        .await;
+
+    assert!(
+        after.hooks_seen,
+        "フックの印が落ちています（版と一緒に入口も消えた）: {after:?}"
+    );
+    assert!(
+        after.last_activity_at > before,
+        "版を消したあとフックが1件も届いていません（{before} のまま）"
     );
 }

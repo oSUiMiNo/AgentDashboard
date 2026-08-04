@@ -105,10 +105,12 @@ fi
 # - `agentdashboard`：フックが叩く本体と、ペアリングトークンの発行
 # - `agentdashboard-agent`：セルフホスト構成の PC 側（フェーズ4 の画面配信）
 # - `transcript-parser`：履歴の読み手。**居ないとエージェントが起動時に落ちる**
+#
+# **パッケージ名は書かない。** 3本の所属は `crates/dist` へ移った経緯があり、ここに
+# 書いておくと移すたびに腐る（実際、移したあと `make test-cli` は動かなくなっていた）。
+# `--bin` はワークスペース内で一意なら所属を書かずに解決できる。
 "${REPO_ROOT}/scripts/cargo" build \
-    --package agentdashboard-core --bin agentdashboard \
-    --package agentdashboard-agent --bin agentdashboard-agent \
-    --package transcript-parser --bin transcript-parser
+    --bin agentdashboard --bin agentdashboard-agent --bin transcript-parser
 
 echo "==> ホストで実行します（本物の claude を起動します）"
 # --test-threads=1 にするのは、複数の claude を同時に起動して待ち時間と出力が
