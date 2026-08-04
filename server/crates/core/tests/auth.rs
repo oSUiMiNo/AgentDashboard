@@ -238,6 +238,12 @@ impl Selfhost {
                             auth: std::sync::Arc::clone(&auth),
                             // サーバモードを模しているので PTY の持ち主ではない
                             registry: None,
+                            config_arg: None,
+                            applied: agentdashboard_core::versions_api::no_schemas(),
+                            ops: agent_core::version_ops::detect(),
+                            install: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                            // ここで見るのは**押せる相手だけ**なので、落ちる道は塞ぐ
+                            stop: agentdashboard_core::versions_api::no_stop(),
                         },
                     ),
                 ),
@@ -507,6 +513,24 @@ async fn versions(body: &str) -> serde_json::Value {
     serde_json::from_str(body).expect("VersionsView として読めること")
 }
 
+/// 版を**動かす**口の全部（CICD設計§13・§14）。
+///
+/// **口を足したらここへ足す。** 判定は [`versions_api::may_operate`] 1箇所に集めて
+/// あるが、集めてあることと**全部の口がそこを通っている**ことは別なので、総当たりで
+/// 数え上げる（`server-core/tests/tenancy.rs` と同じ考え方）。見る口（`GET`）は
+/// 誰でも通るのでここには入れない。
+const WRITE_ROUTES: [(&str, &str, Option<&str>); 5] = [
+    (
+        "PUT",
+        "/api/versions/selected",
+        Some(r#"{"version":"0.0.1"}"#),
+    ),
+    ("DELETE", "/api/versions/selected", None),
+    ("DELETE", "/api/versions/0.0.1", None),
+    ("POST", "/api/versions/0.0.1/install", None),
+    ("POST", "/api/versions/restart", None),
+];
+
 #[tokio::test]
 async fn ローカルでは同じ機械からだけ版を触れる() {
     // 版の入れ替えは、突き詰めれば**外から実行ファイルを取ってきて走らせる**こと。
@@ -534,11 +558,17 @@ async fn ローカルでは同じ機械からだけ版を触れる() {
         "LAN の向こうからは押せない"
     );
 
-    let (status, body) = there.request("DELETE", "/api/versions/0.0.1", None).await;
-    assert_eq!(status, 403, "断られていない: {body}");
+    for (method, path, payload) in WRITE_ROUTES {
+        let (status, body) = there.request(method, path, payload).await;
+        assert_eq!(status, 403, "{method} {path} が断られていない: {body}");
+        assert!(
+            body.contains("127.0.0.1"),
+            "{method} {path} がどこからなら通るかを書いていない: {body}"
+        );
+    }
     assert!(
-        body.contains("127.0.0.1"),
-        "どこからなら通るかを書く: {body}"
+        !there.stopped.load(std::sync::atomic::Ordering::SeqCst),
+        "断ったのに落とそうとしている"
     );
 }
 
@@ -563,7 +593,12 @@ async fn セルフホストでは管理者だけが版を触れる() {
         "管理者でなければ押せない"
     );
 
-    let (status, body) = server.request("DELETE", "/api/versions/0.0.1", None).await;
-    assert_eq!(status, 403, "断られていない: {body}");
-    assert!(body.contains("管理者"), "誰なら押せるかを書く: {body}");
+    for (method, path, payload) in WRITE_ROUTES {
+        let (status, body) = server.request(method, path, payload).await;
+        assert_eq!(status, 403, "{method} {path} が断られていない: {body}");
+        assert!(
+            body.contains("管理者"),
+            "{method} {path} が誰なら押せるかを書いていない: {body}"
+        );
+    }
 }

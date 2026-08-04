@@ -47,6 +47,41 @@ fn write_stored_version(state_dir: &Path, version: &str) {
     }
 }
 
+/// 門の3つの問いに答えられる一式を保管庫へ置く。
+///
+/// [`write_stored_version`] の一式は版を名乗るだけなので、門からは**形を答えられない
+/// 版**——つまりこの機能より前の版と同じ——に見える。選べるところまで通したいときは
+/// こちらを使う。
+fn write_gate_ready_version(state_dir: &Path, version: &str) {
+    write_stored_version(state_dir, version);
+
+    // いま適用されている形をそのまま名乗らせる。**知らない形が1つでもあれば断られる**
+    // ので、ここが食い違うとテストの狙いから外れる
+    let names = server_core::db::migration_names()
+        .into_iter()
+        .map(|name| format!("    echo '{name}'"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let marker = agentdashboard_core::cli::SCHEMA_NAMES_MARKER;
+    let path = version::versions_dir(state_dir)
+        .join(version)
+        .join("agentdashboard");
+    // 実行できる形は `write_stored_version` が付けている（書き直しても残る）
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\n\
+             case \"$1\" in\n\
+             \x20 --version) echo 'agentdashboard {version}' ;;\n\
+             \x20 migrations)\n\
+             \x20   echo '{marker}'\n{names} ;;\n\
+             \x20 *) exit 0 ;;\n\
+             esac\n"
+        ),
+    )
+    .expect("書けること");
+}
+
 /// 使える構成のふりをする。
 ///
 /// nextest はテストごとに別プロセスなので、ここで立てても他のテストへは漏れない。
@@ -261,5 +296,274 @@ async fn 入れ替えで抜け殻になる枚数が押す前に分かる() {
         view(&server).await["stranded_cards"],
         1,
         "落とすと道連れになるカードを数えていない"
+    );
+}
+
+#[tokio::test]
+async fn 版を選んでもプロセスは落ちない() {
+    // **要件が名指しで恐れている点**（設計§10）。選ぶのはポインタを書くところまでで、
+    // 効くのは次に起こしたとき——「選んだ瞬間に全部入れ替わる」を構造で外している
+    pretend_supported();
+    let server = common::TestServer::start().await;
+    let state_dir = server.config.agent().resolved_state_dir();
+    write_gate_ready_version(&state_dir, "0.1.1");
+
+    let (status, body) = server
+        .put("/api/versions/selected", r#"{"version":"0.1.1"}"#)
+        .await;
+    assert_eq!(status, 200, "選べない: {body}");
+
+    let picked: serde_json::Value = serde_json::from_str(&body).expect("応答を読めること");
+    assert_eq!(picked["selected"], "0.1.1", "予約になっていない");
+    assert_eq!(
+        version::read_pointer(&state_dir),
+        Some(
+            version::versions_dir(&state_dir)
+                .join("0.1.1")
+                .join("agentdashboard")
+        ),
+        "ポインタが書かれていない"
+    );
+    assert!(
+        !server.stopped.load(std::sync::atomic::Ordering::SeqCst),
+        "選んだだけで落とそうとしている"
+    );
+}
+
+#[tokio::test]
+async fn 選んだだけの状態は取り消せる() {
+    pretend_supported();
+    let server = common::TestServer::start().await;
+    let state_dir = server.config.agent().resolved_state_dir();
+    write_gate_ready_version(&state_dir, "0.1.1");
+
+    let (status, _) = server
+        .put("/api/versions/selected", r#"{"version":"0.1.1"}"#)
+        .await;
+    assert_eq!(status, 200);
+
+    let (status, body) = server
+        .request("DELETE", "/api/versions/selected", None)
+        .await;
+    assert_eq!(status, 200, "取り消せない: {body}");
+    let view: serde_json::Value = serde_json::from_str(&body).expect("応答を読めること");
+    assert_eq!(
+        view["selected"],
+        serde_json::Value::Null,
+        "予約が残っている"
+    );
+    assert_eq!(
+        version::read_pointer(&state_dir),
+        None,
+        "ポインタが外れていない"
+    );
+}
+
+#[tokio::test]
+async fn 揃っていない版は選べない() {
+    // 3本揃っていない版を選ばせると、パーサだけ食い違った状態で動き出す（設計§6）
+    pretend_supported();
+    let server = common::TestServer::start().await;
+    let state_dir = server.config.agent().resolved_state_dir();
+    write_stored_version(&state_dir, "0.1.1");
+    std::fs::remove_file(
+        version::versions_dir(&state_dir)
+            .join("0.1.1")
+            .join("transcript-parser"),
+    )
+    .expect("1本だけ消せること");
+
+    let (status, body) = server
+        .put("/api/versions/selected", r#"{"version":"0.1.1"}"#)
+        .await;
+    assert_eq!(status, 409, "揃っていないのに選べてしまった: {body}");
+    assert_eq!(
+        version::read_pointer(&state_dir),
+        None,
+        "断ったのにポインタを書いている"
+    );
+}
+
+#[tokio::test]
+async fn 形を答えられない行き先は同意を求めてから通す() {
+    // この機能より前の版は記録の形を答えられない。**断るといちばん戻りたい先へ
+    // 永久に戻れなくなる**ので、そう言って同意を取ってから通す（設計§9）
+    pretend_supported();
+    let server = common::TestServer::start().await;
+    let state_dir = server.config.agent().resolved_state_dir();
+    write_stored_version(&state_dir, "0.1.1");
+
+    let (status, body) = server
+        .put("/api/versions/selected", r#"{"version":"0.1.1"}"#)
+        .await;
+    assert_eq!(
+        status, 428,
+        "確かめられないことを、断ったのと同じ返し方にしている: {body}"
+    );
+    assert!(
+        body.contains("答えられません"),
+        "理由を書いていない: {body}"
+    );
+    assert_eq!(
+        version::read_pointer(&state_dir),
+        None,
+        "同意していないのに書いている"
+    );
+
+    let (status, body) = server
+        .put(
+            "/api/versions/selected",
+            r#"{"version":"0.1.1","confirm_unverified":true}"#,
+        )
+        .await;
+    assert_eq!(status, 200, "同意しても通らない: {body}");
+    assert!(
+        version::read_pointer(&state_dir).is_some(),
+        "同意したのに書いていない"
+    );
+}
+
+#[tokio::test]
+async fn 入れ替えは返してから落とす() {
+    // **返してから落とす**（設計§24）。ハンドラの中で落とすと応答が届かず、
+    // ブラウザからは「押したのに失敗した」と見分けが付かない
+    pretend_supported();
+    let server = common::TestServer::start().await;
+
+    let (status, body) = server.request("POST", "/api/versions/restart", None).await;
+    assert_eq!(status, 200, "入れ替えを頼めない: {body}");
+    let view: serde_json::Value = serde_json::from_str(&body).expect("応答を読めること");
+    assert!(
+        view["stranded_cards"].is_number(),
+        "何枚が抜け殻になるかを返していない: {body}"
+    );
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !server.stopped.load(std::sync::atomic::Ordering::SeqCst) {
+        assert!(std::time::Instant::now() < deadline, "落とそうとしていない");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn 取ってくる道具が無ければ断る() {
+    // **`supported` と混ぜない**（設計§23-6）。版を選ぶことはできるが取ってくることは
+    // できない、という組み合わせが普通にある
+    pretend_supported();
+    unsafe { std::env::set_var("PATH", "/どこにもない") };
+    let server = common::TestServer::start().await;
+
+    let view = view(&server).await;
+    assert_eq!(view["supported"], true, "選ぶことまでできなくなっている");
+    assert!(
+        view["install_unavailable"].is_string(),
+        "取ってこられない理由を出していない: {view}"
+    );
+
+    let (status, body) = server
+        .request("POST", "/api/versions/0.9.9/install", None)
+        .await;
+    assert_eq!(status, 409, "道具が無いのに受け付けた: {body}");
+}
+
+/// 取ってくる先を手元へ向ける。**外へは出ない。**
+///
+/// `curl` は `file` を通す（`curl_args` が `--proto "=https,file"` を渡している）ので、
+/// 本物の窓口のまま手元のインストーラを走らせられる。差し替えた窓口で通したことに
+/// すると、**引数の組み立ても環境の掃除も一度も踏まないまま緑になる**。
+fn serve_installer_locally(version: &str) -> tempdir::Guard {
+    let dir = tempdir::make("agentdashboard-release");
+    let tag = dir.path().join("download").join(format!("v{version}"));
+    std::fs::create_dir_all(&tag).expect("置き場所を作れること");
+
+    let script = r#"#!/bin/sh
+set -e
+d="$AGENTDASHBOARD_UNMANAGED_INSTALL"
+mkdir -p "$d"
+printf '#!/bin/sh\necho "agentdashboard __V__"\n' > "$d/agentdashboard"
+printf '#!/bin/sh\necho "agentdashboard-agent __V__"\n' > "$d/agentdashboard-agent"
+printf '#!/bin/sh\nprintf %s "{\"ev\":\"hello\",\"parser_version\":\"__V__\"}\n"\n' > "$d/transcript-parser"
+chmod 755 "$d/agentdashboard" "$d/agentdashboard-agent" "$d/transcript-parser"
+"#
+    .replace("__V__", version);
+    std::fs::write(tag.join("agentdashboard-installer.sh"), script).expect("書けること");
+
+    unsafe {
+        std::env::set_var(
+            agent_core::version_ops::RELEASE_BASE_ENV,
+            format!("file://{}", dir.path().display()),
+        )
+    };
+    dir
+}
+
+/// 使い捨ての置き場所。**畳むときに消す。**
+mod tempdir {
+    pub struct Guard(std::path::PathBuf);
+
+    impl Guard {
+        pub fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    pub fn make(label: &str) -> Guard {
+        let dir = std::env::temp_dir().join(format!("{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("使い捨ての置き場所を作れること");
+        Guard(dir)
+    }
+}
+
+#[tokio::test]
+async fn 取ってきても選ばれない() {
+    // **「勝手に更新されない」の最後の砦**（設計§7）。取ってくることと、次に起こす版を
+    // 決めることは別の操作でなければならない
+    pretend_supported();
+    let _release = serve_installer_locally("0.9.9");
+    let server = common::TestServer::start().await;
+    let state_dir = server.config.agent().resolved_state_dir();
+
+    let (status, body) = server
+        .request("POST", "/api/versions/0.9.9/install", None)
+        .await;
+    assert_eq!(status, 202, "取ってくる仕事を受け付けない: {body}");
+
+    // 背景で走るので、様子が変わるまで待つ（設計§15）
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let done = loop {
+        let view = view(&server).await;
+        match view["install"]["phase"].as_str() {
+            Some("done") => break view,
+            Some("failed") => panic!("取ってこられなかった: {}", view["install"]),
+            _ => {}
+        }
+        assert!(std::time::Instant::now() < deadline, "終わらない: {view}");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+
+    assert!(
+        done["entries"]
+            .as_array()
+            .expect("一覧があること")
+            .iter()
+            .any(|entry| entry["version"] == "0.9.9" && entry["usable"] == true),
+        "取ってきた版が並んでいない: {done}"
+    );
+    assert_eq!(
+        done["selected"],
+        serde_json::Value::Null,
+        "取ってきただけで選ばれている"
+    );
+    assert_eq!(
+        version::read_pointer(&state_dir),
+        None,
+        "取ってきただけでポインタが書かれている"
     );
 }

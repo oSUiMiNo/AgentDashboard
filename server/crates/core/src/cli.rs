@@ -228,9 +228,11 @@ async fn run_async(cli: Cli, config: Config, config_path: PathBuf) -> anyhow::Re
                     .display(),
                 env!("CARGO_PKG_VERSION")
             );
+            // **書き戻し先（`config_path`）と、門が行き先へ渡す `--config` は別物**
+            // （CICD設計§9）。あちらは常に値を持つが、こちらは受け取ったときだけ渡す
             match cli.mode {
-                Mode::Local => serve(config, config_path).await?,
-                Mode::Server => serve_server(config).await?,
+                Mode::Local => serve(config, config_path, cli.config).await?,
+                Mode::Server => serve_server(config, cli.config).await?,
             }
         }
     }

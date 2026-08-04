@@ -19,19 +19,72 @@
 //! ログインを通っただけの相手に開ける操作ではない（設計§13）。一方で**一覧を見るのは
 //! 誰でもよい**——見えないと、押せないことすら分からない。
 
-use agent_core::version;
+use crate::gate;
+use agent_core::{version, version_ops::VersionOps};
 use axum::{
     Extension, Json, Router,
     extract::{Path, State},
     http::StatusCode,
-    routing::get,
+    routing::{delete, get, post, put},
 };
 use protocol::{VersionEntry, VersionId};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use server_core::auth::{AuthContext, AuthMode, Identity};
 use server_core::registry::SessionRegistry;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+/// その DB に適用済みの記録の形を読む口（設計§9）。
+///
+/// **関数で受け取るのは、`crates/core` が記録の道具を通常の依存に持っていないため**
+/// （設計§23-9。更新確認の設定と同じ理由）。型を書かずに呼べる形にしておく。
+pub type AppliedSchemas = Arc<
+    dyn Fn() -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Vec<String>, String>> + Send>,
+        > + Send
+        + Sync,
+>;
+
+/// 自分を終える口（設計§10・§24）。
+///
+/// **差し替えられる形にしてある。** 素直に `std::process::exit` を呼ぶと、統合テストは
+/// サーバをプロセス内に立てているので**テストバイナリごと死ぬ**——押した結果を
+/// 確かめる手段が無くなる。「新しく外の状態を持ったら、同時に差し替え口も作る」
+/// （PJTガイドライン）に沿って口にした。
+pub type Stopper = Arc<dyn Fn() + Send + Sync>;
+
+/// 本番の終わり方。**後片付けは走らない。**
+///
+/// graceful shutdown を採らないのは、あれが**開いている接続の完了を待つ**ため。
+/// ブラウザは `/ws` を開きっぱなしなので、押した本人の接続が閉じず待ちが終わらない。
+/// 失うのは `Drop`（PTY の後始末）だが、**穏やかに終えても強引に殺しても claude は
+/// 道連れで死ぬ**ことを実測済み（設計§20-1）なので、失うものが無い。
+pub fn exit_process() -> Stopper {
+    Arc::new(|| std::process::exit(0))
+}
+
+/// 記録へ聞けない構成のときの答え（設計§9）。
+///
+/// **「聞けなかった」を「知らない形は無かった」に読み替えない。** 空の一覧を返すと
+/// 門は必ず `Ready` を出すので、**記録が読めないという理由だけで切替が通る**ことになる。
+pub fn no_schemas() -> AppliedSchemas {
+    Arc::new(|| {
+        Box::pin(async {
+            Err("この構成では記録の形を確かめられません".to_string()) as Result<Vec<String>, String>
+        })
+    })
+}
+
+/// 終わり方を持たない構成のときの答え。**落とさない**（既存の統合テスト用）。
+pub fn no_stop() -> Stopper {
+    Arc::new(|| tracing::warn!("この構成では自分を終えられません"))
+}
+
+/// 応答を流し切ってから落とすまでの間（設計§24）。
+///
+/// **ハンドラの中で落とすと応答が届かない。** ブラウザからは「押したのに失敗した」と
+/// 見分けが付かなくなるので、返してから落とす。
+const STOP_AFTER: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// 版の一覧と、いまの状態（設計§14）。
 ///
@@ -60,6 +113,50 @@ pub struct VersionsView {
     /// 既に繋がっていないカードは**既に抜け殻**なので数えない。ここが数えるのは
     /// **これから失うぶん**だけ。
     pub stranded_cards: usize,
+    /// 取ってくる仕事の様子（設計§15）。押していなければ `None`。
+    pub install: Option<InstallView>,
+    /// 取ってくる道具が無いときの理由（設計§23-6）。
+    ///
+    /// **`supported` と混ぜない。** あちらは「保管庫を持てる構成か」で、こちらは
+    /// 「取ってこられるか」。混ぜると画面が2つを区別できなくなる——版を選ぶことは
+    /// できるが取ってくることはできない、という組み合わせが普通にある。
+    pub install_unavailable: Option<String>,
+}
+
+/// 取ってくる仕事の段階（設計§15）。
+///
+/// **3つしか無い。** 細かく刻むには [`agent_core::version::install_version`] の中へ
+/// 通知の口を通すことになるが、窓は数十秒なので割に合わない（設計§24）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallPhase {
+    Installing,
+    Done,
+    Failed,
+}
+
+/// 取ってくる仕事の様子。
+///
+/// **プロセスの中にだけ持つ。** [`version::Outcome`] がファイルなのは乗り換えが
+/// プロセスをまたぐからで、取ってくる仕事はまたがない（設計§24）。
+#[derive(Debug, Clone, Serialize)]
+pub struct InstallView {
+    pub version: VersionId,
+    pub phase: InstallPhase,
+    /// 失敗した理由。うまくいったときは `None`。
+    pub reason: Option<String>,
+}
+
+/// 版を選ぶときの本文。
+#[derive(Debug, Deserialize)]
+pub struct SelectRequest {
+    pub version: VersionId,
+    /// **確かめられなかったことを承知のうえで進めるか**（設計§9）。
+    ///
+    /// この機能より前の版は記録の形を答えられないので、必ず「確かめられません」を通る。
+    /// 断ってしまうといちばん戻りたい先へ永久に戻れなくなるので、**同意を取って通す**。
+    #[serde(default)]
+    pub confirm_unverified: bool,
 }
 
 /// 最後に読めた最新版（設計§8）。
@@ -104,12 +201,32 @@ pub struct VersionsState {
     /// 鍵のモードで見分ける道もあるが、あれは**鍵のかけ方**であって PTY の持ち主では
     /// ない。`None` が「この機械は誰も道連れにしない」を型で言うほうが読み違えにくい。
     pub registry: Option<Arc<SessionRegistry>>,
+    /// 親が受け取った `--config`（設計§9）。
+    ///
+    /// **書き戻し先の `config_path` とは別物。** 常に渡すと、設定ファイルを置いて
+    /// いない利用者を「設定が壊れている」と誤判定する——`--config` 無しの起動は、
+    /// カレントに設定が無くても空の設定として成功するため。
+    pub config_arg: Option<PathBuf>,
+    /// 適用済みの記録の形を読む口（設計§9）。
+    pub applied: AppliedSchemas,
+    /// 取ってくる窓口（設計§7）。**道具が無い環境でも形は変えない**（必ず失敗を返す実装）。
+    pub ops: Arc<dyn VersionOps>,
+    /// 取ってくる仕事の様子（設計§15）。
+    pub install: Arc<Mutex<Option<InstallView>>>,
+    /// 自分を終える口（設計§10）。
+    pub stop: Stopper,
 }
 
 pub fn routes(state: VersionsState) -> Router {
     Router::new()
         .route("/api/versions", get(api_versions))
-        .route("/api/versions/{version}", axum::routing::delete(api_remove))
+        .route(
+            "/api/versions/selected",
+            put(api_select).delete(api_unselect),
+        )
+        .route("/api/versions/{version}", delete(api_remove))
+        .route("/api/versions/{version}/install", post(api_install))
+        .route("/api/versions/restart", post(api_restart))
         .with_state(state)
 }
 
@@ -149,6 +266,8 @@ async fn build_view(state: &VersionsState, identity: &Identity) -> VersionsView 
             outcome: None,
             latest: None,
             stranded_cards: 0,
+            install: None,
+            install_unavailable: None,
         };
     }
 
@@ -172,6 +291,8 @@ async fn build_view(state: &VersionsState, identity: &Identity) -> VersionsView 
         outcome: version::read_outcome(&state.state_dir),
         latest: latest_of(&state.state_dir),
         stranded_cards: stranded_cards(state, identity),
+        install: state.install.lock().expect("ロックが壊れていない").clone(),
+        install_unavailable: state.ops.unavailable_reason(),
     }
 }
 
@@ -220,4 +341,172 @@ async fn api_remove(
     removed.map_err(|reason| (StatusCode::CONFLICT, reason))?;
 
     Ok(Json(build_view(&state, &identity).await))
+}
+
+/// 次に起こす版を選ぶ（設計§9・§10）。
+///
+/// **プロセスは落ちない。** ここでやるのは門を通してポインタを書くところまでで、
+/// 効くのは次に起こしたとき——要件が名指しで恐れている「選んだ瞬間に全部入れ替わる」を
+/// 構造で外している。
+async fn api_select(
+    State(state): State<VersionsState>,
+    Extension(identity): Extension<Identity>,
+    Json(request): Json<SelectRequest>,
+) -> Result<Json<VersionsView>, (StatusCode, String)> {
+    if !may_operate(&state.auth, &identity) {
+        return Err(refusal(&state.auth));
+    }
+
+    let Some(dir) = version::stored_version_dir(&state.state_dir, &request.version) else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("保管庫にありません: {}", request.version),
+        ));
+    };
+    // **3本揃って、3本とも同じ版を名乗るときだけ選ばせる**（設計§6）。揃っていない版を
+    // 選ばせると、パーサだけ食い違った状態で動き出す
+    version::versions_agree(&dir)
+        .map_err(|reason| (StatusCode::CONFLICT, format!("選べません: {reason}")))?;
+    let target = dir.join("agentdashboard");
+
+    version::acquire_lock(&state.state_dir).map_err(|reason| (StatusCode::CONFLICT, reason))?;
+    let verdict = decide(&state, &target).await;
+    let selected = match &verdict {
+        Ok(gate::Verdict::Ready) => Ok(()),
+        // **断らない。** 断るといちばん戻りたい先（この機能を入れる直前の版）へ
+        // 永久に戻れなくなるので、承知のうえなら通す（設計§9）
+        Ok(gate::Verdict::Unverified { reason }) if request.confirm_unverified => {
+            tracing::warn!(version = %request.version, %reason, "確かめられないまま版を選びました");
+            Ok(())
+        }
+        Ok(gate::Verdict::Unverified { reason }) => Err((
+            // **「断った」とは別の返し方をする。** 同意すれば進める道が残っていることを、
+            // 画面が状態コードだけで見分けられるようにする
+            StatusCode::PRECONDITION_REQUIRED,
+            reason.clone(),
+        )),
+        Ok(gate::Verdict::Refused { reason }) => Err((StatusCode::CONFLICT, reason.clone())),
+        Err(reason) => Err((StatusCode::CONFLICT, reason.clone())),
+    };
+    if selected.is_ok() {
+        version::write_pointer(&state.state_dir, Some(&target));
+    }
+    version::release_lock(&state.state_dir);
+    selected?;
+
+    Ok(Json(build_view(&state, &identity).await))
+}
+
+/// 行き先に聞いて結論を出す（設計§9）。
+async fn decide(state: &VersionsState, target: &std::path::Path) -> Result<gate::Verdict, String> {
+    let applied = (state.applied)().await?;
+    let target = target.to_path_buf();
+    let config_arg = state.config_arg.clone();
+    // **3回プロセスを起こす**ので、非同期の担ぎ手を塞がないよう逃がす
+    let answers = tokio::task::spawn_blocking(move || gate::ask(&target, config_arg.as_deref()))
+        .await
+        .map_err(|err| format!("行き先に聞けませんでした: {err}"))??;
+    Ok(gate::judge(&answers, &applied))
+}
+
+/// 予約を取り消す（設計§10）。**入れる側が置いた版へ戻る。**
+async fn api_unselect(
+    State(state): State<VersionsState>,
+    Extension(identity): Extension<Identity>,
+) -> Result<Json<VersionsView>, (StatusCode, String)> {
+    if !may_operate(&state.auth, &identity) {
+        return Err(refusal(&state.auth));
+    }
+
+    version::acquire_lock(&state.state_dir).map_err(|reason| (StatusCode::CONFLICT, reason))?;
+    version::write_pointer(&state.state_dir, None);
+    version::release_lock(&state.state_dir);
+
+    Ok(Json(build_view(&state, &identity).await))
+}
+
+/// 版を取ってくる（設計§7・§15）。
+///
+/// **すぐ返して背景で走らせる。** 取得は数十秒かかるので、応答を待たせると前段の
+/// 打ち切りに当たる。様子は [`VersionsView::install`] に出る。
+///
+/// **取ってきても選ばない。** 「勝手に更新されない」の最後の砦なので、ポインタは
+/// [`api_select`] でしか書かない。
+async fn api_install(
+    State(state): State<VersionsState>,
+    Extension(identity): Extension<Identity>,
+    Path(version): Path<String>,
+) -> Result<(StatusCode, Json<VersionsView>), (StatusCode, String)> {
+    if !may_operate(&state.auth, &identity) {
+        return Err(refusal(&state.auth));
+    }
+    if let Some(reason) = state.ops.unavailable_reason() {
+        return Err((StatusCode::CONFLICT, reason));
+    }
+
+    let version = VersionId::new(version);
+    version::acquire_lock(&state.state_dir).map_err(|reason| (StatusCode::CONFLICT, reason))?;
+    *state.install.lock().expect("ロックが壊れていない") = Some(InstallView {
+        version: version.clone(),
+        phase: InstallPhase::Installing,
+        reason: None,
+    });
+
+    let background = state.clone();
+    tokio::spawn(async move {
+        let state_dir = background.state_dir.clone();
+        let ops = Arc::clone(&background.ops);
+        let target = version.clone();
+        let done = tokio::task::spawn_blocking(move || {
+            version::install_version(&state_dir, ops.as_ref(), &target)
+        })
+        .await;
+        let (phase, reason) = match done {
+            Ok(Ok(_)) => (InstallPhase::Done, None),
+            Ok(Err(reason)) => (InstallPhase::Failed, Some(reason)),
+            Err(err) => (
+                InstallPhase::Failed,
+                Some(format!("取ってこられません: {err}")),
+            ),
+        };
+        *background.install.lock().expect("ロックが壊れていない") = Some(InstallView {
+            version,
+            phase,
+            reason,
+        });
+        version::release_lock(&background.state_dir);
+    });
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(build_view(&state, &identity).await),
+    ))
+}
+
+/// いま入れ替える（設計§10）。
+///
+/// **自分を終えるところまで。** 起こし直しは常駐の設定（systemd の `Restart=always` ／
+/// compose の `restart: unless-stopped`）に任せる。見届け役のプロセスを離す形は採らない
+/// ——このプロジェクトは離したプロセスが孤児として生き残った事故を実測している。
+async fn api_restart(
+    State(state): State<VersionsState>,
+    Extension(identity): Extension<Identity>,
+) -> Result<Json<VersionsView>, (StatusCode, String)> {
+    if !may_operate(&state.auth, &identity) {
+        return Err(refusal(&state.auth));
+    }
+
+    let view = build_view(&state, &identity).await;
+    tracing::info!(
+        stranded = view.stranded_cards,
+        "版を入れ替えるために終了します"
+    );
+    let stop = Arc::clone(&state.stop);
+    tokio::spawn(async move {
+        // **返してから落とす。** 応答が届かないと「押したのに失敗した」と見分けが付かない
+        tokio::time::sleep(STOP_AFTER).await;
+        stop();
+    });
+
+    Ok(Json(view))
 }

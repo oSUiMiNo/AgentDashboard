@@ -118,6 +118,11 @@ pub struct TestServer {
     /// REST も `/ws` も同じ Cookie で通すので、**ここに入れておけば以後の要求に載る**。
     /// 鍵の無いローカルモード（`Open`）では最後まで `None` のまま。
     pub cookie: Option<String>,
+    /// 版の入れ替えで**自分を終えろと言われたか**（CICD設計§10・§24）。
+    ///
+    /// 素直に落とす実装だと、サーバをプロセス内に立てているここでは
+    /// **テストバイナリごと死ぬ**。差し替えた口が押されたことだけを控える。
+    pub stopped: Arc<std::sync::atomic::AtomicBool>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -353,6 +358,7 @@ impl TestServer {
         // 入口の鍵も**本番と同じ組み立て**で作る。テストだけ素通しにすると、
         // 認証を通る経路が一度も踏まれないまま緑になる
         let auth = server_core::auth::AuthContext::local(db.clone(), &server_config);
+        let gate_db = db.clone();
         let registry = SessionRegistry::load(db, server_config.transcript_window_nodes, None)
             .await
             .expect("記録層を立てられること");
@@ -384,6 +390,28 @@ impl TestServer {
         // 版の口も本番と同じ形で立てる。**置き場所は使い捨て**なので、開発者の
         // 実環境の保管庫を読むことはない（CICD設計§21-6）
         .with_state_dir(agent_config.resolved_state_dir());
+        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        server = server.with_versions(agentdashboard_core::VersionsWiring {
+            // 門が行き先へ渡す `--config`。テストは設定ファイルを持たないので渡さない
+            config_arg: None,
+            // 記録への口は本番と同じ形（型を書かずに関数で受け取る）
+            applied: {
+                let db = gate_db;
+                Arc::new(move || {
+                    let db = db.clone();
+                    Box::pin(async move {
+                        server_core::db::applied_migration_names(&db)
+                            .await
+                            .map_err(|err| format!("適用済みの記録の形を読めません: {err}"))
+                    })
+                })
+            },
+            // **落とす代わりに控える。** 素直に落とすとテストバイナリごと死ぬ
+            stop: {
+                let stopped = Arc::clone(&stopped);
+                Arc::new(move || stopped.store(true, std::sync::atomic::Ordering::SeqCst))
+            },
+        });
         let parser = if with_parser {
             // 本番と同じ入口（環境変数）でビルド済みのパーサを指す
             if name_parser_by_env {
@@ -448,6 +476,7 @@ impl TestServer {
             selfheal: None,
             config,
             cookie: None,
+            stopped,
             task,
         }
     }

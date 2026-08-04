@@ -58,6 +58,19 @@ pub struct LocalServer {
     /// 版の保管庫の置き場所（CICD設計§14）。**居なくても動く**ので、既存の統合テストは
     /// 版の口を立てずにセッションの検証だけができる。
     state_dir: Option<std::path::PathBuf>,
+    /// 版の口の残りの材料（CICD設計§9・§10）。`state_dir` と一緒に入る。
+    versions: Option<VersionsWiring>,
+}
+
+/// 版の口が要る、`state_dir` 以外の材料。
+///
+/// 門は行き先の実行ファイルへ聞くだけでなく**その DB に適用済みの形**と突き合わせる
+/// ので、記録への口が要る。`crates/core` は記録の道具を通常の依存に持っていないので、
+/// 型ではなく関数で受け取る（CICD設計§23-9 と同じ形）。
+pub struct VersionsWiring {
+    pub config_arg: Option<std::path::PathBuf>,
+    pub applied: versions_api::AppliedSchemas,
+    pub stop: versions_api::Stopper,
 }
 
 impl LocalServer {
@@ -75,6 +88,7 @@ impl LocalServer {
             settings: None,
             auth,
             state_dir: None,
+            versions: None,
         }
     }
 
@@ -90,9 +104,19 @@ impl LocalServer {
         self
     }
 
-    /// 版の保管庫を繋いだ状態にする。
+    /// 版の保管庫を繋いだ状態にする。**見る口と消す口だけ**が生える。
     pub fn with_state_dir(mut self, state_dir: std::path::PathBuf) -> Self {
         self.state_dir = Some(state_dir);
+        self
+    }
+
+    /// 版を**選ぶ・取ってくる・入れ替える**口まで生やす（CICD設計§9・§10）。
+    ///
+    /// 分けてあるのは、既存の統合テストが記録への口も終わり方も要らないため。
+    /// **終わり方を差し替えられる形にしてある**のが要点——素直に落とすと、サーバを
+    /// プロセス内に立てているテストがテストバイナリごと死ぬ。
+    pub fn with_versions(mut self, wiring: VersionsWiring) -> Self {
+        self.versions = Some(wiring);
         self
     }
 
@@ -142,6 +166,20 @@ impl LocalServer {
                     // **こちらは PTY の持ち主**。落とすと道連れになるカードがあるので、
                     // 押す前に数えられるようにする（CICD設計§10）
                     registry: Some(Arc::clone(&self.registry)),
+                    config_arg: self
+                        .versions
+                        .as_ref()
+                        .and_then(|wiring| wiring.config_arg.clone()),
+                    applied: match &self.versions {
+                        Some(wiring) => Arc::clone(&wiring.applied),
+                        None => versions_api::no_schemas(),
+                    },
+                    ops: agent_core::version_ops::detect(),
+                    install: Arc::new(std::sync::Mutex::new(None)),
+                    stop: match &self.versions {
+                        Some(wiring) => Arc::clone(&wiring.stop),
+                        None => versions_api::no_stop(),
+                    },
                 }),
                 Arc::clone(&self.auth),
             ));
@@ -157,7 +195,10 @@ impl LocalServer {
 ///
 /// 落ちても、繋がっている PC のセッションは無傷（§9-6）。エージェントは繋ぎ直し、
 /// 未 ack のぶんを送り直して追いつく（§6-4）。
-pub async fn serve_server(config: Config) -> anyhow::Result<()> {
+pub async fn serve_server(
+    config: Config,
+    config_arg: Option<std::path::PathBuf>,
+) -> anyhow::Result<()> {
     let server_config = Arc::new(config.server());
 
     let db = server_core::db::connect(&config.resolved_database_url()).await?;
@@ -186,6 +227,7 @@ pub async fn serve_server(config: Config) -> anyhow::Result<()> {
     .await?;
     let auth = AuthContext::server(db.clone(), &server_config);
     let update_db = db.clone();
+    let gate_db = db.clone();
     let hub = AgentHub::new(db, Arc::clone(&registry));
 
     if let Some(bus) = &bus {
@@ -218,6 +260,22 @@ pub async fn serve_server(config: Config) -> anyhow::Result<()> {
                     // **PTY を持たないので道連れにするものが無い。** 記録は持っている
                     // が、あれは PC 側が生かし続けるセッションの写し（CICD設計§10）
                     registry: None,
+                    config_arg: config_arg.clone(),
+                    // 記録への口は**型を書かずに関数で受け取る**（設計§23-9 と同じ形）
+                    applied: {
+                        let db = gate_db;
+                        Arc::new(move || {
+                            let db = db.clone();
+                            Box::pin(async move {
+                                server_core::db::applied_migration_names(&db)
+                                    .await
+                                    .map_err(|err| format!("適用済みの記録の形を読めません: {err}"))
+                            })
+                        })
+                    },
+                    ops: agent_core::version_ops::detect(),
+                    install: Arc::new(std::sync::Mutex::new(None)),
+                    stop: versions_api::exit_process(),
                 })),
             Arc::clone(&auth),
         ));
@@ -325,7 +383,11 @@ async fn serve_router(listener: tokio::net::TcpListener, router: Router) -> anyh
 }
 
 /// 設定からサーバ一式を組み立てて起動する（ローカルモード）。
-pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
+pub async fn serve(
+    config: Config,
+    config_path: std::path::PathBuf,
+    config_arg: Option<std::path::PathBuf>,
+) -> anyhow::Result<()> {
     // 1つのファイルから、エージェント側とサーバ側の2つへ射影する（セルフホスト化設計§13-2）。
     // 分けておくと、フェーズ3 で両者が別プロセスになったときに、この行より下は
     // ほとんど動かさずに済む
@@ -345,6 +407,7 @@ pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::R
     server_core::auth::ensure_lan_password(&db, &server_config).await?;
     let auth = server_core::auth::AuthContext::local(db.clone(), &server_config);
     let update_db = db.clone();
+    let gate_db = db.clone();
 
     let registry = SessionRegistry::load(db, server_config.transcript_window_nodes, None).await?;
 
@@ -433,7 +496,23 @@ pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::R
     let server = LocalServer::new(manager, registry, Arc::clone(&server_config), auth)
         .with_parser(parser)
         .with_settings(settings)
-        .with_state_dir(agent_config.resolved_state_dir());
+        .with_state_dir(agent_config.resolved_state_dir())
+        .with_versions(VersionsWiring {
+            config_arg,
+            // 記録への口は**型を書かずに関数で受け取る**（設計§23-9 と同じ形）
+            applied: {
+                let db = gate_db;
+                Arc::new(move || {
+                    let db = db.clone();
+                    Box::pin(async move {
+                        server_core::db::applied_migration_names(&db)
+                            .await
+                            .map_err(|err| format!("適用済みの記録の形を読めません: {err}"))
+                    })
+                })
+            },
+            stop: versions_api::exit_process(),
+        });
     let listener = bind(&server_config).await?;
     // **待ち受けを確保できた時点で、乗り換えの印を消す**（CICD設計§11）。ここより後ろへ
     // ずらすと、印を消す前に落ちる隙間が広がる
