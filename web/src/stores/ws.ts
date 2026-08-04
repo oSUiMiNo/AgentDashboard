@@ -249,6 +249,9 @@ async function openSocket(set: SetState) {
     set({ status: 'open', lastError: null })
     // 開き直したときに台帳の購読を出し直す。初回は台帳が空なので何も起きない
     resubscribe()
+    // **繋がった相手の版を聞き直す**（CICD設計§11）。版を切り替えるとサーバごと
+    // 入れ替わるので、繋ぎ直した瞬間が「画面のほうが古い」と気づける唯一の機会になる
+    void useAuthStore.getState().load()
   }
 
   next.onclose = () => {

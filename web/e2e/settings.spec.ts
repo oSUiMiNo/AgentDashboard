@@ -51,3 +51,20 @@ test('ローカルでは LAN パスワードの欄が出て、画面の間隔は
   await expect(page.getByTestId('screen-interval-select')).toHaveCount(0)
   await expect(page.getByTestId('scrollback-lines-input')).toHaveCount(0)
 })
+
+test('版を切り替えられない構成では、押せる顔をせず案内だけ出す', async ({
+  page,
+}) => {
+  // **できないことをボタンにしない**（CICD設計§14）。この土台は版の機能を
+  // 塞いであるので、ここでは「出ないこと」だけを確かめる——出る側は
+  // `chromium-versions` の土台で見る
+  await openDashboard(page)
+  await page.getByTestId('settings-link').click()
+
+  await expect(page.getByTestId('versions')).toHaveAttribute(
+    'data-supported',
+    'false',
+  )
+  await expect(page.getByTestId('versions-picker')).toHaveCount(0)
+  await expect(page.getByTestId('versions-restart')).toHaveCount(0)
+})

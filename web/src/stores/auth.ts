@@ -29,6 +29,8 @@ export interface AuthView {
   setup_open: boolean
   /** 接続元が 127.0.0.1 か */
   from_loopback: boolean
+  /** いま応答しているサーバの版（CICD設計§11）。古いサーバは返さない */
+  version?: string
 }
 
 interface AuthState {
@@ -36,6 +38,14 @@ interface AuthState {
   /** まだ聞けていない間は true。この間は画面を出さない（ちらつきを避ける） */
   loading: boolean
   lastError: string | null
+  /**
+   * **画面より新しいサーバが応答している**（CICD設計§11）。
+   *
+   * 版を切り替えるとサーバごと入れ替わるが、開きっぱなしのタブは古い画面のまま
+   * 喋り続ける。壊れ方が「一部が黙って更新されなくなる」なので、気づけるように
+   * 印を立てる。**勝手に読み込み直さない**——書きかけの指示が消える。
+   */
+  serverChanged: boolean
   load: () => Promise<void>
   /** ログインする。`name` が null なら LAN の共有パスワード */
   login: (name: string | null, password: string) => Promise<boolean>
@@ -65,6 +75,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   auth: UNKNOWN,
   loading: true,
   lastError: null,
+  serverChanged: false,
 
   load: async () => {
     try {
@@ -73,7 +84,19 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         set({ loading: false })
         return
       }
-      set({ auth: (await response.json()) as AuthView, loading: false })
+      const auth = (await response.json()) as AuthView
+      // **一度でも版を知っていて、それが変わったら**印を立てる。初回は比べる相手が
+      // 無いので立たない。版を返さない古いサーバでも立たない（比べようが無い）
+      const known = get().auth.version
+      const changed =
+        known !== undefined &&
+        auth.version !== undefined &&
+        known !== auth.version
+      set({
+        auth,
+        loading: false,
+        serverChanged: get().serverChanged || changed,
+      })
     } catch {
       // 繋がらないこと自体は WebSocket 側が画面に出す
       set({ loading: false })

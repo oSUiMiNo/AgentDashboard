@@ -23,6 +23,7 @@ import { HOME } from '@/lib/routes'
 import { useNow } from '@/lib/sessions'
 import { useAuthStore } from '@/stores/auth'
 import { useSettingsStore } from '@/stores/settings'
+import { isNewer } from '@/stores/versions'
 
 interface TokenView {
   id: string
@@ -37,10 +38,14 @@ interface AgentRow {
   name: string
   last_seen_at: number | null
   connected: boolean
+  /** その PC のエージェントの版（CICD設計§16）。名乗っていなければ無い */
+  version?: string | null
 }
 
 export function AccountPage() {
   const account = useAuthStore((state) => state.auth.account)
+  // 危ない組み合わせの判定に要る（CICD設計§16）。名乗っていなければ比べない
+  const serverVersion = useAuthStore((state) => state.auth.version ?? '')
   const logout = useAuthStore((state) => state.logout)
   const reloadSettings = useSettingsStore((state) => state.load)
 
@@ -239,6 +244,26 @@ export function AccountPage() {
                 }`}
               />
               <span className="min-w-0 flex-1 truncate font-medium">{agent.name}</span>
+              {agent.version && (
+                <span
+                  data-testid="agent-version"
+                  className={`shrink-0 ${
+                    isNewer(agent.version, serverVersion)
+                      ? 'text-amber-300'
+                      : 'text-muted-foreground'
+                  }`}
+                  // **サーバのほうが古い組み合わせだけを目立たせる**（CICD設計§16）。
+                  // 逆は知らない指示が読み飛ばされるだけで済むが、こちらは報告全体が
+                  // 解けなくなり、カードが1枚も出なくなる
+                  title={
+                    isNewer(agent.version, serverVersion)
+                      ? `この PC（${agent.version}）よりサーバ（${serverVersion}）が古いので、カードが出ないことがあります`
+                      : undefined
+                  }
+                >
+                  版 {agent.version}
+                </span>
+              )}
               <span className="text-muted-foreground shrink-0">
                 {agent.connected
                   ? '接続中'

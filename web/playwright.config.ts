@@ -46,7 +46,17 @@ export default defineConfig({
       use: { ...devices['Desktop Chrome'] },
       // セルフホスト構成のぶんは別のサーバ（4174）、2台構成のぶんは compose（4175）、
       // PC 3台のぶんはさらに別のサーバ（4177）
-      testIgnore: /(remote|account|compose|fleet)\.spec\.ts/,
+      testIgnore: /(remote|account|compose|fleet|versions)\.spec\.ts/,
+    },
+    {
+      // 版の切替が**使える**構成（CICD設計§14）。既定の土台は版の機能ごと塞いで
+      // あるので、そちらでは「出ないこと」しか確かめられない。
+      //
+      // **土台を分けるのは、画面の前提が変わるため**——1つの土台で切り替えると、
+      // 版と無関係な全テストが版のカードを抱えて走ることになる（PJTガイドライン）。
+      name: 'chromium-versions',
+      use: { ...devices['Desktop Chrome'], baseURL: 'http://127.0.0.1:4178' },
+      testMatch: /versions\.spec\.ts/,
     },
     {
       // 別の PC のセッションを、実物のブラウザで見る（セルフホスト化設計§7）。
@@ -115,6 +125,35 @@ export default defineConfig({
     stdout: 'pipe',
     stderr: 'pipe',
     timeout: 60_000,
+    },
+    {
+      // 版の切替が使える構成（CICD設計§14）。設定はローカルと同じものを使い、
+      // ぶつかるところだけ環境変数で上書きする（全キーが `AGENTDASHBOARD_<キー>`
+      // で上書きできる。設計§14-1）
+      command: `rm -rf test-results/versions-state && ${serverBinary} --config e2e/config.toml`,
+      env: {
+        AGENTDASHBOARD_CLAUDE_BIN: fakeClaude,
+        AGENTDASHBOARD_PORT: '4178',
+        AGENTDASHBOARD_STATE_DIR: 'test-results/versions-state',
+        // **利用者のグローバル設定の差し替え先も分ける。** 既定の土台と同じ場所を
+        // 指すと、注入と回復が2つのサーバで取り合いになる（モードやモデルの
+        // テストが理由の分からない形で落ちる）
+        AGENTDASHBOARD_CLAUDE_SETTINGS_PATH:
+          'test-results/versions-state/claude-settings.json',
+        // **乗り換えだけは塞ぐ。** 画面から選べる状態にはするが、実際に乗り換えると
+        // E2E のサーバが別の実行ファイルへ化けてしまう
+        AGENTDASHBOARD_VERSION_HANDED_OVER: '1',
+        AGENTDASHBOARD_VERSION_SUPPORTED: '1',
+        // **初回退避の元を空にする。** 塞がないと、起こすたびに実行ファイル3本ぶん
+        // （数十MB）を控えにいく
+        AGENTDASHBOARD_VERSION_SOURCE_DIR: 'test-results/versions-state/none',
+        RUST_LOG: 'info',
+      },
+      url: 'http://127.0.0.1:4178',
+      reuseExistingServer: !process.env.CI,
+      stdout: 'pipe',
+      stderr: 'pipe',
+      timeout: 60_000,
     },
     {
       // セルフホスト構成（サーバ＋エージェント）。**順序を持った起動**なので、

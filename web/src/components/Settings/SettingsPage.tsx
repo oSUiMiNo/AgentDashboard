@@ -27,6 +27,7 @@ import { permissionModeInfo } from '@/lib/protocol'
 import { formatScreenInterval } from '@/lib/time'
 import { HOME } from '@/lib/routes'
 import { useSettingsStore } from '@/stores/settings'
+import { VersionsCard } from '@/components/Settings/VersionsCard'
 
 /** 履歴を送る間隔の選択肢（秒。設計§13-3）。 */
 const SYNC_CHOICES = [5, 10, 20, 60]
@@ -129,6 +130,8 @@ export function SettingsPage() {
       </div>
 
       {settings.lan_password.supported && <LanPasswordCard />}
+
+      <VersionsCard />
 
       <div className="border-border flex flex-col gap-2 rounded-xl border p-4">
         <h3 className="text-sm font-medium">この CLI が受け付けるモード</h3>

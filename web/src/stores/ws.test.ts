@@ -63,20 +63,31 @@ class FakeSocket {
   }
 }
 
-let fetched = 0
+/**
+ * 叩かれた口。**数だけでは足りない。**
+ *
+ * 繋がった時点でサーバの版も聞きに行く（CICD設計§11）ので、全部まとめて数えると
+ * 「全体像を取り直したか」を見ているつもりが別の口の呼び出しまで数えてしまう。
+ */
+let fetched: string[] = []
+
+/** 全体像を取りに行った回数。 */
+function snapshots(): number {
+  return fetched.filter((url) => url.includes('/api/sessions')).length
+}
 
 beforeEach(() => {
   clearSessions()
   FakeSocket.instances = []
-  fetched = 0
+  fetched = []
   vi.useFakeTimers()
   vi.stubGlobal('WebSocket', FakeSocket)
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
     callback(0)
     return 0
   })
-  vi.stubGlobal('fetch', async () => {
-    fetched += 1
+  vi.stubGlobal('fetch', async (url: string) => {
+    fetched.push(String(url))
     return { ok: true, json: async () => [] } as unknown as Response
   })
 })
@@ -102,7 +113,7 @@ describe('WebSocket ストア', () => {
     // 逆順だと、遅れて届いたスナップショットが差分を古い値で上書きする
     await useWsStore.getState().connect()
 
-    expect(fetched).toBe(1)
+    expect(snapshots()).toBe(1)
     expect(FakeSocket.instances).toHaveLength(1)
     expect(latest().url).toMatch(/\/ws$/)
 
@@ -121,7 +132,16 @@ describe('WebSocket ストア', () => {
 
     await vi.advanceTimersByTimeAsync(500)
     expect(FakeSocket.instances).toHaveLength(2)
-    expect(fetched).toBe(2)
+    expect(snapshots()).toBe(2)
+  })
+
+  it('繋がるたびにサーバの版を聞き直す', async () => {
+    // 版を切り替えるとサーバごと入れ替わる。**繋ぎ直した瞬間**が、画面のほうが
+    // 古いと気づける唯一の機会になる（CICD設計§11）
+    await useWsStore.getState().connect()
+    latest().accept()
+
+    expect(fetched.filter((url) => url.includes('/api/me'))).toHaveLength(1)
   })
 
   it('繋がらないうちは待ち時間を伸ばす', async () => {

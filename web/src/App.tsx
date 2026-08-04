@@ -169,6 +169,7 @@ function Shell() {
       )}
 
       <SelfhealBanner />
+      <ServerChangedBanner />
 
       {/*
         通っていない間は中身を出さない。**扉は開いているが中は返さない**という
@@ -230,6 +231,43 @@ function SelfhealBanner() {
       </span>
       <Button variant="ghost" size="sm" onClick={clearSelfheal}>
         閉じる
+      </Button>
+    </div>
+  )
+}
+
+/**
+ * 画面より新しいサーバが応答していることを知らせる（CICD設計§11）。
+ *
+ * 画面は実行ファイルへ焼き込まれるので、版を切り替えればサーバごと入れ替わる。
+ * ところが開きっぱなしのタブは古い画面のまま喋り続け、**知らない知らせは黙って
+ * 捨てられる**——壊れ方が「エラーが出る」ではなく「一部が黙って更新されなくなる」
+ * になるので、気づける形にしておく。
+ *
+ * **勝手に読み込み直さない。** 入力欄に書きかけの指示があると消える。
+ *
+ * 自己修復と枠を分けてあるのは、あちらが単一スロットで、片方がもう片方を
+ * 押し出してしまうため（設計§11）。
+ */
+function ServerChangedBanner() {
+  const serverChanged = useAuthStore((state) => state.serverChanged)
+
+  if (!serverChanged) {
+    return null
+  }
+  return (
+    <div
+      data-testid="server-changed-banner"
+      className="flex items-center justify-between gap-4 rounded-md border border-sky-500/40 bg-sky-500/10 px-3 py-2 text-sm"
+    >
+      <span>
+        ダッシュボードの版が変わりました。
+        <span className="text-muted-foreground ml-2 text-xs">
+          この画面は古いままなので、読み込み直してください
+        </span>
+      </span>
+      <Button size="sm" onClick={() => window.location.reload()}>
+        読み込み直す
       </Button>
     </div>
   )
