@@ -48,7 +48,7 @@
   <tr><td>ローカルモード</td><td>ダッシュボードと「PC 側の一式」が<strong>1つのプロセスに同居</strong>する動かし方。落とすと、走っている claude も道連れで死ぬ</td></tr>
   <tr><td>サーバモード</td><td><code>--mode server</code> で起こす動かし方。擬似ターミナルを持たず、ブラウザへの配信だけを受け持つ。<strong>落としても、繋がっている PC のセッションは死なない</strong></td></tr>
   <tr><td>セッションホスト</td><td><code>agentdashboard-agent</code>。利用者の機械に常駐し、claude を擬似ターミナル上で動かして、サーバへ報告する</td></tr>
-  <tr><td>Cloudflare Tunnel</td><td>手元の待ち受けポートに、インターネットから届く URL を割り当てる仕組み。ここでは使い捨ての <code>trycloudflare.com</code> を使っている</td></tr>
+  <tr><td>Cloudflare Tunnel</td><td>待ち受けポートに、インターネットから届く URL を割り当てる仕組み。<strong>サーバのポートを1つも開けない</strong>——中から Cloudflare へ繋ぎに行き、その道を逆流させる。<strong>名前付きトンネル</strong>は行き先をドメインに固定したもので、使い捨ての <code>trycloudflare.com</code> と違って URL が変わらない</td></tr>
   <tr><td>ソースビルド</td><td>配布物を取ってこず、リポジトリで <code>make build</code> して出来た実行ファイルを直接起こすこと。<strong>リリースを出しても、この動かし方には何も届かない</strong></td></tr>
 </table>
 </div>
@@ -94,11 +94,11 @@
   <text x="578" y="112" fill="#e6e9ef" font-size="12">i-0bf66240fec98392a / t3.small</text>
   <text x="578" y="132" fill="#e6e9ef" font-size="12">docker compose ／ 版 0.1.5</text>
   <text x="578" y="152" fill="#9aa4b2" font-size="11">箱の中なので版の切替は出ない</text>
-  <text x="578" y="172" fill="#9aa4b2" font-size="11">ここにも cloudflared が居る</text>
+  <text x="578" y="172" fill="#9aa4b2" font-size="11">cloudflared は systemd で常駐</text>
   <text x="578" y="192" fill="#f7768e" font-size="11">課金が続いている</text>
 
-  <text x="560" y="262" fill="#e0af68" font-size="13" font-weight="600">flying-playback-not-lang</text>
-  <text x="560" y="280" fill="#e0af68" font-size="13" font-weight="600">.trycloudflare.com</text>
+  <text x="560" y="262" fill="#e0af68" font-size="13" font-weight="600">dash.underschaft.com</text>
+  <text x="560" y="280" fill="#9aa4b2" font-size="11">名前付きトンネル（systemd で常駐）</text>
   <path d="M700 250 L700 216" stroke="#e0af68" stroke-width="2" marker-end="url(#aw)"/>
   <text x="500" y="330" fill="#f7768e" font-size="12">↑ この URL は 8788 ではなく AWS EC2 を指している</text>
 </svg>
@@ -107,9 +107,9 @@
   <strong>いちばん間違えやすいところ。</strong>
   この機械にも <code>cloudflared tunnel --url http://127.0.0.1:8788</code> が動いているので、
   <code>ps</code> で見ると「あの URL は 8788 だな」と読めてしまう。
-  <strong>実際は別物</strong>で、普段見ている <code>flying-playback-not-lang.trycloudflare.com</code> は AWS EC2 側の
-  cloudflared が作った URL。<br>
-  実際にこれを取り違えて、キャッシュを疑って強制リロードを3通り試す、という遠回りをした。
+  <strong>実際は別物</strong>で、普段見ている <code>dash.underschaft.com</code> は AWS EC2 側の
+  cloudflared が作った道。<br>
+  以前これを取り違えて、キャッシュを疑って強制リロードを3通り試す、という遠回りをした。
 </div>
 
 <div class="panel warn">
@@ -145,12 +145,21 @@
   </tr>
   <tr>
     <td>AWS EC2</td>
-    <td><code>flying-playback-not-lang.trycloudflare.com</code></td>
+    <td><code>dash.underschaft.com</code></td>
     <td><span class="tag t-ok">0.1.5</span><br><small>配った箱（GHCR）</small></td>
-    <td><strong>docker compose</strong>（道②）。<code>~/compose.yml</code> の <code>image:</code> で版を決める。terraform は <code>~/Dev/Test_AgentDashboard/</code>、SSH 鍵は同じ場所の <code>ssh_key.pem</code>、IP は <code>43.207.237.211</code></td>
+    <td><strong>docker compose</strong>（道②）。<code>~/compose.yml</code> の <code>image:</code> で版を決める。外へは<strong>名前付きトンネル</strong>で出しており、<code>cloudflared</code> は <strong>systemd で常駐</strong>（<code>systemctl status cloudflared</code>）。terraform は <code>~/Dev/Test_AgentDashboard/</code>、SSH 鍵は同じ場所の <code>ssh_key.pem</code>、IP は <code>43.207.237.211</code></td>
   </tr>
 </table>
 </div>
+
+<h3>ドメインとトンネル</h3>
+<ul>
+  <li><strong>ドメインは <code>underschaft.com</code></strong>（お名前.com で登録。<strong>登録はあちらのまま</strong>で、DNS だけ Cloudflare が預かっている）</li>
+  <li>ダッシュボードは <code>dash.underschaft.com</code>。<strong>apex と <code>www</code> は触っていない</strong>——お名前.com のレンタルサーバを指したまま</li>
+  <li>メール（<code>MX</code> / <code>SPF</code> / <code>DKIM</code>）もそのまま動く。<strong><code>mail</code> の A は必ず「DNS only」</strong>にしておくこと——プロキシを通すと配送が失敗する</li>
+  <li>トンネルの設定は<strong>Cloudflare 側に置いてある</strong>（<code>config_src: cloudflare</code>）。EC2 に設定ファイルは無く、行き先を変えるのは Cloudflare の管理画面か API</li>
+  <li>EC2 の <code>/etc/cloudflared/token</code> が接続用の鍵。<strong>これが漏れると誰でもこのトンネルに成り代われる</strong></li>
+</ul>
 
 <h3>AWS EC2 について</h3>
 <ul>
