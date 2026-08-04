@@ -92,8 +92,8 @@
   <rect x="560" y="62" width="280" height="150" rx="10" fill="#221b0f" stroke="#5a4520"/>
   <text x="578" y="90" fill="#e0af68" font-size="14" font-weight="600">AWS EC2（外）</text>
   <text x="578" y="112" fill="#e6e9ef" font-size="12">i-0bf66240fec98392a / t3.small</text>
-  <text x="578" y="132" fill="#e6e9ef" font-size="12">8月初旬のビルド（版の画面なし）</text>
-  <text x="578" y="152" fill="#9aa4b2" font-size="11">検収で立て、いまも起動中</text>
+  <text x="578" y="132" fill="#e6e9ef" font-size="12">docker compose ／ 版 0.1.2</text>
+  <text x="578" y="152" fill="#9aa4b2" font-size="11">箱の中なので版の切替は出ない</text>
   <text x="578" y="172" fill="#9aa4b2" font-size="11">ここにも cloudflared が居る</text>
   <text x="578" y="192" fill="#f7768e" font-size="11">課金が続いている</text>
 
@@ -137,16 +137,17 @@
   <tr>
     <td>AWS EC2</td>
     <td><code>flying-playback-not-lang.trycloudflare.com</code></td>
-    <td><span class="tag t-old">8月初旬</span></td>
-    <td>セルフホスト化の検収で構築。terraform は <code>~/Dev/Test_AgentDashboard/</code>。IP は <code>43.207.237.211</code></td>
+    <td><span class="tag t-ok">0.1.2</span></td>
+    <td><strong>docker compose</strong>（道②）。<code>~/compose.yml</code> の <code>image:</code> で版を決める。terraform は <code>~/Dev/Test_AgentDashboard/</code>、SSH 鍵は同じ場所の <code>ssh_key.pem</code>、IP は <code>43.207.237.211</code></td>
   </tr>
 </table>
 </div>
 
 <h3>AWS EC2 について</h3>
 <ul>
-  <li>版の切替の画面は<strong>入っていない</strong>（あの機能より前のビルド）。設定画面を開いてもカードは出ない</li>
-  <li>手元の AWS 認証情報は<strong>失効している</strong>ので、CLI から状態を問い合わせられない。生きているかどうかは、上の URL が応答するかで判断する</li>
+  <li><strong>箱（コンテナ）で動いているので、版のドロップダウンは出ない。</strong>「<code>compose.yml</code> の <code>image:</code> を書き換えて」という案内のカードだけが出る。壊れているのではなく、そう作ってある（設計§14）</li>
+  <li>更新は <strong>SSH で入って3行</strong>——<code>compose.yml</code> の <code>image:</code> の版を書き換え、<code>sudo docker compose pull</code>、<code>sudo docker compose up -d</code>。記録（PostgreSQL）は別の箱なので消えない</li>
+  <li>手元の AWS 認証情報は<strong>失効している</strong>ので、CLI から状態を問い合わせられない。生きているかどうかは、上の URL が応答するかで判断する。<strong>SSH は通る</strong>（鍵は <code>~/Dev/Test_AgentDashboard/ssh_key.pem</code>）</li>
   <li>t3.small で概ね4円/時。<strong>残す判断を取っている</strong>ので、勝手に壊さないこと</li>
   <li>止めるときは <code>~/Dev/Test_AgentDashboard</code> で <code>terraform destroy</code>。ただし<strong>利用者の明示的な承認が要る</strong></li>
 </ul>
