@@ -1,0 +1,169 @@
+<meta charset="utf-8">
+<title>いま動いているもの</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#161a21; --line:#2a313c; --fg:#e6e9ef; --dim:#9aa4b2;
+    --accent:#7aa2f7; --warn:#e0af68; --ok:#9ece6a; --bad:#f7768e;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:2rem 1.25rem 5rem;background:var(--bg);color:var(--fg);
+       font-family:system-ui,"Noto Sans JP",sans-serif;line-height:1.9;
+       max-width:60rem;margin-inline:auto;font-size:15px}
+  h1{font-size:1.6rem;margin:0 0 .4rem;letter-spacing:.02em}
+  h2{font-size:1.15rem;margin:2.6rem 0 .8rem;padding-bottom:.4rem;
+     border-bottom:1px solid var(--line)}
+  h3{font-size:1rem;margin:1.8rem 0 .5rem;color:var(--accent)}
+  p{margin:.6rem 0}
+  .lead{color:var(--dim);margin-bottom:2rem}
+  table{border-collapse:collapse;width:100%;margin:.8rem 0;font-size:.92rem}
+  th,td{border:1px solid var(--line);padding:.5rem .7rem;text-align:left;vertical-align:top}
+  th{background:#1b212b;color:var(--dim);font-weight:600;white-space:nowrap}
+  code{background:#1b212b;border:1px solid var(--line);border-radius:4px;
+       padding:.05rem .35rem;font-size:.87em}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+         padding:1rem 1.2rem;margin:1rem 0}
+  .warn{border-color:#5a4520;background:#221b0f}
+  .mark{color:var(--accent);font-size:.75em;vertical-align:super}
+  .tag{display:inline-block;border-radius:999px;padding:.05rem .6rem;font-size:.78rem;
+       border:1px solid var(--line)}
+  .t-ok{color:var(--ok);border-color:#2d4a22}
+  .t-old{color:var(--warn);border-color:#5a4520}
+  .scroll{overflow-x:auto}
+  ul{margin:.5rem 0 .5rem 1.2rem;padding:0}
+  li{margin:.3rem 0}
+</style>
+
+<h1>いま動いているもの</h1>
+<p class="lead">
+  AgentDashboard に関係して、この機械や外で<strong>起動しっぱなしになっているもの</strong>の一覧。
+  「どの URL がどれを指しているか」を取り違えると原因追跡が丸ごと空振りするので、そこを中心に書いてある。
+  <br>最終更新：2026-08-04
+</p>
+
+<h2>先に用語</h2>
+<p>このプロジェクトを知らないと意味が取れない言葉だけ並べる。以降の説明では必ずこの名前を使い、<span class="mark">▽</span> を付ける。</p>
+<div class="scroll">
+<table>
+  <tr><th>言葉</th><th>意味</th></tr>
+  <tr><td>ローカルモード</td><td>ダッシュボードと「PC 側の一式」が<strong>1つのプロセスに同居</strong>する動かし方。落とすと、走っている claude も道連れで死ぬ</td></tr>
+  <tr><td>サーバモード</td><td><code>--mode server</code> で起こす動かし方。擬似ターミナルを持たず、ブラウザへの配信だけを受け持つ。<strong>落としても、繋がっている PC のセッションは死なない</strong></td></tr>
+  <tr><td>PC 側エージェント</td><td><code>agentdashboard-agent</code>。利用者の機械に常駐し、claude を擬似ターミナル上で動かして、サーバへ報告する</td></tr>
+  <tr><td>Cloudflare Tunnel</td><td>手元の待ち受けポートに、インターネットから届く URL を割り当てる仕組み。ここでは使い捨ての <code>trycloudflare.com</code> を使っている</td></tr>
+  <tr><td>ソースビルド</td><td>配布物を取ってこず、リポジトリで <code>make build</code> して出来た実行ファイルを直接起こすこと。<strong>リリースを出しても、この動かし方には何も届かない</strong></td></tr>
+</table>
+</div>
+
+<h2>全体の見取り図</h2>
+<p>四角が動いているもの、矢印が「どこを指しているか」。</p>
+
+<svg viewBox="0 0 860 400" width="100%" role="img" aria-label="動いているものの関係図">
+  <defs>
+    <marker id="a" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path d="M0,0 L9,4.5 L0,9 z" fill="#7aa2f7"/>
+    </marker>
+    <marker id="aw" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path d="M0,0 L9,4.5 L0,9 z" fill="#e0af68"/>
+    </marker>
+  </defs>
+  <text x="12" y="24" fill="#9aa4b2" font-size="13">この機械（WSL）</text>
+  <rect x="8" y="34" width="470" height="266" rx="10" fill="none" stroke="#2a313c" stroke-dasharray="5 4"/>
+
+  <rect x="30" y="62" width="200" height="72" rx="8" fill="#161a21" stroke="#2d4a22"/>
+  <text x="44" y="88" fill="#9ece6a" font-size="14" font-weight="600">8787 実機</text>
+  <text x="44" y="108" fill="#e6e9ef" font-size="12">ローカルモード・版 0.1.2</text>
+  <text x="44" y="125" fill="#9aa4b2" font-size="11">~/AgentDashboard のソースビルド</text>
+
+  <rect x="256" y="62" width="200" height="72" rx="8" fill="#161a21" stroke="#2d4a22"/>
+  <text x="270" y="88" fill="#9ece6a" font-size="14" font-weight="600">8788 trial</text>
+  <text x="270" y="108" fill="#e6e9ef" font-size="12">サーバモード・版 0.1.2</text>
+  <text x="270" y="125" fill="#9aa4b2" font-size="11">同じ実行ファイルを別設定で</text>
+
+  <rect x="30" y="178" width="200" height="62" rx="8" fill="#161a21" stroke="#2a313c"/>
+  <text x="44" y="202" fill="#e6e9ef" font-size="13">PC 側エージェント</text>
+  <text x="44" y="222" fill="#9aa4b2" font-size="11">claude を実際に動かしている</text>
+
+  <rect x="256" y="178" width="200" height="62" rx="8" fill="#161a21" stroke="#2a313c"/>
+  <text x="270" y="202" fill="#e6e9ef" font-size="13">cloudflared（この機械）</text>
+  <text x="270" y="222" fill="#9aa4b2" font-size="11">→ 127.0.0.1:8788</text>
+
+  <path d="M230 209 L256 209" stroke="#7aa2f7" stroke-width="2" marker-end="url(#a)"/>
+  <path d="M356 178 L356 140" stroke="#7aa2f7" stroke-width="2" marker-end="url(#a)"/>
+
+  <rect x="560" y="62" width="280" height="150" rx="10" fill="#221b0f" stroke="#5a4520"/>
+  <text x="578" y="90" fill="#e0af68" font-size="14" font-weight="600">AWS EC2（外）</text>
+  <text x="578" y="112" fill="#e6e9ef" font-size="12">i-0bf66240fec98392a / t3.small</text>
+  <text x="578" y="132" fill="#e6e9ef" font-size="12">8月初旬のビルド（版の画面なし）</text>
+  <text x="578" y="152" fill="#9aa4b2" font-size="11">検収で立て、いまも起動中</text>
+  <text x="578" y="172" fill="#9aa4b2" font-size="11">ここにも cloudflared が居る</text>
+  <text x="578" y="192" fill="#f7768e" font-size="11">課金が続いている</text>
+
+  <text x="560" y="262" fill="#e0af68" font-size="13" font-weight="600">flying-playback-not-lang</text>
+  <text x="560" y="280" fill="#e0af68" font-size="13" font-weight="600">.trycloudflare.com</text>
+  <path d="M700 250 L700 216" stroke="#e0af68" stroke-width="2" marker-end="url(#aw)"/>
+  <text x="500" y="330" fill="#f7768e" font-size="12">↑ この URL は 8788 ではなく AWS EC2 を指している</text>
+</svg>
+
+<div class="panel warn">
+  <strong>いちばん間違えやすいところ。</strong>
+  この機械にも <code>cloudflared tunnel --url http://127.0.0.1:8788</code> が動いているので、
+  <code>ps</code> で見ると「あの URL は 8788 だな」と読めてしまう。
+  <strong>実際は別物</strong>で、普段見ている <code>flying-playback-not-lang.trycloudflare.com</code> は AWS EC2 側の
+  cloudflared が作った URL。<br>
+  実際にこれを取り違えて、キャッシュを疑って強制リロードを3通り試す、という遠回りをした。
+</div>
+
+<h2>一覧</h2>
+<div class="scroll">
+<table>
+  <tr><th>何</th><th>入口</th><th>版</th><th>どう起こしているか</th></tr>
+  <tr>
+    <td>実機</td>
+    <td><code>127.0.0.1:8787</code></td>
+    <td><span class="tag t-ok">0.1.2</span></td>
+    <td>ローカルモード<span class="mark">▽</span>。<code>~/AgentDashboard</code> で <code>make build</code> したものを引数なしで起動。ログは <code>~/agentdashboard-run.log</code></td>
+  </tr>
+  <tr>
+    <td>trial</td>
+    <td><code>127.0.0.1:8788</code></td>
+    <td><span class="tag t-ok">0.1.2</span></td>
+    <td>サーバモード<span class="mark">▽</span>。<code>--config ~/agentdashboard-trial/server.toml --mode server</code>、作業ディレクトリは <code>~/agentdashboard-trial</code></td>
+  </tr>
+  <tr>
+    <td>PC 側エージェント<span class="mark">▽</span></td>
+    <td>—</td>
+    <td>—</td>
+    <td>常駐。trial へ繋いで claude を動かしている</td>
+  </tr>
+  <tr>
+    <td>AWS EC2</td>
+    <td><code>flying-playback-not-lang.trycloudflare.com</code></td>
+    <td><span class="tag t-old">8月初旬</span></td>
+    <td>セルフホスト化の検収で構築。terraform は <code>~/Dev/Test_AgentDashboard/</code>。IP は <code>43.207.237.211</code></td>
+  </tr>
+</table>
+</div>
+
+<h3>AWS EC2 について</h3>
+<ul>
+  <li>版の切替の画面は<strong>入っていない</strong>（あの機能より前のビルド）。設定画面を開いてもカードは出ない</li>
+  <li>手元の AWS 認証情報は<strong>失効している</strong>ので、CLI から状態を問い合わせられない。生きているかどうかは、上の URL が応答するかで判断する</li>
+  <li>t3.small で概ね4円/時。<strong>残す判断を取っている</strong>ので、勝手に壊さないこと</li>
+  <li>止めるときは <code>~/Dev/Test_AgentDashboard</code> で <code>terraform destroy</code>。ただし<strong>利用者の明示的な承認が要る</strong></li>
+</ul>
+
+<h2>更新の約束</h2>
+<p>このファイルが古くなると、次に困る人が同じ遠回りをする。次のいずれかをしたら、<strong>その場でここを直す</strong>。</p>
+<ul>
+  <li>常駐するものを<strong>起こした・落とした・起こし直した</strong></li>
+  <li>トンネルを<strong>張った・張り替えた</strong>（URL とその先を必ず書く）</li>
+  <li>外に<strong>何かを立てた・壊した</strong></li>
+  <li>ログの出力先や設定ファイルの場所を<strong>変えた</strong></li>
+</ul>
+<p>書くのは「何が・どこで・どの版で・どう起こしたか」の4つだけでよい。詳しい経緯は各イシューの実行レポートにある。</p>
+
+<div class="panel">
+  <strong>なぜ「版」を必ず書くのか。</strong>
+  ソースビルド<span class="mark">▽</span>で動かしているものは、<strong>リリースを出しても何も変わらない</strong>。
+  更新するには <code>git pull</code> → <code>make build</code> → 起こし直す、が要る。
+  「リリースしたのだから最新のはず」という思い込みが、いちばん時間を溶かす。
+</div>
