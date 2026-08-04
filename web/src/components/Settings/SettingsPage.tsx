@@ -28,6 +28,7 @@ import { permissionModeInfo } from '@/lib/protocol'
 import { formatScreenInterval } from '@/lib/time'
 import { HOME } from '@/lib/routes'
 import { useSettingsStore } from '@/stores/settings'
+import { PortableSettingsCard } from '@/components/Settings/PortableSettingsCard'
 import { VersionsCard } from '@/components/Settings/VersionsCard'
 
 /** 履歴を送る間隔の選択肢（秒。設計§13-3）。 */
@@ -131,6 +132,8 @@ export function SettingsPage() {
       </div>
 
       {settings.lan_password.supported && <LanPasswordCard />}
+
+      <PortableSettingsCard />
 
       <VersionsCard />
 

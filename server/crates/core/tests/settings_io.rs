@@ -97,3 +97,160 @@ async fn 画面の選択肢はすべて通る() {
 
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// 書き出して読み戻すと元の状態へ戻ること（持ち出し設計§7・§8）。
+///
+/// **持ち出しの目的そのもの。** ここが通らないなら、書き出しか読み込みのどちらかが
+/// 4つ揃っていない。
+#[tokio::test]
+async fn 書き出して読み戻すと元へ戻る() {
+    let (server, dir) = server().await;
+
+    // 元の状態を作る（既定とは違う値にしておかないと、戻ったのか判別できない）
+    let (status, _) = server
+        .put(
+            "/api/settings",
+            r#"{"always_bypass_permissions":true,"sync_interval_secs":5,
+                "screen_interval_ms":1000,"scrollback_lines":4000}"#,
+        )
+        .await;
+    assert_eq!(status, 200);
+
+    let (status, exported) = server.get("/api/settings/export").await;
+    assert_eq!(status, 200, "{exported}");
+    assert!(exported.contains("agentdashboard-settings"), "{exported}");
+
+    // 4つとも別の値へ変える
+    let (status, _) = server
+        .put(
+            "/api/settings",
+            r#"{"always_bypass_permissions":false,"sync_interval_secs":60,
+                "screen_interval_ms":20000,"scrollback_lines":1000}"#,
+        )
+        .await;
+    assert_eq!(status, 200);
+
+    // 読み戻す
+    let (status, body) = server
+        .request("POST", "/api/settings/import", Some(&exported))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"applied\""), "{body}");
+    assert!(body.contains("\"ignored\":[]"), "{body}");
+
+    let (_, body) = server.get("/api/settings").await;
+    assert!(
+        body.contains("\"always_bypass_permissions\":true"),
+        "{body}"
+    );
+    assert!(body.contains("\"sync_interval_secs\":5"), "{body}");
+    assert!(body.contains("\"screen_interval_ms\":1000"), "{body}");
+    assert!(body.contains("\"scrollback_lines\":4000"), "{body}");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 書き出しに入るのはアカウントの4つだけで、秘密もサーバ全体のものも入らないこと
+/// （持ち出し設計§7）。
+#[tokio::test]
+async fn 書き出しにはアカウントの設定しか入らない() {
+    let (server, dir) = server().await;
+
+    let (_, exported) = server.get("/api/settings/export").await;
+    let value: serde_json::Value = serde_json::from_str(&exported).expect("JSON であること");
+    let settings = value["settings"].as_object().expect("settings があること");
+
+    let mut keys: Vec<&str> = settings.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "always_bypass_permissions",
+            "screen_interval_ms",
+            "scrollback_lines",
+            "sync_interval_secs"
+        ],
+        "持ち出しの顔ぶれが変わっている: {exported}"
+    );
+
+    // 秘密は名前すら現れないこと（値だけでなくキーでも）
+    for forbidden in ["lan_password", "update_check", "pairing", "token"] {
+        assert!(
+            !exported.contains(forbidden),
+            "{forbidden} が書き出しへ混ざっている: {exported}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 関係ないファイルを選んだら断り、**何も書き換えないこと**（持ち出し設計§9）。
+#[tokio::test]
+async fn 関係ないファイルは断られ何も変わらない() {
+    let (server, dir) = server().await;
+    let (_, before) = server.get("/api/settings").await;
+
+    for text in [
+        "これは JSON ではない",
+        r#"{"port":8787}"#,
+        r#"{"kind":"something-else","format":1,"settings":{}}"#,
+    ] {
+        let (status, body) = server
+            .request("POST", "/api/settings/import", Some(text))
+            .await;
+        assert_eq!(status, 400, "断られること: {body}");
+    }
+
+    let (_, after) = server.get("/api/settings").await;
+    assert_eq!(after, before, "断ったのに書き換わっている");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 1つでも駄目なら何も入らず、理由にキーの名前が出ること（持ち出し設計§9）。
+#[tokio::test]
+async fn 一部が駄目なファイルは丸ごと断られる() {
+    let (server, dir) = server().await;
+    let (_, before) = server.get("/api/settings").await;
+
+    let text = r#"{"kind":"agentdashboard-settings","format":1,"settings":{
+        "sync_interval_secs": 5,
+        "scrollback_lines": 0
+    }}"#;
+    let (status, body) = server
+        .request("POST", "/api/settings/import", Some(text))
+        .await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("scrollback_lines"), "{body}");
+
+    let (_, after) = server.get("/api/settings").await;
+    assert_eq!(after, before, "半分だけ入ってはいけない");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 知らないキーは無視して読み込み、**無視したことを伝えること**（持ち出し設計§9）。
+#[tokio::test]
+async fn 知らないキーは無視して伝える() {
+    let (server, dir) = server().await;
+
+    let text = r#"{"kind":"agentdashboard-settings","format":1,"settings":{
+        "sync_interval_secs": 10,
+        "未来のキー": 1
+    }}"#;
+    let (status, body) = server
+        .request("POST", "/api/settings/import", Some(text))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.contains("未来のキー"),
+        "無視したことが伝わること: {body}"
+    );
+
+    // 入っていないキーは触られないこと（既定で埋めない）
+    let (_, body) = server.get("/api/settings").await;
+    assert!(body.contains("\"sync_interval_secs\":10"), "{body}");
+    assert!(body.contains("\"scrollback_lines\":1000"), "{body}");
+
+    let _ = std::fs::remove_dir_all(dir);
+}

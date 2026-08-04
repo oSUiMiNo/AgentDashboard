@@ -26,7 +26,13 @@
 //! CLI の版は PC ごとに違うので、ModelPicker は**セッションが属する PC の表**を見る。
 
 use agent_core::{session::SessionManager, settings::SettingsStore};
-use axum::{Extension, Json, Router, extract::State, http::StatusCode, routing::get};
+use axum::{
+    Extension, Json, Router,
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::{get, post},
+};
 use serde::{Deserialize, Serialize};
 use server_core::{
     account::AgentView,
@@ -99,6 +105,9 @@ pub fn routes(state: SettingsState) -> Router {
     Router::new()
         // 設定は接続のたびに流すほど変わらないので、WebSocket ではなく REST に置く
         .route("/api/settings", get(api_settings).put(api_update_settings))
+        // 持ち出し（持ち出し設計§11）。**両モードで同じ形の口を生やす**
+        .route("/api/settings/export", get(api_export))
+        .route("/api/settings/import", post(api_import))
         .with_state(state)
 }
 
@@ -115,6 +124,8 @@ pub fn server_routes(hub: Arc<server_core::gateway::AgentHub>) -> Router {
             "/api/settings",
             get(api_server_settings).put(api_server_update_settings),
         )
+        .route("/api/settings/export", get(api_server_export))
+        .route("/api/settings/import", post(api_server_import))
         .with_state(hub)
 }
 
@@ -390,6 +401,141 @@ async fn api_server_update_settings(
     }
 
     api_server_settings(State(hub), Extension(identity)).await
+}
+
+/// `POST /api/settings/import` の応答（持ち出し設計§9）。
+///
+/// **無視したものを黙って捨てない。** 反映されない項目があることが伝わらないと、
+/// 「読み込んだのに効いていない」が説明の付かない現象になる。
+#[derive(Debug, Serialize)]
+pub struct ImportOutcome {
+    pub applied: Vec<String>,
+    pub ignored: Vec<String>,
+}
+
+/// 書き出しをダウンロードとして返す（持ち出し設計§13）。
+///
+/// **サーバ側にファイルを作らない。** 置き場所を決める必要が無く、消す責任も生まれない。
+fn download(exported: server_core::portable::Exported) -> Result<Response, (StatusCode, String)> {
+    let body = serde_json::to_string_pretty(&exported)
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, "application/json"),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                "attachment; filename=\"agentdashboard-settings.json\"",
+            ),
+        ],
+        body,
+    )
+        .into_response())
+}
+
+/// `GET /api/settings/export` — ローカルモード。
+async fn api_export(
+    State(state): State<SettingsState>,
+    Extension(identity): Extension<Identity>,
+) -> Result<Response, (StatusCode, String)> {
+    let intervals = db::settings::intervals(state.auth.db(), identity.account_id)
+        .await
+        .unwrap_or_default();
+    // **画面に出ている値を書き出す**（同§7）。行が無いものは初期値で埋まる
+    let always_bypass = db::settings::always_bypass_or(
+        state.auth.db(),
+        identity.account_id,
+        state
+            .store
+            .as_ref()
+            .is_some_and(|store| store.always_bypass_permissions()),
+    )
+    .await;
+    download(server_core::portable::exported(
+        intervals,
+        always_bypass,
+        env!("CARGO_PKG_VERSION"),
+    ))
+}
+
+/// `POST /api/settings/import` — ローカルモード。
+async fn api_import(
+    State(state): State<SettingsState>,
+    Extension(identity): Extension<Identity>,
+    body: String,
+) -> Result<Json<ImportOutcome>, (StatusCode, String)> {
+    let parsed =
+        server_core::portable::parse(&body).map_err(|reason| (StatusCode::BAD_REQUEST, reason))?;
+
+    if parsed.touches_intervals() {
+        let current = db::settings::intervals(state.auth.db(), identity.account_id)
+            .await
+            .unwrap_or_default();
+        // **書くのは既存の道**（同§12）。ローカルには配る相手が居ないので保存だけ
+        db::settings::put_intervals(
+            state.auth.db(),
+            identity.account_id,
+            parsed.merged_intervals(current),
+        )
+        .await
+        .map_err(save_failed)?;
+    }
+    if let Some(value) = parsed.always_bypass_permissions() {
+        db::settings::set_always_bypass_permissions(state.auth.db(), identity.account_id, value)
+            .await
+            .map_err(save_failed)?;
+    }
+
+    Ok(Json(ImportOutcome {
+        applied: parsed.applied(),
+        ignored: parsed.ignored().to_vec(),
+    }))
+}
+
+/// `GET /api/settings/export` — サーバモード。
+async fn api_server_export(
+    State(hub): State<Arc<server_core::gateway::AgentHub>>,
+    Extension(identity): Extension<Identity>,
+) -> Result<Response, (StatusCode, String)> {
+    let intervals = db::settings::intervals(hub.db(), identity.account_id)
+        .await
+        .unwrap_or_default();
+    let always_bypass = db::settings::always_bypass_or(hub.db(), identity.account_id, false).await;
+    download(server_core::portable::exported(
+        intervals,
+        always_bypass,
+        env!("CARGO_PKG_VERSION"),
+    ))
+}
+
+/// `POST /api/settings/import` — サーバモード。
+async fn api_server_import(
+    State(hub): State<Arc<server_core::gateway::AgentHub>>,
+    Extension(identity): Extension<Identity>,
+    body: String,
+) -> Result<Json<ImportOutcome>, (StatusCode, String)> {
+    let parsed =
+        server_core::portable::parse(&body).map_err(|reason| (StatusCode::BAD_REQUEST, reason))?;
+
+    if parsed.touches_intervals() {
+        let current = db::settings::intervals(hub.db(), identity.account_id)
+            .await
+            .unwrap_or_default();
+        // **保存して、そのアカウントの PC へ即時に配る**（同§12）。読み込みだけ
+        // 別の道を作ると、配り直しがそちらにだけ無いという食い違いが生まれる
+        hub.set_intervals(identity.account_id, parsed.merged_intervals(current))
+            .await
+            .map_err(save_failed)?;
+    }
+    if let Some(value) = parsed.always_bypass_permissions() {
+        db::settings::set_always_bypass_permissions(hub.db(), identity.account_id, value)
+            .await
+            .map_err(save_failed)?;
+    }
+
+    Ok(Json(ImportOutcome {
+        applied: parsed.applied(),
+        ignored: parsed.ignored().to_vec(),
+    }))
 }
 
 /// 保存に失敗したときの返し方。

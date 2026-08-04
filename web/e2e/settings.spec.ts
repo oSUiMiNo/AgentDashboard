@@ -68,3 +68,71 @@ test('版を切り替えられない構成では、押せる顔をせず案内�
   await expect(page.getByTestId('versions-picker')).toHaveCount(0)
   await expect(page.getByTestId('versions-restart')).toHaveCount(0)
 })
+
+test('設定を書き出して読み戻すと、元の状態へ戻る', async ({ page }) => {
+  // **持ち出しの目的そのもの**（持ち出し設計§7〜§13）。書き出す・変える・戻す、を
+  // 実物のブラウザで通す。ダウンロードとファイル選択はここでしか踏めない
+  await openDashboard(page)
+  await page.getByTestId('settings-link').click()
+
+  const sync = page.getByTestId('sync-interval-select')
+  const toggle = page.getByTestId('always-bypass-toggle')
+
+  await sync.selectOption('5')
+  await expect(sync).toHaveValue('5')
+  await toggle.check()
+  await expect(toggle).toBeChecked()
+
+  // 書き出す（`Content-Disposition` が付いているのでダウンロードになる）
+  const download = await Promise.all([
+    page.waitForEvent('download'),
+    page.getByTestId('portable-export').click(),
+  ]).then(([event]) => event)
+  expect(download.suggestedFilename()).toBe('agentdashboard-settings.json')
+  const saved = await download.path()
+
+  // 両方とも別の値へ変える
+  await sync.selectOption('60')
+  await expect(sync).toHaveValue('60')
+  await toggle.uncheck()
+  await expect(toggle).not.toBeChecked()
+
+  // 読み戻す
+  await page.getByTestId('portable-file').setInputFiles(saved)
+  await expect(page.getByTestId('portable-outcome')).toContainText('4件')
+
+  await expect(sync).toHaveValue('5')
+  await expect(toggle).toBeChecked()
+
+  // 開き直しても残ること（記録に入っている）
+  await page.reload()
+  await expect(page.getByTestId('sync-interval-select')).toHaveValue('5')
+  await expect(page.getByTestId('always-bypass-toggle')).toBeChecked()
+
+  // 後片付け。**設定は次のテストへ残る**（E2E は1つのサーバを共有している）
+  await page.getByTestId('always-bypass-toggle').uncheck()
+  await expect(page.getByTestId('always-bypass-toggle')).not.toBeChecked()
+  await page.getByTestId('sync-interval-select').selectOption('20')
+  await expect(page.getByTestId('sync-interval-select')).toHaveValue('20')
+})
+
+test('関係ないファイルを選ぶと、理由が出て何も変わらない', async ({ page }) => {
+  // **成功しても断られても、押した場所のすぐ下で結果が読めること**（同§13）
+  await openDashboard(page)
+  await page.getByTestId('settings-link').click()
+
+  const sync = page.getByTestId('sync-interval-select')
+  await expect(sync).toHaveValue('20')
+
+  await page.getByTestId('portable-file').setInputFiles({
+    name: 'not-settings.json',
+    mimeType: 'application/json',
+    buffer: Buffer.from('{"port":8787}'),
+  })
+
+  await expect(page.getByTestId('portable-error')).toContainText(
+    'AgentDashboard',
+  )
+  await expect(page.getByTestId('portable-outcome')).toHaveCount(0)
+  await expect(sync).toHaveValue('20')
+})

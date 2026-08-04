@@ -371,10 +371,99 @@ async fn ログインしないと何も見えない() {
     assert_eq!(view["authenticated"], false);
     assert_eq!(view["setup_open"], true, "まだ管理者が居ないので開いている");
 
-    for path in ["/api/sessions", "/api/settings", "/api/versions"] {
+    for path in [
+        "/api/sessions",
+        "/api/settings",
+        "/api/settings/export",
+        "/api/versions",
+    ] {
         let (status, _) = server.get(path).await;
         assert_eq!(status, 401, "{path} が鍵の向こうにない");
     }
+    // 読み込みは POST なので別に踏む（口を足したら鍵の内側かを必ず見る）
+    let (status, _) = server
+        .request("POST", "/api/settings/import", Some("{}"))
+        .await;
+    assert_eq!(status, 401, "/api/settings/import が鍵の向こうにない");
+}
+
+/// セルフホストでもトグルが画面から変えられること（持ち出し設計§6）。
+///
+/// **利用者が最初に困った現象そのもの。** ここが 403 を返すなら、保存先が
+/// PC 側のファイルのままになっている。
+#[tokio::test]
+async fn セルフホストでもトグルを変えられる() {
+    let mut server = selfhost().await;
+    server.setup("わたし", "つよいあいことば").await;
+
+    let (status, body) = server.get("/api/settings").await;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.contains("\"always_bypass_permissions\":false"),
+        "既定はスキップしない側であること: {body}"
+    );
+    assert!(
+        !body.contains("always_bypass_editable"),
+        "「変えられるか」を運ぶ欄は残ってはいけない: {body}"
+    );
+
+    let (status, body) = server
+        .request(
+            "PUT",
+            "/api/settings",
+            Some(r#"{"always_bypass_permissions":true}"#),
+        )
+        .await;
+    assert_eq!(status, 200, "セルフホストで断られている: {body}");
+    assert!(
+        body.contains("\"always_bypass_permissions\":true"),
+        "{body}"
+    );
+
+    // 開き直しても残ること（記録が正）
+    let (_, body) = server.get("/api/settings").await;
+    assert!(
+        body.contains("\"always_bypass_permissions\":true"),
+        "{body}"
+    );
+}
+
+/// セルフホストでも設定を書き出して読み戻せること（持ち出し設計§11）。
+#[tokio::test]
+async fn セルフホストでも設定を持ち出せる() {
+    let mut server = selfhost().await;
+    server.setup("わたし", "つよいあいことば").await;
+
+    server
+        .request(
+            "PUT",
+            "/api/settings",
+            Some(r#"{"always_bypass_permissions":true,"sync_interval_secs":5}"#),
+        )
+        .await;
+
+    let (status, exported) = server.get("/api/settings/export").await;
+    assert_eq!(status, 200, "{exported}");
+
+    server
+        .request(
+            "PUT",
+            "/api/settings",
+            Some(r#"{"always_bypass_permissions":false,"sync_interval_secs":60}"#),
+        )
+        .await;
+
+    let (status, body) = server
+        .request("POST", "/api/settings/import", Some(&exported))
+        .await;
+    assert_eq!(status, 200, "{body}");
+
+    let (_, body) = server.get("/api/settings").await;
+    assert!(
+        body.contains("\"always_bypass_permissions\":true"),
+        "{body}"
+    );
+    assert!(body.contains("\"sync_interval_secs\":5"), "{body}");
 }
 
 #[tokio::test]
@@ -609,4 +698,82 @@ async fn セルフホストでは管理者だけが版を触れる() {
             "{method} {path} が誰なら押せるかを書いていない: {body}"
         );
     }
+}
+
+/// 設定も持ち出しもアカウントごとに分かれること（持ち出し設計§10）。
+///
+/// **読み込みが入るのは、いまログインしている自分のアカウント。** ファイルに
+/// アカウントの指定を書き足しても、行き先は動かない。
+#[tokio::test]
+async fn 設定と持ち出しはアカウントごとに分かれる() {
+    let mut server = selfhost().await;
+    server.setup("あるじ", "とてもながいあいことば").await;
+
+    // 管理者側で既定とは違う値にしておく
+    server
+        .request(
+            "PUT",
+            "/api/settings",
+            Some(r#"{"sync_interval_secs":5,"always_bypass_permissions":true}"#),
+        )
+        .await;
+    let (_, exported) = server.get("/api/settings/export").await;
+
+    // ── 別の利用者で入る ─────────────────────────────────────
+    server.add_member("ひとり").await;
+    let (status, body) = server.login("ひとり", "とてもながいあいことば").await;
+    assert_eq!(status, 200, "入れない: {body}");
+
+    let (_, body) = server.get("/api/settings").await;
+    assert!(
+        body.contains("\"sync_interval_secs\":20"),
+        "他人の設定が見えている: {body}"
+    );
+    assert!(
+        body.contains("\"always_bypass_permissions\":false"),
+        "他人のトグルが見えている: {body}"
+    );
+
+    let (_, mine) = server.get("/api/settings/export").await;
+    assert!(
+        !mine.contains("\"sync_interval_secs\": 5"),
+        "他人の設定が書き出されている: {mine}"
+    );
+
+    // **アカウントの指定を書き足しても行き先は動かない。** 実装で弾いていても、
+    // ファイルを見た人が「他人のアカウントへ入れられるのでは」と読む形にしない
+    let tampered = exported.replacen(
+        "\"settings\": {",
+        "\"settings\": {\n    \"account_id\": \"00000000-0000-0000-0000-000000000001\",",
+        1,
+    );
+    assert!(tampered.contains("account_id"), "細工できていない");
+    let (status, body) = server
+        .request("POST", "/api/settings/import", Some(&tampered))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.contains("account_id"),
+        "無視したことが伝わること: {body}"
+    );
+
+    let (_, body) = server.get("/api/settings").await;
+    assert!(
+        body.contains("\"sync_interval_secs\":5"),
+        "自分のアカウントへ入っていない: {body}"
+    );
+
+    // こちらだけを動かす
+    server
+        .request("PUT", "/api/settings", Some(r#"{"sync_interval_secs":60}"#))
+        .await;
+
+    // ── 管理者へ戻る ─────────────────────────────────────────
+    let (status, body) = server.login("あるじ", "とてもながいあいことば").await;
+    assert_eq!(status, 200, "入れない: {body}");
+    let (_, body) = server.get("/api/settings").await;
+    assert!(
+        body.contains("\"sync_interval_secs\":5"),
+        "他人の書き込みが自分の設定を動かしている: {body}"
+    );
 }

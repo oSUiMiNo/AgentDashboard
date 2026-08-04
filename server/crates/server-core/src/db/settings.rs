@@ -308,7 +308,10 @@ mod tests {
             (SCREEN_INTERVAL_MS, SCREEN_INTERVAL_MS_RANGE),
             (SCROLLBACK_LINES, SCROLLBACK_LINES_RANGE),
         ] {
-            assert!(check(key, &serde_json::json!(range.start())).is_ok(), "{key}");
+            assert!(
+                check(key, &serde_json::json!(range.start())).is_ok(),
+                "{key}"
+            );
             assert!(check(key, &serde_json::json!(range.end())).is_ok(), "{key}");
             assert!(
                 check(key, &serde_json::json!(range.start() - 1)).is_err(),
