@@ -182,6 +182,7 @@ pub async fn serve_server(config: Config) -> anyhow::Result<()> {
     )
     .await?;
     let auth = AuthContext::server(db.clone(), &server_config);
+    let update_db = db.clone();
     let hub = AgentHub::new(db, Arc::clone(&registry));
 
     if let Some(bus) = &bus {
@@ -220,11 +221,80 @@ pub async fn serve_server(config: Config) -> anyhow::Result<()> {
     // 乗り換えの印を消す（CICD設計§11）。**サーバモードでも同じ**——PTY は持たないが、
     // 版を切り替えられる主体であることは変わらない
     agent_core::version::confirm_started(&config.agent().resolved_state_dir());
+    tokio::spawn(watch_updates(
+        config.agent().resolved_state_dir(),
+        move || {
+            let db = update_db.clone();
+            async move {
+                server_core::db::settings::update_check_enabled(&db)
+                    .await
+                    .unwrap_or(server_core::db::settings::DEFAULT_UPDATE_CHECK_ENABLED)
+            }
+        },
+    ));
     tracing::info!(
         "AgentDashboard（サーバ）を起動しました: http://{}",
         listener.local_addr()?
     );
     serve_router(listener, router).await
+}
+
+/// 新しい版が出ていないか、背景で見に行く（CICD設計§8）。
+///
+/// **見に行くだけ。** 取ってくることも入れ替えることもしない。起動を待たせないよう
+/// 背景へ逃がす——献立表の取得は実測 0.6 秒だが、回線が遅ければその待ち時間が
+/// そのまま起動に乗る。
+///
+/// 実際に外へ出るかは [`agent_core::version_ops::due`] が決める。**「起動時に1回」だけに
+/// すると頻度の上限が再起動の回数になる**ので、前回から経っていなければ見に行かない。
+///
+/// 設定の読み方を関数で受け取っているのは、`crates/core` が記録の道具を通常の依存に
+/// 持っていないため。**型を書かずに呼べる形**にしておく（設定の綴りとスコープは
+/// `server_core::db::settings` の薄いラッパが持っている）。
+async fn watch_updates<F, Fut>(state_dir: std::path::PathBuf, enabled: F)
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    /// 設定の入り切りに追随できるよう、様子を見に来る間隔。
+    /// 外へ出るかどうかは別（[`agent_core::version_ops::CHECK_INTERVAL_MS`]）。
+    const POLL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+    let Ok(ops) = tokio::task::spawn_blocking(agent_core::version_ops::detect).await else {
+        return;
+    };
+    if let Some(reason) = ops.unavailable_reason() {
+        // **黙って何もしないと原因を辿れない。** 取ってくる道具は入れ直しで生えたり
+        // 消えたりするので、理由を1行残す
+        tracing::info!("新しい版の確認はできません: {reason}");
+        return;
+    }
+
+    loop {
+        if enabled().await {
+            let state_dir = state_dir.clone();
+            let ops = Arc::clone(&ops);
+            let now = agent_core::session::now_ms();
+            let checked = tokio::task::spawn_blocking(move || {
+                use agent_core::version_ops as v;
+                if !v::due(&v::read_notice(&state_dir), now, v::CHECK_INTERVAL_MS) {
+                    return None;
+                }
+                Some(v::check_once(&state_dir, ops.as_ref(), now))
+            })
+            .await;
+            match checked {
+                Ok(Some(Ok(latest))) => {
+                    tracing::info!(version = %latest.version, "最新版を確認しました");
+                }
+                // 読めなかった（回線が無い等）ときは黙って次へ。**打てる手が無いことを
+                // 出し続けない**（設計§8）
+                Ok(Some(Err(error))) => tracing::debug!("新しい版を確認できませんでした: {error}"),
+                _ => {}
+            }
+        }
+        tokio::time::sleep(POLL).await;
+    }
 }
 
 /// 待ち受けを開く。
@@ -268,6 +338,7 @@ pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::R
     // 警告は読まれないことがあるし、読まれたときには既に開いている
     server_core::auth::ensure_lan_password(&db, &server_config).await?;
     let auth = server_core::auth::AuthContext::local(db.clone(), &server_config);
+    let update_db = db.clone();
 
     let registry = SessionRegistry::load(db, server_config.transcript_window_nodes, None).await?;
 
@@ -361,6 +432,17 @@ pub async fn serve(config: Config, config_path: std::path::PathBuf) -> anyhow::R
     // **待ち受けを確保できた時点で、乗り換えの印を消す**（CICD設計§11）。ここより後ろへ
     // ずらすと、印を消す前に落ちる隙間が広がる
     agent_core::version::confirm_started(&agent_config.resolved_state_dir());
+    tokio::spawn(watch_updates(
+        agent_config.resolved_state_dir(),
+        move || {
+            let db = update_db.clone();
+            async move {
+                server_core::db::settings::update_check_enabled(&db)
+                    .await
+                    .unwrap_or(server_core::db::settings::DEFAULT_UPDATE_CHECK_ENABLED)
+            }
+        },
+    ));
     let address = listener.local_addr()?;
 
     tracing::info!("AgentDashboard を起動しました: http://{address}");

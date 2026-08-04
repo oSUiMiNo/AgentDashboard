@@ -192,3 +192,35 @@ async fn 前回の結末は繋いだ瞬間に読める() {
     assert_eq!(view["outcome"]["attempted"], "0.2.0");
     assert_eq!(view["outcome"]["failed_reason"], "起動できませんでした");
 }
+
+#[tokio::test]
+async fn 最後に読めた最新版が一覧に載る() {
+    // **この口は見に行かない**（設計§8）。外へ出るのは背景の周期だけで、ここは
+    // 最後に読めた値を返すだけ——さもないと画面を開くたびにネットワークが要る
+    pretend_supported();
+    let server = common::TestServer::start().await;
+    let state_dir = server.config.agent().resolved_state_dir();
+
+    // 一度も見に行けていなければ載らない
+    assert!(view(&server).await["latest"].is_null());
+
+    agent_core::version_ops::record_latest(
+        &state_dir,
+        &agent_core::version_ops::Latest {
+            version: VersionId::new("0.9.0"),
+            prerelease: false,
+            has_artifact: true,
+        },
+        1_234,
+    );
+
+    let view = view(&server).await;
+    assert_eq!(view["latest"]["version"], "0.9.0");
+    assert_eq!(view["latest"]["has_artifact"], true);
+    assert_eq!(view["latest"]["checked_at"], 1_234);
+    // **新着かどうかはサーバが決めない。** 画面が「走っている版より新しいか」で決める
+    assert!(
+        view["latest"].get("is_new").is_none(),
+        "サーバが新着かどうかを決めてしまっている"
+    );
+}

@@ -48,6 +48,39 @@ pub struct VersionsView {
     pub selected: Option<VersionId>,
     /// 前回の乗り換えの結末。**知らせではなく状態**として持つ（設計§11）。
     pub outcome: Option<version::Outcome>,
+    /// 最後に読めた最新版。一度も見に行けていなければ `None`（設計§8）。
+    pub latest: Option<LatestView>,
+}
+
+/// 最後に読めた最新版（設計§8）。
+///
+/// **素の値だけを載せる。** 「新着かどうか」は画面が**走っている版より新しいか**で
+/// 決める（`VersionId` は版として比べられる）。サーバが「新着です」と決めてしまうと、
+/// 押しつけの知らせ（同じ版で二度出さない）と状態（繋いだ瞬間に読める）が
+/// **同じ値を取り合う**——別々の問題への答えなので、値も分ける。
+///
+/// この口は**見に行かない。** 最後に読めた値を返すだけで、外へ出るのは背景の周期だけ。
+/// さもないと画面を開くたびにネットワークが要る。
+#[derive(Debug, Serialize)]
+pub struct LatestView {
+    pub version: VersionId,
+    /// 試作版か。**いまはほぼ常に偽**（`releases/latest` は非試作版を指すため）。
+    pub prerelease: bool,
+    /// 自分の機械向けの箱があるか。**無い版は勧めない。**
+    pub has_artifact: bool,
+    /// 最後に見に行った時刻。
+    pub checked_at: protocol::Timestamp,
+}
+
+/// 記録から最新版を組み立てる。一度も読めていなければ `None`。
+fn latest_of(state_dir: &std::path::Path) -> Option<LatestView> {
+    let notice = agent_core::version_ops::read_notice(state_dir);
+    (!notice.latest.is_empty()).then(|| LatestView {
+        version: VersionId::new(notice.latest),
+        prerelease: notice.prerelease,
+        has_artifact: notice.has_artifact,
+        checked_at: notice.checked_at,
+    })
 }
 
 #[derive(Clone)]
@@ -99,6 +132,7 @@ async fn build_view(state: &VersionsState, identity: &Identity) -> VersionsView 
             entries: Vec::new(),
             selected: None,
             outcome: None,
+            latest: None,
         };
     }
 
@@ -120,6 +154,7 @@ async fn build_view(state: &VersionsState, identity: &Identity) -> VersionsView 
         entries,
         selected,
         outcome: version::read_outcome(&state.state_dir),
+        latest: latest_of(&state.state_dir),
     }
 }
 
