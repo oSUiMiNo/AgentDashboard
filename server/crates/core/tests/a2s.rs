@@ -244,6 +244,8 @@ mod wire {
 struct A2s {
     dir: PathBuf,
     /// サーバ側
+    /// ブラウザ役が REST を叩く先（設定の読み込みなど）
+    addr: SocketAddr,
     registry: Arc<SessionRegistry>,
     hub: Arc<AgentHub>,
     /// ブラウザの代わり（`ws.rs` が使うのと同じ口）
@@ -291,7 +293,10 @@ impl A2s {
             .expect("記録層を立てられること");
         let hub = AgentHub::new(db.clone(), Arc::clone(&registry));
 
-        let account_id = pairing::ensure_account(&db, "テスト用")
+        // **鍵なしの構成が名乗るアカウント**を使う。ブラウザ役が REST を叩くとき、
+        // `AuthContext::local` は必ずこの行を名乗るので、別の行を作ると
+        // 「設定を書いた先」と「PC が繋がっている先」がずれる
+        let account_id = pairing::ensure_account(&db, server_core::db::LOCAL_ACCOUNT_NAME)
             .await
             .expect("アカウントを用意できること");
         // 既定の20秒だと1本のテストがそれだけ待つ。**設定は DB から配られる**ので、
@@ -337,7 +342,13 @@ impl A2s {
         );
         let router = server_core::auth::with_sessions(
             server_core::routes(ws_state, Arc::clone(&auth))
-                .merge(server_core::gateway::agent_routes(Arc::clone(&hub))),
+                .merge(server_core::gateway::agent_routes(Arc::clone(&hub)))
+                // 設定の口も生やす。**読み込んだ間隔が繋がっている PC へ配られるか**は、
+                // 実際に PC を繋いだこの土台でしか見られない（持ち出し設計§12）
+                .merge(server_core::guard(
+                    agentdashboard_core::settings_api::server_routes(Arc::clone(&hub)),
+                    Arc::clone(&auth),
+                )),
             &auth,
         );
         let server_task = tokio::spawn(async move {
@@ -415,6 +426,7 @@ impl A2s {
 
         Self {
             dir,
+            addr,
             registry,
             hub,
             account_id,
@@ -545,7 +557,10 @@ async fn 名乗りを交わすと_PC_のカードとしてサーバに現れる(
         "どの PC のカードか分からないまま記録されている"
     );
     assert!(listed[0].agent_connected, "繋がっているのに印が落ちている");
-    assert_eq!(listed[0].account.as_deref(), Some("テスト用"));
+    assert_eq!(
+        listed[0].account.as_deref(),
+        Some(server_core::db::LOCAL_ACCOUNT_NAME)
+    );
 
     // 繋がっている PC は1台
     assert_eq!(a2s.hub.connected().len(), 1);
@@ -1174,6 +1189,47 @@ async fn 画面の設定を変えると動いているセッションにも効�
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+
+    session.kill();
+}
+
+#[tokio::test]
+async fn 読み込んだ間隔は次の接続を待たずに配られる() {
+    // **読み込みだけ別の道を作らない**（持ち出し設計§12）。ファイルから入った間隔も
+    // `PUT` と同じ経路（`AgentHub::set_intervals`）を通るので、繋がっている PC へ
+    // その場で届く。届かないと、次に繋ぎ直すまで古い間隔で送り続ける
+    let a2s = A2s::start_full("import-intervals", false, 600).await;
+    let (session, transcript) = a2s.start_session();
+    a2s.tell_transcript(&session, &transcript).await;
+    append(&transcript, &sample_lines());
+
+    // 10分間隔なので、待っても来ない
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(
+        a2s.registry
+            .get(session.card_id)
+            .map(|record| record.transcript_snapshot().is_empty())
+            .unwrap_or(true),
+        "長い間隔を指定したのに、すぐ送られてきている"
+    );
+
+    // ファイルを読み込ませる（画面がやることと同じ）
+    let addr = a2s.addr;
+    let body = format!(
+        r#"{{"kind":"{}","format":{},"settings":{{"sync_interval_secs":1}}}}"#,
+        server_core::portable::KIND,
+        server_core::portable::FORMAT
+    );
+    let response = tokio::task::spawn_blocking(move || {
+        testkit::request(addr, "POST", "/api/settings/import", Some(&body), None)
+    })
+    .await
+    .expect("HTTPスレッドが落ちないこと")
+    .expect("応答を読めること");
+    assert_eq!(response.status, 200, "{}", response.body);
+
+    let nodes = a2s.wait_for_nodes(session.card_id, 3).await;
+    assert_eq!(nodes.len(), 3, "読み込んだ間隔が PC へ配られていない");
 
     session.kill();
 }

@@ -170,8 +170,9 @@ pub struct AgentConfig {
     /// （指定なし／編集の承認のみスキップ／全承認をスキップ）、選んだ値は起動のたび既定へ戻る。
     /// **権限確認を飛ばす機能なので、既定はスキップしない側**に置く。選ぶのは利用者。
     ///
-    /// このキーだけは画面（`/settings`）から書き戻される（設計§7）。他のキーは
-    /// 起動時に読むだけ。
+    /// **ここに書くのは初期値**（持ち出し設計§3）。保存先はアカウントごとの記録で、
+    /// 画面（`/settings`）から一度変えると以後はそちらが正になり、このキーは読まれない。
+    /// 記録の行を消せば、また初期値としてここから始まる。
     pub always_bypass_permissions: bool,
     /// 自己修復（設計§9）を動かすか。
     ///
@@ -501,6 +502,10 @@ mod tests {
 
     #[test]
     fn 知らないキーは黙って無視しない() {
+        // **読むだけでもロックを取る。** `from_toml_str` は環境変数を当てるので、
+        // 上書きを試すテストと同居すると、その値を掴んだまま読むことになる
+        // （nextest はテストごとにプロセスを分けるので出ないが、素の `cargo test` で出る）
+        let _lock = env_lock();
         // 打ち間違いを黙って無視すると「設定したのに効かない」事故になる
         assert!(AgentConfig::from_toml_str("coalesce_ms = 8").is_ok());
         assert!(AgentConfig::from_toml_str("coalesce_mss = 8").is_err());
@@ -610,6 +615,18 @@ mod tests {
     fn 権限確認スキップの既定はオフ() {
         // 権限確認を飛ばす機能なので、既定は必ずスキップしない側に置く（設計§9）
         assert!(!AgentConfig::default().always_bypass_permissions);
+    }
+
+    #[test]
+    fn 権限確認スキップのキーは残っていて読めること() {
+        // 読むだけでもロックを取る（`知らないキーは黙って無視しない` と同じ理由）
+        let _lock = env_lock();
+        // **保存先は記録へ移ったが、キーは消していない**（持ち出し設計§4）。
+        // `deny_unknown_fields` なので、消すとこのキーを書いている利用者の
+        // エージェントが起動しなくなる。ここに書く値は行が無いときの初期値
+        let config =
+            AgentConfig::from_toml_str("always_bypass_permissions = true").expect("読めること");
+        assert!(config.always_bypass_permissions);
     }
 
     #[test]

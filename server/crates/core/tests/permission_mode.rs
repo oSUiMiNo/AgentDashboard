@@ -546,3 +546,48 @@ async fn キーに反応しないときは到達不能と混同しない() {
         "行けるモードを行けないと言ってはいけない: {message}"
     );
 }
+
+/// 記録の行を消すと、また設定ファイルの値から始まること（持ち出し設計§3）。
+///
+/// `config.toml.example` が「記録を消せばまたここから始まる」と書いている。
+/// **その約束をここで固定する。**
+#[tokio::test]
+async fn 記録を消すと設定ファイルの値へ戻る() {
+    let (dir, path) = settings_file("reset");
+    let config = Config {
+        always_bypass_permissions: true,
+        ..Config::default()
+    };
+    let server = common::TestServer::start_with_settings(config, path).await;
+
+    // 画面から選ぶと記録が正になる
+    let (status, _) = server
+        .put("/api/settings", r#"{"always_bypass_permissions":false}"#)
+        .await;
+    assert_eq!(status, 200);
+    let (_, body) = server.get("/api/settings").await;
+    assert!(
+        body.contains("\"always_bypass_permissions\":false"),
+        "{body}"
+    );
+
+    // 行を消す（記録を作り直したのと同じ状態）
+    let db = server_core::db::connect(&server.config.resolved_database_url())
+        .await
+        .expect("同じ記録へ繋げること");
+    server_core::db::settings::remove(
+        &db,
+        server_core::db::LOCAL_ACCOUNT_ID,
+        server_core::db::settings::ALWAYS_BYPASS_PERMISSIONS,
+    )
+    .await
+    .expect("消せること");
+
+    let (_, body) = server.get("/api/settings").await;
+    assert!(
+        body.contains("\"always_bypass_permissions\":true"),
+        "設定ファイルの値へ戻っていない: {body}"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
