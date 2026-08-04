@@ -1,4 +1,4 @@
-# インスタンス2台構成の E2E：**PC 側エージェント**（セルフホスト化設計§15-2 #4）。
+# インスタンス2台構成の E2E：**セッションホスト**（セルフホスト化設計§15-2 #4）。
 #
 # 繋ぎ先とトークンは `scripts/e2e-compose` が環境変数で渡す
 # （`AGENTDASHBOARD_SERVER_URL` / `AGENTDASHBOARD_PAIRING_TOKEN`）。

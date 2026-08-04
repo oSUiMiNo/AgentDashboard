@@ -81,7 +81,7 @@ sea-orm-migration = { version = "2", default-features = false, features = [
 # 別の版を書くと同じ実装が2つビルドされ、配布バイナリ（設計§14-3）が理由もなく太る。
 # axum を上げるときは `scripts/cargo tree -i tungstenite` で揃っているか見ること。
 #
-# TLS を入れてあるのは、エージェントがインターネット越しに繋ぐため（設計§14-2 の
+# TLS を入れてあるのは、セッションホストがインターネット越しに繋ぐため（設計§14-2 の
 # リバースプロキシ構成では `wss://` になる）。native-tls ではなく rustls を選ぶのは、
 # musl 静的リンク（設計§14-3）で OpenSSL を引き込まないため。
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
@@ -102,7 +102,7 @@ password-auth = "1"
 # 理由は設計§8-2（更新停止・版の非互換・sqlx の二重ビルド）。
 tower-sessions = "0.15"
 # インスタンスの間の連絡係（セルフホスト化設計§9-1）。**server-core だけが持つ**——
-# PC 側が持つと、配布するエージェントに要らない荷物が増える（設計§14-3 の musl 静的リンク）。
+# PC 側が持つと、配布するセッションホストに要らない荷物が増える（設計§14-3 の musl 静的リンク）。
 # 境界は crates/core/tests/dependencies.rs が機械で検査する。
 #
 # 設計は 1.4.1 を挙げているが、確認した時点で 1.5.0 が出ている。使う API

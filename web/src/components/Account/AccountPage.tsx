@@ -38,7 +38,7 @@ interface AgentRow {
   name: string
   last_seen_at: number | null
   connected: boolean
-  /** その PC のエージェントの版（CICD設計§16）。名乗っていなければ無い */
+  /** その PC のセッションホストの版（CICD設計§16）。名乗っていなければ無い */
   version?: string | null
 }
 

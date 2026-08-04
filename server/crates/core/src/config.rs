@@ -5,7 +5,7 @@
 //!
 //! # 1つのファイルから2つの設定を作る
 //!
-//! 中身はエージェント側（[`AgentConfig`]）とサーバ側（[`ServerConfig`]）に分かれるが、
+//! 中身はセッションホスト側（[`AgentConfig`]）とサーバ側（[`ServerConfig`]）に分かれるが、
 //! **ローカルモードでは利用者が書くファイルは1つのまま**（セルフホスト化設計§13-2）。
 //! そこで、読み込みと検証はこの1つの構造体が受け持ち、[`Config::agent`] /
 //! [`Config::server`] が各側へ射影する。
@@ -178,7 +178,7 @@ impl Config {
     /// 気づくのは配ったあとになる。そこで [`Config`] 自身を TOML の表へ起こし、
     /// **そこにあるキーを全部見る**。以後の新キーは何もしなくても対応する。
     ///
-    /// 仕組みそのものは [`agent_core::config::env`] にある。`agent.toml`（エージェント
+    /// 仕組みそのものは [`agent_core::config::env`] にある。`agent.toml`（セッションホスト
     /// 単体の設定）でも同じ形が要るので、**両方から見える場所へ置いてある**。
     fn apply_env(table: &mut toml::Table) -> Result<(), ConfigError> {
         env::apply(table, &Self::key_shapes(), BARE_ENV_ALIASES).map_err(ConfigError::Invalid)
@@ -201,11 +201,11 @@ impl Config {
         env::shapes_of(&probe).expect("既定値を TOML へ変換できること")
     }
 
-    /// エージェント（PC 側）が使う分だけを取り出す。
+    /// セッションホスト（PC 側）が使う分だけを取り出す。
     ///
     /// `hook_port` に待ち受けポートを入れているのは、ローカルモードではフックの宛先が
     /// ブラウザと同じポートに同居しているため。フェーズ3 で別プロセスになると、ここは
-    /// エージェント自身の設定から来る（セルフホスト化設計§5-3）。
+    /// セッションホスト自身の設定から来る（セルフホスト化設計§5-3）。
     pub fn agent(&self) -> AgentConfig {
         AgentConfig {
             stalled_threshold_secs: self.stalled_threshold_secs,
@@ -241,7 +241,7 @@ impl Config {
             flow_low: self.flow_low,
             transcript_page_limit: self.transcript_page_limit,
             transcript_window_nodes: self.transcript_window_nodes,
-            // 既定は状態の置き場所の隣。**エージェント側のキーから決まる**ので、
+            // 既定は状態の置き場所の隣。**セッションホスト側のキーから決まる**ので、
             // 両側を知っているこの層でしか解決できない（`ServerConfig::default` は
             // `state_dir` を知らないため `None` のまま）
             database_url: Some(self.resolved_database_url()),

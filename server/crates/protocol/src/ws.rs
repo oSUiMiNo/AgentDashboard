@@ -60,7 +60,7 @@ pub enum SelfhealPhase {
     Testing,
     /// 修復セッションが作業している
     Repairing,
-    /// 修復の結果を core 側で検証している（エージェントの自己申告は使わない）
+    /// 修復の結果を core 側で検証している（セッションホストの自己申告は使わない）
     Verifying,
     /// 直す必要が無かった。対応表に登録して終わり
     Passed,

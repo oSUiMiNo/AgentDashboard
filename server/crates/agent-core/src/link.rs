@@ -61,7 +61,7 @@ pub struct LinkConfig {
     pub agent_name: String,
     /// 起動している CLI が受け付ける権限モード（名乗りで渡す）
     pub available_modes: Vec<protocol::PermissionMode>,
-    /// エージェント側の toml のトグル（名乗りで渡す）
+    /// セッションホスト側の toml のトグル（名乗りで渡す）
     pub always_bypass_permissions: bool,
 }
 
@@ -96,7 +96,7 @@ pub struct AgentLink {
     inbox: Mutex<Option<mpsc::UnboundedReceiver<Outgoing>>>,
 }
 
-/// エージェントが名乗るモデルの表（§13-4）。
+/// セッションホストが名乗るモデルの表（§13-4）。
 #[derive(Clone)]
 struct ModelTable {
     cli_version: String,

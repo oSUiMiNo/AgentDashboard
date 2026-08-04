@@ -5,7 +5,7 @@
 //! 起動する**ので、そこでしか出ない食い違い——設定の読み方、トークンの受け渡し、
 //! フックの宛先ポート、起動の順序——を捕まえる。
 //!
-//! 検収条件「エージェント：ペアリング接続」と、5分セットアップ（§14-4）の手順3〜4を
+//! 検収条件「セッションホスト：ペアリング接続」と、5分セットアップ（§14-4）の手順3〜4を
 //! 機械で通す形にあたる。
 //!
 //! 本物の claude は起こさない（`AGENTDASHBOARD_CLAUDE_BIN` で擬似 claude を指す）。
@@ -66,7 +66,7 @@ fn free_port() -> u16 {
 }
 
 impl Pair {
-    /// サーバとエージェントを両方起こす。
+    /// サーバとセッションホストを両方起こす。
     async fn start(label: &str) -> Self {
         let (mut pair, token) = Self::start_server_only(label).await;
         pair.start_agent(&token).await;
@@ -148,7 +148,7 @@ impl Pair {
         (pair, token)
     }
 
-    /// エージェントを起こす（手順4）。**設定はファイルで渡す**——実運用と同じ形で
+    /// セッションホストを起こす（手順4）。**設定はファイルで渡す**——実運用と同じ形で
     /// 読めることまで確かめたいので、環境変数だけで済ませない。
     async fn start_agent(&mut self, token: &str) {
         let dir = self.dir.clone();
@@ -167,13 +167,13 @@ impl Pair {
                 settings = dir.join("claude-settings.json").display(),
             ),
         )
-        .expect("エージェントの設定を書けること");
+        .expect("セッションホストの設定を書けること");
 
         self.agent = Some(spawn_agent(&agent_config));
         // **繋がったことは「この PC が名乗った能力」で分かる。** 権限モードは
         // 起動している CLI にしか聞けないので、空でなくなった時点で Hello が渡っている
         let here = &*self;
-        wait_for("エージェントが名乗る", || async {
+        wait_for("セッションホストが名乗る", || async {
             !here.available_modes().await.is_empty()
         })
         .await;
@@ -342,7 +342,7 @@ async fn ペアリングして起動しフックまで通る() {
     assert_eq!(session.account.as_deref(), Some(ACCOUNT));
 
     // 擬似 claude に、**注入された settings のフックを実際に起動させる**。
-    // ここが通れば「焼き込み → エージェントの 127.0.0.1 → 状態導出 → A2S → 記録」が
+    // ここが通れば「焼き込み → セッションホストの 127.0.0.1 → 状態導出 → A2S → 記録」が
     // 端から端まで成立している（実機検証#5 の自動化）
     browser
         .send(&ClientMessage::SendInput {
@@ -359,7 +359,7 @@ async fn ペアリングして起動しフックまで通る() {
     })
     .await;
 
-    // エージェントを落とすと、接続断の印だけが付く（状態は最後の既知のまま）
+    // セッションホストを落とすと、接続断の印だけが付く（状態は最後の既知のまま）
     pair.kill_agent();
     wait_for("接続断になる", || async {
         pair.sessions()
@@ -383,7 +383,7 @@ async fn ペアリングして起動しフックまで通る() {
 
 #[tokio::test]
 async fn 認められないトークンでは繋がらない() {
-    // 発行していないトークンで起動しても、**1台も繋がらない**。エージェントの側は
+    // 発行していないトークンで起動しても、**1台も繋がらない**。セッションホストの側は
     // 繋がるまで試し直し続けるので、断り続けられていることを外から見る
     let (pair, _token) = Pair::start_server_only("bad-token").await;
     assert!(
@@ -422,7 +422,7 @@ async fn 認められないトークンでは繋がらない() {
 /// 条件が満たされるまで待つ。
 ///
 /// `Pair` のメソッドにしていないのは、**待つ間ずっと `Pair` を借りたままにしない**ため。
-/// 途中でエージェントを畳む（`&mut`）テストがあるので、借りる範囲は短いほうがよい。
+/// 途中でセッションホストを畳む（`&mut`）テストがあるので、借りる範囲は短いほうがよい。
 async fn wait_for<F, Fut>(what: &str, mut check: F)
 where
     F: FnMut() -> Fut,
@@ -441,7 +441,7 @@ where
     }
 }
 
-/// エージェントを1つ起こす。**本物の claude は起こさない**（E2E と同じ差し替え口）。
+/// セッションホストを1つ起こす。**本物の claude は起こさない**（E2E と同じ差し替え口）。
 fn spawn_agent(config: &Path) -> Child {
     Command::new(testkit::binary_path("agentdashboard-agent"))
         .arg("--config")
@@ -454,5 +454,5 @@ fn spawn_agent(config: &Path) -> Child {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .expect("エージェントを起動できること")
+        .expect("セッションホストを起動できること")
 }

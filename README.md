@@ -64,7 +64,7 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/oSUiMiNo/AgentDashboard
 agentdashboard
 ```
 
-ブラウザで **http://127.0.0.1:8787** を開く。`~/.local/bin` へ3つ入る——ローカル用の `agentdashboard`、PC 側エージェントの `agentdashboard-agent`、履歴を読む `transcript-parser`。**3つは隣同士に置いたままにすること**（互いを隣で探す）。
+ブラウザで **http://127.0.0.1:8787** を開く。`~/.local/bin` へ3つ入る——ローカル用の `agentdashboard`、セッションホストの `agentdashboard-agent`、履歴を読む `transcript-parser`。**3つは隣同士に置いたままにすること**（互いを隣で探す）。
 
 使い方は目的で分かれる。
 
@@ -330,7 +330,7 @@ rm   ~/.local/state/agentdashboard/version-current   # 入れる側が置いた�
 ### ローカルモードでは、再起動すると全セッションが終了する
 claude の PTY はダッシュボードの子プロセスなので、落とすと道連れになる。**落とさない運用**が前提。
 
-セルフホストでは事情が変わる。PTY を持っているのは PC 側のエージェントなので、**ダッシュボードサーバは何度落としても、走っている Claude Code は死なない**。道連れになるのはエージェントを落としたときだけ。
+セルフホストでは事情が変わる。PTY を持っているのはセッションホストなので、**ダッシュボードサーバは何度落としても、走っている Claude Code は死なない**。道連れになるのはセッションホストを落としたときだけ。
 
 ### 配布したバイナリでは自己修復が検知だけになる
 自己修復は、ダッシュボード自身のソースと Docker を使ってパーサを直す。ワンライナーで入れた PC にはどちらも無いので、そこでは**直せない**。
@@ -424,7 +424,7 @@ server/                Cargo workspace
   crates/agent-core/       PC 側の一式。PTY・フック受信・状態導出・パース・自己修復
   crates/server-core/      ブラウザ配信。WebSocket・REST・DB・アカウント・連絡係
   crates/core/             両者を1プロセスで束ねる配線（ローカルモード）と CLI
-  crates/agent/            PC 側エージェントの中身
+  crates/agent/            セッションホストの中身
   crates/transcript-parser/  JSONL → 表示用ツリー。**自己修復が唯一書き換えてよい範囲**
   crates/protocol/         サーバ・フロント・パーサが共有する型
   crates/dist/             配る一式。実行ファイル3本の入口だけを持つ
@@ -462,7 +462,7 @@ scripts/               cargo・dist のラッパー、フィクスチャ採取�
 | `.claude/docs/knowledge/` | 開発環境・ツールチェーン・依存バージョン方針 |
 | `fixtures/README.md` | ゴールデンフィクスチャの採取と匿名化 |
 | `server/config.toml.example` | ダッシュボード側の設定の全キー |
-| `server/agent.toml.example` | PC 側エージェントの設定の全キー |
+| `server/agent.toml.example` | セッションホストの設定の全キー |
 
 ---
 <br/>

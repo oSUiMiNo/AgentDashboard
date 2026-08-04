@@ -13,7 +13,7 @@
 //! 既存の環境だけ古い値に取り残される**（利用者が選んだ値なのか、昔の既定なのかを
 //! 区別できない）。行が無い＝まだ選んでいない、として読むときに埋める。
 //!
-//! 設定画面からの操作はフェーズ5、接続中エージェントへの即時反映（SetIntervals）は
+//! 設定画面からの操作はフェーズ5、接続中セッションホストへの即時反映（SetIntervals）は
 //! フェーズ3。ここは置き場所と読み書きだけを用意する。
 
 use super::entity::settings;
@@ -107,7 +107,7 @@ pub fn check(key: &str, value: &serde_json::Value) -> Result<(), String> {
     }
 }
 
-/// エージェントへ配る間隔の一式（設計§4-2 の SetIntervals と同じ組）。
+/// セッションホストへ配る間隔の一式（設計§4-2 の SetIntervals と同じ組）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Intervals {
     pub sync_interval_secs: u64,

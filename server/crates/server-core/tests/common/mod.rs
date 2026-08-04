@@ -147,7 +147,7 @@ fn replace_database(url: &str, name: &str) -> String {
     }
 }
 
-// --- エージェントの役をするための道具（`gateway.rs` と `tenancy.rs` が使う）---------
+// --- セッションホストの役をするための道具（`gateway.rs` と `tenancy.rs` が使う）---------
 //
 // **写さずに共有する。** 同じものを2つ持つと片方だけが古くなり、しかもここは
 // 「他人のカードへ報告しても通らない」を確かめる側なので、古い写しが通ってしまうと
@@ -164,7 +164,7 @@ use tokio_tungstenite::tungstenite;
 /// 待ち合わせの上限。
 pub const AGENT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// エージェントとして繋ぐ。版とトークンは呼び出し側が決める（断られ方も試すため）。
+/// セッションホストとして繋ぐ。版とトークンは呼び出し側が決める（断られ方も試すため）。
 pub async fn connect_agent(
     addr: std::net::SocketAddr,
     token: Option<&str>,
@@ -353,7 +353,7 @@ pub fn meta(card_id: CardId) -> SessionMeta {
         last_assistant_message: None,
         created_at: 1,
         hooks_seen: false,
-        // **エージェントが何を書いて寄越しても**、記録に残る帰属は接続が決める（§8-5）
+        // **セッションホストが何を書いて寄越しても**、記録に残る帰属は接続が決める（§8-5）
         agent_id: Some(protocol::AgentId::new()),
         agent_connected: true,
         account: Some("なりすまし".to_string()),

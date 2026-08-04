@@ -41,7 +41,7 @@ test('別の PC のセッションを起こして画面が出る', async ({ page
   // 起動の指示は A2S を渡り、CardId は PC 側で採番される（設計§5-2）
   const tile = await spawnSession(page)
 
-  // 画面はエージェント内の端末エミュレータが作ったもの。**生バイトは1バイトも
+  // 画面はセッションホスト内の端末エミュレータが作ったもの。**生バイトは1バイトも
   // ブラウザまで来ていない**（要件5-2）
   await openSession(page, tile)
 

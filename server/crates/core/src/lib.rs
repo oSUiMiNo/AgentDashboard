@@ -125,7 +125,7 @@ impl LocalServer {
     /// | ルータ | 出どころ | なぜ分かれているか |
     /// |---|---|---|
     /// | `/ws`・`/api/sessions`・web アセット | [`server_core::routes`] | ブラウザ向け。セルフホストではクラウド側へ移る |
-    /// | `/hook/*`・`/model/*` | [`agent_core::hooks::routes`] | 宛先はどちらのモードでもエージェントの 127.0.0.1（セルフホスト化設計§5-3） |
+    /// | `/hook/*`・`/model/*` | [`agent_core::hooks::routes`] | 宛先はどちらのモードでもセッションホストの 127.0.0.1（セルフホスト化設計§5-3） |
     /// | `/api/settings` | [`settings_api::routes`] | 応答の中身が PC 側にしか無い（§13-4 で作り替える予定） |
     ///
     /// いまは同じポートに同居しているが、**分けられる形にしておく**のがこの合成の意味。
@@ -193,7 +193,7 @@ impl LocalServer {
 /// **PC 側を作らない**のがローカルモードとの違い。PTY もフックの受信口も持たず、
 /// セッションの実体は A2S の向こう（[`server_core::gateway`]）にある。
 ///
-/// 落ちても、繋がっている PC のセッションは無傷（§9-6）。エージェントは繋ぎ直し、
+/// 落ちても、繋がっている PC のセッションは無傷（§9-6）。セッションホストは繋ぎ直し、
 /// 未 ack のぶんを送り直して追いつく（§6-4）。
 pub async fn serve_server(
     config: Config,
@@ -243,7 +243,7 @@ pub async fn serve_server(
         Arc::new(server_core::gateway::RemoteAgent::new(Arc::clone(&hub)));
     let ws_state = ws::AppState::new(agent, Arc::clone(&registry), Arc::clone(&server_config));
     let router = server_core::routes(ws_state, Arc::clone(&auth))
-        // エージェントの受け口は**ブラウザとは別の鍵**（ペアリングトークン。§8-4）。
+        // セッションホストの受け口は**ブラウザとは別の鍵**（ペアリングトークン。§8-4）。
         // Cookie の middleware をかけると、PC が Cookie を持たないだけで断られる
         .merge(server_core::gateway::agent_routes(Arc::clone(&hub)))
         .merge(server_core::guard(
@@ -384,7 +384,7 @@ async fn serve_router(listener: tokio::net::TcpListener, router: Router) -> anyh
 
 /// 設定からサーバ一式を組み立てて起動する（ローカルモード）。
 pub async fn serve(config: Config, config_arg: Option<std::path::PathBuf>) -> anyhow::Result<()> {
-    // 1つのファイルから、エージェント側とサーバ側の2つへ射影する（セルフホスト化設計§13-2）。
+    // 1つのファイルから、セッションホスト側とサーバ側の2つへ射影する（セルフホスト化設計§13-2）。
     // 分けておくと、フェーズ3 で両者が別プロセスになったときに、この行より下は
     // ほとんど動かさずに済む
     let agent_config = Arc::new(config.agent());

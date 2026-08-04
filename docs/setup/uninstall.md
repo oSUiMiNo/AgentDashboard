@@ -117,7 +117,7 @@ rm ~/.local/bin/env ~/.local/bin/env.fish
 | [ローカル](local.md) | 記録（`--purge` で消える） |
 | [セルフホストのサーバー・道①](selfhost.md) | 記録。常駐させたなら **systemd の設定**（下記） |
 | [セルフホストのサーバー・道②](selfhost.md) | **記録は Docker の中**（下記） |
-| [PC 側エージェント](pairing.md) | 自分で置いた `agent.toml` |
+| [セッションホスト](pairing.md) | 自分で置いた `agent.toml` |
 
 ### 常駐させた場合（道①）
 ```

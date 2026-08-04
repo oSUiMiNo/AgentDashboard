@@ -1,4 +1,4 @@
-//! エージェントとサーバをネットワークで隔てて通す（セルフホスト化設計§4〜§6、テスト計画フェーズ3）。
+//! セッションホストとサーバをネットワークで隔てて通す（セルフホスト化設計§4〜§6、テスト計画フェーズ3）。
 //!
 //! **同じプロセスの中で2つの役を立て、本物の WebSocket で繋ぐ**（§15-2 #1）。ローカル
 //! モードのテストが「両方が同じ物を触る」形なのに対し、こちらは経路が
@@ -60,7 +60,7 @@ mod wire {
     /// 覗き見しながら中継する相手。
     pub struct Sniffer {
         pub addr: std::net::SocketAddr,
-        /// エージェント → サーバ方向に流れた文字フレーム
+        /// セッションホスト → サーバ方向に流れた文字フレーム
         pub sent: Arc<Mutex<Vec<String>>>,
         cut: broadcast::Sender<()>,
         /// 立っている間は**新しい接続も通さない**（下記）
@@ -124,7 +124,7 @@ mod wire {
         ///
         /// # なぜ塞ぐ必要があるのか
         ///
-        /// エージェントは1度目の繋ぎ直しを待たずに試す（設計§6-3 の指数バックオフは
+        /// セッションホストは1度目の繋ぎ直しを待たずに試す（設計§6-3 の指数バックオフは
         /// **失敗してから**効く）。切っただけだと数十ミリ秒で戻ってしまい、
         /// 「接続断の印が付く」ことを観測できるかどうかが実行環境の速さ次第になる。
         /// 実際、塞がずに書いていたテストは**単体で走らせると必ず落ちる**状態だった。
@@ -251,7 +251,7 @@ struct A2s {
     /// ブラウザの代わり（`ws.rs` が使うのと同じ口）
     browser: Arc<dyn AgentHost>,
     account_id: uuid::Uuid,
-    /// エージェント側
+    /// セッションホスト側
     manager: Arc<SessionManager>,
     link: Arc<AgentLink>,
     parser: Arc<agent_core::parser::ParserSupervisor>,
@@ -359,7 +359,7 @@ impl A2s {
             .await;
         });
 
-        // --- エージェント側 -------------------------------------------------
+        // --- セッションホスト側 -------------------------------------------------
         let sniffer = if through_sniffer {
             Some(wire::Sniffer::start(addr).await)
         } else {
@@ -481,7 +481,7 @@ impl A2s {
         }
     }
 
-    /// エージェント側でセッションを1本起こし、トランスクリプトの場所を教える。
+    /// セッションホスト側でセッションを1本起こし、トランスクリプトの場所を教える。
     fn start_session(&self) -> (Arc<agent_core::session::Session>, PathBuf) {
         let cwd = self.dir.join("project");
         std::fs::create_dir_all(&cwd).expect("作業ディレクトリを作れること");
@@ -502,7 +502,7 @@ impl A2s {
             .await;
     }
 
-    /// エージェント自身のフック受信口を叩く（**サーバの口ではない**。設計§5-3）。
+    /// セッションホスト自身のフック受信口を叩く（**サーバの口ではない**。設計§5-3）。
     async fn post_hook(&self, token: &str, event: &str, body: &str) -> u16 {
         let port = self.manager.hook_port();
         let (path, body) = (format!("/hook/{token}/{event}"), body.to_string());
@@ -588,7 +588,7 @@ async fn ブラウザからの指示が_PC_まで届く() {
         .wait_for_listed("1枚出る", |listed| listed.len() == 1)
         .await;
     let card_id = listed[0].card_id;
-    // **CardId を採番したのはエージェント側**（設計§5-2）。サーバは知らない ID の
+    // **CardId を採番したのはセッションホスト側**（設計§5-2）。サーバは知らない ID の
     // 報告を新規登録として扱う
     assert!(a2s.manager.get(card_id).is_some(), "PC 側に実体が無い");
 
@@ -615,7 +615,7 @@ async fn ブラウザからの指示が_PC_まで届く() {
 }
 
 #[tokio::test]
-async fn フックはエージェントの口で受けて状態がサーバまで届く() {
+async fn フックはセッションホストの口で受けて状態がサーバまで届く() {
     // 実機検証#5 の自動化。分離しても「焼き込み → 127.0.0.1 で受信 → 状態導出 →
     // 即時の報告」が成立すること（設計§5-3・§5-4）
     let a2s = A2s::start("hook").await;
@@ -646,7 +646,7 @@ async fn 履歴はバッチで渡り_DB_に入る() {
     let nodes = a2s.wait_for_nodes(session.card_id, 3).await;
     assert_eq!(nodes.len(), 3);
 
-    // REST の遡りも DB から返る（パーサはエージェント側に居て、サーバは知らない）
+    // REST の遡りも DB から返る（パーサはセッションホスト側に居て、サーバは知らない）
     let page = a2s
         .registry
         .transcript_page(a2s.account_id, session.card_id, None, 10)
@@ -672,7 +672,7 @@ async fn 切断して繋ぎ直しても履歴に欠落も重複も出ない() {
     // ここで線を切る（電波断・スリープの再現）
     sniffer.cut();
 
-    // **切断中も PC の中では動き続ける。** パーサは読み、エージェントは手元に溜める
+    // **切断中も PC の中では動き続ける。** パーサは読み、セッションホストは手元に溜める
     append(&transcript, &more_lines());
     tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -794,7 +794,7 @@ async fn 切断すると接続断の印が付き_状態は書き換わらない(
 
 #[tokio::test]
 async fn モデルの表は_PC_ごとに保存される() {
-    // CLI の版は PC ごとに違う（設計§13-4）。**表はエージェント単位のデータ**なので、
+    // CLI の版は PC ごとに違う（設計§13-4）。**表はセッションホスト単位のデータ**なので、
     // サーバは中身を解釈せずそのまま `agents.model_table` へ置く
     let a2s = A2s::start("model-table").await;
     a2s.link.set_model_table(

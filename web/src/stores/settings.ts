@@ -30,7 +30,7 @@ export interface AgentInfo {
   last_seen_at: number | null
   /** いま繋がっているか。DB には持たない値で、応答のたびに被せられる */
   connected: boolean
-  /** その PC のエージェントの版（CICD設計§16）。名乗っていなければ無い */
+  /** その PC のセッションホストの版（CICD設計§16）。名乗っていなければ無い */
   version?: string | null
 }
 

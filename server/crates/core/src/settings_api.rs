@@ -314,7 +314,7 @@ pub async fn api_update_settings(
             .await
             .unwrap_or_default();
         // ローカルモードには配る相手（PC）が居ないので、保存だけで足りる。
-        // 履歴の同期間隔はエージェント側が起動時に読む（§13-3）
+        // 履歴の同期間隔はセッションホスト側が起動時に読む（§13-3）
         db::settings::put_intervals(state.auth.db(), identity.account_id, update.merged(current))
             .await
             .map_err(|err| {

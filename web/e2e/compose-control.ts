@@ -8,7 +8,7 @@ import path from 'node:path'
  * # なぜテストの中から壊すのか
  *
  * 障害マトリクス（§12）の各行は「**壊れたときにどう見えるか**」を決めたもので、
- * 壊さずに確かめる方法が無い。片系ダウンも DB 断もエージェント断も、正常に動いている
+ * 壊さずに確かめる方法が無い。片系ダウンも DB 断もセッションホスト断も、正常に動いている
  * 相手からは一度も引き出せない。
  *
  * # 立ち上げは script、壊すのはここ
@@ -62,7 +62,7 @@ export function startService(name: string): void {
   compose('up', '-d', '--wait', name)
 }
 
-/** エージェント（ホストで動いている PC 側）を落とす。 */
+/** セッションホスト（ホストで動いている PC 側）を落とす。 */
 export function killAgent(): void {
   const pid = Number(fs.readFileSync(path.join(STATE, 'agent.pid'), 'utf8'))
   try {
@@ -73,7 +73,7 @@ export function killAgent(): void {
 }
 
 /**
- * エージェントを起こし直す。
+ * セッションホストを起こし直す。
  *
  * **同じトークンで繋ぎ直す。** 新しく発行すると別の PC として登録され、
  * 「切れた PC が戻ってきた」ではなく「2台目が来た」になってしまう。

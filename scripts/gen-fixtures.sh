@@ -132,7 +132,7 @@ should_run "subagent" "$@" && run_session "subagent" \
     'Task ツールでサブエージェントを1つ起動し、このディレクトリにある .py ファイルの関数一覧を調べさせてください。サブエージェントの報告を受け取ったら、その内容を1行で要約して答えてください。'
 
 # 多段ネスト（spawnDepth 2以上）を採る。深さ1の meta は toolUseId で親のツールコールに
-# 繋がるが、深さ2以上は parentAgentId で親エージェントに繋がる。鍵が変わるので、
+# 繋がるが、深さ2以上は parentAgentId で親セッションホストに繋がる。鍵が変わるので、
 # 実物が無いとマウント処理を検証できない。
 should_run "nested-subagent" "$@" && run_session "nested-subagent" \
     'サブエージェントを1つ起動してください。そのサブエージェントには「さらに自分でサブエージェントをもう1つ起動して、このディレクトリの notes.md を読ませ、その結果を報告させる」よう指示してください。最終的な報告を1行で要約して答えてください。'
@@ -161,7 +161,7 @@ check "Edit の差分"         'old_string'
 check "sidechain"           '"isSidechain":true'
 check "サブエージェント"    'subagents'
 check "多段ネスト"          '"spawnDepth":2'
-check "親エージェント参照"  'parentAgentId'
+check "親セッションホスト参照"  'parentAgentId'
 check "失敗したツールコール" '"is_error":true'
 
 echo

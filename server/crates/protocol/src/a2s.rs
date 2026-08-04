@@ -1,7 +1,7 @@
-//! エージェント ⇄ ダッシュボードサーバのメッセージ（セルフホスト化設計§4）。
+//! セッションホスト ⇄ ダッシュボードサーバのメッセージ（セルフホスト化設計§4）。
 //!
 //! ブラウザ向けの [`crate::ws`] とは**別のプロトコル**にしてある。同じ列挙を使い回すと
-//! 方向の意味論が濁り（`Spawn` は誰から誰へ？）、エージェント固有の知らせ（Hello・ack・
+//! 方向の意味論が濁り（`Spawn` は誰から誰へ？）、セッションホスト固有の知らせ（Hello・ack・
 //! 画面の購読制御）がブラウザ向けの型に混ざる。**ブラウザ向けの型は不変**というのが
 //! セルフホスト化の前提なので、線を分ける。
 //!
@@ -13,7 +13,7 @@
 //!
 //! # 版はハンドシェイクで交渉する
 //!
-//! エージェントは利用者の PC にあり、サーバより更新が遅れがちになる。噛み合わない版で
+//! セッションホストは利用者の PC にあり、サーバより更新が遅れがちになる。噛み合わない版で
 //! 動き出してから気づくより、**接続の最初に断る**ほうがよい。WebSocket のサブプロトコル
 //! （[`A2S_PROTOCOL`]）で交渉するので、upgrade の段階で拒否できる。
 
@@ -33,8 +33,8 @@ pub const A2S_VERSION: u32 = 1;
 
 /// 履歴のバッチにつける通し番号（§6-1）。
 ///
-/// エージェントのプロセス内で単調に増える。**サーバは順序を仮定しない**——ack は
-/// 「この番号は書けた」だけを意味し、抜けや追い越しの管理はエージェント側の責任。
+/// セッションホストのプロセス内で単調に増える。**サーバは順序を仮定しない**——ack は
+/// 「この番号は書けた」だけを意味し、抜けや追い越しの管理はセッションホスト側の責任。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct BatchId(pub u64);
@@ -45,7 +45,7 @@ impl std::fmt::Display for BatchId {
     }
 }
 
-/// 画面と履歴の更新間隔（§13-3）。DB settings の値をエージェントへ運ぶ。
+/// 画面と履歴の更新間隔（§13-3）。DB settings の値をセッションホストへ運ぶ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Intervals {
     /// 履歴のバッチを送る周期（秒）
@@ -56,7 +56,7 @@ pub struct Intervals {
     pub scrollback_lines: usize,
 }
 
-/// エージェント → サーバ。
+/// セッションホスト → サーバ。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum AgentMessage {
@@ -66,7 +66,7 @@ pub enum AgentMessage {
     ///
     /// `available_modes` と `always_bypass_permissions` は、`GET /api/settings` が
     /// 返す内容のうち **PC 側にしか無いもの**（起動している CLI が受け付ける権限モードと、
-    /// エージェントの toml のトグル）。サーバモードにはローカルの CLI が居ないので、
+    /// セッションホストの toml のトグル）。サーバモードにはローカルの CLI が居ないので、
     /// ここで受け取らないと起動ボタンと権限モードの選択肢が空になる。
     /// モデルの表は量が違う（数KB）ので [`AgentMessage::ModelTable`] に分けてある。
     Hello {
@@ -91,10 +91,10 @@ pub enum AgentMessage {
         subagent_active: u32,
         last_activity_at: Timestamp,
     },
-    /// 履歴のバッチ（§6-1）。**ack が返るまで再送責任はエージェント側**。
+    /// 履歴のバッチ（§6-1）。**ack が返るまで再送責任はセッションホスト側**。
     ///
     /// どのファイルのどこまで読んだか（オフセット）は載せない。サーバに使い道が無く、
-    /// 利用者の PC のパスをネットワークへ出す理由も無い。位置の管理はエージェントが持つ。
+    /// 利用者の PC のパスをネットワークへ出す理由も無い。位置の管理はセッションホストが持つ。
     TranscriptBatch {
         batch_id: BatchId,
         card_id: CardId,
@@ -133,7 +133,7 @@ pub enum AgentMessage {
     },
 }
 
-/// サーバ → エージェント。
+/// サーバ → セッションホスト。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum ServerToAgent {
@@ -141,18 +141,18 @@ pub enum ServerToAgent {
     Hello {
         protocol_version: u32,
         server_version: String,
-        /// このエージェントに割り当てられた ID。カードの帰属はサーバが決める（§5-1）
+        /// このセッションホストに割り当てられた ID。カードの帰属はサーバが決める（§5-1）
         agent_id: AgentId,
         intervals: Intervals,
     },
     /// 履歴が **DB へ入った**ことの応答（§6-1）。
     ///
-    /// エージェントはこれを見てから JSONL のオフセットを進める。返さないことが
+    /// セッションホストはこれを見てから JSONL のオフセットを進める。返さないことが
     /// そのまま「まだ書けていない」を意味するので、DB 断のときは黙って返さない（§12）。
     BatchAck {
         batch_id: BatchId,
     },
-    /// 新しいセッションを起こす。**CardId はエージェントが採番する**（§5-2）ので、
+    /// 新しいセッションを起こす。**CardId はセッションホストが採番する**（§5-2）ので、
     /// ここでは指定しない。結果は `SessionUpsert` で返る。
     Spawn {
         cwd: String,
@@ -164,7 +164,7 @@ pub enum ServerToAgent {
     Archive {
         card_id: CardId,
     },
-    /// Composer からの指示。PTY へ届くまでの作法（初期実装§18）はエージェント側の責任（§5-5）
+    /// Composer からの指示。PTY へ届くまでの作法（初期実装§18）はセッションホスト側の責任（§5-5）
     SendInput {
         card_id: CardId,
         text: String,

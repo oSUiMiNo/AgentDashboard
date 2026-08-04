@@ -367,7 +367,7 @@ async fn handle_request(
                 task.abort();
             }
             // **実体が居ないカードも外せないといけない。** 前回の起動が残したカードや、
-            // PC ごと落ちたあとのカードには頼む相手が居ない。エージェントへ頼む形だけに
+            // PC ごと落ちたあとのカードには頼む相手が居ない。セッションホストへ頼む形だけに
             // すると、そういうカードは一覧から二度と消せなくなる
             if state.agent.exists(card_id) {
                 if let Err(message) = state.agent.archive(card_id) {
@@ -408,7 +408,7 @@ async fn handle_request(
                 state.agent.subscribe_pty(card_id, client_id, cols, rows)
             else {
                 // **生きているのに端末が開けない**＝別の PC のカード。セルフホストの画面は
-                // エージェント内の端末エミュレータが作るので、生バイトの購読口が無い
+                // セッションホスト内の端末エミュレータが作るので、生バイトの購読口が無い
                 // （セルフホスト化設計§7）。ローカルでは、直前の生存確認との隙間に
                 // セッションが終わった場合だけここへ来る
                 send_error(

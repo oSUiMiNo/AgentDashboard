@@ -26,7 +26,7 @@ pub const KIND_PTY_INPUT: u8 = 0x02;
 pub const KIND_PTY_SNAPSHOT: u8 = 0x03;
 /// A→S：全画面（セルフホスト化設計§4-3）。payload の先頭 8B が seq。
 ///
-/// エージェント内の端末エミュレータ（vt100）が作ったエスケープ列で、**独自のセル配列
+/// セッションホスト内の端末エミュレータ（vt100）が作ったエスケープ列で、**独自のセル配列
 /// フォーマットは発明しない**。サーバはこれを [`KIND_PTY_SNAPSHOT`] へ移し替えるだけで
 /// ブラウザへ流せる（「画面をリセットしてから書け」という意味論がちょうど一致する）。
 pub const KIND_SCREEN_FULL: u8 = 0x04;
@@ -40,7 +40,7 @@ pub const HEADER_LEN: usize = 1 + 16;
 ///
 /// 中継（Valkey pub/sub。設計§9-3）は取りこぼしうるので、受け手が連番を検査して
 /// 飛びに気づけるようにする。**ブラウザへ渡す前に剥がす**ので、この番号は
-/// エージェントとサーバの間だけに存在する。
+/// セッションホストとサーバの間だけに存在する。
 pub const SEQ_LEN: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,7 +119,7 @@ pub fn encode(kind: FrameKind, card_id: CardId, payload: &[u8]) -> Vec<u8> {
 ///
 /// `[kind][card_id][seq 8B][エスケープ列]`。番号を payload の先頭に置いてヘッダを
 /// 太らせないのは、**既存の3実装（Rust×2・TS×1）に散る固定長ヘッダの前提**を
-/// 壊さないため。番号が要るのはエージェントとサーバの間だけで、ブラウザは知らない。
+/// 壊さないため。番号が要るのはセッションホストとサーバの間だけで、ブラウザは知らない。
 pub fn encode_screen(kind: FrameKind, card_id: CardId, seq: u64, payload: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(HEADER_LEN + SEQ_LEN + payload.len());
     bytes.push(kind.as_byte());

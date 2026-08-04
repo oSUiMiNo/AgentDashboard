@@ -37,7 +37,7 @@ base64.workspace = true
 redis.workspace = true
 
 [dev-dependencies]
-# エージェントの受け口（`/agent/ws`）を**本物の WebSocket で**叩くため。製品コードの
+# セッションホストの受け口（`/agent/ws`）を**本物の WebSocket で**叩くため。製品コードの
 # 依存には入れない——接続は常に PC 側から張るので、サーバ側にクライアントは要らない。
 tokio-tungstenite.workspace = true
 futures-util.workspace = true

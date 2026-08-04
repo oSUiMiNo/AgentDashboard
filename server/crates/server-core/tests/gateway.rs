@@ -1,4 +1,4 @@
-//! エージェントの受け口（セルフホスト化設計§4-1・§6-3、テスト計画フェーズ3）。
+//! セッションホストの受け口（セルフホスト化設計§4-1・§6-3、テスト計画フェーズ3）。
 //!
 //! **本物の WebSocket で叩く。** 版交渉もトークン照合も upgrade の前後に散っているので、
 //! ハンドラだけを呼んでも「接続できるかどうか」は確かめられない。
@@ -25,7 +25,7 @@ use common::{AgentSocket, hello, meta};
 const WINDOW: usize = 100;
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-/// 待ち受けているエージェント受け口。
+/// 待ち受けているセッションホスト受け口。
 struct TestGateway {
     addr: SocketAddr,
     hub: Arc<AgentHub>,
@@ -57,7 +57,7 @@ impl TestGateway {
         }
     }
 
-    /// エージェントとして繋ぐ。版とトークンは呼び出し側が決める（断られ方も試すため）。
+    /// セッションホストとして繋ぐ。版とトークンは呼び出し側が決める（断られ方も試すため）。
     async fn connect(
         &self,
         token: Option<&str>,
@@ -124,7 +124,7 @@ fn status_of(error: &tungstenite::Error) -> Option<u16> {
 
 #[tokio::test]
 async fn 知らない版は接続の前に断られる() {
-    // エージェントは利用者の PC にあり更新が遅れがち。**繋がってから黙る**のが一番
+    // セッションホストは利用者の PC にあり更新が遅れがち。**繋がってから黙る**のが一番
     // たちが悪いので、upgrade の前に理由を返す（設計§4-1）
     for backend in common::backends("gw-version").await {
         let gateway = TestGateway::start(backend.db.clone()).await;
@@ -306,7 +306,7 @@ async fn 報告は記録層へ入り帰属は接続が決める() {
 
 #[tokio::test]
 async fn 履歴のバッチは書けてから_ack_が返る() {
-    // ack は「DB へ入った」の意味（設計§6-1）。ここが緩むと、エージェントが
+    // ack は「DB へ入った」の意味（設計§6-1）。ここが緩むと、セッションホストが
     // 書けていないものの位置を進めて履歴が欠ける
     for backend in common::backends("gw-ack").await {
         let gateway = TestGateway::start(backend.db.clone()).await;

@@ -40,12 +40,12 @@ pub struct ServerConfig {
     pub transcript_page_limit: usize,
     /// メモリに置く履歴の読みキャッシュの大きさ（ノード数。設計§3-3）。
     ///
-    /// フェーズ1 まではエージェント側の設定だった（窓が履歴の持ち主だったため）。
+    /// フェーズ1 まではセッションホスト側の設定だった（窓が履歴の持ち主だったため）。
     /// **DB が真実になったので、窓ごとサーバ側へ移った**。
     pub transcript_window_nodes: usize,
     /// 記録の置き場所（設計§13-2）。
     ///
-    /// 既定は `sqlite://<state_dir>/dashboard.db`。`state_dir` はエージェント側の
+    /// 既定は `sqlite://<state_dir>/dashboard.db`。`state_dir` はセッションホスト側の
     /// キーなので、既定値の解決は両側を束ねる層が行う（[`ServerConfig::default`] は
     /// それを知らないため `None` のまま）。
     pub database_url: Option<String>,

@@ -57,7 +57,7 @@ services:
           - dashboard
 
   # 手順書（`docs/setup/reverse-proxy.md`）に載せる設定の実物を読ませる。
-  # **前に置くのは B**——PC 側エージェントが繋がっている側なので、ブラウザ用の `/ws` と
+  # **前に置くのは B**——セッションホストが繋がっている側なので、ブラウザ用の `/ws` と
   # PC 用の `/agent/ws` の両方をこの1台で通せる。
   caddy:
     image: caddy:2-alpine

@@ -84,7 +84,7 @@ fn text_node(id: &str) -> TreeNode {
     }
 }
 
-/// サーバ1台ぶん。記録層・受け口・エージェントの待ち受けを1組で持つ。
+/// サーバ1台ぶん。記録層・受け口・セッションホストの待ち受けを1組で持つ。
 struct Instance {
     registry: Arc<SessionRegistry>,
     hub: Arc<AgentHub>,
@@ -117,7 +117,7 @@ async fn instance(db: &sea_orm::DatabaseConnection, broker: &Arc<MemoryBroker>) 
         .expect("記録層を立てられること");
     let hub = AgentHub::new(db.clone(), Arc::clone(&registry));
 
-    // エージェントの受け口も本当に開ける。**繋ぐ先を選べる**ようにしないと、
+    // セッションホストの受け口も本当に開ける。**繋ぐ先を選べる**ようにしないと、
     // 「ブラウザは A・PC は B」という配置そのものが作れない
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
@@ -137,7 +137,7 @@ async fn instance(db: &sea_orm::DatabaseConnection, broker: &Arc<MemoryBroker>) 
     }
 }
 
-/// エージェントとして繋ぎ、名乗りまで済ませる。
+/// セッションホストとして繋ぎ、名乗りまで済ませる。
 async fn connect_agent(addr: SocketAddr, token: &str, name: &str) -> common::AgentSocket {
     let mut request =
         tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(format!(
@@ -219,7 +219,7 @@ async fn expect_silence(events: &mut broadcast::Receiver<AccountEvent>, what: &s
 
 #[tokio::test]
 async fn 一方が受けた報告はもう一方のブラウザにも届く() {
-    // 検収「どこへ接続しても同じ結果」の最小形。エージェントは A に報告し、
+    // 検収「どこへ接続しても同じ結果」の最小形。セッションホストは A に報告し、
     // 利用者のブラウザは B に繋がっている、という配置にあたる
     for backend in common::backends("cluster-fanout").await {
         let broker = MemoryBroker::new();

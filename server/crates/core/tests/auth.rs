@@ -189,7 +189,7 @@ async fn 短すぎるパスワードは登録できない() {
 ///
 /// [`common::TestServer`] を使わないのは、**セルフホストには PC 側が無い**ため
 /// （PTY もマネージャも持たない）。ここで見たいのは入口の鍵だけなので、
-/// エージェントの居ない最小の組み立てで足りる。
+/// セッションホストの居ない最小の組み立てで足りる。
 struct Selfhost {
     addr: SocketAddr,
     db: sea_orm::DatabaseConnection,

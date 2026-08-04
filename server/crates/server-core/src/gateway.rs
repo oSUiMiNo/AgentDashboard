@@ -1,4 +1,4 @@
-//! エージェントの受け口（セルフホスト化設計§4-1・§6）。
+//! セッションホストの受け口（セルフホスト化設計§4-1・§6）。
 //!
 //! `GET /agent/ws` に PC 側から張られる WebSocket を受け、報告を記録層（[`crate::registry`]）
 //! へ流し、ブラウザからの指示をそちらへ中継する。**接続の向きは常に PC → サーバ**なので、
@@ -6,7 +6,7 @@
 //!
 //! # 入口で3つ確かめる
 //!
-//! 1. **版**（`Sec-WebSocket-Protocol` が [`A2S_PROTOCOL`] を含むか）。エージェントは
+//! 1. **版**（`Sec-WebSocket-Protocol` が [`A2S_PROTOCOL`] を含むか）。セッションホストは
 //!    利用者の PC にあり更新が遅れがちなので、**噛み合わない版は upgrade の前に断る**。
 //!    繋がってから解釈できずに黙る、が一番たちが悪い
 //! 2. **トークン**（`Authorization: Bearer`）。ハッシュ一致で `pairing_tokens` を引く
@@ -49,10 +49,10 @@ use std::{
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
-/// エージェント1接続あたりの送信待ち行列（メッセージ数）。
+/// セッションホスト1接続あたりの送信待ち行列（メッセージ数）。
 ///
 /// 溢れたら**捨てる**。ここを流れるのは指示（`SendInput` 等）で、届かなかったことは
-/// 利用者にすぐ分かる（画面が動かない）。待って詰まらせると、他のエージェントへの
+/// 利用者にすぐ分かる（画面が動かない）。待って詰まらせると、他のセッションホストへの
 /// 中継まで巻き添えになる。履歴の欠落は逆側（A→S）の ack が守るので、ここには影響しない。
 const OUTBOUND_QUEUE_MESSAGES: usize = 256;
 
@@ -137,7 +137,7 @@ pub struct Capabilities {
     pub available_modes: Vec<PermissionMode>,
     #[serde(default)]
     pub always_bypass_permissions: bool,
-    /// その PC のエージェントの版（CICD設計§16）。
+    /// その PC のセッションホストの版（CICD設計§16）。
     ///
     /// 名乗りには最初から載っていたが、ログへ出て消えていた。**ここへ写すだけで
     /// 画面まで運べる**——この列はサーバが解釈しない JSON なので、記録の形も
@@ -155,7 +155,7 @@ pub struct Capabilities {
 ///
 /// 生の入力（キー打鍵）は JSON に包まずバイナリで運ぶ約束（設計§4-3）なので、
 /// `ServerToAgent` には入る場所が無い。**そのために A2S へ変種を足すと、
-/// エージェントが知らなくてよいものを共有境界へ持ち込む**ことになる。ここは
+/// セッションホストが知らなくてよいものを共有境界へ持ち込む**ことになる。ここは
 /// サーバ同士の内輪の取り決めなので、server-core の中で完結させる。
 ///
 /// 生入力は数十バイトなので base64 で内包してよい（設計§9-2 の但し書き。
@@ -179,7 +179,7 @@ pub enum AgentCommand {
 ///
 /// # 誰が見ているかを数えるのはサーバの仕事
 ///
-/// エージェントは「送れ」と言われたぶんだけ送る。**誰も見ていないときに止める**判断は、
+/// セッションホストは「送れ」と言われたぶんだけ送る。**誰も見ていないときに止める**判断は、
 /// 視聴者を知っている側——つまりここ——にしか下せない（要件5-2）。
 ///
 /// 数えるのを個数ではなく **client_id の集合**にしてあるのは、同じ端末を開き直したとき
@@ -694,7 +694,7 @@ impl AgentHub {
 
     /// 繋ぎ直した PC へ、いま見られているカードの購読を出し直す（§6-4）。
     ///
-    /// エージェント側は切れた時点で全部止めている——**誰が見ているかを知っているのは
+    /// セッションホスト側は切れた時点で全部止めている——**誰が見ているかを知っているのは
     /// こちら**なので、こちらから頼み直さないと画面が戻らない。
     fn resubscribe_screens(&self, agent_id: AgentId) {
         let watched: Vec<(CardId, (u16, u16))> = self
@@ -720,7 +720,7 @@ impl AgentHub {
         }
     }
 
-    /// エージェントから届いた画面のフレームを、ブラウザ向けへ移し替えて配る（設計§4-3）。
+    /// セッションホストから届いた画面のフレームを、ブラウザ向けへ移し替えて配る（設計§4-3）。
     ///
     /// やることは**種別の移し替えと通し番号を剥がすこと**だけ。中身（エスケープ列）は
     /// 一切解釈しない——だからこそブラウザ側は1行も変わらない（§7-3）。
@@ -737,7 +737,7 @@ impl AgentHub {
             protocol::frame::FrameKind::ScreenFull | protocol::frame::FrameKind::ScreenDiff
         ) {
             tracing::warn!(
-                "エージェントから送られてよい種別ではありません: {:?}",
+                "セッションホストから送られてよい種別ではありません: {:?}",
                 frame.kind
             );
             return;
@@ -886,7 +886,7 @@ impl AgentHub {
     }
 }
 
-/// ブラウザから見た「PC 側」を、A2S 越しのエージェントへ繋ぐ実装（設計§2-3）。
+/// ブラウザから見た「PC 側」を、A2S 越しのセッションホストへ繋ぐ実装（設計§2-3）。
 ///
 /// ローカルモードの `LocalAgent` と同じ口（[`AgentHost`]）を満たすので、**ブラウザ配信
 /// （[`crate::ws`]）はどちらが向こうに居るかを知らない**。
@@ -1018,7 +1018,7 @@ impl crate::agent::AgentHost for RemoteAgent {
     /// 画面の配信を始める（設計§7-4）。
     ///
     /// 返すスナップショットは**空**である。リモートに「いまの生バイト」は存在せず、
-    /// 画面はエージェントが作って送ってくるものだから——ここで空の 0x03（画面を消せ）を
+    /// 画面はセッションホストが作って送ってくるものだから——ここで空の 0x03（画面を消せ）を
     /// 返しておくと、直後に届く全画面がその上に描かれて辻褄が合う。
     fn subscribe_pty(
         &self,
@@ -1045,7 +1045,7 @@ impl crate::agent::AgentHost for RemoteAgent {
     ///
     /// **古い全画面を渡してはいけない。** その上に新しい差分が乗ると、画面は
     /// 「途中まで古い・途中から新しい」という壊れ方をする。一度消して、
-    /// エージェントに全画面を出し直してもらうのが唯一正しい復帰になる（§7-4 のデシンク）。
+    /// セッションホストに全画面を出し直してもらうのが唯一正しい復帰になる（§7-4 のデシンク）。
     fn pty_snapshot(&self, card_id: CardId) -> Option<bytes::Bytes> {
         let (cols, rows) = self.hub.screen(card_id).size();
         self.hub.request_screen(card_id, cols, rows);
@@ -1095,7 +1095,7 @@ impl crate::agent::AgentHost for RemoteAgent {
         self.hub.remove_viewer(card_id, client_id);
     }
 
-    /// パーサの健康状態は**エージェントから届く**（`ParserStatus`）ので、サーバは
+    /// パーサの健康状態は**セッションホストから届く**（`ParserStatus`）ので、サーバは
     /// 持っていない。購読を始めた瞬間に縮退を知らせることはできないが、次の変化で届く。
     fn parser_state(&self) -> Option<protocol::ws::ParserState> {
         None
@@ -1118,7 +1118,7 @@ impl crate::agent::AgentHost for RemoteAgent {
     }
 }
 
-/// エージェント向けのルート。**ブラウザ向け（[`crate::routes`]）とは別に合成する。**
+/// セッションホスト向けのルート。**ブラウザ向け（[`crate::routes`]）とは別に合成する。**
 ///
 /// 分けてあるのは、セルフホストモードでこの2つが別の経路（リバースプロキシの
 /// 別ロケーション）に置かれうるため（設計§14-2 の「WS が2パス」）。
@@ -1133,9 +1133,9 @@ pub async fn agent_ws_handler(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    // 1. 版。**upgrade の前に断る**ので、古いエージェントは接続の時点で理由を受け取れる
+    // 1. 版。**upgrade の前に断る**ので、古いセッションホストは接続の時点で理由を受け取れる
     if !requests_protocol(&headers, A2S_PROTOCOL) {
-        tracing::warn!("知らない版のエージェントを断りました");
+        tracing::warn!("知らない版のセッションホストを断りました");
         return (
             StatusCode::BAD_REQUEST,
             format!("対応していないプロトコルです（このサーバは {A2S_PROTOCOL}）"),
@@ -1308,7 +1308,7 @@ async fn agent_loop(
     // 全セッションの SessionUpsert が復帰手順（§6-4）で必ず来るので、生きているものは
     // そこで印が戻る
     hub.registry.set_agent_live(agent_id, false);
-    // まだ見られている端末があれば、画面を出し直してもらう（§6-4）。エージェントは
+    // まだ見られている端末があれば、画面を出し直してもらう（§6-4）。セッションホストは
     // 切れた時点で全部止めているので、**こちらから頼まないと画面が戻らない**
     hub.resubscribe_screens(agent_id);
     // 他のインスタンスからも「この PC は繋がっている」と見えるようにする（§9-4）。
@@ -1377,7 +1377,7 @@ async fn next_hello(
             Ok(other) => {
                 tracing::warn!("名乗りより先に別の報告が来ました: {other:?}");
             }
-            Err(err) => tracing::warn!("エージェントの報告を解釈できません: {err}"),
+            Err(err) => tracing::warn!("セッションホストの報告を解釈できません: {err}"),
         }
     }
     None
@@ -1395,9 +1395,9 @@ async fn handle_message(
             let report = match serde_json::from_str::<AgentMessage>(&text) {
                 Ok(report) => report,
                 // 知らない報告で接続ごと落とさない。版交渉を通っているので、
-                // これは「新しいエージェントが増やした知らせ」でありうる
+                // これは「新しいセッションホストが増やした知らせ」でありうる
                 Err(err) => {
-                    tracing::warn!("エージェントの報告を解釈できません: {err}");
+                    tracing::warn!("セッションホストの報告を解釈できません: {err}");
                     return true;
                 }
             };
@@ -1455,7 +1455,7 @@ async fn handle_report(
         }
 
         // **書けたときだけ ack を返す**（設計§6-1）。返さないことが「まだ書けていない」
-        // の合図になり、エージェントは持っているぶんを再送する
+        // の合図になり、セッションホストは持っているぶんを再送する
         AgentMessage::TranscriptBatch {
             batch_id,
             card_id,

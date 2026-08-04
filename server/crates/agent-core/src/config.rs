@@ -1,4 +1,4 @@
-//! エージェント（PC 側）が使う設定（セルフホスト化設計§13-2）。
+//! セッションホスト（PC 側）が使う設定（セルフホスト化設計§13-2）。
 //!
 //! # 2つの入口がある
 //!
@@ -8,7 +8,7 @@
 //! | セルフホスト（分離） | `agent.toml` を [`AgentConfig::load`] が読む |
 //!
 //! フェーズ2 までは前者だけだったので「ファイルは読まない」と書いてあったが、
-//! エージェントが別プロセスになると**読む主体が他に無い**（§21 読み替え8）。
+//! セッションホストが別プロセスになると**読む主体が他に無い**（§21 読み替え8）。
 //! 実行ファイル側に置くと 15 キーの構造体が2つになり、片方だけが古くなる。
 //!
 //! # キーの割り当て
@@ -125,7 +125,7 @@ const DEFAULT_STATUS_LINE_REFRESH_SECS: u64 = 3;
 /// 同じ値を入れる（同居しているため）。
 const DEFAULT_HOOK_PORT: u16 = 0;
 
-/// 設定の既定ファイル名（エージェント単体で動くとき）。
+/// 設定の既定ファイル名（セッションホスト単体で動くとき）。
 pub const DEFAULT_AGENT_FILE_NAME: &str = "agent.toml";
 
 /// 記録と状態を置くフォルダの名前。
@@ -279,7 +279,7 @@ impl Default for AgentConfig {
 }
 
 impl AgentConfig {
-    /// `agent.toml` を読む（セルフホストモードのエージェント）。
+    /// `agent.toml` を読む（セルフホストモードのセッションホスト）。
     ///
     /// 探索順は `explicit`（`--config`）→ カレントの `agent.toml` → 既定値。
     pub fn load(explicit: Option<&Path>) -> anyhow::Result<Self> {
@@ -454,7 +454,7 @@ mod tests {
     fn 雛形は全キーを網羅し既定値と一致する() {
         // 環境変数を触る他のテストと同時に走ると、上書きが混ざって落ちる
         let _lock = env_lock();
-        // `agent.toml.example` は、PC へエージェントを入れる人が最初に読む一覧。
+        // `agent.toml.example` は、PC へセッションホストを入れる人が最初に読む一覧。
         // ここが実装より遅れていると、増えたキーの存在に誰も気づけない
         // （`config.toml.example` 側で実際に起きた）
         let example = include_str!("../../../agent.toml.example");
@@ -623,7 +623,7 @@ mod tests {
         let _lock = env_lock();
         // **保存先は記録へ移ったが、キーは消していない**（持ち出し設計§4）。
         // `deny_unknown_fields` なので、消すとこのキーを書いている利用者の
-        // エージェントが起動しなくなる。ここに書く値は行が無いときの初期値
+        // セッションホストが起動しなくなる。ここに書く値は行が無いときの初期値
         let config =
             AgentConfig::from_toml_str("always_bypass_permissions = true").expect("読めること");
         assert!(config.always_bypass_permissions);

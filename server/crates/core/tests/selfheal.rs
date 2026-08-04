@@ -89,7 +89,7 @@ impl FakeOps {
     /// 別名表の見直しの筋書きを整える。
     ///
     /// 表そのものは worktree の実ファイルを読むので、**中身も置く**。
-    /// `changed` は「エージェントが何を触ったか」の代わり。
+    /// `changed` は「セッションホストが何を触ったか」の代わり。
     fn stage_review(&self, table: &str, changed: &[&str]) {
         let path = self.worktree.join("web/src/lib/models.ts");
         std::fs::create_dir_all(path.parent().expect("親がある")).expect("置き場所を作れること");
@@ -309,7 +309,7 @@ async fn play_repair_agent(server: &TestServer, attempts: u32) {
 ///
 /// [`play_repair_agent`] と同じ作法。**実際に何を変えたかは演じない** ——
 /// 触った範囲は `FakeOps::changed`、表の中身は worktree の実ファイルが持つ。
-/// エージェントの言葉ではなく機械で見る、という設計をテスト側でもなぞっている。
+/// セッションホストの言葉ではなく機械で見る、という設計をテスト側でもなぞっている。
 async fn play_review_agent(server: &TestServer) {
     let card = wait_for_repair_card(server).await;
     let session = server.manager.get(card).expect("見直しセッションが居る");
@@ -510,7 +510,7 @@ async fn 範囲外を触ったらテストの結果によらず不合格にす�
 
 #[tokio::test]
 async fn 落ちているサンプルを消して通そうとしても採用しない() {
-    // 実際の訓練で本物のエージェントがこれをやった。落ちているフィクスチャを消せば
+    // 実際の訓練で本物のセッションホストがこれをやった。落ちているフィクスチャを消せば
     // ゲートは通るが、新しい形式に対応したことにはならない。採りたてのファイルは
     // 追跡対象外なので、消しても git status には出ない（＝範囲の検査では捕まらない）
     let dir = work_dir("sample-deleted");

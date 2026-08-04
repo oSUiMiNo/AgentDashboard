@@ -1,4 +1,4 @@
-//! PC 側エージェントの中身（セルフホスト化設計§1-1）。
+//! セッションホストの中身（セルフホスト化設計§1-1）。
 //!
 //! 実行ファイル（`agentdashboard-agent`）そのものは**配布用のパッケージ**
 //! （`crates/dist`）が持っている。3本の実行ファイルを1つのアーカイブへ入れるには
@@ -38,7 +38,7 @@ use std::{path::PathBuf, sync::Arc};
 #[command(
     name = "agentdashboard-agent",
     version,
-    about = "AgentDashboard の PC 側エージェント"
+    about = "AgentDashboard のセッションホスト"
 )]
 struct Cli {
     /// 設定ファイルのパス。省略時はカレントの agent.toml、それも無ければ既定値
@@ -51,16 +51,16 @@ struct Cli {
 
 /// フックと `statusLine` から呼ばれる転送の口。
 ///
-/// # なぜエージェントが持つのか
+/// # なぜセッションホストが持つのか
 ///
 /// 注入する settings には**この実行ファイル自身**が書き込まれる（`current_exe()`）。
-/// PC に置かれているのは配布されたエージェントだけなので、転送の口をここに持たないと
+/// PC に置かれているのは配布されたセッションホストだけなので、転送の口をここに持たないと
 /// 「注入したコマンドが存在しない」ことになり、フックが1つも届かない。
 ///
 /// 中身はローカルモードの `agentdashboard` と同じもの（`agent_core` の関数）。
 #[derive(Subcommand)]
 enum Command {
-    /// フックから起動され、stdin の JSON をエージェントへ転送する（設計§7）
+    /// フックから起動され、stdin の JSON をセッションホストへ転送する（設計§7）
     ///
     /// 標準出力には何も書かず、失敗しても終了コード 0 で終わる。
     HookPost {
@@ -68,7 +68,7 @@ enum Command {
         #[arg(long, value_name = "URL")]
         url: String,
     },
-    /// 注入した statusLine から起動され、いまのモデルをエージェントへ転送する（設計§4）
+    /// 注入した statusLine から起動され、いまのモデルをセッションホストへ転送する（設計§4）
     ///
     /// `hook-post` と違い、**標準出力にモデルの表示名を書く**（statusLine の標準出力は
     /// 端末の表示になるため）。こちらも失敗しても終了コード 0 で終わる。
@@ -79,7 +79,7 @@ enum Command {
     },
 }
 
-/// PC 側エージェントの入口。
+/// セッションホストの入口。
 #[tokio::main]
 pub async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -206,11 +206,11 @@ pub async fn run() -> anyhow::Result<()> {
 
     // 5. 繋ぎ始める。ここから先は切れても繋ぎ直し続ける（§6-3）
     link.attach(Arc::clone(&manager), offsets);
-    tracing::info!("エージェントを起動しました");
+    tracing::info!("セッションホストを起動しました");
 
     // 常駐する。畳むのは Ctrl+C か、外からの停止
     tokio::signal::ctrl_c().await?;
-    tracing::info!("エージェントを終了します");
+    tracing::info!("セッションホストを終了します");
     Ok(())
 }
 

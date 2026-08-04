@@ -467,7 +467,7 @@ impl Sample {
     /// 元の中身に戻す。
     ///
     /// 戻すのをこちら側でやるのは、**消した本人には戻せない**から。採取したサンプルの
-    /// 中身はエージェントの手元に無く、「元に戻して」と言うだけでは詰んでしまう。
+    /// 中身はセッションホストの手元に無く、「元に戻して」と言うだけでは詰んでしまう。
     fn restore(&self) -> bool {
         let Some(bytes) = &self.bytes else {
             return false;
@@ -539,7 +539,7 @@ async fn repair_loop(
             break;
         }
 
-        // ここから先はエージェントの言い分ではなく、こちらで確かめた事実だけを使う
+        // ここから先はセッションホストの言い分ではなく、こちらで確かめた事実だけを使う
         selfheal.notify(SelfhealPhase::Verifying, None);
         let worktree_owned = worktree.to_path_buf();
         let changed = blocking(ops, move |ops| ops.changed_files(&worktree_owned))

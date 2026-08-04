@@ -1179,7 +1179,7 @@ async fn 注入したstatusLineから本物のCLIがモデルを名乗る() {
 // この経路を端から端まで通さないと「リモートから操作できる」は確かめられない。
 // 費用を抑えるためモデルは haiku に固定する（利用者の判断）。
 
-/// リモート構成の一式（サーバ＋エージェントを別プロセスで起こす）。
+/// リモート構成の一式（サーバ＋セッションホストを別プロセスで起こす）。
 struct RemotePair {
     dir: WorkDir,
     addr: std::net::SocketAddr,
@@ -1261,7 +1261,7 @@ impl RemotePair {
                 settings = dir.path().join("agent/claude-settings.json").display(),
             ),
         )
-        .expect("エージェントの設定を書けること");
+        .expect("セッションホストの設定を書けること");
 
         let agent = Command::new(testkit::binary_path("agentdashboard-agent"))
             .arg("--config")
@@ -1271,7 +1271,7 @@ impl RemotePair {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .expect("エージェントを起動できること");
+            .expect("セッションホストを起動できること");
 
         let pair = Self {
             dir,
@@ -1661,9 +1661,9 @@ async fn リモートの画面越しに_rewind_のメニューを操作できる
 
 #[tokio::test]
 #[ignore = "本物の claude を起動し、アカウントのクォータを消費する（make test-cli）"]
-async fn エージェント経由でも注入したstatusLineからモデルが名乗られる() {
+async fn セッションホスト経由でも注入したstatusLineからモデルが名乗られる() {
     // テスト計画フェーズ4「実CLI statusLine 実測（agent 経由）」。
-    // **注入されるコマンドは実行ファイル自身**（§21）なので、エージェントとして動くと
+    // **注入されるコマンドは実行ファイル自身**（§21）なので、セッションホストとして動くと
     // `agentdashboard-agent model-post` が起動する。ローカルモードで通っていても、
     // こちらで転送の口を持っていなければ1つも届かない
     let pair =
@@ -1688,7 +1688,7 @@ async fn エージェント経由でも注入したstatusLineからモデルが�
         .await;
     browser.accept_trust_if_any(card.card_id).await;
 
-    // statusLine → model-post → エージェント → A2S → サーバ、と渡ってカードに載る
+    // statusLine → model-post → セッションホスト → A2S → サーバ、と渡ってカードに載る
     let named = browser
         .wait_for_card("モデルを名乗る", |meta| meta.model.is_some())
         .await;
