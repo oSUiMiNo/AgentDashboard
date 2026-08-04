@@ -30,6 +30,7 @@ pub mod model_catalog;
 pub mod model_post;
 pub mod offsets;
 pub mod parser;
+pub mod proc;
 pub mod selfheal;
 pub mod session;
 pub mod settings;

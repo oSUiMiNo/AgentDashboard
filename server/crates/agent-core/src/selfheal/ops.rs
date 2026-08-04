@@ -11,9 +11,10 @@
 //! 差し替えるのは**外の世界に出る部分だけ**で、順序・判定・差し替え・再開位置の扱いは
 //! 本物を通す。そこが壊れやすい場所だからである。
 
+use crate::proc::{Outcome, run};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
 
 /// ゲート（ゴールデンテスト）の結果。
 #[derive(Debug, Clone)]
@@ -418,73 +419,6 @@ impl SelfhealOps for HostOps {
             .into_result("git commit")?;
         Ok(())
     }
-}
-
-/// コマンド1回の結果。
-struct Outcome {
-    success: bool,
-    output: String,
-}
-
-impl Outcome {
-    fn failed(output: String) -> Self {
-        Self {
-            success: false,
-            output,
-        }
-    }
-
-    fn into_result(self, what: &str) -> anyhow::Result<String> {
-        if self.success {
-            Ok(self.output)
-        } else {
-            anyhow::bail!("{what} に失敗しました: {}", self.output)
-        }
-    }
-}
-
-/// 標準出力と標準エラーをまとめて受け取り、上限時間で打ち切る。
-///
-/// 打ち切りを入れているのは、返らないコマンドが1つあるだけで自己修復が
-/// 「作業中のまま永久に終わらない」状態になるため。
-fn run(command: &mut Command, timeout: Duration) -> Outcome {
-    let child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
-    let mut child = match child {
-        Ok(child) => child,
-        Err(error) => return Outcome::failed(format!("起動できません: {error}")),
-    };
-
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let output = child.wait_with_output().map(collect).unwrap_or_default();
-                return Outcome {
-                    success: status.success(),
-                    output,
-                };
-            }
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Outcome::failed(format!("{timeout:?} を過ぎても終わりませんでした"));
-                }
-                std::thread::sleep(Duration::from_millis(200));
-            }
-            Err(error) => return Outcome::failed(format!("待ち受けに失敗しました: {error}")),
-        }
-    }
-}
-
-fn collect(output: std::process::Output) -> String {
-    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-    text.push_str(&String::from_utf8_lossy(&output.stderr));
-    text
 }
 
 fn claude_version(program: &str) -> anyhow::Result<String> {
