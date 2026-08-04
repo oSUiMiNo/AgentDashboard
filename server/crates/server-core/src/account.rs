@@ -13,6 +13,7 @@
 //! `revoked_at` を立てるだけだと、既に繋がっている PC は次に切れるまで繋がり続ける。
 //! それでは「外した」と言えないので、立てた直後にその接続を畳む（§8-4）。
 
+use crate::gateway::Capabilities;
 use crate::{
     auth::Identity,
     db::{self, entity, pairing},
@@ -61,6 +62,11 @@ pub struct AgentView {
     /// **いま繋がっているか。** DB には持たない（落ちた瞬間の値が残るため。§3-2）ので、
     /// 接続の集まりから都度かぶせる
     pub connected: bool,
+    /// その PC のエージェントの版（CICD設計§16）。名乗っていなければ `None`。
+    ///
+    /// 見せるのは、**危ない組み合わせに気づけるようにする**ため。サーバのほうが古いと、
+    /// 必須の項目が1つ増えるだけで報告全体が解けなくなり、カードが1枚も出なくなる。
+    pub version: Option<String>,
 }
 
 async fn list_tokens(
@@ -198,6 +204,12 @@ pub async fn agents_of(
         .into_iter()
         .map(|row| AgentView {
             connected: connected.contains(&row.id),
+            // 名乗りは**この行と一緒に引けている**ので、聞き直さない（CICD設計§16）
+            version: row
+                .capabilities
+                .clone()
+                .and_then(|value| serde_json::from_value::<Capabilities>(value).ok())
+                .and_then(|capabilities| capabilities.agent_version),
             id: row.id,
             name: row.name,
             last_seen_at: row.last_seen_at,

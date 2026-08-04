@@ -558,6 +558,14 @@ async fn ローカルでは同じ機械からだけ版を触れる() {
         "LAN の向こうからは押せない"
     );
 
+    // **鍵の外側にサーバの版が載る**（CICD設計§11）。開きっぱなしのタブが、繋ぎ直した
+    // ときに「画面のほうが古い」と気づけるようにするための唯一の手がかり
+    assert_eq!(
+        me(&here).await["version"],
+        env!("CARGO_PKG_VERSION"),
+        "サーバの版が鍵の外側から読めない"
+    );
+
     for (method, path, payload) in WRITE_ROUTES {
         let (status, body) = there.request(method, path, payload).await;
         assert_eq!(status, 403, "{method} {path} が断られていない: {body}");

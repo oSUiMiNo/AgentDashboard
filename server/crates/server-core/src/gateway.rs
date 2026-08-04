@@ -137,6 +137,16 @@ pub struct Capabilities {
     pub available_modes: Vec<PermissionMode>,
     #[serde(default)]
     pub always_bypass_permissions: bool,
+    /// その PC のエージェントの版（CICD設計§16）。
+    ///
+    /// 名乗りには最初から載っていたが、ログへ出て消えていた。**ここへ写すだけで
+    /// 画面まで運べる**——この列はサーバが解釈しない JSON なので、記録の形も
+    /// A2S の形も変えずに済む。
+    ///
+    /// 古い行には無いので `Option`。**「まだ名乗っていない」と「持っていない」を
+    /// 同じ形で表す**（どちらも画面では「不明」）。
+    #[serde(default)]
+    pub agent_version: Option<String>,
 }
 
 /// 他インスタンスから回ってくる、PC への指示（設計§9-2 の `agent:{id}:cmd`）。
@@ -1253,6 +1263,8 @@ async fn agent_loop(
     let capabilities = Capabilities {
         available_modes: available_modes.clone(),
         always_bypass_permissions,
+        // 名乗りには最初から載っている。**ここまで来て捨てていた**（CICD設計§16）
+        agent_version: Some(agent_version.clone()),
     };
     match serde_json::to_value(&capabilities) {
         Ok(value) => {

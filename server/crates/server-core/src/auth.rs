@@ -257,6 +257,16 @@ pub struct AuthView {
     pub setup_open: bool,
     /// 接続元が 127.0.0.1 か（LAN パスワードの登録欄を出すかの判断）
     pub from_loopback: bool,
+    /// **いま応答しているサーバの版**（CICD設計§11）。
+    ///
+    /// 画面はコンパイル時に実行ファイルへ焼き込まれるので、版を切り替えれば画面も
+    /// 変わる。ところが開きっぱなしのタブは古い画面のまま新しいサーバと喋り続け、
+    /// **知らない知らせは黙って捨てられる**——壊れ方が「エラーが出る」ではなく
+    /// 「一部が黙って更新されなくなる」になる。
+    ///
+    /// **鍵の外側の口に載せる**のが要点。繋ぎ直すたびに読めるので、変わっていたら
+    /// 読み込み直しを促せる（勝手には読み込み直さない。書きかけの指示が消えるため）。
+    pub version: String,
 }
 
 async fn api_me(
@@ -276,7 +286,15 @@ async fn api_me(
         is_admin: identity.as_ref().is_some_and(|identity| identity.is_admin),
         setup_open: auth.mode == AuthMode::Account && auth.setup_open().await,
         from_loopback,
+        version: running_version(),
     })
+}
+
+/// いま応答しているサーバの版。
+///
+/// 5つの応答すべてに同じものを載せるので、綴りは1箇所に置く。
+fn running_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
 }
 
 /// `POST /api/login` の本文。
@@ -348,6 +366,7 @@ async fn login_lan(
         is_admin: false,
         setup_open: false,
         from_loopback: false,
+        version: running_version(),
     }))
 }
 
@@ -389,6 +408,7 @@ async fn login_account(
         is_admin: row.is_admin,
         setup_open: false,
         from_loopback: false,
+        version: running_version(),
     }))
 }
 
@@ -406,6 +426,7 @@ async fn api_logout(
         is_admin: false,
         setup_open: auth.mode == AuthMode::Account && auth.setup_open().await,
         from_loopback: false,
+        version: running_version(),
     }))
 }
 
@@ -503,6 +524,7 @@ async fn api_setup(
         is_admin: true,
         setup_open: false,
         from_loopback: false,
+        version: running_version(),
     }))
 }
 

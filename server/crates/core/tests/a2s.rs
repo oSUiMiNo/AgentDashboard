@@ -816,6 +816,32 @@ async fn wait_for_model_table(
 }
 
 #[tokio::test]
+async fn PC_の版が名乗りから一覧まで運ばれる() {
+    // **A2S の形も記録の形も変えていない**（CICD設計§16）。版は名乗りに最初から
+    // 載っていて、ログへ出て消えていただけ——運び忘れていないかだけを見る。
+    //
+    // 見せるのは、危ない組み合わせに気づけるようにするため。サーバのほうが古いと、
+    // 必須の項目が1つ増えるだけで報告全体が解けなくなり、カードが1枚も出なくなる
+    let a2s = A2s::start("agent-version").await;
+
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    loop {
+        let agents = server_core::account::agents_of(&a2s.hub, a2s.account_id)
+            .await
+            .expect("PC の一覧を読めること");
+        if let Some(version) = agents.first().and_then(|agent| agent.version.clone()) {
+            assert_eq!(version, env!("CARGO_PKG_VERSION"), "別の版を名乗っている");
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{TIMEOUT:?} 以内に PC の版が運ばれてきませんでした: {agents:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
 async fn 同期間隔の変更は次の接続を待たずに効く() {
     // 設定を変えたのに「次に繋ぎ直すまで古い間隔で送り続ける」のでは、変えた意味が
     // 半分無くなる（設計§13-3）。**間隔が長い状態から始めて、押し込んだら届く**ことを見る
