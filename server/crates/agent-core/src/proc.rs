@@ -102,7 +102,11 @@ mod tests {
             Duration::from_millis(300),
         );
         assert!(!outcome.success);
-        assert!(outcome.output.contains("過ぎても終わりませんでした"), "{}", outcome.output);
+        assert!(
+            outcome.output.contains("過ぎても終わりませんでした"),
+            "{}",
+            outcome.output
+        );
     }
 
     #[test]
@@ -112,7 +116,11 @@ mod tests {
             Duration::from_secs(10),
         );
         assert!(!outcome.success);
-        assert!(outcome.output.contains("起動できません"), "{}", outcome.output);
+        assert!(
+            outcome.output.contains("起動できません"),
+            "{}",
+            outcome.output
+        );
     }
 
     #[test]

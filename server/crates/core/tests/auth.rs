@@ -522,7 +522,10 @@ async fn ローカルでは同じ機械からだけ版を触れる() {
         common::TestServer::start_from(agentdashboard_core::config::Config::default(), lan_peer())
             .await;
     let (status, body) = there.get("/api/versions").await;
-    assert_eq!(status, 200, "見るのは誰でもよい（見えないと押せないことも分からない）");
+    assert_eq!(
+        status, 200,
+        "見るのは誰でもよい（見えないと押せないことも分からない）"
+    );
     assert_eq!(
         versions(&body).await["editable"],
         false,
@@ -531,7 +534,10 @@ async fn ローカルでは同じ機械からだけ版を触れる() {
 
     let (status, body) = there.request("DELETE", "/api/versions/0.0.1", None).await;
     assert_eq!(status, 403, "断られていない: {body}");
-    assert!(body.contains("127.0.0.1"), "どこからなら通るかを書く: {body}");
+    assert!(
+        body.contains("127.0.0.1"),
+        "どこからなら通るかを書く: {body}"
+    );
 }
 
 #[tokio::test]

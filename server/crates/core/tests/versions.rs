@@ -31,7 +31,9 @@ fn write_stored_version(state_dir: &Path, version: &str) {
     for name in version::BINARIES {
         let path = dir.join(name);
         let body = if name == "transcript-parser" {
-            format!("#!/bin/sh\nprintf '{{\"ev\":\"hello\",\"parser_version\":\"{version}\"}}\\n'\n")
+            format!(
+                "#!/bin/sh\nprintf '{{\"ev\":\"hello\",\"parser_version\":\"{version}\"}}\\n'\n"
+            )
         } else {
             format!("#!/bin/sh\necho '{name} {version}'\n")
         };
@@ -103,7 +105,11 @@ async fn 選んでいる版は一覧の外にも出る() {
     write_stored_version(&state_dir, "0.1.1");
     version::write_pointer(
         &state_dir,
-        Some(&version::versions_dir(&state_dir).join("0.1.1").join("agentdashboard")),
+        Some(
+            &version::versions_dir(&state_dir)
+                .join("0.1.1")
+                .join("agentdashboard"),
+        ),
     );
 
     let view = view(&server).await;
@@ -118,7 +124,11 @@ async fn 消すと一覧から消えてポインタも外れる() {
     write_stored_version(&state_dir, "0.1.1");
     version::write_pointer(
         &state_dir,
-        Some(&version::versions_dir(&state_dir).join("0.1.1").join("agentdashboard")),
+        Some(
+            &version::versions_dir(&state_dir)
+                .join("0.1.1")
+                .join("agentdashboard"),
+        ),
     );
 
     let (status, body) = server.request("DELETE", "/api/versions/0.1.1", None).await;

@@ -527,7 +527,9 @@ pub fn list_versions(state_dir: &Path, source: Option<&Path>) -> Vec<protocol::V
         // 選ぶのはパスでも、**人が見て選ぶのは名前**なので、ここは断る側へ倒す
         let reason = match versions_agree(&dir) {
             Ok(actual) if actual == named => None,
-            Ok(actual) => Some(format!("中身は {actual} です（フォルダ名と食い違っています）")),
+            Ok(actual) => Some(format!(
+                "中身は {actual} です（フォルダ名と食い違っています）"
+            )),
             Err(reason) => Some(reason),
         };
         entries.push(entry_of(
@@ -666,7 +668,8 @@ pub fn snapshot(state_dir: &Path, source: &Path) -> anyhow::Result<Option<Versio
 /// 作りになっている（実測）。途中で死ぬと残骸が入ったまま公開されてしまい、画面へ出す
 /// 使用量も嘘になる。[`versions_agree`] は3本の在・不在しか見ないので、ここで数える。
 fn only_binaries(dir: &Path) -> Result<(), String> {
-    let entries = std::fs::read_dir(dir).map_err(|error| format!("置き場所を読めません: {error}"))?;
+    let entries =
+        std::fs::read_dir(dir).map_err(|error| format!("置き場所を読めません: {error}"))?;
     let mut extra: Vec<String> = entries
         .flatten()
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
@@ -775,8 +778,8 @@ pub fn remove_version(state_dir: &Path, version: &VersionId) -> Result<(), Strin
         return Err("いま走っている版は消せません".to_string());
     }
 
-    let selected =
-        read_pointer(state_dir).is_some_and(|pointer| real_path(&pointer).starts_with(real_path(&dir)));
+    let selected = read_pointer(state_dir)
+        .is_some_and(|pointer| real_path(&pointer).starts_with(real_path(&dir)));
     if selected {
         write_pointer(state_dir, None);
     }
@@ -882,7 +885,10 @@ fn read_lock(state_dir: &Path) -> Option<Lock> {
 /// ことをその場で伝えるほうがよい。
 pub fn acquire_lock(state_dir: &Path) -> Result<(), String> {
     if let Some(existing) = read_lock(state_dir) {
-        if !lock_is_stale(probe_holder(&existing), now_ms().saturating_sub(existing.at)) {
+        if !lock_is_stale(
+            probe_holder(&existing),
+            now_ms().saturating_sub(existing.at),
+        ) {
             return Err("いま別の版の操作が動いています".to_string());
         }
     }
@@ -1099,7 +1105,11 @@ mod tests {
         let entries = list_versions(&dir, None);
 
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].version, VersionId::new("0.2.0"), "名前は名前のまま");
+        assert_eq!(
+            entries[0].version,
+            VersionId::new("0.2.0"),
+            "名前は名前のまま"
+        );
         assert!(!entries[0].usable);
         assert!(
             entries[0]
@@ -1346,7 +1356,9 @@ mod tests {
         let path = dir.join(name);
         // パーサだけ `--version` を持たず、起こすと1行目に名乗る（設計§20-2）
         let body = if name == "transcript-parser" {
-            format!("#!/bin/sh\nprintf '{{\"ev\":\"hello\",\"parser_version\":\"{version}\"}}\\n'\n")
+            format!(
+                "#!/bin/sh\nprintf '{{\"ev\":\"hello\",\"parser_version\":\"{version}\"}}\\n'\n"
+            )
         } else {
             format!("#!/bin/sh\necho '{name} {version}'\n")
         };
@@ -1439,7 +1451,10 @@ mod tests {
         };
         let error = install_version(&state, &ops, &VersionId::new("0.2.0")).unwrap_err();
         assert!(error.contains("3本のほかに残っています"), "{error}");
-        assert!(error.contains("tmp.XXXXXXXXXX"), "残骸を名指ししていない: {error}");
+        assert!(
+            error.contains("tmp.XXXXXXXXXX"),
+            "残骸を名指ししていない: {error}"
+        );
         assert!(!versions_dir(&state).join("0.2.0").exists());
         assert!(!versions_dir(&state).join(".staging-0.2.0").exists());
     }
@@ -1478,7 +1493,10 @@ mod tests {
         install_version(&state, &FakeOps::new(), &VersionId::new("0.2.0")).unwrap();
         let error = install_version(&state, &FakeOps::new(), &VersionId::new("0.2.0")).unwrap_err();
         assert!(error.contains("すでに保管庫にあります"), "{error}");
-        assert!(error.contains("先に消して"), "次の一手を書いていない: {error}");
+        assert!(
+            error.contains("先に消して"),
+            "次の一手を書いていない: {error}"
+        );
     }
 
     #[test]
@@ -1517,7 +1535,9 @@ mod tests {
             source_dir_from(
                 None,
                 Some("/home/x/.local/bin/agentdashboard".to_string()),
-                Some(PathBuf::from("/home/x/.local/state/agentdashboard/versions/0.2.0/agentdashboard")),
+                Some(PathBuf::from(
+                    "/home/x/.local/state/agentdashboard/versions/0.2.0/agentdashboard"
+                )),
             ),
             Some(PathBuf::from("/home/x/.local/bin")),
             "乗り換え前の入口の隣を見る"

@@ -609,7 +609,9 @@ mod スキーマの名前 {
     use sea_orm::ConnectionTrait as _;
 
     /// 「適用済みだが、この実行ファイルは知らない」形を1件だけ作る。
-    async fn 知らないものを適用済みにする(db: &sea_orm::DatabaseConnection) -> String {
+    async fn 知らないものを適用済みにする(
+        db: &sea_orm::DatabaseConnection,
+    ) -> String {
         let unknown = "m99999999_000099_知らない形".to_string();
         db.execute_unprepared(&format!(
             "INSERT INTO seaql_migrations (version, applied_at) VALUES ('{unknown}', 0)"

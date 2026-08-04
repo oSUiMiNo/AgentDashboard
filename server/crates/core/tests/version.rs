@@ -285,7 +285,11 @@ fn 形の名前は設定が壊れていても答えられる() {
     let broken = fixture.dir.join("broken.toml");
     std::fs::write(&broken, "知らないキー = 1\n").unwrap();
 
-    let out = fixture.run(&["--config".as_ref(), broken.as_os_str(), "migrations".as_ref()]);
+    let out = fixture.run(&[
+        "--config".as_ref(),
+        broken.as_os_str(),
+        "migrations".as_ref(),
+    ]);
 
     assert!(
         out.status.success(),
@@ -293,7 +297,8 @@ fn 形の名前は設定が壊れていても答えられる() {
         text_of(&out)
     );
     assert!(
-        String::from_utf8_lossy(&out.stdout).starts_with(agentdashboard_core::cli::SCHEMA_NAMES_MARKER),
+        String::from_utf8_lossy(&out.stdout)
+            .starts_with(agentdashboard_core::cli::SCHEMA_NAMES_MARKER),
         "目印が出ていない:\n{}",
         text_of(&out)
     );
@@ -613,7 +618,10 @@ fn 起動できない行き先は断る() {
 
     let refused = agentdashboard_core::gate::ask(&dead, None).expect_err("通してしまった");
     assert!(refused.contains("起動できません"), "理由: {refused}");
-    assert!(refused.contains("ライブラリ"), "行き先の言い分を混ぜる: {refused}");
+    assert!(
+        refused.contains("ライブラリ"),
+        "行き先の言い分を混ぜる: {refused}"
+    );
 }
 
 #[test]

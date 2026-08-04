@@ -228,7 +228,8 @@ impl VersionOps for HostOps {
         );
         let result = outcome.into_result("献立表の取得").and_then(|_| {
             // curl は失敗しても空のファイルを作る。**中身が読めることまで確かめる**
-            std::fs::read_to_string(&out).map_err(|error| anyhow::anyhow!("献立表を開けません: {error}"))
+            std::fs::read_to_string(&out)
+                .map_err(|error| anyhow::anyhow!("献立表を開けません: {error}"))
         });
         let _ = std::fs::remove_file(&out);
         result
@@ -248,7 +249,10 @@ impl VersionOps for HostOps {
         );
         if !fetch.success {
             let _ = std::fs::remove_file(&script);
-            return Outcome::failed(format!("インストーラを取ってこられません: {}", fetch.output));
+            return Outcome::failed(format!(
+                "インストーラを取ってこられません: {}",
+                fetch.output
+            ));
         }
 
         let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());
@@ -444,7 +448,11 @@ pub fn mark_notified(state_dir: &Path, version: &VersionId) {
 ///
 /// 取ってくることも入れ替えることもしない。読めなかったとき（回線が無い等）は
 /// **記録に触らない**——前に読めた値を消すと、画面から「最新版」が理由もなく消える。
-pub fn check_once(state_dir: &Path, ops: &dyn VersionOps, now: Timestamp) -> anyhow::Result<Latest> {
+pub fn check_once(
+    state_dir: &Path,
+    ops: &dyn VersionOps,
+    now: Timestamp,
+) -> anyhow::Result<Latest> {
     let json = ops.fetch_manifest()?;
     let latest = parse_latest(&json, target_triple().as_deref())
         .map_err(|reason| anyhow::anyhow!("{reason}"))?;
@@ -551,7 +559,12 @@ mod tests {
     #[test]
     fn curlの引数に検証を切る指定を混ぜない() {
         let args = curl_args("https://example.test/x", Path::new("/tmp/x"));
-        for forbidden in ["-k", "--insecure", "--no-check-certificate", "--proxy-insecure"] {
+        for forbidden in [
+            "-k",
+            "--insecure",
+            "--no-check-certificate",
+            "--proxy-insecure",
+        ] {
             assert!(
                 !args.iter().any(|arg| arg == forbidden),
                 "TLS の検証を切る指定が混ざっている: {forbidden}"
@@ -597,7 +610,10 @@ mod tests {
             "走査に拾われる名前になっている: {name}"
         );
         // 置き場所そのものの中には落とさない（後条件の「3本だけ」に引っかかる）
-        assert_eq!(path.parent(), Path::new("/state/versions/.staging-0.2.0").parent());
+        assert_eq!(
+            path.parent(),
+            Path::new("/state/versions/.staging-0.2.0").parent()
+        );
     }
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -662,7 +678,11 @@ mod tests {
         assert!(due(&notice, 1_000, CHECK_INTERVAL_MS));
 
         notice.checked_at = 1_000;
-        assert!(!due(&notice, 1_000 + CHECK_INTERVAL_MS - 1, CHECK_INTERVAL_MS));
+        assert!(!due(
+            &notice,
+            1_000 + CHECK_INTERVAL_MS - 1,
+            CHECK_INTERVAL_MS
+        ));
         assert!(due(&notice, 1_000 + CHECK_INTERVAL_MS, CHECK_INTERVAL_MS));
     }
 
@@ -724,7 +744,10 @@ mod tests {
     #[test]
     fn 道具が無い窓口は必ず失敗を返す() {
         let ops = Unavailable::new("curl がありません");
-        assert_eq!(ops.unavailable_reason().as_deref(), Some("curl がありません"));
+        assert_eq!(
+            ops.unavailable_reason().as_deref(),
+            Some("curl がありません")
+        );
         assert!(ops.fetch_manifest().is_err());
         let outcome = ops.install(&VersionId::new("0.2.0"), Path::new("/tmp/x"));
         assert!(!outcome.success);

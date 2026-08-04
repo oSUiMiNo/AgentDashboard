@@ -58,7 +58,9 @@ fn run(target: &Path, args: &[&std::ffi::OsStr]) -> Result<std::process::Output,
 fn why(output: &std::process::Output) -> String {
     let text = String::from_utf8_lossy(&output.stderr);
     let line = text.lines().find(|line| !line.trim().is_empty());
-    line.unwrap_or("理由を出さずに終わりました").trim().to_string()
+    line.unwrap_or("理由を出さずに終わりました")
+        .trim()
+        .to_string()
 }
 
 /// 行き先の実行ファイルに聞く（設計§9 の3つ）。
@@ -148,13 +150,19 @@ mod tests {
         let Verdict::Refused { reason } = verdict else {
             panic!("断っていない: {verdict:?}");
         };
-        assert!(reason.contains("m2_あとから"), "何が引っかかったか: {reason}");
+        assert!(
+            reason.contains("m2_あとから"),
+            "何が引っかかったか: {reason}"
+        );
     }
 
     #[test]
     fn 行き先が全部知っていれば通す() {
         assert_eq!(
-            judge(&答え(Some(&["m1_init", "m2_あとから"])), &["m1_init".to_string()]),
+            judge(
+                &答え(Some(&["m1_init", "m2_あとから"])),
+                &["m1_init".to_string()]
+            ),
             Verdict::Ready,
             "行き先のほうが多く知っているのは前へ進むだけ"
         );
