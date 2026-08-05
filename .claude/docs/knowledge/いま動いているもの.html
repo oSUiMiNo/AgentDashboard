@@ -37,7 +37,7 @@
 <p class="lead">
   AgentDashboard に関係して、この機械や外で<strong>起動しっぱなしになっているもの</strong>の一覧。
   「どの URL がどれを指しているか」を取り違えると原因追跡が丸ごと空振りするので、そこを中心に書いてある。
-  <br>最終更新：2026-08-06（ダッシュボード3台は 0.1.6。<strong>セッションホストだけ 0.1.5 のまま走っている</strong>）
+  <br>最終更新：2026-08-06（4つとも 0.1.6）
 </p>
 
 <h2>先に用語</h2>
@@ -140,9 +140,9 @@
   <tr>
     <td>セッションホスト<span class="mark">▽</span></td>
     <td>— （PC 名 <code>OMEN</code>）</td>
-    <td><span class="tag t-old">0.1.5</span><br><small><strong>ここだけ古い</strong></small></td>
+    <td><span class="tag t-ok">0.1.6</span></td>
     <td><strong>AWS へ繋いでいる</strong>（<code>dash.underschaft.com</code>）。設定は <code>~/agentdashboard-agent/agent.toml</code>、ログは同じ場所の <code>run.log</code>。
-        <strong>起こしたのが版を上げる前（8/5 05:11）なので、走っているのは 0.1.5 のコード。</strong>ディスク上のファイルは 0.1.6 になっているが、<strong>起こし直していないので効いていない</strong>——このホストの子として<strong>本物の claude が走っている</strong>ので、落とすと道連れになる。入れ替えるのはその作業が終わってから。
+        <strong>ここを起こし直すと、抱えている claude が道連れになる。</strong>版を上げたら入れ替えないと、サーバだけ新しくなって<strong>フォルダを覗く口が「版が古い」で断られ続ける</strong>（実際に踏んだ）。<code>agent_id</code> はペアリングトークンから決まるので、<strong>起こし直しても同じ PC のまま</strong>——枠は孤児にならない。
         記録の置き場所は <code>~/agentdashboard-agent/state</code>——<strong>8787 と分けてある</strong>（既定のままだと同じ場所を取り合う）。
         <strong>自己修復は切ってある</strong>（8787 が担当。2つ動かすと本物の claude を無人で2重に起こす）</td>
   </tr>
