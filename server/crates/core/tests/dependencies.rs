@@ -87,7 +87,7 @@ fn 配布用の入口は呼ぶだけになっている() {
     // 効かないなら狭める。入口が**呼び出しの1行だけ**であるうちは、そこへ書ける
     // ロジックが存在しない——境界の外に立っているのは1行であって、コードではない。
     // ここが緩むと、たとえば配るセッションホストの入口からサーバ側の関数を呼べてしまい、
-    // 「配布バイナリを軽く保つ」（`crates/agent/Cargo.toml`）が黙って破れる。
+    // 「配布バイナリを軽く保つ」（`crates/session-host/Cargo.toml`）が黙って破れる。
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(DIST_BINS);
 
     let mut found: Vec<String> = std::fs::read_dir(&dir)

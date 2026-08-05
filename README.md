@@ -424,7 +424,7 @@ server/                Cargo workspace
   crates/session-host-core/       PC 側の一式。PTY・フック受信・状態導出・パース・自己修復
   crates/server-core/      ブラウザ配信。WebSocket・REST・DB・アカウント・連絡係
   crates/core/             両者を1プロセスで束ねる配線（ローカルモード）と CLI
-  crates/agent/            セッションホストの中身
+  crates/session-host/     セッションホストの中身
   crates/transcript-parser/  JSONL → 表示用ツリー。**自己修復が唯一書き換えてよい範囲**
   crates/protocol/         サーバ・フロント・パーサが共有する型
   crates/dist/             配る一式。実行ファイル3本の入口だけを持つ
