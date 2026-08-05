@@ -186,8 +186,13 @@ export function FileView({ host, root, path, onClose }: Props) {
               className="prose-dashboard text-sm leading-relaxed"
             >
               {/* 生の HTML は通さない。`rehype-raw` を入れていないことが、
-                  そのまま「通さない」の実体になっている（設計§15） */}
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  そのまま「通さない」の実体になっている（設計§15）。
+
+                  `skipHtml` は、その HTML を**字面としても出さない**（設計§27）。
+                  外すと `<br/>` のような綴りが本文に混ざる——このリポジトリの
+                  ドキュメントは段落の間隔に使っているので、節のたびに出る。
+                  外して困らないのは、消えた中身を「生テキストで見る」で確かめられるため */}
+              <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
                 {content.text}
               </ReactMarkdown>
             </div>

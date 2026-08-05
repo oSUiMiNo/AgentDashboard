@@ -81,7 +81,7 @@ describe('ファイルの見せ方', () => {
   it('生の HTML が実行も表示もされない', async () => {
     serve(
       content(
-        '# 見出し\n\n<img src="x" onerror="alert(1)">\n\n<script>alert(2)</script>\n',
+        '# 見出し\n\n<img src="x" onerror="alert(1)">\n\n<script>alert(2)</script>\n\n```html\n<div>コードブロックの中</div>\n```\n',
       ),
     )
     const { container } = render(
@@ -89,10 +89,18 @@ describe('ファイルの見せ方', () => {
     )
     await screen.findByTestId('file-markdown')
 
-    // **タグとして出ていないこと**を見る。字面が無いことを条件にすると、
-    // 逃がされた無害な出現まで拾って落ちる（フェーズ0 で踏んだ）
+    // **タグとして出ていないこと**を見る
     expect(container.querySelector('img')).toBeNull()
     expect(container.querySelector('script')).toBeNull()
+    // **字面としても出ていないこと**（`skipHtml`。設計§27）。フェーズ0 で
+    // 「字面が無いこと」を条件にして落ちたのは、逃がされて残っていたため——
+    // いまは木から取り除いているので、無いことが正しい条件になる
+    expect(screen.getByTestId('file-markdown').textContent).not.toContain(
+      'onerror',
+    )
+    // **コードブロックの中は消えない。** 取り除くのは HTML のノードだけで、
+    // 囲まれた中身はただの文字列として残る（ここを壊すのが唯一の怖い副作用）
+    expect(screen.getByText('<div>コードブロックの中</div>')).toBeInTheDocument()
     // 整形自体は効いている（丸ごと素通ししているわけではない）
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('見出し')
   })
