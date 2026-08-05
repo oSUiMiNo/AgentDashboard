@@ -1,0 +1,166 @@
+//! 追加した PJT 枠の読み書き（イシューグループ_2026_0805_0514 設計§2）。
+//!
+//! # 番兵はここにしか無い
+//!
+//! ローカルモードには PC という単位が無い。それを表す nil UUID の綴りは
+//! **このファイルの [`LOCAL_AGENT`] 1つだけ**にする。他所で `Uuid::nil()` と書くと、
+//! 意味の違う nil（[`super::SERVER_SCOPE_ID`] など）と見分けが付かなくなり、
+//! 片方だけ直したときに黙って壊れる。
+//!
+//! `hosts::LOCAL_HOST`（`"local"`）とも**別物**である。あちらは画面と REST の綴りで、
+//! こちらは DB の値。同じ「ローカル」でも、変えたときに影響する範囲が違う。
+//!
+//! # 読み替えは1本に閉じる
+//!
+//! `sessions.agent_id` は `Option<Uuid>` のままにしてある（既に配ったスキーマを
+//! 変える理由が無い）。したがって「`None` ⇄ 番兵」の読み替えが要るが、これを各所で
+//! 書くと必ずどこかで忘れる。[`to_column`] と [`from_column`] だけを使うこと。
+
+use super::entity::projects;
+use protocol::AgentId;
+use sea_orm::{
+    ActiveValue::Set, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder,
+};
+use uuid::Uuid;
+
+/// 「PC という単位が無い」を表す番兵（設計§2）。
+///
+/// **主キー相当の列に NULL を置けない**ため。ユニーク索引へ逃がしても、PostgreSQL では
+/// NULL 同士が互いに別物と扱われ、同じ枠が二重に入る（PJTガイドライン「DB を相手に
+/// するとき」で実際に踏んでいる）。
+pub const LOCAL_AGENT: Uuid = Uuid::nil();
+
+/// 宛先を列の値へ。`None`（ローカル）は番兵になる。
+pub fn to_column(agent: Option<AgentId>) -> Uuid {
+    agent.map(|id| id.0).unwrap_or(LOCAL_AGENT)
+}
+
+/// 列の値を宛先へ。番兵は `None` に戻る。
+pub fn from_column(value: Uuid) -> Option<AgentId> {
+    if value == LOCAL_AGENT {
+        None
+    } else {
+        Some(AgentId(value))
+    }
+}
+
+/// そのアカウントの枠を、**追加した順**に並べて返す。
+///
+/// 並びを `created_at` で固定するのは、一覧の箱が「最初に現れた順」で安定している
+/// 既存の作り（`web/src/stores/sessions.ts`）と揃えるため。セッションが居るかどうかで
+/// 2群に分けるのは画面の仕事で、ここは順序だけを保証する。
+pub async fn list(
+    db: &DatabaseConnection,
+    account_id: Uuid,
+) -> Result<Vec<projects::Model>, DbErr> {
+    projects::Entity::find()
+        .filter(projects::Column::AccountId.eq(account_id))
+        .order_by_asc(projects::Column::CreatedAt)
+        .order_by_asc(projects::Column::Id)
+        .all(db)
+        .await
+}
+
+/// 1つ引く。**必ずアカウントで絞る**（設計§18）。
+///
+/// 他人の枠は「無い」と同じ扱いになる——絞りをここに入れておけば、呼び出し側が
+/// 帰属の確認を書き忘れても他人のものは出てこない。
+pub async fn get(
+    db: &DatabaseConnection,
+    account_id: Uuid,
+    id: Uuid,
+) -> Result<Option<projects::Model>, DbErr> {
+    projects::Entity::find_by_id(id)
+        .filter(projects::Column::AccountId.eq(account_id))
+        .one(db)
+        .await
+}
+
+/// 枠を足す。**同じ（アカウント・PC・パス）が既にあれば、その行をそのまま返す。**
+///
+/// 二重に押したときに増えないことを、判定ではなくユニーク索引で担保している。
+/// 先に引いてから入れる形にしているのは、**既にある行の `id` を返す**必要があるため
+/// （画面はその `id` で消しにくる）。競合で入れ損ねた場合も、もう一度引いて既存を返す。
+pub async fn add(
+    db: &DatabaseConnection,
+    account_id: Uuid,
+    agent: Option<AgentId>,
+    path: &str,
+    now: i64,
+) -> Result<projects::Model, DbErr> {
+    let agent_column = to_column(agent);
+
+    if let Some(found) = find_same(db, account_id, agent_column, path).await? {
+        return Ok(found);
+    }
+
+    let row = projects::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        account_id: Set(account_id),
+        agent_id: Set(agent_column),
+        path: Set(path.to_string()),
+        created_at: Set(now),
+    };
+    projects::Entity::insert(row)
+        .on_conflict_do_nothing()
+        .exec(db)
+        .await?;
+
+    // `on_conflict_do_nothing` は「入らなかった」ことを成功として返すので、
+    // 入れた行そのものは取り直す。競合していた場合はここで相手の行が取れる
+    find_same(db, account_id, agent_column, path)
+        .await?
+        .ok_or_else(|| DbErr::Custom("枠を足したのに読み戻せません".to_string()))
+}
+
+/// 枠を消す。消えたら `true`、もともと無い（または他人のもの）なら `false`。
+pub async fn remove(db: &DatabaseConnection, account_id: Uuid, id: Uuid) -> Result<bool, DbErr> {
+    let outcome = projects::Entity::delete_many()
+        .filter(projects::Column::Id.eq(id))
+        .filter(projects::Column::AccountId.eq(account_id))
+        .exec(db)
+        .await?;
+    Ok(outcome.rows_affected > 0)
+}
+
+async fn find_same(
+    db: &DatabaseConnection,
+    account_id: Uuid,
+    agent_column: Uuid,
+    path: &str,
+) -> Result<Option<projects::Model>, DbErr> {
+    projects::Entity::find()
+        .filter(projects::Column::AccountId.eq(account_id))
+        .filter(projects::Column::AgentId.eq(agent_column))
+        .filter(projects::Column::Path.eq(path))
+        .one(db)
+        .await
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(non_snake_case)]
+
+    use super::*;
+
+    #[test]
+    fn 宛先と番兵は往復する() {
+        // 読み替えを1本に閉じている以上、ここが唯一の検査点になる
+        assert_eq!(to_column(None), LOCAL_AGENT);
+        assert_eq!(from_column(LOCAL_AGENT), None);
+
+        let agent = AgentId(Uuid::new_v4());
+        assert_eq!(to_column(Some(agent)), agent.0);
+        assert_eq!(from_column(agent.0), Some(agent));
+    }
+
+    #[test]
+    fn 番兵は実在の宛先とぶつからない() {
+        // v4 は nil を作らないので、番兵が本物の PC と衝突することはない。
+        // ここが破れると「ローカルの枠」と「ある PC の枠」が同じ行になる
+        assert_eq!(LOCAL_AGENT, Uuid::nil());
+        for _ in 0..64 {
+            assert_ne!(Uuid::new_v4(), LOCAL_AGENT);
+        }
+    }
+}

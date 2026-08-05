@@ -1,6 +1,6 @@
 //! DB のテーブル定義（セルフホスト化設計§3-2）。
 //!
-//! **7表がそのままこのモジュールの一覧**になっている。表を増やしたら
+//! **表がそのままこのモジュールの一覧**になっている。表を増やしたら
 //! [`super::migration`] にも足すこと——entity だけ足しても CREATE TABLE は走らない。
 //!
 //! 時刻はすべて `i64` の epoch ミリ秒で持つ（`protocol::Timestamp` と同じ）。DB の
@@ -9,6 +9,7 @@
 pub mod accounts;
 pub mod agents;
 pub mod pairing_tokens;
+pub mod projects;
 pub mod sessions;
 pub mod settings;
 pub mod transcript_nodes;

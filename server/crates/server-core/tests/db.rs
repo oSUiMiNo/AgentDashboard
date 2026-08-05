@@ -8,7 +8,7 @@
 
 mod common;
 
-use protocol::{CardId, Node, NodeId, SessionStatus, ToolStatus, TreeNode};
+use protocol::{AgentId, CardId, Node, NodeId, SessionStatus, ToolStatus, TreeNode};
 use sea_orm::{ActiveValue::Set, EntityTrait, PaginatorTrait as _};
 use server_core::db::{self, entity, settings, transcript};
 
@@ -681,5 +681,329 @@ mod スキーマの名前 {
             );
             backend.finish().await;
         }
+    }
+}
+
+// --- PJT 枠（イシューグループ_2026_0805_0514 設計§2・§3）-----------------------
+
+/// 枠を確かめるためのカード行。`archived` と時刻と宛先を指定できる。
+async fn seed_card(
+    db: &sea_orm::DatabaseConnection,
+    agent_id: Option<uuid::Uuid>,
+    project: &str,
+    created_at: i64,
+    archived: bool,
+) {
+    let row = entity::sessions::ActiveModel {
+        card_id: Set(CardId::new().0),
+        agent_id: Set(agent_id),
+        account_id: Set(db::LOCAL_ACCOUNT_ID),
+        project: Set(project.to_string()),
+        claude_session_id: Set(None),
+        permission_mode: Set(None),
+        model: Set(None),
+        model_label: Set(None),
+        model_requested: Set(None),
+        status: Set(serde_json::to_value(SessionStatus::Working).unwrap()),
+        subagent_active: Set(0),
+        last_activity_at: Set(created_at),
+        last_assistant_message: Set(None),
+        created_at: Set(created_at),
+        hooks_seen: Set(false),
+        archived: Set(archived),
+        toml_account: Set(None),
+    };
+    entity::sessions::Entity::insert(row)
+        .exec(db)
+        .await
+        .expect("カード行を入れられること");
+}
+
+/// 枠の表だけを「まだ無い」状態へ戻す。
+///
+/// **製品コードへ検証用の口を増やさずに済ませるための手口。** 表を落として適用済みの
+/// 記録を消せば、次に繋いだときにその1本だけがもう一度走る——つまり**本物の
+/// マイグレーションが本物のカードを見て作り直す**ところを、そのまま観察できる。
+async fn 枠の表を巻き戻す(db: &sea_orm::DatabaseConnection) {
+    use sea_orm::ConnectionTrait as _;
+
+    let version = db::migration_names()
+        .into_iter()
+        .find(|name| name.contains("projects"))
+        .expect("枠のマイグレーションが一覧に居ること");
+    db.execute_unprepared("DROP TABLE projects")
+        .await
+        .expect("枠の表を落とせること");
+    db.execute_unprepared(&format!(
+        "DELETE FROM seaql_migrations WHERE version = '{version}'"
+    ))
+    .await
+    .expect("適用済みの記録を消せること");
+}
+
+#[tokio::test]
+async fn 同じ枠を二度足しても増えない() {
+    // 二重に押したときに増えないことを、判定ではなくユニーク索引で担保している。
+    // 判定に頼ると、並行して押されたときにすり抜ける
+    for backend in common::backends("proj-dup").await {
+        let path = "/home/example/dev/app";
+        let first = db::projects::add(&backend.db, db::LOCAL_ACCOUNT_ID, None, path, 10)
+            .await
+            .expect("足せること");
+        let again = db::projects::add(&backend.db, db::LOCAL_ACCOUNT_ID, None, path, 20)
+            .await
+            .expect("二度目も断られないこと");
+
+        assert_eq!(first.id, again.id, "[{}] 別の行ができた", backend.name);
+        // **既にある行をそのまま返す**（画面はこの id で消しにくる）
+        assert_eq!(first.created_at, again.created_at);
+        let rows = db::projects::list(&backend.db, db::LOCAL_ACCOUNT_ID)
+            .await
+            .expect("読めること");
+        assert_eq!(rows.len(), 1, "[{}] 行が増えた", backend.name);
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn pcが違えば同じパスでも別の枠になる() {
+    // 枠の同一性は「PC ＋ パス」（利用者判断）。ここが破れると、どの PC の枠なのかが
+    // 分からなくなり、「+」を押したときの宛先も決まらない
+    for backend in common::backends("proj-host").await {
+        let path = "/home/osuim/Dev/App";
+        let a = AgentId(uuid::Uuid::new_v4());
+        let b = AgentId(uuid::Uuid::new_v4());
+
+        db::projects::add(&backend.db, db::LOCAL_ACCOUNT_ID, Some(a), path, 1)
+            .await
+            .expect("足せること");
+        db::projects::add(&backend.db, db::LOCAL_ACCOUNT_ID, Some(b), path, 2)
+            .await
+            .expect("足せること");
+        // ローカル（番兵）もまた別の枠
+        db::projects::add(&backend.db, db::LOCAL_ACCOUNT_ID, None, path, 3)
+            .await
+            .expect("足せること");
+
+        let rows = db::projects::list(&backend.db, db::LOCAL_ACCOUNT_ID)
+            .await
+            .expect("読めること");
+        assert_eq!(rows.len(), 3, "[{}] 同じ枠に混ざった", backend.name);
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn ローカルの枠は番兵で1つに揃う() {
+    // **NULL を許すと PostgreSQL では NULL 同士が別物と扱われ、二重に入る。**
+    // 番兵にしてあるのはそれを避けるため
+    for backend in common::backends("proj-local").await {
+        let path = "/home/example/dev/app";
+        db::projects::add(&backend.db, db::LOCAL_ACCOUNT_ID, None, path, 1)
+            .await
+            .expect("足せること");
+        db::projects::add(&backend.db, db::LOCAL_ACCOUNT_ID, None, path, 2)
+            .await
+            .expect("足せること");
+
+        let rows = db::projects::list(&backend.db, db::LOCAL_ACCOUNT_ID)
+            .await
+            .expect("読めること");
+        assert_eq!(
+            rows.len(),
+            1,
+            "[{}] ローカルの枠が二重に入った",
+            backend.name
+        );
+        assert_eq!(rows[0].agent_id, db::projects::LOCAL_AGENT);
+        assert_eq!(db::projects::from_column(rows[0].agent_id), None);
+        backend.finish().await;
+    }
+}
+
+#[test]
+fn 番兵の綴りは1箇所にしか無い() {
+    // 目視の約束にすると、次に触った人が2箇所目を作る。**同じ nil でも意味が違う**
+    // （サーバ全体の印と、PC という単位が無いこと）ので、綴りを散らすと片方だけ直る
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut found = Vec::new();
+    let mut stack = vec![src.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("ソースを読めること") {
+            let path = entry.expect("項目を読めること").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs")
+                && std::fs::read_to_string(&path)
+                    .expect("読めること")
+                    .contains("Uuid::nil()")
+            {
+                found.push(
+                    path.strip_prefix(&src)
+                        .expect("src の下")
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                );
+            }
+        }
+    }
+    found.sort();
+    assert_eq!(
+        found,
+        vec!["db/mod.rs".to_string(), "db/projects.rs".to_string()],
+        "nil UUID の綴りが増えている。意味の違う nil を共有していないか確かめること"
+    );
+}
+
+#[tokio::test]
+async fn 作り直しは外していないカードから枠を起こす() {
+    // これが無いと、版を上げた利用者の画面から枠が消える。しかも「消えた」ではなく
+    // 「セッションが終わったら消える枠」に戻るので、原因が版上げにあると気づけない
+    for backend in common::backends("proj-backfill").await {
+        枠の表を巻き戻す(&backend.db).await;
+
+        let agent = uuid::Uuid::new_v4();
+        // カードは PC の行を参照するので、先に登録しておく
+        entity::agents::Entity::insert(entity::agents::ActiveModel {
+            id: Set(agent),
+            account_id: Set(db::LOCAL_ACCOUNT_ID),
+            name: Set("仕事用ノート".to_string()),
+            created_at: Set(1),
+            last_seen_at: Set(None),
+            model_table: Set(None),
+            capabilities: Set(None),
+        })
+        .exec(&backend.db)
+        .await
+        .expect("PC を登録できること");
+
+        // 同じ組のカードが2枚。**古いほうの時刻が枠の時刻になる**
+        seed_card(&backend.db, Some(agent), "/home/example/a", 300, false).await;
+        seed_card(&backend.db, Some(agent), "/home/example/a", 100, false).await;
+        // ローカル（`agent_id` が NULL）は番兵へ読み替わる
+        seed_card(&backend.db, None, "/home/example/b", 200, false).await;
+        // **外したカードからは起こさない**
+        seed_card(&backend.db, Some(agent), "/home/example/gone", 50, true).await;
+
+        let again = db::connect(&backend.url)
+            .await
+            .unwrap_or_else(|err| panic!("[{}] 繋ぎ直せない: {err}", backend.name));
+        let mut rows = db::projects::list(&again, db::LOCAL_ACCOUNT_ID)
+            .await
+            .expect("読めること");
+        rows.sort_by(|a, b| a.path.cmp(&b.path));
+
+        let paths: Vec<&str> = rows.iter().map(|row| row.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["/home/example/a", "/home/example/b"],
+            "[{}] 起こした枠が違う（外したカードから起こしていないか）",
+            backend.name
+        );
+        assert_eq!(rows[0].agent_id, agent);
+        assert_eq!(
+            rows[0].created_at, 100,
+            "[{}] いちばん古いカードの時刻になっていない",
+            backend.name
+        );
+        assert_eq!(rows[1].agent_id, db::projects::LOCAL_AGENT);
+        assert_eq!(rows[1].created_at, 200);
+
+        let _ = sea_orm::DatabaseConnection::close(again).await;
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 作り直しはカードが1枚も無ければ何も起こさない() {
+    // 新規の利用者がここを通る。空の DB で落ちると**初めて動かした人だけ**起動できない
+    for backend in common::backends("proj-empty").await {
+        枠の表を巻き戻す(&backend.db).await;
+
+        let again = db::connect(&backend.url)
+            .await
+            .unwrap_or_else(|err| panic!("[{}] 繋ぎ直せない: {err}", backend.name));
+        let rows = db::projects::list(&again, db::LOCAL_ACCOUNT_ID)
+            .await
+            .expect("読めること");
+        assert!(rows.is_empty(), "[{}] 何も無いのに枠ができた", backend.name);
+
+        let _ = sea_orm::DatabaseConnection::close(again).await;
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 枠は持ち主で絞って読み書きされる() {
+    // 帰属の判定を呼び出し側の心がけに任せない（設計§18）。ここで絞っておけば、
+    // 書き忘れても他人のものは出てこない
+    for backend in common::backends("proj-owner").await {
+        let other = uuid::Uuid::new_v4();
+        entity::accounts::Entity::insert(entity::accounts::ActiveModel {
+            id: Set(other),
+            name: Set("よそ".to_string()),
+            password_hash: Set(None),
+            is_admin: Set(false),
+            created_at: Set(1),
+        })
+        .exec(&backend.db)
+        .await
+        .expect("よそのアカウントを作れること");
+
+        let mine = db::projects::add(&backend.db, db::LOCAL_ACCOUNT_ID, None, "/mine", 1)
+            .await
+            .expect("足せること");
+        db::projects::add(&backend.db, other, None, "/theirs", 2)
+            .await
+            .expect("足せること");
+
+        let rows = db::projects::list(&backend.db, db::LOCAL_ACCOUNT_ID)
+            .await
+            .expect("読めること");
+        assert_eq!(rows.len(), 1, "[{}] 他人の枠が混ざった", backend.name);
+
+        // 他人の枠は引けないし消せない
+        assert!(
+            db::projects::get(&backend.db, other, mine.id)
+                .await
+                .expect("読めること")
+                .is_none()
+        );
+        assert!(
+            !db::projects::remove(&backend.db, other, mine.id)
+                .await
+                .expect("消せること")
+        );
+        assert!(
+            db::projects::remove(&backend.db, db::LOCAL_ACCOUNT_ID, mine.id)
+                .await
+                .expect("消せること"),
+            "[{}] 自分の枠は消せること",
+            backend.name
+        );
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 枠は追加した順に並ぶ() {
+    // 一覧の箱が「最初に現れた順」で安定している既存の作りと揃える
+    for backend in common::backends("proj-order").await {
+        for (path, at) in [("/c", 30), ("/a", 10), ("/b", 20)] {
+            db::projects::add(&backend.db, db::LOCAL_ACCOUNT_ID, None, path, at)
+                .await
+                .expect("足せること");
+        }
+        let rows = db::projects::list(&backend.db, db::LOCAL_ACCOUNT_ID)
+            .await
+            .expect("読めること");
+        let paths: Vec<&str> = rows.iter().map(|row| row.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["/a", "/b", "/c"],
+            "[{}] 並びが違う",
+            backend.name
+        );
+        backend.finish().await;
     }
 }

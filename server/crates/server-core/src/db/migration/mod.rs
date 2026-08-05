@@ -8,6 +8,7 @@
 
 mod m20260731_000001_init;
 mod m20260801_000002_agent_capabilities;
+mod m20260805_000003_projects;
 
 use sea_orm_migration::prelude::*;
 
@@ -19,6 +20,7 @@ impl MigratorTrait for Migrator {
         vec![
             Box::new(m20260731_000001_init::Migration),
             Box::new(m20260801_000002_agent_capabilities::Migration),
+            Box::new(m20260805_000003_projects::Migration),
         ]
     }
 }
