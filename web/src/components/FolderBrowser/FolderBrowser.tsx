@@ -26,6 +26,7 @@ import {
   childOf,
   crumbsOf,
   listDir,
+  relativeOf,
   type DirEntry,
   type DirListing,
 } from '@/lib/hostfs'
@@ -60,10 +61,6 @@ export function FolderBrowser({
   // `undefined` は「まだ聞いていない」＝ホームから始める（設計§26-2）
   const [path, setPath] = useState<string | undefined>(start)
 
-  useEffect(() => {
-    setPath(start)
-  }, [start])
-
   const go = useCallback(
     async (next: string | undefined) => {
       setLoading(true)
@@ -86,11 +83,12 @@ export function FolderBrowser({
   )
 
   useEffect(() => {
-    void go(path)
-    // `path` は `go` の中で更新するので、依存に入れると辿るたびに二重に走る。
-    // ここで見たいのは「宛先か始まりが変わったら辿り直す」だけ
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [host, start])
+    // **辿り直す先は `start`。`path` を渡してはいけない。**
+    // `start` が変わった描画では `path` はまだ古く、渡すと「古い場所を引き直して
+    // 上書きする」ことになる。症状は**一瞬だけ新しい場所が見えて元へ戻る**で、
+    // 状態の更新が非同期であることに由来するので、目で追っても原因が見えない。
+    void go(start)
+  }, [host, start, go])
 
   // ルートより上は出さない（左パネル用）。**出しても押せない段は作らない**
   const crumbs = crumbsOf(path ?? '/').filter(
@@ -98,7 +96,13 @@ export function FolderBrowser({
   )
 
   return (
-    <div data-testid="folder-browser" data-path={path ?? ''} className="flex min-h-0 flex-col gap-2">
+    <div
+      data-testid="folder-browser"
+      data-path={path ?? ''}
+      // **入れ物の高さいっぱいに広がる。** これが無いと一覧が伸び放題になり、
+      // `ul` の `overflow-y-auto` が効かずに親ごとはみ出す
+      className="flex h-full min-h-0 flex-col gap-2"
+    >
       <nav
         data-testid="folder-crumbs"
         aria-label="いまの場所"
@@ -147,6 +151,8 @@ export function FolderBrowser({
             <Row
               key={entry.name}
               entry={entry}
+              full={childOf(listing.path, entry.name)}
+              root={root}
               onOpen={() => void go(childOf(listing.path, entry.name))}
               onPickFile={
                 onPickFile === undefined
@@ -161,16 +167,27 @@ export function FolderBrowser({
 }
 
 /**
- * 1行。**行全体が押す対象**（狭い画面では的の大きさがそのまま使い勝手になる）。
+ * 1行。**開く的とコピーの的を分ける**（設計§13）。
+ *
+ * 行全体を1つのボタンにすると、狭い画面では的が大きくて押しやすい代わりに、
+ * **中に別のボタンを置けない**（入れ子のボタンは HTML として成立しない）。
+ * コピーは要件が名指ししている用途（エージェントへ渡す値を作る）なので、
+ * 的を2つに割って両方を成立させる。
  *
  * リンクは辿らない（設計§8）ので、押しても入らない。在ることだけを示す。
  */
 function Row({
   entry,
+  full,
+  root,
   onOpen,
   onPickFile,
 }: {
   entry: DirEntry
+  /** この行が指す絶対パス */
+  full: string
+  /** 相対パスの基準。無ければ絶対パスをコピーする */
+  root?: string
   onOpen: () => void
   onPickFile?: () => void
 }) {
@@ -178,7 +195,7 @@ function Row({
   const pressable = openable || (entry.kind === 'file' && onPickFile !== undefined)
 
   return (
-    <li>
+    <li className="flex items-center gap-1">
       <Button
         type="button"
         variant="ghost"
@@ -187,8 +204,8 @@ function Row({
         data-name={entry.name}
         disabled={!pressable}
         onClick={openable ? onOpen : onPickFile}
-        // 行全体を的にする。高さも狭い画面で押しやすい値にしてある
-        className="h-auto w-full justify-start gap-2 px-2 py-2 text-left font-normal"
+        // 的はできるだけ大きく取る。高さも狭い画面で押しやすい値にしてある
+        className="h-auto min-w-0 flex-1 justify-start gap-2 px-2 py-2 text-left font-normal"
       >
         <span aria-hidden className="shrink-0">
           {entry.kind === 'dir' ? '📁' : entry.kind === 'symlink' ? '🔗' : '📄'}
@@ -205,6 +222,48 @@ function Row({
           </span>
         )}
       </Button>
+      <CopyPath full={full} root={root} />
     </li>
+  )
+}
+
+/**
+ * その行のパスをコピーする（設計§15。要件「フォルダやファイルのパスを渡す」）。
+ *
+ * `root` があれば**そこからの相対パス**、無ければ絶対パス。基準が分からない相対パスは
+ * 貼られた側で解釈できないので、**何をコピーするのかは `title` に出す**。
+ */
+function CopyPath({ full, root }: { full: string; root?: string }) {
+  const value = root === undefined ? full : relativeOf(root, full)
+  const [state, setState] = useState<'idle' | 'done' | 'failed'>('idle')
+
+  const copy = async () => {
+    // **黙って失敗させない**（`FileView` と同じ扱い）。使えない環境があるので、
+    // 押したのに何も起きない状態を残さない
+    try {
+      await navigator.clipboard.writeText(value)
+      setState('done')
+    } catch {
+      setState('failed')
+    }
+  }
+
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="sm"
+      data-testid="folder-copy"
+      data-value={value}
+      title={
+        root === undefined
+          ? `コピーする値：${value}`
+          : `コピーする値：${value}（${root} からの相対パス）`
+      }
+      className="text-muted-foreground shrink-0 text-xs"
+      onClick={() => void copy()}
+    >
+      {state === 'done' ? 'コピーしました' : state === 'failed' ? 'コピーできません' : 'コピー'}
+    </Button>
   )
 }

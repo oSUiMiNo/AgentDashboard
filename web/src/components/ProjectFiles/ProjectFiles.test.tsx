@@ -80,6 +80,61 @@ describe('左パネル', () => {
     expect(screen.getByTestId('file-relative-base')).toHaveTextContent(ROOT)
   })
 
+  it('別の枠へ移ると、その枠の起点から始まる', async () => {
+    // **回帰テスト。** 直す前は、辿り直す効果が「変わる前の場所」を掴んでいたので、
+    // 起点が変わっても**古い枠の中身を出し続けた**（一覧のシートでは一瞬だけ
+    // 新しい場所が見えて戻る、という形で表に出ていた）
+    const other = '/home/me/dev/other'
+    const view = render(<ProjectFiles host="local" project={ROOT} />)
+    await waitFor(() =>
+      expect(screen.getByTestId('folder-browser')).toHaveAttribute('data-path', ROOT),
+    )
+
+    view.rerender(<ProjectFiles host="local" project={other} />)
+    await waitFor(() =>
+      expect(screen.getByTestId('folder-browser')).toHaveAttribute('data-path', other),
+    )
+
+    // 落ち着いたあとも新しい枠のままであること（戻らない）
+    await new Promise((done) => setTimeout(done, 50))
+    expect(screen.getByTestId('folder-browser')).toHaveAttribute('data-path', other)
+  })
+
+  it('フォルダ行から相対パスをコピーできる', async () => {
+    // 要件が名指ししている用途（「エージェントに**フォルダやファイル**のパスを
+    // 渡す」）。ファイルを開かないと取れない状態だと、フォルダのパスは渡せない
+    const written: string[] = []
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn(async (text: string) => void written.push(text)) },
+    })
+
+    render(<ProjectFiles host="local" project={ROOT} />)
+    const rows = await screen.findAllByTestId('folder-copy')
+    await userEvent.click(rows[0])
+
+    // 基準は枠のパス。絶対パスではなく**貼れる形**で取れること
+    expect(written).toEqual(['MyDocs'])
+    expect(rows[0]).toHaveAttribute('data-value', 'MyDocs')
+  })
+
+  it('コピーを押しても階層は変わらない', async () => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn(async () => undefined) },
+    })
+
+    render(<ProjectFiles host="local" project={ROOT} />)
+    await waitFor(() =>
+      expect(screen.getByTestId('folder-browser')).toHaveAttribute('data-path', ROOT),
+    )
+
+    await userEvent.click((await screen.findAllByTestId('folder-copy'))[0])
+    // 開く的とコピーの的は別（設計§13）。混ざると、渡す値を取るだけのつもりで
+    // 階層が動く
+    expect(screen.getByTestId('folder-browser')).toHaveAttribute('data-path', ROOT)
+  })
+
   it('閉じると一覧だけに戻る', async () => {
     render(<ProjectFiles host="local" project={ROOT} />)
 

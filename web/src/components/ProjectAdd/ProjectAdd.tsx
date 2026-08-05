@@ -67,6 +67,9 @@ function AddSheet({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [start, setStart] = useState<string | undefined>(undefined)
+  // **同じ行を押し直しても辿り直せるようにする。** `start` だけだと値が変わらず、
+  // 一度そこへ行って別の階層を掘ったあと、もう一度押しても何も起きない
+  const [startSeq, setStartSeq] = useState(0)
 
   // 繋がっている PC だけを候補にする。切れている PC のフォルダは辿れない
   const connected = agents.filter((agent) => agent.connected)
@@ -148,13 +151,26 @@ function AddSheet({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <div
-      data-testid="project-add-sheet"
-      role="dialog"
-      aria-label="PJT を追加"
-      className="bg-background/95 fixed inset-0 z-50 flex flex-col gap-3 overflow-y-auto p-4 sm:inset-x-auto sm:inset-y-8 sm:left-1/2 sm:w-[min(40rem,90vw)] sm:-translate-x-1/2 sm:rounded-xl sm:border sm:shadow-xl"
-    >
-      <header className="flex items-center gap-2">
+    <>
+      {/*
+        暗い幕。**押しても閉じない**——打ち込んだ内容を事故で失わせないため、
+        閉じるのは「閉じる」だけにしてある。ここに幕が無いと、下の画面の文字が
+        シートの上に重なって読める（実際にそう見えていた）
+      */}
+      <div aria-hidden className="fixed inset-0 z-40 bg-black/60" />
+      <div
+        data-testid="project-add-sheet"
+        role="dialog"
+        aria-label="PJT を追加"
+        /*
+          **高さの決まった縦並びにする。** 以前はシート全体を `overflow-y-auto` に
+          していたので、フォルダの多い場所を開くと一覧が伸び放題になり、
+          「この場所を追加」が画面の外へ押し出されていた。
+          いまは中の一覧だけがスクロールし、頭と脚は必ず見える。
+        */
+        className="bg-background fixed inset-0 z-50 flex flex-col gap-3 overflow-hidden p-4 sm:inset-x-auto sm:inset-y-8 sm:left-1/2 sm:w-[min(40rem,90vw)] sm:-translate-x-1/2 sm:rounded-xl sm:border sm:shadow-xl"
+      >
+      <header className="flex shrink-0 items-center gap-2">
         <h2 className="text-sm font-semibold">PJT を追加</h2>
         <Button
           type="button"
@@ -168,7 +184,7 @@ function AddSheet({ onClose }: { onClose: () => void }) {
       </header>
 
       {needsTarget && (
-        <label className="flex items-center gap-1.5 text-xs">
+        <label className="flex shrink-0 items-center gap-1.5 text-xs">
           <span className="text-muted-foreground">どの PC か</span>
           <select
             data-testid="project-add-host"
@@ -188,7 +204,7 @@ function AddSheet({ onClose }: { onClose: () => void }) {
         </label>
       )}
 
-      <label className="flex flex-col gap-1 text-xs">
+      <label className="flex shrink-0 flex-col gap-1 text-xs">
         <span className="text-muted-foreground">パスを打ち込む</span>
         <Input
           data-testid="project-add-path"
@@ -204,9 +220,13 @@ function AddSheet({ onClose }: { onClose: () => void }) {
       </label>
 
       {recent.length > 0 && (
-        <div className="flex flex-col gap-1">
+        <div className="flex shrink-0 flex-col gap-1">
           <span className="text-muted-foreground text-xs">最近使った場所</span>
-          <ul data-testid="project-add-recent" className="flex flex-col">
+          {/* 8件まで並ぶので、狭い画面では一覧の場所を食い潰さないよう頭を押さえる */}
+          <ul
+            data-testid="project-add-recent"
+            className="flex max-h-28 flex-col overflow-y-auto"
+          >
             {recent.map((entry) => (
               <li key={entry.path}>
                 <Button
@@ -215,7 +235,14 @@ function AddSheet({ onClose }: { onClose: () => void }) {
                   data-testid="project-add-recent-item"
                   data-added={entry.added ? 'true' : 'false'}
                   className="h-auto w-full justify-start gap-2 px-2 py-1.5 text-left text-xs font-normal"
-                  onClick={() => setStart(entry.path)}
+                  onClick={() => {
+                    // **押した場所を確定の相手にもする。** 辿り着いてから
+                    // `onPathChange` で入るのを待つと、押しただけでは
+                    // 「この場所を追加」が効かない
+                    setStart(entry.path)
+                    setPicked(entry.path)
+                    setStartSeq((seq) => seq + 1)
+                  }}
                 >
                   <span className="min-w-0 truncate">{entry.path}</span>
                   {entry.added && (
@@ -230,28 +257,35 @@ function AddSheet({ onClose }: { onClose: () => void }) {
         </div>
       )}
 
-      <div className="border-border min-h-48 flex-1 rounded border p-2">
+      {/* **ここだけが伸び縮みする。** `min-h-0` が無いと flex の子は縮まない */}
+      <div className="border-border min-h-0 flex-1 overflow-hidden rounded border p-2">
         {needsTarget && target === '' ? (
           <p className="text-muted-foreground text-xs">
             どの PC のフォルダを見るか選んでください。
           </p>
         ) : (
-          <FolderBrowser host={host} start={start} onPathChange={setPicked} />
+          <FolderBrowser
+            // 同じ場所を押し直しても辿り直す（`start` だけでは値が変わらない）
+            key={`${host}:${startSeq}`}
+            host={host}
+            start={start}
+            onPathChange={setPicked}
+          />
         )}
       </div>
 
       {error !== null && (
-        <p data-testid="project-add-error" className="text-xs text-red-400">
+        <p data-testid="project-add-error" className="shrink-0 text-xs text-red-400">
           {error}
         </p>
       )}
       {notice !== null && (
-        <p data-testid="project-add-notice" className="text-xs text-amber-300">
+        <p data-testid="project-add-notice" className="shrink-0 text-xs text-amber-300">
           {notice}
         </p>
       )}
 
-      <footer className="flex items-center gap-2">
+      <footer className="flex shrink-0 items-center gap-2">
         <span
           data-testid="project-add-target"
           className="text-muted-foreground min-w-0 flex-1 truncate text-xs"
@@ -268,7 +302,8 @@ function AddSheet({ onClose }: { onClose: () => void }) {
           この場所を追加
         </Button>
       </footer>
-    </div>
+      </div>
+    </>
   )
 }
 

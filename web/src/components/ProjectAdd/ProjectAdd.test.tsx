@@ -153,6 +153,90 @@ describe('PJT を追加', () => {
     })
   })
 
+  it('最近使った場所を押すと、そこへ移動して戻らない', async () => {
+    // **回帰テスト。** 直す前は「一瞬だけ移動して元へ戻る」——辿り直す効果が
+    // 変わる前の値を掴んでいたため、古い場所を引き直して上書きしていた
+    applyProjectSnapshot([
+      { id: 'p1', host: 'local', path: '/dev/already', created_at: 1 },
+    ])
+    const sheet = await openSheet()
+    await screen.findByTestId('folder-browser')
+
+    await userEvent.click(within(sheet).getByTestId('project-add-recent-item'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('folder-browser')).toHaveAttribute(
+        'data-path',
+        '/dev/already',
+      ),
+    )
+    // 押しただけで確定の相手になる（辿り着くのを待たせない）
+    expect(within(sheet).getByTestId('project-add-target')).toHaveTextContent(
+      '/dev/already',
+    )
+
+    // **戻らないこと。** 直す前はここで元の場所へ戻っていた
+    await new Promise((done) => setTimeout(done, 50))
+    expect(screen.getByTestId('folder-browser')).toHaveAttribute(
+      'data-path',
+      '/dev/already',
+    )
+  })
+
+  it('同じ行をもう一度押しても、そこへ戻れる', async () => {
+    applyProjectSnapshot([
+      { id: 'p1', host: 'local', path: '/dev/already', created_at: 1 },
+    ])
+    const sheet = await openSheet()
+    await screen.findByTestId('folder-browser')
+
+    const row = within(sheet).getByTestId('project-add-recent-item')
+    await userEvent.click(row)
+    await waitFor(() =>
+      expect(screen.getByTestId('folder-browser')).toHaveAttribute(
+        'data-path',
+        '/dev/already',
+      ),
+    )
+
+    // 掘ってから、同じ行をもう一度押す
+    await userEvent.click(screen.getAllByTestId('folder-entry')[0])
+    await waitFor(() =>
+      expect(screen.getByTestId('folder-browser')).toHaveAttribute(
+        'data-path',
+        '/dev/already/app',
+      ),
+    )
+
+    await userEvent.click(row)
+    await waitFor(() =>
+      expect(screen.getByTestId('folder-browser')).toHaveAttribute(
+        'data-path',
+        '/dev/already',
+      ),
+    )
+  })
+
+  it('フォルダ行から絶対パスをコピーできる', async () => {
+    // 追加のシートには基準になる PJT がまだ無いので、**絶対パス**を取る
+    const written: string[] = []
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn(async (text: string) => void written.push(text)) },
+    })
+
+    await openSheet()
+    const copy = (await screen.findAllByTestId('folder-copy'))[0]
+    await userEvent.click(copy)
+
+    expect(written).toEqual(['/home/me/dev'])
+    // 押しても階層は動かない（開く的と分かれている）
+    expect(screen.getByTestId('folder-browser')).toHaveAttribute(
+      'data-path',
+      '/home/me',
+    )
+  })
+
   it('PC が2台以上のときは選択が出て、既定が選ばれていない', async () => {
     useSettingsStore.setState({
       settings: settingsFixture({

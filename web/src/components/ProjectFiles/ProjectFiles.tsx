@@ -34,7 +34,8 @@ export function ProjectFiles({ host, project }: Props) {
       data-testid="project-files"
       className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden"
     >
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      {/* 一覧のスクロールは `FolderBrowser` の中が持つ（親で二重に持たない） */}
+      <div className="min-h-0 flex-1 overflow-hidden">
         <FolderBrowser
           host={host}
           start={project}
