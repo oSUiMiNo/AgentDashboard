@@ -28,11 +28,15 @@ use crate::{
 use futures_util::{SinkExt as _, StreamExt as _};
 use protocol::{
     CardId, TreeNode,
-    a2s::{A2S_PROTOCOL, A2S_VERSION, AgentMessage, BatchId, Intervals, ServerToAgent},
+    a2s::{
+        A2S_PROTOCOL, A2S_VERSION, AgentMessage, BatchId, HostReply, Intervals, RequestId,
+        ServerToAgent,
+    },
     frame::{self, FrameKind},
     ws::ServerMessage,
 };
 use std::{
+    path::Path,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -575,6 +579,10 @@ async fn handshake(mut socket: Socket, config: &LinkConfig) -> anyhow::Result<(S
         // サーバにはローカルの CLI が居ないので、ここで渡さないと選択肢が空になる
         available_modes: config.available_modes.clone(),
         always_bypass_permissions: config.always_bypass_permissions,
+        // フォルダを覗ける版であることを名乗る（イシューグループ_2026_0805_0514 設計§4）。
+        // **この実行ファイルは実装を持っている**ので、常に真。名乗らない古いホストと
+        // 区別が付くことが、画面に正しい理由を出せる唯一の材料になる
+        supports_host_fs: true,
     };
     socket
         .send(tungstenite::Message::text(serde_json::to_string(&hello)?))
@@ -682,7 +690,7 @@ async fn connected(
             incoming = stream.next() => match incoming {
                 Some(Ok(message)) => {
                     last_seen = tokio::time::Instant::now();
-                    if !handle_incoming(message, manager, outbox, intervals, &mut flush) {
+                    if !handle_incoming(message, manager, &link.outgoing, outbox, intervals, &mut flush) {
                         return;
                     }
                 }
@@ -707,6 +715,7 @@ async fn connected(
 fn handle_incoming(
     message: tungstenite::Message,
     manager: &Arc<SessionManager>,
+    outgoing: &mpsc::UnboundedSender<Outgoing>,
     outbox: &mut Outbox,
     intervals: &mut Intervals,
     flush: &mut tokio::time::Interval,
@@ -714,7 +723,7 @@ fn handle_incoming(
     match message {
         tungstenite::Message::Text(text) => {
             match serde_json::from_str::<ServerToAgent>(&text) {
-                Ok(command) => apply_command(command, manager, outbox, intervals, flush),
+                Ok(command) => apply_command(command, manager, outgoing, outbox, intervals, flush),
                 // 知らない指示で接続ごと落とさない。新しいサーバが増やしたものでありうる
                 Err(err) => tracing::warn!("サーバの指示を解釈できません: {err}"),
             }
@@ -731,9 +740,56 @@ fn handle_incoming(
     }
 }
 
+/// どちらを聞かれたか。
+#[derive(Debug, Clone, Copy)]
+enum HostFsAsk {
+    Dir,
+    File,
+}
+
+/// フォルダ／ファイルの問いに、**別のスレッドで**答える（設計§4・§8・§9）。
+///
+/// # 必ず答える
+///
+/// 読めなかった場合も `HostReply::Failed` を返す。黙ると、聞いた側は時間切れを待つ
+/// しかなくなり、**フォルダが無いことと区別が付かない**（設計§7）。
+///
+/// # 送り口が閉じているときは捨ててよい
+///
+/// 切断中の答えは行き先が無い。聞いた側は時間切れで畳むので、溜めても意味が無い
+/// （`Outgoing::Volatile` の扱いと同じ）。
+fn answer_host_fs(
+    outgoing: mpsc::UnboundedSender<Outgoing>,
+    request_id: RequestId,
+    path: String,
+    ask: HostFsAsk,
+) {
+    tokio::task::spawn_blocking(move || {
+        let failed = |err: crate::hostfs::HostFsError| HostReply::Failed {
+            reason: err.reason,
+            detail: err.detail,
+        };
+        let reply = match ask {
+            HostFsAsk::Dir => match crate::hostfs::list_dir(Path::new(&path)) {
+                Ok(listing) => HostReply::Dir(listing),
+                Err(err) => failed(err),
+            },
+            HostFsAsk::File => match crate::hostfs::read_file(Path::new(&path)) {
+                Ok(content) => HostReply::File(content),
+                Err(err) => failed(err),
+            },
+        };
+        let _ = outgoing.send(Outgoing::Volatile(AgentMessage::HostReply {
+            request_id,
+            reply,
+        }));
+    });
+}
+
 fn apply_command(
     command: ServerToAgent,
     manager: &Arc<SessionManager>,
+    outgoing: &mpsc::UnboundedSender<Outgoing>,
     outbox: &mut Outbox,
     intervals: &mut Intervals,
     flush: &mut tokio::time::Interval,
@@ -847,6 +903,18 @@ fn apply_command(
             rows,
         } => manager.subscribe_screen(card_id, cols, rows),
         ServerToAgent::UnsubScreen { card_id } => manager.unsubscribe_screen(card_id),
+
+        // フォルダとファイルの問い（イシューグループ_2026_0805_0514 設計§4）。
+        //
+        // **ここで直接読まない。** この関数は接続の `select!` ループの中から同期で
+        // 呼ばれているので、大きなフォルダを読むと ping まで止まり、サーバから見ると
+        // 「静かな死」に見えて切られる
+        ServerToAgent::ListDir { request_id, path } => {
+            answer_host_fs(outgoing.clone(), request_id, path, HostFsAsk::Dir);
+        }
+        ServerToAgent::ReadFile { request_id, path } => {
+            answer_host_fs(outgoing.clone(), request_id, path, HostFsAsk::File);
+        }
     }
 }
 
