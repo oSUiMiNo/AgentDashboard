@@ -18,10 +18,23 @@
  *
  * 購読するのは**この箱に入るカードIDの並び**だけ。中身は [`SessionView`] が自分で
  * 購読するので、1本の状態が変わっても隣が作り直されない。
+ *
+ * # 左にファイル（イシューグループ_2026_0805_0514 設計§14）
+ *
+ * 左上のハンバーガーで [`ProjectFiles`] を開閉する。**セッション専用画面には出さない**
+ * ——PJT のフォルダはセッションごとに変わらないので、セッションの数だけ同じものを
+ * 出す意味が無い（設計§20 の読み替え）。
+ *
+ * この画面だからこそ、**左でパスをコピーして右のセッションの入力欄へ貼る**が1画面で
+ * 完結する。配置を選んだ理由そのものなので、右側の横並びには手を入れていない。
  */
 
+import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router'
+import { ProjectFiles } from '@/components/ProjectFiles/ProjectFiles'
+import { SessionAdd } from '@/components/SessionAdd/SessionAdd'
 import { SessionView } from '@/components/SessionView/SessionView'
+import { Button } from '@/components/ui/button'
 import { HOME } from '@/lib/routes'
 import { useProjectCards } from '@/stores/sessions'
 
@@ -31,8 +44,55 @@ interface Props {
   project: string
 }
 
+/**
+ * 左パネルを開いているか、の置き場所。
+ *
+ * **ブラウザ側に持つ**（設計§14）。サーバへ置くと他の端末の開閉まで揃ってしまい、
+ * 手元では畳んでおきたいのにスマホで開いた状態が飛んでくる、ということが起きる。
+ *
+ * 枠ごとではなく**1つ**にしてあるのは、これが「ファイルを見ながら作業する人かどうか」
+ * という利用者の癖に属するため。枠ごとに覚えると、新しい枠を開くたびに押し直しになる。
+ */
+const PANEL_KEY = 'agentdashboard.project-files-open'
+
+function readPanelOpen(): boolean {
+  try {
+    return globalThis.localStorage?.getItem(PANEL_KEY) === '1'
+  } catch {
+    // 置けない設定のブラウザでも画面は動くべきなので、既定（畳む）へ落とす
+    return false
+  }
+}
+
+function writePanelOpen(open: boolean) {
+  try {
+    globalThis.localStorage?.setItem(PANEL_KEY, open ? '1' : '0')
+  } catch {
+    // 覚えられないだけで、この回の開閉は成立している
+  }
+}
+
 export function GroupView({ host, project }: Props) {
   const cards = useProjectCards(host, project)
+  const [filesOpen, setFilesOpen] = useState(readPanelOpen)
+
+  // 別のタブで切り替えた結果も拾う（同じ利用者の同じ癖なので、揃っていたほうが自然）
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === PANEL_KEY) {
+        setFilesOpen(event.newValue === '1')
+      }
+    }
+    globalThis.addEventListener('storage', onStorage)
+    return () => globalThis.removeEventListener('storage', onStorage)
+  }, [])
+
+  const toggleFiles = useCallback(() => {
+    setFilesOpen((now) => {
+      writePanelOpen(!now)
+      return !now
+    })
+  }, [])
 
   return (
     <section
@@ -41,35 +101,80 @@ export function GroupView({ host, project }: Props) {
       data-host={host}
       className="flex min-h-0 flex-1 flex-col gap-3"
     >
-      <header className="flex items-baseline gap-3">
+      <header className="flex items-center gap-2">
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          data-testid="project-files-toggle"
+          aria-expanded={filesOpen}
+          aria-label="ファイル"
+          title="ファイル"
+          className="shrink-0"
+          onClick={toggleFiles}
+        >
+          <span aria-hidden>☰</span>
+        </Button>
+
         <h2 className="min-w-0 truncate text-sm font-semibold" title={project}>
           {project}
         </h2>
         <span className="text-muted-foreground shrink-0 text-xs">
           {cards.length}セッション
         </span>
-        <Link
-          to={HOME}
-          className="text-primary ml-auto shrink-0 text-xs underline"
-        >
+
+        {/* 0本の枠でも起こせる必要がある（設計§14）。押す前に権限モードを選ぶ形は
+            一覧の枠と同じ部品なので、危険度の見え方も揃う */}
+        <div className="ml-auto shrink-0">
+          <SessionAdd host={host} project={project} compact />
+        </div>
+        <Link to={HOME} className="text-primary shrink-0 text-xs underline">
           一覧へ戻る
         </Link>
       </header>
 
-      {cards.length === 0 ? (
-        <p className="text-muted-foreground text-sm">
-          このプロジェクトのセッションはありません
-        </p>
-      ) : (
-        <div
-          data-testid="group-rail"
-          className="flex min-h-0 flex-1 gap-4 overflow-x-auto pb-2"
-        >
-          {cards.map((cardId) => (
-            <SessionView key={cardId} cardId={cardId} compact />
-          ))}
-        </div>
-      )}
+      <div className="flex min-h-0 flex-1 gap-4">
+        {filesOpen && (
+          /*
+            広い画面では左に常設し、狭い画面では**全幅のドロワー**として被せる
+            （設計§14）。並べると両方が狭くなり、どちらも読めない。
+          */
+          <aside
+            data-testid="project-files-panel"
+            className="bg-background border-border fixed inset-0 z-40 flex min-h-0 flex-col gap-2 border-r p-3 md:static md:z-auto md:w-80 md:shrink-0 md:p-0 md:pr-3"
+          >
+            <div className="flex items-center gap-2 md:hidden">
+              <span className="text-sm font-semibold">ファイル</span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                data-testid="project-files-close"
+                className="ml-auto"
+                onClick={toggleFiles}
+              >
+                閉じる
+              </Button>
+            </div>
+            <ProjectFiles host={host} project={project} />
+          </aside>
+        )}
+
+        {cards.length === 0 ? (
+          <p className="text-muted-foreground text-sm">
+            このプロジェクトのセッションはありません
+          </p>
+        ) : (
+          <div
+            data-testid="group-rail"
+            className="flex min-h-0 flex-1 gap-4 overflow-x-auto pb-2"
+          >
+            {cards.map((cardId) => (
+              <SessionView key={cardId} cardId={cardId} compact />
+            ))}
+          </div>
+        )}
+      </div>
     </section>
   )
 }
