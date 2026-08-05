@@ -8,7 +8,7 @@
 //!
 //! | 表の行 | ここでの叩き方 |
 //! |---|---|
-//! | REST 全エンドポイント | 他人のカードの一覧・履歴を要求する |
+//! | REST 全エンドポイント | 他人のカードの一覧・履歴を要求する／**他人の枠を一覧・削除し、他人の PC へ枠を作る** |
 //! | WS 購読 | `SubTranscript` / `SubPty` を他人のカードへ出す |
 //! | WS 操作 | `Kill` / `Archive` / `SetModel` / `SetPermissionMode` / `SendInput` / `Resize` / `PtyFlow` / 生の入力 / `Spawn`（他人の PC 宛て）を出す |
 //! | A2S | 自分の接続から**他人の card_id** を報告する |
@@ -238,6 +238,19 @@ impl Browser {
         let (addr, path, cookie) = (self.addr, path.to_string(), self.cookie.clone());
         let response = tokio::task::spawn_blocking(move || {
             testkit::request(addr, "GET", &path, None, Some(&cookie))
+        })
+        .await
+        .expect("HTTPスレッドが落ちないこと")
+        .expect("応答を読めること");
+        (response.status, response.body)
+    }
+
+    /// `GET` 以外も叩く（枠の追加・削除）。入館証の載せ方は同じ。
+    async fn request(&self, method: &str, path: &str, body: Option<&str>) -> (u16, String) {
+        let (addr, method, path) = (self.addr, method.to_string(), path.to_string());
+        let (body, cookie) = (body.map(str::to_string), self.cookie.clone());
+        let response = tokio::task::spawn_blocking(move || {
+            testkit::request(addr, &method, &path, body.as_deref(), Some(&cookie))
         })
         .await
         .expect("HTTPスレッドが落ちないこと")
@@ -733,6 +746,100 @@ async fn 同じアカウントへ3台以上を同時に繋げる() {
             "[{}] 別々の PC として登録されていない",
             backend.name
         );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 他人の枠は見えないし消せない() {
+    // 口が3つ増えたので、表の行も同じ数だけ増やす（イシューグループ_2026_0805_0514 設計§18）。
+    // **他人の PC と知らない PC を言い分けない**——言い分けると、IDを総当たりして
+    // 他人の持ち物の存在だけを調べられる
+    use sea_orm::{ColumnTrait as _, EntityTrait as _, QueryFilter as _};
+
+    for backend in common::backends("tenancy-projects").await {
+        let arena = Arena::start(backend.db.clone()).await;
+        let (mine, _mine_agent) = arena.tenant("わたし").await;
+        let (theirs, _their_agent) = arena.tenant("よそのひと").await;
+        let browser = arena.browser(&mine).await;
+
+        let ours = server_core::db::projects::add(
+            &backend.db,
+            mine.account_id,
+            None,
+            "/home/example/mine",
+            1,
+        )
+        .await
+        .expect("自分の枠を作れること");
+        let theirs_project = server_core::db::projects::add(
+            &backend.db,
+            theirs.account_id,
+            None,
+            "/home/example/theirs",
+            2,
+        )
+        .await
+        .expect("よその枠を作れること");
+
+        // ① 一覧に他人の枠は出ない
+        let (status, body) = browser.get("/api/projects").await;
+        assert_eq!(status, 200);
+        let listed: Vec<serde_json::Value> = serde_json::from_str(&body).expect("読めること");
+        assert_eq!(listed.len(), 1, "[{}] 実際: {body}", backend.name);
+        assert_eq!(listed[0]["path"], "/home/example/mine");
+
+        // ② 他人の枠は消せない。**知らない枠と同じ 404**
+        let (status, _) = browser
+            .request(
+                "DELETE",
+                &format!("/api/projects/{}", theirs_project.id),
+                None,
+            )
+            .await;
+        assert_eq!(status, 404, "[{}] 他人の枠を消せてしまった", backend.name);
+        let (unknown, _) = browser
+            .request("DELETE", &format!("/api/projects/{}", Uuid::new_v4()), None)
+            .await;
+        assert_eq!(
+            unknown, status,
+            "[{}] 他人の枠と知らない枠を言い分けている",
+            backend.name
+        );
+
+        // ③ 断られただけでなく、相手の枠が無傷であること
+        let still =
+            server_core::db::projects::get(&backend.db, theirs.account_id, theirs_project.id)
+                .await
+                .expect("読めること");
+        assert!(still.is_some(), "[{}] 他人の枠が消えている", backend.name);
+
+        // ④ 他人の PC を宛先にした追加も、知らない PC と同じ言葉で断る
+        let their_agent = server_core::db::entity::agents::Entity::find()
+            .filter(server_core::db::entity::agents::Column::AccountId.eq(theirs.account_id))
+            .one(&backend.db)
+            .await
+            .expect("読めること")
+            .expect("よその PC が登録されていること");
+        let (status, _) = browser
+            .request(
+                "POST",
+                "/api/projects",
+                Some(&serde_json::json!({ "host": their_agent.id, "path": "/x" }).to_string()),
+            )
+            .await;
+        assert_eq!(
+            status, 404,
+            "[{}] 他人の PC へ枠を作れてしまった",
+            backend.name
+        );
+
+        // ⑤ 正当な側では同じ操作が通ること（全部断っているだけの実装でも通らないように）
+        let (status, _) = browser
+            .request("DELETE", &format!("/api/projects/{}", ours.id), None)
+            .await;
+        assert_eq!(status, 204, "[{}] 自分の枠が消せない", backend.name);
 
         backend.finish().await;
     }
