@@ -222,7 +222,7 @@ function Row({
           </span>
         )}
       </Button>
-      <CopyPath full={full} root={root} />
+      <CopyPath full={full} root={root} isDir={entry.kind === 'dir'} />
     </li>
   )
 }
@@ -233,8 +233,19 @@ function Row({
  * `root` があれば**そこからの相対パス**、無ければ絶対パス。基準が分からない相対パスは
  * 貼られた側で解釈できないので、**何をコピーするのかは `title` に出す**。
  */
-function CopyPath({ full, root }: { full: string; root?: string }) {
-  const value = root === undefined ? full : relativeOf(root, full)
+function CopyPath({
+  full,
+  root,
+  isDir,
+}: {
+  full: string
+  root?: string
+  isDir: boolean
+}) {
+  const base = root === undefined ? full : relativeOf(root, full)
+  // **フォルダは末尾に `/` を付ける。** 貼られた側で「これは入れ物か中身か」が
+  // 一目で分かり、続けて名前を書き足すときにも区切りを打ち直さずに済む
+  const value = isDir && !base.endsWith('/') ? `${base}/` : base
   const [state, setState] = useState<'idle' | 'done' | 'failed'>('idle')
 
   const copy = async () => {

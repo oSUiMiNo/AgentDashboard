@@ -229,7 +229,7 @@ describe('PJT を追加', () => {
     const copy = (await screen.findAllByTestId('folder-copy'))[0]
     await userEvent.click(copy)
 
-    expect(written).toEqual(['/home/me/dev'])
+    expect(written).toEqual(['/home/me/dev/'])
     // 押しても階層は動かない（開く的と分かれている）
     expect(screen.getByTestId('folder-browser')).toHaveAttribute(
       'data-path',

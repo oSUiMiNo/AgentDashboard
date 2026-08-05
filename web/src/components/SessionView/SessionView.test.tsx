@@ -1,4 +1,6 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SessionView } from './SessionView'
 import type { SessionMeta } from '@/lib/protocol'
 import { applySessionSnapshot, clearSessions } from '@/stores/sessions'
@@ -99,5 +101,64 @@ describe('SessionView の更新間隔表示', () => {
     render(<SessionView cardId={CARD} />)
 
     expect(screen.queryByTestId('screen-interval')).toBeNull()
+  })
+})
+
+/**
+ * セッション専用画面の左パネル（設計§28）。
+ *
+ * **PJT 専用画面と同じ部品・同じ経路**で出す。ここが別実装になると、片方だけ直した
+ * ときに辿り方や相対パスの基準が食い違う——同じ列挙の口を使う部品が2つの作法を
+ * 持ってはいけない、という §13 の約束がそのまま効く。
+ */
+describe('セッション専用画面のファイル', () => {
+  beforeEach(() => {
+    globalThis.localStorage?.clear()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            path: '/home/example/dev/app',
+            entries: [{ name: 'MyDocs', kind: 'dir', is_project: false }],
+            truncated: false,
+          }),
+          { status: 200 },
+        ),
+      ),
+    )
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('ハンバーガーで左パネルが開き、そのセッションの枠から始まる', async () => {
+    clearSessions()
+    applySessionSnapshot([meta()])
+    useSettingsStore.setState({ settings: settingsFixture(), loading: false, lastError: null })
+    render(<SessionView cardId={CARD} />)
+
+    expect(screen.queryByTestId('project-files-panel')).toBeNull()
+    await userEvent.click(screen.getByTestId('project-files-toggle'))
+
+    expect(screen.getByTestId('project-files-panel')).toBeInTheDocument()
+    // 起点はそのセッションの作業ディレクトリ（PJT 専用画面と同じ根拠）
+    await waitFor(() =>
+      expect(screen.getByTestId('folder-browser')).toHaveAttribute(
+        'data-path',
+        '/home/example/dev/app',
+      ),
+    )
+  })
+
+  it('横並び（compact）では出さない', () => {
+    clearSessions()
+    applySessionSnapshot([meta()])
+    useSettingsStore.setState({ settings: settingsFixture(), loading: false, lastError: null })
+    render(<SessionView cardId={CARD} compact />)
+
+    // PJT 専用画面が既に持っているので、セッションの数だけ同じものを出さない
+    expect(screen.queryByTestId('project-files-toggle')).toBeNull()
   })
 })

@@ -27,6 +27,9 @@ import { TerminalPane } from '@/components/TerminalPane/TerminalPane'
 import { TranscriptTree } from '@/components/TranscriptTree/TranscriptTree'
 import { formatElapsed, formatScreenInterval } from '@/lib/time'
 import { isEnded, isHookSilent, statusLabel, statusTone } from '@/lib/protocol'
+import { ProjectFiles } from '@/components/ProjectFiles/ProjectFiles'
+import { useFilesPanel } from '@/lib/filesPanel'
+import { LOCAL_HOST } from '@/lib/routes'
 import type { CardId } from '@/lib/protocol'
 import { useNow } from '@/lib/sessions'
 import { useSessionCard } from '@/stores/sessions'
@@ -49,6 +52,8 @@ export function SessionView({ cardId, compact = false }: Props) {
   const now = useNow()
   // 単独で開いたときは履歴が主役。横並びのときは一望して即操作したいのでターミナル
   const [view, setView] = useState<View>(compact ? 'terminal' : 'transcript')
+  // PJT 専用画面と**同じ部品・同じ経路**（設計§28）。開閉の記憶も共有する
+  const [filesOpen, toggleFiles] = useFilesPanel()
 
   if (!session) {
     // 消えた直後の一瞬。単独表示のときは呼び出し側が「見つかりません」を出す
@@ -66,6 +71,21 @@ export function SessionView({ cardId, compact = false }: Props) {
       }`}
     >
       <header className="flex items-center gap-2 text-sm">
+        {!compact && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            data-testid="project-files-toggle"
+            aria-expanded={filesOpen}
+            aria-label="ファイル"
+            title="ファイル"
+            className="shrink-0"
+            onClick={toggleFiles}
+          >
+            <span aria-hidden>☰</span>
+          </Button>
+        )}
         <span
           aria-hidden
           className={`size-2.5 shrink-0 rounded-full ${statusTone(session.status)}`}
@@ -123,40 +143,74 @@ export function SessionView({ cardId, compact = false }: Props) {
         </div>
       </header>
 
-      <div className="flex items-center gap-2">
-        <div
-          role="tablist"
-          className="border-border bg-background/60 flex w-fit gap-1 rounded-lg border p-0.5 text-sm"
-        >
-          <ViewTab
-            current={view}
-            value="transcript"
-            onSelect={setView}
-            cardId={cardId}
+      <div className="flex min-h-0 flex-1 gap-4">
+        {!compact && filesOpen && (
+          /*
+            PJT 専用画面と同じ出し方（設計§14・§28）。広い画面では左に常設し、
+            狭い画面では**全幅のドロワー**として被せる。
+            **横並び（compact）では出さない**——あちらは PJT 専用画面が既に持っている
+          */
+          <aside
+            data-testid="project-files-panel"
+            className="bg-background border-border fixed inset-0 z-40 flex min-h-0 flex-col gap-2 border-r p-3 md:static md:z-auto md:w-80 md:shrink-0 md:p-0 md:pr-3"
           >
-            構造化ビュー
-          </ViewTab>
-          <ViewTab
-            current={view}
-            value="terminal"
-            onSelect={setView}
-            cardId={cardId}
+            <div className="flex items-center gap-2 md:hidden">
+              <span className="text-sm font-semibold">ファイル</span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                data-testid="project-files-close"
+                className="ml-auto"
+                onClick={toggleFiles}
+              >
+                閉じる
+              </Button>
+            </div>
+            <ProjectFiles
+              host={session.agent_id ?? LOCAL_HOST}
+              project={session.project}
+            />
+          </aside>
+        )}
+
+        <div className="flex min-h-0 flex-1 flex-col gap-2">
+        <div className="flex items-center gap-2">
+          <div
+            role="tablist"
+            className="border-border bg-background/60 flex w-fit gap-1 rounded-lg border p-0.5 text-sm"
           >
-            ターミナル
-          </ViewTab>
+            <ViewTab
+              current={view}
+              value="transcript"
+              onSelect={setView}
+              cardId={cardId}
+            >
+              構造化ビュー
+            </ViewTab>
+            <ViewTab
+              current={view}
+              value="terminal"
+              onSelect={setView}
+              cardId={cardId}
+            >
+              ターミナル
+            </ViewTab>
+          </div>
+          <ScreenInterval remote={session.agent_id !== null} shown={view === 'terminal'} />
         </div>
-        <ScreenInterval remote={session.agent_id !== null} shown={view === 'terminal'} />
-      </div>
 
-      {/* 表示していない側もマウントしたまま隠す（作り直さないため） */}
-      <div className={`flex min-h-0 flex-1 flex-col ${view === 'transcript' ? '' : 'hidden'}`}>
-        <TranscriptTree key={session.card_id} cardId={session.card_id} />
-      </div>
-      <div className={`flex min-h-0 flex-1 flex-col ${view === 'terminal' ? '' : 'hidden'}`}>
-        <TerminalPane key={session.card_id} cardId={session.card_id} />
-      </div>
+        {/* 表示していない側もマウントしたまま隠す（作り直さないため） */}
+        <div className={`flex min-h-0 flex-1 flex-col ${view === 'transcript' ? '' : 'hidden'}`}>
+          <TranscriptTree key={session.card_id} cardId={session.card_id} />
+        </div>
+        <div className={`flex min-h-0 flex-1 flex-col ${view === 'terminal' ? '' : 'hidden'}`}>
+          <TerminalPane key={session.card_id} cardId={session.card_id} />
+        </div>
 
-      <Composer cardId={session.card_id} status={session.status} />
+        <Composer cardId={session.card_id} status={session.status} />
+        </div>
+      </div>
     </section>
   )
 }

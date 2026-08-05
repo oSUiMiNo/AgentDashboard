@@ -113,9 +113,14 @@ describe('左パネル', () => {
     const rows = await screen.findAllByTestId('folder-copy')
     await userEvent.click(rows[0])
 
-    // 基準は枠のパス。絶対パスではなく**貼れる形**で取れること
-    expect(written).toEqual(['MyDocs'])
-    expect(rows[0]).toHaveAttribute('data-value', 'MyDocs')
+    // 基準は枠のパス。絶対パスではなく**貼れる形**で取れること。
+    // **フォルダは末尾に `/`**（入れ物だと一目で分かる）
+    expect(written).toEqual(['MyDocs/'])
+    expect(rows[0]).toHaveAttribute('data-value', 'MyDocs/')
+
+    // **ファイルには付かない。** 付けると、貼られた側で存在しない場所を指す
+    await userEvent.click(rows[1])
+    expect(written).toEqual(['MyDocs/', '計画.md'])
   })
 
   it('コピーを押しても階層は変わらない', async () => {

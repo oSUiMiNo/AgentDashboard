@@ -21,20 +21,20 @@
  *
  * # 左にファイル（イシューグループ_2026_0805_0514 設計§14）
  *
- * 左上のハンバーガーで [`ProjectFiles`] を開閉する。**セッション専用画面には出さない**
- * ——PJT のフォルダはセッションごとに変わらないので、セッションの数だけ同じものを
- * 出す意味が無い（設計§20 の読み替え）。
+ * 左上のハンバーガーで [`ProjectFiles`] を開閉する。**セッション専用画面にも
+ * 同じものが出る**（設計§28）——同じ部品・同じ経路で、開閉の記憶も共有する
+ * （[`@/lib/filesPanel`]）。
  *
  * この画面だからこそ、**左でパスをコピーして右のセッションの入力欄へ貼る**が1画面で
  * 完結する。配置を選んだ理由そのものなので、右側の横並びには手を入れていない。
  */
 
-import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router'
 import { ProjectFiles } from '@/components/ProjectFiles/ProjectFiles'
 import { SessionAdd } from '@/components/SessionAdd/SessionAdd'
 import { SessionView } from '@/components/SessionView/SessionView'
 import { Button } from '@/components/ui/button'
+import { useFilesPanel } from '@/lib/filesPanel'
 import { HOME } from '@/lib/routes'
 import { useProjectCards } from '@/stores/sessions'
 
@@ -53,46 +53,9 @@ interface Props {
  * 枠ごとではなく**1つ**にしてあるのは、これが「ファイルを見ながら作業する人かどうか」
  * という利用者の癖に属するため。枠ごとに覚えると、新しい枠を開くたびに押し直しになる。
  */
-const PANEL_KEY = 'agentdashboard.project-files-open'
-
-function readPanelOpen(): boolean {
-  try {
-    return globalThis.localStorage?.getItem(PANEL_KEY) === '1'
-  } catch {
-    // 置けない設定のブラウザでも画面は動くべきなので、既定（畳む）へ落とす
-    return false
-  }
-}
-
-function writePanelOpen(open: boolean) {
-  try {
-    globalThis.localStorage?.setItem(PANEL_KEY, open ? '1' : '0')
-  } catch {
-    // 覚えられないだけで、この回の開閉は成立している
-  }
-}
-
 export function GroupView({ host, project }: Props) {
   const cards = useProjectCards(host, project)
-  const [filesOpen, setFilesOpen] = useState(readPanelOpen)
-
-  // 別のタブで切り替えた結果も拾う（同じ利用者の同じ癖なので、揃っていたほうが自然）
-  useEffect(() => {
-    const onStorage = (event: StorageEvent) => {
-      if (event.key === PANEL_KEY) {
-        setFilesOpen(event.newValue === '1')
-      }
-    }
-    globalThis.addEventListener('storage', onStorage)
-    return () => globalThis.removeEventListener('storage', onStorage)
-  }, [])
-
-  const toggleFiles = useCallback(() => {
-    setFilesOpen((now) => {
-      writePanelOpen(!now)
-      return !now
-    })
-  }, [])
+  const [filesOpen, toggleFiles] = useFilesPanel()
 
   return (
     <section
