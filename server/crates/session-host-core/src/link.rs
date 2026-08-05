@@ -266,11 +266,17 @@ fn to_agent_message(event: &ServerMessage) -> Option<AgentMessage> {
             message: message.clone(),
         },
         // `BusStatus` はサーバ同士の話（インスタンスの間の連絡係。設計§12）。
-        // **PC は自分が繋いだ1台としか話さない**ので、運ぶ意味も運ぶ手段も無い
+        // **PC は自分が繋いだ1台としか話さない**ので、運ぶ意味も運ぶ手段も無い。
+        //
+        // PJT 枠（`ProjectUpsert` / `ProjectRemoved`）は**サーバの記録**で、PC は
+        // 持っていない（イシューグループ_2026_0805_0514 設計§2）。足すのも消すのも
+        // ブラウザ → サーバの REST で完結するので、こちらへ運ぶ経路は要らない
         ServerMessage::Hello { .. }
         | ServerMessage::TranscriptAppend { .. }
         | ServerMessage::TranscriptReset { .. }
-        | ServerMessage::BusStatus { .. } => return None,
+        | ServerMessage::BusStatus { .. }
+        | ServerMessage::ProjectUpsert { .. }
+        | ServerMessage::ProjectRemoved { .. } => return None,
     })
 }
 

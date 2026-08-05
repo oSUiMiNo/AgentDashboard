@@ -227,6 +227,24 @@ export type ServerMessage =
   | { t: 'parser_status'; state: 'ok' | 'degraded'; detail: string | null }
   | { t: 'bus_status'; state: 'ok' | 'degraded'; detail: string | null }
   | { t: 'selfheal'; phase: SelfhealPhase; detail: string | null }
+  | { t: 'project_upsert'; project: ProjectView }
+  | { t: 'project_removed'; project_id: string }
+
+/**
+ * 追加した PJT 枠1枚（イシューグループ_2026_0805_0514 設計§11）。
+ *
+ * **セッションが何本居るかは持たない。** カードから毎回数える——ここへ持たせると、
+ * カードの増減と枠の配信が食い違ったときに画面が嘘をつく。
+ *
+ * `host` は `agent_id` の文字列か、ローカルを表す `'local'`。REST のパス
+ * （`/api/hosts/{host}/dir`）と同じ綴りで、**サーバの記録の中の番兵とは別物**。
+ */
+export interface ProjectView {
+  id: string
+  host: string
+  path: string
+  created_at: number
+}
 
 /**
  * 自己修復の進み具合（設計§9）。

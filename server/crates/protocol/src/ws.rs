@@ -167,6 +167,26 @@ pub enum ClientMessage {
     },
 }
 
+/// 追加した PJT 枠1枚（イシューグループ_2026_0805_0514 設計§11）。
+///
+/// # なぜ「セッションが何本居るか」を持たないのか
+///
+/// カードから毎回数えるほうが正しいため（設計§2）。ここへ持たせると、カードが増減する
+/// たびに枠のほうも配り直す必要が生まれ、片方だけ届いたときに**画面が嘘をつく**。
+///
+/// # `host` が文字列なのはなぜか
+///
+/// 画面と REST が使う綴りをそのまま運ぶため。`agent_id` の文字列表現か、ローカルを
+/// 表す `"local"` のどちらかになる。**DB の番兵（nil UUID）とは別物**で、あちらは
+/// 記録の中だけの値。混ぜると、片方の綴りを変えたときにもう片方が黙って取り残される。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectView {
+    pub id: uuid::Uuid,
+    pub host: String,
+    pub path: String,
+    pub created_at: Timestamp,
+}
+
 /// サーバ → ブラウザ。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
@@ -249,6 +269,16 @@ pub enum ServerMessage {
         card_id: Option<CardId>,
         message: String,
     },
+    /// PJT 枠1枚の最新（イシューグループ_2026_0805_0514 設計§11）。
+    ///
+    /// **記録へ書けてから配る。** 書けなかったものを配ると、画面には出ているのに
+    /// 読み込み直すと消える——嘘をつくことになる。
+    ProjectUpsert { project: ProjectView },
+    /// PJT 枠が消えたことを伝える。
+    ///
+    /// 消したブラウザ以外の画面にも届ける必要があるので、`SessionRemoved` と同じ形で
+    /// 用意してある。
+    ProjectRemoved { project_id: uuid::Uuid },
 }
 
 #[cfg(test)]
@@ -398,10 +428,52 @@ mod tests {
                 card_id: None,
                 message: "claude を起動できませんでした".to_string(),
             },
+            ServerMessage::ProjectUpsert {
+                project: ProjectView {
+                    id: uuid::Uuid::new_v4(),
+                    host: "local".to_string(),
+                    path: "/home/example/dev/app".to_string(),
+                    created_at: 1_700_000_000_000,
+                },
+            },
+            ServerMessage::ProjectRemoved {
+                project_id: uuid::Uuid::new_v4(),
+            },
         ];
         for message in &all {
             assert_eq!(&roundtrip(message), message);
         }
+    }
+
+    /// 枠の種別が、TypeScript 側（`web/src/lib/protocol.ts`）と同じ JSON になること。
+    ///
+    /// 手書きで二重に定義しているので、**ここが唯一のズレ検出手段**になる。
+    /// 片方だけ直すとコンパイルは通るのに動かない、という追いにくい状態を防ぐ。
+    #[test]
+    fn 枠の増減は決まった綴りで線に乗る() {
+        let id = uuid::Uuid::nil();
+        let text = serde_json::to_string(&ServerMessage::ProjectUpsert {
+            project: ProjectView {
+                id,
+                host: "local".to_string(),
+                path: "/home/example/dev/app".to_string(),
+                created_at: 1_700_000_000_000,
+            },
+        })
+        .unwrap();
+        assert_eq!(
+            text,
+            format!(
+                r#"{{"t":"project_upsert","project":{{"id":"{id}","host":"local","path":"/home/example/dev/app","created_at":1700000000000}}}}"#
+            )
+        );
+
+        let text =
+            serde_json::to_string(&ServerMessage::ProjectRemoved { project_id: id }).unwrap();
+        assert_eq!(
+            text,
+            format!(r#"{{"t":"project_removed","project_id":"{id}"}}"#)
+        );
     }
 
     /// フロントエンド（TypeScript）は手書きの型で同じ JSON を組み立てる。

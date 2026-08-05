@@ -99,6 +99,29 @@ describe('サーバと同じ JSON になること', () => {
     expect(statusLabel(status)).toBe('異常終了')
   })
 
+  it('枠の増減は Rust と同じ綴りで往復する', () => {
+    // 手書きで二重に定義しているので、ここが唯一のズレ検出手段になる。
+    // 綴りは `protocol/src/ws.rs` の「枠の増減は決まった綴りで線に乗る」と対
+    const id = '00000000-0000-0000-0000-000000000000'
+    const upsert: ServerMessage = {
+      t: 'project_upsert',
+      project: {
+        id,
+        host: 'local',
+        path: '/home/example/dev/app',
+        created_at: 1700000000000,
+      },
+    }
+    expect(JSON.stringify(upsert)).toBe(
+      `{"t":"project_upsert","project":{"id":"${id}","host":"local","path":"/home/example/dev/app","created_at":1700000000000}}`,
+    )
+
+    const removed: ServerMessage = { t: 'project_removed', project_id: id }
+    expect(JSON.stringify(removed)).toBe(
+      `{"t":"project_removed","project_id":"${id}"}`,
+    )
+  })
+
   it('send_input', () => {
     const message: ClientMessage = {
       t: 'send_input',
