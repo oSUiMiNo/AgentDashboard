@@ -122,3 +122,53 @@
   --diff-code-delete-text-color: var(--color-foreground);
   --diff-code-selected-background-color: color-mix(in oklch, gold 18%, transparent);
 }
+
+/*
+  整形した Markdown の見た目（イシューグループ_2026_0805_0514 設計§15）。
+
+  目的は `計画.md` の進捗を読むことなので、**見出しの段差とチェックボックス**が読めれば足りる。
+  組版のライブラリを入れていないのは、要るのがこれだけだから——入れると、使っていない
+  見た目の規則まで一緒に抱えることになる。
+*/
+.prose-dashboard > :first-child { margin-top: 0; }
+.prose-dashboard > :last-child { margin-bottom: 0; }
+.prose-dashboard h1,
+.prose-dashboard h2,
+.prose-dashboard h3,
+.prose-dashboard h4 { font-weight: 600; line-height: 1.4; margin: 1.2em 0 0.5em; }
+.prose-dashboard h1 { font-size: 1.3em; }
+.prose-dashboard h2 { font-size: 1.15em; }
+.prose-dashboard h3 { font-size: 1.05em; }
+.prose-dashboard p, .prose-dashboard ul, .prose-dashboard ol { margin: 0.6em 0; }
+.prose-dashboard ul, .prose-dashboard ol { padding-left: 1.4em; }
+.prose-dashboard ul { list-style: disc; }
+.prose-dashboard ol { list-style: decimal; }
+/* 作業の進み具合そのものなので、印は本文より目立ってよい */
+.prose-dashboard li:has(> input[type='checkbox']) { list-style: none; margin-left: -1.4em; }
+.prose-dashboard input[type='checkbox'] { margin-right: 0.45em; vertical-align: middle; }
+.prose-dashboard code {
+  background: var(--color-muted);
+  border-radius: 4px;
+  padding: 0.05em 0.35em;
+  font-size: 0.9em;
+}
+.prose-dashboard pre {
+  background: var(--color-muted);
+  border-radius: 6px;
+  padding: 0.7em 0.9em;
+  overflow-x: auto;
+}
+.prose-dashboard pre code { background: none; padding: 0; }
+.prose-dashboard blockquote {
+  border-left: 3px solid var(--color-border);
+  padding-left: 0.8em;
+  color: var(--color-muted-foreground);
+}
+.prose-dashboard a { text-decoration: underline; }
+.prose-dashboard table { border-collapse: collapse; display: block; overflow-x: auto; }
+.prose-dashboard th, .prose-dashboard td {
+  border: 1px solid var(--color-border);
+  padding: 0.3em 0.6em;
+  text-align: left;
+}
+.prose-dashboard hr { border-top: 1px solid var(--color-border); margin: 1em 0; }
