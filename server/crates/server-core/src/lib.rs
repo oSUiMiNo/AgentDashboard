@@ -20,6 +20,7 @@ pub mod embed;
 pub mod gateway;
 pub mod hosts;
 pub mod portable;
+pub mod projects;
 pub mod registry;
 pub mod session_host;
 pub mod transcript;
@@ -29,7 +30,7 @@ use axum::{
     Router,
     http::{StatusCode, Uri, header},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{delete, get},
 };
 use std::sync::Arc;
 
@@ -59,6 +60,13 @@ pub fn routes(state: ws::AppState, auth: Arc<auth::AuthContext>) -> Router {
         // **鍵の内側**に置く——中身のある口なので、素通しにしてよい理由が無い
         .route("/api/hosts/{host}/dir", get(hosts::api_dir))
         .route("/api/hosts/{host}/file", get(hosts::api_file))
+        // 追加した PJT 枠（イシューグループ_2026_0805_0514 設計§10）。
+        // フォルダの口と同じく**鍵の内側**
+        .route(
+            "/api/projects",
+            get(projects::api_list).post(projects::api_add),
+        )
+        .route("/api/projects/{id}", delete(projects::api_remove))
         .with_state(state);
 
     guard(protected, Arc::clone(&auth))

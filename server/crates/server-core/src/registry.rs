@@ -299,6 +299,22 @@ impl SessionRegistry {
         self.bus.as_ref()
     }
 
+    /// 記録そのもの。**カード以外の表**（PJT 枠など）を読み書きする口が使う。
+    ///
+    /// カードの読み書きはこの型のメソッド越しに行うこと——**外から直に触ると
+    /// 「手元の写しと DB」の順序を守る場所が増える**（設計§9-1 の配線）。
+    pub fn db(&self) -> &DatabaseConnection {
+        &self.db
+    }
+
+    /// カード以外の知らせを、そのアカウントのブラウザへ配る（設計§11）。
+    ///
+    /// 配り方は [`Self::publish`] と同じ——**連絡係にも流す**ので、別のインスタンスに
+    /// 繋いでいるブラウザにも届く。呼ぶ側は**記録へ書けてから**呼ぶこと。
+    pub fn announce_account(&self, account_id: Uuid, message: ServerMessage) {
+        self.publish(account_id, message);
+    }
+
     /// 一覧の更新通知を購読する。**どのアカウントのぶんかは受け取る側が捨てる。**
     ///
     /// **購読を始めてから [`Self::list`] を呼ぶ**こと。逆順にすると、その隙間に起動した
