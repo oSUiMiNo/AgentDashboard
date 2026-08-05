@@ -57,7 +57,7 @@ function ShowLocation() {
   return <p data-testid="current-path">{location.pathname}</p>
 }
 
-function renderGroup(sessions: SessionMeta[]) {
+function renderGroup(sessions: SessionMeta[], projectId?: string) {
   applySessionSnapshot(sessions)
   return render(
     <MemoryRouter initialEntries={['/']}>
@@ -69,6 +69,7 @@ function renderGroup(sessions: SessionMeta[]) {
             <ProjectGroup
               host="local"
               project={PROJECT}
+              projectId={projectId}
               cards={sessions.map((session) => session.card_id)}
             />
           }
@@ -103,5 +104,30 @@ describe('ProjectGroup', () => {
 
     await userEvent.click(screen.getByTestId('session-tile'))
     expect(screen.getByTestId('current-path')).toHaveTextContent('/s/a')
+  })
+
+  it('カードから逆算した箱には「×」を出さない', () => {
+    // 消す対象を持たないので、押せるボタンにしない（設計§13）。そちらは
+    // カードが全部無くなれば自然に消える
+    renderGroup([meta('a')])
+
+    expect(screen.queryByTestId('project-remove')).toBeNull()
+  })
+
+  it('追加した枠には「×」が出て、セッションが居ると押せない', () => {
+    // 走っている作業を巻き添えにしない。**押せない理由も画面に出す**（設計§13）
+    renderGroup([meta('a')], 'p1')
+
+    const remove = screen.getByTestId('project-remove')
+    expect(remove).toBeDisabled()
+    expect(remove).toHaveAttribute('title', expect.stringContaining('セッションが動いている'))
+  })
+
+  it('セッションが0本なら「×」が押せる', () => {
+    renderGroup([], 'p1')
+
+    expect(screen.getByTestId('project-remove')).toBeEnabled()
+    // 0本のときは、次に何をすればよいかを出す
+    expect(screen.getByText(/「\+」で起こせます/)).toBeInTheDocument()
   })
 })

@@ -152,9 +152,14 @@ export async function addProject(
   cwd: string = WORK_DIR,
   agentName?: string,
 ): Promise<Locator> {
-  const group = page.locator(`[data-testid="project-group"][data-project="${cwd}"]`)
-  if ((await group.count()) > 0) {
-    return group.first()
+  // **枠の鍵は（PC, パス）の組**（設計§13）。パスだけで探すと、3台構成で
+  // 「1台目の /tmp」を使い回してしまい、2台目を名指ししたのに1台目で起きる
+  const host = await hostIdOf(page, agentName)
+  const existing = page.locator(
+    `[data-testid="project-group"][data-host="${host}"][data-project="${cwd}"]`,
+  )
+  if ((await existing.count()) > 0) {
+    return existing.first()
   }
 
   await page.getByTestId('project-add-open').click()
@@ -166,8 +171,53 @@ export async function addProject(
   await sheet.getByTestId('project-add-path').fill(cwd)
   await sheet.getByTestId('project-add-submit').click()
   await expect(sheet).toHaveCount(0)
-  await expect(group).toHaveCount(1)
-  return group
+
+  // **入力した形で探さない。** Windows 側から貼ったパスは PC 側で読み替えられるので、
+  // 枠は解決後の絶対パスで作られる（設計§13）。真実はサーバ側にあるので、そちらに聞く
+  const added = await page.evaluate(async (target) => {
+    const response = await fetch('/api/projects')
+    const rows = (await response.json()) as {
+      host: string
+      path: string
+      created_at: number
+    }[]
+    const mine = rows.filter((row) => row.host === target)
+    return (
+      mine.sort((a, b) => b.created_at - a.created_at)[0]?.path ?? ''
+    )
+  }, host)
+  const resolved = page.locator(
+    `[data-testid="project-group"][data-host="${host}"][data-project="${added}"]`,
+  )
+  await expect(resolved).toHaveCount(1)
+  return resolved
+}
+
+/**
+ * 名前から PC の識別子を引く。名指しが無ければローカル（または唯一の PC）。
+ *
+ * 枠も URL も `agent_id` を鍵に持つので、**名前のままでは照合できない**。
+ */
+async function hostIdOf(page: Page, agentName?: string): Promise<string> {
+  const agents = await page.evaluate(async () => {
+    const response = await fetch('/api/settings')
+    if (!response.ok) {
+      return [] as { id: string; name: string; connected: boolean }[]
+    }
+    return ((await response.json()) as {
+      agents: { id: string; name: string; connected: boolean }[]
+    }).agents
+  })
+  if (agentName !== undefined) {
+    const found = agents.find((agent) => agent.name === agentName)
+    if (found === undefined) {
+      throw new Error(`PC「${agentName}」が繋がっていません`)
+    }
+    return found.id
+  }
+  const connected = agents.filter((agent) => agent.connected)
+  // ローカルモードは PC を1台として並べないので、綴りは 'local' になる（設計§10）
+  return connected.length === 1 ? connected[0].id : 'local'
 }
 
 /**

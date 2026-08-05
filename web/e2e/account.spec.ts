@@ -21,7 +21,7 @@ test('ログインしないと一覧が見えない', async ({ page }) => {
   await page.goto('/')
 
   await expect(page.getByTestId('login-form')).toBeVisible()
-  await expect(page.getByTestId('spawn-form')).toHaveCount(0)
+  await expect(page.getByTestId('project-add-open')).toHaveCount(0)
 
   // 間違えたら理由が出る。**名前の有無とパスワード違いを呼び分けない**
   await page.getByTestId('login-name').fill('e2e')
@@ -31,7 +31,7 @@ test('ログインしないと一覧が見えない', async ({ page }) => {
 
   await page.getByTestId('login-password').fill('e2eのあいことば')
   await page.getByRole('button', { name: '入る' }).click()
-  await expect(page.getByTestId('spawn-form')).toBeVisible()
+  await expect(page.getByTestId('project-add-open')).toBeVisible()
 })
 
 test('鍵を発行すると平文が一度だけ出て、一覧に載る', async ({ page }) => {

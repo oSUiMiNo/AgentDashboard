@@ -100,7 +100,8 @@ test('小窓とグループ余白でクリックの意味が変わる', async ({
   // グループの余白をクリック → 全セッションが横並びで開く
   await page.goto('/')
   await page.getByTestId('project-group').click({ position: { x: 5, y: 5 } })
-  await expect(page).toHaveURL(`/p/${encodeURIComponent(WORK_DIR)}`)
+  // 鍵に PC が入る（設計§16）。ローカルは `local`
+  await expect(page).toHaveURL(`/p/local/${encodeURIComponent(WORK_DIR)}`)
   await expect(page.getByTestId('group-view')).toBeVisible()
 
   // 「一覧」ではなく専用画面そのものが2枚並ぶ（見比べられる状態になっている）

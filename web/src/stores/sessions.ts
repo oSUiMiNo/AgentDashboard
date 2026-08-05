@@ -372,6 +372,11 @@ export function setAccountFilter(account: string | null) {
   notifyStructure()
 }
 
+/** 購読しない読み取り（テスト用）。 */
+export function getProjectGroups(): ProjectGrouping[] {
+  return groups
+}
+
 export function useProjectGroups(): ProjectGrouping[] {
   return useSyncExternalStore(
     subscribeStructure,

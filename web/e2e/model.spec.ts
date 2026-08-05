@@ -120,11 +120,13 @@ test('横並び画面でも片方だけが変わる', async ({ page }) => {
   await page.getByTestId('session-tile').first().click()
   await page.goBack()
   // 同じプロジェクトの2本を横並びで開く
-  const project = await page
-    .getByTestId('project-group')
-    .first()
-    .getAttribute('data-project')
-  await page.goto(`/p/${encodeURIComponent(project ?? '')}`)
+  const group = page.getByTestId('project-group').first()
+  const project = await group.getAttribute('data-project')
+  // 鍵は（PC, パス）の組（設計§16）。枠が名乗っている PC をそのまま使う
+  const host = await group.getAttribute('data-host')
+  await page.goto(
+    `/p/${encodeURIComponent(host ?? 'local')}/${encodeURIComponent(project ?? '')}`,
+  )
 
   const views = page.getByTestId('session-view')
   await expect(views).toHaveCount(2)
