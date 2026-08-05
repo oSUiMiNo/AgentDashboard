@@ -484,6 +484,47 @@ async fn 設定はアカウントとサーバ全体で別々に持てる() {
     }
 }
 
+/// 枠の自動起動は、行が無いあいだ既定で読める（イシューグループ_2026_0805_0514 §12）。
+///
+/// `always_bypass_permissions` と違って **PC 側に初期値の出どころが無い**ので、
+/// `Option` ではなく既定で埋めて返す形になっている。ここが `None` を返す作りに
+/// 変わると、画面が「まだ選んでいない」を扱う羽目になる。
+#[tokio::test]
+async fn 枠の自動起動は行が無ければ既定で読める() {
+    for backend in common::backends("autostart").await {
+        assert!(
+            !settings::project_autostart_session(&backend.db, db::LOCAL_ACCOUNT_ID).await,
+            "[{}] 行が無いのに ON で読めた",
+            backend.name
+        );
+
+        settings::set_project_autostart_session(&backend.db, db::LOCAL_ACCOUNT_ID, true)
+            .await
+            .unwrap();
+        assert!(
+            settings::project_autostart_session(&backend.db, db::LOCAL_ACCOUNT_ID).await,
+            "[{}] 書いた値が読めない",
+            backend.name
+        );
+
+        // 消したら既定へ戻る（行が無いことに意味がある、という約束）
+        settings::remove(
+            &backend.db,
+            db::LOCAL_ACCOUNT_ID,
+            settings::PROJECT_AUTOSTART_SESSION,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !settings::project_autostart_session(&backend.db, db::LOCAL_ACCOUNT_ID).await,
+            "[{}] 消しても ON のまま",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
 /// ログインセッションの置き場所（設計§8-2）。**結線はフェーズ5**だが、置き場所は
 /// 統合前に単体で固める（テスト計画F2）。
 mod ログインセッション {

@@ -101,7 +101,7 @@ async fn 画面の選択肢はすべて通る() {
 /// 書き出して読み戻すと元の状態へ戻ること（持ち出し設計§7・§8）。
 ///
 /// **持ち出しの目的そのもの。** ここが通らないなら、書き出しか読み込みのどちらかが
-/// 4つ揃っていない。
+/// 揃っていない。**キーを1つ足したら、この本文にも1つ足すこと。**
 #[tokio::test]
 async fn 書き出して読み戻すと元へ戻る() {
     let (server, dir) = server().await;
@@ -110,7 +110,8 @@ async fn 書き出して読み戻すと元へ戻る() {
     let (status, _) = server
         .put(
             "/api/settings",
-            r#"{"always_bypass_permissions":true,"sync_interval_secs":5,
+            r#"{"always_bypass_permissions":true,"project_autostart_session":true,
+                "sync_interval_secs":5,
                 "screen_interval_ms":1000,"scrollback_lines":4000}"#,
         )
         .await;
@@ -120,11 +121,12 @@ async fn 書き出して読み戻すと元へ戻る() {
     assert_eq!(status, 200, "{exported}");
     assert!(exported.contains("agentdashboard-settings"), "{exported}");
 
-    // 4つとも別の値へ変える
+    // 全部を別の値へ変える
     let (status, _) = server
         .put(
             "/api/settings",
-            r#"{"always_bypass_permissions":false,"sync_interval_secs":60,
+            r#"{"always_bypass_permissions":false,"project_autostart_session":false,
+                "sync_interval_secs":60,
                 "screen_interval_ms":20000,"scrollback_lines":1000}"#,
         )
         .await;
@@ -143,6 +145,10 @@ async fn 書き出して読み戻すと元へ戻る() {
         body.contains("\"always_bypass_permissions\":true"),
         "{body}"
     );
+    assert!(
+        body.contains("\"project_autostart_session\":true"),
+        "{body}"
+    );
     assert!(body.contains("\"sync_interval_secs\":5"), "{body}");
     assert!(body.contains("\"screen_interval_ms\":1000"), "{body}");
     assert!(body.contains("\"scrollback_lines\":4000"), "{body}");
@@ -150,7 +156,7 @@ async fn 書き出して読み戻すと元へ戻る() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// 書き出しに入るのはアカウントの4つだけで、秘密もサーバ全体のものも入らないこと
+/// 書き出しに入るのはアカウントのものだけで、秘密もサーバ全体のものも入らないこと
 /// （持ち出し設計§7）。
 #[tokio::test]
 async fn 書き出しにはアカウントの設定しか入らない() {
@@ -166,6 +172,7 @@ async fn 書き出しにはアカウントの設定しか入らない() {
         keys,
         [
             "always_bypass_permissions",
+            "project_autostart_session",
             "screen_interval_ms",
             "scrollback_lines",
             "sync_interval_secs"

@@ -45,7 +45,12 @@ pub struct Exported {
 ///
 /// **行が無い設定も、埋めた値で書き出す**（同§7）。行があるものだけを書き出すと、
 /// 別のアカウントで読み込んだときに向こうの既存の値が残り、画面が一致しない。
-pub fn exported(intervals: Intervals, always_bypass: bool, exported_by: &str) -> Exported {
+pub fn exported(
+    intervals: Intervals,
+    always_bypass: bool,
+    project_autostart: bool,
+    exported_by: &str,
+) -> Exported {
     Exported {
         kind: KIND,
         format: FORMAT,
@@ -54,6 +59,10 @@ pub fn exported(intervals: Intervals, always_bypass: bool, exported_by: &str) ->
             (
                 settings::ALWAYS_BYPASS_PERMISSIONS.to_string(),
                 serde_json::json!(always_bypass),
+            ),
+            (
+                settings::PROJECT_AUTOSTART_SESSION.to_string(),
+                serde_json::json!(project_autostart),
             ),
             (
                 settings::SYNC_INTERVAL_SECS.to_string(),
@@ -95,6 +104,13 @@ impl Parsed {
     pub fn always_bypass_permissions(&self) -> Option<bool> {
         self.values
             .get(settings::ALWAYS_BYPASS_PERMISSIONS)
+            .and_then(serde_json::Value::as_bool)
+    }
+
+    /// 枠を足したら1本起こすか。入っていなければ `None`（＝いまの値を残す）。
+    pub fn project_autostart_session(&self) -> Option<bool> {
+        self.values
+            .get(settings::PROJECT_AUTOSTART_SESSION)
             .and_then(serde_json::Value::as_bool)
     }
 
@@ -202,16 +218,21 @@ mod tests {
     use super::*;
 
     fn 書き出し() -> String {
-        let exported = exported(Intervals::default(), true, "0.0.0-test");
+        let exported = exported(Intervals::default(), true, true, "0.0.0-test");
         serde_json::to_string_pretty(&exported).expect("書き出せること")
     }
 
     #[test]
     fn 書き出したものはそのまま読み戻せる() {
         let parsed = parse(&書き出し()).expect("読めること");
-        assert_eq!(parsed.applied().len(), 4, "4つ揃って出ること");
+        assert_eq!(
+            parsed.applied().len(),
+            settings::ACCOUNT_KEYS.len(),
+            "アカウントの設定が全部揃って出ること"
+        );
         assert!(parsed.ignored().is_empty());
         assert_eq!(parsed.always_bypass_permissions(), Some(true));
+        assert_eq!(parsed.project_autostart_session(), Some(true));
         assert_eq!(
             parsed.merged_intervals(Intervals::default()),
             Intervals::default()

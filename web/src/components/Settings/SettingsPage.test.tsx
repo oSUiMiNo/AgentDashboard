@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { SettingsPage } from '@/components/Settings/SettingsPage'
@@ -61,5 +62,49 @@ describe('常に権限確認スキップモードで開く', () => {
     )
 
     expect(screen.getByTestId('always-bypass-toggle')).toBeDisabled()
+  })
+})
+
+describe('PJT を追加したらセッションを1本起こす', () => {
+  beforeEach(() => {
+    vi.spyOn(useSettingsStore.getState(), 'load').mockResolvedValue(undefined)
+  })
+
+  it('既定は OFF', () => {
+    // 枠を置くことと作業を始めることは別の意思なので、押していない側が既定
+    // （イシューグループ_2026_0805_0514 §12）
+    show()
+    expect(screen.getByTestId('project-autostart-toggle')).not.toBeChecked()
+  })
+
+  it('記録が ON なら入った状態で出る', () => {
+    show({ project_autostart_session: true })
+    expect(screen.getByTestId('project-autostart-toggle')).toBeChecked()
+  })
+
+  it('押すと、その項目だけを送る', async () => {
+    // 1項目のために全部を送り直すと、別のタブで開いている変更を巻き戻す
+    const update = vi.fn().mockResolvedValue(true)
+    useSettingsStore.setState({ update })
+    show()
+
+    await userEvent.click(screen.getByTestId('project-autostart-toggle'))
+
+    expect(update).toHaveBeenCalledWith({ project_autostart_session: true })
+  })
+
+  it('読み込み中は押せない', () => {
+    useSettingsStore.setState({
+      settings: settingsFixture(),
+      loading: true,
+      lastError: null,
+    })
+    render(
+      <MemoryRouter>
+        <SettingsPage />
+      </MemoryRouter>,
+    )
+
+    expect(screen.getByTestId('project-autostart-toggle')).toBeDisabled()
   })
 })

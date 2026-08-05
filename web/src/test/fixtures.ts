@@ -18,6 +18,7 @@ import type { AgentInfo, Settings } from '@/stores/settings'
 export function settingsFixture(overrides: Partial<Settings> = {}): Settings {
   return {
     always_bypass_permissions: false,
+    project_autostart_session: false,
     available_modes: ['default'],
     model_tables: {},
     agents: [],

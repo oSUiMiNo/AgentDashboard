@@ -49,6 +49,12 @@ pub struct SettingsView {
     /// **どの構成でも画面から変えられる**（持ち出し設計§6）。「変えられるか」を運ぶ欄は
     /// 置かない——区別が無くなったので、真偽を運ぶ意味も無い。
     pub always_bypass_permissions: bool,
+    /// PJT の枠を足したら、続けてセッションを1本起こすか（イシューグループ_2026_0805_0514
+    /// 設計§12）。
+    ///
+    /// **PC 側に初期値の出どころが無い**ので、`always_bypass_permissions` と違って
+    /// 名乗りを覗きに行かない。行が無ければ既定（`false`）がそのまま出る。
+    pub project_autostart_session: bool,
     /// その CLI が受け付ける権限モード（正規値）。繋がっている PC ぶんを合併したもの
     pub available_modes: Vec<protocol::PermissionMode>,
     /// PC ごとのモデル表（設計§13-4）。キーは `agent_id`、ローカルは `"local"`
@@ -183,6 +189,11 @@ async fn api_server_settings(
                 .any(|capability| capability.always_bypass_permissions),
         )
         .await,
+        project_autostart_session: db::settings::project_autostart_session(
+            hub.db(),
+            identity.account_id,
+        )
+        .await,
         available_modes,
         model_tables,
         agents: server_core::account::agents_of(&hub, identity.account_id).await?,
@@ -204,6 +215,7 @@ async fn api_server_settings(
 #[serde(default)]
 pub struct SettingsUpdate {
     pub always_bypass_permissions: Option<bool>,
+    pub project_autostart_session: Option<bool>,
     /// LAN 開放の共有パスワード（設計§8-3）。**平文で受けてここでハッシュにする。**
     ///
     /// 受け付けるのは**ローカルモードの 127.0.0.1 から**だけ。LAN の向こうから
@@ -279,6 +291,11 @@ pub async fn api_settings(
             store.always_bypass_permissions(),
         )
         .await,
+        project_autostart_session: db::settings::project_autostart_session(
+            state.auth.db(),
+            identity.account_id,
+        )
+        .await,
         available_modes: store.available_modes().to_vec(),
         model_tables: store.local_model_tables(&state.manager.aliases().all()),
         // ローカルモードに PC という単位は無い（`"local"` を1台として並べない）
@@ -332,6 +349,12 @@ pub async fn api_update_settings(
             .map_err(save_failed)?;
     }
 
+    if let Some(value) = update.project_autostart_session {
+        db::settings::set_project_autostart_session(state.auth.db(), identity.account_id, value)
+            .await
+            .map_err(save_failed)?;
+    }
+
     // **設定の持ち主が居なくても、DB のぶんは保存できている。** 居ないことを理由に
     // 404 を返すと、保存されたのに失敗したように見える（統合テストは画面を立てずに
     // セッションだけを確かめることがある）
@@ -344,6 +367,11 @@ pub async fn api_update_settings(
                 state.auth.db(),
                 identity.account_id,
                 false,
+            )
+            .await,
+            project_autostart_session: db::settings::project_autostart_session(
+                state.auth.db(),
+                identity.account_id,
             )
             .await,
             available_modes: Vec::new(),
@@ -396,6 +424,12 @@ async fn api_server_update_settings(
 
     if let Some(value) = update.always_bypass_permissions {
         db::settings::set_always_bypass_permissions(hub.db(), identity.account_id, value)
+            .await
+            .map_err(save_failed)?;
+    }
+
+    if let Some(value) = update.project_autostart_session {
+        db::settings::set_project_autostart_session(hub.db(), identity.account_id, value)
             .await
             .map_err(save_failed)?;
     }
@@ -453,6 +487,7 @@ async fn api_export(
     download(server_core::portable::exported(
         intervals,
         always_bypass,
+        db::settings::project_autostart_session(state.auth.db(), identity.account_id).await,
         env!("CARGO_PKG_VERSION"),
     ))
 }
@@ -484,6 +519,11 @@ async fn api_import(
             .await
             .map_err(save_failed)?;
     }
+    if let Some(value) = parsed.project_autostart_session() {
+        db::settings::set_project_autostart_session(state.auth.db(), identity.account_id, value)
+            .await
+            .map_err(save_failed)?;
+    }
 
     Ok(Json(ImportOutcome {
         applied: parsed.applied(),
@@ -503,6 +543,7 @@ async fn api_server_export(
     download(server_core::portable::exported(
         intervals,
         always_bypass,
+        db::settings::project_autostart_session(hub.db(), identity.account_id).await,
         env!("CARGO_PKG_VERSION"),
     ))
 }
@@ -528,6 +569,11 @@ async fn api_server_import(
     }
     if let Some(value) = parsed.always_bypass_permissions() {
         db::settings::set_always_bypass_permissions(hub.db(), identity.account_id, value)
+            .await
+            .map_err(save_failed)?;
+    }
+    if let Some(value) = parsed.project_autostart_session() {
+        db::settings::set_project_autostart_session(hub.db(), identity.account_id, value)
             .await
             .map_err(save_failed)?;
     }

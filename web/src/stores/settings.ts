@@ -67,6 +67,14 @@ export interface Settings {
    * 記録なので、別の端末で開いても同じ値になる。
    */
   always_bypass_permissions: boolean
+  /**
+   * PJT の枠を足したら、続けてセッションを1本起こすか（イシューグループ_2026_0805_0514
+   * 設計§12）。
+   *
+   * 枠を置くことと、そこで作業を始めることは別の意思なので**既定は OFF**。
+   * ON にすると、追加したその場で1本立ち上がる。
+   */
+  project_autostart_session: boolean
   /** その CLI が受け付けるモード（正規値）。繋がっている PC ぶんを合併したもの */
   available_modes: PermissionMode[]
   /**
@@ -84,6 +92,7 @@ export interface Settings {
 /** 触った項目だけを送る（他のタブの変更を巻き戻さないため）。 */
 export type SettingsPatch = Partial<{
   always_bypass_permissions: boolean
+  project_autostart_session: boolean
   lan_password: string
   sync_interval_secs: number
   screen_interval_ms: number
@@ -118,6 +127,8 @@ interface SettingsState {
  */
 const FALLBACK: Settings = {
   always_bypass_permissions: false,
+  // 読めていない間に「追加したら起こす」で出すと、意図しない claude が1本立ち上がる
+  project_autostart_session: false,
   available_modes: PERMISSION_MODES.map((mode) => mode.value),
   // 実測が無い状態が正しい初期値。推測で埋めると、選択肢に嘘の版番号が出る
   model_tables: {},
@@ -187,11 +198,17 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     // **押した瞬間に反映する。** サーバの応答を待つと、制御されたチェックボックスが
     // 一度元の値へ描き直され、利用者からは「押したのに戻った」ように見える。
     // 送っただけで確定していないもの（パスワード）は手元へ映さない
-    if (patch.always_bypass_permissions !== undefined) {
+    if (
+      patch.always_bypass_permissions !== undefined ||
+      patch.project_autostart_session !== undefined
+    ) {
       set({
         settings: {
           ...previous,
-          always_bypass_permissions: patch.always_bypass_permissions,
+          always_bypass_permissions:
+            patch.always_bypass_permissions ?? previous.always_bypass_permissions,
+          project_autostart_session:
+            patch.project_autostart_session ?? previous.project_autostart_session,
         },
         lastError: null,
       })

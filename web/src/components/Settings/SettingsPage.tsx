@@ -96,6 +96,33 @@ export function SettingsPage() {
         </p>
       </div>
 
+      <div className="border-border flex flex-col gap-2 rounded-xl border p-4">
+        <label
+          data-testid="project-autostart-label"
+          className="flex items-center gap-3"
+        >
+          <input
+            type="checkbox"
+            data-testid="project-autostart-toggle"
+            className="size-4 disabled:cursor-not-allowed"
+            disabled={loading}
+            checked={settings.project_autostart_session}
+            onChange={(event) =>
+              void update({ project_autostart_session: event.target.checked })
+            }
+          />
+          <span className="text-sm font-medium">
+            PJT を追加したらセッションを1本起こす
+          </span>
+        </label>
+        <p className="text-muted-foreground text-xs">
+          オンにすると、PJT を追加したその場でセッションが1本立ち上がります。
+          権限モードは上の既定に従います——モードを選んで起こしたいときは、
+          追加してから枠の「+」を押してください。
+          オフのときは枠だけが増えます（あとから「+」で足せます）。
+        </p>
+      </div>
+
       <div className="border-border flex flex-col gap-3 rounded-xl border p-4">
         <h3 className="text-sm font-medium">同期と表示の間隔</h3>
         <Choice

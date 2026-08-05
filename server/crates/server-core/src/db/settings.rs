@@ -44,6 +44,21 @@ pub const DEFAULT_SCROLLBACK_LINES: u64 = 1_000;
 pub const ALWAYS_BYPASS_PERMISSIONS: &str = "always_bypass_permissions";
 pub const DEFAULT_ALWAYS_BYPASS_PERMISSIONS: bool = false;
 
+/// PJT の枠を足したときに、続けてセッションを1本起こすか（イシューグループ_2026_0805_0514
+/// 設計§12）。
+///
+/// **アカウントスコープ**。`always_bypass_permissions` と同じで、起動の入口をどう使うかは
+/// 完全に利用体験の話になる。
+///
+/// 既定は `false`。枠を足すことと、そこで作業を始めることは別の意思なので、
+/// **押していない側を既定にする**。ON にすると「追加したのに何も起きない」という
+/// 手間が1回減り、OFF のままなら枠だけが増える。
+///
+/// 起こすときに権限モードは渡さない。既定に従うのは PC 側の既存の経路で、
+/// モードを選んで起こしたい場合は枠の「+」を押す（そちらには選択が付く）。
+pub const PROJECT_AUTOSTART_SESSION: &str = "project_autostart_session";
+pub const DEFAULT_PROJECT_AUTOSTART_SESSION: bool = false;
+
 /// LAN 開放時の共有パスワード（argon2 ハッシュ）。**サーバ全体スコープ**（設計§8-3）。
 pub const LAN_PASSWORD_HASH: &str = "lan_password_hash";
 
@@ -61,8 +76,9 @@ pub const DEFAULT_UPDATE_CHECK_ENABLED: bool = true;
 /// サーバ全体スコープのもの（LAN パスワード・更新確認）はここに入らないので、
 /// **秘密が持ち出しへ混ざる余地が構造的に無い**。裏返すと、**アカウントスコープへ
 /// 秘密を置いてはいけない**——ここが持ち出しの対象そのものになる。
-pub const ACCOUNT_KEYS: [&str; 4] = [
+pub const ACCOUNT_KEYS: [&str; 5] = [
     ALWAYS_BYPASS_PERMISSIONS,
+    PROJECT_AUTOSTART_SESSION,
     SYNC_INTERVAL_SECS,
     SCREEN_INTERVAL_MS,
     SCROLLBACK_LINES,
@@ -96,7 +112,7 @@ pub fn check(key: &str, value: &serde_json::Value) -> Result<(), String> {
         }
     };
     match key {
-        ALWAYS_BYPASS_PERMISSIONS => value
+        ALWAYS_BYPASS_PERMISSIONS | PROJECT_AUTOSTART_SESSION => value
             .as_bool()
             .map(|_| ())
             .ok_or_else(|| format!("{key} には true か false を指定してください")),
@@ -256,6 +272,39 @@ pub async fn set_always_bypass_permissions(
     .await
 }
 
+/// 枠を足したら1本起こすか。**行が無ければ既定**（イシューグループ_2026_0805_0514 §12）。
+///
+/// こちらは `always_bypass_permissions` と違って PC 側に初期値の出どころが無い
+/// （`config.toml` にも名乗りにも対応する値が無い）ので、`Option` を返さず
+/// **既定で埋めて返す**。読めなかったときも既定に倒す——読めない事故と
+/// 「まだ選んでいない」で落とし先が同じなので、分ける意味が無い。
+pub async fn project_autostart_session(db: &DatabaseConnection, account: Uuid) -> bool {
+    match get(db, account, PROJECT_AUTOSTART_SESSION).await {
+        Ok(value) => value
+            .and_then(|value| value.as_bool())
+            .unwrap_or(DEFAULT_PROJECT_AUTOSTART_SESSION),
+        Err(err) => {
+            tracing::warn!("枠の自動起動の設定を読めません: {err}");
+            DEFAULT_PROJECT_AUTOSTART_SESSION
+        }
+    }
+}
+
+/// 枠の自動起動を決める。**ここで行ができ、以後は記録が正になる。**
+pub async fn set_project_autostart_session(
+    db: &DatabaseConnection,
+    account: Uuid,
+    value: bool,
+) -> Result<(), DbErr> {
+    put(
+        db,
+        account,
+        PROJECT_AUTOSTART_SESSION,
+        serde_json::json!(value),
+    )
+    .await
+}
+
 /// LAN 開放の共有パスワード（ハッシュ）。設定されていなければ `None`。
 pub async fn lan_password_hash(db: &DatabaseConnection) -> Result<Option<String>, DbErr> {
     Ok(get(db, super::SERVER_SCOPE_ID, LAN_PASSWORD_HASH)
@@ -295,9 +344,49 @@ mod tests {
     #[test]
     fn 入れてよい値だけが通る() {
         assert!(check(ALWAYS_BYPASS_PERMISSIONS, &serde_json::json!(true)).is_ok());
+        assert!(check(PROJECT_AUTOSTART_SESSION, &serde_json::json!(true)).is_ok());
         assert!(check(SYNC_INTERVAL_SECS, &serde_json::json!(20)).is_ok());
         assert!(check(SCREEN_INTERVAL_MS, &serde_json::json!(20_000)).is_ok());
         assert!(check(SCROLLBACK_LINES, &serde_json::json!(1_000)).is_ok());
+    }
+
+    /// 真偽値のキーは、**数や文字列を受け取らない**。
+    ///
+    /// REST は直に叩けるので、画面がチェックボックスで絞っていることは担保にならない。
+    /// 断る理由にキーの名前が入ることも一緒に見る（そのまま利用者へ出る文）。
+    #[test]
+    fn 真偽値のキーは真偽値だけを通す() {
+        for key in [ALWAYS_BYPASS_PERMISSIONS, PROJECT_AUTOSTART_SESSION] {
+            assert!(check(key, &serde_json::json!(false)).is_ok(), "{key}");
+            for wrong in [
+                serde_json::json!(1),
+                serde_json::json!("true"),
+                serde_json::json!(null),
+                serde_json::json!([true]),
+            ] {
+                let reason = check(key, &wrong).expect_err(&format!("{key} が {wrong} を通した"));
+                assert!(reason.contains(key), "{reason}");
+            }
+        }
+    }
+
+    /// **持ち出しの対象はこの並びで決まる。** キーを足したらこの数も動く——
+    /// 書き換え忘れると、足したキーが書き出されないまま「揃っている」ことになる。
+    #[test]
+    fn アカウントの設定は5つ() {
+        assert_eq!(ACCOUNT_KEYS.len(), 5);
+        assert!(ACCOUNT_KEYS.contains(&PROJECT_AUTOSTART_SESSION));
+        // サーバ全体スコープのものが混ざっていないこと（混ざると秘密が持ち出しへ乗る）
+        assert!(!ACCOUNT_KEYS.contains(&LAN_PASSWORD_HASH));
+        assert!(!ACCOUNT_KEYS.contains(&UPDATE_CHECK_ENABLED));
+        // 全部が `check()` を通る綴りであること
+        for key in ACCOUNT_KEYS {
+            assert!(
+                check(key, &serde_json::json!(true)).is_ok()
+                    || check(key, &serde_json::json!(20)).is_ok(),
+                "{key} は check() が知らない"
+            );
+        }
     }
 
     #[test]
