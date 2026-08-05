@@ -31,7 +31,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use protocol::{AgentId, ws::ProjectView, ws::ServerMessage};
+use protocol::{AgentId, PermissionMode, ws::ProjectView, ws::ServerMessage};
 use sea_orm::{ColumnTrait as _, DatabaseConnection, EntityTrait as _, QueryFilter as _};
 use uuid::Uuid;
 
@@ -49,10 +49,16 @@ pub struct AddResponse {
     pub project: ProjectView,
     /// 追加と同時にセッションを起こしたか（設計§10）。
     ///
-    /// **起こすかどうかを決めるのは設定**（§12）で、実装はフェーズ4。この段では
-    /// 常に `false` になるが、**欄は先に置く**——後から足すと、画面が「起きたのか
-    /// どうか」を知る手段の無い版が一度出回ることになる。
+    /// 起こすかどうかを決めるのは設定（§12）。切っていれば常に `false` になる。
     pub spawned: bool,
+    /// 起こそうとして駄目だった理由（設計§26-1）。起こさなかった場合は `None`。
+    ///
+    /// **`spawned: false` だけでは足りない。** 設定を切っているのか、PC が寝ていて
+    /// 起こせなかったのかが区別できず、画面には「起きませんでした」としか出せない
+    /// ——§17 が「動かないではなく何が起きているかを言い分ける」と決めているのに、
+    /// ここだけ言い分けられないことになる。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spawn_error: Option<String>,
 }
 
 /// `GET /api/projects` — このアカウントの枠。
@@ -101,11 +107,48 @@ pub async fn api_add(
         },
     );
 
+    // **枠が先、セッションは後。** 起こせなくても枠は残す（§26-1）——消してしまうと、
+    // PC が寝ているだけなのに「追加そのものが失敗した」ように見える
+    let (spawned, spawn_error) =
+        if db::settings::project_autostart_session(db, identity.account_id).await {
+            match state
+                .agent
+                .spawn(crate::session_host::SpawnRequest {
+                    account_id: identity.account_id,
+                    target,
+                    cwd: &request.path,
+                    // **既定に従う**（§12）。ここを `None` にすると「スキップの指定は無し」に
+                    // なってしまい、トグルを ON にしている人の意図と食い違う
+                    permission_mode: bypass_default(db, identity.account_id).await,
+                })
+                .await
+            {
+                Ok(()) => (true, None),
+                Err(reason) => (false, Some(reason)),
+            }
+        } else {
+            (false, None)
+        };
+
     Ok(Json(AddResponse {
         project,
-        // 起こす実装はフェーズ4（設計§12）
-        spawned: false,
+        spawned,
+        spawn_error,
     }))
+}
+
+/// 起動時の権限モードの既定（設計§12）。
+///
+/// 画面の起動フォームがトグルから組み立てているのと同じ規則を、サーバ側でもう一度
+/// 通す。**自動起動にはブラウザが介在しない**ので、ここで決めるしかない。
+///
+/// 行が無ければ「スキップの指定は無し」に倒す。PC 側の `config.toml` を初期値に
+/// 使う道（`always_bypass_or` の第3引数）はここからは見えないが、**危ないほうへ
+/// 倒さない**という一点でこちらが正しい。
+async fn bypass_default(db: &DatabaseConnection, account_id: Uuid) -> Option<PermissionMode> {
+    db::settings::always_bypass_or(db, account_id, false)
+        .await
+        .then(|| PermissionMode::new("bypassPermissions"))
 }
 
 /// `DELETE /api/projects/{id}` — 枠を消す。

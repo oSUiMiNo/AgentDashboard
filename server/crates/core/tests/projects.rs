@@ -108,8 +108,12 @@ async fn 枠を足すと記録に残り知らせが配られる() {
     let added: serde_json::Value = serde_json::from_str(&body).expect("応答を読めること");
     assert_eq!(added["project"]["host"], "local");
     assert_eq!(added["project"]["path"], "/home/example/dev/app");
-    // **欄は先に置く**（起こす実装はフェーズ4）。後から足すと、画面が知る手段の無い版が出回る
+    // 設定を切っているあいだは起こさない（既定 OFF。設計§12）
     assert_eq!(added["spawned"], false);
+    assert!(
+        added.get("spawn_error").is_none(),
+        "起こそうとしていないのに理由が付いている: {body}"
+    );
 
     match wait_for_project_event(&mut events, "枠が増えたこと").await {
         ServerMessage::ProjectUpsert { project } => {
@@ -312,4 +316,118 @@ async fn 繋がっていないpcの枠も足せて一覧に出る() {
     assert_eq!(rows.len(), 1);
     // 画面はこの `host` をそのまま REST のパスへ載せる
     assert_eq!(rows[0]["host"], agent.to_string());
+}
+
+/// 設定が ON なら、枠を足したその場でセッションが**1本だけ**起きること（設計§12）。
+///
+/// **数を見るのが要点。** 「起きたこと」だけを見ると、2本起こしていても通ってしまう。
+#[tokio::test]
+async fn 設定がonなら追加と同時に1本だけ起きる() {
+    let server = common::TestServer::start_with(config_for("autostart-on")).await;
+
+    let (status, body) = server
+        .put("/api/settings", r#"{"project_autostart_session":true}"#)
+        .await;
+    assert_eq!(status, 200, "{body}");
+
+    let (status, body) = server
+        .request(
+            "POST",
+            "/api/projects",
+            Some(r#"{"host":"local","path":"/tmp"}"#),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+
+    let added: serde_json::Value = serde_json::from_str(&body).expect("応答を読めること");
+    assert_eq!(
+        added["spawned"], true,
+        "起こしたことが応答に載らない: {body}"
+    );
+    assert!(
+        added.get("spawn_error").is_none(),
+        "起きたのに理由が付いている: {body}"
+    );
+
+    let listed = server
+        .wait_for_listed("1枚が載ること", |listed| !listed.is_empty())
+        .await;
+    assert_eq!(listed.len(), 1, "1本だけのはずが {} 本", listed.len());
+    assert_eq!(listed[0].project.0, "/tmp");
+
+    // 枠も残っていること（枠が先、セッションは後）
+    let (_, body) = server.get("/api/projects").await;
+    assert_eq!(paths_of(&body), vec!["/tmp".to_string()]);
+}
+
+/// 設定が OFF なら、枠だけが増えてセッションは起きないこと（設計§12）。
+#[tokio::test]
+async fn 設定がoffなら枠だけが増える() {
+    let server = common::TestServer::start_with(config_for("autostart-off")).await;
+
+    // 既定が OFF であることも一緒に見る（明示的に切らずに足す）
+    let (status, body) = server
+        .request(
+            "POST",
+            "/api/projects",
+            Some(r#"{"host":"local","path":"/tmp"}"#),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()["spawned"],
+        false
+    );
+
+    // **「まだ起きていない」と「起きない」は待たないと区別できない。**
+    // カードが載るのを待つ形にすると、載らないことを確かめようがない
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let (_, listed) = server.get("/api/sessions").await;
+    assert_eq!(
+        serde_json::from_str::<Vec<serde_json::Value>>(&listed)
+            .expect("一覧を読めること")
+            .len(),
+        0,
+        "切っているのに起きた: {listed}"
+    );
+
+    let (_, body) = server.get("/api/projects").await;
+    assert_eq!(paths_of(&body), vec!["/tmp".to_string()]);
+}
+
+/// 起こせなくても枠は残り、**理由が応答に載る**こと（設計§26-1）。
+///
+/// 消してしまうと、PC が寝ているだけなのに「追加そのものが失敗した」ように見える。
+#[tokio::test]
+async fn 起こせなくても枠は残り理由が返る() {
+    let server = common::TestServer::start_with(config_for("autostart-fail")).await;
+
+    let (status, _) = server
+        .put("/api/settings", r#"{"project_autostart_session":true}"#)
+        .await;
+    assert_eq!(status, 200);
+
+    // 存在しないフォルダ＝起こせない。枠のほうは**パスの実在を見ない**ので足せる
+    let (status, body) = server
+        .request(
+            "POST",
+            "/api/projects",
+            Some(r#"{"host":"local","path":"/存在しないはずのフォルダ"}"#),
+        )
+        .await;
+    assert_eq!(status, 200, "起こせないだけで枠まで断られた: {body}");
+
+    let added: serde_json::Value = serde_json::from_str(&body).expect("応答を読めること");
+    assert_eq!(added["spawned"], false, "{body}");
+    let reason = added["spawn_error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("理由が載っていない: {body}"));
+    assert!(!reason.is_empty(), "理由が空: {body}");
+
+    let (_, body) = server.get("/api/projects").await;
+    assert_eq!(
+        paths_of(&body),
+        vec!["/存在しないはずのフォルダ".to_string()],
+        "起こせなかったせいで枠まで消えている"
+    );
 }
