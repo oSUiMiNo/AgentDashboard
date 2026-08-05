@@ -1015,3 +1015,117 @@ async fn 外したカードは跨ぎの知らせでも戻らない() {
         backend.finish().await;
     }
 }
+
+// --- フォルダの問いと答え（イシューグループ_2026_0805_0514 設計§7）--------------
+
+/// その PC が繋がっていると、跨いだ側からも見えるようになるまで待つ。
+async fn wait_online(
+    hub: &Arc<server_core::gateway::SessionHostHub>,
+    account_id: uuid::Uuid,
+) -> protocol::AgentId {
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    loop {
+        if let Some(id) = hub.online_of(account_id).await.first().copied() {
+            return id;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{TIMEOUT:?} 以内に PC が跨いで見えるようになりませんでした"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn 跨いだ配置でもフォルダの答えが問うた側へ戻る() {
+    // **この経路は1台構成では何も保証されない。** 行きの道（`agent:{id}:cmd`）は
+    // 元からあるが、**帰りの道は無かった**——答えはアカウントの知らせに相乗りして
+    // 問うた側のインスタンスへ戻る（設計§7）
+    for backend in common::backends("cluster-hostfs").await {
+        let broker = MemoryBroker::new();
+        let (a, _b, mut agent, _card_id, account_id) = split(&backend.db, &broker).await;
+        let target = wait_online(&a.hub, account_id).await;
+
+        let host = RemoteSessionHost::new(Arc::clone(&a.hub));
+        // 問いは待つので、別のタスクへ逃がして**その間に PC 役が答える**
+        let asking = tokio::spawn(async move {
+            host.list_dir(server_core::session_host::HostFsRequest {
+                account_id,
+                target: Some(target),
+                path: "/home/example/dev/app",
+            })
+            .await
+        });
+
+        let message = agent
+            .wait_for("跨ぎで届くフォルダの問い", |message| {
+                matches!(message, protocol::a2s::ServerToAgent::ListDir { .. })
+            })
+            .await;
+        let protocol::a2s::ServerToAgent::ListDir { request_id, path } = message else {
+            panic!("[{}] フォルダの問いであること", backend.name);
+        };
+        assert_eq!(path, "/home/example/dev/app");
+
+        agent
+            .send(&protocol::a2s::AgentMessage::HostReply {
+                request_id,
+                reply: protocol::a2s::HostReply::Dir(protocol::fs::DirListing {
+                    path: path.clone(),
+                    entries: vec![protocol::fs::DirEntry {
+                        name: "src".to_string(),
+                        kind: protocol::fs::EntryKind::Dir,
+                        is_project: false,
+                    }],
+                    truncated: false,
+                }),
+            })
+            .await;
+
+        let listing = asking
+            .await
+            .expect("問いのタスクが畳まれないこと")
+            .unwrap_or_else(|err| panic!("[{}] 答えが戻ること: {err:?}", backend.name));
+        assert_eq!(listing.entries.len(), 1, "[{}]", backend.name);
+        assert_eq!(listing.entries[0].name, "src", "[{}]", backend.name);
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 連絡係が切れている間のフォルダの問いは理由を返す() {
+    // 時間切れの「応じません」と混ぜない。**届けられないのはこちら側の事情**で、
+    // 利用者が PC を疑っても何も直らない（設計§17）
+    for backend in common::backends("cluster-hostfs-cut").await {
+        let broker = MemoryBroker::new();
+        let (a, _b, _agent, _card_id, account_id) = split(&backend.db, &broker).await;
+        let target = wait_online(&a.hub, account_id).await;
+
+        broker.cut();
+
+        let err = RemoteSessionHost::new(Arc::clone(&a.hub))
+            .list_dir(server_core::session_host::HostFsRequest {
+                account_id,
+                target: Some(target),
+                path: "/home/example/dev/app",
+            })
+            .await
+            .expect_err("断られること");
+
+        // 503 へ写る側であること（写し方そのものは `hosts.rs` の単体が固定している）
+        assert!(
+            matches!(err, server_core::session_host::HostFsError::Unreachable(_)),
+            "[{}] 届かないことが理由として返ること: {err:?}",
+            backend.name
+        );
+        assert!(
+            err.message().contains("連絡係"),
+            "[{}] 理由が分からない: {}",
+            backend.name,
+            err.message()
+        );
+
+        backend.finish().await;
+    }
+}

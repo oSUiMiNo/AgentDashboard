@@ -1240,3 +1240,259 @@ async fn 読み込んだ間隔は次の接続を待たずに配られる() {
 
     session.kill();
 }
+
+// --- フォルダとファイルの往復（イシューグループ_2026_0805_0514 設計§5〜§7）------
+
+/// 使い捨ての木を1つ作り、その場所を返す。
+fn sample_tree(dir: &Path) -> PathBuf {
+    let root = dir.join("覗く先");
+    std::fs::create_dir_all(root.join("src")).expect("フォルダを作れること");
+    std::fs::write(root.join("計画.md"), "# 計画\n- [x] 済み\n").expect("ファイルを作れること");
+    root
+}
+
+fn ask<'a>(
+    account_id: uuid::Uuid,
+    target: Option<protocol::AgentId>,
+    path: &'a str,
+) -> server_core::session_host::HostFsRequest<'a> {
+    server_core::session_host::HostFsRequest {
+        account_id,
+        target,
+        path,
+    }
+}
+
+#[tokio::test]
+async fn 一覧と中身が_A2S_越しに取れる() {
+    // ローカルの単体（`session-host-core`）が確かめているのは読み方の決まりで、
+    // ここが確かめるのは**線を跨いで往復すること**。この線には ack しか往復が無く、
+    // 「答えが要る問い」を通すのは初めてになる（設計§4）
+    let a2s = A2s::start("hostfs-roundtrip").await;
+    let root = sample_tree(&a2s.dir);
+    let target = a2s.hub.online_of(a2s.account_id).await[0];
+
+    let listing = a2s
+        .browser
+        .list_dir(ask(
+            a2s.account_id,
+            Some(target),
+            &root.display().to_string(),
+        ))
+        .await
+        .expect("一覧が取れること");
+    let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["src", "計画.md"],
+        "読み方の決まりが線の向こうから届くこと"
+    );
+
+    let content = a2s
+        .browser
+        .read_file(ask(
+            a2s.account_id,
+            Some(target),
+            &root.join("計画.md").display().to_string(),
+        ))
+        .await
+        .expect("中身が取れること");
+    assert!(content.text.contains("- [x] 済み"));
+}
+
+#[tokio::test]
+async fn 答えが返らないときは時間で打ち切り空の一覧を返さない() {
+    // **黙って空を返すのがいちばん悪い。** フォルダが本当に空なのか、届かなかったのかを
+    // 利用者が区別できなくなる（設計§7）
+    let a2s = A2s::start_with("hostfs-timeout", true).await;
+    let root = sample_tree(&a2s.dir);
+    let target = a2s.hub.online_of(a2s.account_id).await[0];
+
+    // 線を塞ぐ。**切るのではなく塞ぐ**——切ると繋ぎ直して答えが届いてしまう
+    a2s.sniffer.as_ref().expect("中継が居ること").block();
+
+    let err = a2s
+        .browser
+        .list_dir(ask(
+            a2s.account_id,
+            Some(target),
+            &root.display().to_string(),
+        ))
+        .await
+        .expect_err("打ち切られること");
+
+    assert_eq!(err, server_core::session_host::HostFsError::Timeout);
+    assert_eq!(err.message(), "PC が応じません");
+}
+
+#[tokio::test]
+async fn 識別子の合わない答えは捨てられる() {
+    // このチャネルはアカウント単位なので、**問うていないインスタンスにも届く**。
+    // 番号が合わないものを取り込むと、別の要求へ他人の答えを渡すことになる
+    let a2s = A2s::start("hostfs-stray").await;
+
+    let stray = protocol::a2s::RequestId::new();
+    let accepted = a2s.hub.resolve_reply(
+        stray,
+        protocol::a2s::HostReply::Failed {
+            reason: protocol::a2s::HostFailure::NotFound,
+            detail: "誰も待っていない".to_string(),
+        },
+    );
+
+    assert!(!accepted, "待っていない番号の答えは受け取らないこと");
+}
+
+#[tokio::test]
+async fn 打ち切ったあとに届いた答えは待ち行列に溜まらない() {
+    // 消し忘れると、遅れて届いた答えが誰にも渡らないまま積み上がる（設計§7）。
+    // 打ち切った**あと**に同じ番号で渡してみて、受け取られないことで確かめる
+    let a2s = A2s::start_with("hostfs-late", true).await;
+    let root = sample_tree(&a2s.dir);
+    let target = a2s.hub.online_of(a2s.account_id).await[0];
+    a2s.sniffer.as_ref().expect("中継が居ること").block();
+
+    let err = a2s
+        .browser
+        .list_dir(ask(
+            a2s.account_id,
+            Some(target),
+            &root.display().to_string(),
+        ))
+        .await
+        .expect_err("打ち切られること");
+    assert_eq!(err, server_core::session_host::HostFsError::Timeout);
+
+    // 打ち切った時点の番号は分からないが、**待ち行列が空**なら、どんな番号を渡しても
+    // 受け取られない。1つでも残っていれば、その番号は受け取られるはず
+    for _ in 0..4 {
+        let accepted = a2s.hub.resolve_reply(
+            protocol::a2s::RequestId::new(),
+            protocol::a2s::HostReply::Failed {
+                reason: protocol::a2s::HostFailure::NotFound,
+                detail: String::new(),
+            },
+        );
+        assert!(!accepted);
+    }
+}
+
+#[tokio::test]
+async fn 能力を名乗らない_PC_へは問いを投げない() {
+    // 古いホストは知らない種別を受け取っても**接続を保ち、警告を出して無視する**
+    // （§23-1 の実測）。投げると時間切れの「応じません」しか出せず、本当の理由
+    // （版が古い）を伝えられない
+    let a2s = A2s::start("hostfs-old").await;
+    let root = sample_tree(&a2s.dir);
+    let target = a2s.hub.online_of(a2s.account_id).await[0];
+
+    // 名乗りを「古い版」へ書き換える（能力の欄を持たない Hello と同じ状態）
+    let old = serde_json::json!({
+        "available_modes": ["default"],
+        "always_bypass_permissions": false,
+        "agent_version": "0.1.5",
+    });
+    pairing::save_capabilities(a2s.hub.db(), target, old)
+        .await
+        .expect("名乗りを書き換えられること");
+
+    let started = tokio::time::Instant::now();
+    let err = a2s
+        .browser
+        .list_dir(ask(
+            a2s.account_id,
+            Some(target),
+            &root.display().to_string(),
+        ))
+        .await
+        .expect_err("断ること");
+
+    assert_eq!(err, server_core::session_host::HostFsError::Unsupported);
+    // **待たずに断ること。** 時間切れを待つなら、判定を置いた意味が無い
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "投げる前に断ること（{:?} かかった）",
+        started.elapsed()
+    );
+    // 接続は無事（この PC はまだセッションを起こせる）
+    assert!(!a2s.hub.online_of(a2s.account_id).await.is_empty());
+}
+
+#[tokio::test]
+async fn 他人の_PC_と知らない_PC_は同じ言葉で断られる() {
+    // 言い分けると、IDを総当たりして他人の PC の存在を調べられる（設計§18）
+    let a2s = A2s::start("hostfs-tenancy").await;
+    let root = sample_tree(&a2s.dir);
+
+    // ① 知らない PC
+    let unknown = protocol::AgentId(uuid::Uuid::new_v4());
+    let err_unknown = a2s
+        .browser
+        .list_dir(ask(
+            a2s.account_id,
+            Some(unknown),
+            &root.display().to_string(),
+        ))
+        .await
+        .expect_err("断ること");
+
+    // ② 他人のアカウントの PC（実在する行）
+    let other_account = pairing::ensure_account(a2s.hub.db(), "よそのひと")
+        .await
+        .expect("別のアカウントを作れること");
+    let other_agent = pairing::ensure_agent(a2s.hub.db(), other_account, "よその PC")
+        .await
+        .expect("別の PC を登録できること");
+    let err_other = a2s
+        .browser
+        .list_dir(ask(
+            a2s.account_id,
+            Some(other_agent),
+            &root.display().to_string(),
+        ))
+        .await
+        .expect_err("断ること");
+
+    assert_eq!(
+        err_unknown,
+        server_core::session_host::HostFsError::UnknownHost
+    );
+    assert_eq!(err_other, err_unknown, "同じ言葉で断ること");
+
+    // 中身の口も同じ扱いであること（片方だけ穴が空くのを防ぐ）
+    let err_file = a2s
+        .browser
+        .read_file(ask(
+            a2s.account_id,
+            Some(other_agent),
+            &root.join("計画.md").display().to_string(),
+        ))
+        .await
+        .expect_err("断ること");
+    assert_eq!(err_file, err_unknown);
+}
+
+#[tokio::test]
+async fn 繋がっていない_PC_は理由が返る() {
+    // **枠そのものは出す**ので、辿れない理由が要る（設計§17）。黙って空だと
+    // 「追加したはずの PJT が消えた」に見える
+    let a2s = A2s::start("hostfs-offline").await;
+    let root = sample_tree(&a2s.dir);
+
+    // 同じアカウントの、一度も繋がっていない PC を登録する
+    let sleeping = pairing::ensure_agent(a2s.hub.db(), a2s.account_id, "寝ている PC")
+        .await
+        .expect("PC を登録できること");
+
+    let err = a2s
+        .browser
+        .list_dir(ask(
+            a2s.account_id,
+            Some(sleeping),
+            &root.display().to_string(),
+        ))
+        .await
+        .expect_err("断ること");
+
+    assert_eq!(err.message(), "指定された PC が繋がっていません");
+}

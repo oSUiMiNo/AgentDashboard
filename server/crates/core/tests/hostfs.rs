@@ -95,10 +95,41 @@ async fn 読めないときは理由が説明として返る() {
         .await
         .expect_err("断ること");
 
-    // 境界の戻り値は `String`（設計§5）。**人が読む説明だけを運ぶ**と決めてあるので、
-    // 理由の列挙はここまで来ない。代わりに、何を開けなかったのかが文に残っていること
+    // **ローカルが作るのは `Failed` だけ。** 線を跨がないので、届かなかったことを表す
+    // 残りの理由（宛先不明・時間切れ・連絡係の断）は起こりえない（設計§19）
     assert!(
-        err.contains("居ないフォルダ"),
-        "何を開けなかったのかが説明に残ること（{err}）"
+        matches!(
+            err,
+            server_core::session_host::HostFsError::Failed {
+                reason: protocol::a2s::HostFailure::NotFound,
+                ..
+            }
+        ),
+        "読めない理由がそのまま写ること（{err:?}）"
     );
+    assert!(
+        err.message().contains("居ないフォルダ"),
+        "何を開けなかったのかが説明に残ること（{}）",
+        err.message()
+    );
+}
+
+#[tokio::test]
+async fn ローカルモードで宛先を指名されたら断る() {
+    // ローカルには PC という単位が無い（設計§19）。黙って無視すると
+    // `/api/hosts/<でたらめ>/dir` が手元のファイルを返し、**口の意味が構成で変わる**
+    let sandbox = Sandbox::new();
+    let host = host();
+
+    let err = host
+        .list_dir(HostFsRequest {
+            account_id: uuid::Uuid::new_v4(),
+            target: Some(protocol::AgentId(uuid::Uuid::new_v4())),
+            path: &sandbox.path().display().to_string(),
+        })
+        .await
+        .expect_err("断ること");
+
+    // 知らない PC と同じ言葉。綴りを変えて探る余地を残さない
+    assert_eq!(err, server_core::session_host::HostFsError::UnknownHost);
 }
