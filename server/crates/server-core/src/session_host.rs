@@ -24,7 +24,11 @@
 //! 表示は変わらない。
 
 use bytes::Bytes;
-use protocol::{AgentId, CardId, ModelId, PermissionMode, ws::ParserState};
+use protocol::{
+    AgentId, CardId, ModelId, PermissionMode,
+    fs::{DirListing, FileContent},
+    ws::ParserState,
+};
 use tokio::sync::broadcast;
 
 /// 新しいセッションを起こす頼み（設計§5-1）。
@@ -128,4 +132,29 @@ pub trait SessionHost: Send + Sync + 'static {
 
     /// モデルの切替（利用者のグローバル既定の保護まで含めて向こう側で行う）。
     async fn set_model(&self, card_id: CardId, model: ModelId) -> Result<(), String>;
+
+    // --- ファイルシステム -----------------------------------------------------
+
+    /// フォルダ1つの中身（イシューグループ_2026_0805_0514 設計§5・§8）。
+    ///
+    /// **ローカルモードもここを通る。** サーバ側で「同じプロセスなら自分で読む」と
+    /// 近道を作らない——片側だけ速くすると「ローカルでは動くのにセルフホストで欠ける」
+    /// という、経路の違いが原因でテストを増やしても見つからない壊れ方が残る（§19）。
+    async fn list_dir(&self, request: HostFsRequest<'_>) -> Result<DirListing, String>;
+
+    /// ファイル1つの中身（設計§5・§9）。**読むだけ**で、書く口は持たない。
+    async fn read_file(&self, request: HostFsRequest<'_>) -> Result<FileContent, String>;
+}
+
+/// ファイルシステムへの頼み（イシューグループ_2026_0805_0514 設計§5）。
+///
+/// 引数を並べずに1つの型へまとめてあるのは [`SpawnRequest`] と同じ理由——
+/// **宛先とアカウントを取り違えても型で気づけない**ため。
+pub struct HostFsRequest<'a> {
+    /// 頼んだ人のアカウント。**他人の PC を宛先にできない**ことをここで確かめる（§18）
+    pub account_id: uuid::Uuid,
+    /// どの PC に聞くか。`None` は「選ばれていない」——ローカルモードは常に `None`
+    pub target: Option<AgentId>,
+    /// 絶対パス
+    pub path: &'a str,
 }

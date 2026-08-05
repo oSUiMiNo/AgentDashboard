@@ -339,6 +339,9 @@ pub fn hello(name: &str) -> AgentMessage {
         agent_name: name.to_string(),
         available_modes: vec![protocol::PermissionMode::new("default")],
         always_bypass_permissions: false,
+        // 土台の PC は**新しい版のつもり**にしておく。ここを偽にすると、
+        // 名乗りを見て問いを投げる側（フェーズ2）のテストが全部素通りする
+        supports_host_fs: true,
     }
 }
 

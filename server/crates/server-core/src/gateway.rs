@@ -147,6 +147,13 @@ pub struct Capabilities {
     /// 同じ形で表す**（どちらも画面では「不明」）。
     #[serde(default)]
     pub agent_version: Option<String>,
+    /// フォルダを覗けるか（イシューグループ_2026_0805_0514 設計§4）。
+    ///
+    /// 名乗らない古いホストは `false`。**問いを投げる前にここを見る**（フェーズ2）——
+    /// 投げても永遠に答えないので、時間切れの「PC が応じません」しか出せなくなり、
+    /// 本当の理由（版が古い）を伝えられない。
+    #[serde(default)]
+    pub supports_host_fs: bool,
 }
 
 /// 他インスタンスから回ってくる、PC への指示（設計§9-2 の `agent:{id}:cmd`）。
@@ -1120,7 +1127,30 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
     async fn set_model(&self, card_id: CardId, model: protocol::ModelId) -> Result<(), String> {
         self.relay(card_id, ServerToAgent::SetModel { card_id, model })
     }
+
+    /// **中身はフェーズ2**（イシューグループ_2026_0805_0514 設計§21 の段2）。
+    ///
+    /// 問いを投げるところまでは A2S に載っているが、**答えを問うた側のインスタンスへ
+    /// 戻す道がまだ無い**（`AccountMessage` に種別を足し、待ち行列を作るのが段2）。
+    /// 半分だけ通すと「投げたのに永遠に返らない」になり、時間切れの理由が
+    /// 「PC が応じない」と見分けられなくなるので、**器だけ置いて断る**。
+    async fn list_dir(
+        &self,
+        _request: crate::session_host::HostFsRequest<'_>,
+    ) -> Result<protocol::fs::DirListing, String> {
+        Err(HOST_FS_NOT_READY.to_string())
+    }
+
+    async fn read_file(
+        &self,
+        _request: crate::session_host::HostFsRequest<'_>,
+    ) -> Result<protocol::fs::FileContent, String> {
+        Err(HOST_FS_NOT_READY.to_string())
+    }
 }
+
+/// フェーズ2 が入るまでの断り文。**画面へそのまま出る。**
+const HOST_FS_NOT_READY: &str = "この構成ではまだフォルダを覗けません";
 
 /// セッションホスト向けのルート。**ブラウザ向け（[`crate::routes`]）とは別に合成する。**
 ///
@@ -1238,6 +1268,7 @@ async fn agent_loop(
         agent_name,
         available_modes,
         always_bypass_permissions,
+        supports_host_fs,
     } = hello
     else {
         // next_hello が Hello 以外を返すことはない
@@ -1269,6 +1300,7 @@ async fn agent_loop(
         always_bypass_permissions,
         // 名乗りには最初から載っている。**ここまで来て捨てていた**（CICD設計§16）
         agent_version: Some(agent_version.clone()),
+        supports_host_fs,
     };
     match serde_json::to_value(&capabilities) {
         Ok(value) => {
@@ -1497,6 +1529,19 @@ async fn handle_report(
             hub.registry
                 .apply(origin, ServerMessage::Error { card_id, message })
                 .await;
+        }
+
+        // 問いへの答え（イシューグループ_2026_0805_0514 設計§7）。
+        //
+        // **受け取る先を作るのはフェーズ2。** 待ち行列（`request_id` で対応づけ）と、
+        // 跨いだときに問うた側のインスタンスへ戻す道（`AccountMessage`）がまだ無い。
+        // いまは問いを投げる口も塞いである（`RemoteSessionHost::list_dir`）ので、
+        // ここへ来るのは実装の食い違いだけになる——**黙って捨てず、記録に残す**
+        AgentMessage::HostReply { request_id, .. } => {
+            tracing::warn!(
+                %request_id,
+                "誰も待っていない答えが届きました（受け取る先はフェーズ2 で作ります）"
+            );
         }
 
         AgentMessage::ModelTable {

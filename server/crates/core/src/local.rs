@@ -158,6 +158,52 @@ impl SessionHost for LocalSessionHost {
             }
         }
     }
+
+    /// フォルダの中身（イシューグループ_2026_0805_0514 設計§5・§19）。
+    ///
+    /// **ここでディレクトリを読まない。** 読むのは `session_host_core::hostfs` で、
+    /// このモジュールがやるのは呼び替えだけ——ローカルだけの近道を作ると、
+    /// セルフホストとの間に「経路の違いでしか出ない壊れ方」が残る。
+    ///
+    /// `target` は見ない。ローカルモードには PC という単位が無いので、
+    /// **宛先を指定される余地そのものが無い**（帰属の確認は §18 のとおりサーバ側の口で行う）。
+    async fn list_dir(
+        &self,
+        request: server_core::session_host::HostFsRequest<'_>,
+    ) -> Result<protocol::fs::DirListing, String> {
+        blocking_fs(
+            request.path.to_string(),
+            session_host_core::hostfs::list_dir,
+        )
+        .await
+    }
+
+    async fn read_file(
+        &self,
+        request: server_core::session_host::HostFsRequest<'_>,
+    ) -> Result<protocol::fs::FileContent, String> {
+        blocking_fs(
+            request.path.to_string(),
+            session_host_core::hostfs::read_file,
+        )
+        .await
+    }
+}
+
+/// ファイルの仕事を**専用のスレッドへ逃がす**。
+///
+/// ローカルモードでは、この呼び出しはブラウザ配信と同じランタイムの上に居る。
+/// 大きなフォルダを非同期タスクの中で直接読むと、その間そのワーカーの上にある全部が
+/// 止まる（PJTガイドライン「遅いハッシュは専用のスレッドへ逃がす」と同じ理屈）。
+async fn blocking_fs<T: Send + 'static>(
+    path: String,
+    read: fn(&std::path::Path) -> Result<T, session_host_core::hostfs::HostFsError>,
+) -> Result<T, String> {
+    tokio::task::spawn_blocking(move || read(std::path::Path::new(&path)))
+        .await
+        // 逃がした先が落ちたのは実装の誤り。握り潰さず、そのまま説明にする
+        .map_err(|err| format!("読み取りを完了できませんでした（{err}）"))?
+        .map_err(|err| err.detail)
 }
 
 /// セッションホストの報告を**記録層へ運ぶ**報告先（セルフホスト化設計§2-3・§3-3）。
