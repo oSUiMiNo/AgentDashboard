@@ -70,7 +70,13 @@ export function SessionView({ cardId, compact = false }: Props) {
         compact ? 'w-[42rem] shrink-0' : 'min-w-0 flex-1'
       }`}
     >
-      <header className="flex items-center gap-2 text-sm">
+      {/*
+        **折り返せるようにしておく。** 狭い画面では右側の道具（モデル・モード・
+        終了・削除）だけで画面幅を超える。はみ出したままだと、
+        **ページの横幅が画面より広くなる**——モバイルの `fixed` はその広い幅を
+        基準にするので、左パネルのドロワーの右端（閉じる・コピー）が画面の外へ出る。
+      */}
+      <header className="flex flex-wrap items-center gap-2 text-sm">
         {!compact && (
           <Button
             type="button"
@@ -113,7 +119,7 @@ export function SessionView({ cardId, compact = false }: Props) {
           </span>
         )}
 
-        <div className="ml-auto flex shrink-0 items-center gap-2">
+        <div className="ml-auto flex flex-wrap items-center gap-2">
           {/*
             モードとモデルは小窓とセッション画面の両方に出す（要件）。ここは切替も兼ねる。
             並びは モデル → モード。モデルのほうが長い文字列になるので、
