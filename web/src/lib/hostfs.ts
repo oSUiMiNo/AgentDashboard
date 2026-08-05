@@ -30,6 +30,22 @@ export interface DirListing {
   truncated: boolean
 }
 
+/**
+ * ファイル1つの中身。Rust 側の `protocol::fs::FileContent` と同じ綴り。
+ *
+ * 読めるのは**テキストだけ**で、上限を超えたものは中身ごと断られる（設計§9）。
+ * したがってここへ届いた時点で「読めた」ことは確定しており、`truncated` は
+ * **上限の内側で切った**ことだけを意味する。
+ */
+export interface FileContent {
+  path: string
+  text: string
+  /** 上限の内側で切ったか。**隠さない**（設計§9・§15） */
+  truncated: boolean
+  /** 元のファイルの大きさ */
+  bytes: number
+}
+
 /** 引けなかったときに投げるもの。`message` はそのまま画面へ出す。 */
 export class HostFsError extends Error {
   readonly status: number
@@ -59,6 +75,44 @@ export async function listDir(
     throw new HostFsError(response.status, await reason(response))
   }
   return (await response.json()) as DirListing
+}
+
+/**
+ * ファイルの中身を引く（設計§9・§10）。
+ *
+ * 一覧と違い `path` は省略できない。**どこから読むかは呼ぶ側にしか分からない**ので、
+ * 省いた形にサーバ側の既定を持たせると「押した相手と読まれた相手がずれる」余地ができる。
+ */
+export async function readFile(
+  host: string,
+  path: string,
+): Promise<FileContent> {
+  const response = await fetch(
+    `/api/hosts/${encodeURIComponent(host)}/file?path=${encodeURIComponent(path)}`,
+  )
+  if (!response.ok) {
+    throw new HostFsError(response.status, await reason(response))
+  }
+  return (await response.json()) as FileContent
+}
+
+/**
+ * `root` から見た相対パス。**基準を組み立てる場所をここ1つに閉じる**（設計§15）。
+ *
+ * 基準が分からない相対パスは、貼られた側で解釈できない。だから画面には必ず
+ * 「何からの相対パスか」を添えるが、**組み立て自体を各所で書くと区切りの扱いが割れる**
+ * （`childOf` を1箇所に置いてあるのと同じ理由）。
+ *
+ * `root` の外を渡された場合は**絶対パスのまま返す**。相対にできないものを無理に
+ * `../` で表すと、貼られた側が別の場所を指す。
+ */
+export function relativeOf(root: string, path: string): string {
+  const base = root.endsWith('/') ? root.slice(0, -1) : root
+  if (path === base) {
+    return '.'
+  }
+  const prefix = `${base}/`
+  return path.startsWith(prefix) ? path.slice(prefix.length) : path
 }
 
 /** 断りの本文。空なら状態コードから当たり障りのない文を作る。 */
