@@ -1,3 +1,6 @@
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { expect, test } from '@playwright/test'
 import {
   killAgent,
@@ -6,6 +9,7 @@ import {
   stopService,
 } from './compose-control'
 import {
+  addProject,
   archiveAll,
   expectTerminalToContain,
   openDashboard,
@@ -14,6 +18,14 @@ import {
   spawnSession,
   typeLine,
 } from './helpers'
+
+/**
+ * 跨ぎの確認で読ませる小さな PJT。
+ *
+ * **セッションホストはホスト側で動いている**（compose に居るのはサーバ・前段・DB だけ）
+ * ので、ここで作ったフォルダがそのまま PC 側のファイルとして見える。
+ */
+const CROSS_DIR = path.join(os.tmpdir(), 'adash-e2e-cross')
 
 /** もう一方のインスタンス（PC が繋がっている側）。 */
 const OTHER_INSTANCE = 'http://127.0.0.1:4176/'
@@ -99,6 +111,44 @@ test('スラッシュコマンドも跨いで届く', async ({ page }) => {
 
   await typeLine(page, '/rewind')
   await expectTerminalToContain(page, '[fake-claude] received: /rewind')
+})
+
+test('跨いだ配置でも、フォルダの一覧と中身が返る', async ({ page }) => {
+  // **この経路はここでしか実証できない**（イシューグループ_2026_0805_0514 設計§7・§21）。
+  // 指示を届ける道（`agent:{id}:cmd`）は元からあるが、**答えを問うた側のインスタンスへ
+  // 戻す道**は今回はじめて通した。1台構成だと A と B が同じプロセスなので、
+  // 戻し方を間違えていても届いてしまう。
+  //
+  // ```text
+  // ブラウザ ──▶ A ──Valkey(agent:cmd)──▶ B ──▶ PC
+  //          ◀── A ◀─Valkey(acct:events)── B ◀── PC（答え）
+  // ```
+  fs.mkdirSync(path.join(CROSS_DIR, 'MyDocs'), { recursive: true })
+  fs.writeFileSync(
+    path.join(CROSS_DIR, 'MyDocs', '計画.md'),
+    '# 跨ぎ\n\n- [x] 届いた\n',
+    'utf8',
+  )
+
+  await openDashboard(page)
+  const group = await addProject(page, CROSS_DIR)
+  await group.click({ position: { x: 5, y: 5 } })
+  await page.getByTestId('project-files-toggle').click()
+
+  const panel = page.getByTestId('project-files-panel')
+  // 一覧が返る（A は PC を1台も持っていないので、B へ頼んで戻してもらっている）
+  await expect(panel.getByTestId('folder-browser')).toHaveAttribute(
+    'data-path',
+    CROSS_DIR,
+  )
+  await panel.getByTestId('folder-entry').filter({ hasText: 'MyDocs' }).click()
+  await panel.getByTestId('folder-entry').filter({ hasText: '計画.md' }).click()
+
+  // 中身も返る。**大きさの上限が効くのはこの経路を守るため**（設計§7）
+  await expect(panel.getByTestId('file-view')).toBeVisible()
+  await expect(panel.getByRole('checkbox')).toBeChecked()
+
+  fs.rmSync(CROSS_DIR, { recursive: true, force: true })
 })
 
 test('ブラウザ側のインスタンスを落としてもセッションは無傷', async ({ page }) => {
