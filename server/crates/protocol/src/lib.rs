@@ -6,6 +6,7 @@
 
 pub mod a2s;
 pub mod frame;
+pub mod fs;
 pub mod ipc;
 pub mod ws;
 

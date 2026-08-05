@@ -45,6 +45,66 @@ impl std::fmt::Display for BatchId {
     }
 }
 
+/// 問いと答えを対応づける番号（イシューグループ_2026_0805_0514 設計§4）。
+///
+/// この線に**初めて「答えが要る問い」を通す**ために足した。それまで往復は
+/// [`BatchId`] の ack しか無く、指示に返事は無かった。
+///
+/// 対応づけが要るのは、**答えを待っているのがサーバ側の別々の要求**だからである。
+/// 番号が無いと、2人が同時にフォルダを聞いたときにどちらの答えか分からない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RequestId(pub uuid::Uuid);
+
+impl RequestId {
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+}
+
+impl std::fmt::Display for RequestId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// 問いへの答え（設計§4）。
+///
+/// **1種類にまとめてある。** 一覧と中身で別々の答えを作ると、対応づけの仕組みを
+/// 2つ持つことになる。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "t", rename_all = "snake_case")]
+pub enum HostReply {
+    Dir(crate::fs::DirListing),
+    File(crate::fs::FileContent),
+    /// 応えられなかった。**理由を分ける**のは、どれも利用者が直せるものだから（設計§8）
+    Failed {
+        reason: HostFailure,
+        /// 人が読む説明。画面へそのまま出る
+        detail: String,
+    },
+}
+
+/// 応えられない理由（設計§8・§9）。
+///
+/// まとめて「駄目でした」にすると、**権限が無いのか消えているのか**が利用者から
+/// 区別できず、直しようが無くなる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostFailure {
+    /// そこに無い
+    NotFound,
+    /// 権限が無い
+    Denied,
+    /// フォルダを頼まれたがファイルだった
+    NotDirectory,
+    /// 上限を超えている（大きさは `detail` に添える）
+    TooLarge,
+    /// テキストとして読めない（バイナリ・UTF-8 でない）
+    Unsupported,
+}
+
 /// 画面と履歴の更新間隔（§13-3）。DB settings の値をセッションホストへ運ぶ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Intervals {
@@ -75,6 +135,23 @@ pub enum AgentMessage {
         agent_name: String,
         available_modes: Vec<PermissionMode>,
         always_bypass_permissions: bool,
+        /// この PC のフォルダを覗けるか（イシューグループ_2026_0805_0514 設計§4）。
+        ///
+        /// # なぜ `#[serde(default)]` が要るのか
+        ///
+        /// **これを外すと、古いセッションホストが繋がらなくなる。** 名乗りに欄が
+        /// 足りず、必須欄の欠落で Hello そのものが解けなくなるためである。
+        ///
+        /// # なぜ名乗らせるのか
+        ///
+        /// 接続を守るためではない（§23-1 で前提が覆った）。古いホストは知らない種別を
+        /// 受け取っても**接続を保ち、警告を出して無視する**——`link.rs` が意図的に
+        /// そう作ってある。ただし**永遠に答えない**。
+        ///
+        /// 名乗りが無いと、画面には時間切れの「PC が応じません」しか出せず、
+        /// **本当の理由（版が古い）を伝えられない**。判定を通すのはそのため。
+        #[serde(default)]
+        supports_host_fs: bool,
     },
     /// カード1枚の最新（意味は [`crate::ws::ServerMessage::SessionUpsert`] と同じ）。
     ///
@@ -130,6 +207,14 @@ pub enum AgentMessage {
         cli_version: String,
         catalog: serde_json::Value,
         aliases: serde_json::Value,
+    },
+    /// 問いへの答え（設計§4）。**この線で唯一、指示に返事を返すもの。**
+    ///
+    /// 答えられなかった場合も必ず返す（`HostReply::Failed`）。黙ると、サーバ側は
+    /// 時間切れを待つしかなくなり、**フォルダが無いことと区別が付かない**。
+    HostReply {
+        request_id: RequestId,
+        reply: HostReply,
     },
 }
 
@@ -196,6 +281,21 @@ pub enum ServerToAgent {
     SetIntervals {
         intervals: Intervals,
     },
+    /// フォルダの中身を教えてほしい（イシューグループ_2026_0805_0514 設計§4・§8）。
+    ///
+    /// **答えは [`AgentMessage::HostReply`] で返る。** カードに紐づかない問いなので、
+    /// `card_id` は持たない——PJT を追加する場面では、まだカードが1枚も無い。
+    ListDir {
+        request_id: RequestId,
+        path: String,
+    },
+    /// ファイルの中身を教えてほしい（設計§4・§9）。
+    ///
+    /// **読むだけ。** 書く口はこの工事では作らない（設計§9）。
+    ReadFile {
+        request_id: RequestId,
+        path: String,
+    },
 }
 
 #[cfg(test)]
@@ -235,6 +335,25 @@ mod tests {
         }
     }
 
+    fn sample_listing() -> crate::fs::DirListing {
+        crate::fs::DirListing {
+            path: "/home/example/dev/app".to_string(),
+            entries: vec![
+                crate::fs::DirEntry {
+                    name: ".claude".to_string(),
+                    kind: crate::fs::EntryKind::Dir,
+                    is_project: false,
+                },
+                crate::fs::DirEntry {
+                    name: "計画.md".to_string(),
+                    kind: crate::fs::EntryKind::File,
+                    is_project: false,
+                },
+            ],
+            truncated: false,
+        }
+    }
+
     #[test]
     fn agent_messageは全種が往復する() {
         let card_id = CardId::new();
@@ -248,6 +367,7 @@ mod tests {
                     PermissionMode::new("acceptEdits"),
                 ],
                 always_bypass_permissions: false,
+                supports_host_fs: true,
             },
             AgentMessage::SessionUpsert {
                 session: Box::new(sample_meta()),
@@ -292,6 +412,10 @@ mod tests {
                 cli_version: "2.1.220".to_string(),
                 catalog: serde_json::json!([{ "id": "claude-opus-5", "label": "Opus 5" }]),
                 aliases: serde_json::json!([{ "alias": "opus", "resolved": "claude-opus-5" }]),
+            },
+            AgentMessage::HostReply {
+                request_id: RequestId::new(),
+                reply: HostReply::Dir(sample_listing()),
             },
         ];
         for message in &all {
@@ -347,6 +471,14 @@ mod tests {
             },
             ServerToAgent::UnsubScreen { card_id },
             ServerToAgent::SetIntervals { intervals },
+            ServerToAgent::ListDir {
+                request_id: RequestId::new(),
+                path: "/home/example/dev/app".to_string(),
+            },
+            ServerToAgent::ReadFile {
+                request_id: RequestId::new(),
+                path: "/home/example/dev/app/計画.md".to_string(),
+            },
         ];
         for message in &all {
             assert_eq!(&roundtrip(message), message);
@@ -393,5 +525,72 @@ mod tests {
             aliases: serde_json::json!({}),
         };
         assert_eq!(roundtrip(&message), message);
+    }
+
+    #[test]
+    fn 答えの3種と理由の5値がすべて往復する() {
+        // 断る側を1つでも落とすと、その理由だけが画面へ出せなくなる。
+        // 「まとめて駄目でした」に潰れるのを防ぐため、**5値を数え上げて**固定する
+        let reasons = [
+            HostFailure::NotFound,
+            HostFailure::Denied,
+            HostFailure::NotDirectory,
+            HostFailure::TooLarge,
+            HostFailure::Unsupported,
+        ];
+        let mut all = vec![
+            HostReply::Dir(sample_listing()),
+            HostReply::File(crate::fs::FileContent {
+                path: "/home/example/dev/app/計画.md".to_string(),
+                text: "# 計画\n- [x] 済み\n".to_string(),
+                truncated: false,
+                bytes: 24,
+            }),
+        ];
+        for reason in reasons {
+            all.push(HostReply::Failed {
+                reason,
+                detail: "実際の理由がここに入る".to_string(),
+            });
+        }
+        assert_eq!(all.len(), 2 + reasons.len());
+        for reply in &all {
+            assert_eq!(&roundtrip(reply), reply);
+        }
+    }
+
+    #[test]
+    fn request_idは薄い包みとして往復する() {
+        // `BatchId` と同じ形にしてある。包みが厚いと、線の上の見た目が変わる
+        let id = RequestId::new();
+        assert_eq!(roundtrip(&id), id);
+        assert_eq!(serde_json::to_string(&id).unwrap(), format!("\"{}\"", id.0));
+    }
+
+    #[test]
+    fn 能力の欄を持たない古いhelloも解ける() {
+        // **この工事でいちばん壊してはいけないところ。** `#[serde(default)]` を外すと、
+        // 古いセッションホストの名乗りが必須欄の欠落で解けなくなり、繋がらなくなる。
+        // 実物の 0.1.5 が送ってくる5欄そのままを食わせる
+        let old = r#"{
+            "t": "hello",
+            "protocol_version": 1,
+            "agent_version": "0.1.5",
+            "agent_name": "OMEN",
+            "available_modes": ["default"],
+            "always_bypass_permissions": false
+        }"#;
+        let parsed: AgentMessage = serde_json::from_str(old).expect("古い名乗りが解けること");
+        let AgentMessage::Hello {
+            supports_host_fs,
+            agent_version,
+            ..
+        } = parsed
+        else {
+            panic!("Hello として解けること");
+        };
+        // 名乗らない＝覗けない。**黙って「できる」にしない**
+        assert!(!supports_host_fs);
+        assert_eq!(agent_version, "0.1.5");
     }
 }
