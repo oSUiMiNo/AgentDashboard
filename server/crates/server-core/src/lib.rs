@@ -18,6 +18,7 @@ pub mod config;
 pub mod db;
 pub mod embed;
 pub mod gateway;
+pub mod hosts;
 pub mod portable;
 pub mod registry;
 pub mod session_host;
@@ -54,6 +55,10 @@ pub fn routes(state: ws::AppState, auth: Arc<auth::AuthContext>) -> Router {
             "/api/sessions/{card_id}/transcript",
             get(ws::api_transcript),
         )
+        // 利用者の PC のフォルダとファイル（イシューグループ_2026_0805_0514 設計§10）。
+        // **鍵の内側**に置く——中身のある口なので、素通しにしてよい理由が無い
+        .route("/api/hosts/{host}/dir", get(hosts::api_dir))
+        .route("/api/hosts/{host}/file", get(hosts::api_file))
         .with_state(state);
 
     guard(protected, Arc::clone(&auth))
