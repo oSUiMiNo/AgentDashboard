@@ -1,11 +1,12 @@
 import { expect, test } from '@playwright/test'
 import {
+  WORK_DIR,
+  addProject,
   archiveAll,
   expectTerminalToContain,
   openDashboard,
   openSession,
   spawnSession,
-  WORK_DIR,
 } from './helpers'
 
 /**
@@ -29,11 +30,14 @@ test.afterEach(async ({ page }) => {
 
 test('ドロップダウンで選んだモードが小窓に出る', async ({ page }) => {
   await openDashboard(page)
-  await expect(page.getByTestId('spawn-mode').locator('option')).toHaveCount(3)
+  // 起動の入口は枠の「+」へ移った（イシューグループ_2026_0805_0514 §13）。
+  // 危険度の判断が要るのは起こす瞬間だけなので、選択もそこに付く
+  const group = await addProject(page, WORK_DIR)
+  await group.getByTestId('spawn-open').click()
+  await expect(group.getByTestId('spawn-mode').locator('option')).toHaveCount(3)
 
-  await page.getByTestId('cwd-input').fill(WORK_DIR)
-  await page.getByTestId('spawn-mode').selectOption('acceptEdits')
-  await page.getByTestId('spawn-button').click()
+  await group.getByTestId('spawn-mode').selectOption('acceptEdits')
+  await group.getByTestId('spawn-button').click()
   await expect(page.getByTestId('session-tile')).toHaveCount(1)
 
   const tile = page.getByTestId('session-tile').first()
@@ -143,13 +147,15 @@ test('設定のトグルはリロードしても別タブでも保たれる', as
   await page.reload()
   await expect(page.getByTestId('always-bypass-toggle')).toBeChecked()
 
-  // 一覧の権限モードの既定が「全承認をスキップ」になる（選択肢は減らない）
+  // 起動時の権限モードの既定が「全承認をスキップ」になる（選択肢は減らない）
   await page.goto('/')
-  await expect(page.getByTestId('spawn-mode')).toHaveAttribute(
+  const group = await addProject(page, WORK_DIR)
+  await group.getByTestId('spawn-open').click()
+  await expect(group.getByTestId('spawn-mode')).toHaveAttribute(
     'data-mode',
     'bypassPermissions',
   )
-  await expect(page.getByTestId('spawn-mode').locator('option')).toHaveCount(3)
+  await expect(group.getByTestId('spawn-mode').locator('option')).toHaveCount(3)
 
   // 別のタブでも同じ値になる（ブラウザごとに食い違わない）
   const other = await context.newPage()
@@ -167,22 +173,24 @@ test('既定が全承認スキップでも別のモードで起こせて、起�
     data: { always_bypass_permissions: true },
   })
   await openDashboard(page)
-  await expect(page.getByTestId('spawn-mode')).toHaveAttribute(
+  const group = await addProject(page, WORK_DIR)
+  await group.getByTestId('spawn-open').click()
+  await expect(group.getByTestId('spawn-mode')).toHaveAttribute(
     'data-mode',
     'bypassPermissions',
   )
 
-  await page.getByTestId('cwd-input').fill(WORK_DIR)
-  await page.getByTestId('spawn-mode').selectOption('acceptEdits')
-  await page.getByTestId('spawn-button').click()
+  await group.getByTestId('spawn-mode').selectOption('acceptEdits')
+  await group.getByTestId('spawn-button').click()
   await expect(page.getByTestId('session-tile')).toHaveCount(1)
 
   // 起こしたのは選んだモード
   await expect(
     page.getByTestId('session-tile').first().getByTestId('permission-mode'),
   ).toHaveAttribute('data-mode', 'acceptEdits')
-  // そして選択は捨てられ、既定へ戻っている
-  await expect(page.getByTestId('spawn-mode')).toHaveAttribute(
+  // そして選択は捨てられ、既定へ戻っている（開き直すと既定で出る）
+  await group.getByTestId('spawn-open').click()
+  await expect(group.getByTestId('spawn-mode')).toHaveAttribute(
     'data-mode',
     'bypassPermissions',
   )
@@ -192,9 +200,10 @@ test('全承認をスキップで起動すると、確認に自動で答えて�
   page,
 }) => {
   await openDashboard(page)
-  await page.getByTestId('cwd-input').fill(WORK_DIR)
-  await page.getByTestId('spawn-mode').selectOption('bypassPermissions')
-  await page.getByTestId('spawn-button').click()
+  const group = await addProject(page, WORK_DIR)
+  await group.getByTestId('spawn-open').click()
+  await group.getByTestId('spawn-mode').selectOption('bypassPermissions')
+  await group.getByTestId('spawn-button').click()
   await expect(page.getByTestId('session-tile')).toHaveCount(1)
 
   await page.getByTestId('session-tile').first().click()

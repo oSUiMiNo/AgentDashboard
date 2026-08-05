@@ -79,7 +79,7 @@ export async function signInIfAsked(page: Page) {
   // 何を出すか決めるので、聞いている間はどちらも出ていない。待たずに数えると
   // 0 が返り、ログインを飛ばして「繋がらない」で落ちる——しかも**実行環境の速さ次第**で
   // 通ったり落ちたりする（単体では通るのに通しで落ちる形）
-  await expect(form.or(page.getByTestId('spawn-form'))).toBeVisible()
+  await expect(form.or(page.getByTestId('project-add-open'))).toBeVisible()
   if ((await form.count()) === 0) {
     return
   }
@@ -128,14 +128,46 @@ export async function spawnSession(
   const before = (await serverCardIds(page)).length
   await expect(page.getByTestId('session-tile')).toHaveCount(before)
 
-  await page.getByTestId('cwd-input').fill(cwd)
-  if (agentName !== undefined) {
-    await page.getByTestId('spawn-target').selectOption({ label: agentName })
-  }
-  await page.getByTestId('spawn-mode').selectOption('')
-  await page.getByTestId('spawn-button').click()
+  const group = await addProject(page, cwd, agentName)
+
+  // 枠の「+」から起こす（設計§13）。**モードは名指しで選ぶ**
+  await group.getByTestId('spawn-open').click()
+  await group.getByTestId('spawn-mode').selectOption('')
+  await group.getByTestId('spawn-button').click()
   await expect(page.getByTestId('session-tile')).toHaveCount(before + 1)
   return page.getByTestId('session-tile').nth(before)
+}
+
+/**
+ * PJT の枠を足して、その枠を返す（イシューグループ_2026_0805_0514 設計§13）。
+ *
+ * 起動の入口が入れ替わったので、セッションを起こす前に必ずここを通る。
+ * **パスは打ち込む道を使う**——辿る道は実行環境のフォルダ構成に依存するので、
+ * 土台としては再現しない。辿る道そのものは専用のテストで見る。
+ *
+ * 既にある枠を指したときは、記録が1行のままなので**同じ枠が返る**。
+ */
+export async function addProject(
+  page: Page,
+  cwd: string = WORK_DIR,
+  agentName?: string,
+): Promise<Locator> {
+  const group = page.locator(`[data-testid="project-group"][data-project="${cwd}"]`)
+  if ((await group.count()) > 0) {
+    return group.first()
+  }
+
+  await page.getByTestId('project-add-open').click()
+  const sheet = page.getByTestId('project-add-sheet')
+  await expect(sheet).toBeVisible()
+  if (agentName !== undefined) {
+    await sheet.getByTestId('project-add-host').selectOption({ label: agentName })
+  }
+  await sheet.getByTestId('project-add-path').fill(cwd)
+  await sheet.getByTestId('project-add-submit').click()
+  await expect(sheet).toHaveCount(0)
+  await expect(group).toHaveCount(1)
+  return group
 }
 
 /**
@@ -233,6 +265,9 @@ export async function archiveAll(page: Page) {
   for (let guard = 0; guard < 20; guard += 1) {
     const remaining = await serverCardIds(page)
     if (remaining.length === 0) {
+      // カードを片付けたら枠も外す。**製品としては枠が残るのが正しい**（設計§13）が、
+      // テストの間で残ると「一覧が空であること」を見ている主張が次のテストへ漏れる
+      await removeAllProjects(page)
       return
     }
     await page.goto(`/s/${remaining[0]}`)
@@ -246,4 +281,42 @@ export async function archiveAll(page: Page) {
       .toBe(false)
   }
   throw new Error('カードを片付けきれませんでした')
+}
+
+/**
+ * 追加した PJT の枠を全部外す（[`archiveAll`] が最後に呼ぶ）。
+ *
+ * カードと同じく**サーバに聞いて、IDで名指しして消す**——画面の枠を数えると
+ * 「まだ描かれていない」と「もう無い」を読み違える。
+ *
+ * セッションが居る枠は消せないので、**カードを片付けたあと**でなければ効かない。
+ */
+async function removeAllProjects(page: Page) {
+  const ids = await page.evaluate(async () => {
+    const response = await fetch('/api/projects')
+    if (!response.ok) {
+      return [] as string[]
+    }
+    return ((await response.json()) as { id: string }[]).map((row) => row.id)
+  })
+  for (const id of ids) {
+    await page.evaluate(
+      async (target) => {
+        await fetch(`/api/projects/${target}`, { method: 'DELETE' })
+      },
+      id,
+    )
+  }
+  await expect
+    .poll(
+      async () =>
+        await page.evaluate(async () => {
+          const response = await fetch('/api/projects')
+          return response.ok
+            ? ((await response.json()) as unknown[]).length
+            : 0
+        }),
+      { message: 'サーバ側からも枠が消えること' },
+    )
+    .toBe(0)
 }

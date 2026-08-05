@@ -172,11 +172,11 @@ impl SessionHost for LocalSessionHost {
         request: server_core::session_host::HostFsRequest<'_>,
     ) -> Result<protocol::fs::DirListing, server_core::session_host::HostFsError> {
         reject_target(&request)?;
-        // 省略されたらホームから始める（設計§26-2）。セルフホストでは PC 側が同じことをする
-        let path = match request.path {
-            Some(path) => path.to_string(),
-            None => session_host_core::hostfs::home().display().to_string(),
-        };
+        // 省略ならホーム、貼られた形なら読み替える（設計§26-2・§13）。
+        // セルフホストでは PC 側が同じ1本を通る
+        let path = session_host_core::hostfs::resolve_start(request.path)
+            .display()
+            .to_string();
         blocking_fs(path, session_host_core::hostfs::list_dir).await
     }
 

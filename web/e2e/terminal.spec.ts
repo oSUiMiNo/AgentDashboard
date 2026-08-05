@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 import {
   WORK_DIR,
+  addProject,
   archiveAll,
   expectTerminalToContain,
   openDashboard,
@@ -106,9 +107,12 @@ test('存在しない作業ディレクトリを指定すると理由が表示�
 }) => {
   await openDashboard(page)
 
-  await page.getByTestId('cwd-input').fill('/存在しないはずのディレクトリ')
-  await page.getByTestId('spawn-mode').selectOption('')
-  await page.getByTestId('spawn-button').click()
+  // **枠は足せる。** パスの実在を見るのは起こす瞬間で、枠のほうは寝ている PC の
+  // ぶんも足せる必要がある（設計§17）
+  const group = await addProject(page, '/存在しないはずのディレクトリ')
+  await group.getByTestId('spawn-open').click()
+  await group.getByTestId('spawn-mode').selectOption('')
+  await group.getByTestId('spawn-button').click()
 
   await expect(page.getByTestId('error-banner')).toContainText(
     '作業ディレクトリが存在しません',

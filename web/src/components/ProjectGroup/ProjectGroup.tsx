@@ -27,6 +27,7 @@
 import { AnimatePresence } from 'motion/react'
 import { useState } from 'react'
 import { useNavigate } from 'react-router'
+import { SessionAdd } from '@/components/SessionAdd/SessionAdd'
 import { SessionTile } from '@/components/SessionTile/SessionTile'
 import { Button } from '@/components/ui/button'
 import type { CardId } from '@/lib/protocol'
@@ -82,6 +83,11 @@ export function ProjectGroup({ host, project, projectId, cards }: Props) {
         <span className="text-muted-foreground shrink-0 text-xs">
           {cards.length}セッション
         </span>
+        {/* 起動の入口はここ（設計§13）。追加は「枠を置く」操作なので、
+            危険度の判断が要るのは起こす瞬間だけになる */}
+        <div className="ml-auto shrink-0" onClick={(event) => event.stopPropagation()}>
+          <SessionAdd host={host} project={project} compact />
+        </div>
         {projectId !== undefined && (
           <Button
             type="button"
@@ -94,7 +100,7 @@ export function ProjectGroup({ host, project, projectId, cards }: Props) {
                 ? 'セッションが動いているので外せません（先にセッションを終了してください）'
                 : 'この PJT を一覧から外す（履歴は残ります）'
             }
-            className="ml-auto shrink-0 px-2 py-0.5 text-xs"
+            className="shrink-0 px-2 py-0.5 text-xs"
             onClick={(event) => {
               // 余白のクリック（＝画面を開く）と取り違えない
               event.stopPropagation()

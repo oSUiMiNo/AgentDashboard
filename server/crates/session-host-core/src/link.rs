@@ -916,8 +916,11 @@ fn apply_command(
         // 呼ばれているので、大きなフォルダを読むと ping まで止まり、サーバから見ると
         // 「静かな死」に見えて切られる
         ServerToAgent::ListDir { request_id, path } => {
-            // 省略されたら**ホームから始める**（設計§26-2）。解決できるのはこちらだけ
-            let path = path.unwrap_or_else(|| crate::hostfs::home().display().to_string());
+            // 省略ならホーム、貼られた形なら読み替える（設計§26-2・§13）。
+            // どちらも解決できるのはこちら側だけ
+            let path = crate::hostfs::resolve_start(path.as_deref())
+                .display()
+                .to_string();
             answer_host_fs(outgoing.clone(), request_id, path, HostFsAsk::Dir);
         }
         ServerToAgent::ReadFile { request_id, path } => {

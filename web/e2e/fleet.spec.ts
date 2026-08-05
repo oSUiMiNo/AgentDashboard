@@ -42,13 +42,17 @@ test('起動先を選ぶまで起動できない', async ({ page }) => {
   // 本物の claude が起動する——利用者から見れば「押したのに違う機械で動いた」に
   // なり、しかも気づくのはずっと後になる
   await openDashboard(page)
-  await page.getByTestId('cwd-input').fill('/tmp')
+  // 起動の入口は「PJT を追加」へ移った（イシューグループ_2026_0805_0514 §13）。
+  // **どの PC のフォルダを見るか**を選ぶまで進めない、という形で同じ線を守る
+  await page.getByTestId('project-add-open').click()
+  const sheet = page.getByTestId('project-add-sheet')
+  await sheet.getByTestId('project-add-path').fill('/tmp')
 
-  const button = page.getByTestId('spawn-button')
+  const button = sheet.getByTestId('project-add-submit')
   await expect(button).toBeDisabled()
 
   // 選んだ瞬間に押せるようになる
-  await page.getByTestId('spawn-target').selectOption({ label: agentName(1) })
+  await sheet.getByTestId('project-add-host').selectOption({ label: agentName(1) })
   await expect(button).toBeEnabled()
 })
 

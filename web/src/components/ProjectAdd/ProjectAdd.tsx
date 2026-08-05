@@ -22,6 +22,7 @@
 
 import { useMemo, useState } from 'react'
 import { FolderBrowser } from '@/components/FolderBrowser/FolderBrowser'
+import { listDir } from '@/lib/hostfs'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { LOCAL_HOST } from '@/lib/routes'
@@ -112,10 +113,17 @@ function AddSheet({ onClose }: { onClose: () => void }) {
     setError(null)
     setNotice(null)
     try {
+      // **打ち込んだ形のまま保存しない。** Windows 側から貼ったパス（`\` 区切り・
+      // `C:\...` など）をそのまま枠にすると、起こしたカードは解決後の絶対パスを
+      // 名乗るので、**同じフォルダなのに枠とカードが別の箱に割れる**（設計§13）。
+      //
+      // 読み替えを持っているのは PC 側なので、一覧の口へ一度通して着いた先を貰う。
+      // 引けなければ打ち込んだ形のまま足す——**寝ている PC の枠も足せる**必要がある（§17）
+      const path = await canonical(host, target_path)
       const response = await fetch('/api/projects', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ host, path: target_path }),
+        body: JSON.stringify({ host, path }),
       })
       if (!response.ok) {
         setError((await response.text()).trim() || '追加できませんでした')
@@ -262,4 +270,15 @@ function AddSheet({ onClose }: { onClose: () => void }) {
       </footer>
     </div>
   )
+}
+
+/** 打ち込まれた形を、PC が解決した絶対パスへ寄せる（設計§13）。 */
+async function canonical(host: string, path: string): Promise<string> {
+  try {
+    return (await listDir(host, path)).path
+  } catch {
+    // 引けない理由は「無い」だけとは限らない（寝ている・権限が無い）。
+    // ここで断ると枠すら足せなくなるので、打ち込まれた形をそのまま返す
+    return path
+  }
 }
