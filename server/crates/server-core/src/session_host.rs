@@ -204,6 +204,10 @@ pub struct HostFsRequest<'a> {
     pub account_id: uuid::Uuid,
     /// どの PC に聞くか。`None` は「選ばれていない」——ローカルモードは常に `None`
     pub target: Option<AgentId>,
-    /// 絶対パス
-    pub path: &'a str,
+    /// 絶対パス。**`None` はその PC のホーム**（設計§26-2）。
+    ///
+    /// `None` を渡してよいのは [`SessionHost::list_dir`] だけである。中身の読み取りに
+    /// 「始まり」は無く、REST の口も `path` を必須にしているので、
+    /// [`SessionHost::read_file`] がここで `None` を受け取ることはない。
+    pub path: Option<&'a str>,
 }

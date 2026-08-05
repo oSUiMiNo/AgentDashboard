@@ -21,7 +21,7 @@ use protocol::a2s::HostFailure;
 use protocol::fs::{
     DirEntry, DirListing, EntryKind, FileContent, MAX_ENTRIES, MAX_FILE_BYTES, MAX_LISTING_BYTES,
 };
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// 応えられなかったときの中身。そのまま `HostReply::Failed` になる。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +58,17 @@ impl HostFsError {
 /// 大きさの上限を掛けるのに使う。**正確な JSON の長さを作ってから測らない**——
 /// 作ってから捨てるのは、上限を置いた意味（大きいものを作らない）を失う。
 const ENTRY_OVERHEAD_BYTES: usize = 60;
+
+/// 「始まりの場所」＝この PC のホーム（設計§26-2）。
+///
+/// **ホームを知っているのは PC 側だけ**なので、サーバから `~` を送ってもらう道は無い。
+/// 環境変数が無い環境（サービスとして起こした場合など）ではルートに落とす——
+/// 辿る起点が消えるより、辿れるがそっけない起点があるほうがよい。
+pub fn home() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
+}
 
 /// フォルダ1つの中身を返す（設計§8）。
 ///

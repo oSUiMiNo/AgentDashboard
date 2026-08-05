@@ -1259,7 +1259,7 @@ fn ask<'a>(
     server_core::session_host::HostFsRequest {
         account_id,
         target,
-        path,
+        path: Some(path),
     }
 }
 

@@ -1186,7 +1186,7 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
         &self,
         request: crate::session_host::HostFsRequest<'_>,
     ) -> Result<protocol::fs::DirListing, crate::session_host::HostFsError> {
-        let path = request.path.to_string();
+        let path = request.path.map(str::to_string);
         match self
             .ask(request, |request_id| ServerToAgent::ListDir {
                 request_id,
@@ -1210,7 +1210,14 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
         &self,
         request: crate::session_host::HostFsRequest<'_>,
     ) -> Result<protocol::fs::FileContent, crate::session_host::HostFsError> {
-        let path = request.path.to_string();
+        // 中身の読み取りに「始まり」は無い（§26-2）。REST の口が `path` を必須に
+        // しているので、ここが空になるのは呼び出し側の誤りにあたる
+        let Some(path) = request.path.map(str::to_string) else {
+            return Err(crate::session_host::HostFsError::Failed {
+                reason: protocol::a2s::HostFailure::NotFound,
+                detail: "読むファイルが指定されていません".to_string(),
+            });
+        };
         match self
             .ask(request, |request_id| ServerToAgent::ReadFile {
                 request_id,

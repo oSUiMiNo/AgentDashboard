@@ -172,11 +172,12 @@ impl SessionHost for LocalSessionHost {
         request: server_core::session_host::HostFsRequest<'_>,
     ) -> Result<protocol::fs::DirListing, server_core::session_host::HostFsError> {
         reject_target(&request)?;
-        blocking_fs(
-            request.path.to_string(),
-            session_host_core::hostfs::list_dir,
-        )
-        .await
+        // 省略されたらホームから始める（設計§26-2）。セルフホストでは PC 側が同じことをする
+        let path = match request.path {
+            Some(path) => path.to_string(),
+            None => session_host_core::hostfs::home().display().to_string(),
+        };
+        blocking_fs(path, session_host_core::hostfs::list_dir).await
     }
 
     async fn read_file(
@@ -184,11 +185,14 @@ impl SessionHost for LocalSessionHost {
         request: server_core::session_host::HostFsRequest<'_>,
     ) -> Result<protocol::fs::FileContent, server_core::session_host::HostFsError> {
         reject_target(&request)?;
-        blocking_fs(
-            request.path.to_string(),
-            session_host_core::hostfs::read_file,
-        )
-        .await
+        // 中身の読み取りに「始まり」は無い（設計§26-2）。REST の口が必須にしている
+        let Some(path) = request.path else {
+            return Err(server_core::session_host::HostFsError::Failed {
+                reason: protocol::a2s::HostFailure::NotFound,
+                detail: "読むファイルが指定されていません".to_string(),
+            });
+        };
+        blocking_fs(path.to_string(), session_host_core::hostfs::read_file).await
     }
 }
 

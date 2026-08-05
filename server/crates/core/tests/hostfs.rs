@@ -52,7 +52,7 @@ fn ask<'a>(path: &'a str) -> HostFsRequest<'a> {
         account_id: uuid::Uuid::new_v4(),
         // ローカルモードには PC という単位が無い（設計§19）
         target: None,
-        path,
+        path: Some(path),
     }
 }
 
@@ -125,11 +125,60 @@ async fn ローカルモードで宛先を指名されたら断る() {
         .list_dir(HostFsRequest {
             account_id: uuid::Uuid::new_v4(),
             target: Some(protocol::AgentId(uuid::Uuid::new_v4())),
-            path: &sandbox.path().display().to_string(),
+            path: Some(&sandbox.path().display().to_string()),
         })
         .await
         .expect_err("断ること");
 
     // 知らない PC と同じ言葉。綴りを変えて探る余地を残さない
     assert_eq!(err, server_core::session_host::HostFsError::UnknownHost);
+}
+
+/// `path` を省略すると、その PC の**ホームへ着く**（設計§26-2）。
+///
+/// 設計§13 は始まりの場所の1つをホームと決めているが、当初の「能力の名乗りで運ぶ」道は
+/// **ローカルモードでは成立しない**（あちらは PC の一覧そのものを持たない）。省略できる
+/// 形にしてあるので、ここが通ることがローカル側の担保になる。
+///
+/// 着いた先は応答の `path` に載る——**画面はここを見てパンくずを組み立てる**ので、
+/// 空だと現在地を出せない。
+#[tokio::test]
+async fn 一覧はパスを省略するとホームから始まる() {
+    let listing = host()
+        .list_dir(HostFsRequest {
+            account_id: uuid::Uuid::new_v4(),
+            target: None,
+            path: None,
+        })
+        .await
+        .expect("ホームを引けること");
+
+    assert_eq!(
+        listing.path,
+        session_host_core::hostfs::home().display().to_string(),
+        "省略したのにホーム以外へ着いた"
+    );
+    assert!(!listing.path.is_empty(), "着いた先が応答に載っていない");
+}
+
+/// 中身の読み取りに「始まり」は無い（設計§26-2）。
+///
+/// 口が `path` を必須にしているので通常は起きないが、**型がその状態を許す**以上、
+/// 落ちずに断ることを固定しておく。
+#[tokio::test]
+async fn 中身の読み取りはパスの省略を断る() {
+    let err = host()
+        .read_file(HostFsRequest {
+            account_id: uuid::Uuid::new_v4(),
+            target: None,
+            path: None,
+        })
+        .await
+        .expect_err("断ること");
+
+    assert!(
+        err.message().contains("指定されていません"),
+        "理由が伝わらない: {}",
+        err.message()
+    );
 }

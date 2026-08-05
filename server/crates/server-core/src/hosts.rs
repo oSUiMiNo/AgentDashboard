@@ -32,7 +32,13 @@ use protocol::{
 /// `SettingsView.model_tables` のキーが既にこの綴りを使っているので揃える（設計§10）。
 pub const LOCAL_HOST: &str = "local";
 
-/// `?path=…`
+/// `?path=…`。**フォルダの一覧では省略できる**（省略＝その PC のホーム。設計§26-2）。
+#[derive(Debug, serde::Deserialize)]
+pub struct DirQuery {
+    pub path: Option<String>,
+}
+
+/// `?path=…`。中身の読み取りには「始まり」が無いので**必須**。
 #[derive(Debug, serde::Deserialize)]
 pub struct PathQuery {
     pub path: String,
@@ -43,7 +49,7 @@ pub async fn api_dir(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<Identity>,
     Path(host): Path<String>,
-    Query(query): Query<PathQuery>,
+    Query(query): Query<DirQuery>,
 ) -> Result<Json<DirListing>, (StatusCode, String)> {
     let target = parse_host(&host)?;
     state
@@ -51,7 +57,7 @@ pub async fn api_dir(
         .list_dir(HostFsRequest {
             account_id: identity.account_id,
             target,
-            path: &query.path,
+            path: query.path.as_deref(),
         })
         .await
         .map(Json)
@@ -71,7 +77,7 @@ pub async fn api_file(
         .read_file(HostFsRequest {
             account_id: identity.account_id,
             target,
-            path: &query.path,
+            path: Some(&query.path),
         })
         .await
         .map(Json)

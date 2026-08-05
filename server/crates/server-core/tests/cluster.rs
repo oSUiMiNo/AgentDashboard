@@ -1052,7 +1052,7 @@ async fn 跨いだ配置でもフォルダの答えが問うた側へ戻る() {
             host.list_dir(server_core::session_host::HostFsRequest {
                 account_id,
                 target: Some(target),
-                path: "/home/example/dev/app",
+                path: Some("/home/example/dev/app"),
             })
             .await
         });
@@ -1065,6 +1065,8 @@ async fn 跨いだ配置でもフォルダの答えが問うた側へ戻る() {
         let protocol::a2s::ServerToAgent::ListDir { request_id, path } = message else {
             panic!("[{}] フォルダの問いであること", backend.name);
         };
+        // 省略なしで問うたので、そのまま載っていること（§26-2 の `None` は別の道）
+        let path = path.expect("パスが載っていること");
         assert_eq!(path, "/home/example/dev/app");
 
         agent
@@ -1108,7 +1110,7 @@ async fn 連絡係が切れている間のフォルダの問いは理由を返�
             .list_dir(server_core::session_host::HostFsRequest {
                 account_id,
                 target: Some(target),
-                path: "/home/example/dev/app",
+                path: Some("/home/example/dev/app"),
             })
             .await
             .expect_err("断られること");

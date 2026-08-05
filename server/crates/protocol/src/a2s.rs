@@ -287,7 +287,13 @@ pub enum ServerToAgent {
     /// `card_id` は持たない——PJT を追加する場面では、まだカードが1枚も無い。
     ListDir {
         request_id: RequestId,
-        path: String,
+        /// 絶対パス。**`None` は「始まりの場所」＝その PC のホーム**（設計§26-2）。
+        ///
+        /// ホームを知っているのは PC 側だけなので、サーバが `~` を解決して送ることは
+        /// できない。設計§13 は名乗りに添えて受け取る形にしていたが、それだと
+        /// **ローカルモードで受け取れない**（あちらは PC の一覧そのものを持たない）。
+        /// 省略できる形にすると、どちらの構成でも同じ1本の口で始まりへ辿り着ける。
+        path: Option<String>,
     },
     /// ファイルの中身を教えてほしい（設計§4・§9）。
     ///
@@ -473,7 +479,12 @@ mod tests {
             ServerToAgent::SetIntervals { intervals },
             ServerToAgent::ListDir {
                 request_id: RequestId::new(),
-                path: "/home/example/dev/app".to_string(),
+                path: Some("/home/example/dev/app".to_string()),
+            },
+            // 省略＝ホームから始める（§26-2）。**省いた形も往復すること**を固定する
+            ServerToAgent::ListDir {
+                request_id: RequestId::new(),
+                path: None,
             },
             ServerToAgent::ReadFile {
                 request_id: RequestId::new(),
