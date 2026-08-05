@@ -128,6 +128,14 @@ async fn events_loop(
             // 立ち上げ直したインスタンスからの頼み。**自分に繋がっている PC の
             // カードだけ**を名乗り直す
             bus::AccountMessage::Resync => hub.reannounce(account_id),
+            // 別のインスタンスに繋がっている PC からの答え（設計§7）。
+            //
+            // **自分が問うたものでなければ捨てる。** このチャネルはアカウント単位なので、
+            // 問うていないインスタンスにも届く——`request_id` が合わないものは、
+            // 捨てるだけで正しい
+            bus::AccountMessage::HostReply { request_id, reply } => {
+                hub.resolve_reply(request_id, *reply);
+            }
         }
     }
 }

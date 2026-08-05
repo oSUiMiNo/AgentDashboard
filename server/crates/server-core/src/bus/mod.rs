@@ -199,6 +199,25 @@ pub enum AccountMessage {
     Event(Box<protocol::ws::ServerMessage>),
     /// 「いま持っているカードをもう一度名乗ってほしい」
     Resync,
+    /// フォルダ・ファイルの問いへの答え（イシューグループ_2026_0805_0514 設計§7）。
+    ///
+    /// # なぜここへ載せるのか
+    ///
+    /// ブラウザが繋いでいるサーバと、PC が繋いでいるサーバは**別でありうる**。
+    /// 指示を届ける道（`agent:{id}:cmd`）はあるが、**答えを問うた側へ戻す道が無い**。
+    /// 画面のフレームが流れる `card:{id}:screen` はカード単位なので、カードを持たない
+    /// この問いには使えない。**新しいチャネルを増やさず**、既にある知らせの道へ相乗りする。
+    ///
+    /// 問うていないインスタンスにも届くが、`request_id` が合わなければ捨てるだけで済む。
+    ///
+    /// # `ServerMessage` に足さない理由
+    ///
+    /// あれは**ブラウザ向けの型**で、ブラウザはこの答えを REST で受け取る。足すと
+    /// 「Rust の型・往復テスト・TS の型・突き合わせテスト」の4箇所を揃える義務が生まれる。
+    HostReply {
+        request_id: protocol::a2s::RequestId,
+        reply: Box<protocol::a2s::HostReply>,
+    },
 }
 
 // --- 封筒 --------------------------------------------------------------------
@@ -314,6 +333,43 @@ mod tests {
         let (from, body) = decode_binary(&payload).expect("読めること");
         assert_eq!(from, me);
         assert_eq!(body, b"\x01\x02\x03");
+    }
+
+    #[test]
+    fn 答えも発信元つきの封筒で往復する() {
+        // 跨いだ答えはこのチャネルに相乗りする（イシューグループ_2026_0805_0514 設計§7）。
+        // **発信元が要る**のは、自分の publish も返ってくるため——印が無いと、
+        // 受けた側が配り直し、それがまた返ってきて止まらなくなる
+        let me = Uuid::new_v4();
+        let request_id = protocol::a2s::RequestId::new();
+        let message = AccountMessage::HostReply {
+            request_id,
+            reply: Box::new(protocol::a2s::HostReply::Failed {
+                reason: protocol::a2s::HostFailure::Denied,
+                detail: "権限がありません".to_string(),
+            }),
+        };
+
+        let payload = encode_json(me, &message);
+        let (from, body) = decode_json::<AccountMessage>(&payload).expect("読めること");
+
+        assert_eq!(from, me);
+        let AccountMessage::HostReply {
+            request_id: got,
+            reply,
+        } = body
+        else {
+            panic!("答えとして解けること");
+        };
+        // 番号が壊れると、別の要求へ他人の答えを渡すことになる
+        assert_eq!(got, request_id);
+        assert!(matches!(
+            *reply,
+            protocol::a2s::HostReply::Failed {
+                reason: protocol::a2s::HostFailure::Denied,
+                ..
+            }
+        ));
     }
 
     #[test]

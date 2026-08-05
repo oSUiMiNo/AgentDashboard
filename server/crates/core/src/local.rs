@@ -170,7 +170,8 @@ impl SessionHost for LocalSessionHost {
     async fn list_dir(
         &self,
         request: server_core::session_host::HostFsRequest<'_>,
-    ) -> Result<protocol::fs::DirListing, String> {
+    ) -> Result<protocol::fs::DirListing, server_core::session_host::HostFsError> {
+        reject_target(&request)?;
         blocking_fs(
             request.path.to_string(),
             session_host_core::hostfs::list_dir,
@@ -181,12 +182,27 @@ impl SessionHost for LocalSessionHost {
     async fn read_file(
         &self,
         request: server_core::session_host::HostFsRequest<'_>,
-    ) -> Result<protocol::fs::FileContent, String> {
+    ) -> Result<protocol::fs::FileContent, server_core::session_host::HostFsError> {
+        reject_target(&request)?;
         blocking_fs(
             request.path.to_string(),
             session_host_core::hostfs::read_file,
         )
         .await
+    }
+}
+
+/// ローカルモードで宛先を指名されたら断る（設計§19）。
+///
+/// **ローカルモードには PC という単位が無い。** 黙って無視すると、`/api/hosts/<でたらめ>/dir`
+/// が手元のファイルを返すことになり、口の意味が構成によって変わる。**知らない PC と
+/// 同じ言葉で断る**ので、綴りを変えて探る余地も残らない。
+fn reject_target(
+    request: &server_core::session_host::HostFsRequest<'_>,
+) -> Result<(), server_core::session_host::HostFsError> {
+    match request.target {
+        None => Ok(()),
+        Some(_) => Err(server_core::session_host::HostFsError::UnknownHost),
     }
 }
 
@@ -198,12 +214,22 @@ impl SessionHost for LocalSessionHost {
 async fn blocking_fs<T: Send + 'static>(
     path: String,
     read: fn(&std::path::Path) -> Result<T, session_host_core::hostfs::HostFsError>,
-) -> Result<T, String> {
-    tokio::task::spawn_blocking(move || read(std::path::Path::new(&path)))
-        .await
+) -> Result<T, server_core::session_host::HostFsError> {
+    use server_core::session_host::HostFsError;
+    match tokio::task::spawn_blocking(move || read(std::path::Path::new(&path))).await {
+        // **ローカルが作るのは `Failed` だけ。** 線を跨がないので、届かなかったことを
+        // 表す残りの理由は起こりえない（設計§19：見え方をモードで食い違わせない）
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(err)) => Err(HostFsError::Failed {
+            reason: err.reason,
+            detail: err.detail,
+        }),
         // 逃がした先が落ちたのは実装の誤り。握り潰さず、そのまま説明にする
-        .map_err(|err| format!("読み取りを完了できませんでした（{err}）"))?
-        .map_err(|err| err.detail)
+        Err(err) => Err(HostFsError::Failed {
+            reason: protocol::a2s::HostFailure::Unsupported,
+            detail: format!("読み取りを完了できませんでした（{err}）"),
+        }),
+    }
 }
 
 /// セッションホストの報告を**記録層へ運ぶ**報告先（セルフホスト化設計§2-3・§3-3）。

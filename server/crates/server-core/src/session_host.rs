@@ -140,10 +140,59 @@ pub trait SessionHost: Send + Sync + 'static {
     /// **ローカルモードもここを通る。** サーバ側で「同じプロセスなら自分で読む」と
     /// 近道を作らない——片側だけ速くすると「ローカルでは動くのにセルフホストで欠ける」
     /// という、経路の違いが原因でテストを増やしても見つからない壊れ方が残る（§19）。
-    async fn list_dir(&self, request: HostFsRequest<'_>) -> Result<DirListing, String>;
+    async fn list_dir(&self, request: HostFsRequest<'_>) -> Result<DirListing, HostFsError>;
 
     /// ファイル1つの中身（設計§5・§9）。**読むだけ**で、書く口は持たない。
-    async fn read_file(&self, request: HostFsRequest<'_>) -> Result<FileContent, String>;
+    async fn read_file(&self, request: HostFsRequest<'_>) -> Result<FileContent, HostFsError>;
+}
+
+/// ファイルの口が応えられなかった理由（設計§10 の状態コードの表）。
+///
+/// # なぜここだけ `String` ではないのか
+///
+/// 他のメソッドは `Result<_, String>` で、「運ぶのは人が読む説明だけ」と決めてある。
+/// この2つだけ型を持つのは、**設計§10 が状態コードの写しを求めている**ため——
+/// `403` と `413` と `404` は、文字列からは作れない。
+///
+/// **ローカルとリモートで食い違わせない**のが要点（フェーズ1 の引き継ぎ）。
+/// ローカルモードは [`HostFsError::Failed`] しか作らず、残りは線の向こうへ
+/// 届かなかったことを表す——どちらの構成でも同じ入口で同じ写し方をする。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostFsError {
+    /// その PC が居ない。**他人のもの・知らない・繋がっていない を言い分けない**（§18）——
+    /// 分けると、IDを総当たりして他人の PC の存在を調べられる
+    UnknownHost,
+    /// その PC が古くて、フォルダを覗く能力を名乗っていない（§4）。
+    ///
+    /// 投げても永遠に答えないので、**投げる前に断る**。時間切れと混ぜると、
+    /// 利用者は回線を疑うことになる
+    Unsupported,
+    /// 時間内に答えが返らなかった（§7）
+    Timeout,
+    /// 連絡係が切れていて、別のインスタンスに繋がっている PC へ届けられない（§17）
+    Unreachable(String),
+    /// PC は答えたが、読めなかった（§8・§9）。**理由をそのまま写す**
+    Failed {
+        reason: protocol::a2s::HostFailure,
+        detail: String,
+    },
+}
+
+impl HostFsError {
+    /// 画面へ出す説明。**どの構成でも同じ文になる。**
+    pub fn message(&self) -> String {
+        match self {
+            // 「知らない」と「他人のもの」に同じ言葉を返す（§18）
+            Self::UnknownHost => "指定された PC が繋がっていません".to_string(),
+            Self::Unsupported => {
+                "この PC は版が古いのでフォルダを覗けません（セッションホストを更新してください）"
+                    .to_string()
+            }
+            Self::Timeout => "PC が応じません".to_string(),
+            Self::Unreachable(detail) => detail.clone(),
+            Self::Failed { detail, .. } => detail.clone(),
+        }
+    }
 }
 
 /// ファイルシステムへの頼み（イシューグループ_2026_0805_0514 設計§5）。

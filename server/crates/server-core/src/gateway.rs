@@ -37,7 +37,9 @@ use bytes::Bytes;
 use futures_util::{SinkExt as _, StreamExt as _};
 use protocol::{
     AgentId, CardId, PermissionMode,
-    a2s::{A2S_PROTOCOL, A2S_VERSION, AgentMessage, Intervals, ServerToAgent},
+    a2s::{
+        A2S_PROTOCOL, A2S_VERSION, AgentMessage, HostReply, Intervals, RequestId, ServerToAgent,
+    },
     ws::ServerMessage,
 };
 use sea_orm::EntityTrait as _;
@@ -46,7 +48,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use uuid::Uuid;
 
 /// セッションホスト1接続あたりの送信待ち行列（メッセージ数）。
@@ -239,6 +241,11 @@ pub struct SessionHostHub {
     /// **数えるのはここに居るカードだけ。** 全カードを10秒ごとに数えると、遊んでいる
     /// カードの数だけ連絡係へ問い合わせが出る。
     streaming: Mutex<HashSet<CardId>>,
+    /// フォルダ・ファイルの答え待ち（イシューグループ_2026_0805_0514 設計§7）。
+    ///
+    /// **時間で打ち切ったら必ず消す。** 消し忘れると、遅れて届いた答えが誰にも
+    /// 渡らないまま溜まる。接続やカードと違い、これは1回の要求の寿命しか持たない。
+    pending: Mutex<HashMap<RequestId, oneshot::Sender<HostReply>>>,
 }
 
 impl SessionHostHub {
@@ -249,7 +256,51 @@ impl SessionHostHub {
             conns: Mutex::new(HashMap::new()),
             screens: Mutex::new(HashMap::new()),
             streaming: Mutex::new(HashSet::new()),
+            pending: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// 連絡係が切れているか。**居ない（1台構成）ときは偽**——切れているのではなく、
+    /// もともと跨ぐ必要が無い。
+    pub fn bus_degraded(&self) -> bool {
+        self.registry
+            .bus()
+            .is_some_and(|bus| *bus.state().borrow() == BusState::Degraded)
+    }
+
+    /// 答えを待つ口を1つ開ける（設計§7）。
+    fn expect_reply(&self, request_id: RequestId) -> oneshot::Receiver<HostReply> {
+        let (tx, rx) = oneshot::channel();
+        self.pending
+            .lock()
+            .expect("ロックが壊れていない")
+            .insert(request_id, tx);
+        rx
+    }
+
+    /// 待つのをやめる。**時間切れのあとは必ず呼ぶ。**
+    fn forget_reply(&self, request_id: RequestId) {
+        self.pending
+            .lock()
+            .expect("ロックが壊れていない")
+            .remove(&request_id);
+    }
+
+    /// 届いた答えを、待っている要求へ渡す。
+    ///
+    /// 渡せなければ `false`。**そのときは自分が問うたものではない**ので、
+    /// 呼び出し側は連絡係へ流して、問うたインスタンスに拾わせる（設計§7）。
+    pub fn resolve_reply(&self, request_id: RequestId, reply: HostReply) -> bool {
+        let waiting = self
+            .pending
+            .lock()
+            .expect("ロックが壊れていない")
+            .remove(&request_id);
+        match waiting {
+            // 受け取る側が既に諦めている（時間切れ）ことはある。**捨ててよい**
+            Some(tx) => tx.send(reply).is_ok(),
+            None => false,
+        }
     }
 
     pub fn registry(&self) -> &Arc<SessionRegistry> {
@@ -359,10 +410,7 @@ impl SessionHostHub {
             return Err(NOT_CONNECTED.to_string());
         };
         if *bus.state().borrow() == BusState::Degraded {
-            return Err(
-                "この PC は別のインスタンスに繋がっています（連絡係が切れているため、いま指示を届けられません）"
-                    .to_string(),
-            );
+            return Err(BUS_DOWN.to_string());
         }
         bus.publish(
             &bus::agent_cmd(agent_id),
@@ -952,6 +1000,12 @@ impl RemoteSessionHost {
 /// そのカードを持つ PC が居ないときの説明。
 const NOT_CONNECTED: &str = "セッションが見つかりません（PC が繋がっていません）";
 
+/// 連絡係が切れていて跨げないときの説明（設計§17）。
+///
+/// **1か所に置く。** 指示もフォルダの問いも同じ事情で届かないので、口によって
+/// 言い方が変わると、利用者は別々の不調だと受け取る。
+const BUS_DOWN: &str = "この PC は別のインスタンスに繋がっています（連絡係が切れているため、いま指示を届けられません）";
+
 #[async_trait::async_trait]
 impl crate::session_host::SessionHost for RemoteSessionHost {
     /// そのカードを**どこかのインスタンスが**持っているか。
@@ -1128,29 +1182,188 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
         self.relay(card_id, ServerToAgent::SetModel { card_id, model })
     }
 
-    /// **中身はフェーズ2**（イシューグループ_2026_0805_0514 設計§21 の段2）。
-    ///
-    /// 問いを投げるところまでは A2S に載っているが、**答えを問うた側のインスタンスへ
-    /// 戻す道がまだ無い**（`AccountMessage` に種別を足し、待ち行列を作るのが段2）。
-    /// 半分だけ通すと「投げたのに永遠に返らない」になり、時間切れの理由が
-    /// 「PC が応じない」と見分けられなくなるので、**器だけ置いて断る**。
     async fn list_dir(
         &self,
-        _request: crate::session_host::HostFsRequest<'_>,
-    ) -> Result<protocol::fs::DirListing, String> {
-        Err(HOST_FS_NOT_READY.to_string())
+        request: crate::session_host::HostFsRequest<'_>,
+    ) -> Result<protocol::fs::DirListing, crate::session_host::HostFsError> {
+        let path = request.path.to_string();
+        match self
+            .ask(request, |request_id| ServerToAgent::ListDir {
+                request_id,
+                path: path.clone(),
+            })
+            .await?
+        {
+            HostReply::Dir(listing) => Ok(listing),
+            HostReply::Failed { reason, detail } => {
+                Err(crate::session_host::HostFsError::Failed { reason, detail })
+            }
+            // 頼んだものと違う答えが返るのは実装の食い違い。**黙って空を返さない**
+            HostReply::File(_) => Err(crate::session_host::HostFsError::Failed {
+                reason: protocol::a2s::HostFailure::Unsupported,
+                detail: "PC が別の答えを返しました".to_string(),
+            }),
+        }
     }
 
     async fn read_file(
         &self,
-        _request: crate::session_host::HostFsRequest<'_>,
-    ) -> Result<protocol::fs::FileContent, String> {
-        Err(HOST_FS_NOT_READY.to_string())
+        request: crate::session_host::HostFsRequest<'_>,
+    ) -> Result<protocol::fs::FileContent, crate::session_host::HostFsError> {
+        let path = request.path.to_string();
+        match self
+            .ask(request, |request_id| ServerToAgent::ReadFile {
+                request_id,
+                path: path.clone(),
+            })
+            .await?
+        {
+            HostReply::File(content) => Ok(content),
+            HostReply::Failed { reason, detail } => {
+                Err(crate::session_host::HostFsError::Failed { reason, detail })
+            }
+            HostReply::Dir(_) => Err(crate::session_host::HostFsError::Failed {
+                reason: protocol::a2s::HostFailure::Unsupported,
+                detail: "PC が別の答えを返しました".to_string(),
+            }),
+        }
     }
 }
 
-/// フェーズ2 が入るまでの断り文。**画面へそのまま出る。**
-const HOST_FS_NOT_READY: &str = "この構成ではまだフォルダを覗けません";
+/// 問いの届け方。**宛先の解決と送信を分ける**ための中間の形。
+///
+/// 分けるのは、間に「答えられる版か」の判定を挟むため（設計§4・§18）。
+enum Route {
+    /// 自分の接続表に居る
+    Here(Arc<SessionHostConn>),
+    /// 別のインスタンスに繋がっている
+    Across,
+}
+
+/// 答えを待つ上限（設計§23-3 の実測で決めた値）。
+///
+/// 実測の最悪（トンネル越し 0.57 秒）の約9倍。**5秒返らないなら「遅い」のではなく
+/// 「聞いていない」**ので、待ち続ける意味が無い。
+const HOST_FS_TIMEOUT: Duration = Duration::from_secs(5);
+
+impl RemoteSessionHost {
+    /// 問いを投げて答えを待つ（設計§5〜§7）。
+    ///
+    /// 宛先の解決と帰属の確認は **`spawn` と同じ道**をたどる。書き直すと、片方だけ
+    /// 直したときに「起動はできるのに覗けない」という食い違いが生まれる。
+    async fn ask(
+        &self,
+        request: crate::session_host::HostFsRequest<'_>,
+        make: impl FnOnce(RequestId) -> ServerToAgent,
+    ) -> Result<HostReply, crate::session_host::HostFsError> {
+        use crate::session_host::HostFsError;
+
+        // 宛先が無いのは、画面が PC を選ばずに聞いてきた場合。**推測で1台目へ送らない**
+        let Some(target) = request.target else {
+            return Err(HostFsError::UnknownHost);
+        };
+
+        // **順序が意味を持つ。** 先に「その PC が居るか」を決めてから能力を見る。
+        // 逆にすると、名乗りの行が無いだけの**知らない PC が「版が古い」と断られ**、
+        // 存在しないことと古いことを言い分けてしまう（設計§18）
+        let route = match self
+            .hub
+            .conn(target)
+            .filter(|conn| conn.account_id == request.account_id)
+        {
+            Some(conn) => Route::Here(conn),
+            None => {
+                // 自分の表に無くても、別のインスタンスに繋がっていることがある。
+                // **他人の PC はここに現れない**ので、そのまま「知らない」に落ちる
+                if self
+                    .hub
+                    .online_of(request.account_id)
+                    .await
+                    .contains(&target)
+                {
+                    Route::Across
+                } else if self.mine(request.account_id, target).await && self.hub.bus_degraded() {
+                    // **連絡係が切れていると、繋がっている PC を数えられない。**
+                    // そのまま「知らない」と答えると、利用者は PC を疑うことになる——
+                    // 直せるのはこちら側なので、届けられないことをそのまま返す（設計§17）。
+                    //
+                    // 自分のアカウントの PC だと分かっている場合にだけこう答える。
+                    // 他人の PC はここへ来ない（`mine` が偽）ので、存在は漏れない
+                    return Err(HostFsError::Unreachable(BUS_DOWN.to_string()));
+                } else {
+                    return Err(HostFsError::UnknownHost);
+                }
+            }
+        };
+
+        // **投げる前に、答えられる版かどうかを見る**（設計§4）。古いホストは知らない
+        // 種別を無視して黙るだけなので、投げると時間切れの「応じません」しか出せない
+        if !self.supports_host_fs(request.account_id, target).await {
+            return Err(HostFsError::Unsupported);
+        }
+
+        let request_id = RequestId::new();
+        // **送る前に待ち口を開ける。** 逆にすると、速い答えが行き場を失う
+        let waiting = self.hub.expect_reply(request_id);
+        let message = make(request_id);
+
+        let sent = match route {
+            Route::Here(conn) => {
+                conn.send(&message);
+                Ok(())
+            }
+            Route::Across => self
+                .hub
+                .relay_across(target, SessionHostCommand::Message(Box::new(message)))
+                .map_err(HostFsError::Unreachable),
+        };
+        if let Err(err) = sent {
+            self.hub.forget_reply(request_id);
+            return Err(err);
+        }
+
+        match tokio::time::timeout(HOST_FS_TIMEOUT, waiting).await {
+            Ok(Ok(reply)) => Ok(reply),
+            // 待ち口が落ちた（答えを渡す前に捨てられた）。時間切れと同じ扱いでよい
+            Ok(Err(_)) => Err(HostFsError::Timeout),
+            Err(_) => {
+                // **必ず消す。** 残すと、遅れて届いた答えが誰にも渡らないまま溜まる
+                self.hub.forget_reply(request_id);
+                Err(HostFsError::Timeout)
+            }
+        }
+    }
+
+    /// その PC が自分のアカウントのものか（**繋がっているかは見ない**）。
+    ///
+    /// 連絡係が切れていて数えられないときに、「知らない PC」と「届けられない PC」を
+    /// 分けるためだけに使う。他人の PC はここで偽になるので、存在は漏れない（設計§18）。
+    async fn mine(&self, account_id: Uuid, target: AgentId) -> bool {
+        pairing::agent_names(&self.hub.db, account_id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .any(|(id, _)| id == target)
+    }
+
+    /// その PC が「フォルダを覗ける」と名乗っているか。
+    ///
+    /// 見るのは接続表ではなく **DB に残した名乗り**（`agents.capabilities`）。
+    /// 接続表を見ると、**別のインスタンスに繋がっている PC が全部「できない」ことになる**。
+    async fn supports_host_fs(&self, account_id: Uuid, target: AgentId) -> bool {
+        let rows = match pairing::capabilities_of(&self.hub.db, account_id).await {
+            Ok(rows) => rows,
+            Err(err) => {
+                tracing::warn!("PC の名乗りを読めません: {err}");
+                return false;
+            }
+        };
+        rows.into_iter()
+            .find(|(agent_id, _)| *agent_id == target)
+            .and_then(|(_, value)| serde_json::from_value::<Capabilities>(value).ok())
+            .is_some_and(|capabilities| capabilities.supports_host_fs)
+    }
+}
 
 /// セッションホスト向けのルート。**ブラウザ向け（[`crate::routes`]）とは別に合成する。**
 ///
@@ -1533,15 +1746,27 @@ async fn handle_report(
 
         // 問いへの答え（イシューグループ_2026_0805_0514 設計§7）。
         //
-        // **受け取る先を作るのはフェーズ2。** 待ち行列（`request_id` で対応づけ）と、
-        // 跨いだときに問うた側のインスタンスへ戻す道（`AccountMessage`）がまだ無い。
-        // いまは問いを投げる口も塞いである（`RemoteSessionHost::list_dir`）ので、
-        // ここへ来るのは実装の食い違いだけになる——**黙って捨てず、記録に残す**
-        AgentMessage::HostReply { request_id, .. } => {
-            tracing::warn!(
-                %request_id,
-                "誰も待っていない答えが届きました（受け取る先はフェーズ2 で作ります）"
-            );
+        // **まず自分が待っていないかを見る。** 渡せなければ、問うたのは別の
+        // インスタンスなので連絡係へ流す——`agent:{id}:cmd` は行きの道しかなく、
+        // 帰りはアカウントの知らせに相乗りする
+        AgentMessage::HostReply { request_id, reply } => {
+            if !hub.resolve_reply(request_id, reply.clone()) {
+                if let Some(bus) = hub.registry.bus() {
+                    bus.publish(
+                        &bus::account_events(conn.account_id),
+                        bus::encode_json(
+                            hub.registry.instance_id(),
+                            &bus::AccountMessage::HostReply {
+                                request_id,
+                                reply: Box::new(reply),
+                            },
+                        ),
+                    );
+                } else {
+                    // 連絡係が居ない＝1台構成。**誰も待っていないのは実装の食い違い**
+                    tracing::warn!(%request_id, "誰も待っていない答えが届きました");
+                }
+            }
         }
 
         AgentMessage::ModelTable {
