@@ -22,9 +22,9 @@ import { GroupView } from '@/components/GroupView/GroupView'
 import { SessionView } from '@/components/SessionView/SessionView'
 import { SettingsPage } from '@/components/Settings/SettingsPage'
 import { TileGrid } from '@/components/TileGrid/TileGrid'
-import { SpawnForm } from '@/components/SpawnForm/SpawnForm'
+import { ProjectAdd } from '@/components/ProjectAdd/ProjectAdd'
 import { selfhealLabel } from '@/lib/protocol'
-import { ACCOUNT, HOME, SETTINGS } from '@/lib/routes'
+import { ACCOUNT, HOME, LOCAL_HOST, SETTINGS } from '@/lib/routes'
 import { canEnter, useAuthStore } from '@/stores/auth'
 import { useSessionCard } from '@/stores/sessions'
 import { useSettingsStore } from '@/stores/settings'
@@ -192,7 +192,7 @@ function Shell() {
       {authLoading ? null : entered ? (
         <Routes>
           <Route path="/" element={<HomePage />} />
-          <Route path="/p/:projectId" element={<GroupPage />} />
+          <Route path="/p/:host/:projectId" element={<GroupPage />} />
           <Route path="/s/:cardId" element={<SessionPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/account" element={<AccountPage />} />
@@ -292,16 +292,17 @@ function HomePage() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto">
-      <SpawnForm disabled={status !== 'open'} />
+      <ProjectAdd disabled={status !== 'open'} />
       <TileGrid />
     </div>
   )
 }
 
 function GroupPage() {
-  const { projectId } = useParams()
-  // react-router が符号を戻してくれるので、そのまま作業ディレクトリの絶対パスになる
-  return <GroupView project={projectId ?? ''} />
+  const { host, projectId } = useParams()
+  // react-router が符号を戻してくれるので、そのまま作業ディレクトリの絶対パスになる。
+  // **鍵に PC が入る**（設計§16）——パスだけでは別の PC の同名 PJT を指し分けられない
+  return <GroupView host={host ?? LOCAL_HOST} project={projectId ?? ''} />
 }
 
 function SessionPage() {

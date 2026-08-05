@@ -47,6 +47,7 @@ import {
   removeSession,
   upsertSession,
 } from '@/stores/sessions'
+import { loadProjects, removeProject, upsertProject } from '@/stores/projects'
 import { appendNodes, resetTranscript } from '@/stores/transcript'
 
 export type ConnectionStatus = 'connecting' | 'open' | 'closed'
@@ -195,6 +196,8 @@ async function loadSnapshot() {
       return
     }
     applySessionSnapshot((await response.json()) as SessionMeta[])
+    // 枠も同じ契機で取り直す。**カードと枠が揃って初めて一覧の箱が作れる**（設計§13）
+    void loadProjects()
   } catch {
     // 接続できないこと自体は WebSocket 側の onerror で画面に出る
   }
@@ -406,6 +409,14 @@ function handleJson(raw: string, set: SetState) {
       break
     case 'selfheal':
       set({ selfheal: { phase: message.phase, detail: message.detail } })
+      break
+    case 'project_upsert':
+      // 枠は**書けてから配られる**（設計§11）。押した瞬間に手元へ足さないので、
+      // ここが唯一の反映点になる
+      upsertProject(message.project)
+      break
+    case 'project_removed':
+      removeProject(message.project_id)
       break
     case 'error':
       set({ lastError: message.message })

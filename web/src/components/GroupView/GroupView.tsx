@@ -26,16 +26,19 @@ import { HOME } from '@/lib/routes'
 import { useProjectCards } from '@/stores/sessions'
 
 interface Props {
+  /** `agent_id` かローカルを表す `'local'`（設計§16） */
+  host: string
   project: string
 }
 
-export function GroupView({ project }: Props) {
-  const cards = useProjectCards(project)
+export function GroupView({ host, project }: Props) {
+  const cards = useProjectCards(host, project)
 
   return (
     <section
       data-testid="group-view"
       data-project={project}
+      data-host={host}
       className="flex min-h-0 flex-1 flex-col gap-3"
     >
       <header className="flex items-baseline gap-3">

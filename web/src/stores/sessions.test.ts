@@ -170,8 +170,8 @@ describe('一覧ストア', () => {
   it('プロジェクト単位のカードは同じ配列を返し続ける', () => {
     // 毎回新しい配列を返すと useSyncExternalStore が無限に描き直す
     applySessionSnapshot([meta(A)])
-    const found = renderHook(() => useProjectCards(PROJECT))
-    const missing = renderHook(() => useProjectCards('/dev/nowhere'))
+    const found = renderHook(() => useProjectCards('local', PROJECT))
+    const missing = renderHook(() => useProjectCards('local', '/dev/nowhere'))
 
     expect(found.result.current).toEqual([A])
     expect(missing.result.current).toEqual([])

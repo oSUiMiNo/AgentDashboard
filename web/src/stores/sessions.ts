@@ -27,11 +27,27 @@
 
 import { useSyncExternalStore } from 'react'
 import type { CardId, SessionMeta, SessionStatus } from '@/lib/protocol'
+import { LOCAL_HOST } from '@/lib/routes'
+import { getProjects, subscribeProjects } from '@/stores/projects'
 
-/** 1つの作業ディレクトリにまとまったカードの並び。 */
+/**
+ * 一覧に並ぶ箱1つ。
+ *
+ * **鍵は（PC, パス）の組**（設計§13）。パスだけだと、複数の PC を繋いだときに
+ * 同じパスが1つの箱へ混ざり、持ち主も「+」の宛先も決まらなくなる。
+ */
 export interface ProjectGrouping {
+  /** `agent_id` かローカルを表す `'local'` */
+  host: string
   project: string
-  /** そのプロジェクトのカードID（作成順） */
+  /**
+   * 追加した枠なら、その ID。
+   *
+   * **カードから逆算して出ている箱は持たない**（設計§13）——消す対象が無いので
+   * 「×」も出さない。そちらはカードが全部無くなれば自然に消える。
+   */
+  projectId?: string
+  /** その箱のカードID（作成順） */
   cards: CardId[]
 }
 
@@ -101,6 +117,22 @@ function notifyStructure() {
 function rebuildGroups() {
   const next: ProjectGrouping[] = []
   const names = new Set<string>()
+  const keyOf = (host: string, project: string) => `${host}\u0000${project}`
+  const at = new Map<string, number>()
+
+  // ① 追加した枠を先に置く。**カードが0枚でも箱は在る**——これが「セッションの有無に
+  //    関係なく PJT を追加できる」の実体（設計§13）
+  for (const project of getProjects()) {
+    at.set(keyOf(project.host, project.path), next.length)
+    next.push({
+      host: project.host,
+      project: project.path,
+      projectId: project.id,
+      cards: [],
+    })
+  }
+
+  // ② カードを流し込む。枠に無いカードは従来どおりカードから箱を作る
   for (const cardId of order) {
     const meta = metas.get(cardId)
     if (!meta) {
@@ -114,14 +146,27 @@ function rebuildGroups() {
     if (accountFilter !== null && meta.toml_account !== accountFilter) {
       continue
     }
-    const found = next.find((group) => group.project === meta.project)
-    if (found) {
-      found.cards.push(cardId)
+    const host = meta.agent_id ?? LOCAL_HOST
+    const key = keyOf(host, meta.project)
+    const found = at.get(key)
+    if (found !== undefined) {
+      next[found].cards.push(cardId)
     } else {
-      next.push({ project: meta.project, cards: [cardId] })
+      at.set(key, next.length)
+      next.push({ host, project: meta.project, cards: [cardId] })
     }
   }
-  groups = next
+
+  // ③ セッションが居る箱を上へ（設計§13）。**群は2つだけ**で、群の中は今までどおり
+  //    出現順のまま——並びが動くのは起動と終了の瞬間だけになる
+  const busy = next.filter((group) => group.cards.length > 0)
+  const idle = next.filter((group) => group.cards.length === 0)
+  groups = [...busy, ...idle]
+
+  // 絞り込み中は、枠だけの箱を出さない（名乗りで絞ったのに減らないように見える）
+  if (accountFilter !== null) {
+    groups = busy
+  }
   const sorted = [...names].sort()
   // 同じ内容なら同じ配列を返し続ける（`useSyncExternalStore` が無限に回らないため）
   if (sorted.length !== accounts.length || sorted.some((name, at) => name !== accounts[at])) {
@@ -231,6 +276,13 @@ function enqueue(op: Op) {
  *
  * 待ち行列に積んでから流すのは、先に積まれている差分との順序を崩さないため。
  */
+// 枠が増減したら箱を組み直す。**カードが1枚も動いていなくても並びは変わる**
+// （枠を足した瞬間に、カード0枚の箱が現れる）
+subscribeProjects(() => {
+  rebuildGroups()
+  notifyStructure()
+})
+
 export function applySessionSnapshot(list: SessionMeta[]) {
   pending.push({ kind: 'snapshot', list })
   flush()
@@ -328,15 +380,31 @@ export function useProjectGroups(): ProjectGrouping[] {
   )
 }
 
-/** 1つのプロジェクトに属するカードIDを購読する。 */
-export function useProjectCards(project: string): CardId[] {
+/** 1つの箱に属するカードIDを購読する。**鍵は（PC, パス）の組**（設計§13）。 */
+export function useProjectCards(host: string, project: string): CardId[] {
   const all = useProjectGroups()
   // 同じ配列を返し続けないと useSyncExternalStore が無限ループするので、
   // 見つからないときは共有の空配列を返す
-  return all.find((group) => group.project === project)?.cards ?? EMPTY_CARDS
+  return (
+    all.find((group) => group.host === host && group.project === project)
+      ?.cards ?? EMPTY_CARDS
+  )
 }
 
 /** 手元のカードを引く（購読しない読み取り。テストや一時的な参照用）。 */
 export function getSession(cardId: CardId): SessionMeta | undefined {
   return metas.get(cardId)
+}
+
+/**
+ * 手元のカード全部（作成順・購読しない読み取り）。
+ *
+ * 「最近使った場所」の材料に使う（設計§13）。**PC に問い合わせずに出せる**のが要点で、
+ * 過去に起こしたカードの作業ディレクトリはサーバの記録の中に既にある。
+ */
+export function getSessions(): SessionMeta[] {
+  return order.flatMap((cardId) => {
+    const meta = metas.get(cardId)
+    return meta === undefined ? [] : [meta]
+  })
 }

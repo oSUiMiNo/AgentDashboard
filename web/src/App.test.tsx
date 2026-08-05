@@ -71,7 +71,7 @@ afterEach(() => {
 })
 
 describe('App', () => {
-  it('起動フォームと一覧の枠が表示される', async () => {
+  it('PJT を追加する入口と一覧の枠が表示される', async () => {
     render(<App />)
 
     expect(
@@ -79,21 +79,22 @@ describe('App', () => {
     ).toBeInTheDocument()
     // **聞いてから描く。** 何を出すかはサーバの構成で決まるので、最初の1描画では
      // まだ決まっていない（`GET /api/me` の応答を待つ）
-    expect(await screen.findByLabelText('作業ディレクトリ')).toBeInTheDocument()
-    // 権限モードは選んでから起こす（設計§8）。選択肢は3つ、起動ボタンは1つ
-    const mode = screen.getByTestId('spawn-mode') as HTMLSelectElement
-    expect(mode.options).toHaveLength(3)
-    expect(screen.getByTestId('spawn-button')).toBeInTheDocument()
+    //
+    // 起動の入口は「PJT を追加」に入れ替わった（イシューグループ_2026_0805_0514 §13）。
+    // セッションを起こすのは枠の「+」からで、一覧に起動フォームは無い
+    expect(await screen.findByTestId('project-add-open')).toBeInTheDocument()
+    expect(screen.queryByTestId('spawn-form')).toBeNull()
     expect(
       await screen.findByText('セッションはまだありません'),
     ).toBeInTheDocument()
   })
 
-  it('作業ディレクトリが空のうちは起動できない', async () => {
+  it('押すまで追加のシートは出ていない', async () => {
+    // 一覧は「押して開く」ための画面なので、重ねて出すものが最初から居てはいけない
     render(<App />)
 
-    await screen.findByLabelText('作業ディレクトリ')
-    expect(screen.getByTestId('spawn-button')).toBeDisabled()
+    await screen.findByTestId('project-add-open')
+    expect(screen.queryByTestId('project-add-sheet')).toBeNull()
   })
 
   it('接続時に一覧のスナップショットを取りにいく', async () => {

@@ -67,6 +67,7 @@ function renderGroup(sessions: SessionMeta[]) {
           path="/"
           element={
             <ProjectGroup
+              host="local"
               project={PROJECT}
               cards={sessions.map((session) => session.card_id)}
             />
@@ -91,8 +92,9 @@ describe('ProjectGroup', () => {
     renderGroup([meta('a')])
 
     await userEvent.click(screen.getByTestId('project-group'))
+    // 鍵に PC が入る（設計§16）。パスだけでは別の PC の同名 PJT を指し分けられない
     expect(screen.getByTestId('current-path')).toHaveTextContent(
-      `/p/${encodeURIComponent(PROJECT)}`,
+      `/p/local/${encodeURIComponent(PROJECT)}`,
     )
   })
 

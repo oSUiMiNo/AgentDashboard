@@ -15,9 +15,22 @@ export function sessionPath(cardId: CardId): string {
   return `/s/${cardId}`
 }
 
-/** プロジェクト内の全セッションを横並びにする画面（中身はフェーズ4）。 */
-export function projectPath(project: string): string {
-  return `/p/${encodeURIComponent(project)}`
+/**
+ * ローカルモードの `{host}`（イシューグループ_2026_0805_0514 設計§10）。
+ *
+ * REST のパス（`/api/hosts/{host}/dir`）と URL の両方で同じ綴りを使う。
+ * **サーバの記録の中の番兵（nil UUID）とは別物。**
+ */
+export const LOCAL_HOST = 'local'
+
+/**
+ * プロジェクト内の全セッションを横並びにする画面。
+ *
+ * **鍵に PC が入る**（イシューグループ_2026_0805_0514 設計§16）。パスだけでは
+ * 別の PC の同名 PJT を指し分けられない——どの PC にも `/home/me/dev/app` は在りうる。
+ */
+export function projectPath(host: string, project: string): string {
+  return `/p/${encodeURIComponent(host)}/${encodeURIComponent(project)}`
 }
 
 /** 設定画面。一覧と同じ階層に置く（一覧の主役を埋もれさせないため） */

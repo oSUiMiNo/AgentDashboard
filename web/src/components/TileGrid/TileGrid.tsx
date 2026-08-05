@@ -62,8 +62,11 @@ export function TileGrid() {
         <div data-testid="tile-grid" className="flex flex-col gap-4">
           {groups.map((group) => (
             <ProjectGroup
-              key={group.project}
+              // 鍵は（PC, パス）の組（設計§13）。パスだけだと別の PC の同名 PJT と衝突する
+              key={`${group.host}\u0000${group.project}`}
+              host={group.host}
               project={group.project}
+              projectId={group.projectId}
               cards={group.cards}
             />
           ))}
