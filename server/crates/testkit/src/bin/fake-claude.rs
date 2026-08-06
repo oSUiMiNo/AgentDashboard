@@ -542,6 +542,12 @@ fn append_jsonl(out: &mut impl Write, injected: &Injected, argument: &str) {
     if let Some(parent) = std::path::Path::new(target).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+
+    // **子を先に置く。** 本体を先に書くと、その追記でパーサが起きたときに
+    // 子ツリーがまだ無く、**サブエージェントの行が付かないまま確定する**。
+    // 起きる隙間は数ミリ秒なので、E2E が時々だけ落ちる形で表に出ていた
+    copy_session_dir(source, target);
+
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -556,15 +562,14 @@ fn append_jsonl(out: &mut impl Write, injected: &Injected, argument: &str) {
     }
     let _ = file.flush();
 
-    // サブエージェントのファイル群も一緒に置く。本物は `<セッションID>/subagents/` に
-    // 別ファイルで書くので、本体だけ写しても子ツリーがマウントされない
-    copy_session_dir(source, target);
-
     let _ = writeln!(out, "{JSONL_APPENDED_PREFIX}{}", lines.len());
     let _ = out.flush();
 }
 
 /// `<元>.jsonl` の隣にある `<元>/` を、`<先>.jsonl` の隣へ写す。
+///
+/// 本物は `<セッションID>/subagents/` に別ファイルで書くので、本体だけ写しても
+/// 子ツリーがマウントされない。**呼ぶのは本体を書く前**（上記）。
 fn copy_session_dir(source: &str, target: &str) {
     let source = std::path::Path::new(source);
     let target = std::path::Path::new(target);
