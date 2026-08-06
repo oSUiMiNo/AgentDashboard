@@ -64,6 +64,35 @@ describe('ファイルの見せ方', () => {
 
     await userEvent.click(screen.getByTestId('file-copy'))
     await waitFor(() => expect(written).toEqual(['MyDocs/計画.md']))
+    expect(screen.getByTestId('file-copied')).toHaveTextContent('コピーしました')
+  })
+
+  it('コピーできない環境では、黙らずに値を選べる形で出す', async () => {
+    // **セキュアコンテキストでないと `navigator.clipboard` は存在しない。**
+    // LAN へ開いて `http://192.168.x.x:8787` で見ている場合がまさにそれで、
+    // 黙って失敗すると「押しても何も起きない」だけが残る（設計§29）
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText: vi.fn(async () => {
+          throw new Error('この場所では使えません')
+        }),
+      },
+    })
+    serve(content('# 計画'))
+    show(`${ROOT}/MyDocs/計画.md`)
+
+    await userEvent.click(await screen.findByTestId('file-copy'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('file-copied')).toHaveTextContent(
+        'コピーできません',
+      ),
+    )
+    // 利用者が自分で取れること（注釈が約束している逃げ道）
+    expect(screen.getByTestId('file-copy-fallback')).toHaveTextContent(
+      'MyDocs/計画.md',
+    )
   })
 
   it('Markdown が整形され、チェックボックスの入り／未入りが読める', async () => {

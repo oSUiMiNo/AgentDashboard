@@ -71,12 +71,28 @@ function AddSheet({ onClose }: { onClose: () => void }) {
   // 一度そこへ行って別の階層を掘ったあと、もう一度押しても何も起きない
   const [startSeq, setStartSeq] = useState(0)
 
-  // 繋がっている PC だけを候補にする。切れている PC のフォルダは辿れない
-  const connected = agents.filter((agent) => agent.connected)
-  const needsTarget = connected.length > 1
+  /**
+   * 候補は**登録されている PC 全部**（設計§17・§29）。
+   *
+   * 繋がっているものだけに絞ると、2つの困りごとが出る。
+   *
+   * - **全部寝ているとき**、宛先がローカルへ落ちる。サーバモードに「ローカル」という
+   *   単位は無いので、できるのは一覧に出るだけで何もできない番兵の枠になる
+   * - 起きているのが1台のとき、**寝ている PC を選ぶ道が画面から消える**。枠は寝ていても
+   *   足せる必要があり（§17）、サーバ側も帰属しか見ていない。断っているのは画面だけだった
+   *
+   * 辿れないのは事実なので、そこは選んだあとに案内する（下記）。
+   */
+  const isLocal = agents.length === 0
+  const needsTarget = agents.length > 1
   const [target, setTarget] = useState('')
   // 1台のときとローカルモードは選ぶ余地が無い（設計§13）
-  const host = needsTarget ? target : (connected[0]?.id ?? LOCAL_HOST)
+  const host = isLocal ? LOCAL_HOST : needsTarget ? target : agents[0].id
+  // 選んだ PC が寝ているか。**辿る道だけを塞ぐ**（打ち込む道は残す）
+  const asleep =
+    !isLocal &&
+    host !== '' &&
+    agents.find((agent) => agent.id === host)?.connected === false
 
   /**
    * 最近使った場所（設計§13）。
@@ -195,9 +211,10 @@ function AddSheet({ onClose }: { onClose: () => void }) {
           >
             {/* **既定を作らない。** 勝手に1台目を選ぶと、意図しない PC を辿ることになる */}
             <option value="">選んでください</option>
-            {connected.map((agent) => (
+            {agents.map((agent) => (
               <option key={agent.id} value={agent.id}>
-                {agent.name}
+                {/* 寝ていることは**隠さずに選ばせる**。枠は寝ていても足せる（§17） */}
+                {agent.connected ? agent.name : `${agent.name}（寝ています）`}
               </option>
             ))}
           </select>
@@ -262,6 +279,11 @@ function AddSheet({ onClose }: { onClose: () => void }) {
         {needsTarget && target === '' ? (
           <p className="text-muted-foreground text-xs">
             どの PC のフォルダを見るか選んでください。
+          </p>
+        ) : asleep ? (
+          // 辿る道だけが塞がる。**打ち込んで足す道は残っている**（設計§17）
+          <p data-testid="project-add-asleep" className="text-muted-foreground text-xs">
+            この PC は繋がっていないので、フォルダを辿れません。パスを打ち込めば枠は足せます。
           </p>
         ) : (
           <FolderBrowser

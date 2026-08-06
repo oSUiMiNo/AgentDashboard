@@ -20,11 +20,12 @@
  * 同じ列挙の口を使う部品が2つの作法を持つと、片方だけ直したときに食い違う。
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import {
   childOf,
   crumbsOf,
+  isUnder,
   listDir,
   relativeOf,
   type DirEntry,
@@ -60,23 +61,44 @@ export function FolderBrowser({
   const [loading, setLoading] = useState(true)
   // `undefined` は「まだ聞いていない」＝ホームから始める（設計§26-2）
   const [path, setPath] = useState<string | undefined>(start)
+  /**
+   * 何番目の問いか。**最後に投げたものの答えだけを採る**（設計§29）。
+   *
+   * 速く辿ると、先に投げた場所の答えが後から届くことがある。跨いだ配置では
+   * 1回に最大5秒かかりうるので、押した順と返る順は簡単に入れ替わる。
+   * 番号を見ないと、**新しい場所を出したあとに古い場所へ戻る**。
+   *
+   * `useRef` で持つのは、これが描画に出ない値だから——`useState` にすると
+   * `go` が作り直され、それを見ている効果まで走り直す。
+   */
+  const asked = useRef(0)
 
   const go = useCallback(
     async (next: string | undefined) => {
+      const mine = ++asked.current
       setLoading(true)
       setError(null)
       try {
         const result = await listDir(host, next)
+        if (mine !== asked.current) {
+          return
+        }
         setListing(result)
         // **着いた先はサーバが返す値を正とする。** 省略して問うたときは
         // ここで初めてホームのパスが分かる
         setPath(result.path)
         onPathChange?.(result.path)
       } catch (err) {
+        // 古い問いの失敗も捨てる。拾うと、**新しい場所の正しい一覧が消える**
+        if (mine !== asked.current) {
+          return
+        }
         setError(err instanceof Error ? err.message : '読めませんでした')
         setListing(null)
       } finally {
-        setLoading(false)
+        if (mine === asked.current) {
+          setLoading(false)
+        }
       }
     },
     [host, onPathChange],
@@ -90,9 +112,14 @@ export function FolderBrowser({
     void go(start)
   }, [host, start, go])
 
-  // ルートより上は出さない（左パネル用）。**出しても押せない段は作らない**
+  // ルートより上は出さない（左パネル用）。現在地までの道筋は見せて、外側だけを塞ぐ。
+  // **内側かどうかの判定は `isUnder` に寄せる**——区切りを見ない前方一致で書くと、
+  // `app` の内側に `app-old` が通り、起点の外へ抜ける段ができる
   const crumbs = crumbsOf(path ?? '/').filter(
-    (crumb) => root === undefined || crumb.path.startsWith(root) || root.startsWith(crumb.path),
+    (crumb) =>
+      root === undefined ||
+      isUnder(root, crumb.path) ||
+      isUnder(crumb.path, root),
   )
 
   return (
@@ -114,7 +141,7 @@ export function FolderBrowser({
             <button
               type="button"
               data-testid="folder-crumb"
-              disabled={root !== undefined && !crumb.path.startsWith(root)}
+              disabled={root !== undefined && !isUnder(root, crumb.path)}
               className="hover:text-primary disabled:text-muted-foreground rounded px-1 py-0.5 underline disabled:no-underline"
               onClick={() => void go(crumb.path)}
             >

@@ -29,11 +29,14 @@ function listing(path: string, names: string[], truncated = false) {
 }
 
 let dirCalls: string[] = []
+/** 枠を足すときにサーバへ渡した中身。**宛先が落ちていないか**をここで見る */
+let posted: { host: string; path: string } | null = null
 
 beforeEach(() => {
   clearProjects()
   clearSessions()
   dirCalls = []
+  posted = null
   useSettingsStore.setState({
     settings: settingsFixture(),
     loading: false,
@@ -53,6 +56,7 @@ beforeEach(() => {
         )
       }
       if (url === '/api/projects' && init?.method === 'POST') {
+        posted = JSON.parse(String(init.body)) as { host: string; path: string }
         return new Response(
           JSON.stringify({
             project: { id: 'p1', host: 'local', path: '/x', created_at: 1 },
@@ -262,8 +266,76 @@ describe('PJT を追加', () => {
     expect(within(sheet).getByTestId('project-add-submit')).toBeEnabled()
   })
 
-  it('1台のときは選択そのものを出さない', async () => {
+  it('ローカルモード（PC が0台）では選択そのものを出さない', async () => {
+    // `settingsFixture()` の `agents` は空＝ローカルモード
     const sheet = await openSheet()
     expect(within(sheet).queryByTestId('project-add-host')).toBeNull()
+    // 辿る先はローカルとして決まっている
+    await waitFor(() =>
+      expect(screen.getByTestId('folder-browser')).toBeInTheDocument(),
+    )
+  })
+
+  it('登録が1台のときも選択は出さず、その PC を相手にする', async () => {
+    useSettingsStore.setState({
+      settings: settingsFixture({
+        agents: [
+          { id: 'a1', name: 'ノート', connected: true, last_seen_at: null, version: null },
+        ],
+      }),
+      loading: false,
+      lastError: null,
+    })
+    const sheet = await openSheet()
+
+    expect(within(sheet).queryByTestId('project-add-host')).toBeNull()
+    await waitFor(() => expect(dirCalls.length).toBeGreaterThan(0))
+    // **`local` へ落ちないこと。** サーバモードに「ローカル」という単位は無い
+    expect(dirCalls[0]).toContain('/api/hosts/a1/dir')
+  })
+
+  it('登録1台が寝ていても、その PC の枠を足せる', async () => {
+    // 繋がっている PC だけを候補にしていたころは、ここで宛先が `local` へ落ちて
+    // **一覧に出るが何もできない枠**ができていた（設計§17・§29）
+    useSettingsStore.setState({
+      settings: settingsFixture({
+        agents: [
+          { id: 'a1', name: 'ノート', connected: false, last_seen_at: null, version: null },
+        ],
+      }),
+      loading: false,
+      lastError: null,
+    })
+    const sheet = await openSheet()
+
+    // 辿る道は塞がるが、打ち込む道は残る
+    expect(within(sheet).getByTestId('project-add-asleep')).toBeInTheDocument()
+    expect(screen.queryByTestId('folder-browser')).toBeNull()
+    expect(dirCalls, '寝ている PC へは問い合わせないこと').toHaveLength(0)
+
+    await userEvent.type(within(sheet).getByTestId('project-add-path'), '/dev/app')
+    await userEvent.click(within(sheet).getByTestId('project-add-submit'))
+
+    await waitFor(() => expect(posted).not.toBeNull())
+    expect(posted).toEqual({ host: 'a1', path: '/dev/app' })
+  })
+
+  it('寝ている PC も選択肢に並び、寝ていると分かる', async () => {
+    useSettingsStore.setState({
+      settings: settingsFixture({
+        agents: [
+          { id: 'a1', name: 'ノート', connected: true, last_seen_at: null, version: null },
+          { id: 'a2', name: 'デスクトップ', connected: false, last_seen_at: null, version: null },
+        ],
+      }),
+      loading: false,
+      lastError: null,
+    })
+    const sheet = await openSheet()
+
+    const picker = within(sheet).getByTestId('project-add-host') as HTMLSelectElement
+    const labels = Array.from(picker.options).map((option) => option.textContent)
+    expect(labels).toContain('ノート')
+    expect(labels).toContain('デスクトップ（寝ています）')
   })
 })

@@ -107,12 +107,35 @@ export async function readFile(
  * `../` で表すと、貼られた側が別の場所を指す。
  */
 export function relativeOf(root: string, path: string): string {
-  const base = root.endsWith('/') ? root.slice(0, -1) : root
-  if (path === base) {
-    return '.'
+  if (!isUnder(root, path)) {
+    return path
   }
-  const prefix = `${base}/`
-  return path.startsWith(prefix) ? path.slice(prefix.length) : path
+  return path === trimEnd(root) ? '.' : path.slice(prefixOf(root).length)
+}
+
+/**
+ * `path` が `root` そのものか、その内側にあるか（設計§15）。
+ *
+ * **区切りまで見る。** 素の前方一致で書くと、`/dev/app` の内側の判定に
+ * `/dev/app-old` や `/dev/app2` が通ってしまう。名前の頭が同じ兄弟フォルダは
+ * 珍しくないので、**起点の外へ抜ける道**がそこに残る。
+ *
+ * 同じ規則が2通りあると、片方を直したときにもう片方が取り残される。
+ * 内側かどうかを見るのは全部ここを通す。
+ */
+export function isUnder(root: string, path: string): boolean {
+  return path === trimEnd(root) || path.startsWith(prefixOf(root))
+}
+
+/** 末尾の区切りを落とす。ルート（`/`）だけは落とさない。 */
+function trimEnd(path: string): string {
+  return path.length > 1 && path.endsWith('/') ? path.slice(0, -1) : path
+}
+
+/** 内側を表す前置き。**ルートは `//` にしない**（そこだけ区切りが元から在る）。 */
+function prefixOf(root: string): string {
+  const base = trimEnd(root)
+  return base.endsWith('/') ? base : `${base}/`
 }
 
 /** 断りの本文。空なら状態コードから当たり障りのない文を作る。 */
@@ -124,19 +147,6 @@ async function reason(response: Response): Promise<string> {
   return response.status === 404
     ? 'その場所は見つかりません'
     : 'フォルダを読めませんでした'
-}
-
-/** 1つ上の階層。ルートまで来たら `null`（**そこで止める**）。 */
-export function parentOf(path: string): string | null {
-  if (path === '/' || path === '') {
-    return null
-  }
-  const trimmed = path.endsWith('/') ? path.slice(0, -1) : path
-  const cut = trimmed.lastIndexOf('/')
-  if (cut < 0) {
-    return null
-  }
-  return cut === 0 ? '/' : trimmed.slice(0, cut)
 }
 
 /** 子のパス。**画面で文字列を継ぎ足さない**（区切りの重なりがここに閉じる）。 */

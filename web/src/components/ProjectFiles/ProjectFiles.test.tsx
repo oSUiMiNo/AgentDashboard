@@ -12,7 +12,15 @@ import { ProjectFiles } from '@/components/ProjectFiles/ProjectFiles'
 
 const ROOT = '/home/me/dev/app'
 
+/**
+ * 場所ごとの遅れ（ミリ秒）。**返る順を押した順と入れ替える**ために使う。
+ *
+ * 跨いだ配置では1回に最大5秒かかりうるので、速く辿れば現実に起きる。
+ */
+let slow: Record<string, number> = {}
+
 beforeEach(() => {
+  slow = {}
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url: string) => {
@@ -24,6 +32,10 @@ beforeEach(() => {
         )
       }
       const at = new URL(url, 'http://x').searchParams.get('path') ?? ROOT
+      const delay = slow[at] ?? 0
+      if (delay > 0) {
+        await new Promise((done) => setTimeout(done, delay))
+      }
       return new Response(
         JSON.stringify({
           path: at,
@@ -98,6 +110,35 @@ describe('左パネル', () => {
     // 落ち着いたあとも新しい枠のままであること（戻らない）
     await new Promise((done) => setTimeout(done, 50))
     expect(screen.getByTestId('folder-browser')).toHaveAttribute('data-path', other)
+  })
+
+  it('速く辿っても、古い応答が新しい表示を上書きしない', async () => {
+    // **回帰テスト。** 問いに世代を持たせる前は、遅い応答が後から届くと
+    // そこへ表示が戻っていた。左パネルは作り直されないので、そのまま表に出る
+    render(<ProjectFiles host="local" project={ROOT} />)
+    await waitFor(() =>
+      expect(screen.getByTestId('folder-browser')).toHaveAttribute('data-path', ROOT),
+    )
+
+    // 掘る先だけを遅らせる（跨いだ配置の遅れを真似る）
+    slow[`${ROOT}/MyDocs`] = 80
+    const into = screen
+      .getAllByTestId('folder-entry')
+      .find((row) => row.getAttribute('data-name') === 'MyDocs')
+    await userEvent.click(into as HTMLElement)
+    // 答えを待たずに、起点へ戻る（こちらは即答）
+    const back = screen
+      .getAllByTestId('folder-crumb')
+      .find((crumb) => crumb.textContent === 'app')
+    await userEvent.click(back as HTMLElement)
+
+    await waitFor(() =>
+      expect(screen.getByTestId('folder-browser')).toHaveAttribute('data-path', ROOT),
+    )
+
+    // 遅れていた答えが届いたあとも、起点のままであること
+    await new Promise((done) => setTimeout(done, 150))
+    expect(screen.getByTestId('folder-browser')).toHaveAttribute('data-path', ROOT)
   })
 
   it('フォルダ行から相対パスをコピーできる', async () => {

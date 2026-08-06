@@ -52,13 +52,14 @@ export function FileView({ host, root, path, onClose }: Props) {
   const [loading, setLoading] = useState(true)
   // 整形できる相手のときだけ意味を持つ。既定は整形（進捗を読むのが目的のため）
   const [raw, setRaw] = useState(false)
-  const [copied, setCopied] = useState<string | null>(null)
+  // `CopyPath`（`FolderBrowser`）と同じ3つの状態。**片方だけ黙る作りにしない**
+  const [copied, setCopied] = useState<'idle' | 'done' | 'failed'>('idle')
 
   useEffect(() => {
     let alive = true
     setLoading(true)
     setError(null)
-    setCopied(null)
+    setCopied('idle')
     setRaw(false)
     void (async () => {
       try {
@@ -89,9 +90,9 @@ export function FileView({ host, root, path, onClose }: Props) {
     // 選べる形で出して、利用者が自分で取れるようにする
     try {
       await navigator.clipboard.writeText(relative)
-      setCopied('コピーしました')
+      setCopied('done')
     } catch {
-      setCopied(null)
+      setCopied('failed')
     }
   }, [relative])
 
@@ -156,9 +157,21 @@ export function FileView({ host, root, path, onClose }: Props) {
         </div>
       </header>
 
-      {copied !== null && (
+      {copied === 'done' && (
         <p data-testid="file-copied" className="text-xs text-emerald-400">
-          {copied}
+          コピーしました
+        </p>
+      )}
+
+      {copied === 'failed' && (
+        <p data-testid="file-copied" className="text-xs text-amber-300">
+          コピーできません。この値を選んで取ってください：{' '}
+          <code
+            data-testid="file-copy-fallback"
+            className="bg-muted/60 rounded px-1 py-0.5 font-mono select-all"
+          >
+            {relative}
+          </code>
         </p>
       )}
 
