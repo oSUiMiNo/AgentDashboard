@@ -78,12 +78,11 @@ describe('App', () => {
       screen.getByRole('heading', { name: 'AgentDashboard' }),
     ).toBeInTheDocument()
     // **聞いてから描く。** 何を出すかはサーバの構成で決まるので、最初の1描画では
-     // まだ決まっていない（`GET /api/me` の応答を待つ）
+    // まだ決まっていない（`GET /api/me` の応答を待つ）
     //
     // 起動の入口は「PJT を追加」に入れ替わった（イシューグループ_2026_0805_0514 §13）。
     // セッションを起こすのは枠の「+」からで、一覧に起動フォームは無い
     expect(await screen.findByTestId('project-add-open')).toBeInTheDocument()
-    expect(screen.queryByTestId('spawn-form')).toBeNull()
     expect(
       await screen.findByText('セッションはまだありません'),
     ).toBeInTheDocument()

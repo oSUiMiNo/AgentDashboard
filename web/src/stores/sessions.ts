@@ -266,6 +266,13 @@ function enqueue(op: Op) {
   schedule()
 }
 
+// 枠が増減したら箱を組み直す。**カードが1枚も動いていなくても並びは変わる**
+// （枠を足した瞬間に、カード0枚の箱が現れる）
+subscribeProjects(() => {
+  rebuildGroups()
+  notifyStructure()
+})
+
 /**
  * `GET /api/sessions` の結果を取り込む（接続時・再接続時の作り直し）。
  *
@@ -276,13 +283,6 @@ function enqueue(op: Op) {
  *
  * 待ち行列に積んでから流すのは、先に積まれている差分との順序を崩さないため。
  */
-// 枠が増減したら箱を組み直す。**カードが1枚も動いていなくても並びは変わる**
-// （枠を足した瞬間に、カード0枚の箱が現れる）
-subscribeProjects(() => {
-  rebuildGroups()
-  notifyStructure()
-})
-
 export function applySessionSnapshot(list: SessionMeta[]) {
   pending.push({ kind: 'snapshot', list })
   flush()

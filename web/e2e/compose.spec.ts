@@ -1,5 +1,4 @@
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 import { expect, test } from '@playwright/test'
 import {
@@ -17,6 +16,7 @@ import {
   signInIfAsked,
   spawnSession,
   typeLine,
+  WORK_DIR,
 } from './helpers'
 
 /**
@@ -25,7 +25,7 @@ import {
  * **セッションホストはホスト側で動いている**（compose に居るのはサーバ・前段・DB だけ）
  * ので、ここで作ったフォルダがそのまま PC 側のファイルとして見える。
  */
-const CROSS_DIR = path.join(os.tmpdir(), 'adash-e2e-cross')
+const CROSS_DIR = path.join(WORK_DIR, 'adash-e2e-cross')
 
 /** もう一方のインスタンス（PC が繋がっている側）。 */
 const OTHER_INSTANCE = 'http://127.0.0.1:4176/'
@@ -55,6 +55,21 @@ const THROUGH_NGINX = 'http://127.0.0.1:4178'
  * 立ち上げは `scripts/e2e-compose`（`make e2e-compose`）が面倒を見る。ここでは
  * 既に立っている前提で、ブラウザから見えるものだけを確かめる。
  */
+
+// **作るのと消すのを対にする。** テストの本体で消していたころは、途中で落ちると
+// 残骸が残った（`project-files.spec.ts` と同じ作法へ揃える）
+test.beforeAll(() => {
+  fs.mkdirSync(path.join(CROSS_DIR, 'MyDocs'), { recursive: true })
+  fs.writeFileSync(
+    path.join(CROSS_DIR, 'MyDocs', '計画.md'),
+    '# 跨ぎ\n\n- [x] 届いた\n',
+    'utf8',
+  )
+})
+
+test.afterAll(() => {
+  fs.rmSync(CROSS_DIR, { recursive: true, force: true })
+})
 
 test.afterEach(async ({ page }) => {
   await archiveAll(page)
@@ -123,13 +138,6 @@ test('跨いだ配置でも、フォルダの一覧と中身が返る', async ({
   // ブラウザ ──▶ A ──Valkey(agent:cmd)──▶ B ──▶ PC
   //          ◀── A ◀─Valkey(acct:events)── B ◀── PC（答え）
   // ```
-  fs.mkdirSync(path.join(CROSS_DIR, 'MyDocs'), { recursive: true })
-  fs.writeFileSync(
-    path.join(CROSS_DIR, 'MyDocs', '計画.md'),
-    '# 跨ぎ\n\n- [x] 届いた\n',
-    'utf8',
-  )
-
   await openDashboard(page)
   const group = await addProject(page, CROSS_DIR)
   await group.click({ position: { x: 5, y: 5 } })
@@ -147,8 +155,6 @@ test('跨いだ配置でも、フォルダの一覧と中身が返る', async ({
   // 中身も返る。**大きさの上限が効くのはこの経路を守るため**（設計§7）
   await expect(panel.getByTestId('file-view')).toBeVisible()
   await expect(panel.getByRole('checkbox')).toBeChecked()
-
-  fs.rmSync(CROSS_DIR, { recursive: true, force: true })
 })
 
 test('ブラウザ側のインスタンスを落としてもセッションは無傷', async ({ page }) => {
