@@ -98,6 +98,63 @@ fn 件数が上限を超えると打ち切られたことが応答に載る() {
 }
 
 #[test]
+fn 上限を超えるフォルダでも並びの約束は保たれる() {
+    // **打ち切ってから並べると、返るのは「先に読めた任意の切れ端」になる。**
+    // 件数の多いフォルダは辿るのがいちばん難しい場面なので、そこでだけ
+    // 「ディレクトリが先」が効かないのでは、並びを決めた意味が無い（設計§8）。
+    //
+    // ファイルを上限の何倍も作るのは、**読み出しの順がファイルシステム任せ**
+    // だから。全件を並べてから切っていなければ、フォルダは高い確率で溢れる
+    let sandbox = Sandbox::new("orderlimit");
+    for index in 0..(MAX_ENTRIES * 3) {
+        sandbox.file(&format!("f{index:05}.txt"), b"x");
+    }
+    // 名前でも最後に来る形にして、「たまたま先頭に居た」を排除する
+    let names_of_dirs = ["zz-a", "zz-b", "zz-c", "zz-d", "zz-e"];
+    for name in names_of_dirs {
+        sandbox.dir(name);
+    }
+    std::fs::create_dir_all(sandbox.path().join("zz-a").join(".git")).expect(".git を作れること");
+
+    let listing = hostfs::list_dir(sandbox.path()).expect("読めること");
+
+    assert!(listing.truncated, "打ち切ったことが応答に載ること");
+    let got = names(&listing);
+    for name in names_of_dirs {
+        assert!(
+            got.contains(&name.to_string()),
+            "{name} が溢れている（打ち切ってから並べていないか）"
+        );
+    }
+    assert_eq!(
+        &got[..names_of_dirs.len()],
+        &names_of_dirs,
+        "ディレクトリが先頭に固まること"
+    );
+    // 印は**残した1件ぶんだけ**見る作りにしたので、打ち切った先でも正しいこと
+    assert!(
+        listing.entries[0].is_project,
+        "打ち切った一覧でも .git の印が立つこと"
+    );
+}
+
+#[test]
+fn ルートがフォルダへのリンクでも一覧できる() {
+    // 「リンクは辿らない」は**一覧の中の1件**についての決まりで、問われたパス
+    // そのものには当てはまらない。ここを取り違えると、`~/Dev` をリンクにしている
+    // 人は左パネルが丸ごと使えない
+    let sandbox = Sandbox::new("rootlink");
+    let real = sandbox.dir("real");
+    std::fs::write(real.join("中身.md"), b"# hi\n").expect("中身を作れること");
+    let link = sandbox.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("リンクを作れること");
+
+    let listing = hostfs::list_dir(&link).expect("リンク越しでも読めること");
+
+    assert_eq!(names(&listing), vec!["中身.md"]);
+}
+
+#[test]
 fn ドット始まりも一覧に出る() {
     let sandbox = Sandbox::new("dotfiles");
     sandbox.dir(".claude");
@@ -255,6 +312,46 @@ fn 上限を超えるファイルは大きさを添えて断る() {
     assert!(
         err.detail.contains(&size.to_string()),
         "実際の大きさが添えられること（{}）",
+        err.detail
+    );
+}
+
+#[test]
+fn リンク越しでも大きさの上限は効く() {
+    // **判定と読み取りが同じものを見ていないと、リンク1本で上限をすり抜ける。**
+    // 辿らない側で測るとリンク自身の長さ（数十バイト）になるのに、読むほうは
+    // 辿るので、上限を無視した中身がそのまま画面まで流れる
+    let sandbox = Sandbox::new("linklarge");
+    let size = (MAX_FILE_BYTES + 1) as usize;
+    let real = sandbox.file("大きい.txt", &vec![b'a'; size]);
+    let link = sandbox.path().join("近道.txt");
+    std::os::unix::fs::symlink(&real, &link).expect("リンクを作れること");
+
+    let err = hostfs::read_file(&link).expect_err("リンク越しでも断ること");
+
+    assert_eq!(err.reason, HostFailure::TooLarge);
+    assert!(
+        err.detail.contains(&size.to_string()),
+        "リンク先の大きさが添えられること（{}）",
+        err.detail
+    );
+}
+
+#[test]
+fn フォルダへのリンクはフォルダとして断る() {
+    // 辿らない側で見ていると「フォルダである」ことに気づけず、読みに行って
+    // 失敗する。理由が「開けません」になるので、利用者は何をすればよいか分からない
+    let sandbox = Sandbox::new("linkdir");
+    let real = sandbox.dir("real");
+    let link = sandbox.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("リンクを作れること");
+
+    let err = hostfs::read_file(&link).expect_err("断ること");
+
+    assert_eq!(err.reason, HostFailure::Unsupported);
+    assert!(
+        err.detail.contains("フォルダなので"),
+        "フォルダだと分かる説明であること（{}）",
         err.detail
     );
 }

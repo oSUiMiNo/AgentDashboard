@@ -95,13 +95,27 @@ pub fn resolve_start(path: Option<&str>) -> PathBuf {
     }
 }
 
+/// 並べ替えるまでの1件。
+///
+/// `is_project` をまだ持たないのは、**その判定に1件ずつ stat が要る**ため。
+/// 打ち切りで捨てる分にまで打つと、遅いマウントでは時間切れに近づく（設計§8）。
+struct Found {
+    name: String,
+    kind: EntryKind,
+}
+
 /// フォルダ1つの中身を返す（設計§8）。
 ///
 /// **リンクは辿らない。** 追いかけると輪を作られたときに止まらなくなるので、
-/// 在ることだけを示す。
+/// 在ることだけを示す。ただしこれは**一覧の中の1件**についての決まりで、
+/// 問われたパスそのものには当てはまらない（下記）。
 pub fn list_dir(path: &Path) -> Result<DirListing, HostFsError> {
-    // 「無い」と「ファイルだった」を先に分ける。`read_dir` はどちらも同じ顔で失敗する
-    let meta = std::fs::symlink_metadata(path).map_err(|err| HostFsError::from_io(&err, path))?;
+    // 「無い」と「ファイルだった」を先に分ける。`read_dir` はどちらも同じ顔で失敗する。
+    //
+    // **辿る側（`metadata`）で見る。** ここで `symlink_metadata` を使うと、
+    // PJT のルートがリンクの人は一覧そのものを開けない——`read_dir` はリンクを
+    // 辿るので、詰まるのはこの手前の判定だけになる
+    let meta = std::fs::metadata(path).map_err(|err| HostFsError::from_io(&err, path))?;
     if !meta.is_dir() {
         return Err(HostFsError::new(
             HostFailure::NotDirectory,
@@ -111,9 +125,10 @@ pub fn list_dir(path: &Path) -> Result<DirListing, HostFsError> {
 
     let reader = std::fs::read_dir(path).map_err(|err| HostFsError::from_io(&err, path))?;
 
-    let mut entries: Vec<DirEntry> = Vec::new();
-    let mut truncated = false;
-    let mut bytes = 0usize;
+    // **先に全件を集める。** 打ち切ってから並べると、返るのは
+    // 「`read_dir` が先に返した任意の切れ端」になり、下の並びの約束が
+    // いちばん必要な場面（件数が多くて辿りにくいフォルダ）でだけ効かない
+    let mut all: Vec<Found> = Vec::new();
 
     for found in reader {
         let found = match found {
@@ -139,26 +154,12 @@ pub fn list_dir(path: &Path) -> Result<DirListing, HostFsError> {
             }
         };
 
-        // `.git` を持つのはフォルダだけ。リンクには付けない（辿らないと分からないため）
-        let is_project = matches!(kind, EntryKind::Dir) && found.path().join(".git").exists();
-
-        // **二重の上限**（設計§23-2）。件数だけでは、名前が極端に長いフォルダを縛れない
-        bytes += name.len() + ENTRY_OVERHEAD_BYTES;
-        if entries.len() >= MAX_ENTRIES || bytes > MAX_LISTING_BYTES {
-            truncated = true;
-            break;
-        }
-
-        entries.push(DirEntry {
-            name,
-            kind,
-            is_project,
-        });
+        all.push(Found { name, kind });
     }
 
     // **ディレクトリが先、その他が後。** 各群の中は名前の昇順で、大文字小文字を区別しない。
     // 辿るのが目的なので、開けるものが上に集まっているほうが速い（設計§8）
-    entries.sort_by(|a, b| {
+    all.sort_by(|a, b| {
         let group = |kind: EntryKind| u8::from(!matches!(kind, EntryKind::Dir));
         group(a.kind)
             .cmp(&group(b.kind))
@@ -166,6 +167,28 @@ pub fn list_dir(path: &Path) -> Result<DirListing, HostFsError> {
             // 大文字小文字だけが違う2件で並びが揺れないよう、最後に元の名前で決める
             .then_with(|| a.name.cmp(&b.name))
     });
+
+    let mut entries: Vec<DirEntry> = Vec::new();
+    let mut truncated = false;
+    let mut bytes = 0usize;
+
+    for Found { name, kind } in all {
+        // **二重の上限**（設計§23-2）。件数だけでは、名前が極端に長いフォルダを縛れない
+        bytes += name.len() + ENTRY_OVERHEAD_BYTES;
+        if entries.len() >= MAX_ENTRIES || bytes > MAX_LISTING_BYTES {
+            truncated = true;
+            break;
+        }
+
+        // `.git` を持つのはフォルダだけ。リンクには付けない（辿らないと分からないため）
+        let is_project = matches!(kind, EntryKind::Dir) && path.join(&name).join(".git").exists();
+
+        entries.push(DirEntry {
+            name,
+            kind,
+            is_project,
+        });
+    }
 
     Ok(DirListing {
         path: path.display().to_string(),
@@ -179,7 +202,10 @@ pub fn list_dir(path: &Path) -> Result<DirListing, HostFsError> {
 /// **テキストだけ。** 文字コードの推定はしない——外したときに文字化けした嘘を
 /// 表示することになる。
 pub fn read_file(path: &Path) -> Result<FileContent, HostFsError> {
-    let meta = std::fs::symlink_metadata(path).map_err(|err| HostFsError::from_io(&err, path))?;
+    // **判定と読み取りが同じものを見る。** 下の `fs::read` はリンクを辿るので、
+    // ここで `symlink_metadata`（辿らない側）を使うと、リンクの大きさ＝数十バイトで
+    // 上限を判定してしまい、**リンク1本で上限をすり抜けられる**
+    let meta = std::fs::metadata(path).map_err(|err| HostFsError::from_io(&err, path))?;
     if meta.is_dir() {
         return Err(HostFsError::new(
             HostFailure::Unsupported,
