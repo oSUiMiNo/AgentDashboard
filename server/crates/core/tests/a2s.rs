@@ -1251,16 +1251,11 @@ fn sample_tree(dir: &Path) -> PathBuf {
     root
 }
 
-fn ask<'a>(
+fn ask(
     account_id: uuid::Uuid,
     target: Option<protocol::AgentId>,
-    path: &'a str,
-) -> server_core::session_host::HostFsRequest<'a> {
-    server_core::session_host::HostFsRequest {
-        account_id,
-        target,
-        path: Some(path),
-    }
+) -> server_core::session_host::HostFsRequest {
+    server_core::session_host::HostFsRequest { account_id, target }
 }
 
 #[tokio::test]
@@ -1274,11 +1269,10 @@ async fn 一覧と中身が_A2S_越しに取れる() {
 
     let listing = a2s
         .browser
-        .list_dir(ask(
-            a2s.account_id,
-            Some(target),
-            &root.display().to_string(),
-        ))
+        .list_dir(
+            ask(a2s.account_id, Some(target)),
+            Some(&root.display().to_string()),
+        )
         .await
         .expect("一覧が取れること");
     let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
@@ -1290,11 +1284,10 @@ async fn 一覧と中身が_A2S_越しに取れる() {
 
     let content = a2s
         .browser
-        .read_file(ask(
-            a2s.account_id,
-            Some(target),
+        .read_file(
+            ask(a2s.account_id, Some(target)),
             &root.join("計画.md").display().to_string(),
-        ))
+        )
         .await
         .expect("中身が取れること");
     assert!(content.text.contains("- [x] 済み"));
@@ -1313,11 +1306,10 @@ async fn 答えが返らないときは時間で打ち切り空の一覧を返�
 
     let err = a2s
         .browser
-        .list_dir(ask(
-            a2s.account_id,
-            Some(target),
-            &root.display().to_string(),
-        ))
+        .list_dir(
+            ask(a2s.account_id, Some(target)),
+            Some(&root.display().to_string()),
+        )
         .await
         .expect_err("打ち切られること");
 
@@ -1340,7 +1332,10 @@ async fn 識別子の合わない答えは捨てられる() {
         },
     );
 
-    assert!(!accepted, "待っていない番号の答えは受け取らないこと");
+    assert!(
+        accepted.is_some(),
+        "待っていない番号の答えは受け取らず、渡せなかったものとして返ってくること"
+    );
 }
 
 #[tokio::test]
@@ -1354,11 +1349,10 @@ async fn 打ち切ったあとに届いた答えは待ち行列に溜まらな�
 
     let err = a2s
         .browser
-        .list_dir(ask(
-            a2s.account_id,
-            Some(target),
-            &root.display().to_string(),
-        ))
+        .list_dir(
+            ask(a2s.account_id, Some(target)),
+            Some(&root.display().to_string()),
+        )
         .await
         .expect_err("打ち切られること");
     assert_eq!(err, server_core::session_host::HostFsError::Timeout);
@@ -1373,7 +1367,10 @@ async fn 打ち切ったあとに届いた答えは待ち行列に溜まらな�
                 detail: String::new(),
             },
         );
-        assert!(!accepted);
+        assert!(
+            accepted.is_some(),
+            "打ち切ったあとの答えは受け取られないこと"
+        );
     }
 }
 
@@ -1399,11 +1396,10 @@ async fn 能力を名乗らない_PC_へは問いを投げない() {
     let started = tokio::time::Instant::now();
     let err = a2s
         .browser
-        .list_dir(ask(
-            a2s.account_id,
-            Some(target),
-            &root.display().to_string(),
-        ))
+        .list_dir(
+            ask(a2s.account_id, Some(target)),
+            Some(&root.display().to_string()),
+        )
         .await
         .expect_err("断ること");
 
@@ -1428,11 +1424,10 @@ async fn 他人の_PC_と知らない_PC_は同じ言葉で断られる() {
     let unknown = protocol::AgentId(uuid::Uuid::new_v4());
     let err_unknown = a2s
         .browser
-        .list_dir(ask(
-            a2s.account_id,
-            Some(unknown),
-            &root.display().to_string(),
-        ))
+        .list_dir(
+            ask(a2s.account_id, Some(unknown)),
+            Some(&root.display().to_string()),
+        )
         .await
         .expect_err("断ること");
 
@@ -1445,11 +1440,10 @@ async fn 他人の_PC_と知らない_PC_は同じ言葉で断られる() {
         .expect("別の PC を登録できること");
     let err_other = a2s
         .browser
-        .list_dir(ask(
-            a2s.account_id,
-            Some(other_agent),
-            &root.display().to_string(),
-        ))
+        .list_dir(
+            ask(a2s.account_id, Some(other_agent)),
+            Some(&root.display().to_string()),
+        )
         .await
         .expect_err("断ること");
 
@@ -1462,11 +1456,10 @@ async fn 他人の_PC_と知らない_PC_は同じ言葉で断られる() {
     // 中身の口も同じ扱いであること（片方だけ穴が空くのを防ぐ）
     let err_file = a2s
         .browser
-        .read_file(ask(
-            a2s.account_id,
-            Some(other_agent),
+        .read_file(
+            ask(a2s.account_id, Some(other_agent)),
             &root.join("計画.md").display().to_string(),
-        ))
+        )
         .await
         .expect_err("断ること");
     assert_eq!(err_file, err_unknown);
@@ -1486,11 +1479,10 @@ async fn 繋がっていない_PC_は理由が返る() {
 
     let err = a2s
         .browser
-        .list_dir(ask(
-            a2s.account_id,
-            Some(sleeping),
-            &root.display().to_string(),
-        ))
+        .list_dir(
+            ask(a2s.account_id, Some(sleeping)),
+            Some(&root.display().to_string()),
+        )
         .await
         .expect_err("断ること");
 

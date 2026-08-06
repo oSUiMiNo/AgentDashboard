@@ -54,11 +54,13 @@ pub async fn api_dir(
     let target = parse_host(&host)?;
     state
         .agent
-        .list_dir(HostFsRequest {
-            account_id: identity.account_id,
-            target,
-            path: query.path.as_deref(),
-        })
+        .list_dir(
+            HostFsRequest {
+                account_id: identity.account_id,
+                target,
+            },
+            query.path.as_deref(),
+        )
         .await
         .map(Json)
         .map_err(refuse)
@@ -74,11 +76,13 @@ pub async fn api_file(
     let target = parse_host(&host)?;
     state
         .agent
-        .read_file(HostFsRequest {
-            account_id: identity.account_id,
-            target,
-            path: Some(&query.path),
-        })
+        .read_file(
+            HostFsRequest {
+                account_id: identity.account_id,
+                target,
+            },
+            &query.path,
+        )
         .await
         .map(Json)
         .map_err(refuse)
@@ -87,7 +91,10 @@ pub async fn api_file(
 /// `{host}` を宛先へ。**読めない綴りは「知らない PC」と同じ扱い**（設計§18）。
 ///
 /// 言い分けると、綴りを変えながら叩いて何かを探れる余地ができる。
-fn parse_host(host: &str) -> Result<Option<AgentId>, (StatusCode, String)> {
+///
+/// 枠の口（[`crate::projects`]）も同じ綴りを受けるので、**ここから借りる**。
+/// 写しを持たせると、`LOCAL_HOST` の綴りを変えたときに片方だけ直る。
+pub(crate) fn parse_host(host: &str) -> Result<Option<AgentId>, (StatusCode, String)> {
     if host == LOCAL_HOST {
         return Ok(None);
     }
@@ -97,7 +104,7 @@ fn parse_host(host: &str) -> Result<Option<AgentId>, (StatusCode, String)> {
     }
 }
 
-fn refuse(err: HostFsError) -> (StatusCode, String) {
+pub(crate) fn refuse(err: HostFsError) -> (StatusCode, String) {
     (status_of(&err), err.message())
 }
 

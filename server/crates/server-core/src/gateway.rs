@@ -288,18 +288,22 @@ impl SessionHostHub {
 
     /// 届いた答えを、待っている要求へ渡す。
     ///
-    /// 渡せなければ `false`。**そのときは自分が問うたものではない**ので、
+    /// 渡せなければ**答えをそのまま返す**。そのときは自分が問うたものではないので、
     /// 呼び出し側は連絡係へ流して、問うたインスタンスに拾わせる（設計§7）。
-    pub fn resolve_reply(&self, request_id: RequestId, reply: HostReply) -> bool {
+    ///
+    /// 渡せたかどうかを真偽で返すと、**呼び出し側は流す道のために複製を持たされる**。
+    /// 答えは一覧なら 512 KiB・中身なら 256 KiB を抱えていて、しかも複製が要るのは
+    /// 流す場合だけ——1階層辿るたびに、使わない写しを作ることになっていた。
+    pub fn resolve_reply(&self, request_id: RequestId, reply: HostReply) -> Option<HostReply> {
         let waiting = self
             .pending
             .lock()
             .expect("ロックが壊れていない")
             .remove(&request_id);
         match waiting {
-            // 受け取る側が既に諦めている（時間切れ）ことはある。**捨ててよい**
-            Some(tx) => tx.send(reply).is_ok(),
-            None => false,
+            // 受け取る側が既に諦めている（時間切れ）ことはある。そのときも戻ってくる
+            Some(tx) => tx.send(reply).err(),
+            None => Some(reply),
         }
     }
 
@@ -1184,13 +1188,14 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
 
     async fn list_dir(
         &self,
-        request: crate::session_host::HostFsRequest<'_>,
+        request: crate::session_host::HostFsRequest,
+        start: Option<&str>,
     ) -> Result<protocol::fs::DirListing, crate::session_host::HostFsError> {
-        let path = request.path.map(str::to_string);
+        let start = start.map(str::to_string);
         match self
-            .ask(request, |request_id| ServerToAgent::ListDir {
+            .ask(request, move |request_id| ServerToAgent::ListDir {
                 request_id,
-                path: path.clone(),
+                path: start,
             })
             .await?
         {
@@ -1208,20 +1213,14 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
 
     async fn read_file(
         &self,
-        request: crate::session_host::HostFsRequest<'_>,
+        request: crate::session_host::HostFsRequest,
+        path: &str,
     ) -> Result<protocol::fs::FileContent, crate::session_host::HostFsError> {
-        // 中身の読み取りに「始まり」は無い（§26-2）。REST の口が `path` を必須に
-        // しているので、ここが空になるのは呼び出し側の誤りにあたる
-        let Some(path) = request.path.map(str::to_string) else {
-            return Err(crate::session_host::HostFsError::Failed {
-                reason: protocol::a2s::HostFailure::NotFound,
-                detail: "読むファイルが指定されていません".to_string(),
-            });
-        };
+        let path = path.to_string();
         match self
-            .ask(request, |request_id| ServerToAgent::ReadFile {
+            .ask(request, move |request_id| ServerToAgent::ReadFile {
                 request_id,
-                path: path.clone(),
+                path,
             })
             .await?
         {
@@ -1260,7 +1259,7 @@ impl RemoteSessionHost {
     /// 直したときに「起動はできるのに覗けない」という食い違いが生まれる。
     async fn ask(
         &self,
-        request: crate::session_host::HostFsRequest<'_>,
+        request: crate::session_host::HostFsRequest,
         make: impl FnOnce(RequestId) -> ServerToAgent,
     ) -> Result<HostReply, crate::session_host::HostFsError> {
         use crate::session_host::HostFsError;
@@ -1757,7 +1756,7 @@ async fn handle_report(
         // インスタンスなので連絡係へ流す——`agent:{id}:cmd` は行きの道しかなく、
         // 帰りはアカウントの知らせに相乗りする
         AgentMessage::HostReply { request_id, reply } => {
-            if !hub.resolve_reply(request_id, reply.clone()) {
+            if let Some(reply) = hub.resolve_reply(request_id, reply) {
                 if let Some(bus) = hub.registry.bus() {
                     bus.publish(
                         &bus::account_events(conn.account_id),

@@ -140,10 +140,22 @@ pub trait SessionHost: Send + Sync + 'static {
     /// **ローカルモードもここを通る。** サーバ側で「同じプロセスなら自分で読む」と
     /// 近道を作らない——片側だけ速くすると「ローカルでは動くのにセルフホストで欠ける」
     /// という、経路の違いが原因でテストを増やしても見つからない壊れ方が残る（§19）。
-    async fn list_dir(&self, request: HostFsRequest<'_>) -> Result<DirListing, HostFsError>;
+    ///
+    /// `start` を省略すると**その PC のホーム**（設計§26-2）。
+    async fn list_dir(
+        &self,
+        request: HostFsRequest,
+        start: Option<&str>,
+    ) -> Result<DirListing, HostFsError>;
 
     /// ファイル1つの中身（設計§5・§9）。**読むだけ**で、書く口は持たない。
-    async fn read_file(&self, request: HostFsRequest<'_>) -> Result<FileContent, HostFsError>;
+    ///
+    /// パスは必須。中身の読み取りに「始まり」は無いので、省略できる形にしない。
+    async fn read_file(
+        &self,
+        request: HostFsRequest,
+        path: &str,
+    ) -> Result<FileContent, HostFsError>;
 }
 
 /// ファイルの口が応えられなかった理由（設計§10 の状態コードの表）。
@@ -195,19 +207,21 @@ impl HostFsError {
     }
 }
 
-/// ファイルシステムへの頼み（イシューグループ_2026_0805_0514 設計§5）。
+/// ファイルシステムへの頼み、その**聞く相手**（イシューグループ_2026_0805_0514 設計§5）。
 ///
 /// 引数を並べずに1つの型へまとめてあるのは [`SpawnRequest`] と同じ理由——
-/// **宛先とアカウントを取り違えても型で気づけない**ため。
-pub struct HostFsRequest<'a> {
+/// **宛先とアカウントを取り違えても型で気づけない**ため。どちらも UUID なので、
+/// 順番を入れ替えてもコンパイルは通ってしまう。
+///
+/// # 何を聞くかはここに入れない
+///
+/// 一覧は省略できる始まり（`Option`）、中身は必須のパスで、**口ごとに形が違う**。
+/// 1つの `Option<&str>` にまとめると「中身の読み取りに `None` を渡してはいけない」を
+/// 型が表せず、実装のたびに同じ防御を書くことになる（実際、2つの実装が別々に
+/// 同じ断り方を書いていた。3つ目が増えても型は何も言わない）。
+pub struct HostFsRequest {
     /// 頼んだ人のアカウント。**他人の PC を宛先にできない**ことをここで確かめる（§18）
     pub account_id: uuid::Uuid,
     /// どの PC に聞くか。`None` は「選ばれていない」——ローカルモードは常に `None`
     pub target: Option<AgentId>,
-    /// 絶対パス。**`None` はその PC のホーム**（設計§26-2）。
-    ///
-    /// `None` を渡してよいのは [`SessionHost::list_dir`] だけである。中身の読み取りに
-    /// 「始まり」は無く、REST の口も `path` を必須にしているので、
-    /// [`SessionHost::read_file`] がここで `None` を受け取ることはない。
-    pub path: Option<&'a str>,
 }

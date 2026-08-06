@@ -169,28 +169,23 @@ impl SessionHost for LocalSessionHost {
     /// **宛先を指定される余地そのものが無い**（帰属の確認は §18 のとおりサーバ側の口で行う）。
     async fn list_dir(
         &self,
-        request: server_core::session_host::HostFsRequest<'_>,
+        request: server_core::session_host::HostFsRequest,
+        start: Option<&str>,
     ) -> Result<protocol::fs::DirListing, server_core::session_host::HostFsError> {
         reject_target(&request)?;
         // 省略ならホーム、貼られた形なら読み替える（設計§26-2・§13）。
         // セルフホストでは PC 側が同じ1本を通る。**解決も逃がした先で行う**——
         // 候補ごとに `is_dir()` を叩くので、ここでやると配信と同じワーカーが止まる
-        let start = request.path.map(str::to_string);
+        let start = start.map(str::to_string);
         blocking_fs(move || session_host_core::hostfs::list_dir_from(start.as_deref())).await
     }
 
     async fn read_file(
         &self,
-        request: server_core::session_host::HostFsRequest<'_>,
+        request: server_core::session_host::HostFsRequest,
+        path: &str,
     ) -> Result<protocol::fs::FileContent, server_core::session_host::HostFsError> {
         reject_target(&request)?;
-        // 中身の読み取りに「始まり」は無い（設計§26-2）。REST の口が必須にしている
-        let Some(path) = request.path else {
-            return Err(server_core::session_host::HostFsError::Failed {
-                reason: protocol::a2s::HostFailure::NotFound,
-                detail: "読むファイルが指定されていません".to_string(),
-            });
-        };
         let path = path.to_string();
         blocking_fs(move || session_host_core::hostfs::read_file(std::path::Path::new(&path))).await
     }
@@ -202,7 +197,7 @@ impl SessionHost for LocalSessionHost {
 /// が手元のファイルを返すことになり、口の意味が構成によって変わる。**知らない PC と
 /// 同じ言葉で断る**ので、綴りを変えて探る余地も残らない。
 fn reject_target(
-    request: &server_core::session_host::HostFsRequest<'_>,
+    request: &server_core::session_host::HostFsRequest,
 ) -> Result<(), server_core::session_host::HostFsError> {
     match request.target {
         None => Ok(()),

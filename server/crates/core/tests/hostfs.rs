@@ -47,12 +47,11 @@ fn host() -> LocalSessionHost {
     LocalSessionHost::new(SessionManager::new(Arc::new(config)))
 }
 
-fn ask<'a>(path: &'a str) -> HostFsRequest<'a> {
+fn ask() -> HostFsRequest {
     HostFsRequest {
         account_id: uuid::Uuid::new_v4(),
         // ローカルモードには PC という単位が無い（設計§19）
         target: None,
-        path: Some(path),
     }
 }
 
@@ -67,7 +66,7 @@ async fn ローカルモードでも境界を通って一覧と中身が取れ�
 
     // ① 一覧
     let listing = host
-        .list_dir(ask(&sandbox.path().display().to_string()))
+        .list_dir(ask(), Some(&sandbox.path().display().to_string()))
         .await
         .expect("一覧が取れること");
     let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
@@ -79,7 +78,7 @@ async fn ローカルモードでも境界を通って一覧と中身が取れ�
 
     // ② 中身
     let content = host
-        .read_file(ask(&sandbox.path().join("計画.md").display().to_string()))
+        .read_file(ask(), &sandbox.path().join("計画.md").display().to_string())
         .await
         .expect("中身が取れること");
     assert_eq!(content.text, body);
@@ -91,7 +90,7 @@ async fn 読めないときは理由が説明として返る() {
     let host = host();
 
     let err = host
-        .list_dir(ask("/居ないフォルダ/居ない"))
+        .list_dir(ask(), Some("/居ないフォルダ/居ない"))
         .await
         .expect_err("断ること");
 
@@ -122,11 +121,13 @@ async fn ローカルモードで宛先を指名されたら断る() {
     let host = host();
 
     let err = host
-        .list_dir(HostFsRequest {
-            account_id: uuid::Uuid::new_v4(),
-            target: Some(protocol::AgentId(uuid::Uuid::new_v4())),
-            path: Some(&sandbox.path().display().to_string()),
-        })
+        .list_dir(
+            HostFsRequest {
+                account_id: uuid::Uuid::new_v4(),
+                target: Some(protocol::AgentId(uuid::Uuid::new_v4())),
+            },
+            Some(&sandbox.path().display().to_string()),
+        )
         .await
         .expect_err("断ること");
 
@@ -145,11 +146,7 @@ async fn ローカルモードで宛先を指名されたら断る() {
 #[tokio::test]
 async fn 一覧はパスを省略するとホームから始まる() {
     let listing = host()
-        .list_dir(HostFsRequest {
-            account_id: uuid::Uuid::new_v4(),
-            target: None,
-            path: None,
-        })
+        .list_dir(ask(), None)
         .await
         .expect("ホームを引けること");
 
@@ -163,24 +160,9 @@ async fn 一覧はパスを省略するとホームから始まる() {
     assert!(!listing.path.is_empty(), "着いた先が応答に載っていない");
 }
 
-/// 中身の読み取りに「始まり」は無い（設計§26-2）。
-///
-/// 口が `path` を必須にしているので通常は起きないが、**型がその状態を許す**以上、
-/// 落ちずに断ることを固定しておく。
-#[tokio::test]
-async fn 中身の読み取りはパスの省略を断る() {
-    let err = host()
-        .read_file(HostFsRequest {
-            account_id: uuid::Uuid::new_v4(),
-            target: None,
-            path: None,
-        })
-        .await
-        .expect_err("断ること");
-
-    assert!(
-        err.message().contains("指定されていません"),
-        "理由が伝わらない: {}",
-        err.message()
-    );
-}
+// 「中身の読み取りはパスの省略を断る」は**書けなくなったので消した**。
+//
+// あれは `HostFsRequest.path` が `Option` で、型が許してしまう状態を実行時に
+// 塞いでいることを固定するテストだった。`read_file` がパスを必須で受ける形に
+// なった以上、省略した呼び出しはコンパイルが通らない——**同じことを型が
+// 言っているので、実行して確かめる意味が無い**（設計§29）。

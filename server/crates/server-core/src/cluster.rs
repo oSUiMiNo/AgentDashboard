@@ -134,7 +134,9 @@ async fn events_loop(
             // 問うていないインスタンスにも届く——`request_id` が合わないものは、
             // 捨てるだけで正しい
             bus::AccountMessage::HostReply { request_id, reply } => {
-                hub.resolve_reply(request_id, *reply);
+                // 渡せなければ答えが戻ってくるが、ここでは捨てる。**流し直さない**——
+                // この知らせは既に連絡係から来たもので、返すと輪になる
+                let _ = hub.resolve_reply(request_id, *reply);
             }
         }
     }

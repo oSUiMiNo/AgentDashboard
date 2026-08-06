@@ -21,7 +21,7 @@
 use crate::{
     auth::Identity,
     db::{self, entity},
-    hosts::{LOCAL_HOST, status_of},
+    hosts::{LOCAL_HOST, parse_host, refuse},
     registry::SessionRegistry,
     session_host::HostFsError,
     ws::AppState,
@@ -232,21 +232,6 @@ fn to_view(row: &entity::projects::Model) -> ProjectView {
     }
 }
 
-/// `{host}` を宛先へ。**読めない綴りは「知らない PC」と同じ扱い**（設計§18）。
-fn parse_host(host: &str) -> Result<Option<AgentId>, (StatusCode, String)> {
-    if host == LOCAL_HOST {
-        return Ok(None);
-    }
-    match host.parse::<Uuid>() {
-        Ok(id) => Ok(Some(AgentId(id))),
-        Err(_) => Err(refuse(HostFsError::UnknownHost)),
-    }
-}
-
-fn refuse(err: HostFsError) -> (StatusCode, String) {
-    (status_of(&err), err.message())
-}
-
 fn unavailable(err: sea_orm::DbErr) -> (StatusCode, String) {
     (
         StatusCode::SERVICE_UNAVAILABLE,
@@ -260,17 +245,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn 読めない宛先は知らないpcと同じ言葉で断る() {
-        let (code, message) = parse_host("これはUUIDではない").expect_err("断ること");
-        assert_eq!(code, StatusCode::NOT_FOUND);
-        assert_eq!(message, HostFsError::UnknownHost.message());
-    }
-
-    #[test]
-    fn localは宛先なしとして読む() {
-        assert_eq!(parse_host(LOCAL_HOST).expect("通ること"), None);
-    }
+    // 宛先の読み方（`parse_host`）と断り方（`refuse`）は `crate::hosts` から
+    // 借りているので、それを固定するテストもあちらの1組だけを持つ
 
     #[test]
     fn 枠の表示は宛先の綴りをそのまま持つ() {

@@ -1049,11 +1049,13 @@ async fn 跨いだ配置でもフォルダの答えが問うた側へ戻る() {
         let host = RemoteSessionHost::new(Arc::clone(&a.hub));
         // 問いは待つので、別のタスクへ逃がして**その間に PC 役が答える**
         let asking = tokio::spawn(async move {
-            host.list_dir(server_core::session_host::HostFsRequest {
-                account_id,
-                target: Some(target),
-                path: Some("/home/example/dev/app"),
-            })
+            host.list_dir(
+                server_core::session_host::HostFsRequest {
+                    account_id,
+                    target: Some(target),
+                },
+                Some("/home/example/dev/app"),
+            )
             .await
         });
 
@@ -1107,11 +1109,13 @@ async fn 連絡係が切れている間のフォルダの問いは理由を返�
         broker.cut();
 
         let err = RemoteSessionHost::new(Arc::clone(&a.hub))
-            .list_dir(server_core::session_host::HostFsRequest {
-                account_id,
-                target: Some(target),
-                path: Some("/home/example/dev/app"),
-            })
+            .list_dir(
+                server_core::session_host::HostFsRequest {
+                    account_id,
+                    target: Some(target),
+                },
+                Some("/home/example/dev/app"),
+            )
             .await
             .expect_err("断られること");
 
