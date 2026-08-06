@@ -154,6 +154,69 @@ fn ルートがフォルダへのリンクでも一覧できる() {
     assert_eq!(names(&listing), vec!["中身.md"]);
 }
 
+// --- 起点の解決（設計§13・§26-2）-------------------------------------------
+
+#[test]
+fn 起点は末尾のスラッシュを落として返す() {
+    // **フォルダのコピーは末尾に `/` を付ける仕様**（設計§28）なので、貼って
+    // 足すだけでこの形になる。カード側（`spawn_with`）は `/` 無しの正規形を
+    // 持つので、ここで揃えないと**同じ PJT が2つの箱に割れる**
+    let sandbox = Sandbox::new("trailing");
+    sandbox.dir("中身");
+
+    let listing =
+        hostfs::list_dir_from(Some(&format!("{}/", sandbox.path().display()))).expect("読めること");
+
+    assert_eq!(
+        listing.path,
+        sandbox
+            .path()
+            .canonicalize()
+            .expect("実体があること")
+            .display()
+            .to_string(),
+        "末尾の `/` が残っている"
+    );
+}
+
+#[test]
+fn 起点がリンクでも実体のパスで返す() {
+    // `~/Dev` をリンクにしている人は、辿る道と打ち込む道で別の文字列になる。
+    // カード側は `canonicalize` を通すので、こちらも同じ規則へ寄せる
+    let sandbox = Sandbox::new("startlink");
+    let real = sandbox.dir("real");
+    let link = sandbox.path().join("近道");
+    std::os::unix::fs::symlink(&real, &link).expect("リンクを作れること");
+
+    let listing = hostfs::list_dir_from(Some(&link.display().to_string())).expect("読めること");
+
+    assert_eq!(
+        listing.path,
+        real.canonicalize()
+            .expect("実体があること")
+            .display()
+            .to_string(),
+        "リンクのままの名前で返っている"
+    );
+}
+
+#[test]
+fn 実体が無い起点は打ち込まれた形のまま返す() {
+    // 寝ている PC の枠を足せる必要がある（設計§17）。正規化できないことを
+    // **断る理由にしない**——断るかどうかは一覧を引く側の判断
+    let sandbox = Sandbox::new("startmissing");
+    let missing = sandbox.path().join("まだ無い");
+
+    let err = hostfs::list_dir_from(Some(&missing.display().to_string())).expect_err("断ること");
+
+    assert_eq!(err.reason, HostFailure::NotFound);
+    assert!(
+        err.detail.contains("まだ無い"),
+        "打ち込まれた形がそのまま説明に出ること（{}）",
+        err.detail
+    );
+}
+
 #[test]
 fn ドット始まりも一覧に出る() {
     let sandbox = Sandbox::new("dotfiles");

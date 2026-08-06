@@ -153,9 +153,11 @@ async fn 一覧はパスを省略するとホームから始まる() {
         .await
         .expect("ホームを引けること");
 
+    // 起点はカードと同じ規則で正規化される（設計§13）ので、期待値も同じ規則で作る
+    let home = session_host_core::hostfs::home();
     assert_eq!(
         listing.path,
-        session_host_core::hostfs::home().display().to_string(),
+        home.canonicalize().unwrap_or(home).display().to_string(),
         "省略したのにホーム以外へ着いた"
     );
     assert!(!listing.path.is_empty(), "着いた先が応答に載っていない");

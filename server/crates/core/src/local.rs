@@ -173,11 +173,10 @@ impl SessionHost for LocalSessionHost {
     ) -> Result<protocol::fs::DirListing, server_core::session_host::HostFsError> {
         reject_target(&request)?;
         // 省略ならホーム、貼られた形なら読み替える（設計§26-2・§13）。
-        // セルフホストでは PC 側が同じ1本を通る
-        let path = session_host_core::hostfs::resolve_start(request.path)
-            .display()
-            .to_string();
-        blocking_fs(path, session_host_core::hostfs::list_dir).await
+        // セルフホストでは PC 側が同じ1本を通る。**解決も逃がした先で行う**——
+        // 候補ごとに `is_dir()` を叩くので、ここでやると配信と同じワーカーが止まる
+        let start = request.path.map(str::to_string);
+        blocking_fs(move || session_host_core::hostfs::list_dir_from(start.as_deref())).await
     }
 
     async fn read_file(
@@ -192,7 +191,8 @@ impl SessionHost for LocalSessionHost {
                 detail: "読むファイルが指定されていません".to_string(),
             });
         };
-        blocking_fs(path.to_string(), session_host_core::hostfs::read_file).await
+        let path = path.to_string();
+        blocking_fs(move || session_host_core::hostfs::read_file(std::path::Path::new(&path))).await
     }
 }
 
@@ -215,12 +215,15 @@ fn reject_target(
 /// ローカルモードでは、この呼び出しはブラウザ配信と同じランタイムの上に居る。
 /// 大きなフォルダを非同期タスクの中で直接読むと、その間そのワーカーの上にある全部が
 /// 止まる（PJTガイドライン「遅いハッシュは専用のスレッドへ逃がす」と同じ理屈）。
-async fn blocking_fs<T: Send + 'static>(
-    path: String,
-    read: fn(&std::path::Path) -> Result<T, session_host_core::hostfs::HostFsError>,
-) -> Result<T, server_core::session_host::HostFsError> {
+/// 渡すのは**読む仕事そのもの**にしてある。パスと関数に分けると、パスを作る側
+/// （起点の解決）だけがこちら側に残り、逃がしたはずのものが手前に漏れる。
+async fn blocking_fs<T, F>(read: F) -> Result<T, server_core::session_host::HostFsError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, session_host_core::hostfs::HostFsError> + Send + 'static,
+{
     use server_core::session_host::HostFsError;
-    match tokio::task::spawn_blocking(move || read(std::path::Path::new(&path))).await {
+    match tokio::task::spawn_blocking(read).await {
         // **ローカルが作るのは `Failed` だけ。** 線を跨がないので、届かなかったことを
         // 表す残りの理由は起こりえない（設計§19：見え方をモードで食い違わせない）
         Ok(Ok(value)) => Ok(value),

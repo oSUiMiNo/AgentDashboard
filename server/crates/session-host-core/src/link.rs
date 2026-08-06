@@ -747,10 +747,14 @@ fn handle_incoming(
 }
 
 /// どちらを聞かれたか。
-#[derive(Debug, Clone, Copy)]
+///
+/// **解決する前の値を持つ。** 起点の読み替え（`hostfs::resolve_start`）も
+/// ファイルシステムに触るので、逃がした先で行う（下記）。
+#[derive(Debug, Clone)]
 enum HostFsAsk {
-    Dir,
-    File,
+    /// 一覧。`None` はその PC のホーム（設計§26-2）
+    Dir(Option<String>),
+    File(String),
 }
 
 /// フォルダ／ファイルの問いに、**別のスレッドで**答える（設計§4・§8・§9）。
@@ -764,10 +768,14 @@ enum HostFsAsk {
 ///
 /// 切断中の答えは行き先が無い。聞いた側は時間切れで畳むので、溜めても意味が無い
 /// （`Outgoing::Volatile` の扱いと同じ）。
+///
+/// # 起点の解決もここで行う
+///
+/// 呼ぶ側（`apply_command`）は接続の `select!` ループの上に居る。読み取りだけを
+/// 逃がして解決をあちらへ残すと、**候補ごとの `is_dir()` でループが止まる**。
 fn answer_host_fs(
     outgoing: mpsc::UnboundedSender<Outgoing>,
     request_id: RequestId,
-    path: String,
     ask: HostFsAsk,
 ) {
     tokio::task::spawn_blocking(move || {
@@ -776,11 +784,11 @@ fn answer_host_fs(
             detail: err.detail,
         };
         let reply = match ask {
-            HostFsAsk::Dir => match crate::hostfs::list_dir(Path::new(&path)) {
+            HostFsAsk::Dir(start) => match crate::hostfs::list_dir_from(start.as_deref()) {
                 Ok(listing) => HostReply::Dir(listing),
                 Err(err) => failed(err),
             },
-            HostFsAsk::File => match crate::hostfs::read_file(Path::new(&path)) {
+            HostFsAsk::File(path) => match crate::hostfs::read_file(Path::new(&path)) {
                 Ok(content) => HostReply::File(content),
                 Err(err) => failed(err),
             },
@@ -917,14 +925,11 @@ fn apply_command(
         // 「静かな死」に見えて切られる
         ServerToAgent::ListDir { request_id, path } => {
             // 省略ならホーム、貼られた形なら読み替える（設計§26-2・§13）。
-            // どちらも解決できるのはこちら側だけ
-            let path = crate::hostfs::resolve_start(path.as_deref())
-                .display()
-                .to_string();
-            answer_host_fs(outgoing.clone(), request_id, path, HostFsAsk::Dir);
+            // どちらも解決できるのはこちら側だけ——**解決そのものは逃がした先で行う**
+            answer_host_fs(outgoing.clone(), request_id, HostFsAsk::Dir(path));
         }
         ServerToAgent::ReadFile { request_id, path } => {
-            answer_host_fs(outgoing.clone(), request_id, path, HostFsAsk::File);
+            answer_host_fs(outgoing.clone(), request_id, HostFsAsk::File(path));
         }
     }
 }

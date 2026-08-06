@@ -72,27 +72,43 @@ pub fn home() -> PathBuf {
 
 /// 一覧の起点を決める（設計§26-2・§13）。
 ///
-/// 2つのことを1か所でやる。
+/// 3つのことを1か所でやる。
 ///
 /// 1. **省略されたらホーム**（§26-2）
 /// 2. **Windows 側から貼ったパスを読み替える**（`\` 区切り・`\\wsl.localhost\...`・
 ///    `C:\...`・引用符付き）
+/// 3. **カードと同じ規則で正規化する**（末尾の `/`・途中のリンクを落とす）
 ///
-/// 2 が要るのは、**追加の入口が2つある**ためである（§13）。打ち込む道と辿る道が
+/// 2 と 3 が要るのは、**追加の入口が2つある**ためである（§13）。打ち込む道と辿る道が
 /// 別の値を指すと、同じフォルダなのに打ち方の違いで枠とカードが別の箱に割れる。
 /// 読み替えそのものは `session::cwd` が持っているので、ここでは**呼ぶだけ**——
 /// 解釈の並べ方を2箇所に書くと、片方だけ直したときに食い違う。
 ///
+/// 3 の相手は `session::spawn_with`（カードの `project` を作る側）で、あちらも
+/// `canonicalize` を通している。**片方だけ通すと、末尾に `/` を付けて足した枠が
+/// カードと別の箱になる**——フォルダのコピーは `/` を付ける仕様なので、貼って
+/// 足すだけで踏める。
+///
 /// 当たらなければ**入力をそのまま返す**。存在しないパスでも枠は足せる必要があり
 /// （§17。寝ている PC のぶん）、断るかどうかは呼んだ先の仕事になる。
 pub fn resolve_start(path: Option<&str>) -> PathBuf {
-    let Some(path) = path else {
-        return home();
+    let found = match path {
+        None => home(),
+        Some(path) => match crate::session::cwd::resolve(path) {
+            crate::session::cwd::Resolution::Found(found) => found,
+            _ => PathBuf::from(path),
+        },
     };
-    match crate::session::cwd::resolve(path) {
-        crate::session::cwd::Resolution::Found(found) => found,
-        _ => PathBuf::from(path),
-    }
+    found.canonicalize().unwrap_or(found)
+}
+
+/// 起点を決めてから一覧する（設計§26-2・§8）。
+///
+/// **この2つを離さない。** 解決はファイルシステムに触る（候補ごとに `is_dir()` を
+/// 叩き、正規化もする）ので、呼ぶ側が逃がした先の外で解決すると、逃がした意味が
+/// その手前で薄まる。1本にしておけば、次に呼ぶ実装が解決を忘れる余地も無い。
+pub fn list_dir_from(start: Option<&str>) -> Result<DirListing, HostFsError> {
+    list_dir(&resolve_start(start))
 }
 
 /// 並べ替えるまでの1件。
