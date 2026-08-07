@@ -355,7 +355,16 @@ async fn pump(
                 }
                 // core が畳まれた
                 None => {
-                    let _ = write_command(&mut stdin, &ParserCommand::Shutdown).await;
+                    if let Err(err) = write_command(&mut stdin, &ParserCommand::Shutdown).await {
+                        // **孤児が生まれるのはここ**（未解明事象2。36分生き残った実測）。
+                        // 停止指示が届かなかった相手の pid が出ることに全部が懸かっている
+                        tracing::warn!(
+                            parser_pid = ?child.id(),
+                            watching = watched.len(),
+                            %err,
+                            "畳むときにパーサへ停止を指示できません。孤児が残る恐れがあります"
+                        );
+                    }
                     return PumpEnd::Shutdown;
                 }
             },
@@ -370,8 +379,25 @@ async fn pump(
                 Some(()) => {
                     // 読みかけを畳ませてから落とす。応答を待たないのは、差し替えの目的が
                     // 「新しいバイナリに変わること」であって、綺麗に終わることではないため
-                    let _ = write_command(&mut stdin, &ParserCommand::Shutdown).await;
-                    let _ = child.kill().await;
+                    //
+                    // **`kill().await` より前に控える。** あれは子を刈り取るので、
+                    // あとから `child.id()` を呼ぶと `None` になり、いちばん要る番号が消える
+                    let parser_pid = child.id();
+                    if let Err(err) = write_command(&mut stdin, &ParserCommand::Shutdown).await {
+                        tracing::warn!(
+                            parser_pid = ?parser_pid,
+                            watching = watched.len(),
+                            %err,
+                            "差し替えのための停止指示がパーサへ届きません"
+                        );
+                    }
+                    if let Err(err) = child.kill().await {
+                        tracing::warn!(
+                            parser_pid = ?parser_pid,
+                            %err,
+                            "差し替えのためのパーサ停止に失敗しました。古いパーサが生き残ります"
+                        );
+                    }
                     return PumpEnd::Restart;
                 }
                 None => return PumpEnd::Shutdown,

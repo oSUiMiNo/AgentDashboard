@@ -181,15 +181,65 @@ fn format_note(pid: u32, args: std::fmt::Arguments<'_>) -> String {
     format!("[{pid}] {args}")
 }
 
+/// IPC が壊れたことを既に告げたか。
+///
+/// **告げるのは1回だけ。** 書けない状態は回復しない（core が居なくなっている）ので、
+/// ノードごとに鳴らすと親の stderr 取り込みが warn を毎ノード生む。設計§9-2 の
+/// 「ノードごとの書き出しは書けなかったときだけ」は、ここでは「1回だけ」の意味になる。
+static IPC_BROKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn emit(event: &ParserEvent) {
-    let Ok(line) = serde_json::to_string(event) else {
-        return;
-    };
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
-    // 書けない＝core が居なくなった。次のループで stdin 側も閉じるので黙って捨てる
-    let _ = writeln!(stdout, "{line}");
-    let _ = stdout.flush();
+    if let Some(complaint) = emit_into(&mut stdout, event) {
+        note(format_args!("{complaint}"));
+    }
+}
+
+/// 書き出し先を受け取る側。**告げる中身だけを返し、告げるのは呼び出し側**。
+///
+/// `eprintln!` そのものはテストから捕まえられないので、`format_note` と同じ作法で
+/// 判断をこちらへ置く。
+///
+/// # 捨てるのは変えない
+///
+/// 書けなければ次のループで stdin 側も閉じる。**変えたのは、消えたことが誰にも
+/// 見えないところだけ**（設計§10-3。未解明事象1「構造化ビューが永久に空」の経路）。
+fn emit_into(out: &mut impl Write, event: &ParserEvent) -> Option<String> {
+    let Ok(line) = serde_json::to_string(event) else {
+        return None;
+    };
+    let wrote = writeln!(out, "{line}");
+    // **`and_then` にしてはいけない。** `writeln!` が失敗したときに `flush` が
+    // 走らなくなり、制御の流れが変わる
+    let flushed = out.flush();
+    let err = wrote.and(flushed).err()?;
+    (!IPC_BROKEN.swap(true, std::sync::atomic::Ordering::Relaxed)).then(|| {
+        format!(
+            "core へ結果を書けません（以降は黙って捨てます）: {err}: {}",
+            event_label(event)
+        )
+    })
+}
+
+/// 事故のときに載せる見出し。
+///
+/// **中身は載せない。** `nodes` の本体は会話そのもので、stderr へ流すと親のログへ
+/// 会話が丸ごと入る（設計§9-3）。
+fn event_label(event: &ParserEvent) -> String {
+    match event {
+        ParserEvent::Hello { parser_version, .. } => format!("hello({parser_version})"),
+        ParserEvent::Nodes { card_id, nodes, .. } => {
+            format!("nodes card_id={card_id} n={}", nodes.len())
+        }
+        ParserEvent::Reset { card_id } => format!("reset card_id={card_id}"),
+        ParserEvent::Range { req_id, nodes } => format!("range req_id={req_id} n={}", nodes.len()),
+        ParserEvent::Stats { card_id, .. } => format!("stats card_id={card_id}"),
+        ParserEvent::Error { card_id, .. } => match card_id {
+            Some(card_id) => format!("error card_id={card_id}"),
+            None => "error".to_string(),
+        },
+    }
 }
 
 fn spawn_stdin_reader(tx: Sender<Message>) {
@@ -396,5 +446,77 @@ mod tests {
         let card_id = CardId::new();
         let split = split_event(ParserEvent::Reset { card_id });
         assert_eq!(split, vec![ParserEvent::Reset { card_id }]);
+    }
+
+    /// IPC の書き込み失敗に声を与える（設計§10-3。未解明事象1 の経路）。
+    ///
+    /// **この crate は `tracing` を持てない**（設計§8-3）ので、告げるのは `note` 経由の
+    /// stderr。親が拾って `parser_pid` の欄へ移す。
+    mod 書けないことを告げる {
+        use super::*;
+
+        struct 壊れた口;
+
+        impl Write for 壊れた口 {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "core が居ない",
+                ))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "core が居ない",
+                ))
+            }
+        }
+
+        #[test]
+        fn 何度書けなくても告げるのは1回だけ() {
+            // 書けない状態は回復しない。ノードごとに鳴らすと、親の stderr 取り込みが
+            // warn を毎ノード生む（設計§9-2）
+            let card_id = CardId::new();
+            let event = ParserEvent::Reset { card_id };
+            let mut out = 壊れた口;
+
+            let complaint = emit_into(&mut out, &event).expect("1回目は告げること");
+            assert!(complaint.contains("core へ結果を書けません"), "{complaint}");
+            assert!(
+                complaint.contains(&format!("reset card_id={card_id}")),
+                "何が消えたかの見出しが載ること: {complaint}"
+            );
+
+            for _ in 0..200 {
+                assert!(emit_into(&mut out, &event).is_none(), "2回目以降は黙ること");
+            }
+        }
+
+        #[test]
+        fn 書けたときは何も言わず1行1レコードで出す() {
+            let mut out: Vec<u8> = Vec::new();
+            let event = ParserEvent::Reset {
+                card_id: CardId::new(),
+            };
+            assert!(emit_into(&mut out, &event).is_none());
+
+            let text = String::from_utf8(out).expect("UTF-8 であること");
+            assert!(text.ends_with('\n'));
+            assert_eq!(text.lines().count(), 1, "1行1レコード");
+        }
+
+        #[test]
+        fn 見出しは短く保つ() {
+            // **会話そのものを stderr へ流さない**（設計§9-3）。件数と相手だけ
+            let card_id = CardId::new();
+            let label = event_label(&ParserEvent::Nodes {
+                card_id,
+                source: "/どこかの/長いパス/session.jsonl".to_string(),
+                nodes: Vec::new(),
+                next_offset: 0,
+            });
+            assert_eq!(label, format!("nodes card_id={card_id} n=0"));
+        }
     }
 }
