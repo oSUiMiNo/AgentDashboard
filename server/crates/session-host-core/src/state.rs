@@ -302,6 +302,27 @@ pub fn sweep_hook_silence(
     true
 }
 
+/// 出力もフックも1バイトも無いまま固まっているか（ログ設計§8-4 の追記）。
+///
+/// [`sweep_hook_silence`] は `saw_output` が立っているものだけを `Unknown` へ落とす。
+/// **こちらは状態を1バイトも動かさない**——§8-4 の3材料のうち「端末の末尾」が空なので、
+/// 断じるだけの根拠が無い。原因を1つに決め打ちしないという約束は、材料が欠けている
+/// ときにこそ効く。
+///
+/// それでも**無音にはしない**。出力もフックも無いまま `Starting` で固まったセッションは、
+/// いままで何も出ていなかった——このイシューが敵にしている沈黙そのものである。
+pub fn hook_silent_without_output(
+    meta: &SessionMeta,
+    now: Timestamp,
+    threshold_secs: u64,
+    saw_output: bool,
+) -> bool {
+    if meta.hooks_seen || saw_output || meta.status != SessionStatus::Starting {
+        return false;
+    }
+    now.saturating_sub(meta.created_at) >= (threshold_secs as i64).saturating_mul(1000)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(non_snake_case)]

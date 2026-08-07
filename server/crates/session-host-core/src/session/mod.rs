@@ -41,6 +41,7 @@ use protocol::{
     ws::ServerMessage,
 };
 use pty::{PtyExit, PtyProcess};
+use std::path::Path;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
@@ -89,8 +90,62 @@ const INSTRUCTION_SETTLE: Duration = Duration::from_millis(30);
 /// （既定 1MiB）を毎秒コピーすると、セッション数だけ無駄が積み上がる。
 const FOOTER_TAIL: usize = 32 * 1024;
 
+/// フック未受信の1行に載せる端末の末尾の長さ（文字）。
+///
+/// フォルダ信頼の確認は「このフォルダのファイルを信頼しますか」＋パス＋選択肢で、
+/// 畳んだあと200文字前後。倍の余裕を取る。
+const HOOK_SILENCE_TAIL_CHARS: usize = 400;
+
 /// Shift+Tab（backtab）。TUI の権限モードを1つ進める。
 const CYCLE_KEY: &[u8] = b"\x1b[Z";
+
+/// 見張り1周ぶんで、セッションの外から渡す材料（設計§8-4）。
+///
+/// `hook_port` と `hook_bin` を持っているのは [`SessionManager`] だけ。**フック未受信を
+/// 知らせる1行に、注入した設定と宛先を並べるため**にここへ通す。
+pub(crate) struct SweepInput<'a> {
+    pub threshold_secs: u64,
+    pub hook_port: u16,
+    pub hook_bin: &'a Path,
+}
+
+/// 端末の末尾を、ログの1行へ載せられる形にする（設計§8-4）。
+///
+/// # `squeeze` は通さない
+///
+/// [`permission::squeeze`] は空白を**全部**落とす照合専用の道具で、通すと
+/// `Dtrtstthfilsinthisflder` のような人が読めない塊になる。ここは読む側に判断させる
+/// ための材料なので、**制御列だけ落として空白は畳む**。
+///
+/// # それでも語がくっついて見えることがある
+///
+/// TUI は語ごとに別々に書き、間をカーソル移動で埋める。制御列を落としても
+/// `trust this folder` が `trustthisfolder` になることがある（自己修復で実測済み）。
+/// **これは壊れているのではない。** あとから「空白が無いから」と `squeeze` を足さないこと。
+fn tail_for_log(raw: &str) -> String {
+    let stripped = permission::strip_ansi(raw);
+    let mut folded = String::with_capacity(stripped.len());
+    let mut in_space = false;
+    for ch in stripped.chars() {
+        if ch.is_whitespace() {
+            if !in_space {
+                folded.push(' ');
+                in_space = true;
+            }
+        } else {
+            folded.push(ch);
+            in_space = false;
+        }
+    }
+    let folded = folded.trim();
+    let count = folded.chars().count();
+    if count <= HOOK_SILENCE_TAIL_CHARS {
+        return folded.to_string();
+    }
+    // **文字数で切る。** バイトで切ると日本語の途中で割れる（`--since` で踏んだ罠）
+    let skip = count - HOOK_SILENCE_TAIL_CHARS;
+    format!("…{}", folded.chars().skip(skip).collect::<String>())
+}
 
 /// 切替で Shift+Tab を押す上限。
 ///
@@ -294,6 +349,13 @@ pub struct Session {
     /// 「CLI は動いているのにフックが1件も来ない」を見分けるために要る。出力が無い
     /// だけなら単に起動が遅いだけかもしれず、警告を出すのは早すぎる。
     saw_output: AtomicBool,
+    /// 出力もフックも無いまま固まっていることを、もう言ったか（設計§8-4）。
+    ///
+    /// **主経路には要らない。** あちらは `Starting → Unknown` の遷移そのものが
+    /// ラッチとして働く（2度目は `status != Starting` で偽になる）。ここが要るのは
+    /// **状態を動かさない側**——出力が1バイトも無いセッションは `Starting` のままなので、
+    /// 覚えておかないと毎秒言うことになる。
+    hook_silence_noted: AtomicBool,
     /// いま効いていると分かっている**別名**。分からなければ `None`（設計§5）。
     ///
     /// [`SessionMeta::model`] が持つのは CLI が名乗った**フルID**で、別名とは別物である。
@@ -854,6 +916,15 @@ impl Session {
         &self.settings.token
     }
 
+    /// このセッションへ注入した設定ファイルの**実際の**パス。
+    ///
+    /// フックが1件も来ないときの材料（設計§8-4）。形を写すのではなく、
+    /// **いま注入されているファイルそのもの**を出す——「読まれていない」を
+    /// 確かめる材料になるのは実物だけである。
+    pub fn settings_path(&self) -> &Path {
+        &self.settings.path
+    }
+
     /// SessionStart フックが知らせてきた JSONL の場所（フェーズ3で使う）。
     pub fn transcript_path(&self) -> Option<String> {
         self.transcript_path
@@ -889,7 +960,7 @@ impl Session {
     ///
     /// 戻り値は「状態の差分を配信すべきか」。モードは差分メッセージ（`status`）に
     /// 載らないので、変わったときはカード全体を送り直す必要がある（[`Changed::meta`]）。
-    fn sweep(&self, threshold_secs: u64) -> Changed {
+    fn sweep(&self, input: &SweepInput<'_>) -> Changed {
         let mode_changed = match self.read_footer_mode() {
             Some(mode) => self.store_permission_mode(mode),
             None => false,
@@ -897,12 +968,72 @@ impl Session {
 
         let saw_output = self.saw_output.load(Ordering::Relaxed);
         let now = now_ms();
-        let mut meta = self.meta.lock().expect("ロックが壊れていない");
-        let stalled = state::sweep_stalled(&mut meta, now, threshold_secs);
-        let silent = state::sweep_hook_silence(&mut meta, now, threshold_secs, saw_output);
+
+        // **判定だけをロックの中で終わらせる。** 材料集め（端末の末尾は `ring` の
+        // ロックを取る）を中でやると、毎フレーム `ring` を握る出力の配信と、一覧を
+        // 読む側が、32 KiB の複製ぶんだけ待たされる。
+        //
+        // `ring` → 離す → `meta` の順は既存の並びで、**ここだけ逆順を持たせない**。
+        let (stalled, silent, quiet, created_at) = {
+            let mut meta = self.meta.lock().expect("ロックが壊れていない");
+            let stalled = state::sweep_stalled(&mut meta, now, input.threshold_secs);
+            let silent =
+                state::sweep_hook_silence(&mut meta, now, input.threshold_secs, saw_output);
+            let quiet =
+                state::hook_silent_without_output(&meta, now, input.threshold_secs, saw_output);
+            (stalled, silent, quiet, meta.created_at)
+        };
+
+        if silent {
+            // `Starting → Unknown` の遷移そのものがラッチ。ここへ来るのは1本につき1回だけ
+            self.report_hook_silence(input, now, created_at, true);
+        } else if quiet && !self.hook_silence_noted.swap(true, Ordering::Relaxed) {
+            self.report_hook_silence(input, now, created_at, false);
+        }
+
         Changed {
             status: stalled || silent,
             meta: mode_changed,
+        }
+    }
+
+    /// フックが1件も来ないことを、**材料を並べて**1行にする（設計§8-4）。
+    ///
+    /// **原因を1つに決め打ちしない。** 積み残し_運用 項目2 では推測を決め打ちして
+    /// 外している（実際の原因はフォルダ信頼の確認待ちだった）。読む側に判断させる。
+    fn report_hook_silence(
+        &self,
+        input: &SweepInput<'_>,
+        now: Timestamp,
+        created_at: Timestamp,
+        saw_output: bool,
+    ) {
+        let settings = self.settings_path();
+        let elapsed_secs = now.saturating_sub(created_at) / 1000;
+        // 宛先は**合言葉を含まない形**（設計§9-3。入館証は伏せるのではなく載せない）
+        let hook_url = hooks_settings::hook_url_shape(input.hook_port);
+
+        if saw_output {
+            tracing::warn!(
+                card_id = %self.card_id,
+                settings = %settings.display(),
+                settings_exists = settings.is_file(),
+                hook_bin = %input.hook_bin.display(),
+                hook_url = %hook_url,
+                elapsed_secs,
+                tail = %tail_for_log(&self.scrollback_tail(FOOTER_TAIL)),
+                "CLI は動いているのにフックが1件も届いていません（材料を並べます）"
+            );
+        } else {
+            tracing::debug!(
+                card_id = %self.card_id,
+                settings = %settings.display(),
+                settings_exists = settings.is_file(),
+                hook_bin = %input.hook_bin.display(),
+                hook_url = %hook_url,
+                elapsed_secs,
+                "フックも端末への出力も1バイトもありません（まだ起動していない疑い）"
+            );
         }
     }
 
@@ -1339,6 +1470,7 @@ impl SessionManager {
             transcript_path: Mutex::new(None),
             expected_exit: AtomicBool::new(false),
             saw_output: AtomicBool::new(false),
+            hook_silence_noted: AtomicBool::new(false),
             model_alias: Mutex::new(initial_alias),
             model_switching: AtomicBool::new(false),
             // 画面を作るかどうかは**報告先が決める**（設計§7-2・§22 読み替え2）
@@ -1712,8 +1844,15 @@ impl SessionManager {
             .values()
             .cloned()
             .collect();
+        // 束は1周に1回だけ組む。`hook_port` と `hook_bin` を持っているのはこちらだけで、
+        // フック未受信の1行に宛先を並べるために要る（設計§8-4）
+        let input = SweepInput {
+            threshold_secs: self.config.stalled_threshold_secs,
+            hook_port: self.config.hook_port,
+            hook_bin: &self.hook_program,
+        };
         for session in sessions {
-            let changed = session.sweep(self.config.stalled_threshold_secs);
+            let changed = session.sweep(&input);
             if changed.any() {
                 self.publish(&session, changed);
             }

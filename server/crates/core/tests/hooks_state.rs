@@ -235,6 +235,107 @@ async fn 出力はあるのにフックが来なければ判断できない状�
     assert!(session.meta().hooks_seen);
 }
 
+/// フックが来ないとき、**材料を並べた1行**が出ること（ログ設計§8-4）。
+///
+/// **原因を1つに決め打ちしない。** 積み残し_運用 項目2 では推測を決め打ちして外している
+/// （実際の原因はフォルダ信頼の確認待ちだった）。並べて、読む側に判断させる。
+#[tokio::test]
+async fn フックが来ないときは材料を並べた1行が出る() {
+    let config = agentdashboard_core::config::Config {
+        stalled_threshold_secs: 1,
+        ..Default::default()
+    };
+    let server = common::TestServer::start_with(config).await;
+    let sink = session_host_core::logging::capture::sink();
+    let mark = sink.mark();
+
+    // 起動マーカーを待つ＝PTY から出力が届いている状態
+    let (session, _watcher) = common::start_session(&server.manager).await;
+    assert_eq!(session.status(), SessionStatus::Starting);
+
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    server.manager.sweep_once();
+    assert_eq!(session.status(), SessionStatus::Unknown);
+
+    // **相関キーで絞る。** 他のカードの行が混ざる
+    let lines = sink.matching(mark, "card_id", &session.card_id.to_string());
+    let found: Vec<_> = lines
+        .iter()
+        .filter(|line| {
+            line["msg"]
+                .as_str()
+                .is_some_and(|msg| msg.contains("フックが1件も届いていません"))
+        })
+        .collect();
+    assert_eq!(found.len(), 1, "1行だけ出ること: {lines:#?}");
+    let line = found[0];
+    assert_eq!(line["level"], "WARN");
+
+    // 材料1：注入した設定の**実際の**パス。形を写すのではなく、いま在るファイルを指すこと
+    let settings = line["settings"].as_str().expect("欄があること");
+    assert!(
+        std::path::Path::new(settings).is_file(),
+        "実在するファイルを指していること: {settings}"
+    );
+    assert!(settings.contains(&session.card_id.to_string()));
+    assert_eq!(line["settings_exists"], true);
+
+    // 材料2：焼き込んだ宛先。確かめたいのは**ポートが受信口と一致していること**
+    let url = line["hook_url"].as_str().expect("欄があること");
+    assert!(
+        url.contains(&format!(":{}/hook/", server.manager.hook_port())),
+        "実際: {url}"
+    );
+    // **合言葉は載せない**（設計§9-3。入館証は伏せるのではなく最初から載せない）
+    assert!(
+        !url.contains(session.token()),
+        "宛先に合言葉が混ざっている: {url}"
+    );
+
+    // 材料3：端末の末尾。擬似 claude の起動マーカーは必ず出ている
+    let tail = line["tail"].as_str().expect("欄があること");
+    assert!(
+        tail.contains(testkit::fake_claude::READY_MARKER),
+        "端末の末尾が載っていない: {tail}"
+    );
+    assert!(!tail.contains('\u{1b}'), "制御列が残っている: {tail}");
+    assert!(!tail.contains('\n'), "1行に収まること: {tail}");
+    assert!(tail.chars().count() <= 401, "{}", tail.chars().count());
+
+    // 材料4：フックを起こす実行ファイル。設計の3材料に無いが、版を消した瞬間に
+    // 生きているセッションのフックが全滅する——§8-4 の症状そのもの
+    assert!(line["hook_bin"].as_str().is_some_and(|bin| !bin.is_empty()));
+}
+
+#[tokio::test]
+async fn フックの1行はセッション1本につき1回しか出ない() {
+    // `Starting → Unknown` の遷移がそのままラッチとして働く（新しい印は要らない）
+    let config = agentdashboard_core::config::Config {
+        stalled_threshold_secs: 1,
+        ..Default::default()
+    };
+    let server = common::TestServer::start_with(config).await;
+    let sink = session_host_core::logging::capture::sink();
+    let mark = sink.mark();
+
+    let (session, _watcher) = common::start_session(&server.manager).await;
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    server.manager.sweep_once();
+    server.manager.sweep_once();
+    server.manager.sweep_once();
+
+    let found = sink
+        .matching(mark, "card_id", &session.card_id.to_string())
+        .into_iter()
+        .filter(|line| {
+            line["msg"]
+                .as_str()
+                .is_some_and(|msg| msg.contains("フックが1件も届いていません"))
+        })
+        .count();
+    assert_eq!(found, 1, "見張りを3周しても1行だけ");
+}
+
 #[tokio::test]
 async fn api_sessionsが現在の一覧を返す() {
     let server = common::TestServer::start().await;
