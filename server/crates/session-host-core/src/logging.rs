@@ -1016,6 +1016,157 @@ fn spawn_drop_watch(counter: ErrorCounter) -> Option<tokio::task::JoinHandle<()>
     }))
 }
 
+// ---------------------------------------------------------------------------
+// テストがログの行を読む口（設計§22-1）
+// ---------------------------------------------------------------------------
+
+/// テストがログの行を読むための口。
+///
+/// **製品の経路からは呼ばない。** [`install`] と同じ整形（`JsonFormat`）を使い、
+/// 書き出し先だけをメモリへ差し替える——**テストが見る行と、ファイルへ残る行が
+/// 同じであること**が、この口の存在意義そのものである。整形を写すと、写した側だけが
+/// 古くなったときに「テストは緑なのに実物は違う形」になる。
+///
+/// # なぜ要るのか
+///
+/// 段3 で足す `warn` / `debug` は、**行が出ることでしか確かめられない**。
+/// `build_file_layer` は private で、別の crate の統合テストからは届かない。
+///
+/// # 間引きは掛けない
+///
+/// 本番のファイル層は5秒窓で同じ鍵を間引く（設計§6-3）。テストで間引くと
+/// 「2度目が出ない」のが仕様なのか事故なのか区別できなくなる。整形器へ渡すのは
+/// **`admit` を一度も通らない空の帳簿**なので、`suppressed` の欄は決して出ない。
+///
+/// # 水位は `debug`
+///
+/// 設計§10-1 の「諦めた」行を見るため。既定の `log_file_level` と同じ値なので、
+/// **テストが見る集合は、製品がファイルへ書く集合と同じ**になる。
+#[doc(hidden)]
+pub mod capture {
+    use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::{EnvFilter, Layer};
+
+    /// 溜めた行。
+    #[derive(Debug, Default)]
+    pub struct Sink {
+        lines: Mutex<Vec<serde_json::Value>>,
+    }
+
+    impl Sink {
+        /// ロックが毒されてもテストを落とさない（本体の `Dedup::lock` と同じ扱い）。
+        fn lock(&self) -> MutexGuard<'_, Vec<serde_json::Value>> {
+            self.lines
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+
+        /// いまの位置。**テストはここから後だけを見る。**
+        ///
+        /// 同じプロセスで前に走った処理の行が混ざらないようにするための印。
+        pub fn mark(&self) -> usize {
+            self.lock().len()
+        }
+
+        /// `mark` から後の行。
+        pub fn since(&self, mark: usize) -> Vec<serde_json::Value> {
+            let lines = self.lock();
+            lines.get(mark..).map(<[_]>::to_vec).unwrap_or_default()
+        }
+
+        /// `mark` から後で、欄 `field` が `value` の行だけ。
+        ///
+        /// **相関キーで絞るのが基本。** 並行して動く別のセッションの行が混ざるので、
+        /// `card_id` などで絞らないと件数が揺れる。段3 で相関キーを載せて回る作業は、
+        /// そのままテストの絞り込み手段にもなっている。
+        pub fn matching(&self, mark: usize, field: &str, value: &str) -> Vec<serde_json::Value> {
+            self.since(mark)
+                .into_iter()
+                .filter(|line| line.get(field).and_then(serde_json::Value::as_str) == Some(value))
+                .collect()
+        }
+
+        fn push(&self, bytes: &[u8]) {
+            let text = String::from_utf8_lossy(bytes);
+            let mut lines = self.lock();
+            for line in text.split('\n').filter(|line| !line.trim().is_empty()) {
+                match serde_json::from_str(line) {
+                    Ok(value) => lines.push(value),
+                    // **落とさない。** 読めない行が出たこと自体が手がかりになる
+                    Err(_) => lines.push(serde_json::Value::from(line)),
+                }
+            }
+        }
+    }
+
+    /// 1イベント＝1回の `write` で届く（整形器が行末の改行まで書く）。
+    pub struct SinkWriter(&'static Sink);
+
+    impl std::io::Write for SinkWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.push(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct MakeSink(&'static Sink);
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for MakeSink {
+        type Writer = SinkWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SinkWriter(self.0)
+        }
+    }
+
+    /// 捕捉口を据えて、溜まり場を返す。**2度目以降は据え直さない。**
+    pub fn sink() -> &'static Sink {
+        static SINK: OnceLock<Sink> = OnceLock::new();
+        let sink = SINK.get_or_init(Sink::default);
+        static INSTALLED: OnceLock<()> = OnceLock::new();
+        INSTALLED.get_or_init(|| attach(sink));
+        sink
+    }
+
+    /// **スレッドローカル（`with_default`）にしない。**
+    ///
+    /// あちらは張った thread の中でしか効かないので、`tokio::spawn` したタスクの行が
+    /// 拾えなくなる。中継・連絡係・見張りの経路は全部そこにあり、段3 で声を与える
+    /// 箇所の大半がそこを通る。
+    fn attach(sink: &'static Sink) {
+        let origin = Arc::new(super::Origin {
+            proc: super::Proc::Dashboard.as_str(),
+            pid: std::process::id(),
+            run_id: super::run_id(),
+        });
+        let layer = tracing_subscriber::fmt::layer()
+            .event_format(super::JsonFormat {
+                origin,
+                // 空の帳簿。`admit` を通らないので `take_suppressed` は必ず `None`
+                dedup: Arc::new(super::Dedup::default()),
+            })
+            .with_ansi(false)
+            .log_internal_errors(false)
+            .with_writer(MakeSink(sink))
+            .with_filter(EnvFilter::new(super::file_filter_directives(
+                super::DEFAULT_LOG_FILE_LEVEL,
+            )));
+
+        if let Err(err) = tracing_subscriber::registry().with(layer).try_init() {
+            // **黙らない。** 据えられなかったことが原因で行が見えないのと、
+            // 行が出ていないのとは、テストからは同じ顔をしている
+            eprintln!("ログの捕捉口を据えられません（既に据えられています）: {err}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1608,6 +1759,63 @@ mod tests {
                 let (_, complaint) = file_filter(level);
                 assert!(complaint.is_none(), "{level}: {complaint:?}");
             }
+        }
+    }
+
+    /// 捕捉口（設計§22-1）。
+    ///
+    /// **ここが壊れると、段3 で足した声のテストが全部「行が出ない」で落ちる。**
+    /// 原因が実装側なのか捕捉側なのかを切り分けられるよう、口そのものを1本で押さえる。
+    mod 捕捉口 {
+        use super::super::capture;
+
+        #[test]
+        fn 印から後の行を7欄つきで拾い_間引かれない() {
+            let sink = capture::sink();
+            let mark = sink.mark();
+
+            // **同じ本文を2度。** 本番のファイル層なら5秒窓で2度目が間引かれる。
+            // 捕捉口では間引かないので2行とも出る——「2度目が出ない」のが仕様なのか
+            // 事故なのかを、テストが区別できるようにするため
+            tracing::warn!(card_id = "捕捉口の検査", "同じ本文");
+            tracing::warn!(card_id = "捕捉口の検査", "同じ本文");
+            // 絞り込みの相手にならない行も混ぜる
+            tracing::warn!(card_id = "別の相手", "同じ本文");
+
+            let lines = sink.matching(mark, "card_id", "捕捉口の検査");
+            assert_eq!(lines.len(), 2, "間引かれずに2行とも拾えること: {lines:#?}");
+
+            let line = &lines[0];
+            for field in ["ts", "level", "target", "proc", "pid", "run_id", "msg"] {
+                assert!(line.get(field).is_some(), "{field} が無い: {line}");
+            }
+            assert_eq!(line["level"], "WARN");
+            assert_eq!(line["msg"], "同じ本文");
+            assert!(
+                line.get("suppressed").is_none(),
+                "捕捉口では間引かないので suppressed は出ない: {line}"
+            );
+
+            // 印より前は見えない
+            assert!(sink.since(mark).len() >= 3);
+            assert!(
+                sink.matching(sink.mark(), "card_id", "捕捉口の検査")
+                    .is_empty()
+            );
+        }
+
+        #[test]
+        fn 水位は_debug() {
+            // 設計§10-1 の「諦めた」行は `debug`。既定の `log_file_level` と同じ値に
+            // してあるので、**テストが見る集合は製品がファイルへ書く集合と同じ**になる
+            let sink = capture::sink();
+            let mark = sink.mark();
+            tracing::debug!(card_id = "水位の検査", "諦めました");
+            assert_eq!(
+                sink.matching(mark, "card_id", "水位の検査").len(),
+                1,
+                "debug が拾えること"
+            );
         }
     }
 }
