@@ -53,7 +53,10 @@ use crate::config::{DEFAULT_LOG_FILE_LEVEL, SessionHostConfig};
 pub const LOGS_DIR_NAME: &str = "logs";
 
 /// ファイルの拡張子。1行1レコードの JSON なので `jsonl`。
-const FILE_SUFFIX: &str = "jsonl";
+///
+/// 読む側（[`crate::logs`]）も同じものを見る。**形を2箇所が持つと、片方を直したときに
+/// 黙って食い違う**ので、書く側の定義をそのまま使わせる。
+pub(crate) const FILE_SUFFIX: &str = "jsonl";
 
 /// 間引きの窓（設計§19-6）。
 ///
@@ -297,7 +300,7 @@ fn now_rfc3339_millis() -> String {
     format_rfc3339_millis(time::OffsetDateTime::now_utc())
 }
 
-fn format_rfc3339_millis(at: time::OffsetDateTime) -> String {
+pub(crate) fn format_rfc3339_millis(at: time::OffsetDateTime) -> String {
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
         at.year(),
@@ -665,7 +668,10 @@ struct SweepOutcome {
 }
 
 /// ファイル名を `(stem, 日付)` へ分解する。合わない名前は `None`。
-fn parse_log_name(name: &str) -> Option<(&str, time::Date)> {
+///
+/// 読む側（[`crate::logs`]）が同じ判定で拾う。**掃く側と読む側で「ログのファイル」の
+/// 定義がずれると、掃かれるのに読めないファイルが生まれる。**
+pub(crate) fn parse_log_name(name: &str) -> Option<(&str, time::Date)> {
     let rest = name.strip_suffix(&format!(".{FILE_SUFFIX}"))?;
     let (stem, date) = rest.rsplit_once('.')?;
     if stem.is_empty() {
