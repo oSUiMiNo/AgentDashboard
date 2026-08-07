@@ -627,9 +627,9 @@ impl Session {
                         card_id = %self.card_id,
                         "モデル切替の確認に答えます（選択肢 {key}）"
                     );
-                    let _ = self.write_input(key.to_string().as_bytes());
+                    self.send_key(key.to_string().as_bytes(), "モデル切替の選択肢");
                     tokio::time::sleep(INSTRUCTION_SETTLE).await;
-                    let _ = self.write_input(b"\r");
+                    self.send_key(b"\r", "モデル切替の確定");
                 }
                 // 読めないなら何も送らない。利用者がターミナルビューから答えられる
                 None => tracing::warn!(
@@ -731,6 +731,32 @@ impl Session {
         let framed = Bytes::from(frame::encode(FrameKind::PtyOutput, self.card_id, payload));
         // 購読者が1人もいないときは Err になるが、それは異常ではない
         let _ = self.output.send(framed);
+    }
+
+    /// 端末へキーを送り、**送れなかったことだけ**を残す（設計§10-3）。
+    ///
+    /// 戻り値を返さないのは、元の判断（送れなくても続ける）を変えないため。直前に
+    /// 「答えます」と `info` を出しておきながら送出が無音だと、**ログ上は「答えたのに
+    /// 効かない」としか読めない**。
+    ///
+    /// # `write_input` の中に置いてはいけない
+    ///
+    /// あそこはブラウザの1打鍵（`crate::link`）も通る熱い経路（設計§9-1）で、しかも
+    /// **何をしようとしたかが失われる**——あそこからは「`0x1b[B` を送ろうとした」
+    /// としか言えない。
+    ///
+    /// # `what` は欄に置く
+    ///
+    /// 本文へ埋めると先頭24文字が変わり、間引き（設計§6-3）の鍵が散る。
+    pub fn send_key(&self, bytes: &[u8], what: &str) {
+        if let Err(err) = self.write_input(bytes) {
+            tracing::warn!(
+                card_id = %self.card_id,
+                what,
+                err = %format!("{err:#}"),
+                "端末へキーを送れません"
+            );
+        }
     }
 
     pub fn write_input(&self, bytes: &[u8]) -> anyhow::Result<()> {
@@ -1848,10 +1874,10 @@ async fn answer_bypass_notice(session: Arc<Session>) {
                     card_id = %session.card_id,
                     "全承認をスキップの確認に答えます（選択肢 {key}）"
                 );
-                let _ = session.write_input(key.to_string().as_bytes());
+                session.send_key(key.to_string().as_bytes(), "全承認スキップの選択肢");
                 // 番号を選んだあとに確定が要る作りもあるので、間を置いて確定を送る
                 tokio::time::sleep(INSTRUCTION_SETTLE).await;
-                let _ = session.write_input(b"\r");
+                session.send_key(b"\r", "全承認スキップの確定");
             }
             None => tracing::warn!(
                 card_id = %session.card_id,
@@ -1868,6 +1894,52 @@ mod tests {
     #![allow(non_snake_case)]
 
     use super::*;
+
+    /// 端末への書き込みは、声を持つ口だけを通ること（設計§10-3）。
+    ///
+    /// 送出の失敗に声を与えたのは `send_key` / `send_instruction` /
+    /// `switch_permission_mode` の3つ。**直に呼ぶ道を増やすと、そこだけがまた
+    /// 無音になる**——しかも「送ったのに効かない」という、いちばん理由の見えない形で。
+    ///
+    /// 到達可能性ではなく**綴りそのもの**を見るのは、`write_input` が公開の口で
+    /// あり続ける必要があるため（`crate::link` のブラウザの打鍵が通る）。
+    #[test]
+    fn 端末への書き込みは声を持つ口だけを通る() {
+        /// 許した綴り。**増やすときは、その口が失敗を残すことを確かめてから。**
+        const 許した綴り: &[&str] = &[
+            // 口そのもの
+            "pub fn write_input(&self, bytes: &[u8]) -> anyhow::Result<()> {",
+            "self.process.write_input(bytes)",
+            // 声を持つ3つの口。**綴りごと持つ**——`self.write_input(..)` だけを
+            // 見ると、`let _ =` で捨てる形が紛れ込んでも気づけない
+            "if let Err(err) = self.write_input(bytes) {", // send_key
+            "self.write_input(CYCLE_KEY)",                 // switch_permission_mode
+            "self.write_input(&body)?;",                   // send_instruction
+            "self.write_input(&submit)",                   // send_instruction
+        ];
+
+        // **試験の側は数えない。** この検査自身が許した綴りを並べているので、
+        // 切らないと自分の行を拾って必ず落ちる（台帳の走査と同じ規則）
+        let source = include_str!("mod.rs");
+        let 製品 = source
+            .find("\n#[cfg(test)]")
+            .map_or(source, |cut| &source[..cut]);
+
+        let はみ出し: Vec<&str> = 製品
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.contains("write_input("))
+            .filter(|line| !line.starts_with("//"))
+            .filter(|line| !許した綴り.contains(line))
+            .collect();
+
+        assert!(
+            はみ出し.is_empty(),
+            "端末への書き込みが、声を持たない口から出ています:\n{}\n\
+             `send_key` を通すか、失敗を残す口を新しく作って許した綴りへ足すこと",
+            はみ出し.join("\n")
+        );
+    }
 
     #[test]
     fn リングバッファは容量を超えたら古いバイトから捨てる() {

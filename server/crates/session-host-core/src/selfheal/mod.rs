@@ -979,8 +979,13 @@ async fn wait_ready(
             if TRUST_PROMPT_MARKERS.iter().any(|marker| {
                 screen.contains(&crate::session::permission::squeeze(marker).to_lowercase())
             }) {
-                tracing::info!("修復セッションのフォルダ信頼の確認に答えます");
-                let _ = session.write_input(b"\r");
+                tracing::info!(
+                    card_id = %session.card_id,
+                    "修復セッションのフォルダ信頼の確認に答えます"
+                );
+                // 設計§10-3 の表には無いが**同じ性質**。無人の修復セッションが確認に
+                // 答えられずに落ちる事故を実測しているので、ここも声を持たせる
+                session.send_key(b"\r", "フォルダ信頼の確認への回答");
                 answered_trust = true;
             }
         }

@@ -272,3 +272,25 @@ async fn 起こしたセッションは_toml_が名乗る名前を申告する()
     session.kill();
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// 子が居なくなっても端末への書き込みは失敗しない（実測）。
+///
+/// **この事実が、送出失敗（設計§10-3 の `send_key`）の回帰テストを置けない理由である。**
+/// master への書き込みは相手が居なくても通るので、warn を通す注入がこの経路には無い。
+///
+/// 声を持たない口から書けないことは、`session/mod.rs` の
+/// `端末への書き込みは声を持つ口だけを通る` が綴りで固定している。
+#[tokio::test]
+async fn 子が居なくなっても端末への書き込みは失敗しない() {
+    let manager = common::manager();
+    let (session, _watcher) = common::start_session(&manager).await;
+
+    session.kill();
+    common::wait_for_status(&session, SessionStatus::Ended { ok: true }).await;
+
+    assert!(
+        session.write_input(b"x").is_ok(),
+        "ここが Err になったなら、送出失敗の回帰テストが書けるようになったということ。\
+         そのときは send_key の warn を実測で押さえること"
+    );
+}
