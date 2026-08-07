@@ -37,7 +37,7 @@
 <p class="lead">
   AgentDashboard に関係して、この機械や外で<strong>起動しっぱなしになっているもの</strong>の一覧。
   「どの URL がどれを指しているか」を取り違えると原因追跡が丸ごと空振りするので、そこを中心に書いてある。
-  <br>最終更新：2026-08-06（4つとも 0.1.10）
+  <br>最終更新：2026-08-07（4つとも 0.1.10。ただし手元3台にはログ整備が入っていて、AWS には入っていない）
 </p>
 
 <h2>先に用語</h2>
@@ -118,7 +118,22 @@
   <code>git pull</code> と <code>make build</code> のたびに中身が変わる。
   一方 AWS は<strong>配った箱</strong>なので、<strong>リリースを出すまで何も変わらない</strong>。<br>
   いまは<strong>4つとも</strong> <code>0.1.10</code> で揃っている（ダッシュボード3台＋セッションホスト<span class="mark">▽</span>）が、手元で作業を進めれば<strong>すぐにずれる</strong>。
-  画面に出る版だけを見て「同じものが動いている」と判断しないこと。
+  画面に出る版だけを見て「同じものが動いている」と判断しないこと。<br>
+  <strong>いまがまさにその状態。</strong>手元3台はログ整備（ローカルイシュー「あらゆる経路のログを〜」の段1）が入った
+  ソースビルドで、AWS の箱には入っていない。<strong>版番号はどちらも <code>0.1.10</code>。</strong>
+</div>
+
+<div class="panel">
+  <strong>ログの置き場所。</strong>手元3台は <code>&lt;state_dir&gt;/logs/&lt;種別&gt;-&lt;pid&gt;.&lt;日付&gt;.jsonl</code> へ
+  1行1レコードの JSON で残す（7日・合計 512 MiB まで。起動時に古いものを掃く）。
+  <strong>端末へ出るぶんは今までどおり</strong> <code>RUST_LOG</code> で決まり、出力先は stderr。
+  <ul>
+    <li>実機 … <code>~/.local/state/agentdashboard-run/logs/</code></li>
+    <li>trial … <code>~/agentdashboard-trial/server/logs/</code></li>
+    <li>セッションホスト<span class="mark">▽</span> … <code>~/agentdashboard-agent/state/logs/</code></li>
+  </ul>
+  <code>~/agentdashboard-run.log</code> などの <code>run.log</code> は<strong>端末のぶん</strong>で、これまでどおり残る。
+  読む口（<code>agentdashboard logs</code>）は段2 で作るので、いまは <code>jq</code> で読む。
 </div>
 
 <h2>一覧</h2>
