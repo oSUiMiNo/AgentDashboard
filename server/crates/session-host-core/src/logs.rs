@@ -261,6 +261,7 @@ fn level_rank(level: &str) -> usize {
 
 /// 読み取った1行。**任意欄の型は決め打ちできない**（`%` は文字列、`count = 3` は数）ので
 /// [`serde_json::Value`] で受ける。
+#[derive(Clone)]
 struct Line {
     raw: String,
     ts: String,
@@ -571,6 +572,46 @@ fn offsets_of(sources: &[Source]) -> HashMap<PathBuf, u64> {
         .collect()
 }
 
+/// 中身をそのまま運ぶ欄。**`--sanitize` では中身を落として長さだけ残す。**
+///
+/// `tail`（端末の末尾400文字。§8-4 の材料）には、利用者が打った指示・開いている
+/// ファイル名・パスがそのまま写る。**名指しの規則でも形でも拾えない**ので、欄ごと
+/// 落とすしかない。実際、実CLI の失敗メッセージには利用者の表示名とメールアドレスが
+/// 写った TUI の画面が丸ごと出ていた。
+///
+/// 落としたことは長さで示す。**黙って消すと、元から何も無かったのか伏せたのかを
+/// 読む側が区別できない**——このイシューが敵にしている無言の欠落そのものになる。
+const VERBATIM_FIELDS: &[&str] = &["tail"];
+
+/// 本文をそのまま運ぶ欄の中身を落とす。`--sanitize` のときだけ通る。
+fn drop_verbatim(line: &Line) -> Line {
+    let mut line = line.clone();
+    let mut dropped = false;
+    for (name, value) in &mut line.extra {
+        if !VERBATIM_FIELDS.contains(&name.as_str()) {
+            continue;
+        }
+        let chars = value.as_str().map_or(0, |text| text.chars().count());
+        *value = serde_json::Value::String(format!("（{chars} 文字を伏せました）"));
+        dropped = true;
+    }
+    if dropped {
+        // `--json` は `raw` をそのまま流すので、そちらも同じ形へ直す。**片方だけ直すと、
+        // 人が読む形では伏せられているのに JSON では素通りする**という一番たちの悪い形になる
+        if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&line.raw)
+            && let Some(object) = value.as_object_mut()
+        {
+            for (name, replaced) in &line.extra {
+                if VERBATIM_FIELDS.contains(&name.as_str()) {
+                    object.insert(name.clone(), replaced.clone());
+                }
+            }
+            line.raw = value.to_string();
+        }
+    }
+    line
+}
+
 /// 1行を出す。相手が読むのをやめていたら `false`。
 fn emit(
     line: &Line,
@@ -578,6 +619,13 @@ fn emit(
     out: &mut impl Write,
     stats: &mut Stats,
 ) -> anyhow::Result<bool> {
+    let dropped;
+    let line = if query.rules.is_some() {
+        dropped = drop_verbatim(line);
+        &dropped
+    } else {
+        line
+    };
     let text = if query.json {
         line.raw.clone()
     } else {
@@ -810,6 +858,41 @@ mod tests {
             )
             .expect("読めること");
             assert!(render_human(&parsed).contains("（他 12 件を間引き）"));
+        }
+
+        fn 端末の末尾つき() -> Line {
+            parse_line(
+                r#"{"ts":"2026-08-07T12:00:00.000Z","level":"WARN","target":"a","proc":"dashboard","pid":7,"run_id":"r","msg":"フックが来ません","card_id":"c1","tail":"❯ 秘密の指示を書いた行"}"#,
+            )
+            .expect("読めること")
+        }
+
+        #[test]
+        fn 本文を運ぶ欄は中身を落として長さだけ残す() {
+            let dropped = drop_verbatim(&端末の末尾つき());
+            let text = render_human(&dropped);
+            assert!(!text.contains("秘密の指示"), "{text}");
+            // **黙って消さない。** 元から無かったのか伏せたのかを読む側が区別できる
+            assert!(text.contains("12 文字を伏せました"), "{text}");
+            // 他の欄は落とさない——`card_id` が消えると串刺しができなくなる
+            assert!(text.contains("card_id=c1"), "{text}");
+        }
+
+        #[test]
+        fn 生のjsonの側も同じ形へ直す() {
+            // 片方だけ直すと、人が読む形では伏せられているのに `--json` では素通りする
+            let dropped = drop_verbatim(&端末の末尾つき());
+            assert!(!dropped.raw.contains("秘密の指示"), "{}", dropped.raw);
+            assert!(dropped.raw.contains("文字を伏せました"), "{}", dropped.raw);
+        }
+
+        #[test]
+        fn 運ばない欄しか無い行は素通しする() {
+            let parsed = parse_line(
+                r#"{"ts":"2026-08-07T12:00:00.000Z","level":"INFO","target":"a","proc":"dashboard","pid":7,"run_id":"r","msg":"m","card_id":"c1"}"#,
+            )
+            .expect("読めること");
+            assert_eq!(drop_verbatim(&parsed).raw, parsed.raw);
         }
     }
 

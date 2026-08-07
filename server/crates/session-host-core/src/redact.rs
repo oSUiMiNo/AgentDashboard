@@ -36,11 +36,15 @@ const ACCOUNT_UUID_PLACEHOLDER: &str = "00000000-0000-0000-0000-0000000000ac";
 const ORG_UUID_PLACEHOLDER: &str = "00000000-0000-0000-0000-000000000009";
 const TOKEN_PLACEHOLDER: &str = "adp_redacted";
 
-/// 伏せる規則として採らない短さ。
+/// 伏せる規則として採らない短さ。**バイトではなく文字で数える。**
 ///
 /// **短い語を伏せると、無関係な場所が壊れる。** `HOME` が読めないとき
 /// [`crate::hostfs::home`] は `/` を返すので、その1文字を規則にすると**行のすべての
 /// 区切りが伏せ字になる**。利用者名が2文字のときも同じ性質を持つ。
+///
+/// バイトで数えると、この歯止めが**非 ASCII の名前に対してだけ効かなくなる**。
+/// 表示名が漢字2文字なら UTF-8 で6バイトあるので素通りし、本文が日本語のこの
+/// リポジトリでは無関係な行が伏せ字で割れる。実機のアカウントが実際にその形だった。
 const MIN_RULE_LEN: usize = 3;
 
 /// 伏せない宛先。ここを潰すと、説明用の例まで書き換わってしまう。
@@ -72,6 +76,7 @@ pub struct Rules {
     secrets: HashSet<String>,
     email: Regex,
     token: Regex,
+    url_host: Regex,
 }
 
 impl Rules {
@@ -140,6 +145,7 @@ impl Rules {
             secrets,
             email: email_pattern(),
             token: token_pattern(),
+            url_host: url_host_pattern(),
         }
     }
 
@@ -158,7 +164,17 @@ impl Rules {
                 }
             })
             .into_owned();
-        self.token.replace_all(&out, TOKEN_PLACEHOLDER).into_owned()
+        out = self.token.replace_all(&out, TOKEN_PLACEHOLDER).into_owned();
+        self.url_host
+            .replace_all(&out, |caps: &regex::Captures| {
+                let host = &caps[2];
+                if is_kept_host(host) {
+                    caps[0].to_string()
+                } else {
+                    format!("{}://{HOST_PLACEHOLDER}", &caps[1])
+                }
+            })
+            .into_owned()
     }
 
     /// 1回の走査で、当たった一番長い規則を当てる。
@@ -228,6 +244,13 @@ impl Rules {
         if self.token.is_match(&probe) {
             found.push("ペアリングトークンの形が残っています".to_string());
         }
+        if self
+            .url_host
+            .captures_iter(&probe)
+            .any(|caps| !is_kept_host(&caps[2]))
+        {
+            found.push("接続先のホスト名が残っています".to_string());
+        }
         found
     }
 
@@ -252,7 +275,7 @@ impl Rules {
 /// 使える規則なら積んで `true`。短すぎるもの・空のものは採らない。
 fn push_rule(pairs: &mut Vec<(String, String)>, old: &str, new: &str) -> bool {
     let old = old.trim();
-    if old.len() < MIN_RULE_LEN || old == "/" {
+    if old.chars().count() < MIN_RULE_LEN || old == "/" {
         return false;
     }
     pairs.push((old.to_string(), new.to_string()));
@@ -277,6 +300,48 @@ fn email_pattern() -> Regex {
 /// 「**ログや設定ファイルの中で『これは鍵だ』と分かるように**」付けているもの。
 fn token_pattern() -> Regex {
     Regex::new(r"adp_[A-Za-z0-9_\-]{16,}").expect("定数の正規表現")
+}
+
+/// URL のホスト部。
+///
+/// **接続先の FQDN は、名指しでも形でも拾えない。** 利用者が自前で立てたサーバの名前は
+/// こちらの環境のどこにも書いていないので、[`env_hostname`] にも `~/.claude.json` にも
+/// 現れない。実機のログでは `session_host_core::link` の「ダッシュボードサーバへ
+/// 接続しました: …」に素で出ていた。
+///
+/// 拾えるのは**位置**だけなので、URL の形で捕まえてホスト部だけを伏せる。
+///
+/// **大文字小文字を無視する指定は `(?i-u)` と書く。** `regex` は
+/// `default-features = false` で入れてある（配布物を軽く保つため。`server/Cargo.toml`）
+/// ので、`unicode-case` を持っていない。素の `(?i)` は
+/// 「Unicode-aware case insensitivity matching is not available」で**組み立てに失敗する**
+/// ——定数の正規表現なので、落ちるのは実行時（`expect` で panic）になる。
+/// `-u` を添えて ASCII の畳み込みに落とせば、機能を足さずに済む。
+fn url_host_pattern() -> Regex {
+    Regex::new(r"(?i-u)\b(https?|wss?)://([A-Za-z0-9._\-]+)").expect("定数の正規表現")
+}
+
+/// そのまま残してよいホストか。
+///
+/// **ループバックは伏せない。** 切り分けに要るのは「焼き込んだ先と受けている場所が
+/// 一致するか」で、`127.0.0.1:4173` の番号を潰すと材料としての価値が落ちる（§22-8 が
+/// 宛先の URL について同じ判断をしている）。説明用の例と、伏せ字そのものも残す。
+fn is_kept_host(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if host == HOST_PLACEHOLDER || host == "localhost" || host == "0.0.0.0" {
+        return true;
+    }
+    // IPv4 の素の並び。私設アドレスかどうかは見ない——LAN の番号は名前ではないので、
+    // 伏せても守るものが無く、待ち受けの切り分けだけが難しくなる
+    if host
+        .split('.')
+        .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
+    {
+        return true;
+    }
+    EXAMPLE_DOMAINS
+        .iter()
+        .any(|allowed| host == *allowed || host.ends_with(&format!(".{allowed}")))
 }
 
 fn env_user(home: &Path) -> Option<String> {
@@ -414,6 +479,69 @@ mod tests {
         let rules = Rules::from_parts("/", Some("ab"), None, &Account::default());
         assert!(rules.is_empty());
         assert_eq!(rules.apply("/a/b/c"), "/a/b/c");
+    }
+
+    #[test]
+    fn 短さは文字で数える() {
+        // **バイトで数えると、この歯止めが非 ASCII にだけ効かない。** 漢字2文字は
+        // UTF-8 で6バイトあるので素通りし、日本語の本文が伏せ字で割れる。
+        // 実機のアカウントの表示名が実際にこの形だった
+        let account = Account {
+            display_name: Some("太郎".to_string()),
+            ..Account::default()
+        };
+        let rules = Rules::from_parts("/", None, None, &account);
+        assert!(rules.is_empty(), "2文字の表示名が規則になっている");
+        assert_eq!(
+            rules.apply("太郎さんが起こしました"),
+            "太郎さんが起こしました"
+        );
+    }
+
+    #[test]
+    fn 接続先のホスト名を伏せる() {
+        // 自前で立てたサーバの名前は、こちらの環境のどこにも書いていない。
+        // 名指しでも形（メール・トークン）でも拾えないので、URL の位置で捕まえる
+        let out = rules().apply("ダッシュボードサーバへ接続しました: https://dash.example-real.jp");
+        assert!(out.contains(HOST_PLACEHOLDER), "{out}");
+        assert!(!out.contains("dash.example-real.jp"), "{out}");
+        assert!(
+            out.starts_with("ダッシュボードサーバへ接続しました: https://"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn ループバックと番号は残す() {
+        // **切り分けに要るのはポート番号。** 焼き込んだ先と受けている場所が
+        // 一致するかを見るので、ここを潰すと材料としての価値が落ちる（§22-8）
+        let rules = rules();
+        for text in [
+            "http://127.0.0.1:8787",
+            "ws://localhost:4173/ws",
+            "http://192.168.1.20:8788",
+        ] {
+            assert_eq!(rules.apply(text), text, "{text}");
+        }
+    }
+
+    #[test]
+    fn 大文字の綴りでも伏せる() {
+        // `(?i-u)` が効いていることを見る。ここが `(?i)` だと**組み立ての時点で
+        // panic する**ので、このテストは「大文字も拾える」と「そもそも組める」の
+        // 両方を押さえている
+        let out = rules().apply("HTTPS://Dash.Example-Real.JP へ繋いだ");
+        assert!(out.contains(HOST_PLACEHOLDER), "{out}");
+        assert!(!out.contains("Example-Real"), "{out}");
+    }
+
+    #[test]
+    fn 残存検査は接続先のホスト名も見る() {
+        let leaks = rules().residue("接続先: https://dash.example-real.jp");
+        assert!(
+            leaks.iter().any(|leak| leak.contains("ホスト名")),
+            "{leaks:?}"
+        );
     }
 
     #[test]
