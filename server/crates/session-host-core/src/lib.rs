@@ -33,6 +33,7 @@ pub mod model_post;
 pub mod offsets;
 pub mod parser;
 pub mod proc;
+pub mod redact;
 pub mod selfheal;
 pub mod session;
 pub mod settings;

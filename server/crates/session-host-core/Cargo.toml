@@ -22,6 +22,11 @@ anyhow.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 tokio.workspace = true
+# ログを読む口（`agentdashboard logs` / `agentdashboard-agent logs`）の引数の型を
+# ここへ置くため（ログ設計§11-3）。**両方の CLI が同じ定義を呼ぶ**ので、10個の
+# フラグが2箇所へ写らない。`core` と `session-host` は既に引いているので、
+# 配布バイナリに新しいクレートは1つも増えない
+clap.workspace = true
 # フックの受信口（`POST /hook/...` と `POST /model/...`）を出すために使う。
 # ブラウザ向けの WebSocket は server-core の担当で、こちらには入れない。
 axum.workspace = true
@@ -35,6 +40,9 @@ tracing-appender.workspace = true
 # ログの1行の `ts`（RFC3339・ミリ秒・UTC）を組むため。tracing-appender が既に
 # 引き込むので、コンパイル対象は増えない
 time.workspace = true
+# ログを読む口の `--grep` と、伏せる口のメール・トークンの形（ログ設計§14-2）。
+# 伏せる規則をソースへ書き並べない代わりに、**形で捕まえる**のに要る
+regex.workspace = true
 # ダッシュボードサーバへの常時接続（A2S。セルフホスト化設計§4-1）。**接続は常に
 # PC 側から張る**ので、クライアントを持つのはこのクレートだけ
 tokio-tungstenite.workspace = true

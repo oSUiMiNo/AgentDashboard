@@ -131,6 +131,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 #
 # 配布バイナリへの増分は +254 KiB（+3.6%。ログ設計§19-7 で実測）。
 tracing-appender = "0.2"
+# ログを読む口の `--grep` と、外へ貼るときに伏せる口（`--sanitize`）が使う
+# （ログ設計§11-1・§14-2）。**`unicode` を切ってある**——日本語の literal 一致には
+# 要らず、文字クラスのテーブルだけが重いため。
+#
+# 中身の大半（`regex-automata` / `regex-syntax` / `aho-corasick`）は
+# `tracing-subscriber` の `env-filter` 経由で**既に配布バイナリへ入っている**ので、
+# 増えるのは外皮だけ。増分は実測してログ設計へ記録する。
+regex = { version = "1", default-features = false, features = ["std"] }
 
 [profile.release]
 lto = "thin"
