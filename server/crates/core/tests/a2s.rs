@@ -1338,6 +1338,95 @@ async fn 識別子の合わない答えは捨てられる() {
     );
 }
 
+/// `mark` から後で、この相関キーを持つ行。
+fn 声(mark: usize, 欄: &str, 値: &str) -> Vec<serde_json::Value> {
+    session_host_core::logging::capture::sink().matching(mark, 欄, 値)
+}
+
+#[tokio::test]
+async fn 打ち切られた要求へ遅れて届いた答えは黙って消えない() {
+    // 待ち手が消えたあとに届いた答えは、いままで無音で消えていた。画面には既に
+    // 「PC が応じません」が出ているので、**本当に届かなかった**のか
+    // **間に合わなかっただけ**なのかを、後から読んで区別できない（設計§10-3）
+    let a2s = A2s::start("hostfs-late-voice").await;
+    let sink = session_host_core::logging::capture::sink();
+    let mark = sink.mark();
+
+    let id = protocol::a2s::RequestId::new();
+    // 待ち口を開けてから受け手を落とす＝時間切れで諦めた形
+    drop(a2s.hub.expect_reply(id));
+
+    let back = a2s.hub.resolve_reply(
+        id,
+        protocol::a2s::HostReply::Failed {
+            reason: protocol::a2s::HostFailure::NotFound,
+            detail: "遅れて届いた".to_string(),
+        },
+    );
+    assert!(
+        back.is_some(),
+        "渡せなかったので返ってくること（**制御の流れは変えない**）"
+    );
+
+    let lines = 声(mark, "request_id", &id.to_string());
+    assert_eq!(lines.len(), 1, "1行だけ出ること: {lines:#?}");
+    assert_eq!(lines[0]["level"], "WARN");
+    // 中身は載せず種別だけ（設計§9-1。一覧 512 KiB・中身 256 KiB）
+    assert_eq!(lines[0]["kind"], "failed");
+}
+
+#[tokio::test]
+async fn 自分宛てでない答えは_debug_に留まる() {
+    // **このチャネルはアカウント単位なので、問うていないインスタンスにも毎回届く。**
+    // ここを warn にすると鳴り続けて読まれなくなる（設計§10-1）。
+    // 過剰に鳴らす実装なら落ちる向きのテストで、§10-3 の判断を機械で固定できるのはここだけ
+    let a2s = A2s::start("hostfs-stray-voice").await;
+    let sink = session_host_core::logging::capture::sink();
+    let mark = sink.mark();
+
+    let stray = protocol::a2s::RequestId::new();
+    let back = a2s.hub.resolve_reply(
+        stray,
+        protocol::a2s::HostReply::Failed {
+            reason: protocol::a2s::HostFailure::NotFound,
+            detail: "誰も待っていない".to_string(),
+        },
+    );
+    assert!(back.is_some());
+
+    let lines = 声(mark, "request_id", &stray.to_string());
+    assert_eq!(lines.len(), 1, "{lines:#?}");
+    assert_eq!(
+        lines[0]["level"], "DEBUG",
+        "毎回起きる経路を warn にしてはいけない"
+    );
+}
+
+#[tokio::test]
+async fn 大きさ変更を伝えられないときは理由が残る() {
+    // `relay` は届かない理由を返すのに、呼び出し側が捨てていた（設計§10-3）。
+    // **同じ経路に `tell_agent`（画面の送出開始・停止）も乗っている。**
+    let a2s = A2s::start("resize-voice").await;
+    let sink = session_host_core::logging::capture::sink();
+    let mark = sink.mark();
+
+    // 記録に無いカード＝どのインスタンスも持っていない
+    let unknown = CardId::new();
+    a2s.browser.resize(unknown, 80, 24);
+
+    let lines = 声(mark, "card_id", &unknown.to_string());
+    assert_eq!(lines.len(), 1, "{lines:#?}");
+    assert_eq!(lines[0]["level"], "WARN");
+    // **数値は欄に置く。** 本文へ埋めると間引きの鍵が散り、窓を掴んで動かすあいだ
+    // 1行ずつ増える（設計§6-3）
+    assert_eq!(lines[0]["cols"], 80);
+    assert_eq!(lines[0]["rows"], 24);
+    assert!(
+        lines[0]["reason"].as_str().is_some_and(|r| !r.is_empty()),
+        "届かない理由が載ること: {lines:#?}"
+    );
+}
+
 #[tokio::test]
 async fn 打ち切ったあとに届いた答えは待ち行列に溜まらない() {
     // 消し忘れると、遅れて届いた答えが誰にも渡らないまま積み上がる（設計§7）。

@@ -269,7 +269,10 @@ impl SessionHostHub {
     }
 
     /// 答えを待つ口を1つ開ける（設計§7）。
-    fn expect_reply(&self, request_id: RequestId) -> oneshot::Receiver<HostReply> {
+    ///
+    /// `resolve_reply` / `forget_reply` と対になる口。**片方だけ閉じていると、
+    /// 「打ち切られた要求へ遅れて届いた答え」をテストから作れない。**
+    pub fn expect_reply(&self, request_id: RequestId) -> oneshot::Receiver<HostReply> {
         let (tx, rx) = oneshot::channel();
         self.pending
             .lock()
@@ -294,6 +297,16 @@ impl SessionHostHub {
     /// 渡せたかどうかを真偽で返すと、**呼び出し側は流す道のために複製を持たされる**。
     /// 答えは一覧なら 512 KiB・中身なら 256 KiB を抱えていて、しかも複製が要るのは
     /// 流す場合だけ——1階層辿るたびに、使わない写しを作ることになっていた。
+    ///
+    /// # 声を上げるのはここ（設計§10-3）
+    ///
+    /// `Some(..)` が返る意味は**2つある**——**時間切れで待ち手が消えた**（答えが宙に
+    /// 消えた）と、**自分宛てではない**（捨てて正しい）。呼び出し側からはこの2つが
+    /// 区別できないので、**区別できるこの場所で言う**。
+    ///
+    /// 呼び出し側（`cluster.rs` / `deliver_reply`）へ運んでから作り直すと、
+    /// §13 が新しい呼び出し側を足したときにまた無音になる。**返り値の型を割らない**のは
+    /// §10-2 の「制御の流れは1バイトも変えない」を守るため。
     pub fn resolve_reply(&self, request_id: RequestId, reply: HostReply) -> Option<HostReply> {
         let waiting = self
             .pending
@@ -302,8 +315,30 @@ impl SessionHostHub {
             .remove(&request_id);
         match waiting {
             // 受け取る側が既に諦めている（時間切れ）ことはある。そのときも戻ってくる
-            Some(tx) => tx.send(reply).err(),
-            None => Some(reply),
+            Some(tx) => {
+                let back = tx.send(reply).err();
+                if let Some(reply) = &back {
+                    // **待っていた本人が消えたあとに届いた答え。** 画面には既に
+                    // 「PC が応じません」が出ている。ここが無音だと、**本当に届かなかった**のか
+                    // **間に合わなかっただけ**なのかを、後から読んで区別できない
+                    tracing::warn!(
+                        %request_id,
+                        kind = reply_kind(reply),
+                        "答えが届きましたが、待っていた要求は既に打ち切られていました"
+                    );
+                }
+                back
+            }
+            None => {
+                // 自分が問うたものではない。**チャネルはアカウント単位なので毎回起きる**
+                // ——ここを warn にすると鳴り続けて読まれなくなる（設計§10-1）
+                tracing::debug!(
+                    %request_id,
+                    kind = reply_kind(&reply),
+                    "自分が待っていない答えでした（呼び出し側の判断へ返します）"
+                );
+                Some(reply)
+            }
         }
     }
 
@@ -720,11 +755,26 @@ impl SessionHostHub {
             .get(card_id)
             .and_then(|record| record.meta().agent_id)
         {
-            let _ = self.relay_across(agent_id, SessionHostCommand::Message(Box::new(message)));
+            // 何を伝えられなかったかは、回す**前に**控える（`message` は箱へ入って渡る）
+            let what = screen_request_label(&message);
+            if let Err(reason) =
+                self.relay_across(agent_id, SessionHostCommand::Message(Box::new(message)))
+            {
+                // `relay_across` は「黙って落とさない」ために理由を返す作りだが、
+                // ここには画面へ出す先が無い。**捨てるならログへ移す**（設計§10-3）
+                tracing::warn!(
+                    %card_id,
+                    %agent_id,
+                    %reason,
+                    "{what}を別インスタンス経由で伝えられません"
+                );
+            }
         }
     }
 
     /// 「いま送らせているカード」を覚える（掃除の対象を絞るため）。
+    ///
+    /// 中継に失敗したときの見出しは [`screen_request_label`] が作る。
     fn note_streaming(&self, message: &ServerToAgent) {
         let mut streaming = self.streaming.lock().expect("ロックが壊れていない");
         match message {
@@ -1001,6 +1051,30 @@ impl RemoteSessionHost {
     }
 }
 
+/// 答えの種別だけ。**中身は載せない**（一覧 512 KiB・中身 256 KiB。設計§9-1）。
+///
+/// **型の名前を本文へ書かない。** §13-3 が `HostFsError` を `HostAskError` へ
+/// 改名するので、書くと改名で本文が腐る。
+fn reply_kind(reply: &HostReply) -> &'static str {
+    match reply {
+        HostReply::Dir(_) => "dir",
+        HostReply::File(_) => "file",
+        HostReply::Failed { .. } => "failed",
+    }
+}
+
+/// 中継に失敗したときに「何を伝えられなかったか」を言うための見出し（設計§10-3）。
+///
+/// **本文へ埋めるのは、値の種類が数個に限られるものだけ。** ここを可変にすると
+/// 間引き（設計§6-3）の鍵が散る。数値は欄へ置く（`resize` がそうしている）。
+fn screen_request_label(message: &ServerToAgent) -> &'static str {
+    match message {
+        ServerToAgent::SubScreen { .. } => "画面の送出開始",
+        ServerToAgent::UnsubScreen { .. } => "画面の送出停止",
+        _ => "画面の指示",
+    }
+}
+
 /// そのカードを持つ PC が居ないときの説明。
 const NOT_CONNECTED: &str = "セッションが見つかりません（PC が繋がっていません）";
 
@@ -1144,14 +1218,24 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
     }
 
     fn resize(&self, card_id: CardId, cols: u16, rows: u16) {
-        let _ = self.relay(
+        if let Err(reason) = self.relay(
             card_id,
             ServerToAgent::Resize {
                 card_id,
                 cols,
                 rows,
             },
-        );
+        ) {
+            // **数値は欄に置き、本文へ埋め込まない。** 本文の先頭24文字が変わると
+            // 間引き（設計§6-3）が効かず、窓を掴んで動かすあいだ1行ずつ増える
+            tracing::warn!(
+                %card_id,
+                cols,
+                rows,
+                %reason,
+                "端末の大きさ変更を PC へ伝えられません"
+            );
+        }
     }
 
     /// フロー制御はローカルの生バイト配信の仕組み（初期実装§10）。
