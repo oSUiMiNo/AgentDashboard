@@ -419,6 +419,83 @@ async fn 認められないトークンでは繋がらない() {
     let _ = liar.wait();
 }
 
+#[tokio::test]
+async fn セルフホストではサーバと_pc_が別々のログを持つ() {
+    // ログ設計§1-1。**ローカルモードとの違いはここにしか出ない**——あちらは同居する
+    // ので `dashboard-*` 1本に混ざるが、こちらは別の機械にある前提なので混ざらない。
+    // 混ざったら、それは片方の置き場所がもう片方を指しているということで、
+    // 「どちらの機械で起きたか」が読めなくなる
+    let pair = Pair::start("logs").await;
+
+    let サーバ = ログの顔ぶれ(&pair.dir.join("state"));
+    let pc = ログの顔ぶれ(&pair.dir.join("agent-state"));
+
+    assert!(
+        サーバ.iter().any(|name| name.starts_with("dashboard-")),
+        "サーバのログが無い: {サーバ:?}"
+    );
+    assert!(
+        !サーバ.iter().any(|name| name.starts_with("session-host-")),
+        "サーバの置き場所に PC のログが混ざっている: {サーバ:?}"
+    );
+    assert!(
+        pc.iter().any(|name| name.starts_with("session-host-")),
+        "PC のログが無い: {pc:?}"
+    );
+    assert!(
+        !pc.iter().any(|name| name.starts_with("dashboard-")),
+        "PC の置き場所にサーバのログが混ざっている: {pc:?}"
+    );
+
+    // 名前だけでなく中身も確かめる。**ファイル名は書き手の申告**なので、
+    // それだけを見ていると「名前は合っているが中身が逆」を見逃す
+    assert_eq!(欄の顔ぶれ(&pair.dir.join("state"), "proc"), ["dashboard"]);
+    assert_eq!(
+        欄の顔ぶれ(&pair.dir.join("agent-state"), "proc"),
+        ["session-host"]
+    );
+}
+
+/// `<state_dir>/logs/` にあるファイル名。
+fn ログの顔ぶれ(state_dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(state_dir.join("logs"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.ends_with(".jsonl"))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// `<state_dir>/logs/` の全行から、ある欄に現れた値の顔ぶれ（重複なし）。
+fn 欄の顔ぶれ(state_dir: &Path, field: &str) -> Vec<String> {
+    let mut values: Vec<String> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(state_dir.join("logs")) else {
+        return values;
+    };
+    for entry in entries.flatten() {
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if let Some(found) = value.get(field).and_then(serde_json::Value::as_str)
+                && !values.iter().any(|seen| seen == found)
+            {
+                values.push(found.to_string());
+            }
+        }
+    }
+    values.sort();
+    values
+}
+
 /// 条件が満たされるまで待つ。
 ///
 /// `Pair` のメソッドにしていないのは、**待つ間ずっと `Pair` を借りたままにしない**ため。
