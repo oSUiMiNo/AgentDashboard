@@ -1076,11 +1076,34 @@ fn write_pointer(state_dir: &Path, path: Option<&Path>) {
     let pointer = state_dir.join(crate::parser::PARSER_POINTER);
     match path {
         Some(path) => {
-            let _ = std::fs::create_dir_all(state_dir);
-            let _ = std::fs::write(&pointer, path.to_string_lossy().as_bytes());
+            if let Err(err) = std::fs::create_dir_all(state_dir) {
+                tracing::warn!(
+                    dir = %state_dir.display(),
+                    %err,
+                    "パーサのポインタの置き場所を作れません"
+                );
+            }
+            if let Err(err) = std::fs::write(&pointer, path.to_string_lossy().as_bytes()) {
+                tracing::warn!(
+                    pointer = %pointer.display(),
+                    target = %path.display(),
+                    %err,
+                    "パーサのポインタを書けません。修復しても古いパーサを使い続けます"
+                );
+            }
         }
         None => {
-            let _ = std::fs::remove_file(&pointer);
+            // 版のポインタ（`crate::version::write_pointer`）と同じ扱い。
+            // **もともと無いのは正常**なので、そこでは黙る
+            if let Err(err) = std::fs::remove_file(&pointer)
+                && err.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(
+                    pointer = %pointer.display(),
+                    %err,
+                    "パーサのポインタを消せません。差し替えたパーサを使い続けます"
+                );
+            }
         }
     }
 }
@@ -1105,6 +1128,63 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// パーサのポインタも声を持つこと（設計§10-3）。
+    ///
+    /// 版のポインタ（`crate::version`）と**同じ形**にしてある。片方だけ腐らないよう、
+    /// 台帳（設計§10-5）でも対にして持つ。
+    mod ポインタが声を持つ {
+        use super::*;
+        use crate::logging::capture;
+
+        fn 行(mark: usize, 含む: &str) -> Vec<serde_json::Value> {
+            capture::sink()
+                .since(mark)
+                .into_iter()
+                .filter(|line| {
+                    line.get("msg")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|msg| msg.contains(含む))
+                })
+                .collect()
+        }
+
+        #[test]
+        fn 書けないときは理由が残る() {
+            let blocked = temp_dir("parser-pointer-blocked").join("塞ぎ");
+            std::fs::write(&blocked, "邪魔").unwrap();
+
+            let sink = capture::sink();
+            let mark = sink.mark();
+            write_pointer(&blocked, Some(Path::new("/bin/true")));
+
+            assert_eq!(行(mark, "パーサのポインタの置き場所を作れません").len(), 1);
+            let 書けない = 行(mark, "パーサのポインタを書けません");
+            assert_eq!(書けない.len(), 1, "{書けない:#?}");
+            assert_eq!(書けない[0]["level"], "WARN");
+        }
+
+        #[test]
+        fn もともと無いときは黙る() {
+            let dir = temp_dir("parser-pointer-absent");
+            let sink = capture::sink();
+            let mark = sink.mark();
+            write_pointer(&dir, None);
+            assert!(行(mark, "パーサのポインタを消せません").is_empty());
+        }
+
+        #[test]
+        fn 消せないときは理由が残る() {
+            let dir = temp_dir("parser-pointer-undeletable");
+            std::fs::create_dir_all(dir.join(crate::parser::PARSER_POINTER)).unwrap();
+
+            let sink = capture::sink();
+            let mark = sink.mark();
+            write_pointer(&dir, None);
+
+            assert_eq!(行(mark, "パーサのポインタを消せません").len(), 1);
+        }
     }
 
     #[test]

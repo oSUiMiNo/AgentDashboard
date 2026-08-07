@@ -192,11 +192,34 @@ pub fn write_pointer(state_dir: &Path, path: Option<&Path>) {
     let pointer = pointer_path(state_dir);
     match path {
         Some(path) => {
-            let _ = std::fs::create_dir_all(state_dir);
-            let _ = std::fs::write(&pointer, path.to_string_lossy().as_bytes());
+            if let Err(err) = std::fs::create_dir_all(state_dir) {
+                tracing::warn!(
+                    dir = %state_dir.display(),
+                    %err,
+                    "版のポインタの置き場所を作れません"
+                );
+            }
+            if let Err(err) = std::fs::write(&pointer, path.to_string_lossy().as_bytes()) {
+                tracing::warn!(
+                    pointer = %pointer.display(),
+                    target = %path.display(),
+                    %err,
+                    "版のポインタを書けません。次に起こしても切り替わりません"
+                );
+            }
         }
         None => {
-            let _ = std::fs::remove_file(&pointer);
+            // **もともと無いのは正常な呼ばれ方**（切り替えていない利用者の解除）なので
+            // そこでは黙る。素で言うと、起こすたびに鳴って読まれなくなる
+            if let Err(err) = std::fs::remove_file(&pointer)
+                && err.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(
+                    pointer = %pointer.display(),
+                    %err,
+                    "版のポインタを消せません。次に起こすと、外したはずの版へ戻ります"
+                );
+            }
         }
     }
 }
@@ -985,6 +1008,69 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// ポインタの書き込みが声を持つこと（設計§10-3）。
+    ///
+    /// **無音だと「更新したのに次に起こしても切り替わらない」の理由がどこにも残らない。**
+    mod ポインタが声を持つ {
+        use super::*;
+        use crate::logging::capture;
+
+        fn 行(mark: usize, 含む: &str) -> Vec<serde_json::Value> {
+            capture::sink()
+                .since(mark)
+                .into_iter()
+                .filter(|line| {
+                    line.get("msg")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|msg| msg.contains(含む))
+                })
+                .collect()
+        }
+
+        #[test]
+        fn 書けないときは置き場所と書き込みの両方が残る() {
+            // 置き場所の位置にファイルを置く。**読み取り専用ディレクトリは使わない**
+            // ——CI が root だと効かない
+            let blocked = temp_dir("pointer-blocked").join("塞ぎ");
+            std::fs::write(&blocked, "邪魔").unwrap();
+
+            let sink = capture::sink();
+            let mark = sink.mark();
+            write_pointer(&blocked, Some(Path::new("/bin/true")));
+
+            assert_eq!(行(mark, "版のポインタの置き場所を作れません").len(), 1);
+            let 書けない = 行(mark, "版のポインタを書けません");
+            assert_eq!(書けない.len(), 1, "{書けない:#?}");
+            assert_eq!(書けない[0]["level"], "WARN");
+        }
+
+        #[test]
+        fn もともと無いときは黙る() {
+            // 切り替えていない利用者の解除は正常な道。ここで鳴ると起こすたびに増える
+            let dir = temp_dir("pointer-absent");
+            let sink = capture::sink();
+            let mark = sink.mark();
+            write_pointer(&dir, None);
+            assert!(
+                行(mark, "版のポインタを消せません").is_empty(),
+                "初回の解除で鳴ってはいけない"
+            );
+        }
+
+        #[test]
+        fn 消せないときは理由が残る() {
+            let dir = temp_dir("pointer-undeletable");
+            // ポインタの位置をディレクトリで塞ぐ
+            std::fs::create_dir_all(pointer_path(&dir)).unwrap();
+
+            let sink = capture::sink();
+            let mark = sink.mark();
+            write_pointer(&dir, None);
+
+            assert_eq!(行(mark, "版のポインタを消せません").len(), 1);
+        }
     }
 
     fn touch(path: &Path) {
