@@ -89,3 +89,18 @@ selfheal_cooldown_hours = 24
 # 再開位置・自己修復の対応表・差し替えたパーサを置く場所。
 # 未指定なら $XDG_STATE_HOME/agentdashboard（無ければ ~/.local/state/agentdashboard）
 # state_dir = "/home/you/.local/state/agentdashboard"
+
+# --- ログ ---------------------------------------------------------------------
+
+# ログは <state_dir>/logs/ に JSON Lines（1行1レコード）で残る。
+# 1行が1レコードなので jq で読める。
+
+# ここより古いログを起動時に消す（日）
+log_retention_days = 7
+
+# logs/ の**合計**の上限（バイト）。1ファイルの上限ではない。
+# 超えていたら古い順に消す。既定は 512 MiB
+log_max_bytes = 536870912
+
+# ファイルへ残すレベル。**端末に出る量はこれではなく RUST_LOG で決まる**
+log_file_level = "debug"

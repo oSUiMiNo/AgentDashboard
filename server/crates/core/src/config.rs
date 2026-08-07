@@ -72,6 +72,9 @@ pub struct Config {
     pub inject_status_line: bool,
     pub claude_settings_path: Option<PathBuf>,
     pub status_line_refresh_secs: u64,
+    pub log_retention_days: u64,
+    pub log_max_bytes: u64,
+    pub log_file_level: String,
 }
 
 impl Default for Config {
@@ -106,6 +109,9 @@ impl Default for Config {
             inject_status_line: agent.inject_status_line,
             claude_settings_path: agent.claude_settings_path,
             status_line_refresh_secs: agent.status_line_refresh_secs,
+            log_retention_days: agent.log_retention_days,
+            log_max_bytes: agent.log_max_bytes,
+            log_file_level: agent.log_file_level,
         }
     }
 }
@@ -224,6 +230,9 @@ impl Config {
             inject_status_line: self.inject_status_line,
             status_line_refresh_secs: self.status_line_refresh_secs,
             hook_port: self.port,
+            log_retention_days: self.log_retention_days,
+            log_max_bytes: self.log_max_bytes,
+            log_file_level: self.log_file_level.clone(),
             // 接続の3つは `agent.toml` にだけ意味がある（セルフホスト化設計§21 読み替え8）。
             // ローカルモードは同じプロセスに同居していて、繋ぐ相手が自分自身になる
             server_url: None,
@@ -319,6 +328,20 @@ impl Config {
                 "lan_session_ttl_hours は 1 以上である必要があります".to_string(),
             ));
         }
+        // 0 だと今日書いたぶんまで「古い」扱いになり、起動のたびに直前のログを消す
+        if self.log_retention_days == 0 {
+            return Err(ConfigError::Invalid(
+                "log_retention_days は 1 以上である必要があります".to_string(),
+            ));
+        }
+        // 0 だと掃除が毎回すべてを消しにいく
+        if self.log_max_bytes == 0 {
+            return Err(ConfigError::Invalid(
+                "log_max_bytes は 1 以上である必要があります".to_string(),
+            ));
+        }
+        // `log_file_level` はここで断らない。読めない綴りは logging 側が `debug` へ
+        // 落として**そのことをログに残す**（黙って落ちるのがこのイシューの敵）
         Ok(())
     }
 }
@@ -519,6 +542,9 @@ mod tests {
             inject_status_line = false
             claude_settings_path = "/tmp/settings.json"
             status_line_refresh_secs = 5
+            log_retention_days = 3
+            log_max_bytes = 4096
+            log_file_level = "trace"
             "#,
         )
         .unwrap();
@@ -542,6 +568,9 @@ mod tests {
         );
         assert!(!agent.inject_status_line);
         assert_eq!(agent.status_line_refresh_secs, 5);
+        assert_eq!(agent.log_retention_days, 3);
+        assert_eq!(agent.log_max_bytes, 4096);
+        assert_eq!(agent.log_file_level, "trace");
 
         let server = config.server();
         assert_eq!(server.port, 9001);

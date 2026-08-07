@@ -124,6 +124,16 @@ const DEFAULT_STATUS_LINE_REFRESH_SECS: u64 = 3;
 /// という分かりにくい失敗になる。ローカルモードでは束ねる層がブラウザの待ち受けと
 /// 同じ値を入れる（同居しているため）。
 const DEFAULT_HOOK_PORT: u16 = 0;
+/// ログを残す日数（ログ設計§7-1）。
+const DEFAULT_LOG_RETENTION_DAYS: u64 = 7;
+/// `logs/` の**合計**の上限（ログ設計§7-1）。512 MiB。
+///
+/// 時間軸だけでは暴走を止められない。画面フレーム1枚ごとに警告を出しうる経路が
+/// 既にあり、12セッション61fps なら毎秒732行——日次ローテーションは日が変わるまで
+/// ファイルを閉じないので、そこまで止まらない。
+const DEFAULT_LOG_MAX_BYTES: u64 = 512 * 1024 * 1024;
+/// ファイル層のレベル（ログ設計§7-1）。**端末層は `RUST_LOG`。**
+pub(crate) const DEFAULT_LOG_FILE_LEVEL: &str = "debug";
 
 /// 設定の既定ファイル名（セッションホスト単体で動くとき）。
 pub const DEFAULT_AGENT_FILE_NAME: &str = "agent.toml";
@@ -238,6 +248,20 @@ pub struct SessionHostConfig {
     /// **既定は 0＝動的確保**（設計§5-3）。固定の番号を既定にすると、その番号が
     /// 塞がっている PC で「フックが届かない」という分かりにくい失敗になる。
     pub hook_port: u16,
+    /// ログを残す日数（ログ設計§6-2）。これより古いファイルは起動時に消える。
+    pub log_retention_days: u64,
+    /// `logs/` の**合計**の上限（バイト）。**1ファイルの上限ではない。**
+    ///
+    /// 超えていたら古い順に消す（ログ設計§6-2）。時間軸だけでは、フレーム1枚ごとに
+    /// 警告が出る条件が続いたときに1日で数十ギガバイトになりうる。
+    pub log_max_bytes: u64,
+    /// ファイル層のレベル（ログ設計§4-3）。
+    ///
+    /// **端末層はこれを見ない**——あちらは `RUST_LOG` に従う。`RUST_LOG` は1本しか
+    /// 無いので、分けておかないと「詳しく出したくて `RUST_LOG=debug` にしたら端末が
+    /// 読めなくなった」になる。読めない綴りを書いた場合は `debug` として扱い、
+    /// **そのことをログに残す**。
+    pub log_file_level: String,
     /// 繋ぎに行くダッシュボードサーバ（`http://host:port`）。
     ///
     /// **`agent.toml` にだけ意味がある。** ローカルモードは同じプロセスに同居しており、
@@ -271,6 +295,9 @@ impl Default for SessionHostConfig {
             inject_status_line: true,
             status_line_refresh_secs: DEFAULT_STATUS_LINE_REFRESH_SECS,
             hook_port: DEFAULT_HOOK_PORT,
+            log_retention_days: DEFAULT_LOG_RETENTION_DAYS,
+            log_max_bytes: DEFAULT_LOG_MAX_BYTES,
+            log_file_level: DEFAULT_LOG_FILE_LEVEL.to_string(),
             server_url: None,
             pairing_token: None,
             agent_name: None,

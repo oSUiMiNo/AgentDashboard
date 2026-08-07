@@ -344,6 +344,9 @@ rm   ~/.local/state/agentdashboard/version-current   # 入れる側が置いた�
 | `selfheal_cooldown_hours` | `24` | 同じ版へ再挑戦するまでの間隔 |
 | `selfheal_repo_dir` | 自動探索 | ダッシュボード自身のソース。未指定ならカレントから上へ辿って探す |
 | `state_dir` | `~/.local/state/agentdashboard` | 再開位置・自己修復の対応表・差し替えたパーサの置き場所 |
+| `log_retention_days` | `7` | ログを残す日数。これより古いものは起動時に消える |
+| `log_max_bytes` | `536870912`（512 MiB） | `<state_dir>/logs/` の**合計**の上限（バイト）。1ファイルの上限ではない。超えていたら古い順に消す |
+| `log_file_level` | `"debug"` | ファイルへ残すレベル。**端末に出る量はこれではなく `RUST_LOG` で決まる** |
 
 解決後の値は `agentdashboard config` で確認できる。
 
