@@ -119,12 +119,18 @@ redis = { version = "1.5", default-features = false, features = [
 # 依存を「使うフェーズまで入れない」方針どおり、通常依存への昇格もそのときに行う。
 vt100 = "0.16"
 notify = "8"
-# トランスクリプトの ISO8601 タイムスタンプを epoch ミリ秒へ直すためだけに使う。
-# 自前で暦の計算を書くと閏年やうるう秒の周りで静かに間違え、画面の「N分前」が
-# ずれる形でしか気づけない。transcript-parser だけが依存する。
+# 暦の計算。トランスクリプトの ISO8601 タイムスタンプを epoch ミリ秒へ直す（parser）のと、
+# ログの1行の `ts` を組む（session-host-core の logging）のに使う。自前で書くと閏年の
+# 周りで静かに間違え、画面の「N分前」やログの並び順がずれる形でしか気づけない。
 time = { version = "0.3", default-features = false, features = ["parsing", "std"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# ログをファイルへ落とす層（ログ設計§4-2・§6-1）。日次ローテーションと、書き手を
+# 止めない書き出しを持つ。**持つのは session-host-core だけ**——ログの出力層を組むのは
+# あそこ1箇所で、他は `tracing` のマクロを呼ぶだけ。
+#
+# 配布バイナリへの増分は +254 KiB（+3.6%。ログ設計§19-7 で実測）。
+tracing-appender = "0.2"
 
 [profile.release]
 lto = "thin"

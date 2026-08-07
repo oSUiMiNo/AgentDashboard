@@ -26,6 +26,7 @@ pub mod hooks;
 pub mod hostfs;
 pub mod jsonfile;
 pub mod link;
+pub mod logging;
 pub mod model_aliases;
 pub mod model_catalog;
 pub mod model_post;

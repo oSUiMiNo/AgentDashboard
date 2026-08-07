@@ -27,6 +27,14 @@ tokio.workspace = true
 axum.workspace = true
 portable-pty.workspace = true
 tracing.workspace = true
+# ログの出力層（ログ設計§4-1）。**購読者を組むのはこのクレートだけ**で、
+# `core` と `session-host` の両方がここへ依存しているから置ける。`server-core` は
+# マクロを呼ぶだけなので、こちらを足してもあちらは太らない。
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+# ログの1行の `ts`（RFC3339・ミリ秒・UTC）を組むため。tracing-appender が既に
+# 引き込むので、コンパイル対象は増えない
+time.workspace = true
 # ダッシュボードサーバへの常時接続（A2S。セルフホスト化設計§4-1）。**接続は常に
 # PC 側から張る**ので、クライアントを持つのはこのクレートだけ
 tokio-tungstenite.workspace = true
