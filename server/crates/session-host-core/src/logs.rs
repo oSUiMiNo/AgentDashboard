@@ -426,11 +426,49 @@ impl Stats {
             );
         }
         if !dir.exists() {
+            // **この口は設定を読まない**（§11-2）ので、設定で置き場所を移していると
+            // ここへ来る。実機がまさにそれだった。**答えを知っている口を名指しする**
+            // ——`scripts/uninstall.sh` が「置き場所は実行ファイルに聞く」形にしてある
+            // のと同じ考えで、こちらが設定を読み始めるより筋がよい
+            // **`\` の行継続と全角スペースを混ぜない。** 継続が飛ばすのは ASCII の空白
+            // だけなので、続く `　` は本文として残る（意図どおりだが rustc が曖昧だと
+            // 警告する）。1つの文字列として書けば迷いようが無い
             eprintln!(
-                "ログの置き場所がまだありません：{}\n（一度も起動していないか、`--state-dir` の指し先が違います）",
-                dir.display()
+                "ログの置き場所がまだありません：{}\n（一度も起動していないか、設定で置き場所を移しています。\n　この口は設定を読まないので、{}を `--state-dir` へ渡してください）",
+                dir.display(),
+                where_to_ask()
             );
         }
+    }
+}
+
+/// 「本当の置き場所をどこで知るか」の案内。**実行ファイルごとに違う。**
+///
+/// `agentdashboard` には置き場所を答える口（`state-dir`）があるが、
+/// **`agentdashboard-agent` には無い**（`hook-post` / `model-post` / `logs` だけ）。
+/// 名前を組み立てて `<名前> state-dir` と案内すると、セッションホスト側では
+/// **存在しないコマンドを名指しする**ことになる——それは「できないことを、できるように
+/// 見せない」に反する。
+///
+/// なお `agentdashboard state-dir` は `config.toml` を読むので、**セッションホストの
+/// 置き場所の答えにはならない**（あちらは `agent.toml`）。名前を借りるだけでも誤り。
+fn where_to_ask() -> String {
+    let name = std::env::current_exe()
+        .ok()
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_default();
+    if name.ends_with("-agent") {
+        "`agent.toml` の `state_dir` が指す場所".to_string()
+    } else {
+        let name = if name.is_empty() {
+            "agentdashboard".to_string()
+        } else {
+            name
+        };
+        format!("`{name} state-dir` が答える場所")
     }
 }
 

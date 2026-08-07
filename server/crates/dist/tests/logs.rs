@@ -251,6 +251,42 @@ fn helpに射程の制約が書いてある() {
 }
 
 #[test]
+fn 置き場所が無いときは答えを知っている口を名指しする() {
+    // この口は設定を読まない（§11-2）ので、設定で移していると既定では見つからない。
+    // **実機がまさにそれだった。** 断るだけでは利用者が次に何をすればよいか分からない
+    let home = FakeHome::new("logs-missing-dir");
+    for (binary, expected) in [
+        // ダッシュボードには置き場所を答える口がある
+        (
+            env!("CARGO_BIN_EXE_agentdashboard"),
+            "agentdashboard state-dir",
+        ),
+        // **セッションホストには無い。** `state-dir` と案内すると存在しない
+        // コマンドを名指しすることになる（実際に一度そう書いて、この検査で気づいた）
+        (
+            env!("CARGO_BIN_EXE_agentdashboard-agent"),
+            "`agent.toml` の `state_dir`",
+        ),
+    ] {
+        let output = command(binary, &home)
+            .args(["logs", "--state-dir"])
+            .arg(home.join("どこにも無い"))
+            .output()
+            .expect("起こせること");
+        let text = String::from_utf8_lossy(&output.stderr);
+        assert!(text.contains(expected), "{binary}: {text}");
+        assert!(text.contains("--state-dir"), "{binary}: {text}");
+    }
+
+    // **案内したコマンドが実在すること。** ここを見ないと、案内だけが独り歩きする
+    let asked = command(env!("CARGO_BIN_EXE_agentdashboard"), &home)
+        .arg("state-dir")
+        .output()
+        .expect("起こせること");
+    assert!(asked.status.success(), "state-dir が無くなっています");
+}
+
+#[test]
 fn 別の機械は引けないことを理由つきで断る() {
     let home = FakeHome::new("logs-host");
     let output = command(env!("CARGO_BIN_EXE_agentdashboard"), &home)
