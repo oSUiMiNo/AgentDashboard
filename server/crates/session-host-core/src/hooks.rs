@@ -91,7 +91,10 @@ pub async fn receive(
     };
 
     let Some(event) = HookEvent::parse(&event) else {
-        tracing::debug!("注入していないフックイベントを受け取りました: {event}");
+        tracing::debug!(
+            card_id = %session.card_id,
+            "注入していないフックイベントを受け取りました: {event}"
+        );
         return StatusCode::NO_CONTENT;
     };
 
@@ -136,7 +139,10 @@ pub async fn receive_model(
         .and_then(Value::as_str)
         .filter(|id| !id.is_empty())
     else {
-        tracing::debug!("statusLine の payload に model.id がありません");
+        tracing::debug!(
+            card_id = %session.card_id,
+            "statusLine の payload に model.id がありません"
+        );
         return StatusCode::NO_CONTENT;
     };
     let label = payload

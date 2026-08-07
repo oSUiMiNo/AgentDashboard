@@ -850,6 +850,7 @@ impl SessionHostHub {
             protocol::frame::FrameKind::ScreenFull | protocol::frame::FrameKind::ScreenDiff
         ) {
             tracing::warn!(
+                card_id = %frame.card_id,
                 "セッションホストから送られてよい種別ではありません: {:?}",
                 frame.kind
             );
@@ -857,7 +858,10 @@ impl SessionHostHub {
         }
         // 番号は**ここで剥がす**。ブラウザは知らないし、知る必要も無い（§4-3）
         let Ok((_seq, payload)) = protocol::frame::split_seq(frame.payload) else {
-            tracing::warn!("番号の無い画面のフレームを受け取りました");
+            tracing::warn!(
+                card_id = %frame.card_id,
+                "番号の無い画面のフレームを受け取りました"
+            );
             return;
         };
 

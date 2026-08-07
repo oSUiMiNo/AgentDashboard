@@ -954,7 +954,11 @@ fn write_pty_input(manager: &Arc<SessionManager>, bytes: &[u8]) {
         }
     };
     if frame.kind != FrameKind::PtyInput {
-        tracing::warn!("サーバから送られてよい種別ではありません: {:?}", frame.kind);
+        tracing::warn!(
+            card_id = %frame.card_id,
+            "サーバから送られてよい種別ではありません: {:?}",
+            frame.kind
+        );
         return;
     }
     // 居ないカードへの入力は黙って捨てる（閉じた直後に届いたぶんで画面を汚さない）
@@ -962,7 +966,10 @@ fn write_pty_input(manager: &Arc<SessionManager>, bytes: &[u8]) {
         return;
     };
     if let Err(err) = session.write_input(frame.payload) {
-        tracing::warn!("端末へ書き込めませんでした: {err:#}");
+        tracing::warn!(
+            card_id = %frame.card_id,
+            "端末へ書き込めませんでした: {err:#}"
+        );
     }
 }
 

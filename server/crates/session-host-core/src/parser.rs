@@ -512,8 +512,16 @@ fn handle_event(
             }
         }
 
-        ParserEvent::Error { message, .. } => {
-            tracing::warn!("パーサからのエラー: {message}");
+        ParserEvent::Error {
+            card_id, message, ..
+        } => {
+            // `card_id` は `Option`。指示に紐づかないエラー（起動時など）では無い
+            match card_id {
+                Some(card_id) => {
+                    tracing::warn!(%card_id, "パーサからのエラー: {message}");
+                }
+                None => tracing::warn!("パーサからのエラー: {message}"),
+            }
         }
     }
 }
