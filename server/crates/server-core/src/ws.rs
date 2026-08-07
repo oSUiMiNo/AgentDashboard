@@ -158,6 +158,19 @@ pub async fn api_transcript(
 
 async fn client_loop(state: AppState, identity: Identity, socket: WebSocket) {
     let client_id = state.next_client_id.fetch_add(1, Ordering::Relaxed);
+    // **ブラウザの出入りは1接続につき1回ずつ残す。**
+    //
+    // ローカルモードでは、ここが無いと `server_core::` の行が**1件も出ない**
+    // （PC の接続もトークンの発行も起きないため）。同じ機械のログを開いても、
+    // サーバ側の経路については何も分からない状態になっていた（ログ設計§23-6）。
+    //
+    // 接続ごとに1回なので、バイト・フレーム・ノード単位を禁じた§9-2 には当たらない。
+    // §9-1 の「両端と異常時だけで足りる」のちょうど両端にあたる。
+    tracing::info!(
+        client_id,
+        account_id = %identity.account_id,
+        "ブラウザが繋がりました"
+    );
     let (mut sink, mut stream) = socket.split();
     let (outbound, mut outbound_rx) = mpsc::channel::<Message>(OUTBOUND_QUEUE_MESSAGES);
 
@@ -261,6 +274,11 @@ async fn client_loop(state: AppState, identity: Identity, socket: WebSocket) {
     state.registry.detach_browser(identity.account_id);
     drop(outbound);
     let _ = writer.await;
+    tracing::info!(
+        client_id,
+        account_id = %identity.account_id,
+        "ブラウザが離れました"
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
