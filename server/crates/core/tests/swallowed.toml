@@ -1,0 +1,491 @@
+# 結果を捨てている箇所の台帳（ログ設計§10-5）。
+#
+# ここは「見ていない」と「見て捨ててよいと判断した」を分けるためだけに在る。
+# 一部だけ載せると分けられなくなるので、**製品コードの `let _ =` を全部**載せる。
+# 一致は crates/core/tests/swallowed.rs が機械で見張る。理由が空なら落ちる。
+#
+# ## 鍵
+#
+# path + fn + expr。**行番号は使わない**——行は動くので、行番号を鍵にした台帳は
+# 無関係な変更のたびに落ちて、やがて誰も読まなくなる。
+# 同じ関数の中に字句的に同じ文が N 個あるときだけ count = N を書く。
+#
+# ## count を割りたくなったら
+#
+# count を分けるのではなく、**式か関数のほうを分ける**（変数名を変える・関数を切る）。
+# 同じ関数の同じ文が違う意味を持っているなら、それはコードの側の問題である。
+#
+# ## class
+#
+# send         受け手が消えていることだけが失敗の原因。消えるのは正常な終わり方
+# by-design    失敗し得るが、失敗しても呼び手にできることが無い（後片付け・二重停止）
+# unused-value 捨てているのは失敗ではない。返り値の型に失敗が入っていない
+# warn         **捨ててはいけないと判断した箇所**（設計§10-3）。
+#              声を与えるとその行は `let _ =` でなくなり、台帳からも消える
+#
+# ## いま warn が1件も無いこと
+#
+# 設計§10-3 が名指しした7経路は、段3 で全部に声を与えた。**残っている warn の件数が、
+# そのまま未着手の件数**になる。
+#
+# ## 注入できない箇所がある
+#
+# 端末へのキー送出（session/mod.rs の send_key）と、パーサへの停止指示・kill は、
+# 失敗を作り出せないので回帰テストが無い。**書けないものは書けないと書く**——
+# 前者は「子が居なくなっても端末への書き込みは失敗しない」を実測で固定してあり、
+# 後者は生きている子への kill が Linux では実質失敗しないため。
+#
+# ## 並び順
+#
+# path → fn → expr の昇順。**位置ではなく名前で並べる**（行が動いても並びが変わらない）。
+
+[[entry]]
+path = "server/crates/core/src/cli.rs"
+fn = "run"
+expr = '''session_host_core::version::started_at()'''
+class = "unused-value"
+reason = "返り値は使わない。ここで一度触ることで「プロセスの起動時刻」を確定させるのが目的で、失敗しうる型ですらない"
+
+[[entry]]
+path = "server/crates/core/src/local.rs"
+fn = "emit"
+expr = '''self.reports.send(Report::Volatile(event.clone()))'''
+class = "send"
+reason = "記録層が落ちていても手元の購読者へは配り続ける。受け手が居ないのは異常ではない"
+
+[[entry]]
+path = "server/crates/core/src/local.rs"
+fn = "report_transcript"
+expr = '''self.reports.send(Report::Transcript(report))'''
+class = "send"
+reason = "同上。履歴の報告も、受け口が閉じているだけなら止める理由が無い"
+
+[[entry]]
+path = "server/crates/core/src/local.rs"
+fn = "reset_transcript"
+expr = '''self.reports.send(Report::Reset(card_id))'''
+class = "send"
+reason = "同上。読み直しの合図は、次の追記でまた届く"
+
+[[entry]]
+path = "server/crates/core/src/local.rs"
+fn = "resize"
+expr = '''session.resize(cols, rows)'''
+class = "by-design"
+reason = "大きさの指定は次に開いたときにまた送られる。届かなくても画面の桁が合わないだけで、作業は続く"
+
+[[entry]]
+path = "server/crates/server-core/src/bus/memory.rs"
+fn = "publish"
+expr = '''member.incoming.send(BusMessage { channel: channel.to_string(), payload: payload.clone(), })'''
+class = "send"
+reason = "購読していない相手へ配ろうとしただけ。連絡係は届かないことを前提に組んである（設計§9-3 の取りこぼし検出が別に居る）"
+
+[[entry]]
+path = "server/crates/server-core/src/bus/valkey.rs"
+fn = "publish"
+expr = '''self.ops.send(Op::Publish { channel: channel.to_string(), payload, })'''
+class = "send"
+reason = "接続の世話をする側の待ち行列へ積むだけ。詰まっているなら、繋ぎ直しのときに全部やり直す"
+
+[[entry]]
+path = "server/crates/server-core/src/bus/valkey.rs"
+fn = "subscribe"
+expr = '''self.ops.send(Op::Subscribe(channel.to_string()))'''
+class = "send"
+reason = "同上。購読の指示は繋ぎ直しのたびに出し直す"
+
+[[entry]]
+path = "server/crates/server-core/src/bus/valkey.rs"
+fn = "unsubscribe"
+expr = '''self.ops.send(Op::Unsubscribe(channel.to_string()))'''
+class = "send"
+reason = "同上。購読を外し損ねても、受け取った側が名前で弾く"
+
+[[entry]]
+path = "server/crates/server-core/src/cluster.rs"
+fn = "events_loop"
+expr = '''hub.resolve_reply(request_id, *reply)'''
+class = "by-design"
+reason = "渡せなかった答えは流し直さない（この知らせは既に連絡係から来たもので、返すと輪になる）。捨てる理由の切り分けは resolve_reply の中で言う（設計§10-3）"
+
+[[entry]]
+path = "server/crates/server-core/src/gateway.rs"
+fn = "deliver_bus_screen"
+expr = '''relay.frames.send(Bytes::from(browser))'''
+class = "send"
+reason = "画面を見ている人が居なくなっただけ。次に開き直せば全画面から送り直す"
+
+[[entry]]
+path = "server/crates/server-core/src/gateway.rs"
+fn = "deliver_screen"
+expr = '''relay.frames.send(Bytes::from(browser))'''
+class = "send"
+reason = "同上。画面のフレームは落ちても次の全画面で追いつく"
+
+[[entry]]
+path = "server/crates/server-core/src/gateway.rs"
+fn = "disconnect"
+expr = '''self.outbound.try_send(Message::Close(None))'''
+class = "send"
+reason = "閉じる合図。相手が既に切れているなら送る意味が無い"
+
+[[entry]]
+path = "server/crates/server-core/src/gateway.rs"
+fn = "release_presence"
+expr = '''bus.lease_release(bus::agents_online(), &agent_id.0.to_string()).await'''
+class = "by-design"
+reason = "在席の印を返すだけ。返し損ねても寿命で切れる（設計§9-4 の貸出）"
+
+[[entry]]
+path = "server/crates/server-core/src/gateway.rs"
+fn = "release_viewing"
+expr = '''bus.lease_release(&key, &member).await'''
+class = "by-design"
+reason = "視聴の貸出を返すだけ。返し損ねても寿命で切れる"
+
+[[entry]]
+path = "server/crates/server-core/src/registry.rs"
+fn = "fanout"
+expr = '''self.transcript_tx.send(Arc::new(text))'''
+class = "send"
+reason = "履歴を見ている購読者が居ないだけ。記録は DB に入っているので、開き直せば読める"
+
+[[entry]]
+path = "server/crates/server-core/src/registry.rs"
+fn = "publish_local"
+expr = '''self.events.send(AccountEvent { account_id, message, })'''
+class = "send"
+reason = "そのアカウントのブラウザが1枚も開いていないだけ。開いたときに一覧を取り直す"
+
+[[entry]]
+path = "server/crates/server-core/src/ws.rs"
+fn = "client_loop"
+expr = '''writer.await'''
+class = "by-design"
+reason = "畳む前の待ち合わせ。相手のタスクが既に落ちていることを意味するだけで、閉じる処理の中で言うことが無い"
+
+[[entry]]
+path = "server/crates/session-host-core/src/events.rs"
+fn = "emit"
+expr = '''self.events.send(event)'''
+class = "send"
+reason = "購読者が居ないのは正常（ローカルモードで誰も繋いでいないとき）"
+
+[[entry]]
+path = "server/crates/session-host-core/src/events.rs"
+fn = "report_transcript"
+expr = '''self.events.send(ServerMessage::TranscriptAppend { card_id: report.card_id, nodes: report.nodes, })'''
+class = "send"
+reason = "同上。履歴の追記は次の報告でも届く"
+
+[[entry]]
+path = "server/crates/session-host-core/src/events.rs"
+fn = "reset_transcript"
+expr = '''self.events.send(ServerMessage::TranscriptReset { card_id })'''
+class = "send"
+reason = "同上。読み直しの合図は次の追記でまた出る"
+
+[[entry]]
+path = "server/crates/session-host-core/src/hook_post.rs"
+fn = "post"
+expr = '''stream.read_to_end(&mut response)'''
+class = "by-design"
+reason = "応答は読み捨てる。フックは送れたかどうかだけが関心で、ダッシュボードの返事に用は無い"
+
+[[entry]]
+path = "server/crates/session-host-core/src/hook_post.rs"
+fn = "run"
+expr = '''post(url, &body)'''
+class = "by-design"
+reason = "送れなくても CLI の邪魔をしないのが最優先。宛先不達でも終了コードは 0 で返す（設計§7）"
+
+[[entry]]
+path = "server/crates/session-host-core/src/link.rs"
+fn = "answer_host_fs"
+expr = '''outgoing.send(Outgoing::Volatile(AgentMessage::HostReply { request_id, reply, }))'''
+class = "send"
+reason = "線が切れているなら答えは届かない。問うた側は時間切れで打ち切る"
+
+[[entry]]
+path = "server/crates/session-host-core/src/link.rs"
+fn = "apply_command"
+expr = '''session.resize(cols, rows)'''
+class = "by-design"
+reason = "大きさの指定は次に開いたときにまた届く。カードが既に畳まれていることもある"
+
+[[entry]]
+path = "server/crates/session-host-core/src/link.rs"
+fn = "emit"
+expr = '''self.outgoing.send(Outgoing::Volatile(message))'''
+class = "send"
+reason = "線が切れているだけ。繋ぎ直したときに名乗り直して追いつく（設計§6-4）"
+
+[[entry]]
+path = "server/crates/session-host-core/src/link.rs"
+fn = "model_aliases_changed"
+expr = '''self.outgoing.send(Outgoing::ModelTable(message))'''
+class = "send"
+reason = "同上。別名の表は繋ぎ直しの名乗りでも運ばれる"
+
+[[entry]]
+path = "server/crates/session-host-core/src/link.rs"
+fn = "report_transcript"
+expr = '''self.outgoing.send(Outgoing::Transcript(report))'''
+class = "send"
+reason = "同上。位置を進めるのは ack が返ってからなので、届かなければ送り直される（設計§6-1）"
+
+[[entry]]
+path = "server/crates/session-host-core/src/link.rs"
+fn = "reset_transcript"
+expr = '''self.outgoing.send(Outgoing::Reset(card_id))'''
+class = "send"
+reason = "同上。読み直しの合図は繋ぎ直しでやり直す"
+
+[[entry]]
+path = "server/crates/session-host-core/src/link.rs"
+fn = "screen_frame"
+expr = '''self.outgoing.send(Outgoing::Screen(frame))'''
+class = "send"
+reason = "画面のフレームは落ちても次の全画面で追いつく"
+
+[[entry]]
+path = "server/crates/session-host-core/src/link.rs"
+fn = "set_model_table"
+expr = '''self.outgoing.send(Outgoing::ModelTable(message))'''
+class = "send"
+reason = "同上。別名の表は繋ぎ直しの名乗りでも運ばれる"
+
+[[entry]]
+path = "server/crates/session-host-core/src/logs.rs"
+fn = "follow"
+expr = '''out.flush()'''
+class = "by-design"
+reason = "読む口の標準出力を流すだけ。相手が読むのをやめた（パイプを閉じた）ことしか意味しない"
+
+[[entry]]
+path = "server/crates/session-host-core/src/logs.rs"
+fn = "run"
+expr = '''out.flush()'''
+class = "by-design"
+reason = "同上。head などで打ち切られたときに鳴っても仕方がない"
+
+[[entry]]
+path = "server/crates/session-host-core/src/model_post.rs"
+fn = "run"
+expr = '''crate::hook_post::post(url, &body)'''
+class = "by-design"
+reason = "送れなくても CLI の邪魔をしないのが最優先。statusLine は毎回走るので次で届く"
+
+[[entry]]
+path = "server/crates/session-host-core/src/parser.rs"
+fn = "handle_event"
+expr = '''sink.try_send(StatsReport { card_id, records_total, parse_errors, unknown_types, orphans, versions, })'''
+class = "send"
+reason = "溢れたら捨てる。健康状態は次の報告でも届くので、ここで待つ理由が無い"
+
+[[entry]]
+path = "server/crates/session-host-core/src/parser.rs"
+fn = "restart"
+expr = '''self.restarts.try_send(())'''
+class = "send"
+reason = "立て直しの依頼は1件入っていれば十分。既に入っているなら二重に頼む意味が無い"
+
+[[entry]]
+path = "server/crates/session-host-core/src/parser.rs"
+fn = "unwatch"
+expr = '''self.requests.try_send(ParserRequest::Unwatch { card_id })'''
+class = "send"
+reason = "世話役が既に畳まれているときだけ失敗する。畳まれた先へ見張りの解除を頼む意味が無い"
+
+[[entry]]
+path = "server/crates/session-host-core/src/parser.rs"
+fn = "watch"
+expr = '''self.requests.try_send(ParserRequest::Watch { card_id, path })'''
+class = "send"
+reason = "世話役が既に畳まれているときだけ失敗する。畳まれた先へ見張りを頼む意味が無い"
+
+[[entry]]
+path = "server/crates/session-host-core/src/proc.rs"
+fn = "run"
+expr = '''child.kill()'''
+class = "by-design"
+reason = "時間切れの後始末。既に終わっている子への停止と刈り取りは、失敗しても目的が達成されている"
+
+[[entry]]
+path = "server/crates/session-host-core/src/proc.rs"
+fn = "run"
+expr = '''child.wait()'''
+class = "by-design"
+reason = "時間切れの後始末。既に終わっている子への停止と刈り取りは、失敗しても目的が達成されている"
+
+[[entry]]
+path = "server/crates/session-host-core/src/selfheal/mod.rs"
+fn = "close_session"
+expr = '''selfheal.manager.kill(card_id)'''
+class = "by-design"
+reason = "使い終わった修復セッションを畳むだけ。既に終わっていることもある"
+
+[[entry]]
+path = "server/crates/session-host-core/src/selfheal/ops.rs"
+fn = "link_node_modules"
+expr = '''std::fs::remove_dir_all(&link)'''
+class = "by-design"
+reason = "張り直す前の掃除。無ければ目的は達成されている"
+
+[[entry]]
+path = "server/crates/session-host-core/src/selfheal/ops.rs"
+fn = "link_node_modules"
+expr = '''std::fs::remove_file(&link)'''
+class = "by-design"
+reason = "張り直す前の掃除。無ければ目的は達成されている"
+
+[[entry]]
+path = "server/crates/session-host-core/src/selfheal/ops.rs"
+fn = "run_canary"
+expr = '''std::fs::remove_dir_all(&dir)'''
+class = "by-design"
+reason = "カナリアの使い捨ての作業場所を片付けるだけ。片付けの失敗は元の失敗より軽く、報告を上書きすると原因が隠れる"
+
+[[entry]]
+path = "server/crates/session-host-core/src/selfheal/ops.rs"
+fn = "run_canary"
+expr = '''std::fs::remove_dir_all(&work)'''
+count = 2
+class = "by-design"
+reason = "カナリアの使い捨ての作業場所を片付けるだけ。片付けの失敗は元の失敗より軽く、報告を上書きすると原因が隠れる"
+
+[[entry]]
+path = "server/crates/session-host-core/src/session/hooks_settings.rs"
+fn = "cleanup"
+expr = '''std::fs::remove_dir_all(&settings.dir)'''
+class = "by-design"
+reason = "一時ディレクトリの掃除。消せなくても実害は無く、起動の失敗と混同させたくない"
+
+[[entry]]
+path = "server/crates/session-host-core/src/session/mod.rs"
+fn = "publish_output"
+expr = '''self.output.send(framed)'''
+class = "send"
+reason = "購読者が1人もいないときは失敗するが、それは異常ではない"
+
+[[entry]]
+path = "server/crates/session-host-core/src/session/mod.rs"
+fn = "subscribe_screen"
+expr = '''session.resize(cols, rows)'''
+class = "by-design"
+reason = "見始めた端末の桁へ合わせるだけ。合わなければ次の入力でまた送られる"
+
+[[entry]]
+path = "server/crates/session-host-core/src/session/pty.rs"
+fn = "drop"
+expr = '''self.killer.lock().expect("ロックが壊れていない").kill()'''
+class = "by-design"
+reason = "畳むときの停止。既に終わっている子への kill は、失敗しても目的が達成されている"
+
+[[entry]]
+path = "server/crates/session-host-core/src/session/pty.rs"
+fn = "kill"
+expr = '''self.killer.lock().expect("ロックが壊れていない").kill()'''
+class = "by-design"
+reason = "同上。停止は何度呼んでも構わない作りにしてある"
+
+[[entry]]
+path = "server/crates/session-host-core/src/session/pty.rs"
+fn = "spawn"
+expr = '''exit_tx.send(exit)'''
+class = "send"
+reason = "終了を見ている人が居ないだけ。状態は一覧の記録の側にも入る"
+
+[[entry]]
+path = "server/crates/session-host-core/src/version.rs"
+fn = "clear_attempt"
+expr = '''std::fs::remove_file(attempt_path(state_dir))'''
+class = "by-design"
+reason = "試行の印を消すだけ。無ければ目的は達成されている"
+
+[[entry]]
+path = "server/crates/session-host-core/src/version.rs"
+fn = "drop_selfheal_parser"
+expr = '''std::fs::remove_file(&pointer)'''
+class = "by-design"
+reason = "差し替えたパーサのポインタを外すだけ。既に無ければ目的は達成されている"
+
+[[entry]]
+path = "server/crates/session-host-core/src/version.rs"
+fn = "install_version"
+expr = '''std::fs::remove_dir_all(&staging)'''
+count = 4
+class = "by-design"
+reason = "取り込みの各失敗経路での作業場所の片付け。片付けの失敗は元の失敗より軽く、報告を上書きすると原因が隠れる"
+
+[[entry]]
+path = "server/crates/session-host-core/src/version.rs"
+fn = "release_lock"
+expr = '''std::fs::remove_file(lock_path(state_dir))'''
+class = "by-design"
+reason = "錠を返すだけ。残っても開始時刻を見て古い錠と判断される"
+
+[[entry]]
+path = "server/crates/session-host-core/src/version.rs"
+fn = "snapshot"
+expr = '''std::fs::remove_dir_all(&staging)'''
+class = "by-design"
+reason = "控えを取る前の掃除。無ければ目的は達成されている"
+
+[[entry]]
+path = "server/crates/session-host-core/src/version.rs"
+fn = "take_attempt"
+expr = '''std::fs::remove_file(&path)'''
+class = "by-design"
+reason = "読み終えた試行の印を消すだけ。残っても次の起動で読み直される"
+
+[[entry]]
+path = "server/crates/session-host-core/src/version_ops.rs"
+fn = "fetch_manifest"
+expr = '''std::fs::remove_file(&out)'''
+class = "by-design"
+reason = "取ってきた献立表の一時ファイルを消すだけ。残っても次に上書きされる"
+
+[[entry]]
+path = "server/crates/session-host-core/src/version_ops.rs"
+fn = "install"
+expr = '''std::fs::remove_file(&script)'''
+count = 2
+class = "by-design"
+reason = "取ってきたインストーラを消すだけ。残っても次に上書きされる"
+
+[[entry]]
+path = "server/crates/transcript-parser/src/cli.rs"
+fn = "poll"
+expr = '''watcher.watch(&dir)'''
+class = "by-design"
+reason = "サブエージェントのフォルダは後から生えるので毎回登録し直す（冪等）。既に見張っていれば失敗する"
+
+[[entry]]
+path = "server/crates/transcript-parser/src/cli.rs"
+fn = "spawn_stdin_reader"
+expr = '''tx.send(Message::Stop)'''
+class = "send"
+reason = "本体が既に畳まれているだけ。停止の合図は届かなくても、そのとき既に終わっている"
+
+[[entry]]
+path = "server/crates/transcript-parser/src/cli.rs"
+fn = "spawn_ticker"
+expr = '''tx.send(Message::Stop)'''
+class = "send"
+reason = "同上。巡回の合図の送り手が、閉じた列へ最後の1件を積もうとしただけ"
+
+[[entry]]
+path = "server/crates/transcript-parser/src/session.rs"
+fn = "catch_up"
+expr = '''self.threader.feed_record(&source, agent_id.as_deref(), &record)'''
+class = "unused-value"
+reason = "返り値のノードは使わない。索引（ツールコール・エージェント・親の解決）を進めるのがここでの目的"
+
+[[entry]]
+path = "server/crates/transcript-parser/src/tail.rs"
+fn = "new"
+expr = '''notify.send(())'''
+class = "send"
+reason = "見張りの合図。受け手が畳まれているなら、そもそも読む人が居ない"
