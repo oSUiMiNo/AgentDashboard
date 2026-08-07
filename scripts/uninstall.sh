@@ -14,6 +14,7 @@
 # | 実行ファイル3本 | 消す | これが本体 |
 # | インストールの控え（receipt） | 消す | 入れた記録なので、消したら要らない |
 # | 記録・状態（DB・読み込み位置） | **残す** | **戻せない**。消すなら `--purge` を明示する |
+# | ログ | 消す | アプリが自分のために書いた作業記録で、利用者の資産ではない |
 # | PATH の通し方（`env` と rcfile の1行） | **触らない** | 同じ仕組みで入れた**他のツールと共有**している |
 #
 # 最後の行が要点。`~/.local/bin/env` は cargo-dist で配られたツールが共通で使うので、
@@ -61,6 +62,16 @@ STATE_DIR_FALLBACK="${XDG_STATE_HOME:-${HOME}/.local/state}/${APP_NAME}"
 # 名前は実装（`session_host_core::version`）と揃える。食い違いは `crates/dist/tests/uninstall.rs` が見張る
 VERSIONS_DIR_NAME="versions"
 VERSION_FILE_NAMES="version-current version-attempt version-state.json"
+
+# ログの置き場所（記録の置き場所の中にある）。
+#
+# **記録とは扱いが違う。** ログはアプリが自分のために書いた作業記録であって、
+# 利用者の資産ではない。しかも作業ディレクトリのパスとプロンプト本文が載るので、
+# 消した人の機械に残り続けるのは筋が悪い。だから `--purge` を待たずに消す。
+#
+# 名前は実装（`session_host_core::logging::LOGS_DIR_NAME`）と揃える。
+# 食い違いは `crates/dist/tests/uninstall.rs` が見張る
+LOGS_DIR_NAME="logs"
 
 # fish だけは**アプリ専用の設定ファイル**を作られる。他のツールと共有していないので、
 # 入れる側が作ったものは消す側も消す（`~/.local/bin/env.fish` のほうは共有なので残す）
@@ -228,6 +239,16 @@ for name in "${VERSIONS_DIR_NAME}" ${VERSION_FILE_NAMES}; do
     fi
 done
 [ "${version_found}" -eq 0 ] && say "  ありませんでした"
+
+say ""
+say "== ログ =="
+# 保管庫とは別のブロックにしてある。混ぜると「保管庫は無いがログはある」ときに
+# 「ありませんでした」が嘘をつく
+if [ -e "${STATE_DIR}/${LOGS_DIR_NAME}" ]; then
+    remove "${STATE_DIR}/${LOGS_DIR_NAME}"
+else
+    say "  ありませんでした"
+fi
 
 say ""
 say "== 記録（一覧・履歴） =="

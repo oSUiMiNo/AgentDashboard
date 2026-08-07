@@ -11,6 +11,7 @@
 # | 実行ファイル3本 | 消す | これが本体 |
 # | インストールの控え（receipt） | 消す | 入れた記録なので、消したら要らない |
 # | 記録・状態（DB・読み込み位置） | **残す** | **戻せない**。消すなら `-Purge` を明示する |
+# | ログ | 消す | アプリが自分のために書いた作業記録で、利用者の資産ではない |
 # | PATH への追加 | **触らない** | 同じ仕組みで入れた**他のツールと共有**している |
 #
 # # 使い方
@@ -74,9 +75,14 @@ $StateDirFallback = if ($env:XDG_STATE_HOME) {
 # 実行ファイルなので**落とし直せる＝戻せる**。だから `-Purge` を待たずに消す——
 # 残すと版1つあたり数十MB が誰にも気づかれずに溜まり続ける。
 #
-# 名前は実装（`agent_core::version`）と揃える。食い違いは `crates/dist/tests/uninstall.rs` が見張る
+# 名前は実装（`session_host_core::version`）と揃える。食い違いは `crates/dist/tests/uninstall.rs` が見張る
 $VersionsDirName = 'versions'
 $VersionFileNames = @('version-current', 'version-attempt', 'version-state.json')
+
+# ログの置き場所（記録の置き場所の中にある）。アプリが自分のために書いた作業記録で
+# あって利用者の資産ではないので、`-Purge` を待たずに消す。
+# 名前は実装（`session_host_core::logging::LOGS_DIR_NAME`）と揃える
+$LogsDirName = 'logs'
 
 # **古い置き場所。** v0.1.0 には Windows の道が無く、`HOME` も無いので記録が
 # 一時領域（`%LOCALAPPDATA%\Temp\`）へ落ちていた。いまの実行ファイルはそこを
@@ -199,6 +205,17 @@ foreach ($name in @($VersionsDirName) + $VersionFileNames) {
     }
 }
 if (-not $versionFound) { Write-Host '  ありませんでした' }
+
+Write-Host ''
+Write-Host '== ログ =='
+# 保管庫とは別のブロックにしてある。混ぜると「保管庫は無いがログはある」ときに
+# 「ありませんでした」が嘘をつく
+$logsTarget = Join-Path $StateDir $LogsDirName
+if (Test-Path -LiteralPath $logsTarget) {
+    Remove-Target $logsTarget
+} else {
+    Write-Host '  ありませんでした'
+}
 
 Write-Host ''
 Write-Host '== 記録（一覧・履歴） =='

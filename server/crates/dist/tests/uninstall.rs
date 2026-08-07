@@ -56,6 +56,12 @@ const VERSION_FILES: &[&str] = &["version-current", "version-attempt", "version-
 /// 保管庫に置く版の名前（偽のインストール一式で使う）。
 const STORED_VERSION: &str = "0.1.0";
 
+/// 偽のログ。名前はログ設計§19-3 の読み替え後の形（`<proc>-<pid>.<日付>.jsonl`）。
+///
+/// **設計本文の `<proc>-<日付>-<pid>` で書いてはいけない。** ローテーションでは
+/// 作れない形なので、実装と食い違ったまま門が緑になる
+const LOG_FILES: &[&str] = &["dashboard-1234.2026-08-07.jsonl", "session-host-5678.2026-08-06.jsonl"];
+
 #[test]
 fn 既定では実行ファイルと控えだけが消える() {
     let home = fake_install("default");
@@ -272,6 +278,66 @@ fn dry_runでは保管庫が行そのもので名指しされる() {
             "消す対象にしていません（{line} が出ていない）:\n{out}"
         );
     }
+}
+
+#[test]
+fn ログはpurge無しでも消え記録は残る() {
+    // ログはアプリが自分のために書いた作業記録であって、利用者の資産ではない。
+    // しかも作業ディレクトリのパスとプロンプト本文が載るので、消した人の機械に
+    // 残り続けるのは筋が悪い。記録（一覧・履歴）とは扱いが逆になる
+    let home = fake_install("logs");
+
+    let out = run(&home, &[]);
+
+    let state = home.join(".local/state/agentdashboard");
+    assert!(
+        !state.join("logs").exists(),
+        "ログが残っています。パスとプロンプト本文が載ったまま消した人の機械に残ります:\n{out}"
+    );
+    assert!(
+        state.join("dashboard.db").exists(),
+        "ログを消すついでに記録まで消しています:\n{out}"
+    );
+}
+
+#[test]
+fn dry_runではログが行そのもので名指しされる() {
+    // **行そのもので見る。** 部分一致で探すと、記録の置き場所（`--purge` のときに
+    // 出る `<state_dir>` の行）に当たってしまい、**ログを掃く処理を消しても
+    // 緑のまま通る**（保管庫で同じ轍を一度踏んでいる）
+    let home = fake_install("logs-dry");
+
+    let out = run(&home, &["--dry-run"]);
+
+    let state = home.join(".local/state/agentdashboard");
+    let expected = format!("消す予定: {}", state.join("logs").display());
+    assert!(
+        out.lines().any(|printed| printed.trim() == expected),
+        "消す対象にしていません（{expected} が出ていない）:\n{out}"
+    );
+    assert!(
+        state.join("logs").exists(),
+        "--dry-run なのにログが消えています:\n{out}"
+    );
+}
+
+#[test]
+fn ログの置き場所が実装と食い違っていない() {
+    // 実装が名前を変えたのに消す側が古い名前のままだと、**ログだけが取り残される**。
+    // しかも消す道は「完了しました」と言うので、誰も気づけない
+    use session_host_core::logging::LOGS_DIR_NAME;
+
+    let unix = script_text("uninstall.sh");
+    let windows = script_text("uninstall.ps1");
+
+    assert!(
+        unix.contains(&format!("LOGS_DIR_NAME=\"{LOGS_DIR_NAME}\"")),
+        "消す側（sh）のログの名前が実装（{LOGS_DIR_NAME}）と違います"
+    );
+    assert!(
+        windows.contains(&format!("$LogsDirName = '{LOGS_DIR_NAME}'")),
+        "消す側（ps1）のログの名前が実装（{LOGS_DIR_NAME}）と違います"
+    );
 }
 
 #[test]
@@ -656,6 +722,13 @@ fn fake_install(label: &str) -> FakeHome {
     }
     for name in VERSION_FILES {
         std::fs::write(state.join(name), "x").expect("書けること");
+    }
+
+    // ログ。保管庫と同じく `--purge` を待たずに消える側で、記録とは扱いが違う
+    let logs = state.join("logs");
+    std::fs::create_dir_all(&logs).expect("作れること");
+    for name in LOG_FILES {
+        std::fs::write(logs.join(name), "{}\n").expect("書けること");
     }
 
     home
