@@ -175,6 +175,17 @@ scripts/cargo tree -i tokio-tungstenite -e normal
 `identifiers cannot start with a number` でコンパイルが通らない（Rust の識別子の規則は
 文字種に関わらず効く）。**数を頭に置きたいときは漢数字にする**（`三つ組として…`）。
 
+### 日本語のテスト名に ASCII の大文字を混ぜない
+同じ性質のもう1つ。`fn 割れない名前はNone()` や `fn 別のPCは引けない()` は
+**`non_snake_case` で落ちる**（`-D warnings` なので警告ではなく失敗になる）。日本語の
+部分は判定の対象外だが、混ざった `None` や `PC` が大文字として見える。
+
+`#[allow(non_snake_case)]` を貼らないこと——**貼ると、以後この名前空間で本当に直すべき
+命名も黙る**。名前のほうを日本語へ寄せる（`割れない名前は割らない` `別の機械は引けない`）。
+
+型名や定数を名前へ入れたくなるのは、**その名前を確かめるテストだから**であることが多い。
+本文（`assert` のメッセージ）に書けば、名前に入れなくても読む人には伝わる。
+
 ### 「`make ci` が通った」を `make test` で代用しない
 `make ci` は **lint → test → build** の順で、lint（`rustfmt --check` と clippy）が先に走る。
 つまり **lint で落ちる状態ならテストまで到達しない**ので、`make test` が通ったことは
