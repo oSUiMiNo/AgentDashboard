@@ -152,6 +152,22 @@ pub fn file_stem(proc: Proc, pid: u32) -> String {
     format!("{}-{pid}", proc.as_str())
 }
 
+/// いま書いているファイルの名前。**日付は UTC**（ローテーションの区切りと揃える）。
+///
+/// 日付が変わると別のファイルへ移るので、この名前は**そのときの答え**でしかない。
+fn current_file_name(stem: &str) -> String {
+    file_name_on(stem, time::OffsetDateTime::now_utc().date())
+}
+
+fn file_name_on(stem: &str, date: time::Date) -> String {
+    format!(
+        "{stem}.{:04}-{:02}-{:02}.{FILE_SUFFIX}",
+        date.year(),
+        u8::from(date.month()),
+        date.day(),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // 1行の形（設計§2）
 // ---------------------------------------------------------------------------
@@ -923,7 +939,7 @@ fn build_file_layer(proc: Proc, config: &SessionHostConfig) -> Built {
             worker: Some(worker),
             watch: None,
             counter: Some(counter),
-            path: Some(dir.join(format!("{stem}.<日付>.{FILE_SUFFIX}"))),
+            path: Some(dir.join(current_file_name(&stem))),
         },
         complaints,
     }
@@ -960,18 +976,10 @@ pub fn install(proc: Proc, config: &SessionHostConfig) -> Guard {
     }
 
     match &path {
-        Some(path) => tracing::info!(
-            run_id = run_id(),
-            proc = proc.as_str(),
-            pid = std::process::id(),
-            path = %path.display(),
-            "ログを開始しました"
-        ),
-        None => tracing::error!(
-            run_id = run_id(),
-            proc = proc.as_str(),
-            "ログをファイルへ残せません。端末にだけ出します"
-        ),
+        // **7欄と同じ名前のフィールドを渡さない。** `run_id` / `proc` / `pid` は
+        // どの行にも載っているので、ここで渡すと `f_run_id` のような退避名で二重に出る
+        Some(path) => tracing::info!(path = %path.display(), "ログを開始しました"),
+        None => tracing::error!("ログをファイルへ残せません。端末にだけ出します"),
     }
 
     built.guard
@@ -1022,6 +1030,12 @@ mod tests {
                 .map(|(name, value)| ((*name).to_owned(), value.clone()))
                 .collect(),
         }
+    }
+
+    /// `2026-08-07` の形から日付を作る。子モジュールの両方が使う。
+    fn day(text: &str) -> time::Date {
+        let (_, date) = parse_log_name(&format!("x.{text}.jsonl")).expect("読めること");
+        date
     }
 
     fn parse(line: &str) -> serde_json::Value {
@@ -1188,6 +1202,16 @@ mod tests {
         }
 
         #[test]
+        fn いま書いているファイルの名前は読み戻せる() {
+            let stem = file_stem(Proc::SessionHost, 42);
+            let name = file_name_on(&stem, day("2026-08-07"));
+            assert_eq!(name, "session-host-42.2026-08-07.jsonl");
+            let (parsed, date) = parse_log_name(&name).expect("読み戻せること");
+            assert_eq!(parsed, stem);
+            assert_eq!(date, day("2026-08-07"));
+        }
+
+        #[test]
         fn 見覚えのない名前は読まない() {
             for name in [
                 "dashboard-1.jsonl",
@@ -1320,11 +1344,6 @@ mod tests {
             std::fs::write(dir.join(name), "x".repeat(size)).expect("書けること");
         }
 
-        fn day(text: &str) -> time::Date {
-            let (_, date) = parse_log_name(&format!("x.{text}.jsonl")).expect("読めること");
-            date
-        }
-
         #[test]
         fn 保持日数より古いファイルだけ消える() {
             let dir = temp_dir("retention");
@@ -1387,6 +1406,85 @@ mod tests {
                 1,
             );
             assert_eq!(outcome.removed, 0);
+        }
+    }
+
+    mod 出力層 {
+        use super::*;
+
+        /// ファイル層だけを組んで、行を流してから中身を読む。
+        ///
+        /// `.init()` は呼ばない（プロセスに1つしか置けないので、テストからは触らない）。
+        /// 代わりに `with_default` でスレッドローカルに差す。
+        fn 流す(hold_guard: bool) -> Vec<String> {
+            let dir = std::env::temp_dir().join(format!(
+                "agentdashboard-logging-guard-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4().simple()
+            ));
+            let config = SessionHostConfig {
+                state_dir: Some(dir.clone()),
+                ..Default::default()
+            };
+            let mut built = build_file_layer(Proc::Dashboard, &config);
+            let layer = built.layer.take();
+            let path = built
+                .guard
+                .log_path()
+                .map(Path::to_path_buf)
+                .expect("組めること");
+
+            let Built { guard, .. } = built;
+            let mut guard = Some(guard);
+            if !hold_guard {
+                // `let _ = install(..)` と書いたときに起きること
+                guard = None;
+            }
+
+            let subscriber = tracing_subscriber::registry().with(layer);
+            tracing::subscriber::with_default(subscriber, || {
+                for index in 0..200 {
+                    // **鍵を毎回変える。** 同じ鍵だと間引きが効いて、
+                    // Guard の有無ではなく間引きの結果を見ることになる
+                    tracing::info!(card_id = %format!("card-{index}"), "書き出しの検査");
+                }
+            });
+
+            drop(guard);
+
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let lines: Vec<String> = text.lines().map(str::to_owned).collect();
+            let _ = std::fs::remove_dir_all(&dir);
+            lines
+        }
+
+        #[test]
+        fn guardを持ち続ければ全部残る() {
+            let lines = 流す(true);
+            // 起動の1行が先に入る
+            assert!(
+                lines.len() >= 200,
+                "200行のうち {} 行しか残っていない",
+                lines.len()
+            );
+            for line in &lines {
+                serde_json::from_str::<serde_json::Value>(line)
+                    .expect("全行が JSON として読めること");
+            }
+        }
+
+        #[test]
+        fn guardを落とすと書き終わる前に消える() {
+            // ここが `install` を1箇所へ集めた第一の理由（設計§4-2）。
+            // 2箇所に手書きしたままだと片方が必ず落とす
+            let lines = 流す(false);
+            // 実測は **0行**（§19-2 の「200行のうち0行」がそのまま再現する）。
+            // 遅い機械で数行こぼれても検査の意味は変わらないので、幅を持たせてある
+            assert!(
+                lines.len() < 10,
+                "Guard を落としても {} 行残った。この検査が意味を失っている",
+                lines.len()
+            );
         }
     }
 
