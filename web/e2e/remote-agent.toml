@@ -8,10 +8,10 @@ agent_name = "E2E用PC"
 
 # 状態の置き場所を**サーバと分ける**。同じ場所を指すと、パーサの再開位置を
 # 2つのプロセスが取り合うことになる
-state_dir = "web/test-results/remote/agent"
+state_dir = "web/.e2e-state/remote/agent"
 
 # 利用者のグローバル設定を絶対に触らせない（ローカルモードの E2E と同じ理由）
-claude_settings_path = "web/test-results/remote/agent/claude-settings.json"
+claude_settings_path = "web/.e2e-state/remote/agent/claude-settings.json"
 
 # statusLine の再実行間隔。既定の3秒だと切替の確認だけで毎回3秒待つ
 status_line_refresh_secs = 1

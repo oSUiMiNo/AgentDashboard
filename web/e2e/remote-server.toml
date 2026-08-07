@@ -7,5 +7,5 @@
 port = 4174
 
 # 記録の置き場所。`scripts/e2e-remote` が起動のたびに消す
-state_dir = "web/test-results/remote/server"
-database_url = "sqlite://web/test-results/remote/server/dashboard.db"
+state_dir = "web/.e2e-state/remote/server"
+database_url = "sqlite://web/.e2e-state/remote/server/dashboard.db"

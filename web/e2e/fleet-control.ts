@@ -20,7 +20,7 @@ import path from 'node:path'
  */
 
 /** 立ち上げ側が控えを置く場所。`scripts/e2e-fleet` と揃えてある。 */
-const STATE = path.resolve(import.meta.dirname, '../test-results/fleet')
+const STATE = path.resolve(import.meta.dirname, '../.e2e-state/fleet')
 
 interface FleetEnv {
   repoRoot: string

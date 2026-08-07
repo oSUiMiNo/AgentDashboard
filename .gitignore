@@ -23,6 +23,10 @@ node_modules/
 # **test-results の下に置けない** — Playwright は走る前にあそこを消すので、
 # 立ち上げ側が置いた控えが実行の直前に消える
 /web/.e2e-compose/
+# E2E が使う状態の置き場所（ログもここへ落ちる）。同じ理由で test-results の
+# 下には置けない。しかもログは**消したファイルへ気づかないまま書き続ける**ので
+# （`reuseExistingServer` で前回のサーバが生き残る）、消えたことにさえ気づけない
+/web/.e2e-state/
 /web/playwright-report/
 /web/.playwright/
 # Playwright MCP がブラウザ操作の記録を書き出す先

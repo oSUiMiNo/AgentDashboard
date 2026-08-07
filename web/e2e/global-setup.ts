@@ -34,7 +34,7 @@ import path from 'node:path'
 /** サーバの cwd は `web/`。`e2e/config.toml` の `claude_settings_path` と同じ場所を指す。 */
 const SETTINGS_PATH = path.join(
   import.meta.dirname,
-  '../test-results/state/claude-settings.json',
+  '../.e2e-state/state/claude-settings.json',
 )
 
 /**

@@ -23,7 +23,7 @@ const REPO_ROOT = path.resolve(import.meta.dirname, '../..')
 const SERVER_BINARY = path.join(REPO_ROOT, 'server/target/debug/agentdashboard')
 const VERSIONS_DIR = path.join(
   REPO_ROOT,
-  'web/test-results/versions-state/versions',
+  'web/.e2e-state/versions-state/versions',
 )
 
 /** 門を通れる一式を保管庫へ置く。 */

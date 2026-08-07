@@ -17,7 +17,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="${REPO_ROOT}/server/target/debug/agentdashboard"
 AGENT_BIN="${REPO_ROOT}/server/target/debug/agentdashboard-agent"
 FAKE_CLAUDE="${REPO_ROOT}/server/target/debug/fake-claude"
-STATE="${REPO_ROOT}/web/test-results/remote"
+STATE="${REPO_ROOT}/web/.e2e-state/remote"
 
 # 版の切替を無害にする（CICD設計§4・§6）。**ここはホストで本物のバイナリを起こす**ので、
 # 塞がないと (1) 開発者の実環境のポインタを読んで別の版が起動し (2) 起こすたびに

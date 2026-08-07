@@ -169,6 +169,9 @@ probe-screen: ## 端末エミュレータ（vt100）の再現性と画面サイ�
 
 clean: ## ビルド成果物を消す（自己修復の作業場所も含む）
 	rm -rf server/target web/dist web/node_modules
+	# **Playwright が消してくれない置き場所。** test-results の外にあるので、
+	# ここに書いておかないと誰も消さない
+	rm -rf web/.e2e-state web/.e2e-compose
 	git worktree remove --force .selfheal/worktrees/dashboard-maintenance 2>/dev/null || true
 	git worktree prune 2>/dev/null || true
 	rm -rf .selfheal

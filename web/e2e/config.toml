@@ -12,7 +12,13 @@ port = 4173
 # 指定しないと E2E がパーサの再開位置や自己修復の記録（対応表・クールダウン）を
 # 実運用と共有してしまう。E2E の擬似 claude が採れないカナリアの失敗が、実運用の
 # 自己修復を24時間止める、といった形で表に出る。
-state_dir = "test-results/state"
+#
+# **`test-results/` の下には置けない。** Playwright は走る前にあそこを丸ごと消すが、
+# `reuseExistingServer` で前回のサーバが生き残るので、**消えたファイルへ気づかない
+# まま書き続ける**ことになる（書き手は死なず、書き込みも失敗せず、ただ誰からも
+# 読めない場所へ流れ続ける。ログ設計§19-8 で実測）。ログがここへ落ちるようになった
+# 段1 から、これが実害になった
+state_dir = ".e2e-state/state"
 
 # 利用者のグローバル設定を**絶対に触らせない**。
 #
@@ -27,7 +33,7 @@ state_dir = "test-results/state"
 # ただし E2E で確かめられるのは**注入まで**である。本物の CLI と違って擬似 claude は
 # このファイルを汚さないので、回復（汚れた値の書き戻し）は走らない。そちらは
 # `crates/core/tests/model.rs` と `claude_settings.rs` の単体テストが担保している。
-claude_settings_path = "test-results/state/claude-settings.json"
+claude_settings_path = ".e2e-state/state/claude-settings.json"
 
 # statusLine の再実行間隔。既定の3秒だと切替の確認だけで毎回3秒待つことになる
 status_line_refresh_secs = 1

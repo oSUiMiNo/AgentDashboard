@@ -23,7 +23,7 @@ AGENT_BIN="${REPO_ROOT}/server/target/debug/agentdashboard-agent"
 FAKE_CLAUDE="${REPO_ROOT}/server/target/debug/fake-claude"
 SERVER_CONFIG="${REPO_ROOT}/web/e2e/fleet-server.toml"
 AGENT_CONFIG="${REPO_ROOT}/web/e2e/fleet-agent.toml"
-STATE="${REPO_ROOT}/web/test-results/fleet"
+STATE="${REPO_ROOT}/web/.e2e-state/fleet"
 BASE_URL="http://127.0.0.1:4177"
 
 # 版の切替を無害にする（CICD設計§4・§6）。**ここはホストで本物のバイナリを起こす**ので、
