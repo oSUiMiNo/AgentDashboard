@@ -359,8 +359,25 @@ const BARE_ENV_ALIASES: &[(&str, &str)] = &[
 mod tests {
     use super::*;
 
+    /// 環境変数を触るテストを1本ずつにする錠。
+    ///
+    /// **環境変数はプロセス全体のもの**なので、同じプロセスの別スレッドが同時に触ると
+    /// 取り合いになる。`make test` は nextest（テストごとに別プロセス）なので緑のままだが、
+    /// **`cargo test` を直に叩くと落ちる**。
+    ///
+    /// **読むだけのテストも取る。** `from_toml_str` は環境変数を当ててから組み立てるので、
+    /// 上書きを試すテストと同居すると、その値を掴んだまま読むことになる
+    /// （`session-host-core` の同名の錠と同じ理由。PJTガイドライン）。
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn 空のtomlは設計12の既定値になる() {
+        let _lock = env_lock();
         let config = Config::from_toml_str("").unwrap();
         assert_eq!(config, Config::default());
         assert_eq!(config.stalled_threshold_secs, 120);
@@ -379,6 +396,7 @@ mod tests {
 
     #[test]
     fn 雛形は全キーを網羅し既定値と一致する() {
+        let _lock = env_lock();
         // `config.toml.example` は利用者が最初に読む設定の一覧であり、README の設定表の
         // 元ネタでもある。ここが実装より遅れていると、増えたキーの存在に誰も気づけない
         // （実際にフェーズ5で増えた3キーが雛形に載らないまま残っていた）。
@@ -428,6 +446,7 @@ mod tests {
 
     #[test]
     fn 権限確認スキップの既定はオフ() {
+        let _lock = env_lock();
         // 権限確認を飛ばす機能なので、既定は必ずスキップしない側に置く（設計§9）
         assert!(!Config::default().always_bypass_permissions);
         let config = Config::from_toml_str("always_bypass_permissions = true").unwrap();
@@ -436,6 +455,7 @@ mod tests {
 
     #[test]
     fn 明示したリポジトリが存在しなければ使わない() {
+        let _lock = env_lock();
         // 設定の打ち間違いに気づかず「修復したつもり」で別の場所を触るほうが危ない。
         // 実在しないなら None にして、検知の通知だけに落とす
         let config = Config::from_toml_str(r#"selfheal_repo_dir = "/nonexistent/repo""#).unwrap();
@@ -444,6 +464,7 @@ mod tests {
 
     #[test]
     fn 指定したキーだけが上書きされる() {
+        let _lock = env_lock();
         let config = Config::from_toml_str(
             r#"
             port = 9999
@@ -461,12 +482,14 @@ mod tests {
 
     #[test]
     fn 型不一致は書式エラーになる() {
+        let _lock = env_lock();
         let err = Config::from_toml_str(r#"port = "8787""#).unwrap_err();
         assert!(matches!(err, ConfigError::Parse { .. }), "実際: {err:?}");
     }
 
     #[test]
     fn 知らないキーは書式エラーになる() {
+        let _lock = env_lock();
         // 打ち間違いを黙って無視すると「設定したのに効かない」事故になるため弾く。
         //
         // **2構造体を `#[serde(flatten)]` で束ねると、この検査は静かに効かなくなる。**
@@ -477,6 +500,7 @@ mod tests {
 
     #[test]
     fn 範囲外の値は値エラーになる() {
+        let _lock = env_lock();
         for text in [
             "port = 0",
             "coalesce_ms = 0",
@@ -494,6 +518,7 @@ mod tests {
 
     #[test]
     fn flow_lowがflow_high以上なら値エラーになる() {
+        let _lock = env_lock();
         let err = Config::from_toml_str(
             r#"
             flow_high = 1024
@@ -506,12 +531,14 @@ mod tests {
 
     #[test]
     fn 存在しないファイルを明示指定したら読み取りエラーになる() {
+        let _lock = env_lock();
         let err = Config::load(Some(Path::new("/nonexistent/config.toml"))).unwrap_err();
         assert!(matches!(err, ConfigError::Read { .. }), "実際: {err:?}");
     }
 
     #[test]
     fn 射影が全キーを漏らさず運ぶ() {
+        let _lock = env_lock();
         // 既定値と違う値を全キーへ入れて、両側の射影がそれを運ぶことを見る。
         // 片方の射影でフィールドを写し忘れると、そのキーだけ**黙って既定値に戻る**という
         // 追いにくい壊れ方になる（設定したのに効かない、という利用者から見て同じ症状）。
@@ -604,6 +631,7 @@ mod tests {
 
     #[test]
     fn 全キーが環境変数で上書きできる() {
+        let _lock = env_lock();
         // compose は設定ファイルを配らず環境変数で渡す（設計§14-1）。1つでも
         // 対応していないキーがあると「そのキーだけコンテナで設定できない」という、
         // 配ってからでないと気づけない穴になる。
@@ -635,6 +663,7 @@ mod tests {
 
     #[test]
     fn 環境変数はファイルより強い() {
+        let _lock = env_lock();
         // 設定ファイルを同梱したイメージへ、環境変数だけで別の値を渡せること
         unsafe { std::env::set_var("AGENTDASHBOARD_PORT", "9100") };
         let config = Config::from_toml_str("port = 8787").unwrap();
@@ -644,6 +673,7 @@ mod tests {
 
     #[test]
     fn 裸の名前の環境変数も受けるが接頭辞つきが勝つ() {
+        let _lock = env_lock();
         // compose の慣行（設計§14-1 の例）に合わせる。ただし裸の名前は他のソフトウェアと
         // 衝突しうるので、こちらの名前を先に見る
         unsafe { std::env::set_var("DATABASE_URL", "postgres://bare/db") };
@@ -664,6 +694,7 @@ mod tests {
 
     #[test]
     fn 環境変数の型が合わなければ理由を出して断る() {
+        let _lock = env_lock();
         // 素通しして「設定したのに効かない」になるより、その場で断るほうがよい
         unsafe { std::env::set_var("AGENTDASHBOARD_PORT", "はちななはちなな") };
         let err = Config::from_toml_str("").unwrap_err();
@@ -680,6 +711,7 @@ mod tests {
 
     #[test]
     fn 記録の置き場所は状態の置き場所の隣になる() {
+        let _lock = env_lock();
         // 消えると**一覧と履歴が丸ごと消える**ので、再開位置と同じ扱いにする
         let config = Config::from_toml_str(r#"state_dir = "/tmp/adash-state""#).unwrap();
         assert_eq!(
@@ -702,6 +734,7 @@ mod tests {
 
     #[test]
     fn フックの宛先は待ち受けと同じポートになる() {
+        let _lock = env_lock();
         // ローカルモードではフックの受信口がブラウザと同じポートに同居している。
         // 既定値が食い違うと、settings に焼き込まれた宛先が誰も待っていない場所を指し、
         // 「フックが1件も来ない」という形でしか表に出ない（設計§11 の縮退表示）
