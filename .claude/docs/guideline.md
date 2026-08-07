@@ -175,6 +175,21 @@ scripts/cargo tree -i tokio-tungstenite -e normal
 `identifiers cannot start with a number` でコンパイルが通らない（Rust の識別子の規則は
 文字種に関わらず効く）。**数を頭に置きたいときは漢数字にする**（`三つ組として…`）。
 
+### 正規表現に素の `(?i)` を書くと、コンパイルは通って実行時に落ちる
+`regex` は **`default-features = false`** で入れてある（配布物を軽く保つため。理由は
+`server/Cargo.toml` の当該行にある）。したがって **`unicode-case` を持っていない**ので、
+`(?i)` は `Unicode-aware case insensitivity matching is not available` で
+**`Regex::new` が `Err` を返す**。
+
+定数の正規表現は `.expect("定数の正規表現")` で組み立てるのが本 PJT の作法なので、
+**落ちるのはコンパイル時ではなく、その関数が最初に呼ばれたとき**になる。しかも
+落ちるのは大文字小文字を無視したかった1本だけなので、**その経路を通るテストが
+無ければ緑のまま出荷される**。
+
+大文字小文字を無視したいときは **`(?i-u)`** と書く。`-u` で Unicode モードを外すと
+ASCII の畳み込みになり、機能を足さずに済む。**機能を足して解決しない**——
+`unicode-case` は `regex-automata` の表を引き込むので、配布物の大きさに直接効く。
+
 ### 日本語のテスト名に ASCII の大文字を混ぜない
 同じ性質のもう1つ。`fn 割れない名前はNone()` や `fn 別のPCは引けない()` は
 **`non_snake_case` で落ちる**（`-D warnings` なので警告ではなく失敗になる）。日本語の
