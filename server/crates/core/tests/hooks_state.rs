@@ -365,3 +365,46 @@ async fn api_sessionsが現在の一覧を返す() {
     assert_eq!(sessions[0].card_id, session.card_id);
     assert_eq!(sessions[0].status, SessionStatus::Working);
 }
+
+/// 経路が痕跡を残し、`card_id` で串刺しにできること（設計§16-1 の2・3）。
+///
+/// **相関キーを載せて回る作業（§10-4）の効果は、これでしか言えない。** 形が JSON に
+/// なっただけでは `--card` から何も引けず、土台だけ入れた状態と区別が付かない。
+#[tokio::test]
+async fn 一本のセッションを起こすと_card_id_で串刺しにできる() {
+    let server = common::TestServer::start().await;
+    let sink = session_host_core::logging::capture::sink();
+    let mark = sink.mark();
+
+    let (session, mut watcher) = common::start_session(&server.manager).await;
+    // **SessionStart を通す。** トランスクリプトの場所が確定して、パーサへ監視を
+    // 頼む経路（`card_id` つき）が走る。正常系で `card_id` が載る数少ない行のひとつ
+    common::fire_hook(&session, &mut watcher, "SessionStart", "").await;
+    common::wait_for_status(&session, SessionStatus::WaitingInput).await;
+    server
+        .post_hook(session.token(), "UserPromptSubmit", "{}")
+        .await;
+    common::wait_for_status(&session, SessionStatus::Working).await;
+    session.kill();
+
+    let lines = sink.matching(mark, "card_id", &session.card_id.to_string());
+    assert!(
+        !lines.is_empty(),
+        "card_id で引ける行が1つも無い。相関キーが載っていない"
+    );
+
+    // 必須7欄（§2-1）。**1行1レコードとして読めること**
+    for line in &lines {
+        for field in ["ts", "level", "target", "proc", "pid", "run_id", "msg"] {
+            assert!(line.get(field).is_some(), "{field} が無い: {line}");
+        }
+    }
+
+    // 串刺しの実体は「複数の経路にまたがること」。1つの target からしか出ないなら、
+    // それは1箇所が喋っているだけで、串刺しにはなっていない
+    let targets: std::collections::BTreeSet<&str> = lines
+        .iter()
+        .filter_map(|line| line["target"].as_str())
+        .collect();
+    assert!(!targets.is_empty(), "target が読めない: {lines:#?}");
+}
