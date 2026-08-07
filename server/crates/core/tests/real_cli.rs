@@ -68,6 +68,20 @@ impl WorkDir {
 
 impl Drop for WorkDir {
     fn drop(&mut self) {
+        // **落ちたときは消さない。** ここには段1 で入れたログ（`<state_dir>/logs/*.jsonl`）が
+        // 入っており、丸ごと消すと「なぜ落ちたか」を書いた材料ごと失う。実際、実CLI が6本
+        // 落ちた回はここで全部消えていて、原因が1つも辿れなかった。
+        //
+        // `FakeHome`（`dist/tests/common/mod.rs`）は場所を出してから消すが、こちらは
+        // **中身を読みに行く**ので残すところまでやる。実CLI は `#[ignore]` で明示的にしか
+        // 走らないので、落ちたときだけ /tmp に残るのは許容できる。
+        if std::thread::panicking() {
+            eprintln!(
+                "落ちたので作業ディレクトリを残します（調べるならここ）: {}",
+                self.0.display()
+            );
+            return;
+        }
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
@@ -1186,6 +1200,13 @@ struct RemotePair {
     addr: std::net::SocketAddr,
     server: std::process::Child,
     agent: std::process::Child,
+    /// 管理者の入館証。
+    ///
+    /// **セルフホストはログインしないと何も見えない**（セルフホスト化設計§8-6）。
+    /// ここが無いまま `/api/settings` を叩くと 401 が返り、「まだ起きていない」と
+    /// 「まだ通っていない」が同じ形になる——ガイドライン「起動待ちに鍵の向こうの口を
+    /// 使わない」が名指ししている壊れ方で、実際にこの4本が180秒待って落ちていた。
+    cookie: Option<String>,
 }
 
 impl Drop for RemotePair {
@@ -1194,6 +1215,77 @@ impl Drop for RemotePair {
         let _ = self.agent.wait();
         let _ = self.server.kill();
         let _ = self.server.wait();
+    }
+}
+
+/// 立ち上がらなかったときに、その理由を書いた材料を集める。
+///
+/// **設計§16-2 の予行である。** 「PC が名乗りませんでした」という症状だけを渡されて
+/// コードを読みに行くのではなく、**ログの行から範囲を絞れること**を、テストの失敗
+/// メッセージそのもので果たす。ここが空なら、それ自体が「経路が痕跡を残していない」
+/// という発見になる。
+///
+/// 端末層（`*.log`）とファイル層（`<state_dir>/logs/*.jsonl`）の両方を出す。前者は
+/// 人が読む形で水位が `info`、後者は JSON で水位が `debug` なので、**同じ事象でも
+/// 片方にしか出ないことがある**。
+fn 立ち上がりの手がかり(work: &Path) -> String {
+    let mut out = String::new();
+    for (label, path) in [
+        ("サーバの端末出力", work.join("server.log")),
+        ("セッションホストの端末出力", work.join("agent.log")),
+    ] {
+        out.push_str(&format!(
+            "\n===== {label}（{}）=====\n{}",
+            path.display(),
+            末尾を読む(&path)
+        ));
+    }
+    for (label, logs) in [
+        ("サーバのログ", work.join("server/logs")),
+        ("セッションホストのログ", work.join("agent/logs")),
+    ] {
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(&logs)
+            .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+            .unwrap_or_default();
+        paths.sort();
+        let mut body = String::new();
+        for path in &paths {
+            body.push_str(&末尾を読む(path));
+        }
+        if body.is_empty() {
+            // **黙って空を返さない。** ログが1行も無いこと自体が手がかりになる
+            body.push_str("（ファイルが1つも無い）\n");
+        }
+        out.push_str(&format!(
+            "\n===== {label}（{}）=====\n{body}",
+            logs.display()
+        ));
+    }
+    out
+}
+
+/// ファイルの末尾を読む。**無い・空・読めないを区別して言う**——黙って空を返すと、
+/// 書けなかったのか読めなかったのかが分からなくなる。
+fn 末尾を読む(path: &Path) -> String {
+    /// 1ファイルあたりの上限。文字数で切る（バイトで切ると日本語の途中で割れる）
+    const TAIL_CHARS: usize = 3_000;
+
+    match std::fs::read_to_string(path) {
+        Ok(text) if text.is_empty() => "（空）\n".to_string(),
+        Ok(text) => {
+            let start = text
+                .char_indices()
+                .rev()
+                .take(TAIL_CHARS)
+                .last()
+                .map_or(0, |(at, _)| at);
+            let mut tail = text[start..].to_string();
+            if !tail.ends_with('\n') {
+                tail.push('\n');
+            }
+            tail
+        }
+        Err(err) => format!("（読めない: {err}）\n"),
     }
 }
 
@@ -1224,20 +1316,28 @@ impl RemotePair {
             .arg("--config")
             .arg(&server_config)
             .arg("pair-token")
+            // **ブラウザで入るアカウントと同じにする。** 違うアカウントのトークンで
+            // 繋いだ PC は、そのアカウントでログインしないと見えない（§8-6）
             .arg("--account")
-            .arg("実CLI")
+            .arg(REMOTE_ACCOUNT)
             .output()
             .expect("トークンを発行できること");
         let token = String::from_utf8_lossy(&issued.stdout).trim().to_string();
         assert!(token.starts_with("adp_"), "実際: {token}");
 
+        // **出力を捨てない。** 立ち上がらなかったときに理由を書いているのはここで、
+        // `Stdio::null()` にしていたせいで「PC が名乗りませんでした」としか言えない状態が
+        // 続いていた。標準出力は捨てたままでよい（端末層は stderr。設計§5-1）
         let server = Command::new(testkit::binary_path("agentdashboard"))
             .arg("--config")
             .arg(&server_config)
             .arg("--mode")
             .arg("server")
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::from(
+                std::fs::File::create(dir.path().join("server.log"))
+                    .expect("サーバの出力先を作れること"),
+            ))
             .spawn()
             .expect("サーバを起動できること");
 
@@ -1273,16 +1373,25 @@ impl RemotePair {
                 common::parser_program(),
             )
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::from(
+                std::fs::File::create(dir.path().join("agent.log"))
+                    .expect("セッションホストの出力先を作れること"),
+            ))
             .spawn()
             .expect("セッションホストを起動できること");
 
-        let pair = Self {
+        let mut pair = Self {
             dir,
             addr,
             server,
             agent,
+            cookie: None,
         };
+
+        // **まず鍵の外側で待ち、そのあと管理者を作る。** 待ち合わせに鍵の内側の口を使うと、
+        // 「まだ起きていない」と「まだ通っていない」がどちらも空に見えて永久に待つ
+        pair.wait_until_listening().await;
+        pair.setup_admin().await;
 
         // 名乗りが済むと、PC の能力（権限モード）が設定に現れる
         let deadline = Instant::now() + CLI_TIMEOUT;
@@ -1292,7 +1401,8 @@ impl RemotePair {
             }
             assert!(
                 Instant::now() < deadline,
-                "{CLI_TIMEOUT:?} 以内に PC が名乗りませんでした"
+                "{CLI_TIMEOUT:?} 以内に PC が名乗りませんでした。{}",
+                立ち上がりの手がかり(pair.dir.path())
             );
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
@@ -1315,23 +1425,80 @@ impl RemotePair {
             .unwrap_or_default()
     }
 
+    /// 待ち受けが始まるまで待つ。**鍵の外側の口で見る**（`/api/me` は素通し）。
+    async fn wait_until_listening(&self) {
+        let deadline = Instant::now() + CLI_TIMEOUT;
+        loop {
+            if let Some((200, _)) = self.get("/api/me").await {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{CLI_TIMEOUT:?} 以内にサーバが待ち受けませんでした。{}",
+                立ち上がりの手がかり(self.dir.path())
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    /// 最初の管理者を作り、その入館証を持ち回る（`two_process.rs` と同じ形）。
+    ///
+    /// **アカウント名はトークンを発行したときと同じ [`REMOTE_ACCOUNT`] にする。**
+    /// 違うアカウントで入ると、そのトークンで繋いだ PC は**見えているのに見えない**
+    /// ——接続もペアリングも成功したまま、こちらの一覧にだけ現れない（§8-6）。
+    async fn setup_admin(&mut self) {
+        let addr = self.addr;
+        let body =
+            serde_json::json!({ "name": REMOTE_ACCOUNT, "password": REMOTE_PASSWORD }).to_string();
+        let response = tokio::task::spawn_blocking(move || {
+            testkit::request(addr, "POST", "/api/setup", Some(&body), None)
+        })
+        .await
+        .expect("スレッドが落ちないこと")
+        .expect("セットアップの応答を読めること");
+        assert_eq!(response.status, 200, "管理者を作れない: {}", response.body);
+        self.cookie = response.cookie;
+        assert!(self.cookie.is_some(), "入館証が発行されていない");
+    }
+
     async fn get(&self, path: &str) -> Option<(u16, String)> {
-        let (addr, path) = (self.addr, path.to_string());
-        tokio::task::spawn_blocking(move || testkit::get(addr, &path))
-            .await
-            .ok()?
-            .ok()
+        let (addr, path, cookie) = (self.addr, path.to_string(), self.cookie.clone());
+        tokio::task::spawn_blocking(move || {
+            testkit::request(addr, "GET", &path, None, cookie.as_deref())
+        })
+        .await
+        .ok()?
+        .ok()
+        .map(|response| (response.status, response.body))
     }
 
     /// ブラウザの役で繋ぐ。
     async fn browser(&self) -> Browser {
-        browser_at(self.addr).await
+        browser_at(self.addr, self.cookie.as_deref()).await
     }
 }
 
 /// 待ち受けている相手へ、ブラウザの役で繋ぐ。
-async fn browser_at(addr: std::net::SocketAddr) -> Browser {
-    let (socket, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+///
+/// **入館証は任意。** ローカルモード（鍵なし）とセルフホスト（鍵あり）の両方から
+/// 呼ばれるので、持っていない側に無理やり持たせない。
+async fn browser_at(addr: std::net::SocketAddr, cookie: Option<&str>) -> Browser {
+    // `/ws` も REST と同じ Cookie で認証する（セルフホスト化設計§8-2）ので、
+    // 載せないと upgrade の手前で 401 になる
+    let request = tokio_tungstenite::tungstenite::http::Request::builder()
+        .uri(format!("ws://{addr}/ws"))
+        .header("Host", addr.to_string())
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header(
+            "Sec-WebSocket-Key",
+            tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+        )
+        .header("Cookie", cookie.unwrap_or_default())
+        .body(())
+        .expect("要求を組み立てられること");
+    let (socket, _) = tokio_tungstenite::connect_async(request)
         .await
         .expect("ブラウザとして繋げること");
     Browser {
@@ -1345,6 +1512,11 @@ async fn browser_at(addr: std::net::SocketAddr) -> Browser {
 /// 実CLI のリモート検証で使う端末の大きさ。
 const SCREEN_COLS: u16 = 120;
 const SCREEN_ROWS: u16 = 40;
+
+/// リモート構成で使うアカウント。**トークンの発行とログインで同じものを使う**
+/// （`two_process.rs` と同じ理由。§8-6）。
+const REMOTE_ACCOUNT: &str = "実CLI";
+const REMOTE_PASSWORD: &str = "つよいあいことば";
 
 /// 空いているポートを1つ借りる。
 fn free_port() -> u16 {
@@ -1920,7 +2092,8 @@ impl HandoverDashboard {
     }
 
     async fn browser(&self) -> Browser {
-        browser_at(self.addr).await
+        // こちらはローカルモード（鍵なし）なので入館証は持たない
+        browser_at(self.addr, None).await
     }
 
     /// セッションを1本起こし、入力待ちになるまで見届ける。
