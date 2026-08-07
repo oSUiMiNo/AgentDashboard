@@ -302,7 +302,12 @@ async fn pump(
         tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                tracing::warn!("transcript-parser: {line}");
+                match strip_pid(&line) {
+                    Some((pid, rest)) => {
+                        tracing::warn!(parser_pid = pid, "transcript-parser: {rest}");
+                    }
+                    None => tracing::warn!("transcript-parser: {line}"),
+                }
             }
         });
     }
@@ -487,11 +492,49 @@ fn handle_event(
     }
 }
 
+/// パーサが前置した `[<pid>] ` を剥がす（ログ設計§8-3）。
+///
+/// **剥がせなければ丸ごと本文として扱い、警告も出さない。** ここはパーサの stderr を
+/// そのまま運ぶ道であって、書式を強制する道ではない。厳しくすると、
+///
+/// - 前置を持たない古いパーサ（保管庫や自己修復が置いた版）を繋いだ瞬間に警告が洪水になる
+/// - `[` で始まる panic メッセージやバックトレースを壊す
+///
+/// という形で、**いちばん読みたい行を潰す**。
+fn strip_pid(line: &str) -> Option<(u32, &str)> {
+    let rest = line.strip_prefix('[')?;
+    let (pid, rest) = rest.split_once("] ")?;
+    Some((pid.parse().ok()?, rest))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(non_snake_case)]
 
     use super::*;
+
+    #[test]
+    fn 前置したpidを剥がして欄へ移せる() {
+        assert_eq!(
+            strip_pid("[15637] ファイル監視を使えないので巡回だけで動きます: x"),
+            Some((15637, "ファイル監視を使えないので巡回だけで動きます: x"))
+        );
+    }
+
+    #[test]
+    fn 剥がせない行は丸ごと本文として残す() {
+        // 前置を持たない古いパーサ、panic メッセージ、バックトレース
+        for line in [
+            "前置の無い行",
+            "[まだ] 数字ではない",
+            "[15637]区切りが無い",
+            "[",
+            "",
+            "thread 'main' panicked at src/main.rs:1:1:",
+        ] {
+            assert!(strip_pid(line).is_none(), "{line} を剥がしてしまった");
+        }
+    }
 
     /// 監視を頼むときの「ここから読め」は、保存済みの位置をそのまま渡す。
     ///

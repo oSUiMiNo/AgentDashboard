@@ -50,6 +50,21 @@ const FORBIDDEN: &[(&str, &[&str])] = &[
             "redis",
         ],
     ),
+    // **パーサには `tracing` を持たせない**（ログ設計§8-3）。理由は2つあり、どちらも
+    // 「入れた瞬間に静かに壊れる」性質を持つ。
+    //
+    // 1. `tracing_subscriber::fmt()` の既定の書き出し先は **stdout**。パーサの stdout は
+    //    IPC 専用で、1行でも混ざると「繋がっているのに何も届かない」沈黙になる。
+    //    そして**この crate は丸ごと、無人の claude が書き換えてよい範囲**にあり
+    //    （`selfheal/repair.rs` の許可リスト）、修復のテストゲートは stdout 汚染を見ない
+    // 2. 修復中のビルド時間は利用者の待ち時間そのもの。現在の依存は6つで、
+    //    `tracing` 一式を足すと倍以上になる
+    //
+    // ログは今までどおり `eprintln!` で stderr へ出し、親が拾って合流させる。
+    (
+        "transcript-parser",
+        &["tracing", "tracing-subscriber", "tracing-appender"],
+    ),
 ];
 
 /// 「この crate の `Cargo.toml` に、通常の依存として**直に**書いてはいけない」。

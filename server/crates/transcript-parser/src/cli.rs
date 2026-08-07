@@ -157,6 +157,30 @@ fn split_event(event: ParserEvent) -> Vec<ParserEvent> {
         .collect()
 }
 
+/// stderr へ1行残す。**必ずこの口を通す。**
+///
+/// 行の先頭に `[<pid>]` を付けるのがこの関数の仕事（ログ設計§8-3）。親
+/// （`session-host-core` の `parser.rs`）が拾うとき、ここを剥がして `parser_pid` の
+/// 欄へ移す。
+///
+/// # なぜ前置するのか
+///
+/// 親は `child.id()` でも pid を知れるが、それは「親がいま掴んでいる子」であって
+/// **その行を書いた主体とは限らない**。孤児になったパーサの行は新しい親の stderr へは
+/// 流れないので、**前置だけが「どの起動に紐づく子か」を支える**（未解明事象2）。
+///
+/// # stdout には絶対に書かない
+///
+/// あちらは IPC 専用で、1行でも混ざると「繋がっているのに何も届かない」沈黙になる。
+fn note(args: std::fmt::Arguments<'_>) {
+    eprintln!("{}", format_note(std::process::id(), args));
+}
+
+/// 前置を組む純関数。`eprintln!` そのものは捕まえられないので、判断はこちらに置く。
+fn format_note(pid: u32, args: std::fmt::Arguments<'_>) -> String {
+    format!("[{pid}] {args}")
+}
+
 fn emit(event: &ParserEvent) {
     let Ok(line) = serde_json::to_string(event) else {
         return;
@@ -183,7 +207,9 @@ fn spawn_stdin_reader(tx: Sender<Message>) {
                     }
                 }
                 // 知らない指示で落ちない。core が新しくなっても動き続ける
-                Err(error) => eprintln!("解釈できない指示を無視しました: {error}: {line}"),
+                Err(error) => note(format_args!(
+                    "解釈できない指示を無視しました: {error}: {line}"
+                )),
             }
         }
         let _ = tx.send(Message::Stop);
@@ -245,7 +271,9 @@ fn spawn_watcher(tx: Sender<Message>) -> anyhow::Result<Option<DirWatcher>> {
     let watcher = match DirWatcher::new(notify_tx) {
         Ok(watcher) => watcher,
         Err(error) => {
-            eprintln!("ファイル監視を使えないので巡回だけで動きます: {error}");
+            note(format_args!(
+                "ファイル監視を使えないので巡回だけで動きます: {error}"
+            ));
             return Ok(None);
         }
     };
@@ -265,6 +293,20 @@ mod tests {
 
     use super::*;
     use protocol::{Node, NodeId, TreeNode};
+
+    #[test]
+    fn stderrの行は先頭にpidが付く() {
+        // 親（session-host-core の parser.rs）がここを剥がして parser_pid へ移す。
+        // 孤児になった子の行は新しい親へは流れないので、前置だけが
+        // 「どの起動に紐づく子か」を支える
+        assert_eq!(
+            format_note(
+                15637,
+                format_args!("ファイル監視を使えないので巡回だけで動きます: x")
+            ),
+            "[15637] ファイル監視を使えないので巡回だけで動きます: x"
+        );
+    }
 
     fn node(offset: u64) -> ParsedNode {
         ParsedNode {
