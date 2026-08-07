@@ -1458,6 +1458,74 @@ mod tests {
             lines
         }
 
+        /// レベルとターゲットを指定して1行流し、ファイルへ残ったかを返す。
+        fn 出るか(level: &str, emit: impl FnOnce()) -> Vec<String> {
+            let dir = std::env::temp_dir().join(format!(
+                "agentdashboard-logging-level-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4().simple()
+            ));
+            let config = SessionHostConfig {
+                state_dir: Some(dir.clone()),
+                log_file_level: level.to_owned(),
+                ..Default::default()
+            };
+            let mut built = build_file_layer(Proc::Dashboard, &config);
+            let layer = built.layer.take();
+            let path = built
+                .guard
+                .log_path()
+                .map(Path::to_path_buf)
+                .expect("組めること");
+            let Built { guard, .. } = built;
+
+            let subscriber = tracing_subscriber::registry().with(layer);
+            tracing::subscriber::with_default(subscriber, emit);
+            drop(guard);
+
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let lines: Vec<String> = text
+                .lines()
+                .filter(|line| !line.contains("ログを開始しました"))
+                .map(str::to_owned)
+                .collect();
+            let _ = std::fs::remove_dir_all(&dir);
+            lines
+        }
+
+        #[test]
+        fn ファイル層の水位はlog_file_levelで決まる() {
+            // **`RUST_LOG` ではない。** 分けておかないと「詳しく出したくて
+            // `RUST_LOG=debug` にしたら端末が読めなくなった」になる
+            let 出た = 出るか("debug", || tracing::debug!("細かい話"));
+            assert_eq!(出た.len(), 1, "debug なら出ること: {出た:?}");
+
+            let 出ない = 出るか("warn", || tracing::debug!("細かい話"));
+            assert!(出ない.is_empty(), "warn なら落ちること: {出ない:?}");
+        }
+
+        #[test]
+        fn 第三者クレートの行はファイル層に出ない() {
+            // `sea_orm=warn` は starts_with なので `sea_orm_migration` も飲む。
+            // より長い指定で救っていることを、実際に流して確かめる
+            let 出ない = 出るか("debug", || tracing::debug!(target: "hyper", "内部の話"));
+            assert!(出ない.is_empty(), "hyper の debug が出ている: {出ない:?}");
+
+            let 出た = 出るか(
+                "debug",
+                || tracing::info!(target: "sea_orm_migration::migrator::exec", "移行しました"),
+            );
+            assert_eq!(出た.len(), 1, "移行の記録まで落ちている: {出た:?}");
+        }
+
+        #[test]
+        fn run_idは同じ起動の中では変わらない() {
+            // 起動ごとに変わることは uuid v4 と OnceLock が担保する。
+            // ここで見られるのは「同じ起動の中で変わらない」ほう
+            assert_eq!(run_id(), run_id());
+            assert_eq!(run_id().len(), 32, "簡略形の UUID であること");
+        }
+
         #[test]
         fn guardを持ち続ければ全部残る() {
             let lines = 流す(true);
