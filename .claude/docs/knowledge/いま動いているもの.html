@@ -133,7 +133,13 @@
     <li>セッションホスト<span class="mark">▽</span> … <code>~/agentdashboard-agent/state/logs/</code></li>
   </ul>
   <code>~/agentdashboard-run.log</code> などの <code>run.log</code> は<strong>端末のぶん</strong>で、これまでどおり残る。
-  読む口（<code>agentdashboard logs</code>）は段2 で作るので、いまは <code>jq</code> で読む。
+  <p><strong>読むときは <code>--state-dir</code> が要る。</strong>
+  <code>agentdashboard logs</code> は<strong>設定を読まない</strong>ので、上の3台のように
+  <code>state_dir</code> を移していると<strong>既定では当たらない</strong>（「ログの置き場所がまだありません」と出る）。</p>
+  <pre><code>agentdashboard logs --since 24h --state-dir "$(agentdashboard state-dir)"
+agentdashboard-agent logs --since 24h --state-dir ~/agentdashboard-agent/state</code></pre>
+  <p>セッションホスト<span class="mark">▽</span>側に <code>state-dir</code> の口は無いので、
+  <code>agent.toml</code> の <code>state_dir</code> を直に渡す。生ファイルは今までどおり <code>jq</code> でも読める。</p>
 </div>
 
 <h2>一覧</h2>
