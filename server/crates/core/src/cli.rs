@@ -109,6 +109,16 @@ enum Command {
         #[arg(long, value_name = "LABEL", default_value = "")]
         label: String,
     },
+    /// ログを読む（ログ設計§11）
+    ///
+    /// **読めるのは、この機械の `<state_dir>/logs/` にあるファイルだけ。** 実配置は
+    /// 3台に分かれているので、別の PC のログとサーバのログはここからは見えない。
+    /// `--host` はまだ効かない——引きたい PC の上で `agentdashboard-agent logs` を叩く。
+    ///
+    /// **設定ファイルは読まない。** ログを見たいのはたいてい設定を触った直後なので、
+    /// 設定が壊れていても読める側に倒してある。置き場所を移している場合は
+    /// `--state-dir` で直接指すこと。
+    Logs(session_host_core::logs::LogsArgs),
 }
 
 /// `agentdashboard` の入口。
@@ -150,6 +160,21 @@ pub fn run() -> anyhow::Result<()> {
             println!("{name}");
         }
         return Ok(());
+    }
+    // ログを読む口も設定より前（ログ設計§11-2）。**設定が壊れているときこそ読みたい**
+    // ので、設定の失敗に巻き込まれてはいけない。引き換えに設定で置き場所を移している
+    // 利用者のログは既定では読めないので、`--state-dir` を持たせてある
+    if let Some(Command::Logs(args)) = &cli.command {
+        if cli.config.is_some() {
+            // `--config` は global なのでここまで通ってしまうが、この口は設定を読まない。
+            // **黙って無視すると「指したのに効かない」になる**
+            eprintln!(
+                "注意：`logs` は設定ファイルを読まないので `--config` は効きません。置き場所を指すなら `--state-dir` を使ってください。"
+            );
+        }
+        // **`logging::install` を呼ばない。** 呼ぶと起動時の掃除が走り、これから読む
+        // ファイルを自分で掃くことになる
+        return session_host_core::logs::run(args);
     }
 
     // **設定の失敗をここでは出さない。** 素直に `?` を付けると、設定が壊れている利用者は
@@ -208,7 +233,8 @@ async fn run_async(cli: Cli, config: Config) -> anyhow::Result<()> {
         // 上で先に処理して戻っている
         Some(Command::HookPost { .. })
         | Some(Command::ModelPost { .. })
-        | Some(Command::Migrations) => unreachable!(),
+        | Some(Command::Migrations)
+        | Some(Command::Logs(_)) => unreachable!(),
         None => {
             // **返り値を捨ててはいけない。** 非ブロッキング書き込みの見張り役なので、
             // 落とすと書き終わる前にプロセスが終わりうる（実測：200行のうち0行）。

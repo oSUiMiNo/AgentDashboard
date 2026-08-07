@@ -78,11 +78,29 @@ enum Command {
         #[arg(long, value_name = "URL")]
         url: String,
     },
+    /// ログを読む（ログ設計§11）
+    ///
+    /// **読めるのは、この PC の `<state_dir>/logs/` にあるファイルだけ。** サーバ側の
+    /// ログはサーバの上で `agentdashboard logs` を叩く。
+    ///
+    /// **設定ファイルは読まない。** 置き場所を移している場合は `--state-dir` で直接指す。
+    /// 中身はローカルモードの `agentdashboard logs` と**同じもの**（`session_host_core`
+    /// の関数）。
+    Logs(session_host_core::logs::LogsArgs),
 }
 
 /// セッションホストの入口。
-#[tokio::main]
-pub async fn run() -> anyhow::Result<()> {
+///
+/// # なぜ同期と非同期に割ってあるのか
+///
+/// 早期に処理する口（転送とログ）は**同期の処理しか含まない**ので、非同期ランタイムを
+/// 立てる理由が1つも無い。とくに転送はフックのイベントごとに起こされる熱い経路で、
+/// 1回ごとにランタイムを立てて捨てるのは無駄でしかない。`agentdashboard` 側（`cli.rs`）が
+/// 同じ形になっているので、両方の CLI の骨格も揃う。
+///
+/// `#[tokio::main]` は展開後に同期の `fn` になるので、`crates/dist` の入口（1行）から
+/// 見た形は変わらない。
+pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // 転送は設定より先に処理する。フックは**利用者のプロジェクトを作業ディレクトリとして**
@@ -97,9 +115,19 @@ pub async fn run() -> anyhow::Result<()> {
             model_post::run(url);
             return Ok(());
         }
+        // ログを読む口も設定より前（ログ設計§11-2）。**設定が壊れているときこそ読みたい**。
+        // **`logging::install` は呼ばない**——呼ぶと起動時の掃除が走り、これから読む
+        // ファイルを自分で掃くことになる
+        Some(Command::Logs(args)) => return session_host_core::logs::run(args),
         None => {}
     }
 
+    run_async(cli)
+}
+
+/// ここから先は今までどおり。
+#[tokio::main]
+async fn run_async(cli: Cli) -> anyhow::Result<()> {
     // **設定の読み込みをログ層より前に置く。** ログの置き場所とレベルが設定で決まる
     // ため。読めなかった場合は `?` で抜け、`main` の Termination が理由を stderr へ
     // 書く——ここでログ層が組めている必要はない（入れ替える前も、この2つの間に
