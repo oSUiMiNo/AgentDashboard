@@ -10,7 +10,7 @@
 
 use clap::{Parser, Subcommand, ValueEnum};
 use server_core::embed;
-use session_host_core::{hook_post, model_post};
+use session_host_core::{hook_post, logging, model_post};
 use std::path::PathBuf;
 
 use crate::{boot, config::Config, serve, serve_server};
@@ -210,12 +210,10 @@ async fn run_async(cli: Cli, config: Config) -> anyhow::Result<()> {
         | Some(Command::ModelPost { .. })
         | Some(Command::Migrations) => unreachable!(),
         None => {
-            tracing_subscriber::fmt()
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| "info".into()),
-                )
-                .init();
+            // **返り値を捨ててはいけない。** 非ブロッキング書き込みの見張り役なので、
+            // 落とすと書き終わる前にプロセスが終わりうる（実測：200行のうち0行）。
+            // `serve` の間ずっと持つ形になっている
+            let _log = logging::install(logging::Proc::Dashboard, &config.agent());
             // **どの実行ファイルで動いているかを最初に出す。** 版を切り替えられるように
             // なると「更新したのに変わらない」が起こりうるが、画面へ版が出るのは先の
             // フェーズなので、実機で異常が出たときの切り分けはここだけが頼りになる

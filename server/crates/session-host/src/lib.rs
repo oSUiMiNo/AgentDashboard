@@ -25,6 +25,7 @@ use session_host_core::{
     config::SessionHostConfig,
     hook_post, hooks,
     link::{LinkConfig, SessionHostLink},
+    logging,
     model_catalog::ModelCatalog,
     model_post,
     offsets::OffsetStore,
@@ -99,13 +100,14 @@ pub async fn run() -> anyhow::Result<()> {
         None => {}
     }
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
-
+    // **設定の読み込みをログ層より前に置く。** ログの置き場所とレベルが設定で決まる
+    // ため。読めなかった場合は `?` で抜け、`main` の Termination が理由を stderr へ
+    // 書く——ここでログ層が組めている必要はない（入れ替える前も、この2つの間に
+    // ログを出す処理は1行も無かった）
     let config = SessionHostConfig::load(cli.config.as_deref())?;
+
+    // **返り値を捨ててはいけない。** 落とすと書き終わる前に消える（実測：200行のうち0行）
+    let _log = logging::install(logging::Proc::SessionHost, &config);
     let Some(link_config) = link_config(&config) else {
         // **繋ぎ先が無ければ起動しない。** 繋がらないまま黙って動くと、PTY だけが
         // 増えていって誰も見ていない状態になる
