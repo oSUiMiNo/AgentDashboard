@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Metadata, Subscriber};
 use tracing_appender::non_blocking::{ErrorCounter, NonBlocking, WorkerGuard};
-use tracing_subscriber::layer::{Context, Filter, SubscriberExt};
+use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, fmt};
@@ -483,33 +483,40 @@ where
     }
 }
 
-/// ファイル層のフィルタ。水位の判定と間引きを1つにまとめてある。
+/// 間引きの層。包んだ層の `on_event` を、通す行のときだけ呼ぶ。
 ///
-/// **`impl Layer for 自作層 { fn event_enabled }` と書いてはいけない。** あちらは
-/// `Layered` が AND で短絡合成するので、`false` を返すと**端末層まで消える**。
-/// `with_filter` 経由なら、飛ぶのは包んだ層の `on_event` だけになる。
-struct FileFilter {
-    env: EnvFilter,
+/// # なぜ `Filter::event_enabled` で書かないのか
+///
+/// **書くと、実バイナリが起動して間もなく落ちる。** `tracing-subscriber` は
+/// per-layer フィルタの判定の途中経過をスレッドローカルの帳簿（`FilterState`）へ
+/// 書き、`Filtered::on_event` の中で片付ける。ところが**どの層も通さなかった行では
+/// `on_event` 自体が呼ばれない**ので、帳簿が汚れたまま次のイベントへ持ち越され、
+/// 次の判定で落ちる。
+///
+/// ```text
+/// assertion `left == right` failed
+///   left: FilterMap { disabled_by: {0} }
+///  right: FilterMap { disabled_by: {} }
+/// ```
+///
+/// この構成では**その状況が普通に起きる**。端末層は `RUST_LOG`（既定 info）、
+/// ファイル層は `log_file_level`（既定 debug）なので、「端末層が水位で落とした行を
+/// こちらも間引く」が日常的に成立するため。
+///
+/// **per-layer フィルタそのものは無実**（`EnvFilter` を2本重ねただけの形は実測で
+/// 通る）。壊すのは `event_enabled` で `false` を返すことのほうである。
+///
+/// **`impl Layer for 自作層 { fn event_enabled }` はもっと悪い。** あちらは
+/// `Layered` が AND で短絡合成するので、`false` を返すと端末層まで消える。
+///
+/// 包んで `on_event` を握るこの形なら、帳簿に一切触らずに同じことができる。
+struct Dedupe<L> {
+    inner: L,
     dedup: Arc<Dedup>,
 }
 
-impl<S> Filter<S> for FileFilter
-where
-    S: Subscriber + for<'a> LookupSpan<'a>,
-{
-    fn enabled(&self, meta: &Metadata<'_>, cx: &Context<'_, S>) -> bool {
-        Filter::<S>::enabled(&self.env, meta, cx)
-    }
-
-    fn callsite_enabled(&self, meta: &'static Metadata<'static>) -> tracing::subscriber::Interest {
-        Filter::<S>::callsite_enabled(&self.env, meta)
-    }
-
-    fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
-        Filter::<S>::max_level_hint(&self.env)
-    }
-
-    fn event_enabled(&self, event: &Event<'_>, _cx: &Context<'_, S>) -> bool {
+impl<L> Dedupe<L> {
+    fn admit(&self, event: &Event<'_>) -> bool {
         let mut visitor = KeyVisitor::default();
         event.record(&mut visitor);
         let meta = event.metadata();
@@ -520,6 +527,59 @@ where
             &visitor.msg,
         );
         self.dedup.admit(&key, Instant::now())
+    }
+}
+
+impl<S, L> Layer<S> for Dedupe<L>
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    L: Layer<S>,
+{
+    fn on_layer(&mut self, subscriber: &mut S) {
+        self.inner.on_layer(subscriber);
+    }
+
+    fn register_callsite(&self, meta: &'static Metadata<'static>) -> tracing::subscriber::Interest {
+        self.inner.register_callsite(meta)
+    }
+
+    fn enabled(&self, meta: &Metadata<'_>, cx: Context<'_, S>) -> bool {
+        self.inner.enabled(meta, cx)
+    }
+
+    fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
+        self.inner.max_level_hint()
+    }
+
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::Id,
+        cx: Context<'_, S>,
+    ) {
+        self.inner.on_new_span(attrs, id, cx);
+    }
+
+    fn on_record(&self, id: &tracing::Id, values: &tracing::span::Record<'_>, cx: Context<'_, S>) {
+        self.inner.on_record(id, values, cx);
+    }
+
+    fn on_enter(&self, id: &tracing::Id, cx: Context<'_, S>) {
+        self.inner.on_enter(id, cx);
+    }
+
+    fn on_exit(&self, id: &tracing::Id, cx: Context<'_, S>) {
+        self.inner.on_exit(id, cx);
+    }
+
+    fn on_close(&self, id: tracing::Id, cx: Context<'_, S>) {
+        self.inner.on_close(id, cx);
+    }
+
+    fn on_event(&self, event: &Event<'_>, cx: Context<'_, S>) {
+        if self.admit(event) {
+            self.inner.on_event(event, cx);
+        }
     }
 }
 
@@ -615,7 +675,12 @@ fn parse_log_name(name: &str) -> Option<(&str, time::Date)> {
 /// 昨日の名前のファイルへ書くことは無い。つまり**いま誰かが書きうるのは今日の
 /// 名前のものだけ**で、そこを避ければ同じ機械で2つ動いていても踏まない。
 fn sweep(dir: &Path, retention_days: u64, max_bytes: u64) -> SweepOutcome {
-    sweep_at(dir, time::OffsetDateTime::now_utc().date(), retention_days, max_bytes)
+    sweep_at(
+        dir,
+        time::OffsetDateTime::now_utc().date(),
+        retention_days,
+        max_bytes,
+    )
 }
 
 fn sweep_at(dir: &Path, today: time::Date, retention_days: u64, max_bytes: u64) -> SweepOutcome {
@@ -625,8 +690,13 @@ fn sweep_at(dir: &Path, today: time::Date, retention_days: u64, max_bytes: u64) 
     };
 
     // 見覚えのある名前だけを候補にする。合わないものには何があっても触らない
-    let mut candidates: Vec<(time::Date, Option<std::time::SystemTime>, String, PathBuf, u64)> =
-        Vec::new();
+    let mut candidates: Vec<(
+        time::Date,
+        Option<std::time::SystemTime>,
+        String,
+        PathBuf,
+        u64,
+    )> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
@@ -639,7 +709,13 @@ fn sweep_at(dir: &Path, today: time::Date, retention_days: u64, max_bytes: u64) 
         if !meta.is_file() {
             continue;
         }
-        candidates.push((date, meta.modified().ok(), name.to_owned(), path, meta.len()));
+        candidates.push((
+            date,
+            meta.modified().ok(),
+            name.to_owned(),
+            path,
+            meta.len(),
+        ));
     }
 
     // 古い順。日付 → 同日は更新時刻 → それも取れなければ名前
@@ -695,9 +771,7 @@ fn remove_one(path: &Path, size: u64, outcome: &mut SweepOutcome) -> bool {
         }
         Err(err) => {
             // 握り潰さない。組み終わってから吐く
-            outcome
-                .failures
-                .push(format!("{}: {err}", path.display()));
+            outcome.failures.push(format!("{}: {err}", path.display()));
             false
         }
     }
@@ -829,16 +903,19 @@ fn build_file_layer(proc: Proc, config: &SessionHostConfig) -> Built {
     });
     let dedup = Arc::new(Dedup::default());
 
-    let layer = fmt::layer()
-        .event_format(JsonFormat {
-            origin,
-            dedup: Arc::clone(&dedup),
-        })
-        .with_ansi(false)
-        // ログ書き込み自体の失敗は出さない（設計§9-2。無限再帰になる）
-        .log_internal_errors(false)
-        .with_writer(writer)
-        .with_filter(FileFilter { env, dedup });
+    let layer = Dedupe {
+        inner: fmt::layer()
+            .event_format(JsonFormat {
+                origin,
+                dedup: Arc::clone(&dedup),
+            })
+            .with_ansi(false)
+            // ログ書き込み自体の失敗は出さない（設計§9-2。無限再帰になる）
+            .log_internal_errors(false)
+            .with_writer(writer),
+        dedup,
+    }
+    .with_filter(env);
 
     Built {
         layer: Some(Box::new(layer)),
@@ -980,7 +1057,8 @@ mod tests {
         #[test]
         fn 欄は書いた順に出て辞書順へ並び替わらない() {
             // serde_json::Map（BTreeMap）を使うとここが辞書順になる
-            let line = render_line(&origin(), "t", "INFO", "x", &fields("本文", &[]), None).unwrap();
+            let line =
+                render_line(&origin(), "t", "INFO", "x", &fields("本文", &[]), None).unwrap();
             let head: Vec<&str> = line
                 .trim_start_matches('{')
                 .split(',')
@@ -1125,8 +1203,10 @@ mod tests {
 
         #[test]
         fn 置き場所は状態の置き場所の下になる() {
-            let mut config = SessionHostConfig::default();
-            config.state_dir = Some(PathBuf::from("/tmp/state"));
+            let config = SessionHostConfig {
+                state_dir: Some(PathBuf::from("/tmp/state")),
+                ..Default::default()
+            };
             assert_eq!(logs_dir(&config), PathBuf::from("/tmp/state/logs"));
         }
     }
@@ -1218,8 +1298,8 @@ mod tests {
                 },
             );
             evict_stale(&mut entries, now);
-            assert!(entries.get(&key("捨ててよい", None)).is_none());
-            assert!(entries.get(&key("件数が残っている", None)).is_some());
+            assert!(!entries.contains_key(&key("捨ててよい", None)));
+            assert!(entries.contains_key(&key("件数が残っている", None)));
         }
     }
 

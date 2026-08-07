@@ -60,7 +60,10 @@ const STORED_VERSION: &str = "0.1.0";
 ///
 /// **設計本文の `<proc>-<日付>-<pid>` で書いてはいけない。** ローテーションでは
 /// 作れない形なので、実装と食い違ったまま門が緑になる
-const LOG_FILES: &[&str] = &["dashboard-1234.2026-08-07.jsonl", "session-host-5678.2026-08-06.jsonl"];
+const LOG_FILES: &[&str] = &[
+    "dashboard-1234.2026-08-07.jsonl",
+    "session-host-5678.2026-08-06.jsonl",
+];
 
 #[test]
 fn 既定では実行ファイルと控えだけが消える() {
