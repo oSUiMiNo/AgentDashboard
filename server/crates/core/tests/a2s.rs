@@ -1254,8 +1254,8 @@ fn sample_tree(dir: &Path) -> PathBuf {
 fn ask(
     account_id: uuid::Uuid,
     target: Option<protocol::AgentId>,
-) -> server_core::session_host::HostFsRequest {
-    server_core::session_host::HostFsRequest { account_id, target }
+) -> server_core::session_host::HostAskRequest {
+    server_core::session_host::HostAskRequest { account_id, target }
 }
 
 #[tokio::test]
@@ -1313,7 +1313,7 @@ async fn 答えが返らないときは時間で打ち切り空の一覧を返�
         .await
         .expect_err("打ち切られること");
 
-    assert_eq!(err, server_core::session_host::HostFsError::Timeout);
+    assert_eq!(err, server_core::session_host::HostAskError::Timeout);
     assert_eq!(err.message(), "PC が応じません");
 }
 
@@ -1444,7 +1444,7 @@ async fn 打ち切ったあとに届いた答えは待ち行列に溜まらな�
         )
         .await
         .expect_err("打ち切られること");
-    assert_eq!(err, server_core::session_host::HostFsError::Timeout);
+    assert_eq!(err, server_core::session_host::HostAskError::Timeout);
 
     // 打ち切った時点の番号は分からないが、**待ち行列が空**なら、どんな番号を渡しても
     // 受け取られない。1つでも残っていれば、その番号は受け取られるはず
@@ -1492,7 +1492,7 @@ async fn 能力を名乗らない_PC_へは問いを投げない() {
         .await
         .expect_err("断ること");
 
-    assert_eq!(err, server_core::session_host::HostFsError::Unsupported);
+    assert_eq!(err, server_core::session_host::HostAskError::Unsupported);
     // **待たずに断ること。** 時間切れを待つなら、判定を置いた意味が無い
     assert!(
         started.elapsed() < Duration::from_secs(2),
@@ -1538,7 +1538,7 @@ async fn 他人の_PC_と知らない_PC_は同じ言葉で断られる() {
 
     assert_eq!(
         err_unknown,
-        server_core::session_host::HostFsError::UnknownHost
+        server_core::session_host::HostAskError::UnknownHost
     );
     assert_eq!(err_other, err_unknown, "同じ言葉で断ること");
 

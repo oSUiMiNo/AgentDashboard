@@ -1057,8 +1057,9 @@ impl RemoteSessionHost {
 
 /// 答えの種別だけ。**中身は載せない**（一覧 512 KiB・中身 256 KiB。設計§9-1）。
 ///
-/// **型の名前を本文へ書かない。** §13-3 が `HostFsError` を `HostAskError` へ
-/// 改名するので、書くと改名で本文が腐る。
+/// **型の名前を本文へ書かない。** この行のすぐ上に居た旧版は「これから改名される型」の
+/// 名前を新旧2つとも書いていて、実際に改名したとき**両方が新しい名前に置換されて
+/// 文の意味が消えた**（ログ設計§25）。名前は宣言のところにだけ置く。
 fn reply_kind(reply: &HostReply) -> &'static str {
     match reply {
         HostReply::Dir(_) => "dir",
@@ -1276,9 +1277,9 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
 
     async fn list_dir(
         &self,
-        request: crate::session_host::HostFsRequest,
+        request: crate::session_host::HostAskRequest,
         start: Option<&str>,
-    ) -> Result<protocol::fs::DirListing, crate::session_host::HostFsError> {
+    ) -> Result<protocol::fs::DirListing, crate::session_host::HostAskError> {
         let start = start.map(str::to_string);
         match self
             .ask(request, move |request_id| ServerToAgent::ListDir {
@@ -1289,10 +1290,10 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
         {
             HostReply::Dir(listing) => Ok(listing),
             HostReply::Failed { reason, detail } => {
-                Err(crate::session_host::HostFsError::Failed { reason, detail })
+                Err(crate::session_host::HostAskError::Failed { reason, detail })
             }
             // 頼んだものと違う答えが返るのは実装の食い違い。**黙って空を返さない**
-            HostReply::File(_) => Err(crate::session_host::HostFsError::Failed {
+            HostReply::File(_) => Err(crate::session_host::HostAskError::Failed {
                 reason: protocol::a2s::HostFailure::Unsupported,
                 detail: "PC が別の答えを返しました".to_string(),
             }),
@@ -1301,9 +1302,9 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
 
     async fn read_file(
         &self,
-        request: crate::session_host::HostFsRequest,
+        request: crate::session_host::HostAskRequest,
         path: &str,
-    ) -> Result<protocol::fs::FileContent, crate::session_host::HostFsError> {
+    ) -> Result<protocol::fs::FileContent, crate::session_host::HostAskError> {
         let path = path.to_string();
         match self
             .ask(request, move |request_id| ServerToAgent::ReadFile {
@@ -1314,9 +1315,9 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
         {
             HostReply::File(content) => Ok(content),
             HostReply::Failed { reason, detail } => {
-                Err(crate::session_host::HostFsError::Failed { reason, detail })
+                Err(crate::session_host::HostAskError::Failed { reason, detail })
             }
-            HostReply::Dir(_) => Err(crate::session_host::HostFsError::Failed {
+            HostReply::Dir(_) => Err(crate::session_host::HostAskError::Failed {
                 reason: protocol::a2s::HostFailure::Unsupported,
                 detail: "PC が別の答えを返しました".to_string(),
             }),
@@ -1347,14 +1348,14 @@ impl RemoteSessionHost {
     /// 直したときに「起動はできるのに覗けない」という食い違いが生まれる。
     async fn ask(
         &self,
-        request: crate::session_host::HostFsRequest,
+        request: crate::session_host::HostAskRequest,
         make: impl FnOnce(RequestId) -> ServerToAgent,
-    ) -> Result<HostReply, crate::session_host::HostFsError> {
-        use crate::session_host::HostFsError;
+    ) -> Result<HostReply, crate::session_host::HostAskError> {
+        use crate::session_host::HostAskError;
 
         // 宛先が無いのは、画面が PC を選ばずに聞いてきた場合。**推測で1台目へ送らない**
         let Some(target) = request.target else {
-            return Err(HostFsError::UnknownHost);
+            return Err(HostAskError::UnknownHost);
         };
 
         // **順序が意味を持つ。** 先に「その PC が居るか」を決めてから能力を見る。
@@ -1383,9 +1384,9 @@ impl RemoteSessionHost {
                     //
                     // 自分のアカウントの PC だと分かっている場合にだけこう答える。
                     // 他人の PC はここへ来ない（`mine` が偽）ので、存在は漏れない
-                    return Err(HostFsError::Unreachable(BUS_DOWN.to_string()));
+                    return Err(HostAskError::Unreachable(BUS_DOWN.to_string()));
                 } else {
-                    return Err(HostFsError::UnknownHost);
+                    return Err(HostAskError::UnknownHost);
                 }
             }
         };
@@ -1393,7 +1394,7 @@ impl RemoteSessionHost {
         // **投げる前に、答えられる版かどうかを見る**（設計§4）。古いホストは知らない
         // 種別を無視して黙るだけなので、投げると時間切れの「応じません」しか出せない
         if !self.supports_host_fs(request.account_id, target).await {
-            return Err(HostFsError::Unsupported);
+            return Err(HostAskError::Unsupported);
         }
 
         let request_id = RequestId::new();
@@ -1409,7 +1410,7 @@ impl RemoteSessionHost {
             Route::Across => self
                 .hub
                 .relay_across(target, SessionHostCommand::Message(Box::new(message)))
-                .map_err(HostFsError::Unreachable),
+                .map_err(HostAskError::Unreachable),
         };
         if let Err(err) = sent {
             self.hub.forget_reply(request_id);
@@ -1419,11 +1420,11 @@ impl RemoteSessionHost {
         match tokio::time::timeout(HOST_FS_TIMEOUT, waiting).await {
             Ok(Ok(reply)) => Ok(reply),
             // 待ち口が落ちた（答えを渡す前に捨てられた）。時間切れと同じ扱いでよい
-            Ok(Err(_)) => Err(HostFsError::Timeout),
+            Ok(Err(_)) => Err(HostAskError::Timeout),
             Err(_) => {
                 // **必ず消す。** 残すと、遅れて届いた答えが誰にも渡らないまま溜まる
                 self.hub.forget_reply(request_id);
-                Err(HostFsError::Timeout)
+                Err(HostAskError::Timeout)
             }
         }
     }

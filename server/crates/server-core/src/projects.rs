@@ -23,7 +23,7 @@ use crate::{
     db::{self, entity},
     hosts::{LOCAL_HOST, parse_host, refuse},
     registry::SessionRegistry,
-    session_host::HostFsError,
+    session_host::HostAskError,
     ws::AppState,
 };
 use axum::{
@@ -91,7 +91,7 @@ pub async fn api_add(
             .await
             .map_err(unavailable)?
     {
-        return Err(refuse(HostFsError::UnknownHost));
+        return Err(refuse(HostAskError::UnknownHost));
     }
 
     let row = db::projects::add(db, identity.account_id, target, &request.path, db::now_ms())
@@ -168,7 +168,7 @@ pub async fn api_remove(
         .await
         .map_err(unavailable)?
     else {
-        return Err(refuse(HostFsError::UnknownHost));
+        return Err(refuse(HostAskError::UnknownHost));
     };
 
     if has_sessions(&state.registry, identity.account_id, &row) {

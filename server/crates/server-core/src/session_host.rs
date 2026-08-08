@@ -144,21 +144,24 @@ pub trait SessionHost: Send + Sync + 'static {
     /// `start` を省略すると**その PC のホーム**（設計§26-2）。
     async fn list_dir(
         &self,
-        request: HostFsRequest,
+        request: HostAskRequest,
         start: Option<&str>,
-    ) -> Result<DirListing, HostFsError>;
+    ) -> Result<DirListing, HostAskError>;
 
     /// ファイル1つの中身（設計§5・§9）。**読むだけ**で、書く口は持たない。
     ///
     /// パスは必須。中身の読み取りに「始まり」は無いので、省略できる形にしない。
     async fn read_file(
         &self,
-        request: HostFsRequest,
+        request: HostAskRequest,
         path: &str,
-    ) -> Result<FileContent, HostFsError>;
+    ) -> Result<FileContent, HostAskError>;
 }
 
-/// ファイルの口が応えられなかった理由（設計§10 の状態コードの表）。
+/// 答えの要る問いに、応えられなかった理由（設計§10 の状態コードの表）。
+///
+/// フォルダ・ファイル・**ログ**（ログ設計§13）が同じ型を使う。名前に `Fs` を
+/// 含めていたのをやめたのは、**ログを足した時点で名前が嘘になった**ため。
 ///
 /// # なぜここだけ `String` ではないのか
 ///
@@ -167,14 +170,14 @@ pub trait SessionHost: Send + Sync + 'static {
 /// `403` と `413` と `404` は、文字列からは作れない。
 ///
 /// **ローカルとリモートで食い違わせない**のが要点（フェーズ1 の引き継ぎ）。
-/// ローカルモードは [`HostFsError::Failed`] しか作らず、残りは線の向こうへ
+/// ローカルモードは [`HostAskError::Failed`] しか作らず、残りは線の向こうへ
 /// 届かなかったことを表す——どちらの構成でも同じ入口で同じ写し方をする。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HostFsError {
+pub enum HostAskError {
     /// その PC が居ない。**他人のもの・知らない・繋がっていない を言い分けない**（§18）——
     /// 分けると、IDを総当たりして他人の PC の存在を調べられる
     UnknownHost,
-    /// その PC が古くて、フォルダを覗く能力を名乗っていない（§4）。
+    /// その PC が古くて、**その頼みに応じる能力**を名乗っていない（§4）。
     ///
     /// 投げても永遠に答えないので、**投げる前に断る**。時間切れと混ぜると、
     /// 利用者は回線を疑うことになる
@@ -190,14 +193,16 @@ pub enum HostFsError {
     },
 }
 
-impl HostFsError {
+impl HostAskError {
     /// 画面へ出す説明。**どの構成でも同じ文になる。**
     pub fn message(&self) -> String {
         match self {
             // 「知らない」と「他人のもの」に同じ言葉を返す（§18）
             Self::UnknownHost => "指定された PC が繋がっていません".to_string(),
             Self::Unsupported => {
-                "この PC は版が古いのでフォルダを覗けません（セッションホストを更新してください）"
+                // **どの頼みかを書かない。** フォルダとログが同じ型を使うので、
+                // 片方の名前を書くともう片方で嘘になる（ログ設計§25）
+                "この PC は版が古いので、この頼みに応じられません（セッションホストを更新してください）"
                     .to_string()
             }
             Self::Timeout => "PC が応じません".to_string(),
@@ -207,7 +212,7 @@ impl HostFsError {
     }
 }
 
-/// ファイルシステムへの頼み、その**聞く相手**（イシューグループ_2026_0805_0514 設計§5）。
+/// 答えの要る頼み、その**聞く相手**（イシューグループ_2026_0805_0514 設計§5）。
 ///
 /// 引数を並べずに1つの型へまとめてあるのは [`SpawnRequest`] と同じ理由——
 /// **宛先とアカウントを取り違えても型で気づけない**ため。どちらも UUID なので、
@@ -219,7 +224,7 @@ impl HostFsError {
 /// 1つの `Option<&str>` にまとめると「中身の読み取りに `None` を渡してはいけない」を
 /// 型が表せず、実装のたびに同じ防御を書くことになる（実際、2つの実装が別々に
 /// 同じ断り方を書いていた。3つ目が増えても型は何も言わない）。
-pub struct HostFsRequest {
+pub struct HostAskRequest {
     /// 頼んだ人のアカウント。**他人の PC を宛先にできない**ことをここで確かめる（§18）
     pub account_id: uuid::Uuid,
     /// どの PC に聞くか。`None` は「選ばれていない」——ローカルモードは常に `None`

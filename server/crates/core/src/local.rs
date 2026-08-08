@@ -169,9 +169,9 @@ impl SessionHost for LocalSessionHost {
     /// **宛先を指定される余地そのものが無い**（帰属の確認は §18 のとおりサーバ側の口で行う）。
     async fn list_dir(
         &self,
-        request: server_core::session_host::HostFsRequest,
+        request: server_core::session_host::HostAskRequest,
         start: Option<&str>,
-    ) -> Result<protocol::fs::DirListing, server_core::session_host::HostFsError> {
+    ) -> Result<protocol::fs::DirListing, server_core::session_host::HostAskError> {
         reject_target(&request)?;
         // 省略ならホーム、貼られた形なら読み替える（設計§26-2・§13）。
         // セルフホストでは PC 側が同じ1本を通る。**解決も逃がした先で行う**——
@@ -182,9 +182,9 @@ impl SessionHost for LocalSessionHost {
 
     async fn read_file(
         &self,
-        request: server_core::session_host::HostFsRequest,
+        request: server_core::session_host::HostAskRequest,
         path: &str,
-    ) -> Result<protocol::fs::FileContent, server_core::session_host::HostFsError> {
+    ) -> Result<protocol::fs::FileContent, server_core::session_host::HostAskError> {
         reject_target(&request)?;
         let path = path.to_string();
         blocking_fs(move || session_host_core::hostfs::read_file(std::path::Path::new(&path))).await
@@ -197,11 +197,11 @@ impl SessionHost for LocalSessionHost {
 /// が手元のファイルを返すことになり、口の意味が構成によって変わる。**知らない PC と
 /// 同じ言葉で断る**ので、綴りを変えて探る余地も残らない。
 fn reject_target(
-    request: &server_core::session_host::HostFsRequest,
-) -> Result<(), server_core::session_host::HostFsError> {
+    request: &server_core::session_host::HostAskRequest,
+) -> Result<(), server_core::session_host::HostAskError> {
     match request.target {
         None => Ok(()),
-        Some(_) => Err(server_core::session_host::HostFsError::UnknownHost),
+        Some(_) => Err(server_core::session_host::HostAskError::UnknownHost),
     }
 }
 
@@ -212,22 +212,22 @@ fn reject_target(
 /// 止まる（PJTガイドライン「遅いハッシュは専用のスレッドへ逃がす」と同じ理屈）。
 /// 渡すのは**読む仕事そのもの**にしてある。パスと関数に分けると、パスを作る側
 /// （起点の解決）だけがこちら側に残り、逃がしたはずのものが手前に漏れる。
-async fn blocking_fs<T, F>(read: F) -> Result<T, server_core::session_host::HostFsError>
+async fn blocking_fs<T, F>(read: F) -> Result<T, server_core::session_host::HostAskError>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T, session_host_core::hostfs::HostFsError> + Send + 'static,
 {
-    use server_core::session_host::HostFsError;
+    use server_core::session_host::HostAskError;
     match tokio::task::spawn_blocking(read).await {
         // **ローカルが作るのは `Failed` だけ。** 線を跨がないので、届かなかったことを
         // 表す残りの理由は起こりえない（設計§19：見え方をモードで食い違わせない）
         Ok(Ok(value)) => Ok(value),
-        Ok(Err(err)) => Err(HostFsError::Failed {
+        Ok(Err(err)) => Err(HostAskError::Failed {
             reason: err.reason,
             detail: err.detail,
         }),
         // 逃がした先が落ちたのは実装の誤り。握り潰さず、そのまま説明にする
-        Err(err) => Err(HostFsError::Failed {
+        Err(err) => Err(HostAskError::Failed {
             reason: protocol::a2s::HostFailure::Unsupported,
             detail: format!("読み取りを完了できませんでした（{err}）"),
         }),

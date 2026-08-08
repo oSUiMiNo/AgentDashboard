@@ -13,7 +13,7 @@
 
 use crate::{
     auth::Identity,
-    session_host::{HostFsError, HostFsRequest},
+    session_host::{HostAskError, HostAskRequest},
     ws::AppState,
 };
 use axum::{
@@ -55,7 +55,7 @@ pub async fn api_dir(
     state
         .agent
         .list_dir(
-            HostFsRequest {
+            HostAskRequest {
                 account_id: identity.account_id,
                 target,
             },
@@ -77,7 +77,7 @@ pub async fn api_file(
     state
         .agent
         .read_file(
-            HostFsRequest {
+            HostAskRequest {
                 account_id: identity.account_id,
                 target,
             },
@@ -100,11 +100,11 @@ pub(crate) fn parse_host(host: &str) -> Result<Option<AgentId>, (StatusCode, Str
     }
     match host.parse::<uuid::Uuid>() {
         Ok(id) => Ok(Some(AgentId(id))),
-        Err(_) => Err(refuse(HostFsError::UnknownHost)),
+        Err(_) => Err(refuse(HostAskError::UnknownHost)),
     }
 }
 
-pub(crate) fn refuse(err: HostFsError) -> (StatusCode, String) {
+pub(crate) fn refuse(err: HostAskError) -> (StatusCode, String) {
     (status_of(&err), err.message())
 }
 
@@ -112,15 +112,15 @@ pub(crate) fn refuse(err: HostFsError) -> (StatusCode, String) {
 ///
 /// **ローカルとリモートで同じ写し方になる。** 境界が返すのは同じ型なので、
 /// 構成によってコードが変わることがない（フェーズ1 の引き継ぎで心配していた点）。
-pub fn status_of(err: &HostFsError) -> StatusCode {
+pub fn status_of(err: &HostAskError) -> StatusCode {
     match err {
         // 他人の PC・知らない PC・繋がっていない PC を**言い分けない**
-        HostFsError::UnknownHost => StatusCode::NOT_FOUND,
+        HostAskError::UnknownHost => StatusCode::NOT_FOUND,
         // 「できない」ではなく「いまのこの相手ではできない」——更新すれば変わる
-        HostFsError::Unsupported => StatusCode::CONFLICT,
-        HostFsError::Timeout => StatusCode::GATEWAY_TIMEOUT,
-        HostFsError::Unreachable(_) => StatusCode::SERVICE_UNAVAILABLE,
-        HostFsError::Failed { reason, .. } => match reason {
+        HostAskError::Unsupported => StatusCode::CONFLICT,
+        HostAskError::Timeout => StatusCode::GATEWAY_TIMEOUT,
+        HostAskError::Unreachable(_) => StatusCode::SERVICE_UNAVAILABLE,
+        HostAskError::Failed { reason, .. } => match reason {
             HostFailure::NotFound => StatusCode::NOT_FOUND,
             HostFailure::Denied => StatusCode::FORBIDDEN,
             // 「フォルダを頼んだらファイルだった」も、その名前では見つからないのと同じ
@@ -142,18 +142,18 @@ mod tests {
     fn 断る理由はすべて別の状態コードへ写る() {
         // **まとめて500にしない。** 利用者が直せるもの（権限・パス・版）が、
         // 直せないもの（サーバの不調）と同じ顔になると、直しようが無くなる
-        assert_eq!(status_of(&HostFsError::UnknownHost), StatusCode::NOT_FOUND);
-        assert_eq!(status_of(&HostFsError::Unsupported), StatusCode::CONFLICT);
+        assert_eq!(status_of(&HostAskError::UnknownHost), StatusCode::NOT_FOUND);
+        assert_eq!(status_of(&HostAskError::Unsupported), StatusCode::CONFLICT);
         assert_eq!(
-            status_of(&HostFsError::Timeout),
+            status_of(&HostAskError::Timeout),
             StatusCode::GATEWAY_TIMEOUT
         );
         assert_eq!(
-            status_of(&HostFsError::Unreachable("届きません".to_string())),
+            status_of(&HostAskError::Unreachable("届きません".to_string())),
             StatusCode::SERVICE_UNAVAILABLE
         );
 
-        let failed = |reason| HostFsError::Failed {
+        let failed = |reason| HostAskError::Failed {
             reason,
             detail: String::new(),
         };
@@ -176,7 +176,7 @@ mod tests {
         // 綴りを変えながら叩いて存在を探れないこと（設計§18）
         let (code, message) = parse_host("これはUUIDではない").expect_err("断ること");
         assert_eq!(code, StatusCode::NOT_FOUND);
-        assert_eq!(message, HostFsError::UnknownHost.message());
+        assert_eq!(message, HostAskError::UnknownHost.message());
     }
 
     #[test]

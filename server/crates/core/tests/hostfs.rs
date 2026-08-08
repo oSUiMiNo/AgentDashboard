@@ -13,7 +13,7 @@
 #![allow(non_snake_case)]
 
 use agentdashboard_core::local::LocalSessionHost;
-use server_core::session_host::{HostFsRequest, SessionHost};
+use server_core::session_host::{HostAskRequest, SessionHost};
 use session_host_core::{config::SessionHostConfig, session::SessionManager};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -47,8 +47,8 @@ fn host() -> LocalSessionHost {
     LocalSessionHost::new(SessionManager::new(Arc::new(config)))
 }
 
-fn ask() -> HostFsRequest {
-    HostFsRequest {
+fn ask() -> HostAskRequest {
+    HostAskRequest {
         account_id: uuid::Uuid::new_v4(),
         // ローカルモードには PC という単位が無い（設計§19）
         target: None,
@@ -99,7 +99,7 @@ async fn 読めないときは理由が説明として返る() {
     assert!(
         matches!(
             err,
-            server_core::session_host::HostFsError::Failed {
+            server_core::session_host::HostAskError::Failed {
                 reason: protocol::a2s::HostFailure::NotFound,
                 ..
             }
@@ -122,7 +122,7 @@ async fn ローカルモードで宛先を指名されたら断る() {
 
     let err = host
         .list_dir(
-            HostFsRequest {
+            HostAskRequest {
                 account_id: uuid::Uuid::new_v4(),
                 target: Some(protocol::AgentId(uuid::Uuid::new_v4())),
             },
@@ -132,7 +132,7 @@ async fn ローカルモードで宛先を指名されたら断る() {
         .expect_err("断ること");
 
     // 知らない PC と同じ言葉。綴りを変えて探る余地を残さない
-    assert_eq!(err, server_core::session_host::HostFsError::UnknownHost);
+    assert_eq!(err, server_core::session_host::HostAskError::UnknownHost);
 }
 
 /// `path` を省略すると、その PC の**ホームへ着く**（設計§26-2）。
@@ -162,7 +162,7 @@ async fn 一覧はパスを省略するとホームから始まる() {
 
 // 「中身の読み取りはパスの省略を断る」は**書けなくなったので消した**。
 //
-// あれは `HostFsRequest.path` が `Option` で、型が許してしまう状態を実行時に
+// あれは `HostAskRequest.path` が `Option` で、型が許してしまう状態を実行時に
 // 塞いでいることを固定するテストだった。`read_file` がパスを必須で受ける形に
 // なった以上、省略した呼び出しはコンパイルが通らない——**同じことを型が
 // 言っているので、実行して確かめる意味が無い**（設計§29）。

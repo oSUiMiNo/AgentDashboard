@@ -1050,7 +1050,7 @@ async fn 跨いだ配置でもフォルダの答えが問うた側へ戻る() {
         // 問いは待つので、別のタスクへ逃がして**その間に PC 役が答える**
         let asking = tokio::spawn(async move {
             host.list_dir(
-                server_core::session_host::HostFsRequest {
+                server_core::session_host::HostAskRequest {
                     account_id,
                     target: Some(target),
                 },
@@ -1110,7 +1110,7 @@ async fn 連絡係が切れている間のフォルダの問いは理由を返�
 
         let err = RemoteSessionHost::new(Arc::clone(&a.hub))
             .list_dir(
-                server_core::session_host::HostFsRequest {
+                server_core::session_host::HostAskRequest {
                     account_id,
                     target: Some(target),
                 },
@@ -1121,7 +1121,7 @@ async fn 連絡係が切れている間のフォルダの問いは理由を返�
 
         // 503 へ写る側であること（写し方そのものは `hosts.rs` の単体が固定している）
         assert!(
-            matches!(err, server_core::session_host::HostFsError::Unreachable(_)),
+            matches!(err, server_core::session_host::HostAskError::Unreachable(_)),
             "[{}] 届かないことが理由として返ること: {err:?}",
             backend.name
         );
