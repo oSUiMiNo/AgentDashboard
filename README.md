@@ -320,6 +320,48 @@ rm   ~/.local/state/agentdashboard/version-current   # 入れる側が置いた�
 <br/>
 <br/>
 
+## ログ
+**何もしなくても残る。** サーバもセッションホストも、動いている間ずっと1行1レコードのファイル（JSON Lines）へ書き出している。設定で切ることもできるが、既定は有効にしてある——**動かなくなってから「ログを出す設定にしておけばよかった」と気づいても遅い**ため。
+
+### どこにあるか
+`<state_dir>/logs/`。場所は OS と設定で変わるので、決め打ちで覚えずに実行ファイルへ聞く。
+
+```
+agentdashboard state-dir
+```
+
+ファイルは `<誰が>-<pid>.<日付>.jsonl` の形で、プロセスごと・日付ごとに分かれる。同じ機械で何度も起こし直しても、**どの起動のぶんか**がファイル名で分かる。
+
+### どう読むか
+自分で開かずに、読む口を使う。
+
+```
+agentdashboard logs --since 1h              # 直近1時間
+agentdashboard logs --level warn            # 警告以上だけ
+agentdashboard logs --card <カードID>       # 1枚のカードに関わった行だけを串刺しで
+agentdashboard logs --grep "見たい語"        # 本文で絞る（正規表現）
+agentdashboard logs --json                  # 加工せず生のまま出す
+agentdashboard logs --follow                # 出るそばから追いかける
+```
+
+複数のファイルに分かれていても**時刻順にひとつながりで**出る。セッションホスト側は `agentdashboard-agent logs` で、使い方は同じ。
+
+### いつ消えるか
+古いものは**起動のたびに掃かれる**。既定は7日ぶん、または `<state_dir>/logs/` の合計 512 MiB まで（`log_retention_days` / `log_max_bytes`）。**長く起こしっぱなしの機械では、次に起こし直すまで掃かれない**ので、そこだけ注意する。
+
+### 外へ貼るとき
+そのまま貼らない。**`--sanitize` を付ける。**
+
+```
+agentdashboard logs --since 1h --sanitize
+```
+
+ホームのパス・利用者名・ホスト名・メールアドレス・トークンの類を伏せ字にしてから出す。伏せる規則は**その機械の環境から組み立てる**ので、他人の機械のログには効かない。
+
+---
+<br/>
+<br/>
+
 ## 設定
 `server/config.toml.example` が全キーの一覧を兼ねている。**全キーに既定値がある**ので、変えたい項目だけ書けばよい。打ち間違いを黙って無視しないよう、**知らないキーを書くとエラーになる**。
 
@@ -454,7 +496,7 @@ server/                Cargo workspace
   crates/session-host-core/       PC 側の一式。PTY・フック受信・状態導出・パース・自己修復
   crates/server-core/      ブラウザ配信。WebSocket・REST・DB・アカウント・連絡係
   crates/core/             両者を1プロセスで束ねる配線（ローカルモード）と CLI
-  crates/agent/            セッションホストの中身
+  crates/session-host/     セッションホストの中身
   crates/transcript-parser/  JSONL → 表示用ツリー。**自己修復が唯一書き換えてよい範囲**
   crates/protocol/         サーバ・フロント・パーサが共有する型
   crates/dist/             配る一式。実行ファイル3本の入口だけを持つ
