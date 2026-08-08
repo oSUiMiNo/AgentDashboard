@@ -156,6 +156,18 @@ pub trait SessionHost: Send + Sync + 'static {
         request: HostAskRequest,
         path: &str,
     ) -> Result<FileContent, HostAskError>;
+
+    // --- ログ -----------------------------------------------------------------
+
+    /// その PC のログ（ログ設計§13-1）。
+    ///
+    /// **ローカルモードもここを通る。** 理由は [`SessionHost::list_dir`] と同じで、
+    /// 近道を作ると経路の違いが原因の壊れ方が残る。
+    async fn read_log(
+        &self,
+        request: HostAskRequest,
+        query: &protocol::logs::LogQuery,
+    ) -> Result<protocol::logs::LogChunk, HostAskError>;
 }
 
 /// 答えの要る問いに、応えられなかった理由（設計§10 の状態コードの表）。
@@ -191,6 +203,12 @@ pub enum HostAskError {
         reason: protocol::a2s::HostFailure,
         detail: String,
     },
+    /// 頼み方が読めない（ログ設計§25-8）。
+    ///
+    /// **PC へは投げない。** 抽出子に必須の欄を持たせると axum 自身の 400 が
+    /// [`crate::hosts::refuse`] を通らずに出て、「断り方を1か所に集める」が破れる——
+    /// 同じ失敗が口によって違う言葉になる。ここへ寄せて写し先を1つ増やす
+    BadRequest(String),
 }
 
 impl HostAskError {
@@ -208,6 +226,7 @@ impl HostAskError {
             Self::Timeout => "PC が応じません".to_string(),
             Self::Unreachable(detail) => detail.clone(),
             Self::Failed { detail, .. } => detail.clone(),
+            Self::BadRequest(detail) => detail.clone(),
         }
     }
 }

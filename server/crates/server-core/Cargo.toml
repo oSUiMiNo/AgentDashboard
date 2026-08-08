@@ -32,6 +32,10 @@ sea-orm-migration.workspace = true
 tower-sessions.workspace = true
 password-auth.workspace = true
 time.workspace = true
+# ログを引く口の `grep` を、**PC へ投げる前に**組んでみるため（ログ設計§25-8）。
+# 投げてから相手に断らせると往復1回ぶんを捨てるうえ、頼み方の誤りが
+# 「PC が応じない」側の状態コードで返ることになる
+regex.workspace = true
 sha2.workspace = true
 base64.workspace = true
 redis.workspace = true

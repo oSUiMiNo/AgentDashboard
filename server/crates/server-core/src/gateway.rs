@@ -1300,9 +1300,11 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
     ) -> Result<protocol::fs::DirListing, crate::session_host::HostAskError> {
         let start = start.map(str::to_string);
         match self
-            .ask(request, move |request_id| ServerToAgent::ListDir {
-                request_id,
-                path: start,
+            .ask(request, Need::HostFs, move |request_id| {
+                ServerToAgent::ListDir {
+                    request_id,
+                    path: start,
+                }
             })
             .await?
         {
@@ -1321,13 +1323,32 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
     ) -> Result<protocol::fs::FileContent, crate::session_host::HostAskError> {
         let path = path.to_string();
         match self
-            .ask(request, move |request_id| ServerToAgent::ReadFile {
-                request_id,
-                path,
+            .ask(request, Need::HostFs, move |request_id| {
+                ServerToAgent::ReadFile { request_id, path }
             })
             .await?
         {
             HostReply::File(content) => Ok(content),
+            HostReply::Failed { reason, detail } => {
+                Err(crate::session_host::HostAskError::Failed { reason, detail })
+            }
+            other => Err(wrong_answer(other)),
+        }
+    }
+
+    async fn read_log(
+        &self,
+        request: crate::session_host::HostAskRequest,
+        query: &protocol::logs::LogQuery,
+    ) -> Result<protocol::logs::LogChunk, crate::session_host::HostAskError> {
+        let query = query.clone();
+        match self
+            .ask(request, Need::LogRead, move |request_id| {
+                ServerToAgent::ReadLog { request_id, query }
+            })
+            .await?
+        {
+            HostReply::Log(chunk) => Ok(chunk),
             HostReply::Failed { reason, detail } => {
                 Err(crate::session_host::HostAskError::Failed { reason, detail })
             }
@@ -1346,6 +1367,17 @@ enum Route {
     Across,
 }
 
+/// その問いに応じるために、PC が名乗っていなければならない能力（ログ設計§25-8）。
+///
+/// **`ask` へ決め打ちで書かない。** 能力が2つになった時点で、片方の名乗りしか見ない門は
+/// 「ログを名乗っていない PC へログの問いを投げる」を通してしまう。投げた先は黙るだけ
+/// なので、画面には時間切れの「PC が応じません」しか出せず、本当の理由を伝えられない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Need {
+    HostFs,
+    LogRead,
+}
+
 /// 答えを待つ上限（設計§23-3 の実測で決めた値）。
 ///
 /// 実測の最悪（トンネル越し 0.57 秒）の約9倍。**5秒返らないなら「遅い」のではなく
@@ -1360,6 +1392,7 @@ impl RemoteSessionHost {
     async fn ask(
         &self,
         request: crate::session_host::HostAskRequest,
+        need: Need,
         make: impl FnOnce(RequestId) -> ServerToAgent,
     ) -> Result<HostReply, crate::session_host::HostAskError> {
         use crate::session_host::HostAskError;
@@ -1404,7 +1437,7 @@ impl RemoteSessionHost {
 
         // **投げる前に、答えられる版かどうかを見る**（設計§4）。古いホストは知らない
         // 種別を無視して黙るだけなので、投げると時間切れの「応じません」しか出せない
-        if !self.supports_host_fs(request.account_id, target).await {
+        if !self.supports(need, request.account_id, target).await {
             return Err(HostAskError::Unsupported);
         }
 
@@ -1452,11 +1485,11 @@ impl RemoteSessionHost {
             .any(|(id, _)| id == target)
     }
 
-    /// その PC が「フォルダを覗ける」と名乗っているか。
+    /// その PC が、その頼みに応じられると名乗っているか。
     ///
     /// 見るのは接続表ではなく **DB に残した名乗り**（`agents.capabilities`）。
     /// 接続表を見ると、**別のインスタンスに繋がっている PC が全部「できない」ことになる**。
-    async fn supports_host_fs(&self, account_id: Uuid, target: AgentId) -> bool {
+    async fn supports(&self, need: Need, account_id: Uuid, target: AgentId) -> bool {
         let rows = match pairing::capabilities_of(&self.hub.db, account_id).await {
             Ok(rows) => rows,
             Err(err) => {
@@ -1467,7 +1500,10 @@ impl RemoteSessionHost {
         rows.into_iter()
             .find(|(agent_id, _)| *agent_id == target)
             .and_then(|(_, value)| serde_json::from_value::<Capabilities>(value).ok())
-            .is_some_and(|capabilities| capabilities.supports_host_fs)
+            .is_some_and(|capabilities| match need {
+                Need::HostFs => capabilities.supports_host_fs,
+                Need::LogRead => capabilities.supports_log_read,
+            })
     }
 }
 

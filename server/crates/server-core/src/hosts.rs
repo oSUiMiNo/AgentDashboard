@@ -88,6 +88,86 @@ pub async fn api_file(
         .map_err(refuse)
 }
 
+/// `GET /api/hosts/{host}/logs?since=…&level=…&card=…&proc=…&grep=…&raw=…&sanitize=…`
+///
+/// **全欄を省略できる形にしてある**（ログ設計§25-8）。抽出子に必須の欄を持たせると、
+/// 欠けたときに **axum 自身の 400** が [`refuse`] を通らずに出る——同じ失敗が口によって
+/// 違う言葉になり、「断り方を1か所に集める」が破れる。欠けているかどうかはここで見て、
+/// [`HostAskError::BadRequest`] へ寄せる。
+pub async fn api_logs(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<Identity>,
+    Path(host): Path<String>,
+    Query(query): Query<LogsQuery>,
+) -> Result<Json<protocol::logs::LogChunk>, (StatusCode, String)> {
+    let target = parse_host(&host)?;
+    let wire = query.into_wire().map_err(refuse)?;
+    let mut chunk = state
+        .agent
+        .read_log(
+            HostAskRequest {
+                account_id: identity.account_id,
+                target,
+            },
+            &wire,
+        )
+        .await
+        .map_err(refuse)?;
+    // **どの PC のものかを埋めるのはここ。** PC は自分がどの綴りで呼ばれたかを
+    // 知らない（自分の名前は名乗れるが、アカウントを跨ぐと一意でない）
+    chunk.host = host;
+    Ok(Json(chunk))
+}
+
+/// ログの絞り込み。**全欄が省略可**（上の理由）。
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct LogsQuery {
+    pub since: Option<String>,
+    pub level: Option<String>,
+    pub card: Option<String>,
+    pub proc: Option<String>,
+    pub grep: Option<String>,
+    /// `--json` 相当。`grep` を当てる先を生の行にするか
+    pub raw: Option<bool>,
+    pub sanitize: Option<bool>,
+}
+
+impl LogsQuery {
+    /// 線に載せる形へ。**読めない値はここで断る**（PC へは投げない）。
+    fn into_wire(self) -> Result<protocol::logs::LogQuery, HostAskError> {
+        let Some(since) = self.since else {
+            // 既定を勝手に決めない。**どこからかを言わずにログを引くと、量が構成で変わる**
+            return Err(HostAskError::BadRequest(
+                "`since` は必須です（RFC3339・ミリ秒・UTC）".to_string(),
+            ));
+        };
+        // 形だけ見る。**中身の意味（未来かどうか等）は見ない**——書き手の時計と
+        // 読み手の時計はずれうるので、ここで弾くと正しい問いまで断ることになる
+        if time::OffsetDateTime::parse(&since, &time::format_description::well_known::Rfc3339)
+            .is_err()
+        {
+            return Err(HostAskError::BadRequest(format!(
+                "`since` を RFC3339 として読めません：{since}"
+            )));
+        }
+        let level = self.level.unwrap_or_else(|| "INFO".to_string());
+        if let Some(pattern) = &self.grep {
+            regex::Regex::new(pattern).map_err(|err| {
+                HostAskError::BadRequest(format!("`grep` の正規表現が読めません：{err}"))
+            })?;
+        }
+        Ok(protocol::logs::LogQuery {
+            since,
+            level,
+            card: self.card,
+            proc: self.proc,
+            grep: self.grep,
+            grep_on_raw: self.raw.unwrap_or(false),
+            sanitize: self.sanitize.unwrap_or(false),
+        })
+    }
+}
+
 /// `{host}` を宛先へ。**読めない綴りは「知らない PC」と同じ扱い**（設計§18）。
 ///
 /// 言い分けると、綴りを変えながら叩いて何かを探れる余地ができる。
@@ -129,6 +209,8 @@ pub fn status_of(err: &HostAskError) -> StatusCode {
             // 設計§10 の表には無い5つ目。テキストとして扱えない、が最も近い
             HostFailure::Unsupported => StatusCode::UNSUPPORTED_MEDIA_TYPE,
         },
+        // 頼み方が読めない。**PC は無関係**なので、相手のせいに見える 404 / 409 へ寄せない
+        HostAskError::BadRequest(_) => StatusCode::BAD_REQUEST,
     }
 }
 
@@ -169,6 +251,71 @@ mod tests {
             status_of(&failed(HostFailure::NotFound)),
             StatusCode::NOT_FOUND
         );
+        // 頼み方の誤りは**こちら側の話**。PC のせいに見えるコードへ寄せない
+        assert_eq!(
+            status_of(&HostAskError::BadRequest("読めません".to_string())),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    /// ログの絞り込みは、**PC へ投げる前に**この場で検める（ログ設計§25-8）。
+    mod ログの頼み {
+        use super::*;
+
+        fn asked(since: &str) -> LogsQuery {
+            LogsQuery {
+                since: Some(since.to_string()),
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn いつからを言わない頼みは断る() {
+            // 既定を勝手に決めると、**同じ URL が構成によって違う量を返す**
+            let err = LogsQuery::default().into_wire().expect_err("断ること");
+            assert_eq!(status_of(&err), StatusCode::BAD_REQUEST);
+            assert!(err.message().contains("since"), "{}", err.message());
+        }
+
+        #[test]
+        fn 読めない時刻は投げる前に断る() {
+            let err = asked("きのう").into_wire().expect_err("断ること");
+            assert_eq!(status_of(&err), StatusCode::BAD_REQUEST);
+        }
+
+        #[test]
+        fn 壊れた正規表現は投げる前に断る() {
+            // 投げてから相手に断らせると、往復1回ぶんを捨てたうえに
+            // **頼み方の誤りが「PC が応じない」側のコードで返る**
+            let err = LogsQuery {
+                grep: Some("[".to_string()),
+                ..asked("2026-08-08T00:00:00.000Z")
+            }
+            .into_wire()
+            .expect_err("断ること");
+            assert_eq!(status_of(&err), StatusCode::BAD_REQUEST);
+        }
+
+        #[test]
+        fn 省略できる欄には既定が入る() {
+            let wire = asked("2026-08-08T00:00:00.000Z")
+                .into_wire()
+                .expect("通ること");
+            assert_eq!(wire.level, "INFO");
+            assert!(!wire.grep_on_raw);
+            assert!(!wire.sanitize);
+            assert_eq!(wire.card, None);
+        }
+
+        #[test]
+        fn 未来の時刻でも断らない() {
+            // 書き手と読み手の時計はずれうる（設計§25-4）。**形だけ見て、意味は見ない**
+            // ——ここで弾くと、ずれている PC への正しい問いまで断ることになる
+            let wire = asked("2099-01-01T00:00:00.000Z")
+                .into_wire()
+                .expect("通ること");
+            assert_eq!(wire.since, "2099-01-01T00:00:00.000Z");
+        }
     }
 
     #[test]

@@ -177,7 +177,7 @@ impl SessionHost for LocalSessionHost {
         // セルフホストでは PC 側が同じ1本を通る。**解決も逃がした先で行う**——
         // 候補ごとに `is_dir()` を叩くので、ここでやると配信と同じワーカーが止まる
         let start = start.map(str::to_string);
-        blocking_fs(move || session_host_core::hostfs::list_dir_from(start.as_deref())).await
+        blocking_ask(move || session_host_core::hostfs::list_dir_from(start.as_deref())).await
     }
 
     async fn read_file(
@@ -187,7 +187,23 @@ impl SessionHost for LocalSessionHost {
     ) -> Result<protocol::fs::FileContent, server_core::session_host::HostAskError> {
         reject_target(&request)?;
         let path = path.to_string();
-        blocking_fs(move || session_host_core::hostfs::read_file(std::path::Path::new(&path))).await
+        blocking_ask(move || session_host_core::hostfs::read_file(std::path::Path::new(&path)))
+            .await
+    }
+
+    /// この機械のログ（ログ設計§13-1）。
+    ///
+    /// フォルダと同じで、**読むのは `session_host_core::logs`**。ローカルだけの近道を
+    /// 作らない。宛先を指名されたら断るのも同じ（ローカルに PC という単位は無い）。
+    async fn read_log(
+        &self,
+        request: server_core::session_host::HostAskRequest,
+        query: &protocol::logs::LogQuery,
+    ) -> Result<protocol::logs::LogChunk, server_core::session_host::HostAskError> {
+        reject_target(&request)?;
+        let query = query.clone();
+        let config = self.manager.config().clone();
+        blocking_ask(move || session_host_core::logs::collect(&config, &query)).await
     }
 }
 
@@ -205,27 +221,48 @@ fn reject_target(
     }
 }
 
-/// ファイルの仕事を**専用のスレッドへ逃がす**。
+/// 逃がした先が返す「理由と説明」。
+///
+/// フォルダとログで**型が違う**（それぞれの名前が本当のことを言っているため）ので、
+/// 逃がす関数の側で1つに畳む。畳まないと、同じ形の関数を2本書くことになる。
+trait AskFailure {
+    fn parts(self) -> (protocol::a2s::HostFailure, String);
+}
+
+impl AskFailure for session_host_core::hostfs::HostFsError {
+    fn parts(self) -> (protocol::a2s::HostFailure, String) {
+        (self.reason, self.detail)
+    }
+}
+
+impl AskFailure for session_host_core::logs::LogReadError {
+    fn parts(self) -> (protocol::a2s::HostFailure, String) {
+        (self.reason, self.detail)
+    }
+}
+
+/// 読み取りの仕事を**専用のスレッドへ逃がす**。
 ///
 /// ローカルモードでは、この呼び出しはブラウザ配信と同じランタイムの上に居る。
 /// 大きなフォルダを非同期タスクの中で直接読むと、その間そのワーカーの上にある全部が
 /// 止まる（PJTガイドライン「遅いハッシュは専用のスレッドへ逃がす」と同じ理屈）。
 /// 渡すのは**読む仕事そのもの**にしてある。パスと関数に分けると、パスを作る側
 /// （起点の解決）だけがこちら側に残り、逃がしたはずのものが手前に漏れる。
-async fn blocking_fs<T, F>(read: F) -> Result<T, server_core::session_host::HostAskError>
+async fn blocking_ask<T, E, F>(read: F) -> Result<T, server_core::session_host::HostAskError>
 where
     T: Send + 'static,
-    F: FnOnce() -> Result<T, session_host_core::hostfs::HostFsError> + Send + 'static,
+    E: AskFailure + Send + 'static,
+    F: FnOnce() -> Result<T, E> + Send + 'static,
 {
     use server_core::session_host::HostAskError;
     match tokio::task::spawn_blocking(read).await {
         // **ローカルが作るのは `Failed` だけ。** 線を跨がないので、届かなかったことを
         // 表す残りの理由は起こりえない（設計§19：見え方をモードで食い違わせない）
         Ok(Ok(value)) => Ok(value),
-        Ok(Err(err)) => Err(HostAskError::Failed {
-            reason: err.reason,
-            detail: err.detail,
-        }),
+        Ok(Err(err)) => {
+            let (reason, detail) = err.parts();
+            Err(HostAskError::Failed { reason, detail })
+        }
         // 逃がした先が落ちたのは実装の誤り。握り潰さず、そのまま説明にする
         Err(err) => Err(HostAskError::Failed {
             reason: protocol::a2s::HostFailure::Unsupported,

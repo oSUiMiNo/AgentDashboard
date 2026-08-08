@@ -1577,3 +1577,151 @@ async fn 繋がっていない_PC_は理由が返る() {
 
     assert_eq!(err.message(), "指定された PC が繋がっていません");
 }
+
+// --- ログの往復（ログ設計§13・§25）--------------------------------------------
+
+/// PC 側の `<state_dir>/logs/` へ1本置く。
+///
+/// **本物のプロセスが書いた行は使わない。** `ts` を仕込めないと、時計のずれ
+/// （設計§18-7）も上限も試せない——時刻を引数で受けられることがこの土台の要点になる。
+fn place_log(dir: &Path, name: &str, lines: &[&str]) {
+    let logs = dir.join("state").join("logs");
+    std::fs::create_dir_all(&logs).expect("作れること");
+    let body: String = lines.iter().map(|line| format!("{line}\n")).collect();
+    std::fs::write(logs.join(name), body).expect("書けること");
+}
+
+fn log_record(ts: &str, msg: &str) -> String {
+    format!(
+        r#"{{"ts":"{ts}","level":"INFO","target":"t","proc":"session-host","pid":9,"run_id":"r","msg":"{msg}"}}"#
+    )
+}
+
+fn log_query() -> protocol::logs::LogQuery {
+    protocol::logs::LogQuery {
+        since: "2000-01-01T00:00:00.000Z".to_string(),
+        level: "TRACE".to_string(),
+        card: None,
+        proc: None,
+        grep: None,
+        grep_on_raw: false,
+        sanitize: false,
+    }
+}
+
+#[tokio::test]
+async fn ログが_A2S_越しに引ける() {
+    // フォルダと同じ1本の問答の道に乗る。**新しいチャネルは作っていない**
+    let a2s = A2s::start("logs-roundtrip").await;
+    let target = a2s.hub.online_of(a2s.account_id).await[0];
+    let one = log_record("2026-08-08T00:00:00.000Z", "ひとつめ");
+    let two = log_record("2026-08-08T00:00:01.000Z", "ふたつめ");
+    place_log(&a2s.dir, "session-host-9.2026-08-08.jsonl", &[&one, &two]);
+
+    let chunk = a2s
+        .browser
+        .read_log(ask(a2s.account_id, Some(target)), &log_query())
+        .await
+        .expect("引けること");
+
+    assert_eq!(chunk.lines, vec![one, two]);
+    // **PC は空で返す。** 埋めるのは REST の口（`hosts.rs`）
+    assert_eq!(chunk.host, "");
+    assert!(chunk.host_now.ends_with('Z'), "{}", chunk.host_now);
+    assert!(!chunk.truncated);
+}
+
+#[tokio::test]
+async fn 引いた行の時刻は書き換えられない() {
+    // **受け手の時計へ正規化したくなるが、やってはいけない**（設計§25-4）。
+    // 書き換えると、その PC の上で `agentdashboard-agent logs` を叩いた出力と
+    // 突き合わせられなくなり、いちばん確かな相互参照を失う。
+    //
+    // 時計をずらす仕掛けは無いので、**ファイルの中身として未来と過去を仕込む**
+    let a2s = A2s::start("logs-clock").await;
+    let target = a2s.hub.online_of(a2s.account_id).await[0];
+    let past = log_record("2001-02-03T04:05:06.007Z", "むかし");
+    let future = log_record("2099-12-31T23:59:59.999Z", "みらい");
+    place_log(
+        &a2s.dir,
+        "session-host-9.2026-08-08.jsonl",
+        &[&past, &future],
+    );
+
+    let chunk = a2s
+        .browser
+        .read_log(ask(a2s.account_id, Some(target)), &log_query())
+        .await
+        .expect("引けること");
+
+    // 仕込んだままの綴りで返ること（順は `ts` 順で、実時刻とは無関係）
+    assert_eq!(chunk.lines, vec![past, future]);
+    // 答えた瞬間の PC の時計は別の欄で運ぶ。**これが「併記する」の実体**
+    assert!(chunk.host_now.as_str() > "2026-01-01T00:00:00.000Z");
+}
+
+#[tokio::test]
+async fn 能力を名乗らない_PC_へはログの問いを投げない() {
+    // 能力は**頼みごとに別の欄**なので、フォルダの名乗りでログを通してはいけない。
+    // 通すと相手は黙るだけで、画面には時間切れの「応じません」しか出せない
+    let a2s = A2s::start("logs-old").await;
+    let target = a2s.hub.online_of(a2s.account_id).await[0];
+
+    // フォルダは覗けるが、ログは名乗っていない版（欄を1つだけ持つ Hello と同じ状態）
+    let half = serde_json::json!({
+        "available_modes": ["default"],
+        "always_bypass_permissions": false,
+        "agent_version": "0.1.10",
+        "supports_host_fs": true,
+    });
+    pairing::save_capabilities(a2s.hub.db(), target, half)
+        .await
+        .expect("名乗りを書き換えられること");
+
+    let started = tokio::time::Instant::now();
+    let err = a2s
+        .browser
+        .read_log(ask(a2s.account_id, Some(target)), &log_query())
+        .await
+        .expect_err("断ること");
+
+    assert_eq!(err, server_core::session_host::HostAskError::Unsupported);
+    // **待たずに断ること。** 時間切れを待つなら、判定を置いた意味が無い
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "投げる前に断ること（{:?} かかった）",
+        started.elapsed()
+    );
+
+    // **肯定側の裏取り。** 同じ土台でフォルダは通る＝「全部断っている」のではない
+    let root = sample_tree(&a2s.dir);
+    a2s.browser
+        .list_dir(
+            ask(a2s.account_id, Some(target)),
+            Some(&root.display().to_string()),
+        )
+        .await
+        .expect("フォルダは覗けること");
+}
+
+#[tokio::test]
+async fn ログの答えが返らないときは時間で打ち切る() {
+    // **切るのではなく塞ぐ。** 切ると繋ぎ直して答えが届いてしまう（§23-1）
+    let a2s = A2s::start_with("logs-timeout", true).await;
+    let target = a2s.hub.online_of(a2s.account_id).await[0];
+    place_log(
+        &a2s.dir,
+        "session-host-9.2026-08-08.jsonl",
+        &[&log_record("2026-08-08T00:00:00.000Z", "届かない")],
+    );
+    a2s.sniffer.as_ref().expect("中継が居ること").block();
+
+    let err = a2s
+        .browser
+        .read_log(ask(a2s.account_id, Some(target)), &log_query())
+        .await
+        .expect_err("断ること");
+
+    assert_eq!(err, server_core::session_host::HostAskError::Timeout);
+    assert_eq!(err.message(), "PC が応じません");
+}

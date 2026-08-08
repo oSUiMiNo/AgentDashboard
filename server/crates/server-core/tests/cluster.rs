@@ -1135,3 +1135,79 @@ async fn 連絡係が切れている間のフォルダの問いは理由を返�
         backend.finish().await;
     }
 }
+
+#[tokio::test]
+async fn 跨いだ配置でもログの答えが問うた側へ戻る() {
+    // フォルダと**同じ道に相乗りしている**ことをここで固定する（ログ設計§13-1）。
+    // 新しいチャネルを作っていれば、この検査は通らない
+    for backend in common::backends("cluster-logs").await {
+        let broker = MemoryBroker::new();
+        let (a, _b, mut agent, _card_id, account_id) = split(&backend.db, &broker).await;
+        let target = wait_online(&a.hub, account_id).await;
+
+        let host = RemoteSessionHost::new(Arc::clone(&a.hub));
+        let query = protocol::logs::LogQuery {
+            since: "2026-08-08T00:00:00.000Z".to_string(),
+            level: "INFO".to_string(),
+            card: None,
+            proc: Some("session-host".to_string()),
+            grep: None,
+            grep_on_raw: false,
+            sanitize: false,
+        };
+        let asked = query.clone();
+        // 問いは待つので、別のタスクへ逃がして**その間に PC 役が答える**
+        let asking = tokio::spawn(async move {
+            host.read_log(
+                server_core::session_host::HostAskRequest {
+                    account_id,
+                    target: Some(target),
+                },
+                &asked,
+            )
+            .await
+        });
+
+        let message = agent
+            .wait_for("跨ぎで届くログの問い", |message| {
+                matches!(message, protocol::a2s::ServerToAgent::ReadLog { .. })
+            })
+            .await;
+        let protocol::a2s::ServerToAgent::ReadLog {
+            request_id,
+            query: got,
+        } = message
+        else {
+            panic!("[{}] ログの問いであること", backend.name);
+        };
+        // **絞り込みはそのまま相手へ渡る。** ここで削ると PC 側が全部を返そうとする
+        assert_eq!(got, query, "[{}]", backend.name);
+
+        agent
+            .send(&protocol::a2s::AgentMessage::HostReply {
+                request_id,
+                reply: protocol::a2s::HostReply::Log(protocol::logs::LogChunk {
+                    host: String::new(),
+                    host_now: "2026-08-08T01:00:00.000Z".to_string(),
+                    lines: vec!["{\"ts\":\"2026-08-08T00:30:00.000Z\"}".to_string()],
+                    truncated: false,
+                    broken: 0,
+                    leaks: 0,
+                }),
+            })
+            .await;
+
+        let chunk = asking
+            .await
+            .expect("問いのタスクが畳まれないこと")
+            .unwrap_or_else(|err| panic!("[{}] 答えが戻ること: {err:?}", backend.name));
+        assert_eq!(chunk.lines.len(), 1, "[{}]", backend.name);
+        assert_eq!(
+            chunk.host_now, "2026-08-08T01:00:00.000Z",
+            "[{}]",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}

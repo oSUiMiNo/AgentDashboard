@@ -12,6 +12,7 @@
 //! | WS 購読 | `SubTranscript` / `SubPty` を他人のカードへ出す |
 //! | WS 操作 | `Kill` / `Archive` / `SetModel` / `SetPermissionMode` / `SendInput` / `Resize` / `PtyFlow` / 生の入力 / `Spawn`（他人の PC 宛て）を出す |
 //! | A2S | 自分の接続から**他人の card_id** を報告する |
+//! | 別の PC のログを引く口 | 他人の PC を宛先に `GET /api/hosts/{id}/logs` する（ログ設計§13-1） |
 //! | ブラウザのログの受け口 | 他人の card_id を名乗って `POST /api/client-logs` する（ログ設計§12-5） |
 //!
 //! Valkey の行（チャネル名の acct スコープ）はフェーズ6 側で消化する。
@@ -973,4 +974,108 @@ fn client_log_body(card_id: CardId) -> String {
     format!(
         r#"{{"entries":[{{"ts":"2026-08-08T00:00:00.000Z","level":"ERROR","kind":"unhandled","msg":"落ちました","card_id":"{card_id}"}}]}}"#
     )
+}
+
+#[tokio::test]
+async fn 他人の_PC_のログは引けない() {
+    // 振る舞いは `ask` の宛先解決（`conn.account_id == request.account_id`）が既に
+    // 守っている。**それでもここへ足すのは、守られている証拠が無いから**——
+    // 1経路でも漏れると分離が絵に描いた餅になる、というのがこの表の存在理由
+    for backend in common::backends("tenancy-logs").await {
+        let arena = Arena::start(backend.db.clone()).await;
+        let (mine, mut mine_agent) = arena.tenant("わたし").await;
+        let (theirs, _their_agent) = arena.tenant("よそのひと").await;
+
+        let their_agent_id = arena
+            .registry
+            .list(theirs.account_id)
+            .first()
+            .and_then(|meta| meta.agent_id)
+            .expect("相手の PC が分かること");
+
+        let browser = arena.browser(&mine).await;
+        let (status, body) = browser
+            .get(&format!(
+                "/api/hosts/{}/logs?since=2026-08-08T00:00:00.000Z",
+                their_agent_id.0
+            ))
+            .await;
+
+        // **他人の PC と知らない PC を言い分けない。** 言い分けると、IDを総当たりして
+        // 他人の持ち物の存在だけを調べられる
+        assert_eq!(status, 404, "[{}] {body}", backend.name);
+        assert!(
+            body.contains("繋がっていません"),
+            "[{}] 存在が分かる断り方になっている: {body}",
+            backend.name
+        );
+
+        // **でたらめな綴りも同じ言葉。** ここが違うと、断り方の差だけで実在を探れる
+        let (unknown_status, unknown_body) = browser
+            .get(&format!(
+                "/api/hosts/{}/logs?since=2026-08-08T00:00:00.000Z",
+                uuid::Uuid::new_v4()
+            ))
+            .await;
+        assert_eq!(unknown_status, status, "[{}]", backend.name);
+        assert_eq!(unknown_body, body, "[{}]", backend.name);
+
+        // **肯定側の裏取り。** 全部断っているだけの実装でも上は通ってしまうので、
+        // 自分の PC へは同じ口が通ることまで見る。
+        //
+        // なお `local` は**サーバモードでは引けない**（`RemoteSessionHost` は自分の
+        // ログを読む口を持たない）。ここで `local` を当てにすると、正しい 404 を
+        // 「塞がれている」と読み違える（実際に一度そう書いた）
+        let my_agent_id = arena
+            .registry
+            .list(mine.account_id)
+            .first()
+            .and_then(|meta| meta.agent_id)
+            .expect("自分の PC が分かること");
+        let (addr, cookie) = (browser.addr, browser.cookie.clone());
+        let path = format!(
+            "/api/hosts/{}/logs?since=2026-08-08T00:00:00.000Z",
+            my_agent_id.0
+        );
+        // 問いは答えを待つので、別のタスクへ逃がして**その間に PC 役が答える**
+        let asking = tokio::task::spawn_blocking(move || {
+            testkit::request(addr, "GET", &path, None, Some(&cookie))
+        });
+
+        let message = mine_agent
+            .wait_for("自分の PC へ届くログの問い", |message| {
+                matches!(message, protocol::a2s::ServerToAgent::ReadLog { .. })
+            })
+            .await;
+        let protocol::a2s::ServerToAgent::ReadLog { request_id, .. } = message else {
+            panic!("[{}] ログの問いであること", backend.name);
+        };
+        mine_agent
+            .send(&protocol::a2s::AgentMessage::HostReply {
+                request_id,
+                reply: protocol::a2s::HostReply::Log(protocol::logs::LogChunk {
+                    host: String::new(),
+                    host_now: "2026-08-08T01:00:00.000Z".to_string(),
+                    lines: Vec::new(),
+                    truncated: false,
+                    broken: 0,
+                    leaks: 0,
+                }),
+            })
+            .await;
+        let own = asking
+            .await
+            .expect("HTTPスレッドが落ちないこと")
+            .expect("応答を読めること");
+        assert_eq!(own.status, 200, "[{}] {}", backend.name, own.body);
+        // **どの PC のものかはサーバが埋める**（PC は空で返す）
+        assert!(
+            own.body.contains(&my_agent_id.0.to_string()),
+            "[{}] {}",
+            backend.name,
+            own.body
+        );
+
+        backend.finish().await;
+    }
 }

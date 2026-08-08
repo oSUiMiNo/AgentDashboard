@@ -2821,6 +2821,7 @@ dependencies = [
  "password-auth",
  "protocol",
  "redis",
+ "regex",
  "rust-embed",
  "sea-orm",
  "sea-orm-migration",
