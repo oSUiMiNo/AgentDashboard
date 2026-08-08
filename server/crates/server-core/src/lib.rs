@@ -13,6 +13,7 @@
 pub mod account;
 pub mod auth;
 pub mod bus;
+pub mod client_logs;
 pub mod cluster;
 pub mod config;
 pub mod db;
@@ -49,6 +50,15 @@ use std::sync::Arc;
 /// 画面そのものを 401 にすると「ログイン画面を出す」手段が無くなるし、認証の要否を
 /// 知るのに認証が要るという循環もできる。**中身は返さないが、扉は開ける。**
 pub fn routes(state: ws::AppState, auth: Arc<auth::AuthContext>) -> Router {
+    // ブラウザで起きたことの受け口（設計§12-3）。**鍵の外側**——内側だと
+    // ログイン画面とセットアップ画面のエラーが1件も届かない。材料は先に取り出す
+    // （下の `with_state` が `state` を食べるため）
+    let client_logs = client_logs::routes(
+        Arc::clone(&auth),
+        Arc::clone(&state.registry),
+        state.client_logs.clone(),
+    );
+
     let protected = Router::new()
         .route("/ws", get(ws::ws_handler))
         .route("/api/sessions", get(ws::api_sessions))
@@ -71,6 +81,7 @@ pub fn routes(state: ws::AppState, auth: Arc<auth::AuthContext>) -> Router {
 
     guard(protected, Arc::clone(&auth))
         .merge(auth::routes(auth))
+        .merge(client_logs)
         .fallback(get(static_handler))
 }
 

@@ -117,7 +117,12 @@ impl AuthContext {
     }
 
     /// この接続を誰として扱うか。通っていなければ `None`。
-    async fn identify(&self, session: &Session, from_loopback: bool) -> Option<Identity> {
+    ///
+    /// **鍵の外側の口も呼ぶ。** ブラウザのログの受け口（[`crate::client_logs`]）は
+    /// 素通しだが、通っていれば誰かを知る必要がある——認証済みぶんと未認証ぶんで
+    /// 落とす先を分けるため（設計§12-4）。`require_identity` のように断るのではなく、
+    /// 分からなければ分からないまま先へ進む。
+    pub async fn identify(&self, session: &Session, from_loopback: bool) -> Option<Identity> {
         match self.mode {
             AuthMode::Open => Some(self.local_identity(from_loopback)),
             AuthMode::LanPassword => {

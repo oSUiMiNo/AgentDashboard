@@ -16,6 +16,7 @@
 
 pub mod boot;
 pub mod cli;
+pub mod client_logs;
 pub mod config;
 pub mod gate;
 pub mod local;
@@ -60,6 +61,9 @@ pub struct LocalServer {
     state_dir: Option<std::path::PathBuf>,
     /// 版の口の残りの材料（CICD設計§9・§10）。`state_dir` と一緒に入る。
     versions: Option<VersionsWiring>,
+    /// ブラウザで起きたことの書き出し先（設計§12）。**居なくても動く**ので、
+    /// 既存の統合テストはログの口を立てずにセッションの検証だけができる。
+    client_logs: Option<Arc<dyn server_core::client_logs::ClientLogSink>>,
 }
 
 /// 版の口が要る、`state_dir` 以外の材料。
@@ -89,6 +93,7 @@ impl LocalServer {
             auth,
             state_dir: None,
             versions: None,
+            client_logs: None,
         }
     }
 
@@ -115,6 +120,15 @@ impl LocalServer {
     /// 分けてあるのは、既存の統合テストが記録への口も終わり方も要らないため。
     /// **終わり方を差し替えられる形にしてある**のが要点——素直に落とすと、サーバを
     /// プロセス内に立てているテストがテストバイナリごと死ぬ。
+    /// ブラウザで起きたことの書き出し先を差し込む（設計§12）。
+    pub fn with_client_logs(
+        mut self,
+        sink: Arc<dyn server_core::client_logs::ClientLogSink>,
+    ) -> Self {
+        self.client_logs = Some(sink);
+        self
+    }
+
     pub fn with_versions(mut self, wiring: VersionsWiring) -> Self {
         self.versions = Some(wiring);
         self
@@ -140,11 +154,14 @@ impl LocalServer {
         if let Some(parser) = &self.parser {
             agent = agent.with_parser(Arc::clone(parser));
         }
-        let ws_state = ws::AppState::new(
+        let mut ws_state = ws::AppState::new(
             Arc::new(agent),
             Arc::clone(&self.registry),
             Arc::clone(&self.config),
         );
+        if let Some(sink) = &self.client_logs {
+            ws_state = ws_state.with_client_logs(Arc::clone(sink));
+        }
 
         let settings = server_core::guard(
             settings_api::routes(SettingsState {
@@ -242,7 +259,10 @@ pub async fn serve_server(
     let agent: Arc<dyn server_core::session_host::SessionHost> = Arc::new(
         server_core::gateway::RemoteSessionHost::new(Arc::clone(&hub)),
     );
-    let ws_state = ws::AppState::new(agent, Arc::clone(&registry), Arc::clone(&server_config));
+    // ブラウザで起きたことの受け皿（設計§12）。**サーバモードでも同じ場所へ落ちる**——
+    // PTY は持たないが、ブラウザと話しているのはこちらである
+    let ws_state = ws::AppState::new(agent, Arc::clone(&registry), Arc::clone(&server_config))
+        .with_client_logs(client_logs::LoggingSink::open(&config.agent()));
     let router = server_core::routes(ws_state, Arc::clone(&auth))
         // セッションホストの受け口は**ブラウザとは別の鍵**（ペアリングトークン。§8-4）。
         // Cookie の middleware をかけると、PC が Cookie を持たないだけで断られる
@@ -492,6 +512,9 @@ pub async fn serve(config: Config, config_arg: Option<std::path::PathBuf>) -> an
     let server = LocalServer::new(manager, registry, Arc::clone(&server_config), auth)
         .with_parser(parser)
         .with_settings(settings)
+        // ブラウザで起きたことの受け皿（設計§12）。**同じ `logs/` へ落ちる**ので、
+        // `agentdashboard logs` は経路を意識せずに混ぜて出せる
+        .with_client_logs(client_logs::LoggingSink::open(&agent_config))
         .with_state_dir(agent_config.resolved_state_dir())
         .with_versions(VersionsWiring {
             config_arg,

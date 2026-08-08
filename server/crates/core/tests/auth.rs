@@ -228,7 +228,16 @@ impl Selfhost {
         let agent: std::sync::Arc<dyn server_core::session_host::SessionHost> = std::sync::Arc::new(
             server_core::gateway::RemoteSessionHost::new(std::sync::Arc::clone(&hub)),
         );
-        let ws_state = server_core::ws::AppState::new(agent, registry, config);
+        // ブラウザのログの受け口も立てる（ログ設計§12）。**差し込まないと、口はあるのに
+        // 何も残らない状態になり、「受けた」と「残した」を見分けられない**
+        let ws_state = server_core::ws::AppState::new(agent, registry, config).with_client_logs(
+            agentdashboard_core::client_logs::LoggingSink::open(
+                &session_host_core::config::SessionHostConfig {
+                    state_dir: Some(dir.clone()),
+                    ..Default::default()
+                },
+            ),
+        );
 
         let router = server_core::auth::with_sessions(
             server_core::routes(ws_state, std::sync::Arc::clone(&auth)).merge(server_core::guard(
@@ -284,6 +293,11 @@ impl Selfhost {
         .expect("HTTPスレッドが落ちないこと")
         .expect("応答を読めること");
         (response.status, response.body)
+    }
+
+    /// 記録とログの置き場所。
+    fn state_dir(&self) -> &std::path::Path {
+        &self.dir
     }
 
     async fn get(&self, path: &str) -> (u16, String) {
@@ -386,6 +400,47 @@ async fn ログインしないと何も見えない() {
         .request("POST", "/api/settings/import", Some("{}"))
         .await;
     assert_eq!(status, 401, "/api/settings/import が鍵の向こうにない");
+}
+
+/// ブラウザのログの受け口だけは**鍵の外側**（ログ設計§12-3）。
+///
+/// 内側に置くと、ログイン画面とセットアップ画面で起きたエラーが1件も届かない。
+/// そこがいちばん報告しづらく、いちばん欲しい場所である。
+///
+/// **断られないことだけでは足りない。** 握り潰していても 204 は返るので、
+/// 未認証ぶんのファイルへ実際に行が増えたことまで見る（肯定側の裏取り）。
+#[tokio::test]
+async fn ブラウザのログは未ログインでも受ける() {
+    let server = selfhost().await;
+
+    let 本文 = r#"{"entries":[{"ts":"2026-08-08T00:00:00.000Z","level":"ERROR","kind":"unhandled","msg":"ログイン画面で落ちました"}]}"#;
+    let (status, body) = server.request("POST", "/api/client-logs", Some(本文)).await;
+
+    assert_eq!(status, 204, "鍵の内側に入っている（401 か 404 が返った）");
+    assert!(body.is_empty(), "この口は何も返さない: {body}");
+
+    // 未認証ぶんは `browser-anon-*` へ隔離される（設計§12-4）。
+    // **書き出しは非ブロッキングなので、届くまで待つ。** 応答（204）は書き終わりを
+    // 意味しない——待たずに読むと、通しで走らせたときだけ落ちるテストになる
+    // （ガイドライン「テストが『たまたま通っている』ことに気づく」）
+    let 置き場所 = server.state_dir().join("logs");
+    let mut 見つかった = false;
+    for _ in 0..100 {
+        見つかった = 残ったか(&置き場所);
+        if 見つかった {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        見つかった,
+        "受けたが残っていない（{}の中身: {:?}）",
+        置き場所.display(),
+        std::fs::read_dir(&置き場所).map(|entries| entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .collect::<Vec<_>>())
+    );
 }
 
 /// セルフホストでもトグルが画面から変えられること（持ち出し設計§6）。
@@ -777,4 +832,17 @@ async fn 設定と持ち出しはアカウントごとに分かれる() {
         body.contains("\"sync_interval_secs\":5"),
         "他人の書き込みが自分の設定を動かしている: {body}"
     );
+}
+
+/// 未認証ぶんのファイルへ、その行が残ったか。
+fn 残ったか(置き場所: &std::path::Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(置き場所) else {
+        return false;
+    };
+    entries.filter_map(Result::ok).any(|entry| {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        name.starts_with("browser-anon-")
+            && std::fs::read_to_string(entry.path())
+                .is_ok_and(|text| text.contains("ログイン画面で落ちました"))
+    })
 }

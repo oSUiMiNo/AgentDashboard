@@ -71,6 +71,9 @@ pub struct AppState {
     /// 死んでいても一覧と履歴は出る**（再起動後の復元がまさにその状態）。
     pub registry: Arc<SessionRegistry>,
     pub config: Arc<ServerConfig>,
+    /// ブラウザで起きたことの書き出し先（設計§12）。**居なくても動く**——
+    /// 受け取って捨てるだけになる
+    pub client_logs: Option<Arc<dyn crate::client_logs::ClientLogSink>>,
     next_client_id: Arc<AtomicU64>,
 }
 
@@ -84,8 +87,20 @@ impl AppState {
             agent,
             registry,
             config,
+            client_logs: None,
             next_client_id: Arc::new(AtomicU64::new(1)),
         }
+    }
+
+    /// ブラウザのログの書き出し先を差し込む。
+    ///
+    /// **`new` の引数を増やさない。** 増やすと、この材料を持たないテスト3箇所が
+    /// 巻き添えで直ることになる。「口だけ先に作り、後から相手を差し込む」
+    /// （ガイドライン「口を作る順序は、循環したら2段に割る」）の形にしてある。
+    #[must_use]
+    pub fn with_client_logs(mut self, sink: Arc<dyn crate::client_logs::ClientLogSink>) -> Self {
+        self.client_logs = Some(sink);
+        self
     }
 }
 

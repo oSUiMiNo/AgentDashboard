@@ -12,6 +12,7 @@
 //! | WS 購読 | `SubTranscript` / `SubPty` を他人のカードへ出す |
 //! | WS 操作 | `Kill` / `Archive` / `SetModel` / `SetPermissionMode` / `SendInput` / `Resize` / `PtyFlow` / 生の入力 / `Spawn`（他人の PC 宛て）を出す |
 //! | A2S | 自分の接続から**他人の card_id** を報告する |
+//! | ブラウザのログの受け口 | 他人の card_id を名乗って `POST /api/client-logs` する（ログ設計§12-5） |
 //!
 //! Valkey の行（チャネル名の acct スコープ）はフェーズ6 側で消化する。
 //!
@@ -32,8 +33,14 @@ use protocol::{
     ws::{ClientMessage, ServerMessage},
 };
 use sea_orm::DatabaseConnection;
-use server_core::{db::pairing, gateway::SessionHostHub, registry::SessionRegistry};
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use server_core::{
+    client_logs::ClientLogSink, db::pairing, gateway::SessionHostHub, registry::SessionRegistry,
+};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tokio_tungstenite::tungstenite;
 use uuid::Uuid;
 
@@ -55,7 +62,30 @@ struct Arena {
     registry: Arc<SessionRegistry>,
     /// 繋がっている PC の集まり。失効を接続中へ効かせる確認に要る
     hub: Arc<SessionHostHub>,
+    /// ブラウザのログの行き先。**ファイルではなく手元へ溜める**——
+    /// 見たいのは「何が書かれたか」であって、書き出しの経路ではない
+    logs: Arc<記録>,
     task: tokio::task::JoinHandle<()>,
+}
+
+/// 受け取った行を溜めるだけの行き先。
+#[derive(Default)]
+struct 記録 {
+    lines: Mutex<Vec<protocol::client_log::ClientLogEntry>>,
+}
+
+impl ClientLogSink for 記録 {
+    fn write(
+        &self,
+        _anon: bool,
+        entries: &[protocol::client_log::ClientLogEntry],
+        _drops: protocol::client_log::ClientLogDrops,
+    ) {
+        self.lines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend_from_slice(entries);
+    }
 }
 
 impl Drop for Arena {
@@ -75,8 +105,10 @@ impl Arena {
         let agent: Arc<dyn server_core::session_host::SessionHost> = Arc::new(
             server_core::gateway::RemoteSessionHost::new(Arc::clone(&hub)),
         );
+        let logs = Arc::new(記録::default());
         let ws_state =
-            server_core::ws::AppState::new(agent, Arc::clone(&registry), Arc::clone(&config));
+            server_core::ws::AppState::new(agent, Arc::clone(&registry), Arc::clone(&config))
+                .with_client_logs(Arc::clone(&logs) as Arc<dyn ClientLogSink>);
 
         let router = server_core::auth::with_sessions(
             server_core::routes(ws_state, Arc::clone(&auth))
@@ -101,6 +133,7 @@ impl Arena {
             db,
             registry,
             hub,
+            logs,
             task,
         }
     }
@@ -843,4 +876,101 @@ async fn 他人の枠は見えないし消せない() {
 
         backend.finish().await;
     }
+}
+
+/// ブラウザのログに他人の PC を引かせない（ログ設計§12-5・§8-6）。
+///
+/// この口は**鍵の外側**なので、他の行と違って「断られること」では確かめられない
+/// ——誰でも書けるのが仕様である。見るのは**書けた行の中身**で、他人の `card_id` を
+/// 名乗っても `agent_id` が引けないこと。引けてしまうと、IDを総当たりして
+/// **他人のセッションがどの PC に居るかを外から測れる**。
+#[tokio::test]
+async fn 他人の_card_id_を名乗っても_PC_は引けない() {
+    for backend in common::backends("tenancy-client-logs").await {
+        let arena = Arena::start(backend.db.clone()).await;
+        let (mine, _mine_agent) = arena.tenant("わたし").await;
+        let (theirs, _their_agent) = arena.tenant("よそのひと").await;
+        let browser = arena.browser(&mine).await;
+
+        // ① 他人のカードを名乗る
+        let (status, _) = browser
+            .request(
+                "POST",
+                "/api/client-logs",
+                Some(&client_log_body(theirs.card_id)),
+            )
+            .await;
+        assert_eq!(status, 204, "[{}] 受けること（鍵の外側）", backend.name);
+
+        // ② 自分のカードを名乗る。**正当な側では引けること**まで見ないと、
+        // 「いつも引けない実装」でも①が通ってしまう
+        let (status, _) = browser
+            .request(
+                "POST",
+                "/api/client-logs",
+                Some(&client_log_body(mine.card_id)),
+            )
+            .await;
+        assert_eq!(status, 204, "[{}] 受けること", backend.name);
+
+        let lines = arena
+            .logs
+            .lines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(lines.len(), 2, "[{}] 2件とも書かれること", backend.name);
+        assert_eq!(
+            lines[0].agent_id, None,
+            "[{}] 他人の card_id から PC を引けてしまった",
+            backend.name
+        );
+        assert!(
+            lines[1].agent_id.is_some(),
+            "[{}] 自分の card_id からも引けていない（①が空振りしている）",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+/// ブラウザが名乗った `agent_id` は信じない（ログ設計§12-5）。
+///
+/// **封筒の中身ではなく、こちらが引いた値を正とする。** 信じると、他人の PC を
+/// 名乗った行がそのまま残り、後から読む人が誤った PC を追いかけることになる。
+#[tokio::test]
+async fn ブラウザが名乗った_agent_id_は捨てる() {
+    for backend in common::backends("tenancy-client-logs-agent").await {
+        let arena = Arena::start(backend.db.clone()).await;
+        let (mine, _mine_agent) = arena.tenant("わたし").await;
+        let browser = arena.browser(&mine).await;
+
+        let 嘘 = format!(
+            r#"{{"entries":[{{"ts":"2026-08-08T00:00:00.000Z","level":"ERROR","kind":"unhandled","msg":"名乗り","agent_id":"{}"}}]}}"#,
+            Uuid::from_u128(0xdead)
+        );
+        let (status, _) = browser.request("POST", "/api/client-logs", Some(&嘘)).await;
+        assert_eq!(status, 204);
+
+        let lines = arena
+            .logs
+            .lines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(
+            lines[0].agent_id, None,
+            "[{}] ブラウザの名乗りがそのまま残っている",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+fn client_log_body(card_id: CardId) -> String {
+    format!(
+        r#"{{"entries":[{{"ts":"2026-08-08T00:00:00.000Z","level":"ERROR","kind":"unhandled","msg":"落ちました","card_id":"{card_id}"}}]}}"#
+    )
 }
