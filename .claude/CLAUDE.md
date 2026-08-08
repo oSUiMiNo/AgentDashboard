@@ -86,6 +86,7 @@ issue-sync は、ユーザーが行うので不要。必要かどうかユーザ
 - タスク完了の定義は「テストが通ること」。`make ci`（lint → test → build）が通って初めて完了とみなす
 - 各フェーズの終わりには ⛳チェックポイントがあり、対応するテスト計画のフェーズを消化してから次へ進む
 - 自己修復機構の制約上、`crates/protocol` は共有境界であり変更のハードルが高い。未知の構造は `Node::Unknown` へ写像して吸収する
+- **原因を追うときは、コードを読む前に `agentdashboard logs` を読む。** 残す側の約束は `.claude/docs/guideline.md`「ログを残すとき」に集めてある（利用者向けの読み方は `README.md`）
 - コミットは作業別に分けて段階的に行う。プッシュはしない
 
 ---
@@ -109,6 +110,8 @@ issue-sync は、ユーザーが行うので不要。必要かどうかユーザ
 | `server/crates/server-core/src/gateway.rs` | エージェントの受け口（`/agent/ws`）。版交渉・トークン照合・帰属の決定。ブラウザ向けの指示を A2S へ中継する `RemoteSessionHost` もここ |
 | `server/crates/session-host-core/src/link.rs` | PC からサーバへ繋ぐ側。履歴を束ねて送り、**ack が返ってから位置を進める**（設計§6-1） |
 | `server/crates/session-host-core/src/offsets.rs` | 「どこまで読んだか」の置き場所。**読む側（パーサ）と進める側（運び手）で共有する** |
+| `server/crates/session-host-core/src/logging.rs` | ログの出力層と読む口の土台。**7欄を組み立てるのはここだけ**。同じ名前の欄を渡すと `f_<名前>` へ退避する。行を出す場所を増やす前にガイドライン「ログを残すとき」を読む |
+| `server/crates/core/tests/swallowed.toml` | 結果を捨てている箇所の台帳。**製品コードの `let _ =` は1件残らずここに理由付きで載る**。実コードと食い違うと落ちる。鍵は行番号ではなく式の断片 |
 | `server/crates/session-host/src/lib.rs` | セッションホストの中身。フックの受信口を自分で開く（設計§5-3）。**実行ファイルは `crates/dist` が持つ** |
 | `server/crates/dist/` | 利用者へ配る一式。実行ファイル3本の**入口だけ**（各1行）を持つ（§25 読み替え1）。中身を書かないこと |
 | `dist-workspace.toml` ／ `scripts/dist` | 配布物の作り方。**`.github/workflows/release.yml` は `dist generate` が作る**ので手で書き換えない |
