@@ -37,7 +37,7 @@
 <p class="lead">
   AgentDashboard に関係して、この機械や外で<strong>起動しっぱなしになっているもの</strong>の一覧。
   「どの URL がどれを指しているか」を取り違えると原因追跡が丸ごと空振りするので、そこを中心に書いてある。
-  <br>最終更新：2026-08-08（4つとも 0.1.10。ただし手元3台にはログ整備が入っていて、AWS には入っていない）
+  <br>最終更新：2026-08-08（<strong>動いているのは実機と AWS だけ</strong>。trial とセッションホスト<span class="mark">▽</span>は止まっている）
 </p>
 
 <h2>先に用語</h2>
@@ -117,7 +117,7 @@
   手元の2台は<strong>ソースビルド<span class="mark">▽</span></strong>なので、版を上げなくても
   <code>git pull</code> と <code>make build</code> のたびに中身が変わる。
   一方 AWS は<strong>配った箱</strong>なので、<strong>リリースを出すまで何も変わらない</strong>。<br>
-  いまは<strong>4つとも</strong> <code>0.1.10</code> で揃っている（ダッシュボード3台＋セッションホスト<span class="mark">▽</span>）が、手元で作業を進めれば<strong>すぐにずれる</strong>。
+  版はどれも <code>0.1.10</code> だが、<strong>いま動いているのは実機と AWS の2つだけ</strong>（trial とセッションホスト<span class="mark">▽</span>は止まっている）。手元で作業を進めれば版は<strong>すぐにずれる</strong>。<br><br><strong>同じ 0.1.10 でも中身が違う。</strong> 実機は ソースビルド<span class="mark">▽</span> なので<strong>ログ整備が入っている</strong>が、AWS は配った箱なので<strong>入っていない</strong>（ログ整備はまだどのリリースにも入っていない——<code>v0.1.10</code> のタグは 08-06、ログの最初のコミットは 08-07）。実際、AWS の箱には <code>logs/</code> ディレクトリが無い。
   画面に出る版だけを見て「同じものが動いている」と判断しないこと。<br>
   <strong>いまがまさにその状態。</strong>手元3台はログ整備（ローカルイシュー「あらゆる経路のログを〜」の段1）が入った
   ソースビルドで、AWS の箱には入っていない。<strong>版番号はどちらも <code>0.1.10</code>。</strong>
@@ -155,13 +155,13 @@ agentdashboard-agent logs --since 24h --state-dir ~/agentdashboard-agent/state</
   <tr>
     <td>trial</td>
     <td><code>127.0.0.1:8788</code></td>
-    <td><span class="tag t-ok">0.1.10</span><br><small>実機と同じ実行ファイル</small></td>
+    <td><span class="tag">止まっている</span><br><small>最後の行は 08-08 03:23</small></td>
     <td>サーバモード<span class="mark">▽</span>。<code>--config ~/agentdashboard-trial/server.toml --mode server</code>、作業ディレクトリは <code>~/agentdashboard-trial</code></td>
   </tr>
   <tr>
     <td>セッションホスト<span class="mark">▽</span></td>
     <td>— （PC 名 <code>OMEN</code>）</td>
-    <td><span class="tag t-ok">0.1.10</span></td>
+    <td><span class="tag">止まっている</span><br><small>最後の行は 08-08 04:42。AWS の名前を引けずに繋ぎ直しを続けた末に落ちている</small></td>
     <td><strong>AWS へ繋いでいる</strong>（<code>dash.underschaft.com</code>）。設定は <code>~/agentdashboard-agent/agent.toml</code>、ログは同じ場所の <code>run.log</code>。
         <strong>ここを起こし直すと、抱えている claude が道連れになる。</strong>版を上げたら入れ替えないと、サーバだけ新しくなって<strong>フォルダを覗く口が「版が古い」で断られ続ける</strong>（実際に踏んだ）。<code>agent_id</code> はペアリングトークンから決まるので、<strong>起こし直しても同じ PC のまま</strong>——枠は孤児にならない。
         記録の置き場所は <code>~/agentdashboard-agent/state</code>——<strong>8787 と分けてある</strong>（既定のままだと同じ場所を取り合う）。
