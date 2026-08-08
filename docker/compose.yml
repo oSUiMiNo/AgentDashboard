@@ -41,6 +41,21 @@ services:
       DATABASE_URL: postgres://agentdashboard:agentdashboard@postgres:5432/agentdashboard
       VALKEY_URL: redis://valkey:6379
       RUST_LOG: info
+      # 記録の置き場所を**名指しする**（ログ設計§25-10）。
+      #
+      # 書かないと `HOME` から組み立てられる（いまは root なので
+      # `/root/.local/state/agentdashboard`）。**箱の中の人が変わった瞬間に場所が動く**
+      # ので、下の volume の当て先も一緒にずれる。名指ししておけば、誰で走っても同じ
+      AGENTDASHBOARD_STATE_DIR: /var/lib/agentdashboard
+    volumes:
+      # **ログをここへ残す。** 無いと書き込み層に落ちるので、`up -d` で箱を作り直す
+      # たびに消える——「更新したら壊れた、更新前を見たい」という、いちばん需要のある
+      # 場面でいちばん困る形になる（記録は PostgreSQL 側なので、消えるのはログだけ）。
+      #
+      # 掃除は**起動時に1回だけ**走る（設計§6-2）。長く動かしている箱では
+      # `log_max_bytes` を超えても起こし直すまで掃かれないので、既定値の見直しが
+      # 要るかどうかはフェーズ6 の§18-3 で決める
+      - dashboard-state:/var/lib/agentdashboard
     ports:
       - '8787:8787'
     healthcheck:
@@ -87,3 +102,6 @@ services:
 
 volumes:
   pgdata:
+  # ダッシュボードの記録（ログ・版の保管庫）。**DB とは別**——あちらは PostgreSQL が
+  # 持っているので、ここに入るのは箱が自分のために書いたものだけ
+  dashboard-state:
