@@ -28,6 +28,7 @@
  */
 
 import { create } from 'zustand'
+import { report } from '@/lib/clientLogs'
 import { KIND_PTY_INPUT, decodeFrame, encodeFrame } from '@/lib/frame'
 import type {
   CardId,
@@ -257,14 +258,24 @@ async function openSocket(set: SetState) {
     void useAuthStore.getState().load()
   }
 
-  next.onclose = () => {
+  next.onclose = (event) => {
     // 台帳は消さない。消すと繋ぎ直せても画面が二度と更新されない
     set({ status: 'closed' })
+    // **切れたことをログへ残す**（設計§12-1）。画面には出さない——切断は繋ぎ直しで
+    // 解消するのが普通なので、そのたびにバナーを出す意味は無い。だが「あのとき
+    // 切れていた」を後から言えないと、原因追跡がそこで止まる
+    report('ws_close', event.wasClean ? 'INFO' : 'WARN', 'WebSocket が切れました', {
+      stack: `code=${event.code} reason=${event.reason} wasClean=${event.wasClean}`,
+    })
     scheduleReconnect(set)
   }
 
-  next.onerror = () =>
+  next.onerror = () => {
     set({ lastError: 'サーバへ接続できません。起動しているか確認してください' })
+    // `onerror` の `Event` は理由を持たない（仕様でそう決まっている）。
+    // **分からなかったことを、分かる形で残す**
+    report('ws_error', 'ERROR', 'WebSocket でエラーが起きました（理由は通知されません）')
+  }
 
   next.onmessage = (event) => {
     if (typeof event.data === 'string') {

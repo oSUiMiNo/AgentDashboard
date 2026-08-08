@@ -26,7 +26,11 @@ class FakeSocket {
   sent: string[] = []
 
   onopen: (() => void) | null = null
-  onclose: (() => void) | null = null
+  /**
+   * **本物と同じく `CloseEvent` を渡す。** 引数なしで呼ぶ形にしていると、
+   * 切断の理由を読む実装を足した瞬間にここだけが落ちる（実際に落ちた）
+   */
+  onclose: ((event: CloseEvent) => void) | null = null
   onerror: (() => void) | null = null
   onmessage: ((event: MessageEvent) => void) | null = null
 
@@ -42,7 +46,8 @@ class FakeSocket {
   }
 
   close() {
-    this.drop()
+    // こちらから閉じたので「きれいに閉じた」
+    this.drop({ code: 1000, reason: '', wasClean: true })
   }
 
   /** サーバが受け入れた。 */
@@ -52,9 +57,9 @@ class FakeSocket {
   }
 
   /** 接続が切れた（サーバが落ちた・回線が途切れた）。 */
-  drop() {
+  drop(how: { code: number; reason: string; wasClean: boolean } = { code: 1006, reason: '', wasClean: false }) {
     this.readyState = FakeSocket.CLOSED
-    this.onclose?.()
+    this.onclose?.(how as CloseEvent)
   }
 
   /** このソケットが送った操作メッセージ。 */

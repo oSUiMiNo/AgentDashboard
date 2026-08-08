@@ -4,6 +4,15 @@
   "ignorePatterns": ["dist", "src/components/ui"],
   "rules": {
     "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
+    "react/only-export-components": ["warn", { "allowConstantExport": true }],
+    "no-console": "error"
+  },
+  "overrides": [
+    {
+      "files": ["e2e/**"],
+      "rules": {
+        "no-console": "off"
+      }
+    }
+  ]
 }

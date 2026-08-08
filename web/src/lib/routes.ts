@@ -16,6 +16,21 @@ export function sessionPath(cardId: CardId): string {
 }
 
 /**
+ * URL から `card_id` を読む。[`sessionPath`] の逆。
+ *
+ * **React の外から呼ぶための口**（設計§12-2）。`window.onerror` や WebSocket の
+ * ハンドラは `useParams()` を使えないので、いま開いている画面を知る手段がここしか無い。
+ * 冒頭が言う「組み立てと読み取りを1箇所にまとめる」の、読み取り側にあたる。
+ */
+export function cardIdFromPath(pathname: string): CardId | undefined {
+  const match = /^\/s\/([^/?#]+)/.exec(pathname)
+  if (!match) {
+    return undefined
+  }
+  return decodeURIComponent(match[1]) as CardId
+}
+
+/**
  * ローカルモードの `{host}`（イシューグループ_2026_0805_0514 設計§10）。
  *
  * REST のパス（`/api/hosts/{host}/dir`）と URL の両方で同じ綴りを使う。
