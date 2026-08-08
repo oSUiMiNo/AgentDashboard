@@ -210,6 +210,13 @@ reason = "線が切れているなら答えは届かない。問うた側は時�
 [[entry]]
 path = "server/crates/session-host-core/src/link.rs"
 fn = "apply_command"
+expr = '''outgoing.send(Outgoing::Volatile(AgentMessage::HostReply { request_id, reply: HostReply::Failed { reason: protocol::a2s::HostFailure::Unsupported, detail: "この版のセッションホストはログを引けません".to_string(), }, }))'''
+class = "send"
+reason = "断りが届かないのは線が切れているとき。問うた側は時間切れで畳む（answer_host_fs と同じ）"
+
+[[entry]]
+path = "server/crates/session-host-core/src/link.rs"
+fn = "apply_command"
 expr = '''session.resize(cols, rows)'''
 class = "by-design"
 reason = "大きさの指定は次に開いたときにまた届く。カードが既に畳まれていることもある"

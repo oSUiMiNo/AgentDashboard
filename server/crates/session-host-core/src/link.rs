@@ -589,6 +589,9 @@ async fn handshake(mut socket: Socket, config: &LinkConfig) -> anyhow::Result<(S
         // **この実行ファイルは実装を持っている**ので、常に真。名乗らない古いホストと
         // 区別が付くことが、画面に正しい理由を出せる唯一の材料になる
         supports_host_fs: true,
+        // ログを引ける版か（ログ設計§13-1）。**この段ではまだ実装が無いので偽。**
+        // 先に真を名乗ると、サーバが投げてきた問いに永遠に答えないことになる
+        supports_log_read: false,
     };
     socket
         .send(tungstenite::Message::text(serde_json::to_string(&hello)?))
@@ -930,6 +933,21 @@ fn apply_command(
         }
         ServerToAgent::ReadFile { request_id, path } => {
             answer_host_fs(outgoing.clone(), request_id, HostFsAsk::File(path));
+        }
+
+        // ログの問い（ログ設計§13-1）。**この段では実装がまだ無い。**
+        //
+        // `supports_log_read` を偽で名乗っているのでサーバは投げてこないが、
+        // **黙って捨てる枝を作らない**——名乗りと受け口を別々の版で入れると、
+        // その隙間で「投げたのに永遠に答えない」が起きうる
+        ServerToAgent::ReadLog { request_id, .. } => {
+            let _ = outgoing.send(Outgoing::Volatile(AgentMessage::HostReply {
+                request_id,
+                reply: HostReply::Failed {
+                    reason: protocol::a2s::HostFailure::Unsupported,
+                    detail: "この版のセッションホストはログを引けません".to_string(),
+                },
+            }));
         }
     }
 }

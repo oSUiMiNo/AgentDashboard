@@ -156,6 +156,12 @@ pub struct Capabilities {
     /// 本当の理由（版が古い）を伝えられない。
     #[serde(default)]
     pub supports_host_fs: bool,
+    /// ログを引けるか（ログ設計§13-1）。
+    ///
+    /// `supports_host_fs` と**能力ごとに別の欄**にしてある。1つにまとめると、
+    /// 片方だけ実装した版が現れたときに嘘を名乗ることになる。
+    #[serde(default)]
+    pub supports_log_read: bool,
 }
 
 /// 他インスタンスから回ってくる、PC への指示（設計§9-2 の `agent:{id}:cmd`）。
@@ -1064,7 +1070,19 @@ fn reply_kind(reply: &HostReply) -> &'static str {
     match reply {
         HostReply::Dir(_) => "dir",
         HostReply::File(_) => "file",
+        HostReply::Log(_) => "log",
         HostReply::Failed { .. } => "failed",
+    }
+}
+
+/// 頼んだものと違う答えが返ってきた。**黙って空を返さない。**
+///
+/// 実装の食い違いなので利用者には直せないが、**何が返ったか**は残す——
+/// 答えの種別が3つになった時点で、同じ文字列を書く場所が3箇所へ増えかけた。
+fn wrong_answer(reply: HostReply) -> crate::session_host::HostAskError {
+    crate::session_host::HostAskError::Failed {
+        reason: protocol::a2s::HostFailure::Unsupported,
+        detail: format!("PC が別の答えを返しました（{}）", reply_kind(&reply)),
     }
 }
 
@@ -1292,11 +1310,7 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
             HostReply::Failed { reason, detail } => {
                 Err(crate::session_host::HostAskError::Failed { reason, detail })
             }
-            // 頼んだものと違う答えが返るのは実装の食い違い。**黙って空を返さない**
-            HostReply::File(_) => Err(crate::session_host::HostAskError::Failed {
-                reason: protocol::a2s::HostFailure::Unsupported,
-                detail: "PC が別の答えを返しました".to_string(),
-            }),
+            other => Err(wrong_answer(other)),
         }
     }
 
@@ -1317,10 +1331,7 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
             HostReply::Failed { reason, detail } => {
                 Err(crate::session_host::HostAskError::Failed { reason, detail })
             }
-            HostReply::Dir(_) => Err(crate::session_host::HostAskError::Failed {
-                reason: protocol::a2s::HostFailure::Unsupported,
-                detail: "PC が別の答えを返しました".to_string(),
-            }),
+            other => Err(wrong_answer(other)),
         }
     }
 }
@@ -1577,6 +1588,7 @@ async fn agent_loop(
         available_modes,
         always_bypass_permissions,
         supports_host_fs,
+        supports_log_read,
     } = hello
     else {
         // next_hello が Hello 以外を返すことはない
@@ -1609,6 +1621,7 @@ async fn agent_loop(
         // 名乗りには最初から載っている。**ここまで来て捨てていた**（CICD設計§16）
         agent_version: Some(agent_version.clone()),
         supports_host_fs,
+        supports_log_read,
     };
     match serde_json::to_value(&capabilities) {
         Ok(value) => {

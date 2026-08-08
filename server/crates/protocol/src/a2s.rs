@@ -78,6 +78,12 @@ impl std::fmt::Display for RequestId {
 pub enum HostReply {
     Dir(crate::fs::DirListing),
     File(crate::fs::FileContent),
+    /// 引いてきたログ（ログ設計§13-1）。
+    ///
+    /// **別の答えの型を作らずここへ足した。** 分けると待ち口（`pending`）・答えの
+    /// 解決・連絡係の封筒の**5箇所が二重になる**。1つにまとめてある理由は上の
+    /// とおりで、ログもその理由に当てはまる。
+    Log(crate::logs::LogChunk),
     /// 応えられなかった。**理由を分ける**のは、どれも利用者が直せるものだから（設計§8）
     Failed {
         reason: HostFailure,
@@ -152,6 +158,16 @@ pub enum AgentMessage {
         /// **本当の理由（版が古い）を伝えられない**。判定を通すのはそのため。
         #[serde(default)]
         supports_host_fs: bool,
+        /// この PC のログを引けるか（ログ設計§13-1）。
+        ///
+        /// `supports_host_fs` とまったく同じ形で足してある。**能力ごとに1欄**にするのは、
+        /// 版を1つ上げるだけで済ませようとすると `A2S_VERSION` を上げることになり、
+        /// **既に配ったセッションホストが全部繋がらなくなる**ため（§13-2）。
+        ///
+        /// `#[serde(default)]` が要る理由も同じ——名乗りに欄が足りないと Hello そのものが
+        /// 解けなくなる。名乗らない＝引けない、として扱う。
+        #[serde(default)]
+        supports_log_read: bool,
     },
     /// カード1枚の最新（意味は [`crate::ws::ServerMessage::SessionUpsert`] と同じ）。
     ///
@@ -302,6 +318,18 @@ pub enum ServerToAgent {
         request_id: RequestId,
         path: String,
     },
+    /// この PC のログを引かせてほしい（ログ設計§13-1）。
+    ///
+    /// **答えは [`AgentMessage::HostReply`] で返る**——フォルダ・ファイルと同じ1本の
+    /// 問答の道に相乗りする。カードに紐づかないので `card_id` は持たない。
+    ///
+    /// 絞り込みを [`crate::logs::LogQuery`] として**まるごと相手へ渡す**のは、線の予算
+    /// （512 KiB）に対してファイルの上限が 512 MiB あるためで、こちらで絞る形にすると
+    /// そもそも運びきれない（ログ設計§25-2）。
+    ReadLog {
+        request_id: RequestId,
+        query: crate::logs::LogQuery,
+    },
 }
 
 #[cfg(test)]
@@ -360,6 +388,34 @@ mod tests {
         }
     }
 
+    fn sample_query() -> crate::logs::LogQuery {
+        crate::logs::LogQuery {
+            // **絶対時刻で送る。** 相対の綴りを相手に解かせると時計のずれが見えなくなる
+            since: "2026-08-08T00:00:00.000Z".to_string(),
+            level: "INFO".to_string(),
+            card: None,
+            proc: Some("session-host".to_string()),
+            grep: Some("パーサ".to_string()),
+            grep_on_raw: false,
+            sanitize: false,
+        }
+    }
+
+    fn sample_chunk() -> crate::logs::LogChunk {
+        crate::logs::LogChunk {
+            // PC は空で返す。埋めるのはサーバ
+            host: String::new(),
+            host_now: "2026-08-08T01:23:45.678Z".to_string(),
+            lines: vec![
+                r#"{"ts":"2026-08-08T01:00:00.000Z","level":"WARN","target":"session_host_core::parser","proc":"session-host","pid":29381,"run_id":"9f2c","msg":"パーサへ履歴の監視を頼みました"}"#
+                    .to_string(),
+            ],
+            truncated: false,
+            broken: 0,
+            leaks: 0,
+        }
+    }
+
     #[test]
     fn agent_messageは全種が往復する() {
         let card_id = CardId::new();
@@ -374,6 +430,7 @@ mod tests {
                 ],
                 always_bypass_permissions: false,
                 supports_host_fs: true,
+                supports_log_read: true,
             },
             AgentMessage::SessionUpsert {
                 session: Box::new(sample_meta()),
@@ -490,6 +547,10 @@ mod tests {
                 request_id: RequestId::new(),
                 path: "/home/example/dev/app/計画.md".to_string(),
             },
+            ServerToAgent::ReadLog {
+                request_id: RequestId::new(),
+                query: sample_query(),
+            },
         ];
         for message in &all {
             assert_eq!(&roundtrip(message), message);
@@ -539,7 +600,7 @@ mod tests {
     }
 
     #[test]
-    fn 答えの3種と理由の5値がすべて往復する() {
+    fn 答えの4種と理由の5値がすべて往復する() {
         // 断る側を1つでも落とすと、その理由だけが画面へ出せなくなる。
         // 「まとめて駄目でした」に潰れるのを防ぐため、**5値を数え上げて**固定する
         let reasons = [
@@ -557,6 +618,7 @@ mod tests {
                 truncated: false,
                 bytes: 24,
             }),
+            HostReply::Log(sample_chunk()),
         ];
         for reason in reasons {
             all.push(HostReply::Failed {
@@ -564,7 +626,7 @@ mod tests {
                 detail: "実際の理由がここに入る".to_string(),
             });
         }
-        assert_eq!(all.len(), 2 + reasons.len());
+        assert_eq!(all.len(), 3 + reasons.len());
         for reply in &all {
             assert_eq!(&roundtrip(reply), reply);
         }
@@ -594,6 +656,7 @@ mod tests {
         let parsed: AgentMessage = serde_json::from_str(old).expect("古い名乗りが解けること");
         let AgentMessage::Hello {
             supports_host_fs,
+            supports_log_read,
             agent_version,
             ..
         } = parsed
@@ -602,6 +665,19 @@ mod tests {
         };
         // 名乗らない＝覗けない。**黙って「できる」にしない**
         assert!(!supports_host_fs);
+        // ログの能力も同じ扱い。**欄を足したこの工事でいちばん壊してはいけないところ**
+        assert!(!supports_log_read);
         assert_eq!(agent_version, "0.1.5");
+    }
+
+    #[test]
+    fn 能力を足しても版は上がらない() {
+        // **ここが上がると、既に配ったセッションホストが全部繋がらなくなる**（§13-2）。
+        // 版の突き合わせは完全一致なので、サーバだけ新しくすると誰も入れない。
+        //
+        // 能力は Hello の `#[serde(default)]` な欄で足す、というのがこの PJT の作法で、
+        // それが守られているかどうかは**この数字が動いていないこと**でしか見られない
+        assert_eq!(A2S_VERSION, 1);
+        assert_eq!(A2S_PROTOCOL, "adash-a2s-v1");
     }
 }
