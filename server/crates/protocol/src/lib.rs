@@ -5,6 +5,7 @@
 //! 未知のフォーマットは必ず [`Node::Unknown`] へ写像することで、この制約と両立させる。
 
 pub mod a2s;
+pub mod client_log;
 pub mod frame;
 pub mod fs;
 pub mod ipc;

@@ -121,6 +121,10 @@ pub enum Proc {
     Dashboard,
     /// セッションホスト（`agentdashboard-agent`）。
     SessionHost,
+    /// ブラウザ（認証済み）。**書き手はサーバ**で、行だけがブラウザ由来（設計§3-3）。
+    Browser,
+    /// ブラウザ（未認証）。量を隔離するためにファイルを分ける（設計§12-4）。
+    BrowserAnon,
 }
 
 impl Proc {
@@ -128,6 +132,8 @@ impl Proc {
         match self {
             Proc::Dashboard => "dashboard",
             Proc::SessionHost => "session-host",
+            Proc::Browser => "browser",
+            Proc::BrowserAnon => "browser-anon",
         }
     }
 }
@@ -1017,6 +1023,226 @@ fn spawn_drop_watch(counter: ErrorCounter) -> Option<tokio::task::JoinHandle<()>
 }
 
 // ---------------------------------------------------------------------------
+// ブラウザのぶん（設計§12）
+// ---------------------------------------------------------------------------
+
+/// ブラウザ由来の行の `target`。
+///
+/// モジュールパスではないが、**絞り込みの鍵として使う欄**なので、拾った種別
+/// （`kind`）とは別に、経路そのものを1語で表す値を入れる。
+const CLIENT_TARGET: &str = "browser";
+
+/// 届かなかった件数（設計§12-2・§12-4）。**型は [`protocol`] が持つ**——
+/// 断るのはサーバ、書くのはここ、で持ち主が割れるため。
+pub use protocol::client_log::ClientLogDrops;
+
+/// ブラウザから受け取った行の書き出し口（設計§12）。
+///
+/// # なぜ `install` に相乗りしないのか
+///
+/// [`install`] は `.init()` を呼ぶ**プロセスに1回きり**の口で、購読者は1つしか置けない。
+/// そして、ここへ来る行は `tracing` のイベントではなく**外から届いた JSON** なので、
+/// 層を通す意味も無い（間引きの鍵もフィルタの水位も、書いた本人のものではない）。
+///
+/// 代わりに appender だけを2本持ち、**7欄の整形（[`render_line`]）は共有する**。形が
+/// 揃っていないと `agentdashboard logs` が混ぜられない。
+///
+/// # 落としてはいけない
+///
+/// [`Guard`] と同じ理由で、これを落とすと書き終わる前に消えうる。サーバが待ち受けて
+/// いる間ずっと持つこと。
+#[must_use = "落とすと書き終わる前に消えうる（Guard と同じ）"]
+pub struct ClientLog {
+    authed: Option<ClientSink>,
+    anon: Option<ClientSink>,
+}
+
+struct ClientSink {
+    writer: NonBlocking,
+    #[allow(dead_code, reason = "落とすと書き終わる前に消える。持つこと自体が仕事")]
+    worker: WorkerGuard,
+    counter: ErrorCounter,
+    origin: Arc<Origin>,
+}
+
+impl ClientLog {
+    /// 2本の appender を開く。**開けなくても起動は続ける**——ブラウザのログが残らない
+    /// だけで、サーバの仕事は止まらない。
+    ///
+    /// 掃除（[`sweep`]）はここでは呼ばない。[`install`] が起動時に1回やっており、
+    /// **今日ぶんは誰かが開いている可能性があるので消さない**という約束もそちらにある。
+    pub fn open(config: &SessionHostConfig) -> ClientLog {
+        let dir = logs_dir(config);
+        if let Err(err) = std::fs::create_dir_all(&dir) {
+            tracing::warn!(
+                path = %dir.display(),
+                %err,
+                "ブラウザのログの置き場所を作れません。ブラウザのぶんは残りません"
+            );
+            return ClientLog {
+                authed: None,
+                anon: None,
+            };
+        }
+        ClientLog {
+            authed: ClientSink::open(&dir, Proc::Browser),
+            anon: ClientSink::open(&dir, Proc::BrowserAnon),
+        }
+    }
+
+    /// 受け取った行を書く。
+    ///
+    /// **1行につき `write` を1回だけ呼ぶ。** まとめて書くと
+    /// [`ErrorCounter::dropped_lines`] の単位（1回の `write` ＝1件）が壊れる
+    /// （モジュール冒頭の約束）。
+    ///
+    /// `entries` が空でも `drops` があれば1行残す。**黙って減らさない**のがこのイシューの
+    /// 約束なので、件数だけになっても書く。
+    pub fn write(
+        &self,
+        anon: bool,
+        entries: &[protocol::client_log::ClientLogEntry],
+        drops: ClientLogDrops,
+    ) {
+        let Some(sink) = (if anon {
+            self.anon.as_ref()
+        } else {
+            self.authed.as_ref()
+        }) else {
+            return;
+        };
+
+        if entries.is_empty() {
+            if !drops.is_empty() {
+                sink.write_line(&sink.render(None, drops));
+            }
+            return;
+        }
+
+        for (at, entry) in entries.iter().enumerate() {
+            // 件数は先頭の1行にだけ載せる（`suppressed` と同じ扱い）
+            let drops = if at == 0 {
+                drops
+            } else {
+                ClientLogDrops::default()
+            };
+            sink.write_line(&sink.render(Some(entry), drops));
+        }
+    }
+
+    /// 書き出しが追いつかずに捨てた件数（合計）。**見張りは持たない**——
+    /// ここは呼ばれたときにだけ動く口なので、周期の見張りを足すと居ないときも回る。
+    pub fn dropped_lines(&self, anon: bool) -> usize {
+        let sink = if anon {
+            self.anon.as_ref()
+        } else {
+            self.authed.as_ref()
+        };
+        sink.map_or(0, |sink| sink.counter.dropped_lines())
+    }
+}
+
+impl ClientSink {
+    fn open(dir: &Path, proc: Proc) -> Option<ClientSink> {
+        let pid = std::process::id();
+        let stem = file_stem(proc, pid);
+        let appender = match tracing_appender::rolling::Builder::new()
+            .rotation(tracing_appender::rolling::Rotation::DAILY)
+            .filename_prefix(&stem)
+            .filename_suffix(FILE_SUFFIX)
+            .build(dir)
+        {
+            Ok(appender) => appender,
+            Err(err) => {
+                tracing::warn!(
+                    path = %dir.display(),
+                    proc = proc.as_str(),
+                    %err,
+                    "ブラウザのログのファイルを開けません"
+                );
+                return None;
+            }
+        };
+        let (writer, worker) = NonBlocking::new(appender);
+        let counter = writer.error_counter();
+        Some(ClientSink {
+            writer,
+            worker,
+            counter,
+            origin: Arc::new(Origin {
+                proc: proc.as_str(),
+                pid,
+                run_id: run_id(),
+            }),
+        })
+    }
+
+    /// 1件を7欄の形へ。**`pid` と `run_id` は書き手（サーバ）のもの**（設計§3-3）。
+    fn render(
+        &self,
+        entry: Option<&protocol::client_log::ClientLogEntry>,
+        drops: ClientLogDrops,
+    ) -> String {
+        let mut fields = EventFields::default();
+        let (ts, level) = match entry {
+            Some(entry) => {
+                fields.msg = entry.msg.clone();
+                fields.put_named("kind", entry.kind.as_str().into());
+                if let Some(url) = &entry.url {
+                    fields.put_named("url", url.as_str().into());
+                }
+                if let Some(card_id) = &entry.card_id {
+                    fields.put_named("card_id", card_id.as_str().into());
+                }
+                if let Some(agent_id) = &entry.agent_id {
+                    fields.put_named("agent_id", agent_id.as_str().into());
+                }
+                if let Some(stack) = &entry.stack {
+                    fields.put_named("stack", stack.as_str().into());
+                }
+                if entry.truncated {
+                    fields.put_named("truncated", true.into());
+                }
+                (normalize_ts(&entry.ts), entry.level.as_str())
+            }
+            None => {
+                fields.msg = "ブラウザからの行が届きませんでした".to_string();
+                (now_rfc3339_millis(), "WARN")
+            }
+        };
+        if drops.browser > 0 {
+            fields.put_named("dropped", drops.browser.into());
+        }
+        if drops.refused > 0 {
+            fields.put_named("refused", drops.refused.into());
+        }
+
+        render_line(&self.origin, &ts, level, CLIENT_TARGET, &fields, None)
+            .unwrap_or_else(|err| format!("{{\"msg\":\"行を組めません: {err}\"}}\n"))
+    }
+
+    fn write_line(&self, line: &str) {
+        use std::io::Write as _;
+        let mut writer = self.writer.clone();
+        // 書けなかったことはログにしない（設計§9-2。無限再帰になる）。
+        // 取りこぼしは `counter` が数えている
+        let _ = writer.write_all(line.as_bytes());
+    }
+}
+
+/// ブラウザが名乗った時刻を、こちらの形（RFC3339・ミリ秒・UTC）へ揃える。
+///
+/// **揃えないと `--since` の絞り込みが壊れる。** あちらは文字列の大小で比べているので
+/// （`logs.rs`）、桁やタイムゾーンの違う値が混ざると並びが崩れる。読めない値は
+/// 受け取った時刻で代える——**捨てるより、ずれていることが分かる形で残す**。
+fn normalize_ts(raw: &str) -> String {
+    match time::OffsetDateTime::parse(raw, &time::format_description::well_known::Rfc3339) {
+        Ok(at) => format_rfc3339_millis(at.to_offset(time::UtcOffset::UTC)),
+        Err(_) => now_rfc3339_millis(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // テストがログの行を読む口（設計§22-1）
 // ---------------------------------------------------------------------------
 
@@ -1816,6 +2042,159 @@ mod tests {
                 1,
                 "debug が拾えること"
             );
+        }
+    }
+
+    mod ブラウザのぶん {
+        use super::*;
+        use protocol::client_log::{ClientLogEntry, ClientLogKind, ClientLogLevel};
+
+        fn 一件(msg: &str) -> ClientLogEntry {
+            ClientLogEntry {
+                ts: "2026-08-08T09:00:00.123+09:00".to_string(),
+                level: ClientLogLevel::Error,
+                kind: ClientLogKind::Unhandled,
+                msg: msg.to_string(),
+                url: Some("/s/075b83fa".to_string()),
+                card_id: Some("075b83fa".to_string()),
+                agent_id: None,
+                stack: None,
+                truncated: false,
+            }
+        }
+
+        /// 書いて、落として、読む。**落とすまで読まない**——非ブロッキング書き込みなので、
+        /// 見張りが落ちる前に読むと空になる。
+        fn 書いて読む(
+            anon: bool,
+            entries: &[ClientLogEntry],
+            drops: ClientLogDrops,
+        ) -> Vec<serde_json::Value> {
+            let dir = std::env::temp_dir().join(format!(
+                "agentdashboard-logging-client-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4().simple()
+            ));
+            let config = SessionHostConfig {
+                state_dir: Some(dir.clone()),
+                ..Default::default()
+            };
+            let logs = logs_dir(&config);
+            let proc = if anon {
+                Proc::BrowserAnon
+            } else {
+                Proc::Browser
+            };
+            let path = logs.join(current_file_name(&file_stem(proc, std::process::id())));
+
+            let client = ClientLog::open(&config);
+            client.write(anon, entries, drops);
+            drop(client);
+
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let lines = text
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| serde_json::from_str(line).expect("JSON として読めること"))
+                .collect();
+            let _ = std::fs::remove_dir_all(&dir);
+            lines
+        }
+
+        #[test]
+        fn 必須の7欄が揃い_proc_は_browser() {
+            let lines = 書いて読む(false, &[一件("落ちました")], ClientLogDrops::default());
+            assert_eq!(lines.len(), 1, "1件で1行: {lines:#?}");
+
+            for 欄 in ["ts", "level", "target", "proc", "pid", "run_id", "msg"] {
+                assert!(lines[0].get(欄).is_some(), "{欄} が無い: {:#?}", lines[0]);
+            }
+            assert_eq!(lines[0]["proc"], "browser");
+            assert_eq!(lines[0]["level"], "ERROR");
+            assert_eq!(lines[0]["target"], CLIENT_TARGET);
+            assert_eq!(lines[0]["msg"], "落ちました");
+            assert_eq!(lines[0]["kind"], "unhandled");
+            assert_eq!(lines[0]["card_id"], "075b83fa");
+        }
+
+        #[test]
+        fn 未認証ぶんは別のファイルへ落ちる() {
+            let lines = 書いて読む(
+                true,
+                &[一件("未ログインで落ちました")],
+                ClientLogDrops::default(),
+            );
+            assert_eq!(lines.len(), 1);
+            assert_eq!(lines[0]["proc"], "browser-anon");
+        }
+
+        #[test]
+        fn 名乗られた時刻はこちらの形へ揃う() {
+            // `--since` は文字列で比べるので、桁とタイムゾーンが揃っていないと絞り込みが壊れる
+            let lines = 書いて読む(false, &[一件("時刻の検査")], ClientLogDrops::default());
+            assert_eq!(
+                lines[0]["ts"], "2026-08-08T00:00:00.123Z",
+                "UTC のミリ秒表記へ揃うこと"
+            );
+        }
+
+        #[test]
+        fn 読めない時刻でも捨てずに残す() {
+            let mut entry = 一件("壊れた時刻");
+            entry.ts = "きのう".to_string();
+            let lines = 書いて読む(false, &[entry], ClientLogDrops::default());
+            assert_eq!(lines.len(), 1, "行ごと捨てないこと");
+            let ts = lines[0]["ts"].as_str().expect("文字列であること");
+            assert!(
+                ts.ends_with('Z') && ts.len() == 24,
+                "受け取った時刻で代わること: {ts}"
+            );
+        }
+
+        #[test]
+        fn 届かなかった件数は意味を混ぜずに残る() {
+            let drops = ClientLogDrops {
+                browser: 3,
+                refused: 7,
+            };
+            let lines = 書いて読む(false, &[一件("1件目"), 一件("2件目")], drops);
+            assert_eq!(lines.len(), 2);
+            // 先頭の1行にだけ載る（`suppressed` と同じ扱い）
+            assert_eq!(lines[0]["dropped"], 3);
+            assert_eq!(lines[0]["refused"], 7);
+            assert!(lines[1].get("dropped").is_none());
+            assert!(lines[1].get("refused").is_none());
+        }
+
+        #[test]
+        fn 行が1件も無くても件数だけは残る() {
+            // **黙って減らさない。** 件数を運ぶ行が無いと、断ったこと自体が消える
+            let drops = ClientLogDrops {
+                browser: 0,
+                refused: 5,
+            };
+            let lines = 書いて読む(false, &[], drops);
+            assert_eq!(lines.len(), 1, "件数だけの行が残ること: {lines:#?}");
+            assert_eq!(lines[0]["refused"], 5);
+            assert_eq!(lines[0]["level"], "WARN");
+        }
+
+        #[test]
+        fn 切ったことは行にも残る() {
+            let mut entry = 一件("本文");
+            entry.stack = Some("x".repeat(protocol::client_log::MAX_ENTRY_BYTES * 2));
+            entry.clamp();
+            let lines = 書いて読む(false, &[entry], ClientLogDrops::default());
+            assert_eq!(lines[0]["truncated"], true);
+        }
+
+        #[test]
+        fn ファイル名は読む側と掃く側の決まりに合う() {
+            // `parse_log_name` は stem の中身を見ないので、ここが合っていれば
+            // `--proc browser` も掃除も追加実装なしで効く
+            let name = current_file_name(&file_stem(Proc::BrowserAnon, 9));
+            let (stem, _) = parse_log_name(&name).expect("読めること");
+            assert_eq!(stem, "browser-anon-9");
         }
     }
 }

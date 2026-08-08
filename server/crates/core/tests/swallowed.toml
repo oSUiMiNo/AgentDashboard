@@ -257,6 +257,13 @@ class = "send"
 reason = "同上。別名の表は繋ぎ直しの名乗りでも運ばれる"
 
 [[entry]]
+path = "server/crates/session-host-core/src/logging.rs"
+fn = "write_line"
+expr = '''writer.write_all(line.as_bytes())'''
+class = "by-design"
+reason = "ログ書き込み自体の失敗は出さない（設計§9-2。書けなかったことを書こうとすると無限再帰になる）。取りこぼしは ErrorCounter が数えており、ClientLog::dropped_lines から読める"
+
+[[entry]]
 path = "server/crates/session-host-core/src/logs.rs"
 fn = "follow"
 expr = '''out.flush()'''
