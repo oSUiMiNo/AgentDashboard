@@ -260,8 +260,20 @@ async fn run(
                 // **どの起動の子か**をここで残す。Hello の行だけでは pid が分からず、
                 // 孤児が出たとき（未解明事象2）に「誰が置き去りにされたか」を
                 // 後から名指しできない。ファイル名の pid（親）と行の `run_id` に、
-                // この番号が加わって初めて親子の対応が付く
-                tracing::info!(parser_pid = ?child.id(), "transcript-parser を起こしました");
+                // この番号が加わって初めて親子の対応が付く。
+                //
+                // **数として載せる**（`?` の Debug ではなく）。読むのは人だけでなく、
+                // 置き去りにされた子を突き合わせる側でもある
+                match child.id() {
+                    Some(parser_pid) => {
+                        tracing::info!(parser_pid, "transcript-parser を起こしました");
+                    }
+                    // 起こした直後に取れないのは、刈り取られた後だけ。**起きないはずだが
+                    // 黙らない**——ここが取れないと、その子は孤児になっても辿れない
+                    None => tracing::warn!(
+                        "transcript-parser を起こしましたが pid を取れません（孤児になっても辿れません）"
+                    ),
+                }
                 supervisor.set_state(ParserState::Ok, None);
                 let reason = pump(
                     &supervisor,

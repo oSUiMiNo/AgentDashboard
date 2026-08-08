@@ -155,6 +155,33 @@ impl TestServer {
         Self::build(config, program, false).await
     }
 
+    /// パーサの実行ファイルを**呼び出し側が名指しして**立ち上げる。
+    ///
+    /// [`Self::start_with_parser`] は本物を指す。こちらは指す先を選べるので、
+    /// **本物では作れない状態**（何も報告しない・標準入力を閉じている）を相手にできる。
+    /// 未解明2事象を「辿れる」で確かめるのに要る（ログ設計§16-2）。
+    ///
+    /// 本番と同じ入口（環境変数）で名指しするので、差し込みのための分岐は製品側に無い。
+    pub async fn start_with_parser_binary(config: Config, parser: &std::path::Path) -> Self {
+        unsafe {
+            std::env::set_var(session_host_core::parser::PARSER_BIN_ENV, parser);
+        }
+        let mut config = config;
+        let server = Self::build_full(
+            &mut config,
+            fake_claude().to_string_lossy().into_owned(),
+            true,
+            // **環境変数を上書きさせない。** ここで名指ししたものが使われる
+            false,
+            None,
+            None,
+            None,
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        server
+    }
+
     /// パーサに加えて自己修復も立ち上げる（設計§9）。
     ///
     /// 外の世界へ出る操作（cargo・git・本物の claude）は呼び出し側が差し替える。

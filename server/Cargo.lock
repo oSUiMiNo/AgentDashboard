@@ -3301,6 +3301,7 @@ dependencies = [
  "anyhow",
  "axum",
  "portable-pty",
+ "protocol",
  "serde_json",
  "tokio",
 ]

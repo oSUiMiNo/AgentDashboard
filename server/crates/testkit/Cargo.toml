@@ -9,9 +9,16 @@ publish.workspace = true
 name = "fake-claude"
 path = "src/bin/fake-claude.rs"
 
+[[bin]]
+name = "fake-parser"
+path = "src/bin/fake-parser.rs"
+
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
+# 擬似パーサが本物と同じ形の Hello を返すために要る。**綴りを手で写さない**——
+# IPC の形が変わったら、通じなくなるのではなくコンパイルで止まってほしい
+protocol.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 
