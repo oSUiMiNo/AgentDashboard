@@ -589,9 +589,9 @@ async fn handshake(mut socket: Socket, config: &LinkConfig) -> anyhow::Result<(S
         // **この実行ファイルは実装を持っている**ので、常に真。名乗らない古いホストと
         // 区別が付くことが、画面に正しい理由を出せる唯一の材料になる
         supports_host_fs: true,
-        // ログを引ける版か（ログ設計§13-1）。**この段ではまだ実装が無いので偽。**
-        // 先に真を名乗ると、サーバが投げてきた問いに永遠に答えないことになる
-        supports_log_read: false,
+        // ログを引ける版であることを名乗る（ログ設計§13-1）。`supports_host_fs` と
+        // 同じで、**この実行ファイルは実装を持っている**ので常に真
+        supports_log_read: true,
     };
     socket
         .send(tungstenite::Message::text(serde_json::to_string(&hello)?))
@@ -754,13 +754,18 @@ fn handle_incoming(
 /// **解決する前の値を持つ。** 起点の読み替え（`hostfs::resolve_start`）も
 /// ファイルシステムに触るので、逃がした先で行う（下記）。
 #[derive(Debug, Clone)]
-enum HostFsAsk {
+enum Ask {
     /// 一覧。`None` はその PC のホーム（設計§26-2）
     Dir(Option<String>),
     File(String),
+    /// この PC のログ（ログ設計§13-1）。**置き場所を知るのに設定が要る**
+    Log(
+        Box<protocol::logs::LogQuery>,
+        Arc<crate::config::SessionHostConfig>,
+    ),
 }
 
-/// フォルダ／ファイルの問いに、**別のスレッドで**答える（設計§4・§8・§9）。
+/// 答えの要る問いに、**別のスレッドで**答える（設計§4・§8・§9、ログ設計§13-1）。
 ///
 /// # 必ず答える
 ///
@@ -776,24 +781,27 @@ enum HostFsAsk {
 ///
 /// 呼ぶ側（`apply_command`）は接続の `select!` ループの上に居る。読み取りだけを
 /// 逃がして解決をあちらへ残すと、**候補ごとの `is_dir()` でループが止まる**。
-fn answer_host_fs(
-    outgoing: mpsc::UnboundedSender<Outgoing>,
-    request_id: RequestId,
-    ask: HostFsAsk,
-) {
+fn answer_ask(outgoing: mpsc::UnboundedSender<Outgoing>, request_id: RequestId, ask: Ask) {
     tokio::task::spawn_blocking(move || {
         let failed = |err: crate::hostfs::HostFsError| HostReply::Failed {
             reason: err.reason,
             detail: err.detail,
         };
         let reply = match ask {
-            HostFsAsk::Dir(start) => match crate::hostfs::list_dir_from(start.as_deref()) {
+            Ask::Dir(start) => match crate::hostfs::list_dir_from(start.as_deref()) {
                 Ok(listing) => HostReply::Dir(listing),
                 Err(err) => failed(err),
             },
-            HostFsAsk::File(path) => match crate::hostfs::read_file(Path::new(&path)) {
+            Ask::File(path) => match crate::hostfs::read_file(Path::new(&path)) {
                 Ok(content) => HostReply::File(content),
                 Err(err) => failed(err),
+            },
+            Ask::Log(query, config) => match crate::logs::collect(&config, &query) {
+                Ok(chunk) => HostReply::Log(chunk),
+                Err(err) => HostReply::Failed {
+                    reason: err.reason,
+                    detail: err.detail,
+                },
             },
         };
         let _ = outgoing.send(Outgoing::Volatile(AgentMessage::HostReply {
@@ -929,25 +937,22 @@ fn apply_command(
         ServerToAgent::ListDir { request_id, path } => {
             // 省略ならホーム、貼られた形なら読み替える（設計§26-2・§13）。
             // どちらも解決できるのはこちら側だけ——**解決そのものは逃がした先で行う**
-            answer_host_fs(outgoing.clone(), request_id, HostFsAsk::Dir(path));
+            answer_ask(outgoing.clone(), request_id, Ask::Dir(path));
         }
         ServerToAgent::ReadFile { request_id, path } => {
-            answer_host_fs(outgoing.clone(), request_id, HostFsAsk::File(path));
+            answer_ask(outgoing.clone(), request_id, Ask::File(path));
         }
 
-        // ログの問い（ログ設計§13-1）。**この段では実装がまだ無い。**
+        // ログの問い（ログ設計§13-1）。**フォルダと同じ1本の問答の道に乗る。**
         //
-        // `supports_log_read` を偽で名乗っているのでサーバは投げてこないが、
-        // **黙って捨てる枝を作らない**——名乗りと受け口を別々の版で入れると、
-        // その隙間で「投げたのに永遠に答えない」が起きうる
-        ServerToAgent::ReadLog { request_id, .. } => {
-            let _ = outgoing.send(Outgoing::Volatile(AgentMessage::HostReply {
+        // 置き場所を知るのに設定が要るので、`SessionManager` から借りる——
+        // ここで別の経路から配ると、片方だけ差し替えたときに食い違う
+        ServerToAgent::ReadLog { request_id, query } => {
+            answer_ask(
+                outgoing.clone(),
                 request_id,
-                reply: HostReply::Failed {
-                    reason: protocol::a2s::HostFailure::Unsupported,
-                    detail: "この版のセッションホストはログを引けません".to_string(),
-                },
-            }));
+                Ask::Log(Box::new(query), manager.config().clone()),
+            );
         }
     }
 }

@@ -1129,6 +1129,15 @@ impl SessionManager {
         )
     }
 
+    /// この PC の設定。
+    ///
+    /// ログを引く問い（ログ設計§13-1）が置き場所を知るために要る。`link.rs` は
+    /// `SessionManager` しか持っていないので、**設定をもう1本の引数で配って回らない**
+    /// ——同じものが2つの経路で渡ると、片方だけ差し替えたときに食い違う。
+    pub fn config(&self) -> &Arc<SessionHostConfig> {
+        &self.config
+    }
+
     /// 利用者の PC 上のファイル（グローバル既定・別名の実測）を開く。
     fn user_files(
         config: &SessionHostConfig,

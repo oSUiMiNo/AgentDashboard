@@ -151,33 +151,69 @@ struct Query {
     rules: Option<redact::Rules>,
 }
 
+/// CLI の引数を、線に載せる形へ（設計§25-2）。
+///
+/// **`--since` を解くのはここだけ。** 相対の綴り（`1h`）を線に載せて相手に解かせると、
+/// 時計のずれが完全に見えなくなる。こちらの時計で絶対時刻にしてから渡せば、ずれは
+/// 「思ったより多い・少ない」という観測できる形で現れる。
+///
+/// 水位と正規表現は**送る前にこちらでも組んでみる**。相手に断らせると往復1回ぶんの
+/// 無駄になるうえ、手元で読むときと同じ言葉で断れない。
+fn to_wire(args: &LogsArgs) -> anyhow::Result<protocol::logs::LogQuery> {
+    let since = parse_since(&args.since, time::OffsetDateTime::now_utc())?;
+    parse_level(&args.level)?;
+    if let Some(pattern) = &args.grep {
+        regex::Regex::new(pattern)
+            .map_err(|err| anyhow::anyhow!("`--grep` の正規表現が読めません：{err}"))?;
+    }
+    Ok(protocol::logs::LogQuery {
+        since,
+        level: args.level.clone(),
+        card: args.card.clone(),
+        proc: args.proc.clone(),
+        grep: args.grep.clone(),
+        // **`--json` は「読み手が生で見る」ということ。** grep を当てる先はそちらに
+        // 合わせないと、`--grep` の意味が構成によって変わる
+        grep_on_raw: args.json,
+        sanitize: args.sanitize,
+    })
+}
+
 impl Query {
     fn build(args: &LogsArgs) -> anyhow::Result<Self> {
-        let since = parse_since(&args.since, time::OffsetDateTime::now_utc())?;
-        let level = parse_level(&args.level)?;
-        let grep = match &args.grep {
-            Some(pattern) => Some(
-                regex::Regex::new(pattern)
-                    .map_err(|err| anyhow::anyhow!("`--grep` の正規表現が読めません：{err}"))?,
-            ),
-            None => None,
-        };
-        let rules = args.sanitize.then(redact::Rules::from_env);
-        if let Some(rules) = &rules
+        let query = Self::from_wire(&to_wire(args)?)?;
+        if let Some(rules) = &query.rules
             && rules.is_empty()
         {
             eprintln!(
                 "警告：伏せる規則を1つも組み立てられませんでした（ホーム・利用者名・ホスト名のいずれも読めません）。"
             );
         }
+        Ok(query)
+    }
+
+    /// 線の向こうから来た頼みを、解決済みの条件へ。
+    ///
+    /// [`to_wire`] と対になっていて、**`--since` はここでは解かない**（もう絶対時刻）。
+    fn from_wire(wire: &protocol::logs::LogQuery) -> anyhow::Result<Self> {
+        let level = parse_level(&wire.level)?;
+        let grep = match &wire.grep {
+            Some(pattern) => Some(
+                regex::Regex::new(pattern)
+                    .map_err(|err| anyhow::anyhow!("`--grep` の正規表現が読めません：{err}"))?,
+            ),
+            None => None,
+        };
         Ok(Self {
-            since,
+            since: wire.since.clone(),
             level,
-            card: args.card.clone(),
-            proc: args.proc.clone(),
+            card: wire.card.clone(),
+            proc: wire.proc.clone(),
             grep,
-            json: args.json,
-            rules,
+            json: wire.grep_on_raw,
+            // **伏せる規則は「この機械」の環境から組む。** 頼んだ側で組んで
+            // こちらの行に当てても、こちらの利用者名もホーム名も規則に入っていない
+            rules: wire.sanitize.then(redact::Rules::from_env),
         })
     }
 
@@ -649,6 +685,142 @@ fn emit(
         Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => Ok(false),
         Err(err) => Err(err.into()),
     }
+}
+
+// ---------------------------------------------------------------------------
+// 線の向こうへ渡す形で切り出す（ログ設計§13-1・§25）
+// ---------------------------------------------------------------------------
+
+/// 引けなかった理由。[`crate::hostfs::HostFsError`] と同じ形だが、**別の型にしてある**。
+///
+/// あちらは名前のとおりファイルシステムの話で、ログを混ぜると名前が嘘になる。
+/// 運ぶ先（`HostReply::Failed`）が同じなので、写すのは受け口の2行で済む。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogReadError {
+    pub reason: protocol::a2s::HostFailure,
+    pub detail: String,
+}
+
+/// この機械のログを切り出す（設計§13-1）。
+///
+/// **同期のまま置いてある。** 呼ぶ側（`link.rs`）が `spawn_blocking` へ逃がす——
+/// [`crate::hostfs`] と同じ作法で、接続の `select!` ループを塞がないため。
+///
+/// 絞り込みをこちら側で当てるのは、線の予算（512 KiB）に対してファイルの上限が
+/// 512 MiB あるためである。**`--grep` まで当てる**のが要点で、受け取ってから当てると
+/// 「一致が少ない」のか「上限で切られた先に在った」のかが読み手から区別できない。
+pub fn collect(
+    config: &SessionHostConfig,
+    wire: &protocol::logs::LogQuery,
+) -> Result<protocol::logs::LogChunk, LogReadError> {
+    let dir = logging::logs_dir(config);
+    if !dir.exists() {
+        // **空の答えを返さない。** 「0行だった」と「一度も起動していない・設定で
+        // 移している」は別物で、潰すと引いたときだけその区別が消える
+        return Err(LogReadError {
+            reason: protocol::a2s::HostFailure::NotFound,
+            detail: format!(
+                "ログの置き場所がありません：{}（一度も起動していないか、設定で置き場所を移しています）",
+                dir.display()
+            ),
+        });
+    }
+    let query = Query::from_wire(wire).map_err(|err| LogReadError {
+        // 頼みが読めないのは実装の食い違い——サーバは投げる前に同じものを組んでいる
+        reason: protocol::a2s::HostFailure::Unsupported,
+        detail: format!("頼みを読めません：{err}"),
+    })?;
+
+    let paths = list_log_files(&dir, query.proc.as_deref());
+    let mut stats = Stats::default();
+    let mut sources: Vec<Source> = Vec::with_capacity(paths.len());
+    for path in &paths {
+        match Source::open(path) {
+            Ok(source) => sources.push(source),
+            // 開けなかったファイルも**黙って落とさない**。数だけは読み手まで運ぶ
+            Err(_) => stats.broken += 1,
+        }
+    }
+
+    // 混ぜ方は `drain` と同じ。全部読んでから並べ替えると上限いっぱいのときに落ちる
+    let mut heads: Vec<Option<Line>> = Vec::with_capacity(sources.len());
+    let mut heap: BinaryHeap<Reverse<(String, usize)>> = BinaryHeap::new();
+    for (index, source) in sources.iter_mut().enumerate() {
+        let head = source.next_kept(&query, &mut stats);
+        if let Some(line) = &head {
+            heap.push(Reverse((line.ts.clone(), index)));
+        }
+        heads.push(head);
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut bytes = 0usize;
+    let mut truncated = false;
+    while let Some(Reverse((_, index))) = heap.pop() {
+        let Some(line) = heads[index].take() else {
+            continue;
+        };
+        if let Some(text) = take_line(&line, &query, &mut stats) {
+            // **古いほうから詰めて、上限で止める。** 「更新前を見たい」がいちばんの
+            // 動機なので、切るなら新しい側を切る。続きは `--since` を進めて引ける
+            if lines.len() >= protocol::logs::MAX_LOG_LINES
+                || bytes + text.len() > protocol::logs::MAX_LOG_BYTES
+            {
+                truncated = true;
+                break;
+            }
+            bytes += text.len();
+            lines.push(text);
+        }
+        let next = sources[index].next_kept(&query, &mut stats);
+        if let Some(next) = &next {
+            heap.push(Reverse((next.ts.clone(), index)));
+        }
+        heads[index] = next;
+    }
+
+    Ok(protocol::logs::LogChunk {
+        // 埋めるのはサーバ。こちらは自分がどの綴りで呼ばれたかを知らない
+        host: String::new(),
+        host_now: logging::format_rfc3339_millis(time::OffsetDateTime::now_utc()),
+        lines,
+        truncated,
+        broken: stats.broken as u32,
+        leaks: stats.leaks as u32,
+    })
+}
+
+/// 1行を、線に載せる形へ。`--grep` に合わなければ `None`。
+///
+/// **[`emit`] と同じ順で通す**——伏せるより先に grep を当てる。順が違うと、手元で
+/// 読むときと引いて読むときで当たる行が変わる。
+fn take_line(line: &Line, query: &Query, stats: &mut Stats) -> Option<String> {
+    let dropped;
+    let line = if query.rules.is_some() {
+        dropped = drop_verbatim(line);
+        &dropped
+    } else {
+        line
+    };
+    let text = if query.json {
+        line.raw.clone()
+    } else {
+        render_human(line)
+    };
+    if let Some(grep) = &query.grep
+        && !grep.is_match(&text)
+    {
+        return None;
+    }
+    // **運ぶのは常に生。** どう出すかを決めるのは読み手なので、ここでは整えない
+    Some(match &query.rules {
+        Some(rules) => {
+            let redacted = rules.apply(&line.raw);
+            stats.leaks += rules.residue(&redacted).len();
+            redacted
+        }
+        None => line.raw.clone(),
+    })
 }
 
 /// 追いかける。**新しく現れたファイルも拾う**（日付が変わるとローテーションで名前が変わる）。
@@ -1151,6 +1323,178 @@ mod tests {
             let mut stats = Stats::default();
             drain(&dir, &query_all(), &mut out, &mut stats).expect("落ちないこと");
             assert!(out.is_empty());
+        }
+    }
+
+    /// 線の向こうへ渡す形で切り出す（ログ設計§13-1・§25）。
+    mod 切り出す {
+        use super::*;
+
+        fn temp_dir(label: &str) -> PathBuf {
+            let dir = std::env::temp_dir().join(format!(
+                "agentdashboard-collect-{label}-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4().simple()
+            ));
+            std::fs::create_dir_all(&dir).expect("作れること");
+            dir
+        }
+
+        fn config_at(dir: &Path) -> SessionHostConfig {
+            // `logs_dir` は `<state_dir>/logs` を返すので、親を渡す
+            SessionHostConfig {
+                state_dir: Some(dir.to_path_buf()),
+                ..Default::default()
+            }
+        }
+
+        /// `<state_dir>/logs/` を作って、行を書く。
+        fn place(state: &Path, name: &str, body: &str) {
+            let dir = state.join("logs");
+            std::fs::create_dir_all(&dir).expect("作れること");
+            std::fs::write(dir.join(name), body).expect("書けること");
+        }
+
+        fn wire() -> protocol::logs::LogQuery {
+            protocol::logs::LogQuery {
+                since: "2026-01-01T00:00:00.000Z".to_string(),
+                level: "TRACE".to_string(),
+                card: None,
+                proc: None,
+                grep: None,
+                grep_on_raw: false,
+                sanitize: false,
+            }
+        }
+
+        fn record(ts: &str, msg: &str) -> String {
+            format!(
+                r#"{{"ts":"{ts}","level":"INFO","target":"t","proc":"session-host","pid":9,"run_id":"r","msg":"{msg}"}}"#
+            )
+        }
+
+        #[test]
+        fn 置き場所が無ければ理由つきで断る() {
+            // **空の答えを返さない。** 「0行だった」と「一度も起動していない」は別物で、
+            // 潰すと引いたときだけその区別が消える
+            let dir = temp_dir("missing");
+            let err = collect(&config_at(&dir), &wire()).expect_err("断ること");
+            assert_eq!(err.reason, protocol::a2s::HostFailure::NotFound);
+            assert!(err.detail.contains("置き場所がありません"), "{err:?}");
+        }
+
+        #[test]
+        fn 運ぶのは生の行であって整えたものではない() {
+            // 解いて組み立て直すと欄の並びが変わる（設計§25-1）。**そのまま運ぶ**
+            let dir = temp_dir("raw");
+            let one = record("2026-08-08T00:00:00.000Z", "ひとつめ");
+            place(&dir, "session-host-9.2026-08-08.jsonl", &format!("{one}\n"));
+
+            let chunk = collect(&config_at(&dir), &wire()).expect("読めること");
+            assert_eq!(chunk.lines, vec![one]);
+            // 埋めるのはサーバ。PC は自分がどう呼ばれたかを知らない
+            assert_eq!(chunk.host, "");
+            assert!(!chunk.host_now.is_empty());
+            assert!(chunk.host_now.ends_with('Z'), "{}", chunk.host_now);
+            assert!(!chunk.truncated);
+        }
+
+        #[test]
+        fn 上限を超えると古いほうを残して打ち切る() {
+            // 「更新前を見たい」がいちばんの動機なので、切るなら新しい側を切る
+            let dir = temp_dir("limit");
+            let mut body = String::new();
+            for index in 0..(protocol::logs::MAX_LOG_LINES + 10) {
+                body.push_str(&record(
+                    &format!("2026-08-08T00:00:{:02}.{:03}Z", index / 1000, index % 1000),
+                    &format!("行{index}"),
+                ));
+                body.push('\n');
+            }
+            place(&dir, "session-host-9.2026-08-08.jsonl", &body);
+
+            let chunk = collect(&config_at(&dir), &wire()).expect("読めること");
+            assert!(chunk.truncated, "打ち切ったことが載ること");
+            assert_eq!(chunk.lines.len(), protocol::logs::MAX_LOG_LINES);
+            assert!(chunk.lines[0].contains("行0"), "古いほうが残ること");
+        }
+
+        #[test]
+        fn grepの当て先は頼みで決まる() {
+            // `run_id` は人が読む形には出ない欄。**生に当てるかどうかで結果が変わる**
+            let dir = temp_dir("grep");
+            place(
+                &dir,
+                "session-host-9.2026-08-08.jsonl",
+                &format!("{}\n", record("2026-08-08T00:00:00.000Z", "ふつうの本文")),
+            );
+            let config = config_at(&dir);
+
+            let on_raw = protocol::logs::LogQuery {
+                grep: Some("run_id".to_string()),
+                grep_on_raw: true,
+                ..wire()
+            };
+            assert_eq!(
+                collect(&config, &on_raw).expect("読めること").lines.len(),
+                1
+            );
+
+            let on_human = protocol::logs::LogQuery {
+                grep_on_raw: false,
+                ..on_raw
+            };
+            assert!(
+                collect(&config, &on_human)
+                    .expect("読めること")
+                    .lines
+                    .is_empty(),
+                "人が読む形には run_id が出ない"
+            );
+        }
+
+        #[test]
+        fn 伏せるときは本文をそのまま運ぶ欄が落ちる() {
+            // `tail`（端末の末尾）は名指しの規則でも形でも拾えないので欄ごと落とす。
+            // **`--json` で流れるのは生の行**なので、そちらも直っていないと素通しになる
+            let dir = temp_dir("sanitize");
+            place(
+                &dir,
+                "session-host-9.2026-08-08.jsonl",
+                r#"{"ts":"2026-08-08T00:00:00.000Z","level":"WARN","target":"t","proc":"session-host","pid":9,"run_id":"r","msg":"m","tail":"利用者の画面がそのまま写る"}
+"#,
+            );
+            let config = config_at(&dir);
+
+            let asked = protocol::logs::LogQuery {
+                sanitize: true,
+                ..wire()
+            };
+            let chunk = collect(&config, &asked).expect("読めること");
+            let line = &chunk.lines[0];
+            assert!(!line.contains("利用者の画面がそのまま写る"), "{line}");
+            assert!(line.contains("文字を伏せました"), "{line}");
+
+            // 頼まなければ伏せない（手元の道具として、原因究明に要るものを既定で落とさない）
+            let plain = collect(&config, &wire()).expect("読めること");
+            assert!(plain.lines[0].contains("利用者の画面がそのまま写る"));
+        }
+
+        #[test]
+        fn 読めない行は数えて運ぶ() {
+            // **引いたときだけ黙らない。** 手元では「N 行飛ばしました」と必ず言う
+            let dir = temp_dir("broken");
+            place(
+                &dir,
+                "session-host-9.2026-08-08.jsonl",
+                &format!(
+                    "これはJSONではない\n{}\n",
+                    record("2026-08-08T00:00:00.000Z", "よめる")
+                ),
+            );
+            let chunk = collect(&config_at(&dir), &wire()).expect("読めること");
+            assert_eq!(chunk.lines.len(), 1);
+            assert_eq!(chunk.broken, 1);
         }
     }
 }
