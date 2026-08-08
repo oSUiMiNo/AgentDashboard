@@ -25,6 +25,7 @@ const STATE_ROOT = path.resolve(process.cwd(), '.e2e-state')
 /** 見る経路。**増やしたらここへ足す。** */
 const 経路 = [
   { 何: 'ローカルモード', 置き場所: 'state', proc: 'dashboard' },
+  { 何: 'ブラウザ', 置き場所: 'state', proc: 'browser' },
   { 何: '版切替の構成', 置き場所: 'versions-state', proc: 'dashboard' },
   { 何: 'セルフホストのサーバ', 置き場所: 'remote/server', proc: 'dashboard' },
   { 何: 'セルフホストの PC', 置き場所: 'remote/agent', proc: 'session-host' },
@@ -47,12 +48,31 @@ type 行 = {
 /** 必須の7欄（設計§2-1）。 */
 const 必須欄 = ['ts', 'level', 'target', 'proc', 'pid', 'run_id', 'msg'] as const
 
-/** その置き場所の**いちばん新しい**ログファイルを読む。無ければ空。 */
-function 直近の行(置き場所: string): 行[] {
+/**
+ * その置き場所の**いちばん新しい**ログファイルを読む。無ければ空。
+ *
+ * **`proc` で絞れる形にしてある**（設計§24）。同じ `logs/` にブラウザのぶん
+ * （`browser-*.jsonl`）が並ぶようになったので、絞らずに「いちばん新しい1本」を
+ * 取ると、ブラウザがエラーを出した瞬間から `dashboard-*` を見ているつもりの
+ * 検査が別のファイルを読むことになる。
+ */
+function 直近の行(置き場所: string, proc?: string): 行[] {
   const dir = path.join(STATE_ROOT, 置き場所, 'logs')
   let names: string[]
   try {
-    names = fs.readdirSync(dir).filter((name) => name.endsWith('.jsonl'))
+    names = fs
+      .readdirSync(dir)
+      .filter((name) => name.endsWith('.jsonl'))
+      // ファイル名は `<proc>-<pid>.<日付>.jsonl`。**中身ではなく名前で絞る**
+      // （`logs.rs::split_stem` と同じ数え方。`session-host` と `browser-anon` は
+      // ハイフンを含むので、右から1回で割る）
+      .filter((name) => {
+        if (proc === undefined) {
+          return true
+        }
+        const stem = name.slice(0, name.indexOf('.'))
+        return stem.slice(0, stem.lastIndexOf('-')) === proc
+      })
   } catch {
     return []
   }
@@ -80,16 +100,25 @@ test('経路ごとに1件以上のログが残る', async ({ page }) => {
   // 先にブラウザで繋ぐ。**サーバ側の経路（`server_core::ws`）はここでしか通らない**
   await openDashboard(page)
 
+  // ブラウザの経路は、エラーが起きないと1行も出ない（設計§12-1）。**わざと起こす。**
+  // `console.error` ではなく本物の未捕捉エラーにする——前者は拾わないと決めてある
+  await page.evaluate(() => {
+    setTimeout(() => {
+      throw new Error('E2E がわざと起こした未捕捉のエラー')
+    }, 0)
+  })
+
   for (const { 何, 置き場所, proc } of 経路) {
-    // 書き込みは非同期（`tracing-appender`）なので、届くまで少し待つ
+    // 書き込みは非同期（`tracing-appender`）なので、届くまで少し待つ。
+    // ブラウザのぶんは1秒ぶんをまとめてから送るので、そのぶんも待つ
     await expect
-      .poll(() => 直近の行(置き場所).length, {
+      .poll(() => 直近の行(置き場所, proc).length, {
         message: `${何}（${置き場所}）のログが1件も無い`,
-        timeout: 10_000,
+        timeout: 15_000,
       })
       .toBeGreaterThan(0)
 
-    const 行たち = 直近の行(置き場所)
+    const 行たち = 直近の行(置き場所, proc)
     for (const 欄 of 必須欄) {
       expect(行たち.every((行) => 行[欄] !== undefined), `${何}: ${欄} が欠けた行がある`).toBe(true)
     }
@@ -108,7 +137,7 @@ test('ローカルモードではサーバと PC が1本のファイルに混ざ
   await expect
     .poll(
       () =>
-        直近の行('state').filter((行) => 行.target.startsWith('server_core::'))
+        直近の行('state', 'dashboard').filter((行) => 行.target.startsWith('server_core::'))
           .length,
       {
         message:
@@ -118,7 +147,7 @@ test('ローカルモードではサーバと PC が1本のファイルに混ざ
     )
     .toBeGreaterThan(0)
 
-  const 行たち = 直近の行('state')
+  const 行たち = 直近の行('state', 'dashboard')
   expect(
     行たち.some((行) => 行.target.startsWith('session_host_core::')),
     'session_host_core:: の行が無い',
