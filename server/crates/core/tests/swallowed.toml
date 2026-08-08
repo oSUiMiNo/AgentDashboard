@@ -278,6 +278,13 @@ class = "by-design"
 reason = "同上。head などで打ち切られたときに鳴っても仕方がない"
 
 [[entry]]
+path = "server/crates/session-host-core/src/logs.rs"
+fn = "run_remote"
+expr = '''out.flush()'''
+class = "by-design"
+reason = "同上。別の PC から引いたぶんも、出す先の都合は同じ"
+
+[[entry]]
 path = "server/crates/session-host-core/src/model_post.rs"
 fn = "run"
 expr = '''crate::hook_post::post(url, &body)'''

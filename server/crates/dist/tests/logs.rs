@@ -248,6 +248,11 @@ fn helpに射程の制約が書いてある() {
     assert!(text.contains("この機械の"), "{text}");
     assert!(text.contains("設定ファイルは読まない"), "{text}");
     assert!(text.contains("--state-dir"), "{text}");
+    // **`--host` が今は使えないことまで書く**（ログ設計§25-9）。ローカルモードは
+    // PC の受け口を持たず、サーバモードはアカウント認証なので CLI からは通らない。
+    // 「付ければ引ける」とだけ書くと、通らない道を案内することになる
+    assert!(text.contains("この道は使えない"), "{text}");
+    assert!(text.contains("agentdashboard-agent logs"), "{text}");
 }
 
 #[test]
@@ -287,15 +292,19 @@ fn 置き場所が無いときは答えを知っている口を名指しする()
 }
 
 #[test]
-fn 別の機械は引けないことを理由つきで断る() {
-    let home = FakeHome::new("logs-host");
-    let output = command(env!("CARGO_BIN_EXE_agentdashboard"), &home)
+fn セッションホストの口からは別の機械を引けない() {
+    // **あちらにダッシュボードの REST 口は無い。** `agent.toml` の `server_url` は
+    // 外のサーバを指していて、ループバックではない
+    let home = FakeHome::new("logs-host-agent");
+    let output = command(env!("CARGO_BIN_EXE_agentdashboard-agent"), &home)
         .args(["logs", "--host", "ほかのPC"])
         .output()
         .expect("起こせること");
     assert!(!output.status.success());
     let text = String::from_utf8_lossy(&output.stderr);
-    assert!(text.contains("まだ引けません"), "{text}");
+    assert!(text.contains("この口からは引けません"), "{text}");
+    // **どちらを叩けばよいかまで言う。** 断るだけでは次に何をすればよいか分からない
+    assert!(text.contains("agentdashboard logs --host"), "{text}");
     assert!(text.contains("agentdashboard-agent logs"), "{text}");
 }
 
@@ -388,4 +397,208 @@ mod 伏せる {
         assert!(text.contains(メール), "{text}");
         assert!(text.contains(トークン), "{text}");
     }
+}
+
+// --- 別の PC のログを引く（ログ設計§25-5）------------------------------------
+
+/// ダッシュボードの代わりに1回だけ答える、使い捨ての口。
+///
+/// **本物のサーバを起こさない。** ここで見たいのは「CLI が答えをどう扱うか」で、
+/// 問答そのものは `core/tests/a2s.rs` が本物の WebSocket で見ている。
+fn stub_dashboard(status: &str, body: String) -> (u16, std::thread::JoinHandle<String>) {
+    use std::io::{Read as _, Write as _};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("待ち受けられること");
+    let port = listener.local_addr().expect("番号が分かること").port();
+    let status = status.to_string();
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("繋がること");
+        let mut buffer = [0u8; 4096];
+        let read = stream.read(&mut buffer).unwrap_or(0);
+        let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.flush();
+        request
+    });
+    (port, handle)
+}
+
+/// `--host` が使う設定（待ち受けポートだけが要る）。
+fn write_config(home: &FakeHome, port: u16) -> std::path::PathBuf {
+    // `FakeHome::new` は場所を決めるだけで作らない。**書く前に実在させる**
+    // （`command` が作るのは、これより後になる）
+    std::fs::create_dir_all(home.path()).expect("偽の HOME を作れること");
+    let path = home.join("config.toml");
+    std::fs::write(&path, format!("port = {port}\n")).expect("書けること");
+    path
+}
+
+fn chunk_json(host_now: &str, lines: &[&str]) -> String {
+    let lines: Vec<serde_json::Value> = lines
+        .iter()
+        .map(|line| serde_json::Value::String((*line).to_string()))
+        .collect();
+    serde_json::json!({
+        "host": "",
+        "host_now": host_now,
+        "lines": lines,
+        "truncated": false,
+        "broken": 0,
+        "leaks": 0,
+    })
+    .to_string()
+}
+
+#[test]
+fn 引いた行にはどの機械のものかが付く() {
+    // **人が読む形と `--json` の両方**で付くこと。片方だけだと、機械で読む側が
+    // 出どころを持たないまま結論を出す
+    let home = FakeHome::new("logs-host-stamp");
+    let now = time::OffsetDateTime::now_utc();
+    let host_now = now
+        .format(&time::format_description::well_known::Rfc3339)
+        .expect("組めること");
+    let line = record(
+        "2026-08-07T12:00:00.000Z",
+        "WARN",
+        "session-host",
+        9,
+        "むこう",
+    );
+
+    for json in [false, true] {
+        let (port, handle) = stub_dashboard("200 OK", chunk_json(&host_now, &[&line]));
+        let config = write_config(&home, port);
+        let mut command = command(env!("CARGO_BIN_EXE_agentdashboard"), &home);
+        command.arg("--config").arg(&config).args([
+            "logs",
+            "--host",
+            "むこうのPC",
+            "--since",
+            "2000-01-01T00:00:00Z",
+        ]);
+        if json {
+            command.arg("--json");
+        }
+        let output = command.output().expect("起こせること");
+        let text = stdout_of(&output);
+        assert!(
+            text.contains("host=むこうのPC") || text.contains(r#""host":"むこうのPC""#),
+            "json={json}: {text}"
+        );
+
+        // **問いは URL に載って届いている**（絞り込みを黙って落としていない）
+        let request = handle.join().expect("答えられること");
+        assert!(request.contains("/api/hosts/"), "{request}");
+        assert!(request.contains("since="), "{request}");
+    }
+}
+
+#[test]
+fn 時計がずれていれば警告する() {
+    // **行の `ts` は書き換えない**（設計§25-4）。代わりに受け取った側の時刻を併記する
+    let home = FakeHome::new("logs-host-clock");
+    let line = record(
+        "2026-08-07T12:00:00.000Z",
+        "INFO",
+        "session-host",
+        9,
+        "ずれ",
+    );
+    let (port, handle) = stub_dashboard("200 OK", chunk_json("2099-01-01T00:00:00.000Z", &[&line]));
+    let config = write_config(&home, port);
+
+    let output = command(env!("CARGO_BIN_EXE_agentdashboard"), &home)
+        .arg("--config")
+        .arg(&config)
+        .args([
+            "logs",
+            "--host",
+            "むこう",
+            "--since",
+            "2000-01-01T00:00:00Z",
+        ])
+        .output()
+        .expect("起こせること");
+    let _ = handle.join();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("時計"), "{stderr}");
+    // 仕込んだ行はそのまま出ること（書き換えていない）
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("2026-08-07T12:00:00.000Z"), "{stdout}");
+}
+
+#[test]
+fn アカウント方式のサーバでは理由を出して断る() {
+    // **401 が出るのはアカウント方式のときだけ**なので、事実を名指しできる
+    let home = FakeHome::new("logs-host-401");
+    let (port, handle) = stub_dashboard("401 Unauthorized", "ログインが要ります".to_string());
+    let config = write_config(&home, port);
+
+    let output = command(env!("CARGO_BIN_EXE_agentdashboard"), &home)
+        .arg("--config")
+        .arg(&config)
+        .args([
+            "logs",
+            "--host",
+            "むこう",
+            "--since",
+            "2000-01-01T00:00:00Z",
+        ])
+        .output()
+        .expect("起こせること");
+    let _ = handle.join();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("アカウントでログインする形式"), "{stderr}");
+    assert!(stderr.contains("agentdashboard-agent logs"), "{stderr}");
+}
+
+#[test]
+fn 追いかけながら別の機械は引けない() {
+    // **1往復の問答に `--follow` は乗らない。** 黙って1回で終わると
+    // 「追いかけているつもりで止まっている」になる
+    let home = FakeHome::new("logs-host-follow");
+    let config = write_config(&home, 1);
+    let output = command(env!("CARGO_BIN_EXE_agentdashboard"), &home)
+        .arg("--config")
+        .arg(&config)
+        .args(["logs", "--host", "むこう", "--follow"])
+        .output()
+        .expect("起こせること");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--follow"), "{stderr}");
+}
+
+#[test]
+fn hostのときはconfigが効かないという注意を出さない() {
+    // 既定では「`logs` は設定を読まない」と注意するが、**`--host` のときは読む**ので
+    // その文は嘘になる
+    let home = FakeHome::new("logs-host-config-note");
+    let (port, handle) = stub_dashboard("200 OK", chunk_json("2026-08-07T12:00:00.000Z", &[]));
+    let config = write_config(&home, port);
+
+    let output = command(env!("CARGO_BIN_EXE_agentdashboard"), &home)
+        .arg("--config")
+        .arg(&config)
+        .args([
+            "logs",
+            "--host",
+            "むこう",
+            "--since",
+            "2000-01-01T00:00:00Z",
+        ])
+        .output()
+        .expect("起こせること");
+    let _ = handle.join();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("`--config` は効きません"), "{stderr}");
 }

@@ -79,7 +79,7 @@ pub struct LogsArgs {
     #[arg(long)]
     pub sanitize: bool,
 
-    /// 別の PC のログを引く。**この版ではまだ使えない。**
+    /// 別の PC のログを引く（ダッシュボード側の口だけ・ループバック限定）。
     #[arg(long, value_name = "ID")]
     pub host: Option<String>,
 }
@@ -105,10 +105,15 @@ impl Default for LogsArgs {
 pub fn run(args: &LogsArgs) -> anyhow::Result<()> {
     if let Some(host) = &args.host {
         // **できないことを、できるように見せない。** 黙って手元のログを出すと、
-        // 別の PC を見ているつもりの読み手が、まったく別の機械の行で結論を出す
+        // 別の PC を見ているつもりの読み手が、まったく別の機械の行で結論を出す。
+        //
+        // ここへ来るのはセッションホストの `logs` だけ（ダッシュボード側は `--host` を
+        // 見て [`run_remote`] へ分岐する）。**あちらにダッシュボードの REST 口は無い**
+        // ——`agent.toml` の `server_url` は外のサーバを指していて、ループバックではない
         anyhow::bail!(
-            "別の PC（{host}）のログは、この版ではまだ引けません。\n\
-             いまは、その PC の上で `agentdashboard-agent logs` を叩いてください。"
+            "別の PC（{host}）のログは、この口からは引けません。\n\
+             ダッシュボードを動かしている機械で `agentdashboard logs --host {host}` を叩くか、\n\
+             その PC の上で `agentdashboard-agent logs` を叩いてください。"
         );
     }
 
@@ -448,6 +453,22 @@ struct Stats {
 }
 
 impl Stats {
+    /// 別の PC から引いたときの報告。**置き場所の案内は出さない**。
+    ///
+    /// あちらの置き場所はこちらには無いので、`--state-dir` を案内すると嘘になる
+    /// （置き場所が無いことは、答えの側が `NotFound` として言う）。
+    fn report_remote(&self) {
+        if self.broken > 0 {
+            eprintln!("読めない行を {} 行飛ばしました。", self.broken);
+        }
+        if self.leaks > 0 {
+            eprintln!(
+                "警告：伏せ切れなかったものが {} 件あります。外へ貼る前に目で確かめてください。",
+                self.leaks
+            );
+        }
+    }
+
     /// **黙って減らさない。** 飛ばした行がある事実は、必ず読み手へ言う。
     fn report(&self, dir: &Path) {
         if self.broken > 0 {
@@ -685,6 +706,239 @@ fn emit(
         Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => Ok(false),
         Err(err) => Err(err.into()),
     }
+}
+
+// ---------------------------------------------------------------------------
+// 別の PC のログを引く（ログ設計§25-5）
+// ---------------------------------------------------------------------------
+
+/// 答えを待つ上限。
+///
+/// **`hook_post` の 1 秒を写してはいけない。** サーバ側は PC の答えを5秒待つので、
+/// 1秒で切ると**必ず時間切れになる**。
+const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 時計のずれを警告する境目（設計§25-4）。
+const CLOCK_SKEW: time::Duration = time::Duration::seconds(2);
+
+/// 同じ機械で動いているダッシュボードを通して、別の PC のログを引く。
+///
+/// # ループバック限定
+///
+/// 叩くのは `http://127.0.0.1:<port>` だけ。TLS を張らないので**外のサーバへは届かない**
+/// ——外を見たいなら、そのサーバの上でこれを叩く。アカウントでログインする形式の
+/// サーバでは 401 になるので、そのことを理由として出す。
+pub fn run_remote(args: &LogsArgs, port: u16) -> anyhow::Result<()> {
+    let host = args
+        .host
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("`--host` が要ります"))?;
+    if args.follow {
+        // **1往復の問答に `--follow` は乗らない。** 黙って1回で終わると
+        // 「追いかけているつもりで止まっている」になる
+        anyhow::bail!(
+            "`--follow` は `--host` と一緒には使えません（別の PC のログは1回ずつ引く形です）。"
+        );
+    }
+    let wire = to_wire(args)?;
+    let url = format!(
+        "http://127.0.0.1:{port}/api/hosts/{}/logs?{}",
+        escape(host),
+        query_string(&wire)
+    );
+
+    let (status, body) = fetch(&url)?;
+    if status != 200 {
+        anyhow::bail!("{}", explain(status, host, &body));
+    }
+    let chunk: protocol::logs::LogChunk = serde_json::from_str(&body)
+        .map_err(|err| anyhow::anyhow!("ダッシュボードの答えを読めません：{err}"))?;
+
+    let query = Query::build(args)?;
+    let mut out = std::io::stdout().lock();
+    let mut stats = Stats::default();
+    // 相手側で数えたぶんを、こちらの数え上げへ足し込む。**引いたときだけ黙らない**
+    stats.broken += chunk.broken as usize;
+    stats.leaks += chunk.leaks as usize;
+
+    for raw in &chunk.lines {
+        // **刻んでから解く。** 先に刻めば、人が読む形も `--json` も同じ1本で済む
+        let stamped = stamp_host(raw, host);
+        let Some(line) = parse_line(&stamped) else {
+            stats.broken += 1;
+            continue;
+        };
+        if !emit(&line, &query, &mut out, &mut stats)? {
+            break;
+        }
+    }
+    let _ = out.flush();
+
+    if chunk.truncated {
+        eprintln!(
+            "上限で打ち切りました（{} 行）。続きは `--since` を進めて引いてください。",
+            chunk.lines.len()
+        );
+    }
+    if let Some(note) = clock_note(&chunk.host_now, time::OffsetDateTime::now_utc()) {
+        eprintln!("{note}");
+    }
+    stats.report_remote();
+    Ok(())
+}
+
+/// 時計がずれていたら、そのことを言う（設計§25-4・§18-7）。
+///
+/// **行の `ts` は書き換えない。** 書き換えると、その PC の上で
+/// `agentdashboard-agent logs` を叩いた出力と突き合わせられなくなり、いちばん確かな
+/// 相互参照を失う。代わりに**受け取った側の時刻を併記する**——設計§18-7 が
+/// 「扱えないなら併記する」としていたものの答えがこれ。
+fn clock_note(host_now: &str, local_now: time::OffsetDateTime) -> Option<String> {
+    let at = time::OffsetDateTime::parse(host_now, &time::format_description::well_known::Rfc3339)
+        .ok()?;
+    let skew = at - local_now;
+    if skew.abs() <= CLOCK_SKEW {
+        return None;
+    }
+    Some(format!(
+        "警告：この PC の時計は {:.0} 秒ずれています（PC={host_now} / こちら={}）。\n\
+         混ぜたときの前後関係は当てになりません。",
+        skew.as_seconds_f64(),
+        logging::format_rfc3339_millis(local_now),
+    ))
+}
+
+/// 引いた行に「どの機械のものか」を刻む（設計§25-3）。
+///
+/// **解いて組み立て直さない。** 直すと欄の並びが変わり、同じ行が経路によって別の順で
+/// 出ることになる。末尾の `}` の直前へ差し込む。
+fn stamp_host(raw: &str, host: &str) -> String {
+    let trimmed = raw.trim_end();
+    let Some(head) = trimmed.strip_suffix('}') else {
+        return raw.to_string();
+    };
+    if head.trim_end().ends_with('{') {
+        // 中身の無い行。刻むと壊れる
+        return raw.to_string();
+    }
+    // 書く側は `logging::RESERVED` で塞いであるが、**古いファイルには効かない**。
+    // 綴りを揃えて退避する（落とさずに残す、が RESERVED の約束）
+    let head = if head.contains("\"host\":") {
+        head.replacen("\"host\":", "\"f_host\":", 1)
+    } else {
+        head.to_string()
+    };
+    format!(
+        "{head},\"host\":{}}}",
+        serde_json::Value::String(host.to_string())
+    )
+}
+
+/// 絞り込みを URL のクエリへ。
+fn query_string(wire: &protocol::logs::LogQuery) -> String {
+    let mut parts = vec![
+        format!("since={}", escape(&wire.since)),
+        format!("level={}", escape(&wire.level)),
+    ];
+    if let Some(card) = &wire.card {
+        parts.push(format!("card={}", escape(card)));
+    }
+    if let Some(proc) = &wire.proc {
+        parts.push(format!("proc={}", escape(proc)));
+    }
+    if let Some(grep) = &wire.grep {
+        parts.push(format!("grep={}", escape(grep)));
+    }
+    if wire.grep_on_raw {
+        parts.push("raw=true".to_string());
+    }
+    if wire.sanitize {
+        parts.push("sanitize=true".to_string());
+    }
+    parts.join("&")
+}
+
+/// URL に載せられる形へ。**予約文字だけを逃がす**（依存を増やさない）。
+fn escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
+/// 状態コードを、読み手にできることが分かる言葉へ。
+fn explain(status: u16, host: &str, body: &str) -> String {
+    let body = body.trim();
+    match status {
+        // **401 が出るのはアカウント方式のときだけ**（素通しと LAN の合言葉は
+        // 127.0.0.1 を免除している）。事実を名指しできる
+        401 => "このダッシュボードはアカウントでログインする形式なので、CLI からは引けません。\n                ブラウザで開くか、引きたい PC の上で `agentdashboard-agent logs` を叩いてください。"
+            .to_string(),
+        404 => format!("PC（{host}）が見つかりません：{body}"),
+        409 => format!("PC（{host}）の版が古く、ログを引けません：{body}"),
+        504 => format!("PC（{host}）が応じません：{body}"),
+        503 => format!("いま PC（{host}）へ届けられません：{body}"),
+        400 => format!("頼み方が読めません：{body}"),
+        other => format!("ダッシュボードが {other} を返しました：{body}"),
+    }
+}
+
+/// ループバックのダッシュボードへ1本 GET する。
+///
+/// [`crate::hook_post::post`] を流用しないのは、あちらの契約が「失敗しても黙る」
+/// 「応答を読み捨てる」だからである。こちらは**状態コードと本文の両方が要る**。
+fn fetch(url: &str) -> anyhow::Result<(u16, String)> {
+    use std::io::{Read as _, Write as _};
+
+    let target = crate::hook_post::parse_url(url)?;
+    let address = std::net::ToSocketAddrs::to_socket_addrs(&target.authority)?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("接続先を解決できません：{}", target.authority))?;
+
+    let mut stream = std::net::TcpStream::connect_timeout(&address, FETCH_TIMEOUT)
+        .map_err(|err| anyhow::anyhow!("ダッシュボードへ繋げません（{err}）。起きていますか？"))?;
+    stream.set_write_timeout(Some(FETCH_TIMEOUT))?;
+    stream.set_read_timeout(Some(FETCH_TIMEOUT))?;
+
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
+        target.path, target.authority,
+    );
+    stream.write_all(request.as_bytes())?;
+    stream.flush()?;
+
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response)?;
+    let text = String::from_utf8_lossy(&response).into_owned();
+    let (head, body) = text
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| anyhow::anyhow!("答えの形が読めません（区切りがありません）"))?;
+
+    let status: u16 = head
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse().ok())
+        .ok_or_else(|| anyhow::anyhow!("答えの状態コードを読めません"))?;
+
+    // **`Content-Length` が無ければ断る。** 分割送り（chunked）は読めないので、
+    // 黙って長さの行ごと本文として扱うと壊れた JSON を読むことになる。
+    // ループバック直結では来ないが、来たときに黙らない
+    if !head
+        .lines()
+        .any(|line| line.to_ascii_lowercase().starts_with("content-length:"))
+    {
+        anyhow::bail!(
+            "答えに `Content-Length` がありません（この口はループバック直結だけを相手にします）。"
+        );
+    }
+    Ok((status, body.to_string()))
 }
 
 // ---------------------------------------------------------------------------

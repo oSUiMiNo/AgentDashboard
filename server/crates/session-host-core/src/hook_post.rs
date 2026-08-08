@@ -37,12 +37,16 @@ pub fn run(url: &str) {
 }
 
 /// 宛先URLを「接続先」と「パス」に分けたもの。
-struct Target {
-    authority: String,
-    path: String,
+///
+/// ログを引く口（[`crate::logs`]）も同じ形の URL を組むので、**割り方だけを借りる**。
+/// [`post`] そのものは流用しない——あちらは「失敗しても黙る」ことと「応答を読み捨てる」
+/// ことが契約なので、声を持つ処理を混ぜるとその契約が濁る
+pub(crate) struct Target {
+    pub(crate) authority: String,
+    pub(crate) path: String,
 }
 
-fn parse_url(url: &str) -> anyhow::Result<Target> {
+pub(crate) fn parse_url(url: &str) -> anyhow::Result<Target> {
     let rest = url
         .strip_prefix("http://")
         .ok_or_else(|| anyhow::anyhow!("http:// で始まるURLのみ扱えます: {url}"))?;
