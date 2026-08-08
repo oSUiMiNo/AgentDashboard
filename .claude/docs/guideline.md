@@ -171,6 +171,28 @@ scripts/cargo tree -i tokio-tungstenite -e normal
 `crates/server-core/build.rs` が `web/dist` の変更を cargo に伝えるようにしてあるので、ビルド順さえ
 守れば自動で作り直される。
 
+### ビルドの置き場所は青天井に育つ。ときどき嵩を見る
+`cargo` は**古い成果物を自分では消さない**。このワークスペースは統合テストが多く、
+テストの実行ファイル1本が数百 MB あるので、再ビルドのたびに別名のぶんが
+`server/target/debug/deps` へ積み上がっていく。差分コンパイルのキャッシュ
+（`incremental`）も同じように増える一方になる。
+
+**放っておくと数百 GB に達する。** 実際に 335 GB まで育ち、WSL の仮想ディスクごしに
+Windows の C: を満杯にして、Docker Desktop とターミナルを落とした（2026-08-09）。
+`scripts/cargo` は Docker の上に乗っているので、**ここが詰まると開発が全部止まる。**
+
+```
+du -sh server/target     # ときどき見る。数十 GB を超えていたら減らす
+make prune               # 次のビルドの大半を使い回せる形で嵩だけ落とす
+make clean               # 全部消す（丸ごと作り直しになる）
+```
+
+**WSL で開発しているときは、消しても Windows 側の空きはすぐには戻らない。** 仮想
+ディスクのファイルは自動では縮まないので、`wsl --shutdown` してから `diskpart` の
+`compact vdisk` を掛ける必要がある。`wsl --manage --set-sparse` は Microsoft が
+非推奨にしていて、`--allow-unsafe` を求められる——**利用者の全ソースが入っている
+ディスクなので、その旗は立てない。**
+
 ### 本物の claude を使うテストは `make test-cli`
 `make test` では走らない（`#[ignore]` 付き）。実行すると**本物の claude が起動し、利用者のアカウントのクォータを消費する**ので、明示的に叩くときだけにすること。ビルドはコンテナ、実行はホストという二段構えになっている理由は `.claude/docs/knowledge/開発環境とツールチェーン.md` を参照。
 

@@ -17,7 +17,7 @@ DEBUG_BIN := server/target/debug/agentdashboard
 .PHONY: help setup setup-rust setup-web dev dev-web dev-server \
         test test-rust test-web test-cli test-compose e2e e2e-compose build-debug perf \
         lint lint-rust lint-web fmt \
-        build build-web build-server dist-local ci fixtures record-terminal probe-screen clean
+        build build-web build-server dist-local ci fixtures record-terminal probe-screen clean prune
 
 help: ## このヘルプを表示する
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -172,6 +172,24 @@ clean: ## ビルド成果物を消す（自己修復の作業場所も含む）
 	# **Playwright が消してくれない置き場所。** test-results の外にあるので、
 	# ここに書いておかないと誰も消さない
 	rm -rf web/.e2e-state web/.e2e-compose
+	# Playwright MCP がブラウザを触るたびに勝手に作る置き場所。こちらも
+	# test-results の外なので、書かなければ誰も消さない
+	rm -rf .playwright-mcp
 	git worktree remove --force .selfheal/worktrees/dashboard-maintenance 2>/dev/null || true
 	git worktree prune 2>/dev/null || true
 	rm -rf .selfheal
+
+# **cargo は古い成果物を自分では消さない。**
+#
+# 統合テストが多いので、再ビルドのたびに別名の実行ファイルが `deps` へ積み上がる。
+# 放っておくと 300 GB を超え、実際に Windows の C: を満杯にして Docker ごと
+# 落とした（2026-08-09）。`make clean` は全部消して丸ごと作り直しになるが、
+# こちらは**次のビルドの大半を使い回せる形**で嵩だけ落とす。
+#
+# 消すのはどちらもキャッシュで、消えて困るものは入っていない。
+prune: ## ビルドの置き場所を、作り直しを最小にして減らす
+	@echo "減らす前:"
+	@du -sh server/target 2>/dev/null || true
+	rm -rf server/target/debug/incremental server/target/debug/deps
+	@echo "減らした後:"
+	@du -sh server/target 2>/dev/null || true

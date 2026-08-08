@@ -140,6 +140,20 @@ tracing-appender = "0.2"
 # 増えるのは外皮だけ。増分は実測してログ設計へ記録する。
 regex = { version = "1", default-features = false, features = ["std"] }
 
+# **デバッグ情報を行番号だけに絞る。**
+#
+# 既定（`debug = true`）だと、テストの実行ファイル1本が 300 MB を超える。この
+# ワークスペースは統合テストが多く、cargo は**古い成果物を自分では消さない**ので、
+# 再ビルドのたびに別名の 300 MB が `target/debug/deps` へ積み上がっていく。
+# 実際に 335 GB まで育ち、Windows の C: を満杯にして Docker ごと落とした
+# （2026-08-09。掃除の口は `make prune`）。
+#
+# `line-tables-only` でも**パニックのバックトレースは file:line を保つ**ので、
+# テストが落ちたときに現場を指す能力は変わらない。失うのはデバッガで変数を覗く
+# ときの型情報で、本PJTの日常（`make test` と `make ci`）はそこを使っていない。
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
