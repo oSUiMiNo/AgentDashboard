@@ -306,20 +306,6 @@ class = "send"
 reason = "立て直しの依頼は1件入っていれば十分。既に入っているなら二重に頼む意味が無い"
 
 [[entry]]
-path = "server/crates/session-host-core/src/parser.rs"
-fn = "unwatch"
-expr = '''self.requests.try_send(ParserRequest::Unwatch { card_id })'''
-class = "send"
-reason = "世話役が既に畳まれているときだけ失敗する。畳まれた先へ見張りの解除を頼む意味が無い"
-
-[[entry]]
-path = "server/crates/session-host-core/src/parser.rs"
-fn = "watch"
-expr = '''self.requests.try_send(ParserRequest::Watch { card_id, path })'''
-class = "send"
-reason = "世話役が既に畳まれているときだけ失敗する。畳まれた先へ見張りを頼む意味が無い"
-
-[[entry]]
 path = "server/crates/session-host-core/src/proc.rs"
 fn = "run"
 expr = '''child.kill()'''

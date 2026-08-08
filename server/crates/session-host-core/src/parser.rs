@@ -66,13 +66,40 @@ pub struct ParserHandle {
 
 impl ParserHandle {
     pub fn watch(&self, card_id: CardId, path: String) {
-        let _ = self
+        if let Err(err) = self
             .requests
-            .try_send(ParserRequest::Watch { card_id, path });
+            .try_send(ParserRequest::Watch { card_id, path })
+        {
+            undelivered(card_id, "監視", &err);
+        }
     }
 
     pub fn unwatch(&self, card_id: CardId) {
-        let _ = self.requests.try_send(ParserRequest::Unwatch { card_id });
+        if let Err(err) = self.requests.try_send(ParserRequest::Unwatch { card_id }) {
+            undelivered(card_id, "監視の解除", &err);
+        }
+    }
+}
+
+/// 世話役へ渡せなかったことを告げる。**満杯と畳み済みを言い分ける。**
+///
+/// 畳み済みは正常で、core が終わりかけているだけ。**満杯だけが未解明事象1 の候補**に
+/// なる——落ちた Watch は、そのカードの構造化ビューを永久に空のまま残す。一覧も
+/// ターミナルも動くので、利用者からは原因が見えない。
+///
+/// 同じ文言で出すと、この2つを後から区別できない。区別が付かない行は、
+/// 追う側にとって無いのと変わらない。
+fn undelivered(card_id: CardId, what: &str, err: &mpsc::error::TrySendError<ParserRequest>) {
+    match err {
+        mpsc::error::TrySendError::Full(_) => tracing::warn!(
+            %card_id,
+            queue = REQUEST_QUEUE,
+            "パーサの待ち行列が満杯で{what}を頼めません。この指示は消えました"
+        ),
+        mpsc::error::TrySendError::Closed(_) => tracing::debug!(
+            %card_id,
+            "パーサの世話役が畳まれているため{what}を頼めません"
+        ),
     }
 }
 
@@ -230,6 +257,11 @@ async fn run(
         match spawn_parser(&supervisor.config).await {
             Ok(child) => {
                 attempt = 0;
+                // **どの起動の子か**をここで残す。Hello の行だけでは pid が分からず、
+                // 孤児が出たとき（未解明事象2）に「誰が置き去りにされたか」を
+                // 後から名指しできない。ファイル名の pid（親）と行の `run_id` に、
+                // この番号が加わって初めて親子の対応が付く
+                tracing::info!(parser_pid = ?child.id(), "transcript-parser を起こしました");
                 supervisor.set_state(ParserState::Ok, None);
                 let reason = pump(
                     &supervisor,
@@ -328,10 +360,15 @@ async fn pump(
         }
     });
 
+    // このパーサから1件でも報告が返ってきたカード。**「読まれた」の肯定側**（設計§10-3）。
+    // 立て直しのたびに空から始める——前の個体が読めたことは、いまの個体の証明にならない
+    let mut reported: std::collections::HashSet<CardId> = std::collections::HashSet::new();
+
     // 立て直し後は、監視していたカードを保存済みの位置から登録し直す（無欠落再開）
     for (card_id, path) in watched.iter() {
         let command = watch_command(&supervisor.offsets, *card_id, path.clone());
-        if write_command(&mut stdin, &command).await.is_err() {
+        if let Err(err) = write_command(&mut stdin, &command).await {
+            undelivered_to_child(child.id(), *card_id, "監視の登録し直し", &err);
             return PumpEnd::ParserGone;
         }
     }
@@ -342,14 +379,16 @@ async fn pump(
                 Some(ParserRequest::Watch { card_id, path }) => {
                     watched.insert(card_id, path.clone());
                     let command = watch_command(&supervisor.offsets, card_id, path);
-                    if write_command(&mut stdin, &command).await.is_err() {
+                    if let Err(err) = write_command(&mut stdin, &command).await {
+                        undelivered_to_child(child.id(), card_id, "監視の指示", &err);
                         return PumpEnd::ParserGone;
                     }
                 }
                 Some(ParserRequest::Unwatch { card_id }) => {
                     watched.remove(&card_id);
                     supervisor.offsets.forget(card_id);
-                    if write_command(&mut stdin, &ParserCommand::Unwatch { card_id }).await.is_err() {
+                    if let Err(err) = write_command(&mut stdin, &ParserCommand::Unwatch { card_id }).await {
+                        undelivered_to_child(child.id(), card_id, "監視の解除の指示", &err);
                         return PumpEnd::ParserGone;
                     }
                 }
@@ -370,7 +409,7 @@ async fn pump(
             },
 
             event = events.recv() => match event {
-                Some(event) => handle_event(supervisor, event, watched),
+                Some(event) => handle_event(supervisor, event, watched, &mut reported),
                 // パーサの stdout が閉じた＝プロセスが終わった
                 None => return PumpEnd::ParserGone,
             },
@@ -430,10 +469,30 @@ async fn write_command(
     stdin.flush().await
 }
 
+/// 子へ指示を渡せなかったことを告げる（設計§10-3。未解明事象1 の「届かなかったのか」）。
+///
+/// **ここが無言だと、3択のうち真ん中だけが読めない。** 「頼みました」の行は出ているのに
+/// 何も起きない、という追いようのない沈黙になる。**流れは変えない**——渡せなかった時点で
+/// 立て直しへ抜けるのは元のままで、抜けたことが見えるようになっただけ。
+fn undelivered_to_child(
+    parser_pid: Option<u32>,
+    card_id: CardId,
+    what: &str,
+    err: &std::io::Error,
+) {
+    tracing::warn!(
+        parser_pid = ?parser_pid,
+        %card_id,
+        %err,
+        "パーサへ{what}を渡せません。この指示は届いていません"
+    );
+}
+
 fn handle_event(
     supervisor: &Arc<ParserSupervisor>,
     event: ParserEvent,
     watched: &HashMap<CardId, String>,
+    reported: &mut std::collections::HashSet<CardId>,
 ) {
     match event {
         ParserEvent::Hello {
@@ -468,6 +527,19 @@ fn handle_event(
                 // 監視していないカードの報告。位置の持ち主が決まらないので捨てる
                 return;
             };
+            // **「読まれた」の肯定側**（設計§10-3。未解明事象1 の3択の3番目）。
+            //
+            // 「届かなかった」と「読まれなかった」は、どちらも**何も起きない**という
+            // 同じ見え方をする。頼んだ行と届かなかった行だけでは、届いたのに
+            // 読まれていない状態を名指しできない。**最初の1件だけ**出すのは、
+            // ノード単位で回る場所に行を置かない約束（設計§9-2）を守るため
+            if reported.insert(card_id) {
+                tracing::info!(
+                    %card_id,
+                    nodes = nodes.len(),
+                    "パーサから最初の報告が届きました"
+                );
+            }
             supervisor
                 .manager
                 .report_transcript(card_id, path, &source, next_offset, &nodes);
