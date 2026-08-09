@@ -427,9 +427,9 @@ fn read_account(path: &Path) -> Account {
 mod tests {
     use super::*;
 
-    /// Windows 形のホームで組んだ規則。**エスケープ形にも当たること**を見る。
+    /// Windows 形のホームで組んだ規則。**重ねて書かれた形にも当たること**を見る。
     #[test]
-    fn Windowsのホームは_JSON_に書かれた形でも伏せる() {
+    fn バックスラッシュのホームは重ねて書かれた形でも伏せる() {
         let rules = Rules::from_parts(r"C:\Users\taro", Some("taro"), None, &Account::default());
 
         // `--json` や引いた行が持つ生の1行では、`\` が重ねて書かれている

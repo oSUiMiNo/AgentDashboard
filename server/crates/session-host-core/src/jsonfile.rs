@@ -32,7 +32,7 @@ pub fn load_or_default<T: Default + DeserializeOwned>(path: &Path) -> T {
     match serde_json::from_str(&text) {
         Ok(value) => value,
         Err(err) => {
-            load_gave_up(path, &format!("中身が JSON として読めない: {err}"));
+            load_gave_up(path, &format!("中身が JSON として読めない：{err}"));
             T::default()
         }
     }
@@ -51,13 +51,13 @@ pub fn save<T: Serialize>(path: &Path, value: &T) {
         return;
     };
     if let Err(err) = std::fs::create_dir_all(dir) {
-        save_gave_up(path, &format!("置き場所を作れない: {err}"));
+        save_gave_up(path, &format!("置き場所を作れない：{err}"));
         return;
     }
     let text = match serde_json::to_string(value) {
         Ok(text) => text,
         Err(err) => {
-            save_gave_up(path, &format!("JSON にできない: {err}"));
+            save_gave_up(path, &format!("JSON にできない：{err}"));
             return;
         }
     };
@@ -65,10 +65,10 @@ pub fn save<T: Serialize>(path: &Path, value: &T) {
     match std::fs::write(&temporary, text) {
         Ok(()) => {
             if let Err(err) = std::fs::rename(&temporary, path) {
-                save_gave_up(path, &format!("一時ファイルを置き換えられない: {err}"));
+                save_gave_up(path, &format!("一時ファイルを置き換えられない：{err}"));
             }
         }
-        Err(err) => save_gave_up(path, &format!("一時ファイルへ書けない: {err}")),
+        Err(err) => save_gave_up(path, &format!("一時ファイルへ書けない：{err}")),
     }
 }
 
@@ -77,11 +77,11 @@ pub fn save<T: Serialize>(path: &Path, value: &T) {
 /// `debug` なのは、諦めること自体が設計判断だから（設計§10-1）。既定の
 /// `log_file_level` が `debug` なのでファイルには残り、端末は汚さない。
 fn save_gave_up(path: &Path, why: &str) {
-    tracing::debug!(path = %path.display(), "状態ファイルを保存できないので諦めます: {why}");
+    tracing::debug!(path = %path.display(), "状態ファイルを保存できないので諦めます：{why}");
 }
 
 fn load_gave_up(path: &Path, why: &str) {
-    tracing::debug!(path = %path.display(), "状態ファイルを読めないので既定から始めます: {why}");
+    tracing::debug!(path = %path.display(), "状態ファイルを読めないので既定から始めます：{why}");
 }
 
 #[cfg(test)]

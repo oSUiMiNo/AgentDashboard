@@ -526,8 +526,8 @@ where
 ///
 /// ```text
 /// assertion `left == right` failed
-///   left: FilterMap { disabled_by: {0} }
-///  right: FilterMap { disabled_by: {} }
+///   left: FilterMap { disabled_by：{0} }
+///  right: FilterMap { disabled_by：{} }
 /// ```
 ///
 /// この構成では**その状況が普通に起きる**。端末層は `RUST_LOG`（既定 info）、
@@ -659,7 +659,7 @@ fn file_filter(level: &str) -> (EnvFilter, Option<String>) {
         Err(err) => (
             EnvFilter::new(file_filter_directives(DEFAULT_LOG_FILE_LEVEL)),
             Some(format!(
-                "ファイル層のフィルタを組めません（{level}）: {err}。\
+                "ファイル層のフィルタを組めません（{level}）：{err}。\
                  {DEFAULT_LOG_FILE_LEVEL} として扱います"
             )),
         ),
@@ -863,7 +863,7 @@ fn build_file_layer(proc: Proc, config: &SessionHostConfig) -> Built {
 
     if let Err(err) = std::fs::create_dir_all(&dir) {
         complaints.push(format!(
-            "ログの置き場所を作れません（{}）: {err}。ファイルへは残りません",
+            "ログの置き場所を作れません（{}）：{err}。ファイルへは残りません",
             dir.display()
         ));
         return Built {
@@ -893,7 +893,7 @@ fn build_file_layer(proc: Proc, config: &SessionHostConfig) -> Built {
         ));
     }
     for failure in outcome.failures {
-        complaints.push(format!("古いログを消せません: {failure}"));
+        complaints.push(format!("古いログを消せません：{failure}"));
     }
 
     let stem = file_stem(proc, pid);
@@ -906,7 +906,7 @@ fn build_file_layer(proc: Proc, config: &SessionHostConfig) -> Built {
         Ok(appender) => appender,
         Err(err) => {
             complaints.push(format!(
-                "ログのファイルを開けません（{}）: {err}。ファイルへは残りません",
+                "ログのファイルを開けません（{}）：{err}。ファイルへは残りません",
                 dir.display()
             ));
             return Built {
@@ -1224,7 +1224,7 @@ impl ClientSink {
         }
 
         render_line(&self.origin, &ts, level, CLIENT_TARGET, &fields, None)
-            .unwrap_or_else(|err| format!("{{\"msg\":\"行を組めません: {err}\"}}\n"))
+            .unwrap_or_else(|err| format!("{{\"msg\":\"行を組めません：{err}\"}}\n"))
     }
 
     fn write_line(&self, line: &str) {
@@ -1394,7 +1394,7 @@ pub mod capture {
         if let Err(err) = tracing_subscriber::registry().with(layer).try_init() {
             // **黙らない。** 据えられなかったことが原因で行が見えないのと、
             // 行が出ていないのとは、テストからは同じ顔をしている
-            eprintln!("ログの捕捉口を据えられません（既に据えられています）: {err}");
+            eprintln!("ログの捕捉口を据えられません（既に据えられています）：{err}");
         }
     }
 }
@@ -1887,10 +1887,10 @@ mod tests {
             // **`RUST_LOG` ではない。** 分けておかないと「詳しく出したくて
             // `RUST_LOG=debug` にしたら端末が読めなくなった」になる
             let 出た = 出るか("debug", || tracing::debug!("細かい話"));
-            assert_eq!(出た.len(), 1, "debug なら出ること: {出た:?}");
+            assert_eq!(出た.len(), 1, "debug なら出ること：{出た:?}");
 
             let 出ない = 出るか("warn", || tracing::debug!("細かい話"));
-            assert!(出ない.is_empty(), "warn なら落ちること: {出ない:?}");
+            assert!(出ない.is_empty(), "warn なら落ちること：{出ない:?}");
         }
 
         #[test]
@@ -1898,13 +1898,13 @@ mod tests {
             // `sea_orm=warn` は starts_with なので `sea_orm_migration` も飲む。
             // より長い指定で救っていることを、実際に流して確かめる
             let 出ない = 出るか("debug", || tracing::debug!(target: "hyper", "内部の話"));
-            assert!(出ない.is_empty(), "hyper の debug が出ている: {出ない:?}");
+            assert!(出ない.is_empty(), "hyper の debug が出ている：{出ない:?}");
 
             let 出た = 出るか(
                 "debug",
                 || tracing::info!(target: "sea_orm_migration::migrator::exec", "移行しました"),
             );
-            assert_eq!(出た.len(), 1, "移行の記録まで落ちている: {出た:?}");
+            assert_eq!(出た.len(), 1, "移行の記録まで落ちている：{出た:?}");
         }
 
         #[test]
@@ -2015,17 +2015,17 @@ mod tests {
             tracing::warn!(card_id = "別の相手", "同じ本文");
 
             let lines = sink.matching(mark, "card_id", "捕捉口の検査");
-            assert_eq!(lines.len(), 2, "間引かれずに2行とも拾えること: {lines:#?}");
+            assert_eq!(lines.len(), 2, "間引かれずに2行とも拾えること：{lines:#?}");
 
             let line = &lines[0];
             for field in ["ts", "level", "target", "proc", "pid", "run_id", "msg"] {
-                assert!(line.get(field).is_some(), "{field} が無い: {line}");
+                assert!(line.get(field).is_some(), "{field} が無い：{line}");
             }
             assert_eq!(line["level"], "WARN");
             assert_eq!(line["msg"], "同じ本文");
             assert!(
                 line.get("suppressed").is_none(),
-                "捕捉口では間引かないので suppressed は出ない: {line}"
+                "捕捉口では間引かないので suppressed は出ない：{line}"
             );
 
             // 印より前は見えない
@@ -2110,10 +2110,10 @@ mod tests {
         #[test]
         fn 必須の7欄が揃い_proc_は_browser() {
             let lines = 書いて読む(false, &[一件("落ちました")], ClientLogDrops::default());
-            assert_eq!(lines.len(), 1, "1件で1行: {lines:#?}");
+            assert_eq!(lines.len(), 1, "1件で1行：{lines:#?}");
 
             for 欄 in ["ts", "level", "target", "proc", "pid", "run_id", "msg"] {
-                assert!(lines[0].get(欄).is_some(), "{欄} が無い: {:#?}", lines[0]);
+                assert!(lines[0].get(欄).is_some(), "{欄} が無い：{:#?}", lines[0]);
             }
             assert_eq!(lines[0]["proc"], "browser");
             assert_eq!(lines[0]["level"], "ERROR");
@@ -2153,7 +2153,7 @@ mod tests {
             let ts = lines[0]["ts"].as_str().expect("文字列であること");
             assert!(
                 ts.ends_with('Z') && ts.len() == 24,
-                "受け取った時刻で代わること: {ts}"
+                "受け取った時刻で代わること：{ts}"
             );
         }
 
@@ -2180,7 +2180,7 @@ mod tests {
                 refused: 5,
             };
             let lines = 書いて読む(false, &[], drops);
-            assert_eq!(lines.len(), 1, "件数だけの行が残ること: {lines:#?}");
+            assert_eq!(lines.len(), 1, "件数だけの行が残ること：{lines:#?}");
             assert_eq!(lines[0]["refused"], 5);
             assert_eq!(lines[0]["level"], "WARN");
         }
