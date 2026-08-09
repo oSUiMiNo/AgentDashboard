@@ -859,21 +859,7 @@ pub fn run_remote(args: &LogsArgs, port: u16) -> anyhow::Result<()> {
     let query = Query::build(args)?;
     let mut out = std::io::stdout().lock();
     let mut stats = Stats::default();
-    // 相手側で数えたぶんを、こちらの数え上げへ足し込む。**引いたときだけ黙らない**
-    stats.broken += chunk.broken as usize;
-    stats.leaks += chunk.leaks as usize;
-
-    for raw in &chunk.lines {
-        // **刻んでから解く。** 先に刻めば、人が読む形も `--json` も同じ1本で済む
-        let stamped = stamp_host(raw, host);
-        let Some(line) = parse_line(&stamped) else {
-            stats.broken += 1;
-            continue;
-        };
-        if !emit(&line, &query, &mut out, &mut stats)? {
-            break;
-        }
-    }
+    emit_chunk(&chunk, host, &query, &mut out, &mut stats)?;
     let _ = out.flush();
 
     if chunk.truncated {
@@ -886,6 +872,55 @@ pub fn run_remote(args: &LogsArgs, port: u16) -> anyhow::Result<()> {
         eprintln!("{note}");
     }
     stats.report_remote();
+    Ok(())
+}
+
+/// 引いてきた塊を出す。
+///
+/// # 手元の規則をもう一度当てない
+///
+/// **伏せるのは相手の仕事である**（設計§25）。規則は**その機械の環境から組む**もので、
+/// 手元で組んだ規則には相手の利用者名もホーム名もメールも入っていない。だから
+/// 「手元でも念のため伏せる」は守りを厚くしない。
+///
+/// それどころか害がある。相手は既に `tail` を「（12 文字を伏せました）」へ差し替えて
+/// 返しており、手元でもう一度当てると**その置き換え文字列そのものを数え直して**
+/// 「（13 文字を伏せました）」に書き換わる——**読み手に嘘の長さを伝える**。残存の数も、
+/// 相手が報告したぶん（`chunk.leaks`）に手元の数え上げが乗って**二重になる**。
+///
+/// `--sanitize` を付けていない場合は相手も伏せていないので、当てる相手がそもそも無い。
+/// **どちらにせよ当てない**のが正しい。絞り込み（水位・カード・`--grep`）はそのまま効かせる。
+fn emit_chunk(
+    chunk: &protocol::logs::LogChunk,
+    host: &str,
+    query: &Query,
+    out: &mut impl Write,
+    stats: &mut Stats,
+) -> anyhow::Result<()> {
+    // 相手側で数えたぶんを、こちらの数え上げへ足し込む。**引いたときだけ黙らない**
+    stats.broken += chunk.broken as usize;
+    stats.leaks += chunk.leaks as usize;
+
+    let query = Query {
+        rules: None,
+        grep: query.grep.clone(),
+        since: query.since.clone(),
+        card: query.card.clone(),
+        proc: query.proc.clone(),
+        ..*query
+    };
+
+    for raw in &chunk.lines {
+        // **刻んでから解く。** 先に刻めば、人が読む形も `--json` も同じ1本で済む
+        let stamped = stamp_host(raw, host);
+        let Some(line) = parse_line(&stamped) else {
+            stats.broken += 1;
+            continue;
+        };
+        if !emit(&line, &query, out, stats)? {
+            break;
+        }
+    }
     Ok(())
 }
 
@@ -1805,6 +1840,99 @@ mod tests {
     }
 
     /// 線の向こうへ渡す形で切り出す（ログ設計§13-1・§25）。
+    mod 引いた行 {
+        use super::*;
+
+        /// 相手が伏せた後の1行。`tail` は既に置き換え済み。
+        fn 伏せ済みの行() -> String {
+            r#"{"ts":"2026-08-07T12:00:00.000Z","level":"INFO","target":"t","proc":"dashboard","pid":1,"run_id":"r","msg":"m","tail":"（12 文字を伏せました）"}"#
+                .to_string()
+        }
+
+        /// 手元の規則。**引いた行には当ててはいけない**もの。
+        fn 手元の規則() -> redact::Rules {
+            redact::Rules::from_parts(
+                "/home/local",
+                Some("local"),
+                None,
+                &redact::Account::default(),
+            )
+        }
+
+        fn 伏せる問い() -> Query {
+            Query {
+                since: "2026-01-01T00:00:00.000Z".to_string(),
+                level: 0,
+                card: None,
+                proc: None,
+                grep: None,
+                json: true,
+                rules: Some(手元の規則()),
+            }
+        }
+
+        fn 引く(chunk: &protocol::logs::LogChunk, query: &Query) -> (String, Stats) {
+            let mut out = Vec::new();
+            let mut stats = Stats::default();
+            emit_chunk(chunk, "むこう", query, &mut out, &mut stats).expect("出せること");
+            (String::from_utf8(out).expect("UTF-8 であること"), stats)
+        }
+
+        fn 塊(lines: Vec<String>, leaks: u32) -> protocol::logs::LogChunk {
+            protocol::logs::LogChunk {
+                host: String::new(),
+                host_now: "2026-08-07T12:00:01.000Z".to_string(),
+                lines,
+                truncated: false,
+                broken: 0,
+                leaks,
+            }
+        }
+
+        #[test]
+        fn 相手が伏せた文字列を数え直さない() {
+            let (text, _) = 引く(&塊(vec![伏せ済みの行()], 0), &伏せる問い());
+            assert!(
+                text.contains("（12 文字を伏せました）"),
+                "置き換え文字列がそのまま出ること：{text}"
+            );
+            assert!(
+                !text.contains("（13 文字を伏せました）"),
+                "置き換え文字列そのものを数え直していないこと：{text}"
+            );
+        }
+
+        #[test]
+        fn 相手が数えた残存をそのまま引き継ぐ() {
+            // 伏せ切れなかった件数は**相手しか数えられない**（規則を持っているのが
+            // 相手だけなので）。ここで足し忘れると、引いたときだけ残存が0件に見える。
+            //
+            // **「二重に数える」側は検査していない。** 手元で当て直しても、`apply` が
+            // 通った直後の `residue` は空になる（`replace_once` は1走査で全部置換し、
+            // メール・トークン・ホスト名は形で捕まえるため）。二重計上は理屈の上では
+            // 起こりうるが、この経路では起こらない
+            let line = r#"{"ts":"2026-08-07T12:00:00.000Z","level":"INFO","target":"t","proc":"dashboard","pid":1,"run_id":"r","msg":"m"}"#;
+            let (_, stats) = 引く(&塊(vec![line.to_string()], 3), &伏せる問い());
+            assert_eq!(stats.leaks, 3, "相手が数えたぶんを引き継ぐこと");
+        }
+
+        #[test]
+        fn 絞り込みは相手側で済んでいるので当て直さない() {
+            // 水位・カード・下限は**線に載せて相手へ渡してある**（`to_wire`）ので、
+            // 切り出しは相手が済ませている。こちらで当て直すと、同じ条件を2つの
+            // 実装で解くことになり、食い違ったときにどちらが正か決められない
+            let mut query = 伏せる問い();
+            query.level = 3; // warn 以上。**それでも落とさない**
+            let (text, _) = 引く(&塊(vec![伏せ済みの行()], 0), &query);
+            assert!(text.contains(r#""level":"INFO""#), "落とさないこと：{text}");
+            // どの機械のものかは、こちらで刻む（相手は自分の綴りを知らない）
+            assert!(
+                text.contains(r#""host":"むこう""#),
+                "刻印が付くこと：{text}"
+            );
+        }
+    }
+
     mod 切り出す {
         use super::*;
 
