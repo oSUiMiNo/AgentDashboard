@@ -28,6 +28,8 @@ use protocol::ipc::{PROTOCOL_VERSION, ParsedNode, ParserCommand, ParserEvent};
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
@@ -44,24 +46,53 @@ enum Message {
     Stop,
 }
 
+/// 「見に行け」がもう積んである、という1枚の旗。
+///
+/// # なぜ列ではなく旗なのか
+///
+/// 合図に回数の意味が無いからである。100回来ても1回来ても、やることは「見に行く」1回
+/// でしかない。冪等なものを境界なしの列へ積むと、溜まった数がそのまま嵩になる——
+/// パーサ自身の `open` が通知を生む輪と噛み合って、実測で毎分 340〜500 MB がこれで消えた。
+///
+/// 上限付きの列でも同じ効果は得られるが、上限をいくつにするかという決めなくてよい数字が
+/// 1つ増える。旗は定義から上限が1なので、決める余地が無い。
+#[derive(Clone, Default)]
+struct Signal(Arc<AtomicBool>);
+
+impl Signal {
+    /// 旗を立て、**まだ立っていなかったときだけ** true を返す。
+    ///
+    /// 送り手はこれが true のときだけ `Message::Poke` を積む。既に積んであるなら、
+    /// もう1件積んでも読む側のすることは変わらない。
+    fn raise(&self) -> bool {
+        !self.0.swap(true, Ordering::AcqRel)
+    }
+
+    /// 旗を降ろす。
+    fn lower(&self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 /// パーサプロセスの入口。
 pub fn run() -> anyhow::Result<()> {
     let (tx, rx) = mpsc::channel();
+    let signal = Signal::default();
     spawn_stdin_reader(tx.clone());
-    spawn_ticker(tx.clone());
-    let watcher = spawn_watcher(tx)?;
+    spawn_ticker(tx.clone(), signal.clone());
+    let watcher = spawn_watcher(tx, signal.clone())?;
 
     emit(&ParserEvent::Hello {
         protocol_version: PROTOCOL_VERSION,
         parser_version: env!("CARGO_PKG_VERSION").to_string(),
     });
 
-    pump(rx, watcher);
+    pump(rx, watcher, signal);
     Ok(())
 }
 
 /// 指示と合図を1本の列で受けて捌く。
-fn pump(rx: Receiver<Message>, mut watcher: Option<DirWatcher>) {
+fn pump(rx: Receiver<Message>, mut watcher: Option<DirWatcher>, signal: Signal) {
     let mut sessions: HashMap<CardId, SessionState> = HashMap::new();
 
     while let Ok(message) = rx.recv() {
@@ -89,7 +120,12 @@ fn pump(rx: Receiver<Message>, mut watcher: Option<DirWatcher>) {
                 emit(&ParserEvent::Range { req_id, nodes });
             }
             Message::Command(ParserCommand::Shutdown) | Message::Stop => break,
-            Message::Poke => poll(&mut sessions, &mut watcher),
+            Message::Poke => {
+                // 降ろすのは読む前。逆にすると、読んでいる最中に届いた変更が
+                // 降ろした拍子に消え、次の巡回まで最大 500ms 遅れる
+                signal.lower();
+                poll(&mut sessions, &mut watcher);
+            }
         }
     }
 }
@@ -266,7 +302,7 @@ fn spawn_stdin_reader(tx: Sender<Message>) {
     });
 }
 
-fn spawn_ticker(tx: Sender<Message>) {
+fn spawn_ticker(tx: Sender<Message>, signal: Signal) {
     let born_under = parent_pid();
     std::thread::spawn(move || {
         loop {
@@ -276,7 +312,9 @@ fn spawn_ticker(tx: Sender<Message>) {
                 let _ = tx.send(Message::Stop);
                 break;
             }
-            if tx.send(Message::Poke).is_err() {
+            // 既に積んであるなら積まない。旗が立ったままなのは、読む側がまだ
+            // 見に行っていないということなので、もう1件積んでも結果は同じ
+            if signal.raise() && tx.send(Message::Poke).is_err() {
                 break;
             }
         }
@@ -316,7 +354,7 @@ fn orphaned(born_under: Option<u32>) -> bool {
 }
 
 /// ファイル監視を立ち上げる。使えなくても致命傷にはしない（巡回だけで動く）。
-fn spawn_watcher(tx: Sender<Message>) -> anyhow::Result<Option<DirWatcher>> {
+fn spawn_watcher(tx: Sender<Message>, signal: Signal) -> anyhow::Result<Option<DirWatcher>> {
     let (notify_tx, notify_rx) = mpsc::channel();
     let watcher = match DirWatcher::new(notify_tx) {
         Ok(watcher) => watcher,
@@ -329,7 +367,10 @@ fn spawn_watcher(tx: Sender<Message>) -> anyhow::Result<Option<DirWatcher>> {
     };
     std::thread::spawn(move || {
         while notify_rx.recv().is_ok() {
-            if tx.send(Message::Poke).is_err() {
+            // 通知そのものは1件ずつ来るが、積むのは旗が降りているときだけ。
+            // 中継そのものを消すのは通知の選別を入れる段の仕事で、ここでは
+            // 経路を変えず、積む条件だけを変える
+            if signal.raise() && tx.send(Message::Poke).is_err() {
                 break;
             }
         }
@@ -343,6 +384,7 @@ mod tests {
 
     use super::*;
     use protocol::{Node, NodeId, TreeNode};
+    use std::sync::atomic::AtomicUsize;
 
     #[test]
     fn stderrの行は先頭にpidが付く() {
@@ -439,6 +481,65 @@ mod tests {
     fn 親が分からない環境では見張りを止める() {
         // /proc が無い環境で「常に孤児」と判定すると、起動した瞬間に終わってしまう
         assert!(!orphaned(None));
+    }
+
+    #[test]
+    fn 立っていない旗は立てられる() {
+        assert!(Signal::default().raise());
+    }
+
+    #[test]
+    fn 既に立っている旗は立てられない() {
+        // これが二重に積まないことの根拠。偽が返るあいだ、送り手は列へ何も積まない
+        let signal = Signal::default();
+        assert!(signal.raise());
+        assert!(!signal.raise(), "2回目は偽であること");
+    }
+
+    #[test]
+    fn 降ろせばまた立てられる() {
+        let signal = Signal::default();
+        assert!(signal.raise());
+        signal.lower();
+        assert!(signal.raise(), "降ろしたあとは真に戻ること");
+    }
+
+    #[test]
+    fn 同時に立てても真を返すのは1回だけ() {
+        // 送り手は見張りと巡回の2本あり、別々のスレッドから同時に立てにくる。
+        // ここが崩れると、1回の合図で複数の Poke が積まれて旗の意味が消える
+        let signal = Signal::default();
+        let raised = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let signal = signal.clone();
+            let raised = Arc::clone(&raised);
+            handles.push(std::thread::spawn(move || {
+                if signal.raise() {
+                    raised.fetch_add(1, Ordering::Relaxed);
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("スレッドを畳めること");
+        }
+        assert_eq!(raised.load(Ordering::Relaxed), 1, "真を返すのは1回だけ");
+    }
+
+    #[test]
+    fn 合図が溜まっていても終了の指示は届く() {
+        // 旗を入れる前は、送り手が積んだ合図の後ろで Shutdown が埋もれた。
+        // 溜まった状態を人為的に作り、それでも pump が返ることを見る。
+        // 見張っているセッションが無いので poll は何もしない
+        let (tx, rx) = mpsc::channel();
+        for _ in 0..10_000 {
+            tx.send(Message::Poke).expect("列へ積めること");
+        }
+        tx.send(Message::Command(ParserCommand::Shutdown))
+            .expect("列へ積めること");
+        drop(tx);
+
+        pump(rx, None, Signal::default());
     }
 
     #[test]
