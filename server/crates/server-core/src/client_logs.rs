@@ -121,11 +121,15 @@ async fn api_client_logs(
             continue;
         }
         entry.clamp();
-        bytes += entry.size_bytes();
-        if bytes > MAX_BATCH_BYTES {
+        // **通ったぶんだけ数える。** 先に足してから断ると、上限を跨いだ1件の大きさが
+        // 残り続け、`bytes > MAX_BATCH_BYTES` が真のまま以降を全部巻き添えにする——
+        // 入るはずだった小さい行が、前に居た大きい行のせいで消える
+        let next = bytes + entry.size_bytes();
+        if next > MAX_BATCH_BYTES {
             drops.refused += 1;
             continue;
         }
+        bytes = next;
         entries.push(entry);
     }
 

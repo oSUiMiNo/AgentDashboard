@@ -487,6 +487,58 @@ async fn 中身が空でも書き込みは頻度の門を通る() {
     );
 }
 
+/// **大きすぎる1件が、後ろの小さい行を巻き添えにしない**（レビュー指摘⑦）。
+///
+/// バイト数を上限判定より先に足していたため、上限を跨いだ1件の大きさが残り続け、
+/// `bytes > MAX_BATCH_BYTES` が真のまま**以降の全件が断られて**いた。
+///
+/// **上限ちょうどを当てにしない。** 見るのは「大きいものが断られた後でも、小さい行が
+/// 届いていること」だけ。値そのものは `protocol` 側の話である。
+#[tokio::test]
+async fn 大きすぎる1件は後続を巻き添えにしない() {
+    let server = selfhost().await;
+    let 置き場所 = server.state_dir().join("logs");
+
+    // 6 KiB を10件。上限（56 KiB）は9件目までで埋まり、10件目が跨ぐ
+    let 大きい: Vec<String> = (0..10)
+        .map(|_| {
+            let msg = "あ".repeat(2_000); // UTF-8 で約 6 KiB
+            format!(
+                r#"{{"ts":"2026-08-09T00:00:00.000Z","level":"ERROR","kind":"unhandled","msg":"{msg}"}}"#
+            )
+        })
+        .collect();
+    // そのあとに続く小さい行。**跨いだ1件のせいで消えてはいけない**
+    let 小さい: Vec<String> = (0..5)
+        .map(|_| {
+            r#"{"ts":"2026-08-09T00:00:00.000Z","level":"ERROR","kind":"unhandled","msg":"ちいさい"}"#
+                .to_string()
+        })
+        .collect();
+    let 本文 = format!(
+        r#"{{"entries":[{}],"dropped":0}}"#,
+        [大きい, 小さい].concat().join(",")
+    );
+
+    let (status, _) = server
+        .request("POST", "/api/client-logs", Some(&本文))
+        .await;
+    assert_eq!(status, 204);
+
+    let mut 中身 = String::new();
+    for _ in 0..100 {
+        中身 = 未認証の中身(&置き場所);
+        if 中身.contains("ちいさい") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        中身.contains("ちいさい"),
+        "跨いだ1件のあとの小さい行が届いていない"
+    );
+}
+
 /// **行が門で全部断られたら、断り自体も書かない**（レビュー指摘①）。
 ///
 /// 穴の本体は「空のバッチ」ではなく、**書き込みが門の外にあること**だった。
@@ -933,6 +985,23 @@ async fn 設定と持ち出しはアカウントごとに分かれる() {
 
 /// 未認証ぶんのファイルへ、その行が残ったか。
 /// 未認証ぶんのファイルに溜まった行数。
+/// 未認証ぶんのログの中身をまとめて読む。
+fn 未認証の中身(置き場所: &std::path::Path) -> String {
+    let Ok(entries) = std::fs::read_dir(置き場所) else {
+        return String::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("browser-anon-")
+        })
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .collect()
+}
+
 fn 未認証の行数(置き場所: &std::path::Path) -> usize {
     let Ok(entries) = std::fs::read_dir(置き場所) else {
         return 0;
