@@ -35,7 +35,11 @@ use crate::redact;
 const FOLLOW_POLL: Duration = Duration::from_millis(500);
 
 /// 水位の並び。小さいほど詳しい。
-const LEVELS: &[&str] = &["TRACE", "DEBUG", "INFO", "WARN", "ERROR"];
+///
+/// **綴りを持っているのは共有の側**（[`protocol::logs::LEVELS`]）。読める値かどうかを
+/// 見る場所が2つある（切り出すここと、投げる前に断るサーバ）ので、同じ並びを
+/// 2箇所に書かない。
+const LEVELS: &[&str] = protocol::logs::LEVELS;
 
 /// ログを読む口の引数（設計§11-1）。
 ///
@@ -1022,6 +1026,9 @@ fn explain(status: u16, host: &str, body: &str) -> String {
         504 => format!("PC（{host}）が応じません：{body}"),
         503 => format!("いま PC（{host}）へ届けられません：{body}"),
         400 => format!("頼み方が読めません：{body}"),
+        // **これは PC の側の事情である。** 頼み方の間違いは 400 で先に断っているので、
+        // ここまで来るのは相手が本当に応じられないとき（版が古い等）だけ
+        415 => format!("PC（{host}）はこの頼みに応じられません：{body}"),
         other => format!("ダッシュボードが {other} を返しました：{body}"),
     }
 }

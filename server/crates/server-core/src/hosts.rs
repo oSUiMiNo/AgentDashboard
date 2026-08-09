@@ -151,6 +151,15 @@ impl LogsQuery {
             )));
         }
         let level = self.level.unwrap_or_else(|| "INFO".to_string());
+        // **ここで断らないと、打ち間違いが相手の PC の落ち度になる。** 素通しすると
+        // PC 側の切り出しが落ちて `Unsupported`（415）になり、読み手には
+        // 「その PC は応じられません」としか見えない——直すべき場所を指していない
+        if !protocol::logs::LEVELS.contains(&level.to_ascii_uppercase().as_str()) {
+            return Err(HostAskError::BadRequest(format!(
+                "`level` を読めません：{level}\n合うのは {} です。",
+                protocol::logs::LEVELS.join(" / ").to_lowercase()
+            )));
+        }
         if let Some(pattern) = &self.grep {
             regex::Regex::new(pattern).map_err(|err| {
                 HostAskError::BadRequest(format!("`grep` の正規表現が読めません：{err}"))
@@ -294,6 +303,36 @@ mod tests {
             .into_wire()
             .expect_err("断ること");
             assert_eq!(status_of(&err), StatusCode::BAD_REQUEST);
+        }
+
+        #[test]
+        fn 読めない水位は投げる前に断る() {
+            // 素通しすると PC 側の切り出しが落ちて 415 になり、読み手には
+            // 「その PC は応じられません」としか見えない。**打ち間違いが相手の
+            // 落ち度として報告される**ので、直すべき場所を指していない
+            let err = LogsQuery {
+                level: Some("しずか".to_string()),
+                ..asked("2026-08-08T00:00:00.000Z")
+            }
+            .into_wire()
+            .expect_err("断ること");
+            assert_eq!(status_of(&err), StatusCode::BAD_REQUEST);
+            // 読めなかった値と、合う値の一覧を出す
+            assert!(err.message().contains("しずか"), "{}", err.message());
+            assert!(err.message().contains("warn"), "{}", err.message());
+        }
+
+        #[test]
+        fn 水位は大小文字を問わない() {
+            for level in ["warn", "WARN", "Warn"] {
+                let wire = LogsQuery {
+                    level: Some(level.to_string()),
+                    ..asked("2026-08-08T00:00:00.000Z")
+                }
+                .into_wire()
+                .expect("通ること");
+                assert_eq!(wire.level, level, "綴りはそのまま運ぶこと");
+            }
         }
 
         #[test]
