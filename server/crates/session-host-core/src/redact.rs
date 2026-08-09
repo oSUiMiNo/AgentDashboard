@@ -273,10 +273,25 @@ impl Rules {
 }
 
 /// 使える規則なら積んで `true`。短すぎるもの・空のものは採らない。
+///
+/// # `\` を含むものは、JSON で書かれた形も積む
+///
+/// Windows のホームは `C:\Users\taro` だが、`--json` や別の PC から引いた行の中では
+/// `C:\\Users\\taro` と書かれている（`serde_json` が `\` を重ねる）。積むのが
+/// ファイルシステムの形だけだと**一致せず素通しになる**。
+///
+/// しかも [`Rules::residue`] は同じ規則で残存を数えるので、**警告も出ない**——
+/// 利用者は「安全に貼れる」と言われたまま、ホームパスと利用者名を外へ出すことになる。
+/// Unix は区切りが `/` なので、この道は通らない。
 fn push_rule(pairs: &mut Vec<(String, String)>, old: &str, new: &str) -> bool {
     let old = old.trim();
     if old.chars().count() < MIN_RULE_LEN || old == "/" {
         return false;
+    }
+    if old.contains('\\') {
+        // **長いほうを先に積む。** `Rules::from_parts` は長い順へ並べ替えるが、
+        // 同じ長さのときの順序に頼らないよう、ここでも重ねた形を先に置く
+        pairs.push((old.replace('\\', "\\\\"), new.to_string()));
     }
     pairs.push((old.to_string(), new.to_string()));
     true
@@ -411,6 +426,36 @@ fn read_account(path: &Path) -> Account {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Windows 形のホームで組んだ規則。**エスケープ形にも当たること**を見る。
+    #[test]
+    fn Windowsのホームは_JSON_に書かれた形でも伏せる() {
+        let rules = Rules::from_parts(r"C:\Users\taro", Some("taro"), None, &Account::default());
+
+        // `--json` や引いた行が持つ生の1行では、`\` が重ねて書かれている
+        let raw = r#"{"msg":"C:\\Users\\taro\\Dev で落ちました"}"#;
+        let 伏せた = rules.apply(raw);
+        // **利用者名ではなくパスそのものを見る。** 利用者名は別の規則でも消えるので、
+        // `taro` が無いことだけを見ると、ホームの規則が当たっていなくても通ってしまう
+        assert!(
+            !伏せた.contains(r"C:\\Users"),
+            "重ねて書かれたホームが素通ししている：{伏せた}"
+        );
+        assert!(
+            伏せた.contains(HOME_PLACEHOLDER),
+            "ホームの伏せ字に置き換わること：{伏せた}"
+        );
+        // 素通しに気づけない、がいちばん悪い。**残存として数えられること**
+        assert!(
+            rules.residue(&伏せた).is_empty(),
+            "伏せ切れたのに残存と言っている：{:?}",
+            rules.residue(&伏せた)
+        );
+
+        // ファイルシステムの形（人が読む1行のほう）も従来どおり
+        let 人が読む形 = rules.apply(r"C:\Users\taro\Dev で落ちました");
+        assert!(!人が読む形.contains("taro"), "実際：{人が読む形}");
+    }
 
     fn account() -> Account {
         Account {
