@@ -654,10 +654,35 @@ fn drop_verbatim(line: &Line) -> Line {
     }
     if dropped {
         // `--json` は `raw` をそのまま流すので、そちらも同じ形へ直す。**片方だけ直すと、
-        // 人が読む形では伏せられているのに JSON では素通りする**という一番たちの悪い形になる
-        if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&line.raw)
+        // 人が読む形では伏せられているのに JSON では素通りする**という一番たちの悪い形になる。
+        //
+        // **解いて組み立て直さない**（`stamp_host` と同じ作法）。`serde_json` は
+        // `preserve_order` 無しでビルドされているので `Map` は `BTreeMap` になり、
+        // `to_string()` が**キーをアルファベット順へ並べ替える**。同じファイルを
+        // `--json` で2回出したときに `--sanitize` の有無で並びが変わり、差分が取れなくなる
+        let mut raw = line.raw.clone();
+        let mut 全部置けた = true;
+        for (name, replaced) in &line.extra {
+            if !VERBATIM_FIELDS.contains(&name.as_str()) {
+                continue;
+            }
+            let Some(text) = replaced.as_str() else {
+                continue;
+            };
+            match replace_string_field(&raw, name, text) {
+                Some(next) => raw = next,
+                None => 全部置けた = false,
+            }
+        }
+        if 全部置けた {
+            line.raw = raw;
+        } else if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&line.raw)
             && let Some(object) = value.as_object_mut()
         {
+            // **並びが崩れるより、伏せ損ねるほうが困る。** 文字列として置けなかった
+            // （欄が無い・値が文字列でない・書式が想定と違う）ときだけここへ落ちる。
+            // 自分たちの書き手が出した行では起きないが、**古いファイルや手で書かれた行**
+            // には効く
             for (name, replaced) in &line.extra {
                 if VERBATIM_FIELDS.contains(&name.as_str()) {
                     object.insert(name.clone(), replaced.clone());
@@ -667,6 +692,46 @@ fn drop_verbatim(line: &Line) -> Line {
         }
     }
     line
+}
+
+/// JSON 1行の中の `"<name>":"...."` を、文字列として差し替える。
+///
+/// **解かずに直すためのもの**（理由は [`drop_verbatim`] と [`stamp_host`]）。値の走査は
+/// エスケープを尊重する——`\"` で終わったと読み違えると、そこから先が壊れた JSON になる。
+///
+/// 欄が無い・値が文字列でないときは `None`。**黙って素通しさせない**ために、
+/// 呼び出し側が別の手へ落ちられる形にしてある。
+fn replace_string_field(raw: &str, name: &str, value: &str) -> Option<String> {
+    let key = format!("\"{name}\":");
+    let at = raw.find(&key)?;
+    let rest = &raw[at + key.len()..];
+    let head = rest.len() - rest.trim_start().len();
+    let body = &rest[head..];
+    if !body.starts_with('"') {
+        return None;
+    }
+    // 開きの `"` の次から、エスケープされていない `"` を探す
+    let mut escaped = false;
+    let mut end = None;
+    for (index, ch) in body.char_indices().skip(1) {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '"' => {
+                end = Some(index);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let end = end?;
+    let 置き換え = serde_json::Value::String(value.to_string()).to_string();
+    let 前 = &raw[..at + key.len() + head];
+    let 後 = &body[end + 1..];
+    Some(format!("{前}{置き換え}{後}"))
 }
 
 /// 1行を出す。相手が読むのをやめていたら `false`。
@@ -1319,6 +1384,58 @@ mod tests {
             )
             .expect("読めること");
             assert_eq!(drop_verbatim(&parsed).raw, parsed.raw);
+        }
+
+        /// **伏せても欄の並びが変わらない**（レビュー指摘②）。
+        ///
+        /// `raw` を `serde_json::Value` へ解いて組み立て直していたころは、`Map` が
+        /// `BTreeMap`（`preserve_order` 無し）なのでキーがアルファベット順へ並び替わり、
+        /// 同じファイルを `--json` で2回出すと `--sanitize` の有無で順が変わっていた。
+        #[test]
+        fn 伏せても欄の並びが変わらない() {
+            let もと = 端末の末尾つき();
+            let dropped = drop_verbatim(&もと);
+
+            let 並び = |raw: &str| -> Vec<String> {
+                raw.split(",\"")
+                    .skip(1)
+                    .filter_map(|part| part.split("\":").next().map(str::to_string))
+                    .collect()
+            };
+            assert_eq!(
+                並び(&もと.raw),
+                並び(&dropped.raw),
+                "伏せる前後で欄の並びが変わっている\n前: {}\n後: {}",
+                もと.raw,
+                dropped.raw
+            );
+            // 先頭も動いていないこと（7欄の1つ目は `ts`）
+            assert!(dropped.raw.starts_with(r#"{"ts":"#), "{}", dropped.raw);
+            // 直したあとも JSON として読める
+            serde_json::from_str::<serde_json::Value>(&dropped.raw).expect("JSON として読めること");
+        }
+
+        #[test]
+        fn 欄の中身を文字列のまま差し替えられる() {
+            let raw = r#"{"a":"x","tail":"ふつうの値","b":1}"#;
+            let 直した = replace_string_field(raw, "tail", "伏せました").expect("置けること");
+            assert_eq!(直した, r#"{"a":"x","tail":"伏せました","b":1}"#);
+        }
+
+        #[test]
+        fn エスケープを含む値でも終わりを読み違えない() {
+            // `\"` を値の終わりと読むと、そこから先が壊れた JSON になる
+            let raw = r#"{"tail":"引用 \" と 逆斜線 \\ 入り","b":1}"#;
+            let 直した = replace_string_field(raw, "tail", "伏せました").expect("置けること");
+            assert_eq!(直した, r#"{"tail":"伏せました","b":1}"#);
+            serde_json::from_str::<serde_json::Value>(&直した).expect("JSON として読めること");
+        }
+
+        #[test]
+        fn 欄が無いか文字列でなければ置かない() {
+            assert!(replace_string_field(r#"{"a":1}"#, "tail", "x").is_none());
+            // 値が文字列でない行は、この口では扱わない（呼び出し側が別の手へ落ちる）
+            assert!(replace_string_field(r#"{"tail":42}"#, "tail", "x").is_none());
         }
     }
 
