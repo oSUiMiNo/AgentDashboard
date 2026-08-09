@@ -43,7 +43,6 @@ enum Message {
     Command(ParserCommand),
     /// 何かが変わったかもしれないので見に行く合図
     Poke,
-    Stop,
 }
 
 /// 「見に行け」がもう積んである、という1枚の旗。
@@ -119,7 +118,7 @@ fn pump(rx: Receiver<Message>, mut watcher: Option<DirWatcher>, signal: Signal) 
                 let nodes = session::read_range(&PathBuf::from(source), from_offset, to_offset);
                 emit(&ParserEvent::Range { req_id, nodes });
             }
-            Message::Command(ParserCommand::Shutdown) | Message::Stop => break,
+            Message::Command(ParserCommand::Shutdown) => break,
             Message::Poke => {
                 // 降ろすのは読む前。逆にすると、読んでいる最中に届いた変更が
                 // 降ろした拍子に消え、次の巡回まで最大 500ms 遅れる
@@ -278,6 +277,33 @@ fn event_label(event: &ParserEvent) -> String {
     }
 }
 
+/// 列を通さずに、その場で終わる。**止まる道はここ1つに集める。**
+///
+/// 呼ぶのは「core が居なくなった」と分かった2箇所だけ（stdin の EOF と孤児の検知）。
+/// どちらも合図を受け取る相手がもう居ないので、列へ積んでも意味が無い。
+///
+/// # ロックを先に取るのが肝
+///
+/// `emit` は書き込みのあいだ stdout のロックを持つ。ここで取ってから終われば、
+/// **行が途中で切れた状態で終わることがない。** 切れた行は core の行パースを壊し、
+/// 「繋がっているのに何も届かない」という最も追いにくい沈黙になる。
+///
+/// # `flush` を自分で呼ぶ理由
+///
+/// `std::process::exit` はデストラクタも Rust の後始末も走らせないので、
+/// 溜めたぶんは黙って消える。明示して初めて出し切れる。
+///
+/// # 終了コードは 0
+///
+/// 異常ではなく、**役目が終わったから終わる**。親（`session-host-core` の `parser.rs`）は
+/// パーサが落ちれば起こし直すが、孤児の場面ではそもそも親が居ないので相手も居ない。
+fn end_now() -> ! {
+    let stdout = std::io::stdout();
+    let mut stdout = stdout.lock();
+    let _ = stdout.flush();
+    std::process::exit(0);
+}
+
 fn spawn_stdin_reader(tx: Sender<Message>) {
     std::thread::spawn(move || {
         let stdin = std::io::stdin();
@@ -298,7 +324,9 @@ fn spawn_stdin_reader(tx: Sender<Message>) {
                 )),
             }
         }
-        let _ = tx.send(Message::Stop);
+        // ここへ来るのは stdin が閉じたか、受け手が畳まれたときだけ。どちらも
+        // core が居ないという意味なので、終わり方を分ける理由が無い
+        end_now();
     });
 }
 
@@ -307,10 +335,10 @@ fn spawn_ticker(tx: Sender<Message>, signal: Signal) {
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(POLL_INTERVAL);
-            // core が消えたら道連れで終わる（下記参照）
+            // core が消えたら道連れで終わる（下記参照）。**列を通さない**——
+            // 積んだところで、読む側を起こす相手がもう居ない
             if orphaned(born_under) {
-                let _ = tx.send(Message::Stop);
-                break;
+                end_now();
             }
             // 既に積んであるなら積まない。旗が立ったままなのは、読む側がまだ
             // 見に行っていないということなので、もう1件積んでも結果は同じ

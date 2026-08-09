@@ -457,24 +457,17 @@ reason = "取ってきたインストーラを消すだけ。残っても次に�
 
 [[entry]]
 path = "server/crates/transcript-parser/src/cli.rs"
+fn = "end_now"
+expr = '''stdout.flush()'''
+class = "by-design"
+reason = "終わる直前の最後の一押し。書けないのは core が既に居ないときで、告げる相手も居ない"
+
+[[entry]]
+path = "server/crates/transcript-parser/src/cli.rs"
 fn = "poll"
 expr = '''watcher.watch(&dir)'''
 class = "by-design"
 reason = "サブエージェントのフォルダは後から生えるので毎回登録し直す（冪等）。既に見張っていれば失敗する"
-
-[[entry]]
-path = "server/crates/transcript-parser/src/cli.rs"
-fn = "spawn_stdin_reader"
-expr = '''tx.send(Message::Stop)'''
-class = "send"
-reason = "本体が既に畳まれているだけ。停止の合図は届かなくても、そのとき既に終わっている"
-
-[[entry]]
-path = "server/crates/transcript-parser/src/cli.rs"
-fn = "spawn_ticker"
-expr = '''tx.send(Message::Stop)'''
-class = "send"
-reason = "同上。巡回の合図の送り手が、閉じた列へ最後の1件を積もうとしただけ"
 
 [[entry]]
 path = "server/crates/transcript-parser/src/cli.rs"
