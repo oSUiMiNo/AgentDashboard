@@ -37,8 +37,9 @@
 <p class="lead">
   AgentDashboard に関係して、この機械や外で<strong>起動しっぱなしになっているもの</strong>の一覧。
   「どの URL がどれを指しているか」を取り違えると原因追跡が丸ごと空振りするので、そこを中心に書いてある。
-  <br>最終更新：2026-08-09（<strong>動いているのは実機と AWS だけ</strong>。trial とセッションホスト<span class="mark">▽</span>は止まっている）
-  <br><strong>08-09 に WSL ごと落ちた。</strong> ビルドの置き場所が Windows の C: を満杯にして Docker Desktop が停止し、WSL の仮想ディスクを縮めるために <code>wsl --shutdown</code> を掛けたため、<strong>この機械で動いていたものは全部いったん死んでいる</strong>。実機は起こし直し済み。
+  <br>最終更新：2026-08-09（<strong>動いているのは実機・AWS・セッションホスト<span class="mark">▽</span>の3つ</strong>。trial だけ止まっている）
+  <br><strong>08-09 に WSL ごと落ちた。</strong> ビルドの置き場所が Windows の C: を満杯にして Docker Desktop が停止し、WSL の仮想ディスクを縮めるために <code>wsl --shutdown</code> を掛けたため、<strong>この機械で動いていたものは全部いったん死んでいる</strong>。
+  <br><strong>08-09 に <code>0.1.11</code> で3つとも起こし直した</strong>（実機・AWS・セッションホスト<span class="mark">▽</span>）。trial（8788）だけ止まったまま。
 </p>
 
 <h2>先に用語</h2>
@@ -170,7 +171,7 @@ agentdashboard-agent logs --since 24h --state-dir ~/agentdashboard-agent/state</
     <td>セッションホスト<span class="mark">▽</span></td>
     <td>— （PC 名 <code>OMEN</code>）</td>
     <td><span class="tag">止まっている</span><br><small>最後の行は 08-08 04:42。AWS の名前を引けずに繋ぎ直しを続けた末に落ちている</small></td>
-    <td><strong>AWS へ繋いでいる</strong>（<code>dash.underschaft.com</code>）。設定は <code>~/agentdashboard-agent/agent.toml</code>、ログは同じ場所の <code>run.log</code>。
+    <td><strong>AWS へ繋いでいる</strong>（<code>dash.underschaft.com</code>。この PC の名前は <code>OMEN</code>）。設定は <code>~/agentdashboard-agent/agent.toml</code>、ログは同じ場所の <code>run.log</code>。<br><strong>これが止まっていると、ブラウザに「指定された PC が繋がっていません」が出る</strong>——カードは PC に紐づくので、繋がっていないと引けない。ブラウザとサーバは繋がったままなので<strong>上の帯だけが赤くなる</strong>。
         <strong>ここを起こし直すと、抱えている claude が道連れになる。</strong>版を上げたら入れ替えないと、サーバだけ新しくなって<strong>フォルダを覗く口が「版が古い」で断られ続ける</strong>（実際に踏んだ）。<code>agent_id</code> はペアリングトークンから決まるので、<strong>起こし直しても同じ PC のまま</strong>——枠は孤児にならない。
         記録の置き場所は <code>~/agentdashboard-agent/state</code>——<strong>8787 と分けてある</strong>（既定のままだと同じ場所を取り合う）。
         <strong>自己修復は切ってある</strong>（8787 が担当。2つ動かすと本物の claude を無人で2重に起こす）</td>
