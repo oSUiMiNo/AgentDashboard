@@ -25,7 +25,7 @@ use crate::session::{self, SessionState};
 use crate::tail::DirWatcher;
 use protocol::CardId;
 use protocol::ipc::{PROTOCOL_VERSION, ParsedNode, ParserCommand, ParserEvent};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -107,6 +107,11 @@ fn pump(rx: Receiver<Message>, mut watcher: Option<DirWatcher>, signal: Signal) 
             }
             Message::Command(ParserCommand::Unwatch { card_id }) => {
                 sessions.remove(&card_id);
+                // 外したカードのぶんだけ解除してはいけない。残っているものから
+                // 集合を作り直す（設計§4）
+                if let Some(watcher) = watcher.as_mut() {
+                    watcher.retain(&dirs_in_use(&sessions));
+                }
             }
             Message::Command(ParserCommand::ReadRange {
                 req_id,
@@ -127,6 +132,16 @@ fn pump(rx: Receiver<Message>, mut watcher: Option<DirWatcher>, signal: Signal) 
             }
         }
     }
+}
+
+/// 残っているセッションが要る場所の集合。
+///
+/// **引き算にしない。** 外したカードが使っていたディレクトリをそのまま解除すると、
+/// 同じフォルダで走っている別のセッションの見張りまで外れる
+/// （`~/.claude/projects/<プロジェクト>/` は同じプロジェクトの全セッションで同じ）。
+/// 残っているものから作り直せば、共有されているかどうかを数えずに済む。
+fn dirs_in_use(sessions: &HashMap<CardId, SessionState>) -> HashSet<PathBuf> {
+    sessions.values().flat_map(SessionState::dirs).collect()
 }
 
 fn poll(sessions: &mut HashMap<CardId, SessionState>, watcher: &mut Option<DirWatcher>) {
@@ -413,6 +428,7 @@ mod tests {
 
     use super::*;
     use protocol::{Node, NodeId, TreeNode};
+    use std::path::Path;
     use std::sync::atomic::AtomicUsize;
 
     #[test]
@@ -510,6 +526,45 @@ mod tests {
     fn 親が分からない環境では見張りを止める() {
         // /proc が無い環境で「常に孤児」と判定すると、起動した瞬間に終わってしまう
         assert!(!orphaned(None));
+    }
+
+    #[test]
+    fn 同じフォルダを2本が使っていたら片方を外しても残る() {
+        // 引き算で外すと、ここで共有のフォルダまで消える。実運用では
+        // `~/.claude/projects/<プロジェクト>/` を同じプロジェクトの全セッションが
+        // 共有するので、これは例外的な状況ではなく普通の状況である
+        let mut sessions = HashMap::new();
+        let a = CardId::new();
+        let b = CardId::new();
+        let 空 = std::collections::BTreeMap::new();
+        sessions.insert(a, SessionState::new(a, PathBuf::from("/x/a.jsonl"), &空));
+        sessions.insert(b, SessionState::new(b, PathBuf::from("/x/b.jsonl"), &空));
+
+        let 全部 = dirs_in_use(&sessions);
+        assert!(
+            全部.contains(Path::new("/x")),
+            "前提：共有の親が入っていること"
+        );
+        assert!(
+            全部.contains(Path::new("/x/a")),
+            "前提：a 専用の場所も入っていること"
+        );
+
+        sessions.remove(&a);
+        let 残り = dirs_in_use(&sessions);
+
+        assert!(
+            残り.contains(Path::new("/x")),
+            "共有している親は、片方を外しても要り続けること"
+        );
+        assert!(
+            !残り.contains(Path::new("/x/a")),
+            "外したセッション専用の場所は要らなくなること"
+        );
+        assert!(
+            残り.contains(Path::new("/x/b")),
+            "残ったセッションの場所は要り続けること"
+        );
     }
 
     #[test]
