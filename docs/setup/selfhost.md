@@ -135,8 +135,10 @@ docker compose up -d
 **ログは箱を作り直しても残る**（`dashboard-state` という置き場所に入っている）。「更新したら壊れたので、更新前の様子を見たい」がいちばん需要のある場面なので、そこで消えない形にしてある。読むときは箱の中で叩く。
 
 ```
-docker compose exec dashboard agentdashboard logs --since 2h
+docker compose exec dashboard agentdashboard logs --since 2h --state-dir /var/lib/agentdashboard
 ```
+
+**`--state-dir` は省けない。** 読む口は**設定を読まない**（ログを見たいのはたいてい設定を触った直後なので、設定が壊れていても読める側に倒してある）。この構成は置き場所を既定から移しているので、省くと箱の中の既定（`/root/.local/state/agentdashboard`）を見に行って「置き場所がありません」と言う。**そのときの断り文が、渡すべき場所の調べ方まで書いてある。**
 
 なお道①にある**画面からの版の切替は、この道では出ない**。箱の中で入れ替えても次に起こし直すと消えるので、できないことをボタンにしていない。こちらでの版上げは上の3行が正となる。
 

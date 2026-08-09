@@ -71,12 +71,12 @@
 
   <rect x="30" y="62" width="200" height="72" rx="8" fill="#161a21" stroke="#2d4a22"/>
   <text x="44" y="88" fill="#9ece6a" font-size="14" font-weight="600">8787 実機</text>
-  <text x="44" y="108" fill="#e6e9ef" font-size="12">ローカルモード・版 0.1.10</text>
+  <text x="44" y="108" fill="#e6e9ef" font-size="12">ローカルモード・版 0.1.11</text>
   <text x="44" y="125" fill="#9aa4b2" font-size="11">~/AgentDashboard のソースビルド</text>
 
   <rect x="256" y="62" width="200" height="72" rx="8" fill="#161a21" stroke="#2d4a22"/>
   <text x="270" y="88" fill="#9ece6a" font-size="14" font-weight="600">8788 trial</text>
-  <text x="270" y="108" fill="#e6e9ef" font-size="12">サーバモード・版 0.1.10</text>
+  <text x="270" y="108" fill="#e6e9ef" font-size="12">サーバモード・版 0.1.11</text>
   <text x="270" y="125" fill="#9aa4b2" font-size="11">同じ実行ファイルを別設定で</text>
 
   <rect x="30" y="178" width="200" height="62" rx="8" fill="#161a21" stroke="#2a313c"/>
@@ -93,7 +93,7 @@
   <rect x="560" y="62" width="280" height="150" rx="10" fill="#221b0f" stroke="#5a4520"/>
   <text x="578" y="90" fill="#e0af68" font-size="14" font-weight="600">AWS EC2（外）</text>
   <text x="578" y="112" fill="#e6e9ef" font-size="12">i-0bf66240fec98392a / t3.small</text>
-  <text x="578" y="132" fill="#e6e9ef" font-size="12">docker compose ／ 版 0.1.10</text>
+  <text x="578" y="132" fill="#e6e9ef" font-size="12">docker compose ／ 版 0.1.11</text>
   <text x="578" y="152" fill="#9aa4b2" font-size="11">箱の中なので版の切替は出ない</text>
   <text x="578" y="172" fill="#9aa4b2" font-size="11">cloudflared は systemd で常駐</text>
   <text x="578" y="192" fill="#f7768e" font-size="11">課金が続いている</text>
@@ -115,13 +115,19 @@
 
 <div class="panel warn">
   <strong>版番号が同じでも、中身は同じとは限らない。</strong>
-  手元の2台は<strong>ソースビルド<span class="mark">▽</span></strong>なので、版を上げなくても
+  手元はソースビルド<span class="mark">▽</span>なので、版を上げなくても
   <code>git pull</code> と <code>make build</code> のたびに中身が変わる。
-  一方 AWS は<strong>配った箱</strong>なので、<strong>リリースを出すまで何も変わらない</strong>。<br>
-  版はどれも <code>0.1.10</code> だが、<strong>いま動いているのは実機と AWS の2つだけ</strong>（trial とセッションホスト<span class="mark">▽</span>は止まっている）。手元で作業を進めれば版は<strong>すぐにずれる</strong>。<br><br><strong>同じ 0.1.10 でも中身が違う。</strong> 実機は ソースビルド<span class="mark">▽</span> なので<strong>ログ整備が入っている</strong>が、AWS は配った箱なので<strong>入っていない</strong>（ログ整備はまだどのリリースにも入っていない——<code>v0.1.10</code> のタグは 08-06、ログの最初のコミットは 08-07）。実際、AWS の箱には <code>logs/</code> ディレクトリが無い。
-  画面に出る版だけを見て「同じものが動いている」と判断しないこと。<br>
-  <strong>いまがまさにその状態。</strong>手元3台はログ整備（ローカルイシュー「あらゆる経路のログを〜」の段1）が入った
-  ソースビルドで、AWS の箱には入っていない。<strong>版番号はどちらも <code>0.1.10</code>。</strong>
+  一方 AWS は<strong>配った箱</strong>なので、<strong>リリースを出すまで何も変わらない</strong>。
+  画面に出る版だけを見て「同じものが動いている」と判断しないこと。<br><br>
+
+  <strong>08-09 に <code>0.1.11</code> で揃えた。</strong>それまでは、同じ <code>0.1.10</code> でも
+  実機だけにログ整備が入っていて、AWS には入っていなかった（<code>v0.1.10</code> のタグは 08-06、
+  ログの最初のコミットは 08-07）。<strong>いまは中身も揃っている</strong>が、
+  手元で作業を進めれば<strong>また実機だけが先へ行く</strong>。<br><br>
+
+  <strong>AWS にログが残るようになったのも 0.1.11 から。</strong>それまで箱には
+  <code>logs/</code> ディレクトリすら無かった。0.1.11 で <code>dashboard-state</code> という
+  置き場所が付いたので、<strong>以後は箱を作り直しても消えない</strong>。
 </div>
 
 <div class="panel">
@@ -132,6 +138,7 @@
     <li>実機 … <code>~/.local/state/agentdashboard-run/logs/</code></li>
     <li>trial … <code>~/agentdashboard-trial/server/logs/</code></li>
     <li>セッションホスト<span class="mark">▽</span> … <code>~/agentdashboard-agent/state/logs/</code></li>
+    <li>AWS … 箱の中の <code>/var/lib/agentdashboard/logs/</code>（<code>dashboard-state</code> という置き場所。<strong>0.1.11 から</strong>）</li>
   </ul>
   <code>~/agentdashboard-run.log</code> などの <code>run.log</code> は<strong>端末のぶん</strong>で、これまでどおり残る。
   <p><strong>読むときは <code>--state-dir</code> が要る。</strong>
@@ -150,7 +157,7 @@ agentdashboard-agent logs --since 24h --state-dir ~/agentdashboard-agent/state</
   <tr>
     <td>実機</td>
     <td><code>127.0.0.1:8787</code></td>
-    <td><span class="tag t-ok">0.1.10</span><br><small>ソースビルド<span class="mark">▽</span>（08-09 に <code>c3534b1</code> で起こし直し）</small></td>
+    <td><span class="tag t-ok">0.1.11</span><br><small>ソースビルド<span class="mark">▽</span>（08-09 に <code>8887b0f</code> で起こし直し）</small></td>
     <td>ローカルモード<span class="mark">▽</span>。<code>~/AgentDashboard</code> で <code>make build</code> したものを引数なしで起動。端末の出力は <code>~/agentdashboard-run.log</code>、構造化ログは <code>~/.local/state/agentdashboard-run/logs/</code>。<br><strong>読むときは <code>--state-dir</code> が要る。</strong> 置き場所を設定で移してあるが、読む口は設定を読まない（設計§11-2 の非対称）——<code>agentdashboard logs --since 1h --state-dir ~/.local/state/agentdashboard-run</code></td>
   </tr>
   <tr>
@@ -171,8 +178,8 @@ agentdashboard-agent logs --since 24h --state-dir ~/agentdashboard-agent/state</
   <tr>
     <td>AWS EC2</td>
     <td><code>dash.underschaft.com</code></td>
-    <td><span class="tag t-ok">0.1.10</span><br><small>配った箱（GHCR）</small></td>
-    <td><strong>docker compose</strong>（道②）。<code>~/compose.yml</code> の <code>image:</code> で版を決める。外へは<strong>名前付きトンネル</strong>で出しており、<code>cloudflared</code> は <strong>systemd で常駐</strong>（<code>systemctl status cloudflared</code>）。terraform は <code>~/Dev/Test_AgentDashboard/</code>、SSH 鍵は同じ場所の <code>ssh_key.pem</code>、IP は <code>43.207.237.211</code></td>
+    <td><span class="tag t-ok">0.1.11</span><br><small>配った箱（GHCR）。08-09 に <code>0.1.10</code> から入れ替え</small></td>
+    <td><strong>docker compose</strong>（道②）。<code>~/compose.yml</code> の <code>image:</code> で版を決める。<strong>ログを読むには <code>--state-dir /var/lib/agentdashboard</code> が要る</strong>（読む口は設定を読まない）。外へは<strong>名前付きトンネル</strong>で出しており、<code>cloudflared</code> は <strong>systemd で常駐</strong>（<code>systemctl status cloudflared</code>）。terraform は <code>~/Dev/Test_AgentDashboard/</code>、SSH 鍵は同じ場所の <code>ssh_key.pem</code>、IP は <code>43.207.237.211</code></td>
   </tr>
 </table>
 </div>
