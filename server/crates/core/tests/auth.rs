@@ -443,6 +443,103 @@ async fn ブラウザのログは未ログインでも受ける() {
     );
 }
 
+/// **中身が空の要求でも、書き込みは門を通る**（レビュー指摘①）。
+///
+/// この口は鍵の外側にある（設計§12-3）ので、頻度と容量の門だけが歯止めになる。
+/// ところが門は「受け取った行数」で数えていたため、`{"entries":[],"dropped":1}` を
+/// 投げ続けると**どちらの門にも当たらないまま**1リクエストにつき1行が書けた。
+/// 掃除は起動時に1回だけ（設計§6-2）なので、動かしている間は回収されない。
+///
+/// **上限ちょうどを当てにしない。** 見るのは「投げた数より確かに少ないこと」で、
+/// 上限の値そのものは `protocol` 側の定数の話である。
+#[tokio::test]
+async fn 中身が空でも書き込みは頻度の門を通る() {
+    let server = selfhost().await;
+    let 置き場所 = server.state_dir().join("logs");
+    let 投げる数 = protocol::client_log::MAX_PER_MINUTE as usize + 20;
+
+    for _ in 0..投げる数 {
+        let (status, _) = server
+            .request(
+                "POST",
+                "/api/client-logs",
+                Some(r#"{"entries":[],"dropped":1}"#),
+            )
+            .await;
+        assert_eq!(status, 204);
+    }
+
+    // **書き出しは非ブロッキング。** 増えなくなるまで待ってから数える
+    let mut 行数 = 0;
+    for _ in 0..100 {
+        let いま = 未認証の行数(&置き場所);
+        if いま > 0 && いま == 行数 {
+            break;
+        }
+        行数 = いま;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    assert!(行数 > 0, "上限の内側のぶんは残ること");
+    assert!(
+        行数 <= protocol::client_log::MAX_PER_MINUTE as usize,
+        "上限を超えて書けている（{行数} 行／投げたのは {投げる数} 回）"
+    );
+}
+
+/// **行が門で全部断られたら、断り自体も書かない**（レビュー指摘①）。
+///
+/// 穴の本体は「空のバッチ」ではなく、**書き込みが門の外にあること**だった。
+/// 中身を持った要求でも、門が全部断れば `drops` の行だけが書けてしまう。
+#[tokio::test]
+async fn 枠を使い切ったら断りの行も書かない() {
+    let server = selfhost().await;
+    let 置き場所 = server.state_dir().join("logs");
+
+    // 枠を使い切る
+    for _ in 0..protocol::client_log::MAX_PER_MINUTE {
+        let (status, _) = server
+            .request(
+                "POST",
+                "/api/client-logs",
+                Some(r#"{"entries":[],"dropped":1}"#),
+            )
+            .await;
+        assert_eq!(status, 204);
+    }
+    let mut 使い切った時点 = 0;
+    for _ in 0..100 {
+        let いま = 未認証の行数(&置き場所);
+        if いま > 0 && いま == 使い切った時点 {
+            break;
+        }
+        使い切った時点 = いま;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(使い切った時点 > 0, "先に枠を使い切れていること");
+
+    // ここから先は、中身を持っていても1行も増えない
+    for _ in 0..10 {
+        let (status, _) = server
+            .request(
+                "POST",
+                "/api/client-logs",
+                Some(
+                    r#"{"entries":[{"ts":"2026-08-09T00:00:00.000Z","level":"ERROR","kind":"unhandled","msg":"あふれたぶん"}],"dropped":3}"#,
+                ),
+            )
+            .await;
+        assert_eq!(status, 204);
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    assert_eq!(
+        未認証の行数(&置き場所),
+        使い切った時点,
+        "枠が無いのに書けている"
+    );
+}
+
 /// セルフホストでもトグルが画面から変えられること（持ち出し設計§6）。
 ///
 /// **利用者が最初に困った現象そのもの。** ここが 403 を返すなら、保存先が
@@ -835,6 +932,24 @@ async fn 設定と持ち出しはアカウントごとに分かれる() {
 }
 
 /// 未認証ぶんのファイルへ、その行が残ったか。
+/// 未認証ぶんのファイルに溜まった行数。
+fn 未認証の行数(置き場所: &std::path::Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(置き場所) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("browser-anon-")
+        })
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .map(|text| text.lines().filter(|line| !line.trim().is_empty()).count())
+        .sum()
+}
+
 fn 残ったか(置き場所: &std::path::Path) -> bool {
     let Ok(entries) = std::fs::read_dir(置き場所) else {
         return false;

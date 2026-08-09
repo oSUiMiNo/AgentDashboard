@@ -47,6 +47,13 @@ use crate::{auth::AuthContext, registry::SessionRegistry};
 /// 頻度を数える窓の長さ。**設定キーにはしない**（設計§7-3）。
 const RATE_WINDOW: Duration = Duration::from_secs(60);
 
+/// `drops` だけの行1本を、未認証の1日の合計へ計上するときの見積り。
+///
+/// **0 で通してはいけない。** 中身が無くても行はディスクへ書かれるので、0 を計上すると
+/// 「中身の無い要求」だけが容量の門を素通りする道になる。実際の1行は 100 バイト前後
+/// （7欄＋2つの数）なので、少し多めに採って上限側へ倒してある。
+const DROPS_LINE_BYTES: u64 = 128;
+
 /// 受け取った行の書き出し先（境界）。
 ///
 /// 実体は `agentdashboard_core::client_logs::LoggingSink`。**ここに実装を置かない**のが
@@ -129,18 +136,32 @@ async fn api_client_logs(
         // 分からないものを別扱いにすると、そこだけ上限が効かない道ができる
         None => Who::Peer(peer.map_or(IpAddr::from([0, 0, 0, 0]), |addr| addr.ip())),
     };
-    let allowed = state.gate.take(who, entries.len(), Instant::now());
+    // **数えるのは「行」ではなく「書き込み」。** `drops` だけの行も1本はディスクへ
+    // 落ちるので、中身が空でも最低1枠を要求する。ここを `entries.len()` のままにすると、
+    // 空のバッチ（`{"entries":[],"dropped":1}`）が**どちらの門にも当たらないまま**
+    // 1リクエストにつき1行を書ける道になる——掃除は起動時に1回だけなので（設計§6-2）、
+    // 動かしている間は回収されない
+    let want = entries.len().max(1);
+    let allowed = state.gate.take(who, want, Instant::now());
     if allowed < entries.len() {
         drops.refused += (entries.len() - allowed) as u32;
         entries.truncate(allowed);
     }
+    // 枠が1つも取れなかったなら**何も書かない。** `entries` が全部断られた要求でも
+    // `drops` の行は書けてしまう、というのが穴の本体だった
+    let mut may_write = allowed > 0;
 
     // ③ 未認証ぶんは1日の合計にも上限を置く
-    if anon {
-        let want: u64 = entries.iter().map(|entry| entry.size_bytes() as u64).sum();
+    if anon && may_write {
+        let want: u64 = entries
+            .iter()
+            .map(|entry| entry.size_bytes() as u64)
+            .sum::<u64>()
+            .max(DROPS_LINE_BYTES);
         if !state.gate.take_anon_bytes(want) {
             drops.refused += entries.len() as u32;
             entries.clear();
+            may_write = false;
         }
     }
 
@@ -158,10 +179,11 @@ async fn api_client_logs(
             .map(|agent_id| agent_id.to_string());
     }
 
-    if let Some(sink) = &state.sink {
-        if !entries.is_empty() || !drops.is_empty() {
-            sink.write(anon, &entries, drops);
-        }
+    if let Some(sink) = &state.sink
+        && may_write
+        && (!entries.is_empty() || !drops.is_empty())
+    {
+        sink.write(anon, &entries, drops);
     }
 
     StatusCode::NO_CONTENT
