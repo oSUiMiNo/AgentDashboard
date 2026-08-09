@@ -77,13 +77,53 @@ let timer: ReturnType<typeof setTimeout> | undefined
 /** 据えた聞き耳。**外せる形で持つ**——持たないと、据え直したときに二重に発火する */
 let listeners: (() => void) | undefined
 
+const ENCODER = new TextEncoder()
+
+/**
+ * UTF-8 での長さ。**`.length` を使わない。**
+ *
+ * あちらが数えるのは UTF-16 の符号単位で、サーバ（`str::len()`）が数えるのは
+ * UTF-8 のバイトである。日本語は1文字が UTF-16 では1、UTF-8 では3になるので、
+ * **手元の検査を通った行がサーバの上限を超える**——そして断られたことは
+ * `fetch` の `ok` にしか出ないので、黙って消える形になっていた。
+ */
+function byteLen(text: string): number {
+  return ENCODER.encode(text).length
+}
+
+/**
+ * 予算に収まるところまで、**符号位置の境目で**切る。
+ *
+ * `slice` はサロゲートペアを割りうる。割れた片割れは単独では正しい文字ではなく、
+ * サーバの JSON 解釈が拒む——ここでも「断られたのに気づかない」に落ちる。
+ */
+function sliceToBytes(text: string, budget: number): string {
+  if (budget <= 0) {
+    return ''
+  }
+  if (byteLen(text) <= budget) {
+    return text
+  }
+  let used = 0
+  let out = ''
+  for (const ch of text) {
+    const size = byteLen(ch)
+    if (used + size > budget) {
+      break
+    }
+    used += size
+    out += ch
+  }
+  return out
+}
+
 function sizeOf(entry: ClientLogEntry): number {
   return (
-    entry.msg.length +
-    (entry.stack?.length ?? 0) +
-    (entry.url?.length ?? 0) +
-    (entry.card_id?.length ?? 0) +
-    entry.ts.length +
+    byteLen(entry.msg) +
+    byteLen(entry.stack ?? '') +
+    byteLen(entry.url ?? '') +
+    byteLen(entry.card_id ?? '') +
+    byteLen(entry.ts) +
     ENTRY_OVERHEAD_BYTES
   )
 }
@@ -102,7 +142,7 @@ function clamp(entry: ClientLogEntry): ClientLogEntry {
   if (withoutStack <= MAX_ENTRY_BYTES && entry.stack !== undefined) {
     return {
       ...entry,
-      stack: entry.stack.slice(0, MAX_ENTRY_BYTES - withoutStack),
+      stack: sliceToBytes(entry.stack, MAX_ENTRY_BYTES - withoutStack),
       truncated: true,
     }
   }
@@ -110,7 +150,7 @@ function clamp(entry: ClientLogEntry): ClientLogEntry {
   return {
     ...entry,
     stack: undefined,
-    msg: entry.msg.slice(0, Math.max(0, MAX_ENTRY_BYTES - withoutMsg)),
+    msg: sliceToBytes(entry.msg, MAX_ENTRY_BYTES - withoutMsg),
     truncated: true,
   }
 }
@@ -194,24 +234,42 @@ export async function flush(): Promise<void> {
   dropped = 0
   const body = JSON.stringify({ entries: batch, dropped: carried })
 
+  // **`fetch` はネットワーク障害でしか reject しない。** 413 や 400 で断られても
+  // `try` を抜けてしまうので、`ok` を見ないと「サーバが受け取らなかった」だけが
+  // 成功として通り、行も `dropped` も黙って消える
+  let accepted = false
   try {
-    await fetch(ENDPOINT, {
+    const response = await fetch(ENDPOINT, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body,
       // タブが閉じかけていても送り切る
       keepalive: true,
     })
+    accepted = response.ok
   } catch {
+    accepted = false
+  }
+  if (!accepted) {
     // **送信の失敗はログにしない**（輪ができる）。積み直して次に賭ける
-    pending = [...batch, ...pending]
-    dropped = carried
-    while (pending.length > RING) {
-      pending.shift()
-      dropped += 1
-    }
+    requeue(batch, carried)
   }
   schedule()
+}
+
+/**
+ * 送れなかったぶんを積み直す。
+ *
+ * **`dropped` は足す**（上書きしない）。待っている間に新しく捨てたぶんが
+ * 積まれていることがあり、上書きするとその数が消える。
+ */
+function requeue(batch: ClientLogEntry[], carried: number): void {
+  pending = [...batch, ...pending]
+  dropped += carried
+  while (pending.length > RING) {
+    pending.shift()
+    dropped += 1
+  }
 }
 
 /**
@@ -225,11 +283,23 @@ export function flushOnLeave(): void {
     return
   }
   const batch = takeBatch()
-  const body = JSON.stringify({ entries: batch, dropped })
-  dropped = 0
-  if (typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
+  // **持ち出せなかったぶんも、この便で数として伝える。** 次が無いので、ここで
+  // 数えなければどこにも残らない（`takeBatch` は件数と大きさで頭打ちになる）
+  const carried = dropped + pending.length
+  const body = JSON.stringify({ entries: batch, dropped: carried })
+  const sent =
+    typeof navigator !== 'undefined' &&
+    typeof navigator.sendBeacon === 'function' &&
     navigator.sendBeacon(ENDPOINT, new Blob([body], { type: 'application/json' }))
+  if (sent) {
+    pending = []
+    dropped = 0
+    return
   }
+  // **送れていないなら消費しない。** `sendBeacon` はキューが一杯・64 KiB 超で
+  // `false` を返し、そもそも実装が無い環境もある。`pagehide` は bfcache から
+  // 戻ってくることがあるので、戻れたときに次の便へ載せられる形で残す
+  pending = [...batch, ...pending]
 }
 
 /**

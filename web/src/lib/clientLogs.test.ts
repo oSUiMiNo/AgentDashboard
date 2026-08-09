@@ -15,7 +15,11 @@ interface 送った {
 
 let 送信: 送った[]
 let 失敗させる: boolean
+/** サーバが**受け取らない**（4xx/5xx）。`fetch` は reject しないので `ok` にしか出ない */
+let 断らせる: boolean
 let ビーコン: string[]
+/** `sendBeacon` の戻り値。キュー一杯・64 KiB 超・実装無しを作る */
+let ビーコンを通す: boolean
 
 function 本文(at = 0): { entries: Record<string, unknown>[]; dropped: number } {
   return JSON.parse(String(送信[at].init?.body)) as {
@@ -28,12 +32,17 @@ beforeEach(() => {
   resetClientLogs()
   送信 = []
   失敗させる = false
+  断らせる = false
   ビーコン = []
+  ビーコンを通す = true
   vi.useFakeTimers()
   vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
     送信.push({ url, init })
     if (失敗させる) {
       throw new Error('繋がりません')
+    }
+    if (断らせる) {
+      return { ok: false, status: 413 } as Response
     }
     return { ok: true, status: 204 } as Response
   })
@@ -41,7 +50,7 @@ beforeEach(() => {
     sendBeacon: (_url: string, body: Blob) => {
       // jsdom には `sendBeacon` が無いので、ここで補う
       ビーコン.push(String((body as unknown as { __text?: string }).__text ?? ''))
-      return true
+      return ビーコンを通す
     },
   })
   // `Blob.text()` は非同期なので、同期に読める印を持たせておく
@@ -102,6 +111,20 @@ describe('送れなかったとき', () => {
     expect(本文(1).entries.map((entry) => entry.msg)).toEqual(['落ちた便'])
   })
 
+  it('サーバが断ったら、成功扱いにせず積み直す', async () => {
+    // `fetch` はネットワーク障害でしか reject しない。413 や 400 は `ok` にしか
+    // 出ないので、見なければ**行も `dropped` も黙って消える**
+    断らせる = true
+    report('unhandled', 'ERROR', '断られた便')
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(送信).toHaveLength(1)
+
+    断らせる = false
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(送信).toHaveLength(2)
+    expect(本文(1).entries.map((entry) => entry.msg)).toEqual(['断られた便'])
+  })
+
   it('リングが溢れたら捨てた件数が残る', async () => {
     // 溜められるのは64件。65件目で1件こぼれる
     for (let index = 0; index < 70; index += 1) {
@@ -135,6 +158,34 @@ describe('上限', () => {
     expect(entry.truncated).toBe(true)
     expect(entry.msg).toBe('本文')
     expect(String(entry.stack).length).toBeLessThan(8 * 1024)
+  })
+})
+
+describe('測り方', () => {
+  it('サーバと同じ UTF-8 のバイトで測る', async () => {
+    // `.length` は UTF-16 の符号単位を数える。日本語は1文字が UTF-16 で1、
+    // UTF-8 で3なので、手元で通してサーバの上限を超える行ができていた
+    const 日本語 = 'あ'.repeat(4_000) // UTF-16 で 4,000 ／ UTF-8 で 12,000
+    report('unhandled', 'ERROR', 日本語)
+    await vi.advanceTimersByTimeAsync(1_000)
+
+    const entry = 本文().entries[0]
+    expect(entry.truncated).toBe(true)
+    const バイト数 = new TextEncoder().encode(String(entry.msg)).length
+    expect(バイト数).toBeLessThanOrEqual(8 * 1024)
+  })
+
+  it('サロゲートペアを割らない', async () => {
+    // 割れた片割れは単独では正しい文字ではなく、サーバの JSON 解釈が拒む
+    // **予算は奇数バイトになる**（1件の上限から、本文以外のぶんを引いた残り）。
+    // UTF-16 の単位で同じ数だけ切ると、対の途中に落ちる
+    const 絵文字 = '🐈'.repeat(8_000)
+    report('unhandled', 'ERROR', 絵文字)
+    await vi.advanceTimersByTimeAsync(1_000)
+
+    const msg = String(本文().entries[0].msg)
+    expect(msg).not.toMatch(/[\uD800-\uDFFF]/u)
+    expect([...msg].every((ch) => ch === '🐈')).toBe(true)
   })
 })
 
@@ -200,6 +251,34 @@ describe('画面を離れるとき', () => {
     expect(送信).toHaveLength(0)
     expect(ビーコン).toHaveLength(1)
     expect(JSON.parse(ビーコン[0]).entries[0].msg).toBe('離脱の検査')
+  })
+
+  it('持ち出せなかったぶんも件数として伝える', () => {
+    // 1回で持ち出せるのは32件。**次が無いので、残りをここで数えなければ
+    // どこにも残らない**
+    for (let index = 0; index < 50; index += 1) {
+      report('unhandled', 'ERROR', `件 ${index}`)
+    }
+    flushOnLeave()
+
+    const 本体 = JSON.parse(ビーコン[0]) as { entries: unknown[]; dropped: number }
+    expect(本体.entries).toHaveLength(32)
+    expect(本体.dropped).toBe(50 - 32)
+  })
+
+  it('送れていないなら消費しない', async () => {
+    // `sendBeacon` はキュー一杯・64 KiB 超で `false` を返し、そもそも実装が無い
+    // 環境もある。`pagehide` は bfcache から戻ることがあるので、戻れたときに
+    // 次の便へ載せられる形で残す
+    ビーコンを通す = false
+    report('unhandled', 'ERROR', '戻ってきたら送る')
+    flushOnLeave()
+    expect(ビーコン).toHaveLength(1)
+
+    // 戻ってきた体で、次の便を流す
+    await flush()
+    expect(送信).toHaveLength(1)
+    expect(本文().entries.map((entry) => entry.msg)).toEqual(['戻ってきたら送る'])
   })
 })
 
