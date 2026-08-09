@@ -13,10 +13,10 @@
 //! （フェーズ2の実機検証で確認済み）。JSONL は結果整合のチャネルであり、
 //! 「無い＝異常」と扱うと構造化ビューが起動直後に必ず壊れる。
 
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use notify::event::ModifyKind;
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::io::{self, Read as _, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Sender;
 
 /// 1回の読み取りで扱う上限。
 ///
@@ -171,6 +171,36 @@ fn fingerprint(bytes: &[u8]) -> u64 {
     hash
 }
 
+/// その通知が「見に行く理由」になるかを判定する。
+///
+/// # 落とすのは2種だけ
+///
+/// | 通知 | 通すか | なぜ |
+/// |---|---|---|
+/// | `need_rescan()` が立っている | **通す** | 取りこぼしたかもしれないという合図。**種別より先に見る** |
+/// | `Access(_)` | 通さない | `IN_OPEN`。**パーサ自身の読み取りで上がる**。輪の発生源 |
+/// | `Modify(Metadata(_))` | 通さない | `IN_ATTRIB`。`strictatime` の環境では読むたびに上がる |
+/// | それ以外 | 通す | 中身が増えた・現れた・消えた・名前が変わった |
+///
+/// 知らない種別（`Any` / `Other`）は**通す側へ倒す**。判断が付かないものを落とすと、
+/// 見立てが外れたときに静かに届かなくなる。
+///
+/// # これは効率の改善であって、安全性の担保ではない
+///
+/// 選別が失敗しても、合図は1枚の旗に畳まれるので嵩は増えない（`cli.rs` の `Signal`）。
+/// そして正しさを担保しているのは 500ms の巡回であって、見張りは反応を速くするためだけに
+/// 在る（初期実装§8）。したがって通知を減らしても、**遅くなることはあっても届かなくなることはない**。
+fn worth_polling(event: &notify::Event) -> bool {
+    // 取りこぼしの合図は、種別によらず通す（保険を二重に効かなくしない）
+    if event.need_rescan() {
+        return true;
+    }
+    !matches!(
+        event.kind,
+        EventKind::Access(_) | EventKind::Modify(ModifyKind::Metadata(_))
+    )
+}
+
 /// ディレクトリの変更を知らせる見張り。
 ///
 /// **ファイル単体ではなくディレクトリを見る。**監視を始める時点でファイルが存在しない
@@ -181,14 +211,22 @@ pub struct DirWatcher {
 }
 
 impl DirWatcher {
-    /// 変更があったら `notify` へ空メッセージを送る見張りを作る。
+    /// 見に行く価値のある変更があったときだけ `on_change` を呼ぶ見張りを作る。
     ///
     /// 何が変わったかは伝えない。受け手は「とにかく見に行く」だけでよく、
-    /// イベントの種別に依存しないぶん取りこぼしに強い。
-    pub fn new(notify: Sender<()>) -> notify::Result<Self> {
+    /// イベントの種別に依存しないぶん取りこぼしに強い。**種別を見るのはここまで**で、
+    /// 判断（`worth_polling`）を内側に置いてあるぶん、呼び出し側が選別を書き忘れる余地が無い。
+    ///
+    /// # 中継しない
+    ///
+    /// 以前はここから `Sender<()>` へ流し、別のスレッドが受けて合図へ載せ替えていた。
+    /// 2段になっているぶん、1件の通知が必ず1件の合図になる。クロージャを直に呼べば
+    /// **スレッドが1本、チャネルが1本消える**。呼ぶのは旗の操作と `send` だけで、
+    /// どちらも待たない操作なので notify のイベント処理を詰まらせない（設計§12-3 で実測）。
+    pub fn new(on_change: impl Fn() + Send + 'static) -> notify::Result<Self> {
         let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-            if event.is_ok() {
-                let _ = notify.send(());
+            if event.is_ok_and(|event| worth_polling(&event)) {
+                on_change();
             }
         })?;
         Ok(Self {
@@ -329,5 +367,170 @@ mod tests {
         std::fs::write(&path, "{\"a\":1}\n\n{\"b\":2}\n").unwrap();
         let mut tail = FileTail::new(&path, 0);
         assert_eq!(lines(tail.read().unwrap()), vec!["{\"a\":1}", "{\"b\":2}"]);
+    }
+
+    /// 通知の選別（設計§3）。純関数なので、実際の見張りを作らずに当てられる。
+    ///
+    /// 種別の写り方はフェーズ0 で `notify` 8.2.0 の実物のソースから採ってある（設計§12-1）。
+    mod 通知の選別 {
+        use super::*;
+        use notify::event::{
+            AccessKind, AccessMode, CreateKind, DataChange, Flag, MetadataKind, RemoveKind,
+            RenameMode,
+        };
+
+        fn 判定(kind: EventKind) -> bool {
+            worth_polling(&notify::Event::new(kind))
+        }
+
+        #[test]
+        fn 自分の読み取りで上がる開くは通さない() {
+            // ここが輪の発生源。パーサが poll で開くたびに IN_OPEN が上がり、
+            // その通知でまた poll が呼ばれていた
+            assert!(!判定(
+                EventKind::Access(AccessKind::Open(AccessMode::Any))
+            ));
+        }
+
+        #[test]
+        fn 閉じるも通さない() {
+            // IN_CLOSE_WRITE も Access へ写るので落ちる側。書き込みの合図を
+            // これに頼ってはいけない——fd を開いたままの書き手では上がらない。
+            // 実際の書き込みには必ず IN_MODIFY が伴う（設計§12-1）
+            assert!(!判定(EventKind::Access(AccessKind::Close(
+                AccessMode::Write
+            ))));
+            assert!(!判定(EventKind::Access(AccessKind::Close(
+                AccessMode::Read
+            ))));
+        }
+
+        #[test]
+        fn メタデータだけの変更は通さない() {
+            // strictatime の環境では、読むたびに IN_ATTRIB が上がる。
+            // パーサが見ているのは中身の増加だけなので、時刻や権限は関係が無い
+            assert!(!判定(EventKind::Modify(ModifyKind::Metadata(
+                MetadataKind::Any
+            ))));
+            assert!(!判定(EventKind::Modify(ModifyKind::Metadata(
+                MetadataKind::AccessTime
+            ))));
+        }
+
+        #[test]
+        fn 中身が増えたら通す() {
+            assert!(判定(EventKind::Modify(ModifyKind::Data(DataChange::Any))));
+            assert!(判定(EventKind::Modify(ModifyKind::Data(
+                DataChange::Content
+            ))));
+        }
+
+        #[test]
+        fn 作成と削除は通す() {
+            assert!(判定(EventKind::Create(CreateKind::File)));
+            assert!(判定(EventKind::Remove(RemoveKind::File)));
+            // 名前が変わるのも、見に行くべき変化
+            assert!(判定(EventKind::Modify(ModifyKind::Name(RenameMode::Any))));
+        }
+
+        #[test]
+        fn 取りこぼしの合図は種別によらず通す() {
+            // **落とす種別に付いていても通ること**を見る。ここが効かないと、
+            // 溢れて取りこぼしたことを知らせる唯一の合図を捨てることになる
+            let 溢れた = notify::Event::new(EventKind::Access(AccessKind::Open(AccessMode::Any)))
+                .set_flag(Flag::Rescan);
+            assert!(溢れた.need_rescan(), "前提：印が立っていること");
+            assert!(worth_polling(&溢れた));
+        }
+
+        #[test]
+        fn 知らない種別は通す() {
+            // 判断が付かないものは通す側へ倒す。落とすと、見立てが外れたときに
+            // 静かに届かなくなる
+            assert!(判定(EventKind::Any));
+            assert!(判定(EventKind::Other));
+            assert!(判定(EventKind::Modify(ModifyKind::Any)));
+            assert!(判定(EventKind::Modify(ModifyKind::Other)));
+        }
+    }
+
+    /// 読む行為が次の読む理由を作る輪が、閉じていること。
+    ///
+    /// この2本は**対で意味を持つ**。「合図が来ない」だけでは、輪が閉じたのか
+    /// 見張りがそもそも動いていないのかを区別できない。
+    mod 輪が閉じていること {
+        use super::*;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        /// 落ち着くまでの猶予。**判定の待ちより短くする**（短いほうで待って
+        /// 静まったものが、長いほうで蘇ることはない）。
+        const QUIET: Duration = Duration::from_millis(300);
+        /// 合図を待つ上限。
+        const WAIT: Duration = Duration::from_millis(1500);
+
+        fn watch_dir(name: &str) -> PathBuf {
+            let dir = std::env::temp_dir()
+                .join(format!("transcript-watch-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+
+        /// 監視を張った直後に来るぶんを捨て、静まるまで待つ。
+        fn 静まるまで待つ(rx: &mpsc::Receiver<()>) {
+            while rx.recv_timeout(QUIET).is_ok() {}
+        }
+
+        #[test]
+        fn 監視下のファイルを繰り返し読んでも合図は来ない() {
+            // 巡回が毎回やっていること（開いて読む）を、そのまま繰り返す。
+            // ここで合図が返ってくると、その合図でまた読むことになり輪が回る
+            let dir = watch_dir("read");
+            let path = dir.join("session.jsonl");
+            std::fs::write(&path, "{\"a\":1}\n").unwrap();
+
+            let (tx, rx) = mpsc::channel();
+            let mut watcher = DirWatcher::new(move || {
+                let _ = tx.send(());
+            })
+            .expect("見張りを作れること");
+            watcher.watch(&dir).expect("監視を張れること");
+            静まるまで待つ(&rx);
+
+            let mut tail = FileTail::new(&path, 0);
+            for _ in 0..20 {
+                tail.read().expect("読めること");
+            }
+
+            assert!(
+                rx.recv_timeout(WAIT).is_err(),
+                "読むだけでは合図が来ないこと。来るなら、その合図でまた読む輪になっている"
+            );
+        }
+
+        #[test]
+        fn 追記すれば合図が来る() {
+            // 上の否定側だけでは「見張りが動いていない」と区別が付かない。
+            // 肯定側をここで裏取りする
+            let dir = watch_dir("append");
+            let path = dir.join("session.jsonl");
+            std::fs::write(&path, "{\"a\":1}\n").unwrap();
+
+            let (tx, rx) = mpsc::channel();
+            let mut watcher = DirWatcher::new(move || {
+                let _ = tx.send(());
+            })
+            .expect("見張りを作れること");
+            watcher.watch(&dir).expect("監視を張れること");
+            静まるまで待つ(&rx);
+
+            append(&path, "{\"b\":2}\n");
+
+            assert!(
+                rx.recv_timeout(WAIT).is_ok(),
+                "中身が増えたら合図が来ること"
+            );
+        }
     }
 }

@@ -354,28 +354,29 @@ fn orphaned(born_under: Option<u32>) -> bool {
 }
 
 /// ファイル監視を立ち上げる。使えなくても致命傷にはしない（巡回だけで動く）。
+///
+/// # 中継を挟まない
+///
+/// notify のコールバックから直に旗を立てて積む。以前はチャネルと中継スレッドを1本ずつ
+/// 挟んでいたが、そこでやることは何も無かった。コールバックの中で行うのは
+/// `AtomicBool::swap` と、立っていなかったときだけの `send` で、**どちらも待たない**。
 fn spawn_watcher(tx: Sender<Message>, signal: Signal) -> anyhow::Result<Option<DirWatcher>> {
-    let (notify_tx, notify_rx) = mpsc::channel();
-    let watcher = match DirWatcher::new(notify_tx) {
-        Ok(watcher) => watcher,
+    let watcher = DirWatcher::new(move || {
+        // 既に積んであるなら積まない。旗が立ったままなのは、読む側がまだ
+        // 見に行っていないということなので、もう1件積んでも結果は同じ
+        if signal.raise() {
+            let _ = tx.send(Message::Poke);
+        }
+    });
+    match watcher {
+        Ok(watcher) => Ok(Some(watcher)),
         Err(error) => {
             note(format_args!(
                 "ファイル監視を使えないので巡回だけで動きます: {error}"
             ));
-            return Ok(None);
+            Ok(None)
         }
-    };
-    std::thread::spawn(move || {
-        while notify_rx.recv().is_ok() {
-            // 通知そのものは1件ずつ来るが、積むのは旗が降りているときだけ。
-            // 中継そのものを消すのは通知の選別を入れる段の仕事で、ここでは
-            // 経路を変えず、積む条件だけを変える
-            if signal.raise() && tx.send(Message::Poke).is_err() {
-                break;
-            }
-        }
-    });
-    Ok(Some(watcher))
+    }
 }
 
 #[cfg(test)]

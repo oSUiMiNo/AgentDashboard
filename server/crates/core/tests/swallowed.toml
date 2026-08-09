@@ -477,15 +477,15 @@ class = "send"
 reason = "同上。巡回の合図の送り手が、閉じた列へ最後の1件を積もうとしただけ"
 
 [[entry]]
+path = "server/crates/transcript-parser/src/cli.rs"
+fn = "spawn_watcher"
+expr = '''tx.send(Message::Poke)'''
+class = "send"
+reason = "見張りの合図。受け手が畳まれているだけで、読む人が居ないなら合図も要らない"
+
+[[entry]]
 path = "server/crates/transcript-parser/src/session.rs"
 fn = "catch_up"
 expr = '''self.threader.feed_record(&source, agent_id.as_deref(), &record)'''
 class = "unused-value"
 reason = "返り値のノードは使わない。索引（ツールコール・エージェント・親の解決）を進めるのがここでの目的"
-
-[[entry]]
-path = "server/crates/transcript-parser/src/tail.rs"
-fn = "new"
-expr = '''notify.send(())'''
-class = "send"
-reason = "見張りの合図。受け手が畳まれているなら、そもそも読む人が居ない"
