@@ -118,7 +118,18 @@ export default defineConfig({
     // そこで消すと**開いたままのファイルを消す**ことになり、SQLite が
     // 「attempt to write a readonly database」（DBMOVED）を返し続ける。
     // 消す側と開く側の順序は、同じコマンド行に並べて初めて保証できる。
-    command: `rm -f .e2e-state/state/dashboard.db* .e2e-state/state/offsets.json && ${serverBinary} --config e2e/config.toml`,
+    // **名指しで掃く。全消しにはしない。**
+    //
+    // `test-results` の下に居たころは Playwright が走る前に丸ごと消していたが、
+    // ログを残すためにあそこの外へ出した（ログ設計§19-8）。そのぶん**誰も消さない
+    // 置き場所**になったので、持ち越すと困るものをここに並べる。
+    //
+    // `logs/` は**残す**——「開発中に何が起きたかを翌日読む」がこのログ整備の目的で、
+    // 掃除の都合でそれを失っては本末転倒になる（同§20-5）。
+    //
+    // `claude-settings.json` も消さない。`globalSetup` が webServer より先に書くので、
+    // ここで消すと**書いたそばから消す**ことになり、モデルの検査が空振りする。
+    command: `rm -rf .e2e-state/state/dashboard.db* .e2e-state/state/offsets.json .e2e-state/state/selfheal.json .e2e-state/state/version-notice.json .e2e-state/state/model-aliases.json .e2e-state/state/version-current .e2e-state/state/versions && ${serverBinary} --config e2e/config.toml`,
     env: {
       // 本物の claude ではなく擬似 claude を起動させる
       AGENTDASHBOARD_CLAUDE_BIN: fakeClaude,
