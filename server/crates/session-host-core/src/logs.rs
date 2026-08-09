@@ -227,7 +227,12 @@ impl Query {
         if line.ts.as_str() < self.since.as_str() {
             return false;
         }
-        if level_rank(&line.level) < self.level {
+        // **読めた水位のときだけ絞り込む。** 知らない綴りを順位へ潰すと、それがどの値に
+        // なっても「捨てる／出す」のどちらかへ倒れる。倒れる先を選べない以上、
+        // **絞り込みそのものを当てない**のが「捨てるより出す」を守る唯一の形になる
+        if let Some(rank) = level_rank(&line.level)
+            && rank < self.level
+        {
             return false;
         }
         if let Some(card) = &self.card
@@ -291,9 +296,16 @@ fn parse_level(text: &str) -> anyhow::Result<usize> {
         })
 }
 
-/// 知らない水位は**いちばん詳しい扱い**にする。捨てるより出すほうが安全側。
-fn level_rank(level: &str) -> usize {
-    LEVELS.iter().position(|known| *known == level).unwrap_or(0)
+/// 水位の順位。**知らない綴りには順位を与えない。**
+///
+/// 与えると、その値が何であれ絞り込みの片側へ倒れる。以前は `unwrap_or(0)`（＝TRACE 相当）
+/// にしていたが、これは**既定の `--level info` で落ちる**という意味で、
+/// 「捨てるより出すほうが安全側」という意図の**逆**だった。`FATAL` のような、
+/// いちばん読みたい行が消える。
+///
+/// 順位を返さないことで、[`Query::keep`] は水位の絞り込みを**当てずに通す**。
+fn level_rank(level: &str) -> Option<usize> {
+    LEVELS.iter().position(|known| *known == level)
 }
 
 // ---------------------------------------------------------------------------
@@ -1269,8 +1281,24 @@ mod tests {
 
         #[test]
         fn 知らない水位の行は捨てない() {
-            // 捨てるより出すほうが安全側。読み手が気づける
-            assert_eq!(level_rank("FATAL"), 0);
+            // 捨てるより出すほうが安全側。読み手が気づける。
+            //
+            // **中の数ではなく振る舞いで固定する。** 以前はここが
+            // `assert_eq!(level_rank("FATAL"), 0)` になっており、テスト名と正反対の
+            // 「既定の `--level info` で落ちる」を固定していた
+            assert_eq!(level_rank("FATAL"), None);
+            for min in ["trace", "info", "error"] {
+                let args = LogsArgs {
+                    since: "2026-01-01T00:00:00Z".to_string(),
+                    level: min.to_string(),
+                    ..Default::default()
+                };
+                let query = Query::build(&args).expect("組めること");
+                assert!(
+                    query.keep(&line("2026-08-07T12:00:00.000Z", "FATAL", "a")),
+                    "--level {min} でも出ること"
+                );
+            }
         }
 
         #[test]
