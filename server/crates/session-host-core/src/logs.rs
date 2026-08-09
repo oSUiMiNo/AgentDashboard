@@ -461,6 +461,12 @@ impl Stats {
         if self.broken > 0 {
             eprintln!("読めない行を {} 行飛ばしました。", self.broken);
         }
+        // 引いた側で開けなかった／読めなくなったファイルがあれば、それも言う。
+        // **相手側のぶんはここへ届かない**（`LogChunk` は行数しか運ばない）ので、
+        // 出るのは手元で起きたぶんだけ
+        for note in &self.unreadable {
+            eprintln!("{note}");
+        }
         if self.leaks > 0 {
             eprintln!(
                 "警告：伏せ切れなかったものが {} 件あります。外へ貼る前に目で確かめてください。",
@@ -474,8 +480,10 @@ impl Stats {
         if self.broken > 0 {
             eprintln!("読めない行を {} 行飛ばしました。", self.broken);
         }
-        for path in &self.unreadable {
-            eprintln!("開けませんでした：{path}");
+        // **文言は積むときに決めている。** 開けなかったのか、途中で読めなくなったのかは
+        // 読む側にとって別の話なので、ここで一括りにしない
+        for note in &self.unreadable {
+            eprintln!("{note}");
         }
         if self.leaks > 0 {
             eprintln!(
@@ -550,7 +558,24 @@ impl Source {
     fn next_kept(&mut self, query: &Query, stats: &mut Stats) -> Option<Line> {
         loop {
             let mut raw = String::new();
-            let read = self.reader.read_line(&mut raw).ok()?;
+            let read = match self.reader.read_line(&mut raw) {
+                Ok(read) => read,
+                // **`.ok()?` にしてはいけない。** 終端と読み違えると、このファイルの
+                // 残りが黙って消える——不正な UTF-8 が1バイト混ざっただけで、その先の
+                // 出来事が「無かったこと」になる。`let _ =` ではないので台帳にも掛からず、
+                // このイシューが敵にしている無言の欠落そのものになっていた
+                Err(err) => {
+                    stats.unreadable.push(format!(
+                        "途中で読めなくなりました：{}（{err}）",
+                        self.path.display()
+                    ));
+                    // **引いた側へ伝える道はこれしかない。** `LogChunk` は行数しか
+                    // 運ばないので（`protocol` を触らない範囲に収める）、少なくとも
+                    // 「何か落ちた」ことは数に出す
+                    stats.broken += 1;
+                    return None;
+                }
+            };
             if read == 0 {
                 return None;
             }
@@ -590,7 +615,7 @@ fn drain(
             Ok(source) => sources.push(source),
             Err(err) => stats
                 .unreadable
-                .push(format!("{}（{err}）", path.display())),
+                .push(format!("開けませんでした：{}（{err}）", path.display())),
         }
     }
 
@@ -1542,6 +1567,60 @@ mod tests {
                 "{text}"
             );
             assert_eq!(stats.broken, 0);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        /// **読み取りに失敗したファイルは、黙って終わらない**（レビュー指摘③）。
+        ///
+        /// `read_line` の `Err` を `.ok()?` で終端へ潰していたので、不正な UTF-8 が
+        /// 1バイト混ざっただけで**そのファイルの残りが消え**、集計にも標準エラーにも
+        /// 何も出なかった。読む側には「その先の出来事が無かった」と見える。
+        #[test]
+        fn 途中で読めなくなったファイルは黙って終わらない() {
+            let dir = temp_dir("invalid-utf8");
+            // 生きている行 → 不正なバイト列 → その先の行
+            let mut 中身 = record("2026-08-07T12:00:00.000Z", "dashboard", 1, "手前").into_bytes();
+            中身.push(b'\n');
+            中身.extend_from_slice(&[0xff, 0xfe, 0xfd]);
+            中身.push(b'\n');
+            中身.extend_from_slice(
+                record("2026-08-07T12:00:02.000Z", "dashboard", 1, "奥").as_bytes(),
+            );
+            中身.push(b'\n');
+            std::fs::write(dir.join("dashboard-1.2026-08-07.jsonl"), 中身).expect("書けること");
+            // **別のファイルは最後まで出ること。** 1本の失敗が全体を巻き込まない
+            std::fs::write(
+                dir.join("session-host-2.2026-08-07.jsonl"),
+                format!(
+                    "{}\n",
+                    record("2026-08-07T12:00:03.000Z", "session-host", 2, "無事")
+                ),
+            )
+            .expect("書けること");
+
+            let mut out: Vec<u8> = Vec::new();
+            let mut stats = Stats::default();
+            drain(&dir, &query_all(), &mut out, &mut stats).expect("読めること");
+            let text = String::from_utf8(out).expect("UTF-8");
+
+            assert!(text.contains("手前"), "手前の行は出ること: {text}");
+            assert!(
+                text.contains("無事"),
+                "他のファイルは最後まで出ること: {text}"
+            );
+            assert_eq!(
+                stats.unreadable.len(),
+                1,
+                "読めなくなったことが残ること: {:?}",
+                stats.unreadable
+            );
+            assert!(
+                stats.unreadable[0].contains("途中で読めなくなりました"),
+                "開けなかったのと言い分けること: {:?}",
+                stats.unreadable
+            );
+            // 引いた側へ届く唯一の道（`LogChunk` は行数しか運ばない）
+            assert!(stats.broken > 0, "数にも出ること");
             let _ = std::fs::remove_dir_all(&dir);
         }
 
