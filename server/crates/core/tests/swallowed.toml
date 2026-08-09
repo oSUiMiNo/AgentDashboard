@@ -482,3 +482,10 @@ fn = "catch_up"
 expr = '''self.threader.feed_record(&source, agent_id.as_deref(), &record)'''
 class = "unused-value"
 reason = "返り値のノードは使わない。索引（ツールコール・エージェント・親の解決）を進めるのがここでの目的"
+
+[[entry]]
+path = "server/crates/transcript-parser/src/tail.rs"
+fn = "retain"
+expr = '''self.watcher.unwatch(&dir)'''
+class = "by-design"
+reason = "見張りの解除。既に消えたディレクトリでは失敗する。次の登録は冪等なので取りこぼしても実害が無い"

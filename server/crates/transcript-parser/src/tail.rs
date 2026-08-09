@@ -15,6 +15,7 @@
 
 use notify::event::ModifyKind;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use std::collections::HashSet;
 use std::io::{self, Read as _, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
@@ -248,6 +249,34 @@ impl DirWatcher {
         self.watching.push(dir.to_path_buf());
         Ok(())
     }
+
+    /// いま要る場所だけを見張り続ける。`keep` に無いものを解除する。
+    ///
+    /// # 引き算で外さない
+    ///
+    /// 呼び出し側は「外したカードが使っていたディレクトリ」ではなく、**残っている
+    /// セッション全部が要求する集合**を渡す。同じフォルダは複数のセッションが共有する
+    /// （`~/.claude/projects/<プロジェクト>/` は同じプロジェクトの全セッションで同じ）ので、
+    /// 引き算で外すと**別のセッションの見張りまで消える**。
+    ///
+    /// # 解除できなくても一覧からは必ず落とす
+    ///
+    /// 落とし忘れると [`watch`](Self::watch) の冪等な早期 return に引っかかり、
+    /// **同じディレクトリを二度と張り直せなくなる**。エラーも出ないので、
+    /// 「そのセッションだけ構造化ビューが更新されない」という形でしか表に出ない。
+    pub fn retain(&mut self, keep: &HashSet<PathBuf>) {
+        let mut kept = Vec::with_capacity(self.watching.len());
+        for dir in std::mem::take(&mut self.watching) {
+            if keep.contains(&dir) {
+                kept.push(dir);
+            } else {
+                // 既に消えたディレクトリなどで失敗する。次の登録は冪等なので
+                // 取りこぼしても実害が無い（設計§4）
+                let _ = self.watcher.unwatch(&dir);
+            }
+        }
+        self.watching = kept;
+    }
 }
 
 #[cfg(test)]
@@ -256,11 +285,32 @@ mod tests {
 
     use super::*;
     use std::io::Write;
+    use std::time::Duration;
+
+    /// 見張りが落ち着くまでの猶予。**判定の待ちより短くする**（短いほうで待って
+    /// 静まったものが、長いほうで蘇ることはない）。
+    const QUIET: Duration = Duration::from_millis(300);
+    /// 合図を待つ上限。
+    const WAIT: Duration = Duration::from_millis(1500);
 
     fn temp_path(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("transcript-tail-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join(name)
+    }
+
+    /// 見張りを張る使い捨てのディレクトリ。走るたびに作り直す。
+    fn watch_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("transcript-watch-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 監視を張った直後に来るぶんを捨て、静まるまで待つ。
+    fn 静まるまで待つ(rx: &std::sync::mpsc::Receiver<()>) {
+        while rx.recv_timeout(QUIET).is_ok() {}
     }
 
     fn append(path: &Path, text: &str) {
@@ -461,26 +511,6 @@ mod tests {
     mod 輪が閉じていること {
         use super::*;
         use std::sync::mpsc;
-        use std::time::Duration;
-
-        /// 落ち着くまでの猶予。**判定の待ちより短くする**（短いほうで待って
-        /// 静まったものが、長いほうで蘇ることはない）。
-        const QUIET: Duration = Duration::from_millis(300);
-        /// 合図を待つ上限。
-        const WAIT: Duration = Duration::from_millis(1500);
-
-        fn watch_dir(name: &str) -> PathBuf {
-            let dir = std::env::temp_dir()
-                .join(format!("transcript-watch-{}-{name}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            dir
-        }
-
-        /// 監視を張った直後に来るぶんを捨て、静まるまで待つ。
-        fn 静まるまで待つ(rx: &mpsc::Receiver<()>) {
-            while rx.recv_timeout(QUIET).is_ok() {}
-        }
 
         #[test]
         fn 監視下のファイルを繰り返し読んでも合図は来ない() {
@@ -530,6 +560,74 @@ mod tests {
             assert!(
                 rx.recv_timeout(WAIT).is_ok(),
                 "中身が増えたら合図が来ること"
+            );
+        }
+    }
+
+    /// 要らなくなった見張りを外せること（設計§4）。
+    ///
+    /// 待ち方の道具（`WAIT` / `静まるまで待つ`）は輪の検査と共有する。**新しい待ち方を
+    /// 作らない**——2通りあると、落ちたときにどちらの都合かを切り分けることになる。
+    mod 監視の解除 {
+        use super::*;
+        use std::sync::mpsc;
+
+        /// 2つのディレクトリを張り、合図が1本の口へ集まる見張りを作る。
+        fn 二箇所を張る(label: &str) -> (DirWatcher, mpsc::Receiver<()>, PathBuf, PathBuf) {
+            let 残す = watch_dir(&format!("{label}-keep"));
+            let 外す = watch_dir(&format!("{label}-drop"));
+            std::fs::write(残す.join("session.jsonl"), "{\"a\":1}\n").unwrap();
+            std::fs::write(外す.join("session.jsonl"), "{\"a\":1}\n").unwrap();
+
+            let (tx, rx) = mpsc::channel();
+            let mut watcher = DirWatcher::new(move || {
+                let _ = tx.send(());
+            })
+            .expect("見張りを作れること");
+            watcher.watch(&残す).expect("監視を張れること");
+            watcher.watch(&外す).expect("監視を張れること");
+            静まるまで待つ(&rx);
+            (watcher, rx, 残す, 外す)
+        }
+
+        #[test]
+        fn 集合に無いものだけが外れる() {
+            // **2つの主張を1本に入れてある。** どちらも同じ `retain` 呼び出しに
+            // ついての事実で、「外したほうが黙る」だけでは見張りごと壊れた場合と
+            // 区別が付かない。残したほうが同じ呼び出しの後に鳴って初めて、
+            // 「外したほうだけが外れた」と言える
+            let (mut watcher, rx, 残す, 外す) = 二箇所を張る("retain");
+
+            watcher.retain(&HashSet::from([残す.clone()]));
+
+            append(&外す.join("session.jsonl"), "{\"b\":2}\n");
+            assert!(
+                rx.recv_timeout(WAIT).is_err(),
+                "どのセッションも使っていないディレクトリは、追記しても合図が来ないこと"
+            );
+
+            append(&残す.join("session.jsonl"), "{\"b\":2}\n");
+            assert!(
+                rx.recv_timeout(WAIT).is_ok(),
+                "使っているディレクトリの見張りは残っていること"
+            );
+        }
+
+        #[test]
+        fn 外したディレクトリは張り直せる() {
+            // 解除したのに内部の一覧へ残していると、`watch` の冪等な早期 return に
+            // 引っかかって**二度と張り直せない**。エラーが出ないので、
+            // 「そのセッションだけ更新されない」という形でしか表に出ない
+            let (mut watcher, rx, 残す, 外す) = 二箇所を張る("rewatch");
+            watcher.retain(&HashSet::from([残す]));
+
+            watcher.watch(&外す).expect("張り直せること");
+            静まるまで待つ(&rx);
+
+            append(&外す.join("session.jsonl"), "{\"c\":3}\n");
+            assert!(
+                rx.recv_timeout(WAIT).is_ok(),
+                "一度外したディレクトリでも、張り直せば合図が来ること"
             );
         }
     }
