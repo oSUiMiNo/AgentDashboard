@@ -39,7 +39,7 @@
   「どの URL がどれを指しているか」を取り違えると原因追跡が丸ごと空振りするので、そこを中心に書いてある。
   <br>最終更新：2026-08-10（<strong>動いているのは実機・AWS・セッションホスト<span class="mark">▽</span>の3つ</strong>。trial だけ止まっている）
   <br><strong>08-10 に実機だけ <code>87ddfb9</code> で起こし直した。</strong> パーサの通知の輪を断つ修正（ローカルイシュー「ダッシュボードでセッションを動かすとWSLが落ちやすい」フェーズ1〜5）が入っている。
-  <br><strong>この修正が入っているのは実機だけ。</strong> AWS は配った箱なのでリリースを出すまで届かず、セッションホスト<span class="mark">▽</span>は<strong>生きた claude を抱えているので入れ替えていない</strong>（起こし直すと道連れになる）。実行ファイルは新しくなっているので、<strong>次に起こし直したときから効く</strong>。
+  <br><strong>この修正が入っているのは実機と、セッションホスト<span class="mark">▽</span>のパーサだけ。</strong> AWS は配った箱なのでリリースを出すまで届かない。セッションホスト<span class="mark">▽</span>の<strong>本体</strong>は生きた claude を抱えているので入れ替えておらず、<strong>次に起こし直したときから効く</strong>。<strong>ただしパーサは 08-10 16:46 に落として立て直したので、そこだけ 0.1.12 になっている</strong>（子だけなら落としても claude は道連れにならない。下の表を見る）。
   <br><strong>版番号は3つとも <code>0.1.11</code> だが、中身は違う。</strong> 実機はソースビルド<span class="mark">▽</span>なので、版を上げなくても <code>git pull</code> と <code>make build</code> のたびに中身が変わる。
 </p>
 
@@ -171,9 +171,10 @@ agentdashboard-agent logs --since 24h --state-dir ~/agentdashboard-agent/state</
   <tr>
     <td>セッションホスト<span class="mark">▽</span></td>
     <td>— （PC 名 <code>OMEN</code>）</td>
-    <td><span class="tag t-ok">0.1.11</span><br><small>ソースビルド<span class="mark">▽</span>（08-10 01:08 に起こした）。<strong>パーサの輪の修正は入っていない</strong>——実行ファイルは新しいが、走っているのは起こしたときの版</small></td>
+    <td><span class="tag t-ok">0.1.11</span><br><small>ソースビルド<span class="mark">▽</span>（08-10 01:08 に起こした）。<strong>本体は修正前の版のまま</strong>——走っているのは起こしたときの版で、起こし直すまで変わらない。<br><strong>パーサだけは 0.1.12</strong>（08-10 16:46 に落として立て直した。輪の修正が入っている）</small></td>
     <td><strong>AWS へ繋いでいる</strong>（<code>dash.underschaft.com</code>。この PC の名前は <code>OMEN</code>）。設定は <code>~/agentdashboard-agent/agent.toml</code>、ログは同じ場所の <code>run.log</code>。<br><strong>これが止まっていると、ブラウザに「指定された PC が繋がっていません」が出る</strong>——カードは PC に紐づくので、繋がっていないと引けない。ブラウザとサーバは繋がったままなので<strong>上の帯だけが赤くなる</strong>。
         <strong>ここを起こし直すと、抱えている claude が道連れになる。</strong>落とす前に <code>ps -eo pid,ppid,args --forest</code> で子を数えること——08-10 の入れ替えでは<strong>生きた claude が1本ぶら下がっていたので入れ替えを見送った</strong>。版を上げたら入れ替えないと、サーバだけ新しくなって<strong>フォルダを覗く口が「版が古い」で断られ続ける</strong>（実際に踏んだ）。<code>agent_id</code> はペアリングトークンから決まるので、<strong>起こし直しても同じ PC のまま</strong>——枠は孤児にならない。
+        <strong>パーサだけなら落としてよい。</strong>子の <code>transcript-parser</code> を PID 直指定で <code>kill</code> すると、セッションホストが立て直して監視も保存済みの位置から張り直す（<strong>claude は道連れにならない</strong>）。本体が古い版のあいだにパーサが肥大したら、これで嵩が戻るうえ<strong>ディスク上の新しいパーサに入れ替わる</strong>。
         記録の置き場所は <code>~/agentdashboard-agent/state</code>——<strong>8787 と分けてある</strong>（既定のままだと同じ場所を取り合う）。
         <strong>自己修復は切ってある</strong>（8787 が担当。2つ動かすと本物の claude を無人で2重に起こす）</td>
   </tr>
