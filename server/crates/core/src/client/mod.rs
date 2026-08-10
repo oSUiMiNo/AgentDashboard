@@ -10,7 +10,9 @@
 //! `versions_api.rs` が同じ理屈でこの crate に居る。
 
 pub mod http;
+pub mod keys;
 pub mod output;
+pub mod render;
 pub mod wait;
 pub mod ws;
 
@@ -366,7 +368,7 @@ pub async fn versions(
 // 満ちるまで観測する。REST だけで済むもの（PJT 枠・設定・版）はそのまま REST。
 // ---------------------------------------------------------------------------
 
-use protocol::ws::ClientMessage;
+use protocol::ws::{ClientMessage, ServerMessage};
 use protocol::{CardId, ModelId, PermissionMode};
 use std::collections::HashSet;
 use std::time::Duration;
@@ -584,6 +586,202 @@ fn receipt(operation: &str, card: CardId) -> Outcome {
             "confirmed": false,
         })
         .to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 端末系（CLI設計§9。フェーズ3）
+//
+// 画面を1枚受け取る・キーを1つ送る、の2つで「画面でしか到達できない操作」を無くす。
+// 対話 attach は作らない（方針で決定。1回ごとに終わる形がエージェントには扱いやすい）。
+// ---------------------------------------------------------------------------
+
+/// `session screen` の待ちの上限（CLI設計§8-2 の表）。
+pub const SCREEN_CAP: Duration = Duration::from_secs(15);
+
+/// `session screen` の持ち帰り。`payload` は届いたままのエスケープ列（`--raw` 用）。
+pub struct Screenshot {
+    pub card: CardId,
+    pub cols: u16,
+    pub rows: u16,
+    pub payload: Vec<u8>,
+}
+
+/// `session screen`（CLI設計§9-1）。いまの画面を1枚だけ受け取る。
+///
+/// **最初の `0x03`（スナップショット）が届くまで、`0x01`（増分）は読み飛ばす**（§15-3）。
+/// 購読し直しのとき、前の購読の増分が新しいスナップショットより先に届くことがある
+/// （フェーズ0 で実測）。増分は「画面をリセットしてから書け」の前提を持たないので、
+/// 先頭に混ぜると壊れた画面を描く。
+///
+/// なお `SubPty` は購読と同時に PTY をその大きさへリサイズする（§9-2）。**同じセッションを
+/// ブラウザで開いている人の表示幅も変わる**——この副作用は隠さず、`--help` にも書いてある。
+pub async fn screen(
+    target: &Target,
+    prefix: &str,
+    cols: u16,
+    rows: u16,
+) -> Result<Screenshot, ClientError> {
+    let card = resolve_card_id(target, prefix).await?;
+    let mut ws = ws::Ws::connect(target).await?;
+    ws.send(&ClientMessage::SubPty {
+        card_id: card,
+        cols,
+        rows,
+    })
+    .await?;
+    let waited = tokio::time::timeout(SCREEN_CAP, snapshot_after(&mut ws, card))
+        .await
+        .unwrap_or_else(|_| {
+            Err(ClientError::Timeout {
+                what: "画面のスナップショット".to_string(),
+                secs: SCREEN_CAP.as_secs(),
+            })
+        });
+    ws.close().await;
+    let payload = waited?;
+    Ok(Screenshot {
+        card,
+        cols,
+        rows,
+        payload,
+    })
+}
+
+/// 自カード宛ての**最初のスナップショット（`0x03`）**が届くまで待つ（CLI設計§15-3）。
+///
+/// それまでの増分（`0x01`）は読み飛ばす——購読し直しのとき、前の購読の増分が新しい
+/// スナップショットより先に届くことがある（フェーズ0 で実測）。増分は「画面をリセット
+/// してから書け」の前提を持たないので、先頭に混ぜると壊れた画面を描く。
+///
+/// `screen` の中身だが、**この順序（増分が先に届く形）は本物のサーバでは決定的に
+/// 作れない**ので、スタブを相手にするテストが直に呼べるよう口を分けてある。
+pub async fn snapshot_after(ws: &mut ws::Ws, card: CardId) -> Result<Vec<u8>, ClientError> {
+    loop {
+        match ws.next_frame().await? {
+            ws::WsEvent::Frame {
+                kind,
+                card_id,
+                payload,
+            } => {
+                if card_id == card && kind == protocol::frame::FrameKind::PtySnapshot {
+                    return Ok(payload);
+                }
+                // 自カードの 0x01（前の購読の増分）も、他カードのフレームも読み飛ばす
+            }
+            ws::WsEvent::Message(ServerMessage::Error { card_id, message })
+                if card_id.is_none() || card_id == Some(card) =>
+            {
+                // 開けないカード（リモートの生バイト経路が無い等）はサーバが理由を言う
+                return Err(ClientError::Refused {
+                    status: 400,
+                    message,
+                });
+            }
+            ws::WsEvent::Message(_) => {}
+        }
+    }
+}
+
+/// `session key`（CLI設計§9-3）。名前を並べた順に `0x02` フレームで送る。待たない（§8-2）
+/// ので、返るのは受け取り証——効いたかは `session screen` で見る。
+pub async fn send_keys(
+    target: &Target,
+    prefix: &str,
+    names: &[String],
+) -> Result<Outcome, ClientError> {
+    // 1つでも知らない名前があれば、カードの解決より前に（＝何も送らずに）断る
+    let sequence = keys::encode_all(names)?;
+    let card = resolve_card_id(target, prefix).await?;
+    let mut ws = ws::Ws::connect(target).await?;
+    for (index, bytes) in sequence.iter().enumerate() {
+        if index > 0 {
+            // 2つの書き込みが1回の読み取りにまとまると TUI の受け取り方が変わる（§9-3）
+            tokio::time::sleep(keys::KEY_GAP).await;
+        }
+        ws.send_binary(protocol::frame::encode(
+            protocol::frame::FrameKind::PtyInput,
+            card,
+            bytes,
+        ))
+        .await?;
+    }
+    ws.close().await;
+    Ok(Outcome {
+        human: format!(
+            "キーを送りました（届いたかは確かめていません）：{} → {}",
+            names.join(" "),
+            output::short_id(&card.to_string())
+        ),
+        raw: serde_json::json!({
+            "sent": "key",
+            "card_id": card.to_string(),
+            "keys": names,
+            "confirmed": false,
+        })
+        .to_string(),
+    })
+}
+
+/// `transcript --follow` の流れ（CLI設計§3-2）。`next` で追記を1つずつ受け取る。
+pub struct Follow {
+    ws: ws::Ws,
+    card: CardId,
+}
+
+/// 追いかけている間に届くもの。
+pub enum FollowEvent {
+    /// 追記。`raw` は届いた知らせそのまま（`--json` 用。CLI設計§10-2）
+    Append {
+        nodes: Vec<protocol::TreeNode>,
+        raw: String,
+    },
+    /// 履歴の作り直し。購読開始時にも先頭で1回来る（再購読の冪等化）
+    Reset,
+}
+
+/// 履歴の購読を開く。閉じるのは [`Follow::close`]（unsub を送ってから切る）。
+pub async fn follow(target: &Target, prefix: &str) -> Result<Follow, ClientError> {
+    let card = resolve_card_id(target, prefix).await?;
+    let mut ws = ws::Ws::connect(target).await?;
+    ws.send(&ClientMessage::SubTranscript { card_id: card })
+        .await?;
+    Ok(Follow { ws, card })
+}
+
+impl Follow {
+    /// 次の追記か作り直しを待つ。**上限は置かない**——開きっぱなしが仕様で、
+    /// 止めるのは利用者の Ctrl+C（cli.rs 側が受ける）。
+    pub async fn next(&mut self) -> Result<FollowEvent, ClientError> {
+        loop {
+            let message = self.ws.next_event().await?;
+            match &message {
+                ServerMessage::TranscriptAppend { card_id, nodes } if *card_id == self.card => {
+                    let raw = serde_json::to_string(&message)
+                        .expect("受け取れた知らせは必ず JSON へ戻せる");
+                    return Ok(FollowEvent::Append {
+                        nodes: nodes.clone(),
+                        raw,
+                    });
+                }
+                ServerMessage::TranscriptReset { card_id } if *card_id == self.card => {
+                    return Ok(FollowEvent::Reset);
+                }
+                ServerMessage::Error { card_id, message }
+                    if card_id.is_none() || *card_id == Some(self.card) =>
+                {
+                    return Err(ClientError::Refused {
+                        status: 400,
+                        message: message.clone(),
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    pub async fn close(self) {
+        self.ws.close().await;
     }
 }
 

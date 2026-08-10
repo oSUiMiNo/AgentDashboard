@@ -184,6 +184,9 @@ enum SessionCmd {
         /// 1回で読む最大ノード数（サーバの既定は200）
         #[arg(long, value_name = "N")]
         limit: Option<usize>,
+        /// 届く追記をそのまま流し続ける（止めるのは Ctrl+C）。--before / --limit とは併用できない
+        #[arg(long, conflicts_with_all = ["before", "limit"])]
+        follow: bool,
         #[command(flatten)]
         out: OutputArgs,
     },
@@ -256,6 +259,36 @@ enum SessionCmd {
         cols: u16,
         #[arg(long, value_name = "N")]
         rows: u16,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// いまの画面を1枚だけ受け取る（権限確認やメニューを読むためのもの）。
+    /// **--cols / --rows の指定は、同じセッションをブラウザで開いている人の表示にも効きます**
+    /// （購読がそのまま端末のリサイズになるため）
+    Screen {
+        /// カードID。先頭の数文字で足りる
+        id: String,
+        /// 画面の桁数。既定はブラウザの録画と同じ 120
+        #[arg(long, value_name = "N", default_value_t = 120)]
+        cols: u16,
+        /// 画面の行数。既定は 40
+        #[arg(long, value_name = "N", default_value_t = 40)]
+        rows: u16,
+        /// エスケープ列のまま出す（別の端末エミュレータへ流したいとき用）
+        #[arg(long)]
+        raw: bool,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// キーを送る（矢印・確定・取り消しなど。名前を並べた順に送る）。
+    /// 確定は enter（改行を入れたいときは newline）。届いたかは確かめないので、
+    /// 効いたかは `session screen` で見る
+    Key {
+        /// カードID。先頭の数文字で足りる
+        id: String,
+        /// 送るキーの名前。例：down down enter
+        #[arg(required = true, value_name = "KEY")]
+        keys: Vec<String>,
         #[command(flatten)]
         out: OutputArgs,
     },
@@ -625,11 +658,16 @@ async fn client_session(
             id,
             before,
             limit,
+            follow,
             out,
         } => {
-            let (page, raw) = client::transcript(target, &id, before.as_deref(), limit).await?;
-            let human = output::render_transcript(&page.nodes, page.has_more);
-            println!("{}", output::pick(out.json, &raw, &human));
+            if follow {
+                follow_transcript(target, &id, out.json).await?;
+            } else {
+                let (page, raw) = client::transcript(target, &id, before.as_deref(), limit).await?;
+                let human = output::render_transcript(&page.nodes, page.has_more);
+                println!("{}", output::pick(out.json, &raw, &human));
+            }
         }
         SessionCmd::Spawn {
             cwd,
@@ -675,7 +713,80 @@ async fn client_session(
             let outcome = client::resize(target, &id, cols, rows).await?;
             println!("{}", output::pick(out.json, &outcome.raw, &outcome.human));
         }
+        SessionCmd::Screen {
+            id,
+            cols,
+            rows,
+            raw,
+            out,
+        } => {
+            let shot = client::screen(target, &id, cols, rows).await?;
+            if raw {
+                // エスケープ列は UTF-8 とは限らないので、文字列を経由せずそのまま書く
+                use std::io::Write;
+                std::io::stdout()
+                    .write_all(&shot.payload)
+                    .map_err(|err| client::ClientError::Config(format!("書き出せません: {err}")))?;
+                println!();
+            } else {
+                let text = client::render::render_screen(&shot.payload, shot.rows, shot.cols);
+                if out.json {
+                    // 画面のフレームはバイナリで、サーバに JSON の応答が無い唯一の口。
+                    // ここだけ CLI が組む（「そのまま出す」約束の例外として設計§17 に記録）
+                    let value = serde_json::json!({
+                        "card_id": shot.card.to_string(),
+                        "cols": shot.cols,
+                        "rows": shot.rows,
+                        "text": text,
+                    });
+                    println!("{value}");
+                } else {
+                    println!("{text}");
+                }
+            }
+        }
+        SessionCmd::Key { id, keys, out } => {
+            let outcome = client::send_keys(target, &id, &keys).await?;
+            println!("{}", output::pick(out.json, &outcome.raw, &outcome.human));
+        }
     }
+    Ok(())
+}
+
+/// `session transcript --follow`。届く追記を流し続け、Ctrl+C で閉じる（CLI設計§3-2）。
+async fn follow_transcript(
+    target: &client::Target,
+    id: &str,
+    json: bool,
+) -> Result<(), client::ClientError> {
+    let mut stream = client::follow(target, id).await?;
+    loop {
+        // select! の中で stream を動かせない（next の借用が生きている）ので、
+        // どちらが来たかだけを持ち出して、閉じるのは外で行う
+        let event = tokio::select! {
+            event = stream.next() => Some(event),
+            _ = tokio::signal::ctrl_c() => None,
+        };
+        match event {
+            Some(event) => match event? {
+                client::FollowEvent::Append { nodes, raw } => {
+                    if json {
+                        // 1追記＝1行の JSON（届いた知らせそのまま）。読む側が行単位で追える
+                        println!("{raw}");
+                    } else {
+                        let human = output::render_transcript(&nodes, false);
+                        println!("{human}");
+                    }
+                }
+                client::FollowEvent::Reset => {
+                    // 履歴が作り直された（購読開始時にも1回来る）。結果と混ぜない（§10-4）
+                    eprintln!("（履歴が作り直されました。ここから先が新しい内容です）");
+                }
+            },
+            None => break,
+        }
+    }
+    stream.close().await;
     Ok(())
 }
 
@@ -896,5 +1007,41 @@ mod tests {
         );
         // 群そのものは生きている（比較対象。これも落ちたら試験の作りが壊れている）
         assert!(Cli::try_parse_from(["agentdashboard", "host", "dir", "local"]).is_ok());
+    }
+
+    #[test]
+    fn セッション群の口は名指しの集合で固定する() {
+        // **生バイトを直に送る口は作らない**（CLI設計§9-4）。任意のバイト列を許すと
+        // 入力の作法（初期実装§18）を迂回できてしまう。指示文は send・キーは key の
+        // 2つに絞ってあり、口を1つ足すときはこの集合を**意識して**更新することになる
+        use clap::CommandFactory as _;
+        let command = Cli::command();
+        let session = command
+            .get_subcommands()
+            .find(|sub| sub.get_name() == "session")
+            .expect("session 群があること");
+        let mut names: Vec<&str> = session
+            .get_subcommands()
+            .map(clap::Command::get_name)
+            .collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            vec![
+                "key",
+                "kill",
+                "ls",
+                "mode",
+                "model",
+                "resize",
+                "rm",
+                "screen",
+                "send",
+                "show",
+                "spawn",
+                "transcript",
+            ],
+            "session 群の口が増減している。生バイトの直送を作っていないか、台帳（フェーズ5）と照合すること"
+        );
     }
 }

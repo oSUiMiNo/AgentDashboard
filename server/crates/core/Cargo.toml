@@ -48,6 +48,10 @@ webpki-roots.workspace = true
 # `agentdashboard-agent` の嵩は動かない（動かないことは実行レポートの再計測で確かめる）
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
+# `session screen` が 0x03 のエスケープ列をテキストへ直すのに使う（CLI設計§9-1）。
+# もとはテストの**ブラウザの役**として dev 側に居たが、その役がそのまま製品になった
+# （tokio-tungstenite と同じ経緯）。feature はセッションホスト側と同じなので嵩は動かない
+vt100.workspace = true
 
 [dev-dependencies]
 testkit.workspace = true
@@ -58,7 +62,4 @@ sea-orm.workspace = true
 # 統合テストだけが直に使う。**通常の依存には入れない** — 製品コードから PTY を触るのは
 # session-host-core の仕事で、その境界は crates/core/tests/dependencies.rs が見張っている
 portable-pty.workspace = true
-# 画面配信のテストで**ブラウザ（xterm.js）の役**をさせる。届いたフレームを同じ意味論で
-# 書き戻し、画面が再現できることを機械で確かめるために使う（設計§7-3）
-vt100.workspace = true
 uuid.workspace = true

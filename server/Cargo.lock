@@ -3306,6 +3306,7 @@ version = "0.1.12"
 dependencies = [
  "anyhow",
  "axum",
+ "libc",
  "portable-pty",
  "protocol",
  "serde_json",

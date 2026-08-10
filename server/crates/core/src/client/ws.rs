@@ -12,6 +12,8 @@
 //! （CLI設計§7-2。固定スリープで立ち上がりを待つ罠と同じ形を踏まない）。
 
 use futures_util::{SinkExt, StreamExt};
+use protocol::CardId;
+use protocol::frame::FrameKind;
 use protocol::ws::{ClientMessage, ServerMessage};
 use std::time::Duration;
 use tokio_tungstenite::tungstenite;
@@ -23,6 +25,22 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// 線の上を流れてくるものの2種類（CLI設計§9-1）。
+///
+/// 操作系の待ち（[`super::wait`]）はテキストの知らせしか見ないが、`session screen` は
+/// バイナリ（PTY のフレーム）が本体になる。どちらが要るかは受け取る側の都合なので、
+/// 両方を返す口（[`Ws::next_frame`]）を分けて置く。
+pub enum WsEvent {
+    /// テキストの知らせ（`ServerMessage`）
+    Message(ServerMessage),
+    /// PTY のバイナリフレーム。`payload` はヘッダ（kind + card_id）を剥がした中身
+    Frame {
+        kind: FrameKind,
+        card_id: CardId,
+        payload: Vec<u8>,
+    },
+}
 
 /// ダッシュボードの `/ws` に座っている接続。1回の呼び出しで「繋ぐ→送る→観測する→切る」を
 /// 閉じる（CLI設計§1-2）ので、長生きさせない。
@@ -121,12 +139,35 @@ impl Ws {
     /// 同じ理由で読み飛ばす——操作系の待ちに要るのはテキストの知らせだけ。
     pub async fn next_event(&mut self) -> Result<ServerMessage, ClientError> {
         loop {
+            if let WsEvent::Message(message) = self.next_frame().await? {
+                return Ok(message);
+            }
+            // バイナリは読み飛ばす（`session screen` だけが next_frame を直に使う）
+        }
+    }
+
+    /// 次に流れてきたものを、テキスト・バイナリの区別ごと受け取る（CLI設計§9-1）。
+    ///
+    /// `session screen` は PTY のフレーム（`0x03` / `0x01`）が本体なのでこちらを使う。
+    /// 読めないバイナリ（ヘッダが壊れている・知らない種別）は、知らないテキストと
+    /// 同じ理由で黙って読み飛ばす。
+    pub async fn next_frame(&mut self) -> Result<WsEvent, ClientError> {
+        loop {
             match self.socket.next().await {
                 Some(Ok(tungstenite::Message::Text(text))) => {
                     if let Ok(message) = serde_json::from_str::<ServerMessage>(&text) {
-                        return Ok(message);
+                        return Ok(WsEvent::Message(message));
                     }
                     // パース不能＝知らない種別。捨てて次を待つ
+                }
+                Some(Ok(tungstenite::Message::Binary(bytes))) => {
+                    if let Ok(frame) = protocol::frame::decode(&bytes) {
+                        return Ok(WsEvent::Frame {
+                            kind: frame.kind,
+                            card_id: frame.card_id,
+                            payload: frame.payload.to_vec(),
+                        });
+                    }
                 }
                 Some(Ok(tungstenite::Message::Close(_))) | None => {
                     return Err(ClientError::Unreachable {
@@ -143,6 +184,17 @@ impl Ws {
                 }
             }
         }
+    }
+
+    /// バイナリフレームを1本送る（`session key` の `0x02`。CLI設計§9-3）。
+    pub async fn send_binary(&mut self, bytes: Vec<u8>) -> Result<(), ClientError> {
+        self.socket
+            .send(tungstenite::Message::Binary(bytes.into()))
+            .await
+            .map_err(|err| ClientError::Unreachable {
+                target: self.target_url.clone(),
+                detail: format!("送っている途中で切れました: {err}"),
+            })
     }
 
     /// 未解除の購読を送ってから閉じる。失敗しても黙って終わる——切断そのものが
