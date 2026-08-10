@@ -32,6 +32,12 @@ pub const HOOK_FAILED_PREFIX: &str = "[fake-claude] hook-failed: ";
 pub const JSONL_APPENDED_PREFIX: &str = "[fake-claude] jsonl-appended: ";
 /// `jsonl` に失敗したことを示す行頭。
 pub const JSONL_FAILED_PREFIX: &str = "[fake-claude] jsonl-failed: ";
+/// 画面サイズが変わった（SIGWINCH を受けた）ときのマーカー。`<cols>x<rows>` が続く。
+///
+/// 本物の claude も SIGWINCH には反応する（再描画で応える）。擬似はテストが読める形で
+/// 応える——「PTY のリサイズが子まで届いた」ことを PTY の外から観測する唯一の口になる
+/// （PTY のサイズに getter は無く、fake-claude はサイズ依存の描画もしないため）。
+pub const RESIZED_PREFIX: &str = "[fake-claude] resized: ";
 /// `crash` で自ら異常終了する直前のマーカー。
 pub const CRASH_MARKER: &str = "[fake-claude] crash";
 /// 終了時のマーカー。

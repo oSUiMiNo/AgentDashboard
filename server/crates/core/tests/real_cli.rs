@@ -31,6 +31,7 @@
 
 mod common;
 
+use agentdashboard_core::client;
 use agentdashboard_core::config::Config;
 use protocol::SessionStatus;
 use session_host_core::session::{Session, hooks_settings, lifecycle};
@@ -331,6 +332,300 @@ async fn 権限確認待ちを検知しターミナルで許可すると作業�
         .manager
         .archive(session.card_id)
         .expect("片付けられること");
+}
+
+// ---------------------------------------------------------------------------
+// 2-2. CLI の端末系（テスト計画フェーズ5。CLI設計§9）
+//
+// 擬似 claude は選択ダイアログを出さないので、**キー送出と画面読み取りが本物の TUI と
+// 噛み合うこと**はここでしか確かめられない。操作はすべて CLI のクライアント層
+// （`client::…`）を通す——コマンドの実体と同じ経路。
+// ---------------------------------------------------------------------------
+
+/// CLI の一覧（記録層）でカードが目的の形になるまで待つ。
+///
+/// 端末系のテストは**CLI から見える形**だけで判定する——セッションの実体
+/// （`session.status()`）で見ると、CLI が本当に同じものを見られるかの検証にならない。
+async fn wait_via_cli(
+    target: &client::Target,
+    card: &str,
+    what: &str,
+    matches: impl Fn(&protocol::SessionMeta) -> bool,
+) -> protocol::SessionMeta {
+    let deadline = Instant::now() + CLI_TIMEOUT;
+    loop {
+        let (list, _) = client::sessions(target).await.expect("一覧を引けること");
+        if let Some(meta) = list
+            .iter()
+            .find(|meta| meta.card_id.to_string() == card)
+            .filter(|meta| matches(meta))
+        {
+            return meta.clone();
+        }
+        if Instant::now() >= deadline {
+            // 何が映っていたかを残す——「ならなかった」だけでは、指示が届かなかったのか
+            // 答えが違ったのかを後から切り分けられない（実際に切り分けに困った）
+            let screen = cli_screen_text(target, &card[..8]).await;
+            panic!("{CLI_TIMEOUT:?} 以内に {what} になりませんでした。実際の画面:\n{screen}");
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+/// `session screen` 相当でいまの画面をテキストにする。
+async fn cli_screen_text(target: &client::Target, prefix: &str) -> String {
+    let shot = client::screen(target, prefix, 120, 40)
+        .await
+        .expect("画面を受け取れること");
+    client::render::render_screen(&shot.payload, shot.rows, shot.cols)
+}
+
+/// 指示を送る前に、**画面が落ち着く**（描き直しが止まり、入力欄が出ている）まで待つ。
+///
+/// `SessionStart` は TUI が貼り付けを受け付けられるようになる**前に**飛ぶ（初期実装§17 の
+/// 実測）。状態が入力待ちになった直後に送ると、描画中の TUI が貼り付けの合図をただの
+/// 文字として解釈し、**指示が届かないまま静かに終わる**——通しの実行で実際に踏んだ
+/// （トランスクリプトが1行も作られていなかった）。同§17 の処方（出力が増えなくなるまで
+/// 待つ）の画面版として、同じ画面が2回続くまで待つ。
+async fn wait_screen_settled(target: &client::Target, prefix: &str) -> String {
+    let deadline = Instant::now() + CLI_TIMEOUT;
+    let mut previous = String::new();
+    loop {
+        let text = cli_screen_text(target, prefix).await;
+        if !previous.is_empty() && text == previous && text.contains("❯") {
+            return text;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{CLI_TIMEOUT:?} 以内に画面が落ち着きませんでした: {text}"
+        );
+        previous = text;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "本物の claude を起動し、アカウントのクォータを消費する（make test-cli）"]
+async fn CLIの画面とキーで信頼確認に答え長い単一行がターンを終える() {
+    let dir = WorkDir::new("cli-screen-key");
+    // モデルは haiku 固定でクォータを抑える。利用者のグローバル設定は外す——
+    // フックやスキルが割り込むと、画面の判定とキーの宛先が狂う（PJTガイドライン）
+    let program = claude_wrapper(
+        &dir,
+        &["--model", "haiku", "--setting-sources", "project,local"],
+    );
+    let server = common::TestServer::start_with_program(
+        Config::default(),
+        program.to_string_lossy().into_owned(),
+    )
+    .await;
+    let target =
+        client::Target::from_url(&format!("http://{}", server.addr)).expect("接続先を読めること");
+
+    // 起こすのも CLI の経路で（フルのカードIDが返る）
+    let spawned = client::spawn(&target, &dir.as_str(), None, None)
+        .await
+        .expect("CLI から起こせること");
+    let card = spawned.human.clone();
+    let prefix = &card[..8];
+
+    // テF5-1：信頼の確認が `session screen` で読める（新しいフォルダなので出る。
+    // 既に信頼済みの環境では出ないことがあるので、その場合は先へ進む）
+    // **照合はダイアログの文言（"do you trust"）で行う。** 裸の "trust" では、起動後の
+    // welcome 画面の What's new（"added a workspace trust prompt …"）にも一致してしまい、
+    // 分岐が永久に welcome へ届かない（1回目の実行で実際に踏んだ）
+    let deadline = Instant::now() + CLI_TIMEOUT;
+    let mut trust_seen = false;
+    loop {
+        let text = cli_screen_text(&target, prefix).await.to_lowercase();
+        if text.contains("do you trust") {
+            trust_seen = true;
+            break;
+        }
+        if text.contains("welcome back") || text.contains("❯") {
+            break; // 信頼確認を出さない環境
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{CLI_TIMEOUT:?} 以内に信頼確認も起動後の画面も読めませんでした: {text}"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    if trust_seen {
+        // テF5-2：`session key` で答える。**素直な down→enter は2つ目の選択肢
+        // （No, exit）を選んで claude ごと終わる**ので、矢印を往復してから既定へ
+        // 戻して確定する——矢印が効くことと確定が効くことの両方を見る形（設計§17）
+        client::send_keys(
+            &target,
+            prefix,
+            &["down".to_string(), "up".to_string(), "enter".to_string()],
+        )
+        .await
+        .expect("キーを送れること");
+
+        // テF5-3：答えたあと画面が進む（信頼確認が消える）
+        let deadline = Instant::now() + CLI_TIMEOUT;
+        loop {
+            let text = cli_screen_text(&target, prefix).await.to_lowercase();
+            if !text.contains("do you trust") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{CLI_TIMEOUT:?} 以内に信頼確認が消えませんでした: {text}"
+            );
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    // 起動が完了して入力待ちになる（SessionStart は信頼に答えるまで飛ばない）
+    wait_via_cli(&target, &card, "入力待ち", |meta| {
+        meta.status == SessionStatus::WaitingInput
+    })
+    .await;
+    // 状態が変わった直後は TUI がまだ描いている。落ち着くまで待ってから送る（§17 の競合）
+    wait_screen_settled(&target, prefix).await;
+
+    // テF5-4・5：境目（57〜64バイト）より長い単一行（日本語20文字超）が届き、
+    // `--wait` が本物のターンの終わり（Stop フック）で返る（初期実装§18 破綻1 の回帰）
+    let instruction = "1 たす 1 の答えを数字だけで教えてください。説明は要りません。";
+    assert!(
+        instruction.len() > 64,
+        "境目より長いこと: {}",
+        instruction.len()
+    );
+    let outcome = client::send_input(&target, prefix, instruction, true, 180)
+        .await
+        .expect("ターンの終わりまで待てること");
+    assert!(
+        outcome.human.contains("入力待ち"),
+        "ターンが終わって返ること: {}",
+        outcome.human
+    );
+
+    // 片付けも CLI の経路で
+    client::kill(&target, prefix).await.expect("終了できること");
+    client::archive(&target, prefix).await.expect("外せること");
+}
+
+#[tokio::test]
+#[ignore = "本物の claude を起動し、アカウントのクォータを消費する（make test-cli）"]
+async fn CLIのキーで権限確認に答えモデル切替が一覧へ映る() {
+    let dir = WorkDir::new("cli-permission-model");
+    // 確認が必ず出るようにし、モデル切替が利用者の実物の設定へ書き戻さないよう
+    // 影のファイルを指す（モデル切替はグローバル既定の回復で settings.json を触る）
+    let shadow = dir.path().join("shadow-claude-settings.json");
+    std::fs::write(&shadow, "{}").expect("影の設定を書けること");
+    let program = claude_wrapper(
+        &dir,
+        &[
+            "--model",
+            "haiku",
+            "--permission-mode",
+            "manual",
+            "--setting-sources",
+            "project,local",
+        ],
+    );
+    let config = Config {
+        claude_settings_path: Some(shadow),
+        ..Config::default()
+    };
+    let server =
+        common::TestServer::start_with_program(config, program.to_string_lossy().into_owned())
+            .await;
+    let target =
+        client::Target::from_url(&format!("http://{}", server.addr)).expect("接続先を読めること");
+
+    let spawned = client::spawn(&target, &dir.as_str(), None, None)
+        .await
+        .expect("CLI から起こせること");
+    let card = spawned.human.clone();
+    let prefix = &card[..8];
+
+    // 信頼確認（出れば）に CLI のキーで答える。照合はダイアログの文言で行う——
+    // 裸の "trust" は welcome 画面の What's new にも一致する（テストAの注記と同じ罠）
+    let deadline = Instant::now() + CLI_TIMEOUT;
+    loop {
+        let text = cli_screen_text(&target, prefix).await.to_lowercase();
+        if text.contains("do you trust") {
+            client::send_keys(&target, prefix, &["enter".to_string()])
+                .await
+                .expect("キーを送れること");
+        } else if text.contains("welcome back") || text.contains("❯") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{CLI_TIMEOUT:?} 以内に起動の画面になりませんでした: {text}"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    wait_via_cli(&target, &card, "入力待ち", |meta| {
+        meta.status == SessionStatus::WaitingInput
+    })
+    .await;
+    // 状態が変わった直後は TUI がまだ描いている。落ち着くまで待ってから送る（§17 の競合。
+    // 通しの実行で1回、送った指示が届かないままトランスクリプトが空という形で実際に踏んだ）
+    wait_screen_settled(&target, prefix).await;
+
+    // テF5-7：ツールの実行を伴う指示 → 権限確認待ち → 画面で確認を読み、
+    // `session key` の enter で許可 → 作業中へ戻る。
+    // **副作用のある操作を頼む**（リモート版と同じ指示）——`echo` のような読み取り専用に
+    // 見えるものは、版によっては確認なしで通ってしまい、確かめたい経路を1度も踏まない
+    // （echo で実際に踏んだ。ガイドライン§22-3 と同じ罠）
+    client::send_input(
+        &target,
+        prefix,
+        "report.txt というファイルを作って、中身は ok の1行にして。",
+        false,
+        5,
+    )
+    .await
+    .expect("指示を送れること");
+    wait_via_cli(&target, &card, "権限確認待ち", |meta| {
+        meta.status == SessionStatus::WaitingPermission
+    })
+    .await;
+
+    let text = cli_screen_text(&target, prefix).await;
+    assert!(
+        text.contains("report.txt"),
+        "何を聞かれているかが画面から読めること: {text}"
+    );
+
+    client::send_keys(&target, prefix, &["enter".to_string()])
+        .await
+        .expect("許可を送れること");
+    wait_via_cli(&target, &card, "作業中", |meta| {
+        meta.status == SessionStatus::Working
+    })
+    .await;
+    // ターンの終わりまで待ってから次へ（切替の確認画面と混ざらないように）
+    wait_via_cli(&target, &card, "入力待ちへ戻る", |meta| {
+        meta.status == SessionStatus::WaitingInput
+    })
+    .await;
+    wait_screen_settled(&target, prefix).await;
+
+    // テF5-6：`session model` で切り替えたモデルが `session ls` の表示に反映される
+    client::set_model(&target, prefix, "sonnet")
+        .await
+        .expect("切り替えられること");
+    wait_via_cli(&target, &card, "モデルの表示が変わる", |meta| {
+        meta.model_label
+            .as_deref()
+            .is_some_and(|label| label.to_lowercase().contains("sonnet"))
+            || meta
+                .model
+                .as_ref()
+                .is_some_and(|model| model.to_string().contains("sonnet"))
+    })
+    .await;
+
+    client::kill(&target, prefix).await.expect("終了できること");
+    client::archive(&target, prefix).await.expect("外せること");
 }
 
 // ---------------------------------------------------------------------------

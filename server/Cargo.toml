@@ -53,6 +53,9 @@ async-trait = "0.1"
 # 動かしている本PJTではコンテナ内の絶対パスを探して失敗する（ホストには存在しない）。
 rust-embed = { version = "8", features = ["debug-embed"] }
 portable-pty = "0.9"
+# 擬似 claude（testkit）が SIGWINCH と TIOCGWINSZ を扱うためだけの低水準の口。
+# portable-pty が同じ版を既に引いているので、木に新しい crate は増えない
+libc = "0.2"
 # DB（セルフホスト化設計§3-2）。**server-core だけが持つ**——PC 側が DB を触ると、
 # 「セッションの実体は PC・記録はサーバ」という分け方が崩れる。境界は
 # crates/core/tests/dependencies.rs が機械で検査する。

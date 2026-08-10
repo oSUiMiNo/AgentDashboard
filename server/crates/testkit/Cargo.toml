@@ -16,6 +16,9 @@ path = "src/bin/fake-parser.rs"
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
+# 擬似 claude が SIGWINCH（画面サイズの変更）に反応するために使う。本物も SIGWINCH には
+# 反応する（再描画で応える）。擬似はテストが読める形＝マーカー1行で応える
+libc.workspace = true
 # 擬似パーサが本物と同じ形の Hello を返すために要る。**綴りを手で写さない**——
 # IPC の形が変わったら、通じなくなるのではなくコンパイルで止まってほしい
 protocol.workspace = true

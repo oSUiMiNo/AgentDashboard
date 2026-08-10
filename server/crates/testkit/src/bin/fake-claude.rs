@@ -43,8 +43,8 @@ use testkit::fake_claude::{
     ARGV_PREFIX, BYE_MARKER, BYPASS_ACCEPTED_MARKER, BYPASS_NOTICE, CRASH_MARKER, CYCLE_MODES,
     DUMP_END_MARKER, ENV_PREFIX, FLOOD_END_MARKER, FLOOD_PATTERN, FOOTER_PREFIX,
     HOOK_FAILED_PREFIX, HOOK_SENT_PREFIX, JSONL_APPENDED_PREFIX, JSONL_FAILED_PREFIX,
-    MODEL_SET_PREFIX, MODEL_SWITCH_NOTICE, READY_MARKER, RECEIVED_PREFIX, STATUS_LINE_SENT_PREFIX,
-    footer_for, resolve_model,
+    MODEL_SET_PREFIX, MODEL_SWITCH_NOTICE, READY_MARKER, RECEIVED_PREFIX, RESIZED_PREFIX,
+    STATUS_LINE_SENT_PREFIX, footer_for, resolve_model,
 };
 
 /// 起動時に受け取った、フック実行に必要な情報。
@@ -210,6 +210,11 @@ fn main() {
         .args(["-icanon", "min", "1", "time", "0"])
         .status();
 
+    // SIGWINCH（画面サイズの変更）に反応する。本物も反応する（再描画で応える）——
+    // 擬似はテストが読める形＝マーカー1行で応える。「リサイズが子まで届いた」ことを
+    // PTY の外から観測する唯一の口（PTY のサイズに getter は無い）
+    start_winch_reporter();
+
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
@@ -337,6 +342,58 @@ fn main() {
         conversation_started = true;
         send_status_line(&mut out, &mut injected, true);
     }
+}
+
+/// SIGWINCH を受けたら、いまの画面サイズをマーカー1行で報告する。
+///
+/// # なぜ自己パイプなのか
+///
+/// シグナルハンドラの中でできることは限られている（async-signal-safe な関数だけ）。
+/// `write(2)` はその1つなので、ハンドラは**パイプへ1バイト書くだけ**にして、
+/// サイズの取得と報告は普通のスレッドで行う。
+///
+/// # なぜ標準出力のロックを通さないのか
+///
+/// main は起動直後に `stdout.lock()` を取って持ち続けるので、別スレッドから
+/// `println!` するとロック待ちで永久に止まる。fd 1 へ直接 `write(2)` すれば、
+/// 1回の write は行単位で崩れずに出る（割り込まれるのは行と行の間だけ）。
+fn start_winch_reporter() {
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    static PIPE_WRITE: AtomicI32 = AtomicI32::new(-1);
+
+    extern "C" fn on_winch(_: libc::c_int) {
+        let fd = PIPE_WRITE.load(Ordering::Relaxed);
+        if fd >= 0 {
+            let byte = 1u8;
+            unsafe { libc::write(fd, std::ptr::from_ref(&byte).cast(), 1) };
+        }
+    }
+
+    let mut fds = [0i32; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return;
+    }
+    PIPE_WRITE.store(fds[1], Ordering::Relaxed);
+    // glibc の signal(2) は BSD 意味論（SA_RESTART）なので、main の stdin 読みは
+    // シグナルで中断されず勝手に再開される（EINTR で行読みが壊れることはない）
+    unsafe { libc::signal(libc::SIGWINCH, on_winch as *const () as usize) };
+
+    let read_fd = fds[0];
+    std::thread::spawn(move || {
+        let mut byte = [0u8; 1];
+        loop {
+            let read = unsafe { libc::read(read_fd, byte.as_mut_ptr().cast(), 1) };
+            if read <= 0 {
+                return;
+            }
+            let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+            if unsafe { libc::ioctl(0, libc::TIOCGWINSZ, &mut size) } == 0 {
+                let line = format!("{RESIZED_PREFIX}{}x{}\n", size.ws_col, size.ws_row);
+                unsafe { libc::write(1, line.as_ptr().cast(), line.len()) };
+            }
+        }
+    });
 }
 
 /// モデルを切り替えて名乗り直す。
