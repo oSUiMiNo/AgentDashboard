@@ -3,6 +3,7 @@ import path from 'node:path'
 import { expect, test } from '@playwright/test'
 import {
   killAgent,
+  runCli,
   startAgent,
   startService,
   stopService,
@@ -157,6 +158,111 @@ test('跨いだ配置でも、フォルダの一覧と中身が返る', async ({
   await expect(panel.getByRole('checkbox')).toBeChecked()
 })
 
+// ---------------------------------------------------------------------------
+// CLI の席（CLIテスト計画F4）。**破壊系（サービスを落とすテスト）より前に置く**——
+// 後ろに置くと、破壊系が環境を戻し損ねたとき（実際に DB 断のテストが postgres を
+// 止めたまま落ちた）、CLI の検証がぜんぶ巻き添えで落ちて何も言えなくなる。
+// これらは前段・DB・PC がぜんぶ健康な状態を前提にする読み書きなので、前が正しい。
+// ---------------------------------------------------------------------------
+
+test('CLI が前段越しに REST を読める（Caddy と nginx）', async ({ page }) => {
+  // CLIテスト計画F4「Caddy 越しに REST」「nginx 越しに REST」。CLI は
+  // `Accept-Encoding` を送らないので前段は応答を素通しする（CLI設計§15-1）。
+  // 札は `ADASH_TOKEN`（kind=cli）——サーバモードに CLI の札で通れることも兼ねる。
+  // ページを開くのは afterEach（archiveAll）が A のログイン済み origin を前提にするため
+  await openDashboard(page)
+  for (const front of [THROUGH_CADDY, THROUGH_NGINX]) {
+    const result = runCli(['session', 'ls', '--server', front, '--json'])
+    expect(result.status, `${front}: ${result.stderr}`).toBe(0)
+    expect(() => JSON.parse(result.stdout) as unknown).not.toThrow()
+  }
+})
+
+test('CLI が前段越しの WebSocket でセッションを起こし、指示が届く', async ({
+  page,
+}) => {
+  // WS も同じ前段を通る（CLIテスト計画F4「前段越しに WebSocket が張れること」）。
+  // compose の前段は `:80` の平文なので ws://——wss:// の TLS 終端は本番の前段
+  // （Caddy がドメインを書けば証明書ごと面倒を見る）の仕事で、経路の形は同じ。
+  //
+  // **届いたことは端末のエコーで見る（`--wait` は使わない）。** `--wait` はターンの
+  // 終わり（フック→状態遷移）で満ちる作りだが、擬似 claude はフックを
+  // 「hook 〇〇」という指示行でしか発火しない（`cli_ops.rs` がその作法で通している）。
+  // 素の本文では状態が永久に動かず、待ちが満ちない——実際に 2 分固まって踏んだ
+  await openDashboard(page)
+  const spawned = runCli([
+    'session',
+    'spawn',
+    WORK_DIR,
+    '--server',
+    THROUGH_CADDY,
+  ])
+  expect(spawned.status, spawned.stderr).toBe(0)
+  const cardId = spawned.stdout.trim()
+  expect(cardId).toMatch(/^[0-9a-f-]{36}$/)
+
+  // ブラウザで同じカードを開く（カードは共有の真実——CLI が作ったものが画面にも居る）
+  const tile = page.locator(`[data-card-id="${cardId}"]`)
+  await expect(tile).toBeVisible()
+  await openSession(page, tile)
+
+  // 指示は CLI から前段越しに、届いた証拠は端末のエコーで
+  const sent = runCli([
+    'session',
+    'send',
+    cardId,
+    '前段ごしにCLIから',
+    '--server',
+    THROUGH_CADDY,
+  ])
+  expect(sent.status, sent.stderr).toBe(0)
+  await expectTerminalToContain(page, '[fake-claude] received: 前段ごしにCLIから')
+
+  // 片付けも CLI で。kill の待ちはフックではなく**プロセス終了の観測**なので満ちる
+  const killed = runCli(['session', 'kill', cardId, '--server', THROUGH_CADDY])
+  expect(killed.status, killed.stderr).toBe(0)
+  const removed = runCli(['session', 'rm', cardId, '--server', THROUGH_CADDY])
+  expect(removed.status, removed.stderr).toBe(0)
+})
+
+test('ブラウザ側と PC 側のインスタンスが別でも、CLI から操作が届く', async ({
+  page,
+}) => {
+  // CLIテスト計画F4「跨ぎの中継に CLI が乗れること」。CLI が話すのは A（4175）で、
+  // PC が繋がっているのは B——起動も指示も A が Valkey 越しに B へ頼んで初めて成立
+  // する。ブラウザ版（このファイルの1本目）と同じ配置を、CLI の席から通す。
+  // 届いた証拠は端末のエコー（`--wait` を使わない理由は1つ上のテストと同じ）
+  await openDashboard(page)
+  const instanceA = 'http://127.0.0.1:4175'
+  const spawned = runCli(['session', 'spawn', WORK_DIR, '--server', instanceA])
+  expect(spawned.status, spawned.stderr).toBe(0)
+  const cardId = spawned.stdout.trim()
+  expect(cardId).toMatch(/^[0-9a-f-]{36}$/)
+
+  const tile = page.locator(`[data-card-id="${cardId}"]`)
+  await expect(tile).toBeVisible()
+  await openSession(page, tile)
+
+  const sent = runCli([
+    'session',
+    'send',
+    cardId,
+    'インスタンスをまたいでCLIから',
+    '--server',
+    instanceA,
+  ])
+  expect(sent.status, sent.stderr).toBe(0)
+  await expectTerminalToContain(
+    page,
+    '[fake-claude] received: インスタンスをまたいでCLIから',
+  )
+
+  const killed = runCli(['session', 'kill', cardId, '--server', instanceA])
+  expect(killed.status, killed.stderr).toBe(0)
+  const removed = runCli(['session', 'rm', cardId, '--server', instanceA])
+  expect(removed.status, removed.stderr).toBe(0)
+})
+
 test('ブラウザ側のインスタンスを落としてもセッションは無傷', async ({ page }) => {
   // 検収「片方を落としても継続」。PTY を持っているのは PC 側なので、**サーバが
   // 何台落ちてもセッションは死なない**（設計§9-6）。落ちた側が戻ったら、真実である
@@ -223,11 +329,15 @@ test('DB が落ちている間の報告は、戻ってから追いつく', async
   await openSession(page, tile)
 
   stopService('postgres')
-  // 端末は無傷（PTY は PC 側にあり、DB を1バイトも通らない）
-  await typeLine(page, 'DBが落ちている間')
-  await expectTerminalToContain(page, '[fake-claude] received: DBが落ちている間')
-
-  startService('postgres')
+  try {
+    // 端末は無傷（PTY は PC 側にあり、DB を1バイトも通らない）
+    await typeLine(page, 'DBが落ちている間')
+    await expectTerminalToContain(page, '[fake-claude] received: DBが落ちている間')
+  } finally {
+    // **失敗しても必ず戻す。** 戻し損ねると postgres が止まったまま後続の全テストが
+    // 巻き添えになる（実際に起きた——このテスト1本の赤が5本の赤に化けた）
+    startService('postgres')
+  }
   // 戻ったら記録は無事で、カードもそのまま。
   //
   // **ログインはやり直しになる。** 入館証の置き場所も DB なので、読めない間に
@@ -261,8 +371,12 @@ test('手順書の前段の設定で、2本の WebSocket がどちらも通る',
 
   // **前のテストの片付けが届くまで待つ。** 畳んだのは A で、ここで見ているのは B。
   // 待たずに数えると「1枚ある」と読んだ直後に取り消しが届き、起こした1枚と差し引きで
-  // 枚数が変わらない——「起こしたのに増えない」に見える（実際に取りこぼした）
-  await expect(page.getByTestId('session-tile')).toHaveCount(0)
+  // 枚数が変わらない——「起こしたのに増えない」に見える（実際に取りこぼした）。
+  // 上限は archiveAll と同じ 20 秒——直前が DB 断のテストなので、復帰直後の同期は
+  // 既定の5秒に収まらないことがある（実際に 6 秒台で取りこぼした）
+  await expect(page.getByTestId('session-tile')).toHaveCount(0, {
+    timeout: 20_000,
+  })
 
   // 画面が動くところまで見る。繋がっただけでは、Upgrade のあとフレームが
   // 流れ続けるかどうかが分からない

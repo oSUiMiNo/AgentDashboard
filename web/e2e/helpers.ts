@@ -348,31 +348,40 @@ export async function archiveAll(page: Page) {
  * セッションが居る枠は消せないので、**カードを片付けたあと**でなければ効かない。
  */
 async function removeAllProjects(page: Page) {
-  const ids = await page.evaluate(async () => {
-    const response = await fetch('/api/projects')
-    if (!response.ok) {
-      return [] as string[]
-    }
-    return ((await response.json()) as { id: string }[]).map((row) => row.id)
-  })
-  for (const id of ids) {
-    await page.evaluate(
-      async (target) => {
-        await fetch(`/api/projects/${target}`, { method: 'DELETE' })
-      },
-      id,
-    )
-  }
+  // **消すのも数えるのも1つのポーリングの中で行う。** 1回の DELETE ＋数えるだけの形は、
+  // 直前のカード片付けの余韻（消した直後の枠がまだ「使用中」に見える等）を1度でも
+  // 踏むと戻れない。archiveAll の待ちと同じく、通しでだけ・たまに出る取りこぼしなので
+  // 上限も同じ 20 秒へ揃える。
+  //
+  // 返りは**残った枠と断りの本文ごと** JSON にする——空でないとき、その中身が
+  // そのまま失敗メッセージに出るので、「なぜ消せないか」を落ちた場で読める
   await expect
     .poll(
-      async () =>
-        await page.evaluate(async () => {
+      async () => {
+        const outcomes = await page.evaluate(async () => {
           const response = await fetch('/api/projects')
-          return response.ok
-            ? ((await response.json()) as unknown[]).length
-            : 0
-        }),
-      { message: 'サーバ側からも枠が消えること' },
+          if (!response.ok) {
+            return [] as unknown[]
+          }
+          const ids = ((await response.json()) as { id: string }[]).map(
+            (row) => row.id,
+          )
+          const results: unknown[] = []
+          for (const id of ids) {
+            const deleted = await fetch(`/api/projects/${id}`, {
+              method: 'DELETE',
+            })
+            results.push({
+              id,
+              status: deleted.status,
+              body: await deleted.text(),
+            })
+          }
+          return results
+        })
+        return JSON.stringify(outcomes)
+      },
+      { message: 'サーバ側からも枠が消えること', timeout: 20_000 },
     )
-    .toBe(0)
+    .toBe('[]')
 }

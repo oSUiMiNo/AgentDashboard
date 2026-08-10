@@ -28,6 +28,11 @@ import { isNewer } from '@/stores/versions'
 interface TokenView {
   id: string
   label: string
+  /**
+   * 札の用途（CLI設計§5-3）。`agent`＝PC を繋ぐ・`cli`＝CLI で叩く。
+   * 見分けを出さないと、CLI の札が「繋いでこない PC」として並び続ける
+   */
+  kind: string
   created_at: number
   last_used_at: number | null
   revoked_at: number | null
@@ -197,15 +202,26 @@ export function AccountPage() {
               key={token.id}
               data-testid="token-row"
               data-revoked={token.revoked_at !== null}
+              data-kind={token.kind}
               className="flex items-center gap-2"
             >
+              <span
+                data-testid="token-kind"
+                className="border-border text-muted-foreground shrink-0 rounded border px-1"
+              >
+                {token.kind === 'cli' ? 'CLI' : 'PC'}
+              </span>
               <span className="min-w-0 flex-1 truncate">
                 {token.label || '（札なし）'}
               </span>
               <span className="text-muted-foreground shrink-0">
+                {/* CLI の札に「繋がっていません」は嘘になる（繋ぎっぱなしにしない使い方が正）。
+                    PC の札だけ、貼り忘れの可能性として言う */}
                 {token.last_used_at === null
-                  ? 'まだ繋がっていません'
-                  : `最終接続 ${formatElapsed(now - token.last_used_at)}`}
+                  ? token.kind === 'cli'
+                    ? 'まだ使われていません'
+                    : 'まだ繋がっていません'
+                  : `最終使用 ${formatElapsed(now - token.last_used_at)}`}
               </span>
               {token.revoked_at === null ? (
                 <Button

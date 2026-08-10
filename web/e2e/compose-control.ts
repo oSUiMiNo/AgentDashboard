@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from 'node:child_process'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -35,12 +35,40 @@ interface ComposeEnv {
   agentConfig: string
   agentUrl: string
   token: string
+  /** CLI 用の札（kind=cli。CLI設計§5-3——PC の札とは口が分かれている） */
+  cliToken: string
 }
 
 function env(): ComposeEnv {
   return JSON.parse(
     fs.readFileSync(path.join(STATE, 'env.json'), 'utf8'),
   ) as ComposeEnv
+}
+
+/**
+ * リリースの CLI を1回叩く（CLIテスト計画F4。前段越し・跨ぎの検証用）。
+ *
+ * 札は**環境変数（`ADASH_TOKEN`）で渡す**——`--token` の経路は統合テスト
+ * （`crates/core/tests/cli_auth.rs`）が見ているので、こちらは環境変数の経路を
+ * 実バイナリで踏む。どちらも同じ `Target` に合流する（CLI設計§5-4）。
+ */
+export function runCli(args: string[]): {
+  status: number
+  stdout: string
+  stderr: string
+} {
+  const { repoRoot, cliToken } = env()
+  const bin = path.join(repoRoot, 'server', 'target', 'release', 'agentdashboard')
+  const result = spawnSync(bin, args, {
+    encoding: 'utf8',
+    env: { ...process.env, ADASH_TOKEN: cliToken },
+    timeout: 120_000,
+  })
+  return {
+    status: result.status ?? -1,
+    stdout: result.stdout ?? '',
+    stderr: result.stderr ?? '',
+  }
 }
 
 function compose(...args: string[]): void {

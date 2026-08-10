@@ -92,6 +92,15 @@ if [[ -z "${token}" ]]; then
     exit 1
 fi
 
+# CLI 用の札も1本発行する（CLI設計§5-3。用途が分かれているので PC の札は使い回せない）。
+# テスト（compose.spec.ts）が前段越し・跨ぎの CLI 操作に使う
+cli_token="$(docker compose -p "${PROJECT}" -f "${COMPOSE_FILE}" exec -T dashboard-a \
+    agentdashboard pair-token --account "${ACCOUNT}" --label compose-cli --kind cli | tr -d '[:space:]')"
+if [[ -z "${cli_token}" ]]; then
+    echo "エラー: CLI 用のトークンを発行できませんでした。" >&2
+    exit 1
+fi
+
 # 3. エージェントは **B へ**繋ぐ。ブラウザが繋ぐ A とは別のインスタンスになる
 echo "==> エージェントを起動します（繋ぎ先は B）"
 AGENTDASHBOARD_CLAUDE_BIN="${FAKE_CLAUDE}" \
@@ -112,7 +121,8 @@ cat > "${STATE}/env.json" <<JSON
   "fakeClaude": "${FAKE_CLAUDE}",
   "agentConfig": "${AGENT_CONFIG}",
   "agentUrl": "${AGENT_URL}",
-  "token": "${token}"
+  "token": "${token}",
+  "cliToken": "${cli_token}"
 }
 JSON
 
