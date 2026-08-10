@@ -1048,3 +1048,54 @@ async fn 枠は追加した順に並ぶ() {
         backend.finish().await;
     }
 }
+
+#[tokio::test]
+async fn kindを知らない書き手の札はagentとして埋まる() {
+    // `kind` 列の migration（m20260810_000004）は DEFAULT 'agent' の1行で、
+    // **既存行の埋めを既定値が兼ねる**（ALTER TABLE ADD COLUMN は SQLite でも
+    // PostgreSQL でも既存行を既定値で埋める）。migration を段階実行する口は
+    // 公開していないので、同じ機構を「列を知らない書き手」（列を省いた INSERT）で
+    // 踏む——migration 前に書かれた行と、まだ列を知らない古い版の書き手の両方が
+    // この形になる（CLI設計§5-3・テスト計画F3「札」）
+    use sea_orm::ActiveValue::NotSet;
+    use server_core::db::pairing;
+
+    for backend in common::backends("db-token-kind").await {
+        let account_id = pairing::ensure_account(&backend.db, "むかしのひと")
+            .await
+            .expect("アカウントを用意できること");
+        let id = uuid::Uuid::new_v4();
+        entity::pairing_tokens::Entity::insert(entity::pairing_tokens::ActiveModel {
+            id: Set(id),
+            account_id: Set(account_id),
+            token_hash: Set(format!("kindを知らない書き手-{id}")),
+            label: Set("旧い札".to_string()),
+            kind: NotSet,
+            created_at: Set(1),
+            last_used_at: Set(None),
+            revoked_at: Set(None),
+        })
+        .exec(&backend.db)
+        .await
+        .expect("列を省いた INSERT が通ること（通らないなら列に既定値が無い）");
+
+        let row = entity::pairing_tokens::Entity::find_by_id(id)
+            .one(&backend.db)
+            .await
+            .expect("読めること")
+            .expect("行があること");
+        assert_eq!(
+            row.kind, "agent",
+            "[{}] 既定値が agent で埋めること（既存の札はぜんぶ PC 用）",
+            backend.name
+        );
+        assert_eq!(
+            pairing::TokenKind::parse(&row.kind),
+            Some(pairing::TokenKind::Agent),
+            "[{}] 埋まった綴りが照合側の語彙と一致すること",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}

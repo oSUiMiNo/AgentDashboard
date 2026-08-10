@@ -320,7 +320,7 @@ impl A2s {
         )
         .await
         .expect("画面の間隔を書けること");
-        let token = pairing::issue_token(&db, account_id, "テスト")
+        let token = pairing::issue_token(&db, account_id, "テスト", pairing::TokenKind::Agent)
             .await
             .expect("トークンを発行できること");
 

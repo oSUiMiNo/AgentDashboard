@@ -108,7 +108,7 @@ async fn issue(db: &DatabaseConnection, account: &str) -> (String, Uuid) {
     let account_id = pairing::ensure_account(db, account)
         .await
         .expect("アカウントを用意できること");
-    let token = pairing::issue_token(db, account_id, "テスト")
+    let token = pairing::issue_token(db, account_id, "テスト", pairing::TokenKind::Agent)
         .await
         .expect("トークンを発行できること");
     (token, account_id)
@@ -172,9 +172,10 @@ async fn トークンが無い_不正_失効なら繋げない() {
         let account_id = pairing::ensure_account(&backend.db, "失効テスト")
             .await
             .expect("アカウントを用意できること");
-        let token = pairing::issue_token(&backend.db, account_id, "捨てる")
-            .await
-            .expect("発行できること");
+        let token =
+            pairing::issue_token(&backend.db, account_id, "捨てる", pairing::TokenKind::Agent)
+                .await
+                .expect("発行できること");
         assert!(
             gateway
                 .connect(Some(&token), Some(A2S_PROTOCOL))
@@ -184,7 +185,7 @@ async fn トークンが無い_不正_失効なら繋げない() {
             backend.name
         );
 
-        let row = pairing::resolve_token(&backend.db, &token)
+        let row = pairing::resolve_token(&backend.db, &token, pairing::TokenKind::Agent)
             .await
             .expect("引けること")
             .expect("有効であること");

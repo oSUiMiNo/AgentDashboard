@@ -442,9 +442,14 @@ async fn issue(db: &sea_orm::DatabaseConnection) -> (String, uuid::Uuid) {
     let account_id = server_core::db::pairing::ensure_account(db, "テスト")
         .await
         .expect("アカウントを用意できること");
-    let token = server_core::db::pairing::issue_token(db, account_id, "テスト")
-        .await
-        .expect("トークンを発行できること");
+    let token = server_core::db::pairing::issue_token(
+        db,
+        account_id,
+        "テスト",
+        server_core::db::pairing::TokenKind::Agent,
+    )
+    .await
+    .expect("トークンを発行できること");
     (token, account_id)
 }
 

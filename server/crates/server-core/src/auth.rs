@@ -28,12 +28,12 @@
 
 use crate::{
     config::ServerConfig,
-    db::{self, entity, web_session_store::DbSessionStore},
+    db::{self, entity, pairing, web_session_store::DbSessionStore},
 };
 use axum::{
     Json, Router,
     extract::{ConnectInfo, Request, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -122,7 +122,22 @@ impl AuthContext {
     /// 素通しだが、通っていれば誰かを知る必要がある——認証済みぶんと未認証ぶんで
     /// 落とす先を分けるため（設計§12-4）。`require_identity` のように断るのではなく、
     /// 分からなければ分からないまま先へ進む。
-    pub async fn identify(&self, session: &Session, from_loopback: bool) -> Option<Identity> {
+    ///
+    /// # 札（Bearer）は Cookie より先に見る（CLI設計§5-2）
+    ///
+    /// `bearer` が来ていたら**札だけで判定して返る**。通らなかったとき Cookie へ
+    /// 落とさないのは、失効した札を持つ相手がたまたま Cookie も持っていると
+    /// 「失効させたのに通る」状態になるため。CLI は Cookie を持たず、ブラウザは
+    /// 札を持たないので、正当な相手がこの分岐で困ることは無い。
+    pub async fn identify(
+        &self,
+        session: &Session,
+        from_loopback: bool,
+        bearer: Option<&str>,
+    ) -> Option<Identity> {
+        if let Some(token) = bearer {
+            return self.identify_bearer(token, from_loopback).await;
+        }
         match self.mode {
             AuthMode::Open => Some(self.local_identity(from_loopback)),
             AuthMode::LanPassword => {
@@ -150,6 +165,28 @@ impl AuthContext {
                 })
             }
         }
+    }
+
+    /// 札で名乗った相手（CLI設計§5-2）。
+    ///
+    /// 課すのは **`cli` の札**だけ——`agent` の札は `/agent/ws` 専用で、ここは通さない
+    /// （§5-3。片方が漏れたときの被害を広げない）。`password_hash` は要求しない。
+    /// 札そのものが鍵で、`pair-token` が作るアカウントはパスワードを持たないまま
+    /// 使い始められるのが正（[`crate::gateway`] の PC の受け口と同じ扱い）。
+    async fn identify_bearer(&self, token: &str, from_loopback: bool) -> Option<Identity> {
+        let owner = pairing::resolve_token(&self.db, token, pairing::TokenKind::Cli)
+            .await
+            .ok()??;
+        let row = entity::accounts::Entity::find_by_id(owner.account_id)
+            .one(&self.db)
+            .await
+            .ok()??;
+        Some(Identity {
+            account_id: row.id,
+            name: row.name,
+            is_admin: row.is_admin,
+            from_loopback,
+        })
     }
 
     /// ローカルモードで通った相手。アカウントという単位が無いので、常に同じ1つ。
@@ -223,6 +260,19 @@ pub fn routes(auth: Arc<AuthContext>) -> Router {
         .with_state(auth)
 }
 
+/// `Authorization: Bearer` の後ろだけを取り出す（CLI設計§5-2）。
+///
+/// PC の受け口（[`crate::gateway`]）と CLI の札の両方がここを通る——取り出し方が
+/// 2つあると、片方だけ空白の扱いが違うといった形でずれる。
+pub fn bearer_token(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let token = value
+        .strip_prefix("Bearer ")
+        .or_else(|| value.strip_prefix("bearer "))?;
+    let token = token.trim();
+    (!token.is_empty()).then(|| token.to_string())
+}
+
 /// 通っていなければ 401 で断り、通っていれば [`Identity`] を持たせて先へ渡す。
 pub async fn require_identity(
     State(auth): State<Arc<AuthContext>>,
@@ -231,7 +281,11 @@ pub async fn require_identity(
     next: Next,
 ) -> Response {
     let from_loopback = peer_is_loopback(&request);
-    let Some(identity) = auth.identify(&session, from_loopback).await else {
+    let bearer = bearer_token(request.headers());
+    let Some(identity) = auth
+        .identify(&session, from_loopback, bearer.as_deref())
+        .await
+    else {
         return (StatusCode::UNAUTHORIZED, "ログインが必要です").into_response();
     };
     request.extensions_mut().insert(identity);
@@ -251,7 +305,11 @@ fn peer_is_loopback(request: &Request) -> bool {
 }
 
 /// `GET /api/me` の応答。画面はこれを見て出すものを決める。
-#[derive(Debug, Serialize)]
+///
+/// `Deserialize` は CLI のため（CLI設計§3-4・§6-3）。`account` 群はこの `mode` 欄を
+/// 内部で読んで「この構成にアカウントはありません」を言い分ける——CLI 側に写しの型を
+/// 作らず、この型を共有する。
+#[derive(Debug, Serialize, Deserialize)]
 pub struct AuthView {
     pub mode: AuthMode,
     pub authenticated: bool,
@@ -280,7 +338,10 @@ async fn api_me(
     request: Request,
 ) -> Json<AuthView> {
     let from_loopback = peer_is_loopback(&request);
-    let identity = auth.identify(&session, from_loopback).await;
+    let bearer = bearer_token(request.headers());
+    let identity = auth
+        .identify(&session, from_loopback, bearer.as_deref())
+        .await;
     Json(AuthView {
         mode: auth.mode,
         authenticated: identity.is_some(),
@@ -651,6 +712,27 @@ mod tests {
     #![allow(non_snake_case)]
 
     use super::*;
+
+    #[test]
+    fn トークンはBearerの後ろだけを取る() {
+        use axum::http::HeaderValue;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer adp_xyz"),
+        );
+        assert_eq!(bearer_token(&headers), Some("adp_xyz".to_string()));
+
+        // 種別が違うものは受け取らない（Basic 認証のヘッダを流用させない）
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Basic abc"));
+        assert_eq!(bearer_token(&headers), None);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer  "));
+        assert_eq!(bearer_token(&headers), None, "空のトークンは無いのと同じ");
+    }
 
     #[test]
     fn 短すぎるパスワードは断る() {

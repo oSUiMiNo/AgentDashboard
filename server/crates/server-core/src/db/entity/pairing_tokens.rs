@@ -17,6 +17,9 @@ pub struct Model {
     #[sea_orm(unique)]
     pub token_hash: String,
     pub label: String,
+    /// 札の用途（CLI設計§5-3）。`"agent"`（PC を繋ぐ）か `"cli"`（CLI で叩く）。
+    /// 口ごとに照合で課すので、合わない札は通らない。
+    pub kind: String,
     pub created_at: i64,
     pub last_used_at: Option<i64>,
     /// 失効した時刻。`None` なら有効。

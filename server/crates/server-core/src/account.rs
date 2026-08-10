@@ -42,19 +42,26 @@ pub fn routes(hub: Arc<SessionHostHub>) -> Router {
 }
 
 /// 発行済みトークンの1件（**平文は含まない**）。
-#[derive(Debug, Serialize)]
+///
+/// `Deserialize` は CLI のため（CLI設計§6-3）——`account tokens` が同じ型で読み戻す。
+/// CLI 側に写しの型を作らない。
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TokenView {
     pub id: Uuid,
     /// どの PC 用かを見分けるための札
     pub label: String,
+    /// 札の用途（CLI設計§5-3）。`"agent"` か `"cli"`。画面はこれで
+    /// 「これは PC ではない」を出し分ける——分けないと、CLI の札が
+    /// 「繋いでこない PC」としてアカウント画面に並び続ける
+    pub kind: String,
     pub created_at: i64,
     /// 一度でも繋がったか。**繋がっていないトークンは貼り忘れの可能性がある**
     pub last_used_at: Option<i64>,
     pub revoked_at: Option<i64>,
 }
 
-/// 登録済みの PC の1件（設計§11-1）。
-#[derive(Debug, Serialize)]
+/// 登録済みの PC の1件（設計§11-1）。`Deserialize` は CLI のため（CLI設計§6-3）。
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SessionHostView {
     pub id: Uuid,
     pub name: String,
@@ -85,6 +92,7 @@ async fn list_tokens(
             .map(|row| TokenView {
                 id: row.id,
                 label: row.label,
+                kind: row.kind,
                 created_at: row.created_at,
                 last_used_at: row.last_used_at,
                 revoked_at: row.revoked_at,
@@ -98,6 +106,9 @@ async fn list_tokens(
 #[serde(default)]
 pub struct IssueRequest {
     pub label: String,
+    /// 札の用途（CLI設計§5-5）。省略は `agent`——画面の発行ボタンは PC を繋ぐ
+    /// ためのもので、既存の動きを変えない。CLI の札は `"cli"` を明示して頼む
+    pub kind: Option<String>,
 }
 
 /// 発行の応答。**`token` がここにしか出てこない。**
@@ -115,7 +126,14 @@ async fn issue_token(
     Json(request): Json<IssueRequest>,
 ) -> Result<Json<IssuedToken>, (StatusCode, String)> {
     let label = request.label.trim();
-    let token = pairing::issue_token(hub.db(), identity.account_id, label)
+    let kind = match request.kind.as_deref() {
+        None => pairing::TokenKind::Agent,
+        Some(value) => pairing::TokenKind::parse(value).ok_or((
+            StatusCode::BAD_REQUEST,
+            "kind は agent か cli です".to_string(),
+        ))?,
+    };
+    let token = pairing::issue_token(hub.db(), identity.account_id, label, kind)
         .await
         .map_err(unavailable)?;
 
@@ -132,6 +150,7 @@ async fn issue_token(
         view: TokenView {
             id: row.id,
             label: row.label,
+            kind: row.kind,
             created_at: row.created_at,
             last_used_at: row.last_used_at,
             revoked_at: row.revoked_at,

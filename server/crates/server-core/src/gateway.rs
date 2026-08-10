@@ -1532,11 +1532,12 @@ pub async fn agent_ws_handler(
             .into_response();
     }
 
-    // 2. トークン。**理由は区別して返さない**（総当たりに手掛かりを与えない）
-    let Some(token) = bearer_token(&headers) else {
+    // 2. トークン。**理由は区別して返さない**（総当たりに手掛かりを与えない）。
+    // 課すのは `agent` の札だけ——CLI の札でこの口は開かない（CLI設計§5-3）
+    let Some(token) = crate::auth::bearer_token(&headers) else {
         return (StatusCode::UNAUTHORIZED, "ペアリングトークンが要ります").into_response();
     };
-    let owner = match pairing::resolve_token(&hub.db, &token).await {
+    let owner = match pairing::resolve_token(&hub.db, &token, pairing::TokenKind::Agent).await {
         Ok(Some(owner)) => owner,
         Ok(None) => {
             tracing::warn!("認められないペアリングトークンで接続を試みられました");
@@ -1572,15 +1573,6 @@ fn requests_protocol(headers: &HeaderMap, wanted: &str) -> bool {
         .filter_map(|value| value.to_str().ok())
         .flat_map(|value| value.split(','))
         .any(|value| value.trim() == wanted)
-}
-
-fn bearer_token(headers: &HeaderMap) -> Option<String> {
-    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
-    let token = value
-        .strip_prefix("Bearer ")
-        .or_else(|| value.strip_prefix("bearer "))?;
-    let token = token.trim();
-    (!token.is_empty()).then(|| token.to_string())
 }
 
 async fn agent_loop(
@@ -1984,25 +1976,6 @@ mod tests {
             !requests_protocol(&HeaderMap::new(), A2S_PROTOCOL),
             "名乗りが無いものも断ること"
         );
-    }
-
-    #[test]
-    fn トークンはBearerの後ろだけを取る() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::AUTHORIZATION,
-            HeaderValue::from_static("Bearer adp_xyz"),
-        );
-        assert_eq!(bearer_token(&headers), Some("adp_xyz".to_string()));
-
-        // 種別が違うものは受け取らない（Basic 認証のヘッダを流用させない）
-        let mut headers = HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Basic abc"));
-        assert_eq!(bearer_token(&headers), None);
-
-        let mut headers = HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer  "));
-        assert_eq!(bearer_token(&headers), None, "空のトークンは無いのと同じ");
     }
 }
 

@@ -14,6 +14,7 @@
 //! | A2S | 自分の接続から**他人の card_id** を報告する |
 //! | 別の PC のログを引く口 | 他人の PC を宛先に `GET /api/hosts/{id}/logs` する（ログ設計§13-1） |
 //! | ブラウザのログの受け口 | 他人の card_id を名乗って `POST /api/client-logs` する（ログ設計§12-5） |
+//! | CLI の札（CLI設計§5-2・§5-3） | `cli` の札で REST と `/ws` を通し、見えるのは自分のカードだけ／他人のカードは名指しでも知らないカードと同じ言葉／`agent` の札・失効した札・用途違いの札は通らない／**札が通らないとき Cookie へ落ちない** |
 //!
 //! Valkey の行（チャネル名の acct スコープ）はフェーズ6 側で消化する。
 //!
@@ -146,7 +147,7 @@ impl Arena {
             .expect("アカウントを用意できること");
         // 画面から入れるようにパスワードも付ける（`/setup` は1人目しか通らない）
         set_password(&self.db, account_id).await;
-        let token = pairing::issue_token(&self.db, account_id, "テスト")
+        let token = pairing::issue_token(&self.db, account_id, "テスト", pairing::TokenKind::Agent)
             .await
             .expect("トークンを発行できること");
 
@@ -697,10 +698,15 @@ async fn 失効させると繋がっている_PC_も切れる() {
         let account_id = pairing::ensure_account(&backend.db, "わたし")
             .await
             .expect("アカウントを用意できること");
-        let token = pairing::issue_token(&backend.db, account_id, "捨てる予定")
-            .await
-            .expect("発行できること");
-        let token_id = pairing::resolve_token(&backend.db, &token)
+        let token = pairing::issue_token(
+            &backend.db,
+            account_id,
+            "捨てる予定",
+            pairing::TokenKind::Agent,
+        )
+        .await
+        .expect("発行できること");
+        let token_id = pairing::resolve_token(&backend.db, &token, pairing::TokenKind::Agent)
             .await
             .expect("引けること")
             .expect("有効であること")
@@ -752,9 +758,10 @@ async fn 同じアカウントへ3台以上を同時に繋げる() {
 
         let mut sockets = Vec::new();
         for name in ["仕事用ノート", "自宅デスクトップ", "手元のミニPC"] {
-            let token = pairing::issue_token(&backend.db, account_id, name)
-                .await
-                .expect("発行できること");
+            let token =
+                pairing::issue_token(&backend.db, account_id, name, pairing::TokenKind::Agent)
+                    .await
+                    .expect("発行できること");
             let mut socket = common::connect_agent_as(arena.addr, &token, name).await;
             socket
                 .wait_for("名乗りの応答", |message| {
@@ -1074,6 +1081,304 @@ async fn 他人の_PC_のログは引けない() {
             "[{}] {}",
             backend.name,
             own.body
+        );
+
+        backend.finish().await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CLI の札（CLI設計§5。テスト計画F3「札」）
+//
+// CLI は Cookie を持たず、`Authorization: Bearer` の札だけで名乗る。判定は
+// `AuthContext::identify` の1箇所（§5-1）なので、REST と `/ws` の両方に同じ形で効く。
+// ---------------------------------------------------------------------------
+
+/// 札で REST を叩く（CLI の役）。`cookie` も渡せるのは「札が通らないとき Cookie へ
+/// 落ちない」（§5-2）を試すため——正当な CLI は Cookie を持たない。
+async fn bearer_request(
+    addr: SocketAddr,
+    method: &'static str,
+    path: String,
+    token: String,
+    cookie: Option<String>,
+) -> (u16, String) {
+    let response = tokio::task::spawn_blocking(move || {
+        let auth = format!("Bearer {token}");
+        let mut headers: Vec<(&str, &str)> = vec![("Authorization", auth.as_str())];
+        if let Some(cookie) = cookie.as_deref() {
+            headers.push(("Cookie", cookie));
+        }
+        testkit::request_with(addr, method, &path, None, &headers)
+    })
+    .await
+    .expect("HTTPスレッドが落ちないこと")
+    .expect("応答を読めること");
+    (response.status, response.body)
+}
+
+/// 札で `/ws` へ upgrade する（CLI の役。Cookie は載せない）。
+async fn cli_ws(
+    addr: SocketAddr,
+    token: &str,
+) -> Result<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    tungstenite::Error,
+> {
+    let request = tungstenite::http::Request::builder()
+        .uri(format!("ws://{addr}/ws"))
+        .header("Host", addr.to_string())
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header(
+            "Sec-WebSocket-Key",
+            tungstenite::handshake::client::generate_key(),
+        )
+        .header("Authorization", format!("Bearer {token}"))
+        .body(())
+        .expect("要求を組み立てられること");
+    tokio_tungstenite::connect_async(request)
+        .await
+        .map(|(socket, _)| socket)
+}
+
+/// upgrade の断りが 401 であることを見る。
+fn assert_ws_unauthorized(result: Result<impl Sized, tungstenite::Error>, what: &str) {
+    match result {
+        Err(tungstenite::Error::Http(response)) => {
+            assert_eq!(response.status().as_u16(), 401, "{what}");
+        }
+        Err(other) => panic!("{what}：401 ではない断られ方でした: {other:?}"),
+        Ok(_) => panic!("{what}：通ってしまいました"),
+    }
+}
+
+#[tokio::test]
+async fn cliの札でrestが通り自分のカードだけが見える() {
+    for backend in common::backends("tenancy-cli-rest").await {
+        let arena = Arena::start(backend.db.clone()).await;
+        let (mine, _mine_agent) = arena.tenant("わたし").await;
+        let (theirs, _their_agent) = arena.tenant("よそのひと").await;
+        let token =
+            pairing::issue_token(&arena.db, mine.account_id, "CLI", pairing::TokenKind::Cli)
+                .await
+                .expect("札を発行できること");
+
+        // 通る。そして絞り込み（§8-6）は Cookie の経路とまったく同じに効く
+        let (status, body) = bearer_request(
+            arena.addr,
+            "GET",
+            "/api/sessions".into(),
+            token.clone(),
+            None,
+        )
+        .await;
+        assert_eq!(status, 200, "[{}] {body}", backend.name);
+        let listed: Vec<SessionMeta> = serde_json::from_str(&body).expect("読めること");
+        assert_eq!(listed.len(), 1, "[{}] 実際: {body}", backend.name);
+        assert_eq!(listed[0].card_id, mine.card_id, "[{}]", backend.name);
+
+        // 他人のカードは名指しでも、でたらめな綴りと**同じ言葉**で断られる
+        let (their_status, their_body) = bearer_request(
+            arena.addr,
+            "GET",
+            format!("/api/sessions/{}/transcript", theirs.card_id),
+            token.clone(),
+            None,
+        )
+        .await;
+        let (unknown_status, unknown_body) = bearer_request(
+            arena.addr,
+            "GET",
+            format!("/api/sessions/{}/transcript", CardId::new()),
+            token.clone(),
+            None,
+        )
+        .await;
+        assert_eq!(their_status, 404, "[{}] {their_body}", backend.name);
+        assert_eq!(their_status, unknown_status, "[{}]", backend.name);
+        assert_eq!(
+            their_body, unknown_body,
+            "[{}] 断り方の差で実在を探れる",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn cliの札でwsも通る() {
+    for backend in common::backends("tenancy-cli-ws").await {
+        let arena = Arena::start(backend.db.clone()).await;
+        let (mine, _mine_agent) = arena.tenant("わたし").await;
+        let token =
+            pairing::issue_token(&arena.db, mine.account_id, "CLI", pairing::TokenKind::Cli)
+                .await
+                .expect("札を発行できること");
+
+        // upgrade も同じ middleware を通る（§5-1）。名乗り（Hello）まで届けば通っている
+        let mut socket = cli_ws(arena.addr, &token)
+            .await
+            .expect("札で /ws へ繋げること");
+        let deadline = tokio::time::Instant::now() + TIMEOUT;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let next = tokio::time::timeout(remaining, socket.next())
+                .await
+                .unwrap_or_else(|_| panic!("[{}] Hello が届きませんでした", backend.name));
+            match next {
+                Some(Ok(tungstenite::Message::Text(text))) => {
+                    if matches!(
+                        serde_json::from_str::<ServerMessage>(&text),
+                        Ok(ServerMessage::Hello { .. })
+                    ) {
+                        break;
+                    }
+                }
+                Some(Ok(_)) => continue,
+                other => panic!("[{}] Hello の前に切れました: {other:?}", backend.name),
+            }
+        }
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn agentの札ではブラウザ側の口を通れない() {
+    // 用途を分けた意味（§5-3）：PC の札が漏れても、鍵の内側の REST と `/ws` は開かない
+    for backend in common::backends("tenancy-agent-kind").await {
+        let arena = Arena::start(backend.db.clone()).await;
+        let (mine, _mine_agent) = arena.tenant("わたし").await;
+        let token =
+            pairing::issue_token(&arena.db, mine.account_id, "PC", pairing::TokenKind::Agent)
+                .await
+                .expect("札を発行できること");
+
+        let (status, body) = bearer_request(
+            arena.addr,
+            "GET",
+            "/api/sessions".into(),
+            token.clone(),
+            None,
+        )
+        .await;
+        assert_eq!(status, 401, "[{}] {body}", backend.name);
+        assert_ws_unauthorized(
+            cli_ws(arena.addr, &token).await,
+            &format!("[{}] agent の札で /ws", backend.name),
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn cliの札ではpcの受け口を通れない() {
+    // 逆向きも同じ（§5-3）：CLI の札が漏れても `/agent/ws` は開かない
+    for backend in common::backends("tenancy-cli-kind").await {
+        let arena = Arena::start(backend.db.clone()).await;
+        let (mine, _mine_agent) = arena.tenant("わたし").await;
+        let token =
+            pairing::issue_token(&arena.db, mine.account_id, "CLI", pairing::TokenKind::Cli)
+                .await
+                .expect("札を発行できること");
+
+        let result =
+            common::connect_agent(arena.addr, Some(&token), Some(protocol::a2s::A2S_PROTOCOL))
+                .await
+                .map(|_| ());
+        assert_ws_unauthorized(result, &format!("[{}] cli の札で /agent/ws", backend.name));
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 失効した札では通らない() {
+    for backend in common::backends("tenancy-cli-revoked").await {
+        let arena = Arena::start(backend.db.clone()).await;
+        let (mine, _mine_agent) = arena.tenant("わたし").await;
+        let token =
+            pairing::issue_token(&arena.db, mine.account_id, "CLI", pairing::TokenKind::Cli)
+                .await
+                .expect("札を発行できること");
+        let owner = pairing::resolve_token(&arena.db, &token, pairing::TokenKind::Cli)
+            .await
+            .expect("引けること")
+            .expect("有効であること");
+        pairing::revoke_token(&arena.db, owner.token_id)
+            .await
+            .expect("失効させられること");
+
+        let (status, body) = bearer_request(
+            arena.addr,
+            "GET",
+            "/api/sessions".into(),
+            token.clone(),
+            None,
+        )
+        .await;
+        assert_eq!(status, 401, "[{}] {body}", backend.name);
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 札が通らなくてもcookieへ落ちない() {
+    // §5-2 の核心。ここが破れると、失効させた札の持ち主が**たまたま持っている
+    // Cookie で通り続け**、「外した」が嘘になる
+    for backend in common::backends("tenancy-cli-fallback").await {
+        let arena = Arena::start(backend.db.clone()).await;
+        let (mine, _mine_agent) = arena.tenant("わたし").await;
+        let browser = arena.browser(&mine).await;
+
+        // 前提の裏取り：この Cookie 単体なら通る
+        let (status, _) = browser.get("/api/sessions").await;
+        assert_eq!(status, 200, "[{}] 入館証が生きていること", backend.name);
+
+        // でたらめな札＋生きた Cookie → 401（Cookie で拾い直さない）
+        let (status, body) = bearer_request(
+            arena.addr,
+            "GET",
+            "/api/sessions".into(),
+            "adp_detarame".to_string(),
+            Some(browser.cookie.clone()),
+        )
+        .await;
+        assert_eq!(
+            status, 401,
+            "[{}] 札が通らないのに Cookie で通っている: {body}",
+            backend.name
+        );
+
+        // 失効した札＋生きた Cookie も同じ
+        let token =
+            pairing::issue_token(&arena.db, mine.account_id, "CLI", pairing::TokenKind::Cli)
+                .await
+                .expect("札を発行できること");
+        let owner = pairing::resolve_token(&arena.db, &token, pairing::TokenKind::Cli)
+            .await
+            .expect("引けること")
+            .expect("有効であること");
+        pairing::revoke_token(&arena.db, owner.token_id)
+            .await
+            .expect("失効させられること");
+        let (status, body) = bearer_request(
+            arena.addr,
+            "GET",
+            "/api/sessions".into(),
+            token,
+            Some(browser.cookie.clone()),
+        )
+        .await;
+        assert_eq!(
+            status, 401,
+            "[{}] 失効した札が Cookie で生き返っている: {body}",
+            backend.name
         );
 
         backend.finish().await;

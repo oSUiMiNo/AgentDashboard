@@ -26,6 +26,36 @@ use uuid::Uuid;
 /// 発行するトークンの接頭辞。ログや設定ファイルの中で「これは鍵だ」と分かるように付ける。
 pub const TOKEN_PREFIX: &str = "adp_";
 
+/// 札の用途（CLI設計§5-3）。**口ごとに照合で課す**——`agent` の札は `/agent/ws` だけ、
+/// `cli` の札は鍵の内側の REST と `/ws` だけを通る。互いの口は通さない。
+/// 用途を分けた意味が無くなるうえ、片方が漏れたときの被害が広がるため。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenKind {
+    /// PC（セッションホスト）を繋ぐ札。
+    Agent,
+    /// CLI で叩く札。
+    Cli,
+}
+
+impl TokenKind {
+    /// DB の `kind` 列に置く綴り。**保存も照合も必ずここを通す**（`token_hash` と同じ理由）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TokenKind::Agent => "agent",
+            TokenKind::Cli => "cli",
+        }
+    }
+
+    /// 綴りから戻す。知らない綴りは `None`（呼び出し側が言葉を添えて断る）。
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "agent" => Some(TokenKind::Agent),
+            "cli" => Some(TokenKind::Cli),
+            _ => None,
+        }
+    }
+}
+
 /// トークンを認められた結果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TokenOwner {
@@ -93,6 +123,7 @@ pub async fn issue_token(
     db: &DatabaseConnection,
     account_id: Uuid,
     label: &str,
+    kind: TokenKind,
 ) -> Result<String, DbErr> {
     let token = generate_token();
     entity::pairing_tokens::Entity::insert(entity::pairing_tokens::ActiveModel {
@@ -100,6 +131,7 @@ pub async fn issue_token(
         account_id: Set(account_id),
         token_hash: Set(token_hash(&token)),
         label: Set(label.to_string()),
+        kind: Set(kind.as_str().to_string()),
         created_at: Set(now_ms()),
         last_used_at: Set(None),
         revoked_at: Set(None),
@@ -109,13 +141,16 @@ pub async fn issue_token(
     Ok(token)
 }
 
-/// 提示されたトークンを認める。失効済み・未知なら `None`。
+/// 提示されたトークンを認める。失効済み・未知・**用途違い**なら `None`。
 ///
 /// **`None` の理由を区別して返さない。** 「そのトークンは存在するが失効している」と
 /// 「そんなトークンは無い」を呼び分けられると、総当たりに手掛かりを与えることになる。
+/// 用途違い（CLI設計§5-3）も同じ扱いで、`last_used_at` も進めない——通っていない札を
+/// 「使われている」と画面に見せない。
 pub async fn resolve_token(
     db: &DatabaseConnection,
     token: &str,
+    kind: TokenKind,
 ) -> Result<Option<TokenOwner>, DbErr> {
     let Some(row) = entity::pairing_tokens::Entity::find()
         .filter(entity::pairing_tokens::Column::TokenHash.eq(token_hash(token)))
@@ -124,7 +159,7 @@ pub async fn resolve_token(
     else {
         return Ok(None);
     };
-    if row.revoked_at.is_some() {
+    if row.revoked_at.is_some() || row.kind != kind.as_str() {
         return Ok(None);
     }
 

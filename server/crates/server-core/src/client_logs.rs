@@ -99,12 +99,17 @@ async fn api_client_logs(
     State(state): State<ClientLogState>,
     session: Session,
     Peer(peer): Peer,
+    headers: axum::http::HeaderMap,
     Json(batch): Json<ClientLogBatch>,
 ) -> StatusCode {
     // **接続そのものを見る。** `X-Forwarded-For` の類は読まない（§8-3 と同じ理由で、
     // ヘッダ1行で相手を名乗り分けられては数える意味が無い）
     let from_loopback = peer.is_some_and(|addr| addr.ip().is_loopback());
-    let identity = state.auth.identify(&session, from_loopback).await;
+    let bearer = crate::auth::bearer_token(&headers);
+    let identity = state
+        .auth
+        .identify(&session, from_loopback, bearer.as_deref())
+        .await;
     let anon = identity.is_none();
 
     let mut drops = ClientLogDrops {

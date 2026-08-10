@@ -246,9 +246,25 @@ pub fn request(
     body: Option<&str>,
     cookie: Option<&str>,
 ) -> anyhow::Result<Response> {
+    let headers: Vec<(&str, &str)> = cookie.map(|value| ("Cookie", value)).into_iter().collect();
+    request_with(addr, method, path, body, &headers)
+}
+
+/// 1往復ぶんを組み立てて送る。**任意のヘッダ行を運べる**版。
+///
+/// 札（`Authorization: Bearer`）と入館証（`Cookie`）を**同時に**載せる検査
+/// （CLI設計§5-2「札が通らなければ Cookie へ落ちない」）は、どちらか片方しか
+/// 運べない口では踏めない——ヘッダの組み合わせは呼び出し側が決める。
+pub fn request_with(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    headers: &[(&str, &str)],
+) -> anyhow::Result<Response> {
     let mut head = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n");
-    if let Some(cookie) = cookie {
-        head.push_str(&format!("Cookie: {cookie}\r\n"));
+    for (name, value) in headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
     }
     let request = match body {
         Some(body) => format!(
