@@ -187,12 +187,100 @@ enum SessionCmd {
         #[command(flatten)]
         out: OutputArgs,
     },
+    /// セッションを起こす。新しいカードのフルIDを標準出力へ返す
+    Spawn {
+        /// 作業ディレクトリ
+        cwd: String,
+        /// 権限モード（例：acceptEdits / bypassPermissions / plan）。省略すると既定
+        #[arg(long, value_name = "MODE")]
+        mode: Option<String>,
+        /// どの PC で起こすか（繋がっている PC が2台以上のときは必須）
+        #[arg(long, value_name = "AGENT_ID")]
+        host: Option<String>,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// 指示を送る。既定は投げて終わり（届いたかは確かめない）
+    Send {
+        /// カードID。先頭の数文字で足りる
+        id: String,
+        /// 送る本文
+        text: String,
+        /// ターンの終わり（入力待ちへ戻る）まで待つ。
+        /// 既に作業中のセッションへ送った場合は、いま走っているターンの終わりで返りうる
+        #[arg(long)]
+        wait: bool,
+        /// `--wait` の上限秒
+        #[arg(long, value_name = "SECS", default_value_t = client::wait::SEND_DEFAULT_CAP_SECS)]
+        timeout: u64,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// セッションを終了する（終了の知らせまで待つ）
+    Kill {
+        /// カードID。先頭の数文字で足りる
+        id: String,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// カードを一覧から外す（外れたの知らせまで待つ）。履歴の記録は残る
+    Rm {
+        /// カードID。先頭の数文字で足りる
+        id: String,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// モデルを切り替える（切り替わったの知らせまで待つ）
+    Model {
+        /// カードID。先頭の数文字で足りる
+        id: String,
+        /// 切り替え先（別名で渡す。例：opus / sonnet / haiku / default）
+        model: String,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// 権限モードを切り替える（反映の知らせまで待つ）
+    Mode {
+        /// カードID。先頭の数文字で足りる
+        id: String,
+        /// 切り替え先（例：default / acceptEdits / plan。行けないモードは断られる）
+        mode: String,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// 端末の大きさを変える（待たない）
+    Resize {
+        /// カードID。先頭の数文字で足りる
+        id: String,
+        #[arg(long, value_name = "N")]
+        cols: u16,
+        #[arg(long, value_name = "N")]
+        rows: u16,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
 }
 
 #[derive(Subcommand)]
 enum ProjectCmd {
     /// PJT 枠の一覧
     Ls {
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// PJT 枠を足す（設定が ON ならセッションも1本起きる）
+    Add {
+        /// どの PC か。この機械なら `local`、繋いだ PC はその ID
+        host: String,
+        /// 作業ディレクトリのパス
+        path: String,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// PJT 枠を外す（セッションが動いている枠は断られる）
+    Rm {
+        /// 枠のID。先頭の数文字で足りる（一覧は `project ls --json`）
+        id: String,
         #[command(flatten)]
         out: OutputArgs,
     },
@@ -227,12 +315,69 @@ enum SettingsCmd {
         #[command(flatten)]
         out: OutputArgs,
     },
+    /// 設定を1項目だけ変える（触った項目だけを送る。CLI設計§12-1）
+    Set {
+        /// キー（always_bypass_permissions / project_autostart_session /
+        /// sync_interval_secs / screen_interval_ms / scrollback_lines / lan_password）
+        key: String,
+        /// 値（トグルは true・false、間隔は数値）
+        value: String,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// 設定をファイルへ持ち出せる形で出す（標準出力へ。`> 保存先` で受ける）
+    Export,
+    /// 持ち出した設定を読み込む（全部通るか、1つも入れないか）
+    Import {
+        /// 読み込むファイル
+        file: std::path::PathBuf,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
 }
 
 #[derive(Subcommand)]
 enum VersionCmd {
     /// 手元に置いてある版と、いま動いている版を出す
     Ls {
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// 版を予約する。**その瞬間には何も起きない**——効くのは次に起こしたとき
+    Select {
+        /// 予約する版（例：0.1.10）
+        version: String,
+        /// 「確かめられない」と断られた版を、承知のうえで予約する
+        #[arg(long)]
+        confirm_unverified: bool,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// 予約を取り消す（次に起こすと、入れる側が置いた版で立ち上がる）
+    Unselect {
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// 新しい版を取ってくる（背景で走る。進みは `version ls` で見る）
+    Install {
+        /// 取ってくる版
+        version: String,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// 手元に置いてある版を消す（走っている版は消せない）
+    Rm {
+        /// 消す版
+        version: String,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// いま入れ替える＝**プロセスを落とす**。ローカルモードでは走っている claude が
+    /// 道連れになるので、生きたカードが1枚でもあれば数を言って止まる
+    Restart {
+        /// 生きたカードがあっても落とす
+        #[arg(long)]
+        force: bool,
         #[command(flatten)]
         out: OutputArgs,
     },
@@ -486,6 +631,50 @@ async fn client_session(
             let human = output::render_transcript(&page.nodes, page.has_more);
             println!("{}", output::pick(out.json, &raw, &human));
         }
+        SessionCmd::Spawn {
+            cwd,
+            mode,
+            host,
+            out,
+        } => {
+            let outcome = client::spawn(target, &cwd, mode.as_deref(), host.as_deref()).await?;
+            println!("{}", output::pick(out.json, &outcome.raw, &outcome.human));
+        }
+        SessionCmd::Send {
+            id,
+            text,
+            wait,
+            timeout,
+            out,
+        } => {
+            let outcome = client::send_input(target, &id, &text, wait, timeout).await?;
+            println!("{}", output::pick(out.json, &outcome.raw, &outcome.human));
+        }
+        SessionCmd::Kill { id, out } => {
+            let outcome = client::kill(target, &id).await?;
+            println!("{}", output::pick(out.json, &outcome.raw, &outcome.human));
+        }
+        SessionCmd::Rm { id, out } => {
+            let outcome = client::archive(target, &id).await?;
+            println!("{}", output::pick(out.json, &outcome.raw, &outcome.human));
+        }
+        SessionCmd::Model { id, model, out } => {
+            let outcome = client::set_model(target, &id, &model).await?;
+            println!("{}", output::pick(out.json, &outcome.raw, &outcome.human));
+        }
+        SessionCmd::Mode { id, mode, out } => {
+            let outcome = client::set_mode(target, &id, &mode).await?;
+            println!("{}", output::pick(out.json, &outcome.raw, &outcome.human));
+        }
+        SessionCmd::Resize {
+            id,
+            cols,
+            rows,
+            out,
+        } => {
+            let outcome = client::resize(target, &id, cols, rows).await?;
+            println!("{}", output::pick(out.json, &outcome.raw, &outcome.human));
+        }
     }
     Ok(())
 }
@@ -498,6 +687,30 @@ async fn client_project(
         ProjectCmd::Ls { out } => {
             let (projects, raw) = client::projects(target).await?;
             let human = output::render_projects(&projects, home().as_deref());
+            println!("{}", output::pick(out.json, &raw, &human));
+        }
+        ProjectCmd::Add { host, path, out } => {
+            let (response, raw) = client::project_add(target, &host, &path).await?;
+            let mut human = format!(
+                "PJT 枠を足しました：{}（{}）",
+                output::fold_home(&response.project.path, home().as_deref()),
+                output::short_id(&response.project.id.to_string())
+            );
+            if response.spawned {
+                human.push_str("。セッションも1本起こしました");
+            }
+            if let Some(reason) = &response.spawn_error {
+                // 枠は足せたがセッションは起きなかった。混ぜると結果が読めなくなるので
+                // 理由は標準エラーへ（CLI設計§10-4）
+                eprintln!("セッションは起きませんでした：{reason}");
+            }
+            println!("{}", output::pick(out.json, &raw, &human));
+        }
+        ProjectCmd::Rm { id, out } => {
+            let removed = client::project_remove(target, &id).await?;
+            // DELETE の応答は本文なし（204）なので、`--json` には消したIDの受け取り証を出す
+            let raw = serde_json::json!({ "removed": removed }).to_string();
+            let human = format!("PJT 枠を外しました：{}", output::short_id(&removed));
             println!("{}", output::pick(out.json, &raw, &human));
         }
     }
@@ -546,14 +759,77 @@ async fn client_settings(
             if out.json {
                 println!("{raw}");
             } else {
-                let pretty = serde_json::from_str::<serde_json::Value>(&raw)
-                    .and_then(|value| serde_json::to_string_pretty(&value))
-                    .unwrap_or_else(|_| raw.clone());
-                println!("{pretty}");
+                println!("{}", prettify(&raw));
             }
+        }
+        SettingsCmd::Set { key, value, out } => {
+            // 知らないキー・読めない値は引数の誤り（exit 2）。BadUrl は「引数が読めない」
+            // 全般の受け皿で、終了コードの写像（§10-3）がそのままここにも当てはまる
+            let body =
+                client::settings_update_body(&key, &value).map_err(client::ClientError::BadUrl)?;
+            let raw = client::settings_set(target, body).await?;
+            if out.json {
+                println!("{raw}");
+            } else {
+                println!("{key} を変えました。いまの設定：");
+                println!("{}", prettify(&raw));
+            }
+        }
+        SettingsCmd::Export => {
+            // 出力そのものが持ち出しファイルの中身。`> 保存先` で受ける前提なので
+            // 案内は混ぜない（標準出力は結果だけ。CLI設計§10-4）
+            let raw = client::settings_export(target).await?;
+            println!("{raw}");
+        }
+        SettingsCmd::Import { file, out } => {
+            let body = std::fs::read_to_string(&file).map_err(|err| {
+                client::ClientError::BadUrl(format!("`{}` を読めません（{err}）", file.display()))
+            })?;
+            let raw = client::settings_import(target, body).await?;
+            let human = render_import_outcome(&raw);
+            println!("{}", output::pick(out.json, &raw, &human));
         }
     }
     Ok(())
+}
+
+/// JSON の応答を、値に触らず読みやすい形（改行と字下げ）にする。
+fn prettify(raw: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .and_then(|value| serde_json::to_string_pretty(&value))
+        .unwrap_or_else(|_| raw.to_string())
+}
+
+/// 読み込みの結果（applied / ignored）を人が読む形へ。
+fn render_import_outcome(raw: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return raw.to_string();
+    };
+    let names = |key: &str| -> Vec<String> {
+        value[key]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let applied = names("applied");
+    let ignored = names("ignored");
+    let mut lines = if applied.is_empty() {
+        "入れた項目はありません".to_string()
+    } else {
+        format!("入れました：{}", applied.join("、"))
+    };
+    if !ignored.is_empty() {
+        lines.push_str(&format!(
+            "\n知らないキーは無視しました：{}",
+            ignored.join("、")
+        ));
+    }
+    lines
 }
 
 async fn client_version(
@@ -565,6 +841,42 @@ async fn client_version(
             let (view, raw) = client::versions(target).await?;
             let human = output::render_versions(&view);
             println!("{}", output::pick(out.json, &raw, &human));
+        }
+        VersionCmd::Select {
+            version,
+            confirm_unverified,
+            out,
+        } => {
+            let raw = client::version_select(target, &version, confirm_unverified).await?;
+            // 「選ぶ」と「効かせる」は別（CICD設計）。この意味論を出力にも書く
+            let human = format!(
+                "{version} を予約しました。次に起こしたときから効きます（この瞬間には何も起きません）。\nいま入れ替えるなら `agentdashboard version restart`"
+            );
+            println!("{}", output::pick(out.json, &raw, &human));
+        }
+        VersionCmd::Unselect { out } => {
+            let raw = client::version_unselect(target).await?;
+            let human = "予約を取り消しました。次に起こすと、入れる側が置いた版で立ち上がります";
+            println!("{}", output::pick(out.json, &raw, human));
+        }
+        VersionCmd::Install { version, out } => {
+            let raw = client::version_install(target, &version).await?;
+            let human = format!(
+                "{version} を取りに行っています（背景で走ります）。進みは `agentdashboard version ls`"
+            );
+            println!("{}", output::pick(out.json, &raw, &human));
+        }
+        VersionCmd::Rm { version, out } => {
+            let raw = client::version_remove(target, &version).await?;
+            let human = format!("{version} を消しました");
+            println!("{}", output::pick(out.json, &raw, &human));
+        }
+        VersionCmd::Restart { force, out } => {
+            // 生きたカードを数えて止まる門は client::version_restart の中（判定の実装を
+            // 1箇所に集める。`積み残し_運用` 項目11）
+            let raw = client::version_restart(target, force).await?;
+            let human = "落とす指示を受け付けました。常駐（systemd 等）が無ければ、手で起こし直してください";
+            println!("{}", output::pick(out.json, &raw, human));
         }
     }
     Ok(())
