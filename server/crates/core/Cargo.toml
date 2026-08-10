@@ -32,6 +32,16 @@ clap.workspace = true
 tokio.workspace = true
 axum.workspace = true
 tracing.workspace = true
+# CLI がダッシュボードを叩く HTTP の1往復（CLI設計§6-1）。ブラウザと同じ席に座る側
+# なので、置き場所はサーバ側でも PC 側でもなくここになる（CLI設計§2-1）。
+# 接続プールは持たない——1回の呼び出しで「繋ぐ→送る→切る」を閉じる（CLI設計§1-2）
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+# `--server https://…` のときだけ通す TLS（CLI設計§6-1）。実装はセッションホストの
+# A2S（tokio-tungstenite の rustls-tls-webpki-roots）が既にビルドしているものと同じ
+tokio-rustls.workspace = true
+webpki-roots.workspace = true
 
 [dev-dependencies]
 testkit.workspace = true

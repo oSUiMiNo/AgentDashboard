@@ -34,7 +34,7 @@ use sea_orm::sea_query::OnConflict;
 use sea_orm::{
     ActiveValue::Set, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     sync::{
@@ -61,7 +61,10 @@ pub const PRESENCE_TTL_MS: i64 = 30_000;
 pub const TRANSCRIPT_QUEUE_MESSAGES: usize = 64;
 
 /// 履歴1ページ分（`GET /api/sessions/{card_id}/transcript` の応答）。
-#[derive(Debug, Serialize)]
+///
+/// `Deserialize` も持つのは、CLI（`agentdashboard session transcript`）が同じ型で
+/// 応答を読み戻すため（CLI設計§6-3）。CLI 側に写しの型を定義しない。
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TranscriptPage {
     pub nodes: Vec<TreeNode>,
     /// さらに前があるかもしれない

@@ -50,6 +50,13 @@ const FORBIDDEN: &[(&str, &[&str])] = &[
             "redis",
         ],
     ),
+    // 配布するセッションホストは、**CLI の荷物も引き込まない**（CLI設計§2-2）。
+    // CLI（ダッシュボードを外から叩く層）の置き場所は agentdashboard-core なので、
+    // そこへ到達しないことがそのまま「CLI を持たない」の機械表現になる。
+    // hyper / vt100 / tokio-tungstenite への**到達**は禁じられない——フック受信の
+    // axum・画面の端末エミュレータ・A2S クライアントとして session-host-core が
+    // 元から正当に持っている。だから直の宣言のほうは FORBIDDEN_DIRECT で見る
+    ("session-host", &["agentdashboard-core"]),
     // **パーサには `tracing` を持たせない**（ログ設計§8-3）。理由は2つあり、どちらも
     // 「入れた瞬間に静かに壊れる」性質を持つ。
     //
@@ -81,6 +88,20 @@ const FORBIDDEN_DIRECT: &[(&str, &[&str])] = &[
     // 繋ぎに行く経路は存在しない。**テストは本物の WS で叩くので dev-dependencies には
     // 入る**が、それは「使う」に当たらない
     ("server-core", &["tokio-tungstenite"]),
+    // CLI の HTTP クライアント（CLI設計§6-1）はセッションホストの仕事ではない。
+    // hyper 系は axum 経由で同じ木に居るので到達可能性では捕まえられず、
+    // **自分で使い始めたこと**を宣言で捕まえる。配布物が太らないことは
+    // フェーズ0 の実測（CLI設計§15-4：−136 B）で確認済みで、これはその見張り
+    (
+        "session-host",
+        &[
+            "hyper",
+            "hyper-util",
+            "http-body-util",
+            "tokio-rustls",
+            "webpki-roots",
+        ],
+    ),
 ];
 
 /// 配布用パッケージの入口が置いてある場所（このテストから見た相対パス）。

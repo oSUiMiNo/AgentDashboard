@@ -16,6 +16,7 @@
 
 pub mod boot;
 pub mod cli;
+pub mod client;
 pub mod client_logs;
 pub mod config;
 pub mod gate;

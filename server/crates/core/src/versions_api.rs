@@ -91,7 +91,10 @@ const STOP_AFTER: std::time::Duration = std::time::Duration::from_millis(250);
 /// `supported` / `editable` を分けてあるのは [`crate::settings_api::LanPasswordView`] と
 /// 同じ形。**使えない構成なのに中身がある**という組み合わせを作らないため、
 /// `supported` が偽なら他も空にする。
-#[derive(Debug, Serialize)]
+///
+/// `Deserialize` も持つのは、CLI（`client`）が同じ型で応答を読み戻すため（CLI設計§6-3）。
+/// CLI 側に写しの型を定義すると、片方だけが古くなる場所が1つ増える。
+#[derive(Debug, Serialize, Deserialize)]
 pub struct VersionsView {
     /// 保管庫を持てる構成か。**箱の中なら偽**（書いても次に起こし直すと消える）。
     pub supported: bool,
@@ -149,7 +152,7 @@ pub struct VersionsView {
 ///
 /// **3つしか無い。** 細かく刻むには [`session_host_core::version::install_version`] の中へ
 /// 通知の口を通すことになるが、窓は数十秒なので割に合わない（設計§24）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InstallPhase {
     Installing,
@@ -161,7 +164,7 @@ pub enum InstallPhase {
 ///
 /// **プロセスの中にだけ持つ。** [`version::Outcome`] がファイルなのは乗り換えが
 /// プロセスをまたぐからで、取ってくる仕事はまたがない（設計§24）。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstallView {
     pub version: VersionId,
     pub phase: InstallPhase,
@@ -190,7 +193,7 @@ pub struct SelectRequest {
 ///
 /// この口は**見に行かない。** 最後に読めた値を返すだけで、外へ出るのは背景の周期だけ。
 /// さもないと画面を開くたびにネットワークが要る。
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct LatestView {
     pub version: VersionId,
     /// 試作版か。**いまはほぼ常に偽**（`releases/latest` は非試作版を指すため）。
