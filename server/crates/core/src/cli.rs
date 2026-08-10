@@ -39,6 +39,11 @@ struct Cli {
     #[arg(long, global = true, value_name = "URL")]
     server: Option<String>,
 
+    /// 札（ペアリングトークン。CLI設計§5-4）。サーバモードのダッシュボードを叩くときに要る。
+    /// 環境変数 ADASH_TOKEN でも渡せ、両方あれば引数が勝つ。ファイルには保存しない
+    #[arg(long, global = true, value_name = "TOKEN")]
+    token: Option<String>,
+
     /// 動かし方（セルフホスト化設計§1-1）
     #[arg(long, value_enum, default_value = "local")]
     mode: Mode,
@@ -114,6 +119,10 @@ enum Command {
         /// どの PC 用かを後から見分けるための札
         #[arg(long, value_name = "LABEL", default_value = "")]
         label: String,
+        /// 札の用途（CLI設計§5-5）。`agent`＝PC を繋ぐ・`cli`＝CLI で叩く。
+        /// 既定は `agent`——既存の手順（PC のペアリング）を変えない
+        #[arg(long, value_name = "KIND", default_value = "agent")]
+        kind: String,
     },
     /// ログを読む（ログ設計§11）
     ///
@@ -150,6 +159,12 @@ enum Command {
     /// ダッシュボードの版を見る
     #[command(subcommand)]
     Version(VersionCmd),
+    /// アカウントの札（ペアリングトークン）と登録済みの PC を見る・操作する
+    ///
+    /// **サーバモードにしか無い**（CLI設計§3-4）。ローカルモードのダッシュボードへ
+    /// 叩くと「この構成にアカウントはありません」で断られる
+    #[command(subcommand)]
+    Account(AccountCmd),
 }
 
 /// `--json` の置き場所。読む系の全コマンドが同じ旗を持つ（CLI設計§10-2）。
@@ -370,6 +385,39 @@ enum SettingsCmd {
 }
 
 #[derive(Subcommand)]
+enum AccountCmd {
+    /// 発行済みの札の一覧（平文は出ない——もう一度見る口はそもそも無い）
+    Tokens {
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// 札を発行する。**平文はこの1回しか出ない**（標準出力へ。パイプでそのまま渡せる）
+    Issue {
+        /// 何用かを後から見分けるための名前
+        #[arg(long, value_name = "LABEL", default_value = "")]
+        label: String,
+        /// 札の用途（CLI設計§5-5）。`agent`＝PC を繋ぐ・`cli`＝CLI で叩く。
+        /// 既定は `agent`——画面の発行ボタンと同じ意味を保つ
+        #[arg(long, value_name = "KIND", default_value = "agent")]
+        kind: String,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// 札を失効させる（その札で繋がっている接続はその場で切れる）
+    Revoke {
+        /// 札のID。先頭の数文字で足りる（一覧は `account tokens`）
+        id: String,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// 登録済みの PC の一覧
+    Hosts {
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+}
+
+#[derive(Subcommand)]
 enum VersionCmd {
     /// 手元に置いてある版と、いま動いている版を出す
     Ls {
@@ -429,6 +477,7 @@ impl Command {
                 | Self::Host(_)
                 | Self::Settings(_)
                 | Self::Version(_)
+                | Self::Account(_)
         )
     }
 }
@@ -482,7 +531,12 @@ pub fn run() -> anyhow::Result<()> {
         // と `--help` にも書いてある
         if args.host.is_some() {
             let config = Config::load(cli.config.as_deref())?;
-            return session_host_core::logs::run_remote(args, config.port);
+            // 札は 引数 > 環境変数（CLI設計§5-4。`run_client` の作法と同じ）
+            let mut args = args.clone();
+            if args.token.is_none() {
+                args.token = std::env::var(client::TOKEN_ENV).ok();
+            }
+            return session_host_core::logs::run_remote(&args, config.port);
         }
         if cli.config.is_some() {
             // `--config` は global なのでここまで通ってしまうが、この口は設定を読まない。
@@ -544,16 +598,30 @@ async fn run_async(cli: Cli, config: Config) -> anyhow::Result<()> {
             use std::io::Write as _;
             std::io::stdout().write_all(&data)?;
         }
-        Some(Command::PairToken { account, label }) => {
+        Some(Command::PairToken {
+            account,
+            label,
+            kind,
+        }) => {
+            let Some(kind) = server_core::db::pairing::TokenKind::parse(&kind) else {
+                anyhow::bail!("--kind は agent か cli です（実際: {kind}）");
+            };
             let db = server_core::db::connect(&config.resolved_database_url()).await?;
             let account_id = server_core::db::pairing::ensure_account(&db, &account).await?;
-            let token = server_core::db::pairing::issue_token(&db, account_id, &label).await?;
+            let token =
+                server_core::db::pairing::issue_token(&db, account_id, &label, kind).await?;
             // **1回だけ表示する。** 控えを取り損ねたら、作り直してもらうほうが安全
             println!("{token}");
-            eprintln!(
-                "アカウント「{account}」のトークンを発行しました。\n\
-                 PC 側の agent.toml へ pairing_token として貼ってください（この表示は一度きりです）。"
-            );
+            match kind {
+                server_core::db::pairing::TokenKind::Agent => eprintln!(
+                    "アカウント「{account}」のトークンを発行しました。\n\
+                     PC 側の agent.toml へ pairing_token として貼ってください（この表示は一度きりです）。"
+                ),
+                server_core::db::pairing::TokenKind::Cli => eprintln!(
+                    "アカウント「{account}」の CLI 用トークンを発行しました。\n\
+                     `--token` か環境変数 ADASH_TOKEN で渡してください（この表示は一度きりです）。"
+                ),
+            }
         }
         // 上で先に処理して戻っている
         Some(Command::HookPost { .. })
@@ -564,7 +632,8 @@ async fn run_async(cli: Cli, config: Config) -> anyhow::Result<()> {
         | Some(Command::Project(_))
         | Some(Command::Host(_))
         | Some(Command::Settings(_))
-        | Some(Command::Version(_)) => unreachable!(),
+        | Some(Command::Version(_))
+        | Some(Command::Account(_)) => unreachable!(),
         None => {
             // **返り値を捨ててはいけない。** 非ブロッキング書き込みの見張り役なので、
             // 落とすと書き終わる前にプロセスが終わりうる（実測：200行のうち0行）。
@@ -604,7 +673,13 @@ async fn run_client(cli: Cli) -> anyhow::Result<()> {
             .map(|config| config.port)
             .map_err(|err| format!("設定を読めません（{err}）。外のサーバなら --server で指せます"))
     })
-    .unwrap_or_else(|err| fail(err));
+    .unwrap_or_else(|err| fail(err))
+    // 札は接続先と独立に決まる（引数 > 環境変数。CLI設計§5-4）
+    .with_token(
+        cli.token
+            .clone()
+            .or_else(|| std::env::var(client::TOKEN_ENV).ok()),
+    );
     let command = cli.command.expect("is_client で絞ってから来る");
     let outcome = match command {
         Command::Session(cmd) => client_session(cmd, &target).await,
@@ -612,6 +687,7 @@ async fn run_client(cli: Cli) -> anyhow::Result<()> {
         Command::Host(cmd) => client_host(cmd, &target).await,
         Command::Settings(cmd) => client_settings(cmd, &target).await,
         Command::Version(cmd) => client_version(cmd, &target).await,
+        Command::Account(cmd) => client_account(cmd, &target).await,
         _ => unreachable!("is_client で絞ってから来る"),
     };
     if let Err(err) = outcome {
@@ -993,6 +1069,52 @@ async fn client_version(
     Ok(())
 }
 
+async fn client_account(
+    cmd: AccountCmd,
+    target: &client::Target,
+) -> Result<(), client::ClientError> {
+    match cmd {
+        AccountCmd::Tokens { out } => {
+            let (tokens, raw) = client::account_tokens(target).await?;
+            let human = output::render_tokens(&tokens, now_ms());
+            println!("{}", output::pick(out.json, &raw, &human));
+        }
+        AccountCmd::Issue { label, kind, out } => {
+            // 綴りは手元で先に確かめる（打ち間違いをサーバまで運ばない。exit 2）
+            if server_core::db::pairing::TokenKind::parse(&kind).is_none() {
+                return Err(client::ClientError::BadUrl(format!(
+                    "--kind は agent か cli です（実際: {kind}）"
+                )));
+            }
+            let (token, raw) = client::account_issue(target, &label, &kind).await?;
+            if out.json {
+                println!("{raw}");
+            } else {
+                // 平文は標準出力へ**1回だけ**。案内を混ぜないので、パイプでそのまま
+                // 次へ渡せる（CLI設計§12-3。標準出力は結果だけの約束＝§10-4）
+                println!("{token}");
+                eprintln!("札を発行しました（この表示は一度きりです）。");
+            }
+        }
+        AccountCmd::Revoke { id, out } => {
+            let raw = client::account_revoke(target, &id).await?;
+            // 204 は本文が空。`--json` でも空行を出さず、空の連想配列で「済んだ」を表す
+            let human = "失効させました。この札で繋がっていた接続は切れます";
+            if out.json {
+                println!("{}", if raw.trim().is_empty() { "{}" } else { &raw });
+            } else {
+                println!("{human}");
+            }
+        }
+        AccountCmd::Hosts { out } => {
+            let (hosts, raw) = client::account_hosts(target).await?;
+            let human = output::render_hosts(&hosts, now_ms());
+            println!("{}", output::pick(out.json, &raw, &human));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1007,6 +1129,40 @@ mod tests {
         );
         // 群そのものは生きている（比較対象。これも落ちたら試験の作りが壊れている）
         assert!(Cli::try_parse_from(["agentdashboard", "host", "dir", "local"]).is_ok());
+    }
+
+    #[test]
+    fn 検証を切る旗はどの群にも生えていない() {
+        // TLS の証明書検証を切る指定（`--insecure` の類）は**作らない**（テスト計画F4。
+        // PJTガイドライン「渡す環境と引数は純粋関数で組み立て、門を置く」）。一度でも
+        // 生えると「とりあえず付ける」が習慣になり、検証が実質オフの運用に落ちる。
+        // 旗の名前は将来も増えるので、引数の**全群を再帰で走査**して禁止語で見張る
+        use clap::CommandFactory as _;
+        fn walk(command: &clap::Command, hits: &mut Vec<String>) {
+            for arg in command.get_arguments() {
+                if let Some(long) = arg.get_long() {
+                    let long = long.to_ascii_lowercase();
+                    if ["insecure", "no-verify", "danger", "skip-tls", "no-check"]
+                        .iter()
+                        .any(|bad| long.contains(bad))
+                    {
+                        hits.push(format!("{} --{long}", command.get_name()));
+                    }
+                }
+            }
+            for sub in command.get_subcommands() {
+                walk(sub, hits);
+            }
+        }
+        let command = Cli::command();
+        let mut hits = Vec::new();
+        walk(&command, &mut hits);
+        assert!(hits.is_empty(), "検証を切る旗が生えています: {hits:?}");
+        // 解釈もされない（走査の対象漏れがあっても、こちらで捕まる）
+        assert!(
+            Cli::try_parse_from(["agentdashboard", "session", "ls", "--insecure"]).is_err(),
+            "--insecure は解釈されてはいけない"
+        );
     }
 
     #[test]

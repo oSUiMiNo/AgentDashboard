@@ -220,3 +220,46 @@ async fn 相手が居ないときは繋げないという言葉と終了コー�
     let text = err.to_string();
     assert!(text.contains("相手が居ません"), "言葉が違う: {text}");
 }
+
+#[tokio::test]
+async fn 前段がchunkedで返しても読める() {
+    // 同梱の前段設定は Content-Length を保つが、**利用者が Caddy へ `encode gzip` を
+    // 1行足すだけで chunked が現れる**（CLI設計§15-1 の実測）。手書きクライアントなら
+    // ここで壊れる——hyper を借りた判断（§6-2）が実際に効いていることを、chunked を
+    // 返すスタブで机の上に固定する（テスト計画F4「前段が chunked で返しても読めること」）
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("空きポートを取れること");
+    let addr = listener.local_addr().expect("番号を読めること");
+    let serve = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("接続が来ること");
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        // 要求ヘッダを読み切る（中身は見ない——ここはただの前段役）
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            let read = socket.read(&mut chunk).await.expect("読めること");
+            buffer.extend_from_slice(&chunk[..read]);
+            if read == 0 || buffer.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        // `[]` を2バイトの chunk 1つ＋終端で返す
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\n\
+                  Content-Type: application/json\r\n\
+                  Transfer-Encoding: chunked\r\n\
+                  Connection: close\r\n\
+                  \r\n\
+                  2\r\n[]\r\n0\r\n\r\n",
+            )
+            .await
+            .expect("書けること");
+    });
+
+    let target = client::Target::from_url(&format!("http://{addr}")).expect("接続先を作れること");
+    let (sessions, raw) = client::sessions(&target).await.expect("読めること");
+    assert!(sessions.is_empty(), "chunked の本文が解けること: {raw}");
+    serve.await.expect("スタブが最後まで生きること");
+}

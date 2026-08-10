@@ -536,3 +536,91 @@ fn spawn_agent(config: &Path) -> Child {
         .spawn()
         .expect("セッションホストを起動できること")
 }
+
+#[tokio::test]
+async fn cli用の札はpair_tokenで発行でき平文は一度だけ出る() {
+    // CLI設計§5-5。`pair-token` は DB を直に触る発行の道——**まだ誰もログインできない
+    // 段階でも使える**のが存在理由なので、サーバを起こさずに叩けることまで含めて型
+    let dir = std::env::temp_dir().join(format!(
+        "agentdashboard-2p-pair-cli-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir_all(dir.join("state")).expect("作業ディレクトリを作れること");
+    let config_path = dir.join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "state_dir = \"{state}\"\ndatabase_url = \"sqlite://{db}\"\n",
+            state = dir.join("state").display(),
+            db = dir.join("dashboard.db").display(),
+        ),
+    )
+    .expect("設定を書けること");
+
+    let issued = Command::new(testkit::binary_path("agentdashboard"))
+        .arg("--config")
+        .arg(&config_path)
+        .arg("pair-token")
+        .arg("--account")
+        .arg(ACCOUNT)
+        .arg("--label")
+        .arg("開発エージェント")
+        .arg("--kind")
+        .arg("cli")
+        .output()
+        .expect("発行を実行できること");
+    assert!(
+        issued.status.success(),
+        "発行に失敗しました: {}",
+        String::from_utf8_lossy(&issued.stderr)
+    );
+
+    // **平文は標準出力の1行だけ**（案内は標準エラー。パイプでそのまま次へ渡せる形）
+    let stdout = String::from_utf8_lossy(&issued.stdout).into_owned();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "平文以外が混ざっている: {stdout:?}");
+    let token = lines[0].trim().to_string();
+    assert!(token.starts_with("adp_"), "実際: {token}");
+    let stderr = String::from_utf8_lossy(&issued.stderr).into_owned();
+    assert!(stderr.contains("一度きり"), "実際: {stderr}");
+    assert!(
+        !stderr.contains(&token),
+        "平文が標準エラーにも出ている（一度だけの約束が破れる）"
+    );
+
+    // DB に残るのは kind つきのハッシュ行だけ（平文はどこにも残らない）
+    {
+        use sea_orm::{ColumnTrait as _, EntityTrait as _, QueryFilter as _};
+        let db =
+            server_core::db::connect(&format!("sqlite://{}", dir.join("dashboard.db").display()))
+                .await
+                .expect("発行先の DB へ繋げること");
+        let row = server_core::db::entity::pairing_tokens::Entity::find()
+            .filter(
+                server_core::db::entity::pairing_tokens::Column::TokenHash
+                    .eq(server_core::db::pairing::token_hash(&token)),
+            )
+            .one(&db)
+            .await
+            .expect("読めること")
+            .expect("発行した行があること");
+        assert_eq!(row.kind, "cli", "用途が刻まれること");
+        assert_eq!(row.label, "開発エージェント");
+    }
+
+    // 知らない用途は発行前に断られる（DB に行を作らない）
+    let refused = Command::new(testkit::binary_path("agentdashboard"))
+        .arg("--config")
+        .arg(&config_path)
+        .arg("pair-token")
+        .arg("--kind")
+        .arg("detarame")
+        .output()
+        .expect("実行できること");
+    assert!(
+        !refused.status.success(),
+        "知らない用途で発行できてしまいました"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

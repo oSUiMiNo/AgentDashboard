@@ -534,8 +534,10 @@ fn 時計がずれていれば警告する() {
 }
 
 #[test]
-fn アカウント方式のサーバでは理由を出して断る() {
-    // **401 が出るのはアカウント方式のときだけ**なので、事実を名指しできる
+fn アカウント方式のサーバでは次の一手を出して断る() {
+    // **401 が出るのはアカウント方式のときだけ**なので、事実を名指しできる。
+    // フェーズ4 で札の配線が入った（CLI設計§14-2）ので、断りは「引けません」ではなく
+    // **札の渡し方の案内**になる——渡していないから断られただけで、道は通っている
     let home = FakeHome::new("logs-host-401");
     let (port, handle) = stub_dashboard("401 Unauthorized", "ログインが要ります".to_string());
     let config = write_config(&home, port);
@@ -556,8 +558,12 @@ fn アカウント方式のサーバでは理由を出して断る() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("アカウントでログインする形式"), "{stderr}");
-    assert!(stderr.contains("agentdashboard-agent logs"), "{stderr}");
+    assert!(stderr.contains("アカウント方式"), "{stderr}");
+    assert!(stderr.contains("ADASH_TOKEN"), "{stderr}");
+    assert!(
+        stderr.contains("--kind cli"),
+        "発行の仕方まで案内する: {stderr}"
+    );
 }
 
 #[test]

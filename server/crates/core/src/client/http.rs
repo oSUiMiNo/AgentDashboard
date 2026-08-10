@@ -152,6 +152,10 @@ where
         .header(hyper::header::HOST, target.authority())
         .header(hyper::header::ACCEPT, "application/json")
         .header(hyper::header::CONNECTION, "close");
+    if let Some(token) = target.token() {
+        // 札（CLI設計§5-4）。サーバは Cookie より先にこれで判定する（§5-2）
+        builder = builder.header(hyper::header::AUTHORIZATION, format!("Bearer {token}"));
+    }
     if body.is_some() {
         builder = builder.header(hyper::header::CONTENT_TYPE, "application/json");
     }

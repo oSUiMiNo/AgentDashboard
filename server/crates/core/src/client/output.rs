@@ -291,6 +291,84 @@ pub fn render_versions(view: &crate::versions_api::VersionsView) -> String {
     out
 }
 
+/// 札の用途の日本語ラベル（CLI設計§5-3）。画面と同じ言い分けを使う。
+pub fn kind_label(kind: &str) -> &str {
+    match kind {
+        "agent" => "PC",
+        "cli" => "CLI",
+        // 知らない用途は綴りのまま出す（将来の値を隠さない）
+        other => other,
+    }
+}
+
+/// `account tokens` の表。
+pub fn render_tokens(tokens: &[server_core::account::TokenView], now_ms: i64) -> String {
+    if tokens.is_empty() {
+        return "札はありません".to_string();
+    }
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{:<9} {:<5} {:<7} {:<12} {}\n",
+        "TOKEN", "用途", "状態", "最終使用", "札"
+    ));
+    for view in tokens {
+        let id = view.id.to_string();
+        let state = if view.revoked_at.is_some() {
+            "失効"
+        } else {
+            "有効"
+        };
+        let last_used = match view.last_used_at {
+            Some(ts) => format_ago(now_ms, ts),
+            None => "まだ".to_string(),
+        };
+        out.push_str(&format!(
+            "{:<9} {:<5} {:<7} {:<12} {}\n",
+            short_id(&id),
+            kind_label(&view.kind),
+            state,
+            last_used,
+            view.label,
+        ));
+    }
+    out.pop();
+    out
+}
+
+/// `account hosts` の表。
+pub fn render_hosts(hosts: &[server_core::account::SessionHostView], now_ms: i64) -> String {
+    if hosts.is_empty() {
+        return "登録済みの PC はありません".to_string();
+    }
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{:<9} {:<7} {:<12} {:<10} {}\n",
+        "HOST", "接続", "最終確認", "版", "名前"
+    ));
+    for view in hosts {
+        let id = view.id.to_string();
+        let connected = if view.connected {
+            "接続中"
+        } else {
+            "切断"
+        };
+        let last_seen = match view.last_seen_at {
+            Some(ts) => format_ago(now_ms, ts),
+            None => "-".to_string(),
+        };
+        out.push_str(&format!(
+            "{:<9} {:<7} {:<12} {:<10} {}\n",
+            short_id(&id),
+            connected,
+            last_seen,
+            view.version.as_deref().unwrap_or("-"),
+            view.name,
+        ));
+    }
+    out.pop();
+    out
+}
+
 /// 本文の1行目だけを、長すぎない形で。
 fn first_line(text: &str, max_chars: usize) -> String {
     let line = text.lines().next().unwrap_or("");

@@ -86,6 +86,11 @@ pub struct LogsArgs {
     /// 別の PC のログを引く（ダッシュボード側の口だけ・ループバック限定）。
     #[arg(long, value_name = "ID")]
     pub host: Option<String>,
+
+    /// 札（ペアリングトークン。CLI設計§5-4）。`--host` で叩く先がアカウント方式の
+    /// サーバモードのとき、これで通る。環境変数 ADASH_TOKEN でも渡せ、引数が勝つ
+    #[arg(long, value_name = "TOKEN")]
+    pub token: Option<String>,
 }
 
 impl Default for LogsArgs {
@@ -101,6 +106,7 @@ impl Default for LogsArgs {
             state_dir: None,
             sanitize: false,
             host: None,
+            token: None,
         }
     }
 }
@@ -853,7 +859,7 @@ pub fn run_remote(args: &LogsArgs, port: u16) -> anyhow::Result<()> {
         query_string(&wire)
     );
 
-    let (status, body) = fetch(&url)?;
+    let (status, body) = fetch(&url, args.token.as_deref())?;
     if status != 200 {
         anyhow::bail!("{}", explain(status, host, &body));
     }
@@ -1019,7 +1025,7 @@ fn explain(status: u16, host: &str, body: &str) -> String {
     match status {
         // **401 が出るのはアカウント方式のときだけ**（素通しと LAN の合言葉は
         // 127.0.0.1 を免除している）。事実を名指しできる
-        401 => "このダッシュボードはアカウントでログインする形式なので、CLI からは引けません。\n                ブラウザで開くか、引きたい PC の上で `agentdashboard-agent logs` を叩いてください。"
+        401 => "このダッシュボードはアカウント方式なので、札が要ります（`--token` か環境変数 ADASH_TOKEN。発行は `agentdashboard pair-token --kind cli`）。\n                渡しているのに断られるなら、失効しているかもしれません。"
             .to_string(),
         404 => format!("PC（{host}）が見つかりません：{body}"),
         409 => format!("PC（{host}）の版が古く、ログを引けません：{body}"),
@@ -1037,7 +1043,7 @@ fn explain(status: u16, host: &str, body: &str) -> String {
 ///
 /// [`crate::hook_post::post`] を流用しないのは、あちらの契約が「失敗しても黙る」
 /// 「応答を読み捨てる」だからである。こちらは**状態コードと本文の両方が要る**。
-fn fetch(url: &str) -> anyhow::Result<(u16, String)> {
+fn fetch(url: &str, token: Option<&str>) -> anyhow::Result<(u16, String)> {
     use std::io::{Read as _, Write as _};
 
     let target = crate::hook_post::parse_url(url)?;
@@ -1050,9 +1056,17 @@ fn fetch(url: &str) -> anyhow::Result<(u16, String)> {
     stream.set_write_timeout(Some(FETCH_TIMEOUT))?;
     stream.set_read_timeout(Some(FETCH_TIMEOUT))?;
 
+    // 札があれば添える（CLI設計§14-2。サーバモードのダッシュボードはこれで通る）。
+    // 改行を含む札は要求行を壊す（ヘッダ注入）ので、渡ってきても線に載せない
+    let auth_line = match token {
+        Some(token) if !token.contains(['\r', '\n']) => {
+            format!("Authorization: Bearer {token}\r\n")
+        }
+        _ => String::new(),
+    };
     let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
-        target.path, target.authority,
+        "GET {} HTTP/1.1\r\nHost: {}\r\n{}Accept: application/json\r\nConnection: close\r\n\r\n",
+        target.path, target.authority, auth_line,
     );
     stream.write_all(request.as_bytes())?;
     stream.flush()?;

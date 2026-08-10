@@ -25,12 +25,18 @@ use std::fmt;
 /// 札（`ADASH_TOKEN`）に対して名指ししている罠と同じ）。
 pub const SERVER_ENV: &str = "ADASH_SERVER";
 
+/// 札（ペアリングトークン）の環境変数。`--token` と同じ意味で、引数が勝つ（CLI設計§5-4）。
+///
+/// [`SERVER_ENV`] と同じ理由で **`AGENTDASHBOARD_` で始めない**。ファイルへは保存しない
+/// ——秘密の置き場所を増やさないのが既定で、保存したい人は自分の rcfile に書く。
+pub const TOKEN_ENV: &str = "ADASH_TOKEN";
+
 /// 接続先（CLI設計§4）。
 ///
 /// `resolve` で作る。WebSocket の URL は HTTP の URL から**導く**（§4-2）——別々に
 /// 指定させると、片方だけ直したときに「読めるのに操作できない」という切り分けの
 /// 難しい状態になる。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Target {
     /// TLS で話すか（`https://` なら真）
     tls: bool,
@@ -38,6 +44,22 @@ pub struct Target {
     port: u16,
     /// 前段がパスの下へ載せている場合の接頭辞。無ければ空。末尾に `/` は持たない
     prefix: String,
+    /// 札（CLI設計§5-4）。あれば HTTP と WS の両方が `Authorization: Bearer` を添える
+    token: Option<String>,
+}
+
+/// `Debug` を手で書くのは**札の平文を写さない**ため。`{:?}` はエラーメッセージや
+/// ログへそのまま流れうるので、derive のままだと秘密が紛れ込む経路になる。
+impl fmt::Debug for Target {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Target")
+            .field("tls", &self.tls)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("prefix", &self.prefix)
+            .field("token", &self.token.as_ref().map(|_| "＜伏せ字＞"))
+            .finish()
+    }
 }
 
 impl Target {
@@ -59,6 +81,7 @@ impl Target {
                     host: "127.0.0.1".to_string(),
                     port,
                     prefix: String::new(),
+                    token: None,
                 })
             }
         }
@@ -101,7 +124,20 @@ impl Target {
             host,
             port,
             prefix,
+            token: None,
         })
+    }
+
+    /// 札を被せる（CLI設計§5-4）。接続先の決まり方（`resolve`）とは独立に、
+    /// 引数 > 環境変数 の優先を呼び出し側で済ませてから渡す。
+    pub fn with_token(mut self, token: Option<String>) -> Self {
+        self.token = token;
+        self
+    }
+
+    /// 持っている札。HTTP（[`http`]）と WS（[`ws`]）がヘッダに添えるときだけ読む
+    pub fn token(&self) -> Option<&str> {
+        self.token.as_deref()
     }
 
     pub fn tls(&self) -> bool {
@@ -359,6 +395,109 @@ pub async fn versions(
     target: &Target,
 ) -> Result<(crate::versions_api::VersionsView, String), ClientError> {
     http::fetch_as(target, "/api/versions").await
+}
+
+// ---------------------------------------------------------------------------
+// account 群（CLI設計§12-3。サーバモードにしか無い）
+// ---------------------------------------------------------------------------
+
+/// `GET /api/me` を内部で読む（CLI設計§3-4）。
+///
+/// コマンドとしては出さない（§3-2 の載せない理由）が、`account` 群がモードを
+/// 見分けるのに使う——ブラウザが「何を出すべきか」を決めるのと同じ用途。
+async fn auth_view(target: &Target) -> Result<server_core::auth::AuthView, ClientError> {
+    let (view, _) = http::fetch_as::<server_core::auth::AuthView>(target, "/api/me").await?;
+    Ok(view)
+}
+
+/// `account` 群の門（CLI設計§3-4）。サーバモード以外では言葉を添えて断る。
+///
+/// **404 と言い分けるのが要点**——ローカルモードに `account` の口は無いので、黙って
+/// 叩くと SPA のフォールバック（HTML）が返ってくる。「口が無い」ことと「繋がって
+/// いない・打ち間違えた」ことを、受け取る側が区別できる形にする。
+async fn ensure_account_mode(target: &Target) -> Result<(), ClientError> {
+    let view = auth_view(target).await?;
+    if view.mode != server_core::auth::AuthMode::Account {
+        return Err(ClientError::Refused {
+            status: 400,
+            message: "この構成にアカウントはありません（ローカルモード）。札や PC の一覧はサーバモードのダッシュボードにだけあります".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// `GET /api/account/tokens`（札の一覧。平文は含まれない）。
+pub async fn account_tokens(
+    target: &Target,
+) -> Result<(Vec<server_core::account::TokenView>, String), ClientError> {
+    ensure_account_mode(target).await?;
+    http::fetch_as(target, "/api/account/tokens").await
+}
+
+/// `POST /api/account/tokens`（札の発行）。返りは（平文, 生の応答）。
+///
+/// **平文が手に入るのはこの1回だけ**（DB にはハッシュしか置かれない。§12-3）。
+pub async fn account_issue(
+    target: &Target,
+    label: &str,
+    kind: &str,
+) -> Result<(String, String), ClientError> {
+    ensure_account_mode(target).await?;
+    let body = serde_json::json!({ "label": label, "kind": kind }).to_string();
+    let raw = write_ok(target, "POST", "/api/account/tokens", Some(body)).await?;
+    let value: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|err| ClientError::Refused {
+            status: 200,
+            message: format!("発行の応答を読めません（{err}）"),
+        })?;
+    let token = value["token"].as_str().unwrap_or_default().to_string();
+    if token.is_empty() {
+        return Err(ClientError::Refused {
+            status: 200,
+            message: "発行の応答に平文が入っていません".to_string(),
+        });
+    }
+    Ok((token, raw))
+}
+
+/// `DELETE /api/account/tokens/{id}`（失効。繋がっている接続はその場で切れる）。
+pub async fn account_revoke(target: &Target, prefix: &str) -> Result<String, ClientError> {
+    ensure_account_mode(target).await?;
+    let (tokens, _) =
+        http::fetch_as::<Vec<server_core::account::TokenView>>(target, "/api/account/tokens")
+            .await?;
+    let ids: Vec<String> = tokens.iter().map(|view| view.id.to_string()).collect();
+    let id = resolve_token_prefix(prefix, &ids)?;
+    write_ok(target, "DELETE", &format!("/api/account/tokens/{id}"), None).await
+}
+
+/// `GET /api/account/agents`（登録済みの PC の一覧）。
+pub async fn account_hosts(
+    target: &Target,
+) -> Result<(Vec<server_core::account::SessionHostView>, String), ClientError> {
+    ensure_account_mode(target).await?;
+    http::fetch_as(target, "/api/account/agents").await
+}
+
+/// 札の前方一致の解決（`resolve_card` と同じ作法。断りの言葉だけ札向け）。
+fn resolve_token_prefix(prefix: &str, ids: &[String]) -> Result<String, ClientError> {
+    let borrowed: Vec<&str> = ids.iter().map(String::as_str).collect();
+    match output::resolve_prefix(prefix, &borrowed) {
+        Ok(id) => Ok(id.to_string()),
+        Err(output::PrefixError::NotFound) => Err(ClientError::Refused {
+            status: 404,
+            message: format!(
+                "`{prefix}` に当たる札は見つかりません。一覧は `agentdashboard account tokens`"
+            ),
+        }),
+        Err(output::PrefixError::Ambiguous(hits)) => Err(ClientError::Refused {
+            status: 409,
+            message: format!(
+                "`{prefix}` は複数の札に当たります。どれかまで打ってください：\n  {}",
+                hits.join("\n  ")
+            ),
+        }),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -995,6 +1134,32 @@ mod tests {
     use super::*;
 
     // --- 接続先の解決（テスト計画F2「接続先の解決」） ---
+
+    #[test]
+    fn 札と接続先の環境変数は箱へ転送される接頭辞を避けている() {
+        // `scripts/cargo` は `AGENTDASHBOARD_*` を丸ごとビルドの箱へ転送する（CLI設計§5-4）。
+        // その名前にすると、開発者が手元で export した札がテストにも製品の経路にも混ざる。
+        // 定数を変えた人がこの罠に気づけるよう、名前そのものを機械で見張る
+        assert!(
+            !SERVER_ENV.starts_with("AGENTDASHBOARD"),
+            "実際: {SERVER_ENV}"
+        );
+        assert!(
+            !TOKEN_ENV.starts_with("AGENTDASHBOARD"),
+            "実際: {TOKEN_ENV}"
+        );
+    }
+
+    #[test]
+    fn 札は接続先のデバッグ表示に写らない() {
+        // `{:?}` はエラーメッセージやログへそのまま流れうる。札の平文が紛れ込む
+        // 経路を作らない（CLI設計§5-4「ファイルへは保存しない」と同じ守り）
+        let target = Target::from_url("http://127.0.0.1:8787")
+            .expect("読めること")
+            .with_token(Some("adp_himitsu".to_string()));
+        let debug = format!("{target:?}");
+        assert!(!debug.contains("adp_himitsu"), "実際: {debug}");
+    }
 
     #[test]
     fn 平文の接続先からは素のwebsocketが導かれる() {

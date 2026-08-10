@@ -104,6 +104,17 @@ const FORBIDDEN_DIRECT: &[(&str, &[&str])] = &[
     ),
 ];
 
+/// 「この crate は、これらを**通常の依存として直に**持っていること」
+/// （CLI設計§2-2・テスト計画F2「依存と置き場所」）。
+///
+/// CLI の道具が dev-dependencies へ滑り落ちても、テストは dev の側で繋がるので
+/// **テストだけが通る形**で壊れる余地がある。禁じる側（上の2つ）と対で、持つ側も
+/// 機械で固定する。
+const REQUIRED_DIRECT: &[(&str, &[&str])] = &[(
+    "agentdashboard-core",
+    &["hyper", "tokio-tungstenite", "vt100"],
+)];
+
 /// 配布用パッケージの入口が置いてある場所（このテストから見た相対パス）。
 const DIST_BINS: &str = "../dist/src/bin";
 
@@ -168,6 +179,21 @@ fn 直に持ってはいけない依存を宣言していない() {
                 !declared.contains(*banned),
                 "{from} が {banned} を通常の依存として宣言しています。\
                  使ってよい場所ではありません（dev-dependencies なら数えません）"
+            );
+        }
+    }
+}
+
+#[test]
+fn 持つべき依存を通常の依存として持っている() {
+    let metadata = metadata();
+    for (from, required) in REQUIRED_DIRECT {
+        let declared = direct_normal_dependencies(&metadata, from);
+        for needed in *required {
+            assert!(
+                declared.contains(*needed),
+                "{from} が {needed} を通常の依存として持っていません。\
+                 dev-dependencies へ落ちると、製品の CLI が壊れてもテストだけは通ります"
             );
         }
     }

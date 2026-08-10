@@ -54,18 +54,30 @@ pub struct Ws {
 }
 
 impl Ws {
-    /// 繋いで、`Hello` を受け取ってから返す。
+    /// 繋いで、`Hello` を受け取ってから返る。
     pub async fn connect(target: &Target) -> Result<Self, ClientError> {
         let url = target.ws_url();
-        let connected = tokio::time::timeout(
-            CONNECT_TIMEOUT,
-            tokio_tungstenite::connect_async(url.as_str()),
-        )
-        .await
-        .map_err(|_| ClientError::Timeout {
-            what: format!("{url} への接続"),
-            secs: CONNECT_TIMEOUT.as_secs(),
-        })?;
+        // 札があればヘッダに載せる（CLI設計§5-4）。upgrade の要求でも middleware へ
+        // 届くことは実測済み（§15-2）。組み立て方は A2S の接続（link.rs）と同じ型
+        let mut request = tungstenite::client::IntoClientRequest::into_client_request(url.as_str())
+            .map_err(|err| {
+                ClientError::BadUrl(format!("`{url}` を接続先として読めません: {err}"))
+            })?;
+        if let Some(token) = target.token() {
+            let value = format!("Bearer {token}").parse().map_err(|_| {
+                ClientError::BadUrl("札に HTTP ヘッダへ載せられない文字が含まれています".into())
+            })?;
+            request
+                .headers_mut()
+                .insert(tungstenite::http::header::AUTHORIZATION, value);
+        }
+        let connected =
+            tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(request))
+                .await
+                .map_err(|_| ClientError::Timeout {
+                    what: format!("{url} への接続"),
+                    secs: CONNECT_TIMEOUT.as_secs(),
+                })?;
         let (socket, _) = connected.map_err(|err| match err {
             // upgrade が HTTP の答えで断られた形（401 など）は、REST と同じ言葉へ写す
             tungstenite::Error::Http(response) => {
