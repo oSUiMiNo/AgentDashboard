@@ -145,8 +145,22 @@ fn dirs_in_use(sessions: &HashMap<CardId, SessionState>) -> HashSet<PathBuf> {
 }
 
 fn poll(sessions: &mut HashMap<CardId, SessionState>, watcher: &mut Option<DirWatcher>) {
+    poll_into(sessions, watcher, |event| emit(&event));
+}
+
+/// 巡回の中身。出す先を受け取る。
+///
+/// `emit` / `emit_into` と同じ対にしてある。分けてあるのは**見張りが無いときの道**
+/// （設計§8 の縮退）を検査できるようにするためで、`emit` 越しでは stdout へ流れて
+/// 消えるので何も見られない。振る舞いは分ける前と変わらない。
+fn poll_into(
+    sessions: &mut HashMap<CardId, SessionState>,
+    watcher: &mut Option<DirWatcher>,
+    mut sink: impl FnMut(ParserEvent),
+) {
     for session in sessions.values_mut() {
-        // サブエージェントのディレクトリは後から生えるので、毎回登録し直す（冪等）
+        // サブエージェントのディレクトリは後から生えるので、毎回登録し直す（冪等）。
+        // 見張りが作れなかった環境では `None` のままここを素通りし、下の読み取りだけで動く
         if let Some(watcher) = watcher.as_mut() {
             for dir in session.dirs() {
                 let _ = watcher.watch(&dir);
@@ -154,7 +168,7 @@ fn poll(sessions: &mut HashMap<CardId, SessionState>, watcher: &mut Option<DirWa
         }
         for event in session.poll() {
             for event in split_event(event) {
-                emit(&event);
+                sink(event);
             }
         }
     }
@@ -564,6 +578,86 @@ mod tests {
         assert!(
             残り.contains(Path::new("/x/b")),
             "残ったセッションの場所は要り続けること"
+        );
+    }
+
+    /// 走るたびに作り直す使い捨ての場所。
+    fn 使い捨ての場所(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("parser-cli-{}-{label}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn 追記(path: &Path, line: &str) {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        writeln!(file, "{line}").unwrap();
+    }
+
+    /// 出たイベントに載っているノードの数。
+    fn ノードの数(events: &[ParserEvent]) -> usize {
+        events
+            .iter()
+            .map(|event| match event {
+                ParserEvent::Nodes { nodes, .. } => nodes.len(),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    #[test]
+    fn 見張りが無くても巡回だけで履歴が届く() {
+        // `spawn_watcher` は見張りを作れなければ `Ok(None)` を返し、巡回だけで動く道へ
+        // 落ちる（設計§8）。inotify を使い切らないと実機では踏めない道なので、`None` を
+        // 直接渡して同じところを通す。**選別も解除も見張りが在る前提の話**なので、
+        // ここが通らないと縮退したときだけ構造化ビューが静かに止まる
+        let dir = 使い捨ての場所("縮退");
+        let path = dir.join("s.jsonl");
+        追記(
+            &path,
+            r#"{"type":"user","uuid":"u1","timestamp":"2026-08-10T00:00:00.000Z","version":"2.1.220","message":{"role":"user","content":"あ"}}"#,
+        );
+
+        let card = CardId::new();
+        let mut sessions = HashMap::new();
+        let 空 = std::collections::BTreeMap::new();
+        sessions.insert(card, SessionState::new(card, path.clone(), &空));
+
+        let mut 見張り: Option<DirWatcher> = None;
+        let mut 出たもの = Vec::new();
+        poll_into(&mut sessions, &mut 見張り, |event| 出たもの.push(event));
+        assert!(
+            ノードの数(&出たもの) > 0,
+            "見張りが無くても最初の追記が届くこと"
+        );
+
+        // 位置が進んでいること。進んでいなければ同じものが二度届く
+        出たもの.clear();
+        poll_into(&mut sessions, &mut 見張り, |event| 出たもの.push(event));
+        assert_eq!(
+            ノードの数(&出たもの),
+            0,
+            "増えていないなら何も出ないこと（読み直していないこと）"
+        );
+
+        追記(
+            &path,
+            r#"{"type":"assistant","uuid":"u2","parentUuid":"u1","timestamp":"2026-08-10T00:00:01.000Z","version":"2.1.220","message":{"role":"assistant","content":[{"type":"text","text":"い"}]}}"#,
+        );
+        出たもの.clear();
+        poll_into(&mut sessions, &mut 見張り, |event| 出たもの.push(event));
+        assert!(
+            ノードの数(&出たもの) > 0,
+            "見張りが無くても、続きの追記が届くこと"
+        );
+
+        assert!(
+            見張り.is_none(),
+            "縮退した道を通っていること（途中で見張りが生えていないこと）"
         );
     }
 

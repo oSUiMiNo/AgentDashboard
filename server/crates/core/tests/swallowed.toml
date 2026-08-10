@@ -464,7 +464,7 @@ reason = "終わる直前の最後の一押し。書けないのは core が既�
 
 [[entry]]
 path = "server/crates/transcript-parser/src/cli.rs"
-fn = "poll"
+fn = "poll_into"
 expr = '''watcher.watch(&dir)'''
 class = "by-design"
 reason = "サブエージェントのフォルダは後から生えるので毎回登録し直す（冪等）。既に見張っていれば失敗する"
