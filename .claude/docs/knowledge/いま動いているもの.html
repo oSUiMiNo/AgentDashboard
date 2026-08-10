@@ -37,10 +37,10 @@
 <p class="lead">
   AgentDashboard に関係して、この機械や外で<strong>起動しっぱなしになっているもの</strong>の一覧。
   「どの URL がどれを指しているか」を取り違えると原因追跡が丸ごと空振りするので、そこを中心に書いてある。
-  <br>最終更新：2026-08-10（<strong>動いているのは実機・AWS・セッションホスト<span class="mark">▽</span>の3つ</strong>。trial だけ止まっている）
-  <br><strong>08-10 に実機だけ <code>87ddfb9</code> で起こし直した。</strong> パーサの通知の輪を断つ修正（ローカルイシュー「ダッシュボードでセッションを動かすとWSLが落ちやすい」フェーズ1〜5）が入っている。
+  <br>最終更新：2026-08-10 19時台（<strong>動いているのは実機・AWS・セッションホスト<span class="mark">▽</span>の3つ</strong>。trial だけ止まっている）
+  <br><strong>実機は <code>0.1.12</code> で稼働中</strong>（08-10 15:37 ビルドのバイナリを直後に起動。<code>/api/me</code> の実測）。パーサの通知の輪を断つ修正（ローカルイシュー「ダッシュボードでセッションを動かすとWSLが落ちやすい」）が入っている。
   <br><strong>この修正が入っているのは実機と、セッションホスト<span class="mark">▽</span>のパーサだけ。</strong> AWS は配った箱なのでリリースを出すまで届かない。セッションホスト<span class="mark">▽</span>の<strong>本体</strong>は生きた claude を抱えているので入れ替えておらず、<strong>次に起こし直したときから効く</strong>。<strong>ただしパーサは 08-10 16:46 に落として立て直したので、そこだけ 0.1.12 になっている</strong>（子だけなら落としても claude は道連れにならない。下の表を見る）。
-  <br><strong>版番号は3つとも <code>0.1.11</code> だが、中身は違う。</strong> 実機はソースビルド<span class="mark">▽</span>なので、版を上げなくても <code>git pull</code> と <code>make build</code> のたびに中身が変わる。
+  <br><strong>版番号だけで中身を判断しないこと。</strong> 実機はソースビルド<span class="mark">▽</span>なので、版を上げなくても <code>git pull</code> と <code>make build</code> のたびに中身が変わる。実機リポジトリは <code>ac19aac</code>（CLI イシュー フェーズ1）まで pull 済みだが、<strong>走っているのはビルド時点（15:37）の中身</strong>。
 </p>
 
 <h2>先に用語</h2>
@@ -159,7 +159,7 @@ agentdashboard-agent logs --since 24h --state-dir ~/agentdashboard-agent/state</
   <tr>
     <td>実機</td>
     <td><code>127.0.0.1:8787</code></td>
-    <td><span class="tag t-ok">0.1.11</span><br><small>ソースビルド<span class="mark">▽</span>（08-10 に <code>87ddfb9</code> で起こし直し）</small></td>
+    <td><span class="tag t-ok">0.1.12</span><br><small>ソースビルド<span class="mark">▽</span>（08-10 15:37 のビルドで起こし直し）</small></td>
     <td>ローカルモード<span class="mark">▽</span>。<code>~/AgentDashboard</code> で <code>make build</code> したものを引数なしで起動。端末の出力は <code>~/agentdashboard-run.log</code>、構造化ログは <code>~/.local/state/agentdashboard-run/logs/</code>。<br><strong>読むときは <code>--state-dir</code> が要る。</strong> 置き場所を設定で移してあるが、読む口は設定を読まない（設計§11-2 の非対称）——<code>agentdashboard logs --since 1h --state-dir ~/.local/state/agentdashboard-run</code><br><strong>起こすときは <code>setsid</code> で切り離す。</strong> ツール呼び出しの子として起こすと、呼び出しの終了で巻き添えに死ぬ（08-10 に一度この形で起こしてしまい、起こし直した）。<code>cd ~/AgentDashboard &amp;&amp; setsid nohup ./server/target/release/agentdashboard &gt;&gt; ~/agentdashboard-run.log 2&gt;&amp;1 &lt; /dev/null &amp;</code></td>
   </tr>
   <tr>
