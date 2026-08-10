@@ -311,30 +311,47 @@ async function serverCardIds(page: Page): Promise<string[]> {
  * 消す対象もIDで名指しする。`.first()` で選ぶと、消したい相手と押した相手がずれうる。
  */
 export async function archiveAll(page: Page) {
-  // 上限を切っておく。消せないカードがあったときに無限に回り続けないため
-  for (let guard = 0; guard < 20; guard += 1) {
-    const remaining = await serverCardIds(page)
-    if (remaining.length === 0) {
-      // カードを片付けたら枠も外す。**製品としては枠が残るのが正しい**（設計§13）が、
-      // テストの間で残ると「一覧が空であること」を見ている主張が次のテストへ漏れる
-      await removeAllProjects(page)
-      return
-    }
-    await page.goto(`/s/${remaining[0]}`)
-    await page.getByRole('button', { name: '削除' }).click()
-    // 消えると専用画面は「見つかりません」に変わる。これを消えた合図にする。
-    //
-    // **待ちを長めに取る。** 片付けは全テストが共有する1台のサーバの上で走るので、
-    // 通しで流すと起動直後（まだ「起動中」）のカードを消しに行くことがあり、
-    // 往復が既定の5秒に収まらない。単独では出ず**通しでだけ、たまに落ちる**という
-    // いちばん追いにくい形になっていた（`運用の積み残し` の7・8）
-    await expect(page.getByTestId('not-found')).toBeVisible({ timeout: 20_000 })
-    await expect
-      .poll(async () => (await serverCardIds(page)).includes(remaining[0]), {
-        message: 'サーバ側からもカードが消えること',
+  // **枠が消せなかったら、カードの片付けからやり直す。** アーカイブした瞬間に
+  // 飛行中だった報告（statusLine の1秒周期の SessionUpsert）が着地すると、
+  // 消したはずのカードが一覧へ蘇り、枠の削除が 409（セッションが動いている）で
+  // 断られ続ける——2026-08-11 に compose の通しで実測（枠の DELETE の診断が
+  // 409 の本文を出す）。蘇りそのものは製品側の競合（アーカイブ済みへの upsert が
+  // archived を剥がす）なので、ここでは**もう一度アーカイブして**先へ進む
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    // 上限を切っておく。消せないカードがあったときに無限に回り続けないため
+    for (let guard = 0; guard < 20; guard += 1) {
+      const remaining = await serverCardIds(page)
+      if (remaining.length === 0) {
+        break
+      }
+      await page.goto(`/s/${remaining[0]}`)
+      await page.getByRole('button', { name: '削除' }).click()
+      // 消えると専用画面は「見つかりません」に変わる。これを消えた合図にする。
+      //
+      // **待ちを長めに取る。** 片付けは全テストが共有する1台のサーバの上で走るので、
+      // 通しで流すと起動直後（まだ「起動中」）のカードを消しに行くことがあり、
+      // 往復が既定の5秒に収まらない。単独では出ず**通しでだけ、たまに落ちる**という
+      // いちばん追いにくい形になっていた（`運用の積み残し` の7・8）
+      await expect(page.getByTestId('not-found')).toBeVisible({
         timeout: 20_000,
       })
-      .toBe(false)
+      await expect
+        .poll(async () => (await serverCardIds(page)).includes(remaining[0]), {
+          message: 'サーバ側からもカードが消えること',
+          timeout: 20_000,
+        })
+        .toBe(false)
+    }
+    // カードを片付けたら枠も外す。**製品としては枠が残るのが正しい**（設計§13）が、
+    // テストの間で残ると「一覧が空であること」を見ている主張が次のテストへ漏れる
+    try {
+      await removeAllProjects(page)
+      return
+    } catch (cause) {
+      if (attempt === 2) {
+        throw cause
+      }
+    }
   }
   throw new Error('カードを片付けきれませんでした')
 }
@@ -350,8 +367,8 @@ export async function archiveAll(page: Page) {
 async function removeAllProjects(page: Page) {
   // **消すのも数えるのも1つのポーリングの中で行う。** 1回の DELETE ＋数えるだけの形は、
   // 直前のカード片付けの余韻（消した直後の枠がまだ「使用中」に見える等）を1度でも
-  // 踏むと戻れない。archiveAll の待ちと同じく、通しでだけ・たまに出る取りこぼしなので
-  // 上限も同じ 20 秒へ揃える。
+  // 踏むと戻れない。上限は10秒——ここで粘るより、呼び手（archiveAll）が
+  // **カードの片付けからやり直す**ほうが効く（蘇ったカードはこちらからは消せない）。
   //
   // 返りは**残った枠と断りの本文ごと** JSON にする——空でないとき、その中身が
   // そのまま失敗メッセージに出るので、「なぜ消せないか」を落ちた場で読める
@@ -381,7 +398,7 @@ async function removeAllProjects(page: Page) {
         })
         return JSON.stringify(outcomes)
       },
-      { message: 'サーバ側からも枠が消えること', timeout: 20_000 },
+      { message: 'サーバ側からも枠が消えること', timeout: 10_000 },
     )
     .toBe('[]')
 }
