@@ -44,7 +44,10 @@ pub struct AddRequest {
 }
 
 /// `POST /api/projects` の応答。
-#[derive(Debug, serde::Serialize)]
+///
+/// `Deserialize` も持つのは、CLI（`agentdashboard project add`）が同じ型で読み戻すため
+/// （CLI設計§6-3——CLI 側に写しの型を作らない）。
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct AddResponse {
     pub project: ProjectView,
     /// 追加と同時にセッションを起こしたか（設計§10）。

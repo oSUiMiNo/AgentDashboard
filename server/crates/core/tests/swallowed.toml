@@ -54,6 +54,13 @@ class = "by-design"
 reason = "Connection: close を頼んだ1回きりの接続の看取り。応答の失敗は本文の収集側が別に捕まえるので、切断がどう終わったかは呼び手に伝える情報を持たない"
 
 [[entry]]
+path = "server/crates/core/src/client/ws.rs"
+fn = "close"
+expr = '''self.socket.close(None).await'''
+class = "by-design"
+reason = "1回きりの接続の後片付け。切断そのものが購読の解除になる（サーバは接続ごとに購読を持つ）ので、閉じ損ねても呼び手にできることが無い"
+
+[[entry]]
 path = "server/crates/core/src/local.rs"
 fn = "emit"
 expr = '''self.reports.send(Report::Volatile(event.clone()))'''
