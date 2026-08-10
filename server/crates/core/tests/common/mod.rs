@@ -323,6 +323,26 @@ impl TestServer {
         .await
     }
 
+    /// LAN のふり（[`Self::start_from`]）と設定の口（[`Self::start_with_settings`]）の
+    /// **両方**を持って立ち上げる。「127.0.0.1 からだけ変えられる設定」を LAN の側から
+    /// 叩いて、断られる側を踏むために使う（CLI のテスト計画F3「設定・版・アカウント」）。
+    pub async fn start_with_settings_from(
+        mut config: Config,
+        settings_path: PathBuf,
+        peer: SocketAddr,
+    ) -> Self {
+        Self::build_full(
+            &mut config,
+            fake_claude().to_string_lossy().into_owned(),
+            false,
+            true,
+            Some(settings_path),
+            None,
+            Some(peer),
+        )
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn build_full(
         config: &mut Config,
