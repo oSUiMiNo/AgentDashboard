@@ -182,8 +182,10 @@ async fn revoke_token(
     pairing::revoke_token(hub.db(), token_id)
         .await
         .map_err(unavailable)?;
-    // **立ててから畳む。** 逆にすると、畳んだ直後に繋ぎ直された接続がまだ通ってしまう
+    // **立ててから畳む。** 逆にすると、畳んだ直後に繋ぎ直された接続がまだ通ってしまう。
+    // PC の接続（/agent/ws）とブラウザ側の口（/ws。cli 札の follow 等）の両方を畳む
     hub.disconnect_token(token_id);
+    hub.registry().broadcast_revocation(token_id);
     Ok(StatusCode::NO_CONTENT)
 }
 

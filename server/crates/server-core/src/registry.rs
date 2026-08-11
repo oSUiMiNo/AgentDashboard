@@ -209,6 +209,11 @@ pub struct SessionRegistry {
     db: DatabaseConnection,
     records: Mutex<HashMap<CardId, Arc<SessionRecord>>>,
     events: broadcast::Sender<AccountEvent>,
+    /// 失効した札（cli）の知らせ。**このインスタンスの `/ws` 接続を畳むためだけ**の道
+    /// （コードレビュー対応3）。PC 側の失効（gateway の `disconnect_token`）と同じく
+    /// インスタンス跨ぎは扱わない——よそのインスタンスの接続は、新しい要求が
+    /// `resolve_token` で断られる形に任せる
+    revocations: broadcast::Sender<Uuid>,
     window_nodes: usize,
     /// インスタンスを跨ぐ連絡係（設計§9）。**無ければプロセスの中で完結する**——
     /// ローカルモードと、インスタンスが1台だけのセルフホストがこれにあたる
@@ -286,6 +291,7 @@ impl SessionRegistry {
             db,
             records: Mutex::new(records),
             events: broadcast::channel(EVENT_QUEUE_MESSAGES).0,
+            revocations: broadcast::channel(EVENT_QUEUE_MESSAGES).0,
             window_nodes,
             bus,
             instance_id: Uuid::new_v4(),
@@ -324,6 +330,17 @@ impl SessionRegistry {
     /// セッションを取りこぼす（順序を守れば重複するだけで、upsert は重複しても害がない）。
     pub fn subscribe_events(&self) -> broadcast::Receiver<AccountEvent> {
         self.events.subscribe()
+    }
+
+    /// 札の失効を購読する（札で入った `/ws` 接続が自分を畳むため。コードレビュー対応3）。
+    pub fn subscribe_revocations(&self) -> broadcast::Receiver<Uuid> {
+        self.revocations.subscribe()
+    }
+
+    /// 札の失効を知らせる。呼ぶのは revoke の口だけ。
+    pub fn broadcast_revocation(&self, token_id: Uuid) {
+        // 受け手（札で入った接続）が1つも居ないのは正常な状態
+        let _ = self.revocations.send(token_id);
     }
 
     /// そのアカウントのカード一覧を作成順に返す（設計§8-6）。

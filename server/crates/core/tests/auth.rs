@@ -172,6 +172,37 @@ async fn 共有パスワードを通れば広げた先からも入れる() {
 }
 
 #[tokio::test]
+async fn 札は共有パスワード構成の鍵にも迂回にもならない() {
+    // コードレビュー対応2。LanPassword に札の概念は無いので、来ていても無視する——
+    // (a) loopback の免除は札で壊れない（rcfile の ADASH_TOKEN が本人を締め出さない）
+    // (b) 札が共有パスワードの鍵の代わりにならない（LAN の相手は 401 のまま）
+    // testkit::request_with はブロッキング I/O なので spawn_blocking で包む
+    // （TestServer::request と同じ作法。直に呼ぶとサーバのタスクが飢えて固まる）
+    async fn with_bearer(addr: std::net::SocketAddr) -> testkit::Response {
+        tokio::task::spawn_blocking(move || {
+            testkit::request_with(
+                addr,
+                "GET",
+                "/api/sessions",
+                None,
+                &[("Authorization", "Bearer adp_よそのサーバの札")],
+            )
+        })
+        .await
+        .expect("待てること")
+        .expect("届くこと")
+    }
+
+    let local = common::TestServer::start_with(opened_config()).await;
+    let response = with_bearer(local.addr).await;
+    assert_eq!(response.status, 200, "実際: {}", response.body);
+
+    let lan = common::TestServer::start_from(opened_config(), lan_peer()).await;
+    let response = with_bearer(lan.addr).await;
+    assert_eq!(response.status, 401, "実際: {}", response.body);
+}
+
+#[tokio::test]
 async fn 短すぎるパスワードは登録できない() {
     let server = common::TestServer::start_with(opened_config()).await;
     let (status, body) = server

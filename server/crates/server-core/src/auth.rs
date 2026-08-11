@@ -74,6 +74,11 @@ pub struct Identity {
     /// LAN パスワードの登録欄を出してよいか（§8-3「127.0.0.1 からアクセスした設定画面で
     /// 登録する」）の判断に使う。**免除の判断とは別に、画面の出し分けにも要る。**
     pub from_loopback: bool,
+    /// 札で入ったなら、その札の id（コードレビュー対応3）。
+    ///
+    /// 札が失効したとき、**その札で張られている `/ws` を畳む**ためだけに持つ。
+    /// Cookie とローカルの相手は `None`——失効という概念が札にしか無い。
+    pub token_id: Option<Uuid>,
 }
 
 /// 鍵の持ち主。ルータと middleware が共有する。
@@ -123,21 +128,23 @@ impl AuthContext {
     /// 落とす先を分けるため（設計§12-4）。`require_identity` のように断るのではなく、
     /// 分からなければ分からないまま先へ進む。
     ///
-    /// # 札（Bearer）は Cookie より先に見る（CLI設計§5-2）
+    /// # 札（Bearer）は Account モードの鍵。Cookie より先に見る（CLI設計§5-2）
     ///
-    /// `bearer` が来ていたら**札だけで判定して返る**。通らなかったとき Cookie へ
-    /// 落とさないのは、失効した札を持つ相手がたまたま Cookie も持っていると
-    /// 「失効させたのに通る」状態になるため。CLI は Cookie を持たず、ブラウザは
-    /// 札を持たないので、正当な相手がこの分岐で困ることは無い。
+    /// Account モードで `bearer` が来ていたら**札だけで判定して返る**。通らなかった
+    /// とき Cookie へ落とさないのは、失効した札を持つ相手がたまたま Cookie も
+    /// 持っていると「失効させたのに通る」状態になるため。CLI は Cookie を持たず、
+    /// ブラウザは札を持たないので、正当な相手がこの分岐で困ることは無い。
+    ///
+    /// **Open／LanPassword に札の概念は無いので、来ていても無視する**——素通しにも
+    /// 締め出しにも使わない。モードを見ずに札を先に判定すると、rcfile へ
+    /// `ADASH_TOKEN` を書いた利用者（外のサーバ用）が、認証の要らないローカルの
+    /// ダッシュボードから全コマンド 401 で締め出される（コードレビュー対応2で実測）。
     pub async fn identify(
         &self,
         session: &Session,
         from_loopback: bool,
         bearer: Option<&str>,
     ) -> Option<Identity> {
-        if let Some(token) = bearer {
-            return self.identify_bearer(token, from_loopback).await;
-        }
         match self.mode {
             AuthMode::Open => Some(self.local_identity(from_loopback)),
             AuthMode::LanPassword => {
@@ -149,6 +156,9 @@ impl AuthContext {
                 }
             }
             AuthMode::Account => {
+                if let Some(token) = bearer {
+                    return self.identify_bearer(token, from_loopback).await;
+                }
                 let account_id = session.get::<Uuid>(SESSION_ACCOUNT_KEY).await.ok()??;
                 // **毎回 DB を引く。** 消された・パスワードを外されたアカウントの
                 // 入館証が、Cookie の期限まで生き残ってはいけない
@@ -162,6 +172,7 @@ impl AuthContext {
                     name: row.name,
                     is_admin: row.is_admin,
                     from_loopback,
+                    token_id: None,
                 })
             }
         }
@@ -186,6 +197,7 @@ impl AuthContext {
             name: row.name,
             is_admin: row.is_admin,
             from_loopback,
+            token_id: Some(owner.token_id),
         })
     }
 
@@ -196,6 +208,7 @@ impl AuthContext {
             name: db::LOCAL_ACCOUNT_NAME.to_string(),
             is_admin: false,
             from_loopback,
+            token_id: None,
         }
     }
 

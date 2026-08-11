@@ -234,6 +234,27 @@ async fn client_loop(state: AppState, identity: Identity, socket: WebSocket) {
 
     let event_task = tokio::spawn(pump_events(identity.account_id, events, outbound.clone()));
 
+    // 札で入った接続は、その札の失効で畳む（コードレビュー対応3）。作法は PC 側の
+    // `SessionHostConn::disconnect` と同じ「待ち行列へ Close を積むだけ」——TCP を
+    // 殴らず、行儀のよい相手が Close へ応えて受信ループが終わるのに任せる
+    let revocation_watch = identity.token_id.map(|token_id| {
+        let mut revocations = state.registry.subscribe_revocations();
+        let outbound = outbound.clone();
+        tokio::spawn(async move {
+            loop {
+                match revocations.recv().await {
+                    Ok(revoked) if revoked == token_id => {
+                        let _ = outbound.try_send(Message::Close(None));
+                        return;
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        })
+    });
+
     // 購読中のターミナル。切断時にまとめて畳む
     let mut terminals: HashMap<CardId, JoinHandle<()>> = HashMap::new();
     // 購読中の履歴。ターミナルと対称に、クライアントごとに持つ。
@@ -284,6 +305,9 @@ async fn client_loop(state: AppState, identity: Identity, socket: WebSocket) {
         task.abort();
     }
     event_task.abort();
+    if let Some(task) = revocation_watch {
+        task.abort();
+    }
     // 最後の1人なら跨ぎの購読も閉じる。**忘れると、誰も見ていないアカウントの
     // 知らせを受け取り続ける**
     state.registry.detach_browser(identity.account_id);

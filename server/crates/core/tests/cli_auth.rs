@@ -136,6 +136,60 @@ async fn 札なしのcliは次の一手が分かる言葉で断られる() {
 }
 
 #[tokio::test]
+async fn 失効させた札のwsは切れる() {
+    // コードレビュー対応3。revoke は PC の接続（/agent/ws）だけでなく、同じ札で
+    // 張られたブラウザ側の口（/ws。follow や画面の購読が座る席）も畳む——
+    // 「この札で繋がっていた接続は切れます」という CLI の言葉を嘘にしない
+    let server = Selfhost::start().await;
+    let target = server.cli_target().await;
+
+    let mut ws = client::ws::Ws::connect(&target)
+        .await
+        .expect("札で /ws へ繋げること");
+
+    // 自分の札を本物の口（DELETE /api/account/tokens/{id}）で失効させる
+    let (tokens, _) = client::account_tokens(&target)
+        .await
+        .expect("札の一覧を引けること");
+    assert_eq!(tokens.len(), 1);
+    client::account_revoke(&target, &tokens[0].id.to_string())
+        .await
+        .expect("失効させられること");
+
+    // 開きっぱなしの購読が畳まれる（Close が届いて next_event が線の切れを返す）
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if ws.next_event().await.is_err() {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("失効から10秒以内に接続が畳まれること");
+}
+
+#[tokio::test]
+async fn ローカルモードは札を持っていても素通しのまま() {
+    // コードレビュー対応2。外のサーバ用に ADASH_TOKEN を rcfile へ書いた利用者が、
+    // 認証の要らないローカルから全コマンド 401 で締め出されてはいけない——
+    // Open モードに札の概念は無いので、来ていても無視する（identify のモード内判定）
+    let server = TestServer::start().await;
+    let target = client::Target::from_url(&format!("http://{}", server.addr))
+        .expect("接続先を作れること")
+        .with_token(Some("adp_よそのサーバの札".to_string()));
+
+    let (sessions, _) = client::sessions(&target)
+        .await
+        .expect("札があっても読めること");
+    assert!(sessions.is_empty());
+
+    let ws = client::ws::Ws::connect(&target)
+        .await
+        .expect("札があっても /ws が開くこと");
+    ws.close().await;
+}
+
+#[tokio::test]
 async fn ローカルモードのaccount群はアカウントが無いという言葉で断られる() {
     // CLI設計§3-4。404 と言い分ける——口が無いことと、打ち間違いを区別できる形にする
     let server = TestServer::start().await;

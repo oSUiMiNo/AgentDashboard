@@ -160,6 +160,13 @@ reason = "視聴の貸出を返すだけ。返し損ねても寿命で切れる"
 
 [[entry]]
 path = "server/crates/server-core/src/registry.rs"
+fn = "broadcast_revocation"
+expr = '''self.revocations.send(token_id)'''
+class = "send"
+reason = "札で入った接続が1つも無いだけ。失効そのものは DB が持ち、新しい要求は resolve_token が断る"
+
+[[entry]]
+path = "server/crates/server-core/src/registry.rs"
 fn = "fanout"
 expr = '''self.transcript_tx.send(Arc::new(text))'''
 class = "send"
@@ -171,6 +178,13 @@ fn = "publish_local"
 expr = '''self.events.send(AccountEvent { account_id, message, })'''
 class = "send"
 reason = "そのアカウントのブラウザが1枚も開いていないだけ。開いたときに一覧を取り直す"
+
+[[entry]]
+path = "server/crates/server-core/src/ws.rs"
+fn = "client_loop"
+expr = '''outbound.try_send(Message::Close(None))'''
+class = "send"
+reason = "待ち行列が既に畳まれているなら、その接続はもう閉じている。Close を届ける相手が居ないだけ"
 
 [[entry]]
 path = "server/crates/server-core/src/ws.rs"
