@@ -332,6 +332,192 @@ async fn 申告の直後に終わったら正常終了のまま() {
     common::wait_for_status(&session, SessionStatus::Ended { ok: true }).await;
 }
 
+/// しきい値を最短にした設定。**猶予は停滞のしきい値を流用している**（設計§6）ので、
+/// 猶予切れの検証も既存の停滞テストとまったく同じ作法に乗る。
+fn 猶予を最短にした設定() -> agentdashboard_core::config::Config {
+    agentdashboard_core::config::Config {
+        stalled_threshold_secs: 1,
+        ..Default::default()
+    }
+}
+
+/// 見張りを、配信が出なくなるまで回す。
+///
+/// **見張りには申告のほかにも仕事がある**——フッタから権限モードを読んで控える経路が
+/// あり、初回はそこでカード全体が1回配信される。**申告を立てる前に**済ませておかないと、
+/// 「申告を下ろしたから配信された」のか「別の仕事で配信された」のかが見分けられない。
+///
+/// 上限を持たせてあるのは、止まらないときに**固まらず落ちる**ようにするため。
+async fn 見張りを落ち着かせる(server: &common::TestServer) {
+    let mut events = server.manager.subscribe_events();
+    for _ in 0..10 {
+        server.manager.sweep_once();
+        if events.try_recv().is_err() {
+            return;
+        }
+    }
+    panic!("見張りの配信が10周たっても止まりません");
+}
+
+/// 取り消す相手が居ない順序（`SessionStart` が先・`SessionEnd` が後で、そのあと無音）を、
+/// 見張りが拾うこと。
+///
+/// **申告は画面に出さない**と決めてあるので、下りたことを外から見る窓は `ok` の真偽しかない。
+#[tokio::test]
+async fn 猶予を過ぎた申告は見張りが下ろす() {
+    let server = common::TestServer::start_with(猶予を最短にした設定()).await;
+    let (session, mut watcher) = common::start_session(&server.manager).await;
+
+    common::fire_hook(&session, &mut watcher, "SessionStart", "").await;
+    common::wait_for_status(&session, SessionStatus::WaitingInput).await;
+    common::fire_hook(
+        &session,
+        &mut watcher,
+        "SessionEnd",
+        r#"{"reason":"resume"}"#,
+    )
+    .await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    server.manager.sweep_once();
+
+    // 申告が下りたので、このあとの異常終了は異常終了として出る
+    common::send_line(&session, "crash 9");
+    watcher.wait_for(fake_claude::CRASH_MARKER).await;
+    common::wait_for_status(&session, SessionStatus::Ended { ok: false }).await;
+}
+
+/// 申告を下ろしても、**状態は1つも動かず、ブラウザへは1バイトも流れない**（設計§6）。
+///
+/// 申告の間も状態は動かしていないので、下ろしても戻すものが無い。ここで配信すると、
+/// 画面には何も変わっていないのに更新だけが流れることになる。
+#[tokio::test]
+async fn 申告が下りても状態は動かず配信も起きない() {
+    let server = common::TestServer::start_with(猶予を最短にした設定()).await;
+    let (session, mut watcher) = common::start_session(&server.manager).await;
+
+    common::fire_hook(&session, &mut watcher, "SessionStart", "").await;
+    common::wait_for_status(&session, SessionStatus::WaitingInput).await;
+    // 申告を立てる**前に**、見張りの別の仕事を済ませておく
+    見張りを落ち着かせる(&server).await;
+    common::fire_hook(&session, &mut watcher, "SessionEnd", "").await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    // **フックの配信を受け取らないよう、見張りの直前で張る。** 申告そのものは
+    // `last_activity_at` を進めるので、手前から張ると自分が起こした行を数えてしまう
+    let mut events = server.manager.subscribe_events();
+    server.manager.sweep_once();
+
+    assert_eq!(
+        session.status(),
+        SessionStatus::WaitingInput,
+        "申告を下ろしても状態は動かないこと"
+    );
+    let 届いたもの = events.try_recv();
+    assert!(
+        matches!(
+            届いたもの,
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ),
+        "申告を下ろしただけでブラウザへ流してはいけない: {届いたもの:?}"
+    );
+}
+
+#[tokio::test]
+async fn 申告が無いまま見張りを回しても何も起きない() {
+    let server = common::TestServer::start_with(猶予を最短にした設定()).await;
+    let (session, mut watcher) = common::start_session(&server.manager).await;
+
+    common::fire_hook(&session, &mut watcher, "SessionStart", "").await;
+    common::wait_for_status(&session, SessionStatus::WaitingInput).await;
+    見張りを落ち着かせる(&server).await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let mut events = server.manager.subscribe_events();
+    server.manager.sweep_once();
+
+    assert_eq!(session.status(), SessionStatus::WaitingInput);
+    let 届いたもの = events.try_recv();
+    assert!(
+        matches!(
+            届いたもの,
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ),
+        "申告が無いのだから、見張りは何もしないこと: {届いたもの:?}"
+    );
+}
+
+/// 申告の一生（立つ → フックで下りる → また立つ → 猶予切れで下りる）が、
+/// **`card_id` で串刺しに読める形**で残ること（設計§7）。
+///
+/// `調査レポート.md` は「`/resume` と `/clear` が `reason` に何を入れるか」を確かめられなかった
+/// 理由として「**payload をどこにも残していない**」を挙げている。同じ穴を塞ぐのがこの3行なので、
+/// **欄まで含めて固定する**。
+#[tokio::test]
+async fn 申告の一生が_card_id_つきの3行として残る() {
+    let server = common::TestServer::start_with(猶予を最短にした設定()).await;
+    let sink = session_host_core::logging::capture::sink();
+    let mark = sink.mark();
+
+    let (session, mut watcher) = common::start_session(&server.manager).await;
+    common::fire_hook(&session, &mut watcher, "SessionStart", "").await;
+    common::wait_for_status(&session, SessionStatus::WaitingInput).await;
+
+    // ① 申告が立つ（理由つき）
+    common::fire_hook(
+        &session,
+        &mut watcher,
+        "SessionEnd",
+        r#"{"reason":"resume"}"#,
+    )
+    .await;
+    // ② 次のフックが届いて下りる
+    common::fire_hook(&session, &mut watcher, "PreToolUse", "").await;
+    common::wait_for_status(&session, SessionStatus::Working).await;
+    // ③ もう一度立てて、今度は猶予切れで下ろす（理由は載らない payload）
+    common::fire_hook(&session, &mut watcher, "SessionEnd", "").await;
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    server.manager.sweep_once();
+
+    // **相関キーで絞る。** 他のカードの行が混ざる
+    let lines = sink.matching(mark, "card_id", &session.card_id.to_string());
+    let 探す = |needle: &str| -> Vec<serde_json::Value> {
+        lines
+            .iter()
+            .filter(|line| line["msg"].as_str().is_some_and(|msg| msg.contains(needle)))
+            .cloned()
+            .collect()
+    };
+
+    let 立った = 探す("CLI が終了を名乗りました");
+    let フックで下りた = 探す("フックが届いたので");
+    let 猶予で下りた = 探す("猶予の間に終わらなかったので");
+    assert_eq!(立った.len(), 2, "申告は2回立てた: {lines:#?}");
+    assert_eq!(フックで下りた.len(), 1, "フックで下りたのは1回: {lines:#?}");
+    assert_eq!(猶予で下りた.len(), 1, "猶予で下りたのは1回: {lines:#?}");
+
+    // 必須7欄（ログ設計§2-1）。**`--card` で串刺しに引けるための性質そのもの**
+    for line in 立った.iter().chain(&フックで下りた).chain(&猶予で下りた) {
+        for field in ["ts", "level", "target", "proc", "pid", "run_id", "msg"] {
+            assert!(line.get(field).is_some(), "{field} が無い: {line}");
+        }
+        assert_eq!(
+            line["level"], "INFO",
+            "利用者の正常な操作なので警告にしない"
+        );
+    }
+
+    // 理由は欄として載る。**無いときは空**でよい（判定には使っていないので困らない）
+    assert_eq!(立った[0]["reason"], "resume");
+    assert_eq!(立った[1]["reason"], "");
+    assert_eq!(フックで下りた[0]["reason"], "resume");
+
+    // 下ろした側は、どのフックで下りたのか・どれだけ経っていたのかまで読める
+    assert_eq!(フックで下りた[0]["hook"], "PreToolUse");
+    assert!(フックで下りた[0]["elapsed_ms"].is_number());
+    assert!(猶予で下りた[0]["elapsed_ms"].is_number());
+}
+
 #[tokio::test]
 async fn 作業中のまま無音が続くと停滞として表示される() {
     let config = agentdashboard_core::config::Config {
