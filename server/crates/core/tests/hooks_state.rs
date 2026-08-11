@@ -167,12 +167,114 @@ async fn 注入したフックが起動して状態が順に変わる() {
     assert!(matches!(seen_status, ServerMessage::Status { .. }));
 }
 
+/// `/resume` の2つの順序のうち、`SessionEnd` が先に届くほう。
+///
+/// CLI は会話を呼び戻すとき `SessionEnd` と `SessionStart` を続けて飛ばす。前者は
+/// **プロセスの終わりではなく会話の終わり**なので、これだけで終端へ落とすと
+/// 生きている claude が操作できなくなる（調査レポートの症状そのもの）。
 #[tokio::test]
-async fn session_endを受けたら正常終了として扱う() {
+async fn resume相当はsession_endが先でも終了扱いにならない() {
+    let server = common::TestServer::start().await;
+    let (session, mut watcher) = common::start_session(&server.manager).await;
+
+    common::fire_hook(&session, &mut watcher, "SessionStart", "").await;
+    common::wait_for_status(&session, SessionStatus::WaitingInput).await;
+
+    // ここから呼び戻し。前の会話の終わりが先に届く
+    common::fire_hook(
+        &session,
+        &mut watcher,
+        "SessionEnd",
+        r#"{"reason":"resume"}"#,
+    )
+    .await;
+    common::fire_hook(
+        &session,
+        &mut watcher,
+        "SessionStart",
+        r#"{"source":"resume"}"#,
+    )
+    .await;
+    common::wait_for_status(&session, SessionStatus::WaitingInput).await;
+
+    // 指示を送れることまで見る。状態が終端だと Composer が無効になり、
+    // 利用者からは「このセッションだけ操作できない」に見える
+    session
+        .send_instruction("こんにちは")
+        .await
+        .expect("指示を送れること");
+    watcher.wait_for("received: こんにちは").await;
+}
+
+/// `/resume` の2つの順序のうち、`SessionStart` が先に届くほう。
+///
+/// 終端ガードを解くだけの直し方（方針の案B）では**こちらが救えない**。だから権威を
+/// プロセスへ移す形にしてある。2本は別々の性質を見ているので、片方だけでは足りない。
+#[tokio::test]
+async fn resume相当はsession_startが先でも終了扱いにならない() {
+    let server = common::TestServer::start().await;
+    let (session, mut watcher) = common::start_session(&server.manager).await;
+
+    common::fire_hook(&session, &mut watcher, "SessionStart", "").await;
+    common::wait_for_status(&session, SessionStatus::WaitingInput).await;
+
+    // 呼び戻し先の開始が先に届き、前の会話の終わりが後から届く
+    common::fire_hook(
+        &session,
+        &mut watcher,
+        "SessionStart",
+        r#"{"source":"resume"}"#,
+    )
+    .await;
+    common::fire_hook(
+        &session,
+        &mut watcher,
+        "SessionEnd",
+        r#"{"reason":"resume"}"#,
+    )
+    .await;
+    assert_eq!(
+        session.status(),
+        SessionStatus::WaitingInput,
+        "後から届いた SessionEnd で終端へ落としてはいけない"
+    );
+
+    session
+        .send_instruction("こんにちは")
+        .await
+        .expect("指示を送れること");
+    watcher.wait_for("received: こんにちは").await;
+}
+
+#[tokio::test]
+async fn session_endだけでは終わらない() {
     let server = common::TestServer::start().await;
     let (session, mut watcher) = common::start_session(&server.manager).await;
 
     common::fire_hook(&session, &mut watcher, "SessionEnd", "").await;
+    assert!(
+        !matches!(session.status(), SessionStatus::Ended { .. }),
+        "申告だけでは終わらない。実際: {:?}",
+        session.status()
+    );
+
+    // 申告のあとに届いたフックも、今までどおり効く
+    assert_eq!(
+        server.post_hook(session.token(), "PreToolUse", "{}").await,
+        204
+    );
+    common::wait_for_status(&session, SessionStatus::Working).await;
+}
+
+#[tokio::test]
+async fn プロセスが終われば終わる() {
+    let server = common::TestServer::start().await;
+    let (session, mut watcher) = common::start_session(&server.manager).await;
+
+    common::fire_hook(&session, &mut watcher, "SessionEnd", "").await;
+
+    // 擬似 claude を実際に終わらせる。ここで初めて終了が確定する
+    common::send_line(&session, "exit");
     common::wait_for_status(&session, SessionStatus::Ended { ok: true }).await;
 
     // 終わったカードは、後から届いたフックで生き返らない
