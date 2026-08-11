@@ -776,6 +776,148 @@ async fn 終了はフック経路とプロセス終了経路の両方で検知�
     }
 }
 
+/// 会話の入れ替えと本当の終了を、**1セッションで**実物から採る（設計§11 の前提3件）。
+///
+/// 擬似 claude では「`SessionEnd` が来たらこう振る舞う」までしか固定できない。
+/// **本物の CLI が本当に `SessionEnd` を出すのか**、出すなら `reason` に何を入れるのか、
+/// そして本当の終了のあとに他のフックが来ないのかは、ここでしか言えない。
+///
+/// クォータを使うので**起こすのは1本**。`/clear` で会話を入れ替えてから `/exit` で終わらせ、
+/// 途中のログを読む。
+#[tokio::test]
+#[ignore = "本物の claude を起動し、アカウントのクォータを消費する（make test-cli）"]
+async fn 会話の入れ替えでは終わらず_プロセスの終了で終わる() {
+    let dir = WorkDir::new("end-report");
+    // **利用者のグローバル設定を持ち込まない**（ガイドラインの原則）。持ち込むと、
+    // セッション開始で発火する自動スキルの許可ダイアログがターンを塞ぐ
+    let program = claude_wrapper(&dir, &["--setting-sources", "project,local"]);
+    let server = common::TestServer::start_with_program(
+        Config::default(),
+        program.to_string_lossy().into_owned(),
+    )
+    .await;
+    let sink = session_host_core::logging::capture::sink();
+    let mark = sink.mark();
+
+    let session = server
+        .manager
+        .spawn(&dir.as_str())
+        .expect("セッションを起動できること");
+    let mut watcher = common::Watcher::attach(&session);
+    accept_trust_prompt_if_any(&session, &mut watcher).await;
+    wait_for_status(&session, SessionStatus::WaitingInput).await;
+
+    // ── 会話の入れ替え。**カードが終了扱いになってはいけない**（要件の症状そのもの）
+    session
+        .write_input(b"/clear\r")
+        .expect("端末へ書き込めること");
+
+    let 申告 = 申告を待つ(sink, mark, session.card_id, 0).await;
+    match &申告 {
+        Some((line, _)) => {
+            eprintln!(
+                "【実測】/clear の SessionEnd: reason={:?}",
+                line["reason"].as_str()
+            );
+            assert!(
+                !matches!(session.status(), SessionStatus::Ended { .. }),
+                "会話の入れ替えで終了扱いになった: {:?}",
+                session.status()
+            );
+        }
+        // **落とさない。** 出ないならそれが実測で、記録すべき事実になる
+        None => eprintln!("【実測】/clear では SessionEnd が飛ばなかった"),
+    }
+
+    // ── 本当の終了。ここで初めて確定する
+    let 申告の数 = 申告の行(sink, mark, session.card_id).len();
+    session
+        .write_input(b"/exit\r")
+        .expect("端末へ書き込めること");
+
+    // 前提3：終わりの申告が `reason` つきで残ること
+    let (最後の申告, 申告を見た時刻) = 申告を待つ(sink, mark, session.card_id, 申告の数)
+        .await
+        .expect("本当の終了の申告が残っていること");
+    eprintln!(
+        "【実測】/exit の SessionEnd: reason={:?}",
+        最後の申告["reason"].as_str()
+    );
+
+    wait_for_status(&session, SessionStatus::Ended { ok: true }).await;
+
+    // 前提2：申告から確定までの時間差。**猶予（既定120秒）より十分短いこと**。
+    // 測っているのは**観測の間隔**なので、巡回の刻み（200ms）ぶんは粗い
+    let 経過 = 申告を見た時刻.elapsed().as_millis();
+    eprintln!("【実測】申告から確定まで: {経過} ms（観測の刻みは 200ms）");
+    assert!(
+        経過 < 120_000,
+        "申告から確定まで猶予を超えている: {経過} ms"
+    );
+
+    // 前提1：本当の終了のあと、申告を取り消すフックが1件も来ないこと。
+    // **来ていれば `フックが届いたので` の行が出ており、`hook` 欄にイベント名が載る**
+    let 最後の申告のあと = sink
+        .matching(mark, "card_id", &session.card_id.to_string())
+        .into_iter()
+        .skip_while(|line| line["ts"] != 最後の申告["ts"])
+        .filter(|line| {
+            line["msg"]
+                .as_str()
+                .is_some_and(|msg| msg.contains("フックが届いたので"))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        最後の申告のあと.is_empty(),
+        "本当の終了のあとにフックが届いている（申告が取り消される）: {最後の申告のあと:#?}"
+    );
+
+    server
+        .manager
+        .archive(session.card_id)
+        .expect("片付けられること");
+}
+
+/// 「終了を名乗った」行だけを取り出す。
+fn 申告の行(
+    sink: &session_host_core::logging::capture::Sink,
+    mark: usize,
+    card_id: protocol::CardId,
+) -> Vec<serde_json::Value> {
+    sink.matching(mark, "card_id", &card_id.to_string())
+        .into_iter()
+        .filter(|line| {
+            line["msg"]
+                .as_str()
+                .is_some_and(|msg| msg.contains("CLI が終了を名乗りました"))
+        })
+        .collect()
+}
+
+/// 申告の行が `これより多く` 出るまで待ち、**見た時刻を添えて**返す。
+///
+/// 出なければ `None`（**出ないことも実測**なので、待ち切れを失敗にしない）。
+/// 時刻をログの `ts` から読まずに手元の時計で持つのは、**依存を1つも増やさない**ため。
+/// 測りたいのは猶予（120秒）との桁の違いなので、巡回の刻みぶんの粗さで足りる。
+async fn 申告を待つ(
+    sink: &session_host_core::logging::capture::Sink,
+    mark: usize,
+    card_id: protocol::CardId,
+    これより多く: usize,
+) -> Option<(serde_json::Value, Instant)> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let mut 行 = 申告の行(sink, mark, card_id);
+        if 行.len() > これより多く {
+            return 行.pop().map(|line| (line, Instant::now()));
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 6. Composer からの指示送信（単一行 / 複数行 / スラッシュコマンド）
 // ---------------------------------------------------------------------------
