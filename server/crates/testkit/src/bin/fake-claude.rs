@@ -213,6 +213,7 @@ fn main() {
     // SIGWINCH（画面サイズの変更）に反応する。本物も反応する（再描画で応える）——
     // 擬似はテストが読める形＝マーカー1行で応える。「リサイズが子まで届いた」ことを
     // PTY の外から観測する唯一の口（PTY のサイズに getter は無い）
+    #[cfg(unix)]
     start_winch_reporter();
 
     let stdout = std::io::stdout();
@@ -357,6 +358,13 @@ fn main() {
 /// main は起動直後に `stdout.lock()` を取って持ち続けるので、別スレッドから
 /// `println!` するとロック待ちで永久に止まる。fd 1 へ直接 `write(2)` すれば、
 /// 1回の write は行単位で崩れずに出る（割り込まれるのは行と行の間だけ）。
+///
+/// # Unix 専用
+///
+/// SIGWINCH も ioctl(TIOCGWINSZ) も Windows の libc には無い。リリースは
+/// **Windows でもワークスペース全体を作る**ので、囲わないとタグを打つまで
+/// 気づけない形で3 OS ビルドが落ちる（v0.1.13 の1回目で実際に落ちた）。
+#[cfg(unix)]
 fn start_winch_reporter() {
     use std::sync::atomic::{AtomicI32, Ordering};
 
