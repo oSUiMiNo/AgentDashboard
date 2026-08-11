@@ -332,9 +332,7 @@ struct EndReport {
     ///
     /// 綴りも顔ぶれも CLI 側の都合で変わる（公式の列挙は4つから6つへ増えている）。
     /// ここに判定を載せると、表に無い値が来たときだけ壊れる。
-    // 読むのはログ（段3）。**判定からは永久に読まない**ので、
-    // 「使われていないから消す」と判断しないこと
-    #[allow(dead_code)]
+    // 読むのはログだけ。**判定からは永久に読まない**
     reason: Option<String>,
 }
 
@@ -984,13 +982,33 @@ impl Session {
     }
 
     /// CLI が終わりを名乗ったことを控える。**状態は動かさない。**
+    ///
+    /// `reason` を1行に残すのは、**受け取った値をどこにも残していなかった**ため
+    /// （`/resume` と `/clear` が何を入れるかを、実機の症状から調べようがなかった）。
     pub(crate) fn report_end(&self, reason: Option<&str>) {
         self.end_report.report(now_ms(), reason.map(str::to_owned));
+        tracing::info!(
+            card_id = %self.card_id,
+            reason = reason.unwrap_or_default(),
+            "CLI が終了を名乗りました。確定はプロセスの終了を待ちます"
+        );
     }
 
     /// 申告を下ろす。**まだ生きている証拠**（次のフック1件）を受け取ったときに呼ぶ。
-    pub(crate) fn clear_end_report(&self) {
-        self.end_report.clear();
+    ///
+    /// **立っていなければ何も出さない。** フックは1件ごとに届くので、ここが毎回喋ると
+    /// いちばん読みたい行がそれで埋まる（ガイドライン「ログを残すとき」3）。
+    pub(crate) fn clear_end_report(&self, by: state::HookEvent) {
+        let Some(report) = self.end_report.clear() else {
+            return;
+        };
+        tracing::info!(
+            card_id = %self.card_id,
+            reason = report.reason.as_deref().unwrap_or_default(),
+            elapsed_ms = now_ms().saturating_sub(report.at),
+            hook = by.as_str(),
+            "終了の申告を下ろしました。フックが届いたので、まだ生きています"
+        );
     }
 
     /// 申告を取り出す（確定のときに1度だけ）。
@@ -999,7 +1017,6 @@ impl Session {
     }
 
     /// 猶予を過ぎた申告を取り出す。**過ぎていなければ残す。**
-    #[allow(dead_code)] // 猶予切れの見張りは段3 で結線する
     fn end_report_older_than(&self, now: Timestamp, secs: u64) -> Option<EndReport> {
         self.end_report.take_older_than(now, secs)
     }
@@ -1061,6 +1078,24 @@ impl Session {
 
         let saw_output = self.saw_output.load(Ordering::Relaxed);
         let now = now_ms();
+
+        // **猶予を過ぎても生きているなら、申告は嘘だったことになる。** 取り消す相手が
+        // 居ない順序（`SessionStart` が先・`SessionEnd` が後で、そのあと無音）を、ここで拾う。
+        //
+        // 猶予に `threshold_secs`（＝停滞のしきい値）を流用しているのは、どちらも
+        // 「何も来ないまま経った時間」で判断する同じ性質の値だから。別の数字を持つほどの
+        // 違いが無く、持つとテストから短くできない。
+        //
+        // **状態は動かさないので `Changed` には足さない。** 申告の間も状態は動いていない
+        // ので、下ろしても戻すものが無い（ブラウザへは1バイトも流れない）。
+        if let Some(report) = self.end_report_older_than(now, input.threshold_secs) {
+            tracing::info!(
+                card_id = %self.card_id,
+                reason = report.reason.as_deref().unwrap_or_default(),
+                elapsed_ms = now.saturating_sub(report.at),
+                "終了の申告を下ろしました。猶予の間に終わらなかったので、まだ生きています"
+            );
+        }
 
         // **判定だけをロックの中で終わらせる。** 材料集め（端末の末尾は `ring` の
         // ロックを取る）を中でやると、毎フレーム `ring` を握る出力の配信と、一覧を
@@ -1685,7 +1720,7 @@ impl SessionManager {
         // 理由の綴りにも、到着順にも依らない
         match input.event {
             state::HookEvent::SessionEnd => session.report_end(input.end_reason()),
-            _ => session.clear_end_report(),
+            other => session.clear_end_report(other),
         }
         let (changed, new_transcript) = session.apply_hook(input);
         // JSONL の場所が分かった／変わった時点でパーサへ監視を頼む。resume で別ファイルに
