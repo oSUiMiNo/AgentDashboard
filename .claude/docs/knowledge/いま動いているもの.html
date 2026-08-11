@@ -37,10 +37,10 @@
 <p class="lead">
   AgentDashboard に関係して、この機械や外で<strong>起動しっぱなしになっているもの</strong>の一覧。
   「どの URL がどれを指しているか」を取り違えると原因追跡が丸ごと空振りするので、そこを中心に書いてある。
-  <br>最終更新：2026-08-10 19時台（<strong>動いているのは実機・AWS・セッションホスト<span class="mark">▽</span>の3つ</strong>。trial だけ止まっている）
-  <br><strong>実機は <code>0.1.12</code> で稼働中</strong>（08-10 15:37 ビルドのバイナリを直後に起動。<code>/api/me</code> の実測）。パーサの通知の輪を断つ修正（ローカルイシュー「ダッシュボードでセッションを動かすとWSLが落ちやすい」）が入っている。
-  <br><strong>この修正が入っているのは実機と、セッションホスト<span class="mark">▽</span>のパーサだけ。</strong> AWS は配った箱なのでリリースを出すまで届かない。セッションホスト<span class="mark">▽</span>の<strong>本体</strong>は生きた claude を抱えているので入れ替えておらず、<strong>次に起こし直したときから効く</strong>。<strong>ただしパーサは 08-10 16:46 に落として立て直したので、そこだけ 0.1.12 になっている</strong>（子だけなら落としても claude は道連れにならない。下の表を見る）。
-  <br><strong>版番号だけで中身を判断しないこと。</strong> 実機はソースビルド<span class="mark">▽</span>なので、版を上げなくても <code>git pull</code> と <code>make build</code> のたびに中身が変わる。実機リポジトリは <code>ac19aac</code>（CLI イシュー フェーズ1）まで pull 済みだが、<strong>走っているのはビルド時点（15:37）の中身</strong>。
+  <br>最終更新：2026-08-11 16時台（<strong>動いているのは実機・AWS・セッションホスト<span class="mark">▽</span>の3つ</strong>。trial だけ止まっている）
+  <br><strong>3つとも <code>0.1.13</code> で揃っている</strong>（08-11 の全更新。<code>/api/me</code>・接続ログの実測）。CLI イシュー（`agentdashboard session …` などの6群・札の kind・台帳）が全経路に入った。
+  <br><strong>実機とセッションホスト<span class="mark">▽</span>は 08-11 15:28 ビルドを 15:29〜15:30 に起こし直し</strong>（セッションホストが抱えていた claude 2本は14時間以上待機のまま道連れ——ユーザ指示の全更新で実施）。<strong>AWS はリリース v0.1.13 の箱へ入れ替え</strong>（16:09。migration <code>m20260810_000004_token_kind</code> が自動適用された。控えは <code>compose.yml.bak-0.1.12-20260811</code> と <code>backup-agentdashboard-2026-08-11-1600.sql</code>）。
+  <br><strong>版番号だけで中身を判断しないこと。</strong> 実機はソースビルド<span class="mark">▽</span>なので、版を上げなくても <code>git pull</code> と <code>make build</code> のたびに中身が変わる。08-11 の全更新でビルドと走行中の中身は一致したが、<strong>手元で作業を進めればまた実機だけが先へ行く</strong>。
 </p>
 
 <h2>先に用語</h2>
@@ -73,12 +73,12 @@
 
   <rect x="30" y="62" width="200" height="72" rx="8" fill="#161a21" stroke="#2d4a22"/>
   <text x="44" y="88" fill="#9ece6a" font-size="14" font-weight="600">8787 実機</text>
-  <text x="44" y="108" fill="#e6e9ef" font-size="12">ローカルモード・版 0.1.11</text>
+  <text x="44" y="108" fill="#e6e9ef" font-size="12">ローカルモード・版 0.1.13</text>
   <text x="44" y="125" fill="#9aa4b2" font-size="11">~/AgentDashboard のソースビルド</text>
 
   <rect x="256" y="62" width="200" height="72" rx="8" fill="#161a21" stroke="#2d4a22"/>
   <text x="270" y="88" fill="#9ece6a" font-size="14" font-weight="600">8788 trial</text>
-  <text x="270" y="108" fill="#e6e9ef" font-size="12">サーバモード・版 0.1.11</text>
+  <text x="270" y="108" fill="#e6e9ef" font-size="12">サーバモード・止まっている</text>
   <text x="270" y="125" fill="#9aa4b2" font-size="11">同じ実行ファイルを別設定で</text>
 
   <rect x="30" y="178" width="200" height="62" rx="8" fill="#161a21" stroke="#2a313c"/>
@@ -95,7 +95,7 @@
   <rect x="560" y="62" width="280" height="150" rx="10" fill="#221b0f" stroke="#5a4520"/>
   <text x="578" y="90" fill="#e0af68" font-size="14" font-weight="600">AWS EC2（外）</text>
   <text x="578" y="112" fill="#e6e9ef" font-size="12">i-0bf66240fec98392a / t3.small</text>
-  <text x="578" y="132" fill="#e6e9ef" font-size="12">docker compose ／ 版 0.1.11</text>
+  <text x="578" y="132" fill="#e6e9ef" font-size="12">docker compose ／ 版 0.1.13</text>
   <text x="578" y="152" fill="#9aa4b2" font-size="11">箱の中なので版の切替は出ない</text>
   <text x="578" y="172" fill="#9aa4b2" font-size="11">cloudflared は systemd で常駐</text>
   <text x="578" y="192" fill="#f7768e" font-size="11">課金が続いている</text>
@@ -159,7 +159,7 @@ agentdashboard-agent logs --since 24h --state-dir ~/agentdashboard-agent/state</
   <tr>
     <td>実機</td>
     <td><code>127.0.0.1:8787</code></td>
-    <td><span class="tag t-ok">0.1.12</span><br><small>ソースビルド<span class="mark">▽</span>（08-10 15:37 のビルドで起こし直し）</small></td>
+    <td><span class="tag t-ok">0.1.13</span><br><small>ソースビルド<span class="mark">▽</span>（08-11 15:28 のビルドで 15:29 に起こし直し）</small></td>
     <td>ローカルモード<span class="mark">▽</span>。<code>~/AgentDashboard</code> で <code>make build</code> したものを引数なしで起動。端末の出力は <code>~/agentdashboard-run.log</code>、構造化ログは <code>~/.local/state/agentdashboard-run/logs/</code>。<br><strong>読むときは <code>--state-dir</code> が要る。</strong> 置き場所を設定で移してあるが、読む口は設定を読まない（設計§11-2 の非対称）——<code>agentdashboard logs --since 1h --state-dir ~/.local/state/agentdashboard-run</code><br><strong>起こすときは <code>setsid</code> で切り離す。</strong> ツール呼び出しの子として起こすと、呼び出しの終了で巻き添えに死ぬ（08-10 に一度この形で起こしてしまい、起こし直した）。<code>cd ~/AgentDashboard &amp;&amp; setsid nohup ./server/target/release/agentdashboard &gt;&gt; ~/agentdashboard-run.log 2&gt;&amp;1 &lt; /dev/null &amp;</code></td>
   </tr>
   <tr>
@@ -171,7 +171,7 @@ agentdashboard-agent logs --since 24h --state-dir ~/agentdashboard-agent/state</
   <tr>
     <td>セッションホスト<span class="mark">▽</span></td>
     <td>— （PC 名 <code>OMEN</code>）</td>
-    <td><span class="tag t-ok">0.1.11</span><br><small>ソースビルド<span class="mark">▽</span>（08-10 01:08 に起こした）。<strong>本体は修正前の版のまま</strong>——走っているのは起こしたときの版で、起こし直すまで変わらない。<br><strong>パーサだけは 0.1.12</strong>（08-10 16:46 に落として立て直した。輪の修正が入っている）</small></td>
+    <td><span class="tag t-ok">0.1.13</span><br><small>ソースビルド<span class="mark">▽</span>（08-11 15:30 に起こし直し。<strong>本体・パーサとも 0.1.13</strong>。抱えていた claude 2本＝14時間以上待機は道連れ——ユーザ指示の全更新で実施）</small></td>
     <td><strong>AWS へ繋いでいる</strong>（<code>dash.underschaft.com</code>。この PC の名前は <code>OMEN</code>）。設定は <code>~/agentdashboard-agent/agent.toml</code>、ログは同じ場所の <code>run.log</code>。<br><strong>これが止まっていると、ブラウザに「指定された PC が繋がっていません」が出る</strong>——カードは PC に紐づくので、繋がっていないと引けない。ブラウザとサーバは繋がったままなので<strong>上の帯だけが赤くなる</strong>。
         <strong>ここを起こし直すと、抱えている claude が道連れになる。</strong>落とす前に <code>ps -eo pid,ppid,args --forest</code> で子を数えること——08-10 の入れ替えでは<strong>生きた claude が1本ぶら下がっていたので入れ替えを見送った</strong>。版を上げたら入れ替えないと、サーバだけ新しくなって<strong>フォルダを覗く口が「版が古い」で断られ続ける</strong>（実際に踏んだ）。<code>agent_id</code> はペアリングトークンから決まるので、<strong>起こし直しても同じ PC のまま</strong>——枠は孤児にならない。
         <strong>パーサだけなら落としてよい。</strong>子の <code>transcript-parser</code> を PID 直指定で <code>kill</code> すると、セッションホストが立て直して監視も保存済みの位置から張り直す（<strong>claude は道連れにならない</strong>）。本体が古い版のあいだにパーサが肥大したら、これで嵩が戻るうえ<strong>ディスク上の新しいパーサに入れ替わる</strong>。
@@ -181,7 +181,7 @@ agentdashboard-agent logs --since 24h --state-dir ~/agentdashboard-agent/state</
   <tr>
     <td>AWS EC2</td>
     <td><code>dash.underschaft.com</code></td>
-    <td><span class="tag t-ok">0.1.11</span><br><small>配った箱（GHCR）。08-09 に <code>0.1.10</code> から入れ替え</small></td>
+    <td><span class="tag t-ok">0.1.13</span><br><small>配った箱（GHCR）。08-11 16:09 に <code>0.1.12</code> から入れ替え（migration <code>token_kind</code> 自動適用・控えは <code>~/backup-agentdashboard-2026-08-11-1600.sql</code>）</small></td>
     <td><strong>docker compose</strong>（道②）。<code>~/compose.yml</code> の <code>image:</code> で版を決める。<strong>ログを読むには <code>--state-dir /var/lib/agentdashboard</code> が要る</strong>（読む口は設定を読まない）。外へは<strong>名前付きトンネル</strong>で出しており、<code>cloudflared</code> は <strong>systemd で常駐</strong>（<code>systemctl status cloudflared</code>）。terraform は <code>~/Dev/Test_AgentDashboard/</code>、SSH 鍵は同じ場所の <code>ssh_key.pem</code>、IP は <code>43.207.237.211</code></td>
   </tr>
 </table>
