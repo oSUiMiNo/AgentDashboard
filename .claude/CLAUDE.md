@@ -112,6 +112,7 @@ issue-sync は、ユーザーが行うので不要。必要かどうかユーザ
 | `server/crates/session-host-core/src/offsets.rs` | 「どこまで読んだか」の置き場所。**読む側（パーサ）と進める側（運び手）で共有する** |
 | `server/crates/session-host-core/src/logging.rs` | ログの出力層と読む口の土台。**7欄を組み立てるのはここだけ**。同じ名前の欄を渡すと `f_<名前>` へ退避する。行を出す場所を増やす前にガイドライン「ログを残すとき」を読む |
 | `server/crates/core/tests/swallowed.toml` | 結果を捨てている箇所の台帳。**製品コードの `let _ =` は1件残らずここに理由付きで載る**。実コードと食い違うと落ちる。鍵は行番号ではなく式の断片 |
+| `server/crates/core/tests/cli_surface.toml` | 画面と CLI の口の対応台帳。**画面に口を足したらここへ足す**。ブラウザが叩ける口（`ClientMessage` と REST）が1つ残らず載り、CLI へ写したか・載せない理由が残る。実コードと食い違うと落ちる |
 | `server/crates/session-host/src/lib.rs` | セッションホストの中身。フックの受信口を自分で開く（設計§5-3）。**実行ファイルは `crates/dist` が持つ** |
 | `server/crates/dist/` | 利用者へ配る一式。実行ファイル3本の**入口だけ**（各1行）を持つ（§25 読み替え1）。中身を書かないこと |
 | `dist-workspace.toml` ／ `scripts/dist` | 配布物の作り方。**`.github/workflows/release.yml` は `dist generate` が作る**ので手で書き換えない |
