@@ -518,6 +518,178 @@ async fn 申告の一生が_card_id_つきの3行として残る() {
     assert!(猶予で下りた[0]["elapsed_ms"].is_number());
 }
 
+/// 申告が立っている間、**そのカードは生きているものとして数えられる**（設計§9）。
+///
+/// 数える側が騙されると、被害は表示に留まらない——`version restart` の門は「生きたカードが
+/// 0枚だから安全」と判断して実機ごと落とし、枠の削除は走っているセッションを巻き添えにする。
+/// どちらも一覧（`registry.list`）を見ているので、ここを1本で押さえられる。
+#[tokio::test]
+async fn 申告中のカードは生きているものとして数えられる() {
+    let server = common::TestServer::start().await;
+    let (session, mut watcher) = common::start_session(&server.manager).await;
+
+    common::fire_hook(&session, &mut watcher, "SessionStart", "").await;
+    common::wait_for_status(&session, SessionStatus::WaitingInput).await;
+    let 載ったカード = server
+        .wait_for_listed("1枚が入力待ち", |listed| {
+            listed.len() == 1 && listed[0].status == SessionStatus::WaitingInput
+        })
+        .await;
+    let 申告前の最終活動 = 載ったカード[0].last_activity_at;
+    let project = 載ったカード[0].project.0.clone();
+
+    // 枠を登録しておく。**削除の門（`has_sessions`）が数える入口**がここ
+    let (_, body) = server
+        .request(
+            "POST",
+            "/api/projects",
+            Some(&serde_json::json!({ "host": "local", "path": project }).to_string()),
+        )
+        .await;
+    let added: serde_json::Value = serde_json::from_str(&body).expect("応答を読めること");
+    let project_id = added["project"]["id"].as_str().expect("id があること");
+
+    common::fire_hook(
+        &session,
+        &mut watcher,
+        "SessionEnd",
+        r#"{"reason":"resume"}"#,
+    )
+    .await;
+
+    // **記録へ届いたことを待ってから判定する。** 申告は状態を変えないので、撃った直後に
+    // 読むと「まだ前の報告しか届いていない」のか「届いたうえで終了扱いになっていない」のかが
+    // 区別できない。最終活動が進んだことが、届いたことの証拠になる
+    let listed = server
+        .wait_for_listed("申告の報告が記録へ届くこと", |listed| {
+            listed.len() == 1 && listed[0].last_activity_at > 申告前の最終活動
+        })
+        .await;
+    assert!(
+        !matches!(listed[0].status, SessionStatus::Ended { .. }),
+        "申告だけで終了扱いになっている: {:?}",
+        listed[0].status
+    );
+
+    let (status, body) = server
+        .request("DELETE", &format!("/api/projects/{project_id}"), None)
+        .await;
+    assert_eq!(status, 409, "申告だけで枠が消せてしまう: {body}");
+}
+
+/// 申告が立っていても、**履歴の監視は新しいトランスクリプトへ張り替わる**。
+///
+/// 調査レポートが観測した「1箇所だけが嘘をつく」状態のうち、**張り替えの側は元から
+/// 正しかった**（`apply_hook` は `state::apply` の手前で控える）。直しすぎて、こちらを
+/// 巻き添えにしていないことを見る。
+#[tokio::test]
+async fn 申告中でも履歴の監視は新しいトランスクリプトへ張り替わる() {
+    /// 呼び戻した先の会話。**別のファイルになる**ことが要点なので、値そのものに意味は無い。
+    ///
+    /// 擬似 claude の `transcript_path` は**起動時に渡した ID**から組み立てられるので、
+    /// payload の `session_id` を上書きしても場所は動かない。本物の `/resume` と同じく、
+    /// **フックに新しい場所を名乗らせる**のが正しい再現になる。
+    const 呼び戻し先: &str = "11111111-2222-3333-4444-555555555555";
+
+    let server = common::TestServer::start().await;
+    let (session, mut watcher) = common::start_session(&server.manager).await;
+
+    common::fire_hook(&session, &mut watcher, "SessionStart", "").await;
+    common::wait_for_status(&session, SessionStatus::WaitingInput).await;
+    let 呼び戻す前 = session.transcript_path().expect("場所を控えていること");
+
+    common::fire_hook(
+        &session,
+        &mut watcher,
+        "SessionEnd",
+        r#"{"reason":"resume"}"#,
+    )
+    .await;
+    common::fire_hook(
+        &session,
+        &mut watcher,
+        "SessionStart",
+        &format!(
+            r#"{{"session_id":"{呼び戻し先}","transcript_path":"/tmp/fake-claude/{呼び戻し先}.jsonl","source":"resume"}}"#
+        ),
+    )
+    .await;
+
+    let 呼び戻した後 = 張り替えを待つ(&session, &呼び戻す前).await;
+    assert!(
+        呼び戻した後.contains(呼び戻し先),
+        "呼び戻した先を指していない: {呼び戻した後}"
+    );
+}
+
+/// 履歴の監視先が変わるまで待つ。
+///
+/// **同じ種類のフックを2回撃つときは、`fire_hook` の印では待てない。** `Watcher::wait_for` は
+/// 溜まった出力に印が含まれていれば即座に返るので、1回目の `SessionStart` が残した印で
+/// 通り抜けてしまい、2回目が届く前に判定してしまう。**効果そのものを待つ。**
+async fn 張り替えを待つ(session: &session_host_core::session::Session, 前: &str) -> String {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        if let Some(path) = session.transcript_path()
+            && path != 前
+        {
+            return path;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "20秒たっても張り替わりませんでした（いまも {前}）"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// 1本で呼び戻しが起きても、**他のカードは1つも動かない**。
+///
+/// 要件が「そのあと新しく別のセッションを起動してみたが、そちらは問題無く入力待ちに
+/// なっている」と書いているとおり、症状は1本だけに出る。印をカード単位で持っていることの確認。
+#[tokio::test]
+async fn 一本で呼び戻しが起きても他のカードは動かない() {
+    let server = common::TestServer::start().await;
+    let (呼び戻す側, mut watcher) = common::start_session(&server.manager).await;
+    let (巻き添えを見る側, mut 見る側の監視) = common::start_session(&server.manager).await;
+
+    for (session, watcher) in [
+        (&呼び戻す側, &mut watcher),
+        (&巻き添えを見る側, &mut 見る側の監視),
+    ] {
+        common::fire_hook(session, watcher, "SessionStart", "").await;
+        common::wait_for_status(session, SessionStatus::WaitingInput).await;
+    }
+    let 巻き添えを見る側の最終活動 = 巻き添えを見る側.meta().last_activity_at;
+
+    // 片方だけで `/resume` 相当を起こす
+    common::fire_hook(
+        &呼び戻す側,
+        &mut watcher,
+        "SessionEnd",
+        r#"{"reason":"resume"}"#,
+    )
+    .await;
+    common::fire_hook(
+        &呼び戻す側,
+        &mut watcher,
+        "SessionStart",
+        r#"{"source":"resume"}"#,
+    )
+    .await;
+
+    assert_eq!(
+        巻き添えを見る側.status(),
+        SessionStatus::WaitingInput,
+        "隣のカードの状態が動いている"
+    );
+    assert_eq!(
+        巻き添えを見る側.meta().last_activity_at,
+        巻き添えを見る側の最終活動,
+        "隣のカードの最終活動が動いている"
+    );
+}
+
 #[tokio::test]
 async fn 作業中のまま無音が続くと停滞として表示される() {
     let config = agentdashboard_core::config::Config {
