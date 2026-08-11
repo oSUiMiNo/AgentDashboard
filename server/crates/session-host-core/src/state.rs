@@ -117,6 +117,18 @@ impl HookInput {
         self.text("last_assistant_message")
     }
 
+    /// `SessionEnd` が運んでくる終了の理由。**判定には使わない。**
+    ///
+    /// 綴りも顔ぶれも CLI 側の都合で変わる。実際、公式ドキュメントの列挙は4つから6つへ
+    /// 増えている（`resume` と `bypass_permissions_disabled` が後から入った）。ここに判定を
+    /// 載せると、**表に無い値が来たときだけ**壊れる——しかも壊れ方は「生きているカードが
+    /// 終了に落ちる」という、いま直したものとまったく同じになる。
+    ///
+    /// 使い道は記録だけ。無くても `None` になるだけで、判定は1バイトも変わらない。
+    pub fn end_reason(&self) -> Option<&str> {
+        self.text("reason")
+    }
+
     /// いまの権限モード。
     ///
     /// **全てのフックが運んでくるわけではない**（設計§11 の実測）。運ぶのは
@@ -158,6 +170,9 @@ impl Changed {
 ///   「入力待ち」と出ると、人が対処すべき状況を見落とす
 pub fn apply(meta: &mut SessionMeta, input: &HookInput, now: Timestamp) -> Changed {
     let mut changed = Changed::default();
+    // ここへ来る `Ended` は**プロセスが消えたことが確定したもの**だけになった
+    // （`SessionEnd` フックはもう終端へ落とさない）。したがってこのガードの役目は
+    // 「死んだプロセスから遅れて届いたフックで蘇らせない」ことだけである
     if matches!(meta.status, SessionStatus::Ended { .. }) {
         return changed;
     }
@@ -237,8 +252,15 @@ pub fn apply(meta: &mut SessionMeta, input: &HookInput, now: Timestamp) -> Chang
             changed.status = true;
         }
 
-        // フックが届いた＝CLI が自分で終了処理をした。異常終了ではない
-        HookEvent::SessionEnd => set(meta, SessionStatus::Ended { ok: true }, &mut changed),
+        // **状態を動かさない。** フックは「会話が終わった」までしか言えない。
+        //
+        // `SessionEnd` は `/resume` や `/clear` のように**会話が入れ替わるだけ**の場面でも
+        // 飛ぶ（公式の `reason` に `resume` / `clear` が並んでいる）。ここで終端へ落とすと、
+        // 生きている claude のカードが操作できなくなる。**終わったと言えるのはプロセスだけ**
+        // なので、確定は PTY の終了（`SessionManager::on_exit`）が受け持つ。
+        //
+        // 空の腕なのは書き忘れではない。埋め戻さないこと
+        HookEvent::SessionEnd => {}
     }
 
     changed
@@ -388,10 +410,11 @@ mod tests {
                 HookEvent::Stop,
                 SessionStatus::WaitingInput,
             ),
+            // 会話の終わりでしかないので、状態は動かない（終了の確定は PTY の側）
             (
                 SessionStatus::Working,
                 HookEvent::SessionEnd,
-                SessionStatus::Ended { ok: true },
+                SessionStatus::Working,
             ),
             // サブエージェントの増減は状態を動かさない
             (
@@ -472,6 +495,65 @@ mod tests {
                 event.as_str()
             );
         }
+    }
+
+    #[test]
+    fn session_endはどの状態からでも終了にしない() {
+        // `/resume` も `/clear` も CLI が生きたまま `SessionEnd` を出す。どの状態から
+        // 受けても終端へ落とさないことが、この修正の本体
+        for status in [
+            SessionStatus::Starting,
+            SessionStatus::WaitingInput,
+            SessionStatus::Working,
+            SessionStatus::WaitingPermission,
+        ] {
+            let mut meta = meta_with(status);
+            apply(&mut meta, &hook(HookEvent::SessionEnd), NOW);
+            assert_eq!(meta.status, status, "{status:?} から動かしてはいけない");
+        }
+
+        // 停滞だけは例外で、作業中へ戻る。これは `SessionEnd` の効果ではなく
+        // **どのフックでも効く共通の停滞解除**（フックが届いた＝生きている証拠）
+        let mut meta = meta_with(SessionStatus::Stalled);
+        apply(&mut meta, &hook(HookEvent::SessionEnd), NOW);
+        assert_eq!(meta.status, SessionStatus::Working);
+    }
+
+    #[test]
+    fn session_endのあとも最終活動が進む() {
+        // 実機で踏んだ症状：終端へ落ちた瞬間に早期 return が効き、以後どのフックも
+        // `last_activity_at` を進められなくなって「N分前」が増え続けていた
+        let mut meta = meta_with(SessionStatus::Working);
+        apply(&mut meta, &hook(HookEvent::SessionEnd), NOW);
+        assert_eq!(meta.last_activity_at, NOW);
+
+        apply(&mut meta, &hook(HookEvent::PreToolUse), NOW + 1_000);
+        assert_eq!(
+            meta.last_activity_at,
+            NOW + 1_000,
+            "申告のあとに届いたフックでも時刻は進む"
+        );
+    }
+
+    #[test]
+    fn 終了の理由は読めるが判定には使わない() {
+        let with_reason = HookInput::new(HookEvent::SessionEnd, json!({ "reason": "resume" }));
+        assert_eq!(with_reason.end_reason(), Some("resume"));
+
+        // 欄が無い版・値が文字列でない版でも落ちない。記録に使うだけなので困らない
+        assert_eq!(hook(HookEvent::SessionEnd).end_reason(), None);
+        for payload in [
+            json!({ "reason": 7 }),
+            json!({ "reason": { "kind": "clear" } }),
+        ] {
+            let input = HookInput::new(HookEvent::SessionEnd, payload);
+            assert_eq!(input.end_reason(), None);
+        }
+
+        // 理由が何であれ状態は動かない（綴りに判定を載せていないことの確認）
+        let mut meta = meta_with(SessionStatus::Working);
+        apply(&mut meta, &with_reason, NOW);
+        assert_eq!(meta.status, SessionStatus::Working);
     }
 
     #[test]
