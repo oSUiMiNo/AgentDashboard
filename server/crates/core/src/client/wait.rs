@@ -54,8 +54,10 @@ pub enum Goal {
     /// `cwd` の一致で待つと、同じフォルダで既に走っているカードの更新を掴む
     NewCard { known: HashSet<String> },
     /// `send --wait`：status が `WaitingInput` へ**戻る**。二段で見る——接続直後に
-    /// 流れてくる写し（送る前の `WaitingInput`）を掴まないため、一度 `WaitingInput`
-    /// 以外を見てからでないと満ちない
+    /// 流れてくる写し（送る前の `WaitingInput`）を掴まないため、**忙しい状態
+    /// （Working／WaitingPermission／Stalled）を一度見てからでないと満ちない**。
+    /// 「WaitingInput 以外」で武装すると、写しの WaitingInput 自身が武装役になり、
+    /// 定期報告の WaitingInput がもう1発来ただけで満ちてしまう（コードレビュー対応1）
     TurnEnded { card: CardId, seen_busy: bool },
     /// `kill`：status が `Ended` になる
     Ended { card: CardId },
@@ -104,10 +106,18 @@ impl Goal {
                         "待っている間にセッションが終了しました（{}）",
                         if ok { "正常終了" } else { "異常終了" }
                     )),
-                    Some(_) => {
+                    // 武装するのは**ターンの進行中と言える状態だけ**を名指しで。
+                    // Starting（指示がまだ届いていないかもしれない）と Unknown で
+                    // 武装すると、届かなかった指示を「終わった」と読み違える
+                    Some(
+                        SessionStatus::Working
+                        | SessionStatus::WaitingPermission
+                        | SessionStatus::Stalled,
+                    ) => {
                         *seen_busy = true;
                         Step::Continue
                     }
+                    Some(_) => Step::Continue,
                     None => Step::Continue,
                 }
             }
@@ -322,6 +332,45 @@ mod tests {
                 subagent_active: 0,
                 last_activity_at: 0,
             }),
+            Step::Done(_)
+        ));
+    }
+
+    #[test]
+    fn 写しと定期報告の入力待ちだけでは満ちない() {
+        // 接続直後の写し（WaitingInput）が武装役になってしまうと、statusLine 由来の
+        // 定期報告がもう1発来ただけで「ターンが終わった」と嘘をつく（コードレビュー対応1）。
+        // 武装は忙しい状態（Working 等）を名指しで見たときだけ
+        let card = CardId::new();
+        let mut goal = Goal::TurnEnded {
+            card,
+            seen_busy: false,
+        };
+        for _ in 0..3 {
+            assert!(
+                matches!(
+                    goal.observe(&upsert(meta(card, SessionStatus::WaitingInput))),
+                    Step::Continue
+                ),
+                "WaitingInput を何度見ても、忙しさを見る前に満ちてはいけない"
+            );
+        }
+        // Starting も武装役にしない——指示がまだ届いていない可能性がある（初期実装§17）
+        assert!(matches!(
+            goal.observe(&upsert(meta(card, SessionStatus::Starting))),
+            Step::Continue
+        ));
+        assert!(matches!(
+            goal.observe(&upsert(meta(card, SessionStatus::WaitingInput))),
+            Step::Continue
+        ));
+        // 忙しさを見てから戻れば満ちる
+        assert!(matches!(
+            goal.observe(&upsert(meta(card, SessionStatus::Working))),
+            Step::Continue
+        ));
+        assert!(matches!(
+            goal.observe(&upsert(meta(card, SessionStatus::WaitingInput))),
             Step::Done(_)
         ));
     }
