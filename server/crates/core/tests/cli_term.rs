@@ -189,6 +189,65 @@ async fn スナップショットの前に届いた増分は読み飛ばす() {
     );
 }
 
+#[tokio::test]
+async fn 空のリセットの後に出し直された全画面を画面として返す() {
+    // リモートのカードは「空の 0x03（リセット）→ PC が出し直した全画面（0x03）」の順で
+    // 届く（CLI設計§20-1。サーバは古い全画面を持たない——gateway の subscribe_pty）。
+    // 最初の 0x03 で返る素の作法（§15-3）のままだと**リモートの画面が常に空**になる。
+    // フェーズ6 の受け入れ（外のサーバ越しの実測）で実際に踏んだ形をスタブで固定する
+    use futures_util::{SinkExt as _, StreamExt as _};
+    use protocol::frame::{self, FrameKind};
+    use protocol::ws::ServerMessage;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("待ち受けられること");
+    let addr = listener.local_addr().expect("番号を読めること");
+    let card = protocol::CardId::new();
+
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("受けられること");
+        let mut socket = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("upgrade できること");
+        let hello = serde_json::to_string(&ServerMessage::Hello {
+            flow_high: 1,
+            flow_low: 1,
+        })
+        .expect("組み立てられること");
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::text(hello))
+            .await
+            .expect("送れること");
+        // 空のリセット → 途中の増分 → 出し直しの全画面
+        for (kind, payload) in [
+            (FrameKind::PtySnapshot, b"".as_slice()),
+            (FrameKind::PtyOutput, b"partial".as_slice()),
+            (FrameKind::PtySnapshot, b"remote-full".as_slice()),
+        ] {
+            socket
+                .send(tokio_tungstenite::tungstenite::Message::Binary(
+                    frame::encode(kind, card, payload).into(),
+                ))
+                .await
+                .expect("送れること");
+        }
+        while let Some(Ok(_)) = socket.next().await {}
+    });
+
+    let target = client::Target::from_url(&format!("http://{addr}")).expect("接続先を読めること");
+    let mut ws = agentdashboard_core::client::ws::Ws::connect(&target)
+        .await
+        .expect("繋がること");
+    let payload = client::snapshot_after(&mut ws, card)
+        .await
+        .expect("スナップショットが取れること");
+    assert_eq!(
+        payload, b"remote-full",
+        "空のリセットを画面として返してはいけない（出し直しの全画面が答え）"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // キー（テスト計画F3「画面とキー」）
 // ---------------------------------------------------------------------------

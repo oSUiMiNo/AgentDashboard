@@ -787,15 +787,67 @@ pub async fn screen(
     })
 }
 
+/// リモートのカードで「空のリセット」の後に全画面を待つ猶予（CLI設計§20-1）。
+///
+/// PC は購読を受けてから全画面を出し直すので、丸1往復＋描画のぶんだけ遅れて届く。
+/// 本当に空の画面（起きた直後で何も描いていない）はこの猶予を待ち切ってから空を返す。
+pub const REMOTE_REDRAW_GRACE: Duration = Duration::from_secs(3);
+
 /// 自カード宛ての**最初のスナップショット（`0x03`）**が届くまで待つ（CLI設計§15-3）。
 ///
 /// それまでの増分（`0x01`）は読み飛ばす——購読し直しのとき、前の購読の増分が新しい
 /// スナップショットより先に届くことがある（フェーズ0 で実測）。増分は「画面をリセット
 /// してから書け」の前提を持たないので、先頭に混ぜると壊れた画面を描く。
 ///
-/// `screen` の中身だが、**この順序（増分が先に届く形）は本物のサーバでは決定的に
-/// 作れない**ので、スタブを相手にするテストが直に呼べるよう口を分けてある。
+/// **最初の `0x03` が空だったら、それは答えではなく前触れである**（CLI設計§20-1）。
+/// リモートのカードは「空のリセット→PC が出し直した全画面」の順で届く（サーバは
+/// 古い全画面を持たない設計。gateway の `subscribe_pty`）。空でない `0x03` が来たら
+/// それが画面。来ないまま猶予が切れたら、リセット後に届いた増分を重ねたもの
+/// （何も届いていなければ空）が本当の画面。
+///
+/// `screen` の中身だが、**この順序（増分が先に届く形・空のリセットが先に来る形）は
+/// 本物のサーバでは決定的に作れない**ので、スタブを相手にするテストが直に呼べるよう
+/// 口を分けてある。
 pub async fn snapshot_after(ws: &mut ws::Ws, card: CardId) -> Result<Vec<u8>, ClientError> {
+    let first = first_snapshot(ws, card).await?;
+    if !first.is_empty() {
+        return Ok(first);
+    }
+    // 空のリセットだった。猶予の間だけ、出し直しの全画面（空でない 0x03）を待つ
+    let grace = tokio::time::sleep(REMOTE_REDRAW_GRACE);
+    tokio::pin!(grace);
+    let mut accumulated: Vec<u8> = Vec::new();
+    loop {
+        tokio::select! {
+            _ = &mut grace => return Ok(accumulated),
+            frame = ws.next_frame() => match frame? {
+                ws::WsEvent::Frame { kind, card_id, payload } if card_id == card => {
+                    match kind {
+                        protocol::frame::FrameKind::PtySnapshot if !payload.is_empty() => {
+                            return Ok(payload);
+                        }
+                        // 空のリセットがまた来たら、重ねた増分も無かったことになる
+                        protocol::frame::FrameKind::PtySnapshot => accumulated.clear(),
+                        protocol::frame::FrameKind::PtyOutput => {
+                            accumulated.extend_from_slice(&payload);
+                        }
+                        _ => {}
+                    }
+                }
+                ws::WsEvent::Frame { .. } => {}
+                ws::WsEvent::Message(ServerMessage::Error { card_id, message })
+                    if card_id.is_none() || card_id == Some(card) =>
+                {
+                    return Err(ClientError::Refused { status: 400, message });
+                }
+                ws::WsEvent::Message(_) => {}
+            }
+        }
+    }
+}
+
+/// 自カード宛ての `0x03` が最初に届くまで読み飛ばす（§15-3 の素の形）。
+async fn first_snapshot(ws: &mut ws::Ws, card: CardId) -> Result<Vec<u8>, ClientError> {
     loop {
         match ws.next_frame().await? {
             ws::WsEvent::Frame {
