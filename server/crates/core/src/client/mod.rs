@@ -241,7 +241,7 @@ impl ClientError {
                 }
             }
             503 => Self::Unavailable {
-                message: "いま記録を読めません。サーバは動いていますが、記録の置き場所（DB）が応じていません".to_string(),
+                message: "いま記録を読めません。サーバは動いていますが、記録の置き場所（DB）が応じていません。少し待ってからやり直してください".to_string(),
             },
             other => Self::Refused {
                 status: other,

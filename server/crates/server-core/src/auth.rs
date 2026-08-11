@@ -139,41 +139,61 @@ impl AuthContext {
     /// 締め出しにも使わない。モードを見ずに札を先に判定すると、rcfile へ
     /// `ADASH_TOKEN` を書いた利用者（外のサーバ用）が、認証の要らないローカルの
     /// ダッシュボードから全コマンド 401 で締め出される（コードレビュー対応2で実測）。
+    ///
+    /// # 「通っていない」と「判定できない」は別（コードレビュー対応4）
+    ///
+    /// DB が引けなかったときは `Err` で返す。401 は「札やログインが悪い・再試行するな」
+    /// を意味する（CLI設計§10-3）ので、一過性の断をそこへ潰すと、正しい札を持つ
+    /// エージェントが「失効した」と誤学習して手を引く。セッションストアの読み損ね
+    /// （`session.get`）だけは今日も未認証へ倒す——あちらは Cookie の話で、
+    /// 入り直せば直る側だから。
     pub async fn identify(
         &self,
         session: &Session,
         from_loopback: bool,
         bearer: Option<&str>,
-    ) -> Option<Identity> {
+    ) -> Result<Option<Identity>, sea_orm::DbErr> {
         match self.mode {
-            AuthMode::Open => Some(self.local_identity(from_loopback)),
+            AuthMode::Open => Ok(Some(self.local_identity(from_loopback))),
             AuthMode::LanPassword => {
                 // **127.0.0.1 は常に免除**（§8-3）。直結で使っている本人を締め出さない
-                if from_loopback || session.get::<bool>(SESSION_LAN_KEY).await.ok()? == Some(true) {
-                    Some(self.local_identity(from_loopback))
+                let lan = session.get::<bool>(SESSION_LAN_KEY).await.ok().flatten() == Some(true);
+                if from_loopback || lan {
+                    Ok(Some(self.local_identity(from_loopback)))
                 } else {
-                    None
+                    Ok(None)
                 }
             }
             AuthMode::Account => {
                 if let Some(token) = bearer {
                     return self.identify_bearer(token, from_loopback).await;
                 }
-                let account_id = session.get::<Uuid>(SESSION_ACCOUNT_KEY).await.ok()??;
+                let Some(account_id) = session
+                    .get::<Uuid>(SESSION_ACCOUNT_KEY)
+                    .await
+                    .ok()
+                    .flatten()
+                else {
+                    return Ok(None);
+                };
                 // **毎回 DB を引く。** 消された・パスワードを外されたアカウントの
                 // 入館証が、Cookie の期限まで生き残ってはいけない
-                let row = entity::accounts::Entity::find_by_id(account_id)
+                let Some(row) = entity::accounts::Entity::find_by_id(account_id)
                     .one(&self.db)
-                    .await
-                    .ok()??;
-                row.password_hash.as_ref()?;
-                Some(Identity {
+                    .await?
+                else {
+                    return Ok(None);
+                };
+                if row.password_hash.is_none() {
+                    return Ok(None);
+                }
+                Ok(Some(Identity {
                     account_id: row.id,
                     name: row.name,
                     is_admin: row.is_admin,
                     from_loopback,
                     token_id: None,
-                })
+                }))
             }
         }
     }
@@ -184,21 +204,28 @@ impl AuthContext {
     /// （§5-3。片方が漏れたときの被害を広げない）。`password_hash` は要求しない。
     /// 札そのものが鍵で、`pair-token` が作るアカウントはパスワードを持たないまま
     /// 使い始められるのが正（[`crate::gateway`] の PC の受け口と同じ扱い）。
-    async fn identify_bearer(&self, token: &str, from_loopback: bool) -> Option<Identity> {
-        let owner = pairing::resolve_token(&self.db, token, pairing::TokenKind::Cli)
-            .await
-            .ok()??;
-        let row = entity::accounts::Entity::find_by_id(owner.account_id)
+    async fn identify_bearer(
+        &self,
+        token: &str,
+        from_loopback: bool,
+    ) -> Result<Option<Identity>, sea_orm::DbErr> {
+        let Some(owner) = pairing::resolve_token(&self.db, token, pairing::TokenKind::Cli).await?
+        else {
+            return Ok(None);
+        };
+        let Some(row) = entity::accounts::Entity::find_by_id(owner.account_id)
             .one(&self.db)
-            .await
-            .ok()??;
-        Some(Identity {
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(Identity {
             account_id: row.id,
             name: row.name,
             is_admin: row.is_admin,
             from_loopback,
             token_id: Some(owner.token_id),
-        })
+        }))
     }
 
     /// ローカルモードで通った相手。アカウントという単位が無いので、常に同じ1つ。
@@ -287,6 +314,7 @@ pub fn bearer_token(headers: &HeaderMap) -> Option<String> {
 }
 
 /// 通っていなければ 401 で断り、通っていれば [`Identity`] を持たせて先へ渡す。
+/// 判定できなかった（DB が引けない）ときは 503——401 と混ぜない（コードレビュー対応4）。
 pub async fn require_identity(
     State(auth): State<Arc<AuthContext>>,
     session: Session,
@@ -295,11 +323,22 @@ pub async fn require_identity(
 ) -> Response {
     let from_loopback = peer_is_loopback(&request);
     let bearer = bearer_token(request.headers());
-    let Some(identity) = auth
+    let identity = match auth
         .identify(&session, from_loopback, bearer.as_deref())
         .await
-    else {
-        return (StatusCode::UNAUTHORIZED, "ログインが必要です").into_response();
+    {
+        Ok(Some(identity)) => identity,
+        Ok(None) => {
+            return (StatusCode::UNAUTHORIZED, "ログインが必要です").into_response();
+        }
+        Err(err) => {
+            tracing::error!("認証の記録を読めません: {err}");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "記録を読めません。少し待ってからやり直してください",
+            )
+                .into_response();
+        }
     };
     request.extensions_mut().insert(identity);
     next.run(request).await
@@ -349,13 +388,22 @@ async fn api_me(
     State(auth): State<Arc<AuthContext>>,
     session: Session,
     request: Request,
-) -> Json<AuthView> {
+) -> Result<Json<AuthView>, (StatusCode, String)> {
     let from_loopback = peer_is_loopback(&request);
     let bearer = bearer_token(request.headers());
+    // 判定できないときに「未認証」と偽ると、ブラウザがログイン画面へ落ちて
+    // 二度手間になる（ログインも同じ DB を引くので通らない）。503 で正直に言う
     let identity = auth
         .identify(&session, from_loopback, bearer.as_deref())
-        .await;
-    Json(AuthView {
+        .await
+        .map_err(|err| {
+            tracing::error!("認証の記録を読めません: {err}");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "記録を読めません。少し待ってからやり直してください".to_string(),
+            )
+        })?;
+    Ok(Json(AuthView {
         mode: auth.mode,
         authenticated: identity.is_some(),
         account: identity
@@ -366,7 +414,7 @@ async fn api_me(
         setup_open: auth.mode == AuthMode::Account && auth.setup_open().await,
         from_loopback,
         version: running_version(),
-    })
+    }))
 }
 
 /// いま応答しているサーバの版。

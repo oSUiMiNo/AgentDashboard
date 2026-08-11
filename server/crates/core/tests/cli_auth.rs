@@ -262,3 +262,32 @@ async fn logsの入り口は札を線に乗せる() {
     );
     serve.join().expect("スタブが最後まで生きること");
 }
+
+#[tokio::test]
+async fn dbが引けない間は503で待てと言う() {
+    // コードレビュー対応4。401 は「札やログインが悪い・再試行するな」（exit 1）、
+    // 503 は「記録が引けない・待って再試行」（exit 4）で、CLI の終了コード契約
+    // （CLI設計§10-3）上の意味が違う。DB の一過性の断を 401 へ潰すと、正しい札を
+    // 持つエージェントが「失効した」と誤学習して手を引く。
+    let server = Selfhost::start().await;
+    let target = server.cli_target().await;
+
+    // まず通ることを見る——ここを飛ばすと、503 が「元から壊れていた」と区別できない
+    client::sessions(&target).await.expect("札で通ること");
+
+    // プールを畳んで「DB が引けない」を作る。sqlx のプールは clone で共有されるので、
+    // テスト側の clone を閉じればサーバ側も引けなくなる
+    server.db.clone().close().await.expect("プールを畳めること");
+
+    let err = client::sessions(&target).await.expect_err("断られること");
+    assert_eq!(
+        err.exit_code(),
+        4,
+        "待って再試行する族であること（401/exit1 に化けている）: {err:?}"
+    );
+    let message = err.to_string();
+    assert!(
+        message.contains("待って"),
+        "待つ案内が言葉に入っていること: {message}"
+    );
+}

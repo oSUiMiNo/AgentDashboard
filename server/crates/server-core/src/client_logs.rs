@@ -106,10 +106,17 @@ async fn api_client_logs(
     // ヘッダ1行で相手を名乗り分けられては数える意味が無い）
     let from_loopback = peer.is_some_and(|addr| addr.ip().is_loopback());
     let bearer = crate::auth::bearer_token(&headers);
+    // 判定できないときは匿名として受ける（コードレビュー対応4の平坦化）。ブラウザの
+    // 障害ログは DB が死んでいるときこそ落としたくない——断ると「DB 断のあいだ何が
+    // 起きていたか」が丸ごと消える。落とす先が匿名側になるだけで、記録は残る
     let identity = state
         .auth
         .identify(&session, from_loopback, bearer.as_deref())
-        .await;
+        .await
+        .unwrap_or_else(|err| {
+            tracing::warn!("認証の記録を読めません（匿名として受けます）: {err}");
+            None
+        });
     let anon = identity.is_none();
 
     let mut drops = ClientLogDrops {
