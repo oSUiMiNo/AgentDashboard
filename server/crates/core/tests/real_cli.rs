@@ -907,8 +907,20 @@ async fn サブエージェントの稼働と子ツリーのマウントを検�
         state_dir: Some(state_dir),
         ..Config::default()
     };
-    // 権限確認で止まらないよう、編集を許すモードで起動する
-    let wrapper = claude_wrapper(&dir, &["--permission-mode", "acceptEdits"]);
+    // 権限確認で止まらないよう、編集を許すモードで起動する。
+    // **利用者のグローバル設定は持ち込まない**——セッション開始の自動スキルが
+    // 許可待ちを作ると、acceptEdits はスキル使用を自動許可しないため、
+    // サブエージェントが走る前にターンごと塞がる（v2.1.227 の実測で踏んだ。
+    // 指示は記録されるのに assistant の応答が1件も無い、という顔で落ちる）
+    let wrapper = claude_wrapper(
+        &dir,
+        &[
+            "--permission-mode",
+            "acceptEdits",
+            "--setting-sources",
+            "project,local",
+        ],
+    );
     let server = common::TestServer::start_with_parser_and_program(
         config,
         wrapper.to_string_lossy().into_owned(),
