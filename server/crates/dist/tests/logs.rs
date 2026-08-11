@@ -248,10 +248,16 @@ fn helpに射程の制約が書いてある() {
     assert!(text.contains("この機械の"), "{text}");
     assert!(text.contains("設定ファイルは読まない"), "{text}");
     assert!(text.contains("--state-dir"), "{text}");
-    // **`--host` が今は使えないことまで書く**（ログ設計§25-9）。ローカルモードは
-    // PC の受け口を持たず、サーバモードはアカウント認証なので CLI からは通らない。
-    // 「付ければ引ける」とだけ書くと、通らない道を案内することになる
-    assert!(text.contains("この道は使えない"), "{text}");
+    // **札があれば通る道になった**（CLI設計§14-2・§18-6）。かつては「この道は
+    // 使えない」を書くことがこの検査の仕事だったが（ログ設計§25-9）、札の配線が
+    // 入った後も言い続けると、今度は通る道を塞いで見せることになる。
+    // 残る制約（ローカルモードに PC の受け口が無い）と札の渡し方が書いてあることを見る
+    assert!(!text.contains("この道は使えない"), "{text}");
+    assert!(
+        text.contains("ローカルモードは PC の受け口を持たない"),
+        "{text}"
+    );
+    assert!(text.contains("ADASH_TOKEN"), "{text}");
     assert!(text.contains("agentdashboard-agent logs"), "{text}");
 }
 
