@@ -41,6 +41,11 @@ pub fn routes(hub: Arc<SessionHostHub>) -> Router {
         .with_state(hub)
 }
 
+/// `kind` が欠けている応答（0.1.12 以前のサーバ）の読み方。
+fn kind_agent() -> String {
+    pairing::TokenKind::Agent.as_str().to_string()
+}
+
 /// 発行済みトークンの1件（**平文は含まない**）。
 ///
 /// `Deserialize` は CLI のため（CLI設計§6-3）——`account tokens` が同じ型で読み戻す。
@@ -52,7 +57,13 @@ pub struct TokenView {
     pub label: String,
     /// 札の用途（CLI設計§5-3）。`"agent"` か `"cli"`。画面はこれで
     /// 「これは PC ではない」を出し分ける——分けないと、CLI の札が
-    /// 「繋いでこない PC」としてアカウント画面に並び続ける
+    /// 「繋いでこない PC」としてアカウント画面に並び続ける。
+    ///
+    /// **既定を持たせているのは CLI のため。** この型は CLI が応答を読むのにも使う
+    /// ので、`kind` を知らない版のサーバ（0.1.12 以前）を相手にすると
+    /// 「応答の形を読めません」で落ちる。用途が生まれる前の札は全部 PC 用なので、
+    /// 欠けていたら `agent` と読むのが実態に合う。
+    #[serde(default = "kind_agent")]
     pub kind: String,
     pub created_at: i64,
     /// 一度でも繋がったか。**繋がっていないトークンは貼り忘れの可能性がある**
@@ -258,4 +269,27 @@ fn unavailable(err: impl std::fmt::Display) -> (StatusCode, String) {
 /// ローカルアカウントかどうか（画面の出し分け用）。
 pub fn is_local(account_id: Uuid) -> bool {
     account_id == db::LOCAL_ACCOUNT_ID
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(non_snake_case)]
+
+    use super::*;
+
+    #[test]
+    fn 用途の無い応答は_PC_用の札として読める() {
+        // この型は CLI が応答を読むのにも使う（CLI設計§6-3）。用途（kind）が生まれる
+        // 前のサーバ（0.1.12 以前）を相手にしたとき、欠けているだけで
+        // 「応答の形を読めません」で落ちてはいけない（コードレビュー対応5）。
+        // 用途が無かった頃の札は全部 PC 用なので、agent と読むのが実態に合う
+        let 昔の応答 = r#"{"id":"11111111-1111-4111-8111-111111111111","label":"ふるいPC","created_at":1,"last_used_at":null,"revoked_at":null}"#;
+        let view: TokenView = serde_json::from_str(昔の応答).expect("読めること");
+        assert_eq!(view.kind, "agent");
+
+        // いまの応答はそのまま読む
+        let いまの応答 = r#"{"id":"11111111-1111-4111-8111-111111111111","label":"CLI","kind":"cli","created_at":1,"last_used_at":null,"revoked_at":null}"#;
+        let view: TokenView = serde_json::from_str(いまの応答).expect("読めること");
+        assert_eq!(view.kind, "cli");
+    }
 }

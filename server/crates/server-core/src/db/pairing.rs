@@ -147,6 +147,19 @@ pub async fn issue_token(
 /// 「そんなトークンは無い」を呼び分けられると、総当たりに手掛かりを与えることになる。
 /// 用途違い（CLI設計§5-3）も同じ扱いで、`last_used_at` も進めない——通っていない札を
 /// 「使われている」と画面に見せない。
+/// 最終使用を書き直す間隔（ミリ秒）。
+const LAST_USED_INTERVAL_MS: i64 = 60_000;
+
+/// 最終使用を書き直すか。**一度も使われていなければ必ず書く**——「まだ使われていません」
+/// （貼り忘れの手掛かり）から抜けるのが、この欄のいちばん大事な仕事なので遅らせない。
+fn 触り直す(last_used_at: Option<i64>, now: i64) -> bool {
+    match last_used_at {
+        None => true,
+        // 時計が巻き戻った（記録のほうが未来）ときも書き直して現在へ寄せる
+        Some(last) => now - last >= LAST_USED_INTERVAL_MS || now < last,
+    }
+}
+
 pub async fn resolve_token(
     db: &DatabaseConnection,
     token: &str,
@@ -163,14 +176,21 @@ pub async fn resolve_token(
         return Ok(None);
     }
 
-    entity::pairing_tokens::Entity::update_many()
-        .col_expr(
-            entity::pairing_tokens::Column::LastUsedAt,
-            sea_orm::sea_query::Expr::value(now_ms()),
-        )
-        .filter(entity::pairing_tokens::Column::Id.eq(row.id))
-        .exec(db)
-        .await?;
+    // **最終使用は間引いて書く。** 札での認証は読む口（`session ls` のポーリング等）でも
+    // 毎回ここを通るので、素直に書くと読み取りのたびに UPDATE が走る（SQLite では
+    // 書き手が直列化し、PostgreSQL では行が絶えず更新される）。表示は「最終使用」と
+    // 「まだ」の区別が付けばよく、分単位の粒度で足りる（コードレビュー対応12）
+    let now = now_ms();
+    if 触り直す(row.last_used_at, now) {
+        entity::pairing_tokens::Entity::update_many()
+            .col_expr(
+                entity::pairing_tokens::Column::LastUsedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
+            .filter(entity::pairing_tokens::Column::Id.eq(row.id))
+            .exec(db)
+            .await?;
+    }
 
     Ok(Some(TokenOwner {
         token_id: row.id,
@@ -334,6 +354,20 @@ mod tests {
     #![allow(non_snake_case)]
 
     use super::*;
+
+    #[test]
+    fn 最終使用は一分に一度だけ書き直す() {
+        let now = 1_800_000_000_000;
+        // 一度も使われていない札は必ず書く（「まだ」から抜けるのが最優先）
+        assert!(触り直す(None, now));
+        // 直後の連打では書かない——読む口のポーリングが毎回 UPDATE を打たないため
+        assert!(!触り直す(Some(now), now));
+        assert!(!触り直す(Some(now - 59_999), now));
+        // 間隔を越えたら書く
+        assert!(触り直す(Some(now - 60_000), now));
+        // 時計が巻き戻ったときも現在へ寄せる
+        assert!(触り直す(Some(now + 5_000), now));
+    }
 
     #[test]
     fn 発行したトークンは接頭辞つきで毎回違う() {
