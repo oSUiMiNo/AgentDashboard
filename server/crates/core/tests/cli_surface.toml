@@ -1,0 +1,232 @@
+# 画面と CLI の口の対応台帳（CLI設計§11）。
+#
+# 要件「以降の開発で画面に口を足したら CLI も追従する」を、文書ではなく
+# **実コードと食い違うと落ちる台帳**として持つ。ブラウザが叩ける口
+# （WebSocket の ClientMessage と、鍵の内側・外側の REST）を**全部**載せ、
+# 1行ごとに「CLI での叩き方」か「載せない理由」のどちらかを書く。
+# 一致は crates/core/tests/cli_surface.rs が機械で見張る。
+#
+# ## 鍵
+#
+# kind + target。**行番号もファイル名も使わない**——口の綴りそのものを鍵にすれば、
+# コードの置き場所が動いても台帳は動かない。
+#
+# ## kind
+#
+# ws     ClientMessage の variant（ブラウザが WebSocket で送れる操作）
+# rest   REST の口（メソッド + パス）。鍵の内側も外側もここ
+#
+# ## 約束（cli_surface.rs が課す）
+#
+# - command と skip は排他。どちらも無い行は落ちる
+# - skip には 12文字以上の reason が要る。逃げ文句（「不要」など）は落ちる
+# - 並びは kind → target の辞書順。中身が合っていても並びが違えば落ちる
+#
+# ## 載せていないもの
+#
+# `/agent/ws`（PC の受け口）と `/hook/…`（フックの受け口）は**画面の口ではない**ので
+# 範囲外（§11-3）。`GET /ws` は WebSocket の入口そのもので、そこを流れる操作は
+# kind = "ws" の12行が数える（cli_surface.rs の REST以外）。
+
+[[entry]]
+kind = "rest"
+target = "DELETE /api/account/tokens/{token_id}"
+command = "account revoke"
+
+[[entry]]
+kind = "rest"
+target = "DELETE /api/projects/{id}"
+command = "project rm"
+
+[[entry]]
+kind = "rest"
+target = "DELETE /api/versions/selected"
+command = "version unselect"
+
+[[entry]]
+kind = "rest"
+target = "DELETE /api/versions/{version}"
+command = "version rm"
+
+[[entry]]
+kind = "rest"
+target = "GET /api/account/agents"
+command = "account hosts"
+
+[[entry]]
+kind = "rest"
+target = "GET /api/account/tokens"
+command = "account tokens"
+
+[[entry]]
+kind = "rest"
+target = "GET /api/hosts/{host}/dir"
+command = "host dir"
+
+[[entry]]
+kind = "rest"
+target = "GET /api/hosts/{host}/file"
+command = "host file"
+
+[[entry]]
+kind = "rest"
+target = "GET /api/hosts/{host}/logs"
+command = "logs --host"
+
+[[entry]]
+kind = "rest"
+target = "GET /api/me"
+skip = true
+reason = "「何を出すべきか」をブラウザが決めるための口。CLI は札を持っているかどうかを自分で知っている。モードの見分けに内部で読むが、コマンドとしては出さない（設計§3-4）"
+
+[[entry]]
+kind = "rest"
+target = "GET /api/projects"
+command = "project ls"
+
+[[entry]]
+kind = "rest"
+target = "GET /api/sessions"
+command = "session ls / session show"
+
+[[entry]]
+kind = "rest"
+target = "GET /api/sessions/{card_id}/transcript"
+command = "session transcript"
+
+[[entry]]
+kind = "rest"
+target = "GET /api/settings"
+command = "settings show"
+
+[[entry]]
+kind = "rest"
+target = "GET /api/settings/export"
+command = "settings export"
+
+[[entry]]
+kind = "rest"
+target = "GET /api/versions"
+command = "version ls"
+
+[[entry]]
+kind = "rest"
+target = "POST /api/account/tokens"
+command = "account issue"
+
+[[entry]]
+kind = "rest"
+target = "POST /api/client-logs"
+skip = true
+reason = "ブラウザで起きたことをサーバへ送る口。CLI は自分のログを自分の標準エラーへ出す（設計§10-4）ので、送るものが無い"
+
+[[entry]]
+kind = "rest"
+target = "POST /api/login"
+skip = true
+reason = "CLI は札（ペアリングトークン）で名乗る（設計§5）。入館証（Cookie）を持たないので、入る口を叩く立場に無い"
+
+[[entry]]
+kind = "rest"
+target = "POST /api/logout"
+skip = true
+reason = "ログインと同じ理由。札は失効（account revoke）で無効になるのであって、ログアウトする対象が無い"
+
+[[entry]]
+kind = "rest"
+target = "POST /api/projects"
+command = "project add"
+
+[[entry]]
+kind = "rest"
+target = "POST /api/settings/import"
+command = "settings import"
+
+[[entry]]
+kind = "rest"
+target = "POST /api/setup"
+skip = true
+reason = "最初の管理者を作る口。サーバを立てる側の操作として、利用者がスコープ外と判断した（設計§3-2）"
+
+[[entry]]
+kind = "rest"
+target = "POST /api/versions/restart"
+command = "version restart"
+
+[[entry]]
+kind = "rest"
+target = "POST /api/versions/{version}/install"
+command = "version install"
+
+[[entry]]
+kind = "rest"
+target = "PUT /api/settings"
+command = "settings set"
+
+[[entry]]
+kind = "rest"
+target = "PUT /api/versions/selected"
+command = "version select"
+
+[[entry]]
+kind = "ws"
+target = "ClientMessage::Archive"
+command = "session rm"
+
+[[entry]]
+kind = "ws"
+target = "ClientMessage::Kill"
+command = "session kill"
+
+[[entry]]
+kind = "ws"
+target = "ClientMessage::PtyFlow"
+skip = true
+reason = "受信が追いつかないときにブラウザが送る流量制御。CLI に描画が無いので、送る動機そのものが存在しない（設計§3-3）"
+
+[[entry]]
+kind = "ws"
+target = "ClientMessage::Resize"
+command = "session resize"
+
+[[entry]]
+kind = "ws"
+target = "ClientMessage::SendInput"
+command = "session send"
+
+[[entry]]
+kind = "ws"
+target = "ClientMessage::SetModel"
+command = "session model"
+
+[[entry]]
+kind = "ws"
+target = "ClientMessage::SetPermissionMode"
+command = "session mode"
+
+[[entry]]
+kind = "ws"
+target = "ClientMessage::Spawn"
+command = "session spawn"
+
+[[entry]]
+kind = "ws"
+target = "ClientMessage::SubPty"
+command = "session screen"
+
+[[entry]]
+kind = "ws"
+target = "ClientMessage::SubTranscript"
+command = "session transcript --follow"
+
+[[entry]]
+kind = "ws"
+target = "ClientMessage::UnsubPty"
+skip = true
+reason = "購読の解除。CLI は1回の呼び出しで切断して終わるので、切断がそのまま解除になる。内部では close() が律儀に送る（設計§3-3）"
+
+[[entry]]
+kind = "ws"
+target = "ClientMessage::UnsubTranscript"
+skip = true
+reason = "UnsubPty と同じ。切断がそのまま解除になるので、コマンドとして出す意味が無い（設計§3-3）"
