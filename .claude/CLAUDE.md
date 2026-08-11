@@ -125,7 +125,7 @@ issue-sync は、ユーザーが行うので不要。必要かどうかユーザ
 | `server/crates/core/tests/dependencies.rs` | crate 境界（依存の逆流）の機械検査。**新しい依存を入れたらここへ足す** |
 | `server/crates/transcript-parser/` | 自己修復が唯一書き換えてよい範囲（設計§9） |
 | `server/crates/testkit/` | フック受信モックサーバと擬似 claude |
-| `server/crates/session-host-core/src/session/screen.rs` | 端末エミュレータと画面の配信（設計§7）。**vt100 を持つのはここだけ**——サーバへ漏れていないかは `dependencies.rs` が見張る |
+| `server/crates/session-host-core/src/session/screen.rs` | 端末エミュレータと画面の配信（設計§7）。**画面を作るのはここだけ**——vt100 を使うもう1箇所は `core/src/client/render.rs`（CLI が画面を読むため。作らずに描くだけ）で、どちらも `dependencies.rs` が見張る（`server-core` へ漏れていないこと・両者が通常依存で持つこと） |
 | `server/crates/server-core/src/gateway.rs` | エージェントの受け口。画面のフレームはここで種別を移し替えてブラウザへ流す（0x04→0x03 / 0x05→0x01） |
 | `server/config.toml.example` | 設定の雛形。**全キーが `AGENTDASHBOARD_<キー>` で上書きできる**（設計§14-1） |
 | `docker/compose.test.yml` ／ `scripts/test-compose` | 永続化層を PostgreSQL に対しても流す（`make test-compose`）。**新しい DB テストは両方へ通す** |
