@@ -10,6 +10,7 @@ mod common;
 
 use protocol::{SessionStatus, ws::ServerMessage};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use testkit::fake_claude;
 
 /// 合言葉を知らない相手からの通知は受け付けない。
 #[tokio::test]
@@ -283,6 +284,52 @@ async fn プロセスが終われば終わる() {
         204
     );
     assert_eq!(session.status(), SessionStatus::Ended { ok: true });
+}
+
+/// 申告は取り消される。**取り消されたあとに落ちたものは、異常終了として出る。**
+///
+/// 申告は画面に出さないと決めてある（方針）ので、外から取り消しを確かめる窓は
+/// `ok` の真偽しかない。したがってこの1本が「`PreToolUse` で申告が取り消されること」の
+/// 観測も兼ねている。
+#[tokio::test]
+async fn 申告が取り消されたあとの異常終了は異常終了として出る() {
+    let server = common::TestServer::start().await;
+    let (session, mut watcher) = common::start_session(&server.manager).await;
+
+    common::fire_hook(&session, &mut watcher, "SessionStart", "").await;
+    common::wait_for_status(&session, SessionStatus::WaitingInput).await;
+
+    // 呼び戻し。前の会話の終わりが申告として届く
+    common::fire_hook(
+        &session,
+        &mut watcher,
+        "SessionEnd",
+        r#"{"reason":"resume"}"#,
+    )
+    .await;
+    // 死んだプロセスはフックを出さない。届いた1件がそのまま「まだ生きている」の証拠になる
+    common::fire_hook(&session, &mut watcher, "PreToolUse", "").await;
+    common::wait_for_status(&session, SessionStatus::Working).await;
+
+    // そのあと本当に落ちた。誰も終わりを意図していなかったので異常終了である
+    common::send_line(&session, "crash 9");
+    watcher.wait_for(fake_claude::CRASH_MARKER).await;
+    common::wait_for_status(&session, SessionStatus::Ended { ok: false }).await;
+}
+
+/// `/exit` 相当の回帰。**申告が残っているなら、終了コードが非ゼロでも異常終了ではない。**
+///
+/// CLI 自身が終わりを名乗ってから落ちた形なので、利用者から見て「落ちた」ではない。
+#[tokio::test]
+async fn 申告の直後に終わったら正常終了のまま() {
+    let server = common::TestServer::start().await;
+    let (session, mut watcher) = common::start_session(&server.manager).await;
+
+    common::fire_hook(&session, &mut watcher, "SessionEnd", "").await;
+
+    common::send_line(&session, "crash 9");
+    watcher.wait_for(fake_claude::CRASH_MARKER).await;
+    common::wait_for_status(&session, SessionStatus::Ended { ok: true }).await;
 }
 
 #[tokio::test]
