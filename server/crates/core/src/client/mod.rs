@@ -87,6 +87,16 @@ impl Target {
         }
     }
 
+    /// ポートを省いたときの約束事（https は 443・http は 80）。
+    fn default_port(tls: bool) -> u16 {
+        if tls { 443 } else { 80 }
+    }
+
+    fn parse_port(text: &str) -> Result<u16, ClientError> {
+        text.parse::<u16>()
+            .map_err(|_| ClientError::BadUrl(format!("`{text}` をポート番号として読めません")))
+    }
+
     /// `http://…` / `https://…` を読む。それ以外の形は引数の誤りとして断る。
     pub fn from_url(url: &str) -> Result<Self, ClientError> {
         let (tls, rest) = if let Some(rest) = url.strip_prefix("https://") {
@@ -107,15 +117,32 @@ impl Target {
                 "`{url}` にホスト名がありません"
             )));
         }
-        let (host, port) = match authority.rsplit_once(':') {
-            Some((host, port_text)) => {
-                let port = port_text.parse::<u16>().map_err(|_| {
-                    ClientError::BadUrl(format!("`{authority}` のポート番号を読めません"))
-                })?;
-                (host.to_string(), port)
+        // IPv6 の直書きは `[::1]:8787` の形で来る（**括弧の中にコロンが居る**）ので、
+        // 括弧を先に剥がしてからポートを見る。素朴に最後のコロンで割ると
+        // `http://::1` を「ホスト `::` のポート 1」と読んで、別の相手へ黙って繋ぎに行く
+        let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
+            let (inside, after) = rest.split_once(']').ok_or_else(|| {
+                ClientError::BadUrl(format!("`{authority}` の `[` が閉じていません"))
+            })?;
+            let port = match after {
+                "" => Self::default_port(tls),
+                rest => Self::parse_port(rest.strip_prefix(':').ok_or_else(|| {
+                    ClientError::BadUrl(format!("`{authority}` の `]` の後ろを読めません"))
+                })?)?,
+            };
+            (inside.to_string(), port)
+        } else if authority.matches(':').count() > 1 {
+            // 括弧の無い IPv6（`http://::1`）。**ポートの付けようが無い**ので、
+            // 曖昧なまま繋がずに書き方を案内する
+            return Err(ClientError::BadUrl(format!(
+                "`{authority}` は IPv6 の書き方が足りません。`[::1]:8787` のように角括弧で囲んでください"
+            )));
+        } else {
+            match authority.rsplit_once(':') {
+                Some((host, port_text)) => (host.to_string(), Self::parse_port(port_text)?),
+                // ポートを省いたら、その約束事のとおりへ（https は 443・http は 80）
+                None => (authority.to_string(), Self::default_port(tls)),
             }
-            // ポートを省いたら、その約束事のとおりへ（https は 443・http は 80）
-            None => (authority.to_string(), if tls { 443 } else { 80 }),
         };
         // 末尾の `/` は畳む。畳まないと `/ws` を足したときにパスが二重になる（§4-2）
         let prefix = path.trim_end_matches('/').to_string();
@@ -152,13 +179,18 @@ impl Target {
         self.port
     }
 
-    /// `Host` ヘッダに入れる形。既定のポート（443 / 80）は書かない
+    /// `Host` ヘッダに入れる形。既定のポート（443 / 80）は書かない。
+    /// **IPv6 は角括弧で囲み直す**——`::1:8787` ではポートと区別が付かない
     pub fn authority(&self) -> String {
-        let default = if self.tls { 443 } else { 80 };
-        if self.port == default {
-            self.host.clone()
+        let host = if self.host.contains(':') {
+            format!("[{}]", self.host)
         } else {
-            format!("{}:{}", self.host, self.port)
+            self.host.clone()
+        };
+        if self.port == Self::default_port(self.tls) {
+            host
+        } else {
+            format!("{host}:{}", self.port)
         }
     }
 
@@ -301,28 +333,37 @@ pub async fn session_show(
     prefix: &str,
 ) -> Result<(SessionMeta, String), ClientError> {
     let raw = http::fetch_ok(target, "/api/sessions").await?;
-    let values: Vec<serde_json::Value> =
+    // **要素は生のまま持つ**（`RawValue`）。`Value` を経由すると鍵が辞書順へ並び替わり、
+    // 整形も変わるので、「サーバの応答をそのまま出す」（§10-2）が破れる
+    let elements: Vec<Box<serde_json::value::RawValue>> =
         serde_json::from_str(&raw).map_err(|err| ClientError::Refused {
             status: 200,
             message: format!("一覧の形を読めません（{err}）"),
         })?;
-    let ids: Vec<String> = values
+    /// 一覧から目当ての1件を選ぶためだけの読み方（全部を解釈しない）。
+    #[derive(serde::Deserialize)]
+    struct 見出し {
+        card_id: String,
+    }
+    let ids: Vec<String> = elements
         .iter()
-        .map(|value| value["card_id"].as_str().unwrap_or_default().to_string())
+        .map(|element| {
+            serde_json::from_str::<見出し>(element.get())
+                .map(|head| head.card_id)
+                .unwrap_or_default()
+        })
         .collect();
     let id = resolve_card(prefix, &ids)?;
-    let element = values
+    let at = ids
         .iter()
-        .find(|value| value["card_id"].as_str() == Some(id.as_str()))
+        .position(|candidate| candidate == &id)
         .expect("解決した ID は一覧から選んだものなので必ず居る");
-    let meta: SessionMeta =
-        serde_json::from_value(element.clone()).map_err(|err| ClientError::Refused {
-            status: 200,
-            message: format!("カードの形を読めません（{err}）"),
-        })?;
-    let raw_element =
-        serde_json::to_string_pretty(element).expect("JSON から読んだ値は必ず JSON へ戻せる");
-    Ok((meta, raw_element))
+    let element = elements[at].get();
+    let meta: SessionMeta = serde_json::from_str(element).map_err(|err| ClientError::Refused {
+        status: 200,
+        message: format!("カードの形を読めません（{err}）"),
+    })?;
+    Ok((meta, element.to_string()))
 }
 
 /// `GET /api/sessions/{card}/transcript`（履歴。`--before` で遡る）。
@@ -480,10 +521,20 @@ pub async fn account_hosts(
 }
 
 /// 札の前方一致の解決（`resolve_card` と同じ作法。断りの言葉だけ札向け）。
+/// 空の ID を渡されたときの断り。**引数の誤り（exit 2）**として扱う——「見つからない」
+/// （exit 1）と言い分けないと、変数の展開に失敗した呼び出し側が
+/// 「そのIDは無いのか」と読んで総当たりを始める。
+fn 空の識別子(何の: &str) -> ClientError {
+    ClientError::BadUrl(format!(
+        "{何の}の ID が空です。省略はできません（変数の展開に失敗していませんか）"
+    ))
+}
+
 fn resolve_token_prefix(prefix: &str, ids: &[String]) -> Result<String, ClientError> {
     let borrowed: Vec<&str> = ids.iter().map(String::as_str).collect();
     match output::resolve_prefix(prefix, &borrowed) {
         Ok(id) => Ok(id.to_string()),
+        Err(output::PrefixError::Empty) => Err(空の識別子("札")),
         Err(output::PrefixError::NotFound) => Err(ClientError::Refused {
             status: 404,
             message: format!(
@@ -998,6 +1049,7 @@ pub async fn project_remove(target: &Target, prefix: &str) -> Result<String, Cli
     let borrowed: Vec<&str> = ids.iter().map(String::as_str).collect();
     let id = match output::resolve_prefix(prefix, &borrowed) {
         Ok(id) => id.to_string(),
+        Err(output::PrefixError::Empty) => return Err(空の識別子("PJT 枠")),
         Err(output::PrefixError::NotFound) => {
             return Err(ClientError::Refused {
                 status: 404,
@@ -1165,6 +1217,7 @@ fn resolve_card(prefix: &str, ids: &[String]) -> Result<String, ClientError> {
     let borrowed: Vec<&str> = ids.iter().map(String::as_str).collect();
     match output::resolve_prefix(prefix, &borrowed) {
         Ok(id) => Ok(id.to_string()),
+        Err(output::PrefixError::Empty) => Err(空の識別子("カード")),
         Err(output::PrefixError::NotFound) => Err(ClientError::Refused {
             status: 404,
             message: format!(
@@ -1186,6 +1239,33 @@ mod tests {
     use super::*;
 
     // --- 接続先の解決（テスト計画F2「接続先の解決」） ---
+
+    #[test]
+    fn ipv6の直書きは角括弧のまま分解される() {
+        // 素朴に最後のコロンで割ると `::1` を「ホスト `::`・ポート 1」と読み、
+        // 別の相手へ黙って繋ぎに行く（コードレビュー対応7）
+        let target = Target::from_url("http://[::1]:8787").expect("読めること");
+        assert_eq!(target.host(), "::1");
+        assert_eq!(target.port(), 8787);
+        assert_eq!(target.authority(), "[::1]:8787", "組み直しでも囲み直すこと");
+
+        // ポートを省いたら約束事のとおり（http は 80・https は 443）
+        let bare = Target::from_url("http://[::1]").expect("読めること");
+        assert_eq!((bare.host(), bare.port()), ("::1", 80));
+        assert_eq!(bare.authority(), "[::1]", "既定のポートは書かない");
+
+        let tls = Target::from_url("https://[::1]").expect("読めること");
+        assert_eq!((tls.host(), tls.port()), ("::1", 443));
+        assert_eq!(tls.ws_url(), "wss://[::1]/ws");
+
+        // 角括弧の無い IPv6 は、繋ぎ先を推測せずに書き方を案内して断る
+        let err = Target::from_url("http://::1").expect_err("断ること");
+        assert_eq!(err.exit_code(), 2, "引数の誤りとして扱う");
+        assert!(
+            format!("{err}").contains("[::1]"),
+            "書き方を示すこと: {err}"
+        );
+    }
 
     #[test]
     fn 札と接続先の環境変数は箱へ転送される接頭辞を避けている() {

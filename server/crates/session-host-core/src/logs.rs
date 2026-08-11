@@ -1049,6 +1049,20 @@ fn fetch(url: &str, token: Option<&str>) -> anyhow::Result<(u16, String)> {
     use std::io::{Read as _, Write as _};
 
     let target = crate::hook_post::parse_url(url)?;
+
+    // 札があれば添える（CLI設計§14-2。サーバモードのダッシュボードはこれで通る）。
+    // **改行を含む札は載せずに断る。** 要求行を壊す（ヘッダ注入）ので送れないが、
+    // 黙って外すと「札を渡したのに 401」＝「失効したのかも」という誤った案内に化ける
+    // ——渡ってきた値そのものの問題だと、ここで名指しする（コードレビュー対応8）。
+    // **繋ぐ前に見る**：送らないと決まっている要求のために線を張らない
+    let auth_line = match token {
+        Some(token) if token.contains(['\r', '\n']) => anyhow::bail!(
+            "札に改行が混ざっています（要求行を壊すので送れません）。ファイルから読ませているなら、末尾の改行や CRLF を落としてください。"
+        ),
+        Some(token) => format!("Authorization: Bearer {token}\r\n"),
+        None => String::new(),
+    };
+
     let address = std::net::ToSocketAddrs::to_socket_addrs(&target.authority)?
         .next()
         .ok_or_else(|| anyhow::anyhow!("接続先を解決できません：{}", target.authority))?;
@@ -1058,14 +1072,6 @@ fn fetch(url: &str, token: Option<&str>) -> anyhow::Result<(u16, String)> {
     stream.set_write_timeout(Some(FETCH_TIMEOUT))?;
     stream.set_read_timeout(Some(FETCH_TIMEOUT))?;
 
-    // 札があれば添える（CLI設計§14-2。サーバモードのダッシュボードはこれで通る）。
-    // 改行を含む札は要求行を壊す（ヘッダ注入）ので、渡ってきても線に載せない
-    let auth_line = match token {
-        Some(token) if !token.contains(['\r', '\n']) => {
-            format!("Authorization: Bearer {token}\r\n")
-        }
-        _ => String::new(),
-    };
     let request = format!(
         "GET {} HTTP/1.1\r\nHost: {}\r\n{}Accept: application/json\r\nConnection: close\r\n\r\n",
         target.path, target.authority, auth_line,

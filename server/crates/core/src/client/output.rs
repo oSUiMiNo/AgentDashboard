@@ -52,7 +52,14 @@ pub fn short_id(id: &str) -> &str {
 ///
 /// 一意なら通し、複数に当たったら**候補を並べて断る**——黙って1つ目を選ぶと、
 /// 消すつもりのなかったカードを操作する経路になる。
+///
+/// **空文字は候補が1件でも断る。** 空の前方一致は全部に当たるので、候補がたまたま
+/// 1件のときだけ「一意に決まった」ことになってしまう——`session rm "$CARD"` の
+/// 変数が空だったときに、唯一のカードが消える経路になる。
 pub fn resolve_prefix<'a>(input: &str, ids: &[&'a str]) -> Result<&'a str, PrefixError> {
+    if input.is_empty() {
+        return Err(PrefixError::Empty);
+    }
     // 完全一致が1件あるなら、それが答え（別のIDの接頭辞と重なっていても迷わない）
     if let Some(exact) = ids.iter().find(|id| **id == input) {
         return Ok(exact);
@@ -74,6 +81,8 @@ pub fn resolve_prefix<'a>(input: &str, ids: &[&'a str]) -> Result<&'a str, Prefi
 /// 前方一致が解けなかった理由。
 #[derive(Debug, PartialEq, Eq)]
 pub enum PrefixError {
+    /// 空の ID を渡された。**引数の誤り**であって「見つからない」ではない
+    Empty,
     NotFound,
     /// 複数に当たった。中身は当たった ID の全部
     Ambiguous(Vec<String>),
@@ -412,6 +421,17 @@ mod tests {
         assert_eq!(resolve_prefix("0198", &ids), Ok("0198c0de-1111"));
         assert_eq!(resolve_prefix("77aa1122-2222", &ids), Ok("77aa1122-2222"));
         assert_eq!(resolve_prefix("ffff", &ids), Err(PrefixError::NotFound));
+    }
+
+    #[test]
+    fn 空の識別子は候補が1件でも断られる() {
+        // 空の前方一致は全部に当たるので、候補が1件のときだけ「一意に決まった」形に
+        // なってしまう——`session rm "$CARD"` の変数が空だと唯一のカードが消える
+        let ids = ["0198c0de-1111"];
+        assert_eq!(resolve_prefix("", &ids), Err(PrefixError::Empty));
+        // 候補が複数でも「曖昧」ではなく「空」として断る（直し方が違う）
+        let ids = ["0198c0de-1111", "77aa1122-2222"];
+        assert_eq!(resolve_prefix("", &ids), Err(PrefixError::Empty));
     }
 
     #[test]

@@ -73,11 +73,32 @@ async fn 前方一致の短いIDで一件に絞れる() {
         serde_json::from_str(&raw_element).expect("切り出しも JSON のまま");
     assert_eq!(value["card_id"].as_str(), Some(full.as_str()));
 
+    // **生の切り出しは一覧の該当要素とバイト一致する**（CLI設計§10-2。コードレビュー対応10）。
+    // `serde_json::Value` を経由すると鍵が辞書順へ並び替わり、整形も変わる
+    let (_, raw_list) = client::sessions(&target).await.expect("一覧を引けること");
+    let element = raw_list
+        .trim()
+        .strip_prefix('[')
+        .and_then(|rest| rest.trim().strip_suffix(']'))
+        .expect("一覧は配列")
+        .trim();
+    assert_eq!(
+        raw_element, element,
+        "show の切り出しが一覧の要素と食い違っている（並べ替えや整形をしていないか）"
+    );
+
     // 当たらない指定は「見つかりません」で断られる（終了コード1の族）
     let err = client::session_show(&target, "ffffffff")
         .await
         .expect_err("見つからないこと");
     assert_eq!(err.exit_code(), 1);
+
+    // 空の ID は「見つからない」ではなく**引数の誤り**（exit 2。コードレビュー対応6）
+    // ——`session rm "$CARD"` の変数が空のとき、唯一のカードを掴ませない
+    let err = client::session_show(&target, "")
+        .await
+        .expect_err("空は断られること");
+    assert_eq!(err.exit_code(), 2, "実際の言葉: {err}");
 }
 
 #[tokio::test]

@@ -533,11 +533,15 @@ pub fn run() -> anyhow::Result<()> {
         // と `--help` にも書いてある
         if args.host.is_some() {
             let config = Config::load(cli.config.as_deref())?;
-            // 札は 引数 > 環境変数（CLI設計§5-4。`run_client` の作法と同じ）
+            // 札は **`logs` の引数 > 全体の `--token` > 環境変数**（CLI設計§5-4）。
+            // 全体の `--token` を見るのは、それが他の全コマンドで効く位置だから
+            // ——ここだけ黙って無視すると「渡したのに断られた」になる
             let mut args = args.clone();
-            if args.token.is_none() {
-                args.token = std::env::var(client::TOKEN_ENV).ok();
-            }
+            args.token = 札を合流(
+                args.token.clone(),
+                cli.token.clone(),
+                std::env::var(client::TOKEN_ENV).ok(),
+            );
             return session_host_core::logs::run_remote(&args, config.port);
         }
         if cli.config.is_some() {
@@ -706,6 +710,30 @@ fn fail(err: client::ClientError) -> ! {
 }
 
 /// いまの epoch ミリ秒（「12秒前」の基準）。
+/// 受け取ったバイト列を1バイトも足さずに書く。
+///
+/// `screen --raw` と `host file` の約束（CLI設計§10-2「そのまま出す」）はここに集める。
+/// **末尾の改行を補わない**——`--raw` は端末へ流し直すためのバイト列で1行ぶんずれ、
+/// `host file` は `> copy` で写したファイルが元より1バイト長くなる
+/// （どちらも照合が必ず食い違う。コードレビュー対応11）。
+fn 生のまま書く(out: &mut impl std::io::Write, bytes: &[u8]) -> std::io::Result<()> {
+    out.write_all(bytes)?;
+    out.flush()
+}
+
+/// `logs --host` が使う札を決める（CLI設計§5-4）。
+///
+/// 優先は **`logs` の `--token` > 全体の `--token` > 環境変数**。全体の `--token` を
+/// 混ぜるのは、それが**他の全コマンドで効く位置**だから——ここだけ黙って無視すると
+/// 「渡したのに断られた」になり、失効を疑って総当たりする経路ができる。
+fn 札を合流(
+    logs: Option<String>,
+    global: Option<String>,
+    env: Option<String>,
+) -> Option<String> {
+    logs.or(global).or(env)
+}
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -800,12 +828,8 @@ async fn client_session(
         } => {
             let shot = client::screen(target, &id, cols, rows).await?;
             if raw {
-                // エスケープ列は UTF-8 とは限らないので、文字列を経由せずそのまま書く
-                use std::io::Write;
-                std::io::stdout()
-                    .write_all(&shot.payload)
+                生のまま書く(&mut std::io::stdout(), &shot.payload)
                     .map_err(|err| client::ClientError::Config(format!("書き出せません: {err}")))?;
-                println!();
             } else {
                 let text = client::render::render_screen(&shot.payload, shot.rows, shot.cols);
                 if out.json {
@@ -920,10 +944,8 @@ async fn client_host(cmd: HostCmd, target: &client::Target) -> Result<(), client
             } else {
                 // 中身をそのまま出す（`--json` でないときの結果はファイルの本文そのもの）。
                 // 切り詰めの注記は本文と混ざらないよう標準エラーへ（CLI設計§10-4）
-                print!("{}", content.text);
-                if !content.text.ends_with('\n') {
-                    println!();
-                }
+                生のまま書く(&mut std::io::stdout(), content.text.as_bytes())
+                    .map_err(|err| client::ClientError::Config(format!("書き出せません: {err}")))?;
                 if content.truncated {
                     eprintln!(
                         "（大きいので途中まで。全体は {} バイトあります）",
@@ -1165,6 +1187,33 @@ mod tests {
             Cli::try_parse_from(["agentdashboard", "session", "ls", "--insecure"]).is_err(),
             "--insecure は解釈されてはいけない"
         );
+    }
+
+    #[test]
+    fn そのまま出す口は末尾の改行を足さない() {
+        // `--raw` は端末へ流し直すバイト列、`host file` はファイルの本文そのもの。
+        // 1バイト足すと再生が1行ずれ、写したファイルは照合が食い違う（コードレビュー対応11）
+        let payload = b"\x1b[2J\x1b[Hhello";
+        let mut out = Vec::new();
+        生のまま書く(&mut out, payload).expect("書けること");
+        assert_eq!(out, payload, "エスケープ列に改行を足さないこと");
+
+        // 末尾に改行の無い本文も、そのままの長さで出る
+        let text = "ok";
+        let mut out = Vec::new();
+        生のまま書く(&mut out, text.as_bytes()).expect("書けること");
+        assert_eq!(out, text.as_bytes(), "本文へ改行を補わないこと");
+    }
+
+    #[test]
+    fn logsの札は引数から環境変数へ順に落ちる() {
+        let 札 = |s: &str| Some(s.to_string());
+        // logs 自身の --token が最優先
+        assert_eq!(札を合流(札("logs"), 札("global"), 札("env")), 札("logs"));
+        // 全体の --token は他の全コマンドで効く位置。ここでも効く（コードレビュー対応9）
+        assert_eq!(札を合流(None, 札("global"), 札("env")), 札("global"));
+        assert_eq!(札を合流(None, None, 札("env")), 札("env"));
+        assert_eq!(札を合流(None, None, None), None);
     }
 
     #[test]

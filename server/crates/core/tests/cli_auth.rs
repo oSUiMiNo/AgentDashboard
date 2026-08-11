@@ -264,6 +264,32 @@ async fn logsの入り口は札を線に乗せる() {
 }
 
 #[tokio::test]
+async fn 改行の混ざった札は送らずに理由を名指しして断る() {
+    // 黙って札を外して送ると、無認証の 401 に「失効しているかも」という誤った案内が
+    // 付く（コードレビュー対応8）。**繋ぐ前に断る**ので、待ち受けは要らない
+    let args = session_host_core::logs::LogsArgs {
+        host: Some("11111111-1111-4111-8111-111111111111".to_string()),
+        token: Some("adp_kaigyou_iri\n".to_string()),
+        ..Default::default()
+    };
+    // 誰も居ないポートを指す——繋ぎに行ってしまったら「繋げません」で落ちるので、
+    // 言葉を見れば「送る前に断った」ことまで分かる
+    let err = tokio::task::spawn_blocking(move || session_host_core::logs::run_remote(&args, 1))
+        .await
+        .expect("スレッドが落ちないこと")
+        .expect_err("断られること");
+    let text = format!("{err}");
+    assert!(
+        text.contains("改行"),
+        "理由が改行を名指ししていない: {text}"
+    );
+    assert!(
+        !text.contains("繋げません"),
+        "繋ぐ前に断ること（線を張ってしまっている）: {text}"
+    );
+}
+
+#[tokio::test]
 async fn dbが引けない間は503で待てと言う() {
     // コードレビュー対応4。401 は「札やログインが悪い・再試行するな」（exit 1）、
     // 503 は「記録が引けない・待って再試行」（exit 4）で、CLI の終了コード契約

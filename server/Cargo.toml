@@ -28,7 +28,9 @@ server-core = { path = "crates/server-core" }
 testkit = { path = "crates/testkit" }
 
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `raw_value` は CLI が「サーバの応答をそのまま出す」（CLI設計§10-2）ために要る。
+# `Value` を経由すると鍵が辞書順へ並び替わり、整形も変わる
+serde_json = { version = "1", features = ["raw_value"] }
 # axum の WebSocket ペイロードと同じ型。1つの Bytes を clone（参照カウントのみ）して
 # 全クライアントへ配る、設計§4 のゼロコピー配信のために使う。
 bytes = "1"
