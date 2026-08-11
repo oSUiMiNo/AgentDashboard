@@ -319,6 +319,68 @@ impl RingBuffer {
     }
 }
 
+/// CLI が「セッションが終わった」と名乗ったこと。**確定ではない。**
+///
+/// `SessionEnd` は会話の入れ替え（`/resume` ／ `/clear`）でも飛ぶので、これだけでは
+/// プロセスが消えたと言えない。確定を受け持つのは PTY の終了（[`SessionManager::on_exit`]）で、
+/// こちらは「利用者が知らないうちに落ちたのか」を見分けるための材料にしかならない。
+#[derive(Debug, Clone)]
+struct EndReport {
+    /// 申告を受けた時刻。猶予の判定に使う。
+    at: Timestamp,
+    /// CLI が名乗った理由。**判定には使わず、記録にだけ載せる**。
+    ///
+    /// 綴りも顔ぶれも CLI 側の都合で変わる（公式の列挙は4つから6つへ増えている）。
+    /// ここに判定を載せると、表に無い値が来たときだけ壊れる。
+    // 読むのはログ（段3）。**判定からは永久に読まない**ので、
+    // 「使われていないから消す」と判断しないこと
+    #[allow(dead_code)]
+    reason: Option<String>,
+}
+
+/// 申告の置き場所。**中に他のものを入れない。**
+///
+/// [`Session`] の欄として直に `Mutex<Option<EndReport>>` を持たせるのと持ち物は同じだが、
+/// 名前を付けてあるのには理由が2つある。
+///
+/// - **`meta` や `ring` を跨げない形になる。** このロックは `Option` の出し入れだけで
+///   終わる約束で、既存の並び（`ring` → 離す → `meta`）へ新しい順序を持ち込まない
+/// - **単体テストが擬似ターミナルを起こさずに書ける。** [`Session`] は子プロセスを
+///   起こさないと作れないので、包まないと器の検証がプロセス込みの統合テストになる
+#[derive(Debug, Default)]
+struct EndReportCell(Mutex<Option<EndReport>>);
+
+impl EndReportCell {
+    /// 申告を立てる。既に立っていれば新しいほうで上書きする。
+    fn report(&self, at: Timestamp, reason: Option<String>) {
+        *self.0.lock().expect("ロックが壊れていない") = Some(EndReport { at, reason });
+    }
+
+    /// 立っていれば下ろす。立っていなければ**何も起きない**。
+    fn clear(&self) -> Option<EndReport> {
+        self.0.lock().expect("ロックが壊れていない").take()
+    }
+
+    /// 立っていれば取り出す（[`Self::clear`] と同じだが、呼ぶ側の意図が違う）。
+    fn take(&self) -> Option<EndReport> {
+        self.clear()
+    }
+
+    /// 立ってから `secs` 秒より長く経っていれば取り出す。**そうでなければ残す。**
+    ///
+    /// `now` を引数で受け取るのは、境目の検証を待ち時間ゼロで書けるようにするため。
+    fn take_older_than(&self, now: Timestamp, secs: u64) -> Option<EndReport> {
+        let mut slot = self.0.lock().expect("ロックが壊れていない");
+        let at = slot.as_ref()?.at;
+        // 秒からミリ秒への直し方は `state::sweep_stalled` と同じ形に揃える
+        if now.saturating_sub(at) > (secs as i64).saturating_mul(1000) {
+            slot.take()
+        } else {
+            None
+        }
+    }
+}
+
 /// 一覧画面の小窓1枚に対応する、生きているセッション。
 pub struct Session {
     pub card_id: CardId,
@@ -338,12 +400,22 @@ pub struct Session {
     /// **サーバ側へは移さない**（設計§2-2 からの読み替え）。これは PC 上のファイルの
     /// 場所で、サーバに JSONL は存在しない（§3-3）ため、向こうへ置いても使えない。
     transcript_path: Mutex<Option<String>>,
-    /// 終了が「想定内」であることの印。
+    /// **利用者がダッシュボードから終わらせた**ことの印。立てるのは [`Session::kill`] だけで、
+    /// 一度立つと下りない。
     ///
     /// ダッシュボードから終了させた場合、子プロセスは強制終了されるので終了コードは
     /// 非ゼロになる。それをそのまま「異常終了」と表示すると、利用者が自分で終わらせたのに
     /// 落ちたように見えてしまうため、指示した側で印を立てておく。
+    ///
+    /// **CLI 側の申告（`SessionEnd`）はここへ立てない。** あちらは `/resume` のように
+    /// プロセスが生き続ける場面でも飛ぶので**取り消しうる**印であり、下りない印と混ぜると
+    /// 呼び戻したあとに本当に落ちたときまで正常終了として表示される。器は `end_report`。
     expected_exit: AtomicBool,
+    /// CLI からの終了の申告。**立っている間も状態は動かさない。**
+    ///
+    /// 取り消されるのは、次のフックが1件届いたとき（死んだプロセスはフックを出さない）か、
+    /// 猶予を過ぎても生きていたとき。確定は [`SessionManager::on_exit`] が受け持つ。
+    end_report: EndReportCell,
     /// PTY が何か出力したか（設計§11 の「フック未受信」判定の片側）。
     ///
     /// 「CLI は動いているのにフックが1件も来ない」を見分けるために要る。出力が無い
@@ -909,6 +981,27 @@ impl Session {
         // 先に走って異常終了として表示されてしまう
         self.expected_exit.store(true, Ordering::SeqCst);
         self.process.kill();
+    }
+
+    /// CLI が終わりを名乗ったことを控える。**状態は動かさない。**
+    pub(crate) fn report_end(&self, reason: Option<&str>) {
+        self.end_report.report(now_ms(), reason.map(str::to_owned));
+    }
+
+    /// 申告を下ろす。**まだ生きている証拠**（次のフック1件）を受け取ったときに呼ぶ。
+    pub(crate) fn clear_end_report(&self) {
+        self.end_report.clear();
+    }
+
+    /// 申告を取り出す（確定のときに1度だけ）。
+    fn take_end_report(&self) -> Option<EndReport> {
+        self.end_report.take()
+    }
+
+    /// 猶予を過ぎた申告を取り出す。**過ぎていなければ残す。**
+    #[allow(dead_code)] // 猶予切れの見張りは段3 で結線する
+    fn end_report_older_than(&self, now: Timestamp, secs: u64) -> Option<EndReport> {
+        self.end_report.take_older_than(now, secs)
     }
 
     /// フックの受信URLに埋め込まれる、このセッション限りの合言葉。
@@ -1478,6 +1571,7 @@ impl SessionManager {
             settings,
             transcript_path: Mutex::new(None),
             expected_exit: AtomicBool::new(false),
+            end_report: EndReportCell::default(),
             saw_output: AtomicBool::new(false),
             hook_silence_noted: AtomicBool::new(false),
             model_alias: Mutex::new(initial_alias),
@@ -1586,10 +1680,12 @@ impl SessionManager {
     /// [`crate::state::apply`] の戻り値で決まる。フックはツールコールのたびに飛んで
     /// くるので、毎回カード全体を送ると無駄が大きい。
     pub fn handle_hook(&self, session: &Arc<Session>, input: &HookInput) {
-        // SessionEnd を受けたら「自分で終了した」ことが分かる。この後に PTY の終了が
-        // 届いても異常終了として上書きしないための印でもある
-        if input.event == state::HookEvent::SessionEnd {
-            session.expected_exit.store(true, Ordering::SeqCst);
+        // `SessionEnd` は「会話が終わった」までしか言えない。**死んだプロセスはフックを
+        // 出さない**ので、それ以外が1件届いたことが、そのまま「まだ生きている」の証拠になる。
+        // 理由の綴りにも、到着順にも依らない
+        match input.event {
+            state::HookEvent::SessionEnd => session.report_end(input.end_reason()),
+            _ => session.clear_end_report(),
         }
         let (changed, new_transcript) = session.apply_hook(input);
         // JSONL の場所が分かった／変わった時点でパーサへ監視を頼む。resume で別ファイルに
@@ -1872,15 +1968,21 @@ impl SessionManager {
         let Some(session) = self.get(card_id) else {
             return;
         };
+        // 申告はここで取り出して消す。**`meta` を取る前に済ませる**（器のロックは他と
+        // 跨がない約束）。下の早期 return を通ると取り出したぶんは捨てられるが、そこは
+        // 終了が二重に届いたときしか通らない
+        let reported = session.take_end_report();
         {
             let mut meta = session.meta.lock().expect("ロックが壊れていない");
-            // SessionEnd フックで既に終了扱いになっているなら、そちらの判定を尊重する
+            // 終了は oneshot で1回だけ届くので二重には来ない。防御として残す
             if matches!(meta.status, SessionStatus::Ended { .. }) {
                 return;
             }
-            // ダッシュボードから終了させた場合、強制終了なので終了コードは非ゼロになる。
-            // それを異常終了として出すと、利用者が自分で終わらせたのに落ちたように見える
-            let ok = exit.ok || session.expected_exit.load(Ordering::SeqCst);
+            // **終わったと言えるのはプロセスだけ。** フックの申告は材料の1つとしてしか
+            // 使わない。「異常終了」と出してよいのは、誰も終わりを意図していなかったとき
+            // だけである——ダッシュボードから終了させた場合は強制終了なので終了コードが
+            // 非ゼロになり、CLI が自分で終わりを名乗った場合も落ちたわけではない
+            let ok = exit.ok || session.expected_exit.load(Ordering::SeqCst) || reported.is_some();
             meta.status = SessionStatus::Ended { ok };
             meta.last_activity_at = now_ms();
         }
@@ -2273,5 +2375,76 @@ mod tests {
         .await;
 
         assert_eq!(merged, vec![b"first".to_vec(), b"second".to_vec()]);
+    }
+
+    /// 申告は1回しか取り出せない。**取り出したら空になる。**
+    ///
+    /// 取り出すのは終了の確定（`on_exit`）で、そこは1本につき1回しか通らない。
+    /// 残ってしまうと、次に立てた申告と見分けが付かなくなる。
+    #[test]
+    fn 申告は立てて取り出すと消える() {
+        let cell = EndReportCell::default();
+        cell.report(1_000, Some("resume".to_owned()));
+
+        let taken = cell.take().expect("立てた申告が取り出せること");
+        assert_eq!(taken.at, 1_000);
+        assert_eq!(taken.reason.as_deref(), Some("resume"));
+
+        assert!(cell.take().is_none(), "2度目は空であること");
+    }
+
+    /// 取り消しは**空振りしてよい**。
+    ///
+    /// 申告が立っていないセッションにもフックは届き続けるので、ここが騒ぐと
+    /// 1件ごとに何かをすることになる。
+    #[test]
+    fn 立っていない申告を取り消しても何も起きない() {
+        let cell = EndReportCell::default();
+
+        assert!(cell.clear().is_none(), "立てていないので何も返らないこと");
+        assert!(
+            cell.take().is_none(),
+            "取り消しても状態は空のままであること"
+        );
+    }
+
+    /// 猶予の**境目の直前では下ろさない**。
+    ///
+    /// 早く下ろすと、終了処理に手間取っている CLI の終了が「誰も意図していない異常終了」
+    /// として出る。境目そのものは「過ぎた」に含めない。
+    #[test]
+    fn 猶予の境目までは申告を残す() {
+        let cell = EndReportCell::default();
+        cell.report(1_000, None);
+
+        assert!(
+            cell.take_older_than(1_000, 1).is_none(),
+            "経っていないので残ること"
+        );
+        assert!(
+            cell.take_older_than(2_000, 1).is_none(),
+            "境目ちょうどでは残ること"
+        );
+        assert!(
+            cell.take().is_some(),
+            "残っていた申告は、まだ器の中にあること"
+        );
+    }
+
+    /// 猶予を過ぎたら下ろす。**下ろしたら空になる。**
+    #[test]
+    fn 猶予を過ぎた申告は下ろされる() {
+        let cell = EndReportCell::default();
+        cell.report(1_000, Some("clear".to_owned()));
+
+        let taken = cell
+            .take_older_than(2_001, 1)
+            .expect("猶予を過ぎたら取り出せること");
+        assert_eq!(taken.reason.as_deref(), Some("clear"));
+
+        assert!(
+            cell.take_older_than(9_999, 1).is_none(),
+            "下ろしたあとは空であること"
+        );
     }
 }
