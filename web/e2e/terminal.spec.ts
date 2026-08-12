@@ -134,3 +134,94 @@ test('Windows 側から貼ったバックスラッシュ区切りのパスでも
     page.locator(`[data-testid="project-group"][data-project="${WORK_DIR}"]`),
   ).toHaveCount(1)
 })
+
+/**
+ * 選択ダイアログの確定（ローカルイシュー「送信以外の操作も Ctrl+Enter になっている」）。
+ *
+ * 権限確認や `/rewind` のメニューは、画面に `Enter to confirm` と出ているのに素の Enter が
+ * 効かなかった。Enter を一律に改行へ読み替えていたためで、確定には `Ctrl+Enter` が要った。
+ * **`Ctrl` を持たないスマホでは確定そのものができなかった。**
+ *
+ * 擬似 claude の `/model` の確認画面を相手にする。**本物と同じ形**（`❯ 1. …` と
+ * `Esc to cancel`）を描き、方向キーで選択が動き、CR で確定する。
+ * 責任の受諾（`BYPASS_NOTICE`）ではなくこちらを使うのは、**あちらの既定が
+ * `No, exit`** で、確定させると擬似 claude ごと終わってしまうため。
+ */
+test('選択ダイアログでは素の Enter が確定になる', async ({ page }) => {
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  await openSession(page, tile)
+
+  // 会話が進んでいないと確認画面は出ない（本物と同じ）
+  await typeLine(page, 'こんにちは')
+  await expectTerminalToContain(page, '[fake-claude] received: こんにちは')
+
+  await typeLine(page, '/model haiku')
+  await expectTerminalToContain(page, 'Esc to cancel')
+
+  // ここが本題。**素の Enter** で確定する
+  await page.getByTestId('terminal').click()
+  await page.keyboard.press('Enter')
+
+  await expectTerminalToContain(page, '[fake-claude] model-set: ')
+})
+
+test('選択ダイアログでは方向キーで選び直してから確定できる', async ({ page }) => {
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  await openSession(page, tile)
+
+  await typeLine(page, 'こんにちは')
+  await expectTerminalToContain(page, '[fake-claude] received: こんにちは')
+  await typeLine(page, '/model haiku')
+  await expectTerminalToContain(page, 'Esc to cancel')
+
+  // 既定は「Yes, switch」。1つ下げると「No, go back」になる。
+  // **矢印が効かないと選択が動かない**ので、結果が変わることが符号の証拠にもなる
+  await page.getByTestId('terminal').click()
+  await page.keyboard.press('ArrowDown')
+  await page.keyboard.press('Enter')
+
+  await expectTerminalToContain(page, '[fake-claude] model-set: （取りやめ）')
+})
+
+test('選択ダイアログでも Ctrl+Enter で確定できる', async ({ page }) => {
+  // 判定が外れたときの逃げ道。ここが画面に依存すると、利用者は手段を失う
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  await openSession(page, tile)
+
+  await typeLine(page, 'こんにちは')
+  await expectTerminalToContain(page, '[fake-claude] received: こんにちは')
+  await typeLine(page, '/model haiku')
+  await expectTerminalToContain(page, 'Esc to cancel')
+
+  await page.getByTestId('terminal').click()
+  await page.keyboard.press('Control+Enter')
+
+  await expectTerminalToContain(page, '[fake-claude] model-set: ')
+})
+
+test('ダイアログが消えれば Enter は改行へ戻る', async ({ page }) => {
+  // **直しすぎていないことの回帰。** 判定が「一度選択待ちを見たら以後ずっと確定」に
+  // なっていると、複数行の指示が打てなくなる
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  await openSession(page, tile)
+
+  await typeLine(page, 'こんにちは')
+  await expectTerminalToContain(page, '[fake-claude] received: こんにちは')
+  await typeLine(page, '/model haiku')
+  await expectTerminalToContain(page, 'Esc to cancel')
+  await page.getByTestId('terminal').click()
+  await page.keyboard.press('Enter')
+  await expectTerminalToContain(page, '[fake-claude] model-set: ')
+
+  // ダイアログが消えたあとは、Enter が改行として効く
+  await page.keyboard.type('あか')
+  await page.keyboard.press('Enter')
+  await page.keyboard.type('あお')
+  await page.keyboard.press('Control+Enter')
+
+  await expectTerminalToContain(page, '[fake-claude] received: あか\nあお')
+})

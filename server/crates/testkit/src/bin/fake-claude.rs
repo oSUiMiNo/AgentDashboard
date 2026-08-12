@@ -40,11 +40,11 @@ use std::io::{Read as _, Write};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use testkit::fake_claude::{
-    ARGV_PREFIX, BYE_MARKER, BYPASS_ACCEPTED_MARKER, BYPASS_NOTICE, CRASH_MARKER, CYCLE_MODES,
-    DUMP_END_MARKER, ENV_PREFIX, FLOOD_END_MARKER, FLOOD_PATTERN, FOOTER_PREFIX,
+    ARGV_PREFIX, BYE_MARKER, BYPASS_ACCEPTED_MARKER, BYPASS_NOTICE, BYPASS_OPTIONS, CRASH_MARKER,
+    CYCLE_MODES, DUMP_END_MARKER, ENV_PREFIX, FLOOD_END_MARKER, FLOOD_PATTERN, FOOTER_PREFIX,
     HOOK_FAILED_PREFIX, HOOK_SENT_PREFIX, JSONL_APPENDED_PREFIX, JSONL_FAILED_PREFIX,
-    MODEL_SET_PREFIX, MODEL_SWITCH_NOTICE, READY_MARKER, RECEIVED_PREFIX, RESIZED_PREFIX,
-    STATUS_LINE_SENT_PREFIX, footer_for, resolve_model,
+    MODEL_SET_PREFIX, MODEL_SWITCH_NOTICE, MODEL_SWITCH_OPTIONS, READY_MARKER, RECEIVED_PREFIX,
+    RESIZED_PREFIX, STATUS_LINE_SENT_PREFIX, footer_for, render_dialog, resolve_model,
 };
 
 /// 起動時に受け取った、フック実行に必要な情報。
@@ -225,7 +225,7 @@ fn main() {
     // （テストからは「フックが飛ばない」という分かりにくい形でしか見えない）
     let mut awaiting_accept = launched_bypass;
     if awaiting_accept {
-        let _ = writeln!(out, "{BYPASS_NOTICE}");
+        let _ = writeln!(out, "{}", render_dialog(BYPASS_NOTICE, BYPASS_OPTIONS, 0));
     } else {
         let _ = writeln!(out, "{READY_MARKER}");
         let _ = writeln!(out, "{FOOTER_PREFIX}{}", footer_for(&injected.mode));
@@ -240,6 +240,8 @@ fn main() {
     let mut conversation_started = false;
     // 確認画面を出している間、答えを待っている切替先
     let mut awaiting_model_choice: Option<String> = None;
+    // 選択ダイアログで**いま選ばれている位置**。本物は方向キーで動き、Enter で確定する
+    let mut choice = 0usize;
 
     for input in InputReader::new() {
         let line = match input {
@@ -253,14 +255,59 @@ fn main() {
                 let _ = out.flush();
                 continue;
             }
+            // 矢印。**選択ダイアログが出ている間だけ**選択を動かして描き直す。
+            // 出ていないときに何もしないのは本物と同じ（気を利かせない）
+            key @ (Input::Up | Input::Down) => {
+                let options = if awaiting_accept {
+                    Some((BYPASS_NOTICE, BYPASS_OPTIONS))
+                } else if awaiting_model_choice.is_some() {
+                    Some((MODEL_SWITCH_NOTICE, MODEL_SWITCH_OPTIONS))
+                } else {
+                    None
+                };
+                if let Some((header, items)) = options {
+                    let last = items.len() - 1;
+                    // 端で止める（本物は巡回しない。行き過ぎても選択は動かない）
+                    let down = matches!(key, Input::Down);
+                    choice = if down && choice < last {
+                        choice + 1
+                    } else if !down && choice > 0 {
+                        choice - 1
+                    } else {
+                        choice
+                    };
+                    let _ = writeln!(out, "{}", render_dialog(header, items, choice));
+                    let _ = out.flush();
+                }
+                continue;
+            }
             Input::Line(line) => line,
         };
         let line = line.trim_end_matches('\r');
 
-        // 受諾の画面が出ている間は、選択肢の番号だけを受け付ける
+        // 受諾の画面が出ている間は、選択肢の番号か **CR（いま選ばれているものを確定）** を受ける。
+        // 本物は方向キーで選んで Enter で確定するので、番号だけを受ける形は嘘になる
         if awaiting_accept {
-            if line.trim() == "2" {
+            let picked = match line.trim() {
+                "1" => Some(0),
+                "2" => Some(1),
+                // CR だけ ＝ 選択中の項目を確定
+                "" => Some(choice),
+                _ => None,
+            };
+            if picked == Some(0) {
+                // 「No, exit」。**本物はここで終わる**ので、そちらへ合わせる
+                let _ = writeln!(out, "{BYE_MARKER}");
+                let _ = out.flush();
+                break;
+            }
+            if picked == Some(1) {
                 awaiting_accept = false;
+                choice = 0;
+                clear_dialog(
+                    &mut out,
+                    &render_dialog(BYPASS_NOTICE, BYPASS_OPTIONS, choice),
+                );
                 let _ = writeln!(out, "{BYPASS_ACCEPTED_MARKER}");
                 let _ = writeln!(out, "{READY_MARKER}");
                 let _ = writeln!(out, "{FOOTER_PREFIX}{}", footer_for(&injected.mode));
@@ -269,15 +316,31 @@ fn main() {
             continue;
         }
 
-        // モデル切替の確認画面が出ている間は、選択肢の番号だけを受け付ける
+        // モデル切替の確認画面。こちらも番号と CR の両方を受ける
         if let Some(target) = awaiting_model_choice.clone() {
-            match line.trim() {
-                "1" => {
+            let picked = match line.trim() {
+                "1" => Some(0),
+                "2" => Some(1),
+                "" => Some(choice),
+                _ => None,
+            };
+            match picked {
+                Some(0) => {
                     awaiting_model_choice = None;
+                    choice = 0;
+                    clear_dialog(
+                        &mut out,
+                        &render_dialog(MODEL_SWITCH_NOTICE, MODEL_SWITCH_OPTIONS, 0),
+                    );
                     apply_model(&mut out, &injected, &target);
                 }
-                "2" => {
+                Some(1) => {
                     awaiting_model_choice = None;
+                    choice = 0;
+                    clear_dialog(
+                        &mut out,
+                        &render_dialog(MODEL_SWITCH_NOTICE, MODEL_SWITCH_OPTIONS, 0),
+                    );
                     let _ = writeln!(out, "{MODEL_SET_PREFIX}（取りやめ）");
                     let _ = out.flush();
                 }
@@ -297,7 +360,12 @@ fn main() {
         if let Some(target) = line.strip_prefix("/model ") {
             let target = target.trim().to_string();
             if conversation_started {
-                let _ = writeln!(out, "{MODEL_SWITCH_NOTICE}");
+                choice = 0;
+                let _ = writeln!(
+                    out,
+                    "{}",
+                    render_dialog(MODEL_SWITCH_NOTICE, MODEL_SWITCH_OPTIONS, 0)
+                );
                 let _ = out.flush();
                 awaiting_model_choice = Some(target);
             } else {
@@ -343,6 +411,21 @@ fn main() {
         conversation_started = true;
         send_status_line(&mut out, &mut injected, true);
     }
+}
+
+/// 選択ダイアログを画面から消す。
+///
+/// **本物の TUI は選択が終わると描き直してダイアログを消す。** 擬似 claude は行を追記して
+/// いくだけなので、何もしないと確定した後も画面に残り続ける——ブラウザの判定は**可視領域**を
+/// 見るので、残っていると「まだ選択待ち」と読まれ、次に打った Enter まで確定になる
+/// （E2E で実際に踏んだ）。
+///
+/// 画面を丸ごと消す（`ESC[2J`）と**スクロールバックまで巻き込んで**既存のテストが読めなく
+/// なるので、カーソルをダイアログの先頭へ戻して、そこから下だけを消す。
+fn clear_dialog(out: &mut impl Write, dialog: &str) {
+    let lines = dialog.lines().count();
+    let _ = write!(out, "\x1b[{lines}A\x1b[J");
+    let _ = out.flush();
 }
 
 /// SIGWINCH を受けたら、いまの画面サイズをマーカー1行で報告する。
@@ -495,6 +578,10 @@ enum Input {
     Line(String),
     /// Shift+Tab（`ESC [ Z`）。改行を伴わないので行としては読めない
     Cycle,
+    /// 上矢印（`ESC [ A`）。選択ダイアログの選択を1つ戻す
+    Up,
+    /// 下矢印（`ESC [ B`）。選択ダイアログの選択を1つ進める
+    Down,
 }
 
 /// 標準入力を**バイト単位**で読み、行と Shift+Tab に振り分ける。
@@ -555,7 +642,14 @@ impl Iterator for InputReader {
                     // `/terminal-setup` で VS Code へ書き込む keybinding で確かめた。
                     // `{ key: "shift+enter", ..., args: { text: "\x1B\r" } }`（v2.1.220）
                     b'\r' | b'\n' => self.buffer.push(b'\n'),
-                    b'[' if self.read_csi()? == "Z" => return Some(Input::Cycle),
+                    // **矢印も拾う。** 本物の選択ダイアログは方向キーで選択が動くので、
+                    // ここで捨てるとブラウザから選び直せるかを確かめられない
+                    b'[' => match self.read_csi()?.as_str() {
+                        "Z" => return Some(Input::Cycle),
+                        "A" => return Some(Input::Up),
+                        "B" => return Some(Input::Down),
+                        _ => {}
+                    },
                     _ => {}
                 },
                 // 端末の作法では確定は CR。行編集を切っているので自分で扱う

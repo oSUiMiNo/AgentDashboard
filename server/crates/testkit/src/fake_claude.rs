@@ -81,9 +81,38 @@ pub const CYCLE_MODES: &[&str] = &["default", "acceptEdits", "plan"];
 /// 既定の選択肢が「いいえ」である点も本物の説明に合わせてある。
 pub const BYPASS_NOTICE: &str = "\
 WARNING: Claude Code running in Bypass Permissions mode
-By proceeding, you accept all responsibility for actions taken without permission checks
-❯ 1. No, exit
-  2. Yes, I accept";
+By proceeding, you accept all responsibility for actions taken without permission checks";
+
+/// 責任の受諾の選択肢。**既定は「いいえ」の側**（本物の説明に合わせてある）。
+pub const BYPASS_OPTIONS: &[&str] = &["1. No, exit", "2. Yes, I accept"];
+
+/// 選択ダイアログの末尾に本物が出す案内。
+///
+/// **3種すべてがこれを出す**ことを実測した（v2.1.228。`fixtures/v2.1.228/screens/`）。
+/// Enter の側の文言は画面ごとに違う（`confirm` ／ `continue` ／ そもそも出さない）が、
+/// `Esc to cancel` だけは共通で、**ブラウザはこれを選択待ちの目印にしている**
+/// （ローカルイシュー「送信以外の操作も Ctrl+Enter になっている」設計§4）。
+///
+/// 擬似 claude が出さないと、あの判定が E2E で一度も踏まれない。
+pub const DIALOG_HINT: &str = "Enter to confirm · Esc to cancel";
+
+/// 選択ダイアログを、いま選ばれている位置ごと描く。
+///
+/// 本物は**方向キーで選択が動き、Enter で確定する**。番号を打つ形しか受け付けないと、
+/// ブラウザの Enter が確定として届くことを確かめられない。
+pub fn render_dialog(header: &str, options: &[&str], selected: usize) -> String {
+    let mut out = String::from(header);
+    for (index, option) in options.iter().enumerate() {
+        let cursor = if index == selected { "❯" } else { " " };
+        out.push('\n');
+        out.push_str(cursor);
+        out.push(' ');
+        out.push_str(option);
+    }
+    out.push('\n');
+    out.push_str(DIALOG_HINT);
+    out
+}
 
 /// 受諾の選択肢が選ばれたことを示すマーカー。
 pub const BYPASS_ACCEPTED_MARKER: &str = "[fake-claude] bypass-accepted";
@@ -114,9 +143,10 @@ pub const STATUS_LINE_SENT_PREFIX: &str = "[fake-claude] statusline-sent: ";
 pub const MODEL_SWITCH_NOTICE: &str = "\
 Switch model?
 This conversation is cached for the current model. Switching means the full history
-gets re-read on your next message.
-❯ 1. Yes, switch
-  2. No, go back";
+gets re-read on your next message.";
+
+/// モデル切替の確認の選択肢。**既定は「はい」の側**（本物に合わせてある）。
+pub const MODEL_SWITCH_OPTIONS: &[&str] = &["1. Yes, switch", "2. No, go back"];
 
 /// モデルの別名が解決される先（本物の実測。設計§11）。
 ///
