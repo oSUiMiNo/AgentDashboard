@@ -17,7 +17,8 @@ DEBUG_BIN := server/target/debug/agentdashboard
 .PHONY: help setup setup-rust setup-web dev dev-web dev-server \
         test test-rust test-web test-cli test-compose e2e e2e-compose build-debug perf \
         lint lint-rust lint-web fmt \
-        build build-web build-server dist-local ci fixtures record-terminal probe-screen clean prune
+        build build-web build-server dist-local ci fixtures record-terminal capture-screens \
+        probe-screen clean prune
 
 help: ## このヘルプを表示する
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -161,6 +162,13 @@ fixtures: ## ゴールデンフィクスチャを採取して匿名化する（�
 # コンテナ内で完結し、何度でも走らせてよい。
 record-terminal: ## 実 claude の TUI を録画してフィクスチャにする（ホストで実行・クォータ消費）
 	./scripts/record-terminal.sh
+
+# 選択ダイアログの目印を実物から採る（ローカルイシュー「送信以外の操作も Ctrl+Enter に
+# なっている」テスト計画フェーズ1）。**`make test-cli` の通しには入れない**——採取は
+# 一度きりで足りるので、通しのたびにクォータを使わせない。置き場所は既定でリポジトリの
+# 外（`AGENTDASHBOARD_SCREEN_CAPTURE_DIR` で変えられる）。
+capture-screens: ## 本物の TUI の選択ダイアログの画面を採る（ホストで実行・クォータ消費）
+	TEST_TARGET=screen_capture ./scripts/test-cli
 
 # perf と同じ扱い。合否ではなく実測値を出すためのものなので `#[ignore]` を付けて
 # make test から外し、ここでだけ `--run-ignored all` で走らせる。
