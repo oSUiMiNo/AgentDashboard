@@ -163,7 +163,9 @@ test('選択ダイアログでは素の Enter が確定になる', async ({ page
   await page.getByTestId('terminal').click()
   await page.keyboard.press('Enter')
 
-  await expectTerminalToContain(page, '[fake-claude] model-set: ')
+  // **切り替わった値まで見る。** 接頭辞だけだと「取りやめ」（`model-set: （取りやめ）`）
+  // にも一致してしまい、確定でも取り消しでも緑になる
+  await expectTerminalToContain(page, '[fake-claude] model-set: haiku')
 })
 
 test('選択ダイアログでは方向キーで選び直してから確定できる', async ({ page }) => {
@@ -199,7 +201,9 @@ test('選択ダイアログでも Ctrl+Enter で確定できる', async ({ page 
   await page.getByTestId('terminal').click()
   await page.keyboard.press('Control+Enter')
 
-  await expectTerminalToContain(page, '[fake-claude] model-set: ')
+  // **切り替わった値まで見る。** 接頭辞だけだと「取りやめ」（`model-set: （取りやめ）`）
+  // にも一致してしまい、確定でも取り消しでも緑になる
+  await expectTerminalToContain(page, '[fake-claude] model-set: haiku')
 })
 
 test('ダイアログが消えれば Enter は改行へ戻る', async ({ page }) => {
@@ -215,7 +219,9 @@ test('ダイアログが消えれば Enter は改行へ戻る', async ({ page })
   await expectTerminalToContain(page, 'Esc to cancel')
   await page.getByTestId('terminal').click()
   await page.keyboard.press('Enter')
-  await expectTerminalToContain(page, '[fake-claude] model-set: ')
+  // **切り替わった値まで見る。** 接頭辞だけだと「取りやめ」（`model-set: （取りやめ）`）
+  // にも一致してしまい、確定でも取り消しでも緑になる
+  await expectTerminalToContain(page, '[fake-claude] model-set: haiku')
 
   // ダイアログが消えたあとは、Enter が改行として効く
   await page.keyboard.type('あか')
