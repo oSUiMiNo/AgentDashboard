@@ -41,11 +41,16 @@
  * つまり **ESC + CR** を送れば本物は改行として扱う。公式ドキュメントが言う
  * 「Option+Enter で改行」も、Option を Meta として送る＝ESC 前置なので同じ並びになる。
  *
- * # 選択ダイアログの確定も Ctrl+Enter になる
+ * # 選択ダイアログのときだけ、Enter は確定になる
  *
- * CLI の TUI は「Yes / No」のような選択も Enter で確定する。Enter を改行にした以上、
- * **その確定も Ctrl+Enter で行うことになる**。押し分けが要るのはこの割り当ての代償で、
- * 隠さずここに書いておく。
+ * CLI の TUI は「Yes / No」のような選択も Enter で確定する。Enter を一律に改行へ読み替えて
+ * いた頃は、**その確定まで Ctrl+Enter で行うことになっていた**——画面に `Enter to confirm` と
+ * 出ているのに素の Enter が効かない、という食い違いがここにあった。しかも **`Ctrl` を持たない
+ * スマホでは確定そのものができなかった**。
+ *
+ * いまは [`isSelectionPrompt`] が画面を見て、選択待ちのときだけ Enter を確定として送る。
+ * 押し分けを覚える必要は無くなったが、**`Ctrl+Enter` は画面によらず確定のまま**にしてある
+ * ——判定が外れたときの逃げ道を、利用者から取り上げないため。
  *
  * なお `Ctrl+J`（0x0A）は読み替え無しでいまも改行として効く。xterm がそのまま送るため。
  */
@@ -74,6 +79,75 @@ export const NEWLINE = '\x1b\r'
 export const SUBMIT = '\r'
 
 /**
+ * 選択カーソルとして扱う文字。
+ *
+ * 実物は `❯` だが、版で変わりうるので近い形を数個持っておく。サーバ側の
+ * `session/permission.rs` の `accept_option_key` が落としている顔ぶれに揃えてある。
+ */
+const SELECTION_CURSORS = '❯>*›▶│'
+
+/**
+ * TUI が「Esc で取り消せる」と言っている案内。**これが選択待ちの唯一の共通点**だった。
+ *
+ * 実測（v2.1.228）では、Enter の案内は画面ごとに違った——信頼確認は `Enter to confirm`、
+ * `/rewind` は `Enter to continue`、権限確認は**Enter の案内をそもそも出さない**。
+ * 3種すべてに出たのはこちらだけである。
+ *
+ * 作業中に出る `esc to interrupt` とは綴りが違うので当たらない。
+ */
+const CANCEL_HINT = 'esc to cancel'
+
+/**
+ * いま画面が「選択して決めるのを待っている」か。
+ *
+ * # 目印を2つ持ち、どちらかが当たれば選択待ちとみなす
+ *
+ * 1つの文字列に賭けない。TUI の文言は版ごとに変わるうえ、こちらから出させることが
+ * できない画面もある。実測（v2.1.228。`fixtures/v2.1.228/screens/`）の結果が次のとおりで、
+ * **2つ持って初めて3種すべてに当たり、そうでない画面には1つも当たらない**。
+ *
+ * | 画面 | 形 | 案内文 |
+ * |---|---|---|
+ * | フォルダ信頼の確認 | 当たり | 当たり |
+ * | 権限確認 | 当たり | 当たり |
+ * | `/rewind` のメニュー | — | 当たり |
+ * | 起動直後（welcome） | — | — |
+ * | 普通に会話しているだけ | — | — |
+ *
+ * **`/rewind` は選択肢に番号を持たない**（`❯ (current)`）ので、形の目印だけでは取りこぼす。
+ *
+ * # 迷ったら「選択待ちではない」と答える
+ *
+ * 誤判定の重さが逆方向で違う。選択待ちでないのに確定と答えると**打ちかけの文が送信されて
+ * しまう**（取り消せない）。逆は「Enter が効かない」だけで、`Ctrl+Enter` を押せば済む。
+ * だから**目印が1つも当たらなければ false** にする。
+ */
+export function isSelectionPrompt(screen: string): boolean {
+  if (!screen) {
+    return false
+  }
+  if (screen.toLowerCase().includes(CANCEL_HINT)) {
+    return true
+  }
+  return screen.split('\n').some(hasNumberedChoice)
+}
+
+/**
+ * その行が「選択カーソル ＋ 番号つきの選択肢」か。
+ *
+ * **空白の種類を当てにしない。** `❯` の直後は、入力欄では NBSP（U+00A0）、選択肢では
+ * 通常の半角空白だった（実測）。`trimStart()` はどちらも落とすので、種類を問わずに読める。
+ */
+function hasNumberedChoice(line: string): boolean {
+  const trimmed = line.trimStart()
+  const cursor = trimmed.charAt(0)
+  if (!cursor || !SELECTION_CURSORS.includes(cursor)) {
+    return false
+  }
+  return /^\d+\./.test(trimmed.slice(1).trimStart())
+}
+
+/**
  * 端末へ送る前にキーを読み替える。読み替えが要らなければ `null`。
  *
  * 対象は **keydown の Enter だけ**に絞る。絞らないと次の事故が起きる。
@@ -83,8 +157,22 @@ export const SUBMIT = '\r'
  * | `keydown` 以外 | 横取りの口は keypress でも呼ばれるので、二重に送ってしまう |
  * | Alt / Meta が一緒 | Alt+Enter は端末の作法で既に ESC 前置になる。奪うと二重に前置する |
  * | IME の変換中 | 変換確定の Enter を改行と取り違える（Composer が見ているのと同じ理由） |
+ *
+ * **除外は画面を見る前に効かせる。** 変換確定の Enter を確定と取り違えないことのほうが先で、
+ * しかもそうすれば既存の振る舞いを1バイトも変えずに済む。
+ *
+ * # 画面は「読む関数」で受け取る
+ *
+ * 横取りの口は**すべてのキー**で呼ばれるので、画面テキスト（40行×120桁）を毎打鍵で
+ * 組み立てると、打つたびに無駄が乗る。関数で受け取れば、**素の Enter のときにしか
+ * 呼ばれない**——除外に当たった場合も、`Ctrl+Enter` の場合も、読まずに答えが決まる。
+ *
+ * @param readScreen いま見えている画面（可視領域だけ）を返す。**呼ばれないことがある**
  */
-export function terminalKeyOverride(event: KeyboardEvent): string | null {
+export function terminalKeyOverride(
+  event: KeyboardEvent,
+  readScreen: () => string,
+): string | null {
   if (event.type !== 'keydown' || event.isComposing) {
     return null
   }
@@ -96,7 +184,11 @@ export function terminalKeyOverride(event: KeyboardEvent): string | null {
   }
   // Shift の有無は改行かどうかに影響しない（xterm は Enter に修飾キーを見ておらず、
   // Shift+Enter でも素の Enter と同じ CR を送る）。押し分けるのは Ctrl だけ
-  return event.ctrlKey ? SUBMIT : NEWLINE
+  if (event.ctrlKey) {
+    return SUBMIT
+  }
+  // 選択待ちの画面でだけ、素の Enter も確定として送る
+  return isSelectionPrompt(readScreen()) ? SUBMIT : NEWLINE
 }
 
 /**

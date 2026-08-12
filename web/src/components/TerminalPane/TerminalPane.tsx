@@ -19,6 +19,7 @@ import '@xterm/xterm/css/xterm.css'
 import { createFlowController } from '@/lib/flow'
 import { KIND_PTY_SNAPSHOT } from '@/lib/frame'
 import { terminalKeyOverride } from '@/lib/keys'
+import { visibleScreen } from '@/lib/screen'
 import type { CardId } from '@/lib/protocol'
 import { useWsStore } from '@/stores/ws'
 
@@ -141,12 +142,16 @@ export function TerminalPane({ cardId }: Props) {
     )
 
     // Enter まわりを読み替える（[`terminalKeyOverride`]）。
-    // Enter と Shift+Enter は改行、Ctrl+Enter が送信になる。
+    // Shift+Enter は改行、Ctrl+Enter が送信。素の Enter は**画面次第**で、
+    // 選択ダイアログが出ていれば確定、そうでなければ改行になる。
     //
     // **`term.input` を通すのが要点。** ここで `sendPtyInput` を直に呼ぶと送信口が
     // 2つになり、片方だけ直して片方が取り残される形の不具合を作る
+    //
+    // 画面は**関数で渡す**。この横取りの口はすべてのキーで呼ばれるので、素の Enter の
+    // ときにしか読まれない形にしておく（[`visibleScreen`]）
     term.attachCustomKeyEventHandler((event) => {
-      const override = terminalKeyOverride(event)
+      const override = terminalKeyOverride(event, () => visibleScreen(term))
       if (override === null) {
         return true
       }
