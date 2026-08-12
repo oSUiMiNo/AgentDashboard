@@ -37,8 +37,8 @@
 <p class="lead">
   AgentDashboard に関係して、この機械や外で<strong>起動しっぱなしになっているもの</strong>の一覧。
   「どの URL がどれを指しているか」を取り違えると原因追跡が丸ごと空振りするので、そこを中心に書いてある。
-  <br>最終更新：2026-08-12 08時台（<strong>動いているのは実機・AWS・セッションホスト<span class="mark">▽</span>の3つ</strong>。trial だけ止まっている）
-  <br><strong>3つとも <code>0.1.14</code>。ただし実機とセッションホスト<span class="mark">▽</span>だけ中身が新しい</strong>——<strong>08-12 08:48 に、終了判定の修正（`SessionEnd` は申告に留め、確定はプロセスの終了で行う）を入れて起こし直した</strong>（ローカルイシュー「稼働中のセッションが終了扱いになっていた」の段1〜5）。<strong>版番号は上げていない</strong>ので、<code>/api/me</code> はどちらも <code>0.1.14</code> のままである。
+  <br>最終更新：2026-08-12 16時台（<strong>動いているのは実機・AWS・セッションホスト<span class="mark">▽</span>の3つ</strong>。trial だけ止まっている）
+  <br><strong>3つとも <code>0.1.14</code>。ただし中身は3つとも違う</strong>——版番号を上げていないので <code>/api/me</code> はどれも <code>0.1.14</code> と答えるが、実態は次のとおり。<br>・<strong>実機だけがいちばん新しい</strong>（<strong>08-12 16時台</strong>に起こし直し）。終了判定の修正に加えて、<strong>選択ダイアログで素の Enter が確定になる修正</strong>が入っている（ローカルイシュー「送信以外の操作も Ctrl+Enter になっている」）<br>・<strong>セッションホスト<span class="mark">▽</span>は 08-12 08:48 のまま</strong>（終了判定の修正までは入っているが、Enter の修正は入っていない）。<strong>今回は起こし直していない</strong>——Enter の判定はブラウザ側だけの変更なので、あちらを入れ替える理由が無い<br>・<strong>AWS は 08-12 03:29 の箱のまま</strong>。配った箱なので、リリースを出すまで何も変わらない
   <br><strong>AWS には入っていない。</strong> あちらは配った箱なので、<strong>リリースを出すまで中身は変わらない</strong>。<code>protocol</code> を変えていないため <code>A2S_VERSION</code> は 1 のままで、<strong>新しいホストは 0.1.14 のサーバへそのまま繋がる</strong>（実測：起こし直した直後に同じ <code>agent_id</code> で再登録された）。
   <br><strong>版番号だけで中身を判断しないこと。</strong> 実機はソースビルド<span class="mark">▽</span>なので、版を上げなくても <code>git pull</code> と <code>make build</code> のたびに中身が変わる。<strong>いまがまさにその状態</strong>——実機とセッションホスト<span class="mark">▽</span>だけが先へ行っており、AWS は 08-12 03:29 の箱のままである。
 </p>
@@ -123,8 +123,8 @@
   画面に出る版だけを見て「同じものが動いている」と判断しないこと。<br><br>
 
   <strong>いま、まさに食い違っている。</strong> 3つとも <code>0.1.14</code> と名乗るが、
-  <strong>終了判定の修正が入っているのは実機とセッションホスト<span class="mark">▽</span>だけ</strong>
-  （08-12 08:48 のソースビルド）。AWS は配った箱なので、<strong>次のリリースまで入らない</strong>。<br><br>
+  <strong>いま3つの中身はすべて違う。</strong> 実機（16時台・Enter の修正入り）＞ セッションホスト<span class="mark">▽</span>（08:48・終了判定まで）＞ AWS（03:29 の箱）。
+  <strong>Enter の修正はブラウザ側だけの変更</strong>なので、セッションホストを入れ替えなくても、実機の画面を開いていれば効く。<br><br>
 
   同じことは以前も起きている（08-09 に <code>0.1.11</code> で揃えるまで、実機だけにログ整備が
   入っていた）。<strong>版番号で揃っているかを判断できない</strong>のは、この構成の性質である。<br><br>
@@ -161,7 +161,7 @@ agentdashboard-agent logs --since 24h --state-dir ~/agentdashboard-agent/state</
   <tr>
     <td>実機</td>
     <td><code>127.0.0.1:8787</code></td>
-    <td><span class="tag t-ok">0.1.14</span><br><small>ソースビルド<span class="mark">▽</span>（<strong>08-12 08:48 に起こし直し</strong>。終了判定の修正入り。落とす前に生きたカードが0枚であることを確かめてある）</small></td>
+    <td><span class="tag t-ok">0.1.14</span><br><small>ソースビルド<span class="mark">▽</span>（<strong>08-12 16時台に起こし直し</strong>。終了判定の修正に加えて<strong>選択ダイアログで素の Enter が確定になる修正</strong>入り。落とす前に生きたカードが0枚であることを2回確かめてある）</small></td>
     <td>ローカルモード<span class="mark">▽</span>。<code>~/AgentDashboard</code> で <code>make build</code> したものを引数なしで起動。端末の出力は <code>~/agentdashboard-run.log</code>、構造化ログは <code>~/.local/state/agentdashboard-run/logs/</code>。<br><strong>読むときは <code>--state-dir</code> が要る。</strong> 置き場所を設定で移してあるが、読む口は設定を読まない（設計§11-2 の非対称）——<code>agentdashboard logs --since 1h --state-dir ~/.local/state/agentdashboard-run</code><br><strong>起こすときは <code>setsid</code> で切り離す。</strong> ツール呼び出しの子として起こすと、呼び出しの終了で巻き添えに死ぬ（08-10 に一度この形で起こしてしまい、起こし直した）。<code>cd ~/AgentDashboard &amp;&amp; setsid nohup ./server/target/release/agentdashboard &gt;&gt; ~/agentdashboard-run.log 2&gt;&amp;1 &lt; /dev/null &amp;</code></td>
   </tr>
   <tr>
@@ -173,7 +173,7 @@ agentdashboard-agent logs --since 24h --state-dir ~/agentdashboard-agent/state</
   <tr>
     <td>セッションホスト<span class="mark">▽</span></td>
     <td>— （PC 名 <code>OMEN</code>）</td>
-    <td><span class="tag t-ok">0.1.14</span><br><small>ソースビルド<span class="mark">▽</span>（<strong>08-12 08:48 に起こし直し</strong>。本体・パーサとも 0.1.14 で、<strong>終了判定の修正が届くのはこちら</strong>。抱えている claude は0本だった）</small></td>
+    <td><span class="tag t-ok">0.1.14</span><br><small>ソースビルド<span class="mark">▽</span>（<strong>08-12 08:48 のまま</strong>。本体・パーサとも 0.1.14 で終了判定の修正入り。<strong>Enter の修正は入っていないが、あれはブラウザ側だけの変更なので影響しない</strong>）</small></td>
     <td><strong>AWS へ繋いでいる</strong>（<code>dash.underschaft.com</code>。この PC の名前は <code>OMEN</code>）。設定は <code>~/agentdashboard-agent/agent.toml</code>、ログは同じ場所の <code>run.log</code>。<br><strong>これが止まっていると、ブラウザに「指定された PC が繋がっていません」が出る</strong>——カードは PC に紐づくので、繋がっていないと引けない。ブラウザとサーバは繋がったままなので<strong>上の帯だけが赤くなる</strong>。
         <strong>ここを起こし直すと、抱えている claude が道連れになる。</strong>落とす前に <code>ps -eo pid,ppid,args --forest</code> で子を数えること——08-10 の入れ替えでは<strong>生きた claude が1本ぶら下がっていたので入れ替えを見送った</strong>。版を上げたら入れ替えないと、サーバだけ新しくなって<strong>フォルダを覗く口が「版が古い」で断られ続ける</strong>（実際に踏んだ）。<code>agent_id</code> はペアリングトークンから決まるので、<strong>起こし直しても同じ PC のまま</strong>——枠は孤児にならない。
         <strong>パーサだけなら落としてよい。</strong>子の <code>transcript-parser</code> を PID 直指定で <code>kill</code> すると、セッションホストが立て直して監視も保存済みの位置から張り直す（<strong>claude は道連れにならない</strong>）。本体が古い版のあいだにパーサが肥大したら、これで嵩が戻るうえ<strong>ディスク上の新しいパーサに入れ替わる</strong>。

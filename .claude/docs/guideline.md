@@ -171,6 +171,22 @@ scripts/cargo tree -i tokio-tungstenite -e normal
 `crates/server-core/build.rs` が `web/dist` の変更を cargo に伝えるようにしてあるので、ビルド順さえ
 守れば自動で作り直される。
 
+#### **E2E が使うのは debug ビルド。`make build` では効かない**
+上を守っていても踏む。`make build` が作るのは **release**（`server/target/release/`）だが、
+Playwright の `webServer` が起こすのは **`server/target/debug/agentdashboard`**
+（`web/playwright.config.ts` の `serverBinary`）。**別のバイナリなので、release をいくら作り直しても
+E2E には1バイトも届かない。**
+
+症状が最悪の形で出る。**古い web が焼き込まれた debug バイナリで E2E が走る**ので、直したはずの
+振る舞いが再現せず、しかも**製品コードもテストも正しい**。実際に、ブラウザ側の判定を足した回で
+3本が落ち、「判定が効いていない」と読んで調査用のテストまで書いた——可視領域には判定に必要な
+文字列がちゃんと入っており、**実装は最初から正しかった**。
+
+`make e2e` は `build-web build-debug` を前置しているので、**素直にあれを叩けば踏まない**。
+`npx playwright test` を直に呼ぶときは、先に `make build-web build-debug` を通すこと。
+
+**「web を作り直した」ではなく「E2E が見るバイナリを作り直した」で考える。**
+
 ### ビルドの置き場所は青天井に育つ。ときどき嵩を見る
 `cargo` は**古い成果物を自分では消さない**。このワークスペースは統合テストが多く、
 テストの実行ファイル1本が数百 MB あるので、再ビルドのたびに別名のぶんが
