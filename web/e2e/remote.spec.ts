@@ -102,12 +102,12 @@ test.describe('タッチで遡る', () => {
   /**
    * 遡れる中身を持った状態にして返す。
    *
-   * **順序が命。** 差分が届いている間、xterm のスクロールバックは1行も積まれない
-   * （差分は可視領域を描き直す形なので、押し出された行はどこにも残らない）。
-   * **全画面フレームが届いた瞬間だけ**、そのときのスクロールバックが一度に入る
-   * （フェーズ1 の実測。設計§9 の「既知の制約」）。
+   * **フェーズ8 で前提が変わった。** それまでは「差分が届いている間は1行も積まれず、
+   * 全画面フレームが届いた瞬間だけ一度に入る」だったので、ここでわざと画面の大きさを
+   * 変えて全画面フレームを起こしていた。いまは**流れたぶんが差分と一緒に運ばれる**ので、
+   * 吐かせるだけで遡れるようになる（設計§13）。
    *
-   * だから「吐かせる → 画面の大きさを変える（＝全画面フレームを起こす）」の順で行う。
+   * 大きさを変える手は**残さない**。あれを挟むと、運ぶ経路が壊れていても通ってしまう。
    */
   async function scrollbackLoaded(page: Page) {
     await openDashboard(page)
@@ -116,16 +116,12 @@ test.describe('タッチで遡る', () => {
     await typeLine(page, 'flood 200000')
     await expectTerminalToContain(page, '[fake-claude] flood-end')
 
-    const before = await terminalScroll(page)
-    await page.setViewportSize({ width: 1000, height: 700 })
-
-    // 全画面フレームが届くと、スクロールバックごと入れ替わって総行数が跳ねる
     await expect
-      .poll(async () => (await terminalScroll(page)).length, {
-        message: '全画面フレームで遡る行が入ること',
+      .poll(async () => (await terminalScroll(page)).baseY, {
+        message: '流したぶんが遡れるようになること',
         timeout: 30_000,
       })
-      .toBeGreaterThan(before.length)
+      .toBeGreaterThan(0)
 
     await scrollTerminalToBottom(page)
     return terminalScroll(page)
@@ -165,5 +161,121 @@ test.describe('タッチで遡る', () => {
 
     const after = await terminalScroll(page)
     expect(after.baseY - after.viewportY).toBeGreaterThan(0)
+  })
+})
+
+/**
+ * 遡る中身が運ばれること（テスト計画フェーズ6・設計§13）。
+ *
+ * # なぜ別の describe なのか
+ *
+ * 上の2本は**測る前にわざと全画面フレームを起こしている**（`scrollbackLoaded()`）。
+ * 開き直せば遡る中身は一度に入るので、**運ぶ経路が壊れていても通る**。実際それで
+ * 実機の症状を1つも捕まえられず、利用者が3本のセッションを並べて比べるまで
+ * 原因が分からなかった。
+ *
+ * こちらは**開いたまま何もしない**。全画面フレームを起こさずに出力だけを流し、
+ * そのあと遡れるかを見る。**リサイズを1回でも挟むと、この検査は意味を失う。**
+ */
+test.describe('遡る中身が運ばれる', () => {
+  /** 開いた直後の全画面フレームが落ち着くまで待ち、その枚数を返す。 */
+  async function settled(page: Page): Promise<number> {
+    const status = page.getByTestId('terminal-status')
+    await expect
+      .poll(async () => Number(await status.getAttribute('data-snapshots')), {
+        message: '開いた直後の全画面フレームが届くこと',
+        timeout: 30_000,
+      })
+      .toBeGreaterThan(0)
+    // 続けて届くぶんが落ち着くまで、値が動かなくなるのを待つ
+    let last = -1
+    await expect
+      .poll(
+        async () => {
+          const now = Number(await status.getAttribute('data-snapshots'))
+          const stable = now === last
+          last = now
+          return stable
+        },
+        { message: '全画面フレームが落ち着くこと', timeout: 30_000, intervals: [500] },
+      )
+      .toBe(true)
+    return last
+  }
+
+  test('開きっぱなしで流れた行を、あとから遡れる', async ({ page }) => {
+    await openDashboard(page)
+    const tile = await spawnSession(page)
+    await openSession(page, tile)
+
+    const status = page.getByTestId('terminal-status')
+    const snapshots = await settled(page)
+    const before = await terminalScroll(page)
+
+    // **リサイズしない。** 画面の大きさを変えると全画面フレームが起きて、
+    // そのとき遡る中身が一度に入る＝壊れていても通る
+    await typeLine(page, 'flood 200000')
+    await expectTerminalToContain(page, '[fake-claude] flood-end')
+
+    const after = await terminalScroll(page)
+    // 落ちた場から数字が読めるようにしておく。**「遡れない」だけでは、
+    // 運ばれていないのか測り方が悪いのかを切り分けられない**
+    console.log(
+      `[実測] 開いた直後 ${JSON.stringify(before)} → 流したあと ${JSON.stringify(after)}` +
+        ` / 全画面フレーム ${snapshots} → ${await status.getAttribute('data-snapshots')}`,
+    )
+
+    // 開いた時点では遡る中身が無い＝**増えたぶんは、開きっぱなしの間に運ばれたもの**
+    expect(before.baseY, '開いた時点では遡る中身が無いこと').toBe(0)
+    expect(after.baseY, '流れた行がスクロールバックへ積まれていること').toBeGreaterThan(0)
+  })
+
+  /**
+   * 1行ずつ流れる道（設計§13 の主の仕掛け）。
+   *
+   * 上のテストは一度に大量が流れるので、**見える範囲より多く流れた側**の受け皿
+   * （全画面フレームへ倒す）を通る。こちらは**差分に流れたぶんを前置する**という
+   * 主の仕掛けそのものを通すので、全画面フレームが**1枚も増えないこと**まで見る。
+   */
+  test('1行ずつ流れても、そのぶんだけ遡りが増える', async ({ page }) => {
+    await openDashboard(page)
+    const tile = await spawnSession(page)
+    await openSession(page, tile)
+
+    // 画面を埋めてからでないと、行は流れ始めない（埋まるまでは下へ伸びるだけ）
+    await typeLine(page, 'flood 20000')
+    await expectTerminalToContain(page, '[fake-claude] flood-end')
+    const snapshots = await settled(page)
+    const before = await terminalScroll(page)
+
+    // **少しずつ流す。** 一度に画面ぶんより多く流すと、受け皿（全画面へ倒す）の
+    // ほうを通ってしまい、主の仕掛けを一度も踏まない
+    const status = page.getByTestId('terminal-status')
+    const trail: string[] = []
+    for (let round = 1; round <= 4; round += 1) {
+      await typeLine(page, 'flood 600')
+      await expectTerminalToContain(page, '[fake-claude] flood-end')
+      const at = await terminalScroll(page)
+      trail.push(`${round}:baseY=${at.baseY}/全画面=${await status.getAttribute('data-snapshots')}`)
+    }
+    console.log(`[実測] ${trail.join(' ')}`)
+
+    const after = await terminalScroll(page)
+    console.log(
+      `[実測] 刻んで流す前 ${JSON.stringify(before)} → 後 ${JSON.stringify(after)}` +
+        ` / 全画面フレーム ${snapshots} → ${await status.getAttribute('data-snapshots')}`,
+    )
+
+    // **主の仕掛けを通ったことの証拠。** 全画面フレームで運ばれたのなら、
+    // このテストは受け皿のほうを見ていることになる
+    expect(
+      Number(await status.getAttribute('data-snapshots')),
+      '全画面フレームに頼らずに運ばれていること',
+    ).toBe(snapshots)
+    expect(after.baseY, '刻んで流れたぶんだけ遡りが増えること').toBeGreaterThan(before.baseY)
+
+    // **画面が壊れていないこと。** 前置した改行のぶん画面がずれると、
+    // 遡りは増えても読めるものが出なくなる
+    await expectTerminalToContain(page, '[fake-claude] flood-end')
   })
 })
