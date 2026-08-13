@@ -91,6 +91,13 @@ interface SwipeOptions {
    * 空けると乗らない。慣性を始める境目は 0.25 px/ms（`lib/touch.ts` の `flingMin`）。
    */
   gapMs?: number
+  /**
+   * 1回目に入れる指のブレ（px）。**0 で真っ直ぐ（＝合成タッチのふるまい）。**
+   *
+   * 実際の指は真っ直ぐ動き出さず、1回目は「横へ2px・縦へ1px」のような値になる。
+   * ここが**フェーズ7 で実機だけが死んだ道**で、真っ直ぐな合成タッチでは一度も通らない。
+   */
+  jitter?: number
 }
 
 /**
@@ -101,7 +108,7 @@ interface SwipeOptions {
  * **握れているかどうかを一度も確かめないまま緑になる**（フェーズ1 の実測）。
  */
 export async function swipeTerminal(page: Page, options: SwipeOptions) {
-  const { dy, dx = 0, steps = 8, gapMs = 0 } = options
+  const { dy, dx = 0, steps = 8, gapMs = 0, jitter = 0 } = options
   const box = await page.getByTestId('terminal').boundingBox()
   if (!box) {
     throw new Error('端末の位置が取れません')
@@ -116,6 +123,14 @@ export async function swipeTerminal(page: Page, options: SwipeOptions) {
       type: 'touchStart',
       touchPoints: [{ x, y }],
     })
+    if (jitter > 0) {
+      // **横のほうが大きい小さな1回目。** ここで向きを確定させると、そのなぞりは
+      // 二度と握れない（フェーズ7 の実測）。真っ直ぐな合成タッチでは作れない状況
+      await cdp.send('Input.dispatchTouchEvent', {
+        type: 'touchMove',
+        touchPoints: [{ x: x + jitter, y: y + jitter / 2 }],
+      })
+    }
     for (let step = 1; step <= steps; step += 1) {
       if (gapMs > 0) {
         await page.waitForTimeout(gapMs)

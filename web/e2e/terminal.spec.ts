@@ -277,6 +277,27 @@ test.describe('タッチで遡る', () => {
     expect(after.viewportY).toBeLessThan(before.viewportY)
   })
 
+  test('1回目に指がブレても遡れる', async ({ page }) => {
+    // **実機だけが死んでいた道（フェーズ7）。** 指は真っ直ぐ動き出さないので、1回目は
+    // 「横へ2px・縦へ1px」のような値になる。そこで向きを確定させると、決定は指が離れる
+    // まで戻らないので**そのなぞりは二度と握れない**。
+    //
+    // 既定の `swipeTerminal` は1歩目が 30px あるため、この道を一度も通らなかった。
+    // **合成タッチで通ることと、指で動くことは別**である
+    const before = await floodedSession(page)
+
+    // **ブレは touch slop より大きく取る。** ブラウザは指が一定距離動くまで `touchmove`
+    // をページへ配らない。実測では **2px と 12px は1つも届かず、30px で届いた**ので、
+    // 小さいブレでは**この道を一度も通せない**（通したつもりで何も確かめないテストになる）。
+    //
+    // 30px の斜めを1歩目にすると、届く1歩目が「横が勝つ」形になる。壊した状態で走らせると
+    // **2歩目から `cancelable` が落ち**、そのなぞりが丸ごと死ぬことまで実測してある
+    await swipeTerminal(page, { dy: 240, steps: 8, gapMs: 120, jitter: 30 })
+
+    const after = await terminalScroll(page)
+    expect(after.viewportY).toBeLessThan(before.viewportY)
+  })
+
   test('なぞっている間は入力が送られない', async ({ page }) => {
     await floodedSession(page)
     await typeLine(page, 'こんにちは')
