@@ -683,6 +683,117 @@ mod tests {
         );
     }
 
+    /// 種別を見ながら食わせる（**ブラウザの振る舞いを真似る**）。
+    ///
+    /// 全画面フレームは「ここまでの画面はこれで正しい」という指示なので、受け取る側は
+    /// **作り直してから書く**（`TerminalPane` の `term.reset()`）。種別を無視して
+    /// 全部つなげると、全画面のたびに遡り行が二重に積まれて**検査のほうが嘘をつく**。
+    fn replay_frames(sink: &Frames, cols: u16, rows: u16) -> vt100::Parser {
+        let mut mirror = vt100::Parser::new(rows, cols, 100);
+        for bytes in sink.seen.lock().expect("ロックが壊れていない").iter() {
+            let frame = frame::decode(bytes).expect("分解できること");
+            let (_, rest) = frame::split_seq(frame.payload).expect("番号を剥がせること");
+            if frame.kind == FrameKind::ScreenFull {
+                mirror = vt100::Parser::new(rows, cols, 100);
+            }
+            mirror.process(rest);
+        }
+        mirror
+    }
+
+    /// 受け取る側が持っている行を、遡りも画面も込みで古い順に読む。
+    fn all_lines(parser: &mut vt100::Parser) -> Vec<String> {
+        let (rows, cols) = parser.screen().size();
+        parser.screen_mut().set_scrollback(usize::MAX);
+        let depth = parser.screen().scrollback();
+        let mut out = Vec::new();
+        let mut offset = depth;
+        while offset > 0 {
+            parser.screen_mut().set_scrollback(offset);
+            let take = offset.min(rows as usize);
+            out.extend(parser.screen().rows(0, cols).take(take));
+            offset = offset.saturating_sub(rows as usize);
+        }
+        parser.screen_mut().set_scrollback(0);
+        out.extend(parser.screen().rows(0, cols));
+        out.into_iter()
+            .filter(|line| !line.trim().is_empty())
+            .collect()
+    }
+
+    /// 継ぎ目で行が**重複も欠落もしない**こと（計画フェーズ8 の要）。
+    ///
+    /// 番号を振った行を刻んで流し、受け取る側で**そのままの並びで1回ずつ**読めるかを見る。
+    /// 数えられる形にしてあるので、1行でもずれれば落ちる。
+    #[test]
+    fn 継ぎ目で行が重複も欠落もしない() {
+        let (screen, sink) = emulator(ScreenSettings {
+            screen_ms: 60_000,
+            scrollback_lines: 100,
+        });
+        screen.send_full();
+
+        // **画面（5行）より少なく刻む。** 多く流すと全画面へ倒れ、あちらが遡り行ごと
+        // 運び直してしまうので、**前置の道を一度も通らないまま通ってしまう**
+        let mut next = 1;
+        for chunk in [3usize, 4, 2, 3, 4, 2, 3] {
+            let mut bytes = Vec::new();
+            for _ in 0..chunk {
+                bytes.extend_from_slice(format!("L{next}\r\n").as_bytes());
+                next += 1;
+            }
+            screen.feed(&bytes);
+            // **`next_update` は組み立てるだけで送らない。** 送る口を通さないと
+            // 受け取る側に1バイトも届かず、検査が空を見て通ってしまう
+            screen.send_update();
+        }
+
+        let mut mirror = replay_frames(&sink, 20, 5);
+        let seen = all_lines(&mut mirror);
+        let want: Vec<String> = (1..next).map(|index| format!("L{index}")).collect();
+        assert_eq!(
+            seen, want,
+            "受け取る側の並びが食い違っています（重複か欠落）"
+        );
+    }
+
+    /// 上限に達したあとも、あとから流れた行が遡れること。
+    ///
+    /// **ここが止まると、長く動いているセッションだけ直らない。** 遡りが上限に達すると
+    /// 深さが動かなくなり、流れた行数を数えられなくなる。間隔をあけて全画面で運び直す
+    /// ことでしか埋められない。
+    ///
+    /// あわせて**溜め込みすぎないこと**も見る。運び直しは遡りの窓ごと入れ替えるので、
+    /// 受け取る側の深さは設定の範囲に戻る。
+    #[test]
+    fn 上限に達したあとも流れた行が遡れる() {
+        let (screen, sink) = emulator(ScreenSettings {
+            // 上限に達したらすぐ運び直す（実運用は無操作時の送信周期に揃う）
+            screen_ms: 1,
+            scrollback_lines: 10,
+        });
+        screen.send_full();
+
+        for round in 0..30 {
+            screen.feed(format!("R{round}\r\n").as_bytes());
+            std::thread::sleep(Duration::from_millis(2));
+            screen.send_update();
+        }
+
+        let mut mirror = replay_frames(&sink, 20, 5);
+        let depth = scrollback_depth(&mut mirror);
+        let seen = all_lines(&mut mirror);
+        // 画面から流れて間もない行が、受け取る側でも遡れること
+        assert!(
+            seen.iter().any(|line| line == "R22"),
+            "上限に達したあと、新しく流れた行が届いていない: {seen:?}"
+        );
+        assert!(
+            depth <= 10 + 5,
+            "受け取る側が設定より深く溜め込んでいます（深さ {depth}・上限 10）"
+        );
+    }
+
     /// 見える範囲より多く流れたら、差分では埋められないので全画面へ倒すこと。
     #[test]
     fn 見える範囲より多く流れたら全画面へ倒す() {
