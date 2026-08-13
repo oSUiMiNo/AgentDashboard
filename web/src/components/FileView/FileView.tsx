@@ -102,7 +102,12 @@ export function FileView({ host, root, path, onClose }: Props) {
     <section
       data-testid="file-view"
       data-path={path}
-      className="border-border flex min-h-0 flex-col gap-2 border-t pt-2"
+      // **入れ物の高さいっぱいに広がる。** これが無いと中身が伸び放題になり、
+      // 下の `overflow-auto` が効かずに親ごとはみ出す（兄弟の `FolderBrowser` と同じ理由）。
+      // `overflow-auto` が言うのは「はみ出したら遡らせる」だけで、**どこまでがはみ出しかは
+      // 別に決まっている必要がある**。高さが `auto` のままだと箱も中身と一緒に伸びるので、
+      // はみ出しが永久に発生しない——遡れないのに、画面には「短い文書」に見える
+      className="border-border flex h-full min-h-0 flex-col gap-2 border-t pt-2"
     >
       <header className="flex flex-wrap items-center gap-1.5">
         {/* **何からの相対パスかを必ず出す。** 基準の分からない相対パスは、
@@ -192,7 +197,10 @@ export function FileView({ host, root, path, onClose }: Props) {
       )}
 
       {!loading && content !== null && (
-        <div className="min-h-0 flex-1 overflow-auto">
+        /* 遡る箱。**印を持っているのは、遡れることが実測でしか言えないため**——
+           `file-markdown` と `file-raw` は中身の出し方を指しているので、どちらへ
+           切り替えても同じこの箱を掴めるようにしておく（設計§6） */
+        <div data-testid="file-body" className="min-h-0 flex-1 overflow-auto">
           {markdown && !raw ? (
             <div
               data-testid="file-markdown"
