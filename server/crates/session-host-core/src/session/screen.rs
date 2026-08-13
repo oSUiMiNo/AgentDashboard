@@ -113,6 +113,10 @@ pub struct TermEmulator {
     screen_ms: AtomicU64,
     /// いま作ってある遡り行数。vt100 は後から訊けないので控えておく
     scrollback_lines: AtomicUsize,
+    /// 最後に配ったときの遡りの深さ。**流れた行数はこの差で出す**（設計§13）。
+    delivered_depth: AtomicUsize,
+    /// 最後に全画面を出した時刻。上限に達したあとの運び直しの間隔に使う
+    last_full: Mutex<Option<std::time::Instant>>,
     /// 入力があった合図（ホットウィンドウの引き金）
     input: Notify,
     /// 配信タスク。**居ないあいだは1バイトも出さない**（要件5-2）
@@ -135,6 +139,8 @@ impl TermEmulator {
             seq: AtomicU64::new(0),
             screen_ms: AtomicU64::new(settings.screen_ms),
             scrollback_lines: AtomicUsize::new(settings.scrollback_lines),
+            delivered_depth: AtomicUsize::new(0),
+            last_full: Mutex::new(None),
             input: Notify::new(),
             pump: Mutex::new(None),
         })
@@ -185,6 +191,9 @@ impl TermEmulator {
         *self.sent.lock().expect("ロックが壊れていない") = vt100::Parser::new(rows, cols, 0);
         self.scrollback_lines
             .store(scrollback_lines, Ordering::Relaxed);
+        // 作り直しただけで行が流れたわけではない。いまの深さを配り済みとして控える
+        let depth = scrollback_depth(&mut source);
+        self.delivered_depth.store(depth, Ordering::Relaxed);
     }
 
     pub fn set_screen_ms(&self, screen_ms: u64) {
@@ -237,8 +246,11 @@ impl TermEmulator {
     fn send_full(&self) {
         let payload = {
             let mut source = self.source.lock().expect("ロックが壊れていない");
-            self.full_payload(&mut source)
+            let payload = self.full_payload(&mut source);
+            self.mark_delivered(&mut source);
+            payload
         };
+        *self.last_full.lock().expect("ロックが壊れていない") = Some(std::time::Instant::now());
         self.emit(FrameKind::ScreenFull, payload);
     }
 
@@ -252,23 +264,82 @@ impl TermEmulator {
 
     fn next_update(&self) -> Option<(FrameKind, Vec<u8>)> {
         let mut source = self.source.lock().expect("ロックが壊れていない");
-        let diff = {
-            let sent = self.sent.lock().expect("ロックが壊れていない");
-            source.screen().state_diff(sent.screen())
-        };
-        if diff.is_empty() {
-            return None;
-        }
-        // 差分のほうが大きくなるくらいなら、画面を作り直したほうが小さい（設計§9-5）
-        if diff.len() > FRAME_LIMIT {
+        let (rows, _) = source.screen().size();
+        let depth = scrollback_depth(&mut source);
+        let pushed = depth.saturating_sub(self.delivered_depth.load(Ordering::Relaxed));
+
+        // **流れたぶんを、こちらで同じだけ流してやる**（設計§13）。
+        //
+        // 差分（`state_diff`）は可視領域を描き直すエスケープ列でしかないので、
+        // 押し出された行を1行も運ばない。ブラウザ側の端末は自分でスクロールしない
+        // 限りスクロールバックを増やさず、**開きっぱなしにしているといつまでも
+        // 遡れない**（実測：200KB 流しても総行数は画面ぶんの 33 行のまま）。
+        //
+        // **行の中身は送らない。** 送った画面とブラウザの画面は同じものなので、
+        // ブラウザを N 行流せば、押し出されるのは向こうが持っている正しい行になる。
+        // **見える範囲より多く流れていたら、差分では埋められない**（押し出せるのは
+        // 画面ぶんまで）。全画面フレームは遡り行ごと運ぶので、そちらへ倒す。
+        //
+        // **上限に達したあとも同じ。** 深さが頭打ちになると差が出なくなり、流れた行数を
+        // 数えられない。間隔をあけて全画面で運び直す——あちらは遡りの窓ごと入れ替えるので、
+        // 取りこぼしも重複も出ない。
+        if pushed > rows as usize || self.stale_at_cap(depth) {
             let payload = self.full_payload(&mut source);
+            self.mark_delivered(&mut source);
+            *self.last_full.lock().expect("ロックが壊れていない") = Some(std::time::Instant::now());
             return Some((FrameKind::ScreenFull, payload));
         }
-        self.sent
-            .lock()
-            .expect("ロックが壊れていない")
-            .process(&diff);
-        Some((FrameKind::ScreenDiff, diff))
+
+        let mut payload = Vec::new();
+        {
+            let mut sent = self.sent.lock().expect("ロックが壊れていない");
+            if pushed > 0 {
+                let scroll = scroll_bytes(rows, pushed);
+                // **送った画面も同じだけ流す。** ここを揃えないと、続く差分が
+                // 「流れる前の画面」を基準に組み立てられて画面が崩れる
+                sent.process(&scroll);
+                payload = scroll;
+            }
+            let diff = source.screen().state_diff(sent.screen());
+            if diff.is_empty() && payload.is_empty() {
+                return None;
+            }
+            payload.extend_from_slice(&diff);
+            sent.process(&diff);
+        }
+
+        // 差分のほうが大きくなるくらいなら、画面を作り直したほうが小さい（設計§9-5）
+        if payload.len() > FRAME_LIMIT {
+            let payload = self.full_payload(&mut source);
+            self.mark_delivered(&mut source);
+            return Some((FrameKind::ScreenFull, payload));
+        }
+        self.mark_delivered(&mut source);
+        Some((FrameKind::ScreenDiff, payload))
+    }
+
+    /// ここまでの遡り行は配った、と控える。
+    ///
+    /// **配ったあとに読む。** 先に控えると、組み立てている間に増えたぶんを
+    /// 配ったことにしてしまう。
+    /// 遡りが上限に達していて、前の全画面から間があいたか。
+    ///
+    /// 上限に達すると深さが動かなくなるので、**流れた行数が分からなくなる**。
+    /// そのまま差分だけを送り続けると、ブラウザ側の遡りが凍りついて古いままになる。
+    /// 間隔は無操作時の送信周期（`screen_ms`）に揃えてある——あれが「どれくらい
+    /// 古くてよいか」の答えとして既にある値だから。
+    fn stale_at_cap(&self, depth: usize) -> bool {
+        let cap = self.scrollback_lines();
+        if cap == 0 || depth < cap {
+            return false;
+        }
+        let last = *self.last_full.lock().expect("ロックが壊れていない");
+        last.is_none_or(|at| at.elapsed() >= Duration::from_millis(self.screen_ms()))
+    }
+
+    fn mark_delivered(&self, source: &mut vt100::Parser) {
+        let depth = scrollback_depth(source);
+        self.delivered_depth.store(depth, Ordering::Relaxed);
     }
 
     /// 全画面を組み立て、**送った画面をその形に合わせる**。
@@ -309,6 +380,31 @@ impl TermEmulator {
         self.events
             .screen_frame(frame::encode_screen(kind, self.card_id, seq, &payload));
     }
+}
+
+/// いま遡れる深さ（行数）を訊く。
+///
+/// vt100 は深さを直接返さないので、**窓を目一杯ずらして丸められた値を読む**
+/// （`collect_scrollback` が使っているのと同じ手）。読んだあとは必ず窓を戻す——
+/// 戻し忘れると、以後の `state_diff` が過去の画面を基準に組み立てられる。
+fn scrollback_depth(source: &mut vt100::Parser) -> usize {
+    source.screen_mut().set_scrollback(usize::MAX);
+    let depth = source.screen().scrollback();
+    source.screen_mut().set_scrollback(0);
+    depth
+}
+
+/// ブラウザ側の端末を `shift` 行ぶん流すバイト列。
+///
+/// **最下行へ移ってから改行する。** 画面の途中で改行しても流れない（カーソルが
+/// 下がるだけ）ので、押し出しが起きない。
+fn scroll_bytes(rows: u16, shift: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8 + shift * 2);
+    out.extend_from_slice(format!("\x1b[{rows};1H").as_bytes());
+    for _ in 0..shift {
+        out.extend_from_slice(LINE_BREAK);
+    }
+    out
 }
 
 /// 遡れる行を古い方から集める（設計§19-3 で確定した組み立て方）。
@@ -514,6 +610,127 @@ mod tests {
         let mirror = replay(&sink.payloads(), 20, 5);
         assert!(mirror.screen().contents().contains("abc"));
         screen.unsubscribe();
+    }
+
+    /// 遡り行が、差分に前置した改行で運ばれること（設計§13）。
+    ///
+    /// **差分だけでは1行も運ばれない。** 可視領域を描き直すエスケープ列でしかないので、
+    /// 受け取る側の端末は自分でスクロールせず、スクロールバックが増えない。
+    #[test]
+    fn 流れた行は差分の前置で運ばれる() {
+        let (screen, sink) = emulator(ScreenSettings {
+            screen_ms: 60_000,
+            scrollback_lines: 100,
+        });
+        // 画面（5行）を埋めてから基準を配る
+        screen.feed(b"a1\r\na2\r\na3\r\na4\r\na5");
+        screen.send_full();
+
+        // 2行ぶん流す
+        screen.feed(b"\r\nb1\r\nb2");
+        let (kind, diff) = screen.next_update().expect("更新が出ること");
+        assert_eq!(kind, FrameKind::ScreenDiff, "全画面へ倒れています");
+
+        let mut payloads = sink.payloads();
+        payloads.push(diff);
+        let mut mirror = replay(&payloads, 20, 5);
+        assert!(
+            mirror.screen().contents().contains("b2"),
+            "画面が届いていない: {:?}",
+            mirror.screen().contents()
+        );
+        assert!(
+            scrollback_depth(&mut mirror) >= 2,
+            "遡り行が積まれていない（深さ {}）",
+            scrollback_depth(&mut mirror)
+        );
+        // 流れて消えたはずの行が、受け取る側の遡りに在ること
+        mirror.screen_mut().set_scrollback(2);
+        assert!(
+            mirror.screen().contents().contains("a1"),
+            "流れた行が遡れない: {:?}",
+            mirror.screen().contents()
+        );
+    }
+
+    /// 遡りが**すでに在る**状態から、さらに流れたぶんを運べること。
+    ///
+    /// 上のテストは遡りが空の状態から始まるので、目印を使わない枝を通る。実物は
+    /// たいてい遡りを持っているので、**目印を探す枝**をここで通す。
+    #[test]
+    fn 遡りが在る状態から流れたぶんも運ばれる() {
+        let (screen, sink) = emulator(ScreenSettings {
+            screen_ms: 60_000,
+            scrollback_lines: 100,
+        });
+        // 先に遡りを作ってから配る（目印が空でない状態にする）
+        for index in 0..12 {
+            screen.feed(format!("s{index}\r\n").as_bytes());
+        }
+        screen.send_full();
+
+        screen.feed(b"t1\r\nt2\r\n");
+        let (kind, diff) = screen.next_update().expect("更新が出ること");
+        assert_eq!(kind, FrameKind::ScreenDiff, "全画面へ倒れています");
+
+        let mut payloads = sink.payloads();
+        payloads.push(diff);
+        let mut mirror = replay(&payloads, 20, 5);
+        let depth = scrollback_depth(&mut mirror);
+        assert!(
+            depth >= 9,
+            "流れたぶんが積まれていない（深さ {depth}。全画面で7行ぶん＋あとから2行）"
+        );
+    }
+
+    /// 見える範囲より多く流れたら、差分では埋められないので全画面へ倒すこと。
+    #[test]
+    fn 見える範囲より多く流れたら全画面へ倒す() {
+        let (screen, _sink) = emulator(ScreenSettings {
+            screen_ms: 60_000,
+            scrollback_lines: 100,
+        });
+        screen.feed(b"a1\r\na2\r\na3\r\na4\r\na5");
+        screen.send_full();
+
+        // 画面（5行）より多く流す。重なりが1行も残らない
+        let many: Vec<u8> = (0..20).fold(Vec::new(), |mut acc, index| {
+            acc.extend_from_slice(format!("\r\nz{index}").as_bytes());
+            acc
+        });
+        screen.feed(&many);
+
+        let (kind, _) = screen.next_update().expect("更新が出ること");
+        assert_eq!(
+            kind,
+            FrameKind::ScreenFull,
+            "取りこぼすより全画面で運び直すべきところ"
+        );
+    }
+
+    /// 流れていないときに前置してはいけない（**重複の防止**）。
+    #[test]
+    fn 流れていなければ前置しない() {
+        let (screen, sink) = emulator(ScreenSettings {
+            screen_ms: 60_000,
+            scrollback_lines: 100,
+        });
+        screen.feed(b"a1\r\na2");
+        screen.send_full();
+
+        // 画面の中を書き換えるだけ（行は1本も流れない）
+        screen.feed(b"XY");
+        let (kind, diff) = screen.next_update().expect("更新が出ること");
+        assert_eq!(kind, FrameKind::ScreenDiff);
+
+        let mut payloads = sink.payloads();
+        payloads.push(diff);
+        let mut mirror = replay(&payloads, 20, 5);
+        assert_eq!(
+            scrollback_depth(&mut mirror),
+            0,
+            "流れていないのに遡り行が増えています（前置が余計に入っている）"
+        );
     }
 
     #[tokio::test]
