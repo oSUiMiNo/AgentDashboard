@@ -37,7 +37,8 @@
 <p class="lead">
   AgentDashboard に関係して、この機械や外で<strong>起動しっぱなしになっているもの</strong>の一覧。
   「どの URL がどれを指しているか」を取り違えると原因追跡が丸ごと空振りするので、そこを中心に書いてある。
-  <br>最終更新：2026-08-12 17時台（<strong>動いているのは実機・AWS・セッションホスト<span class="mark">▽</span>の3つ</strong>。trial だけ止まっている）
+  <br>最終更新：2026-08-13 02時台（<strong>動いているのは実機・AWS・セッションホスト<span class="mark">▽</span>の3つ</strong>。trial だけ止まっている）
+  <br><strong>手元の2つ（実機・セッションホスト<span class="mark">▽</span>）は自動では起きない。</strong>常駐の仕組みに載せていないので、<strong>WSL を起こし直すと落ちたままになる</strong>。ブラウザに「繋がっている PC がありません」と出たら、まずここが動いているかを見る——AWS 側は生きたままなので、画面だけを見ても区別が付かない。
   <br><strong>3つとも <code>0.1.15</code>で、中身も揃っている</strong>——<strong>08-12 17時台にリリース <code>v0.1.15</code> を出して全経路を入れ替えた</strong>。選択ダイアログで素の Enter が確定になる修正（ローカルイシュー「送信以外の操作も Ctrl+Enter になっている」）が、実機・セッションホスト<span class="mark">▽</span>・AWS のどこにも入っている。<br><strong>版が揃っているのは珍しい状態である。</strong> 普段は実機がソースビルド<span class="mark">▽</span>で先へ行き、AWS だけがリリースを待つ形になる——<strong>版番号だけで中身を判断しない</strong>という注意は、そのときのために残しておく。
 </p>
 
@@ -157,7 +158,7 @@ agentdashboard-agent logs --since 24h --state-dir ~/agentdashboard-agent/state</
   <tr>
     <td>実機</td>
     <td><code>127.0.0.1:8787</code></td>
-    <td><span class="tag t-ok">0.1.15</span><br><small>ソースビルド<span class="mark">▽</span>（<strong>08-12 17時台に起こし直し</strong>。リリース <code>v0.1.15</code> と同じ中身。落とす前に生きたカードが0枚であることを2回確かめてある）</small></td>
+    <td><span class="tag t-ok">0.1.15</span><br><small>ソースビルド<span class="mark">▽</span>（<strong>08-13 02時台に起こし直し</strong>——WSL の再起動で落ちていたもの。リリース <code>v0.1.15</code> と同じ中身）</small></td>
     <td>ローカルモード<span class="mark">▽</span>。<code>~/AgentDashboard</code> で <code>make build</code> したものを引数なしで起動。端末の出力は <code>~/agentdashboard-run.log</code>、構造化ログは <code>~/.local/state/agentdashboard-run/logs/</code>。<br><strong>読むときは <code>--state-dir</code> が要る。</strong> 置き場所を設定で移してあるが、読む口は設定を読まない（設計§11-2 の非対称）——<code>agentdashboard logs --since 1h --state-dir ~/.local/state/agentdashboard-run</code><br><strong>起こすときは <code>setsid</code> で切り離す。</strong> ツール呼び出しの子として起こすと、呼び出しの終了で巻き添えに死ぬ（08-10 に一度この形で起こしてしまい、起こし直した）。<code>cd ~/AgentDashboard &amp;&amp; setsid nohup ./server/target/release/agentdashboard &gt;&gt; ~/agentdashboard-run.log 2&gt;&amp;1 &lt; /dev/null &amp;</code></td>
   </tr>
   <tr>
@@ -169,7 +170,7 @@ agentdashboard-agent logs --since 24h --state-dir ~/agentdashboard-agent/state</
   <tr>
     <td>セッションホスト<span class="mark">▽</span></td>
     <td>— （PC 名 <code>OMEN</code>）</td>
-    <td><span class="tag t-ok">0.1.15</span><br><small>ソースビルド<span class="mark">▽</span>（<strong>08-12 17時台に起こし直し</strong>。本体・パーサとも 0.1.15。抱えていた claude は0本だった）</small></td>
+    <td><span class="tag t-ok">0.1.15</span><br><small>ソースビルド<span class="mark">▽</span>（<strong>08-13 02時台に起こし直し</strong>——WSL の再起動で落ちていたもの。本体・パーサとも 0.1.15。<code>agent_id</code> は前と同じなので枠は孤児になっていない）</small></td>
     <td><strong>AWS へ繋いでいる</strong>（<code>dash.underschaft.com</code>。この PC の名前は <code>OMEN</code>）。設定は <code>~/agentdashboard-agent/agent.toml</code>、ログは同じ場所の <code>run.log</code>。<br><strong>これが止まっていると、ブラウザに「指定された PC が繋がっていません」が出る</strong>——カードは PC に紐づくので、繋がっていないと引けない。ブラウザとサーバは繋がったままなので<strong>上の帯だけが赤くなる</strong>。
         <strong>ここを起こし直すと、抱えている claude が道連れになる。</strong>落とす前に <code>ps -eo pid,ppid,args --forest</code> で子を数えること——08-10 の入れ替えでは<strong>生きた claude が1本ぶら下がっていたので入れ替えを見送った</strong>。版を上げたら入れ替えないと、サーバだけ新しくなって<strong>フォルダを覗く口が「版が古い」で断られ続ける</strong>（実際に踏んだ）。<code>agent_id</code> はペアリングトークンから決まるので、<strong>起こし直しても同じ PC のまま</strong>——枠は孤児にならない。
         <strong>パーサだけなら落としてよい。</strong>子の <code>transcript-parser</code> を PID 直指定で <code>kill</code> すると、セッションホストが立て直して監視も保存済みの位置から張り直す（<strong>claude は道連れにならない</strong>）。本体が古い版のあいだにパーサが肥大したら、これで嵩が戻るうえ<strong>ディスク上の新しいパーサに入れ替わる</strong>。
