@@ -145,6 +145,61 @@ describe('なぞりと触れるの見分け', () => {
     expect(h.scroller.move([point(0, 1)])).toBe(true)
   })
 
+  it('1回目が横へブレても、そのなぞりが死なないこと', () => {
+    // **実機はこれで死んでいた（フェーズ7 の実測）。** 指は真っ直ぐ動き出さないので、
+    // 1回目は「横へ2px・縦へ1px」のような値になる。そこで「横へ払う操作」と確定すると、
+    // 決定は指が離れるまで戻らないので**そのなぞりは二度と握れない**。
+    //
+    // 合成タッチ（CDP）は真っ直ぐ動くので、この道を一度も通らなかった。**E2E が7本とも
+    // 緑なのに実機だけが死ぬ**という形で出た
+    const h = harness()
+    h.scroller.start([point(100, 100)])
+    expect(h.scroller.move([point(102, 101)])).toBe(true)
+    const rest = [20, 60, 120].map((d) => h.scroller.move([point(102, 100 + d)]))
+    expect(rest).toEqual([true, true, true])
+    expect(h.total()).toBeLessThan(0)
+  })
+
+  it('下端で1回目だけ逆へブレても、そのあと遡れること', () => {
+    // 同じ壊れ方の別の入口。**下端は普段いる場所**なので、こちらのほうが踏みやすい
+    const h = harness({ canScroll: (direction) => direction < 0 })
+    h.scroller.start([point(100, 100)])
+    expect(h.scroller.move([point(100, 98)])).toBe(true)
+    const rest = [20, 80, 160].map((d) => h.scroller.move([point(100, 100 + d)]))
+    expect(rest).toEqual([true, true, true])
+    expect(h.total()).toBeLessThan(0)
+  })
+
+  it('斜めの1歩目は、端末側へ倒すこと', () => {
+    // **ブラウザは touch slop を超えるまで `touchmove` を配らない**（実測：2px と 12px は
+    // 1つも届かず、30px で届いた）。したがって**こちらへ届く1歩目は既に大きく、斜め**で
+    // ある。実測した1歩目は「横30・縦15」だった。
+    //
+    // ここを「横が少しでも大きければ手放す」にすると、その斜めが横に化けて**実機の
+    // なぞりが丸ごと死ぬ**。端末の中は縦に読む場所なので、迷ったら縦へ倒す
+    const h = harness()
+    h.scroller.start([point(0, 0)])
+    expect(h.scroller.move([point(30, 15)])).toBe(true)
+    expect(h.scroller.move([point(30, 200)])).toBe(true)
+    expect(h.total()).toBeLessThan(0)
+  })
+
+  it('1ピクセルも動いていない間は握らないこと', () => {
+    // 動いていなければブラウザもパンを始めようがない。タップの邪魔をしない
+    const h = harness()
+    h.scroller.start([point(0, 0)])
+    expect(h.scroller.move([point(0, 0)])).toBe(false)
+  })
+
+  it('向きが信用できる距離まで来たら、そこで横へ払う操作を手放すこと', () => {
+    // 暫定で握るのは**まだ分からない間だけ**。分かったら返す（上の2本と対になる肯定側）
+    const h = harness()
+    h.scroller.start([point(0, 0)])
+    expect(h.scroller.move([point(2, 1)])).toBe(true)
+    expect(h.scroller.move([point(60, 4)])).toBe(false)
+    expect(h.lines).toEqual([])
+  })
+
   it('しきい値を超えるまでは遡らせないこと', () => {
     // 握りはするが、動かすのはしきい値を超えてから。
     //
