@@ -118,14 +118,39 @@ export function TerminalPane({ cardId }: Props) {
       status.setAttribute('data-total-bytes', String(flow.totalBytes()))
     }
 
-    const write = (payload: Uint8Array) => {
+    const write = (payload: Uint8Array, afterWritten: (() => void) | null = null) => {
       const size = payload.length
       flow.begin(size)
       term.write(payload, () => {
         flow.done(size)
+        // **書き終えてから呼ぶ。** `term.write` は非同期で、呼んだ直後には
+        // まだバッファが作り直されていない（設計§9）
+        afterWritten?.()
         updateFlowIndicator()
       })
       updateFlowIndicator()
+    }
+
+    /**
+     * 作り直しの前に、いま遡っている位置を控える（設計§9）。
+     *
+     * リモートの全画面フレームは `term.reset()` を伴うので、遡って読んでいる最中に
+     * 来ると**下端へ飛ぶ**。スマホではソフトキーボードの開閉や向きの変更で画面の
+     * 大きさが変わり、そのたびに全画面フレームが届くので実際に踏む。
+     *
+     * **下端に居たなら何も返さない。** 遡っていた人だけを助ける形にしておけば、
+     * ふだんの見え方は1バイトも変わらない。
+     *
+     * 戻した先が同じ内容とは限らない（作り直された画面は中身が違う）。ここは
+     * **近くへ戻すことが目的**で、同じ行を指すことは狙わない。
+     */
+    const keepScrollback = (): (() => void) | null => {
+      const buffer = term.buffer.active
+      const distance = buffer.baseY - buffer.viewportY
+      if (distance <= 0) {
+        return null
+      }
+      return () => term.scrollLines(-distance)
     }
 
     // --- サーバとの接続 ---------------------------------------------------
@@ -134,11 +159,14 @@ export function TerminalPane({ cardId }: Props) {
       term.cols,
       term.rows,
       (kind, payload) => {
+        let restore: (() => void) | null = null
         if (kind === KIND_PTY_SNAPSHOT) {
-          // 「ここまでの画面はこれで正しい」という指示。作り直してから書く
+          // 「ここまでの画面はこれで正しい」という指示。作り直してから書く。
+          // **控えるのは作り直しの前**——あとから読むと、遡っていた距離が消えている
+          restore = keepScrollback()
           term.reset()
         }
-        write(payload)
+        write(payload, restore)
       },
     )
 

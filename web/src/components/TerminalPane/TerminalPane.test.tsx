@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import type { Terminal } from '@xterm/xterm'
 import { TERMINAL_OPTIONS, TerminalPane } from './TerminalPane'
+import { KIND_PTY_OUTPUT, KIND_PTY_SNAPSHOT } from '@/lib/frame'
 import { useWsStore } from '@/stores/ws'
 
 /**
@@ -177,5 +178,115 @@ describe('TerminalPane のタッチ', () => {
     expect(removed).toEqual(
       expect.arrayContaining(['touchstart', 'touchmove', 'touchend', 'touchcancel']),
     )
+  })
+})
+
+/**
+ * 作り直されたときの遡り位置（テスト計画フェーズ3「遡り位置の保持」・設計§9）。
+ *
+ * リモートの全画面フレームは `term.reset()` を伴うので、遡って読んでいる最中に来ると
+ * 下端へ飛ぶ。スマホではソフトキーボードの開閉や向きの変更で画面の大きさが変わり、
+ * そのたびに全画面フレームが届くので**実際に踏む**。
+ */
+describe('TerminalPane の遡り位置', () => {
+  const PAYLOAD = new TextEncoder().encode('x')
+
+  /**
+   * 端末を描いて、サーバからのフレームを流し込む口を返す。
+   *
+   * `TerminalPane` は `useWsStore.getState().subscribeTerminal(...)` で受け取り口を
+   * 渡すだけなので、ストアを差し替えればその口をこちらで掴める。**描き終えたら
+   * すぐ戻す**——偽物を残すと、以後のテストが本物の購読を通らなくなる。
+   */
+  async function renderPane() {
+    let deliver: ((kind: number, payload: Uint8Array) => void) | undefined
+    const original = useWsStore.getState().subscribeTerminal
+    useWsStore.setState({
+      subscribeTerminal: (_cardId, _cols, _rows, listener) => {
+        deliver = listener
+        return () => {}
+      },
+    })
+    const { container } = render(<TerminalPane cardId={CARD} />)
+    useWsStore.setState({ subscribeTerminal: original })
+
+    const pane = container.querySelector('[data-testid="terminal"]') as HTMLElement
+    const term = (pane as HTMLElement & { __terminal?: Terminal }).__terminal
+    await waitFor(() => expect(term).toBeDefined())
+    expect(deliver).toBeDefined()
+    return { term: term as Terminal, deliver: deliver as NonNullable<typeof deliver> }
+  }
+
+  /**
+   * 「いま N 行ぶん遡っている」状態を作る。
+   *
+   * **作り直しで遡っていた位置が消えることまで真似る。** これが要点で、控えるのが
+   * `term.reset()` の**あと**の実装だと、読む値が 0 になって復元しなくなる——
+   * つまりこの仕掛けが「前に控えているか」を実際に測っている。
+   *
+   * 本物の `reset()` は呼ばない。ここで確かめたいのは控える順序であって、
+   * バッファが本当に空になることではない（呼ぶと `buffer.active` ごと入れ替わり、
+   * 差し込んだ値が効かなくなる）。
+   */
+  function scrolledBack(term: Terminal, distance: number) {
+    const bottom = 200
+    let position = { viewportY: bottom - distance, baseY: bottom }
+    vi.spyOn(term.buffer.active, 'viewportY', 'get').mockImplementation(
+      () => position.viewportY,
+    )
+    vi.spyOn(term.buffer.active, 'baseY', 'get').mockImplementation(() => position.baseY)
+    const reset = vi.spyOn(term, 'reset').mockImplementation(() => {
+      position = { viewportY: 0, baseY: 0 }
+    })
+    const scrolled: number[] = []
+    vi.spyOn(term, 'scrollLines').mockImplementation((lines: number) => {
+      scrolled.push(lines)
+    })
+    return { scrolled, reset }
+  }
+
+  it('作り直しの前に、遡っていた位置を控えること', async () => {
+    const { term, deliver } = await renderPane()
+    const { scrolled } = scrolledBack(term, 50)
+
+    deliver(KIND_PTY_SNAPSHOT, PAYLOAD)
+
+    // 50行ぶん遡っていたので、書き直したあと同じだけ戻る
+    await waitFor(() => expect(scrolled).toEqual([-50]))
+  })
+
+  it('戻すのは書き終えたコールバックの中であること', async () => {
+    const { term, deliver } = await renderPane()
+    const { scrolled } = scrolledBack(term, 50)
+
+    deliver(KIND_PTY_SNAPSHOT, PAYLOAD)
+
+    // `term.write` は非同期。呼んだ直後にはまだバッファが作り直されていないので、
+    // ここで戻すと**作り直される前の画面**を掴んで飛ぶ
+    expect(scrolled).toEqual([])
+    await waitFor(() => expect(scrolled).toEqual([-50]))
+  })
+
+  it('下端に居たときは何もしないこと', async () => {
+    const { term, deliver } = await renderPane()
+    const { scrolled, reset } = scrolledBack(term, 0)
+
+    deliver(KIND_PTY_SNAPSHOT, PAYLOAD)
+
+    // 作り直し自体は起きる。起きたうえで戻さない、が「ふだんの見え方を変えない」
+    await waitFor(() => expect(reset).toHaveBeenCalled())
+    expect(scrolled).toEqual([])
+  })
+
+  it('差分のフレームでは作り直しも復元もしないこと', async () => {
+    const { term, deliver } = await renderPane()
+    const { scrolled, reset } = scrolledBack(term, 50)
+
+    deliver(KIND_PTY_OUTPUT, PAYLOAD)
+
+    // 差分は書き足すだけ。ここで戻すと、遡っていない人まで毎フレーム動かすことになる
+    await waitFor(() => expect(term.buffer.active).toBeDefined())
+    expect(reset).not.toHaveBeenCalled()
+    expect(scrolled).toEqual([])
   })
 })
