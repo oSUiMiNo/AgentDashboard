@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { Terminal } from '@xterm/xterm'
 import { TERMINAL_OPTIONS, TerminalPane } from './TerminalPane'
 import { KIND_PTY_OUTPUT, KIND_PTY_SNAPSHOT } from '@/lib/frame'
@@ -160,6 +160,18 @@ describe('TerminalPane のタッチ', () => {
     touch(pane, 'touchstart', [{ x: 0, y: 0 }])
     const grabbed = touch(pane, 'touchmove', [{ x: 0, y: 60 }])
     expect(grabbed.defaultPrevented).toBe(true)
+  })
+
+  it('既定ではタッチの数字を出さないこと', async () => {
+    // 実機から読む口（`?touchdebug=1`）は**普段の画面を1ピクセルも変えない**。
+    // 入れ物だけは常に置いてあるので、「空であること」で見る（`empty:hidden`）
+    render(<TerminalPane cardId={CARD} />)
+    const readout = screen.getByTestId('terminal-touch-debug')
+    await waitFor(() => expect(screen.getByTestId('terminal')).toBeInTheDocument())
+    fireEvent.touchStart(screen.getByTestId('terminal'), {
+      touches: [{ clientX: 10, clientY: 10 }],
+    })
+    expect(readout.textContent).toBe('')
   })
 
   it('端末を捨てるときに購読を外すこと', async () => {

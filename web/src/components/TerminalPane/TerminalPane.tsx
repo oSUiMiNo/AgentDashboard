@@ -57,6 +57,8 @@ export function TerminalPane({ cardId }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   // E2E から観測するための値。React の再レンダリングとは無関係に更新する
   const statusRef = useRef<HTMLDivElement>(null)
+  // 実機からタッチの数字を読むための置き場所（`?touchdebug=1` のときだけ中身が入る）
+  const debugRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     const container = containerRef.current
@@ -215,16 +217,18 @@ export function TerminalPane({ cardId }: Props) {
     //
     // xterm 6 にタッチの口は無い（同梱の `Gesture` は呼び出し0件・非公開、`scroll` の
     // 購読も0件）。**判断は [`createTouchScroller`] が持ち、ここは配線だけ**にする。
+    // レンダラが実寸を書き込んでいる唯一の場所から引く。`.xterm` や外側の入れ物を
+    // 使うと、`FitAddon` の切り捨てぶんの余白が混ざって遡る量が少しずつずれる
+    const cellHeightOf = () => {
+      const screen = container.querySelector('.xterm-screen')
+      if (!(screen instanceof HTMLElement) || term.rows === 0) {
+        return 0
+      }
+      return screen.clientHeight / term.rows
+    }
+
     const scroller = createTouchScroller({
-      // レンダラが実寸を書き込んでいる唯一の場所から引く。`.xterm` や外側の入れ物を
-      // 使うと、`FitAddon` の切り捨てぶんの余白が混ざって遡る量が少しずつずれる
-      cellHeight: () => {
-        const screen = container.querySelector('.xterm-screen')
-        if (!(screen instanceof HTMLElement) || term.rows === 0) {
-          return 0
-        }
-        return screen.clientHeight / term.rows
-      },
+      cellHeight: cellHeightOf,
       scrollLines: (lines) => term.scrollLines(lines),
       canScroll: (direction) => {
         const buffer = term.buffer.active
@@ -238,21 +242,72 @@ export function TerminalPane({ cardId }: Props) {
     const points = (event: TouchEvent) =>
       Array.from(event.touches, (touch) => ({ x: touch.clientX, y: touch.clientY }))
 
+    // --- 実機から読むための数字（`?touchdebug=1` のときだけ）-----------------
+    //
+    // **合成タッチで通ることと、指で動くことは別**だった（フェーズ7）。実機で何が
+    // 起きているかは実機でしか読めないので、読む口をここに置く。**既定では何も出さない**
+    // ので、普段の画面は1ピクセルも変わらない。
+    const debugOn =
+      typeof window !== 'undefined' &&
+      new URLSearchParams(window.location.search).has('touchdebug')
+    const tally = { start: 0, move: 0, end: 0, cancel: 0, grabbed: 0, uncancelable: 0 }
+    const showDebug = (last: string) => {
+      const node = debugRef.current
+      if (!node) {
+        return
+      }
+      const buffer = term.buffer.active
+      const action =
+        typeof getComputedStyle === 'function'
+          ? getComputedStyle(container).touchAction
+          : '?'
+      node.textContent = [
+        `${last} start=${tally.start} move=${tally.move} end=${tally.end} cancel=${tally.cancel}`,
+        `握った=${tally.grabbed} 握れない回=${tally.uncancelable}`,
+        `viewportY=${buffer.viewportY} baseY=${buffer.baseY} rows=${term.rows}`,
+        `touch-action=${action} cell=${cellHeightOf().toFixed(1)}`,
+      ].join('\n')
+    }
+
     const onTouchStart = (event: TouchEvent) => {
       scroller.start(points(event))
+      if (debugOn) {
+        tally.start += 1
+        showDebug('start')
+      }
     }
     // **握ったかどうかだけを見て `preventDefault()` を決める。** 判断を2箇所に
     // 分けると、片方だけ直して片方が取り残される
     const onTouchMove = (event: TouchEvent) => {
-      if (scroller.move(points(event)) && event.cancelable) {
+      const grabbed = scroller.move(points(event))
+      if (grabbed && event.cancelable) {
         event.preventDefault()
+      }
+      if (debugOn) {
+        tally.move += 1
+        if (grabbed) {
+          tally.grabbed += 1
+        }
+        if (grabbed && !event.cancelable) {
+          // **ここが正なら、原因は判断ではなくブラウザ側**（握ろうとしたのに握れない）
+          tally.uncancelable += 1
+        }
+        showDebug('move')
       }
     }
     const onTouchEnd = () => {
       scroller.end()
+      if (debugOn) {
+        tally.end += 1
+        showDebug('end')
+      }
     }
     const onTouchCancel = () => {
       scroller.cancel()
+      if (debugOn) {
+        tally.cancel += 1
+        showDebug('cancel')
+      }
     }
     // **`{ passive: false }` でなければ `preventDefault()` は効かない。**
     container.addEventListener('touchstart', onTouchStart, { passive: false })
@@ -326,6 +381,19 @@ export function TerminalPane({ cardId }: Props) {
         data-testid="terminal"
         style={{ touchAction: 'pan-x' }}
         className="min-h-0 flex-1 overflow-hidden rounded-md bg-[#0b0f14] p-2"
+      />
+      {/*
+        実機からタッチの数字を読む口（`?touchdebug=1` のときだけ中身が入る）。
+
+        **合成タッチで通ることと、指で動くことは別**だった（フェーズ7）。実機で何が
+        起きているかは実機でしか読めないので、URL を1つ変えるだけで読めるようにしてある。
+        **既定では空**なので普段の画面には出ない——空の入れ物を常に置いているのは、
+        条件付きで描くと React の再描画が要り、1本指の経路に手数が乗るため。
+      */}
+      <div
+        ref={debugRef}
+        data-testid="terminal-touch-debug"
+        className="text-muted-foreground shrink-0 font-mono text-[10px] leading-tight whitespace-pre-wrap empty:hidden"
       />
     </div>
   )
