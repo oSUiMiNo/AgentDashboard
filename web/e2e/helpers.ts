@@ -46,6 +46,117 @@ export async function terminalText(page: Page): Promise<string> {
   })
 }
 
+/**
+ * 端末の遡り位置を読む。
+ *
+ * `viewportY` が `baseY` より小さければ、そのぶん過去へ遡っている。`length` は
+ * スクロールバックを含めた総行数で、**リモートでは全画面フレームが届くまで増えない**
+ * （差分は可視領域を描き直すだけなので、押し出された行はどこにも残らない）。
+ */
+export async function terminalScroll(page: Page) {
+  return page.evaluate(() => {
+    const container = document.querySelector('[data-testid="terminal"]') as
+      | (HTMLDivElement & { __terminal?: Terminal })
+      | null
+    const buffer = container?.__terminal?.buffer.active
+    return {
+      viewportY: buffer?.viewportY ?? -1,
+      baseY: buffer?.baseY ?? -1,
+      length: buffer?.length ?? -1,
+    }
+  })
+}
+
+/** 端末を下端まで戻す（測り直しの前に位置を揃える用）。 */
+export async function scrollTerminalToBottom(page: Page) {
+  await page.evaluate(() => {
+    const container = document.querySelector('[data-testid="terminal"]') as
+      | (HTMLDivElement & { __terminal?: Terminal })
+      | null
+    container?.__terminal?.scrollToBottom()
+  })
+}
+
+interface SwipeOptions {
+  /** 縦の移動量（px）。**正で下へ＝過去へ遡る** */
+  dy: number
+  /** 横の移動量（px）。横へ払う操作を試すとき用 */
+  dx?: number
+  /** 何回に分けて動かすか */
+  steps?: number
+  /**
+   * 1回ごとの間（ms）。
+   *
+   * **勢いはここで決まる。** 0 なら CDP の往復ぶん（数ミリ秒）で動くので慣性が乗り、
+   * 空けると乗らない。慣性を始める境目は 0.25 px/ms（`lib/touch.ts` の `flingMin`）。
+   */
+  gapMs?: number
+}
+
+/**
+ * 端末の上を指でなぞる。
+ *
+ * **CDP でしか合成できない。** `page.dispatchEvent` はリスナーへ届きはするが、
+ * 合成イベントなのでブラウザの既定動作（パン・互換のマウス操作）が一切起きず、
+ * **握れているかどうかを一度も確かめないまま緑になる**（フェーズ1 の実測）。
+ */
+export async function swipeTerminal(page: Page, options: SwipeOptions) {
+  const { dy, dx = 0, steps = 8, gapMs = 0 } = options
+  const box = await page.getByTestId('terminal').boundingBox()
+  if (!box) {
+    throw new Error('端末の位置が取れません')
+  }
+  const x = box.x + box.width / 2
+  // 下へなぞる余地を残すため、上寄りから始める
+  const y = box.y + box.height * 0.25
+
+  const cdp = await page.context().newCDPSession(page)
+  try {
+    await cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchStart',
+      touchPoints: [{ x, y }],
+    })
+    for (let step = 1; step <= steps; step += 1) {
+      if (gapMs > 0) {
+        await page.waitForTimeout(gapMs)
+      }
+      await cdp.send('Input.dispatchTouchEvent', {
+        type: 'touchMove',
+        touchPoints: [{ x: x + (dx * step) / steps, y: y + (dy * step) / steps }],
+      })
+    }
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+  } finally {
+    await cdp.detach()
+  }
+}
+
+/**
+ * なぞったときに `preventDefault()` が呼ばれたかを、あとから読めるようにする。
+ *
+ * `document` の側で拾うのが要点。端末の受け口は子孫にあるので**先に走り**、
+ * ここへ上がってくる頃には `defaultPrevented` が決まっている。
+ */
+export async function watchPrevented(page: Page) {
+  await page.evaluate(() => {
+    const seen: boolean[] = []
+    ;(window as unknown as { __prevented: boolean[] }).__prevented = seen
+    document.addEventListener(
+      'touchmove',
+      (event) => seen.push(event.defaultPrevented),
+      { passive: true },
+    )
+  })
+}
+
+/** [`watchPrevented`] が拾った結果を読み、次の測定のために空にする。 */
+export async function takePrevented(page: Page): Promise<boolean[]> {
+  return page.evaluate(() => {
+    const seen = (window as unknown as { __prevented?: boolean[] }).__prevented ?? []
+    return seen.splice(0, seen.length)
+  })
+}
+
 export async function expectTerminalToContain(page: Page, marker: string) {
   await expect
     .poll(async () => terminalText(page), {

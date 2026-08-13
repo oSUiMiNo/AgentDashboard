@@ -1,10 +1,14 @@
 import { expect, test } from '@playwright/test'
+import type { Page } from '@playwright/test'
 import {
   archiveAll,
   expectTerminalToContain,
   openDashboard,
   openSession,
+  scrollTerminalToBottom,
   spawnSession,
+  swipeTerminal,
+  terminalScroll,
   typeLine,
 } from './helpers'
 
@@ -84,4 +88,82 @@ test('端末を閉じても一覧と履歴は動き続ける', async ({ page }) 
     page,
     '[fake-claude] received: 画面を見ていなくても届く',
   )
+})
+
+/**
+ * タッチで遡る（テスト計画フェーズ4「リモート経路」）。
+ *
+ * ローカルと同じ操作でも、**xterm へ入るものが違う**——こちらはセッションホストの
+ * 端末エミュレータが作った画面のエスケープ列である。だから片方だけでは片方が分からない。
+ */
+test.describe('タッチで遡る', () => {
+  test.use({ hasTouch: true })
+
+  /**
+   * 遡れる中身を持った状態にして返す。
+   *
+   * **順序が命。** 差分が届いている間、xterm のスクロールバックは1行も積まれない
+   * （差分は可視領域を描き直す形なので、押し出された行はどこにも残らない）。
+   * **全画面フレームが届いた瞬間だけ**、そのときのスクロールバックが一度に入る
+   * （フェーズ1 の実測。設計§9 の「既知の制約」）。
+   *
+   * だから「吐かせる → 画面の大きさを変える（＝全画面フレームを起こす）」の順で行う。
+   */
+  async function scrollbackLoaded(page: Page) {
+    await openDashboard(page)
+    const tile = await spawnSession(page)
+    await openSession(page, tile)
+    await typeLine(page, 'flood 200000')
+    await expectTerminalToContain(page, '[fake-claude] flood-end')
+
+    const before = await terminalScroll(page)
+    await page.setViewportSize({ width: 1000, height: 700 })
+
+    // 全画面フレームが届くと、スクロールバックごと入れ替わって総行数が跳ねる
+    await expect
+      .poll(async () => (await terminalScroll(page)).length, {
+        message: '全画面フレームで遡る行が入ること',
+        timeout: 30_000,
+      })
+      .toBeGreaterThan(before.length)
+
+    await scrollTerminalToBottom(page)
+    return terminalScroll(page)
+  }
+
+  test('別の PC の画面でも、なぞって遡れる', async ({ page }) => {
+    const bottom = await scrollbackLoaded(page)
+
+    await swipeTerminal(page, { dy: 240, steps: 8, gapMs: 120 })
+
+    const after = await terminalScroll(page)
+    expect(after.viewportY).toBeLessThan(bottom.viewportY)
+  })
+
+  test('画面が作り直されても、遡っていた位置が保たれる', async ({ page }) => {
+    await scrollbackLoaded(page)
+    await swipeTerminal(page, { dy: 240, steps: 8, gapMs: 120 })
+
+    const scrolled = await terminalScroll(page)
+    expect(scrolled.baseY - scrolled.viewportY).toBeGreaterThan(0)
+
+    // **作り直しが済むまで待ってから測る。** ここを待たずに「遡ったままか」を
+    // 見ると、届く前の値で通ってしまう（実際にそう書いて空振りさせた）。
+    // 数えているのは**書き終えた**全画面フレームなので、戻す処理まで済んでいる
+    const status = page.getByTestId('terminal-status')
+    const before = Number(await status.getAttribute('data-snapshots'))
+
+    // もう一度画面の大きさを変える＝全画面フレーム＝`term.reset()`。
+    // **控えて戻していなければ、ここで下端へ飛ぶ**（設計§9）
+    await page.setViewportSize({ width: 1100, height: 800 })
+    await expect
+      .poll(async () => Number(await status.getAttribute('data-snapshots')), {
+        message: '画面が作り直されること',
+        timeout: 30_000,
+      })
+      .toBeGreaterThan(before)
+
+    const after = await terminalScroll(page)
+    expect(after.baseY - after.viewportY).toBeGreaterThan(0)
+  })
 })

@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import type { Page } from '@playwright/test'
 import {
   WORK_DIR,
   addProject,
@@ -6,8 +7,14 @@ import {
   expectTerminalToContain,
   openDashboard,
   openSession,
+  scrollTerminalToBottom,
   spawnSession,
+  swipeTerminal,
+  takePrevented,
+  terminalScroll,
+  terminalText,
   typeLine,
+  watchPrevented,
 } from './helpers'
 
 /**
@@ -230,4 +237,122 @@ test('ダイアログが消えれば Enter は改行へ戻る', async ({ page })
   await page.keyboard.press('Control+Enter')
 
   await expectTerminalToContain(page, '[fake-claude] received: あか\nあお')
+})
+
+/**
+ * タッチで遡る（テスト計画フェーズ4「ローカル経路」）。
+ *
+ * ここで xterm に入るのは**擬似ターミナルの生バイトそのまま**。サーバが作った画面が
+ * 入るリモート経路は `remote.spec.ts` が見る——入るものが違うので、片方だけでは
+ * 片方が分からない。
+ */
+test.describe('タッチで遡る', () => {
+  // 既定の土台はタッチ無効（`devices['Desktop Chrome']`）。**この describe の中だけ**で
+  // 有効にする。ファイル全体へ掛けると、タッチと無関係な既存テストの前提まで変わる
+  test.use({ hasTouch: true })
+
+  /** 遡れるだけの行を吐かせて、下端に居る状態で返す。 */
+  async function floodedSession(page: Page) {
+    await openDashboard(page)
+    const tile = await spawnSession(page)
+    await openSession(page, tile)
+    // 1行62バイトなので、10万バイトで約1600行。なぞるのは1回240px＝十数行なので
+    // 十分に足りる。**必要以上に吐かせない**——E2E は1台のサーバを共有しており、
+    // ここで作った負荷は次に走るテストが被る
+    await typeLine(page, 'flood 100000')
+    await expectTerminalToContain(page, '[fake-claude] flood-end')
+    await scrollTerminalToBottom(page)
+    const at = await terminalScroll(page)
+    expect(at.viewportY).toBe(at.baseY)
+    return at
+  }
+
+  test('なぞると端末の中を遡れる', async ({ page }) => {
+    const before = await floodedSession(page)
+
+    // ゆっくりなぞる（1回ごとに間を空けると勢いが乗らない）ので、動くのは指のぶんだけ
+    await swipeTerminal(page, { dy: 240, steps: 8, gapMs: 120 })
+
+    const after = await terminalScroll(page)
+    expect(after.viewportY).toBeLessThan(before.viewportY)
+  })
+
+  test('なぞっている間は入力が送られない', async ({ page }) => {
+    await floodedSession(page)
+    await typeLine(page, 'こんにちは')
+    await expectTerminalToContain(page, '[fake-claude] received: こんにちは')
+
+    const countReceived = async () =>
+      (await terminalText(page)).split('[fake-claude] received:').length
+    const before = await countReceived()
+
+    await scrollTerminalToBottom(page)
+    await swipeTerminal(page, { dy: 240, steps: 8, gapMs: 120 })
+
+    // なぞりが入力に化けていないこと。**化けると受け取りが1本増える**
+    expect(await countReceived()).toBe(before)
+    // 範囲選択にもなっていないこと
+    expect(await page.evaluate(() => window.getSelection()?.toString() ?? '')).toBe('')
+  })
+
+  test('行けない向きへのなぞりは、ブラウザへ渡す', async ({ page }) => {
+    // 端まで来たらページ側のスクロールへ渡す（設計§7）。いまのセッション専用画面は
+    // 外枠が `h-svh` で縦に伸びないので、渡した先が動く場面は無い——**渡していること
+    // 自体**を、`preventDefault()` を呼んでいないことで見る
+    await floodedSession(page)
+    await watchPrevented(page)
+
+    // 下端に居るので、未来（上へなぞる）へは行けない
+    await swipeTerminal(page, { dy: -240, steps: 8, gapMs: 120 })
+    const released = await takePrevented(page)
+    expect(released.length).toBeGreaterThan(0)
+    expect(released).not.toContain(true)
+
+    // 過去へは行けるので、そちらは握る（**否定側と対で肯定側も見る**）。
+    //
+    // **1回でも取りこぼしていないことまで見る。** `touch-action` を指定していないと、
+    // 1回目に握っても3回目から `cancelable` が落ちて握れなくなる（フェーズ1 の実測）。
+    // 「1回でも握った」で通してしまうと、その壊れ方を見逃す
+    await swipeTerminal(page, { dy: 240, steps: 8, gapMs: 120 })
+    const grabbed = await takePrevented(page)
+    expect(grabbed.length).toBeGreaterThan(2)
+    expect(grabbed).not.toContain(false)
+  })
+
+  test('フリックすると、ゆっくりなぞるより深く遡る', async ({ page }) => {
+    const bottom = await floodedSession(page)
+
+    await swipeTerminal(page, { dy: 240, steps: 8, gapMs: 120 })
+    const dragged = bottom.viewportY - (await terminalScroll(page)).viewportY
+    expect(dragged).toBeGreaterThan(0)
+
+    await scrollTerminalToBottom(page)
+    // 間を空けずに動かすと勢いが乗り、指を離したあとも滑り続ける
+    await swipeTerminal(page, { dy: 240, steps: 8, gapMs: 0 })
+    await expect
+      .poll(
+        async () => bottom.viewportY - (await terminalScroll(page)).viewportY,
+        { message: '慣性で、なぞったぶんより深く遡ること' },
+      )
+      .toBeGreaterThan(dragged)
+  })
+
+  test('遡ったあと、何か打つと下端へ戻る', async ({ page }) => {
+    // xterm の `scrollOnUserInput`（既定で真）を動かしていないことの担保。
+    // ここが効いていれば「遡ったきり戻れない」状態は作られない
+    await floodedSession(page)
+    await swipeTerminal(page, { dy: 240, steps: 8, gapMs: 120 })
+    const scrolled = await terminalScroll(page)
+    expect(scrolled.viewportY).toBeLessThan(scrolled.baseY)
+
+    await page.getByTestId('terminal').click()
+    await page.keyboard.type('x')
+
+    await expect
+      .poll(async () => {
+        const at = await terminalScroll(page)
+        return at.baseY - at.viewportY
+      })
+      .toBe(0)
+  })
 })
