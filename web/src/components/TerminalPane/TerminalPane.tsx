@@ -20,6 +20,7 @@ import { createFlowController } from '@/lib/flow'
 import { KIND_PTY_SNAPSHOT } from '@/lib/frame'
 import { terminalKeyOverride } from '@/lib/keys'
 import { visibleScreen } from '@/lib/screen'
+import { createTouchScroller } from '@/lib/touch'
 import type { CardId } from '@/lib/protocol'
 import { useWsStore } from '@/stores/ws'
 
@@ -164,6 +165,55 @@ export function TerminalPane({ cardId }: Props) {
       return false
     })
 
+    // --- タッチで遡る（設計§3・§4・§7）---------------------------------
+    //
+    // xterm 6 にタッチの口は無い（同梱の `Gesture` は呼び出し0件・非公開、`scroll` の
+    // 購読も0件）。**判断は [`createTouchScroller`] が持ち、ここは配線だけ**にする。
+    const scroller = createTouchScroller({
+      // レンダラが実寸を書き込んでいる唯一の場所から引く。`.xterm` や外側の入れ物を
+      // 使うと、`FitAddon` の切り捨てぶんの余白が混ざって遡る量が少しずつずれる
+      cellHeight: () => {
+        const screen = container.querySelector('.xterm-screen')
+        if (!(screen instanceof HTMLElement) || term.rows === 0) {
+          return 0
+        }
+        return screen.clientHeight / term.rows
+      },
+      scrollLines: (lines) => term.scrollLines(lines),
+      canScroll: (direction) => {
+        const buffer = term.buffer.active
+        return direction < 0 ? buffer.viewportY > 0 : buffer.viewportY < buffer.baseY
+      },
+      now: () => performance.now(),
+      raf: (callback) => requestAnimationFrame(callback),
+      cancelRaf: (handle) => cancelAnimationFrame(handle),
+    })
+
+    const points = (event: TouchEvent) =>
+      Array.from(event.touches, (touch) => ({ x: touch.clientX, y: touch.clientY }))
+
+    const onTouchStart = (event: TouchEvent) => {
+      scroller.start(points(event))
+    }
+    // **握ったかどうかだけを見て `preventDefault()` を決める。** 判断を2箇所に
+    // 分けると、片方だけ直して片方が取り残される
+    const onTouchMove = (event: TouchEvent) => {
+      if (scroller.move(points(event)) && event.cancelable) {
+        event.preventDefault()
+      }
+    }
+    const onTouchEnd = () => {
+      scroller.end()
+    }
+    const onTouchCancel = () => {
+      scroller.cancel()
+    }
+    // **`{ passive: false }` でなければ `preventDefault()` は効かない。**
+    container.addEventListener('touchstart', onTouchStart, { passive: false })
+    container.addEventListener('touchmove', onTouchMove, { passive: false })
+    container.addEventListener('touchend', onTouchEnd, { passive: false })
+    container.addEventListener('touchcancel', onTouchCancel, { passive: false })
+
     const encoder = new TextEncoder()
     const dataSubscription = term.onData((data) => {
       useWsStore.getState().sendPtyInput(cardId, encoder.encode(data))
@@ -191,6 +241,12 @@ export function TerminalPane({ cardId }: Props) {
 
     return () => {
       observer.disconnect()
+      container.removeEventListener('touchstart', onTouchStart)
+      container.removeEventListener('touchmove', onTouchMove)
+      container.removeEventListener('touchend', onTouchEnd)
+      container.removeEventListener('touchcancel', onTouchCancel)
+      // 滑っている最中に捨てられることがある。止めないと、消えた端末を触り続ける
+      scroller.stop()
       dataSubscription.dispose()
       resizeSubscription.dispose()
       unsubscribe()
@@ -209,9 +265,20 @@ export function TerminalPane({ cardId }: Props) {
         data-pending="0"
         className="sr-only"
       />
+      {/*
+        **`touchAction` は見た目ではなく、握れるかどうかを決める指定である**（設計§3）。
+        未指定のままだと、1回目の `touchmove` で握っても3回目から `cancelable` が
+        落ちて遡れなくなる（フェーズ1 の実測）。`none` ではなく `pan-x` にして、
+        横へ払う操作はブラウザに残す。
+
+        Tailwind の `touch-pan-x` ではなく**素のスタイル**で書いてあるのは、綴りを
+        間違えても黙って効かなくなる指定だからで、こうしておけば単体テストから
+        実際の値を読める（クラス名の一致では、綴り違いを捕まえられない）。
+      */}
       <div
         ref={containerRef}
         data-testid="terminal"
+        style={{ touchAction: 'pan-x' }}
         className="min-h-0 flex-1 overflow-hidden rounded-md bg-[#0b0f14] p-2"
       />
     </div>
