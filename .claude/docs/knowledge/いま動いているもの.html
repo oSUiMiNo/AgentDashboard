@@ -84,7 +84,7 @@
   <rect x="30" y="178" width="200" height="62" rx="8" fill="#161a21" stroke="#2a313c"/>
   <text x="44" y="202" fill="#e6e9ef" font-size="13">セッションホスト（OMEN）</text>
   <text x="44" y="222" fill="#9aa4b2" font-size="11">claude を動かす → AWS へ繋ぐ</text>
-  <text x="44" y="236" fill="#e0af68" font-size="11">版 0.1.15（ここだけ古い）</text>
+  <text x="44" y="236" fill="#9ece6a" font-size="11">版 0.1.19</text>
 
   <rect x="256" y="178" width="200" height="62" rx="8" fill="#161a21" stroke="#2a313c"/>
   <text x="270" y="202" fill="#e6e9ef" font-size="13">cloudflared（この機械）</text>
@@ -123,7 +123,7 @@
   一方 AWS は<strong>配った箱</strong>なので、<strong>リリースを出すまで何も変わらない</strong>。
   画面に出る版だけを見て「同じものが動いている」と判断しないこと。<br><br>
 
-  <strong>いまはずれている。</strong> AWS が <code>0.1.19</code>、<strong>実機は走行 <code>0.1.16</code>・セッションホスト<span class="mark">▽</span>は走行 <code>0.1.15</code></strong>（どちらもディスク上は <code>0.1.19</code>）。落とすと抱えている claude が道連れになるので、<strong>子が居るあいだは起こし直せない</strong>（08-13 は入れ替えようとしたセッション自身が子だった）。<br><br>  <strong>ずらしたままでよいかは、変更の中身で決まる。</strong> <strong>0.1.19 はセッションホスト<span class="mark">▽</span>側の修正なので、起こし直すまで効かない</strong>——<strong>PC ⇄ サーバの線や、PC が名乗る能力を変えた版では、揃えるまで「この PC は版が古い」が出続ける</strong>（過去に踏んだ）。<br><br>
+  <strong>いまはずれている。</strong> AWS が <code>0.1.19</code>、<strong>実機だけが走行 <code>0.1.16</code></strong>（ディスク上は <code>0.1.19</code>）。セッションホスト<span class="mark">▽</span>は <strong>08-14 03時台に <code>0.1.19</code> で起こし直した</strong>。落とすと抱えている claude が道連れになるので、<strong>子が居るあいだは起こし直せない</strong>（08-13 は入れ替えようとしたセッション自身が子だった）。<br><br>  <strong>ずらしたままでよいかは、変更の中身で決まる。</strong> <strong>0.1.19 はセッションホスト<span class="mark">▽</span>側の修正なので、起こし直すまで効かない</strong>——<strong>PC ⇄ サーバの線や、PC が名乗る能力を変えた版では、揃えるまで「この PC は版が古い」が出続ける</strong>（過去に踏んだ）。<br><br>
 
   同じことは以前も起きている（08-09 に <code>0.1.11</code> で揃えるまで、実機だけにログ整備が
   入っていた）。<strong>版番号で揃っているかを判断できない</strong>のは、この構成の性質である。<br><br>
@@ -172,7 +172,7 @@ agentdashboard-agent logs --since 24h --state-dir ~/agentdashboard-agent/state</
   <tr>
     <td>セッションホスト<span class="mark">▽</span></td>
     <td>— （PC 名 <code>OMEN</code>）</td>
-    <td><span class="tag t-old">走行 0.1.15</span><br><small><strong>いちばん古い。そして 0.1.19 では、ここを起こし直さないとスマホの遡りが直らない</strong>（画面を作っているのはここ）。ディスク上の実行ファイルは <strong>0.1.19</strong> に置き換わっているので、<strong>起こし直せば上がる</strong>。<br><strong>08-13 18時台に落とせなかった理由：抱えている claude が2本あり、そのうち1本が「入れ替えようとしていたセッション自身」だった。</strong>セッションホストを落とすと子は道連れになるので、自分が子であるあいだは落とせない——<strong>落とす時機は人が決める</strong>）</small></td>
+    <td><span class="tag t-ok">0.1.19</span><br><small><strong>08-14 03時台に起こし直した</strong>（利用者の指示）。<strong>0.1.19 は、ここを起こし直さないとスマホの遡りが直らない</strong>——画面を作っているのはここだから。<br><strong>落とすと抱えている claude は道連れになる。</strong>このときは3本（うち2本は作業中のセッション）が死んだが、作業はすべて push 済みだったので失うものは無かった。<strong>「押してよいか」は、作業が残っているかで決まる</strong>——版の新しさではない。<br>起こし直しは<strong>切り離したスクリプト</strong>に任せた（<code>/tmp/agentdashboard-agent-restart.sh</code>。記録は <code>~/agentdashboard-agent/restart.log</code>）。落とす相手が自分の親なので、ツール呼び出しの中で <code>kill</code> すると起こし直す行まで辿り着けない。<br><strong>08-13 18時台に落とせなかった理由：抱えている claude が2本あり、そのうち1本が「入れ替えようとしていたセッション自身」だった。</strong>セッションホストを落とすと子は道連れになるので、自分が子であるあいだは落とせない——<strong>落とす時機は人が決める</strong>）</small></td>
     <td><strong>AWS へ繋いでいる</strong>（<code>dash.underschaft.com</code>。この PC の名前は <code>OMEN</code>）。設定は <code>~/agentdashboard-agent/agent.toml</code>、ログは同じ場所の <code>run.log</code>。<br><strong>これが止まっていると、ブラウザに「指定された PC が繋がっていません」が出る</strong>——カードは PC に紐づくので、繋がっていないと引けない。ブラウザとサーバは繋がったままなので<strong>上の帯だけが赤くなる</strong>。
         <strong>ここを起こし直すと、抱えている claude が道連れになる。</strong>落とす前に <code>ps -eo pid,ppid,args --forest</code> で子を数えること——08-10 の入れ替えでは<strong>生きた claude が1本ぶら下がっていたので入れ替えを見送った</strong>。版を上げたら入れ替えないと、サーバだけ新しくなって<strong>フォルダを覗く口が「版が古い」で断られ続ける</strong>（実際に踏んだ）。<code>agent_id</code> はペアリングトークンから決まるので、<strong>起こし直しても同じ PC のまま</strong>——枠は孤児にならない。
         <strong>パーサだけなら落としてよい。</strong>子の <code>transcript-parser</code> を PID 直指定で <code>kill</code> すると、セッションホストが立て直して監視も保存済みの位置から張り直す（<strong>claude は道連れにならない</strong>）。本体が古い版のあいだにパーサが肥大したら、これで嵩が戻るうえ<strong>ディスク上の新しいパーサに入れ替わる</strong>。
