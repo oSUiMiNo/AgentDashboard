@@ -106,6 +106,17 @@ export function TerminalPane({ cardId }: Props) {
       onResume: () => useWsStore.getState().setFlow(cardId, 'resume'),
     })
 
+    /**
+     * 全画面フレームを**書き終えた**数。
+     *
+     * リモートの画面が作り直された瞬間を、外から観測できるようにするために持つ。
+     * これが無いと、テストは「作り直しが済んだか」を待てず、**届く前の値を見て
+     * 通ってしまう**（実際にそういうテストを書いて空振りさせた）。
+     *
+     * 数えるのは書き終えてからで、遡り位置を戻したあとにあたる。
+     */
+    let snapshots = 0
+
     const updateFlowIndicator = () => {
       const status = statusRef.current
       if (!status) {
@@ -116,6 +127,7 @@ export function TerminalPane({ cardId }: Props) {
       // 一度でも止めたかは、瞬間の値を見張るより累計で見るほうが取りこぼさない
       status.setAttribute('data-pause-count', String(flow.pauseCount()))
       status.setAttribute('data-total-bytes', String(flow.totalBytes()))
+      status.setAttribute('data-snapshots', String(snapshots))
     }
 
     const write = (payload: Uint8Array, afterWritten: (() => void) | null = null) => {
@@ -159,14 +171,20 @@ export function TerminalPane({ cardId }: Props) {
       term.cols,
       term.rows,
       (kind, payload) => {
+        const snapshot = kind === KIND_PTY_SNAPSHOT
         let restore: (() => void) | null = null
-        if (kind === KIND_PTY_SNAPSHOT) {
+        if (snapshot) {
           // 「ここまでの画面はこれで正しい」という指示。作り直してから書く。
           // **控えるのは作り直しの前**——あとから読むと、遡っていた距離が消えている
           restore = keepScrollback()
           term.reset()
         }
-        write(payload, restore)
+        write(payload, () => {
+          restore?.()
+          if (snapshot) {
+            snapshots += 1
+          }
+        })
       },
     )
 
