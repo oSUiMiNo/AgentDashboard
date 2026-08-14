@@ -128,7 +128,8 @@ interface WsState {
   setFlow: (cardId: CardId, state: FlowState) => void
   sendPtyInput: (cardId: CardId, data: Uint8Array) => void
   /** Composer からの指示送信。改行の扱いはサーバ側で決まる（設計§6） */
-  sendInput: (cardId: CardId, text: string) => void
+  /** 指示を送る。**送れたら真**（入力欄が書きかけを消してよいかの判断に使う） */
+  sendInput: (cardId: CardId, text: string) => boolean
   /** ターミナルの購読を始める。戻り値を呼ぶと購読を止める */
   subscribeTerminal: (
     cardId: CardId,
@@ -170,11 +171,20 @@ function socketUrl(): string {
   return `${protocol}//${window.location.host}/ws`
 }
 
-function send(message: ClientMessage) {
+/**
+ * 1通送る。**送れたかを返す。**
+ *
+ * 繋がっていなければ黙って捨てるのは従来どおりだが、**捨てたことを呼び手が知れる**
+ * ようにした。入力欄の書きかけは「送信に成功したら消し、失敗したら残す」という約束を
+ * 持っており（十字ボタン設計§11）、送れたかどうかが分からないと**送れていない文を
+ * 消してしまう**——いちばん困る形になる。
+ */
+function send(message: ClientMessage): boolean {
   if (socket?.readyState !== WebSocket.OPEN) {
-    return
+    return false
   }
   socket.send(JSON.stringify(message))
+  return true
 }
 
 type SetState = (partial: Partial<WsState>) => void
