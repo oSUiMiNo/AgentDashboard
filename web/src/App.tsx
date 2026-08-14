@@ -13,6 +13,7 @@
  * 内側ではなく外側に置いている。
  */
 
+import { MotionConfig } from 'motion/react'
 import { useEffect } from 'react'
 import { BrowserRouter, Link, Route, Routes, useParams } from 'react-router'
 import { Button } from '@/components/ui/button'
@@ -38,9 +39,19 @@ const CONNECTION_LABEL: Record<string, string> = {
 
 function App() {
   return (
-    <BrowserRouter>
-      <Shell />
-    </BrowserRouter>
+    /*
+      **既定は `"never"` で、何もしないと OS の「動きを減らす」設定を無視する**
+      （十字ボタン設計§13）。効く範囲は画面全体だが、入れないほうが既定として
+      不適切なので、ここで1回だけ置く。
+
+      有効時に切られるのは transform と layout のアニメーションだけで `opacity` は
+      残る——「止めるのではなく弱める」がそのまま実装される。
+    */
+    <MotionConfig reducedMotion="user">
+      <BrowserRouter>
+        <Shell />
+      </BrowserRouter>
+    </MotionConfig>
   )
 }
 
