@@ -330,3 +330,50 @@ export function isComposerSubmit(event: EnterKeyState): boolean {
   // Shift は見ない。押し分けるのは Ctrl だけ
   return event.ctrlKey
 }
+
+/**
+ * 端末へ頼めるキー。**意味であって、バイト列ではない**（設計§5）。
+ *
+ * 十字ボタンは `'up'` と頼むだけで、何バイト送られるかを知らない。押す側が独自に
+ * 組み立てる余地が構造的に無いので、「Enter の扱いを直したのに十字ボタンだけ
+ * 取り残される」という、このファイルがまさに防ごうとしている失敗を型で消せる。
+ */
+export type TerminalKey = 'up' | 'down' | 'left' | 'right' | 'enter' | 'esc'
+
+/** 矢印の終端バイト。前置きが `ESC [` か `ESC O` かはモードで決まる。 */
+const CURSOR_FINAL: Record<'up' | 'down' | 'right' | 'left', string> = {
+  up: 'A',
+  down: 'B',
+  right: 'C',
+  left: 'D',
+}
+
+/**
+ * キーを端末へ送るバイト列に直す。**バイト列を知るのはここだけ**（設計§5）。
+ *
+ * # 矢印の符号は読んで選ぶ
+ *
+ * `ESC [ A`（ノーマル）と `ESC O A`（アプリケーション）を分けているのは DECCKM で、
+ * 実測では claude はこれを立てず、しかも**両方を受ける**（調査レポート §2-1）。つまり
+ * 今日は決め打ちでも動く。それでも読んで選ぶのは、`term.modes` がすぐそこにあり
+ * **読むコストがゼロ**だからで、tmux の `send-keys` も同じことをしている。
+ *
+ * 立っているかを**知らない**とき（`undefined`）は CSI 側へ落とす。知らないことを
+ * 「立っていない」と同じ扱いにするのは、そちらが既定だからである。
+ *
+ * @param applicationCursorKeys `term.modes.applicationCursorKeysMode`。読めなければ `undefined`
+ */
+export function sequenceFor(
+  key: TerminalKey,
+  applicationCursorKeys: boolean | undefined,
+): string {
+  if (key === 'enter') {
+    // 確定は CR。端末の作法どおりで、Ctrl+Enter が送るものと同じ
+    return SUBMIT
+  }
+  if (key === 'esc') {
+    return '\x1b'
+  }
+  const prefix = applicationCursorKeys === true ? '\x1bO' : '\x1b['
+  return prefix + CURSOR_FINAL[key]
+}

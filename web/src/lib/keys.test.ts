@@ -10,9 +10,11 @@ import {
   isSelectionPrompt,
   looksSelecting,
   NEWLINE,
+  sequenceFor,
   SUBMIT,
   terminalKeyOverride,
   type EnterKeyState,
+  type TerminalKey,
 } from './keys'
 
 /**
@@ -415,5 +417,51 @@ describe('isComposerSubmit', () => {
     expect(isComposerSubmit(composerKey({ key: 's', ctrlKey: true }))).toBe(
       false,
     )
+  })
+})
+
+/**
+ * キーをバイト列へ直す（テスト計画フェーズ3「部品」）。
+ *
+ * **バイト列を知るのはここだけ**という線を、表で固定する。橋も十字ボタンも意味
+ * （`TerminalKey`）しか持たないので、ここが正しければ全部が正しい。
+ */
+describe('sequenceFor', () => {
+  const ARROWS: [TerminalKey, string, string][] = [
+    ['up', '\x1b[A', '\x1bOA'],
+    ['down', '\x1b[B', '\x1bOB'],
+    ['right', '\x1b[C', '\x1bOC'],
+    ['left', '\x1b[D', '\x1bOD'],
+  ]
+
+  it.each(ARROWS)('%s はノーマルで CSI を送る', (key, normal) => {
+    expect(sequenceFor(key, false)).toBe(normal)
+  })
+
+  it.each(ARROWS)('%s はアプリケーションで SS3 を送る', (key, _normal, app) => {
+    expect(sequenceFor(key, true)).toBe(app)
+  })
+
+  it('モードを知らないときは CSI 側へ落ちる', () => {
+    // `term.modes` が読めない場合。既定はノーマルなので、そちらへ倒す
+    expect(sequenceFor('up', undefined)).toBe('\x1b[A')
+  })
+
+  it('決定は CR。Ctrl+Enter が送るものと同じ', () => {
+    expect(sequenceFor('enter', false)).toBe(SUBMIT)
+    // モードで変わらない
+    expect(sequenceFor('enter', true)).toBe(SUBMIT)
+  })
+
+  it('Esc は 1 バイト', () => {
+    expect(sequenceFor('esc', false)).toBe('\x1b')
+    expect(sequenceFor('esc', true)).toBe('\x1b')
+  })
+
+  it('改行の並びは送らない', () => {
+    // `NEWLINE`（ESC + CR）は入力欄の改行のためのもので、キーの表には無い
+    for (const key of ['up', 'down', 'left', 'right', 'enter', 'esc'] as const) {
+      expect(sequenceFor(key, false)).not.toBe(NEWLINE)
+    }
   })
 })
