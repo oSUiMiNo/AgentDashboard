@@ -265,8 +265,11 @@ describe('十字ボタンの置き方', () => {
     dock()
     act(() => setSelecting(CARD, true))
 
-    const layer = screen.getByTestId('dpad-layer')
-    expect(layer).toHaveAttribute('data-place', 'overlay')
+    // 置き方を持つのは**場所を空けている入れ物**のほう（出入りでレイアウトを
+    // 動かさないため、置き方は常在の側が持つ）
+    const slot = screen.getByTestId('dpad-slot')
+    expect(screen.getByTestId('dpad-layer')).toHaveAttribute('data-place', 'overlay')
+    const layer = slot
     expect(layer.className).toContain('absolute')
     // 縦の中ほどへ寄せる。**下端に吸い付ける指定が無いこと**まで見る
     expect(layer.className).toContain('top-1/2')
@@ -284,7 +287,7 @@ describe('十字ボタンの置き方', () => {
     dock()
     act(() => setSelecting(CARD, true))
 
-    expect(screen.getByTestId('dpad-layer').style.pointerEvents).toBe('none')
+    expect(screen.getByTestId('dpad-slot').className).toContain('pointer-events-none')
     expect(screen.getByTestId('dpad-上').style.pointerEvents).toBe('auto')
   })
 })
@@ -305,5 +308,34 @@ describe('出入りを支援技術へ伝える', () => {
     act(() => setSelecting(CARD, true))
 
     expect(screen.getByTestId('dpad-live')).toHaveTextContent('方向キー')
+  })
+})
+
+/**
+ * **輪を構造で断ったことの検査**（実機で3度踏んだ）。
+ *
+ * 十字の出入りで帯の高さが変わると、端末が縮み／伸びし、リサイズが PTY まで飛んで
+ * TUI が描き直し、その画面がまた判定へ戻る。**待たせても止まらず**、測る契機を足すと
+ * **また回り出した**。damping では消えないので、**出入りと大きさの結び目を切った**。
+ */
+describe('出入りでレイアウトを動かさない', () => {
+  it('縦では、出ていなくても同じ高さを占める', () => {
+    stubMedia({ [COARSE]: true, [LANDSCAPE]: false })
+    dock()
+    const slot = screen.getByTestId('dpad-slot')
+    const 出る前 = slot.style.height
+    expect(出る前, '出ていなくても高さを持つこと').not.toBe('')
+    act(() => setSelecting(CARD, true))
+    expect(
+      screen.getByTestId('dpad-slot').style.height,
+      '出ても高さが変わらないこと',
+    ).toBe(出る前)
+  })
+
+  it('PC では場所ごと空けない', () => {
+    // 粗いポインタでないなら十字は出ないので、端末を削る理由が無い
+    stubMedia({ [COARSE]: false, [LANDSCAPE]: false })
+    dock()
+    expect(screen.queryByTestId('dpad-slot')).toBeNull()
   })
 })

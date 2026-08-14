@@ -35,7 +35,7 @@ import { AnimatePresence, motion } from 'motion/react'
 import { useEffect, useRef } from 'react'
 import { Button } from '@/components/ui/button'
 import { Composer } from '@/components/Composer/Composer'
-import { Dpad } from '@/components/Dpad/Dpad'
+import { Dpad, DPAD_CELL_PX } from '@/components/Dpad/Dpad'
 import { isEnded, type SessionStatus } from '@/lib/protocol'
 import type { CardId } from '@/lib/protocol'
 import { useCoarsePointer, useLandscape } from '@/lib/pointer'
@@ -113,36 +113,59 @@ export function InputDock({ cardId, status, compact = false }: Props) {
         </Button>
       </div>
 
-      <AnimatePresence initial={false}>
-        {show && (
-          <motion.div
-            data-testid="dpad-layer"
-            data-place={landscape ? 'overlay' : 'stacked'}
-            initial={{ opacity: 0, scale: 0.85 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{
-              opacity: 0,
-              scale: 0.85,
-              transition: { duration: 0.15, ease: [0.3, 0, 1, 1] },
-            }}
-            // バネは duration 系で書く。物理系を1つでも混ぜると duration 系が無効になる
-            transition={{ type: 'spring', visualDuration: 0.22, bounce: 0.35 }}
-            className={
-              landscape
-                ? 'absolute top-1/2 right-6 z-20 -translate-y-1/2'
-                : 'flex justify-center'
-            }
-            /*
-              **横向きは端末の脇へ重ねる**（設計§10）。下端にだけは重ねない——
-              選択肢は必ず末尾5行に出るので、下端に重ねると選ぼうとしている対象を覆う。
-              層は素通しにして、押せるのはボタンだけにする
-            */
-            style={landscape ? { pointerEvents: 'none' } : undefined}
-          >
-            <Dpad onKey={(key) => sendTerminalKey(cardId, key)} />
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {/*
+        **場所は、出ていなくても空けておく**（設計§10 の訂正。実機で3度踏んだ輪の対処）。
+
+        十字が出入りするたびに帯の高さが変われば、端末が縮み／伸びし、
+        `ResizeObserver → fit.fit() → resize` が PTY まで飛ぶ。すると TUI が描き直し、
+        その画面がまた判定へ戻ってくる——**出す条件が、出したことで変わる輪**になる。
+
+        待たせて damping しようとしたが、**周期が伸びるだけで止まらなかった**（0.1.22）。
+        測る契機を足すと**また回り出した**（0.1.23）。原因は damping の不足ではなく、
+        **出入りと端末の大きさが結ばれていること**そのものにある。
+
+        **結び目を切る。** 見ている端末（粗いポインタ・横並びでない・生きている）では
+        **常に同じ高さを占める**ようにし、十字は**その中で**現れたり消えたりする。
+        こうすると出入りでレイアウトが1ピクセルも動かないので、**リサイズが飛ばない＝
+        輪が原理的に成立しない**。
+
+        引き換えに、選択待ちでない間も端末がそのぶん短くなる。**寸法は実機で詰める**
+        （設計§16-4）ので、重いと感じたらセルを小さくする。
+      */}
+      {watching && !ended && (
+        <div
+          data-testid="dpad-slot"
+          data-shown={show ? 'true' : 'false'}
+          className={
+            landscape
+              ? 'pointer-events-none absolute top-1/2 right-6 z-20 -translate-y-1/2'
+              : 'flex shrink-0 justify-center'
+          }
+          // **高さを固定するのが要点。** 中身の有無で変わってはいけない
+          style={landscape ? undefined : { height: DPAD_CELL_PX * 3 }}
+        >
+          <AnimatePresence initial={false}>
+            {show && (
+              <motion.div
+                data-testid="dpad-layer"
+                data-place={landscape ? 'overlay' : 'stacked'}
+                initial={{ opacity: 0, scale: 0.85 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{
+                  opacity: 0,
+                  scale: 0.85,
+                  transition: { duration: 0.15, ease: [0.3, 0, 1, 1] },
+                }}
+                // バネは duration 系で書く。物理系を混ぜると duration 系が無効になる
+                transition={{ type: 'spring', visualDuration: 0.22, bounce: 0.35 }}
+                className="pointer-events-auto"
+              >
+                <Dpad onKey={(key) => sendTerminalKey(cardId, key)} />
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+      )}
 
       <Composer cardId={cardId} status={status} collapsed={show} />
     </div>
