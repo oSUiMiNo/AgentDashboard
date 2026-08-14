@@ -53,6 +53,28 @@
  * ——判定が外れたときの逃げ道を、利用者から取り上げないため。
  *
  * なお `Ctrl+J`（0x0A）は読み替え無しでいまも改行として効く。xterm がそのまま送るため。
+ *
+ * # 判定は「位置」で決まる。語だけでは決まらない
+ *
+ * **かつてここには「`Esc to cancel` が選択待ちの唯一の共通点だった」と書いてあったが、
+ * それは誤りだった。** 母集団を実行ファイルの解析まで広げると、
+ *
+ * - `esc to cancel` を**出さない**選択画面が実在する（`Esc to reject all` など）
+ * - 選択待ちでない画面に**当たる**（作業中・ログイン待ち・そして**利用者が打った文そのもの**）
+ *
+ * の両方が起きる。実際、入力欄に `1. 手順を書く` と打っただけで以後 Enter が送信になる、
+ * という不具合が出荷されていた。
+ *
+ * 直し方は語を増やすことではなく、**画面のどこを見るかを絞ること**だった。実物では
+ * **案内は最終行に出て、メニューの選択肢は字下げされており、利用者が打つ行は字下げ0**
+ * である。この3つで本物と偽物が完全に分かれる。
+ *
+ * # 口は2つある。倒し方が逆
+ *
+ * | 口 | 誰が使うか | 迷ったら |
+ * |---|---|---|
+ * | [`isSelectionPrompt`] | Enter の読み替え | **偽**（誤爆すると打ちかけが送信される） |
+ * | [`looksSelecting`] | 十字ボタンの出し入れ | **真**（出しすぎても場所を取るだけ） |
  */
 
 /**
@@ -86,65 +108,161 @@ export const SUBMIT = '\r'
  */
 const SELECTION_CURSORS = '❯>*›▶│'
 
-/**
- * TUI が「Esc で取り消せる」と言っている案内。**これが選択待ちの唯一の共通点**だった。
- *
- * 実測（v2.1.228）では、Enter の案内は画面ごとに違った——信頼確認は `Enter to confirm`、
- * `/rewind` は `Enter to continue`、権限確認は**Enter の案内をそもそも出さない**。
- * 3種すべてに出たのはこちらだけである。
- *
- * 作業中に出る `esc to interrupt` とは綴りが違うので当たらない。
- */
-const CANCEL_HINT = 'esc to cancel'
+/** 案内文を探す窓（最終行から何行ぶんか）。実物はすべて**最終行**に出る。 */
+const HINT_WINDOW = 3
+
+/** 選択カーソルを探す窓。実物はすべて**下から5行以内**に出る。 */
+const CURSOR_WINDOW = 6
 
 /**
- * いま画面が「選択して決めるのを待っている」か。
+ * キーの案内の形。`Esc to cancel` / `Esc cancel` / `Enter/↓ to select` のどれも拾う。
  *
- * # 目印を2つ持ち、どちらかが当たれば選択待ちとみなす
+ * **`to` は任意。** 自動生成のフッタは `Esc cancel · ↑/↓ navigate` の形になり、
+ * 「to」が入らない（実行ファイルの解析で確認）。綴りは `Esc` / `esc` / `⎋` に変わる。
+ */
+const HINT = /(?:^|[\s·([])(esc|⎋|enter|⏎|↵)(?:\/\S+)?\s+(?:to\s+)?([a-z]+)/gi
+
+/**
+ * 案内の形をしているが、**選択待ちではない**場面に固有の語。
  *
- * 1つの文字列に賭けない。TUI の文言は版ごとに変わるうえ、こちらから出させることが
- * できない画面もある。実測（v2.1.228。`fixtures/v2.1.228/screens/`）の結果が次のとおりで、
- * **2つ持って初めて3種すべてに当たり、そうでない画面には1つも当たらない**。
+ * 許す側（`cancel` `close` `skip` …）を並べないのは、**列挙は版が上がるたびに漏れる**から。
+ * 禁じる側は2語しかなく、しかも「作業中」という出てはいけない場面に固有なので、
+ * こちらのほうが寿命が長い。
  *
- * | 画面 | 形 | 案内文 |
- * |---|---|---|
- * | フォルダ信頼の確認 | 当たり | 当たり |
- * | 権限確認 | 当たり | 当たり |
- * | `/rewind` のメニュー | — | 当たり |
- * | 起動直後（welcome） | — | — |
- * | 普通に会話しているだけ | — | — |
+ * **位置で絞っても救えない。** どちらも末尾のフッタに出るので、ここを書かないと
+ * 作業中ずっと Enter が確定になる。
+ */
+const NOT_A_PROMPT = new Set(['interrupt', 'stop'])
+
+/** 末尾の空行を落とした行の並び。窓を切る前に必ず通す。 */
+function screenLines(screen: string): string[] {
+  const lines = screen.split('\n')
+  while (lines.length > 0 && lines[lines.length - 1].trim() === '') {
+    lines.pop()
+  }
+  return lines
+}
+
+/**
+ * **利用者が打った行**か（入力欄そのものと、履歴に残る過去の発言）。
  *
- * **`/rewind` は選択肢に番号を持たない**（`❯ (current)`）ので、形の目印だけでは取りこぼす。
+ * 実物では、入力欄も過去の発言も**字下げ0**の選択カーソルで始まる。一方メニューの
+ * 選択肢は必ず**字下げ1以上**である（`fixtures/` の実測）。**この字下げが、本物と偽物を
+ * 分ける唯一の構造情報**なので、案内を探すときもカーソルを数えるときも先に除く。
+ *
+ * これを除かないと、利用者が `esc to cancel` の意味を尋ねただけで選択待ちと判定される
+ * （調査レポート §10-3 で実物の関数を動かして再現した誤爆）。
+ */
+function isTypedLine(line: string): boolean {
+  return (
+    line.length > 0 &&
+    line.trimStart() === line &&
+    SELECTION_CURSORS.includes(line.charAt(0))
+  )
+}
+
+/** その行に、選択待ちの案内があるか。 */
+function hasHint(line: string): boolean {
+  if (isTypedLine(line)) {
+    return false
+  }
+  for (const found of line.matchAll(HINT)) {
+    if (!NOT_A_PROMPT.has(found[2].toLowerCase())) {
+      return true
+    }
+  }
+  return false
+}
+
+/** 末尾の窓の中に案内があるか。 */
+function hintNearEnd(lines: string[]): boolean {
+  return lines.slice(Math.max(0, lines.length - HINT_WINDOW)).some(hasHint)
+}
+
+/**
+ * 末尾の窓の中にある**メニューの選択肢**（字下げ1以上の選択カーソルで始まる行）の、
+ * カーソルより後ろの部分。
+ *
+ * **空白の種類を当てにしない。** `❯` の直後は、入力欄では NBSP（U+00A0）、選択肢では
+ * 通常の半角空白だった（実測）。`trimStart()` はどちらも落とすので、種類を問わずに読める。
+ * ただし**落とすのは字下げを見たあと**である。
+ */
+function menuChoices(lines: string[]): string[] {
+  const choices: string[] = []
+  for (const line of lines.slice(Math.max(0, lines.length - CURSOR_WINDOW))) {
+    const trimmed = line.trimStart()
+    if (trimmed === line) {
+      // 字下げ0。入力欄か過去の発言であって、選択肢ではない
+      continue
+    }
+    const cursor = trimmed.charAt(0)
+    if (cursor && SELECTION_CURSORS.includes(cursor)) {
+      choices.push(trimmed.slice(1))
+    }
+  }
+  return choices
+}
+
+/**
+ * いま画面が「選択して決めるのを待っている」か。**厳しいほう**（Enter の読み替え用）。
+ *
+ * # 見るのは3つ。どれも位置で窓を絞る
+ *
+ * | 材料 | 定義 |
+ * |---|---|
+ * | 末尾の案内 | 最終行から3行以内に、`Esc` / `Enter` に続く語がある（`interrupt` と `stop` は除く） |
+ * | 選択カーソル | 下から6行以内に、**字下げ1以上**の `❯` で始まる行がある |
+ * | 番号 | その行のカーソルの後ろが `数字.` の形 |
+ *
+ * ```
+ * 厳しい ＝ 末尾の案内 ‖ （選択カーソル ＆ 番号）
+ * ```
+ *
+ * **位置を見ないと誤爆する。** 実物の画面で確かめてある——作業中の画面にも過去の発言の
+ * エコー（`❯ 1. …`）が残っているので、語を除外するだけでは止まらない。
  *
  * # 迷ったら「選択待ちではない」と答える
  *
  * 誤判定の重さが逆方向で違う。選択待ちでないのに確定と答えると**打ちかけの文が送信されて
  * しまう**（取り消せない）。逆は「Enter が効かない」だけで、`Ctrl+Enter` を押せば済む。
- * だから**目印が1つも当たらなければ false** にする。
+ * **十字ボタンの出し入れは倒し方が逆**なので、そちらは [`looksSelecting`] を使う。
  */
 export function isSelectionPrompt(screen: string): boolean {
-  if (!screen) {
+  const lines = screenLines(screen)
+  if (lines.length === 0) {
     return false
   }
-  if (screen.toLowerCase().includes(CANCEL_HINT)) {
-    return true
-  }
-  return screen.split('\n').some(hasNumberedChoice)
+  return (
+    hintNearEnd(lines) ||
+    menuChoices(lines).some((rest) => /^\s*\d+\./.test(rest))
+  )
 }
 
 /**
- * その行が「選択カーソル ＋ 番号つきの選択肢」か。
+ * いま画面が選択待ち**らしい**か。**緩いほう**（十字ボタンの出し入れ用）。
  *
- * **空白の種類を当てにしない。** `❯` の直後は、入力欄では NBSP（U+00A0）、選択肢では
- * 通常の半角空白だった（実測）。`trimStart()` はどちらも落とすので、種類を問わずに読める。
+ * ```
+ * 緩い ＝ 厳しい ‖ 選択カーソル
+ * ```
+ *
+ * **番号を要求しない。** 案内が横幅の都合で `+N more` に切られて消えた画面でも、
+ * 字下げされたカーソルさえ見えていれば出せる。
+ *
+ * # なぜ倒し方を変えるのか
+ *
+ * 外したときの損が逆向きだから。十字ボタンが余計に出ても**場所を取るだけ**で、
+ * 入力欄は畳むだけで消さないので何も失わない。逆に出ないと、**`Ctrl` を持たない
+ * スマホでは選択肢を選べない**。
+ *
+ * **厳しいほうを必ず内包する。** 逆転すると「Enter は確定になるのに十字ボタンが
+ * 出ない」という、いちばん説明のつかない状態ができる。
  */
-function hasNumberedChoice(line: string): boolean {
-  const trimmed = line.trimStart()
-  const cursor = trimmed.charAt(0)
-  if (!cursor || !SELECTION_CURSORS.includes(cursor)) {
+export function looksSelecting(screen: string): boolean {
+  const lines = screenLines(screen)
+  if (lines.length === 0) {
     return false
   }
-  return /^\d+\./.test(trimmed.slice(1).trimStart())
+  return hintNearEnd(lines) || menuChoices(lines).length > 0
 }
 
 /**
