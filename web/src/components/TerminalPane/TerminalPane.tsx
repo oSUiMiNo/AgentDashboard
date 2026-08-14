@@ -18,8 +18,13 @@ import { Terminal, type ITerminalOptions } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
 import { createFlowController } from '@/lib/flow'
 import { KIND_PTY_SNAPSHOT } from '@/lib/frame'
-import { terminalKeyOverride } from '@/lib/keys'
+import { looksSelecting, sequenceFor, terminalKeyOverride } from '@/lib/keys'
 import { visibleScreen } from '@/lib/screen'
+import {
+  hasWatcher,
+  registerTerminal,
+  setSelecting,
+} from '@/lib/terminalBridge'
 import { createTouchScroller } from '@/lib/touch'
 import type { CardId } from '@/lib/protocol'
 import { useWsStore } from '@/stores/ws'
@@ -213,6 +218,33 @@ export function TerminalPane({ cardId }: Props) {
       return false
     })
 
+    // --- 橋（十字ボタン設計§2・§4・§5）----------------------------------
+    //
+    // 端末の中に閉じている「いま選択待ちか」を外へ出し、外から「意味」でキーを
+    // 頼めるようにする2車線。**寿命も鍵も同じ**なので、同じ `useEffect` で登録し
+    // 同じ `return` で解除する（片方だけ解除されると、消えた端末へ送り続ける）。
+    //
+    // 上り：フレームごとに判定して外へ出す。**見ている人が居るときだけ**画面を
+    // 組み立てる——`keys.ts` の「打鍵ごとに全画面を組み立てない」という約束を、
+    // フレームごとの経路にも通す。PC では購読者が0なので、ここは即座に戻る
+    const parsed = term.onWriteParsed(() => {
+      if (!hasWatcher(cardId)) {
+        return
+      }
+      setSelecting(cardId, looksSelecting(visibleScreen(term)))
+    })
+
+    // 下り：頼まれた「意味」をバイト列へ直して流す。**`term` そのものは渡さない**
+    // （渡すと `reset` や `dispose` を外から呼べてしまい、`keepScrollback` と
+    // `flow.begin`/`done` の対が壊せる）
+    //
+    // **第2引数の `false` が要点。** 型定義が「エスケープシーケンスには false を」と
+    // 名指ししているのに加え、`true` にすると xterm が下端へ飛ばす——選択肢を読む
+    // ために遡っていた位置が、キーを送るたびに消える
+    const unregisterKeys = registerTerminal(cardId, (key) => {
+      term.input(sequenceFor(key, term.modes.applicationCursorKeysMode), false)
+    })
+
     // --- タッチで遡る（設計§3・§4・§7）---------------------------------
     //
     // xterm 6 にタッチの口は無い（同梱の `Gesture` は呼び出し0件・非公開、`scroll` の
@@ -348,6 +380,9 @@ export function TerminalPane({ cardId }: Props) {
       container.removeEventListener('touchcancel', onTouchCancel)
       // 滑っている最中に捨てられることがある。止めないと、消えた端末を触り続ける
       scroller.stop()
+      parsed.dispose()
+      // 受け口・送信待ちの列・選択待ちの値の3つとも片付く
+      unregisterKeys()
       dataSubscription.dispose()
       resizeSubscription.dispose()
       unsubscribe()
