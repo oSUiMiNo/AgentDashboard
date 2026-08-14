@@ -111,6 +111,20 @@ describe('isSelectionPrompt', () => {
     expect(isSelectionPrompt(実物の画面('after-turn'))).toBe(false)
   })
 
+  it('版が上がっても同じ答えを返す', () => {
+    // **判定を単一版の観測に留めない**（設計§16-6）。フェーズ6 で同じ4枚を
+    // `v2.1.232` でも採り直し、**目印（末尾の案内文・選択カーソルの字下げ）が
+    // 1文字も動いていない**ことを確かめた。ここに置いておけば、次に版が上がって
+    // 文言が変わったときに**この行が落ちて教えてくれる**。
+    //
+    // 版をまたいで置くのは**肯定と否定の両方**にする。肯定だけだと、判定が
+    // 「常に true」へ壊れても version 間の比較としては通ってしまう
+    expect(isSelectionPrompt(実物の画面('permission', 'v2.1.232'))).toBe(true)
+    expect(isSelectionPrompt(実物の画面('rewind', 'v2.1.232'))).toBe(true)
+    expect(isSelectionPrompt(実物の画面('welcome', 'v2.1.232'))).toBe(false)
+    expect(isSelectionPrompt(実物の画面('after-turn', 'v2.1.232'))).toBe(false)
+  })
+
   it('番号つきの選択肢があれば選択待ちと判定する', () => {
     // **選択肢は字下げされている。** 実物（`permission` / `trust` は1、`rewind` は2）に
     // 合わせる。字下げ0 の `❯` は入力欄と過去の発言なので、数えると誤爆になる
