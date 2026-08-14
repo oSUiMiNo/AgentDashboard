@@ -136,7 +136,7 @@ export function useDraft(
   const [text, setText] = useState(() => readDraft(cardId, account))
   /** まだ書き出していない値。`null` は「書くものが無い」 */
   const pending = useRef<string | null>(null)
-  const timer = useRef<number | null>(null)
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // 相手が変わったら読み直す。**入れ物を使い回すと、前のカードの文が出る**
   useEffect(() => {
@@ -175,7 +175,7 @@ export function useDraft(
       timer.current = setTimeout(() => {
         timer.current = null
         flush()
-      }, WRITE_DEBOUNCE_MS) as unknown as number
+      }, WRITE_DEBOUNCE_MS)
     },
     [flush],
   )
