@@ -172,6 +172,124 @@ export async function takePrevented(page: Page): Promise<boolean[]> {
   })
 }
 
+/** 線の上へ出て行った1フレーム。`bytes` は `[1B kind][16B card_id][payload]` のまま。 */
+export interface SentKey {
+  /** 送った瞬間（`performance.now()`）。**フレームの間隔はこの差で測る** */
+  at: number
+  bytes: number[]
+}
+
+export interface SentFrames {
+  /** `PtyInput`（`0x02`）のフレームだけ。 */
+  keys: SentKey[]
+  /** 入力欄の経路（`send_input`）が呼ばれた回数。 */
+  sendInput: number
+}
+
+/** [`SentKey`] の payload（ヘッダ 17 バイトの後ろ）を取り出す。 */
+export function keyPayload(key: SentKey): number[] {
+  return key.bytes.slice(17)
+}
+
+/**
+ * ブラウザが**線の上へ何を出したか**を、あとから読めるようにする。
+ *
+ * # 画面からは観測できないものがある
+ *
+ * 十字ボタンまわりには、描かれているかを見ても分からないことが3つある。
+ *
+ * | 確かめたいこと | なぜ画面では分からないか |
+ * |---|---|
+ * | キーが `PtyInput` を通り、`SendInput` を通っていない | どちらの道を通っても、端末の見た目は同じになりうる |
+ * | 長押しで**何発**送られたか | 選択肢が2つしか無い画面では、3発目以降が画面を変えない |
+ * | Esc の2発が**別のフレームで 30ms 以上空いている** | まとまって届いたかどうかは、送ったあとの画面に出ない |
+ *
+ * # `WebSocket.prototype.send` を包む
+ *
+ * Playwright の `framesent` ではなく**ページの中**で拾うのは、時刻が要るため。
+ * あちらの時刻は CDP の通知が届いた時刻で、送った瞬間とは別物になる。**30ms
+ * という細かい間隔を測る用途には、送り手の時計でなければ足りない。**
+ *
+ * **`page.goto` より前に呼ぶこと**（`addInitScript` は次の読み込みから効く）。
+ * 包みは測定が本体を壊さないよう、何があっても元の `send` を呼ぶ。
+ */
+export async function watchSentFrames(page: Page) {
+  await page.addInitScript(() => {
+    const box = { keys: [] as SentKey[], sendInput: 0 }
+    ;(window as unknown as { __sent: typeof box }).__sent = box
+
+    const original = WebSocket.prototype.send
+    WebSocket.prototype.send = function (this: WebSocket, data: Parameters<WebSocket['send']>[0]) {
+      try {
+        if (typeof data === 'string') {
+          // 入力欄の経路。**本文から ESC を落とす道**なので、キーが通ってはいけない
+          if (data.includes('"send_input"')) {
+            box.sendInput += 1
+          }
+        } else {
+          const view =
+            data instanceof ArrayBuffer
+              ? new Uint8Array(data)
+              : new Uint8Array((data as ArrayBufferView).buffer)
+          // 0x02 が `KIND_PTY_INPUT`（`web/src/lib/frame.ts`）
+          if (view[0] === 0x02) {
+            box.keys.push({ at: performance.now(), bytes: Array.from(view) })
+          }
+        }
+      } catch {
+        // 測るために本体を止めない
+      }
+      return original.call(this, data)
+    }
+  })
+}
+
+/** [`watchSentFrames`] が拾った結果を読み、次の測定のために空にする。 */
+export async function takeSentFrames(page: Page): Promise<SentFrames> {
+  return page.evaluate(() => {
+    const box = (window as unknown as { __sent?: SentFrames }).__sent
+    if (!box) {
+      return { keys: [], sendInput: 0 }
+    }
+    const keys = box.keys.splice(0, box.keys.length)
+    const sendInput = box.sendInput
+    box.sendInput = 0
+    return { keys, sendInput }
+  })
+}
+
+interface HoldOptions {
+  /** 押しっぱなしにする長さ（ms）。 */
+  holdMs: number
+}
+
+/**
+ * 部品を**指で押しっぱなしにする**（連射の確認用）。
+ *
+ * `touchscreen.tap()` では長押しにならない（実測：`tap` のあと時間を進めても連射0回）。
+ * `swipeTerminal` と同じく CDP の `Input.dispatchTouchEvent` で、`touchStart` →
+ * 保持 → `touchEnd` を自分で組む。
+ */
+export async function holdTouch(page: Page, target: Locator, options: HoldOptions) {
+  const box = await target.boundingBox()
+  if (!box) {
+    throw new Error('押す相手の位置が取れません')
+  }
+  const point = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+
+  const cdp = await page.context().newCDPSession(page)
+  try {
+    await cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchStart',
+      touchPoints: [point],
+    })
+    await page.waitForTimeout(options.holdMs)
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+  } finally {
+    await cdp.detach()
+  }
+}
+
 export async function expectTerminalToContain(page: Page, marker: string) {
   await expect
     .poll(async () => terminalText(page), {
