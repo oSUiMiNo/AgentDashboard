@@ -100,11 +100,22 @@ pub const DIALOG_HINT: &str = "Enter to confirm · Esc to cancel";
 ///
 /// 本物は**方向キーで選択が動き、Enter で確定する**。番号を打つ形しか受け付けないと、
 /// ブラウザの Enter が確定として届くことを確かめられない。
+///
+/// # 選択肢は字下げする
+///
+/// 実物は選択カーソルを**1つ字下げして**描く（`fixtures/v2.1.228/screens/` の
+/// `permission` と `trust` が字下げ1、`rewind` が2）。一方、**字下げ0 の `❯` は
+/// 入力欄と過去の発言のエコー**で、選択待ちではない——同じ画面の中に両方が出る。
+///
+/// ブラウザ側の判定はこの差を「本物と偽物を分ける唯一の構造情報」として使う
+/// （ローカルイシュー「スマホで方向キーが要る場面に十字ボタンを出す」設計§3）。
+/// **字下げ0 のまま描くと、その経路が E2E で一度も踏まれない。**
 pub fn render_dialog(header: &str, options: &[&str], selected: usize) -> String {
     let mut out = String::from(header);
     for (index, option) in options.iter().enumerate() {
         let cursor = if index == selected { "❯" } else { " " };
         out.push('\n');
+        out.push(' ');
         out.push_str(cursor);
         out.push(' ');
         out.push_str(option);
