@@ -1,0 +1,21 @@
+      1 ok
+ 
+● 完了しました。report.txt
+  ファイルを作成し、内容を "ok" にしました。
+
+✻ Baked for 7s
+
+─────────────────────────────────────────────
+  Rewind
+
+  Restore the code and/or conversation to
+  the point before…
+
+    report.txt というファイルを作って…
+    report.txt +2
+
+  ❯ (current)
+
+
+
+  Enter to continue · Esc to cancel

@@ -48,9 +48,27 @@ use tokio::time::Instant;
 /// 本物の CLI は考える時間があるので長めに待つ。（出所：`tests/real_cli.rs`）
 const CLI_TIMEOUT: Duration = Duration::from_secs(180);
 
-/// 画面を採る大きさ。`session screen` の既定と揃える（CLI設計§9-1）。
-const COLS: u16 = 120;
-const ROWS: u16 = 40;
+/// 画面を採る大きさ。既定は `session screen` と揃える（CLI設計§9-1）。
+///
+/// **環境変数で変えられる。** 判定は「最終行から N 行以内」で窓を切るので、
+/// **採ったときの大きさが判定の当たり外れを決める**。スマホは 120×40 とはまるで
+/// 違う形（実測で 47×18 前後）なので、そちらでも採れないと**広い端末でしか
+/// 確かめていない判定**になる。
+fn cols() -> u16 {
+    size_from_env("AGENTDASHBOARD_SCREEN_CAPTURE_COLS", 120)
+}
+
+fn rows() -> u16 {
+    size_from_env("AGENTDASHBOARD_SCREEN_CAPTURE_ROWS", 40)
+}
+
+fn size_from_env(name: &str, fallback: u16) -> u16 {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.parse::<u16>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(fallback)
+}
 
 // ---------------------------------------------------------------------------
 // ここから4つは `tests/real_cli.rs` からの写し。
@@ -122,7 +140,7 @@ fn claude_wrapper(dir: &WorkDir, extra: &[&str]) -> PathBuf {
 /// ——ブラウザの xterm がバッファに持っているものと同じ性質のテキストになる（設計§2）。
 /// だから採ったものがそのまま web 側の判定の材料になる。
 async fn cli_screen_text(target: &client::Target, prefix: &str) -> String {
-    let shot = client::screen(target, prefix, COLS, ROWS)
+    let shot = client::screen(target, prefix, cols(), rows())
         .await
         .expect("画面を受け取れること");
     client::render::render_screen(&shot.payload, shot.rows, shot.cols)

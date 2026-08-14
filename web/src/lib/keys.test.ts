@@ -55,13 +55,28 @@ function override(
  * 同じ思い込みを共有したまま緑になる（PJTガイドライン）。実物を1回通しておけば、
  * 目印が実際の画面に当たることまで固定できる。
  */
-function 実物の画面(name: string, 版 = 'v2.1.228'): string {
+function 実物の画面(name: string, 版 = 'v2.1.228', 棚 = 'screens'): string {
   // **`new URL(…, import.meta.url)` は使えない。** Vite がアセットとして解決しようとし、
   // `fixtures/` は `web/` の外なので `Denied ID` で弾かれる。パスを文字列として
   // 組み立てれば、Vite は介入しない
   const ここ = dirname(fileURLToPath(import.meta.url))
-  const path = resolve(ここ, '../../../fixtures', 版, 'screens', `${name}.txt`)
+  const path = resolve(ここ, '../../../fixtures', 版, 棚, `${name}.txt`)
   return readFileSync(path, 'utf8')
+}
+
+/**
+ * **スマホと同じ狭さで採った画面**（45桁×22行。`screens-narrow`）。
+ *
+ * ここまでの実物はすべて **120桁×40行**で採ってあり、十字ボタンの E2E も
+ * `devices['Desktop Chrome']`（1280×720）にタッチを足しただけだった——つまり
+ * **判定は広い端末でしか確かめていなかった**。
+ *
+ * 狭いと何が変わるかは、実際に採ってみるまで分からない。案内文は折り返して割れうるし、
+ * フッタは幅が足りないと `+N more` で**切られて Esc の案内ごと消える**（実行ファイルの
+ * 解析で確認）。**位置で窓を切る判定にとって、画面の大きさは前提そのもの**である。
+ */
+function 狭い画面(name: string): string {
+  return 実物の画面(name, 'v2.1.232', 'screens-narrow')
 }
 
 /**
@@ -123,6 +138,22 @@ describe('isSelectionPrompt', () => {
     expect(isSelectionPrompt(実物の画面('rewind', 'v2.1.232'))).toBe(true)
     expect(isSelectionPrompt(実物の画面('welcome', 'v2.1.232'))).toBe(false)
     expect(isSelectionPrompt(実物の画面('after-turn', 'v2.1.232'))).toBe(false)
+  })
+
+  it('スマホと同じ狭さの画面でも同じ答えを返す', () => {
+    // **画面の大きさは、位置で窓を切る判定にとって前提そのもの。** それまでの実物は
+    // すべて 120桁×40行で採ってあり、十字の E2E も 1280×720 だった——**狭い端末では
+    // 一度も確かめていなかった**。実機で「十字が出ない」を踏んだときに、ここを
+    // 容疑者から外せるようにしておく
+    expect(isSelectionPrompt(狭い画面('permission'))).toBe(true)
+    expect(isSelectionPrompt(狭い画面('rewind'))).toBe(true)
+    expect(isSelectionPrompt(狭い画面('multi-select'))).toBe(true)
+    expect(isSelectionPrompt(狭い画面('welcome'))).toBe(false)
+    expect(isSelectionPrompt(狭い画面('after-turn'))).toBe(false)
+    // **陰性対照。** 作業中の `esc to interrupt` は、狭くても選択待ちにしてはいけない
+    expect(isSelectionPrompt(狭い画面('working'))).toBe(false)
+    // 出荷済みの誤爆の実物。狭くても当たってはいけない
+    expect(isSelectionPrompt(狭い画面('numbered-echo'))).toBe(false)
   })
 
   it('番号つきの選択肢があれば選択待ちと判定する', () => {
@@ -293,6 +324,18 @@ describe('looksSelecting', () => {
     expect(looksSelecting(実物の画面('working', 'v2.1.232'))).toBe(false)
     expect(looksSelecting(打ちかけの画面('1. 手順を書く'))).toBe(false)
     expect(looksSelecting('')).toBe(false)
+  })
+
+  it('スマホと同じ狭さでも、出す画面と出さない画面が分かれる', () => {
+    // **十字ボタンが実際に見ているのはこちら**なので、狭い画面はここでこそ要る。
+    // 実機で「十字が出ない」を踏んだとき、判定を容疑者から外せるようにしておく
+    expect(looksSelecting(狭い画面('permission'))).toBe(true)
+    expect(looksSelecting(狭い画面('rewind'))).toBe(true)
+    expect(looksSelecting(狭い画面('multi-select'))).toBe(true)
+    expect(looksSelecting(狭い画面('welcome'))).toBe(false)
+    expect(looksSelecting(狭い画面('after-turn'))).toBe(false)
+    expect(looksSelecting(狭い画面('working'))).toBe(false)
+    expect(looksSelecting(狭い画面('numbered-echo'))).toBe(false)
   })
 })
 
