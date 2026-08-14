@@ -19,22 +19,35 @@
  * 加工を両側でやると、どちらが正なのか分からなくなる。
  */
 
-import { useRef, useState } from 'react'
+import { useRef } from 'react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
+import { useDraft } from '@/lib/drafts'
 import { isComposerSubmit } from '@/lib/keys'
 import { isEnded, type SessionStatus } from '@/lib/protocol'
 import type { CardId } from '@/lib/protocol'
+import { useAuthStore } from '@/stores/auth'
 import { useWsStore } from '@/stores/ws'
 
 interface Props {
   cardId: CardId
   status: SessionStatus
+  /**
+   * 十字ボタンが出ている間は高さを詰める（十字ボタン設計§11）。
+   *
+   * **消さない。** 要素が消えると日本語の変換中の文字が復元できない——変換途中の
+   * 文字は入力欄の値としてまだ確定していないため、消えた瞬間に取り戻す先が無くなる。
+   * この判断が、判定を「迷ったら出す」側へ倒せる根拠になっている。
+   */
+  collapsed?: boolean
 }
 
-export function Composer({ cardId, status }: Props) {
+export function Composer({ cardId, status, collapsed = false }: Props) {
   const sendInput = useWsStore((state) => state.sendInput)
-  const [text, setText] = useState('')
+  // 下書きの鍵を分けるためのアカウント。**`lib/` から `stores/` は読まない**ので、
+  // 読むのはこちら側（十字ボタン設計§11 のフェーズ3 の訂正）
+  const account = useAuthStore((state) => state.auth.account)
+  const [text, setText] = useDraft(cardId, account)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const ended = isEnded(status)
 
@@ -42,7 +55,10 @@ export function Composer({ cardId, status }: Props) {
     if (ended) {
       return
     }
-    sendInput(cardId, text)
+    // **送れたときだけ消す。** 送れていない文が消えるのが、いちばん困る形
+    if (!sendInput(cardId, text)) {
+      return
+    }
     setText('')
     inputRef.current?.focus()
   }
@@ -59,9 +75,11 @@ export function Composer({ cardId, status }: Props) {
       <Textarea
         ref={inputRef}
         data-testid="composer-input"
+        data-collapsed={collapsed ? 'true' : 'false'}
         value={text}
         disabled={ended}
-        rows={2}
+        // 畳んでも消さない。**行数を詰めるだけ**
+        rows={collapsed ? 1 : 2}
         placeholder={
           ended
             ? 'このセッションは終了しています'

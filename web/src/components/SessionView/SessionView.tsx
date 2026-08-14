@@ -20,11 +20,12 @@
 import { motion } from 'motion/react'
 import { useState } from 'react'
 import { Button } from '@/components/ui/button'
-import { Composer } from '@/components/Composer/Composer'
+import { InputDock } from '@/components/InputDock/InputDock'
 import { ModelPicker } from '@/components/ModelPicker/ModelPicker'
 import { PermissionModePicker } from '@/components/PermissionModePicker/PermissionModePicker'
 import { TerminalPane } from '@/components/TerminalPane/TerminalPane'
 import { TranscriptTree } from '@/components/TranscriptTree/TranscriptTree'
+import { dropDraft } from '@/lib/drafts'
 import { formatElapsed, formatScreenInterval } from '@/lib/time'
 import { isEnded, isHookSilent, statusLabel, statusTone } from '@/lib/protocol'
 import { ProjectFiles } from '@/components/ProjectFiles/ProjectFiles'
@@ -32,6 +33,7 @@ import { useFilesPanel } from '@/lib/filesPanel'
 import { LOCAL_HOST } from '@/lib/routes'
 import type { CardId } from '@/lib/protocol'
 import { useNow } from '@/lib/sessions'
+import { useAuthStore } from '@/stores/auth'
 import { useSessionCard } from '@/stores/sessions'
 import { useSettingsStore } from '@/stores/settings'
 import { useWsStore } from '@/stores/ws'
@@ -47,6 +49,8 @@ interface Props {
 export function SessionView({ cardId, compact = false }: Props) {
   const kill = useWsStore((state) => state.kill)
   const archive = useWsStore((state) => state.archive)
+  // 外したカードの書きかけを忘れるのに要る。**下書きの鍵はアカウントごと**
+  const account = useAuthStore((state) => state.auth.account)
   // 中身は自分で購読する。横並びのとき、隣のセッションの状態変化で作り直されないため
   const session = useSessionCard(cardId)
   const now = useNow()
@@ -142,7 +146,12 @@ export function SessionView({ cardId, compact = false }: Props) {
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => archive(session.card_id)}
+            onClick={() => {
+              // **カードを外したら書きかけも忘れる。** 残すと、二度と開かない相手の
+              // 下書きが積み上がる（十字ボタン設計§11）
+              dropDraft(session.card_id, account)
+              archive(session.card_id)
+            }}
           >
             削除
           </Button>
@@ -180,7 +189,13 @@ export function SessionView({ cardId, compact = false }: Props) {
           </aside>
         )}
 
-        <div className="flex min-h-0 flex-1 flex-col gap-2">
+        {/*
+          **重ねる基準はここ**（十字ボタン設計§10）。横向きのとき、十字ボタンは
+          `InputDock` の中に居ながら端末の脇へ重なる。`isolate` を先に置いてあるのは、
+          `motion` が `initial` を当てた瞬間に重なりの文脈を作るためで、恒久的な文脈を
+          先に持たせておけば喧嘩しない（見た目は何も変わらない）
+        */}
+        <div className="relative isolate flex min-h-0 flex-1 flex-col gap-2">
         <div className="flex items-center gap-2">
           <div
             role="tablist"
@@ -214,7 +229,11 @@ export function SessionView({ cardId, compact = false }: Props) {
           <TerminalPane key={session.card_id} cardId={session.card_id} />
         </div>
 
-        <Composer cardId={session.card_id} status={session.status} />
+        <InputDock
+          cardId={session.card_id}
+          status={session.status}
+          compact={compact}
+        />
         </div>
       </div>
     </section>
