@@ -37,10 +37,10 @@
 <p class="lead">
   AgentDashboard に関係して、この機械や外で<strong>起動しっぱなしになっているもの</strong>の一覧。
   「どの URL がどれを指しているか」を取り違えると原因追跡が丸ごと空振りするので、そこを中心に書いてある。
-  <br>最終更新：2026-08-14 17時台（<strong>動いているのは実機・AWS・セッションホスト<span class="mark">▽</span>の3つ</strong>。trial だけ止まっている）
+  <br>最終更新：2026-08-14 22時台（<strong>動いているのは実機・AWS・セッションホスト<span class="mark">▽</span>の3つ</strong>。trial だけ止まっている）
   <br><strong>手元の2つ（実機・セッションホスト<span class="mark">▽</span>）は自動では起きない。</strong>常駐の仕組みに載せていないので、<strong>WSL を起こし直すと落ちたままになる</strong>。ブラウザに「繋がっている PC がありません」と出たら、まずここが動いているかを見る——AWS 側は生きたままなので、画面だけを見ても区別が付かない。
-  <br><strong>いまは版が3つにずれている。</strong> <strong>08-14 16時台にリリース <code>v0.1.20</code> を出し、AWS を入れ替えた</strong>（<strong>打ちかけの文を選択待ちと読み違える不具合</strong>を直した件——入力欄に <code>1. …</code> と打つと、以後 Enter が改行ではなく送信になっていた）。<strong>実機はディスク上だけ <code>0.1.20</code> になっており、走っているのは <code>0.1.16</code> のまま</strong>。落とすと抱えている claude が道連れになるので、<strong>起こし直す時機は人が決める</strong>（CLAUDE.md の段4）。セッションホスト<span class="mark">▽</span>は <code>0.1.19</code> のまま。
-  <br><strong>0.1.20 は、AWS だけで効く。</strong> 直したのは<strong>ブラウザへ配る画面（web）だけ</strong>で、判定はブラウザの中にある。画面はサーバの実行ファイルへ焼き込まれているので、<strong>AWS を入れ替えればスマホへ届く</strong>——セッションホスト<span class="mark">▽</span>を起こし直す必要は無い（<code>0.1.19</code> のまま <code>0.1.20</code> のサーバへ繋がり続けることを実測した）。<br><strong>ただし開きっぱなしのタブは古い画面のまま。</strong>版の数字は毎回サーバに聞いた答えなので<strong>古いタブでも 0.1.20 と出る</strong>。直っているかは<strong>タブを読み込み直してから</strong>確かめること。
+  <br><strong>いまは版が3つにずれている。</strong> <strong>08-14 22時台にリリース <code>v0.1.21</code> を出し、AWS を入れ替えた</strong>（<strong>スマホで方向キーが要る場面に十字ボタンを出す</strong>件——Esc ボタン・十字ボタン・入力欄の畳みと下書きが入った）。<strong>実機はディスク上だけ <code>0.1.21</code> になっており、走っているのは <code>0.1.16</code> のまま</strong>。落とすと抱えている claude が道連れになるので、<strong>起こし直す時機は人が決める</strong>（CLAUDE.md の段4）。セッションホスト<span class="mark">▽</span>は <code>0.1.19</code> のまま。
+  <br><strong>0.1.21 も、AWS だけで効く。</strong> 触ったのは<strong>ブラウザへ配る画面（web）だけ</strong>で、判定も十字ボタンもブラウザの中にある。画面はサーバの実行ファイルへ焼き込まれているので、<strong>AWS を入れ替えればスマホへ届く</strong>——セッションホスト<span class="mark">▽</span>を起こし直す必要は無い。<strong>届いたことは、配っている JavaScript の中身で確かめてある</strong>（十字の <code>aria-label="方向キー"</code> と ▲◀▶▼⏎ が在り、手元のビルドとハッシュが一致。古い判定の目印は0件）。<br><strong>ただし開きっぱなしのタブは古い画面のまま。</strong>版の数字は毎回サーバに聞いた答えなので<strong>古いタブでも 0.1.21 と出る</strong>。直っているかは<strong>タブを読み込み直してから</strong>確かめること。
 </p>
 
 <h2>先に用語</h2>
@@ -96,7 +96,7 @@
   <rect x="560" y="62" width="280" height="150" rx="10" fill="#221b0f" stroke="#5a4520"/>
   <text x="578" y="90" fill="#e0af68" font-size="14" font-weight="600">AWS EC2（外）</text>
   <text x="578" y="112" fill="#e6e9ef" font-size="12">i-0bf66240fec98392a / t3.small</text>
-  <text x="578" y="132" fill="#e6e9ef" font-size="12">docker compose ／ 版 0.1.20</text>
+  <text x="578" y="132" fill="#e6e9ef" font-size="12">docker compose ／ 版 0.1.21</text>
   <text x="578" y="152" fill="#9aa4b2" font-size="11">箱の中なので版の切替は出ない</text>
   <text x="578" y="172" fill="#9aa4b2" font-size="11">cloudflared は systemd で常駐</text>
   <text x="578" y="192" fill="#f7768e" font-size="11">課金が続いている</text>
@@ -123,7 +123,7 @@
   一方 AWS は<strong>配った箱</strong>なので、<strong>リリースを出すまで何も変わらない</strong>。
   画面に出る版だけを見て「同じものが動いている」と判断しないこと。<br><br>
 
-  <strong>いまはずれている。</strong> AWS が <code>0.1.20</code>、セッションホスト<span class="mark">▽</span>が <code>0.1.19</code>、<strong>実機だけが走行 <code>0.1.16</code></strong>（ディスク上は <code>0.1.20</code>）。<br><br>  <strong>ずらしたままでよいかは、変更の中身で決まる。</strong> <strong>0.1.20 はブラウザへ配る画面だけの修正なので、AWS を入れ替えた時点で効いている</strong>。一方<strong>PC ⇄ サーバの線や、PC が名乗る能力を変えた版では、揃えるまで「この PC は版が古い」が出続ける</strong>（過去に踏んだ）。<strong>入れ替えが要るかは版の数字ではなく、どの crate を触ったかで決まる。</strong><br><br>
+  <strong>いまはずれている。</strong> AWS が <code>0.1.21</code>、セッションホスト<span class="mark">▽</span>が <code>0.1.19</code>、<strong>実機だけが走行 <code>0.1.16</code></strong>（ディスク上は <code>0.1.21</code>）。<br><br>  <strong>ずらしたままでよいかは、変更の中身で決まる。</strong> <strong>0.1.20 と 0.1.21 はブラウザへ配る画面だけの修正なので、AWS を入れ替えた時点で効いている</strong>。一方<strong>PC ⇄ サーバの線や、PC が名乗る能力を変えた版では、揃えるまで「この PC は版が古い」が出続ける</strong>（過去に踏んだ）。<strong>入れ替えが要るかは版の数字ではなく、どの crate を触ったかで決まる。</strong><br><br>
 
   同じことは以前も起きている（08-09 に <code>0.1.11</code> で揃えるまで、実機だけにログ整備が
   入っていた）。<strong>版番号で揃っているかを判断できない</strong>のは、この構成の性質である。<br><br>
@@ -160,7 +160,7 @@ agentdashboard-agent logs --since 24h --state-dir ~/agentdashboard-agent/state</
   <tr>
     <td>実機</td>
     <td><code>127.0.0.1:8787</code></td>
-    <td><span class="tag t-old">走行 0.1.16</span><br><small><strong>ディスク上は 0.1.20</strong>（08-14 17時台に <code>git pull</code> → <code>make build</code> 済み。<strong>このとき生きたカードは0枚だった</strong>。<strong>起こし直していないので走っているのは 0.1.16</strong>——上げるには <code>agentdashboard version restart</code> ＋ 起こし直しが要る。段4 なので人が決める）。<br>ソースビルド<span class="mark">▽</span>（<strong>08-13 18時台に起こし直し</strong>——`make build` してから、生きたカードが0枚であることを数えて落とした。リリース <code>v0.1.16</code> と同じ中身）</small></td>
+    <td><span class="tag t-old">走行 0.1.16</span><br><small><strong>ディスク上は 0.1.21</strong>（08-14 22時台に <code>git pull</code> → <code>make build</code> 済み。<strong>このとき生きたカードは0枚だった</strong>。<strong>起こし直していないので走っているのは 0.1.16</strong>——上げるには <code>agentdashboard version restart</code> ＋ 起こし直しが要る。段4 なので人が決める）。<br>ソースビルド<span class="mark">▽</span>（<strong>08-13 18時台に起こし直し</strong>——`make build` してから、生きたカードが0枚であることを数えて落とした。リリース <code>v0.1.16</code> と同じ中身）</small></td>
     <td>ローカルモード<span class="mark">▽</span>。<code>~/AgentDashboard</code> で <code>make build</code> したものを引数なしで起動。端末の出力は <code>~/agentdashboard-run.log</code>、構造化ログは <code>~/.local/state/agentdashboard-run/logs/</code>。<br><strong>読むときは <code>--state-dir</code> が要る。</strong> 置き場所を設定で移してあるが、読む口は設定を読まない（設計§11-2 の非対称）——<code>agentdashboard logs --since 1h --state-dir ~/.local/state/agentdashboard-run</code><br><strong>起こすときは <code>setsid</code> で切り離す。</strong> ツール呼び出しの子として起こすと、呼び出しの終了で巻き添えに死ぬ（08-10 に一度この形で起こしてしまい、起こし直した）。<code>cd ~/AgentDashboard &amp;&amp; setsid nohup ./server/target/release/agentdashboard &gt;&gt; ~/agentdashboard-run.log 2&gt;&amp;1 &lt; /dev/null &amp;</code></td>
   </tr>
   <tr>
@@ -172,7 +172,7 @@ agentdashboard-agent logs --since 24h --state-dir ~/agentdashboard-agent/state</
   <tr>
     <td>セッションホスト<span class="mark">▽</span></td>
     <td>— （PC 名 <code>OMEN</code>）</td>
-    <td><span class="tag t-ok">0.1.19</span><br><small>08-14 03時台に <code>0.1.19</code> で起こし直したまま。<strong>0.1.20 では入れ替えていない</strong>——あちらはブラウザへ配る画面だけの修正なので、ここは古いままで繋がり続ける（実測）。<br><strong>落とすと抱えている claude は道連れになる。</strong>「押してよいか」は<strong>作業が残っているかで決まる</strong>——版の新しさではない。落とす前に <code>ps -eo pid,ppid,args --forest</code> で子を数え、<strong>0本でなければ止まる</strong>こと。<br><strong>起こし直しは切り離したスクリプトに任せる</strong>（<code>/tmp/agentdashboard-agent-restart.sh</code>。記録は <code>~/agentdashboard-agent/restart.log</code>）。落とす相手が自分の親なので、ツール呼び出しの中で <code>kill</code> すると起こし直す行まで辿り着けない。<strong>自分がその子であることがある</strong>——そのときは落とさずに利用者へ渡す</small></td>
+    <td><span class="tag t-ok">0.1.19</span><br><small>08-14 03時台に <code>0.1.19</code> で起こし直したまま。<strong>0.1.20 でも 0.1.21 でも入れ替えていない</strong>——どちらもブラウザへ配る画面だけの修正なので、ここは古いままで繋がり続ける（実測）。<br><strong>落とすと抱えている claude は道連れになる。</strong>「押してよいか」は<strong>作業が残っているかで決まる</strong>——版の新しさではない。落とす前に <code>ps -eo pid,ppid,args --forest</code> で子を数え、<strong>0本でなければ止まる</strong>こと。<br><strong>起こし直しは切り離したスクリプトに任せる</strong>（<code>/tmp/agentdashboard-agent-restart.sh</code>。記録は <code>~/agentdashboard-agent/restart.log</code>）。落とす相手が自分の親なので、ツール呼び出しの中で <code>kill</code> すると起こし直す行まで辿り着けない。<strong>自分がその子であることがある</strong>——そのときは落とさずに利用者へ渡す</small></td>
     <td><strong>AWS へ繋いでいる</strong>（<code>dash.underschaft.com</code>。この PC の名前は <code>OMEN</code>）。設定は <code>~/agentdashboard-agent/agent.toml</code>、ログは同じ場所の <code>run.log</code>。<br><strong>これが止まっていると、ブラウザに「指定された PC が繋がっていません」が出る</strong>——カードは PC に紐づくので、繋がっていないと引けない。ブラウザとサーバは繋がったままなので<strong>上の帯だけが赤くなる</strong>。
         <strong>ここを起こし直すと、抱えている claude が道連れになる。</strong>落とす前に <code>ps -eo pid,ppid,args --forest</code> で子を数えること——08-10 の入れ替えでは<strong>生きた claude が1本ぶら下がっていたので入れ替えを見送った</strong>。版を上げたら入れ替えないと、サーバだけ新しくなって<strong>フォルダを覗く口が「版が古い」で断られ続ける</strong>（実際に踏んだ）。<code>agent_id</code> はペアリングトークンから決まるので、<strong>起こし直しても同じ PC のまま</strong>——枠は孤児にならない。
         <strong>パーサだけなら落としてよい。</strong>子の <code>transcript-parser</code> を PID 直指定で <code>kill</code> すると、セッションホストが立て直して監視も保存済みの位置から張り直す（<strong>claude は道連れにならない</strong>）。本体が古い版のあいだにパーサが肥大したら、これで嵩が戻るうえ<strong>ディスク上の新しいパーサに入れ替わる</strong>。
@@ -182,7 +182,7 @@ agentdashboard-agent logs --since 24h --state-dir ~/agentdashboard-agent/state</
   <tr>
     <td>AWS EC2</td>
     <td><code>dash.underschaft.com</code></td>
-    <td><span class="tag t-ok">0.1.20</span><br><small>配った箱（GHCR）。<strong>08-14 16時台に <code>0.1.19</code> から入れ替え</strong>（migration の追加なし・控えは <code>~/compose.yml.bak.0.1.19</code>）。<strong>0.1.20 はここだけで効く</strong>——直したのはブラウザへ配る画面だけなので、セッションホスト<span class="mark">▽</span>は 0.1.19 のままでよい</small></td>
+    <td><span class="tag t-ok">0.1.21</span><br><small>配った箱（GHCR）。<strong>08-14 22時台に <code>0.1.20</code> から入れ替え</strong>（migration の追加なし・控えは <code>~/compose.yml.bak.0.1.20</code>）。<strong>0.1.21 はここだけで効く</strong>——触ったのはブラウザへ配る画面だけなので、セッションホスト<span class="mark">▽</span>は 0.1.19 のままでよい</small></td>
     <td><strong>docker compose</strong>（道②）。<code>~/compose.yml</code> の <code>image:</code> で版を決める。<strong>ログを読むには <code>--state-dir /var/lib/agentdashboard</code> が要る</strong>（読む口は設定を読まない）。外へは<strong>名前付きトンネル</strong>で出しており、<code>cloudflared</code> は <strong>systemd で常駐</strong>（<code>systemctl status cloudflared</code>）。terraform は <code>~/Dev/Test_AgentDashboard/</code>、SSH 鍵は同じ場所の <code>ssh_key.pem</code>、IP は <code>43.207.237.211</code></td>
   </tr>
 </table>
