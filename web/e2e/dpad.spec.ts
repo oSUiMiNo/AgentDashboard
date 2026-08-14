@@ -133,13 +133,24 @@ test('十字のキーは PtyInput を通り、入力欄の経路を通らない'
   expect(keyPayload(sent.keys[0])).toEqual([0x1b, 0x5b, 0x42])
 })
 
+/**
+ * ダイアログが閉じると十字は消え、入力欄が戻ること。
+ *
+ * **選び直してから確定する。** そちらが普段の使い方であり、しかも**壊れていた側**でも
+ * ある——擬似 claude がダイアログを描き直さずに書き足していた頃は、前の1枚が画面に
+ * 残って「閉じたのに選択待ちに見える」状態になっていた（判定は残骸を正しく読んでいた）。
+ * 確定だけの道は `中央で確定できる` が通っている。
+ */
 test('ダイアログが閉じると十字は消え、入力欄が戻る', async ({ page }) => {
   await watchSentFrames(page)
   await openDashboard(page)
   await openDialog(page)
 
+  await page.getByTestId('dpad-下').click()
+  await expectTerminalToContain(page, '❯ 2. No, go back')
+
   await page.getByTestId('dpad-決定').click()
-  await expectTerminalToContain(page, '[fake-claude] model-set: haiku')
+  await expectTerminalToContain(page, '[fake-claude] model-set: （取りやめ）')
 
   await expect(page.getByTestId('dpad')).toHaveCount(0)
   await expect(page.getByTestId('dpad-live')).toHaveText('')

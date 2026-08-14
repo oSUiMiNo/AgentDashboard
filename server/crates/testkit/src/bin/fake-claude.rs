@@ -269,13 +269,24 @@ fn main() {
                     let last = items.len() - 1;
                     // 端で止める（本物は巡回しない。行き過ぎても選択は動かない）
                     let down = matches!(key, Input::Down);
-                    choice = if down && choice < last {
+                    let moved = if down && choice < last {
                         choice + 1
                     } else if !down && choice > 0 {
                         choice - 1
                     } else {
                         choice
                     };
+                    // **描き直す前に、いま出ているものを消す。**
+                    //
+                    // 消さずに新しいのを書き足すと、押した回数だけダイアログが積み上がる。
+                    // **本物はその場で描き直す**ので、積み上がるのは擬似だけの姿になる。
+                    //
+                    // 実害が出た形（十字ボタンのイシュー フェーズ5）：エコーが `^[[B` という
+                    // 字として1行を占めるため、確定のときの `clear_dialog` が新しいほうしか
+                    // 消せず、**前のダイアログが画面に残る**。画面テキストから「いま選択待ちか」を
+                    // 導く側から見ると、閉じたのに選択待ちのままに見える
+                    clear_dialog(&mut out, &render_dialog(header, items, choice));
+                    choice = moved;
                     let _ = writeln!(out, "{}", render_dialog(header, items, choice));
                     let _ = out.flush();
                 }
@@ -424,7 +435,10 @@ fn main() {
 /// なるので、カーソルをダイアログの先頭へ戻して、そこから下だけを消す。
 fn clear_dialog(out: &mut impl Write, dialog: &str) {
     let lines = dialog.lines().count();
-    let _ = write!(out, "\x1b[{lines}A\x1b[J");
+    // **桁も戻す。** カーソルを上げるだけだと桁はそのまま残るので、行の途中から
+    // 消し始めて左側が生き残る。矢印のエコー（`^[[B`）で桁が進んでいる状態から
+    // 呼ばれるので、`\r` が無いと消し残す
+    let _ = write!(out, "\x1b[{lines}A\r\x1b[J");
     let _ = out.flush();
 }
 

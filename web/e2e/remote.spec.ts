@@ -299,7 +299,7 @@ test.describe('遡る中身が運ばれる', () => {
 test.describe('十字ボタン', () => {
   test.use({ hasTouch: true })
 
-  test('別の PC の画面でも、出て・動いて・キーが PtyInput を通る', async ({ page }) => {
+  test('別の PC の画面でも、出て・動いて・決まって・消える', async ({ page }) => {
     await watchSentFrames(page)
     await openDashboard(page)
     const tile = await spawnSession(page)
@@ -331,33 +331,10 @@ test.describe('十字ボタン', () => {
     // 決まる
     await page.getByTestId('dpad-決定').click()
     await expectTerminalToContain(page, '[fake-claude] model-set: （取りやめ）')
-  })
 
-  /**
-   * 決まって、消えるところまで。
-   *
-   * **矢印を押さずに確定する。** 擬似 claude はエコーを残す作りなので、矢印を送ると
-   * その符号が `^[[B` という**字**として画面へ出る（tty が制御文字をそう echo する）。
-   * すると1行ずれて `clear_dialog` が消し損ね、**前のダイアログが画面に残る**。
-   * 判定はその残骸を正しく「選択待ち」と読むので、十字は出たままになる。
-   *
-   * **製品の問題ではない**——本物の claude は echo を切って自分で描き直すので、この形に
-   * ならない。ローカル経路でも同じ残骸が出ることを実測して切り分けてある。
-   */
-  test('別の PC の画面でも、確定すると十字は消える', async ({ page }) => {
-    await openDashboard(page)
-    const tile = await spawnSession(page)
-    await openSession(page, tile)
-
-    await typeLine(page, 'こんにちは')
-    await expectTerminalToContain(page, '[fake-claude] received: こんにちは')
-    await typeLine(page, '/model haiku')
-    await expectTerminalToContain(page, 'Esc to cancel')
-    await expect(page.getByTestId('dpad')).toBeVisible()
-
-    await page.getByTestId('dpad-決定').click()
-    await expectTerminalToContain(page, '[fake-claude] model-set: haiku')
-
+    // 消える。**矢印を押したあとでも消えること**を見るのが要点——擬似 claude が
+    // ダイアログを描き直さずに書き足していた頃は、前の1枚が画面に残って
+    // 「閉じたのに選択待ちに見える」状態になっていた
     await expect(page.getByTestId('dpad')).toHaveCount(0)
     await expect(page.getByTestId('composer-input')).toHaveAttribute(
       'data-collapsed',
