@@ -4,6 +4,8 @@ import type { TerminalKey } from './keys'
 import {
   hasWatcher,
   HIDE_SETTLE_MS,
+  measure,
+  registerProbe,
   KEY_GAP_MS,
   registerTerminal,
   sendTerminalKey,
@@ -311,5 +313,54 @@ describe('解除', () => {
     sendTerminalKey(id, 'up')
     expect(first).toEqual([])
     expect(second).toEqual(['up'])
+  })
+})
+
+/**
+ * **見ている人が現れた瞬間に測る**（実機で2度踏んだ穴）。
+ *
+ * 判定はフレームが届いたときにしか走らないが、**選択待ちの画面は静止している**。
+ * タブを開き直すと「メニューは出ているのに一度も判定されない」が起きる。
+ */
+describe('測る契機', () => {
+  it('最初の1人が見に来たら、その場で測る', () => {
+    const id = card()
+    const release = registerProbe(id, () => true)
+    const { result } = renderHook(() => useSelecting(id))
+    // 測っていなければ、フレームが来るまで偽のまま
+    expect(result.current, '購読した瞬間に測ること').toBe(true)
+    release()
+  })
+
+  it('2人目では測り直さない', () => {
+    const id = card()
+    let 回数 = 0
+    const release = registerProbe(id, () => {
+      回数 += 1
+      return true
+    })
+    renderHook(() => useSelecting(id))
+    renderHook(() => useSelecting(id))
+    expect(回数, '測るのは最初の1人のときだけ').toBe(1)
+    release()
+  })
+
+  it('測る手が無ければ何も起きない', () => {
+    const id = card()
+    const { result } = renderHook(() => useSelecting(id))
+    expect(result.current).toBe(false)
+    expect(() => measure(id)).not.toThrow()
+  })
+
+  it('解除したら測らなくなる', () => {
+    const id = card()
+    let 回数 = 0
+    const release = registerProbe(id, () => {
+      回数 += 1
+      return true
+    })
+    release()
+    renderHook(() => useSelecting(id))
+    expect(回数).toBe(0)
   })
 })

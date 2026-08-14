@@ -22,6 +22,8 @@ import { looksSelecting, sequenceFor, terminalKeyOverride } from '@/lib/keys'
 import { visibleScreen } from '@/lib/screen'
 import {
   hasWatcher,
+  measure,
+  registerProbe,
   registerTerminal,
   setSelecting,
 } from '@/lib/terminalBridge'
@@ -227,11 +229,16 @@ export function TerminalPane({ cardId }: Props) {
     // 上り：フレームごとに判定して外へ出す。**見ている人が居るときだけ**画面を
     // 組み立てる——`keys.ts` の「打鍵ごとに全画面を組み立てない」という約束を、
     // フレームごとの経路にも通す。PC では購読者が0なので、ここは即座に戻る
+    // **測り方は1つにまとめる。** フレームで測るのも、見ている人が現れて測るのも、
+    // 大きさが変わって測るのも、同じ関数を通す
+    const 測る = () => looksSelecting(visibleScreen(term))
+    const unprobe = registerProbe(cardId, 測る)
+
     const parsed = term.onWriteParsed(() => {
       if (!hasWatcher(cardId)) {
         return
       }
-      setSelecting(cardId, looksSelecting(visibleScreen(term)))
+      setSelecting(cardId, 測る())
     })
 
     // 下り：頼まれた「意味」をバイト列へ直して流す。**`term` そのものは渡さない**
@@ -353,6 +360,11 @@ export function TerminalPane({ cardId }: Props) {
     })
     const resizeSubscription = term.onResize(({ cols, rows }) => {
       useWsStore.getState().resize(cardId, cols, rows)
+      // **大きさが変わったら測り直す。** 画面の中身は変わっているのに、こちらへ
+      // フレームが来るとは限らない（相手が描き直さない場合がある）
+      if (hasWatcher(cardId)) {
+        measure(cardId)
+      }
     })
 
     const observer = new ResizeObserver(() => {
@@ -385,6 +397,7 @@ export function TerminalPane({ cardId }: Props) {
       unregisterKeys()
       dataSubscription.dispose()
       resizeSubscription.dispose()
+      unprobe()
       unsubscribe()
       webgl?.dispose()
       term.dispose()

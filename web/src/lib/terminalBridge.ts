@@ -61,6 +61,23 @@ const watchers = new Map<CardId, Set<() => void>>()
 /** 端末の受け口。キーを**意味のまま**渡す。 */
 const terminals = new Map<CardId, (key: TerminalKey) => void>()
 
+/**
+ * いまの画面を測り直す手。**見ている人が現れた瞬間に呼ぶ。**
+ *
+ * # なぜ要るのか（**実機で2度踏んだ**）
+ *
+ * 判定は `onWriteParsed`（フレームが届いたとき）でしか走らない。ところが
+ * **選択待ちの画面は静止している**——`/rewind` のメニューは利用者が選ぶまで
+ * 1バイトも動かない。したがって
+ *
+ * - タブを開き直した直後は、**メニューが出ているのに一度も判定されない**（出ない）
+ * - 逆に、何かの拍子にフレームが流れ続けると判定も走り続ける（明滅する）
+ *
+ * **「出てこない」と「明滅する」は、同じ穴の裏表だった。** フレーム任せにせず、
+ * **測る契機を自分で持つ**必要がある。
+ */
+const probes = new Map<CardId, () => boolean>()
+
 interface Queue {
   keys: TerminalKey[]
   timer: ReturnType<typeof setTimeout> | null
@@ -160,6 +177,30 @@ function applySelecting(cardId: CardId, value: boolean): void {
   }
 }
 
+/**
+ * いまの画面を測り直して置く。**測る手が無ければ何もしない。**
+ *
+ * 呼ぶ契機は2つ——**見ている人が現れたとき**と、**端末の大きさが変わったとき**。
+ * どちらも「画面は変わったのにフレームは来ない」が起こりうる継ぎ目である。
+ */
+export function measure(cardId: CardId): void {
+  const probe = probes.get(cardId)
+  if (!probe) {
+    return
+  }
+  setSelecting(cardId, probe())
+}
+
+/** 画面を測る手を登録する。返るのは解除。 */
+export function registerProbe(cardId: CardId, probe: () => boolean): () => void {
+  probes.set(cardId, probe)
+  return () => {
+    if (probes.get(cardId) === probe) {
+      probes.delete(cardId)
+    }
+  }
+}
+
 /** そのカードを見ている人が居るか。**端末はこれを見てから画面を組み立てる。** */
 export function hasWatcher(cardId: CardId): boolean {
   return (watchers.get(cardId)?.size ?? 0) > 0
@@ -172,7 +213,13 @@ function subscribeSelecting(cardId: CardId, listener: () => void): () => void {
     watchers.set(cardId, set)
   }
   const found = set
+  const 最初の1人 = found.size === 0
   found.add(listener)
+  if (最初の1人) {
+    // **見ている人が現れた瞬間に測る。** ここが無いと、静止した画面では
+    // 次のフレームが来るまで（＝利用者が何か押すまで）永久に判定されない
+    measure(cardId)
+  }
   return () => {
     found.delete(listener)
     if (found.size === 0) {
