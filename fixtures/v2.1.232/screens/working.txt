@@ -1,0 +1,22 @@
+╭─── Claude Code v2.1.232 ─────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                    │ Tips for getting started                                        │
+│                 Welcome back dashboard-user!                 │ Run /init to create a CLAUDE.md file with instructions for Cla… │
+│                                                    │ ─────────────────────────────────────────────────────────────── │
+│                       ▐▛███▜▌                      │ What's new                                                      │
+│                      ▝▜█████▛▘                     │ Subagent forking is now on by default: a `subagent_type: "fork… │
+│                        ▘▘ ▝▝                       │ Type `@` in the prompt to mention another Claude session by na… │
+│ Haiku 4.5 · Claude Max · redacted@example.invalid's │ `SendMessage` now delivers to a bare name that exactly matches… │
+│ Organization                                       │ /release-notes for more                                         │
+│    /…/working-0edc52b5bd42477998deab3b252324b1     │                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+❯ 1. 手順を書いて。2. そのあと1について詳しく説明して。                                                                 
+
+· Unravelling… 
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Haiku 4.5                                                                                                        /rc
+  ⏸ manual mode on · ← for agents

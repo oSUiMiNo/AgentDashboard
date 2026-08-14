@@ -349,3 +349,232 @@ async fn 選択待ちの画面と_そうでない画面を実物から採る() {
     println!("\n採取先: {}", out.display());
     println!("**匿名化と残存検査を通してから fixtures へ置くこと**");
 }
+
+/// 判定を直すために足りない画面を採る（ローカルイシュー「スマホで方向キーが要る場面に
+/// 十字ボタンを出す」テスト計画フェーズ1）。
+///
+/// 既存の5枚は「選択待ちか、そうでないか」を分けるための材料だった。こちらは
+/// **判定を直したときに、直したところが効いていることを確かめるための材料**である。
+///
+/// | ファイル | 何の画面か | 何の材料になるか |
+/// |---|---|---|
+/// | `multi-select.txt` | 未承認の MCP サーバの一括承認 | **既存の目印が2つとも外れる**（`Esc to reject all`・番号なし） |
+/// | `working.txt` | 作業中 | **陰性対照。** `esc to interrupt` を選択待ちと読んではいけない |
+/// | `numbered-echo.txt` | 番号で始まる発言のエコー | **字下げ0 の `❯ 1. …`** ——出荷済みの誤爆の実物 |
+///
+/// 別の関数にしてあるのは、1枚目が**別の作業ディレクトリ**（`.mcp.json` を置いたもの）を
+/// 要求するためで、既存の流れへ差し込むと採れているものまで巻き添えにする。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "本物の claude を起動し、アカウントのクォータを消費する（make capture-screens）"]
+async fn 判定を直すために足りない画面を実物から採る() {
+    let out = capture_dir();
+
+    // --- 1枚目：未承認の MCP サーバの一括承認 ---------------------------------
+    //
+    // **サーバが実在しなくてよい。** 承認を聞かれるのは起動するより前なので、
+    // 名前だけ書いてあれば画面は出る
+    //
+    // **既に採れているものは採り直さない。** 3枚のうち1枚でも失敗すると全部やり直しに
+    // なるが、採り直す理由が無いものに本物の claude を起こすのは、そのぶんクォータを
+    // 捨てるだけである
+    if out.join("multi-select.txt").exists() {
+        eprintln!("multi-select.txt は既にあるので採り直しません");
+    } else {
+        let dir = WorkDir::new("multi-select");
+        std::fs::write(
+            dir.path().join(".mcp.json"),
+            r#"{"mcpServers":{"probe-alpha":{"command":"true"},"probe-beta":{"command":"true"}}}"#,
+        )
+        .expect(".mcp.json を書けること");
+
+        let program = claude_wrapper(
+            &dir,
+            &["--model", "haiku", "--setting-sources", "project,local"],
+        );
+        let server = common::TestServer::start_with_program(
+            Config::default(),
+            program.to_string_lossy().into_owned(),
+        )
+        .await;
+        let target = client::Target::from_url(&format!("http://{}", server.addr))
+            .expect("接続先を読めること");
+        let spawned = client::spawn(&target, &dir.as_str(), None, None)
+            .await
+            .expect("CLI から起こせること");
+        let prefix = spawned.human[..8].to_string();
+
+        // 信頼の確認が先に出ることがある。出たら既定へ戻してから通す
+        let deadline = Instant::now() + CLI_TIMEOUT;
+        let mut captured = false;
+        loop {
+            let text = cli_screen_text(&target, &prefix).await;
+            let lower = text.to_lowercase();
+            if lower.contains("reject all") || lower.contains("space to select") {
+                save(&out, "multi-select", &text);
+                captured = true;
+                break;
+            }
+            if TRUST_MARKERS.iter().any(|marker| lower.contains(marker)) {
+                client::send_keys(
+                    &target,
+                    &prefix,
+                    &["down".to_string(), "up".to_string(), "enter".to_string()],
+                )
+                .await
+                .expect("信頼の確認に答えられること");
+            }
+            if Instant::now() >= deadline {
+                eprintln!("警告: 一括承認の画面が出ませんでした。この1枚は採れていません");
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(700)).await;
+        }
+        if captured {
+            // **確定させない。** 承認すると実在しないサーバを起こしにいく
+            client::send_keys(&target, &prefix, &["esc".to_string()])
+                .await
+                .expect("画面を閉じられること");
+        }
+        let _ = client::kill(&target, &prefix).await;
+        let _ = client::archive(&target, &prefix).await;
+    }
+
+    // --- 2枚目と3枚目：作業中と、番号で始まる発言のエコー ----------------------
+    if out.join("working.txt").exists() && out.join("numbered-echo.txt").exists() {
+        eprintln!("working.txt と numbered-echo.txt は既にあるので採り直しません");
+    } else {
+        let dir = WorkDir::new("working");
+        let program = claude_wrapper(
+            &dir,
+            &["--model", "haiku", "--setting-sources", "project,local"],
+        );
+        let server = common::TestServer::start_with_program(
+            Config::default(),
+            program.to_string_lossy().into_owned(),
+        )
+        .await;
+        let target = client::Target::from_url(&format!("http://{}", server.addr))
+            .expect("接続先を読めること");
+        let spawned = client::spawn(&target, &dir.as_str(), None, None)
+            .await
+            .expect("CLI から起こせること");
+        let card = spawned.human.clone();
+        let prefix = card[..8].to_string();
+
+        let deadline = Instant::now() + CLI_TIMEOUT;
+        loop {
+            let text = cli_screen_text(&target, &prefix).await;
+            let lower = text.to_lowercase();
+            if TRUST_MARKERS.iter().any(|marker| lower.contains(marker)) {
+                client::send_keys(
+                    &target,
+                    &prefix,
+                    &["down".to_string(), "up".to_string(), "enter".to_string()],
+                )
+                .await
+                .expect("信頼の確認に答えられること");
+            }
+            if lower.contains("welcome back") || text.contains("❯") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "起動後の画面が読めません: {text}"
+            );
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        wait_via_cli(&target, &card, "入力待ち", |meta| {
+            meta.status == SessionStatus::WaitingInput
+        })
+        .await;
+        // **状態が入力待ちになっただけでは送ってはいけない。** `SessionStart` は TUI が
+        // 貼り付けを受け付けられるようになる**前に**飛ぶので、描画中に流し込むと括弧付き
+        // 貼り付けの合図がただの文字として解釈され、**指示が入力欄に残ったまま静かに
+        // 終わる**（初期実装§17）。実際にこれを踏んで1回ぶん採り損ねた
+        let _ = wait_screen_settled(&target, &prefix).await;
+
+        // **番号で始まる指示にする。** これがそのままエコーとして画面に残り、3枚目になる。
+        // 送る側は待たない——待つと作業中の画面を通り過ぎる
+        client::send_input(
+            &target,
+            &prefix,
+            "1. 手順を書いて。2. そのあと1について詳しく説明して。",
+            false,
+            5,
+        )
+        .await
+        .expect("指示を送れること");
+
+        wait_via_cli(&target, &card, "作業中", |meta| {
+            meta.status == SessionStatus::Working
+        })
+        .await;
+        let working = cli_screen_text(&target, &prefix).await;
+        save(&out, "working", &working);
+
+        wait_via_cli(&target, &card, "入力待ちへ戻る", |meta| {
+            meta.status == SessionStatus::WaitingInput
+        })
+        .await;
+        let echo = wait_screen_settled(&target, &prefix).await;
+        save(&out, "numbered-echo", &echo);
+
+        let _ = client::kill(&target, &prefix).await;
+        let _ = client::archive(&target, &prefix).await;
+    }
+
+    // --- 4枚目：入力欄に番号つきの文が残っている画面 ---------------------------
+    //
+    // **これが出荷済みの誤爆そのもの。** `❯ 1. …` が**画面のいちばん下**に、しかも
+    // **字下げ0**で出る。3枚目（`numbered-echo`）はエコーが末尾から19行目に来るので
+    // **位置の窓**で弾かれるが、こちらは窓の中に入るので**字下げの規則でしか弾けない**。
+    //
+    // 作り方は初期実装§17 の裏返しを使う。**画面が落ち着く前に流し込むと、括弧付き
+    // 貼り付けの合図がただの文字として解釈され、本文が入力欄に残る**。2枚目を採るときに
+    // これを踏んで1回ぶん採り損ねたので、今度は意図して踏む。
+    {
+        let dir = WorkDir::new("pending-input");
+        let program = claude_wrapper(
+            &dir,
+            &["--model", "haiku", "--setting-sources", "project,local"],
+        );
+        let server = common::TestServer::start_with_program(
+            Config::default(),
+            program.to_string_lossy().into_owned(),
+        )
+        .await;
+        let target = client::Target::from_url(&format!("http://{}", server.addr))
+            .expect("接続先を読めること");
+        let spawned = client::spawn(&target, &dir.as_str(), None, None)
+            .await
+            .expect("CLI から起こせること");
+        let card = spawned.human.clone();
+        let prefix = card[..8].to_string();
+
+        wait_via_cli(&target, &card, "入力待ち", |meta| {
+            meta.status == SessionStatus::WaitingInput
+        })
+        .await;
+        // **落ち着くのを待たずに送る。** ここだけは待ってはいけない
+        client::send_input(&target, &prefix, "1. 手順を書いて", false, 5)
+            .await
+            .expect("指示を送れること");
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        let text = cli_screen_text(&target, &prefix).await;
+        // 確定してしまった回は採らない。**採れなかったことを黙らない**
+        if text.contains("❯ 1. 手順を書いて") {
+            save(&out, "pending-input", &text);
+        } else {
+            eprintln!(
+                "警告: 入力欄に残らず確定されたようです。この1枚は採れていません（採り直すこと）"
+            );
+        }
+
+        let _ = client::kill(&target, &prefix).await;
+        let _ = client::archive(&target, &prefix).await;
+    }
+
+    println!("\n採取先: {}", out.display());
+    println!("**匿名化と残存検査を通してから fixtures へ置くこと**");
+}
