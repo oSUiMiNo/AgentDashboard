@@ -240,6 +240,38 @@ test('ダイアログが消えれば Enter は改行へ戻る', async ({ page })
 })
 
 /**
+ * 十字ボタンの逆側（ローカルイシュー「スマホで方向キーが要る場面に十字ボタンを出す」
+ * テスト計画フェーズ5）。**出ることは `dpad.spec.ts` が見る。**
+ *
+ * ここに置いてあるのは、**同じファイルの中では入力方式を切り替えられない**ため。
+ * `test.use({ hasTouch: true })` はファイル（か describe）の単位でしか効かないので、
+ * 「粗いポインタでは出る」と「そうでなければ出ない」は別の土台で見るしかない。
+ *
+ * 出ないことには2つの意味がある。**画面に出ない**ことと、**端末が画面を組み立てない**
+ * こと——後者が効かないと、PC でもフレームごとに解析が走る（設計§4）。
+ */
+test('粗いポインタでなければ、選択ダイアログでも十字は出ない', async ({ page }) => {
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  await openSession(page, tile)
+
+  await typeLine(page, 'こんにちは')
+  await expectTerminalToContain(page, '[fake-claude] received: こんにちは')
+  await typeLine(page, '/model haiku')
+  await expectTerminalToContain(page, 'Esc to cancel')
+
+  // ダイアログは出ている。**それでも十字は出ない**
+  await expect(page.getByTestId('dpad')).toHaveCount(0)
+  await expect(page.getByTestId('composer-input')).toHaveAttribute(
+    'data-collapsed',
+    'false',
+  )
+  // Esc ボタンは入力方式によらず常に出る（設計§6）。構造化ビューを見ている間は
+  // 端末にフォーカスが無く、**PC でも物理の Esc が届かない**ため
+  await expect(page.getByTestId('esc-key')).toBeVisible()
+})
+
+/**
  * タッチで遡る（テスト計画フェーズ4「ローカル経路」）。
  *
  * ここで xterm に入るのは**擬似ターミナルの生バイトそのまま**。サーバが作った画面が

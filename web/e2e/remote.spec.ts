@@ -3,13 +3,16 @@ import type { Page } from '@playwright/test'
 import {
   archiveAll,
   expectTerminalToContain,
+  keyPayload,
   openDashboard,
   openSession,
   scrollTerminalToBottom,
   spawnSession,
   swipeTerminal,
+  takeSentFrames,
   terminalScroll,
   typeLine,
+  watchSentFrames,
 } from './helpers'
 
 /**
@@ -277,5 +280,88 @@ test.describe('遡る中身が運ばれる', () => {
     // **画面が壊れていないこと。** 前置した改行のぶん画面がずれると、
     // 遡りは増えても読めるものが出なくなる
     await expectTerminalToContain(page, '[fake-claude] flood-end')
+  })
+})
+
+/**
+ * 十字ボタン（ローカルイシュー「スマホで方向キーが要る場面に十字ボタンを出す」
+ * テスト計画フェーズ5「リモート経路」）。
+ *
+ * # なぜローカルと別に見るのか
+ *
+ * **スマホが通るのはこちらだけ**である。しかも判定の材料が違う——ローカルの xterm へ
+ * 入るのは擬似ターミナルの生バイトだが、こちらへ入るのは**セッションホストの端末
+ * エミュレータが作った画面**である。同じ「選択待ち」を、別の字面から導くことになる。
+ *
+ * キーの向きも1段伸びる。ブラウザ → サーバ → セッションホスト → PTY と渡るので、
+ * **`PtyInput` を通っていること**をここで確かめておく価値がある。
+ */
+test.describe('十字ボタン', () => {
+  test.use({ hasTouch: true })
+
+  test('別の PC の画面でも、出て・動いて・キーが PtyInput を通る', async ({ page }) => {
+    await watchSentFrames(page)
+    await openDashboard(page)
+    const tile = await spawnSession(page)
+    await openSession(page, tile)
+
+    await typeLine(page, 'こんにちは')
+    await expectTerminalToContain(page, '[fake-claude] received: こんにちは')
+    await typeLine(page, '/model haiku')
+    await expectTerminalToContain(page, 'Esc to cancel')
+
+    // 出る
+    await expect(page.getByTestId('dpad')).toBeVisible()
+    await expect(page.getByTestId('composer-input')).toHaveAttribute(
+      'data-collapsed',
+      'true',
+    )
+
+    // 動く（既定の「Yes, switch」から1つ下げる）
+    await takeSentFrames(page)
+    await page.getByTestId('dpad-下').click()
+    await expectTerminalToContain(page, '❯ 2. No, go back')
+
+    // **キーは `PtyInput` を通り、入力欄の経路を通らない。** あちらは本文から ESC を
+    // 落とすので、通していたら矢印は黙って消える（設計§14）
+    const sent = await takeSentFrames(page)
+    expect(sent.sendInput, '入力欄の経路は1度も通らないこと').toBe(0)
+    expect(keyPayload(sent.keys[0]), '下矢印の符号そのもの').toEqual([0x1b, 0x5b, 0x42])
+
+    // 決まる
+    await page.getByTestId('dpad-決定').click()
+    await expectTerminalToContain(page, '[fake-claude] model-set: （取りやめ）')
+  })
+
+  /**
+   * 決まって、消えるところまで。
+   *
+   * **矢印を押さずに確定する。** 擬似 claude はエコーを残す作りなので、矢印を送ると
+   * その符号が `^[[B` という**字**として画面へ出る（tty が制御文字をそう echo する）。
+   * すると1行ずれて `clear_dialog` が消し損ね、**前のダイアログが画面に残る**。
+   * 判定はその残骸を正しく「選択待ち」と読むので、十字は出たままになる。
+   *
+   * **製品の問題ではない**——本物の claude は echo を切って自分で描き直すので、この形に
+   * ならない。ローカル経路でも同じ残骸が出ることを実測して切り分けてある。
+   */
+  test('別の PC の画面でも、確定すると十字は消える', async ({ page }) => {
+    await openDashboard(page)
+    const tile = await spawnSession(page)
+    await openSession(page, tile)
+
+    await typeLine(page, 'こんにちは')
+    await expectTerminalToContain(page, '[fake-claude] received: こんにちは')
+    await typeLine(page, '/model haiku')
+    await expectTerminalToContain(page, 'Esc to cancel')
+    await expect(page.getByTestId('dpad')).toBeVisible()
+
+    await page.getByTestId('dpad-決定').click()
+    await expectTerminalToContain(page, '[fake-claude] model-set: haiku')
+
+    await expect(page.getByTestId('dpad')).toHaveCount(0)
+    await expect(page.getByTestId('composer-input')).toHaveAttribute(
+      'data-collapsed',
+      'false',
+    )
   })
 })
