@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { TerminalKey } from './keys'
 import {
   hasWatcher,
+  HIDE_SETTLE_MS,
   KEY_GAP_MS,
   registerTerminal,
   sendTerminalKey,
@@ -46,14 +47,91 @@ describe('上り（いま選択待ちか）', () => {
     expect(result.current).toBe(true)
   })
 
-  it('値が変われば伝わる', () => {
+  it('出すのは即座に伝わる', () => {
     const id = card()
     const { result } = renderHook(() => useSelecting(id))
     expect(result.current).toBe(false)
     act(() => setSelecting(id, true))
     expect(result.current).toBe(true)
-    act(() => setSelecting(id, false))
-    expect(result.current).toBe(false)
+  })
+
+  /**
+   * **消すのを待つのは、実機で輪を踏んだから**（実行レポート フェーズ6 追記）。
+   *
+   * 十字が出ると端末が縮み、リサイズが PTY まで飛んで TUI が描き直す。その最中の画面は
+   * 選択待ちに見えないので消える。消えると端末が伸びて描き直され、また出る——
+   * **出す条件が、出したことで変わる輪**である。
+   *
+   * 時間は偽の時計で進める。**境目は `n-1` で動かない／`n` で動く**を別々に見る——
+   * 一気に跨ぐと「待ちが在ること」を確かめたことにならない。
+   */
+  it('消すのは、落ち着くまで待ってから', () => {
+    vi.useFakeTimers()
+    try {
+      const id = card()
+      const { result } = renderHook(() => useSelecting(id))
+      act(() => setSelecting(id, true))
+      expect(result.current).toBe(true)
+
+      act(() => setSelecting(id, false))
+      // **まだ消えない。** ここで消えると、描き直しのたびに明滅する
+      expect(result.current, '待っている間は出たまま').toBe(true)
+
+      act(() => {
+        vi.advanceTimersByTime(HIDE_SETTLE_MS - 1)
+      })
+      expect(result.current, '境目の手前ではまだ出たまま').toBe(true)
+
+      act(() => {
+        vi.advanceTimersByTime(1)
+      })
+      expect(result.current, '落ち着いたら消える').toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('待っている間に選択待ちへ戻れば、消さずに済ませる', () => {
+    vi.useFakeTimers()
+    try {
+      const id = card()
+      const { result } = renderHook(() => useSelecting(id))
+      act(() => setSelecting(id, true))
+      act(() => setSelecting(id, false))
+      act(() => {
+        vi.advanceTimersByTime(HIDE_SETTLE_MS - 50)
+      })
+      // 描き直しが終わってメニューが戻ってきた
+      act(() => setSelecting(id, true))
+      act(() => {
+        vi.advanceTimersByTime(HIDE_SETTLE_MS * 2)
+      })
+      // **取り消しが取り消されていること。** ここが効かないと、戻ってきたあとに消える
+      expect(result.current, '戻ってきたら出たまま').toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('偽が続いても、待ち直さずに消える', () => {
+    vi.useFakeTimers()
+    try {
+      const id = card()
+      const { result } = renderHook(() => useSelecting(id))
+      act(() => setSelecting(id, true))
+      // 描き直しのあいだ、判定は**何度も**偽を返す。**待ち直すと期限が動き続ける**ので、
+      // 待ちより長く偽を送り続けたところで見る——待ち直す実装ではここで消えていない
+      const 回 = Math.ceil((HIDE_SETTLE_MS * 2) / 10)
+      for (let i = 0; i < 回; i += 1) {
+        act(() => setSelecting(id, false))
+        act(() => {
+          vi.advanceTimersByTime(10)
+        })
+      }
+      expect(result.current, '最初の偽から数えて消える').toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('見ている人が0なら hasWatcher は偽', () => {

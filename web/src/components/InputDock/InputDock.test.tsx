@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
 import { InputDock } from './InputDock'
 import type { SessionStatus } from '@/lib/protocol'
-import { hasWatcher, setSelecting } from '@/lib/terminalBridge'
+import { hasWatcher, HIDE_SETTLE_MS, setSelecting } from '@/lib/terminalBridge'
 import { useWsStore } from '@/stores/ws'
 
 /**
@@ -80,7 +80,12 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  // **消すのは待つ**作りなので、片付けでは時計を進めて確実に落とす
+  // （残したまま次のテストへ渡すと、前の値を見て通ってしまう）
+  vi.useFakeTimers()
   setSelecting(CARD, false)
+  vi.advanceTimersByTime(HIDE_SETTLE_MS)
+  vi.useRealTimers()
   vi.unstubAllGlobals()
   localStorage.clear()
 })
@@ -202,7 +207,17 @@ describe('入力欄の畳み', () => {
     act(() => setSelecting(CARD, true))
     expect(composer()).toHaveAttribute('data-collapsed', 'true')
 
+    // **消すのは落ち着くまで待つ**（実機で明滅の輪を踏んだため。橋の `HIDE_SETTLE_MS`）
+    vi.useFakeTimers()
     act(() => setSelecting(CARD, false))
+    expect(composer(), '待っている間は畳んだまま').toHaveAttribute(
+      'data-collapsed',
+      'true',
+    )
+    act(() => {
+      vi.advanceTimersByTime(HIDE_SETTLE_MS)
+    })
+    vi.useRealTimers()
     expect(composer()).toHaveAttribute('data-collapsed', 'false')
   })
 

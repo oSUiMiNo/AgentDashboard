@@ -73,12 +73,80 @@ const queues = new Map<CardId, Queue>()
 const noop = () => {}
 
 /**
+ * 消すのを待つ長さ（ms）。**出すのは即座、消すのは待つ**という非対称にする。
+ *
+ * # なぜ非対称にするのか（**実機で輪を踏んだ**）
+ *
+ * 十字が出ると帯が高くなり、端末が縮み、`ResizeObserver → fit.fit() → resize` が
+ * PTY まで飛ぶ。**すると TUI が描き直し、その最中の画面は選択待ちに見えない**——
+ * だから消える。消えると端末が伸び、また描き直され、メニューが戻り、また出る。
+ *
+ * ```
+ * メニュー → 出す → 端末が縮む → 描き直し → 判定が偽 → 消す
+ *                → 端末が伸びる → 描き直し → 判定が真 → 出す → …
+ * ```
+ *
+ * **出す条件が、出したことで変わっている。** 自分の出力が自分の入力に戻る輪で、
+ * 実機（`/rewind`）では毎秒何度も明滅して止まらなかった。
+ *
+ * # なぜ「待つ」で解けるのか
+ *
+ * 描き直しは**一過性**である。落ち着けば TUI は新しい大きさでメニューを描き直すので、
+ * **その間だけ消さなければ、系は「十字が出ていて、メニューも見えている」へ収束する**。
+ * 逆に出すほうを遅らせる理由は無い——遅らせると、押したい瞬間に出ていない。
+ *
+ * 値は「TUI の描き直しが終わるまで」を見込んだもの。**実機で詰めること**（設計§16）。
+ */
+export const HIDE_SETTLE_MS = 600
+
+/** 消すのを待っているカード。**出すが来たら取り消す。** */
+const hiding = new Map<CardId, ReturnType<typeof setTimeout>>()
+
+/** 待っている取り消しを解く。 */
+function cancelHide(cardId: CardId): void {
+  const timer = hiding.get(cardId)
+  if (timer !== undefined) {
+    clearTimeout(timer)
+    hiding.delete(cardId)
+  }
+}
+
+/**
  * 画面から導いた結論を置く。**同じ値なら何もしない。**
  *
  * ここが効かないと、`onWriteParsed` はフレームごとに呼ばれるので毎フレーム
  * 再描画されることになる。
+ *
+ * **消すときだけ [`HIDE_SETTLE_MS`] だけ待つ。** 理由は上記——待たないと、
+ * 出したこと自体が端末を縮めて判定を覆し、明滅が止まらなくなる。
  */
 export function setSelecting(cardId: CardId, value: boolean): void {
+  if (value) {
+    // **出すのは即座。** 待っていた取り消しがあれば、それも解く
+    cancelHide(cardId)
+    applySelecting(cardId, true)
+    return
+  }
+  if (!(selecting.get(cardId) ?? false)) {
+    // もともと出ていない。待つ意味が無い
+    return
+  }
+  if (hiding.has(cardId)) {
+    // もう待っている。**待ち直さない**——描き直しのあいだ判定は何度も偽を返すので、
+    // そのたびに待ち直すと永久に消えなくなる
+    return
+  }
+  hiding.set(
+    cardId,
+    setTimeout(() => {
+      hiding.delete(cardId)
+      applySelecting(cardId, false)
+    }, HIDE_SETTLE_MS),
+  )
+}
+
+/** 実際に置いて配る。 */
+function applySelecting(cardId: CardId, value: boolean): void {
   if ((selecting.get(cardId) ?? false) === value) {
     return
   }
@@ -157,7 +225,11 @@ export function registerTerminal(
       terminals.delete(cardId)
     }
     dropQueue(cardId)
-    setSelecting(cardId, false)
+    // **端末が消えるときは待たない。** 待つのは「描き直しの最中に消さない」ためで、
+    // 端末そのものが居なくなったなら描き直しも来ない。待たせたままにすると、
+    // 消えたカードの取り消しが後から発火する
+    cancelHide(cardId)
+    applySelecting(cardId, false)
   }
 }
 
