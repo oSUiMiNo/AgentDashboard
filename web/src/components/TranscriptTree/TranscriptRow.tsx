@@ -24,7 +24,7 @@
  * | サブエージェント | — | 子 |
  */
 
-import { useEffect, useState } from 'react'
+import { memo, useEffect, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { HunkTokens } from 'react-diff-view'
@@ -107,6 +107,16 @@ function showsBodyAlways(node: Node): boolean {
   return node.kind === 'user_message' || node.kind === 'assistant_text'
 }
 
+/**
+ * マークダウンのプラグイン。**モジュールの定数として1度だけ作る。**
+ *
+ * `ReactMarkdown` はプラグインの配列の**同一性**を見て処理系を組み直すので、
+ * 呼ぶたびに `[remarkGfm]` と書くと、**中身が同じでも毎回作り直す**。履歴は流れて
+ * いる間フレームごとに通知が来るので、可視の行数ぶんの解析がそのまま乗る。
+ */
+const REMARK_PLUGINS = [remarkGfm]
+const REHYPE_PLUGINS = [rehypeLineBreaks]
+
 function summarizeInput(input: unknown): string {
   if (typeof input !== 'object' || input === null) {
     return ''
@@ -122,7 +132,22 @@ function summarizeInput(input: unknown): string {
   return JSON.stringify(input).slice(0, 200)
 }
 
-export function TranscriptRow({ cardId, row, onToggle, onToggleBody }: Props) {
+/**
+ * 履歴の1行。**`memo` で包む。**
+ *
+ * 履歴が流れている間、ストアはフレームごとに通知する。包まないと、**見えている
+ * 行すべてがそのたびにマークダウンを解析し直す**（折りたたみの `foldMarkdown` も同じ回数）。
+ *
+ * **包むだけでは効かない。** 呼ぶ側が `onToggle` / `onToggleBody` を毎回新しい関数で
+ * 渡していると props が変わったことになるので、あちらも `useCallback` で安定させてある
+ * （`TranscriptTree.tsx`）。**片方だけでは意味が無い**ので、直すときは2つ揃えること。
+ */
+export const TranscriptRow = memo(function TranscriptRow({
+  cardId,
+  row,
+  onToggle,
+  onToggleBody,
+}: Props) {
   if (row.kind === 'rewound') {
     return <RewoundHeader row={row} onToggle={() => onToggle(row)} />
   }
@@ -134,7 +159,7 @@ export function TranscriptRow({ cardId, row, onToggle, onToggleBody }: Props) {
       onToggleBody={() => onToggleBody(row)}
     />
   )
-}
+})
 
 /**
  * 巻き戻し前のやりとりをまとめた見出し（設計§16）。
@@ -302,7 +327,7 @@ function MarkdownBody({
           要約を横に出していた頃の名残で薄い色にしていると、見出しも強調も
           本文と同じ灰色になって、整形した意味がほとんど消える（実物で確認） */}
       <div data-testid="row-body" className="prose-dashboard text-xs leading-relaxed">
-        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeLineBreaks]}>
+        <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS}>
           {body}
         </ReactMarkdown>
       </div>

@@ -15,8 +15,9 @@
  */
 
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import type { CardId } from '@/lib/protocol'
+import type { FlatRow, NodeRow } from '@/stores/transcript'
 import { toggleBody, toggleNode, toggleRewound, useTranscript } from '@/stores/transcript'
 import { useWsStore } from '@/stores/ws'
 import { TranscriptRow } from './TranscriptRow'
@@ -54,6 +55,23 @@ export function TranscriptTree({ cardId }: { cardId: CardId }) {
 
   // 開いている間だけ購読する。閉じたカードの履歴を受け取り続けない
   useEffect(() => subscribeTranscript(cardId), [cardId, subscribeTranscript])
+
+  /*
+    行へ渡す手は**同一性を保つ**。`TranscriptRow` は `memo` で包んであるが、ここで
+    毎回新しい関数を作ると props が変わったことになり、**包んだ意味が消える**。
+
+    依存が `cardId` だけで済むのは、`toggleNode` / `toggleBody` / `toggleRewound` が
+    ストアの**モジュール関数**（`stores/transcript.ts`）で、描画のたびに作り直されないため。
+  */
+  const onToggle = useCallback(
+    (target: FlatRow) =>
+      target.kind === 'rewound' ? toggleRewound(cardId) : toggleNode(cardId, target.id),
+    [cardId],
+  )
+  const onToggleBody = useCallback(
+    (target: NodeRow) => toggleBody(cardId, target.id),
+    [cardId],
+  )
 
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -130,12 +148,8 @@ export function TranscriptTree({ cardId }: { cardId: CardId }) {
                   <TranscriptRow
                     cardId={cardId}
                     row={row}
-                    onToggle={(target) =>
-                      target.kind === 'rewound'
-                        ? toggleRewound(cardId)
-                        : toggleNode(cardId, target.id)
-                    }
-                    onToggleBody={(target) => toggleBody(cardId, target.id)}
+                    onToggle={onToggle}
+                    onToggleBody={onToggleBody}
                   />
                 </div>
               )
