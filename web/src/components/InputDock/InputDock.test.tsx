@@ -319,17 +319,16 @@ describe('出入りを支援技術へ伝える', () => {
  * **また回り出した**。damping では消えないので、**出入りと大きさの結び目を切った**。
  */
 describe('出入りでレイアウトを動かさない', () => {
-  it('縦では、出ていなくても同じ高さを占める', () => {
+  it('縦でも端末へ重ねる（流れに入れない）', () => {
+    // **流れに入れると、出入りで帯の高さが動く**——それがリサイズを呼び、
+    // リサイズが判定へ戻って輪になる。重ねればレイアウトは1ピクセルも動かない
     stubMedia({ [COARSE]: true, [LANDSCAPE]: false })
     dock()
     const slot = screen.getByTestId('dpad-slot')
-    const 出る前 = slot.style.height
-    expect(出る前, '出ていなくても高さを持つこと').not.toBe('')
-    act(() => setSelecting(CARD, true))
-    expect(
-      screen.getByTestId('dpad-slot').style.height,
-      '出ても高さが変わらないこと',
-    ).toBe(出る前)
+    expect(slot.className, '重ねること').toContain('absolute')
+    expect(slot.className, '層は素通しであること').toContain('pointer-events-none')
+    // 下端そのものには重ねない（選択肢と案内文は末尾5行に出る）
+    expect(slot.className).not.toMatch(/\bbottom-0\b/)
   })
 
   it('PC では場所ごと空けない', () => {
