@@ -92,7 +92,12 @@ export function InputDock({ cardId, status, compact = false }: Props) {
         {show ? '方向キーを表示しました' : ''}
       </div>
 
-      <div className="flex items-center gap-2">
+      {/*
+        **Esc は入力欄と同じ行に置く。** 別の行にすると、それだけで端末が1行ぶん
+        短くなる——スマホでは端末の高さがそのまま読める量なので、帯は1行でも惜しい
+        （利用者の要望・2026-08-15）
+      */}
+      <div className="flex items-end gap-2">
         <Button
           ref={escRef}
           type="button"
@@ -111,7 +116,6 @@ export function InputDock({ cardId, status, compact = false }: Props) {
         >
           Esc
         </Button>
-      </div>
 
       {/*
         **縦でも端末へ重ねる**（設計§10 の訂正。実機で3度踏んだ輪の対処 ＋ 利用者判断）。
@@ -169,7 +173,13 @@ export function InputDock({ cardId, status, compact = false }: Props) {
         </div>
       )}
 
-      <Composer cardId={cardId} status={status} collapsed={show} />
+        <Composer
+          cardId={cardId}
+          status={status}
+          collapsed={show}
+          className="min-w-0 flex-1"
+        />
+      </div>
     </div>
   )
 }

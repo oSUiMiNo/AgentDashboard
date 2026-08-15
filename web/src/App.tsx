@@ -86,7 +86,7 @@ function Shell() {
   }, [entered, connect, loadSettings])
 
   return (
-    <main className="flex h-svh flex-col gap-4 p-6">
+    <main className="flex h-dvh flex-col gap-2 p-3 md:gap-4 md:p-6">
       <header className="flex items-center gap-3">
         <Link to={HOME} className="text-xl font-semibold tracking-tight">
           <h1>AgentDashboard</h1>

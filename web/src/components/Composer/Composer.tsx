@@ -30,6 +30,8 @@ import { useAuthStore } from '@/stores/auth'
 import { useWsStore } from '@/stores/ws'
 
 interface Props {
+  /** 外から寸法を決める（帯へ横並びに置くため） */
+  className?: string
   cardId: CardId
   status: SessionStatus
   /**
@@ -42,7 +44,7 @@ interface Props {
   collapsed?: boolean
 }
 
-export function Composer({ cardId, status, collapsed = false }: Props) {
+export function Composer({ cardId, status, collapsed = false, className = '' }: Props) {
   const sendInput = useWsStore((state) => state.sendInput)
   // 下書きの鍵を分けるためのアカウント。**`lib/` から `stores/` は読まない**ので、
   // 読むのはこちら側（十字ボタン設計§11 のフェーズ3 の訂正）
@@ -66,7 +68,7 @@ export function Composer({ cardId, status, collapsed = false }: Props) {
   return (
     <form
       data-testid="composer"
-      className="flex items-end gap-2"
+      className={`flex items-end gap-2 ${className}`}
       onSubmit={(event) => {
         event.preventDefault()
         submit()
@@ -79,7 +81,7 @@ export function Composer({ cardId, status, collapsed = false }: Props) {
         value={text}
         disabled={ended}
         // 畳んでも消さない。**行数を詰めるだけ**
-        rows={collapsed ? 1 : 2}
+        rows={1}
         placeholder={
           ended
             ? 'このセッションは終了しています'
