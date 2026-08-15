@@ -262,7 +262,31 @@ export function looksSelecting(screen: string): boolean {
   if (lines.length === 0) {
     return false
   }
-  return hintNearEnd(lines) || menuChoices(lines).length > 0
+  return (
+    hintNearEnd(lines) || menuChoices(lines).length > 0 || hasScrollHint(lines)
+  )
+}
+
+/**
+ * 「まだ上（下）に N 件ある」という**送りの案内**があるか。
+ *
+ * # なぜ要るのか（実機・`/rewind`）
+ *
+ * `/rewind` は**選択肢に番号を持たない**（`❯ (current)`）ので、番号の目印では取れない。
+ * 残るのは案内文と字下げカーソルの2つだが、**一覧が長くなるとどちらも視界から外れる**
+ * ——実機では `↑ 33 more above` だけが見えている状態になった。
+ *
+ * **送りの案内は、それ自体が「送って選ぶ一覧」の証拠**である。普通の会話には出ない。
+ *
+ * # 緩いほうにだけ足す
+ *
+ * 厳しいほう（Enter の読み替え）には足さない。**あちらの偽陽性は打ちかけの文が
+ * 送信されること**で取り消せないが、こちらは十字が余計に出るだけで済む（設計§3）。
+ */
+function hasScrollHint(lines: string[]): boolean {
+  return lines
+    .slice(Math.max(0, lines.length - CURSOR_WINDOW))
+    .some((line) => /[↑↓]\s*\d+\s+more\b/i.test(line))
 }
 
 /**

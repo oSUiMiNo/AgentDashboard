@@ -19,7 +19,7 @@ import '@xterm/xterm/css/xterm.css'
 import { createFlowController } from '@/lib/flow'
 import { KIND_PTY_SNAPSHOT } from '@/lib/frame'
 import { looksSelecting, sequenceFor, terminalKeyOverride } from '@/lib/keys'
-import { visibleScreen } from '@/lib/screen'
+import { visibleLines, visibleScreen } from '@/lib/screen'
 import {
   hasWatcher,
   measure,
@@ -305,6 +305,12 @@ export function TerminalPane({ cardId }: Props) {
         `握った=${tally.grabbed} 握れない回=${tally.uncancelable}`,
         `viewportY=${buffer.viewportY} baseY=${buffer.baseY} rows=${term.rows}`,
         `touch-action=${action} cell=${cellHeightOf().toFixed(1)}`,
+        // **判定の材料をそのまま出す。** 「十字が出ない」を実機で踏んだとき、
+        // 何を読んで偽になったのかは**その画面を見ないと分からない**。推測で直すと
+        // 往復が増えるので、読む口をここに置く（既定では何も出ない）
+        `選択待ち=${測る()} 論理行=${visibleLines(term).length}`,
+        '--- 末尾8行（判定はここを見る） ---',
+        ...visibleLines(term).slice(-8).map((l, i) => `${i}| ${l}`),
       ].join('\n')
     }
 

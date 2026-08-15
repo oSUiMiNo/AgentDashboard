@@ -522,3 +522,19 @@ describe('sequenceFor', () => {
     }
   })
 })
+
+describe('送りの案内（実機の /rewind）', () => {
+  it('「↑ N more above」だけでも、緩いほうは出す', () => {
+    // `/rewind` は番号を持たず、一覧が長いと案内文もカーソルも視界から外れる。
+    // 実機ではこれだけが見えている状態になった
+    const 送りだけ = ['  Rewind', '  Restore the code…', '  ↑ 33 more above'].join('\n')
+    expect(looksSelecting(送りだけ), '緩いほうは出す').toBe(true)
+    // **厳しいほうは動かさない**——あちらの偽陽性は打ちかけの文の送信になる
+    expect(isSelectionPrompt(送りだけ), '厳しいほうは変えない').toBe(false)
+  })
+
+  it('普通の会話では出さない', () => {
+    expect(looksSelecting(会話の画面('  33 more とは何ですか'))).toBe(false)
+    expect(looksSelecting(会話の画面('  ↑ 上を見て'))).toBe(false)
+  })
+})
