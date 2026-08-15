@@ -298,10 +298,10 @@ function MarkdownBody({
 
   return (
     <div className="mt-1 ml-6">
-      <div
-        data-testid="row-body"
-        className="prose-dashboard text-muted-foreground text-xs leading-relaxed"
-      >
+      {/* 本文は**主役**なので、地の色で出す（`FileView` と同じ扱い）。
+          要約を横に出していた頃の名残で薄い色にしていると、見出しも強調も
+          本文と同じ灰色になって、整形した意味がほとんど消える（実物で確認） */}
+      <div data-testid="row-body" className="prose-dashboard text-xs leading-relaxed">
         <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeLineBreaks]}>
           {body}
         </ReactMarkdown>

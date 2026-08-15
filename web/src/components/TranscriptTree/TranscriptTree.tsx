@@ -21,8 +21,25 @@ import { toggleBody, toggleNode, toggleRewound, useTranscript } from '@/stores/t
 import { useWsStore } from '@/stores/ws'
 import { TranscriptRow } from './TranscriptRow'
 
-/** 折り畳んだ1行の見込み高さ。実測が入るまでの当たり。 */
-const ESTIMATED_ROW = 30
+/**
+ * 行の見込み高さ。実測（`measureElement`）が入るまでの当たり。
+ *
+ * **本文を常に出すようになってから、「折り畳んだ1行」は当たりではなくなった。**
+ * 実測（幅780px・既存フィクスチャの混在12行）は次のとおり。
+ *
+ * | 行 | 高さ |
+ * |---|---|
+ * | 思考・ツールコール（畳んだまま） | 29px |
+ * | 本文が1行のアシスタント | 53px |
+ * | 本文が数行のアシスタント | 118px |
+ * | **混在の平均** | **42px** |
+ *
+ * 42 ではなく少し上を採るのは、**実物の本文はフィクスチャより長い**ため
+ * （実測：フィクスチャは最長175文字、実物は中央値107文字・p99 1,461文字）。
+ * そして**低いほうへ外すと「遡っている最中に画面が跳ねる」**——まだ測っていない行が
+ * 多いほど総高が伸び続けるので、外すなら高い側へ外す。
+ */
+const ESTIMATED_ROW = 48
 
 /** 「末尾を見ている」とみなす余白（px）。 */
 const END_THRESHOLD = 80
