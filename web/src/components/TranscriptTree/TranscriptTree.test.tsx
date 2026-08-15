@@ -200,8 +200,12 @@ const MARKDOWN = [
   '```',
 ].join('\n')
 
-/** しきい値を超える本文。冒頭は必ず整形できる形にしてある。 */
-const LONG = `${MARKDOWN}\n\n${'ながい本文。'.repeat(200)}`
+/**
+ * しきい値を超える本文。冒頭は必ず整形できる形にしてある。
+ *
+ * 長さを**しきい値から作る**ので、実機で 1000 を決め直してもこの土台は追随する。
+ */
+const LONG = `${MARKDOWN}\n\n${'ながい本文。'.repeat(Math.ceil(BODY_FOLD_LIMIT / 6))}`
 
 function rowByKind(kind: string) {
   const row = rowsOf(kind)[0]
@@ -261,7 +265,9 @@ describe('本文を整形して出す', () => {
 
     await userEvent.click(within(rowByKind('tool_call')).getByRole('button'))
     const row = rowByKind('tool_call')
-    expect(row.querySelector('h2')).toBeNull()
+    // 整形する本文には `row-body` の器が付く。ツールの中身は素の `<pre>` のまま
+    expect(within(row).queryByTestId('row-body')).toBeNull()
+    expect(row.querySelector('pre')).not.toBeNull()
     expect(row.textContent).toContain('## echo **hi**')
   })
 })
