@@ -1,17 +1,38 @@
 /**
- * 構造化ビューの1行（設計§10）。
+ * 構造化ビューの1行（初期実装設計§10、イシューグループ_2026-0813-2208 設計§2）。
  *
  * 行の種別ごとに見た目を変え、開くと中身（ツールの入力・結果・コードの差分）が出る。
  * 「サブエージェント → ツールコール → 編集差分」と掘れることが要件なので、
  * **開け閉めできること**と**入れ子が見て分かること**を最優先にしている。
+ *
+ * # 操作は2つある
+ *
+ * | 操作 | 置き場所 | 何をするか |
+ * |---|---|---|
+ * | `▸▾` | 見出しの左 | **まだ出していないものを出す** |
+ * | 「続きを読む／畳む」 | **本文の中**（末尾） | **切ってある本文を全部読む** |
+ *
+ * `▸▾` を「この行を開く」と読むと、本文と子が一緒に出入りすることになり、**ツールを
+ * 何本も呼んだターンを畳んで会話だけ追う**という読み方ができなくなる。「まだ出して
+ * いないものを出す」と読み直すと、種別ごとの違いが例外ではなく帰結になる。
+ *
+ * | 種別 | 本文 | `▸▾` が出すもの |
+ * |---|---|---|
+ * | 利用者・アシスタント | **常に出す**（整形）。長ければ畳んで「続きを読む」 | 子だけ |
+ * | 思考 | `▸▾` で開く。開いたら整形して全文 | 本文（子を持たない） |
+ * | ツールコール・不明 | — | 中身と子 |
+ * | サブエージェント | — | 子 |
  */
 
 import { useEffect, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import type { HunkTokens } from 'react-diff-view'
 import { Diff, Hunk } from 'react-diff-view'
 import type { CardId, Node } from '@/lib/protocol'
 import { countChanges, toDiffSource } from '@/lib/diff'
 import { tokenizeHunks } from '@/lib/highlight'
+import { foldMarkdown, rehypeLineBreaks } from '@/lib/markdown'
 import type { FlatRow, NodeRow, RewoundRow } from '@/stores/transcript'
 
 interface Props {
@@ -19,6 +40,8 @@ interface Props {
   row: FlatRow
   /** 行そのものを渡す。巻き戻しの見出し行はノードではないので、IDでは足りない */
   onToggle: (row: FlatRow) => void
+  /** 本文の開け閉め。`▸▾` とは別の操作 */
+  onToggleBody: (row: NodeRow) => void
 }
 
 /** 種別ごとの見出し（記号・ラベル・色）。 */
@@ -54,13 +77,22 @@ function toolMark(node: Node): string {
   }
 }
 
-/** 折り畳んだ状態でも中身の見当がつくように、1行だけの要約を作る。 */
+/**
+ * 折り畳んだ状態でも中身の見当がつくように、1行だけの要約を作る。
+ *
+ * **本文を持つ種別には出さない。** あちらは本文そのものが（整形されて）出ているので、
+ * 横に同じものを並べる理由が無い。以前はここでも先頭200文字を出しており、短い本文では
+ * **同じ文字が2回並んで**いた。
+ *
+ * ツールコールとサブエージェントには**残す**。あれは本文ではなく**入力の抜粋**
+ * （どのファイルを・どのコマンドを）で、畳んだままでも見当が付く必要がある。
+ */
 function summary(node: Node): string {
   switch (node.kind) {
     case 'user_message':
     case 'assistant_text':
     case 'thinking':
-      return node.text.replace(/\s+/g, ' ').slice(0, 200)
+      return ''
     case 'tool_call':
       return summarizeInput(node.input)
     case 'subagent':
@@ -68,6 +100,11 @@ function summary(node: Node): string {
     case 'unknown':
       return ''
   }
+}
+
+/** 本文を常に出す種別か（＝`▸▾` が子だけを担う種別か）。 */
+function showsBodyAlways(node: Node): boolean {
+  return node.kind === 'user_message' || node.kind === 'assistant_text'
 }
 
 function summarizeInput(input: unknown): string {
@@ -85,11 +122,18 @@ function summarizeInput(input: unknown): string {
   return JSON.stringify(input).slice(0, 200)
 }
 
-export function TranscriptRow({ cardId, row, onToggle }: Props) {
+export function TranscriptRow({ cardId, row, onToggle, onToggleBody }: Props) {
   if (row.kind === 'rewound') {
     return <RewoundHeader row={row} onToggle={() => onToggle(row)} />
   }
-  return <NodeRowView cardId={cardId} row={row} onToggle={() => onToggle(row)} />
+  return (
+    <NodeRowView
+      cardId={cardId}
+      row={row}
+      onToggle={() => onToggle(row)}
+      onToggleBody={() => onToggleBody(row)}
+    />
+  )
 }
 
 /**
@@ -139,13 +183,16 @@ function NodeRowView({
   cardId,
   row,
   onToggle,
+  onToggleBody,
 }: {
   cardId: CardId
   row: NodeRow
   onToggle: () => void
+  onToggleBody: () => void
 }) {
   const { icon, label, tone } = heading(row.node)
   const mark = toolMark(row.node)
+  const alwaysBody = showsBodyAlways(row.node)
 
   return (
     <div
@@ -153,6 +200,8 @@ function NodeRowView({
       data-kind={row.node.kind}
       data-depth={row.depth}
       data-expanded={row.expanded}
+      data-foldable={row.foldable}
+      data-body-open={row.bodyOpen}
       // 入れ子の深さは余白で見せる。1段あたり 1.25rem
       style={{ paddingLeft: `${row.depth * 1.25}rem` }}
       className="border-border/40 border-b py-1 text-sm"
@@ -181,23 +230,35 @@ function NodeRowView({
         <span className="text-muted-foreground min-w-0 flex-1 truncate">{summary(row.node)}</span>
       </button>
 
-      {row.expanded && <RowBody node={row.node} cardId={cardId} />}
+      {/* 本文を持つ種別は `▸▾` に関わらず常に出す。ここを `row.expanded` で囲うと、
+          子を畳んだ瞬間に本文まで消えて操作が1つに戻ってしまう */}
+      {(alwaysBody || row.expanded) && (
+        <RowBody node={row.node} cardId={cardId} row={row} onToggleBody={onToggleBody} />
+      )}
     </div>
   )
 }
 
-/** 展開したときに出る中身。 */
-function RowBody({ node, cardId }: { node: Node; cardId: CardId }) {
+/** 行の中身。本文は整形して出し、ツールの中身は現状のまま出す。 */
+function RowBody({
+  node,
+  cardId,
+  row,
+  onToggleBody,
+}: {
+  node: Node
+  cardId: CardId
+  row: NodeRow
+  onToggleBody: () => void
+}) {
   void cardId
   switch (node.kind) {
-    case 'thinking':
     case 'user_message':
     case 'assistant_text':
-      return (
-        <pre className="text-muted-foreground mt-1 ml-6 whitespace-pre-wrap text-xs">
-          {node.text}
-        </pre>
-      )
+      return <MarkdownBody text={node.text} row={row} onToggleBody={onToggleBody} />
+    case 'thinking':
+      // 思考は畳む相手にしない（開いた時点で全文。設計§2-4）
+      return <MarkdownBody text={node.text} row={null} onToggleBody={onToggleBody} />
     case 'tool_call':
       return <ToolCallBody input={node.input} result={node.result} />
     case 'unknown':
@@ -209,6 +270,54 @@ function RowBody({ node, cardId }: { node: Node; cardId: CardId }) {
     default:
       return null
   }
+}
+
+/**
+ * 本文をマークダウンとして出す。
+ *
+ * **生の HTML は素通しする（`skipHtml` を付けない）。** `FileView`（ファイル閲覧）は
+ * 消しているが、あちらには「生テキストで見る」という**確かめる先がある**。履歴には
+ * 元の JSONL を開く道が画面のどこにも無いので、消すと利用者は消えたことに気づけない。
+ * 残った HTML は `react-markdown` がテキストノードへ落とすので、**描かれることは無い**。
+ *
+ * `rehypeLineBreaks` が `<br/>` だけを改行の要素へ変える。**`rehype-raw` は入れない**
+ * ——入れないこと自体が「任意の HTML を描く道が無い」の実体になっている。
+ */
+function MarkdownBody({
+  text,
+  row,
+  onToggleBody,
+}: {
+  text: string
+  /** 畳む相手なら行を渡す。畳まない種別（思考）は `null` */
+  row: NodeRow | null
+  onToggleBody: () => void
+}) {
+  const folded = row?.foldable === true && !row.bodyOpen
+  const body = folded ? foldMarkdown(text).head : text
+
+  return (
+    <div className="mt-1 ml-6">
+      <div
+        data-testid="row-body"
+        className="prose-dashboard text-muted-foreground text-xs leading-relaxed"
+      >
+        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeLineBreaks]}>
+          {body}
+        </ReactMarkdown>
+      </div>
+      {row?.foldable === true && (
+        <button
+          type="button"
+          data-testid="body-toggle"
+          onClick={onToggleBody}
+          className="text-muted-foreground hover:text-foreground mt-1 text-xs underline"
+        >
+          {row.bodyOpen ? '畳む' : '続きを読む'}
+        </button>
+      )}
+    </div>
+  )
 }
 
 function ToolCallBody({ input, result }: { input: unknown; result: unknown }) {

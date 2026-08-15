@@ -34,8 +34,14 @@ import { VersionsCard } from '@/components/Settings/VersionsCard'
 
 /** 履歴を送る間隔の選択肢（秒。設計§13-3）。 */
 const SYNC_CHOICES = [5, 10, 20, 60]
-/** 画面を送る間隔の選択肢（ミリ秒。設計§13-3）。 */
-const SCREEN_CHOICES = [50, 1000, 5000, 10000, 20000]
+/**
+ * 画面を送る間隔の選択肢（ミリ秒。設計§13-3）。
+ *
+ * 300 は **0.05秒 と 1秒 の谷を埋めるため**にある。50 は細かすぎ（無操作でも毎秒20回
+ * 届く）、1000 はターミナルを見ながら操作するには粗い。**新しい下限ではない**——
+ * いちばん細かいのは今までどおり 50 で、これはその上に入る。
+ */
+const SCREEN_CHOICES = [50, 300, 1000, 5000, 10000, 20000]
 
 export function SettingsPage() {
   const settings = useSettingsStore((state) => state.settings)

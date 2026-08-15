@@ -1159,7 +1159,15 @@ async fn 大きさを変えると画面が作り直される() {
 #[tokio::test]
 async fn 画面の設定を変えると動いているセッションにも効く() {
     // 設計§13-3。**次に繋ぎ直すまで古い間隔で送り続けない**のが要点で、動いている
-    // セッションの端末を作り直す（遡り行数）ところまで含めて効かせる
+    // セッションの端末を作り直す（遡り行数）ところまで含めて効かせる。
+    //
+    // 送る周期のほうも見る。画面に「更新間隔 0.3秒」と出ていても、**その値が端末まで
+    // 運ばれていなければ表示が嘘になる**（DB → A2S → 端末と3段あるので、手前だけ見ても
+    // 一致の保証が無い）。**周期そのものを時間で測ることはしない**——負荷に左右される
+    // 数値を合否にすると、通しのときだけ落ちるテストが増える（PJTガイドライン）。
+    //
+    // 2つの値をわざと違う数にしてあるのは、**取り違えても気づけるようにする**ため。
+    // 同じ数だと、片方をもう片方から取ってくる実装でも両方の断言が通る。
     let a2s = A2s::start("screen-intervals").await;
     let (session, _transcript) = a2s.start_session();
     a2s.wait_for_listed("1枚出る", |listed| listed.len() == 1)
@@ -1174,25 +1182,32 @@ async fn 画面の設定を変えると動いているセッションにも効�
         server_core::db::settings::Intervals::default().scrollback_lines as usize,
         "名乗りの応答で受け取った既定が効いていない"
     );
+    assert_eq!(
+        screen.screen_ms(),
+        server_core::db::settings::Intervals::default().screen_interval_ms,
+        "名乗りの応答で受け取った既定の周期が効いていない"
+    );
 
     a2s.hub
         .set_intervals(
             a2s.account_id,
             server_core::db::settings::Intervals {
                 sync_interval_secs: 1,
-                screen_interval_ms: 250,
-                scrollback_lines: 300,
+                // 画面の選択肢に足した値そのもの（要件「0.05秒と1秒の谷を埋める」）
+                screen_interval_ms: 300,
+                scrollback_lines: 400,
             },
         )
         .await
         .expect("設定を変えられること");
 
     let deadline = tokio::time::Instant::now() + TIMEOUT;
-    while screen.scrollback_lines() != 300 {
+    while screen.scrollback_lines() != 400 || screen.screen_ms() != 300 {
         assert!(
             tokio::time::Instant::now() < deadline,
-            "{TIMEOUT:?} 以内に遡り行数が変わりませんでした（{} 行）",
-            screen.scrollback_lines()
+            "{TIMEOUT:?} 以内に届きませんでした（遡り {} 行 / 周期 {} ミリ秒）",
+            screen.scrollback_lines(),
+            screen.screen_ms()
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }

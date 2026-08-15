@@ -204,7 +204,12 @@ impl TermEmulator {
         self.scrollback_lines.load(Ordering::Relaxed)
     }
 
-    fn screen_ms(&self) -> u64 {
+    /// いま効いている送信の周期（ミリ秒）。
+    ///
+    /// **外へ出しているのは、間隔が本当にここまで運ばれたかを確かめるため**
+    /// （`scrollback_lines` と同じ理由）。設定は DB → A2S → ここ、と3段を渡るので、
+    /// 手前だけを見ても「画面に出ている値」と「実際に使う値」が一致している保証が無い。
+    pub fn screen_ms(&self) -> u64 {
         self.screen_ms.load(Ordering::Relaxed).max(1)
     }
 

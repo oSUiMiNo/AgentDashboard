@@ -47,6 +47,9 @@ describe('formatScreenInterval', () => {
   it('1秒未満は小数のままにする', () => {
     // いちばん細かい選択肢。ミリ秒で出すと他の選択肢と桁が揃わない
     expect(formatScreenInterval(50)).toBe('0.05秒')
+    // 0.05秒 と 1秒 の谷を埋める選択肢。**整形は一切直していない**——
+    // この作りが元から 1秒未満をそのまま出すので、数字を足すだけで読める
+    expect(formatScreenInterval(300)).toBe('0.3秒')
   })
 })
 

@@ -85,7 +85,7 @@ async fn 画面の選択肢はすべて通る() {
             .await;
         assert_eq!(status, 200, "{seconds} 秒が通らない: {body}");
     }
-    for millis in [50, 1000, 5000, 10000, 20000] {
+    for millis in [50, 300, 1000, 5000, 10000, 20000] {
         let (status, body) = server
             .put(
                 "/api/settings",

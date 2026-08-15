@@ -17,7 +17,7 @@
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useEffect, useRef } from 'react'
 import type { CardId } from '@/lib/protocol'
-import { toggleNode, toggleRewound, useTranscript } from '@/stores/transcript'
+import { toggleBody, toggleNode, toggleRewound, useTranscript } from '@/stores/transcript'
 import { useWsStore } from '@/stores/ws'
 import { TranscriptRow } from './TranscriptRow'
 
@@ -118,6 +118,7 @@ export function TranscriptTree({ cardId }: { cardId: CardId }) {
                         ? toggleRewound(cardId)
                         : toggleNode(cardId, target.id)
                     }
+                    onToggleBody={(target) => toggleBody(cardId, target.id)}
                   />
                 </div>
               )

@@ -68,6 +68,41 @@ test('更新間隔がヘッダに出る', async ({ page }) => {
   await expect(page.getByTestId('screen-interval')).toContainText('更新間隔')
 })
 
+test('画面の更新間隔に 0.3秒 を選べて、選んだ値が効く', async ({ page }) => {
+  // 要件：選択肢は 0.05秒 と 1秒 の間が20倍空いていた。**この欄はリモート構成にしか
+  // 無い**（ローカルには画面配信そのものが無い）ので、画面から確かめられるのはここだけ
+  await openDashboard(page)
+  await page.getByTestId('settings-link').click()
+
+  const select = page.getByTestId('screen-interval-select')
+  await expect(select).toHaveValue('20000')
+
+  try {
+    await select.selectOption('300')
+    // 保存はサーバ往復。**確定を待たずに開き直すと、何を確かめたのか分からなくなる**
+    await expect(select).toHaveValue('300')
+
+    await page.reload()
+    await expect(page.getByTestId('screen-interval-select')).toHaveValue('300')
+
+    // 選んだ値はセッション画面にも出る。ここの数字が「相手が止まっている」と
+    // 「間引かれているだけ」を見分ける唯一の手掛かりになる
+    await openDashboard(page)
+    const tile = await spawnSession(page)
+    await openSession(page, tile)
+    await expect(page.getByTestId('screen-interval')).toContainText(
+      '更新間隔 0.3秒',
+    )
+  } finally {
+    // **設定は次のテストへ残る**（E2E は1つのサーバを共有している）。断言が落ちても
+    // 戻すために finally へ置く——戻し損ねると、後続が別の周期で走ることになる
+    await openDashboard(page)
+    await page.getByTestId('settings-link').click()
+    await page.getByTestId('screen-interval-select').selectOption('20000')
+    await expect(page.getByTestId('screen-interval-select')).toHaveValue('20000')
+  }
+})
+
 test('端末を閉じても一覧と履歴は動き続ける', async ({ page }) => {
   // 画面の配信を止めても、状態と履歴は別の経路（フック・batch+ack）で流れ続ける。
   // 要件5-5 が名指しで求めている「更新間隔が効くのは画面だけ」の確認にあたる

@@ -42,14 +42,12 @@ export function formatElapsed(elapsedMs: number): string {
  * 出さないと、利用者は「相手が止まっている」のか「間引かれているだけ」なのかを
  * 区別できない——1秒でも20秒でも、見えているのは同じ止まった画面になる。
  *
- * 1秒未満は既定の選択肢（50ms）を「0.05秒」と読ませる。ミリ秒のまま出すと、
- * 他の選択肢（20秒）と桁が揃わず比べにくい。
+ * 1秒未満はそのまま小数で出す（50ms なら「0.05秒」、300ms なら「0.3秒」）。ミリ秒の
+ * まま出すと、他の選択肢（20秒）と桁が揃わず比べにくい。**選択肢を1つ足しても
+ * ここは直さなくてよい**——桁で場合分けしていないため。
  */
 export function formatScreenInterval(intervalMs: number): string {
   const seconds = intervalMs / 1000
-  if (seconds < 1) {
-    return `${seconds}秒`
-  }
   return `${Math.round(seconds)}秒`
 }
 

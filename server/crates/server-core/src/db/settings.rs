@@ -25,7 +25,7 @@ use uuid::Uuid;
 pub const SYNC_INTERVAL_SECS: &str = "sync_interval_secs";
 pub const DEFAULT_SYNC_INTERVAL_SECS: u64 = 20;
 
-/// 画面を送る間隔（ミリ秒）。選択肢は 50 / 1000 / 5000 / 10000 / 20000。
+/// 画面を送る間隔（ミリ秒）。選択肢は 50 / 300 / 1000 / 5000 / 10000 / 20000。
 pub const SCREEN_INTERVAL_MS: &str = "screen_interval_ms";
 pub const DEFAULT_SCREEN_INTERVAL_MS: u64 = 20_000;
 
