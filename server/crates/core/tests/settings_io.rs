@@ -112,7 +112,7 @@ async fn 書き出して読み戻すと元へ戻る() {
             "/api/settings",
             r#"{"always_bypass_permissions":true,"project_autostart_session":true,
                 "sync_interval_secs":5,
-                "screen_interval_ms":1000,"scrollback_lines":4000}"#,
+                "screen_interval_ms":300,"scrollback_lines":4000}"#,
         )
         .await;
     assert_eq!(status, 200);
@@ -150,7 +150,8 @@ async fn 書き出して読み戻すと元へ戻る() {
         "{body}"
     );
     assert!(body.contains("\"sync_interval_secs\":5"), "{body}");
-    assert!(body.contains("\"screen_interval_ms\":1000"), "{body}");
+    // 画面の選択肢に足した 0.3秒 が、書き出し→読み込みの往復で戻ってくること
+    assert!(body.contains("\"screen_interval_ms\":300"), "{body}");
     assert!(body.contains("\"scrollback_lines\":4000"), "{body}");
 
     let _ = std::fs::remove_dir_all(dir);

@@ -468,6 +468,23 @@ async fn 設定の変更は触った項目だけが変わる() {
         view["always_bypass_permissions"], false,
         "触っていない項目が動いている: {raw}"
     );
+
+    // 数の項目も同じ道を通る。**画面の選択肢に足した 0.3秒 が CLI からも入る**ことを見る
+    // ——検査は1か所に集めてあるので、入口によって通ったり通らなかったりしてはいけない
+    let body = client::settings_update_body("screen_interval_ms", "300").expect("本文を組めること");
+    let raw = client::settings_set(&target, body)
+        .await
+        .expect("変えられること");
+
+    let view: serde_json::Value = serde_json::from_str(&raw).expect("応答を読めること");
+    assert_eq!(
+        view["intervals"]["screen_interval_ms"], 300,
+        "触った項目: {raw}"
+    );
+    assert_eq!(
+        view["project_autostart_session"], true,
+        "さっき変えた値が巻き戻っている: {raw}"
+    );
 }
 
 #[tokio::test]
