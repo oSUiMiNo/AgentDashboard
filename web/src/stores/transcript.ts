@@ -21,6 +21,7 @@
 
 import { useSyncExternalStore } from 'react'
 import type { CardId, Node, NodeId, TreeNode } from '@/lib/protocol'
+import { BODY_FOLD_LIMIT } from '@/lib/markdown'
 
 /** ツリーの1ノードに対応する行。 */
 export interface NodeRow {
@@ -34,6 +35,15 @@ export interface NodeRow {
   expanded: boolean
   /** 子を持っているか（開いても中身が無い場合と区別する） */
   hasChildren: boolean
+  /**
+   * 本文がしきい値を超えるか（＝畳む相手か）。
+   *
+   * 長さの判断を**行が持つ**ので、描く側は本文の長さを知らなくてよい。
+   * 本文を持たない種別（ツールコール・サブエージェント）では常に偽になる。
+   */
+  foldable: boolean
+  /** 本文を開いているか。[`foldable`] が偽なら意味を持たない */
+  bodyOpen: boolean
 }
 
 /**
@@ -72,6 +82,15 @@ interface CardState {
   /** 親ID（根は [`ROOT`]）→ 子IDの並び（届いた順） */
   children: Map<string, string[]>
   expanded: Set<string>
+  /**
+   * 本文を開いている行。
+   *
+   * **コンポーネントに置けない。** 構造化ビューは仮想化しているので、画面の外へ出た行は
+   * DOM ごと消える。`useState` に置くと遡って戻ってきたときに畳み直され、しかも実測した
+   * 高さがそのたびに変わる——**遡っている最中に画面が跳ねる**という、この画面でいちばん
+   * 困る形になる。
+   */
+  bodyOpen: Set<string>
   /** 巻き戻し前の枝を開いているか */
   showRewound: boolean
   /** 平らにした結果。変化したら捨てて作り直す */
@@ -92,6 +111,7 @@ function stateOf(cardId: CardId): CardState {
       byId: new Map(),
       children: new Map(),
       expanded: new Set(),
+      bodyOpen: new Set(),
       showRewound: false,
       flat: null,
     }
@@ -102,6 +122,17 @@ function stateOf(cardId: CardId): CardState {
 
 /** 既定で開いておく種別。会話の本文は開いた状態で見せ、詳細は畳んでおく。 */
 function opensByDefault(node: Node): boolean {
+  return node.kind === 'user_message' || node.kind === 'assistant_text'
+}
+
+/**
+ * 常に出す本文を持つ種別か。
+ *
+ * 思考は**読まなくてよいもの**として既定で畳んである（開けば整形して全文が出る）。
+ * 長さで決める規則を当てると短い思考が全部出っぱなしになり、会話の本文と見分けが
+ * 付かなくなるので、こちらには入れない。
+ */
+function hasFoldableBody(node: Node): node is Extract<Node, { kind: 'user_message' | 'assistant_text' }> {
   return node.kind === 'user_message' || node.kind === 'assistant_text'
 }
 
@@ -158,6 +189,9 @@ function flatten(state: CardState): FlatRow[] {
     }
     const hasChildren = (state.children.get(id)?.length ?? 0) > 0
     const expanded = state.expanded.has(id)
+    // 長さを見るだけにする。ここで実際に切ると、数万件の履歴で全ノードぶんの
+    // 文字列を作ることになる（切る仕事は、描くときで間に合う）
+    const foldable = hasFoldableBody(node.node) && node.node.text.length > BODY_FOLD_LIMIT
     rows.push({
       kind: 'node',
       id,
@@ -166,6 +200,8 @@ function flatten(state: CardState): FlatRow[] {
       expandable: isExpandable(node.node, hasChildren),
       expanded,
       hasChildren,
+      foldable,
+      bodyOpen: state.bodyOpen.has(id),
     })
     if (expanded && hasChildren) {
       walkFrom(id, depth + 1)
@@ -266,6 +302,24 @@ export function toggleNode(cardId: CardId, nodeId: NodeId) {
     state.expanded.delete(nodeId)
   } else {
     state.expanded.add(nodeId)
+  }
+  state.flat = null
+  notify(cardId)
+}
+
+/**
+ * 本文の開け閉めを切り替える。
+ *
+ * [`toggleNode`] とは**別の操作**である。`▸▾` が担うのは「まだ出していないもの（＝子）を
+ * 出すこと」で、こちらは「切ってある本文を全部読むこと」。同じ操作にまとめると、
+ * ツールを何本も呼んだターンを畳んで会話だけ追う、という読み方ができなくなる。
+ */
+export function toggleBody(cardId: CardId, nodeId: NodeId) {
+  const state = stateOf(cardId)
+  if (state.bodyOpen.has(nodeId)) {
+    state.bodyOpen.delete(nodeId)
+  } else {
+    state.bodyOpen.add(nodeId)
   }
   state.flat = null
   notify(cardId)
