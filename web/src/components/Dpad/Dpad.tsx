@@ -73,8 +73,23 @@ const TOUCH_STYLE: CSSProperties = {
   pointerEvents: 'auto',
 }
 
+/**
+ * ボタン1つの見た目。
+ *
+ * # 半透明にする（利用者の要望・2026-08-15）
+ *
+ * 端末へ重ねるので、下の文字が透けたほうが読める。**値は 0.7**——RetroArch・Delta・
+ * PPSSPP・Dolphin の4実装が独立に 0.65〜0.70 へ収束しており、実装既定値としては
+ * これがいちばん根拠がある（調査レポート §7-2）。
+ *
+ * **枠と字は透かさない。** WCAG 1.4.11 は操作子に隣接色との 3:1 を求めるが、
+ * 端末の背景は ANSI の黒〜白全域を取りうるので、**面まで透かすと「どの背景でも 3:1」を
+ * 保証できない**（数学的に不可能）。枠が不透明なら、そこが隣接色として確定する。
+ *
+ * OS が「透明度を下げる」設定なら**不透明へ戻す**。
+ */
 const BUTTON_CLASS =
-  'border-border bg-background/95 text-foreground flex items-center justify-center border text-lg leading-none transition-colors duration-150'
+  'border-border bg-background/70 text-foreground [@media(prefers-reduced-transparency:reduce)]:bg-background flex items-center justify-center border text-lg leading-none transition-colors duration-150'
 
 /** 押している間の見た目。**`:active` は使わない**（iOS では発火しない）。 */
 const PRESSED_CLASS = 'dpad-pressed bg-accent scale-[0.94] duration-0'
