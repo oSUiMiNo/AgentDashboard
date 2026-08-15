@@ -204,9 +204,46 @@ function Direction({
  * ずらしても元のボタンへ届いてしまう。押した瞬間に明示的に解く。
  *
  * `releasePointerCapture` は **jsdom に無い**ので `?.()` で呼ぶ。
+ *
+ * # キャプチャを解いた代償を、印で埋める
+ *
+ * 解いた結果、`pointerup` は**指の下の要素**へ行く。つまり
+ * **別の場所（端末など）で押し始めて、⏎ の上まで指を運んで離す**と、こちらへ
+ * `pointerup` だけが届く。素直に発火させると**押し始めていない決定が通る**——
+ * 権限確認の場面で踏むと、承認が勝手に走る。
+ *
+ * そこで「**自分の上で押し始めたか**」を印として持ち、印が立っているときだけ発火する。
+ * 印は `useState` ではなく `useRef` で持つ——速いタップだと `pointerup` の側が
+ * 1つ前の描画の値を見る余地が残るため。
+ *
+ * # `lostpointercapture` は掴まない
+ *
+ * この要素は `pointerdown` で**自分からキャプチャを解いている**ので、あの合図は
+ * **押した直後に必ず飛ぶ**。落とす契機に加えると、押した見た目が即座に消える。
+ * 外で離された場合は、下の窓の合図で拾う。
  */
 function Confirm({ onFire }: { onFire: () => void }) {
   const [pressed, setPressed] = useState(false)
+  /** 自分の上で押し始めた指。`null` は「押し始めていない」 */
+  const armed = useRef<number | null>(null)
+
+  // **外で離されたときに、印と見た目を落とす。** キャプチャを解いてあるので、
+  // その `pointerup` はこちらへ届かない。届かないものは窓で拾うしかない
+  useEffect(() => {
+    if (!pressed) {
+      return
+    }
+    const disarm = () => {
+      armed.current = null
+      setPressed(false)
+    }
+    window.addEventListener('pointerup', disarm)
+    window.addEventListener('pointercancel', disarm)
+    return () => {
+      window.removeEventListener('pointerup', disarm)
+      window.removeEventListener('pointercancel', disarm)
+    }
+  }, [pressed])
 
   return (
     <div className="flex items-center justify-center">
@@ -224,12 +261,21 @@ function Confirm({ onFire }: { onFire: () => void }) {
         }}
         onMouseDown={(event) => event.preventDefault()}
         onPointerDown={(event) => {
+          armed.current = event.pointerId
           setPressed(true)
           event.currentTarget.releasePointerCapture?.(event.pointerId)
         }}
-        onPointerCancel={() => setPressed(false)}
-        onPointerUp={() => {
+        onPointerCancel={() => {
+          armed.current = null
           setPressed(false)
+        }}
+        onPointerUp={(event) => {
+          const 押し始めた指 = armed.current === event.pointerId
+          armed.current = null
+          setPressed(false)
+          if (!押し始めた指) {
+            return
+          }
           buzz()
           onFire()
         }}

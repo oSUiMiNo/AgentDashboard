@@ -59,6 +59,49 @@ describe('Dpad の押し方', () => {
   })
 
   /*
+    ここから3本は**キャプチャを解いた代償**を見る。
+
+    解いた結果 `pointerup` は指の下の要素へ行くので、**別の場所で押し始めて ⏎ の上まで
+    運んで離す**と、こちらへ `pointerup` だけが届く。素直に発火させると
+    **押し始めていない決定が通る**——権限確認の場面で踏むと承認が勝手に走る。
+  */
+  it('中央の外で押し始めて中央で離しても発火しない', () => {
+    const onKey = keys()
+
+    // 端末など、別の場所で押し始めた（ここでは下ボタンで代用する）
+    fireEvent.pointerDown(down(), { pointerId: 3 })
+    onKey.mockClear()
+    // 指を ⏎ の上まで運んで離した
+    fireEvent.pointerUp(confirm(), { pointerId: 3 })
+
+    expect(onKey).not.toHaveBeenCalled()
+  })
+
+  it('中央で押し始めて外で離すと、押した見た目が残らない', () => {
+    keys()
+
+    fireEvent.pointerDown(confirm(), { pointerId: 4 })
+    expect(confirm()).toHaveAttribute('data-pressed', 'true')
+
+    // ボタンの外で離れた。**キャプチャを解いてあるので、この合図はこちらへ届かない**
+    fireEvent.pointerUp(document.body, { pointerId: 4 })
+
+    expect(confirm()).toHaveAttribute('data-pressed', 'false')
+  })
+
+  it('指が攫われたら印も落ち、そのあと離しても発火しない', () => {
+    const onKey = keys()
+
+    fireEvent.pointerDown(confirm(), { pointerId: 5 })
+    fireEvent.pointerCancel(confirm(), { pointerId: 5 })
+    expect(confirm()).toHaveAttribute('data-pressed', 'false')
+
+    fireEvent.pointerUp(confirm(), { pointerId: 5 })
+
+    expect(onKey).not.toHaveBeenCalledWith('enter')
+  })
+
+  /*
     上の「ずらして離す」が実際のブラウザでも成立するには、**暗黙のポインタ
     キャプチャを解いておく**必要がある。タッチは `pointerdown` の時点で捕まえて
     いるので、放っておくと**ずらしても元のボタンへ `pointerup` が届く**。
