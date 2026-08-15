@@ -48,6 +48,9 @@ export function formatElapsed(elapsedMs: number): string {
  */
 export function formatScreenInterval(intervalMs: number): string {
   const seconds = intervalMs / 1000
+  if (seconds < 1) {
+    return `${seconds}秒`
+  }
   return `${Math.round(seconds)}秒`
 }
 

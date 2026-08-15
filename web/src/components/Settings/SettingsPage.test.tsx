@@ -155,11 +155,29 @@ describe('画面の更新間隔', () => {
     expect(update).toHaveBeenCalledWith({ screen_interval_ms: 300 })
   })
 
-  it('既定は 20秒 のまま', () => {
-    // **足すだけで既定は動かさない**（要件「やらないこと」）。ここが動くと、
-    // 何も選んでいない人の通信量が黙って増える
+  it('いま効いている値が選ばれた状態で出る', () => {
+    // **足すだけで既定は動かさない**（要件「やらないこと」）。既定そのものは
+    // サーバ側で固定してあるので（`db::settings` の `選択肢を足しても既定は動かない`）、
+    // ここは渡された値をそのまま選んでいることを見る
     show(remoteAgent('pc-1', 'OMEN'))
 
     expect(screen.getByTestId('screen-interval-select')).toHaveValue('20000')
+  })
+
+  it('選択肢に無い値でも、黙って別の値を選んだ顔をしない', () => {
+    // 設定ファイルや CLI から入った値・別の版で選んだ値は、選択肢に無いことがある。
+    // **先頭に足して出す**ので、既に 0.3秒 を手で入れていた人の画面も壊れない
+    // （要件「選択肢に無い値でも壊れない作りになっている」）
+    show({
+      ...remoteAgent('pc-1', 'OMEN'),
+      intervals: {
+        sync_interval_secs: 20,
+        screen_interval_ms: 777,
+        scrollback_lines: 1000,
+      },
+    })
+
+    expect(choices()[0]).toBe('777')
+    expect(screen.getByTestId('screen-interval-select')).toHaveValue('777')
   })
 })
