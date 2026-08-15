@@ -1184,8 +1184,8 @@ async fn 画面の設定を変えると動いているセッションにも効�
     );
     assert_eq!(
         screen.screen_ms(),
-        server_core::db::settings::Intervals::default().screen_interval_ms,
-        "名乗りの応答で受け取った既定の周期が効いていない"
+        SCREEN_MS,
+        "名乗りの応答で受け取った周期が効いていない"
     );
 
     a2s.hub
