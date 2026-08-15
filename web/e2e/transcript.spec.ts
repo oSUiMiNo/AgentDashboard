@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 import {
   archiveAll,
+  FIXTURES,
   fireHook,
   openDashboard,
   openSession,
@@ -135,6 +136,115 @@ test('巻き戻し前のやりとりは畳まれ、開けば読める', async ({
   await expect(
     page.getByText('notes.md の1つ目の TODO を DONE に書き換えて。').first(),
   ).toBeVisible()
+})
+
+/**
+ * 本文の見せ方（イシューグループ_2026-0813-2208 テスト計画フェーズ5）。
+ *
+ * 単体では各層の中しか見ない。**パーサ → WebSocket → 画面が端から端まで繋がったこと**は
+ * ここでしか分からない。使うのは狙って作った合成フィクスチャで、**切れ目が記法の途中へ
+ * 来るように長さを合わせてある**（実物では境目を作れない）。
+ */
+async function loadMarkdownBodies(page: Parameters<typeof openDashboard>[0]) {
+  await startSession(page)
+  await showTerminal(page)
+  await fireHook(page, 'SessionStart')
+  await writeTranscript(page, 'synthetic/markdown-bodies/session.jsonl')
+  await showTranscript(page)
+  await expect
+    .poll(
+      async () =>
+        Number(await page.getByTestId('transcript-status').getAttribute('data-row-count')),
+      { message: '履歴が届くこと', timeout: 30_000 },
+    )
+    .toBeGreaterThan(0)
+}
+
+/** 畳む相手の行（しきい値を超えた本文）。 */
+function foldableRow(page: Parameters<typeof openDashboard>[0]) {
+  return page.locator('[data-testid="transcript-row"][data-foldable="true"]').first()
+}
+
+test('長い本文は畳まれて出て、押すと全文になる', async ({ page }) => {
+  await loadMarkdownBodies(page)
+
+  const row = foldableRow(page)
+  await expect(row).toBeVisible()
+  await expect(row).toHaveAttribute('data-body-open', 'false')
+
+  const folded = (await row.innerText()).length
+  await row.getByTestId('body-toggle').click()
+
+  await expect(row).toHaveAttribute('data-body-open', 'true')
+  expect((await row.innerText()).length).toBeGreaterThan(folded)
+})
+
+test('表と箇条書きが要素として出る', async ({ page }) => {
+  // 記号のまま並んでいたら、この画面の存在理由（読みやすさ）が立たない
+  await loadMarkdownBodies(page)
+
+  const body = foldableRow(page).getByTestId('row-body')
+  await expect(body.locator('table')).toHaveCount(1)
+  await expect(body.locator('li')).toHaveCount(3)
+  await expect(body.locator('pre code')).toHaveCount(1)
+  // 見出しの横に本文の先頭が出ていない（二重の消滅）
+  await expect(foldableRow(page).getByRole('button').first()).not.toContainText('フォルダの決まり')
+})
+
+test('`<br/>` を含む本文でも行が消えない', async ({ page }) => {
+  // このリポジトリのドキュメントの作法を引用した応答が、行ごと消えて見えないこと
+  await loadMarkdownBodies(page)
+
+  const row = page
+    .locator('[data-testid="transcript-row"][data-kind="assistant_text"]')
+    .filter({ hasText: '区切りの作法' })
+  await expect(row.getByTestId('row-body').locator('br')).toHaveCount(2)
+  await expect(row).toContainText('つぎの見出し')
+})
+
+test('高さの違う行が混ざっていても、末尾に居るかどうかを正しく判定する', async ({ page }) => {
+  // 本文を常に出すようになって行の高さがばらけた（29px の行と 1,000px 超の行が混ざる）。
+  // **数万ノードは確かめていない**（フェーズ1 の判断。数万件は `flatten` の単体で通す）
+  await loadMarkdownBodies(page)
+  const tree = page.getByTestId('transcript-tree')
+
+  await tree.evaluate((el) => {
+    el.scrollTop = el.scrollHeight
+  })
+  await expect(page.getByTestId('transcript-status')).toHaveAttribute('data-at-end', 'true')
+
+  await tree.evaluate((el) => {
+    el.scrollTop = 0
+  })
+  await expect(page.getByTestId('transcript-status')).toHaveAttribute('data-at-end', 'false')
+})
+
+test('遡っている最中に履歴が増えても、引き戻されない', async ({ page }) => {
+  // 読んでいる途中で勝手に飛ぶのが、この画面でいちばん困る挙動（初期実装設計§10）
+  await loadMarkdownBodies(page)
+  const tree = page.getByTestId('transcript-tree')
+  const status = page.getByTestId('transcript-status')
+
+  await tree.evaluate((el) => {
+    el.scrollTop = 0
+  })
+  await expect(status).toHaveAttribute('data-at-end', 'false')
+  const before = Number(await status.getAttribute('data-row-count'))
+
+  // **構造化ビューを見たまま**追記する。入力欄はタブの外に常設されているので、
+  // ターミナルへ切り替えずに擬似 claude へ命令を送れる（切り替えると、隠れている間の
+  // 追記になって「引き戻されるか」を確かめられない）
+  await page.getByTestId('composer-input').fill(`jsonl ${FIXTURES}/v2.1.220/basic-tools/session.jsonl`)
+  await page.keyboard.press('Control+Enter')
+
+  await expect
+    .poll(async () => Number(await status.getAttribute('data-row-count')), {
+      message: '行が増えること',
+      timeout: 30_000,
+    })
+    .toBeGreaterThan(before)
+  // 増えたあとも、見ている場所は動かない
+  expect(await tree.evaluate((el) => el.scrollTop)).toBe(0)
 })
 
 test('タブを往復してもターミナルの内容が残る', async ({ page }) => {
