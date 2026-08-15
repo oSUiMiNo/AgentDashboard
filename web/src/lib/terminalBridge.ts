@@ -47,10 +47,16 @@ import type { CardId } from '@/lib/protocol'
  * ——`ESC` と次のバイトを 0ms 間隔で別々に書いても1チャンクにまとまり、Alt+その文字と
  * して食われることを実測してある（調査レポート §2-2）。
  *
- * 値は CLI 側の `KEY_GAP`（`core/src/client/keys.rs`）に揃えてある。**同じ地雷を
- * 2箇所で別々の値で踏まない。**
+ * 値は CLI 側の `KEY_GAP`（`core/src/client/keys.rs`）の **30ms ＋1**。
+ *
+ * **1 多いのは、丸めのぶんである。** こちらは時計に `Date.now()` を使っており
+ * **整数ミリ秒しか返さない**ので、`lastAt` を記録した時点で最大1ms が切り捨てられる。
+ * 30 のままだと、実時間では 29.4ms しか空かないことがあった（E2E が実測して落ちた）。
+ * CLI 側は `Duration` で測るので丸めが無く、あちらは 30 のままでよい。
+ *
+ * **狙いは「実時間で 30ms 以上」**であって数字を揃えることではないので、ここは +1 する。
  */
-export const KEY_GAP_MS = 30
+export const KEY_GAP_MS = 31
 
 /** いま選択待ちか。**画面テキストから導いた結論だけ**を持つ（フックの印は混ぜない）。 */
 const selecting = new Map<CardId, boolean>()
