@@ -1,6 +1,6 @@
 ╭─ Claude Code ─────────────────────────────╮
 │                                           │
-│            Welcome back dashboard-user!             │
+│       Welcome back dashboard-user!        │
 │                                           │
 │                  ▐▛███▜▌                  │
 │                 ▝▜█████▛▘                 │

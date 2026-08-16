@@ -30,6 +30,7 @@ import json
 import re
 import socket
 import sys
+import unicodedata
 from pathlib import Path
 
 TARGET_SUFFIXES = {".jsonl", ".json", ".txt", ".md", ".cast", ".screen"}
@@ -267,6 +268,100 @@ def sanitize_file(path: Path, rules: list[tuple[str, str]]) -> int:
     return 0
 
 
+def is_screen(path: Path) -> bool:
+    """画面の写しか。**幅が意味を持つ**ファイルだけを見分ける。"""
+    return path.suffix == ".screen" or path.parent.name == "screens"
+
+
+def display_width(text: str) -> int:
+    """端末での表示幅。全角（East Asian Wide / Fullwidth）は2桁。"""
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
+
+
+def fit_width(text: str, width: int) -> str:
+    """表示幅を `width` ちょうどに合わせる。
+
+    # 溢れたぶんは、末尾ではなく**内側の空白**から詰める
+
+    画面の写しは**枠で囲まれている**（`│ … │ … │`）。素直に末尾を切ると、
+    **右の枠線と、その手前の本文ごと落ちる**——実物で確かめた。
+
+    ```
+    │   Welcome back dashboard-user!   │ Run /init to … for Cla… │
+                                                              ↑ ここを切ってしまう
+    ```
+
+    落としてよいのは**余白だけ**なので、いちばん長い空白の連なりを縮める。
+    縮めきれないときだけ、最後の手段として末尾を切る（全角を半分に割らないよう
+    1文字ずつ積む）。
+    """
+    current = display_width(text)
+    if current == width:
+        return text
+    if current < width:
+        return text + " " * (width - current)
+
+    over = current - width
+    # まず「余白らしい余白」（2つ以上の連なり）から詰める。1つは残す——語がくっつくと
+    # 画面の意味が変わる
+    for _ in range(over):
+        runs = [m for m in re.finditer(r" {2,}", text) if (m.end() - m.start()) >= 2]
+        if not runs:
+            break
+        longest = max(runs, key=lambda m: m.end() - m.start())
+        text = text[: longest.end() - 1] + text[longest.end() :]
+        over -= 1
+    # それでも溢れるなら、**いちばん右の単独の空白**を詰める。枠線（`│`）を切るより
+    # 空白1つを詰めるほうが、画面としての意味を保てる
+    while over > 0:
+        index = text.rfind(" ", 0, len(text) - 1)
+        if index < 0:
+            break
+        text = text[:index] + text[index + 1 :]
+        over -= 1
+    if over <= 0:
+        return text
+
+    out: list[str] = []
+    used = 0
+    for ch in text:
+        step = display_width(ch)
+        if used + step > width:
+            break
+        out.append(ch)
+        used += step
+    return "".join(out) + " " * (width - used)
+
+
+def sanitize_screen(path: Path, rules: list[tuple[str, str]]) -> int:
+    """画面の写しは、**行の幅を保ったまま**直す。
+
+    利用者名を長い置換先へ替えると行が伸びる。実際 `welcome.txt` は
+    **45桁で採ったのに55桁**あった（広いほうも 120 → 130）。
+
+    **幅を固定するために置いたフィクスチャの、幅が嘘になっている**のが問題で、
+    折り返しに関わる後退（`joinWrapped` / `visibleLines`）をここでは捕まえられない。
+
+    行ごとに元の幅を控え、置換のあとで切るか空白で埋めて元へ戻す。
+    """
+    original = path.read_text(encoding="utf-8", errors="surrogateescape")
+    lines = original.split("\n")
+    fixed: list[str] = []
+    for line in lines:
+        width = display_width(line)
+        text = line
+        for old, new in rules:
+            text = text.replace(old, new)
+        text = redact_emails(text)
+        # **空の行は空のまま。** 幅0へ埋めても何も起きないが、意図を明示しておく
+        fixed.append(fit_width(text, width) if width else text)
+    text = "\n".join(fixed)
+    if text != original:
+        path.write_text(text, encoding="utf-8", errors="surrogateescape")
+        return 1
+    return 0
+
+
 def sanitize_cast(path: Path, rules: list[tuple[str, str]]) -> int:
     """端末録画は「イベントの中身」を直す。ファイルの文字列を直接いじってはいけない。
 
@@ -437,6 +532,8 @@ def main() -> int:
         # 端末録画だけは中身の構造を見て直す（ファイルの文字列を直接いじると壊れる）
         if path.suffix == ".cast":
             changed += sanitize_cast(path, rules)
+        elif is_screen(path):
+            changed += sanitize_screen(path, rules)
         else:
             changed += sanitize_file(path, rules)
 

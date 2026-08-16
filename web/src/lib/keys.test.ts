@@ -2,7 +2,7 @@
 // `src/` は**ブラウザ向けの型だけ**で検査する（`tsconfig.app.json` の `types` に `node` は
 // 入れていない）。入れるとアプリのソースに `fs` を書けてしまうので、緩めずにこのファイル
 // だけへ型を足す。**実物の画面を読むのはテストの中だけ**という線を、型でも保つ。
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
@@ -78,6 +78,60 @@ function 実物の画面(name: string, 版 = 'v2.1.228', 棚 = 'screens'): strin
 function 狭い画面(name: string): string {
   return 実物の画面(name, 'v2.1.232', 'screens-narrow')
 }
+
+/** 端末での表示幅。全角（East Asian Wide / Fullwidth）は2桁。 */
+function 表示幅(text: string): number {
+  let width = 0
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0
+    const 全角 =
+      (code >= 0x1100 && code <= 0x115f) ||
+      (code >= 0x2e80 && code <= 0x303e) ||
+      (code >= 0x3041 && code <= 0x33ff) ||
+      (code >= 0x3400 && code <= 0x4dbf) ||
+      (code >= 0x4e00 && code <= 0x9fff) ||
+      (code >= 0xac00 && code <= 0xd7a3) ||
+      (code >= 0xf900 && code <= 0xfaff) ||
+      (code >= 0xff00 && code <= 0xff60) ||
+      (code >= 0xffe0 && code <= 0xffe6)
+    width += 全角 ? 2 : 1
+  }
+  return width
+}
+
+/**
+ * 画面のフィクスチャは、**採取した桁数を保っていなければならない**。
+ *
+ * 匿名化は利用者名を長い置換先へ替えるので、詰め直さないと**行が伸びる**。実際
+ * `screens-narrow/welcome.txt` は **45桁で採ったのに55桁**あった（広いほうも 120 → 130）。
+ *
+ * **幅を固定するために置いたフィクスチャの、幅が嘘になっている**のがまずい——
+ * 折り返しに関わる後退（`joinWrapped` / `visibleLines`）を、ここでは捕まえられなくなる
+ * （コードレビュー対応11）。
+ */
+describe('画面のフィクスチャの幅', () => {
+  const 棚 = [
+    { 版: 'v2.1.228', 名: 'screens', 桁: 120 },
+    { 版: 'v2.1.232', 名: 'screens', 桁: 120 },
+    { 版: 'v2.1.232', 名: 'screens-narrow', 桁: 45 },
+  ]
+
+  it.each(棚)('$版/$名 は $桁 桁を超えない', ({ 版, 名, 桁 }) => {
+    const ここ = dirname(fileURLToPath(import.meta.url))
+    const dir = resolve(ここ, '../../../fixtures', 版, 名)
+    const 溢れ: string[] = []
+    for (const file of readdirSync(dir).filter((n) => n.endsWith('.txt'))) {
+      const text = readFileSync(resolve(dir, file), 'utf8')
+      text.split('\n').forEach((line, index) => {
+        const w = 表示幅(line)
+        if (w > 桁) {
+          溢れ.push(`${file}:${index + 1} が ${w} 桁`)
+        }
+      })
+    }
+    expect(溢れ, '匿名化で行が伸びている').toEqual([])
+  })
+})
 
 /**
  * 会話の途中の画面を組み立てる。**末尾に入力欄と下の帯が来る**のが本物の形。
