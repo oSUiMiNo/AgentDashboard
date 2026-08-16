@@ -1692,9 +1692,7 @@ impl SessionManager {
         // セッションが解放されない（合流タスクは待ち行列が閉じたときに終わる）
         session.kill();
         hooks_settings::cleanup(&session.settings);
-        if let Some(parser) = self.parser.lock().expect("ロックが壊れていない").as_ref() {
-            parser.unwatch(card_id);
-        }
+        self.stop_watching_transcript(card_id);
         self.events.emit(ServerMessage::SessionRemoved { card_id });
         Ok(())
     }
@@ -1745,6 +1743,56 @@ impl SessionManager {
             }
         }
         self.publish(session, changed);
+    }
+
+    /// そのカードの履歴の監視を**止める**（イシュー設計§4-2 の3）。
+    ///
+    /// 溜まりが上限を超えたカードを畳んだときに呼ぶ。`ParserRequest::Unwatch` は
+    /// **読み位置を捨てる（`offsets.forget()`）ことも兼ねている**ので、これ1つで
+    /// 「位置を捨てる」段（設計§1-2 の1段目）が済む。
+    ///
+    /// **止めないと、切断が続いている間に同じ量がまた溜まる**（設計§4-4）。畳んだ
+    /// そばから読み直すと、畳んでは読み直す輪になる。
+    pub fn stop_watching_transcript(&self, card_id: CardId) {
+        if let Some(parser) = self.parser.lock().expect("ロックが壊れていない").as_ref() {
+            parser.unwatch(card_id);
+        }
+    }
+
+    /// そのカードの履歴を**頭から読み直してもらう**（イシュー設計§4-2 の5）。
+    ///
+    /// 畳んだカードの `TranscriptReset` に ack が返った時点で呼ぶ。位置は
+    /// [`SessionManager::stop_watching_transcript`] で捨ててあるので、`watch` を
+    /// 頼み直せばパーサは JSONL の頭から読む——止めていた間に書き足されたぶんも
+    /// 一緒に届く（設計§4-4）。
+    ///
+    /// 頼む形は [`SessionManager::handle_hook`] の監視依頼とまったく同じにしてある。
+    /// **パーサが繋がっていないときに黙らない**ところまで揃えないと、構造化ビューだけが
+    /// 永久に空のまま残り、利用者からは原因が見えない。
+    ///
+    /// # 戻り値は「実際に頼んだ場所」
+    ///
+    /// 頼めなかったとき（カードが外された／まだ JSONL の場所を名乗っていない／パーサが
+    /// 繋がっていない）は `None` を返す。**遷移の1行を出すのは呼ぶ側**で、頼めていない
+    /// のに「頼みました」と残ると、後からログを読む人が原因を1つ取り違える。
+    pub fn rewatch_transcript(&self, card_id: CardId) -> Option<String> {
+        // 畳んだあとに外されたカード／まだ場所を名乗っていないカードは、読み直す先が無い。
+        // 後者は次のフックで監視が張られるので、ここで何もしなくても履歴は出る
+        let path = self.get(card_id)?.transcript_path()?;
+        match self.parser.lock().expect("ロックが壊れていない").as_ref() {
+            Some(parser) => {
+                parser.watch(card_id, path.clone());
+                Some(path)
+            }
+            None => {
+                tracing::warn!(
+                    %card_id,
+                    %path,
+                    "パーサが繋がっていないため読み直しを頼めません"
+                );
+                None
+            }
+        }
     }
 
     /// パーサが読んだノードを**上へ報告する**（セルフホスト化設計§3-3・§6-1）。

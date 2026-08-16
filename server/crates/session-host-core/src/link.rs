@@ -70,21 +70,24 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// **1つの構造体にまとめてあるのは、テストから小さく差し替えるため**である。既定値のままだと
 /// テストが実運用の量（3万ノード規模）を作ることになり、確かめたい性質より先に時間が尽きる。
+/// **既定は本物の値**である（[`Limits::default`]）。小さくできる口は
+/// [`SessionHostLink::set_limits`] にあるが、指定しなければ実運用の量へ落ちる——
+/// 差し替え口を作るだけで既定を緩めると、本番だけが守られない形になる。
 #[derive(Debug, Clone, Copy)]
-struct Limits {
+pub struct Limits {
     /// 同時に未 ack にしてよいバッチの数（設計§3-1）。
     ///
     /// 実測で決めた（2026-08-16）。1バッチの記録に 10.8ms・エッジまでの往復が 87〜101ms
     /// なので下限は約 8.3。上は 64 にしても追いつきが縮まらない。**32 は下限の約4倍で、
     /// 頭打ちの手前**にあたる。
-    window: usize,
+    pub window: usize,
     /// 1枚のカードに溜めてよいノード数（設計§4-1）。
     ///
     /// 手元でいちばん大きいカードが 15,978 ノード。**読み直しが必ず収まるよう**その2倍。
     /// 収まらない値を置くと、そのカードは畳むたびに輪へ入る（設計§4-2）。
-    card_nodes: usize,
+    pub card_nodes: usize,
     /// 全カードの合計（設計§4-1 の backstop）。1枚ずつは上限内でも全体が育つため。
-    total_nodes: usize,
+    pub total_nodes: usize,
     /// **1通に入れるノード数**（設計§4-6）。
     ///
     /// 1フレームの上限は 16 MiB で、超えると受け取る側が**無言で接続をリセットする**。
@@ -93,7 +96,7 @@ struct Limits {
     /// **ノード数だけでは上限を保証できない。** 1ノードが 200.7 KB に達した実測があり、
     /// 極端な並びなら 1,500 ノードでも 16 MiB を超えうる。保証が要るなら直列化した
     /// バイトで切ることになるが、数えるのに直列化が要る（設計§4-1）ので、まずは数で置く。
-    batch_nodes: usize,
+    pub batch_nodes: usize,
 }
 
 impl Default for Limits {
@@ -148,6 +151,9 @@ pub struct SessionHostLink {
     /// **部品のまま持つ。** 変わるのは別名の側だけ（実測の学習）なので、
     /// 差し替えてから組み立て直す
     model_table: Mutex<Option<ModelTable>>,
+    /// 送る側が守る量の上限。**既定は本物の値**で、[`SessionHostLink::set_limits`] で
+    /// だけ小さくできる（設計§8-1）
+    limits: Mutex<Limits>,
     /// 常駐タスクへ渡す受け口。[`SessionHostLink::attach`] で取り出す
     inbox: Mutex<Option<mpsc::UnboundedReceiver<Outgoing>>>,
 }
@@ -201,8 +207,26 @@ impl SessionHostLink {
             bus: LocalEventBus::new(),
             outgoing,
             model_table: Mutex::new(None),
+            limits: Mutex::new(Limits::default()),
             inbox: Mutex::new(Some(inbox)),
         })
+    }
+
+    /// 送る側が守る量の上限を差し替える（設計§8-1 の「テストから小さく差し替える」）。
+    ///
+    /// **[`SessionHostLink::attach`] より前に呼ぶこと。** 常駐タスクは起きるときに
+    /// 1度だけ読む。
+    ///
+    /// # なぜ製品の口として在るのか
+    ///
+    /// 既定のカードごとの上限は 32,768 ノードで、**統合テストからは現実的な時間で
+    /// 踏めない**。差し替えられないと、畳みを確かめるテストは**一度も畳まないまま
+    /// 緑になる**（ガイドライン「差し替え口を作るだけでは足りない」の裏返しで、
+    /// ここでは口が無いこと自体が空振りを生む）。
+    ///
+    /// 指定しなければ [`Limits::default`]（実運用の値）のままである。
+    pub fn set_limits(&self, limits: Limits) {
+        *self.limits.lock().expect("ロックが壊れていない") = limits;
     }
 
     /// 常駐タスクを立てて繋ぎ始める。2度目以降は何もしない。
@@ -714,15 +738,13 @@ impl Outbox {
 
     /// 監視を止めてほしいカードを取り出す。**取り出したら消える**（設計§4-3）。
     ///
-    /// 適用するのは `manager` を持っている側で、配線はフェーズ3。`Outbox` から
+    /// 適用するのは `manager` を持っている側（[`apply_marks`]）。`Outbox` から
     /// `SessionManager` を呼ぶと参照が輪になる（manager → events → link → outbox → manager）。
-    #[allow(dead_code)] // 呼ぶ側を作るのはフェーズ3。印を溜める側だけ先に置いてある
     fn take_unwatch(&mut self) -> Vec<CardId> {
         std::mem::take(&mut self.needs_unwatch)
     }
 
     /// 読み直しを頼んでほしいカードを取り出す。**取り出したら消える**（設計§4-3）。
-    #[allow(dead_code)] // 同上
     fn take_rewatch(&mut self) -> Vec<CardId> {
         std::mem::take(&mut self.needs_rewatch)
     }
@@ -740,16 +762,18 @@ async fn run(
     mut inbox: mpsc::UnboundedReceiver<Outgoing>,
 ) {
     let mut outbox = Outbox::new(offsets);
+    outbox.limits = *link.limits.lock().expect("ロックが壊れていない");
     let mut attempt = 0usize;
 
     loop {
         // **繋がるのを待っている間も報告は受け取る。** 待ち行列を止めると、報告を出す側
         // （フックの処理・パーサの読み取り）が詰まる
-        let socket = match connect_waiting(&config, &mut inbox, &mut outbox, attempt).await {
-            Some(socket) => socket,
-            // 送り口が全部落ちた＝プロセスが畳まれている
-            None => return,
-        };
+        let socket =
+            match connect_waiting(&config, &manager, &mut inbox, &mut outbox, attempt).await {
+                Some(socket) => socket,
+                // 送り口が全部落ちた＝プロセスが畳まれている
+                None => return,
+            };
 
         match handshake(socket, &config).await {
             Ok((socket, mut intervals)) => {
@@ -787,6 +811,7 @@ async fn run(
 /// 待ち時間を置いてから繋ぐ。待っている間に届いた報告は溜める。
 async fn connect_waiting(
     config: &LinkConfig,
+    manager: &Arc<SessionManager>,
     inbox: &mut mpsc::UnboundedReceiver<Outgoing>,
     outbox: &mut Outbox,
     attempt: usize,
@@ -800,7 +825,7 @@ async fn connect_waiting(
                 tokio::select! {
                     _ = tokio::time::sleep_until(deadline) => break,
                     received = inbox.recv() => match received {
-                        Some(outgoing) => absorb(outbox, outgoing),
+                        Some(outgoing) => absorb(outbox, outgoing, manager.as_ref()),
                         None => return None,
                     },
                 }
@@ -818,12 +843,72 @@ async fn connect_waiting(
 }
 
 /// 溜める側（送らない）。
-fn absorb(outbox: &mut Outbox, outgoing: Outgoing) {
+///
+/// **`manager` を受け取るのは、畳んだ印をその場で適用するため**である（設計§4-3）。
+/// 繋がるまで溜めておくと、その間パーサは走り続け、畳んだそばからまた溜まる——
+/// いちばん抑えたい切断中がちょうど抜ける。
+fn absorb(outbox: &mut Outbox, outgoing: Outgoing, watch: &dyn TranscriptWatch) {
     match outgoing {
         // 切断中の状態の知らせは捨てる。復帰したら全部送り直す（§6-4）
         Outgoing::Volatile(_) | Outgoing::ModelTable(_) | Outgoing::Screen(_) => {}
         Outgoing::Transcript(report) => outbox.push(report),
         Outgoing::Reset(card_id) => outbox.push_reset(card_id),
+    }
+    apply_marks(outbox, watch);
+}
+
+/// 畳んだ印の適用先（設計§4-3）。
+///
+/// 本番の相手は [`SessionManager`] ただ1つで、**切ってあるのはテストのため**である。
+/// 適用と一緒に出す3種類のログ（設計§7）を、`SessionManager` を組み立てずに
+/// 機械で確かめられるようにしている——組み立てには本物の設定・フックの受信口・
+/// 擬似 claude が要り、**ログ1行を見るための土台としては重すぎる**。
+trait TranscriptWatch {
+    /// そのカードの監視を止める（位置も捨てる）。
+    fn stop_watching(&self, card_id: CardId);
+    /// 頭から読み直してもらう。**実際に頼めた場所**を返す（頼めなければ `None`）。
+    fn rewatch(&self, card_id: CardId) -> Option<String>;
+}
+
+impl TranscriptWatch for SessionManager {
+    fn stop_watching(&self, card_id: CardId) {
+        self.stop_watching_transcript(card_id);
+    }
+
+    fn rewatch(&self, card_id: CardId) -> Option<String> {
+        self.rewatch_transcript(card_id)
+    }
+}
+
+/// 畳んだ印をパーサへの操作に変える（設計§4-3）。
+///
+/// `Outbox` は大きさを知っているが `SessionManager` を知らない（知らせると
+/// manager → events → link → outbox → manager で参照が輪になる）。そこで
+/// `Outbox` は印を溜めるだけにし、**`manager` を持っている側がここで適用する**。
+///
+/// # 3箇所から呼ぶ。書き分けない
+///
+/// 積む経路（`absorb()` ／ `connected()` の `inbox.recv()`）と、ack の経路
+/// （`apply_command()`）の3つ。**1つ漏らすと、その経路で畳んだカードだけが
+/// 読み直されないまま消える。** 関数1つに寄せてあるのは `unmark_sent()` と同じ理由で、
+/// 呼び忘れは起きても、書き分けによる食い違いは起きない形にするため。
+///
+/// # 切断中に読み直しは始まらない（設計§4-4）
+///
+/// `needs_rewatch` が積まれるのは **`Reset` の ack が返ったとき**だけで、ack は
+/// 繋がっていなければ届かない。したがって切断中にこの関数を呼んでも、動くのは
+/// 監視を止める側だけになる。**この性質に寄りかかっている**ので、`needs_rewatch` を
+/// 積む場所を増やすなら、切断中でないことをここで見る必要がある。
+fn apply_marks(outbox: &mut Outbox, watch: &dyn TranscriptWatch) {
+    for card_id in outbox.take_unwatch() {
+        watch.stop_watching(card_id);
+    }
+    for card_id in outbox.take_rewatch() {
+        // **頼めたときだけ1行残す**（設計§7）。頼めなかった理由は相手が言う——
+        // ここで一律に出すと、頼めていないのに「頼みました」が残る
+        if let Some(path) = watch.rewatch(card_id) {
+            tracing::info!(%card_id, %path, "畳んだ履歴の読み直しを頼みました");
+        }
     }
 }
 
@@ -967,8 +1052,14 @@ async fn connected(
                         return;
                     }
                 }
-                Some(Outgoing::Transcript(report)) => outbox.push(report),
-                Some(Outgoing::Reset(card_id)) => outbox.push_reset(card_id),
+                Some(Outgoing::Transcript(report)) => {
+                    outbox.push(report);
+                    apply_marks(outbox, manager.as_ref());
+                }
+                Some(Outgoing::Reset(card_id)) => {
+                    outbox.push_reset(card_id);
+                    apply_marks(outbox, manager.as_ref());
+                }
                 // 画面はバイナリのまま運ぶ（設計§4-3）。JSON に包むと base64 で 4/3 に膨らむ
                 Some(Outgoing::Screen(bytes)) => {
                     if sink.send(tungstenite::Message::Binary(bytes.into())).await.is_err() {
@@ -1116,6 +1207,10 @@ fn apply_command(
 
         ServerToAgent::BatchAck { batch_id } => {
             outbox.ack(batch_id);
+            // 畳んだカードの `Reset` が入った合図でもある。**読み直しを頼むのはここだけ**
+            // （設計§4-2 の5）——ack は繋がっていなければ届かないので、切断中に
+            // 読み直しが始まることが原理的に無い（設計§4-4）
+            apply_marks(outbox, manager.as_ref());
             // **その場でまた出す**（設計§3-3）。ack を待って次を出す形にすると、
             // 窓は自然に回り続ける——次の `flush.tick()` まで待つ理由が無い
             waiting.extend(outbox.pump());
@@ -1941,5 +2036,243 @@ mod tests {
             agent_ws_url("ws://127.0.0.1:8787"),
             "ws://127.0.0.1:8787/agent/ws"
         );
+    }
+
+    /// 畳んだ印の適用先の代役。**本物は `SessionManager` だけ**（[`TranscriptWatch`]）。
+    #[derive(Default)]
+    struct FakeWatch {
+        stopped: std::sync::Mutex<Vec<CardId>>,
+        rewatched: std::sync::Mutex<Vec<CardId>>,
+        /// 読み直しを頼める場所。`None` にすると「頼めなかった」を作れる
+        path: Option<String>,
+    }
+
+    impl FakeWatch {
+        fn with_path() -> Self {
+            Self {
+                path: Some("/p/s.jsonl".to_string()),
+                ..Self::default()
+            }
+        }
+
+        fn stopped(&self) -> Vec<CardId> {
+            self.stopped.lock().expect("ロックが壊れていない").clone()
+        }
+
+        fn rewatched(&self) -> Vec<CardId> {
+            self.rewatched.lock().expect("ロックが壊れていない").clone()
+        }
+    }
+
+    impl TranscriptWatch for FakeWatch {
+        fn stop_watching(&self, card_id: CardId) {
+            self.stopped
+                .lock()
+                .expect("ロックが壊れていない")
+                .push(card_id);
+        }
+
+        fn rewatch(&self, card_id: CardId) -> Option<String> {
+            self.rewatched
+                .lock()
+                .expect("ロックが壊れていない")
+                .push(card_id);
+            self.path.clone()
+        }
+    }
+
+    /// ログの行を集める。**遷移だけが出ていること**を数で見るために使う（設計§7）。
+    #[derive(Clone, Default)]
+    struct LogSink(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl LogSink {
+        fn lines(&self) -> Vec<String> {
+            String::from_utf8(self.0.lock().expect("ロックが壊れていない").clone())
+                .expect("UTF-8 であること")
+                .lines()
+                .map(str::to_string)
+                .collect()
+        }
+    }
+
+    impl std::io::Write for LogSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("ロックが壊れていない")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// 集めながら走らせる。
+    fn 集める(body: impl FnOnce()) -> Vec<String> {
+        let sink = LogSink::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(sink.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        tracing::subscriber::with_default(subscriber, body);
+        sink.lines()
+    }
+
+    #[test]
+    fn 出るのは畳みの遷移3種類だけでバッチ1件ごとには出ない() {
+        // 設計§7。**1件ごとに回る場所に行を置かない**——置くと、いちばん読みたい行が
+        // そこで埋まる。出てよいのは「畳んだ」「読み直しを頼んだ」「畳むのをやめた」の3つ
+        let (mut outbox, _offsets, dir) = outbox_with(
+            "fold-logs",
+            Limits {
+                card_nodes: 2,
+                ..Limits::default()
+            },
+        );
+        let watch = FakeWatch::with_path();
+        let 大きいカード = CardId::new();
+        let 普通のカード = CardId::new();
+
+        let lines = 集める(|| {
+            // 1本目：上限を超えて畳む
+            outbox.push(report_nodes(大きいカード, "a", 3, 10));
+            apply_marks(&mut outbox, &watch);
+
+            // 2本目：巻き戻しの ack が返って読み直しを頼む
+            let first = outbox.pump();
+            outbox.ack(batch_id_of(&first[0]));
+            apply_marks(&mut outbox, &watch);
+
+            // 3本目：読み直した結果がまた超えたので、畳むのをやめる
+            outbox.push(report_nodes(大きいカード, "b", 3, 20));
+            apply_marks(&mut outbox, &watch);
+
+            // **ここから下は1行も出てはいけない。** 上限に触れないカードを何度も
+            // 積んで出して ack する、いちばん普通の流れ
+            for i in 0..5 {
+                outbox.push(report_nodes(
+                    普通のカード,
+                    &format!("n{i}"),
+                    1,
+                    100 + i as u64,
+                ));
+                let messages = outbox.pump();
+                for message in &messages {
+                    outbox.ack(batch_id_of(message));
+                }
+                apply_marks(&mut outbox, &watch);
+            }
+        });
+
+        let 本文 = lines.join("\n");
+        assert_eq!(
+            lines.len(),
+            3,
+            "遷移以外の行が出ている（1件ごとに回る場所へ置いていないか）:\n{本文}"
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains("畳みました"))
+                .count(),
+            1,
+            "畳んだ1行が無い:\n{本文}"
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains("読み直しを頼みました"))
+                .count(),
+            1,
+            "読み直しを頼んだ1行が無い:\n{本文}"
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains("これ以上畳みません"))
+                .count(),
+            1,
+            "畳むのをやめた1行が無い:\n{本文}"
+        );
+        // 相関キー（設計§7）。無いと、出ていても後から辿れない
+        for line in &lines {
+            assert!(line.contains("card_id"), "card_id が載っていない: {line}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 頼めなかった読み直しは頼んだことにしない() {
+        // 頼めない相手（パーサが繋がっていない・カードが外された）に対して
+        // 「頼みました」と残すと、ログを読む人が原因を1つ取り違える
+        let (mut outbox, _offsets, dir) = outbox_with(
+            "rewatch-failed",
+            Limits {
+                card_nodes: 2,
+                ..Limits::default()
+            },
+        );
+        let watch = FakeWatch::default(); // path が無い＝頼めない
+        let card_id = CardId::new();
+
+        let lines = 集める(|| {
+            outbox.push(report_nodes(card_id, "a", 3, 10));
+            apply_marks(&mut outbox, &watch);
+            let first = outbox.pump();
+            outbox.ack(batch_id_of(&first[0]));
+            apply_marks(&mut outbox, &watch);
+        });
+
+        assert_eq!(
+            watch.rewatched(),
+            vec![card_id],
+            "頼みにすら行っていない（相手が答えられるかは相手が決める）"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("読み直しを頼みました")),
+            "頼めていないのに頼んだと残っている:\n{}",
+            lines.join("\n")
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 適用した印は消えて二度は効かない() {
+        // 印が残ると、次に適用したとき同じカードをもう一度止めて読み直させる。
+        // **読み直しが二重に走ると、その間に届いたぶんの並びが崩れる**
+        let (mut outbox, _offsets, dir) = outbox_with(
+            "apply-once",
+            Limits {
+                card_nodes: 2,
+                ..Limits::default()
+            },
+        );
+        let watch = FakeWatch::with_path();
+        let card_id = CardId::new();
+
+        outbox.push(report_nodes(card_id, "a", 3, 10));
+        apply_marks(&mut outbox, &watch);
+        let first = outbox.pump();
+        outbox.ack(batch_id_of(&first[0]));
+        apply_marks(&mut outbox, &watch);
+        // 何も足さずにもう一度適用する
+        apply_marks(&mut outbox, &watch);
+
+        assert_eq!(watch.stopped(), vec![card_id], "監視を二度止めている");
+        assert_eq!(watch.rewatched(), vec![card_id], "読み直しを二度頼んでいる");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
