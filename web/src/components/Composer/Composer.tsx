@@ -41,10 +41,9 @@ interface Props {
    * 文字は入力欄の値としてまだ確定していないため、消えた瞬間に取り戻す先が無くなる。
    * この判断が、判定を「迷ったら出す」側へ倒せる根拠になっている。
    */
-  collapsed?: boolean
 }
 
-export function Composer({ cardId, status, collapsed = false, className = '' }: Props) {
+export function Composer({ cardId, status, className = '' }: Props) {
   const sendInput = useWsStore((state) => state.sendInput)
   // 下書きの鍵を分けるためのアカウント。**`lib/` から `stores/` は読まない**ので、
   // 読むのはこちら側（十字ボタン設計§11 のフェーズ3 の訂正）
@@ -77,7 +76,6 @@ export function Composer({ cardId, status, collapsed = false, className = '' }: 
       <Textarea
         ref={inputRef}
         data-testid="composer-input"
-        data-collapsed={collapsed ? 'true' : 'false'}
         value={text}
         disabled={ended}
         // 畳んでも消さない。**行数を詰めるだけ**

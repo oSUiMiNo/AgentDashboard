@@ -173,15 +173,15 @@ describe('十字ボタンを出す条件', () => {
     expect(screen.getByTestId('dpad-live')).toHaveTextContent('')
   })
 
-  it('終了したセッションでは、入力欄も畳まれない', () => {
-    // **`rows` では見ない。** いまは畳んでも畳まなくても 1 で、`collapsed` が高さを
-    // 変えていない（コードレビュー対応4。**利用者の判断待ちで据え置き**）。
-    // ここで見たいのは「畳んだ扱いにしていないか」なので、印のほうを見る
+  it('終了したセッションでは、入力欄は終了どおり無効のまま', () => {
+    // 畳む機能そのものを落としたので（コードレビュー対応4）、ここで見るのは
+    // **十字の出し入れが入力欄の状態をいじっていないこと**。無効なのは終了だから
+    // であって、十字とは関係ない
     dock({ kind: 'ended', ok: true })
 
     act(() => setSelecting(CARD, true))
 
-    expect(composer()).toHaveAttribute('data-collapsed', 'false')
+    expect(composer()).toBeDisabled()
   })
 
   it('構造化ビューを見ていても Esc は出る', () => {
@@ -253,34 +253,18 @@ describe('Esc ボタン', () => {
   })
 })
 
-describe('入力欄の畳み', () => {
-  it('十字が出ている間は畳まれ、終わったら戻る', () => {
-    dock()
-    expect(composer()).toHaveAttribute('data-collapsed', 'false')
-
-    act(() => setSelecting(CARD, true))
-    expect(composer()).toHaveAttribute('data-collapsed', 'true')
-
-    // **消すのは落ち着くまで待つ**（実機で明滅の輪を踏んだため。橋の `HIDE_SETTLE_MS`）
-    vi.useFakeTimers()
-    act(() => setSelecting(CARD, false))
-    expect(composer(), '待っている間は畳んだまま').toHaveAttribute(
-      'data-collapsed',
-      'true',
-    )
-    act(() => {
-      vi.advanceTimersByTime(HIDE_SETTLE_MS)
-    })
-    vi.useRealTimers()
-    expect(composer()).toHaveAttribute('data-collapsed', 'false')
-  })
-
+describe('十字が出ている間の入力欄', () => {
   /*
-    **これが偽陽性を安くしている根拠。** 消すと、日本語の変換中の文字は入力欄の
-    値としてまだ確定していないので復元経路が無くなる。畳むだけなら、判定が外れて
-    余計に出ても失うものが無い——だから「迷ったら出す」側へ倒せる。
+    **畳む機能は落とした**（コードレビュー対応4）。要件は「十字が出ている間、入力欄と
+    送信ボタンは基本的に出さない」だったが、**畳む先の高さがもう無い**——`ef94575` が
+    「入力欄は常に1行」にして、端末の縦幅を稼ぐ形になったため。属性だけが切り替わる
+    `collapsed` を残すと、**何もしていないのに対処済みに見える**ので落とした。
+
+    **消さない**という約束のほうは生きている。消すと、日本語の変換中の文字は入力欄の
+    値としてまだ確定していないので復元経路が無くなる。作り直さないだけで、判定が
+    外れて余計に出ても失うものが無い——だから「迷ったら出す」側へ倒せる。
   */
-  it('畳んでも作り直されず、書きかけが残る', () => {
+  it('十字が出ても作り直されず、書きかけが残る', () => {
     dock()
     const before = composer()
     fireEvent.change(before, { target: { value: '書きかけ' } })
@@ -291,8 +275,8 @@ describe('入力欄の畳み', () => {
     expect(composer()).toHaveValue('書きかけ')
   })
 
-  // 消すと、畳んだ状態から送る手段が無くなる（スマホに `Ctrl+Enter` は無い）
-  it('畳んでも送信ボタンが押せる', () => {
+  // 十字が出ている間も送れること。スマホに `Ctrl+Enter` は無いので、ボタンが要る
+  it('十字が出ていても送信ボタンが押せる', () => {
     dock()
     fireEvent.change(composer(), { target: { value: '送る' } })
     act(() => setSelecting(CARD, true))
