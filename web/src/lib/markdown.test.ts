@@ -192,3 +192,26 @@ describe('しきい値の既定', () => {
     expect(BODY_FOLD_LIMIT).toBe(1000)
   })
 })
+
+describe('絵文字を割らない', () => {
+  it('しきい値の境目に絵文字が跨っても、末尾が壊れない', () => {
+    // **1行目がしきい値より長いときだけ通る道。** 行の切れ目へ戻せないので、
+    // そのまま切ることになる——素の `slice` はサロゲートペアの途中で切れて
+    // 末尾に `�` が出る（コードレビュー対応12）
+    const 絵文字 = '🙂'
+    // 境目のちょうど上に絵文字の**上位**が来るように詰める
+    const text = 'a'.repeat(9) + 絵文字.repeat(10)
+    const { head, folded } = foldMarkdown(text, 10)
+
+    expect(folded).toBe(true)
+    expect(head).not.toContain('�')
+    // 割れていない＝そのまま読み戻せる
+    expect([...head].every((ch) => ch === 'a' || ch === 絵文字)).toBe(true)
+  })
+
+  it('絵文字を含まない本文の畳み方は変わらない', () => {
+    const text = ['一行目', '二行目', '三行目'].join('\n')
+    // 行の切れ目まで戻すので、2行目までが残る（この振る舞いは変えていない）
+    expect(foldMarkdown(text, 8).head).toBe('一行目\n二行目')
+  })
+})

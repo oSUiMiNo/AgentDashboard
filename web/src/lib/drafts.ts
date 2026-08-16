@@ -56,6 +56,18 @@ function keyFor(account: string | null): string {
   return PREFIX + (account ?? NO_ACCOUNT)
 }
 
+/**
+ * 直前に解析した結果。**鍵は「読んだ生の文字列」そのもの。**
+ *
+ * 表は打鍵のデバウンスごとにも読まれるので、毎回 `JSON.parse` すると
+ * カードの数だけ積み上がる。かといって表を持ち回すと、**別のタブの書き換えや
+ * `localStorage.clear()` に気づけない**——`storage` は自分の窓では飛ばない。
+ *
+ * **`getItem` は毎回する（安い）。重い解析だけを省く。** 生の文字列が同じなら
+ * 中身も同じなので、古いものを返す道が原理的に無い。
+ */
+let 控え: { raw: string; table: Table } | null = null
+
 /** 表を読む。**壊れていても落ちない**——読めなければ空として扱う。 */
 function readTable(account: string | null): Table {
   let raw: string | null = null
@@ -66,6 +78,9 @@ function readTable(account: string | null): Table {
   }
   if (raw === null) {
     return {}
+  }
+  if (控え !== null && 控え.raw === raw) {
+    return 控え.table
   }
   try {
     const parsed: unknown = JSON.parse(raw)
@@ -78,6 +93,7 @@ function readTable(account: string | null): Table {
         table[card] = text
       }
     }
+    控え = { raw, table }
     return table
   } catch {
     // 誰かが手で壊した／別の版が別の形で書いた。既定へ落とす
@@ -104,7 +120,9 @@ export function putDraft(
   account: string | null,
   text: string,
 ): void {
-  const table = readTable(account)
+  // **控えを直接いじらない。** `readTable` は控えた表をそのまま返すことがあるので、
+  // ここで書き換えると「まだ書いていない中身」を控えが持つことになる
+  const table = { ...readTable(account) }
   // 末尾へ送るために、一度消してから入れ直す
   delete table[cardId]
   if (text !== '') {
@@ -138,8 +156,18 @@ export function useDraft(
   const pending = useRef<string | null>(null)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  /** 最後に読んだ相手。**初回は `useState` が読んでいる**ので、効果では読み直さない */
+  const 読んだ相手 = useRef(`${cardId}::${account ?? ''}`)
+
   // 相手が変わったら読み直す。**入れ物を使い回すと、前のカードの文が出る**
   useEffect(() => {
+    const 相手 = `${cardId}::${account ?? ''}`
+    if (読んだ相手.current === 相手) {
+      // 初回。**ここで読み直すと、開くたびに表を2回読むことになる**——横並びの
+      // 画面ではカードの数だけ倍になる（12枚なら24回。コードレビュー対応14）
+      return
+    }
+    読んだ相手.current = 相手
     setText(readDraft(cardId, account))
   }, [cardId, account])
 

@@ -70,13 +70,32 @@ export function foldMarkdown(text: string, limit: number = BODY_FOLD_LIMIT): Fol
     return { head: text, folded: false }
   }
 
-  const cut = text.slice(0, limit)
+  const cut = cutAtCodePoint(text, limit)
   const lastBreak = cut.lastIndexOf('\n')
   const backed = lastBreak >= 0 ? cut.slice(0, lastBreak) : ''
   // 戻した先が空＝1行目が limit より長い。戻す先が無いので、そのまま切る
   const head = backed.trim() === '' ? cut : backed
 
   return { head: closeFence(head), folded: true }
+}
+
+/**
+ * `limit` 個ぶんの位置で切る。**符号位置の境目で切る**ので、絵文字を割らない。
+ *
+ * `String` の長さは UTF-16 の単位で数えるので、素の `slice(0, limit)` は
+ * **サロゲートペアの途中で切れる**ことがある。切れると末尾に `�` が出る——
+ * しかも**1行目がしきい値より長いときだけ**通る道なので、普通の本文では出ない。
+ *
+ * 境目まで戻すので、返る長さは `limit` 以下になる（最大1つぶん短い）。
+ */
+function cutAtCodePoint(text: string, limit: number): string {
+  if (text.length <= limit) {
+    return text
+  }
+  // 切り口が下位サロゲートなら、その手前まで戻す
+  const code = text.charCodeAt(limit)
+  const 下位サロゲート = code >= 0xdc00 && code <= 0xdfff
+  return text.slice(0, 下位サロゲート ? limit - 1 : limit)
 }
 
 /**

@@ -1,5 +1,6 @@
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { CardId } from '@/lib/protocol'
 import {
   dropDraft,
   MAX_DRAFTS,
@@ -172,5 +173,58 @@ describe('useDraft', () => {
     // 入れ物を使い回して前のカードの文が出る、を防ぐ
     expect(view.result.current[0]).toBe('B の文')
     view.unmount()
+  })
+})
+
+describe('読み書きの回数', () => {
+  it('1枚開くとき、表を1回しか読まない', () => {
+    // `useState` の初期化と直後の効果で**同じ表を2回**解析していた。横並びでは
+    // カードの数だけ倍になる（12枚なら24回。コードレビュー対応14）
+    localStorage.setItem(
+      'agentdashboard.drafts.alice',
+      JSON.stringify({ 'card-1': '書きかけ' }),
+    )
+    const 読んだ = vi.spyOn(Storage.prototype, 'getItem')
+
+    const view = renderHook(() => useDraft('card-1' as CardId, 'alice'))
+
+    expect(view.result.current[0]).toBe('書きかけ')
+    expect(読んだ).toHaveBeenCalledTimes(1)
+    読んだ.mockRestore()
+    view.unmount()
+  })
+
+  it('相手が変わったら読み直す', () => {
+    // 回数を減らした代わりに、**読み直しが要る場面まで止めていない**ことを見る
+    localStorage.setItem(
+      'agentdashboard.drafts.alice',
+      JSON.stringify({ 'card-1': 'いち', 'card-2': 'に' }),
+    )
+    const view = renderHook(({ id }) => useDraft(id as CardId, 'alice'), {
+      initialProps: { id: 'card-1' },
+    })
+    expect(view.result.current[0]).toBe('いち')
+
+    view.rerender({ id: 'card-2' })
+
+    expect(view.result.current[0]).toBe('に')
+    view.unmount()
+  })
+
+  it('別のタブが書き換えたら、次に読むとき追随する', () => {
+    // **控えるのは解析だけ。** `getItem` は毎回するので、外から書き換えられても
+    // 古いものを返す道が無い
+    localStorage.setItem(
+      'agentdashboard.drafts.alice',
+      JSON.stringify({ 'card-9': 'まえ' }),
+    )
+    expect(readDraft('card-9' as CardId, 'alice')).toBe('まえ')
+
+    localStorage.setItem(
+      'agentdashboard.drafts.alice',
+      JSON.stringify({ 'card-9': 'あと' }),
+    )
+
+    expect(readDraft('card-9' as CardId, 'alice')).toBe('あと')
   })
 })
