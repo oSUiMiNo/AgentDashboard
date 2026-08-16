@@ -15,10 +15,20 @@
 //! ダッシュボードが必要とするのは「最新の状態」と「完全な履歴」で、その2つは
 //! 別の方法で守られている。
 //!
-//! # 溜めるほうに上限を置かない
+//! # 溜めるほうにも上限を置く（2026-08-16 に改めた）
 //!
-//! 長い切断で手元のバッチは増え続ける。上限を置いて捨てると「欠落なし」（要件の非機能）が
-//! 壊れるので、**遅れは許容し、欠落は許容しない**（ローカルの待ち行列と同じ判断。§20-1）。
+//! 以前ここには「上限を置かない」と書いてあった。捨てると「欠落なし」（要件の非機能）が
+//! 壊れる、という理由である。**畳み先を変えたので、その理由は当たらなくなった**——捨てるのは
+//! 送る予定だった写しだけで、履歴そのものは利用者の機械の JSONL に残っている。位置を忘れて
+//! 頭から読み直せば、同じものが揃う（イシュー「溜まった履歴の ack が詰まって線が切れ続ける」
+//! 設計§4-5）。
+//!
+//! したがっていまは3つの上限を持つ。**どれも「滅多に発動しない保険」**として置いてある。
+//!
+//! - **窓**……同時に未 ack にしてよいバッチの数（§3）
+//! - **溜まりの上限**……カードごと／全カードの合計のノード数（§4-1）
+//! - **1通の上限**……1つのバッチに入れるノード数（§4-6）。**これを超えると受け取る側が
+//!   無言で接続をリセットする**（実測：21MB でリセット・15MB は通る）
 
 use crate::{
     events::{EventSink, LocalEventBus, TranscriptReport},
@@ -36,6 +46,7 @@ use protocol::{
     ws::ServerMessage,
 };
 use std::{
+    collections::{HashMap, VecDeque},
     path::Path,
     sync::{Arc, Mutex},
     time::Duration,
@@ -54,6 +65,47 @@ const SILENCE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 名乗りの応答を待つ上限。
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 送る側が守る量の上限（設計§3-1・§4-1・§4-6）。
+///
+/// **1つの構造体にまとめてあるのは、テストから小さく差し替えるため**である。既定値のままだと
+/// テストが実運用の量（3万ノード規模）を作ることになり、確かめたい性質より先に時間が尽きる。
+#[derive(Debug, Clone, Copy)]
+struct Limits {
+    /// 同時に未 ack にしてよいバッチの数（設計§3-1）。
+    ///
+    /// 実測で決めた（2026-08-16）。1バッチの記録に 10.8ms・エッジまでの往復が 87〜101ms
+    /// なので下限は約 8.3。上は 64 にしても追いつきが縮まらない。**32 は下限の約4倍で、
+    /// 頭打ちの手前**にあたる。
+    window: usize,
+    /// 1枚のカードに溜めてよいノード数（設計§4-1）。
+    ///
+    /// 手元でいちばん大きいカードが 15,978 ノード。**読み直しが必ず収まるよう**その2倍。
+    /// 収まらない値を置くと、そのカードは畳むたびに輪へ入る（設計§4-2）。
+    card_nodes: usize,
+    /// 全カードの合計（設計§4-1 の backstop）。1枚ずつは上限内でも全体が育つため。
+    total_nodes: usize,
+    /// **1通に入れるノード数**（設計§4-6）。
+    ///
+    /// 1フレームの上限は 16 MiB で、超えると受け取る側が**無言で接続をリセットする**。
+    /// 1ノード平均 2.4 KB なので 1,500 ノード ≈ 3.6 MB、上限の4分の1以下に収まる。
+    ///
+    /// **ノード数だけでは上限を保証できない。** 1ノードが 200.7 KB に達した実測があり、
+    /// 極端な並びなら 1,500 ノードでも 16 MiB を超えうる。保証が要るなら直列化した
+    /// バイトで切ることになるが、数えるのに直列化が要る（設計§4-1）ので、まずは数で置く。
+    batch_nodes: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            window: 32,
+            card_nodes: 32_768,
+            total_nodes: 65_536,
+            batch_nodes: 1_500,
+        }
+    }
+}
 
 /// 接続先と身分証。
 #[derive(Debug, Clone)]
@@ -280,10 +332,15 @@ fn to_agent_message(event: &ServerMessage) -> Option<AgentMessage> {
     })
 }
 
-/// ack を待っている、または待たせている履歴1件。
+/// ack を待っている、または待たせている履歴1件。**1件がそのまま1通になる。**
 struct Pending {
     batch_id: BatchId,
     card_id: CardId,
+    /// **この接続で送り出したか**（設計§3-2）。
+    ///
+    /// `inflight` に居ることと、いまの接続で出したことは別である。切れたら全部 `false` へ
+    /// 戻すので、この印が「窓を何件ぶん埋めているか」の唯一の根拠になる。
+    sent: bool,
     kind: PendingKind,
 }
 
@@ -317,9 +374,27 @@ impl Pending {
             },
         }
     }
+
+    fn node_count(&self) -> usize {
+        match &self.kind {
+            PendingKind::Nodes { nodes, .. } => nodes.len(),
+            PendingKind::Reset => 0,
+        }
+    }
 }
 
-/// 履歴の送り出し（設計§6-1・§6-2）。
+/// 1枚のカードを畳んだ履歴（設計§4-2 の歯止め2つ）。
+#[derive(Debug, Default)]
+struct FoldState {
+    /// 畳んで積んだ `Reset` の ack をまだ待っている。**この間は二度畳まない**
+    waiting_reset: bool,
+    /// 一度畳んで、読み直しまで済んだ
+    folded_once: bool,
+    /// 読み直した結果がまた上限を超えた。**畳んでも小さくならないので、もう畳まない**
+    gave_up: bool,
+}
+
+/// 履歴の送り出し（セルフホスト化設計§6-1・§6-2 と、イシュー設計§3・§4）。
 struct Outbox {
     offsets: Arc<OffsetStore>,
     next_id: u64,
@@ -327,6 +402,13 @@ struct Outbox {
     buffered: Vec<Pending>,
     /// 送ったが ack が返っていないぶん
     inflight: Vec<Pending>,
+    limits: Limits,
+    /// 畳んだので**監視を止めてほしい**カード（設計§4-3）
+    needs_unwatch: Vec<CardId>,
+    /// `Reset` が入ったので**読み直しを頼んでほしい**カード（設計§4-3）
+    needs_rewatch: Vec<CardId>,
+    /// 畳んだカードの履歴。**輪に入らないための歯止め**（設計§4-2）
+    fold: HashMap<CardId, FoldState>,
 }
 
 impl Outbox {
@@ -336,6 +418,10 @@ impl Outbox {
             next_id: 1,
             buffered: Vec::new(),
             inflight: Vec::new(),
+            limits: Limits::default(),
+            needs_unwatch: Vec::new(),
+            needs_rewatch: Vec::new(),
+            fold: HashMap::new(),
         }
     }
 
@@ -363,39 +449,63 @@ impl Outbox {
             next_offset,
         };
 
-        // 同じカードの、**巻き戻しを挟まない**最後のバッチを探す
-        let mergeable = self
-            .buffered
-            .iter_mut()
-            .rev()
-            .take_while(|pending| {
-                pending.card_id != card_id || matches!(pending.kind, PendingKind::Nodes { .. })
-            })
-            .find(|pending| pending.card_id == card_id);
+        // **1通の上限は、出すときではなく積むときに効かせる**（設計§4-6）。ここで
+        // 割っておけば「1つの Pending ＝ 1通」が保たれ、ack との対応が 1:1 のまま崩れない
+        let cap = self.limits.batch_nodes.max(1);
+        let mut rest: VecDeque<TreeNode> = nodes.into();
 
-        if let Some(Pending {
-            kind:
-                PendingKind::Nodes {
-                    nodes: acc,
-                    commits,
-                },
-            ..
-        }) = mergeable
-        {
-            acc.extend(nodes);
-            commits.push(commit);
-            return;
+        loop {
+            let index = match Self::mergeable_index(&self.buffered, card_id) {
+                // 空きがあるか、載せるものがもう無い（＝位置だけ付ける）なら、その相手でよい
+                Some(index) if self.buffered[index].node_count() < cap || rest.is_empty() => index,
+                _ => {
+                    let batch_id = self.take_id();
+                    self.buffered.push(Pending {
+                        batch_id,
+                        card_id,
+                        sent: false,
+                        kind: PendingKind::Nodes {
+                            nodes: Vec::new(),
+                            commits: Vec::new(),
+                        },
+                    });
+                    self.buffered.len() - 1
+                }
+            };
+
+            let PendingKind::Nodes {
+                nodes: acc,
+                commits,
+            } = &mut self.buffered[index].kind
+            else {
+                unreachable!("載せ先は必ず Nodes（探す側も積む側も Nodes しか返さない）");
+            };
+
+            let take = cap.saturating_sub(acc.len()).min(rest.len());
+            acc.extend(rest.drain(..take));
+            if rest.is_empty() {
+                // **位置を進めてよいのは、その報告を載せ終えた断片だけ。** 手前の断片に
+                // 付けると、そちらだけ ack が返った時点で**まだ入っていないノードの先まで
+                // 位置が進む**——読み直しても戻れないので、そのまま欠落になる
+                commits.push(commit);
+                break;
+            }
         }
 
-        let batch_id = self.take_id();
-        self.buffered.push(Pending {
-            batch_id,
-            card_id,
-            kind: PendingKind::Nodes {
-                nodes,
-                commits: vec![commit],
-            },
-        });
+        self.enforce_limits(card_id);
+    }
+
+    /// 同じカードの、**巻き戻しを挟まない**最後のバッチ（セルフホスト化設計§6-2）。
+    fn mergeable_index(buffered: &[Pending], card_id: CardId) -> Option<usize> {
+        buffered
+            .iter()
+            .enumerate()
+            .rev()
+            .take_while(|(_, pending)| {
+                pending.card_id != card_id || matches!(pending.kind, PendingKind::Nodes { .. })
+            })
+            .find(|(_, pending)| pending.card_id == card_id)
+            .map(|(index, _)| index)
     }
 
     fn push_reset(&mut self, card_id: CardId) {
@@ -403,20 +513,55 @@ impl Outbox {
         self.buffered.push(Pending {
             batch_id,
             card_id,
+            sent: false,
             kind: PendingKind::Reset,
         });
+        self.enforce_limits(card_id);
     }
 
-    /// 束ねていたぶんを送りに出す。返るのは送るべきメッセージの列（順序どおり）。
-    fn flush(&mut self) -> Vec<AgentMessage> {
-        let messages: Vec<AgentMessage> = self.buffered.iter().map(Pending::message).collect();
-        self.inflight.append(&mut self.buffered);
+    /// 送れるぶんだけ出す（設計§3-2）。**`flush()` と `resend()` を一本化したもの。**
+    ///
+    /// 返すのは `窓 − 送出済みで未 ack の数` 件まで。順は
+    ///
+    /// 1. `inflight` のうち、**この接続でまだ出していない**もの（＝復帰時の送り直し）
+    /// 2. `buffered` の先頭から、窓が空いているぶん
+    ///
+    /// **並べ替えない**（設計§3-4）。窓が絞るのは先頭から何件出すかだけで、
+    /// セルフホスト化設計§6-2 の送信順序は崩さない。
+    fn pump(&mut self) -> Vec<AgentMessage> {
+        let window = self.limits.window.max(1);
+        let sent = self.inflight.iter().filter(|pending| pending.sent).count();
+        let mut room = window.saturating_sub(sent);
+        let mut messages = Vec::new();
+
+        for pending in self.inflight.iter_mut() {
+            if room == 0 {
+                return messages;
+            }
+            if pending.sent {
+                continue;
+            }
+            pending.sent = true;
+            messages.push(pending.message());
+            room -= 1;
+        }
+
+        let take = room.min(self.buffered.len());
+        for mut pending in self.buffered.drain(..take).collect::<Vec<_>>() {
+            pending.sent = true;
+            messages.push(pending.message());
+            self.inflight.push(pending);
+        }
         messages
     }
 
-    /// 未 ack のぶんを送り直す（復帰手順。§6-4）。
-    fn resend(&self) -> Vec<AgentMessage> {
-        self.inflight.iter().map(Pending::message).collect()
+    /// 切れたので、送出済みの印を**全部下ろす**（設計§3-2）。
+    ///
+    /// 次の接続では、この印が下りているぶんが送り直しの対象になる。
+    fn unmark_sent(&mut self) {
+        for pending in self.inflight.iter_mut() {
+            pending.sent = false;
+        }
     }
 
     /// **記録に入った**ので位置を進める。
@@ -441,12 +586,145 @@ impl Outbox {
                     );
                 }
             }
-            PendingKind::Reset => self.offsets.forget(pending.card_id),
+            PendingKind::Reset => {
+                self.offsets.forget(pending.card_id);
+                // 畳んで積んだ `Reset` なら、**ここが読み直しを頼む時機**（設計§4-2 の5）。
+                // 位置を忘れただけでは何も起きない——頼み直して初めて頭から読まれる
+                if let Some(state) = self.fold.get_mut(&pending.card_id) {
+                    if state.waiting_reset {
+                        state.waiting_reset = false;
+                        state.folded_once = true;
+                        self.needs_rewatch.push(pending.card_id);
+                    }
+                }
+            }
         }
     }
 
     fn pending_count(&self) -> usize {
         self.buffered.len() + self.inflight.len()
+    }
+
+    fn card_nodes(&self, card_id: CardId) -> usize {
+        self.buffered
+            .iter()
+            .chain(self.inflight.iter())
+            .filter(|pending| pending.card_id == card_id)
+            .map(Pending::node_count)
+            .sum()
+    }
+
+    fn total_nodes(&self) -> usize {
+        self.buffered
+            .iter()
+            .chain(self.inflight.iter())
+            .map(Pending::node_count)
+            .sum()
+    }
+
+    /// 上限を超えていたら畳む（設計§4-1・§4-2）。
+    ///
+    /// **呼ぶのは積むとき（`push` ／ `push_reset`）であって、出すとき（`pump`）ではない。**
+    /// `pump()` は繋がっているときしか呼ばれないので、そこに置くと**切断中はいくらでも
+    /// 育つ**——いちばん抑えたい場合がちょうど抜ける。
+    fn enforce_limits(&mut self, card_id: CardId) {
+        if self.card_nodes(card_id) > self.limits.card_nodes {
+            self.fold(card_id);
+        }
+        if self.total_nodes() <= self.limits.total_nodes {
+            return;
+        }
+        // 全体の backstop（設計§4-1）。1枚ずつは上限内でも、枚数が多いと育つ。
+        // **大きいカードから**畳んで、合計が下回ったらそこで止める
+        let mut cards: Vec<CardId> = self
+            .buffered
+            .iter()
+            .chain(self.inflight.iter())
+            .map(|pending| pending.card_id)
+            .collect();
+        cards.sort_unstable();
+        cards.dedup();
+        cards.sort_by_key(|card| std::cmp::Reverse(self.card_nodes(*card)));
+        for card in cards {
+            if self.total_nodes() <= self.limits.total_nodes {
+                break;
+            }
+            self.fold(card);
+        }
+    }
+
+    /// 1枚のカードを畳む（設計§4-2）。畳んだら `true`。
+    ///
+    /// 捨てるのは**送る予定だった写し**だけで、履歴そのものは利用者の機械の JSONL に残って
+    /// いる。位置を忘れて頭から読み直せば同じものが揃う（設計§4-5）。
+    fn fold(&mut self, card_id: CardId) -> bool {
+        enum Decision {
+            Fold,
+            GiveUp,
+            Skip,
+        }
+        let decision = {
+            let state = self.fold.entry(card_id).or_default();
+            if state.gave_up || state.waiting_reset {
+                // **二度畳まない。** 畳んだ結果が入る前にもう一度畳むと、
+                // 畳んでは読み直す輪になる
+                Decision::Skip
+            } else if state.folded_once {
+                state.gave_up = true;
+                Decision::GiveUp
+            } else {
+                state.waiting_reset = true;
+                Decision::Fold
+            }
+        };
+
+        match decision {
+            Decision::Skip => false,
+            Decision::GiveUp => {
+                // 読み直した結果がまた超えた＝**このカードは畳んでも小さくならない**。
+                // 輪になるほうが害が大きいので、やめて1行残す（設計§4-2）
+                tracing::warn!(
+                    %card_id,
+                    nodes = self.card_nodes(card_id),
+                    "読み直しても上限を超えるので、これ以上畳みません"
+                );
+                false
+            }
+            Decision::Fold => {
+                let dropped = self.card_nodes(card_id);
+                self.buffered.retain(|pending| pending.card_id != card_id);
+                self.inflight.retain(|pending| pending.card_id != card_id);
+                self.needs_unwatch.push(card_id);
+                let batch_id = self.take_id();
+                self.buffered.push(Pending {
+                    batch_id,
+                    card_id,
+                    sent: false,
+                    kind: PendingKind::Reset,
+                });
+                tracing::warn!(
+                    %card_id,
+                    nodes = dropped,
+                    "溜まりが上限を超えたので畳みました。読み直して送り直します"
+                );
+                true
+            }
+        }
+    }
+
+    /// 監視を止めてほしいカードを取り出す。**取り出したら消える**（設計§4-3）。
+    ///
+    /// 適用するのは `manager` を持っている側で、配線はフェーズ3。`Outbox` から
+    /// `SessionManager` を呼ぶと参照が輪になる（manager → events → link → outbox → manager）。
+    #[allow(dead_code)] // 呼ぶ側を作るのはフェーズ3。印を溜める側だけ先に置いてある
+    fn take_unwatch(&mut self) -> Vec<CardId> {
+        std::mem::take(&mut self.needs_unwatch)
+    }
+
+    /// 読み直しを頼んでほしいカードを取り出す。**取り出したら消える**（設計§4-3）。
+    #[allow(dead_code)] // 同上
+    fn take_rewatch(&mut self) -> Vec<CardId> {
+        std::mem::take(&mut self.needs_rewatch)
     }
 }
 
@@ -486,6 +764,10 @@ async fn run(
                     &mut intervals,
                 )
                 .await;
+                // 送出済みの印を全部下ろす（設計§3-2）。**`connected()` は `return` が
+                // 多いので、書き分けずにここ1箇所で戻す**——1つ漏らすと、その接続で
+                // 出したぶんが次の接続で送り直されないまま窓を埋め続ける
+                outbox.unmark_sent();
                 // 見ている相手が居るかどうかを知っているのはサーバ側なので、切れたら
                 // 一旦全部止める。作り続けても行き先が無い（§7-4）
                 manager.unsubscribe_all_screens();
@@ -639,8 +921,11 @@ async fn connected(
     // ここで揃う——**繋がっていなかった PC のぶんは、この経路でしか届かない**
     manager.set_screen_settings((*intervals).into());
 
-    // 復帰手順（§6-4）：全セッションを送り直す → 未 ack を送り直す
-    let mut initial: Vec<AgentMessage> = manager
+    // 復帰手順（§6-4）：全セッションを送り直す → 未 ack を送り直す。
+    //
+    // **積むだけにする**（設計§2-2）。以前はここで送り切っていたので、その間ずっと
+    // 相手の ack も指示も読まなかった——1055件を抱えていると、読む番が永久に回ってこない
+    let mut waiting: VecDeque<AgentMessage> = manager
         .list()
         .into_iter()
         .map(|meta| AgentMessage::SessionUpsert {
@@ -653,14 +938,9 @@ async fn connected(
         .expect("ロックが壊れていない")
         .as_ref()
     {
-        initial.push(table.message());
+        waiting.push_back(table.message());
     }
-    initial.extend(outbox.resend());
-    for message in initial {
-        if send(&mut sink, &message).await.is_err() {
-            return;
-        }
-    }
+    waiting.extend(outbox.pump());
 
     let mut flush = tokio::time::interval(Duration::from_secs(intervals.sync_secs.max(1)));
     flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -670,6 +950,17 @@ async fn connected(
 
     loop {
         tokio::select! {
+            // 未送出があるときだけ、**1回に1通**出す（設計§2-2）。
+            //
+            // `select!` は準備できている枝から無作為に1つ選ぶので、列が空でない間も
+            // 受信の枝が選ばれうる。**これが「送りながら読む」の実体**である
+            _ = std::future::ready(()), if !waiting.is_empty() => {
+                let message = waiting.pop_front().expect("空でないことを見てから取り出している");
+                if send(&mut sink, &message).await.is_err() {
+                    return;
+                }
+            },
+
             received = inbox.recv() => match received {
                 Some(Outgoing::Volatile(message)) | Some(Outgoing::ModelTable(message)) => {
                     if send(&mut sink, &message).await.is_err() {
@@ -689,17 +980,13 @@ async fn connected(
             },
 
             _ = flush.tick() => {
-                for message in outbox.flush() {
-                    if send(&mut sink, &message).await.is_err() {
-                        return;
-                    }
-                }
+                waiting.extend(outbox.pump());
             }
 
             incoming = stream.next() => match incoming {
                 Some(Ok(message)) => {
                     last_seen = tokio::time::Instant::now();
-                    if !handle_incoming(message, manager, &link.outgoing, outbox, intervals, &mut flush) {
+                    if !handle_incoming(message, manager, &link.outgoing, outbox, intervals, &mut flush, &mut waiting) {
                         return;
                     }
                 }
@@ -728,11 +1015,14 @@ fn handle_incoming(
     outbox: &mut Outbox,
     intervals: &mut Intervals,
     flush: &mut tokio::time::Interval,
+    waiting: &mut VecDeque<AgentMessage>,
 ) -> bool {
     match message {
         tungstenite::Message::Text(text) => {
             match serde_json::from_str::<ServerToAgent>(&text) {
-                Ok(command) => apply_command(command, manager, outgoing, outbox, intervals, flush),
+                Ok(command) => apply_command(
+                    command, manager, outgoing, outbox, intervals, flush, waiting,
+                ),
                 // 知らない指示で接続ごと落とさない。新しいサーバが増やしたものでありうる
                 Err(err) => tracing::warn!("サーバの指示を解釈できません: {err}"),
             }
@@ -818,12 +1108,18 @@ fn apply_command(
     outbox: &mut Outbox,
     intervals: &mut Intervals,
     flush: &mut tokio::time::Interval,
+    waiting: &mut VecDeque<AgentMessage>,
 ) {
     match command {
         // 2度目の名乗りは実装の食い違い。無視して続ける
         ServerToAgent::Hello { .. } => {}
 
-        ServerToAgent::BatchAck { batch_id } => outbox.ack(batch_id),
+        ServerToAgent::BatchAck { batch_id } => {
+            outbox.ack(batch_id);
+            // **その場でまた出す**（設計§3-3）。ack を待って次を出す形にすると、
+            // 窓は自然に回り続ける——次の `flush.tick()` まで待つ理由が無い
+            waiting.extend(outbox.pump());
+        }
 
         ServerToAgent::SetIntervals {
             intervals: updated, ..
@@ -1034,6 +1330,22 @@ mod tests {
         }
     }
 
+    /// ノードを `count` 個持つ報告。
+    fn report_nodes(
+        card_id: CardId,
+        prefix: &str,
+        count: usize,
+        next_offset: u64,
+    ) -> TranscriptReport {
+        TranscriptReport {
+            card_id,
+            transcript_path: "/p/s.jsonl".to_string(),
+            source: "/p/s.jsonl".to_string(),
+            next_offset,
+            nodes: (0..count).map(|i| node(&format!("{prefix}{i}"))).collect(),
+        }
+    }
+
     fn outbox(label: &str) -> (Outbox, Arc<OffsetStore>, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!(
             "agentdashboard-outbox-{label}-{}",
@@ -1042,6 +1354,53 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("一時ディレクトリを作れること");
         let offsets = OffsetStore::open(dir.clone());
         (Outbox::new(Arc::clone(&offsets)), offsets, dir)
+    }
+
+    /// **窓と上限を小さくして作る。** 既定のままだと、テストが実運用の量（3万ノード規模）を
+    /// 作ることになり、確かめたい性質より先に時間が尽きる（テスト計画フェーズ2）。
+    fn outbox_with(label: &str, limits: Limits) -> (Outbox, Arc<OffsetStore>, std::path::PathBuf) {
+        let (mut outbox, offsets, dir) = outbox(label);
+        outbox.limits = limits;
+        (outbox, offsets, dir)
+    }
+
+    fn batch_id_of(message: &AgentMessage) -> BatchId {
+        match message {
+            AgentMessage::TranscriptBatch { batch_id, .. }
+            | AgentMessage::TranscriptReset { batch_id, .. } => *batch_id,
+            other => panic!("履歴の通ではない: {other:?}"),
+        }
+    }
+
+    fn card_of(message: &AgentMessage) -> CardId {
+        match message {
+            AgentMessage::TranscriptBatch { card_id, .. }
+            | AgentMessage::TranscriptReset { card_id, .. } => *card_id,
+            other => panic!("履歴の通ではない: {other:?}"),
+        }
+    }
+
+    fn nodes_of(message: &AgentMessage) -> usize {
+        match message {
+            AgentMessage::TranscriptBatch { nodes, .. } => nodes.len(),
+            other => panic!("バッチではない: {other:?}"),
+        }
+    }
+
+    fn node_ids(message: &AgentMessage) -> Vec<String> {
+        match message {
+            AgentMessage::TranscriptBatch { nodes, .. } => {
+                nodes.iter().map(|node| node.id.0.clone()).collect()
+            }
+            other => panic!("バッチではない: {other:?}"),
+        }
+    }
+
+    fn resets_in(messages: &[AgentMessage]) -> usize {
+        messages
+            .iter()
+            .filter(|message| matches!(message, AgentMessage::TranscriptReset { .. }))
+            .count()
     }
 
     #[test]
@@ -1053,12 +1412,9 @@ mod tests {
         outbox.push(report(card_id, "n1", 10));
         outbox.push(report(card_id, "n2", 20));
 
-        let messages = outbox.flush();
+        let messages = outbox.pump();
         assert_eq!(messages.len(), 1, "実際: {messages:?}");
-        match &messages[0] {
-            AgentMessage::TranscriptBatch { nodes, .. } => assert_eq!(nodes.len(), 2),
-            other => panic!("バッチではない: {other:?}"),
-        }
+        assert_eq!(nodes_of(&messages[0]), 2);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1071,21 +1427,21 @@ mod tests {
         outbox.push_reset(card_id);
         outbox.push(report(card_id, "n2", 20));
 
-        let messages = outbox.flush();
-        assert!(
-            matches!(messages[0], AgentMessage::TranscriptBatch { .. }),
-            "実際: {:?}",
-            messages[0]
-        );
+        let messages = outbox.pump();
+        assert_eq!(messages.len(), 3, "実際: {messages:?}");
+        // **どのノードが前後どちらに居るか**まで見る。種別だけを見ていると、
+        // 並べ替えが起きても「バッチ・巻き戻し・バッチ」の形は保たれるので通ってしまう
+        // （壊し方6「pump() で並べ替える」を当てたときに、実際に素通しした）
+        assert_eq!(node_ids(&messages[0]), vec!["n1"], "実際: {messages:?}");
         assert!(
             matches!(messages[1], AgentMessage::TranscriptReset { .. }),
             "実際: {:?}",
             messages[1]
         );
-        assert!(
-            matches!(messages[2], AgentMessage::TranscriptBatch { .. }),
-            "巻き戻しの後のぶんが前へ回っている: {:?}",
-            messages[2]
+        assert_eq!(
+            node_ids(&messages[2]),
+            vec!["n2"],
+            "巻き戻しの後のぶんが前へ回っている: {messages:?}"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1095,21 +1451,22 @@ mod tests {
         let (mut outbox, offsets, dir) = outbox("ack");
         let card_id = CardId::new();
         outbox.push(report(card_id, "n1", 10));
-        let messages = outbox.flush();
-        let AgentMessage::TranscriptBatch { batch_id, .. } = messages[0] else {
-            panic!("バッチではない")
-        };
+        let messages = outbox.pump();
+        let batch_id = batch_id_of(&messages[0]);
 
         assert!(
             offsets.resume(card_id, "/p/s.jsonl").is_empty(),
             "送っただけで位置が進んでいる"
         );
-        assert_eq!(outbox.resend().len(), 1, "未 ack が送り直しの対象に無い");
+        // 切れた形にすると、未 ack は送り直しの対象へ戻る（設計§3-2）
+        outbox.unmark_sent();
+        assert_eq!(outbox.pump().len(), 1, "未 ack が送り直しの対象に無い");
 
         outbox.ack(batch_id);
 
         assert_eq!(offsets.resume(card_id, "/p/s.jsonl")["/p/s.jsonl"], 10);
-        assert!(outbox.resend().is_empty(), "ack 済みが残っている");
+        outbox.unmark_sent();
+        assert!(outbox.pump().is_empty(), "ack 済みが残っている");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1118,23 +1475,39 @@ mod tests {
         let (mut outbox, offsets, dir) = outbox("reset-ack");
         let card_id = CardId::new();
         outbox.push(report(card_id, "n1", 10));
-        let first = outbox.flush();
-        let AgentMessage::TranscriptBatch { batch_id, .. } = first[0] else {
-            panic!("バッチではない")
-        };
-        outbox.ack(batch_id);
+        let first = outbox.pump();
+        outbox.ack(batch_id_of(&first[0]));
         assert!(!offsets.resume(card_id, "/p/s.jsonl").is_empty());
 
+        // パーサが申告した巻き戻し。**監視は止めていない**ので、読み直しは頼まない
         outbox.push_reset(card_id);
-        let second = outbox.flush();
-        let AgentMessage::TranscriptReset { batch_id, .. } = second[0] else {
-            panic!("巻き戻しではない")
-        };
-        outbox.ack(batch_id);
+        let second = outbox.pump();
+        assert!(
+            matches!(second[0], AgentMessage::TranscriptReset { .. }),
+            "巻き戻しではない: {:?}",
+            second[0]
+        );
+        outbox.ack(batch_id_of(&second[0]));
 
         assert!(
             offsets.resume(card_id, "/p/s.jsonl").is_empty(),
             "巻き戻したのに位置が残っている（先のやりとりが二度と読まれない）"
+        );
+        assert!(
+            outbox.take_rewatch().is_empty(),
+            "止めていない監視を頼み直そうとしている"
+        );
+
+        // **忘れるだけでは終わらない。** 畳んで積んだ巻き戻しは監視を止めてあるので、
+        // ack のここで頼み直さないと、そのカードの履歴が二度と出てこない（設計§4-2 の5）
+        outbox.limits.card_nodes = 2;
+        outbox.push(report_nodes(card_id, "m", 3, 20));
+        let folded = outbox.pump();
+        outbox.ack(batch_id_of(&folded[0]));
+        assert_eq!(
+            outbox.take_rewatch(),
+            vec![card_id],
+            "畳んだのに読み直しが頼まれない"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1145,12 +1518,412 @@ mod tests {
         let (mut outbox, _offsets, dir) = outbox("double");
         let card_id = CardId::new();
         outbox.push(report(card_id, "n1", 10));
-        let messages = outbox.flush();
-        let AgentMessage::TranscriptBatch { batch_id, .. } = messages[0] else {
-            panic!("バッチではない")
-        };
+        let messages = outbox.pump();
+        let batch_id = batch_id_of(&messages[0]);
         outbox.ack(batch_id);
         outbox.ack(batch_id);
+
+        // 畳んだ巻き戻しの ack が2度届いても、**読み直しは1回しか頼まない**。
+        // 2回立つと、そのカードを2度読み直して同じものを二重に送ることになる
+        outbox.limits.card_nodes = 1;
+        outbox.push(report_nodes(card_id, "m", 2, 20));
+        let folded = outbox.pump();
+        let reset_id = batch_id_of(&folded[0]);
+        outbox.ack(reset_id);
+        outbox.ack(reset_id);
+        assert_eq!(
+            outbox.take_rewatch().len(),
+            1,
+            "二重の ack で読み直しが2回立っている"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ------------------------------------------------------------------
+    // 窓（設計§3）
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn 窓を超えて出さない() {
+        // 出しっぱなしにすると、受ける側が返す ack が同時にその数だけ生まれる。
+        // 溜まりが1000件を超えた実機では、それが約束のレーンを溢れさせた（設計§3-1）
+        let (mut outbox, _offsets, dir) = outbox_with(
+            "window",
+            Limits {
+                window: 2,
+                ..Limits::default()
+            },
+        );
+        let cards: Vec<CardId> = (0..5).map(|_| CardId::new()).collect();
+        for (index, card) in cards.iter().enumerate() {
+            outbox.push(report(*card, &format!("n{index}"), 10 + index as u64));
+        }
+
+        assert_eq!(outbox.pump().len(), 2, "窓を超えて出している");
+        assert!(
+            outbox.pump().is_empty(),
+            "窓が埋まっているのに、更に出している"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ackが返ったぶんだけ次が出る() {
+        // 窓が空かないと、溜まりは永久に減らない（実機で239回の再接続を通じて1件も
+        // 減らなかったのがこの形）
+        let (mut outbox, _offsets, dir) = outbox_with(
+            "window-refill",
+            Limits {
+                window: 2,
+                ..Limits::default()
+            },
+        );
+        let cards: Vec<CardId> = (0..5).map(|_| CardId::new()).collect();
+        for (index, card) in cards.iter().enumerate() {
+            outbox.push(report(*card, &format!("n{index}"), 10 + index as u64));
+        }
+
+        let first = outbox.pump();
+        outbox.ack(batch_id_of(&first[0]));
+        assert_eq!(outbox.pump().len(), 1, "ack で空いたぶんが出ていない");
+        outbox.ack(batch_id_of(&first[1]));
+        assert_eq!(
+            outbox.pump().len(),
+            1,
+            "2つ目の ack で空いたぶんが出ていない"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 切れたら送出済みは出していないへ戻る() {
+        // 戻さないと、その接続で出したぶんが**次の接続でも窓を埋めたまま**になり、
+        // 誰も ack を返せないので二度と出せなくなる（設計§3-2）
+        let (mut outbox, _offsets, dir) = outbox_with(
+            "unsend",
+            Limits {
+                window: 2,
+                ..Limits::default()
+            },
+        );
+        let cards: Vec<CardId> = (0..3).map(|_| CardId::new()).collect();
+        for (index, card) in cards.iter().enumerate() {
+            outbox.push(report(*card, &format!("n{index}"), 10 + index as u64));
+        }
+        let first = outbox.pump();
+        assert!(outbox.pump().is_empty());
+
+        outbox.unmark_sent();
+        let again = outbox.pump();
+
+        assert_eq!(again.len(), 2, "送り直しの対象に戻っていない");
+        assert_eq!(
+            batch_id_of(&again[0]),
+            batch_id_of(&first[0]),
+            "送り直しで別のものが出ている"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 窓は先頭から絞るだけで並べ替えない() {
+        // 並べ替えると、巻き戻しがバッチを追い越して消えたはずの枝が残る
+        // （セルフホスト化設計§6-2）。窓が絞るのは**先頭から何件出すか**だけ
+        let (mut outbox, _offsets, dir) = outbox_with(
+            "order-window",
+            Limits {
+                window: 1,
+                ..Limits::default()
+            },
+        );
+        let cards: Vec<CardId> = (0..4).map(|_| CardId::new()).collect();
+        for (index, card) in cards.iter().enumerate() {
+            outbox.push(report(*card, &format!("n{index}"), 10 + index as u64));
+        }
+
+        let mut order = Vec::new();
+        for _ in 0..cards.len() {
+            let out = outbox.pump();
+            assert_eq!(out.len(), 1, "窓1 なのに複数出ている: {out:?}");
+            order.push(card_of(&out[0]));
+            outbox.ack(batch_id_of(&out[0]));
+        }
+
+        assert_eq!(order, cards, "到着順が崩れている");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ------------------------------------------------------------------
+    // 1通の上限（設計§4-6）——この不具合の本命
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn 一通のノード数は上限で割れる() {
+        // 1通が 16MiB を超えると、受け取る側が**無言で接続をリセットする**
+        // （実測：21MB でリセット・15MB は通る）。実機で線を殺していたのはこれ
+        let (mut outbox, _offsets, dir) = outbox_with(
+            "split",
+            Limits {
+                batch_nodes: 2,
+                ..Limits::default()
+            },
+        );
+        let card_id = CardId::new();
+        outbox.push(report_nodes(card_id, "a", 3, 10));
+        // 続きは、空きのある最後のバッチへ載る。**上限に達したら併合しない**
+        outbox.push(report_nodes(card_id, "b", 2, 20));
+
+        let messages = outbox.pump();
+        assert_eq!(messages.len(), 3, "1通のまま出している: {messages:?}");
+        assert_eq!(nodes_of(&messages[0]), 2);
+        assert_eq!(nodes_of(&messages[1]), 2);
+        assert_eq!(nodes_of(&messages[2]), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 割れた断片は最後だけが位置を進める() {
+        // 手前の断片に位置を付けると、そちらだけ ack が返った時点で
+        // **まだ入っていないノードの先まで位置が進む**——読み直しても戻れない
+        let (mut outbox, offsets, dir) = outbox_with(
+            "split-commit",
+            Limits {
+                batch_nodes: 2,
+                ..Limits::default()
+            },
+        );
+        let card_id = CardId::new();
+        outbox.push(report_nodes(card_id, "a", 5, 40));
+        let messages = outbox.pump();
+        assert_eq!(messages.len(), 3);
+
+        outbox.ack(batch_id_of(&messages[0]));
+        outbox.ack(batch_id_of(&messages[1]));
+        assert!(
+            offsets.resume(card_id, "/p/s.jsonl").is_empty(),
+            "まだ入っていないノードの先まで位置が進んでいる"
+        );
+
+        outbox.ack(batch_id_of(&messages[2]));
+        assert_eq!(offsets.resume(card_id, "/p/s.jsonl")["/p/s.jsonl"], 40);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ------------------------------------------------------------------
+    // 溜まりの上限と、畳み方（設計§4）
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn カードごとの上限を超えたら畳む() {
+        let (mut outbox, _offsets, dir) = outbox_with(
+            "fold-card",
+            Limits {
+                card_nodes: 4,
+                ..Limits::default()
+            },
+        );
+        let card_id = CardId::new();
+        outbox.push(report_nodes(card_id, "a", 5, 10));
+
+        assert_eq!(outbox.card_nodes(card_id), 0, "畳まれていない");
+        let messages = outbox.pump();
+        assert_eq!(messages.len(), 1, "実際: {messages:?}");
+        assert_eq!(resets_in(&messages), 1, "巻き戻しが積まれていない");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 全カードの合計でも畳む() {
+        // 1枚ずつは上限内でも、枚数が多いと全体が育つ（設計§4-1 の backstop）
+        let (mut outbox, _offsets, dir) = outbox_with(
+            "fold-total",
+            Limits {
+                card_nodes: 1_000,
+                total_nodes: 5,
+                ..Limits::default()
+            },
+        );
+        for index in 0..3 {
+            outbox.push(report_nodes(CardId::new(), &format!("c{index}"), 3, 10));
+        }
+
+        assert!(
+            outbox.total_nodes() <= 5,
+            "全体の上限を超えたまま: {}",
+            outbox.total_nodes()
+        );
+        assert!(
+            !outbox.needs_unwatch.is_empty(),
+            "全体の上限では畳まれていない"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 畳んだカードは束ねている途中も送出済みも捨てる() {
+        // 片方だけ捨てると、そのカードは上限を超えたまま残る
+        let (mut outbox, _offsets, dir) = outbox_with(
+            "fold-both",
+            Limits {
+                card_nodes: 4,
+                ..Limits::default()
+            },
+        );
+        let card_id = CardId::new();
+        outbox.push(report_nodes(card_id, "a", 3, 10));
+        assert_eq!(outbox.pump().len(), 1, "送出済みを作れていない");
+        outbox.push(report_nodes(card_id, "b", 3, 20));
+
+        assert_eq!(outbox.card_nodes(card_id), 0, "捨て残しがある");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 巻き戻しは一通だけで_ackが返るまで二度畳まない() {
+        // 畳んだ結果が入る前にもう一度畳むと、**畳んでは読み直す輪**になる（設計§4-2）
+        let (mut outbox, _offsets, dir) = outbox_with(
+            "fold-once",
+            Limits {
+                card_nodes: 2,
+                ..Limits::default()
+            },
+        );
+        let card_id = CardId::new();
+        outbox.push(report_nodes(card_id, "a", 3, 10));
+        outbox.push(report_nodes(card_id, "b", 3, 20));
+
+        let messages = outbox.pump();
+        assert_eq!(
+            resets_in(&messages),
+            1,
+            "巻き戻しが1通ではない: {messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| matches!(message, AgentMessage::TranscriptBatch { .. })),
+            "二度畳んで、ack を待っている間のぶんまで捨てている: {messages:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 監視を止める印と読み直しの印は別の時機に立つ() {
+        // 止めるのは畳んだ時点、読み直しは **Reset の ack が返った時点**（設計§4-2）。
+        // 取り違えると、切断中に読み直しが始まって輪になる（設計§4-4）
+        let (mut outbox, _offsets, dir) = outbox_with(
+            "fold-marks",
+            Limits {
+                card_nodes: 2,
+                ..Limits::default()
+            },
+        );
+        let card_id = CardId::new();
+        outbox.push(report_nodes(card_id, "a", 3, 10));
+
+        assert_eq!(
+            outbox.needs_unwatch,
+            vec![card_id],
+            "畳んだ時点で監視を止める印が立っていない"
+        );
+        assert!(
+            outbox.needs_rewatch.is_empty(),
+            "ack より先に読み直しが立っている"
+        );
+
+        let messages = outbox.pump();
+        outbox.ack(batch_id_of(&messages[0]));
+        assert_eq!(
+            outbox.needs_rewatch,
+            vec![card_id],
+            "巻き戻しの ack で読み直しが立っていない"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 畳んでいないカードは巻き込まれない() {
+        let (mut outbox, _offsets, dir) = outbox_with(
+            "fold-scope",
+            Limits {
+                card_nodes: 2,
+                ..Limits::default()
+            },
+        );
+        let small = CardId::new();
+        let big = CardId::new();
+        outbox.push(report_nodes(small, "s", 1, 10));
+        outbox.push(report_nodes(big, "b", 3, 20));
+
+        assert_eq!(
+            outbox.card_nodes(small),
+            1,
+            "畳んでいないカードを捨てている"
+        );
+        assert_eq!(outbox.card_nodes(big), 0);
+        assert_eq!(outbox.needs_unwatch, vec![big], "止める相手を間違えている");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 印は取り出したら消える() {
+        // 2回取ると2回適用される。監視を2回止め、読み直しを2回頼むことになる
+        let (mut outbox, _offsets, dir) = outbox_with(
+            "marks-taken",
+            Limits {
+                card_nodes: 2,
+                ..Limits::default()
+            },
+        );
+        let card_id = CardId::new();
+        outbox.push(report_nodes(card_id, "a", 3, 10));
+
+        assert_eq!(outbox.take_unwatch(), vec![card_id]);
+        assert!(outbox.take_unwatch().is_empty(), "止める印が消えていない");
+
+        let messages = outbox.pump();
+        outbox.ack(batch_id_of(&messages[0]));
+        assert_eq!(outbox.take_rewatch(), vec![card_id]);
+        assert!(
+            outbox.take_rewatch().is_empty(),
+            "読み直しの印が消えていない"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 読み直しても超えるカードは畳むのをやめる() {
+        // 畳んでも同じ大きさに戻るだけのカードは、畳み続けると輪になる（設計§4-2）
+        let (mut outbox, _offsets, dir) = outbox_with(
+            "fold-giveup",
+            Limits {
+                card_nodes: 2,
+                ..Limits::default()
+            },
+        );
+        let card_id = CardId::new();
+
+        // 1度目：畳む → 巻き戻しの ack まで進めて、読み直しが済んだ形にする。
+        // **立った印はここで回収しておく**（残っていると、2度目に立ったのか
+        // 1度目のぶんが残っているのかを見分けられない）
+        outbox.push(report_nodes(card_id, "a", 3, 10));
+        let first = outbox.pump();
+        outbox.ack(batch_id_of(&first[0]));
+        assert_eq!(outbox.take_unwatch(), vec![card_id]);
+        assert_eq!(outbox.take_rewatch(), vec![card_id]);
+
+        // 2度目：読み直した結果がまた超えた。**ここで畳むのをやめる**
+        outbox.push(report_nodes(card_id, "b", 3, 20));
+
+        assert_eq!(
+            outbox.card_nodes(card_id),
+            3,
+            "やめずに畳んでいる（読み直しては畳む輪になる）"
+        );
+        assert!(
+            outbox.take_unwatch().is_empty(),
+            "やめたのに監視を止めようとしている"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
