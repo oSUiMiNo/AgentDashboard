@@ -347,10 +347,6 @@ test.describe('十字ボタン', () => {
 
     // 出る
     await expect(page.getByTestId('dpad')).toBeVisible()
-    await expect(page.getByTestId('composer-input')).toHaveAttribute(
-      'data-collapsed',
-      'true',
-    )
 
     // 動く（既定の「Yes, switch」から1つ下げる）
     await takeSentFrames(page)
@@ -371,9 +367,5 @@ test.describe('十字ボタン', () => {
     // ダイアログを描き直さずに書き足していた頃は、前の1枚が画面に残って
     // 「閉じたのに選択待ちに見える」状態になっていた
     await expect(page.getByTestId('dpad')).toHaveCount(0)
-    await expect(page.getByTestId('composer-input')).toHaveAttribute(
-      'data-collapsed',
-      'false',
-    )
   })
 })

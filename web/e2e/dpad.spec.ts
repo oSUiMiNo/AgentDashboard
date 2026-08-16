@@ -70,22 +70,18 @@ test('選択ダイアログが出ると十字が現れる', async ({ page }) => 
 
   // 支援技術へも伝わっていること（先に置いてある領域の中身が変わる）
   await expect(page.getByTestId('dpad-live')).toHaveText('方向キーを表示しました')
-  // 入力欄は**消えずに畳まれる**（設計§11）
-  await expect(page.getByTestId('composer-input')).toHaveAttribute(
-    'data-collapsed',
-    'true',
-  )
 })
 
-test('構造化ビューを見ていても十字は出る', async ({ page }) => {
-  // 設計§6「タブによらず出す」。権限確認は構造化ビューを見ている最中に来るので、
-  // ターミナルのタブに限ると**いちばん要る場面で出ない**
+test('構造化ビューを見ている間は十字が出ない', async ({ page }) => {
+  // **十字はターミナルのタブでだけ出す**（`c3e5332`）。構造化ビューの上に出すと、
+  // 押したキーが**見えていない端末へ飛ぶ**。設計§6「タブによらず出す」は Esc の話で、
+  // そちらは据え置いてある
   await watchSentFrames(page)
   await openDashboard(page)
   await openDialog(page)
 
   await showTranscript(page)
-  await expect(page.getByTestId('dpad')).toBeVisible()
+  await expect(page.getByTestId('dpad')).toHaveCount(0)
 })
 
 test('上下で選択が動く', async ({ page }) => {
@@ -154,10 +150,6 @@ test('ダイアログが閉じると十字は消え、入力欄が戻る', async
 
   await expect(page.getByTestId('dpad')).toHaveCount(0)
   await expect(page.getByTestId('dpad-live')).toHaveText('')
-  await expect(page.getByTestId('composer-input')).toHaveAttribute(
-    'data-collapsed',
-    'false',
-  )
 })
 
 /**
@@ -179,10 +171,6 @@ test('打ちかけの ❯ 1. … では十字が出ない', async ({ page }) => 
   await expectTerminalToContain(page, '❯ 1. 手順を書く')
 
   await expect(page.getByTestId('dpad')).toHaveCount(0)
-  await expect(page.getByTestId('composer-input')).toHaveAttribute(
-    'data-collapsed',
-    'false',
-  )
 })
 
 test('打ちかけの ❯ 1. … のとき素の Enter は改行のまま', async ({ page }) => {

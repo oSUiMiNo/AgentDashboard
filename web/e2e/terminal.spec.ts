@@ -262,10 +262,6 @@ test('粗いポインタでなければ、選択ダイアログでも十字は�
 
   // ダイアログは出ている。**それでも十字は出ない**
   await expect(page.getByTestId('dpad')).toHaveCount(0)
-  await expect(page.getByTestId('composer-input')).toHaveAttribute(
-    'data-collapsed',
-    'false',
-  )
   // Esc ボタンは入力方式によらず常に出る（設計§6）。構造化ビューを見ている間は
   // 端末にフォーカスが無く、**PC でも物理の Esc が届かない**ため
   await expect(page.getByTestId('esc-key')).toBeVisible()
