@@ -37,12 +37,14 @@
 <p class="lead">
   AgentDashboard に関係して、この機械や外で<strong>起動しっぱなしになっているもの</strong>の一覧。
   「どの URL がどれを指しているか」を取り違えると原因追跡が丸ごと空振りするので、そこを中心に書いてある。
-  <br>最終更新：2026-08-16 18時台（<strong>AWS が落ちている。</strong>動いているのは実機とセッションホスト<span class="mark">▽</span>の2つで、trial は止まったまま）
-  <br><strong>AWS が 530 を返す（Cloudflare が origin へ届かない）。</strong>16:30 と 17:57 に確認。<strong>外から使う道は全部止まっている</strong>ので、<code>dash.underschaft.com</code> が開かないのは手元の問題ではない。<strong>復旧は人の作業</strong>——エージェント側の AWS 認証は失効している（<code>aws sts</code> が <code>InvalidClientTokenId</code>）。
-  <br><strong>セッションホスト<span class="mark">▽</span>は、溜まりを抱えたまま繋ぎ直しを繰り返している。</strong>未送信 1055 件が減らず、AWS が生きていた間は約25秒ごとに切れていた（ローカルイシュー「溜まった履歴の ack が詰まって線が切れ続ける」）。<strong>いま落とすと、この再現の素材が消える</strong>——直ったことを実機で確かめる機会も一緒に消えるので、<strong>あのイシューの裏取りが済むまで起こし直さない</strong>こと。
-  <br><strong>手元の2つ（実機・セッションホスト<span class="mark">▽</span>）は自動では起きない。</strong>常駐の仕組みに載せていないので、<strong>WSL を起こし直すと落ちたままになる</strong>。ブラウザに「繋がっている PC がありません」と出たら、まずここが動いているかを見る。
-  <br><strong>いまは版が3つにずれている。</strong> <strong>08-15 00時台にリリース <code>v0.1.28</code> を出し、AWS を入れ替えた</strong>（<strong>十字ボタン一式</strong>。0.1.21 で入れ、0.1.22〜0.1.28 で明滅の輪を断ち、端末へ重ねる形に落ち着いた。実機で4場面とも通った）。<strong>実機はディスク上だけ <code>0.1.28</code> になっており、走っているのは <code>0.1.16</code> のまま</strong>。落とすと抱えている claude が道連れになるので、<strong>起こし直す時機は人が決める</strong>（CLAUDE.md の段4）。セッションホスト<span class="mark">▽</span>は <code>0.1.19</code> のまま。
-  <br><strong>0.1.28 も、AWS だけで効く。</strong> 触ったのは<strong>ブラウザへ配る画面（web）だけ</strong>で、判定も十字ボタンもブラウザの中にある。画面はサーバの実行ファイルへ焼き込まれているので、<strong>AWS を入れ替えればスマホへ届く</strong>——セッションホスト<span class="mark">▽</span>を起こし直す必要は無い。<strong>届いたことは、配っている JavaScript の中身で確かめてある</strong>（十字の <code>aria-label="方向キー"</code> と ▲◀▶▼⏎ が在り、手元のビルドとハッシュが一致。古い判定の目印は0件）。<br><strong>ただし開きっぱなしのタブは古い画面のまま。</strong>版の数字は毎回サーバに聞いた答えなので<strong>古いタブでも 0.1.28 と出る</strong>。直っているかは<strong>タブを読み込み直してから</strong>確かめること。
+  <br>最終更新：2026-08-16 23時台（<strong>AWS はもう無い。</strong>動いているのは実機とセッションホスト<span class="mark">▽</span>の2つで、trial は止まったまま）
+  <br><strong>AWS のアカウントが閉鎖された。原因は無料プランの期限切れ（2026-08-15）。</strong>画面に「アカウントが閉鎖されました」と「無料プランはまもなく終了します（Aug 15, 2026 に、またはすべてのクレジットを使い切った時点で終了）」が出る（利用者が確認・08-16 22時台）。<strong>クレジットは $108.97 残っているが、無料プランの窓が閉じたので使えない。</strong><code>dash.underschaft.com</code> は <strong>530</strong> を返す。
+  <br><strong>止まり方は段階的だった。</strong>08-16 の 16:30 と 17:57 は 530、<strong>18:24 は 200 に戻り</strong>、20時台から 530 のまま。閉鎖に伴って資源が順に止められていく途中だったと読める。<strong>「一度 200 が返ったから復旧した」と読まないこと。</strong>
+  <br><strong>「IP が変わった」ではない。</strong>最初は SSH が届かないだけに見え、Elastic IP を持たない構成なので IP の付け替えを疑ったが、<strong>原因はアカウントごと消えていたこと</strong>だった。terraform の記録（<code>~/Dev/Test_AgentDashboard/terraform.tfstate</code>・08-03）にある <code>43.207.237.211</code> は<strong>もう誰のものでもない</strong>。<strong>ここを直すのも、別の場所へ立て直すのも人の作業。</strong>
+  <br><strong>セッションホスト<span class="mark">▽</span>は生きているが、20:11 から黙って固まっている。</strong>Cloudflare 宛に TLS が張られたまま無通信（<code>ESTAB</code>・送受信キュー0・CPU ほぼ0）で、<strong>ログも1行も出ていない</strong>。<code>link.rs</code> の <code>dial()</code> に<strong>時間切れが無い</strong>ため、相手が「断る」のではなく<strong>黙って握ったまま答えない</strong>と永久に待つ。<strong>画面には理由の分からない「接続断」だけが残る。</strong>別イシュー化の候補。
+  <br><strong>手元の2つ（実機・セッションホスト<span class="mark">▽</span>）は自動では起きない。</strong>常駐の仕組みに載せていないので、<strong>WSL を起こし直すと落ちたままになる</strong>。
+  <br><strong>版は 0.1.29 まで出ている（08-16 22時台）。</strong>ack の詰まり一式（ローカルイシュー「溜まった履歴の ack が詰まって線が切れ続ける」）と、十字ボタン・履歴表示の直しが入っている。<strong>ただし走っているものは1つも 0.1.29 ではない</strong>——実機は走行 <code>0.1.16</code>、セッションホスト<span class="mark">▽</span>は走行 <code>0.1.19</code>で、<strong>どちらもディスク上だけ 0.1.29</strong>（<code>~/AgentDashboard</code> で <code>git pull</code> → <code>make build</code> 済み）。落とすと抱えている claude が道連れになるので、<strong>起こし直す時機は人が決める</strong>（CLAUDE.md の段4）。
+  <br><strong>0.1.29 の直りは、セッションホスト<span class="mark">▽</span>を起こし直さないと効かない。</strong>触ったのが <code>session-host-core</code>（送る側の窓と上限）と <code>server-core</code>（受ける側のレーン）の両方なので、<strong>画面だけの版と違ってサーバの入れ替えでは足りない</strong>。そしてその<strong>サーバがいま無い</strong>ので、<strong>実機での裏取りは、どこかにサーバを立て直すまでできない</strong>。
 </p>
 
 <h2>先に用語</h2>
@@ -98,7 +100,7 @@
   <rect x="560" y="62" width="280" height="150" rx="10" fill="#221b0f" stroke="#5a4520"/>
   <text x="578" y="90" fill="#e0af68" font-size="14" font-weight="600">AWS EC2（外）</text>
   <text x="578" y="112" fill="#e6e9ef" font-size="12">i-0bf66240fec98392a / t3.small</text>
-  <text x="578" y="132" fill="#e6e9ef" font-size="12">docker compose ／ 版 0.1.28</text>
+  <text x="578" y="132" fill="#e6e9ef" font-size="12">アカウント閉鎖で消えた（最後は 0.1.28）</text>
   <text x="578" y="152" fill="#9aa4b2" font-size="11">箱の中なので版の切替は出ない</text>
   <text x="578" y="172" fill="#9aa4b2" font-size="11">cloudflared は systemd で常駐</text>
   <text x="578" y="192" fill="#f7768e" font-size="11">課金が続いている</text>
@@ -125,7 +127,7 @@
   一方 AWS は<strong>配った箱</strong>なので、<strong>リリースを出すまで何も変わらない</strong>。
   画面に出る版だけを見て「同じものが動いている」と判断しないこと。<br><br>
 
-  <strong>いまはずれている。</strong> AWS が <code>0.1.28</code>、セッションホスト<span class="mark">▽</span>が <code>0.1.19</code>、<strong>実機だけが走行 <code>0.1.16</code></strong>（ディスク上は <code>0.1.28</code>）。<br><br>  <strong>ずらしたままでよいかは、変更の中身で決まる。</strong> <strong>0.1.20〜0.1.28 はブラウザへ配る画面だけの修正なので、AWS を入れ替えた時点で効いている</strong>。一方<strong>PC ⇄ サーバの線や、PC が名乗る能力を変えた版では、揃えるまで「この PC は版が古い」が出続ける</strong>（過去に踏んだ）。<strong>入れ替えが要るかは版の数字ではなく、どの crate を触ったかで決まる。</strong><br><br>
+  <strong>いまはずれている。</strong> <strong>AWS は無い</strong>（アカウント閉鎖）。セッションホスト<span class="mark">▽</span>が走行 <code>0.1.19</code>、実機が走行 <code>0.1.16</code>——<strong>どちらもディスク上は <code>0.1.29</code></strong>。<br><br>  <strong>ずらしたままでよいかは、変更の中身で決まる。</strong> 0.1.20〜0.1.28 はブラウザへ配る画面だけの修正だったので、サーバを入れ替えた時点で効いていた。<strong>0.1.29 は違う</strong>——<code>session-host-core</code> を触っているので、<strong>セッションホスト<span class="mark">▽</span>を起こし直すまで効かない</strong>。<strong>入れ替えが要るかは版の数字ではなく、どの crate を触ったかで決まる。</strong><br><br>
 
   同じことは以前も起きている（08-09 に <code>0.1.11</code> で揃えるまで、実機だけにログ整備が
   入っていた）。<strong>版番号で揃っているかを判断できない</strong>のは、この構成の性質である。<br><br>
@@ -162,7 +164,7 @@ agentdashboard-agent logs --since 24h --state-dir ~/agentdashboard-agent/state</
   <tr>
     <td>実機</td>
     <td><code>127.0.0.1:8787</code></td>
-    <td><span class="tag t-old">走行 0.1.16</span><br><small><strong>実行ファイルは 0.1.28</strong>（08-15 00時台に <code>git pull</code> → <code>make build</code> 済み。<strong>このとき生きたカードは0枚だった</strong>。<strong>起こし直していないので走っているのは 0.1.16</strong>——上げるには <code>agentdashboard version restart</code> ＋ 起こし直しが要る。段4 なので人が決める）。<br><strong>ソースだけ先へ進んでいる</strong>（08-15 12時台に <code>git pull</code> のみ。<code>make build</code> はしていないので、<strong>実行ファイルは 00時台のまま</strong>）。「pull してあるならビルドも済んでいる」と読まないこと——<code>(cd ~/AgentDashboard &amp;&amp; make build)</code> が要る。<br>ソースビルド<span class="mark">▽</span>（<strong>08-13 18時台に起こし直し</strong>——`make build` してから、生きたカードが0枚であることを数えて落とした。リリース <code>v0.1.16</code> と同じ中身）</small></td>
+    <td><span class="tag t-old">走行 0.1.16</span><br><small><strong>実行ファイルは 0.1.29</strong>（08-16 22時台に <code>git pull</code> → <code>make build</code> 済み）。<strong>起こし直していないので走っているのは 0.1.16</strong>——上げるには <code>agentdashboard version restart</code> ＋ 起こし直しが要る。段4 なので人が決める。<br>ソースビルド<span class="mark">▽</span>（<strong>08-13 18時台に起こし直し</strong>——`make build` してから、生きたカードが0枚であることを数えて落とした。リリース <code>v0.1.16</code> と同じ中身）</small></td>
     <td>ローカルモード<span class="mark">▽</span>。<code>~/AgentDashboard</code> で <code>make build</code> したものを引数なしで起動。端末の出力は <code>~/agentdashboard-run.log</code>、構造化ログは <code>~/.local/state/agentdashboard-run/logs/</code>。<br><strong>読むときは <code>--state-dir</code> が要る。</strong> 置き場所を設定で移してあるが、読む口は設定を読まない（設計§11-2 の非対称）——<code>agentdashboard logs --since 1h --state-dir ~/.local/state/agentdashboard-run</code><br><strong>起こすときは <code>setsid</code> で切り離す。</strong> ツール呼び出しの子として起こすと、呼び出しの終了で巻き添えに死ぬ（08-10 に一度この形で起こしてしまい、起こし直した）。<code>cd ~/AgentDashboard &amp;&amp; setsid nohup ./server/target/release/agentdashboard &gt;&gt; ~/agentdashboard-run.log 2&gt;&amp;1 &lt; /dev/null &amp;</code></td>
   </tr>
   <tr>
@@ -174,7 +176,7 @@ agentdashboard-agent logs --since 24h --state-dir ~/agentdashboard-agent/state</
   <tr>
     <td>セッションホスト<span class="mark">▽</span></td>
     <td>— （PC 名 <code>OMEN</code>）</td>
-    <td><span class="tag t-ok">0.1.19</span><br><small>08-14 03時台に <code>0.1.19</code> で起こし直したまま。<strong>0.1.20 から 0.1.28 まで、一度も入れ替えていない</strong>——どちらもブラウザへ配る画面だけの修正なので、ここは古いままで繋がり続ける（実測）。<br><strong>落とすと抱えている claude は道連れになる。</strong>「押してよいか」は<strong>作業が残っているかで決まる</strong>——版の新しさではない。落とす前に <code>ps -eo pid,ppid,args --forest</code> で子を数え、<strong>0本でなければ止まる</strong>こと。<br><strong>起こし直しは切り離したスクリプトに任せる</strong>（<code>/tmp/agentdashboard-agent-restart.sh</code>。記録は <code>~/agentdashboard-agent/restart.log</code>）。落とす相手が自分の親なので、ツール呼び出しの中で <code>kill</code> すると起こし直す行まで辿り着けない。<strong>自分がその子であることがある</strong>——そのときは落とさずに利用者へ渡す</small></td>
+    <td><span class="tag t-old">走行 0.1.19</span><br><small>08-14 03時台に <code>0.1.19</code> で起こし直したまま。<strong>実行ファイルは 0.1.29</strong>（08-16 22時台に <code>~/AgentDashboard</code> で <code>make build</code> 済み）。0.1.20〜0.1.28 は画面だけの修正だったので古いままでよかったが、<strong>0.1.29 は <code>session-host-core</code> を触っているので、起こし直すまで効かない</strong>。<br><strong>いま黙って固まっている</strong>（08-16 20:11 以降・上の説明）。<code>dial()</code> に時間切れが無いためで、<strong>起こし直せば解ける</strong>。<br><strong>落とすと抱えている claude は道連れになる。</strong>「押してよいか」は<strong>作業が残っているかで決まる</strong>——版の新しさではない。落とす前に <code>ps -eo pid,ppid,args --forest</code> で子を数え、<strong>0本でなければ止まる</strong>こと。<br><strong>起こし直しは切り離したスクリプトに任せる</strong>（<code>/tmp/agentdashboard-agent-restart.sh</code>。記録は <code>~/agentdashboard-agent/restart.log</code>）。落とす相手が自分の親なので、ツール呼び出しの中で <code>kill</code> すると起こし直す行まで辿り着けない。<strong>自分がその子であることがある</strong>——そのときは落とさずに利用者へ渡す</small></td>
     <td><strong>AWS へ繋いでいる</strong>（<code>dash.underschaft.com</code>。この PC の名前は <code>OMEN</code>）。設定は <code>~/agentdashboard-agent/agent.toml</code>、ログは同じ場所の <code>run.log</code>。<br><strong>これが止まっていると、ブラウザに「指定された PC が繋がっていません」が出る</strong>——カードは PC に紐づくので、繋がっていないと引けない。ブラウザとサーバは繋がったままなので<strong>上の帯だけが赤くなる</strong>。
         <strong>ここを起こし直すと、抱えている claude が道連れになる。</strong>落とす前に <code>ps -eo pid,ppid,args --forest</code> で子を数えること——08-10 の入れ替えでは<strong>生きた claude が1本ぶら下がっていたので入れ替えを見送った</strong>。版を上げたら入れ替えないと、サーバだけ新しくなって<strong>フォルダを覗く口が「版が古い」で断られ続ける</strong>（実際に踏んだ）。<code>agent_id</code> はペアリングトークンから決まるので、<strong>起こし直しても同じ PC のまま</strong>——枠は孤児にならない。
         <strong>パーサだけなら落としてよい。</strong>子の <code>transcript-parser</code> を PID 直指定で <code>kill</code> すると、セッションホストが立て直して監視も保存済みの位置から張り直す（<strong>claude は道連れにならない</strong>）。本体が古い版のあいだにパーサが肥大したら、これで嵩が戻るうえ<strong>ディスク上の新しいパーサに入れ替わる</strong>。
@@ -184,8 +186,8 @@ agentdashboard-agent logs --since 24h --state-dir ~/agentdashboard-agent/state</
   <tr>
     <td>AWS EC2</td>
     <td><code>dash.underschaft.com</code></td>
-    <td><span class="tag t-old">0.1.28（落ちている）</span><br><small><strong>2026-08-16 現在、外から 530 が返る</strong>（Cloudflare が origin へ届かない）。箱が落ちたのかトンネルが切れたのか、EC2 ごとなのかは<strong>まだ分けていない</strong>——エージェント側の AWS 認証が失効していて中を見に行けない。<strong>復旧は人の作業。</strong><br>配った箱（GHCR）。<strong>08-15 00時台に <code>0.1.21</code> から入れ替え</strong>（migration の追加なし・控えは <code>~/compose.yml.bak.0.1.21</code>）。<strong>0.1.28 はここだけで効く</strong>——触ったのはブラウザへ配る画面だけなので、セッションホスト<span class="mark">▽</span>は 0.1.19 のままでよい</small></td>
-    <td><strong>docker compose</strong>（道②）。<code>~/compose.yml</code> の <code>image:</code> で版を決める。<strong>ログを読むには <code>--state-dir /var/lib/agentdashboard</code> が要る</strong>（読む口は設定を読まない）。外へは<strong>名前付きトンネル</strong>で出しており、<code>cloudflared</code> は <strong>systemd で常駐</strong>（<code>systemctl status cloudflared</code>）。terraform は <code>~/Dev/Test_AgentDashboard/</code>、SSH 鍵は同じ場所の <code>ssh_key.pem</code>、IP は <code>43.207.237.211</code></td>
+    <td><span class="tag t-old">無い（アカウント閉鎖）</span><br><small><strong>2026-08-16 22時台、AWS のアカウントが閉鎖されていることが分かった</strong>（利用者がログインを試みて確認）。<code>dash.underschaft.com</code> は <strong>530</strong>。18:24 には 200 だったので、<strong>落ちたのは 20時台</strong>。<br><strong>最後に動いていたのは <code>0.1.28</code></strong>（08-15 00時台に <code>0.1.21</code> から入れ替え）。<strong>0.1.29 は届いていない。</strong><br><strong>SSH も CLI も通らないのは、閉鎖の結果である</strong>——IP の付け替えではない。<strong>戻す道は「プランのアップグレード（有料へ）」か「別の場所へ立て直す」の2つで、どちらも費用の判断を伴うので人が決める。</strong></small></td>
+    <td><strong>もう入れない。</strong>控えとして残る手がかり：terraform は <code>~/Dev/Test_AgentDashboard/</code>（記録は 08-03 のもので、<code>43.207.237.211</code> は<strong>もう無効</strong>）、SSH 鍵は同じ場所の <code>ssh_key.pem</code>。Elastic IP は持っていない構成。<br>立て直すときの形：<strong>docker compose</strong>（<code>~/compose.yml</code> の <code>image:</code> で版を決める）、外へは<strong>名前付きトンネル</strong>（<code>cloudflared</code> を systemd で常駐）、ログは <code>--state-dir /var/lib/agentdashboard</code> で読む</td>
   </tr>
 </table>
 </div>
@@ -202,8 +204,8 @@ agentdashboard-agent logs --since 24h --state-dir ~/agentdashboard-agent/state</
 <h3>AWS EC2 について</h3>
 <ul>
   <li><strong>箱（コンテナ）で動いているので、版のドロップダウンは出ない。</strong>「<code>compose.yml</code> の <code>image:</code> を書き換えて」という案内のカードだけが出る。壊れているのではなく、そう作ってある（設計§14）</li>
-  <li>更新は <strong>SSH で入って3行</strong>——<code>compose.yml</code> の <code>image:</code> の版を書き換え、<code>sudo docker compose pull</code>、<code>sudo docker compose up -d</code>。記録（PostgreSQL）は別の箱なので消えない</li>
-  <li>手元の AWS 認証情報は<strong>失効している</strong>ので、CLI から状態を問い合わせられない。生きているかどうかは、上の URL が応答するかで判断する。<strong>SSH は通る</strong>（鍵は <code>~/Dev/Test_AgentDashboard/ssh_key.pem</code>）</li>
+  <li><strong>以下は、立て直したときに再び効く手順である</strong>（いまは入口が無い）。更新は <strong>SSH で入って3行</strong>——<code>compose.yml</code> の <code>image:</code> の版を書き換え、<code>sudo docker compose pull</code>、<code>sudo docker compose up -d</code></li>
+  <li><strong>AWS 認証も SSH も通らない。</strong> 失効ではなく<strong>アカウント閉鎖</strong>によるもので、<code>aws sts</code> は <code>InvalidClientTokenId</code>、<code>43.207.237.211</code> の 22番・443番はどちらもタイムアウトする。<strong>「認証を入れ直せば入れる」と読まないこと</strong></li>
   <li>t3.small で概ね4円/時。<strong>残す判断を取っている</strong>ので、勝手に壊さないこと</li>
   <li>止めるときは <code>~/Dev/Test_AgentDashboard</code> で <code>terraform destroy</code>。ただし<strong>利用者の明示的な承認が要る</strong></li>
 </ul>
