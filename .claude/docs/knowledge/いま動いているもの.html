@@ -37,8 +37,10 @@
 <p class="lead">
   AgentDashboard に関係して、この機械や外で<strong>起動しっぱなしになっているもの</strong>の一覧。
   「どの URL がどれを指しているか」を取り違えると原因追跡が丸ごと空振りするので、そこを中心に書いてある。
-  <br>最終更新：2026-08-15 12時台（<strong>動いているのは実機・AWS・セッションホスト<span class="mark">▽</span>の3つ</strong>。trial だけ止まっている）
-  <br><strong>手元の2つ（実機・セッションホスト<span class="mark">▽</span>）は自動では起きない。</strong>常駐の仕組みに載せていないので、<strong>WSL を起こし直すと落ちたままになる</strong>。ブラウザに「繋がっている PC がありません」と出たら、まずここが動いているかを見る——AWS 側は生きたままなので、画面だけを見ても区別が付かない。
+  <br>最終更新：2026-08-16 18時台（<strong>AWS が落ちている。</strong>動いているのは実機とセッションホスト<span class="mark">▽</span>の2つで、trial は止まったまま）
+  <br><strong>AWS が 530 を返す（Cloudflare が origin へ届かない）。</strong>16:30 と 17:57 に確認。<strong>外から使う道は全部止まっている</strong>ので、<code>dash.underschaft.com</code> が開かないのは手元の問題ではない。<strong>復旧は人の作業</strong>——エージェント側の AWS 認証は失効している（<code>aws sts</code> が <code>InvalidClientTokenId</code>）。
+  <br><strong>セッションホスト<span class="mark">▽</span>は、溜まりを抱えたまま繋ぎ直しを繰り返している。</strong>未送信 1055 件が減らず、AWS が生きていた間は約25秒ごとに切れていた（ローカルイシュー「溜まった履歴の ack が詰まって線が切れ続ける」）。<strong>いま落とすと、この再現の素材が消える</strong>——直ったことを実機で確かめる機会も一緒に消えるので、<strong>あのイシューの裏取りが済むまで起こし直さない</strong>こと。
+  <br><strong>手元の2つ（実機・セッションホスト<span class="mark">▽</span>）は自動では起きない。</strong>常駐の仕組みに載せていないので、<strong>WSL を起こし直すと落ちたままになる</strong>。ブラウザに「繋がっている PC がありません」と出たら、まずここが動いているかを見る。
   <br><strong>いまは版が3つにずれている。</strong> <strong>08-15 00時台にリリース <code>v0.1.28</code> を出し、AWS を入れ替えた</strong>（<strong>十字ボタン一式</strong>。0.1.21 で入れ、0.1.22〜0.1.28 で明滅の輪を断ち、端末へ重ねる形に落ち着いた。実機で4場面とも通った）。<strong>実機はディスク上だけ <code>0.1.28</code> になっており、走っているのは <code>0.1.16</code> のまま</strong>。落とすと抱えている claude が道連れになるので、<strong>起こし直す時機は人が決める</strong>（CLAUDE.md の段4）。セッションホスト<span class="mark">▽</span>は <code>0.1.19</code> のまま。
   <br><strong>0.1.28 も、AWS だけで効く。</strong> 触ったのは<strong>ブラウザへ配る画面（web）だけ</strong>で、判定も十字ボタンもブラウザの中にある。画面はサーバの実行ファイルへ焼き込まれているので、<strong>AWS を入れ替えればスマホへ届く</strong>——セッションホスト<span class="mark">▽</span>を起こし直す必要は無い。<strong>届いたことは、配っている JavaScript の中身で確かめてある</strong>（十字の <code>aria-label="方向キー"</code> と ▲◀▶▼⏎ が在り、手元のビルドとハッシュが一致。古い判定の目印は0件）。<br><strong>ただし開きっぱなしのタブは古い画面のまま。</strong>版の数字は毎回サーバに聞いた答えなので<strong>古いタブでも 0.1.28 と出る</strong>。直っているかは<strong>タブを読み込み直してから</strong>確かめること。
 </p>
@@ -182,7 +184,7 @@ agentdashboard-agent logs --since 24h --state-dir ~/agentdashboard-agent/state</
   <tr>
     <td>AWS EC2</td>
     <td><code>dash.underschaft.com</code></td>
-    <td><span class="tag t-ok">0.1.28</span><br><small>配った箱（GHCR）。<strong>08-15 00時台に <code>0.1.21</code> から入れ替え</strong>（migration の追加なし・控えは <code>~/compose.yml.bak.0.1.21</code>）。<strong>0.1.28 はここだけで効く</strong>——触ったのはブラウザへ配る画面だけなので、セッションホスト<span class="mark">▽</span>は 0.1.19 のままでよい</small></td>
+    <td><span class="tag t-old">0.1.28（落ちている）</span><br><small><strong>2026-08-16 現在、外から 530 が返る</strong>（Cloudflare が origin へ届かない）。箱が落ちたのかトンネルが切れたのか、EC2 ごとなのかは<strong>まだ分けていない</strong>——エージェント側の AWS 認証が失効していて中を見に行けない。<strong>復旧は人の作業。</strong><br>配った箱（GHCR）。<strong>08-15 00時台に <code>0.1.21</code> から入れ替え</strong>（migration の追加なし・控えは <code>~/compose.yml.bak.0.1.21</code>）。<strong>0.1.28 はここだけで効く</strong>——触ったのはブラウザへ配る画面だけなので、セッションホスト<span class="mark">▽</span>は 0.1.19 のままでよい</small></td>
     <td><strong>docker compose</strong>（道②）。<code>~/compose.yml</code> の <code>image:</code> で版を決める。<strong>ログを読むには <code>--state-dir /var/lib/agentdashboard</code> が要る</strong>（読む口は設定を読まない）。外へは<strong>名前付きトンネル</strong>で出しており、<code>cloudflared</code> は <strong>systemd で常駐</strong>（<code>systemctl status cloudflared</code>）。terraform は <code>~/Dev/Test_AgentDashboard/</code>、SSH 鍵は同じ場所の <code>ssh_key.pem</code>、IP は <code>43.207.237.211</code></td>
   </tr>
 </table>
