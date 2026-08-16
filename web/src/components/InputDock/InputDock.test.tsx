@@ -65,8 +65,16 @@ let sent: Mock<SendInput>
 function dock(
   status: SessionStatus = { kind: 'waiting_input' },
   compact = false,
+  terminalShown = true,
 ) {
-  return render(<InputDock cardId={CARD} status={status} compact={compact} />)
+  return render(
+    <InputDock
+      cardId={CARD}
+      status={status}
+      compact={compact}
+      terminalShown={terminalShown}
+    />,
+  )
 }
 
 const dpad = () => screen.queryByTestId('dpad')
@@ -137,6 +145,52 @@ describe('十字ボタンを出す条件', () => {
   })
 
   // 宛先が一意で、取り消しは安全側の操作なので、こちらは出す
+  it('構造化ビューを見ているあいだは出ない', () => {
+    // **方向キーは、見えている端末を操作する道具。** 構造化ビューの上に出しても
+    // 意味が無いどころか、押すと**見えていない端末へキーが飛ぶ**
+    dock({ kind: 'waiting_input' }, false, false)
+
+    act(() => setSelecting(CARD, true))
+
+    expect(dpad()).not.toBeInTheDocument()
+  })
+
+  it('構造化ビューを見ているあいだは、端末が画面を組み立てない', () => {
+    // 出せない場面で読む理由が無い。**購読そのものを起こさない**
+    dock({ kind: 'waiting_input' }, false, false)
+
+    expect(hasWatcher(CARD)).toBe(false)
+  })
+
+  it('終了したセッションでは、権限確認の印が残っていても出ない', () => {
+    // 層のほうは `!ended` を見ていたのに、`show` が見ていなかった。**十字が無いのに
+    // 「表示しました」と読み上げていた**
+    dock({ kind: 'ended', ok: true })
+
+    act(() => setSelecting(CARD, true))
+
+    expect(dpad()).not.toBeInTheDocument()
+    expect(screen.getByTestId('dpad-live')).toHaveTextContent('')
+  })
+
+  it('終了したセッションでは、入力欄も畳まれない', () => {
+    // **`rows` では見ない。** いまは畳んでも畳まなくても 1 で、`collapsed` が高さを
+    // 変えていない（コードレビュー対応4。**利用者の判断待ちで据え置き**）。
+    // ここで見たいのは「畳んだ扱いにしていないか」なので、印のほうを見る
+    dock({ kind: 'ended', ok: true })
+
+    act(() => setSelecting(CARD, true))
+
+    expect(composer()).toHaveAttribute('data-collapsed', 'false')
+  })
+
+  it('構造化ビューを見ていても Esc は出る', () => {
+    // 設計§6 の「タブによらず出す」は **Esc の話**。止めるのは、見ていなくてもしたい
+    dock({ kind: 'waiting_input' }, false, false)
+
+    expect(screen.getByTestId('esc-key')).toBeInTheDocument()
+  })
+
   it('横並びでも Esc は出る', () => {
     dock({ kind: 'waiting_input' }, true)
 

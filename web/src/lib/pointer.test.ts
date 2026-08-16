@@ -99,6 +99,39 @@ describe('useCoarsePointer', () => {
     expect(media.watching(COARSE)).toBe(false)
   })
 
+  it('addEventListener を持たない実装でも落ちず、値は正しいまま', () => {
+    // 古い Safari（`addListener` だけ）・一部の WebView・部分的なテストスタブ。
+    // **購読の中で例外が飛ぶと、飛ぶ先は `useSyncExternalStore` なのでセッション画面ごと落ちる**
+    const handlers = new Set<() => void>()
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: query === COARSE,
+      media: query,
+      addListener: (handler: () => void) => handlers.add(handler),
+      removeListener: (handler: () => void) => handlers.delete(handler),
+    }))
+
+    const view = renderHook(() => useCoarsePointer())
+
+    // **偽へ倒さない。** 倒すと、古い Safari から十字が丸ごと消える
+    expect(view.result.current).toBe(true)
+    // 古い口があるなら、そちらで追随もできている
+    expect(handlers.size).toBe(1)
+    view.unmount()
+    expect(handlers.size).toBe(0)
+  })
+
+  it('どちらの口も無ければ、追随しないだけで値は読める', () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: query === COARSE,
+      media: query,
+    }))
+
+    const view = renderHook(() => useCoarsePointer())
+
+    expect(view.result.current).toBe(true)
+    view.unmount()
+  })
+
   it('matchMedia が無い環境では偽になり、落ちない', () => {
     vi.stubGlobal('matchMedia', undefined)
     const view = renderHook(() => useCoarsePointer())

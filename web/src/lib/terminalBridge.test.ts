@@ -11,6 +11,7 @@ import {
   sendTerminalKey,
   setSelecting,
   useSelecting,
+  selectingRows,
 } from './terminalBridge'
 
 /**
@@ -301,6 +302,22 @@ describe('解除', () => {
     act(() => release())
     // カードが消えたあとも「選択待ちだった」が残らない
     expect(result.current).toBe(false)
+  })
+
+  it('解除したら、表に行そのものが残らない', () => {
+    // **答えからは観測できない漏れ。** `useSelecting` は `?? false` で既定へ落ちるので、
+    // `false` を書き込んで残しても答えは変わらない——他の3つの表（`watchers` /
+    // `terminals` / `queues`）が消えるのに**ここだけ増え続ける**（コードレビュー対応10）
+    const before = selectingRows()
+    const id = card()
+    const release = registerTerminal(id, () => {})
+
+    act(() => setSelecting(id, true))
+    expect(selectingRows()).toBe(before + 1)
+
+    act(() => release())
+
+    expect(selectingRows()).toBe(before)
   })
 
   it('登録し直された相手は巻き添えにしない', () => {

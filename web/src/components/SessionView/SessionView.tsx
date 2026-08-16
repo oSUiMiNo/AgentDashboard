@@ -233,6 +233,7 @@ export function SessionView({ cardId, compact = false }: Props) {
           cardId={session.card_id}
           status={session.status}
           compact={compact}
+          terminalShown={view === 'terminal'}
         />
         </div>
       </div>

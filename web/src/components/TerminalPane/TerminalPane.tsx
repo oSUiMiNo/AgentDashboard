@@ -300,6 +300,10 @@ export function TerminalPane({ cardId }: Props) {
         typeof getComputedStyle === 'function'
           ? getComputedStyle(container).touchAction
           : '?'
+      // **1回だけ組み立てて使い回す。** ここは `touchmove` ごとに呼ばれるので、
+      // 呼ぶたびに画面を作り直すと**なぞる速度で毎秒60〜120回 × 回数**になる——
+      // **遅さを測るための口が、自分で遅くしていた**（コードレビュー対応13）
+      const lines = visibleLines(term)
       node.textContent = [
         `${last} start=${tally.start} move=${tally.move} end=${tally.end} cancel=${tally.cancel}`,
         `握った=${tally.grabbed} 握れない回=${tally.uncancelable}`,
@@ -308,9 +312,9 @@ export function TerminalPane({ cardId }: Props) {
         // **判定の材料をそのまま出す。** 「十字が出ない」を実機で踏んだとき、
         // 何を読んで偽になったのかは**その画面を見ないと分からない**。推測で直すと
         // 往復が増えるので、読む口をここに置く（既定では何も出ない）
-        `選択待ち=${測る()} 論理行=${visibleLines(term).length}`,
+        `選択待ち=${測る()} 論理行=${lines.length}`,
         '--- 末尾8行（判定はここを見る） ---',
-        ...visibleLines(term).slice(-8).map((l, i) => `${i}| ${l}`),
+        ...lines.slice(-8).map((l, i) => `${i}| ${l}`),
       ].join('\n')
     }
 

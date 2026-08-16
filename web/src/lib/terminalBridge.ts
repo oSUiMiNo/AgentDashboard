@@ -173,7 +173,15 @@ function applySelecting(cardId: CardId, value: boolean): void {
   if ((selecting.get(cardId) ?? false) === value) {
     return
   }
-  selecting.set(cardId, value)
+  // **既定へ戻るときは行を消す。** 書き込んで残すと、他の3つの表（`watchers` /
+  // `terminals` / `queues`）が解除で消えるのに**ここだけ増え続ける**——長く開いた
+  // タブでは、開いたカードの数だけ `false` が溜まる。読む側は `?? false` で
+  // 既定へ落ちるので、消しても答えは変わらない
+  if (value) {
+    selecting.set(cardId, true)
+  } else {
+    selecting.delete(cardId)
+  }
   const set = watchers.get(cardId)
   if (!set) {
     return
@@ -208,6 +216,18 @@ export function registerProbe(cardId: CardId, probe: () => boolean): () => void 
 }
 
 /** そのカードを見ている人が居るか。**端末はこれを見てから画面を組み立てる。** */
+/**
+ * 「いま選択待ちか」の表に残っている行数。
+ *
+ * **読むだけの口で、製品コードは使わない。** それでも置いているのは、
+ * **溜まっていないことを機械で見る手段が他に無い**ため——`useSelecting` は
+ * `?? false` で既定へ落ちるので、行が残っていても答えは変わらない。
+ * つまり漏れは**答えからは観測できない**（コードレビュー対応10）。
+ */
+export function selectingRows(): number {
+  return selecting.size
+}
+
 export function hasWatcher(cardId: CardId): boolean {
   return (watchers.get(cardId)?.size ?? 0) > 0
 }

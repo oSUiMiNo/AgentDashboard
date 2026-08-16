@@ -56,6 +56,48 @@ function read(query: string): boolean {
   }
 }
 
+/**
+ * 変化の購読を張る。**張れたかどうか**を返す。
+ *
+ * 口は2通りあり、古い実装は後者しか持たない（`addListener` は Safari 14 より前）。
+ * どちらも無ければ張らない——**そのときも `matches` は読めている**ので、値は正しいまま
+ * 追随だけができなくなる。
+ */
+function subscribeChange(entry: Entry): boolean {
+  const list = entry.list as MediaQueryList & {
+    addListener?: (listener: () => void) => void
+  }
+  try {
+    if (typeof list.addEventListener === 'function') {
+      list.addEventListener('change', entry.onChange)
+      return true
+    }
+    if (typeof list.addListener === 'function') {
+      list.addListener(entry.onChange)
+      return true
+    }
+  } catch {
+    // 持っているのに落ちる実装もある。張れなかったものとして扱う
+  }
+  return false
+}
+
+/** 購読を外す。**張った側と同じ口**で外す。 */
+function unsubscribeChange(entry: Entry): void {
+  const list = entry.list as MediaQueryList & {
+    removeListener?: (listener: () => void) => void
+  }
+  try {
+    if (typeof list.removeEventListener === 'function') {
+      list.removeEventListener('change', entry.onChange)
+      return
+    }
+    list.removeListener?.(entry.onChange)
+  } catch {
+    // 外せなくても、こちらの表からは落とす
+  }
+}
+
 function subscribe(query: string, listener: () => void): () => void {
   let entry = entries.get(query)
   if (!entry) {
@@ -80,7 +122,18 @@ function subscribe(query: string, listener: () => void): () => void {
         }
       },
     }
-    list.addEventListener('change', created.onChange)
+    // **読む側と同じだけ守る。** `addEventListener` を持たない実装（古い Safari の
+    // `addListener` だけのもの・一部の WebView・部分的なテストスタブ）だと、ここで
+    // 例外が飛ぶ。**飛ぶ先は `useSyncExternalStore` の購読の中**なので、
+    // セッション画面ごと落ちる——読む側だけ `try` で守っていたので、片側だけが素通しだった
+    //
+    // **値まで偽らない。** 購読できないことと、いまが粗いポインタかどうかは別の話で、
+    // `matches` は古い実装でも読める。ここで「PC ということにする」と、
+    // **古い Safari から十字が丸ごと消える**——`addListener` へ落とせば追随もできる
+    if (!subscribeChange(created)) {
+      // どちらの口も無い。**変化を知る手段が無いだけ**で、いまの値は読めている
+      return noop
+    }
     entries.set(query, created)
     entry = created
   }
@@ -89,7 +142,7 @@ function subscribe(query: string, listener: () => void): () => void {
   return () => {
     found.listeners.delete(listener)
     if (found.listeners.size === 0) {
-      found.list.removeEventListener('change', found.onChange)
+      unsubscribeChange(found)
       entries.delete(query)
     }
   }

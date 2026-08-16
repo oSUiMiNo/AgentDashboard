@@ -188,6 +188,11 @@ function Direction({
       }}
       onPointerUp={() => setPressed(false)}
       onPointerCancel={() => setPressed(false)}
+      // **止める契機と、見た目を戻す契機を同じ集合にする。** 連射のほうは
+      // `bindRepeater` が3つ（`pointerup` / `pointercancel` / `lostpointercapture`）で
+      // 止まるのに、見た目は前2つでしか戻していなかった——3つ目で止まったとき、
+      // **押しっぱなしの見た目だけが残る**
+      onLostPointerCapture={() => setPressed(false)}
     >
       <span aria-hidden>{glyph}</span>
     </button>

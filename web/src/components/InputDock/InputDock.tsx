@@ -52,18 +52,37 @@ interface Props {
    * 非対称すぎる。**Esc は出す**（宛先が一意で、取り消しは安全側の操作）。
    */
   compact?: boolean
+  /**
+   * ターミナルのタブを見ているか。**十字はこれが真のときだけ出す。**
+   *
+   * 設計§6 は「タブによらず出す」と決めたが、あれは **Esc の話**だった。方向キーは
+   * **見えている端末を操作する道具**なので、構造化ビューを見ているあいだに出しても
+   * 意味が無いどころか、押すと**見えていない端末へキーが飛ぶ**。
+   *
+   * **Esc はこれまでどおりタブによらず出す**（止めるのは、見ていなくてもしたい）。
+   */
+  terminalShown?: boolean
 }
 
-export function InputDock({ cardId, status, compact = false }: Props) {
+export function InputDock({
+  cardId,
+  status,
+  compact = false,
+  terminalShown = true,
+}: Props) {
   const ended = isEnded(status)
   const coarse = useCoarsePointer()
   const landscape = useLandscape()
   const escRef = useRef<HTMLButtonElement>(null)
 
-  // **ここが「見ている人」の正体。** 偽のあいだは購読そのものが起きない
-  const watching = coarse && !compact
+  // **ここが「見ている人」の正体。** 偽のあいだは購読そのものが起きない。
+  // 端末を見ていないときも偽にする——出せない場面で画面を読む理由が無い
+  const watching = coarse && !compact && terminalShown
   const selecting = useSelecting(cardId, watching)
-  const show = watching && (status.kind === 'waiting_permission' || selecting)
+  // **終了したカードでは出さない。** 層のほうは `!ended` を見ていたのに、こちらが
+  // 見ていなかったので、**十字が無いのに「表示しました」と読み上げていた**
+  const show =
+    watching && !ended && (status.kind === 'waiting_permission' || selecting)
 
   // 消える要素にフォーカスがあるなら、消える前に常在の Esc へ移す（設計§12）
   useEffect(() => {

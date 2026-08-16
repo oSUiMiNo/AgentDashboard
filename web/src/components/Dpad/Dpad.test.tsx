@@ -144,6 +144,39 @@ describe('Dpad の押し方', () => {
     }
   })
 
+  it('キャプチャを失っても、押した見た目が残らない', () => {
+    // **止める契機と、見た目を戻す契機を同じ集合にする。** 連射は3つ
+    // （`pointerup` / `pointercancel` / `lostpointercapture`）で止まるのに、
+    // 見た目は前2つでしか戻していなかった——3つ目で止まったとき、
+    // **押しっぱなしの見た目だけが残る**
+    keys()
+
+    fireEvent.pointerDown(up())
+    expect(up()).toHaveAttribute('data-pressed', 'true')
+
+    fireEvent.lostPointerCapture(up())
+
+    expect(up()).toHaveAttribute('data-pressed', 'false')
+  })
+
+  it('キャプチャを失ったら、連射も止まる', () => {
+    // 見た目だけ戻して連射が残ると、逆向きの取り残しになる。**両方**を見る
+    vi.useFakeTimers()
+    try {
+      const onKey = keys()
+
+      fireEvent.pointerDown(up())
+      fireEvent.lostPointerCapture(up())
+      const stopped = onKey.mock.calls.length
+
+      act(() => void vi.advanceTimersByTime(1000))
+
+      expect(onKey).toHaveBeenCalledTimes(stopped)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('上下は行をまるごと占め、隙間が生まれない', () => {
     keys()
 
