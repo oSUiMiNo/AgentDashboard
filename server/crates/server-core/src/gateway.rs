@@ -118,6 +118,14 @@ impl SessionHostConn {
             .is_ok()
     }
 
+    /// 積まれたまま、まだ書き出せていない数（§6）。
+    ///
+    /// **詰まったことを言葉にするために持つ。** 積めなかったという事実だけでは、
+    /// 相手が読んでいないのか一時的に混んだだけなのかを後から区別できない。
+    pub fn queued(&self) -> usize {
+        queued(&self.outbound)
+    }
+
     /// この接続を畳ませる（設計§8-4 の「接続中なら切断」）。
     ///
     /// 待ち行列へ Close を積むだけ。**こちらから TCP を殴らない**のは、送信タスクが
@@ -126,6 +134,30 @@ impl SessionHostConn {
     pub fn disconnect(&self) {
         let _ = self.outbound.try_send(Message::Close(None));
     }
+}
+
+/// 送信の待ち行列に積まれたまま、まだ書き出せていない数。
+///
+/// 接続の本体は生の送り口を持っているので、[`SessionHostConn`] を通らない場所
+/// （生存確認）からも同じ数え方ができるように、ここへ切り出してある。
+fn queued(outbound: &mpsc::Sender<Message>) -> usize {
+    outbound.max_capacity().saturating_sub(outbound.capacity())
+}
+
+/// 約束（ack）を積めなかったことを1行残す（§6）。
+///
+/// **この段では接続を畳まない。** 畳むのはレーンを分けてから（§5）で、いまはまだ
+/// 捨てている。捨てていることが見えるようにするのが先で、**見えないまま直すと、
+/// 直った証拠も残らない**。
+///
+/// 出すのは詰まった遷移のときだけで、ack 1件ごとには出さない（§7）。
+fn ack_not_queued(conn: &SessionHostConn, card_id: CardId) {
+    tracing::warn!(
+        agent_id = %conn.agent_id,
+        %card_id,
+        queued = conn.queued(),
+        "送信の待ち行列が満杯で ack を積めません。セッションホストは同じぶんを送り直します"
+    );
 }
 
 /// その PC の CLI ができること（設計§9-2）。
@@ -1730,6 +1762,14 @@ async fn agent_loop(
                     break;
                 }
                 if outbound.try_send(Message::Ping(bytes::Bytes::new())).is_err() {
+                    // **無言で切らない**（§6）。ここが黙っていると、記録には
+                    // 「PC が切断しました」しか出ず、詰まって切ったのか相手が
+                    // 畳んだのかを後から区別できない
+                    tracing::warn!(
+                        %agent_id,
+                        queued = queued(&outbound),
+                        "送信の待ち行列が満杯で生存確認を積めません。切断します"
+                    );
                     break;
                 }
             }
@@ -1850,8 +1890,9 @@ async fn handle_report(
                 .registry
                 .apply(origin, ServerMessage::TranscriptAppend { card_id, nodes })
                 .await
+                && !conn.send(&ServerToAgent::BatchAck { batch_id })
             {
-                conn.send(&ServerToAgent::BatchAck { batch_id });
+                ack_not_queued(conn, card_id);
             }
         }
         AgentMessage::TranscriptReset { batch_id, card_id } => {
@@ -1859,8 +1900,9 @@ async fn handle_report(
                 .registry
                 .apply(origin, ServerMessage::TranscriptReset { card_id })
                 .await
+                && !conn.send(&ServerToAgent::BatchAck { batch_id })
             {
-                conn.send(&ServerToAgent::BatchAck { batch_id });
+                ack_not_queued(conn, card_id);
             }
         }
 
