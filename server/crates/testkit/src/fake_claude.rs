@@ -191,3 +191,101 @@ pub fn resolve_model(alias: &str) -> (String, String) {
 pub fn path() -> PathBuf {
     crate::binary_path("fake-claude")
 }
+
+/// 折り返しを数えるための、おおよその表示幅。
+///
+/// **外部の crate は入れない。** 要るのは「全角は2桁」という粒度だけで、
+/// 擬似 claude が描くものは今のところ ASCII と数個の記号しかない。**それでも
+/// 文字数で数えないのは、あとから日本語を足したときに黙って壊れるため。**
+fn display_width(text: &str) -> usize {
+    text.chars().map(char_width).sum()
+}
+
+/// East Asian Wide / Fullwidth を2桁として数える。
+fn char_width(ch: char) -> usize {
+    let code = ch as u32;
+    let wide = matches!(code,
+        0x1100..=0x115F
+            | 0x2E80..=0x303E
+            | 0x3041..=0x33FF
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xA000..=0xA4CF
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE30..=0xFE6F
+            | 0xFF00..=0xFF60
+            | 0xFFE0..=0xFFE6
+            | 0x1F300..=0x1F64F
+            | 0x20000..=0x2FFFD);
+    if wide { 2 } else { 1 }
+}
+
+/// 幅 `cols` の端末で、この文字列が占める**物理行**の数。
+///
+/// # なぜ論理行では足りないのか
+///
+/// ダイアログを消すときは「カーソルを N 行上げてから下を消す」ので、**N は画面が
+/// 実際に使っている行数**でなければならない。論理行で数えると、**狭い幅で折り返した
+/// 選択肢が消え残る**。
+///
+/// 残ると、ブラウザ側の判定（可視領域のテキストを読む）がそれを拾って
+/// **閉じたのに十字が出たまま**になる——**このイシューが直した症状そのものを、
+/// 擬似 claude が自分で作る**ことになる。
+///
+/// 空の行も1行を占めるので、幅0の行は1と数える。
+pub fn physical_lines(text: &str, cols: usize) -> usize {
+    if cols == 0 {
+        return text.lines().count().max(1);
+    }
+    text.lines()
+        .map(|line| display_width(line).div_ceil(cols).max(1))
+        .sum::<usize>()
+        .max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 収まる行は一行と数える() {
+        assert_eq!(physical_lines("abc", 80), 1);
+        assert_eq!(physical_lines("abc\ndef", 80), 2);
+    }
+
+    #[test]
+    fn 空の行も一行を占める() {
+        assert_eq!(physical_lines("", 80), 1);
+        assert_eq!(physical_lines("a\n\nb", 80), 3);
+    }
+
+    #[test]
+    fn 幅を超えた行は折り返したぶんだけ増える() {
+        // ちょうど・1つ超え・2倍を、境目の両側で見る
+        assert_eq!(physical_lines(&"x".repeat(10), 10), 1);
+        assert_eq!(physical_lines(&"x".repeat(11), 10), 2);
+        assert_eq!(physical_lines(&"x".repeat(20), 10), 2);
+        assert_eq!(physical_lines(&"x".repeat(21), 10), 3);
+    }
+
+    #[test]
+    fn 全角は二桁として数える() {
+        // 5文字＝10桁なので、幅10 なら1行・幅9 なら2行
+        assert_eq!(physical_lines("あいうえお", 10), 1);
+        assert_eq!(physical_lines("あいうえお", 9), 2);
+    }
+
+    #[test]
+    fn 狭い幅では選択ダイアログが折り返す() {
+        // レビューが挙げた条件（45桁）。**論理行で数えると足りない**ことを固定する
+        let dialog = render_dialog(BYPASS_NOTICE, BYPASS_OPTIONS, 0);
+        let logical = dialog.lines().count();
+        assert!(
+            physical_lines(&dialog, 45) > logical,
+            "45桁では折り返すはずが、論理行と同じだった（論理={logical}）"
+        );
+        // 広い画面では折り返さない＝両者が一致する
+        assert_eq!(physical_lines(&dialog, 200), logical);
+    }
+}

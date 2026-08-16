@@ -44,7 +44,8 @@ use testkit::fake_claude::{
     CYCLE_MODES, DUMP_END_MARKER, ENV_PREFIX, FLOOD_END_MARKER, FLOOD_PATTERN, FOOTER_PREFIX,
     HOOK_FAILED_PREFIX, HOOK_SENT_PREFIX, JSONL_APPENDED_PREFIX, JSONL_FAILED_PREFIX,
     MODEL_SET_PREFIX, MODEL_SWITCH_NOTICE, MODEL_SWITCH_OPTIONS, READY_MARKER, RECEIVED_PREFIX,
-    RESIZED_PREFIX, STATUS_LINE_SENT_PREFIX, footer_for, render_dialog, resolve_model,
+    RESIZED_PREFIX, STATUS_LINE_SENT_PREFIX, footer_for, physical_lines, render_dialog,
+    resolve_model,
 };
 
 /// 起動時に受け取った、フック実行に必要な情報。
@@ -434,12 +435,30 @@ fn main() {
 /// 画面を丸ごと消す（`ESC[2J`）と**スクロールバックまで巻き込んで**既存のテストが読めなく
 /// なるので、カーソルをダイアログの先頭へ戻して、そこから下だけを消す。
 fn clear_dialog(out: &mut impl Write, dialog: &str) {
-    let lines = dialog.lines().count();
+    // **論理行では足りない。** 狭い画面では選択肢が折り返して**2行を占める**ので、
+    // 論理行ぶんしか上げないと下側が消え残る。残ったものをブラウザの判定が読んで
+    // **閉じたのに十字が出たまま**になる（[`physical_lines`]）
+    let lines = physical_lines(dialog, terminal_cols());
     // **桁も戻す。** カーソルを上げるだけだと桁はそのまま残るので、行の途中から
     // 消し始めて左側が生き残る。矢印のエコー（`^[[B`）で桁が進んでいる状態から
     // 呼ばれるので、`\r` が無いと消し残す
     let _ = write!(out, "\x1b[{lines}A\r\x1b[J");
     let _ = out.flush();
+}
+
+/// いまの端末の桁数。**取れなければ 80**（端末の既定）。
+///
+/// 折り返しを数えるのに要る。`TIOCGWINSZ` は Windows の libc に無いので囲ってある
+/// （リリースは Windows でもワークスペース全体を作るため。[`start_winch_reporter`] と同じ理由）。
+fn terminal_cols() -> usize {
+    #[cfg(unix)]
+    {
+        let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+        if unsafe { libc::ioctl(0, libc::TIOCGWINSZ, &mut size) } == 0 && size.ws_col > 0 {
+            return usize::from(size.ws_col);
+        }
+    }
+    80
 }
 
 /// SIGWINCH を受けたら、いまの画面サイズをマーカー1行で報告する。
