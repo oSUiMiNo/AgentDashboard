@@ -73,6 +73,8 @@ mod wire {
         cut: broadcast::Sender<()>,
         /// 立っている間は**新しい接続も通さない**（下記）
         blocked: AtomicBool,
+        /// サーバ → セッションホスト方向だけを堰き止める（下記 [`Sniffer::hold`]）
+        held: tokio::sync::watch::Sender<bool>,
     }
 
     impl Sniffer {
@@ -82,11 +84,13 @@ mod wire {
                 .expect("空きポートで待ち受けられること");
             let addr = listener.local_addr().expect("待ち受け先を取れること");
             let (cut, _) = broadcast::channel(8);
+            let (held, _) = tokio::sync::watch::channel(false);
             let sniffer = Arc::new(Self {
                 addr,
                 sent: Arc::new(Mutex::new(Vec::new())),
                 cut,
                 blocked: AtomicBool::new(false),
+                held,
             });
 
             let accepting = Arc::clone(&sniffer);
@@ -106,15 +110,16 @@ mod wire {
                     let sent = Arc::clone(&accepting.sent);
                     let mut cut_a = accepting.cut.subscribe();
                     let mut cut_b = accepting.cut.subscribe();
+                    let held = accepting.held.subscribe();
                     tokio::spawn(async move {
                         tokio::select! {
-                            _ = pump(down_read, up_write, Some(sent)) => {}
+                            _ = pump(down_read, up_write, Some(sent), None) => {}
                             _ = cut_a.recv() => {}
                         }
                     });
                     tokio::spawn(async move {
                         tokio::select! {
-                            _ = pump(up_read, down_write, None) => {}
+                            _ = pump(up_read, down_write, None, Some(held)) => {}
                             _ = cut_b.recv() => {}
                         }
                     });
@@ -146,6 +151,28 @@ mod wire {
             self.blocked.store(false, Ordering::SeqCst);
         }
 
+        /// **サーバ → セッションホスト方向だけ**を堰き止める（受け手が読まない状態）。
+        ///
+        /// # なぜ `cut` や `block` では代わりにならないか
+        ///
+        /// あちらは接続ごと落とすので、詰まりではなく**切断**になる。ここで作りたいのは
+        /// 「繋がってはいるが、書いたものが相手へ流れていかない」状態——サーバ側の
+        /// 書き手が `sink.send()` の途中で止まり、待ち行列が埋まっていく形である。
+        /// **これがこのイシューの現場で起きていたこと**で、詰まりを作れないと
+        /// 「約束は捨てない」も「詰まったら理由を残して畳む」も一度も踏めない。
+        ///
+        /// 相手が読まないだけでは足りない（送信バッファが数百 KiB 吸ってしまう）ので、
+        /// 呼ぶ側はバッファより大きいものを1通流し込むこと。
+        pub fn hold(&self) {
+            let _ = self.held.send(true);
+        }
+
+        /// また流す。
+        #[allow(dead_code)] // 詰まったまま畳まれる形しか見ていないので、いまは呼ばない
+        pub fn release(&self) {
+            let _ = self.held.send(false);
+        }
+
         pub fn sent_frames(&self) -> Vec<String> {
             self.sent.lock().expect("ロックが壊れていない").clone()
         }
@@ -156,11 +183,21 @@ mod wire {
         mut from: tokio::net::tcp::OwnedReadHalf,
         mut to: tokio::net::tcp::OwnedWriteHalf,
         record: Option<Arc<Mutex<Vec<String>>>>,
+        mut held: Option<tokio::sync::watch::Receiver<bool>>,
     ) {
         let mut buffer = Vec::new();
         let mut handshake_done = false;
         let mut chunk = vec![0u8; 16 * 1024];
         loop {
+            // 堰き止められている間は**読まない**。読まなければ送り元（サーバ）の
+            // 書き込みが詰まる——落とすのではなく詰まらせるのが狙い
+            if let Some(held) = &mut held {
+                while *held.borrow_and_update() {
+                    if held.changed().await.is_err() {
+                        return;
+                    }
+                }
+            }
             let read = match from.read(&mut chunk).await {
                 Ok(0) | Err(_) => return,
                 Ok(read) => read,
@@ -2012,4 +2049,186 @@ async fn ログの答えが返らないときは時間で打ち切る() {
 
     assert_eq!(err, server_core::session_host::HostAskError::Timeout);
     assert_eq!(err.message(), "PC が応じません");
+}
+
+#[tokio::test]
+async fn 約束を積めないときは理由が残って畳まれる() {
+    // このイシューの現場（設計§6）。実機では生存確認を積めずに `break` していたが
+    // **1行も残していなかった**ので、記録には「PC が切断しました」しか出ず、
+    // 詰まって切れたのか相手が畳んだのかを後から区別できなかった。
+    //
+    // ここで作るのは「繋がってはいるが、書いたものが流れていかない」状態である。
+    // 落とす（`cut` ／ `block`）のとは別物で、**詰まりでしか踏めない経路**がある。
+    let a2s = A2s::start_with("promise-voice", true).await;
+    let sniffer = a2s.sniffer.as_ref().expect("覗き見の中継を挟んである");
+    let (session, transcript) = a2s.start_session();
+    a2s.tell_transcript(&session, &transcript).await;
+
+    // 先にふつうに流れることを見ておく。ここが動いていないと、後の「届かない」が
+    // 詰まりのせいなのか元から繋がっていないのか分からない
+    append(&transcript, &sample_lines());
+    a2s.wait_for_nodes(session.card_id, 3).await;
+
+    // 約束のレーンを1にして繋ぎ直させる。**深さは接続ごとに決まる**ので、
+    // 繋ぎ直さないと新しい値が効かない
+    a2s.hub.set_lane_depths(server_core::gateway::LaneDepths {
+        promise: 1,
+        command: 2,
+    });
+    sniffer.block();
+    a2s.wait_until("いったん切れる", || {
+        a2s.hub.conn_for_card(session.card_id).is_none()
+    })
+    .await;
+    sniffer.unblock();
+    a2s.wait_until("繋ぎ直る", || {
+        a2s.hub.conn_for_card(session.card_id).is_some()
+    })
+    .await;
+    let conn = a2s
+        .hub
+        .conn_for_card(session.card_id)
+        .expect("繋ぎ直った接続を引けること");
+
+    // --- 書き手を詰まらせる ------------------------------------------------
+    sniffer.hold();
+    a2s.browser
+        .send_input(session.card_id, "x".repeat(4 * 1024 * 1024))
+        .await
+        .expect("宛先が引けること");
+    a2s.wait_until("書き手が大きな指示を掴む", || {
+        conn.queued_command() == 0
+    })
+    .await;
+
+    // 約束のレーン（深さ1）を埋める。**Close も約束**なので、これで満杯になる
+    conn.disconnect();
+    assert_eq!(
+        conn.queued_promise(),
+        1,
+        "約束のレーンが埋まっていない＝書き手が止まっていない"
+    );
+
+    // --- 詰まった状態で履歴が届くと、ack を積めない ------------------------
+    let sink = session_host_core::logging::capture::sink();
+    let mark = sink.mark();
+    append(&transcript, &more_lines());
+
+    a2s.wait_until("積めなかった理由が残る", || {
+        !声(mark, "card_id", &session.card_id.to_string()).is_empty()
+    })
+    .await;
+
+    let lines = 声(mark, "card_id", &session.card_id.to_string());
+    assert_eq!(lines[0]["level"], "WARN", "{lines:#?}");
+    assert!(
+        lines[0]["agent_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()),
+        "どの PC かが載ること（相関キー。設計§7）: {lines:#?}"
+    );
+    assert!(
+        lines[0]["queued"].as_u64().is_some(),
+        "溜まっている数が載ること: {lines:#?}"
+    );
+    assert!(
+        lines[0]["msg"]
+            .as_str()
+            .is_some_and(|msg| msg.contains("約束のレーン")),
+        "どの列が詰まったのかが分かる言葉であること: {lines:#?}"
+    );
+
+    // **黙って捨てず、畳む。** 捨てて続けると、セッションホストは ack が返らない
+    // ぶんを送り直し、それがまたレーンを埋める（実機で239回繰り返した形）。
+    //
+    // **`wait_until` の 20 秒では確かめられない。** 詰まったまま放っておくと、
+    // 10 秒後の生存確認が同じレーンで詰まって**あちらが畳んでしまう**ので、
+    // 「ack で畳んだ」と「生存確認で畳んだ」を区別できない（畳まない壊し方を
+    // 当てても落ちなかったのがこれ）。**生存確認より早いこと**まで見る
+    let 早く = tokio::time::Instant::now() + Duration::from_secs(3);
+    while a2s.hub.conn_for_card(session.card_id).is_some() {
+        assert!(
+            tokio::time::Instant::now() < 早く,
+            "ack を積めなかったのに畳んでいない（3秒以内。これを過ぎると生存確認の側が畳んでしまい、どちらが畳んだのか分からなくなる）"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    session.kill();
+}
+
+#[tokio::test]
+async fn 生存確認を積めないときも理由が残る() {
+    // **実機で25秒ごとに切れていたのは、たぶんここ**だった——たぶん、としか言えな
+    // かったのは1行も残していなかったからで、この行が入って初めて裏取りができる
+    // （設計§6・§9-4）。
+    //
+    // ack の側（`約束を積めないときは理由が残って畳まれる`）とは**別の枝**である。
+    // あちらは報告を受けた流れの中、こちらは誰も喋っていないときに独りでに起きる。
+    let a2s = A2s::start_with("ping-voice", true).await;
+    let sniffer = a2s.sniffer.as_ref().expect("覗き見の中継を挟んである");
+    let (session, transcript) = a2s.start_session();
+    a2s.tell_transcript(&session, &transcript).await;
+    append(&transcript, &sample_lines());
+    a2s.wait_for_nodes(session.card_id, 3).await;
+
+    a2s.hub.set_lane_depths(server_core::gateway::LaneDepths {
+        promise: 1,
+        command: 2,
+    });
+    sniffer.block();
+    a2s.wait_until("いったん切れる", || {
+        a2s.hub.conn_for_card(session.card_id).is_none()
+    })
+    .await;
+    sniffer.unblock();
+    a2s.wait_until("繋ぎ直る", || {
+        a2s.hub.conn_for_card(session.card_id).is_some()
+    })
+    .await;
+    let conn = a2s
+        .hub
+        .conn_for_card(session.card_id)
+        .expect("繋ぎ直った接続を引けること");
+    let agent_id = conn.agent_id.to_string();
+
+    sniffer.hold();
+    a2s.browser
+        .send_input(session.card_id, "x".repeat(4 * 1024 * 1024))
+        .await
+        .expect("宛先が引けること");
+    a2s.wait_until("書き手が大きな指示を掴む", || {
+        conn.queued_command() == 0
+    })
+    .await;
+    conn.disconnect();
+
+    // **ここから先は何も足さない。** 履歴を書き足すと ack の枝が先に発火して、
+    // 確かめたい枝を一度も踏まないまま緑になる
+    let sink = session_host_core::logging::capture::sink();
+    let mark = sink.mark();
+    a2s.wait_until("生存確認を積めなかった理由が残る", || {
+        声(mark, "agent_id", &agent_id).iter().any(|line| {
+            line["msg"]
+                .as_str()
+                .is_some_and(|msg| msg.contains("生存確認"))
+        })
+    })
+    .await;
+
+    let lines: Vec<_> = 声(mark, "agent_id", &agent_id)
+        .into_iter()
+        .filter(|line| {
+            line["msg"]
+                .as_str()
+                .is_some_and(|msg| msg.contains("生存確認"))
+        })
+        .collect();
+    assert_eq!(lines[0]["level"], "WARN", "{lines:#?}");
+    assert!(
+        lines[0]["queued"].as_u64().is_some(),
+        "溜まっている数が載ること: {lines:#?}"
+    );
+
+    session.kill();
 }

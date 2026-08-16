@@ -561,3 +561,269 @@ async fn 画面は種別を移し替えて配られ_見る人が居なくなる�
         backend.finish().await;
     }
 }
+
+/// 受け取った指示を、届いた順に集める。
+///
+/// `wait_for` は条件に合わないものを読み飛ばすので、**順序を見る用には使えない**。
+/// ここが見たいのは「約束が指示を追い越したか」なので、並びごと持って帰る。
+async fn collect_in_order(
+    socket: &mut SessionHostSocket,
+    window: Duration,
+    until: impl Fn(&[ServerToAgent]) -> bool,
+) -> Vec<ServerToAgent> {
+    use futures_util::StreamExt as _;
+
+    let deadline = tokio::time::Instant::now() + window;
+    let mut received = Vec::new();
+    while !until(&received) {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, socket.socket.next()).await {
+            Ok(Some(Ok(tungstenite::Message::Text(text)))) => {
+                if let Ok(message) = serde_json::from_str::<ServerToAgent>(&text) {
+                    received.push(message);
+                }
+            }
+            Ok(Some(Ok(_))) => continue,
+            _ => break,
+        }
+    }
+    received
+}
+
+/// カードが接続表へ載るまで待つ。載る前に指示を積んでも宛先が引けない。
+async fn wait_for_conn(
+    gateway: &TestGateway,
+    card_id: CardId,
+) -> Arc<server_core::gateway::SessionHostConn> {
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    loop {
+        if let Some(conn) = gateway.hub.conn_for_card(card_id) {
+            return conn;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{TIMEOUT:?} 以内にカードが接続表へ載りませんでした"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn 指示が詰まっても_ack_は捨てられず先に出て線も切れない() {
+    // このイシューそのもの（設計§5）。実機では ack が指示と同じ列に載っており、
+    // 詰まった瞬間に捨てられて、セッションホストは同じ 1055 件を239回送り直した。
+    //
+    // **件数だけでは書き手を止められない。** 枠の19倍を送っても直す前のコードで
+    // 全部 ack が返る（OS の送信バッファが吸うため。設計§8-2 の訂正）ので、
+    // レーンを浅くしたうえで、**読まない相手へ大きな指示を積んで**実際に止める。
+    for backend in common::backends("gw-lane").await {
+        let gateway = TestGateway::start(backend.db.clone()).await;
+        // **繋ぐ前に**浅くする。チャネルは接続ごとに1度だけ作られる
+        gateway
+            .hub
+            .set_lane_depths(server_core::gateway::LaneDepths {
+                promise: 8,
+                command: 2,
+            });
+
+        let (token, _) = issue(&backend.db, "テスト用").await;
+        let mut socket = gateway.connect_as(&token, "仕事用ノート").await;
+        socket
+            .wait_for("名乗りの応答", |message| {
+                matches!(message, ServerToAgent::Hello { .. })
+            })
+            .await;
+
+        let card_id = CardId::new();
+        socket
+            .send(&AgentMessage::SessionUpsert {
+                session: Box::new(meta(card_id)),
+            })
+            .await;
+        let conn = wait_for_conn(&gateway, card_id).await;
+
+        // --- 1. 読まない相手へ大きな指示を1通積んで、書き手を止める ---------
+        //
+        // **細切れに何通も積んでも止まらない。** 送信バッファが吸ってしまい、落ちるのは
+        // 「レーンが埋まるほど書き手が遅い」だけになる（最初に書いた形がそれで、
+        // ack は詰まりを一度も通らずに返っていた）。**1通をバッファより大きくする。**
+        let browser = server_core::gateway::RemoteSessionHost::new(Arc::clone(&gateway.hub));
+        server_core::session_host::SessionHost::send_input(
+            &browser,
+            card_id,
+            "x".repeat(4 * 1024 * 1024),
+        )
+        .await
+        .expect("宛先が引けること");
+        // 書き手がそれを掴む（＝レーンから消える）まで待つ。掴んだ時点で、相手が
+        // 読み始めるまで書き終われない
+        let deadline = tokio::time::Instant::now() + TIMEOUT;
+        while conn.queued_command() > 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "[{}] 書き手が大きな指示を掴みませんでした",
+                backend.name
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // 書き手が止まっている間に、指示のレーンを埋める。
+        //
+        // **印を付けて積む。** 追い越しを見るには「詰まっている最中に並んでいた指示」を
+        // 名指しできないといけない——大きな指示（既に書き手が掴んだもの）と区別せずに
+        // 「最後の指示」で測ると、**順序を決めている指定を外しても落ちない**（実際に
+        // 落ちなかった）
+        const NOKORI: &str = "のこり";
+        const PUSHED: usize = 16;
+        for _ in 0..PUSHED {
+            server_core::session_host::SessionHost::send_input(
+                &browser,
+                card_id,
+                NOKORI.to_string(),
+            )
+            .await
+            .expect("宛先が引けること");
+        }
+        assert_eq!(
+            conn.queued_command(),
+            2,
+            "[{}] 指示のレーンが埋まっていない＝書き手が止まっていない。この形では何も確かめられない",
+            backend.name
+        );
+
+        // --- 2. 詰まっている最中に履歴を送る --------------------------------
+        for n in 1..=3u64 {
+            socket
+                .send(&AgentMessage::TranscriptBatch {
+                    batch_id: BatchId(n),
+                    card_id,
+                    nodes: vec![protocol::TreeNode {
+                        id: protocol::NodeId(format!("n{n}")),
+                        parent: None,
+                        node: protocol::Node::AssistantText {
+                            text: format!("{n} 件目"),
+                        },
+                        ts: n as i64,
+                        branch: 0,
+                    }],
+                })
+                .await;
+        }
+
+        // --- 3. 読む前に、ack が約束のレーンへ載ったことを確かめる ----------
+        //
+        // **ここがこの試験の要**である。指示のレーンが満杯（2件）のまま ack が3件
+        // 積まれている——これが「約束は捨てられない」の実体で、直す前はここで
+        // 捨てられていた。**確かめずに読み始めると、載る前に書き手が動き出して
+        // 並びが競う**（実際に競って、順序の判定が実行のたびに変わった）。
+        let acked = tokio::time::Instant::now() + TIMEOUT;
+        while conn.queued_promise() < 3 {
+            assert!(
+                tokio::time::Instant::now() < acked,
+                "[{}] ack が約束のレーンへ載りません（載っているのは {} 件）。捨てられている",
+                backend.name,
+                conn.queued_promise()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            conn.queued_command(),
+            2,
+            "[{}] 指示のレーンが空いた＝書き手が動き出している。追い越しを確かめられない",
+            backend.name
+        );
+
+        // --- 4. ここで初めて読む。並びごと持って帰る ------------------------
+        // **3件揃ったところで読むのをやめない。** 追い越しの証拠は「ack の**後ろ**に
+        // 詰まっていた指示が残っていること」なので、そこまで読まないと並びが見えない
+        let 残りか = |message: &ServerToAgent| matches!(message, ServerToAgent::SendInput { text, .. } if text == NOKORI);
+        let received = collect_in_order(&mut socket, TIMEOUT, |so_far| {
+            let all_acked = so_far
+                .iter()
+                .filter(|message| matches!(message, ServerToAgent::BatchAck { .. }))
+                .count()
+                == 3;
+            all_acked && so_far.iter().any(残りか)
+        })
+        .await;
+
+        let acks: Vec<usize> = received
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| matches!(message, ServerToAgent::BatchAck { .. }))
+            .map(|(at, _)| at)
+            .collect();
+        let inputs: Vec<usize> = received
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| matches!(message, ServerToAgent::SendInput { .. }))
+            .map(|(at, _)| at)
+            .collect();
+        let 残り: Vec<usize> = received
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| 残りか(message))
+            .map(|(at, _)| at)
+            .collect();
+
+        // 約束は捨てられない（送った3件ぶんが揃う）
+        assert_eq!(
+            acks.len(),
+            3,
+            "[{}] ack が {} 件しか返っていない。詰まったときに捨てられている",
+            backend.name,
+            acks.len()
+        );
+        // 指示は従来どおり捨てられる（約束と入れ替わっていない）
+        assert!(
+            inputs.len() < PUSHED,
+            "[{}] 指示が1件も捨てられていない（{} 件全部届いた）。書き手が止まっていないので、この試験は空振りしている",
+            backend.name,
+            inputs.len()
+        );
+        // 約束が先に出る（詰まっていた指示を**3件とも**追い越している）
+        //
+        // **「最初の ack が最後の指示より前」では弱い。** 順序を決めている指定を
+        // 外しても、たまたま ack が1つ先に出れば通ってしまう（実際に通った）。
+        // 詰まっていた指示の**先頭**より、**最後の ack** が前に出ていることを見る
+        let first_left = *残り.first().unwrap_or_else(|| {
+            panic!(
+                "[{}] 詰まっていた指示が1件も届いていない。追い越しを確かめられない",
+                backend.name
+            )
+        });
+        let last_ack = *acks.last().expect("ack が1件も届いていない");
+        assert!(
+            last_ack < first_left,
+            "[{}] 約束が指示に追い越されている（最後の ack {last_ack} / 詰まっていた指示の先頭 {first_left}）。約束のレーンが先に見られていない: {received:#?}",
+            backend.name
+        );
+
+        // --- 5. 線は切れていない --------------------------------------------
+        socket
+            .send(&AgentMessage::TranscriptBatch {
+                batch_id: BatchId(99),
+                card_id,
+                nodes: vec![protocol::TreeNode {
+                    id: protocol::NodeId("n99".to_string()),
+                    parent: None,
+                    node: protocol::Node::AssistantText {
+                        text: "まだ生きている".to_string(),
+                    },
+                    ts: 99,
+                    branch: 0,
+                }],
+            })
+            .await;
+        socket
+            .wait_for("詰まりの後の ack", |message| {
+                matches!(message, ServerToAgent::BatchAck { batch_id } if *batch_id == BatchId(99))
+            })
+            .await;
+
+        backend.finish().await;
+    }
+}
