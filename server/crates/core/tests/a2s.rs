@@ -22,17 +22,25 @@ use server_core::{
 };
 use session_host_core::{
     config::SessionHostConfig,
-    events::EventSink,
-    link::{LinkConfig, SessionHostLink},
+    events::{EventSink, TranscriptReport},
+    link::{Limits, LinkConfig, SessionHostLink},
     offsets::OffsetStore,
     session::SessionManager,
 };
 use std::{
+    collections::HashMap,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
+
+/// 畳みを見るテストのカードごとの上限（イシュー設計§4-1）。
+///
+/// ふつうの流れ（3ノード）では超えず、切断中に書き足すぶん（12ノード）では超える。
+const FOLD_CARD_NODES: usize = 6;
+/// 切断中に書き足すノード数。上限の2倍で、**畳まないと収まらない**大きさ。
+const FOLD_APPEND: usize = 12;
 
 const WINDOW: usize = 2000;
 const TIMEOUT: Duration = Duration::from_secs(20);
@@ -240,6 +248,95 @@ mod wire {
     }
 }
 
+/// 報告を数えながら素通しする（イシュー設計§4-4 の検査用）。
+///
+/// # なぜ数える必要があるのか
+///
+/// 「**切断中に読み直しが始まっていないこと**」は、始まっていないことの証明なので
+/// 状態を見ても分からない（読み位置は畳んだ時点で消えており、届く先も切れている）。
+/// **パーサが報告を出したかどうか**だけが、読み直しが走ったかどうかを直接に示す。
+struct CountingSink {
+    inner: Arc<dyn EventSink>,
+    reports: Mutex<HashMap<CardId, usize>>,
+    /// 報告に載ったノードIDを**出た順に全部**。同じIDが二度出れば読み直しが走っている
+    seen: Mutex<HashMap<CardId, Vec<String>>>,
+}
+
+impl CountingSink {
+    fn new(inner: Arc<dyn EventSink>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            reports: Mutex::new(HashMap::new()),
+            seen: Mutex::new(HashMap::new()),
+        })
+    }
+
+    fn reports_of(&self, card_id: CardId) -> usize {
+        self.reports
+            .lock()
+            .expect("ロックが壊れていない")
+            .get(&card_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// そのノードIDが報告に載った回数。
+    ///
+    /// **頭から読み直したかどうかは、これでしか時機に依らずに言えない。** 報告の
+    /// 件数だけを見ると、数え始める時機と読み直しの速さの兼ね合いで見逃す
+    /// （実際、壊し方5 をすり抜けた）。
+    fn times_seen(&self, card_id: CardId, node_id: &str) -> usize {
+        self.seen
+            .lock()
+            .expect("ロックが壊れていない")
+            .get(&card_id)
+            .map(|ids| ids.iter().filter(|id| *id == node_id).count())
+            .unwrap_or(0)
+    }
+}
+
+impl EventSink for CountingSink {
+    fn emit(&self, event: protocol::ws::ServerMessage) {
+        self.inner.emit(event);
+    }
+
+    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<protocol::ws::ServerMessage> {
+        self.inner.subscribe()
+    }
+
+    fn report_transcript(&self, report: TranscriptReport) {
+        *self
+            .reports
+            .lock()
+            .expect("ロックが壊れていない")
+            .entry(report.card_id)
+            .or_default() += 1;
+        self.seen
+            .lock()
+            .expect("ロックが壊れていない")
+            .entry(report.card_id)
+            .or_default()
+            .extend(report.nodes.iter().map(|node| node.id.0.clone()));
+        self.inner.report_transcript(report);
+    }
+
+    fn reset_transcript(&self, card_id: CardId) {
+        self.inner.reset_transcript(card_id);
+    }
+
+    fn model_aliases_changed(&self, aliases: serde_json::Value) {
+        self.inner.model_aliases_changed(aliases);
+    }
+
+    fn screens_enabled(&self) -> bool {
+        self.inner.screens_enabled()
+    }
+
+    fn screen_frame(&self, frame: Vec<u8>) {
+        self.inner.screen_frame(frame);
+    }
+}
+
 /// 2つの役を繋いだ一式。
 struct A2s {
     dir: PathBuf,
@@ -255,6 +352,10 @@ struct A2s {
     manager: Arc<SessionManager>,
     link: Arc<SessionHostLink>,
     parser: Arc<session_host_core::parser::ParserSupervisor>,
+    /// 「どこまで読んだか」。畳むと消えることを見るために持つ（イシュー設計§4-2 の3）
+    offsets: Arc<OffsetStore>,
+    /// パーサが報告を出した回数（読み直しが走ったかどうかの唯一の直接の証拠）
+    reports: Arc<CountingSink>,
     sniffer: Option<Arc<wire::Sniffer>>,
     server_task: tokio::task::JoinHandle<()>,
 }
@@ -272,11 +373,37 @@ impl A2s {
 
     /// `through_sniffer` を立てると、線の上を覗ける中継を間に挟む。
     async fn start_with(label: &str, through_sniffer: bool) -> Self {
-        Self::start_full(label, through_sniffer, SYNC_SECS).await
+        Self::start_full(label, through_sniffer, SYNC_SECS, None).await
+    }
+
+    /// 溜まりの上限を小さくして立てる（畳みを見るテスト用。イシュー設計§4-1）。
+    ///
+    /// **既定の 32,768 ノードは、統合テストから現実的な時間では踏めない。** 差し替え
+    /// なしで書くと、畳みを確かめるつもりのテストが**一度も畳まないまま緑になる**。
+    ///
+    /// `FOLD_CARD_NODES` は、**繋がっている間のふつうの流れ（3ノード）では超えず、
+    /// 切断中に書き足したぶん（12ノード）では超える**大きさに取ってある。どちらかに
+    /// 寄せると、畳みが「起きっぱなし」か「起きない」になって性質が現れない。
+    async fn start_folding(label: &str) -> Self {
+        Self::start_full(
+            label,
+            true,
+            SYNC_SECS,
+            Some(Limits {
+                card_nodes: FOLD_CARD_NODES,
+                ..Limits::default()
+            }),
+        )
+        .await
     }
 
     /// 履歴の同期間隔まで決めて立てる（設定の即時反映を見るテスト用）。
-    async fn start_full(label: &str, through_sniffer: bool, sync_secs: u64) -> Self {
+    async fn start_full(
+        label: &str,
+        through_sniffer: bool,
+        sync_secs: u64,
+        limits: Option<Limits>,
+    ) -> Self {
         let dir = std::env::temp_dir().join(format!(
             "agentdashboard-a2s-{label}-{}",
             uuid::Uuid::new_v4().simple()
@@ -398,10 +525,15 @@ impl A2s {
             available_modes: vec![protocol::PermissionMode::new("default")],
             always_bypass_permissions: false,
         });
+        // **繋ぎ始める前に差し替える**（常駐タスクは起きるときに1度だけ読む）
+        if let Some(limits) = limits {
+            link.set_limits(limits);
+        }
+        let reports = CountingSink::new(Arc::clone(&link) as Arc<dyn EventSink>);
         let manager = common::build_manager_with(
             Arc::clone(&agent_config),
             common::fake_claude().to_string_lossy().into_owned(),
-            Arc::clone(&link) as Arc<dyn EventSink>,
+            Arc::clone(&reports) as Arc<dyn EventSink>,
         );
         session_host_core::hooks::serve(hook_listener, Arc::clone(&manager));
         let parser = session_host_core::parser::ParserSupervisor::start(
@@ -410,7 +542,7 @@ impl A2s {
             Arc::clone(&offsets),
         );
         manager.attach_parser(parser.handle());
-        link.attach(Arc::clone(&manager), offsets);
+        link.attach(Arc::clone(&manager), Arc::clone(&offsets));
         // **最初の接続は、時間ではなく繋がったことで待つ。**
         //
         // 固定の待ち時間だと、負荷が高いとき（`make ci` は48個のテストバイナリを同時に
@@ -434,6 +566,8 @@ impl A2s {
             hub,
             account_id,
             parser,
+            offsets,
+            reports,
             browser,
             manager,
             link,
@@ -509,6 +643,24 @@ impl A2s {
             .await;
     }
 
+    /// そのカードの読み位置。**畳むと消える**（`Unwatch` が `offsets.forget()` を兼ねる）。
+    fn read_offset(&self, card_id: CardId, transcript: &Path) -> Option<u64> {
+        let path = transcript.to_string_lossy().into_owned();
+        self.offsets.resume(card_id, &path).get(&path).copied()
+    }
+
+    /// 条件が満たされるまで待つ。満たされなければ落とす。
+    async fn wait_until(&self, what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = tokio::time::Instant::now() + TIMEOUT;
+        while !done() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{TIMEOUT:?} 以内に {what} になりませんでした"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     /// セッションホスト自身のフック受信口を叩く（**サーバの口ではない**。設計§5-3）。
     async fn post_hook(&self, token: &str, event: &str, body: &str) -> u16 {
         let port = self.manager.hook_port();
@@ -536,6 +688,26 @@ fn more_lines() -> Vec<String> {
         r#"{"type":"user","uuid":"u4","parentUuid":"u3","timestamp":"2026-07-29T00:00:03.000Z","version":"2.1.220","toolUseResult":{"stdout":"1 passed"},"message":{"role":"user","content":[{"tool_use_id":"toolu_1","type":"tool_result","content":"1 passed"}]}}"#.to_string(),
         r#"{"type":"assistant","uuid":"u5","parentUuid":"u4","timestamp":"2026-07-29T00:00:04.000Z","version":"2.1.220","message":{"role":"assistant","content":[{"type":"text","text":"通りました"}]}}"#.to_string(),
     ]
+}
+
+/// 上限を超えさせるための、素直なアシスタント発言の連なり。
+///
+/// **1レコード＝1ノード**なので、行数がそのまま溜まりの大きさになる。
+fn many_lines(count: usize) -> Vec<String> {
+    (0..count)
+        .map(|i| {
+            let uuid = format!("m{i}");
+            let parent = if i == 0 {
+                "u3".to_string()
+            } else {
+                format!("m{}", i - 1)
+            };
+            format!(
+                r#"{{"type":"assistant","uuid":"{uuid}","parentUuid":"{parent}","timestamp":"2026-07-29T00:01:{:02}.000Z","version":"2.1.220","message":{{"role":"assistant","content":[{{"type":"text","text":"{uuid} 番目"}}]}}}}"#,
+                i.min(59)
+            )
+        })
+        .collect()
 }
 
 fn append(path: &std::path::Path, lines: &[String]) {
@@ -799,6 +971,107 @@ async fn 切断すると接続断の印が付き_状態は書き換わらない(
     session.kill();
 }
 
+/// 畳みが起きるところまで進めた土台を作る（下の2本で共有する）。
+///
+/// 戻すのは「セッション」「トランスクリプトの場所」「畳んだ時点の報告回数」。
+async fn 畳ませる(a2s: &A2s) -> (Arc<session_host_core::session::Session>, PathBuf, usize) {
+    let sniffer = a2s.sniffer.as_ref().expect("覗き見の中継を挟んである");
+    let (session, transcript) = a2s.start_session();
+    a2s.tell_transcript(&session, &transcript).await;
+
+    // 繋がっている間はふつうに流れ、読み位置も進む
+    append(&transcript, &sample_lines());
+    a2s.wait_for_nodes(session.card_id, 3).await;
+    a2s.wait_until("読み位置が進む", || {
+        a2s.read_offset(session.card_id, &transcript).unwrap_or(0) > 0
+    })
+    .await;
+
+    // **繋ぎ直しごと塞ぐ。** 切るだけだと即座に戻り、切断中に溜まる形を作れない
+    sniffer.block();
+    append(&transcript, &many_lines(FOLD_APPEND));
+
+    // 畳まれたことは**読み位置が消えること**で分かる。`Unwatch` が `offsets.forget()` を
+    // 兼ねているので、位置が消えたなら監視を止める依頼がパーサへ届いている（設計§4-2 の3）
+    a2s.wait_until("畳まれて読み位置が消える", || {
+        a2s.read_offset(session.card_id, &transcript).is_none()
+    })
+    .await;
+
+    let 畳んだ時点 = a2s.reports.reports_of(session.card_id);
+    (session, transcript, 畳んだ時点)
+}
+
+#[tokio::test]
+async fn 切断中に上限を超えたカードは畳まれ_読み直しは始まらない() {
+    // 設計§4-2 の3 と §4-4。畳んだそばから読み直させると、切断が続いている間に
+    // 同じ量がまた溜まり、**畳んでは読み直す輪**になる
+    let a2s = A2s::start_folding("fold-cut").await;
+    let (session, transcript, 畳んだ時点) = 畳ませる(&a2s).await;
+
+    // 読み位置が消えた状態で、しばらく置いても**報告が1件も増えない**。
+    // 増えるなら、止めたはずの監視が生きているか、読み直しが始まっている
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        a2s.reports.reports_of(session.card_id),
+        畳んだ時点,
+        "切断中に読み直しが始まっている（畳んでは読み直す輪に入る）"
+    );
+    // **件数だけでは足りない。** 数え始める時機と読み直しの速さの兼ね合いで、
+    // 既に走り終えた読み直しを見逃す。頭のノードが二度来ていないことまで見る
+    assert_eq!(
+        a2s.reports.times_seen(session.card_id, "u1.0"),
+        1,
+        "頭から読み直している（切断中に読み直しを頼んでいる）"
+    );
+    assert!(
+        a2s.read_offset(session.card_id, &transcript).is_none(),
+        "読み位置が戻っている（切断中に読み進めている）"
+    );
+
+    session.kill();
+}
+
+#[tokio::test]
+async fn 繋ぎ直すと畳んだカードを頭から読み直して履歴が揃う() {
+    // 設計§1-2 の2段目と§4-5。畳んで捨てたのは**送る予定だった写し**だけで、
+    // 履歴そのものは利用者の機械の JSONL に残っている
+    let a2s = A2s::start_folding("fold-resume").await;
+    let sniffer = a2s.sniffer.as_ref().expect("覗き見の中継を挟んである");
+    let (session, _transcript, 畳んだ時点) = 畳ませる(&a2s).await;
+
+    // 電波が戻る → 巻き戻しが渡って ack が返る → 読み直しが頼まれる
+    sniffer.unblock();
+
+    // **畳む前に送っていたぶんも含めて全部揃う。** 3（畳む前に届いていた）＋12（切断中）
+    let nodes = a2s.wait_for_nodes(session.card_id, 3 + FOLD_APPEND).await;
+    assert!(
+        a2s.reports.reports_of(session.card_id) > 畳んだ時点,
+        "繋ぎ直しても読み直しが始まっていない"
+    );
+
+    // **頭から読み直している。** 位置を捨てたので、いちばん最初のレコードが再び来る——
+    // 途中から読んでいれば `u1.0` の報告は1回きりのままになる
+    assert!(
+        a2s.reports.times_seen(session.card_id, "u1.0") >= 2,
+        "頭から読み直していない（途中から読んでいる）"
+    );
+    let ids: Vec<&str> = nodes.iter().map(|node| node.id.0.as_str()).collect();
+    assert!(
+        ids.contains(&"u1.0"),
+        "頭から読み直していない（畳む前のぶんが欠けている）: {ids:?}"
+    );
+    for i in 0..FOLD_APPEND {
+        let id = format!("m{i}.0");
+        assert!(
+            ids.contains(&id.as_str()),
+            "切断中に書き足したぶんが欠けている（{id}）: {ids:?}"
+        );
+    }
+
+    session.kill();
+}
+
 #[tokio::test]
 async fn モデルの表は_PC_ごとに保存される() {
     // CLI の版は PC ごとに違う（設計§13-4）。**表はセッションホスト単位のデータ**なので、
@@ -880,7 +1153,7 @@ async fn PC_の版が名乗りから一覧まで運ばれる() {
 async fn 同期間隔の変更は次の接続を待たずに効く() {
     // 設定を変えたのに「次に繋ぎ直すまで古い間隔で送り続ける」のでは、変えた意味が
     // 半分無くなる（設計§13-3）。**間隔が長い状態から始めて、押し込んだら届く**ことを見る
-    let a2s = A2s::start_full("intervals", false, 600).await;
+    let a2s = A2s::start_full("intervals", false, 600, None).await;
     let (session, transcript) = a2s.start_session();
     a2s.tell_transcript(&session, &transcript).await;
     append(&transcript, &sample_lines());
@@ -1220,7 +1493,7 @@ async fn 読み込んだ間隔は次の接続を待たずに配られる() {
     // **読み込みだけ別の道を作らない**（持ち出し設計§12）。ファイルから入った間隔も
     // `PUT` と同じ経路（`SessionHostHub::set_intervals`）を通るので、繋がっている PC へ
     // その場で届く。届かないと、次に繋ぎ直すまで古い間隔で送り続ける
-    let a2s = A2s::start_full("import-intervals", false, 600).await;
+    let a2s = A2s::start_full("import-intervals", false, 600, None).await;
     let (session, transcript) = a2s.start_session();
     a2s.tell_transcript(&session, &transcript).await;
     append(&transcript, &sample_lines());
