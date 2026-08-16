@@ -140,9 +140,9 @@ reason = "同上。画面のフレームは落ちても次の全画面で追い�
 [[entry]]
 path = "server/crates/server-core/src/gateway.rs"
 fn = "disconnect"
-expr = '''self.outbound.try_send(Message::Close(None))'''
+expr = '''self.lanes.promise.try_send(Message::Close(None))'''
 class = "send"
-reason = "閉じる合図。相手が既に切れているなら送る意味が無い"
+reason = "閉じる合図。相手が既に切れているなら送る意味が無い。約束のレーンが満杯で積めない場合も、畳みたい相手は既に読んでいないので同じ扱いでよい（読み取りループを抜けて畳む側が本筋）"
 
 [[entry]]
 path = "server/crates/server-core/src/gateway.rs"

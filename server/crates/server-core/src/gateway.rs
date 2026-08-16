@@ -51,12 +51,35 @@ use std::{
 use tokio::sync::{broadcast, mpsc, oneshot};
 use uuid::Uuid;
 
-/// セッションホスト1接続あたりの送信待ち行列（メッセージ数）。
+/// セッションホスト1接続あたり、**指示**のレーンの深さ（メッセージ数）。
 ///
 /// 溢れたら**捨てる**。ここを流れるのは指示（`SendInput` 等）で、届かなかったことは
 /// 利用者にすぐ分かる（画面が動かない）。待って詰まらせると、他のセッションホストへの
-/// 中継まで巻き添えになる。履歴の欠落は逆側（A→S）の ack が守るので、ここには影響しない。
-const OUTBOUND_QUEUE_MESSAGES: usize = 256;
+/// 中継まで巻き添えになる。
+///
+/// **かつてはここに ack も乗っていた**（設計§5-1）。「履歴の欠落は逆側（A→S）の ack が
+/// 守るので、ここには影響しない」と書いてあったが、**その ack 自身がこの行列を通っていた**。
+/// 詰まった瞬間に守り手が捨てられ、セッションホストは同じぶんを永久に送り直す——実機で
+/// 1055件が239回の再接続を通じて1件も減らなかったのがこれである。約束は
+/// [`PROMISE_QUEUE_MESSAGES`] のレーンへ移した。
+const COMMAND_QUEUE_MESSAGES: usize = 256;
+
+/// セッションホスト1接続あたり、**約束**のレーンの深さ（メッセージ数・設計§5-2）。
+///
+/// 乗るのは `BatchAck` ／ 生存確認 ／ Close の3つで、**溢れても捨てない**——積めなければ
+/// 理由を1行残して接続を畳む（§6）。
+///
+/// 深さは**式で上から抑えられる**。ack は「同時に未 ack にできるバッチの数」を超えて
+/// 生まれず、それは送る側の窓（`session-host-core` の `Limits::window` = 32）で決まる。
+///
+/// ```text
+/// 同時に載りうる約束 = 未 ack のバッチ数（≦ 窓 32）＋ 生存確認 1 ＋ Close 1 = 34
+/// ```
+///
+/// **34 が原理的な最大**で、64 はその約2倍。窓を持たない古いセッションホストが相手の
+/// ときはこの式が効かず、レーンが埋まって §6 の形で畳まれる——**いまと同じ結果に、
+/// 理由の1行が付くだけ**である（設計§10-4）。
+const PROMISE_QUEUE_MESSAGES: usize = 64;
 
 /// 生存確認を送る間隔（設計§4-1）。
 const PING_INTERVAL: Duration = Duration::from_secs(10);
@@ -96,14 +119,50 @@ pub struct SessionHostConn {
     /// ここから取る。持っていないと起動ボタンと権限モードの選択肢が空になる。
     pub available_modes: Vec<PermissionMode>,
     pub always_bypass_permissions: bool,
-    outbound: mpsc::Sender<Message>,
+    lanes: Lanes,
+}
+
+/// サーバ→PC の送り口。**約束と指示を別の列で持つ**（設計§5-2）。
+///
+/// 分けている理由は1つで、**混ぜると守り手が捨てられる**ため。指示は溢れたら捨てて
+/// よいが、ack を捨てると履歴が永久に前へ進まない（[`COMMAND_QUEUE_MESSAGES`]）。
+#[derive(Clone)]
+struct Lanes {
+    /// `BatchAck` ／ 生存確認 ／ Close。**捨てない。**
+    promise: mpsc::Sender<Message>,
+    /// `SendInput`・画面の購読・切替・PTY の生入力。**溢れたら捨てる。**
+    command: mpsc::Sender<Message>,
+}
+
+/// どちらのレーンへ乗るか（設計§5-2）。
+///
+/// **種別で決める。** 呼ぶ側に選ばせると、口を1つ足したときに付け忘れる——
+/// 付け忘れは「たまに履歴が進まない」という形でしか表に出ない。
+fn lane_of(message: &ServerToAgent) -> Lane {
+    match message {
+        ServerToAgent::BatchAck { .. } => Lane::Promise,
+        _ => Lane::Command,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lane {
+    Promise,
+    Command,
 }
 
 impl SessionHostConn {
-    /// 指示を1つ送る。**待たない**（届かなければ捨てる）。
+    /// 1つ送る。**待たない。**
+    ///
+    /// 積めたかどうかを返す。**約束（`BatchAck`）の呼び出し側は必ず見ること**——
+    /// 見ずに捨てると、直す前と同じ「無言で履歴が止まる」形へ戻る（設計§5-3）。
     pub fn send(&self, message: &ServerToAgent) -> bool {
+        let sender = match lane_of(message) {
+            Lane::Promise => &self.lanes.promise,
+            Lane::Command => &self.lanes.command,
+        };
         match serde_json::to_string(message) {
-            Ok(text) => self.outbound.try_send(Message::text(text)).is_ok(),
+            Ok(text) => sender.try_send(Message::text(text)).is_ok(),
             Err(err) => {
                 tracing::error!("指示をシリアライズできません: {err}");
                 false
@@ -111,28 +170,33 @@ impl SessionHostConn {
         }
     }
 
-    /// 生の入力（PTY のキー入力）を送る。
+    /// 生の入力（PTY のキー入力）を送る。**指示のレーン。**
     pub fn send_binary(&self, bytes: Vec<u8>) -> bool {
-        self.outbound
+        self.lanes
+            .command
             .try_send(Message::Binary(bytes.into()))
             .is_ok()
     }
 
-    /// 積まれたまま、まだ書き出せていない数（§6）。
+    /// 約束のレーンに積まれたまま、まだ書き出せていない数（§6）。
     ///
     /// **詰まったことを言葉にするために持つ。** 積めなかったという事実だけでは、
     /// 相手が読んでいないのか一時的に混んだだけなのかを後から区別できない。
-    pub fn queued(&self) -> usize {
-        queued(&self.outbound)
+    pub fn queued_promise(&self) -> usize {
+        queued(&self.lanes.promise)
+    }
+
+    /// 指示のレーンのぶん。**捨てた側の数**なので、約束と混ぜて数えない。
+    pub fn queued_command(&self) -> usize {
+        queued(&self.lanes.command)
     }
 
     /// この接続を畳ませる（設計§8-4 の「接続中なら切断」）。
     ///
-    /// 待ち行列へ Close を積むだけ。**こちらから TCP を殴らない**のは、送信タスクが
-    /// 積まれた指示を書き終えてから畳むほうが、相手にとって理由の分かる終わり方に
-    /// なるため。
+    /// **Close は約束のレーンへ積む。** 指示が詰まっていても畳めることが要る——
+    /// 詰まっているときこそ畳みたい。
     pub fn disconnect(&self) {
-        let _ = self.outbound.try_send(Message::Close(None));
+        let _ = self.lanes.promise.try_send(Message::Close(None));
     }
 }
 
@@ -146,17 +210,17 @@ fn queued(outbound: &mpsc::Sender<Message>) -> usize {
 
 /// 約束（ack）を積めなかったことを1行残す（§6）。
 ///
-/// **この段では接続を畳まない。** 畳むのはレーンを分けてから（§5）で、いまはまだ
-/// 捨てている。捨てていることが見えるようにするのが先で、**見えないまま直すと、
-/// 直った証拠も残らない**。
+/// **残したら畳む。** 捨てて続けると、セッションホストは ack が返らないぶんを送り直し、
+/// それがまたレーンを埋める——**捨てさせている当のものが、ack でしか減らない**。
+/// 畳めば、繋ぎ直したときに窓のぶんだけ出し直すところからやり直せる。
 ///
 /// 出すのは詰まった遷移のときだけで、ack 1件ごとには出さない（§7）。
 fn ack_not_queued(conn: &SessionHostConn, card_id: CardId) {
     tracing::warn!(
         agent_id = %conn.agent_id,
         %card_id,
-        queued = conn.queued(),
-        "送信の待ち行列が満杯で ack を積めません。セッションホストは同じぶんを送り直します"
+        queued = conn.queued_promise(),
+        "約束のレーンが満杯で ack を積めません。切断します"
     );
 }
 
@@ -284,6 +348,25 @@ pub struct SessionHostHub {
     /// **時間で打ち切ったら必ず消す。** 消し忘れると、遅れて届いた答えが誰にも
     /// 渡らないまま溜まる。接続やカードと違い、これは1回の要求の寿命しか持たない。
     pending: Mutex<HashMap<RequestId, oneshot::Sender<HostReply>>>,
+    /// レーンの深さ。**既定は本物の値**で、[`SessionHostHub::set_lane_depths`] でだけ
+    /// 小さくできる。
+    depths: Mutex<LaneDepths>,
+}
+
+/// 約束と指示、それぞれのレーンの深さ（設計§5-2）。
+#[derive(Debug, Clone, Copy)]
+pub struct LaneDepths {
+    pub promise: usize,
+    pub command: usize,
+}
+
+impl Default for LaneDepths {
+    fn default() -> Self {
+        Self {
+            promise: PROMISE_QUEUE_MESSAGES,
+            command: COMMAND_QUEUE_MESSAGES,
+        }
+    }
 }
 
 impl SessionHostHub {
@@ -295,7 +378,24 @@ impl SessionHostHub {
             screens: Mutex::new(HashMap::new()),
             streaming: Mutex::new(HashSet::new()),
             pending: Mutex::new(HashMap::new()),
+            depths: Mutex::new(LaneDepths::default()),
         })
+    }
+
+    /// レーンを浅くする（テスト専用の口）。
+    ///
+    /// **書き手が止まった状態は、件数では作れない。** 実測では枠の19倍を送っても
+    /// 直す前のコードで全部 ack が返った（設計§8-2 の訂正）——OS の送信バッファが
+    /// 吸ってしまうためで、**件数だけで当てると直す前のコードでも通る空振り**になる。
+    ///
+    /// **繋ぎ始める前に呼ぶこと。** 既に繋がっている接続の深さは変わらない
+    /// （チャネルは接続ごとに1度だけ作られる）。指定しなければ実運用の値のまま。
+    pub fn set_lane_depths(&self, depths: LaneDepths) {
+        *self.depths.lock().expect("ロックが壊れていない") = depths;
+    }
+
+    fn lane_depths(&self) -> LaneDepths {
+        *self.depths.lock().expect("ロックが壊れていない")
     }
 
     /// 連絡係が切れているか。**居ない（1台構成）ときは偽**——切れているのではなく、
@@ -1615,11 +1715,30 @@ async fn agent_loop(
     socket: WebSocket,
 ) {
     let (mut sink, mut stream) = socket.split();
-    let (outbound, mut outbound_rx) = mpsc::channel::<Message>(OUTBOUND_QUEUE_MESSAGES);
+    let depths = hub.lane_depths();
+    let (promise, mut promise_rx) = mpsc::channel::<Message>(depths.promise);
+    let (command, mut command_rx) = mpsc::channel::<Message>(depths.command);
+    let lanes = Lanes { promise, command };
 
     // WebSocket への書き込み口はこのタスクだけ（ブラウザ側の client_loop と同じ作り）
     let writer = tokio::spawn(async move {
-        while let Some(message) = outbound_rx.recv().await {
+        loop {
+            let message = tokio::select! {
+                // **約束を先に見る**（設計§5-2）。指示が詰まっていても、ack と
+                // 生存確認は先に出る。
+                //
+                // `biased` は普通なら後ろの枝を飢えさせるが、ここでは起きない——
+                // 約束に載るものは有限（未 ack のバッチ ≦ 窓32 ＋ 生存確認 ＋ Close）で、
+                // 出し切れば必ず指示の番が来る。**無限に生まれるものを先に置いたら
+                // 飢える**ので、約束のレーンへ新しい種別を足すときはここを読むこと。
+                biased;
+
+                Some(received) = promise_rx.recv() => received,
+                Some(received) = command_rx.recv() => received,
+                // どちらも閉じた＝接続を畳んでいる。**片方が閉じただけでは抜けない**
+                // （閉じた側の枝は外れ、もう片方を出し切ってから終わる）
+                else => break,
+            };
             if sink.send(message).await.is_err() {
                 break;
             }
@@ -1699,7 +1818,7 @@ async fn agent_loop(
         name: agent_name.clone(),
         available_modes,
         always_bypass_permissions,
-        outbound: outbound.clone(),
+        lanes: lanes.clone(),
     });
     // 同じ PC が繋ぎ直してきた場合、古い接続は**静かに置き換える**。半分死んだ TCP を
     // 掴んだまま新しい接続を断ると、その PC は二度と繋がらなくなる
@@ -1768,14 +1887,18 @@ async fn agent_loop(
                     tracing::warn!(%agent_id, "{PING_TIMEOUT:?} 応答がないので切断します");
                     break;
                 }
-                if outbound.try_send(Message::Ping(bytes::Bytes::new())).is_err() {
+                if lanes
+                    .promise
+                    .try_send(Message::Ping(bytes::Bytes::new()))
+                    .is_err()
+                {
                     // **無言で切らない**（§6）。ここが黙っていると、記録には
                     // 「PC が切断しました」しか出ず、詰まって切ったのか相手が
                     // 畳んだのかを後から区別できない
                     tracing::warn!(
                         %agent_id,
-                        queued = queued(&outbound),
-                        "送信の待ち行列が満杯で生存確認を積めません。切断します"
+                        queued = queued(&lanes.promise),
+                        "約束のレーンが満杯で生存確認を積めません。切断します"
                     );
                     break;
                 }
@@ -1792,7 +1915,7 @@ async fn agent_loop(
         }
         tracing::info!(%agent_id, %agent_name, "PC が切断しました");
     }
-    drop(outbound);
+    drop(lanes);
     writer.abort();
 }
 
@@ -1833,8 +1956,7 @@ async fn handle_message(
                     return true;
                 }
             };
-            handle_report(hub, conn, origin, report).await;
-            true
+            handle_report(hub, conn, origin, report).await
         }
         // 画面のフレーム（0x04 / 0x05）。種別を移し替えてブラウザへ流す（§4-3）
         Message::Binary(bytes) => {
@@ -1847,12 +1969,17 @@ async fn handle_message(
     }
 }
 
+/// 報告を1件処理する。`false` を返したら接続を畳む。
+///
+/// **畳む理由はここでは1つだけ**——約束（ack）を積めなかったとき（設計§5-3）。
+/// 他の報告は、解釈できなくても記録層が断っても接続を保つ。
 async fn handle_report(
     hub: &Arc<SessionHostHub>,
     conn: &Arc<SessionHostConn>,
     origin: &ReportOrigin,
     report: AgentMessage,
-) {
+) -> bool {
+    let mut keep = true;
     match report {
         // 2度目の名乗りは、再接続ではなく実装の食い違い。無視して続ける
         AgentMessage::Hello { .. } => {}
@@ -1900,6 +2027,7 @@ async fn handle_report(
                 && !conn.send(&ServerToAgent::BatchAck { batch_id })
             {
                 ack_not_queued(conn, card_id);
+                keep = false;
             }
         }
         AgentMessage::TranscriptReset { batch_id, card_id } => {
@@ -1910,6 +2038,7 @@ async fn handle_report(
                 && !conn.send(&ServerToAgent::BatchAck { batch_id })
             {
                 ack_not_queued(conn, card_id);
+                keep = false;
             }
         }
 
@@ -1969,6 +2098,7 @@ async fn handle_report(
             }
         }
     }
+    keep
 }
 
 /// この接続へ渡す間隔（設計§13-3）。読めなければ既定で進む。
