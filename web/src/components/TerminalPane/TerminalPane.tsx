@@ -399,6 +399,10 @@ export function TerminalPane({ cardId }: Props) {
     const dataSubscription = term.onData((data) => {
       useWsStore.getState().sendPtyInput(cardId, encoder.encode(data))
     })
+    // **格子を固定したので、いまここは鳴らない。** 桁行を変えるものが1つも無くなった
+    // ため（設計§14-1）。外さずに残してあるのは、これが**十字の測る契機3つのうちの
+    // 1つ**だからで、外すとあちらの設計に手を入れる判断になる。残りの2つ——フレームが
+    // 届いたとき・見ている人が現れたとき——は生きている。
     const resizeSubscription = term.onResize(({ cols, rows }) => {
       useWsStore.getState().resize(cardId, cols, rows)
       // **大きさが変わったら測り直す。** 画面の中身は変わっているのに、こちらへ
