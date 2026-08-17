@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { Terminal } from '@xterm/xterm'
-import { TERMINAL_OPTIONS, TerminalPane } from './TerminalPane'
+import { TERMINAL_GRID, TERMINAL_OPTIONS, TerminalPane } from './TerminalPane'
 import { KIND_PTY_OUTPUT, KIND_PTY_SNAPSHOT } from '@/lib/frame'
 import { useWsStore } from '@/stores/ws'
 
@@ -61,6 +61,135 @@ describe('TerminalPane', () => {
   // WebGL レンダラのカーソルは canvas 描画なので CSS では戻せない。ここが唯一の指定箇所
   it('カーソルは挿入モードに見えるバーにする', () => {
     expect(TERMINAL_OPTIONS.cursorStyle).toBe('bar')
+  })
+
+  // 遡りはサーバのリングバッファとは別物。画面内で遡るぶんを控えめに確保している
+  it('xterm 側の遡りは持ったままにする', () => {
+    expect(TERMINAL_OPTIONS.scrollback).toBe(5000)
+  })
+})
+
+/**
+ * 格子の固定（設計§2・§4-1）。
+ *
+ * **入れ物の寸法から桁行を決めるのをやめた**ので、見ている端末によって形が変わらない。
+ * jsdom はレイアウトを持たず要素の大きさが常に 0 なので、**入れ物から決めていれば
+ * この値にはならない**——ここが「決めていない」ことの担保になる。
+ */
+describe('TerminalPane の格子', () => {
+  it('文字を 0.8倍（10px）にすること', () => {
+    // 実機で読めなければ戻す。**動かすのはこの数字1つ**（設定にはしない）
+    expect(TERMINAL_OPTIONS.fontSize).toBe(10)
+  })
+
+  it('格子は 120桁×40行に固定すること', () => {
+    // 録画・画面のゴールデン・CLI の `session screen` の既定と同じ大きさ
+    expect(TERMINAL_GRID).toEqual({ cols: 120, rows: 40 })
+  })
+
+  it('描いた端末が 120桁×40行であること', async () => {
+    const { container } = render(<TerminalPane cardId={CARD} />)
+    const pane = container.querySelector('[data-testid="terminal"]') as HTMLElement
+    const term = (pane as HTMLElement & { __terminal?: Terminal }).__terminal
+    await waitFor(() => expect(term).toBeDefined())
+
+    expect({ cols: term!.cols, rows: term!.rows }).toEqual({ cols: 120, rows: 40 })
+  })
+
+  it('購読の1通目から 120桁×40行で頼むこと', async () => {
+    // **ここが 80×24 だと、開いた瞬間に CLI がその大きさで描く。** 実測でそうなっていた
+    // （タブを切り替えるまで 80桁のままだった）
+    let asked: { cols: number; rows: number } | undefined
+    const original = useWsStore.getState().subscribeTerminal
+    useWsStore.setState({
+      subscribeTerminal: (_cardId, cols, rows) => {
+        asked = { cols, rows }
+        return () => {}
+      },
+    })
+    render(<TerminalPane cardId={CARD} />)
+    useWsStore.setState({ subscribeTerminal: original })
+
+    await waitFor(() => expect(asked).toBeDefined())
+    expect(asked).toEqual({ cols: 120, rows: 40 })
+  })
+
+  it('入れ物の大きさを見張らないこと', async () => {
+    // 見張ると、そこから桁行を決め直す道が戻る。**張っていないことで見る**
+    const observed: unknown[] = []
+    const original = globalThis.ResizeObserver
+    globalThis.ResizeObserver = class {
+      constructor(callback: ResizeObserverCallback) {
+        observed.push(callback)
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver
+
+    const { container } = render(<TerminalPane cardId={CARD} />)
+    const pane = container.querySelector('[data-testid="terminal"]') as HTMLElement
+    await waitFor(() =>
+      expect((pane as HTMLElement & { __terminal?: Terminal }).__terminal).toBeDefined(),
+    )
+    globalThis.ResizeObserver = original
+
+    expect(observed).toEqual([])
+  })
+})
+
+/**
+ * 入れ物を「窓」にする（設計§3）。
+ *
+ * 桁行を固定したので、入れ物のほうが狭ければはみ出す。**横はスクロールで読み、
+ * 縦は切り落とす。切り落とすのは常に上側**（読みたいものは必ず下にある）。
+ *
+ * jsdom は CSS を読まないので、Tailwind のクラス名では効き目も綴り違いも捕まえられない。
+ * だから指定は素のスタイルで書いてあり、ここではその値を直接読む。
+ */
+describe('TerminalPane の窓', () => {
+  function pane() {
+    const { container } = render(<TerminalPane cardId={CARD} />)
+    return container.querySelector('[data-testid="terminal"]') as HTMLElement
+  }
+
+  it('横へはみ出したぶんはスクロールで読ませること', () => {
+    expect(pane().style.overflowX).toBe('auto')
+  })
+
+  it('縦へはみ出したぶんは切り落とすこと', () => {
+    expect(pane().style.overflowY).toBe('hidden')
+  })
+
+  it('格子を下端へ貼り付けること', () => {
+    // 上下が逆だと、読みたい末尾（選択肢・プロンプト）のほうが切り落とされる
+    const box = pane()
+    expect(box.style.display).toBe('grid')
+    expect(box.style.alignContent).toBe('end')
+  })
+
+  it('格子が縮まないことを指定で言い切ること', async () => {
+    // 縮んだときの症状は「右端が消える」ではなく**「行が折り返す」**なので、
+    // TUI の描画が壊れたように見える。原因が CSS だと気づくまでが遠い
+    const box = pane()
+    await waitFor(() =>
+      expect((box as HTMLElement & { __terminal?: Terminal }).__terminal).toBeDefined(),
+    )
+    const grid = box.querySelector('.xterm') as HTMLElement
+    expect(grid.style.minWidth).toBe('max-content')
+  })
+
+  it('空き地を押しても端末へ焦点を渡すこと', async () => {
+    // 格子より入れ物が大きいと、上に地の色の余白ができる（設計§3-4）。**見た目は
+    // 端末の一部**なので普通に押されるが、そこは `.xterm` の外なので xterm は拾わない
+    const box = pane()
+    const term = (box as HTMLElement & { __terminal?: Terminal }).__terminal
+    await waitFor(() => expect(term).toBeDefined())
+    const focus = vi.spyOn(term!, 'focus')
+
+    fireEvent.pointerDown(box)
+
+    expect(focus).toHaveBeenCalled()
   })
 })
 
