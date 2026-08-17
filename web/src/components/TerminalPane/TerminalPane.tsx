@@ -12,9 +12,8 @@
  */
 
 import { useEffect, useRef } from 'react'
-import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
-import { Terminal, type ITerminalOptions } from '@xterm/xterm'
+import { Terminal, type ITerminalInitOnlyOptions, type ITerminalOptions } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
 import { createFlowController } from '@/lib/flow'
 import { KIND_PTY_SNAPSHOT } from '@/lib/frame'
@@ -51,7 +50,7 @@ export const TERMINAL_OPTIONS: ITerminalOptions = {
   cursorBlink: true,
   cursorStyle: 'bar',
   cursorWidth: 2,
-  fontSize: 13,
+  fontSize: 10,
   fontFamily:
     'ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", monospace',
   theme: { background: '#0b0f14' },
@@ -59,6 +58,29 @@ export const TERMINAL_OPTIONS: ITerminalOptions = {
   // 画面内の遡り用に控えめに確保する
   scrollback: 5000,
 }
+
+/**
+ * 端末の格子（設計§2）。**見ている入れ物の寸法からは決めない。**
+ *
+ * # なぜ固定するのか
+ *
+ * 桁行は「最後に届いた `resize` が勝つ」（初期実装§10）。入れ物から決めていると、
+ * PC とスマホで同じセッションを開いたときに**後から開いたほうが相手の表示を作り替える**。
+ * どのブラウザも同じ値を送るようにすれば、規則を変えずに引っ張り合いだけが消える。
+ *
+ * # なぜ 120×40 か
+ *
+ * 端末の録画（`fixtures/*​/terminal/*.cast`）も、画面のゴールデンの採取も、CLI の
+ * `session screen` の既定も、すべてこの大きさである。**出荷される見え方と、テストが
+ * 見ている見え方が揃う。**
+ *
+ * # 初期オプションとして渡す（`resize()` で当て直さない）
+ *
+ * `cols` / `rows` は `ITerminalInitOnlyOptions` なので、**生まれたときから 120×40** に
+ * できる。あとから `resize()` する形にすると、xterm の既定（80×24）で1回できてから
+ * 直すことになり、**購読の1通目とサーバへのリサイズが余計に1往復増える**。
+ */
+export const TERMINAL_GRID: ITerminalInitOnlyOptions = { cols: 120, rows: 40 }
 
 export function TerminalPane({ cardId }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -74,11 +96,22 @@ export function TerminalPane({ cardId }: Props) {
     }
 
     const store = useWsStore.getState()
-    const term = new Terminal(TERMINAL_OPTIONS)
+    const term = new Terminal({ ...TERMINAL_OPTIONS, ...TERMINAL_GRID })
 
-    const fit = new FitAddon()
-    term.loadAddon(fit)
     term.open(container)
+
+    // **格子が縮まないことを、指定で言い切る**（設計§3-3）。
+    //
+    // xterm は `.xterm-screen` に桁行から計算した実寸を書き込み、`.xterm` 自身には
+    // 寸法を持たない。したがって `.xterm` の幅は中身から決まる——のだが、その決まり方は
+    // 暗黙の規則（grid の子の自動最小サイズ）に乗っている。そこへ寄りかからない。
+    //
+    // 縮んだときの症状は「右端が消える」ではなく**「行が折り返す」**——つまり TUI の
+    // 描画が崩れた形に見えるので、原因が CSS 側にあると気づくまでが遠い。
+    const grid = container.querySelector('.xterm')
+    if (grid instanceof HTMLElement) {
+      grid.style.minWidth = 'max-content'
+    }
 
     const setRendererLabel = (renderer: 'webgl' | 'dom') => {
       statusRef.current?.setAttribute('data-renderer', renderer)
@@ -102,8 +135,6 @@ export function TerminalPane({ cardId }: Props) {
       webgl = null
       setRendererLabel('dom')
     }
-
-    fit.fit()
 
     // --- フロー制御 -------------------------------------------------------
     const flow = createFlowController({
@@ -256,8 +287,8 @@ export function TerminalPane({ cardId }: Props) {
     //
     // xterm 6 にタッチの口は無い（同梱の `Gesture` は呼び出し0件・非公開、`scroll` の
     // 購読も0件）。**判断は [`createTouchScroller`] が持ち、ここは配線だけ**にする。
-    // レンダラが実寸を書き込んでいる唯一の場所から引く。`.xterm` や外側の入れ物を
-    // 使うと、`FitAddon` の切り捨てぶんの余白が混ざって遡る量が少しずつずれる
+    // レンダラが実寸を書き込んでいる唯一の場所から引く。外側の入れ物を使うと、
+    // **格子より入れ物が大きいぶんの余白**（設計§3-4）が混ざって遡る量がずれる
     const cellHeightOf = () => {
       const screen = container.querySelector('.xterm-screen')
       if (!(screen instanceof HTMLElement) || term.rows === 0) {
@@ -377,13 +408,15 @@ export function TerminalPane({ cardId }: Props) {
       }
     })
 
-    const observer = new ResizeObserver(() => {
-      // 要素の大きさが 0 のときに fit すると例外になることがある
-      if (container.clientWidth > 0 && container.clientHeight > 0) {
-        fit.fit()
-      }
-    })
-    observer.observe(container)
+    // **窓の空き地を押しても、端末へ焦点を渡す**（設計§3-4 の余白への手当て）。
+    //
+    // 格子が入れ物より小さいとき、上に地の色の余白ができる。見た目は端末の一部
+    // なので普通に押されるが、そこは `.xterm` の外なので xterm は拾わない——
+    // **押しても打てない**という、原因のいちばん見えにくい形になる。
+    //
+    // `Terminal.focus()` は `preventScroll` 付きで textarea を掴むので、**窓は動かない**。
+    const onPointerDown = () => term.focus()
+    container.addEventListener('pointerdown', onPointerDown)
 
     // E2E から端末の内容を読むための取り出し口。
     //
@@ -395,7 +428,7 @@ export function TerminalPane({ cardId }: Props) {
     term.focus()
 
     return () => {
-      observer.disconnect()
+      container.removeEventListener('pointerdown', onPointerDown)
       container.removeEventListener('touchstart', onTouchStart)
       container.removeEventListener('touchmove', onTouchMove)
       container.removeEventListener('touchend', onTouchEnd)
@@ -416,7 +449,13 @@ export function TerminalPane({ cardId }: Props) {
   }, [cardId])
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    /*
+      **`min-w-0` が要る。** flex の子は既定で「中身より小さくならない」ので、
+      これが無いと**格子の幅（720px）が入れ物の下限になり、入れ物が縮まない**。
+      すると窓の中でスクロールする代わりに**ページ全体が横へ広がる**——狭い画面では
+      帯も入力欄も一緒に流れることになり、窓にした意味が消える（実測で踏んだ）。
+    */
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <div
         ref={statusRef}
         data-testid="terminal-status"
@@ -425,20 +464,39 @@ export function TerminalPane({ cardId }: Props) {
         className="sr-only"
       />
       {/*
-        **`touchAction` は見た目ではなく、握れるかどうかを決める指定である**（設計§3）。
-        未指定のままだと、1回目の `touchmove` で握っても3回目から `cancelable` が
-        落ちて遡れなくなる（フェーズ1 の実測）。`none` ではなく `pan-x` にして、
-        横へ払う操作はブラウザに残す。
+        **入れ物は「格子を覗く窓」である**（設計§3）。桁行を 120×40 に固定したので、
+        入れ物のほうが狭ければはみ出す。見せ方は横と縦で違う。
 
-        Tailwind の `touch-pan-x` ではなく**素のスタイル**で書いてあるのは、綴りを
-        間違えても黙って効かなくなる指定だからで、こうしておけば単体テストから
-        実際の値を読める（クラス名の一致では、綴り違いを捕まえられない）。
+        | 指定 | 何のためか |
+        |---|---|
+        | `overflowX: auto` | 横にはみ出したぶんは**スクロールで読む** |
+        | `overflowY: hidden` | 縦にはみ出したぶんは**切り落とす** |
+        | `display: grid` ＋ `alignContent: end` | 格子を**下端へ貼り付ける**。切り落とすのは常に上側 |
+
+        下端に貼り付けてよいのは、**読みたいものが必ず下にある**ため——選択肢は末尾5行に
+        出るし、プロンプトも権限モードのフッタも下端にある。上へ押し出された行は、
+        指でなぞる遡り（`lib/touch.ts`）でそのまま視界に入る。
+
+        **`touchAction` は見た目ではなく、握れるかどうかを決める指定である。**
+        未指定のままだと、1回目の `touchmove` で握っても3回目から `cancelable` が
+        落ちて遡れなくなる（十字ボタン設計フェーズ1 の実測）。`none` ではなく `pan-x`
+        にして、**横へ払う操作はブラウザに残す**——その払いが、そのまま窓の横スクロールになる。
+
+        Tailwind のクラスではなく**素のスタイル**で書いてあるのは、綴りを間違えても
+        黙って効かなくなる指定だからで、こうしておけば単体テストから実際の値を読める
+        （jsdom は CSS を読まないので、クラス名の一致では綴り違いも効き目も捕まえられない）。
       */}
       <div
         ref={containerRef}
         data-testid="terminal"
-        style={{ touchAction: 'pan-x' }}
-        className="min-h-0 flex-1 overflow-hidden rounded-md bg-[#0b0f14] p-2"
+        style={{
+          touchAction: 'pan-x',
+          display: 'grid',
+          alignContent: 'end',
+          overflowX: 'auto',
+          overflowY: 'hidden',
+        }}
+        className="min-h-0 min-w-0 flex-1 rounded-md bg-[#0b0f14] p-2"
       />
       {/*
         実機からタッチの数字を読む口（`?touchdebug=1` のときだけ中身が入る）。

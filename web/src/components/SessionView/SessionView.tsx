@@ -195,7 +195,14 @@ export function SessionView({ cardId, compact = false }: Props) {
           `motion` が `initial` を当てた瞬間に重なりの文脈を作るためで、恒久的な文脈を
           先に持たせておけば喧嘩しない（見た目は何も変わらない）
         */}
-        <div className="relative isolate flex min-h-0 flex-1 flex-col gap-2">
+        {/*
+          **`min-w-0` が要る。** 端末の格子は 120桁で固定してあり（`TerminalPane` の
+          `TERMINAL_GRID`）、横に入りきらないぶんは**端末の入れ物の中**でスクロールさせる。
+          ところが flex の子は既定で「中身より小さくならない」ので、これが無いと
+          **格子の幅（720px）がこの列の下限になり、ページ全体が横へ広がる**——狭い画面では
+          帯も入力欄も一緒に流れることになり、窓にした意味が消える（実測で踏んだ）。
+        */}
+        <div className="relative isolate flex min-h-0 min-w-0 flex-1 flex-col gap-2">
         <div className="flex items-center gap-2">
           <div
             role="tablist"
@@ -225,7 +232,9 @@ export function SessionView({ cardId, compact = false }: Props) {
         <div className={`flex min-h-0 flex-1 flex-col ${view === 'transcript' ? '' : 'hidden'}`}>
           <TranscriptTree key={session.card_id} cardId={session.card_id} />
         </div>
-        <div className={`flex min-h-0 flex-1 flex-col ${view === 'terminal' ? '' : 'hidden'}`}>
+        <div
+          className={`flex min-h-0 min-w-0 flex-1 flex-col ${view === 'terminal' ? '' : 'hidden'}`}
+        >
           <TerminalPane key={session.card_id} cardId={session.card_id} />
         </div>
 
