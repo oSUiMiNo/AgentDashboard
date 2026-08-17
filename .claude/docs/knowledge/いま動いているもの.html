@@ -43,7 +43,7 @@
   <br><strong>「IP が変わった」ではない。</strong>最初は SSH が届かないだけに見え、Elastic IP を持たない構成なので IP の付け替えを疑ったが、<strong>原因はアカウントごと消えていたこと</strong>だった。terraform の記録（<code>~/Dev/Test_AgentDashboard/terraform.tfstate</code>・08-03）にある <code>43.207.237.211</code> は<strong>もう誰のものでもない</strong>。<strong>ここを直すのも、別の場所へ立て直すのも人の作業。</strong>
   <br><strong>セッションホスト<span class="mark">▽</span>は生きているが、20:11 から黙って固まっている。</strong>Cloudflare 宛に TLS が張られたまま無通信（<code>ESTAB</code>・送受信キュー0・CPU ほぼ0）で、<strong>ログも1行も出ていない</strong>。<code>link.rs</code> の <code>dial()</code> に<strong>時間切れが無い</strong>ため、相手が「断る」のではなく<strong>黙って握ったまま答えない</strong>と永久に待つ。<strong>画面には理由の分からない「接続断」だけが残る。</strong>別イシュー化の候補。
   <br><strong>手元の2つ（実機・セッションホスト<span class="mark">▽</span>）は自動では起きない。</strong>常駐の仕組みに載せていないので、<strong>WSL を起こし直すと落ちたままになる</strong>。
-  <br><strong>版は 0.1.29 まで出ている（08-16 22時台）。</strong>ack の詰まり一式（ローカルイシュー「溜まった履歴の ack が詰まって線が切れ続ける」）と、十字ボタン・履歴表示の直しが入っている。<strong>ただし走っているものは1つも 0.1.29 ではない</strong>——実機は走行 <code>0.1.16</code>、セッションホスト<span class="mark">▽</span>は走行 <code>0.1.19</code>で、<strong>どちらもディスク上だけ 0.1.29</strong>（<code>~/AgentDashboard</code> で <code>git pull</code> → <code>make build</code> 済み）。落とすと抱えている claude が道連れになるので、<strong>起こし直す時機は人が決める</strong>（CLAUDE.md の段4）。
+  <br><strong>版は 0.1.29 まで出ている（08-16 22時台）。</strong>ack の詰まり一式（ローカルイシュー「溜まった履歴の ack が詰まって線が切れ続ける」）と、十字ボタン・履歴表示の直しが入っている。<strong>実機は 0.1.29 で走っている</strong>（08-16 23時台に起こし直した。<strong>生きたカードが0枚だったので何も巻き添えにしていない</strong>）。<strong>セッションホスト<span class="mark">▽</span>だけが走行 <code>0.1.19</code> のまま</strong>で、ディスク上は 0.1.29。落とすと抱えている claude が道連れになるので、<strong>起こし直す時機は人が決める</strong>（CLAUDE.md の段4）。
   <br><strong>0.1.29 の直りは、セッションホスト<span class="mark">▽</span>を起こし直さないと効かない。</strong>触ったのが <code>session-host-core</code>（送る側の窓と上限）と <code>server-core</code>（受ける側のレーン）の両方なので、<strong>画面だけの版と違ってサーバの入れ替えでは足りない</strong>。そしてその<strong>サーバがいま無い</strong>ので、<strong>実機での裏取りは、どこかにサーバを立て直すまでできない</strong>。
 </p>
 
@@ -127,7 +127,15 @@
   一方 AWS は<strong>配った箱</strong>なので、<strong>リリースを出すまで何も変わらない</strong>。
   画面に出る版だけを見て「同じものが動いている」と判断しないこと。<br><br>
 
-  <strong>いまはずれている。</strong> <strong>AWS は無い</strong>（アカウント閉鎖）。セッションホスト<span class="mark">▽</span>が走行 <code>0.1.19</code>、実機が走行 <code>0.1.16</code>——<strong>どちらもディスク上は <code>0.1.29</code></strong>。<br><br>  <strong>ずらしたままでよいかは、変更の中身で決まる。</strong> 0.1.20〜0.1.28 はブラウザへ配る画面だけの修正だったので、サーバを入れ替えた時点で効いていた。<strong>0.1.29 は違う</strong>——<code>session-host-core</code> を触っているので、<strong>セッションホスト<span class="mark">▽</span>を起こし直すまで効かない</strong>。<strong>入れ替えが要るかは版の数字ではなく、どの crate を触ったかで決まる。</strong><br><br>
+  <strong>いまはずれている。</strong> <strong>AWS は無い</strong>（アカウント閉鎖）。<strong>実機は走行 <code>0.1.29</code></strong>、<strong>セッションホスト<span class="mark">▽</span>だけが走行 <code>0.1.19</code></strong>（ディスク上は <code>0.1.29</code>）。<br><br>
+
+  <strong>Windows から 8787 が開かないとき（2026-08-16 に踏んだ）。</strong>
+  症状は <code>ERR_CONNECTION_RESET</code> で、<strong>約2.04秒ぴったり</strong>で切れる。WSL の中から <code>curl</code> すると 200 が数ミリ秒で返るので、アプリは無罪である。<br><br>
+  原因は <strong>Windows 側に残っている <code>netsh portproxy</code></strong>（<code>0.0.0.0:8787 → 192.168.147.44:8787</code>。持ち主は <code>svchost.exe</code> の <strong><code>iphlpsvc</code></strong>）。これが <code>0.0.0.0:8787</code> を先に掴むので<strong>WSL の localhost 転送が出番を失い</strong>、転送先の WSL 側には<strong>ダッシュボードが <code>127.0.0.1</code> にしか耳を出していないので誰も居ない</strong>。2.04秒はその転送が諦めるまでの時間。<br><br>
+  <strong>切り分け方。</strong> 使い捨ての口を<strong>別のポート</strong>で立てて Windows から叩くと通ってしまうので、<strong>ポートを変えずに</strong>確かめること（変えると変数が2つ動く。実際にそれで一度読み違えた）。<strong>決め手は <code>netstat.exe -ano | grep :8787</code></strong>——Windows 側に <code>LISTENING</code> が居れば、それが横取りしている。<br><br>
+  <strong>直し方は2つ。</strong> ①WSL 側の <code>bind_addr</code> を <code>0.0.0.0</code> にする（管理者権限が要らない。<strong>いまはこちら</strong>）②<code>netsh interface portproxy delete v4tov4 listenport=8787 listenaddress=0.0.0.0</code>（管理者権限が要る。耳は 127.0.0.1 のままで安全だが、スマホからは開けなくなる）。<br><br>
+  <strong>①は WSL の IP が変わると、また同じ症状で壊れる。</strong> portproxy の行き先は <code>192.168.147.44</code> と<strong>数字で焼き込まれている</strong>のに、<strong>WSL の IP は起こし直すたびに変わる</strong>。ずれた瞬間に「2秒でリセット」へ戻るので、<strong>WSL を再起動したあとに開けなくなったら、まずここを疑う</strong>（<code>hostname -I</code> と portproxy の行き先を突き合わせる）。恒久的に嫌なら②を選ぶ。<br><br>
+  <strong>スマホから開くには、さらにファイアウォールの受信規則が要る。</strong> 宛先は <strong>Windows の LAN 側の IP</strong>（<code>192.168.0.11:8787</code>。WSL の <code>192.168.147.44</code> ではない——あれはホストからしか見えない）。8787 の受信規則は<strong>いま存在せず</strong>、受信の既定は <code>NotConfigured</code>＝ブロックなので、<code>New-NetFirewallRule … -LocalPort 8787 -Action Allow -Profile Private</code> を管理者で足す。<strong><code>-Profile Private</code> を外さないこと</strong>——ローカルモードには鍵が無いので、公衆 Wi-Fi で開くと誰でも claude を操作できる。<br><br>  <strong>ずらしたままでよいかは、変更の中身で決まる。</strong> 0.1.20〜0.1.28 はブラウザへ配る画面だけの修正だったので、サーバを入れ替えた時点で効いていた。<strong>0.1.29 は違う</strong>——<code>session-host-core</code> を触っているので、<strong>セッションホスト<span class="mark">▽</span>を起こし直すまで効かない</strong>。<strong>入れ替えが要るかは版の数字ではなく、どの crate を触ったかで決まる。</strong><br><br>
 
   同じことは以前も起きている（08-09 に <code>0.1.11</code> で揃えるまで、実機だけにログ整備が
   入っていた）。<strong>版番号で揃っているかを判断できない</strong>のは、この構成の性質である。<br><br>
@@ -164,7 +172,7 @@ agentdashboard-agent logs --since 24h --state-dir ~/agentdashboard-agent/state</
   <tr>
     <td>実機</td>
     <td><code>127.0.0.1:8787</code></td>
-    <td><span class="tag t-old">走行 0.1.16</span><br><small><strong>実行ファイルは 0.1.29</strong>（08-16 22時台に <code>git pull</code> → <code>make build</code> 済み）。<strong>起こし直していないので走っているのは 0.1.16</strong>——上げるには <code>agentdashboard version restart</code> ＋ 起こし直しが要る。段4 なので人が決める。<br>ソースビルド<span class="mark">▽</span>（<strong>08-13 18時台に起こし直し</strong>——`make build` してから、生きたカードが0枚であることを数えて落とした。リリース <code>v0.1.16</code> と同じ中身）</small></td>
+    <td><span class="tag t-ok">走行 0.1.29</span><br><small><strong>08-16 23時台に起こし直した</strong>（生きたカードが0枚——9枚とも `ended`——であることを数えてから落とした）。ソースビルド<span class="mark">▽</span>。<br><strong>耳を <code>0.0.0.0</code> へ広げてある</strong>（<code>config.toml</code> の <code>bind_addr</code>）。<strong>既定の 127.0.0.1 のままだと Windows のブラウザから開けない</strong>——理由は下の「Windows から 8787 が開かないとき」。<br><strong>鍵は無い。</strong> ローカルモードは認証を持たないので、耳を広げた状態は<strong>同じネットワークから誰でも操作できる</strong>ことを意味する</small></td>
     <td>ローカルモード<span class="mark">▽</span>。<code>~/AgentDashboard</code> で <code>make build</code> したものを引数なしで起動。端末の出力は <code>~/agentdashboard-run.log</code>、構造化ログは <code>~/.local/state/agentdashboard-run/logs/</code>。<br><strong>読むときは <code>--state-dir</code> が要る。</strong> 置き場所を設定で移してあるが、読む口は設定を読まない（設計§11-2 の非対称）——<code>agentdashboard logs --since 1h --state-dir ~/.local/state/agentdashboard-run</code><br><strong>起こすときは <code>setsid</code> で切り離す。</strong> ツール呼び出しの子として起こすと、呼び出しの終了で巻き添えに死ぬ（08-10 に一度この形で起こしてしまい、起こし直した）。<code>cd ~/AgentDashboard &amp;&amp; setsid nohup ./server/target/release/agentdashboard &gt;&gt; ~/agentdashboard-run.log 2&gt;&amp;1 &lt; /dev/null &amp;</code></td>
   </tr>
   <tr>
