@@ -187,18 +187,43 @@ test.describe('タッチで遡る', () => {
     const status = page.getByTestId('terminal-status')
     const before = Number(await status.getAttribute('data-snapshots'))
 
-    // もう一度画面の大きさを変える＝全画面フレーム＝`term.reset()`。
-    // **控えて戻していなければ、ここで下端へ飛ぶ**（設計§9）
-    await page.setViewportSize({ width: 1100, height: 800 })
-    await expect
-      .poll(async () => Number(await status.getAttribute('data-snapshots')), {
-        message: '画面が作り直されること',
-        timeout: 30_000,
-      })
-      .toBeGreaterThan(before)
+    // **契機は「遡り行数の変更」にした**（設計§7）。
+    //
+    // 以前は画面の大きさを変えて全画面フレームを起こしていたが、桁行を固定した
+    // 工事（`TerminalPane` の `TERMINAL_GRID`）で**ブラウザはリサイズを送らなくなった**
+    // ので、あの手はもう効かない。代わりに製品の実経路を使う——設定の変更が
+    // `SetIntervals` として PC へ届き、端末を作り直して全画面フレームが飛ぶ。
+    //
+    // **別のページから変える。** この画面を離れると端末ごと作り直され、遡っていた
+    // 位置が消えて、何を確かめたのか分からなくなる。
+    //
+    // **増やす向きにする。** 減らすと作り直しで遡れる量そのものが縮み、「残っているのに
+    // 0」という揺れるテストになる。
+    const settings = await page.context().newPage()
+    try {
+      await settings.goto('/settings')
+      const input = settings.getByTestId('scrollback-lines-input')
+      await input.fill('2000')
+      await input.press('Enter')
 
-    const after = await terminalScroll(page)
-    expect(after.baseY - after.viewportY).toBeGreaterThan(0)
+      await expect
+        .poll(async () => Number(await status.getAttribute('data-snapshots')), {
+          message: '画面が作り直されること',
+          timeout: 30_000,
+        })
+        .toBeGreaterThan(before)
+
+      // **控えて戻していなければ、ここで下端へ飛んでいる**（設計§9）
+      const after = await terminalScroll(page)
+      expect(after.baseY - after.viewportY).toBeGreaterThan(0)
+    } finally {
+      // **設定は次の検査へ残る**（E2E は1台のサーバを共有している）。断言が落ちても
+      // 戻すために finally へ置く
+      const input = settings.getByTestId('scrollback-lines-input')
+      await input.fill('1000')
+      await input.press('Enter')
+      await settings.close()
+    }
   })
 })
 

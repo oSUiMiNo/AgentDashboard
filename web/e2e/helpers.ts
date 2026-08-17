@@ -184,6 +184,14 @@ export interface SentFrames {
   keys: SentKey[]
   /** 入力欄の経路（`send_input`）が呼ばれた回数。 */
   sendInput: number
+  /**
+   * 端末の大きさを変えてくれと頼んだ回数（`resize`）。
+   *
+   * 桁行を固定したので、**入れ物の大きさが変わってもここは増えない**のが正しい
+   * （`TerminalPane` の `TERMINAL_GRID`）。増えていれば、どこかがまた入れ物から
+   * 桁行を決めている。**画面を見ても分からない**ので、線の上で数える。
+   */
+  resize: number
 }
 
 /** [`SentKey`] の payload（ヘッダ 17 バイトの後ろ）を取り出す。 */
@@ -215,7 +223,7 @@ export function keyPayload(key: SentKey): number[] {
  */
 export async function watchSentFrames(page: Page) {
   await page.addInitScript(() => {
-    const box = { keys: [] as SentKey[], sendInput: 0 }
+    const box = { keys: [] as SentKey[], sendInput: 0, resize: 0 }
     ;(window as unknown as { __sent: typeof box }).__sent = box
 
     const original = WebSocket.prototype.send
@@ -225,6 +233,10 @@ export async function watchSentFrames(page: Page) {
           // 入力欄の経路。**本文から ESC を落とす道**なので、キーが通ってはいけない
           if (data.includes('"send_input"')) {
             box.sendInput += 1
+          }
+          // 端末の大きさを変えてくれという頼み。固定したので増えないのが正しい
+          if (data.includes('"resize"')) {
+            box.resize += 1
           }
         } else {
           const view =
@@ -249,12 +261,14 @@ export async function takeSentFrames(page: Page): Promise<SentFrames> {
   return page.evaluate(() => {
     const box = (window as unknown as { __sent?: SentFrames }).__sent
     if (!box) {
-      return { keys: [], sendInput: 0 }
+      return { keys: [], sendInput: 0, resize: 0 }
     }
     const keys = box.keys.splice(0, box.keys.length)
     const sendInput = box.sendInput
+    const resize = box.resize
     box.sendInput = 0
-    return { keys, sendInput }
+    box.resize = 0
+    return { keys, sendInput, resize }
   })
 }
 

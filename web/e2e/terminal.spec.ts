@@ -11,10 +11,12 @@ import {
   spawnSession,
   swipeTerminal,
   takePrevented,
+  takeSentFrames,
   terminalScroll,
   terminalText,
   typeLine,
   watchPrevented,
+  watchSentFrames,
 } from './helpers'
 
 /**
@@ -403,5 +405,154 @@ test.describe('タッチで遡る', () => {
         return at.baseY - at.viewportY
       })
       .toBe(0)
+  })
+})
+
+/**
+ * 格子は入れ物から決めない（テスト計画フェーズ3・設計§2・§4-1・§6-1）。
+ *
+ * # なぜ実物のブラウザでしか確かめられないのか
+ *
+ * 単体（jsdom）はレイアウトを持たないので、**入れ物の大きさが変わるという出来事
+ * そのものを作れない**。「変えても動かない」は、変えられる場所でしか言えない。
+ *
+ * # 何が要件の中心か
+ *
+ * 「PC とスマホで同時に開いても、互いの表示を引っ張らない」。端末の大きさは
+ * **最後に届いた指示が勝つ**（初期実装§10）ので、どのブラウザも同じ値を送るように
+ * すれば規則を変えずに引っ張り合いだけが消える。**2枚のページで再現できる。**
+ */
+test.describe('端末の格子', () => {
+  /** いま端末が何桁×何行か（画面ではなく端末そのものに聞く）。 */
+  async function 桁行(page: Page) {
+    return page.evaluate(() => {
+      const box = document.querySelector('[data-testid="terminal"]') as
+        | (HTMLElement & { __terminal?: { cols: number; rows: number } })
+        | null
+      const term = box?.__terminal
+      return { cols: term?.cols ?? -1, rows: term?.rows ?? -1 }
+    })
+  }
+
+  test('入れ物の大きさを変えても、桁行が動かない', async ({ page }) => {
+    await openDashboard(page)
+    const tile = await spawnSession(page)
+    await openSession(page, tile)
+
+    expect(await 桁行(page)).toEqual({ cols: 120, rows: 40 })
+
+    for (const size of [
+      { width: 390, height: 780 },
+      { width: 1600, height: 1000 },
+      { width: 1280, height: 720 },
+    ]) {
+      await page.setViewportSize(size)
+      // 変わるとしたら変えた直後なので、少し置いてから聞く
+      await page.waitForTimeout(300)
+      expect(await 桁行(page), `${size.width}x${size.height} で動かないこと`).toEqual({
+        cols: 120,
+        rows: 40,
+      })
+    }
+  })
+
+  test('入れ物の大きさを変えても、リサイズを頼まない', async ({ page }) => {
+    // **画面を見ても分からない**ので、線の上で数える。頼んでいれば、その値が
+    // そのまま相手の PTY を作り替える
+    await watchSentFrames(page)
+    await openDashboard(page)
+    const tile = await spawnSession(page)
+    await openSession(page, tile)
+
+    await takeSentFrames(page)
+
+    await page.setViewportSize({ width: 390, height: 780 })
+    await page.waitForTimeout(300)
+    await page.setViewportSize({ width: 1600, height: 1000 })
+    await page.waitForTimeout(300)
+
+    const sent = await takeSentFrames(page)
+    expect(sent.resize, 'リサイズを1回も頼んでいないこと').toBe(0)
+  })
+
+  test('2枚のページで開いても、互いの桁行を引っ張らない', async ({ page }) => {
+    await openDashboard(page)
+    const tile = await spawnSession(page)
+    const cardId = await tile.getAttribute('data-card-id')
+    await openSession(page, tile)
+
+    // もう1枚（別の端末の代わり）。**同じカードを同時に見ている状態**を作る
+    const other = await page.context().newPage()
+    await other.goto(`/s/${cardId}`)
+    await other.getByTestId('view-tab-terminal').click()
+    await expect(other.getByTestId('session-view')).toHaveAttribute(
+      'data-view',
+      'terminal',
+    )
+
+    try {
+      // 片方だけをスマホの幅にする。**以前はこれで、もう片方の表示まで作り替わっていた**
+      await other.setViewportSize({ width: 390, height: 780 })
+      await other.waitForTimeout(300)
+
+      expect(await 桁行(page), '見ていないほうが引っ張られないこと').toEqual({
+        cols: 120,
+        rows: 40,
+      })
+      expect(await 桁行(other), '狭いほうも同じ格子であること').toEqual({
+        cols: 120,
+        rows: 40,
+      })
+    } finally {
+      await other.close()
+    }
+  })
+
+  test('狭い入れ物では横へスクロールでき、下端が揃う', async ({ page }) => {
+    await openDashboard(page)
+    const tile = await spawnSession(page)
+    await openSession(page, tile)
+
+    await page.setViewportSize({ width: 390, height: 780 })
+    await page.waitForTimeout(300)
+
+    const 窓 = await page.evaluate(() => {
+      const box = document.querySelector('[data-testid="terminal"]') as HTMLElement
+      const grid = box.querySelector('.xterm') as HTMLElement
+      const boxRect = box.getBoundingClientRect()
+      const gridRect = grid.getBoundingClientRect()
+      return {
+        横へはみ出す: box.scrollWidth > box.clientWidth,
+        // 入れ物には余白（`p-2`）があるので、ぴったり 0 にはならない
+        下端の差: Math.round(boxRect.bottom - gridRect.bottom),
+        縦にはみ出す: gridRect.height > box.clientHeight,
+        上端の差: Math.round(gridRect.top - boxRect.top),
+      }
+    })
+
+    expect(窓.横へはみ出す, '横へはみ出したぶんはスクロールで読めること').toBe(true)
+    expect(窓.下端の差, '格子が下端へ貼り付いていること').toBeLessThanOrEqual(8)
+    if (窓.縦にはみ出す) {
+      // 貼り付けた結果、切り落とされるのは**常に上側**になる
+      expect(窓.上端の差, '切り落とされるのは上側であること').toBeLessThan(0)
+    }
+  })
+
+  test('横へはみ出していても、なぞって遡れる', async ({ page }) => {
+    // 横の払いはブラウザ（窓のスクロール）へ、縦は端末の遡りへ。**分担は
+    // `touch-action: pan-x` が最初から持っている**ので、窓にしても変わらない
+    await openDashboard(page)
+    const tile = await spawnSession(page)
+    await openSession(page, tile)
+    await page.setViewportSize({ width: 390, height: 780 })
+    await typeLine(page, 'flood 200000')
+    await expectTerminalToContain(page, '[fake-claude] flood-end')
+    await scrollTerminalToBottom(page)
+
+    const bottom = await terminalScroll(page)
+    await swipeTerminal(page, { dy: 240, steps: 8, gapMs: 120 })
+
+    const after = await terminalScroll(page)
+    expect(after.viewportY).toBeLessThan(bottom.viewportY)
   })
 })
