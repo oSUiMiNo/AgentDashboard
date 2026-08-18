@@ -538,6 +538,57 @@ test.describe('端末の格子', () => {
     }
   })
 
+})
+
+/**
+ * 窓を**指で触る**（コードレビュー対応2）。
+ *
+ * 既定の土台はタッチ無効（`devices['Desktop Chrome']`）なので、**この describe の中だけ**で
+ * 有効にする。ファイル全体へ掛けると、タッチと無関係な既存テストの前提まで変わる。
+ *
+ * ここを分けてあるのは、**`touch-action: pan-x` の効き目がタッチの有無で変わる**ためである。
+ * 入れ物が本当に横スクロールするようになったので、ブラウザへ譲った横パンが遡りと
+ * 取り合いうる——**タッチが無効な土台で試すと、その取り合いごと起きない**。
+ */
+test.describe('端末の窓を指で触る', () => {
+  test.use({ hasTouch: true })
+
+  test('狭い画面で斜めになぞっても、遡れて窓は動かない', async ({ page }) => {
+    // **`touch-action: pan-x` は、横へ本当にスクロールするようになって初めて効く。**
+    // 斜めの1歩目をブラウザが「横パン」と読むと、以後の `touchmove` が `cancelable` を
+    // 失って遡りが死ぬ——という筋がある（コードレビュー対応2）。
+    //
+    // **空いていたのはこの組み合わせだけ**である。`jitter` つきの検査は広い画面
+    // （横スクロールが出ない）で、狭い画面の検査は真っ直ぐなぞっていた。
+    //
+    // 合成タッチでは再現しないことを実測で確かめてあるが、**合成と指は別**
+    // （十字ボタン フェーズ7）。ここは実機で見るための材料である。
+    await openDashboard(page)
+    const tile = await spawnSession(page)
+    await openSession(page, tile)
+    await page.setViewportSize({ width: 390, height: 780 })
+    await typeLine(page, 'flood 200000')
+    await expectTerminalToContain(page, '[fake-claude] flood-end')
+    await scrollTerminalToBottom(page)
+
+    const 窓 = () =>
+      page.evaluate(() => {
+        const box = document.querySelector('[data-testid="terminal"]') as HTMLElement
+        return { scrollLeft: box.scrollLeft, はみ出す: box.scrollWidth > box.clientWidth }
+      })
+    const 前 = await 窓()
+    expect(前.はみ出す, '横スクロールが出ている状態で試すこと').toBe(true)
+    const bottom = await terminalScroll(page)
+
+    // **1歩目を横へ大きくブレさせる。** 真っ直ぐな合成なぞりでは作れない状況
+    await swipeTerminal(page, { dy: 240, steps: 8, gapMs: 120, jitter: 30 })
+
+    const after = await terminalScroll(page)
+    expect(after.viewportY, '斜めでも遡れること').toBeLessThan(bottom.viewportY)
+    const 後 = await 窓()
+    expect(後.scrollLeft, '横へ持っていかれていないこと').toBe(前.scrollLeft)
+  })
+
   test('横へはみ出していても、なぞって遡れる', async ({ page }) => {
     // 横の払いはブラウザ（窓のスクロール）へ、縦は端末の遡りへ。**分担は
     // `touch-action: pan-x` が最初から持っている**ので、窓にしても変わらない
