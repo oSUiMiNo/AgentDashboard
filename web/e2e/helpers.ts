@@ -230,12 +230,14 @@ export async function watchSentFrames(page: Page) {
     WebSocket.prototype.send = function (this: WebSocket, data: Parameters<WebSocket['send']>[0]) {
       try {
         if (typeof data === 'string') {
-          // 入力欄の経路。**本文から ESC を落とす道**なので、キーが通ってはいけない
-          if (data.includes('"send_input"')) {
+          // **札で数える。** `data.includes('"send_input"')` のような綴りだけの照合は、
+          // **利用者が本文にその語を打っただけで増える**（指示は同じ JSON の中に文字列
+          // として乗る）。数えたいのは種別なので、`"t":"…"` の形で見る
+          if (data.includes('"t":"send_input"')) {
             box.sendInput += 1
           }
           // 端末の大きさを変えてくれという頼み。固定したので増えないのが正しい
-          if (data.includes('"resize"')) {
+          if (data.includes('"t":"resize"')) {
             box.resize += 1
           }
         } else {

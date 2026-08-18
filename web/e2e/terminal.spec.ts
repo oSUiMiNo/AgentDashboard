@@ -471,14 +471,25 @@ test.describe('端末の格子', () => {
     await page.setViewportSize({ width: 1600, height: 1000 })
     await page.waitForTimeout(300)
 
+    // **否定だけでは、線が丸ごと死んでいても通る。** 同じ観測の中で「送れば増える」
+    // ことを見せて初めて、0 に意味が出る（ガイドライン「『流れていないこと』を確かめる
+    // 検査は、空振りしていないかまで見る」）
+    await page.getByTestId('terminal').click()
+    await page.keyboard.type('x')
+
     const sent = await takeSentFrames(page)
     expect(sent.resize, 'リサイズを1回も頼んでいないこと').toBe(0)
+    expect(sent.keys.length, '同じ線でキーは届いていること（0 が空振りでない裏取り）')
+      .toBeGreaterThan(0)
   })
 
   test('2枚のページで開いても、互いの桁行を引っ張らない', async ({ page }) => {
     await openDashboard(page)
     const tile = await spawnSession(page)
     const cardId = await tile.getAttribute('data-card-id')
+    // **`null` のまま URL へ入れない。** 属性名が変わると `/s/null` を開くことになり、
+    // 症状は「見つかりませんの画面でタブが押せない」——原因を名指ししない失敗になる
+    expect(cardId, '小窓が data-card-id を持っていること').not.toBeNull()
     await openSession(page, tile)
 
     // もう1枚（別の端末の代わり）。**同じカードを同時に見ている状態**を作る
@@ -527,11 +538,19 @@ test.describe('端末の格子', () => {
         下端の差: Math.round(boxRect.bottom - gridRect.bottom),
         縦にはみ出す: gridRect.height > box.clientHeight,
         上端の差: Math.round(gridRect.top - boxRect.top),
+        // **横スクロールバーは、環境によって場所を取る。** 重ねて出る（オーバーレイの）
+        // 環境では 0、取る環境では十数 px。ここを見込まないと、**同じ実装なのに
+        // 環境で合否が変わる**検査になる
+        バーの厚み: box.offsetHeight - box.clientHeight,
       }
     })
 
     expect(窓.横へはみ出す, '横へはみ出したぶんはスクロールで読めること').toBe(true)
-    expect(窓.下端の差, '格子が下端へ貼り付いていること').toBeLessThanOrEqual(8)
+    // 許容は「入れ物の余白（`p-2` ＝ 8px）＋ 実際に場所を取っているバーの厚み」。
+    // 数字を直に書くと、バーが場所を取る環境で落ちる
+    expect(窓.下端の差, '格子が下端へ貼り付いていること').toBeLessThanOrEqual(
+      8 + 窓.バーの厚み,
+    )
     if (窓.縦にはみ出す) {
       // 貼り付けた結果、切り落とされるのは**常に上側**になる
       expect(窓.上端の差, '切り落とされるのは上側であること').toBeLessThan(0)
