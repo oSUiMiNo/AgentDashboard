@@ -200,9 +200,16 @@ test.describe('タッチで遡る', () => {
     // **増やす向きにする。** 減らすと作り直しで遡れる量そのものが縮み、「残っているのに
     // 0」という揺れるテストになる。
     const settings = await page.context().newPage()
+    await settings.goto('/settings')
+    const input = settings.getByTestId('scrollback-lines-input')
+    // **戻す値は画面から読む。** 直に `1000` と書くと、既定が動いた日から嘘になる
+    const 元の行数 = await input.inputValue()
+
+    // **`finally` を使わない。** `finally` の中で投げると本体の例外を上書きしてしまい
+    // （`no-unsafe-finally`）、本来の失敗が消える。本体の失敗を**投げずに受け止めて**
+    // おけば、戻す処理は必ず通り、投げる順番もこちらで決められる
+    let 本体の失敗: unknown
     try {
-      await settings.goto('/settings')
-      const input = settings.getByTestId('scrollback-lines-input')
       await input.fill('2000')
       await input.press('Enter')
 
@@ -216,13 +223,32 @@ test.describe('タッチで遡る', () => {
       // **控えて戻していなければ、ここで下端へ飛んでいる**（設計§9）
       const after = await terminalScroll(page)
       expect(after.baseY - after.viewportY).toBeGreaterThan(0)
-    } finally {
-      // **設定は次の検査へ残る**（E2E は1台のサーバを共有している）。断言が落ちても
-      // 戻すために finally へ置く
-      const input = settings.getByTestId('scrollback-lines-input')
-      await input.fill('1000')
+    } catch (error) {
+      本体の失敗 = error
+    }
+
+    // **設定は次の検査へ残る**（E2E は1台のサーバを共有している）。**元の値へ戻し、
+    // 戻ったことを断言してから閉じる**——`press` は要求を投げるだけなので、待たずに
+    // 閉じると往復ごと中断されうる
+    let 戻せなかった: unknown
+    try {
+      await input.fill(元の行数)
       await input.press('Enter')
-      await settings.close()
+      // 保存はサーバ往復。**読み込み直して初めて「効いた」と言える**——入力欄は
+      // 打った値をそのまま映すので、画面の値だけでは往復の証拠にならない
+      await settings.reload()
+      await expect(settings.getByTestId('scrollback-lines-input')).toHaveValue(元の行数)
+    } catch (error) {
+      戻せなかった = error
+    }
+    await settings.close()
+
+    // **本来の失敗が先。** 戻し損ねも黙らせない（後続の検査が別の行数で走るため）
+    if (本体の失敗 !== undefined) {
+      throw 本体の失敗
+    }
+    if (戻せなかった !== undefined) {
+      throw 戻せなかった
     }
   })
 })
