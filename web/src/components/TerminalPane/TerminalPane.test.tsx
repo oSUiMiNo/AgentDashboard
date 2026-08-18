@@ -33,6 +33,21 @@ vi.mock('@xterm/addon-webgl', () => ({
 
 const CARD = '11111111-2222-3333-4444-555555555555'
 
+/**
+ * 描き終わった端末を返す。**待つものは、待つたびに読み直す。**
+ *
+ * `const term = …__terminal` を先に読んでから `waitFor(() => expect(term)…)` と書くと、
+ * **閉じ込めた値は二度と変わらない**ので、待ち合わせではなく「同じ断言を5秒繰り返して
+ * 落ちる」だけになる。いま通っているのは `render` が `act` の中で効果を流し切っている
+ * からで、**その見張りは何も見ていない**。
+ */
+async function 描かれた端末(box: HTMLElement): Promise<Terminal> {
+  await waitFor(() =>
+    expect((box as HTMLElement & { __terminal?: Terminal }).__terminal).toBeDefined(),
+  )
+  return (box as HTMLElement & { __terminal?: Terminal }).__terminal as Terminal
+}
+
 beforeEach(() => {
   loseContext = undefined
   disposed = false
@@ -90,10 +105,11 @@ describe('TerminalPane の格子', () => {
   it('描いた端末が 120桁×40行であること', async () => {
     const { container } = render(<TerminalPane cardId={CARD} />)
     const pane = container.querySelector('[data-testid="terminal"]') as HTMLElement
-    const term = (pane as HTMLElement & { __terminal?: Terminal }).__terminal
-    await waitFor(() => expect(term).toBeDefined())
+    // **待つものはコールバックの中で読む。** 外で `const` に閉じ込めると、値は
+    // 二度と変わらないので「同じ断言を5秒繰り返して落ちる」だけになる
+    const 端末 = await 描かれた端末(pane)
 
-    expect({ cols: term!.cols, rows: term!.rows }).toEqual({ cols: 120, rows: 40 })
+    expect({ cols: 端末.cols, rows: 端末.rows }).toEqual({ cols: 120, rows: 40 })
   })
 
   it('購読の1通目から 120桁×40行で頼むこと', async () => {
@@ -101,14 +117,19 @@ describe('TerminalPane の格子', () => {
     // （タブを切り替えるまで 80桁のままだった）
     let asked: { cols: number; rows: number } | undefined
     const original = useWsStore.getState().subscribeTerminal
-    useWsStore.setState({
-      subscribeTerminal: (_cardId, cols, rows) => {
-        asked = { cols, rows }
-        return () => {}
-      },
-    })
-    render(<TerminalPane cardId={CARD} />)
-    useWsStore.setState({ subscribeTerminal: original })
+    // **戻すのは `finally` で。** 描く途中で落ちると偽物が残り、以後のテストが
+    // **何も届かない購読**を掴んだまま走る——1件の失敗が連鎖に化ける
+    try {
+      useWsStore.setState({
+        subscribeTerminal: (_cardId, cols, rows) => {
+          asked = { cols, rows }
+          return () => {}
+        },
+      })
+      render(<TerminalPane cardId={CARD} />)
+    } finally {
+      useWsStore.setState({ subscribeTerminal: original })
+    }
 
     await waitFor(() => expect(asked).toBeDefined())
     expect(asked).toEqual({ cols: 120, rows: 40 })
@@ -118,21 +139,24 @@ describe('TerminalPane の格子', () => {
     // 見張ると、そこから桁行を決め直す道が戻る。**張っていないことで見る**
     const observed: unknown[] = []
     const original = globalThis.ResizeObserver
-    globalThis.ResizeObserver = class {
-      constructor(callback: ResizeObserverCallback) {
-        observed.push(callback)
-      }
-      observe() {}
-      unobserve() {}
-      disconnect() {}
-    } as unknown as typeof ResizeObserver
+    // **戻すのは `finally` で**（上と同じ理由）。無効化された見張りが残ると、
+    // 以後のテストは大きさの変化を一度も受け取らないまま走る
+    try {
+      globalThis.ResizeObserver = class {
+        constructor(callback: ResizeObserverCallback) {
+          observed.push(callback)
+        }
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      } as unknown as typeof ResizeObserver
 
-    const { container } = render(<TerminalPane cardId={CARD} />)
-    const pane = container.querySelector('[data-testid="terminal"]') as HTMLElement
-    await waitFor(() =>
-      expect((pane as HTMLElement & { __terminal?: Terminal }).__terminal).toBeDefined(),
-    )
-    globalThis.ResizeObserver = original
+      const { container } = render(<TerminalPane cardId={CARD} />)
+      const pane = container.querySelector('[data-testid="terminal"]') as HTMLElement
+      await 描かれた端末(pane)
+    } finally {
+      globalThis.ResizeObserver = original
+    }
 
     expect(observed).toEqual([])
   })
@@ -195,9 +219,8 @@ describe('TerminalPane の窓', () => {
 describe('TerminalPane の焦点', () => {
   async function 端末(container: HTMLElement) {
     const box = container.querySelector('[data-testid="terminal"]') as HTMLElement
-    const term = (box as HTMLElement & { __terminal?: Terminal }).__terminal
-    await waitFor(() => expect(term).toBeDefined())
-    return { box, term: term as Terminal, focus: vi.spyOn(term as Terminal, 'focus') }
+    const term = await 描かれた端末(box)
+    return { box, term, focus: vi.spyOn(term, 'focus') }
   }
 
   it('マウスで押したときは焦点を渡すこと', async () => {
@@ -306,16 +329,16 @@ describe('TerminalPane のタッチ', () => {
   })
 
   it('セルの高さを .xterm-screen から引くこと', async () => {
-    // `.xterm` や外側の入れ物を使うと、`FitAddon` の切り捨てぶんの余白が混ざる
+    // `.xterm` や外側の入れ物を使うと、**格子より入れ物が大きいぶんの余白**が混ざる
+    // （設計§3-4。窓は格子より広くなりうる）
     const { container } = render(<TerminalPane cardId={CARD} />)
     const pane = container.querySelector('[data-testid="terminal"]') as HTMLElement
-    const term = (pane as HTMLElement & { __terminal?: Terminal }).__terminal
-    await waitFor(() => expect(term).toBeDefined())
+    const term = await 描かれた端末(pane)
 
     const screen = pane.querySelector('.xterm-screen') as HTMLElement
     expect(screen).not.toBeNull()
     // jsdom は寸法を持たないので、実際の値を差し込んでから遡らせる
-    Object.defineProperty(screen, 'clientHeight', { value: 15 * term!.rows })
+    Object.defineProperty(screen, 'clientHeight', { value: 15 * term.rows })
     const scrolled: number[] = []
     vi.spyOn(term!, 'scrollLines').mockImplementation((lines: number) => {
       scrolled.push(lines)
@@ -332,8 +355,7 @@ describe('TerminalPane のタッチ', () => {
   it('握ったときだけ既定の動きを止めること', async () => {
     const { container } = render(<TerminalPane cardId={CARD} />)
     const pane = container.querySelector('[data-testid="terminal"]') as HTMLElement
-    const term = (pane as HTMLElement & { __terminal?: Terminal }).__terminal
-    await waitFor(() => expect(term).toBeDefined())
+    const term = await 描かれた端末(pane)
 
     // 下端に居るので、未来（上へなぞる）へは行けない
     vi.spyOn(term!.buffer.active, 'viewportY', 'get').mockReturnValue(100)
@@ -401,20 +423,25 @@ describe('TerminalPane の遡り位置', () => {
   async function renderPane() {
     let deliver: ((kind: number, payload: Uint8Array) => void) | undefined
     const original = useWsStore.getState().subscribeTerminal
-    useWsStore.setState({
-      subscribeTerminal: (_cardId, _cols, _rows, listener) => {
-        deliver = listener
-        return () => {}
-      },
-    })
-    const { container } = render(<TerminalPane cardId={CARD} />)
-    useWsStore.setState({ subscribeTerminal: original })
+    // **戻すのは `finally` で。** 描く途中で落ちると偽物が残り、以後のテストが
+    // 本物の購読を通らなくなる
+    let container: HTMLElement
+    try {
+      useWsStore.setState({
+        subscribeTerminal: (_cardId, _cols, _rows, listener) => {
+          deliver = listener
+          return () => {}
+        },
+      })
+      container = render(<TerminalPane cardId={CARD} />).container
+    } finally {
+      useWsStore.setState({ subscribeTerminal: original })
+    }
 
     const pane = container.querySelector('[data-testid="terminal"]') as HTMLElement
-    const term = (pane as HTMLElement & { __terminal?: Terminal }).__terminal
-    await waitFor(() => expect(term).toBeDefined())
+    const term = await 描かれた端末(pane)
     expect(deliver).toBeDefined()
-    return { term: term as Terminal, deliver: deliver as NonNullable<typeof deliver> }
+    return { term, deliver: deliver as NonNullable<typeof deliver> }
   }
 
   /**
