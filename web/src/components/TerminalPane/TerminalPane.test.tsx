@@ -179,15 +179,70 @@ describe('TerminalPane の窓', () => {
     expect(grid.style.minWidth).toBe('max-content')
   })
 
-  it('空き地を押しても端末へ焦点を渡すこと', async () => {
-    // 格子より入れ物が大きいと、上に地の色の余白ができる（設計§3-4）。**見た目は
-    // 端末の一部**なので普通に押されるが、そこは `.xterm` の外なので xterm は拾わない
-    const box = pane()
+})
+
+/**
+ * 焦点をいつ渡すか（設計§14-3・§14-9）。
+ *
+ * 格子より入れ物が大きいと、上に地の色の余白ができる（設計§3-4）。**見た目は端末の
+ * 一部**なので普通に押されるが、そこは `.xterm` の外なので xterm は拾わない——
+ * だから入れ物の側で渡している。
+ *
+ * **ただしタッチは別。** `pointerdown` はタップとなぞりを区別しないので、そのまま
+ * 渡すと**遡ろうとなぞるたびにソフトキーボードが出る**（実測で再現した回帰）。
+ * タッチは離すまで待ち、**一度も握らなかったときだけ**渡す。
+ */
+describe('TerminalPane の焦点', () => {
+  async function 端末(container: HTMLElement) {
+    const box = container.querySelector('[data-testid="terminal"]') as HTMLElement
     const term = (box as HTMLElement & { __terminal?: Terminal }).__terminal
     await waitFor(() => expect(term).toBeDefined())
-    const focus = vi.spyOn(term!, 'focus')
+    return { box, term: term as Terminal, focus: vi.spyOn(term as Terminal, 'focus') }
+  }
 
-    fireEvent.pointerDown(box)
+  it('マウスで押したときは焦点を渡すこと', async () => {
+    const { container } = render(<TerminalPane cardId={CARD} />)
+    const { box, focus } = await 端末(container)
+
+    fireEvent.pointerDown(box, { pointerType: 'mouse', button: 0 })
+
+    expect(focus).toHaveBeenCalled()
+  })
+
+  it('主ボタン以外では渡さないこと', async () => {
+    // 右クリックで焦点が動くと、打ちかけの文がある入力欄から奪うことになる
+    const { container } = render(<TerminalPane cardId={CARD} />)
+    const { box, focus } = await 端末(container)
+
+    fireEvent.pointerDown(box, { pointerType: 'mouse', button: 2 })
+
+    expect(focus).not.toHaveBeenCalled()
+  })
+
+  it('指でなぞったときは渡さないこと', async () => {
+    // **これが回帰の本体。** 渡すとスマホでソフトキーボードが出て、画面が半分隠れる
+    const { container } = render(<TerminalPane cardId={CARD} />)
+    const { box, term, focus } = await 端末(container)
+    // 過去へ遡る余地がある＝握れる状態にする
+    vi.spyOn(term.buffer.active, 'viewportY', 'get').mockReturnValue(50)
+    vi.spyOn(term.buffer.active, 'baseY', 'get').mockReturnValue(100)
+
+    fireEvent.pointerDown(box, { pointerType: 'touch', button: 0 })
+    touch(box, 'touchstart', [{ x: 0, y: 0 }])
+    touch(box, 'touchmove', [{ x: 0, y: 60 }])
+    touch(box, 'touchend', [])
+
+    expect(focus).not.toHaveBeenCalled()
+  })
+
+  it('指でなぞらずに離したときは渡すこと', async () => {
+    // タップ＝空き地を押して打ち始めたい、という操作
+    const { container } = render(<TerminalPane cardId={CARD} />)
+    const { box, focus } = await 端末(container)
+
+    fireEvent.pointerDown(box, { pointerType: 'touch', button: 0 })
+    touch(box, 'touchstart', [{ x: 0, y: 0 }])
+    touch(box, 'touchend', [])
 
     expect(focus).toHaveBeenCalled()
   })
@@ -198,16 +253,20 @@ describe('TerminalPane の窓', () => {
  *
  * 判断そのものは `lib/touch.test.ts` が持つ。ここで見るのは**繋がっているか**だけ。
  */
-describe('TerminalPane のタッチ', () => {
-  function touch(target: HTMLElement, type: string, points: { x: number; y: number }[]) {
-    const event = new Event(type, { bubbles: true, cancelable: true })
-    Object.defineProperty(event, 'touches', {
-      value: points.map((point) => ({ clientX: point.x, clientY: point.y })),
-    })
-    target.dispatchEvent(event)
-    return event
-  }
+/**
+ * 指の出来事を1つ起こす。**焦点の検査（下の describe）からも使う**ので、
+ * どちらか一方の中に閉じ込めない。
+ */
+function touch(target: HTMLElement, type: string, points: { x: number; y: number }[]) {
+  const event = new Event(type, { bubbles: true, cancelable: true })
+  Object.defineProperty(event, 'touches', {
+    value: points.map((point) => ({ clientX: point.x, clientY: point.y })),
+  })
+  target.dispatchEvent(event)
+  return event
+}
 
+describe('TerminalPane のタッチ', () => {
   it('touchmove は passive でない購読にすること', () => {
     // **既定（passive）では `preventDefault()` が効かない**ので、なぞりを握れない。
     // DOM からは読めない指定なので、購読のされ方そのものを覗く。

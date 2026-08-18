@@ -349,7 +349,17 @@ export function TerminalPane({ cardId }: Props) {
       ].join('\n')
     }
 
+    /**
+     * 指を置いてから離すまでに、一度でも握ったか。
+     *
+     * **なぞりで焦点を移さないために持つ**（下の `onPointerDown` の注記）。判断の
+     * 材料は `scroller.move()` の戻り値だけにする——`preventDefault()` を決めるのと
+     * 同じ答えを見ておけば、握ったかどうかの判断が2箇所に分かれない。
+     */
+    let なぞった = false
+
     const onTouchStart = (event: TouchEvent) => {
+      なぞった = false
       scroller.start(points(event))
       if (debugOn) {
         tally.start += 1
@@ -360,6 +370,9 @@ export function TerminalPane({ cardId }: Props) {
     // 分けると、片方だけ直して片方が取り残される
     const onTouchMove = (event: TouchEvent) => {
       const grabbed = scroller.move(points(event))
+      if (grabbed) {
+        なぞった = true
+      }
       if (grabbed && event.cancelable) {
         event.preventDefault()
       }
@@ -377,6 +390,12 @@ export function TerminalPane({ cardId }: Props) {
     }
     const onTouchEnd = () => {
       scroller.end()
+      // **なぞらずに離した＝タップ。** ここでだけ焦点を渡す（空き地を押して
+      // 打ち始められるように）。なぞりでは渡さない——渡すとスマホでソフト
+      // キーボードが出て、遡ろうとするたびに画面が半分隠れる
+      if (!なぞった) {
+        term.focus()
+      }
       if (debugOn) {
         tally.end += 1
         showDebug('end')
@@ -419,7 +438,22 @@ export function TerminalPane({ cardId }: Props) {
     // **押しても打てない**という、原因のいちばん見えにくい形になる。
     //
     // `Terminal.focus()` は `preventScroll` 付きで textarea を掴むので、**窓は動かない**。
-    const onPointerDown = () => term.focus()
+    //
+    // # タッチはここで決めない（設計§14-9）
+    //
+    // `pointerdown` は**タップとなぞりを区別しない**。指を置いた瞬間に焦点を移すと、
+    // **遡ろうとなぞるたびにソフトキーボードが出て**画面が半分隠れるうえ、入力欄に
+    // 打ちかけの文があっても焦点を奪う。**なぞりでは移さない**のが元の振る舞いで、
+    // それは `onTouchMove` の `preventDefault()` が互換マウスイベントを抑えていた
+    // ことによる。タッチは `touchend` まで待ち、**一度も握らなかったときだけ**移す。
+    //
+    // 主ボタン以外（右クリック）でも移さない。
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.pointerType === 'touch' || event.button !== 0) {
+        return
+      }
+      term.focus()
+    }
     container.addEventListener('pointerdown', onPointerDown)
 
     // E2E から端末の内容を読むための取り出し口。
