@@ -21,7 +21,6 @@ import { looksSelecting, sequenceFor, terminalKeyOverride } from '@/lib/keys'
 import { visibleLines, visibleScreen } from '@/lib/screen'
 import {
   hasWatcher,
-  measure,
   registerProbe,
   registerTerminal,
   setSelecting,
@@ -418,17 +417,18 @@ export function TerminalPane({ cardId }: Props) {
     const dataSubscription = term.onData((data) => {
       useWsStore.getState().sendPtyInput(cardId, encoder.encode(data))
     })
-    // **格子を固定したので、いまここは鳴らない。** 桁行を変えるものが1つも無くなった
-    // ため（設計§14-1）。外さずに残してあるのは、これが**十字の測る契機3つのうちの
-    // 1つ**だからで、外すとあちらの設計に手を入れる判断になる。残りの2つ——フレームが
-    // 届いたとき・見ている人が現れたとき——は生きている。
+    // **格子を固定したので、いまここは鳴らない**（桁行を変えるものが1つも無い。設計§14-1）。
+    //
+    // それでも**送る側は残す**。これは `ClientMessage::Resize` をブラウザから送る
+    // 唯一の実装で、消すと**型はあるのに送り手が居ない**状態になる（台帳
+    // `cli_surface.toml` は Rust の enum から導くので落ちないが、「ブラウザが叩ける口」
+    // という台帳の前提のほうが嘘になる）。
+    //
+    // **一方、十字の測り直しはここから外した**（設計§14-11）。鳴らないものを契機として
+    // 残すと「契機は3つ」と読む人が出る。**生きている契機は2つ**——フレームが届いたときと、
+    // 見ている人が現れたとき。
     const resizeSubscription = term.onResize(({ cols, rows }) => {
       useWsStore.getState().resize(cardId, cols, rows)
-      // **大きさが変わったら測り直す。** 画面の中身は変わっているのに、こちらへ
-      // フレームが来るとは限らない（相手が描き直さない場合がある）
-      if (hasWatcher(cardId)) {
-        measure(cardId)
-      }
     })
 
     // **窓の空き地を押しても、端末へ焦点を渡す**（設計§3-4 の余白への手当て）。
