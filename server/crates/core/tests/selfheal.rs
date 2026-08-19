@@ -877,11 +877,20 @@ mod 載ったものを降ろす {
 
         // 擬似パーサは `fake-silent` と名乗る＝本体の版と食い違う
         let もとの = std::fs::read_to_string(pointer_path(&dir)).expect("訓練台が置いている");
-        std::fs::write(pointer_path(&dir), testkit::binary_path("fake-parser").to_string_lossy().as_bytes())
-            .expect("ポインタを書けること");
+        std::fs::write(
+            pointer_path(&dir),
+            testkit::binary_path("fake-parser")
+                .to_string_lossy()
+                .as_bytes(),
+        )
+        .expect("ポインタを書けること");
         server.parser.as_ref().expect("パーサが居る").restart();
 
-        let いま = ポインタが外れるまで待つ(&dir, &std::fs::read_to_string(pointer_path(&dir)).unwrap_or_default()).await;
+        let いま = ポインタが外れるまで待つ(
+            &dir,
+            &std::fs::read_to_string(pointer_path(&dir)).unwrap_or_default(),
+        )
+        .await;
         assert!(
             !いま.contains("fake-parser"),
             "版が食い違うのに載せ続けている: {いま}"

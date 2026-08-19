@@ -202,7 +202,11 @@ impl ParserSupervisor {
     /// 直接呼べるようにしてある（ガイドライン「通していない経路は『動く』と書いては
     /// いけない」）。**判定そのものは [`RunawayWatch`] 側**にあり、こちらは運ぶだけ。
     pub fn report_trouble(&self, trouble: ParserTrouble) -> bool {
-        let sink = self.trouble_sink.lock().expect("ロックが壊れていない").clone();
+        let sink = self
+            .trouble_sink
+            .lock()
+            .expect("ロックが壊れていない")
+            .clone();
         match sink {
             // 溢れたら捨てる。同じ知らせを積んでも、戻す回数が増えるだけ
             Some(sink) => sink.try_send(trouble).is_ok(),
@@ -379,7 +383,11 @@ impl RunawayWatch {
     ///
     /// `sample` が `None` は「測れなかった」。**0 として扱わない**——0 と読むと
     /// 「増えていない」に化けて、暴走を見落とす（設計§5-4）。
-    pub fn observe(&mut self, sample: Option<ResourceSample>, elapsed: Duration) -> Option<Runaway> {
+    pub fn observe(
+        &mut self,
+        sample: Option<ResourceSample>,
+        elapsed: Duration,
+    ) -> Option<Runaway> {
         let Some(sample) = sample else {
             // 測れなかった窓は、前後を繋げない。跨いで差分を取ると別物の引き算になる
             self.previous = None;
@@ -387,9 +395,8 @@ impl RunawayWatch {
             return None;
         };
         let millis = elapsed.as_millis().max(1) as u64;
-        let Some(previous) = self.previous.replace(sample) else {
-            return None;
-        };
+        // 1本目は物差しになるだけ（差分が取れない）
+        let previous = self.previous.replace(sample)?;
         // 累計が減った＝別の個体になった。差分を取ってはいけない
         if sample.reads < previous.reads {
             self.streak = 0;
@@ -562,7 +569,9 @@ pub struct CrashLog<T> {
 
 impl<T: Copy> CrashLog<T> {
     pub fn new() -> Self {
-        Self { 落ちた: Vec::new() }
+        Self {
+            落ちた: Vec::new()
+        }
     }
 
     /// 1回落ちたことを記録し、**見切る回数に達したか**を返す。
@@ -1061,7 +1070,8 @@ mod tests {
         let mut 追いつき = RunawayWatch::new();
         assert_eq!(追いつき.observe(窓(0, 100), 窓の長さ), None);
         for 回 in 1..=(RUNAWAY_STREAK + 2) {
-            let 判定 = 追いつき.observe(窓(200 * 回 as u64, 100 + 暴走の増え * 回 as u64), 窓の長さ);
+            let 判定 =
+                追いつき.observe(窓(200 * 回 as u64, 100 + 暴走の増え * 回 as u64), 窓の長さ);
             assert_eq!(判定, None, "追いつきを暴走とみなした（{回}回目）");
         }
 
@@ -1131,7 +1141,11 @@ mod tests {
         let mut watch = RunawayWatch::new();
         let mut 積む = 暴走を積む::始める(&mut watch);
 
-        assert_eq!(積む.複数窓(&mut watch, RUNAWAY_STREAK - 1), None, "5回で鳴った");
+        assert_eq!(
+            積む.複数窓(&mut watch, RUNAWAY_STREAK - 1),
+            None,
+            "5回で鳴った"
+        );
         assert_eq!(積む.落ち着く(&mut watch), None);
         // 数え直しになっているので、あと5回では鳴らない
         assert_eq!(
@@ -1155,7 +1169,11 @@ mod tests {
             assert_eq!(watch.observe(窓(reads, rss), 窓の長さ), None);
         }
         // 立て直しで新しい個体になった＝累計が 0 から数え直される
-        assert_eq!(watch.observe(窓(0, 8), 窓の長さ), None, "減った差分で鳴った");
+        assert_eq!(
+            watch.observe(窓(0, 8), 窓の長さ),
+            None,
+            "減った差分で鳴った"
+        );
 
         // 新しい個体で、また6回そろうまでは鳴らない
         let mut reads = 0u64;
@@ -1221,7 +1239,10 @@ mod tests {
     fn 一度鳴らしたあとも見張りは続く() {
         let mut watch = RunawayWatch::new();
         let mut 積む = 暴走を積む::始める(&mut watch);
-        assert!(積む.複数窓(&mut watch, RUNAWAY_STREAK).is_some(), "1度目が鳴らない");
+        assert!(
+            積む.複数窓(&mut watch, RUNAWAY_STREAK).is_some(),
+            "1度目が鳴らない"
+        );
         assert!(
             積む.複数窓(&mut watch, RUNAWAY_STREAK).is_some(),
             "1度鳴らしたら終わってしまっている"
@@ -1301,7 +1322,8 @@ mod tests {
         // ポインタが実在のファイルを指していれば Pointer
         let swapped = dir.join("transcript-parser-swapped");
         std::fs::write(&swapped, b"#!/bin/false\n").expect("差し替え版を置けること");
-        std::fs::write(&pointer, swapped.to_string_lossy().as_bytes()).expect("ポインタを書けること");
+        std::fs::write(&pointer, swapped.to_string_lossy().as_bytes())
+            .expect("ポインタを書けること");
         let (path, origin) = parser_program(&config);
         assert_eq!(path, swapped);
         assert_eq!(origin, ParserOrigin::Pointer);
@@ -1320,10 +1342,7 @@ mod tests {
         // ポインタが無ければ、隣か PATH
         std::fs::remove_file(&pointer).expect("ポインタを消せること");
         let (_, origin) = parser_program(&config);
-        assert!(matches!(
-            origin,
-            ParserOrigin::Sibling | ParserOrigin::Path
-        ));
+        assert!(matches!(origin, ParserOrigin::Sibling | ParserOrigin::Path));
         assert!(!origin.can_roll_back());
 
         let _ = std::fs::remove_dir_all(dir);

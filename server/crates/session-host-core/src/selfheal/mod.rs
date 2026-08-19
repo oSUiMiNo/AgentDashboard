@@ -681,7 +681,9 @@ async fn worktree_is_current(
             // 見られないなら通さない。**素通しにすると、門が在ることにならない**
             give_up(
                 selfheal,
-                &format!("修復の作業場所が本体に追いついているか確かめられません（{when}）: {error}"),
+                &format!(
+                    "修復の作業場所が本体に追いついているか確かめられません（{when}）: {error}"
+                ),
             );
             false
         }

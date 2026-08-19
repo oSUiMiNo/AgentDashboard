@@ -740,7 +740,9 @@ mod tests {
         let repo = 使い捨てのリポジトリ::作る("catch-up");
         let ops = repo.ops();
 
-        let worktree = ops.prepare_worktree(修復の枝).expect("作業場所を作れること");
+        let worktree = ops
+            .prepare_worktree(修復の枝)
+            .expect("作業場所を作れること");
         // 本体だけが先へ進む
         let 新しい本体 = repo.積む("本体の直し");
         assert!(
@@ -748,7 +750,9 @@ mod tests {
             "先へ進めた直後は追いついていないはず"
         );
 
-        let worktree = ops.prepare_worktree(修復の枝).expect("作業場所を作れること");
+        let worktree = ops
+            .prepare_worktree(修復の枝)
+            .expect("作業場所を作れること");
         assert_eq!(
             repo.git_in(&worktree, &["rev-parse", "HEAD"]),
             新しい本体,
@@ -762,13 +766,17 @@ mod tests {
         // 修復の成果を本体へ取り込むかは人が決める設計なので、辿れなくしてはいけない（§3-2）
         let repo = 使い捨てのリポジトリ::作る("attic");
         let ops = repo.ops();
-        let worktree = ops.prepare_worktree(修復の枝).expect("作業場所を作れること");
+        let worktree = ops
+            .prepare_worktree(修復の枝)
+            .expect("作業場所を作れること");
 
         // 修復セッションが成果を積み、そのあいだに本体も進む
         let 修復の成果 = repo.積む_in(&worktree, "修復の成果");
         repo.積む("本体の直し");
 
-        let worktree = ops.prepare_worktree(修復の枝).expect("作業場所を作れること");
+        let worktree = ops
+            .prepare_worktree(修復の枝)
+            .expect("作業場所を作れること");
         let 枝 = repo.退避枝(修復の枝);
         assert_eq!(枝.len(), 1, "退避用の枝が残っていない: {枝:?}");
         assert_eq!(
@@ -793,14 +801,17 @@ mod tests {
         // 枝が無駄に増えると、どれが本当に残すべき成果なのかが読めなくなる
         let repo = 使い捨てのリポジトリ::作る("no-attic");
         let ops = repo.ops();
-        let worktree = ops.prepare_worktree(修復の枝).expect("作業場所を作れること");
+        let worktree = ops
+            .prepare_worktree(修復の枝)
+            .expect("作業場所を作れること");
 
         // 成果を本体へ取り込んでから、本体を進める
         let 成果 = repo.積む_in(&worktree, "修復の成果");
         repo.git(&["merge", "--ff-only", &成果]);
         repo.積む("本体の直し");
 
-        ops.prepare_worktree(修復の枝).expect("作業場所を作れること");
+        ops.prepare_worktree(修復の枝)
+            .expect("作業場所を作れること");
         assert!(
             repo.退避枝(修復の枝).is_empty(),
             "取り込まれているのに退避した: {:?}",
@@ -813,13 +824,20 @@ mod tests {
         // 付け替えを足しても、ここは今までどおり通ること
         let repo = 使い捨てのリポジトリ::作る("discard");
         let ops = repo.ops();
-        let worktree = ops.prepare_worktree(修復の枝).expect("作業場所を作れること");
+        let worktree = ops
+            .prepare_worktree(修復の枝)
+            .expect("作業場所を作れること");
 
         std::fs::write(worktree.join("書きかけ.txt"), "残り").expect("置けること");
         std::fs::write(worktree.join("最初.txt"), "書き換えた").expect("置けること");
 
-        let worktree = ops.prepare_worktree(修復の枝).expect("作業場所を作れること");
-        assert!(!worktree.join("書きかけ.txt").exists(), "追跡外の残りが消えていない");
+        let worktree = ops
+            .prepare_worktree(修復の枝)
+            .expect("作業場所を作れること");
+        assert!(
+            !worktree.join("書きかけ.txt").exists(),
+            "追跡外の残りが消えていない"
+        );
         assert_eq!(
             std::fs::read_to_string(worktree.join("最初.txt")).expect("読めること"),
             "最初",

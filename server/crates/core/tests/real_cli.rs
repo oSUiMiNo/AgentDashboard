@@ -1167,6 +1167,12 @@ impl session_host_core::selfheal::ops::SelfhealOps for PlantedCanary {
         self.inner.prepare_worktree(branch)
     }
 
+    /// **本物へ委ねる。** ここを「常に真」にすると、実CLIの訓練だけが門を素通りし、
+    /// 古い土台の上でも通ってしまう（確かめたいのは本物の1周である）
+    fn worktree_is_current(&self, worktree: &Path) -> anyhow::Result<bool> {
+        self.inner.worktree_is_current(worktree)
+    }
+
     fn run_canary(
         &self,
         _model: &str,
