@@ -120,6 +120,11 @@ pub struct ParserSupervisor {
     /// **戻す道は1本**にしてある。ここへ渡した先で、既にある `rollback()` が
     /// 「ポインタを戻す・間を置く・立て直す・画面へ知らせる」を1組で行う。
     trouble_sink: Mutex<Option<mpsc::Sender<ParserTrouble>>>,
+    /// 「いま動いている個体を畳め」の依頼（設計§18-2）。
+    ///
+    /// **戻す先が無いときの道**で、`pump` が受けて縮退にし、落として、
+    /// 立て直しを頼まれるまで待つ。溜める意味が無いので1つで足りる。
+    folds: mpsc::Sender<String>,
 }
 
 /// 載っているパーサそのものが悪い、と分かったときの知らせ（設計§6・§8）。
@@ -167,6 +172,8 @@ impl ParserSupervisor {
         let (requests, request_rx) = mpsc::channel(REQUEST_QUEUE);
         // 立て直しの依頼は溜める意味が無い（1回入っていれば十分）
         let (restarts, restart_rx) = mpsc::channel(1);
+        // 畳む依頼も同じ（畳むのは1回で足りる）
+        let (folds, fold_rx) = mpsc::channel(1);
 
         let supervisor = Arc::new(Self {
             manager: Arc::clone(&manager),
@@ -177,9 +184,15 @@ impl ParserSupervisor {
             restarts,
             stats_sink: Mutex::new(None),
             trouble_sink: Mutex::new(None),
+            folds,
         });
 
-        tokio::spawn(run(Arc::clone(&supervisor), request_rx, restart_rx));
+        tokio::spawn(run(
+            Arc::clone(&supervisor),
+            request_rx,
+            restart_rx,
+            fold_rx,
+        ));
         supervisor
     }
 
@@ -212,6 +225,19 @@ impl ParserSupervisor {
             Some(sink) => sink.try_send(trouble).is_ok(),
             None => false,
         }
+    }
+
+    /// いま動いている個体を**畳む**（戻す先が無いときの道。設計§18-2）。
+    ///
+    /// 縮退にして落とし、**立て直しを頼まれるまで自分からは起こし直さない**。
+    ///
+    /// # なぜ公開しているか
+    ///
+    /// [`Self::report_trouble`] と同じ——暴走の契機は 8GB 食う個体を用意しないと踏めず、
+    /// しかも見張りは10秒窓×6回（60秒）でしか鳴らない。**踏めない経路を確かめない理由には
+    /// しない**ので、入口を開けて検査から直接叩けるようにしてある。
+    pub fn fold_runaway(&self, detail: String) -> bool {
+        self.folds.try_send(detail).is_ok()
     }
 
     /// 構造化ビューを縮退として宣言する（設計§9-6 の縮退モード）。
@@ -460,6 +486,7 @@ async fn run(
     supervisor: Arc<ParserSupervisor>,
     mut requests: mpsc::Receiver<ParserRequest>,
     mut restarts: mpsc::Receiver<()>,
+    mut folds: mpsc::Receiver<String>,
 ) {
     // カード → 本体トランスクリプトのパス。再起動のたびに登録し直すために持つ
     let mut watched: HashMap<CardId, String> = HashMap::new();
@@ -502,6 +529,7 @@ async fn run(
                     child,
                     &mut requests,
                     &mut restarts,
+                    &mut folds,
                     &mut watched,
                     origin,
                 )
@@ -510,9 +538,18 @@ async fn run(
                     PumpEnd::Shutdown => return,
                     // 差し替えによる立て直しは異常ではないので、縮退にも待ちにも入らない
                     PumpEnd::Restart => continue,
-                    // 戻す先が無い個体が暴走した。**立て直さない**——同じものを起こし直せば
-                    // また食い始める。機械を守るほうを採り、構造化ビューは縮退のまま置く
-                    PumpEnd::Runaway => return,
+                    // 戻す先が無い個体が暴走した。**自分からは起こし直さない**——同じものを
+                    // 起こし直せばまた食い始める。ただし**世話役ごと終わってはいけない**
+                    // （設計§18-2）：終わると、あとから差し替えが来ても受け手が居ないのに
+                    // 画面には「差し替えました」と出る。**立て直しを頼まれるまで待つ**
+                    PumpEnd::Runaway => {
+                        match wait_for_restart(&mut requests, &mut restarts, &mut watched).await {
+                            // 差し替えが来た。新しい実行ファイルで起き直る
+                            WaitEnd::Restart => continue,
+                            // core が畳まれた
+                            WaitEnd::Shutdown => return,
+                        }
+                    }
                     PumpEnd::ParserGone => {
                         supervisor.set_state(
                             ParserState::Degraded,
@@ -605,6 +642,44 @@ impl<T: Copy> CrashLog<T> {
     }
 }
 
+/// 暴走で畳んだあと、待っている間に何が起きたか（設計§18-2）。
+enum WaitEnd {
+    /// 差し替えが来た
+    Restart,
+    /// core が畳まれた
+    Shutdown,
+}
+
+/// 暴走で畳んだ個体の代わりを**自分からは起こさず**、立て直しを頼まれるまで待つ。
+///
+/// 待っている間も監視の依頼は受け続ける。**受けないと待ち行列が満杯になり**、
+/// 起き直ったときに登録し直す先が欠ける（落ちた `Watch` は、そのカードの構造化ビューを
+/// 永久に空のまま残す）。子は居ないので**渡さずに控えるだけ**にして、次の起動で
+/// まとめて登録し直す道（`pump` の先頭）へ乗せる。
+async fn wait_for_restart(
+    requests: &mut mpsc::Receiver<ParserRequest>,
+    restarts: &mut mpsc::Receiver<()>,
+    watched: &mut HashMap<CardId, String>,
+) -> WaitEnd {
+    loop {
+        tokio::select! {
+            restart = restarts.recv() => return match restart {
+                Some(()) => WaitEnd::Restart,
+                None => WaitEnd::Shutdown,
+            },
+            request = requests.recv() => match request {
+                Some(ParserRequest::Watch { card_id, path }) => {
+                    watched.insert(card_id, path);
+                }
+                Some(ParserRequest::Unwatch { card_id }) => {
+                    watched.remove(&card_id);
+                }
+                None => return WaitEnd::Shutdown,
+            },
+        }
+    }
+}
+
 enum PumpEnd {
     /// core 自体が終わる
     Shutdown,
@@ -631,6 +706,7 @@ async fn pump(
     mut child: tokio::process::Child,
     requests: &mut mpsc::Receiver<ParserRequest>,
     restarts: &mut mpsc::Receiver<()>,
+    folds: &mut mpsc::Receiver<String>,
     watched: &mut HashMap<CardId, String>,
     origin: ParserOrigin,
 ) -> PumpEnd {
@@ -795,15 +871,21 @@ async fn pump(
 
                 // 戻す先が無い（同梱・環境変数・PATH）か、受け手が居ない。
                 // **畳んで縮退にする。** 起こし直せばまた食い始めるので、立て直さない
-                supervisor.degrade(format!(
+                fold(supervisor, &mut child, parser_pid, format!(
                     "パーサが資源を食い続けているため畳みました\
                      （{}MB・毎秒 {} 回の read）。ターミナルと指示送信はそのまま使えます",
                     runaway.rss_bytes / (1024 * 1024),
                     runaway.reads_per_sec
-                ));
-                if let Err(err) = child.kill().await {
-                    tracing::warn!(parser_pid = ?parser_pid, %err, "暴走したパーサを落とせません");
-                }
+                )).await;
+                return PumpEnd::Runaway;
+            }
+
+            // 畳む依頼（設計§18-2）。見張りが鳴らしたときと**同じ本体**を通る
+            detail = folds.recv() => {
+                let Some(detail) = detail else {
+                    return PumpEnd::Shutdown;
+                };
+                fold(supervisor, &mut child, parser_pid, detail).await;
                 return PumpEnd::Runaway;
             }
 
@@ -812,6 +894,22 @@ async fn pump(
                 return PumpEnd::ParserGone;
             }
         }
+    }
+}
+
+/// 暴走した個体を畳む（設計§18-2）。**縮退にしてから落とす。**
+///
+/// 見張りが鳴らしたときと、外から頼まれたときの**両方がここを通る**。2箇所に書くと、
+/// 片方だけ直したときに「検査では畳めるのに実物では畳めない」が起こる。
+async fn fold(
+    supervisor: &Arc<ParserSupervisor>,
+    child: &mut tokio::process::Child,
+    parser_pid: Option<u32>,
+    detail: String,
+) {
+    supervisor.degrade(detail);
+    if let Err(err) = child.kill().await {
+        tracing::warn!(parser_pid = ?parser_pid, %err, "暴走したパーサを落とせません");
     }
 }
 
