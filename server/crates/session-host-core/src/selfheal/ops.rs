@@ -117,6 +117,19 @@ pub const WORKTREE_DIR: &str = ".selfheal/worktrees";
 /// ビルド成果物の置き場所（リポジトリ相対）。本体の `target/` と混ぜない。
 const WORKTREE_TARGET_DIR: &str = ".selfheal/target";
 
+/// パーサの**実行ファイル**を持っているパッケージ。
+///
+/// **`transcript-parser` パッケージには実行ファイルが無い。** 入口は `crates/dist` に
+/// 3本まとめて置いてある（セルフホスト化設計§25 読み替え1）。`-p transcript-parser` で
+/// 作ると**ライブラリだけが出来て、実行ファイルは出ない**——そして cargo は成功で返るので、
+/// 「ビルドしたパーサが見つかりません」という**置き場所の話に見える失敗**になる。
+///
+/// 実際に踏んだ（2026-08-19）。修復の作業場所が入口の移動より前の木で止まっていたため、
+/// **古い木では通っていた**。作業場所を本体へ追いつかせた途端に表に出た。
+const PARSER_BIN_PACKAGE: &str = "agentdashboard";
+/// 実行ファイルの名前。
+const PARSER_BIN_NAME: &str = "transcript-parser";
+
 /// `scripts/cargo` に作業ディレクトリを伝える環境変数（リポジトリ相対）。
 pub const CARGO_DIR_ENV: &str = "AGENTDASHBOARD_CARGO_DIR";
 /// `scripts/cargo` にビルド成果物の置き場所を伝える環境変数（リポジトリ相対）。
@@ -464,14 +477,24 @@ impl SelfhealOps for HostOps {
     }
 
     fn build_parser(&self, worktree: &Path) -> anyhow::Result<PathBuf> {
-        self.cargo(worktree, &["build", "--release", "-p", "transcript-parser"])
-            .into_result("cargo build")?;
+        self.cargo(
+            worktree,
+            &[
+                "build",
+                "--release",
+                "-p",
+                PARSER_BIN_PACKAGE,
+                "--bin",
+                PARSER_BIN_NAME,
+            ],
+        )
+        .into_result("cargo build")?;
         let built = self
             .repo
             .join(WORKTREE_TARGET_DIR)
             .join(leaf(worktree))
             .join("release")
-            .join("transcript-parser");
+            .join(PARSER_BIN_NAME);
         if !built.is_file() {
             anyhow::bail!("ビルドしたパーサが見つかりません: {}", built.display());
         }
@@ -660,6 +683,55 @@ mod tests {
             .to_string();
         assert!(error.contains("web/node_modules"), "実際: {error}");
         assert!(!worktree.join(NODE_MODULES).exists());
+    }
+
+    /// パーサの実行ファイルを、**それを持っているパッケージから**作っているか。
+    ///
+    /// # なぜ検査が要るのか
+    ///
+    /// 入口が `crates/dist` へ移ったあとも、ビルドの呼び出しは `-p transcript-parser` の
+    /// ままだった。あちらは `[lib]` しか持たないので**ライブラリだけが出来て cargo は成功で
+    /// 返る**——失敗は「ビルドしたパーサが見つかりません」という、置き場所の話に見える形で
+    /// 出る。しかも修復の作業場所が入口の移動より前の木で止まっていたので、**そちらでは
+    /// 通っていた**（そして本体で直した輪を持たないパーサが出来上がった）。
+    ///
+    /// 次に入口が動いたとき、**同じ形で静かに壊れないよう**に実物と突き合わせる。
+    #[test]
+    fn パーサの実行ファイルを持つパッケージから作っている() {
+        let dist = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../dist/Cargo.toml");
+        let text = std::fs::read_to_string(&dist).expect("crates/dist の Cargo.toml を読めること");
+
+        // `[[bin]] name = "transcript-parser"` を持っているのは誰か
+        assert!(
+            text.contains(&format!("name = \"{PARSER_BIN_NAME}\"")),
+            "{} が {PARSER_BIN_NAME} の実行ファイルを持っていない。\
+             入口が動いたなら PARSER_BIN_PACKAGE も直すこと",
+            dist.display()
+        );
+        let package = text
+            .lines()
+            .skip_while(|line| !line.starts_with("name = "))
+            .map(|line| {
+                line.trim_start_matches("name = ")
+                    .trim_matches('"')
+                    .to_string()
+            })
+            .next()
+            .expect("パッケージ名が読めること");
+        assert_eq!(
+            package, PARSER_BIN_PACKAGE,
+            "実行ファイルを持つパッケージが変わっている。**ライブラリだけが出来て静かに失敗する**"
+        );
+
+        // `transcript-parser` パッケージ側に実行ファイルが無いことも見る。
+        // ここに `[[bin]]` が戻ってきたら、どちらから作るのかを決め直す必要がある
+        let lib = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../transcript-parser/Cargo.toml");
+        let lib =
+            std::fs::read_to_string(&lib).expect("transcript-parser の Cargo.toml を読めること");
+        assert!(
+            !lib.contains("[[bin]]"),
+            "transcript-parser パッケージへ実行ファイルが戻っている。作る先を決め直すこと"
+        );
     }
 
     /// 本物の git で作業場所を作り、付け替えを確かめるための小さなリポジトリ。
