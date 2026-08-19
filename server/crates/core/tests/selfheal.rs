@@ -845,6 +845,170 @@ mod 古い土台では進まない {
     }
 }
 
+/// 載ってしまったものを降ろす側（設計§4-2・§6・§8）。
+///
+/// 門をすり抜けた個体は、**率の観察では捕まらない**——暴走したパーサはパース自体は
+/// 正しくできるので、失敗率は悪化しない。ここが効かないと、今回と同じ壊れ方が繰り返される。
+mod 載ったものを降ろす {
+    use super::*;
+    use protocol::ws::{SelfhealPhase, ServerMessage};
+    use session_host_core::parser::ParserTrouble;
+
+    /// 戻ったことを、ポインタの中身が変わったことで見る。
+    async fn ポインタが外れるまで待つ(dir: &Path, もとの: &str) -> String {
+        for _ in 0..300 {
+            let いま = std::fs::read_to_string(pointer_path(dir)).unwrap_or_default();
+            if いま != もとの {
+                return いま;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("ポインタが外れませんでした（{もとの} のまま）");
+    }
+
+    #[tokio::test]
+    async fn 版の違うパーサを名乗られたらポインタが外れる() {
+        // 今回の再発は「相手が3週間前の木」だった。`Hello` は初期実装から在るので、
+        // **相手が新しい仕組みを何も持っていなくても**この門は成立する
+        let dir = work_dir("version-mismatch");
+        let ops = FakeOps::new(&dir);
+        let server = TestServer::start_with_selfheal(config_for(&dir), ops.clone()).await;
+        let mut events = common::EventWatcher::attach(&server.manager);
+
+        // 擬似パーサは `fake-silent` と名乗る＝本体の版と食い違う
+        let もとの = std::fs::read_to_string(pointer_path(&dir)).expect("訓練台が置いている");
+        std::fs::write(pointer_path(&dir), testkit::binary_path("fake-parser").to_string_lossy().as_bytes())
+            .expect("ポインタを書けること");
+        server.parser.as_ref().expect("パーサが居る").restart();
+
+        let いま = ポインタが外れるまで待つ(&dir, &std::fs::read_to_string(pointer_path(&dir)).unwrap_or_default()).await;
+        assert!(
+            !いま.contains("fake-parser"),
+            "版が食い違うのに載せ続けている: {いま}"
+        );
+        // 戻す先が無いので同梱へ（＝ポインタは空になる）
+        assert!(いま.is_empty() || いま == もとの, "戻り先が変: {いま}");
+
+        let message = events
+            .wait_for("戻したという知らせ", |message| {
+                matches!(
+                    message,
+                    ServerMessage::Selfheal {
+                        phase: SelfhealPhase::RolledBack,
+                        ..
+                    }
+                )
+            })
+            .await;
+        let ServerMessage::Selfheal { detail, .. } = message else {
+            unreachable!("RolledBack だけを待っている");
+        };
+        let detail = detail.unwrap_or_default();
+        assert!(
+            detail.contains("違う版") && detail.contains("fake-silent"),
+            "名乗った版が読めない: {detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn 落ち続けたらポインタが外れる() {
+        // **落ちるほど何度も起き直る**のがいまの作りで、壊れた版ほど長生きしていた。
+        // 3回で見切る（1回は事故・2回は偶然が残る・3回はその実行ファイルの性質）
+        let dir = work_dir("crash-loop");
+        let ops = FakeOps::new(&dir);
+        let server = TestServer::start_with_selfheal(config_for(&dir), ops.clone()).await;
+
+        std::fs::write(pointer_path(&dir), b"/bin/false").expect("ポインタを書けること");
+        server.parser.as_ref().expect("パーサが居る").restart();
+
+        let いま = ポインタが外れるまで待つ(&dir, "/bin/false").await;
+        assert!(
+            !いま.contains("/bin/false"),
+            "落ち続けているのに同じ版で起こし直している: {いま}"
+        );
+    }
+
+    #[tokio::test]
+    async fn 暴走したら間を置いて同梱へ戻す() {
+        // 8GB 食う個体は用意できないので、**入口から直接**流す（判定そのものは
+        // `RunawayWatch` の単体で当ててある）
+        let dir = work_dir("runaway");
+        let ops = FakeOps::new(&dir);
+        let server = TestServer::start_with_selfheal(config_for(&dir), ops.clone()).await;
+        let mut events = common::EventWatcher::attach(&server.manager);
+        let もとの = std::fs::read_to_string(pointer_path(&dir)).expect("訓練台が置いている");
+
+        assert!(
+            server
+                .parser
+                .as_ref()
+                .expect("パーサが居る")
+                .report_trouble(ParserTrouble::Runaway {
+                    pid: Some(4321),
+                    rss_bytes: 8202 * 1024 * 1024,
+                    reads_per_sec: 336_784,
+                    growth_per_min: 427 * 1024 * 1024,
+                }),
+            "戻す側が受け取っていない"
+        );
+
+        let message = events
+            .wait_for("戻したという知らせ", |message| {
+                matches!(
+                    message,
+                    ServerMessage::Selfheal {
+                        phase: SelfhealPhase::RolledBack,
+                        ..
+                    }
+                )
+            })
+            .await;
+        let ServerMessage::Selfheal { detail, .. } = message else {
+            unreachable!("RolledBack だけを待っている");
+        };
+        let detail = detail.unwrap_or_default();
+        // **実測値が出ること。** 「戻しました」だけでは、次に同じことが起きたときに
+        // 何を見ればよいのか分からない
+        assert!(
+            detail.contains("8202MB") && detail.contains("336784"),
+            "実測値が残っていない: {detail}"
+        );
+
+        ポインタが外れるまで待つ(&dir, &もとの).await;
+
+        // **間を置く。** 置かないと「戻す → 発報 → また直す」が回り、カナリアが
+        // 本物の claude を起こし続けてクォータを使い切る
+        let (_session, transcript) = start_watched(&server, &dir).await;
+        append_records(&transcript, 3, "9.9.9", 0);
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        assert_eq!(
+            ops.count("worktree"),
+            0,
+            "戻した直後に修復へ進んでいる: {:?}",
+            ops.calls()
+        );
+    }
+
+    #[tokio::test]
+    async fn 戻す先が無ければポインタを触らない() {
+        // 同梱・環境変数・PATH のどれかで動いている個体には戻す先が無い。
+        // ここでポインタを作りにいくと、**誰も置いていないものを指す**ことになる
+        let dir = work_dir("no-pointer");
+        let ops = FakeOps::new(&dir);
+        let server = TestServer::start_with_selfheal(config_for(&dir), ops.clone()).await;
+
+        std::fs::remove_file(pointer_path(&dir)).expect("ポインタを外せること");
+        server.parser.as_ref().expect("パーサが居る").restart();
+
+        // 見つからないので起動に失敗し続けるが、**ポインタは作られない**
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert!(
+            !pointer_path(&dir).exists(),
+            "戻す先が無いのにポインタを書いた"
+        );
+    }
+}
+
 #[tokio::test]
 async fn 差し替えたパーサが悪ければ自動で戻す() {
     // テスト計画フェーズ7「ロールバック」。直したつもりが悪化していた場合、

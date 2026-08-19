@@ -26,7 +26,7 @@ use protocol::CardId;
 use protocol::ipc::{PROTOCOL_VERSION, ParserCommand, ParserEvent};
 use protocol::ws::{ParserState, ServerMessage};
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -115,6 +115,30 @@ pub struct ParserSupervisor {
     restarts: mpsc::Sender<()>,
     /// stats の届け先。自己修復が居るときだけ差し込まれる
     stats_sink: Mutex<Option<mpsc::Sender<StatsReport>>>,
+    /// 「載っているものが悪い」ことの届け先（設計§6-1）。
+    ///
+    /// **戻す道は1本**にしてある。ここへ渡した先で、既にある `rollback()` が
+    /// 「ポインタを戻す・間を置く・立て直す・画面へ知らせる」を1組で行う。
+    trouble_sink: Mutex<Option<mpsc::Sender<ParserTrouble>>>,
+}
+
+/// 載っているパーサそのものが悪い、と分かったときの知らせ（設計§6・§8）。
+///
+/// **出どころがポインタのときだけ流れる。** 同梱版や環境変数で名指ししたものには
+/// 戻す先が無いので、世話役がその場で縮退にする。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParserTrouble {
+    /// 資源を食い続けている（設計§5）
+    Runaway {
+        pid: Option<u32>,
+        rss_bytes: u64,
+        reads_per_sec: u64,
+        growth_per_min: i64,
+    },
+    /// 短い間に何度も落ちている（設計§8-2）
+    CrashLoop { times: usize, within: Duration },
+    /// 本体と違う版を名乗った＝**古い木から作られている**（設計§4-2）
+    VersionMismatch { parser_version: String },
 }
 
 /// パーサが報告してきた健康状態を、自己修復へ渡すときの形。
@@ -152,6 +176,7 @@ impl ParserSupervisor {
             state: Arc::new(Mutex::new(ParserState::Ok)),
             restarts,
             stats_sink: Mutex::new(None),
+            trouble_sink: Mutex::new(None),
         });
 
         tokio::spawn(run(Arc::clone(&supervisor), request_rx, restart_rx));
@@ -161,6 +186,28 @@ impl ParserSupervisor {
     /// 健康状態の届け先を差し込む（自己修復が起動したときに呼ばれる）。
     pub fn attach_stats_sink(&self, sink: mpsc::Sender<StatsReport>) {
         *self.stats_sink.lock().expect("ロックが壊れていない") = Some(sink);
+    }
+
+    /// 「載っているものが悪い」ことの届け先を差し込む（設計§6-1）。
+    pub fn attach_trouble_sink(&self, sink: mpsc::Sender<ParserTrouble>) {
+        *self.trouble_sink.lock().expect("ロックが壊れていない") = Some(sink);
+    }
+
+    /// 戻す側へ知らせる。**受け手が居なければ偽**——そのときは世話役が自分で畳む。
+    ///
+    /// # なぜ公開しているか
+    ///
+    /// 暴走の契機は**8GB 食う個体を用意しないと踏めない**。踏めない経路を確かめない
+    /// 理由にはしない、というのがこのリポジトリの決まりなので、入口を開けて検査から
+    /// 直接呼べるようにしてある（ガイドライン「通していない経路は『動く』と書いては
+    /// いけない」）。**判定そのものは [`RunawayWatch`] 側**にあり、こちらは運ぶだけ。
+    pub fn report_trouble(&self, trouble: ParserTrouble) -> bool {
+        let sink = self.trouble_sink.lock().expect("ロックが壊れていない").clone();
+        match sink {
+            // 溢れたら捨てる。同じ知らせを積んでも、戻す回数が増えるだけ
+            Some(sink) => sink.try_send(trouble).is_ok(),
+            None => false,
+        }
     }
 
     /// 構造化ビューを縮退として宣言する（設計§9-6 の縮退モード）。
@@ -410,10 +457,20 @@ async fn run(
     // カード → 本体トランスクリプトのパス。再起動のたびに登録し直すために持つ
     let mut watched: HashMap<CardId, String> = HashMap::new();
     let mut attempt = 0usize;
+    // 落ち続けの数え方（設計§8-2）。**実行ファイルが変わったら数え直す**——
+    // 前の個体が落ちたことは、いまの個体の証明にならない
+    let mut crashes: CrashLog<std::time::Instant> = CrashLog::new();
+    let mut last_program: Option<PathBuf> = None;
 
     loop {
-        match spawn_parser(&supervisor.config).await {
-            Ok((child, _origin)) => {
+        let (program, origin) = parser_program(&supervisor.config);
+        if last_program.as_ref() != Some(&program) {
+            crashes.reset();
+            last_program = Some(program.clone());
+        }
+
+        match spawn_parser(&program).await {
+            Ok(child) => {
                 attempt = 0;
                 // **どの起動の子か**をここで残す。Hello の行だけでは pid が分からず、
                 // 孤児が出たとき（未解明事象2）に「誰が置き去りにされたか」を
@@ -439,17 +496,39 @@ async fn run(
                     &mut requests,
                     &mut restarts,
                     &mut watched,
+                    origin,
                 )
                 .await;
                 match reason {
                     PumpEnd::Shutdown => return,
                     // 差し替えによる立て直しは異常ではないので、縮退にも待ちにも入らない
                     PumpEnd::Restart => continue,
+                    // 戻す先が無い個体が暴走した。**立て直さない**——同じものを起こし直せば
+                    // また食い始める。機械を守るほうを採り、構造化ビューは縮退のまま置く
+                    PumpEnd::Runaway => return,
                     PumpEnd::ParserGone => {
                         supervisor.set_state(
                             ParserState::Degraded,
                             Some("パーサが終了しました。立て直しています".to_string()),
                         );
+                        if origin.can_roll_back() {
+                            let 見切る = crashes.record(std::time::Instant::now(), |now, at| {
+                                now.duration_since(at)
+                            });
+                            if 見切る {
+                                let times = CRASH_LIMIT;
+                                tracing::warn!(
+                                    origin = origin.label(),
+                                    times,
+                                    within_secs = CRASH_WINDOW.as_secs(),
+                                    "差し替えたパーサが落ち続けています。同梱のパーサへ戻します"
+                                );
+                                supervisor.report_trouble(ParserTrouble::CrashLoop {
+                                    times,
+                                    within: CRASH_WINDOW,
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -467,6 +546,56 @@ async fn run(
     }
 }
 
+/// 落ち続けを見る窓（設計§8-2）。
+const CRASH_WINDOW: Duration = Duration::from_secs(5 * 60);
+/// この回数だけ落ちたら、ポインタを外す。1回は事故でも起こり、2回は偶然が残る。
+/// 3回続くのは**その実行ファイルの性質**である。
+const CRASH_LIMIT: usize = 3;
+
+/// 落ちた回数の数え方（設計§8-2）。
+///
+/// **時計を持たせず、外から渡す。** 5分待つ検査は書けないので、判定だけを切り離す。
+#[derive(Debug, Default)]
+pub struct CrashLog<T> {
+    落ちた: Vec<T>,
+}
+
+impl<T: Copy> CrashLog<T> {
+    pub fn new() -> Self {
+        Self { 落ちた: Vec::new() }
+    }
+
+    /// 1回落ちたことを記録し、**見切る回数に達したか**を返す。
+    ///
+    /// `age` は「その時刻から何秒経ったか」を返す関数。窓の外へ出たものは数えない。
+    pub fn record(&mut self, now: T, age: impl Fn(T, T) -> Duration) -> bool {
+        self.落ちた.retain(|at| age(now, *at) < CRASH_WINDOW);
+        self.落ちた.push(now);
+        if self.落ちた.len() < CRASH_LIMIT {
+            return false;
+        }
+        // 見切ったら数え直す。**戻したあとの1回目の落ちで、また外そうとしない**
+        self.落ちた.clear();
+        true
+    }
+
+    /// 別の実行ファイルになったので、いままでの回数を捨てる。
+    ///
+    /// **前の個体が落ちたことは、いまの個体の証明にならない**（報告の記録を
+    /// 立て直しのたびに空から始めているのと同じ考え方）。
+    pub fn reset(&mut self) {
+        self.落ちた.clear();
+    }
+
+    pub fn len(&self) -> usize {
+        self.落ちた.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.落ちた.is_empty()
+    }
+}
+
 enum PumpEnd {
     /// core 自体が終わる
     Shutdown,
@@ -474,20 +603,18 @@ enum PumpEnd {
     ParserGone,
     /// 自己修復が差し替えたので、こちらから立て直す
     Restart,
+    /// 戻す先の無い個体が暴走したので畳んだ。**立て直さない**
+    Runaway,
 }
 
-async fn spawn_parser(
-    config: &SessionHostConfig,
-) -> std::io::Result<(tokio::process::Child, ParserOrigin)> {
-    let (program, origin) = parser_program(config);
-    let child = tokio::process::Command::new(program)
+async fn spawn_parser(program: &Path) -> std::io::Result<tokio::process::Child> {
+    tokio::process::Command::new(program)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         // core が落ちたときにパーサだけ生き残らないようにする
         .kill_on_drop(true)
-        .spawn()?;
-    Ok((child, origin))
+        .spawn()
 }
 
 async fn pump(
@@ -496,6 +623,7 @@ async fn pump(
     requests: &mut mpsc::Receiver<ParserRequest>,
     restarts: &mut mpsc::Receiver<()>,
     watched: &mut HashMap<CardId, String>,
+    origin: ParserOrigin,
 ) -> PumpEnd {
     let Some(mut stdin) = child.stdin.take() else {
         return PumpEnd::ParserGone;
@@ -537,6 +665,14 @@ async fn pump(
     // このパーサから1件でも報告が返ってきたカード。**「読まれた」の肯定側**（設計§10-3）。
     // 立て直しのたびに空から始める——前の個体が読めたことは、いまの個体の証明にならない
     let mut reported: std::collections::HashSet<CardId> = std::collections::HashSet::new();
+
+    // 資源の見張り（設計§5）。**個体ごとに空から始める**
+    let parser_pid = child.id();
+    let mut watch = RunawayWatch::new();
+    let mut ticker = tokio::time::interval(RUNAWAY_SAMPLE_EVERY);
+    // 1回目は即座に返るので捨てる（窓の長さが 0 になる）
+    ticker.tick().await;
+    let mut sampled_at = std::time::Instant::now();
 
     // 立て直し後は、監視していたカードを保存済みの位置から登録し直す（無欠落再開）
     for (card_id, path) in watched.iter() {
@@ -583,7 +719,7 @@ async fn pump(
             },
 
             event = events.recv() => match event {
-                Some(event) => handle_event(supervisor, event, watched, &mut reported),
+                Some(event) => handle_event(supervisor, event, watched, &mut reported, origin),
                 // パーサの stdout が閉じた＝プロセスが終わった
                 None => return PumpEnd::ParserGone,
             },
@@ -615,6 +751,52 @@ async fn pump(
                 }
                 None => return PumpEnd::Shutdown,
             },
+
+            // 資源の見張り（設計§5）。**判定そのものは行を出さない**——10秒ごとに
+            // 回る場所なので、越えた回だけ残す（設計§6-4）
+            _ = ticker.tick() => {
+                let now = std::time::Instant::now();
+                let elapsed = now.duration_since(sampled_at);
+                sampled_at = now;
+                let sample = parser_pid.and_then(sample_process);
+                let Some(runaway) = watch.observe(sample, elapsed) else {
+                    continue;
+                };
+                tracing::warn!(
+                    parser_pid = ?parser_pid,
+                    rss_mb = runaway.rss_bytes / (1024 * 1024),
+                    reads_per_sec = runaway.reads_per_sec,
+                    growth_mb_per_min = runaway.growth_per_min / (1024 * 1024),
+                    origin = origin.label(),
+                    "パーサが資源を食い続けています（暴走とみなしました）"
+                );
+
+                // 戻す先があるなら、戻す側へ渡す。**ポインタを外してから立て直す**
+                // 順序は向こうが持っている（設計§6-2・§8-1）
+                if origin.can_roll_back()
+                    && supervisor.report_trouble(ParserTrouble::Runaway {
+                        pid: parser_pid,
+                        rss_bytes: runaway.rss_bytes,
+                        reads_per_sec: runaway.reads_per_sec,
+                        growth_per_min: runaway.growth_per_min,
+                    })
+                {
+                    continue;
+                }
+
+                // 戻す先が無い（同梱・環境変数・PATH）か、受け手が居ない。
+                // **畳んで縮退にする。** 起こし直せばまた食い始めるので、立て直さない
+                supervisor.degrade(format!(
+                    "パーサが資源を食い続けているため畳みました\
+                     （{}MB・毎秒 {} 回の read）。ターミナルと指示送信はそのまま使えます",
+                    runaway.rss_bytes / (1024 * 1024),
+                    runaway.reads_per_sec
+                ));
+                if let Err(err) = child.kill().await {
+                    tracing::warn!(parser_pid = ?parser_pid, %err, "暴走したパーサを落とせません");
+                }
+                return PumpEnd::Runaway;
+            }
 
             status = child.wait() => {
                 tracing::warn!("transcript-parser が終了しました: {status:?}");
@@ -667,6 +849,7 @@ fn handle_event(
     event: ParserEvent,
     watched: &HashMap<CardId, String>,
     reported: &mut std::collections::HashSet<CardId>,
+    origin: ParserOrigin,
 ) {
     match event {
         ParserEvent::Hello {
@@ -682,6 +865,23 @@ fn handle_event(
                         "パーサの版が噛み合いません（core={PROTOCOL_VERSION} / parser={protocol_version}）"
                     )),
                 );
+            } else if origin.can_roll_back() && parser_version != env!("CARGO_PKG_VERSION") {
+                // **古い木から作られたものが載っている**（設計§4-2）。`Hello` は初期実装から
+                // 在るので、相手が新しい仕組みを何も持っていなくてもこの門は成立する——
+                // 「相手が3週間前」の場面でこそ効かなければならない、という条件を満たす
+                // 唯一の材料である。
+                //
+                // **環境変数で名指しした経路は巻き込まない。** そちらは版が食い違っても
+                // 利用者が意図している
+                tracing::warn!(
+                    parser_version,
+                    core_version = env!("CARGO_PKG_VERSION"),
+                    origin = origin.label(),
+                    "差し替えたパーサが本体と違う版を名乗りました。同梱のパーサへ戻します"
+                );
+                supervisor.report_trouble(ParserTrouble::VersionMismatch {
+                    parser_version: parser_version.clone(),
+                });
             } else {
                 tracing::info!("transcript-parser {parser_version} と接続しました");
             }
@@ -1008,6 +1208,73 @@ mod tests {
         reads += 暴走の読み;
         rss += 暴走の増え;
         assert!(watch.observe(窓(reads, rss), 窓の長さ).is_some());
+    }
+
+    /// 資源の見張りは**終わらない**（設計§7-2）。
+    ///
+    /// 率の観察（`selfheal` の `baseline`）は「健全な窓を1つ通れば終わり」で、それには
+    /// 理由がある——率は読んでいるデータの性質で動くので、時間が経つほど「パーサが悪いのか
+    /// データが変わったのか」が言えなくなる。**資源の見張りにその終わり方を持ち込むと、
+    /// 今回と同じ見落としに戻る**（輪へ入ったのは差し替えの直後ではなく、大きなファイルを
+    /// 監視した瞬間だった）。ここは1度鳴らしても畳まないことを型で押さえる。
+    #[test]
+    fn 一度鳴らしたあとも見張りは続く() {
+        let mut watch = RunawayWatch::new();
+        let mut 積む = 暴走を積む::始める(&mut watch);
+        assert!(積む.複数窓(&mut watch, RUNAWAY_STREAK).is_some(), "1度目が鳴らない");
+        assert!(
+            積む.複数窓(&mut watch, RUNAWAY_STREAK).is_some(),
+            "1度鳴らしたら終わってしまっている"
+        );
+    }
+
+    /// 落ち続けの数え方（設計§8-2）。**時計は外から渡す**ので、5分待たずに当たれる。
+    mod 落ち続け {
+        use super::*;
+
+        /// 「いま」を秒で表した目盛り。差がそのまま経過時間になる。
+        fn 経過(now: u64, at: u64) -> Duration {
+            Duration::from_secs(now - at)
+        }
+
+        #[test]
+        fn 三回落ちたら見切る() {
+            let mut log = CrashLog::new();
+            assert!(!log.record(0, 経過), "1回は事故でも起こる");
+            assert!(!log.record(1, 経過), "2回は偶然が残る");
+            assert!(log.record(2, 経過), "3回続いたら見切る");
+        }
+
+        #[test]
+        fn 窓の外へ出たものは数えない() {
+            let mut log = CrashLog::new();
+            assert!(!log.record(0, 経過));
+            assert!(!log.record(1, 経過));
+            // 5分を大きく越えてから3回目。**たまたま2回落ちていたものを巻き込まない**
+            assert!(!log.record(1000, 経過), "窓の外の落ちを数えている");
+            assert_eq!(log.len(), 1, "窓の中に残るのは最後の1回だけ");
+        }
+
+        #[test]
+        fn 見切ったら数え直す() {
+            // **戻したあとの1回目の落ちで、また外そうとしない**
+            let mut log = CrashLog::new();
+            log.record(0, 経過);
+            log.record(1, 経過);
+            assert!(log.record(2, 経過));
+            assert!(log.is_empty(), "見切ったのに回数が残っている");
+            assert!(!log.record(3, 経過), "戻した直後の1回でまた見切っている");
+        }
+
+        #[test]
+        fn 実行ファイルが変わったら数え直す() {
+            // 前の個体が落ちたことは、いまの個体の証明にならない
+            let mut log = CrashLog::new();
+            log.record(0, 経過);
+            log.record(1, 経過);
+            log.reset();
+            assert!(!log.record(2, 経過), "前の個体の回数を引き継いでいる");
+        }
     }
 
     /// 出どころの4通り（設計§4-3）。**ポインタだけが外せる。**

@@ -34,7 +34,7 @@ pub mod state;
 pub mod watchdog;
 
 use crate::config::SessionHostConfig;
-use crate::parser::{ParserSupervisor, StatsReport};
+use crate::parser::{ParserSupervisor, ParserTrouble, StatsReport};
 use crate::session::{SessionManager, now_ms};
 use ops::SelfhealOps;
 use protocol::ws::{SelfhealPhase, ServerMessage};
@@ -49,6 +49,11 @@ use watchdog::{Counters, Trigger, Watchdog};
 
 /// 健康状態の待ち行列。溢れたぶんは捨てる（次の報告でまた届く）。
 const STATS_QUEUE: usize = 64;
+
+/// 「載っているものが悪い」の待ち行列。
+///
+/// **深く持つ意味が無い。** 同じ知らせを積んでも、戻す回数が増えるだけ（戻すのは1回で足りる）。
+const TROUBLE_QUEUE: usize = 4;
 
 /// 修復セッションの1ターンを待つ上限。
 ///
@@ -144,6 +149,13 @@ impl Selfheal {
         let (sink, reports) = mpsc::channel(STATS_QUEUE);
         parser.attach_stats_sink(sink);
         tokio::spawn(watch(Arc::clone(&selfheal), reports));
+
+        // 「載っているものが悪い」ことの受け口（設計§6-1）。**自己修復を止めていても
+        // 差し込む**——これは自己修復の一部ではなく、機械を守るためのものなので、
+        // `selfheal_enabled` や `ops` の有無で切らない（設計§10）
+        let (trouble_sink, troubles) = mpsc::channel(TROUBLE_QUEUE);
+        parser.attach_trouble_sink(trouble_sink);
+        tokio::spawn(watch_trouble(Arc::clone(&selfheal), troubles));
 
         // CLI が上がっていたら、モデル別名の表を見直す（設計§14）。
         // **契機は観測ではなくバージョン変化。** 誰も使っていない新しい別名は
@@ -253,6 +265,41 @@ async fn watch(selfheal: Arc<Selfheal>, mut reports: mpsc::Receiver<StatsReport>
             run_cycle(&running, trigger).await;
             running.busy.store(false, Ordering::SeqCst);
         });
+    }
+}
+
+/// 「載っているものが悪い」を受けて戻す（設計§6-1）。
+///
+/// **判断は世話役が済ませてある。** ここへ届くのは出どころがポインタのものだけで、
+/// 戻す先が必ずある。やることは、既にある [`rollback`] を理由付きで呼ぶことだけ——
+/// あれが「ポインタを戻す・間を置く・立て直す・画面へ知らせる」を1組で持っている。
+///
+/// **`selfheal_enabled` を見ない。** 自己修復を止めていても、載っているものが機械を
+/// 落としにかかっているなら降ろす（設計§10）。
+async fn watch_trouble(selfheal: Arc<Selfheal>, mut troubles: mpsc::Receiver<ParserTrouble>) {
+    while let Some(trouble) = troubles.recv().await {
+        let reason = match trouble {
+            ParserTrouble::Runaway {
+                rss_bytes,
+                reads_per_sec,
+                growth_per_min,
+                ..
+            } => format!(
+                "差し替えたパーサが資源を食い続けています（{}MB・毎秒 {reads_per_sec} 回の read・毎分 {}MB 増）",
+                rss_bytes / (1024 * 1024),
+                growth_per_min / (1024 * 1024),
+            ),
+            ParserTrouble::CrashLoop { times, within } => format!(
+                "差し替えたパーサが{}分のうちに{times}回落ちました",
+                within.as_secs() / 60
+            ),
+            ParserTrouble::VersionMismatch { parser_version } => format!(
+                "差し替えたパーサが本体と違う版を名乗りました（core={} / parser={parser_version}）。\
+                 古い木から作られています",
+                env!("CARGO_PKG_VERSION")
+            ),
+        };
+        rollback(&selfheal, &reason);
     }
 }
 
