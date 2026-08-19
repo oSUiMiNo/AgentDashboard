@@ -162,6 +162,11 @@ impl TestServer {
     /// 未解明2事象を「辿れる」で確かめるのに要る（ログ設計§16-2）。
     ///
     /// 本番と同じ入口（環境変数）で名指しするので、差し込みのための分岐は製品側に無い。
+    /// **環境変数を立てるので、ポインタの経路を確かめるバイナリからは呼べない。**
+    ///
+    /// あれはプロセス全体に効き、同じバイナリの中であとから走るテストからも探索順の
+    /// 先頭に居座る。`selfheal.rs` は `work_dir()` の入口で立っていないことを見張って
+    /// いるので、あちらへ持ち込むと理由つきで落ちる。
     pub async fn start_with_parser_binary(config: Config, parser: &std::path::Path) -> Self {
         unsafe {
             std::env::set_var(session_host_core::parser::PARSER_BIN_ENV, parser);
@@ -476,6 +481,9 @@ impl TestServer {
         let parser = if with_parser {
             // 本番と同じ入口（環境変数）でビルド済みのパーサを指す
             if name_parser_by_env {
+                // **プロセス全体に効く。** ポインタの経路を確かめるテストと同じバイナリで
+                // 立てると、あとから走るテストが確かめたい経路を踏めなくなる
+                // （`selfheal.rs` の `work_dir()` が見張っている）
                 unsafe {
                     std::env::set_var(session_host_core::parser::PARSER_BIN_ENV, parser_program());
                 }
