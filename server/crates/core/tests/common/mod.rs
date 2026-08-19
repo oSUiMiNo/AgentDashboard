@@ -205,14 +205,27 @@ impl TestServer {
     /// 別名表の見直し（第2系統）が起きないことまで確かめるため。空文字だと
     /// 「比べる相手が無い」という別の理由で起きなくなり、検証にならない。
     pub async fn start_without_selfheal_ops(config: Config, cli_version: &str) -> Self {
-        // 差し替えは起きない環境なので、パーサの場所は**環境変数で名指しする**。
-        // ポインタ経由にすると、それを書き忘れたときにパーサが見つからず、
-        // 「検知が動かない」を「直せないので動かない」と読み違えることになる（実際に踏んだ）
+        // 差し替えは起きない環境だが、**パーサの場所はポインタで名指しする**。
+        //
+        // 以前はここで環境変数を立てていた。あれは**プロセス共通**なので、同じテスト
+        // バイナリの中でこれより後に走るテストからも探索順の先頭に居座り、
+        // **ポインタを書いても効かなくなる**（`パーサが居なくなっても…` が、テストを
+        // 1本足して順序が変わった途端に落ちた。実際に踏んだ）。
+        //
+        // 書き忘れれば見つからない、という当初の懸念は、ここで確実に置くことで消える。
+        let state_dir = config.agent().resolved_state_dir();
+        std::fs::create_dir_all(&state_dir).expect("状態の置き場所を作れること");
+        std::fs::write(
+            state_dir.join(session_host_core::parser::PARSER_POINTER),
+            parser_program().to_string_lossy().as_bytes(),
+        )
+        .expect("ポインタを書けること");
+
         let mut server = Self::build_with(
             config,
             fake_claude().to_string_lossy().into_owned(),
             true,
-            true,
+            false,
             None,
         )
         .await;
