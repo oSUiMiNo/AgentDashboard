@@ -211,21 +211,55 @@ impl ParserSupervisor {
 /// 「いま何を使っているか」を人が開いて確かめられるようにするため。
 pub const PARSER_POINTER: &str = "parser-current";
 
-/// パーサ実行ファイルの場所を決める。
+/// いま動いているパーサが、どこから来たか（設計§4-3）。
+///
+/// 版が食い違ったとき・暴走したとき・落ち続けたときに、**ポインタを外してよいかどうか**が
+/// これで決まる。3箇所が同じことを別々に推測しないよう、決めた場所から1つの値として運ぶ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParserOrigin {
+    /// 環境変数で名指しされた。テストと実験の経路——**版が違っても利用者が意図している**
+    Env,
+    /// 自己修復が差し替えた（`parser-current` が指している）。**外せる唯一の出どころ**
+    Pointer,
+    /// 実行ファイルの隣（＝同梱版）
+    Sibling,
+    /// PATH 任せ
+    Path,
+}
+
+impl ParserOrigin {
+    /// ポインタを外して同梱版へ戻せるか。
+    pub fn can_roll_back(self) -> bool {
+        matches!(self, ParserOrigin::Pointer)
+    }
+
+    /// ログの欄に載せる短い名前。
+    pub fn label(self) -> &'static str {
+        match self {
+            ParserOrigin::Env => "env",
+            ParserOrigin::Pointer => "pointer",
+            ParserOrigin::Sibling => "sibling",
+            ParserOrigin::Path => "path",
+        }
+    }
+}
+
+/// パーサ実行ファイルの場所と、その出どころを決める。
 ///
 /// 探索順は **環境変数 → ポインタ → 実行ファイルの隣 → PATH**。
 ///
 /// - 環境変数が先頭なのは、テストがビルド済みのパーサを名指しできるようにするため
 /// - ポインタが隣より先なのは、自己修復が差し替えた新しいパーサを使わせるため。
-///   ポインタの指す先が消えていたら既定へ戻る（起動できなくなるほうが困る）
-pub fn parser_program(config: &SessionHostConfig) -> PathBuf {
+///   ポインタの指す先が消えていたら既定へ戻る（起動できなくなるほうが困る）。
+///   **そのとき出どころは `Pointer` にしない**——外す必要の無いポインタを外さないため
+pub fn parser_program(config: &SessionHostConfig) -> (PathBuf, ParserOrigin) {
     if let Ok(path) = std::env::var(PARSER_BIN_ENV) {
-        return PathBuf::from(path);
+        return (PathBuf::from(path), ParserOrigin::Env);
     }
     if let Ok(text) = std::fs::read_to_string(config.resolved_state_dir().join(PARSER_POINTER)) {
         let path = PathBuf::from(text.trim());
         if path.is_file() {
-            return path;
+            return (path, ParserOrigin::Pointer);
         }
         tracing::warn!(
             "差し替え済みのパーサが見つかりません（既定に戻します）: {}",
@@ -236,11 +270,135 @@ pub fn parser_program(config: &SessionHostConfig) -> PathBuf {
         if let Some(dir) = current.parent() {
             let sibling = dir.join("transcript-parser");
             if sibling.is_file() {
-                return sibling;
+                return (sibling, ParserOrigin::Sibling);
             }
         }
     }
-    PathBuf::from("transcript-parser")
+    (PathBuf::from("transcript-parser"), ParserOrigin::Path)
+}
+
+/// 資源の見張りの標本を採る間隔（設計§5-3）。
+const RUNAWAY_SAMPLE_EVERY: Duration = Duration::from_secs(10);
+
+/// `read` の線（回/秒）。
+///
+/// **単独では健全なパーサも越える**（書き手が速いと実測 140,793回/秒）。それでも低いまま
+/// にしてあるのは、AND のもう片方（メモリの増え方）が効くうえ、**見落とすと機械が落ちる**側
+/// だから。緩く持って、続くかどうかで決める（設計§16-1）。
+const RUNAWAY_READS_PER_SEC: u64 = 50_000;
+
+/// メモリの増え方の線（バイト/分）。こちらも単独では健全な追いつきが越える。
+const RUNAWAY_GROWTH_PER_MIN: i64 = 100 * 1024 * 1024;
+
+/// 何回続いたら暴走とみなすか（設計§16-1。実測で 3回から改めた）。
+///
+/// 健全な追いつきも1窓は**両方の線を越える**。分けているのは「続くかどうか」だけで、
+/// 追いつきの増え方は**ファイルの長さで頭打ちになる**のに対し、暴走は頭打ちにならない。
+/// 6回 × 10秒 ＝ 60秒で、線どおりなら 100MB の増加が要る——実測した最大の履歴（64MB）の
+/// 追いつきでも RSS の増加は 46MB で、続けようがない。
+const RUNAWAY_STREAK: u32 = 6;
+
+/// パーサ1個体から採った、その瞬間の値。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceSample {
+    pub rss_bytes: u64,
+    /// `read` の**累計**回数。単調増加する
+    pub reads: u64,
+}
+
+/// 暴走とみなしたときの実測値。**そのままログの欄になる**（設計§6-4）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Runaway {
+    pub rss_bytes: u64,
+    pub reads_per_sec: u64,
+    pub growth_per_min: i64,
+}
+
+/// 暴走の判定（設計§5-5）。
+///
+/// **`/proc` を読む側とは分けてある。** 分けないと、8GB 食う個体を用意しないと確かめられない。
+#[derive(Debug, Default)]
+pub struct RunawayWatch {
+    previous: Option<ResourceSample>,
+    streak: u32,
+}
+
+impl RunawayWatch {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 標本を1つ与えて、暴走と判定できたかを返す。
+    ///
+    /// `sample` が `None` は「測れなかった」。**0 として扱わない**——0 と読むと
+    /// 「増えていない」に化けて、暴走を見落とす（設計§5-4）。
+    pub fn observe(&mut self, sample: Option<ResourceSample>, elapsed: Duration) -> Option<Runaway> {
+        let Some(sample) = sample else {
+            // 測れなかった窓は、前後を繋げない。跨いで差分を取ると別物の引き算になる
+            self.previous = None;
+            self.streak = 0;
+            return None;
+        };
+        let millis = elapsed.as_millis().max(1) as u64;
+        let Some(previous) = self.previous.replace(sample) else {
+            return None;
+        };
+        // 累計が減った＝別の個体になった。差分を取ってはいけない
+        if sample.reads < previous.reads {
+            self.streak = 0;
+            return None;
+        }
+
+        let reads_per_sec = (sample.reads - previous.reads) * 1_000 / millis;
+        let growth_per_min =
+            (sample.rss_bytes as i64 - previous.rss_bytes as i64) * 60_000 / millis as i64;
+
+        // **両方が線を越えたときだけ数える。** 片方は健全なパーサでも越える
+        if reads_per_sec < RUNAWAY_READS_PER_SEC || growth_per_min < RUNAWAY_GROWTH_PER_MIN {
+            self.streak = 0;
+            return None;
+        }
+
+        self.streak += 1;
+        if self.streak < RUNAWAY_STREAK {
+            return None;
+        }
+        // 鳴らしたら数え直す。この後は立て直しへ進むので、同じ個体で二度鳴らす意味が無い
+        self.streak = 0;
+        Some(Runaway {
+            rss_bytes: sample.rss_bytes,
+            reads_per_sec,
+            growth_per_min,
+        })
+    }
+
+    /// 個体が変わったので、いままでの標本を捨てる。
+    pub fn reset(&mut self) {
+        self.previous = None;
+        self.streak = 0;
+    }
+}
+
+/// `/proc` からその pid の標本を採る。**読めなければ `None`。**
+///
+/// `/proc` を持たない環境では見張りが黙って止まる。パーサの `orphaned()` が
+/// 「親が分からない環境ではこの見張りを無効にする」としているのと同じ作法で、
+/// **動かないことを異常にしない**（設計§5-4）。
+fn sample_process(pid: u32) -> Option<ResourceSample> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let rss_kb: u64 = status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))
+        .and_then(|value| value.trim().trim_end_matches(" kB").trim().parse().ok())?;
+    let io = std::fs::read_to_string(format!("/proc/{pid}/io")).ok()?;
+    let reads: u64 = io
+        .lines()
+        .find_map(|line| line.strip_prefix("syscr:"))
+        .and_then(|value| value.trim().parse().ok())?;
+    Some(ResourceSample {
+        rss_bytes: rss_kb * 1024,
+        reads,
+    })
 }
 
 /// 常駐タスク。パーサが落ちたら間を置いて立て直し、監視中のカードを全部登録し直す。
@@ -255,7 +413,7 @@ async fn run(
 
     loop {
         match spawn_parser(&supervisor.config).await {
-            Ok(child) => {
+            Ok((child, _origin)) => {
                 attempt = 0;
                 // **どの起動の子か**をここで残す。Hello の行だけでは pid が分からず、
                 // 孤児が出たとき（未解明事象2）に「誰が置き去りにされたか」を
@@ -318,14 +476,18 @@ enum PumpEnd {
     Restart,
 }
 
-async fn spawn_parser(config: &SessionHostConfig) -> std::io::Result<tokio::process::Child> {
-    tokio::process::Command::new(parser_program(config))
+async fn spawn_parser(
+    config: &SessionHostConfig,
+) -> std::io::Result<(tokio::process::Child, ParserOrigin)> {
+    let (program, origin) = parser_program(config);
+    let child = tokio::process::Command::new(program)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         // core が落ちたときにパーサだけ生き残らないようにする
         .kill_on_drop(true)
-        .spawn()
+        .spawn()?;
+    Ok((child, origin))
 }
 
 async fn pump(
@@ -652,6 +814,252 @@ mod tests {
         ] {
             assert!(strip_pid(line).is_none(), "{line} を剥がしてしまった");
         }
+    }
+
+    /// 10秒窓ぶんの標本を作る。`reads` は累計、`rss_mb` はそのときの実測値。
+    fn 窓(reads: u64, rss_mb: u64) -> Option<ResourceSample> {
+        Some(ResourceSample {
+            rss_bytes: rss_mb * 1024 * 1024,
+            reads,
+        })
+    }
+
+    const 窓の長さ: Duration = Duration::from_secs(10);
+
+    /// 実測（設計§16-1）に合わせた、暴走側の1窓ぶんの進み方。
+    /// `read` 約303,000回/秒 ＝ 10秒で約303万回。メモリ +300MB/分 ＝ 10秒で 50MB。
+    const 暴走の読み: u64 = 3_030_000;
+    const 暴走の増え: u64 = 50;
+
+    #[test]
+    fn 両方が線を越えて6回続いたときだけ暴走とみなす() {
+        let mut watch = RunawayWatch::new();
+        // 1本目は物差しが無いので判定しない
+        assert_eq!(watch.observe(窓(0, 100), 窓の長さ), None);
+        for 回 in 1..RUNAWAY_STREAK {
+            let 判定 = watch.observe(
+                窓(暴走の読み * 回 as u64, 100 + 暴走の増え * 回 as u64),
+                窓の長さ,
+            );
+            assert_eq!(判定, None, "{回}回目で鳴ってしまった");
+        }
+        let 判定 = watch.observe(
+            窓(
+                暴走の読み * RUNAWAY_STREAK as u64,
+                100 + 暴走の増え * RUNAWAY_STREAK as u64,
+            ),
+            窓の長さ,
+        );
+        let 暴走 = 判定.expect("6回目で鳴ること");
+        assert_eq!(暴走.reads_per_sec, 303_000);
+        assert_eq!(暴走.growth_per_min, 300 * 1024 * 1024);
+    }
+
+    #[test]
+    fn 片方だけでは鳴らない() {
+        // メモリだけ増えている＝大きなファイルへ追いついている最中（実測 +287MB/分）
+        let mut 追いつき = RunawayWatch::new();
+        assert_eq!(追いつき.observe(窓(0, 100), 窓の長さ), None);
+        for 回 in 1..=(RUNAWAY_STREAK + 2) {
+            let 判定 = 追いつき.observe(窓(200 * 回 as u64, 100 + 暴走の増え * 回 as u64), 窓の長さ);
+            assert_eq!(判定, None, "追いつきを暴走とみなした（{回}回目）");
+        }
+
+        // read だけ多い＝書き手が速いだけ（実測 140,793回/秒でも健全）
+        let mut 速い書き手 = RunawayWatch::new();
+        assert_eq!(速い書き手.observe(窓(0, 100), 窓の長さ), None);
+        for 回 in 1..=(RUNAWAY_STREAK + 2) {
+            let 判定 = 速い書き手.observe(窓(1_400_000 * 回 as u64, 100), 窓の長さ);
+            assert_eq!(判定, None, "速い書き手を暴走とみなした（{回}回目）");
+        }
+    }
+
+    /// 暴走側の進み方を積む役。**テストごとに手で足し算を書くと、どこかで取り違える。**
+    struct 暴走を積む {
+        reads: u64,
+        rss_mb: u64,
+    }
+
+    impl 暴走を積む {
+        fn 始める(watch: &mut RunawayWatch) -> Self {
+            let 積む = Self {
+                reads: 0,
+                rss_mb: 100,
+            };
+            // 1本目は物差しになるだけ
+            assert_eq!(watch.observe(窓(積む.reads, 積む.rss_mb), 窓の長さ), None);
+            積む
+        }
+
+        fn ひと窓(&mut self, watch: &mut RunawayWatch) -> Option<Runaway> {
+            self.reads += 暴走の読み;
+            self.rss_mb += 暴走の増え;
+            watch.observe(窓(self.reads, self.rss_mb), 窓の長さ)
+        }
+
+        fn 複数窓(&mut self, watch: &mut RunawayWatch, 回数: u32) -> Option<Runaway> {
+            let mut 最後 = None;
+            for _ in 0..回数 {
+                最後 = self.ひと窓(watch);
+            }
+            最後
+        }
+
+        /// 線を越えない窓を1つ挟む（落ち着いた）。
+        fn 落ち着く(&mut self, watch: &mut RunawayWatch) -> Option<Runaway> {
+            self.reads += 100;
+            watch.observe(窓(self.reads, self.rss_mb), 窓の長さ)
+        }
+    }
+
+    /// **回数を字で書く。** 上の検査は `RUNAWAY_STREAK` から回数を作っているので、
+    /// 定数を 1 に書き換えると**テストのほうも一緒に動いて通ってしまう**
+    /// （ガイドライン「テストの既定値が壊れた状態だと、全テストが崩れたまま緑になる」）。
+    /// ここだけは実測で決めた数（設計§16-1）を直接書き、番人にする。
+    #[test]
+    fn 五回で止まったら鳴らず六回目で鳴る() {
+        let mut watch = RunawayWatch::new();
+        let mut 積む = 暴走を積む::始める(&mut watch);
+        for 回 in 1..=5 {
+            assert_eq!(積む.ひと窓(&mut watch), None, "{回}回目で鳴った");
+        }
+        assert!(積む.ひと窓(&mut watch).is_some(), "6回目で鳴らない");
+    }
+
+    #[test]
+    fn 途切れたら数え直す() {
+        let mut watch = RunawayWatch::new();
+        let mut 積む = 暴走を積む::始める(&mut watch);
+
+        assert_eq!(積む.複数窓(&mut watch, RUNAWAY_STREAK - 1), None, "5回で鳴った");
+        assert_eq!(積む.落ち着く(&mut watch), None);
+        // 数え直しになっているので、あと5回では鳴らない
+        assert_eq!(
+            積む.複数窓(&mut watch, RUNAWAY_STREAK - 1),
+            None,
+            "途切れたのに数え直していない"
+        );
+        // 6回そろって、ようやく鳴る
+        assert!(積む.ひと窓(&mut watch).is_some(), "6回そろっても鳴らない");
+    }
+
+    #[test]
+    fn 累計が減ったら別の個体として数え直す() {
+        let mut watch = RunawayWatch::new();
+        let mut reads = 0u64;
+        let mut rss = 100u64;
+        assert_eq!(watch.observe(窓(reads, rss), 窓の長さ), None);
+        for _ in 0..(RUNAWAY_STREAK - 1) {
+            reads += 暴走の読み;
+            rss += 暴走の増え;
+            assert_eq!(watch.observe(窓(reads, rss), 窓の長さ), None);
+        }
+        // 立て直しで新しい個体になった＝累計が 0 から数え直される
+        assert_eq!(watch.observe(窓(0, 8), 窓の長さ), None, "減った差分で鳴った");
+
+        // 新しい個体で、また6回そろうまでは鳴らない
+        let mut reads = 0u64;
+        let mut rss = 8u64;
+        for 回 in 1..RUNAWAY_STREAK {
+            reads += 暴走の読み;
+            rss += 暴走の増え;
+            assert_eq!(
+                watch.observe(窓(reads, rss), 窓の長さ),
+                None,
+                "前の個体の回数を引き継いでいる（{回}回目）"
+            );
+        }
+        reads += 暴走の読み;
+        rss += 暴走の増え;
+        assert!(watch.observe(窓(reads, rss), 窓の長さ).is_some());
+    }
+
+    #[test]
+    fn 測れなかった標本を0として扱わない() {
+        let mut watch = RunawayWatch::new();
+        let mut reads = 0u64;
+        let mut rss = 100u64;
+        assert_eq!(watch.observe(窓(reads, rss), 窓の長さ), None);
+        for _ in 0..(RUNAWAY_STREAK - 1) {
+            reads += 暴走の読み;
+            rss += 暴走の増え;
+            assert_eq!(watch.observe(窓(reads, rss), 窓の長さ), None);
+        }
+        // ここで読めなかった。**0 と読むと「増えていない」に化ける**ので、繋げない
+        assert_eq!(watch.observe(None, 窓の長さ), None);
+
+        // 繋げていないなら、次の1本は物差しになるだけで判定に使われない
+        reads += 暴走の読み;
+        rss += 暴走の増え;
+        assert_eq!(
+            watch.observe(窓(reads, rss), 窓の長さ),
+            None,
+            "測れなかった窓を跨いで差分を取っている"
+        );
+        for 回 in 1..RUNAWAY_STREAK {
+            reads += 暴走の読み;
+            rss += 暴走の増え;
+            assert_eq!(
+                watch.observe(窓(reads, rss), 窓の長さ),
+                None,
+                "測れなかったのに回数が残っている（{回}回目）"
+            );
+        }
+        reads += 暴走の読み;
+        rss += 暴走の増え;
+        assert!(watch.observe(窓(reads, rss), 窓の長さ).is_some());
+    }
+
+    /// 出どころの4通り（設計§4-3）。**ポインタだけが外せる。**
+    #[test]
+    fn 実行ファイルの出どころを名乗る() {
+        let dir = std::env::temp_dir().join(format!(
+            "agentdashboard-parser-origin-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).expect("一時ディレクトリを作れること");
+        let config = SessionHostConfig {
+            state_dir: Some(dir.clone()),
+            ..SessionHostConfig::default()
+        };
+        let pointer = dir.join(PARSER_POINTER);
+
+        // 環境変数は他のテストと衝突しうるので、この1本の中では触らない。
+        // 代わりに「環境変数が無いとき」の3通りを見る
+        assert!(
+            std::env::var(PARSER_BIN_ENV).is_err(),
+            "この検査は環境変数が無いことを前提にしている"
+        );
+
+        // ポインタが実在のファイルを指していれば Pointer
+        let swapped = dir.join("transcript-parser-swapped");
+        std::fs::write(&swapped, b"#!/bin/false\n").expect("差し替え版を置けること");
+        std::fs::write(&pointer, swapped.to_string_lossy().as_bytes()).expect("ポインタを書けること");
+        let (path, origin) = parser_program(&config);
+        assert_eq!(path, swapped);
+        assert_eq!(origin, ParserOrigin::Pointer);
+        assert!(origin.can_roll_back(), "ポインタ由来は外せる");
+
+        // 指す先が消えていたら既定へ落ちる。**そのとき Pointer と名乗ってはいけない**
+        std::fs::remove_file(&swapped).expect("差し替え版を消せること");
+        let (_, origin) = parser_program(&config);
+        assert_ne!(
+            origin,
+            ParserOrigin::Pointer,
+            "落ちた先を Pointer と名乗ると、外す必要の無いポインタを外す"
+        );
+        assert!(!origin.can_roll_back());
+
+        // ポインタが無ければ、隣か PATH
+        std::fs::remove_file(&pointer).expect("ポインタを消せること");
+        let (_, origin) = parser_program(&config);
+        assert!(matches!(
+            origin,
+            ParserOrigin::Sibling | ParserOrigin::Path
+        ));
+        assert!(!origin.can_roll_back());
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// 監視を頼むときの「ここから読め」は、保存済みの位置をそのまま渡す。
