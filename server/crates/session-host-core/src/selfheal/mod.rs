@@ -434,9 +434,22 @@ async fn run_cycle(selfheal: &Arc<Selfheal>, trigger: Trigger) {
         }
     };
 
+    // **基準の SHA は、ここで1回だけ読む**（設計§18-1）。門のたびに読み直すと、
+    // 修復中に本体が進んだだけで——このリポジトリは複数のセッションが同時に触るので
+    // 珍しくない——正しく直った成果を捨てて24時間のクールダウンへ入ってしまう。
+    //
+    // 付け替えの直後に読むので、**土台が古ければ偽のまま**になる。門の目的は保たれる
+    let baseline = match blocking(&ops, |ops| ops.repo_head()).await {
+        Ok(sha) => sha,
+        Err(error) => {
+            give_up(selfheal, &format!("本体の HEAD を読めません: {error}"));
+            return;
+        }
+    };
+
     // 門①：古い土台の上で修復を始めない（設計§4-1）。
     // ここで無理に進めると、**本体で直したことが入っていない実行ファイル**が出来上がる
-    if !worktree_is_current(selfheal, &ops, &worktree, "修復を始める前").await {
+    if !worktree_contains(selfheal, &ops, &worktree, &baseline, "修復を始める前").await {
         return;
     }
 
@@ -495,6 +508,7 @@ async fn run_cycle(selfheal: &Arc<Selfheal>, trigger: Trigger) {
         selfheal,
         &ops,
         &worktree,
+        &baseline,
         &reason,
         &version,
         gate.output,
@@ -540,6 +554,8 @@ async fn repair_loop(
     selfheal: &Arc<Selfheal>,
     ops: &Arc<dyn SelfhealOps>,
     worktree: &Path,
+    // 門が見る基準。**周回の開始時に決めたものをそのまま使う**（設計§18-1）
+    baseline: &str,
     reason: &str,
     version: &str,
     mut gate_output: String,
@@ -638,7 +654,7 @@ async fn repair_loop(
         // 門②：修復セッションが積んだコミットまで含めて、まだ本体の子孫か（設計§4-1）。
         // **ここで断ったら、直しをやり直させない**——木そのものが古いので、何度直しても
         // 出来上がるものは同じように古い
-        if !worktree_is_current(selfheal, ops, worktree, "ビルドの直前").await {
+        if !worktree_contains(selfheal, ops, worktree, baseline, "ビルドの直前").await {
             close_session(selfheal, card);
             return;
         }
@@ -654,18 +670,27 @@ async fn repair_loop(
     finish_failure(selfheal, version);
 }
 
-/// 作業場所が本体に追いついているかを見て、追いついていなければ**間を置いて諦める**。
+/// 作業場所が基準の SHA を含んでいるかを見て、含んでいなければ**間を置いて諦める**。
 ///
 /// 2回見るのは、修復セッションが**その間にコミットを積む**ため（設計§4-1）。積んだ結果まで
-/// 含めて本体の子孫でなければ、出来上がる実行ファイルには本体の直しが入っていない。
-async fn worktree_is_current(
+/// 含めて基準の子孫でなければ、出来上がる実行ファイルには本体の直しが入っていない。
+///
+/// **基準は周回の開始時に決めたものを渡す。** ここで読み直すと、修復中に本体が進んだだけで
+/// 断ってしまう（設計§18-1）。
+async fn worktree_contains(
     selfheal: &Arc<Selfheal>,
     ops: &Arc<dyn SelfhealOps>,
     worktree: &Path,
+    baseline: &str,
     when: &str,
 ) -> bool {
     let worktree_owned = worktree.to_path_buf();
-    match blocking(ops, move |ops| ops.worktree_is_current(&worktree_owned)).await {
+    let baseline_owned = baseline.to_string();
+    match blocking(ops, move |ops| {
+        ops.worktree_contains(&worktree_owned, &baseline_owned)
+    })
+    .await
+    {
         Ok(true) => true,
         Ok(false) => {
             give_up(

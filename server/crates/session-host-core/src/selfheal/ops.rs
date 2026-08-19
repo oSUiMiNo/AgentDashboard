@@ -57,11 +57,17 @@ pub trait SelfhealOps: Send + Sync {
     /// 反映されない——実際にそれで、直したはずの輪を持つパーサが差し替えられた。
     fn prepare_worktree(&self, branch: &str) -> anyhow::Result<PathBuf>;
 
-    /// 作業場所の `HEAD` が、本体の `HEAD` の子孫になっているか（設計§4-1）。
+    /// 本体（リポジトリ）の `HEAD` の SHA。
+    ///
+    /// **周回の開始時に1回だけ読んで持ち回る**ためにある（設計§18-1）。門のたびに
+    /// 読み直すと、修復中に本体が進んだだけで**正しく直った成果を捨てる**ことになる。
+    fn repo_head(&self) -> anyhow::Result<String>;
+
+    /// 作業場所が、その SHA を含んでいるか（＝ SHA の子孫になっているか。設計§4-1）。
     ///
     /// **既定の実装を置かない。** 置くと、実装し忘れた側で門が黙って素通しになる
     /// （`run_web_gate` の既定を「不合格」にしてあるのと同じ判断）。
-    fn worktree_is_current(&self, worktree: &Path) -> anyhow::Result<bool>;
+    fn worktree_contains(&self, worktree: &Path, sha: &str) -> anyhow::Result<bool>;
 
     /// カナリアを走らせ、採ったサンプルを worktree の `fixtures/` へ置く。
     fn run_canary(&self, model: &str, worktree: &Path) -> anyhow::Result<CanarySample>;
@@ -461,9 +467,12 @@ impl SelfhealOps for HostOps {
         }
     }
 
-    fn worktree_is_current(&self, worktree: &Path) -> anyhow::Result<bool> {
-        let head = self.head_sha()?;
-        Ok(self.is_ancestor(worktree, &head, "HEAD"))
+    fn repo_head(&self) -> anyhow::Result<String> {
+        self.head_sha()
+    }
+
+    fn worktree_contains(&self, worktree: &Path, sha: &str) -> anyhow::Result<bool> {
+        Ok(self.is_ancestor(worktree, sha, "HEAD"))
     }
 
     fn discard_changes(&self, worktree: &Path) -> anyhow::Result<()> {
@@ -817,8 +826,12 @@ mod tests {
             .expect("作業場所を作れること");
         // 本体だけが先へ進む
         let 新しい本体 = repo.積む("本体の直し");
+        // **基準はそのつど読む側の検査**。ここでは「本体が進んだ直後は含んでいない」
+        // ことを見たいので、いまの `HEAD` を渡す
+        let 進んだあとの本体 = ops.repo_head().expect("本体の HEAD を読めること");
         assert!(
-            !ops.worktree_is_current(&worktree).expect("見られること"),
+            !ops.worktree_contains(&worktree, &進んだあとの本体)
+                .expect("見られること"),
             "先へ進めた直後は追いついていないはず"
         );
 
@@ -830,7 +843,11 @@ mod tests {
             新しい本体,
             "使い回すだけで付け替えていない"
         );
-        assert!(ops.worktree_is_current(&worktree).expect("見られること"));
+        assert!(
+            ops.worktree_contains(&worktree, &新しい本体)
+                .expect("見られること"),
+            "付け替えたのに、その SHA を含んでいない"
+        );
     }
 
     #[test]

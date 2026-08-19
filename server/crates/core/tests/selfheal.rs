@@ -27,7 +27,12 @@ use std::time::Duration;
 
 /// テストごとに独立した作業場所。状態ファイルを共有すると、対応表や
 /// クールダウンが前のテストから漏れて結果が変わる。
+///
+/// **ここで、環境変数が混ざっていないことも見る。** 置き場所が全テスト共通の入口なので、
+/// 検査を1本足すより確実に効く——`cargo test` はスレッドで並べるので、**順序に依存しない
+/// 場所でしか捕まらない**。
 fn work_dir(name: &str) -> PathBuf {
+    パーサの場所を環境変数で名指ししていないこと();
     let dir = std::env::temp_dir().join(format!(
         "agentdashboard-selfheal-{}-{name}",
         std::process::id()
@@ -35,6 +40,37 @@ fn work_dir(name: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("作業ディレクトリを作れること");
     dir
+}
+
+/// **このバイナリでは、パーサの場所を環境変数で名指ししてはいけない。**
+///
+/// 環境変数は**プロセス全体**に効くので、同じテストバイナリの中でこれより後に走る
+/// テストからも探索順の先頭に居座る。ここのテストは**ポインタの経路**（自己修復の
+/// 差し替え・版の照合・落ち続けの見切り）を確かめるものばかりなので、居座られると
+/// **確かめたい経路を1本も踏まないまま緑になる**（2026-08-19 に実際に踏んだ。
+/// テストを1本足して順序が変わった途端、無関係なテストが落ちた）。
+///
+/// **env の経路そのものは正しい**——「利用者が意図して差し替えている」印として機能して
+/// おり、`traceable.rs` はわざと版の食い違う擬似パーサをそれで使っている（ポインタ経由に
+/// すると出どころが `Pointer` になり、版の照合が働いて戻してしまう）。**消すのではなく、
+/// 同じバイナリへ混ぜない。**
+///
+/// # この番人が効く範囲
+///
+/// **`cargo test`（1プロセスで並べる側）で効く。** `make test` の `nextest` はテストごとに
+/// プロセスを分けるので、あちらでは env が混ざらない——**混ざらないなら害も無い**ので、
+/// 効かなくてよい。実際に踏んだ落ち方（テストを1本足したら無関係なテストが落ちた）は
+/// 前者の側で起きた。
+fn パーサの場所を環境変数で名指ししていないこと() {
+    assert!(
+        std::env::var(session_host_core::parser::PARSER_BIN_ENV).is_err(),
+        "このテストバイナリでは {} を立ててはいけません。\n\
+         プロセス全体に効くので、あとから走るテストがポインタの経路を踏めなくなります\n\
+         （ここのテストは自己修復の差し替え・版の照合・落ち続けの見切りを見ています）。\n\
+         env で名指しする土台が要るなら、別のテストバイナリへ置いてください\
+         （前例：`traceable.rs`）。",
+        session_host_core::parser::PARSER_BIN_ENV
+    );
 }
 
 fn config_for(dir: &Path) -> Config {
@@ -68,6 +104,12 @@ struct FakeOps {
     web_gate_passes: Mutex<bool>,
     /// 門①②（設計§4-1）が返す答え。**古い土台を演じるために偽へ倒す**
     worktree_current: Mutex<bool>,
+    /// `repo_head` を何回配ったか。
+    ///
+    /// **呼ばれるたびに違う SHA を返す**（＝周回の途中で本体が進み続ける機械を演じる）。
+    /// `worktree_contains` は**最初に配った SHA にだけ**真を返すので、基準を持ち回らずに
+    /// 読み直す実装だと門②が断る——直しが入っていないと必ず落ちる形になっている
+    heads: Mutex<Vec<String>>,
     /// `prepare_worktree` を何回通ったら偽へ倒すか。
     ///
     /// **ビルドの直前の門だけを落とす**ために要る。1回目（修復に入る前）は通し、
@@ -91,6 +133,7 @@ impl FakeOps {
             gate_follows_sample: Mutex::new(false),
             web_gate_passes: Mutex::new(true),
             worktree_current: Mutex::new(true),
+            heads: Mutex::new(Vec::new()),
             current_until: Mutex::new(None),
         })
     }
@@ -152,8 +195,27 @@ impl SelfhealOps for FakeOps {
         Ok(self.worktree.clone())
     }
 
-    fn worktree_is_current(&self, _worktree: &Path) -> anyhow::Result<bool> {
+    fn repo_head(&self) -> anyhow::Result<String> {
+        self.record("head");
+        let mut heads = self.heads.lock().expect("ロックが壊れていない");
+        // **毎回違う**。基準を持ち回っていれば、これが増えても判定は変わらない
+        let sha = format!("sha-{}", heads.len() + 1);
+        heads.push(sha.clone());
+        Ok(sha)
+    }
+
+    fn worktree_contains(&self, _worktree: &Path, sha: &str) -> anyhow::Result<bool> {
         self.record("current?");
+        // **最初に配った SHA だけを含んでいる。** 読み直した新しい SHA では偽になる
+        let first = self
+            .heads
+            .lock()
+            .expect("ロックが壊れていない")
+            .first()
+            .cloned();
+        if first.as_deref() != Some(sha) {
+            return Ok(false);
+        }
         let mut remaining = self.current_until.lock().expect("ロックが壊れていない");
         if let Some(times) = remaining.as_mut() {
             if *times == 0 {
@@ -480,6 +542,9 @@ async fn 未知の版を見つけたら修復セッションを起こして差�
         order,
         vec![
             "worktree",
+            // **基準の SHA は1回だけ読む。** ここが2つ以上出たら、門のたびに読み直して
+            // いる＝修復中に本体が進んだだけで成果を捨てる形へ戻っている（設計§18-1）
+            "head",
             // 門①：古い土台の上で修復を始めない（設計§4-1）
             "current?",
             "canary:haiku",
@@ -812,6 +877,33 @@ mod 古い土台では進まない {
     }
 
     #[tokio::test]
+    async fn 周回の途中で本体が進んでも断らない() {
+        // **この機械では毎回起こる。** 修復セッションは1ターン最大30分×再試行ぶん走るので、
+        // その間に本体へ誰かがコミットする（複数のセッションが同じリポジトリを触る前提）。
+        // 門のたびに `HEAD` を読み直すと、作業場所は正しい子孫なのに偽になり、
+        // **正しく直った成果を捨てて24時間のクールダウンへ入る**
+        let dir = work_dir("moving-head");
+        let ops = FakeOps::new(&dir);
+        ops.fail_gate(1);
+        let server = TestServer::start_with_selfheal(config_for(&dir), ops.clone()).await;
+        let (_session, transcript) = start_watched(&server, &dir).await;
+
+        append_records(&transcript, 3, "9.9.9", 0);
+        play_repair_agent(&server, 1).await;
+
+        // `FakeOps::repo_head` は呼ばれるたびに違う SHA を返し、`worktree_contains` は
+        // **最初に配った SHA にだけ**真を返す。読み直していれば、ここで断られて届かない
+        wait_for_call(&ops, "commit", 1).await;
+        assert_eq!(
+            ops.count("head"),
+            1,
+            "基準を読み直している（門のたびに本体の HEAD を見に行っている）: {:?}",
+            ops.calls()
+        );
+        assert_eq!(ops.count("build"), 1, "差し替えまで届いていない");
+    }
+
+    #[tokio::test]
     async fn ビルドの直前にもう一度見る() {
         // 修復セッションは**その間にコミットを積む**。積んだ結果まで本体の子孫でなければ、
         // 出来上がる実行ファイルには本体の直しが入っていない
@@ -996,6 +1088,67 @@ mod 載ったものを降ろす {
             "戻した直後に修復へ進んでいる: {:?}",
             ops.calls()
         );
+    }
+
+    #[tokio::test]
+    async fn 畳んだあとでも差し替えは効く() {
+        // 戻す先の無い個体を畳んだあと、世話役ごと終わってしまうと——
+        // 自己修復が新しいパーサを作って立て直しを頼んでも**受け手が居ないのに**、
+        // 画面には「差し替えました」と出る（**嘘をつく**）。監視の依頼も届かなくなり、
+        // 生きた縮退が「core が終わりかけ」と同じ顔になる（設計§18-2）
+        let dir = work_dir("runaway-then-swap");
+        let ops = FakeOps::new(&dir);
+        let server = TestServer::start_with_selfheal(config_for(&dir), ops.clone()).await;
+        let parser = server.parser.as_ref().expect("パーサが居る");
+        let (session, transcript) = start_watched(&server, &dir).await;
+
+        append_records(&transcript, 3, "2.1.220", 0);
+        for _ in 0..100 {
+            if !server.transcript_of(session.card_id).is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            !server.transcript_of(session.card_id).is_empty(),
+            "まず履歴が届く"
+        );
+
+        // 戻す先が無い個体が暴走したときの道を、そのまま通す。
+        // **見張りが鳴らしたときと同じ本体**を通る（10秒窓×6回は待てないので入口から叩く）
+        assert!(
+            parser.fold_runaway("暴走したので畳みました（検査）".to_string()),
+            "畳む依頼を渡せていない"
+        );
+
+        // 縮退になること
+        let mut 縮退を見た = false;
+        for _ in 0..200 {
+            if parser.state() == protocol::ws::ParserState::Degraded {
+                縮退を見た = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(縮退を見た, "畳んだのに縮退を知らせていない");
+
+        // **自分からは起こし直さない。** 畳んだ直後に勝手に起き直ると、また食い始める
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        assert_eq!(
+            parser.state(),
+            protocol::ws::ParserState::Degraded,
+            "畳んだのに自分から起こし直している"
+        );
+
+        // ここが本題：**立て直しを頼めば起き直る**（世話役は生きている）
+        parser.restart();
+        for _ in 0..200 {
+            if parser.state() == protocol::ws::ParserState::Ok {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("畳んだあと、立て直しを頼んでも起き直らない（世話役ごと終わっている）");
     }
 
     #[tokio::test]
