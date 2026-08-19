@@ -10,21 +10,33 @@
  * なぞりを支えないので、**タッチでは `pointerleave` が来ない**という問題自体が発生しない。
  * そして「素の `<button>` を5個」というアクセシビリティの要求ともそのまま両立する。
  *
- * # 逆T字にする
+ * # 逆T字を、丸く切り抜く（**利用者の要望・2026-08-16**）
  *
  * ```
- * ┌───────────────┐
- * │       ▲       │  ← 上段まるごと
- * ├─────┬───┬─────┤
- * │  ◀  │ ⏎ │  ▶  │
- * ├─────┴───┴─────┤
- * │       ▼       │  ← 下段まるごと
- * └───────────────┘
+ *      ╭───────────╮
+ *   ╱       ▲       ╲     ← 上段まるごと（横に長い）
+ *  │─────┬─────┬─────│
+ *  │  ◀  │  ⏎  │  ▶  │    ← 中央は一回り小さく、まわりが不活性の縁
+ *  │─────┴─────┴─────│
+ *   ╲       ▼       ╱     ← 下段まるごと
+ *      ╰───────────╯
  * ```
  *
- * 上下が行をまるごと占めるので、隙間が1ピクセルも生まれない。**中央の `⏎` だけは
- * セルより一回り小さく置く**——余った縁はどのボタンにも属さないので、そこを押しても
- * 何も起きない。これが「決定は見た目より狭く」の実体になる。
+ * 並べ方は逆T字のまま（上下が行をまるごと占めるので、**隙間が1ピクセルも生まれない**）で、
+ * **外形だけを円に切り抜く**。角が落ちるぶん、同じ面積の中で1マスを大きく取れる——
+ * 四角のままだと「上下だけが大きく、左右と中央が小さい」という見え方になっていた。
+ *
+ * **上下は行をまるごと占めたまま**にしてある（利用者の指定）。円にしても、いちばん押す
+ * 上下がいちばん広い。
+ *
+ * **中央の `⏎` はセルより一回り小さい**——余った縁はどのボタンにも属さないので、
+ * そこを押しても何も起きない。これが「決定は見た目より狭く」の実体になる。
+ *
+ * # 縁は不活性だが、素通しではない
+ *
+ * その縁を**素通し**にすると、押し損ねた指が**背後の端末へ届く**（利用者の指摘）。
+ * 端末へ重ねている以上、抜けた先には別の操作がある。縁も容れ物も
+ * `pointer-events: auto` にして、**押しても何も起きず、通り抜けもしない**形にしてある。
  *
  * # 発火の作法を、方向と決定で逆にする
  *
@@ -49,10 +61,13 @@ import { bindRepeater, createRepeater, type Repeater } from '@/lib/repeat'
 import type { TerminalKey } from '@/lib/keys'
 
 /** 1マスの大きさ（CSS px）。**実機で決め直す**（設計§16-4）。 */
-export const DPAD_CELL_PX = 60
+export const DPAD_CELL_PX = 66
+
+/** 十字の直径。3マスぶん。**丸く切り抜く**ので、これが外形になる。 */
+export const DPAD_SIZE_PX = DPAD_CELL_PX * 3
 
 /** 中央の決定ボタンの大きさ。**マスより小さいぶんが不活性の縁になる。** */
-export const DPAD_CONFIRM_PX = 44
+export const DPAD_CONFIRM_PX = 54
 
 /**
  * 触り方の指定。**ボタン自身にだけ当てる**——コンテナや `body` に当てると
@@ -107,10 +122,16 @@ export function Dpad({ onKey }: Props) {
       role="group"
       aria-label="方向キー"
       data-testid="dpad"
-      className="grid w-fit gap-0"
+      className="grid gap-0 overflow-hidden rounded-full"
       style={{
+        width: `${DPAD_SIZE_PX}px`,
+        height: `${DPAD_SIZE_PX}px`,
         gridTemplateColumns: `repeat(3, ${DPAD_CELL_PX}px)`,
         gridTemplateRows: `repeat(3, ${DPAD_CELL_PX}px)`,
+        // **隙も含めて、指を受け止める。** 縁（中央のまわり）を素通しにすると、
+        // 押し損ねた指が**背後の端末へ届く**。押しても何も起きないが、
+        // 通り抜けもしない（利用者の指摘・2026-08-16）
+        pointerEvents: 'auto',
       }}
     >
       <Direction label="上" glyph="▲" onFire={() => onKey('up')} wide />
@@ -251,7 +272,13 @@ function Confirm({ onFire }: { onFire: () => void }) {
   }, [pressed])
 
   return (
-    <div className="flex items-center justify-center">
+    <div
+      data-testid="dpad-確定の縁"
+      className="flex items-center justify-center"
+      // **縁は不活性だが、素通しでもない。** ここを押しても何も起きず、
+      // かつ背後の端末にも届かない（利用者の指摘・2026-08-16）
+      style={{ pointerEvents: 'auto', touchAction: 'none' }}
+    >
       <button
         type="button"
         tabIndex={-1}

@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { DPAD_CELL_PX, DPAD_CONFIRM_PX, Dpad } from './Dpad'
+import { DPAD_CELL_PX, DPAD_CONFIRM_PX, Dpad, DPAD_SIZE_PX } from './Dpad'
 
 /**
  * 十字ボタンの押し方・触り方・名前（テスト計画フェーズ4「結線」）。
@@ -322,5 +322,48 @@ describe('Dpad の手応え', () => {
     fireEvent.pointerDown(up())
 
     expect(vibrate).toHaveBeenCalled()
+  })
+})
+
+describe('丸い外形と、不活性の縁', () => {
+  it('外形が円に切り抜かれていること', () => {
+    // 角を落とすぶん、同じ面積で1マスを大きく取れる（利用者の要望・2026-08-16）
+    keys()
+    const pad = screen.getByTestId('dpad')
+
+    expect(pad.className).toContain('rounded-full')
+    expect(pad.className).toContain('overflow-hidden')
+    expect(pad.style.width).toBe(`${DPAD_SIZE_PX}px`)
+    expect(pad.style.height).toBe(`${DPAD_SIZE_PX}px`)
+  })
+
+  it('中央の縁を押しても、何も送らない', () => {
+    // 「決定は見た目より狭く」の実体。押し損ねが承認に化けない
+    const onKey = keys()
+    const 縁 = screen.getByTestId('dpad-確定の縁')
+
+    fireEvent.pointerDown(縁)
+    fireEvent.pointerUp(縁)
+
+    expect(onKey).not.toHaveBeenCalled()
+  })
+
+  it('中央の縁と容れ物が、指を受け止めること', () => {
+    // **素通しにすると、押し損ねた指が背後の端末へ届く**（利用者の指摘・2026-08-16）。
+    // 何も起きないことと、通り抜けないことは別の性質なので、別々に見る
+    keys()
+
+    expect(screen.getByTestId('dpad').style.pointerEvents).toBe('auto')
+    expect(screen.getByTestId('dpad-確定の縁').style.pointerEvents).toBe('auto')
+  })
+
+  it('上下は左右より広いままであること', () => {
+    // 円にしても、いちばん押す上下がいちばん広い（利用者の指定）
+    keys()
+
+    expect(screen.getByTestId('dpad-上').style.gridColumn).toBe('1 / -1')
+    expect(screen.getByTestId('dpad-下').style.gridColumn).toBe('1 / -1')
+    expect(screen.getByTestId('dpad-左').style.gridColumn).toBe('')
+    expect(screen.getByTestId('dpad-右').style.gridColumn).toBe('')
   })
 })
