@@ -51,7 +51,17 @@ impl CanarySample {
 /// 自己修復が外の世界へ出るときの口。
 pub trait SelfhealOps: Send + Sync {
     /// 作業用の git worktree を用意して、その場所を返す。
+    ///
+    /// **毎回、本体の `HEAD` へ付け替える**（設計§3）。使い回すだけだと作業場所は
+    /// 最初に作った日の木のまま据え置かれ、本体で直したことが修復の成果に一切
+    /// 反映されない——実際にそれで、直したはずの輪を持つパーサが差し替えられた。
     fn prepare_worktree(&self, branch: &str) -> anyhow::Result<PathBuf>;
+
+    /// 作業場所の `HEAD` が、本体の `HEAD` の子孫になっているか（設計§4-1）。
+    ///
+    /// **既定の実装を置かない。** 置くと、実装し忘れた側で門が黙って素通しになる
+    /// （`run_web_gate` の既定を「不合格」にしてあるのと同じ判断）。
+    fn worktree_is_current(&self, worktree: &Path) -> anyhow::Result<bool>;
 
     /// カナリアを走らせ、採ったサンプルを worktree の `fixtures/` へ置く。
     fn run_canary(&self, model: &str, worktree: &Path) -> anyhow::Result<CanarySample>;
@@ -173,6 +183,55 @@ impl HostOps {
         run(Command::new("git").args(args).current_dir(cwd), timeout)
     }
 
+    /// 本体の `HEAD` の SHA。
+    fn head_sha(&self) -> anyhow::Result<String> {
+        Ok(self
+            .git(&self.repo, &["rev-parse", "HEAD"], GIT_TIMEOUT)
+            .into_result("git rev-parse")?
+            .trim()
+            .to_string())
+    }
+
+    /// `descendant` が `ancestor` の子孫か。**`git` の終了コードがそのまま答え**なので、
+    /// 失敗を `Err` にしない（「子孫ではない」も終了コード1で返る）。
+    fn is_ancestor(&self, cwd: &Path, ancestor: &str, descendant: &str) -> bool {
+        self.git(
+            cwd,
+            &["merge-base", "--is-ancestor", ancestor, descendant],
+            GIT_TIMEOUT,
+        )
+        .success
+    }
+
+    /// 作業場所の枝を、本体の `HEAD` へ付け替える（設計§3-1 の3・4段目）。
+    ///
+    /// 付け替える前に、**取り込まれていない先端だけ**を退避用の枝へ逃がす。修復の成果を
+    /// 本体へ取り込むかどうかは人が決める設計なので、辿れなくしてはいけない（§3-2）。
+    fn catch_up_worktree(&self, worktree: &Path, branch: &str) -> anyhow::Result<()> {
+        let head = self.head_sha()?;
+        if self.is_ancestor(worktree, &head, "HEAD") {
+            // もう追いついている。触らない
+            return Ok(());
+        }
+
+        // 本体に取り込まれている先端は逃がさない（枝が無駄に増える）
+        if !self.is_ancestor(&self.repo, branch, &head) {
+            // **`/` は使えない。** git は `a` と `a/b` を同時に持てないので、
+            // `dashboard-maintenance` がある時点で `dashboard-maintenance/attic-…` は作れない
+            let attic = format!("{branch}-attic-{}", epoch_millis());
+            self.git(&self.repo, &["branch", &attic, branch], GIT_TIMEOUT)
+                .into_result("git branch（退避）")?;
+            tracing::info!(
+                "修復の作業場所の先端を退避しました（本体へ取り込まれていないため）: {attic}"
+            );
+        }
+
+        self.git(worktree, &["checkout", "-B", branch, &head], GIT_TIMEOUT)
+            .into_result("git checkout -B（付け替え）")?;
+        tracing::info!("修復の作業場所を本体の HEAD（{head}）へ付け替えました");
+        Ok(())
+    }
+
     /// リポジトリからの相対パスにする。
     fn relative(&self, path: &Path) -> Option<String> {
         path.strip_prefix(&self.repo)
@@ -230,6 +289,16 @@ fn symlink_dir(source: &Path, link: &Path) -> std::io::Result<()> {
     std::os::windows::fs::symlink_dir(source, link)
 }
 
+/// 退避用の枝に付ける通し番号（エポックミリ秒）。
+///
+/// 名前が一意でありさえすればよいので、時計が狂っていても困らない。読めなかったら 0。
+fn epoch_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_millis())
+        .unwrap_or(0)
+}
+
 fn leaf(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -243,6 +312,9 @@ impl SelfhealOps for HostOps {
         if worktree.join(".git").exists() {
             // 使い回す。前回の修復の残りを持ち込むと、変更範囲の検査が意味を失う
             self.discard_changes(&worktree)?;
+            // **そのうえで、本体の HEAD へ付け替える**（設計§3）。ここを飛ばすと、
+            // 作業場所は最初に作った日の木のまま何か月でも据え置かれる
+            self.catch_up_worktree(&worktree, branch)?;
             return Ok(worktree);
         }
 
@@ -374,6 +446,11 @@ impl SelfhealOps for HostOps {
             passed: outcome.success,
             output: outcome.output,
         }
+    }
+
+    fn worktree_is_current(&self, worktree: &Path) -> anyhow::Result<bool> {
+        let head = self.head_sha()?;
+        Ok(self.is_ancestor(worktree, &head, "HEAD"))
     }
 
     fn discard_changes(&self, worktree: &Path) -> anyhow::Result<()> {
@@ -583,6 +660,185 @@ mod tests {
             .to_string();
         assert!(error.contains("web/node_modules"), "実際: {error}");
         assert!(!worktree.join(NODE_MODULES).exists());
+    }
+
+    /// 本物の git で作業場所を作り、付け替えを確かめるための小さなリポジトリ。
+    ///
+    /// **`FakeOps` では確かめられない**（枝の名前も、退避が残ることも、git しか知らない）。
+    /// 作るのは使い捨てのリポジトリだけで、外の世界へは出ない。
+    struct 使い捨てのリポジトリ {
+        repo: PathBuf,
+    }
+
+    impl 使い捨てのリポジトリ {
+        fn 作る(label: &str) -> Self {
+            let repo = std::env::temp_dir().join(format!(
+                "agentdashboard-ops-{label}-{}",
+                uuid::Uuid::new_v4().simple()
+            ));
+            std::fs::create_dir_all(&repo).expect("置き場所を作れること");
+            let it = Self { repo };
+            it.git(&["init", "--initial-branch=main"]);
+            it.git(&["config", "user.email", "test@example.invalid"]);
+            it.git(&["config", "user.name", "test"]);
+            it.積む("最初");
+            it
+        }
+
+        fn git(&self, args: &[&str]) -> String {
+            self.git_in(&self.repo, args)
+        }
+
+        fn git_in(&self, cwd: &Path, args: &[&str]) -> String {
+            let outcome = run(Command::new("git").args(args).current_dir(cwd), GIT_TIMEOUT);
+            assert!(outcome.success, "git {args:?} が落ちた: {}", outcome.output);
+            outcome.output.trim().to_string()
+        }
+
+        /// コミットを1つ積んで、その SHA を返す。
+        fn 積む(&self, 印: &str) -> String {
+            self.積む_in(&self.repo, 印)
+        }
+
+        fn 積む_in(&self, cwd: &Path, 印: &str) -> String {
+            std::fs::write(cwd.join(format!("{印}.txt")), 印).expect("ファイルを置けること");
+            self.git_in(cwd, &["add", "-A"]);
+            self.git_in(cwd, &["commit", "-m", 印]);
+            self.git_in(cwd, &["rev-parse", "HEAD"])
+        }
+
+        fn ops(&self) -> HostOps {
+            HostOps::new(self.repo.clone(), "claude".to_string())
+        }
+
+        /// 退避用の枝の一覧。
+        fn 退避枝(&self, branch: &str) -> Vec<String> {
+            self.git(&[
+                "for-each-ref",
+                "--format=%(refname:short)",
+                &format!("refs/heads/{branch}-attic-*"),
+            ])
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| line.to_string())
+            .collect()
+        }
+    }
+
+    impl Drop for 使い捨てのリポジトリ {
+        fn drop(&mut self) {
+            // 一時領域なので、消えなくても困らない
+            let _ = std::fs::remove_dir_all(&self.repo);
+        }
+    }
+
+    const 修復の枝: &str = "dashboard-maintenance";
+
+    #[test]
+    fn 作業場所は毎回本体のヘッドに追いつく() {
+        // これが無いと、作業場所は最初に作った日の木のまま据え置かれる（設計§3）
+        let repo = 使い捨てのリポジトリ::作る("catch-up");
+        let ops = repo.ops();
+
+        let worktree = ops.prepare_worktree(修復の枝).expect("作業場所を作れること");
+        // 本体だけが先へ進む
+        let 新しい本体 = repo.積む("本体の直し");
+        assert!(
+            !ops.worktree_is_current(&worktree).expect("見られること"),
+            "先へ進めた直後は追いついていないはず"
+        );
+
+        let worktree = ops.prepare_worktree(修復の枝).expect("作業場所を作れること");
+        assert_eq!(
+            repo.git_in(&worktree, &["rev-parse", "HEAD"]),
+            新しい本体,
+            "使い回すだけで付け替えていない"
+        );
+        assert!(ops.worktree_is_current(&worktree).expect("見られること"));
+    }
+
+    #[test]
+    fn 取り込まれていない先端は付け替えても辿れる() {
+        // 修復の成果を本体へ取り込むかは人が決める設計なので、辿れなくしてはいけない（§3-2）
+        let repo = 使い捨てのリポジトリ::作る("attic");
+        let ops = repo.ops();
+        let worktree = ops.prepare_worktree(修復の枝).expect("作業場所を作れること");
+
+        // 修復セッションが成果を積み、そのあいだに本体も進む
+        let 修復の成果 = repo.積む_in(&worktree, "修復の成果");
+        repo.積む("本体の直し");
+
+        let worktree = ops.prepare_worktree(修復の枝).expect("作業場所を作れること");
+        let 枝 = repo.退避枝(修復の枝);
+        assert_eq!(枝.len(), 1, "退避用の枝が残っていない: {枝:?}");
+        assert_eq!(
+            repo.git(&["rev-parse", &枝[0]]),
+            修復の成果,
+            "退避した先が成果を指していない"
+        );
+        assert!(
+            !枝[0].contains('/'),
+            "枝の名前に / を使うと git が拒む（同じ名前の枝が既にあるため）: {}",
+            枝[0]
+        );
+        assert_ne!(
+            repo.git_in(&worktree, &["rev-parse", "HEAD"]),
+            修復の成果,
+            "付け替えていない"
+        );
+    }
+
+    #[test]
+    fn 取り込み済みの先端は退避しない() {
+        // 枝が無駄に増えると、どれが本当に残すべき成果なのかが読めなくなる
+        let repo = 使い捨てのリポジトリ::作る("no-attic");
+        let ops = repo.ops();
+        let worktree = ops.prepare_worktree(修復の枝).expect("作業場所を作れること");
+
+        // 成果を本体へ取り込んでから、本体を進める
+        let 成果 = repo.積む_in(&worktree, "修復の成果");
+        repo.git(&["merge", "--ff-only", &成果]);
+        repo.積む("本体の直し");
+
+        ops.prepare_worktree(修復の枝).expect("作業場所を作れること");
+        assert!(
+            repo.退避枝(修復の枝).is_empty(),
+            "取り込まれているのに退避した: {:?}",
+            repo.退避枝(修復の枝)
+        );
+    }
+
+    #[test]
+    fn 前回の残りを持ち込まない() {
+        // 付け替えを足しても、ここは今までどおり通ること
+        let repo = 使い捨てのリポジトリ::作る("discard");
+        let ops = repo.ops();
+        let worktree = ops.prepare_worktree(修復の枝).expect("作業場所を作れること");
+
+        std::fs::write(worktree.join("書きかけ.txt"), "残り").expect("置けること");
+        std::fs::write(worktree.join("最初.txt"), "書き換えた").expect("置けること");
+
+        let worktree = ops.prepare_worktree(修復の枝).expect("作業場所を作れること");
+        assert!(!worktree.join("書きかけ.txt").exists(), "追跡外の残りが消えていない");
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("最初.txt")).expect("読めること"),
+            "最初",
+            "書き換えが戻っていない"
+        );
+    }
+
+    #[test]
+    fn 別名表の見直しの作業場所も同じ経路を通る() {
+        // 片方だけ直すと、次に古くなるのはあちらになる（設計§3-4）
+        let repo = 使い捨てのリポジトリ::作る("models");
+        let ops = repo.ops();
+        let 枝 = "dashboard-maintenance-models";
+
+        ops.prepare_worktree(枝).expect("作業場所を作れること");
+        let 新しい本体 = repo.積む("本体の直し");
+        let worktree = ops.prepare_worktree(枝).expect("作業場所を作れること");
+
+        assert_eq!(repo.git_in(&worktree, &["rev-parse", "HEAD"]), 新しい本体);
     }
 
     #[test]

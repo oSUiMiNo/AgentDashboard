@@ -387,6 +387,12 @@ async fn run_cycle(selfheal: &Arc<Selfheal>, trigger: Trigger) {
         }
     };
 
+    // 門①：古い土台の上で修復を始めない（設計§4-1）。
+    // ここで無理に進めると、**本体で直したことが入っていない実行ファイル**が出来上がる
+    if !worktree_is_current(selfheal, &ops, &worktree, "修復を始める前").await {
+        return;
+    }
+
     // カナリア：新しい版の JSONL を「構造の全部入り」で採る
     selfheal.notify(
         SelfhealPhase::Canary,
@@ -582,6 +588,14 @@ async fn repair_loop(
             continue;
         }
 
+        // 門②：修復セッションが積んだコミットまで含めて、まだ本体の子孫か（設計§4-1）。
+        // **ここで断ったら、直しをやり直させない**——木そのものが古いので、何度直しても
+        // 出来上がるものは同じように古い
+        if !worktree_is_current(selfheal, ops, worktree, "ビルドの直前").await {
+            close_session(selfheal, card);
+            return;
+        }
+
         if swap_parser(selfheal, ops, worktree, version).await {
             close_session(selfheal, card);
             return;
@@ -591,6 +605,40 @@ async fn repair_loop(
 
     close_session(selfheal, card);
     finish_failure(selfheal, version);
+}
+
+/// 作業場所が本体に追いついているかを見て、追いついていなければ**間を置いて諦める**。
+///
+/// 2回見るのは、修復セッションが**その間にコミットを積む**ため（設計§4-1）。積んだ結果まで
+/// 含めて本体の子孫でなければ、出来上がる実行ファイルには本体の直しが入っていない。
+async fn worktree_is_current(
+    selfheal: &Arc<Selfheal>,
+    ops: &Arc<dyn SelfhealOps>,
+    worktree: &Path,
+    when: &str,
+) -> bool {
+    let worktree_owned = worktree.to_path_buf();
+    match blocking(ops, move |ops| ops.worktree_is_current(&worktree_owned)).await {
+        Ok(true) => true,
+        Ok(false) => {
+            give_up(
+                selfheal,
+                &format!(
+                    "修復の作業場所が本体に追いついていません（{when}）。\
+                     古い木から作ると、本体で直したことが入らない実行ファイルが出来上がります"
+                ),
+            );
+            false
+        }
+        Err(error) => {
+            // 見られないなら通さない。**素通しにすると、門が在ることにならない**
+            give_up(
+                selfheal,
+                &format!("修復の作業場所が本体に追いついているか確かめられません（{when}）: {error}"),
+            );
+            false
+        }
+    }
 }
 
 /// ビルドして、パーサを新しいものへ差し替える。

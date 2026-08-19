@@ -66,6 +66,13 @@ struct FakeOps {
     gate_follows_sample: Mutex<bool>,
     /// 画面側のゲート（別名表の見直しで使う）の合否
     web_gate_passes: Mutex<bool>,
+    /// 門①②（設計§4-1）が返す答え。**古い土台を演じるために偽へ倒す**
+    worktree_current: Mutex<bool>,
+    /// `prepare_worktree` を何回通ったら偽へ倒すか。
+    ///
+    /// **ビルドの直前の門だけを落とす**ために要る。1回目（修復に入る前）は通し、
+    /// 修復セッションがコミットを積んだあとに古くなった、という筋書きを作る
+    current_until: Mutex<Option<usize>>,
 }
 
 impl FakeOps {
@@ -83,7 +90,19 @@ impl FakeOps {
             thin_canaries: Mutex::new(0),
             gate_follows_sample: Mutex::new(false),
             web_gate_passes: Mutex::new(true),
+            worktree_current: Mutex::new(true),
+            current_until: Mutex::new(None),
         })
+    }
+
+    /// 作業場所が本体に追いついていない、という筋書きにする。
+    fn stale_worktree(&self) {
+        *self.worktree_current.lock().expect("ロックが壊れていない") = false;
+    }
+
+    /// 門を `times` 回だけ通し、そのあとは断る（ビルドの直前の門を落とすため）。
+    fn current_for(&self, times: usize) {
+        *self.current_until.lock().expect("ロックが壊れていない") = Some(times);
     }
 
     /// 別名表の見直しの筋書きを整える。
@@ -131,6 +150,19 @@ impl SelfhealOps for FakeOps {
     fn prepare_worktree(&self, _branch: &str) -> anyhow::Result<PathBuf> {
         self.record("worktree");
         Ok(self.worktree.clone())
+    }
+
+    fn worktree_is_current(&self, _worktree: &Path) -> anyhow::Result<bool> {
+        self.record("current?");
+        let mut remaining = self.current_until.lock().expect("ロックが壊れていない");
+        if let Some(times) = remaining.as_mut() {
+            if *times == 0 {
+                return Ok(false);
+            }
+            *times -= 1;
+            return Ok(true);
+        }
+        Ok(*self.worktree_current.lock().expect("ロックが壊れていない"))
     }
 
     fn run_canary(&self, model: &str, worktree: &Path) -> anyhow::Result<CanarySample> {
@@ -448,10 +480,14 @@ async fn 未知の版を見つけたら修復セッションを起こして差�
         order,
         vec![
             "worktree",
+            // 門①：古い土台の上で修復を始めない（設計§4-1）
+            "current?",
             "canary:haiku",
             "gate",
             "changed",
             "gate",
+            // 門②：修復セッションが積んだコミットまで含めて、まだ本体の子孫か
+            "current?",
             "build",
             "commit"
         ],
@@ -689,6 +725,126 @@ mod ソースの無い環境 {
     // 「テストが『たまたま通っている』ことに気づく」）。
 }
 
+/// 古い土台の上で作られたものを載せない門（設計§4-1）。
+///
+/// **今回の再発は、ここが無かったことで起きた。** 作業場所が3週間前の木のままで、
+/// 本体で直した輪を持たないパーサがビルドされ、差し替えられた。
+mod 古い土台では進まない {
+    use super::*;
+    use protocol::ws::{SelfhealPhase, ServerMessage};
+
+    /// 断りの知らせが届くまで待って、その中身を返す。
+    async fn 断りを受け取る(events: &mut common::EventWatcher) -> String {
+        let message = events
+            .wait_for("自己修復の断り", |message| {
+                matches!(
+                    message,
+                    ServerMessage::Selfheal {
+                        phase: SelfhealPhase::Failed,
+                        ..
+                    }
+                )
+            })
+            .await;
+        let ServerMessage::Selfheal { detail, .. } = message else {
+            unreachable!("Failed だけを待っている");
+        };
+        detail.unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn 修復に入る前に断る() {
+        // カナリアは**本物の claude を起こす**ので、断るならその手前でなければ意味が無い
+        let dir = work_dir("stale-before");
+        let ops = FakeOps::new(&dir);
+        ops.stale_worktree();
+        let server = TestServer::start_with_selfheal(config_for(&dir), ops.clone()).await;
+        let mut events = common::EventWatcher::attach(&server.manager);
+        let (_session, transcript) = start_watched(&server, &dir).await;
+
+        append_records(&transcript, 3, "9.9.9", 0);
+
+        let detail = 断りを受け取る(&mut events).await;
+        assert!(
+            detail.contains("追いついていません"),
+            "断った理由が読めない: {detail}"
+        );
+        assert_eq!(
+            ops.count("canary:haiku"),
+            0,
+            "断ったのにカナリアを起こした: {:?}",
+            ops.calls()
+        );
+        assert_eq!(ops.count("build"), 0, "断ったのにビルドまで進んだ");
+        assert!(
+            server
+                .manager
+                .list()
+                .iter()
+                .all(|meta| !meta.project.0.contains("worktree")),
+            "断ったのに修復セッションが起きた"
+        );
+    }
+
+    #[tokio::test]
+    async fn 断ったあとは間を置く() {
+        // 置かないと、健康状態が届くたびに同じところで断り続ける（バナーが消えなくなる）
+        let dir = work_dir("stale-holdoff");
+        let ops = FakeOps::new(&dir);
+        ops.stale_worktree();
+        let server = TestServer::start_with_selfheal(config_for(&dir), ops.clone()).await;
+        let mut events = common::EventWatcher::attach(&server.manager);
+        let (_session, transcript) = start_watched(&server, &dir).await;
+
+        append_records(&transcript, 3, "9.9.9", 0);
+        断りを受け取る(&mut events).await;
+        let 断った回数 = ops.count("worktree");
+
+        // 健康状態は数秒おきに届き続ける。間を置いていなければ、また作業場所を用意しに行く
+        append_records(&transcript, 3, "9.9.9", 3);
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        assert_eq!(
+            ops.count("worktree"),
+            断った回数,
+            "間を置かずに何度も断りに行っている: {:?}",
+            ops.calls()
+        );
+    }
+
+    #[tokio::test]
+    async fn ビルドの直前にもう一度見る() {
+        // 修復セッションは**その間にコミットを積む**。積んだ結果まで本体の子孫でなければ、
+        // 出来上がる実行ファイルには本体の直しが入っていない
+        let dir = work_dir("stale-before-build");
+        let ops = FakeOps::new(&dir);
+        ops.fail_gate(1);
+        // 1回目（修復に入る前）だけ通す
+        ops.current_for(1);
+        let server = TestServer::start_with_selfheal(config_for(&dir), ops.clone()).await;
+        let (_session, transcript) = start_watched(&server, &dir).await;
+
+        append_records(&transcript, 3, "9.9.9", 0);
+        play_repair_agent(&server, 1).await;
+
+        // 門は2回通る。2回目で断られるので、ビルドまで行かない
+        wait_for_call(&ops, "current?", 2).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            ops.count("build"),
+            0,
+            "ビルドの直前の門が効いていない: {:?}",
+            ops.calls()
+        );
+        // ポインタは訓練台が起動時に置くので、**在るかどうか**では何も言えない。
+        // 差し替えが起きていないこと＝**指す先が変わっていないこと**を見る
+        assert_eq!(
+            std::fs::read_to_string(pointer_path(&dir)).expect("ポインタは訓練台が置いている"),
+            common::parser_program().to_string_lossy(),
+            "断ったのにポインタが差し替えられている"
+        );
+    }
+}
+
 #[tokio::test]
 async fn 差し替えたパーサが悪ければ自動で戻す() {
     // テスト計画フェーズ7「ロールバック」。直したつもりが悪化していた場合、
@@ -758,17 +914,17 @@ async fn パーサが居なくなってもターミナルと状態表示は無�
     let parser = server.parser.as_ref().expect("パーサが居る");
     parser.restart();
 
+    // **見た瞬間を控える。** 落ちるパーサは立て直され続けるので、`break` してから
+    // もう一度読むと、その間に起き直って `Ok` へ戻っていることがある（通しで実際に踏んだ）
+    let mut 縮退を見た = false;
     for _ in 0..200 {
         if parser.state() == protocol::ws::ParserState::Degraded {
+            縮退を見た = true;
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert_eq!(
-        parser.state(),
-        protocol::ws::ParserState::Degraded,
-        "パーサが落ちたのに縮退を知らせていない"
-    );
+    assert!(縮退を見た, "パーサが落ちたのに縮退を知らせていない");
 
     // ここからが本題：縮退していてもターミナルと状態表示は動く
     let mut watcher = common::Watcher::attach(&session);
