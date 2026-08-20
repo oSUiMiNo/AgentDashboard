@@ -222,6 +222,60 @@ impl HostOps {
         .success
     }
 
+    /// 取り込まれていない先端を、退避用の枝へ逃がす（設計§3-2・§18-9）。
+    ///
+    /// **付け替える側と作り直す側の両方から呼ぶ。** どちらも枝を `HEAD` へ叩き戻すので、
+    /// 片方にしか置かないと、そちらを通ったときだけ成果が辿れなくなる。
+    ///
+    /// 名前に**先端の短い SHA** を使う（`{枝}-attic-{SHA}`）。時刻だと、ぶつかったときに
+    /// **救うための操作が修復ごと止める**（`?` で伝播して24時間のクールダウンに入る）。
+    /// SHA なら、同じ名前が既にある＝**同じ先端が既に退避されている**ということなので、
+    /// そのまま成功として扱える。
+    ///
+    /// **`/` は使えない。** git は `a` と `a/b` を同時に持てないので、
+    /// `dashboard-maintenance` がある時点で `dashboard-maintenance/attic-…` は作れない。
+    fn stash_branch(&self, branch: &str, head: &str) -> anyhow::Result<()> {
+        // そもそも枝が無ければ、逃がすものが無い
+        if !self.branch_exists(branch) {
+            return Ok(());
+        }
+        // 本体に取り込まれている先端は逃がさない（枝が無駄に増える）
+        if self.is_ancestor(&self.repo, branch, head) {
+            return Ok(());
+        }
+        let tip = self
+            .git(&self.repo, &["rev-parse", "--short", branch], GIT_TIMEOUT)
+            .into_result("git rev-parse（退避する先端）")?
+            .trim()
+            .to_string();
+        let attic = format!("{branch}-attic-{tip}");
+        if self.branch_exists(&attic) {
+            tracing::info!("修復の作業場所の先端は既に退避されています: {attic}");
+            return Ok(());
+        }
+        self.git(&self.repo, &["branch", &attic, branch], GIT_TIMEOUT)
+            .into_result("git branch（退避）")?;
+        tracing::info!(
+            "修復の作業場所の先端を退避しました（本体へ取り込まれていないため）: {attic}"
+        );
+        Ok(())
+    }
+
+    /// その名前の枝があるか。**無いことは失敗ではない**ので `bool` で返す。
+    fn branch_exists(&self, branch: &str) -> bool {
+        self.git(
+            &self.repo,
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}"),
+            ],
+            GIT_TIMEOUT,
+        )
+        .success
+    }
+
     /// 作業場所の枝を、本体の `HEAD` へ付け替える（設計§3-1 の3・4段目）。
     ///
     /// 付け替える前に、**取り込まれていない先端だけ**を退避用の枝へ逃がす。修復の成果を
@@ -233,17 +287,7 @@ impl HostOps {
             return Ok(());
         }
 
-        // 本体に取り込まれている先端は逃がさない（枝が無駄に増える）
-        if !self.is_ancestor(&self.repo, branch, &head) {
-            // **`/` は使えない。** git は `a` と `a/b` を同時に持てないので、
-            // `dashboard-maintenance` がある時点で `dashboard-maintenance/attic-…` は作れない
-            let attic = format!("{branch}-attic-{}", epoch_millis());
-            self.git(&self.repo, &["branch", &attic, branch], GIT_TIMEOUT)
-                .into_result("git branch（退避）")?;
-            tracing::info!(
-                "修復の作業場所の先端を退避しました（本体へ取り込まれていないため）: {attic}"
-            );
-        }
+        self.stash_branch(branch, &head)?;
 
         self.git(worktree, &["checkout", "-B", branch, &head], GIT_TIMEOUT)
             .into_result("git checkout -B（付け替え）")?;
@@ -308,16 +352,6 @@ fn symlink_dir(source: &Path, link: &Path) -> std::io::Result<()> {
     std::os::windows::fs::symlink_dir(source, link)
 }
 
-/// 退避用の枝に付ける通し番号（エポックミリ秒）。
-///
-/// 名前が一意でありさえすればよいので、時計が狂っていても困らない。読めなかったら 0。
-fn epoch_millis() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_millis())
-        .unwrap_or(0)
-}
-
 fn leaf(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -338,6 +372,12 @@ impl SelfhealOps for HostOps {
         }
 
         std::fs::create_dir_all(worktree.parent().unwrap_or(&self.repo))?;
+        // **作り直す側にも退避が要る**（設計§18-9）。フォルダだけ消えて枝が残っている状態
+        // （調査のために作業場所を覗いて消した、など）だと、下の `--force -B` が
+        // **枝を `HEAD` へ叩き戻す**——未取り込みの成果が、退避もログも無しに辿れなくなる
+        let head = self.head_sha()?;
+        self.stash_branch(branch, &head)?;
+
         let path = worktree.to_string_lossy().into_owned();
         // -B で既存のブランチも作り直す。前回の修復ブランチが残っていても止まらない
         self.git(
@@ -882,6 +922,67 @@ mod tests {
             repo.git_in(&worktree, &["rev-parse", "HEAD"]),
             修復の成果,
             "付け替えていない"
+        );
+    }
+
+    #[test]
+    fn 作業場所を消しても未取り込みの先端は辿れる() {
+        // フォルダだけ消えて枝が残っている状態は、調査の流れで普通に起こる。
+        // そこで `worktree add --force -B` が枝を叩き戻すと、**退避もログも無しに**
+        // 成果が辿れなくなる（設計§18-9）
+        let repo = 使い捨てのリポジトリ::作る("attic-on-create");
+        let ops = repo.ops();
+        let worktree = ops
+            .prepare_worktree(修復の枝)
+            .expect("作業場所を作れること");
+        let 成果 = repo.積む_in(&worktree, "修復の成果");
+        repo.積む("本体の直し");
+
+        // 作業場所のフォルダだけを消す（枝は残る）
+        std::fs::remove_dir_all(&worktree).expect("フォルダを消せること");
+        repo.git(&["worktree", "prune"]);
+
+        ops.prepare_worktree(修復の枝)
+            .expect("作業場所を作り直せること");
+        let 枝 = repo.退避枝(修復の枝);
+        assert_eq!(枝.len(), 1, "作り直す側で退避していない: {枝:?}");
+        assert_eq!(
+            repo.git(&["rev-parse", &枝[0]]),
+            成果,
+            "退避した先が成果を指していない"
+        );
+    }
+
+    #[test]
+    fn 同じ先端を二度退避しても失敗しない() {
+        // 名前が時刻だと、ぶつかった瞬間に `?` で伝播して**修復ごと24時間止まる**。
+        // 先端の SHA なら「同じ名前がある＝同じものが既に退避されている」と読める（§18-9）
+        let repo = 使い捨てのリポジトリ::作る("attic-twice");
+        let ops = repo.ops();
+        let worktree = ops
+            .prepare_worktree(修復の枝)
+            .expect("作業場所を作れること");
+        let 成果 = repo.積む_in(&worktree, "修復の成果");
+        repo.積む("本体の直し");
+
+        ops.prepare_worktree(修復の枝).expect("1度目");
+        let 枝 = repo.退避枝(修復の枝);
+        assert_eq!(枝.len(), 1);
+        assert!(
+            枝[0].ends_with(&成果[..7]),
+            "枝の名前に先端の SHA が入っていない: {} / 先端 {}",
+            枝[0],
+            &成果[..7]
+        );
+
+        // 同じ先端をもう一度退避させる（枝を成果へ戻してから、また回す）
+        repo.git_in(&worktree, &["checkout", "-B", 修復の枝, &成果]);
+        repo.積む("本体の直し2");
+        ops.prepare_worktree(修復の枝).expect("2度目も落ちないこと");
+        assert_eq!(
+            repo.退避枝(修復の枝).len(),
+            1,
+            "同じ先端で枝が増えている（名前が一意でない）"
         );
     }
 
