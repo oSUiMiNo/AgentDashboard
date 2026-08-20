@@ -245,6 +245,35 @@ impl TestServer {
         server
     }
 
+    /// パーサを**ポインタ経由で**立ち上げ、自己修復は付けない。
+    ///
+    /// 「載っているものが悪いと分かったのに、**戻す側が居ない**」状態を作るための土台。
+    /// `Hello` は個体につき1回しか来ないので、そこで知らせを落とすと**その個体の一生ぶん
+    /// 門が黙る**——世話役が自分で畳むことを確かめるのに要る。
+    ///
+    /// **環境変数は立てない。** あれはプロセス全体に効くので、ポインタの経路を確かめる
+    /// バイナリでは使えない（`selfheal.rs` の番人が見張っている）。
+    pub async fn start_with_parser_by_pointer(config: Config, parser: &std::path::Path) -> Self {
+        let state_dir = config.agent().resolved_state_dir();
+        std::fs::create_dir_all(&state_dir).expect("状態の置き場所を作れること");
+        std::fs::write(
+            state_dir.join(session_host_core::parser::PARSER_POINTER),
+            parser.to_string_lossy().as_bytes(),
+        )
+        .expect("ポインタを書けること");
+
+        let server = Self::build_with(
+            config,
+            fake_claude().to_string_lossy().into_owned(),
+            true,
+            false,
+            None,
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        server
+    }
+
     /// 起動する CLI を明示して自己修復も立ち上げる（実CLIの訓練用）。
     pub async fn start_with_selfheal_and_program(
         config: Config,

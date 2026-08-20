@@ -1074,6 +1074,12 @@ mod 載ったものを降ろす {
             detail.contains("8202MB") && detail.contains("336784"),
             "実測値が残っていない: {detail}"
         );
+        // **pid も出す**（設計§18-7）。ログの行と突き合わせるための番号なので、
+        // 運ぶだけ運んで画面に出さないと、知らせから先へ辿れない
+        assert!(
+            detail.contains("4321"),
+            "暴走していた個体の pid が知らせに出ていない: {detail}"
+        );
 
         ポインタが外れるまで待つ(&dir, &もとの).await;
 
@@ -1167,6 +1173,64 @@ mod 載ったものを降ろす {
         assert!(
             !pointer_path(&dir).exists(),
             "戻す先が無いのにポインタを書いた"
+        );
+    }
+
+    #[tokio::test]
+    async fn 起動できない個体でもポインタが外れる() {
+        // 落ちた回数を数えているのが「起こしたあとに死んだ」側だけだと、**起こせない個体**
+        // （実行権が無い・`noexec`・アーキテクチャ違い）で永久にポインタが外れない。
+        // プロセスを起こし直しても直らないので、いちばん抜けにくい塞がり方になる（§18-4）
+        let dir = work_dir("cannot-spawn");
+        let ops = FakeOps::new(&dir);
+        let server = TestServer::start_with_selfheal(config_for(&dir), ops.clone()).await;
+
+        // 実行権の無いファイル。`parser_program` は `is_file()` しか見ないので選ばれる
+        let 起動できない = dir.join("not-executable");
+        std::fs::write(&起動できない, b"#!/bin/sh\nexit 0\n").expect("置けること");
+        std::fs::write(
+            pointer_path(&dir),
+            起動できない.to_string_lossy().as_bytes(),
+        )
+        .expect("ポインタを書けること");
+        server.parser.as_ref().expect("パーサが居る").restart();
+
+        let いま = ポインタが外れるまで待つ(&dir, &起動できない.to_string_lossy()).await;
+        assert!(
+            !いま.contains("not-executable"),
+            "起こせない個体を指したままになっている: {いま}"
+        );
+    }
+
+    #[tokio::test]
+    async fn 戻す側が居なければ縮退にする() {
+        // `Hello` は個体につき1回しか来ない。世話役は `Selfheal::start` より先に走るので、
+        // **受け口が刺さる前に読む競合**がある。落としたら、その個体の一生ぶん門が黙る（§18-6）
+        let dir = work_dir("no-sink");
+        // 擬似パーサは `fake-silent` と名乗る＝本体の版と食い違う。**自己修復は付けない**
+        let server = TestServer::start_with_parser_by_pointer(
+            config_for(&dir),
+            &testkit::binary_path("fake-parser"),
+        )
+        .await;
+
+        let parser = server.parser.as_ref().expect("パーサが居る");
+        let mut 縮退を見た = false;
+        for _ in 0..100 {
+            if parser.state() == protocol::ws::ParserState::Degraded {
+                縮退を見た = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            縮退を見た,
+            "戻す側が居ないのに、版の食い違いを黙って飲み込んでいる"
+        );
+        // **ポインタは触らない。** 戻す先が無いので、外すと「誰も置いていないもの」を指す
+        assert!(
+            pointer_path(&dir).exists(),
+            "戻す側が居ないのにポインタを外した"
         );
     }
 }
@@ -1310,6 +1374,47 @@ async fn 別名表の見直しが通れば変更が採用される() {
     assert_eq!(ops.count("web-gate"), 1, "画面側のゲートを通ること");
     assert_eq!(ops.count("commit"), 1, "採用したらコミットすること");
     assert_eq!(ops.count("discard"), 0, "採用したのに戻してはいけない");
+}
+
+#[tokio::test]
+async fn 古い土台では別名表の見直しも進まない() {
+    // パーサ側は「付け替え＋門2枚」なのに、こちらは付け替えだけだった（設計§18-10）。
+    // あちらが書き換えるのは表の1ファイルなので、古い木から作ると**3週間前の表を
+    // 「最新」として採用する**——**症状が静かなぶん、こちらのほうが気づきにくい**
+    let dir = work_dir("review-stale");
+    let ops = FakeOps::new(&dir);
+    ops.stage_review(SOUND_TABLE, &["web/src/lib/models.ts"]);
+    ops.stale_worktree();
+    let server = TestServer::start_with_selfheal(config_for(&dir), ops.clone()).await;
+
+    let selfheal = Arc::clone(server.selfheal.as_ref().expect("自己修復が居る"));
+    // **見直しセッションは起きない**ので、修復役を演じずにそのまま終わる。
+    //
+    // **上限を持たせる。** 門を外すと見直しセッションを起こして応答を待ちにいくので、
+    // 上限が無いと落ちずに30分ぶら下がる（待ち合わせを見るテストには、その待ち合わせ
+    // 自体の上限を持たせる——ガイドライン）
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        session_host_core::selfheal::review_model_table(selfheal, "9.9.9".to_string()),
+    )
+    .await
+    .expect("門が断るので、待たずに終わること");
+
+    assert_eq!(
+        ops.count("web-gate"),
+        0,
+        "断ったのにゲートまで進んだ: {:?}",
+        ops.calls()
+    );
+    assert_eq!(ops.count("commit"), 0, "断ったのに採用した");
+    assert!(
+        server
+            .manager
+            .list()
+            .iter()
+            .all(|meta| !meta.project.0.contains("worktree")),
+        "断ったのに見直しセッションが起きた"
+    );
 }
 
 #[tokio::test]
