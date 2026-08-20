@@ -280,12 +280,20 @@ async fn watch_trouble(selfheal: Arc<Selfheal>, mut troubles: mpsc::Receiver<Par
     while let Some(trouble) = troubles.recv().await {
         let reason = match trouble {
             ParserTrouble::Runaway {
+                pid,
                 rss_bytes,
                 reads_per_sec,
                 growth_per_min,
-                ..
             } => format!(
-                "差し替えたパーサが資源を食い続けています（{}MB・毎秒 {reads_per_sec} 回の read・毎分 {}MB 増）",
+                // **pid も出す**（設計§18-7）。ログの行と突き合わせるための番号なので、
+                // 運ぶだけ運んで画面に出さないと、知らせから先へ辿れない
+                "差し替えたパーサ（pid {}）が資源を食い続けています（{}MB・毎秒 {reads_per_sec} 回の read・毎分 {}MB 増）",
+                match pid {
+                    Some(pid) => pid.to_string(),
+                    // 刈り取られた後だと取れない。**「不明」と書く**——欄ごと消すと、
+                    // 読む側は「出し忘れ」と区別が付かない
+                    None => "不明".to_string(),
+                },
                 rss_bytes / (1024 * 1024),
                 growth_per_min / (1024 * 1024),
             ),
@@ -354,9 +362,12 @@ fn rollback(selfheal: &Arc<Selfheal>, reason: &str) {
     write_pointer(&selfheal.state_dir, previous.as_deref());
     selfheal.parser.restart();
 
+    // **戻る先は「1つ前の版」で、同梱版になるのは戻す先が無いときだけ**（設計§18-8）。
+    // 「同梱の版へ戻しました」と言い切ると、実際には別の差し替え版が載っている場面で
+    // 嘘になる
     let destination = match previous {
-        Some(_) => "前のパーサ",
-        None => "同梱のパーサ",
+        Some(_) => "1つ前の版",
+        None => "同梱の版",
     };
     selfheal.notify(
         SelfhealPhase::RolledBack,
@@ -923,6 +934,23 @@ async fn run_model_review(
         let branch = branch.clone();
         blocking(ops, move |ops| ops.prepare_worktree(&branch)).await?
     };
+
+    // **門はこちらにも要る**（設計§18-10）。パーサ側は「付け替え＋門2枚」なのに、
+    // ここだけ付け替えだけだった。あちらが書き換えるのは `web/src/lib/models.ts` の
+    // 1ファイルなので、古い木から作ると**3週間前の表を「最新」として採用する**——
+    // **症状が静かなぶん、こちらのほうが気づきにくい**
+    let baseline = blocking(ops, |ops| ops.repo_head()).await?;
+    let current = {
+        let worktree = worktree.clone();
+        let baseline = baseline.clone();
+        blocking(ops, move |ops| ops.worktree_contains(&worktree, &baseline)).await?
+    };
+    if !current {
+        anyhow::bail!(
+            "見直しの作業場所が本体に追いついていません。\
+             古い木から作ると、3週間前の表を「最新」として採用することになります"
+        );
+    }
 
     let card = start_repair_session(selfheal, &worktree).await.ok();
     let Some(card_id) = card else {
