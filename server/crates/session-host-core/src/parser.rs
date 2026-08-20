@@ -305,7 +305,7 @@ pub enum ParserOrigin {
 }
 
 impl ParserOrigin {
-    /// ポインタを外して同梱版へ戻せるか。
+    /// ポインタを1つ前の版（無ければ同梱版）へ戻せるか。
     pub fn can_roll_back(self) -> bool {
         matches!(self, ParserOrigin::Pointer)
     }
@@ -357,6 +357,18 @@ pub fn parser_program(config: &SessionHostConfig) -> (PathBuf, ParserOrigin) {
 /// 資源の見張りの標本を採る間隔（設計§5-3）。
 const RUNAWAY_SAMPLE_EVERY: Duration = Duration::from_secs(10);
 
+/// 判定に使ってよい窓の下限（設計§18-3）。
+///
+/// **短い窓では比率が跳ね上がる。** 1ミリ秒の窓で 100 回読めば「毎秒10万回」になり、
+/// 1MB 増えれば「毎分60GB」になる——どちらも線を軽く越えるが、**測れていない**だけである。
+/// 逆に、暴走で機械が詰まって窓が細切れになると、差分がほぼ0の窓が続いて
+/// **6回続けるという条件が毎回リセットされる**。いちばん鳴ってほしい場面で鳴らなくなる。
+///
+/// 短い窓は**判定に使わず、次の標本まで時間を持ち越す**。撃ち直しを止める側
+/// （[`tokio::time::MissedTickBehavior::Delay`]）と**両方**入れてある——片方だけだと、
+/// もう片方の経路で同じ穴が残る。
+const RUNAWAY_MIN_WINDOW: Duration = Duration::from_secs(5);
+
 /// `read` の線（回/秒）。
 ///
 /// **単独では健全なパーサも越える**（書き手が速いと実測 140,793回/秒）。それでも低いまま
@@ -398,6 +410,8 @@ pub struct Runaway {
 pub struct RunawayWatch {
     previous: Option<ResourceSample>,
     streak: u32,
+    /// まだ判定に使っていない経過。**短い窓を捨てずに繋ぐ**ための持ち越し（§18-3）
+    pending: Duration,
 }
 
 impl RunawayWatch {
@@ -418,9 +432,19 @@ impl RunawayWatch {
             // 測れなかった窓は、前後を繋げない。跨いで差分を取ると別物の引き算になる
             self.previous = None;
             self.streak = 0;
+            self.pending = Duration::ZERO;
             return None;
         };
-        let millis = elapsed.as_millis().max(1) as u64;
+        self.pending += elapsed;
+        // **短すぎる窓では判定しない。** 標本も進めず、次の標本まで時間を持ち越す（§18-3）。
+        // ここで進めてしまうと、細切れの窓が続くかぎり物差しが更新され続け、
+        // 差分がほぼ0のまま「線を越えない」が繰り返される
+        if self.pending < RUNAWAY_MIN_WINDOW {
+            return None;
+        }
+        let millis = std::mem::replace(&mut self.pending, Duration::ZERO)
+            .as_millis()
+            .max(1) as u64;
         // 1本目は物差しになるだけ（差分が取れない）
         let previous = self.previous.replace(sample)?;
         // 累計が減った＝別の個体になった。差分を取ってはいけない
@@ -456,6 +480,7 @@ impl RunawayWatch {
     pub fn reset(&mut self) {
         self.previous = None;
         self.streak = 0;
+        self.pending = Duration::ZERO;
     }
 }
 
@@ -556,22 +581,7 @@ async fn run(
                             Some("パーサが終了しました。立て直しています".to_string()),
                         );
                         if origin.can_roll_back() {
-                            let 見切る = crashes.record(std::time::Instant::now(), |now, at| {
-                                now.duration_since(at)
-                            });
-                            if 見切る {
-                                let times = CRASH_LIMIT;
-                                tracing::warn!(
-                                    origin = origin.label(),
-                                    times,
-                                    within_secs = CRASH_WINDOW.as_secs(),
-                                    "差し替えたパーサが落ち続けています。同梱のパーサへ戻します"
-                                );
-                                supervisor.report_trouble(ParserTrouble::CrashLoop {
-                                    times,
-                                    within: CRASH_WINDOW,
-                                });
-                            }
+                            crashes.record_and_report(&supervisor, origin);
                         }
                     }
                 }
@@ -581,6 +591,14 @@ async fn run(
                     ParserState::Degraded,
                     Some(format!("パーサを起動できません: {error}")),
                 );
+                // **起こせなかったのも「落ちた」うちに入れる**（設計§18-4）。
+                // `parser_program` は `is_file()` しか見ないので、実行権が落ちている・
+                // `noexec` の場所にある・アーキテクチャが違う個体は**永久に起動失敗を
+                // 繰り返す**。ここを数えないと、ポインタが外れずプロセスを起こし直しても
+                // 直らない
+                if origin.can_roll_back() {
+                    crashes.record_and_report(&supervisor, origin);
+                }
             }
         }
 
@@ -639,6 +657,29 @@ impl<T: Copy> CrashLog<T> {
 
     pub fn is_empty(&self) -> bool {
         self.落ちた.is_empty()
+    }
+}
+
+impl CrashLog<std::time::Instant> {
+    /// 1回落ちたことを記録し、見切る回数に達していたら戻す側へ知らせる。
+    ///
+    /// **落ち方が2通りある**（起こせなかった／起こしたあとに死んだ）ので、数え方を
+    /// 1箇所に集める。片方だけに書くと、もう片方は永久に外れない（設計§18-4）。
+    fn record_and_report(&mut self, supervisor: &Arc<ParserSupervisor>, origin: ParserOrigin) {
+        let 見切る = self.record(std::time::Instant::now(), |now, at| now.duration_since(at));
+        if !見切る {
+            return;
+        }
+        tracing::warn!(
+            origin = origin.label(),
+            times = CRASH_LIMIT,
+            within_secs = CRASH_WINDOW.as_secs(),
+            "差し替えたパーサが落ち続けています。1つ前の版（無ければ同梱版）へ戻します"
+        );
+        supervisor.report_trouble(ParserTrouble::CrashLoop {
+            times: CRASH_LIMIT,
+            within: CRASH_WINDOW,
+        });
     }
 }
 
@@ -755,6 +796,9 @@ async fn pump(
     let parser_pid = child.id();
     let mut watch = RunawayWatch::new();
     let mut ticker = tokio::time::interval(RUNAWAY_SAMPLE_EVERY);
+    // **取りこぼした窓を撃ち直さない**（設計§18-3）。既定の `Burst` は、詰まって遅れたぶんを
+    // 続けて撃つので、**暴走で機械がスワップし始めたときほど短い窓が連続する**
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // 1回目は即座に返るので捨てる（窓の長さが 0 になる）
     ticker.tick().await;
     let mut sampled_at = std::time::Instant::now();
@@ -973,10 +1017,13 @@ fn handle_event(
                     )),
                 );
             } else if origin.can_roll_back() && parser_version != env!("CARGO_PKG_VERSION") {
-                // **古い木から作られたものが載っている**（設計§4-2）。`Hello` は初期実装から
-                // 在るので、相手が新しい仕組みを何も持っていなくてもこの門は成立する——
-                // 「相手が3週間前」の場面でこそ効かなければならない、という条件を満たす
-                // 唯一の材料である。
+                // **版を上げたあとの取り残しを拾う門**（設計§4-2・§18-5）。
+                //
+                // **効く範囲は狭い。** ワークスペースの版は共有なので、**古い木から作った
+                // パーサも同じ版を名乗る**——「相手が3週間前」の場面ではここは鳴らない。
+                // 同版の古さを防いでいるのは §3（毎回付け替える）と §4-1（門）のほうで、
+                // ここが拾うのは「本体の版を上げたのに、古い版のポインタが残っている」
+                // （README「取り込んだらポインタを消す」の忘れ）である。
                 //
                 // **環境変数で名指しした経路は巻き込まない。** そちらは版が食い違っても
                 // 利用者が意図している
@@ -984,11 +1031,20 @@ fn handle_event(
                     parser_version,
                     core_version = env!("CARGO_PKG_VERSION"),
                     origin = origin.label(),
-                    "差し替えたパーサが本体と違う版を名乗りました。同梱のパーサへ戻します"
+                    "差し替えたパーサが本体と違う版を名乗りました。1つ前の版（無ければ同梱版）へ戻します"
                 );
-                supervisor.report_trouble(ParserTrouble::VersionMismatch {
+                // **渡せなかったら、その場で畳む**（設計§18-6）。`Hello` は個体につき1回しか
+                // 来ないので、ここで落とすと**その個体の一生ぶん門が黙る**。世話役は
+                // `Selfheal::start` より先に走り出すため、受け口が刺さる前に読む競合がある
+                if !supervisor.report_trouble(ParserTrouble::VersionMismatch {
                     parser_version: parser_version.clone(),
-                });
+                }) {
+                    supervisor.degrade(format!(
+                        "パーサが本体と違う版を名乗っています（core={} / parser={parser_version}）。\
+                         ターミナルと指示送信はそのまま使えます",
+                        env!("CARGO_PKG_VERSION")
+                    ));
+                }
             } else {
                 tracing::info!("transcript-parser {parser_version} と接続しました");
             }
@@ -1324,6 +1380,65 @@ mod tests {
         reads += 暴走の読み;
         rss += 暴走の増え;
         assert!(watch.observe(窓(reads, rss), 窓の長さ).is_some());
+    }
+
+    /// 短い窓では判定しない（設計§18-3）。
+    ///
+    /// **1ミリ秒の窓は、比率を1000倍に見せる。** 詰まって窓が細切れになったときほど
+    /// 差分は小さくなるので、素直に割ると「線を越えない」が並び、**6回続けるという条件が
+    /// 毎回リセットされる**。いちばん鳴ってほしい場面で鳴らなくなる。
+    #[test]
+    fn 短い窓では判定せず時間を持ち越す() {
+        let mut watch = RunawayWatch::new();
+        let 短い窓 = Duration::from_millis(200);
+        assert_eq!(watch.observe(窓(0, 100), 短い窓), None, "1本目は物差し");
+
+        // 暴走と同じ勢いを、短い窓で細切れに与える。**ここで判定してはいけない**
+        let mut reads = 0u64;
+        let mut rss = 100u64;
+        for 回 in 1..=24 {
+            reads += 暴走の読み / 50;
+            rss += 暴走の増え / 50;
+            assert_eq!(
+                watch.observe(窓(reads, rss), 短い窓),
+                None,
+                "短い窓で判定してしまった（{回}回目）"
+            );
+        }
+
+        // 持ち越しが下限を越えたら、**溜めた時間ぶんで**判定する。
+        // 24回×0.2秒＝4.8秒＋0.2秒＝5.0秒ちょうどで1窓ぶん
+        reads += 暴走の読み / 50;
+        rss += 暴走の増え / 50;
+        assert_eq!(
+            watch.observe(窓(reads, rss), 短い窓),
+            None,
+            "1窓目は数えるだけ"
+        );
+
+        // 以後、同じ勢いのまま6窓そろえば鳴る（＝持ち越しても取りこぼしていない）
+        let mut 鳴った = false;
+        for _ in 0..(RUNAWAY_STREAK * 25) {
+            reads += 暴走の読み / 50;
+            rss += 暴走の増え / 50;
+            if watch.observe(窓(reads, rss), 短い窓).is_some() {
+                鳴った = true;
+                break;
+            }
+        }
+        assert!(鳴った, "短い窓を持ち越しても、続けば鳴ること");
+    }
+
+    #[test]
+    fn 極端に短い窓で比率が跳ね上がらない() {
+        // 下限が無いと、1ミリ秒に 100 回読んだだけで「毎秒10万回」に化ける
+        let mut watch = RunawayWatch::new();
+        let 一瞬 = Duration::from_millis(1);
+        assert_eq!(watch.observe(窓(0, 100), 一瞬), None);
+        for 回 in 1..=(RUNAWAY_STREAK * 2) {
+            let 判定 = watch.observe(窓(100 * 回 as u64, 100 + 回 as u64), 一瞬);
+            assert_eq!(判定, None, "一瞬の窓を判定に使っている（{回}回目）");
+        }
     }
 
     /// 資源の見張りは**終わらない**（設計§7-2）。
