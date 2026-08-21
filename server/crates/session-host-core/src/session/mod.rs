@@ -51,7 +51,7 @@ use std::{
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{Semaphore, broadcast, mpsc};
 
 /// 読み取りスレッド → 合流タスクの待ち行列（チャンク数）。
 ///
@@ -174,6 +174,27 @@ const MODEL_STEP: Duration = Duration::from_millis(200);
 ///
 /// 会話が進んでいるときだけ出る。出ないほうが普通なので、短く切って先へ進む。
 const MODEL_CONFIRM_WAIT: Duration = Duration::from_secs(4);
+
+/// 同時に起こし直せる本数（接続断のカードを復旧ボタンで戻す 設計§8-4）。
+///
+/// 1本あたり実測 **1190MB・14プロセス**（ローカルイシュー
+/// `セッションに載るMCPサーバ群を選べるようにする`）なので、6枚を一斉に起こすと
+/// 7GB が同時に立ち上がる。この機械は WSL で Windows とメモリを分け合っており、
+/// 育てすぎて一度落としかけた記録がある。
+///
+/// **設定キーには出していない。** 実機で6枚を戻す実測（設計§13 の4）を取ってから
+/// 決める。
+const REVIVE_PARALLEL: usize = 2;
+
+/// 起こし直した1本を「立ち上がりきった」と数えるまでの上限（設計§8-5）。
+///
+/// 席を返す条件は「カードが [`SessionStatus::Starting`] を抜けること」＝最初のフックが
+/// 届くことだが、**フックが1件も来ないセッションが席を占め続ける**のは困る
+/// （初期実装§11 の「フック未受信」は実在する状態である）。
+///
+/// 値は CLI の起動を待つ既存の上限と揃えてある。
+const REVIVE_SETTLE: Duration = Duration::from_secs(60);
+const REVIVE_STEP: Duration = Duration::from_millis(100);
 
 pub fn now_ms() -> Timestamp {
     SystemTime::now()
@@ -1206,6 +1227,40 @@ pub struct SessionManager {
     /// **これから起こすセッションのため**に持つ。すでに動いているセッションへは
     /// [`SessionManager::set_screen_settings`] がその場で配るので、両方が要る。
     screen_settings: Mutex<screen::ScreenSettings>,
+    /// いま起こし直している最中のカード（接続断のカードを復旧ボタンで戻す 設計§8-2）。
+    ///
+    /// **この集合が1台に1つで足りる**のが、上限を実体を持つ側に置いた理由である。
+    /// カード1枚への頼みが集まる先は必ずこの PC なので、**サーバが2台でもタブが2枚でも
+    /// 二重に起きない**——ブラウザ側やサーバ側で数える必要は無い。
+    ///
+    /// 実体の有無を見るだけでは防げない。抜け殻には実体が無いので、2つ目の頼みも
+    /// 「居ないから作ってよい」を通ってしまう。
+    reviving: Mutex<HashSet<CardId>>,
+    /// 同時に起こし直す本数の上限（設計§8-1）。
+    ///
+    /// **ここだけは「その場で断る」ではなく「待たせる」**。このリポジトリの作法は
+    /// `switch_model` の即断りだが、「全て復旧」は6枚をまとめて頼む操作なので、
+    /// 断られたぶんを**押した人が拾い直せない**。
+    revive_slots: Arc<Semaphore>,
+}
+
+/// 起こし直しが走っていることの印（設計§8-2）。落ちると印も下りる。
+///
+/// [`SwitchInFlight`] と同じ形だが、**こちらは所有する**——受け付けたら仕事を切り離し、
+/// 切り離した先で席を待つ（設計§8-3）ので、借用のままではタスクへ移せない。
+pub struct ReviveInFlight {
+    manager: Arc<SessionManager>,
+    card_id: CardId,
+}
+
+impl Drop for ReviveInFlight {
+    fn drop(&mut self) {
+        self.manager
+            .reviving
+            .lock()
+            .expect("ロックが壊れていない")
+            .remove(&self.card_id);
+    }
 }
 
 impl SessionManager {
@@ -1308,6 +1363,8 @@ impl SessionManager {
             claude_settings,
             aliases,
             screen_settings: Mutex::new(screen::ScreenSettings::default()),
+            reviving: Mutex::new(HashSet::new()),
+            revive_slots: Arc::new(Semaphore::new(REVIVE_PARALLEL)),
         })
     }
 
@@ -1469,12 +1526,54 @@ impl SessionManager {
         self.spawn_with(cwd, Some(session_id), &[], None)
     }
 
+    /// カードを**新しく採番して**起こす。既存の4入口はすべてここを通る。
+    ///
+    /// 採番の1行だけをここに残し、中身は [`SessionManager::spawn_as`] へ寄せてある
+    /// （接続断のカードを復旧ボタンで戻す 設計§7-2）。復旧は**採番せずに**あちらを
+    /// 直に呼ぶので、この関数の見た目——ひいては公開の4入口の見た目——は変わらない。
     fn spawn_with(
         self: &Arc<Self>,
         cwd: &str,
         resume: Option<ClaudeSessionId>,
         extra_args: &[String],
         initial_mode: Option<PermissionMode>,
+    ) -> Result<Arc<Session>, SessionError> {
+        let start = match resume {
+            Some(session_id) => lifecycle::SessionStart::Resume(session_id),
+            None => lifecycle::SessionStart::Fresh(ClaudeSessionId::new()),
+        };
+        let initial_session_id = match start {
+            // 自己採番なら起動した瞬間から対応が確定している
+            lifecycle::SessionStart::Fresh(id) => Some(id),
+            // 引き継ぎでは CLI 側が決めるので、最初のフックが届くまで空。
+            // **復旧だけはここが違う**（設計§7-3）
+            lifecycle::SessionStart::Resume(_) => None,
+        };
+        self.spawn_as(
+            CardId::new(),
+            cwd,
+            start,
+            extra_args,
+            initial_mode,
+            initial_session_id,
+        )
+    }
+
+    /// カードIDを指定して起こす。
+    ///
+    /// `initial_session_id` は [`SessionMeta::claude_session_id`] の初期値で、
+    /// **呼び出し側が「どの CLI セッションで始まるか」を知っている場合にだけ** `Some` に
+    /// する。フックが届いたら [`crate::state`] の張り替えが確定させるので、CLI が別の
+    /// IDを名乗った場合も追随する。
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_as(
+        self: &Arc<Self>,
+        card_id: CardId,
+        cwd: &str,
+        start: lifecycle::SessionStart,
+        extra_args: &[String],
+        initial_mode: Option<PermissionMode>,
+        initial_session_id: Option<ClaudeSessionId>,
     ) -> Result<Arc<Session>, SessionError> {
         // 入力は利用者が手で打つか Windows 側から貼ったものなので、区切りや先頭の
         // スラッシュが揃っていないことがある。試すべき解釈は [`cwd`] が並べる
@@ -1496,12 +1595,6 @@ impl SessionManager {
         };
         // 一覧のグループ化キーになるので、シンボリックリンク等を解決して絶対パスに揃える
         let project_path = path.canonicalize().unwrap_or(path);
-
-        let card_id = CardId::new();
-        let start = match resume {
-            Some(session_id) => lifecycle::SessionStart::Resume(session_id),
-            None => lifecycle::SessionStart::Fresh(ClaudeSessionId::new()),
-        };
 
         // 注入するモデルは**セッションを起こすたびに読み直す**（設計§6 の主の仕掛け）。
         // 起動時に1回だけ読むと、利用者が途中で既定を変えたときに追従できない。
@@ -1562,12 +1655,9 @@ impl SessionManager {
             meta: Mutex::new(SessionMeta {
                 card_id,
                 project: ProjectId(project_path.to_string_lossy().into_owned()),
-                claude_session_id: match start {
-                    // 自己採番なら起動した瞬間から対応が確定している
-                    lifecycle::SessionStart::Fresh(id) => Some(id),
-                    // 引き継ぎでは CLI 側が決めるので、最初のフックが届くまで空
-                    lifecycle::SessionStart::Resume(_) => None,
-                },
+                // 呼び出し側が「どの CLI セッションで始まるか」を知っているときだけ
+                // 埋まる（設計§7-3）。素の引き継ぎでは空のままで、最初のフックが確定させる
+                claude_session_id: initial_session_id,
                 // 起動時に指定した値は初期値でしかない（設計§11）。フックとフッタが
                 // 実態へ訂正するまでの間、画面を空にしないために持つ
                 permission_mode: initial_mode.clone(),
@@ -1639,9 +1729,15 @@ impl SessionManager {
         ));
 
         let manager = Arc::clone(self);
+        // **自分の実体を弱く握って渡す。** カードIDから引き直すと、起こし直しで
+        // 載せ替わった別の実体へ終了を届けてしまう（[`SessionManager::on_exit`]）。
+        // 強く握らないのは、終了を待つこのタスクが解放を1つも妨げないようにするため
+        let 自分 = Arc::downgrade(&session);
         tokio::spawn(async move {
-            if let Ok(exit) = exit_rx.await {
-                manager.on_exit(card_id, exit);
+            if let Ok(exit) = exit_rx.await
+                && let Some(session) = 自分.upgrade()
+            {
+                manager.on_exit(&session, exit);
             }
         });
 
@@ -1669,14 +1765,40 @@ impl SessionManager {
         Ok(())
     }
 
-    /// カードを一覧から消す。生きていれば先に終了させる。
-    pub fn archive(&self, card_id: CardId) -> Result<(), SessionError> {
+    /// 実体を畳む。**カードが消えたことは配らない。**
+    ///
+    /// [`SessionManager::archive`] と [`SessionManager::revive`] が共有する本体で、
+    /// 両者の違いは配信を伴うかどうかだけである（接続断のカードを復旧ボタンで戻す 設計§7-1）。
+    /// **2箇所に書いてはいけない**——片方だけ直すと「画面からは畳めるのに復旧では
+    /// 畳めない」が起きる。
+    ///
+    /// # 起こし直す前に必ず通す
+    ///
+    /// 同じ CardId で作り直すとき、これを飛ばすと2つの壊れ方が同時に起きる。
+    ///
+    /// 1. **古い claude が孤児になる。** `sessions` への登録は `insert` なので古い
+    ///    `Arc<Session>` は表から消えるが、`coalesce_loop` が同じ `Arc` を握ったままで
+    ///    参照数が 0 にならず、[`PtyProcess`] の `Drop`（＝`kill`）が走らない。表から
+    ///    引けないので `kill` も `archive` も届かず、**画面から止める手段が無くなる**
+    /// 2. **古いトークンが新しいカードを塗り替える。** [`SessionManager::resolve_token`]
+    ///    は token → card_id → `get()` なので、古い合言葉が**新しい**セッションを引く。
+    ///    古い claude のフックと `statusLine` が、復旧したカードの状態とモデルを
+    ///    書き換えることになる（症状は「復旧したのに、たまに前の状態に戻る」）
+    ///
+    /// さらに、フック設定の置き場所は `<一時領域>/agentdashboard/<card_id>/` で
+    /// **カードIDが鍵**である（[`hooks_settings::write`]）。畳むほうが後になると、
+    /// [`hooks_settings::cleanup`] が**書いたばかりの settings をディレクトリごと消す**。
+    ///
+    /// # 居なければ何もしない
+    ///
+    /// PC が起き直して記録を失った場合はこちらが普通である（サーバの記録にはカードが
+    /// 残っているが、この PC の表には無い）。`None` を返して終わる。
+    fn fold(&self, card_id: CardId) -> Option<Arc<Session>> {
         let session = self
             .sessions
             .lock()
             .expect("ロックが壊れていない")
-            .remove(&card_id)
-            .ok_or(SessionError::NotFound(card_id))?;
+            .remove(&card_id)?;
 
         self.tokens
             .lock()
@@ -1693,8 +1815,114 @@ impl SessionManager {
         session.kill();
         hooks_settings::cleanup(&session.settings);
         self.stop_watching_transcript(card_id);
+        Some(session)
+    }
+
+    /// カードを一覧から消す。生きていれば先に終了させる。
+    pub fn archive(&self, card_id: CardId) -> Result<(), SessionError> {
+        self.fold(card_id).ok_or(SessionError::NotFound(card_id))?;
+        // **配るのはこちらだけ。** 復旧は同じ本体を通るが、ここを配ると
+        // 起こし直すつもりのカードが画面から消えてしまう（設計§7-1）
         self.events.emit(ServerMessage::SessionRemoved { card_id });
         Ok(())
+    }
+
+    /// 起こし直しの権利を1つ取る（接続断のカードを復旧ボタンで戻す 設計§8-2）。
+    ///
+    /// **同期であることが要点。** 呼び出し側（`link.rs` の `apply_command`）は接続ループの
+    /// `select!` の中から同期で呼ばれるので、ここで待つと他のカードへの指示も履歴の
+    /// 送り出しも止まり、無通信が続くとサーバから切られる。**印だけを立てて、待つのは
+    /// 切り離した先**（[`SessionManager::revive`]）でやる。
+    ///
+    /// 印を立てるのを切り離した後にすると、**切り離した2つが同時に印を見て両方通る**
+    /// （設計§8-3）。順序を守るために、こちらを同期の `fn` にしてある。
+    ///
+    /// 既に起こし直している最中なら `None`。**待ち行列に並ばせない**——同じカードが
+    /// 2つ並ぶと、席が空いたときに両方とも通る（設計§8-1）。
+    pub fn begin_revive(self: &Arc<Self>, card_id: CardId) -> Option<ReviveInFlight> {
+        self.reviving
+            .lock()
+            .expect("ロックが壊れていない")
+            .insert(card_id)
+            .then(|| ReviveInFlight {
+                manager: Arc::clone(self),
+                card_id,
+            })
+    }
+
+    /// 抜け殻のカードを、元の CLI セッションで起こし直す（設計§7・§8）。
+    ///
+    /// `in_flight` を引数で受けるのは、**印が既に立っていることを型で示す**ため。
+    /// [`SessionManager::begin_revive`] を通らずにここへ来る道を作れない。
+    ///
+    /// # 席は「立ち上がりきる」まで持つ
+    ///
+    /// 擬似ターミナルを起こす処理は一瞬で返る（プロセスを産むだけ）ので、そこで席を
+    /// 返すと上限が事実上効かない——1本あたり 1190MB を食うのは、そのあと CLI が
+    /// 立ち上がっていく区間である。**カードが [`SessionStatus::Starting`] を抜けるまで**
+    /// ＝最初のフックが届くまでを1本と数える（設計§8-5）。
+    ///
+    /// 天井（[`REVIVE_SETTLE`]）を置くのは、フックが1件も来ないセッションが席を
+    /// 占め続けるのを防ぐため。落ちた場合も `Ended` になって `Starting` を抜けるので、
+    /// そちらは天井を待たない。
+    pub async fn revive(
+        self: &Arc<Self>,
+        in_flight: ReviveInFlight,
+        cwd: &str,
+        mode: Option<PermissionMode>,
+        claude_session_id: ClaudeSessionId,
+    ) -> Result<Arc<Session>, SessionError> {
+        let card_id = in_flight.card_id;
+        // 席が空くまで待つ。**ここは切り離されたタスクの中**なので、待っても他の指示は
+        // 止まらない（設計§8-3）
+        let seat = Arc::clone(&self.revive_slots)
+            .acquire_owned()
+            .await
+            .expect("席の口を閉じていない");
+
+        // **必ず起こす前に畳む**（設計§7-1）。理由は [`SessionManager::fold`] に書いてある
+        if self.fold(card_id).is_some() {
+            tracing::info!(%card_id, "起こし直す前に、古い実体を畳みました");
+        }
+
+        let args = lifecycle::permission_mode_args(mode.as_ref());
+        let session = self.spawn_as(
+            card_id,
+            cwd,
+            lifecycle::SessionStart::Resume(claude_session_id),
+            &args,
+            mode,
+            // **こちらがどのセッションを指定したかを知っている**ので、先に入れておく
+            // （設計§7-3）。フックが1件も届かないまま失敗しても戻す先を失わない
+            Some(claude_session_id),
+        )?;
+
+        // 立ち上がりきるまで席と印を持つ見張りを、**切り離してから**返す。
+        //
+        // ここで待ってから返すと、頼んだ側（`link.rs` の切り離したタスク）が
+        // 立ち上がりきるまで戻ってこない。返り値を待つ相手は居ないので実害は無いが、
+        // **「起こせた」と「立ち上がりきった」は別の出来事**なので分けておく。
+        //
+        // 印も一緒に持つ。席だけ返すと、立ち上がり中のカードへ2回目の頼みが通る。
+        tokio::spawn({
+            let session = Arc::clone(&session);
+            async move {
+                let _seat = seat;
+                let _in_flight = in_flight;
+                let deadline = tokio::time::Instant::now() + REVIVE_SETTLE;
+                while session.status() == SessionStatus::Starting {
+                    if tokio::time::Instant::now() >= deadline {
+                        tracing::warn!(
+                            card_id = %session.card_id,
+                            "{REVIVE_SETTLE:?} 経ってもフックが届かないので、席を返します"
+                        );
+                        break;
+                    }
+                    tokio::time::sleep(REVIVE_STEP).await;
+                }
+            }
+        });
+        Ok(session)
     }
 
     /// 合言葉からカードを引く（[`crate::hooks`] の受信口が使う）。
@@ -2047,10 +2275,18 @@ impl SessionManager {
         }
     }
 
-    fn on_exit(&self, card_id: CardId, exit: PtyExit) {
-        let Some(session) = self.get(card_id) else {
-            return;
-        };
+    /// 擬似ターミナルが終わったことを、**その実体自身へ**反映する。
+    ///
+    /// # カードIDから引き直してはいけない
+    ///
+    /// 起こし直し（[`SessionManager::revive`]）は**同じ CardId に別の実体を載せ直す**ので、
+    /// `self.get(card_id)` で引くと、畳んだ古い擬似ターミナルの終了が
+    /// **新しい実体へ届く**。復旧したばかりのカードが即座に終了扱いになり、しかも
+    /// 原因は「前の claude が終わったこと」なので、まず辿れない。
+    ///
+    /// 起こす側が自分の [`Arc<Session>`] を渡す形にして、引き直す道を塞いである。
+    fn on_exit(&self, session: &Arc<Session>, exit: PtyExit) {
+        let card_id = session.card_id;
         // 申告はここで取り出して消す。**`meta` を取る前に済ませる**（器のロックは他と
         // 跨がない約束）。下の早期 return を通ると取り出したぶんは捨てられるが、そこは
         // 終了が二重に届いたときしか通らない
@@ -2069,7 +2305,16 @@ impl SessionManager {
             meta.status = SessionStatus::Ended { ok };
             meta.last_activity_at = now_ms();
         }
-        self.broadcast_meta(&session);
+        // **報告してよいのは、いま表に載っている実体だけ。** 畳まれた古い実体の終了を
+        // 配ると、同じ札で「終了」が飛び、起こし直したばかりのカードが終了扱いになる。
+        // 自分の meta を直すところまでは通す——あの実体は本当に終わっているので、
+        // 後から覗いた人へ嘘をつかないほうがよい
+        if self
+            .get(card_id)
+            .is_some_and(|live| Arc::ptr_eq(&live, session))
+        {
+            self.broadcast_meta(session);
+        }
     }
 
     fn broadcast_meta(&self, session: &Session) {
