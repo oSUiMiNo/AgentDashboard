@@ -157,6 +157,20 @@ pub enum ClientMessage {
         card_id: CardId,
         state: FlowState,
     },
+    /// 抜け殻のカードを、元の CLI セッションで起こし直す
+    /// （接続断のカードを復旧ボタンで戻す 設計§4-1）。
+    ///
+    /// # 運ぶのはカードIDだけ
+    ///
+    /// 作業ディレクトリ・権限モード・呼び戻し先は、どれも**サーバ側の記録が持っている**
+    /// （`sessions` 表）。ブラウザに持たせると、画面が抱えている古い写しで起こし直す
+    /// 経路ができる——押した瞬間に画面が古ければ、戻る先も古くなる。
+    ///
+    /// 戻せるかどうか（[`crate::SessionMeta::revivable`]）はブラウザも見るが、**正はサーバ**
+    /// （設計§3-3・§3-5）。ずれても「押せてしまってサーバが断る」に倒れる。
+    ReviveSession {
+        card_id: CardId,
+    },
     /// セッションを終了させる（PTY プロセスを落とす）
     Kill {
         card_id: CardId,
@@ -365,6 +379,7 @@ mod tests {
                 card_id,
                 state: FlowState::Resume,
             },
+            ClientMessage::ReviveSession { card_id },
             ClientMessage::Kill { card_id },
             ClientMessage::Archive { card_id },
         ];
@@ -548,6 +563,14 @@ mod tests {
         assert_eq!(
             text,
             format!(r#"{{"t":"set_model","card_id":"{card_id}","model":"opus"}}"#)
+        );
+
+        // 起こし直しはカードIDだけを運ぶ。**欄が増えていないこと**もここで固定する——
+        // 材料をブラウザに持たせると、古い写しで起こし直す経路ができる（設計§4-1）
+        let text = serde_json::to_string(&ClientMessage::ReviveSession { card_id }).unwrap();
+        assert_eq!(
+            text,
+            format!(r#"{{"t":"revive_session","card_id":"{card_id}"}}"#)
         );
 
         let text = serde_json::to_string(&ServerMessage::Hello {

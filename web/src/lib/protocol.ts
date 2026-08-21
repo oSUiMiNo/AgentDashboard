@@ -200,6 +200,14 @@ export type ClientMessage =
   | { t: 'set_model'; card_id: CardId; model: ModelId }
   | { t: 'resize'; card_id: CardId; cols: number; rows: number }
   | { t: 'pty_flow'; card_id: CardId; state: FlowState }
+  /**
+   * 抜け殻のカードを、元の CLI セッションで起こし直す（復旧）。
+   *
+   * **運ぶのはカードIDだけ。** 作業ディレクトリ・権限モード・呼び戻し先はサーバ側の
+   * 記録が持っている。ここに材料を載せると、画面が抱えている古い写しで起こし直す
+   * 経路ができる。
+   */
+  | { t: 'revive_session'; card_id: CardId }
   | { t: 'kill'; card_id: CardId }
   | { t: 'archive'; card_id: CardId }
   // 以下はサーバ側の実装がフェーズ3〜4。型だけ先に揃えてある

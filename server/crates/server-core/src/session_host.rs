@@ -45,6 +45,22 @@ pub struct SpawnRequest<'a> {
     pub permission_mode: Option<PermissionMode>,
 }
 
+/// 抜け殻のカードを起こし直す頼み（接続断のカードを復旧ボタンで戻す 設計§4-3）。
+///
+/// # なぜ材料を積まないのか
+///
+/// 作業ディレクトリ・権限モード・呼び戻し先・宛先の PC は、**実装側が
+/// [`crate::registry::SessionRegistry`] から引く**。ここへ詰める形にすると、ローカル実装が
+/// 使わない欄（宛先の PC）まで運ぶことになり、**どちらが正なのか分からなくなる**。
+///
+/// [`SpawnRequest`] と同じく `account_id` を持つのは、**他人のカードを起こし直せない**ことを
+/// 実装側でも確かめるため。ブラウザ配信の入口（`crate::ws`）が既に門を通しているが、
+/// 引数から落とすと「門を通らずにここへ来る道」を型が許してしまう。
+pub struct ReviveRequest {
+    pub account_id: uuid::Uuid,
+    pub card_id: CardId,
+}
+
 #[async_trait::async_trait]
 pub trait SessionHost: Send + Sync + 'static {
     // --- 生存確認 -------------------------------------------------------------
@@ -74,6 +90,23 @@ pub trait SessionHost: Send + Sync + 'static {
     /// **待つ形にしてある**のは、繋がっている PC を数えるのに連絡係と DB を引く
     /// ことがあるため（設計§9-4）。ローカルモードでは即座に返る。
     async fn spawn(&self, request: SpawnRequest<'_>) -> Result<(), String>;
+
+    /// 抜け殻のカードを、**元の CardId のまま**元の CLI セッションで起こし直す
+    /// （接続断のカードを復旧ボタンで戻す 設計§7）。
+    ///
+    /// [`SessionHost::spawn`] との違いは2つ。**採番しない**（カードは既にある）ことと、
+    /// **宛先がカードから決まる**（どの PC のものかは記録が知っている）こと。
+    ///
+    /// # 戻せるかは呼ぶ前に確かめてある
+    ///
+    /// 「実体が無く、戻す先がある」（[`protocol::SessionMeta::revivable`]）の判定は
+    /// ブラウザ配信の入口が済ませている（設計§3-5）。ここが返す `Err` は**その先の事情**
+    /// ——PC が繋がっていない・版が古い・連絡係が切れている——だけになる。
+    ///
+    /// **待つ形にしてある**のは [`SessionHost::spawn`] と同じで、宛先を決めるのに連絡係と
+    /// DB を引くため。起こし直せたかどうかは `SessionUpsert` が記録層へ届いた時点で分かる。
+    async fn revive(&self, request: ReviveRequest) -> Result<(), String>;
+
     fn kill(&self, card_id: CardId) -> Result<(), String>;
     fn archive(&self, card_id: CardId) -> Result<(), String>;
 

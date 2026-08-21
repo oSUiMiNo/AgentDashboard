@@ -1239,6 +1239,16 @@ fn screen_request_label(message: &ServerToAgent) -> &'static str {
 /// そのカードを持つ PC が居ないときの説明。
 const NOT_CONNECTED: &str = "セッションが見つかりません（PC が繋がっていません）";
 
+/// 知らないカードを指されたときの説明。**他人のカードにも同じ言葉**（設計§18）。
+const NOT_FOUND: &str = "セッションが見つかりません";
+
+/// 呼び戻す先を持たないカードを指されたときの説明
+/// （接続断のカードを復旧ボタンで戻す 設計§3-2）。
+///
+/// 入口（[`crate::ws`]）が既に断っているので、ここへは来ない見込み。
+/// **来ないはずの道でも、通ったときに何が起きたか言えるようにしておく。**
+const NO_RESUME_TARGET: &str = "呼び戻す先が記録されていません";
+
 /// 連絡係が切れていて跨げないときの説明（設計§17）。
 ///
 /// **1か所に置く。** 指示もフォルダの問いも同じ事情で届かないので、口によって
@@ -1308,6 +1318,56 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
             many => Err(format!(
                 "どの PC で起動するか選んでください（{many} 台が繋がっています）"
             )),
+        }
+    }
+
+    /// 抜け殻のカードを起こし直す（接続断のカードを復旧ボタンで戻す 設計§6）。
+    ///
+    /// # **`relay` を使えない**
+    ///
+    /// あちらは `conn_for_card` が外れると [`RemoteSessionHost::remote_agent_of`] へ落ち、
+    /// そこは `(Some(agent_id), true)` の**ときだけ** `Ok` を返す。ところが復旧の対象は
+    /// 定義上 `agent_connected == false`（設計§3-1）なので、`Kill` の形を写すと
+    /// **100%「PC が繋がっていません」で断られる**。動かないのではなく、いつも断られる。
+    ///
+    /// 代わりに [`RemoteSessionHost::route`]（`ask` と共有）で宛先を決める。**待ち口と
+    /// 時間切れは持ち込まない**——`ReviveSession` は答えを返さない種別で、結果は
+    /// `SessionUpsert` が記録層へ届いた時点で分かる。
+    async fn revive(&self, request: crate::session_host::ReviveRequest) -> Result<(), String> {
+        let meta = self
+            .hub
+            .registry
+            .owned(request.account_id, request.card_id)
+            .map(|record| record.meta())
+            .ok_or_else(|| NOT_FOUND.to_string())?;
+        // リモートのカードは必ず PC を名乗る（名乗らないのはローカルモードだけ）。
+        // **黙って1台目へ送らない**——意図しない PC で本物の claude が起動する
+        let target = meta
+            .agent_id
+            .ok_or_else(|| "このカードは PC を名乗っていません".to_string())?;
+        let claude_session_id = meta
+            .claude_session_id
+            .ok_or_else(|| NO_RESUME_TARGET.to_string())?;
+
+        let route = self
+            .route(request.account_id, target, Need::Revive)
+            .await
+            .map_err(|err| err.message())?;
+
+        let message = ServerToAgent::ReviveSession {
+            card_id: request.card_id,
+            cwd: meta.project.0.clone(),
+            permission_mode: meta.permission_mode.clone(),
+            claude_session_id,
+        };
+        match route {
+            Route::Here(conn) => {
+                conn.send(&message);
+                Ok(())
+            }
+            Route::Across => self
+                .hub
+                .relay_across(target, SessionHostCommand::Message(Box::new(message))),
         }
     }
 
@@ -1514,6 +1574,12 @@ enum Route {
 enum Need {
     HostFs,
     LogRead,
+    /// 抜け殻のカードを起こし直せるか（接続断のカードを復旧ボタンで戻す 設計§5-3）。
+    ///
+    /// **これだけは答えを待たない頼み**（`request_id` を持たない）にも関わらず名乗りを
+    /// 見る。古いホストは知らない種別を**接続を保ったまま無視する**ので、投げると
+    /// 永遠に何も起きず、画面には時間切れすら出せない。
+    Revive,
 }
 
 /// 答えを待つ上限（設計§23-3 の実測で決めた値）。
@@ -1539,45 +1605,7 @@ impl RemoteSessionHost {
         let Some(target) = request.target else {
             return Err(HostAskError::UnknownHost);
         };
-
-        // **順序が意味を持つ。** 先に「その PC が居るか」を決めてから能力を見る。
-        // 逆にすると、名乗りの行が無いだけの**知らない PC が「版が古い」と断られ**、
-        // 存在しないことと古いことを言い分けてしまう（設計§18）
-        let route = match self
-            .hub
-            .conn(target)
-            .filter(|conn| conn.account_id == request.account_id)
-        {
-            Some(conn) => Route::Here(conn),
-            None => {
-                // 自分の表に無くても、別のインスタンスに繋がっていることがある。
-                // **他人の PC はここに現れない**ので、そのまま「知らない」に落ちる
-                if self
-                    .hub
-                    .online_of(request.account_id)
-                    .await
-                    .contains(&target)
-                {
-                    Route::Across
-                } else if self.mine(request.account_id, target).await && self.hub.bus_degraded() {
-                    // **連絡係が切れていると、繋がっている PC を数えられない。**
-                    // そのまま「知らない」と答えると、利用者は PC を疑うことになる——
-                    // 直せるのはこちら側なので、届けられないことをそのまま返す（設計§17）。
-                    //
-                    // 自分のアカウントの PC だと分かっている場合にだけこう答える。
-                    // 他人の PC はここへ来ない（`mine` が偽）ので、存在は漏れない
-                    return Err(HostAskError::Unreachable(BUS_DOWN.to_string()));
-                } else {
-                    return Err(HostAskError::UnknownHost);
-                }
-            }
-        };
-
-        // **投げる前に、答えられる版かどうかを見る**（設計§4）。古いホストは知らない
-        // 種別を無視して黙るだけなので、投げると時間切れの「応じません」しか出せない
-        if !self.supports(need, request.account_id, target).await {
-            return Err(HostAskError::Unsupported);
-        }
+        let route = self.route(request.account_id, target, need).await?;
 
         let request_id = RequestId::new();
         // **送る前に待ち口を開ける。** 逆にすると、速い答えが行き場を失う
@@ -1611,6 +1639,58 @@ impl RemoteSessionHost {
         }
     }
 
+    /// その PC への道を決める（設計§18・接続断のカードを復旧ボタンで戻す 設計§6-2）。
+    ///
+    /// **順序が意味を持つ。** 先に「その PC が居るか」を決めてから能力を見る。逆にすると、
+    /// 名乗りの行が無いだけの**知らない PC が「版が古い」と断られ**、存在しないことと
+    /// 古いことを言い分けてしまう。
+    ///
+    /// # 答えを待つ頼みと、待たない頼みで共有する
+    ///
+    /// [`RemoteSessionHost::ask`]（フォルダ・ファイル・ログ）と
+    /// [`SessionHost::revive`] が同じここを通る。**書き直すと、片方だけ直したときに
+    /// 「起動はできるのに覗けない」という食い違いが生まれる。**
+    async fn route(
+        &self,
+        account_id: Uuid,
+        target: AgentId,
+        need: Need,
+    ) -> Result<Route, crate::session_host::HostAskError> {
+        use crate::session_host::HostAskError;
+
+        let route = match self
+            .hub
+            .conn(target)
+            .filter(|conn| conn.account_id == account_id)
+        {
+            Some(conn) => Route::Here(conn),
+            None => {
+                // 自分の表に無くても、別のインスタンスに繋がっていることがある。
+                // **他人の PC はここに現れない**ので、そのまま「知らない」に落ちる
+                if self.hub.online_of(account_id).await.contains(&target) {
+                    Route::Across
+                } else if self.mine(account_id, target).await && self.hub.bus_degraded() {
+                    // **連絡係が切れていると、繋がっている PC を数えられない。**
+                    // そのまま「知らない」と答えると、利用者は PC を疑うことになる——
+                    // 直せるのはこちら側なので、届けられないことをそのまま返す（設計§17）。
+                    //
+                    // 自分のアカウントの PC だと分かっている場合にだけこう答える。
+                    // 他人の PC はここへ来ない（`mine` が偽）ので、存在は漏れない
+                    return Err(HostAskError::Unreachable(BUS_DOWN.to_string()));
+                } else {
+                    return Err(HostAskError::UnknownHost);
+                }
+            }
+        };
+
+        // **投げる前に、答えられる版かどうかを見る**（設計§4）。古いホストは知らない
+        // 種別を無視して黙るだけなので、投げると時間切れの「応じません」しか出せない
+        if !self.supports(need, account_id, target).await {
+            return Err(HostAskError::Unsupported);
+        }
+        Ok(route)
+    }
+
     /// その PC が自分のアカウントのものか（**繋がっているかは見ない**）。
     ///
     /// 連絡係が切れていて数えられないときに、「知らない PC」と「届けられない PC」を
@@ -1641,6 +1721,7 @@ impl RemoteSessionHost {
             .is_some_and(|capabilities| match need {
                 Need::HostFs => capabilities.supports_host_fs,
                 Need::LogRead => capabilities.supports_log_read,
+                Need::Revive => capabilities.supports_revive,
             })
     }
 }

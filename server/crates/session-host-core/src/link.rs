@@ -33,7 +33,7 @@
 use crate::{
     events::{EventSink, LocalEventBus, TranscriptReport},
     offsets::OffsetStore,
-    session::SessionManager,
+    session::{ALREADY_REVIVING, SessionManager},
 };
 use futures_util::{SinkExt as _, StreamExt as _};
 use protocol::{
@@ -1383,10 +1383,6 @@ fn apply_command(
 
 /// 見つからないカードを指されたときの説明。
 const NOT_FOUND: &str = "セッションが見つかりません";
-
-/// 既に起こし直している最中のカードを、もう一度指されたときの説明
-/// （接続断のカードを復旧ボタンで戻す 設計§8-1）。
-const ALREADY_REVIVING: &str = "このカードは復旧中です";
 
 /// 操作の失敗を上へ返す（§5-6）。サーバが `ServerMessage::Error` として配る。
 fn report_error(manager: &Arc<SessionManager>, card_id: CardId, message: String) {

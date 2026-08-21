@@ -24,7 +24,7 @@ use session_host_core::{
     events::{EventSink, LocalEventBus, TranscriptReport},
     offsets::OffsetStore,
     parser::ParserSupervisor,
-    session::SessionManager,
+    session::{self, SessionManager},
 };
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
@@ -32,12 +32,35 @@ use tokio::sync::{broadcast, mpsc};
 /// 見つからないカードを指されたときの説明。
 const NOT_FOUND: &str = "セッションが見つかりません";
 
+/// 記録を繋がずに組み立てられた土台で、復旧を頼まれたときの説明。
+///
+/// **製品の経路では起こらない**（`lib.rs` が必ず繋ぐ）が、`Option` である以上
+/// 通らない道が1本残る。**黙って何もしないより、届かなかったと言うほうがよい。**
+const NO_REGISTRY: &str = "カードの記録に繋がっていないので、復旧を頼めません";
+
+/// 呼び戻す先を持たないカードを指されたときの説明。
+///
+/// 入口（`server_core::ws`）が既に断っているので、ここへは来ない見込み。
+/// **来ないはずの道でも、通ったときに何が起きたか言えるようにしておく。**
+const NO_RESUME_TARGET: &str = "呼び戻す先が記録されていません";
+
 pub struct LocalSessionHost {
     manager: Arc<SessionManager>,
     /// パーサの世話役。**居なくても動く**（構造化ビューだけが縮退する）。
     ///
     /// 設計§11 の「パーサが停止しても、ターミナルと指示送信は通常動作」を型で表している。
     parser: Option<Arc<ParserSupervisor>>,
+    /// カードの記録。**起こし直し（復旧）にだけ要る。**
+    ///
+    /// 戻すための材料（作業ディレクトリ・権限モード・呼び戻し先）を持っているのは記録の
+    /// ほうで、実体（[`SessionManager`]）は抜け殻のカードを1枚も知らない。
+    ///
+    /// # なぜ `Option` なのか
+    ///
+    /// [`LocalSessionHost::new`] は**記録を持たない土台からも呼ばれる**（ログとフォルダ閲覧の
+    /// テストは DB を立てない）。必須の引数にすると、記録を1行も読まないテストにまで
+    /// DB を立てさせることになる。`parser` を `Option` にしてあるのと同じ形。
+    registry: Option<Arc<SessionRegistry>>,
 }
 
 impl LocalSessionHost {
@@ -45,12 +68,19 @@ impl LocalSessionHost {
         Self {
             manager,
             parser: None,
+            registry: None,
         }
     }
 
     /// パーサを繋いだ状態にする。
     pub fn with_parser(mut self, parser: Arc<ParserSupervisor>) -> Self {
         self.parser = Some(parser);
+        self
+    }
+
+    /// 記録を繋いだ状態にする（復旧が材料を引くため）。
+    pub fn with_registry(mut self, registry: Arc<SessionRegistry>) -> Self {
+        self.registry = Some(registry);
         self
     }
 }
@@ -71,6 +101,49 @@ impl SessionHost for LocalSessionHost {
             .spawn_with_mode(request.cwd, request.permission_mode)
             .map(|_| ())
             .map_err(|err| err.to_string())
+    }
+
+    /// 抜け殻のカードを起こし直す（接続断のカードを復旧ボタンで戻す 設計§7・§8）。
+    ///
+    /// **宛先は見ない**（[`LocalSessionHost::spawn`] と同じ理由）。材料は記録から引く。
+    ///
+    /// 印を立てる（`begin_revive`）のは**切り離す前**（設計§8-3）。後にすると、続けて
+    /// 2回押したときに切り離した2つが同時に印を見て両方通る。席を待つのは切り離した先で、
+    /// ここで待つと押したブラウザの他の操作まで止まる。
+    async fn revive(
+        &self,
+        request: server_core::session_host::ReviveRequest,
+    ) -> Result<(), String> {
+        let registry = self.registry.as_ref().ok_or(NO_REGISTRY)?;
+        let meta = registry
+            .owned(request.account_id, request.card_id)
+            .map(|record| record.meta())
+            .ok_or(NOT_FOUND)?;
+        // 戻せるかは入口（`server_core::ws`）が確かめてある。ここで見るのは
+        // 「材料が揃っているか」だけ——呼び戻し先が無ければ `--resume` に渡す値が無い
+        let claude_session_id = meta.claude_session_id.ok_or(NO_RESUME_TARGET)?;
+        let in_flight = self
+            .manager
+            .begin_revive(request.card_id)
+            .ok_or(session::ALREADY_REVIVING)?;
+
+        let manager = Arc::clone(&self.manager);
+        let cwd = meta.project.0.clone();
+        let mode = meta.permission_mode.clone();
+        tokio::spawn(async move {
+            if let Err(err) = manager
+                .revive(in_flight, &cwd, mode, claude_session_id)
+                .await
+            {
+                // **黙って失敗させない。** 待っている相手（画面・CLI）には状態でしか
+                // 返らないので、届かなかったことは自分から配る（`link.rs` と同じ形）
+                manager.broadcast(ServerMessage::Error {
+                    card_id: Some(request.card_id),
+                    message: err.to_string(),
+                });
+            }
+        });
+        Ok(())
     }
 
     fn kill(&self, card_id: CardId) -> Result<(), String> {

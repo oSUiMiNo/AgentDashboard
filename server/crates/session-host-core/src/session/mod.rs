@@ -196,6 +196,14 @@ const REVIVE_PARALLEL: usize = 2;
 const REVIVE_SETTLE: Duration = Duration::from_secs(60);
 const REVIVE_STEP: Duration = Duration::from_millis(100);
 
+/// 同じカードへ二度目の頼みが来たときの言い分（設計§8-1）。
+///
+/// **待ち行列に並ばせない**ので、断り方は1つで済む。ここに置いてあるのは、
+/// [`SessionManager::begin_revive`] が `None` を返す唯一の理由だからで、**頼み手ごとに
+/// 書くと言い方が食い違う**——リモート（`crate::link`）とローカル（`agentdashboard_core::local`）で
+/// 別の文が出ると、利用者には別々の不調に見える。
+pub const ALREADY_REVIVING: &str = "このカードは復旧中です";
+
 pub fn now_ms() -> Timestamp {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

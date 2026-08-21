@@ -407,6 +407,49 @@ async fn handle_request(
             });
         }
 
+        // 抜け殻のカードを、元の CLI セッションで起こし直す
+        // （接続断のカードを復旧ボタンで戻す 設計§3-5・§4-2）。
+        //
+        // **戻せるかの判定はここに集める。** 画面は「実体があるカードにはボタンを出さない」
+        // で済ませているが、それは画面の話でしかなく CLI には効かない。走っているカードへ
+        // 撃つと、向こう側は**走っている claude を畳んでから**起こし直す——要件が守りたい
+        // ものと正反対で、しかも押した人には「戻した」としか見えない
+        ClientMessage::ReviveSession { card_id } => {
+            // 門（この関数の冒頭）を通っているので、持ち主は確かめ済み
+            let meta = state
+                .registry
+                .owned(identity.account_id, card_id)
+                .map(|record| record.meta());
+            match meta {
+                // 門を通った直後に外された、という細い隙間。**黙って何もしない道を作らない**
+                None => send_error(outbound, Some(card_id), NOT_FOUND.to_string()).await,
+                Some(meta) if !meta.revivable() => {
+                    // **理由を言い分ける**（設計§3-2）。どちらも「押しても戻らない」だが、
+                    // 利用者から見ればまったく別の事情である
+                    let message = if meta.claude_session_id.is_none() {
+                        NO_RESUME_TARGET
+                    } else {
+                        ALREADY_LIVE
+                    };
+                    send_error(outbound, Some(card_id), message.to_string()).await;
+                }
+                Some(_) => {
+                    if let Err(message) = state
+                        .agent
+                        .revive(crate::session_host::ReviveRequest {
+                            account_id: identity.account_id,
+                            card_id,
+                        })
+                        .await
+                    {
+                        // **カードを名指しする**（設計§7-5）。`Spawn` が名指ししないのは
+                        // 採番前に失敗しうるからで、復旧はIDが最初から確定している
+                        send_error(outbound, Some(card_id), message).await;
+                    }
+                }
+            }
+        }
+
         ClientMessage::Kill { card_id } => {
             if let Err(message) = state.agent.kill(card_id) {
                 send_error(outbound, Some(card_id), message).await;
@@ -579,6 +622,7 @@ fn target_card(request: &ClientMessage) -> Option<CardId> {
         | ClientMessage::SendInput { card_id, .. }
         | ClientMessage::Resize { card_id, .. }
         | ClientMessage::PtyFlow { card_id, .. }
+        | ClientMessage::ReviveSession { card_id }
         | ClientMessage::Kill { card_id }
         | ClientMessage::Archive { card_id } => Some(*card_id),
         // まだカードが無い（作る側）
@@ -591,6 +635,14 @@ fn target_card(request: &ClientMessage) -> Option<CardId> {
 /// **他人のカードにも同じ言葉を返す。** 「あなたのものではありません」と言い分けると、
 /// IDを総当たりして「そのカードは存在する」ことだけを調べられる。
 const NOT_FOUND: &str = "セッションが見つかりません";
+
+/// 起こし直しを断る2つの言い分（接続断のカードを復旧ボタンで戻す 設計§3-2）。
+///
+/// **`NOT_FOUND` と違って言い分けてよい。** あちらを1つにまとめているのは、IDの総当たりで
+/// 他人のカードの存在を調べられないようにするためで、こちらは**自分のカードだと確かめた
+/// あと**の話——事情を伏せる理由が無い。
+const ALREADY_LIVE: &str = "このセッションは動いています（復旧は要りません）";
+const NO_RESUME_TARGET: &str = "呼び戻す先が記録されていません";
 
 /// ブラウザからのキー入力を PTY へ書き込む。
 async fn handle_pty_input(

@@ -156,7 +156,9 @@ impl LocalServer {
     /// トークンが入っている（設計§5-3）。ブラウザの Cookie を持ちようが無いので、
     /// ここに鍵をかけると**フックが1件も届かなくなる**。
     pub fn router(&self) -> Router {
-        let mut agent = LocalSessionHost::new(Arc::clone(&self.manager));
+        let mut agent = LocalSessionHost::new(Arc::clone(&self.manager))
+            // 復旧は**記録から材料を引く**（抜け殻のカードを知っているのは記録だけ）
+            .with_registry(Arc::clone(&self.registry));
         if let Some(parser) = &self.parser {
             agent = agent.with_parser(Arc::clone(parser));
         }

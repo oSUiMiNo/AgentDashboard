@@ -393,6 +393,37 @@ pub struct SessionMeta {
     pub toml_account: Option<String>,
 }
 
+impl SessionMeta {
+    /// このカードを起こし直せるか（接続断のカードを復旧ボタンで戻す 設計§3-1・§3-4）。
+    ///
+    /// 規則は1つ——**いま操作できる実体が無く、かつ戻す先がある。**
+    ///
+    /// | 何 | なぜ |
+    /// |---|---|
+    /// | `!agent_connected` | PC が居ない、または**PC は居るがそのカードを持っていない**。繋ぎ直しのとき、サーバはその PC の全カードを一旦倒し、報告し直されたものだけ戻す。だから起き直して失われたカードは、PC が繋がっていても倒れたまま残る |
+    /// | `status` が `Ended` | 擬似ターミナルが実際に消えた。PC は繋がっていることもある |
+    /// | `claude_session_id` がある | `--resume` に渡す先。無ければ戻しようが無い |
+    ///
+    /// **構成で分岐しない。** ローカルの再起動・セッションホストの再起動・サーバだけの
+    /// 再起動の3通りが、この1つの規則で表せる（サーバだけ落とした場合は PC が繋ぎ直して
+    /// 自分で印を戻すので、そもそも対象にならない）。
+    ///
+    /// # ここに置いた理由
+    ///
+    /// **Rust 側で判定が要る場所が2つある**——サーバの断り（`server_core::ws`）と、
+    /// CLI の `session revive --all` の絞り込み。2箇所に書くと、片方だけ直したときに
+    /// 「CLI では飛ばされるのにサーバは通す」が起きる。
+    ///
+    /// ブラウザ側（TypeScript）は同じ規則を書き直す。**突き合わせる台帳は作らない**
+    /// （設計§3-3）——ずれても「押せてしまってサーバが断る」に倒れるだけで、
+    /// 危険側には倒れないため。
+    pub fn revivable(&self) -> bool {
+        let 実体が無い =
+            !self.agent_connected || matches!(self.status, SessionStatus::Ended { .. });
+        実体が無い && self.claude_session_id.is_some()
+    }
+}
+
 /// JSONL レコードの `uuid` に対応するノードID。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -510,6 +541,64 @@ mod tests {
             serde_json::to_string(&project).unwrap(),
             "\"/home/example/dev/app\""
         );
+    }
+
+    /// 起こし直しの判定を当てるための1枚。**既定は「動いている、戻す先つき」**——
+    /// つまり戻せない側から始める。ここを戻せる側にすると、条件を1つ落とした実装でも
+    /// 全部通ってしまう。
+    fn 生きたカード() -> SessionMeta {
+        SessionMeta {
+            card_id: CardId::new(),
+            project: ProjectId("/home/example/dev/app".to_string()),
+            claude_session_id: Some(ClaudeSessionId::new()),
+            permission_mode: None,
+            model: None,
+            model_label: None,
+            model_requested: None,
+            status: SessionStatus::Working,
+            subagent_active: 0,
+            last_activity_at: 0,
+            last_assistant_message: None,
+            created_at: 0,
+            hooks_seen: true,
+            agent_id: None,
+            agent_connected: true,
+            account: None,
+            toml_account: None,
+        }
+    }
+
+    #[test]
+    fn 実体があるカードは起こし直せない() {
+        // 走っている claude を畳んでから起こし直すことになる。押した人には
+        // 「戻した」としか見えないので、規則の側で塞ぐ（設計§3-5）
+        assert!(!生きたカード().revivable());
+    }
+
+    #[test]
+    fn 接続断のカードは起こし直せる() {
+        let mut meta = 生きたカード();
+        meta.agent_connected = false;
+        assert!(meta.revivable(), "抜け殻がこの機能の本命");
+    }
+
+    #[test]
+    fn 終了したカードはPCが繋がっていても起こし直せる() {
+        // 擬似ターミナルが実際に消えた側。PC は繋がったままのことがある
+        let mut meta = 生きたカード();
+        meta.status = SessionStatus::Ended { ok: true };
+        assert!(meta.revivable());
+        meta.status = SessionStatus::Ended { ok: false };
+        assert!(meta.revivable(), "異常終了も戻せる側");
+    }
+
+    #[test]
+    fn 呼び戻す先を持たないカードは起こし直せない() {
+        // `--resume` に渡す値が無い。実体が無くても戻しようが無い
+        let mut meta = 生きたカード();
+        meta.agent_connected = false;
+        meta.claude_session_id = None;
+        assert!(!meta.revivable());
     }
 
     #[test]
