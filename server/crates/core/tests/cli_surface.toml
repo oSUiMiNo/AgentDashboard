@@ -191,6 +191,11 @@ command = "session resize"
 
 [[entry]]
 kind = "ws"
+target = "ClientMessage::ReviveSession"
+command = "session revive"
+
+[[entry]]
+kind = "ws"
 target = "ClientMessage::SendInput"
 command = "session send"
 

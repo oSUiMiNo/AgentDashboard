@@ -23,6 +23,8 @@ use super::ws::Ws;
 pub const SPAWN_CAP: Duration = Duration::from_secs(60);
 pub const KILL_CAP: Duration = Duration::from_secs(30);
 pub const REMOVE_CAP: Duration = Duration::from_secs(30);
+/// `revive`：起動を待つのと同じ長さ。**やっていることが起動そのもの**なので揃える
+pub const REVIVE_CAP: Duration = Duration::from_secs(60);
 pub const MODEL_CAP: Duration = Duration::from_secs(60);
 pub const MODE_CAP: Duration = Duration::from_secs(60);
 /// `send --wait` の既定。`--timeout` で変えられる唯一の枠（他は固定でよい——
@@ -63,6 +65,25 @@ pub enum Goal {
     Ended { card: CardId },
     /// `rm`：`SessionRemoved` が来る
     Removed { card: CardId },
+    /// `revive`：**接続直後の写しを1枚見送ってから**、`SessionUpsert` で `Starting` かつ
+    /// 「繋がっている」（接続断のカードを復旧ボタンで戻す 設計§10-2）。
+    ///
+    /// # なぜ二段なのか
+    ///
+    /// **写しは必ず来る。** サーバは接続直後、そのアカウントの全カードを
+    /// `SessionUpsert` で流してから受け付けを始める（`server-core/src/ws.rs`）ので、
+    /// 送る前に必ずそのカードの写しが1枚届く。
+    ///
+    /// 一段（`Starting` かつ繋がっている）では**動いているカードで嘘をつく**。
+    /// 起こしたてでフックがまだ1件も来ていないカードは `Starting` のまま繋がっており、
+    /// 写しがそのまま条件を満たす——サーバは正しく断っているのに、**その断りが届く前に
+    /// 「起こし直しました」と言ってしまう**（実際にこれを踏んだ）。
+    ///
+    /// 二段にすれば、満ちるのは**送ったあとに動いた**ときだけになる。
+    ///
+    /// **`Status`（差分）では満ちない。** あちらは `agent_connected` を運ばないので、
+    /// 起こし直した実体かどうかを見分けられない。
+    Revived { card: CardId, seen_snapshot: bool },
     /// `model`：切替要求の印（`model_requested`）が立ってから消える。二段で見るのは
     /// `TurnEnded` と同じ理由（写しの `None` を「もう終わった」と読まないため）
     ModelApplied { card: CardId, seen_requested: bool },
@@ -137,6 +158,25 @@ impl Goal {
                 }
                 _ => Step::Continue,
             },
+            Self::Revived {
+                card,
+                seen_snapshot,
+            } => {
+                if let ServerMessage::SessionUpsert { session } = message
+                    && session.card_id == *card
+                {
+                    // 1枚目は接続直後の写し。**見送る**（送る前の姿なので、何を
+                    // 言っていても起こし直しの結果ではない）
+                    if !*seen_snapshot {
+                        *seen_snapshot = true;
+                        return Step::Continue;
+                    }
+                    if session.status == SessionStatus::Starting && session.agent_connected {
+                        return done("起こし直しました".to_string(), message);
+                    }
+                }
+                Step::Continue
+            }
             Self::ModelApplied {
                 card,
                 seen_requested,
@@ -188,6 +228,7 @@ impl Goal {
             Self::TurnEnded { card, .. }
             | Self::Ended { card }
             | Self::Removed { card }
+            | Self::Revived { card, .. }
             | Self::ModelApplied { card, .. }
             | Self::ModeApplied { card, .. } => Some(card),
         }
@@ -439,6 +480,97 @@ mod tests {
         assert!(matches!(
             goal.observe(&ServerMessage::SessionRemoved { card_id: card }),
             Step::Done(_)
+        ));
+    }
+
+    /// 起こし直しの待ちを、接続直後の写しを1枚見送った状態で作る。
+    fn 写しを見送った起こし直し(card: CardId, 写し: SessionMeta) -> Goal {
+        let mut goal = Goal::Revived {
+            card,
+            seen_snapshot: false,
+        };
+        assert!(
+            matches!(goal.observe(&upsert(写し)), Step::Continue),
+            "接続直後の写しで満ちてはいけない"
+        );
+        goal
+    }
+
+    #[test]
+    fn 起こし直しは写しを見送ってから繋がった起動中で満ちる() {
+        let card = CardId::new();
+        let mut shell = meta(card, SessionStatus::Working);
+        shell.agent_connected = false;
+        let mut goal = 写しを見送った起こし直し(card, shell);
+
+        let mut revived = meta(card, SessionStatus::Starting);
+        revived.agent_connected = true;
+        assert!(matches!(goal.observe(&upsert(revived)), Step::Done(_)));
+    }
+
+    #[test]
+    fn 動いているカードの写しでは起こし直しは満ちない() {
+        // **一段（Starting かつ繋がっている）だとここで嘘をつく。** 起こしたてで
+        // フックがまだ来ていないカードは `Starting` のまま繋がっているので、写しが
+        // そのまま条件を満たす——サーバは正しく断っているのに、その断りが届く前に
+        // 「起こし直しました」と言ってしまう（実際に踏んだ）
+        let card = CardId::new();
+        let mut 起こしたて = meta(card, SessionStatus::Starting);
+        起こしたて.agent_connected = true;
+        let mut goal = Goal::Revived {
+            card,
+            seen_snapshot: false,
+        };
+        assert!(
+            matches!(goal.observe(&upsert(起こしたて)), Step::Continue),
+            "写しで満ちている"
+        );
+        // 断りが届けば、そこで落ちる
+        assert!(matches!(
+            goal.observe(&ServerMessage::Error {
+                card_id: Some(card),
+                message: "このセッションは動いています（復旧は要りません）".to_string(),
+            }),
+            Step::Fail(_)
+        ));
+    }
+
+    #[test]
+    fn 起こし直しは写しのあとでも状態が揃わなければ満ちない() {
+        let card = CardId::new();
+        let mut shell = meta(card, SessionStatus::Working);
+        shell.agent_connected = false;
+        let mut goal = 写しを見送った起こし直し(card, shell.clone());
+
+        // 繋がっていない Starting（起こし直しの前に別の報告が挟まった形）
+        let mut 繋がらない = meta(card, SessionStatus::Starting);
+        繋がらない.agent_connected = false;
+        assert!(matches!(goal.observe(&upsert(繋がらない)), Step::Continue));
+        // 繋がっているが Starting ではない
+        let mut 起動中でない = meta(card, SessionStatus::WaitingInput);
+        起動中でない.agent_connected = true;
+        assert!(matches!(
+            goal.observe(&upsert(起動中でない)),
+            Step::Continue
+        ));
+    }
+
+    #[test]
+    fn 起こし直しは差分の知らせでは満ちない() {
+        // `Status` は `agent_connected` を運ばないので、起こし直した実体かどうかを
+        // 見分けられない。**運んでいない値で判断しない**
+        let card = CardId::new();
+        let mut shell = meta(card, SessionStatus::Working);
+        shell.agent_connected = false;
+        let mut goal = 写しを見送った起こし直し(card, shell);
+        assert!(matches!(
+            goal.observe(&ServerMessage::Status {
+                card_id: card,
+                status: SessionStatus::Starting,
+                subagent_active: 0,
+                last_activity_at: 0,
+            }),
+            Step::Continue
         ));
     }
 

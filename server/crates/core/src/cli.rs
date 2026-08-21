@@ -243,6 +243,18 @@ enum SessionCmd {
         #[command(flatten)]
         out: OutputArgs,
     },
+    /// 抜け殻のカード（接続断・終了）を、元の CLI セッションで起こし直す（起動まで待つ）。
+    /// **動いているカードは断られます**（走っている作業を巻き添えにしないため）
+    Revive {
+        /// カードID。先頭の数文字で足りる
+        #[arg(required_unless_present = "all")]
+        id: Option<String>,
+        /// 起こし直せるカードを全部（順に1枚ずつ。戻せないものは理由を出して飛ばす）
+        #[arg(long, conflicts_with = "id")]
+        all: bool,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
     /// カードを一覧から外す（外れたの知らせまで待つ）。履歴の記録は残る
     Rm {
         /// カードID。先頭の数文字で足りる
@@ -798,6 +810,16 @@ async fn client_session(
             let outcome = client::kill(target, &id).await?;
             println!("{}", output::pick(out.json, &outcome.raw, &outcome.human));
         }
+        // `all` は読まない。**clap が「id か --all のどちらか片方」を強制している**
+        // （`required_unless_present` と `conflicts_with`）ので、id が無いことが
+        // そのまま `--all` を意味する。ここで両方を見ると、同じ約束を2箇所で持つことになる
+        SessionCmd::Revive { id, all: _, out } => {
+            let outcome = match id {
+                Some(id) => client::revive(target, &id).await?,
+                None => client::revive_all(target).await?,
+            };
+            println!("{}", output::pick(out.json, &outcome.raw, &outcome.human));
+        }
         SessionCmd::Rm { id, out } => {
             let outcome = client::archive(target, &id).await?;
             println!("{}", output::pick(out.json, &outcome.raw, &outcome.human));
@@ -1241,6 +1263,10 @@ mod tests {
                 "mode",
                 "model",
                 "resize",
+                // 抜け殻のカードを起こし直す（接続断のカードを復旧ボタンで戻す 設計§10-1）。
+                // **生バイトは1つも運ばない**——運ぶのはカードIDだけで、材料は
+                // サーバ側の記録が持っている
+                "revive",
                 "rm",
                 "screen",
                 "send",

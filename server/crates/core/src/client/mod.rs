@@ -680,6 +680,99 @@ pub async fn kill(target: &Target, prefix: &str) -> Result<Outcome, ClientError>
     outcome
 }
 
+/// `session revive`。抜け殻のカードを元の CLI セッションで起こし直し、起動を待つ
+/// （接続断のカードを復旧ボタンで戻す 設計§10-1）。
+pub async fn revive(target: &Target, prefix: &str) -> Result<Outcome, ClientError> {
+    let card = resolve_card_id(target, prefix).await?;
+    revive_one(target, card).await
+}
+
+/// 1枚を起こし直して待つ。`--all` と単数で共有する。
+async fn revive_one(target: &Target, card: CardId) -> Result<Outcome, ClientError> {
+    let mut ws = ws::Ws::connect(target).await?;
+    ws.send(&ClientMessage::ReviveSession { card_id: card })
+        .await?;
+    let outcome = wait::run(
+        &mut ws,
+        Goal::Revived {
+            card,
+            seen_snapshot: false,
+        },
+        "セッションの起こし直し",
+        wait::REVIVE_CAP,
+    )
+    .await;
+    ws.close().await;
+    outcome
+}
+
+/// `session revive --all`（設計§10-1）。戻せるカードを**順に1枚ずつ**。
+///
+/// # なぜ順に回すのか
+///
+/// 待ち方の仕掛け（[`wait::run`]）は1件ずつしか見られず、複数を同時に待つ道が無い。
+/// そして PC 側も同時に2本ずつしか進めない（設計§8-4）ので、**順に回しても遅くならない**。
+/// 「どこまで戻ったか」が明確になる利点のほうが大きい。
+///
+/// # 飛ばしたものは黙って落とさない
+///
+/// 戻せないカード（動いている・呼び戻す先が無い）は理由つきで標準エラーへ出す。
+/// **0枚のときは0枚と言う**——沈黙させると、押したのに何も起きなかったのか、
+/// 対象が無かったのかを利用者が区別できない。
+pub async fn revive_all(target: &Target) -> Result<Outcome, ClientError> {
+    let (list, _) = sessions(target).await?;
+    let (戻せる, 飛ばす): (Vec<_>, Vec<_>) =
+        list.into_iter().partition(protocol::SessionMeta::revivable);
+    for meta in &飛ばす {
+        eprintln!(
+            "飛ばしました（{}）：{}",
+            if meta.claude_session_id.is_none() {
+                "呼び戻す先が記録されていません"
+            } else {
+                "このセッションは動いています"
+            },
+            output::short_id(&meta.card_id.to_string())
+        );
+    }
+    if 戻せる.is_empty() {
+        return Ok(Outcome {
+            human: "起こし直せるカードはありません（0枚）".to_string(),
+            raw: serde_json::json!({ "revived": [], "failed": [] }).to_string(),
+        });
+    }
+
+    let mut 戻した = Vec::new();
+    let mut 戻せなかった = Vec::new();
+    for meta in &戻せる {
+        let id = meta.card_id.to_string();
+        // **1枚が駄目でも残りを続ける。** 「全て復旧」は数枚をまとめて頼む操作なので、
+        // 途中で止めると人が拾い直すことになる
+        match revive_one(target, meta.card_id).await {
+            Ok(_) => 戻した.push(id),
+            Err(err) => {
+                eprintln!("戻せませんでした：{} … {err}", output::short_id(&id));
+                戻せなかった.push(id);
+            }
+        }
+    }
+    let human = format!(
+        "{} 枚を起こし直しました（戻せなかったもの {} 枚／対象外 {} 枚）",
+        戻した.len(),
+        戻せなかった.len(),
+        飛ばす.len()
+    );
+    let raw = serde_json::json!({ "revived": 戻した, "failed": 戻せなかった }).to_string();
+    // **1枚も戻せなかったら失敗として返す。** 全部落ちたのに終了コード0だと、
+    // 呼んだエージェントは戻ったものとして次へ進む
+    if 戻した.is_empty() {
+        return Err(ClientError::Refused {
+            status: 400,
+            message: human,
+        });
+    }
+    Ok(Outcome { human, raw })
+}
+
 /// `session rm`。`SessionRemoved` まで待つ。
 pub async fn archive(target: &Target, prefix: &str) -> Result<Outcome, ClientError> {
     let card = resolve_card_id(target, prefix).await?;
