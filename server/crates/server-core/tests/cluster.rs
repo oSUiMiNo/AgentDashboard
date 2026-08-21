@@ -484,6 +484,88 @@ async fn split(
 }
 
 #[tokio::test]
+async fn 別のインスタンスに繋がった_PC_の抜け殻も起こし直せる() {
+    // **設計§6-1 がひっくり返したところが、本当に落ちるのはここだけ。**
+    //
+    // 既存の中継（`relay`）は、まず `conn_for_card` で自分の接続表を引く。1台構成なら
+    // PC が繋がっている限りそこで当たるので、**カードの鮮度が落ちていても通ってしまう**
+    // ——つまり「`Kill` の写経は100%失敗する」は言い過ぎだった（実際に壊し方を当てて
+    // 分かった）。落ちるのは接続表に無いときで、それが**この配置**である。
+    //
+    // ブラウザは A、PC は B、そのうえでカードの鮮度は落ちている。`relay` はここで
+    // `remote_agent_of` へ落ち、あれは `agent_connected == true` を要求するので断る。
+    for backend in common::backends("cluster-revive").await {
+        let broker = MemoryBroker::new();
+        let (a, _b, mut agent, card_id, account_id) = split(&backend.db, &broker).await;
+
+        // 呼び戻し先を持たせてから、鮮度だけ落とす（＝PC が起き直してカードを失った形）
+        let claude_session_id = protocol::ClaudeSessionId::new();
+        let mut 抜け殻 = common::meta(card_id);
+        抜け殻.claude_session_id = Some(claude_session_id);
+        agent
+            .send(&protocol::a2s::AgentMessage::SessionUpsert {
+                session: Box::new(抜け殻),
+            })
+            .await;
+        let deadline = tokio::time::Instant::now() + TIMEOUT;
+        loop {
+            let carried = a
+                .registry
+                .get(card_id)
+                .is_some_and(|record| record.meta().claude_session_id == Some(claude_session_id));
+            if carried {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "[{}] 呼び戻し先が A まで届きませんでした",
+                backend.name
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let agent_id = a
+            .registry
+            .get(card_id)
+            .expect("記録があること")
+            .meta()
+            .agent_id
+            .expect("PC を名乗っていること");
+        a.registry.set_agent_live(agent_id, false);
+
+        RemoteSessionHost::new(Arc::clone(&a.hub))
+            .revive(server_core::session_host::ReviveRequest {
+                account_id,
+                card_id,
+            })
+            .await
+            .expect("接続表に無い PC の抜け殻でも宛先が解決できること");
+
+        let message = agent
+            .wait_for("跨ぎで届く起こし直し", |message| {
+                matches!(
+                    message,
+                    protocol::a2s::ServerToAgent::ReviveSession { card_id: got, .. } if *got == card_id
+                )
+            })
+            .await;
+        let protocol::a2s::ServerToAgent::ReviveSession {
+            claude_session_id: got,
+            ..
+        } = message
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            got, claude_session_id,
+            "[{}] 呼び戻し先が渡っていない",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
 async fn 別のインスタンスに繋がった_PC_へ指示が届く() {
     // 検収「別インスタンスに接続していてもターミナル操作が成立」。ブラウザが繋がった
     // 側に PC が居ないという、**1台構成では絶対に起きない配置**を作って確かめる

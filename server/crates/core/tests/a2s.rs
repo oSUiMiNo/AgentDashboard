@@ -1903,6 +1903,177 @@ async fn 繋がっていない_PC_は理由が返る() {
     assert_eq!(err.message(), "指定された PC が繋がっていません");
 }
 
+// --- 抜け殻のカードを起こし直す（接続断のカードを復旧ボタンで戻す 設計§6）---------
+
+/// カードを1枚、**呼び戻し先つきで抜け殻にする**。
+///
+/// # なぜ「PC は繋がったまま」なのか
+///
+/// この機能の本命は**セルフホストでセッションホストだけが起き直した状態**である。
+/// 繋ぎ直しのとき、サーバはその PC の全カードを一旦倒し、PC が報告し直したものだけ
+/// 戻す（`gateway.rs` の `set_agent_live`）。だから**起き直して失われたカードは、
+/// PC が繋がっていても倒れたまま残る**——ここで作るのはその状態である。
+///
+/// 線ごと切ってしまうと「PC が繋がっていません」で断られる側しか試せず、
+/// **設計§6-1 がひっくり返した肝心のところを1度も通らない。**
+async fn 抜け殻にする(
+    a2s: &A2s,
+) -> (Arc<session_host_core::session::Session>, protocol::CardId) {
+    let (session, _transcript) = a2s.start_session();
+    let claude_session_id = protocol::ClaudeSessionId::new();
+    a2s.post_hook(
+        session.token(),
+        "SessionStart",
+        &format!(r#"{{"session_id":"{claude_session_id}"}}"#),
+    )
+    .await;
+    let listed = a2s
+        .wait_for_listed("呼び戻し先が載る", |listed| {
+            listed.len() == 1 && listed[0].claude_session_id == Some(claude_session_id)
+        })
+        .await;
+    let card_id = listed[0].card_id;
+    let agent_id = listed[0].agent_id.expect("PC を名乗っていること");
+
+    // 繋ぎ直しと同じ手で鮮度だけを落とす。**実体（PC 側の PTY）はそのまま**なので、
+    // これは「サーバから見て失われたカード」になる
+    a2s.registry.set_agent_live(agent_id, false);
+    let listed = a2s
+        .wait_for_listed("接続断になる", |listed| {
+            listed.len() == 1 && !listed[0].agent_connected
+        })
+        .await;
+    assert!(listed[0].revivable(), "戻せる状態として見えていない");
+    (session, card_id)
+}
+
+#[tokio::test]
+async fn 接続断のカードでも宛先が解決できて指示が届く() {
+    // **設計§6-1 がひっくり返したところ。** 既存の中継（`relay`）は
+    // `agent_connected == true` を要求するので、`Kill` の形を写すと **100% 断られる**。
+    // 動かないのではなく、いつも断られる
+    let a2s = A2s::start("revive-cross").await;
+    let (session, card_id) = 抜け殻にする(&a2s).await;
+
+    a2s.browser
+        .revive(server_core::session_host::ReviveRequest {
+            account_id: a2s.account_id,
+            card_id,
+        })
+        .await
+        .expect("接続断のカードでも宛先が解決できること");
+
+    // 届いた証拠は、**PC 側が同じ札で実体を載せ直したこと**。古い実体は畳まれている
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    loop {
+        let live = a2s.manager.get(card_id);
+        if live.is_some_and(|live| !Arc::ptr_eq(&live, &session)) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{TIMEOUT:?} 以内に起こし直されませんでした"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // 鮮度も戻る（新しい実体の報告が届くので）
+    let listed = a2s
+        .wait_for_listed("繋がった1枚になる", |listed| {
+            listed.len() == 1 && listed[0].agent_connected
+        })
+        .await;
+    assert_eq!(listed[0].card_id, card_id, "別のカードとして起きている");
+
+    a2s.manager.get(card_id).expect("実体があること").kill();
+}
+
+#[tokio::test]
+async fn 起こし直しの宛先が無い_PC_は理由が返る() {
+    // 一度も繋がっていない PC のカード。**枠そのものは出す**ので、辿れない理由が要る
+    let a2s = A2s::start("revive-offline").await;
+    let (session, card_id) = 抜け殻にする(&a2s).await;
+
+    // カードの名乗りを、繋がっていない PC へ付け替える
+    let sleeping = pairing::ensure_agent(a2s.hub.db(), a2s.account_id, "寝ている PC")
+        .await
+        .expect("PC を登録できること");
+    let mut 寝ている = a2s.registry.get(card_id).expect("記録があること").meta();
+    寝ている.agent_id = Some(sleeping);
+    寝ている.agent_connected = false;
+    a2s.registry
+        .apply(
+            &server_core::registry::ReportOrigin {
+                account_id: a2s.account_id,
+                agent_id: Some(sleeping),
+                account: None,
+            },
+            protocol::ws::ServerMessage::SessionUpsert {
+                session: Box::new(寝ている),
+            },
+        )
+        .await;
+
+    let err = a2s
+        .browser
+        .revive(server_core::session_host::ReviveRequest {
+            account_id: a2s.account_id,
+            card_id,
+        })
+        .await
+        .expect_err("断ること");
+    assert_eq!(err, "指定された PC が繋がっていません");
+
+    session.kill();
+}
+
+#[tokio::test]
+async fn 起こし直しを名乗らない_PC_へは投げない() {
+    // 古いホストは知らない種別を**接続を保ったまま警告を出して無視する**。投げると
+    // 永遠に何も起きず、画面には理由すら出せない（設計§5-3）
+    let a2s = A2s::start("revive-old").await;
+    let (session, card_id) = 抜け殻にする(&a2s).await;
+    let target = a2s.hub.online_of(a2s.account_id).await[0];
+
+    // 名乗りを「古い版」へ書き換える（能力の欄を持たない Hello と同じ状態）
+    let old = serde_json::json!({
+        "available_modes": ["default"],
+        "always_bypass_permissions": false,
+        "agent_version": "0.1.5",
+    });
+    pairing::save_capabilities(a2s.hub.db(), target, old)
+        .await
+        .expect("名乗りを書き換えられること");
+
+    let started = tokio::time::Instant::now();
+    let err = a2s
+        .browser
+        .revive(server_core::session_host::ReviveRequest {
+            account_id: a2s.account_id,
+            card_id,
+        })
+        .await
+        .expect_err("断ること");
+    assert!(
+        err.contains("版が古い"),
+        "版が古いことが読めない断り方: {err}"
+    );
+    // **待たずに断ること。** 時間切れを待つなら、判定を置いた意味が無い
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "投げる前に断ること（{:?} かかった）",
+        started.elapsed()
+    );
+    // 起こし直していない（古い実体がそのまま）
+    assert!(
+        a2s.manager
+            .get(card_id)
+            .is_some_and(|live| Arc::ptr_eq(&live, &session)),
+        "断ったのに起こし直している"
+    );
+    session.kill();
+}
+
 // --- ログの往復（ログ設計§13・§25）--------------------------------------------
 
 /// PC 側の `<state_dir>/logs/` へ1本置く。

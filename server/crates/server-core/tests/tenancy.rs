@@ -444,6 +444,9 @@ async fn 他人のカードへの購読と操作は全部断られる() {
             ),
             ("購読の取り下げ", ClientMessage::UnsubTranscript { card_id }),
             ("端末の取り下げ", ClientMessage::UnsubPty { card_id }),
+            // 起こし直しは**他人の PC で本物の claude を起動させる**操作なので、
+            // 越えられると被害がいちばん大きい
+            ("起こし直し", ClientMessage::ReviveSession { card_id }),
         ];
         for (what, message) in crossings {
             browser.expect_refused(message, what).await;
@@ -487,6 +490,60 @@ async fn 他人のカードへの購読と操作は全部断られる() {
             "[{}] 横取りした指示が相手の PC へ届いている: {next:?}",
             backend.name
         );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 他人の戻せるカードも同じ言葉で断られる() {
+    // **門の順序を固定する。** 持ち主の確認より先に「戻せるか」を見ると、他人のカードへ
+    // 「このセッションは動いています」「呼び戻す先が記録されていません」を返すことになり、
+    // **IDの総当たりで他人のカードの様子が読める**（設計§3-5・セルフホスト化設計§18）。
+    //
+    // 上の総当たりが使うのは**動いているカード**なので、順序を入れ替えても
+    // あちらは「動いています」ではなく素通りしてしまい、この壊れ方を捕まえられない。
+    for backend in common::backends("tenancy-revive").await {
+        let arena = Arena::start(backend.db.clone()).await;
+        let (mine, _mine_agent) = arena.tenant("わたし").await;
+        let (theirs, mut their_agent) = arena.tenant("よそのひと").await;
+        let mut browser = arena.browser(&mine).await;
+
+        // 相手のカードを**起こし直せる状態**にする（終了済み＋呼び戻し先あり）
+        let mut ended = common::meta(theirs.card_id);
+        ended.status = SessionStatus::Ended { ok: true };
+        ended.claude_session_id = Some(protocol::ClaudeSessionId::new());
+        their_agent
+            .send(&AgentMessage::SessionUpsert {
+                session: Box::new(ended),
+            })
+            .await;
+        let deadline = tokio::time::Instant::now() + TIMEOUT;
+        loop {
+            if arena
+                .registry
+                .list(theirs.account_id)
+                .first()
+                .is_some_and(SessionMeta::revivable)
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "[{}] 相手のカードが戻せる状態になりませんでした",
+                backend.name
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        browser
+            .expect_refused(
+                ClientMessage::ReviveSession {
+                    card_id: theirs.card_id,
+                },
+                "他人の戻せるカードの起こし直し",
+            )
+            .await;
 
         backend.finish().await;
     }

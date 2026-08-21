@@ -10,8 +10,8 @@
 //!   fake-claude --exit-code <N>    何もせず終了コード N で終了する（異常終了の検証用）
 //!   fake-claude --echo-only        受け取った行をそのまま返す（余計な装飾なし）
 //!   fake-claude --help             本物に似せた使い方を出す（権限モードの choices を含む）
-//!   （本物と同じく `--session-id <UUID>` `--settings <PATH>` `--permission-mode <MODE>` を
-//!     付けて起動される。知らないオプションは黙って無視する）
+//!   （本物と同じく `--session-id <UUID>` `--settings <PATH>` `--permission-mode <MODE>`
+//!     `--resume <UUID>` を付けて起動される。知らないオプションは黙って無視する）
 //!
 //! 対話モードで受け付ける命令:
 //!   dump          自分の起動引数と環境変数を1行ずつ書き出す
@@ -125,6 +125,7 @@ Options:
                                         \"bypassPermissions\", \"manual\",
                                         \"dontAsk\", \"plan\")
   --session-id <uuid>                   Use a specific session ID
+  --resume <uuid>                       Resume a conversation
 ";
 
 fn main() {
@@ -162,8 +163,13 @@ fn main() {
                 echo_only = true;
                 index += 1;
             }
-            // 本物と同じく、ダッシュボードが採番したIDを受け取る
-            "--session-id" => {
+            // 本物と同じく、ダッシュボードが採番したIDを受け取る。
+            //
+            // `--resume` も同じ扱いにする。**本物は `--fork-session` を付けないかぎり
+            // 元のIDを再利用する**（接続断のカードを復旧ボタンで戻す 設計§15-1 で実測。
+            // 同じ JSONL へ完全な追記になり、ファイル内の `sessionId` も頼んだ値のまま
+            // 1つだけだった）ので、名乗り直す形にするほうが本物に近い。
+            "--session-id" | "--resume" => {
                 session_id = args.get(index + 1).cloned().unwrap_or_default();
                 index += 2;
             }

@@ -326,6 +326,127 @@ async fn 満ちない待ちは時間切れの三で終わる() {
     assert_eq!(err.exit_code(), 3);
 }
 
+/// 抜け殻のカードを1枚作る（呼び戻し先つき・接続断）。
+///
+/// ローカルモードでは実体が居るあいだ必ず `agent_connected` が立つので、記録へ直に
+/// 1枚置いて倒す。**サーバを畳んで起こし直す形は `restart.rs` が持っている**ので、
+/// ここでは「CLI が何をするか」だけに絞る。
+async fn 抜け殻を1枚(
+    server: &TestServer,
+    session: &std::sync::Arc<session_host_core::session::Session>,
+) -> protocol::CardId {
+    let card = listed_card(server, session).await;
+    let listed = server
+        .wait_for_listed("1枚出る", |listed| !listed.is_empty())
+        .await;
+    let mut 抜け殻 = listed
+        .into_iter()
+        .find(|meta| meta.card_id.to_string() == card)
+        .expect("いま起こしたカードが居ること");
+    抜け殻.claude_session_id = Some(protocol::ClaudeSessionId::new());
+    抜け殻.agent_connected = false;
+    let card_id = 抜け殻.card_id;
+    server
+        .registry
+        .apply(
+            &server_core::registry::ReportOrigin::local(),
+            ServerMessage::SessionUpsert {
+                session: Box::new(抜け殻),
+            },
+        )
+        .await;
+    server
+        .wait_for_listed("接続断になる", |listed| {
+            listed
+                .iter()
+                .any(|meta| meta.card_id == card_id && meta.revivable())
+        })
+        .await;
+    card_id
+}
+
+#[tokio::test]
+async fn 全部復旧は戻せるものだけを順に回す() {
+    // **飛ばしたものを黙って落とさない**のが要点（設計§10-1）。戻せる1枚と、
+    // 動いている1枚を並べて、戻ったのが1枚だけであることを見る
+    let server = TestServer::start().await;
+    let (抜け殻の元, _w1) = common::start_session(&server.manager).await;
+    let (動いている, _w2) = common::start_session(&server.manager).await;
+    let card_id = 抜け殻を1枚(&server, &抜け殻の元).await;
+    let 動いているid = listed_card(&server, &動いている).await;
+    let target = target_of(&server);
+
+    let outcome = client::revive_all(&target).await.expect("回れること");
+
+    assert!(
+        outcome.human.starts_with("1 枚を起こし直しました"),
+        "戻した枚数が読めない: {}",
+        outcome.human
+    );
+    assert!(
+        outcome.human.contains("対象外 1 枚"),
+        "飛ばした枚数が読めない: {}",
+        outcome.human
+    );
+    assert!(
+        outcome.raw.contains(&card_id.to_string()),
+        "戻したカードが持ち帰りに入っていない: {}",
+        outcome.raw
+    );
+    assert!(
+        !outcome.raw.contains(&動いているid),
+        "動いているカードまで戻している: {}",
+        outcome.raw
+    );
+
+    for session in [抜け殻の元, 動いている] {
+        session.kill();
+    }
+    if let Some(live) = server.manager.get(card_id) {
+        live.kill();
+    }
+}
+
+#[tokio::test]
+async fn 全部復旧は対象が無ければ零枚と言う() {
+    // **沈黙させない。** 押したのに何も起きなかったのか、対象が無かったのかを
+    // 利用者が区別できなくなる
+    let server = TestServer::start().await;
+    let target = target_of(&server);
+
+    let outcome = client::revive_all(&target)
+        .await
+        .expect("0枚でも落ちないこと");
+    assert!(
+        outcome.human.contains("0枚"),
+        "0枚だと言っていない: {}",
+        outcome.human
+    );
+}
+
+#[tokio::test]
+async fn 起こし直しの断りは時間切れを待たずに一で落ちる() {
+    // 動いているカードは断られる（設計§3-5）。**1（断られた）で落ちること**——
+    // 3（確かめられなかった）と同じにすると、送り直して二重に効かせる経路ができる
+    let server = TestServer::start().await;
+    let (session, _watcher) = common::start_session(&server.manager).await;
+    let target = target_of(&server);
+    let card = listed_card(&server, &session).await;
+
+    let started = std::time::Instant::now();
+    let err = client::revive(&target, &card[..8])
+        .await
+        .expect_err("断られること");
+
+    assert_eq!(err.exit_code(), 1, "断られたのだから 1（送り直さない）");
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "断りが来ているのに時間切れまで待っている（{:?}）",
+        started.elapsed()
+    );
+    session.kill();
+}
+
 // ---------------------------------------------------------------------------
 // サーバの側を偽物にする2本（Hello の順序・未知種別）
 // ---------------------------------------------------------------------------
