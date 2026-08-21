@@ -343,6 +343,7 @@ pub fn hello(name: &str) -> AgentMessage {
         // 名乗りを見て問いを投げる側（フェーズ2）のテストが全部素通りする
         supports_host_fs: true,
         supports_log_read: true,
+        supports_revive: true,
     }
 }
 

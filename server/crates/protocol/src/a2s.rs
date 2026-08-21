@@ -168,6 +168,17 @@ pub enum AgentMessage {
         /// 解けなくなる。名乗らない＝引けない、として扱う。
         #[serde(default)]
         supports_log_read: bool,
+        /// 抜け殻のカードを起こし直せるか（接続断のカードを復旧ボタンで戻す 設計§5-2）。
+        ///
+        /// 上の2つとまったく同じ形。**能力ごとに1欄**にするのは、版を1つ上げて済ませようと
+        /// すると [`A2S_VERSION`] を上げることになり、**既に配ったセッションホストが
+        /// 全部繋がらなくなる**ため。
+        ///
+        /// 名乗らせる理由も同じで、[`ServerToAgent::ReviveSession`] は**答えを返さない
+        /// 種別**（`request_id` を持たない）である。古いホストへ投げると無視されるだけで
+        /// 永遠に何も起きないので、名乗りが無いと画面には理由を出せない。
+        #[serde(default)]
+        supports_revive: bool,
     },
     /// カード1枚の最新（意味は [`crate::ws::ServerMessage::SessionUpsert`] と同じ）。
     ///
@@ -258,6 +269,29 @@ pub enum ServerToAgent {
     Spawn {
         cwd: String,
         permission_mode: Option<PermissionMode>,
+    },
+    /// 抜け殻になったカードを、元の CLI セッションで起こし直す
+    /// （接続断のカードを復旧ボタンで戻す 設計§5-1）。
+    ///
+    /// # `Spawn` に欄を足さなかった理由
+    ///
+    /// **古いセッションホストは知らない欄を読み飛ばす。** 欄を足す形にすると、
+    /// あちらでは**ふつうの起動として成立してしまう**——復旧のつもりが、抜け殻の隣に
+    /// 新しいカードが1枚増える。種別を分ければ、古いホストは**接続を保ったまま
+    /// 警告を出して無視する**だけで済む（`link.rs` が意図してそう作ってある）。
+    ///
+    /// # CardId をサーバから渡す唯一の種別
+    ///
+    /// [`ServerToAgent::Spawn`] は PC が採番する（§5-2）。こちらは**既にあるカードへ
+    /// 戻す**のが目的なので、採番させると意味を成さない。
+    ///
+    /// 作業ディレクトリ・権限モード・呼び戻し先は、どれもサーバ側の記録が持っている
+    /// （`sessions` 表）。ブラウザからは運ばない——古い写しで起こし直す経路ができる。
+    ReviveSession {
+        card_id: CardId,
+        cwd: String,
+        permission_mode: Option<PermissionMode>,
+        claude_session_id: crate::ClaudeSessionId,
     },
     Kill {
         card_id: CardId,
@@ -431,6 +465,7 @@ mod tests {
                 always_bypass_permissions: false,
                 supports_host_fs: true,
                 supports_log_read: true,
+                supports_revive: true,
             },
             AgentMessage::SessionUpsert {
                 session: Box::new(sample_meta()),
@@ -507,6 +542,15 @@ mod tests {
             ServerToAgent::Spawn {
                 cwd: "/home/example/dev/app".to_string(),
                 permission_mode: None,
+            },
+            // 復旧（設計§5-1）。**モードを持った形で置く**——記録どおりのモードで
+            // 起こすのがこの機能の約束なので、省いた形だけを固定すると、
+            // 組で運べることを誰も見ていない状態になる
+            ServerToAgent::ReviveSession {
+                card_id,
+                cwd: "/home/example/dev/app".to_string(),
+                permission_mode: Some(PermissionMode::new("bypassPermissions")),
+                claude_session_id: crate::ClaudeSessionId::new(),
             },
             ServerToAgent::Kill { card_id },
             ServerToAgent::Archive { card_id },
@@ -657,6 +701,7 @@ mod tests {
         let AgentMessage::Hello {
             supports_host_fs,
             supports_log_read,
+            supports_revive,
             agent_version,
             ..
         } = parsed
@@ -667,6 +712,9 @@ mod tests {
         assert!(!supports_host_fs);
         // ログの能力も同じ扱い。**欄を足したこの工事でいちばん壊してはいけないところ**
         assert!(!supports_log_read);
+        // 復旧の能力も同じ。名乗らない古いホストへ投げると、無視されて永遠に何も
+        // 起きない——画面には理由が出せなくなる（設計§5-2）
+        assert!(!supports_revive);
         assert_eq!(agent_version, "0.1.5");
     }
 

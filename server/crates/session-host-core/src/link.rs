@@ -959,6 +959,10 @@ async fn handshake(mut socket: Socket, config: &LinkConfig) -> anyhow::Result<(S
         // ログを引ける版であることを名乗る（ログ設計§13-1）。`supports_host_fs` と
         // 同じで、**この実行ファイルは実装を持っている**ので常に真
         supports_log_read: true,
+        // 抜け殻のカードを起こし直せる版であることを名乗る
+        // （接続断のカードを復旧ボタンで戻す 設計§5-2）。上2つと同じで、
+        // **この実行ファイルは `apply_command` に腕を持っている**ので常に真
+        supports_revive: true,
     };
     socket
         .send(tungstenite::Message::text(serde_json::to_string(&hello)?))
@@ -1244,6 +1248,35 @@ fn apply_command(
                 });
             }
         }
+        // 抜け殻のカードを起こし直す（接続断のカードを復旧ボタンで戻す 設計§7・§8）。
+        //
+        // **印を立てるのは切り離す前**（設計§8-3）。後にすると、切り離した2つが
+        // 同時に印を見て両方通る。この関数が同期の `fn` であること自体が、
+        // 「席を待つのはここではない」ことの担保にもなっている
+        ServerToAgent::ReviveSession {
+            card_id,
+            cwd,
+            permission_mode,
+            claude_session_id,
+        } => {
+            let Some(in_flight) = manager.begin_revive(card_id) else {
+                // 待ち行列に並ばせない。同じカードが2つ並ぶと、席が空いたとき
+                // 両方とも通る（設計§8-1）
+                report_error(manager, card_id, ALREADY_REVIVING.to_string());
+                return;
+            };
+            let manager = Arc::clone(manager);
+            tokio::spawn(async move {
+                if let Err(err) = manager
+                    .revive(in_flight, &cwd, permission_mode, claude_session_id)
+                    .await
+                {
+                    // **カードを名指しする**（設計§7-5）。`Spawn` が名指ししないのは
+                    // 採番前に失敗しうるからで、復旧はIDが最初から確定している
+                    report_error(&manager, card_id, err.to_string());
+                }
+            });
+        }
         ServerToAgent::Kill { card_id } => {
             if let Err(err) = manager.kill(card_id) {
                 report_error(manager, card_id, err.to_string());
@@ -1350,6 +1383,10 @@ fn apply_command(
 
 /// 見つからないカードを指されたときの説明。
 const NOT_FOUND: &str = "セッションが見つかりません";
+
+/// 既に起こし直している最中のカードを、もう一度指されたときの説明
+/// （接続断のカードを復旧ボタンで戻す 設計§8-1）。
+const ALREADY_REVIVING: &str = "このカードは復旧中です";
 
 /// 操作の失敗を上へ返す（§5-6）。サーバが `ServerMessage::Error` として配る。
 fn report_error(manager: &Arc<SessionManager>, card_id: CardId, message: String) {

@@ -258,6 +258,12 @@ pub struct Capabilities {
     /// 片方だけ実装した版が現れたときに嘘を名乗ることになる。
     #[serde(default)]
     pub supports_log_read: bool,
+    /// 抜け殻のカードを起こし直せるか（接続断のカードを復旧ボタンで戻す 設計§5-2）。
+    ///
+    /// 上2つと同じ形。**投げる前にここを見る**——復旧は答えを返さない種別なので、
+    /// 名乗らないホストへ投げると無視されるだけで、画面には理由を出せない。
+    #[serde(default)]
+    pub supports_revive: bool,
 }
 
 /// 他インスタンスから回ってくる、PC への指示（設計§9-2 の `agent:{id}:cmd`）。
@@ -1768,6 +1774,7 @@ async fn agent_loop(
         always_bypass_permissions,
         supports_host_fs,
         supports_log_read,
+        supports_revive,
     } = hello
     else {
         // next_hello が Hello 以外を返すことはない
@@ -1801,6 +1808,7 @@ async fn agent_loop(
         agent_version: Some(agent_version.clone()),
         supports_host_fs,
         supports_log_read,
+        supports_revive,
     };
     match serde_json::to_value(&capabilities) {
         Ok(value) => {
