@@ -38,6 +38,7 @@ use session_host_core::session::{Session, hooks_settings, lifecycle};
 use std::{
     path::{Path, PathBuf},
     process::Command,
+    sync::Arc,
     time::Duration,
 };
 use testkit::MockHookServer;
@@ -673,12 +674,21 @@ async fn トランスクリプト未作成でもフックだけで状態表示�
 }
 
 // ---------------------------------------------------------------------------
-// 4. resume でも CardId は変わらない
+// 4. resume は新しいカードを作り、CLI 側のIDはあとから埋まる
 // ---------------------------------------------------------------------------
 
+/// **`SessionManager::resume` は新しいカードを作る**（`起こし直し` 設計§7-2）。
+/// 元のカードへ戻すのは `revive` のほうで、こちらとは別の口である。
+///
+/// もとの名前は `引き継ぎ起動でもカードのidは変わらず…` だったが、**実装と食い違って
+/// いた**うえ、確かめていた主張が `assert_eq!(resumed.card_id, card_id)` ——
+/// **自分自身との比較**で、どう壊しても落ちなかった（`起こし直し` テスト計画フェーズ6）。
+///
+/// 「CardId は生涯不変」を本当に見るには、**器の外から引き直す**必要がある。CLI 側のIDが
+/// 埋まったあとで `manager.get(card_id)` が同じ実体を返すことが、その性質そのものになる。
 #[tokio::test]
 #[ignore = "本物の claude を起動し、アカウントのクォータを消費する（make test-cli）"]
-async fn 引き継ぎ起動でもカードのidは変わらずcli側のidが張り替わる() {
+async fn 引き継ぎ起動は新しいカードになりcli側のidがあとから埋まる() {
     let dir = WorkDir::new("resume");
     let program = claude_wrapper(&dir, &[]);
     let server = common::TestServer::start_with_program(
@@ -696,6 +706,7 @@ async fn 引き継ぎ起動でもカードのidは変わらずcli側のidが張�
     accept_trust_prompt_if_any(&first, &mut watcher).await;
     wait_for_status(&first, SessionStatus::WaitingInput).await;
     let original = wait_for_session_id(&first).await;
+    let 元のカード = first.card_id;
     server
         .manager
         .archive(first.card_id)
@@ -708,6 +719,10 @@ async fn 引き継ぎ起動でもカードのidは変わらずcli側のidが張�
         .resume(&dir.as_str(), original)
         .expect("引き継いで起動できること");
     let card_id = resumed.card_id;
+    assert_ne!(
+        card_id, 元のカード,
+        "resume は新しいカードを作ること（元のカードへ戻すのは revive のほう）"
+    );
     assert!(
         resumed.meta().claude_session_id.is_none(),
         "引き継ぎでは自己採番しない"
@@ -718,7 +733,22 @@ async fn 引き継ぎ起動でもカードのidは変わらずcli側のidが張�
 
     let restored = wait_for_session_id(&resumed).await;
     println!("引き継ぎ元={original} 引き継ぎ後={restored}");
-    assert_eq!(resumed.card_id, card_id, "CardId は生涯不変であること");
+
+    // **器の外から引き直す。** ここが「CardId は生涯不変」の観測点で、
+    // `resumed.card_id` を自分自身と比べても何も確かめたことにならない
+    let 引き直した = server
+        .manager
+        .get(card_id)
+        .expect("CLI 側のIDが埋まったあとも、同じ CardId で引けること");
+    assert!(
+        Arc::ptr_eq(&引き直した, &resumed),
+        "張り替えで実体が載せ替わっていないこと"
+    );
+    assert_eq!(
+        引き直した.meta().claude_session_id,
+        Some(restored),
+        "引き直したカードにも、埋まったIDが載っていること"
+    );
     assert!(
         resumed.transcript_path().is_some(),
         "transcript_path も張り替わること"
