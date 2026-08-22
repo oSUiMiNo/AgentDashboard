@@ -287,6 +287,8 @@ function flush() {
       }
       case 'remove': {
         if (metas.delete(op.cardId)) {
+          // カードごと消えたら、そのカードに出していた断りも消す
+          cardErrors.delete(op.cardId)
           order = order.filter((cardId) => cardId !== op.cardId)
           structureChanged = true
           touched.add(op.cardId)
@@ -313,9 +315,13 @@ function flush() {
 
   // サーバ由来の状態が届いたカードは、押した側の印を畳む（復旧設計§9-4）。
   // 居座らせると「復旧中…」のまま押せないカードが残る
+  //
+  // **断りのほうは畳まない。** 起こし直しの最中でなくてもカードは数秒おきに報告を
+  // 送ってくる（`statusLine` の再実行など）ので、一緒に畳むと**読む前に消える**。
+  // 実際、権限モードの切替が断られたときの理由が E2E で1度も出せなかった。
+  // 断りが消えるのは、次に押したときとカードが消えたときだけにする
   for (const cardId of touched) {
     reviving.delete(cardId)
-    cardErrors.delete(cardId)
   }
 
   if (structureChanged) {
@@ -397,6 +403,8 @@ export function markReviving(cardId: CardId) {
     return
   }
   reviving.add(cardId)
+  // 前の理由は消す。押し直したのに古い断りが残っていると、今回の結果と読めてしまう
+  cardErrors.delete(cardId)
   // **カード1枚だけを鳴らす。** 全体に持つと、6枚を並べたときに一覧が丸ごと描き直される
   notifyCard(cardId)
 }

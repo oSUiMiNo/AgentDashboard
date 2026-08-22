@@ -93,10 +93,19 @@ test('巡回に入らないモードを選ぶと理由が画面に出る', async
 
   // dontAsk は起動時にしか選べない（設計§11）。黙って何も起きないのが一番困る
   await view.getByTestId('permission-mode-picker').selectOption('dontAsk')
-  await expect(page.getByTestId('error-banner')).toContainText(
+  /*
+    **出る先はカードで、画面全体の帯ではない**（復旧設計§9-5）。この失敗は `card_id`
+    を名乗っており、行き先は種別ではなく名指しの有無で決まる。横並びで見ているとき、
+    帯に出すと**どのカードの話なのか分からない**。
+
+    帯に出続けるのは名指しの無い失敗だけで、そちらは `terminal.spec.ts`（起動に失敗
+    したときは、まだカードが無いので名乗れない）が押さえている。
+  */
+  await expect(view.getByTestId('card-error')).toContainText(
     '切り替えられません',
     { timeout: 30_000 },
   )
+  await expect(page.getByTestId('error-banner')).toHaveCount(0)
 })
 
 test('片方を切り替えても、もう片方の表示は変わらない', async ({ page }) => {

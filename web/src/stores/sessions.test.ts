@@ -343,3 +343,45 @@ describe('起こし直しの印と候補', () => {
     expect(error.result.current).toBeNull()
   })
 })
+
+describe('断りが消える契機', () => {
+  function stale(cardId: string) {
+    return meta(cardId, { agent_connected: false, claude_session_id: '2222' })
+  }
+
+  it('状態がふつうに流れてきただけでは消えない', () => {
+    /*
+      **カードは起こし直しの最中でなくても報告を送ってくる**（`statusLine` の再実行など）。
+      一緒に畳むと、断りが**読む前に消える**——実際、権限モードの切替が断られた理由が
+      E2E で1度も画面に出せなかった。
+    */
+    applySessionSnapshot([stale(A)])
+    const { result } = renderHook(() => useCardError(A))
+    act(() => setCardError(A, '切り替えられません'))
+
+    act(() => upsertSession(stale(A)))
+
+    expect(result.current).toBe('切り替えられません')
+  })
+
+  it('押し直したら消える', () => {
+    // 古い断りが残っていると、今回の結果と読めてしまう
+    applySessionSnapshot([stale(A)])
+    const { result } = renderHook(() => useCardError(A))
+    act(() => setCardError(A, '切り替えられません'))
+
+    act(() => markReviving(A))
+
+    expect(result.current).toBeNull()
+  })
+
+  it('カードごと消えたら消える', () => {
+    applySessionSnapshot([stale(A)])
+    const { result } = renderHook(() => useCardError(A))
+    act(() => setCardError(A, '切り替えられません'))
+
+    act(() => removeSession(A))
+
+    expect(result.current).toBeNull()
+  })
+})
