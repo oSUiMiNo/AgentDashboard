@@ -83,6 +83,45 @@ let accounts: string[] = []
 /** 絞り込み中の名乗り。`null` は絞り込まない。 */
 let accountFilter: string | null = null
 
+/**
+ * いま起こし直しを頼んでいるカード（復旧設計§9-4）。
+ *
+ * **サーバに対応する欄が無い**ので、モデル切替の「楽観更新はしない」は当てはまらない
+ * （食い違う相手が居ない）。それでも印が要るのは、**席が空くまでカードが1バイトも
+ * 変わらない**ため——6枚を並べれば5枚目・6枚目は数十秒待つ。
+ *
+ * サーバ由来の状態が1件でも届いたら消す（[`flush`]）。居座らせない。
+ */
+const reviving = new Set<CardId>()
+
+/**
+ * そのカードに出す断りの言葉（復旧設計§9-5）。
+ *
+ * `ServerMessage::Error` は `card_id` を運んでいるのに、ブラウザは捨てて画面全体の帯へ
+ * 出していた。**名指しがあるものはそのカードへ**出す。行き先を決めるのは種別ではなく
+ * 名指しの有無なので、経路が増えても迷わない。
+ */
+const cardErrors = new Map<CardId, string>()
+
+/**
+ * 実体が無いカード（＝起こし直しの候補。復旧設計§3-1）。**作成順・絞り込み後**。
+ *
+ * ここで見るのは記録だけ（接続断か終了か）で、**PC の在否や名乗りは見ていない**。
+ * あちらの材料は設定ストアにあるので、最後の絞り込みは押す画面の側で行う（§3-3）。
+ *
+ * 絞り込み中のカードを入れないのは、**押した人が数を予測できる**ようにするため
+ * （見えていないカードまで起こさない）。
+ */
+let reviveTargets: CardId[] = []
+
+/**
+ * 候補の顔ぶれと**内訳が変わったか**を見るための指紋。
+ *
+ * 顔ぶれだけを比べると、同じカードが「接続断 → 終了」へ移ったときに気づけず、
+ * 画面の内訳が古いまま残る。
+ */
+let reviveFingerprint = ''
+
 const cardListeners = new Map<CardId, Set<() => void>>()
 const structureListeners = new Set<() => void>()
 
@@ -172,6 +211,40 @@ function rebuildGroups() {
   if (sorted.length !== accounts.length || sorted.some((name, at) => name !== accounts[at])) {
     accounts = sorted
   }
+  rebuildReviveTargets()
+}
+
+/**
+ * 起こし直しの候補を数え直す（復旧設計§3-1・§9-3）。
+ *
+ * 変わったときだけ配列を差し替えて `true` を返す。呼んだ側が構造の購読者へ知らせる
+ * ——**接続断は構造を変えない**（同じ箱に同じカードが並んだまま）ので、これが無いと
+ * ホームの内訳だけが古いまま残る。
+ */
+function rebuildReviveTargets(): boolean {
+  const next: CardId[] = []
+  const marks: string[] = []
+  for (const group of groups) {
+    for (const cardId of group.cards) {
+      const meta = metas.get(cardId)
+      if (!meta) {
+        continue
+      }
+      const ended = meta.status.kind === 'ended'
+      if (meta.agent_connected && !ended) {
+        continue
+      }
+      next.push(cardId)
+      marks.push(`${cardId}:${ended ? 'e' : 'd'}`)
+    }
+  }
+  const fingerprint = marks.join('|')
+  if (fingerprint === reviveFingerprint) {
+    return false
+  }
+  reviveFingerprint = fingerprint
+  reviveTargets = next
+  return true
 }
 
 /** 待ち行列を確定済みの状態へ流し込む。 */
@@ -238,8 +311,18 @@ function flush() {
     }
   }
 
+  // サーバ由来の状態が届いたカードは、押した側の印を畳む（復旧設計§9-4）。
+  // 居座らせると「復旧中…」のまま押せないカードが残る
+  for (const cardId of touched) {
+    reviving.delete(cardId)
+    cardErrors.delete(cardId)
+  }
+
   if (structureChanged) {
     rebuildGroups()
+    notifyStructure()
+  } else if (rebuildReviveTargets()) {
+    // 接続断は構造を変えない。**ここで知らせないとホームの内訳だけが古くなる**
     notifyStructure()
   }
   for (const cardId of touched) {
@@ -303,6 +386,74 @@ export function patchSessionStatus(patch: StatusPatch) {
   enqueue({ kind: 'status', patch })
 }
 
+/**
+ * 起こし直しを頼んだ印を立てる（復旧設計§9-4）。
+ *
+ * **押した側ではなくここで立てる。** 押せる場所が3か所（小窓・セッション画面・ホーム）
+ * あるので、押し手ごとに書くと1つ書き漏らしたときだけ手応えが無くなる。
+ */
+export function markReviving(cardId: CardId) {
+  if (reviving.has(cardId)) {
+    return
+  }
+  reviving.add(cardId)
+  // **カード1枚だけを鳴らす。** 全体に持つと、6枚を並べたときに一覧が丸ごと描き直される
+  notifyCard(cardId)
+}
+
+/** そのカードを起こし直している最中か。 */
+export function useReviving(cardId: CardId): boolean {
+  return useSyncExternalStore(
+    (listener) => subscribeCard(cardId, listener),
+    () => reviving.has(cardId),
+    () => false,
+  )
+}
+
+/**
+ * そのカードに出す断りを立てる（復旧設計§9-5）。
+ *
+ * **印も一緒に外す。** 断られたのに「復旧中…」が残ると、二度と押せないカードになる。
+ */
+export function setCardError(cardId: CardId, message: string) {
+  cardErrors.set(cardId, message)
+  reviving.delete(cardId)
+  notifyCard(cardId)
+}
+
+/** そのカードに出ている断り（無ければ `null`）。 */
+export function useCardError(cardId: CardId): string | null {
+  return useSyncExternalStore(
+    (listener) => subscribeCard(cardId, listener),
+    () => cardErrors.get(cardId) ?? null,
+    () => null,
+  )
+}
+
+/** 起こし直しの候補（購読しない読み取り。テスト用）。 */
+export function getReviveTargets(): CardId[] {
+  return reviveTargets
+}
+
+/** 印が立っているか（購読しない読み取り。テスト用）。 */
+export function isReviving(cardId: CardId): boolean {
+  return reviving.has(cardId)
+}
+
+/**
+ * 起こし直しの候補を購読する（復旧設計§9-3）。
+ *
+ * **PC の在否と名乗りはここでは見ていない。** その材料は設定ストアにあるので、
+ * 最後の絞り込みは押す画面（`TileGrid`）が `reviveState` で行う。
+ */
+export function useReviveTargets(): CardId[] {
+  return useSyncExternalStore(
+    subscribeStructure,
+    () => reviveTargets,
+    () => reviveTargets,
+  )
+}
+
 /** テストの後始末用。ストアがモジュール単位で生き残るので、明示的に畳む。 */
 export function clearSessions() {
   metas.clear()
@@ -312,6 +463,10 @@ export function clearSessions() {
   accountFilter = null
   pending = []
   scheduled = false
+  reviving.clear()
+  cardErrors.clear()
+  reviveTargets = []
+  reviveFingerprint = ''
 }
 
 function subscribeCard(cardId: CardId, listener: () => void): () => void {

@@ -5,6 +5,8 @@ import {
   permissionModeInfo,
   permissionModeLabel,
   permissionModeTone,
+  reviveReason,
+  reviveState,
   selfhealLabel,
   statusLabel,
 } from './protocol'
@@ -192,6 +194,16 @@ describe('サーバと同じ JSON になること', () => {
     }
     expect(JSON.stringify(message)).toBe(
       `{"t":"set_model","card_id":"${CARD_ID}","model":"opus"}`,
+    )
+  })
+
+  it('revive_session', () => {
+    // 4箇所同期の最後の1つ（復旧設計§4-4）。Rust 側 `client_messageは全種が往復する`
+    // が固定している綴りと1文字も違わないこと。**運ぶのはカードIDだけ**——
+    // 作業ディレクトリや権限モードを載せると、古い写しで起こし直す経路ができる
+    const message: ClientMessage = { t: 'revive_session', card_id: CARD_ID }
+    expect(JSON.stringify(message)).toBe(
+      `{"t":"revive_session","card_id":"${CARD_ID}"}`,
     )
   })
 
@@ -441,5 +453,103 @@ describe('状態のラベル', () => {
     expect(isHookSilent(base)).toBe(true)
     expect(isHookSilent({ ...base, hooks_seen: true })).toBe(false)
     expect(isHookSilent({ ...base, status: { kind: 'working' } })).toBe(false)
+  })
+})
+
+/**
+ * 戻せるかの判定（復旧設計§3-1・§3-2）。
+ *
+ * サーバ側の同じ規則（`SessionMeta::revivable`）と突き合わせる台帳は作らない（§3-3）。
+ * ずれても「押せてしまってサーバが断る」に倒れるだけで、危険側にはならない。
+ */
+describe('戻せるかの判定', () => {
+  const AGENT_ID = '99999999-9999-9999-9999-999999999999'
+
+  function card(overrides: Partial<SessionMeta> = {}): SessionMeta {
+    return {
+      card_id: CARD_ID,
+      project: '/dev/app',
+      // 戻す先。**製品の経路では必ず埋まる**（起動時に採番して渡すため）が、
+      // 記録の形の上では NULL を取りうる
+      claude_session_id: '22222222-2222-2222-2222-222222222222',
+      permission_mode: 'bypassPermissions',
+      model: null,
+      model_label: null,
+      model_requested: null,
+      status: { kind: 'working' },
+      subagent_active: 0,
+      last_activity_at: 0,
+      last_assistant_message: null,
+      created_at: 0,
+      hooks_seen: true,
+      agent_id: null,
+      agent_connected: false,
+      account: null,
+      toml_account: null,
+      ...overrides,
+    }
+  }
+
+  it('接続断のカードは戻せる', () => {
+    expect(reviveState(card(), null)).toEqual({ kind: 'ready' })
+  })
+
+  it('終了したカードも戻せる', () => {
+    // 繋がっていても、擬似ターミナルが消えていれば実体は無い（設計§3-1 の B）
+    const ended = card({
+      agent_connected: true,
+      status: { kind: 'ended', ok: true },
+    })
+    expect(reviveState(ended, null)).toEqual({ kind: 'ready' })
+  })
+
+  it('実体があるカードでは、そもそもボタンを出さない', () => {
+    const live = card({ agent_connected: true })
+    expect(reviveState(live, null)).toEqual({ kind: 'live' })
+    // 出さないのはこの1通りだけ。残りは出したうえで押せなくする（設計§3-2）
+    expect(reviveReason({ kind: 'live' })).toBeNull()
+  })
+
+  it('呼び戻す先が無いカードは、理由を出して押させない', () => {
+    const state = reviveState(card({ claude_session_id: null }), null)
+    expect(state).toEqual({ kind: 'no-target' })
+    expect(reviveReason(state)).toBe('呼び戻す先が記録されていません')
+  })
+
+  it('PC が繋がっていなければ、そう言う', () => {
+    const remote = card({ agent_id: AGENT_ID })
+    // 一覧に居ないときも、居るが切れているときも同じ言い方
+    expect(reviveReason(reviveState(remote, null))).toBe(
+      'この PC が繋がっていません',
+    )
+    expect(
+      reviveReason(reviveState(remote, { connected: false, supports_revive: true })),
+    ).toBe('この PC が繋がっていません')
+  })
+
+  it('名乗らない PC は、版が古いと言う', () => {
+    const remote = card({ agent_id: AGENT_ID })
+    const state = reviveState(remote, { connected: true })
+    expect(state).toEqual({ kind: 'pc-old' })
+    expect(reviveReason(state)).toBe('この PC の版が古くて対応していません')
+  })
+
+  it('在否を先に、能力を後に見る', () => {
+    // 逆にすると、**知らない PC が「版が古い」と断られる**（設計§6-2）。
+    // 存在しないことと古いことを言い分けられなくなる
+    const remote = card({ agent_id: AGENT_ID })
+    expect(reviveState(remote, null)).toEqual({ kind: 'pc-offline' })
+  })
+
+  it('ローカルモードでは PC の在否を理由にしない', () => {
+    // `agents` は常に空なので、素直に引くと全カードが「PC が繋がっていません」になる
+    expect(reviveState(card({ agent_id: null }), null)).toEqual({ kind: 'ready' })
+  })
+
+  it('名乗っている PC が繋がっていれば戻せる', () => {
+    const remote = card({ agent_id: AGENT_ID })
+    expect(
+      reviveState(remote, { connected: true, supports_revive: true }),
+    ).toEqual({ kind: 'ready' })
   })
 })

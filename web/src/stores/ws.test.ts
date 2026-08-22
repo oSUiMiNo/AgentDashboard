@@ -1,5 +1,5 @@
-import type { ClientMessage } from '@/lib/protocol'
-import { clearSessions } from './sessions'
+import type { ClientMessage, ServerMessage } from '@/lib/protocol'
+import { clearSessions, isReviving } from './sessions'
 import { useWsStore } from './ws'
 
 /**
@@ -65,6 +65,11 @@ class FakeSocket {
   /** このソケットが送った操作メッセージ。 */
   requests(): ClientMessage[] {
     return this.sent.map((raw) => JSON.parse(raw) as ClientMessage)
+  }
+
+  /** サーバから1通届いた。 */
+  deliver(message: ServerMessage) {
+    this.onmessage?.({ data: JSON.stringify(message) } as MessageEvent)
   }
 }
 
@@ -214,5 +219,61 @@ describe('WebSocket ストア', () => {
 
     expect(FakeSocket.instances).toHaveLength(1)
     expect(useWsStore.getState().status).toBe('closed')
+  })
+})
+
+/**
+ * 起こし直しの頼みと、失敗の行き先（復旧設計§4-1・§9-4・§9-5）。
+ *
+ * ここで固定するのは3つ——**運ぶのはカードIDだけ**であること、**送れたときだけ
+ * 印を立てる**こと、**失敗の行き先を種別ではなく名指しの有無で決める**こと。
+ */
+describe('起こし直しの頼み', () => {
+  it('運ぶのはカードIDだけ', async () => {
+    // 作業ディレクトリや権限モードを載せると、**古い写しで起こし直す**経路ができる
+    await useWsStore.getState().connect()
+    latest().accept()
+
+    useWsStore.getState().revive(CARD)
+
+    expect(latest().requests()).toEqual([
+      { t: 'revive_session', card_id: CARD },
+    ])
+  })
+
+  it('繋がっていなければ印を立てない', () => {
+    // 届いていない頼みを待ち続けることになる（「復旧中…」のまま押せなくなる）
+    useWsStore.getState().revive(CARD)
+
+    expect(useWsStore.getState().status).toBe('closed')
+    expect(isReviving(CARD)).toBe(false)
+  })
+
+  it('カードを名指しした失敗は、画面全体の帯に出さない', async () => {
+    // 行き先を決めるのは**種別ではなく名指しの有無**。こうしておけば、名指しできる
+    // 失敗を持つ経路が増えてもここを直さずに済む（設計§9-5）
+    await useWsStore.getState().connect()
+    latest().accept()
+
+    latest().deliver({
+      t: 'error',
+      card_id: CARD,
+      message: 'この PC が繋がっていません',
+    })
+
+    expect(useWsStore.getState().lastError).toBeNull()
+  })
+
+  it('名指しの無い失敗は、いままでどおり帯に出す', async () => {
+    await useWsStore.getState().connect()
+    latest().accept()
+
+    latest().deliver({
+      t: 'error',
+      card_id: null,
+      message: '起動できませんでした',
+    })
+
+    expect(useWsStore.getState().lastError).toBe('起動できませんでした')
   })
 })

@@ -502,3 +502,83 @@ export function isEnded(status: SessionStatus): boolean {
 export function isHookSilent(session: SessionMeta): boolean {
   return session.status.kind === 'unknown' && !session.hooks_seen
 }
+
+/**
+ * そのカードを起こし直せるか（復旧設計§3-1・§3-2）。
+ *
+ * `live` だけが「**ボタンを出さない**」で、残りは**出したうえで押せなくする**。
+ * 出さないと「なぜこのカードにだけ無いのか」を利用者が推測することになる。
+ */
+export type ReviveState =
+  /** 実体がある。復旧は要らない */
+  | { kind: 'live' }
+  | { kind: 'ready' }
+  /** 呼び戻す先（CLI のセッションID）が記録に無い */
+  | { kind: 'no-target' }
+  /** そのカードの PC が、どのインスタンスにも繋がっていない */
+  | { kind: 'pc-offline' }
+  /** PC は居るが、起こし直しを名乗っていない（版が古い） */
+  | { kind: 'pc-old' }
+
+/**
+ * そのカードの PC のうち、判定に要る2つだけ。
+ *
+ * [`AgentInfo`](../stores/settings.ts) をそのまま渡せる形にしてある。**型の名前で
+ * 受けない**のは、`lib/` から `stores/` を import すると輪になるため
+ * （`stores/settings.ts` はこのファイルを読んでいる）。
+ */
+export interface ReviveAgent {
+  connected: boolean
+  supports_revive?: boolean
+}
+
+/**
+ * 戻せるかを1つの規則で決める（設計§3-1）。
+ *
+ * サーバ側の同じ規則は `SessionMeta::revivable`（§3-4）にあるが、**突き合わせる台帳は
+ * 作らない**（§3-3）。ずれても「押せてしまってサーバが断る」に倒れるだけで、危険側には
+ * ならない——サーバのほうが材料が多いので、こちらが甘いことはあっても逆は無い。
+ *
+ * 見る順は **実体 → 戻す先 → 在否 → 能力**。在否より先に能力を見ると、**知らない PC が
+ * 「版が古い」と断られ**、存在しないことと古いことを言い分けてしまう（§6-2）。
+ */
+export function reviveState(
+  session: SessionMeta,
+  agent: ReviveAgent | null,
+): ReviveState {
+  // 実体が無いのは2通り（設計§3-1）。接続断は「PC が居ない」と「PC は居るがこの
+  // カードを失った」の両方を含む——後者がセルフホストでの復旧対象そのもの
+  if (session.agent_connected && !isEnded(session.status)) {
+    return { kind: 'live' }
+  }
+  if (session.claude_session_id === null) {
+    return { kind: 'no-target' }
+  }
+  // ローカルモードは PC という単位が無い（`agents` は常に空）。ここで在否を見ると
+  // **全カードが「PC が繋がっていません」になる**
+  if (session.agent_id === null) {
+    return { kind: 'ready' }
+  }
+  if (agent === null || !agent.connected) {
+    return { kind: 'pc-offline' }
+  }
+  if (agent.supports_revive !== true) {
+    return { kind: 'pc-old' }
+  }
+  return { kind: 'ready' }
+}
+
+/** 押せない理由の言葉（押せるとき・出さないときは `null`）。 */
+export function reviveReason(state: ReviveState): string | null {
+  switch (state.kind) {
+    case 'no-target':
+      return '呼び戻す先が記録されていません'
+    case 'pc-offline':
+      return 'この PC が繋がっていません'
+    case 'pc-old':
+      return 'この PC の版が古くて対応していません'
+    case 'live':
+    case 'ready':
+      return null
+  }
+}

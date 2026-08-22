@@ -44,8 +44,10 @@ import { useAuthStore } from '@/stores/auth'
 import { useSettingsStore } from '@/stores/settings'
 import {
   applySessionSnapshot,
+  markReviving,
   patchSessionStatus,
   removeSession,
+  setCardError,
   upsertSession,
 } from '@/stores/sessions'
 import { loadProjects, removeProject, upsertProject } from '@/stores/projects'
@@ -124,6 +126,16 @@ interface WsState {
   setModel: (cardId: CardId, model: ModelId) => void
   kill: (cardId: CardId) => void
   archive: (cardId: CardId) => void
+  /**
+   * 抜け殻のカードを、元の CLI セッションで起こし直す（復旧設計§4-1）。
+   *
+   * **運ぶのはカードIDだけ。** 作業ディレクトリも権限モードも呼び戻し先も記録が
+   * 持っているので、ブラウザから渡すと**古い写しで起こし直す**経路ができる。
+   *
+   * `setModel` と違い**印を立てる**。あちらはサーバが `model_requested` を配って
+   * くれるが、こちらは**席が空くまでカードが1バイトも変わらない**（§9-4）。
+   */
+  revive: (cardId: CardId) => void
   resize: (cardId: CardId, cols: number, rows: number) => void
   setFlow: (cardId: CardId, state: FlowState) => void
   sendPtyInput: (cardId: CardId, data: Uint8Array) => void
@@ -343,6 +355,14 @@ export const useWsStore = create<WsState>((set) => ({
   kill: (cardId) => send({ t: 'kill', card_id: cardId }),
   archive: (cardId) => send({ t: 'archive', card_id: cardId }),
 
+  revive: (cardId) => {
+    if (!send({ t: 'revive_session', card_id: cardId })) {
+      // 繋がっていないのに印を立てると、届いていない頼みを待ち続けることになる
+      return
+    }
+    markReviving(cardId)
+  },
+
   resize: (cardId, cols, rows) => {
     // 台帳の大きさも更新する。繋ぎ直したときに古い大きさで購読し直さないため
     const entry = terminals.get(cardId)
@@ -440,7 +460,13 @@ function handleJson(raw: string, set: SetState) {
       removeProject(message.project_id)
       break
     case 'error':
-      set({ lastError: message.message })
+      // **行き先を決めるのは種別ではなく名指しの有無**（復旧設計§9-5）。こうしておけば、
+      // 名指しできる失敗を持つ経路が増えても、ここを直さずに済む
+      if (message.card_id === null) {
+        set({ lastError: message.message })
+      } else {
+        setCardError(message.card_id, message.message)
+      }
       break
   }
 }

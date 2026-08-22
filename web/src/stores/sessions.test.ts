@@ -3,12 +3,19 @@ import type { SessionMeta } from '@/lib/protocol'
 import {
   applySessionSnapshot,
   clearSessions,
+  getReviveTargets,
   getSession,
+  markReviving,
   patchSessionStatus,
   removeSession,
+  setAccountFilter,
+  setCardError,
   upsertSession,
+  useCardError,
   useProjectCards,
   useProjectGroups,
+  useReviveTargets,
+  useReviving,
   useSessionCard,
 } from './sessions'
 
@@ -216,5 +223,123 @@ describe('一覧ストア', () => {
     applySessionSnapshot([meta(A)])
     // rAF を1度も回していないのに、もう読める
     expect(getSession(A)).toBeDefined()
+  })
+})
+
+/**
+ * 起こし直しの印・断り・候補（復旧設計§9-3・§9-4・§9-5）。
+ *
+ * 印と断りは**カード単位**で持つ。全体に持つと、6枚を並べたときに一覧が丸ごと
+ * 描き直される。候補のほうは**構造の購読で配る**——接続断は構造を変えないので、
+ * ここで知らせないとホームの内訳だけが古いまま残る。
+ */
+describe('起こし直しの印と候補', () => {
+  /** 接続断で、呼び戻し先を持っているカード */
+  function stale(cardId: string, overrides: Partial<SessionMeta> = {}) {
+    return meta(cardId, {
+      agent_connected: false,
+      claude_session_id: '2222',
+      ...overrides,
+    })
+  }
+
+  it('印は押したカードだけを鳴らす', () => {
+    applySessionSnapshot([stale(A), stale(B)])
+    const other = renderHook(() => useReviving(B))
+    const target = renderHook(() => useReviving(A))
+
+    act(() => markReviving(A))
+
+    expect(target.result.current).toBe(true)
+    expect(other.result.current).toBe(false)
+  })
+
+  it('サーバ由来の状態が届いたら印が消える', () => {
+    // 居座らせると「復旧中…」のまま押せないカードが残る
+    applySessionSnapshot([stale(A)])
+    const { result } = renderHook(() => useReviving(A))
+    act(() => markReviving(A))
+    expect(result.current).toBe(true)
+
+    act(() => upsertSession(stale(A, { status: { kind: 'starting' } })))
+
+    expect(result.current).toBe(false)
+  })
+
+  it('断りを立てると、印も一緒に外れる', () => {
+    // 断られたのに「復旧中…」が残ると、二度と押せないカードになる
+    applySessionSnapshot([stale(A)])
+    const reviving = renderHook(() => useReviving(A))
+    const error = renderHook(() => useCardError(A))
+    act(() => markReviving(A))
+
+    act(() => setCardError(A, 'この PC が繋がっていません'))
+
+    expect(reviving.result.current).toBe(false)
+    expect(error.result.current).toBe('この PC が繋がっていません')
+  })
+
+  it('断りもカード単位で出る', () => {
+    applySessionSnapshot([stale(A), stale(B)])
+    const other = renderHook(() => useCardError(B))
+
+    act(() => setCardError(A, '版が古い'))
+
+    expect(other.result.current).toBeNull()
+  })
+
+  it('候補は実体が無いカードだけ', () => {
+    applySessionSnapshot([
+      meta(A),
+      stale(B),
+      meta('cccccccc-0000-0000-0000-000000000003', {
+        status: { kind: 'ended', ok: true },
+      }),
+    ])
+
+    expect(getReviveTargets()).toEqual([
+      B,
+      'cccccccc-0000-0000-0000-000000000003',
+    ])
+  })
+
+  it('接続断になった瞬間に、構造の購読者へ届く', () => {
+    // **接続断は構造を変えない**（同じ箱に同じカードが並んだまま）ので、
+    // ここで鳴らさないとホームの内訳だけが古いまま残る
+    applySessionSnapshot([meta(A)])
+    const { result } = renderHook(() => useReviveTargets())
+    expect(result.current).toEqual([])
+
+    act(() => upsertSession(stale(A)))
+
+    expect(result.current).toEqual([A])
+  })
+
+  it('絞り込みで見えていないカードは候補に入れない', () => {
+    // 押した人が数を予測できること（要件）
+    applySessionSnapshot([
+      stale(A, { toml_account: 'しごと' }),
+      stale(B, { toml_account: 'あそび' }),
+    ])
+    expect(getReviveTargets()).toEqual([A, B])
+
+    act(() => setAccountFilter('しごと'))
+
+    expect(getReviveTargets()).toEqual([A])
+  })
+
+  it('後始末で印も断りも候補も畳まれる', () => {
+    // ストアはモジュール単位で生き残るので、残すと次のテストへ漏れる
+    applySessionSnapshot([stale(A)])
+    markReviving(A)
+    setCardError(A, '版が古い')
+
+    clearSessions()
+
+    expect(getReviveTargets()).toEqual([])
+    const reviving = renderHook(() => useReviving(A))
+    const error = renderHook(() => useCardError(A))
+    expect(reviving.result.current).toBe(false)
+    expect(error.result.current).toBeNull()
   })
 })
