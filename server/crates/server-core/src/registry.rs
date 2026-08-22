@@ -841,11 +841,14 @@ impl SessionRegistry {
         //
         // 記録が手元に無いときだけ DB を見るので、通常の更新に問い合わせは増えない。
         // CardId は UUIDv4 なので、外したIDが後から別のセッションに割り当たることもない
+        // 既に知っているカードなら、生まれた時刻は**記録の側が正**（下記）
+        let mut 記録の生まれた時刻 = None;
         match self.get(meta.card_id) {
             Some(record) => {
                 if self.refuse_crossing(&origin.account_id, record.account_id, meta.card_id) {
                     return Ok(());
                 }
+                記録の生まれた時刻 = Some(record.meta().created_at);
             }
             None => match self.stored(meta.card_id).await? {
                 Some((owner, _))
@@ -863,6 +866,19 @@ impl SessionRegistry {
         // 名乗られても通らないのは、ここで見ているのが**申告ではなく接続**だから（§8-5）
         meta.agent_id = origin.agent_id;
         meta.account = origin.account.clone();
+        // **生まれた時刻もサーバが決める。** これは擬似ターミナルではなく**カードの性質**で、
+        // カードは起こし直しをまたいで同じものであり続ける（初期実装§3）。
+        //
+        // 起こし直し（`revive`）は同じ CardId に別の実体を載せ直すので、セッションホストは
+        // **そのとき採った時刻**を申告してくる。素直に取り込むと、**一覧の並びが動く**——
+        // 並びは `created_at` の昇順で、しかも「群の中の並びは追加した順で固定してあり、
+        // 状態が変わっても動かない」と約束してある（README。押そうとした瞬間に的が逃げないため）。
+        //
+        // 実機で踏んだ（2026-08-23）。復旧した2枚が枠の末尾へ動いた。「全て復旧」を押すと
+        // **群ごと並び替わる**ことになるので、約束のほうが先に壊れる。
+        if let Some(生まれた時刻) = 記録の生まれた時刻 {
+            meta.created_at = 生まれた時刻;
+        }
         // 申告が持ち主と食い違ったら**記録には残すが帰属は動かさない**。警告を出すのは、
         // 利用者から見ると「toml に書いたのに効かない」だけに見えるため
         if let (Some(claimed), Some(actual)) = (&meta.toml_account, &origin.account)

@@ -423,3 +423,68 @@ async fn 他人のカードは名指ししても外せない() {
         backend.finish().await;
     }
 }
+
+/// **回帰テスト。** 起こし直し（`revive`）は同じ CardId に別の実体を載せ直すので、
+/// セッションホストは**そのとき採った時刻**を `created_at` として申告してくる。
+/// 素直に取り込むと**一覧の並びが動く**——並びは `created_at` の昇順で、しかも
+/// 「群の中の並びは追加した順で固定してあり、状態が変わっても動かない」と約束してある
+/// （README。押そうとした瞬間に的が逃げないため）。
+///
+/// 実機で踏んだ（2026-08-23）。復旧した2枚が枠の末尾へ動いた。「全て復旧」なら群ごと動く。
+#[tokio::test]
+async fn 起こし直しの報告でカードの生まれた時刻は動かない() {
+    for backend in common::backends("created_at").await {
+        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+            .await
+            .expect("記録層を立てられること");
+        let card_id = CardId::new();
+
+        registry.apply(&local(), upsert(card_id)).await;
+        let 最初 = registry
+            .get(card_id)
+            .expect("カードが在ること")
+            .meta()
+            .created_at;
+
+        // 起こし直しの報告。**同じ CardId で、新しい時刻を名乗ってくる**
+        let mut 起こし直し = meta(card_id);
+        起こし直し.created_at = 最初 + 60_000;
+        起こし直し.status = SessionStatus::Starting;
+        registry
+            .apply(
+                &local(),
+                ServerMessage::SessionUpsert {
+                    session: Box::new(起こし直し),
+                },
+            )
+            .await;
+
+        let あと = registry.get(card_id).expect("カードが在ること").meta();
+        assert_eq!(
+            あと.created_at, 最初,
+            "[{}] 生まれた時刻が動いた（一覧の並びが動く）",
+            backend.name
+        );
+        assert_eq!(
+            あと.status,
+            SessionStatus::Starting,
+            "[{}] 生まれた時刻以外は、いままでどおり新しい報告で更新されること",
+            backend.name
+        );
+
+        // **記録にも残っていること。** メモリだけ守っても、起こし直しで元へ戻る
+        let 読み直し = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+            .await
+            .expect("記録層を立て直せること");
+        assert_eq!(
+            読み直し
+                .get(card_id)
+                .expect("記録から戻ること")
+                .meta()
+                .created_at,
+            最初,
+            "[{}] 記録の側が新しい時刻で上書きされている",
+            backend.name
+        );
+    }
+}
