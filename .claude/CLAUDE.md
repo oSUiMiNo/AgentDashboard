@@ -133,6 +133,20 @@ setsid nohup ./server/target/release/agentdashboard >> ~/agentdashboard-run.log 
 | 型 | `RemoteSessionHost` ／ `LocalSessionHost` | `RemoteSessionHost` ／ `LocalSessionHost` |
 | 型 | `SessionHostConfig` ／ `SessionHostLink` ／ `SessionHostView` | `SessionHostConfig` ／ `SessionHostLink` ／ `SessionHostView` |
 
+### 利用者の語法（画面の呼び方）
+**利用者が「セッション画面」と言うとき、指しているのは2つある。**
+
+| 言い方 | 指しているもの |
+|---|---|
+| **セッション画面** | **セッション専用画面（`/s/:cardId`）と、PJT 専用画面に横並びで出る各セッションの区画の両方** |
+| セッション専用画面 | 単独で開いたほう（`/s/:cardId`）だけ |
+| PJT 専用画面 | `/p/:host/:project`。中にセッションの区画が横並びで入る |
+| 小窓（カード） | 一覧に並ぶタイル |
+
+**片方だけに実装して「入れた」と言わないこと。** 横並びは `SessionView` を `compact` で並べたものなので、**`SessionView` へ置けば両方に出る**——逆に、単独画面の側だけへ足すと横並びに出ない。
+
+**`compact` で出さない判断には理由が要る。** 十字ボタンは横並びで出さないと決めているが、あれは**宛先が1つに定まらない**ため（方向キーをどの端末へ撃つのか曖昧になる）。**カードごとに宛先が一意な操作には、この理由は当てはまらない。**
+
 ### 据え置くもの（変えてはいけない）
 | 据え置くもの | なぜ |
 |---|---|
