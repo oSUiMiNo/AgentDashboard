@@ -10,20 +10,90 @@
  */
 
 import { ProjectGroup } from '@/components/ProjectGroup/ProjectGroup'
+import { Button } from '@/components/ui/button'
+import { reviveState } from '@/lib/protocol'
 import {
+  getSession,
   setAccountFilter,
   useAccountFilter,
   useProjectGroups,
+  useReviveTargets,
   useTomlAccounts,
 } from '@/stores/sessions'
+import { agentOf, useSettingsStore } from '@/stores/settings'
+import { useWsStore } from '@/stores/ws'
 
 export function TileGrid() {
   const groups = useProjectGroups()
   const accounts = useTomlAccounts()
   const filter = useAccountFilter()
+  const candidates = useReviveTargets()
+  const agents = useSettingsStore((state) => state.settings.agents)
+  const revive = useWsStore((state) => state.revive)
+
+  /*
+    起こし直せるカードを数える（復旧設計§9-3）。**ストアが持っているのは候補まで**
+    （実体が無いカード）で、PC の在否と名乗りはここで見る——その材料は設定ストアに
+    あるため。数はブラウザが手元のカードから数える。版の切替と違い、**全カードを
+    既に持っている**ので、サーバに数えさせる理由が無い。
+  */
+  let disconnected = 0
+  let ended = 0
+  const targets: string[] = []
+  for (const cardId of candidates) {
+    const meta = getSession(cardId)
+    if (!meta) {
+      continue
+    }
+    if (reviveState(meta, agentOf(agents, meta.agent_id)).kind !== 'ready') {
+      // 押しても断られるカードは数に入れない。**押した人が数を予測できる**こと（要件）
+      continue
+    }
+    targets.push(cardId)
+    if (meta.status.kind === 'ended') {
+      ended += 1
+    } else {
+      disconnected += 1
+    }
+  }
 
   return (
     <div className="flex flex-col gap-3">
+      {/*
+        絞り込みの `<select>` に相乗りさせず、**独立した行**にする（設計§9-3）。
+        あちらは名乗りを持つカードが1枚も無ければ消えるので、載せると一緒に消える。
+
+        内訳は**押すボタンより上**に出す（版の切替の雛形）。**0枚なら0枚と言う**——
+        「全て」の中身が分からないと押せない、という要件はここで満たす
+      */}
+      <div
+        data-testid="revive-all-row"
+        className="flex flex-wrap items-center gap-2 text-xs"
+      >
+        <span data-testid="revive-breakdown" className="text-muted-foreground">
+          {targets.length === 0
+            ? '起こし直せるカードはありません（0枚）'
+            : `起こし直せるカード：接続断 ${disconnected}枚／終了 ${ended}枚`}
+        </span>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          data-testid="revive-all"
+          disabled={targets.length === 0}
+          title="接続断・終了しているカードを、元の CLI セッションでまとめて起こし直します"
+          onClick={() => {
+            // 口は増やさない。**対象ぶん1枚ずつ送る**——並べるのは PC 側なので、
+            // 押し手は数を気にしなくてよい（PC が複数あれば自然に台数ぶん並列になる）
+            for (const cardId of targets) {
+              revive(cardId)
+            }
+          }}
+        >
+          全て復旧
+        </Button>
+      </div>
+
       {/*
         `.agent-dashboard.toml` が名乗った名前で絞り込む（セルフホスト化設計§8-5）。
         **これは権限ではない**——ローカルモードには認証が無く、ここは「いまはこの

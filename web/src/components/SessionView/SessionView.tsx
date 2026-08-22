@@ -27,15 +27,24 @@ import { TerminalPane } from '@/components/TerminalPane/TerminalPane'
 import { TranscriptTree } from '@/components/TranscriptTree/TranscriptTree'
 import { dropDraft } from '@/lib/drafts'
 import { formatElapsed, formatScreenInterval } from '@/lib/time'
-import { isEnded, isHookSilent, statusLabel, statusTone } from '@/lib/protocol'
+import {
+  isEnded,
+  isHookSilent,
+  permissionModeLabel,
+  permissionModeTone,
+  reviveReason,
+  reviveState,
+  statusLabel,
+  statusTone,
+} from '@/lib/protocol'
 import { ProjectFiles } from '@/components/ProjectFiles/ProjectFiles'
 import { useFilesPanel } from '@/lib/filesPanel'
 import { LOCAL_HOST } from '@/lib/routes'
 import type { CardId } from '@/lib/protocol'
 import { useNow } from '@/lib/sessions'
 import { useAuthStore } from '@/stores/auth'
-import { useSessionCard } from '@/stores/sessions'
-import { useSettingsStore } from '@/stores/settings'
+import { useCardError, useReviving, useSessionCard } from '@/stores/sessions'
+import { agentOf, useSettingsStore } from '@/stores/settings'
 import { useWsStore } from '@/stores/ws'
 
 type View = 'transcript' | 'terminal'
@@ -49,6 +58,10 @@ interface Props {
 export function SessionView({ cardId, compact = false }: Props) {
   const kill = useWsStore((state) => state.kill)
   const archive = useWsStore((state) => state.archive)
+  const revive = useWsStore((state) => state.revive)
+  const reviving = useReviving(cardId)
+  const cardError = useCardError(cardId)
+  const agents = useSettingsStore((state) => state.settings.agents)
   // 外したカードの書きかけを忘れるのに要る。**下書きの鍵はアカウントごと**
   const account = useAuthStore((state) => state.auth.account)
   // 中身は自分で購読する。横並びのとき、隣のセッションの状態変化で作り直されないため
@@ -63,6 +76,11 @@ export function SessionView({ cardId, compact = false }: Props) {
     // 消えた直後の一瞬。単独表示のときは呼び出し側が「見つかりません」を出す
     return null
   }
+
+  // 起こし直せるか（復旧設計§3-2）。**この画面には「接続断」の表示そのものが無い**
+  // ので、このボタンがその合図を兼ねる
+  const revivable = reviveState(session, agentOf(agents, session.agent_id))
+  const reviveWhy = reviveReason(revivable)
 
   return (
     <section
@@ -135,6 +153,41 @@ export function SessionView({ cardId, compact = false }: Props) {
               <PermissionModePicker cardId={session.card_id} />
             </>
           )}
+          {/*
+            **起こし直しは `compact` の分岐の外**に置く（設計§9-2）。宛先がカードごとに
+            一意なので、十字ボタンを横並びで出さなかった理由（どの端末へ撃つのか
+            曖昧になる）は当てはまらない。終了・削除が横並びでも出ているのと同じ扱い
+          */}
+          {revivable.kind !== 'live' && (
+            <>
+              {/*
+                押す前に権限モードを見せる（要件）。**終了したカードではピッカーが
+                出ない**ので、そのときだけ静的なバッジで補う——実機の記録では
+                23枚とも `bypassPermissions` だった（設計§15-4）ので、これは飾りではない
+              */}
+              {isEnded(session.status) && session.permission_mode !== null && (
+                <span
+                  data-testid="revive-mode"
+                  data-mode={session.permission_mode}
+                  className={`shrink-0 rounded border px-1.5 py-0.5 text-[0.7rem] ${permissionModeTone(session.permission_mode)}`}
+                  title="このモードで起こし直します"
+                >
+                  {permissionModeLabel(session.permission_mode)}
+                </span>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                data-testid="revive-button"
+                data-state={revivable.kind}
+                disabled={revivable.kind !== 'ready' || reviving}
+                title={reviveWhy ?? '元の CLI セッションで起こし直します'}
+                onClick={() => revive(session.card_id)}
+              >
+                {reviving ? '復旧中…' : '復旧'}
+              </Button>
+            </>
+          )}
           <Button
             variant="outline"
             size="sm"
@@ -157,6 +210,16 @@ export function SessionView({ cardId, compact = false }: Props) {
           </Button>
         </div>
       </header>
+
+      {/*
+        断りはそのカードに出す（設計§9-5）。画面全体の帯へ出すと、横並びのときに
+        **どのカードの話なのか分からなくなる**
+      */}
+      {cardError && (
+        <p data-testid="card-error" className="text-xs text-rose-400">
+          {cardError}
+        </p>
+      )}
 
       <div className="flex min-h-0 flex-1 gap-4">
         {!compact && filesOpen && (

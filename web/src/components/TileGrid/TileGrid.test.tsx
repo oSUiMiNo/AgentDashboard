@@ -3,7 +3,14 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
 import { TileGrid } from './TileGrid'
 import type { SessionMeta } from '@/lib/protocol'
-import { applySessionSnapshot, clearSessions } from '@/stores/sessions'
+import {
+  applySessionSnapshot,
+  clearSessions,
+  upsertSession,
+} from '@/stores/sessions'
+import { useSettingsStore } from '@/stores/settings'
+import { useWsStore } from '@/stores/ws'
+import { settingsFixture } from '@/test/fixtures'
 
 /**
  * 一覧の絞り込み（セルフホスト化設計§8-5、テスト計画フェーズ5）。
@@ -105,5 +112,156 @@ describe('名乗りによる絞り込み', () => {
     })
 
     expect(screen.getByText(/「しごと」/)).toBeInTheDocument()
+  })
+})
+
+/**
+ * ホームの「全て復旧」（復旧設計§9-3）。
+ *
+ * 押す前に**内訳**を出す。「全て」の中身が分からないと押せない、というのが要件で、
+ * 雛形は版の切替の「いま入れ替えると N 枚が抜け殻になります」——あちらも**押す
+ * ボタンより上に**数を置いている。**0枚なら0枚と言う**（沈黙させない）。
+ *
+ * 数はブラウザが手元のカードから数える。版の切替と違い、**全カードを既に持っている**
+ * ので、サーバに数えさせる理由が無い。
+ */
+describe('全て復旧', () => {
+  const PC = '77777777-7777-7777-7777-777777777777'
+
+  /** 接続断で、呼び戻し先を持っているカード */
+  function stale(cardId: string, overrides: Partial<SessionMeta> = {}) {
+    return meta(cardId, {
+      agent_connected: false,
+      claude_session_id: `2222${cardId}`,
+      ...overrides,
+    })
+  }
+
+  beforeEach(() => {
+    useSettingsStore.setState({ settings: settingsFixture(), loading: false })
+    useWsStore.setState({ revive: vi.fn() })
+  })
+
+  it('0枚のときは0枚と言い、押させない', () => {
+    applySessionSnapshot([meta('a'), meta('b')])
+    renderGrid()
+
+    expect(screen.getByTestId('revive-breakdown')).toHaveTextContent(
+      '起こし直せるカードはありません（0枚）',
+    )
+    expect(screen.getByTestId('revive-all')).toBeDisabled()
+  })
+
+  it('内訳を接続断と終了に分けて出す', () => {
+    // 合計だけだと、**自分で閉じたものが黙って蘇る**ことに気づけない
+    applySessionSnapshot([
+      stale('a'),
+      stale('b'),
+      stale('c', { agent_connected: true, status: { kind: 'ended', ok: true } }),
+      meta('d'),
+    ])
+    renderGrid()
+
+    expect(screen.getByTestId('revive-breakdown')).toHaveTextContent(
+      '起こし直せるカード：接続断 2枚／終了 1枚',
+    )
+  })
+
+  it('押すと、対象ぶんだけ起こし直すよう頼む', async () => {
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    applySessionSnapshot([stale('a'), meta('b'), stale('c')])
+    renderGrid()
+
+    await userEvent.click(screen.getByTestId('revive-all'))
+
+    expect(revive).toHaveBeenCalledTimes(2)
+    expect(revive).toHaveBeenCalledWith('a')
+    expect(revive).toHaveBeenCalledWith('c')
+    // 実体があるカードは巻き込まない
+    expect(revive).not.toHaveBeenCalledWith('b')
+  })
+
+  it('押しても断られるカードは数にも対象にも入れない', async () => {
+    // **押した人が数を予測できること**（要件）。数えたものと送るものを一致させる
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    useSettingsStore.setState({
+      settings: settingsFixture({
+        agents: [
+          {
+            id: PC,
+            name: '仕事用ノート',
+            last_seen_at: 1,
+            connected: false,
+            supports_revive: true,
+          },
+        ],
+      }),
+      loading: false,
+    })
+    applySessionSnapshot([
+      stale('a'),
+      // 繋がっていない PC のカードと、呼び戻し先の無いカード
+      stale('b', { agent_id: PC }),
+      stale('c', { claude_session_id: null }),
+    ])
+    renderGrid()
+
+    expect(screen.getByTestId('revive-breakdown')).toHaveTextContent(
+      '接続断 1枚／終了 0枚',
+    )
+    await userEvent.click(screen.getByTestId('revive-all'))
+    expect(revive).toHaveBeenCalledTimes(1)
+    expect(revive).toHaveBeenCalledWith('a')
+  })
+
+  it('絞り込みで見えていないカードは起こさない', async () => {
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    applySessionSnapshot([
+      stale('a', { toml_account: 'しごと' }),
+      stale('b', { toml_account: 'あそび' }),
+    ])
+    renderGrid()
+
+    expect(screen.getByTestId('revive-breakdown')).toHaveTextContent('接続断 2枚')
+    await userEvent.selectOptions(screen.getByTestId('account-filter'), 'しごと')
+
+    expect(screen.getByTestId('revive-breakdown')).toHaveTextContent('接続断 1枚')
+    await userEvent.click(screen.getByTestId('revive-all'))
+    expect(revive).toHaveBeenCalledTimes(1)
+    expect(revive).toHaveBeenCalledWith('a')
+  })
+
+  it('接続断になった瞬間に内訳が動く', () => {
+    // **接続断は構造を変えない**（同じ箱に同じカードが並んだまま）ので、
+    // 構造の購読だけに任せると内訳が古いまま残る
+    applySessionSnapshot([meta('a')])
+    renderGrid()
+    expect(screen.getByTestId('revive-breakdown')).toHaveTextContent('0枚')
+
+    act(() => {
+      upsertSession(stale('a'))
+    })
+
+    expect(screen.getByTestId('revive-breakdown')).toHaveTextContent('接続断 1枚')
+  })
+
+  it('接続断から終了へ移ったら、内訳の内わけも動く', () => {
+    // 顔ぶれだけを比べると、同じカードが別の欄へ移ったときに気づけない
+    applySessionSnapshot([stale('a')])
+    renderGrid()
+    expect(screen.getByTestId('revive-breakdown')).toHaveTextContent(
+      '接続断 1枚／終了 0枚',
+    )
+
+    act(() => {
+      upsertSession(stale('a', { status: { kind: 'ended', ok: false } }))
+    })
+
+    expect(screen.getByTestId('revive-breakdown')).toHaveTextContent(
+      '接続断 0枚／終了 1枚',
+    )
   })
 })

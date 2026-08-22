@@ -1,10 +1,17 @@
-import { cleanup, render, screen } from '@testing-library/react'
+import { act, cleanup, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { SessionTile } from './SessionTile'
 import type { SessionMeta, SessionStatus } from '@/lib/protocol'
-import { applySessionSnapshot, clearSessions } from '@/stores/sessions'
+import {
+  applySessionSnapshot,
+  clearSessions,
+  markReviving,
+  setCardError,
+  upsertSession,
+} from '@/stores/sessions'
 import { useSettingsStore } from '@/stores/settings'
+import { useWsStore } from '@/stores/ws'
 import { settingsFixture } from '@/test/fixtures'
 
 /**
@@ -275,5 +282,209 @@ describe('どの PC のセッションかと、その鮮度（セルフホスト
     renderTile(meta({ toml_account: 'しごと' }))
 
     expect(screen.getByTestId('toml-account-badge')).toHaveTextContent('@しごと')
+  })
+})
+
+/**
+ * 小窓の復旧ボタン（復旧設計§9-1・§9-4・§9-5）。
+ *
+ * ここで見るのは3つ——**器を変えていないこと**（キーボードで到達も起動もできる）、
+ * **押しても専用画面へ移らないこと**（伝播を止めている）、**押せない理由が読めること**。
+ *
+ * 器を `div` にすると `<button>` が担っている Tab / Enter / Space の到達性を失う。
+ * それを避けるために「包んで兄弟として重ねる」形にしてあるので、**到達性そのものを
+ * 1本押さえておく**。
+ */
+describe('SessionTile の復旧', () => {
+  const PC2 = '77777777-7777-7777-7777-777777777777'
+  /** 接続断で、呼び戻し先を持っているカード（＝復旧の本命） */
+  function stale(overrides: Partial<SessionMeta> = {}): SessionMeta {
+    return meta({
+      agent_connected: false,
+      claude_session_id: '22222222-2222-2222-2222-222222222222',
+      ...overrides,
+    })
+  }
+
+  beforeEach(() => {
+    useSettingsStore.setState({ settings: settingsFixture(), loading: false })
+    useWsStore.setState({ revive: vi.fn() })
+  })
+
+  it('実体があるカードにはボタンを出さない', () => {
+    // 出さないのはこの1通りだけ（設計§3-2）
+    renderTile(meta({ agent_connected: true, status: { kind: 'working' } }))
+    expect(screen.queryByTestId('revive-button')).toBeNull()
+  })
+
+  it('接続断のカードには押せるボタンが出る', () => {
+    renderTile(stale())
+    const button = screen.getByTestId('revive-button')
+    expect(button).toBeEnabled()
+    expect(button.dataset.state).toBe('ready')
+  })
+
+  it('終了したカードにも出る', () => {
+    renderTile(stale({ agent_connected: true, status: { kind: 'ended', ok: true } }))
+    expect(screen.getByTestId('revive-button')).toBeEnabled()
+  })
+
+  it('押すと、そのカードを起こし直すよう頼む', async () => {
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    renderTile(stale())
+
+    await userEvent.click(screen.getByTestId('revive-button'))
+
+    expect(revive).toHaveBeenCalledWith(CARD)
+  })
+
+  it('押しても画面が切り替わらない', async () => {
+    /*
+      **伝播の相手は器（小窓）ではなく、その外側の枠である。** ボタンは器の「中」では
+      なく `relative` の入れ物の中に**兄弟として**置いてあるので（設計§9-1）、器へは
+      構造上そもそも届かない。届くのは `ProjectGroup` の `<section>` で、あそこは
+      **余白のクリックで PJT 専用画面へ移る**（同じ場所に2つの意味がある）。
+
+      したがって枠の中に置いて確かめる。**小窓を単体で描いて確かめると、止めるのを
+      やめても落ちない**——最初にそう書いて空振りした。
+    */
+    applySessionSnapshot([stale()])
+    const onGroupClick = vi.fn()
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route
+            path="/"
+            element={
+              // ProjectGroup の <section>（余白クリックで PJT 専用画面へ）の役
+              <section onClick={onGroupClick}>
+                <SessionTile cardId={CARD} />
+              </section>
+            }
+          />
+          <Route path="/s/:cardId" element={<p>専用画面</p>} />
+        </Routes>
+      </MemoryRouter>,
+    )
+
+    await userEvent.click(screen.getByTestId('revive-button'))
+
+    expect(onGroupClick).not.toHaveBeenCalled()
+    expect(screen.queryByText('専用画面')).toBeNull()
+  })
+
+  it('小窓はいままでどおりキーボードで到達でき、Enter で開く', async () => {
+    // 器を `div` に変えていないことの担保（設計§9-1）
+    renderTile(stale())
+
+    await userEvent.tab()
+    expect(screen.getByTestId('session-tile')).toHaveFocus()
+
+    await userEvent.keyboard('{Enter}')
+    expect(screen.getByText('専用画面')).toBeInTheDocument()
+  })
+
+  it('押せないときも、ボタンは出て理由が読める', () => {
+    // 出さないと「なぜこのカードにだけ無いのか」を推測させることになる
+    renderTile(stale({ claude_session_id: null }))
+
+    const button = screen.getByTestId('revive-button')
+    expect(button).toBeDisabled()
+    expect(button.dataset.state).toBe('no-target')
+    expect(button).toHaveAttribute('title', '呼び戻す先が記録されていません')
+  })
+
+  it('PC が繋がっていなければ、そう言って押させない', () => {
+    useSettingsStore.setState({
+      settings: settingsFixture({
+        agents: [
+          {
+            id: PC2,
+            name: '仕事用ノート',
+            last_seen_at: 1,
+            connected: false,
+            supports_revive: true,
+          },
+        ],
+      }),
+      loading: false,
+    })
+    renderTile(stale({ agent_id: PC2 }))
+
+    const button = screen.getByTestId('revive-button')
+    expect(button).toBeDisabled()
+    expect(button).toHaveAttribute('title', 'この PC が繋がっていません')
+  })
+
+  it('名乗らない PC では、版が古いと言う', () => {
+    useSettingsStore.setState({
+      settings: settingsFixture({
+        agents: [
+          { id: PC2, name: '仕事用ノート', last_seen_at: 1, connected: true },
+        ],
+      }),
+      loading: false,
+    })
+    renderTile(stale({ agent_id: PC2 }))
+
+    expect(screen.getByTestId('revive-button')).toHaveAttribute(
+      'title',
+      'この PC の版が古くて対応していません',
+    )
+  })
+
+  it('押している間は「復旧中…」になり、二度押せない', async () => {
+    // 席が空くまでカードは1バイトも変わらない（設計§9-4）。印が無いと手応えが出ない
+    const revive = vi.fn(() => markReviving(CARD))
+    useWsStore.setState({ revive })
+    renderTile(stale())
+
+    await userEvent.click(screen.getByTestId('revive-button'))
+
+    const button = screen.getByTestId('revive-button')
+    expect(button).toHaveTextContent('復旧中…')
+    expect(button).toBeDisabled()
+  })
+
+  it('サーバ由来の状態が届いたら、印が消える', () => {
+    renderTile(stale())
+    act(() => markReviving(CARD))
+    expect(screen.getByTestId('revive-button')).toHaveTextContent('復旧中…')
+
+    // 起こし直しが始まると、そのカードの `session_upsert` が流れてくる
+    act(() =>
+      upsertSession(stale({ status: { kind: 'starting' }, agent_connected: true })),
+    )
+
+    expect(screen.queryByTestId('revive-button')).toBeNull()
+  })
+
+  it('断りはそのカードに出る', () => {
+    // 画面全体の帯ではなく名指しの場所へ（設計§9-5）
+    renderTile(stale())
+    act(() => setCardError(CARD, 'この PC が繋がっていません'))
+
+    expect(screen.getByTestId('card-error')).toHaveTextContent(
+      'この PC が繋がっていません',
+    )
+    // 断られたのに「復旧中…」が残ると、二度と押せないカードになる
+    expect(screen.getByTestId('revive-button')).toHaveTextContent('復旧')
+  })
+
+  it('印は押したカードだけに立つ', () => {
+    // 全体に持つと、6枚を並べたときに一覧が丸ごと描き直される（設計§9-4）
+    const other = '33333333-3333-3333-3333-333333333333'
+    applySessionSnapshot([stale(), stale({ card_id: other })])
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <SessionTile cardId={other} />
+      </MemoryRouter>,
+    )
+    act(() => markReviving(CARD))
+
+    // **部分一致で見ない。**「復旧中…」は「復旧」を含むので、
+    // `toHaveTextContent('復旧')` では巻き添えを捕まえられない（実際に空振りした）
+    expect(screen.getByTestId('revive-button')).not.toHaveTextContent('復旧中')
   })
 })
