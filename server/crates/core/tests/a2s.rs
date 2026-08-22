@@ -1187,6 +1187,34 @@ async fn PC_の版が名乗りから一覧まで運ばれる() {
 }
 
 #[tokio::test]
+async fn PC_の起こし直しの名乗りが一覧まで運ばれる() {
+    // 押せない理由を**4通り言い分ける**（復旧設計§3-2）ために、画面は「この PC が
+    // 起こし直しに対応しているか」を知る必要がある。**版から推し量らない**——
+    // §5-2 が「能力ごとに1欄」と決めているので、画面側だけ版で判定すると食い違う。
+    //
+    // 値は名乗りから記録（`agents.capabilities`）まで既に届いている。ここで見るのは
+    // **一覧へ運び忘れていないか**だけで、落とすと画面が全部「版が古い」と言い出す。
+    let a2s = A2s::start("agent-revive").await;
+
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    loop {
+        let agents = server_core::account::agents_of(&a2s.hub, a2s.account_id)
+            .await
+            .expect("PC の一覧を読めること");
+        if let Some(agent) = agents.first()
+            && agent.supports_revive
+        {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{TIMEOUT:?} 以内に起こし直しの名乗りが運ばれてきませんでした: {agents:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
 async fn 同期間隔の変更は次の接続を待たずに効く() {
     // 設定を変えたのに「次に繋ぎ直すまで古い間隔で送り続ける」のでは、変えた意味が
     // 半分無くなる（設計§13-3）。**間隔が長い状態から始めて、押し込んだら届く**ことを見る

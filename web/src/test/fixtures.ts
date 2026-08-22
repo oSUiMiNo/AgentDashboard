@@ -40,12 +40,25 @@ export function localModelTable(
   return { model_tables: { local: { aliases, catalog } } }
 }
 
-/** 別の PC のモデル表を持つ設定（PC 名バッジと per-agent 表の検証用）。 */
+/**
+ * 別の PC のモデル表を持つ設定（PC 名バッジと per-agent 表の検証用）。
+ *
+ * 既定は**繋がっていて、復旧に対応している PC**（いまの版のセッションホストと同じ形）。
+ * 落ちている PC・版が古い PC を作りたいテストだけが `state` で上書きする（復旧設計§3-2）。
+ */
 export function remoteAgent(
   id: string,
   name: string,
   table: { aliases?: ModelAliasSeen[]; catalog?: ModelCatalogEntry[] } = {},
+  state: Partial<Pick<AgentInfo, 'connected' | 'supports_revive'>> = {},
 ): Partial<Settings> {
-  const agent: AgentInfo = { id, name, last_seen_at: 1, connected: true }
+  const agent: AgentInfo = {
+    id,
+    name,
+    last_seen_at: 1,
+    connected: true,
+    supports_revive: true,
+    ...state,
+  }
   return { agents: [agent], model_tables: { [id]: table } }
 }

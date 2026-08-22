@@ -32,6 +32,14 @@ export interface AgentInfo {
   connected: boolean
   /** その PC のセッションホストの版（CICD設計§16）。名乗っていなければ無い */
   version?: string | null
+  /**
+   * 抜け殻のカードを起こし直せるか（復旧設計§3-6）。
+   *
+   * 押せない理由の4通りのうち「この PC の版が古い」だけは、これが無いと言えない。
+   * **省略可にしてあるのはサーバが古い場合のため**——無い＝名乗っていない＝できない、
+   * と読む（`false` と同じ扱いで、判定側が `?? false` する）。
+   */
+  supports_revive?: boolean
 }
 
 /** 1台の PC が名乗ったモデルの表（設計§13-4）。 */
@@ -242,15 +250,28 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   },
 }))
 
+/**
+ * そのセッションが属する PC（分からなければ `null`）。
+ *
+ * `null` は2つの意味を兼ねる——**ローカルモード**（`agentId` がそもそも無い）と、
+ * **知らない PC**（一覧に居ない）。区別が要るのは呼ぶ側なので、ここでは分けない。
+ */
+export function agentOf(
+  agents: AgentInfo[],
+  agentId: string | null,
+): AgentInfo | null {
+  if (agentId === null) {
+    return null
+  }
+  return agents.find((agent) => agent.id === agentId) ?? null
+}
+
 /** そのセッションが属する PC の名前（分からなければ `null`）。 */
 export function agentName(
   agents: AgentInfo[],
   agentId: string | null,
 ): string | null {
-  if (agentId === null) {
-    return null
-  }
-  return agents.find((agent) => agent.id === agentId)?.name ?? null
+  return agentOf(agents, agentId)?.name ?? null
 }
 
 /** そのセッションに効くモデル表（設計§13-4）。ローカルは `"local"` を引く。 */

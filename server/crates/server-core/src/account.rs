@@ -85,6 +85,15 @@ pub struct SessionHostView {
     /// 見せるのは、**危ない組み合わせに気づけるようにする**ため。サーバのほうが古いと、
     /// 必須の項目が1つ増えるだけで報告全体が解けなくなり、カードが1枚も出なくなる。
     pub version: Option<String>,
+    /// 抜け殻のカードを起こし直せるか（復旧設計§3-6）。
+    ///
+    /// 画面が押せない理由を**4通り言い分ける**ために要る（§3-2）。**版から推し量らない**
+    /// ——§5-2 が「能力ごとに1欄」と決めており、画面だけ版で判定するとその判断と食い違う。
+    ///
+    /// **`default` は必須。** この型は CLI も読むので、名乗りを返さない古いサーバを
+    /// 相手にすると「応答の形を読めません」で落ちる（`TokenView::kind` で踏んだのと同じ）。
+    #[serde(default)]
+    pub supports_revive: bool,
 }
 
 async fn list_tokens(
@@ -234,17 +243,26 @@ pub async fn agents_of(
 
     Ok(rows
         .into_iter()
-        .map(|row| SessionHostView {
-            connected: connected.contains(&row.id),
-            // 名乗りは**この行と一緒に引けている**ので、聞き直さない（CICD設計§16）
-            version: row
+        .map(|row| {
+            // 名乗りは**この行と一緒に引けている**ので、聞き直さない（CICD設計§16）。
+            // **解くのは1回だけ**——欄ごとに解き直すと、増えるたびに同じ JSON を
+            // 何度も舐めることになる
+            let capabilities = row
                 .capabilities
-                .clone()
-                .and_then(|value| serde_json::from_value::<Capabilities>(value).ok())
-                .and_then(|capabilities| capabilities.agent_version),
-            id: row.id,
-            name: row.name,
-            last_seen_at: row.last_seen_at,
+                .and_then(|value| serde_json::from_value::<Capabilities>(value).ok());
+            SessionHostView {
+                connected: connected.contains(&row.id),
+                version: capabilities
+                    .as_ref()
+                    .and_then(|capabilities| capabilities.agent_version.clone()),
+                // 名乗らない古い PC は `false`。画面はこれを見て「版が古い」と言う（§3-6）
+                supports_revive: capabilities
+                    .as_ref()
+                    .is_some_and(|capabilities| capabilities.supports_revive),
+                id: row.id,
+                name: row.name,
+                last_seen_at: row.last_seen_at,
+            }
         })
         .collect())
 }
