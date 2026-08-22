@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { agentName, killAgent, startAgent } from './fleet-control'
+import { agentName, killAgent, startAgent, waitForAgent } from './fleet-control'
 import {
   archiveAll,
   expectTerminalToContain,
@@ -123,14 +123,7 @@ test('落とした PC を起こし直すと、またそこで起こせる', asyn
   // 切れたことを見届けてから起こす。**待たずに起こすと、サーバがまだ前の接続を
   // 握っている**——同じ PC として名乗るので登録は通るが、起動の指示が死んだほうへ
   // 渡って黙って消える（compose の検証で踏んだ）
-  await expect(async () => {
-    const response = await page.request.get('/api/settings')
-    const view = (await response.json()) as {
-      agents: { name: string; connected: boolean }[]
-    }
-    const target = view.agents.find((agent) => agent.name === agentName(3))
-    expect(target?.connected).toBe(false)
-  }).toPass({ timeout: 60_000 })
+  await waitForAgent(page, 3, false)
 
   startAgent(3)
 

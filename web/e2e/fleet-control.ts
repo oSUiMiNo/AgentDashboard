@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
+import { expect } from '@playwright/test'
+import type { Page } from '@playwright/test'
 
 /**
  * 3台つないだうちの**特定の1台**を、テストの中から落としたり起こしたりする
@@ -89,4 +91,51 @@ export function startAgent(index: number): void {
   })
   child.unref()
   fs.writeFileSync(pidFile(index), String(child.pid))
+}
+
+/**
+ * その台が繋がっている／いないと**サーバが言う**まで待つ。
+ *
+ * 画面のバッジではなくサーバに聞くのは、「まだ描かれていない」と「もう居ない」を
+ * 読み違えないため（`helpers.ts` の `archiveAll` と同じ理由）。
+ */
+export async function waitForAgent(page: Page, index: number, connected: boolean) {
+  const name = agentName(index)
+  await expect(async () => {
+    const response = await page.request.get('/api/settings')
+    const view = (await response.json()) as {
+      agents: { name: string; connected: boolean }[]
+    }
+    const target = view.agents.find((agent) => agent.name === name)
+    expect(target?.connected).toBe(connected)
+  }).toPass({
+    timeout: 60_000,
+  })
+}
+
+/**
+ * その台のカードを**抜け殻にする**（接続断のカードを復旧ボタンで戻す テスト計画フェーズ5）。
+ *
+ * # 何が起きるか
+ *
+ * 落とすと擬似ターミナルごと claude が死ぬ。起こし直した PC は**1本も抱えていない**ので、
+ * サーバは接続時に全カードを一旦「繋がっていない」へ倒し（`gateway.rs` の
+ * `set_agent_live(agent_id, false)`）、**報告し直されなかったカードは倒れたまま残る**。
+ *
+ * この「**PC は居るのに、そのカードだけ接続断**」が復旧の本命の相手である（復旧設計§3-1）。
+ * 落としっぱなしにすると「PC が繋がっていません」で断られる側しか作れない。
+ *
+ * # `remote`（1台構成）では作れない
+ *
+ * 唯一の PC を落とすと頼む相手が居なくなる。3台つないだこの土台でだけ、
+ * **1台だけを抜け殻にして、残り2台は無傷**という配置が作れる。
+ *
+ * 切れたことを見届けてから起こすのも要点で、待たずに起こすと**サーバがまだ前の接続を
+ * 握っている**（同じ PC として名乗るので登録は通るが、指示が死んだほうへ渡って消える）。
+ */
+export async function orphanAgent(page: Page, index: number) {
+  killAgent(index)
+  await waitForAgent(page, index, false)
+  startAgent(index)
+  await waitForAgent(page, index, true)
 }

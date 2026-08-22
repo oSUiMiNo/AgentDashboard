@@ -55,7 +55,7 @@ export default defineConfig({
       use: { ...devices['Desktop Chrome'] },
       // セルフホスト構成のぶんは別のサーバ（4174）、2台構成のぶんは compose（4175）、
       // PC 3台のぶんはさらに別のサーバ（4177）
-      testIgnore: /(remote|account|compose|fleet|versions)\.spec\.ts/,
+      testIgnore: /(remote|account|compose|fleet|revive|versions)\.spec\.ts/,
     },
     {
       // 版の切替が**使える**構成（CICD設計§14）。既定の土台は版の機能ごと塞いで
@@ -95,9 +95,12 @@ export default defineConfig({
       // PC を3台つないだ構成（セルフホスト化設計§26 読み替え3）。**PC が2台以上に
       // なると起動フォームに「起動する PC」の選択が現れる**ので、1台構成の画面とは
       // 前提が違う。混線しないことは、この配置でしか確かめられない
+      // **起こし直し（`revive.spec.ts`）もここへ載せる。** 確かめたい状態は
+      // 「PC は居るのに、そのカードだけ接続断」で、**1台構成では作れない**
+      // （唯一の PC を落とすと頼む相手が居なくなる）
       name: 'chromium-fleet',
       use: { ...devices['Desktop Chrome'], baseURL: 'http://127.0.0.1:4177' },
-      testMatch: /fleet\.spec\.ts/,
+      testMatch: /(fleet|revive)\.spec\.ts/,
     },
   ],
   // compose の検証（`make e2e-compose`）では**1つも起こさない**。
