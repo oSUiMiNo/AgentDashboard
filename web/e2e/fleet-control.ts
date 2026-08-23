@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { expect } from '@playwright/test'
 import type { Page } from '@playwright/test'
+import { openDashboard } from './helpers'
 
 /**
  * 3台つないだうちの**特定の1台**を、テストの中から落としたり起こしたりする
@@ -149,4 +150,17 @@ export async function orphanAgent(
   await waitForAgent(page, index, false)
   startAgent(index, extraEnv)
   await waitForAgent(page, index, true)
+  // **画面の持っている PC の一覧を、いまの姿へ揃える。**
+  //
+  // あの一覧は**入場したときに1回だけ**取りに行く（`App.tsx` の `load()`。WS では
+  // 更新されない）。ここで PC を落として起こし直しているので、**取った時点の姿が
+  // 残っていると、繋がっている PC を「繋がっていません」と言い続ける**——
+  // 復旧ボタンが `pc-offline` のまま60秒、という形で実際に落ちた。
+  //
+  // **どの取り方でそうなるのかは突き止められていない**（`load()` の再実行契機は
+  // 見つからず、観測と説明が合わない）。ただ、**この土台の約束を
+  // 「起こし直したら、画面はいまの姿を持っている」にしておけば、
+  // 経路がどうであれ食い違いは残らない**。待ち合わせを増やして誤魔化すのとは違い、
+  // 取り直しは**事実を取りに行く**操作である。
+  await openDashboard(page)
 }
