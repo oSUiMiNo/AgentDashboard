@@ -284,30 +284,19 @@ impl SessionHost for LocalSessionHost {
         request: server_core::session_host::HostAskRequest,
     ) -> Result<protocol::HostResources, server_core::session_host::HostAskError> {
         reject_target(&request)?;
-        // `/proc/meminfo` を読むのでファイルに触る。**配信と同じワーカーを止めない**
-        let probe = self.manager.memory_probe();
-        let estimate_mb = self.manager.config().revive_estimate_mb;
-        let headroom_mb = self.manager.config().revive_headroom_mb;
-        // **床の判定と同じ数を渡す**（起こし直し設計§19）。通したぶんを引いた見込みを
-        // 使わないと、画面が「入る」と言ったものを PC が断る
-        let projected = self.manager.projected_available_mb();
-        let resources = tokio::task::spawn_blocking(move || {
-            session_host_core::resources::snapshot(
-                probe.as_ref(),
-                estimate_mb,
-                headroom_mb,
-                projected,
-            )
+        // **3箇所目の組み立てを作らない**（コードレビュー対応4）。予算も見込みも
+        // `SessionManager` の口が持っているので、そのまま呼ぶ——ここで組み立て直すと、
+        // 床の判定と食い違ったときに**画面が「入る」と言ったものを PC が断る**
+        let manager = Arc::clone(&self.manager);
+        // `/proc/meminfo` を読むのでファイルに触る。**配信と同じワーカーを止めない**。
+        // **`blocking_ask` に載せる**ので、逃がした先が落ちた（`JoinError`）ことは
+        // 「この PC では読めない」とは別の答えになる
+        blocking_ask(move || {
+            manager
+                .host_resources()
+                .ok_or_else(session_host_core::resources::ReadError::unreadable)
         })
         .await
-        .ok()
-        .flatten();
-        // **読めないことは異常ではない**（Linux 以外）。そう言えば、聞いた側は
-        // 歯止め無しで進む——分からないことを理由に止めない（設計§18-4）
-        resources.ok_or(server_core::session_host::HostAskError::Failed {
-            reason: protocol::a2s::HostFailure::Unsupported,
-            detail: "この PC ではメモリの空きを読めません".to_string(),
-        })
     }
 }
 
@@ -340,6 +329,12 @@ impl AskFailure for session_host_core::hostfs::HostFsError {
 }
 
 impl AskFailure for session_host_core::logs::LogReadError {
+    fn parts(self) -> (protocol::a2s::HostFailure, String) {
+        (self.reason, self.detail)
+    }
+}
+
+impl AskFailure for session_host_core::resources::ReadError {
     fn parts(self) -> (protocol::a2s::HostFailure, String) {
         (self.reason, self.detail)
     }

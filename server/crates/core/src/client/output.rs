@@ -250,6 +250,30 @@ pub fn render_dir(listing: &protocol::fs::DirListing) -> String {
     out
 }
 
+/// `host resources` の1枚（起こし直し設計§18-4）。
+///
+/// **番兵を数として出さない**（コードレビュー対応2）。`fits_now` が `None` なのは
+/// 「歯止めを外している」ことなので、そう書く——以前はここが
+/// 「いま 4294967295 枚まで起こし直せます」と出していた。
+///
+/// **人向けの出力に Markdown を混ぜない**（同 対応11）。`**` は端末では字のまま出る。
+pub fn render_resources(resources: &protocol::HostResources) -> String {
+    let 枚数 = match resources.fits_now {
+        Some(fits) => format!("いま {fits} 枚まで起こし直せます"),
+        None => "数えません（revive_estimate_mb = 0 で歯止めを外しています）".to_string(),
+    };
+    format!(
+        "空き {} MB ／ 積んでいる {} MB ／ スワップの空き {} MB\n\
+         1枚あたり {} MB ＋ 残す余白 {} MB → {}",
+        resources.available_mb,
+        resources.total_mb,
+        resources.swap_free_mb,
+        resources.estimate_mb,
+        resources.headroom_mb,
+        枚数,
+    )
+}
+
 /// `version ls` の要約と表。
 pub fn render_versions(view: &crate::versions_api::VersionsView) -> String {
     if !view.supported {
@@ -452,6 +476,53 @@ mod tests {
         let raw = r#"[{"card_id":"x","unknown_field":1}]"#;
         assert_eq!(pick(true, raw, "整形済み"), raw);
         assert_eq!(pick(false, raw, "整形済み"), "整形済み");
+    }
+
+    fn 資源(fits_now: Option<u32>) -> protocol::HostResources {
+        protocol::HostResources {
+            total_mb: 15_696,
+            available_mb: 12_000,
+            swap_free_mb: 4_096,
+            estimate_mb: 780,
+            headroom_mb: 2_048,
+            fits_now,
+        }
+    }
+
+    #[test]
+    fn 数えたときは枚数をそのまま出す() {
+        let out = render_resources(&資源(Some(12)));
+        assert!(out.contains("いま 12 枚まで起こし直せます"), "{out}");
+    }
+
+    /// 番兵を数として出さない（コードレビュー対応2）。
+    ///
+    /// **壊し方**：`None` の腕を `Some(u32::MAX)` と同じ形（数を出す）へ戻すと、
+    /// この1本が落ちる。
+    #[test]
+    fn 数えないときは巨大な数を出さない() {
+        let out = render_resources(&資源(None));
+        assert!(
+            out.contains("数えません"),
+            "歯止めを外していることを言うこと: {out}"
+        );
+        assert!(
+            !out.contains(&u32::MAX.to_string()),
+            "番兵を数として出さないこと: {out}"
+        );
+        assert!(
+            !out.contains("枚まで起こし直せます"),
+            "数えていないのに枚数を言わないこと: {out}"
+        );
+    }
+
+    /// 人向けの出力に Markdown を混ぜない（同 対応11）。端末では字のまま出る。
+    #[test]
+    fn 人向けの出力に強調の記号を混ぜない() {
+        for fits in [Some(3), None] {
+            let out = render_resources(&資源(fits));
+            assert!(!out.contains("**"), "Markdown が混ざっている: {out}");
+        }
     }
 
     #[test]

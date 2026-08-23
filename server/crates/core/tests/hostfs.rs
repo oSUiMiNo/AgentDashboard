@@ -173,12 +173,21 @@ async fn 一覧はパスを省略するとホームから始まる() {
 
 /// 見積もりと余白を決めた口を作る。
 fn host_with(estimate_mb: u64, headroom_mb: u64) -> LocalSessionHost {
+    host_and_manager(estimate_mb, headroom_mb).0
+}
+
+/// 読む口を差し替えたいときは、器のほうも受け取る。
+///
+/// **`LocalSessionHost` に取り出す口を足さない。** 製品には要らないものなので、
+/// テストのために公開する面を増やさない。
+fn host_and_manager(estimate_mb: u64, headroom_mb: u64) -> (LocalSessionHost, Arc<SessionManager>) {
     let config = SessionHostConfig {
         revive_estimate_mb: estimate_mb,
         revive_headroom_mb: headroom_mb,
         ..SessionHostConfig::default()
     };
-    LocalSessionHost::new(SessionManager::new(Arc::new(config)))
+    let manager = SessionManager::new(Arc::new(config));
+    (LocalSessionHost::new(Arc::clone(&manager)), manager)
 }
 
 #[tokio::test]
@@ -195,7 +204,8 @@ async fn ローカルモードでも境界を通って資源が取れる() {
     assert_eq!(resources.headroom_mb, 2_000);
     // 数えた結果が設定と辻褄が合っていること（規則は PC 側の1箇所。§18-2）
     let 期待 = resources.available_mb.saturating_sub(2_000) / 1_000;
-    assert_eq!(u64::from(resources.fits_now), 期待);
+    let 数えた = resources.fits_now.expect("見積もりがあるので数えること");
+    assert_eq!(u64::from(数えた), 期待);
 }
 
 #[tokio::test]
@@ -214,11 +224,76 @@ async fn 資源もローカルモードで宛先を指名されたら断る() {
     assert_eq!(err, server_core::session_host::HostAskError::UnknownHost);
 }
 
+/// 読めない機械（Linux 以外）を演じる口。
+#[derive(Debug)]
+struct 読めない;
+
+impl session_host_core::resources::Probe for 読めない {
+    fn read(&self) -> Option<session_host_core::resources::Memory> {
+        None
+    }
+}
+
+/// 逃がした先が落ちる口。**実装の誤りを演じる。**
+#[derive(Debug)]
+struct 落ちる;
+
+impl session_host_core::resources::Probe for 落ちる {
+    fn read(&self) -> Option<session_host_core::resources::Memory> {
+        panic!("読み取りの途中で落ちた");
+    }
+}
+
+/// **「読めない」と「逃がした先が落ちた」は別の答えになること**（コードレビュー対応4）。
+///
+/// 以前は `.await.ok().flatten()` で受けており、`JoinError` が「Linux 以外なので
+/// 読めません」と**同じ答えへ潰れていた**。実装の誤りが、正常な構成の話に化ける。
+///
+/// **壊し方**：`blocking_ask` をやめて `.ok().flatten()` へ戻すと、この1本が落ちる。
+#[tokio::test]
+async fn 逃がした先が落ちたことは読めないことと言い分ける() {
+    let (読めない側, 器1) = host_and_manager(1_000, 2_000);
+    器1.set_memory_probe(Arc::new(読めない));
+    let 読めない答え = 読めない側
+        .host_resources(ask())
+        .await
+        .expect_err("読めないと言うこと");
+
+    let (落ちる側, 器2) = host_and_manager(1_000, 2_000);
+    器2.set_memory_probe(Arc::new(落ちる));
+    let 落ちた答え = 落ちる側
+        .host_resources(ask())
+        .await
+        .expect_err("落ちたと言うこと");
+
+    assert_ne!(
+        読めない答え, 落ちた答え,
+        "実装の誤りを、正常な構成（Linux 以外）と同じ答えにしないこと"
+    );
+
+    let 説明 = |err: &server_core::session_host::HostAskError| match err {
+        server_core::session_host::HostAskError::Failed { detail, .. } => detail.clone(),
+        other => panic!("Failed で返ること: {other:?}"),
+    };
+    assert!(
+        説明(&読めない答え).contains("読めません"),
+        "読めない側: {}",
+        説明(&読めない答え)
+    );
+    assert!(
+        説明(&落ちた答え).contains("完了できませんでした"),
+        "落ちた側: {}",
+        説明(&落ちた答え)
+    );
+}
+
 #[tokio::test]
 async fn 見積もりを0にすると数えない() {
     // 歯止めを外したい人のための逃げ道（設計§18-2）。0 除算の防御も兼ねている
     let host = host_with(0, 2_048);
 
     let resources = host.host_resources(ask()).await.expect("答えが返ること");
-    assert_eq!(resources.fits_now, u32::MAX, "数えないこと");
+    // **番兵ではなく「数えない」を型で言う**（コードレビュー対応2）。以前は
+    // `u32::MAX` を数として運んでおり、CLI が「4294967295 枚」と出していた
+    assert_eq!(resources.fits_now, None, "数えないこと");
 }

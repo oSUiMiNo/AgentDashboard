@@ -30,8 +30,13 @@ export interface HostResources {
   swap_free_mb: number
   estimate_mb: number
   headroom_mb: number
-  /** **いま何枚起こし直せるか。** 数えたのは PC 側 */
-  fits_now: number
+  /**
+   * **いま何枚起こし直せるか。** 数えたのは PC 側。
+   *
+   * **`null` は「数えない」**（`revive_estimate_mb = 0`＝歯止めを外している）。
+   * 以前は番兵（`u32::MAX`）が数として載っていた（コードレビュー対応2）。
+   */
+  fits_now: number | null
 }
 
 /** 起こし直す相手1枚ぶん。 */
@@ -96,6 +101,9 @@ export function planRevive(
 
   for (const [host, list] of byHost) {
     const found = resources.get(host) ?? null
+    // **「聞けなかった」と「数えない」を同じ `null` に畳むのは正しい。** どちらも
+    // 歯止め無しで進む側で、画面のふるまいは同じでよい（**CLI は言い分ける**——
+    // あちらは人が読む答えなので、外しているのか聞けなかったのかは別の話）
     const fits = found?.fits_now ?? null
     hosts.push({ host, targets: list.length, fits, resources: found })
 

@@ -985,16 +985,8 @@ async fn client_host(cmd: HostCmd, target: &client::Target) -> Result<(), client
         }
         HostCmd::Resources { host, out } => {
             let (resources, raw) = client::host_resources(target, &host).await?;
-            let human = format!(
-                "空き {} MB ／ 積んでいる {} MB ／ スワップの空き {} MB\n\
-                 1枚あたり {} MB ＋ 残す余白 {} MB → **いま {} 枚まで起こし直せます**",
-                resources.available_mb,
-                resources.total_mb,
-                resources.swap_free_mb,
-                resources.estimate_mb,
-                resources.headroom_mb,
-                resources.fits_now,
-            );
+            // 組み立ては `output` へ寄せる（テストから当てられる形にするため）
+            let human = output::render_resources(&resources);
             println!("{}", output::pick(out.json, &raw, &human));
         }
     }

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { hostOf, planRevive, type HostResources } from '@/lib/reviveBudget'
 
-function resources(fits: number): HostResources {
+function resources(fits: number | null): HostResources {
   return {
     total_mb: 16_000,
     available_mb: 13_000,
@@ -18,6 +18,18 @@ function target(cardId: string, host: string, lastActivityAt: number) {
 }
 
 describe('planRevive', () => {
+  it('数えない（歯止めを外している）と言われたら、間引かない', () => {
+    // `revive_estimate_mb = 0` のとき PC は `null` を返す（コードレビュー対応2）。
+    // **番兵の巨大な数を運んでいた頃は、たまたま `list.length <= fits` で通っていた**
+    // ——意味が型に出ていなかったので、見せるところで1つずつ潰す必要があった
+    const plan = planRevive(
+      [target('a', 'local', 1), target('b', 'local', 2)],
+      new Map([['local', resources(null)]]),
+    )
+    expect(plan.over).toBe(false)
+    expect(plan.fitting).toEqual(['a', 'b'])
+  })
+
   it('全部入るならダイアログを出さない', () => {
     const plan = planRevive(
       [target('a', 'local', 1), target('b', 'local', 2)],

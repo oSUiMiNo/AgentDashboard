@@ -1427,12 +1427,7 @@ impl SessionManager {
     /// 読めなければ `None`。**読めないことは異常ではない**（Linux 以外）。
     /// そのときは歯止めそのものが効かない——**分からないことを理由に止めない。**
     pub fn host_resources(&self) -> Option<protocol::HostResources> {
-        crate::resources::snapshot(
-            self.memory_probe().as_ref(),
-            self.config.revive_estimate_mb,
-            self.config.revive_headroom_mb,
-            self.projected_available_mb(),
-        )
+        crate::resources::snapshot(&self.memory_gauge(), self.projected_available_mb())
     }
 
     /// 通したぶんを差し引いた見込みの空き（設計§19）。枠が1つも無ければ `None`。
@@ -1462,6 +1457,14 @@ impl SessionManager {
     /// `Debug` を強いることになる——問いに要るのは読む口と数字2つだけである。
     pub fn memory_probe(&self) -> Arc<dyn crate::resources::Probe> {
         self.memory.lock().expect("ロックが壊れていない").clone()
+    }
+
+    /// 数えるのに要るもの一式（コードレビュー対応4）。
+    ///
+    /// **読む口と2つの数字を、ここでだけ束ねる。** 以前は3箇所が別々に組み立てており、
+    /// **裸の `u64` が2つ並ぶ**ので見積もりと余白の取り違えを型が止められなかった。
+    pub fn memory_gauge(&self) -> crate::resources::Gauge {
+        crate::resources::Gauge::from_config(self.memory_probe(), &self.config)
     }
 
     /// いま1枚も起こし直せないなら、その理由を返す（設計§18-3）。
@@ -1495,21 +1498,16 @@ impl SessionManager {
     ) -> Result<Option<MemoryReservation>, SessionError> {
         // **台帳のロックを取る前に読む口を複製しておく。** `memory_probe()` は別の
         // ロックを取るので、入れ子にすると順序の約束が要る
-        let probe = self.memory_probe();
-        let estimate_mb = self.config.revive_estimate_mb;
-        let headroom_mb = self.config.revive_headroom_mb;
+        let 物差し = self.memory_gauge();
 
         let mut budget = self.budget.lock().expect("ロックが壊れていない");
-        let Some(resources) = crate::resources::snapshot(
-            probe.as_ref(),
-            estimate_mb,
-            headroom_mb,
-            budget.projected_mb,
-        ) else {
+        let Some(resources) = crate::resources::snapshot(&物差し, budget.projected_mb) else {
             // 読めない機械（Linux 以外）。歯止めそのものが効かない
             return Ok(None);
         };
-        if resources.fits_now == 0 {
+        // **`None` は「数えない」**（歯止めを外している）ので通す。断るのは
+        // 「数えたうえで 0 枚」のときだけ（コードレビュー対応2）
+        if resources.fits_now == Some(0) {
             return Err(SessionError::OutOfMemory {
                 available_mb: resources.available_mb,
                 estimate_mb: resources.estimate_mb,
@@ -1519,7 +1517,7 @@ impl SessionManager {
         // 通したぶんを見込みから引く。**実測が既に下がっていれば、そちらが採られている**
         // （`snapshot` が小さいほうを使う）ので、二重には引かれない
         let base = crate::resources::projected(resources.available_mb, budget.projected_mb);
-        budget.projected_mb = Some(base.saturating_sub(estimate_mb));
+        budget.projected_mb = Some(base.saturating_sub(物差し.estimate_mb()));
         budget.outstanding += 1;
         drop(budget);
         Ok(Some(MemoryReservation {

@@ -681,7 +681,7 @@ async fn いま何枚入るかを答えられる() {
 
     let resources = manager.host_resources().expect("答えられること");
     // (12,000 − 2,000) / 1,000 = 10
-    assert_eq!(resources.fits_now, 10);
+    assert_eq!(resources.fits_now, Some(10));
     assert_eq!(resources.available_mb, 12_000);
     assert_eq!(resources.estimate_mb, 1_000);
     assert_eq!(resources.headroom_mb, 2_000);
@@ -937,7 +937,7 @@ async fn 終わったセッションは予約を返す() {
     wait_until("予約が立つ", || manager.reserved_revives() == 1).await;
     assert_eq!(
         manager.host_resources().expect("読めること").fits_now,
-        0,
+        Some(0),
         "予約中は「もう入らない」と答えること"
     );
 
@@ -946,7 +946,7 @@ async fn 終わったセッションは予約を返す() {
     wait_until("予約が返る", || manager.reserved_revives() == 0).await;
     assert_eq!(
         manager.host_resources().expect("読めること").fits_now,
-        1,
+        Some(1),
         "終わったぶんは、また入ると答えること"
     );
 }
@@ -960,7 +960,7 @@ async fn 画面へ答える枚数にも予約が乗る() {
 
     assert_eq!(
         manager.host_resources().expect("読めること").fits_now,
-        3,
+        Some(3),
         "(5,000 − 2,000) / 1,000 = 3"
     );
 
@@ -969,7 +969,11 @@ async fn 画面へ答える枚数にも予約が乗る() {
     wait_until("予約が立つ", || manager.reserved_revives() == 1).await;
 
     let resources = manager.host_resources().expect("読めること");
-    assert_eq!(resources.fits_now, 2, "通した1枚ぶんが引かれていること");
+    assert_eq!(
+        resources.fits_now,
+        Some(2),
+        "通した1枚ぶんが引かれていること"
+    );
     assert_eq!(
         resources.available_mb, 5_000,
         "空きそのものは書き換えないこと（機械が報告した値である）"

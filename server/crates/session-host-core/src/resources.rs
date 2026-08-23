@@ -63,21 +63,102 @@ pub fn parse_meminfo(text: &str) -> Option<Memory> {
     })
 }
 
-/// いま何枚起こし直せるか。
+/// いま何枚起こし直せるか。**数えないときは `None`。**
 ///
 /// `(空き − 余白) ÷ 1枚あたりの見積もり` を切り捨てる。
 ///
 /// **余白を引くのは、空きを 0 まで使わないため。** 戻したあとに何も動かせない機械が
 /// 残ると、片付けることすらできなくなる。
 ///
-/// **見積もりが 0 なら数えない**（`u32::MAX`）。歯止めを外したい人のための逃げ道で、
+/// **見積もりが 0 なら数えない**（`None`）。歯止めを外したい人のための逃げ道で、
 /// 0 除算の防御を兼ねている。
-pub fn fits(available_mb: u64, headroom_mb: u64, estimate_mb: u64) -> u32 {
+///
+/// # なぜ番兵ではなく `None` なのか
+///
+/// 以前はここで `u32::MAX` を返していた。**それを「数」として運ぶと、見せるところで
+/// 1つずつ潰すことになる**——実際、`agentdashboard host resources local` が
+/// 「いま 4294967295 枚まで起こし直せます」と出していた（コードレビュー対応2）。
+/// 「数えない」は数ではないので、型で言う。
+pub fn fits(available_mb: u64, headroom_mb: u64, estimate_mb: u64) -> Option<u32> {
     if estimate_mb == 0 {
-        return u32::MAX;
+        return None;
     }
     let usable = available_mb.saturating_sub(headroom_mb);
-    u32::try_from(usable / estimate_mb).unwrap_or(u32::MAX)
+    Some(u32::try_from(usable / estimate_mb).unwrap_or(u32::MAX))
+}
+
+/// 数えるのに要るもの一式——**読む口と、2つの数字**（コードレビュー対応4）。
+///
+/// # なぜ束ねるのか
+///
+/// 以前は `(probe, estimate_mb, headroom_mb)` の3つ組が **3箇所**（`session/mod.rs`・
+/// `link.rs`・`local.rs`）で別々に組み立てられていた。**裸の `u64` が2つ並ぶ**ので、
+/// 見積もりと余白の取り違えを型が止められない。「数えるのはここ1箇所」という
+/// [`snapshot`] の約束も、組み立てる側が増えた時点で既に破れていた。
+///
+/// **作る道を1つに絞ってある**（[`Gauge::from_config`]）。呼び出し側に裸の
+/// `u64` を並べる場所がもう無いので、**取り違えようがない。**
+///
+/// # なぜ `ReviveBudget` ではないのか
+///
+/// **その名前は既に別のものが使っている**——`session::ReviveBudget` は「いま枠を
+/// 握っている本数と、通したぶんを引いた見込み」を持つ**予約の台帳**で、こちらは
+/// **測る道具**である。同じ回のレビューで両方が生まれたので、片方の名前を変えた
+/// （`.claude/CLAUDE.md`「新しく紛らわしい語が出たら、表へ足してから言い換える」）。
+#[derive(Clone)]
+pub struct Gauge {
+    probe: std::sync::Arc<dyn Probe>,
+    estimate_mb: u64,
+    headroom_mb: u64,
+}
+
+impl std::fmt::Debug for Gauge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Gauge")
+            .field("estimate_mb", &self.estimate_mb)
+            .field("headroom_mb", &self.headroom_mb)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Gauge {
+    /// 設定から作る。**ここが唯一の入口。**
+    pub fn from_config(
+        probe: std::sync::Arc<dyn Probe>,
+        config: &crate::config::SessionHostConfig,
+    ) -> Self {
+        Self {
+            probe,
+            estimate_mb: config.revive_estimate_mb,
+            headroom_mb: config.revive_headroom_mb,
+        }
+    }
+
+    /// 1枚あたりの見積もり（MB）。
+    pub fn estimate_mb(&self) -> u64 {
+        self.estimate_mb
+    }
+}
+
+/// 資源を読めなかった（コードレビュー対応4）。
+///
+/// **`Option` ではなく型にしてあるのは、`JoinError` と言い分けるため。**
+/// ローカルモードは読み取りを別スレッドへ逃がしており、**逃がした先が落ちたこと**と
+/// **この機械では読めないこと**は別の話である（前者は実装の誤り）。
+#[derive(Debug, Clone)]
+pub struct ReadError {
+    pub reason: protocol::a2s::HostFailure,
+    pub detail: String,
+}
+
+impl ReadError {
+    /// 「この機械では読めない」（Linux 以外）。**異常ではない。**
+    pub fn unreadable() -> Self {
+        Self {
+            reason: protocol::a2s::HostFailure::Unsupported,
+            detail: "この PC ではメモリの空きを読めません".to_string(),
+        }
+    }
 }
 
 /// いまの資源を1枚にまとめる（設計§18-2・§19）。
@@ -98,25 +179,20 @@ pub fn fits(available_mb: u64, headroom_mb: u64, estimate_mb: u64) -> u32 {
 /// 枠が1つも無ければ `None`＝実測をそのまま使う。
 ///
 /// 読めなければ `None`。**読めないことは異常ではない**（Linux 以外）。
-pub fn snapshot(
-    probe: &dyn Probe,
-    estimate_mb: u64,
-    headroom_mb: u64,
-    projected_mb: Option<u64>,
-) -> Option<protocol::HostResources> {
-    let memory = probe.read()?;
+pub fn snapshot(gauge: &Gauge, projected_mb: Option<u64>) -> Option<protocol::HostResources> {
+    let memory = gauge.probe.read()?;
     Some(protocol::HostResources {
         total_mb: memory.total_mb,
         // **機械が報告した値は書き換えない。** 見込みは数えるためのもので、
         // 「いくら空いているか」の答えではない
         available_mb: memory.available_mb,
         swap_free_mb: memory.swap_free_mb,
-        estimate_mb,
-        headroom_mb,
+        estimate_mb: gauge.estimate_mb,
+        headroom_mb: gauge.headroom_mb,
         fits_now: fits(
             projected(memory.available_mb, projected_mb),
-            headroom_mb,
-            estimate_mb,
+            gauge.headroom_mb,
+            gauge.estimate_mb,
         ),
     })
 }
@@ -136,25 +212,27 @@ mod tests {
     #[test]
     fn 空きから余白を引いた残りを見積もりで割る() {
         // (10000 - 2000) / 780 = 10.25… → 10
-        assert_eq!(fits(10_000, 2_000, 780), 10);
+        assert_eq!(fits(10_000, 2_000, 780), Some(10));
     }
 
     #[test]
     fn 余白に届かなければ0枚() {
-        assert_eq!(fits(2_000, 2_048, 780), 0);
-        assert_eq!(fits(0, 2_048, 780), 0);
+        assert_eq!(fits(2_000, 2_048, 780), Some(0));
+        assert_eq!(fits(0, 2_048, 780), Some(0));
     }
 
     #[test]
     fn 境目はちょうど1枚を跨ぐ() {
         // 余白 + 見積もり ちょうどで 1 枚、1MB 足りなければ 0 枚
-        assert_eq!(fits(2_048 + 780, 2_048, 780), 1);
-        assert_eq!(fits(2_048 + 779, 2_048, 780), 0);
+        assert_eq!(fits(2_048 + 780, 2_048, 780), Some(1));
+        assert_eq!(fits(2_048 + 779, 2_048, 780), Some(0));
     }
 
     #[test]
     fn 見積もりが0なら数えない() {
-        assert_eq!(fits(100, 2_048, 0), u32::MAX);
+        // **番兵を返さない。** 数として運ぶと、見せるところで1つずつ潰すことになる
+        // （コードレビュー対応2。CLI が「4294967295 枚」と出していた）
+        assert_eq!(fits(100, 2_048, 0), None);
     }
 
     /// 好きな空きを名乗るだけの口。
@@ -171,13 +249,23 @@ mod tests {
         }
     }
 
+    /// **入口を増やさない。** 設定から作る道（`from_config`）をテストでも通す
+    fn 物差し(available_mb: u64, estimate_mb: u64, headroom_mb: u64) -> Gauge {
+        let config = crate::config::SessionHostConfig {
+            revive_estimate_mb: estimate_mb,
+            revive_headroom_mb: headroom_mb,
+            ..Default::default()
+        };
+        Gauge::from_config(std::sync::Arc::new(名乗る(available_mb)), &config)
+    }
+
     #[test]
     fn 通したぶんを引いた見込みで数える() {
         // (12,000 − 2,000) / 1,000 = 10 枚。3枚ぶん通してあれば見込みは 9,000
-        let 見込みなし = snapshot(&名乗る(12_000), 1_000, 2_000, None).expect("読めること");
-        assert_eq!(見込みなし.fits_now, 10);
-        let 見込みあり = snapshot(&名乗る(12_000), 1_000, 2_000, Some(9_000)).expect("読めること");
-        assert_eq!(見込みあり.fits_now, 7);
+        let 見込みなし = snapshot(&物差し(12_000, 1_000, 2_000), None).expect("読めること");
+        assert_eq!(見込みなし.fits_now, Some(10));
+        let 見込みあり = snapshot(&物差し(12_000, 1_000, 2_000), Some(9_000)).expect("読めること");
+        assert_eq!(見込みあり.fits_now, Some(7));
         // **空きそのものは動かさない。** 見込みは数えるためのもので、機械が報告した
         // 空きを書き換えてよいわけではない
         assert_eq!(見込みあり.available_mb, 12_000);
@@ -198,8 +286,8 @@ mod tests {
 
     #[test]
     fn 見込みが余白を割っても負にならない() {
-        let resources = snapshot(&名乗る(3_000), 1_000, 2_000, Some(0)).expect("読めること");
-        assert_eq!(resources.fits_now, 0);
+        let resources = snapshot(&物差し(3_000, 1_000, 2_000), Some(0)).expect("読めること");
+        assert_eq!(resources.fits_now, Some(0));
     }
 
     #[test]
