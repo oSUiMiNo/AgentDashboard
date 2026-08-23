@@ -57,7 +57,7 @@ const OUTSIDE_DOORS: usize = 5;
 
 /// tenancy.rs の総当たりの本数。口が増えないなら総当たりも増えない（§1-1）。
 /// enforcement を足したときだけ意識して上げる。
-const TENANCY_TESTS: usize = 19;
+const TENANCY_TESTS: usize = 20;
 
 /// `command` に書ける群の先頭語。誤記（存在しない群）を機械で捕まえる。
 const 群: &[&str] = &[

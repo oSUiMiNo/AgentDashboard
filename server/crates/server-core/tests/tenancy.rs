@@ -1144,6 +1144,97 @@ async fn 他人の_PC_のログは引けない() {
     }
 }
 
+/// 他人の PC の資源（空きメモリ）は引けないこと（コードレビュー対応7）。
+///
+/// **いまは `route()` を `/dir`・`/file`・`/logs` と共有しているので実際には塞がっている。**
+/// それでもここへ足すのは、`.claude/CLAUDE.md` が「enforcement を足したらここへ足す」と
+/// 定めているため——**将来 `api_resources` が近道を持ったときに、総当たりが空振りする。**
+#[tokio::test]
+async fn 他人の_PC_の資源は引けない() {
+    for backend in common::backends("tenancy-resources").await {
+        let arena = Arena::start(backend.db.clone()).await;
+        let (mine, mut mine_agent) = arena.tenant("わたし").await;
+        let (theirs, _their_agent) = arena.tenant("よそのひと").await;
+
+        let their_agent_id = arena
+            .registry
+            .list(theirs.account_id)
+            .first()
+            .and_then(|meta| meta.agent_id)
+            .expect("相手の PC が分かること");
+
+        let browser = arena.browser(&mine).await;
+        let (status, body) = browser
+            .get(&format!("/api/hosts/{}/resources", their_agent_id.0))
+            .await;
+
+        // **他人の PC と知らない PC を言い分けない。** 言い分けると、IDを総当たりして
+        // 他人の持ち物の存在だけを調べられる
+        assert_eq!(status, 404, "[{}] {body}", backend.name);
+        assert!(
+            body.contains("繋がっていません"),
+            "[{}] 存在が分かる断り方になっている: {body}",
+            backend.name
+        );
+
+        // **でたらめな綴りも同じ言葉。** ここが違うと、断り方の差だけで実在を探れる
+        let (unknown_status, unknown_body) = browser
+            .get(&format!("/api/hosts/{}/resources", uuid::Uuid::new_v4()))
+            .await;
+        assert_eq!(unknown_status, status, "[{}]", backend.name);
+        assert_eq!(unknown_body, body, "[{}]", backend.name);
+
+        // **肯定側の裏取り。** 全部断っているだけの実装でも上は通ってしまう
+        let my_agent_id = arena
+            .registry
+            .list(mine.account_id)
+            .first()
+            .and_then(|meta| meta.agent_id)
+            .expect("自分の PC が分かること");
+        let (addr, cookie) = (browser.addr, browser.cookie.clone());
+        let path = format!("/api/hosts/{}/resources", my_agent_id.0);
+        // 問いは答えを待つので、別のタスクへ逃がして**その間に PC 役が答える**
+        let asking = tokio::task::spawn_blocking(move || {
+            testkit::request(addr, "GET", &path, None, Some(&cookie))
+        });
+
+        let message = mine_agent
+            .wait_for("自分の PC へ届く資源の問い", |message| {
+                matches!(message, protocol::a2s::ServerToAgent::HostResources { .. })
+            })
+            .await;
+        let protocol::a2s::ServerToAgent::HostResources { request_id } = message else {
+            panic!("[{}] 資源の問いであること", backend.name);
+        };
+        mine_agent
+            .send(&protocol::a2s::AgentMessage::HostReply {
+                request_id,
+                reply: protocol::a2s::HostReply::Resources(protocol::HostResources {
+                    total_mb: 15_700,
+                    available_mb: 8_192,
+                    swap_free_mb: 4_096,
+                    estimate_mb: 780,
+                    headroom_mb: 2_048,
+                    fits_now: Some(7),
+                }),
+            })
+            .await;
+        let own = asking
+            .await
+            .expect("HTTPスレッドが落ちないこと")
+            .expect("応答を読めること");
+        assert_eq!(own.status, 200, "[{}] {}", backend.name, own.body);
+        assert!(
+            own.body.contains("8192"),
+            "[{}] 自分の PC の答えが返ること: {}",
+            backend.name,
+            own.body
+        );
+
+        backend.finish().await;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CLI の札（CLI設計§5。テスト計画F3「札」）
 //
