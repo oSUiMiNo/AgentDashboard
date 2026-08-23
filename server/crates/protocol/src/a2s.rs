@@ -84,6 +84,11 @@ pub enum HostReply {
     /// 解決・連絡係の封筒の**5箇所が二重になる**。1つにまとめてある理由は上の
     /// とおりで、ログもその理由に当てはまる。
     Log(crate::logs::LogChunk),
+    /// この PC の資源（起こし直し設計§18）。
+    ///
+    /// **`Log` と同じ理由でここへ足した。** 別の答えの型を作ると、待ち口・答えの解決・
+    /// 連絡係の封筒の5箇所が二重になる。
+    Resources(crate::HostResources),
     /// 応えられなかった。**理由を分ける**のは、どれも利用者が直せるものだから（設計§8）
     Failed {
         reason: HostFailure,
@@ -168,6 +173,13 @@ pub enum AgentMessage {
         /// 解けなくなる。名乗らない＝引けない、として扱う。
         #[serde(default)]
         supports_log_read: bool,
+        /// この PC の資源（空きメモリ）を答えられるか（起こし直し設計§18-4）。
+        ///
+        /// 上と同じ形。名乗らない古いホストには**聞かずに済ませる**——聞くと永遠に
+        /// 答えが返らず、画面は時間切れを待つことになる。答えが無ければ
+        /// **歯止め無しで進む**（分からないことを理由に止めない）。
+        #[serde(default)]
+        supports_resources: bool,
         /// 抜け殻のカードを起こし直せるか（接続断のカードを復旧ボタンで戻す 設計§5-2）。
         ///
         /// 上の2つとまったく同じ形。**能力ごとに1欄**にするのは、版を1つ上げて済ませようと
@@ -364,6 +376,14 @@ pub enum ServerToAgent {
         request_id: RequestId,
         query: crate::logs::LogQuery,
     },
+    /// この PC の資源を聞く（起こし直し設計§18-4）。
+    ///
+    /// **押した瞬間にだけ聞く。** 常時報告にしないのは、メモリは秒単位で動くので
+    /// 定期的に運んでも**古い値を配るだけ**になり、経路と嵩だけが増えるため。
+    /// 「入るか」を判断したいのは押した瞬間の1回きりである。
+    HostResources {
+        request_id: RequestId,
+    },
 }
 
 #[cfg(test)]
@@ -465,6 +485,7 @@ mod tests {
                 always_bypass_permissions: false,
                 supports_host_fs: true,
                 supports_log_read: true,
+                supports_resources: true,
                 supports_revive: true,
             },
             AgentMessage::SessionUpsert {
@@ -701,6 +722,7 @@ mod tests {
         let AgentMessage::Hello {
             supports_host_fs,
             supports_log_read,
+            supports_resources,
             supports_revive,
             agent_version,
             ..
@@ -715,6 +737,8 @@ mod tests {
         // 復旧の能力も同じ。名乗らない古いホストへ投げると、無視されて永遠に何も
         // 起きない——画面には理由が出せなくなる（設計§5-2）
         assert!(!supports_revive);
+        // 資源の能力も同じ。名乗らないホストへ聞くと永遠に答えが返らない（設計§18-4）
+        assert!(!supports_resources);
         assert_eq!(agent_version, "0.1.5");
     }
 

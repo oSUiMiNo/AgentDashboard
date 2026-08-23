@@ -183,6 +183,30 @@ impl LogsQuery {
 ///
 /// 枠の口（[`crate::projects`]）も同じ綴りを受けるので、**ここから借りる**。
 /// 写しを持たせると、`LOCAL_HOST` の綴りを変えたときに片方だけ直る。
+/// `GET /api/hosts/{host}/resources`
+///
+/// その PC の空きメモリと、**いま何枚起こし直せるか**（起こし直し設計§18-4）。
+///
+/// **押した瞬間にだけ聞く口である。** 定期的に運ばないのは、メモリが秒単位で動くので
+/// **古い値を配るだけ**になり、経路と嵩だけが増えるため。「入るか」を知りたいのは
+/// 押した瞬間の1回きりで、そのとき新しい値が要る。
+pub async fn api_resources(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<Identity>,
+    Path(host): Path<String>,
+) -> Result<Json<protocol::HostResources>, (StatusCode, String)> {
+    let target = parse_host(&host)?;
+    state
+        .agent
+        .host_resources(HostAskRequest {
+            account_id: identity.account_id,
+            target,
+        })
+        .await
+        .map(Json)
+        .map_err(refuse)
+}
+
 pub(crate) fn parse_host(host: &str) -> Result<Option<AgentId>, (StatusCode, String)> {
     if host == LOCAL_HOST {
         return Ok(None);

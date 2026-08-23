@@ -1364,22 +1364,20 @@ impl SessionManager {
     /// 読めなければ `None`。**読めないことは異常ではない**（Linux 以外）。
     /// そのときは歯止めそのものが効かない——**分からないことを理由に止めない。**
     pub fn host_resources(&self) -> Option<protocol::HostResources> {
-        let memory = self
-            .memory
-            .lock()
-            .expect("ロックが壊れていない")
-            .clone()
-            .read()?;
-        let estimate_mb = self.config.revive_estimate_mb;
-        let headroom_mb = self.config.revive_headroom_mb;
-        Some(protocol::HostResources {
-            total_mb: memory.total_mb,
-            available_mb: memory.available_mb,
-            swap_free_mb: memory.swap_free_mb,
-            estimate_mb,
-            headroom_mb,
-            fits_now: crate::resources::fits(memory.available_mb, headroom_mb, estimate_mb),
-        })
+        crate::resources::snapshot(
+            self.memory_probe().as_ref(),
+            self.config.revive_estimate_mb,
+            self.config.revive_headroom_mb,
+        )
+    }
+
+    /// メモリを読む口を借りる。
+    ///
+    /// **線の答えを作るところ（`link.rs`）は、器そのものではなくこれを持ち出す。**
+    /// `SessionManager` を答えの中へ入れると `Debug` が要る形になり、器の全体に
+    /// `Debug` を強いることになる——問いに要るのは読む口と数字2つだけである。
+    pub fn memory_probe(&self) -> Arc<dyn crate::resources::Probe> {
+        self.memory.lock().expect("ロックが壊れていない").clone()
     }
 
     /// いま1枚も起こし直せないなら、その理由を返す（設計§18-3）。

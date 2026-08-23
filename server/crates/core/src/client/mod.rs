@@ -412,6 +412,17 @@ pub async fn host_dir(
     http::fetch_as(target, &url).await
 }
 
+/// `GET /api/hosts/{host}/resources`（その PC の資源と、いま何枚起こし直せるか）。
+///
+/// **「全て復旧」を押す前に画面が聞くのと同じ口**（起こし直し設計§18-4）。
+pub async fn host_resources(
+    target: &Target,
+    host: &str,
+) -> Result<(protocol::HostResources, String), ClientError> {
+    let url = format!("/api/hosts/{}/resources", http::percent_encode(host));
+    http::fetch_as(target, &url).await
+}
+
 /// `GET /api/hosts/{host}/file`（ファイルを読む）。
 pub async fn host_file(
     target: &Target,

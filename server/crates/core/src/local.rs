@@ -278,6 +278,29 @@ impl SessionHost for LocalSessionHost {
         let config = self.manager.config().clone();
         blocking_ask(move || session_host_core::logs::collect(&config, &query)).await
     }
+
+    async fn host_resources(
+        &self,
+        request: server_core::session_host::HostAskRequest,
+    ) -> Result<protocol::HostResources, server_core::session_host::HostAskError> {
+        reject_target(&request)?;
+        // `/proc/meminfo` を読むのでファイルに触る。**配信と同じワーカーを止めない**
+        let probe = self.manager.memory_probe();
+        let estimate_mb = self.manager.config().revive_estimate_mb;
+        let headroom_mb = self.manager.config().revive_headroom_mb;
+        let resources = tokio::task::spawn_blocking(move || {
+            session_host_core::resources::snapshot(probe.as_ref(), estimate_mb, headroom_mb)
+        })
+        .await
+        .ok()
+        .flatten();
+        // **読めないことは異常ではない**（Linux 以外）。そう言えば、聞いた側は
+        // 歯止め無しで進む——分からないことを理由に止めない（設計§18-4）
+        resources.ok_or(server_core::session_host::HostAskError::Failed {
+            reason: protocol::a2s::HostFailure::Unsupported,
+            detail: "この PC ではメモリの空きを読めません".to_string(),
+        })
+    }
 }
 
 /// ローカルモードで宛先を指名されたら断る（設計§19）。

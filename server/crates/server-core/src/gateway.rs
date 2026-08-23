@@ -258,6 +258,15 @@ pub struct Capabilities {
     /// 片方だけ実装した版が現れたときに嘘を名乗ることになる。
     #[serde(default)]
     pub supports_log_read: bool,
+    /// この PC の資源（空きメモリ）を答えられるか（起こし直し設計§18-4）。
+    ///
+    /// **`#[serde(default)]` を外してはいけない。** この構造体は**保存済みの行を
+    /// 解釈し直す**ので、欄を必須にすると**この工事より前に保存された名乗りが
+    /// 丸ごと解けなくなる**——`supports()` は解けなければ `false` を返すので、
+    /// フォルダもログも復旧も、既に繋いである PC が**全部できないことになる**。
+    /// 一度この形で書いて、テストが空振りする形で気づいた。
+    #[serde(default)]
+    pub supports_resources: bool,
     /// 抜け殻のカードを起こし直せるか（接続断のカードを復旧ボタンで戻す 設計§5-2）。
     ///
     /// 上2つと同じ形。**投げる前にここを見る**——復旧は答えを返さない種別なので、
@@ -1209,6 +1218,7 @@ fn reply_kind(reply: &HostReply) -> &'static str {
         HostReply::Dir(_) => "dir",
         HostReply::File(_) => "file",
         HostReply::Log(_) => "log",
+        HostReply::Resources(_) => "resources",
         HostReply::Failed { .. } => "failed",
     }
 }
@@ -1553,6 +1563,24 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
             other => Err(wrong_answer(other)),
         }
     }
+
+    async fn host_resources(
+        &self,
+        request: crate::session_host::HostAskRequest,
+    ) -> Result<protocol::HostResources, crate::session_host::HostAskError> {
+        match self
+            .ask(request, Need::Resources, |request_id| {
+                ServerToAgent::HostResources { request_id }
+            })
+            .await?
+        {
+            HostReply::Resources(resources) => Ok(resources),
+            HostReply::Failed { reason, detail } => {
+                Err(crate::session_host::HostAskError::Failed { reason, detail })
+            }
+            other => Err(wrong_answer(other)),
+        }
+    }
 }
 
 /// 問いの届け方。**宛先の解決と送信を分ける**ための中間の形。
@@ -1580,6 +1608,11 @@ enum Need {
     /// 見る。古いホストは知らない種別を**接続を保ったまま無視する**ので、投げると
     /// 永遠に何も起きず、画面には時間切れすら出せない。
     Revive,
+    /// この PC の資源を答えられるか（起こし直し設計§18-4）。
+    ///
+    /// 名乗らない相手に聞くと**永遠に答えが返らない**。聞けなければ画面は
+    /// 歯止め無しで進む——分からないことを理由に止めない。
+    Resources,
 }
 
 /// 答えを待つ上限（設計§23-3 の実測で決めた値）。
@@ -1722,6 +1755,7 @@ impl RemoteSessionHost {
                 Need::HostFs => capabilities.supports_host_fs,
                 Need::LogRead => capabilities.supports_log_read,
                 Need::Revive => capabilities.supports_revive,
+                Need::Resources => capabilities.supports_resources,
             })
     }
 }
@@ -1855,6 +1889,7 @@ async fn agent_loop(
         always_bypass_permissions,
         supports_host_fs,
         supports_log_read,
+        supports_resources,
         supports_revive,
     } = hello
     else {
@@ -1889,6 +1924,7 @@ async fn agent_loop(
         agent_version: Some(agent_version.clone()),
         supports_host_fs,
         supports_log_read,
+        supports_resources,
         supports_revive,
     };
     match serde_json::to_value(&capabilities) {

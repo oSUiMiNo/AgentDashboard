@@ -368,6 +368,13 @@ enum HostCmd {
         #[command(flatten)]
         out: OutputArgs,
     },
+    /// PC の空きメモリと、**いま何枚起こし直せるか**（`session revive` の歯止めと同じ数）
+    Resources {
+        /// どの PC か。この機械なら `local`
+        host: String,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
 }
 
 #[derive(Subcommand)]
@@ -975,6 +982,20 @@ async fn client_host(cmd: HostCmd, target: &client::Target) -> Result<(), client
                     );
                 }
             }
+        }
+        HostCmd::Resources { host, out } => {
+            let (resources, raw) = client::host_resources(target, &host).await?;
+            let human = format!(
+                "空き {} MB ／ 積んでいる {} MB ／ スワップの空き {} MB\n\
+                 1枚あたり {} MB ＋ 残す余白 {} MB → **いま {} 枚まで起こし直せます**",
+                resources.available_mb,
+                resources.total_mb,
+                resources.swap_free_mb,
+                resources.estimate_mb,
+                resources.headroom_mb,
+                resources.fits_now,
+            );
+            println!("{}", output::pick(out.json, &raw, &human));
         }
     }
     Ok(())

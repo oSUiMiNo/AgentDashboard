@@ -2102,6 +2102,122 @@ async fn 起こし直しを名乗らない_PC_へは投げない() {
     session.kill();
 }
 
+#[tokio::test]
+async fn 資源を跨いで聞ける() {
+    // 「全て復旧」を押す前に画面が聞く口（起こし直し設計§18-4）。**答えるのは PC**で、
+    // サーバが自分の `/proc/meminfo` を読んではいけない——別の機械の話になる
+    let a2s = A2s::start("resources").await;
+    let target = a2s.hub.online_of(a2s.account_id).await[0];
+
+    let resources = a2s
+        .browser
+        .host_resources(server_core::session_host::HostAskRequest {
+            account_id: a2s.account_id,
+            target: Some(target),
+        })
+        .await
+        .expect("答えが返ること");
+
+    assert!(resources.total_mb > 0, "積んでいる量が読めること");
+    assert_eq!(
+        resources.estimate_mb,
+        session_host_core::config::SessionHostConfig::default().revive_estimate_mb,
+        "PC 側の設定がそのまま載ること"
+    );
+}
+
+#[tokio::test]
+async fn 資源を名乗らない_PC_へは聞かない() {
+    // 名乗らない相手に聞くと**永遠に答えが返らない**。時間切れを待つのではなく、
+    // 投げる前に断る（設計§18-4）。
+    //
+    // **名乗りは「解釈できるが資源だけ偽」にする。** 欄ごと落とした JSON にすると
+    // `Capabilities` の解釈そのものが失敗し、`supports()` は need を見る前に false を
+    // 返す——**能力の欄を見ていることを一度も確かめないまま緑になる**（当てて確かめた）。
+    let a2s = A2s::start("resources-old").await;
+    let target = a2s.hub.online_of(a2s.account_id).await[0];
+
+    let 資源だけ非対応 = serde_json::json!({
+        "available_modes": ["default"],
+        "always_bypass_permissions": false,
+        "agent_version": "0.1.30",
+        "supports_host_fs": true,
+        "supports_log_read": true,
+        "supports_resources": false,
+        "supports_revive": true,
+    });
+    pairing::save_capabilities(a2s.hub.db(), target, 資源だけ非対応)
+        .await
+        .expect("名乗りを書き換えられること");
+
+    let started = tokio::time::Instant::now();
+    let err = a2s
+        .browser
+        .host_resources(server_core::session_host::HostAskRequest {
+            account_id: a2s.account_id,
+            target: Some(target),
+        })
+        .await
+        .expect_err("断ること");
+
+    assert!(
+        err.message().contains("版が古い"),
+        "版が古いことが読める断り方であること: {err:?}／{}",
+        err.message()
+    );
+    // **待たずに断ること。** 時間切れを待つなら、判定を置いた意味が無い
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "投げる前に断ること（{:?} かかった）",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn 資源の欄を持たない古い名乗りでも他の能力は生きている() {
+    // **この工事で一度壊した。** `Capabilities` に必須の欄を足すと、**この工事より前に
+    // 保存された名乗りが丸ごと解けなくなる**——`supports()` は解けなければ false を
+    // 返すので、繋いである PC が**フォルダもログも復旧も全部できなくなる**。
+    //
+    // 気づけたのは、上のテストの壊し方が空振りしたからである。
+    let a2s = A2s::start("resources-legacy").await;
+    let target = a2s.hub.online_of(a2s.account_id).await[0];
+
+    // 資源の欄を**持たない**、この工事より前の形
+    let 古い名乗り = serde_json::json!({
+        "available_modes": ["default"],
+        "always_bypass_permissions": false,
+        "agent_version": "0.1.29",
+        "supports_host_fs": true,
+        "supports_log_read": true,
+        "supports_revive": true,
+    });
+    pairing::save_capabilities(a2s.hub.db(), target, 古い名乗り)
+        .await
+        .expect("名乗りを書き換えられること");
+
+    // フォルダは今までどおり引けること（＝名乗りが解けていること）
+    a2s.browser
+        .list_dir(
+            server_core::session_host::HostAskRequest {
+                account_id: a2s.account_id,
+                target: Some(target),
+            },
+            None,
+        )
+        .await
+        .expect("古い名乗りでもフォルダは引けること");
+
+    // 資源だけは名乗っていないので断られる
+    a2s.browser
+        .host_resources(server_core::session_host::HostAskRequest {
+            account_id: a2s.account_id,
+            target: Some(target),
+        })
+        .await
+        .expect_err("名乗っていない能力は断られること");
+}
+
 // --- ログの往復（ログ設計§13・§25）--------------------------------------------
 
 /// PC 側の `<state_dir>/logs/` へ1本置く。

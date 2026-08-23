@@ -80,6 +80,28 @@ pub fn fits(available_mb: u64, headroom_mb: u64, estimate_mb: u64) -> u32 {
     u32::try_from(usable / estimate_mb).unwrap_or(u32::MAX)
 }
 
+/// いまの資源を1枚にまとめる（設計§18-2）。
+///
+/// **数える規則はここ1箇所。** `SessionManager` からも、線の答えを作るところからも
+/// これを通す——2箇所に書くと、画面が「入る」と言ったものを PC が断ることが起こる。
+///
+/// 読めなければ `None`。**読めないことは異常ではない**（Linux 以外）。
+pub fn snapshot(
+    probe: &dyn Probe,
+    estimate_mb: u64,
+    headroom_mb: u64,
+) -> Option<protocol::HostResources> {
+    let memory = probe.read()?;
+    Some(protocol::HostResources {
+        total_mb: memory.total_mb,
+        available_mb: memory.available_mb,
+        swap_free_mb: memory.swap_free_mb,
+        estimate_mb,
+        headroom_mb,
+        fits_now: fits(memory.available_mb, headroom_mb, estimate_mb),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

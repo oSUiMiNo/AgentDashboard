@@ -959,6 +959,8 @@ async fn handshake(mut socket: Socket, config: &LinkConfig) -> anyhow::Result<(S
         // ログを引ける版であることを名乗る（ログ設計§13-1）。`supports_host_fs` と
         // 同じで、**この実行ファイルは実装を持っている**ので常に真
         supports_log_read: true,
+        // この実行ファイルは資源を答える実装を持っている（起こし直し設計§18-4）
+        supports_resources: true,
         // 抜け殻のカードを起こし直せる版であることを名乗る
         // （接続断のカードを復旧ボタンで戻す 設計§5-2）。上2つと同じで、
         // **この実行ファイルは `apply_command` に腕を持っている**ので常に真
@@ -1148,6 +1150,10 @@ enum Ask {
         Box<protocol::logs::LogQuery>,
         Arc<crate::config::SessionHostConfig>,
     ),
+    /// この PC の資源（起こし直し設計§18-4）。**読む口と数字2つだけを持ち出す**
+    /// ——器ごと入れると `Debug` を器の全体へ強いることになる。数える規則は
+    /// `resources::snapshot` の1箇所のまま
+    Resources(Arc<dyn crate::resources::Probe>, u64, u64),
 }
 
 /// 答えの要る問いに、**別のスレッドで**答える（設計§4・§8・§9、ログ設計§13-1）。
@@ -1188,6 +1194,17 @@ fn answer_ask(outgoing: mpsc::UnboundedSender<Outgoing>, request_id: RequestId, 
                     detail: err.detail,
                 },
             },
+            // **読めないことは異常ではない**（Linux 以外）。そう言えば、聞いた側は
+            // 歯止め無しで進む——分からないことを理由に止めない（設計§18-4）
+            Ask::Resources(probe, estimate_mb, headroom_mb) => {
+                match crate::resources::snapshot(probe.as_ref(), estimate_mb, headroom_mb) {
+                    Some(resources) => HostReply::Resources(resources),
+                    None => HostReply::Failed {
+                        reason: protocol::a2s::HostFailure::Unsupported,
+                        detail: "この PC ではメモリの空きを読めません".to_string(),
+                    },
+                }
+            }
         };
         let _ = outgoing.send(Outgoing::Volatile(AgentMessage::HostReply {
             request_id,
@@ -1376,6 +1393,19 @@ fn apply_command(
                 outgoing.clone(),
                 request_id,
                 Ask::Log(Box::new(query), manager.config().clone()),
+            );
+        }
+
+        // 資源の問い（起こし直し設計§18-4）。**同じ1本の問答の道に乗る。**
+        ServerToAgent::HostResources { request_id } => {
+            answer_ask(
+                outgoing.clone(),
+                request_id,
+                Ask::Resources(
+                    manager.memory_probe(),
+                    manager.config().revive_estimate_mb,
+                    manager.config().revive_headroom_mb,
+                ),
             );
         }
     }

@@ -201,6 +201,19 @@ pub trait SessionHost: Send + Sync + 'static {
         request: HostAskRequest,
         query: &protocol::logs::LogQuery,
     ) -> Result<protocol::logs::LogChunk, HostAskError>;
+
+    // --- 資源 -----------------------------------------------------------------
+
+    /// その PC の資源と、**いま何枚起こし直せるか**（起こし直し設計§18-4）。
+    ///
+    /// **ローカルモードもここを通る。** 理由は [`SessionHost::list_dir`] と同じ。
+    ///
+    /// メモリを持っているのは**セッションを抱える機械**であって、サーバではない。
+    /// セルフホストでサーバが自分の `/proc/meminfo` を読むと、**別の機械の話**になる。
+    async fn host_resources(
+        &self,
+        request: HostAskRequest,
+    ) -> Result<protocol::HostResources, HostAskError>;
 }
 
 /// 答えの要る問いに、応えられなかった理由（設計§10 の状態コードの表）。

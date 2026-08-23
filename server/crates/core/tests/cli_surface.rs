@@ -52,7 +52,7 @@ const TENANCY_SOURCE: &str = "crates/server-core/tests/tenancy.rs";
 /// 座るだけなので、この作業列で口は1つも増えない。**口を増やす設計判断をしたとき
 /// だけ**、意識してこの数字を上げる。
 const WS_VARIANTS: usize = 13;
-const INSIDE_DOORS: usize = 22;
+const INSIDE_DOORS: usize = 23;
 const OUTSIDE_DOORS: usize = 5;
 
 /// tenancy.rs の総当たりの本数。口が増えないなら総当たりも増えない（§1-1）。

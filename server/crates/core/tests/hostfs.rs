@@ -166,3 +166,59 @@ async fn 一覧はパスを省略するとホームから始まる() {
 // 塞いでいることを固定するテストだった。`read_file` がパスを必須で受ける形に
 // なった以上、省略した呼び出しはコンパイルが通らない——**同じことを型が
 // 言っているので、実行して確かめる意味が無い**（設計§29）。
+
+// ---------------------------------------------------------------------------
+// 資源（起こし直し設計§18-4）
+// ---------------------------------------------------------------------------
+
+/// 見積もりと余白を決めた口を作る。
+fn host_with(estimate_mb: u64, headroom_mb: u64) -> LocalSessionHost {
+    let config = SessionHostConfig {
+        revive_estimate_mb: estimate_mb,
+        revive_headroom_mb: headroom_mb,
+        ..SessionHostConfig::default()
+    };
+    LocalSessionHost::new(SessionManager::new(Arc::new(config)))
+}
+
+#[tokio::test]
+async fn ローカルモードでも境界を通って資源が取れる() {
+    // **ここが通らないと、サーバ側で「ローカルなら自分の `/proc/meminfo` を読む」という
+    // 近道を書きたくなる。** それをやると、セルフホストで**別の機械のメモリ**を答える
+    // ことになる——セッションを抱えているのはサーバではなく PC である
+    let host = host_with(1_000, 2_000);
+
+    let resources = host.host_resources(ask()).await.expect("答えが返ること");
+
+    assert!(resources.total_mb > 0, "積んでいる量が読めること");
+    assert_eq!(resources.estimate_mb, 1_000, "設定がそのまま載ること");
+    assert_eq!(resources.headroom_mb, 2_000);
+    // 数えた結果が設定と辻褄が合っていること（規則は PC 側の1箇所。§18-2）
+    let 期待 = resources.available_mb.saturating_sub(2_000) / 1_000;
+    assert_eq!(u64::from(resources.fits_now), 期待);
+}
+
+#[tokio::test]
+async fn 資源もローカルモードで宛先を指名されたら断る() {
+    // フォルダと同じ扱い。**口の意味が構成で変わらないこと**
+    let host = host_with(780, 2_048);
+
+    let err = host
+        .host_resources(HostAskRequest {
+            account_id: uuid::Uuid::new_v4(),
+            target: Some(protocol::AgentId(uuid::Uuid::new_v4())),
+        })
+        .await
+        .expect_err("断ること");
+
+    assert_eq!(err, server_core::session_host::HostAskError::UnknownHost);
+}
+
+#[tokio::test]
+async fn 見積もりを0にすると数えない() {
+    // 歯止めを外したい人のための逃げ道（設計§18-2）。0 除算の防御も兼ねている
+    let host = host_with(0, 2_048);
+
+    let resources = host.host_resources(ask()).await.expect("答えが返ること");
+    assert_eq!(resources.fits_now, u32::MAX, "数えないこと");
+}
