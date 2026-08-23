@@ -265,3 +265,150 @@ describe('全て復旧', () => {
     )
   })
 })
+
+/**
+ * メモリの歯止め（起こし直し設計§18-5）。
+ *
+ * **枚数だけでは資源が読めない。** 26枚が約 20GB を要求することは内訳からは分からず、
+ * 押すと機械が固まる。数えるのは PC 側で、ここがやるのは比べることだけ。
+ */
+describe('全て復旧のメモリの歯止め', () => {
+  function stale(cardId: string, lastActivityAt: number) {
+    return meta(cardId, {
+      agent_connected: false,
+      claude_session_id: `2222${cardId}`,
+      last_activity_at: lastActivityAt,
+    })
+  }
+
+  /** `GET /api/hosts/{host}/resources` の答えを決める。 */
+  function 資源を答える(fits: number | 'エラー') {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        if (fits === 'エラー') {
+          return { ok: false, status: 503 } as Response
+        }
+        return {
+          ok: true,
+          json: async () => ({
+            total_mb: 16_000,
+            available_mb: 13_000,
+            swap_free_mb: 0,
+            estimate_mb: 780,
+            headroom_mb: 2_048,
+            fits_now: fits,
+          }),
+        } as unknown as Response
+      }),
+    )
+  }
+
+  beforeEach(() => {
+    useSettingsStore.setState({ settings: settingsFixture(), loading: false })
+    useWsStore.setState({ revive: vi.fn() })
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('全部入るなら、ダイアログを出さずにそのまま進む', async () => {
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    資源を答える(10)
+    applySessionSnapshot([stale('a', 1), stale('b', 2)])
+    renderGrid()
+
+    await userEvent.click(screen.getByTestId('revive-all'))
+
+    expect(screen.queryByTestId('revive-budget-dialog')).not.toBeInTheDocument()
+    expect(revive).toHaveBeenCalledTimes(2)
+  })
+
+  it('入りきらないとダイアログが出て、押すまで1枚も送らない', async () => {
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    資源を答える(1)
+    applySessionSnapshot([stale('a', 1), stale('b', 2), stale('c', 3)])
+    renderGrid()
+
+    await userEvent.click(screen.getByTestId('revive-all'))
+
+    expect(screen.getByTestId('revive-budget-dialog')).toBeInTheDocument()
+    // **数と、いま入る枚数の両方を出す。** 枚数だけでは資源が読めない
+    expect(screen.getByTestId('revive-budget-targets')).toHaveTextContent('3枚')
+    expect(screen.getByTestId('revive-budget-fits')).toHaveTextContent('1枚')
+    expect(revive).not.toHaveBeenCalled()
+  })
+
+  it('入るぶんだけ戻すと、その枚数だけを新しい順に送る', async () => {
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    資源を答える(2)
+    applySessionSnapshot([stale('古い', 100), stale('新しい', 300), stale('中', 200)])
+    renderGrid()
+
+    await userEvent.click(screen.getByTestId('revive-all'))
+    await userEvent.click(screen.getByTestId('revive-budget-fitting'))
+
+    expect(revive).toHaveBeenCalledTimes(2)
+    expect(revive).toHaveBeenCalledWith('新しい')
+    expect(revive).toHaveBeenCalledWith('中')
+    expect(revive).not.toHaveBeenCalledWith('古い')
+    // 押したら閉じる
+    expect(screen.queryByTestId('revive-budget-dialog')).not.toBeInTheDocument()
+  })
+
+  it('それでも全部戻すを選べる（押すのは人）', async () => {
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    資源を答える(1)
+    applySessionSnapshot([stale('a', 1), stale('b', 2), stale('c', 3)])
+    renderGrid()
+
+    await userEvent.click(screen.getByTestId('revive-all'))
+    await userEvent.click(screen.getByTestId('revive-budget-all'))
+
+    expect(revive).toHaveBeenCalledTimes(3)
+  })
+
+  it('やめると1枚も送らない', async () => {
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    資源を答える(0)
+    applySessionSnapshot([stale('a', 1), stale('b', 2)])
+    renderGrid()
+
+    await userEvent.click(screen.getByTestId('revive-all'))
+    await userEvent.click(screen.getByTestId('revive-budget-cancel'))
+
+    expect(revive).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('revive-budget-dialog')).not.toBeInTheDocument()
+  })
+
+  it('1枚も入らないなら「入るぶんだけ」は押せない', async () => {
+    資源を答える(0)
+    applySessionSnapshot([stale('a', 1)])
+    renderGrid()
+
+    await userEvent.click(screen.getByTestId('revive-all'))
+
+    expect(screen.getByTestId('revive-budget-fitting')).toBeDisabled()
+    expect(screen.getByTestId('revive-budget-all')).toBeEnabled()
+  })
+
+  it('聞けなかったら、歯止め無しで進む（分からないことを理由に止めない）', async () => {
+    // 読めない機械（Linux 以外）や版の古い PC がここに当たる
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    資源を答える('エラー')
+    applySessionSnapshot([stale('a', 1), stale('b', 2)])
+    renderGrid()
+
+    await userEvent.click(screen.getByTestId('revive-all'))
+
+    expect(screen.queryByTestId('revive-budget-dialog')).not.toBeInTheDocument()
+    expect(revive).toHaveBeenCalledTimes(2)
+  })
+})

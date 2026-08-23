@@ -9,9 +9,20 @@
  * まとまりの組み立てと並びの安定は [`@/stores/sessions`] が持つ。
  */
 
+import { useState } from 'react'
+
 import { ProjectGroup } from '@/components/ProjectGroup/ProjectGroup'
+import { ReviveBudgetDialog } from '@/components/TileGrid/ReviveBudgetDialog'
 import { Button } from '@/components/ui/button'
 import { reviveState } from '@/lib/protocol'
+import {
+  fetchHostResources,
+  hostOf,
+  planRevive,
+  type HostResources,
+  type RevivePlan,
+  type ReviveTarget,
+} from '@/lib/reviveBudget'
 import {
   getSession,
   setAccountFilter,
@@ -39,7 +50,7 @@ export function TileGrid() {
   */
   let disconnected = 0
   let ended = 0
-  const targets: string[] = []
+  const targets: ReviveTarget[] = []
   for (const cardId of candidates) {
     const meta = getSession(cardId)
     if (!meta) {
@@ -49,11 +60,56 @@ export function TileGrid() {
       // 押しても断られるカードは数に入れない。**押した人が数を予測できる**こと（要件）
       continue
     }
-    targets.push(cardId)
+    targets.push({
+      cardId,
+      // メモリは**PC ごとに別**なので、宛先ごとに束ねて数える（設計§18-5）
+      host: hostOf(meta.agent_id),
+      lastActivityAt: meta.last_activity_at,
+    })
     if (meta.status.kind === 'ended') {
       ended += 1
     } else {
       disconnected += 1
+    }
+  }
+
+  /*
+    押したときの計画（設計§18-5）。**聞くのは押した瞬間だけ**——常時持っていると
+    古い値で判断することになる。全部入るなら黙って進み、入りきらないときだけ出す。
+  */
+  const [plan, setPlan] = useState<RevivePlan | null>(null)
+  const [asking, setAsking] = useState(false)
+
+  const 送る = (ids: string[]) => {
+    // 口は増やさない。**対象ぶん1枚ずつ送る**——並べるのは PC 側なので、
+    // 押し手は数を気にしなくてよい（PC が複数あれば自然に台数ぶん並列になる）
+    for (const cardId of ids) {
+      revive(cardId)
+    }
+  }
+
+  const 押した = async () => {
+    setAsking(true)
+    try {
+      const hosts = [...new Set(targets.map((target) => target.host))]
+      const answers = await Promise.all(
+        hosts.map(
+          async (host) =>
+            [host, await fetchHostResources(host)] as [
+              string,
+              HostResources | null,
+            ],
+        ),
+      )
+      const 立てた = planRevive(targets, new Map(answers))
+      if (!立てた.over) {
+        // 全部入る。**いままでどおり黙って進む**
+        送る(立てた.all)
+        return
+      }
+      setPlan(立てた)
+    } finally {
+      setAsking(false)
     }
   }
 
@@ -80,19 +136,30 @@ export function TileGrid() {
           variant="outline"
           size="sm"
           data-testid="revive-all"
-          disabled={targets.length === 0}
+          disabled={targets.length === 0 || asking}
           title="接続断・終了しているカードを、元の CLI セッションでまとめて起こし直します"
           onClick={() => {
-            // 口は増やさない。**対象ぶん1枚ずつ送る**——並べるのは PC 側なので、
-            // 押し手は数を気にしなくてよい（PC が複数あれば自然に台数ぶん並列になる）
-            for (const cardId of targets) {
-              revive(cardId)
-            }
+            void 押した()
           }}
         >
-          全て復旧
+          {asking ? '数えています…' : '全て復旧'}
         </Button>
       </div>
+
+      {plan !== null && (
+        <ReviveBudgetDialog
+          plan={plan}
+          onFitting={() => {
+            送る(plan.fitting)
+            setPlan(null)
+          }}
+          onAll={() => {
+            送る(plan.all)
+            setPlan(null)
+          }}
+          onCancel={() => setPlan(null)}
+        />
+      )}
 
       {/*
         `.agent-dashboard.toml` が名乗った名前で絞り込む（セルフホスト化設計§8-5）。
