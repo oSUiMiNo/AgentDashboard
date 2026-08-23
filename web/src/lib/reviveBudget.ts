@@ -22,6 +22,7 @@
  */
 
 import { LOCAL_HOST } from '@/lib/routes'
+import { useAuthStore } from '@/stores/auth'
 
 /** Rust 側の `protocol::HostResources` と同じ綴り。 */
 export interface HostResources {
@@ -137,18 +138,45 @@ export function gb(mb: number): string {
 }
 
 /**
+ * 入館証が切れていた、という答え（コードレビュー対応13）。
+ *
+ * **「聞けなかった」（`null`）と混ぜてはいけない。** あちらは歯止め無しで進む側だが、
+ * こちらで進むと**ログイン画面へ落ちずに26枚流す**ことになる。
+ */
+export const SIGNED_OUT = 'signed-out' as const
+
+/** [`fetchHostResources`] の答え。 */
+export type HostResourcesAnswer =
+  | HostResources
+  | null
+  | typeof SIGNED_OUT
+
+/**
  * その PC の資源を聞く（`GET /api/hosts/{host}/resources`）。
  *
  * **押した瞬間にだけ聞く。** 常時持っていると古い値で判断することになる。
  * 聞けなければ `null`——**歯止め無しで進む**ので、投げるのではなく畳んで返す。
+ *
+ * # 401 だけは言い分ける
+ *
+ * cookie が切れているときに `null` へ畳むと、**歯止め無しで全部流す**ことになる。
+ * 他の取得口（`stores/settings.ts` ／ `stores/versions.ts` ／ `stores/ws.ts`）は
+ * 401 で `markSignedOut()` を呼ぶ約束なので、ここも揃える。
+ *
+ * **例外にしない。** `Promise.all` で投げると押した流れの他の分岐まで巻き込むうえ、
+ * 「聞けなかったら進む」という既存の契約と混ざる。**返り値で言い分けるほうが読める。**
  */
 export async function fetchHostResources(
   host: string,
-): Promise<HostResources | null> {
+): Promise<HostResourcesAnswer> {
   try {
     const response = await fetch(
       `/api/hosts/${encodeURIComponent(host)}/resources`,
     )
+    if (response.status === 401) {
+      useAuthStore.getState().markSignedOut()
+      return SIGNED_OUT
+    }
     if (!response.ok) {
       return null
     }

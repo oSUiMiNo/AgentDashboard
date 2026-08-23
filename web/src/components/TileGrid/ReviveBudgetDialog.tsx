@@ -11,6 +11,8 @@
 
 import { Button } from '@/components/ui/button'
 import { gb, type RevivePlan } from '@/lib/reviveBudget'
+import { LOCAL_HOST } from '@/lib/routes'
+import { agentName, useSettingsStore } from '@/stores/settings'
 
 interface Props {
   plan: RevivePlan
@@ -24,6 +26,13 @@ interface Props {
 export function ReviveBudgetDialog({ plan, onFitting, onAll, onCancel }: Props) {
   // 数えられた PC だけを並べる（聞けなかった PC は歯止めの外＝出しても判断材料にならない）
   const 数えた = plan.hosts.filter((host) => host.resources !== null)
+  // **生の `agent_id`（UUID）を出さない**（コードレビュー対応10）。2台以上あると
+  // 「PC：11111111-2222-…」が並び、**どちらを間引くかを決める**というこの
+  // ダイアログの目的が果たせない。`SessionTile` と同じ道具を使う
+  const agents = useSettingsStore((state) => state.settings.agents)
+  /** その宛先の呼び名。**引けなければ綴りをそのまま出す**（嘘をつかない） */
+  const pc名 = (host: string): string =>
+    agentName(agents, host === LOCAL_HOST ? null : host) ?? host
   const 入る枚数 = plan.fitting.length
 
   return (
@@ -54,7 +63,7 @@ export function ReviveBudgetDialog({ plan, onFitting, onAll, onCancel }: Props) 
               className="border-border flex flex-col gap-1 rounded-lg border p-3 text-xs"
             >
               {plan.hosts.length > 1 && (
-                <p className="text-muted-foreground">PC：{host.host}</p>
+                <p className="text-muted-foreground">PC：{pc名(host.host)}</p>
               )}
               <p>
                 対象{' '}

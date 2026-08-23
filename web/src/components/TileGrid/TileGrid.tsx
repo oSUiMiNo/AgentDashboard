@@ -19,7 +19,9 @@ import {
   fetchHostResources,
   hostOf,
   planRevive,
+  SIGNED_OUT,
   type HostResources,
+  type HostResourcesAnswer,
   type RevivePlan,
   type ReviveTarget,
 } from '@/lib/reviveBudget'
@@ -114,11 +116,22 @@ export function TileGrid() {
           async (host) =>
             [host, await fetchHostResources(host)] as [
               string,
-              HostResources | null,
+              HostResourcesAnswer,
             ],
         ),
       )
-      const 立てた = planRevive(targets, new Map(answers))
+      // **入館証が切れていたら1枚も送らない**（コードレビュー対応13）。
+      // `null`（聞けなかった）は歯止め無しで進む側だが、こちらは進んではいけない
+      // ——ログイン画面へ落ちずに26枚流すことになる。`markSignedOut()` は
+      // `fetchHostResources` が呼んでいるので、ここは送らずに返るだけでよい
+      if (answers.some(([, answer]) => answer === SIGNED_OUT)) {
+        return
+      }
+      // `planRevive` の契約は変えない。`SIGNED_OUT` は上で弾いてある
+      const 数えた = new Map(
+        answers.map(([host, answer]) => [host, answer as HostResources | null]),
+      )
+      const 立てた = planRevive(targets, 数えた)
       if (!立てた.over) {
         // 全部入る。**いままでどおり黙って進む**
         送る(立てた.all)

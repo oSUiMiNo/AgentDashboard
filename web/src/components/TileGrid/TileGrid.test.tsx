@@ -8,9 +8,10 @@ import {
   clearSessions,
   upsertSession,
 } from '@/stores/sessions'
+import { useAuthStore } from '@/stores/auth'
 import { useSettingsStore } from '@/stores/settings'
 import { useWsStore } from '@/stores/ws'
-import { settingsFixture } from '@/test/fixtures'
+import { remoteAgent, settingsFixture } from '@/test/fixtures'
 
 /**
  * 一覧の絞り込み（セルフホスト化設計§8-5、テスト計画フェーズ5）。
@@ -291,12 +292,16 @@ describe('全て復旧のメモリの歯止め', () => {
   }
 
   /** `GET /api/hosts/{host}/resources` の答えを決める。 */
-  function 資源を答える(fits: number | null | 'エラー') {
+  function 資源を答える(fits: number | null | 'エラー' | '入館証切れ') {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => {
         if (fits === 'エラー') {
           return { ok: false, status: 503 } as Response
+        }
+        // **401 だけは「聞けなかった」と別扱い**（コードレビュー対応13）
+        if (fits === '入館証切れ') {
+          return { ok: false, status: 401 } as Response
         }
         return {
           ok: true,
@@ -481,5 +486,60 @@ describe('全て復旧のメモリの歯止め', () => {
 
     expect(screen.queryByTestId('revive-budget-dialog')).not.toBeInTheDocument()
     expect(revive).toHaveBeenCalledTimes(2)
+  })
+
+  it('入館証が切れていたら、ログイン画面へ移して1枚も送らない', async () => {
+    // **「聞けなかった」と混ぜてはいけない**（コードレビュー対応13）。あちらは
+    // 歯止め無しで進む側だが、こちらで進むと**ログイン画面へ落ちずに26枚流す**
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    useAuthStore.setState({
+      auth: {
+        mode: 'lan_password',
+        authenticated: true,
+        account: null,
+        is_admin: false,
+        setup_open: false,
+        from_loopback: false,
+      },
+    })
+    資源を答える('入館証切れ')
+    applySessionSnapshot([stale('a', 1), stale('b', 2)])
+    renderGrid()
+
+    await userEvent.click(screen.getByTestId('revive-all'))
+
+    expect(revive).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('revive-budget-dialog')).not.toBeInTheDocument()
+    // 他の取得口（`stores/settings.ts` ほか）と同じ約束＝`markSignedOut()` を呼ぶ
+    expect(useAuthStore.getState().auth.authenticated).toBe(false)
+  })
+
+  it('2台以上のとき、ダイアログは生の_agent_id_ではなく_PC_名を出す', async () => {
+    // 生の UUID が並ぶと**どちらを間引くかを決められない**——このダイアログの
+    // 目的そのものが果たせない（コードレビュー対応10）
+    useSettingsStore.setState({
+      settings: settingsFixture(remoteAgent('11111111-2222-3333-4444-555555555555', 'OMEN')),
+      loading: false,
+    })
+    資源を答える(1)
+    applySessionSnapshot([
+      stale('a', 1),
+      stale('b', 2),
+      meta('c', {
+        agent_connected: false,
+        claude_session_id: '2222c',
+        last_activity_at: 3,
+        agent_id: '11111111-2222-3333-4444-555555555555',
+      }),
+    ])
+    renderGrid()
+
+    await userEvent.click(screen.getByTestId('revive-all'))
+
+    const 行 = screen.getAllByTestId('revive-budget-host')
+    const 文 = 行.map((row) => row.textContent ?? '').join('\n')
+    expect(文).toContain('OMEN')
+    expect(文).not.toContain('11111111-2222-3333-4444-555555555555')
   })
 })
