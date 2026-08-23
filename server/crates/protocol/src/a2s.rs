@@ -114,6 +114,17 @@ pub enum HostFailure {
     TooLarge,
     /// テキストとして読めない（バイナリ・UTF-8 でない）
     Unsupported,
+    /// **この機械ではできない**（OS が違う・口が無い）。**異常ではない**
+    ///
+    /// `Unsupported` と分けてあるのは、**状態コードが別だから**である
+    /// （コードレビュー対応8）。あちらは「渡されたものがテキストではない」で 415 が
+    /// 正しいが、こちらは相手の機械にその口が無いので、415 だと**メディア型の話に
+    /// 見えて理由が伝わらない**（Linux 以外へメモリの空きを聞いた場合が実例）。
+    ///
+    /// **足しても `A2S_VERSION` は上げない。** これは PC → サーバ方向の理由で、
+    /// 古い PC は送らない。新しい PC が古いサーバへ送る組み合わせは、能力の名乗りが
+    /// 閉じている（知らないサーバはそもそも聞かない）。
+    Unavailable,
 }
 
 /// 画面と履歴の更新間隔（§13-3）。DB settings の値をセッションホストへ運ぶ。
@@ -616,6 +627,11 @@ mod tests {
                 request_id: RequestId::new(),
                 query: sample_query(),
             },
+            // 資源を聞く（起こし直し設計§18-4）。**足したら必ずここへ足す**——
+            // この検査の名前は「全種が往復する」なので、抜けると意図と食い違う
+            ServerToAgent::HostResources {
+                request_id: RequestId::new(),
+            },
         ];
         for message in &all {
             assert_eq!(&roundtrip(message), message);
@@ -665,15 +681,16 @@ mod tests {
     }
 
     #[test]
-    fn 答えの4種と理由の5値がすべて往復する() {
+    fn 答えの5種と理由の6値がすべて往復する() {
         // 断る側を1つでも落とすと、その理由だけが画面へ出せなくなる。
-        // 「まとめて駄目でした」に潰れるのを防ぐため、**5値を数え上げて**固定する
+        // 「まとめて駄目でした」に潰れるのを防ぐため、**6値を数え上げて**固定する
         let reasons = [
             HostFailure::NotFound,
             HostFailure::Denied,
             HostFailure::NotDirectory,
             HostFailure::TooLarge,
             HostFailure::Unsupported,
+            HostFailure::Unavailable,
         ];
         let mut all = vec![
             HostReply::Dir(sample_listing()),
@@ -684,6 +701,16 @@ mod tests {
                 bytes: 24,
             }),
             HostReply::Log(sample_chunk()),
+            // 資源（起こし直し設計§18-4）。**足したら必ずここへ足す**——
+            // 台帳が数えていない種別は、綴りが変わっても誰も気づかない
+            HostReply::Resources(crate::HostResources {
+                total_mb: 15_700,
+                available_mb: 8_192,
+                swap_free_mb: 4_096,
+                estimate_mb: 780,
+                headroom_mb: 2_048,
+                fits_now: Some(7),
+            }),
         ];
         for reason in reasons {
             all.push(HostReply::Failed {
@@ -691,7 +718,7 @@ mod tests {
                 detail: "実際の理由がここに入る".to_string(),
             });
         }
-        assert_eq!(all.len(), 3 + reasons.len());
+        assert_eq!(all.len(), 4 + reasons.len());
         for reply in &all {
             assert_eq!(&roundtrip(reply), reply);
         }

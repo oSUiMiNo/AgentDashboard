@@ -177,12 +177,6 @@ impl LogsQuery {
     }
 }
 
-/// `{host}` を宛先へ。**読めない綴りは「知らない PC」と同じ扱い**（設計§18）。
-///
-/// 言い分けると、綴りを変えながら叩いて何かを探れる余地ができる。
-///
-/// 枠の口（[`crate::projects`]）も同じ綴りを受けるので、**ここから借りる**。
-/// 写しを持たせると、`LOCAL_HOST` の綴りを変えたときに片方だけ直る。
 /// `GET /api/hosts/{host}/resources`
 ///
 /// その PC の空きメモリと、**いま何枚起こし直せるか**（起こし直し設計§18-4）。
@@ -207,6 +201,12 @@ pub async fn api_resources(
         .map_err(refuse)
 }
 
+/// `{host}` を宛先へ。**読めない綴りは「知らない PC」と同じ扱い**（設計§18）。
+///
+/// 言い分けると、綴りを変えながら叩いて何かを探れる余地ができる。
+///
+/// 枠の口（[`crate::projects`]）も同じ綴りを受けるので、**ここから借りる**。
+/// 写しを持たせると、`LOCAL_HOST` の綴りを変えたときに片方だけ直る。
 pub(crate) fn parse_host(host: &str) -> Result<Option<AgentId>, (StatusCode, String)> {
     if host == LOCAL_HOST {
         return Ok(None);
@@ -241,6 +241,10 @@ pub fn status_of(err: &HostAskError) -> StatusCode {
             HostFailure::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             // 設計§10 の表には無い5つ目。テキストとして扱えない、が最も近い
             HostFailure::Unsupported => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            // **その機械にその口が無い**（Linux 以外へメモリの空きを聞いた等）。
+            // 415 へ寄せると「メディア型が非対応」という無関係な理由になり、
+            // 押した人が何を直せばよいか分からない（コードレビュー対応8）
+            HostFailure::Unavailable => StatusCode::NOT_IMPLEMENTED,
         },
         // 頼み方が読めない。**PC は無関係**なので、相手のせいに見える 404 / 409 へ寄せない
         HostAskError::BadRequest(_) => StatusCode::BAD_REQUEST,
@@ -283,6 +287,17 @@ mod tests {
         assert_eq!(
             status_of(&failed(HostFailure::NotFound)),
             StatusCode::NOT_FOUND
+        );
+        // **「テキストではない」と「その機械にその口が無い」を言い分ける**
+        // （コードレビュー対応8）。同じ 415 に畳むと、Linux 以外へメモリの空きを
+        // 聞いた人に「メディア型が非対応」という無関係な理由が出る
+        assert_eq!(
+            status_of(&failed(HostFailure::Unsupported)),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+        assert_eq!(
+            status_of(&failed(HostFailure::Unavailable)),
+            StatusCode::NOT_IMPLEMENTED
         );
         // 頼み方の誤りは**こちら側の話**。PC のせいに見えるコードへ寄せない
         assert_eq!(

@@ -153,9 +153,12 @@ pub struct ReadError {
 
 impl ReadError {
     /// 「この機械では読めない」（Linux 以外）。**異常ではない。**
+    ///
+    /// 理由は `Unavailable`。**`Unsupported` にすると 415 になり**、「メディア型が
+    /// 非対応」という無関係な断りが出る（コードレビュー対応8）。
     pub fn unreadable() -> Self {
         Self {
-            reason: protocol::a2s::HostFailure::Unsupported,
+            reason: protocol::a2s::HostFailure::Unavailable,
             detail: "この PC ではメモリの空きを読めません".to_string(),
         }
     }
@@ -208,6 +211,21 @@ pub fn projected(available_mb: u64, projected_mb: Option<u64>) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 「この機械では読めない」は、**テキストとして読めないのとは別の理由**で断ること
+    /// （コードレビュー対応8）。
+    ///
+    /// ここを `Unsupported` に戻すと、REST が **415**（メディア型が非対応）を返し、
+    /// Linux 以外の PC へ聞いた人に**無関係な理由**が出る。写し先そのものは
+    /// `server-core` の `status_of` が見ているので、ここでは**どちらの理由を選ぶか**だけを固定する。
+    #[test]
+    fn 読めない機械は理由をテキスト非対応と言い分ける() {
+        let err = ReadError::unreadable();
+        assert_eq!(err.reason, protocol::a2s::HostFailure::Unavailable);
+        assert_ne!(err.reason, protocol::a2s::HostFailure::Unsupported);
+        // 文言は変えない。**利用者が読むのはこちら**で、理由の綴りは見えない
+        assert_eq!(err.detail, "この PC ではメモリの空きを読めません");
+    }
 
     #[test]
     fn 空きから余白を引いた残りを見積もりで割る() {
