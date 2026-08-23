@@ -43,7 +43,7 @@
   <br><strong>「IP が変わった」ではない。</strong>最初は SSH が届かないだけに見え、Elastic IP を持たない構成なので IP の付け替えを疑ったが、<strong>原因はアカウントごと消えていたこと</strong>だった。terraform の記録（<code>~/Dev/Test_AgentDashboard/terraform.tfstate</code>・08-03）にある <code>43.207.237.211</code> は<strong>もう誰のものでもない</strong>。<strong>ここを直すのも、別の場所へ立て直すのも人の作業。</strong>
   <br><strong>セッションホスト<span class="mark">▽</span>は、いま1本も走っていない</strong>（08-23 に数えて0本）。以前は<strong>生きたまま黙って固まる</strong>ことがあった——Cloudflare 宛に TLS が張られたまま無通信（<code>ESTAB</code>・送受信キュー0・CPU ほぼ0）で、<strong>ログも1行も出ていない</strong>。<code>link.rs</code> の <code>dial()</code> に<strong>時間切れが無い</strong>ため、相手が「断る」のではなく<strong>黙って握ったまま答えない</strong>と永久に待つ。<strong>画面には理由の分からない「接続断」だけが残る。</strong>別イシュー化の候補。
   <br><strong>実機は自動では起きない。</strong>常駐の仕組みに載せていないので、<strong>WSL を起こし直すと落ちたままになる</strong>（セッションホスト<span class="mark">▽</span>も同じ理由で、いま落ちたままである）。
-  <br><strong>版は 0.1.32 まで出ている（08-23）。</strong>0.1.30 で<strong>抜け殻のカードを起こし直す一式</strong>（画面の「復旧」／「全て復旧」と <code>agentdashboard session revive [--all]</code>）が入り、0.1.31 でその受け入れで見つけた**並びの直し**、<strong>0.1.32 で「全て復旧」のメモリの歯止め</strong>（入りきらないときにダイアログを出し、PC 側でも空きが足りなければ断る）。<br><strong>実機は 05:20 に 0.1.30 で起こし直したあと、18時台に 0.1.32 で起こし直した。</strong>走行とディスクが**揃っている**（久しぶり）。<br><strong>落とすと、抱えている claude が道連れになる。</strong>ローカルモードなので擬似ターミナルの持ち主は本体である。落とす前に <code>ps</code> で子を数え、<strong>0本でなければ止まること</strong>。<strong>作業中のセッション自身がその子であることがある</strong>——08-23 の2回の起こし直しはどちらもその状態だったので、<strong>切り離したスクリプトに任せた</strong>（<code>/tmp/agentdashboard-restart.sh</code>。記録は <code>~/agentdashboard-restart.log</code>）。呼び出しの中で <code>kill</code> すると、起こし直す行まで辿り着けない。<br>08-19 23時台の<strong>自己修復の作業場所を毎回 HEAD へ付け替える一式</strong>（＋暴走したパーサを降ろす見張り）と、それ以前の<strong>端末の桁行を 120×40 に固定した一式</strong>も入っている。
+  <br><strong>版は 0.1.32 まで出ている（08-23）。</strong>0.1.30 で<strong>抜け殻のカードを起こし直す一式</strong>（画面の「復旧」／「全て復旧」と <code>agentdashboard session revive [--all]</code>）が入り、0.1.31 でその受け入れで見つけた**並びの直し**、<strong>0.1.32 で「全て復旧」のメモリの歯止め</strong>（入りきらないときにダイアログを出し、PC 側でも空きが足りなければ断る）。<br><strong>実機は 05:20 に 0.1.30 で起こし直したきりで、走行は <code>0.1.30</code>。ディスクは <code>0.1.32</code> なので、また1段ずれている</strong>——<strong>0.1.31（並びの直し）と 0.1.32（メモリの歯止め）は、起こし直すまで効かない。</strong><br><strong>落とすと、抱えている claude が道連れになる。</strong>ローカルモードなので擬似ターミナルの持ち主は本体である。落とす前に <code>ps</code> で子を数え、<strong>0本でなければ止まること</strong>。<strong>作業中のセッション自身がその子であることがある</strong>——05:20 の起こし直しはその状態だったので、<strong>切り離したスクリプトに任せた</strong>（<code>/tmp/agentdashboard-restart.sh</code>。記録は <code>~/agentdashboard-restart.log</code>）。呼び出しの中で <code>kill</code> すると、起こし直す行まで辿り着けない。<br>08-19 23時台の<strong>自己修復の作業場所を毎回 HEAD へ付け替える一式</strong>（＋暴走したパーサを降ろす見張り）と、それ以前の<strong>端末の桁行を 120×40 に固定した一式</strong>も入っている。
   <br><strong>0.1.29 と 0.1.30 のうち、セッションホスト<span class="mark">▽</span>に関わるぶんは、いま誰も使っていない。</strong>あれが走っておらず、繋ぎ先の<strong>サーバも無い</strong>ためである。<strong>リモート経路（ブラウザ → サーバ → セッションホスト）でしか出ない壊れ方は、どこかにサーバを立て直すまで裏取りできない</strong>——スマホから触る確認は全部ここで止まる。
 </p>
 
@@ -77,7 +77,7 @@
 
   <rect x="30" y="62" width="200" height="72" rx="8" fill="#161a21" stroke="#2d4a22"/>
   <text x="44" y="88" fill="#9ece6a" font-size="14" font-weight="600">8787 実機</text>
-  <text x="44" y="108" fill="#e6e9ef" font-size="12">ローカルモード・走行 0.1.32</text>
+  <text x="44" y="108" fill="#e6e9ef" font-size="12">ローカルモード・走行 0.1.30</text>
   <text x="44" y="125" fill="#9aa4b2" font-size="11">~/AgentDashboard のソースビルド</text>
 
   <rect x="256" y="62" width="200" height="72" rx="8" fill="#161a21" stroke="#2d4a22"/>
@@ -127,7 +127,7 @@
   一方 AWS は<strong>配った箱</strong>なので、<strong>リリースを出すまで何も変わらない</strong>。
   画面に出る版だけを見て「同じものが動いている」と判断しないこと。<br><br>
 
-  <p class="note warn"><strong>いまはずれている。</strong> AWS は無い（アカウント閉鎖）。<strong>セッションホスト<span class="mark">▽</span>は走っていない</strong>。実機は<strong>走行もディスクも 0.1.32</strong>で、<strong>いまはずれていない。</strong></p>
+  <p class="note warn"><strong>いまはずれている。</strong> AWS は無い（アカウント閉鎖）。<strong>セッションホスト<span class="mark">▽</span>は走っていない</strong>。実機は<strong>走行 0.1.30・ディスク 0.1.32</strong>で、<strong>0.1.31 と 0.1.32 の直りは起こし直すまで効かない。</strong><strong>いま抱えている claude は11本</strong>なので、落とす時機は人が決める。</p>
 
   <strong>Windows から 8787 が開かないとき（2026-08-16 に踏んだ）。</strong>
   症状は <code>ERR_CONNECTION_RESET</code> で、<strong>約2.04秒ぴったり</strong>で切れる。WSL の中から <code>curl</code> すると 200 が数ミリ秒で返るので、アプリは無罪である。<br><br>
@@ -172,7 +172,7 @@ agentdashboard-agent logs --since 24h --state-dir ~/agentdashboard-agent/state</
   <tr>
     <td>実機</td>
     <td><code>127.0.0.1:8787</code></td>
-    <td><span class="tag t-ok">走行 0.1.32（ディスクも 0.1.32）</span><br><small><strong>08-23 18時台に起こし直した。</strong>ソースビルド<span class="mark">▽</span>。<strong>走行とディスクが揃っている</strong>ので、いまはずれていない。<br><strong>「全て復旧」に歯止めが入っている</strong>（0.1.32）——入りきらないとダイアログが出て、PC 側でも空きが足りなければ断る。見積もりと余白は設定（<code>revive_estimate_mb</code> ／ <code>revive_headroom_mb</code>）。<br><strong>落とすと抱えている claude が道連れになるので、押すのは人。</strong>数えてから落とすこと。<strong>作業しているセッション自身がその子であることがある</strong>——そのときは<strong>切り離したスクリプト</strong>に任せる（<code>/tmp/agentdashboard-restart.sh</code>。記録は <code>~/agentdashboard-restart.log</code>）。<br><strong>耳を <code>0.0.0.0</code> へ広げてある</strong>（<code>config.toml</code> の <code>bind_addr</code>）。既定の 127.0.0.1 のままだと Windows のブラウザから開けない。<br><strong>鍵は無い。</strong> ローカルモードは認証を持たないので、同じネットワークから誰でも操作できる。<br><strong>パーサは同梱版で走っている</strong>（<code>parser-current</code> は無い）</small></td>
+    <td><span class="tag t-old">走行 0.1.30（ディスクは 0.1.32）</span><br><small><strong>08-23 05:20 に 0.1.30 で起こし直したきり。</strong>ソースビルド<span class="mark">▽</span>。<strong>ディスクだけが先へ進んでいる</strong>（<code>0.1.32</code>）ので、<strong>また1段ずれている</strong>——0.1.31 の並びの直しと 0.1.32 のメモリの歯止めは、<strong>起こし直すまで効かない</strong>。<br><strong>歯止めは 0.1.32 に入っている</strong>——入りきらないとダイアログが出て、PC 側でも空きが足りなければ断る。見積もりと余白は設定（<code>revive_estimate_mb</code> ／ <code>revive_headroom_mb</code>）。<br><strong>落とすと抱えている claude が道連れになるので、押すのは人。</strong>数えてから落とすこと。<strong>作業しているセッション自身がその子であることがある</strong>——そのときは<strong>切り離したスクリプト</strong>に任せる（<code>/tmp/agentdashboard-restart.sh</code>。記録は <code>~/agentdashboard-restart.log</code>）。<br><strong>耳を <code>0.0.0.0</code> へ広げてある</strong>（<code>config.toml</code> の <code>bind_addr</code>）。既定の 127.0.0.1 のままだと Windows のブラウザから開けない。<br><strong>鍵は無い。</strong> ローカルモードは認証を持たないので、同じネットワークから誰でも操作できる。<br><strong>パーサは同梱版で走っている</strong>（<code>parser-current</code> は無い）</small></td>
     <td>ローカルモード<span class="mark">▽</span>。<code>~/AgentDashboard</code> で <code>make build</code> したものを引数なしで起動。端末の出力は <code>~/agentdashboard-run.log</code>、構造化ログは <code>~/.local/state/agentdashboard-run/logs/</code>。<br><strong>読むときは <code>--state-dir</code> が要る。</strong> 置き場所を設定で移してあるが、読む口は設定を読まない（設計§11-2 の非対称）——<code>agentdashboard logs --since 1h --state-dir ~/.local/state/agentdashboard-run</code><br><strong>起こすときは <code>setsid</code> で切り離す。</strong> ツール呼び出しの子として起こすと、呼び出しの終了で巻き添えに死ぬ（08-10 に一度この形で起こしてしまい、起こし直した）。<code>cd ~/AgentDashboard &amp;&amp; setsid nohup ./server/target/release/agentdashboard &gt;&gt; ~/agentdashboard-run.log 2&gt;&amp;1 &lt; /dev/null &amp;</code></td>
   </tr>
   <tr>
