@@ -1150,10 +1150,13 @@ enum Ask {
         Box<protocol::logs::LogQuery>,
         Arc<crate::config::SessionHostConfig>,
     ),
-    /// この PC の資源（起こし直し設計§18-4）。**読む口と数字2つだけを持ち出す**
+    /// この PC の資源（起こし直し設計§18-4）。**読む口と数字だけを持ち出す**
     /// ——器ごと入れると `Debug` を器の全体へ強いることになる。数える規則は
-    /// `resources::snapshot` の1箇所のまま
-    Resources(Arc<dyn crate::resources::Probe>, u64, u64),
+    /// `resources::snapshot` の1箇所のまま。
+    ///
+    /// 4つめは**通したぶんを差し引いた見込みの空き**（設計§19）。床の判定と同じ数を
+    /// 渡さないと、**画面が「入る」と言ったものを PC が断る**ことになる。
+    Resources(Arc<dyn crate::resources::Probe>, u64, u64, Option<u64>),
 }
 
 /// 答えの要る問いに、**別のスレッドで**答える（設計§4・§8・§9、ログ設計§13-1）。
@@ -1196,8 +1199,13 @@ fn answer_ask(outgoing: mpsc::UnboundedSender<Outgoing>, request_id: RequestId, 
             },
             // **読めないことは異常ではない**（Linux 以外）。そう言えば、聞いた側は
             // 歯止め無しで進む——分からないことを理由に止めない（設計§18-4）
-            Ask::Resources(probe, estimate_mb, headroom_mb) => {
-                match crate::resources::snapshot(probe.as_ref(), estimate_mb, headroom_mb) {
+            Ask::Resources(probe, estimate_mb, headroom_mb, projected) => {
+                match crate::resources::snapshot(
+                    probe.as_ref(),
+                    estimate_mb,
+                    headroom_mb,
+                    projected,
+                ) {
                     Some(resources) => HostReply::Resources(resources),
                     None => HostReply::Failed {
                         reason: protocol::a2s::HostFailure::Unsupported,
@@ -1405,6 +1413,7 @@ fn apply_command(
                     manager.memory_probe(),
                     manager.config().revive_estimate_mb,
                     manager.config().revive_headroom_mb,
+                    manager.projected_available_mb(),
                 ),
             );
         }

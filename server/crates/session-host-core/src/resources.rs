@@ -80,26 +80,53 @@ pub fn fits(available_mb: u64, headroom_mb: u64, estimate_mb: u64) -> u32 {
     u32::try_from(usable / estimate_mb).unwrap_or(u32::MAX)
 }
 
-/// いまの資源を1枚にまとめる（設計§18-2）。
+/// いまの資源を1枚にまとめる（設計§18-2・§19）。
 ///
 /// **数える規則はここ1箇所。** `SessionManager` からも、線の答えを作るところからも
 /// これを通す——2箇所に書くと、画面が「入る」と言ったものを PC が断ることが起こる。
+///
+/// # `projected_mb` は「通したぶんを差し引いた見込み」
+///
+/// `MemAvailable` は**実際に確保されたぶんしか減らない**。起こし直しを通してから
+/// claude が約 780MB を確保し終えるまでには間があり（実測：擬似ターミナルは 2.02 秒で
+/// 揃い、RSS が落ち着いたのは +50 秒）、その間この値は**まだ空いている**と言い続ける。
+///
+/// 素直に信じると、同時に頼んだぶんが**互いを数えないまま全員「入る」**になる。
+/// そこで、通したぶんを引いた見込みを持ち回り、**実測と見込みの小さいほう**で数える
+/// （設計§19）。載る前は見込みが効き、載ったあとは実測が効くので、**二重には引かれない**。
+///
+/// 枠が1つも無ければ `None`＝実測をそのまま使う。
 ///
 /// 読めなければ `None`。**読めないことは異常ではない**（Linux 以外）。
 pub fn snapshot(
     probe: &dyn Probe,
     estimate_mb: u64,
     headroom_mb: u64,
+    projected_mb: Option<u64>,
 ) -> Option<protocol::HostResources> {
     let memory = probe.read()?;
     Some(protocol::HostResources {
         total_mb: memory.total_mb,
+        // **機械が報告した値は書き換えない。** 見込みは数えるためのもので、
+        // 「いくら空いているか」の答えではない
         available_mb: memory.available_mb,
         swap_free_mb: memory.swap_free_mb,
         estimate_mb,
         headroom_mb,
-        fits_now: fits(memory.available_mb, headroom_mb, estimate_mb),
+        fits_now: fits(
+            projected(memory.available_mb, projected_mb),
+            headroom_mb,
+            estimate_mb,
+        ),
     })
+}
+
+/// 実測と見込みの、**小さいほう**（設計§19）。
+///
+/// 見込みが無ければ実測をそのまま使う。**数える規則を2箇所に書かない**ため、
+/// 枠を取る側（`SessionManager::reserve_memory`）もこれを通す。
+pub fn projected(available_mb: u64, projected_mb: Option<u64>) -> u64 {
+    projected_mb.map_or(available_mb, |projected| available_mb.min(projected))
 }
 
 #[cfg(test)]
@@ -128,6 +155,51 @@ mod tests {
     #[test]
     fn 見積もりが0なら数えない() {
         assert_eq!(fits(100, 2_048, 0), u32::MAX);
+    }
+
+    /// 好きな空きを名乗るだけの口。
+    #[derive(Debug)]
+    struct 名乗る(u64);
+
+    impl Probe for 名乗る {
+        fn read(&self) -> Option<Memory> {
+            Some(Memory {
+                total_mb: 16_000,
+                available_mb: self.0,
+                swap_free_mb: 0,
+            })
+        }
+    }
+
+    #[test]
+    fn 通したぶんを引いた見込みで数える() {
+        // (12,000 − 2,000) / 1,000 = 10 枚。3枚ぶん通してあれば見込みは 9,000
+        let 見込みなし = snapshot(&名乗る(12_000), 1_000, 2_000, None).expect("読めること");
+        assert_eq!(見込みなし.fits_now, 10);
+        let 見込みあり = snapshot(&名乗る(12_000), 1_000, 2_000, Some(9_000)).expect("読めること");
+        assert_eq!(見込みあり.fits_now, 7);
+        // **空きそのものは動かさない。** 見込みは数えるためのもので、機械が報告した
+        // 空きを書き換えてよいわけではない
+        assert_eq!(見込みあり.available_mb, 12_000);
+    }
+
+    #[test]
+    fn 実測が見込みより下がっていれば実測を採る() {
+        // **これが二重に引かないための要点。** 通したぶんが実際に載れば、実測が
+        // 見込みを下回る。両方引くと、入るのに断り続けることになる
+        assert_eq!(projected(3_000, Some(9_000)), 3_000, "実測のほうが小さい");
+        assert_eq!(
+            projected(12_000, Some(9_000)),
+            9_000,
+            "見込みのほうが小さい"
+        );
+        assert_eq!(projected(12_000, None), 12_000, "枠が無ければ実測そのまま");
+    }
+
+    #[test]
+    fn 見込みが余白を割っても負にならない() {
+        let resources = snapshot(&名乗る(3_000), 1_000, 2_000, Some(0)).expect("読めること");
+        assert_eq!(resources.fits_now, 0);
     }
 
     #[test]

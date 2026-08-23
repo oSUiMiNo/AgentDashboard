@@ -741,7 +741,7 @@ async fn 席を待ったカードにも床が効く() {
     // **「席より前で見ていないこと」は、このテストでは確かめられない。** 3枚を同時に
     // 頼んでも実際にはタスクが順に走るので、受付時に見る実装でも3枚目は既に2枚起きた
     // 後の空きを読む——壊し方を当てても落ちなかった（当てて確かめた）。
-    // **そちらはコンパイラが見張っている**（`memory_floor` が席を引数に取る）。
+    // **そちらはコンパイラが見張っている**（`reserve_memory` が席を引数に取る）。
     let manager = common::manager_with(床の設定());
     let probe = 生きている数で決まるメモリ::作る(4_500, 1_000);
     probe.繋ぐ(&manager);
@@ -784,5 +784,194 @@ async fn 席を待ったカードにも床が効く() {
         起きた枚数(&manager, &ids),
         2,
         "席が空いても、空きが無ければ起きないこと"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 予約——載る前のぶんも容量として数える（設計§19）
+// ---------------------------------------------------------------------------
+//
+// **ここまでの床は、実は効いていなかった。** `MemAvailable` は実際に確保された
+// ぶんしか減らないので、通してから claude が約 780MB を確保し終えるまでの間、
+// 空きは「まだ空いている」と言い続ける。席は2つあり、しかも最初のフックで返るので、
+// 席の数では容量を守れない。
+//
+// 下のテストが**空きの動かない**プローブを使うのは、そのためである。空きが動かない
+// ＝「メモリがまだ載っていない」を、そのまま作れる。**予約を引いていなければ、
+// 何枚でも通る。**
+
+/// 予約を試すための設定。1枚 1,000MB・余白 2,000MB（[`床の設定`] と同じ）。
+///
+/// **空きは固定**なので、通した枚数を数えていなければ `fits_now` は下がらない。
+fn 予約の設定() -> SessionHostConfig {
+    床の設定()
+}
+
+/// 同時に頼んで、結果を集める。
+async fn 同時に頼む(manager: &Arc<SessionManager>, ids: &[CardId]) -> (usize, Vec<String>) {
+    let mut handles = Vec::new();
+    for card_id in ids {
+        let in_flight = manager.begin_revive(*card_id).expect("印が立つこと");
+        let manager = Arc::clone(manager);
+        let cwd = common::work_dir();
+        handles.push(tokio::spawn(async move {
+            manager
+                .revive(in_flight, &cwd, None, ClaudeSessionId::new())
+                .await
+                .map(|_| ())
+                .map_err(|err| err.to_string())
+        }));
+    }
+    let (mut 起きた, mut 断り) = (0, Vec::new());
+    for handle in handles {
+        match handle.await.expect("タスクが落ちていないこと") {
+            Ok(()) => 起きた += 1,
+            Err(refusal) => 断り.push(refusal),
+        }
+    }
+    (起きた, 断り)
+}
+
+#[tokio::test]
+async fn 同時に席を取った二本は互いを数える() {
+    // 空きは 3,000MB のまま動かない＝**1枚ぶんしかない**（余白 2,000 + 1枚 1,000）。
+    // 席は2つあるので、2本が同時に床を見る。**読んだ値が同じでも、通るのは1本。**
+    let manager = common::manager_with(予約の設定());
+    manager.set_memory_probe(名乗るメモリ::一定(3_000));
+
+    let ids: Vec<CardId> = (0..2).map(|_| CardId::new()).collect();
+    let (起きた, 断り) = 同時に頼む(&manager, &ids).await;
+
+    assert_eq!(起きた, 1, "1枚ぶんしか無いのだから1枚だけ通ること");
+    assert_eq!(断り.len(), 1);
+    assert!(
+        断り[0].contains("メモリが足りない"),
+        "理由がメモリだと分かること: {}",
+        断り[0]
+    );
+}
+
+#[tokio::test]
+async fn 席が返っても予約は残る() {
+    // 空きは 4,000MB のまま動かない＝**2枚ぶん**。3枚頼む。
+    //
+    // 2枚を立ち上がりきらせると**席は返る**が、その2枚のメモリはプローブに現れて
+    // いない（＝実機で claude が確保し終える前と同じ）。**予約が残っていなければ、
+    // 3枚目は「まだ2枚入る」と読んで通ってしまう。**
+    let manager = common::manager_with(予約の設定());
+    manager.set_memory_probe(名乗るメモリ::一定(4_000));
+
+    let ids: Vec<CardId> = (0..2).map(|_| CardId::new()).collect();
+    let (起きた, _) = 同時に頼む(&manager, &ids).await;
+    assert_eq!(起きた, 2, "2枚ぶんあるので2枚は通ること");
+
+    // 席を両方返させる。**予約はまだ返らない**
+    for card_id in &ids {
+        let session = manager.get(*card_id).expect("起きていること");
+        立ち上がりきらせる(&manager, &session);
+    }
+    wait_until("席が2つとも返る", || {
+        ids.iter().all(|id| {
+            manager
+                .get(*id)
+                .is_some_and(|s| s.status() != SessionStatus::Starting)
+        })
+    })
+    .await;
+
+    let 三枚目 = CardId::new();
+    let refusal = 頼む(&manager, 三枚目).await.expect_err("断られること");
+    assert!(
+        refusal.contains("メモリが足りない"),
+        "席が返っても、載りきるまでは通さないこと: {refusal}"
+    );
+    assert!(manager.get(三枚目).is_none(), "実体が作られていないこと");
+}
+
+#[tokio::test]
+async fn まとめて投げても入る枚数を超えない() {
+    // **これが「26枚投げても機械が固まらない」の中身。** 空きは動かないので、
+    // 予約を数えていなければ26枚とも通る。
+    //
+    // **席を回しながら投げる。** 起きた2枚を立ち上がりきらせないと席が返らず、
+    // 残り24枚は席待ちで [`REVIVE_SETTLE`]（60秒）ぶん止まる——**確かめたいのは
+    // 席ではなく床**なので、席は詰まらせない。
+    let manager = common::manager_with(予約の設定());
+    manager.set_memory_probe(名乗るメモリ::一定(4_000));
+
+    let ids: Vec<CardId> = (0..26).map(|_| CardId::new()).collect();
+    let 回す = {
+        let manager = Arc::clone(&manager);
+        let ids = ids.clone();
+        tokio::spawn(async move {
+            loop {
+                for card_id in &ids {
+                    if let Some(session) = manager.get(*card_id)
+                        && session.status() == SessionStatus::Starting
+                    {
+                        立ち上がりきらせる(&manager, &session);
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+    };
+
+    let (起きた, 断り) = 同時に頼む(&manager, &ids).await;
+    回す.abort();
+
+    assert_eq!(起きた, 2, "(4,000 − 2,000) / 1,000 = 2 枚を超えないこと");
+    assert_eq!(断り.len(), 24, "残りは断られること");
+    assert_eq!(起きた枚数(&manager, &ids), 2, "実体も2枚だけであること");
+}
+
+#[tokio::test]
+async fn 終わったセッションは予約を返す() {
+    // 死んだプロセスはメモリを持っていない。**枠を握り続ける理由が無い**
+    // ——起こし直しに失敗して即座に落ちた場合が、まさにこれに当たる。
+    let manager = common::manager_with(予約の設定());
+    manager.set_memory_probe(名乗るメモリ::一定(3_000));
+
+    let card_id = CardId::new();
+    頼む(&manager, card_id).await.expect("1枚は通ること");
+    wait_until("予約が立つ", || manager.reserved_revives() == 1).await;
+    assert_eq!(
+        manager.host_resources().expect("読めること").fits_now,
+        0,
+        "予約中は「もう入らない」と答えること"
+    );
+
+    manager.kill(card_id).expect("落とせること");
+
+    wait_until("予約が返る", || manager.reserved_revives() == 0).await;
+    assert_eq!(
+        manager.host_resources().expect("読めること").fits_now,
+        1,
+        "終わったぶんは、また入ると答えること"
+    );
+}
+
+#[tokio::test]
+async fn 画面へ答える枚数にも予約が乗る() {
+    // 床の判定と**同じ数**を答えること。片方だけ引くと、画面が「入る」と言ったものを
+    // PC が断ることになる（`resources.rs` の冒頭が戒めていること）
+    let manager = common::manager_with(予約の設定());
+    manager.set_memory_probe(名乗るメモリ::一定(5_000));
+
+    assert_eq!(
+        manager.host_resources().expect("読めること").fits_now,
+        3,
+        "(5,000 − 2,000) / 1,000 = 3"
+    );
+
+    let card_id = CardId::new();
+    頼む(&manager, card_id).await.expect("通ること");
+    wait_until("予約が立つ", || manager.reserved_revives() == 1).await;
+
+    let resources = manager.host_resources().expect("読めること");
+    assert_eq!(resources.fits_now, 2, "通した1枚ぶんが引かれていること");
+    assert_eq!(
+        resources.available_mb, 5_000,
+        "空きそのものは書き換えないこと（機械が報告した値である）"
     );
 }

@@ -288,8 +288,16 @@ impl SessionHost for LocalSessionHost {
         let probe = self.manager.memory_probe();
         let estimate_mb = self.manager.config().revive_estimate_mb;
         let headroom_mb = self.manager.config().revive_headroom_mb;
+        // **床の判定と同じ数を渡す**（起こし直し設計§19）。通したぶんを引いた見込みを
+        // 使わないと、画面が「入る」と言ったものを PC が断る
+        let projected = self.manager.projected_available_mb();
         let resources = tokio::task::spawn_blocking(move || {
-            session_host_core::resources::snapshot(probe.as_ref(), estimate_mb, headroom_mb)
+            session_host_core::resources::snapshot(
+                probe.as_ref(),
+                estimate_mb,
+                headroom_mb,
+                projected,
+            )
         })
         .await
         .ok()

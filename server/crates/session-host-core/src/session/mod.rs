@@ -196,6 +196,22 @@ const REVIVE_PARALLEL: usize = 2;
 const REVIVE_SETTLE: Duration = Duration::from_secs(60);
 const REVIVE_STEP: Duration = Duration::from_millis(100);
 
+/// 起こし直した1本のメモリが `MemAvailable` に現れきるまでの見込み（設計§19）。
+///
+/// # なぜ [`REVIVE_SETTLE`] と別に要るのか
+///
+/// **数えているものが違う。** 席は「起動の山」を抑えるためのもので、最初のフックが
+/// 届いた時点＝**プロセスが立ち上がった時点**で返してよい。ところが claude が
+/// 約 780MB を実際に確保するのは**そのあと**である。
+///
+/// フェーズ6 の実測がそのまま根拠になっている——6枚を撃つと擬似ターミナルは
+/// **2.02 秒**で6本とも揃うのに、木の RSS はその直後で 7,585MB、**+50 秒で 10,617MB**
+/// だった。席が返ったあとに 3GB 増えている。
+///
+/// 席と同じ寿命で容量を守ろうとすると、**席が返った瞬間に古い空きを読む**ので、
+/// 断られ始めるのは実際に空きが尽きてからになる。歯止めが歯止めにならない。
+const REVIVE_MEMORY_SETTLE: Duration = Duration::from_secs(60);
+
 /// 同じカードへ二度目の頼みが来たときの言い分（設計§8-1）。
 ///
 /// **待ち行列に並ばせない**ので、断り方は1つで済む。ここに置いてあるのは、
@@ -1268,6 +1284,53 @@ pub struct SessionManager {
     /// 中身は変えられないので、固定していると**空きが足りないときの振る舞いを1行も
     /// 確かめられない**（ガイドライン「外の世界へ出る操作はトレイト越しにする」）。
     memory: Mutex<Arc<dyn crate::resources::Probe>>,
+    /// 通したぶんを差し引いた**見込みの空き**（設計§19）。
+    ///
+    /// 席（[`SessionManager::revive_slots`]）とは**寿命が違う**ので別に持つ。席は
+    /// 「起動の山」を抑えるためのもので最初のフックで返るが、claude が約 780MB を
+    /// 確保し終えるのは**そのあと**である。席の数で容量を守ろうとすると、席が返った
+    /// 瞬間に「まだ空いている」古い値を読んで次を通してしまう。
+    ///
+    /// **見るのと取るのは、このロックの中で不可分に行う**（[`SessionManager::reserve_memory`]）。
+    /// 分けると、同時に席を取った2本が**両方「入る」と読んでから両方予約する**。
+    budget: Mutex<ReviveBudget>,
+}
+
+/// 通したぶんを差し引いた見込みの空き（設計§19）。
+///
+/// # なぜ「枚数」ではなく「見込みの空き」なのか
+///
+/// 単純に「通した枚数 × 見積もり」を引くと、**もう載ったぶんまで二重に引く**。
+/// 実機の `MemAvailable` は claude が確保するにつれて本当に減っていくので、
+/// そのぶんと予約の両方を引くと、実際には入るのに断り続けることになる。
+///
+/// そこで**見込みと実測の小さいほう**を採る。載る前は見込みが効き、載ったあとは
+/// 実測が効く——どちらが進んでいても、辻褄の合う側だけが残る。
+#[derive(Debug, Default)]
+struct ReviveBudget {
+    /// いま枠を握っている本数。0 になったら見込みを捨てる（実測だけに戻す）。
+    outstanding: u32,
+    /// 通したぶんを引いた見込み。**枠が1つも無ければ `None`**。
+    projected_mb: Option<u64>,
+}
+
+/// 起こし直し1枚ぶんのメモリを押さえていることの印（設計§19）。落ちると枠が返る。
+///
+/// [`ReviveInFlight`] と同じ RAII の形だが、**持つ期間が違う**——あちらは
+/// 「立ち上がりきるまで」、こちらは**「メモリが載りきるまで」**である。
+pub struct MemoryReservation {
+    manager: Arc<SessionManager>,
+}
+
+impl Drop for MemoryReservation {
+    fn drop(&mut self) {
+        let mut budget = self.manager.budget.lock().expect("ロックが壊れていない");
+        budget.outstanding = budget.outstanding.saturating_sub(1);
+        if budget.outstanding == 0 {
+            // 誰も待っていないなら、見込みは捨てて**実測だけ**に戻す
+            budget.projected_mb = None;
+        }
+    }
 }
 
 /// 起こし直しが走っていることの印（設計§8-2）。落ちると印も下りる。
@@ -1368,7 +1431,28 @@ impl SessionManager {
             self.memory_probe().as_ref(),
             self.config.revive_estimate_mb,
             self.config.revive_headroom_mb,
+            self.projected_available_mb(),
         )
+    }
+
+    /// 通したぶんを差し引いた見込みの空き（設計§19）。枠が1つも無ければ `None`。
+    ///
+    /// **線の答えを作る2箇所**（`link.rs` の `Ask::Resources` と、ローカルモードの
+    /// `local.rs`）も、床の判定と**同じ数**を使うためにこれを通す。片方だけ引くと、
+    /// 画面が「入る」と言ったものを PC が断ることになる。
+    pub fn projected_available_mb(&self) -> Option<u64> {
+        self.budget
+            .lock()
+            .expect("ロックが壊れていない")
+            .projected_mb
+    }
+
+    /// いま枠を握っている本数（テストと、ログのため）。
+    pub fn reserved_revives(&self) -> u32 {
+        self.budget
+            .lock()
+            .expect("ロックが壊れていない")
+            .outstanding
     }
 
     /// メモリを読む口を借りる。
@@ -1397,16 +1481,50 @@ impl SessionManager {
     ///
     /// **だから検査ではなくコンパイラに見張らせる。** 席より前へ動かすと、渡すものが
     /// 無くてコンパイルが通らない。
-    fn memory_floor(&self, _seat: &tokio::sync::OwnedSemaphorePermit) -> Option<SessionError> {
-        let resources = self.host_resources()?;
-        if resources.fits_now > 0 {
-            return None;
+    ///
+    /// # 見るのと取るのは不可分（設計§19）
+    ///
+    /// 通れば**その場で1枚ぶん予約する**。読んでから予約するまでを分けると、同時に
+    /// 席を取った2本が**両方「入る」と読んでから両方予約する**——席は2つあるので、
+    /// これは日常的に起こる。
+    ///
+    /// 読めなかった場合は `Ok`＝**通す**（予約もしない）。**分からないことを理由に止めない。**
+    fn reserve_memory(
+        self: &Arc<Self>,
+        _seat: &tokio::sync::OwnedSemaphorePermit,
+    ) -> Result<Option<MemoryReservation>, SessionError> {
+        // **台帳のロックを取る前に読む口を複製しておく。** `memory_probe()` は別の
+        // ロックを取るので、入れ子にすると順序の約束が要る
+        let probe = self.memory_probe();
+        let estimate_mb = self.config.revive_estimate_mb;
+        let headroom_mb = self.config.revive_headroom_mb;
+
+        let mut budget = self.budget.lock().expect("ロックが壊れていない");
+        let Some(resources) = crate::resources::snapshot(
+            probe.as_ref(),
+            estimate_mb,
+            headroom_mb,
+            budget.projected_mb,
+        ) else {
+            // 読めない機械（Linux 以外）。歯止めそのものが効かない
+            return Ok(None);
+        };
+        if resources.fits_now == 0 {
+            return Err(SessionError::OutOfMemory {
+                available_mb: resources.available_mb,
+                estimate_mb: resources.estimate_mb,
+                headroom_mb: resources.headroom_mb,
+            });
         }
-        Some(SessionError::OutOfMemory {
-            available_mb: resources.available_mb,
-            estimate_mb: resources.estimate_mb,
-            headroom_mb: resources.headroom_mb,
-        })
+        // 通したぶんを見込みから引く。**実測が既に下がっていれば、そちらが採られている**
+        // （`snapshot` が小さいほうを使う）ので、二重には引かれない
+        let base = crate::resources::projected(resources.available_mb, budget.projected_mb);
+        budget.projected_mb = Some(base.saturating_sub(estimate_mb));
+        budget.outstanding += 1;
+        drop(budget);
+        Ok(Some(MemoryReservation {
+            manager: Arc::clone(self),
+        }))
     }
 
     /// 利用者の PC 上のファイル（グローバル既定・別名の実測）を開く。
@@ -1454,6 +1572,7 @@ impl SessionManager {
             reviving: Mutex::new(HashSet::new()),
             revive_slots: Arc::new(Semaphore::new(REVIVE_PARALLEL)),
             memory: Mutex::new(Arc::new(crate::resources::ProcMeminfo)),
+            budget: Mutex::new(ReviveBudget::default()),
         })
     }
 
@@ -1970,13 +2089,19 @@ impl SessionManager {
             .expect("席の口を閉じていない");
 
         // **床は席を取った直後に見る**（設計§18-3）。順序はコンパイラが見張っている
-        // ——`memory_floor` は席を引数に取るので、前へ動かすと通らない。
+        // ——`reserve_memory` は席を引数に取るので、前へ動かすと通らない。
         //
         // 畳むより先に見るのは、**畳んでから断ると、そのカードの実体だけを失う**ため。
-        if let Some(refusal) = self.memory_floor(&seat) {
-            tracing::warn!(%card_id, "{refusal}");
-            return Err(refusal);
-        }
+        //
+        // 通ったら1枚ぶん予約が返る。**この先で失敗したら、そこで落ちて枠が返る**
+        // （RAII。60秒ぶん多く見積もったまま残さない）
+        let reservation = match self.reserve_memory(&seat) {
+            Ok(reservation) => reservation,
+            Err(refusal) => {
+                tracing::warn!(%card_id, "{refusal}");
+                return Err(refusal);
+            }
+        };
 
         // **必ず起こす前に畳む**（設計§7-1）。理由は [`SessionManager::fold`] に書いてある
         if self.fold(card_id).is_some() {
@@ -2002,22 +2127,45 @@ impl SessionManager {
         // **「起こせた」と「立ち上がりきった」は別の出来事**なので分けておく。
         //
         // 印も一緒に持つ。席だけ返すと、立ち上がり中のカードへ2回目の頼みが通る。
+        //
+        // **メモリの予約は、席より長く持つ**（設計§19）。席を返すのは「立ち上がった」
+        // 時点だが、メモリが載りきるのはそのあとである。
         tokio::spawn({
             let session = Arc::clone(&session);
             async move {
-                let _seat = seat;
-                let _in_flight = in_flight;
-                let deadline = tokio::time::Instant::now() + REVIVE_SETTLE;
-                while session.status() == SessionStatus::Starting {
-                    if tokio::time::Instant::now() >= deadline {
-                        tracing::warn!(
-                            card_id = %session.card_id,
-                            "{REVIVE_SETTLE:?} 経ってもフックが届かないので、席を返します"
-                        );
-                        break;
+                let reservation = reservation;
+                {
+                    // **印は席と同じ寿命。** ここを予約に合わせて延ばすと、立ち上がりきった
+                    // カードが「まだ復旧中です」と断られ続ける（設計§8-2 の目的から外れる）
+                    let _in_flight = in_flight;
+                    let _seat = seat;
+                    let deadline = tokio::time::Instant::now() + REVIVE_SETTLE;
+                    while session.status() == SessionStatus::Starting {
+                        if tokio::time::Instant::now() >= deadline {
+                            tracing::warn!(
+                                card_id = %session.card_id,
+                                "{REVIVE_SETTLE:?} 経ってもフックが届かないので、席を返します"
+                            );
+                            break;
+                        }
+                        tokio::time::sleep(REVIVE_STEP).await;
                     }
-                    tokio::time::sleep(REVIVE_STEP).await;
                 }
+                // ここで席は返っている。**予約だけを、メモリが載りきるまで持ち続ける。**
+                //
+                // **終わったセッションは待たない。** 死んだプロセスはメモリを持って
+                // いないので、枠を握り続ける理由が無い（起こし直しに失敗して即座に
+                // 落ちた場合が、まさにこれに当たる）。
+                if reservation.is_some() {
+                    let deadline = tokio::time::Instant::now() + REVIVE_MEMORY_SETTLE;
+                    while tokio::time::Instant::now() < deadline {
+                        if matches!(session.status(), SessionStatus::Ended { .. }) {
+                            break;
+                        }
+                        tokio::time::sleep(REVIVE_STEP).await;
+                    }
+                }
+                drop(reservation);
             }
         });
         Ok(session)
