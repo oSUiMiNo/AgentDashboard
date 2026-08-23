@@ -223,6 +223,18 @@ pub enum SessionError {
     NotFound(CardId),
     #[error("フック設定を用意できませんでした: {0}")]
     Settings(String),
+    /// 空きメモリが床を切っているので起こし直せない（設計§18-3）。
+    ///
+    /// **数を添える。** 「メモリが足りません」だけだと、あと1枚なのか10枚ぶん
+    /// 足りないのかが分からず、利用者は何をすればよいか決められない。
+    #[error(
+        "メモリが足りないので起こし直せません（空き {available_mb} MB／        1枚あたり {estimate_mb} MB ＋ 残す余白 {headroom_mb} MB）。        動いているセッションを終了させてから、もう一度押してください"
+    )]
+    OutOfMemory {
+        available_mb: u64,
+        estimate_mb: u64,
+        headroom_mb: u64,
+    },
 }
 
 /// 権限モードの切替に失敗した理由（設計§6）。
@@ -1250,6 +1262,12 @@ pub struct SessionManager {
     /// `switch_model` の即断りだが、「全て復旧」は6枚をまとめて頼む操作なので、
     /// 断られたぶんを**押した人が拾い直せない**。
     revive_slots: Arc<Semaphore>,
+    /// この機械のメモリを読む口（設計§18）。
+    ///
+    /// **差し替えられる形にしてあるのはテストのため。** テストから `/proc/meminfo` の
+    /// 中身は変えられないので、固定していると**空きが足りないときの振る舞いを1行も
+    /// 確かめられない**（ガイドライン「外の世界へ出る操作はトレイト越しにする」）。
+    memory: Mutex<Arc<dyn crate::resources::Probe>>,
 }
 
 /// 起こし直しが走っていることの印（設計§8-2）。落ちると印も下りる。
@@ -1329,6 +1347,70 @@ impl SessionManager {
         &self.config
     }
 
+    /// メモリを読む口を差し替える（テスト専用。設計§18-1）。
+    ///
+    /// 製品の経路からは呼ばない。**差し替えられないと、空きが足りないときの
+    /// 振る舞いを1行も確かめられない**——テストから `/proc/meminfo` は変えられない。
+    pub fn set_memory_probe(&self, probe: Arc<dyn crate::resources::Probe>) {
+        *self.memory.lock().expect("ロックが壊れていない") = probe;
+    }
+
+    /// いまの資源と、**いま何枚起こし直せるか**（設計§18-2）。
+    ///
+    /// **数えるのはここ1箇所。** 画面もこの数を受け取って比べるだけで、同じ規則を
+    /// TypeScript 側へ書き写さない。書き写すと、画面が「入る」と言ったものを
+    /// PC が断る（あるいは逆）ことが起こる。
+    ///
+    /// 読めなければ `None`。**読めないことは異常ではない**（Linux 以外）。
+    /// そのときは歯止めそのものが効かない——**分からないことを理由に止めない。**
+    pub fn host_resources(&self) -> Option<protocol::HostResources> {
+        let memory = self
+            .memory
+            .lock()
+            .expect("ロックが壊れていない")
+            .clone()
+            .read()?;
+        let estimate_mb = self.config.revive_estimate_mb;
+        let headroom_mb = self.config.revive_headroom_mb;
+        Some(protocol::HostResources {
+            total_mb: memory.total_mb,
+            available_mb: memory.available_mb,
+            swap_free_mb: memory.swap_free_mb,
+            estimate_mb,
+            headroom_mb,
+            fits_now: crate::resources::fits(memory.available_mb, headroom_mb, estimate_mb),
+        })
+    }
+
+    /// いま1枚も起こし直せないなら、その理由を返す（設計§18-3）。
+    ///
+    /// 読めなかった場合は `None`＝**通す**。
+    ///
+    /// # なぜ席を引数で受け取るのか（使わないのに）
+    ///
+    /// **席を取った後でしか呼べないことを、型で固定するため。** 受付の時点で見ると、
+    /// 「全て復旧」が投げる26枚は**まだ誰も起きていない空き**を読むので、全員が
+    /// 「入る」と答えてしまう。席が空くころには足りていないのに、判断はもう済んでいる。
+    ///
+    /// **これをテストで押さえようとして、押さえられなかった。** 3枚を同時に頼んでも、
+    /// 実際にはタスクが順に走るので、受付時に見る実装でも3枚目は既に2枚起きた後の
+    /// 空きを読む——**壊し方を当てても落ちない**（当てて確かめた）。同時に読ませる
+    /// 仕掛けを作るには、同期の `read()` の中で待つ必要があり、そこで走行時を止める。
+    ///
+    /// **だから検査ではなくコンパイラに見張らせる。** 席より前へ動かすと、渡すものが
+    /// 無くてコンパイルが通らない。
+    fn memory_floor(&self, _seat: &tokio::sync::OwnedSemaphorePermit) -> Option<SessionError> {
+        let resources = self.host_resources()?;
+        if resources.fits_now > 0 {
+            return None;
+        }
+        Some(SessionError::OutOfMemory {
+            available_mb: resources.available_mb,
+            estimate_mb: resources.estimate_mb,
+            headroom_mb: resources.headroom_mb,
+        })
+    }
+
     /// 利用者の PC 上のファイル（グローバル既定・別名の実測）を開く。
     fn user_files(
         config: &SessionHostConfig,
@@ -1373,6 +1455,7 @@ impl SessionManager {
             screen_settings: Mutex::new(screen::ScreenSettings::default()),
             reviving: Mutex::new(HashSet::new()),
             revive_slots: Arc::new(Semaphore::new(REVIVE_PARALLEL)),
+            memory: Mutex::new(Arc::new(crate::resources::ProcMeminfo)),
         })
     }
 
@@ -1887,6 +1970,15 @@ impl SessionManager {
             .acquire_owned()
             .await
             .expect("席の口を閉じていない");
+
+        // **床は席を取った直後に見る**（設計§18-3）。順序はコンパイラが見張っている
+        // ——`memory_floor` は席を引数に取るので、前へ動かすと通らない。
+        //
+        // 畳むより先に見るのは、**畳んでから断ると、そのカードの実体だけを失う**ため。
+        if let Some(refusal) = self.memory_floor(&seat) {
+            tracing::warn!(%card_id, "{refusal}");
+            return Err(refusal);
+        }
 
         // **必ず起こす前に畳む**（設計§7-1）。理由は [`SessionManager::fold`] に書いてある
         if self.fold(card_id).is_some() {

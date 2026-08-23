@@ -75,6 +75,10 @@ pub struct Config {
     pub log_retention_days: u64,
     pub log_max_bytes: u64,
     pub log_file_level: String,
+    /// 起こし直し1枚あたりで減る空きメモリの見積もり（MB。起こし直し設計§18）
+    pub revive_estimate_mb: u64,
+    /// 起こし直しで使い切らずに残す余白（MB。起こし直し設計§18）
+    pub revive_headroom_mb: u64,
 }
 
 impl Default for Config {
@@ -112,6 +116,8 @@ impl Default for Config {
             log_retention_days: agent.log_retention_days,
             log_max_bytes: agent.log_max_bytes,
             log_file_level: agent.log_file_level,
+            revive_estimate_mb: agent.revive_estimate_mb,
+            revive_headroom_mb: agent.revive_headroom_mb,
         }
     }
 }
@@ -233,6 +239,8 @@ impl Config {
             log_retention_days: self.log_retention_days,
             log_max_bytes: self.log_max_bytes,
             log_file_level: self.log_file_level.clone(),
+            revive_estimate_mb: self.revive_estimate_mb,
+            revive_headroom_mb: self.revive_headroom_mb,
             // 接続の3つは `agent.toml` にだけ意味がある（セルフホスト化設計§21 読み替え8）。
             // ローカルモードは同じプロセスに同居していて、繋ぐ相手が自分自身になる
             server_url: None,

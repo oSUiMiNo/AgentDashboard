@@ -35,6 +35,7 @@ pub mod offsets;
 pub mod parser;
 pub mod proc;
 pub mod redact;
+pub mod resources;
 pub mod selfheal;
 pub mod session;
 pub mod settings;

@@ -294,6 +294,36 @@ pub struct VersionEntry {
     pub reason: Option<String>,
 }
 
+/// セッションを抱える機械の資源（起こし直し設計§18）。
+///
+/// **サーバではなく PC の値である。** セルフホストでは擬似ターミナルを持っているのは
+/// PC なので、サーバが自分のメモリを答えると**別の機械の話**になる。
+///
+/// # なぜ `fits_now` まで運ぶのか
+///
+/// 「何枚入るか」の規則を Rust と TypeScript の2箇所に書くと、**画面が「入る」と
+/// 言ったものを PC が断る**（あるいは逆）ことが起こる。戻せるかの判定
+/// （起こし直し設計§3-3）は二重に持ってよいと決めたが、あちらはずれても
+/// 「押せてしまってサーバが断る」に倒れるだけだった。**こちらはずれると機械が死ぬ。**
+///
+/// だから**数えるのは PC 側の1箇所**にして、画面は受け取った数と対象の枚数を比べるだけにする。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostResources {
+    /// 積んでいるメモリ（MB）
+    pub total_mb: u64,
+    /// いま渡せるメモリ（MB）。`MemAvailable` であって `MemFree` ではない
+    pub available_mb: u64,
+    /// スワップの空き（MB）。**数える対象には入れない**——ここへ落ちた時点で
+    /// 機械は使い物にならないので、「入る」の根拠にしてはいけない。見せるだけ
+    pub swap_free_mb: u64,
+    /// 起こし直し1枚あたりの見積もり（MB。設定 `revive_estimate_mb`）
+    pub estimate_mb: u64,
+    /// 使い切らずに残す余白（MB。設定 `revive_headroom_mb`）
+    pub headroom_mb: u64,
+    /// **いま何枚起こし直せるか。** `(available − headroom) / estimate` の切り捨て
+    pub fits_now: u32,
+}
+
 /// 小窓に表示するセッションの状態（設計§5 の導出結果）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

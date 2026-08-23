@@ -113,6 +113,23 @@ const DEFAULT_CANARY_FALLBACK_MODEL: &str = "sonnet";
 const DEFAULT_REPAIR_MODEL: &str = "sonnet";
 const DEFAULT_SELFHEAL_RETRY: u32 = 3;
 const DEFAULT_SELFHEAL_COOLDOWN_HOURS: u64 = 24;
+
+/// 起こし直し1枚あたりで減る空きメモリの見積もり（MB）。
+///
+/// **実測値**（起こし直し設計§17-2）。6枚を戻して `MemAvailable` の減りを数えたら
+/// 4,660 MB だった。プロセス木の RSS 合計は 7,796 MB だが、あれは共有ページを
+/// 12プロセスぶん二重計上するので**容量の見積もりには使えない**。
+///
+/// **機械と MCP の載せ方で実際に変わる**ので、設定で動かせるようにしてある
+/// （席 `REVIVE_PARALLEL` を設定へ出さなかったのとは逆の判断。§18-2）。
+const DEFAULT_REVIVE_ESTIMATE_MB: u64 = 780;
+
+/// 起こし直しで使い切らずに残す余白（MB）。
+///
+/// ダッシュボード自身とパーサ、ブラウザ、そしてビルド（`scripts/cargo` は Docker の
+/// 上に乗っている）のぶんである。**空きを 0 まで使う形にすると、戻したあとに
+/// 何も動かせない機械が残る。**
+const DEFAULT_REVIVE_HEADROOM_MB: u64 = 2048;
 /// `statusLine` を再実行する間隔（秒）。
 ///
 /// 実測で `refreshInterval: 3` はきっちり3.0秒間隔で走った（設計§11 前提6）。
@@ -274,6 +291,21 @@ pub struct SessionHostConfig {
     /// **アカウントの中でこの名前が PC の同一性**になる（§8-4）。変えると別の PC として
     /// 登録され、それまでのカードの帰属が切れる。未指定ならホスト名から決める。
     pub agent_name: Option<String>,
+    /// 起こし直し1枚あたりで減る空きメモリの見積もり（MB。起こし直し設計§18）。
+    ///
+    /// 「全て復旧」を押したときに**入るかどうか**を数えるのに使う。**席
+    /// （同時に起こす本数）とは役割が違う**——席は起動の山を抑えるだけで、
+    /// **載る総量は絞らない**（§17-2 で実測した）。総量を見るのはこちらである。
+    ///
+    /// **設定にしてあるのは、機械と MCP の載せ方で実際に変わるから。** 席の値を
+    /// 設定へ出さなかったのは、動かしても総量が変わらず旋回にならないためで、
+    /// こちらはその逆にあたる。
+    pub revive_estimate_mb: u64,
+    /// 起こし直しで使い切らずに残す余白（MB。起こし直し設計§18）。
+    ///
+    /// ダッシュボード自身・パーサ・ブラウザ・ビルドのぶん。**空きを 0 まで使うと、
+    /// 戻したあとに何も動かせない機械が残る。**
+    pub revive_headroom_mb: u64,
 }
 
 impl Default for SessionHostConfig {
@@ -301,6 +333,8 @@ impl Default for SessionHostConfig {
             server_url: None,
             pairing_token: None,
             agent_name: None,
+            revive_estimate_mb: DEFAULT_REVIVE_ESTIMATE_MB,
+            revive_headroom_mb: DEFAULT_REVIVE_HEADROOM_MB,
         }
     }
 }

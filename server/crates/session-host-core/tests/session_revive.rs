@@ -524,3 +524,265 @@ fn 印は仕事を切り離す前に立てる() {
          同時に来た2つが両方とも印を見て通ります"
     );
 }
+
+// ---------------------------------------------------------------------------
+// メモリの床（設計§18-3）
+// ---------------------------------------------------------------------------
+
+/// 好きな空きを名乗るメモリ。**呼ばれるたびに次の値を返す**ので、
+/// 「列の途中で足りなくなる」まで作れる。
+#[derive(Debug)]
+struct 名乗るメモリ {
+    残り: std::sync::Mutex<std::collections::VecDeque<u64>>,
+    最後: u64,
+}
+
+impl 名乗るメモリ {
+    fn 一定(available_mb: u64) -> Arc<Self> {
+        Arc::new(Self {
+            残り: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            最後: available_mb,
+        })
+    }
+
+    /// 前から順に名乗り、尽きたら最後の値を言い続ける。
+    fn 順に(values: &[u64], 尽きたら: u64) -> Arc<Self> {
+        Arc::new(Self {
+            残り: std::sync::Mutex::new(values.iter().copied().collect()),
+            最後: 尽きたら,
+        })
+    }
+}
+
+impl session_host_core::resources::Probe for 名乗るメモリ {
+    fn read(&self) -> Option<session_host_core::resources::Memory> {
+        let available_mb = self
+            .残り
+            .lock()
+            .expect("ロックが壊れていない")
+            .pop_front()
+            .unwrap_or(self.最後);
+        Some(session_host_core::resources::Memory {
+            total_mb: 16_000,
+            available_mb,
+            swap_free_mb: 0,
+        })
+    }
+}
+
+/// 読めない機械（Linux 以外）。
+#[derive(Debug)]
+struct 読めないメモリ;
+
+impl session_host_core::resources::Probe for 読めないメモリ {
+    fn read(&self) -> Option<session_host_core::resources::Memory> {
+        None
+    }
+}
+
+/// 床を試すための設定。1枚 1,000MB・余白 2,000MB。
+fn 床の設定() -> SessionHostConfig {
+    SessionHostConfig {
+        revive_estimate_mb: 1_000,
+        revive_headroom_mb: 2_000,
+        ..SessionHostConfig::default()
+    }
+}
+
+async fn 頼む(manager: &Arc<SessionManager>, card_id: CardId) -> Result<Arc<Session>, String> {
+    let in_flight = manager.begin_revive(card_id).expect("印が立つこと");
+    manager
+        .revive(
+            in_flight,
+            &common::work_dir(),
+            None,
+            ClaudeSessionId(uuid::Uuid::new_v4()),
+        )
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tokio::test]
+async fn 空きが床を切っていたら起こし直しを断る() {
+    // 余白 2,000 + 1枚 1,000 = 3,000MB 要るところへ 2,500MB しかない
+    let manager = common::manager_with(床の設定());
+    manager.set_memory_probe(名乗るメモリ::一定(2_500));
+
+    let card_id = CardId::new();
+    let refusal = 頼む(&manager, card_id).await.expect_err("断られること");
+
+    assert!(
+        refusal.contains("メモリが足りない"),
+        "理由がメモリだと分かること: {refusal}"
+    );
+    assert!(
+        refusal.contains("2500") && refusal.contains("1000") && refusal.contains("2000"),
+        "空き・1枚あたり・余白の3つが数で出ること（あと何をすればよいか決められる）: {refusal}"
+    );
+    assert!(
+        manager.get(card_id).is_none(),
+        "断ったのだから実体は作られていないこと"
+    );
+}
+
+#[tokio::test]
+async fn 空きが足りていれば起こし直せる() {
+    // 3,000MB あれば 1 枚は入る（余白 2,000 + 1枚 1,000）
+    let manager = common::manager_with(床の設定());
+    manager.set_memory_probe(名乗るメモリ::一定(3_000));
+
+    let card_id = CardId::new();
+    let session = 頼む(&manager, card_id).await.expect("起こせること");
+    assert_eq!(session.card_id, card_id);
+}
+
+#[tokio::test]
+async fn 読めない機械では床が効かない() {
+    // Linux 以外では `/proc/meminfo` が無い。**分からないことを理由に止めない**
+    let manager = common::manager_with(床の設定());
+    manager.set_memory_probe(Arc::new(読めないメモリ));
+
+    let card_id = CardId::new();
+    頼む(&manager, card_id).await.expect("通ること");
+    assert!(manager.host_resources().is_none(), "資源も答えられないこと");
+}
+
+#[tokio::test]
+async fn 列の途中で足りなくなったらそこから断られる() {
+    // **これが「26枚投げても入るぶんだけ起きる」の中身。** 受付の時点で見ていると、
+    // 列に並んだ瞬間はまだ空いているので**全員が「入る」と答えてしまう**
+    let manager = common::manager_with(床の設定());
+    // 1枚目・2枚目は足りる。3枚目からは足りない
+    manager.set_memory_probe(名乗るメモリ::順に(&[5_000, 4_000], 2_500));
+
+    let mut 起きた = 0;
+    let mut 断られた = 0;
+    for _ in 0..4 {
+        let card_id = CardId::new();
+        match 頼む(&manager, card_id).await {
+            Ok(session) => {
+                起きた += 1;
+                立ち上がりきらせる(&manager, &session);
+            }
+            Err(refusal) => {
+                断られた += 1;
+                assert!(refusal.contains("メモリが足りない"), "理由: {refusal}");
+            }
+        }
+    }
+    assert_eq!(起きた, 2, "足りていたぶんだけ起きること");
+    assert_eq!(断られた, 2, "足りなくなってからは断られること");
+}
+
+#[tokio::test]
+async fn いま何枚入るかを答えられる() {
+    let manager = common::manager_with(床の設定());
+    manager.set_memory_probe(名乗るメモリ::一定(12_000));
+
+    let resources = manager.host_resources().expect("答えられること");
+    // (12,000 − 2,000) / 1,000 = 10
+    assert_eq!(resources.fits_now, 10);
+    assert_eq!(resources.available_mb, 12_000);
+    assert_eq!(resources.estimate_mb, 1_000);
+    assert_eq!(resources.headroom_mb, 2_000);
+}
+
+/// 空きが**いま生きているカードの数で決まる**メモリ。
+///
+/// 「席を取る前に見るか、取った後に見るか」を判別できる唯一の形。固定の値や
+/// 決め打ちの並びでは、**同時に頼んだ3枚が全員同じ値を読む**ので区別が付かない。
+#[derive(Debug)]
+struct 生きている数で決まるメモリ {
+    manager: std::sync::Mutex<Option<std::sync::Weak<SessionManager>>>,
+    base_mb: u64,
+    per_mb: u64,
+}
+
+impl 生きている数で決まるメモリ {
+    fn 作る(base_mb: u64, per_mb: u64) -> Arc<Self> {
+        Arc::new(Self {
+            manager: std::sync::Mutex::new(None),
+            base_mb,
+            per_mb,
+        })
+    }
+
+    /// 輪にしないよう `Weak` で持つ（`SessionManager` がこの口を握っている）。
+    fn 繋ぐ(&self, manager: &Arc<SessionManager>) {
+        *self.manager.lock().expect("ロックが壊れていない") = Some(Arc::downgrade(manager));
+    }
+}
+
+impl session_host_core::resources::Probe for 生きている数で決まるメモリ {
+    fn read(&self) -> Option<session_host_core::resources::Memory> {
+        let live = self
+            .manager
+            .lock()
+            .expect("ロックが壊れていない")
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .map_or(0, |manager| manager.list().len() as u64);
+        Some(session_host_core::resources::Memory {
+            total_mb: 16_000,
+            available_mb: self.base_mb.saturating_sub(live * self.per_mb),
+            swap_free_mb: 0,
+        })
+    }
+}
+
+#[tokio::test]
+async fn 席を待ったカードにも床が効く() {
+    // **これが「26枚投げても入るぶんだけ起きる」の観測できる部分。**
+    // 席を待たされたカードも、自分の番で改めて空きを見て断られる。
+    //
+    // 空き 4,500 → 1枚起きるごとに 1,000 減る。余白 2,000・1枚 1,000 なので
+    // 2枚目までは入り、**3枚目の番が来た時点では入らない**。
+    //
+    // **「席より前で見ていないこと」は、このテストでは確かめられない。** 3枚を同時に
+    // 頼んでも実際にはタスクが順に走るので、受付時に見る実装でも3枚目は既に2枚起きた
+    // 後の空きを読む——壊し方を当てても落ちなかった（当てて確かめた）。
+    // **そちらはコンパイラが見張っている**（`memory_floor` が席を引数に取る）。
+    let manager = common::manager_with(床の設定());
+    let probe = 生きている数で決まるメモリ::作る(4_500, 1_000);
+    probe.繋ぐ(&manager);
+    manager.set_memory_probe(Arc::clone(&probe) as Arc<dyn session_host_core::resources::Probe>);
+
+    let ids: Vec<CardId> = (0..3).map(|_| CardId::new()).collect();
+    let mut handles = Vec::new();
+    for card_id in &ids {
+        let in_flight = manager.begin_revive(*card_id).expect("印が立つこと");
+        let manager = Arc::clone(&manager);
+        let cwd = common::work_dir();
+        handles.push(tokio::spawn(async move {
+            manager
+                .revive(in_flight, &cwd, None, ClaudeSessionId::new())
+                .await
+                .map(|_| ())
+                .map_err(|err| err.to_string())
+        }));
+    }
+
+    wait_until("2枚が起きる", || 起きた枚数(&manager, &ids) == 2).await;
+
+    // 席を1つ返させる。**ここで3枚目の番が来る**
+    let 起きている = ids
+        .iter()
+        .find_map(|id| manager.get(*id))
+        .expect("起きているカードがあること");
+    立ち上がりきらせる(&manager, &起きている);
+
+    let mut 断られた = 0;
+    for handle in handles {
+        if let Ok(Err(refusal)) = handle.await {
+            assert!(refusal.contains("メモリが足りない"), "理由: {refusal}");
+            断られた += 1;
+        }
+    }
+
+    assert_eq!(断られた, 1, "席を待った3枚目も、自分の番で断られること");
+    assert_eq!(
+        起きた枚数(&manager, &ids),
+        2,
+        "席が空いても、空きが無ければ起きないこと"
+    );
+}
