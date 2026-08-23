@@ -91,6 +91,32 @@ async function spawnOn(page: Page, index: number): Promise<string> {
   return cardIdOf(await spawnSession(page, WORK_DIR, agentName(index)))
 }
 
+/**
+ * そのカードが**呼び戻し先を持つ**まで待つ（サーバに聞く）。
+ *
+ * **抜け殻にする前に必ず通す。** 呼び戻し先は CLI が名乗ってから載るので、
+ * 名乗る前に落とすと「戻す先が無い」カードになり、**起こし直せる候補に数えられない**
+ * ——画面には「起こし直せるカードはありません（0枚）」と出て、待っても変わらない。
+ *
+ * 単独で走らせると擬似 claude が速いので素通りするが、**前のテストが同じ台を
+ * 落として起こし直した直後**は間に合わないことがある（実際に踏んだ）。
+ */
+async function waitForResumeTarget(page: Page, cardId: string) {
+  await expect
+    .poll(
+      async () => {
+        const response = await page.request.get('/api/sessions')
+        const list = (await response.json()) as {
+          card_id: string
+          claude_session_id: string | null
+        }[]
+        return list.find((card) => card.card_id === cardId)?.claude_session_id ?? null
+      },
+      { timeout: 60_000 },
+    )
+    .not.toBeNull()
+}
+
 interface Queued {
   /** 席が空くのを待っている1枚。 */
   pending: string
@@ -319,5 +345,98 @@ test('PC が繋がっていないカードでは押せず、理由が出る', as
   } finally {
     startAgent(3)
     await waitForAgent(page, 3, true)
+  }
+})
+
+/**
+ * メモリの歯止め（起こし直し設計§18-5）。
+ *
+ * # 「足りない」を決定的に作る
+ *
+ * `fits_now = (空き − 余白) ÷ 見積もり` なので、**余白を桁外れに大きくすると、
+ * どの機械でも `0` になる**。空きの実測値に頼ると、走らせる機械によって
+ * 出たり出なかったりする検査になってしまう。
+ *
+ * 上書きは**その1台だけ**へ入れる（`orphanAgent` の第3引数）。全台へ入れると、
+ * 上に並んでいる復旧のテストが**全部床で断られる**。
+ *
+ * **壊す系なので、いちばん後ろに置く。** 戻すのは `finally` で。
+ */
+test('入りきらないときはダイアログが出て、押すまで1枚も起きない', async ({ page }) => {
+  await openDashboard(page)
+  const ids: string[] = []
+  for (let count = 0; count < 2; count += 1) {
+    ids.push(await spawnOn(page, 2))
+  }
+  for (const cardId of ids) {
+    await waitForResumeTarget(page, cardId)
+  }
+
+  try {
+    // 余白を桁外れに大きくして、この台だけ「1枚も入らない」にする
+    await orphanAgent(page, 2, {
+      AGENTDASHBOARD_REVIVE_HEADROOM_MB: '100000000',
+    })
+    await expect(page.getByTestId('revive-breakdown')).toContainText('接続断 2枚', {
+      timeout: 60_000,
+    })
+
+    await page.getByTestId('revive-all').click()
+
+    const dialog = page.getByTestId('revive-budget-dialog')
+    await expect(dialog).toBeVisible({ timeout: 60_000 })
+    // **枚数と、いま入る枚数の両方が出る。** 枚数だけでは資源が読めない
+    await expect(page.getByTestId('revive-budget-targets')).toHaveText('2枚')
+    await expect(page.getByTestId('revive-budget-fits')).toContainText('0枚')
+    // 1枚も入らないので、入るぶんだけは押せない
+    await expect(page.getByTestId('revive-budget-fitting')).toBeDisabled()
+
+    // **押すまで何も起きない。** 抜け殻のままであること
+    for (const cardId of ids) {
+      await expect(tileOf(page, cardId).getByTestId('disconnected-badge')).toBeVisible()
+    }
+
+    // やめれば閉じる
+    await page.getByTestId('revive-budget-cancel').click()
+    await expect(dialog).toBeHidden()
+  } finally {
+    // **床を元へ戻す。** 共有の土台なので、戻し損ねると後続が全部かぶる
+    killAgent(2)
+    await waitForAgent(page, 2, false)
+    startAgent(2)
+    await waitForAgent(page, 2, true)
+  }
+})
+
+test('それでも全部を選ぶと、PC が床で断って理由がカードに出る', async ({ page }) => {
+  // **画面の歯止めを越えても、機械は死なない。** 歯止めは画面と PC の両方にあり、
+  // CLI から叩いた場合も PC 側が守る（設計§18-3）
+  await openDashboard(page)
+  const cardId = await spawnOn(page, 2)
+  await waitForResumeTarget(page, cardId)
+
+  try {
+    await orphanAgent(page, 2, {
+      AGENTDASHBOARD_REVIVE_HEADROOM_MB: '100000000',
+    })
+    await expect(page.getByTestId('revive-breakdown')).toContainText('接続断 1枚', {
+      timeout: 60_000,
+    })
+
+    await page.getByTestId('revive-all').click()
+    await expect(page.getByTestId('revive-budget-dialog')).toBeVisible({ timeout: 60_000 })
+    await page.getByTestId('revive-budget-all').click()
+
+    // PC が断り、理由がそのカードへ出る（設計§9-5 の名指しの経路）
+    await expect(tileOf(page, cardId)).toContainText('メモリが足りない', {
+      timeout: 60_000,
+    })
+    // 起き上がっていないこと
+    await expect(tileOf(page, cardId).getByTestId('disconnected-badge')).toBeVisible()
+  } finally {
+    killAgent(2)
+    await waitForAgent(page, 2, false)
+    startAgent(2)
+    await waitForAgent(page, 2, true)
   }
 })

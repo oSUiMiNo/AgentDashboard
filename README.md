@@ -401,6 +401,8 @@ agentdashboard logs --since 1h --sanitize
 | `log_retention_days` | `7` | ログを残す日数。これより古いものは起動時に消える |
 | `log_max_bytes` | `536870912`（512 MiB） | `<state_dir>/logs/` の**合計**の上限（バイト）。1ファイルの上限ではない。超えていたら古い順に消す |
 | `log_file_level` | `"debug"` | ファイルへ残すレベル。**端末に出る量はこれではなく `RUST_LOG` で決まる** |
+| `revive_estimate_mb` | `780` | 起こし直し1枚あたりで減る空きメモリの見積もり。**「全て復旧」が入るかどうかを数えるのに使う**（実測値。機械と MCP の載せ方で変わるので動かせる）。`0` にすると数えない |
+| `revive_headroom_mb` | `2048` | 起こし直しで使い切らずに残す余白。**空きを 0 まで使うと、戻したあとに何も動かせない機械が残る** |
 
 解決後の値は `agentdashboard config` で確認できる。
 

@@ -70,7 +70,10 @@ export function killAgent(index: number): void {
  * **同じトークンで繋ぎ直す。** 新しく発行すると別の PC として登録され、
  * 「切れた PC が戻ってきた」ではなく「4台目が来た」になってしまう。
  */
-export function startAgent(index: number): void {
+export function startAgent(
+  index: number,
+  extraEnv: Record<string, string> = {},
+): void {
   const config = env()
   const child = spawn(config.agentBin, ['--config', config.agentConfig], {
     cwd: config.repoRoot,
@@ -85,6 +88,10 @@ export function startAgent(index: number): void {
         `agent-${index}`,
         'claude-settings.json',
       ),
+      // **1台だけ設定を変えたいときの口**（起こし直しのメモリの歯止め）。
+      // 全キーが `AGENTDASHBOARD_<大文字>` で上書きできるのは機械検査済みなので、
+      // ここへ乗せるだけで台ごとに違う設定にできる
+      ...extraEnv,
     },
     detached: true,
     stdio: 'ignore',
@@ -133,9 +140,13 @@ export async function waitForAgent(page: Page, index: number, connected: boolean
  * 切れたことを見届けてから起こすのも要点で、待たずに起こすと**サーバがまだ前の接続を
  * 握っている**（同じ PC として名乗るので登録は通るが、指示が死んだほうへ渡って消える）。
  */
-export async function orphanAgent(page: Page, index: number) {
+export async function orphanAgent(
+  page: Page,
+  index: number,
+  extraEnv: Record<string, string> = {},
+) {
   killAgent(index)
   await waitForAgent(page, index, false)
-  startAgent(index)
+  startAgent(index, extraEnv)
   await waitForAgent(page, index, true)
 }
