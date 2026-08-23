@@ -281,8 +281,17 @@ describe('全て復旧のメモリの歯止め', () => {
     })
   }
 
+  /** 実体が居るカード。**戻せる相手ではない** */
+  function live(cardId: string) {
+    return meta(cardId, {
+      agent_connected: true,
+      claude_session_id: `2222${cardId}`,
+      status: { kind: 'waiting_input' },
+    })
+  }
+
   /** `GET /api/hosts/{host}/resources` の答えを決める。 */
-  function 資源を答える(fits: number | 'エラー') {
+  function 資源を答える(fits: number | null | 'エラー') {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => {
@@ -396,6 +405,68 @@ describe('全て復旧のメモリの歯止め', () => {
 
     expect(screen.getByTestId('revive-budget-fitting')).toBeDisabled()
     expect(screen.getByTestId('revive-budget-all')).toBeEnabled()
+  })
+
+  it('数えないと言われたら、ダイアログを出さずに進む', async () => {
+    // `revive_estimate_mb = 0`＝歯止めを外している（コードレビュー対応2）。
+    // **「聞けなかった」と同じ扱いでよい**——どちらも歯止め無しで進む側である
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    資源を答える(null)
+    applySessionSnapshot([stale('a', 1), stale('b', 2), stale('c', 3)])
+    renderGrid()
+
+    await userEvent.click(screen.getByTestId('revive-all'))
+
+    expect(screen.queryByTestId('revive-budget-dialog')).not.toBeInTheDocument()
+    expect(revive).toHaveBeenCalledTimes(3)
+  })
+
+  /*
+    ダイアログを開けたまま対象が変わっても、**送るのはいま戻せる相手だけ**
+    （コードレビュー対応3）。凍結したまま送ると、既に live なカードへも送って
+    「このカードは復旧中です」が並ぶ。
+
+    **壊し方**：`送る` の絞り込みを外すと、この2本が落ちる。
+  */
+  it('ダイアログを開けている間に戻ったカードへは送らない', async () => {
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    資源を答える(1)
+    applySessionSnapshot([stale('a', 1), stale('b', 2), stale('c', 3)])
+    renderGrid()
+
+    await userEvent.click(screen.getByTestId('revive-all'))
+    expect(screen.getByTestId('revive-budget-dialog')).toBeInTheDocument()
+
+    // 開けている間に、別の画面から `b` が戻った（＝もう抜け殻ではない）
+    act(() => {
+      applySessionSnapshot([stale('a', 1), live('b'), stale('c', 3)])
+    })
+    await userEvent.click(screen.getByTestId('revive-budget-all'))
+
+    const 送った = revive.mock.calls.map((call) => call[0])
+    expect(送った).not.toContain('b')
+    expect(送った.toSorted()).toEqual(['a', 'c'])
+  })
+
+  it('ダイアログを開けている間に消えたカードへは送らない', async () => {
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    資源を答える(1)
+    applySessionSnapshot([stale('a', 1), stale('b', 2), stale('c', 3)])
+    renderGrid()
+
+    await userEvent.click(screen.getByTestId('revive-all'))
+    act(() => {
+      applySessionSnapshot([stale('a', 1), stale('c', 3)])
+    })
+    await userEvent.click(screen.getByTestId('revive-budget-all'))
+
+    expect(revive.mock.calls.map((call) => call[0]).toSorted()).toEqual([
+      'a',
+      'c',
+    ])
   })
 
   it('聞けなかったら、歯止め無しで進む（分からないことを理由に止めない）', async () => {
