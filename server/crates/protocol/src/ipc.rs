@@ -123,6 +123,19 @@ pub enum ParserEvent {
     Reset { card_id: CardId },
     /// [`ParserCommand::ReadRange`] への応答。
     Range { req_id: u64, nodes: Vec<ParsedNode> },
+    /// CLI が付けたセッションの名前（`ai-title` の行から拾ったもの）。
+    ///
+    /// **変わったときだけ届く。** 同じ題は履歴に何度も書かれるので、読むたびに流すと
+    /// カード1枚の配り直しが記録層と全ブラウザまで波及し続ける。
+    ///
+    /// # なぜこれを足しても [`PROTOCOL_VERSION`] を上げないのか
+    ///
+    /// 版を上げると、噛み合わない相手を見つけた側が**構造化ビューごと縮退させる**。
+    /// 自己修復が差し替えた古いパーサを抱えた機械では、それが実際に起こりうる。
+    /// 一方この報告を知らない受け手は、**警告1行を出して捨てる**だけで済む——
+    /// 名前が出ないだけで、履歴も状態も無傷である。**名前が出ないことと、
+    /// 履歴が丸ごと死ぬことを、同じ重さで扱わない。**
+    SessionTitle { card_id: CardId, title: String },
     /// パースの健康状態。自己修復（設計§9）の検知の入力になる。
     ///
     /// パーサは**観測値を単調増加のカウンタで返すだけ**にし、「率が閾値を超えたか」の
@@ -232,6 +245,10 @@ mod tests {
                 req_id: 7,
                 nodes: vec![sample_node()],
             },
+            ParserEvent::SessionTitle {
+                card_id,
+                title: "TODOを完了に変更し作業内容をまとめる".to_string(),
+            },
             ParserEvent::Stats {
                 card_id,
                 records_total: 100,
@@ -299,6 +316,19 @@ mod tests {
         assert_eq!(
             event,
             r#"{"ev":"hello","protocol_version":1,"parser_version":"0.1.0"}"#
+        );
+
+        // 名前の報告も綴りを固定しておく（設計§3-1 が書いている形そのもの）。
+        // **受け手はこの綴りを知らなければ捨てるだけ**なので、綴りが動くと
+        // 「繋がるのに名前だけ来ない」という静かな壊れ方をする
+        let title = serde_json::to_string(&ParserEvent::SessionTitle {
+            card_id: CardId(uuid::Uuid::from_u128(1)),
+            title: "題".to_string(),
+        })
+        .unwrap();
+        assert_eq!(
+            title,
+            r#"{"ev":"session_title","card_id":"00000000-0000-0000-0000-000000000001","title":"題"}"#
         );
     }
 }

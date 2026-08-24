@@ -653,6 +653,21 @@ impl Session {
         true
     }
 
+    /// CLI が付けた名前を控える。変わっていれば `true`（設計§4）。
+    ///
+    /// **同じ題は履歴に何度も書かれる**（実測では1ファイルに2件）ので、変わっていない
+    /// ときに `true` を返すと、読み直すたびにカード1枚の配り直しが記録層と全ブラウザまで
+    /// 波及する。ここが「変わったときだけ」の最後の砦になる——パーサ側でも同じ判定を
+    /// しているが、**再起動を跨ぐと向こうの記憶は消える**（設計§2-2）。
+    fn store_session_title(&self, title: String) -> bool {
+        let mut meta = self.meta.lock().expect("ロックが壊れていない");
+        if meta.session_title.as_ref() == Some(&title) {
+            return false;
+        }
+        meta.session_title = Some(title);
+        true
+    }
+
     /// 権限モードを目的の値へ切り替える（設計§6）。
     ///
     /// # 巡回順を決め打ちしない
@@ -2303,6 +2318,33 @@ impl SessionManager {
             next_offset,
             nodes: nodes.iter().map(|parsed| parsed.node.clone()).collect(),
         });
+    }
+
+    /// CLI が付けたセッションの名前を控えて、カード1枚を配り直す（設計§4・§13）。
+    ///
+    /// # 門をここ1枚にしている理由
+    ///
+    /// ノードの報告は門を2枚持っている（受け口の `watched` と、ここの `get`）が、
+    /// **名前は「どこまで読んだか」の持ち主に依存しない**ので1枚で足りる。
+    /// [`Self::report_transcript_reset`] と同じ形にしてある。
+    ///
+    /// 外した直後に届いたぶんで一覧を汚さないのが、この門の役目。
+    pub fn report_session_title(&self, card_id: CardId, title: String) {
+        let Some(session) = self.get(card_id) else {
+            return;
+        };
+        // **「初めて付いた」を、控える前に読む。** 控えたあとでは区別が付かない
+        let first = session.meta().session_title.is_none();
+        if !session.store_session_title(title) {
+            // 同じ題。配り直しも記録もしないので、行も出さない（設計§13）
+            return;
+        }
+        if first {
+            tracing::info!(card_id = %card_id, "セッションの名前が付きました");
+        } else {
+            tracing::debug!(card_id = %card_id, "セッションの名前が変わりました");
+        }
+        self.broadcast_meta(&session);
     }
 
     /// 巻き戻り（`/rewind`）を上へ報告する。

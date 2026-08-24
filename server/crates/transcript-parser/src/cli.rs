@@ -298,6 +298,8 @@ fn event_label(event: &ParserEvent) -> String {
         }
         ParserEvent::Reset { card_id } => format!("reset card_id={card_id}"),
         ParserEvent::Range { req_id, nodes } => format!("range req_id={req_id} n={}", nodes.len()),
+        // 題も**中身は載せない**。会話から作られた文なので、`nodes` と同じ扱いにする
+        ParserEvent::SessionTitle { card_id, .. } => format!("session_title card_id={card_id}"),
         ParserEvent::Stats { card_id, .. } => format!("stats card_id={card_id}"),
         ParserEvent::Error { card_id, .. } => match card_id {
             Some(card_id) => format!("error card_id={card_id}"),

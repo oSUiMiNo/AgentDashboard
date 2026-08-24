@@ -1093,6 +1093,13 @@ fn handle_event(
         // `ipc.rs` は凍結境界（設計§4-4）なので、変種そのものは残っている
         ParserEvent::Range { .. } => {}
 
+        // **ここでは `watched` を見ない。** 名前は「どこまで読んだか」の持ち主に
+        // 依存しないので、外したカードかどうかの判定は取りまとめ役の門に任せる
+        // （`Reset` と同じ形。設計§4）
+        ParserEvent::SessionTitle { card_id, title } => {
+            supervisor.manager.report_session_title(card_id, title);
+        }
+
         ParserEvent::Stats {
             card_id,
             records_total,
