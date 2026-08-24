@@ -1856,6 +1856,106 @@ async fn 能力を名乗らない_PC_へは問いを投げない() {
     assert!(!a2s.hub.online_of(a2s.account_id).await.is_empty());
 }
 
+/// バイト列の名乗りが無い PC でも、**フォルダとテキストは今までどおり読める**
+/// （`ファイル閲覧で画像とHTMLも表示する` 設計§3-4。テスト計画フェーズ3）。
+///
+/// **`Need::HostFs` に相乗りさせていないことの裏取りである。** まとめてしまうと
+/// 「フォルダも読めません」に退化するが、**断り方が同じ 409 なので画面からは気づけない。**
+#[tokio::test]
+async fn バイト列を名乗らない_PC_でもフォルダとテキストは読める() {
+    let a2s = A2s::start("blob-old").await;
+    let root = sample_tree(&a2s.dir);
+    std::fs::write(root.join("撮った.png"), [0x89, 0x50, 0x4e, 0x47]).expect("置けること");
+    let target = a2s.hub.online_of(a2s.account_id).await[0];
+
+    // フォルダとログは名乗るが、**バイト列だけ名乗らない**古い版と同じ状態にする
+    let old = serde_json::json!({
+        "available_modes": ["default"],
+        "always_bypass_permissions": false,
+        "agent_version": "0.1.32",
+        "supports_host_fs": true,
+        "supports_log_read": true,
+    });
+    pairing::save_capabilities(a2s.hub.db(), target, old)
+        .await
+        .expect("名乗りを書き換えられること");
+
+    let started = tokio::time::Instant::now();
+    let err = a2s
+        .browser
+        .read_blob(
+            ask(a2s.account_id, Some(target)),
+            &root.join("撮った.png").display().to_string(),
+        )
+        .await
+        .expect_err("断ること");
+
+    assert_eq!(err, server_core::session_host::HostAskError::Unsupported);
+    // **待たずに断ること。** 投げてしまうと、古いホストは黙るので時間切れまで返らない
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "投げる前に断ること（{:?} かかった）",
+        started.elapsed()
+    );
+
+    // **ここがこのテストの主眼。** 同じ PC で、フォルダとテキストは通り続ける
+    let listing = a2s
+        .browser
+        .list_dir(
+            ask(a2s.account_id, Some(target)),
+            Some(&root.display().to_string()),
+        )
+        .await
+        .expect("フォルダは今までどおり読めること");
+    assert!(!listing.entries.is_empty());
+
+    let content = a2s
+        .browser
+        .read_file(
+            ask(a2s.account_id, Some(target)),
+            &root.join("計画.md").display().to_string(),
+        )
+        .await
+        .expect("テキストも今までどおり読めること");
+    assert!(content.text.contains("- [x] 済み"));
+}
+
+/// 上限いっぱいの画像が、**本物の線を往復する**
+/// （設計§4-2・§15 の1。テスト計画フェーズ1 未決1 の恒久版）。
+///
+/// 机上では「base64 で 10.7 MiB、フレームの上限 16 MiB の内側」と言えるが、
+/// **通ることは通してみないと言えない**。ここが唯一その1通を実際に流す場所になる。
+#[tokio::test]
+async fn 上限いっぱいの画像が線を往復する() {
+    let a2s = A2s::start("blob-large").await;
+    let root = sample_tree(&a2s.dir);
+    let target = a2s.hub.online_of(a2s.account_id).await[0];
+
+    // **その場で作ってその場で消す**（`fixtures/` にも一時フォルダにも残さない）。
+    // 中身を 0 埋めにしないのは、base64 の往復で桁がずれても気づけるようにするため
+    let size = protocol::fs::MAX_BLOB_BYTES as usize;
+    let body: Vec<u8> = (0..size).map(|at| (at % 251) as u8).collect();
+    let path = root.join("大きい.png");
+    std::fs::write(&path, &body).expect("置けること");
+
+    let blob = a2s
+        .browser
+        .read_blob(
+            ask(a2s.account_id, Some(target)),
+            &path.display().to_string(),
+        )
+        .await
+        .expect("上限いっぱいでも往復すること");
+
+    assert_eq!(blob.bytes, size as u64);
+    assert_eq!(blob.data.len(), size, "丸ごと届くこと");
+    // 全バイトを比べる。**長さだけ見ると、途中が化けても通る**
+    assert_eq!(blob.data, body, "1バイトも化けていないこと");
+    assert_eq!(blob.media_type, "image/png");
+
+    let _ = std::fs::remove_file(&path);
+}
+
 #[tokio::test]
 async fn 他人の_PC_と知らない_PC_は同じ言葉で断られる() {
     // 言い分けると、IDを総当たりして他人の PC の存在を調べられる（設計§18）

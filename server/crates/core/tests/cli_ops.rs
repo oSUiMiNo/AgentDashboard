@@ -769,3 +769,65 @@ async fn 入れ替えは生きたカードを数えて止まりforceでだけ落
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
+
+// ---------------------------------------------------------------------------
+// 生で取る（`ファイル閲覧で画像とHTMLも表示する` 設計§9。テスト計画フェーズ3「CLI」）
+// ---------------------------------------------------------------------------
+
+/// 1x1 の GIF89a。**43バイトの実物。**
+const 小さなGIF: &[u8] = &[
+    0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xff, 0xff, 0xff, 0x21, 0xf9, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x2c, 0x00, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x01, 0x44, 0x00, 0x3b,
+];
+
+#[tokio::test]
+async fn 画像はバイト列のまま取れる() {
+    // **文字列を経由しない**ことの裏取り。途中で `String` にすると置き換え文字が混ざり、
+    // 書き出したファイルが壊れる（設計§9）
+    let dir = work_dir("host-file-raw");
+    let path = dir.join("撮った.gif");
+    std::fs::write(&path, 小さなGIF).expect("置けること");
+    let server = TestServer::start().await;
+
+    let bytes = client::host_file_raw(&target_of(&server), "local", &path.display().to_string())
+        .await
+        .expect("取れること");
+
+    assert_eq!(bytes, 小さなGIF, "1バイトも化けていないこと");
+}
+
+#[tokio::test]
+async fn 生で返せない相手は理由ごと断られる() {
+    let dir = work_dir("host-file-raw-refused");
+    let path = dir.join("計画.md");
+    std::fs::write(&path, "# 計画\n").expect("置けること");
+    let server = TestServer::start().await;
+
+    let err = client::host_file_raw(&target_of(&server), "local", &path.display().to_string())
+        .await
+        .expect_err("断ること");
+
+    // **断り文をそのまま持ち上げる**（状態コードごとの言い換えをしない）
+    assert!(
+        format!("{err}").contains("生で返せる種別ではありません"),
+        "理由が読めること: {err}"
+    );
+}
+
+#[tokio::test]
+async fn 従来の呼び方は一文字も変わっていない() {
+    // **壊していないこと**（設計§13）。`--raw` を足しても既定の道は同じ
+    let dir = work_dir("host-file-plain");
+    let path = dir.join("計画.md");
+    std::fs::write(&path, "# 計画\n- [x] 済み\n").expect("置けること");
+    let server = TestServer::start().await;
+
+    let (content, raw) =
+        client::host_file(&target_of(&server), "local", &path.display().to_string())
+            .await
+            .expect("取れること");
+
+    assert!(content.text.contains("- [x] 済み"));
+    assert!(raw.contains("\"truncated\""), "生の本文もそのまま返ること");
+}

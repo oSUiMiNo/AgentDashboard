@@ -723,6 +723,25 @@ impl TestServer {
         self.request("GET", path, None).await
     }
 
+    /// 応答を**バイト列とヘッダごと**受け取る（`ファイル閲覧で画像とHTMLも表示する` 設計§5-3）。
+    ///
+    /// 生で返す口は、**中身が UTF-8 とは限らない**うえ、確かめたいことの半分がヘッダに
+    /// 在る。文字列で受ける [`TestServer::get`] では、どちらも見られない。
+    pub async fn get_raw(&self, path: &str) -> testkit::RawResponse {
+        let (addr, path) = (self.addr, path.to_string());
+        let cookie = self.cookie.clone();
+        tokio::task::spawn_blocking(move || {
+            let headers: Vec<(&str, &str)> = cookie
+                .iter()
+                .map(|value| ("Cookie", value.as_str()))
+                .collect();
+            testkit::request_raw(addr, "GET", &path, None, &headers)
+        })
+        .await
+        .expect("HTTPスレッドが落ちないこと")
+        .expect("応答を読めること")
+    }
+
     /// DB に入っている間隔（設計§13-3）。
     ///
     /// `/api/settings` を読むのではなく DB を直に見るのは、**設定の持ち主

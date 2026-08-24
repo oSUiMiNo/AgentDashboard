@@ -1235,6 +1235,97 @@ async fn 他人の_PC_の資源は引けない() {
     }
 }
 
+/// 生で返す口も、他人の PC には届かない
+/// （`ファイル閲覧で画像とHTMLも表示する` 設計§12-1。テスト計画フェーズ3「アカウント分離」）。
+///
+/// **同じルートのクエリ違いでも、総当たりへ足す。** 判定は `guard` と `parse_host` の
+/// 1箇所を通るので通って当然に見えるが、`.claude/CLAUDE.md` が「enforcement を足したら
+/// ここへ足す」と定めている——**将来この分岐が近道を持ったときに、総当たりが空振りする。**
+#[tokio::test]
+async fn 他人の_PC_のファイルは生でも引けない() {
+    for backend in common::backends("tenancy-raw").await {
+        let arena = Arena::start(backend.db.clone()).await;
+        let (mine, mut mine_agent) = arena.tenant("わたし").await;
+        let (theirs, _their_agent) = arena.tenant("よそのひと").await;
+
+        let their_agent_id = arena
+            .registry
+            .list(theirs.account_id)
+            .first()
+            .and_then(|meta| meta.agent_id)
+            .expect("相手の PC が分かること");
+
+        let browser = arena.browser(&mine).await;
+        let (status, body) = browser
+            .get(&format!(
+                "/api/hosts/{}/file?path=%2Ftmp%2F%E6%92%AE%E3%81%A3%E3%81%9F.png&as=raw",
+                their_agent_id.0
+            ))
+            .await;
+
+        // **他人の PC と知らない PC を言い分けない**（他の口と同じ言葉）
+        assert_eq!(status, 404, "[{}] {body}", backend.name);
+        assert!(
+            body.contains("繋がっていません"),
+            "[{}] 存在が分かる断り方になっている: {body}",
+            backend.name
+        );
+
+        // **でたらめな綴りも同じ言葉。** 断り方の差だけで実在を探れないこと
+        let (unknown_status, unknown_body) = browser
+            .get(&format!(
+                "/api/hosts/{}/file?path=%2Ftmp%2Fa.png&as=raw",
+                uuid::Uuid::new_v4()
+            ))
+            .await;
+        assert_eq!(unknown_status, status, "[{}]", backend.name);
+        assert_eq!(unknown_body, body, "[{}]", backend.name);
+
+        // **肯定側の裏取り。** 全部断っているだけの実装でも上は通ってしまう
+        let my_agent_id = arena
+            .registry
+            .list(mine.account_id)
+            .first()
+            .and_then(|meta| meta.agent_id)
+            .expect("自分の PC が分かること");
+        let (addr, cookie) = (browser.addr, browser.cookie.clone());
+        let path = format!(
+            "/api/hosts/{}/file?path=%2Ftmp%2F%E6%92%AE%E3%81%A3%E3%81%9F.png&as=raw",
+            my_agent_id.0
+        );
+        let asking = tokio::task::spawn_blocking(move || {
+            testkit::request(addr, "GET", &path, None, Some(&cookie))
+        });
+
+        let message = mine_agent
+            .wait_for("自分の PC へ届くバイト列の問い", |message| {
+                matches!(message, protocol::a2s::ServerToAgent::ReadBlob { .. })
+            })
+            .await;
+        let protocol::a2s::ServerToAgent::ReadBlob { request_id, .. } = message else {
+            panic!("[{}] バイト列の問いであること", backend.name);
+        };
+        mine_agent
+            .send(&protocol::a2s::AgentMessage::HostReply {
+                request_id,
+                reply: protocol::a2s::HostReply::Blob(protocol::fs::FileBlob {
+                    path: "/tmp/撮った.png".to_string(),
+                    media_type: "image/png".to_string(),
+                    bytes: 3,
+                    data: vec![0x00, 0x7f, 0xff],
+                }),
+            })
+            .await;
+        let own = asking
+            .await
+            .expect("HTTPスレッドが落ちないこと")
+            .expect("応答を読めること");
+        assert_eq!(own.status, 200, "[{}] {}", backend.name, own.body);
+
+        backend.finish().await;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CLI の札（CLI設計§5。テスト計画F3「札」）
 //
