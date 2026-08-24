@@ -273,6 +273,12 @@ pub struct Capabilities {
     /// 名乗らないホストへ投げると無視されるだけで、画面には理由を出せない。
     #[serde(default)]
     pub supports_revive: bool,
+    /// ファイルを**バイト列で**読めるか（`ファイル閲覧で画像とHTMLも表示する` 設計§3-4）。
+    ///
+    /// 上3つと同じ形。**`supports_host_fs` に相乗りさせない**——古い PC でも
+    /// フォルダとテキストは読めるので、まとめると「フォルダも読めません」と嘘になる。
+    #[serde(default)]
+    pub supports_blob_read: bool,
 }
 
 /// 他インスタンスから回ってくる、PC への指示（設計§9-2 の `agent:{id}:cmd`）。
@@ -1218,6 +1224,7 @@ fn reply_kind(reply: &HostReply) -> &'static str {
         HostReply::Dir(_) => "dir",
         HostReply::File(_) => "file",
         HostReply::Log(_) => "log",
+        HostReply::Blob(_) => "blob",
         HostReply::Resources(_) => "resources",
         HostReply::Failed { .. } => "failed",
     }
@@ -1544,6 +1551,28 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
         }
     }
 
+    async fn read_blob(
+        &self,
+        request: crate::session_host::HostAskRequest,
+        path: &str,
+    ) -> Result<protocol::fs::FileBlob, crate::session_host::HostAskError> {
+        let path = path.to_string();
+        match self
+            // **`Need::HostFs` ではない。** 古い PC でもフォルダとテキストは読めるので、
+            // 相乗りさせると「フォルダも読めません」と嘘をつくことになる（設計§3-4）
+            .ask(request, Need::Blob, move |request_id| {
+                ServerToAgent::ReadBlob { request_id, path }
+            })
+            .await?
+        {
+            HostReply::Blob(blob) => Ok(blob),
+            HostReply::Failed { reason, detail } => {
+                Err(crate::session_host::HostAskError::Failed { reason, detail })
+            }
+            other => Err(wrong_answer(other)),
+        }
+    }
+
     async fn read_log(
         &self,
         request: crate::session_host::HostAskRequest,
@@ -1613,6 +1642,11 @@ enum Need {
     /// 名乗らない相手に聞くと**永遠に答えが返らない**。聞けなければ画面は
     /// 歯止め無しで進む——分からないことを理由に止めない。
     Resources,
+    /// ファイルを**バイト列で**読めるか（`ファイル閲覧で画像とHTMLも表示する` 設計§3-4）。
+    ///
+    /// **`HostFs` に相乗りさせない。** 古い PC でもフォルダとテキストは読めるので、
+    /// まとめると「フォルダも読めません」と嘘をつくことになる。
+    Blob,
 }
 
 /// 答えを待つ上限（設計§23-3 の実測で決めた値）。
@@ -1755,6 +1789,7 @@ impl RemoteSessionHost {
                 Need::HostFs => capabilities.supports_host_fs,
                 Need::LogRead => capabilities.supports_log_read,
                 Need::Revive => capabilities.supports_revive,
+                Need::Blob => capabilities.supports_blob_read,
                 Need::Resources => capabilities.supports_resources,
             })
     }
@@ -1891,6 +1926,7 @@ async fn agent_loop(
         supports_log_read,
         supports_resources,
         supports_revive,
+        supports_blob_read,
     } = hello
     else {
         // next_hello が Hello 以外を返すことはない
@@ -1926,6 +1962,7 @@ async fn agent_loop(
         supports_log_read,
         supports_resources,
         supports_revive,
+        supports_blob_read,
     };
     match serde_json::to_value(&capabilities) {
         Ok(value) => {

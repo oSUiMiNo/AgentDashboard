@@ -20,12 +20,9 @@ use axum::{
     Json,
     extract::{Path, Query, State},
     http::StatusCode,
+    response::IntoResponse as _,
 };
-use protocol::{
-    AgentId,
-    a2s::HostFailure,
-    fs::{DirListing, FileContent},
-};
+use protocol::{AgentId, a2s::HostFailure, fs::DirListing};
 
 /// ローカルモードの `{host}`。
 ///
@@ -38,11 +35,31 @@ pub struct DirQuery {
     pub path: Option<String>,
 }
 
-/// `?path=…`。中身の読み取りには「始まり」が無いので**必須**。
+/// `?path=…&as=…`。中身の読み取りには「始まり」が無いので `path` は**必須**。
+///
+/// `as` を `Option<String>` で受けるのは [`LogsQuery`] と同じ理由である。列挙で受けると
+/// 読めない綴りで **axum 自身の 400** が出て、[`refuse`] を通らない——同じ失敗が口に
+/// よって違う言葉になり、「断り方を1か所に集める」が破れる。
 #[derive(Debug, serde::Deserialize)]
 pub struct PathQuery {
     pub path: String,
+    #[serde(rename = "as")]
+    pub shape: Option<String>,
 }
+
+/// 生で返すときに必ず付ける CSP（`ファイル閲覧で画像とHTMLも表示する` 設計§5-3）。
+///
+/// # なぜヘッダで出すのか
+///
+/// **`sandbox` 指令は、URL を直接開かれたときにも効く唯一の鍵である。** `iframe` の
+/// `sandbox` 属性は埋め込む側にしか付けられないので、これが無いと、この URL を直接
+/// 開いた人の画面で他人の HTML が**ダッシュボードと同じ出自**で動く。
+///
+/// 許可は3つだけ。**理解doc の作法（インライン `<style>`・`data:` の画像・インライン SVG）**
+/// がそのまま読めることを実測してある（設計§15 の4）ので、これ以上は緩めない。
+/// 緩めるときは**1つずつ**足して、理由を設計§5-3 へ書く。
+pub const RAW_CSP: &str =
+    "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:";
 
 /// `GET /api/hosts/{host}/dir?path=…`
 pub async fn api_dir(
@@ -66,26 +83,90 @@ pub async fn api_dir(
         .map_err(refuse)
 }
 
-/// `GET /api/hosts/{host}/file?path=…`
+/// `GET /api/hosts/{host}/file?path=…[&as=raw]`
+///
+/// # 1つの口が2つの形を返す
+///
+/// **新しいルートを立てない**（設計§5-1）。台帳（`core/tests/cli_surface.toml`）は
+/// ルート単位で数えており、鍵も `guard` の内側にある——口を増やすと、台帳・CLI・
+/// アカウント分離の総当たりが芋づるで増える。
+///
+/// | `as` | 返すもの |
+/// |---|---|
+/// | 省略 | JSON の [`protocol::fs::FileContent`]（**いままでどおり**） |
+/// | `raw` | 生のバイト列 ＋ 4つのヘッダ。`<img>` と `<iframe>` の宛先になる |
 pub async fn api_file(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<Identity>,
     Path(host): Path<String>,
     Query(query): Query<PathQuery>,
-) -> Result<Json<FileContent>, (StatusCode, String)> {
+) -> Result<axum::response::Response, (StatusCode, String)> {
     let target = parse_host(&host)?;
-    state
-        .agent
-        .read_file(
-            HostAskRequest {
-                account_id: identity.account_id,
-                target,
-            },
-            &query.path,
-        )
-        .await
-        .map(Json)
-        .map_err(refuse)
+    let ask = || HostAskRequest {
+        account_id: identity.account_id,
+        target,
+    };
+
+    match query.shape.as_deref() {
+        None => {
+            let content = state
+                .agent
+                .read_file(ask(), &query.path)
+                .await
+                .map_err(refuse)?;
+            Ok(Json(content).into_response())
+        }
+        Some("raw") => raw_file(&state, ask(), &query.path).await,
+        Some(other) => Err(refuse(HostAskError::BadRequest(format!(
+            "`as` を読めません：{other}\n合うのは raw です。"
+        )))),
+    }
+}
+
+/// 生のバイト列で返す（設計§5-2・§5-3）。
+///
+/// **なんでも生で返せる口にしてはいけない。** `.js` を `text/javascript` で返せる口が
+/// あると、ダッシュボードと同じ出自でスクリプトを読ませる道になる。表に載っている
+/// 種別だけを返し、載っていないものは既定の JSON の口で読む。
+async fn raw_file(
+    state: &AppState,
+    ask: HostAskRequest,
+    path: &str,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    let Some(media_type) = protocol::fs::media_type_of(path) else {
+        return Err(refuse(HostAskError::Failed {
+            reason: HostFailure::Unsupported,
+            detail: format!("{path} は生で返せる種別ではありません"),
+        }));
+    };
+
+    // **作り方は種別で分かれる。** HTML と SVG はテキストなので既存の道から作れる
+    // （それぞれの上限がそのまま効く）。画像だけが新設のバイト列の道を通る（設計§5-2）
+    let body = if protocol::fs::kind_of(path) == protocol::fs::FileKind::Image {
+        state.agent.read_blob(ask, path).await.map_err(refuse)?.data
+    } else {
+        state
+            .agent
+            .read_file(ask, path)
+            .await
+            .map_err(refuse)?
+            .text
+            .into_bytes()
+    };
+
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, media_type),
+            // 宣言した型と違うものとして解釈させない。壊れた `.png` を HTML として
+            // 読みに行かせないための1行
+            (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (axum::http::header::CONTENT_SECURITY_POLICY, RAW_CSP),
+            // 鍵の内側の中身を、ブラウザの控えに残さない
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    )
+        .into_response())
 }
 
 /// `GET /api/hosts/{host}/logs?since=…&level=…&card=…&proc=…&grep=…&raw=…&sanitize=…`
@@ -256,6 +337,31 @@ mod tests {
     #![allow(non_snake_case)]
 
     use super::*;
+
+    #[test]
+    fn 生で返すときのcspは字で固定する() {
+        // **綴りを1つ字で書く。** 定数から組み立てると、崩れたときに一緒に動いて通る。
+        // ここが崩れても画面は普通に動くので、気づく手段が他に無い（設計§5-3）
+        assert_eq!(
+            RAW_CSP,
+            "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:"
+        );
+        // 4つの部品を名指しでも見る。並べ替えただけの崩れを、上の1本と別に捕まえる
+        for piece in [
+            "sandbox",
+            "default-src 'none'",
+            "img-src data:",
+            "style-src 'unsafe-inline'",
+        ] {
+            assert!(RAW_CSP.contains(piece), "{piece} が要る");
+        }
+        // **script は1つも許さない。** ここが緩むと、隔離そのものが意味を失う
+        assert!(
+            !RAW_CSP.contains("script-src"),
+            "script を許す指定を持たないこと"
+        );
+        assert!(!RAW_CSP.contains("unsafe-eval"));
+    }
 
     #[test]
     fn 断る理由はすべて別の状態コードへ写る() {

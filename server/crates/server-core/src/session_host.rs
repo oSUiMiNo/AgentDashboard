@@ -190,6 +190,19 @@ pub trait SessionHost: Send + Sync + 'static {
         path: &str,
     ) -> Result<FileContent, HostAskError>;
 
+    /// ファイル1つを**バイト列で**（`ファイル閲覧で画像とHTMLも表示する` 設計§3）。
+    ///
+    /// **[`SessionHost::read_file`] と分けてある。** あちらは「テキストだけ」を契約に
+    /// していて、返す型もそれに合わせてある。両義にすると「中身が空なのか画像なのか」が
+    /// 読めなくなる。
+    ///
+    /// **ローカルモードもここを通る。** 理由は [`SessionHost::list_dir`] と同じ。
+    async fn read_blob(
+        &self,
+        request: HostAskRequest,
+        path: &str,
+    ) -> Result<protocol::fs::FileBlob, HostAskError>;
+
     // --- ログ -----------------------------------------------------------------
 
     /// その PC のログ（ログ設計§13-1）。

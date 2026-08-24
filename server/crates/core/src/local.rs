@@ -264,6 +264,21 @@ impl SessionHost for LocalSessionHost {
             .await
     }
 
+    /// この機械のファイルを**バイト列で**（`ファイル閲覧で画像とHTMLも表示する` 設計§3-5）。
+    ///
+    /// **近道を作らない。** サーバ側で「同じプロセスなら自分で読む」と書くと、
+    /// 「ローカルでは動くのにセルフホストで欠ける」が残る。
+    async fn read_blob(
+        &self,
+        request: server_core::session_host::HostAskRequest,
+        path: &str,
+    ) -> Result<protocol::fs::FileBlob, server_core::session_host::HostAskError> {
+        reject_target(&request)?;
+        let path = path.to_string();
+        blocking_ask(move || session_host_core::hostfs::read_blob(std::path::Path::new(&path)))
+            .await
+    }
+
     /// この機械のログ（ログ設計§13-1）。
     ///
     /// フォルダと同じで、**読むのは `session_host_core::logs`**。ローカルだけの近道を

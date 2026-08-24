@@ -345,6 +345,7 @@ pub fn hello(name: &str) -> AgentMessage {
         supports_log_read: true,
         supports_resources: true,
         supports_revive: true,
+        supports_blob_read: true,
     }
 }
 
