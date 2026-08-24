@@ -711,6 +711,105 @@ mod tests {
         );
     }
 
+    /// 「新しい欄を足すとき、古い名乗りが解けなくなるのはどういう形か」を実行できる形で
+    /// 残すための3つ。**製品コードではない。**
+    ///
+    /// # なぜ実物の [`SessionMeta`] では書けないのか
+    ///
+    /// 欄を足して既定を付けた瞬間、「**付けなかったらどうなるか**」は表現できなくなる。
+    /// 属性が要る理由を残せるのはこの形だけなので、捨てずに置く
+    /// （`一覧のカードのレイアウトを変える` 設計§5-1）。
+    ///
+    /// カードの報告は PC からサーバへ `SessionMeta` を**丸ごと**運ぶので、古い版の PC が
+    /// 名乗る JSON には新しい欄が無い。ここを外すと**そのカードの報告そのものが届かない**。
+    // この1つだけ欄を読まない。**解けないことを確かめる相手**なので、解けた値が手に入る
+    // 機会が原理的に無い。読める形にすると「解けてしまった」ことを見逃す。
+    #[allow(dead_code)]
+    #[derive(Debug, Deserialize)]
+    struct 既定の無い必須欄 {
+        card_id: CardId,
+        /// **わざと `#[serde(default)]` を付けていない。** `Option` でもない。
+        session_title: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct 既定を書いていないOptionの欄 {
+        card_id: CardId,
+        /// こちらも `#[serde(default)]` を書いていない。**`Option` であることだけが違う。**
+        session_title: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct 既定を付けた欄 {
+        card_id: CardId,
+        #[serde(default)]
+        session_title: String,
+    }
+
+    /// 古い版のセッションホストが名乗る形（新しい欄を持たない）。
+    const 欄の無い古い名乗り: &str = r#"{"card_id":"00000000-0000-0000-0000-000000000001"}"#;
+
+    #[test]
+    fn 既定の無い欄は古い名乗りを丸ごと落とす() {
+        let err = serde_json::from_str::<既定の無い必須欄>(欄の無い古い名乗り)
+            .expect_err("必須欄が欠けているので解けないこと");
+        // **名前が出ないどころか、カードの報告そのものが届かなくなる**——欄1つのために
+        // JSON が丸ごと解けなくなる、という壊れ方をする
+        assert!(
+            err.to_string().contains("session_title"),
+            "欠けた欄の名前が理由に出ること: {err}"
+        );
+    }
+
+    #[test]
+    fn Optionの欄は既定を書かなくても古い名乗りで空になる() {
+        // **設計§5-1 の前提を1つ訂正するテスト。** serde は欠けた欄を
+        // `missing_field` で埋めようとし、その口が `Option` を `None` として受ける。
+        // つまり `Option<T>` にしておけば `#[serde(default)]` は**動作としては要らない**。
+        //
+        // それでも書くのは**意図を残すため**である。この属性が付いていれば、次に読む人が
+        // 「ここは欠けてよい欄だ」と1行で分かる。動作に効かないから書かない、にすると、
+        // 型を `Option` から外した瞬間に静かに壊れる。
+        let parsed: 既定を書いていないOptionの欄 =
+            serde_json::from_str(欄の無い古い名乗り).expect("古い名乗りが解けること");
+        assert_eq!(parsed.card_id.0.as_u128(), 1);
+        assert_eq!(parsed.session_title, None);
+    }
+
+    #[test]
+    fn 既定を付ければ古い名乗りが解けて欄は空になる() {
+        let parsed: 既定を付けた欄 =
+            serde_json::from_str(欄の無い古い名乗り).expect("古い名乗りが解けること");
+        assert_eq!(parsed.card_id.0.as_u128(), 1);
+        assert_eq!(parsed.session_title, "");
+    }
+
+    #[test]
+    fn session_metaは知らない欄を黙って読み飛ばす() {
+        // 逆向き——**新しい PC ＋ 古いサーバ**。`deny_unknown_fields` を持たないので通る。
+        // **A2S の版交渉に手を入れずに済む根拠がこれである**（設計§5-1）。
+        //
+        // 混ぜる欄の名前を、フェーズ2 で足す `session_title` に**しない**。あれは足した
+        // 瞬間に「知らない欄」ではなくなり、このテストは何も確かめなくなる。
+        let text = r#"{"card_id":"00000000-0000-0000-0000-000000000001","project":"/p","claude_session_id":null,"permission_mode":null,"model":null,"model_label":null,"model_requested":null,"status":{"kind":"working"},"subagent_active":0,"last_activity_at":1,"last_assistant_message":null,"created_at":1,"hooks_seen":false,"agent_id":null,"agent_connected":true,"account":null,"toml_account":null,"まだ存在しない欄":1}"#;
+        let meta: SessionMeta =
+            serde_json::from_str(text).expect("知らない欄が混ざっても解けること");
+        assert_eq!(meta.card_id.0.as_u128(), 1);
+        assert_eq!(meta.status, SessionStatus::Working);
+    }
+
+    #[test]
+    fn 名前を運ぶ工事でパーサとの契約の版は上がらない() {
+        // **ここが上がると、自己修復が差し替えた古いパーサを抱えている機械で、
+        // 構造化ビューが丸ごと縮退する**（設計§3-2）。名前が出ないだけで済むはずの差で、
+        // 履歴を殺すことになる。
+        //
+        // 報告を1つ足すのは `ParserEvent` の変種を増やすだけでよい——受け口
+        // （`session-host-core/src/parser.rs`）が知らない報告を警告1行で捨てる作りに
+        // なっているので、古い PC 側は落ちない。
+        assert_eq!(crate::ipc::PROTOCOL_VERSION, 1);
+    }
+
     #[test]
     fn 申告したアカウントと帰属したアカウントは別々に運ばれる() {
         // 同じ欄に入れると、**上書きされたのか一致したのか**を後から区別できない。
