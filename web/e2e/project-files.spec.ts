@@ -26,6 +26,53 @@ const TAIL = 'いちばん最後の行'
 /** 一覧のほうも溢れさせる数。同じ器の中で高さを取り合うので、両方を見る。 */
 const FILLERS = 60
 
+/** 1x1 の PNG。**実物**（`<img>` が実際に描けることを幅で見る）。 */
+const TINY_PNG_BASE64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+const PICTURE = '撮った.png'
+/** 拡張子は画像・中身は違う。**壊れていても画面が壊れないこと**を見る。 */
+const BROKEN = '嘘.png'
+const DOCUMENT = '理解.html'
+const DANGEROUS = '危ない.html'
+const VECTOR = '図.svg'
+/** 上限を超える画像。**その場で作ってその場で消す**（置きっぱなしにしない）。 */
+const HUGE = '大きい.png'
+
+/**
+ * 材料に埋めておく、外への宛先の印。
+ *
+ * **本物の番号はテストの中で決まる**（受け口を立ててみるまで分からない）ので、
+ * ここでは差し替えられる形だけを置く。固定の番号を焼き込むと、その番号が埋まって
+ * いる機械で**嘘の緑**になる。
+ */
+const OUTSIDE_MARK = 'http://外の宛先/beacon.png'
+
+/**
+ * 理解doc と同じ作りの HTML。**利用者が実際に読みたいものの形**を写してある
+ * （自己完結型・インライン `<style>`・`data:` の画像・インライン SVG）。
+ */
+const RICH_HTML = `<!doctype html><html><head><meta charset="utf-8">
+<style>#塗り { color: rgb(1, 2, 3); }</style></head><body>
+<h1 id="見出し">理解ドキュメント</h1>
+<p id="塗り">色が付く</p>
+<img id="埋め込み" src="data:image/png;base64,${TINY_PNG_BASE64}">
+<svg id="図形" width="12" height="12"><rect width="12" height="12" fill="red"/></svg>
+</body></html>`
+
+/**
+ * script と外部への読み込みを持つ材料。**この2つが止まることがこの工事の要**。
+ *
+ * 「書き換えるはずの文字」を置いてあるのは、**動かなかったことを字で言える**ようにするため。
+ */
+const DANGEROUS_HTML = `<!doctype html><html><head><meta charset="utf-8"></head><body>
+<p id="印">元のまま</p>
+<img id="外" src="${OUTSIDE_MARK}">
+<script>document.getElementById('印').textContent = '書き換えられた'</script>
+</body></html>`
+
+const TINY_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><rect id="四角" width="20" height="20" fill="green"/></svg>'
+
 test.use({ permissions: ['clipboard-read', 'clipboard-write'] })
 
 test.beforeAll(() => {
@@ -54,6 +101,19 @@ test.beforeAll(() => {
       'utf8',
     )
   }
+
+  // --- 画像と HTML（`ファイル閲覧で画像とHTMLも表示する` テスト計画フェーズ5）------
+  //
+  // **`fixtures/` へは1枚も置かない**（公開リポジトリ・壊れた材料を含むため）。
+  // その場で書いて、`afterAll` でフォルダごと消える
+  fs.writeFileSync(path.join(docs, PICTURE), Buffer.from(TINY_PNG_BASE64, 'base64'))
+  // 拡張子は画像・中身は違う。**画面が壊れないこと**を見るための材料
+  fs.writeFileSync(path.join(docs, BROKEN), 'これは画像ではありません\n', 'utf8')
+  // 理解doc と同じ作り（インライン `<style>`・`data:` の画像・インライン SVG）
+  fs.writeFileSync(path.join(docs, DOCUMENT), RICH_HTML, 'utf8')
+  // script と外部への読み込みを持つ材料。**隔離が効いているかを言うのはこれ**
+  fs.writeFileSync(path.join(docs, DANGEROUS), DANGEROUS_HTML, 'utf8')
+  fs.writeFileSync(path.join(docs, VECTOR), TINY_SVG, 'utf8')
 })
 
 /**
@@ -280,3 +340,229 @@ async function openLongFile(page: Page) {
   await expect(panel.getByTestId('file-view')).toBeVisible()
   return panel
 }
+
+// ---------------------------------------------------------------------------
+// 画像と HTML（`ファイル閲覧で画像とHTMLも表示する` テスト計画フェーズ5）
+//
+// ここでしか言えないのは「**本当に描かれるか**」と「**本当に外へ出ないか**」である。
+// 細かい見え方は前のフェーズで済ませてある。
+// ---------------------------------------------------------------------------
+
+/** 左パネルを開いて、`MyDocs` の中の1件を選ぶところまで。 */
+async function 開いて選ぶ(page: Page, name: string) {
+  await openDashboard(page)
+  const group = await addProject(page, PROJECT_DIR)
+  await group.click({ position: { x: 5, y: 5 } })
+  await page.getByTestId('project-files-toggle').click()
+  const panel = page.getByTestId('project-files-panel')
+  await expect(panel).toBeVisible()
+  await panel.getByTestId('folder-entry').filter({ hasText: 'MyDocs' }).click()
+  await panel.getByTestId('folder-entry').filter({ hasText: name }).click()
+  return panel
+}
+
+test('画像が実際に描かれる', async ({ page }) => {
+  const panel = await 開いて選ぶ(page, PICTURE)
+
+  const image = panel.getByTestId('file-image')
+  await expect(image).toBeVisible()
+  // **要素が在ることを見ても足りない。** 描けていない画像も要素としては在る
+  await expect
+    .poll(async () => image.evaluate((el: HTMLImageElement) => el.naturalWidth))
+    .toBeGreaterThan(0)
+  await expect(panel.getByTestId('file-meta')).toContainText('image/png')
+})
+
+test('理解doc と同じ作りの HTML が、箱の中で読める', async ({ page }) => {
+  const panel = await 開いて選ぶ(page, DOCUMENT)
+
+  const frame = panel.getByTestId('file-frame')
+  await expect(frame).toBeVisible()
+  await expect(frame).toHaveAttribute('sandbox', '')
+
+  const inside = page.frameLocator('[data-testid="file-frame"]')
+  await expect(inside.locator('#見出し')).toHaveText('理解ドキュメント')
+  // インライン `<style>` が効いていること（CSP の `style-src 'unsafe-inline'`）
+  await expect
+    .poll(async () =>
+      inside.locator('#塗り').evaluate((el) => getComputedStyle(el).color),
+    )
+    .toBe('rgb(1, 2, 3)')
+  // `data:` の画像とインライン SVG が出ること
+  await expect
+    .poll(async () =>
+      inside.locator('#埋め込み').evaluate((el: HTMLImageElement) => el.naturalWidth),
+    )
+    .toBeGreaterThan(0)
+  await expect
+    .poll(async () =>
+      inside.locator('#図形').evaluate((el) => el.getBoundingClientRect().width),
+    )
+    .toBeGreaterThan(0)
+})
+
+test('SVG も箱の中で描かれる', async ({ page }) => {
+  const panel = await 開いて選ぶ(page, VECTOR)
+
+  await expect(panel.getByTestId('file-frame')).toHaveAttribute('sandbox', '')
+  const inside = page.frameLocator('[data-testid="file-frame"]')
+  await expect
+    .poll(async () =>
+      inside.locator('#四角').evaluate((el) => el.getBoundingClientRect().width),
+    )
+    .toBeGreaterThan(0)
+})
+
+/**
+ * 外への読み込みを、**受け取る側で**数える。
+ *
+ * # なぜブラウザ側の出来事では言えないのか
+ *
+ * 実測で2通り踏んだ。**`request` は CSP に止められた要求でも上がり**（＝出たように
+ * 見える）、**`requestfailed` は上がらない**（＝止めた証拠にもならない）。どちらも
+ * 「網へ出たか」という問いに答えていない。
+ *
+ * **本物の受け口を立てて、そこへ1件でも届いたかを数える。** 届いていなければ
+ * 出ていない、で議論の余地が無い。
+ */
+async function 外の受け口() {
+  const http = await import('node:http')
+  const 届いた: string[] = []
+  const server = http.createServer((request, response) => {
+    届いた.push(request.url ?? '(パスなし)')
+    response.writeHead(404).end()
+  })
+  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done))
+  const address = server.address()
+  if (address === null || typeof address === 'string') {
+    throw new Error('受け口の番号が分かりません')
+  }
+  return {
+    origin: `http://127.0.0.1:${address.port}`,
+    届いた,
+    close: () => new Promise<void>((done) => server.close(() => done())),
+  }
+}
+
+test('隔離が効く——script が動かず、外へも出ない', async ({ page }) => {
+  const 外 = await 外の受け口()
+  // **宛先はここで焼き込む。** 受け口の番号は立ててみないと分からないので、
+  // 材料もこの場で書く（固定の番号にすると、埋まっている機械で嘘の緑になる）
+  const html = DANGEROUS_HTML.replace(OUTSIDE_MARK, `${外.origin}/beacon.png`)
+  const 材料 = path.join(PROJECT_DIR, 'MyDocs', DANGEROUS)
+  fs.writeFileSync(材料, html, 'utf8')
+
+  try {
+    const panel = await 開いて選ぶ(page, DANGEROUS)
+    await expect(panel.getByTestId('file-frame')).toBeVisible()
+
+    const inside = page.frameLocator('[data-testid="file-frame"]')
+    await expect(inside.locator('#印')).toHaveText('元のまま')
+    // 描き終わってから数える。**先に数えると、まだ出ていないだけの0を見る**
+    await expect
+      .poll(async () =>
+        inside.locator('#外').evaluate((el: HTMLImageElement) => el.complete),
+      )
+      .toBe(true)
+    expect(外.届いた, '網へは1バイトも出ていないこと').toHaveLength(0)
+
+    // **肯定側の裏取り。** 同じ材料が、隔離の外でなら動いて外へも出る。
+    // これが無いと、材料の script が最初から壊れていても上は通る
+    const control = await page.evaluate(async (source) => {
+      const frame = document.createElement('iframe')
+      frame.srcdoc = source
+      document.body.appendChild(frame)
+      await new Promise((done) => {
+        frame.addEventListener('load', done, { once: true })
+        setTimeout(done, 2000)
+      })
+      return frame.contentDocument?.getElementById('印')?.textContent ?? '(読めず)'
+    }, html)
+    expect(control, '隔離の外でなら、この材料の script は動く').toBe('書き換えられた')
+    await expect
+      .poll(() => 外.届いた.length, {
+        message: '隔離の外でなら、この材料は外へ出る',
+      })
+      .toBeGreaterThan(0)
+  } finally {
+    await 外.close()
+    // 材料を元へ戻す（次のテストが同じファイルを開く）
+    fs.writeFileSync(材料, DANGEROUS_HTML, 'utf8')
+  }
+})
+
+test('sandbox 属性を外しても、ヘッダだけで script は止まる', async ({ page }) => {
+  // **二重の鍵の、片方ずつ。** 属性を外して初めて、CSP の `sandbox` 指令が
+  // 効いているかを言える（設計§6-1）
+  const panel = await 開いて選ぶ(page, DANGEROUS)
+  await expect(panel.getByTestId('file-frame')).toBeVisible()
+
+  await page.evaluate(() => {
+    const frame = document.querySelector<HTMLIFrameElement>(
+      '[data-testid="file-frame"]',
+    )
+    if (frame === null) {
+      throw new Error('箱が見つかりません')
+    }
+    frame.removeAttribute('sandbox')
+    // 属性を外しただけでは読み込み直されない。同じ宛先へ入れ直す
+    frame.src = `${frame.src}&再読み込み=1`
+  })
+
+  const inside = page.frameLocator('[data-testid="file-frame"]')
+  await expect(inside.locator('#印')).toHaveText('元のまま')
+})
+
+test('壊れた画像でも画面は壊れない', async ({ page }) => {
+  const panel = await 開いて選ぶ(page, BROKEN)
+
+  // **断られたのとは別の言い方**（サーバは読めているので断っていない）
+  await expect(panel.getByTestId('file-broken')).toContainText('画像として読めません')
+  await expect(panel.getByTestId('file-error')).toHaveCount(0)
+  // 画面そのものは生きている（パスのコピーは今までどおり押せる）
+  await expect(panel.getByTestId('file-copy')).toBeVisible()
+})
+
+test('上限を超える画像は、理由と大きさが出る', async ({ page }) => {
+  // **開く前に置く。** 一覧はパネルを開いたときに1回読むだけなので、
+  // 開いたあとに置いたファイルは行として現れない（押す相手が永久に出てこない）
+  const huge = path.join(PROJECT_DIR, 'MyDocs', HUGE)
+  fs.writeFileSync(huge, Buffer.alloc(8 * 1024 * 1024 + 1))
+  try {
+    const panel = await 開いて選ぶ(page, HUGE)
+    const error = panel.getByTestId('file-error')
+    await expect(error).toBeVisible()
+    await expect(error, '大きさが読めること').toContainText('8388609')
+    // 描こうとしていないこと（断られた側の道を通っている）
+    await expect(panel.getByTestId('file-image')).toHaveCount(0)
+  } finally {
+    // **その場で消す。** 8 MiB を置きっぱなしにしない
+    fs.rmSync(huge, { force: true })
+  }
+})
+
+test('HTML でも生テキストと整形を行き来できる', async ({ page }) => {
+  const panel = await 開いて選ぶ(page, DOCUMENT)
+  await expect(panel.getByTestId('file-frame')).toBeVisible()
+
+  await panel.getByTestId('file-toggle-raw').click()
+  await expect(panel.getByTestId('file-raw')).toContainText('<h1 id="見出し">')
+  await expect(panel.getByTestId('file-frame')).toHaveCount(0)
+
+  await panel.getByTestId('file-toggle-raw').click()
+  await expect(panel.getByTestId('file-frame')).toBeVisible()
+})
+
+test('狭い幅でも、画像と箱がページを横へはみ出させない', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 780 })
+  const panel = await 開いて選ぶ(page, PICTURE)
+  await expect(panel.getByTestId('file-image')).toBeVisible()
+
+  const widths = await page.evaluate(() => ({
+    body: document.body.scrollWidth,
+    window: window.innerWidth,
+  }))
+  expect(widths.body, 'ページ全体が横へはみ出さないこと').toBeLessThanOrEqual(
+    widths.window,
+  )
+})
