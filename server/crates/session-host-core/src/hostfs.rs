@@ -19,7 +19,8 @@
 
 use protocol::a2s::HostFailure;
 use protocol::fs::{
-    DirEntry, DirListing, EntryKind, FileContent, MAX_ENTRIES, MAX_FILE_BYTES, MAX_LISTING_BYTES,
+    DirEntry, DirListing, EntryKind, FileBlob, FileContent, MAX_BLOB_BYTES, MAX_ENTRIES,
+    MAX_FILE_BYTES, MAX_LISTING_BYTES, media_type_of,
 };
 use std::path::{Path, PathBuf};
 
@@ -210,6 +211,63 @@ pub fn list_dir(path: &Path) -> Result<DirListing, HostFsError> {
         path: path.display().to_string(),
         entries,
         truncated,
+    })
+}
+
+/// ファイル1つを**バイト列で**返す（`ファイル閲覧で画像とHTMLも表示する` 設計§3-2）。
+///
+/// # `read_file` とどう違うのか
+///
+/// あちらは「テキストだけ」を契約にしていて、UTF-8 として読めないものを断る。
+/// ここは**断らずに運ぶ**代わりに、**生で返してよいと決めた種別だけ**を相手にする
+/// （表は `protocol::fs` に1つ。設計§2-2）。
+///
+/// # 中身は検めない
+///
+/// 拡張子が `.png` で中身が違っていても、そのまま返す。**壊れていることに気づけるのは
+/// 描く側**なので、そこで言う（設計§7-2）。ここで中身を見に行くと、
+/// 「読めない」と「壊れている」が同じ断りに潰れる。
+pub fn read_blob(path: &Path) -> Result<FileBlob, HostFsError> {
+    let shown = path.display().to_string();
+
+    // **種別を先に見る。** 表に無いものは、大きさを測るまでもなく相手ではない
+    let Some(media_type) = media_type_of(&shown) else {
+        return Err(HostFsError::new(
+            HostFailure::Unsupported,
+            format!("{shown} は生で返せる種別ではありません"),
+        ));
+    };
+
+    // **判定と読み取りが同じものを見る。** 下の `fs::read` はリンクを辿るので、
+    // ここで `symlink_metadata`（辿らない側）を使うと、リンク1本で上限をすり抜けられる
+    let meta = std::fs::metadata(path).map_err(|err| HostFsError::from_io(&err, path))?;
+    if meta.is_dir() {
+        return Err(HostFsError::new(
+            HostFailure::Unsupported,
+            format!("{shown} はフォルダなので中身を読めません"),
+        ));
+    }
+
+    // **開く前に大きさで断る。** 読んでから捨てるのでは、上限を置いた意味が無い
+    let bytes = meta.len();
+    if bytes > MAX_BLOB_BYTES {
+        return Err(HostFsError::new(
+            HostFailure::TooLarge,
+            format!("{shown} は {bytes} バイトで、上限の {MAX_BLOB_BYTES} バイトを超えています"),
+        ));
+    }
+
+    let data = std::fs::read(path).map_err(|err| {
+        let failure = HostFsError::from_io(&err, path);
+        tracing::warn!(path = %shown, bytes, reason = ?failure.reason, "ファイルをバイト列で読めません");
+        failure
+    })?;
+
+    Ok(FileBlob {
+        path: shown,
+        media_type: media_type.to_string(),
+        bytes,
+        data,
     })
 }
 

@@ -965,6 +965,10 @@ async fn handshake(mut socket: Socket, config: &LinkConfig) -> anyhow::Result<(S
         // （接続断のカードを復旧ボタンで戻す 設計§5-2）。上2つと同じで、
         // **この実行ファイルは `apply_command` に腕を持っている**ので常に真
         supports_revive: true,
+        // ファイルをバイト列で読める版であることを名乗る
+        // （`ファイル閲覧で画像とHTMLも表示する` 設計§3-4）。上4つと同じで、
+        // **この実行ファイルは `hostfs::read_blob` を持っている**ので常に真
+        supports_blob_read: true,
     };
     socket
         .send(tungstenite::Message::text(serde_json::to_string(&hello)?))
@@ -1145,6 +1149,9 @@ enum Ask {
     /// 一覧。`None` はその PC のホーム（設計§26-2）
     Dir(Option<String>),
     File(String),
+    /// バイト列で読む（`ファイル閲覧で画像とHTMLも表示する` 設計§3-2）。
+    /// **`File` と別にしてある**——契約（テキストだけ／表に載る種別だけ）が違う
+    Blob(String),
     /// この PC のログ（ログ設計§13-1）。**置き場所を知るのに設定が要る**
     Log(
         Box<protocol::logs::LogQuery>,
@@ -1187,6 +1194,10 @@ fn answer_ask(outgoing: mpsc::UnboundedSender<Outgoing>, request_id: RequestId, 
             },
             Ask::File(path) => match crate::hostfs::read_file(Path::new(&path)) {
                 Ok(content) => HostReply::File(content),
+                Err(err) => failed(err),
+            },
+            Ask::Blob(path) => match crate::hostfs::read_blob(Path::new(&path)) {
+                Ok(blob) => HostReply::Blob(blob),
                 Err(err) => failed(err),
             },
             Ask::Log(query, config) => match crate::logs::collect(&config, &query) {
@@ -1387,6 +1398,9 @@ fn apply_command(
         }
         ServerToAgent::ReadFile { request_id, path } => {
             answer_ask(outgoing.clone(), request_id, Ask::File(path));
+        }
+        ServerToAgent::ReadBlob { request_id, path } => {
+            answer_ask(outgoing.clone(), request_id, Ask::Blob(path));
         }
 
         // ログの問い（ログ設計§13-1）。**フォルダと同じ1本の問答の道に乗る。**

@@ -7,7 +7,7 @@
 #![allow(non_snake_case)]
 
 use protocol::a2s::HostFailure;
-use protocol::fs::{EntryKind, MAX_ENTRIES, MAX_FILE_BYTES};
+use protocol::fs::{EntryKind, MAX_BLOB_BYTES, MAX_ENTRIES, MAX_FILE_BYTES};
 use session_host_core::hostfs;
 use std::path::{Path, PathBuf};
 
@@ -417,6 +417,152 @@ fn フォルダへのリンクはフォルダとして断る() {
         "フォルダだと分かる説明であること（{}）",
         err.detail
     );
+}
+
+// ---------------------------------------------------------------------------
+// バイト列で読む（`ファイル閲覧で画像とHTMLも表示する` 設計§3-2。テスト計画フェーズ2）
+// ---------------------------------------------------------------------------
+
+/// 1x1 の GIF89a。**43バイトの実物**で、ブラウザが描けることも測ってある（設計§15 の5）。
+const 小さなGIF: &[u8] = &[
+    0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xff, 0xff, 0xff, 0x21, 0xf9, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x2c, 0x00, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x01, 0x44, 0x00, 0x3b,
+];
+
+#[test]
+fn 表にある種別はバイト列で返る() {
+    let sandbox = Sandbox::new("blob-ok");
+    sandbox.file("撮った.gif", 小さなGIF);
+
+    let blob = hostfs::read_blob(&sandbox.path().join("撮った.gif")).expect("読めること");
+
+    assert_eq!(blob.data, 小さなGIF, "中身がそのまま運ばれること");
+    assert_eq!(blob.media_type, "image/gif", "媒体型が添うこと");
+    assert_eq!(blob.bytes, 小さなGIF.len() as u64);
+    assert!(blob.path.ends_with("撮った.gif"));
+}
+
+#[test]
+fn 表の外は断る() {
+    // **なんでも生で返せる口にしない**（設計§5-2）。`.js` は生で返すと危ないほうの代表
+    let sandbox = Sandbox::new("blob-unknown");
+    sandbox.file("組み込み.js", b"alert(1)");
+    sandbox.file("計画.md", b"# a");
+
+    for name in ["組み込み.js", "計画.md"] {
+        let err = hostfs::read_blob(&sandbox.path().join(name)).expect_err("断ること");
+        assert_eq!(err.reason, HostFailure::Unsupported, "{name}");
+        assert!(
+            err.detail.contains("生で返せる種別ではありません"),
+            "何が駄目なのか分かる説明であること（{}）",
+            err.detail
+        );
+    }
+}
+
+#[test]
+fn フォルダはバイト列でも断る() {
+    let sandbox = Sandbox::new("blob-dir");
+    // 拡張子だけを見れば表に載る名前のフォルダ。**種別の判定だけで通してはいけない**
+    sandbox.dir("紛らわしい.png");
+
+    let err = hostfs::read_blob(&sandbox.path().join("紛らわしい.png")).expect_err("断ること");
+
+    assert_eq!(err.reason, HostFailure::Unsupported);
+    assert!(err.detail.contains("フォルダなので"), "{}", err.detail);
+}
+
+#[test]
+fn 上限を超えたら大きさを添えて断る() {
+    let sandbox = Sandbox::new("blob-large");
+    let size = MAX_BLOB_BYTES as usize + 1;
+    sandbox.file("大きい.png", &vec![0u8; size]);
+
+    let err = hostfs::read_blob(&sandbox.path().join("大きい.png")).expect_err("断ること");
+
+    assert_eq!(err.reason, HostFailure::TooLarge);
+    assert!(
+        err.detail.contains(&size.to_string()),
+        "実際の大きさが読めること（{}）",
+        err.detail
+    );
+    assert!(
+        err.detail.contains(&MAX_BLOB_BYTES.to_string()),
+        "上限も読めること（{}）",
+        err.detail
+    );
+}
+
+#[test]
+fn リンク越しでも上限をすり抜けられない() {
+    // `symlink_metadata`（辿らない側）で測ると、**リンク1本で上限をすり抜けられる**
+    let sandbox = Sandbox::new("blob-link");
+    let real = sandbox.path().join("本体.png");
+    std::fs::write(&real, vec![0u8; MAX_BLOB_BYTES as usize + 1]).expect("置けること");
+    let link = sandbox.path().join("近道.png");
+    std::os::unix::fs::symlink(&real, &link).expect("リンクを張れること");
+
+    let err = hostfs::read_blob(&link).expect_err("リンク越しでも断ること");
+
+    assert_eq!(err.reason, HostFailure::TooLarge);
+}
+
+#[test]
+fn 権限が無いのと存在しないのを言い分ける() {
+    let sandbox = Sandbox::new("blob-why");
+
+    let missing = hostfs::read_blob(&sandbox.path().join("無い.png")).expect_err("断ること");
+    assert_eq!(missing.reason, HostFailure::NotFound);
+
+    let denied_path = sandbox.path().join("読めない.png");
+    std::fs::write(&denied_path, 小さなGIF).expect("置けること");
+    let mut perms = std::fs::metadata(&denied_path)
+        .expect("見えること")
+        .permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o000);
+    std::fs::set_permissions(&denied_path, perms).expect("権限を落とせること");
+
+    let denied = hostfs::read_blob(&denied_path);
+    // root で走らせると権限は効かない。**そのときは判定そのものを飛ばす**——
+    // 「効かない環境でだけ落ちるテスト」は、直せないものを赤くするだけになる
+    if let Err(err) = denied {
+        assert_eq!(err.reason, HostFailure::Denied);
+        assert_ne!(err.reason, HostFailure::NotFound, "不在と混ぜないこと");
+    }
+}
+
+#[test]
+fn 中身は検めない() {
+    // 拡張子が `.png` で中身がテキストでも、**そのまま返る**。
+    // 壊れていることを言うのは描く側（設計§7-2）——ここで見に行くと、
+    // 「読めない」と「壊れている」が同じ断りに潰れる
+    let sandbox = Sandbox::new("blob-lying");
+    sandbox.file("嘘.png", "これは画像ではありません".as_bytes());
+
+    let blob = hostfs::read_blob(&sandbox.path().join("嘘.png")).expect("断らないこと");
+
+    assert_eq!(
+        blob.media_type, "image/png",
+        "拡張子どおりの媒体型が付くこと"
+    );
+    assert_eq!(blob.data, "これは画像ではありません".as_bytes());
+}
+
+#[test]
+fn テキストの上限は動かしていない() {
+    // **画像の上限を足しても、テキストの側は1バイトも動かさない**（設計§13）
+    let sandbox = Sandbox::new("blob-text-untouched");
+    let size = MAX_FILE_BYTES as usize + 1;
+    sandbox.file("長い.md", &vec![b'a'; size]);
+
+    let err = hostfs::read_file(&sandbox.path().join("長い.md")).expect_err("今までどおり断ること");
+
+    assert_eq!(err.reason, HostFailure::TooLarge);
+    // 画像の上限（8 MiB）で判定していたら、この大きさは通ってしまう。
+    // **定数どうしの比較は const block へ**（clippy）——ここは実行時ではなく
+    // 「2つの上限が別物である」という約束そのものを固定している
+    const { assert!(MAX_FILE_BYTES < MAX_BLOB_BYTES) };
 }
 
 #[test]
