@@ -205,6 +205,7 @@ setsid nohup ./server/target/release/agentdashboard >> ~/agentdashboard-run.log 
 ## 重要ファイル
 | パス | 役割 |
 |---|---|
+| `DESIGN.md` | **画面の見た目の正**（一覧・ツリー・アイコン・バッジ・状態表示など）。見た目に関わるものを作る・直す前に読む。**禁止事項を守るだけでは合格ではない**——天井（§5・§20・§33）と床（§8）の両方を満たして初めて合格。出す前に §34 で数える。触るときの作法は `.claude/docs/guideline.md`「画面の見た目を作る・直すとき」 |
 | `scripts/cargo` | cargo 呼び出しの唯一の入口（docker run のラッパー） |
 | `docker/Dockerfile.rust` | Rust ツールチェーンの隔離イメージ |
 | `Makefile` | 開発コマンド一式 |
