@@ -234,6 +234,79 @@ pub struct Response {
     pub cookie: Option<String>,
 }
 
+/// 応答を**バイト列のまま**受け取る（`ファイル閲覧で画像とHTMLも表示する` 設計§12-1）。
+///
+/// # なぜ文字列版と分けるのか
+///
+/// 画像は UTF-8 として解けない。`read_to_string` はそこで**失敗する**ので、生で返す口を
+/// 確かめるテストは1行も書けない。ヘッダを丸ごと返すのは、**付けたヘッダを字で照合する**
+/// のがこの口の主眼だからである（CSP の中身が崩れても画面は普通に動く）。
+pub struct RawResponse {
+    pub status: u16,
+    /// 状態行を含むヘッダ部分をそのまま。**小文字化しない**（照合する側が決める）
+    pub headers: String,
+    pub body: Vec<u8>,
+}
+
+impl RawResponse {
+    /// ヘッダを1つ引く。**名前は大文字小文字を区別しない**（HTTP の決まり）。
+    pub fn header(&self, name: &str) -> Option<String> {
+        let name = name.to_ascii_lowercase();
+        self.headers.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            (key.trim().to_ascii_lowercase() == name).then(|| value.trim().to_string())
+        })
+    }
+}
+
+/// 1往復ぶんを組み立てて送り、**バイト列で**受け取る。
+pub fn request_raw(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    headers: &[(&str, &str)],
+) -> anyhow::Result<RawResponse> {
+    let mut head = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n");
+    for (name, value) in headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    let request = match body {
+        Some(body) => format!(
+            "{head}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ),
+        None => format!("{head}\r\n"),
+    };
+
+    let mut stream = std::net::TcpStream::connect(addr)?;
+    stream.write_all(request.as_bytes())?;
+    stream.flush()?;
+
+    let mut response: Vec<u8> = Vec::new();
+    stream.read_to_end(&mut response)?;
+
+    // ヘッダと本文の境目は空行。チャンク転送は使われない想定（Content-Length 応答のみ）
+    let split = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| anyhow::anyhow!("ヘッダの終わりが見つかりません"))?;
+    let headers = String::from_utf8_lossy(&response[..split]).into_owned();
+    let body = response[split + 4..].to_vec();
+
+    let status = headers
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .ok_or_else(|| anyhow::anyhow!("HTTPステータス行を読めません: {headers:?}"))?;
+
+    Ok(RawResponse {
+        status,
+        headers,
+        body,
+    })
+}
+
 /// 1往復ぶんを組み立てて送る。**Cookie を運べる**のがこれまでとの違い。
 ///
 /// 認証が入って以降、テストは「ログインして、その入館証で叩く」形になる。
@@ -262,36 +335,13 @@ pub fn request_with(
     body: Option<&str>,
     headers: &[(&str, &str)],
 ) -> anyhow::Result<Response> {
-    let mut head = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n");
-    for (name, value) in headers {
-        head.push_str(&format!("{name}: {value}\r\n"));
-    }
-    let request = match body {
-        Some(body) => format!(
-            "{head}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-            body.len()
-        ),
-        None => format!("{head}\r\n"),
-    };
-
-    let mut stream = std::net::TcpStream::connect(addr)?;
-    stream.write_all(request.as_bytes())?;
-    stream.flush()?;
-
-    let mut response = String::new();
-    stream.read_to_string(&mut response)?;
-
-    let status = response
-        .split_whitespace()
-        .nth(1)
-        .and_then(|code| code.parse::<u16>().ok())
-        .ok_or_else(|| anyhow::anyhow!("HTTPステータス行を読めません: {response:?}"))?;
-
-    // ヘッダと本文の境目は空行。チャンク転送は使われない想定（Content-Length 応答のみ）
-    let (headers, body) = response
-        .split_once("\r\n\r\n")
-        .map(|(headers, body)| (headers.to_string(), body.to_string()))
-        .unwrap_or_else(|| (response.clone(), String::new()));
+    let raw = request_raw(addr, method, path, body, headers)?;
+    let RawResponse {
+        status,
+        headers,
+        body,
+    } = raw;
+    let body = String::from_utf8_lossy(&body).into_owned();
 
     let cookie = headers
         .lines()
