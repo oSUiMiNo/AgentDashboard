@@ -97,6 +97,46 @@ export async function readFile(
 }
 
 /**
+ * 生で返す口の URL（`ファイル閲覧で画像とHTMLも表示する` 設計§5-1）。
+ *
+ * **`<img>` と `<iframe>` の宛先はこれ1本。** 画面で文字列を継ぎ足すと、符号化の
+ * 仕方が2通りになる（`childOf` を1箇所に置いてあるのと同じ理由）。
+ *
+ * HTML と SVG は**この URL のまま `<iframe src>` に渡す**——手元に本文があっても
+ * `srcdoc` へは渡さない。応答に付く CSP がこの箱の唯一の鍵で、`srcdoc` には付かない
+ * （設計§14 の1）。
+ */
+export function rawUrl(host: string, path: string): string {
+  return `/api/hosts/${encodeURIComponent(host)}/file?path=${encodeURIComponent(path)}&as=raw`
+}
+
+/**
+ * 画像を取ってくる（設計§7-2）。
+ *
+ * **`<img src>` に直に URL を渡さない。** `<img>` の失敗は理由を運べないので、
+ * 断られたのか壊れているのかを画面が言えなくなる。ここで状態を見て、
+ * **断り文はそのまま持ち上げる**。
+ *
+ * 返すのは `blob:` の URL。**使い終わったら呼ぶ側が捨てる**
+ * （`URL.revokeObjectURL`）——忘れると、開くたびにブラウザの中で溜まる。
+ */
+export async function readBlob(
+  host: string,
+  path: string,
+): Promise<{ url: string; bytes: number; mediaType: string }> {
+  const response = await fetch(rawUrl(host, path))
+  if (!response.ok) {
+    throw new HostFsError(response.status, await reason(response))
+  }
+  const blob = await response.blob()
+  return {
+    url: URL.createObjectURL(blob),
+    bytes: blob.size,
+    mediaType: response.headers.get('content-type') ?? blob.type,
+  }
+}
+
+/**
  * `root` から見た相対パス。**基準を組み立てる場所をここ1つに閉じる**（設計§15）。
  *
  * 基準が分からない相対パスは、貼られた側で解釈できない。だから画面には必ず

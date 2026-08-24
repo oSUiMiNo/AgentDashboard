@@ -5,7 +5,7 @@
  * とくに生の HTML は、通してしまっても画面は普通に見えるので、目視では気づけない。
  */
 
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FileView } from '@/components/FileView/FileView'
@@ -23,6 +23,9 @@ function content(text: string, truncated = false) {
 }
 
 let written: string[] = []
+/** `createObjectURL` で作ったもの／捨てたもの（下の「画像と HTML」で数える）。 */
+const made: { url: string; size: number }[] = []
+const revoked: string[] = []
 
 function serve(body: unknown, status = 200) {
   vi.stubGlobal(
@@ -177,5 +180,193 @@ describe('ファイルの見せ方', () => {
     expect(await screen.findByTestId('file-error')).toHaveTextContent(
       '大きすぎます',
     )
+  })
+})
+
+/**
+ * 画像と HTML（`ファイル閲覧で画像とHTMLも表示する` 設計§7。テスト計画フェーズ4）。
+ *
+ * **否定側の主張が多いので、肯定側と対で書く。** 「叩かない」「出さない」は、
+ * 探し方が間違っているときにも同じ答えを返す。
+ */
+describe('画像と HTML', () => {
+  /** 呼ばれた URL を全部控える。**「叩かない」を数で言うため。** */
+  function record(handler: (url: string) => Response) {
+    const calls: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input)
+        calls.push(url)
+        return handler(url)
+      }),
+    )
+    return calls
+  }
+
+  beforeEach(() => {
+    // jsdom は `createObjectURL` を持たない。**捨てたかどうかを数えたい**ので、
+    // 作った URL と捨てた URL の両方を控える形にする
+    made.length = 0
+    revoked.length = 0
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn((blob: Blob) => {
+        const url = `blob:偽物/${made.length}`
+        made.push({ url, size: blob.size })
+        return url
+      }),
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: vi.fn((url: string) => {
+        revoked.push(url)
+      }),
+    })
+  })
+
+  it('画像は生の口から取って img に渡す。テキストの口は1回も叩かない', async () => {
+    const calls = record(
+      () =>
+        new Response(new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' }), {
+          status: 200,
+          headers: { 'content-type': 'image/png' },
+        }),
+    )
+    render(<FileView host="local" root={ROOT} path={`${ROOT}/撮った.png`} />)
+
+    const image = await screen.findByTestId('file-image')
+    expect(image).toHaveAttribute('src', 'blob:偽物/0')
+    // **二度運ばない**（設計§7-2）。`as=raw` の1本だけが叩かれていること
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toContain('as=raw')
+    // 生テキストは出さず、代わりに素性を出す（設計§7-4）
+    expect(screen.queryByTestId('file-toggle-raw')).toBeNull()
+    expect(screen.getByTestId('file-meta')).toHaveTextContent('image/png')
+  })
+
+  it('断られたら、本文をそのまま断り欄へ出す', async () => {
+    record(() => new Response('大きすぎます（9000000 バイト）', { status: 413 }))
+    render(<FileView host="local" root={ROOT} path={`${ROOT}/大きい.png`} />)
+
+    expect(await screen.findByTestId('file-error')).toHaveTextContent(
+      '大きすぎます（9000000 バイト）',
+    )
+    // 断られたときは箱も画像も出さない
+    expect(screen.queryByTestId('file-image')).toBeNull()
+  })
+
+  it('中身が画像でないときは、断られたのとは別の言い方をする', async () => {
+    record(
+      () =>
+        new Response(new Blob(['これは画像ではありません'], { type: 'image/png' }), {
+          status: 200,
+          headers: { 'content-type': 'image/png' },
+        }),
+    )
+    render(<FileView host="local" root={ROOT} path={`${ROOT}/嘘.png`} />)
+
+    const image = await screen.findByTestId('file-image')
+    // jsdom は画像を解こうとしないので、`onError` を自分で起こす
+    fireEvent.error(image)
+
+    const broken = await screen.findByTestId('file-broken')
+    expect(broken).toHaveTextContent('画像として読めません')
+    // **断り欄とは別の場所に出ること。** 同じ言葉に潰すと、直す場所が分からなくなる
+    expect(screen.queryByTestId('file-error')).toBeNull()
+  })
+
+  it('別のファイルへ移ると、作った URL を捨てる', async () => {
+    record(
+      () =>
+        new Response(new Blob([new Uint8Array([1])], { type: 'image/png' }), {
+          status: 200,
+          headers: { 'content-type': 'image/png' },
+        }),
+    )
+    const view = render(
+      <FileView host="local" root={ROOT} path={`${ROOT}/一枚目.png`} />,
+    )
+    await screen.findByTestId('file-image')
+    expect(revoked).toHaveLength(0)
+
+    view.rerender(<FileView host="local" root={ROOT} path={`${ROOT}/二枚目.png`} />)
+    await waitFor(() => expect(revoked).toContain('blob:偽物/0'))
+  })
+
+  it('HTML は先にテキストの口で読んでから、隔離した箱に入れる', async () => {
+    const calls = record(
+      () =>
+        new Response(
+          JSON.stringify({
+            path: `${ROOT}/理解.html`,
+            text: '<!doctype html><p>理解</p>',
+            truncated: false,
+            bytes: 26,
+          }),
+          { status: 200 },
+        ),
+    )
+    render(<FileView host="local" root={ROOT} path={`${ROOT}/理解.html`} />)
+
+    const frame = await screen.findByTestId('file-frame')
+    // **鍵の片方。** 空の `sandbox` は「許可を1つも与えない」の意味
+    expect(frame).toHaveAttribute('sandbox', '')
+    expect(frame.getAttribute('src')).toContain('as=raw')
+    expect(frame.getAttribute('src')).toContain(encodeURIComponent(`${ROOT}/理解.html`))
+    // 先に叩くのはテキストの口（`as=raw` を含まない）
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).not.toContain('as=raw')
+  })
+
+  it('HTML が読めなかったら、箱を出さずに理由だけを出す', async () => {
+    record(() => new Response('その場所は見つかりません', { status: 404 }))
+    render(<FileView host="local" root={ROOT} path={`${ROOT}/無い.html`} />)
+
+    expect(await screen.findByTestId('file-error')).toHaveTextContent(
+      'その場所は見つかりません',
+    )
+    expect(screen.queryByTestId('file-frame')).toBeNull()
+  })
+
+  it('SVG も同じ箱に入る（img へ落ちない）', async () => {
+    record(
+      () =>
+        new Response(
+          JSON.stringify({
+            path: `${ROOT}/図.svg`,
+            text: '<svg></svg>',
+            truncated: false,
+            bytes: 11,
+          }),
+          { status: 200 },
+        ),
+    )
+    render(<FileView host="local" root={ROOT} path={`${ROOT}/図.svg`} />)
+
+    expect(await screen.findByTestId('file-frame')).toHaveAttribute('sandbox', '')
+    expect(screen.queryByTestId('file-image')).toBeNull()
+  })
+
+  it('HTML でも生テキストへ行き来できる', async () => {
+    record(
+      () =>
+        new Response(
+          JSON.stringify({
+            path: `${ROOT}/理解.html`,
+            text: '<!doctype html><p>理解</p>',
+            truncated: false,
+            bytes: 26,
+          }),
+          { status: 200 },
+        ),
+    )
+    render(<FileView host="local" root={ROOT} path={`${ROOT}/理解.html`} />)
+    await screen.findByTestId('file-frame')
+
+    await userEvent.click(screen.getByTestId('file-toggle-raw'))
+
+    expect(screen.getByTestId('file-raw')).toHaveTextContent('<p>理解</p>')
+    expect(screen.queryByTestId('file-frame')).toBeNull()
   })
 })

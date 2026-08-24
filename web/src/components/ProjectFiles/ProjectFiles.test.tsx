@@ -192,3 +192,42 @@ describe('左パネル', () => {
     expect(screen.getByTestId('folder-browser')).toBeInTheDocument()
   })
 })
+
+/**
+ * サムネイルを出さない、の実体（`ファイル閲覧で画像とHTMLも表示する` 設計§7-5。
+ * テスト計画フェーズ4）。
+ *
+ * **「出さない」は見た目では確かめられない。** 出ていないことを目で見ても、
+ * 「まだ描かれていないだけ」と区別が付かない。**呼び出しの回数で言う。**
+ */
+describe('一覧は画像を先読みしない', () => {
+  it('画像だらけのフォルダを描いても、画像を1枚も取りに行かない', async () => {
+    const calls: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        calls.push(url)
+        return new Response(
+          JSON.stringify({
+            path: ROOT,
+            entries: [
+              { name: '一枚目.png', kind: 'file', is_project: false },
+              { name: '二枚目.jpg', kind: 'file', is_project: false },
+              { name: '三枚目.svg', kind: 'file', is_project: false },
+            ],
+            truncated: false,
+          }),
+          { status: 200 },
+        )
+      }),
+    )
+
+    render(<ProjectFiles host="local" project={ROOT} />)
+    await screen.findByText('一枚目.png')
+
+    // **一覧の1回だけ。** 画像の数だけ問答が走ると、跨いだ配置では
+    // 1件あたり最大5秒の時間切れがその数だけ並ぶ
+    expect(calls).toHaveLength(1)
+    expect(calls.filter((url) => url.includes('as=raw'))).toHaveLength(0)
+  })
+})

@@ -1,5 +1,6 @@
 /**
- * ファイル1つを見せる（イシューグループ_2026_0805_0514 設計§15）。
+ * ファイル1つを見せる（イシューグループ_2026_0805_0514 設計§15、
+ * `ファイル閲覧で画像とHTMLも表示する` 設計§7）。
  *
  * # 何のための画面か
  *
@@ -11,24 +12,42 @@
  * だから整形は Markdown に寄せてあり、**チェックボックスが読めること**がこの画面の
  * 価値のほとんどを占める。
  *
- * # 生の HTML は通さない
+ * # 種別で1回だけ分岐する
  *
- * この画面はインターネットへ出ていることがある。`react-markdown` は既定で生の HTML を
- * 素通ししないので、**`rehype-raw` を入れないこと自体が安全条件**になっている
- * （設計§15・フェーズ0 の実測）。入れる場合は `rehype-sanitize` と組にする必要があるが、
- * 設計は「通さない」と決めている。
+ * 拡張子の判定は `lib/fileKind.ts` の1箇所（設計§2）。ここに `isImage` を足すと、
+ * 判定が2箇所になって片方だけ直したときに食い違う。
+ *
+ * | 種別 | 読み方 | 見せ方 |
+ * |---|---|---|
+ * | `markdown` / `text` | テキストの口（JSON） | いままでどおり |
+ * | `image` | **生の口を自分で取りに行く**（`readBlob`） | `<img>` |
+ * | `html` / `svg` | **先にテキストの口** → そのあと箱 | **隔離した `<iframe>`** |
+ *
+ * # 生の HTML は、整形の中では通さない
+ *
+ * `react-markdown` は既定で生の HTML を素通ししないので、**`rehype-raw` を入れないこと
+ * 自体が安全条件**になっている（設計§15・フェーズ0 の実測）。**これは変えていない**——
+ * HTML を描くのは隔離した箱の中だけで、整形の中ではない（設計§13）。
  *
  * # 整形が嘘をついたときの逃げ道を残す
  *
  * 整形すると、元の字面との対応が見えなくなる。**生テキストへ切り替えられる**ように
- * してあるのはそのためで、確かめる先が無い整形は信じられない。
+ * してあるのはそのためで、確かめる先が無い整形は信じられない。箱の中で描く HTML と
+ * SVG にも同じ理由が当てはまるので、そちらにも出す（設計§7-4）。
  */
 
 import { useCallback, useEffect, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Button } from '@/components/ui/button'
-import { readFile, relativeOf, type FileContent } from '@/lib/hostfs'
+import { fileKind, needsSandbox } from '@/lib/fileKind'
+import {
+  rawUrl,
+  readBlob,
+  readFile,
+  relativeOf,
+  type FileContent,
+} from '@/lib/hostfs'
 
 interface Props {
   /** `agent_id` かローカルを表す `'local'` */
@@ -41,13 +60,19 @@ interface Props {
   onClose?: () => void
 }
 
-/** Markdown として整形してよいか。拡張子だけで決める（中身を推測しない）。 */
-function isMarkdown(path: string): boolean {
-  return /\.(md|markdown)$/i.test(path)
+/** 取ってきた画像。`url` は `blob:` なので、**使い終わったら捨てる**。 */
+interface Picture {
+  url: string
+  bytes: number
+  mediaType: string
 }
 
 export function FileView({ host, root, path, onClose }: Props) {
+  const kind = fileKind(path)
   const [content, setContent] = useState<FileContent | null>(null)
+  const [picture, setPicture] = useState<Picture | null>(null)
+  /** 拡張子は画像なのに、中身が画像として読めなかった（設計§7-2） */
+  const [broken, setBroken] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   // 整形できる相手のときだけ意味を持つ。既定は整形（進捗を読むのが目的のため）
@@ -57,20 +82,40 @@ export function FileView({ host, root, path, onClose }: Props) {
 
   useEffect(() => {
     let alive = true
+    let made: string | null = null
     setLoading(true)
     setError(null)
     setCopied('idle')
     setRaw(false)
+    setBroken(false)
+    setContent(null)
+    setPicture(null)
+
     void (async () => {
       try {
-        const result = await readFile(host, path)
-        if (alive) {
-          setContent(result)
+        if (kind === 'image') {
+          // **画像はテキストの口を1回も叩かない。** 二度運ぶ意味が無いうえ、
+          // あちらは UTF-8 として読めないものを断るので、必ず失敗する
+          const found = await readBlob(host, path)
+          made = found.url
+          if (alive) {
+            setPicture(found)
+          } else {
+            // 外れたあとに届いたぶんも捨てる（下の後始末は `made` を見る）
+            URL.revokeObjectURL(found.url)
+            made = null
+          }
+        } else {
+          // **HTML と SVG も、まずここを通る**（設計§7-3）。断りの理由と
+          // 「生テキストで見る」の中身が、この1回で揃う
+          const result = await readFile(host, path)
+          if (alive) {
+            setContent(result)
+          }
         }
       } catch (err) {
         if (alive) {
           setError(err instanceof Error ? err.message : '読めませんでした')
-          setContent(null)
         }
       } finally {
         if (alive) {
@@ -78,10 +123,15 @@ export function FileView({ host, root, path, onClose }: Props) {
         }
       }
     })()
+
     return () => {
       alive = false
+      // **作った URL は必ず捨てる。** 忘れると、開くたびにブラウザの中で溜まる
+      if (made !== null) {
+        URL.revokeObjectURL(made)
+      }
     }
-  }, [host, path])
+  }, [host, path, kind])
 
   const relative = relativeOf(root, path)
 
@@ -96,12 +146,17 @@ export function FileView({ host, root, path, onClose }: Props) {
     }
   }, [relative])
 
-  const markdown = isMarkdown(path)
+  const markdown = kind === 'markdown'
+  const boxed = needsSandbox(kind)
+  // 整形の逃げ道を出す相手（設計§7-4）。**画像には出さない**——テキストではないので、
+  // 出しても読めない。代わりに大きさと種別を出す
+  const canShowSource = markdown || boxed
 
   return (
     <section
       data-testid="file-view"
       data-path={path}
+      data-kind={kind}
       // **入れ物の高さいっぱいに広がる。** これが無いと中身が伸び放題になり、
       // 下の `overflow-auto` が効かずに親ごとはみ出す（兄弟の `FolderBrowser` と同じ理由）。
       // `overflow-auto` が言うのは「はみ出したら遡らせる」だけで、**どこまでがはみ出しかは
@@ -136,7 +191,7 @@ export function FileView({ host, root, path, onClose }: Props) {
           >
             パスをコピー
           </Button>
-          {markdown && (
+          {canShowSource && (
             <Button
               type="button"
               variant="ghost"
@@ -186,6 +241,14 @@ export function FileView({ host, root, path, onClose }: Props) {
         </p>
       )}
 
+      {/* **断られたのとは別の言い方にする**（設計§7-2）。直す場所が違う——
+          あちらは上限や版、こちらはファイルそのもの */}
+      {broken && (
+        <p data-testid="file-broken" className="text-xs text-amber-300">
+          画像として読めません（拡張子と中身が食い違っているようです）。
+        </p>
+      )}
+
       {content?.truncated === true && (
         <p data-testid="file-truncated" className="text-xs text-amber-300">
           長すぎるので途中までしか出していません（全体は {content.bytes} バイト）。
@@ -196,12 +259,44 @@ export function FileView({ host, root, path, onClose }: Props) {
         <p className="text-muted-foreground text-xs">読み込み中…</p>
       )}
 
+      {!loading && picture !== null && (
+        <div data-testid="file-body" className="min-h-0 flex-1 overflow-auto">
+          {/* **入れ物の幅まで縮める**（設計§8）。原寸で出すと横スクロールが二重になる */}
+          <img
+            data-testid="file-image"
+            src={picture.url}
+            alt={relative}
+            className="h-auto max-w-full"
+            onError={() => setBroken(true)}
+          />
+          {/* 画像には生テキストが無いので、代わりに素性を出す（設計§7-4） */}
+          <p data-testid="file-meta" className="text-muted-foreground mt-1 text-[11px]">
+            {picture.mediaType} ／ {picture.bytes} バイト
+          </p>
+        </div>
+      )}
+
       {!loading && content !== null && (
         /* 遡る箱。**印を持っているのは、遡れることが実測でしか言えないため**——
            `file-markdown` と `file-raw` は中身の出し方を指しているので、どちらへ
            切り替えても同じこの箱を掴めるようにしておく（設計§6） */
         <div data-testid="file-body" className="min-h-0 flex-1 overflow-auto">
-          {markdown && !raw ? (
+          {boxed && !raw ? (
+            /* **隔離した箱**（設計§6-1）。鍵は二重で、ここに書く `sandbox` 属性と、
+               応答に付く CSP の `sandbox` 指令。後者は**URL を直接開かれたときにも
+               効く**唯一の鍵になる。
+
+               `srcdoc` に手元の本文を渡さないのは、**そちらには CSP が付かない**
+               ため（設計§14 の1）。二度運ぶことになるが、HTML と SVG はテキストの
+               上限（256 KiB）の内側と決まっている */
+            <iframe
+              data-testid="file-frame"
+              title={relative}
+              sandbox=""
+              src={rawUrl(host, path)}
+              className="h-full w-full border-0 bg-white"
+            />
+          ) : markdown && !raw ? (
             <div
               data-testid="file-markdown"
               className="prose-dashboard text-sm leading-relaxed"
