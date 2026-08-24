@@ -30,6 +30,11 @@ struct Parsed {
     emissions: Vec<(u64, protocol::TreeNode)>,
     stats: Option<ParserEvent>,
     resets: usize,
+    /// 拾った題と、それが**何回報告されたか**。
+    ///
+    /// ここを見ることで、**自己修復のゲートにも名前が入る**——修復されたパーサが
+    /// 題を落としたら、フィクスチャを回るテストが止める。
+    titles: Vec<String>,
 }
 
 impl Parsed {
@@ -45,6 +50,7 @@ impl Parsed {
             emissions: Vec::new(),
             stats: None,
             resets: 0,
+            titles: Vec::new(),
         };
         // meta とレコードの読み込み順に依存しないよう、変化が止まるまで回す
         for _ in 0..8 {
@@ -66,6 +72,7 @@ impl Parsed {
                     }
                     ParserEvent::Reset { .. } => parsed.resets += 1,
                     stats @ ParserEvent::Stats { .. } => parsed.stats = Some(stats),
+                    ParserEvent::SessionTitle { title, .. } => parsed.titles.push(title),
                     _ => {}
                 }
             }
@@ -99,6 +106,10 @@ impl Parsed {
             Some(ParserEvent::Stats { parse_errors, .. }) => *parse_errors,
             _ => 0,
         }
+    }
+
+    fn title(&self) -> Option<&str> {
+        self.titles.last().map(String::as_str)
     }
 
     fn unknown_types(&self) -> BTreeMap<String, u64> {
@@ -583,6 +594,33 @@ fn すべてのフィクスチャが不明なイベントを出さずに読め�
             parsed.orphans(),
             0,
             "{name}: 親に繋がらないレコードがあります"
+        );
+    }
+}
+
+#[test]
+fn 実物のフィクスチャから題を1回だけ拾える() {
+    // **これを置くことで、名前を運ぶ経路が自己修復のゲートに入る。** 修復されたパーサが
+    // `ai-title` を捨てる側へ戻したら、ここが止める。
+    //
+    // 実物は**同じ題が2件**書かれている（`basic-tools` は8行目と20行目）ので、
+    // 「変わったときだけ出す」が効いていれば報告は1回で済む。
+    let 題のあるもの = [
+        (
+            "v2.1.220/basic-tools",
+            "TODOを完了に変更し作業内容をまとめる",
+        ),
+        ("v2.1.220/subagent", "Pythonファイルの関数一覧を調査"),
+    ];
+
+    for (label, 期待) in 題のあるもの {
+        let parsed = Parsed::of(fixture(&format!("{label}/session.jsonl")));
+        assert_eq!(parsed.title(), Some(期待), "{label}: 題が拾えていません");
+        assert_eq!(
+            parsed.titles.len(),
+            1,
+            "{label}: 同じ題を{}回報告しています（変わったときだけのはず）",
+            parsed.titles.len()
         );
     }
 }

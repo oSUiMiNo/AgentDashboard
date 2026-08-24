@@ -132,6 +132,15 @@ pub struct SessionThreader {
     synthetic_seq: u64,
     /// タイムスタンプが読めなかったときの代わり（0 にすると全部がエポックへ飛ぶ）
     last_ts: i64,
+    /// CLI が付けたセッションの名前（本体ファイルの `ai-title` から。設計§2-2）。
+    ///
+    /// **最後に読んだものが勝つ。** 同じ題は履歴に何度も書かれる（実測で1ファイルに2件）。
+    session_title: Option<String>,
+    /// 上の題を、前回渡してから読み直したか。
+    ///
+    /// **これが無いと、読むたびに報告が出る。** 報告1件はカード1枚の配り直しになり、
+    /// 記録層と全ブラウザまで波及するので、変わっていないものは流さない。
+    title_unreported: bool,
     stats: Stats,
 }
 
@@ -151,6 +160,18 @@ impl SessionThreader {
     /// 「まだ読まない」と判断する。
     pub fn has_agent_root(&self, agent_id: &str) -> bool {
         self.agent_roots.contains_key(agent_id)
+    }
+
+    /// 前回渡してから変わったセッションの名前を取り出す。**取り出したら印が下りる。**
+    ///
+    /// 変わっていなければ `None`。読み手はこれを1巡に1回だけ見て、`Some` のときだけ
+    /// 報告を1件出す（設計§2-2）。
+    pub fn take_session_title(&mut self) -> Option<String> {
+        if !self.title_unreported {
+            return None;
+        }
+        self.title_unreported = false;
+        self.session_title.clone()
     }
 
     /// レコード1件を取り込み、発行・更新されたノードを返す。
@@ -190,6 +211,22 @@ impl SessionThreader {
                 let parent = self.resolve(source, record.parent_uuid.as_deref());
                 if let Some(uuid) = &record.uuid {
                     self.file(source).resolved.insert(uuid.clone(), parent);
+                }
+                Vec::new()
+            }
+            Kind::Attribute => {
+                // ツリーへの影響は Noise と同じ。違うのは**値を控えること**だけ。
+                //
+                // **本体のファイルだけから拾う。** 判定に使うのは引数ではなく
+                // 上で合成したほう——行そのものが `agentId` を名乗ることがあるので、
+                // 本体のファイルに子の行が混ざっていても弾ける（設計§2-2）
+                if agent_id.is_none() {
+                    if let Some(title) = record.ai_title() {
+                        if self.session_title.as_deref() != Some(title) {
+                            self.session_title = Some(title.to_string());
+                            self.title_unreported = true;
+                        }
+                    }
                 }
                 Vec::new()
             }
@@ -731,6 +768,96 @@ mod tests {
             .is_empty()
         );
         assert!(feed(&mut threader, r#"{"type":"ai-title","aiTitle":"題"}"#).is_empty());
+    }
+
+    #[test]
+    fn 属性種別はノードにも鎖にもならない() {
+        // ノードを作らないのは上のテストが見ている。こちらは**鎖に参加しない**ほう——
+        // 属性の行を挟んでも、後続のレコードの親が動かないこと
+        let mut threader = SessionThreader::new();
+        let assistant = feed(
+            &mut threader,
+            r#"{"type":"assistant","uuid":"u1","message":{"content":[{"type":"text","text":"本文"}]}}"#,
+        );
+        feed(
+            &mut threader,
+            r#"{"type":"ai-title","uuid":"u2","parentUuid":"u1","aiTitle":"題"}"#,
+        );
+        let unknown = feed(
+            &mut threader,
+            r#"{"type":"brand-new","uuid":"u3","parentUuid":"u2"}"#,
+        );
+        // 鎖に参加していれば u1 へ繋がるが、属性は参加しないので親を解決できない
+        assert_eq!(kinds(&unknown), vec!["unknown"]);
+        assert_ne!(unknown[0].parent.as_ref(), Some(&assistant[0].id));
+    }
+
+    #[test]
+    fn 本体の題を拾い取り出したら印が下りる() {
+        let mut threader = SessionThreader::new();
+        assert_eq!(threader.take_session_title(), None, "読む前は何も無い");
+
+        feed(&mut threader, r#"{"type":"ai-title","aiTitle":"最初の題"}"#);
+        assert_eq!(threader.take_session_title().as_deref(), Some("最初の題"));
+        // **取り出したら印が下りる。** 次の巡回でまた出てきてはいけない
+        assert_eq!(threader.take_session_title(), None);
+    }
+
+    #[test]
+    fn 同じ題を何度読んでも報告は1回だけで最後の題が勝つ() {
+        // 実測では1ファイルに同じ題が2件書かれている。読むたびに報告すると、
+        // カード1枚の配り直しが記録層と全ブラウザまで波及し続ける
+        let mut threader = SessionThreader::new();
+        feed(&mut threader, r#"{"type":"ai-title","aiTitle":"同じ題"}"#);
+        feed(&mut threader, r#"{"type":"ai-title","aiTitle":"同じ題"}"#);
+        assert_eq!(threader.take_session_title().as_deref(), Some("同じ題"));
+        assert_eq!(threader.take_session_title(), None);
+
+        // 変わったら、また出る（最後に読んだものが勝つ）
+        feed(&mut threader, r#"{"type":"ai-title","aiTitle":"後の題"}"#);
+        assert_eq!(threader.take_session_title().as_deref(), Some("後の題"));
+    }
+
+    #[test]
+    fn 中身の無い題は控えている名前を消さない() {
+        let mut threader = SessionThreader::new();
+        feed(&mut threader, r#"{"type":"ai-title","aiTitle":"題"}"#);
+        assert_eq!(threader.take_session_title().as_deref(), Some("題"));
+
+        feed(&mut threader, r#"{"type":"ai-title","aiTitle":""}"#);
+        feed(&mut threader, r#"{"type":"ai-title"}"#);
+        assert_eq!(
+            threader.take_session_title(),
+            None,
+            "中身の無い題で報告が起きている"
+        );
+    }
+
+    #[test]
+    fn サブエージェントのファイルからは題を拾わない() {
+        // 実測ではサブエージェントのファイルに `ai-title` は無いが、**無いことに
+        // 頼らない**（設計§2-2）。判定は引数ではなく、行の `agentId` を合成した後で行う
+        let mut threader = SessionThreader::new();
+        let record = parse_line(r#"{"type":"ai-title","aiTitle":"子の題"}"#);
+        threader.feed_record("/p/s/subagents/agent-a1.jsonl", Some("a1"), &record);
+        assert_eq!(
+            threader.take_session_title(),
+            None,
+            "引数で子だと分かる場合"
+        );
+
+        // 本体のファイルに、行そのものが子だと名乗るものが混ざった場合
+        let 名乗る行 = parse_line(r#"{"type":"ai-title","aiTitle":"子の題","agentId":"a1"}"#);
+        threader.feed_record(MAIN, None, &名乗る行);
+        assert_eq!(
+            threader.take_session_title(),
+            None,
+            "行が子だと名乗っているのに拾っている"
+        );
+
+        // 本体の行は拾う
+        feed(&mut threader, r#"{"type":"ai-title","aiTitle":"親の題"}"#);
+        assert_eq!(threader.take_session_title().as_deref(), Some("親の題"));
     }
 
     #[test]

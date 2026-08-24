@@ -16,12 +16,20 @@ const MESSAGE_TYPES: &[&str] = &["user", "assistant"];
 /// 指す例が多数あり（実測96件）、素通しで破棄すると以降の応答が丸ごと画面から消える。
 const TRANSPARENT_TYPES: &[&str] = &["attachment", "system"];
 
+/// `uuid` を持たず、ツリーにも置かないが、**読んだ値をセッションの属性として渡す**種別。
+///
+/// ツリーへの影響は [`Kind::Noise`] と同じで、違うのは「値をどこかへ渡すかどうか」だけ。
+/// `ai-title` は CLI が付けたセッションの名前で、`--resume` の一覧に出るものにあたる。
+///
+/// **捨てる側に置いてはいけない。** 名前を運ぶ経路がこの1行しか無く、捨てると
+/// 画面のいちばん下に出すものが無くなる（`一覧のカードのレイアウトを変える` 設計§2-1）。
+const ATTRIBUTE_TYPES: &[&str] = &["ai-title"];
+
 /// `uuid` を持たず、ツリーに置き場所が無い種別。
 ///
 /// 履歴表示には寄与しないので数えるだけにする。root に積むと画面がノイズで埋まる。
 const NOISE_TYPES: &[&str] = &[
     "queue-operation",
-    "ai-title",
     "last-prompt",
     "mode",
     "permission-mode",
@@ -39,6 +47,8 @@ pub enum Kind {
     Message,
     /// 表示しないが鎖には参加する（子の親を繋ぎ替える）
     Transparent,
+    /// ノードは作らず鎖にも参加しないが、**値をセッションの属性として拾う**
+    Attribute,
     /// 捨てる（数えるだけ）
     Noise,
     /// 知らない種別。`uuid` があればツリーに置き、無ければ合成IDで root へ
@@ -50,6 +60,8 @@ pub fn classify(record_type: &str) -> Kind {
         Kind::Message
     } else if TRANSPARENT_TYPES.contains(&record_type) {
         Kind::Transparent
+    } else if ATTRIBUTE_TYPES.contains(&record_type) {
+        Kind::Attribute
     } else if NOISE_TYPES.contains(&record_type) {
         Kind::Noise
     } else {
@@ -95,6 +107,16 @@ impl Record {
     /// 型を仮定して取り出すとそこでパースが落ちるので、`Value` のまま扱う。
     pub fn tool_use_result(&self) -> Option<&Value> {
         self.raw.get("toolUseResult")
+    }
+
+    /// CLI が付けたセッションの名前（`ai-title` の行が持つ `aiTitle`）。
+    ///
+    /// **中身が無いときは `None` を返す。** 欄ごと無い・文字列でない・空白しか無い、の
+    /// どれも「まだ名前が無い」と同じ扱いにする——**空の名前で上書きすると、いちど
+    /// 付いた名前が消える**。値そのものは削らずに返す（切るのは画面の仕事）。
+    pub fn ai_title(&self) -> Option<&str> {
+        let title = self.raw.get("aiTitle")?.as_str()?;
+        (!title.trim().is_empty()).then_some(title)
     }
 }
 
@@ -179,8 +201,30 @@ mod tests {
         assert_eq!(classify("attachment"), Kind::Transparent);
         assert_eq!(classify("system"), Kind::Transparent);
         assert_eq!(classify("queue-operation"), Kind::Noise);
-        assert_eq!(classify("ai-title"), Kind::Noise);
+        // 捨てる側から**属性**へ移した。名前を運ぶ経路がこの1行しか無い
+        assert_eq!(classify("ai-title"), Kind::Attribute);
         assert_eq!(classify("brand-new-type"), Kind::Unknown);
+    }
+
+    #[test]
+    fn 題は中身が無ければ拾わない() {
+        // **空の名前で上書きすると、いちど付いた名前が消える**（設計§2-1）
+        let 題あり = parse_line(r#"{"type":"ai-title","aiTitle":"題"}"#);
+        assert_eq!(題あり.ai_title(), Some("題"));
+
+        for 中身が無い行 in [
+            r#"{"type":"ai-title"}"#,
+            r#"{"type":"ai-title","aiTitle":""}"#,
+            r#"{"type":"ai-title","aiTitle":"   "}"#,
+            r#"{"type":"ai-title","aiTitle":123}"#,
+            r#"{"type":"ai-title","aiTitle":null}"#,
+        ] {
+            assert_eq!(
+                parse_line(中身が無い行).ai_title(),
+                None,
+                "中身の無い題を拾っている: {中身が無い行}"
+            );
+        }
     }
 
     #[test]

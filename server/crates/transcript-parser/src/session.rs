@@ -115,6 +115,18 @@ impl SessionState {
             }
         }
 
+        // 名前は**健康状態より前**に出す。どちらも1巡に1回だが、名前のほうが
+        // カードの見た目に直結するので、同じ巡回で運ぶなら先に流す（設計§2-2）。
+        //
+        // **`catch_up` が拾ったぶんもここを通る。** 再開位置まで先頭から読み直すので、
+        // 起こし直したあとも名前は自力で戻ってくる（設計§6-1 の前提はここで半分外れる）。
+        if let Some(title) = self.threader.take_session_title() {
+            events.push(ParserEvent::SessionTitle {
+                card_id: self.card_id,
+                title,
+            });
+        }
+
         if self.threader.stats().records_total != self.reported_records {
             self.reported_records = self.threader.stats().records_total;
             events.push(self.stats_event());
