@@ -84,6 +84,13 @@ pub enum HostReply {
     /// 解決・連絡係の封筒の**5箇所が二重になる**。1つにまとめてある理由は上の
     /// とおりで、ログもその理由に当てはまる。
     Log(crate::logs::LogChunk),
+    /// バイト列で読んだファイル（`ファイル閲覧で画像とHTMLも表示する` 設計§3-3）。
+    ///
+    /// **`Log` と `Resources` と同じ理由でここへ足した。** 別の答えの型を作ると、
+    /// 待ち口・答えの解決・連絡係の封筒の5箇所が二重になる。
+    ///
+    /// 中身は base64 の文字列として線に載る（[`crate::fs::FileBlob`]）。
+    Blob(crate::fs::FileBlob),
     /// この PC の資源（起こし直し設計§18）。
     ///
     /// **`Log` と同じ理由でここへ足した。** 別の答えの型を作ると、待ち口・答えの解決・
@@ -202,6 +209,14 @@ pub enum AgentMessage {
         /// 永遠に何も起きないので、名乗りが無いと画面には理由を出せない。
         #[serde(default)]
         supports_revive: bool,
+        /// ファイルを**バイト列で**読めるか（`ファイル閲覧で画像とHTMLも表示する` 設計§3-4）。
+        ///
+        /// 上の4つとまったく同じ形。**`supports_host_fs` に相乗りさせない**——古い PC でも
+        /// フォルダとテキストは読めるので、まとめると「フォルダも読めません」と嘘をつく。
+        ///
+        /// `#[serde(default)]` が要る理由も同じで、欄が足りないと Hello そのものが解けなくなる。
+        #[serde(default)]
+        supports_blob_read: bool,
     },
     /// カード1枚の最新（意味は [`crate::ws::ServerMessage::SessionUpsert`] と同じ）。
     ///
@@ -375,6 +390,17 @@ pub enum ServerToAgent {
         request_id: RequestId,
         path: String,
     },
+    /// ファイルを**バイト列で**教えてほしい（`ファイル閲覧で画像とHTMLも表示する` 設計§3-3）。
+    ///
+    /// **[`Self::ReadFile`] と別の種別にしてある。** あちらは「テキストだけ」を契約に
+    /// していて、答えの型（[`crate::fs::FileContent`]）もそれに合わせてある。
+    ///
+    /// 投げる前に**名乗り**（`supports_blob_read`）を見ること。名乗らない PC は
+    /// 接続を保ったまま無視するので、投げると永遠に答えが返らない。
+    ReadBlob {
+        request_id: RequestId,
+        path: String,
+    },
     /// この PC のログを引かせてほしい（ログ設計§13-1）。
     ///
     /// **答えは [`AgentMessage::HostReply`] で返る**——フォルダ・ファイルと同じ1本の
@@ -498,6 +524,7 @@ mod tests {
                 supports_log_read: true,
                 supports_resources: true,
                 supports_revive: true,
+                supports_blob_read: true,
             },
             AgentMessage::SessionUpsert {
                 session: Box::new(sample_meta()),
@@ -623,6 +650,10 @@ mod tests {
                 request_id: RequestId::new(),
                 path: "/home/example/dev/app/計画.md".to_string(),
             },
+            ServerToAgent::ReadBlob {
+                request_id: RequestId::new(),
+                path: "/home/example/dev/app/撮った.png".to_string(),
+            },
             ServerToAgent::ReadLog {
                 request_id: RequestId::new(),
                 query: sample_query(),
@@ -681,7 +712,7 @@ mod tests {
     }
 
     #[test]
-    fn 答えの5種と理由の6値がすべて往復する() {
+    fn 答えの6種と理由の6値がすべて往復する() {
         // 断る側を1つでも落とすと、その理由だけが画面へ出せなくなる。
         // 「まとめて駄目でした」に潰れるのを防ぐため、**6値を数え上げて**固定する
         let reasons = [
@@ -701,6 +732,13 @@ mod tests {
                 bytes: 24,
             }),
             HostReply::Log(sample_chunk()),
+            // バイト列（`ファイル閲覧で画像とHTMLも表示する` 設計§3-3）。**足したら必ずここへ足す**
+            HostReply::Blob(crate::fs::FileBlob {
+                path: "/home/example/dev/app/撮った.png".to_string(),
+                media_type: "image/png".to_string(),
+                bytes: 3,
+                data: vec![0x00, 0x7f, 0xff],
+            }),
             // 資源（起こし直し設計§18-4）。**足したら必ずここへ足す**——
             // 台帳が数えていない種別は、綴りが変わっても誰も気づかない
             HostReply::Resources(crate::HostResources {
@@ -718,7 +756,7 @@ mod tests {
                 detail: "実際の理由がここに入る".to_string(),
             });
         }
-        assert_eq!(all.len(), 4 + reasons.len());
+        assert_eq!(all.len(), 5 + reasons.len());
         for reply in &all {
             assert_eq!(&roundtrip(reply), reply);
         }

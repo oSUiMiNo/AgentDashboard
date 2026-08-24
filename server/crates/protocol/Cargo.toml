@@ -6,6 +6,9 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+# `FileBlob.data` を線の上で base64 の文字列にするためだけに使う（fs.rs）。
+# 依存を持たない小さな crate で、配布物の大きさにはほとんど効かない
+base64.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
