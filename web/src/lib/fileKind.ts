@@ -55,3 +55,28 @@ export function fileKind(path: string): FileKind {
 export function needsSandbox(kind: FileKind): boolean {
   return kind === 'html' || kind === 'svg'
 }
+
+/**
+ * 一覧に出す印（`ファイル閲覧で画像とHTMLも表示する` フェーズ6 の利用者判断・2026-08-25）。
+ *
+ * # なぜ種別ごとに変えるのか
+ *
+ * **開く前に、何が起きるかが分かる**ようにするため。画像とテキストが同じ印だと、
+ * 押してみるまで「箱が出るのか・画像が出るのか・字が出るのか」が分からない。
+ * 種別ごとに見せ方が違うと決めた以上（§7-1 の表）、**印もそこに合わせる**。
+ *
+ * `svg` を画像と同じ印にしてあるのは、**利用者から見れば画像だから**である。
+ * 中で隔離した箱を通ることは実装の都合で、押す前に知りたいことではない。
+ */
+const ICONS: Record<FileKind, string> = {
+  markdown: '📝',
+  html: '🌐',
+  svg: '🖼️',
+  image: '🖼️',
+  text: '📄',
+}
+
+/** ファイル1つの印。**フォルダとリンクは呼ぶ側が決める**（種別の話ではない）。 */
+export function fileIcon(path: string): string {
+  return ICONS[fileKind(path)]
+}

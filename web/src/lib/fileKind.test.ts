@@ -12,7 +12,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { fileKind, needsSandbox, type FileKind } from './fileKind'
+import { fileIcon, fileKind, needsSandbox, type FileKind } from './fileKind'
 
 /**
  * 正の置き場所を、**走らせた場所から上へ辿って**探す。
@@ -95,5 +95,34 @@ describe('種別の写し', () => {
     expect(needsSandbox('image')).toBe(false)
     expect(needsSandbox('markdown')).toBe(false)
     expect(needsSandbox('text')).toBe(false)
+  })
+})
+
+describe('一覧の印', () => {
+  it('画像とテキストが別の印になる', () => {
+    // **これが直したかったこと。** 同じ印だと、押してみるまで何が出るか分からない
+    expect(fileIcon('撮った.png')).not.toBe(fileIcon('メモ.txt'))
+    expect(fileIcon('撮った.png')).toBe('🖼️')
+    expect(fileIcon('メモ.txt')).toBe('📄')
+  })
+
+  it('HTML と Markdown もそれと分かる印になる', () => {
+    expect(fileIcon('理解.html')).toBe('🌐')
+    expect(fileIcon('計画.md')).toBe('📝')
+    // 3つとも互いに違うこと。**片方だけ変えて同じに戻す**のを防ぐ
+    const 印 = [fileIcon('理解.html'), fileIcon('計画.md'), fileIcon('メモ.txt')]
+    expect(new Set(印).size).toBe(3)
+  })
+
+  it('SVG は画像と同じ印（利用者から見れば画像）', () => {
+    // 中で隔離した箱を通るのは実装の都合で、押す前に知りたいことではない
+    expect(fileIcon('図.svg')).toBe(fileIcon('撮った.png'))
+  })
+
+  it('5種すべてに印がある', () => {
+    // 種別を1つ足したときに、印を足し忘れたら落ちる
+    for (const path of ['a.md', 'a.html', 'a.svg', 'a.png', 'a.txt']) {
+      expect(fileIcon(path)).toBeTruthy()
+    }
   })
 })

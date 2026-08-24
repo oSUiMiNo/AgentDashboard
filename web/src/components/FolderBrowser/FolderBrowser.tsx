@@ -22,6 +22,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
+import { fileIcon } from '@/lib/fileKind'
 import {
   childOf,
   crumbsOf,
@@ -234,8 +235,15 @@ function Row({
         // 的はできるだけ大きく取る。高さも狭い画面で押しやすい値にしてある
         className="h-auto min-w-0 flex-1 justify-start gap-2 px-2 py-2 text-left font-normal"
       >
-        <span aria-hidden className="shrink-0">
-          {entry.kind === 'dir' ? '📁' : entry.kind === 'symlink' ? '🔗' : '📄'}
+        {/* **開く前に、何が起きるかが分かる印。** 画像とテキストが同じ印だと、
+            押してみるまで箱が出るのか字が出るのか分からない（種別ごとに見せ方が
+            違うと決めてあるので、印もそこへ合わせる） */}
+        <span aria-hidden data-testid="folder-entry-icon" className="shrink-0">
+          {entry.kind === 'dir'
+            ? '📁'
+            : entry.kind === 'symlink'
+              ? '🔗'
+              : fileIcon(entry.name)}
         </span>
         <span className="min-w-0 truncate">{entry.name}</span>
         {entry.is_project && (
