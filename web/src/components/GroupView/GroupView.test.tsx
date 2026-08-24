@@ -43,6 +43,7 @@ function card(cardId: string): SessionMeta {
     agent_connected: true,
     account: null,
     toml_account: null,
+    session_title: null,
   } as unknown as SessionMeta
 }
 

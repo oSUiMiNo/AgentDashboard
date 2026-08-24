@@ -268,7 +268,7 @@ describe('サーバと同じ JSON になること', () => {
       '"status":{"kind":"working"},"subagent_active":0,"last_activity_at":1,' +
       '"last_assistant_message":null,"created_at":1,"hooks_seen":true,' +
       '"agent_id":"11111111-1111-1111-1111-111111111111",' +
-      '"agent_connected":false,"account":"mao","toml_account":null}'
+      '"agent_connected":false,"account":"mao","toml_account":null,"session_title":null}'
     const meta = JSON.parse(raw) as SessionMeta
     expect(meta.agent_id).toBe('11111111-1111-1111-1111-111111111111')
     expect(meta.agent_connected).toBe(false)
@@ -312,6 +312,39 @@ describe('サーバと同じ JSON になること', () => {
     const meta = JSON.parse(raw) as SessionMeta
     expect(meta.account).toBe('わたし')
     expect(meta.toml_account).toBe('よその人')
+  })
+
+  it('SessionMeta はセッション名を運ぶ', () => {
+    // Rust 側 `session_metaはセッション名を運ぶ` と対になる。
+    // 名前は CLI が最初のターンのあとに付けるので、**起こした直後は必ず null**。
+    const 名前あり =
+      '{"card_id":"' +
+      CARD_ID +
+      '","project":"/dev/app","claude_session_id":null,' +
+      '"permission_mode":null,"model":null,"model_label":null,"model_requested":null,' +
+      '"status":{"kind":"idle"},"subagent_active":0,"last_activity_at":1,' +
+      '"last_assistant_message":null,"created_at":1,"hooks_seen":true,' +
+      '"agent_id":null,"agent_connected":true,"account":null,"toml_account":null,' +
+      '"session_title":"TODOを完了に変更し作業内容をまとめる"}'
+    expect((JSON.parse(名前あり) as SessionMeta).session_title).toBe(
+      'TODOを完了に変更し作業内容をまとめる',
+    )
+
+    // **欄ごと無い形も来る**——名前の欄を知らない古い版の PC が名乗ると、
+    // サーバはそれをそのまま運ぶ。読む側は `undefined` を受け取るので、
+    // 画面は「まだありません」を出す側へ倒す（フェーズ4）。
+    //
+    // この節の他の JSON リテラルが `session_title` を持たないのは**わざと**で、
+    // どれも欄が増える前の名乗りをそのまま残してある。
+    const 名前の欄が無い =
+      '{"card_id":"' +
+      CARD_ID +
+      '","project":"/dev/app","claude_session_id":null,' +
+      '"permission_mode":null,"model":null,"model_label":null,"model_requested":null,' +
+      '"status":{"kind":"idle"},"subagent_active":0,"last_activity_at":1,' +
+      '"last_assistant_message":null,"created_at":1,"hooks_seen":true,' +
+      '"agent_id":null,"agent_connected":true,"account":null,"toml_account":null}'
+    expect((JSON.parse(名前の欄が無い) as SessionMeta).session_title).toBeUndefined()
   })
 })
 
@@ -449,6 +482,7 @@ describe('状態のラベル', () => {
       agent_connected: true,
       account: null,
       toml_account: null,
+      session_title: null,
     }
     expect(isHookSilent(base)).toBe(true)
     expect(isHookSilent({ ...base, hooks_seen: true })).toBe(false)
@@ -486,6 +520,7 @@ describe('戻せるかの判定', () => {
       agent_connected: false,
       account: null,
       toml_account: null,
+      session_title: null,
       ...overrides,
     }
   }

@@ -369,5 +369,6 @@ pub fn meta(card_id: CardId) -> SessionMeta {
         agent_connected: true,
         account: Some("なりすまし".to_string()),
         toml_account: None,
+        session_title: None,
     }
 }

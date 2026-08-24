@@ -329,6 +329,7 @@ mod tests {
             agent_connected: true,
             account: None,
             toml_account: None,
+            session_title: None,
         }
     }
 

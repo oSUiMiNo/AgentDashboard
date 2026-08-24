@@ -1899,6 +1899,10 @@ impl SessionManager {
                 // 途中でファイルを書き換えても走っているセッションは動かない——
                 // 帰属が実行中に変わると、見えていたカードが黙って消えることになる
                 toml_account: account_toml::lookup(&project_path),
+                // 名前は**最初のターンのあとに CLI が付ける**（履歴へ `ai-title` の行が
+                // 書かれる）。起動した時点では存在しないので、ここで埋められる値が無い。
+                // パーサが拾って報告してくるまで `None` のままでよい（設計§2）
+                session_title: None,
             }),
             process,
             ring: Mutex::new(RingBuffer::new(self.config.pty_ring_buffer)),

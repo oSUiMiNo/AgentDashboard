@@ -122,6 +122,14 @@ export interface SessionMeta {
    * ローカルモードには認証が無いので、一覧の絞り込みとしてだけ使う。
    */
   toml_account: string | null
+  /**
+   * CLI が付けたセッションの名前（`--resume` の一覧に出るもの）。
+   *
+   * `null` は「まだ付いていない」。名前は**最初のターンのあとに付く**ので、
+   * 起こした直後は必ずここから始まる。長さの上限は運ぶ側では置いていないので、
+   * **切るのは画面の仕事**。
+   */
+  session_title: string | null
 }
 
 /** JSONL レコードの `uuid` に対応するノードID。 */

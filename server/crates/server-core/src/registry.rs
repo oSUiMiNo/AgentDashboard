@@ -1184,6 +1184,7 @@ fn placeholder_meta(card_id: CardId) -> SessionMeta {
         agent_connected: true,
         account: None,
         toml_account: None,
+        session_title: None,
     }
 }
 
@@ -1208,5 +1209,8 @@ fn meta_from_row(row: entity::sessions::Model) -> SessionMeta {
         agent_connected: false,
         account: None,
         toml_account: row.toml_account,
+        // **記録から復元できない。列がまだ無い**（フェーズ3で足す）。
+        // 名前はパーサが読み直して報告し直すので、サーバを起こし直した直後だけ空になる
+        session_title: None,
     }
 }

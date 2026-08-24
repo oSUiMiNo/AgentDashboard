@@ -42,6 +42,7 @@ fn meta(card_id: CardId) -> SessionMeta {
         agent_connected: true,
         account: None,
         toml_account: None,
+        session_title: None,
     }
 }
 

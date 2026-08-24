@@ -430,6 +430,21 @@ pub struct SessionMeta {
     ///
     /// **持っていない権限は名乗れない。** ここに他人の名前を書いても帰属は動かない。
     pub toml_account: Option<String>,
+    /// CLI が付けたセッションの名前（`--resume` の一覧に出るもの。設計§5-1）。
+    ///
+    /// `None` は「まだ付いていない」。名前は最初のターンのあとに付くので、
+    /// **起こした直後は必ずここから始まる**。
+    ///
+    /// # なぜ `#[serde(default)]` を書くのか
+    ///
+    /// **動作としては要らない。** `Option` なので、欄を持たない古い版の名乗りでも
+    /// serde が `None` として受ける（フェーズ1で実測。設計§5-1-1）。
+    ///
+    /// **それでも書くのは意図を残すため**である。属性が付いていれば「ここは欠けてよい欄だ」
+    /// と1行で分かる。書かないでおくと、**型を `Option` から外した瞬間に静かに壊れる**——
+    /// そのとき壊れるのは名前の表示ではなく、**カードの報告そのもの**である。
+    #[serde(default)]
+    pub session_title: Option<String>,
 }
 
 impl SessionMeta {
@@ -604,6 +619,7 @@ mod tests {
             agent_connected: true,
             account: None,
             toml_account: None,
+            session_title: None,
         }
     }
 
@@ -677,6 +693,7 @@ mod tests {
             agent_connected: false,
             account: Some("mao".to_string()),
             toml_account: None,
+            session_title: None,
         };
         assert_eq!(roundtrip(&meta), meta);
     }
@@ -704,11 +721,45 @@ mod tests {
             agent_connected: true,
             account: None,
             toml_account: None,
+            session_title: None,
         };
         assert_eq!(
             serde_json::to_string(&meta).unwrap(),
-            r#"{"card_id":"00000000-0000-0000-0000-000000000001","project":"/p","claude_session_id":null,"permission_mode":null,"model":null,"model_label":null,"model_requested":null,"status":{"kind":"working"},"subagent_active":0,"last_activity_at":1,"last_assistant_message":null,"created_at":1,"hooks_seen":false,"agent_id":null,"agent_connected":true,"account":null,"toml_account":null}"#
+            r#"{"card_id":"00000000-0000-0000-0000-000000000001","project":"/p","claude_session_id":null,"permission_mode":null,"model":null,"model_label":null,"model_requested":null,"status":{"kind":"working"},"subagent_active":0,"last_activity_at":1,"last_assistant_message":null,"created_at":1,"hooks_seen":false,"agent_id":null,"agent_connected":true,"account":null,"toml_account":null,"session_title":null}"#
         );
+    }
+
+    #[test]
+    fn session_metaはセッション名を運ぶ() {
+        // 対になる TypeScript 側：`web/src/lib/protocol.test.ts` の
+        // `SessionMeta はセッション名を運ぶ`。**型はどちらも手書き**なので、片方だけ
+        // 直すと「繋がるのに名前だけ出ない」形で静かに壊れる。
+        let mut meta = 生きたカード();
+        meta.session_title = Some("TODOを完了に変更し作業内容をまとめる".to_string());
+        let back = roundtrip(&meta);
+        assert_eq!(
+            back.session_title.as_deref(),
+            Some("TODOを完了に変更し作業内容をまとめる")
+        );
+
+        // 起こした直後は必ずここを通る。名前は最初のターンのあとに CLI が付ける
+        meta.session_title = None;
+        assert_eq!(roundtrip(&meta).session_title, None);
+    }
+
+    #[test]
+    fn 名前の欄を持たない古い名乗りも実物の型で解ける() {
+        // **実物の [`SessionMeta`] に対する主張**。下の実験用の型は「属性を外したら
+        // どうなるか」を残すためのもので、こちらは**いま配ってある PC が名乗る形が
+        // 本当に解けること**を見る（設計§5-1・フェーズ1の引き継ぎ）。
+        //
+        // ここが落ちるなら、繋いである古い PC の**カードの報告そのものが届かない**。
+        let 名前の欄が無い古い名乗り = r#"{"card_id":"00000000-0000-0000-0000-000000000001","project":"/p","claude_session_id":null,"permission_mode":null,"model":null,"model_label":null,"model_requested":null,"status":{"kind":"working"},"subagent_active":0,"last_activity_at":1,"last_assistant_message":null,"created_at":1,"hooks_seen":false,"agent_id":null,"agent_connected":true,"account":null,"toml_account":null}"#;
+        let meta: SessionMeta =
+            serde_json::from_str(名前の欄が無い古い名乗り).expect("古い名乗りが解けること");
+        assert_eq!(meta.card_id.0.as_u128(), 1);
+        assert_eq!(meta.session_title, None, "名前は空として受ける");
+        assert_eq!(meta.status, SessionStatus::Working, "他の欄は今までどおり");
     }
 
     /// 「新しい欄を足すとき、古い名乗りが解けなくなるのはどういう形か」を実行できる形で
@@ -836,6 +887,7 @@ mod tests {
                 agent_connected: false,
                 account: None,
                 toml_account: None,
+                session_title: None,
             }
         };
         let back = roundtrip(&meta);
@@ -890,6 +942,7 @@ mod tests {
             agent_connected: true,
             account: None,
             toml_account: None,
+            session_title: None,
         };
         let back = roundtrip(&meta);
         assert_eq!(back.model, meta.model);
@@ -922,6 +975,7 @@ mod tests {
             agent_connected: true,
             account: None,
             toml_account: None,
+            session_title: None,
         };
         let text = serde_json::to_string(&meta).unwrap();
         assert!(text.contains(r#""model":null"#), "実際: {text}");
