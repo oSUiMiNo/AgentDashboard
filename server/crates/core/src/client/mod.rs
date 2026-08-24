@@ -437,6 +437,23 @@ pub async fn host_file(
     http::fetch_as(target, &url).await
 }
 
+/// `GET /api/hosts/{host}/file?path=…&as=raw`（`ファイル閲覧で画像とHTMLも表示する` 設計§9）。
+///
+/// **画面が `<img>` と `<iframe>` の宛先にしているのと同じ口**を叩く。口を分けると、
+/// 画面で見えているものと CLI が取るものが食い違いうる。
+pub async fn host_file_raw(
+    target: &Target,
+    host: &str,
+    path: &str,
+) -> Result<Vec<u8>, ClientError> {
+    let url = format!(
+        "/api/hosts/{}/file?path={}&as=raw",
+        http::percent_encode(host),
+        http::percent_encode(path)
+    );
+    http::fetch_bytes(target, &url).await
+}
+
 /// `GET /api/settings`。**解釈しない**（CLI設計§12-1）ので生の本文だけを返す。
 pub async fn settings_raw(target: &Target) -> Result<String, ClientError> {
     http::fetch_ok(target, "/api/settings").await

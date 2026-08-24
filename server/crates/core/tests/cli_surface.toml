@@ -66,7 +66,7 @@ command = "host dir"
 [[entry]]
 kind = "rest"
 target = "GET /api/hosts/{host}/file"
-command = "host file"
+command = "host file --raw"
 
 [[entry]]
 kind = "rest"

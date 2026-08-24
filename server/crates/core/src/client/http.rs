@@ -56,6 +56,33 @@ pub async fn fetch_ok(target: &Target, path: &str) -> Result<String, ClientError
     }
 }
 
+/// バイト列のまま取る（`ファイル閲覧で画像とHTMLも表示する` 設計§9）。
+///
+/// **文字列を経由しない。** 画像は UTF-8 として解けないので、途中で `String` にすると
+/// 置き換え文字（`U+FFFD`）が混ざって**壊れたファイルを書き出す**ことになる。
+pub async fn fetch_bytes(target: &Target, path: &str) -> Result<Vec<u8>, ClientError> {
+    let outcome =
+        tokio::time::timeout(REQUEST_TIMEOUT, exchange_bytes(target, "GET", path, None)).await;
+    let (status, body) = match outcome {
+        Ok(result) => result?,
+        Err(_) => {
+            return Err(ClientError::Timeout {
+                what: format!("GET {path} の応答"),
+                secs: REQUEST_TIMEOUT.as_secs(),
+            });
+        }
+    };
+    if (200..300).contains(&status) {
+        Ok(body)
+    } else {
+        // 断り文は本文に入っている（`hosts.rs` の `refuse`）。**そのまま持ち上げる**
+        Err(ClientError::from_status(
+            status,
+            String::from_utf8_lossy(&body).into_owned(),
+        ))
+    }
+}
+
 /// 型付きで取る。**生の本文も一緒に返す**——`--json` はこの生をそのまま出す
 /// （CLI 側で作り直すと、サーバの型が変わったときに黙って古い形を出し続ける。CLI設計§10-2）。
 pub async fn fetch_as<T: DeserializeOwned>(
@@ -76,6 +103,20 @@ async fn exchange(
     path: &str,
     body: Option<String>,
 ) -> Result<(u16, String), ClientError> {
+    let (status, bytes) = exchange_bytes(target, method, path, body).await?;
+    Ok((status, String::from_utf8_lossy(&bytes).into_owned()))
+}
+
+/// 1往復して**バイト列のまま**返す。
+///
+/// 文字列にするのは呼ぶ側の都合であって、線の上を流れるのはバイト列である。
+/// 画像は UTF-8 として解けないので、ここで `String` にすると置き換え文字が混ざる。
+async fn exchange_bytes(
+    target: &Target,
+    method: &str,
+    path: &str,
+    body: Option<String>,
+) -> Result<(u16, Vec<u8>), ClientError> {
     let address = (target.host().to_string(), target.port());
     let stream = TcpStream::connect(address)
         .await
@@ -128,7 +169,7 @@ async fn drive<T>(
     method: &str,
     path: &str,
     body: Option<String>,
-) -> Result<(u16, String), ClientError>
+) -> Result<(u16, Vec<u8>), ClientError>
 where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -175,8 +216,7 @@ where
         .collect()
         .await
         .map_err(|err| cannot(format!("本文を読み切れませんでした: {err}")))?;
-    let text = String::from_utf8_lossy(&collected.to_bytes()).into_owned();
-    Ok((status, text))
+    Ok((status, collected.to_bytes().to_vec()))
 }
 
 /// クエリの値を URL に載せられる形へ（予約文字だけを逃がす）。

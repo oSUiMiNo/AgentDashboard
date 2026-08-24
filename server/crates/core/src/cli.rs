@@ -365,6 +365,12 @@ enum HostCmd {
         host: String,
         /// 読むファイルのパス
         path: String,
+        /// 画像や HTML を**生のバイト列で**取る（`--out` が要る）
+        #[arg(long)]
+        raw: bool,
+        /// `--raw` の書き出し先。**標準出力へバイト列は流さない**
+        #[arg(long)]
+        out_file: Option<std::path::PathBuf>,
         #[command(flatten)]
         out: OutputArgs,
     },
@@ -966,7 +972,39 @@ async fn client_host(cmd: HostCmd, target: &client::Target) -> Result<(), client
             let human = output::render_dir(&listing);
             println!("{}", output::pick(out.json, &raw, &human));
         }
-        HostCmd::File { host, path, out } => {
+        HostCmd::File {
+            host,
+            path,
+            raw: true,
+            out_file,
+            out: _,
+        } => {
+            // **`--out-file` が無ければ断る。** 標準出力へバイト列を流すと、
+            // 消す道が `state-dir` の出力をそのままパスとして使う約束と食い違う
+            // （ログ設計「標準出力へ書いてよいのは、サーバを起こしたときだけ」）
+            let Some(destination) = out_file else {
+                return Err(client::ClientError::Config(
+                    "`--raw` には `--out-file <パス>` が要ります（標準出力へバイト列は流しません）"
+                        .to_string(),
+                ));
+            };
+            let bytes = client::host_file_raw(target, &host, &path).await?;
+            std::fs::write(&destination, &bytes)
+                .map_err(|err| client::ClientError::Config(format!("書き出せません: {err}")))?;
+            // **何が起きたかを人が確かめられる形で1行。** 中身は出さない
+            println!(
+                "{} へ {} バイト書き出しました",
+                destination.display(),
+                bytes.len()
+            );
+        }
+        HostCmd::File {
+            host,
+            path,
+            raw: false,
+            out_file: _,
+            out,
+        } => {
             let (content, raw) = client::host_file(target, &host, &path).await?;
             if out.json {
                 println!("{raw}");
