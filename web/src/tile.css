@@ -1,0 +1,408 @@
+/*
+  一覧のカードの見た目と動き（カード設計§7・§8-4・§9）。
+
+  # なぜ CSS なのか
+
+  動かすのは**回転・移動・濃さの3つだけ**で、どれも描き直しを起こさない。円環の
+  グラデーションはペイント段階で1回だけテクスチャに焼かれ、以後は GPU がそれを
+  回すだけなので、**周期を変えても枚数を増やしても描く仕事は増えない**（調査§6-1）。
+
+  アニメーションのライブラリ（motion）の個別変形の構文は**内部で変数を使うため
+  加速されない**と公式が明記している。あれで作っていたら加速されなかった。
+
+  # 触ってよい範囲
+
+  このファイルは `index.css` から `@import` されるので、**どの層（`@layer`）にも
+  属さない＝Tailwind のユーティリティに無条件で勝つ**。したがって
+
+  - Tailwind のクラスを持たない要素（`.tile-ring` / `.tile-lines`）
+  - Tailwind が設定していないプロパティ（`animation` / `outline-offset`）
+
+  だけを触る。**同じプロパティを両側から書かないこと**——書くと TSX 側の指定が
+  黙って効かなくなる。
+
+  # 打ち消しの順序（設計§9-5 の補足）
+
+  設計は「後に書いたほうが勝つので、優先度を上げる指定は要らない」と書いているが、
+  **これは hover 規則が詳細度を上げていない限りの話である**。素の `:hover` を足すと
+  (0,3,0) になり、静けさ (0,2,0) と OS 設定 (0,2,0) の**両方に勝ってしまう**——
+  「静止」を選んでいてもマウスを乗せた瞬間に揺れ出す。
+
+  そこで **hover は `:where()` で包み、詳細度を1も上げない**。以後は書いた順だけで
+  決まるので、打ち消しをファイルの末尾に置けば必ず効く。
+*/
+
+/* ───────────────── 動きの定義 ───────────────── */
+
+/* 弧が1周する。回すのは弧だけで、薄い全周は動かない */
+@keyframes tile-spin {
+  to {
+    rotate: 360deg;
+  }
+}
+
+/*
+  呼吸（入力待ち）。**濃さだけ**を動かす。
+
+  薄い側は「カードの地に対して 3:1 を満たす値」で、状態ごとに違う（`--tile-dim`）。
+  周期の一部で状態が読めなくなるのを避けるため（調査§6-5）。
+*/
+@keyframes tile-breathe {
+  0%,
+  100% {
+    opacity: var(--tile-dim);
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/*
+  揺れ（権限確認待ち）。4.8秒のうち末尾の 0.36秒（7.5%）だけ動き、残りは静止。
+
+  **バーストの中の往復は2回まで。** 4往復させると局所で 11Hz になり、面積の例外を
+  持たない厳しいほうの基準に触れる（調査§6-6）。
+
+  **鎮まり用のキーフレームは、形が同じで名前だけ違うものをもう1本置く。**
+  `animation-name` を差し替えると動きが頭から再生されるので、離れた直後は必ず静止の
+  区間から始まる＝「すぐには揺れ直さない」が仕掛け無しで成立する（設計§9-3-1）。
+  変数（`--tile-amp`）だけを差し替える形では**継続してしまい**、離れた直後に揺れが来る。
+*/
+@keyframes tile-shake {
+  0%,
+  92.5%,
+  100% {
+    translate: 0;
+    rotate: 0deg;
+  }
+  94% {
+    translate: calc(-1 * var(--tile-amp));
+    rotate: calc(-1 * var(--tile-tilt));
+  }
+  96% {
+    translate: var(--tile-amp);
+    rotate: var(--tile-tilt);
+  }
+  98% {
+    translate: calc(-1 * var(--tile-amp));
+    rotate: calc(-1 * var(--tile-tilt));
+  }
+}
+
+@keyframes tile-shake-calm {
+  0%,
+  92.5%,
+  100% {
+    translate: 0;
+    rotate: 0deg;
+  }
+  94% {
+    translate: calc(-1 * var(--tile-amp));
+    rotate: calc(-1 * var(--tile-tilt));
+  }
+  96% {
+    translate: var(--tile-amp);
+    rotate: var(--tile-tilt);
+  }
+  98% {
+    translate: calc(-1 * var(--tile-amp));
+    rotate: calc(-1 * var(--tile-tilt));
+  }
+}
+
+/* 効果線。外へ伸びながら薄くなる */
+@keyframes tile-lines {
+  from {
+    opacity: 1;
+    scale: 1;
+  }
+  to {
+    opacity: 0;
+    scale: 1.35;
+  }
+}
+
+/* ───────────────── 骨格 ───────────────── */
+
+/*
+  近づいたかを測る帯を、外へ 6px 出す。
+
+  **疑似要素にするのは、レイアウトを1ピクセルも動かさないため。** 内側に余白を持たせて
+  同じだけ負のマージンで引く書き方もあるが、あれは横（カード同士の隙間）だけでなく
+  **縦にも効き**、枠の見出しとカードの間を 8px から 2px へ詰めてしまう。
+
+  カード同士の隙間は 12px なので、両隣の帯はちょうど辺で接する（設計§10-1-1）。
+  `:hover` は最前面の1要素にしか付かないので、接していても2枚が同時に鎮まることはない。
+  **隙間を 12px から縮めると、その瞬間に帯が重なる。**
+*/
+.tile-shell::before {
+  content: '';
+  position: absolute;
+  inset: -6px;
+}
+
+/*
+  輪。**薄い全周はここ、明るい弧は疑似要素**という分け方にしてある。
+
+  1枚で作ると、止めるときに「弧を消して全周だけ残す」ために背景と濃さを両方
+  書き直すことになる。2枚なら**弧を消すだけ**で済む。
+
+  濃さ（α）を**二重に掛けないこと**。`color-mix` と `opacity` の両方へ同じ変数を
+  当てると 0.5×0.5=0.25 になり、3:1 が5色とも割れる。見た目は「少し薄い」だけなので
+  目で見ても気づけない。
+*/
+.tile-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--tile-accent);
+  opacity: var(--tile-dim);
+  pointer-events: none;
+}
+
+/*
+  回る弧。**正方形にして枠より大きく取る**ので、回しても角が空かない。
+
+  中央寄せと回転を**別々のプロパティ**に分ける。1つの `transform` で取り合うと、
+  回転が中央寄せを消す。仕様は translate → rotate の順で適用すると定めているので、
+  「中央へ寄せてから、その場で回る」が保証される（調査§6-8）。
+*/
+.tile-ring::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 120%;
+  aspect-ratio: 1;
+  translate: -50% -50%;
+  background: conic-gradient(
+    #fff 0deg,
+    transparent 45deg,
+    transparent 315deg,
+    #fff 360deg
+  );
+  /* 弧は状態の色そのものではなく、地の輪を明るく抜く形で出す */
+  mix-blend-mode: plus-lighter;
+  opacity: 0;
+}
+
+/*
+  中身。**フォーカスの輪を内側へ描かせる。**
+
+  切る枠が `overflow: hidden` なので、既定の（境界の外側に描かれる）輪は丸角に
+  削られて見えなくなる。**テストは `toHaveFocus()` しか見ないので緑のまま、実機でだけ
+  キーボード操作の居場所が消える**——自動では捕まらない種類の退行になる。
+*/
+.tile-body:focus-visible {
+  outline-offset: -3px;
+}
+
+/*
+  記号の枠。8つのうち5つは同梱フォントの外へ落ち、**送り幅が記号ごとに違う**
+  （設計§8-2-1）。①行の先頭に置くので、揃えないと状態が変わるたびにラベル以降が
+  横へずれる。
+
+  落ちること自体は避けられない（フォントが持っていない）ので、**落ちる先を名指しする**。
+  `--font-sans` を触ると画面全体のフォントに効くため、ここへ閉じている。
+  **実環境での字形は確かめていない**——測ったのは WSL の headless Chromium で、
+  利用者が見る Windows / Android / iOS とはフォント集合が違う（§16 の10）。
+*/
+.tile-glyph {
+  display: inline-block;
+  width: 1rem;
+  text-align: center;
+  font-family: 'Geist Variable', 'Segoe UI Symbol', 'Noto Sans Symbols 2', sans-serif;
+}
+
+/*
+  効果線。**切る枠の外**に置くので、丸角で切られない。クリックも通さない。
+
+  漫画でキャラクターがハッとしたときに体の周りへ出る、あの短い線。「気づいた」の
+  合図なので、**鎮まるのと同時に**出す（先に線が出て後から止まると、気づいたように
+  見えない）。
+*/
+.tile-lines {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.tile-lines i {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 10px;
+  height: 1.5px;
+  border-radius: 1px;
+  background: var(--tile-accent);
+  transform-origin: -140px 50%;
+  rotate: var(--tile-angle);
+  translate: 140px -50%;
+  opacity: 0;
+}
+
+/*
+  復旧ボタンの当たり判定を広げる（カード設計§7）。
+
+  押せる大きさの規範の床は 24px 角だが、あれは床であって推奨ではなく、**指で押す
+  部品は 44px** が実務の基準になっている。このボタンはスマホから押されるうえ、
+  隣で揺れているカードがある。
+
+  **見た目は変えずに判定だけ広げる。** ボタンそのものを 44px 角にすると、カードの
+  高さの半分近くを覆って①行と②行の押し場所を食う。**広げすぎても同じことが起きる**
+  ので、実機で押しやすさを見て決め直す（§16）。
+*/
+.tile-revive::after {
+  content: '';
+  position: absolute;
+  inset: -10px;
+}
+
+/* ───────────────── 状態ごとの動き ───────────────── */
+
+/*
+  回る（作業中・停滞）。**同じ形で速さだけが違う。**
+
+  停滞が「遅い回転」なのは、単独のカードでは判定できないという代償を承知のうえの
+  選択である（設計§18-2）。**性能が落ちても回転は遅く見える**ので、fps を測るときは
+  「停滞に見えるカードが増えた」の原因をまず実装ではなく fps に疑うこと（§14-2）。
+*/
+[data-motion='spin-fast'] .tile-ring::after {
+  opacity: 1;
+  animation: tile-spin 3.2s linear infinite;
+}
+
+[data-motion='spin-slow'] .tile-ring::after {
+  opacity: 1;
+  animation: tile-spin 9.6s linear infinite;
+}
+
+/* 呼吸（入力待ち）。回さないのは、作業中の回転と見間違えないため */
+[data-motion='breathe'] .tile-ring {
+  animation: tile-breathe 2.8s ease-in-out infinite;
+}
+
+/*
+  揺れ（権限確認待ち）。**切る枠から内側だけ**が揺れる——器は近づいたかを測る枠なので、
+  揺らすと鎮めるための的そのものが逃げる。
+
+  振れ幅は指の当たり判定（おおむね 30px）より十分小さいので、押し損ねにはならない。
+*/
+[data-motion='shake'] .tile-frame {
+  --tile-amp: 1.5px;
+  --tile-tilt: 0.35deg;
+  animation: tile-shake 4.8s linear infinite;
+}
+
+/* ───────────────── 近づいたら鎮まる ───────────────── */
+
+/*
+  **マウスのある機械だけ**に効かせる（設計§9-3）。スマホは PC と同じだけ揺らし続ける
+  という判断で、**指で触れた状態が張り付いて永久に鎮まる事故**も同時に防げる。
+
+  `:where()` で包んで詳細度を上げない（このファイルの冒頭を見よ）。
+*/
+@media (hover: hover) and (pointer: fine) {
+  /* 完全には止めない。息をひそめた形で、生きているものが居ることは伝え続ける */
+  [data-motion='shake']:where(:hover) .tile-frame {
+    --tile-amp: 0.4px;
+    --tile-tilt: 0deg;
+    animation-name: tile-shake-calm;
+  }
+
+  /* 近づいた1回だけ。繰り返すと「気づいた」ではなく「ずっと騒いでいる」になる */
+  [data-motion='shake']:where(:hover) .tile-lines i {
+    animation: tile-lines 0.42s ease-out;
+  }
+
+  /* 押せる場所であることを、色と光だけで伝える（位置も大きさも変えない） */
+  [data-motion='breathe']:where(:hover) .tile-ring {
+    opacity: 1;
+    animation: none;
+  }
+}
+
+/* ───────────────── 静けさの3段 ───────────────── */
+
+/*
+  「控えめ」は**作業中の回転だけ**を止める（設計§9-5-2）。
+
+  作業中は放っておいてよい状態なのに、いちばん強い合図を持っている（調査§4-3）。
+  ここだけを止めると、**動いているカード＝見に行くカード**になる。
+  停滞・入力待ち・承認待ちは動いたまま。
+*/
+[data-quiet='calm'][data-motion='spin-fast'] .tile-ring::after {
+  opacity: 0;
+  animation: none;
+}
+
+/*
+  「静止」はすべて止める。**色・記号・文字は残る**ので状態は読める——「止めるのでは
+  なく弱める」という既存の考え方と揃う。
+*/
+[data-quiet='still'] .tile-ring::after {
+  opacity: 0;
+  animation: none;
+}
+
+[data-quiet='still'] .tile-ring {
+  /* 明滅は**濃い側で静止**させる（方針B-6）。薄いまま止めると合図が沈む */
+  opacity: 1;
+  animation: none;
+}
+
+[data-quiet='still'] .tile-frame {
+  animation: none;
+}
+
+[data-quiet='still'] .tile-lines i {
+  animation: none;
+}
+
+/* ───────────────── OS の「動きを減らす」 ───────────────── */
+
+/*
+  **段の選択によらず止める**（設計§9-5-2）。要件の完了条件が「『動きを減らす』設定を
+  入れている利用者には、揺れも回転も止まる」と**無条件で書いてある**ので、段で
+  覆せるようにするとこの条件が弱まる。
+
+  代償：OS 設定を入れたまま「この画面だけは動かしたい」人は画面からは戻せない。
+  **その道は要件が閉じているので、必要になったら要件の側から開ける。**
+
+  **ファイルの最後に置く。** 上のどの規則とも詳細度が並ぶので、順序だけで勝つ。
+*/
+@media (prefers-reduced-motion: reduce) {
+  [data-motion] .tile-ring::after {
+    opacity: 0;
+    animation: none;
+  }
+
+  [data-motion] .tile-ring {
+    opacity: 1;
+    animation: none;
+  }
+
+  [data-motion] .tile-frame {
+    animation: none;
+  }
+
+  [data-motion] .tile-lines i {
+    animation: none;
+  }
+}
+
+/* ───────────────── 色が消える環境 ───────────────── */
+
+/*
+  ハイコントラストの環境では**背景画像が強制的に消される**ので、輪が丸ごと消える
+  （調査§6-4）——薄い全周ごと消えるため、作業中・停滞・入力待ちが区別できなくなる。
+  配色の強制も掛かるので、「ダークテーマ固定」という前提自体も崩れる。
+
+  **状態が読めることは、記号と文言が担保している**（設計§8-2・§8-4）。ここで足すのは
+  カードの境目が消えないようにする実線1本だけ。
+*/
+@media (forced-colors: active) {
+  .tile-frame {
+    border: 1px solid CanvasText;
+  }
+}

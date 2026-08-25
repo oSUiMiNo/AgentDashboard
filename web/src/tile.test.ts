@@ -1,0 +1,282 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+
+/**
+ * **`import.meta.url` では読めない。** vitest が変換したモジュールの URL は `file:`
+ * スキームとは限らず、`?raw` で取り込んでも CSS は既定で差し替えられて空になる。
+ * 実体を読むには素朴にファイルを開くしかない。
+ *
+ * 基準はテストの走る場所（`web/`）。`vite.config.ts` がここに在るので動かない。
+ */
+function 読む(name: string): string {
+  return readFileSync(resolve(process.cwd(), 'src', name), 'utf8')
+}
+
+const CSS = 読む('tile.css')
+const INDEX = 読む('index.css')
+
+/**
+ * カードの動きの定義（`tile.css`）を、**テキストとして**確かめる。
+ *
+ * # なぜテキストなのか
+ *
+ * テストは jsdom で走るが、**jsdom は CSS を適用しない**。したがって
+ * 「『静止』を選ぶと止まる」「OS が『動きを減らす』と言えば止まる」「ハイコントラストの
+ * 環境で枠が実線へ退避する」は、**画面を描いても1つも確かめられない**。
+ *
+ * ここで確かめられるのは「そう書いてある」ことまでで、**実際に効くかどうかは実物を
+ * 見るしかない**（フェーズ6）。それでも書く価値があるのは、**打ち消しが効かなくなる
+ * 形が構造で決まっている**からである——下の「hover の詳細度」がまさにそれで、
+ * 素の `:hover` を1本足しただけで静けさも OS 設定も黙って効かなくなる。
+ *
+ * # 依存を増やさない
+ *
+ * CSS のパーサは入れない（このイシューは新しい依存を1つも入れない方針）。
+ * 素朴なブロック分割で足りる。**正規表現は実物に当てて較正してある。**
+ */
+
+/** コメントを落とす。中に `{}` が入っているので、先に消さないと分割が狂う */
+function 素のCSS(): string {
+  return CSS.replace(/\/\*[\s\S]*?\*\//g, '')
+}
+
+interface Rule {
+  /** セレクタ（`@media` の中なら、その条件を前置した形） */
+  selector: string
+  /** 宣言の中身 */
+  body: string
+  /** ファイルの先頭からの位置。**打ち消しが後ろにあること**を見るのに使う */
+  at: number
+}
+
+/**
+ * 規則を平らに取り出す。`@media` は1段だけ展開し、条件をセレクタへ前置する。
+ *
+ * `@keyframes` の中は入れ子の宣言なので、まとめて1つの塊として飛ばす。
+ */
+function rules(): Rule[] {
+  const source = 素のCSS()
+  const found: Rule[] = []
+  let index = 0
+
+  while (index < source.length) {
+    const open = source.indexOf('{', index)
+    if (open === -1) {
+      break
+    }
+    const head = source.slice(index, open).trim()
+    const close = 対応する閉じ(source, open)
+    const inner = source.slice(open + 1, close)
+
+    if (head.startsWith('@media')) {
+      for (const rule of 中を割る(inner, open + 1)) {
+        found.push({ ...rule, selector: `${head} ${rule.selector}` })
+      }
+    } else if (!head.startsWith('@keyframes')) {
+      found.push({ selector: head, body: inner, at: index })
+    }
+    index = close + 1
+  }
+  return found
+}
+
+/** 入れ子を数えて、対応する `}` の位置を返す */
+function 対応する閉じ(source: string, open: number): number {
+  let depth = 0
+  for (let i = open; i < source.length; i += 1) {
+    if (source[i] === '{') depth += 1
+    if (source[i] === '}') {
+      depth -= 1
+      if (depth === 0) return i
+    }
+  }
+  return source.length - 1
+}
+
+function 中を割る(inner: string, offset: number): Rule[] {
+  const found: Rule[] = []
+  let index = 0
+  while (index < inner.length) {
+    const open = inner.indexOf('{', index)
+    if (open === -1) break
+    const close = 対応する閉じ(inner, open)
+    found.push({
+      selector: inner.slice(index, open).trim(),
+      body: inner.slice(open + 1, close),
+      at: offset + index,
+    })
+    index = close + 1
+  }
+  return found
+}
+
+const 全規則 = rules()
+
+/** その断片を含むセレクタの規則を拾う */
+function 当たる(fragment: string): Rule[] {
+  return 全規則.filter((rule) => rule.selector.includes(fragment))
+}
+
+describe('動きの定義の読み込み', () => {
+  it('index.css から取り込まれている', () => {
+    // **書き忘れても、位置を誤っても、このファイルのテストは全部緑のまま通る。**
+    // `@import` は他の規則より前でないと捨てられるので、位置まで見る
+    const 取り込み = INDEX.indexOf("@import './tile.css'")
+    expect(取り込み).toBeGreaterThan(-1)
+
+    const 最初の規則 = INDEX.replace(/\/\*[\s\S]*?\*\//g, '').indexOf('{')
+    const 素の位置 = INDEX.replace(/\/\*[\s\S]*?\*\//g, '').indexOf(
+      "@import './tile.css'",
+    )
+    expect(素の位置).toBeLessThan(最初の規則)
+  })
+
+  it('較正：分割が実物の規則を拾えている', () => {
+    // **正規表現と分割は実物に当てて確かめてから使う**（ガイドライン）。
+    // 数え違いをしていれば、以下のテストは「当たらないから通る」空振りになる
+    expect(全規則.length).toBeGreaterThan(15)
+    expect(当たる('.tile-ring::after')).not.toHaveLength(0)
+    expect(当たる('forced-colors')).not.toHaveLength(0)
+  })
+})
+
+describe('揺れるのは切る枠から内側', () => {
+  it('揺れの指定が .tile-frame に付いている', () => {
+    const 揺れ = 当たる("[data-motion='shake'] .tile-frame")
+    expect(揺れ).toHaveLength(1)
+    expect(揺れ[0].body).toContain('tile-shake')
+  })
+
+  it('器そのものは揺れない', () => {
+    // 判定の枠が揺れると、鎮めるための的そのものが逃げる（カード設計§7）
+    for (const rule of 全規則) {
+      if (!rule.body.includes('tile-shake')) continue
+      expect(rule.selector).toMatch(/\.tile-frame\s*$/)
+    }
+  })
+})
+
+describe('静けさの3段', () => {
+  it('「控えめ」が止めるのは作業中の回転だけ', () => {
+    const 控えめ = 当たる("[data-quiet='calm']")
+    expect(控えめ).toHaveLength(1)
+    // **停滞・入力待ち・承認待ちは動いたまま。** ここを広げると、いちばん見つけたい
+    // ものの合図まで静けさと引き換えに失う
+    expect(控えめ[0].selector).toContain("[data-motion='spin-fast']")
+    for (const 触ってはいけない of ['spin-slow', 'breathe', 'shake']) {
+      expect(控えめ[0].selector).not.toContain(触ってはいけない)
+    }
+  })
+
+  it('「静止」は回転・呼吸・揺れ・効果線をすべて止める', () => {
+    const 静止 = 当たる("[data-quiet='still']")
+    const 当たり先 = 静止.map((rule) => rule.selector)
+    for (const 層 of ['.tile-ring::after', '.tile-ring', '.tile-frame', '.tile-lines i']) {
+      expect(当たり先.some((selector) => selector.endsWith(層))).toBe(true)
+    }
+    for (const rule of 静止) {
+      expect(rule.body).toContain('animation: none')
+    }
+  })
+
+  it('止めても色は残る', () => {
+    // 色・記号・文字が残るので状態は読める（「止めるのではなく弱める」）。
+    // `display: none` や色を消す指定を混ぜていないこと
+    for (const rule of [...当たる("[data-quiet=")]) {
+      expect(rule.body).not.toContain('display: none')
+      expect(rule.body).not.toContain('visibility: hidden')
+    }
+  })
+})
+
+describe('OS の「動きを減らす」', () => {
+  it('段の選択によらず止める', () => {
+    // 要件の完了条件が無条件なので、段で覆せるようにしない（カード設計§9-5-2）
+    const 減らす = 当たる('prefers-reduced-motion')
+    expect(減らす).not.toHaveLength(0)
+    for (const rule of 減らす) {
+      expect(rule.body).toContain('animation: none')
+      // 段を条件に入れていない＝「賑やか」を選んでいても止まる
+      expect(rule.selector).not.toContain('data-quiet')
+    }
+  })
+
+  it('打ち消しが、止める対象より後ろに書いてある', () => {
+    // 詳細度が並ぶので**順序だけで勝つ**。前に書くと1つも止まらない
+    const 最後の動き = Math.max(
+      ...全規則
+        .filter(
+          (rule) =>
+            /animation:\s*tile-/.test(rule.body) &&
+            !rule.selector.includes('prefers-reduced-motion'),
+        )
+        .map((rule) => rule.at),
+    )
+    const 最初の打ち消し = Math.min(
+      ...当たる('prefers-reduced-motion').map((rule) => rule.at),
+    )
+    expect(最初の打ち消し).toBeGreaterThan(最後の動き)
+  })
+})
+
+describe('hover は詳細度を上げない', () => {
+  /**
+   * **打ち消しが効くかどうかの、本当の分かれ目。**
+   *
+   * 素の `:hover` は詳細度を (0,3,0) にするので、静けさ (0,2,0) と OS 設定 (0,2,0) の
+   * **両方に勝ってしまう**——「静止」を選んでいても、OS が「動きを減らす」と言って
+   * いても、マウスを乗せた瞬間に揺れ出す。
+   *
+   * `:where()` は中身の詳細度を 0 として数えるので、包めば並びだけで決まる。
+   */
+  it('すべての hover が :where() で包まれている', () => {
+    const hover = 全規則.filter((rule) => rule.selector.includes(':hover'))
+    expect(hover).not.toHaveLength(0)
+    for (const rule of hover) {
+      expect(rule.selector).toContain(':where(:hover)')
+    }
+  })
+
+  it('鎮まりは、マウスのある機械だけに効く', () => {
+    // 指で触れた状態が張り付いて**永久に鎮まる**事故を、原理的に起こさない
+    for (const rule of 全規則.filter((r) => r.selector.includes(':hover'))) {
+      expect(rule.selector).toContain('hover: hover')
+      expect(rule.selector).toContain('pointer: fine')
+    }
+  })
+})
+
+describe('色が消える環境への退避', () => {
+  it('切る枠が実線になる', () => {
+    // 輪は背景画像なので丸ごと消える（調査§6-4）。カードの境目まで消えないようにする
+    const 退避 = 当たる('forced-colors')
+    expect(退避).toHaveLength(1)
+    expect(退避[0].selector).toContain('.tile-frame')
+    expect(退避[0].body).toContain('CanvasText')
+  })
+})
+
+describe('描き直しを起こさない作りになっている', () => {
+  it('will-change を1箇所も書いていない', () => {
+    // CSS のアニメーションは**自動で合成の層へ載る**（調査§6-1）。書くと副作用
+    // （包含ブロックを作る）だけが残る
+    expect(素のCSS()).not.toContain('will-change')
+  })
+
+  it('器にはみ出しを切る指定を付けていない', () => {
+    // `overflow` / `contain` / `content-visibility` はペイントを内側へ閉じ込めるので、
+    // **効果線が切られる**。付けるなら切る枠の側（カード設計§9-0）
+    for (const rule of 当たる('.tile-shell')) {
+      expect(rule.body).not.toMatch(/overflow|contain|content-visibility/)
+    }
+  })
+
+  it('動かすのは回転・移動・濃さだけ', () => {
+    // 大きさや位置そのものを動かすと描き直しが起きる。12枚同時に走る
+    const 動く = 素のCSS().match(/@keyframes[\s\S]*?\n}/g) ?? []
+    expect(動く).not.toHaveLength(0)
+    for (const keyframes of 動く) {
+      expect(keyframes).not.toMatch(/^\s*(width|height|top|left|margin|padding):/m)
+    }
+  })
+})
