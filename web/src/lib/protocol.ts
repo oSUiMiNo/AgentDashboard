@@ -543,10 +543,21 @@ export function statusGroup(status: SessionStatus): StatusGroup {
  * 1色を固定しており、**変えるときは表ごと差し替える**と決めてある。だからここも
  * 表ごと差し替えた——1色だけ入れ替えると、役割表との対応がその1行で切れる。
  *
- * `dim` は**輪がいちばん薄くなるときの濃さ**。状態を示す部品には非テキストの
- * コントラスト 3:1 が要るので（調査§6-5）、カードの地（`--card` = `#171717`）に
- * 対して 3:1 を満たす最小値を 0.05 刻みで切り上げてある。**色を差し替えたら
- * 引き直すこと**——旧5色の値をそのまま持ち越すと、割る色が出る（実測で 4色が割った）。
+ * **濃さは2つある。役割が違うので分けてある**（カード設計§9-2-2。フェーズ8 で割った）。
+ *
+ * | 欄 | 何 |
+ * |---|---|
+ * | `floor` | **その色が 3:1 を保てる最小の濃さ。** 呼吸の暗い側だけが読む |
+ * | `dim` | **静止しているときに実際に塗る濃さ。** 輪・バー・効果線がそろって読む |
+ *
+ * 割る前は1つの値が両方を兼ねており、**下げると呼吸しない状態まで暗くなる**ので
+ * 呼吸の幅を広げられなかった。分けたことで、入力待ちの呼吸は 75%→100% の 25点から
+ * **55%→100% の 45点**へ広がる——**規則を緩めたのではなく、規則へ戻しただけ**である。
+ *
+ * `floor` は、状態を示す部品に要る非テキストのコントラスト 3:1（調査§6-5）を、
+ * **合成の相手をページ地（`--background` = `#0a0a0a`）、判定の相手をカードの地
+ * （`--card` = `#171717`）**として満たす最小値を 0.05 刻みで切り上げたもの。
+ * **色を差し替えたら引き直すこと**——旧5色の値をそのまま持ち越すと、割る色が出る。
  *
  * **`negative` がいちばん高いのは偶然ではない**——赤系は輝度の 71.52% を担う緑成分を
  * ほとんど持たないので、濃くしても明るくならない。
@@ -556,11 +567,12 @@ export function statusGroup(status: SessionStatus): StatusGroup {
  */
 const STATUS_TONES: Record<
   StatusGroup,
-  { accent: string; dim: string; dot: string; text: string }
+  { accent: string; floor: string; dim: string; dot: string; text: string }
 > = {
   // 進行中（`DESIGN.md` §11.2 Primary Accent）
   primary: {
     accent: '#3dd9e6',
+    floor: '50%',
     dim: '70%',
     dot: 'bg-cyan-400',
     text: 'text-cyan-300',
@@ -568,14 +580,19 @@ const STATUS_TONES: Record<
   // 注意・保留（同 Secondary Accent）
   secondary: {
     accent: '#f5a623',
+    floor: '55%',
     dim: '75%',
     dot: 'bg-amber-400',
     text: 'text-amber-300',
   },
   // 役割を持たない静止。**地の色ではなく、文字の副色から取る**（同 §11.1 Text Secondary）
+  //
+  // **`dim` を 55% から上げた**（フェーズ8）。55% は自分の `floor`（60%）を割っており、
+  // **起動中の輪だけが 2.77:1 で出ていた**。
   neutral: {
     accent: '#9aa4b2',
-    dim: '55%',
+    floor: '60%',
+    dim: '60%',
     dot: 'bg-slate-400',
     text: 'text-slate-300',
   },
@@ -589,6 +606,7 @@ const STATUS_TONES: Record<
   // 対応がそこで切れる。「完了・同期済み」を出す場面が来たら、この行を使う。
   positive: {
     accent: '#8fd14f',
+    floor: '50%',
     dim: '50%',
     dot: 'bg-lime-400',
     text: 'text-lime-300',
@@ -596,6 +614,7 @@ const STATUS_TONES: Record<
   // エラー（同 Negative）
   negative: {
     accent: '#ff5a5f',
+    floor: '70%',
     dim: '90%',
     dot: 'bg-rose-400',
     text: 'text-rose-300',
@@ -641,18 +660,39 @@ export function statusTextTone(status: SessionStatus): string {
  * **一覧でいちばん数が多くなるうえ、対処が要らない唯一の群**である。同じ濃さで
  * 出すと画面の大半が同じ明るさの枠で埋まる（実物を見た利用者の指摘・2026-08-26）。
  *
- * **対応表は割っていない**——色は上の表がただ1つ持ったままで、ここは濃さだけを
- * 下げる。`3:1` の床は守る（0.35 がその床そのもので、これ以上は落とせない）。
+ * **対応表は割っていない**——色は上の表がただ1つ持ったままで、ここは濃さだけを下げる。
+ *
+ * **3:1 は割る。意図して割る**（カード設計§9-2-3。フェーズ8 で言い直した）。0.35 は
+ * 灰の床（0.60）を大きく下回り、実測は 1.72:1 である。**それでよい理由は §8-4**——
+ * この設計は**ハイコントラストでは輪が丸ごと消える前提**で組んであり、8状態の判別は
+ * **記号と文言が担っている**。輪は補強であって、状態の識別を担っていない。
  */
 const QUIETER_DIM: Partial<Record<SessionStatus['kind'], string>> = {
   ended: '35%',
+}
+
+/**
+ * 静かにしてよい状態か（カード設計§8-3-1）。
+ *
+ * **異常終了は「終了」だが、静かにしてはいけない。** `QUIETER_DIM` は種別だけで
+ * 引いていたので、**赤い異常終了まで 35% で塗られていた**（1.54:1。接続断と重なると
+ * 1.17:1）——**対処が要る状態がいちばん沈む**という、調査§4-3 が名指しした逆転が
+ * そのまま起きていた（フェーズ8 で、床の検査を足したときに見つかった）。
+ *
+ * 静かにする理由は「一覧でいちばん数が多く、**対処が要らない**」ことなので、
+ * **正常終了にしか当たらない。**
+ */
+function quieterDim(status: SessionStatus): string | undefined {
+  if (status.kind === 'ended' && !status.ok) return undefined
+  return QUIETER_DIM[status.kind]
 }
 
 export function statusAccent(status: SessionStatus): CSSProperties {
   const tone = STATUS_TONES[statusGroup(status)]
   return {
     '--tile-accent': tone.accent,
-    '--tile-dim': QUIETER_DIM[status.kind] ?? tone.dim,
+    '--tile-floor': tone.floor,
+    '--tile-dim': quieterDim(status) ?? tone.dim,
   } as CSSProperties
 }
 

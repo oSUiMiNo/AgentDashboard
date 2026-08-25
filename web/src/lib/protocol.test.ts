@@ -518,6 +518,8 @@ describe('状態から見た目を決める', () => {
     (statusAccent(status) as Record<string, string>)['--tile-accent']
   const dimOf = (status: SessionStatus) =>
     (statusAccent(status) as Record<string, string>)['--tile-dim']
+  const floorOf = (status: SessionStatus) =>
+    (statusAccent(status) as Record<string, string>)['--tile-floor']
 
   it('8つの姿それぞれに動きの種類が対応づいている', () => {
     // 作業中＝速く回る／停滞＝遅く回る／入力待ち＝呼吸／承認待ち＝揺れ／残りは動かさない
@@ -568,19 +570,50 @@ describe('状態から見た目を決める', () => {
 
   it('輪の薄い側の濃さが、カードの地に対して 3:1 を満たす値になっている', () => {
     // **周期の一部だけ状態が読めなくなる**という壊れ方なので、目で見ても気づけない。
-    // 値の出どころは設計§9-2-1。**色を差し替えたら引き直すこと**——旧5色の値を
-    // そのまま持ち越すと割る色が出る（`DESIGN.md` の役割表へ寄せたときに実測で確認）
-    // **実物を見て引き上げた**（2026-08-26）。床は 3:1 のままで、そこからの
-    // 余裕を使って見た目の明るさを 0.62 → 0.72 前後へ揃えてある
-    expect(dimOf({ kind: 'working' })).toBe('70%') // Cyan・7.62:1
-    expect(dimOf({ kind: 'waiting_permission' })).toBe('75%') // Amber・6.88:1
+    //
+    // **模型は設計§9-2-1 のとおり**——合成の相手はページ地（`#0a0a0a`）、判定の相手は
+    // カードの地（`#171717`）。§9-2-1 が公表している旧5色の最小α（琥珀 0.472 /
+    // 橙 0.625 / 緑 0.591 / 灰 0.589 / 赤 0.744）を**この模型で再現できることを確かめて
+    // から**、いまの5色へ当てた（差 ±0.0004。フェーズ8）。
+    //
+    // **比の数値を書き添えるときは、この模型で引き直すこと。** 前の版はここに
+    // 7.62 / 6.88 / 4.36 / 5.87 / 3.14 と書いてあったが、**どの模型でも再現できない
+    // 数値**だった。値そのものは検査が守るが、**コメントの数字は誰も守らない**。
+    expect(floorOf({ kind: 'working' })).toBe('50%') // Cyan・最小α 0.479
+    expect(floorOf({ kind: 'waiting_input' })).toBe('55%') // Amber・0.522
+    expect(floorOf({ kind: 'starting' })).toBe('60%') // Slate・0.584
+    expect(floorOf({ kind: 'unknown' })).toBe('70%') // Coral・0.657
+
+    // **静止しているときに塗る濃さは、床より濃くてよい。** 見た目の明るさを揃える
+    // ぶんだけ床から上げてある（実物を見た判断・2026-08-26）
+    expect(dimOf({ kind: 'working' })).toBe('70%') // Cyan・5.41:1
+    expect(dimOf({ kind: 'waiting_permission' })).toBe('75%') // Amber・5.25:1
     expect(dimOf({ kind: 'stalled' })).toBe('75%') // 同上（保留と注意は同じ群）
-    expect(dimOf({ kind: 'starting' })).toBe('55%') // Neutral・4.36:1（据え置き）
-    expect(dimOf({ kind: 'unknown' })).toBe('90%') // Coral・5.87:1
+    expect(dimOf({ kind: 'unknown' })).toBe('90%') // Coral・4.89:1
+
+    // **起動中だけ床を割っていた**（55% で 2.77:1）。床まで上げた（フェーズ8）
+    expect(dimOf({ kind: 'starting' })).toBe('60%') // Slate・3.11:1
 
     // **終了だけ群より静かにする。** 起動中と同じ灰だが、一覧でいちばん数が多く、
-    // 対処が要らない唯一の群である（設計§8-3-1）。**0.35 が 3:1 の床そのもの**
-    expect(dimOf({ kind: 'ended', ok: true })).toBe('35%') // 3.14:1
+    // 対処が要らない唯一の群である（設計§8-3-1）。
+    //
+    // **これは床を割る。意図して割る**（設計§9-2-3）——判別は記号と文言が担って
+    // おり、輪は補強にすぎない（§8-4。ハイコントラストでは丸ごと消える前提）
+    expect(dimOf({ kind: 'ended', ok: true })).toBe('35%') // 1.72:1・床(60%)を割る
+  })
+
+  it('どの群にも、床と、床以上の濃さがある', () => {
+    // **1つの値に2つの役割を持たせない**（設計§9-2-2）。呼吸の底は `--tile-floor`、
+    // 静止時に塗る濃さは `--tile-dim` で、**兼ねると呼吸の幅を広げられない**——
+    // 底を下げると、呼吸しない停滞・権限確認待ちまで暗くなる
+    const 数 = (v: string) => Number(v.replace('%', ''))
+    for (const status of ALL) {
+      const 床 = 数(floorOf(status))
+      expect(床).toBeGreaterThan(0)
+      // 終了だけは意図して割る（上のテスト）。それ以外は床以上であること
+      if (status.kind === 'ended' && status.ok) continue
+      expect(数(dimOf(status))).toBeGreaterThanOrEqual(床)
+    }
   })
 
   it('文字色は状態ごとに変わり、輪と同じ表から引いている', () => {
