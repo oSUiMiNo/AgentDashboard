@@ -197,7 +197,7 @@ export function SettingsPage() {
         <Choice
           testId="motion-quiet"
           label="静けさ"
-          hint="一覧のカードをどこまで静めるかです。「控えめ」は作業中の回転だけを止めます（放っておいてよい状態なので、止めると「動いている＝見に行く」になります）。「静止」はすべて止めますが、状態の色と記号と文字は残ります。"
+          hint="一覧のカードをどこまで静めるかです。「控えめ」は作業中の回転と、画面を回遊する線を止めます（どちらも放っておいてよいものなので、止めると「動いている＝見に行く」になります）。承認待ちのカードは跳ね続けます。「静止」はすべて止めますが、状態の色と記号と文字は残ります。"
           value={settings.motion_quiet}
           choices={MOTION_QUIET_CHOICES}
           format={(value) => MOTION_QUIET_LABELS[value]}
