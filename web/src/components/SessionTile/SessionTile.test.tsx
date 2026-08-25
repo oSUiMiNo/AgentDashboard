@@ -246,6 +246,43 @@ describe('SessionTile の骨格', () => {
     expect(screen.getByTestId('tile-lines').children).toHaveLength(6)
   })
 
+  it('ステッカーは権限確認待ちのときだけ貼る', () => {
+    // `DESIGN.md` §23.3「ステッカーは例外だから効く」——全行に付くと表の1カラムへ
+    // 退化し、貼ってある感じも目を引く力も消える。禁止事項にも「状態ステッカーを
+    // 全行に付けて列にする」がある。**数で縛らず、扱いで縛った**（§8.4）
+    for (const kind of ['working', 'stalled', 'waiting_input', 'starting'] as const) {
+      const { unmount } = renderTile(meta({ status: { kind } }))
+      expect(screen.queryByTestId('tile-sticker')).not.toBeInTheDocument()
+      unmount()
+    }
+
+    renderTile(meta({ status: { kind: 'waiting_permission' } }))
+    expect(screen.getByTestId('tile-sticker')).toBeInTheDocument()
+  })
+
+  it('ステッカーは切る枠の中に置く', () => {
+    // 器（`tile-shell`）の直下だと、**器は行の高さまで伸びる**ので、カードが行内で
+    // いちばん高くないときにステッカーだけ下へ取り残される（目視で実測）。
+    // 枠は中身ぴったりの高さなので、そこが正しい居場所になる
+    renderTile(meta({ status: { kind: 'waiting_permission' } }))
+
+    const frame = screen.getByTestId('session-tile').parentElement
+    expect(frame).toHaveClass('tile-frame')
+    expect(screen.getByTestId('tile-sticker').parentElement).toBe(frame)
+    // 効果線とは逆（あちらは枠の外）。**切る対象と切らない対象を取り違えない**
+    expect(screen.getByTestId('tile-lines').parentElement).not.toBe(frame)
+  })
+
+  it('切る角の角丸だけを外している', () => {
+    // 切りと丸めが同じ角を削り合うと**斜辺が見えない**——14px の切りが 12px の
+    // 角丸に埋もれ、白黒にすると特徴が何も残らなかった（`DESIGN.md` §34.5 の判定に
+    // 自分で当てて分かった）。残り3つは §10.3 の Panel（10〜14px）のまま
+    renderTile(meta())
+
+    const frame = screen.getByTestId('session-tile').parentElement
+    expect(frame).toHaveClass('rounded-[0_12px_12px_12px]')
+  })
+
   it('輪と効果線はクリックを通さない', () => {
     // 押す邪魔をしてはいけない。中身のボタンより手前に居るので、素通しでないと届かない
     renderTile(meta({ status: { kind: 'waiting_permission' } }))

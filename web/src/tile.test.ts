@@ -280,3 +280,72 @@ describe('描き直しを起こさない作りになっている', () => {
     }
   })
 })
+
+describe('DESIGN.md の床を満たしている', () => {
+  // `DESIGN.md` は合否を2枚で見る——**禁止事項を守るだけでは合格ではなく**、§8 の
+  // 必達要素の最低数を満たして初めて合格になる。ここは**その床が消えたら落ちる**
+  // ようにしてある。**目で見て決めたことは、目でしか守れない**ので、せめて
+  // 「その規則が居なくなったこと」は機械が気づけるようにする。
+
+  it('切る枠を斜めに切っている（崩し 1/2）', () => {
+    // §10.1「Primary Panel …必要に応じて一部 Cut Corner」／§10.2「一角だけ切る」。
+    // 禁止事項の「すべてを大きな角丸長方形で構成する」と、判定の「白黒にすると
+    // 画面の構成に特徴が何も残らない」の両方が、ここ1つに掛かっている
+    const 切る = 当たる('.tile-frame').filter((r) => r.body.includes('clip-path'))
+    expect(切る).toHaveLength(1)
+    expect(切る[0].body).toMatch(/polygon/)
+  })
+
+  it('進行中は Primary Accent を面で出している（面 1/1）', () => {
+    // §11.2「Primary Accent は面で出す」——「比率の 10〜15% は、**細い線と小さな
+    // バッジだけでは到達しない**。最低1か所は面で出す」。直す前のカードは、
+    // その不合格例（「アクセント色が細い線と小バッジにしか出ていない」）だった
+    const 面 = 当たる("[data-motion='spin-fast']").filter((r) =>
+      r.selector.includes('.tile-body'),
+    )
+    expect(面).toHaveLength(1)
+    expect(面[0].body).toMatch(/background-color:.*--tile-accent/)
+  })
+
+  it('ステッカーが物質を持っている（物質 1/2）', () => {
+    // §12.3 は貼る場所まで決めている（状態バッジ → ステッカー → 強）。
+    // §12.1 の Printed Sticker なので、影で「貼ってある」を作る
+    const ステッカー = 当たる('.tile-sticker')
+    expect(ステッカー).toHaveLength(1)
+    expect(ステッカー[0].body).toMatch(/box-shadow/)
+    // 【崩し 2/2】§10.2「一部だけ少し傾ける」
+    expect(ステッカー[0].body).toMatch(/rotate/)
+  })
+
+  it('縁が段差を持っている（物質 2/2・ステッカー以外）', () => {
+    // §8 の床は「うち1つはステッカー以外」と書いている。不合格例は
+    // 「ステッカーだけが物質を持っている」。§12.3 は「パネルの縁 → 紙の厚み・段差 → 弱」
+    const 縁 = 当たる('.tile-body').filter((r) => r.body.includes('box-shadow'))
+    expect(縁).toHaveLength(1)
+    expect(縁[0].body).toMatch(/inset/)
+  })
+
+  it('縁の段差を border で作っていない', () => {
+    // E2E が「素の状態では枠に border が無い」ことを見ていて、ハイコントラストの
+    // 退避（実線1本）と見分けている。**border を足すと、退避が効いているかどうかを
+    // 機械が判定できなくなる**
+    // `border-radius` は枠線ではないので数えない（Accent Bar が持っている）
+    for (const rule of 当たる('.tile-body')) {
+      expect(rule.body).not.toMatch(
+        /^\s*border(-(width|style|color|top|right|bottom|left))?:/m,
+      )
+    }
+  })
+
+  it('反応が3つある（Hover / Selected / Pressed）', () => {
+    // §8 の床「目に見える反応 3」。不合格例は「Selected しか作っていない」。
+    // この一覧に「選択」は無いので、**フォーカスを Selected 相当まで引き上げてある**
+    // ——§27.3「単なる 1px Border だけで済ませない」
+    const 全部 = 素のCSS()
+    expect(当たる(':hover').some((r) => r.selector.includes('.tile-body'))).toBe(true)
+    expect(全部).toMatch(/\.tile-body:active/)
+    expect(当たる(':focus-visible').some((r) => r.body.includes('background-color'))).toBe(
+      true,
+    )
+  })
+})

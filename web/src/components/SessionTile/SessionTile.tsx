@@ -175,7 +175,13 @@ export function SessionTile({ cardId }: Props) {
       data-quiet={quiet === 'lively' ? undefined : quiet}
       style={statusAccent(session.status)}
     >
-      <div className="tile-frame relative w-72 overflow-hidden rounded-[12px] p-0.5">
+      {/*
+        **左上だけ角丸を外す。** ここは `clip-path` で斜めに切る角なので（`tile.css`）、
+        丸めたままだと**切りと丸めが同じところを削り合って、斜辺が見えない**——14px の
+        切りが 12px の角丸に埋もれて、白黒にすると特徴が何も残らなかった（目視で実測）。
+        残り3つは §10.3 の Panel（10〜14px）のまま。
+      */}
+      <div className="tile-frame relative w-72 overflow-hidden rounded-[0_12px_12px_12px] p-0.5">
         {/* 回る輪。**弧は疑似要素側**にあり、止めるときは弧だけを消す（§9-1） */}
         <span className="tile-ring" aria-hidden />
         <button
@@ -185,7 +191,15 @@ export function SessionTile({ cardId }: Props) {
             ここへ `opacity` を当てると**地の色ごと透ける**ので、裏の輪が出てきて
             カードが状態の色で全面塗りになる（フェーズ6 の目視で実測）。
           */
-          className="tile-body bg-card flex w-full flex-col gap-1.5 rounded-[10px] p-3 text-left transition-colors"
+          /*
+            **密度を2つに分ける**（`DESIGN.md` §9.2「全領域を同じ密度で埋めない」）。
+            床（§8）は「Dense な領域 / Loose な領域 各1」を求めていて、不合格例が
+            「全領域が同じ行間・同じ密度」——直す前のカードがそれだった。
+
+            ここは行間を詰めて **Dense** にし、①行の側で余白を取って **Loose** にする。
+            **高さは 99px のまま**（「縦を詰める」という要件を崩さない）。
+          */
+          className="tile-body bg-card flex w-full flex-col gap-1 rounded-[10px] px-3 pt-2.5 pb-3 text-left"
           data-testid="session-tile"
           data-card-id={session.card_id}
           data-status={session.status.kind}
@@ -211,7 +225,7 @@ export function SessionTile({ cardId }: Props) {
             「接続断」がボタンの下へ潜って読めなくなる（フェーズ6 の目視で実測）。
           */}
           <div
-            className={`flex items-center gap-2 ${
+            className={`flex items-center gap-2 pb-0.5 ${
               revivable.kind !== 'live' ? 'pr-12' : ''
             }`}
           >
@@ -226,12 +240,14 @@ export function SessionTile({ cardId }: Props) {
             <span
               data-testid="status-glyph"
               aria-hidden
-              className={`tile-glyph shrink-0 text-sm ${statusTextTone(session.status)}`}
+              className={`tile-glyph shrink-0 text-[15px] ${statusTextTone(session.status)}`}
             >
               {statusGlyph(session.status)}
             </span>
             <span
-              className={`shrink-0 text-sm font-medium ${statusTextTone(session.status)}`}
+              className={`shrink-0 text-[15px] leading-tight font-semibold tracking-[0.04em] ${statusTextTone(
+                session.status,
+              )}`}
             >
               {statusLabel(session.status)}
             </span>
@@ -242,7 +258,7 @@ export function SessionTile({ cardId }: Props) {
             */}
             <span
               data-testid="elapsed"
-              className="text-muted-foreground min-w-0 flex-1 truncate text-xs whitespace-nowrap tabular-nums"
+              className="text-muted-foreground min-w-0 flex-1 truncate text-[11px] whitespace-nowrap tabular-nums"
               title={`最終活動 ${formatElapsed(now - session.last_activity_at)}`}
             >
               最終活動 {formatElapsed(now - session.last_activity_at)}
@@ -414,6 +430,29 @@ export function SessionTile({ cardId }: Props) {
             {session.session_title ?? '名前はまだありません'}
           </p>
         </button>
+
+        {/*
+          状態のステッカー（`DESIGN.md` §23.2「種別は形で示し、状態はステッカーで示す」）。
+
+          **貼るのは権限確認待ちだけ。** §23.3 は「一覧で同時に見えるステッカーは1つ以上、
+          可視行の3割まで」「縦に連続させない」「専用の列を作らない」と数まで決めていて、
+          禁止事項にも「状態ステッカーを全行に付けて列にする」がある。**数で縛らず、扱いで
+          縛った**（§8.4）——人が答えないと先へ進まない唯一の状態に限れば、実際に少数になる。
+
+          残りの状態は §23.3 の言う「行の静かな要素」（記号と薄い文字）で示している。
+
+          **切る枠の中へ置く。** 器（`tile-shell`）の直下に置くと、**器は行の高さまで
+          伸びる**ので、カードが行内でいちばん高くないときにステッカーだけ下へ取り残される
+          （目視で実測）。枠は中身ぴったりの高さなので、ここが正しい居場所になる。
+
+          切る枠は左上しか切っていないので、右下は `clip-path` に届かない。中身の**後ろ**へ
+          置いて、いちばん下の行へ軽く重ねる。
+        */}
+        {session.status.kind === 'waiting_permission' && (
+          <span className="tile-sticker" data-testid="tile-sticker" aria-hidden>
+            ANSWER
+          </span>
+        )}
       </div>
 
       {/*
