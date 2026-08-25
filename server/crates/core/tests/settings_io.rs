@@ -111,7 +111,7 @@ async fn 書き出して読み戻すと元へ戻る() {
         .put(
             "/api/settings",
             r#"{"always_bypass_permissions":true,"project_autostart_session":true,
-                "sync_interval_secs":5,
+                "sync_interval_secs":5,"motion_quiet":"calm",
                 "screen_interval_ms":300,"scrollback_lines":4000}"#,
         )
         .await;
@@ -126,7 +126,7 @@ async fn 書き出して読み戻すと元へ戻る() {
         .put(
             "/api/settings",
             r#"{"always_bypass_permissions":false,"project_autostart_session":false,
-                "sync_interval_secs":60,
+                "sync_interval_secs":60,"motion_quiet":"lively",
                 "screen_interval_ms":20000,"scrollback_lines":1000}"#,
         )
         .await;
@@ -153,6 +153,8 @@ async fn 書き出して読み戻すと元へ戻る() {
     // 画面の選択肢に足した 0.3秒 が、書き出し→読み込みの往復で戻ってくること
     assert!(body.contains("\"screen_interval_ms\":300"), "{body}");
     assert!(body.contains("\"scrollback_lines\":4000"), "{body}");
+    // 3段のうち、既定でない側が往復で戻ってくること（カード設計§9-5-2）
+    assert!(body.contains("\"motion_quiet\":\"calm\""), "{body}");
 
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -173,6 +175,7 @@ async fn 書き出しにはアカウントの設定しか入らない() {
         keys,
         [
             "always_bypass_permissions",
+            "motion_quiet",
             "project_autostart_session",
             "screen_interval_ms",
             "scrollback_lines",
@@ -259,6 +262,56 @@ async fn 知らないキーは無視して伝える() {
     let (_, body) = server.get("/api/settings").await;
     assert!(body.contains("\"sync_interval_secs\":10"), "{body}");
     assert!(body.contains("\"scrollback_lines\":1000"), "{body}");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 静けさは**3段以外を断り、記録を動かさないこと**（カード設計§9-5-2）。
+///
+/// 真偽値と数値は serde が型で弾いてくれるが、**3段はただの文字列なので serde を
+/// すり抜ける**。明示の検査を外すと、知らない綴りがそのまま記録へ入り、画面は
+/// 既定へ落として描くので「設定したのに効かない」という追いにくい形になる。
+#[tokio::test]
+async fn 静けさは3段以外を断り記録を動かさない() {
+    let (server, dir) = server().await;
+
+    // まず正しい段を1つ入れておく（断ったときに巻き戻っていないことを見るため）
+    let (status, body) = server
+        .put("/api/settings", r#"{"motion_quiet":"calm"}"#)
+        .await;
+    assert_eq!(status, 200, "{body}");
+
+    for wrong in [
+        r#"{"motion_quiet":"quiet"}"#,
+        r#"{"motion_quiet":"Lively"}"#,
+        r#"{"motion_quiet":""}"#,
+    ] {
+        let (status, body) = server.put("/api/settings", wrong).await;
+        assert_eq!(status, 400, "{wrong} が通った: {body}");
+        assert!(
+            body.contains("motion_quiet"),
+            "どのキーが駄目か出ない: {body}"
+        );
+    }
+
+    // 型が違うものは serde が弾く（400 でも 422 でもよい。**通らないことが要点**）
+    let (status, body) = server.put("/api/settings", r#"{"motion_quiet":1}"#).await;
+    assert!(status == 400 || status == 422, "status={status} {body}");
+
+    // **断ったぶんで記録が動いていないこと**
+    let (_, body) = server.get("/api/settings").await;
+    assert!(
+        body.contains(r#""motion_quiet":"calm""#),
+        "断った側で記録が動いた: {body}"
+    );
+
+    // 3段はすべて通ること（絞りすぎていないこと）
+    for 段 in ["lively", "calm", "still"] {
+        let (status, body) = server
+            .put("/api/settings", &format!(r#"{{"motion_quiet":"{段}"}}"#))
+            .await;
+        assert_eq!(status, 200, "{段}: {body}");
+    }
 
     let _ = std::fs::remove_dir_all(dir);
 }

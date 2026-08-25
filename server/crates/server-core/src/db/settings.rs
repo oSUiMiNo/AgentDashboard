@@ -59,6 +59,28 @@ pub const DEFAULT_ALWAYS_BYPASS_PERMISSIONS: bool = false;
 pub const PROJECT_AUTOSTART_SESSION: &str = "project_autostart_session";
 pub const DEFAULT_PROJECT_AUTOSTART_SESSION: bool = false;
 
+/// 一覧のカードの動きを、どこまで静めるか（カード設計§9-5-2）。
+///
+/// **アカウントスコープ**。`project_autostart_session` と同じで、画面をどう見たいかは
+/// 完全に利用体験の話になる。前庭障害・光過敏は**端末ではなく人に属する**ので、
+/// ブラウザごとではなくアカウントに紐づけるほうが意味に合う。
+///
+/// **OS の「動きを減らす」設定だけでは規範を満たさない**（WCAG 2.2.2 は画面の中の
+/// 停止手段を要求しており、達成手段の一覧に OS 設定は1つも入っていない）。しかも
+/// 入力待ちの明滅は、規格の用語では「動き」に当たらないので OS 設定では原理的に
+/// 片付かない。だから画面の中に道を1つ置く。
+///
+/// 3段にしてあるのは、一時停止ボタン1つだと「全部止める」しかないため——
+/// **止めると承認待ちまで止まり**、いちばん見つけたいものの合図を失う。
+pub const MOTION_QUIET: &str = "motion_quiet";
+/// 既定は「賑やか」。**画を変えない**——12枚の輪が回る画面は要望そのもの（§9-6-2）。
+pub const DEFAULT_MOTION_QUIET: &str = "lively";
+/// 入れてよい3段。`calm` は作業中の回転だけを止め、`still` はすべてを止める。
+///
+/// 綴りは画面が出す `data-quiet` と揃えてある（§9-5-3）。**賑やかは属性を出さない**
+/// ので、`lively` は DOM に現れない。
+pub const MOTION_QUIET_CHOICES: [&str; 3] = ["lively", "calm", "still"];
+
 /// LAN 開放時の共有パスワード（argon2 ハッシュ）。**サーバ全体スコープ**（設計§8-3）。
 pub const LAN_PASSWORD_HASH: &str = "lan_password_hash";
 
@@ -76,12 +98,13 @@ pub const DEFAULT_UPDATE_CHECK_ENABLED: bool = true;
 /// サーバ全体スコープのもの（LAN パスワード・更新確認）はここに入らないので、
 /// **秘密が持ち出しへ混ざる余地が構造的に無い**。裏返すと、**アカウントスコープへ
 /// 秘密を置いてはいけない**——ここが持ち出しの対象そのものになる。
-pub const ACCOUNT_KEYS: [&str; 5] = [
+pub const ACCOUNT_KEYS: [&str; 6] = [
     ALWAYS_BYPASS_PERMISSIONS,
     PROJECT_AUTOSTART_SESSION,
     SYNC_INTERVAL_SECS,
     SCREEN_INTERVAL_MS,
     SCROLLBACK_LINES,
+    MOTION_QUIET,
 ];
 
 /// 入れてよい間隔の範囲。画面の選択肢を含む、余裕のある幅にしてある。
@@ -119,6 +142,16 @@ pub fn check(key: &str, value: &serde_json::Value) -> Result<(), String> {
         SYNC_INTERVAL_SECS => number(&SYNC_INTERVAL_SECS_RANGE),
         SCREEN_INTERVAL_MS => number(&SCREEN_INTERVAL_MS_RANGE),
         SCROLLBACK_LINES => number(&SCROLLBACK_LINES_RANGE),
+        // 3段のうちどれか。**受けたふりをしない**——知らない綴りを黙って入れると、
+        // 画面は既定へ落として描くので「設定したのに効かない」だけに見える
+        MOTION_QUIET => match value.as_str() {
+            Some(段) if MOTION_QUIET_CHOICES.contains(&段) => Ok(()),
+            Some(段) => Err(format!(
+                "{key} は {} のどれかで指定してください（{段} が入っています）",
+                MOTION_QUIET_CHOICES.join(" / ")
+            )),
+            None => Err(format!("{key} には文字列を指定してください")),
+        },
         _ => Err(format!("{key} は知らない設定です")),
     }
 }
@@ -305,6 +338,38 @@ pub async fn set_project_autostart_session(
     .await
 }
 
+/// 一覧のカードをどこまで静めるか。**行が無ければ既定**（カード設計§9-5-2）。
+///
+/// `project_autostart_session` と同型で、`Option` を返さず**既定で埋めて返す**——
+/// PC 側に初期値の出どころが無いため。読めなかったときも既定（賑やか）に倒す。
+///
+/// **知らない綴りが記録に入っていたら既定へ落とす。** 入口は `check()` が守っているが、
+/// 古い版が書いた値や手で書き換えられた行が残りうるので、読む側でも受け止める。
+pub async fn motion_quiet(db: &DatabaseConnection, account: Uuid) -> String {
+    let 落とす = || DEFAULT_MOTION_QUIET.to_string();
+    match get(db, account, MOTION_QUIET).await {
+        Ok(value) => value
+            .as_ref()
+            .and_then(serde_json::Value::as_str)
+            .filter(|段| MOTION_QUIET_CHOICES.contains(段))
+            .map(str::to_string)
+            .unwrap_or_else(落とす),
+        Err(err) => {
+            tracing::warn!("静けさの設定を読めません: {err}");
+            落とす()
+        }
+    }
+}
+
+/// 静けさの段を決める。**ここで行ができ、以後は記録が正になる。**
+pub async fn set_motion_quiet(
+    db: &DatabaseConnection,
+    account: Uuid,
+    value: &str,
+) -> Result<(), DbErr> {
+    put(db, account, MOTION_QUIET, serde_json::json!(value)).await
+}
+
 /// LAN 開放の共有パスワード（ハッシュ）。設定されていなければ `None`。
 pub async fn lan_password_hash(db: &DatabaseConnection) -> Result<Option<String>, DbErr> {
     Ok(get(db, super::SERVER_SCOPE_ID, LAN_PASSWORD_HASH)
@@ -373,20 +438,55 @@ mod tests {
     /// **持ち出しの対象はこの並びで決まる。** キーを足したらこの数も動く——
     /// 書き換え忘れると、足したキーが書き出されないまま「揃っている」ことになる。
     #[test]
-    fn アカウントの設定は5つ() {
-        assert_eq!(ACCOUNT_KEYS.len(), 5);
+    fn アカウントの設定は6つ() {
+        assert_eq!(ACCOUNT_KEYS.len(), 6);
         assert!(ACCOUNT_KEYS.contains(&PROJECT_AUTOSTART_SESSION));
+        assert!(ACCOUNT_KEYS.contains(&MOTION_QUIET));
         // サーバ全体スコープのものが混ざっていないこと（混ざると秘密が持ち出しへ乗る）
         assert!(!ACCOUNT_KEYS.contains(&LAN_PASSWORD_HASH));
         assert!(!ACCOUNT_KEYS.contains(&UPDATE_CHECK_ENABLED));
-        // 全部が `check()` を通る綴りであること
+        // 全部が `check()` を通る綴りであること。**受け付ける型が増えたら、ここの
+        // 候補にも足す**——足し忘れると「check() が知らない」と読めてしまう
         for key in ACCOUNT_KEYS {
             assert!(
                 check(key, &serde_json::json!(true)).is_ok()
-                    || check(key, &serde_json::json!(20)).is_ok(),
+                    || check(key, &serde_json::json!(20)).is_ok()
+                    || check(key, &serde_json::json!(DEFAULT_MOTION_QUIET)).is_ok(),
                 "{key} は check() が知らない"
             );
         }
+    }
+
+    /// 静けさは**3段のどれか**しか通さないこと（カード設計§9-5-2）。
+    ///
+    /// 画面は3択で絞っているが、REST は直に叩ける。ここを通さないと、知らない綴りが
+    /// そのまま記録へ入り、**設定したのに効かない**という追いにくい形になる。
+    #[test]
+    fn 静けさは3段だけを通す() {
+        for 段 in MOTION_QUIET_CHOICES {
+            assert!(check(MOTION_QUIET, &serde_json::json!(段)).is_ok(), "{段}");
+        }
+        for wrong in [
+            serde_json::json!("quiet"),
+            serde_json::json!("Lively"),
+            serde_json::json!(""),
+            serde_json::json!(true),
+            serde_json::json!(0),
+            serde_json::json!(null),
+            serde_json::json!(["calm"]),
+        ] {
+            let reason =
+                check(MOTION_QUIET, &wrong).expect_err(&format!("{wrong} を通してしまった"));
+            assert!(reason.contains(MOTION_QUIET), "{reason}");
+        }
+    }
+
+    /// 既定は**賑やか**（カード設計§9-5-2）。**画を変えない**——12枚の輪が回る画面は
+    /// 要望そのものなので、既定を静かな側へ倒すと、何も選んでいない全員の画が変わる。
+    #[test]
+    fn 静けさの既定は賑やか() {
+        assert_eq!(DEFAULT_MOTION_QUIET, "lively");
+        assert!(MOTION_QUIET_CHOICES.contains(&DEFAULT_MOTION_QUIET));
     }
 
     /// 選択肢を1つ足しても**既定は動かない**（要件「やらないこと」）。

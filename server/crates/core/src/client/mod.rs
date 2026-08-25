@@ -1204,7 +1204,7 @@ pub fn settings_update_body(key: &str, value: &str) -> Result<String, String> {
         "screen_interval_ms",
         "scrollback_lines",
     ];
-    let listing = "受け付けるキー：always_bypass_permissions / project_autostart_session（true・false）、sync_interval_secs / screen_interval_ms / scrollback_lines（数値）、lan_password（文字列）";
+    let listing = "受け付けるキー：always_bypass_permissions / project_autostart_session（true・false）、sync_interval_secs / screen_interval_ms / scrollback_lines（数値）、motion_quiet（lively・calm・still）、lan_password（文字列）";
     let json_value = if BOOL_KEYS.contains(&key) {
         match value {
             "true" => serde_json::Value::Bool(true),
@@ -1220,6 +1220,16 @@ pub fn settings_update_body(key: &str, value: &str) -> Result<String, String> {
             .parse()
             .map_err(|_| format!("`{key}` の値は数値です（`{value}` は読めません）"))?;
         serde_json::Value::Number(number.into())
+    } else if key == server_core::db::settings::MOTION_QUIET {
+        // **綴りの検査はサーバに任せない。** ここで断れば「引数の誤り＝exit 2」の族に
+        // 収まる（サーバまで往復すると 400 になり、通信の失敗と見分けが付かない）
+        if !server_core::db::settings::MOTION_QUIET_CHOICES.contains(&value) {
+            return Err(format!(
+                "`{key}` の値は {} のどれかです（`{value}` は読めません）",
+                server_core::db::settings::MOTION_QUIET_CHOICES.join(" / ")
+            ));
+        }
+        serde_json::Value::String(value.to_string())
     } else if key == "lan_password" {
         serde_json::Value::String(value.to_string())
     } else {
@@ -1584,5 +1594,49 @@ mod tests {
         let err =
             settings_update_body("always_bypass_permissions", "yes").expect_err("断られること");
         assert!(err.contains("true か false"), "直し方が無い: {err}");
+    }
+
+    /// **アカウントの設定は、全件が CLI からも触れること**（カード設計§12-1）。
+    ///
+    /// ここには `ACCOUNT_KEYS` とは別に、この関数だけが持つキーの表がある。設計は
+    /// 「アカウントの設定に載せれば `settings set` へ自動で乗る」と書いていたが、
+    /// **乗らない**——表を直し忘れると、画面からは変えられるのに CLI だけが
+    /// 「そのキーは知りません」と断る形になり、**それを数えている場所が1つも無かった**。
+    ///
+    /// このテストがその見張りにあたる。キーを足した人は、ここで落ちて気づく。
+    ///
+    /// 名前に `CLI` と書けないのは、日本語のテスト名に ASCII 大文字を混ぜると
+    /// `non_snake_case` が落とすため（PJTガイドライン）。
+    #[test]
+    fn アカウントの設定は全件がコマンドラインからも触れる() {
+        use server_core::db::settings;
+        // 検査を通る値を、キーの型ごとに1つずつ用意する。**値そのものは何でもよく、
+        // 見たいのは「キーを知っているか」だけ**
+        let 通る値 = |key: &str| -> &'static str {
+            match key {
+                settings::ALWAYS_BYPASS_PERMISSIONS | settings::PROJECT_AUTOSTART_SESSION => "true",
+                settings::MOTION_QUIET => settings::DEFAULT_MOTION_QUIET,
+                _ => "20",
+            }
+        };
+        for key in settings::ACCOUNT_KEYS {
+            let body = settings_update_body(key, 通る値(key))
+                .unwrap_or_else(|err| panic!("`{key}` を CLI が知らない: {err}"));
+            let value: serde_json::Value = serde_json::from_str(&body).expect("JSON であること");
+            let object = value.as_object().expect("オブジェクトであること");
+            assert_eq!(object.len(), 1, "触っていない項目が混ざっている: {body}");
+            assert!(object.contains_key(key), "キーが違う: {body}");
+        }
+    }
+
+    #[test]
+    fn 静けさの段は3値以外を断る() {
+        // サーバまで往復させない。**引数の誤りは exit 2 の族**で、通信の失敗（1）とは
+        // 区別が付く形にしておく
+        let err = settings_update_body("motion_quiet", "quiet").expect_err("断られること");
+        assert!(err.contains("lively"), "直し方が無い: {err}");
+        for 段 in server_core::db::settings::MOTION_QUIET_CHOICES {
+            settings_update_body("motion_quiet", 段).unwrap_or_else(|err| panic!("{段}: {err}"));
+        }
     }
 }

@@ -66,6 +66,17 @@ export interface LanPassword {
   editable: boolean
 }
 
+/**
+ * 一覧のカードの動きを、どこまで静めるか（カード設計§9-5-2）。
+ *
+ * **3段なのは、一時停止ボタン1つだと「全部止める」しかないため**——止めると
+ * 承認待ちまで止まり、いちばん見つけたいものの合図を失う。
+ */
+export type MotionQuiet = 'lively' | 'calm' | 'still'
+
+/** 静けさの3段。**綴りと並びは Rust 側の `MOTION_QUIET_CHOICES` と揃える。** */
+export const MOTION_QUIET_CHOICES: MotionQuiet[] = ['lively', 'calm', 'still']
+
 /** `GET /api/settings` の応答。 */
 export interface Settings {
   /**
@@ -83,6 +94,17 @@ export interface Settings {
    * ON にすると、追加したその場で1本立ち上がる。
    */
   project_autostart_session: boolean
+  /**
+   * 一覧のカードをどこまで静めるか（カード設計§9-5-2）。
+   *
+   * `lively`（既定・何も止めない）／`calm`（作業中の回転だけ止める）／
+   * `still`（すべて止める）。**綴りはカードが出す `data-quiet` と揃えてある**——
+   * 賑やかは属性を出さないので、`lively` は DOM に現れない。
+   *
+   * **OS の「動きを減らす」設定とは別物**で、あちらが立っている間は段の選択に
+   * よらず止まる。ここが運ぶのは「利用者が画面から選んだ段」だけ。
+   */
+  motion_quiet: MotionQuiet
   /** その CLI が受け付けるモード（正規値）。繋がっている PC ぶんを合併したもの */
   available_modes: PermissionMode[]
   /**
@@ -105,6 +127,7 @@ export type SettingsPatch = Partial<{
   sync_interval_secs: number
   screen_interval_ms: number
   scrollback_lines: number
+  motion_quiet: MotionQuiet
 }>
 
 interface SettingsState {
@@ -137,6 +160,8 @@ const FALLBACK: Settings = {
   always_bypass_permissions: false,
   // 読めていない間に「追加したら起こす」で出すと、意図しない claude が1本立ち上がる
   project_autostart_session: false,
+  // **既定は賑やか。** 読めるまでの間だけ静かに出すと、読めた瞬間に画が変わる
+  motion_quiet: 'lively',
   available_modes: PERMISSION_MODES.map((mode) => mode.value),
   // 実測が無い状態が正しい初期値。推測で埋めると、選択肢に嘘の版番号が出る
   model_tables: {},

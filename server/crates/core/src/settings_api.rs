@@ -61,6 +61,11 @@ pub struct SettingsView {
     pub model_tables: BTreeMap<String, serde_json::Value>,
     /// 登録済みの PC（設計§11-1・§11-2）。**PC 名バッジの引き先**
     pub agents: Vec<SessionHostView>,
+    /// 一覧のカードをどこまで静めるか（カード設計§9-5-2）。3段のいずれか。
+    ///
+    /// **OS の「動きを減らす」設定とは別物**で、あちらが立っている間は段の選択に
+    /// よらず止まる。ここが運ぶのは「利用者が画面から選んだ段」だけ。
+    pub motion_quiet: String,
     /// 画面から変えられる間隔一式（設計§13-3）
     pub intervals: IntervalsView,
     /// LAN 開放のパスワード（設計§8-3）。**ローカルモードでしか意味を持たない**
@@ -194,6 +199,7 @@ async fn api_server_settings(
             identity.account_id,
         )
         .await,
+        motion_quiet: db::settings::motion_quiet(hub.db(), identity.account_id).await,
         available_modes,
         model_tables,
         agents: server_core::account::agents_of(&hub, identity.account_id).await?,
@@ -224,6 +230,11 @@ pub struct SettingsUpdate {
     pub sync_interval_secs: Option<u64>,
     pub screen_interval_ms: Option<u64>,
     pub scrollback_lines: Option<u64>,
+    /// 静けさの段（カード設計§9-5-2）。3値のいずれか。
+    ///
+    /// **serde では絞れない**（ただの文字列なので）。`check()` で明示的に見る——
+    /// ここを外すと、知らない綴りがそのまま記録へ入る。
+    pub motion_quiet: Option<String>,
 }
 
 impl SettingsUpdate {
@@ -242,6 +253,12 @@ impl SettingsUpdate {
                 db::settings::check(key, &serde_json::json!(value))
                     .map_err(|reason| (StatusCode::BAD_REQUEST, reason))?;
             }
+        }
+        // **文字列は serde が絞ってくれない。** 真偽値と数値は型で弾けるが、3段は
+        // ただの文字列なので、ここを通さないと知らない綴りがそのまま記録へ入る
+        if let Some(段) = &self.motion_quiet {
+            db::settings::check(db::settings::MOTION_QUIET, &serde_json::json!(段))
+                .map_err(|reason| (StatusCode::BAD_REQUEST, reason))?;
         }
         Ok(())
     }
@@ -296,6 +313,7 @@ pub async fn api_settings(
             identity.account_id,
         )
         .await,
+        motion_quiet: db::settings::motion_quiet(state.auth.db(), identity.account_id).await,
         available_modes: store.available_modes().to_vec(),
         model_tables: store.local_model_tables(&state.manager.aliases().all()),
         // ローカルモードに PC という単位は無い（`"local"` を1台として並べない）
@@ -355,6 +373,12 @@ pub async fn api_update_settings(
             .map_err(save_failed)?;
     }
 
+    if let Some(段) = &update.motion_quiet {
+        db::settings::set_motion_quiet(state.auth.db(), identity.account_id, 段)
+            .await
+            .map_err(save_failed)?;
+    }
+
     // **設定の持ち主が居なくても、DB のぶんは保存できている。** 居ないことを理由に
     // 404 を返すと、保存されたのに失敗したように見える（統合テストは画面を立てずに
     // セッションだけを確かめることがある）
@@ -374,6 +398,7 @@ pub async fn api_update_settings(
                 identity.account_id,
             )
             .await,
+            motion_quiet: db::settings::motion_quiet(state.auth.db(), identity.account_id).await,
             available_modes: Vec::new(),
             model_tables: BTreeMap::new(),
             agents: server_core::account::no_agents(),
@@ -434,6 +459,12 @@ async fn api_server_update_settings(
             .map_err(save_failed)?;
     }
 
+    if let Some(段) = &update.motion_quiet {
+        db::settings::set_motion_quiet(hub.db(), identity.account_id, 段)
+            .await
+            .map_err(save_failed)?;
+    }
+
     api_server_settings(State(hub), Extension(identity)).await
 }
 
@@ -488,6 +519,7 @@ async fn api_export(
         intervals,
         always_bypass,
         db::settings::project_autostart_session(state.auth.db(), identity.account_id).await,
+        &db::settings::motion_quiet(state.auth.db(), identity.account_id).await,
         env!("CARGO_PKG_VERSION"),
     ))
 }
@@ -524,6 +556,11 @@ async fn api_import(
             .await
             .map_err(save_failed)?;
     }
+    if let Some(段) = parsed.motion_quiet() {
+        db::settings::set_motion_quiet(state.auth.db(), identity.account_id, 段)
+            .await
+            .map_err(save_failed)?;
+    }
 
     Ok(Json(ImportOutcome {
         applied: parsed.applied(),
@@ -544,6 +581,7 @@ async fn api_server_export(
         intervals,
         always_bypass,
         db::settings::project_autostart_session(hub.db(), identity.account_id).await,
+        &db::settings::motion_quiet(hub.db(), identity.account_id).await,
         env!("CARGO_PKG_VERSION"),
     ))
 }
@@ -574,6 +612,11 @@ async fn api_server_import(
     }
     if let Some(value) = parsed.project_autostart_session() {
         db::settings::set_project_autostart_session(hub.db(), identity.account_id, value)
+            .await
+            .map_err(save_failed)?;
+    }
+    if let Some(段) = parsed.motion_quiet() {
+        db::settings::set_motion_quiet(hub.db(), identity.account_id, 段)
             .await
             .map_err(save_failed)?;
     }

@@ -49,6 +49,7 @@ pub fn exported(
     intervals: Intervals,
     always_bypass: bool,
     project_autostart: bool,
+    motion_quiet: &str,
     exported_by: &str,
 ) -> Exported {
     Exported {
@@ -75,6 +76,10 @@ pub fn exported(
             (
                 settings::SCROLLBACK_LINES.to_string(),
                 serde_json::json!(intervals.scrollback_lines),
+            ),
+            (
+                settings::MOTION_QUIET.to_string(),
+                serde_json::json!(motion_quiet),
             ),
         ]),
     }
@@ -112,6 +117,13 @@ impl Parsed {
         self.values
             .get(settings::PROJECT_AUTOSTART_SESSION)
             .and_then(serde_json::Value::as_bool)
+    }
+
+    /// 静けさの段。入っていなければ `None`（＝いまの値を残す）。
+    pub fn motion_quiet(&self) -> Option<&str> {
+        self.values
+            .get(settings::MOTION_QUIET)
+            .and_then(serde_json::Value::as_str)
     }
 
     /// 間隔の指定が1つでも入っているか。
@@ -218,7 +230,7 @@ mod tests {
     use super::*;
 
     fn 書き出し() -> String {
-        let exported = exported(Intervals::default(), true, true, "0.0.0-test");
+        let exported = exported(Intervals::default(), true, true, "calm", "0.0.0-test");
         serde_json::to_string_pretty(&exported).expect("書き出せること")
     }
 

@@ -99,7 +99,7 @@ test('設定を書き出して読み戻すと、元の状態へ戻る', async ({
 
   // 読み戻す
   await page.getByTestId('portable-file').setInputFiles(saved)
-  await expect(page.getByTestId('portable-outcome')).toContainText('5件')
+  await expect(page.getByTestId('portable-outcome')).toContainText('6件')
 
   await expect(sync).toHaveValue('5')
   await expect(toggle).toBeChecked()

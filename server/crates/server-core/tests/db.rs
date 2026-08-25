@@ -1101,3 +1101,61 @@ async fn kindを知らない書き手の札はagentとして埋まる() {
         backend.finish().await;
     }
 }
+
+/// 静けさの段も**行が無ければ既定**（カード設計§9-5-2）。
+///
+/// 既定は「賑やか」。**画を変えない**——12枚の輪が回る画面は要望そのものなので、
+/// 何も選んでいない全員の画が変わってしまう側へ倒さない。
+///
+/// あわせて、**知らない綴りが記録に入っていたら既定へ落とす**ことも見る。入口は
+/// `check()` が守っているが、古い版が書いた値や手で書き換えられた行が残りうる。
+#[tokio::test]
+async fn 静けさは行が無ければ賑やかで読める() {
+    for backend in common::backends("motion_quiet").await {
+        assert_eq!(
+            settings::motion_quiet(&backend.db, db::LOCAL_ACCOUNT_ID).await,
+            "lively",
+            "[{}] 行が無いのに既定以外で読めた",
+            backend.name
+        );
+
+        settings::set_motion_quiet(&backend.db, db::LOCAL_ACCOUNT_ID, "still")
+            .await
+            .unwrap();
+        assert_eq!(
+            settings::motion_quiet(&backend.db, db::LOCAL_ACCOUNT_ID).await,
+            "still",
+            "[{}] 書いた値が読めない",
+            backend.name
+        );
+
+        // **知らない綴りは既定へ落とす。** 読む側でも受け止める（入口だけに頼らない）
+        settings::put(
+            &backend.db,
+            db::LOCAL_ACCOUNT_ID,
+            settings::MOTION_QUIET,
+            serde_json::json!("むかしの綴り"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            settings::motion_quiet(&backend.db, db::LOCAL_ACCOUNT_ID).await,
+            "lively",
+            "[{}] 知らない綴りがそのまま読めた",
+            backend.name
+        );
+
+        // 消したら既定へ戻る（行が無いことに意味がある、という約束）
+        settings::remove(&backend.db, db::LOCAL_ACCOUNT_ID, settings::MOTION_QUIET)
+            .await
+            .unwrap();
+        assert_eq!(
+            settings::motion_quiet(&backend.db, db::LOCAL_ACCOUNT_ID).await,
+            "lively",
+            "[{}] 消しても既定へ戻らない",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}

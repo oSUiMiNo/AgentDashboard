@@ -393,9 +393,10 @@ enum SettingsCmd {
     /// 設定を1項目だけ変える（触った項目だけを送る。CLI設計§12-1）
     Set {
         /// キー（always_bypass_permissions / project_autostart_session /
-        /// sync_interval_secs / screen_interval_ms / scrollback_lines / lan_password）
+        /// sync_interval_secs / screen_interval_ms / scrollback_lines /
+        /// motion_quiet / lan_password）
         key: String,
-        /// 値（トグルは true・false、間隔は数値）
+        /// 値（トグルは true・false、間隔は数値、静けさは lively・calm・still）
         value: String,
         #[command(flatten)]
         out: OutputArgs,
