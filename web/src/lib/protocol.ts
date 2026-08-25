@@ -468,29 +468,49 @@ export function statusLabel(status: SessionStatus): string {
  * （[`statusGlyph`]）ので、「あなたの番かどうか」を色が答え、「どちらの番か」を
  * 記号が答える形になる。
  *
+ * **群の名前は色ではなく役割で持つ。** `DESIGN.md` §11.2 が「アクセントカラーは
+ * 役割で固定する」と定めており、色名で持つと**次に色を差し替えたときに名前が嘘になる**。
+ *
+ * | 群 | 役割（`DESIGN.md` §11.2） | 状態 |
+ * |---|---|---|
+ * | `primary` | 進行中 | 作業中 |
+ * | `secondary` | 注意・保留 | 停滞・入力待ち・権限確認待ち |
+ * | `neutral` | — | 起動中 |
+ * | `positive` | 完了 | 終了 |
+ * | `negative` | エラー | 異常終了・不明 |
+ *
+ * **`secondary` が3状態を抱えるのが、役割表へ寄せた代償である。** 色で読めるのは
+ * 「進行中／注意／完了／エラー」の4段までになり、**その中のどれかは記号が答える**
+ * （利用者の判断・2026-08-26）。
+ *
  * **8→5 の写像はここ1箇所しかない。** 群から先の見た目（輪の色・濃さ・●の色・
  * 文字色）は [`STATUS_TONES`] が1つの表で持つ。
  */
-export type StatusGroup = 'amber' | 'orange' | 'green' | 'gray' | 'red'
+export type StatusGroup =
+  | 'primary'
+  | 'secondary'
+  | 'neutral'
+  | 'positive'
+  | 'negative'
 
 export function statusGroup(status: SessionStatus): StatusGroup {
   switch (status.kind) {
     case 'working':
-      // 動いている。放っておいてよい
-      return 'green'
+      // 進行中。放っておいてよい
+      return 'primary'
     case 'stalled':
-      // 進んでいないかもしれない
-      return 'orange'
+      // 注意——進んでいないかもしれない
+      return 'secondary'
     case 'waiting_permission':
     case 'waiting_input':
-      // **あなたが答えないと進まない。** どちらの番かは記号で分ける
-      return 'amber'
+      // 保留——**あなたが答えないと進まない。** どちらの番かは記号で分ける
+      return 'secondary'
     case 'starting':
-      return 'gray'
+      return 'neutral'
     case 'ended':
-      return status.ok ? 'gray' : 'red'
+      return status.ok ? 'positive' : 'negative'
     case 'unknown':
-      return 'red'
+      return 'negative'
   }
 }
 
@@ -498,15 +518,20 @@ export function statusGroup(status: SessionStatus): StatusGroup {
  * 群ごとの見た目。**色の対応表はこの1つだけ。**
  *
  * 輪の色（`accent`）と●の色（`dot`）と文字色（`text`）を別々の表に書くと、
- * 片方だけ直したときに**同じ状態が場所によって違う色になる**。実値の出どころは
- * カード設計§8-1-1（色）と§9-2-1（濃さ）で、**新しい色は発明していない**——
- * いままで使っていた7色から畳んだだけである。
+ * 片方だけ直したときに**同じ状態が場所によって違う色になる**。
+ *
+ * **実値は `DESIGN.md` §11.2 の役割表から取っている。** あそこは「候補を並べる
+ * だけでは決まらない。画面ごとに違う色が選ばれて統一が壊れる」として役割ごとに
+ * 1色を固定しており、**変えるときは表ごと差し替える**と決めてある。だからここも
+ * 表ごと差し替えた——1色だけ入れ替えると、役割表との対応がその1行で切れる。
  *
  * `dim` は**輪がいちばん薄くなるときの濃さ**。状態を示す部品には非テキストの
  * コントラスト 3:1 が要るので（調査§6-5）、カードの地（`--card` = `#171717`）に
- * 対して 3:1 を満たす最小値を 0.05 刻みで切り上げてある。**赤がいちばん高いのは
- * 偶然ではない**——赤は輝度の 71.52% を担う緑成分をほとんど持たないので、
- * 濃くしても明るくならない。
+ * 対して 3:1 を満たす最小値を 0.05 刻みで切り上げてある。**色を差し替えたら
+ * 引き直すこと**——旧5色の値をそのまま持ち越すと、割る色が出る（実測で 4色が割った）。
+ *
+ * **`negative` がいちばん高いのは偶然ではない**——赤系は輝度の 71.52% を担う緑成分を
+ * ほとんど持たないので、濃くしても明るくならない。
  *
  * 文字は輪より1段明るい（§8-3）。細い文字に濃い色を当てると、いちばん読ませたい
  * ラベルがいちばん読みにくくなる。
@@ -515,35 +540,40 @@ const STATUS_TONES: Record<
   StatusGroup,
   { accent: string; dim: string; dot: string; text: string }
 > = {
-  amber: {
-    accent: '#fbbf24',
+  // 進行中（`DESIGN.md` §11.2 Primary Accent）
+  primary: {
+    accent: '#3dd9e6',
+    dim: '45%',
+    dot: 'bg-cyan-400',
+    text: 'text-cyan-300',
+  },
+  // 注意・保留（同 Secondary Accent）
+  secondary: {
+    accent: '#f5a623',
     dim: '50%',
     dot: 'bg-amber-400',
     text: 'text-amber-300',
   },
-  orange: {
-    accent: '#f97316',
-    dim: '65%',
-    dot: 'bg-orange-500',
-    text: 'text-orange-300',
-  },
-  green: {
-    accent: '#10b981',
-    dim: '60%',
-    dot: 'bg-emerald-500',
-    text: 'text-emerald-300',
-  },
-  gray: {
-    accent: '#94a3b8',
-    dim: '60%',
+  // 役割を持たない静止。**地の色ではなく、文字の副色から取る**（同 §11.1 Text Secondary）
+  neutral: {
+    accent: '#9aa4b2',
+    dim: '55%',
     dot: 'bg-slate-400',
     text: 'text-slate-300',
   },
-  red: {
-    accent: '#ef4444',
-    dim: '75%',
-    dot: 'bg-red-500',
-    text: 'text-red-300',
+  // 完了（同 Positive）
+  positive: {
+    accent: '#8fd14f',
+    dim: '50%',
+    dot: 'bg-lime-400',
+    text: 'text-lime-300',
+  },
+  // エラー（同 Negative）
+  negative: {
+    accent: '#ff5a5f',
+    dim: '65%',
+    dot: 'bg-rose-400',
+    text: 'text-rose-300',
   },
 }
 
@@ -628,9 +658,16 @@ export function statusMotion(status: SessionStatus): StatusMotion {
  * 記号は形そのものが意味を持つので、**輪が消える環境でも、動きを止めても残る**
  * （§8-4）。ラベルの直前に、同じ色・同じ大きさで置く。
  *
- * **5つ（`⟳ ▷ ◌ ✓ ✕`）は同梱フォントの外へ落ちる**ことが実測で分かっている
+ * **5つ（`⟳ ▶ ◌ ✓ ✕`）は同梱フォントの外へ落ちる**ことが実測で分かっている
  * （§8-2-1）。落ちること自体は避けられないので、落ちる先を `.tile-glyph` の
  * フォント指定で名指ししてある。
+ *
+ * **入力待ちだけを `▷` から `▶`（塗り）へ寄せた**（`DESIGN.md` §14.1「Filled /
+ * Solid / Duotone 主体を基本とする。Thin Outline だけの体系を主役にしない」）。
+ * **残りは据え置く。** あの5つは落ちた先の字形で出ており、字を差し替えると
+ * **実機で崩れるかどうかを実物で見るまで分からない**——`▶` は落ちた先でも塗りの
+ * 三角として出ることを確かめてから入れている。**据え置きは §35.1 の「違反を残すと
+ * 決めたときは理由を書く」に当たる。**
  */
 export function statusGlyph(status: SessionStatus): string {
   switch (status.kind) {
@@ -639,7 +676,7 @@ export function statusGlyph(status: SessionStatus): string {
     case 'stalled':
       return '‖'
     case 'waiting_input':
-      return '▷'
+      return '▶'
     case 'waiting_permission':
       return '!'
     case 'starting':

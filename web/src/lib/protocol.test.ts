@@ -532,8 +532,9 @@ describe('状態から見た目を決める', () => {
   })
 
   it('8つの姿それぞれに記号が対応づいている', () => {
-    // **色が消える環境でも、動きを止めても残る**のは記号と文字だけ（設計§8-4）
-    expect(ALL.map(statusGlyph)).toEqual(['⟳', '‖', '▷', '!', '◌', '✓', '✕', '?'])
+    // **色が消える環境でも、動きを止めても残る**のは記号と文字だけ（設計§8-4）。
+    // 入力待ちは `DESIGN.md` §14.1「Filled / Solid 主体」へ寄せて `▶`（塗り）にした
+    expect(ALL.map(statusGlyph)).toEqual(['⟳', '‖', '▶', '!', '◌', '✓', '✕', '?'])
   })
 
   it('輪の色が5種類しか現れない', () => {
@@ -543,9 +544,12 @@ describe('状態から見た目を決める', () => {
 
   it('同じ色を持つ組は、記号で分かれている', () => {
     // 色だけでは見分けられないことを承知で畳んだので、記号が最後の砦になる
+    // `DESIGN.md` §11.2 の役割表へ寄せたので、同色の組が入れ替わった——
+    // **注意・保留（Secondary）が3状態を抱え**、起動中（Neutral）と終了（Positive）は
+    // 別の色になった
     const 同色の組: [SessionStatus, SessionStatus][] = [
       [{ kind: 'waiting_input' }, { kind: 'waiting_permission' }],
-      [{ kind: 'starting' }, { kind: 'ended', ok: true }],
+      [{ kind: 'waiting_input' }, { kind: 'stalled' }],
       [{ kind: 'ended', ok: false }, { kind: 'unknown' }],
     ]
     for (const [左, 右] of 同色の組) {
@@ -562,12 +566,14 @@ describe('状態から見た目を決める', () => {
 
   it('輪の薄い側の濃さが、カードの地に対して 3:1 を満たす値になっている', () => {
     // **周期の一部だけ状態が読めなくなる**という壊れ方なので、目で見ても気づけない。
-    // 値の出どころは設計§9-2-1（実値で引き直したもの。0.45 は3色で割っていた）
-    expect(dimOf({ kind: 'waiting_permission' })).toBe('50%')
-    expect(dimOf({ kind: 'stalled' })).toBe('65%')
-    expect(dimOf({ kind: 'working' })).toBe('60%')
-    expect(dimOf({ kind: 'starting' })).toBe('60%')
-    expect(dimOf({ kind: 'unknown' })).toBe('75%')
+    // 値の出どころは設計§9-2-1。**色を差し替えたら引き直すこと**——旧5色の値を
+    // そのまま持ち越すと割る色が出る（`DESIGN.md` の役割表へ寄せたときに実測で確認）
+    expect(dimOf({ kind: 'working' })).toBe('45%') // Cyan
+    expect(dimOf({ kind: 'waiting_permission' })).toBe('50%') // Amber
+    expect(dimOf({ kind: 'stalled' })).toBe('50%') // 同上（保留と注意は同じ群）
+    expect(dimOf({ kind: 'starting' })).toBe('55%') // Neutral
+    expect(dimOf({ kind: 'ended', ok: true })).toBe('50%') // Lime
+    expect(dimOf({ kind: 'unknown' })).toBe('65%') // Coral
   })
 
   it('文字色は状態ごとに変わり、輪と同じ表から引いている', () => {
@@ -581,9 +587,13 @@ describe('状態から見た目を決める', () => {
   it('セッション画面の●も同じ表から引いている', () => {
     // 一覧は●をやめたが、セッション画面には残る（設計§8-5）。**色は5色へ追随する**
     expect(new Set(ALL.map(statusTone)).size).toBe(5)
-    // 畳んだ結果、起動中と終了が同じ灰になる（前は slate-400 と slate-500 で別だった）
-    expect(statusTone({ kind: 'starting' })).toBe(
+    // 役割表へ寄せた結果、**起動中（Neutral）と終了（Positive・完了）は別の色**になった。
+    // 代わりに同じ色を持つのは、注意と保留（停滞・入力待ち・権限確認待ち）である
+    expect(statusTone({ kind: 'starting' })).not.toBe(
       statusTone({ kind: 'ended', ok: true }),
+    )
+    expect(statusTone({ kind: 'stalled' })).toBe(
+      statusTone({ kind: 'waiting_input' }),
     )
   })
 })
