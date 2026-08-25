@@ -271,13 +271,48 @@ describe('描き直しを起こさない作りになっている', () => {
     }
   })
 
-  it('動かすのは回転・移動・濃さだけ', () => {
-    // 大きさや位置そのものを動かすと描き直しが起きる。12枚同時に走る
+  it('位置と大きさそのものは動かさない', () => {
+    // **動かしてよいのは回転・移動・濃さ・大きさの4つ**（`scale` は跳ねの着地の
+    // つぶれで4つ目に入った。合成段で済むので描き直しは起きない）。
+    // ここで禁じているのは**版組をやり直させる指定**で、12枚同時に走ると効く
     const 動く = 素のCSS().match(/@keyframes[\s\S]*?\n}/g) ?? []
     expect(動く).not.toHaveLength(0)
     for (const keyframes of 動く) {
       expect(keyframes).not.toMatch(/^\s*(width|height|top|left|margin|padding):/m)
     }
+  })
+})
+
+describe('跳ね（権限確認待ち）', () => {
+  /** 名前つきの `@keyframes` の中身を、空白をそろえて取り出す */
+  function キーフレーム(name: string): string {
+    const 塊 = 素のCSS().match(
+      new RegExp(`@keyframes\\s+${name}\\s*\\{[\\s\\S]*?\\n\\}`),
+    )
+    expect(塊).not.toBeNull()
+    return (塊 as RegExpMatchArray)[0]
+      .replace(new RegExp(`@keyframes\\s+${name}`), '')
+      .replace(/\s+/g, ' ')
+      .trim()
+  }
+
+  it('鎮まり用のキーフレームは、本体と中身が完全に同じ', () => {
+    // **名前だけを違えるのが要点**（設計§9-3-1）。`animation-name` を差し替えると
+    // 動きが頭から再生されるので、離れた直後は必ず静止の区間から始まる。
+    // 中身がずれると「鎮まると形まで変わる」になり、片方だけ直す事故も起きる。
+    // いまは注釈しか守っていなかったので、機械に見させる
+    expect(キーフレーム('tile-shake-calm')).toBe(キーフレーム('tile-shake'))
+  })
+
+  it('動くのは周期の末尾だけ', () => {
+    // **間欠であることが「すぐには揺れ直さない」の実体**（設計§9-3）。頭へ動かすと
+    // 離れた直後にいきなり跳ね、鎮めた意味が消える
+    const 停留点 = [...キーフレーム('tile-shake').matchAll(/([\d.]+)%/g)].map((m) =>
+      Number(m[1]),
+    )
+    const 動く停留点 = 停留点.filter((値) => 値 !== 0 && 値 !== 100)
+    expect(動く停留点).not.toHaveLength(0)
+    expect(Math.min(...動く停留点)).toBeGreaterThanOrEqual(92.5)
   })
 })
 

@@ -3,12 +3,18 @@
 
   # なぜ CSS なのか
 
-  動かすのは**回転・移動・濃さの3つだけ**で、どれも描き直しを起こさない。円環の
+  動かすのは**回転・移動・濃さ・大きさの4つだけ**で、どれも描き直しを起こさない。円環の
   グラデーションはペイント段階で1回だけテクスチャに焼かれ、以後は GPU がそれを
   回すだけなので、**周期を変えても枚数を増やしても描く仕事は増えない**（調査§6-1）。
 
   アニメーションのライブラリ（motion）の個別変形の構文は**内部で変数を使うため
   加速されない**と公式が明記している。あれで作っていたら加速されなかった。
+
+  **「大きさ」は後から増えた4つ目である**（2026-08-26）。設計§9-0 は長く「回転・移動・
+  濃さの3つ」と書いていたが、押した手応え（`.tile-body:active` の `scale`）が先に
+  食い違っており、跳ねの着地のつぶれで2つ目になった。**`scale` は合成段で済む変形**
+  なので「描き直しを起こさない」という理由のほうは崩れていない。**崩れていたのは
+  数え方だけ**なので、実態へ直した。
 
   # 触ってよい範囲
 
@@ -58,34 +64,54 @@
 }
 
 /*
-  揺れ（権限確認待ち）。4.8秒のうち末尾の 0.36秒（7.5%）だけ動き、残りは静止。
+  跳ね（権限確認待ち）。4.8秒のうち末尾の 0.36秒（7.5%）だけ動き、残りは静止。
+
+  **横揺れから上へ跳ねる形へ変えた**（利用者の指定・2026-08-26）。±1.5px の横揺れは
+  「指の当たり判定より十分小さく」を優先した値で、**遠目には気づけなかった**（実物を
+  見た利用者の指摘）。沈む → 跳ぶ → 着地でつぶれる → 小さく跳ね返る、の順に置く。
 
   **バーストの中の往復は2回まで。** 4往復させると局所で 11Hz になり、面積の例外を
-  持たない厳しいほうの基準に触れる（調査§6-6）。
+  持たない厳しいほうの基準に触れる（調査§6-6）。縦の往復は2回（沈→上、着地→小跳ね）
+  で、0.36秒に2周期＝約 5.6Hz。**上限 3Hz は周期の話ではなく閃光の話**なので、輝度が
+  変わらない移動はここに当たらない。
 
   **鎮まり用のキーフレームは、形が同じで名前だけ違うものをもう1本置く。**
   `animation-name` を差し替えると動きが頭から再生されるので、離れた直後は必ず静止の
   区間から始まる＝「すぐには揺れ直さない」が仕掛け無しで成立する（設計§9-3-1）。
-  変数（`--tile-amp`）だけを差し替える形では**継続してしまい**、離れた直後に揺れが来る。
+  変数だけを差し替える形では**継続してしまい**、離れた直後に揺れが来る。
+  **中身が同一であることは、`tile.test.ts` が機械で見ている**（注釈だけに頼らない）。
 */
 @keyframes tile-shake {
   0%,
   92.5%,
   100% {
-    translate: 0;
+    translate: 0 0;
+    scale: 1 1;
     rotate: 0deg;
   }
-  94% {
-    translate: calc(-1 * var(--tile-amp));
-    rotate: calc(-1 * var(--tile-tilt));
+  /* 沈む（予備動作） */
+  93.5% {
+    translate: 0 var(--tile-drop);
+    scale: calc(1 + var(--tile-squash)) calc(1 - var(--tile-squash));
+    rotate: 0deg;
   }
-  96% {
-    translate: var(--tile-amp);
+  /* 頂点。伸びる */
+  95% {
+    translate: 0 calc(-1 * var(--tile-lift));
+    scale: calc(1 - var(--tile-squash)) calc(1 + var(--tile-squash));
     rotate: var(--tile-tilt);
   }
-  98% {
-    translate: calc(-1 * var(--tile-amp));
+  /* 着地のつぶれ */
+  96.5% {
+    translate: 0 var(--tile-drop);
+    scale: calc(1 + var(--tile-squash)) calc(1 - var(--tile-squash));
     rotate: calc(-1 * var(--tile-tilt));
+  }
+  /* 小さく跳ね返って打ち止め */
+  98% {
+    translate: 0 calc(-0.3 * var(--tile-lift));
+    scale: 1 1;
+    rotate: 0deg;
   }
 }
 
@@ -93,20 +119,33 @@
   0%,
   92.5%,
   100% {
-    translate: 0;
+    translate: 0 0;
+    scale: 1 1;
     rotate: 0deg;
   }
-  94% {
-    translate: calc(-1 * var(--tile-amp));
-    rotate: calc(-1 * var(--tile-tilt));
+  /* 沈む（予備動作） */
+  93.5% {
+    translate: 0 var(--tile-drop);
+    scale: calc(1 + var(--tile-squash)) calc(1 - var(--tile-squash));
+    rotate: 0deg;
   }
-  96% {
-    translate: var(--tile-amp);
+  /* 頂点。伸びる */
+  95% {
+    translate: 0 calc(-1 * var(--tile-lift));
+    scale: calc(1 - var(--tile-squash)) calc(1 + var(--tile-squash));
     rotate: var(--tile-tilt);
   }
-  98% {
-    translate: calc(-1 * var(--tile-amp));
+  /* 着地のつぶれ */
+  96.5% {
+    translate: 0 var(--tile-drop);
+    scale: calc(1 + var(--tile-squash)) calc(1 - var(--tile-squash));
     rotate: calc(-1 * var(--tile-tilt));
+  }
+  /* 小さく跳ね返って打ち止め */
+  98% {
+    translate: 0 calc(-0.3 * var(--tile-lift));
+    scale: 1 1;
+    rotate: 0deg;
   }
 }
 
@@ -330,11 +369,14 @@
   揺れ（権限確認待ち）。**切る枠から内側だけ**が揺れる——器は近づいたかを測る枠なので、
   揺らすと鎮めるための的そのものが逃げる。
 
-  振れ幅は指の当たり判定（おおむね 30px）より十分小さいので、押し損ねにはならない。
+  跳ぶ高さは指の当たり判定（おおむね 30px）より小さいので、押し損ねにはならない。
+  **ただし 1.5px から 8px へ 5倍以上にしたので、スマホの実機で見直すこと**（§16 の1）。
 */
 [data-motion='shake'] .tile-frame {
-  --tile-amp: 1.5px;
+  --tile-lift: 8px;
+  --tile-drop: 1.5px;
   --tile-tilt: 0.35deg;
+  --tile-squash: 0.04;
   animation: tile-shake 4.8s linear infinite;
 }
 
@@ -349,8 +391,10 @@
 @media (hover: hover) and (pointer: fine) {
   /* 完全には止めない。息をひそめた形で、生きているものが居ることは伝え続ける */
   [data-motion='shake']:where(:hover) .tile-frame {
-    --tile-amp: 0.4px;
+    --tile-lift: 1.2px;
+    --tile-drop: 0.3px;
     --tile-tilt: 0deg;
+    --tile-squash: 0;
     animation-name: tile-shake-calm;
   }
 
