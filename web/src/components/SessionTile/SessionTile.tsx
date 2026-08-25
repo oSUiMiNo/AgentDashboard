@@ -76,8 +76,28 @@ interface Props {
  */
 const ECHO_MS = 12_000
 
-/** 効果線の向き。放射状に等間隔＋±6度のばらつき（カード設計§9-4）。 */
-const LINE_ANGLES = [-4, 62, 117, 184, 238, 304]
+/**
+ * 効果線の向きと、**カードの縁のどこから出るか**（カード設計§9-4）。
+ *
+ * 放射状に等間隔＋±6度のばらつき、という向きの決め方は変えていない。変えたのは
+ * **起点**である。
+ *
+ * 旧版は中心から 140px の円周上へ6本を置いていた。**カードは横長（288×99〜137）なので、
+ * 円だと横は縁のすぐ外、縦は縁から 70px も離れる**——上下の2本ずつが隙間を飛び越えて
+ * **隣のカードの本文に重なっていた**（フェーズ6 の目視で実測）。要件は「カードの縁から
+ * 外へ」なので、円ではなく**縁に沿わせる**のが正しい。
+ *
+ * `x` / `y` は器（カードと同じ大きさ）に対する百分率で、線はその点から外向きに伸びる。
+ * **高さが 99px と 137px で変わっても、縁に付いたまま**になる。
+ */
+const LINES = [
+  { angle: -4, x: 100, y: 50 },
+  { angle: 62, x: 78, y: 100 },
+  { angle: 117, x: 28, y: 100 },
+  { angle: 184, x: 0, y: 50 },
+  { angle: 238, x: 24, y: 0 },
+  { angle: 304, x: 74, y: 0 },
+]
 
 /**
  * 直前の応答が**変わった直後だけ** true を返す。
@@ -160,9 +180,12 @@ export function SessionTile({ cardId }: Props) {
         <span className="tile-ring" aria-hidden />
         <button
           type="button"
-          className={`tile-body bg-card flex w-full flex-col gap-1.5 rounded-[10px] p-3 text-left transition-colors ${
-            stale ? 'opacity-60' : ''
-          }`}
+          /*
+            **薄くするのは中身だけ**（`tile.css` の `[data-connected='false']`）。
+            ここへ `opacity` を当てると**地の色ごと透ける**ので、裏の輪が出てきて
+            カードが状態の色で全面塗りになる（フェーズ6 の目視で実測）。
+          */
+          className="tile-body bg-card flex w-full flex-col gap-1.5 rounded-[10px] p-3 text-left transition-colors"
           data-testid="session-tile"
           data-card-id={session.card_id}
           data-status={session.status.kind}
@@ -179,8 +202,19 @@ export function SessionTile({ cardId }: Props) {
             navigate(sessionPath(session.card_id))
           }}
         >
-          {/* ① 状態と最終活動を1行に収める（カード設計§10-1） */}
-          <div className="flex items-center gap-2">
+          {/*
+            ① 状態と最終活動を1行に収める（カード設計§10-1）。
+
+            **復旧ボタンが出ているぶんだけ、右を空けておく。** あのボタンは器の直下に
+            絶対配置されているので、①行の右端へ寄る「接続断」やサブエージェントの
+            バッジと**同じ場所を取り合う**——空けないと、繋がっていないカードで
+            「接続断」がボタンの下へ潜って読めなくなる（フェーズ6 の目視で実測）。
+          */}
+          <div
+            className={`flex items-center gap-2 ${
+              revivable.kind !== 'live' ? 'pr-12' : ''
+            }`}
+          >
             {/*
               記号は**ラベルと別の要素**に置く。同じ要素へ入れると、ラベルを文字で
               探しているテストと支援技術が「⟳ 作業中」を1つの語として読む。
@@ -208,20 +242,11 @@ export function SessionTile({ cardId }: Props) {
             */}
             <span
               data-testid="elapsed"
-              className="text-muted-foreground w-28 shrink-0 truncate text-xs whitespace-nowrap tabular-nums"
+              className="text-muted-foreground min-w-0 flex-1 truncate text-xs whitespace-nowrap tabular-nums"
+              title={`最終活動 ${formatElapsed(now - session.last_activity_at)}`}
             >
               最終活動 {formatElapsed(now - session.last_activity_at)}
             </span>
-            {stale && (
-              <Badge
-                data-testid="disconnected-badge"
-                variant="secondary"
-                className="text-muted-foreground ml-auto shrink-0"
-                title="この PC からの報告が届いていません。表示は最後に分かっていた状態です"
-              >
-                接続断
-              </Badge>
-            )}
             {session.subagent_active > 0 && (
               <Badge
                 data-testid="subagent-badge"
@@ -246,7 +271,8 @@ export function SessionTile({ cardId }: Props) {
             **まだ分からない間は何も出さない**。状態の「不明」と並ぶと、どちらが不明なのか
             読み取れなくなる
           */}
-          {(session.model !== null ||
+          {(stale ||
+            session.model !== null ||
             session.permission_mode !== null ||
             pc !== null ||
             session.toml_account !== null) && (
@@ -254,6 +280,28 @@ export function SessionTile({ cardId }: Props) {
               data-testid="tile-badges"
               className="flex min-w-0 items-center gap-2"
             >
+              {/*
+                **「接続断」は②行に置く。**
+
+                設計§10-1 は①行へ置くと決めていたが、**288px には入らない**——実測で
+                ①行が必要とする幅は、権限確認待ち＋接続断で 290px（使えるのは 260px、
+                復旧ボタンぶんを空けると 212px）。溢れたバッジは切る枠に削られ、
+                **「接続断」が「接」だけになって読めなくなる**（フェーズ6 の目視で実測）。
+
+                ②行なら収まる（モデルとモードの実幅は合わせて 144px ほど）。**意味の上でも
+                ②行のほうが素直**で、あそこは「このセッションはどう動いているか」の属性が
+                並ぶ行である。
+              */}
+              {stale && (
+                <Badge
+                  data-testid="disconnected-badge"
+                  variant="secondary"
+                  className="text-muted-foreground shrink-0"
+                  title="この PC からの報告が届いていません。表示は最後に分かっていた状態です"
+                >
+                  接続断
+                </Badge>
+              )}
               {session.model !== null && (
                 <span
                   data-testid="model"
@@ -377,8 +425,17 @@ export function SessionTile({ cardId }: Props) {
       */}
       {motionKind === 'shake' && (
         <span className="tile-lines" data-testid="tile-lines" aria-hidden>
-          {LINE_ANGLES.map((angle) => (
-            <i key={angle} style={{ '--tile-angle': `${angle}deg` } as CSSAngle} />
+          {LINES.map((line) => (
+            <i
+              key={line.angle}
+              style={
+                {
+                  '--tile-angle': `${line.angle}deg`,
+                  '--tile-x': `${line.x}%`,
+                  '--tile-y': `${line.y}%`,
+                } as CSSAngle
+              }
+            />
           ))}
         </span>
       )}
@@ -412,4 +469,5 @@ export function SessionTile({ cardId }: Props) {
 }
 
 /** 効果線1本の向き。カスタムプロパティは `CSSProperties` に載らないので逃がす。 */
-type CSSAngle = React.CSSProperties & Record<'--tile-angle', string>
+type CSSAngle = React.CSSProperties &
+  Record<'--tile-angle' | '--tile-x' | '--tile-y', string>
