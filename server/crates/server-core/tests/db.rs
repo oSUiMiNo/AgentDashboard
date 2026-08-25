@@ -35,6 +35,7 @@ async fn seed_session(db: &sea_orm::DatabaseConnection, card_id: CardId) {
         hooks_seen: Set(false),
         archived: Set(false),
         toml_account: Set(None),
+        session_title: Set(None),
     };
     entity::sessions::Entity::insert(row)
         .exec(db)
@@ -753,6 +754,7 @@ async fn seed_card(
         hooks_seen: Set(false),
         archived: Set(archived),
         toml_account: Set(None),
+        session_title: Set(None),
     };
     entity::sessions::Entity::insert(row)
         .exec(db)

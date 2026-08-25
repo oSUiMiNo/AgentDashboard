@@ -841,14 +841,16 @@ impl SessionRegistry {
         //
         // 記録が手元に無いときだけ DB を見るので、通常の更新に問い合わせは増えない。
         // CardId は UUIDv4 なので、外したIDが後から別のセッションに割り当たることもない
-        // 既に知っているカードなら、生まれた時刻は**記録の側が正**（下記）
+        // 既に知っているカードなら、生まれた時刻と名前は**記録の側が正**（下記）
         let mut 記録の生まれた時刻 = None;
+        let mut 記録の名前 = None;
         match self.get(meta.card_id) {
             Some(record) => {
                 if self.refuse_crossing(&origin.account_id, record.account_id, meta.card_id) {
                     return Ok(());
                 }
                 記録の生まれた時刻 = Some(record.meta().created_at);
+                記録の名前 = record.meta().session_title;
             }
             None => match self.stored(meta.card_id).await? {
                 Some((owner, _))
@@ -878,6 +880,20 @@ impl SessionRegistry {
         // **群ごと並び替わる**ことになるので、約束のほうが先に壊れる。
         if let Some(生まれた時刻) = 記録の生まれた時刻 {
             meta.created_at = 生まれた時刻;
+        }
+        // **空の報告で名前を消さない**（設計§6-1）。生まれた時刻と同じ性質——名前は
+        // 擬似ターミナルではなく**カードに属する**もので、起こし直しをまたいで残る。
+        //
+        // 名前の行は履歴の途中に1回書かれるだけなので、**カードの報告のほうが先に着く**。
+        // 素直に取り込むと、記録に入っていた名前がその1回で消える（パーサが読み直して
+        // 報告し直すまでの隙間で消え、題の行がまだ無いセッションでは永久に戻らない）。
+        //
+        // 逆向き（空でない報告）は素通しでよい。名前が変わるときは**新しい名前が書かれる**
+        // ので、空を無視しても更新は届く。
+        if meta.session_title.is_none()
+            && let Some(名前) = 記録の名前
+        {
+            meta.session_title = Some(名前);
         }
         // 申告が持ち主と食い違ったら**記録には残すが帰属は動かさない**。警告を出すのは、
         // 利用者から見ると「toml に書いたのに効かない」だけに見えるため
@@ -1085,6 +1101,7 @@ impl SessionRegistry {
             hooks_seen: Set(meta.hooks_seen),
             archived: Set(false),
             toml_account: Set(meta.toml_account.clone()),
+            session_title: Set(meta.session_title.clone()),
         };
         entity::sessions::Entity::insert(row)
             .on_conflict(
@@ -1103,6 +1120,10 @@ impl SessionRegistry {
                         entity::sessions::Column::LastAssistantMessage,
                         entity::sessions::Column::HooksSeen,
                         entity::sessions::Column::TomlAccount,
+                        // `SessionTitle` は更新する。**渡す値のほうを正しくしてある**ので
+                        // （空の報告は `upsert` が記録の名前で埋め直す。§6-1）、
+                        // ここで例外を作らない
+                        entity::sessions::Column::SessionTitle,
                         // `Archived` は**更新しない**。外したことは後から届く報告で
                         // 取り消されてはいけない（上の `upsert` の門と対になっている）。
                         // `AccountId` も**更新しない**。帰属は最初の報告で決まり、
@@ -1209,8 +1230,6 @@ fn meta_from_row(row: entity::sessions::Model) -> SessionMeta {
         agent_connected: false,
         account: None,
         toml_account: row.toml_account,
-        // **記録から復元できない。列がまだ無い**（フェーズ3で足す）。
-        // 名前はパーサが読み直して報告し直すので、サーバを起こし直した直後だけ空になる
-        session_title: None,
+        session_title: row.session_title,
     }
 }

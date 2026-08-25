@@ -489,3 +489,265 @@ async fn 起こし直しの報告でカードの生まれた時刻は動かな�
         );
     }
 }
+
+/// セッションの名前が記録へ残り、読み直しても戻ること（カード設計§6-2・§6-3）。
+///
+/// 名前は CLI が履歴へ**1行書くだけ**のもので、パーサがそれを拾って報告する。記録に
+/// 持たないと、サーバを起こし直した瞬間に全部のカードから名前が消える——行はもう
+/// 追記されないので、二度と戻らない。
+#[tokio::test]
+async fn セッションの名前は記録へ残り読み直しても戻る() {
+    for backend in common::backends("session_title").await {
+        let 名無し = CardId::new();
+        let 名付き = CardId::new();
+        {
+            let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+                .await
+                .expect("記録層を立てられること");
+            registry.apply(&local(), upsert(名無し)).await;
+
+            let mut with_title = meta(名付き);
+            with_title.session_title = Some("TODOを完了に変更する".to_string());
+            registry
+                .apply(
+                    &local(),
+                    ServerMessage::SessionUpsert {
+                        session: Box::new(with_title),
+                    },
+                )
+                .await;
+        }
+
+        let restored = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+            .await
+            .expect("立て直せること");
+
+        assert_eq!(
+            restored
+                .get(名無し)
+                .expect("記録があること")
+                .meta()
+                .session_title,
+            None,
+            "[{}] 名前の無いカードに何かが埋まった",
+            backend.name
+        );
+        assert_eq!(
+            restored
+                .get(名付き)
+                .expect("記録があること")
+                .meta()
+                .session_title
+                .as_deref(),
+            Some("TODOを完了に変更する"),
+            "[{}] 名前が記録から戻らない",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+/// **空の報告で、記録の名前を消さないこと**（カード設計§6-1）。
+///
+/// このイシューでいちばん静かに壊れるところ。名前の行は履歴の途中に1回書かれるだけ
+/// なので、**カードの報告のほうが先に着く**。素直に取り込むと、記録に入っていた名前が
+/// その1回で消える——パーサが読み直して報告し直すまでの隙間で消え、題の行がまだ無い
+/// セッションでは永久に戻らない。
+///
+/// 生まれた時刻の据え置き（`起こし直しの報告でカードの生まれた時刻は動かない`）と
+/// **同じ性質**で、書く場所も同じ（`upsert` の中）。
+#[tokio::test]
+async fn 名前の無い報告は記録の名前を消さない() {
+    for backend in common::backends("session_title_keep").await {
+        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+            .await
+            .expect("記録層を立てられること");
+        let card_id = CardId::new();
+
+        let mut 名付き = meta(card_id);
+        名付き.session_title = Some("最初の題".to_string());
+        registry
+            .apply(
+                &local(),
+                ServerMessage::SessionUpsert {
+                    session: Box::new(名付き),
+                },
+            )
+            .await;
+
+        // 起こし直しの報告。**同じ CardId で、名前を持たずに名乗ってくる**
+        let mut 名無しの報告 = meta(card_id);
+        名無しの報告.status = SessionStatus::Starting;
+        registry
+            .apply(
+                &local(),
+                ServerMessage::SessionUpsert {
+                    session: Box::new(名無しの報告),
+                },
+            )
+            .await;
+
+        let あと = registry.get(card_id).expect("カードが在ること").meta();
+        assert_eq!(
+            あと.session_title.as_deref(),
+            Some("最初の題"),
+            "[{}] 空の報告で名前が消えた",
+            backend.name
+        );
+        assert_eq!(
+            あと.status,
+            SessionStatus::Starting,
+            "[{}] 名前以外は、いままでどおり新しい報告で更新されること",
+            backend.name
+        );
+
+        // **記録にも残っていること。** メモリだけ守っても、起こし直しで元へ戻る
+        let 読み直し = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+            .await
+            .expect("記録層を立て直せること");
+        assert_eq!(
+            読み直し
+                .get(card_id)
+                .expect("記録から戻ること")
+                .meta()
+                .session_title
+                .as_deref(),
+            Some("最初の題"),
+            "[{}] 記録の側が空で上書きされている",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+/// **据え置きが、更新まで止めていないこと**（カード設計§6-1）。
+///
+/// 名前が変わるときは**新しい名前が書かれる**（空にはならない）ので、空を無視しても
+/// 更新は届く。ここを取り違えて「一度付いたら動かさない」にすると、題が変わっても
+/// 古い名前が残り続ける。
+#[tokio::test]
+async fn 新しい名前の報告はちゃんと更新される() {
+    for backend in common::backends("session_title_update").await {
+        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+            .await
+            .expect("記録層を立てられること");
+        let card_id = CardId::new();
+
+        let mut 最初 = meta(card_id);
+        最初.session_title = Some("最初の題".to_string());
+        registry
+            .apply(
+                &local(),
+                ServerMessage::SessionUpsert {
+                    session: Box::new(最初),
+                },
+            )
+            .await;
+
+        let mut あとの題 = meta(card_id);
+        あとの題.session_title = Some("あとで付いた題".to_string());
+        registry
+            .apply(
+                &local(),
+                ServerMessage::SessionUpsert {
+                    session: Box::new(あとの題),
+                },
+            )
+            .await;
+
+        assert_eq!(
+            registry
+                .get(card_id)
+                .expect("カードが在ること")
+                .meta()
+                .session_title
+                .as_deref(),
+            Some("あとで付いた題"),
+            "[{}] 据え置きが更新まで止めている",
+            backend.name
+        );
+
+        let 読み直し = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+            .await
+            .expect("記録層を立て直せること");
+        assert_eq!(
+            読み直し
+                .get(card_id)
+                .expect("記録から戻ること")
+                .meta()
+                .session_title
+                .as_deref(),
+            Some("あとで付いた題"),
+            "[{}] 更新が記録まで届いていない",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+/// **サーバを起こし直した直後の、最初の空の報告でも名前が消えないこと**（カード設計§6-1）。
+///
+/// 据え置きは「記録の名前」を引けることが前提だが、サーバを立て直した瞬間はメモリが
+/// 空である。**起動時に記録を全件メモリへ読む**ので最初の報告の時点で引ける、という
+/// のが設計の根拠——ここが崩れると、サーバの再起動のたびに名前が1回消える。
+///
+/// `名前の無い報告は記録の名前を消さない` と分けてあるのは、**守っている仕組みが違う**
+/// ため。あちらはメモリに載っているカードの話で、こちらは**起動時の読み込み**の話。
+#[tokio::test]
+async fn サーバを起こし直しても最初の空の報告で名前が消えない() {
+    for backend in common::backends("session_title_reboot").await {
+        {
+            let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+                .await
+                .expect("記録層を立てられること");
+            let mut 名付き = meta(CardId::new());
+            名付き.session_title = Some("起こし直しをまたぐ題".to_string());
+            let card_id = 名付き.card_id;
+            registry
+                .apply(
+                    &local(),
+                    ServerMessage::SessionUpsert {
+                        session: Box::new(名付き),
+                    },
+                )
+                .await;
+
+            // ここでサーバが落ちる。メモリは失われ、記録だけが残る
+            drop(registry);
+
+            let 起こし直し = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+                .await
+                .expect("立て直せること");
+
+            // 立て直した直後、**セッションホストは名前を持たずに名乗ってくる**
+            // （パーサが読み直して報告し直すのは、このあと）
+            let mut 名無しの報告 = meta(card_id);
+            名無しの報告.status = SessionStatus::Starting;
+            起こし直し
+                .apply(
+                    &local(),
+                    ServerMessage::SessionUpsert {
+                        session: Box::new(名無しの報告),
+                    },
+                )
+                .await;
+
+            assert_eq!(
+                起こし直し
+                    .get(card_id)
+                    .expect("カードが在ること")
+                    .meta()
+                    .session_title
+                    .as_deref(),
+                Some("起こし直しをまたぐ題"),
+                "[{}] サーバの再起動で名前が1回消えた",
+                backend.name
+            );
+        }
+
+        backend.finish().await;
+    }
+}

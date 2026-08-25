@@ -10,6 +10,7 @@ mod m20260731_000001_init;
 mod m20260801_000002_agent_capabilities;
 mod m20260805_000003_projects;
 mod m20260810_000004_token_kind;
+mod m20260825_000005_session_title;
 
 use sea_orm_migration::prelude::*;
 
@@ -23,6 +24,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260801_000002_agent_capabilities::Migration),
             Box::new(m20260805_000003_projects::Migration),
             Box::new(m20260810_000004_token_kind::Migration),
+            Box::new(m20260825_000005_session_title::Migration),
         ]
     }
 }

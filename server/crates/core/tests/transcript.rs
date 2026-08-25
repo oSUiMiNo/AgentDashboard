@@ -288,3 +288,56 @@ async fn 同じサーバの2本目以降のセッションにも履歴が届く(
         assert_eq!(nodes.len(), 3, "{index} 本目の履歴が揃っていません");
     }
 }
+
+/// **セッションの名前が、履歴の1行から記録まで届くこと**（カード設計§1・§5・§6）。
+///
+/// 名前は `{"type":"ai-title","aiTitle":"…"}` という**表示のツリーに乗らない1行**として
+/// 書かれる。パーサがこれを「属性」として拾い、報告に載せ、PC 側が `meta` を直して
+/// カード1枚を配り直し、記録層が受け取る——**5段が繋がって初めて画面に出せる**。
+///
+/// 単体はそれぞれの継ぎ目しか見ていない（パーサは「拾えた」まで、`session_title.rs` は
+/// 「報告 → meta」まで）。**擬似 claude が書いた実物の行から通す**のはここだけ。
+#[tokio::test]
+async fn 履歴に書かれた名前がカードの記録まで届く() {
+    let dir = work_dir("title");
+    let (server, session, transcript) = start_session_with_transcript(&dir).await;
+
+    // 起こした直後は必ずここから始まる。名前は最初のターンのあとに CLI が付ける
+    let listed = server
+        .wait_for_listed("1枚になる", |cards| cards.len() == 1)
+        .await;
+    assert_eq!(
+        listed[0].session_title, None,
+        "起こした直後に名前が埋まっている"
+    );
+
+    // 本体のファイルへ、実物と同じ形の1行を書く（`fixtures/v2.1.220/basic-tools` から）
+    append(&transcript, &sample_lines());
+    append(
+        &transcript,
+        &[r#"{"type":"ai-title","aiTitle":"TODOを完了に変更し作業内容をまとめる","sessionId":"11111111-2222-3333-4444-555555555555"}"#.to_string()],
+    );
+
+    let listed = server
+        .wait_for_listed("名前が載る", |cards| {
+            cards.iter().any(|card| card.session_title.is_some())
+        })
+        .await;
+    assert_eq!(
+        listed[0].session_title.as_deref(),
+        Some("TODOを完了に変更し作業内容をまとめる"),
+        "記録に載った名前が違う"
+    );
+
+    // **ブラウザが読む口にも載ること。** 記録に入っても、配る経路で落ちれば画面には出ない
+    let (status, body) = server.get("/api/sessions").await;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.contains("TODOを完了に変更し作業内容をまとめる"),
+        "一覧の口に名前が出ていない: {body}"
+    );
+
+    // 名前は**表示のツリーには乗らない**（属性であってノードではない）
+    let nodes = wait_for_nodes(&server, session.card_id, 3).await;
+    assert_eq!(nodes.len(), 3, "名前の行がノードとして混ざった");
+}
