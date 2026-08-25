@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { SessionTile } from './SessionTile'
 import type { SessionMeta, SessionStatus } from '@/lib/protocol'
+import { statusAccentColor } from '@/lib/protocol'
 import {
   applySessionSnapshot,
   clearSessions,
@@ -10,6 +11,7 @@ import {
   setCardError,
   upsertSession,
 } from '@/stores/sessions'
+import { resetRoam, useRoamStore } from '@/stores/roam'
 import { useSettingsStore } from '@/stores/settings'
 import { useWsStore } from '@/stores/ws'
 import { settingsFixture } from '@/test/fixtures'
@@ -811,5 +813,83 @@ describe('SessionTile の復旧', () => {
     // **部分一致で見ない。**「復旧中…」は「復旧」を含むので、
     // `toHaveTextContent('復旧')` では巻き添えを捕まえられない（実際に空振りした）
     expect(screen.getByTestId('revive-button')).not.toHaveTextContent('復旧中')
+  })
+})
+
+describe('跳ねるたびに、画面を回遊する線を放つ', () => {
+  /**
+   * 跳ねの周期が1周した合図。名前を渡せるので、選り分けの検査に使える。
+   *
+   * **`fireEvent.animationIteration` では届かない。** jsdom に `AnimationEvent` が
+   * 無いので React の合成イベントまで通らず、**何を投げても0回しか鳴らない**
+   * （＝書いても常に通る空振りのテストになる）。素のイベントを直接投げる。
+   */
+  function 折り返す(name: string): void {
+    const frame = screen.getByTestId('tile-shell').querySelector('.tile-frame')
+    expect(frame).not.toBeNull()
+    const event = new Event('animationiteration')
+    Object.defineProperty(event, 'animationName', { value: name })
+    act(() => {
+      ;(frame as Element).dispatchEvent(event)
+    })
+  }
+
+  function 待つカードを描く(): void {
+    applySessionSnapshot([meta({ status: { kind: 'waiting_permission' } })])
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <SessionTile cardId={CARD} />
+      </MemoryRouter>,
+    )
+  }
+
+  beforeEach(() => {
+    resetRoam()
+    useSettingsStore.setState((state) => ({
+      settings: { ...state.settings, motion_quiet: 'lively' },
+    }))
+  })
+
+  afterEach(() => resetRoam())
+
+  it('跳ねの折り返しで放つ', () => {
+    待つカードを描く()
+    折り返す('tile-shake')
+    expect(useRoamStore.getState().lines.length).toBeGreaterThan(0)
+  })
+
+  it('鎮まっている間は放たない', () => {
+    // 近づいている間は既存の短い線（`tile-lines`）の担当。**名前が別物になる**ので、
+    // 見分けを落とすとマウスを乗せたまま線が飛び続ける
+    待つカードを描く()
+    折り返す('tile-shake-calm')
+    expect(useRoamStore.getState().lines).toHaveLength(0)
+  })
+
+  it('輪の回転では放たない', () => {
+    // 弧も呼吸も無限に折り返すので、**名前を見ないと全部の状態で鳴る**
+    待つカードを描く()
+    折り返す('tile-spin')
+    expect(useRoamStore.getState().lines).toHaveLength(0)
+  })
+
+  it('「控えめ」では放たない', () => {
+    // 「控えめ」は仕様上カードの跳ねを残すので、**折り返し自体は鳴り続ける**。
+    // 止めているのは門（`emitRoam`）のほうで、ここが外れると画面だけ静かで
+    // 在庫が溜まり続ける形になる
+    useSettingsStore.setState((state) => ({
+      settings: { ...state.settings, motion_quiet: 'calm' },
+    }))
+    待つカードを描く()
+    折り返す('tile-shake')
+    expect(useRoamStore.getState().lines).toHaveLength(0)
+  })
+
+  it('放つ線は、そのカードの状態の色を持つ', () => {
+    待つカードを描く()
+    折り返す('tile-shake')
+    for (const line of useRoamStore.getState().lines) {
+      expect(line.accent).toBe(statusAccentColor({ kind: 'waiting_permission' }))
+    }
   })
 })

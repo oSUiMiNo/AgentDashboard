@@ -52,6 +52,7 @@ import {
   reviveReason,
   reviveState,
   statusAccent,
+  statusAccentColor,
   statusGlyph,
   statusLabel,
   statusMotion,
@@ -60,6 +61,7 @@ import {
 import type { CardId } from '@/lib/protocol'
 import { sessionPath } from '@/lib/routes'
 import { useNow } from '@/lib/sessions'
+import { emitRoam } from '@/stores/roam'
 import { useCardError, useReviving, useSessionCard } from '@/stores/sessions'
 import { agentName, agentOf, useSettingsStore } from '@/stores/settings'
 import { useWsStore } from '@/stores/ws'
@@ -131,11 +133,52 @@ export function SessionTile({ cardId }: Props) {
   const session = useSessionCard(cardId)
   const agents = useSettingsStore((state) => state.settings.agents)
   const quiet = useSettingsStore((state) => state.settings.motion_quiet)
+  const frameRef = useRef<HTMLDivElement>(null)
   const revive = useWsStore((state) => state.revive)
   const reviving = useReviving(cardId)
   const cardError = useCardError(cardId)
   const now = useNow()
   const echo = useEcho(session?.last_assistant_message ?? null)
+
+  /*
+    **跳ねるたびに、画面を回遊する線を放つ**（§9-7）。
+
+    折り返しを合図に使うと、4.8秒の周期の末尾＝**跳ねた直後**にカード1枚あたり
+    ちょうど1回だけ鳴る。タイマも `requestAnimationFrame` も持たないので、時計が
+    2つになってずれることがない。
+
+    **React の `onAnimationIteration` では受けられない。** jsdom に `AnimationEvent`
+    が無く、合成イベントまで届かないので**テストで1度も確かめられない**——素の
+    listener なら実物でもテストでも同じ道を通る。
+
+    **名前で選り分ける。** 弧（`tile-spin`）も呼吸（`tile-breathe`）も無限に折り返す
+    ので、見ないと全部の状態で鳴る。鎮まり中は `tile-shake-calm` へ差し替わるので、
+    **近づいている間は自然に飛ばない**——あちらは既存の短い線（`tile-lines`）の担当。
+
+    「静止」と OS の「動きを減らす」では `animation: none` なので、**そもそもこの行が
+    呼ばれない**。門（`emitRoam`）が見るのは「控えめ」だけでよい。
+  */
+  const 跳ねた = useRef<() => void>(undefined)
+  跳ねた.current = () => {
+    const frame = frameRef.current
+    if (frame === null || session === undefined) return
+    emitRoam({
+      rect: frame.getBoundingClientRect(),
+      accent: statusAccentColor(session.status),
+      quiet,
+    })
+  }
+
+  useEffect(() => {
+    const frame = frameRef.current
+    if (frame === null) return
+    const 受ける = (event: Event) => {
+      if ((event as AnimationEvent).animationName !== 'tile-shake') return
+      跳ねた.current?.()
+    }
+    frame.addEventListener('animationiteration', 受ける)
+    return () => frame.removeEventListener('animationiteration', 受ける)
+  }, [])
 
   if (!session) {
     // 消えた直後の一瞬。構造の更新が届けば親から外れる
@@ -153,6 +196,7 @@ export function SessionTile({ cardId }: Props) {
   const revivable = reviveState(session, agentOf(agents, session.agent_id))
   const reviveWhy = reviveReason(revivable)
   const motionKind = statusMotion(session.status)
+
 
   return (
     /*
@@ -195,7 +239,10 @@ export function SessionTile({ cardId }: Props) {
         中身の角丸も引き直す。枠 2px のときは 12−2＝10px で同心だったので、5px なら
         **7px** になる。
       */}
-      <div className="tile-frame relative w-[294px] overflow-hidden rounded-[0_12px_12px_12px] p-[5px]">
+      <div
+        ref={frameRef}
+        className="tile-frame relative w-[294px] overflow-hidden rounded-[0_12px_12px_12px] p-[5px]"
+      >
         {/* 回る輪。**弧は疑似要素側**にあり、止めるときは弧だけを消す（§9-1） */}
         <span className="tile-ring" aria-hidden />
         <button

@@ -24,6 +24,7 @@ import { SessionView } from '@/components/SessionView/SessionView'
 import { SettingsPage } from '@/components/Settings/SettingsPage'
 import { TileGrid } from '@/components/TileGrid/TileGrid'
 import { ProjectAdd } from '@/components/ProjectAdd/ProjectAdd'
+import { RoamLayer } from '@/components/RoamLayer/RoamLayer'
 import { selfhealLabel } from '@/lib/protocol'
 import { ACCOUNT, HOME, LOCAL_HOST, SETTINGS } from '@/lib/routes'
 import { canEnter, useAuthStore } from '@/stores/auth'
@@ -212,6 +213,15 @@ function Shell() {
       ) : (
         <AuthGate />
       )}
+
+      {/*
+        画面を回遊する効果線（カード設計§9-7）。**カードの中から出すと切られる**ので、
+        ここに1枚だけ置く——一覧のスクロールする入れ物にも、カードの切る枠にも
+        `overflow` が掛かっている。
+
+        `fixed` なので場所を取らず、線が1本も無ければ何も描かない。
+      */}
+      <RoamLayer />
     </main>
   )
 }

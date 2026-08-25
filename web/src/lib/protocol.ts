@@ -643,6 +643,17 @@ export function statusAccent(status: SessionStatus): CSSProperties {
 }
 
 /**
+ * 輪の色だけを取り出す（カード設計§9-7）。
+ *
+ * 上の `statusAccent` は CSS 変数を載せた `CSSProperties` を返すので、**型の上では
+ * `--tile-accent` を読めない**。回遊する線は色を値として持ち回る（層は DOM を1度も
+ * 読まない）ので、こちらから取る。**対応表は割らない**——どちらも同じ表を引く。
+ */
+export function statusAccentColor(status: SessionStatus): string {
+  return STATUS_TONES[statusGroup(status)].accent
+}
+
+/**
  * カードの動きの種類（カード設計§8-2）。
  *
  * **合図の強さを対処の必要性に比例させたい**が、いまは作業中がいちばん強く回る。
