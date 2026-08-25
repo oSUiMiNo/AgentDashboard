@@ -52,13 +52,19 @@ test('フックの受信にあわせて小窓の状態が変わる', async ({ pa
   await fireHook(page, 'Stop', '{"last_assistant_message":"テストが通りました"}')
   await expect(view).toHaveAttribute('data-status', 'waiting_input')
 
-  // 一覧へ戻ると、状態と直前の応答が小窓にも出ている
+  // 一覧へ戻ると、状態と名前が小窓にも出ている。
+  //
+  // **直前の応答は、ここでは出ない。** 常時表示をやめ、`last_assistant_message` が
+  // **変わった瞬間に載っているカードへ12秒だけ**出す形にした（カード設計§11-2）。
+  // `page.goto('/')` はカードを作り直すので初回マウント扱いになり、**原理的に出ない**。
+  // 出るところは `tile.spec.ts` が2ページを使って見ている。
   await page.goto('/')
   const back = page.getByTestId('session-tile').first()
   await expect(back).toHaveAttribute('data-status', 'waiting_input')
-  await expect(back.getByTestId('last-message')).toHaveText(
-    'テストが通りました',
+  await expect(back.getByTestId('session-title')).toHaveText(
+    '名前はまだありません',
   )
+  await expect(back.getByTestId('session-echo')).toHaveCount(0)
   await expect(back.getByTestId('elapsed')).toContainText('最終活動')
 })
 
