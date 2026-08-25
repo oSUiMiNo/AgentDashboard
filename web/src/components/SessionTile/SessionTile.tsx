@@ -217,6 +217,10 @@ export function SessionTile({ cardId }: Props) {
       data-motion={motionKind}
       // **賑やかのときは属性ごと出さない**（カード設計§9-5-3）
       data-quiet={quiet === 'lively' ? undefined : quiet}
+      // **中身と同じ印を器にも出す**（カード設計§7-4-4）。輪と効果線は中身の
+      // **兄弟**なので、中身にだけ印を付けても CSS が届かない——繋がっていない
+      // カードでも枠だけ元の明るさで出ていた
+      data-connected={session.agent_connected}
       style={statusAccent(session.status)}
     >
       {/*
