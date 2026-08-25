@@ -176,6 +176,12 @@ pub fn render_session_detail(meta: &SessionMeta, now_ms: i64, home: Option<&str>
                 .unwrap_or_else(|| "-（この機械）".to_string())
         ),
     ];
+    // **名前が無ければ行ごと出さない**（カード設計§12）。名前は最初のターンのあとに
+    // 付くので、起こした直後は必ず無い——`-` を並べても「まだ付いていない」以上のことは
+    // 伝わらないし、人が読む答えに空欄が増えるだけになる
+    if let Some(title) = &meta.session_title {
+        lines.push(format!("名前         : {title}"));
+    }
     if let Some(message) = &meta.last_assistant_message {
         lines.push(format!("直前の応答   : {}", first_line(message, 120)));
     }
@@ -534,5 +540,60 @@ mod tests {
         assert_eq!(format_ago(now, now - 30 * 86_400_000), "30日前");
         // 時計が僅かに前後しても負の値は出さない
         assert_eq!(format_ago(now, now + 5_000), "0秒前");
+    }
+
+    // --- セッションの名前（カード設計§12） ---
+
+    /// 名前だけを差し替えられる素の `SessionMeta`。
+    fn meta(session_title: Option<&str>) -> SessionMeta {
+        SessionMeta {
+            card_id: protocol::CardId::new(),
+            project: protocol::ProjectId("/tmp/project".to_string()),
+            claude_session_id: None,
+            permission_mode: None,
+            model: None,
+            model_label: None,
+            model_requested: None,
+            status: protocol::SessionStatus::Working,
+            subagent_active: 0,
+            last_activity_at: 0,
+            last_assistant_message: None,
+            created_at: 0,
+            hooks_seen: false,
+            agent_id: None,
+            agent_connected: true,
+            account: None,
+            toml_account: None,
+            session_title: session_title.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn 詳細には名前が一行で出る() {
+        let text = render_session_detail(&meta(Some("TODOを完了に変更する")), 0, None);
+        assert!(text.contains("名前"), "名前の行が無い: {text}");
+        assert!(
+            text.contains("TODOを完了に変更する"),
+            "名前が出ていない: {text}"
+        );
+    }
+
+    /// **名前が無ければ行ごと出さない。** `-` を並べても「まだ付いていない」以上のことは
+    /// 伝わらず、人が読む答えに空欄が増えるだけになる。
+    #[test]
+    fn 名前が無ければその行は出ない() {
+        let text = render_session_detail(&meta(None), 0, None);
+        assert!(!text.contains("名前"), "空欄の行が出ている: {text}");
+    }
+
+    /// 一覧のほうには**足さない**（カード設計§12）。1行に詰める形なので、列を増やすと
+    /// 幅が破綻する。名前を読みたいときは `session show` を使う。
+    #[test]
+    fn 一覧には名前を出さない() {
+        let text = render_sessions(&[meta(Some("TODOを完了に変更する"))], 0, None);
+        assert!(
+            !text.contains("TODOを完了に変更する"),
+            "一覧に名前が出ている: {text}"
+        );
     }
 }
