@@ -180,10 +180,11 @@ test('起こした直後は名前が無く、履歴が届くと題が出て、�
   const cardId = await cardIdOf(tile)
 
   // 名前は最初のターンのあとに付くので、**起こした直後は必ずこの状態を通る**。
-  // 行ごと消さないのは、名前が付いた瞬間にカードが伸びて隣まで動くため（§11-1）
+  // 行ごと消さないのは、名前が付いた瞬間にカードが伸びて隣まで動くため（§11-1）。
+  // **文字は出さない**（2026-08-26）——待つ以外にできることが無い案内は置かない
   const title = tileOf(page, cardId).getByTestId('session-title')
-  await expect(title).toHaveText('名前はまだありません')
   await expect(title).toHaveAttribute('data-named', 'false')
+  expect((await title.textContent())?.replace(/[\s\u00a0]/g, '')).toBe('')
 
   await openSession(page, tile)
   await fireHook(page, 'SessionStart')
@@ -395,7 +396,7 @@ test('ハイコントラストの環境では、切る枠が実線へ退避す�
   expect(await frameBorder()).toMatchObject({ style: 'solid', width: '0px' })
 
   await page.emulateMedia({ forcedColors: 'active' })
-  expect(await frameBorder()).toMatchObject({ style: 'solid', width: '2.5px' })
+  expect(await frameBorder()).toMatchObject({ style: 'solid', width: '3px' })
 
   // **戻してから終える。** 強制配色は同じページに残るので、置いていくと後続が巻き添えになる
   await page.emulateMedia({ forcedColors: 'none' })

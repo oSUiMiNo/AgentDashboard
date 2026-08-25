@@ -61,8 +61,9 @@ test('フックの受信にあわせて小窓の状態が変わる', async ({ pa
   await page.goto('/')
   const back = page.getByTestId('session-tile').first()
   await expect(back).toHaveAttribute('data-status', 'waiting_input')
-  await expect(back.getByTestId('session-title')).toHaveText(
-    '名前はまだありません',
+  await expect(back.getByTestId('session-title')).toHaveAttribute(
+    'data-named',
+    'false',
   )
   await expect(back.getByTestId('session-echo')).toHaveCount(0)
   await expect(back.getByTestId('elapsed')).toContainText('最終活動')

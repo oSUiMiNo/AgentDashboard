@@ -471,9 +471,14 @@ export function SessionTile({ cardId }: Props) {
           {/*
             ③ セッション名（カード設計§11-1）。
 
-            **名前が無くても行を残す。** 名前は最初のターンのあとに付くので、起こした
-            直後は必ずこの状態を通る。行ごと消すと、名前が付いた瞬間にカードが1行ぶん
-            伸び、**横に並んでいる他のカードまで動く**。
+            **名前が無くても行の場所は残す。** 名前は最初のターンのあとに付くので、
+            起こした直後は必ずこの状態を通る。行ごと消すと、名前が付いた瞬間にカードが
+            1行ぶん伸び、**横に並んでいる他のカードまで動く**（器は行の高さまで伸びる）。
+
+            **ただし文字は出さない**（利用者の指定・2026-08-26）。「名前はまだありません」
+            と書いても**利用者にできることが1つも無い**——名前は CLI が勝手に付けるもので、
+            待つ以外の行動に繋がらない。空けておけば、付いた瞬間に文字が現れる。
+            場所を保つのは**改行しない空白**で、`truncate` が効いたまま高さだけが残る。
 
             マウスを乗せて全体を出すのは補助にとどめる——**タッチにホバーは存在しない**
             ので、スマホからはこの手段に届かない。全体を読む道はカードを開けば必ずある
@@ -481,14 +486,10 @@ export function SessionTile({ cardId }: Props) {
           <p
             data-testid="session-title"
             data-named={session.session_title !== null}
-            className={`truncate text-xs ${
-              session.session_title === null
-                ? 'text-muted-foreground/60'
-                : 'text-muted-foreground'
-            }`}
+            className="text-muted-foreground truncate text-xs"
             title={session.session_title ?? undefined}
           >
-            {session.session_title ?? '名前はまだありません'}
+            {session.session_title ?? '\u00a0'}
           </p>
         </button>
 

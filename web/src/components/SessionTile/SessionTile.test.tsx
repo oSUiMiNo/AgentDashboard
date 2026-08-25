@@ -346,12 +346,15 @@ describe('SessionTile のセッション名', () => {
     expect(title).toHaveAttribute('data-named', 'true')
   })
 
-  it('名前が無いときは、薄い字でそう言う', () => {
-    // 名前は最初のターンのあとに付くので、**起こした直後は必ずこの状態を通る**
+  it('名前が無いときは、文字を1つも出さない', () => {
+    // 名前は最初のターンのあとに付くので、**起こした直後は必ずこの状態を通る**。
+    // 「名前はまだありません」と書いても**利用者にできることが1つも無い**ので、
+    // 場所だけ残して空けておく（利用者の指定・2026-08-26）
     renderTile(meta({ session_title: null }))
 
     const title = screen.getByTestId('session-title')
-    expect(title).toHaveTextContent('名前はまだありません')
+    // 改行しない空白しか入っていない＝目に見える文字は0
+    expect(title.textContent?.replace(/[\s\u00a0]/g, '')).toBe('')
     expect(title).toHaveAttribute('data-named', 'false')
   })
 

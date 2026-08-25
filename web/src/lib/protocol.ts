@@ -561,14 +561,14 @@ const STATUS_TONES: Record<
   // 進行中（`DESIGN.md` §11.2 Primary Accent）
   primary: {
     accent: '#3dd9e6',
-    dim: '45%',
+    dim: '70%',
     dot: 'bg-cyan-400',
     text: 'text-cyan-300',
   },
   // 注意・保留（同 Secondary Accent）
   secondary: {
     accent: '#f5a623',
-    dim: '50%',
+    dim: '75%',
     dot: 'bg-amber-400',
     text: 'text-amber-300',
   },
@@ -596,7 +596,7 @@ const STATUS_TONES: Record<
   // エラー（同 Negative）
   negative: {
     accent: '#ff5a5f',
-    dim: '65%',
+    dim: '90%',
     dot: 'bg-rose-400',
     text: 'text-rose-300',
   },
@@ -634,11 +634,25 @@ export function statusTextTone(status: SessionStatus): string {
  * `React.CSSProperties` はカスタムプロパティを受け付けないので、キャストが要る
  * （付けないと `tsc -b` が落ちる）。
  */
+/**
+ * 群の濃さより静かにする状態（カード設計§8-3-1）。
+ *
+ * **色は群で決まるが、強さは状態で決まってよい。** 終了は起動中と同じ灰だが、
+ * **一覧でいちばん数が多くなるうえ、対処が要らない唯一の群**である。同じ濃さで
+ * 出すと画面の大半が同じ明るさの枠で埋まる（実物を見た利用者の指摘・2026-08-26）。
+ *
+ * **対応表は割っていない**——色は上の表がただ1つ持ったままで、ここは濃さだけを
+ * 下げる。`3:1` の床は守る（0.35 がその床そのもので、これ以上は落とせない）。
+ */
+const QUIETER_DIM: Partial<Record<SessionStatus['kind'], string>> = {
+  ended: '35%',
+}
+
 export function statusAccent(status: SessionStatus): CSSProperties {
   const tone = STATUS_TONES[statusGroup(status)]
   return {
     '--tile-accent': tone.accent,
-    '--tile-dim': tone.dim,
+    '--tile-dim': QUIETER_DIM[status.kind] ?? tone.dim,
   } as CSSProperties
 }
 

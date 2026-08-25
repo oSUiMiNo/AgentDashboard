@@ -570,12 +570,17 @@ describe('状態から見た目を決める', () => {
     // **周期の一部だけ状態が読めなくなる**という壊れ方なので、目で見ても気づけない。
     // 値の出どころは設計§9-2-1。**色を差し替えたら引き直すこと**——旧5色の値を
     // そのまま持ち越すと割る色が出る（`DESIGN.md` の役割表へ寄せたときに実測で確認）
-    expect(dimOf({ kind: 'working' })).toBe('45%') // Cyan
-    expect(dimOf({ kind: 'waiting_permission' })).toBe('50%') // Amber
-    expect(dimOf({ kind: 'stalled' })).toBe('50%') // 同上（保留と注意は同じ群）
-    expect(dimOf({ kind: 'starting' })).toBe('55%') // Neutral
-    expect(dimOf({ kind: 'ended', ok: true })).toBe('55%') // 同上（終了も Neutral）
-    expect(dimOf({ kind: 'unknown' })).toBe('65%') // Coral
+    // **実物を見て引き上げた**（2026-08-26）。床は 3:1 のままで、そこからの
+    // 余裕を使って見た目の明るさを 0.62 → 0.72 前後へ揃えてある
+    expect(dimOf({ kind: 'working' })).toBe('70%') // Cyan・7.62:1
+    expect(dimOf({ kind: 'waiting_permission' })).toBe('75%') // Amber・6.88:1
+    expect(dimOf({ kind: 'stalled' })).toBe('75%') // 同上（保留と注意は同じ群）
+    expect(dimOf({ kind: 'starting' })).toBe('55%') // Neutral・4.36:1（据え置き）
+    expect(dimOf({ kind: 'unknown' })).toBe('90%') // Coral・5.87:1
+
+    // **終了だけ群より静かにする。** 起動中と同じ灰だが、一覧でいちばん数が多く、
+    // 対処が要らない唯一の群である（設計§8-3-1）。**0.35 が 3:1 の床そのもの**
+    expect(dimOf({ kind: 'ended', ok: true })).toBe('35%') // 3.14:1
   })
 
   it('文字色は状態ごとに変わり、輪と同じ表から引いている', () => {

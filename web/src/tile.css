@@ -528,23 +528,31 @@
 
   左端に状態の色の帯。**幅だけを動かす**ので、カードの位置も大きさも動かない。
 
-  **幅は 3px → 7.5px**（同上）。輪と同じ倍率にして、カードの中で太さの筋を通す。
+  **形を丸い「つまみ」にした**（実物を見た利用者の指摘・2026-08-26）。もとは上下を
+  12px 空けた角丸 2px の板だったが、**カードの切り欠きと喧嘩していた**——切りは
+  左上を 22px 斜めに削るので、上端 12px の帯は**ちょうど斜辺の上で始まり**、
+  角ばった板が斜めに切られて形が読めなくなる。
+
+  **縦の中央に短く置き、右端を丸め切る。** 中央からの高さで置けば切り欠きへ絶対に
+  届かず、カードが 99px でも 137px でも同じ見え方になる。太さは 6px——輪（5px）より
+  わずかに太い程度にして、**帯ではなく「輪がこちら側だけ厚くなった」**と読ませる。
 */
 .tile-body::before {
   content: '';
   position: absolute;
-  top: 12px;
-  bottom: 12px;
+  top: 50%;
+  height: 46%;
+  translate: 0 -50%;
   left: 0;
   width: 0;
-  border-radius: 0 2px 2px 0;
+  border-radius: 0 999px 999px 0;
   background: var(--tile-accent);
   transition: width 140ms ease-out;
 }
 
 @media (hover: hover) and (pointer: fine) {
   .tile-body:where(:hover)::before {
-    width: 7.5px;
+    width: 6px;
   }
 }
 
@@ -582,7 +590,7 @@
 }
 
 .tile-body:focus-visible::before {
-  width: 7.5px;
+  width: 6px;
 }
 
 /*
@@ -668,11 +676,16 @@
   **状態が読めることは、記号と文言が担保している**（設計§8-2・§8-4）。ここで足すのは
   カードの境目が消えないようにする実線1本だけ。
 
-  **太さは 1px → 2.5px**（同上）。E2E がこの値をリテラルで固定しているので、
-  変えるときは `web/e2e/tile.spec.ts` の退避のテストも一緒に直す。
+  **太さは 1px → 3px**（2026-08-26）。カード周辺は一律 2.5倍にしたが、**枠線だけは
+  端数を描けない**——`2.5px` と書くとブラウザが 2px へ丸め（実測）、2.5倍のつもりが
+  実質2倍になる。影は端数を描けるので 2.5px のままでよい。**ここは切り上げる**——
+  この環境では輪が丸ごと消え、**枠がカードの境目を持つ唯一のもの**になるため。
+
+  E2E がこの値をリテラルで固定しているので、変えるときは `web/e2e/tile.spec.ts` の
+  退避のテストも一緒に直す。
 */
 @media (forced-colors: active) {
   .tile-frame {
-    border: 2.5px solid CanvasText;
+    border: 3px solid CanvasText;
   }
 }
