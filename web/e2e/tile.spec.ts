@@ -395,7 +395,7 @@ test('ハイコントラストの環境では、切る枠が実線へ退避す�
   expect(await frameBorder()).toMatchObject({ style: 'solid', width: '0px' })
 
   await page.emulateMedia({ forcedColors: 'active' })
-  expect(await frameBorder()).toMatchObject({ style: 'solid', width: '1px' })
+  expect(await frameBorder()).toMatchObject({ style: 'solid', width: '2.5px' })
 
   // **戻してから終える。** 強制配色は同じページに残るので、置いていくと後続が巻き添えになる
   await page.emulateMedia({ forcedColors: 'none' })

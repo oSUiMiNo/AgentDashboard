@@ -180,8 +180,22 @@ export function SessionTile({ cardId }: Props) {
         丸めたままだと**切りと丸めが同じところを削り合って、斜辺が見えない**——14px の
         切りが 12px の角丸に埋もれて、白黒にすると特徴が何も残らなかった（目視で実測）。
         残り3つは §10.3 の Panel（10〜14px）のまま。
+
+        **内側の余白が、そのまま輪の見える太さになる。** 2px から **5px**（2.5倍）へ
+        広げた（利用者の指定・2026-08-26）。`DESIGN.md` §14.1「Thin Outline だけの
+        体系を主役にしない」と §11.2「細い線と小バッジだけでは比率に到達しない」の
+        向きに合う。
+
+        **同時にカードを 288px → 294px へ広げている。** 輪を 3px ぶん太くすると
+        中身の内容領域が 260px → 254px に狭まり、**①行のはみ出しがぶり返す**——
+        8状態とも右端が 260px ぴったりで通っていた（フェーズ6 の目視）。6px 広げて
+        260px を保つ。スマホ幅 390px での余りは 52px → 46px になるが、2枚並べるには
+        588px 要るので**1列であることは変わらない**（§10-1-1）。
+
+        中身の角丸も引き直す。枠 2px のときは 12−2＝10px で同心だったので、5px なら
+        **7px** になる。
       */}
-      <div className="tile-frame relative w-72 overflow-hidden rounded-[0_12px_12px_12px] p-0.5">
+      <div className="tile-frame relative w-[294px] overflow-hidden rounded-[0_12px_12px_12px] p-[5px]">
         {/* 回る輪。**弧は疑似要素側**にあり、止めるときは弧だけを消す（§9-1） */}
         <span className="tile-ring" aria-hidden />
         <button
@@ -199,7 +213,7 @@ export function SessionTile({ cardId }: Props) {
             ここは行間を詰めて **Dense** にし、①行の側で余白を取って **Loose** にする。
             **高さは 99px のまま**（「縦を詰める」という要件を崩さない）。
           */
-          className="tile-body bg-card flex w-full flex-col gap-1 rounded-[10px] px-3 pt-2.5 pb-3 text-left"
+          className="tile-body bg-card flex w-full flex-col gap-1 rounded-[7px] px-3 pt-2.5 pb-3 text-left"
           data-testid="session-tile"
           data-card-id={session.card_id}
           data-status={session.status.kind}

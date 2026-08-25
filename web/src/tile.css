@@ -456,9 +456,11 @@
 
   内側の影1本だけにする。§12.2「物質感は、なくなっても意味が分かることが前提」
   ——消えても状態は輪と記号と文字が持っている。
+
+  **厚みは 1px → 2.5px**（利用者の指定・2026-08-26。カード周辺の枠線を一律 2.5倍）。
 */
 .tile-body {
-  box-shadow: inset 0 1px 0 rgb(255 255 255 / 6%);
+  box-shadow: inset 0 2.5px 0 rgb(255 255 255 / 6%);
 }
 
 /*
@@ -481,6 +483,8 @@
   【反応 1/3】**Hover では Accent Bar が現れる**（§27.2 の候補「Accent Bar が現れる」）。
 
   左端に状態の色の帯。**幅だけを動かす**ので、カードの位置も大きさも動かない。
+
+  **幅は 3px → 7.5px**（同上）。輪と同じ倍率にして、カードの中で太さの筋を通す。
 */
 .tile-body::before {
   content: '';
@@ -496,7 +500,7 @@
 
 @media (hover: hover) and (pointer: fine) {
   .tile-body:where(:hover)::before {
-    width: 3px;
+    width: 7.5px;
   }
 }
 
@@ -534,7 +538,7 @@
 }
 
 .tile-body:focus-visible::before {
-  width: 3px;
+  width: 7.5px;
 }
 
 /*
@@ -572,10 +576,10 @@
   letter-spacing: 0.08em;
   line-height: 1.4;
   pointer-events: none;
-  /* 貼ってある感じ。§12.1 の Printed Sticker */
+  /* 貼ってある感じ。§12.1 の Printed Sticker。**厚みは 2.5倍**（2026-08-26） */
   box-shadow:
-    0 1px 2px rgb(0 0 0 / 45%),
-    inset 0 1px 0 rgb(255 255 255 / 35%);
+    0 2.5px 5px rgb(0 0 0 / 45%),
+    inset 0 2.5px 0 rgb(255 255 255 / 35%);
 }
 
 /* ───────────────── OS の「動きを減らす」 ───────────────── */
@@ -619,9 +623,12 @@
 
   **状態が読めることは、記号と文言が担保している**（設計§8-2・§8-4）。ここで足すのは
   カードの境目が消えないようにする実線1本だけ。
+
+  **太さは 1px → 2.5px**（同上）。E2E がこの値をリテラルで固定しているので、
+  変えるときは `web/e2e/tile.spec.ts` の退避のテストも一緒に直す。
 */
 @media (forced-colors: active) {
   .tile-frame {
-    border: 1px solid CanvasText;
+    border: 2.5px solid CanvasText;
   }
 }
