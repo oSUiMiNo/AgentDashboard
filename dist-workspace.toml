@@ -10,9 +10,11 @@
 #
 # # 触ったら
 #
-# `make dist-check` を通すこと。生成物の一覧（`dist plan`）と、生成済みのワークフローが
-# 設定と食い違っていないこと（`dist generate --check`）を見る。**ワークフローを手で
-# 書き換えない**——次の生成で黙って戻る。
+# `make ci` を通すこと。生成物の一覧（`dist plan`）と、生成済みのワークフローが設定と
+# 食い違っていないこと（`dist generate --check`）は、どちらも `crates/dist/tests/artifacts.rs`
+# が叩くので、**手で確かめる必要は無い**（`make dist-check` のような専用ターゲットは無い）。
+# 手で見たいときだけ `./scripts/dist plan` と `./scripts/dist generate --check`。
+# **ワークフローを手で書き換えない**——次の生成で黙って戻る。
 
 [workspace]
 members = ["cargo:server"]
