@@ -60,17 +60,18 @@ function tileOf(page: Page, cardId: string): Locator {
 /**
  * その小窓の復旧ボタン。
  *
- * **小窓の中には居ない。** 器（`motion.button`）そのものがボタンなので中に別のボタンを
- * 置けず、`relative` の入れ物へ**絶対配置の兄弟**として重ねてある（設計§9-1）。
- * したがって `tileOf(...).getByTestId('revive-button')` は**何も見つけずに 0 件で通る**——
+ * **小窓の中には居ない。** 小窓そのものがボタンなので中に別のボタンを置けず、器へ
+ * **絶対配置の兄弟**として重ねてある（設計§9-1）。したがって
+ * `tileOf(...).getByTestId('revive-button')` は**何も見つけずに 0 件で通る**——
  * 実際にそう書いて、5本が「消えていること」を確かめたつもりで空振りした。
  *
- * 隣であることを CSS の `+` でそのまま書く。§9-1 の並べ方が変わればここが落ちるので、
- * 前提が崩れたことに気づける。
+ * **かつては隣接兄弟（`+`）で書いていたが、カードが4層になって隣ではなくなった**
+ * （カード設計§7）。いまは器（`tile-shell`）から辿る——器は小窓と同じ `card_id` を
+ * 名乗るので、間に何が挟まっても対応が崩れない。
  */
 function reviveButtonOf(page: Page, cardId: string): Locator {
   return page.locator(
-    `[data-testid="session-tile"][data-card-id="${cardId}"] + [data-testid="revive-button"]`,
+    `[data-testid="tile-shell"][data-card-id="${cardId}"] [data-testid="revive-button"]`,
   )
 }
 

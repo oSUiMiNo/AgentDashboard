@@ -96,23 +96,60 @@ describe('SessionTile', () => {
     )
   })
 
-  it('状態ごとに色が変わる', () => {
+  it('状態ごとに輪の色が変わる', () => {
+    // ●をやめ、カード全体の枠線で状態を表す（カード設計§8）。色は器の変数に入り、
+    // CSS はそれを読むだけ——**対応表を2箇所に分けないため**
     const { unmount } = renderTile(meta({ status: { kind: 'working' } }))
-    const working = screen.getByTestId('status-dot').className
+    const working = screen.getByTestId('tile-shell').style.getPropertyValue(
+      '--tile-accent',
+    )
+    expect(working).not.toBe('')
     unmount()
 
     renderTile(meta({ status: { kind: 'waiting_permission' } }))
-    expect(screen.getByTestId('status-dot').className).not.toBe(working)
+    expect(
+      screen.getByTestId('tile-shell').style.getPropertyValue('--tile-accent'),
+    ).not.toBe(working)
   })
 
-  it('人の対処が要る状態は見た目で目立つ', () => {
-    // 権限確認待ちを見落とすと、セッションがそこで止まったままになる
+  it('人の対処が要る状態は、他と違う動きで出る', () => {
+    // 権限確認待ちを見落とすと、セッションがそこで止まったままになる。**唯一
+    // 位置を動かしてよい状態**なので、他と同じ見せ方にしない（カード設計§9-6）
     const { unmount } = renderTile(meta({ status: { kind: 'working' } }))
-    const calm = screen.getByTestId('session-tile').className
+    expect(screen.getByTestId('tile-shell')).toHaveAttribute(
+      'data-motion',
+      'spin-fast',
+    )
     unmount()
 
     renderTile(meta({ status: { kind: 'waiting_permission' } }))
-    expect(screen.getByTestId('session-tile').className).not.toBe(calm)
+    expect(screen.getByTestId('tile-shell')).toHaveAttribute(
+      'data-motion',
+      'shake',
+    )
+  })
+
+  it('終了と異常終了を、印で選び分けられる', () => {
+    // `data-status` はどちらも `ended` なので、これだけでは8つの姿を選べない
+    // （カード設計§7-2）。**値は変えず、属性を1つ足した**
+    const 正常 = renderTile(meta({ status: { kind: 'ended', ok: true } }))
+    const tile = screen.getByTestId('session-tile')
+    expect(tile).toHaveAttribute('data-status', 'ended')
+    expect(tile).toHaveAttribute('data-status-ok', 'true')
+    正常.unmount()
+
+    const 異常 = renderTile(meta({ status: { kind: 'ended', ok: false } }))
+    expect(screen.getByTestId('session-tile')).toHaveAttribute(
+      'data-status-ok',
+      'false',
+    )
+    異常.unmount()
+
+    // 終わっていない状態には出さない（`ok` の概念そのものが無い）
+    renderTile(meta({ status: { kind: 'working' } }))
+    expect(screen.getByTestId('session-tile')).not.toHaveAttribute(
+      'data-status-ok',
+    )
   })
 
   it('最終活動からの経過時間が出る', () => {
@@ -131,15 +168,12 @@ describe('SessionTile', () => {
     )
   })
 
-  it('直前の応答があれば要約として出る', () => {
-    const { unmount } = renderTile(meta({ last_assistant_message: null }))
-    expect(screen.queryByTestId('last-message')).not.toBeInTheDocument()
-    unmount()
-
+  it('直前の応答は、常時は出さない', () => {
+    // いちばん下はセッション名（カード設計§11）。応答を常に2行取ると、縦が詰まらない。
+    // **型からは消していない**——別の場所に出したくなったとき、運ぶ経路から作り直しになる
     renderTile(meta({ last_assistant_message: 'テストが通りました' }))
-    expect(screen.getByTestId('last-message')).toHaveTextContent(
-      'テストが通りました',
-    )
+    expect(screen.queryByTestId('session-echo')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('last-message')).not.toBeInTheDocument()
   })
 
   it('フックが1件も来ていない不明には理由が出る', () => {
@@ -159,6 +193,223 @@ describe('SessionTile', () => {
     renderTile(meta())
     await userEvent.click(screen.getByTestId('session-tile'))
     expect(screen.getByText('専用画面')).toBeInTheDocument()
+  })
+})
+
+/**
+ * カードの骨格（カード設計§7）。
+ *
+ * 層はそれぞれ役割が1つずつで、兼ねさせない。**見た目そのものは捕まらないが、
+ * どの層に何が付いているかは捕まる**——そしてそこが崩れると、鎮まりも効果線も
+ * フォーカスも一緒に壊れる。
+ */
+describe('SessionTile の骨格', () => {
+  it('器・切る枠・輪・中身・効果線の順に入れ子になっている', () => {
+    renderTile(meta({ status: { kind: 'waiting_permission' } }))
+
+    const shell = screen.getByTestId('tile-shell')
+    const body = screen.getByTestId('session-tile')
+    const lines = screen.getByTestId('tile-lines')
+    const frame = body.parentElement
+    const ring = frame?.firstElementChild
+
+    expect(frame).toHaveClass('tile-frame')
+    expect(shell).toContainElement(frame)
+    expect(ring).toHaveClass('tile-ring')
+    expect(body).toHaveClass('tile-body')
+
+    // **効果線は切る枠の外。** 中に置くと、いちばん見せたい部分が丸角で切られる
+    expect(frame).not.toContainElement(lines)
+    expect(shell).toContainElement(lines)
+  })
+
+  it('揺れの印は器に出るが、揺れるのは切る枠から内側', () => {
+    // 判定の枠（器）が揺れると、鎮めるための的そのものが逃げる。**器は揺れない**
+    // ことを CSS 側が守れるよう、印だけを器に出して内側を名指しさせる
+    renderTile(meta({ status: { kind: 'waiting_permission' } }))
+
+    expect(screen.getByTestId('tile-shell')).toHaveAttribute(
+      'data-motion',
+      'shake',
+    )
+    // 器そのものに動きのクラスを持たせない（CSS が `.tile-frame` を名指しする）
+    expect(screen.getByTestId('tile-shell').className).toBe('tile-shell relative')
+  })
+
+  it('効果線は承認待ちのときだけ描く', () => {
+    // 常時置くと12枚×6要素になる。近づいた1回だけ走らせるもの（カード設計§9-4）
+    const { unmount } = renderTile(meta({ status: { kind: 'working' } }))
+    expect(screen.queryByTestId('tile-lines')).not.toBeInTheDocument()
+    unmount()
+
+    renderTile(meta({ status: { kind: 'waiting_permission' } }))
+    expect(screen.getByTestId('tile-lines').children).toHaveLength(6)
+  })
+
+  it('輪と効果線はクリックを通さない', () => {
+    // 押す邪魔をしてはいけない。中身のボタンより手前に居るので、素通しでないと届かない
+    renderTile(meta({ status: { kind: 'waiting_permission' } }))
+
+    const frame = screen.getByTestId('session-tile').parentElement
+    for (const element of [frame?.firstElementChild, screen.getByTestId('tile-lines')]) {
+      expect(element).toHaveAttribute('aria-hidden')
+    }
+  })
+
+  it('中身は button のままで、キーボードから到達できる', async () => {
+    // 器を `div` にすると、いま `<button>` だけが担っている Tab / Enter / Space の
+    // 到達性を失う（カード設計§7）
+    renderTile(meta())
+
+    const body = screen.getByTestId('session-tile')
+    expect(body.tagName).toBe('BUTTON')
+    await userEvent.tab()
+    expect(body).toHaveFocus()
+  })
+
+  it('器も小窓と同じカードIDを名乗る', () => {
+    // 復旧ボタンは器の直下に居て、小窓の兄弟ではなくなった。**器から辿れないと、
+    // E2E が「0件で通る」空振りに戻る**（`revive.spec.ts` の `reviveButtonOf`）
+    renderTile(meta())
+
+    expect(screen.getByTestId('tile-shell')).toHaveAttribute('data-card-id', CARD)
+    expect(screen.getByTestId('session-tile')).toHaveAttribute('data-card-id', CARD)
+  })
+})
+
+/**
+ * いちばん下の行（カード設計§11）。
+ *
+ * `--resume` で呼び戻す相手を見分けるために名前を出す。**名前が無くても行を残す**
+ * のが要点で、消すと名前が付いた瞬間に横のカードまで動く。
+ */
+describe('SessionTile のセッション名', () => {
+  it('名前があればそのまま出る', () => {
+    renderTile(meta({ session_title: 'TODOを完了に変更し作業内容をまとめる' }))
+
+    const title = screen.getByTestId('session-title')
+    expect(title).toHaveTextContent('TODOを完了に変更し作業内容をまとめる')
+    expect(title).toHaveAttribute('data-named', 'true')
+  })
+
+  it('名前が無いときは、薄い字でそう言う', () => {
+    // 名前は最初のターンのあとに付くので、**起こした直後は必ずこの状態を通る**
+    renderTile(meta({ session_title: null }))
+
+    const title = screen.getByTestId('session-title')
+    expect(title).toHaveTextContent('名前はまだありません')
+    expect(title).toHaveAttribute('data-named', 'false')
+  })
+
+  it('名前の有無で行が消えない', () => {
+    // 行ごと消すと、名前が付いた瞬間にカードが1行ぶん伸び、**横に並ぶ他のカードまで動く**
+    const { unmount } = renderTile(meta({ session_title: null }))
+    expect(screen.getByTestId('session-title')).toBeInTheDocument()
+    unmount()
+
+    renderTile(meta({ session_title: '名前' }))
+    expect(screen.getByTestId('session-title')).toBeInTheDocument()
+  })
+
+  it('長い名前は1行に収め、全体はマウスで読ませる', () => {
+    // ホバーは補助にとどめる（タッチには存在しない）。全体を読む道はカードを開けばある
+    const 長い名前 = 'あ'.repeat(120)
+    renderTile(meta({ session_title: 長い名前 }))
+
+    const title = screen.getByTestId('session-title')
+    expect(title).toHaveClass('truncate')
+    expect(title).toHaveAttribute('title', 長い名前)
+  })
+})
+
+/**
+ * 直前の応答の1行（カード設計§11-2）。
+ *
+ * 利用時間を予測した唯一の変数は「好奇心」で、カードで好奇心を作っている要素は
+ * これ1つだけだった。**やめるのではなく、変わった直後だけ戻す。**
+ */
+describe('SessionTile の直前の応答', () => {
+  beforeEach(() => {
+    // **偽装するのは `setTimeout` だけ。** 既定の `useFakeTimers()` は
+    // `requestAnimationFrame` も差し替えるが、ストアはカードの更新を rAF で束ねている
+    // （`stores/sessions.ts` の `schedule`）ので、丸ごと偽装すると**上の
+    // `beforeEach` が置いた rAF の代役ごと消え、`upsertSession` が画面へ届かなくなる**
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('応答が変わった直後だけ、名前の上に1行が出る', () => {
+    renderTile(meta({ last_assistant_message: '最初の応答' }))
+    // **初回マウントでは出さない**——一覧を開くたびに全カードが4行になる
+    expect(screen.queryByTestId('session-echo')).not.toBeInTheDocument()
+
+    act(() => upsertSession(meta({ last_assistant_message: 'テストが通りました' })))
+    expect(screen.getByTestId('session-echo')).toHaveTextContent(
+      'テストが通りました',
+    )
+  })
+
+  it('変わっていなければ出直さない', () => {
+    renderTile(meta({ last_assistant_message: '同じ応答' }))
+    act(() =>
+      upsertSession(
+        meta({ last_assistant_message: '同じ応答', subagent_active: 1 }),
+      ),
+    )
+
+    expect(screen.queryByTestId('session-echo')).not.toBeInTheDocument()
+  })
+
+  it('しばらくすると行ごと消える', () => {
+    renderTile(meta({ last_assistant_message: null }))
+    act(() => upsertSession(meta({ last_assistant_message: '出ました' })))
+    expect(screen.getByTestId('session-echo')).toBeInTheDocument()
+
+    act(() => {
+      vi.advanceTimersByTime(12_000)
+    })
+
+    // 消えたら普段の姿（名前だけ）へ戻る
+    expect(screen.queryByTestId('session-echo')).not.toBeInTheDocument()
+    expect(screen.getByTestId('session-title')).toBeInTheDocument()
+  })
+
+  it('長い応答は1行に畳む', () => {
+    // 改行をそのまま出すと、条件付きの1行が何行にもなる
+    renderTile(meta({ last_assistant_message: null }))
+    act(() =>
+      upsertSession(meta({ last_assistant_message: '1行目\n2行目\n3行目' })),
+    )
+
+    const echo = screen.getByTestId('session-echo')
+    expect(echo).toHaveTextContent('1行目 2行目 3行目')
+    expect(echo).toHaveClass('truncate')
+  })
+
+  it('条件付きの行は、対処の必要性が高い順に積む', () => {
+    // 警告 → 断り → 応答（カード設計§10-1）。同時に出ることはありうる
+    renderTile(
+      meta({ status: { kind: 'unknown' }, hooks_seen: false, last_assistant_message: null }),
+    )
+    act(() => setCardError(CARD, 'この PC が繋がっていません'))
+    act(() =>
+      upsertSession(
+        meta({
+          status: { kind: 'unknown' },
+          hooks_seen: false,
+          last_assistant_message: '応答',
+        }),
+      ),
+    )
+
+    const 並び = ['hook-warning', 'card-error', 'session-echo', 'session-title']
+    const 実際 = Array.from(
+      screen.getByTestId('session-tile').querySelectorAll('[data-testid]'),
+      (element) => element.getAttribute('data-testid'),
+    ).filter((testId) => testId !== null && 並び.includes(testId))
+    expect(実際).toEqual(並び)
   })
 })
 
@@ -207,17 +458,20 @@ describe('SessionTile のモデル', () => {
     expect(screen.queryByTestId('model')).not.toBeInTheDocument()
   })
 
-  it('モデルが不明でも権限モードのバッジは右端に付く', () => {
-    // 寄せる指定を個々のバッジに付けると、そのバッジが出ないときに寄せ先ごと
-    // 消えて並びが崩れる。モデルは起動から最初の statusLine まで必ず不明
+  it('モデルが不明でも権限モードのバッジは出る', () => {
+    // モデルは起動から最初の statusLine まで必ず不明で、`inject_status_line = false`
+    // の間はずっと不明。片方だけ出る時間は短くない
     renderTile(meta({ model: null, permission_mode: 'default' }))
 
-    expect(screen.getByTestId('permission-mode').parentElement).toHaveClass(
-      'ml-auto',
+    expect(screen.getByTestId('permission-mode')).toBeInTheDocument()
+    expect(screen.getByTestId('permission-mode').parentElement).toBe(
+      screen.getByTestId('tile-badges'),
     )
   })
 
   it('両方あるときも同じ入れ物に並ぶ', () => {
+    // **②行として独立させた**ので、①行の右端へ寄せる指定はもう要らない
+    // （カード設計§10-1）
     renderTile(
       meta({
         model: 'claude-opus-5',
@@ -227,9 +481,27 @@ describe('SessionTile のモデル', () => {
     )
 
     const badges = screen.getByTestId('tile-badges')
-    expect(badges).toHaveClass('ml-auto')
+    expect(badges).not.toHaveClass('ml-auto')
     expect(badges).toContainElement(screen.getByTestId('model'))
     expect(badges).toContainElement(screen.getByTestId('permission-mode'))
+  })
+
+  it('モードのバッジにも幅の上限が付いている', () => {
+    // **モデルにだけ上限があってモードには無い、という非対称を無くす**
+    // （カード設計§10-2）。押し出された側が切れていたのはこれが原因
+    renderTile(
+      meta({
+        model: 'claude-opus-5',
+        model_label: 'Opus 5',
+        permission_mode: 'bypassPermissions',
+      }),
+    )
+
+    for (const testId of ['model', 'permission-mode']) {
+      const badge = screen.getByTestId(testId)
+      expect(badge).toHaveClass('max-w-28')
+      expect(badge).toHaveClass('truncate')
+    }
   })
 
   it('どちらも分からなければ入れ物ごと出さない', () => {

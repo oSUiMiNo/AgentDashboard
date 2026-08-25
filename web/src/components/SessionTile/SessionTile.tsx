@@ -1,5 +1,5 @@
 /**
- * 一覧画面の小窓1枚（要件「一覧画面（司令塔ビュー）」／設計§10）。
+ * 一覧画面の小窓1枚（要件「一覧画面（司令塔ビュー）」／設計§10・カード設計§7）。
  *
  * 小窓の主役は**ログの縮小表示ではなく状態インジケータ**。「AIが止まらずちゃんと働いて
  * いるか」を一瞥で確かめるのが目的なので、状態の色と最終活動からの経過時間を最も大きく出す。
@@ -12,27 +12,50 @@
  * カードIDだけを受け取り、中身はストアから直接購読する（設計§10）。親から中身を配ると、
  * 1枚の状態が変わっただけで親が作り直され、他の小窓まで再レンダリングの判定に入る。
  *
- * # 動きを付けてよい場所
+ * # 層は4枚。役割を兼ねさせない（カード設計§7）
  *
- * 動かすのは**カードの出入りと、人の対処を待っている印**だけ。状態の変化はフックの
- * 頻度（ツールコールごと）で来るので、そこに演出を足すと画面が騒がしくなり、
- * 「本当に見るべきもの」が埋もれる。要件が言う一覧の目的と逆行する。
+ * ```
+ * tile-shell   近接判定の器。**ここは揺れない**——揺らす対象と「近づいたか」を測る枠が
+ *              同じだと、鎮めるための的そのものが逃げる
+ *   tile-frame 切る枠。丸角・はみ出しを切る・内側に 2px。**揺れるのはここから内側**
+ *     tile-ring  回る輪。クリックを通さない
+ *     tile-body  中身（従来の小窓）。**`<button>` のまま**——`div` にすると
+ *                Tab / Enter / Space の到達性を失う
+ *   tile-lines 効果線。**切る枠の外**（中に置くと、いちばん見せたい部分が切られる）
+ *   revive     復旧ボタン。**揺らさない**（揺れる的を押させない）
+ * ```
+ *
+ * # 動きを付けてよい場所（カード設計§9-6）
+ *
+ * 初期実装は動きを3つ（カードの出入り・タブの下地・要対処の脈）に限っていた。この工事で
+ * **作業中・停滞・入力待ち・押したとき**まで広げている。条件は**位置と大きさを変えない**
+ * ことで、色・光・枠線の中だけで表現する。
+ *
+ * **承認待ちの揺れだけが位置を動かす。** これは例外ではなく、元からある「要対処の脈」の
+ * 言い換えである——人が答えないと先へ進まない唯一の状態なので、他と同じ見せ方にしない。
+ * 並び順に伴う動きは**引き続き禁止**（押そうとした瞬間に的が逃げる）。
+ *
+ * **動きの定義そのものは `tile.css` にある。** ここが出すのは `data-motion` と
+ * `data-quiet` の印だけで、**止める分岐を JavaScript 側へ散らさない**（§9-5-3）。
  */
 
 import { modelLabel } from '@/lib/models'
 import { motion } from 'motion/react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { Badge } from '@/components/ui/badge'
 import { formatElapsed } from '@/lib/time'
 import {
   isHookSilent,
-  needsAttention,
   permissionModeLabel,
   permissionModeTone,
   reviveReason,
   reviveState,
+  statusAccent,
+  statusGlyph,
   statusLabel,
-  statusTone,
+  statusMotion,
+  statusTextTone,
 } from '@/lib/protocol'
 import type { CardId } from '@/lib/protocol'
 import { sessionPath } from '@/lib/routes'
@@ -45,20 +68,59 @@ interface Props {
   cardId: CardId
 }
 
+/**
+ * 直前の応答を出しておく時間（カード設計§11-2）。
+ *
+ * **根拠は弱い。**「見に行くかどうかを決めるのに要る時間」以上の裏付けは無いので、
+ * 実物を見て決め直す（§16 の7）。
+ */
+const ECHO_MS = 12_000
+
+/** 効果線の向き。放射状に等間隔＋±6度のばらつき（カード設計§9-4）。 */
+const LINE_ANGLES = [-4, 62, 117, 184, 238, 304]
+
+/**
+ * 直前の応答が**変わった直後だけ** true を返す。
+ *
+ * 出しっぱなしにすると、いちばん下の行が常に4行になって「縦を詰める」という要件と
+ * 衝突する。**初回マウントでは出さない**——一覧を開くたびに全カードが4行になる。
+ */
+function useEcho(message: string | null): boolean {
+  const previous = useRef<string | null>(message)
+  const [shown, setShown] = useState(false)
+
+  useEffect(() => {
+    if (message === previous.current) {
+      return
+    }
+    previous.current = message
+    if (message === null) {
+      setShown(false)
+      return
+    }
+    setShown(true)
+    const timer = setTimeout(() => setShown(false), ECHO_MS)
+    return () => clearTimeout(timer)
+  }, [message])
+
+  return shown && message !== null
+}
+
 export function SessionTile({ cardId }: Props) {
   const navigate = useNavigate()
   const session = useSessionCard(cardId)
   const agents = useSettingsStore((state) => state.settings.agents)
+  const quiet = useSettingsStore((state) => state.settings.motion_quiet)
   const revive = useWsStore((state) => state.revive)
   const reviving = useReviving(cardId)
   const cardError = useCardError(cardId)
   const now = useNow()
+  const echo = useEcho(session?.last_assistant_message ?? null)
 
   if (!session) {
     // 消えた直後の一瞬。構造の更新が届けば親から外れる
     return null
   }
-  const attention = needsAttention(session.status)
   // **どの PC のセッションかは一覧で判別できる**（要件4-4）。名前は起動時に読む
   // 設定から引く（`agent_id` は変わらないが、名前は後から変わりうるため）
   const pc = agentName(agents, session.agent_id)
@@ -70,103 +132,119 @@ export function SessionTile({ cardId }: Props) {
   // 推測させることになる）
   const revivable = reviveState(session, agentOf(agents, session.agent_id))
   const reviveWhy = reviveReason(revivable)
+  const motionKind = statusMotion(session.status)
 
   return (
     /*
-      **器（`motion.button`）は変えない。** 中に別のボタンを置けないので、
-      `relative` の入れ物で包んで**絶対配置の兄弟**として重ねる（設計§9-1）。
-      器を `div` にすると、いま `<button>` だけが担っている Tab / Enter / Space の
-      到達性を失い、新しくアクセシビリティのコードを書くことになる
-    */
-    <div className="relative">
-      <motion.button
-        type="button"
-        // `layout` は付けない。並びが変わるたびに小窓が動き続けることになり、
-        // 押そうとした瞬間に的が逃げる。一覧は「押して開く」ための画面なので、
-        // 見栄えより狙いやすさを優先する
-        initial={{ opacity: 0, y: 6 }}
-        animate={{ opacity: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.97 }}
-        transition={{ duration: 0.18, ease: 'easeOut' }}
-        data-testid="session-tile"
-        data-card-id={session.card_id}
-        data-status={session.status.kind}
-        data-connected={session.agent_connected}
-        onClick={(event) => {
-          // 小窓をクリックしたときは、その1枚だけを開く。止めないと親（グループの余白）へ
-          // 伝わってしまい、常に全員の横並びが開いてしまう（仕様§10 の作り分け）
-          event.stopPropagation()
-          navigate(sessionPath(session.card_id))
-        }}
-        className={`bg-card flex w-64 flex-col gap-2 rounded-xl border p-3 text-left shadow-sm transition-colors ${
-          attention
-            ? 'border-amber-500/70 bg-amber-500/5'
-            : 'border-border hover:border-primary/60'
-        } ${stale ? 'opacity-60' : ''}`}
-      >
-        <div className="flex items-center gap-2">
-          <span className="relative flex size-2.5 shrink-0">
-            {/* 人の対処を待っている間だけ脈打たせる。放っておくと止まったままになる状態 */}
-            {attention && (
-              <span
-                aria-hidden
-                className={`absolute inline-flex size-full animate-ping rounded-full opacity-60 ${statusTone(session.status)}`}
-              />
-            )}
-            <span
-              data-testid="status-dot"
-              aria-hidden
-              className={`relative inline-flex size-2.5 rounded-full transition-colors ${statusTone(session.status)}`}
-            />
-          </span>
-          <span className="text-sm font-medium">
-            {statusLabel(session.status)}
-          </span>
-          {stale && (
-            <Badge
-              data-testid="disconnected-badge"
-              variant="secondary"
-              className="text-muted-foreground"
-              title="この PC からの報告が届いていません。表示は最後に分かっていた状態です"
-            >
-              接続断
-            </Badge>
-          )}
-          {session.subagent_active > 0 && (
-            <Badge
-              data-testid="subagent-badge"
-              variant="secondary"
-              className="ml-auto text-violet-300"
-            >
-              サブエージェント {session.subagent_active}
-            </Badge>
-          )}
-        </div>
+      **器は揺れない。** `data-motion` と `data-quiet` をここに出し、CSS が
+      `[data-motion=…] .tile-frame` の形で内側だけを動かす。
 
-        <div className="flex items-center gap-2">
-          <span data-testid="elapsed" className="text-muted-foreground text-xs">
-            最終活動 {formatElapsed(now - session.last_activity_at)}
-          </span>
+      入退場の動きは器へ移した（旧版は中身に付けていた）。枠が中身を切るので、
+      中身だけを縮めると裏の輪が覗く。
+    */
+    <motion.div
+      className="tile-shell relative"
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, scale: 0.97 }}
+      transition={{ duration: 0.18, ease: 'easeOut' }}
+      data-testid="tile-shell"
+      data-card-id={session.card_id}
+      data-motion={motionKind}
+      // **賑やかのときは属性ごと出さない**（カード設計§9-5-3）
+      data-quiet={quiet === 'lively' ? undefined : quiet}
+      style={statusAccent(session.status)}
+    >
+      <div className="tile-frame relative w-72 overflow-hidden rounded-[12px] p-0.5">
+        {/* 回る輪。**弧は疑似要素側**にあり、止めるときは弧だけを消す（§9-1） */}
+        <span className="tile-ring" aria-hidden />
+        <button
+          type="button"
+          className={`tile-body bg-card flex w-full flex-col gap-1.5 rounded-[10px] p-3 text-left transition-colors ${
+            stale ? 'opacity-60' : ''
+          }`}
+          data-testid="session-tile"
+          data-card-id={session.card_id}
+          data-status={session.status.kind}
+          // **`data-status` は据え置く**（既存のテストと E2E の当て先）。終了と異常終了は
+          // どちらも `ended` なので、8つの姿を選び分ける印を1つ足す（カード設計§7-2）
+          data-status-ok={
+            session.status.kind === 'ended' ? String(session.status.ok) : undefined
+          }
+          data-connected={session.agent_connected}
+          onClick={(event) => {
+            // 小窓をクリックしたときは、その1枚だけを開く。止めないと親（グループの余白）へ
+            // 伝わってしまい、常に全員の横並びが開いてしまう（仕様§10 の作り分け）
+            event.stopPropagation()
+            navigate(sessionPath(session.card_id))
+          }}
+        >
+          {/* ① 状態と最終活動を1行に収める（カード設計§10-1） */}
+          <div className="flex items-center gap-2">
+            {/*
+              記号は**ラベルと別の要素**に置く。同じ要素へ入れると、ラベルを文字で
+              探しているテストと支援技術が「⟳ 作業中」を1つの語として読む。
+
+              **幅を先に決める。** 8記号のうち5つは同梱フォントの外へ落ち、送り幅が
+              記号ごとに違う（§8-2-1）。①行の先頭なので、揃えないと状態が変わるたびに
+              ラベル以降が横へずれる
+            */}
+            <span
+              data-testid="status-glyph"
+              aria-hidden
+              className={`tile-glyph shrink-0 text-sm ${statusTextTone(session.status)}`}
+            >
+              {statusGlyph(session.status)}
+            </span>
+            <span
+              className={`shrink-0 text-sm font-medium ${statusTextTone(session.status)}`}
+            >
+              {statusLabel(session.status)}
+            </span>
+            {/*
+              **最長の表記でも収まる幅を先に取る。**「たった今」と「9日前」で字数が
+              変わるので、縮む側に置くと1秒ごとに横へ揺れる（§10-2）。数字そのものは
+              `tabular-nums` で幅を揃える
+            */}
+            <span
+              data-testid="elapsed"
+              className="text-muted-foreground w-28 shrink-0 truncate text-xs whitespace-nowrap tabular-nums"
+            >
+              最終活動 {formatElapsed(now - session.last_activity_at)}
+            </span>
+            {stale && (
+              <Badge
+                data-testid="disconnected-badge"
+                variant="secondary"
+                className="text-muted-foreground ml-auto shrink-0"
+                title="この PC からの報告が届いていません。表示は最後に分かっていた状態です"
+              >
+                接続断
+              </Badge>
+            )}
+            {session.subagent_active > 0 && (
+              <Badge
+                data-testid="subagent-badge"
+                variant="secondary"
+                className="ml-auto shrink-0 text-violet-300"
+              >
+                サブエージェント {session.subagent_active}
+              </Badge>
+            )}
+          </div>
+
           {/*
+            ② モデル・モード・PC 名（カード設計§10-1）。
+
+            旧版は①行の右端へ寄せていたが、独立した行になったので寄せ先が無い。
+
             権限モードは一覧にも出す（要件）。**危険なモードほど目立たせ、既定のモードは
             静かに出す** — 全承認をスキップしているセッションが並んでいるのに気づかない、
-            という状態を作らないため（設計§8）。
+            という状態を作らないため（設計§8）。モデルも同じく出す（要件「切り替えた
+            結果が一覧の小窓にも反映される」）。
 
-            まだ分からない間は**何も出さない**。状態の「不明」と並ぶと、どちらが不明なのか
-            読み取れなくなる。分からないのは起動直後の一瞬（フッタを読むまで）で、
-            理由を名指しする必要があるのはセッション画面のほう（そちらは選択肢に出す）
-          */}
-          {/*
-            モデルも一覧に出す（要件「切り替えた結果が一覧の小窓にも反映される」）。
-            出すのは CLI が名乗った表示名で、版番号が入る（設計§12）。
-            モードと同じく、**まだ分からない間は何も出さない** — 状態の「不明」と
-            並ぶと、どちらが不明なのか読み取れなくなる
-          */}
-          {/*
-            右端へ寄せるのは**入れ物のほう**。個々のバッジに `ml-auto` を付けると、
-            そのバッジが出ないときに寄せ先ごと消えて並びが崩れる。モデルは起動から
-            最初の statusLine までは必ず不明で、`inject_status_line = false` の間は
-            ずっと不明なので、片方だけ出る時間は短くない
+            **まだ分からない間は何も出さない**。状態の「不明」と並ぶと、どちらが不明なのか
+            読み取れなくなる
           */}
           {(session.model !== null ||
             session.permission_mode !== null ||
@@ -174,8 +252,32 @@ export function SessionTile({ cardId }: Props) {
             session.toml_account !== null) && (
             <div
               data-testid="tile-badges"
-              className="ml-auto flex min-w-0 items-center gap-2"
+              className="flex min-w-0 items-center gap-2"
             >
+              {session.model !== null && (
+                <span
+                  data-testid="model"
+                  data-model={session.model}
+                  className="border-border text-muted-foreground max-w-28 shrink-0 truncate rounded border px-1.5 py-0.5 text-[0.7rem]"
+                  title={session.model}
+                >
+                  {modelLabel(session.model, session.model_label)}
+                </span>
+              )}
+              {/*
+                **モデルにだけ幅の上限があってモードには無い、という非対称を無くす**
+                （カード設計§10-2）。押し出された側が切れていたのはこれが原因
+              */}
+              {session.permission_mode !== null && (
+                <span
+                  data-testid="permission-mode"
+                  data-mode={session.permission_mode}
+                  className={`max-w-28 shrink-0 truncate rounded border px-1.5 py-0.5 text-[0.7rem] ${permissionModeTone(session.permission_mode)}`}
+                  title={permissionModeLabel(session.permission_mode)}
+                >
+                  {permissionModeLabel(session.permission_mode)}
+                </span>
+              )}
               {pc !== null && (
                 <span
                   data-testid="agent-badge"
@@ -194,59 +296,99 @@ export function SessionTile({ cardId }: Props) {
                   @{session.toml_account}
                 </span>
               )}
-              {session.model !== null && (
-                <span
-                  data-testid="model"
-                  data-model={session.model}
-                  className="max-w-28 shrink-0 truncate rounded border border-border px-1.5 py-0.5 text-[0.7rem] text-muted-foreground"
-                  title={session.model}
-                >
-                  {modelLabel(session.model, session.model_label)}
-                </span>
-              )}
-              {session.permission_mode !== null && (
-                <span
-                  data-testid="permission-mode"
-                  data-mode={session.permission_mode}
-                  className={`shrink-0 rounded border px-1.5 py-0.5 text-[0.7rem] ${permissionModeTone(session.permission_mode)}`}
-                >
-                  {permissionModeLabel(session.permission_mode)}
-                </span>
-              )}
             </div>
           )}
-        </div>
 
-        {/* 「不明」の理由を名指しする。原因は利用者が直せるものが多い（設計§11） */}
-        {isHookSilent(session) && (
-          <span data-testid="hook-warning" className="text-xs text-amber-400">
-            フック未受信（設定の注入が効いていない可能性）
-          </span>
-        )}
+          {/*
+            条件付きで出るものは**②と③の間**へ置く（カード設計§10-1）。①は必ず1行、
+            ③は常に1行と決めているので、そこへ差し込むと約束が崩れる。
 
-        {/*
-          断りはそのカードに出す（設計§9-5）。**「まだ押していない」と「押したが
-          戻せない」を区別できること**が完了条件に入っている
-        */}
-        {cardError && (
-          <span data-testid="card-error" className="text-xs text-rose-400">
-            {cardError}
-          </span>
-        )}
+            同時に出ることはありうるので、**対処の必要性の高い順**に積む
+            （警告 → 断り → 応答）
+          */}
 
-        {session.last_assistant_message && (
+          {/* 「不明」の理由を名指しする。原因は利用者が直せるものが多い（設計§11） */}
+          {isHookSilent(session) && (
+            <span data-testid="hook-warning" className="text-xs text-amber-400">
+              フック未受信（設定の注入が効いていない可能性）
+            </span>
+          )}
+
+          {/*
+            断りはそのカードに出す（設計§9-5）。**「まだ押していない」と「押したが
+            戻せない」を区別できること**が完了条件に入っている
+          */}
+          {cardError && (
+            <span data-testid="card-error" className="text-xs text-rose-400">
+              {cardError}
+            </span>
+          )}
+
+          {/*
+            直前の応答は**変わった直後だけ**戻す（カード設計§11-2）。
+
+            利用時間を予測した唯一の変数は「好奇心」で、カードで好奇心を作っている
+            要素はこれ1つだけだった。セッション名は変わらないので好奇心を作らない。
+            常時出すと縦が詰まらないので、**変化の直後だけ**という形にしてある。
+
+            出入りに動きは付けない。隣のカードが動いて見える
+          */}
+          {echo && session.last_assistant_message !== null && (
+            <p
+              data-testid="session-echo"
+              className="text-muted-foreground truncate text-xs"
+              title={session.last_assistant_message}
+            >
+              {session.last_assistant_message.replace(/\s+/g, ' ')}
+            </p>
+          )}
+
+          {/*
+            ③ セッション名（カード設計§11-1）。
+
+            **名前が無くても行を残す。** 名前は最初のターンのあとに付くので、起こした
+            直後は必ずこの状態を通る。行ごと消すと、名前が付いた瞬間にカードが1行ぶん
+            伸び、**横に並んでいる他のカードまで動く**。
+
+            マウスを乗せて全体を出すのは補助にとどめる——**タッチにホバーは存在しない**
+            ので、スマホからはこの手段に届かない。全体を読む道はカードを開けば必ずある
+          */}
           <p
-            data-testid="last-message"
-            className="text-muted-foreground line-clamp-2 text-xs"
+            data-testid="session-title"
+            data-named={session.session_title !== null}
+            className={`truncate text-xs ${
+              session.session_title === null
+                ? 'text-muted-foreground/60'
+                : 'text-muted-foreground'
+            }`}
+            title={session.session_title ?? undefined}
           >
-            {session.last_assistant_message}
+            {session.session_title ?? '名前はまだありません'}
           </p>
-        )}
-      </motion.button>
+        </button>
+      </div>
+
+      {/*
+        効果線（カード設計§9-4）。**切る枠の外**に置く——中に入れると、いちばん見せたい
+        部分が丸角で切られる。近づいて鎮まるのと**同時**に出す（順序が逆だと「気づいた」
+        ように見えない）。
+
+        承認待ちのときだけ描く。常時置くと12枚×6要素になる
+      */}
+      {motionKind === 'shake' && (
+        <span className="tile-lines" data-testid="tile-lines" aria-hidden>
+          {LINE_ANGLES.map((angle) => (
+            <i key={angle} style={{ '--tile-angle': `${angle}deg` } as CSSAngle} />
+          ))}
+        </span>
+      )}
 
       {/*
         押す前に権限モードが見えていること（要件）は、上のバッジが既に満たしている
         ——記録どおりのモードで起き直るので、全承認スキップのまま戻ることが分かる
+
+        **揺らさない**（カード設計§7）。器の直下に置いてあるので、枠が揺れても
+        このボタンだけは動かない
       */}
       {revivable.kind !== 'live' && (
         <button
@@ -260,11 +402,14 @@ export function SessionTile({ cardId }: Props) {
             event.stopPropagation()
             revive(session.card_id)
           }}
-          className="border-border bg-card text-muted-foreground hover:border-primary/60 hover:text-foreground absolute top-2 right-2 rounded border px-1.5 py-0.5 text-[0.7rem] disabled:cursor-not-allowed disabled:opacity-50"
+          className="tile-revive border-border bg-card text-muted-foreground hover:border-primary/60 hover:text-foreground absolute top-2 right-2 rounded border px-1.5 py-0.5 text-[0.7rem] disabled:cursor-not-allowed disabled:opacity-50"
         >
           {reviving ? '復旧中…' : '復旧'}
         </button>
       )}
-    </div>
+    </motion.div>
   )
 }
+
+/** 効果線1本の向き。カスタムプロパティは `CSSProperties` に載らないので逃がす。 */
+type CSSAngle = React.CSSProperties & Record<'--tile-angle', string>
