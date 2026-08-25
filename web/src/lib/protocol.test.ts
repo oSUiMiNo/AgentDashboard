@@ -537,20 +537,22 @@ describe('状態から見た目を決める', () => {
     expect(ALL.map(statusGlyph)).toEqual(['⟳', '‖', '▶', '!', '◌', '✓', '✕', '?'])
   })
 
-  it('輪の色が5種類しか現れない', () => {
-    // 1つの画面で色符号化に使えるのは6色まで（調査§4-4）。7色から畳んだ
-    expect(new Set(ALL.map(accentOf)).size).toBe(5)
+  it('輪の色が4種類しか現れない', () => {
+    // 1つの画面で色符号化に使えるのは6色まで（調査§4-4）。7色から畳んだ。
+    // **終了を `neutral` へ移したので、いまは4色**——役割表の Positive は
+    // 「操作が成功した合図」で、「もう動いていない」こととは違う（利用者の判断）
+    expect(new Set(ALL.map(accentOf)).size).toBe(4)
   })
 
   it('同じ色を持つ組は、記号で分かれている', () => {
-    // 色だけでは見分けられないことを承知で畳んだので、記号が最後の砦になる
-    // `DESIGN.md` §11.2 の役割表へ寄せたので、同色の組が入れ替わった——
-    // **注意・保留（Secondary）が3状態を抱え**、起動中（Neutral）と終了（Positive）は
-    // 別の色になった
+    // 色だけでは見分けられないことを承知で畳んだので、記号が最後の砦になる。
+    // **注意・保留（Secondary）が3状態を抱え**、**起動中と終了は同じ灰**にした——
+    // どちらも「動いていない・対処が要らない」ので、静かな側でまとめている
     const 同色の組: [SessionStatus, SessionStatus][] = [
       [{ kind: 'waiting_input' }, { kind: 'waiting_permission' }],
       [{ kind: 'waiting_input' }, { kind: 'stalled' }],
       [{ kind: 'ended', ok: false }, { kind: 'unknown' }],
+      [{ kind: 'starting' }, { kind: 'ended', ok: true }],
     ]
     for (const [左, 右] of 同色の組) {
       expect(accentOf(左)).toBe(accentOf(右))
@@ -572,24 +574,25 @@ describe('状態から見た目を決める', () => {
     expect(dimOf({ kind: 'waiting_permission' })).toBe('50%') // Amber
     expect(dimOf({ kind: 'stalled' })).toBe('50%') // 同上（保留と注意は同じ群）
     expect(dimOf({ kind: 'starting' })).toBe('55%') // Neutral
-    expect(dimOf({ kind: 'ended', ok: true })).toBe('50%') // Lime
+    expect(dimOf({ kind: 'ended', ok: true })).toBe('55%') // 同上（終了も Neutral）
     expect(dimOf({ kind: 'unknown' })).toBe('65%') // Coral
   })
 
   it('文字色は状態ごとに変わり、輪と同じ表から引いている', () => {
-    // 表を2つに割ると、同じ状態が場所によって違う色になる（設計§8-3）
-    expect(new Set(ALL.map(statusTextTone)).size).toBe(5)
+    // 表を2つに割ると、同じ状態が場所によって違う色になる（設計§8-3）。
+    // **輪と同じ4色**——終了を Neutral へ戻したぶん、こちらも1つ減る
+    expect(new Set(ALL.map(statusTextTone)).size).toBe(4)
     expect(statusTextTone({ kind: 'working' })).not.toBe(
       statusTextTone({ kind: 'waiting_permission' }),
     )
   })
 
   it('セッション画面の●も同じ表から引いている', () => {
-    // 一覧は●をやめたが、セッション画面には残る（設計§8-5）。**色は5色へ追随する**
-    expect(new Set(ALL.map(statusTone)).size).toBe(5)
-    // 役割表へ寄せた結果、**起動中（Neutral）と終了（Positive・完了）は別の色**になった。
-    // 代わりに同じ色を持つのは、注意と保留（停滞・入力待ち・権限確認待ち）である
-    expect(statusTone({ kind: 'starting' })).not.toBe(
+    // 一覧は●をやめたが、セッション画面には残る（設計§8-5）。**色は4色へ追随する**
+    expect(new Set(ALL.map(statusTone)).size).toBe(4)
+    // **起動中と終了は同じ灰**（設計§8-1-2）。どちらも「動いていない・対処が要らない」
+    // ので静かな側でまとめてある。分けるのは記号（`◌` / `✓`）の役目
+    expect(statusTone({ kind: 'starting' })).toBe(
       statusTone({ kind: 'ended', ok: true }),
     )
     expect(statusTone({ kind: 'stalled' })).toBe(
