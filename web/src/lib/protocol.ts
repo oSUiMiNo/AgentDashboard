@@ -6,6 +6,8 @@
  * （web は `protocol.test.ts`、Rust は `ws.rs` の `種別名はスネークケースのtフィールドで表現される`）。
  */
 
+import type { CSSProperties } from 'react'
+
 /** ダッシュボード内で不変のセッションカードID（UUID の文字列表現）。 */
 export type CardId = string
 
@@ -458,29 +460,194 @@ export function statusLabel(status: SessionStatus): string {
 }
 
 /**
- * 状態インジケータの色。
+ * 状態を5つの群のどれかへ写す（カード設計§8-1）。
+ *
+ * **8つの姿に7色を割り当てていたのをやめ、5色へ畳んだ。** 1つの画面で色符号化に
+ * 使えるのは6色までで、規範はさらに「赤・黄・琥珀を警報以外へ広く使うと、警報の
+ * 注意喚起力が落ちる」と明記している（調査§4-4）。畳んだぶんは**記号**で分ける
+ * （[`statusGlyph`]）ので、「あなたの番かどうか」を色が答え、「どちらの番か」を
+ * 記号が答える形になる。
+ *
+ * **8→5 の写像はここ1箇所しかない。** 群から先の見た目（輪の色・濃さ・●の色・
+ * 文字色）は [`STATUS_TONES`] が1つの表で持つ。
+ */
+export type StatusGroup = 'amber' | 'orange' | 'green' | 'gray' | 'red'
+
+export function statusGroup(status: SessionStatus): StatusGroup {
+  switch (status.kind) {
+    case 'working':
+      // 動いている。放っておいてよい
+      return 'green'
+    case 'stalled':
+      // 進んでいないかもしれない
+      return 'orange'
+    case 'waiting_permission':
+    case 'waiting_input':
+      // **あなたが答えないと進まない。** どちらの番かは記号で分ける
+      return 'amber'
+    case 'starting':
+      return 'gray'
+    case 'ended':
+      return status.ok ? 'gray' : 'red'
+    case 'unknown':
+      return 'red'
+  }
+}
+
+/**
+ * 群ごとの見た目。**色の対応表はこの1つだけ。**
+ *
+ * 輪の色（`accent`）と●の色（`dot`）と文字色（`text`）を別々の表に書くと、
+ * 片方だけ直したときに**同じ状態が場所によって違う色になる**。実値の出どころは
+ * カード設計§8-1-1（色）と§9-2-1（濃さ）で、**新しい色は発明していない**——
+ * いままで使っていた7色から畳んだだけである。
+ *
+ * `dim` は**輪がいちばん薄くなるときの濃さ**。状態を示す部品には非テキストの
+ * コントラスト 3:1 が要るので（調査§6-5）、カードの地（`--card` = `#171717`）に
+ * 対して 3:1 を満たす最小値を 0.05 刻みで切り上げてある。**赤がいちばん高いのは
+ * 偶然ではない**——赤は輝度の 71.52% を担う緑成分をほとんど持たないので、
+ * 濃くしても明るくならない。
+ *
+ * 文字は輪より1段明るい（§8-3）。細い文字に濃い色を当てると、いちばん読ませたい
+ * ラベルがいちばん読みにくくなる。
+ */
+const STATUS_TONES: Record<
+  StatusGroup,
+  { accent: string; dim: string; dot: string; text: string }
+> = {
+  amber: {
+    accent: '#fbbf24',
+    dim: '50%',
+    dot: 'bg-amber-400',
+    text: 'text-amber-300',
+  },
+  orange: {
+    accent: '#f97316',
+    dim: '65%',
+    dot: 'bg-orange-500',
+    text: 'text-orange-300',
+  },
+  green: {
+    accent: '#10b981',
+    dim: '60%',
+    dot: 'bg-emerald-500',
+    text: 'text-emerald-300',
+  },
+  gray: {
+    accent: '#94a3b8',
+    dim: '60%',
+    dot: 'bg-slate-400',
+    text: 'text-slate-300',
+  },
+  red: {
+    accent: '#ef4444',
+    dim: '75%',
+    dot: 'bg-red-500',
+    text: 'text-red-300',
+  },
+}
+
+/**
+ * 状態インジケータの色（セッション画面の●）。
  *
  * 一覧の主役は「AIが止まらずちゃんと働いているか」を一瞥で確かめることなので、
  * **人の対処が要る状態（権限確認待ち・停滞・異常終了）を目立たせる**配色にしている。
  * 順調に動いているものが騒がしいと、本当に見るべきものが埋もれる。
+ *
+ * **一覧のカードは●をやめた**（カード設計§8）が、セッション画面の●は残してある。
+ * ここが同じ表から引いているので、**畳んだ5色が両方の画面へ同時に効く**（§8-5）。
  */
 export function statusTone(status: SessionStatus): string {
+  return STATUS_TONES[statusGroup(status)].dot
+}
+
+/**
+ * 状態ラベルの文字色（カード設計§8-3）。
+ *
+ * ラベルそのものを状態の色で出す。輪が消える環境（`forced-colors`）でも、
+ * 動きを止めたあとでも、**色と文字だけは残る**。
+ */
+export function statusTextTone(status: SessionStatus): string {
+  return STATUS_TONES[statusGroup(status)].text
+}
+
+/**
+ * 輪の色と、いちばん薄いときの濃さ（カード設計§8・§9-2-1）。
+ *
+ * CSS 側は変数を読むだけにしてある——**対応表を2箇所に分けないため**。
+ *
+ * `React.CSSProperties` はカスタムプロパティを受け付けないので、キャストが要る
+ * （付けないと `tsc -b` が落ちる）。
+ */
+export function statusAccent(status: SessionStatus): CSSProperties {
+  const tone = STATUS_TONES[statusGroup(status)]
+  return {
+    '--tile-accent': tone.accent,
+    '--tile-dim': tone.dim,
+  } as CSSProperties
+}
+
+/**
+ * カードの動きの種類（カード設計§8-2）。
+ *
+ * **合図の強さを対処の必要性に比例させたい**が、いまは作業中がいちばん強く回る。
+ * 代償（承認待ちのポップアウトが弱まる）を承知のうえで「艦隊が動いている画」を
+ * 採った利用者の判断で、**逃げ道は設定画面の「控えめ」**（§9-5-2・§18-2）。
+ */
+export type StatusMotion =
+  | 'spin-fast'
+  | 'spin-slow'
+  | 'breathe'
+  | 'shake'
+  | 'still'
+
+export function statusMotion(status: SessionStatus): StatusMotion {
   switch (status.kind) {
     case 'working':
-      return 'bg-emerald-500'
-    case 'waiting_permission':
-      // 人が対処しないと先に進まない。一番強く出す
-      return 'bg-amber-400'
+      return 'spin-fast'
     case 'stalled':
-      return 'bg-orange-500'
+      // 同じ形の3倍遅い回転。「動いてはいるが、進んでいない」を速さで読ませる
+      return 'spin-slow'
     case 'waiting_input':
-      return 'bg-sky-500'
+      return 'breathe'
+    case 'waiting_permission':
+      // **人が答えないと先に進まない唯一の状態。** ここだけ位置を動かしてよい
+      return 'shake'
     case 'starting':
-      return 'bg-slate-400'
     case 'ended':
-      return status.ok ? 'bg-slate-500' : 'bg-red-500'
     case 'unknown':
-      return 'bg-red-500'
+      // 終わったカードが並ぶ画面がいちばんうるさくなる。回す意味も無い
+      return 'still'
+  }
+}
+
+/**
+ * 状態の記号（カード設計§8-2）。
+ *
+ * **●の復活ではない。** ●は色だけを運ぶ点で、色が消えれば何も残らなかった。
+ * 記号は形そのものが意味を持つので、**輪が消える環境でも、動きを止めても残る**
+ * （§8-4）。ラベルの直前に、同じ色・同じ大きさで置く。
+ *
+ * **5つ（`⟳ ▷ ◌ ✓ ✕`）は同梱フォントの外へ落ちる**ことが実測で分かっている
+ * （§8-2-1）。落ちること自体は避けられないので、落ちる先を `.tile-glyph` の
+ * フォント指定で名指ししてある。
+ */
+export function statusGlyph(status: SessionStatus): string {
+  switch (status.kind) {
+    case 'working':
+      return '⟳'
+    case 'stalled':
+      return '‖'
+    case 'waiting_input':
+      return '▷'
+    case 'waiting_permission':
+      return '!'
+    case 'starting':
+      return '◌'
+    case 'ended':
+      return status.ok ? '✓' : '✕'
+    case 'unknown':
+      return '?'
   }
 }
 

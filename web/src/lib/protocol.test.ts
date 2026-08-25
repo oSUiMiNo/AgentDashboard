@@ -8,7 +8,12 @@ import {
   reviveReason,
   reviveState,
   selfhealLabel,
+  statusAccent,
+  statusGlyph,
   statusLabel,
+  statusMotion,
+  statusTextTone,
+  statusTone,
 } from './protocol'
 import type {
   ClientMessage,
@@ -487,6 +492,99 @@ describe('状態のラベル', () => {
     expect(isHookSilent(base)).toBe(true)
     expect(isHookSilent({ ...base, hooks_seen: true })).toBe(false)
     expect(isHookSilent({ ...base, status: { kind: 'working' } })).toBe(false)
+  })
+})
+
+/**
+ * 状態から見た目を決める（カード設計§8）。
+ *
+ * 見た目そのものはテストで捕まらないが、**状態から何を選んだか**は捕まる。
+ * 判断を純関数へ集めてあるのはそのためで、部品はここが返した値を貼るだけにする。
+ */
+describe('状態から見た目を決める', () => {
+  /** 8つの姿。**`ended` は ok で2つに割れる**ので、`kind` の数（7）とは合わない */
+  const ALL: SessionStatus[] = [
+    { kind: 'working' },
+    { kind: 'stalled' },
+    { kind: 'waiting_input' },
+    { kind: 'waiting_permission' },
+    { kind: 'starting' },
+    { kind: 'ended', ok: true },
+    { kind: 'ended', ok: false },
+    { kind: 'unknown' },
+  ]
+
+  const accentOf = (status: SessionStatus) =>
+    (statusAccent(status) as Record<string, string>)['--tile-accent']
+  const dimOf = (status: SessionStatus) =>
+    (statusAccent(status) as Record<string, string>)['--tile-dim']
+
+  it('8つの姿それぞれに動きの種類が対応づいている', () => {
+    // 作業中＝速く回る／停滞＝遅く回る／入力待ち＝呼吸／承認待ち＝揺れ／残りは動かさない
+    expect(statusMotion({ kind: 'working' })).toBe('spin-fast')
+    expect(statusMotion({ kind: 'stalled' })).toBe('spin-slow')
+    expect(statusMotion({ kind: 'waiting_input' })).toBe('breathe')
+    expect(statusMotion({ kind: 'waiting_permission' })).toBe('shake')
+    expect(statusMotion({ kind: 'starting' })).toBe('still')
+    expect(statusMotion({ kind: 'ended', ok: true })).toBe('still')
+    expect(statusMotion({ kind: 'ended', ok: false })).toBe('still')
+    expect(statusMotion({ kind: 'unknown' })).toBe('still')
+  })
+
+  it('8つの姿それぞれに記号が対応づいている', () => {
+    // **色が消える環境でも、動きを止めても残る**のは記号と文字だけ（設計§8-4）
+    expect(ALL.map(statusGlyph)).toEqual(['⟳', '‖', '▷', '!', '◌', '✓', '✕', '?'])
+  })
+
+  it('輪の色が5種類しか現れない', () => {
+    // 1つの画面で色符号化に使えるのは6色まで（調査§4-4）。7色から畳んだ
+    expect(new Set(ALL.map(accentOf)).size).toBe(5)
+  })
+
+  it('同じ色を持つ組は、記号で分かれている', () => {
+    // 色だけでは見分けられないことを承知で畳んだので、記号が最後の砦になる
+    const 同色の組: [SessionStatus, SessionStatus][] = [
+      [{ kind: 'waiting_input' }, { kind: 'waiting_permission' }],
+      [{ kind: 'starting' }, { kind: 'ended', ok: true }],
+      [{ kind: 'ended', ok: false }, { kind: 'unknown' }],
+    ]
+    for (const [左, 右] of 同色の組) {
+      expect(accentOf(左)).toBe(accentOf(右))
+      expect(statusGlyph(左)).not.toBe(statusGlyph(右))
+    }
+  })
+
+  it('色を伏せても、記号と文言だけで8つの姿を判別できる', () => {
+    // ハイコントラストの環境では輪が丸ごと消える（調査§6-4）。そこでも状態が読めること
+    const 手掛かり = ALL.map((status) => statusGlyph(status) + statusLabel(status))
+    expect(new Set(手掛かり).size).toBe(ALL.length)
+  })
+
+  it('輪の薄い側の濃さが、カードの地に対して 3:1 を満たす値になっている', () => {
+    // **周期の一部だけ状態が読めなくなる**という壊れ方なので、目で見ても気づけない。
+    // 値の出どころは設計§9-2-1（実値で引き直したもの。0.45 は3色で割っていた）
+    expect(dimOf({ kind: 'waiting_permission' })).toBe('50%')
+    expect(dimOf({ kind: 'stalled' })).toBe('65%')
+    expect(dimOf({ kind: 'working' })).toBe('60%')
+    expect(dimOf({ kind: 'starting' })).toBe('60%')
+    expect(dimOf({ kind: 'unknown' })).toBe('75%')
+  })
+
+  it('文字色は状態ごとに変わり、輪と同じ表から引いている', () => {
+    // 表を2つに割ると、同じ状態が場所によって違う色になる（設計§8-3）
+    expect(new Set(ALL.map(statusTextTone)).size).toBe(5)
+    expect(statusTextTone({ kind: 'working' })).not.toBe(
+      statusTextTone({ kind: 'waiting_permission' }),
+    )
+  })
+
+  it('セッション画面の●も同じ表から引いている', () => {
+    // 一覧は●をやめたが、セッション画面には残る（設計§8-5）。**色は5色へ追随する**
+    expect(new Set(ALL.map(statusTone)).size).toBe(5)
+    // 畳んだ結果、起動中と終了が同じ灰になる（前は slate-400 と slate-500 で別だった）
+    expect(statusTone({ kind: 'starting' })).toBe(
+      statusTone({ kind: 'ended', ok: true }),
+    )
   })
 })
 
