@@ -27,7 +27,8 @@ import { Input } from '@/components/ui/input'
 import { permissionModeInfo } from '@/lib/protocol'
 import { formatScreenInterval } from '@/lib/time'
 import { HOME } from '@/lib/routes'
-import { useSettingsStore } from '@/stores/settings'
+import { MOTION_QUIET_CHOICES, useSettingsStore } from '@/stores/settings'
+import type { MotionQuiet } from '@/stores/settings'
 import { AboutCard } from '@/components/Settings/AboutCard'
 import { PortableSettingsCard } from '@/components/Settings/PortableSettingsCard'
 import { VersionsCard } from '@/components/Settings/VersionsCard'
@@ -42,6 +43,21 @@ const SYNC_CHOICES = [5, 10, 20, 60]
  * いちばん細かいのは今までどおり 50 で、これはその上に入る。
  */
 const SCREEN_CHOICES = [50, 300, 1000, 5000, 10000, 20000]
+
+/**
+ * 静けさの3段の見せ方（カード設計§9-5-2）。
+ *
+ * **一時停止ボタン1つにしなかったのは、「全部止める」しか選べないため**——止めると
+ * 承認待ちまで止まり、いちばん見つけたいものの合図を静けさと引き換えに失う。
+ *
+ * 「控えめ」がいちばん効く。作業中は放っておいてよい状態なのに、いちばん強い合図を
+ * 持っている。ここだけを止めると**動いているカード＝見に行くカード**になる。
+ */
+const MOTION_QUIET_LABELS: Record<MotionQuiet, string> = {
+  lively: '賑やか（既定）',
+  calm: '控えめ',
+  still: '静止',
+}
 
 export function SettingsPage() {
   const settings = useSettingsStore((state) => state.settings)
@@ -165,6 +181,34 @@ export function SettingsPage() {
         )}
       </div>
 
+      {/*
+        一覧の動き（カード設計§9-5-2）。
+
+        **OS の「動きを減らす」設定だけでは足りない。** 規範は「5秒を超えて自動的に
+        動くものには、一時停止・停止・非表示の手段」を要求しており、その達成手段の
+        一覧に OS 設定は1つも入っていない。しかも入力待ちの明滅は、規格の用語では
+        そもそも「動き」に当たらない（大きさ・形・位置が変わらないため）ので、
+        **OS 設定では原理的に片付かない**。
+
+        この道具は配る前提なので、「自分は該当しないから要らない」は成り立たない。
+      */}
+      <div className="border-border flex flex-col gap-3 rounded-xl border p-4">
+        <h3 className="text-sm font-medium">一覧の動き</h3>
+        <Choice
+          testId="motion-quiet"
+          label="静けさ"
+          hint="一覧のカードをどこまで静めるかです。「控えめ」は作業中の回転だけを止めます（放っておいてよい状態なので、止めると「動いている＝見に行く」になります）。「静止」はすべて止めますが、状態の色と記号と文字は残ります。"
+          value={settings.motion_quiet}
+          choices={MOTION_QUIET_CHOICES}
+          format={(value) => MOTION_QUIET_LABELS[value]}
+          disabled={loading}
+          onSelect={(value) => void update({ motion_quiet: value })}
+        />
+        <p className="text-muted-foreground text-xs">
+          OS の「動きを減らす」設定を入れている間は、ここで何を選んでいても止まります。
+        </p>
+      </div>
+
       {settings.lan_password.supported && <LanPasswordCard />}
 
       <PortableSettingsCard />
@@ -268,8 +312,14 @@ function LanPasswordCard() {
   )
 }
 
-/** 選択肢から選ぶ設定。 */
-function Choice({
+/**
+ * 選択肢から選ぶ設定。
+ *
+ * **数値でも文字列でも使える。** `<select>` の値は必ず文字列になるので、選ばれた
+ * 文字列から**元の値へ戻す**——数値へ決め打ちで変換すると、文字列の選択肢
+ * （静けさの3段）で `NaN` になる。
+ */
+function Choice<T extends string | number>({
   testId,
   label,
   hint,
@@ -282,11 +332,11 @@ function Choice({
   testId: string
   label: string
   hint: string
-  value: number
-  choices: number[]
-  format: (value: number) => string
+  value: T
+  choices: T[]
+  format: (value: T) => string
   disabled: boolean
-  onSelect: (value: number) => void
+  onSelect: (value: T) => void
 }) {
   // いまの値が選択肢に無いことがある（設定ファイルや別の版で入った値）。
   // **黙って別の値を選んだ顔をしない**ので、無ければ先頭に足す
@@ -300,7 +350,16 @@ function Choice({
           className="border-border rounded border px-1.5 py-0.5 text-xs"
           disabled={disabled}
           value={value}
-          onChange={(event) => onSelect(Number(event.target.value))}
+          onChange={(event) => {
+            const picked = options.find(
+              (choice) => String(choice) === event.target.value,
+            )
+            // 選択肢の外は届かない（`<select>` は自分が出した option しか返さない）が、
+            // **見つからないときに何もしない**ぶんだけは書いておく
+            if (picked !== undefined) {
+              onSelect(picked)
+            }
+          }}
         >
           {options.map((choice) => (
             <option key={choice} value={choice}>

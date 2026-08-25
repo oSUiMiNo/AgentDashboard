@@ -233,7 +233,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     // 送っただけで確定していないもの（パスワード）は手元へ映さない
     if (
       patch.always_bypass_permissions !== undefined ||
-      patch.project_autostart_session !== undefined
+      patch.project_autostart_session !== undefined ||
+      patch.motion_quiet !== undefined
     ) {
       set({
         settings: {
@@ -242,6 +243,9 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
             patch.always_bypass_permissions ?? previous.always_bypass_permissions,
           project_autostart_session:
             patch.project_autostart_session ?? previous.project_autostart_session,
+          // 静けさは**選んだ瞬間に一覧のカードの動きが変わる**ので、往復を待たせると
+          // 「選んだのに効かない」ように見える
+          motion_quiet: patch.motion_quiet ?? previous.motion_quiet,
         },
         lastError: null,
       })

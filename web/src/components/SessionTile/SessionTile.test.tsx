@@ -267,6 +267,21 @@ describe('SessionTile の骨格', () => {
     expect(body).toHaveFocus()
   })
 
+  it('静けさの段を印として出す（賑やかのときは出さない）', () => {
+    // **止める分岐は CSS 側に置き、JavaScript へ散らさない**（カード設計§9-5-3）。
+    // 既定は属性ごと出さないので、CSS は素の規則をそのまま使える
+    const 賑やか = renderTile(meta())
+    expect(screen.getByTestId('tile-shell')).not.toHaveAttribute('data-quiet')
+    賑やか.unmount()
+
+    useSettingsStore.setState({
+      settings: settingsFixture({ motion_quiet: 'still' }),
+      loading: false,
+    })
+    renderTile(meta())
+    expect(screen.getByTestId('tile-shell')).toHaveAttribute('data-quiet', 'still')
+  })
+
   it('器も小窓と同じカードIDを名乗る', () => {
     // 復旧ボタンは器の直下に居て、小窓の兄弟ではなくなった。**器から辿れないと、
     // E2E が「0件で通る」空振りに戻る**（`revive.spec.ts` の `reviveButtonOf`）

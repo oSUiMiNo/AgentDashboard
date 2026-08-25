@@ -90,6 +90,22 @@ describe('設定ストア', () => {
     )
   })
 
+  it('静けさの段も、押した瞬間に手元へ映る', async () => {
+    // **選んだ瞬間に一覧のカードの動きが変わる**ので、往復を待たせると「選んだのに
+    // 効かない」ように見える。サーバの応答が返る前の時点で確かめる
+    let 応答: (value: Response) => void = () => {}
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Promise<Response>((resolve) => (応答 = resolve))),
+    )
+
+    const 待ち = useSettingsStore.getState().update({ motion_quiet: 'still' })
+    expect(useSettingsStore.getState().settings.motion_quiet).toBe('still')
+
+    応答(new Response(JSON.stringify({ motion_quiet: 'still' }), { status: 200 }))
+    await 待ち
+  })
+
   it('保存に失敗したら黙らずに理由を残す', async () => {
     // 黙って戻ると「変えたのに効かない」という追いにくい状態になる
     vi.stubGlobal(

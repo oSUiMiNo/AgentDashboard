@@ -181,3 +181,76 @@ describe('画面の更新間隔', () => {
     expect(screen.getByTestId('screen-interval-select')).toHaveValue('777')
   })
 })
+
+/**
+ * 一覧の動き（カード設計§9-5-2）。
+ *
+ * **画面の中に止める道が要る。** 規範は「5秒を超えて自動的に動くものには一時停止・
+ * 停止・非表示の手段」を要求しており、達成手段の一覧に OS 設定は1つも入っていない。
+ * この道具は配る前提なので、「自分は該当しないから要らない」が成り立たない。
+ */
+describe('一覧の動き', () => {
+  beforeEach(() => {
+    vi.spyOn(useSettingsStore.getState(), 'load').mockResolvedValue(undefined)
+  })
+
+  /** 選択肢を、出ている順に読む。 */
+  function choices(): string[] {
+    return Array.from(
+      screen.getByTestId('motion-quiet-select').querySelectorAll('option'),
+      (option) => option.value,
+    )
+  }
+
+  it('3段が、静かになっていく順で並ぶ', () => {
+    // **一時停止ボタン1つだと「全部止める」しか選べない**——止めると承認待ちまで
+    // 止まり、いちばん見つけたいものの合図を失う
+    show()
+
+    expect(choices()).toEqual(['lively', 'calm', 'still'])
+  })
+
+  it('既定は賑やか', () => {
+    // 画は変えない。12枚の輪が回る画面は要望そのもの（設計§9-6-2）
+    show()
+
+    expect(screen.getByTestId('motion-quiet-select')).toHaveValue('lively')
+  })
+
+  it('日本語で読める形で出る', () => {
+    show()
+
+    expect(screen.getByRole('option', { name: '控えめ' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: '静止' })).toBeInTheDocument()
+  })
+
+  it('選ぶと、その項目だけを送る', async () => {
+    const update = vi.fn().mockResolvedValue(true)
+    useSettingsStore.setState({ update })
+    show()
+
+    await userEvent.selectOptions(
+      screen.getByTestId('motion-quiet-select'),
+      'calm',
+    )
+
+    // **数値へ決め打ちで変換していないこと。** していれば `NaN` が飛ぶ
+    expect(update).toHaveBeenCalledWith({ motion_quiet: 'calm' })
+  })
+
+  it('いま効いている段が選ばれた状態で出る', () => {
+    show({ motion_quiet: 'still' })
+
+    expect(screen.getByTestId('motion-quiet-select')).toHaveValue('still')
+  })
+
+  it('OS 設定のほうが強いことを、画面にも書いてある', () => {
+    // 段で覆せるようにしていない（要件の完了条件が無条件）。**選べるのに効かない**
+    // という形になるので、そう書いておかないと不具合に見える
+    show()
+
+    expect(
+      screen.getByText(/OS の「動きを減らす」設定を入れている間は/),
+    ).toBeInTheDocument()
+  })
+})
