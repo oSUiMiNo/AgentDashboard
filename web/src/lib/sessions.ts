@@ -24,24 +24,47 @@ let now = Date.now()
 const listeners = new Set<() => void>()
 let timer: ReturnType<typeof setInterval> | undefined
 
+function tick() {
+  now = Date.now()
+  for (const each of listeners) {
+    each()
+  }
+}
+
+/**
+ * タブが表へ戻ったら、時刻を合わせ直す。
+ *
+ * **裏に回したタブでは、この1秒タイマーが1分に1回まで落とされる。** ブラウザが
+ * 5分以上隠れたタブに掛ける強いほうの間引きは、WebSocket を免除の条件に挙げて
+ * いない（カード設計§10-2・調査§6-11）——「WebSocket を張っていれば免れる」は
+ * 半分だけ正しい。
+ *
+ * 症状は「戻った瞬間に、最大1分ぶん古い経過時間が出ている」。**一覧の①行は
+ * 1秒ごとに数え直す作りなので、ここに直接効く。**
+ *
+ * 輪のほうは何もしなくてよい——裏に回れば描画そのものが止まる。
+ */
+function resync() {
+  if (document.visibilityState === 'visible') {
+    tick()
+  }
+}
+
 function subscribe(listener: () => void): () => void {
   listeners.add(listener)
   if (timer === undefined) {
     // 購読が途切れている間は時刻が止まる（タイマーを畳んでいるため）。再開の瞬間に
     // 現在時刻へ合わせ直さないと、しばらく古い経過時間が出たままになる
     now = Date.now()
-    timer = setInterval(() => {
-      now = Date.now()
-      for (const each of listeners) {
-        each()
-      }
-    }, TICK_MS)
+    timer = setInterval(tick, TICK_MS)
+    document.addEventListener('visibilitychange', resync)
   }
   return () => {
     listeners.delete(listener)
     if (listeners.size === 0 && timer !== undefined) {
       clearInterval(timer)
       timer = undefined
+      document.removeEventListener('visibilitychange', resync)
     }
   }
 }
