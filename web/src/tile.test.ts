@@ -117,6 +117,19 @@ function 当たる(fragment: string): Rule[] {
   return 全規則.filter((rule) => rule.selector.includes(fragment))
 }
 
+/**
+ * カスタムプロパティしか宣言していない規則か。
+ *
+ * **濃さを載せるだけの規則を「止める規則」と数えないため**（フェーズ8）。
+ */
+function 濃さだけ(rule: Rule): boolean {
+  const 宣言 = rule.body
+    .split(';')
+    .map((s) => s.trim())
+    .filter(Boolean)
+  return 宣言.length > 0 && 宣言.every((s) => s.startsWith('--'))
+}
+
 describe('動きの定義の読み込み', () => {
   it('index.css から取り込まれている', () => {
     // **書き忘れても、位置を誤っても、このファイルのテストは全部緑のまま通る。**
@@ -175,6 +188,11 @@ describe('静けさの3段', () => {
       expect(当たり先.some((selector) => selector.endsWith(層))).toBe(true)
     }
     for (const rule of 静止) {
+      // **濃さだけを決める規則は「止める規則」ではない**ので数えない（フェーズ8）。
+      // 「静止」は明滅を**濃い側で止める**ため `--tile-ink` を上げるが、それは
+      // 器へ載せる値であって、動きを止める宣言ではない。**`animation: none` を
+      // 書き足して黙らせない**——効きもしない宣言をテストのために置くことになる
+      if (濃さだけ(rule)) continue
       expect(rule.body).toContain('animation: none')
     }
   })
@@ -382,5 +400,75 @@ describe('DESIGN.md の床を満たしている', () => {
     expect(当たる(':focus-visible').some((r) => r.body.includes('background-color'))).toBe(
       true,
     )
+  })
+})
+
+/**
+ * **同じ状態は、どこでも同じ色で出る。**
+ *
+ * ここが台帳を持っていなかったので、**輪だけが明るくなってバーが取り残される**
+ * 壊れ方を2度続けて実物で指摘された（フェーズ7-4・8）。数値は床を満たしており、
+ * 形も指定どおりで、**それでも同じカードの中で色が食い違っていた**。
+ */
+describe('濃さは1本の変数から配る', () => {
+  /** 規則そのものが濃さを持たなくてよいもの。**理由を書けないものは足さない** */
+  const 除外 = [
+    // 上に暗い文字が乗る。薄くすると `ANSWER` が読めない（`tile.css` に同じ理由）
+    '.tile-sticker',
+    // **濃さはキーフレームが持つ**（素の状態は `opacity: 0` で隠れている）。
+    // その中身は下の「効果線もキーフレームで濃さを読む」が見ている
+    '.tile-lines i',
+  ]
+
+  it('--tile-accent を塗るものは、必ず --tile-ink を通る', () => {
+    const 塗る = 全規則.filter(
+      (rule) =>
+        /background(-color)?:/.test(rule.body) &&
+        rule.body.includes('--tile-accent') &&
+        // 面のティントは「濃さ」ではなく地に混ぜる色（§11.3 の比率のための面）
+        !rule.body.includes('var(--color-card)') &&
+        !除外.some((s) => rule.selector.includes(s)),
+    )
+    expect(塗る.length).toBeGreaterThanOrEqual(2)
+    for (const rule of 塗る) {
+      expect(rule.body).toContain('--tile-ink')
+    }
+  })
+
+  it('濃さを決めるのは4行だけ', () => {
+    // **散らすと、また片方だけ動く。** 既定＋上書き3つ（接続断・静止・入力待ちの hover）
+    const 決める = 全規則.filter((rule) => /--tile-ink:/.test(rule.body))
+    expect(決める).toHaveLength(4)
+    const 当たり先 = 決める.map((r) => r.selector).join(' ')
+    expect(当たり先).toContain('.tile-shell')
+    expect(当たり先).toContain("[data-connected='false']")
+    expect(当たり先).toContain("[data-quiet='still']")
+    expect(当たり先).toContain("[data-motion='breathe']")
+  })
+
+  it('呼吸の暗い側は、静止時の濃さではなく床を読む', () => {
+    // **1つの値に2つの役割を持たせない**（設計§9-2-2）。兼ねていたころは
+    // 75%→100% の 25点しか振れず、**下げると呼吸しない状態まで暗くなる**ので
+    // 広げられなかった。`@keyframes` はヘルパが飛ばすので素の CSS へ当てる
+    const 呼吸 = 素のCSS().match(/@keyframes\s+tile-breathe\s*\{[\s\S]*?\n\}/)
+    expect(呼吸).not.toBeNull()
+    expect(呼吸![0]).toContain('var(--tile-floor)')
+    expect(呼吸![0]).not.toContain('var(--tile-dim)')
+  })
+
+  it('効果線もキーフレームで濃さを読む', () => {
+    // 上の除外表で `.tile-lines i` を外したぶんを、ここで受ける。**除外は
+    // 「見なくてよい」ではなく「別のところで見る」** でなければ穴になる
+    const 効果線 = 素のCSS().match(/@keyframes\s+tile-lines\s*\{[\s\S]*?\n\}/)
+    expect(効果線).not.toBeNull()
+    expect(効果線![0]).toContain('var(--tile-ink)')
+  })
+
+  it('接続断の印は、中身の外まで届く', () => {
+    // 輪と効果線は中身の**兄弟**なので、中身にだけ印を付けても CSS が届かない
+    // （設計§7-4-4）。器へ出した印を読む規則があること
+    const 接続断 = 当たる("[data-connected='false']")
+    expect(接続断.length).toBeGreaterThanOrEqual(2)
+    expect(接続断.some((r) => !r.selector.includes('.tile-body'))).toBe(true)
   })
 })

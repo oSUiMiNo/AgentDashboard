@@ -114,6 +114,23 @@ describe('SessionTile', () => {
     ).not.toBe(working)
   })
 
+  it('繋がっていない印が、中身だけでなく器にも出る', () => {
+    // 輪と効果線は中身の**兄弟**なので、中身にだけ印を付けても CSS が届かない
+    // （カード設計§7-4-4）。**繋がっていないカードでも枠だけ元の明るさで出ていた**
+    const { unmount } = renderTile(meta({ agent_connected: false }))
+    expect(screen.getByTestId('tile-shell')).toHaveAttribute(
+      'data-connected',
+      'false',
+    )
+    unmount()
+
+    renderTile(meta({ agent_connected: true }))
+    expect(screen.getByTestId('tile-shell')).toHaveAttribute(
+      'data-connected',
+      'true',
+    )
+  })
+
   it('人の対処が要る状態は、他と違う動きで出る', () => {
     // 権限確認待ちを見落とすと、セッションがそこで止まったままになる。**唯一
     // 位置を動かしてよい状態**なので、他と同じ見せ方にしない（カード設計§9-6）
