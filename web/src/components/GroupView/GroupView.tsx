@@ -19,21 +19,25 @@
  * 購読するのは**この箱に入るカードIDの並び**だけ。中身は [`SessionView`] が自分で
  * 購読するので、1本の状態が変わっても隣が作り直されない。
  *
- * # 左にファイル（イシューグループ_2026_0805_0514 設計§14）
+ * # 左にファイル（イシューグループ_2026-0826-1146 設計§2・§3）
  *
- * 左上のハンバーガーで [`ProjectFiles`] を開閉する。**セッション専用画面にも
- * 同じものが出る**（設計§28）——同じ部品・同じ経路で、開閉の記憶も共有する
- * （[`@/lib/filesPanel`]）。
+ * 左上のハンバーガーで [`FilesLayout`] を開閉する。**セッション専用画面にも同じ器が
+ * 出る**——`<aside>` を2箇所に写していた形は終わりにしたので、片方だけ直る状態が
+ * 構造的に作れない。開閉の記憶は [`@/lib/filesPanel`] が持つ。
+ *
+ * **場所を取り合う列は2つだけ**（設計§2）——中身の列とレール。フォルダはその上に
+ * 一時的に乗るだけで、取り合いに参加しない。
  *
  * この画面だからこそ、**左でパスをコピーして右のセッションの入力欄へ貼る**が1画面で
  * 完結する。配置を選んだ理由そのものなので、右側の横並びには手を入れていない。
  */
 
+import { useRef } from 'react'
 import { Link } from 'react-router'
-import { ProjectFiles } from '@/components/ProjectFiles/ProjectFiles'
+import { FilesLayout } from '@/components/ProjectFiles/FilesLayout'
+import { FilesToggle } from '@/components/ProjectFiles/FilesToggle'
 import { SessionAdd } from '@/components/SessionAdd/SessionAdd'
 import { SessionView } from '@/components/SessionView/SessionView'
-import { Button } from '@/components/ui/button'
 import { useFilesPanel } from '@/lib/filesPanel'
 import { HOME } from '@/lib/routes'
 import { useProjectCards } from '@/stores/sessions'
@@ -56,6 +60,12 @@ interface Props {
 export function GroupView({ host, project }: Props) {
   const cards = useProjectCards(host, project)
   const [filesOpen, toggleFiles] = useFilesPanel()
+  /*
+    **横ホイールの行き先**（設計§8）。中身の列はレールの兄弟なので、ブラウザの
+    スクロール連鎖（祖先だけを辿る）ではここへ届かない。列の上でホイールを横へ
+    回したらレールが動く、を成り立たせるために参照を渡す
+  */
+  const rail = useRef<HTMLDivElement>(null)
 
   return (
     <section
@@ -65,19 +75,7 @@ export function GroupView({ host, project }: Props) {
       className="flex min-h-0 flex-1 flex-col gap-3"
     >
       <header className="flex items-center gap-2">
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          data-testid="project-files-toggle"
-          aria-expanded={filesOpen}
-          aria-label="ファイル"
-          title="ファイル"
-          className="shrink-0"
-          onClick={toggleFiles}
-        >
-          <span aria-hidden>☰</span>
-        </Button>
+        <FilesToggle open={filesOpen} onToggle={toggleFiles} />
 
         <h2 className="min-w-0 truncate text-sm font-semibold" title={project}>
           {project}
@@ -96,32 +94,19 @@ export function GroupView({ host, project }: Props) {
         </Link>
       </header>
 
-      <div className="flex min-h-0 flex-1 gap-4">
-        {filesOpen && (
-          /*
-            広い画面では左に常設し、狭い画面では**全幅のドロワー**として被せる
-            （設計§14）。並べると両方が狭くなり、どちらも読めない。
-          */
-          <aside
-            data-testid="project-files-panel"
-            className="bg-background border-border fixed inset-0 z-40 flex min-h-0 flex-col gap-2 border-r p-3 md:static md:z-auto md:w-80 md:shrink-0 md:p-0 md:pr-3"
-          >
-            <div className="flex items-center gap-2 md:hidden">
-              <span className="text-sm font-semibold">ファイル</span>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                data-testid="project-files-close"
-                className="ml-auto"
-                onClick={toggleFiles}
-              >
-                閉じる
-              </Button>
-            </div>
-            <ProjectFiles host={host} project={project} />
-          </aside>
-        )}
+      {/*
+        取り合いの器。**`relative` を足す**——フォルダのオーバーレイは広い画面で
+        `absolute` になり、この箱の左端と高さを基準にする（設計§2）。`fixed` のままだと
+        画面の上端から被さり、アプリのヘッダ（設定・アカウント）まで覆う
+      */}
+      <div className="relative flex min-h-0 flex-1 gap-4">
+        <FilesLayout
+          host={host}
+          project={project}
+          open={filesOpen}
+          onToggle={toggleFiles}
+          onWheelX={(deltaX) => rail.current?.scrollBy({ left: deltaX })}
+        />
 
         {cards.length === 0 ? (
           <p className="text-muted-foreground text-sm">
@@ -129,8 +114,15 @@ export function GroupView({ host, project }: Props) {
           </p>
         ) : (
           <div
+            ref={rail}
             data-testid="group-rail"
-            className="flex min-h-0 flex-1 gap-4 overflow-x-auto pb-2"
+            /*
+              **`min-w-0` を足す。** `overflow-x-auto` を持つ箱では flex の
+              `min-width: auto` が仕様上すでに 0 に解決されているので、**見た目は
+              1ピクセルも変わらない**。足すのは、あとで `overflow` を変えた誰かが
+              ページを横へ広げるのを防ぐ字としての保険（設計§7）
+            */
+            className="flex min-h-0 min-w-0 flex-1 gap-4 overflow-x-auto pb-2"
           >
             {cards.map((cardId) => (
               <SessionView key={cardId} cardId={cardId} compact />

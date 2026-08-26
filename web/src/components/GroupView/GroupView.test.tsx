@@ -5,7 +5,7 @@
  * 端末を作る部品を巻き込むと、**確かめたいのは配置なのに、落ちる理由が xterm になる**。
  */
 
-import { cleanup, render, screen, within } from '@testing-library/react'
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -88,7 +88,12 @@ describe('PJT 専用画面', () => {
     expect(screen.getByTestId('project-files-panel')).toBeInTheDocument()
 
     await userEvent.click(screen.getByTestId('project-files-toggle'))
-    expect(screen.queryByTestId('project-files-panel')).toBeNull()
+    // **`waitFor` で待つ。** 出入りに動きを付けた（設計§6）ので、畳んだ意味が
+    // 「DOM から消える」から「やがて消える」へ変わった。jsdom でも `exit` は
+    // 完了するが非同期である（実測）
+    await waitFor(() =>
+      expect(screen.queryByTestId('project-files-panel')).toBeNull(),
+    )
   })
 
   it('開閉が覚えられ、開き直しても保たれる', async () => {
@@ -110,12 +115,24 @@ describe('PJT 専用画面', () => {
     await userEvent.click(screen.getByTestId('project-files-toggle'))
     const panel = screen.getByTestId('project-files-panel')
 
-    // 狭い画面では被せて全幅、広い画面では左に常設（設計§14）。
-    // 並べると両方が狭くなり、どちらも読めない
+    /*
+      **広い画面でも被さる**（設計§2）。移設前は「狭い画面だけドロワー、広い画面は
+      常設の列」だったが、作りを分けないことにした——「フォルダは被さる層、中身は
+      その下の面」という1つの心の模型がそのまま通る。
+
+      広い画面が `absolute` で `fixed` ではないのは、**`fixed` のままだと画面の上端から
+      被さってアプリのヘッダ（設定・アカウント）まで覆う**ため。`absolute` なら
+      取り合いの器の左端と高さがそのまま枠になる。
+
+      幅が CSS 変数なのは、利用者が縁で決めるから。**`style={{ width }}` を直に
+      当てると、狭い画面の `fixed inset-0` で `right` が捨てられて全幅のドロワーが
+      帯に化ける**
+    */
     expect(panel.className).toContain('fixed')
     expect(panel.className).toContain('inset-0')
-    expect(panel.className).toContain('md:static')
-    expect(panel.className).toContain('md:w-80')
+    expect(panel.className).toContain('md:absolute')
+    expect(panel.className).not.toContain('md:static')
+    expect(panel.className).toContain('md:w-[var(--files-folder-w,20rem)]')
     // 狭い画面用の閉じる操作がある（ハンバーガーが隠れる位置に来るため）
     expect(screen.getByTestId('project-files-close')).toBeInTheDocument()
   })
