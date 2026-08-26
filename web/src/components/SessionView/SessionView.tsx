@@ -37,7 +37,8 @@ import {
   statusLabel,
   statusTone,
 } from '@/lib/protocol'
-import { ProjectFiles } from '@/components/ProjectFiles/ProjectFiles'
+import { FilesLayout } from '@/components/ProjectFiles/FilesLayout'
+import { FilesToggle } from '@/components/ProjectFiles/FilesToggle'
 import { useFilesPanel } from '@/lib/filesPanel'
 import { LOCAL_HOST } from '@/lib/routes'
 import type { CardId } from '@/lib/protocol'
@@ -99,21 +100,7 @@ export function SessionView({ cardId, compact = false }: Props) {
         基準にするので、左パネルのドロワーの右端（閉じる・コピー）が画面の外へ出る。
       */}
       <header className="flex flex-wrap items-center gap-2 text-sm">
-        {!compact && (
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            data-testid="project-files-toggle"
-            aria-expanded={filesOpen}
-            aria-label="ファイル"
-            title="ファイル"
-            className="shrink-0"
-            onClick={toggleFiles}
-          >
-            <span aria-hidden>☰</span>
-          </Button>
-        )}
+        {!compact && <FilesToggle open={filesOpen} onToggle={toggleFiles} />}
         <span
           aria-hidden
           className={`size-2.5 shrink-0 rounded-full ${statusTone(session.status)}`}
@@ -221,35 +208,25 @@ export function SessionView({ cardId, compact = false }: Props) {
         </p>
       )}
 
-      <div className="flex min-h-0 flex-1 gap-4">
-        {!compact && filesOpen && (
-          /*
-            PJT 専用画面と同じ出し方（設計§14・§28）。広い画面では左に常設し、
-            狭い画面では**全幅のドロワー**として被せる。
-            **横並び（compact）では出さない**——あちらは PJT 専用画面が既に持っている
-          */
-          <aside
-            data-testid="project-files-panel"
-            className="bg-background border-border fixed inset-0 z-40 flex min-h-0 flex-col gap-2 border-r p-3 md:static md:z-auto md:w-80 md:shrink-0 md:p-0 md:pr-3"
-          >
-            <div className="flex items-center gap-2 md:hidden">
-              <span className="text-sm font-semibold">ファイル</span>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                data-testid="project-files-close"
-                className="ml-auto"
-                onClick={toggleFiles}
-              >
-                閉じる
-              </Button>
-            </div>
-            <ProjectFiles
-              host={session.agent_id ?? LOCAL_HOST}
-              project={session.project}
-            />
-          </aside>
+      {/*
+        取り合いの器。**`relative` を足す**（PJT 専用画面と同じ理由。設計§2）——
+        フォルダのオーバーレイは広い画面で `absolute` になり、この箱を基準にする。
+        下の右列が持つ `relative isolate` はそのまま——あれは十字ボタンを端末の脇へ
+        重ねるための基準で、こちらとは別の話
+      */}
+      <div className="relative flex min-h-0 flex-1 gap-4">
+        {/*
+          **横並び（compact）では丸ごと出さない。** ☰ もオーバーレイも中身の列も
+          出さない——あちらは PJT 専用画面が既に持っており、宛先が一意でない操作を
+          横並びに出さない、という既存の判断をそのまま引き継ぐ
+        */}
+        {!compact && (
+          <FilesLayout
+            host={session.agent_id ?? LOCAL_HOST}
+            project={session.project}
+            open={filesOpen}
+            onToggle={toggleFiles}
+          />
         )}
 
         {/*
