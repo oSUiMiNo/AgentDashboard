@@ -87,66 +87,154 @@
 /* ───────────────── 経路 ───────────────── */
 
 /*
-  停留点は10。**位置と向きは層が変数で渡す**ので、ここには経路の決め方を書かない
+  停留点は32。**位置と向きは層が変数で渡す**ので、ここには経路の決め方を書かない
   （値の出どころを1つに保つ。`lib/roam.ts` が決める）。
 
-  | % | 秒 | 何 |
+  | 停留点 | % | 何 |
   |---|---|---|
   | 0 | 0 | ① カードの右上の角 |
-  | 13.33 | 2.0 | ② 風に流された先 |
-  | 17.33 | 2.6 | ③ 座標は据え置き、向きだけ1周（`--roam-turn`） |
-  | 27.7〜100 | 4.2〜15 | ④ 通路を縫って回遊 |
+  | 1〜 | 3.2〜 | ② 風に流された先へ（区間の数は飛んだ距離で決まる） |
+  | 続く8区間 | | ③ **輪**。位置が円周を1周し、向きは接線 |
+  | 残り | 〜100 | ④ 通路を縫って回遊 |
 
-  **①→②だけを速くする。** キーフレームの中に書いた `animation-timing-function` は
-  「その区間」に効くので、飛び出しだけ `ease-out`、以後は等速になる——`ease-in-out` を
-  全体へ当てると停留点のたびに一度止まって見える。
+  **% は等間隔にする。** `lib/roam.ts` が停留点を**等距離**に置くので、% を等間隔に
+  すればそのまま**等速**になる（設計§9-7-7 C）。前の版は距離を見ずに点を置いていた
+  ので、短い区間は遅く長い区間は速く——**曲がり角で減速して見えた**。
+
+  **区間ごとの `animation-timing-function` を書かない。** 飛び出しだけ `ease-out` に
+  していたが、**等速と正面から矛盾する**ので落とした。飛び出しの勢いは尺取り虫
+  （`roam-paper` の `scale`）が担う。
+
+  **コマ送りは `.roam-line` 側の `steps()` で掛ける**（下記）。
 */
 @keyframes roam-drift {
   0% {
     translate: var(--roam-x0) var(--roam-y0);
     rotate: var(--roam-r0);
-    animation-timing-function: ease-out;
   }
-  13.33% {
+  3.226% {
     translate: var(--roam-x1) var(--roam-y1);
     rotate: var(--roam-r1);
   }
-  17.33% {
-    /* ③ 転回。**座標は動かさない**——その場で1回転させるため */
-    translate: var(--roam-x1) var(--roam-y1);
-    rotate: var(--roam-turn);
-  }
-  27.7% {
+  6.452% {
     translate: var(--roam-x2) var(--roam-y2);
     rotate: var(--roam-r2);
   }
-  38% {
+  9.677% {
     translate: var(--roam-x3) var(--roam-y3);
     rotate: var(--roam-r3);
   }
-  48.3% {
+  12.903% {
     translate: var(--roam-x4) var(--roam-y4);
     rotate: var(--roam-r4);
   }
-  58.7% {
+  16.129% {
     translate: var(--roam-x5) var(--roam-y5);
     rotate: var(--roam-r5);
   }
-  69% {
+  19.355% {
     translate: var(--roam-x6) var(--roam-y6);
     rotate: var(--roam-r6);
   }
-  79.3% {
+  22.581% {
     translate: var(--roam-x7) var(--roam-y7);
     rotate: var(--roam-r7);
   }
-  89.7% {
+  25.806% {
     translate: var(--roam-x8) var(--roam-y8);
     rotate: var(--roam-r8);
   }
-  100% {
+  29.032% {
     translate: var(--roam-x9) var(--roam-y9);
     rotate: var(--roam-r9);
+  }
+  32.258% {
+    translate: var(--roam-x10) var(--roam-y10);
+    rotate: var(--roam-r10);
+  }
+  35.484% {
+    translate: var(--roam-x11) var(--roam-y11);
+    rotate: var(--roam-r11);
+  }
+  38.71% {
+    translate: var(--roam-x12) var(--roam-y12);
+    rotate: var(--roam-r12);
+  }
+  41.935% {
+    translate: var(--roam-x13) var(--roam-y13);
+    rotate: var(--roam-r13);
+  }
+  45.161% {
+    translate: var(--roam-x14) var(--roam-y14);
+    rotate: var(--roam-r14);
+  }
+  48.387% {
+    translate: var(--roam-x15) var(--roam-y15);
+    rotate: var(--roam-r15);
+  }
+  51.613% {
+    translate: var(--roam-x16) var(--roam-y16);
+    rotate: var(--roam-r16);
+  }
+  54.839% {
+    translate: var(--roam-x17) var(--roam-y17);
+    rotate: var(--roam-r17);
+  }
+  58.065% {
+    translate: var(--roam-x18) var(--roam-y18);
+    rotate: var(--roam-r18);
+  }
+  61.29% {
+    translate: var(--roam-x19) var(--roam-y19);
+    rotate: var(--roam-r19);
+  }
+  64.516% {
+    translate: var(--roam-x20) var(--roam-y20);
+    rotate: var(--roam-r20);
+  }
+  67.742% {
+    translate: var(--roam-x21) var(--roam-y21);
+    rotate: var(--roam-r21);
+  }
+  70.968% {
+    translate: var(--roam-x22) var(--roam-y22);
+    rotate: var(--roam-r22);
+  }
+  74.194% {
+    translate: var(--roam-x23) var(--roam-y23);
+    rotate: var(--roam-r23);
+  }
+  77.419% {
+    translate: var(--roam-x24) var(--roam-y24);
+    rotate: var(--roam-r24);
+  }
+  80.645% {
+    translate: var(--roam-x25) var(--roam-y25);
+    rotate: var(--roam-r25);
+  }
+  83.871% {
+    translate: var(--roam-x26) var(--roam-y26);
+    rotate: var(--roam-r26);
+  }
+  87.097% {
+    translate: var(--roam-x27) var(--roam-y27);
+    rotate: var(--roam-r27);
+  }
+  90.323% {
+    translate: var(--roam-x28) var(--roam-y28);
+    rotate: var(--roam-r28);
+  }
+  93.548% {
+    translate: var(--roam-x29) var(--roam-y29);
+    rotate: var(--roam-r29);
+  }
+  96.774% {
+    translate: var(--roam-x30) var(--roam-y30);
+    rotate: var(--roam-r30);
+  }
+  100% {
+    translate: var(--roam-x31) var(--roam-y31);
+    rotate: var(--roam-r31);
   }
 }
 
@@ -183,8 +271,13 @@
   **`width` では作らない**（版組をやり直させる）。**回転でも作らない**——外側が
   進行方向を向く回転を持っているので、内側でも回すと向きの読みが濁る。
 
-  揺れの谷を**停留点の中間**に置いてある。角で平らに、区間の途中で翻るので、
-  「道なりに進みながらパタパタしている」と読める。
+  **潰し量を 0.4 → 0.65 へ緩めた。** 前の版は木の葉型（中央が太く両端が細い）を
+  0.4 まで潰しており、**そのまま楕円になっていた**（0.1.39 を見た利用者の指摘・
+  設計§9-7-7 A）。帯なら縦に潰れても線のままだが、**潰しすぎれば同じ罠を踏む**。
+
+  **③の終わりを待たずに、尺取り虫の直後から翻り続ける。** 前の版は「その場で1回転」
+  する区間があったので、そこだけ平らにしていた。いまは**ずっと走り続けている**ので、
+  待つ理由が無くなった（設計§9-7-7 B）。
 */
 @keyframes roam-paper {
   0% {
@@ -197,53 +290,50 @@
   3% {
     scale: 1 1;
   }
-  17.33% {
+  6.452% {
+    scale: 1 0.65;
+  }
+  12.903% {
     scale: 1 1;
   }
-  22.5% {
-    scale: 1 0.4;
+  19.355% {
+    scale: 1 0.65;
   }
-  27.7% {
+  25.806% {
     scale: 1 1;
   }
-  32.85% {
-    scale: 1 0.4;
+  32.258% {
+    scale: 1 0.65;
   }
-  38% {
+  38.71% {
     scale: 1 1;
   }
-  43.15% {
-    scale: 1 0.4;
+  45.161% {
+    scale: 1 0.65;
   }
-  48.3% {
+  51.613% {
     scale: 1 1;
   }
-  53.5% {
-    scale: 1 0.4;
+  58.065% {
+    scale: 1 0.65;
   }
-  58.7% {
+  64.516% {
     scale: 1 1;
   }
-  63.85% {
-    scale: 1 0.4;
+  70.968% {
+    scale: 1 0.65;
   }
-  69% {
+  77.419% {
     scale: 1 1;
   }
-  74.15% {
-    scale: 1 0.4;
+  83.871% {
+    scale: 1 0.65;
   }
-  79.3% {
+  90.323% {
     scale: 1 1;
   }
-  84.5% {
-    scale: 1 0.4;
-  }
-  89.7% {
-    scale: 1 1;
-  }
-  94.85% {
-    scale: 1 0.4;
+  96.774% {
+    scale: 1 0.65;
   }
   100% {
     scale: 1 1;
@@ -290,12 +380,28 @@
   position: absolute;
   top: 0;
   left: 0;
-  width: 16px;
-  height: 4px;
-  margin: -2px 0 0 -8px;
+  /*
+    箱は 25×7px。**インクの太さは 5px**（＝71.4%）で、残りが輪郭の揺れ代である
+    ——`clip-path` を箱いっぱいに引くと、揺らす余地が無くなる。
+    相殺の `margin` で**箱の中心を停留点へ合わせる**（回転の軸＝線の中心）。
+  */
+  width: 25px;
+  height: 7px;
+  margin: -3.5px 0 0 -12.5px;
   opacity: 0;
   animation-name: roam-drift, roam-fade;
-  animation-timing-function: linear, linear;
+  /*
+    **移動だけコマ送りにする**（利用者の指定・毎秒12コマ）。うごくメモ帳のような
+    手描きアニメの質感は、なめらかさを削ることで出る——**塊がぬるぬる動くのではなく、
+    手で描いた線が勢いよく走る**（設計§9-7-7）。
+
+    `steps()` は**キーフレームの区間ごと**に効く。区間は 31 本で寿命は 15秒なので
+    1区間 484ms、そこを 6 コマに割ると **6 × 31 ÷ 15 ＝ 12.4 コマ/秒**になる。
+    **停留点の数か寿命を変えたら、この段数も引き直すこと。**
+
+    濃さ（`roam-fade`）は刻まない。**移動ではないので、刻むと明滅に見える。**
+  */
+  animation-timing-function: steps(6), linear;
   animation-fill-mode: both, both;
   /* 時間は層が `animationDuration` で渡す。**秒数の出どころを1つにする** */
 }
@@ -303,20 +409,25 @@
 /*
   紙片そのもの。**塗るのはここだけ。**
 
-  `clip-path` で**先細り**にしてある（設計§9-7-3）。前は 14×2px の角丸長方形で、
-  **定規で引いた棒**にしか見えなかった。
+  `clip-path` で**太さの一定な帯**にしてある。**ペンで引いた線**である
+  （利用者の指定・2026-08-26。設計§9-7-7 A）。
 
-  **`clip-path` を採った理由**：`DESIGN.md` §14.1「Filled / Solid 主体」に合う——
-  塗りの形そのものが線になる。要素も増えない（同時に最大10本）。
-  **採らなかった案**：インライン SVG のパスは歪みが自在だが、`stroke` は輪郭の技法で
-  §14.1 の「Thin Outline だけの体系を主役にしない」と噛み合わず、1本につき2ノード
-  増える。`border-radius` の4隅を不揃いにする案は追加要素ゼロだが、**歪みが弱くて
-  定規の棒のまま**だった。
+  **前の版は「先細り」だった**——中央が太く両端が細い木の葉型で、拡大すると
+  **そのまま楕円に見えていた**。ひらひらで縦に潰すと蝶ネクタイに、転回で回すと
+  手裏剣になり、**どの瞬間も「線」ではなく「塊」だった**（実物の動画で確認）。
+
+  **`DESIGN.md` §14.1「Filled / Solid 主体」を根拠に先細りを選んだ判断は取り消した。**
+  あれは**アイコンの体系**の話であって、**装飾の1本の線**に当てはめると「線を塗りの
+  塊で表す」ことになる。利用者が明示的に「ペンかクレヨンの線」と指定した以上、
+  そちらが正である。
+
+  **太さは保ち、中心線だけがゆるく波打つ。** ペン先やクレヨンの線は芯の太さが
+  変わらず、輪郭だけが手のぶれで揺れる。端は少しだけ細める（入りと抜き）。
 
   **`filter` は使わない**（同時に最大10本へ常時掛かると、この設計でいちばん高くつく）。
 
   形は3種を種から選ぶ（`data-shape`）。**同じ棒が3本並ぶと手書きに見えない**ので、
-  反りの向きと太りどころを変えてある。
+  波の位相と振れ幅を変えてある。
 */
 .roam-paper {
   display: block;
@@ -331,19 +442,70 @@
   animation-fill-mode: both;
 }
 
-/* 右へ細る。上辺がふくらむ */
+/* ゆるく波打つ。振れは中くらい */
 .roam-paper[data-shape='0'] {
-  clip-path: polygon(0% 22%, 30% 0%, 68% 14%, 100% 48%, 66% 84%, 26% 100%, 0% 78%);
+  clip-path: polygon(
+    0% 20%,
+    14% 20%,
+    29% 21%,
+    43% 16%,
+    57% 9%,
+    71% 7%,
+    86% 12%,
+    100% 22%,
+    100% 86%,
+    86% 83%,
+    71% 79%,
+    57% 81%,
+    43% 87%,
+    29% 92%,
+    14% 92%,
+    0% 80%
+  );
 }
 
-/* 反りが逆。中ほどが太い */
+/* 大きくうねる。端の細りはいちばん弱い */
 .roam-paper[data-shape='1'] {
-  clip-path: polygon(0% 34%, 26% 6%, 62% 0%, 100% 40%, 100% 60%, 60% 96%, 20% 100%, 0% 72%);
+  clip-path: polygon(
+    0% 25%,
+    14% 15%,
+    29% 7%,
+    43% 6%,
+    57% 12%,
+    71% 20%,
+    86% 23%,
+    100% 20%,
+    100% 87%,
+    86% 95%,
+    71% 92%,
+    57% 84%,
+    43% 77%,
+    29% 78%,
+    14% 86%,
+    0% 90%
+  );
 }
 
-/* 細身。両端がすぼまる */
+/* いちばん真っ直ぐ。そのぶん端をはっきり細める */
 .roam-paper[data-shape='2'] {
-  clip-path: polygon(0% 46%, 22% 10%, 56% 2%, 88% 24%, 100% 52%, 84% 78%, 52% 98%, 18% 86%);
+  clip-path: polygon(
+    0% 17%,
+    14% 9%,
+    29% 14%,
+    43% 19%,
+    57% 20%,
+    71% 16%,
+    86% 11%,
+    100% 13%,
+    100% 76%,
+    86% 82%,
+    71% 87%,
+    57% 91%,
+    43% 90%,
+    29% 85%,
+    14% 81%,
+    0% 73%
+  );
 }
 
 /* ───────────────── 止める ───────────────── */
