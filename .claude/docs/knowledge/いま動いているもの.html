@@ -43,7 +43,7 @@
   <br><strong>「IP が変わった」ではない。</strong>最初は SSH が届かないだけに見え、Elastic IP を持たない構成なので IP の付け替えを疑ったが、<strong>原因はアカウントごと消えていたこと</strong>だった。terraform の記録（<code>~/Dev/Test_AgentDashboard/terraform.tfstate</code>・08-03）にある <code>43.207.237.211</code> は<strong>もう誰のものでもない</strong>。<strong>ここを直すのも、別の場所へ立て直すのも人の作業。</strong>
   <br><strong>セッションホスト<span class="mark">▽</span>は、いま1本も走っていない</strong>（08-23 に数えて0本）。以前は<strong>生きたまま黙って固まる</strong>ことがあった——Cloudflare 宛に TLS が張られたまま無通信（<code>ESTAB</code>・送受信キュー0・CPU ほぼ0）で、<strong>ログも1行も出ていない</strong>。<code>link.rs</code> の <code>dial()</code> に<strong>時間切れが無い</strong>ため、相手が「断る」のではなく<strong>黙って握ったまま答えない</strong>と永久に待つ。<strong>画面には理由の分からない「接続断」だけが残る。</strong>別イシュー化の候補。
   <br><strong>実機は自動では起きない。</strong>常駐の仕組みに載せていないので、<strong>WSL を起こし直すと落ちたままになる</strong>（セッションホスト<span class="mark">▽</span>も同じ理由で、いま落ちたままである）。
-  <br><strong>版は 0.1.34 まで出ている（08-25）。</strong>いまの版でできること——<strong>抜け殻のカードを起こし直す</strong>（画面の「復旧」／「全て復旧」と <code>agentdashboard session revive [--all]</code>。入りきらないときはダイアログで断る）、<strong>ファイル閲覧で画像と HTML を出す</strong>（画像は<strong>バイト列で運ぶ</strong>・上限 8 MiB。HTML と SVG は<strong>隔離した箱</strong>で描く——<code>iframe sandbox</code> と応答の CSP の<strong>二重の鍵</strong>。一覧の印は<strong>種別ごとに分かれる</strong>）。
+  <br><strong>版は 0.1.41 まで出ている（08-26）。</strong>いまの版でできること——<strong>抜け殻のカードを起こし直す</strong>（画面の「復旧」／「全て復旧」と <code>agentdashboard session revive [--all]</code>。入りきらないときはダイアログで断る）、<strong>ファイル閲覧で画像と HTML を出す</strong>（画像は<strong>バイト列で運ぶ</strong>・上限 8 MiB。HTML と SVG は<strong>隔離した箱</strong>で描く——<code>iframe sandbox</code> と応答の CSP の<strong>二重の鍵</strong>。一覧の印は<strong>種別ごとに分かれる</strong>）。
   <br><strong>0.1.29 と 0.1.30 のうち、セッションホスト<span class="mark">▽</span>に関わるぶんは、いま誰も使っていない。</strong>あれが走っておらず、繋ぎ先の<strong>サーバも無い</strong>ためである。<strong>リモート経路（ブラウザ → サーバ → セッションホスト）でしか出ない壊れ方は、どこかにサーバを立て直すまで裏取りできない</strong>——スマホから触る確認は全部ここで止まる。
 </p>
 
@@ -128,7 +128,7 @@
   画面に出る版だけを見て「同じものが動いている」と判断しないこと。<br><br>
 
   <p class="note warn"><strong>実機は押す直前で止めてある（走行 0.1.40 ／ ディスク 0.1.41）。</strong> AWS は無い（アカウント閉鎖）。<strong>セッションホスト<span class="mark">▽</span>は走っていない</strong>。実機は<strong>走行 0.1.40・ディスク 0.1.41</strong>で1段ずれている。<strong>v0.1.41 のタグを打ち、実機で <code>make build</code> まで済ませた</strong>（に起こし直しを任せた——<strong>撃った側（作業セッション）は道連れになるので、起きたかどうかを見ていない</strong>。<strong>確かめるのは <code>~/agentdashboard-restart.log</code> の末尾</strong>（狙い・巻き添え枚数・起きた版が1行ずつ入る）。起こすと入るのは<strong>回遊する効果線の作り直し</strong>（巻きを小さくし、線を細くし、カードのある場所だけを回る）と<strong>ファイルのパネルの組み替え</strong>（フォルダが被さる層へ移り、中身が独立した列になり、縁をドラッグして幅を変えられる）。
-  <br><strong>これはいちばん気づきにくいずれ方である。</strong>ヘッダに出る版はサーバに聞いた答えなので<strong>両方 0.1.34 と出る</strong>。「揃っているのに古い」という形になるので、<strong>数字ではなく「最後に起こし直したのはいつか」で判断すること。</strong>
+  <br><strong>これはいちばん気づきにくいずれ方である。</strong>ヘッダに出る版はサーバに聞いた答えなので<strong>古いタブでも新しい版が表示される</strong>。「揃っているのに古い」という形になるので、<strong>数字ではなく「最後に起こし直したのはいつか」で判断すること。</strong>
   <br><strong>起こし直していないのは、生きたカードが10枚あり、そのうち1枚が作業中のセッション自身だったため。</strong>落とすと自分が道連れになる。<strong>いつ落としてよいかは人にしか決められない。</strong></p>
 
   <strong>Windows から 8787 が開かないとき（2026-08-16 に踏んだ）。</strong>
