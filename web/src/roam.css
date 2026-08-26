@@ -112,129 +112,255 @@
     translate: var(--roam-x0) var(--roam-y0);
     rotate: var(--roam-r0);
   }
-  3.226% {
+  1.9195% {
     translate: var(--roam-x1) var(--roam-y1);
     rotate: var(--roam-r1);
+    animation-timing-function: steps(3);
   }
-  6.452% {
+  2.4828% {
     translate: var(--roam-x2) var(--roam-y2);
     rotate: var(--roam-r2);
+    animation-timing-function: steps(3);
   }
-  9.677% {
+  2.9973% {
     translate: var(--roam-x3) var(--roam-y3);
     rotate: var(--roam-r3);
+    animation-timing-function: steps(3);
   }
-  12.903% {
+  3.4209% {
     translate: var(--roam-x4) var(--roam-y4);
     rotate: var(--roam-r4);
+    animation-timing-function: steps(2);
   }
-  16.129% {
+  3.7278% {
     translate: var(--roam-x5) var(--roam-y5);
     rotate: var(--roam-r5);
+    animation-timing-function: steps(1);
   }
-  19.355% {
+  3.9317% {
     translate: var(--roam-x6) var(--roam-y6);
     rotate: var(--roam-r6);
+    animation-timing-function: steps(1);
   }
-  22.581% {
+  4.1356% {
     translate: var(--roam-x7) var(--roam-y7);
     rotate: var(--roam-r7);
+    animation-timing-function: steps(2);
   }
-  25.806% {
+  4.4426% {
     translate: var(--roam-x8) var(--roam-y8);
     rotate: var(--roam-r8);
+    animation-timing-function: steps(3);
   }
-  29.032% {
+  4.8662% {
     translate: var(--roam-x9) var(--roam-y9);
     rotate: var(--roam-r9);
+    animation-timing-function: steps(3);
   }
-  32.258% {
+  5.3806% {
     translate: var(--roam-x10) var(--roam-y10);
     rotate: var(--roam-r10);
+    animation-timing-function: steps(3);
   }
-  35.484% {
+  5.9439% {
     translate: var(--roam-x11) var(--roam-y11);
     rotate: var(--roam-r11);
   }
-  38.71% {
+  7.8634% {
     translate: var(--roam-x12) var(--roam-y12);
     rotate: var(--roam-r12);
   }
-  41.935% {
+  9.7829% {
     translate: var(--roam-x13) var(--roam-y13);
     rotate: var(--roam-r13);
   }
-  45.161% {
+  11.7025% {
     translate: var(--roam-x14) var(--roam-y14);
     rotate: var(--roam-r14);
   }
-  48.387% {
+  13.622% {
     translate: var(--roam-x15) var(--roam-y15);
     rotate: var(--roam-r15);
   }
-  51.613% {
+  15.5415% {
     translate: var(--roam-x16) var(--roam-y16);
     rotate: var(--roam-r16);
   }
-  54.839% {
+  17.461% {
     translate: var(--roam-x17) var(--roam-y17);
     rotate: var(--roam-r17);
   }
-  58.065% {
+  19.3805% {
     translate: var(--roam-x18) var(--roam-y18);
     rotate: var(--roam-r18);
   }
-  61.29% {
+  21.3% {
     translate: var(--roam-x19) var(--roam-y19);
     rotate: var(--roam-r19);
   }
-  64.516% {
+  23.2195% {
     translate: var(--roam-x20) var(--roam-y20);
     rotate: var(--roam-r20);
   }
-  67.742% {
+  25.139% {
     translate: var(--roam-x21) var(--roam-y21);
     rotate: var(--roam-r21);
   }
-  70.968% {
+  27.0586% {
     translate: var(--roam-x22) var(--roam-y22);
     rotate: var(--roam-r22);
   }
-  74.194% {
+  28.9781% {
     translate: var(--roam-x23) var(--roam-y23);
     rotate: var(--roam-r23);
   }
-  77.419% {
+  30.8976% {
     translate: var(--roam-x24) var(--roam-y24);
     rotate: var(--roam-r24);
   }
-  80.645% {
+  32.8171% {
     translate: var(--roam-x25) var(--roam-y25);
     rotate: var(--roam-r25);
   }
-  83.871% {
+  34.7366% {
     translate: var(--roam-x26) var(--roam-y26);
     rotate: var(--roam-r26);
   }
-  87.097% {
+  36.6561% {
     translate: var(--roam-x27) var(--roam-y27);
     rotate: var(--roam-r27);
   }
-  90.323% {
+  38.5756% {
     translate: var(--roam-x28) var(--roam-y28);
     rotate: var(--roam-r28);
   }
-  93.548% {
+  40.4951% {
     translate: var(--roam-x29) var(--roam-y29);
     rotate: var(--roam-r29);
   }
-  96.774% {
+  42.4146% {
     translate: var(--roam-x30) var(--roam-y30);
     rotate: var(--roam-r30);
   }
-  100% {
+  44.3342% {
     translate: var(--roam-x31) var(--roam-y31);
     rotate: var(--roam-r31);
+  }
+  46.2537% {
+    translate: var(--roam-x32) var(--roam-y32);
+    rotate: var(--roam-r32);
+  }
+  48.1732% {
+    translate: var(--roam-x33) var(--roam-y33);
+    rotate: var(--roam-r33);
+  }
+  50.0927% {
+    translate: var(--roam-x34) var(--roam-y34);
+    rotate: var(--roam-r34);
+  }
+  52.0122% {
+    translate: var(--roam-x35) var(--roam-y35);
+    rotate: var(--roam-r35);
+  }
+  53.9317% {
+    translate: var(--roam-x36) var(--roam-y36);
+    rotate: var(--roam-r36);
+  }
+  55.8512% {
+    translate: var(--roam-x37) var(--roam-y37);
+    rotate: var(--roam-r37);
+  }
+  57.7707% {
+    translate: var(--roam-x38) var(--roam-y38);
+    rotate: var(--roam-r38);
+  }
+  59.6903% {
+    translate: var(--roam-x39) var(--roam-y39);
+    rotate: var(--roam-r39);
+  }
+  61.6098% {
+    translate: var(--roam-x40) var(--roam-y40);
+    rotate: var(--roam-r40);
+  }
+  63.5293% {
+    translate: var(--roam-x41) var(--roam-y41);
+    rotate: var(--roam-r41);
+  }
+  65.4488% {
+    translate: var(--roam-x42) var(--roam-y42);
+    rotate: var(--roam-r42);
+  }
+  67.3683% {
+    translate: var(--roam-x43) var(--roam-y43);
+    rotate: var(--roam-r43);
+  }
+  69.2878% {
+    translate: var(--roam-x44) var(--roam-y44);
+    rotate: var(--roam-r44);
+  }
+  71.2073% {
+    translate: var(--roam-x45) var(--roam-y45);
+    rotate: var(--roam-r45);
+  }
+  73.1268% {
+    translate: var(--roam-x46) var(--roam-y46);
+    rotate: var(--roam-r46);
+  }
+  75.0463% {
+    translate: var(--roam-x47) var(--roam-y47);
+    rotate: var(--roam-r47);
+  }
+  76.9659% {
+    translate: var(--roam-x48) var(--roam-y48);
+    rotate: var(--roam-r48);
+  }
+  78.8854% {
+    translate: var(--roam-x49) var(--roam-y49);
+    rotate: var(--roam-r49);
+  }
+  80.8049% {
+    translate: var(--roam-x50) var(--roam-y50);
+    rotate: var(--roam-r50);
+  }
+  82.7244% {
+    translate: var(--roam-x51) var(--roam-y51);
+    rotate: var(--roam-r51);
+  }
+  84.6439% {
+    translate: var(--roam-x52) var(--roam-y52);
+    rotate: var(--roam-r52);
+  }
+  86.5634% {
+    translate: var(--roam-x53) var(--roam-y53);
+    rotate: var(--roam-r53);
+  }
+  88.4829% {
+    translate: var(--roam-x54) var(--roam-y54);
+    rotate: var(--roam-r54);
+  }
+  90.4024% {
+    translate: var(--roam-x55) var(--roam-y55);
+    rotate: var(--roam-r55);
+  }
+  92.322% {
+    translate: var(--roam-x56) var(--roam-y56);
+    rotate: var(--roam-r56);
+  }
+  94.2415% {
+    translate: var(--roam-x57) var(--roam-y57);
+    rotate: var(--roam-r57);
+  }
+  96.161% {
+    translate: var(--roam-x58) var(--roam-y58);
+    rotate: var(--roam-r58);
+  }
+  98.0805% {
+    translate: var(--roam-x59) var(--roam-y59);
+    rotate: var(--roam-r59);
+  }
+  100% {
+    translate: var(--roam-x60) var(--roam-y60);
+    rotate: var(--roam-r60);
   }
 }
 
@@ -249,10 +375,10 @@
   0% {
     opacity: 0;
   }
-  6% {
+  1.8% {
     opacity: var(--roam-ink);
   }
-  78% {
+  93.4% {
     opacity: var(--roam-ink);
   }
   100% {
@@ -261,78 +387,48 @@
 }
 
 /*
-  紙片のたわみ。**`scale` だけで作る。**
+  紙片のたわみ。**`scale` だけで作る。2本に割ってある。**
 
-  | % | 何 |
-  |---|---|
-  | 0〜3 | ① 尺取り虫。**頭が伸びて、尻が追いつく**（原点が線の頭にある） |
-  | 17.33〜100 | ④ ひらひら。**縦に縮んで翻る**（紙が edge-on になる foreshortening） |
+  | 名前 | 何 | いつ |
+  |---|---|---|
+  | `roam-birth` | ① 尺取り虫。**頭が伸びて、尻が追いつく**（原点が線の頭にある） | 生まれて 0.45秒。1回だけ |
+  | `roam-flutter` | ④ ひらひら。**縦に縮んで翻る**（紙が edge-on になる foreshortening） | ずっと。周期 1.94秒 |
+
+  **割ったのは、停留点の数から切り離すためである。** 前の版はひらひらの谷を停留点の
+  中間へ置いてあり、% が [`ROAM_STOPS`] に紐づいていた——停留点が 32→61 に増え、
+  さらに % が弧長比例になった（設計§9-7-9）ので、**同じ書き方だと61ブロックへ膨らみ、
+  しかも「区間の中間」の意味が失われる**。ひらひらは道のりではなく**時間**の話なので、
+  自分の周期を持たせるほうが素直である。
+
+  **後ろに書いたほうが勝つ。** 同じ `scale` を争うので、`roam-flutter, roam-birth` の
+  順に並べて**生まれの 0.45秒だけ birth が勝つ**（`fill-mode: none` なので、終われば
+  ひらひらへ戻る）。
 
   **`width` では作らない**（版組をやり直させる）。**回転でも作らない**——外側が
   進行方向を向く回転を持っているので、内側でも回すと向きの読みが濁る。
 
-  **潰し量を 0.4 → 0.65 へ緩めた。** 前の版は木の葉型（中央が太く両端が細い）を
-  0.4 まで潰しており、**そのまま楕円になっていた**（0.1.39 を見た利用者の指摘・
-  設計§9-7-7 A）。帯なら縦に潰れても線のままだが、**潰しすぎれば同じ罠を踏む**。
-
-  **③の終わりを待たずに、尺取り虫の直後から翻り続ける。** 前の版は「その場で1回転」
-  する区間があったので、そこだけ平らにしていた。いまは**ずっと走り続けている**ので、
-  待つ理由が無くなった（設計§9-7-7 B）。
+  **潰し量は 0.65。** 前の版は木の葉型（中央が太く両端が細い）を 0.4 まで潰しており、
+  **そのまま楕円になっていた**（0.1.39 を見た利用者の指摘・設計§9-7-7 A）。帯なら縦に
+  潰れても線のままだが、**潰しすぎれば同じ罠を踏む**。
 */
-@keyframes roam-paper {
+@keyframes roam-birth {
   0% {
     scale: 0 1;
   }
-  1.5% {
+  50% {
     /* 頭が行き過ぎる。ここが「尺取り虫」の伸びにあたる */
     scale: 1.35 1;
   }
-  3% {
+  100% {
     scale: 1 1;
   }
-  6.452% {
-    scale: 1 0.65;
-  }
-  12.903% {
+}
+
+@keyframes roam-flutter {
+  0% {
     scale: 1 1;
   }
-  19.355% {
-    scale: 1 0.65;
-  }
-  25.806% {
-    scale: 1 1;
-  }
-  32.258% {
-    scale: 1 0.65;
-  }
-  38.71% {
-    scale: 1 1;
-  }
-  45.161% {
-    scale: 1 0.65;
-  }
-  51.613% {
-    scale: 1 1;
-  }
-  58.065% {
-    scale: 1 0.65;
-  }
-  64.516% {
-    scale: 1 1;
-  }
-  70.968% {
-    scale: 1 0.65;
-  }
-  77.419% {
-    scale: 1 1;
-  }
-  83.871% {
-    scale: 1 0.65;
-  }
-  90.323% {
-    scale: 1 1;
-  }
-  96.774% {
+  50% {
     scale: 1 0.65;
   }
   100% {
@@ -381,13 +477,15 @@
   top: 0;
   left: 0;
   /*
-    箱は 25×7px。**インクの太さは 5px**（＝71.4%）で、残りが輪郭の揺れ代である
-    ——`clip-path` を箱いっぱいに引くと、揺らす余地が無くなる。
+    箱は 30×7px。**インクの太さは 3.5px**（＝50%）で、残りが**中心線のたわみ代**である
+    ——`clip-path` を箱いっぱいに引くと、たわませる余地が無くなる。
     相殺の `margin` で**箱の中心を停留点へ合わせる**（回転の軸＝線の中心）。
+
+    細く長くしたのは利用者の指定（0.1.40 を実物で見て。25×5px は「太くて短い」）。
   */
-  width: 25px;
+  width: 30px;
   height: 7px;
-  margin: -3.5px 0 0 -12.5px;
+  margin: -3.5px 0 0 -15px;
   opacity: 0;
   animation-name: roam-drift, roam-fade;
   /*
@@ -395,13 +493,18 @@
     手描きアニメの質感は、なめらかさを削ることで出る——**塊がぬるぬる動くのではなく、
     手で描いた線が勢いよく走る**（設計§9-7-7）。
 
-    `steps()` は**キーフレームの区間ごと**に効く。区間は 31 本で寿命は 15秒なので
-    1区間 484ms、そこを 6 コマに割ると **6 × 31 ÷ 15 ＝ 12.4 コマ/秒**になる。
-    **停留点の数か寿命を変えたら、この段数も引き直すこと。**
+    `steps()` は**キーフレームの区間ごと**に効く。**% が弧長比例になったので、区間の
+    実時間は2種類ある**（設計§9-7-9）——56px の区間は 0.96秒、巻きの区間は 0.10〜0.28秒。
+    **1つの段数では揃わない**ので、ここは既定として 12 を置き、**巻きの区間だけ
+    キーフレームの側で上書き**する（`steps(1)`〜`steps(3)`）。
+
+    全体では 624 コマ ÷ 50秒 ＝ **12.5 コマ/秒**。**停留点の数か寿命か巻きの形を
+    変えたら、`lib/roam.ts` の `roamSpans()` から引き直すこと**——`roam.test.ts` が
+    毎回それを突き合わせている。
 
     濃さ（`roam-fade`）は刻まない。**移動ではないので、刻むと明滅に見える。**
   */
-  animation-timing-function: steps(6), linear;
+  animation-timing-function: steps(12), linear;
   animation-fill-mode: both, both;
   /* 時間は層が `animationDuration` で渡す。**秒数の出どころを1つにする** */
 }
@@ -437,74 +540,120 @@
   /* 尺取り虫は**頭から伸びる**ので、原点を線の頭（左端）へ置く。縦は中央のままなので、
      ④のひらひら（縦の縮み）は線の芯を軸に翻る */
   transform-origin: 0 50%;
-  animation-name: roam-paper;
-  animation-timing-function: ease-in-out;
-  animation-fill-mode: both;
+  /* **後ろが勝つ。** 生まれの 0.45秒だけ `roam-birth` が `roam-flutter` を上書きする */
+  animation-name: roam-flutter, roam-birth;
+  animation-timing-function: ease-in-out, ease-in-out;
+  animation-iteration-count: infinite, 1;
+  /* **birth は `none`。** 終わったら値を残さず、ひらひらへ明け渡す */
+  animation-fill-mode: none, none;
 }
 
-/* ゆるく波打つ。振れは中くらい */
+/*
+  **中心線がたわむ帯**にしてある。**つたなさは輪郭のギザギザではなく、線そのものの
+  たわみから出る**（0.1.40 を実物で見た利用者の指摘・参考画像「効果線の書体」）。
+
+  前の版は上辺と下辺が**独立に**揺れており、太さだけが変わって中心線はほぼ真っ直ぐ
+  ——だから「定規で引いた帯」に見えていた。**上下を同位相でずらす**と、太さが一定の
+  まま中心線が波打つ。
+
+  箱は 30×7px でインクは 3.5px（＝50%）。中心線の振れは ±1.1〜1.75px で、
+  **端は 40% まで細めてある**（ペン先の入りと抜き）。3.5px の線に真の半円の
+  キャップを付けても見分けが付かないので、**わずかに細めることで丸みを出す**——
+  太さが 0 まで落ちないので、「塊へ戻っていないこと」を見る検査もそのまま効く。
+
+  3種の作り分けは**たわみの波数・位相・振れ**で出す。**同じ線が3本並ぶと手描きに
+  見えない。**
+*/
 .roam-paper[data-shape='0'] {
   clip-path: polygon(
-    0% 20%,
-    14% 20%,
-    29% 21%,
-    43% 16%,
-    57% 9%,
-    71% 7%,
-    86% 12%,
-    100% 22%,
-    100% 86%,
-    86% 83%,
-    71% 79%,
-    57% 81%,
-    43% 87%,
-    29% 92%,
-    14% 92%,
-    0% 80%
+    0% 30%,
+    8.33% 40.21%,
+    16.67% 45%,
+    25% 39.14%,
+    33.33% 25%,
+    41.67% 10.86%,
+    50% 5%,
+    58.33% 10.86%,
+    66.67% 25%,
+    75% 39.14%,
+    83.33% 45%,
+    91.67% 40.21%,
+    100% 30%,
+    100% 70%,
+    91.67% 88.08%,
+    83.33% 95%,
+    75% 89.14%,
+    66.67% 75%,
+    58.33% 60.86%,
+    50% 55%,
+    41.67% 60.86%,
+    33.33% 75%,
+    25% 89.14%,
+    16.67% 95%,
+    8.33% 88.08%,
+    0% 70%
   );
 }
 
-/* 大きくうねる。端の細りはいちばん弱い */
 .roam-paper[data-shape='1'] {
   clip-path: polygon(
-    0% 25%,
-    14% 15%,
-    29% 7%,
-    43% 6%,
-    57% 12%,
-    71% 20%,
-    86% 23%,
-    100% 20%,
-    100% 87%,
-    86% 95%,
-    71% 92%,
-    57% 84%,
-    43% 77%,
-    29% 78%,
-    14% 86%,
-    0% 90%
+    0% 43.81%,
+    8.33% 36.43%,
+    16.67% 16.55%,
+    25% 10.26%,
+    33.33% 25.82%,
+    41.67% 40.16%,
+    50% 32.03%,
+    58.33% 13.48%,
+    66.67% 12%,
+    75% 29.8%,
+    83.33% 40.48%,
+    91.67% 29.28%,
+    100% 16.19%,
+    100% 56.19%,
+    91.67% 77.15%,
+    83.33% 90.48%,
+    75% 79.8%,
+    66.67% 62%,
+    58.33% 63.48%,
+    50% 82.03%,
+    41.67% 90.16%,
+    33.33% 75.82%,
+    25% 60.26%,
+    16.67% 66.55%,
+    8.33% 84.3%,
+    0% 83.81%
   );
 }
 
-/* いちばん真っ直ぐ。そのぶん端をはっきり細める */
 .roam-paper[data-shape='2'] {
   clip-path: polygon(
-    0% 17%,
-    14% 9%,
-    29% 14%,
-    43% 19%,
-    57% 20%,
-    71% 16%,
-    86% 11%,
-    100% 13%,
-    100% 76%,
-    86% 82%,
-    71% 87%,
-    57% 91%,
-    43% 90%,
-    29% 85%,
-    14% 81%,
-    0% 73%
+    0% 42.89%,
+    8.33% 26.52%,
+    16.67% 12.89%,
+    25% 3.58%,
+    33.33% 0%,
+    41.67% 3.13%,
+    50% 12.11%,
+    58.33% 24.55%,
+    66.67% 37.11%,
+    75% 46.42%,
+    83.33% 50%,
+    91.67% 47.94%,
+    100% 42.89%,
+    100% 82.89%,
+    91.67% 95.81%,
+    83.33% 100%,
+    75% 96.42%,
+    66.67% 87.11%,
+    58.33% 74.55%,
+    50% 62.11%,
+    41.67% 53.13%,
+    33.33% 50%,
+    25% 53.58%,
+    16.67% 62.89%,
+    8.33% 74.38%,
+    0% 82.89%
   );
 }
 
