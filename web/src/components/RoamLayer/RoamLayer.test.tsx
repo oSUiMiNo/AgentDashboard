@@ -79,8 +79,8 @@ describe('回遊の層', () => {
       expect(線.getAttribute('style')).toContain(`--roam-y${i}:`)
       expect(線.getAttribute('style')).toContain(`--roam-r${i}:`)
     }
-    // ③の転回は座標を止めたまま向きだけ回すので、専用の変数が要る
-    expect(線.getAttribute('style')).toContain('--roam-turn:')
+    // **③の転回の変数は消えた。** 経路そのものが回るので要らない（設計§9-7-7 B）
+    expect(線.getAttribute('style')).not.toContain('--roam-turn:')
   })
 
   it('線の中に紙片が1枚だけ入る', () => {

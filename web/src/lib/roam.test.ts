@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
   MARGIN,
+  ROAM_LOOP,
+  ROAM_STEP,
   ROAM_STOPS,
-  ROAM_TURN,
   type RoamField,
   type RoamRect,
   planRoute,
@@ -47,6 +48,16 @@ function 内側(点: { x: number; y: number }): boolean {
   )
 }
 
+/** 区間の長さ。`i` 番目の点から次の点まで */
+function 区間(経路: { x: number; y: number }[], i: number): number {
+  return Math.hypot(経路[i + 1].x - 経路[i].x, 経路[i + 1].y - 経路[i].y)
+}
+
+/** 輪の点の添字。**印は実装が付けるので、較正のテストが別に要る**（下記） */
+function 輪の添字(経路: { loop?: boolean }[]): number[] {
+  return 経路.map((点, i) => (点.loop === true ? i : -1)).filter((i) => i >= 0)
+}
+
 describe('回遊の経路', () => {
   it('停留点は決めた数だけ', () => {
     // `roam.css` のキーフレームと揃う。ずれると、最後の点だけ使われない／
@@ -63,13 +74,20 @@ describe('回遊の経路', () => {
     expect(先頭.y).toBe(CARDS[0].y)
   })
 
-  it('2点目以降は、枠から取った通路の上にある', () => {
+  it('回遊の点は、枠から取った通路の上にある', () => {
     /*
       **これが「意味のある動き」を守っている唯一の自動検査である。**
 
       前の版は画面内へランダムに散らした点を巡っていて、線が何も語らなかった
       （設計§9-7-1）。枠の外側 6px に立てた線の上にしか点が来ないことを見れば、
       ランダム散らしへ戻した瞬間に落ちる。
+
+      **「x と y の両方が格子の交点」から「どちらか一方が通路の上」へ緩めてある。**
+      等速にするため1本の通路を [`ROAM_STEP`] ごとに割るようになったので、点は
+      **区間の途中**にも来る——通路の上ではあるが、交点ではない（設計§9-7-7 C）。
+      ランダムへ戻せば**両方とも外れる**ので、検査は依然として効く。
+
+      **輪（③）は通路の上に無い。** 円周を描くのだから当然で、ここでは見ない。
     */
     const xs = new Set<number>()
     const ys = new Set<number>()
@@ -86,24 +104,93 @@ describe('回遊の経路', () => {
     ys.add(FIELD.height - MARGIN)
 
     for (const seed of [1, 2, 3, 17, 99]) {
-      for (const 点 of planRoute(FIELD, seed).slice(1)) {
-        expect(xs).toContain(点.x)
-        expect(ys).toContain(点.y)
+      const 経路 = planRoute(FIELD, seed)
+      const 輪 = 輪の添字(経路)
+      for (const 点 of 経路.slice(輪[輪.length - 1])) {
+        expect(xs.has(点.x) || ys.has(点.y)).toBe(true)
       }
     }
   })
 
-  it('曲がるときは必ず直角', () => {
+  it('回遊の区間は、必ず軸に沿う', () => {
     // **ランダムなのは「曲がるかどうか」であって、角度ではない**（設計§9-7-4）。
-    // 道そのものは読めるまま、分岐だけが予測できない——生き物っぽさをここで出す
+    // 道そのものは読めるまま、分岐だけが予測できない——生き物っぽさをここで出す。
+    //
+    // **輪（③）には当てない。** 円周を描くのだから軸には沿わない（設計§9-7-7 B）
     for (const seed of [1, 5, 42]) {
       const 経路 = planRoute(FIELD, seed)
-      for (let i = 1; i < 経路.length - 1; i += 1) {
+      const 輪 = 輪の添字(経路)
+      for (let i = 輪[輪.length - 1]; i < 経路.length - 1; i += 1) {
         const dx = 経路[i + 1].x - 経路[i].x
         const dy = 経路[i + 1].y - 経路[i].y
         // 縦か横のどちらか一方しか動かない＝軸に沿っている
         expect(dx === 0 || dy === 0).toBe(true)
       }
+    }
+  })
+
+  it('輪の点は、ある中心から等しい隔たりにある', () => {
+    /*
+      ③の転回。**位置が円周を1周する**（設計§9-7-7 B）。
+
+      前の版は座標を止めて `rotate` だけ 360度 回しており、**プロペラに見えていた**
+      （0.1.39 を実物で見た利用者の指摘）。その形へ戻すと輪の点が全部同じ座標になり、
+      **半径 0 に潰れて**ここが落ちる。
+    */
+    for (const seed of [1, 2, 3, 17, 99]) {
+      const 経路 = planRoute(FIELD, seed)
+      const 輪 = 輪の添字(経路).map((i) => 経路[i])
+      const 中心 = 輪.reduce(
+        (和, 点) => ({ x: 和.x + 点.x / 輪.length, y: 和.y + 点.y / 輪.length }),
+        { x: 0, y: 0 },
+      )
+      const 隔たり = 輪.map((点) => Math.hypot(点.x - 中心.x, 点.y - 中心.y))
+      // 円周上の点の重心は中心なので、どれも同じ距離になる
+      expect(Math.min(...隔たり)).toBeGreaterThan(ROAM_STEP / 2)
+      expect(Math.max(...隔たり) - Math.min(...隔たり)).toBeLessThan(0.5)
+    }
+  })
+
+  it('輪は、入ってきた点へ戻る', () => {
+    // **半径を詰めるときに中心を動かすと、ここが落ちる。** 出口が入口とずれると、
+    // 回遊の1本目だけ軸に沿わない区間が生まれる（設計§9-7-7 B）
+    for (const seed of [1, 2, 3, 17, 99]) {
+      const 経路 = planRoute(FIELD, seed)
+      const 輪 = 輪の添字(経路)
+      const 入口 = 経路[輪[0] - 1]
+      const 出口 = 経路[輪[輪.length - 1]]
+      expect(Math.hypot(出口.x - 入口.x, 出口.y - 入口.y)).toBeLessThan(0.5)
+    }
+  })
+
+  it('輪は決めた区間の数ぶんある。回遊がいちばん長い', () => {
+    // **較正。** 輪の印は実装が自分で付けるので、これが無いと「全部を輪と申告して
+    // 直角の検査を空振りさせる」道が開く（どの壊し方でも落ちないテストになる）
+    for (const seed of [1, 2, 3, 17, 99]) {
+      const 経路 = planRoute(FIELD, seed)
+      const 輪 = 輪の添字(経路)
+      expect(輪).toHaveLength(ROAM_LOOP)
+      // 輪は連続した並びである
+      expect(輪[輪.length - 1] - 輪[0]).toBe(ROAM_LOOP - 1)
+      // 回遊が過半を占める。**輪が伸びると「ずっと回っている」になる**
+      expect(経路.length - 1 - 輪[輪.length - 1]).toBeGreaterThan((ROAM_STOPS - 1) / 2)
+    }
+  })
+
+  it('区間の長さがほぼ等しい＝速さが変わらない', () => {
+    /*
+      **これが「曲がり角で減速しない」を守っている検査である**（設計§9-7-7 C）。
+
+      キーフレームの % は等間隔なので、**区間の長さが揃えば速さも揃う**。前の版は
+      距離を見ずに点を置いており、短い区間と長い区間で 3〜10倍 の開きがあった
+      ——それが「角で減速する」の実体だった。時間等分へ戻すとここが落ちる。
+    */
+    for (const seed of [1, 2, 3, 17, 42, 99]) {
+      const 経路 = planRoute(FIELD, seed)
+      const 長さ = [...Array(経路.length - 1).keys()].map((i) => 区間(経路, i))
+      expect(Math.max(...長さ) / Math.min(...長さ)).toBeLessThan(2)
+      // 較正：**そもそも動いている**（全部 0 なら比は NaN で素通りしうる）
+      expect(Math.min(...長さ)).toBeGreaterThan(ROAM_STEP / 3)
     }
   })
 
@@ -130,9 +217,11 @@ describe('回遊の経路', () => {
 
   it('風に流される向きは、種ごとに違う', () => {
     // ②の飛散。**3本が揃って同じ方向へ出ると「風」に見えない**（設計§9-7-2）
+    // **着地は輪に入る手前の点**（飛散は等間隔に割ってあるので、2点目とは限らない）
     const 行き先 = [1, 2, 3].map((seed) => {
-      const [, 二点目] = planRoute(FIELD, seed)
-      return `${二点目.x},${二点目.y}`
+      const 経路 = planRoute(FIELD, seed)
+      const 着地 = 経路[輪の添字(経路)[0] - 1]
+      return `${着地.x},${着地.y}`
     })
     expect(new Set(行き先).size).toBeGreaterThan(1)
   })
@@ -163,8 +252,8 @@ describe('回遊の経路', () => {
 describe('停留点を CSS 変数へ写す', () => {
   it('点ごとに x / y / r の3つを出す', () => {
     const vars = routeVars(planRoute(FIELD, 2))
-    // 点ごとの3つ ＋ 転回の1つ
-    expect(Object.keys(vars)).toHaveLength(ROAM_STOPS * 3 + 1)
+    // 点ごとの3つだけ。**転回の1つは消えた**（経路そのものが回るので要らない）
+    expect(Object.keys(vars)).toHaveLength(ROAM_STOPS * 3)
     for (let i = 0; i < ROAM_STOPS; i += 1) {
       expect(vars[`--roam-x${i}`]).toMatch(/^-?\d+px$/)
       expect(vars[`--roam-y${i}`]).toMatch(/^-?\d+px$/)
@@ -172,23 +261,32 @@ describe('停留点を CSS 変数へ写す', () => {
     }
   })
 
-  it('転回のぶんが、角度へ織り込まれている', () => {
+  it('角度を巻き戻さない', () => {
     /*
-      ③の1回転（設計§9-7-2）。**`animation-composition: add` を使わずに作ってある**
-      ——停留点1の座標を据え置いたまま向きだけ `--roam-turn` へ回し、以降の角度にも
-      同じだけ足しておくと、1本のキーフレームのまま「その場で1回転」になる。
+      `atan2` は (-180, 180] しか返さないので、そのまま並べると**輪を1周する途中で
+      +170° → -170° と折り返し、線が逆回転して見える**。前の点にいちばん近い等価な角を
+      選んで、通し番号で単調に増やしてある。
 
-      **足し忘れると、線は回らずに素通りする**（見た目は自然なので気づけない）。
+      **前の版が角度へ 360度 を足していた細工は消えた**——足すのではなく、経路が回る
+      （設計§9-7-7 B）。
     */
-    const 経路 = planRoute(FIELD, 2)
-    const vars = routeVars(経路)
+    for (const seed of [1, 2, 3, 17, 99]) {
+      const 経路 = planRoute(FIELD, seed)
+      for (let i = 1; i < 経路.length; i += 1) {
+        // 隣り合う点の向きが 180度 を超えて跳ぶことは無い。**ちょうど 180度 は出る**
+        // ——端で跳ね返ると、進む向きがそのまま逆になる
+        expect(Math.abs(経路[i].r - 経路[i - 1].r)).toBeLessThan(180.001)
+      }
+      /*
+        輪を1周するあいだに、向きも1周ぶん近く回る（**プロペラへ戻すと 0 になる**）。
 
-    expect(vars['--roam-turn']).toBe(`${Math.round(経路[1].r) + ROAM_TURN}deg`)
-    // 0 と 1 には足さない（①発生と②飛散は、進む向きを向いているだけ）
-    expect(vars['--roam-r0']).toBe(`${Math.round(経路[0].r)}deg`)
-    expect(vars['--roam-r1']).toBe(`${Math.round(経路[1].r)}deg`)
-    for (let i = 2; i < ROAM_STOPS; i += 1) {
-      expect(vars[`--roam-r${i}`]).toBe(`${Math.round(経路[i].r) + ROAM_TURN}deg`)
+        **測るのは弦の向きなので、1周ぶん＝(区間の数 - 1) × 45度 になる。**
+        各点が持つのは「次の点へ向かう向き」なので、入口の点（輪の1つ手前）から
+        **輪の最後の弦を持つ点**（＝閉じる点の1つ手前）までを見る。
+      */
+      const 輪 = 輪の添字(経路)
+      const 回転 = Math.abs(経路[輪[輪.length - 1] - 1].r - 経路[輪[0] - 1].r)
+      expect(回転).toBeGreaterThan(270)
     }
   })
 })

@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { ROAM_STOPS } from '@/lib/roam'
+import { ROAM_LIFE_MS } from '@/stores/roam'
 
 /**
  * 回遊の定義（`roam.css`）を、**テキストとして**確かめる。
@@ -171,12 +173,68 @@ describe('層は場所を取らず、何も塗らない', () => {
       'roam-fade',
       'roam-paper',
     ])
-    // 停留点10ぶんの座標を読んでいること（`lib/roam.ts` の `ROAM_STOPS` と揃う）
-    for (let i = 0; i < 10; i += 1) {
+    // 停留点ぶんの座標を読んでいること（`lib/roam.ts` の `ROAM_STOPS` と揃う）
+    for (let i = 0; i < ROAM_STOPS; i += 1) {
       expect(素のCSS()).toContain(`var(--roam-x${i})`)
     }
-    // ③の転回。**座標を止めたまま向きだけ1周する**ので、専用の変数を読む
-    expect(素のCSS()).toContain('var(--roam-turn)')
+    // **1つ多く読んでいない。** 停留点を減らしたときに、存在しない変数を読む
+    // キーフレームが残っていると、その区間だけ原点へ飛ぶ
+    expect(素のCSS()).not.toContain(`var(--roam-x${ROAM_STOPS})`)
+    // **③の転回の変数は消えた。** 経路そのものが回るので要らない（設計§9-7-7 B）
+    expect(素のCSS()).not.toContain('var(--roam-turn)')
+  })
+
+  it('線の太さがほぼ一定＝塊ではなく線に見える', () => {
+    /*
+      **これが「楕円に見える」を塞いでいる検査である**（設計§9-7-7 A）。
+
+      前の版は中央が太く両端が細い**木の葉型**で、拡大するとそのまま楕円に見えていた
+      ——ひらひらで縦に潰すと蝶ネクタイに、転回で回すと手裏剣になり、**どの瞬間も
+      「線」ではなく「塊」だった**（0.1.39 を実物で見た利用者の指摘）。
+
+      形は「上辺を左から右へ、下辺を右から左へ」の順に並べてあるので、**i 番目と
+      末尾から i 番目が同じ x を持つ**。その隔たりが太さになる。**先細りへ戻すと
+      両端の太さが落ちて**ここが落ちる。
+    */
+    for (const 形 of [0, 1, 2]) {
+      const [規則] = 当たる(`[data-shape='${形}']`)
+      expect(規則).toBeDefined()
+      const 点 = [...規則.body.matchAll(/(-?[\d.]+)%\s+(-?[\d.]+)%/g)].map((m) => ({
+        x: Number(m[1]),
+        y: Number(m[2]),
+      }))
+      // 較正：上下が対になる形で並んでいる（奇数だと下の突き合わせが嘘になる）
+      expect(点.length % 2).toBe(0)
+      expect(点.length).toBeGreaterThanOrEqual(8)
+
+      const 太さ: number[] = []
+      for (let i = 0; i < 点.length / 2; i += 1) {
+        const 上 = 点[i]
+        const 下 = 点[点.length - 1 - i]
+        expect(下.x).toBe(上.x)
+        太さ.push(下.y - 上.y)
+      }
+      // **端をわずかに細める（ペン先の入りと抜き）以上には変えない**
+      expect(Math.min(...太さ)).toBeGreaterThan(45)
+      expect(Math.max(...太さ) / Math.min(...太さ)).toBeLessThan(1.4)
+    }
+  })
+
+  it('コマ送りは毎秒12コマに揃っている', () => {
+    /*
+      **うごくメモ帳のような手描きアニメの質感**を、なめらかさを削って出す
+      （利用者の指定・2026-08-26。設計§9-7-7）。
+
+      `steps()` は**キーフレームの区間ごと**に効くので、コマ数は
+      「段数 × 区間の数 ÷ 寿命（秒）」になる。**停留点の数か寿命を変えたら、
+      段数も引き直すこと**——ここが、引き直し忘れを捕まえる。
+    */
+    const [線] = 当たる('.roam-line')
+    const 段 = /steps\((\d+)\)/.exec(線.body)?.[1]
+    expect(段).toBeDefined()
+    const コマ = (Number(段) * (ROAM_STOPS - 1)) / (ROAM_LIFE_MS / 1000)
+    expect(コマ).toBeGreaterThan(10)
+    expect(コマ).toBeLessThan(15)
   })
 
   it('尺取り虫を scale で作る', () => {
