@@ -37,7 +37,7 @@
 <p class="lead">
   AgentDashboard に関係して、この機械や外で<strong>起動しっぱなしになっているもの</strong>の一覧。
   「どの URL がどれを指しているか」を取り違えると原因追跡が丸ごと空振りするので、そこを中心に書いてある。
-  <br>最終更新：2026-08-26 11時台（<strong>AWS はもう無い。セッションホスト<span class="mark">▽</span>も走っていない。</strong>動いているのは<strong>実機だけ</strong>で、trial は止まったまま。<strong>実機を 0.1.39 で起こし直すよう撃った</strong>——切り離したスクリプトに任せてあるので、<strong>結果は <code>~/agentdashboard-restart.log</code> を見ること</strong>）
+  <br>最終更新：2026-08-26 11時台（<strong>AWS はもう無い。セッションホスト<span class="mark">▽</span>も走っていない。</strong>動いているのは<strong>実機だけ</strong>で、trial は止まったまま。<strong>実機は押す直前で止めてある</strong>——走行 0.1.40 ／ ディスク 0.1.41 で1段ずれている。<strong>起こし直しは利用者から明示的に止められている</strong>ので、<strong>押すのは人</strong>）
   <br><strong>AWS のアカウントが閉鎖された。原因は無料プランの期限切れ（2026-08-15）。</strong>画面に「アカウントが閉鎖されました」と「無料プランはまもなく終了します（Aug 15, 2026 に、またはすべてのクレジットを使い切った時点で終了）」が出る（利用者が確認・08-16 22時台）。<strong>クレジットは $108.97 残っているが、無料プランの窓が閉じたので使えない。</strong><code>dash.underschaft.com</code> は <strong>530</strong> を返す。
   <br><strong>止まり方は段階的だった。</strong>08-16 の 16:30 と 17:57 は 530、<strong>18:24 は 200 に戻り</strong>、20時台から 530 のまま。閉鎖に伴って資源が順に止められていく途中だったと読める。<strong>「一度 200 が返ったから復旧した」と読まないこと。</strong>
   <br><strong>「IP が変わった」ではない。</strong>最初は SSH が届かないだけに見え、Elastic IP を持たない構成なので IP の付け替えを疑ったが、<strong>原因はアカウントごと消えていたこと</strong>だった。terraform の記録（<code>~/Dev/Test_AgentDashboard/terraform.tfstate</code>・08-03）にある <code>43.207.237.211</code> は<strong>もう誰のものでもない</strong>。<strong>ここを直すのも、別の場所へ立て直すのも人の作業。</strong>
@@ -77,7 +77,7 @@
 
   <rect x="30" y="62" width="200" height="72" rx="8" fill="#161a21" stroke="#2d4a22"/>
   <text x="44" y="88" fill="#9ece6a" font-size="14" font-weight="600">8787 実機</text>
-  <text x="44" y="108" fill="#e6e9ef" font-size="12">ローカルモード・走行 0.1.39（狙い）</text>
+  <text x="44" y="108" fill="#e6e9ef" font-size="12">ローカルモード・走行 0.1.40（ディスク 0.1.41）</text>
   <text x="44" y="125" fill="#9aa4b2" font-size="11">~/AgentDashboard のソースビルド</text>
 
   <rect x="256" y="62" width="200" height="72" rx="8" fill="#161a21" stroke="#2d4a22"/>
@@ -88,7 +88,7 @@
   <rect x="30" y="178" width="200" height="62" rx="8" fill="#161a21" stroke="#2a313c"/>
   <text x="44" y="202" fill="#e6e9ef" font-size="13">セッションホスト（OMEN）</text>
   <text x="44" y="222" fill="#9aa4b2" font-size="11">claude を動かす → AWS へ繋ぐ</text>
-  <text x="44" y="236" fill="#e0af68" font-size="11">走っていない（ディスク 0.1.34）</text>
+  <text x="44" y="236" fill="#e0af68" font-size="11">走っていない（ディスク 0.1.41）</text>
 
   <rect x="256" y="178" width="200" height="62" rx="8" fill="#161a21" stroke="#2a313c"/>
   <text x="270" y="202" fill="#e6e9ef" font-size="13">cloudflared（この機械）</text>
@@ -127,7 +127,7 @@
   一方 AWS は<strong>配った箱</strong>なので、<strong>リリースを出すまで何も変わらない</strong>。
   画面に出る版だけを見て「同じものが動いている」と判断しないこと。<br><br>
 
-  <p class="note warn"><strong>0.1.39 で起こし直すよう撃った（結果は未確認）。</strong> AWS は無い（アカウント閉鎖）。<strong>セッションホスト<span class="mark">▽</span>は走っていない</strong>。実機は<strong>直前まで走行 0.1.37・ディスク 0.1.39</strong>で2段ずれており、<strong>切り離したスクリプト</strong>（<code>/tmp/agentdashboard-restart.sh</code>）に起こし直しを任せた——<strong>撃った側（作業セッション）は道連れになるので、起きたかどうかを見ていない</strong>。<strong>確かめるのは <code>~/agentdashboard-restart.log</code> の末尾</strong>（狙い・巻き添え枚数・起きた版が1行ずつ入る）。入るのは<strong>カードの濃さの直し（0.1.38）</strong>と<strong>回遊する効果線の作り直し（0.1.39。右上から出て枠沿いを縫う手書きの線）</strong>。
+  <p class="note warn"><strong>実機は押す直前で止めてある（走行 0.1.40 ／ ディスク 0.1.41）。</strong> AWS は無い（アカウント閉鎖）。<strong>セッションホスト<span class="mark">▽</span>は走っていない</strong>。実機は<strong>走行 0.1.40・ディスク 0.1.41</strong>で1段ずれている。<strong>v0.1.41 のタグを打ち、実機で <code>make build</code> まで済ませた</strong>（に起こし直しを任せた——<strong>撃った側（作業セッション）は道連れになるので、起きたかどうかを見ていない</strong>。<strong>確かめるのは <code>~/agentdashboard-restart.log</code> の末尾</strong>（狙い・巻き添え枚数・起きた版が1行ずつ入る）。起こすと入るのは<strong>回遊する効果線の作り直し</strong>（巻きを小さくし、線を細くし、カードのある場所だけを回る）と<strong>ファイルのパネルの組み替え</strong>（フォルダが被さる層へ移り、中身が独立した列になり、縁をドラッグして幅を変えられる）。
   <br><strong>これはいちばん気づきにくいずれ方である。</strong>ヘッダに出る版はサーバに聞いた答えなので<strong>両方 0.1.34 と出る</strong>。「揃っているのに古い」という形になるので、<strong>数字ではなく「最後に起こし直したのはいつか」で判断すること。</strong>
   <br><strong>起こし直していないのは、生きたカードが10枚あり、そのうち1枚が作業中のセッション自身だったため。</strong>落とすと自分が道連れになる。<strong>いつ落としてよいかは人にしか決められない。</strong></p>
 
