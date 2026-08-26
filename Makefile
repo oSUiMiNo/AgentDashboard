@@ -195,9 +195,11 @@ clean: ## ビルド成果物を消す（自己修復の作業場所も含む）
 # こちらは**次のビルドの大半を使い回せる形**で嵩だけ落とす。
 #
 # 消すのはどちらもキャッシュで、消えて困るものは入っていない。
+# **消す規則は scripts/prune-target が1つだけ持つ。** ここに `rm -rf` を書き戻すと、
+# 自動の掃除（scripts/cargo が呼ぶ）と手で叩く掃除で規則が2つになり、片方だけ直す事故が起きる。
 prune: ## ビルドの置き場所を、作り直しを最小にして減らす
 	@echo "減らす前:"
 	@du -sh server/target 2>/dev/null || true
-	rm -rf server/target/debug/incremental server/target/debug/deps
+	./scripts/prune-target --all server/target
 	@echo "減らした後:"
 	@du -sh server/target 2>/dev/null || true

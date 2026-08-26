@@ -84,15 +84,33 @@ if [[ -n "${TARGET_DIR}" ]]; then
     esac
     mkdir -p "${REPO_ROOT}/${TARGET_DIR}"
     DOCKER_ENV+=(--env "CARGO_TARGET_DIR=/repo/${TARGET_DIR}")
+    TARGET_ABS="${REPO_ROOT}/${TARGET_DIR}"
+else
+    TARGET_ABS="${REPO_ROOT}/${CARGO_DIR}/target"
 fi
+# ロックの置き場所を作るために、成果物の置き場所を先に用意しておく。cargo も同じものを
+# 作るが、**こちらは cargo より前にロックを取る**ので、無いままでは掴めない。
+mkdir -p "${TARGET_ABS}"
 
 # rust-embed は web/dist を「コンパイル時に」読むため、フォルダが無いとビルドが失敗する。
 # vite は build のたびに dist を作り直す（= 一度消える）ので、git で空ディレクトリを
 # 追跡する方式は壊れやすい。cargo の唯一の入口であるここで必ず存在を保証する。
 mkdir -p "${REPO_ROOT}/web/dist"
 
+# ビルドの間ずっと**共有ロック**を持つ。掃除（scripts/prune-target）は排他で取ろうとするので、
+# ビルドが1本でも走っている間は掃除が走らない——**走っているビルドの足元を抜かない**ため。
+#
+# 共有にしてあるのは、同じ置き場所への同時ビルドを妨げないため。排他にすると2本目の
+# ビルドが1本目の終了まで待たされ、ダッシュボードで並行して開発できなくなる。
+exec 9>"${TARGET_ABS}/.prune-lock"
+flock --shared 9
+
 # リポジトリ全体をマウントする。server/ だけでは足りないのは、core が rust-embed で
 # web/dist を「コンパイル時に」読むため（設計§2 の単一バイナリ同梱）。
+#
+# **終了コードを退避する。** 掃除を後ろに足したせいで cargo の失敗が 0 に化けると、
+# `make ci` が失敗を見逃す。
+set +e
 docker run --rm \
     --user "$(id -u):$(id -g)" \
     --volume "${REPO_ROOT}:/repo" \
@@ -104,3 +122,15 @@ docker run --rm \
     "${DOCKER_NET[@]}" \
     "${IMAGE_TAG}" \
     cargo "$@"
+CARGO_STATUS=$?
+set -e
+
+# 掃除の前に離す。持ったままだと、自分の掃除が自分のロックに阻まれる。
+flock -u 9
+exec 9>&-
+
+# **cargo は古い成果物を自分では消さない。** 育ちすぎたときだけ、古い世代を落とす。
+# 掃除が失敗しても cargo の結果は通す——掃除の不調でビルドが失敗扱いになってはならない。
+"${REPO_ROOT}/scripts/prune-target" "${TARGET_ABS}" || true
+
+exit "${CARGO_STATUS}"
