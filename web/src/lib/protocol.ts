@@ -708,6 +708,24 @@ export function statusAccentColor(status: SessionStatus): string {
 }
 
 /**
+ * いま塗る濃さだけを取り出す（カード設計§9-7）。
+ *
+ * `tile.css` の `--tile-ink` が読んでいるのと**同じ値**である。回遊する線は色と同じく
+ * 濃さも値として持ち回る（層は DOM を1度も読まない）ので、こちらから取る。
+ *
+ * **ここだけ外れたままにしない。** フェーズ8 が「同じ状態はどこでも同じ色で出る」を
+ * 台帳にしたのに、回遊する線だけ `--roam-peak: 0.5` の固定値で塗っていた。
+ *
+ * **実際に乗るのは琥珀の 75% だけ**である——回遊が出るのは跳ねているカード、つまり
+ * 権限確認待ちだけで（[`statusMotion`] で `shake` になるのはこの状態のみ）、他の状態は
+ * この関数を通らない。**それでも状態から引く**：値を書き写すと、色を変えたときに
+ * 片方だけ動く形が生まれる。
+ */
+export function statusInk(status: SessionStatus): string {
+  return quieterDim(status) ?? STATUS_TONES[statusGroup(status)].dim
+}
+
+/**
  * カードの動きの種類（カード設計§8-2）。
  *
  * **合図の強さを対処の必要性に比例させたい**が、いまは作業中がいちばん強く回る。
