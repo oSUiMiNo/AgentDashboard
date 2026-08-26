@@ -68,6 +68,18 @@ test.beforeAll(() => {
   )
 })
 
+/*
+  **カードを掴むときは `session-tile` まで名指しする。**
+
+  `data-card-id` は `tile-shell`（近接判定の器）と `session-tile`（押せる本体）の
+  **両方**に付いているので、`[data-card-id="…"]` だけだと2件に一致して
+  strict mode で落ちる。他の spec（`model` ／ `permission-mode` ／ `perf`）は
+  最初からこの形で書いてある。
+
+  **`make e2e` に含まれない**（docker が要る）ので、カードが4層へ組み替わった
+  2026-08-25 から、誰にも気づかれないまま落ち続けていた。
+*/
+
 test.afterAll(() => {
   fs.rmSync(CROSS_DIR, { recursive: true, force: true })
 })
@@ -118,7 +130,7 @@ test('もう一方のインスタンスへ繋いでも同じものが見える',
     'data-status',
     'open',
   )
-  await expect(page.locator(`[data-card-id="${cardId}"]`)).toBeVisible()
+  await expect(page.locator(`[data-testid="session-tile"][data-card-id="${cardId}"]`)).toBeVisible()
 
   // 片付けは A 側で行う（afterEach が baseURL を見る）
   await page.goto('/')
@@ -208,7 +220,7 @@ test('CLI が前段越しの WebSocket でセッションを起こし、指示�
   expect(cardId).toMatch(/^[0-9a-f-]{36}$/)
 
   // ブラウザで同じカードを開く（カードは共有の真実——CLI が作ったものが画面にも居る）
-  const tile = page.locator(`[data-card-id="${cardId}"]`)
+  const tile = page.locator(`[data-testid="session-tile"][data-card-id="${cardId}"]`)
   await expect(tile).toBeVisible()
   await openSession(page, tile)
 
@@ -245,7 +257,7 @@ test('ブラウザ側と PC 側のインスタンスが別でも、CLI から操
   const cardId = spawned.stdout.trim()
   expect(cardId).toMatch(/^[0-9a-f-]{36}$/)
 
-  const tile = page.locator(`[data-card-id="${cardId}"]`)
+  const tile = page.locator(`[data-testid="session-tile"][data-card-id="${cardId}"]`)
   await expect(tile).toBeVisible()
   await openSession(page, tile)
 
@@ -282,12 +294,12 @@ test('ブラウザ側のインスタンスを落としてもセッションは�
   // PC が繋がっている側（B）では何も起きていない
   await page.goto(OTHER_INSTANCE)
   await signInIfAsked(page)
-  await expect(page.locator(`[data-card-id="${cardId}"]`)).toBeVisible()
+  await expect(page.locator(`[data-testid="session-tile"][data-card-id="${cardId}"]`)).toBeVisible()
 
   startService('dashboard-a')
   await page.goto('/')
   await openDashboard(page)
-  await expect(page.locator(`[data-card-id="${cardId}"]`)).toBeVisible()
+  await expect(page.locator(`[data-testid="session-tile"][data-card-id="${cardId}"]`)).toBeVisible()
 })
 
 test('PC が落ちると印が付き、起こし直すとまた使える', async ({ page }) => {
@@ -300,7 +312,7 @@ test('PC が落ちると印が付き、起こし直すとまた使える', async
   await openDashboard(page)
   const tile = await spawnSession(page)
   const cardId = await tile.getAttribute('data-card-id')
-  const card = page.locator(`[data-card-id="${cardId}"]`)
+  const card = page.locator(`[data-testid="session-tile"][data-card-id="${cardId}"]`)
 
   killAgent()
   await expect(card.getByTestId('disconnected-badge')).toBeVisible({
