@@ -9,6 +9,8 @@
  * 位置から幅を出す経路は縮退した同じ数字しか通らない。当たることは E2E でしか言えない。
  */
 
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { FilesLayout } from '@/components/ProjectFiles/FilesLayout'
@@ -372,5 +374,77 @@ describe('一覧は画像を先読みしない', () => {
     // 1件あたり最大5秒の時間切れがその数だけ並ぶ
     expect(calls).toHaveLength(1)
     expect(calls.filter((url) => url.includes('as=raw'))).toHaveLength(0)
+  })
+})
+
+/**
+ * 器が1つであることの台帳（設計§3）。
+ *
+ * # なぜ画面を描いて確かめないのか
+ *
+ * **「2箇所に写しがある」は、描いても分からない。** 写しは同じものを描くので、
+ * 片方だけ見ても両方見ても、食い違うまでは正しく見える。**食い違ってから気づく**
+ * のでは遅く、しかもそのとき片方は普通に動いているので「直った」と読める。
+ *
+ * だからテキストで見る。出所は `web/src/roam.test.ts` ／ `tile.test.ts` の
+ * 「定義をテキストとして確かめる」と同じ考え方。
+ */
+
+describe('器が1つであること', () => {
+  /**
+   * コメントを落とす。**中に `<aside>` と書いてある**ので、先に消さないと自分の
+   * 説明文を拾ってしまう（出所は `roam.test.ts` の `素のCSS`）。
+   */
+  const 素のコード = (src: string) =>
+    src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+
+  const 読む = (path: string) =>
+    素のコード(readFileSync(resolve(process.cwd(), 'src', path), 'utf8'))
+
+  const 画面 = {
+    'PJT 専用画面': 読む('components/GroupView/GroupView.tsx'),
+    'セッション専用画面': 読む('components/SessionView/SessionView.tsx'),
+  }
+
+  it('どちらの画面も、同じ器を描いている', () => {
+    for (const [名前, 中身] of Object.entries(画面)) {
+      expect(中身, `${名前} が FilesLayout を描いていること`).toContain(
+        '<FilesLayout',
+      )
+    }
+  })
+
+  it('`<aside>` の写しが、どちらにも残っていない', () => {
+    // 移設前はここに**クラス文字列まで一字一句同じもの**が2つあった。
+    // 戻すと、片方だけ直る形がまた作れてしまう
+    for (const [名前, 中身] of Object.entries(画面)) {
+      expect(中身, `${名前} に <aside> が残っていないこと`).not.toContain(
+        '<aside',
+      )
+      expect(中身, `${名前} に project-files-panel が残っていないこと`).not.toContain(
+        'project-files-panel',
+      )
+    }
+  })
+
+  it('☰ も、どちらの画面も同じ部品を使っている', () => {
+    for (const [名前, 中身] of Object.entries(画面)) {
+      expect(中身, `${名前} が FilesToggle を使っていること`).toContain(
+        '<FilesToggle',
+      )
+      expect(中身, `${名前} に ☰ の直書きが残っていないこと`).not.toContain(
+        'project-files-toggle',
+      )
+    }
+  })
+
+  it('取り合いの器が、オーバーレイの基準になっている', () => {
+    // フォルダは広い画面で `md:absolute` になるので、**祖先に位置の基準が要る**。
+    // 無いと `fixed` と同じく画面の上端から被さり、アプリのヘッダまで覆う
+    for (const [名前, 中身] of Object.entries(画面)) {
+      expect(中身, `${名前} の取り合いの器に relative があること`).toContain(
+        'className="relative flex min-h-0 flex-1 gap-4"',
+      )
+    }
   })
 })
