@@ -586,13 +586,18 @@ export function planRoute(field: RoamField, seed: number): RoamStop[] {
  * **角度に細工をしない。** 前の版は停留点2以降へ 360度 を足して「その場で1回転」を
  * 作っていたが、いまは**経路そのものが回る**ので足す必要が無い（設計§9-7-7 B）。
  * 巻き戻しの防止は [`planRoute`] が済ませてある。
+ *
+ * **整数へ丸めない。** 巻きは 57px しか広がらず、弦は 6〜17px しかないので、
+ * **1px の丸めで「線が自分と交差する」が「接するだけ」に潰れる**（実物で測って
+ * 気づいた——12本のうち交差していたのは2本だけだった）。小数第1位まで残す。
  */
 export function routeVars(stops: RoamStop[]): Record<string, string> {
   const vars: Record<string, string> = {}
+  const 丸め = (値: number): number => Math.round(値 * 10) / 10
   stops.forEach((stop, i) => {
-    vars[`--roam-x${i}`] = `${Math.round(stop.x)}px`
-    vars[`--roam-y${i}`] = `${Math.round(stop.y)}px`
-    vars[`--roam-r${i}`] = `${Math.round(stop.r)}deg`
+    vars[`--roam-x${i}`] = `${丸め(stop.x)}px`
+    vars[`--roam-y${i}`] = `${丸め(stop.y)}px`
+    vars[`--roam-r${i}`] = `${丸め(stop.r)}deg`
   })
   return vars
 }

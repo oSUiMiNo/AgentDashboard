@@ -69,6 +69,20 @@ function 範囲(): { 左: number; 右: number; 上: number; 下: number } {
   }
 }
 
+/**
+ * **実際に描かれる座標**。`routeVars` を通した値を読み直す。
+ *
+ * `planRoute` の生の値と、CSS へ渡る値は**丸めのぶん違う**。巻きのように小さい形は
+ * その差で性質が変わるので、**描かれる側で見る**。
+ */
+function 描かれる経路(field: RoamField, seed: number): { x: number; y: number }[] {
+  const vars = routeVars(planRoute(field, seed))
+  return [...Array(ROAM_STOPS).keys()].map((i) => ({
+    x: Number.parseFloat(vars[`--roam-x${i}`]),
+    y: Number.parseFloat(vars[`--roam-y${i}`]),
+  }))
+}
+
 /** 輪の点の添字。**印は実装が付けるので、較正のテストが別に要る**（下記） */
 function 輪の添字(経路: { loop?: boolean }[]): number[] {
   return 経路.map((点, i) => (点.loop === true ? i : -1)).filter((i) => i >= 0)
@@ -185,6 +199,11 @@ describe('回遊の経路', () => {
 
       いまはトロコイド——**進みながら1周する**ので、`b > a` である限り必ず1回交差する。
       **大きな円へ戻すと「小さい」が落ち、前進を 0 にすると「交差する」が落ちる。**
+
+      **見るのは `routeVars` が出した値、つまり実際に描かれる座標である。**
+      `planRoute` の生の値で見てはいけない——巻きは 57px しか広がらず弦は 6〜17px
+      しかないので、**丸めの粗さで交差が「接するだけ」に潰れる**。実物で測って
+      気づいた（整数へ丸めていた頃、12本のうち交差していたのは2本だけだった）。
     */
     const 交わる = (
       p1: { x: number; y: number },
@@ -200,8 +219,8 @@ describe('回遊の経路', () => {
     }
 
     for (const seed of [1, 2, 3, 17, 99]) {
-      const 経路 = planRoute(FIELD, seed)
-      const 輪 = 輪の添字(経路)
+      const 経路 = 描かれる経路(FIELD, seed)
+      const 輪 = 輪の添字(planRoute(FIELD, seed))
       // 入口（飛散の着地）から出口まで。**交差は入口の側の区間と絡む**ので入口を含める
       const 巻き = 経路.slice(輪[0] - 1, 輪[輪.length - 1] + 1)
 
@@ -366,9 +385,9 @@ describe('停留点を CSS 変数へ写す', () => {
     // 点ごとの3つだけ。**転回の1つは消えた**（経路そのものが回るので要らない）
     expect(Object.keys(vars)).toHaveLength(ROAM_STOPS * 3)
     for (let i = 0; i < ROAM_STOPS; i += 1) {
-      expect(vars[`--roam-x${i}`]).toMatch(/^-?\d+px$/)
-      expect(vars[`--roam-y${i}`]).toMatch(/^-?\d+px$/)
-      expect(vars[`--roam-r${i}`]).toMatch(/^-?\d+deg$/)
+      expect(vars[`--roam-x${i}`]).toMatch(/^-?\d+(\.\d)?px$/)
+      expect(vars[`--roam-y${i}`]).toMatch(/^-?\d+(\.\d)?px$/)
+      expect(vars[`--roam-r${i}`]).toMatch(/^-?\d+(\.\d)?deg$/)
     }
   })
 
