@@ -118,18 +118,39 @@ test('層は中身と一緒にスクロールし、場からはみ出さない',
     振る舞っていた）。
   */
   const 器 = page.locator('[data-roam-field]').locator('..')
-  const 動く余地 = await 器.evaluate((el) => el.scrollHeight - el.clientHeight)
-  test.skip(動く余地 < 40, '一覧が1画面に収まっていて、スクロールで動かせない')
 
-  const 前 = (await 層.boundingBox())?.y ?? 0
-  await 器.evaluate((el) => {
-    el.scrollTop = 40
-  })
-  const 後 = (await 層.boundingBox())?.y ?? 0
-  expect(前 - 後).toBeCloseTo(40, 0)
-  await 器.evaluate((el) => {
-    el.scrollTop = 0
-  })
+  /*
+    **窓を狭めて、必ずスクロールできる形にする。**
+
+    最初は「動かせなければ飛ばす」と書いたが、**一覧が1画面に収まって毎回
+    skip された**——`fixed` へ戻す壊し方を当てても落ちない。**飛ばしたテストは
+    何も証明しない**ので、条件のほうを作りにいく。
+  */
+  const 元の窓 = page.viewportSize()
+  await page.setViewportSize({ width: 900, height: 260 })
+  try {
+    // **動かせる量は決め打てない**（カードの高さも一覧の中身も変わる）。実測して、
+    // その量ぶんだけ動かす。最初は 40px を要求したが**余地が 29px しか無くて落ちた**
+    const 余地 = await expect
+      .poll(async () => 器.evaluate((el) => el.scrollHeight - el.clientHeight))
+      .toBeGreaterThan(8)
+      .then(() => 器.evaluate((el) => el.scrollHeight - el.clientHeight))
+    const 動かす = Math.min(40, 余地)
+
+    const 前 = (await 層.boundingBox())?.y ?? 0
+    await 器.evaluate((el, y) => {
+      el.scrollTop = y
+    }, 動かす)
+    const 後 = (await 層.boundingBox())?.y ?? 0
+    // **`fixed` へ戻すとここが 0 になる**（画面に貼り付いて動かない）
+    expect(前 - 後).toBeCloseTo(動かす, 0)
+    await 器.evaluate((el) => {
+      el.scrollTop = 0
+    })
+  } finally {
+    // **戻してから終える。** 置いていくと後続が狭い窓で走る
+    if (元の窓 !== null) await page.setViewportSize(元の窓)
+  }
 })
 
 test('飛んでいる線が、スクロールできる範囲を押し広げない', async ({ page }) => {
