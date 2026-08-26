@@ -202,7 +202,6 @@ export function FilesResizer({
       */}
       <span
         aria-hidden
-        data-testid="files-resizer-line"
         className="bg-border group-hover/resizer:bg-primary group-data-[dragging=true]/resizer:bg-primary group-data-[dragging=true]/resizer:w-0.5 absolute inset-y-0 left-1/2 w-px -translate-x-1/2"
       />
     </div>
