@@ -2,7 +2,13 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { expect, test } from '@playwright/test'
 import type { Locator, Page } from '@playwright/test'
-import { addProject, archiveAll, openDashboard, WORK_DIR } from './helpers'
+import {
+  addProject,
+  archiveAll,
+  openDashboard,
+  spawnSession,
+  WORK_DIR,
+} from './helpers'
 
 /**
  * PJT 専用画面の左パネル（イシューグループ_2026_0805_0514 設計§14・§15。
@@ -597,4 +603,273 @@ test('一覧の印が、種別ごとに分かれている', async ({ page }) => 
   expect(図, 'SVG は画像と同じ印').toBe(画像)
   // **3つが互いに違うこと。** 片方だけ変えて同じに戻すのを防ぐ
   expect(new Set([画像, 文書, 計画]).size).toBe(3)
+})
+
+/*
+  ここから下は `イシューグループ_2026-0826-1146`（ファイルのパネルの置き場所と幅。
+  テスト計画フェーズ4）。**縁で幅が変わること**と、**狭い画面で縁を出さないこと**を通す。
+
+  上の既存分と合わせて、この1ファイルが「移設で壊していないこと」と「新しくできること」
+  の両方を持つ。
+*/
+
+/** 幅を測る。**`getBoundingClientRect` で実際の見た目を見る**（クラス名では言えない）。 */
+async function 幅(box: Locator): Promise<number> {
+  const rect = await box.boundingBox()
+  if (!rect) {
+    throw new Error('位置が取れません')
+  }
+  return rect.width
+}
+
+/** 縁をマウスで掴んで動かす。**しきい値（3px）を必ず超える刻みで運ぶ。** */
+async function 縁を引く(page: Page, edge: 'folder' | 'file', dx: number) {
+  const 縁 = page.locator(`[data-testid="files-resizer"][data-edge="${edge}"]`)
+  const box = await 縁.boundingBox()
+  if (!box) {
+    throw new Error('縁の位置が取れません')
+  }
+  const x = box.x + box.width / 2
+  const y = box.y + box.height / 2
+  await page.mouse.move(x, y)
+  await page.mouse.down()
+  for (let step = 1; step <= 8; step += 1) {
+    await page.mouse.move(x + (dx * step) / 8, y)
+  }
+  await page.mouse.up()
+}
+
+/**
+ * 縁を**指で**掴んで動かす。
+ *
+ * **CDP でしか合成できない**（`swipeTerminal` と同じ理由）。`page.dispatchEvent` は
+ * リスナーへ届きはするが既定動作が一切起きないので、**握れているかを一度も確かめない
+ * まま緑になる**。
+ *
+ * `jitter` を入れるのは、**実機の指が真っ直ぐ動かない**ため。真っ直ぐな合成タッチ
+ * だけだと、壊した状態でも通ることが既存イシューで実測されている（2px と 12px では
+ * 通り、30px で初めて落ちた）。
+ */
+async function 縁を指で引く(
+  page: Page,
+  edge: 'folder' | 'file',
+  dx: number,
+  jitter = 30,
+) {
+  const 縁 = page.locator(`[data-testid="files-resizer"][data-edge="${edge}"]`)
+  const box = await 縁.boundingBox()
+  if (!box) {
+    throw new Error('縁の位置が取れません')
+  }
+  const x = box.x + box.width / 2
+  const y = box.y + box.height / 2
+
+  const cdp = await page.context().newCDPSession(page)
+  try {
+    await cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchStart',
+      touchPoints: [{ x, y }],
+    })
+    // **縦にも振れる小さな1回目。** ここで向きを取り違える実装だと、そのなぞりは
+    // 二度と握れない
+    await cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchMove',
+      touchPoints: [{ x: x + 4, y: y + jitter }],
+    })
+    for (let step = 1; step <= 8; step += 1) {
+      await cdp.send('Input.dispatchTouchEvent', {
+        type: 'touchMove',
+        touchPoints: [
+          { x: x + (dx * step) / 8, y: y + (step % 2 === 0 ? jitter : -jitter) },
+        ],
+      })
+    }
+    await cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchEnd',
+      touchPoints: [],
+    })
+  } finally {
+    await cdp.detach()
+  }
+}
+
+test('縁を掴むと、フォルダの幅が実際に変わる', async ({ page }) => {
+  await openDashboard(page)
+  await openLongFile(page)
+  const panel = page.getByTestId('project-files-panel')
+
+  const 前 = await 幅(panel)
+  expect(前, '既定は 20rem').toBeCloseTo(320, 0)
+
+  await 縁を引く(page, 'folder', 80)
+
+  const 後 = await 幅(panel)
+  expect(後, '引いたぶん広がること').toBeGreaterThan(前)
+  expect(後).toBeCloseTo(400, 0)
+})
+
+test('縁を掴むと、ファイルの中身の列の幅も変わる', async ({ page }) => {
+  await openDashboard(page)
+  await openLongFile(page)
+  const column = page.getByTestId('file-column')
+
+  const 前 = await 幅(column)
+  await 縁を引く(page, 'file', -100)
+
+  expect(await 幅(column), '左へ引けば縮むこと').toBeLessThan(前)
+})
+
+test('下限より狭くも、上限より広くもできない', async ({ page }) => {
+  await openDashboard(page)
+  await openLongFile(page)
+  const panel = page.getByTestId('project-files-panel')
+
+  // 思い切り左へ。**0 にはならない**——畳むのは ☰ の仕事（設計§4）
+  await 縁を引く(page, 'folder', -2000)
+  const 狭いとき = await 幅(panel)
+  expect(狭いとき, '下限（10rem）で止まること').toBeCloseTo(160, 0)
+
+  // 思い切り右へ。上限は絶対値（40rem）と画面比（40%）の狭いほう
+  await 縁を引く(page, 'folder', 4000)
+  const 広いとき = await 幅(panel)
+  expect(広いとき).toBeGreaterThan(狭いとき)
+  expect(広いとき, '上限を超えないこと').toBeLessThanOrEqual(640)
+
+  // **ページ全体が横へはみ出さないこと。** 幅を広げても破れない
+  const overflows = await page.evaluate(() => {
+    const de = document.documentElement
+    return de.scrollWidth > de.clientWidth
+  })
+  expect(overflows, '上限が効いていればページは横へ広がらない').toBe(false)
+})
+
+test('変えた幅は、読み込み直しても残る', async ({ page }) => {
+  await openDashboard(page)
+  await openLongFile(page)
+  const panel = page.getByTestId('project-files-panel')
+
+  await 縁を引く(page, 'folder', 120)
+  const 変えた幅 = await 幅(panel)
+  expect(変えた幅).toBeGreaterThan(400)
+
+  await page.reload()
+  await page.getByTestId('project-files-toggle').click()
+  await expect(page.getByTestId('project-files-panel')).toBeVisible()
+
+  // **離した時点の値が正**（設計§5）。読み込み直しても同じ幅で始まる
+  expect(await 幅(page.getByTestId('project-files-panel'))).toBeCloseTo(
+    変えた幅,
+    0,
+  )
+})
+
+test('縁は指でも掴める', async ({ page }) => {
+  // **`touch-action: none` と「1回目で握る」が両方効いていないと、ここで落ちる。**
+  // 単体テストは「そう書いてある」までしか言えない
+  await openDashboard(page)
+  await openLongFile(page)
+  const panel = page.getByTestId('project-files-panel')
+
+  const 前 = await 幅(panel)
+  await 縁を指で引く(page, 'folder', 90)
+
+  expect(await 幅(panel), '指でも広がること').toBeGreaterThan(前)
+})
+
+test('狭い画面では、両方が全幅の層になり、縁は出ない', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 780 })
+  await openDashboard(page)
+  await openLongFile(page)
+
+  /*
+    両方とも全幅で被さるので、引っぱる縁が物理的に存在しない（設計§2）。
+
+    **「無いこと」ではなく「見えないこと」で言う。** `md` を JS から読まない約束
+    （`lib/pointer.ts` の「画面幅では判定しない」）なので、出し分けは CSS
+    （`hidden md:block`）がやる——DOM には居たまま `display: none` になる
+  */
+  for (const 縁 of await page.getByTestId('files-resizer').all()) {
+    await expect(縁).toBeHidden()
+  }
+
+  // フォルダが手前（`z-40`）。全幅で、閉じる導線が届く位置に在る
+  const panel = page.getByTestId('project-files-panel')
+  expect(await 幅(panel), 'フォルダは全幅').toBeCloseTo(390, 0)
+  await expect(page.getByTestId('project-files-close')).toBeInViewport()
+
+  /*
+    **読むときだけ畳む**（設計§2）。ファイルを選んでもフォルダは閉じないので、
+    これが狭い画面での普通の使い方になる。
+
+    **畳むのに押すのは ☰ ではなく「閉じる」。** 狭い画面ではオーバーレイが
+    `fixed inset-0` で全面を覆うので、ヘッダの ☰ はその下に隠れて押せない
+    ——だからこのボタンが在る（実際に ☰ を押して確かめたら、覆われていて
+    畳めなかった）
+  */
+  await page.getByTestId('project-files-close').click()
+  await expect(panel).toBeHidden()
+
+  // その下に敷いてある中身の列（`z-30`）が出てくる
+  const column = page.getByTestId('file-column')
+  expect(await 幅(column), '中身も全幅').toBeCloseTo(390, 0)
+  // **「在るが届かない」を、位置まで見て否定する**
+  await expect(page.getByTestId('file-close')).toBeInViewport()
+
+  const overflows = await page.evaluate(() => {
+    const de = document.documentElement
+    return de.scrollWidth > de.clientWidth
+  })
+  expect(overflows, '狭い画面でもページは横へ広がらない').toBe(false)
+})
+
+test('中身の列の上で横へ回すと、セッションのレールが動く', async ({ page }) => {
+  // **列はレールの兄弟**なので、ブラウザのスクロール連鎖（祖先だけを辿る）では
+  // ここへ届かない。自分で渡している（設計§8）。
+  //
+  // **レールはセッションが1本も無いと描かれない**ので、ここだけは起こしてから測る。
+  // 横並び1区画は 42rem 固定なので、中身の列（既定 42rem）と並べば必ず溢れる
+  await openDashboard(page)
+  await spawnSession(page, PROJECT_DIR)
+  const group = page.locator(
+    `[data-testid="project-group"][data-project="${PROJECT_DIR}"]`,
+  )
+  await group.click({ position: { x: 5, y: 5 } })
+  await expect(page.getByTestId('group-view')).toBeVisible()
+
+  await page.getByTestId('project-files-toggle').click()
+  const panel = page.getByTestId('project-files-panel')
+  await panel.getByTestId('folder-entry').filter({ hasText: 'MyDocs' }).click()
+  await panel.getByTestId('folder-entry').filter({ hasText: LONG }).click()
+  await expect(page.getByTestId('file-column')).toBeVisible()
+  // フォルダを畳む——被さったままだと列の上を押せない
+  await page.getByTestId('project-files-toggle').click()
+  await expect(panel).toBeHidden()
+
+  const rail = page.getByTestId('group-rail')
+  const 前 = await rail.evaluate((el) => el.scrollLeft)
+
+  await page.getByTestId('file-column').hover()
+  await page.mouse.wheel(200, 0)
+
+  await expect
+    .poll(async () => rail.evaluate((el) => el.scrollLeft), {
+      message: '横ホイールがレールへ届くこと',
+    })
+    .toBeGreaterThan(前)
+})
+
+test('生テキストの上では、その中が横へ動く', async ({ page }) => {
+  // 列の中に横スクロールを持つのはここだけ。**素通しにすると、読みたい行の続きが
+  // 読めないままレールが流れる**（設計§8）
+  await openDashboard(page)
+  await openLongFile(page)
+  await page.getByTestId('file-toggle-raw').click()
+
+  const pre = page.getByTestId('file-raw')
+  await expect(pre).toBeVisible()
+
+  const 横へ動けるか = await pre.evaluate(
+    (el) => getComputedStyle(el).overflowX,
+  )
+  expect(横へ動けるか, '生テキストは自分で横へ動く').toMatch(/auto|scroll/)
 })
