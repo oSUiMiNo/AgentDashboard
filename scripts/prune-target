@@ -1,0 +1,288 @@
+#!/usr/bin/env bash
+# ビルドの置き場所（cargo の target）を、育ちすぎたときだけ自動で片付ける。
+#
+# **cargo は古い成果物を自分では消さない。** ソースが少しでも変われば内容から新しい
+# 名前を計算して隣に置くので、同じ物が何十世代も並ぶ。実測では 66 種の実行ファイルが
+# 2,474 本（1種あたり 37 本）、67 種のクレートが 6,053 ディレクトリ（1種あたり 90 個）
+# 積まれていた。これで Windows の C: を 2 度満杯にしている（2026-08-09 と 2026-08-26）。
+#
+# だから落とす規則は**日数ではなく世代**にしてある。「N 日より古いものを落とす」だと
+# 1 日で 25 GB 積む日があるため 2 日保持でも 80 GB 前後が残り、上限に届かず毎回まるごと
+# 削除へ落ちる——キャッシュを残す意味が消える。世代なら定常状態が「残す数 × 種類の数」で
+# 決まり、**ビルドの頻度に依存しない**。
+#
+# 使い方:
+#   scripts/prune-target <置き場所>          上限と間隔を見て、段1→（足りなければ）段2
+#   scripts/prune-target --all <置き場所>    上限も間隔も見ず、常に段2（make prune 用）
+#
+# **置き場所は引数で必ず渡す。既定値を持たない。** 既定があると、呼び出し側の渡し忘れが
+# 「本物の置き場所を消す」という最悪の結果になる。引数必須なら同じミスは「何も起きない」で終わる。
+#
+# 挙動は次の 4 つで変えられる（`AGENTDASHBOARD_CARGO_*` は**このラッパー自身の制御**の
+# 名前空間で、コンテナへは持ち込まれない。scripts/cargo の決まりに合わせてある）。
+#   AGENTDASHBOARD_CARGO_PRUNE               0 で自動の掃除を止める（既定 1）
+#   AGENTDASHBOARD_CARGO_PRUNE_CAP_GB        この GB を超えたら掃除を始める（既定 40）
+#   AGENTDASHBOARD_CARGO_PRUNE_KEEP          基準名ごとに残す世代の数（既定 2）
+#   AGENTDASHBOARD_CARGO_PRUNE_INTERVAL_SEC  測る間隔（既定 900）
+set -euo pipefail
+
+ALL=0
+TARGET=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --all)
+            ALL=1
+            shift
+            ;;
+        -*)
+            echo "エラー: 知らない指定です: $1" >&2
+            exit 1
+            ;;
+        *)
+            if [ -n "${TARGET}" ]; then
+                echo "エラー: 置き場所は 1 つだけ指定してください: ${TARGET} と $1" >&2
+                exit 1
+            fi
+            TARGET="$1"
+            shift
+            ;;
+    esac
+done
+
+# **渡されなければ何もしない。** ここで既定値へ落ちる道を作ってはいけない（上のコメント）。
+if [ -z "${TARGET}" ]; then
+    echo "エラー: 片付ける置き場所を指定してください（例: scripts/prune-target server/target）" >&2
+    exit 1
+fi
+
+# まだ作られていない置き場所は、掃除する中身も無い。エラーにはしない——ビルドが失敗した
+# 直後や、新しいクローンの 1 回目に呼ばれるのは普通のことである。
+if [ ! -d "${TARGET}" ]; then
+    exit 0
+fi
+
+DEBUG_DIR="${TARGET}/debug"
+DEPS_DIR="${DEBUG_DIR}/deps"
+INC_DIR="${DEBUG_DIR}/incremental"
+
+# 状態・ロック・記録は**置き場所の直下**（`debug/` の外）に置く。cargo 自身が
+# `CACHEDIR.TAG` と `.rustc_info.json` を同じ層へ置く前例があり、段1・段2どちらの
+# 削除にも巻き込まれない。
+STATE_FILE="${TARGET}/.prune-state"
+LOCK_FILE="${TARGET}/.prune-lock"
+LOG_FILE="${TARGET}/.prune-target.log"
+
+PRUNE_ENABLED="${AGENTDASHBOARD_CARGO_PRUNE:-1}"
+CAP_GB="${AGENTDASHBOARD_CARGO_PRUNE_CAP_GB:-40}"
+KEEP="${AGENTDASHBOARD_CARGO_PRUNE_KEEP:-2}"
+INTERVAL_SEC="${AGENTDASHBOARD_CARGO_PRUNE_INTERVAL_SEC:-900}"
+
+for pair in "KEEP:${KEEP}" "INTERVAL_SEC:${INTERVAL_SEC}"; do
+    name="${pair%%:*}"
+    value="${pair#*:}"
+    case "${value}" in
+        '' | *[!0-9]*)
+            echo "エラー: ${name} には 0 以上の整数を指定してください: ${value}" >&2
+            exit 1
+            ;;
+    esac
+done
+# **上限だけは小数を受ける。** 整数の GB しか受けないと、小さな置き場所では上限を
+# 必ず超えることになり、「段1で足りたら段2は走らない」を確かめられる状態を作れない
+# （検査が実物大の GB を用意する羽目になる）。0.5 のような指定が要る場面も普通にある。
+case "${CAP_GB}" in
+    '' | *[!0-9.]* | *.*.*)
+        echo "エラー: CAP_GB には 0 以上の数を指定してください: ${CAP_GB}" >&2
+        exit 1
+        ;;
+esac
+if [ "${KEEP}" -lt 1 ]; then
+    echo "エラー: KEEP には 1 以上を指定してください（0 にすると全部消えるので、それは --all の仕事）" >&2
+    exit 1
+fi
+
+# **標準出力へは何も書かない。** cargo の出力へ混ざると、出力を読んでいる別の仕組みを壊す
+# （ガイドライン「ログを残すとき」——標準出力へ書いてよいのはサーバを起こしたときだけ）。
+記録() {
+    printf '%s\t%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" >>"${LOG_FILE}"
+    printf 'prune-target: %s\n' "$1" >&2
+}
+
+# **見かけの大きさ（`du -sb`）ではなく、ディスクを実際に食っている量を測る。**
+# 知りたいのは「ドライブが埋まるかどうか」なので、ブロックの端数まで込みの値が要る。
+# 見かけの大きさは中身の合計しか数えず、ディレクトリのぶんも落ちる。
+嵩を測る() {
+    if [ ! -d "$1" ]; then
+        echo 0
+        return
+    fi
+    du -s --block-size=1 "$1" | cut -f1
+}
+
+# **単位を切り替える。** GB 固定にすると、小さい置き場所では何を測っても「0.0GB」に
+# 潰れて、記録が「消したこと」しか語らなくなる。
+人が読める嵩() {
+    awk -v b="$1" 'BEGIN {
+        if (b >= 1073741824) { printf "%.1fGB", b / 1073741824 }
+        else if (b >= 1048576) { printf "%.1fMB", b / 1048576 }
+        else { printf "%dB", b }
+    }'
+}
+
+# 基準名から落とす末尾。
+#
+# **`{16}` のような繰り返し指定を使ってはいけない。** Debian・Ubuntu の既定の awk は
+# mawk で、mawk 1.3.4 はこの書き方を解釈しない——しかも**エラーにならず、ただ剥がれない**。
+# 剥がれないと全部が別々の基準名になり、どれも「残す数」を超えないので1件も落ちず、
+# そのまま段2（丸ごと削除）へ落ちる。**いちばん破壊的な側へ静かに倒れる**ということである
+# （箱の中の mawk で実際に踏んだ）。だから 16 回ぶんを組み立てて持つ。
+HEX16=""
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+    HEX16="${HEX16}[0-9a-f]"
+done
+DEPS_STRIP="-${HEX16}$"
+# こちらは長さが決まっていないので `+` で足りる（`+` はどの awk にもある）。
+INC_STRIP='-[0-9a-z]+$'
+
+# **剥がせることを、消す前に確かめる。**
+#
+# 上のとおり、剥がせないときの成れの果ては「丸ごと削除」である。**知らない awk に
+# 当たったら、何もしないで止まるほうが正しい。** 見本で試して、剥がれなければ手を引く。
+基準名を剥がせるか確かめる() {
+    local sample expected got
+    sample="alpha-0123456789abcdef"
+    expected="alpha"
+    got=$(printf '%s\n' "${sample}" | awk -v strip="${DEPS_STRIP}" '{ b = $0; sub(strip, "", b); print b }')
+    if [ "${got}" != "${expected}" ]; then
+        echo "エラー: この機械の awk では基準名を求められません（${sample} → ${got}）。安全のため何もしません" >&2
+        return 1
+    fi
+    got=$(printf '%s\n' "alpha-01vqlxontkmyg" | awk -v strip="${INC_STRIP}" '{ b = $0; sub(strip, "", b); print b }')
+    if [ "${got}" != "${expected}" ]; then
+        echo "エラー: この機械の awk では基準名を求められません（alpha-01vqlxontkmyg → ${got}）。安全のため何もしません" >&2
+        return 1
+    fi
+}
+
+# 基準名ごとに、新しい順へ KEEP 個だけ残して、残りの**道のり**を並べる。
+#
+# 新旧の判定は mtime で行う。成果物は作られた時刻がそのまま mtime になり、あとから
+# 書き換わらないので、世代の順序と一致する。
+#
+# $1 置き場所 / $2 find の種別（f か d）/ $3 基準名を得るために落とす末尾の正規表現
+古い世代を並べる() {
+    local dir="$1" kind="$2" strip="$3"
+    [ -d "${dir}" ] || return 0
+    if [ "${kind}" = "f" ]; then
+        # 拡張子を持たないものだけが、テストごとの最終リンク成果物である。
+        # `.rlib` `.rmeta` `.d` `.o` `.so` は依存クレートの中間成果物で、
+        # **ソースが変わらなければ何日経っても「いま使われている現物」**でありうるので触らない。
+        find "${dir}" -maxdepth 1 -type f ! -name '*.*' -printf '%T@\t%f\t%p\n'
+    else
+        find "${dir}" -maxdepth 1 -mindepth 1 -type d -printf '%T@\t%f\t%p\n'
+    fi |
+        awk -F'\t' -v OFS='\t' -v strip="${strip}" '{ base = $2; sub(strip, "", base); print base, $1, $3 }' |
+        sort -t"$(printf '\t')" -k1,1 -k2,2gr |
+        awk -F'\t' -v keep="${KEEP}" 'base != $1 { base = $1; n = 0 } { n++ } n > keep { print $3 }'
+}
+
+数えて消す() {
+    local listing="$1" count
+    count=$(printf '%s' "${listing}" | grep -c . || true)
+    if [ "${count}" -gt 0 ]; then
+        printf '%s\n' "${listing}" | xargs -d '\n' -r rm -rf
+    fi
+    echo "${count}"
+}
+
+段1() {
+    local deps_old inc_old deps_n inc_n
+    deps_old=$(古い世代を並べる "${DEPS_DIR}" f "${DEPS_STRIP}")
+    inc_old=$(古い世代を並べる "${INC_DIR}" d "${INC_STRIP}")
+    deps_n=$(数えて消す "${deps_old}")
+    inc_n=$(数えて消す "${inc_old}")
+    printf '%s %s' "${deps_n}" "${inc_n}"
+}
+
+段2() {
+    rm -rf "${DEPS_DIR}" "${INC_DIR}"
+}
+
+# --- 手で叩く道（make prune）------------------------------------------------
+#
+# 上限も間隔も止める指定も見ない。**手で叩いたのに「止めてあるから何もしない」と
+# なるのは、指示と結果が食い違う。**
+#
+# ただしロックは待つ。走っているビルドの成果物を抜くと、そのビルドが理由の分からない
+# 形で落ちる。自動の側と違って「諦める」わけにはいかない（人が消せと言っている）ので、
+# **待っていることを先に伝えてから**待つ。
+if [ "${ALL}" -eq 1 ]; then
+    before=$(嵩を測る "${DEBUG_DIR}")
+    exec 9>"${LOCK_FILE}"
+    if ! flock --exclusive --nonblock 9; then
+        printf 'prune-target: ビルドが走っています。終わるまで待ちます\n' >&2
+        flock --exclusive 9
+    fi
+    段2
+    after=$(嵩を測る "${DEBUG_DIR}")
+    記録 "段2（--all）	$(人が読める嵩 "${before}") → $(人が読める嵩 "${after}")"
+    exit 0
+fi
+
+# --- 自動の道（scripts/cargo から）-------------------------------------------
+
+if [ "${PRUNE_ENABLED}" = "0" ]; then
+    exit 0
+fi
+
+# **測る前に間隔を見る。** 温かい状態なら `du` は 1 秒未満で終わるが、`incremental` には
+# 55 万ファイルあり、冷えた状態や仮想ディスク越しでは桁が変わりうる。cargo を呼ぶたびに
+# その賭けをしない。
+now=$(date '+%s')
+if [ -f "${STATE_FILE}" ]; then
+    last=$(cat "${STATE_FILE}" 2>/dev/null || echo 0)
+    case "${last}" in
+        '' | *[!0-9]*) last=0 ;;
+    esac
+    if [ "$((now - last))" -lt "${INTERVAL_SEC}" ]; then
+        exit 0
+    fi
+fi
+# 測ると決めた時点で刻む。**測り終えてからでは、長い測定の最中に来た別の呼び出しが
+# もう一度測ってしまう。**
+printf '%s\n' "${now}" >"${STATE_FILE}"
+
+before=$(嵩を測る "${DEBUG_DIR}")
+cap_bytes=$(awk -v g="${CAP_GB}" 'BEGIN { printf "%d", g * 1073741824 }')
+if [ "${before}" -le "${cap_bytes}" ]; then
+    exit 0
+fi
+
+# **削除の直前にだけ排他を取る。** ビルドは共有ロックを持って走るので、1 本でも走って
+# いれば取れない。そのときは**待たずに諦める**——ビルドは数十分続くことがあり、待つと
+# 次の cargo 呼び出しがその間ずっと止まる。取りこぼしても次の回で拾える。
+exec 9>"${LOCK_FILE}"
+if ! flock --exclusive --nonblock 9; then
+    記録 "見送り	ビルドが走っているためロックを取れなかった（$(人が読める嵩 "${before}")）"
+    exit 0
+fi
+
+# **剥がせない awk なら、ここで手を引く。** 段2へ落とすと丸ごと消える
+if ! 基準名を剥がせるか確かめる; then
+    記録 "見送り	この機械の awk では基準名を求められない"
+    exit 0
+fi
+
+read -r deps_n inc_n <<<"$(段1)"
+after=$(嵩を測る "${DEBUG_DIR}")
+
+if [ "${after}" -gt "${cap_bytes}" ]; then
+    # **段2まで来るのは異常事態である。** 世代で落として上限を超えるということは、
+    # 1 世代ぶんだけで上限に達しているということなので、しきい値か KEEP の見直しが要る。
+    # 警告として残すのはそのためで、あとから気づけるようにしてある。
+    段2
+    after=$(嵩を測る "${DEBUG_DIR}")
+    記録 "警告：段2	段1（実行ファイル ${deps_n} 件・クレート ${inc_n} 件）で上限に収まらず丸ごと落とした	$(人が読める嵩 "${before}") → $(人が読める嵩 "${after}")"
+else
+    記録 "段1	実行ファイル ${deps_n} 件・クレート ${inc_n} 件	$(人が読める嵩 "${before}") → $(人が読める嵩 "${after}")"
+fi
