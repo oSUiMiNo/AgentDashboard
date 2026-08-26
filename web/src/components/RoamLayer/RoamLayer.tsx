@@ -31,7 +31,7 @@
 
 import type { CSSProperties } from 'react'
 import { routeVars } from '@/lib/roam'
-import { ROAM_LIFE_MS, useRoamStore } from '@/stores/roam'
+import { ROAM_BIRTH_MS, ROAM_FLUTTER_MS, ROAM_LIFE_MS, useRoamStore } from '@/stores/roam'
 import { useSettingsStore } from '@/stores/settings'
 
 export function RoamLayer() {
@@ -75,7 +75,9 @@ export function RoamLayer() {
             className="roam-paper"
             data-testid="roam-paper"
             data-shape={line.shape}
-            style={{ animationDuration: `${ROAM_LIFE_MS}ms` }}
+            style={{
+              animationDuration: `${ROAM_FLUTTER_MS}ms, ${ROAM_BIRTH_MS}ms`,
+            }}
           />
         </i>
       ))}

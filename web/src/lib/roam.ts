@@ -75,11 +75,14 @@ export interface RoamField {
  * 「包含ブロックである子孫の**変形後のボーダーボックス**」が数えられる（CSS
  * Overflow 3 §3.5）ので、中心が内側でも角がはみ出せばスクロール範囲が伸びる。
  *
- * 線の箱は 25×7px（インクの太さは 5px で、残りが輪郭の揺れ代）。回転すると半対角は
- * √(12.5²+3.5²) ≈ 12.98px。尺取り虫の頂点で 1.35 倍になるので **17.5px** が要る。
- * 切り上げて 18。
+ * 線の箱は 30×7px（インクの太さは 3.5px で、残りが中心線のたわみ代）。回転すると
+ * 半対角は √(15²+3.5²) ≈ 15.40px。尺取り虫の頂点で 1.35 倍になるので **20.8px** が
+ * 要る。切り上げて 21。
+ *
+ * **1.35 倍が効くのは発生直後の3%だけ**（尺取り虫はカードの上で終わる）なので、
+ * 厳密な最悪値まで取らずここで足りる。**この近似は前の版から引き継いでいる。**
  */
-export const MARGIN = 18
+export const MARGIN = 21
 
 /**
  * 矩形の外側、これだけ離れたところに通路を立てる。
@@ -90,28 +93,95 @@ export const MARGIN = 18
 const 通路 = 6
 
 /** 経路の停留点の数。`roam.css` のキーフレームの停留点と揃える */
-export const ROAM_STOPS = 32
+export const ROAM_STOPS = 61
 
 /**
- * 輪（③転回）を何区間で描くか。
+ * ②飛散を何区間で飛ぶか。**固定である。**
  *
- * **少ないと多角形に見え、多いと輪が大きくなる。** 等速にすると全区間が同じ長さに
- * なるので、輪の一周は `ROAM_LOOP × ROAM_STEP` に決まってしまう——**小さい輪と等速は
- * 両立しない**（設計§9-7-7 B）。8 は「円に見える最小」あたりで、ずれは
- * 半径の 7.6%（弦と弧の差）である。
+ * 前の版は「着地までの距離を [`ROAM_STEP`] で割る」形で 1〜4 と揺れていたが、
+ * **区間の数が線ごとに変わると、キーフレームの % を静的に書けない**（設計§9-7-9）。
+ * 距離のほうを固定し、**向きだけを種で振る**——フェーズ10 が実測で踏んだのは
+ * 「**向き**が揃うと風に見えない」であって、距離ではない。
+ *
+ * **1 なのは「巻きは発生から1秒後」という指定から出ている**（利用者の指定・2026-08-26）。
+ * 等速なので時刻は道のりで決まり、1区間 56px ÷ 58.3px/秒 ＝ **0.96秒**。
+ * ここを増やすと巻きが遅れる——**時刻を変えたいときに動かすのはこの数である。**
  */
-export const ROAM_LOOP = 8
+export const ROAM_FLING = 1
+
+/**
+ * ③巻きを何区間で描くか。
+ *
+ * **少ないと多角形に見え、多いとキーフレームが伸びる。** 媒介変数で等分すると、
+ * 弦と実際の曲線のずれは 10 で 0.85px・8 で 1.3px。**3.5px の線に対して 1.3px は
+ * 見える**ので 10 を採る。
+ */
+export const ROAM_LOOP = 10
+
+/** ④回遊の区間数。**巻きが最初の1区間を食う**ので、歩くのは これ＋1 区間ぶん */
+export const ROAM_ROAM = 49
 
 /**
  * 1区間の道のり（px）。**ここが速さそのものである。**
  *
- * 停留点はキーフレームの % を等間隔に置いてあるので、**区間の長さを揃えれば速さが
- * 揃う**（設計§9-7-7 C）。前の版は距離を見ずに点を置いていたので、短い区間は遅く、
- * 長い区間は速く——**曲がり角で減速して見えた**。
+ * 停留点を**弧長に比例した %** へ置くので（設計§9-7-9）、区間の長さが揃えば速さも
+ * 揃う。前の版は % を等間隔に置いており、**巻きを小さくすると巻きだけ遅くなった**。
  *
- * 31区間 × 56px ＝ 1736px を 15秒で走るので **116px/秒**。
+ * **56 を据え置く。** 要件が嫌ったのは「1区間 93px は粗い」ことなので、上げずに
+ * 点を増やした。カードの行ピッチ 111px がちょうど2区間になる大きさである。
+ *
+ * 50区間 × 56px ＋ 巻き 117.4px ＝ 2917.4px を 50秒で走るので **58.3px/秒**。
  */
 export const ROAM_STEP = 56
+
+/**
+ * ③巻きの形（トロコイド）。**進みながら、その場で1回巻く。**
+ *
+ * `t ∈ [π, 3π]` の局所座標（`u` が進行方向・`v` が法線）で
+ *
+ * ```
+ * u(t) = a(t − π) − b·sin t
+ * v(t) = −b(1 + cos t)
+ * ```
+ *
+ * **入口と出口の向きが、どちらもぴったり進行方向を向く**（`u′=a+b, v′=0`）ので
+ * 折れ目が出ない。前進は `2πa` ＝ [`ROAM_STEP`] ちょうどで、**巻きは回遊の1区間を
+ * 置き換える**——だから巻きが挟まっても、その先の経路は1ピクセルも変わらない。
+ *
+ * **`b > a` が「線が自分と交差する」条件である**（`b = a` は尖点で接するだけ、
+ * `b < a` はただのうねり）。`b = 2a` で、張り出しは 35.7px・交差は前進のちょうど半分
+ * のところに1つできる。
+ */
+const 巻きのa = ROAM_STEP / (2 * Math.PI)
+const 巻きのb = 2 * 巻きのa
+
+/**
+ * 区間ごとの「呼び値の道のり」。**`roam.css` の % と段数の唯一の出どころである。**
+ *
+ * キーフレームの % は全部の線で共有される定数表なので、**区間の道のりが種にも場にも
+ * 依らず決まっていること**が成立条件になる。飛散を固定し（[`ROAM_FLING`]）、巻きの形を
+ * 定数にしたので、この列は常に同じである。
+ *
+ * 実際の道のりは回遊の脚の刻み方（`round(長 / ROAM_STEP)`）で 0.99〜1.09倍ばらつくが、
+ * **段をまたいで系統的にずれない**ことだけが要る——それが「角で減速」の正体だった。
+ */
+export function roamSpans(): number[] {
+  const 弦: number[] = []
+  const 点 = (t: number) => ({
+    u: 巻きのa * (t - Math.PI) - 巻きのb * Math.sin(t),
+    v: -巻きのb * (1 + Math.cos(t)),
+  })
+  for (let k = 0; k < ROAM_LOOP; k += 1) {
+    const p = 点(Math.PI + (2 * Math.PI * k) / ROAM_LOOP)
+    const q = 点(Math.PI + (2 * Math.PI * (k + 1)) / ROAM_LOOP)
+    弦.push(Math.hypot(q.u - p.u, q.v - p.v))
+  }
+  return [
+    ...Array<number>(ROAM_FLING).fill(ROAM_STEP),
+    ...弦,
+    ...Array<number>(ROAM_ROAM).fill(ROAM_STEP),
+  ]
+}
 
 /**
  * 種から 0〜1 の値を作る。
@@ -146,41 +216,126 @@ function 近い番号(線: number[], 値: number): number {
 }
 
 /**
- * 飛散の着地を選ぶ。**通路の線の上へ乗せるが、線に沿った位置は自由にする。**
+ * 飛散の着地を選ぶ。**通路の線の上で、ちょうど1区間ぶん離れた点**を候補にする。
  *
- * 交点へ吸わせない。格子は場所によって粗く（カードの幅ぶん空く）、交点だけを候補に
- * すると**種を変えても同じ点へ着地する**——3本が重なって飛び、「風に飛ばされた」に
- * 見えなくなる。
+ * **距離が揺れてはいけない。** 飛散は [`ROAM_FLING`] 区間ぶんの道のりを持つと決めて
+ * あり（[`roamSpans`]）、実際の距離がそれと食い違うと**そこだけ速さが変わる**——
+ * 前の版は狙いの点を通路へ寄せるだけだったので、飛散が 30px まで縮む種があった（実測）。
  *
- * 飛散は上向きなので、**横の通路（y）へ乗せて x は自由**にする。そのまま横へ歩き出せば
- * 通路の上を進み、最初の角で交点に乗るので、以後はどちらへでも曲がれる。
+ * したがって**線の上で距離を解く**。横の通路 `y=c` なら `x = 角.x ± √(D² − (c−角.y)²)`
+ * が、ちょうど `D` 離れた点である。縦の通路も同じ。**候補はどれも厳密に `D`** なので、
+ * 区間の長さが揃う。
  *
- * 縁ちょうどの通路は外す。**縁を通る円は、接している向き以外では必ずはみ出す**ので、
- * そこへ着地すると直後の輪が消える（[`輪の形`]）。
+ * **向きは扇の中で等分して写す。** 近い順に採ると、1回の跳ねで出る3本が同じ候補へ
+ * 寄って重なる——「風に飛ばされた」に見えなくなる（フェーズ10 の実測）。
  *
- * 近すぎる着地も外す。**1区間ぶんも飛ばないと、飛ばされたように見えない。**
+ * **どの向きの通路へ着いたかを返す。** 横の通路（y）へ着いたなら回遊の初手は横、縦の通路
+ * （x）へ着いたなら縦——**着いた線から外れる向きへ動くと、1歩目で通路を離れる。**
  */
 function 着地点(
+  xs: number[],
   ys: number[],
   角: { x: number; y: number },
-  狙い: { x: number; y: number },
-  field: RoamField,
-): { x: number; y: number } {
-  const x = 挟む(狙い.x, MARGIN, Math.max(MARGIN, field.width - MARGIN))
-  const 縁 = [Math.round(MARGIN), Math.round(Math.max(MARGIN, field.height - MARGIN))]
-  let 近い = { y: 狙い.y, 差: Number.POSITIVE_INFINITY }
-  let 遠い = { y: 角.y, 隔たり: -1 }
+  域: 領域,
+  seed: number,
+): { x: number; y: number; 横: boolean } {
+  const D = ROAM_FLING * ROAM_STEP
+  // **カードの中へ入る向き以外は、どこへ飛んでもよい。** 角は右上なので、除くのは
+  // 左下の四半（+90°〜+180°）だけである。
+  //
+  // **狭い扇では候補が枯れる。** 飛散は1区間ぶん（56px）しか飛ばないので、そこに届く
+  // 通路は「そのカード自身の縁」しか無いことが多い——右上の四半だけに絞ると
+  // **12枚並べても候補が0〜2本**になり、1回の跳ねで出る3本が同じ点へ重なる（実測）。
+  const 扇の始め = -Math.PI
+  const 扇の幅 = (270 * Math.PI) / 180
 
+  const 候補: { x: number; y: number; 横: boolean; θ: number }[] = []
+  const 足す = (x: number, y: number, 横: boolean): void => {
+    if (x < 域.左 || x > 域.右 || y < 域.上 || y > 域.下) return
+    let θ = Math.atan2(y - 角.y, x - 角.x)
+    // 扇は -125°〜+35°。**下側から入る向きだけ +360° して連続にする**
+    if (θ > 扇の始め + 扇の幅) θ -= 2 * Math.PI
+    if (θ < 扇の始め || θ > 扇の始め + 扇の幅) return
+    候補.push({ x, y, 横, θ })
+  }
   for (const y of ys) {
-    if (縁.includes(y)) continue
-    const d = Math.hypot(x - 角.x, y - 角.y)
-    if (d > 遠い.隔たり) 遠い = { y, 隔たり: d }
-    if (d < ROAM_STEP) continue
-    const 差 = Math.abs(y - 狙い.y)
-    if (差 < 近い.差) 近い = { y, 差 }
+    const 縦 = y - 角.y
+    if (Math.abs(縦) > D) continue
+    const 横幅 = Math.sqrt(D * D - 縦 * 縦)
+    足す(角.x + 横幅, y, true)
+    足す(角.x - 横幅, y, true)
+  }
+  for (const x of xs) {
+    const 横 = x - 角.x
+    if (Math.abs(横) > D) continue
+    const 縦幅 = Math.sqrt(D * D - 横 * 横)
+    足す(x, 角.y + 縦幅, false)
+    足す(x, 角.y - 縦幅, false)
   }
 
-  return { x, y: 近い.差 < Number.POSITIVE_INFINITY ? 近い.y : 遠い.y }
+  // 候補が1つも無いのは、場が極端に狭いときだけ。**扇の向きをそのまま使って挟む**
+  if (候補.length === 0) {
+    const θ = 扇の始め + 散らす(seed, 1) * 扇の幅
+    return {
+      x: 挟む(角.x + Math.cos(θ) * D, 域.左, 域.右),
+      y: 挟む(角.y + Math.sin(θ) * D, 域.上, 域.下),
+      横: true,
+    }
+  }
+
+  候補.sort((a, b) => a.θ - b.θ)
+  const 位置 = Math.min(候補.length - 1, Math.floor(散らす(seed, 1) * 候補.length))
+  const 選 = 候補[位置]
+  return { x: 選.x, y: 選.y, 横: 選.横 }
+}
+
+/** 歩いてよい範囲。場の余白の内側と、カードのある場所の、両方を満たすところ */
+interface 領域 {
+  左: number
+  右: number
+  上: number
+  下: number
+}
+
+/**
+ * 回遊してよい範囲を出す。**カードやグループの枠がある場所だけ**（要件3）。
+ *
+ * 前の版は場の縁からも通路を立てていたので、**カードが1枚も無い空き地まで縫って
+ * いた**——そこに枠は無いのに枠沿いに見える動きをしていた。
+ *
+ * **`rects` の合併で足りる。** カードは必ずグループの枠の中に描かれるので
+ * （`ProjectGroup` の `<section>` の中に `TileGrid` が並べる）、
+ * **合併はグループの枠の合併と一致する**。種別を分けて取る必要が無く、測る側
+ * （[`measureField`]）にも型にも手を入れずに済む。
+ *
+ * **矩形が0個なら場の余白の内側そのもの**（縮退）。無いままにすると歩けず、
+ * 無限ループか `NaN` が本番でだけ出る。
+ */
+function 範囲(field: RoamField): 領域 {
+  const 場: 領域 = {
+    左: MARGIN,
+    右: Math.max(MARGIN, field.width - MARGIN),
+    上: MARGIN,
+    下: Math.max(MARGIN, field.height - MARGIN),
+  }
+  if (field.rects.length === 0) return 場
+
+  let 左 = Number.POSITIVE_INFINITY
+  let 右 = Number.NEGATIVE_INFINITY
+  let 上 = Number.POSITIVE_INFINITY
+  let 下 = Number.NEGATIVE_INFINITY
+  for (const r of field.rects) {
+    左 = Math.min(左, r.x - 通路)
+    右 = Math.max(右, r.x + r.w + 通路)
+    上 = Math.min(上, r.y - 通路)
+    下 = Math.max(下, r.y + r.h + 通路)
+  }
+  return {
+    左: 挟む(左, 場.左, 場.右),
+    右: 挟む(右, 場.左, 場.右),
+    上: 挟む(上, 場.上, 場.下),
+    下: 挟む(下, 場.上, 場.下),
+  }
 }
 
 /**
@@ -189,41 +344,30 @@ function 着地点(
  * 矩形の外側 `通路` px に線を引き、**1px に丸めて重複を畳む**。カード同士の隙間は
  * 両側から立てた線が重なるので、畳んだ結果が「隙間の中央を通る道」になる。
  *
- * **1本も立たないことがある**（矩形が0個＝場に何も無い）。そのときは場の縁だけを
- * 道にする——**無いままにすると歩けず、無限ループか `NaN` が本番でだけ出る。**
+ * **場の縁からは立てない**（要件3）。立てると、カードが1枚も無い空き地にも道ができる。
+ * 矩形が0個のときだけ、[`範囲`] の縁＝場の余白の内側を道にする（縮退）。
  */
-function 格子(field: RoamField): { xs: number[]; ys: number[] } {
-  const 左 = MARGIN
-  const 右 = Math.max(MARGIN, field.width - MARGIN)
-  const 上 = MARGIN
-  const 下 = Math.max(MARGIN, field.height - MARGIN)
-
+function 格子(field: RoamField, 域: 領域): { xs: number[]; ys: number[] } {
   const xs = new Set<number>()
   const ys = new Set<number>()
   for (const r of field.rects) {
-    xs.add(Math.round(挟む(r.x - 通路, 左, 右)))
-    xs.add(Math.round(挟む(r.x + r.w + 通路, 左, 右)))
-    ys.add(Math.round(挟む(r.y - 通路, 上, 下)))
-    ys.add(Math.round(挟む(r.y + r.h + 通路, 上, 下)))
+    xs.add(Math.round(挟む(r.x - 通路, 域.左, 域.右)))
+    xs.add(Math.round(挟む(r.x + r.w + 通路, 域.左, 域.右)))
+    ys.add(Math.round(挟む(r.y - 通路, 域.上, 域.下)))
+    ys.add(Math.round(挟む(r.y + r.h + 通路, 域.上, 域.下)))
   }
-  xs.add(Math.round(左))
-  xs.add(Math.round(右))
-  ys.add(Math.round(上))
-  ys.add(Math.round(下))
+  if (xs.size === 0 || ys.size === 0) {
+    xs.add(Math.round(域.左))
+    xs.add(Math.round(域.右))
+    ys.add(Math.round(域.上))
+    ys.add(Math.round(域.下))
+  }
 
   return {
     xs: [...xs].sort((a, b) => a - b),
     ys: [...ys].sort((a, b) => a - b),
   }
 }
-
-/**
- * 輪の半径（詰まっていないとき）。
- *
- * 弦の長さが [`ROAM_STEP`] になる値。**輪も回遊も同じ速さで通す**ための逆算である
- * （設計§9-7-7 C）——小さい輪にすると、そのぶん点数が減って多角形に見えてしまう。
- */
-const 輪の半径 = ROAM_STEP / (2 * Math.sin(Math.PI / ROAM_LOOP))
 
 /** 2点の隔たり */
 function 隔たり(a: { x: number; y: number }, b: { x: number; y: number }): number {
@@ -236,63 +380,66 @@ function 畳む(度: number): number {
 }
 
 /**
- * 入口を通り、場の内側に収まる円を作る。
+ * ③巻き。**進みながら、その場で1回だけ小さく巻く**（要件1・設計§9-7-9）。
  *
- * **中心は入口の法線（＝進行方向と直角）に置きたい。** そこへ置くと入口の接線が進行方向と
- * 一致し、**折れ目なく輪へ入る**。ただし入口が場の縁に近いと、その向きの円ははみ出す
- * ——縁を通る円は、接している向き以外では必ず外へ出る。
+ * 入口 `A` から出口 `B` まで、[`巻きのa`] のトロコイドを1周期ぶん描く。`B` は
+ * **回遊が置いた最初の点そのもの**なので、巻きが挟まってもその先の経路は1ピクセルも
+ * 変わらない——**巻きは回遊の1区間を置き換える**。
  *
- * **半径を詰めて逃がさない。** 詰める形にすると、入口が縁に乗ったときに半径が 0 まで
- * 潰れて輪が消える。**中心を動かして逃がさない**のも同じで、そちらは輪が入口へ戻らなく
- * なり、出口だけ軸に沿わない区間が生まれる。
+ * 前の版は「入口へ戻る円」だった。円は**接するだけで交差しない**うえ、等速のために
+ * 半径が区間の長さに縛られ、直径 146px まで膨らんでいた（設計§9-7-8）。
  *
- * したがって**向きのほうを振る**。法線から左右へ 15度 ずつ広げて、**本命の半径が入る
- * 向きのうち法線にいちばん近いもの**を採る。入口が縁から遠ければ法線がそのまま通るので、
- * **普段は折れ目が出ない**。
+ * **膨らむ側は、範囲の内側へ取る。** 張り出しは 35.7px あるので、通路が範囲の縁に
+ * 近いと外側では出てしまう。**前の版のように向きを振って探す必要は無い**——
+ * 進む向きは通路の軸に固定されており、選べるのは左右どちらへ膨らむかだけである。
  */
-function 輪の形(
-  着地: { x: number; y: number },
-  進行: { x: number; y: number },
-  field: RoamField,
-  回り: number,
-): { 中心: { x: number; y: number }; 半径: number } {
-  const 左 = MARGIN
-  const 右 = Math.max(MARGIN, field.width - MARGIN)
-  const 上 = MARGIN
-  const 下 = Math.max(MARGIN, field.height - MARGIN)
+function 巻き(
+  A: { x: number; y: number },
+  B: { x: number; y: number },
+  域: 領域,
+  seed: number,
+): { x: number; y: number }[] {
+  const 伸び = 隔たり(A, B)
+  const u = 伸び > 0 ? { x: (B.x - A.x) / 伸び, y: (B.y - A.y) / 伸び } : { x: 1, y: 0 }
+  // 法線。**どちらへ膨らませても、入口と出口の向きは進行方向のまま**
+  const n = { x: -u.y, y: u.x }
 
-  // 中心を「着地から 角 の向きへ r」に置いたとき、はみ出さない最大の r
-  const 上限 = (角: number): number => {
-    const 成分 = { x: Math.cos(角), y: Math.sin(角) }
-    let r = 輪の半径
-    const 縛る = (座標: number, 向き: number, 手前: number, 奥: number): void => {
-      // 座標 + 向き*r - r >= 手前  →  r * (1 - 向き) <= 座標 - 手前
-      if (1 - 向き > 1e-9) r = Math.min(r, (座標 - 手前) / (1 - 向き))
-      // 座標 + 向き*r + r <= 奥    →  r * (1 + 向き) <= 奥 - 座標
-      if (1 + 向き > 1e-9) r = Math.min(r, (奥 - 座標) / (1 + 向き))
+  // 膨らむ側を選ぶ。**範囲の縁までの余地が広いほう**——同じくらいなら種で振る。
+  //
+  // **符号は下の式と揃える。** 張り出しは `n × (−巻きのb(1+cos t) × 回り)` なので、
+  // `回り` が正なら **`−n` の側**へ膨らむ。ここを取り違えると縁のほうへ膨らませてしまい、
+  // 挟んだ結果**巻きが一直線に潰れる**（実測で踏んだ——潰れても点の数は合うので、
+  // 「点が足りない」では気づけない）
+  const 余地 = (回り: number): number => {
+    const 先 = {
+      x: (A.x + B.x) / 2 - n.x * 回り * 巻きのb,
+      y: (A.y + B.y) / 2 - n.y * 回り * 巻きのb,
     }
-    縛る(着地.x, 成分.x, 左, 右)
-    縛る(着地.y, 成分.y, 上, 下)
-    return Math.max(0, r)
+    return Math.min(先.x - 域.左, 域.右 - 先.x, 先.y - 域.上, 域.下 - 先.y)
   }
+  const 右余地 = 余地(1)
+  const 左余地 = 余地(-1)
+  const 回り =
+    Math.abs(右余地 - 左余地) < 1 ? (散らす(seed, 5) < 0.5 ? 1 : -1) : 右余地 > 左余地 ? 1 : -1
 
-  const 円 = (角: number, 半径: number): { 中心: { x: number; y: number }; 半径: number } => ({
-    中心: { x: 着地.x + Math.cos(角) * 半径, y: 着地.y + Math.sin(角) * 半径 },
-    半径,
-  })
-
-  const 法線 = Math.atan2(進行.x * 回り, -進行.y * 回り)
-  let 最良 = { 角: 法線, 半径: -1 }
-  for (let 段 = 0; 段 <= 12; 段 += 1) {
-    for (const 側 of 段 === 0 ? [1] : [1, -1]) {
-      const 角 = 法線 + 側 * 段 * (Math.PI / 12)
-      const r = 上限(角)
-      // **法線にいちばん近い「入る向き」で打ち切る**（普段は 段 0 のまま抜ける）
-      if (r >= 輪の半径) return 円(角, 輪の半径)
-      if (r > 最良.半径) 最良 = { 角, 半径: r }
-    }
+  // **縦横とも同じ比率で拡縮する。** 進む向きだけ伸ばすと形が潰れ、弦の比が崩れて
+  // 呼び値（[`roamSpans`]）とずれる。回遊の1区間は 56px ちょうどではなく 50〜66px に
+  // 揺れるので、ここで相似に保っておくと**弦の比だけは常に同じ**になる
+  const 拡 = ROAM_STEP > 0 ? 伸び / ROAM_STEP : 1
+  const 出力: { x: number; y: number }[] = []
+  for (let k = 1; k <= ROAM_LOOP; k += 1) {
+    const t = Math.PI + (2 * Math.PI * k) / ROAM_LOOP
+    const 進 = (巻きのa * (t - Math.PI) - 巻きのb * Math.sin(t)) * 拡
+    const 横 = -巻きのb * (1 + Math.cos(t)) * 回り * 拡
+    出力.push({
+      x: 挟む(A.x + u.x * 進 + n.x * 横, 域.左, 域.右),
+      y: 挟む(A.y + u.y * 進 + n.y * 横, 域.上, 域.下),
+    })
   }
-  return 円(最良.角, 最良.半径)
+  // **出口は計算し直さず、回遊が置いた点そのものを入れる。** 三角関数で1周させると
+  // 数値がわずかにずれ、**そのずれが回遊の全部の点へ伝わる**（フェーズ10 で踏んだ）
+  出力[出力.length - 1] = { x: B.x, y: B.y }
+  return 出力
 }
 
 /**
@@ -313,62 +460,42 @@ function 輪の形(
  * 食い違い、①〜③で作った「風に飛ばされた」の読みも消える。
  */
 export function planRoute(field: RoamField, seed: number): RoamStop[] {
-  const { xs, ys } = 格子(field)
+  const 域 = 範囲(field)
+  const { xs, ys } = 格子(field, 域)
 
   // ① 発生——カードの右上の角。**縁から出すので、飛び出しの向きが外側で揃う**
   const 角 = {
-    x: 挟む(field.card.x + field.card.w, MARGIN, Math.max(MARGIN, field.width - MARGIN)),
-    y: 挟む(field.card.y, MARGIN, Math.max(MARGIN, field.height - MARGIN)),
+    x: 挟む(field.card.x + field.card.w, 域.左, 域.右),
+    y: 挟む(field.card.y, 域.上, 域.下),
   }
 
-  // ② 飛散——右上の四半へ、種ごとに違う向きと距離で流される。着地は格子の上
-  const 流れ = (-100 + 散らす(seed, 1) * 110) * (Math.PI / 180)
-  const 距離 = 60 + 散らす(seed, 2) * 90
-  const 狙い = { x: 角.x + Math.cos(流れ) * 距離, y: 角.y + Math.sin(流れ) * 距離 }
-  const 着地 = 着地点(ys, 角, 狙い, field)
+  // ② 飛散——右上の四半へ、**距離は固定で向きだけ**種ごとに違う（設計§9-7-9）。
+  // 着地は通路の線の上で、どちらの向きの通路へ着いたかで回遊の初手が決まる
+  const 着地 = 着地点(xs, ys, 角, 域, seed)
   let ix = 近い番号(xs, 着地.x)
   let iy = 近い番号(ys, 着地.y)
 
-  // 飛散も等間隔に割る。**ここだけ速いと「加速して減速する塊」に見える**——
-  // 飛び出しの勢いは①の尺取り虫（`scale`）が担うので、移動の速さは変えない
-  const 飛散 = Math.max(1, Math.min(4, Math.round(隔たり(角, 着地) / ROAM_STEP)))
   const 点: { x: number; y: number; loop?: boolean }[] = [角]
-  for (let n = 1; n <= 飛散; n += 1) {
+  for (let n = 1; n <= ROAM_FLING; n += 1) {
     点.push({
-      x: 角.x + (着地.x - 角.x) * (n / 飛散),
-      y: 角.y + (着地.y - 角.y) * (n / 飛散),
+      x: 角.x + (着地.x - 角.x) * (n / ROAM_FLING),
+      y: 角.y + (着地.y - 角.y) * (n / ROAM_FLING),
     })
   }
-
-  // ③ 転回——**位置が円周を1周する**（設計§9-7-7 B）。向きは接線なので、1周ぶんの
-  // 回転は足さなくても出る。前の版は座標を止めて `rotate` だけ回しており、
-  // **プロペラに見えていた**
-  const 伸び = 隔たり(角, 着地)
-  const 進行 = 伸び > 0 ? { x: (着地.x - 角.x) / 伸び, y: (着地.y - 角.y) / 伸び } : { x: 1, y: 0 }
-  const 回り = 散らす(seed, 5) < 0.5 ? 1 : -1
-  const 輪 = 輪の形(着地, 進行, field, 回り)
-  const 起点 = Math.atan2(着地.y - 輪.中心.y, 着地.x - 輪.中心.x)
-  for (let k = 1; k <= ROAM_LOOP; k += 1) {
-    const θ = 起点 + 回り * 2 * Math.PI * (k / ROAM_LOOP)
-    点.push({
-      x: 輪.中心.x + Math.cos(θ) * 輪.半径,
-      y: 輪.中心.y + Math.sin(θ) * 輪.半径,
-      loop: true,
-    })
-  }
-  // **閉じる点は、入ってきた点そのものにする。** 三角関数で1周させると数値が
-  // わずかにずれ、**そのずれが回遊の全部の点へ伝わる**（着地は通路の上に居るので、
-  // ずれると「通路の上にある」が成り立たなくなる）
-  点[点.length - 1] = { x: 着地.x, y: 着地.y, loop: true }
 
   // ④ 回遊——いまの軸へ何本か直進し、角で気まぐれに直角へ折れる。
   // **1本を [`ROAM_STEP`] ごとに割る**ので、長い直進でも速さが変わらない
-  // **まず横へ歩き出す。** 着地は横の通路の上に居るので、縦へ動くと通路から外れる
-  // （最初の角で交点に乗るので、そこから先はどちらへでも曲がれる）
-  let 横 = true
+  //
+  // **着いた通路の向きに沿って歩き出す。** 横の通路（y）へ着いたなら横、縦の通路（x）
+  // へ着いたなら縦——**着いた線から外れる向きへ動くと、1歩目で通路を離れる**
+  //
+  // **1区間ぶん多く歩く。** 先頭の1区間は③の巻きが置き換えるので（下記）、
+  // ここでは [`ROAM_ROAM`] ＋1 区間ぶんの点を作る
+  let 横 = 着地.横
   let 向き = 散らす(seed, 4) < 0.5 ? 1 : -1
-  let 現在 = { x: 点[点.length - 1].x, y: 点[点.length - 1].y }
-  let 残り = ROAM_STOPS - 1 - 飛散 - ROAM_LOOP
+  let 現在 = { x: 着地.x, y: 着地.y }
+  const 回遊点: { x: number; y: number }[] = []
+  let 残り = ROAM_ROAM + 1
   let 回 = 0
 
   while (残り > 0 && 回 < ROAM_STOPS * 4) {
@@ -396,13 +523,13 @@ export function planRoute(field: RoamField, seed: number): RoamStop[] {
       const 本来 = Math.max(1, Math.round(長 / ROAM_STEP))
       const 割 = Math.min(残り, 本来)
       for (let k = 1; k <= 割; k += 1) {
-        点.push({
+        回遊点.push({
           x: 現在.x + (次.x - 現在.x) * (k / 本来),
           y: 現在.y + (次.y - 現在.y) * (k / 本来),
         })
       }
       残り -= 割
-      現在 = { x: 点[点.length - 1].x, y: 点[点.length - 1].y }
+      現在 = { ...回遊点[回遊点.length - 1] }
     }
 
     // **曲がるかどうかだけが予測できない。** 角度は常に直角で、道そのものは読める
@@ -415,7 +542,16 @@ export function planRoute(field: RoamField, seed: number): RoamStop[] {
 
   // 数が足りない（格子が縮退している）ときは最後の点で埋める。**ここに落ちるのは
   // 場が余白より狭いときだけ**である
-  while (点.length < ROAM_STOPS) 点.push({ ...点[点.length - 1] })
+  while (回遊点.length < ROAM_ROAM + 1) {
+    回遊点.push({ ...(回遊点[回遊点.length - 1] ?? 着地) })
+  }
+
+  // ③ 巻き——**回遊の最初の1区間を置き換える**（設計§9-7-9）。
+  // 出口は回遊が置いた点そのものなので、**その先の経路は1ピクセルも変わらない**
+  for (const 巻き点 of 巻き(着地, 回遊点[0], 域, seed)) {
+    点.push({ ...巻き点, loop: true })
+  }
+  for (const 回遊 of 回遊点.slice(1)) 点.push(回遊)
 
   // 向きは**次の点へ進む向き**。最後の点だけは、その手前の区間の向きを引き継ぐ。
   // **巻き戻さない**——前の角にいちばん近い等価な角を選んで単調に増やす
