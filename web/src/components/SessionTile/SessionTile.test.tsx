@@ -854,11 +854,18 @@ describe('跳ねるたびに、画面を回遊する線を放つ', () => {
     })
   }
 
+  /**
+   * **場ごと描く。** 線は場（`data-roam-field`）に対する座標で飛ぶので、
+   * カードだけを描くと `measureField` が場を見つけられず**1本も飛ばない**
+   * ——`App.tsx` の形を写しておかないと、ここの4本が全部「飛ばない」で緑になる。
+   */
   function 待つカードを描く(): void {
     applySessionSnapshot([meta({ status: { kind: 'waiting_permission' } })])
     render(
       <MemoryRouter initialEntries={['/']}>
-        <SessionTile cardId={CARD} />
+        <div data-roam-field>
+          <SessionTile cardId={CARD} />
+        </div>
       </MemoryRouter>,
     )
   }
@@ -876,6 +883,20 @@ describe('跳ねるたびに、画面を回遊する線を放つ', () => {
     待つカードを描く()
     折り返す('tile-shake')
     expect(useRoamStore.getState().lines.length).toBeGreaterThan(0)
+  })
+
+  it('場が無ければ、跳ねても放たない', () => {
+    // 一覧の外にカードが置かれたときに、**無い場所へ線を放たない**。
+    // 上の1本と対で置く——**「飛ばない」だけを見ていると、場を見つけられなく
+    // なった事故を「仕様どおり」と読んでしまう**
+    applySessionSnapshot([meta({ status: { kind: 'waiting_permission' } })])
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <SessionTile cardId={CARD} />
+      </MemoryRouter>,
+    )
+    折り返す('tile-shake')
+    expect(useRoamStore.getState().lines).toHaveLength(0)
   })
 
   it('鎮まっている間は放たない', () => {

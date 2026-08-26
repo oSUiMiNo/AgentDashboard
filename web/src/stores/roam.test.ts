@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { RoamField } from '@/lib/roam'
 import {
   ROAM_LIFE_MS,
+  ROAM_LINES,
   ROAM_MAX,
   emitRoam,
   resetRoam,
@@ -14,8 +16,26 @@ import {
  * `web/src/roam.test.ts` が別に見ている。片方だけ壊れても気づけるように分けてある。
  */
 
-const RECT = { left: 300, top: 400, width: 294 }
-const 種 = { rect: RECT, accent: '#f5a623', quiet: 'lively' as const }
+/**
+ * 跳ねた瞬間に測った場の様子。**手で組み立てる**——jsdom の
+ * `getBoundingClientRect` は全部 0 を返すので、`measureField` を通すと縮退する
+ */
+const FIELD: RoamField = {
+  width: 1200,
+  height: 900,
+  card: { x: 12, y: 60, w: 288, h: 120 },
+  rects: [
+    { x: 0, y: 40, w: 900, h: 300 },
+    { x: 12, y: 60, w: 288, h: 120 },
+    { x: 312, y: 60, w: 288, h: 120 },
+  ],
+}
+const 種 = {
+  field: FIELD,
+  accent: '#f5a623',
+  ink: '75%',
+  quiet: 'lively' as const,
+}
 
 function 本数(): number {
   return useRoamStore.getState().lines.length
@@ -64,10 +84,11 @@ describe('飛ばす門', () => {
 })
 
 describe('量を抑える', () => {
-  it('1回の跳ねで飛ぶのは2〜3本', () => {
+  it('1回の跳ねで飛ぶのは3本', () => {
+    // **3本に固定した**（利用者の指定・2026-08-26）。振り付けが「手書きの3本線が
+    // 放射状に出てくる」と決まったので、**本数が揺れると①の読みが崩れる**
     emitRoam(種)
-    expect(本数()).toBeGreaterThanOrEqual(2)
-    expect(本数()).toBeLessThanOrEqual(3)
+    expect(本数()).toBe(ROAM_LINES)
   })
 
   it('画面の上限を超えない', () => {
@@ -116,13 +137,24 @@ describe('寿命', () => {
 })
 
 describe('線が持つもの', () => {
-  it('カードから渡された色をそのまま持つ', () => {
+  it('カードから渡された色と濃さを、そのまま持つ', () => {
     // **層は DOM を1度も読まない。** `--tile-accent` はインライン style なので
-    // 継承せず、層から `getComputedStyle` で拾いに行く形にすると読む相手が増える
-    emitRoam({ ...種, accent: '#123456' })
+    // 継承せず、層から `getComputedStyle` で拾いに行く形にすると読む相手が増える。
+    //
+    // **濃さも同じ扱いにした**（フェーズ9）。固定値で塗っていたので、同じ状態
+    // なのに輪と線で色が食い違っていた（カード設計§9-7）
+    emitRoam({ ...種, accent: '#123456', ink: '42%' })
     for (const line of useRoamStore.getState().lines) {
       expect(line.accent).toBe('#123456')
+      expect(line.ink).toBe('42%')
     }
+  })
+
+  it('形は種から選ぶので、3本が同じにならない', () => {
+    // **同じ棒が3本並ぶと手書きに見えない**（設計§9-7-3）
+    emitRoam(種)
+    const 形 = useRoamStore.getState().lines.map((line) => line.shape)
+    expect(new Set(形).size).toBeGreaterThan(1)
   })
 
   it('線ごとに経路が違う', () => {

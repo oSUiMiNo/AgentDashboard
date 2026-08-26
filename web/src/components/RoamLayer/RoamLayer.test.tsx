@@ -13,8 +13,19 @@ import { useSettingsStore } from '@/stores/settings'
  */
 
 const 種 = {
-  rect: { left: 300, top: 400, width: 294 },
+  // 跳ねた瞬間に測った場の様子。**手で組み立てる**（jsdom の矩形は全部 0）
+  field: {
+    width: 1200,
+    height: 900,
+    card: { x: 12, y: 60, w: 288, h: 120 },
+    rects: [
+      { x: 0, y: 40, w: 900, h: 300 },
+      { x: 12, y: 60, w: 288, h: 120 },
+      { x: 312, y: 60, w: 288, h: 120 },
+    ],
+  },
   accent: '#f5a623',
+  ink: '75%',
   quiet: 'lively' as const,
 }
 
@@ -54,16 +65,42 @@ describe('回遊の層', () => {
     expect(screen.getByTestId('roam-layer').children).toHaveLength(本数)
   })
 
-  it('線には経路と色が載る', () => {
+  it('線には経路と色と濃さが載る', () => {
     // **層は DOM を1度も読まない。** 値は在庫から来る
-    emitRoam({ ...種, accent: '#123456' })
+    emitRoam({ ...種, accent: '#123456', ink: '42%' })
     render(<RoamLayer />)
     const 線 = screen.getAllByTestId('roam-line')[0]
     expect(線.getAttribute('style')).toContain('--roam-accent: #123456')
+    // **濃さもカードから配られる**（カード設計§9-7）。固定値で塗ると、同じ状態
+    // なのに輪と線で色が食い違う
+    expect(線.getAttribute('style')).toContain('--roam-ink: 42%')
     for (let i = 0; i < ROAM_STOPS; i += 1) {
       expect(線.getAttribute('style')).toContain(`--roam-x${i}:`)
       expect(線.getAttribute('style')).toContain(`--roam-y${i}:`)
       expect(線.getAttribute('style')).toContain(`--roam-r${i}:`)
+    }
+    // ③の転回は座標を止めたまま向きだけ回すので、専用の変数が要る
+    expect(線.getAttribute('style')).toContain('--roam-turn:')
+  })
+
+  it('線の中に紙片が1枚だけ入る', () => {
+    /*
+      **外側と内側で役割を分けてある**（設計§9-7-2）。外は「道と向き」、内は
+      「紙のたわみ」で、1つの要素に載せると進行方向を向く回転と尺取り虫が
+      同じ `transform-origin` を取り合う。
+
+      形は種から選ぶ——**同じ棒が3本並ぶと手書きに見えない**
+    */
+    emitRoam(種)
+    render(<RoamLayer />)
+    const 線 = screen.getAllByTestId('roam-line')
+    const 紙 = screen.getAllByTestId('roam-paper')
+    expect(紙).toHaveLength(線.length)
+    for (const [i, 一枚] of 紙.entries()) {
+      expect(一枚.parentElement).toBe(線[i])
+      expect(一枚).toHaveAttribute('data-shape')
+      // **内側にも秒数を渡す。** 出どころを1つに保つ約束は内側にも掛かる
+      expect((一枚 as HTMLElement).style.animationDuration).toContain('15000ms')
     }
   })
 

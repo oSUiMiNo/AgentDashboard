@@ -214,14 +214,6 @@ function Shell() {
         <AuthGate />
       )}
 
-      {/*
-        画面を回遊する効果線（カード設計§9-7）。**カードの中から出すと切られる**ので、
-        ここに1枚だけ置く——一覧のスクロールする入れ物にも、カードの切る枠にも
-        `overflow` が掛かっている。
-
-        `fixed` なので場所を取らず、線が1本も無ければ何も描かない。
-      */}
-      <RoamLayer />
     </main>
   )
 }
@@ -312,9 +304,36 @@ function HomePage() {
   const status = useWsStore((state) => state.status)
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto">
-      <ProjectAdd disabled={status !== 'open'} />
-      <TileGrid />
+    /*
+      **横のはみ出しを明示で殺す。** `overflow-y-auto` は片方しか書かないので、
+      横は `auto` に計算される（CSS Overflow 3 §3.2）。回遊する線が1本でもはみ出すと
+      横スクロールバーが生え、**バーが生えると可視領域が変わってタイルが再レイアウト
+      され、次に測る矩形がずれる**——直った直後にまた狂う輪になる。
+    */
+    <div className="flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto">
+      {/*
+        **場**（カード設計§9-7-5）。一覧の中身を包む in-flow のラッパで、
+        **高さが中身の全高と一致する**。
+
+        回遊する層をこの中へ置くと、(1) 線が中身と一緒にスクロールし、(2) 層の矩形が
+        場の矩形と一致するので経路のクランプが `scrollHeight` を読まずに決まり、
+        (3) 座標変換が矩形の引き算だけで済む（スクロール中に取得のタイミングが
+        ずれる事故が消える）。
+
+        **スクロールする入れ物の直下ではいけない。** あそこの絶対配置は
+        **パディングボックス**に対して解決される＝層の高さが可視1画面ぶんになる。
+      */}
+      <div data-roam-field className="relative flex flex-col gap-4">
+        <ProjectAdd disabled={status !== 'open'} />
+        <TileGrid />
+        {/*
+          画面を回遊する効果線（カード設計§9-7）。**カードの中から出すと切られる**
+          ので、場の直下に1枚だけ置く——カードの切る枠には `overflow` が掛かっている。
+
+          場所を取らず（`absolute`）、線が1本も無ければ何も描かない。
+        */}
+        <RoamLayer />
+      </div>
     </div>
   )
 }

@@ -17,7 +17,7 @@
 
 import { create } from 'zustand'
 import type { MotionQuiet } from '@/stores/settings'
-import { type RoamStop, planRoute } from '@/lib/roam'
+import { type RoamField, type RoamStop, planRoute } from '@/lib/roam'
 
 /** 画面に同時に居てよい線の数。**「控えめ」という利用者の指定の実体がこれ** */
 export const ROAM_MAX = 10
@@ -25,15 +25,26 @@ export const ROAM_MAX = 10
 /** 1本が飛んでいる時間。`roam.css` へは層が渡すので、秒数の出どころはここだけ */
 export const ROAM_LIFE_MS = 15_000
 
-/** 1回の跳ねで飛ばす本数。2と3を交互に出して、揃いすぎないようにする */
-function 本数(seed: number): number {
-  return 2 + (seed % 2)
-}
+/**
+ * 1回の跳ねで飛ばす本数。
+ *
+ * **3本に固定した**（利用者の指定・2026-08-26。設計§9-7-2）。前は種で 2 と 3 を
+ * 交互に出していたが、振り付けが「手書きの3本線が放射状に出てくる」と決まったので、
+ * **本数が揺れると①の読みが崩れる**。
+ */
+export const ROAM_LINES = 3
+
+/** 線の形の種類。同じ棒が並ばないよう、種から選び分ける（`roam.css` の `data-shape`） */
+export const ROAM_SHAPES = 3
 
 export interface RoamLine {
   id: number
   /** 線の色。カードの `--tile-accent` をそのまま受け取る（層は DOM を読まない） */
   accent: string
+  /** いま塗る濃さ。カードの `--tile-ink` と同じ値（設計§9-7・`statusInk`） */
+  ink: string
+  /** 手書きの形の種別。0〜`ROAM_SHAPES - 1` */
+  shape: number
   stops: RoamStop[]
 }
 
@@ -67,8 +78,15 @@ function 減らす(): boolean {
 }
 
 export interface RoamSeed {
-  rect: { left: number; top: number; width: number }
+  /**
+   * 跳ねた瞬間に測った場の様子（`lib/roam.ts` の `measureField`）。
+   *
+   * **測るのは呼び元。** ここで測ると、jsdom の `getBoundingClientRect` が全部 0 を
+   * 返すせいで**単体テストが縮退した格子を通る**——「何も証明しない経路」で緑になる。
+   */
+  field: RoamField
   accent: string
+  ink: string
   quiet: MotionQuiet
 }
 
@@ -89,12 +107,11 @@ export function emitRoam(seed: RoamSeed): void {
   if (減らす()) return
 
   const 空き = ROAM_MAX - useRoamStore.getState().lines.length
-  const 欲しい = 本数(次のID)
 
   // **空きに応じて減らす。** 満杯のときだけ最古を1本落として1本だけ出す——
   // 新しいほうを捨てると「このカードだけ線が出ない」と読めてしまい、跳ねと線の
   // 対応が崩れて不具合に見える
-  const 出す = 空き >= 欲しい ? 欲しい : Math.max(1, 空き)
+  const 出す = 空き >= ROAM_LINES ? ROAM_LINES : Math.max(1, 空き)
   const 落とす = Math.max(0, 出す - 空き)
   for (let i = 0; i < 落とす; i += 1) {
     const 最古 = useRoamStore.getState().lines[0]
@@ -102,16 +119,17 @@ export function emitRoam(seed: RoamSeed): void {
     畳む(最古.id)
   }
 
-  const viewport = {
-    width: typeof window === 'undefined' ? 0 : window.innerWidth,
-    height: typeof window === 'undefined' ? 0 : window.innerHeight,
-  }
-
   const 足す: RoamLine[] = []
   for (let i = 0; i < 出す; i += 1) {
     const id = 次のID
     次のID += 1
-    足す.push({ id, accent: seed.accent, stops: planRoute(seed.rect, viewport, id) })
+    足す.push({
+      id,
+      accent: seed.accent,
+      ink: seed.ink,
+      shape: id % ROAM_SHAPES,
+      stops: planRoute(seed.field, id),
+    })
     寿命.set(
       id,
       setTimeout(() => 畳む(id), ROAM_LIFE_MS),

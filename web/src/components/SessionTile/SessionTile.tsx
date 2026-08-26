@@ -54,12 +54,14 @@ import {
   statusAccent,
   statusAccentColor,
   statusGlyph,
+  statusInk,
   statusLabel,
   statusMotion,
   statusTextTone,
 } from '@/lib/protocol'
 import type { CardId } from '@/lib/protocol'
 import { sessionPath } from '@/lib/routes'
+import { measureField } from '@/lib/roam'
 import { useNow } from '@/lib/sessions'
 import { emitRoam } from '@/stores/roam'
 import { useCardError, useReviving, useSessionCard } from '@/stores/sessions'
@@ -162,9 +164,15 @@ export function SessionTile({ cardId }: Props) {
   跳ねた.current = () => {
     const frame = frameRef.current
     if (frame === null || session === undefined) return
+    // **測るのはここ**（カード設計§9-7-4）。在庫の側で測ると、jsdom が矩形を全部 0 で
+    // 返すせいで単体テストが縮退した格子を通る。場が無ければ何もしない——一覧の外に
+    // カードが置かれた場合に、無い場所へ線を放たない
+    const field = measureField(frame)
+    if (field === null) return
     emitRoam({
-      rect: frame.getBoundingClientRect(),
+      field,
       accent: statusAccentColor(session.status),
+      ink: statusInk(session.status),
       quiet,
     })
   }
