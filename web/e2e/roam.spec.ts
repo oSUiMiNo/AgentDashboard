@@ -12,12 +12,18 @@ import { archiveAll, fireHook, openDashboard, openSession, spawnSession } from '
  * 確かめられない——単体では素のイベントを手で投げているので、**周期が繋がっている
  * ことの証拠にはならない**。
  *
- * # `fixed` であることは、解決後の値で見る
+ * # 層の居場所は、振る舞いで見る
  *
- * 層がスクロールする入れ物の内側へ落ちると、線は**カードの切る枠にも一覧の入れ物にも
- * 切られる**。一覧を動かして座標を比べる形も試したが、**壊し方を当てても落ちなかった**
- * ——祖先に位置指定が1つも無いので `absolute` でも基準が変わらず、見分けが付かない。
- * 詳しくは当のテストの中に書いてある。
+ * **フェーズ9 で層が「場」（`data-roam-field`）の内側へ移った**（設計§9-7-5）。線が
+ * 中身と一緒にスクロールしないと、枠をなぞる経路が枠から外れて意味が消えるためである。
+ *
+ * 以前ここには `getComputedStyle(層).position` を読むテストが置いてあった。**一覧を
+ * 動かして座標を比べる形は、壊し方を当てても落ちなかったから**である——当時は祖先に
+ * 位置指定が1つも無く、`absolute` でも基準が初期包含ブロックのままで見分けが付かなかった。
+ *
+ * **場が入ったことで、その穴が塞がった。** いまは「スクロールすると層も動く」「層の
+ * 矩形＝場の矩形」がどちらも**壊せば落ちる**ので、位置の種別を直接読む必要が無くなった
+ * ——`relative` が場から外れれば、層は初期包含ブロックへ落ちて矩形が食い違う。
  */
 
 /** 跳ねの周期。1周ぶん待てば、折り返しが必ず1回は来る */
@@ -69,39 +75,99 @@ test('跳ねるたびに線が飛び、しばらく画面に居る', async ({ pa
     timeout: 跳ねの周期 * 2,
   })
 
-  // **控えめな量**（利用者の指定）。1回の跳ねで2〜3本しか出ない
+  // **控えめな量**（利用者の指定）。1回の跳ねで3本しか出ない
   const 本数 = await page.getByTestId('roam-line').count()
-  expect(本数).toBeGreaterThanOrEqual(2)
+  expect(本数).toBeGreaterThanOrEqual(3)
   expect(本数).toBeLessThanOrEqual(10)
+
+  // **線の中には紙片が1枚だけ入る**（設計§9-7-2）。外は「道と向き」、内は
+  // 「紙のたわみ」で、内側が無いと尺取り虫もひらひらも1つも動かない
+  expect(await page.getByTestId('roam-paper').count()).toBe(本数)
 })
 
-test('層は画面に貼りついていて、画面いっぱいを覆う', async ({ page }) => {
+test('層は中身と一緒にスクロールし、場からはみ出さない', async ({ page }) => {
   test.slow()
   await openDashboard(page)
   await 待つカードを作る(page)
 
-  /*
-    **一覧を動かして位置を比べる形にはできなかった。**
-
-    最初はそう書いたが、`absolute` へ落とす壊し方を当てても**4本とも通ってしまった**。
-    層の祖先に位置指定が1つも無いので、`absolute` でも基準が初期の包含ブロックになり、
-    しかもスクロールしているのは層の**外側の入れ物**なので、どちらでも動かない。
-    **見分けが付いていなかった＝空振りのテスト**だった。
-
-    解決後の値を読む形にする。`fixed` でなくなると、カードの切る枠（`overflow:
-    hidden`）にも一覧のスクロールする入れ物にも切られる道が開く——**そこが本題**なので、
-    位置の種別そのものを見るのが素直である。
-  */
   const 層 = page.getByTestId('roam-layer')
-  expect(
-    await 層.evaluate((el) => getComputedStyle(el).position),
-  ).toBe('fixed')
+  const 場 = page.locator('[data-roam-field]')
 
-  // 画面いっぱいであること。狭めると線が縁で消える
-  const 箱 = await 層.boundingBox()
-  const 窓 = page.viewportSize()
-  expect(箱?.width).toBeCloseTo(窓?.width ?? 0, 0)
-  expect(箱?.height).toBeCloseTo(窓?.height ?? 0, 0)
+  /*
+    **層の矩形＝場の矩形。**
+
+    層は `absolute; inset: 0` なので、**基準（`position: relative` の場）が外れると
+    初期包含ブロックへ静かに落ちる**——画面と同じ大きさになり、しかも見た目には
+    ほとんど気づけない。矩形どうしを比べれば、そこが落ちる。
+
+    **場は「中身の全高」を持つ**ので、可視領域より高いのが正しい（スクロールする
+    入れ物の直下へ層を置くと、ここが可視1画面ぶんになって食い違う）。
+  */
+  const 層の箱 = await 層.boundingBox()
+  const 場の箱 = await 場.boundingBox()
+  expect(層の箱?.x).toBeCloseTo(場の箱?.x ?? -1, 0)
+  expect(層の箱?.y).toBeCloseTo(場の箱?.y ?? -1, 0)
+  expect(層の箱?.width).toBeCloseTo(場の箱?.width ?? -1, 0)
+  expect(層の箱?.height).toBeCloseTo(場の箱?.height ?? -1, 0)
+
+  /*
+    **スクロールすると、層も一緒に動く。**
+
+    `fixed` へ戻すと画面に貼り付いて動かなくなるので、ここが落ちる。**フェーズ9 より
+    前はこの形が書けなかった**（祖先に位置指定が無く、`fixed` と `absolute` が同じに
+    振る舞っていた）。
+  */
+  const 器 = page.locator('[data-roam-field]').locator('..')
+  const 動く余地 = await 器.evaluate((el) => el.scrollHeight - el.clientHeight)
+  test.skip(動く余地 < 40, '一覧が1画面に収まっていて、スクロールで動かせない')
+
+  const 前 = (await 層.boundingBox())?.y ?? 0
+  await 器.evaluate((el) => {
+    el.scrollTop = 40
+  })
+  const 後 = (await 層.boundingBox())?.y ?? 0
+  expect(前 - 後).toBeCloseTo(40, 0)
+  await 器.evaluate((el) => {
+    el.scrollTop = 0
+  })
+})
+
+test('飛んでいる線が、スクロールできる範囲を押し広げない', async ({ page }) => {
+  test.slow()
+  await openDashboard(page)
+
+  const 器 = page.locator('[data-roam-field]').locator('..')
+  const 前 = await 器.evaluate((el) => ({
+    w: el.scrollWidth,
+    h: el.scrollHeight,
+  }))
+
+  await 待つカードを作る(page)
+  await expect(page.getByTestId('roam-line').first()).toBeVisible({
+    timeout: 跳ねの周期 * 2,
+  })
+  // 何本か溜まるまで待つ。1本だけだと、たまたま内側へ飛んだだけかもしれない
+  await page.waitForTimeout(跳ねの周期 * 1.5)
+
+  /*
+    **`fixed` をやめた副作用を見る。**
+
+    スクロール可能オーバーフロー域には「包含ブロックである子孫の**変形後の
+    ボーダーボックス**」が数えられる（CSS Overflow 3 §3.5）。経路が場の外へ出ると、
+    **一覧の下に無用の余白が生まれ、横スクロールバーが生える**。
+
+    防いでいるのは経路の側（`lib/roam.ts` の `MARGIN` が回転と拡大を織り込んだ
+    半対角ぶん内側へ留める）と、横は `overflow-x-hidden` の二重である。
+
+    **カードが1枚増えたぶんは伸びる**ので、高さは「線のぶんだけ伸びていない」を
+    見る形にする——カード1枚（100px ほど）より大きく伸びていたら、線が出ている
+  */
+  const 後 = await 器.evaluate((el) => ({
+    w: el.scrollWidth,
+    h: el.scrollHeight,
+  }))
+  expect(後.w).toBeLessThanOrEqual(前.w)
+  expect(後.h - 前.h).toBeLessThan(400)
 })
 
 test('「控えめ」では、カードは跳ね続けるが線は飛ばない', async ({ page }) => {
@@ -129,6 +195,23 @@ test('「控えめ」では、カードは跳ね続けるが線は飛ばない',
   expect(await 残り.first().evaluate((el) => getComputedStyle(el).animationName)).toBe(
     'none',
   )
+
+  /*
+    **内側も止まっていること。**
+
+    `animation` は継承しないので、外側（`.roam-line`）だけを止めると
+    **紙片（`.roam-paper`）は回り続ける**。外が透明なので目には見えないが、規範が
+    求めているのは「動きが止まること」であって「見えないこと」ではない。
+
+    しかも**見えないぶん、外側だけを見るテストは通ってしまう**——ここを足さないと
+    打ち消しのセレクタから `.roam-paper` を外す壊し方が1本も落とせない。
+  */
+  expect(
+    await page
+      .getByTestId('roam-paper')
+      .first()
+      .evaluate((el) => getComputedStyle(el).animationName),
+  ).toBe('none')
 
   /*
     **本数は「0本」ではなく「増えない」で見る。**
@@ -182,6 +265,14 @@ test('OS が「動きを減らす」と言えば、飛んでいる線もその�
       .first()
       .evaluate((el) => getComputedStyle(el).animationName)
     expect(飛んでいるか).toBe('none')
+
+    // **内側も止まる**（上と同じ理由。`animation` は継承しない）
+    expect(
+      await page
+        .getByTestId('roam-paper')
+        .first()
+        .evaluate((el) => getComputedStyle(el).animationName),
+    ).toBe('none')
 
     // 新しい線も出ない（跳ねが止まるので折り返しが鳴らない）
     const 前 = await page.getByTestId('roam-line').count()

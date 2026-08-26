@@ -108,12 +108,17 @@ describe('回遊の定義の読み込み', () => {
 })
 
 describe('層は場所を取らず、何も塗らない', () => {
-  it('画面に貼りついていて、押す邪魔をしない', () => {
-    // `fixed` なのは、一覧のスクロールする入れ物にもカードの切る枠にも
-    // **切られないため**。`absolute` にすると両方に切られる
+  it('中身と一緒にスクロールし、押す邪魔をしない', () => {
+    // **`absolute` でなければならない**（カード設計§9-7-5）。`fixed` だと画面に
+    // 貼り付いて、スクロールしたとき線だけが取り残される——経路が枠をなぞる
+    // ようになると、線が枠から外れて意味が消える。
+    //
+    // 基準になる「場」は `App.tsx` 側にあり、**そちらが外れると層は初期包含
+    // ブロックへ静かに落ちる**。そこは E2E（層の矩形＝場の矩形）が見ている
     const 層 = 全規則.filter((rule) => rule.selector.trim() === '.roam-layer')
     expect(層).toHaveLength(1)
-    expect(層[0].body).toContain('position: fixed')
+    expect(層[0].body).toContain('position: absolute')
+    expect(層[0].body).not.toContain('position: fixed')
     expect(層[0].body).toContain('pointer-events: none')
   })
 
@@ -126,8 +131,8 @@ describe('層は場所を取らず、何も塗らない', () => {
   })
 
   it('z-index を書かない', () => {
-    // `z-index: auto` の `fixed` は DOM 順で「中身より上・ダイアログより下」に
-    // 自然に収まる。書き足すと重なりの文脈が増えるだけ（`tile.css` と同じ方針）
+    // `z-index: auto` の絶対配置は DOM 順で「中身より上」に自然に収まる。
+    // 書き足すと重なりの文脈が増えるだけ（`tile.css` と同じ方針）
     expect(素のCSS()).not.toContain('z-index')
   })
 
@@ -136,21 +141,82 @@ describe('層は場所を取らず、何も塗らない', () => {
     expect(素のCSS()).not.toContain('will-change')
   })
 
-  it('位置と大きさそのものは動かさない', () => {
-    const 動く = 素のCSS().match(/@keyframes[\s\S]*?\n}/g) ?? []
-    expect(動く).not.toHaveLength(0)
-    for (const keyframes of 動く) {
-      expect(keyframes).not.toMatch(/^\s*(width|height|top|left|margin|padding):/m)
+  it('キーフレームで動かすのは、決めた4つだけ', () => {
+    /*
+      **黒リストから白リストへ変えた**（フェーズ9）。
+
+      前は `width|height|top|left|margin|padding` を禁じる形だったが、**黒リストは
+      書き足しに弱い**——`clip-path` でも `inset` でも素通りする。設計§9-0 が
+      「動かしてよいのは回転・移動・濃さ・大きさの4つだけ」と**閉じた集合**で
+      決めている以上、検査も閉じた集合で書くのが素直である。
+    */
+    const 許す = new Set(['translate', 'rotate', 'scale', 'opacity'])
+    const 塊 = 素のCSS().match(/@keyframes\s+[\w-]+\s*\{[\s\S]*?\n\}/g) ?? []
+    expect(塊).not.toHaveLength(0)
+    for (const keyframes of 塊) {
+      for (const [, 名前] of keyframes.matchAll(/^\s*([a-z-]+)\s*:/gm)) {
+        // キーフレームの中の `animation-timing-function` は区間の緩急の指定で、
+        // 何かを動かす宣言ではない
+        if (名前 === 'animation-timing-function') continue
+        expect(許す).toContain(名前)
+      }
     }
+  })
+
+  it('較正：キーフレームを塊ごと拾えている', () => {
+    // 上の検査は「宣言が1つも拾えていない」と空振りする。名前で数えて確かめる
+    const 塊 = 素のCSS().match(/@keyframes\s+[\w-]+\s*\{[\s\S]*?\n\}/g) ?? []
+    expect(塊.map((k) => /@keyframes\s+([\w-]+)/.exec(k)?.[1]).sort()).toEqual([
+      'roam-drift',
+      'roam-fade',
+      'roam-paper',
+    ])
+    // 停留点10ぶんの座標を読んでいること（`lib/roam.ts` の `ROAM_STOPS` と揃う）
+    for (let i = 0; i < 10; i += 1) {
+      expect(素のCSS()).toContain(`var(--roam-x${i})`)
+    }
+    // ③の転回。**座標を止めたまま向きだけ1周する**ので、専用の変数を読む
+    expect(素のCSS()).toContain('var(--roam-turn)')
+  })
+
+  it('尺取り虫を scale で作る', () => {
+    // **`width` で作ると版組をやり直させる**（設計§9-0）。上の白リストが
+    // `width` を弾くので二重に守られるが、**「作ってある」ことは別に見る**
+    // ——キーフレームごと消しても白リストは通ってしまう
+    const 紙 = /@keyframes\s+roam-paper\s*\{[\s\S]*?\n\}/.exec(素のCSS())?.[0] ?? ''
+    expect(紙).toContain('scale: 0 1')
+  })
+
+  it('濃さはカードから配られる。固定値を書かない', () => {
+    // フェーズ8 が「同じ状態はどこでも同じ色で出る」を台帳にしたのに、回遊の線
+    // だけ `--roam-peak: 0.5` の固定値で塗っていた（カード設計§9-7）
+    expect(素のCSS()).not.toContain('--roam-peak')
+    const 淡 = /@keyframes\s+roam-fade\s*\{[\s\S]*?\n\}/.exec(素のCSS())?.[0] ?? ''
+    expect(淡).toContain('var(--roam-ink)')
+  })
+
+  it('filter を1箇所も書かない', () => {
+    // 同時に最大10本へ常時掛かると、この設計でいちばん高くつく（設計§9-7-3）
+    expect(素のCSS()).not.toContain('filter')
+  })
+
+  it('紙片はブロックとして置く', () => {
+    // **書かないと `scale` が黙って一切効かない。** CSS Transforms 1 の
+    // transformable element は非置換インラインを除外する
+    const 紙 = 全規則.filter((rule) => rule.selector.trim() === '.roam-paper')
+    expect(紙).toHaveLength(1)
+    expect(紙[0].body).toContain('display: block')
   })
 
   it('飛ぶ時間を CSS 側に書かない', () => {
     // **秒数の出どころは層（TSX）1箇所。** ここへ書くと、寿命のタイマと見た目の
-    // 長さが別々に育って食い違う
-    const 線 = 全規則.filter((rule) => rule.selector.trim() === '.roam-line')
-    expect(線).toHaveLength(1)
-    expect(線[0].body).not.toMatch(/animation-duration/)
-    expect(線[0].body).not.toMatch(/animation:\s*[^;]*\d+m?s/)
+    // 長さが別々に育って食い違う。**内側にも同じ約束が掛かる**
+    for (const 名 of ['.roam-line', '.roam-paper']) {
+      const 規則 = 全規則.filter((rule) => rule.selector.trim() === 名)
+      expect(規則).toHaveLength(1)
+      expect(規則[0].body).not.toMatch(/animation-duration/)
+      expect(規則[0].body).not.toMatch(/animation:\s*[^;]*\d+m?s/)
+    }
   })
 })
 
@@ -162,9 +228,13 @@ describe('止める道', () => {
       const 規則 = 当たる(`[data-quiet='${段}']`)
       expect(規則).not.toHaveLength(0)
       for (const rule of 規則) {
-        expect(rule.selector).toContain('.roam-line')
         expect(rule.body).toContain('animation: none')
       }
+      // **内側にも当てる。** `animation` は継承しないので、外側だけ止めると
+      // `.roam-paper` は回り続ける——外が透明で見えないだけで、止まっていない
+      const 当たり先 = 規則.flatMap((rule) => rule.selector.split(','))
+      expect(当たり先.some((s) => s.includes('.roam-line'))).toBe(true)
+      expect(当たり先.some((s) => s.includes('.roam-paper'))).toBe(true)
     }
   })
 
@@ -176,6 +246,9 @@ describe('止める道', () => {
       expect(rule.body).toContain('animation: none')
       expect(rule.selector).not.toContain('data-quiet')
     }
+    const 当たり先 = 減らす.flatMap((rule) => rule.selector.split(','))
+    expect(当たり先.some((s) => s.includes('.roam-line'))).toBe(true)
+    expect(当たり先.some((s) => s.includes('.roam-paper'))).toBe(true)
   })
 
   it('打ち消しが、止める対象より後ろに書いてある', () => {
