@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 import { archiveAll, fireHook, openDashboard, openSession, spawnSession } from './helpers'
+import { ROAM_MAX } from '../src/stores/roam'
 
 /**
  * 画面を回遊する効果線（カード設計§9-7）。
@@ -78,7 +79,7 @@ test('跳ねるたびに線が飛び、しばらく画面に居る', async ({ pa
   // **控えめな量**（利用者の指定）。1回の跳ねで3本しか出ない
   const 本数 = await page.getByTestId('roam-line').count()
   expect(本数).toBeGreaterThanOrEqual(3)
-  expect(本数).toBeLessThanOrEqual(10)
+  expect(本数).toBeLessThanOrEqual(ROAM_MAX)
 
   // **線の中には紙片が1枚だけ入る**（設計§9-7-2）。外は「道と向き」、内は
   // 「紙のたわみ」で、内側が無いと尺取り虫もひらひらも1つも動かない

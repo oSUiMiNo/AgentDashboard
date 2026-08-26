@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { ROAM_STOPS } from '@/lib/roam'
+import { ROAM_STOPS, roamSpans } from '@/lib/roam'
 import { ROAM_LIFE_MS } from '@/stores/roam'
 
 /**
@@ -169,9 +169,10 @@ describe('層は場所を取らず、何も塗らない', () => {
     // 上の検査は「宣言が1つも拾えていない」と空振りする。名前で数えて確かめる
     const 塊 = 素のCSS().match(/@keyframes\s+[\w-]+\s*\{[\s\S]*?\n\}/g) ?? []
     expect(塊.map((k) => /@keyframes\s+([\w-]+)/.exec(k)?.[1]).sort()).toEqual([
+      'roam-birth',
       'roam-drift',
       'roam-fade',
-      'roam-paper',
+      'roam-flutter',
     ])
     // 停留点ぶんの座標を読んでいること（`lib/roam.ts` の `ROAM_STOPS` と揃う）
     for (let i = 0; i < ROAM_STOPS; i += 1) {
@@ -195,6 +196,9 @@ describe('層は場所を取らず、何も塗らない', () => {
       形は「上辺を左から右へ、下辺を右から左へ」の順に並べてあるので、**i 番目と
       末尾から i 番目が同じ x を持つ**。その隔たりが太さになる。**先細りへ戻すと
       両端の太さが落ちて**ここが落ちる。
+
+      **中心線のたわみは、この検査では捕まらない**（上下が同位相で動くので太さは
+      変わらない）。たわみは次の検査が別に見る。
     */
     for (const 形 of [0, 1, 2]) {
       const [規則] = 当たる(`[data-shape='${形}']`)
@@ -214,9 +218,88 @@ describe('層は場所を取らず、何も塗らない', () => {
         expect(下.x).toBe(上.x)
         太さ.push(下.y - 上.y)
       }
-      // **端をわずかに細める（ペン先の入りと抜き）以上には変えない**
-      expect(Math.min(...太さ)).toBeGreaterThan(45)
+      /*
+        **床は「インクの太さの 0.75 倍」から引いてある。** 箱は 30×7px でインクは
+        3.5px（＝50%）なので 37.5%。端は 40% まで細めてあり（ペン先の入りと抜き）、
+        **それ以上細めると「線」ではなく「木の葉」へ戻る**。
+
+        マジックナンバーを置かない——前の版の 45 はインクが 5px（71.4%）だった頃の値で、
+        **なぜ 45 なのかがどこにも書かれていなかった**。
+      */
+      const インク = 50
+      expect(Math.min(...太さ)).toBeGreaterThan(インク * 0.75)
       expect(Math.max(...太さ) / Math.min(...太さ)).toBeLessThan(1.4)
+
+      // **端は丸い**（ペン先の入りと抜き。要件6）。真ん中より細くなっていること
+      // ——一定の太さで切りっぱなしにすると、ここが落ちる
+      const 真ん中 = 太さ[Math.floor(太さ.length / 2)]
+      expect(太さ[0]).toBeLessThan(真ん中)
+      expect(太さ[太さ.length - 1]).toBeLessThan(真ん中)
+    }
+  })
+
+  it('中心線がたわむ＝つたない手書きに見える', () => {
+    /*
+      **これが「デジタル手書きペンのつたない線」を守っている検査である**（要件6・
+      参考画像 `効果線の書体.png`）。
+
+      前の版は上辺と下辺が**独立に**揺れており、**太さだけが変わって中心線はほぼ
+      真っ直ぐ**——だから「定規で引いた帯」に見えていた（0.1.40 を実物で見た
+      利用者の指摘）。**上下を同位相でずらす**と、太さが一定のまま中心線が波打つ。
+
+      **上下独立の揺れへ戻すと、中心線の振れが小さくなって落ちる。**
+    */
+    for (const 形 of [0, 1, 2]) {
+      const [規則] = 当たる(`[data-shape='${形}']`)
+      const 点 = [...規則.body.matchAll(/(-?[\d.]+)%\s+(-?[\d.]+)%/g)].map((m) => ({
+        x: Number(m[1]),
+        y: Number(m[2]),
+      }))
+      const 中心: number[] = []
+      for (let i = 0; i < 点.length / 2; i += 1) {
+        中心.push((点[i].y + 点[点.length - 1 - i].y) / 2)
+      }
+      // 箱は 7px なので、% の振れ × 7 ÷ 100 が px の振れ。**1〜2px たわませる**指定
+      const 振れ = ((Math.max(...中心) - Math.min(...中心)) * 7) / 100
+      expect(振れ).toBeGreaterThan(2)
+      expect(振れ).toBeLessThan(4)
+    }
+  })
+
+  it('3種は、たわみ方が違う', () => {
+    // **同じ線が3本並ぶと手描きに見えない**（設計§9-7-6）。太さは揃えたので、
+    // 見分けが付く唯一の手掛かりが中心線の形になった
+    const 形たち = [0, 1, 2].map((形) => {
+      const [規則] = 当たる(`[data-shape='${形}']`)
+      const 点 = [...規則.body.matchAll(/(-?[\d.]+)%\s+(-?[\d.]+)%/g)].map((m) => Number(m[2]))
+      const 中心: number[] = []
+      for (let i = 0; i < 点.length / 2; i += 1) 中心.push((点[i] + 点[点.length - 1 - i]) / 2)
+      return 中心.map((v) => v.toFixed(1)).join(',')
+    })
+    expect(new Set(形たち).size).toBe(3)
+  })
+
+  it('キーフレームの % が、区間の道のりに比例している', () => {
+    /*
+      **これが「角で減速しない」を CSS 側で守っている検査である**（設計§9-7-9）。
+
+      経路の停留点は**等距離ではない**——飛散と回遊は 56px、巻きは 6〜17px。
+      % を等間隔に置くと**巻きだけ 4倍遅く**なるので、% は道のりに比例させてある。
+
+      **`lib/roam.ts` の `roamSpans()` が唯一の出どころ**で、ここはそれを写した
+      静的な表が実物と合っているかを見る。**寿命・区間長・巻きの形のどれを変えても、
+      CSS を引き直すまでここが落ちる**——手で書いた61ブロックを守る唯一の道である。
+    */
+    const 塊 = /@keyframes\s+roam-drift\s*\{[\s\S]*?\n\}/.exec(素のCSS())?.[0] ?? ''
+    const 実際 = [...塊.matchAll(/^\s*([\d.]+)%\s*\{/gm)].map((m) => Number(m[1]))
+    expect(実際).toHaveLength(ROAM_STOPS)
+
+    const 道のり = roamSpans()
+    const 総 = 道のり.reduce((和, x) => 和 + x, 0)
+    let 積 = 0
+    const 狙い = [0, ...道のり.map((x) => ((積 += x) / 総) * 100)]
+    for (const [i, v] of 実際.entries()) {
+      expect(Math.abs(v - 狙い[i])).toBeLessThan(0.01)
     }
   })
 
@@ -225,14 +308,34 @@ describe('層は場所を取らず、何も塗らない', () => {
       **うごくメモ帳のような手描きアニメの質感**を、なめらかさを削って出す
       （利用者の指定・2026-08-26。設計§9-7-7）。
 
-      `steps()` は**キーフレームの区間ごと**に効くので、コマ数は
-      「段数 × 区間の数 ÷ 寿命（秒）」になる。**停留点の数か寿命を変えたら、
-      段数も引き直すこと**——ここが、引き直し忘れを捕まえる。
+      `steps()` は**キーフレームの区間ごと**に効く。**% が弧長比例になったので区間の
+      実時間は2種類ある**（設計§9-7-9）——56px の区間は 0.96秒、巻きの区間は
+      0.10〜0.28秒。**1つの段数では揃わない**ので、既定を `.roam-line` に置き、
+      巻きの区間だけキーフレームの側で上書きしてある。
+
+      見るのは2つ。**全体のコマ数**（総和 ÷ 寿命）と、**区間ごとの段数が道のりから
+      引いた値と一致すること**。後者があるので、**寿命や区間長を変えたら引き直すまで
+      落ちる**。
     */
     const [線] = 当たる('.roam-line')
-    const 段 = /steps\((\d+)\)/.exec(線.body)?.[1]
-    expect(段).toBeDefined()
-    const コマ = (Number(段) * (ROAM_STOPS - 1)) / (ROAM_LIFE_MS / 1000)
+    const 既定 = Number(/steps\((\d+)\)/.exec(線.body)?.[1])
+    expect(既定).toBeGreaterThan(0)
+
+    const 塊 = /@keyframes\s+roam-drift\s*\{[\s\S]*?\n\}/.exec(素のCSS())?.[0] ?? ''
+    // 停留点ごとの塊へ割って、そこに上書きの段数があれば拾う（無ければ既定）
+    const 区切り = 塊.split(/^\s*[\d.]+%\s*\{/gm).slice(1)
+    expect(区切り).toHaveLength(ROAM_STOPS)
+    const 段たち = 区切り
+      .slice(0, ROAM_STOPS - 1)
+      .map((塊) => Number(/steps\((\d+)\)/.exec(塊)?.[1] ?? 既定))
+
+    const 道のり = roamSpans()
+    const 速さ = 道のり.reduce((和, x) => 和 + x, 0) / (ROAM_LIFE_MS / 1000)
+    for (const [i, 段] of 段たち.entries()) {
+      expect(段).toBe(Math.max(1, Math.round((12 * 道のり[i]) / 速さ)))
+    }
+
+    const コマ = 段たち.reduce((和, x) => 和 + x, 0) / (ROAM_LIFE_MS / 1000)
     expect(コマ).toBeGreaterThan(10)
     expect(コマ).toBeLessThan(15)
   })
@@ -241,8 +344,26 @@ describe('層は場所を取らず、何も塗らない', () => {
     // **`width` で作ると版組をやり直させる**（設計§9-0）。上の白リストが
     // `width` を弾くので二重に守られるが、**「作ってある」ことは別に見る**
     // ——キーフレームごと消しても白リストは通ってしまう
-    const 紙 = /@keyframes\s+roam-paper\s*\{[\s\S]*?\n\}/.exec(素のCSS())?.[0] ?? ''
-    expect(紙).toContain('scale: 0 1')
+    const 生 = /@keyframes\s+roam-birth\s*\{[\s\S]*?\n\}/.exec(素のCSS())?.[0] ?? ''
+    expect(生).toContain('scale: 0 1')
+  })
+
+  it('ひらひらは停留点の数から切り離してある', () => {
+    /*
+      **前の版はひらひらの谷を停留点の中間へ置いており、% が `ROAM_STOPS` に紐づいて
+      いた**（設計§9-7-9）。停留点が 32→61 に増え、さらに % が弧長比例になったので、
+      同じ書き方だと**61ブロックへ膨らみ、しかも「区間の中間」の意味が失われる**。
+
+      ひらひらは道のりではなく**時間**の話なので、自分の周期を持たせてある。
+      **停留点の数へ紐づけ直すと、ここが落ちる。**
+    */
+    const 翻 = /@keyframes\s+roam-flutter\s*\{[\s\S]*?\n\}/.exec(素のCSS())?.[0] ?? ''
+    expect(翻).toContain('scale: 1 0.65')
+    // 谷は1つだけ。停留点ぶん刻んであれば、ここが桁で増える
+    expect([...翻.matchAll(/scale:/g)]).toHaveLength(3)
+    // **後ろが勝つ。** 生まれの間だけ尺取り虫が翻りを上書きする
+    const [紙] = 当たる('.roam-paper')
+    expect(紙.body).toContain('animation-name: roam-flutter, roam-birth')
   })
 
   it('濃さはカードから配られる。固定値を書かない', () => {

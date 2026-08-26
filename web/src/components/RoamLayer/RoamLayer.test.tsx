@@ -2,7 +2,13 @@ import { render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { RoamLayer } from '@/components/RoamLayer/RoamLayer'
 import { ROAM_STOPS } from '@/lib/roam'
-import { emitRoam, resetRoam } from '@/stores/roam'
+import {
+  ROAM_BIRTH_MS,
+  ROAM_FLUTTER_MS,
+  ROAM_LIFE_MS,
+  emitRoam,
+  resetRoam,
+} from '@/stores/roam'
 import { useSettingsStore } from '@/stores/settings'
 
 /**
@@ -99,8 +105,11 @@ describe('回遊の層', () => {
     for (const [i, 一枚] of 紙.entries()) {
       expect(一枚.parentElement).toBe(線[i])
       expect(一枚).toHaveAttribute('data-shape')
-      // **内側にも秒数を渡す。** 出どころを1つに保つ約束は内側にも掛かる
-      expect((一枚 as HTMLElement).style.animationDuration).toContain('15000ms')
+      // **内側にも秒数を渡す。** 出どころを1つに保つ約束は内側にも掛かる。
+      // 内は寿命ではなく**ひらひらの周期と尺取り虫の長さ**（設計§9-7-9）
+      expect((一枚 as HTMLElement).style.animationDuration).toBe(
+        `${ROAM_FLUTTER_MS}ms, ${ROAM_BIRTH_MS}ms`,
+      )
     }
   })
 
@@ -109,8 +118,8 @@ describe('回遊の層', () => {
     // 別々に育って食い違う（線が消える前に見えなくなる／消えたあとも残る）
     emitRoam(種)
     render(<RoamLayer />)
-    expect(screen.getAllByTestId('roam-line')[0].style.animationDuration).toContain(
-      '15000ms',
+    expect(screen.getAllByTestId('roam-line')[0].style.animationDuration).toBe(
+      `${ROAM_LIFE_MS}ms, ${ROAM_LIFE_MS}ms`,
     )
   })
 })

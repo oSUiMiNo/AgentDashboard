@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   MARGIN,
+  ROAM_FLING,
   ROAM_LOOP,
   ROAM_STEP,
   ROAM_STOPS,
@@ -53,6 +54,21 @@ function 区間(経路: { x: number; y: number }[], i: number): number {
   return Math.hypot(経路[i + 1].x - 経路[i].x, 経路[i + 1].y - 経路[i].y)
 }
 
+/**
+ * 回遊してよい範囲。**実装（`範囲()`）と同じ手順を、テスト側でも独立に組み立てる。**
+ *
+ * 実装から export して使い回すと「同じ式を2回書いただけ」になり、**間違いも一緒に
+ * 写る**。ここは矩形の合併 ∩ 場の余白の内側、という定義のほうから引き直している。
+ */
+function 範囲(): { 左: number; 右: number; 上: number; 下: number } {
+  return {
+    左: Math.max(MARGIN, Math.min(...FIELD.rects.map((r) => r.x - 6))),
+    右: Math.min(FIELD.width - MARGIN, Math.max(...FIELD.rects.map((r) => r.x + r.w + 6))),
+    上: Math.max(MARGIN, Math.min(...FIELD.rects.map((r) => r.y - 6))),
+    下: Math.min(FIELD.height - MARGIN, Math.max(...FIELD.rects.map((r) => r.y + r.h + 6))),
+  }
+}
+
 /** 輪の点の添字。**印は実装が付けるので、較正のテストが別に要る**（下記） */
 function 輪の添字(経路: { loop?: boolean }[]): number[] {
   return 経路.map((点, i) => (点.loop === true ? i : -1)).filter((i) => i >= 0)
@@ -89,25 +105,54 @@ describe('回遊の経路', () => {
 
       **輪（③）は通路の上に無い。** 円周を描くのだから当然で、ここでは見ない。
     */
+    // **範囲（カードのある場所）で挟む。** 実装と同じ手順を踏まないと、はみ出した
+    // 通路の値がテスト側にだけ残って空振りする
+    const 域 = 範囲()
+    const 挟む = (v: number, 下: number, 上: number): number => Math.min(上, Math.max(下, v))
     const xs = new Set<number>()
     const ys = new Set<number>()
     for (const r of FIELD.rects) {
-      xs.add(Math.round(r.x - 6))
-      xs.add(Math.round(r.x + r.w + 6))
-      ys.add(Math.round(r.y - 6))
-      ys.add(Math.round(r.y + r.h + 6))
+      xs.add(Math.round(挟む(r.x - 6, 域.左, 域.右)))
+      xs.add(Math.round(挟む(r.x + r.w + 6, 域.左, 域.右)))
+      ys.add(Math.round(挟む(r.y - 6, 域.上, 域.下)))
+      ys.add(Math.round(挟む(r.y + r.h + 6, 域.上, 域.下)))
     }
-    // 場の縁も道になる
-    xs.add(MARGIN)
-    xs.add(FIELD.width - MARGIN)
-    ys.add(MARGIN)
-    ys.add(FIELD.height - MARGIN)
+    // **場の縁は道にしない**（要件3）。立てると、カードが1枚も無い空き地にも道ができる
 
     for (const seed of [1, 2, 3, 17, 99]) {
       const 経路 = planRoute(FIELD, seed)
       const 輪 = 輪の添字(経路)
       for (const 点 of 経路.slice(輪[輪.length - 1])) {
         expect(xs.has(点.x) || ys.has(点.y)).toBe(true)
+      }
+    }
+  })
+
+  it('経路は、カードのある場所からはみ出さない', () => {
+    /*
+      **これが要件3「回遊してよいのはカードやグループの枠がある範囲だけ」を守っている
+      検査である。**
+
+      前の版は場の縁からも通路を立てていたので、**カードが1枚も無い空き地（一覧の下）
+      まで縫って回っていた**——そこに枠は無いのに枠沿いに見える動きをしていた
+      （0.1.40 を実物で見た利用者の指摘）。
+
+      **場そのものへ戻すと落ちる。** `FIELD` はわざと縦に余らせてあり（高さ 900 に対して
+      グループは 340 まで）、**空き地を通れば必ずここに掛かる**。
+
+      巻きも飛散も含めて見る——`MARGIN` の箱は最後の砦（スクロール範囲の押し広げ防止）
+      であって、範囲の代わりにはならない。
+    */
+    const 域 = 範囲()
+    // 較正：**範囲は場より狭い**（同じなら、この検査は「場の内側」と区別が付かない）
+    expect(域.下).toBeLessThan(FIELD.height - MARGIN - 100)
+
+    for (const seed of [1, 2, 3, 17, 42, 99]) {
+      for (const 点 of planRoute(FIELD, seed)) {
+        expect(点.x).toBeGreaterThanOrEqual(域.左 - 0.01)
+        expect(点.x).toBeLessThanOrEqual(域.右 + 0.01)
+        expect(点.y).toBeGreaterThanOrEqual(域.上 - 0.01)
+        expect(点.y).toBeLessThanOrEqual(域.下 + 0.01)
       }
     }
   })
@@ -129,37 +174,97 @@ describe('回遊の経路', () => {
     }
   })
 
-  it('輪の点は、ある中心から等しい隔たりにある', () => {
+  it('巻きは小さく、線が自分と交差する', () => {
     /*
-      ③の転回。**位置が円周を1周する**（設計§9-7-7 B）。
+      **これが「その場で小さく巻く」を守っている検査である**（要件1・設計§9-7-9）。
 
-      前の版は座標を止めて `rotate` だけ 360度 回しており、**プロペラに見えていた**
-      （0.1.39 を実物で見た利用者の指摘）。その形へ戻すと輪の点が全部同じ座標になり、
-      **半径 0 に潰れて**ここが落ちる。
+      前の版は**直径 146px の円を1周**しており、実物では「大きく回り込んでいる」ように
+      見えて**紐が巻いたようには読めなかった**（0.1.40 を実物で見た利用者の指摘）。
+      円は**接するだけで交差しない**ことも、参考画像（`効果線のまわり方.png`）との
+      決定的な違いだった。
+
+      いまはトロコイド——**進みながら1周する**ので、`b > a` である限り必ず1回交差する。
+      **大きな円へ戻すと「小さい」が落ち、前進を 0 にすると「交差する」が落ちる。**
     */
+    const 交わる = (
+      p1: { x: number; y: number },
+      p2: { x: number; y: number },
+      p3: { x: number; y: number },
+      p4: { x: number; y: number },
+    ): boolean => {
+      const 分母 = (p2.x - p1.x) * (p4.y - p3.y) - (p2.y - p1.y) * (p4.x - p3.x)
+      if (Math.abs(分母) < 1e-9) return false
+      const s = ((p3.x - p1.x) * (p4.y - p3.y) - (p3.y - p1.y) * (p4.x - p3.x)) / 分母
+      const t = ((p3.x - p1.x) * (p2.y - p1.y) - (p3.y - p1.y) * (p2.x - p1.x)) / 分母
+      return s > 1e-9 && s < 1 - 1e-9 && t > 1e-9 && t < 1 - 1e-9
+    }
+
     for (const seed of [1, 2, 3, 17, 99]) {
       const 経路 = planRoute(FIELD, seed)
-      const 輪 = 輪の添字(経路).map((i) => 経路[i])
-      const 中心 = 輪.reduce(
-        (和, 点) => ({ x: 和.x + 点.x / 輪.length, y: 和.y + 点.y / 輪.length }),
-        { x: 0, y: 0 },
-      )
-      const 隔たり = 輪.map((点) => Math.hypot(点.x - 中心.x, 点.y - 中心.y))
-      // 円周上の点の重心は中心なので、どれも同じ距離になる
-      expect(Math.min(...隔たり)).toBeGreaterThan(ROAM_STEP / 2)
-      expect(Math.max(...隔たり) - Math.min(...隔たり)).toBeLessThan(0.5)
+      const 輪 = 輪の添字(経路)
+      // 入口（飛散の着地）から出口まで。**交差は入口の側の区間と絡む**ので入口を含める
+      const 巻き = 経路.slice(輪[0] - 1, 輪[輪.length - 1] + 1)
+
+      // **小さい。** 前の版は入口から 146px 離れる点があった
+      const 広がり = Math.max(...巻き.map((点) => Math.hypot(点.x - 巻き[0].x, 点.y - 巻き[0].y)))
+      expect(広がり).toBeLessThan(ROAM_STEP * 1.5)
+
+      // **交差する。** 円をなぞって戻る形（＝接するだけ）へ戻すと 0 になる
+      let 交差 = 0
+      for (let i = 0; i < 巻き.length - 1; i += 1) {
+        for (let j = i + 2; j < 巻き.length - 1; j += 1) {
+          if (交わる(巻き[i], 巻き[i + 1], 巻き[j], 巻き[j + 1])) 交差 += 1
+        }
+      }
+      expect(交差).toBeGreaterThan(0)
+
+      /*
+        **巻いている間も前へ進んでいる**（要件1「進みは止まらない」）。
+
+        交差の検査だけでは足りない——**その場で円を描いて最後だけ出口へ飛ぶ**形にすると、
+        飛んだ辺が他の辺と交わって**交差の数は 1 のまま**になる（実測で踏んだ）。
+        真ん中の点が「前進のちょうど半分」あたりに居ることを見れば、その形は落ちる。
+      */
+      const 入口 = 巻き[0]
+      const 出口 = 巻き[巻き.length - 1]
+      const 前 = { x: 出口.x - 入口.x, y: 出口.y - 入口.y }
+      const 長 = Math.hypot(前.x, 前.y)
+      const 半ば = 巻き[Math.floor(巻き.length / 2)]
+      const 進み =
+        ((半ば.x - 入口.x) * 前.x + (半ば.y - 入口.y) * 前.y) / (長 * 長)
+      expect(進み).toBeGreaterThan(0.3)
+      expect(進み).toBeLessThan(0.7)
     }
   })
 
-  it('輪は、入ってきた点へ戻る', () => {
-    // **半径を詰めるときに中心を動かすと、ここが落ちる。** 出口が入口とずれると、
-    // 回遊の1本目だけ軸に沿わない区間が生まれる（設計§9-7-7 B）
+  it('巻きの出口は、回遊の1区間ぶん先にある', () => {
+    /*
+      **巻きは回遊の1区間を置き換える**（設計§9-7-9）。入口へ戻る形（前の版）へ戻すと
+      隔たりが 0 になって落ちる。
+
+      この性質があるから、**巻きが挟まってもその先の経路は1ピクセルも変わらない**
+      ——出口は回遊が置いた点そのものなので、通路の上に居る。
+    */
     for (const seed of [1, 2, 3, 17, 99]) {
       const 経路 = planRoute(FIELD, seed)
       const 輪 = 輪の添字(経路)
       const 入口 = 経路[輪[0] - 1]
       const 出口 = 経路[輪[輪.length - 1]]
-      expect(Math.hypot(出口.x - 入口.x, 出口.y - 入口.y)).toBeLessThan(0.5)
+      const 前進 = Math.hypot(出口.x - 入口.x, 出口.y - 入口.y)
+      expect(前進).toBeGreaterThan(ROAM_STEP * 0.6)
+      expect(前進).toBeLessThan(ROAM_STEP * 1.4)
+      // **軸に沿って進む。** 斜めに出ると、その先の回遊が通路から浮く
+      expect(Math.abs(出口.x - 入口.x) < 0.01 || Math.abs(出口.y - 入口.y) < 0.01).toBe(true)
+    }
+  })
+
+  it('巻きが始まるのは、発生から1区間ぶん進んだところ', () => {
+    // **利用者の指定「線がまわるのは発生から1秒後」**（2026-08-26）。等速なので時刻は
+    // 道のりで決まる——1区間 56px ÷ 58.3px/秒 ＝ 0.96秒。
+    // 飛散を長くすると巻きが遅れるので、**ここが時刻の番人**になる
+    for (const seed of [1, 2, 3, 17, 99]) {
+      const 輪 = 輪の添字(planRoute(FIELD, seed))
+      expect(輪[0]).toBe(ROAM_FLING + 1)
     }
   })
 
@@ -181,13 +286,19 @@ describe('回遊の経路', () => {
     /*
       **これが「曲がり角で減速しない」を守っている検査である**（設計§9-7-7 C）。
 
-      キーフレームの % は等間隔なので、**区間の長さが揃えば速さも揃う**。前の版は
-      距離を見ずに点を置いており、短い区間と長い区間で 3〜10倍 の開きがあった
+      前の版は距離を見ずに点を置いており、短い区間と長い区間で 3〜10倍 の開きがあった
       ——それが「角で減速する」の実体だった。時間等分へ戻すとここが落ちる。
+
+      **巻きの区間には当てない**（設計§9-7-9）。巻きは 6〜17px の短い区間でできており、
+      **キーフレームの % を弧長に比例させることで速さを揃えている**——長さで揃える
+      のではない。「角で減速しない」は**回遊についての約束**である。
     */
     for (const seed of [1, 2, 3, 17, 42, 99]) {
       const 経路 = planRoute(FIELD, seed)
-      const 長さ = [...Array(経路.length - 1).keys()].map((i) => 区間(経路, i))
+      const 輪 = 輪の添字(経路)
+      const 長さ = [...Array(経路.length - 1).keys()]
+        .filter((i) => i < 輪[0] - 1 || i >= 輪[輪.length - 1])
+        .map((i) => 区間(経路, i))
       expect(Math.max(...長さ) / Math.min(...長さ)).toBeLessThan(2)
       // 較正：**そもそも動いている**（全部 0 なら比は NaN で素通りしうる）
       expect(Math.min(...長さ)).toBeGreaterThan(ROAM_STEP / 3)
