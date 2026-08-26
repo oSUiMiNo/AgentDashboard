@@ -73,6 +73,12 @@ test.afterAll(() => {
 })
 
 test.afterEach(async ({ page }) => {
+  // **開閉と幅の記憶を既定へ戻してから片付ける。** 残ると次のテストへ漏れ、
+  // 症状は「別のテストがランダムに落ちる」になる（`project-files.spec.ts` と同じ扱い）
+  await page.evaluate(() => {
+    globalThis.localStorage?.removeItem('agentdashboard.project-files-open')
+    globalThis.localStorage?.removeItem('agentdashboard.project-files-width')
+  })
   await archiveAll(page)
 })
 
@@ -154,8 +160,8 @@ test('跨いだ配置でも、フォルダの一覧と中身が返る', async ({
   await panel.getByTestId('folder-entry').filter({ hasText: '計画.md' }).click()
 
   // 中身も返る。**大きさの上限が効くのはこの経路を守るため**（設計§7）
-  await expect(panel.getByTestId('file-view')).toBeVisible()
-  await expect(panel.getByRole('checkbox')).toBeChecked()
+  await expect(page.getByTestId('file-view')).toBeVisible()
+  await expect(page.getByRole('checkbox')).toBeChecked()
 })
 
 // ---------------------------------------------------------------------------

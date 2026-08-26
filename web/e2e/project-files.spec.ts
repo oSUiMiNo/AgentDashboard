@@ -165,6 +165,9 @@ test.afterEach(async ({ page }) => {
   // と同じ扱いで、残る側の状態は必ず戻す
   await page.evaluate(() => {
     globalThis.localStorage?.removeItem('agentdashboard.project-files-open')
+    // **幅も戻す。** 足さないと、幅を変えたテストが後続へ漏れる——症状は
+    // 「別のテストがランダムに落ちる」で、原因からいちばん遠いところに出る
+    globalThis.localStorage?.removeItem('agentdashboard.project-files-width')
   })
   await page.reload()
   await archiveAll(page)
@@ -199,7 +202,7 @@ test('左パネルを開き、ファイルを読み、相対パスをコピー�
   await panel.getByTestId('folder-entry').filter({ hasText: PLAN }).click()
 
   // 整形されて、進捗（チェックボックス）がそのまま読める
-  const view = panel.getByTestId('file-view')
+  const view = page.getByTestId('file-view')
   await expect(view).toBeVisible()
   const boxes = view.getByRole('checkbox')
   await expect(boxes).toHaveCount(2)
@@ -287,18 +290,18 @@ test('長い文書を末尾まで辿れる（整形と生テキストの両方�
   // 拍子にもう片方が伸び放題になっていないかを、同じ場所で見る
   await expectScrollable(panel.getByTestId('folder-browser').locator('ul'))
 
-  const body = panel.getByTestId('file-body')
+  const body = page.getByTestId('file-body')
 
   // 整形して見るとき
-  await expect(panel.getByTestId('file-markdown')).toBeVisible()
+  await expect(page.getByTestId('file-markdown')).toBeVisible()
   await expectScrollable(body)
   // **数だけでは「遡れた」と言い切れない。** 末尾の目印が実際に見えるところまで見る
-  await expect(panel.getByRole('heading', { name: TAIL })).toBeInViewport()
+  await expect(page.getByRole('heading', { name: TAIL })).toBeInViewport()
 
   // 生テキストで見るとき（**同じ箱の中で中身だけが入れ替わる**ので、片方だけ直る
   // 形にはならない。ただし「なるはず」で済ませずに、両方で測る）
-  await panel.getByTestId('file-toggle-raw').click()
-  await expect(panel.getByTestId('file-raw')).toBeVisible()
+  await page.getByTestId('file-toggle-raw').click()
+  await expect(page.getByTestId('file-raw')).toBeVisible()
   await expectScrollable(body)
 })
 
@@ -311,13 +314,13 @@ test('長い文書を末尾まで辿れる（整形と生テキストの両方�
 test('狭い画面でも、ファイルの中身を遡れる', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 780 })
   await openDashboard(page)
-  const panel = await openLongFile(page)
+  await openLongFile(page)
 
-  const body = panel.getByTestId('file-body')
-  await expect(panel.getByTestId('file-markdown')).toBeVisible()
+  const body = page.getByTestId('file-body')
+  await expect(page.getByTestId('file-markdown')).toBeVisible()
   await expectScrollable(body)
   // 下端が画面の外へ出ていないこと。**在るが届かない**を、位置まで見て否定する
-  await expect(panel.getByRole('heading', { name: TAIL })).toBeInViewport()
+  await expect(page.getByRole('heading', { name: TAIL })).toBeInViewport()
 })
 
 /**
@@ -337,7 +340,7 @@ async function openLongFile(page: Page) {
 
   await panel.getByTestId('folder-entry').filter({ hasText: 'MyDocs' }).click()
   await panel.getByTestId('folder-entry').filter({ hasText: LONG }).click()
-  await expect(panel.getByTestId('file-view')).toBeVisible()
+  await expect(page.getByTestId('file-view')).toBeVisible()
   return panel
 }
 
@@ -362,21 +365,21 @@ async function 開いて選ぶ(page: Page, name: string) {
 }
 
 test('画像が実際に描かれる', async ({ page }) => {
-  const panel = await 開いて選ぶ(page, PICTURE)
+  await 開いて選ぶ(page, PICTURE)
 
-  const image = panel.getByTestId('file-image')
+  const image = page.getByTestId('file-image')
   await expect(image).toBeVisible()
   // **要素が在ることを見ても足りない。** 描けていない画像も要素としては在る
   await expect
     .poll(async () => image.evaluate((el: HTMLImageElement) => el.naturalWidth))
     .toBeGreaterThan(0)
-  await expect(panel.getByTestId('file-meta')).toContainText('image/png')
+  await expect(page.getByTestId('file-meta')).toContainText('image/png')
 })
 
 test('理解doc と同じ作りの HTML が、箱の中で読める', async ({ page }) => {
-  const panel = await 開いて選ぶ(page, DOCUMENT)
+  await 開いて選ぶ(page, DOCUMENT)
 
-  const frame = panel.getByTestId('file-frame')
+  const frame = page.getByTestId('file-frame')
   await expect(frame).toBeVisible()
   await expect(frame).toHaveAttribute('sandbox', '')
 
@@ -402,9 +405,9 @@ test('理解doc と同じ作りの HTML が、箱の中で読める', async ({ p
 })
 
 test('SVG も箱の中で描かれる', async ({ page }) => {
-  const panel = await 開いて選ぶ(page, VECTOR)
+  await 開いて選ぶ(page, VECTOR)
 
-  await expect(panel.getByTestId('file-frame')).toHaveAttribute('sandbox', '')
+  await expect(page.getByTestId('file-frame')).toHaveAttribute('sandbox', '')
   const inside = page.frameLocator('[data-testid="file-frame"]')
   await expect
     .poll(async () =>
@@ -453,8 +456,8 @@ test('隔離が効く——script が動かず、外へも出ない', async ({ p
   fs.writeFileSync(材料, html, 'utf8')
 
   try {
-    const panel = await 開いて選ぶ(page, DANGEROUS)
-    await expect(panel.getByTestId('file-frame')).toBeVisible()
+    await 開いて選ぶ(page, DANGEROUS)
+    await expect(page.getByTestId('file-frame')).toBeVisible()
 
     const inside = page.frameLocator('[data-testid="file-frame"]')
     await expect(inside.locator('#印')).toHaveText('元のまま')
@@ -494,8 +497,8 @@ test('隔離が効く——script が動かず、外へも出ない', async ({ p
 test('sandbox 属性を外しても、ヘッダだけで script は止まる', async ({ page }) => {
   // **二重の鍵の、片方ずつ。** 属性を外して初めて、CSP の `sandbox` 指令が
   // 効いているかを言える（設計§6-1）
-  const panel = await 開いて選ぶ(page, DANGEROUS)
-  await expect(panel.getByTestId('file-frame')).toBeVisible()
+  await 開いて選ぶ(page, DANGEROUS)
+  await expect(page.getByTestId('file-frame')).toBeVisible()
 
   await page.evaluate(() => {
     const frame = document.querySelector<HTMLIFrameElement>(
@@ -514,13 +517,13 @@ test('sandbox 属性を外しても、ヘッダだけで script は止まる', a
 })
 
 test('壊れた画像でも画面は壊れない', async ({ page }) => {
-  const panel = await 開いて選ぶ(page, BROKEN)
+  await 開いて選ぶ(page, BROKEN)
 
   // **断られたのとは別の言い方**（サーバは読めているので断っていない）
-  await expect(panel.getByTestId('file-broken')).toContainText('画像として読めません')
-  await expect(panel.getByTestId('file-error')).toHaveCount(0)
+  await expect(page.getByTestId('file-broken')).toContainText('画像として読めません')
+  await expect(page.getByTestId('file-error')).toHaveCount(0)
   // 画面そのものは生きている（パスのコピーは今までどおり押せる）
-  await expect(panel.getByTestId('file-copy')).toBeVisible()
+  await expect(page.getByTestId('file-copy')).toBeVisible()
 })
 
 test('上限を超える画像は、理由と大きさが出る', async ({ page }) => {
@@ -529,12 +532,12 @@ test('上限を超える画像は、理由と大きさが出る', async ({ page 
   const huge = path.join(PROJECT_DIR, 'MyDocs', HUGE)
   fs.writeFileSync(huge, Buffer.alloc(8 * 1024 * 1024 + 1))
   try {
-    const panel = await 開いて選ぶ(page, HUGE)
-    const error = panel.getByTestId('file-error')
+    await 開いて選ぶ(page, HUGE)
+    const error = page.getByTestId('file-error')
     await expect(error).toBeVisible()
     await expect(error, '大きさが読めること').toContainText('8388609')
     // 描こうとしていないこと（断られた側の道を通っている）
-    await expect(panel.getByTestId('file-image')).toHaveCount(0)
+    await expect(page.getByTestId('file-image')).toHaveCount(0)
   } finally {
     // **その場で消す。** 8 MiB を置きっぱなしにしない
     fs.rmSync(huge, { force: true })
@@ -542,21 +545,21 @@ test('上限を超える画像は、理由と大きさが出る', async ({ page 
 })
 
 test('HTML でも生テキストと整形を行き来できる', async ({ page }) => {
-  const panel = await 開いて選ぶ(page, DOCUMENT)
-  await expect(panel.getByTestId('file-frame')).toBeVisible()
+  await 開いて選ぶ(page, DOCUMENT)
+  await expect(page.getByTestId('file-frame')).toBeVisible()
 
-  await panel.getByTestId('file-toggle-raw').click()
-  await expect(panel.getByTestId('file-raw')).toContainText('<h1 id="見出し">')
-  await expect(panel.getByTestId('file-frame')).toHaveCount(0)
+  await page.getByTestId('file-toggle-raw').click()
+  await expect(page.getByTestId('file-raw')).toContainText('<h1 id="見出し">')
+  await expect(page.getByTestId('file-frame')).toHaveCount(0)
 
-  await panel.getByTestId('file-toggle-raw').click()
-  await expect(panel.getByTestId('file-frame')).toBeVisible()
+  await page.getByTestId('file-toggle-raw').click()
+  await expect(page.getByTestId('file-frame')).toBeVisible()
 })
 
 test('狭い幅でも、画像と箱がページを横へはみ出させない', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 780 })
-  const panel = await 開いて選ぶ(page, PICTURE)
-  await expect(panel.getByTestId('file-image')).toBeVisible()
+  await 開いて選ぶ(page, PICTURE)
+  await expect(page.getByTestId('file-image')).toBeVisible()
 
   const widths = await page.evaluate(() => ({
     body: document.body.scrollWidth,
