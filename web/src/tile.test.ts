@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import { DISCONNECTED_INK_SCALE } from '@/lib/protocol'
 import { resolve } from 'node:path'
 
 /**
@@ -470,5 +471,63 @@ describe('濃さは1本の変数から配る', () => {
     const 接続断 = 当たる("[data-connected='false']")
     expect(接続断.length).toBeGreaterThanOrEqual(2)
     expect(接続断.some((r) => !r.selector.includes('.tile-body'))).toBe(true)
+  })
+
+  it('接続断が沈む割合は、CSS と TypeScript で同じ数字である', () => {
+    // **CSS からは TypeScript の定数を読めない**ので、一致は機械で見張るしかない
+    // （設計§9-7-10）。0.1.41 では CSS 側にしか無く、**放った線だけが沈まなかった**
+    const 規則 = 当たる("[data-connected='false']").find((r) =>
+      /--tile-ink:/.test(r.body),
+    )
+    expect(規則).toBeDefined()
+    expect(規則!.body).toContain(`* ${DISCONNECTED_INK_SCALE}`)
+  })
+})
+
+/**
+ * 停滞の見せ方（カード設計§9-7-10）。
+ *
+ * **停滞は作業中の弱い側**で、色は同じシアン。分けているのは**太さと濃さと速さ**なので、
+ * どれか1つでも外れると作業中と見分けが付かなくなる。
+ */
+describe('停滞は作業中の弱い側', () => {
+  it('輪の外側を地で塗って、見える太さを半分にする', () => {
+    // **切る枠の内側余白は動かさない。** そこを停滞だけ細くすると中身の幅が
+    // 状態によって変わり、作業中↔停滞のたびに②③行の文字が動く
+    const 細く = 当たる("[data-motion='spin-slow']").filter((r) =>
+      r.selector.includes('.tile-frame'),
+    )
+    expect(細く).toHaveLength(1)
+    expect(細く[0].body).toContain('inset')
+    expect(細く[0].body).toContain('var(--color-background)')
+    // 余白そのものを触っていないこと（触ると並びが動く）
+    expect(細く[0].body).not.toMatch(/(^|[^-])padding:/)
+  })
+
+  it('当て先に data-status を使わない', () => {
+    // `data-status` は**中身にしか無い**。器へ複製すると `[data-status=…]` で引いて
+    // いる E2E が2件に一致して壊れる——フェーズ7 で `data-card-id` を器と中身の
+    // 両方へ付け、`compose.spec.ts` が7本落ちたまま1か月気づかなかったのと同じ形
+    expect(素のCSS()).not.toContain('data-status')
+  })
+})
+
+/**
+ * 復旧ボタンの当たり判定（カード設計§7-4）。
+ *
+ * **0.1.41 まで、これを守るテストが単体にも E2E にも1本も無かった。** 実寸を変えた
+ * ときに床を割ったことに気づけるのは、`tile.css` のコメントを読んだ人だけだった。
+ */
+describe('復旧ボタンは指で押せる', () => {
+  it('当たり判定が 44px の床を割らない', () => {
+    // 見た目は 36×23px。判定は疑似要素を外へ広げて作る（ボタン自体を大きくすると
+    // カードの高さの半分を覆い、①②行の押し場所を食う）
+    const 判定 = 当たる('.tile-revive::after')
+    expect(判定).toHaveLength(1)
+    const inset = 判定[0].body.match(/inset:\s*(-?[\d.]+)px/)
+    expect(inset).not.toBeNull()
+    const 広げる = Math.abs(Number(inset![1]))
+    // 高さが先に床へ当たる。23 + 広げる×2 ≥ 44
+    expect(23 + 広げる * 2).toBeGreaterThanOrEqual(44)
   })
 })

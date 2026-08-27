@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { SessionTile } from './SessionTile'
 import type { SessionMeta, SessionStatus } from '@/lib/protocol'
-import { statusAccentColor } from '@/lib/protocol'
+import { statusAccentColor, statusInk } from '@/lib/protocol'
 import {
   applySessionSnapshot,
   clearSessions,
@@ -931,6 +931,39 @@ describe('跳ねるたびに、画面を回遊する線を放つ', () => {
     折り返す('tile-shake')
     for (const line of useRoamStore.getState().lines) {
       expect(line.accent).toBe(statusAccentColor({ kind: 'waiting_permission' }))
+    }
+  })
+
+  it('繋がっているカードの線は、輪と同じ濃さで出る', () => {
+    待つカードを描く()
+    折り返す('tile-shake')
+    const lines = useRoamStore.getState().lines
+    expect(lines.length).toBeGreaterThan(0)
+    for (const line of lines) {
+      expect(line.ink).toBe(statusInk({ kind: 'waiting_permission' }))
+    }
+  })
+
+  it('繋がっていないカードの線も、輪と同じだけ沈む', () => {
+    // **0.1.41 の壊れ方。** 減光は `tile.css` の `[data-connected='false']` にしか
+    // 無く、線へ濃さを渡す経路はあの CSS を通らないので、**輪とバーだけが沈んで
+    // 線が取り残されていた**（実測：枠 45% に対し線 75%。比はちょうど 0.6）
+    applySessionSnapshot([
+      meta({ status: { kind: 'waiting_permission' }, agent_connected: false }),
+    ])
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <div data-roam-field>
+          <SessionTile cardId={CARD} />
+        </div>
+      </MemoryRouter>,
+    )
+    折り返す('tile-shake')
+    const lines = useRoamStore.getState().lines
+    expect(lines.length).toBeGreaterThan(0)
+    for (const line of lines) {
+      expect(line.ink).toBe('45%')
+      expect(line.ink).not.toBe(statusInk({ kind: 'waiting_permission' }))
     }
   })
 })
