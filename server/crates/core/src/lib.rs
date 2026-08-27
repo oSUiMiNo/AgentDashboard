@@ -304,7 +304,9 @@ pub async fn serve_server(
                     },
                     ops: session_host_core::version_ops::detect(),
                     install: Arc::new(std::sync::Mutex::new(None)),
-                    stop: versions_api::exit_process(),
+                    // **落とすのではなく入れ替える。** 常駐に載っていない機械
+                    // （ソースビルド）では、落ちると誰も起こさない
+                    stop: versions_api::hand_over_process(config.agent().resolved_state_dir()),
                 })),
             Arc::clone(&auth),
         ));
@@ -538,7 +540,7 @@ pub async fn serve(config: Config, config_arg: Option<std::path::PathBuf>) -> an
                     })
                 })
             },
-            stop: versions_api::exit_process(),
+            stop: versions_api::hand_over_process(agent_config.resolved_state_dir()),
         });
     let listener = bind(&server_config).await?;
     // **待ち受けを確保できた時点で、乗り換えの印を消す**（CICD設計§11）。ここより後ろへ

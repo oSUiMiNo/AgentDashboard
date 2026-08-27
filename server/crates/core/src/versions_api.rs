@@ -63,6 +63,55 @@ pub fn exit_process() -> Stopper {
     Arc::new(|| std::process::exit(0))
 }
 
+/// **落とすのではなく、次に起きる版へ入れ替える**（`手元の新しい版をGUIだけで効かせる`
+/// 設計§7）。
+///
+/// # なぜ落とすだけでは足りなかったか
+///
+/// 起こし直しは常駐の設定（systemd の `Restart=always`）に任せる作りだったが、
+/// **ソースビルドの機械は常駐に載っていない**ので誰も起こさない。押すと画面ごと消えて
+/// 戻ってこないため、**押せるようにしても使えなかった。**
+///
+/// # 行き先が無ければ、今までどおり落ちる
+///
+/// 常駐に載っている構成（箱・systemd）では、落ちれば戻ってくる。**振る舞いを
+/// 変えない**ほうが安全なので、行き先を決められないときは `exit(0)` へ落とす。
+///
+/// # 入れ替えられなかったときは、**落ちずに生き残る**
+///
+/// 素直に書くと、`exec` に失敗したあと今までどおり `exit(0)` する。**そうしてはいけない。**
+///
+/// この道を作った理由が「**落ちても誰も起こさない機械がある**」ことなので、失敗して
+/// なお落ちると**最悪の結末**になる——版は変わらないまま、画面ごと消えて戻ってこない。
+/// 押す前より悪い。
+///
+/// 生き残れば、利用者は**古い版のまま操作を続けられる**し、理由が画面に残る。
+pub fn hand_over_process(state_dir: PathBuf) -> Stopper {
+    Arc::new(move || {
+        let Some(target) = version::next_binary(&state_dir) else {
+            // 行き先が分からない。今までどおり落ちて、常駐に任せる
+            std::process::exit(0)
+        };
+
+        // 成功すれば返らない（プロセスの中身が入れ替わる）
+        crate::boot::hand_over_now(&state_dir, &target);
+
+        // 返ってきた＝入れ替えられなかった。**落ちない。**
+        let reason = format!("入れ替えられませんでした: {}", target.display());
+        tracing::error!(target = %target.display(), "{reason}");
+        version::write_outcome(
+            &state_dir,
+            &version::Outcome {
+                attempted: None,
+                attempted_path: target.display().to_string(),
+                running: version::running_version(),
+                failed_reason: Some(reason),
+                at: session_host_core::session::now_ms(),
+            },
+        );
+    })
+}
+
 /// 記録へ聞けない構成のときの答え（設計§9）。
 ///
 /// **「聞けなかった」を「知らない形は無かった」に読み替えない。** 空の一覧を返すと
@@ -141,11 +190,38 @@ pub struct VersionsView {
     ///
     /// 配布物なら**その版が作られた時刻**、ソースビルドなら**自分がビルドした時刻**。
     pub binary_at: Option<protocol::Timestamp>,
+    /// 走っている実行ファイルの場所。
+    ///
+    /// **一覧の行から引かせない**（設計§3）。実機では走ってきた実体が消えているので、
+    /// どの行とも一致しない——行を探させると「不明」としか出せなくなる。
+    #[serde(default)]
+    pub running_path: Option<String>,
     /// このプロセスが起きた時刻。
     ///
     /// [`Self::binary_at`] と対で見る。**更新したのか、再起動しただけなのか**が
     /// この2つの差で分かる。
     pub started_at: protocol::Timestamp,
+
+    // --- ここから下は「手元の新しい版を GUI だけで効かせる」イシューで足したもの。
+    /// **いま起こし直したら、どれで立ち上がるか**（設計§4）。
+    ///
+    /// [`Self::selected`] は「予約があるか」しか答えない。**予約が無い機械
+    /// （ソースビルド）でも次に起きる版は在る**ので、画面が見るのはこちらである。
+    ///
+    /// **起動時の乗り換えと同じ関数**（`version::next_binary`）から作る。別々に
+    /// 組み立てると、画面が言った版と実際に立ち上がる版が食い違う。
+    #[serde(default)]
+    pub next_version: Option<VersionId>,
+    /// 次に起きる版の実行ファイルの場所。同じ版名の行を見分ける材料になる。
+    #[serde(default)]
+    pub next_path: Option<String>,
+    /// **走っているものと、次に起きるものが違うか**（設計§5）。
+    ///
+    /// **外を見に行かない。** 「新しい版が出ています」（[`Self::latest`]）とは別物で、
+    /// あちらは取ってくる相手が居ることの知らせ、こちらは**自分の足元**の話である。
+    /// ソースビルドの機械に要るのはこちらだけ（取ってくる相手が居ない）。
+    #[serde(default)]
+    pub next_differs: bool,
 }
 
 /// 取ってくる仕事の段階（設計§15）。
@@ -202,6 +278,14 @@ pub struct LatestView {
     pub has_artifact: bool,
     /// 最後に見に行った時刻。
     pub checked_at: protocol::Timestamp,
+}
+
+/// 走っている実行ファイルの場所（覚えた値から）。
+fn running_path() -> Option<String> {
+    version::running_binary()
+        .path
+        .as_ref()
+        .map(|path| path.display().to_string())
 }
 
 /// 記録から最新版を組み立てる。一度も読めていなければ `None`。
@@ -304,7 +388,12 @@ async fn build_view(state: &VersionsState, identity: &Identity) -> VersionsView 
             pointer_path,
             running: version::running_version(),
             binary_at: version::binary_at(),
+            running_path: running_path(),
             started_at: version::started_at(),
+            // 乗り換えられない構成なので、次に起きる版という概念が無い
+            next_version: None,
+            next_path: None,
+            next_differs: false,
         };
     }
 
@@ -320,6 +409,22 @@ async fn build_view(state: &VersionsState, identity: &Identity) -> VersionsView 
         .find(|entry| entry.selected)
         .map(|entry| entry.version.clone());
 
+    // **次に起きる版**（設計§4）。起動時の乗り換えと同じ関数から作る。
+    // 版名は一覧の行から引く——同じ実行ファイルを二度聞きに行かないため
+    let next_binary = version::next_binary(&state.state_dir);
+    let next_entry = next_binary.as_deref().and_then(|target| {
+        entries
+            .iter()
+            .find(|entry| version::same_path(std::path::Path::new(&entry.path), target))
+    });
+    let next_version = next_entry.map(|entry| entry.version.clone());
+    let next_differs = version::differs(
+        &version::running_version(),
+        version::running_binary(),
+        next_version.as_ref(),
+        next_binary.as_deref().and_then(version::built_at_of),
+    );
+
     VersionsView {
         supported,
         editable,
@@ -333,7 +438,11 @@ async fn build_view(state: &VersionsState, identity: &Identity) -> VersionsView 
         pointer_path,
         running: version::running_version(),
         binary_at: version::binary_at(),
+        running_path: running_path(),
         started_at: version::started_at(),
+        next_version,
+        next_path: next_binary.map(|path| path.display().to_string()),
+        next_differs,
     }
 }
 
@@ -535,6 +644,47 @@ async fn api_restart(
 ) -> Result<Json<VersionsView>, (StatusCode, String)> {
     if !may_operate(&state.auth, &identity) {
         return Err(refusal(&state.auth));
+    }
+
+    // **押す直前に、行き先へ問う**（`手元の新しい版をGUIだけで効かせる` 設計§8）。
+    //
+    // 門は予約を入れるときにも走るが、**予約を通らない道がある**——ソースビルドの機械は
+    // 予約を使わないので、押す道だけが門の外側にできてしまう。
+    //
+    // **予約時の1回では代わりにならない。** 予約してから押すまでの間にファイルが
+    // 置き換わりうるからで、実機ではそれが常態である。
+    //
+    // 実測：ゴミを置いた行き先へ `exec` すると、**失敗せずにシェルへ落ちてそのまま死ぬ**。
+    // 「失敗したら生き残る」では防げないので、**起こす前に断る**しかない。
+    // **2つを分けて扱う。** `decide` は「行き先が起動できない」と「記録の形を読めない」を
+    // 同じ `Err` にまとめるが、**塞いでよいのは前者だけ**——後者で断ると、記録へ聞けない
+    // 構成（`no_schemas`）で押す道が丸ごと無くなる。
+    if let Some(target) = version::next_binary(&state.state_dir) {
+        let asked = {
+            let target = target.clone();
+            let config_arg = state.config_arg.clone();
+            tokio::task::spawn_blocking(move || gate::ask(&target, config_arg.as_deref()))
+                .await
+                .map_err(|err| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("行き先に聞けませんでした: {err}"),
+                    )
+                })?
+        };
+        // ①起きるか・設定を読めるか。**ここが駄目なら絶対に起こさない**
+        let answers = asked.map_err(|reason| {
+            (
+                StatusCode::CONFLICT,
+                format!("この版では起動できないので入れ替えません: {reason}"),
+            )
+        })?;
+        // ②記録の形。聞けないときは**通す**（今までどおり）
+        if let Ok(applied) = (state.applied)().await
+            && let gate::Verdict::Refused { reason } = gate::judge(&answers, &applied)
+        {
+            return Err((StatusCode::CONFLICT, reason));
+        }
     }
 
     let view = build_view(&state, &identity).await;
