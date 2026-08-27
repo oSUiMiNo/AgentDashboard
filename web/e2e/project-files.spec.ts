@@ -193,7 +193,7 @@ test('左パネルを開き、ファイルを読み、相対パスをコピー�
   // セッションが0本でも「+」は出る（設計§14）
   await expect(page.getByTestId('spawn-open')).toBeVisible()
 
-  // ハンバーガーで左パネルが開く
+  // 切り替えボタンでサイドバーが開く
   await expect(page.getByTestId('project-files-panel')).toHaveCount(0)
   await page.getByTestId('project-files-toggle').click()
   const panel = page.getByTestId('project-files-panel')
@@ -724,7 +724,7 @@ test('下限より狭くも、上限より広くもできない', async ({ page 
   await openLongFile(page)
   const panel = page.getByTestId('project-files-panel')
 
-  // 思い切り左へ。**0 にはならない**——畳むのは ☰ の仕事（設計§4）
+  // 思い切り左へ。**0 にはならない**——畳むのは切り替えボタンの仕事（設計§4）
   await 縁を引く(page, 'folder', -2000)
   const 狭いとき = await 幅(panel)
   expect(狭いとき, '下限（10rem）で止まること').toBeCloseTo(160, 0)
@@ -801,9 +801,9 @@ test('狭い画面では、両方が全幅の層になり、縁は出ない', as
     **読むときだけ畳む**（設計§2）。ファイルを選んでもフォルダは閉じないので、
     これが狭い画面での普通の使い方になる。
 
-    **畳むのに押すのは ☰ ではなく「閉じる」。** 狭い画面ではオーバーレイが
-    `fixed inset-0` で全面を覆うので、ヘッダの ☰ はその下に隠れて押せない
-    ——だからこのボタンが在る（実際に ☰ を押して確かめたら、覆われていて
+    **畳むのに押すのは切り替えボタンではなく「閉じる」。** 狭い画面ではサイドバーが
+    `fixed inset-0` で全面を覆う**オーバーレイ**になるので、ヘッダの切り替えボタンは
+    その下に隠れて押せない——だからこのボタンが在る（実際に押して確かめたら、覆われていて
     畳めなかった）
   */
   await page.getByTestId('project-files-close').click()

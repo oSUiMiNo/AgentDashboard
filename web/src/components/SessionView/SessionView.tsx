@@ -210,13 +210,13 @@ export function SessionView({ cardId, compact = false }: Props) {
 
       {/*
         取り合いの器。**`relative` を足す**（PJT 専用画面と同じ理由。設計§2）——
-        フォルダのオーバーレイは広い画面で `absolute` になり、この箱を基準にする。
+        サイドバーは広い画面で `absolute` になり、この箱を基準にする。
         下の右列が持つ `relative isolate` はそのまま——あれは十字ボタンを端末の脇へ
         重ねるための基準で、こちらとは別の話
       */}
       <div className="relative flex min-h-0 flex-1 gap-4">
         {/*
-          **横並び（compact）では丸ごと出さない。** ☰ もオーバーレイも中身の列も
+          **横並び（compact）では丸ごと出さない。** サイドバーも中身の列も切り替えボタンも
           出さない——あちらは PJT 専用画面が既に持っており、宛先が一意でない操作を
           横並びに出さない、という既存の判断をそのまま引き継ぐ
         */}

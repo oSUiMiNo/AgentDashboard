@@ -140,7 +140,7 @@ describe('セッション専用画面のファイル', () => {
     vi.unstubAllGlobals()
   })
 
-  it('ハンバーガーで左パネルが開き、そのセッションの枠から始まる', async () => {
+  it('切り替えボタンでサイドバーが開き、そのセッションの枠から始まる', async () => {
     clearSessions()
     applySessionSnapshot([meta()])
     useSettingsStore.setState({ settings: settingsFixture(), loading: false, lastError: null })

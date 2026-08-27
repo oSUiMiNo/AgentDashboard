@@ -80,7 +80,7 @@ afterEach(() => {
 })
 
 describe('PJT 専用画面', () => {
-  it('ハンバーガーで左パネルが開閉する', async () => {
+  it('切り替えボタンでサイドバーが開閉する', async () => {
     show()
     expect(screen.queryByTestId('project-files-panel')).toBeNull()
 
@@ -133,7 +133,7 @@ describe('PJT 専用画面', () => {
     expect(panel.className).toContain('md:absolute')
     expect(panel.className).not.toContain('md:static')
     expect(panel.className).toContain('md:w-[var(--files-folder-w,20rem)]')
-    // 狭い画面用の閉じる操作がある（ハンバーガーが隠れる位置に来るため）
+    // 狭い画面用の閉じる操作がある（切り替えボタンが隠れる位置に来るため）
     expect(screen.getByTestId('project-files-close')).toBeInTheDocument()
   })
 
