@@ -1724,7 +1724,7 @@ async fn 打ち切られた要求へ遅れて届いた答えは黙って消え�
     let lines = 声(mark, "request_id", &id.to_string());
     assert_eq!(lines.len(), 1, "1行だけ出ること: {lines:#?}");
     assert_eq!(lines[0]["level"], "WARN");
-    // 中身は載せず種別だけ（設計§9-1。一覧 512 KiB・中身 256 KiB）
+    // 中身は載せず種別だけ（設計§9-1。一覧 512 KiB・中身 3 MiB）
     assert_eq!(lines[0]["kind"], "failed");
 }
 
@@ -1952,6 +1952,63 @@ async fn 上限いっぱいの画像が線を往復する() {
     // 全バイトを比べる。**長さだけ見ると、途中が化けても通る**
     assert_eq!(blob.data, body, "1バイトも化けていないこと");
     assert_eq!(blob.media_type, "image/png");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// 上限いっぱいの**テキスト**が、本物の線を往復する
+/// （`表示できるテキストの上限を3MBへ上げる`）。
+///
+/// **画像側にはこの1本が在ったが、テキスト側には無かった。** 上限が 256 KiB のうちは
+/// 気にする大きさではなかったが、3 MiB になったので画像と同じ理由でここが要る——
+/// 机上では「フレームの上限 16 MiB の内側」と言えても、**通ることは通してみないと
+/// 言えない**。
+///
+/// ついでに `HOST_FS_TIMEOUT`（5秒）も見ている。**この経路は時間切れを持っている**ので、
+/// 遅すぎれば往復そのものが `Timeout` で落ちる。かかった時間は印字して記録に残す
+/// （判定にはしない——載っている機械の混み具合で動くため）。
+#[tokio::test]
+async fn 上限いっぱいのテキストが線を往復する() {
+    let a2s = A2s::start("file-large").await;
+    let root = sample_tree(&a2s.dir);
+    let target = a2s.hub.online_of(a2s.account_id).await[0];
+
+    // **同じ字の繰り返しにしない。** JSON にするとき膨らむ字（引用符・バックスラッシュ・
+    // 改行・タブ）と多バイト字を混ぜておかないと、**エスケープの往復で化けても気づけない**。
+    // 最後は ASCII で埋めて、上限ちょうどのバイト数に合わせる
+    let size = protocol::fs::MAX_FILE_BYTES as usize;
+    let unit = "あ\"\\\n行\t";
+    let mut body = String::with_capacity(size + unit.len());
+    while body.len() + unit.len() <= size {
+        body.push_str(unit);
+    }
+    while body.len() < size {
+        body.push('a');
+    }
+    assert_eq!(body.len(), size, "材料が上限ちょうどであること");
+
+    let path = root.join("大きい.txt");
+    std::fs::write(&path, &body).expect("置けること");
+
+    let started = std::time::Instant::now();
+    let content = a2s
+        .browser
+        .read_file(
+            ask(a2s.account_id, Some(target)),
+            &path.display().to_string(),
+        )
+        .await
+        .expect("上限いっぱいでも往復すること");
+    let took = started.elapsed();
+
+    assert_eq!(content.bytes, size as u64);
+    assert_eq!(content.text.len(), size, "丸ごと届くこと");
+    // 全文を比べる。**長さだけ見ると、途中が化けても通る**
+    assert_eq!(content.text, body, "1バイトも化けていないこと");
+    // 上限の内側なので、切ったことにはならない
+    assert!(!content.truncated, "上限の内側では切らないこと");
+
+    eprintln!("上限いっぱい（{size} バイト）の往復にかかった時間：{took:?}");
 
     let _ = std::fs::remove_file(&path);
 }
