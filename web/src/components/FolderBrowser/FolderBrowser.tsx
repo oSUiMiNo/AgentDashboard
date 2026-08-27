@@ -22,6 +22,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
+import { copyToClipboard } from '@/lib/clipboard'
 import { fileIcon } from '@/lib/fileKind'
 import {
   childOf,
@@ -73,6 +74,42 @@ export function FolderBrowser({
    * `go` が作り直され、それを見ている効果まで走り直す。
    */
   const asked = useRef(0)
+
+  /**
+   * **コピーの答えは1組しか持たない**（設計§5）。「どの行の、どの値が、どうなったか」
+   * を覚え、**別の行を押したら前のぶんは消える**。
+   *
+   * 複数行ぶんを覚えると、パネルの上に何行も並んで**どれが最後に押したものか
+   * 分からなくなる**。最後に押したものだけが答えである。
+   *
+   * 番号を `useRef` で持つ理由は `asked` と同じ——描画に出ない値なので、
+   * `useState` にすると押すたびに関数が作り直される。
+   */
+  const copyAsked = useRef(0)
+  const [copied, setCopied] = useState<{
+    path: string
+    value: string
+    state: 'done' | 'failed'
+  } | null>(null)
+
+  /**
+   * **`await` を1つも挟まずに [`copyToClipboard`] を呼ぶ**（設計§3）。ここに
+   * 待ちを入れると、古い方法が要求する「押した合図」が切れることがある——
+   * 切れるかどうかはブラウザ任せなので、**動いたり動かなかったりする**形になる。
+   */
+  const copy = useCallback((at: string, value: string) => {
+    const mine = ++copyAsked.current
+    // 押した瞬間に前の答えを消す。**結果を待たない**——待つと、次の行を押しても
+    // 前の行の答えが残って見える
+    setCopied(null)
+    void copyToClipboard(value).then((ok) => {
+      // 割り込まれた古い答えは捨てる（`asked` と同じ理由）
+      if (mine !== copyAsked.current) {
+        return
+      }
+      setCopied({ path: at, value, state: ok ? 'done' : 'failed' })
+    })
+  }, [])
 
   const go = useCallback(
     async (next: string | undefined) => {
@@ -165,6 +202,27 @@ export function FolderBrowser({
         </p>
       )}
 
+      {/* **写せなかったときの逃げ道**（設計§5）。行の中は「アイコン＋名前＋コピー」で
+          横1列に詰まっていて値を差し込む余地が無いので、**パネルの上に1箇所だけ**出す。
+
+          アンバーなのは上の `folder-truncated` と同じ意味だから——「動くが、この環境では
+          最後の一歩だけ自分でやってほしい」。赤（`folder-error`）は読めないときのもので、
+          ここは読めている。
+
+          文言と形は `FileView` の `file-copy-fallback` と揃えてある。**同じことが起きた
+          ときに同じものが出る**のが要件の完了条件（設計§10）。 */}
+      {copied?.state === 'failed' && (
+        <p data-testid="folder-copy-failed" className="text-xs text-amber-300">
+          コピーできません。この値を選んで取ってください：{' '}
+          <code
+            data-testid="folder-copy-fallback"
+            className="bg-muted/60 rounded px-1 py-0.5 font-mono select-all"
+          >
+            {copied.value}
+          </code>
+        </p>
+      )}
+
       <ul className="min-h-0 flex-1 overflow-y-auto text-sm">
         {loading && (
           <li className="text-muted-foreground px-2 py-1.5 text-xs">読み込み中…</li>
@@ -175,20 +233,24 @@ export function FolderBrowser({
           </li>
         )}
         {!loading &&
-          listing?.entries.map((entry) => (
-            <Row
-              key={entry.name}
-              entry={entry}
-              full={childOf(listing.path, entry.name)}
-              root={root}
-              onOpen={() => void go(childOf(listing.path, entry.name))}
-              onPickFile={
-                onPickFile === undefined
-                  ? undefined
-                  : () => onPickFile(childOf(listing.path, entry.name))
-              }
-            />
-          ))}
+          listing?.entries.map((entry) => {
+            const full = childOf(listing.path, entry.name)
+            return (
+              <Row
+                key={entry.name}
+                entry={entry}
+                full={full}
+                root={root}
+                onOpen={() => void go(full)}
+                onPickFile={
+                  onPickFile === undefined ? undefined : () => onPickFile(full)
+                }
+                // **答えを持っているのは1行だけ。** 他の行は常に手つかずへ戻る
+                copyState={copied?.path === full ? copied.state : 'idle'}
+                onCopy={(value) => copy(full, value)}
+              />
+            )
+          })}
       </ul>
     </div>
   )
@@ -210,6 +272,8 @@ function Row({
   root,
   onOpen,
   onPickFile,
+  copyState,
+  onCopy,
 }: {
   entry: DirEntry
   /** この行が指す絶対パス */
@@ -218,6 +282,9 @@ function Row({
   root?: string
   onOpen: () => void
   onPickFile?: () => void
+  /** この行のコピーがどうなったか。**答えを持つのは1行だけ**（親が決める） */
+  copyState: 'idle' | 'done' | 'failed'
+  onCopy: (value: string) => void
 }) {
   const openable = entry.kind === 'dir'
   const pressable = openable || (entry.kind === 'file' && onPickFile !== undefined)
@@ -257,7 +324,13 @@ function Row({
           </span>
         )}
       </Button>
-      <CopyPath full={full} root={root} isDir={entry.kind === 'dir'} />
+      <CopyPath
+        full={full}
+        root={root}
+        isDir={entry.kind === 'dir'}
+        state={copyState}
+        onCopy={onCopy}
+      />
     </li>
   )
 }
@@ -267,32 +340,30 @@ function Row({
  *
  * `root` があれば**そこからの相対パス**、無ければ絶対パス。基準が分からない相対パスは
  * 貼られた側で解釈できないので、**何をコピーするのかは `title` に出す**。
+ *
+ * **自分では状態を持たない**（設計§5）。写せなかったときの逃げ道はパネルの上に1箇所
+ * しか出さないので、「どの行がどうなったか」は親が1組だけ持つ。ここは押されたことを
+ * 上へ伝え、返ってきた答えを字にするだけである。
+ *
+ * **`title` と `data-value` はそのまま残す。** マウスのある環境では、いまも役に立つ。
  */
 function CopyPath({
   full,
   root,
   isDir,
+  state,
+  onCopy,
 }: {
   full: string
   root?: string
   isDir: boolean
+  state: 'idle' | 'done' | 'failed'
+  onCopy: (value: string) => void
 }) {
   const base = root === undefined ? full : relativeOf(root, full)
   // **フォルダは末尾に `/` を付ける。** 貼られた側で「これは入れ物か中身か」が
   // 一目で分かり、続けて名前を書き足すときにも区切りを打ち直さずに済む
   const value = isDir && !base.endsWith('/') ? `${base}/` : base
-  const [state, setState] = useState<'idle' | 'done' | 'failed'>('idle')
-
-  const copy = async () => {
-    // **黙って失敗させない**（`FileView` と同じ扱い）。使えない環境があるので、
-    // 押したのに何も起きない状態を残さない
-    try {
-      await navigator.clipboard.writeText(value)
-      setState('done')
-    } catch {
-      setState('failed')
-    }
-  }
 
   return (
     <Button
@@ -307,7 +378,7 @@ function CopyPath({
           : `コピーする値：${value}（${root} からの相対パス）`
       }
       className="text-muted-foreground shrink-0 text-xs"
-      onClick={() => void copy()}
+      onClick={() => onCopy(value)}
     >
       {state === 'done' ? 'コピーしました' : state === 'failed' ? 'コピーできません' : 'コピー'}
     </Button>
