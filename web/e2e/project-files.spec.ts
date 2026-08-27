@@ -234,6 +234,93 @@ test('左パネルを開き、ファイルを読み、相対パスをコピー�
 })
 
 /**
+ * **新しい口が無くても、古い方法が実物のブラウザで写す**
+ * （イシュー `フォルダとファイル一覧のコピーボタンが効かない` §2 の層②）。
+ *
+ * # 設計は「E2E では言えない」としていたが、言えた
+ *
+ * 設計は「テストは `127.0.0.1` で走り、そこは常に安全なオリジンとして扱われるので
+ * ②の経路を実物のブラウザで通す道が無い」と書いていた。**前半は正しいが、結論は
+ * 違った**——`navigator.clipboard` を**こちらで外せば**、②はそのまま走る。
+ *
+ * # それでも実機が要る
+ *
+ * ここで言えるのは「**この Chromium で、この DOM の作りなら `execCommand` が写す**」
+ * まで。**本当に安全でないオリジンで開いたときの挙動**と、**iOS Safari ／ Android
+ * Chrome** は別物なので、そこは実機で見る（テスト計画【要人間】）。
+ */
+test('新しい口が無いとき、古い方法が実物のブラウザで写す', async ({ page }) => {
+  // **`goto` より先に置く。** これは次の読み込みから効くので、あとからでは遅い
+  await page.addInitScript(() => {
+    Object.defineProperty(window.navigator, 'clipboard', {
+      configurable: true,
+      value: undefined,
+    })
+  })
+
+  await openDashboard(page)
+  const group = await addProject(page, PROJECT_DIR)
+  await group.click({ position: { x: 5, y: 5 } })
+  await page.getByTestId('project-files-toggle').click()
+  const panel = page.getByTestId('project-files-panel')
+  await expect(panel).toBeVisible()
+
+  await panel.getByTestId('folder-copy').first().click()
+
+  // **写せている。** 直す前はここが「コピーできません」だった
+  await expect(panel.getByTestId('folder-copy').first()).toHaveText(
+    'コピーしました',
+  )
+  // 写せたのに逃げ道が出ると、押せていないように見える
+  await expect(panel.getByTestId('folder-copy-failed')).toHaveCount(0)
+})
+
+/**
+ * **どちらの口も無いとき、値を選べる形が実物のブラウザに出る**（同§5 の層③）。
+ *
+ * ②の寿命は保証されていない（MDN が明言）ので、**消えた日に手詰まりへ戻らない**
+ * ことをここで押さえる。直す前の一覧は値が `title` の中にしか無く、
+ * **`title` を読む操作が無いスマホでは取る手段が1つも残らなかった**。
+ */
+test('どちらの口も無いとき、一覧とファイルの両方で値を選べる形が出る', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(window.navigator, 'clipboard', {
+      configurable: true,
+      value: undefined,
+    })
+    Object.defineProperty(window.document, 'execCommand', {
+      configurable: true,
+      value: undefined,
+    })
+  })
+
+  await openDashboard(page)
+  const group = await addProject(page, PROJECT_DIR)
+  await group.click({ position: { x: 5, y: 5 } })
+  await page.getByTestId('project-files-toggle').click()
+  const panel = page.getByTestId('project-files-panel')
+  await expect(panel).toBeVisible()
+
+  // ① 一覧——**ここが今回の本体**
+  await panel.getByTestId('folder-copy').first().click()
+  await expect(panel.getByTestId('folder-copy-failed')).toBeVisible()
+  // 起点は枠そのものなので、最初の行は枠直下のフォルダ。**末尾に `/` が付く**
+  await expect(panel.getByTestId('folder-copy-fallback')).toHaveText('MyDocs/')
+
+  // ② ファイルの画面——今までどおり出ること（片方だけ直っていないこと）
+  await panel.getByTestId('folder-entry').filter({ hasText: 'MyDocs' }).click()
+  await panel.getByTestId('folder-entry').filter({ hasText: PLAN }).click()
+  const view = page.getByTestId('file-view')
+  await view.getByTestId('file-copy').click()
+  await expect(view.getByTestId('file-copied')).toContainText('コピーできません')
+  await expect(view.getByTestId('file-copy-fallback')).toHaveText(
+    `MyDocs/${PLAN}`,
+  )
+})
+
+/**
  * 狭い画面で**ページが横にはみ出さない**こと（設計§28）。
  *
  * # なぜ E2E でしか捕まらないのか
