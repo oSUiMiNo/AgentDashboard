@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { RoamField } from '@/lib/roam'
+import { type RoamField, planRoute } from '@/lib/roam'
 import {
   ROAM_DELAY_MAX_MS,
   ROAM_DELAY_MIN_MS,
@@ -293,6 +293,8 @@ describe('1回の放出で出た3本は、互いに違う向きへ開く', () =>
     emitRoam({ ...種, field: 狭い })
     const lines = useRoamStore.getState().lines
     expect(lines).toHaveLength(ROAM_LINES)
+    // **ここでも重ならない。** 候補が足りなければ扇へ逃がすので、3本とも別の点へ着く
+    expect(new Set(lines.map((l) => `${l.stops[1].x},${l.stops[1].y}`)).size).toBe(ROAM_LINES)
     for (const line of lines) {
       expect(line.stops.length).toBeGreaterThan(1)
       for (const 点 of line.stops) {
@@ -456,5 +458,49 @@ describe('盤面が変わったら引き直す（入口は1つ）', () => {
     useRoamStore.getState().lines.forEach((line, i) => {
       expect(line.stops).toEqual(前[i])
     })
+  })
+})
+
+describe('実物の並びで、3本が重ならない', () => {
+  /*
+    **0.1.43 を実物で見た利用者の指摘「放出時点から2本重なって出てくる」**（要件14-3）。
+
+    **作り物の場では捕まらなかった。** `FIELD` は候補が多く出る並びなので、順位で
+    割り振れば必ず散る。**実物の一覧（枠2つ・カード3枚）を写して当てる**と、
+    候補が4本しか無く、しかも**同じ座標が二重に入っていた**（横の通路と縦の通路の
+    両方から足されるため）——数が足りているように見えて、実は足りていなかった。
+
+    **どのカードから出るかで角が変わる**ので、3枚とも当てる。
+  */
+  const 実物: RoamField = {
+    width: 952,
+    height: 430.59,
+    card: { x: 13, y: 141, w: 294, h: 97.3 },
+    rects: [
+      { x: 0, y: 88, w: 952, h: 163.3 },
+      { x: 13, y: 141, w: 294, h: 97.3 },
+      { x: 319, y: 141, w: 294, h: 97.3 },
+      { x: 0, y: 267.3, w: 952, h: 163.3 },
+      { x: 13, y: 320.3, w: 294, h: 97.3 },
+    ],
+  }
+  const カードたち = [
+    { x: 13, y: 141, w: 294, h: 97.3 },
+    { x: 319, y: 141, w: 294, h: 97.3 },
+    { x: 13, y: 320.3, w: 294, h: 97.3 },
+  ]
+
+  it('どのカードから出ても、1組の3本は別の点へ着く', () => {
+    for (const card of カードたち) {
+      for (let 基 = 1; 基 < 60; 基 += 3) {
+        const 印 = [0, 1, 2].map((番) => {
+          const 点 = planRoute({ ...実物, card }, 基 + 番, 番, ROAM_LINES)[1]
+          return `${点.x.toFixed(1)},${点.y.toFixed(1)}`
+        })
+        expect(new Set(印).size, `カード(${card.x},${card.y}) 種${基}: ${印.join(' / ')}`).toBe(
+          ROAM_LINES,
+        )
+      }
+    }
   })
 })
