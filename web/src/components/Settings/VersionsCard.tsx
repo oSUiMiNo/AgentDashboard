@@ -351,8 +351,9 @@ export function VersionsCard() {
 
       {!versions.editable && (
         <p data-testid="versions-readonly" className="text-muted-foreground text-xs">
-          版の切り替えは、この PC のブラウザ（127.0.0.1）または管理者のアカウント
-          からだけできます。
+          版の切り替えは、管理者のアカウント（複数人で使う構成）または合言葉を
+          通った相手だけができます。合言葉を置いていない構成では、この PC の
+          ブラウザ（127.0.0.1）からだけになります。
         </p>
       )}
     </div>

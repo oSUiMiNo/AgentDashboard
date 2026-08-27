@@ -15,9 +15,14 @@
 //!
 //! # 押せる相手を絞る
 //!
-//! 版の入れ替えは、突き詰めれば**外から実行ファイルを取ってきて走らせる**ことである。
-//! ログインを通っただけの相手に開ける操作ではない（設計§13）。一方で**一覧を見るのは
-//! 誰でもよい**——見えないと、押せないことすら分からない。
+//! 版の入れ替えは、突き詰めれば**外から実行ファイルを取ってきて走らせる**ことである
+//! （設計§13）。一方で**一覧を見るのは誰でもよい**——見えないと、押せないことすら
+//! 分からない。
+//!
+//! **どこで線を引くかは [`may_operate`] に書いてある。** 元は「合言葉を通っただけの
+//! 相手には開けない」としていたが、**その相手はすでにセッションを起こせる**（＝任意
+//! コード実行）ので、より強い口が開いたまま弱い口だけを閉じていた。合言葉の無い構成
+//! （`Open`）だけは手元に限る。
 
 use crate::gate;
 use axum::{
@@ -343,10 +348,36 @@ pub fn routes(state: VersionsState) -> Router {
 ///
 /// ローカルモードの `is_admin` は**常に偽**なので、管理者で絞ると誰も押せなくなる。
 /// モードで分ける。
+///
+/// # 合言葉を通った相手には許す（`手元の新しい版をGUIだけで効かせる`）
+///
+/// 元はここも手元（127.0.0.1）に限っていた。「版の入れ替えは、突き詰めれば外から
+/// 実行ファイルを取ってきて走らせること」という理由だったが、**その線は守れているものより
+/// 狭いところに引かれていた。**
+///
+/// 合言葉を通った相手は、**すでにセッションを起こせる**（`server_core::ws` の `Spawn` に
+/// 手元や管理者の絞りは無い）。あれは全承認スキップでも起こせるので、**その機械での
+/// 任意コード実行**にあたる。より強い口が開いたまま、弱い口だけを閉じていたことになる。
+///
+/// **そして閉めていた側が、実際に使えなくしていた**——WSL でサーバを動かし Windows の
+/// ブラウザで見る構成では、手元から見ることが原理的にできない。この画面が役に立たない
+/// と言われた理由の1つがこれだった。
+///
+/// # 合言葉が無い構成（`Open`）は手元のままにする
+///
+/// あちらは**誰でも来られる**。合言葉を通ったことすら言えない相手に開ける操作ではない。
 fn may_operate(auth: &AuthContext, identity: &Identity) -> bool {
-    match auth.mode {
+    may_operate_in(auth.mode, identity)
+}
+
+/// 判定そのもの。**材料だけを受け取る純関数**にしてあるのは、線を引き直したときに
+/// 3通りとも単体で固められるようにするため。
+fn may_operate_in(mode: AuthMode, identity: &Identity) -> bool {
+    match mode {
         AuthMode::Account => identity.is_admin,
-        AuthMode::Open | AuthMode::LanPassword => identity.from_loopback,
+        // ここへ来た時点で、手元か合言葉のどちらかを通っている（`auth::identify`）
+        AuthMode::LanPassword => true,
+        AuthMode::Open => identity.from_loopback,
     }
 }
 
@@ -354,7 +385,8 @@ fn may_operate(auth: &AuthContext, identity: &Identity) -> bool {
 fn refusal(auth: &AuthContext) -> (StatusCode, String) {
     let reason = match auth.mode {
         AuthMode::Account => "版の切り替えは管理者のアカウントだけができます",
-        _ => "版の切り替えは、この PC のブラウザ（127.0.0.1）からだけできます",
+        AuthMode::LanPassword => "版の切り替えには、合言葉を通っている必要があります",
+        AuthMode::Open => "版の切り替えは、この PC のブラウザ（127.0.0.1）からだけできます",
     };
     (StatusCode::FORBIDDEN, reason.to_string())
 }
@@ -700,4 +732,40 @@ async fn api_restart(
     });
 
     Ok(Json(view))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(non_snake_case)]
+
+    use super::*;
+
+    fn 相手(is_admin: bool, from_loopback: bool) -> Identity {
+        Identity {
+            account_id: uuid::Uuid::nil(),
+            name: "test".to_string(),
+            is_admin,
+            from_loopback,
+            token_id: None,
+        }
+    }
+
+    /// 押せる相手の線（設計§13。`手元の新しい版をGUIだけで効かせる` で引き直した）。
+    ///
+    /// **3通りとも見る。** 緩めた側だけを見ると、全部通す実装でも緑になる。
+    #[test]
+    fn 版を押せる相手はモードで決まる() {
+        // 複数人で使う構成では管理者だけ。**ここは変えていない**
+        assert!(may_operate_in(AuthMode::Account, &相手(true, false)));
+        assert!(!may_operate_in(AuthMode::Account, &相手(false, true)));
+
+        // 合言葉の構成では、通っていれば押せる。**手元かどうかは問わない**——
+        // WSL でサーバを動かし Windows のブラウザで見る構成は、手元を満たせない
+        assert!(may_operate_in(AuthMode::LanPassword, &相手(false, false)));
+        assert!(may_operate_in(AuthMode::LanPassword, &相手(false, true)));
+
+        // 合言葉が無い構成は**誰でも来られる**ので、手元に限る
+        assert!(may_operate_in(AuthMode::Open, &相手(false, true)));
+        assert!(!may_operate_in(AuthMode::Open, &相手(false, false)));
+    }
 }
