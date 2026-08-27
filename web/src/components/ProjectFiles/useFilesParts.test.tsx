@@ -471,6 +471,49 @@ describe('広い窓で押しのける（場所取り）', () => {
   })
 })
 
+describe('狭い窓の膜', () => {
+  /*
+    **地が黒い画面では、目で見ても膜の有無が分からない。** 参考の動画を最初は「膜は
+    無い」と読み違え、**フレームの画素を測って初めて**分かった——ヘッダも本文も入力欄も
+    255→131・32→17 と同じ比で落ちており、**画面全体を覆う約半分の黒**だった。
+
+    だから**綴りで見張る**。見た目の確認では戻されても気づけない。
+  */
+  it('サイドバーを開くと、膜が出る', async () => {
+    置く()
+
+    const 膜 = await screen.findByTestId('sidebar-scrim')
+    expect(膜).toHaveClass('bg-black/50')
+    // 広い窓では敷かない（あちらは押しのけるので、裏に隠れるものが無い）
+    expect(膜).toHaveClass('md:hidden')
+  })
+
+  it('畳んでいれば、膜は出ない', () => {
+    置く({ open: false })
+
+    expect(screen.queryByTestId('sidebar-scrim')).toBeNull()
+  })
+
+  it('膜を押すと畳む', async () => {
+    /*
+      **参考の動画では確かめられていない**（閉じるボタンしか押されていない）。それでも
+      入れるのは、**膜が裏への操作を塞ぐ**から——押しても何も起きない膜は行き止まりに
+      なる。閉じるボタンと合わせて出口を2つ持たせる
+    */
+    const { toggles } = 置く()
+
+    await userEvent.click(await screen.findByTestId('sidebar-scrim'))
+
+    expect(toggles).toEqual(['toggle'])
+  })
+
+  it('膜は、読み上げには出ない', async () => {
+    置く()
+
+    expect(await screen.findByTestId('sidebar-scrim')).toHaveAttribute('aria-hidden')
+  })
+})
+
 describe('器が1つであること', () => {
   /**
    * コメントを落とす。**中に `<aside>` と書いてある**ので、先に消さないと自分の
