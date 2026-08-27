@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { ROAM_STOPS, roamSpans } from '@/lib/roam'
+import { ROAM_ACT_MS, ROAM_VANISH_MS } from '@/stores/roam'
 import { ROAM_LIFE_MS } from '@/stores/roam'
 
 /**
@@ -143,7 +144,7 @@ describe('層は場所を取らず、何も塗らない', () => {
     expect(素のCSS()).not.toContain('will-change')
   })
 
-  it('キーフレームで動かすのは、決めた4つだけ', () => {
+  it('キーフレームで動かすのは、決めた5つだけ', () => {
     /*
       **黒リストから白リストへ変えた**（フェーズ9）。
 
@@ -151,8 +152,22 @@ describe('層は場所を取らず、何も塗らない', () => {
       書き足しに弱い**——`clip-path` でも `inset` でも素通りする。設計§9-0 が
       「動かしてよいのは回転・移動・濃さ・大きさの4つだけ」と**閉じた集合**で
       決めている以上、検査も閉じた集合で書くのが素直である。
+
+      **`clip-path` を1つ足した**（2026-08-28・要件14-13 の型C）。**読めないまま
+      足していない**——26頂点の形を **32本同時**に動かして実測したうえで入れた。
+
+      | 本数 | 移動だけ | `clip-path` を畳む |
+      |---|---|---|
+      | **32（実働点）** | 60fps | **60fps** |
+      | 256 | 60 | 60 |
+      | 512 | 60 | 51.8 |
+      | 800 | 60 | 20.7 |
+
+      **崩れ始めるのは 512本から**で、実働点まで8倍の余裕がある。**測り器は較正した**
+      （1200本の畳みで 7.7fps、主スレッドを毎コマ 30ms 塞いで 29.7fps）。
+      **Safari では測っていない**（設計は「実機・Safari 含む」と書いている）。
     */
-    const 許す = new Set(['translate', 'rotate', 'scale', 'opacity'])
+    const 許す = new Set(['translate', 'rotate', 'scale', 'opacity', 'clip-path'])
     const 塊 = 素のCSS().match(/@keyframes\s+[\w-]+\s*\{[\s\S]*?\n\}/g) ?? []
     expect(塊).not.toHaveLength(0)
     for (const keyframes of 塊) {
@@ -171,6 +186,9 @@ describe('層は場所を取らず、何も塗らない', () => {
     expect(塊.map((k) => /@keyframes\s+([\w-]+)/.exec(k)?.[1]).sort()).toEqual([
       'roam-birth',
       'roam-drift',
+      'roam-exit-0',
+      'roam-exit-1',
+      'roam-exit-2',
       'roam-fade',
     ])
     // 停留点ぶんの座標を読んでいること（`lib/roam.ts` の `ROAM_STOPS` と揃う）
@@ -393,10 +411,108 @@ describe('層は場所を取らず、何も塗らない', () => {
       expect(Number(y)).toBe(1)
     }
 
-    // 紙片に載る動きは1本だけ。**争う相手が居ない**ので並び順の細工も要らない
-    const [紙] = 当たる('.roam-paper')
-    expect(紙.body).toContain('animation-name: roam-birth')
-    expect(紙.body).not.toContain(',')
+    // **紙片に載る動きは2本**（生まれと退場）。**動かす持ち物が違う**ので
+    // `scale` を争わない——生まれは `scale`、退場は `clip-path` である
+    for (const 形 of [0, 1, 2]) {
+      const [規則] = 当たる(`[data-shape='${形}']`)
+      expect(規則.body).toContain(`animation-name: roam-birth, roam-exit-${形}`)
+    }
+    // **退場は `scale` に一切触らない**（触ると生まれと争う）
+    for (const 形 of [0, 1, 2]) {
+      const 退 = new RegExp(`@keyframes\\s+roam-exit-${形}\\s*\\{[\\s\\S]*?\\n\\}`).exec(素のCSS())?.[0] ?? ''
+      expect(退).not.toBe('')
+      expect(退).not.toContain('scale')
+    }
+  })
+
+  it('退場は、26頂点のまま畳む', () => {
+    /*
+      **`polygon()` 同士は頂点数が一致しないと補間されず、瞬間的にスナップする**
+      （要件14-13・調査レポート §14-8）。基の3種が26頂点なので、**畳んだ先も26頂点**
+      でなければならない。
+
+      **静止画では気づけない。** 頂点を1つ減らしても絵は同じに見えて、動いたときに
+      だけカクッと飛ぶ。**数えるしかない。**
+    */
+    for (const 形 of [0, 1, 2]) {
+      const 退 = new RegExp(`@keyframes\\s+roam-exit-${形}\\s*\\{[\\s\\S]*?\\n\\}`).exec(素のCSS())?.[0] ?? ''
+      const 多角形 = [...退.matchAll(/polygon\(([^)]*)\)/g)]
+      expect(多角形.length).toBeGreaterThanOrEqual(5)
+      for (const [, 中身] of 多角形) {
+        expect([...中身.matchAll(/(-?[\d.]+)%\s+(-?[\d.]+)%/g)]).toHaveLength(26)
+      }
+      // **基の形と同じ頂点数**（片方だけ動かすとスナップする）
+      const [基] = 当たる(`[data-shape='${形}']`)
+      expect([...基.body.matchAll(/(-?[\d.]+)%\s+(-?[\d.]+)%/g)]).toHaveLength(26)
+    }
+  })
+
+  it('退場の最後は、太さが 0 まで畳まれる', () => {
+    // **「畳んで消える」の本体。** 太さが残っていると、消える瞬間に線が途切れて見える
+    for (const 形 of [0, 1, 2]) {
+      const 退 = new RegExp(`@keyframes\\s+roam-exit-${形}\\s*\\{[\\s\\S]*?\\n\\}`).exec(素のCSS())?.[0] ?? ''
+      const 多角形 = [...退.matchAll(/polygon\(([^)]*)\)/g)]
+      const 点 = [...多角形[多角形.length - 1][1].matchAll(/(-?[\d.]+)%\s+(-?[\d.]+)%/g)].map((m) => ({
+        x: Number(m[1]),
+        y: Number(m[2]),
+      }))
+      for (let i = 0; i < 13; i += 1) {
+        expect(点[25 - i].y - 点[i].y).toBeCloseTo(0, 1)
+      }
+    }
+  })
+
+  it('小芝居と、消える瞬間が分かれている', () => {
+    /*
+      **全体が1つのカーブになっていたら落ちる**（調査レポート §14-1）。
+      消える瞬間は **67〜133ms** で、**後半加速**のカーブが要る。
+
+      キーフレームの側では「最後の区間だけ緩急が指定してある」ことで見る
+      ——尺そのものは `stores/roam.ts` の [`ROAM_VANISH_MS`] が持っている。
+    */
+    expect(ROAM_VANISH_MS).toBeGreaterThanOrEqual(67)
+    expect(ROAM_VANISH_MS).toBeLessThanOrEqual(133)
+    // 小芝居は～1秒
+    expect(ROAM_ACT_MS).toBeLessThanOrEqual(1_000)
+    // **区間の比が、尺の比と噛み合っていること**（88.5% ＝ 1000 / 1130）
+    for (const 形 of [0, 1, 2]) {
+      const 退 = new RegExp(`@keyframes\\s+roam-exit-${形}\\s*\\{[\\s\\S]*?\\n\\}`).exec(素のCSS())?.[0] ?? ''
+      const 分岐 = /([\d.]+)%\s*\{[^}]*animation-timing-function/.exec(退)
+      expect(分岐).not.toBeNull()
+      const 実 = Number(分岐?.[1])
+      expect(実).toBeCloseTo((ROAM_ACT_MS / (ROAM_ACT_MS + ROAM_VANISH_MS)) * 100, 0)
+      // **後半加速**（`cubic-bezier` の後ろ側が 1 に寄っている）
+      expect(退).toContain('cubic-bezier(0.3, 0, 0.8, 0.15)')
+    }
+  })
+
+  it('小芝居の速さが、点滅の閾値に当たらない', () => {
+    /*
+      **周期の下限は 0.333秒（1秒に3回）。** `animate.css` の `jello` は8段階で
+      減衰するので、そのまま写すと当たる。**1秒で2往復＝2Hz**に抑えてある。
+
+      往復の数は「振れが基（1.0倍）を横切る回数」で数える。
+    */
+    for (const 形 of [0, 1, 2]) {
+      const 退 = new RegExp(`@keyframes\\s+roam-exit-${形}\\s*\\{[\\s\\S]*?\\n\\}`).exec(素のCSS())?.[0] ?? ''
+      // 小芝居に使っている停留点の数（最後の「消える瞬間」を除く）
+      const 停留 = [...退.matchAll(/^\s*([\d.]+)%\s*\{/gm)].map((m) => Number(m[1]))
+      const 芝居 = 停留.filter((p) => p <= (ROAM_ACT_MS / (ROAM_ACT_MS + ROAM_VANISH_MS)) * 100)
+      // 山と谷で1往復。**2往復＝5停留点**（0 と 戻り を含む）
+      const 往復 = (芝居.length - 1) / 2
+      expect(往復 / (ROAM_ACT_MS / 1000)).toBeLessThanOrEqual(3)
+    }
+  })
+
+  it('32本の尺は揃っている＝線ごとに散らさない', () => {
+    // **散らしてよいのは位相と細部だけ**（調査レポート §14-7 の反面教師）。
+    // 尺は3種とも同じ——**形ごとに違う尺にすると「作りが雑」に見える**
+    const 尺たち = new Set<string>()
+    for (const 形 of [0, 1, 2]) {
+      const 退 = new RegExp(`@keyframes\\s+roam-exit-${形}\\s*\\{[\\s\\S]*?\\n\\}`).exec(素のCSS())?.[0] ?? ''
+      尺たち.add([...退.matchAll(/^\s*([\d.]+)%\s*\{/gm)].map((m) => m[1]).join(','))
+    }
+    expect(尺たち.size).toBe(1)
   })
 
   it('濃さはカードから配られる。固定値を書かない', () => {

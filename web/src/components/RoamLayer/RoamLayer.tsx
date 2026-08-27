@@ -32,7 +32,13 @@
 
 import type { CSSProperties } from 'react'
 import { routeVars } from '@/lib/roam'
-import { ROAM_BIRTH_MS, ROAM_LIFE_MS, useRoamStore } from '@/stores/roam'
+import {
+  ROAM_BIRTH_MS,
+  ROAM_EXIT_DELAY_MS,
+  ROAM_EXIT_MS,
+  ROAM_LIFE_MS,
+  useRoamStore,
+} from '@/stores/roam'
 import { useSettingsStore } from '@/stores/settings'
 
 export function RoamLayer() {
@@ -85,7 +91,11 @@ export function RoamLayer() {
             data-testid="roam-paper"
             data-shape={line.shape}
             style={{
-              animationDuration: `${ROAM_BIRTH_MS}ms`,
+              // 生まれ（尺取り虫）と、退場（ひと芝居してから畳む）の2本
+              animationDuration: `${ROAM_BIRTH_MS}ms, ${ROAM_EXIT_MS}ms`,
+              // **退場は寿命の終わりへ寄せる。** 遅れが明けるまでは静的な
+              // `clip-path` がそのまま生きるので、3種の描き分けが消えない
+              animationDelay: `0ms, ${ROAM_EXIT_DELAY_MS}ms`,
             }}
           />
         </i>

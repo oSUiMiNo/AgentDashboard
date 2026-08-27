@@ -4,6 +4,8 @@ import { RoamLayer } from '@/components/RoamLayer/RoamLayer'
 import { ROAM_STOPS } from '@/lib/roam'
 import {
   ROAM_BIRTH_MS,
+  ROAM_EXIT_DELAY_MS,
+  ROAM_EXIT_MS,
   ROAM_LIFE_MS,
   emitRoam,
   resetRoam,
@@ -105,10 +107,16 @@ describe('回遊の層', () => {
       expect(一枚.parentElement).toBe(線[i])
       expect(一枚).toHaveAttribute('data-shape')
       // **内側にも秒数を渡す。** 出どころを1つに保つ約束は内側にも掛かる。
-      // 内は寿命ではなく**尺取り虫の長さ**（設計§9-7-9）。ひらひらをやめたので
-      // 1本だけになった（2026-08-28）——**2本のまま残すと、残ったほうが繰り上がって
-      // 別の秒数を食う**
-      expect((一枚 as HTMLElement).style.animationDuration).toBe(`${ROAM_BIRTH_MS}ms`)
+      // 内は寿命ではなく**尺取り虫の長さと、退場の長さ**（設計§9-7-9）
+      expect((一枚 as HTMLElement).style.animationDuration).toBe(
+        `${ROAM_BIRTH_MS}ms, ${ROAM_EXIT_MS}ms`,
+      )
+      // **退場は寿命の終わりへ寄せる。** 遅れが明けるまでは静的な `clip-path` が
+      // 生きるので、3種の描き分けが消えない。**線ごとに散らしてはいけない**
+      // ——散らすと寿命の終わりと畳み終わりがずれる
+      expect((一枚 as HTMLElement).style.animationDelay).toBe(
+        `0ms, ${ROAM_EXIT_DELAY_MS}ms`,
+      )
     }
   })
 
