@@ -548,11 +548,12 @@ describe('状態から見た目を決める', () => {
 
   it('同じ色を持つ組は、記号で分かれている', () => {
     // 色だけでは見分けられないことを承知で畳んだので、記号が最後の砦になる。
-    // **注意・保留（Secondary）が3状態を抱え**、**起動中と終了は同じ灰**にした——
+    // **停滞は進行中（Primary）へ移した**（2026-08-26）——作業中の一種なので同じ
+    // シアンにし、弱さは太さと濃さで作る。**起動中と終了は同じ灰**にしてある——
     // どちらも「動いていない・対処が要らない」ので、静かな側でまとめている
     const 同色の組: [SessionStatus, SessionStatus][] = [
       [{ kind: 'waiting_input' }, { kind: 'waiting_permission' }],
-      [{ kind: 'waiting_input' }, { kind: 'stalled' }],
+      [{ kind: 'working' }, { kind: 'stalled' }],
       [{ kind: 'ended', ok: false }, { kind: 'unknown' }],
       [{ kind: 'starting' }, { kind: 'ended', ok: true }],
     ]
@@ -588,7 +589,9 @@ describe('状態から見た目を決める', () => {
     // ぶんだけ床から上げてある（実物を見た判断・2026-08-26）
     expect(dimOf({ kind: 'working' })).toBe('70%') // Cyan・5.41:1
     expect(dimOf({ kind: 'waiting_permission' })).toBe('75%') // Amber・5.25:1
-    expect(dimOf({ kind: 'stalled' })).toBe('75%') // 同上（保留と注意は同じ群）
+    // **停滞は作業中と同じシアンなので、濃さで弱さを作る**（2026-08-26）。
+    // `primary` の床（50%）は割らない
+    expect(dimOf({ kind: 'stalled' })).toBe('55%') // Cyan・作業中の 70% より弱い
     expect(dimOf({ kind: 'unknown' })).toBe('90%') // Coral・4.89:1
 
     // **起動中だけ床を割っていた**（55% で 2.77:1）。床まで上げた（フェーズ8）
@@ -633,7 +636,9 @@ describe('状態から見た目を決める', () => {
     expect(statusTone({ kind: 'starting' })).toBe(
       statusTone({ kind: 'ended', ok: true }),
     )
-    expect(statusTone({ kind: 'stalled' })).toBe(
+    // **停滞は作業中と同じ**（2026-08-26）。入力待ちと同じに見えるのを直した
+    expect(statusTone({ kind: 'stalled' })).toBe(statusTone({ kind: 'working' }))
+    expect(statusTone({ kind: 'stalled' })).not.toBe(
       statusTone({ kind: 'waiting_input' }),
     )
   })

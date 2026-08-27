@@ -413,6 +413,23 @@
   animation: tile-spin 9.6s linear infinite;
 }
 
+/*
+  **停滞は作業中の弱い側**なので、輪を細く見せる（2026-08-26）。作業中と同じシアンに
+  したうえで、見える太さを **5px → 3px**、濃さを 70% → 55%（`QUIETER_DIM`）に落とす。
+
+  **切る枠の内側余白（`p-[5px]`）は動かさない。** そこを停滞だけ 3px にすると
+  **中身の幅が状態によって 4px 変わり**、作業中↔停滞を行き来するたびに②③行の文字が
+  動く。地の色で外側 2px を塗り潰せば、**レイアウトは1ピクセルも動かない。**
+
+  当て先に `data-status` を使っていないのは、あれが**中身にしか無い**ためである。
+  器へ複製すると `[data-status=…]` で引いている E2E が2件に一致して壊れる——フェーズ7 で
+  `data-card-id` を器と中身の両方へ付け、`compose.spec.ts` が7本落ちたまま1か月
+  気づかなかったのと同じ形。`spin-slow` を持つのは停滞だけなので、既にある印で足りる。
+*/
+[data-motion='spin-slow'] .tile-frame {
+  box-shadow: inset 0 0 0 2px var(--color-background);
+}
+
 /* 呼吸（入力待ち）。回さないのは、作業中の回転と見間違えないため */
 [data-motion='breathe'] .tile-ring {
   animation: tile-breathe 2.8s ease-in-out infinite;

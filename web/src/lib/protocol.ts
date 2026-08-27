@@ -515,8 +515,14 @@ export function statusGroup(status: SessionStatus): StatusGroup {
       // 進行中。放っておいてよい
       return 'primary'
     case 'stalled':
-      // 注意——進んでいないかもしれない
-      return 'secondary'
+      // **停滞は作業中の一種**（作業中のままイベントが途絶えた状態）なので、進行中と
+      // 同じ群に置く。0.1.41 まで保留（琥珀）に置いていたが、**入力待ちと同じ色に
+      // 見えて区別が付かなかった**（実物を見た利用者の指摘・2026-08-26）。
+      //
+      // **弱さは色相ではなく、太さと濃さで作る**——輪の見える太さを半分にし
+      // （`tile.css` の `[data-motion='spin-slow']`）、濃さを 55% へ落とす
+      // （下の `QUIETER_DIM`）。色を1つ増やさずに済む
+      return 'primary'
     case 'waiting_permission':
     case 'waiting_input':
       // 保留——**あなたが答えないと進まない。** どちらの番かは記号で分ける
@@ -669,6 +675,9 @@ export function statusTextTone(status: SessionStatus): string {
  */
 const QUIETER_DIM: Partial<Record<SessionStatus['kind'], string>> = {
   ended: '35%',
+  // 停滞は作業中と同じシアンなので、**濃さで弱さを作る**（作業中は 70%）。
+  // `primary` の床は 50% なので 3:1 は割らない
+  stalled: '55%',
 }
 
 /**
@@ -680,7 +689,11 @@ const QUIETER_DIM: Partial<Record<SessionStatus['kind'], string>> = {
  * そのまま起きていた（フェーズ8 で、床の検査を足したときに見つかった）。
  *
  * 静かにする理由は「一覧でいちばん数が多く、**対処が要らない**」ことなので、
- * **正常終了にしか当たらない。**
+ * **異常終了には当たらない。**
+ *
+ * **停滞もここを通る**（2026-08-26）。あちらは静かにしたいのではなく、
+ * **作業中と同じ色のまま「弱い側」だと読ませたい**ためで、理由は違うが
+ * 「群の既定より濃さを下げる」という形は同じなので同じ表に置く。
  */
 function quieterDim(status: SessionStatus): string | undefined {
   if (status.kind === 'ended' && !status.ok) return undefined
@@ -721,8 +734,36 @@ export function statusAccentColor(status: SessionStatus): string {
  * この関数を通らない。**それでも状態から引く**：値を書き写すと、色を変えたときに
  * 片方だけ動く形が生まれる。
  */
-export function statusInk(status: SessionStatus): string {
-  return quieterDim(status) ?? STATUS_TONES[statusGroup(status)].dim
+export function statusInk(status: SessionStatus, connected = true): string {
+  const dim = quieterDim(status) ?? STATUS_TONES[statusGroup(status)].dim
+  if (connected) return dim
+  return scaleInk(dim, DISCONNECTED_INK_SCALE)
+}
+
+/**
+ * 繋がっていないカードが沈む割合（カード設計§9-2-3）。
+ *
+ * **この数字の出どころはここ1つだけにする。** 0.1.41 では `tile.css` の
+ * `[data-connected='false']` にしか書かれておらず、**輪とバーは沈むのに、放った線だけが
+ * 沈まなかった**——線へ濃さを渡す経路（[`statusInk`] → `emitRoam` → `RoamLayer`）は
+ * あの CSS を通らないためである（実測：枠 45% に対し線 75%。比はちょうど 0.6）。
+ *
+ * **CSS からこの定数は読めない**ので、`tile.css` 側には同じ数字を書いたままにし、
+ * **食い違ったら落ちる検査**を `tile.test.ts` に置いてある。
+ */
+export const DISCONNECTED_INK_SCALE = 0.6
+
+/**
+ * 百分率の濃さへ倍率を掛ける。
+ *
+ * **丸めずに整数へ落とす**——`--tile-ink` は CSS の `calc()` が同じ計算をしており、
+ * 端数を持たせると片方だけ違う値になる。いま通る値（35 / 55 / 60 / 70 / 75 / 90）は
+ * すべて 0.6 倍しても整数になる。
+ */
+function scaleInk(dim: string, scale: number): string {
+  const value = Number.parseFloat(dim)
+  if (!Number.isFinite(value)) return dim
+  return `${Math.round(value * scale)}%`
 }
 
 /**
