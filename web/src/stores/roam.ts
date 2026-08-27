@@ -241,7 +241,9 @@ export function emitRoam(seed: RoamSeed): void {
       accent: seed.accent,
       ink: seed.ink,
       shape: id % ROAM_SHAPES,
-      stops: planRoute(seed.field, id),
+      // **1組として渡す**（2026-08-28・要件14-3）。1本ずつ独立に籤を引くと、
+      // 候補が少ない場面で2本が同じ点へ着いて重なる
+      stops: planRoute(seed.field, id, i, 出す),
     })
     寿命.set(
       id,

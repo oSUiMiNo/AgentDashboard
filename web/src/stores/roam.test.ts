@@ -256,6 +256,52 @@ describe('跳ねから切り離して撃つ', () => {
   })
 })
 
+describe('1回の放出で出た3本は、互いに違う向きへ開く', () => {
+  /*
+    **0.1.43 を実物で見た利用者の指摘「放出時点から2本重なって出てくる」への番人**
+    （要件14-3・設計§20-4-1）。
+
+    以前は**1本ずつ独立に籤を引いており、3本は互いを知らなかった**ので、候補が
+    少ない場面で2本が同じ点へ着いた。いまは**候補を角度順に並べ、その中で順位を
+    割り振る**（`planRoute` の `番` と `組`）。
+
+    **角度そのものは決め打ちにしない。** 候補は通路の上の点だけで、角度で決めると
+    通路から外れる——着いた通路の向きが回遊の初手を決めているため。
+  */
+  it('着地点が3本とも違う', () => {
+    emitRoam(種)
+    const lines = useRoamStore.getState().lines
+    expect(lines).toHaveLength(ROAM_LINES)
+    const 着地 = new Set(lines.map((l) => `${l.stops[1].x},${l.stops[1].y}`))
+    expect(着地.size).toBe(ROAM_LINES)
+  })
+
+  it('候補が枯れる場でも、経路は3本とも作られる', () => {
+    /*
+      **カードが1枚だけの場を当てる。** 飛散は1区間（56px）しか飛ばないので、そこに
+      届く通路は「そのカード自身の縁」しか無い——**候補が0〜2本になる**（`lib/roam.ts`
+      の実測）。**そこでの重なりは受け入れる**（扇を 270° へ広げた緩和が受け持つ）が、
+      **経路そのものが壊れないこと**は見る。
+    */
+    const 狭い: RoamField = {
+      width: 320,
+      height: 200,
+      card: { x: 12, y: 12, w: 288, h: 120 },
+      rects: [{ x: 12, y: 12, w: 288, h: 120 }],
+    }
+    emitRoam({ ...種, field: 狭い })
+    const lines = useRoamStore.getState().lines
+    expect(lines).toHaveLength(ROAM_LINES)
+    for (const line of lines) {
+      expect(line.stops.length).toBeGreaterThan(1)
+      for (const 点 of line.stops) {
+        expect(Number.isFinite(点.x)).toBe(true)
+        expect(Number.isFinite(点.y)).toBe(true)
+      }
+    }
+  })
+})
+
 describe('上限と寿命が噛み合っている', () => {
   it('1枚が待っているあいだ、線は寿命どおり生きる', () => {
     /*
