@@ -476,6 +476,27 @@ class = "by-design"
 reason = "読み終えた試行の印を消すだけ。残っても次の起動で読み直される"
 
 [[entry]]
+path = "server/crates/session-host-core/src/version.rs"
+fn = "version_of_parser"
+expr = '''child.kill()'''
+class = "by-design"
+reason = "名乗りを1行読んだら用は済んでいる。相手は指示を待ち続けるので必ず畳むが、既に自分で終わっていれば失敗する——どちらでも結果は同じ（居なくなっている）"
+
+[[entry]]
+path = "server/crates/session-host-core/src/version.rs"
+fn = "version_of_parser"
+expr = '''child.wait()'''
+class = "by-design"
+reason = "屍を引き取るだけ。kill した相手が既に消えていれば失敗するが、そのときは引き取るものが無いので呼び手にできることが無い"
+
+[[entry]]
+path = "server/crates/session-host-core/src/version.rs"
+fn = "version_of_parser"
+expr = '''tx.send(read.ok().map(|_| line))'''
+class = "send"
+reason = "受け手が時間切れで先に去っていると失敗する。そのとき送る先はもう無く、版は「聞けなかった」として扱われている"
+
+[[entry]]
 path = "server/crates/session-host-core/src/version_ops.rs"
 fn = "fetch_manifest"
 expr = '''std::fs::remove_file(&out)'''

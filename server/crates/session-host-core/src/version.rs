@@ -593,17 +593,48 @@ pub fn version_of_cli(binary: &Path) -> Option<VersionId> {
 /// 足す道は採らない——あのファイルは自己修復が書き換えてよい範囲なので、版を確かめる
 /// 手段をそこへ置くと、確かめる側が書き換えられる側に依存してしまう。
 pub fn version_of_parser(binary: &Path) -> Option<VersionId> {
-    let output = std::process::Command::new(binary)
-        // 標準入力を閉じれば、名乗りを出したあと EOF で終わる
-        .stdin(std::process::Stdio::null())
-        .output()
+    let mut child = std::process::Command::new(binary)
+        // **標準入力を閉じない。**
+        //
+        // 閉じると相手は即 EOF を見る。**古いパーサはそこで `process::exit(0)` を呼ぶ**
+        // ——名乗りを出す前に消えることがあり、同じ実行ファイルが名乗ったり名乗らなかったり
+        // した（実測。40回中28回が空）。名乗れなかった版は画面で「版を聞けません」となり、
+        // **選ぼうとしても断られる**。
+        //
+        // 開けたまま持てば競争そのものが起きない。**相手の版に関わらず効く**ので、
+        // 既に保管庫に居る古い版もこれで読めるようになる。
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        // 名乗りだけが要る。相手の泣き言はここでは読まない
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    let line = text.lines().next()?;
-    let hello: serde_json::Value = serde_json::from_str(line).ok()?;
+    let stdout = child.stdout.take()?;
+
+    // **1行だけ読んで、あとは畳む。** 相手は指示を待ち続けるので、`output()` のように
+    // 終わりを待つと返ってこない。読み終わりを別の糸で待ち、時間で見切る
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let read = std::io::BufRead::read_line(&mut std::io::BufReader::new(stdout), &mut line);
+        let _ = tx.send(read.ok().map(|_| line));
+    });
+    let line = rx.recv_timeout(PARSER_HELLO_TIMEOUT).ok().flatten();
+
+    // **必ず畳む。** 残すと、版を1つ聞くたびにパーサが1本増える
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let hello: serde_json::Value = serde_json::from_str(line?.trim()).ok()?;
     let version = hello.get("parser_version")?.as_str()?;
     (!version.is_empty()).then(|| VersionId::new(version))
 }
+
+/// 名乗りを待つ上限。
+///
+/// 版を1つ聞くたびに払う時間なので、長くすると一覧そのものが遅くなる（保管庫に
+/// 27版あれば27回払う）。名乗りは起動直後の1行なので、届くなら一瞬で届く。
+const PARSER_HELLO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// 3本のうち、その名前のものの版を聞く。
 pub fn version_of(binary: &Path) -> Option<VersionId> {
@@ -1925,6 +1956,43 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(5));
         assert_eq!(started_at(), first);
         assert!(first > 0);
+    }
+
+    /// **版を聞くとき、相手の標準入力を閉じない**（`手元の新しい版をGUIだけで効かせる`）。
+    ///
+    /// 閉じると、古いパーサは名乗る前に `process::exit(0)` を呼んで消えることがある。
+    /// 同じ実行ファイルが名乗ったり名乗らなかったりし、**名乗れなかった版は画面で
+    /// 選ぼうとしても断られる**——利用者からは「ドロップダウンが反応しない」に見える。
+    ///
+    /// **その負け方をそのまま写した相手**で見張る。閉じる形へ戻すとここが落ちる。
+    #[cfg(unix)]
+    #[test]
+    fn 版を聞くときは相手の標準入力を閉じない() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("parser-stdin");
+        let stub = dir.join(BINARIES[2]);
+        // **相手から見た標準入力が何かを、そのまま名乗らせる。**
+        //
+        // 「名乗る前に終わる相手」を写そうとすると、背景へ逃がした子が親の終了後も
+        // 書けてしまい、**本物の負け方にならない**（一度そう書いて空振りした）。
+        // 見たいのは「閉じていないこと」そのものなので、それを直接聞く
+        let script = r#"#!/bin/sh
+if [ "$(readlink /proc/$$/fd/0)" = "/dev/null" ]; then
+  printf '%s\n' '{"ev":"hello","protocol_version":1,"parser_version":"0.0.0"}'
+else
+  printf '%s\n' '{"ev":"hello","protocol_version":1,"parser_version":"9.9.9"}'
+fi
+"#;
+        std::fs::write(&stub, script).expect("置けること");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+            .expect("実行できること");
+
+        assert_eq!(
+            version_of_parser(&stub),
+            Some(VersionId::new("9.9.9")),
+            "相手の標準入力が /dev/null になっている（閉じて起こしている）"
+        );
     }
 
     #[test]
