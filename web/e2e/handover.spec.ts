@@ -87,4 +87,12 @@ test('押すと本当に入れ替わり、同じ入口で戻ってくる', async
   // 同じ入口で戻ってきている
   const response = await request.get('/api/me')
   expect(response.ok()).toBe(true)
+
+  // **ブラウザは自分で繋ぎ直す。** 読み込み直しを促す前に、まず線が戻ることを見る
+  // ——戻らないなら「押したら画面が死んだ」と同じ体験になる
+  await expect(page.getByTestId('connection-status')).toHaveAttribute(
+    'data-status',
+    'open',
+    { timeout: 30_000 },
+  )
 })
