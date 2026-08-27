@@ -127,6 +127,7 @@ setsid nohup ./server/target/release/agentdashboard >> ~/agentdashboard-run.log 
 | 区分 | 旧名 | 新名 |
 |---|---|---|
 | 呼称 | PC 側エージェント／エージェント | **セッションホスト**（文脈が明らかなら「ホスト」） |
+| 呼称 | ハンバーガー／ハンバーガーボタン／フォルダのオーバーレイ | **サイドバー**（2026-08-27・利用者の指定） |
 | crate | `session-host-core` | `session-host-core` |
 | crate | `agentdashboard-agent`（`crates/agent`） | `session-host`（`crates/session-host`） |
 | 型 | `SessionHost` ／ `SessionHostHub` ／ `SessionHostConn` ／ `SessionHostCommand` | `SessionHost` ／ `SessionHostHub` ／ `SessionHostConn` ／ `SessionHostCommand` |
@@ -142,6 +143,11 @@ setsid nohup ./server/target/release/agentdashboard >> ~/agentdashboard-run.log 
 | セッション専用画面 | 単独で開いたほう（`/s/:cardId`）だけ |
 | PJT 専用画面 | `/p/:host/:project`。中にセッションの区画が横並びで入る |
 | 小窓（カード） | 一覧に並ぶタイル |
+| **サイドバー** | PJT 専用画面／セッション専用画面の**左から出てくるフォルダの区画**と、それを開け閉めするボタン |
+
+**サイドバーは「ハンバーガー」と呼ばない**（2026-08-27）。印が☰でなくなるので、名前だけが残ると次に読む人が画面上に無いものを探すことになる。
+
+**ただし「オーバーレイ」は一括で消さない。** サイドバーは**狭い窓では実際に被さる**（広い窓では右のものを押しのける）ので、狭い窓を指す用法の「オーバーレイ」は正しいまま残る。上の「守ること」と同じ理由で、1件ずつ意味を見る。
 
 **片方だけに実装して「入れた」と言わないこと。** 横並びは `SessionView` を `compact` で並べたものなので、**`SessionView` へ置けば両方に出る**——逆に、単独画面の側だけへ足すと横並びに出ない。
 
