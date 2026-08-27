@@ -75,16 +75,30 @@ impl Signal {
 
 /// パーサプロセスの入口。
 pub fn run() -> anyhow::Result<()> {
+    // **名乗りは、糸を1本も起こす前に出し切る。**
+    //
+    // `spawn_stdin_reader` は stdin が閉じていると即 EOF を見て `end_now()` を呼ぶ——
+    // あれは `std::process::exit(0)` なので、**本体がここへ辿り着く前にプロセスごと
+    // 消えうる**。間に挟まる `spawn_watcher` はファイルシステムを触るぶん遅いので、
+    // 負けるほうが普通にある。
+    //
+    // これは机上の心配ではない。**版を聞く道（`version::version_of_parser`）は、
+    // まさに stdin を閉じて起こす**ので毎回この競争を引いていた——実測で、同じ
+    // 実行ファイルが名乗ったり名乗らなかったりした。名乗れなかった版は画面で
+    // 「版を聞けません（transcript-parser）」となり、**選ぼうとしても断られる**。
+    //
+    // 順序を入れ替えるだけで消える。`emit` は書いたあと自分で `flush` するので、
+    // ここを抜けた時点で1行は外へ出ている。
+    emit(&ParserEvent::Hello {
+        protocol_version: PROTOCOL_VERSION,
+        parser_version: env!("CARGO_PKG_VERSION").to_string(),
+    });
+
     let (tx, rx) = mpsc::channel();
     let signal = Signal::default();
     spawn_stdin_reader(tx.clone());
     spawn_ticker(tx.clone(), signal.clone());
     let watcher = spawn_watcher(tx, signal.clone())?;
-
-    emit(&ParserEvent::Hello {
-        protocol_version: PROTOCOL_VERSION,
-        parser_version: env!("CARGO_PKG_VERSION").to_string(),
-    });
 
     pump(rx, watcher, signal);
     Ok(())
