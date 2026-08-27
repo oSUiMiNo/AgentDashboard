@@ -64,9 +64,14 @@ describe('版のカード', () => {
   it('いま動いている版と次に起こす版を別々に出す', async () => {
     // 切替のあと再起動の前はこの2つがずれる。選択中の印だけだと
     // 「押しても何も起きない」ように見える（設計§14）
+    // **走っている版は行から探さない**（設計§3）。行の印ではなく、応答が直接答える
+    // 値から出す——ソースビルドの機械では走ってきた実体が消えていて、どの行とも
+    // 一致しない
     show({
+      running: '0.1.1',
+      running_path: '/bin/agentdashboard',
       entries: [
-        entry({ version: '0.1.1', origin: 'installed', running: true, path: '/bin/agentdashboard' }),
+        entry({ version: '0.1.1', origin: 'installed', path: '/bin/agentdashboard' }),
         entry({ version: '0.2.0', selected: true }),
       ],
       selected: '0.2.0',
@@ -162,11 +167,78 @@ describe('版のカード', () => {
   it('走っている版より新しいときだけ取ってくる導線を出す', async () => {
     // **新着かどうかはサーバが決めない**（設計§8）
     show({
+      running: '0.1.1',
       entries: [entry({ version: '0.1.1', running: true })],
       latest: { version: '0.2.0', prerelease: false, has_artifact: true, checked_at: 1 },
     })
 
     expect(await screen.findByTestId('versions-update')).toHaveTextContent('0.2.0')
+  })
+
+  it('予約が1つも無くても、手元が新しければ押せる', async () => {
+    // **このイシューの本体。** ソースビルドの機械は予約を使わない（予約を入れると
+    // 以後の `make build` が効かなくなる）ので、予約を条件にすると**押すボタンが
+    // 永久に出てこない**——実際にそうなっていた
+    show({
+      running: '0.1.41',
+      selected: null,
+      next_version: '0.1.44',
+      next_path: '/home/me/AgentDashboard/server/target/release/agentdashboard',
+      next_differs: true,
+      stranded_cards: 3,
+    })
+
+    const block = await screen.findByTestId('versions-disk-update')
+    expect(block).toHaveTextContent('ディスクに新しい版があります')
+    expect(block).toHaveTextContent('0.1.44')
+    expect(screen.getByTestId('versions-restart')).toBeInTheDocument()
+    // 押す前に、何が失われるかが出る（今までの振る舞いを残す）
+    expect(screen.getByTestId('versions-stranded')).toHaveTextContent('3 枚')
+    // 予約は1つも作られていない
+    expect(screen.queryByTestId('versions-reservation')).toBeNull()
+  })
+
+  it('手元が新しくなければ、押すボタンは出ない', async () => {
+    // **逆側。** 差が無いのに出すと、押しても何も起きないボタンになる
+    show({ running: '0.1.44', selected: null, next_version: '0.1.44', next_differs: false })
+
+    expect(await screen.findByTestId('versions-running')).toBeInTheDocument()
+    expect(screen.queryByTestId('versions-disk-update')).toBeNull()
+    expect(screen.queryByTestId('versions-restart')).toBeNull()
+  })
+
+  it('走っている版が答えられていなければ、不明と出す', async () => {
+    // 行を探していたころは**いつもここへ落ちていた**
+    show({ running: '', entries: [entry({ version: '0.1.1' })] })
+
+    expect(await screen.findByTestId('versions-running')).toHaveTextContent('不明')
+  })
+
+  it('入れる側が置いた版も一覧に出るが、消せない', async () => {
+    // 以前は保管庫の版だけを出しており、ビルドした版が**どこにも現れなかった**。
+    // ただし走ってきた場所なので消させない
+    show({
+      running: '0.1.41',
+      entries: [
+        entry({ version: '0.1.44', origin: 'installed', path: '/build/agentdashboard' }),
+        entry({ version: '0.1.1' }),
+      ],
+    })
+
+    const list = await screen.findByTestId('versions-stored')
+    expect(list).toHaveTextContent('/build/agentdashboard')
+    expect(screen.getByTestId('versions-installed-mark')).toBeInTheDocument()
+    // 「消す」は保管庫の1行ぶんだけ
+    expect(screen.getAllByRole('button', { name: '消す' })).toHaveLength(1)
+  })
+
+  it('既定の選択肢に、次に起きる版の番号が添う', async () => {
+    // **選択肢は増やさない**（予約を作らせないため）。何番なのかを添えるだけ
+    show({ running: '0.1.41', selected: null, next_version: '0.1.44' })
+
+    expect(
+      await screen.findByRole('option', { name: '入れる側が置いた版のまま（0.1.44）' }),
+    ).toBeInTheDocument()
   })
 
   it('自分の機械向けの箱が無い版は勧めない', async () => {
