@@ -110,30 +110,34 @@ describe('PJT 専用画面', () => {
     expect(globalThis.localStorage.getItem('agentdashboard.project-files-open')).toBe('1')
   })
 
-  it('狭い画面では全幅のドロワーとして出る', async () => {
+  it('狭い画面では、左端の帯として出る（全画面にしない）', async () => {
     show()
     await userEvent.click(screen.getByTestId('project-files-toggle'))
     const panel = screen.getByTestId('project-files-panel')
 
     /*
-      **広い画面でも被さる**（設計§2）。移設前は「狭い画面だけドロワー、広い画面は
-      常設の列」だったが、作りを分けないことにした——「フォルダは被さる層、中身は
-      その下の面」という1つの心の模型がそのまま通る。
+      **2026-08-28 に期待が変わった。** それまでは `inset-0` で画面全体を覆っていたが、
+      実機で触って3つの不具合になった——裏が何も見えない・アプリのヘッダごと覆うので
+      切り替えボタンへ届かない・被さっているのか画面が切り替わったのか分からない。
+
+      利用者が示した参考（ChatGPT のウェブアプリ）に合わせて、**左端の帯**にした。
+      `inset-y-0 left-0` なので `right` は自動——**裏の本文がその場に残って見える。**
 
       広い画面が `absolute` で `fixed` ではないのは、**`fixed` のままだと画面の上端から
       被さってアプリのヘッダ（設定・アカウント）まで覆う**ため。`absolute` なら
       取り合いの器の左端と高さがそのまま枠になる。
-
-      幅が CSS 変数なのは、利用者が縁で決めるから。**`style={{ width }}` を直に
-      当てると、狭い画面の `fixed inset-0` で `right` が捨てられて全幅のドロワーが
-      帯に化ける**
     */
     expect(panel.className).toContain('fixed')
-    expect(panel.className).toContain('inset-0')
+    expect(panel.className).toContain('inset-y-0')
+    expect(panel.className).toContain('left-0')
+    // **全画面に戻したら落ちること。** これがこの1本の仕事
+    expect(panel.className).not.toContain('inset-0 ')
+    // どれだけ狭い機械でも、裏が15%は見えている
+    expect(panel.className).toContain('w-[min(85vw,20rem)]')
     expect(panel.className).toContain('md:absolute')
     expect(panel.className).not.toContain('md:static')
     expect(panel.className).toContain('md:w-[var(--files-folder-w,20rem)]')
-    // 狭い画面用の閉じる操作がある（切り替えボタンが隠れる位置に来るため）
+    // 狭い画面用の閉じる操作がある（参考の ✕ にあたるもの）
     expect(screen.getByTestId('project-files-close')).toBeInTheDocument()
   })
 

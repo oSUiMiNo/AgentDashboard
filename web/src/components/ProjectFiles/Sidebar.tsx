@@ -38,10 +38,27 @@
  * 場所取りだけがパネルから遅れる。パネルの側は CSS 変数で即座に変わるため、
  * **合わせるには場所取りの動きを止めるしかない**。
  *
- * # 狭い窓は、1バイトも変えていない
+ * # 狭い窓は「左端の帯」。全画面にしない
  *
- * `fixed inset-0 z-40` も `x` のスライドも出入りの扱いもそのまま。**この形を採る最大の
- * 理由がこれ**で、狭い窓の作りに触らずに広い窓だけを変えられる。
+ * **2026-08-28 に直した。** それまでは `fixed inset-0` で**画面全体を覆っていた**が、
+ * 実機で触って3つの不具合になった——裏が何も見えない・アプリのヘッダごと覆うので
+ * 切り替えボタンへ届かない・被さっているのか画面が切り替わったのか分からない。
+ *
+ * **利用者が示した参考は ChatGPT のウェブアプリ**（`参考/` の画面録画）。狭い窓での
+ * 振る舞いはこうなっている。
+ *
+ * | 何 | どう |
+ * |---|---|
+ * | 幅 | **約 320px の帯**（窓 740px に対して 43%）。全画面にはしない |
+ * | 裏の本文 | **その場に残って見えている**（押しのけない） |
+ * | 膜（暗くする覆い） | **無い** |
+ * | 閉じ方 | **サイドバーの中の閉じるボタン** |
+ *
+ * そのまま写した——`w-[min(85vw,20rem)]` は、ふだんは 320px で、**画面が 376px より
+ * 狭いときだけ 85% に縮む**。どれだけ狭い機械でも**裏が15%は見えている**ので、
+ * 「画面が切り替わった」と読み違えることがない。
+ *
+ * **広い窓のほうは1バイトも変えていない**（下記の場所取り）。
  *
  * # 幅は CSS 変数で運ぶ
  *
@@ -124,7 +141,7 @@ export function Sidebar({
         exit={{ x: '-100%' }}
         transition={スライド}
         style={{ '--files-folder-w': `${width}px` } as CSSProperties}
-        className="bg-background fixed inset-0 z-40 flex min-h-0 flex-col gap-2 p-3 md:absolute md:inset-y-0 md:right-auto md:left-0 md:w-[var(--files-folder-w,20rem)] md:p-0 md:pr-3"
+        className="bg-background fixed inset-y-0 left-0 z-40 flex w-[min(85vw,20rem)] min-h-0 flex-col gap-2 p-3 md:absolute md:w-[var(--files-folder-w,20rem)] md:p-0 md:pr-3"
       >
         <div className="flex items-center gap-2 md:hidden">
           <span className="text-sm font-semibold">ファイル</span>
