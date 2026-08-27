@@ -819,7 +819,7 @@
     画像は**CSS では作れないもの＝型抜きの不規則な縁**だけを担う。
 
     平らな角丸長方形なら CSS が1行で出せるので、そちらは素材にする意味が無い
-    （`DESIGN.md` §14 Small-Size First の門。試作1枚目を実寸で見て落とした）。
+    （`DESIGN.md` §17 Small-Size First。門は §18.4。試作1枚目を実寸で見て落とした）。
   */
   background: var(--tile-accent);
   mask-image: url('./assets/tile/tag-plate.png');

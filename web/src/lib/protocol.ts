@@ -220,7 +220,7 @@ export type ClientMessage =
   | { t: 'revive_session'; card_id: CardId }
   | { t: 'kill'; card_id: CardId }
   | { t: 'archive'; card_id: CardId }
-  // 以下はサーバ側の実装がフェーズ3〜4。型だけ先に揃えてある
+  // 以下は初期実装でフェーズ3〜4に回した3つ。**いまは全部サーバ側も配線済み**
   | { t: 'sub_transcript'; card_id: CardId }
   | { t: 'unsub_transcript'; card_id: CardId }
   | { t: 'send_input'; card_id: CardId; text: string }
@@ -232,7 +232,7 @@ export type ServerMessage =
   | { t: 'session_upsert'; session: SessionMeta }
   | { t: 'session_removed'; card_id: CardId }
   | { t: 'error'; card_id: CardId | null; message: string }
-  // 以下はサーバ側の実装がフェーズ2〜5。届いても落ちないように型は持っておく
+  // 以下は初期実装でフェーズ2〜5に回したもの。**いまは全部サーバ側も配線済み**
   | {
       t: 'status'
       card_id: CardId

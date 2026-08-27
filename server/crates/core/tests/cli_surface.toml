@@ -26,7 +26,7 @@
 #
 # `/agent/ws`（PC の受け口）と `/hook/…`（フックの受け口）は**画面の口ではない**ので
 # 範囲外（§11-3）。`GET /ws` は WebSocket の入口そのもので、そこを流れる操作は
-# kind = "ws" の12行が数える（cli_surface.rs の REST以外）。
+# kind = "ws" の13行が数える（cli_surface.rs の REST以外）。
 
 [[entry]]
 kind = "rest"
