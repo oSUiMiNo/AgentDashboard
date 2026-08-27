@@ -622,6 +622,20 @@ async function 幅(box: Locator): Promise<number> {
   return rect.width
 }
 
+/** 位置ごと欲しいとき。**押しのけているかは、幅ではなく左端で分かる。** */
+async function 矩形(box: Locator) {
+  const rect = await box.boundingBox()
+  if (!rect) {
+    throw new Error('位置が取れません')
+  }
+  return rect
+}
+
+/** 左端。押しのけの前後で比べるためだけに使う。 */
+async function 左端(box: Locator): Promise<number> {
+  return (await 矩形(box)).x
+}
+
 /** 縁をマウスで掴んで動かす。**しきい値（3px）を必ず超える刻みで運ぶ。** */
 async function 縁を引く(page: Page, edge: 'folder' | 'file', dx: number) {
   const 縁 = page.locator(`[data-testid="files-resizer"][data-edge="${edge}"]`)
@@ -717,6 +731,70 @@ test('縁を掴むと、ファイルの中身の列の幅も変わる', async ({
   await 縁を引く(page, 'file', -100)
 
   expect(await 幅(column), '左へ引けば縮むこと').toBeLessThan(前)
+})
+
+test('広い窓では、サイドバーが被さらずに右のものを押しのける', async ({
+  page,
+}) => {
+  /*
+    **計画フェーズ7 の本体。** 0.1.41 までは広い窓でも被せていたが、サイドバーは
+    ファイルを選んでも畳まないので**開いたまま読む時間が長い**——被さっている限り、
+    その裏のファイルの中身は読めない。
+
+    **「見えているか」では言えない。** ずれずに被さっていても、手前のパネルは普通に
+    描かれるので画面は破綻しない。**左端を数字で測り、重なっていないことまで見る。**
+
+    レールはセッションが1本も無いと描かれないので、ここだけは起こしてから測る。
+  */
+  await openDashboard(page)
+  await spawnSession(page, PROJECT_DIR)
+  const group = page.locator(
+    `[data-testid="project-group"][data-project="${PROJECT_DIR}"]`,
+  )
+  await group.click({ position: { x: 5, y: 5 } })
+  await expect(page.getByTestId('group-view')).toBeVisible()
+
+  await page.getByTestId('project-files-toggle').click()
+  const panel = page.getByTestId('project-files-panel')
+  await panel.getByTestId('folder-entry').filter({ hasText: 'MyDocs' }).click()
+  await panel.getByTestId('folder-entry').filter({ hasText: LONG }).click()
+  const column = page.getByTestId('file-column')
+  const rail = page.getByTestId('group-rail')
+  await expect(column).toBeVisible()
+
+  // **畳んだ状態を基準にする。** 開いた側だけ見ても、寄ったのかどうかは言えない
+  await page.getByTestId('project-files-toggle').click()
+  await expect(panel).toBeHidden()
+  const 畳んだときの列 = await 左端(column)
+  const 畳んだときのレール = await 左端(rail)
+
+  await page.getByTestId('project-files-toggle').click()
+  await expect(panel).toBeVisible()
+
+  /*
+    **滑り終わるまで待つ**（220ms のスライド）。「増えたか」で待つと**1フレーム目で
+    条件が満たされ、途中の値を掴む**——実際に踏んだ（336 のところで 285 を測った）。
+    **落ち着いた値そのもので待つ。**
+
+    寄る量は**フォルダの幅（既定 320）＋ 列のあいだの間隔（`gap-4` ＝ 16）**。
+    場所取りがフォルダと同じ幅を取るので、この足し算で決まる
+  */
+  await expect
+    .poll(async () => Math.round((await 左端(column)) - 畳んだときの列), {
+      message: '中身の列が、フォルダの幅ぶん右へ寄ること',
+    })
+    .toBe(336)
+  expect(
+    (await 左端(rail)) - 畳んだときのレール,
+    'セッションのレールも同じだけ寄ること',
+  ).toBeCloseTo(336, -1)
+
+  // **被さっていないこと。** 寄ったうえで、なお重なっていたら押しのけていない
+  const サイドバー = await 矩形(panel)
+  expect(
+    サイドバー.x + サイドバー.width,
+    'サイドバーの右端が、中身の列の左端を越えないこと',
+  ).toBeLessThanOrEqual((await 左端(column)) + 1)
 })
 
 test('下限より狭くも、上限より広くもできない', async ({ page }) => {
