@@ -169,6 +169,54 @@ describe('ファイルの見せ方', () => {
     expect(await screen.findByTestId('file-truncated')).toBeInTheDocument()
   })
 
+  it('大きい Markdown は整形せずに始まり、なぜそうしたかが出る', async () => {
+    // **`bytes` で決まる**ので、材料そのものを大きくしなくても道は通る。
+    // 整形は大きさに対して超線形に伸び、3 MiB では終わらない（実測。`FileView.tsx`）
+    serve({
+      path: `${ROOT}/大きい.md`,
+      text: '# 大きい文書',
+      truncated: false,
+      bytes: 512 * 1024,
+    })
+    show(`${ROOT}/大きい.md`)
+
+    expect(await screen.findByTestId('file-raw')).toHaveTextContent('# 大きい文書')
+    expect(screen.queryByTestId('file-markdown')).toBeNull()
+    // **黙って生テキストにしない。** 何も言わずに出すと、整形が壊れたように見える
+    expect(screen.getByTestId('file-heavy')).toBeInTheDocument()
+  })
+
+  it('大きくても、整形そのものは禁じない', async () => {
+    serve({
+      path: `${ROOT}/大きい.md`,
+      text: '# 大きい文書',
+      truncated: false,
+      bytes: 512 * 1024,
+    })
+    show(`${ROOT}/大きい.md`)
+
+    await screen.findByTestId('file-raw')
+    await userEvent.click(screen.getByTestId('file-toggle-raw'))
+
+    // 待つと決めるのは利用者。押せば整形するし、断り書きは引っ込む
+    expect(await screen.findByTestId('file-markdown')).toBeInTheDocument()
+    expect(screen.queryByTestId('file-heavy')).toBeNull()
+  })
+
+  it('上限の内側なら、今までどおり整形で始まる', async () => {
+    serve({
+      path: `${ROOT}/計画.md`,
+      text: '# 計画',
+      truncated: false,
+      bytes: 256 * 1024,
+    })
+    show()
+
+    // 境目ちょうどは整形の側。**上げたことで普段の文書の出方を変えない**
+    expect(await screen.findByTestId('file-markdown')).toBeInTheDocument()
+    expect(screen.queryByTestId('file-heavy')).toBeNull()
+  })
+
   it('読めないときは理由がそのまま出る', async () => {
     vi.stubGlobal(
       'fetch',
