@@ -42,6 +42,13 @@
 [[entry]]
 path = "server/crates/core/src/cli.rs"
 fn = "run"
+expr = '''session_host_core::version::running_binary()'''
+class = "unused-value"
+reason = "返り値は使わない。ここで一度触ることで「走っている実行ファイルの実パスとビルド時刻」を確定させるのが目的。あとから聞くと make build に実体を消されていて (deleted) しか返らない"
+
+[[entry]]
+path = "server/crates/core/src/cli.rs"
+fn = "run"
 expr = '''session_host_core::version::started_at()'''
 class = "unused-value"
 reason = "返り値は使わない。ここで一度触ることで「プロセスの起動時刻」を確定させるのが目的で、失敗しうる型ですらない"

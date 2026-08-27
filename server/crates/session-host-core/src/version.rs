@@ -260,11 +260,77 @@ pub fn resolve_target(state_dir: &Path) -> Option<PathBuf> {
     None
 }
 
+/// 入れる側（またはビルド）が置いた実行ファイル。
+///
+/// **実在するときだけ答える。** [`resolve_target`] がポインタの先を `is_file()` で
+/// 確かめているのと同じ理由——**無い場所を「次に起きる版」として返すと、押す前の門が
+/// 「起動できません」と断り、入れ替えそのものができなくなる**。行き先が無いなら
+/// 「行き先なし」と答えて、今までどおり落ちる道へ倒すのが正しい。
+pub fn installed_binary() -> Option<PathBuf> {
+    let path = source_dir()?.join(BINARIES[0]);
+    path.is_file().then_some(path)
+}
+
+/// **いま起こし直したら、どれで立ち上がるか。**
+///
+/// 画面が知りたいのは「予約があるか」ではなく、この問いの答えである。
+///
+/// | 構成 | 答え |
+/// |---|---|
+/// | 予約あり（配った版の標準） | 保管庫のその版（[`resolve_target`]） |
+/// | **予約なし（ソースビルドの機械）** | **入れる側／ビルドが置いた版** |
+///
+/// **起動時の乗り換えと同じ関数を通す。** 別々に組み立てると、**画面が言った版と実際に
+/// 立ち上がる版が食い違う**——いちばん信用を失う壊れ方である。起動時はこの答えが
+/// 「いまの自分」と同じことが普通なので、[`is_other_binary`] が乗り換えを止める。
+pub fn next_binary(state_dir: &Path) -> Option<PathBuf> {
+    resolve_target(state_dir).or_else(installed_binary)
+}
+
+/// 走っているものと、次に起きるものが**違うか**（設計§5）。
+///
+/// # 実パスの比較では足りない
+///
+/// 版番号を上げずに `make build` を繰り返す運用があるので、**パスも版名も同じで中身だけ
+/// 新しい**状態になる。実パスで比べても差が出ない。
+///
+/// # 保管庫を見ない
+///
+/// [`snapshot`] は `versions/<版>/` が既にあると上書きしないので、**版番号を上げない
+/// ビルドは保管庫に一切反映されない**。保管庫から判定を作ると、この運用では永久に
+/// 「変わっていない」と答える。**覚えた値と、いまのファイルだけを見る。**
+///
+/// 材料を受け取る純関数にしてあるのは、3通り（版名違い・中身だけ違い・同じ）を
+/// 単体で固めるため。
+pub fn differs(
+    running_version: &VersionId,
+    running: &RunningBinary,
+    next_version: Option<&VersionId>,
+    next_built_at: Option<Timestamp>,
+) -> bool {
+    // 行き先の版が読めないなら、違うとは言えない。**分からないまま押させない**
+    let Some(next_version) = next_version else {
+        return false;
+    };
+    if next_version != running_version {
+        return true;
+    }
+    // 版名が同じなら、中身が入れ替わったかどうかはビルド時刻でしか分からない。
+    // どちらかが読めなければ**違わない側へ倒す**（同上）
+    match (running.built_at, next_built_at) {
+        (Some(running_at), Some(next_at)) => running_at != next_at,
+        _ => false,
+    }
+}
+
 /// 行き先が「いまの自分」と違うか。
 ///
 /// **版名ではなく実パスで比べる。** 手元でビルドした版と配った同じ番号の版は同じ名前を
 /// 名乗る（ワークスペースの版は1箇所にしか無い）ので、名前で比べると乗り換えが起きない。
 /// 解決に失敗したときは**乗り換えないほうへ倒す**——分からないまま乗り換えるより安全。
+///
+/// **これは起動時の判定である。** 走行中の入れ替えは [`differs`] を使う——実機では
+/// **同じパスに別の中身が乗る**ので、パスの比較では差が出ない。
 pub fn is_other_binary(target: &Path) -> bool {
     let Ok(current) = std::env::current_exe() else {
         return false;
@@ -278,7 +344,7 @@ pub fn is_other_binary(target: &Path) -> bool {
 /// ので、名前で比べると別物を同じと見なしてしまう。解決に失敗したパスは書かれたまま
 /// 比べる——`canonicalize` はハードリンクを解決しないので、テストが版フォルダをリンクで
 /// 作っても実パスの比較は成立する（設計§21-7）。
-fn same_path(left: &Path, right: &Path) -> bool {
+pub fn same_path(left: &Path, right: &Path) -> bool {
     real_path(left) == real_path(right)
 }
 
@@ -377,8 +443,51 @@ pub fn running_version() -> VersionId {
 /// ソースからビルドしたものなら、自分がビルドした時刻。どちらも「**この実行ファイルは
 /// いつのものか**」に答えている。
 pub fn binary_at() -> Option<Timestamp> {
-    let path = std::env::current_exe().ok()?;
-    file_time(&path)
+    running_binary().built_at
+}
+
+/// 走っている実行ファイルについて、**起動時に一度だけ**解いた答え。
+///
+/// # なぜ覚えるのか
+///
+/// **`make build` は走っているプロセスの実体を消す**（同じ名前の新しい実体を作って
+/// 差し替える）。そのあと `current_exe()` を読むと、カーネルは行き先に `(deleted)` を
+/// 付けて答える——**存在しないパス**なので、そこから先が全部倒れる。
+///
+/// | 聞き直すと | どうなるか |
+/// |---|---|
+/// | `canonicalize()` | 失敗し、`(deleted)` 付きの生の文字列が残る。どの版の行とも一致しない |
+/// | `metadata()` | 失敗し、ビルド時刻が `null` になる |
+///
+/// **起動した瞬間はまだ差し替えられていない**ので、そのとき一度だけ聞けば正しい答えが
+/// 手に入る。[`started_at`] と同じ性質（起動時に決まって以後動かない）なので、同じ作法で
+/// 持つ。
+#[derive(Debug, Clone)]
+pub struct RunningBinary {
+    /// 解決済みの実パス。解決に失敗したときだけ `current_exe()` の生の値。
+    pub path: Option<PathBuf>,
+    /// ビルド時刻（ファイルの更新時刻）。
+    pub built_at: Option<Timestamp>,
+}
+
+/// 走っている実行ファイルの素性（起動時に一度だけ決まる）。
+pub fn running_binary() -> &'static RunningBinary {
+    static RUNNING: std::sync::OnceLock<RunningBinary> = std::sync::OnceLock::new();
+    RUNNING.get_or_init(|| {
+        let raw = std::env::current_exe().ok();
+        RunningBinary {
+            built_at: raw.as_deref().and_then(file_time),
+            path: raw.map(|path| real_path(&path)),
+        }
+    })
+}
+
+/// **行き先の**実行ファイルができた時刻。読めなければ `None`。
+///
+/// [`binary_at`] は走っている自分のもので、こちらは**これから起きるほう**。
+/// 版名が同じでも中身が入れ替わったかを見分けるのに要る（[`differs`]）。
+pub fn built_at_of(path: &Path) -> Option<Timestamp> {
+    file_time(path)
 }
 
 /// ファイルの更新時刻を epoch ミリ秒で読む。
@@ -557,10 +666,21 @@ fn entry_of(
     pointer: Option<&Path>,
 ) -> protocol::VersionEntry {
     let binary = version_dir.join(BINARIES[0]);
+    // **パスが一致しただけでは「走っている」と言わない**（設計§3）。
+    //
+    // `make build` は**同じパスに別の中身**を置く。パスだけで比べると、ビルドした
+    // ばかりの行が「これが走っています」と嘘をつく。版名を足しても足りない——版番号を
+    // 上げずに建て直す運用があるので、**中身が変わったかはビルド時刻でしか分からない**。
+    //
+    // 読めないときは印を付けない側へ倒す。**この印は「消せない」を決める材料ではない**
+    // （そちらは `remove_version` が自分で確かめる）ので、外しても安全側に落ちる。
+    let running = current_exe.is_some_and(|current| same_path(&binary, current))
+        && version == running_version()
+        && built_at_of(&binary) == running_binary().built_at;
     protocol::VersionEntry {
         version,
         origin,
-        running: current_exe.is_some_and(|current| same_path(&binary, current)),
+        running,
         selected: pointer.is_some_and(|pointer| same_path(&binary, pointer)),
         usable: reason.is_none(),
         size_bytes: size_of(version_dir),
@@ -580,7 +700,9 @@ fn entry_of(
 /// 1つの版あたり3回。保管庫の版数はせいぜい数個なので毎回聞いてよい（実測は設計§22）。
 /// 数が増えたら控えを持つことになるが、**先に測ってから決める。**
 pub fn list_versions(state_dir: &Path, source: Option<&Path>) -> Vec<protocol::VersionEntry> {
-    let current_exe = std::env::current_exe().ok();
+    // **聞き直さない。** 差し替えられていると `(deleted)` 付きの生の文字列が返り、
+    // どの行とも一致しなくなる（設計§2）
+    let current_exe = running_binary().path.clone();
     let pointer = read_pointer(state_dir);
     let mut entries = Vec::new();
 
@@ -839,7 +961,13 @@ pub fn remove_version(state_dir: &Path, version: &VersionId) -> Result<(), Strin
     };
 
     let binary = dir.join(BINARIES[0]);
-    if std::env::current_exe().is_ok_and(|current| same_path(&binary, &current)) {
+    // **聞き直さない**（設計§2）。差し替えられていると `(deleted)` 付きの生の文字列が
+    // 返り、**守りが静かに外れる**——走っている版を消せてしまう
+    if running_binary()
+        .path
+        .as_deref()
+        .is_some_and(|current| same_path(&binary, current))
+    {
         return Err("いま走っている版は消せません".to_string());
     }
 
@@ -1797,5 +1925,89 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(5));
         assert_eq!(started_at(), first);
         assert!(first > 0);
+    }
+
+    #[test]
+    fn 走っている実行ファイルの素性は一度決まったら動かない() {
+        // 差し替えられたあとに聞き直すと `(deleted)` になる。**起動時の答えを持ち続ける**
+        let first = running_binary();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let again = running_binary();
+        assert_eq!(first.path, again.path);
+        assert_eq!(first.built_at, again.built_at);
+    }
+
+    /// 走っているものと次に起きるものが違うか（設計§5）。**3通りを固める。**
+    mod 変わったかどうか {
+        use super::*;
+
+        fn 走っているもの(built_at: Option<Timestamp>) -> RunningBinary {
+            RunningBinary {
+                path: Some(PathBuf::from("/bin/agentdashboard")),
+                built_at,
+            }
+        }
+
+        #[test]
+        fn 版名が違えば違う() {
+            assert!(differs(
+                &VersionId::new("0.1.41"),
+                &走っているもの(Some(100)),
+                Some(&VersionId::new("0.1.44")),
+                Some(100),
+            ));
+        }
+
+        #[test]
+        fn 版名が同じでもビルド時刻が違えば違う() {
+            // **版番号を上げないソースビルドがこれ。** ここを落とすと、実機は
+            // 何度建て直しても「変わっていない」と答える
+            assert!(differs(
+                &VersionId::new("0.1.44"),
+                &走っているもの(Some(100)),
+                Some(&VersionId::new("0.1.44")),
+                Some(200),
+            ));
+        }
+
+        #[test]
+        fn どちらも同じなら違わない() {
+            assert!(!differs(
+                &VersionId::new("0.1.44"),
+                &走っているもの(Some(100)),
+                Some(&VersionId::new("0.1.44")),
+                Some(100),
+            ));
+        }
+
+        #[test]
+        fn 分からないときは違わない側へ倒す() {
+            // 行き先の版が読めない／時刻が読めない。**分からないまま押させない**
+            assert!(!differs(
+                &VersionId::new("0.1.44"),
+                &走っているもの(Some(100)),
+                None,
+                Some(200),
+            ));
+            assert!(!differs(
+                &VersionId::new("0.1.44"),
+                &走っているもの(None),
+                Some(&VersionId::new("0.1.44")),
+                Some(200),
+            ));
+        }
+    }
+
+    #[test]
+    fn 次に起きる版は予約があればそちら_無ければ入れる側() {
+        let state = temp_dir("next-binary");
+        // 予約が無いとき——入れる側（`current_exe` の隣）を指す
+        assert_eq!(next_binary(&state), installed_binary());
+
+        // 予約があるとき——そちらが勝つ
+        let target = state.join("agentdashboard");
+        std::fs::write(&target, b"x").expect("置けること");
+        write_pointer(&state, Some(&target));
+        assert_eq!(next_binary(&state), Some(target));
     }
 }
