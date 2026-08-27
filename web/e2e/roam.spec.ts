@@ -31,16 +31,26 @@ import { ROAM_MAX } from '../src/stores/roam'
 const 跳ねの周期 = 4_800
 
 /**
- * 撃たれるまでの周期。**待つのはこちらであって、跳ねの周期ではない**（2026-08-28）。
+ * 「線が1本出るまで」の上限（2026-08-28）。
  *
  * 跳ねの折り返しは合図のままだが、`stores/roam.ts` の `scheduleRoam` が
  * **籤で半分見送り（`ROAM_SKIP`）、残りも 1.2〜3.6秒 遅らせて**撃つ。
- * したがって「1本目が出るまで」に要る時間は **跳ね2回ぶん＋遅れの上限**である。
  *
- * **跳ねの周期のまま待つと、落ちるのではなく揺れる**——本数を数える側が静かに
- * ばらつき、原因不明のフレーキーに見える。
+ * **平均で待ってはいけない。** 「跳ね2回ぶん＋遅れ」は**平均**であって上限ではない
+ * ——籤の外れが重なると足りず、**落ちるのではなく揺れる**（2026-08-28 に実際に
+ * 2本落ちた）。跳ね12回ぶん見ても1度も撃たない確率は `0.5^12 ＝ 0.02%` である。
+ *
+ * **happy path では待たない**（`toBeVisible` は出た瞬間に返る）ので、長くしても遅くならない。
  */
-const 発火の周期 = 跳ねの周期 * 2 + 3_600
+const 発火の上限 = 跳ねの周期 * 12 + 3_600
+
+/**
+ * 「止まっていること」を確かめる待ち。**こちらは必ず待ち切る**ので、上限とは分ける。
+ *
+ * **門が壊れていたら、この間にほぼ確実に出る**——跳ね8回ぶん見送り続ける確率は
+ * `0.5^8 ＝ 0.4%`。短くすると、**壊れているのに「たまたま出なかった」で緑になる**。
+ */
+const 止まりの確認 = 跳ねの周期 * 8 + 3_600
 
 test.afterEach(async ({ page }) => {
   // **設定を先に戻す。** 静けさはサーバ側に残るので、戻し忘れると後続の無関係な
@@ -85,7 +95,7 @@ test('跳ねるたびに線が飛び、しばらく画面に居る', async ({ pa
   // **周期の末尾で鳴る**ので、1周ぶん待つ。手で投げるのではなく、CSS の時計が
   // 一巡したことを合図にしている＝周期が繋がっていることの証拠になる
   await expect(page.getByTestId('roam-line').first()).toBeVisible({
-    timeout: 発火の周期 * 2,
+    timeout: 発火の上限,
   })
 
   // **控えめな量**（利用者の指定）。1回の跳ねで3本しか出ない
@@ -178,10 +188,13 @@ test('飛んでいる線が、スクロールできる範囲を押し広げな�
 
   await 待つカードを作る(page)
   await expect(page.getByTestId('roam-line').first()).toBeVisible({
-    timeout: 発火の周期 * 2,
+    timeout: 発火の上限,
   })
-  // 何本か溜まるまで待つ。1本だけだと、たまたま内側へ飛んだだけかもしれない
-  await page.waitForTimeout(発火の周期 * 1.5)
+  // 何本か溜まるまで待つ。1本だけだと、たまたま内側へ飛んだだけかもしれない。
+  // **固定待ちにしない**——籤で撃つので、決め打ちの秒数だと本数が静かにばらつく
+  await expect
+    .poll(async () => page.getByTestId('roam-line').count(), { timeout: 発火の上限 })
+    .toBeGreaterThanOrEqual(4)
 
   /*
     **`fixed` をやめた副作用を見る。**
@@ -209,7 +222,7 @@ test('「控えめ」では、カードは跳ね続けるが線は飛ばない',
   await openDashboard(page)
   await 待つカードを作る(page)
   await expect(page.getByTestId('roam-line').first()).toBeVisible({
-    timeout: 発火の周期 * 2,
+    timeout: 発火の上限,
   })
 
   await 静けさ(page, 'calm')
@@ -256,7 +269,7 @@ test('「控えめ」では、カードは跳ね続けるが線は飛ばない',
 
     門（JS）が守っているのは**新しく増えないこと**なので、そちらを数える。
   */
-  await page.waitForTimeout(発火の周期 * 1.5)
+  await page.waitForTimeout(止まりの確認)
   expect(await 残り.count()).toBeLessThanOrEqual(切り替えた時点)
 
   // **カードのほうは跳ね続ける。** ここが `tile.css` の「控えめ」との違い
@@ -289,7 +302,7 @@ test('OS が「動きを減らす」と言えば、飛んでいる線もその�
     飛んでいる最中に切り替えれば、**止めているのが CSS だと分かる**。
   */
   await expect(page.getByTestId('roam-line').first()).toBeVisible({
-    timeout: 発火の周期 * 2,
+    timeout: 発火の上限,
   })
 
   await page.emulateMedia({ reducedMotion: 'reduce' })
@@ -310,7 +323,7 @@ test('OS が「動きを減らす」と言えば、飛んでいる線もその�
 
     // 新しい線も出ない（跳ねが止まるので折り返しが鳴らない）
     const 前 = await page.getByTestId('roam-line').count()
-    await page.waitForTimeout(発火の周期 * 1.5)
+    await page.waitForTimeout(止まりの確認)
     expect(await page.getByTestId('roam-line').count()).toBeLessThanOrEqual(前)
   } finally {
     // **戻してから終える。** 置いていくと後続が巻き添えになる

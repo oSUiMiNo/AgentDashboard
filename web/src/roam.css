@@ -822,8 +822,15 @@
   /*
     **2本。** ひらひらをやめた代わりに退場が入った（2026-08-28）。
     **争わない**——生まれは `scale`、退場は `clip-path` で、動かす持ち物が違う。
-    **退場の名前は形ごとに違う**ので、下の `[data-shape]` の側で足す。
+
+    **退場の名前は変数で受ける。** 形ごとに違うキーフレームが要るが、
+    **`[data-shape]` の側へ `animation-name` を書いてはいけない**——詳細度が
+    `.roam-paper`（0,1,0）から `.roam-paper[data-shape='0']`（0,2,0）へ上がり、
+    **下の「止める規則」に勝ってしまう**。実際に `@media (prefers-reduced-motion)`
+    の `animation: none` が効かなくなった（2026-08-28 に E2E が捕まえた）。
+    **止める道は2枚**（JS の門と CSS の打ち消し）で、こちらはその2枚目である。
   */
+  animation-name: roam-birth, var(--roam-exit);
   animation-timing-function: ease-in-out, ease-in-out;
   animation-iteration-count: 1, 1;
   /* **どちらも `none`。** 退場が効くのは遅れが明けた最後の 1.13秒だけで、
@@ -858,7 +865,7 @@
   見えない。**
 */
 .roam-paper[data-shape='0'] {
-  animation-name: roam-birth, roam-exit-0;
+  --roam-exit: roam-exit-0;
   clip-path: polygon(
     0% 35.72%,
     8.33% 47.05%,
@@ -890,7 +897,7 @@
 }
 
 .roam-paper[data-shape='1'] {
-  animation-name: roam-birth, roam-exit-1;
+  --roam-exit: roam-exit-1;
   clip-path: polygon(
     0% 49.53%,
     8.33% 43.27%,
@@ -922,7 +929,7 @@
 }
 
 .roam-paper[data-shape='2'] {
-  animation-name: roam-birth, roam-exit-2;
+  --roam-exit: roam-exit-2;
   clip-path: polygon(
     0% 48.61%,
     8.33% 33.36%,

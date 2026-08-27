@@ -413,15 +413,47 @@ describe('層は場所を取らず、何も塗らない', () => {
 
     // **紙片に載る動きは2本**（生まれと退場）。**動かす持ち物が違う**ので
     // `scale` を争わない——生まれは `scale`、退場は `clip-path` である
+    const [紙] = 当たる('.roam-paper')
+    expect(紙.body).toContain('animation-name: roam-birth, var(--roam-exit)')
+    // 形ごとに違うのは**変数の中身だけ**
     for (const 形 of [0, 1, 2]) {
       const [規則] = 当たる(`[data-shape='${形}']`)
-      expect(規則.body).toContain(`animation-name: roam-birth, roam-exit-${形}`)
+      expect(規則.body).toContain(`--roam-exit: roam-exit-${形}`)
     }
     // **退場は `scale` に一切触らない**（触ると生まれと争う）
     for (const 形 of [0, 1, 2]) {
       const 退 = new RegExp(`@keyframes\\s+roam-exit-${形}\\s*\\{[\\s\\S]*?\\n\\}`).exec(素のCSS())?.[0] ?? ''
       expect(退).not.toBe('')
       expect(退).not.toContain('scale')
+    }
+  })
+
+  it('止める規則に勝てる場所にしか、動きの名前を書かない', () => {
+    /*
+      **2026-08-28 に実際に踏んだ後戻りへの番人。**
+
+      退場のキーフレームは形ごとに違うので、`.roam-paper[data-shape='0']` の側へ
+      `animation-name` を書いた。**すると詳細度が（0,1,0）から（0,2,0）へ上がり、
+      下の「止める規則」に勝ってしまった**——`@media (prefers-reduced-motion: reduce)`
+      の `animation: none` が効かず、**OS が「動きを減らす」と言っても紙片が止まらなく
+      なった**（E2E が捕まえた。単体の CSS 台帳は「規則が在ること」しか見ておらず、
+      **どちらが勝つかを見ていなかった**）。
+
+      **止める道は2枚**（JS の門と CSS の打ち消し）で、これはその2枚目を守る検査である。
+      **`animation-name` は、打ち消しと同じかそれより弱い場所にだけ書く。**
+    */
+    const 打ち消し = [
+      ...素のCSS().matchAll(/([^{}]*)\{[^{}]*animation:\s*none/g),
+    ].map((m) => m[1].trim())
+    expect(打ち消し.length).toBeGreaterThan(0)
+    // 打ち消しが名指ししているのは、属性の付かない `.roam-line` / `.roam-paper` である
+    for (const 選 of 打ち消し) {
+      expect(選).not.toContain('[data-shape')
+    }
+    // **動きの名前を、属性付きの選び方の中で書いていない**
+    for (const [, 選, 中身] of 素のCSS().matchAll(/([^{}]*)\{([^{}]*)\}/g)) {
+      if (!/animation-name\s*:/.test(中身)) continue
+      expect(選).not.toContain('[data-shape')
     }
   })
 
@@ -513,6 +545,34 @@ describe('層は場所を取らず、何も塗らない', () => {
       尺たち.add([...退.matchAll(/^\s*([\d.]+)%\s*\{/gm)].map((m) => m[1]).join(','))
     }
     expect(尺たち.size).toBe(1)
+  })
+
+  it('飛んでいる間、濃さが時間で動かない', () => {
+    /*
+      **0.1.43 を実物で見た利用者の指摘「線が半透明になることがある」への番人**
+      （要件14-4）。
+
+      半透明に見えていた実体は `roam-flutter` の縦潰しで、**それは 14-1 で消えた**。
+      ここが守るのは**濃さの側**——`roam-fade` の中間へ別の `opacity` を差し込むと落ちる。
+
+      **生まれ際の淡さは残す。** 今回の指定は「消えるとき」の話で（要件14-8）、
+      **入りの 1.8% は「風に飛ばされた紙片が現れる」ための演出**である。
+      見るのは**入り終わってから先が一定**であること。
+    */
+    const 淡 = /@keyframes\s+roam-fade\s*\{[\s\S]*?\n\}/.exec(素のCSS())?.[0] ?? ''
+    expect(淡).not.toBe('')
+    const 段 = [...淡.matchAll(/([\d.]+)%\s*\{\s*opacity:\s*([^;]+);/g)].map((m) => ({
+      位置: Number(m[1]),
+      値: m[2].trim(),
+    }))
+    expect(段.length).toBeGreaterThanOrEqual(3)
+    const 入り終わり = 段.find((x) => x.値.includes('--roam-ink'))
+    expect(入り終わり).toBeDefined()
+    // 入り終わってから最後まで、値が1つも変わらない
+    const 以降 = 段.filter((x) => x.位置 >= (入り終わり?.位置 ?? 0))
+    expect(new Set(以降.map((x) => x.値)).size).toBe(1)
+    // **最後が 0 に落ちていない**（フェードで消すのはやめ、畳んで消す）
+    expect(段[段.length - 1].値).toContain('--roam-ink')
   })
 
   it('濃さはカードから配られる。固定値を書かない', () => {
