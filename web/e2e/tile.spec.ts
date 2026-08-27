@@ -403,6 +403,59 @@ test('ハイコントラストの環境では、切る枠が実線へ退避す�
   expect(await frameBorder()).toMatchObject({ width: '0px' })
 })
 
+test('ハイコントラストでも、状態は記号と文言で読める', async ({ page }) => {
+  /*
+    **この段でいちばん壊れやすいところ**（設計§19-3）。地を画像にしたので、
+    `forced-colors: active` では**地が消える**——**文字を焼き込んでいたら、ここで状態が
+    丸ごと読めなくなっていた**。消えるのは地だけにしてあることを、実物のブラウザで見る。
+
+    作業中だけは絵そのものが中身なので、**あの環境でだけ**文字と記号が出る。
+  */
+  await openDashboard(page)
+  const 待ち = await spawnWith(page, 'Stop', '{"last_assistant_message":"終わりました"}')
+  const 作業中 = await spawnWith(page, 'UserPromptSubmit')
+
+  const 読める = async (id: string) =>
+    page.evaluate((cardId) => {
+      const shell = document.querySelector(
+        `[data-testid="tile-shell"][data-card-id="${cardId}"]`,
+      )
+      if (shell === null) throw new Error(`カードが見つかりません：${cardId}`)
+      const 見えている = (el: Element | null) =>
+        el !== null && getComputedStyle(el).display !== 'none'
+      const tag = shell.querySelector('[data-testid="tile-tag"]')
+      const fallback = shell.querySelector('.tile-run-fallback')
+      const コマ = shell.querySelector('.tile-run i')
+      return {
+        // タグの文言（地が消えても残るはず）
+        文言: tag?.textContent?.trim() ?? fallback?.textContent?.trim() ?? '',
+        絵が出ているか: 見えている(コマ),
+        退避が出ているか: 見えている(fallback),
+      }
+    }, id)
+
+  // 素の状態：作業中は絵だけ、退避は出ない
+  expect(await 読める(作業中)).toMatchObject({
+    絵が出ているか: true,
+    退避が出ているか: false,
+  })
+
+  await page.emulateMedia({ forcedColors: 'active' })
+
+  // タグの状態は、地が消えても**記号と文言で読める**
+  const 待ちの結果 = await 読める(待ち)
+  expect(待ちの結果.文言).toContain('入力待ち')
+
+  // 作業中は**絵が消え、代わりに文字と記号が出る**
+  expect(await 読める(作業中)).toMatchObject({
+    絵が出ているか: false,
+    退避が出ているか: true,
+  })
+  expect((await 読める(作業中)).文言).toContain('作業中')
+
+  await page.emulateMedia({ forcedColors: 'none' })
+})
+
 test('状態は右下のタグに出て、①行は最終活動と接続断が収まる', async ({
   page,
 }) => {

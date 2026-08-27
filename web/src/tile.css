@@ -746,8 +746,15 @@
   bottom: 9px;
   right: 10px;
   rotate: -3deg;
-  padding: 1px 7px;
-  border-radius: 3px;
+  padding: 2px 8px;
+  /*
+    **状態タグと同じ地にする**（要件2-4「ANSWER タグも作り直す」）。揃えないと、同じ
+    カードの右下に**角丸の長方形と型抜きの紙片が並ぶ**——2枚出るのは権限確認待ちだけ
+    なので、そこだけ家族が違って見える
+  */
+  mask-image: url('./assets/tile/tag-plate.png');
+  mask-size: 100% 100%;
+  mask-repeat: no-repeat;
   background: var(--tile-accent);
   color: #171717;
   font-size: 10px;
