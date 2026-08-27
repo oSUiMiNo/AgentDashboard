@@ -30,8 +30,13 @@
  * 塗ってよいのは線だけ（理由は `roam.css` の冒頭）。
  */
 
-import type { CSSProperties } from 'react'
-import { routeVars } from '@/lib/roam'
+import { type CSSProperties, useEffect } from 'react'
+import {
+  measureField,
+  readRoamProgress,
+  roamSegmentAt,
+  routeVars,
+} from '@/lib/roam'
 import {
   ROAM_BIRTH_MS,
   ROAM_EXIT_DELAY_MS,
@@ -39,11 +44,119 @@ import {
   ROAM_LIFE_MS,
   useRoamStore,
 } from '@/stores/roam'
-import { useSettingsStore } from '@/stores/settings'
+import { replanRoam } from '@/stores/roam'
+import { type MotionQuiet, useSettingsStore } from '@/stores/settings'
+
+/**
+ * 盤面が変わってから引き直すまでの待ち。
+ *
+ * **見た目より「いちばん重い瞬間に重い処理を足さない」を優先する**（設計§20-5-4）。
+ * 細い線が数百ミリ秒ずれても目には見えないが、窓を掴んで動かしている最中に経路の
+ * 計算を毎フレーム重ねると、**直そうとしている見た目そのものを壊す**。
+ */
+export const REPLAN_WAIT_MS = 250
+
+/**
+ * 盤面が変わったら、飛んでいる線の残りの道を引き直す（設計§20-5）。
+ *
+ * # 引き金は場そのものを見張る
+ *
+ * 案は2つあった（設計§20-5-7）。**カードと枠の増減はアプリの状態として既に
+ * 分かっている**ので状態から知らせる道もあるが、**窓の伸縮とサイドバーの開閉は
+ * 状態に出ない**ので、結局こちらの仕組みが要る。**2つ持つより1つに寄せた。**
+ *
+ * 拾うのは4つ——`tile-shell` の増減・移動・寸法／`project-group` の同じもの／
+ * 場そのものの寸法／サイドバーの開閉。**格子はこの2種の矩形からできている**
+ * （`lib/roam.ts` の `measureField`）。
+ *
+ * # 静けさの門をここにも通す
+ *
+ * `stores/roam.ts` は「**止まっていれば DOM もタイマも1つも生えない**」を守って
+ * いる。**見張りも同じ**——「控えめ」「静止」と OS の「動きを減らす」では
+ * `MutationObserver` も `ResizeObserver` も繋がない。
+ *
+ * # まとめて1回だけ
+ *
+ * 窓を掴んで動かしている間は毎フレーム変わる。**少し待ってから1回だけ引き直し、
+ * 待つ間は古い道のまま泳がせる**（設計§20-5-4）。**いちばん重い瞬間に重い処理を
+ * 足さない**ことを、数百ミリ秒のずれより優先する——細い線のずれは目に見えない。
+ *
+ * **待ちのタイマも、積む前に門を通す。**
+ */
+function useReplanOnLayout(quiet: MotionQuiet): void {
+  useEffect(() => {
+    // **止まっているなら、見張りもタイマも1つも生やさない**
+    if (quiet !== 'lively') return
+    if (
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    ) {
+      return
+    }
+    if (typeof MutationObserver !== 'function' || typeof ResizeObserver !== 'function') return
+
+    const 場 = document.querySelector('[data-roam-field]')
+    if (場 === null) return
+
+    let 待ち: ReturnType<typeof setTimeout> | undefined
+
+    const 引き直す = (): void => {
+      待ち = undefined
+      const 層 = document.querySelector('[data-testid="roam-layer"]')
+      if (層 === null) return
+      // **控えを使わない。** 控えは場の寸法しか見ていないので、カードが増減しても
+      // 寸法が同じなら古い格子が返る——引き直しはその変化のために呼ばれている
+      const field = measureField(層, true)
+      if (field === null) return
+      // **いま何区間目に居るかを読むだけ。** 画面の実測は取らない（設計§20-5-1）
+      const いま: { id: number; 添字: number }[] = []
+      for (const 線 of 層.querySelectorAll('[data-testid="roam-line"]')) {
+        const id = Number((線 as HTMLElement).dataset.roamId)
+        if (!Number.isFinite(id)) continue
+        const 進み = readRoamProgress(線)
+        if (進み === null) continue
+        いま.push({ id, 添字: roamSegmentAt(進み) })
+      }
+      if (いま.length > 0) replanRoam(field, いま)
+    }
+
+    const 変わった = (): void => {
+      /*
+        **連続した変化は、待ち直してまとめる。** 窓を掴んで動かしている間は毎フレーム
+        変わるので、**待ちを積み直して「動かし終わってから1回だけ」**にする。
+
+        **先に1回撃つ形にはしない**——それだと掴んでいる間ずっと 250ms ごとに
+        引き直すことになり、**いちばん重い瞬間に重い処理を足す**（設計§20-5-4）。
+      */
+      if (待ち !== undefined) clearTimeout(待ち)
+      待ち = setTimeout(引き直す, REPLAN_WAIT_MS)
+    }
+
+    const 見張り = new MutationObserver(変わった)
+    見張り.observe(場, { childList: true, subtree: true })
+    const 寸法 = new ResizeObserver(変わった)
+    寸法.observe(場)
+    for (const 器 of 場.querySelectorAll('[data-testid="tile-shell"], [data-testid="project-group"]')) {
+      寸法.observe(器)
+    }
+    // サイドバーの開閉と窓の伸縮は、場の寸法に出る
+    window.addEventListener('resize', 変わった)
+
+    return () => {
+      見張り.disconnect()
+      寸法.disconnect()
+      window.removeEventListener('resize', 変わった)
+      if (待ち !== undefined) clearTimeout(待ち)
+    }
+  }, [quiet])
+}
 
 export function RoamLayer() {
   const lines = useRoamStore((state) => state.lines)
   const quiet = useSettingsStore((state) => state.settings.motion_quiet)
+
+  useReplanOnLayout(quiet)
 
   return (
     <div
@@ -58,6 +171,8 @@ export function RoamLayer() {
           key={line.id}
           className="roam-line"
           data-testid="roam-line"
+          // **引き直しが線を見つけるための札**（設計§20-5-2）
+          data-roam-id={line.id}
           style={
             {
               ...routeVars(line.stops),

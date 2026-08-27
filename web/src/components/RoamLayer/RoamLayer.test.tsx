@@ -1,5 +1,5 @@
-import { render, screen } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { cleanup, render, screen } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { RoamLayer } from '@/components/RoamLayer/RoamLayer'
 import { ROAM_STOPS } from '@/lib/roam'
 import {
@@ -148,5 +148,122 @@ describe('静けさの印', () => {
       expect(screen.getByTestId('roam-layer')).toHaveAttribute('data-quiet', 段)
       unmount()
     }
+  })
+})
+
+describe('盤面が変わったら引き直す（引き金）', () => {
+  /*
+    **見張りも「仕事を作らない」門の内側に置く**（設計§20-5-7）。
+    `stores/roam.ts` は「止まっていれば DOM もタイマも1つも生えない」を守っており、
+    **見張りだけが例外になってはいけない。**
+
+    **線が出ないことだけを見ると、見張りが回っていても緑になる**ので、
+    **繋いだ数**を数える。
+  */
+  let 繋いだ = 0
+  let 合図: (() => void)[] = []
+  let 元Mutation: typeof MutationObserver
+  let 元Resize: typeof ResizeObserver
+
+  beforeEach(() => {
+    繋いだ = 0
+    合図 = []
+    元Mutation = globalThis.MutationObserver
+    元Resize = globalThis.ResizeObserver
+    class 数える見張り {
+      constructor(受ける: () => void) {
+        合図.push(受ける)
+      }
+      observe() {
+        繋いだ += 1
+      }
+      disconnect() {}
+      unobserve() {}
+      takeRecords() {
+        return []
+      }
+    }
+    globalThis.MutationObserver = 数える見張り as unknown as typeof MutationObserver
+    globalThis.ResizeObserver = 数える見張り as unknown as typeof ResizeObserver
+  })
+
+  afterEach(() => {
+    globalThis.MutationObserver = 元Mutation
+    globalThis.ResizeObserver = 元Resize
+    vi.useRealTimers()
+  })
+
+  function 場ごと描く(): void {
+    render(
+      <div data-roam-field>
+        <RoamLayer />
+      </div>,
+    )
+  }
+
+  it('賑やかなら、場を見張る', () => {
+    useSettingsStore.setState((state) => ({
+      settings: { ...state.settings, motion_quiet: 'lively' },
+    }))
+    場ごと描く()
+    expect(繋いだ).toBeGreaterThan(0)
+  })
+
+  it('「控えめ」「静止」では、見張りを1つも繋がない', () => {
+    for (const quiet of ['calm', 'still'] as const) {
+      繋いだ = 0
+      cleanup()
+      useSettingsStore.setState((state) => ({
+        settings: { ...state.settings, motion_quiet: quiet },
+      }))
+      場ごと描く()
+      expect(繋いだ).toBe(0)
+    }
+  })
+
+  it('OS が「動きを減らす」と言っていれば、見張りを1つも繋がない', () => {
+    const 元 = window.matchMedia
+    window.matchMedia = ((query: string) =>
+      ({
+        matches: query.includes('prefers-reduced-motion'),
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }) as unknown as MediaQueryList) as typeof window.matchMedia
+    try {
+      useSettingsStore.setState((state) => ({
+        settings: { ...state.settings, motion_quiet: 'lively' },
+      }))
+      場ごと描く()
+      expect(繋いだ).toBe(0)
+    } finally {
+      window.matchMedia = 元
+    }
+  })
+
+  it('連続した変化は、まとめて1回になる', () => {
+    /*
+      **窓を掴んで動かしている間は毎フレーム変わる**（設計§20-5-4）。
+      **少し待ってから1回だけ**引き直し、待つ間は古い道のまま泳がせる。
+
+      **線の見た目だけを見ると、毎フレーム引き直していても同じに見えて緑になる**
+      （テスト計画の壊し方）。**待ちの数**を数える。
+
+      **`toFake` を絞る**——既定の偽装は `requestAnimationFrame` も差し替える
+      （`SessionTile.test.tsx` の前例と同じ理由）。
+    */
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    useSettingsStore.setState((state) => ({
+      settings: { ...state.settings, motion_quiet: 'lively' },
+    }))
+    場ごと描く()
+    expect(合図.length).toBeGreaterThan(0)
+
+    // 掴んで動かしている最中のつもりで、立て続けに知らせる
+    for (let i = 0; i < 20; i += 1) 合図[0]()
+
+    // **待ちは1本だけ。** 変化のたびに引き直す形なら 0 本（もう走ってしまっている）、
+    // 待ちを積み増す形なら 20 本になる
+    expect(vi.getTimerCount()).toBe(1)
   })
 })

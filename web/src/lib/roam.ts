@@ -473,6 +473,122 @@ function 巻き(
 }
 
 /**
+ * 通路の格子を、[`ROAM_STEP`] ずつ歩く。
+ *
+ * **`planRoute`（最初に引くとき）と `replanRoute`（途中から引き直すとき）で共有する。**
+ * 引き直しは「同じ区間数・同じ呼び値の道のり」でなければならない（設計§20-5-2）ので、
+ * **同じ道具で作らないと揃う保証が無い。**
+ *
+ * `足りた` が偽なら、**要求どおりの道のりで区間を作れなかった**——格子が縮退して
+ * いる（場が余白より狭い／通路が消えた）。**引き直しの側はこれを逃げ道の合図に使う**
+ * （設計§20-5-5。枚数のような外から決めた閾値は置かない）。
+ *
+ * **「数が足りたか」だけを見てはいけない。** 動けないときもこの関数は**同じ点を
+ * 積んで数だけ揃える**ので、数だけ見ると常に足りたことになる（2026-08-28 に踏んだ）。
+ * **動けなかった回があったか**まで見る。
+ */
+function 歩く(
+  xs: number[],
+  ys: number[],
+  始: { x: number; y: number },
+  横0: boolean,
+  seed: number,
+   本数: number,
+  ずらし = 0,
+): { 点: { x: number; y: number }[]; 足りた: boolean } {
+  let ix = 近い番号(xs, 始.x)
+  let iy = 近い番号(ys, 始.y)
+  let 横 = 横0
+  let 向き = 散らす(seed, 4 + ずらし) < 0.5 ? 1 : -1
+  let 現在 = { x: 始.x, y: 始.y }
+  const 点: { x: number; y: number }[] = []
+  let 残り = 本数
+  let 回 = 0
+  // **動けなかった回。** 格子が縮退していると、跨いでも同じ点しか返らない
+  let 詰まった = false
+
+  while (残り > 0 && 回 < ROAM_STOPS * 4) {
+    回 += 1
+    const 歩 = 1 + Math.floor(散らす(seed, (回 + ずらし) * 7) * 3)
+    for (let n = 0; n < 歩 && 残り > 0; n += 1) {
+      // **近すぎる通路は跨いで進む。** 隣り合う枠から立った線は数 px しか離れて
+      // いないことがあり、そこで刻むと区間の長さが揃わない
+      let 次 = 現在
+      for (let 試し = 0; 試し < xs.length + ys.length; 試し += 1) {
+        if (横) {
+          if (ix + 向き < 0 || ix + 向き >= xs.length) 向き = -向き
+          ix = Math.round(挟む(ix + 向き, 0, xs.length - 1))
+        } else {
+          if (iy + 向き < 0 || iy + 向き >= ys.length) 向き = -向き
+          iy = Math.round(挟む(iy + 向き, 0, ys.length - 1))
+        }
+        次 = { x: xs[ix], y: ys[iy] }
+        // **1区間ぶんに近い距離が空くまで跨ぐ。** 半分で妥協すると、round で1区間に
+        // 畳まれた短い走りがそのまま「そこだけ遅い区間」になる
+        if (隔たり(現在, 次) >= ROAM_STEP * 0.75) break
+      }
+
+      const 長 = 隔たり(現在, 次)
+      // **1区間の 1/3 も動けなければ、そこは通路が無いのと同じ**（`planRoute` は
+      // 同じ点で埋めて先へ進むが、引き直しの側は断る）
+      if (長 < ROAM_STEP / 3) 詰まった = true
+      const 本来 = Math.max(1, Math.round(長 / ROAM_STEP))
+      const 割 = Math.min(残り, 本来)
+      for (let k = 1; k <= 割; k += 1) {
+        点.push({
+          x: 現在.x + (次.x - 現在.x) * (k / 本来),
+          y: 現在.y + (次.y - 現在.y) * (k / 本来),
+        })
+      }
+      残り -= 割
+      現在 = { ...点[点.length - 1] }
+    }
+
+    // **曲がるかどうかだけが予測できない。** 角度は常に直角で、道そのものは読める
+    // ——生き物っぽさを経路の乱れではなく分岐の気まぐれで出す（設計§9-7-4）
+    if (散らす(seed, (回 + ずらし) * 13) < 0.45) {
+      横 = !横
+      向き = 散らす(seed, (回 + ずらし) * 17) < 0.5 ? 1 : -1
+    }
+  }
+  return { 点, 足りた: 点.length >= 本数 && !詰まった }
+}
+
+/**
+ * 点の列へ「次の点を向く角度」を付ける。
+ *
+ * **巻き戻さない**——前の角にいちばん近い等価な角を選んで単調に増やす。
+ * 引き直しのときは、**いま向いている角度から続ける**（`前の角0`）ので線が回らない。
+ */
+function 向きを付ける(
+  点: { x: number; y: number; loop?: boolean }[],
+  個数: number,
+  前の角0: number,
+  最初も向け: boolean,
+): RoamStop[] {
+  const 出力: RoamStop[] = []
+  let 前の角 = 前の角0
+  点.slice(0, 個数).forEach((点い, i) => {
+    const 次 = 点[i + 1]
+    let 生 = 前の角
+    if (次 !== undefined) {
+      const dx = 次.x - 点い.x
+      const dy = 次.y - 点い.y
+      // 動かない区間（格子が1本しか無い）は、向きを保つ
+      if (dx !== 0 || dy !== 0) 生 = (Math.atan2(dy, dx) * 180) / Math.PI
+    }
+    const 度 = i === 0 && 最初も向け ? 生 : 前の角 + 畳む(生 - 前の角)
+    前の角 = 度
+    出力.push(
+      点い.loop === true
+        ? { x: 点い.x, y: 点い.y, r: 度, loop: true }
+        : { x: 点い.x, y: 点い.y, r: 度 },
+    )
+  })
+  return 出力
+}
+
+/**
  * 跳ねたカードから飛び出して、輪を描き、枠を縫って回遊する経路を1本ぶん作る。
  *
  * | 停留点 | 何 |
@@ -502,8 +618,6 @@ export function planRoute(field: RoamField, seed: number, 番 = 0, 組 = 1): Roa
   // ② 飛散——右上の四半へ、**距離は固定で向きだけ**種ごとに違う（設計§9-7-9）。
   // 着地は通路の線の上で、どちらの向きの通路へ着いたかで回遊の初手が決まる
   const 着地 = 着地点(xs, ys, 角, 域, seed, 番, 組)
-  let ix = 近い番号(xs, 着地.x)
-  let iy = 近い番号(ys, 着地.y)
 
   const 点: { x: number; y: number; loop?: boolean }[] = [角]
   for (let n = 1; n <= ROAM_FLING; n += 1) {
@@ -521,57 +635,10 @@ export function planRoute(field: RoamField, seed: number, 番 = 0, 組 = 1): Roa
   //
   // **1区間ぶん多く歩く。** 先頭の1区間は③の巻きが置き換えるので（下記）、
   // ここでは [`ROAM_ROAM`] ＋1 区間ぶんの点を作る
-  let 横 = 着地.横
-  let 向き = 散らす(seed, 4) < 0.5 ? 1 : -1
-  let 現在 = { x: 着地.x, y: 着地.y }
-  const 回遊点: { x: number; y: number }[] = []
-  let 残り = ROAM_ROAM + 1
-  let 回 = 0
-
-  while (残り > 0 && 回 < ROAM_STOPS * 4) {
-    回 += 1
-    const 歩 = 1 + Math.floor(散らす(seed, 回 * 7) * 3)
-    for (let n = 0; n < 歩 && 残り > 0; n += 1) {
-      // **近すぎる通路は跨いで進む。** 隣り合う枠から立った線は数 px しか離れて
-      // いないことがあり、そこで刻むと区間の長さが揃わない
-      let 次 = 現在
-      for (let 試し = 0; 試し < xs.length + ys.length; 試し += 1) {
-        if (横) {
-          if (ix + 向き < 0 || ix + 向き >= xs.length) 向き = -向き
-          ix = Math.round(挟む(ix + 向き, 0, xs.length - 1))
-        } else {
-          if (iy + 向き < 0 || iy + 向き >= ys.length) 向き = -向き
-          iy = Math.round(挟む(iy + 向き, 0, ys.length - 1))
-        }
-        次 = { x: xs[ix], y: ys[iy] }
-        // **1区間ぶんに近い距離が空くまで跨ぐ。** 半分で妥協すると、round で1区間に
-        // 畳まれた短い走りがそのまま「そこだけ遅い区間」になる
-        if (隔たり(現在, 次) >= ROAM_STEP * 0.75) break
-      }
-
-      const 長 = 隔たり(現在, 次)
-      const 本来 = Math.max(1, Math.round(長 / ROAM_STEP))
-      const 割 = Math.min(残り, 本来)
-      for (let k = 1; k <= 割; k += 1) {
-        回遊点.push({
-          x: 現在.x + (次.x - 現在.x) * (k / 本来),
-          y: 現在.y + (次.y - 現在.y) * (k / 本来),
-        })
-      }
-      残り -= 割
-      現在 = { ...回遊点[回遊点.length - 1] }
-    }
-
-    // **曲がるかどうかだけが予測できない。** 角度は常に直角で、道そのものは読める
-    // ——生き物っぽさを経路の乱れではなく分岐の気まぐれで出す（設計§9-7-4）
-    if (散らす(seed, 回 * 13) < 0.45) {
-      横 = !横
-      向き = 散らす(seed, 回 * 17) < 0.5 ? 1 : -1
-    }
-  }
+  const { 点: 回遊点 } = 歩く(xs, ys, 着地, 着地.横, seed, ROAM_ROAM + 1)
 
   // 数が足りない（格子が縮退している）ときは最後の点で埋める。**ここに落ちるのは
-  // 場が余白より狭いときだけ**である
+  // 場が余白より狭いときだけ**である。**引き直しの側は埋めずに断る**（設計§20-5-5）
   while (回遊点.length < ROAM_ROAM + 1) {
     回遊点.push({ ...(回遊点[回遊点.length - 1] ?? 着地) })
   }
@@ -583,28 +650,104 @@ export function planRoute(field: RoamField, seed: number, 番 = 0, 組 = 1): Roa
   }
   for (const 回遊 of 回遊点.slice(1)) 点.push(回遊)
 
-  // 向きは**次の点へ進む向き**。最後の点だけは、その手前の区間の向きを引き継ぐ。
-  // **巻き戻さない**——前の角にいちばん近い等価な角を選んで単調に増やす
-  const 出力: RoamStop[] = []
-  let 前の角 = 0
-  点.slice(0, ROAM_STOPS).forEach((点い, i) => {
-    const 次 = 点[i + 1]
-    let 生 = 前の角
-    if (次 !== undefined) {
-      const dx = 次.x - 点い.x
-      const dy = 次.y - 点い.y
-      // 動かない区間（格子が1本しか無い）は、向きを保つ
-      if (dx !== 0 || dy !== 0) 生 = (Math.atan2(dy, dx) * 180) / Math.PI
-    }
-    const 度 = i === 0 ? 生 : 前の角 + 畳む(生 - 前の角)
-    前の角 = 度
-    出力.push(
-      点い.loop === true
-        ? { x: 点い.x, y: 点い.y, r: 度, loop: true }
-        : { x: 点い.x, y: 点い.y, r: 度 },
-    )
-  })
-  return 出力
+  // 向きは**次の点へ進む向き**。最後の点だけは、その手前の区間の向きを引き継ぐ
+  return 向きを付ける(点, ROAM_STOPS, 0, true)
+}
+
+/**
+ * 引き直した残りを、いまの道へどう繋ぐか。
+ *
+ * **いまは1つだけ。** 次のイシュー（カードがぶつかったら効果線が退く）が
+ * `'退きながら'` を足す想定で、**引き金と繋ぎ方を足すだけで済む形**にしてある
+ * （設計§20-5-3）。**1回しか呼ばれないからといって、この引数を畳まないこと。**
+ */
+export type RoamJoin = 'すぐ'
+
+/**
+ * いまの進み具合（0〜1）から、**いま通過中の区間の番号**を出す。
+ *
+ * キーフレームの % は弧長比例なので、**区間ごとの道のりの累計**がそのまま境目になる
+ * （[`roamSpans`]）。返すのは「停留点 i と i+1 のあいだに居る」の i である。
+ *
+ * **画面を測らない。** レイアウトが崩れている最中に呼ばれるので、`getBoundingClientRect`
+ * を足すと**直そうとしている見た目そのものを壊す**（設計§20-5-1）。
+ */
+export function roamSegmentAt(進み: number): number {
+  const 道のり = roamSpans()
+  const 総 = 道のり.reduce((和, x) => 和 + x, 0)
+  let 累 = 0
+  for (const [i, 長] of 道のり.entries()) {
+    累 += 長
+    if (進み < 累 / 総) return i
+  }
+  return 道のり.length - 1
+}
+
+/**
+ * 走っている線の進み具合（0〜1）を読む。
+ *
+ * **`currentTime` を読むのは「どの変数から先を書き換えてよいか」を知るためだけ**で、
+ * 巻き戻したり張り替えたりはしない（設計§20-5-2）。
+ */
+export function readRoamProgress(線: Element): number | null {
+  const 要素 = 線 as HTMLElement
+  if (typeof 要素.getAnimations !== 'function') return null
+  for (const 動き of 要素.getAnimations()) {
+    const 時 = 動き.currentTime
+    if (typeof 時 !== 'number') continue
+    const 尺 = 動き.effect?.getTiming().duration
+    if (typeof 尺 !== 'number' || 尺 <= 0) continue
+    return Math.min(1, Math.max(0, 時 / 尺))
+  }
+  return null
+}
+
+/**
+ * **いまの位置と、いまの盤面から、残りの道を引き直す**（設計§20-5-2）。
+ *
+ * # やらないこと
+ *
+ * **アニメーションを作り直さない・再起動しない・`currentTime` を巻き戻さない・
+ * 継ぎ足さない。** キーフレームの % は全部の線で共有する定数表で、線ごとの違いは
+ * CSS 変数の値にしか入っていない——**次の停留点から先の値を書き換えれば、線は
+ * その場から新しい向きへ曲がる**（飛ばない）。
+ *
+ * # 返すもの
+ *
+ * 停留点 `添字 + 1` 以降ぶん。**いま通過中の区間（`添字` とその手前）は1つも
+ * 含まない**——そこを書き換えると、補間の途中で始点が動いて線が飛ぶ。
+ *
+ * `null` は**逃げ道の合図**（設計§20-5-5）。**要求どおりの区間数を返せないとき**
+ * ——通路が消えた、場が狭くなった——にだけ起きる。**枚数のような外から決めた
+ * 閾値は置いていない**：`歩く` が足りたかどうかから自然に出る。
+ */
+export function replanRoute(
+  field: RoamField,
+  seed: number,
+  添字: number,
+  現在: { x: number; y: number; r: number },
+  繋ぎ: RoamJoin = 'すぐ',
+): RoamStop[] | null {
+  const 本数 = ROAM_STOPS - 1 - 添字
+  if (本数 <= 0) return null
+  // 繋ぎ方は1つしか無いが、**引数として受けておく**（次のイシューが足す）
+  if (繋ぎ !== 'すぐ') return null
+
+  const 域 = 範囲(field)
+  const { xs, ys } = 格子(field, 域)
+  if (xs.length === 0 || ys.length === 0) return null
+
+  // **いま向いている向きから、どちらの通路を歩くかを決める。** 横へ進んでいるなら
+  // 横の通路——**着いた線から外れる向きへ動くと、1歩目で通路を離れる**
+  const ラジアン = (現在.r * Math.PI) / 180
+  const 横 = Math.abs(Math.cos(ラジアン)) >= Math.abs(Math.sin(ラジアン))
+
+  // **種をずらす。** ずらさないと、盤面が変わったのに同じ道を辿ろうとする
+  const { 点, 足りた } = 歩く(xs, ys, 現在, 横, seed, 本数, 添字 + 1)
+  if (!足りた) return null
+
+  // **いま向いている角度から続ける**ので線が回らない。先頭（＝いまの点）は捨てる
+  return 向きを付ける([現在, ...点], 本数 + 1, 現在.r, false).slice(1)
 }
 
 /**
@@ -667,14 +810,18 @@ export function resetField(): void {
  * **座標は場に対する位置**（`scrollTop` を読まない）。層が場の内側に居るので、
  * 引き算だけで済む——スクロール中に取得のタイミングがずれる事故も起きない。
  */
-export function measureField(frame: Element): RoamField | null {
+export function measureField(frame: Element, 測り直す = false): RoamField | null {
   const 場 = frame.closest('[data-roam-field]')
   if (場 === null) return null
 
   const 場の矩形 = 場.getBoundingClientRect()
   const カード = frame.getBoundingClientRect()
 
+  // **引き直しのときは控えを使わない**（2026-08-28・設計§20-5）。控えは**場の寸法しか
+  // 見ていない**ので、**カードが増えても減っても寸法が変わらなければ古い格子を返す**
+  // ——引き直しはまさにその変化のために呼ばれるので、そこで古い値を掴むと意味が消える
   const 生きている =
+    !測り直す &&
     控え !== null &&
     控え.場 === 場 &&
     控え.幅 === 場の矩形.width &&

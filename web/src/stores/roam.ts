@@ -17,7 +17,13 @@
 
 import { create } from 'zustand'
 import type { MotionQuiet } from '@/stores/settings'
-import { type RoamField, type RoamStop, planRoute } from '@/lib/roam'
+import {
+  type RoamField,
+  type RoamJoin,
+  type RoamStop,
+  planRoute,
+  replanRoute,
+} from '@/lib/roam'
 
 /**
  * 画面に同時に居てよい線の数。
@@ -321,6 +327,57 @@ export function scheduleRoam(quiet: MotionQuiet, 種を作る: () => RoamSeed | 
     if (種 !== null) emitRoam(種)
   }, 遅れ)
   待ち.add(タイマ)
+}
+
+/**
+ * **盤面が変わったので、残りの道を引き直す**（設計§20-5）。
+ *
+ * # 入口はここ1つ
+ *
+ * 用途は2つある——**いま**（盤面が変わったらすぐ引き直す）と、**次のイシュー**
+ * （カードがぶつかったら退きながら引き直す）。`繋ぎ` を引数に持たせてあるので、
+ * あちらは**引き金と繋ぎ方を足すだけ**で済む（設計§20-5-3）。
+ * **1回しか呼ばれないからといって畳まないこと。**
+ *
+ * # 逃げ道
+ *
+ * `replanRoute` が `null` を返したら——**要求どおりの区間数を返せなかった**
+ * （通路が消えた・場が狭くなった）——**引き直さず、その場で寿命を早めて退場させ、
+ * 次の放出に任せる**（設計§20-5-5）。**枚数のような外から決めた閾値は置かない。**
+ *
+ * # 数えられるようにしてある
+ *
+ * 返すのは「実際に引き直した本数」。**まとめて1回になっているかは、呼ばれた回数を
+ * 数えないと分からない**——線の見た目だけを見ると、毎フレーム引き直していても
+ * 同じに見えて緑になる（テスト計画の壊し方）。
+ */
+export function replanRoam(
+  field: RoamField,
+  いま: { id: number; 添字: number }[],
+  繋ぎ: RoamJoin = 'すぐ',
+): number {
+  let 引き直した = 0
+  const 逃がす: number[] = []
+  useRoamStore.setState((state) => ({
+    lines: state.lines.map((line) => {
+      const 場所 = いま.find((x) => x.id === line.id)
+      if (場所 === undefined) return line
+      const 現在 = line.stops[場所.添字]
+      if (現在 === undefined) return line
+      const 残り = replanRoute(field, line.id, 場所.添字, 現在, 繋ぎ)
+      if (残り === null) {
+        逃がす.push(line.id)
+        return line
+      }
+      引き直した += 1
+      // **いま通過中の区間から手前は1つも触らない。** 触ると補間の途中で始点が
+      // 動いて線が飛ぶ（設計§20-5-2）
+      return { ...line, stops: [...line.stops.slice(0, 場所.添字 + 1), ...残り] }
+    }),
+  }))
+  // **逃げ道は寿命を早めるだけ。** 引き直しはしない
+  for (const id of 逃がす) 畳む(id)
+  return 引き直した
 }
 
 /** テストが籤を固定するための口。**製品コードからは呼ばない** */

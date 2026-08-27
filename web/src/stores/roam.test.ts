@@ -8,6 +8,7 @@ import {
   ROAM_MAX,
   ROAM_SKIP,
   emitRoam,
+  replanRoam,
   resetRoam,
   roamDefaultDice,
   scheduleRoam,
@@ -385,5 +386,75 @@ describe('線が持つもの', () => {
     const [一本目, 二本目] = useRoamStore.getState().lines
     expect(二本目).toBeDefined()
     expect(一本目.stops).not.toEqual(二本目.stops)
+  })
+})
+
+describe('盤面が変わったら引き直す（入口は1つ）', () => {
+  /*
+    **入口は `replanRoam` の1つだけ**（設計§20-5-3）。用途は2つ——いま（すぐ引き直す）
+    と、次のイシュー（退きながら引き直す）——で、**繋ぎ方を引数に持たせてある**ので
+    あちらは引き金と繋ぎ方を足すだけで済む。
+  */
+  it('いま通過中の区間から手前は、1つも書き換えない', () => {
+    // **触ると補間の途中で始点が動いて線が飛ぶ**（設計§20-5-2）。
+    // 「引き直した」ことだけを見ると緑のまま通るので、**手前が同じ**ことで見る
+    emitRoam(種)
+    const 前 = useRoamStore.getState().lines.map((l) => l.stops.slice())
+    const 添字 = 20
+    const 数 = replanRoam(
+      FIELD,
+      useRoamStore.getState().lines.map((l) => ({ id: l.id, 添字 })),
+    )
+    expect(数).toBe(ROAM_LINES)
+    useRoamStore.getState().lines.forEach((line, i) => {
+      expect(line.stops.slice(0, 添字 + 1)).toEqual(前[i].slice(0, 添字 + 1))
+      // **その先は変わっている**（変わっていなければ引き直していない）
+      expect(line.stops.slice(添字 + 1)).not.toEqual(前[i].slice(添字 + 1))
+      // 長さは変わらない
+      expect(line.stops).toHaveLength(前[i].length)
+    })
+  })
+
+  it('引き直せないときは、寿命を早めて退場させる', () => {
+    /*
+      **逃げ道**（設計§20-5-5）。引き直さず、その場で退場させて次の放出に任せる。
+
+      **「消える」ことだけを見ると緑になる**——線はいずれ寿命でも消えるため。
+      **通常の寿命より早く消えたこと**で見る。
+    */
+    emitRoam(種)
+    expect(本数()).toBe(ROAM_LINES)
+    const 潰れた: RoamField = { width: 8, height: 8, card: FIELD.card, rects: [] }
+    const 数 = replanRoam(
+      潰れた,
+      useRoamStore.getState().lines.map((l) => ({ id: l.id, 添字: 20 })),
+    )
+    expect(数).toBe(0)
+    // **寿命（90秒）を待たずに、その場で退場している**
+    expect(本数()).toBe(0)
+  })
+
+  it('逃げ道の条件に、外から決めた閾値が無い', () => {
+    // **枚数のような閾値を入れると、ここが落ちる**——同じ盤面なら、カードが何枚
+    // あろうと引き直せる。**`歩く` が要求どおり返せるかどうかだけ**が条件である
+    emitRoam(種)
+    const 広い: RoamField = {
+      ...FIELD,
+      rects: [...FIELD.rects, { x: 612, y: 60, w: 288, h: 120 }],
+    }
+    const 数 = replanRoam(
+      広い,
+      useRoamStore.getState().lines.map((l) => ({ id: l.id, 添字: 20 })),
+    )
+    expect(数).toBe(ROAM_LINES)
+  })
+
+  it('知らない線は触らない', () => {
+    emitRoam(種)
+    const 前 = useRoamStore.getState().lines.map((l) => l.stops.slice())
+    expect(replanRoam(FIELD, [{ id: 9999, 添字: 20 }])).toBe(0)
+    useRoamStore.getState().lines.forEach((line, i) => {
+      expect(line.stops).toEqual(前[i])
+    })
   })
 })

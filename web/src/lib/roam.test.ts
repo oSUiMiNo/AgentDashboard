@@ -8,6 +8,9 @@ import {
   type RoamField,
   type RoamRect,
   planRoute,
+  replanRoute,
+  roamSegmentAt,
+  roamSpans,
   routeVars,
 } from '@/lib/roam'
 
@@ -417,6 +420,117 @@ describe('停留点を CSS 変数へ写す', () => {
       const 輪 = 輪の添字(経路)
       const 回転 = Math.abs(経路[輪[輪.length - 1] - 1].r - 経路[輪[0] - 1].r)
       expect(回転).toBeGreaterThan(270)
+    }
+  })
+})
+
+describe('盤面が変わったら、残りの道を引き直す', () => {
+  /*
+    **設計§20-5 の番人。** アニメーションを作り直さず、**次の停留点から先の
+    CSS 変数だけ**を書き換えることで、線をその場から新しい向きへ曲げる。
+
+    **`currentTime` を読むのは「どの変数から先を書き換えてよいか」を知るためだけ**で、
+    巻き戻したり張り替えたりはしない。
+  */
+  const いまの点 = (経路: ReturnType<typeof planRoute>, i: number) => ({
+    x: 経路[i].x,
+    y: 経路[i].y,
+    r: 経路[i].r,
+  })
+
+  it('残りは、要求どおりの区間数で返る', () => {
+    const 経路 = planRoute(FIELD, 5)
+    for (const 添字 of [12, 20, 40, ROAM_STOPS - 2]) {
+      const 残り = replanRoute(FIELD, 5, 添字, いまの点(経路, 添字))
+      expect(残り).not.toBeNull()
+      // **停留点 添字+1 以降ぶん。** ずれると共有の % 表と噛み合わず、等速が崩れる
+      expect(残り).toHaveLength(ROAM_STOPS - 1 - 添字)
+    }
+  })
+
+  it('残りの区間も、同じ呼び値の道のりになる', () => {
+    // **ずれると共有の % 表と噛み合わず、区間ごとに速さがばらつく**（設計§20-5-2）
+    const 経路 = planRoute(FIELD, 5)
+    const 添字 = 20
+    const 残り = replanRoute(FIELD, 5, 添字, いまの点(経路, 添字))
+    expect(残り).not.toBeNull()
+    const 並び = [いまの点(経路, 添字), ...(残り ?? [])]
+    const 長さ = [...Array(並び.length - 1).keys()].map((i) =>
+      Math.hypot(並び[i + 1].x - 並び[i].x, 並び[i + 1].y - 並び[i].y),
+    )
+    expect(Math.max(...長さ) / Math.min(...長さ)).toBeLessThan(2)
+    expect(Math.min(...長さ)).toBeGreaterThan(ROAM_STEP / 3)
+  })
+
+  it('引き直しても線が飛ばない＝いまの点から続く', () => {
+    /*
+      **書き換える範囲を `--roam-x0` から（＝過ぎた停留点も含めて）にすると、
+      補間の途中で始点が動いて線が飛ぶ。** 「引き直した」ことだけを見ると
+      緑のまま通るので、**1区間ぶんを超えて動いていないこと**で見る。
+    */
+    const 経路 = planRoute(FIELD, 5)
+    const 添字 = 25
+    const 残り = replanRoute(FIELD, 5, 添字, いまの点(経路, 添字))
+    expect(残り).not.toBeNull()
+    const 次 = (残り ?? [])[0]
+    const 隔 = Math.hypot(次.x - 経路[添字].x, 次.y - 経路[添字].y)
+    expect(隔).toBeLessThanOrEqual(ROAM_STEP * 1.6)
+    /*
+      **向きも続く。** いま向いている角度から引き継ぐので線が回らない。
+
+      `経路[添字].r` は**巻き戻さずに積み上げた角度**なので、引き継ぎを忘れて 0 から
+      引き直すと**数百度の飛び**になる（実測で -535.9° の点があった）。
+      **1回の折れは 180° を超えない**（`畳む` が最も近い等価な角を選ぶ）。
+
+      **1つの種と1つの添字では捕まらない**——積み上がった角がたまたま 0 の近くだと、
+      引き継ぎを忘れても 180° に収まってしまう（2026-08-28 に壊し方を当てて分かった）。
+      **積み上がりが大きくなる先のほうまで、いくつも当てる。**
+    */
+    for (const 種 of [1, 2, 3, 5, 17, 42, 99]) {
+      const 道 = planRoute(FIELD, 種)
+      for (const i of [12, 25, 40, 50]) {
+        const 尾 = replanRoute(FIELD, 種, i, いまの点(道, i))
+        expect(尾).not.toBeNull()
+        const 並び2 = [道[i], ...(尾 ?? [])]
+        for (let k = 0; k < 並び2.length - 1; k += 1) {
+          expect(Math.abs(並び2[k + 1].r - 並び2[k].r)).toBeLessThanOrEqual(180)
+        }
+      }
+    }
+  })
+
+  it('通路が消えたら、引き直さずに断る＝逃げ道の合図', () => {
+    /*
+      **枚数のような外から決めた閾値は置いていない**（設計§20-5-5）。
+      **`歩く` が要求どおりの区間数を返せなかったこと**だけが条件である。
+    */
+    const 経路 = planRoute(FIELD, 5)
+    const 潰れた: RoamField = { width: 8, height: 8, card: FIELD.card, rects: [] }
+    expect(replanRoute(潰れた, 5, 20, いまの点(経路, 20))).toBeNull()
+  })
+
+  it('終わりまで来ていたら断る', () => {
+    const 経路 = planRoute(FIELD, 5)
+    expect(replanRoute(FIELD, 5, ROAM_STOPS - 1, いまの点(経路, ROAM_STOPS - 1))).toBeNull()
+  })
+
+  it('繋ぎ方を引数で受けている＝次のイシューが足すだけで済む', () => {
+    // **1回しか呼ばれないからといって、この引数を畳まないこと**（設計§20-5-3）
+    const 経路 = planRoute(FIELD, 5)
+    expect(replanRoute(FIELD, 5, 20, いまの点(経路, 20), 'すぐ')).not.toBeNull()
+  })
+
+  it('進み具合から、いま通過中の区間が出る', () => {
+    // **% は弧長比例**なので、区間ごとの道のりの累計がそのまま境目になる
+    expect(roamSegmentAt(0)).toBe(0)
+    expect(roamSegmentAt(1)).toBe(ROAM_STOPS - 2)
+    const 道のり = roamSpans()
+    const 総 = 道のり.reduce((和, x) => 和 + x, 0)
+    let 累 = 0
+    for (const [i, 長] of 道のり.entries()) {
+      // 区間のまん中に居るなら、その区間の番号が返る
+      expect(roamSegmentAt((累 + 長 / 2) / 総)).toBe(i)
+      累 += 長
     }
   })
 })
