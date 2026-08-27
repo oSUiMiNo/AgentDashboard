@@ -16,9 +16,9 @@
  * 子になり、中身の列とセッションのあいだに余分な1段が入って `shrink-0` と `flex-1` の
  * 関係が崩れる。
  *
- * # ☰ の状態は受け取る。持たない
+ * # サイドバーの開閉は受け取る。持たない
  *
- * 開閉の記憶は [`useFilesPanel`] のままで、**呼ぶのは画面側**。☰ のボタンはヘッダの中に
+ * 開閉の記憶は [`useFilesPanel`] のままで、**呼ぶのは画面側**。切り替えボタンはヘッダの中に
  * 居て（PJT 専用画面とセッション専用画面でヘッダの作りが違う）、こことは別の枝にある。
  * 同じタブの中で `storage` の合図は飛ばないので、**両方が別々に `useFilesPanel()` を
  * 呼ぶと、押しても片方しか変わらない。**
@@ -27,7 +27,7 @@
 import { AnimatePresence } from 'motion/react'
 import { useState } from 'react'
 import { FileColumn } from '@/components/ProjectFiles/FileColumn'
-import { FolderOverlay } from '@/components/ProjectFiles/FolderOverlay'
+import { Sidebar } from '@/components/ProjectFiles/Sidebar'
 import { usePanelWidths } from '@/lib/filesPanel'
 
 interface Props {
@@ -35,7 +35,7 @@ interface Props {
   host: string
   /** その枠のパス。起点であり、相対パスの基準でもある */
   project: string
-  /** ☰ の状態。**記憶は `useFilesPanel` が持つ**ので、ここでは受け取るだけ */
+  /** サイドバーが開いているか。**記憶は `useFilesPanel` が持つ**ので、ここでは受け取るだけ */
   open: boolean
   onToggle: () => void
   /** 横ホイールの行き先（設計§8）。PJT 専用画面だけが渡す */
@@ -48,22 +48,27 @@ export function FilesLayout({ host, project, open, onToggle, onWheelX }: Props) 
     ファイルを戻すかどうかは `イシューグループ_2026-0813-1804` が範囲を切っているので、
     そちらの結論を待つ。
 
-    移設前は `ProjectFiles` のローカル状態だった。ここへ上げたことで、**☰ を畳んでも
+    移設前は `ProjectFiles` のローカル状態だった。ここへ上げたことで、**サイドバーを畳んでも
     中身の列が残る**（設計§2「ふだん（ファイルを開いている）」）
   */
   const [picked, setPicked] = useState<string | null>(null)
-  const [widths, grip] = usePanelWidths()
+  const [widths, grip, dragging] = usePanelWidths()
 
   return (
     <>
       {/* `initial={false}` で、開いた状態で読み込み直したときに滑らせない */}
       <AnimatePresence initial={false}>
         {open && (
-          <FolderOverlay
+          <Sidebar
             key="folder"
             host={host}
             project={project}
             width={widths.folder}
+            /*
+              **掴んでいる間だけ、場所取りの動きを止める**（`Sidebar.tsx`）。
+              渡さないと、幅を引っぱるたびに場所取りがパネルから遅れる
+            */
+            dragging={dragging}
             /*
               **ファイルを選んでも畳まない**（利用者の判断・2026-08-24）。続けて別の
               ファイルを開けるようにするため（設計§2）

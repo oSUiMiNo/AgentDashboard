@@ -20,7 +20,7 @@ const ROOT = '/home/me/dev/app'
 /** 場所ごとの遅れ（ミリ秒）。**返る順を押した順と入れ替える**ために使う。 */
 let slow: Record<string, number> = {}
 
-/** ☰ が開いている状態で置く。畳んだ状態を見たいテストは `open` を渡す。 */
+/** サイドバーが開いている状態で置く。畳んだ状態を見たいテストは `open` を渡す。 */
 function 置く(props: { project?: string; open?: boolean } = {}) {
   const toggles: string[] = []
   const view = render(
@@ -71,7 +71,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-describe('フォルダのオーバーレイ', () => {
+describe('サイドバー', () => {
   it('起点から始まり、起点より上へは辿れない', async () => {
     置く()
 
@@ -196,12 +196,12 @@ describe('フォルダのオーバーレイ', () => {
     )
   })
 
-  it('☰ が畳まれていれば、オーバーレイは出ない', () => {
+  it('サイドバーが畳まれていれば、フォルダは出ない', () => {
     置く({ open: false })
     expect(screen.queryByTestId('project-files-panel')).toBeNull()
   })
 
-  it('狭い画面用の「閉じる」は、☰ と同じ手を呼ぶ', async () => {
+  it('狭い画面用の「閉じる」は、切り替えボタンと同じ手を呼ぶ', async () => {
     const { toggles } = 置く()
     await userEvent.click(screen.getByTestId('project-files-close'))
     expect(toggles).toEqual(['toggle'])
@@ -234,9 +234,9 @@ describe('ファイルの中身の列', () => {
 
     移設前は縦に積んでいたので「閉じる＝下half が畳まれて一覧だけになる」だった。
     列に切り出したいまは「閉じる＝**列ごと消えてセッションが左へ寄る**」で、
-    **フォルダのオーバーレイは開いたまま**である（設計§2）。
+    **サイドバーは開いたまま**である（設計§2）。
   */
-  it('「閉じる」で列ごと消えるが、オーバーレイは開いたまま', async () => {
+  it('「閉じる」で列ごと消えるが、サイドバーは開いたまま', async () => {
     置く()
 
     await userEvent.click(await screen.findByRole('button', { name: /計画\.md/ }))
@@ -249,7 +249,7 @@ describe('ファイルの中身の列', () => {
     expect(screen.getByTestId('folder-browser')).toBeInTheDocument()
   })
 
-  it('ファイルを選んでもオーバーレイは畳まれず、続けて別のファイルを開ける', async () => {
+  it('ファイルを選んでもサイドバーは畳まれず、続けて別のファイルを開ける', async () => {
     // **利用者が名指しで決めた振る舞い**（2026-08-24）。実装の都合で変えないこと
     const { toggles } = 置く()
 
@@ -263,7 +263,7 @@ describe('ファイルの中身の列', () => {
     expect(screen.getByTestId('folder-browser')).toBeInTheDocument()
   })
 
-  it('☰ を畳んでも、中身の列は残る', async () => {
+  it('サイドバーを畳んでも、中身の列は残る', async () => {
     // 移設前は `picked` が `ProjectFiles` の中にあったので、パネルを畳むと消えていた。
     // 器へ上げたことで「ふだん（ファイルを開いている）」の並びが成立する（設計§2）
     const { view } = 置く()
@@ -390,6 +390,62 @@ describe('一覧は画像を先読みしない', () => {
  * 「定義をテキストとして確かめる」と同じ考え方。
  */
 
+describe('広い窓で押しのける（場所取り）', () => {
+  /*
+    **狭い窓は被さったまま、広い窓では被せない**（設計§2 の 2026-08-27 の変更）。
+    押しのけているのは、パネルの隣に置いた「場所取り」——パネル自身はフローの外に
+    居続ける（`Sidebar.tsx` の JSDoc）。
+
+    **どれだけ押しのけたかは、ここでは測れない。** jsdom は幅を常に 800・左端を常に 0
+    で返すので、位置から出す経路は縮退した同じ数字しか通らない。実際に右へずれることは
+    E2E でしか言えない。ここで見るのは**居ることと、綴りと、読み上げに出ないこと**。
+  */
+  it('サイドバーが開いていると、場所取りが出る', async () => {
+    置く()
+
+    await waitFor(() =>
+      expect(screen.getByTestId('sidebar-space')).toBeInTheDocument(),
+    )
+  })
+
+  it('畳んでいれば、場所取りは出ない', () => {
+    置く({ open: false })
+
+    expect(screen.queryByTestId('sidebar-space')).toBeNull()
+  })
+
+  it('場所取りは、フォルダの幅ぶんの場所を取る', async () => {
+    置く()
+
+    // 既定は 320px（`panelWidth.ts` の `PANEL_RANGE`）。**この幅ぶん右がずれる**
+    await waitFor(() =>
+      expect(screen.getByTestId('sidebar-space')).toHaveStyle({ width: '320px' }),
+    )
+  })
+
+  it('場所取りは、狭い窓では消える綴りになっている', async () => {
+    置く()
+
+    /*
+      **`hidden md:block` が安全弁。** 狭い窓では `display:none` になるので、
+      framer が当てるインラインの `width` が1ピクセルも効かない——`fixed inset-0` へ
+      `width` が加わると `right` が捨てられ、**全幅のドロワーが 320px の帯に化ける**
+      という罠（フェーズ1 の実測）を、これで踏まずに済む
+    */
+    const space = await screen.findByTestId('sidebar-space')
+    expect(space).toHaveClass('hidden')
+    expect(space).toHaveClass('md:block')
+  })
+
+  it('場所取りは、読み上げには出ない', async () => {
+    置く()
+
+    // 見せるものが何も無く、場所を作ることだけが仕事なので
+    const space = await screen.findByTestId('sidebar-space')
+    expect(space).toHaveAttribute('aria-hidden')
+  })
+})
+
 describe('器が1つであること', () => {
   /**
    * コメントを落とす。**中に `<aside>` と書いてある**ので、先に消さないと自分の
@@ -427,7 +483,7 @@ describe('器が1つであること', () => {
     }
   })
 
-  it('☰ も、どちらの画面も同じ部品を使っている', () => {
+  it('切り替えボタンも、どちらの画面も同じ部品を使っている', () => {
     for (const [名前, 中身] of Object.entries(画面)) {
       expect(中身, `${名前} が FilesToggle を使っていること`).toContain(
         '<FilesToggle',
@@ -438,7 +494,7 @@ describe('器が1つであること', () => {
     }
   })
 
-  it('取り合いの器が、オーバーレイの基準になっている', () => {
+  it('取り合いの器が、サイドバーの基準になっている', () => {
     // フォルダは広い画面で `md:absolute` になるので、**祖先に位置の基準が要る**。
     // 無いと `fixed` と同じく画面の上端から被さり、アプリのヘッダまで覆う
     for (const [名前, 中身] of Object.entries(画面)) {

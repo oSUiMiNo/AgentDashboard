@@ -176,6 +176,16 @@ function いま当てる幅(): PanelWidths {
  * ——`useState` だと、速い操作で合図の側が1つ前の描画の値を見る余地が残る
  * （`Dpad.tsx` の `armed` と同じ判断）。
  *
+ * # 「掴んでいる」を2つ持つ理由
+ *
+ * `useRef` は**合図を無視するため**、`useState` は**描画へ出すため**。両方が要る。
+ *
+ * 合図の側を `useState` にすると、速い操作で1つ前の描画の値を見る余地が残る
+ * （`Dpad.tsx` の `armed` と同じ判断）。かといって `useRef` だけにすると、
+ * **掴んでいることを画面の側が知れない**——サイドバーの場所取りは、掴んでいる間だけ
+ * 動きを消さないと、幅が毎フレーム変わるたびに tween が挟まって指から遅れる
+ * （`ProjectFiles/Sidebar.tsx`）。**同じ場所で同時に更新するので、ずれようがない。**
+ *
  * # 窓の大きさを実行中に変えても追随しない
  *
  * 画面幅を見るのは**マウント時と別のタブの合図のときだけ**で、`resize` は購読しない。
@@ -183,13 +193,15 @@ function いま当てる幅(): PanelWidths {
  * 名指しで警告している「窓を狭めた状態で clamp した値を覚える」に、いちばん近い経路を
  * 自分で作ることになる。実害があるかは実機で見る。
  */
-export function usePanelWidths(): [PanelWidths, PanelWidthHandle] {
+export function usePanelWidths(): [PanelWidths, PanelWidthHandle, boolean] {
   const [widths, setWidths] = useState<PanelWidths>(いま当てる幅)
   /** 離した時点で書くために、いつも最新を控える */
   const latest = useRef(widths)
   latest.current = widths
   /** 掴んでいるか。`true` のあいだ `storage` を無視する */
   const 掴んでいる = useRef(false)
+  /** 同じことを描画へ出すための控え。**用途が違うだけで、値は同じ** */
+  const [dragging, setDragging] = useState(false)
 
   useEffect(() => {
     const onStorage = (event: StorageEvent) => {
@@ -209,6 +221,7 @@ export function usePanelWidths(): [PanelWidths, PanelWidthHandle] {
 
   const onGrab = useCallback(() => {
     掴んでいる.current = true
+    setDragging(true)
   }, [])
 
   const onMove = useCallback((edge: PanelEdge, width: number) => {
@@ -218,9 +231,10 @@ export function usePanelWidths(): [PanelWidths, PanelWidthHandle] {
 
   const onDrop = useCallback(() => {
     掴んでいる.current = false
+    setDragging(false)
     // **離した時点の値が正**（設計§5）
     writeWidths(latest.current)
   }, [])
 
-  return [widths, { onGrab, onMove, onDrop }]
+  return [widths, { onGrab, onMove, onDrop }, dragging]
 }
