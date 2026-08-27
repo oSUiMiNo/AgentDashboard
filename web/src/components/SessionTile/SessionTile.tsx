@@ -81,6 +81,45 @@ interface Props {
 const ECHO_MS = 12_000
 
 /**
+ * ②行に並ぶ札（接続断・モデル・モード）の見た目。
+ *
+ * **ANSWER タグと同じ「作り」を借りる**（利用者の指定・2026-08-26）。0.1.41 までは
+ * 枠線1本と薄い文字だけで、ステッカーが持っている**物質感を1つも持っていなかった**。
+ * 借りるのは4つ——**地をベタで塗る／内側に白のハイライト（紙の厚み）／角丸を小さく／
+ * 字間を開ける**。
+ *
+ * **ステッカーの印は付けない。** 傾き（`rotate`）と厚い落ち影と
+ * アクセント色のベタ塗りは、`.tile-sticker` に取ってある。`DESIGN.md` §23.3 が
+ * 「**全行に出したい情報は、ステッカーではない**」「属性は行の静かな要素で示す」と
+ * 決めており、§33 の禁止事項に「**状態ステッカーを全行に付けて列にする**」がある——
+ * モデル・モードは全行に出る属性なので、そのまま貼ると 12枚ぶんの列ができる。
+ *
+ * **`--tile-accent` を地に使わない。** 使うと `tile.test.ts` の「`--tile-accent` を
+ * 塗るものは必ず `--tile-ink` を通る」に掛かる（除外表はステッカーと効果線の2つだけ）。
+ *
+ * `tile.css` へ置かずクラス文字列にしてあるのは、**同じプロパティを両側から書かない**
+ * ため（取り込んだ CSS は Tailwind のユーティリティに無条件で勝つので、padding や
+ * 角丸を `tile.css` に書くと TSX 側が黙って効かなくなる。`tile.css` 冒頭の約束）。
+ */
+const CHIP =
+  'shrink-0 rounded-[3px] border px-1.5 py-0.5 text-[0.7rem] tracking-[0.04em] shadow-[inset_0_1px_0_rgb(255_255_255/10%)]'
+
+/**
+ * 札の地を、モードの色と喧嘩させずに足す。
+ *
+ * `permissionModeTone` は**セッション画面・起動フォーム・ピッカーでも使っている**ので
+ * 触らない（このイシューの範囲は一覧のカードだけ）。危ないモードは自分で地を持つが、
+ * **既定のモードは持たない**ので、そこにだけ足す。
+ *
+ * 地を無条件に前へ並べないのは、**Tailwind では同じ種類のクラスの勝敗が
+ * class 属性の並び順では決まらない**ため（生成された CSS の順で決まる）。
+ * 両方書くと、どちらが出るかがビルドの都合で変わる。
+ */
+function chipGround(tone: string): string {
+  return tone.includes('bg-') ? tone : `${tone} bg-muted`
+}
+
+/**
  * 効果線の向きと、**カードの縁のどこから出るか**（カード設計§9-4）。
  *
  * 放射状に等間隔＋±6度のばらつき、という向きの決め方は変えていない。変えたのは
@@ -172,7 +211,10 @@ export function SessionTile({ cardId }: Props) {
     emitRoam({
       field,
       accent: statusAccentColor(session.status),
-      ink: statusInk(session.status),
+      // **繋がっていない状態を渡す**（2026-08-26）。渡さないと、輪とバーは沈むのに
+      // 放った線だけが沈まない——減光は `tile.css` の `[data-connected='false']` に
+      // しか無く、この経路はあの CSS を通らないため（実測：枠 45% に対し線 75%）
+      ink: statusInk(session.status, session.agent_connected),
       quiet,
     })
   }
@@ -381,21 +423,24 @@ export function SessionTile({ cardId }: Props) {
                 ②行のほうが素直**で、あそこは「このセッションはどう動いているか」の属性が
                 並ぶ行である。
               */}
+              {/*
+                **カプセル（`Badge`）をやめて札に揃える。** 同じ行に丸いカプセルと
+                角ばった札が混ざると、3つが1組に見えない
+              */}
               {stale && (
-                <Badge
+                <span
                   data-testid="disconnected-badge"
-                  variant="secondary"
-                  className="text-muted-foreground shrink-0"
+                  className={`${CHIP} border-border bg-muted text-muted-foreground`}
                   title="この PC からの報告が届いていません。表示は最後に分かっていた状態です"
                 >
                   接続断
-                </Badge>
+                </span>
               )}
               {session.model !== null && (
                 <span
                   data-testid="model"
                   data-model={session.model}
-                  className="border-border text-muted-foreground max-w-28 shrink-0 truncate rounded border px-1.5 py-0.5 text-[0.7rem]"
+                  className={`${CHIP} border-border bg-muted text-foreground/80 max-w-28 truncate`}
                   title={session.model}
                 >
                   {modelLabel(session.model, session.model_label)}
@@ -409,7 +454,7 @@ export function SessionTile({ cardId }: Props) {
                 <span
                   data-testid="permission-mode"
                   data-mode={session.permission_mode}
-                  className={`max-w-28 shrink-0 truncate rounded border px-1.5 py-0.5 text-[0.7rem] ${permissionModeTone(session.permission_mode)}`}
+                  className={`${CHIP} max-w-28 truncate ${chipGround(permissionModeTone(session.permission_mode))}`}
                   title={permissionModeLabel(session.permission_mode)}
                 >
                   {permissionModeLabel(session.permission_mode)}
@@ -572,7 +617,21 @@ export function SessionTile({ cardId }: Props) {
             event.stopPropagation()
             revive(session.card_id)
           }}
-          className="tile-revive border-border bg-card text-muted-foreground hover:border-primary/60 hover:text-foreground absolute top-2 right-2 rounded border px-1.5 py-0.5 text-[0.7rem] disabled:cursor-not-allowed disabled:opacity-50"
+          /*
+            **押せるものに見せる**（利用者の指摘・2026-08-26）。0.1.41 までは透明な地に
+            薄い枠と薄い文字だけで、`DESIGN.md` §27.3 が名指しで避けている
+            「単なる 1px Border だけ」そのものだった。§12.3 の「主要操作ボタン →
+            マット塗装・プレート」に寄せ、**地・内側ハイライト・落ち影**で板にする。
+
+            **大きさ（36×23px）は変えない。** 変えなければ `tile.css` の
+            `.tile-revive::after { inset: -11px }` が作る当たり判定 58×45px が
+            44px の床を割らず、①行の `pr-12` の前提も動かない。
+
+            押下は `scale(0.98)`（§27.4 の 0.97〜0.99）。**`Button` 部品へは寄せない**
+            ——あちらは押下で `translate-y-px` するので、「復旧ボタンは揺らさない」と
+            正面から食い違う。
+          */
+          className="tile-revive border-border bg-muted text-foreground hover:border-primary/60 hover:bg-accent absolute top-2 right-2 rounded-[3px] border px-1.5 py-0.5 text-[0.7rem] tracking-[0.04em] shadow-[inset_0_1px_0_rgb(255_255_255/10%),0_1px_2px_rgb(0_0_0/35%)] transition-colors active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none"
         >
           {reviving ? '復旧中…' : '復旧'}
         </button>
