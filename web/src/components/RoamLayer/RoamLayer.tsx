@@ -1,9 +1,10 @@
 /**
  * 画面を回遊する効果線の層（カード設計§9-7）。
  *
- * 権限確認待ちのカードが跳ねるたびに線が2〜3本だけ飛び出し、画面じゅうを15秒ほど
- * 回遊してから消える。**在庫と門は `stores/roam.ts`、経路は `lib/roam.ts`、見た目と
- * 止め方は `roam.css`** が持っていて、ここは並べるだけである。
+ * 権限確認待ちのカードが跳ねるたびに線が3本だけ飛び出し、画面じゅうを90秒ほど
+ * 回遊してから消える（本数は 2026-08-26 に3本固定、寿命は 2026-08-28 に 50→90秒）。
+ * **在庫と門は `stores/roam.ts`、経路は `lib/roam.ts`、見た目と止め方は `roam.css`**
+ * が持っていて、ここは並べるだけである。
  *
  * # 置き場所
  *
@@ -31,7 +32,7 @@
 
 import type { CSSProperties } from 'react'
 import { routeVars } from '@/lib/roam'
-import { ROAM_BIRTH_MS, ROAM_FLUTTER_MS, ROAM_LIFE_MS, useRoamStore } from '@/stores/roam'
+import { ROAM_BIRTH_MS, ROAM_LIFE_MS, useRoamStore } from '@/stores/roam'
 import { useSettingsStore } from '@/stores/settings'
 
 export function RoamLayer() {
@@ -70,13 +71,21 @@ export function RoamLayer() {
             同じ `transform-origin` を取り合う（設計§9-7-2）。
 
             **秒数はここでも層が渡す。** 出どころを1つに保つ約束は内側にも掛かる。
+
+            **渡す秒数は1つだけ。** ひらひら（`roam-flutter`）をやめたので、
+            紙片に載るアニメーションは尺取り虫1本になった（2026-08-28）。
+
+            **秒数は `animation-name` と並び順で対応している。** 片方だけ消すと
+            残ったほうが繰り上がって**別の秒数を食う**——やめたとき `roam-birth` が
+            450ms のまま残るのは、ここも一緒に1本へ畳んだからである。**畳み忘れると
+            画面は動き続けるので、目では気づけない。**
           */}
           <b
             className="roam-paper"
             data-testid="roam-paper"
             data-shape={line.shape}
             style={{
-              animationDuration: `${ROAM_FLUTTER_MS}ms, ${ROAM_BIRTH_MS}ms`,
+              animationDuration: `${ROAM_BIRTH_MS}ms`,
             }}
           />
         </i>

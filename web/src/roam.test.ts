@@ -172,7 +172,6 @@ describe('層は場所を取らず、何も塗らない', () => {
       'roam-birth',
       'roam-drift',
       'roam-fade',
-      'roam-flutter',
     ])
     // 停留点ぶんの座標を読んでいること（`lib/roam.ts` の `ROAM_STOPS` と揃う）
     for (let i = 0; i < ROAM_STOPS; i += 1) {
@@ -348,22 +347,32 @@ describe('層は場所を取らず、何も塗らない', () => {
     expect(生).toContain('scale: 0 1')
   })
 
-  it('ひらひらは停留点の数から切り離してある', () => {
+  it('紙片の太さが、時間で1度も変わらない', () => {
     /*
-      **前の版はひらひらの谷を停留点の中間へ置いており、% が `ROAM_STOPS` に紐づいて
-      いた**（設計§9-7-9）。停留点が 32→61 に増え、さらに % が弧長比例になったので、
-      同じ書き方だと**61ブロックへ膨らみ、しかも「区間の中間」の意味が失われる**。
+      **0.1.43 を実物で見た利用者の指摘「紐の太さと色が呼吸している」への番人**
+      （要件14-1・設計§20-4-4）。
 
-      ひらひらは道のりではなく**時間**の話なので、自分の周期を持たせてある。
-      **停留点の数へ紐づけ直すと、ここが落ちる。**
+      呼吸の実体は `roam-flutter` の縦潰し（`scale: 1 0.65`）ただ1つだった。
+      塗りは一定色で `opacity` も動いておらず、`stroke-width` / `border` / `outline`
+      は1つも無い。**したがって「y を動かすものが1つも無いこと」を見れば足りる。**
+
+      **「形が時間で変わらない」に近い形では書かない。** フェーズ15（紐の形をコマごとに
+      切り替える）と正面衝突するので、**見るのは `scale` の y に限る**。
     */
-    const 翻 = /@keyframes\s+roam-flutter\s*\{[\s\S]*?\n\}/.exec(素のCSS())?.[0] ?? ''
-    expect(翻).toContain('scale: 1 0.65')
-    // 谷は1つだけ。停留点ぶん刻んであれば、ここが桁で増える
-    expect([...翻.matchAll(/scale:/g)]).toHaveLength(3)
-    // **後ろが勝つ。** 生まれの間だけ尺取り虫が翻りを上書きする
+    // 潰しを戻すと落ちる
+    expect(素のCSS()).not.toContain('roam-flutter')
+
+    // **`roam-birth` は横方向しか動かさない**のが前提。y へ手が伸びたら落ちる
+    const 生 = /@keyframes\s+roam-birth\s*\{[\s\S]*?\n\}/.exec(素のCSS())?.[0] ?? ''
+    expect(生).not.toBe('')
+    for (const [, y] of 生.matchAll(/scale:\s*[\d.]+\s+([\d.]+)/g)) {
+      expect(Number(y)).toBe(1)
+    }
+
+    // 紙片に載る動きは1本だけ。**争う相手が居ない**ので並び順の細工も要らない
     const [紙] = 当たる('.roam-paper')
-    expect(紙.body).toContain('animation-name: roam-flutter, roam-birth')
+    expect(紙.body).toContain('animation-name: roam-birth')
+    expect(紙.body).not.toContain(',')
   })
 
   it('濃さはカードから配られる。固定値を書かない', () => {

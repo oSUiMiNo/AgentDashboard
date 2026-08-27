@@ -4,7 +4,6 @@ import { RoamLayer } from '@/components/RoamLayer/RoamLayer'
 import { ROAM_STOPS } from '@/lib/roam'
 import {
   ROAM_BIRTH_MS,
-  ROAM_FLUTTER_MS,
   ROAM_LIFE_MS,
   emitRoam,
   resetRoam,
@@ -106,10 +105,10 @@ describe('回遊の層', () => {
       expect(一枚.parentElement).toBe(線[i])
       expect(一枚).toHaveAttribute('data-shape')
       // **内側にも秒数を渡す。** 出どころを1つに保つ約束は内側にも掛かる。
-      // 内は寿命ではなく**ひらひらの周期と尺取り虫の長さ**（設計§9-7-9）
-      expect((一枚 as HTMLElement).style.animationDuration).toBe(
-        `${ROAM_FLUTTER_MS}ms, ${ROAM_BIRTH_MS}ms`,
-      )
+      // 内は寿命ではなく**尺取り虫の長さ**（設計§9-7-9）。ひらひらをやめたので
+      // 1本だけになった（2026-08-28）——**2本のまま残すと、残ったほうが繰り上がって
+      // 別の秒数を食う**
+      expect((一枚 as HTMLElement).style.animationDuration).toBe(`${ROAM_BIRTH_MS}ms`)
     }
   })
 

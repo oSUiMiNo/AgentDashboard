@@ -1,11 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { RoamField } from '@/lib/roam'
 import {
+  ROAM_DELAY_MAX_MS,
+  ROAM_DELAY_MIN_MS,
   ROAM_LIFE_MS,
   ROAM_LINES,
   ROAM_MAX,
+  ROAM_SKIP,
   emitRoam,
   resetRoam,
+  roamDefaultDice,
+  scheduleRoam,
+  setRoamDice,
   useRoamStore,
 } from '@/stores/roam'
 
@@ -95,6 +101,10 @@ describe('量を抑える', () => {
     for (let i = 0; i < 20; i += 1) {
       emitRoam(種)
     }
+    // **上限に達していること**を先に見る（2026-08-28）。これが無いと、`emitRoam` が
+    // 壊れて1本も積まれなくても `0 <= 32` で緑になる——**上限を守っていることは
+    // 見えても、線が実際に積まれていることは見ていなかった**
+    expect(本数()).toBe(ROAM_MAX)
     expect(本数()).toBeLessThanOrEqual(ROAM_MAX)
   })
 
@@ -112,19 +122,167 @@ describe('量を抑える', () => {
   })
 })
 
+describe('跳ねから切り離して撃つ', () => {
+  /*
+    **0.1.43 を実物で見た利用者の指摘「効果線がカードの揺れと連動している」への番人**
+    （要件14-1・14-2・設計§20-2-1）。
+
+    合図は跳ねの折り返しのままだが、**籤で半分見送り、残りも 1.2〜3.6秒 遅らせて**撃つ。
+    ここが守るのは3つ——**見送ること**、**遅れが固定でないこと**、そして
+    **止まっているときタイマを1本も積まないこと**である。
+
+    **確率そのものは検査しない。** 揺らいで落ちる。**籤を両端へ固定して見る。**
+  */
+  const 測る = () => 種
+
+  it('籤が「出す」側なら、遅れてから出る', () => {
+    setRoamDice(() => 0.99)
+    scheduleRoam('lively', 測る)
+    // **撃つのは後。** ここで出ていたら、遅らせていない
+    expect(本数()).toBe(0)
+    vi.advanceTimersByTime(ROAM_DELAY_MAX_MS + 1)
+    expect(本数()).toBe(ROAM_LINES)
+  })
+
+  it('籤が「見送る」側なら、いくら待っても出ない', () => {
+    setRoamDice(() => 0)
+    scheduleRoam('lively', 測る)
+    vi.advanceTimersByTime(ROAM_DELAY_MAX_MS * 10)
+    expect(本数()).toBe(0)
+  })
+
+  it('遅れは下限と上限のあいだに入る', () => {
+    setRoamDice(() => 0.99)
+    scheduleRoam('lively', 測る)
+    // 下限の直前では、まだ出ていない
+    vi.advanceTimersByTime(ROAM_DELAY_MIN_MS - 1)
+    expect(本数()).toBe(0)
+    vi.advanceTimersByTime(ROAM_DELAY_MAX_MS)
+    expect(本数()).toBe(ROAM_LINES)
+  })
+
+  it('遅れが固定値でない＝同じカードの連続する2回で違う', () => {
+    // **`散らす()` を使っていたら、同じ種で毎回同じ値になる**（要件14-2）
+    const 出た: number[] = []
+    let 経過 = 0
+    const 進める = () => {
+      for (let i = 0; i < 60; i += 1) {
+        vi.advanceTimersByTime(100)
+        経過 += 100
+        if (本数() > 0) return 経過
+      }
+      return -1
+    }
+    for (const r of [0.9, 0.99, 0.5]) {
+      resetRoam()
+      経過 = 0
+      // 1つ目の籤で見送りを抜け、2つ目で遅れが決まる
+      let 回 = 0
+      setRoamDice(() => {
+        回 += 1
+        return 回 === 1 ? 0.99 : r
+      })
+      scheduleRoam('lively', 測る)
+      出た.push(進める())
+    }
+    expect(new Set(出た).size).toBeGreaterThan(1)
+  })
+
+  it('「控えめ」「静止」では、タイマを1本も積まない', () => {
+    /*
+      **門を「撃つ直前」へ動かすと、ここが落ちる。** 設計§9-7 が門に与えた役割は
+      「**仕事を作らない**」ことである——線が出ないことだけを見ると、
+      **タイマが回っていても緑になる**（テスト計画の壊し方の表）。
+    */
+    setRoamDice(() => 0.99)
+    for (const quiet of ['calm', 'still'] as const) {
+      resetRoam()
+      setRoamDice(() => 0.99)
+      scheduleRoam(quiet, 測る)
+      expect(vi.getTimerCount()).toBe(0)
+      vi.advanceTimersByTime(ROAM_DELAY_MAX_MS * 2)
+      expect(本数()).toBe(0)
+    }
+  })
+
+  it('OS が「動きを減らす」と言っていても、タイマを1本も積まない', () => {
+    const 元 = window.matchMedia
+    window.matchMedia = ((query: string) =>
+      ({
+        matches: query.includes('prefers-reduced-motion'),
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }) as unknown as MediaQueryList) as typeof window.matchMedia
+    try {
+      setRoamDice(() => 0.99)
+      scheduleRoam('lively', 測る)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      window.matchMedia = 元
+    }
+  })
+
+  it('見送る確率は、跳ね2回につき1回くらいになる値である', () => {
+    // **1/3 では平均 7.2秒にしかならない**（`1/(1-1/3) = 1.5`）。
+    // 跳ねの 4.8秒 × 1/(1-p) が 9.6秒 になること
+    expect(4.8 / (1 - ROAM_SKIP)).toBeCloseTo(9.6, 5)
+  })
+
+  it('籤は毎回ちがう値を返す＝`散らす()` 由来ではない', () => {
+    /*
+      **`lib/roam.ts` の `散らす()` は種から決まる再現可能な値である**（経路を組み立てる
+      ためのもの）。撃つ／撃たないと遅れをあれで引くと、**同じカードの連続する跳ねが
+      毎回まったく同じ挙動になる**——「揺れと連動している」という元の指摘へ戻る。
+
+      **既定の籤を直接見る。** `scheduleRoam` を通して見ようとすると、`resetRoam` が
+      既定を戻してしまうので**壊しても落ちない**（2026-08-28 に壊し方を当てて分かった）。
+
+      **確率そのものは検査しない。** 見るのは「1点に固まっていないこと」だけである。
+    */
+    const 出た = new Set(Array.from({ length: 40 }, () => roamDefaultDice()))
+    expect(出た.size).toBeGreaterThan(1)
+    for (const 値 of 出た) {
+      expect(値).toBeGreaterThanOrEqual(0)
+      expect(値).toBeLessThan(1)
+    }
+  })
+
+  it('場が無ければ、遅れたあとでも出さない', () => {
+    setRoamDice(() => 0.99)
+    scheduleRoam('lively', () => null)
+    vi.advanceTimersByTime(ROAM_DELAY_MAX_MS + 1)
+    expect(本数()).toBe(0)
+  })
+})
+
 describe('上限と寿命が噛み合っている', () => {
   it('1枚が待っているあいだ、線は寿命どおり生きる', () => {
     /*
-      **上限が小さいと、書いた寿命どおりに生きない**（要件4）。跳ねは 4.8秒に1回で
-      1回 `ROAM_LINES` 本なので、寿命のあいだに出る線は「寿命 ÷ 4.8 × 本数」。
-      上限がそれより小さいと**古いものから捨てられて、実際の寿命は上限で決まる**
-      ——前の版は 10本上限で、50秒と書いても 16秒しか生きなかった。
+      **上限が小さいと、書いた寿命どおりに生きない**（要件4）。上限が小さいと
+      **古いものから捨てられて、実際の寿命は上限で決まる**——前の版は 10本上限で、
+      50秒と書いても 16秒しか生きなかった。
 
-      **上限を下げるか寿命を伸ばすと、ここが落ちる。**
+      **見るのは跳ねの周期ではなく、発火の周期である**（2026-08-28）。跳ねは 4.8秒に
+      1回のままだが、`ROAM_SKIP` で半分見送るので**撃つのは平均 9.6秒に1回**になった。
+      **跳ねの周期のまま置くと、実態より多く見積もって落ちる**（90 ÷ 4.8 × 3 ＝ 54）。
+
+      **上限を下げるか、寿命を伸ばすか、見送る確率を下げると、ここが落ちる。**
     */
     const 跳ねの周期 = 4.8
-    const 出る本数 = Math.floor(ROAM_LIFE_MS / 1000 / 跳ねの周期) * ROAM_LINES
-    expect(ROAM_MAX).toBeGreaterThanOrEqual(出る本数)
+    // 見送る確率 p のとき、撃つまでの平均試行回数は 1/(1-p)
+    const 発火の周期 = 跳ねの周期 / (1 - ROAM_SKIP)
+    const 平均本数 = (ROAM_LIFE_MS / 1000 / 発火の周期) * ROAM_LINES
+
+    /*
+      **平均に届くだけでは足りない**（2026-08-28）。**乱数で撃つ以上、画面の本数は
+      平均の前後に揺れる**ので、上限を平均ぎりぎりに切ると**揺れの山で毎回押し出され、
+      寿命が実現しない**。
+
+      **揺れは「1回の放出」単位で起きる**（撃つときは必ず `ROAM_LINES` 本まとめて出る）
+      ので、**最低でも1回ぶんの余裕**が要る。29 まで切り詰めるとここが落ちる。
+    */
+    expect(ROAM_MAX).toBeGreaterThanOrEqual(平均本数 + ROAM_LINES)
   })
 })
 
@@ -154,13 +312,16 @@ describe('寿命', () => {
 
 describe('線が持つもの', () => {
   it('カードから渡された色と濃さを、そのまま持つ', () => {
+    // **長さを先に見る**（2026-08-28）。空配列だと `for` が0回まわって緑になる
     // **層は DOM を1度も読まない。** `--tile-accent` はインライン style なので
     // 継承せず、層から `getComputedStyle` で拾いに行く形にすると読む相手が増える。
     //
     // **濃さも同じ扱いにした**（フェーズ9）。固定値で塗っていたので、同じ状態
     // なのに輪と線で色が食い違っていた（カード設計§9-7）
     emitRoam({ ...種, accent: '#123456', ink: '42%' })
-    for (const line of useRoamStore.getState().lines) {
+    const lines = useRoamStore.getState().lines
+    expect(lines.length).toBeGreaterThan(0)
+    for (const line of lines) {
       expect(line.accent).toBe('#123456')
       expect(line.ink).toBe('42%')
     }

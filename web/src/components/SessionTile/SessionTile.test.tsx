@@ -16,7 +16,7 @@ import {
   setCardError,
   upsertSession,
 } from '@/stores/sessions'
-import { resetRoam, useRoamStore } from '@/stores/roam'
+import { ROAM_DELAY_MAX_MS, resetRoam, setRoamDice, useRoamStore } from '@/stores/roam'
 import { useSettingsStore } from '@/stores/settings'
 import { useWsStore } from '@/stores/ws'
 import { settingsFixture } from '@/test/fixtures'
@@ -938,18 +938,45 @@ describe('跳ねるたびに、画面を回遊する線を放つ', () => {
     )
   }
 
+  /**
+   * 跳ねてから撃たれるまでを進める。
+   *
+   * **合図と放出は別の時刻になった**（2026-08-28）。`scheduleRoam` が籤で半分見送り、
+   * 残りも 1.2〜3.6秒 遅らせて撃つ。**進めないと、この describe の全部が「0本」で
+   * 揃ってしまう**——`toHaveLength(0)` を見ている4本は、それでも緑になる。
+   */
+  function 撃たれるまで進める(): void {
+    act(() => {
+      vi.advanceTimersByTime(ROAM_DELAY_MAX_MS + 1)
+    })
+  }
+
   beforeEach(() => {
     resetRoam()
+    // **籤を「必ず出す」側へ固定する。** 固定しないと、`toHaveLength(0)` を見ている
+    // 4本が「門が効いた」のか「籤で見送った」のか区別できず、**門が壊れても緑になる**
+    setRoamDice(() => 1)
+    // **`toFake` を絞る。** 既定の偽装は `requestAnimationFrame` も差し替えるが、
+    // ストアはカードの更新を rAF で束ねている。さらに `lib/roam.ts` が控えの寿命に
+    // `performance.now()` を使っているので、**丸ごと止めると控えが永久に新鮮になり、
+    // 場の測り直しが起きなくなる**
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     useSettingsStore.setState((state) => ({
       settings: { ...state.settings, motion_quiet: 'lively' },
     }))
   })
 
-  afterEach(() => resetRoam())
+  afterEach(() => {
+    vi.useRealTimers()
+    resetRoam()
+  })
 
-  it('跳ねの折り返しで放つ', () => {
+  it('跳ねの折り返しを合図に、間を置いてから放つ', () => {
     待つカードを描く()
     折り返す('tile-shake')
+    // **合図の瞬間には出ていない。** ここで出ていたら、揺れと連動したままである
+    expect(useRoamStore.getState().lines).toHaveLength(0)
+    撃たれるまで進める()
     expect(useRoamStore.getState().lines.length).toBeGreaterThan(0)
   })
 
@@ -964,6 +991,7 @@ describe('跳ねるたびに、画面を回遊する線を放つ', () => {
       </MemoryRouter>,
     )
     折り返す('tile-shake')
+    撃たれるまで進める()
     expect(useRoamStore.getState().lines).toHaveLength(0)
   })
 
@@ -972,6 +1000,7 @@ describe('跳ねるたびに、画面を回遊する線を放つ', () => {
     // 見分けを落とすとマウスを乗せたまま線が飛び続ける
     待つカードを描く()
     折り返す('tile-shake-calm')
+    撃たれるまで進める()
     expect(useRoamStore.getState().lines).toHaveLength(0)
   })
 
@@ -979,6 +1008,7 @@ describe('跳ねるたびに、画面を回遊する線を放つ', () => {
     // 弧も呼吸も無限に折り返すので、**名前を見ないと全部の状態で鳴る**
     待つカードを描く()
     折り返す('tile-spin')
+    撃たれるまで進める()
     expect(useRoamStore.getState().lines).toHaveLength(0)
   })
 
@@ -991,13 +1021,19 @@ describe('跳ねるたびに、画面を回遊する線を放つ', () => {
     }))
     待つカードを描く()
     折り返す('tile-shake')
+    撃たれるまで進める()
     expect(useRoamStore.getState().lines).toHaveLength(0)
   })
 
   it('放つ線は、そのカードの状態の色を持つ', () => {
     待つカードを描く()
     折り返す('tile-shake')
-    for (const line of useRoamStore.getState().lines) {
+    撃たれるまで進める()
+    const lines = useRoamStore.getState().lines
+    // **長さを見る。** これが無いと、線が0本のとき `for` が0回まわって緑になる
+    // ——**この工事の最頻出の罠そのもの**（2026-08-28 に実地で踏んだ）
+    expect(lines.length).toBeGreaterThan(0)
+    for (const line of lines) {
       expect(line.accent).toBe(statusAccentColor({ kind: 'waiting_permission' }))
     }
   })
@@ -1005,6 +1041,7 @@ describe('跳ねるたびに、画面を回遊する線を放つ', () => {
   it('繋がっているカードの線は、輪と同じ濃さで出る', () => {
     待つカードを描く()
     折り返す('tile-shake')
+    撃たれるまで進める()
     const lines = useRoamStore.getState().lines
     expect(lines.length).toBeGreaterThan(0)
     for (const line of lines) {
@@ -1027,6 +1064,7 @@ describe('跳ねるたびに、画面を回遊する線を放つ', () => {
       </MemoryRouter>,
     )
     折り返す('tile-shake')
+    撃たれるまで進める()
     const lines = useRoamStore.getState().lines
     expect(lines.length).toBeGreaterThan(0)
     for (const line of lines) {

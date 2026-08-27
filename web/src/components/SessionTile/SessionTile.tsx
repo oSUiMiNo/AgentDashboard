@@ -62,7 +62,7 @@ import type { CardId } from '@/lib/protocol'
 import { sessionPath } from '@/lib/routes'
 import { measureField } from '@/lib/roam'
 import { useNow } from '@/lib/sessions'
-import { emitRoam } from '@/stores/roam'
+import { scheduleRoam } from '@/stores/roam'
 import { useCardError, useReviving, useSessionCard } from '@/stores/sessions'
 import { agentName, agentOf, useSettingsStore } from '@/stores/settings'
 import { useWsStore } from '@/stores/ws'
@@ -196,25 +196,31 @@ export function SessionTile({ cardId }: Props) {
     **近づいている間は自然に飛ばない**——あちらは既存の短い線（`tile-lines`）の担当。
 
     「静止」と OS の「動きを減らす」では `animation: none` なので、**そもそもこの行が
-    呼ばれない**。門（`emitRoam`）が見るのは「控えめ」だけでよい。
+    呼ばれない**。門（`scheduleRoam`）が見るのは保険である。
+
+    **合図はここ、撃つのは後**（2026-08-28）。跳ねと線が連動して見えるという指摘を
+    受けて、`scheduleRoam` が**籤で半分見送り、残りも 1.2〜3.6秒 遅らせて**撃つ。
+    **場を測るのも撃つ瞬間**なので、ここでは測らず**測り方を渡す**。
   */
   const 跳ねた = useRef<() => void>(undefined)
   跳ねた.current = () => {
-    const frame = frameRef.current
-    if (frame === null || session === undefined) return
-    // **測るのはここ**（カード設計§9-7-4）。在庫の側で測ると、jsdom が矩形を全部 0 で
-    // 返すせいで単体テストが縮退した格子を通る。場が無ければ何もしない——一覧の外に
-    // カードが置かれた場合に、無い場所へ線を放たない
-    const field = measureField(frame)
-    if (field === null) return
-    emitRoam({
-      field,
-      accent: statusAccentColor(session.status),
-      // **繋がっていない状態を渡す**（2026-08-26）。渡さないと、輪とバーは沈むのに
-      // 放った線だけが沈まない——減光は `tile.css` の `[data-connected='false']` に
-      // しか無く、この経路はあの CSS を通らないため（実測：枠 45% に対し線 75%）
-      ink: statusInk(session.status, session.agent_connected),
-      quiet,
+    scheduleRoam(quiet, () => {
+      const frame = frameRef.current
+      if (frame === null || session === undefined) return null
+      // **測るのはここ**（カード設計§9-7-4）。在庫の側で測ると、jsdom が矩形を全部 0 で
+      // 返すせいで単体テストが縮退した格子を通る。場が無ければ何もしない——一覧の外に
+      // カードが置かれた場合に、無い場所へ線を放たない
+      const field = measureField(frame)
+      if (field === null) return null
+      return {
+        field,
+        accent: statusAccentColor(session.status),
+        // **繋がっていない状態を渡す**（2026-08-26）。渡さないと、輪とバーは沈むのに
+        // 放った線だけが沈まない——減光は `tile.css` の `[data-connected='false']` に
+        // しか無く、この経路はあの CSS を通らないため（実測：枠 45% に対し線 75%）
+        ink: statusInk(session.status, session.agent_connected),
+        quiet,
+      }
     })
   }
 

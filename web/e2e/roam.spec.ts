@@ -27,8 +27,20 @@ import { ROAM_MAX } from '../src/stores/roam'
  * ——`relative` が場から外れれば、層は初期包含ブロックへ落ちて矩形が食い違う。
  */
 
-/** 跳ねの周期。1周ぶん待てば、折り返しが必ず1回は来る */
+/** 跳ねの周期。1周ぶん待てば、**折り返しは**必ず1回は来る */
 const 跳ねの周期 = 4_800
+
+/**
+ * 撃たれるまでの周期。**待つのはこちらであって、跳ねの周期ではない**（2026-08-28）。
+ *
+ * 跳ねの折り返しは合図のままだが、`stores/roam.ts` の `scheduleRoam` が
+ * **籤で半分見送り（`ROAM_SKIP`）、残りも 1.2〜3.6秒 遅らせて**撃つ。
+ * したがって「1本目が出るまで」に要る時間は **跳ね2回ぶん＋遅れの上限**である。
+ *
+ * **跳ねの周期のまま待つと、落ちるのではなく揺れる**——本数を数える側が静かに
+ * ばらつき、原因不明のフレーキーに見える。
+ */
+const 発火の周期 = 跳ねの周期 * 2 + 3_600
 
 test.afterEach(async ({ page }) => {
   // **設定を先に戻す。** 静けさはサーバ側に残るので、戻し忘れると後続の無関係な
@@ -73,7 +85,7 @@ test('跳ねるたびに線が飛び、しばらく画面に居る', async ({ pa
   // **周期の末尾で鳴る**ので、1周ぶん待つ。手で投げるのではなく、CSS の時計が
   // 一巡したことを合図にしている＝周期が繋がっていることの証拠になる
   await expect(page.getByTestId('roam-line').first()).toBeVisible({
-    timeout: 跳ねの周期 * 2,
+    timeout: 発火の周期 * 2,
   })
 
   // **控えめな量**（利用者の指定）。1回の跳ねで3本しか出ない
@@ -166,10 +178,10 @@ test('飛んでいる線が、スクロールできる範囲を押し広げな�
 
   await 待つカードを作る(page)
   await expect(page.getByTestId('roam-line').first()).toBeVisible({
-    timeout: 跳ねの周期 * 2,
+    timeout: 発火の周期 * 2,
   })
   // 何本か溜まるまで待つ。1本だけだと、たまたま内側へ飛んだだけかもしれない
-  await page.waitForTimeout(跳ねの周期 * 1.5)
+  await page.waitForTimeout(発火の周期 * 1.5)
 
   /*
     **`fixed` をやめた副作用を見る。**
@@ -197,7 +209,7 @@ test('「控えめ」では、カードは跳ね続けるが線は飛ばない',
   await openDashboard(page)
   await 待つカードを作る(page)
   await expect(page.getByTestId('roam-line').first()).toBeVisible({
-    timeout: 跳ねの周期 * 2,
+    timeout: 発火の周期 * 2,
   })
 
   await 静けさ(page, 'calm')
@@ -244,7 +256,7 @@ test('「控えめ」では、カードは跳ね続けるが線は飛ばない',
 
     門（JS）が守っているのは**新しく増えないこと**なので、そちらを数える。
   */
-  await page.waitForTimeout(跳ねの周期 * 1.5)
+  await page.waitForTimeout(発火の周期 * 1.5)
   expect(await 残り.count()).toBeLessThanOrEqual(切り替えた時点)
 
   // **カードのほうは跳ね続ける。** ここが `tile.css` の「控えめ」との違い
@@ -277,7 +289,7 @@ test('OS が「動きを減らす」と言えば、飛んでいる線もその�
     飛んでいる最中に切り替えれば、**止めているのが CSS だと分かる**。
   */
   await expect(page.getByTestId('roam-line').first()).toBeVisible({
-    timeout: 跳ねの周期 * 2,
+    timeout: 発火の周期 * 2,
   })
 
   await page.emulateMedia({ reducedMotion: 'reduce' })
@@ -298,7 +310,7 @@ test('OS が「動きを減らす」と言えば、飛んでいる線もその�
 
     // 新しい線も出ない（跳ねが止まるので折り返しが鳴らない）
     const 前 = await page.getByTestId('roam-line').count()
-    await page.waitForTimeout(跳ねの周期 * 1.5)
+    await page.waitForTimeout(発火の周期 * 1.5)
     expect(await page.getByTestId('roam-line').count()).toBeLessThanOrEqual(前)
   } finally {
     // **戻してから終える。** 置いていくと後続が巻き添えになる
