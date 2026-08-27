@@ -40,6 +40,7 @@ import { useCallback, useEffect, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Button } from '@/components/ui/button'
+import { copyToClipboard } from '@/lib/clipboard'
 import { fileKind, needsSandbox } from '@/lib/fileKind'
 import {
   rawUrl,
@@ -177,13 +178,11 @@ export function FileView({ host, root, path, onClose }: Props) {
 
   const copy = useCallback(async () => {
     // **黙って失敗させない。** 使えない環境（http の別ホスト・古いブラウザ）では
-    // 選べる形で出して、利用者が自分で取れるようにする
-    try {
-      await navigator.clipboard.writeText(relative)
-      setCopied('done')
-    } catch {
-      setCopied('failed')
-    }
+    // 選べる形で出して、利用者が自分で取れるようにする。
+    //
+    // 写す手は `lib/clipboard.ts` が1つだけ持つ（設計§4）。**ここへ書き直さない**
+    // ——一覧（`CopyPath`）と同じ手を使うので、片方だけ直る形が作れない
+    setCopied((await copyToClipboard(relative)) ? 'done' : 'failed')
   }, [relative])
 
   const markdown = kind === 'markdown'

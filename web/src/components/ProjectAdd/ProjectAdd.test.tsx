@@ -241,6 +241,25 @@ describe('PJT を追加', () => {
     )
   })
 
+  it('写せない環境では、ここでも値を選べる形で出す', async () => {
+    // **同じ `FolderBrowser` なので、片方だけ直る形が作れない**（設計§5）。
+    // 左パネル側は `FolderBrowser.test.tsx` が見ているので、ここは
+    // **配線が生きていること**を1本で確かめる
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: undefined,
+    })
+
+    await openSheet()
+    await userEvent.click((await screen.findAllByTestId('folder-copy'))[0])
+
+    await waitFor(() =>
+      expect(screen.getByTestId('folder-copy-fallback')).toHaveTextContent(
+        '/home/me/dev/',
+      ),
+    )
+  })
+
   it('PC が2台以上のときは選択が出て、既定が選ばれていない', async () => {
     useSettingsStore.setState({
       settings: settingsFixture({

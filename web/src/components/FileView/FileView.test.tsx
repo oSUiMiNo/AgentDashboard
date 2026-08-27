@@ -73,14 +73,16 @@ describe('ファイルの見せ方', () => {
   it('コピーできない環境では、黙らずに値を選べる形で出す', async () => {
     // **セキュアコンテキストでないと `navigator.clipboard` は存在しない。**
     // LAN へ開いて `http://192.168.x.x:8787` で見ている場合がまさにそれで、
-    // 黙って失敗すると「押しても何も起きない」だけが残る（設計§29）
+    // 黙って失敗すると「押しても何も起きない」だけが残る（設計§29）。
+    //
+    // **「在るが失敗する」ではなく「無い」を置く。** 以前はここで `writeText` を
+    // 拒否させていたが、それは名前が言っていることと違う環境だった——本物は
+    // `.writeText` を**読んだ時点**で落ち、拒否は Promise が拒まれるだけで、
+    // **三層のうちどこへ入るかが変わる**（`lib/clipboard.ts`）。
+    // jsdom は `document.execCommand` も持たないので、これだけで①②とも自然に落ちる
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
-      value: {
-        writeText: vi.fn(async () => {
-          throw new Error('この場所では使えません')
-        }),
-      },
+      value: undefined,
     })
     serve(content('# 計画'))
     show(`${ROOT}/MyDocs/計画.md`)
