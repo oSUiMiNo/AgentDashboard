@@ -37,8 +37,8 @@ import {
   statusLabel,
   statusTone,
 } from '@/lib/protocol'
-import { FilesLayout } from '@/components/ProjectFiles/FilesLayout'
 import { FilesToggle } from '@/components/ProjectFiles/FilesToggle'
+import { useFilesParts } from '@/components/ProjectFiles/useFilesParts'
 import { useFilesPanel } from '@/lib/filesPanel'
 import { LOCAL_HOST } from '@/lib/routes'
 import type { CardId } from '@/lib/protocol'
@@ -72,6 +72,12 @@ export function SessionView({ cardId, compact = false }: Props) {
   const [view, setView] = useState<View>(compact ? 'terminal' : 'transcript')
   // PJT 専用画面と**同じ部品・同じ経路**（設計§28）。開閉の記憶も共有する
   const [filesOpen, toggleFiles] = useFilesPanel()
+  const { sidebar, column } = useFilesParts({
+    host: session?.agent_id ?? LOCAL_HOST,
+    project: session?.project ?? '',
+    open: filesOpen,
+    onToggle: toggleFiles,
+  })
 
   if (!session) {
     // 消えた直後の一瞬。単独表示のときは呼び出し側が「見つかりません」を出す
@@ -220,14 +226,13 @@ export function SessionView({ cardId, compact = false }: Props) {
           出さない——あちらは PJT 専用画面が既に持っており、宛先が一意でない操作を
           横並びに出さない、という既存の判断をそのまま引き継ぐ
         */}
-        {!compact && (
-          <FilesLayout
-            host={session.agent_id ?? LOCAL_HOST}
-            project={session.project}
-            open={filesOpen}
-            onToggle={toggleFiles}
-          />
-        )}
+        {!compact && sidebar}
+        {/*
+          **ここにレールは無い**（セッションを1本しか出さない）ので、中身の列は
+          取り合いの器の兄弟のまま。**PJT 専用画面だけ形が違うのは入れ忘れではなく、
+          揃える先が存在しないため**（`useFilesParts` の JSDoc）
+        */}
+        {!compact && column}
 
         {/*
           **重ねる基準はここ**（十字ボタン設計§10）。横向きのとき、十字ボタンは

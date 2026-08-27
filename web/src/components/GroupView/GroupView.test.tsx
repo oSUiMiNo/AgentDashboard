@@ -142,8 +142,16 @@ describe('PJT 専用画面', () => {
 
     expect(screen.getByTestId('group-view')).toBeInTheDocument()
     expect(screen.getByTestId('spawn-open')).toBeInTheDocument()
-    expect(screen.queryByTestId('group-rail')).toBeNull()
+    /*
+      **レールは0本でも描く**（2026-08-27）。以前はここで `null` を見ていたが、
+      **中身の列をレールの中へ入れた**ので、描かないと**0本の PJT でファイルを開いても
+      何も出なくなる**。空のレールが1つ在ること自体は、画面に何も足さない
+    */
+    expect(screen.getByTestId('group-rail')).toBeInTheDocument()
     expect(screen.queryAllByTestId('session-view')).toHaveLength(0)
+    expect(
+      screen.getByText('このプロジェクトのセッションはありません'),
+    ).toBeInTheDocument()
   })
 
   it('右側のセッション横並びは現行のまま', () => {

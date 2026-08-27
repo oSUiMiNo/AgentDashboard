@@ -1,5 +1,5 @@
 /**
- * ファイルのパネルの器（設計§2・§3。テスト計画フェーズ3）。
+ * ファイルの区画（設計§2・§3・§8。テスト計画フェーズ3・6・7）。
  *
  * **`ProjectFiles.test.tsx` を引き継いだもの。** あちらは「フォルダと中身を縦に積む器」
  * のテストで、器の役割が変わったのでここへ移した。**8本のうち7本はそのまま生きる**
@@ -13,18 +13,48 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { FilesLayout } from '@/components/ProjectFiles/FilesLayout'
+import { useFilesParts } from '@/components/ProjectFiles/useFilesParts'
 
 const ROOT = '/home/me/dev/app'
 
 /** 場所ごとの遅れ（ミリ秒）。**返る順を押した順と入れ替える**ために使う。 */
 let slow: Record<string, number> = {}
 
+/**
+ * **実物と同じ置き方をする。** `useFilesParts` は組み立て済みの2つを返すだけで、
+ * どこへ置くかは画面が決める——**サイドバーはレールの外、中身の列はレールの中**
+ * （`GroupView.tsx`）。ここで並べて置いてしまうと、置き場所の取り違えを見逃す。
+ *
+ * **名前だけ英語なのは、フックの規則に従うため。** `react-hooks(rules-of-hooks)` は
+ * 「フックを呼ぶ関数は、大文字で始まる部品か `use` で始まるフック」しか認めない。
+ */
+function Placement({
+  host,
+  project,
+  open,
+  onToggle,
+}: {
+  host: string
+  project: string
+  open: boolean
+  onToggle: () => void
+}) {
+  const { sidebar, column } = useFilesParts({ host, project, open, onToggle })
+  return (
+    <div className="relative flex min-h-0 flex-1 gap-4">
+      {sidebar}
+      <div data-testid="group-rail" className="flex min-h-0 min-w-0 flex-1 gap-4">
+        {column}
+      </div>
+    </div>
+  )
+}
+
 /** サイドバーが開いている状態で置く。畳んだ状態を見たいテストは `open` を渡す。 */
 function 置く(props: { project?: string; open?: boolean } = {}) {
   const toggles: string[] = []
   const view = render(
-    <FilesLayout
+    <Placement
       host="local"
       project={props.project ?? ROOT}
       open={props.open ?? true}
@@ -106,7 +136,7 @@ describe('サイドバー', () => {
     )
 
     view.rerender(
-      <FilesLayout host="local" project={other} open onToggle={() => {}} />,
+      <Placement host="local" project={other} open onToggle={() => {}} />,
     )
     await waitFor(() =>
       expect(screen.getByTestId('folder-browser')).toHaveAttribute(
@@ -272,12 +302,7 @@ describe('ファイルの中身の列', () => {
     await screen.findByTestId('file-view')
 
     view.rerender(
-      <FilesLayout
-        host="local"
-        project={ROOT}
-        open={false}
-        onToggle={() => {}}
-      />,
+      <Placement host="local" project={ROOT} open={false} onToggle={() => {}} />,
     )
 
     await waitFor(() =>
@@ -462,12 +487,36 @@ describe('器が1つであること', () => {
     'セッション専用画面': 読む('components/SessionView/SessionView.tsx'),
   }
 
-  it('どちらの画面も、同じ器を描いている', () => {
+  it('どちらの画面も、同じところで区画を組み立てている', () => {
+    /*
+      **器が1つの `<div>` であることではなく、状態が1箇所にあることを見る**
+      （`useFilesParts` の JSDoc）。中身の列だけレールの中へ入れたので、
+      2つの子は別々の親へ行く——それでも**組み立てているのは1箇所**である
+    */
     for (const [名前, 中身] of Object.entries(画面)) {
-      expect(中身, `${名前} が FilesLayout を描いていること`).toContain(
-        '<FilesLayout',
+      expect(中身, `${名前} が useFilesParts を使っていること`).toContain(
+        'useFilesParts(',
       )
     }
+  })
+
+  it('中身の列は、レールの中に置いてある', () => {
+    // **PJT 専用画面だけ。** セッション専用画面にレールは無い（設計§8）
+    const 画面の原文 = 画面['PJT 専用画面']
+    const レール = 画面の原文.indexOf('data-testid="group-rail"')
+    const 列 = 画面の原文.indexOf('{column}')
+    expect(レール, 'レールが在ること').toBeGreaterThan(-1)
+    expect(列, '列が置いてあること').toBeGreaterThan(-1)
+    expect(列, '列がレールより後ろ＝レールの中に居ること').toBeGreaterThan(レール)
+  })
+
+  it('サイドバーは、レールの外に置いてある', () => {
+    // 一緒に流れると、横へ動かしたとき左から出ているものが画面から消える
+    const 画面の原文 = 画面['PJT 専用画面']
+    expect(
+      画面の原文.indexOf('{sidebar}'),
+      'サイドバーがレールより前＝レールの外に居ること',
+    ).toBeLessThan(画面の原文.indexOf('data-testid="group-rail"'))
   })
 
   it('`<aside>` の写しが、どちらにも残っていない', () => {
@@ -495,7 +544,7 @@ describe('器が1つであること', () => {
   })
 
   it('取り合いの器が、サイドバーの基準になっている', () => {
-    // フォルダは広い画面で `md:absolute` になるので、**祖先に位置の基準が要る**。
+    // サイドバーは広い画面で `md:absolute` になるので、**祖先に位置の基準が要る**。
     // 無いと `fixed` と同じく画面の上端から被さり、アプリのヘッダまで覆う
     for (const [名前, 中身] of Object.entries(画面)) {
       expect(中身, `${名前} の取り合いの器に relative があること`).toContain(

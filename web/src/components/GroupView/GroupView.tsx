@@ -21,7 +21,7 @@
  *
  * # 左にファイル（イシューグループ_2026-0826-1146 設計§2・§3）
  *
- * 左上の切り替えボタンで [`FilesLayout`] を開閉する。**セッション専用画面にも同じ器が
+ * 左上の切り替えボタンで [`useFilesParts`] の区画を開閉する。**セッション専用画面にも同じものが
  * 出る**——`<aside>` を2箇所に写していた形は終わりにしたので、片方だけ直る状態が
  * 構造的に作れない。開閉の記憶は [`@/lib/filesPanel`] が持つ。
  *
@@ -32,10 +32,9 @@
  * 完結する。配置を選んだ理由そのものなので、右側の横並びには手を入れていない。
  */
 
-import { useRef } from 'react'
 import { Link } from 'react-router'
-import { FilesLayout } from '@/components/ProjectFiles/FilesLayout'
 import { FilesToggle } from '@/components/ProjectFiles/FilesToggle'
+import { useFilesParts } from '@/components/ProjectFiles/useFilesParts'
 import { SessionAdd } from '@/components/SessionAdd/SessionAdd'
 import { SessionView } from '@/components/SessionView/SessionView'
 import { useFilesPanel } from '@/lib/filesPanel'
@@ -61,11 +60,16 @@ export function GroupView({ host, project }: Props) {
   const cards = useProjectCards(host, project)
   const [filesOpen, toggleFiles] = useFilesPanel()
   /*
-    **横ホイールの行き先**（設計§8）。中身の列はレールの兄弟なので、ブラウザの
-    スクロール連鎖（祖先だけを辿る）ではここへ届かない。列の上でホイールを横へ
-    回したらレールが動く、を成り立たせるために参照を渡す
+    **置き場所はこちらが決める**（`useFilesParts`）。サイドバーはレールの外、
+    中身の列はレールの中のいちばん左。**横ホイールの受け渡しは要らなくなった**
+    ——列がレールの中に居れば、ブラウザのスクロール連鎖がそのまま届く
   */
-  const rail = useRef<HTMLDivElement>(null)
+  const { sidebar, column } = useFilesParts({
+    host,
+    project,
+    open: filesOpen,
+    onToggle: toggleFiles,
+  })
 
   return (
     <section
@@ -100,35 +104,41 @@ export function GroupView({ host, project }: Props) {
         画面の上端から被さり、アプリのヘッダ（設定・アカウント）まで覆う
       */}
       <div className="relative flex min-h-0 flex-1 gap-4">
-        <FilesLayout
-          host={host}
-          project={project}
-          open={filesOpen}
-          onToggle={toggleFiles}
-          onWheelX={(deltaX) => rail.current?.scrollBy({ left: deltaX })}
-        />
+        {/* **レールの外。** 一緒に流れると、横へ動かしたとき左のものが消える */}
+        {sidebar}
 
-        {cards.length === 0 ? (
-          <p className="text-muted-foreground text-sm">
-            このプロジェクトのセッションはありません
-          </p>
-        ) : (
-          <div
-            ref={rail}
-            data-testid="group-rail"
-            /*
-              **`min-w-0` を足す。** `overflow-x-auto` を持つ箱では flex の
-              `min-width: auto` が仕様上すでに 0 に解決されているので、**見た目は
-              1ピクセルも変わらない**。足すのは、あとで `overflow` を変えた誰かが
-              ページを横へ広げるのを防ぐ字としての保険（設計§7）
-            */
-            className="flex min-h-0 min-w-0 flex-1 gap-4 overflow-x-auto pb-2"
-          >
-            {cards.map((cardId) => (
+        {/*
+          **レールは、セッションが0本でも描く**（2026-08-27）。以前は0本のとき
+          レールごと描いていなかったが、**中身の列をこの中へ入れた**ので、そのままだと
+          **セッションが0本の PJT でファイルを開いても何も出なくなる**。条件を足すより、
+          「ありません」の1行をここへ入れて**分岐を消す**ほうが穴が無い。
+
+          **`min-w-0` を足す。** `overflow-x-auto` を持つ箱では flex の
+          `min-width: auto` が仕様上すでに 0 に解決されているので、**見た目は
+          1ピクセルも変わらない**。足すのは、あとで `overflow` を変えた誰かが
+          ページを横へ広げるのを防ぐ字としての保険（設計§7）
+        */}
+        <div
+          data-testid="group-rail"
+          className="flex min-h-0 min-w-0 flex-1 gap-4 overflow-x-auto pb-2"
+        >
+          {/*
+            **いちばん左。セッションの札と同じ扱い**（設計§8 の 2026-08-27 の変更）。
+            横へ流すと札と一緒に流れる——**流しても見えたままだった利点は、意図して
+            捨てた**（利用者の判断）。不具合ではない
+          */}
+          {column}
+
+          {cards.length === 0 ? (
+            <p className="text-muted-foreground shrink-0 text-sm">
+              このプロジェクトのセッションはありません
+            </p>
+          ) : (
+            cards.map((cardId) => (
               <SessionView key={cardId} cardId={cardId} compact />
-            ))}
-          </div>
-        )}
+            ))
+          )}
+        </div>
       </div>
     </section>
   )
