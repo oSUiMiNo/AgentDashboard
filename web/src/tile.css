@@ -761,6 +761,212 @@
     inset 0 2.5px 0 rgb(255 255 255 / 35%);
 }
 
+/* ───────────────── 状態タグと、走るアニメーション ───────────────── */
+
+/*
+  # `DESIGN.md` と食い違っている（§35.1 の作法で残す）
+
+  §23.3 は「一覧で同時に見えるステッカーは**1つ以上、可視行の3割まで**」と数まで決めて
+  おり、§33 の禁止事項には「**状態ステッカーを全行に付けて列にする**」がある。
+  **この規則は、その両方に正面から当たる**——12枚並べば12枚ともタグを持ち、右下に列が
+  できる。ANSWER が「権限確認待ちだけ」に限ってあったのは、まさにこの制約を守るため
+  だった。
+
+  **それでも広げる。理由は3つ。**
+
+  1. §23.2 が「**種別は形で示し、状態はステッカーで示す**」と言っている当のものが状態で
+     ある。ここで禁じられているのは「**同じ印**が全行に並ぶ列」で、こちらは**色も記号も
+     文言も状態ごとに違う**——並んでも「同じものの列」には見えない
+  2. **上部に真面目な文字で書くより読み取れる**、という利用者の実地の判断（0.1.41 を
+     実物で見ての指定・2026-08-26）。①行は最終活動と接続断に明け渡した
+  3. **ANSWER は残す。** あれは状態名ではなく「押して答える」を促す語なので、状態タグと
+     役割が違う（利用者の判断・2026-08-27）。権限確認待ちのカードだけ2枚出る
+
+  同じ形の食い違いは `roam.css` の冒頭にも前例がある（§28.1／§28.2 との食い違い）。
+
+  # 地は画像、記号と文言は要素
+
+  `forced-colors: active` は**背景画像を強制的に消す**。文字を焼き込むとあの環境で状態が
+  読めなくなるので、**消えるのは地だけ**にしてある（下の退避を見よ）。
+*/
+.tile-tag {
+  position: absolute;
+  bottom: 9px;
+  right: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  rotate: -2deg;
+  padding: 2px 8px;
+  border-radius: 3px;
+  /*
+    **`--tile-ink` を通さない**（`tile.test.ts` の除外表に理由つきで載せてある）。
+    上に暗い文字が乗るので、薄くすると文言そのものが読めなくなる。`.tile-sticker` と
+    同じ扱い。
+
+    # 素材は「形」として使う（**色として使わない**）
+
+    生成した地は**琥珀色の紙片**だが、そのまま貼ると状態ごとの色（シアン・灰・珊瑚）が
+    出せない。**`mask-image` で形だけを取り、塗るのは `--tile-accent`** にしてある——
+    こうすると**色の対応表は1つのまま**（設計§8「色の対応表を2箇所に分けない」）で、
+    画像は**CSS では作れないもの＝型抜きの不規則な縁**だけを担う。
+
+    平らな角丸長方形なら CSS が1行で出せるので、そちらは素材にする意味が無い
+    （`DESIGN.md` §14 Small-Size First の門。試作1枚目を実寸で見て落とした）。
+  */
+  background: var(--tile-accent);
+  mask-image: url('./assets/tile/tag-plate.png');
+  mask-size: 100% 100%;
+  mask-repeat: no-repeat;
+  color: #171717;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  line-height: 1.4;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow:
+    0 2.5px 5px rgb(0 0 0 / 45%),
+    inset 0 2.5px 0 rgb(255 255 255 / 35%);
+}
+
+/*
+  権限確認待ちだけ ANSWER と2枚出る。**重ならないよう1段上へ逃がす**（利用者が選んだ形）。
+  どちらも絶対配置なので、**3行の高さは1ピクセルも食わない**。
+
+  **当て先に `data-status` を使わない。** あれは中身（`.tile-body`）にしか無く、器へ
+  複製すると `[data-status=…]` を引いている E2E が2件に一致して壊れる——フェーズ7 で
+  `data-card-id` を器と中身の両方へ付け、`compose.spec.ts` が7本落ちたまま1か月
+  気づかなかったのと同じ形。**タグ自身が持つ修飾クラスで表す**
+*/
+.tile-tag-raised {
+  bottom: 30px;
+  right: 18px;
+}
+
+/*
+  作業中は、タグではなく**人が走る**（要件2-3）。文字も `⟳` も出さない——放っておいて
+  よい状態なので、読ませるより「動いている」ことだけが伝わればよい。
+
+  **3枚を重ねて `opacity` を回す**（`background-image` を差し替えると、切り替えのたびに
+  ペイントが起きる）。`steps(3)` で 0.6秒＝1枚あたり 0.2秒（利用者の指定）
+*/
+.tile-run {
+  position: absolute;
+  bottom: 7px;
+  right: 10px;
+  width: 32px;
+  height: 32px;
+  pointer-events: none;
+}
+
+/*
+  3枚とも**マスクで形だけ**を取り、塗るのは `--tile-accent`（地と同じ理由）。
+  素材は琥珀の人型だが、作業中はシアンなので**そのまま貼ると色が食い違う**。
+
+  **`opacity` を回す。** `mask-image` を差し替える形にすると、切り替えのたびに
+  マスクのラスタライズが起きる（§9-0「描き直しの起きない指定だけで作る」）。
+*/
+.tile-run i {
+  position: absolute;
+  inset: 0;
+  /*
+    **`--tile-ink` を通す**（除外表を増やさない）。`opacity` は 3コマの切り替えに
+    使っているので空けておき、濃さは**地に混ぜる形**で入れる——Accent Bar と同じ作法。
+    接続断のときは輪と一緒に沈む
+  */
+  background: color-mix(
+    in srgb,
+    var(--tile-accent) var(--tile-ink),
+    var(--color-card)
+  );
+  mask-size: contain;
+  mask-repeat: no-repeat;
+  mask-position: center;
+  opacity: 0;
+  animation: tile-run 0.6s steps(1, end) infinite;
+}
+
+.tile-run i:nth-child(1) {
+  mask-image: url('./assets/tile/run-1.png');
+  animation-delay: 0s;
+}
+
+.tile-run i:nth-child(2) {
+  mask-image: url('./assets/tile/run-2.png');
+  animation-delay: 0.2s;
+}
+
+.tile-run i:nth-child(3) {
+  mask-image: url('./assets/tile/run-3.png');
+  animation-delay: 0.4s;
+}
+
+/* 1枚あたり 0.2秒（利用者の指定）。3枚で1周 0.6秒 */
+@keyframes tile-run {
+  0%,
+  33.33% {
+    opacity: 1;
+  }
+  33.34%,
+  100% {
+    opacity: 0;
+  }
+}
+
+/*
+  **止めたら1枚で静止する。** 形は残るので状態は読めたまま（§9-5-2 の「止め方の作法」——
+  `animation: none` で全部殺すのではなく、動かない表現へ置き換える）
+*/
+[data-quiet='calm'] .tile-run i,
+[data-quiet='still'] .tile-run i {
+  animation: none;
+}
+
+/* 止めたら**1枚目だけを出す**。消えたままだと状態そのものが読めなくなる */
+[data-quiet='calm'] .tile-run i:nth-child(1),
+[data-quiet='still'] .tile-run i:nth-child(1) {
+  animation: none;
+  opacity: 1;
+}
+
+/*
+  ハイコントラストの退避。**地が消えるので、文字と記号だけが残る形にする。**
+  走るアニメーションは絵そのものが中身なので、**あの環境でだけ**文字と記号を出す
+  （通常の見た目は変わらない）
+*/
+.tile-run-fallback {
+  display: none;
+}
+
+@media (forced-colors: active) {
+  .tile-tag {
+    border: 1px solid CanvasText;
+    color: CanvasText;
+  }
+
+  /* 絵は消える（`mask` を掛けた地は背景なので強制的に落ちる）。明示して消す */
+  .tile-run i {
+    display: none;
+  }
+
+  .tile-run {
+    width: auto;
+    height: auto;
+  }
+
+  .tile-run > .tile-run-fallback {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    position: static;
+    color: CanvasText;
+    font-size: 11px;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+}
+
 /* ───────────────── OS の「動きを減らす」 ───────────────── */
 
 /*
@@ -790,6 +996,16 @@
 
   [data-motion] .tile-lines i {
     animation: none;
+  }
+
+  /* 走るアニメーションも止める。**1枚で静止する**ので、形は残る */
+  [data-motion] .tile-run i {
+    animation: none;
+  }
+
+  [data-motion] .tile-run i:nth-child(1) {
+    animation: none;
+    opacity: 1;
   }
 }
 

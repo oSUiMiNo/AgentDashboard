@@ -57,7 +57,6 @@ import {
   statusInk,
   statusLabel,
   statusMotion,
-  statusTextTone,
 } from '@/lib/protocol'
 import type { CardId } from '@/lib/protocol'
 import { sessionPath } from '@/lib/routes'
@@ -345,28 +344,6 @@ export function SessionTile({ cardId }: Props) {
             }`}
           >
             {/*
-              記号は**ラベルと別の要素**に置く。同じ要素へ入れると、ラベルを文字で
-              探しているテストと支援技術が「⟳ 作業中」を1つの語として読む。
-
-              **幅を先に決める。** 8記号のうち5つは同梱フォントの外へ落ち、送り幅が
-              記号ごとに違う（§8-2-1）。①行の先頭なので、揃えないと状態が変わるたびに
-              ラベル以降が横へずれる
-            */}
-            <span
-              data-testid="status-glyph"
-              aria-hidden
-              className={`tile-glyph shrink-0 text-[15px] ${statusTextTone(session.status)}`}
-            >
-              {statusGlyph(session.status)}
-            </span>
-            <span
-              className={`shrink-0 text-[15px] leading-tight font-semibold tracking-[0.04em] ${statusTextTone(
-                session.status,
-              )}`}
-            >
-              {statusLabel(session.status)}
-            </span>
-            {/*
               **最長の表記でも収まる幅を先に取る。**「たった今」と「9日前」で字数が
               変わるので、縮む側に置くと1秒ごとに横へ揺れる（§10-2）。数字そのものは
               `tabular-nums` で幅を揃える
@@ -378,6 +355,26 @@ export function SessionTile({ cardId }: Props) {
             >
               最終活動 {formatElapsed(now - session.last_activity_at)}
             </span>
+            {/*
+              **「接続断」は①行に置く**（要件2-6・設計§10-1-3 の読み替え）。
+
+              §10-1-3 は実測で「①行に接続断は入らない」と決めていた——**使えるのは
+              212px なのに 290px 要る**（記号24＋状態ラベル最大84＋最終活動112＋接続断54）。
+              **その前提が、状態を右下のタグへ移したことで変わった**。記号とラベルが
+              抜けたので要るのは **166px** になり、初めて入る。
+
+              **あの節は消さない。** なぜ一度②行へ移したのかが残っていないと、次に
+              誰かが同じ計算をやり直す。
+            */}
+            {stale && (
+              <span
+                data-testid="disconnected-badge"
+                className={`${CHIP} border-border bg-muted text-muted-foreground`}
+                title="この PC からの報告が届いていません。表示は最後に分かっていた状態です"
+              >
+                接続断
+              </span>
+            )}
             {session.subagent_active > 0 && (
               <Badge
                 data-testid="subagent-badge"
@@ -412,30 +409,13 @@ export function SessionTile({ cardId }: Props) {
               className="flex min-w-0 items-center gap-2"
             >
               {/*
-                **「接続断」は②行に置く。**
+                **「接続断」はここに居ない**（フェーズ13 で①行へ移した）。あそこは
+                「このセッションはどう動いているか」の属性が並ぶ行で、接続断は
+                「いまその報告が届いているか」なので、最終活動と同じ行のほうが素直。
 
-                設計§10-1 は①行へ置くと決めていたが、**288px には入らない**——実測で
-                ①行が必要とする幅は、権限確認待ち＋接続断で 290px（使えるのは 260px、
-                復旧ボタンぶんを空けると 212px）。溢れたバッジは切る枠に削られ、
-                **「接続断」が「接」だけになって読めなくなる**（フェーズ6 の目視で実測）。
-
-                ②行なら収まる（モデルとモードの実幅は合わせて 144px ほど）。**意味の上でも
-                ②行のほうが素直**で、あそこは「このセッションはどう動いているか」の属性が
-                並ぶ行である。
-              */}
-              {/*
                 **カプセル（`Badge`）をやめて札に揃える。** 同じ行に丸いカプセルと
-                角ばった札が混ざると、3つが1組に見えない
+                角ばった札が混ざると、1組に見えない
               */}
-              {stale && (
-                <span
-                  data-testid="disconnected-badge"
-                  className={`${CHIP} border-border bg-muted text-muted-foreground`}
-                  title="この PC からの報告が届いていません。表示は最後に分かっていた状態です"
-                >
-                  接続断
-                </span>
-              )}
               {session.model !== null && (
                 <span
                   data-testid="model"
@@ -553,12 +533,10 @@ export function SessionTile({ cardId }: Props) {
         {/*
           状態のステッカー（`DESIGN.md` §23.2「種別は形で示し、状態はステッカーで示す」）。
 
-          **貼るのは権限確認待ちだけ。** §23.3 は「一覧で同時に見えるステッカーは1つ以上、
-          可視行の3割まで」「縦に連続させない」「専用の列を作らない」と数まで決めていて、
-          禁止事項にも「状態ステッカーを全行に付けて列にする」がある。**数で縛らず、扱いで
-          縛った**（§8.4）——人が答えないと先へ進まない唯一の状態に限れば、実際に少数になる。
-
-          残りの状態は §23.3 の言う「行の静かな要素」（記号と薄い文字）で示している。
+          **貼るのは権限確認待ちだけ。** ANSWER は状態名ではなく**「押して答える」を促す
+          語**なので、人が答えないと先へ進まない状態にだけ出す。**状態そのものは、隣の
+          状態タグ（`tile-tag`）が全状態ぶん出す**——2つは役割が違うものとして両方出す
+          （利用者の判断・2026-08-27）。
 
           **切る枠の中へ置く。** 器（`tile-shell`）の直下に置くと、**器は行の高さまで
           伸びる**ので、カードが行内でいちばん高くないときにステッカーだけ下へ取り残される
@@ -570,6 +548,63 @@ export function SessionTile({ cardId }: Props) {
         {session.status.kind === 'waiting_permission' && (
           <span className="tile-sticker" data-testid="tile-sticker" aria-hidden>
             ANSWER
+          </span>
+        )}
+
+        {/*
+          状態タグ（要件2-1・2-2・2-5）。**①行にあった記号とラベルが、そのままここへ来た。**
+
+          # 作業中だけタグを持たない（要件2-3）
+
+          あそこは**人が走るアニメーション**になる。文字も `⟳` も出さない——放っておいて
+          よい状態なので、読ませるより「動いている」ことだけが伝わればよい。
+
+          # 記号と文言は DOM のテキストのまま置く（**画像へ焼かない**）
+
+          地（プレート）は画像だが、**中身の記号と文言は要素として残す**。
+          `forced-colors: active` は**背景画像を強制的に消す**ので、文字を焼き込むと
+          あの環境で状態が丸ごと読めなくなり、要件が自分で立てた完了条件
+          （「色を伏せても記号と文言だけで8状態が判別できる」「ハイコントラストでも
+          8つの姿が見分けられる」）を割る。**消えるのは地だけにする。**
+
+          副産物として、**どの状態にどの素材が当たっているかを字面で検査できる**。
+        */}
+        {motionKind === 'spin-fast' ? (
+          <span
+            className="tile-run"
+            data-testid="tile-run"
+            role="img"
+            aria-label={statusLabel(session.status)}
+          >
+            {/*
+              3コマ。**素材は形だけ**をマスクとして使い、塗るのは状態の色（`tile.css`）。
+              0.2秒おきに切り替わる
+            */}
+            <i aria-hidden />
+            <i aria-hidden />
+            <i aria-hidden />
+            {/*
+              ハイコントラストでは絵が消えるので、そこでだけ文字と記号が出る（`tile.css`）。
+              通常の見た目は変わらない
+            */}
+            <span className="tile-run-fallback" aria-hidden>
+              <span className="tile-glyph">{statusGlyph(session.status)}</span>
+              {statusLabel(session.status)}
+            </span>
+          </span>
+        ) : (
+          <span
+            className={`tile-tag${
+              session.status.kind === 'waiting_permission'
+                ? ' tile-tag-raised'
+                : ''
+            }`}
+            data-testid="tile-tag"
+          >
+            <span className="tile-glyph" aria-hidden>
+              {statusGlyph(session.status)}
+            </span>
+            {statusLabel(session.status)}
           </span>
         )}
       </div>
