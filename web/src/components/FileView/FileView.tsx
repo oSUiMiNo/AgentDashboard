@@ -49,6 +49,41 @@ import {
   type FileContent,
 } from '@/lib/hostfs'
 
+/**
+ * **これより大きいものは、整形を既定にしない**（`表示できるテキストの上限を3MBへ上げる`
+ * フェーズ3）。
+ *
+ * # なぜ要るのか
+ *
+ * 整形（`ReactMarkdown`）は**同期で走り、大きさに対して超線形に伸びる**。実測（jsdom）：
+ *
+ * | 大きさ | 整形 | 生テキスト |
+ * |---:|---:|---:|
+ * | 128 KiB | 985 ms | — |
+ * | 256 KiB | 1.9 秒 | — |
+ * | 512 KiB | 5.5 秒 | — |
+ * | 1 MiB | 18.6 秒 | 15 ms |
+ * | 3 MiB | **180 秒で終わらず** | 36 ms |
+ *
+ * 中身を返す上限が 3 MiB へ上がったので、**そのまま整形へ流すと画面が止まる**。
+ * 生テキストは大きさによらず一定なので、大きいものはそちらで始める。
+ *
+ * # なぜ 256 KiB なのか
+ *
+ * **そこまでは実際に使われていて、問題が出ていない**から。ここは中身を返す上限が
+ * 元々置かれていた値で、`guideline.md`（204 KiB）が毎日その内側で整形されている。
+ * 「耐えられるはず」ではなく「耐えているのを見た」大きさを線にした。
+ *
+ * # 整形を禁じてはいない
+ *
+ * 押せば整形する。**時間がかかることを先に言う**（下の `file-heavy`）だけで、
+ * 決めるのは利用者である——300 KiB の文書を整形したい人には2秒の話でしかない。
+ *
+ * **多バイトの文書を整形で開けるようにすることは、これでは解決していない。**
+ * 直すなら分割か仮想化が要るが、それは上限の話とは別の設計になる（別イシュー）。
+ */
+const FORMAT_DEFAULT_LIMIT = 256 * 1024
+
 interface Props {
   /** `agent_id` かローカルを表す `'local'` */
   host: string
@@ -111,6 +146,11 @@ export function FileView({ host, root, path, onClose }: Props) {
           const result = await readFile(host, path)
           if (alive) {
             setContent(result)
+            // **大きいものは生テキストで始める**（`FORMAT_DEFAULT_LIMIT`）。
+            // 上限が 3 MiB へ上がったので、そのまま整形へ流すと画面が止まる
+            if (result.bytes > FORMAT_DEFAULT_LIMIT) {
+              setRaw(true)
+            }
           }
         }
       } catch (err) {
@@ -255,6 +295,16 @@ export function FileView({ host, root, path, onClose }: Props) {
         </p>
       )}
 
+      {/* **なぜ整形されていないのかを言う**（`FORMAT_DEFAULT_LIMIT`）。
+          黙って生テキストで出すと、整形が壊れたように見える。
+          禁じてはいないので、押せば整形する——待つと決めるのは利用者 */}
+      {markdown && raw && content !== null && content.bytes > FORMAT_DEFAULT_LIMIT && (
+        <p data-testid="file-heavy" className="text-xs text-amber-300">
+          大きいので整形せずに出しています（{content.bytes} バイト）。整形すると時間が
+          かかります。
+        </p>
+      )}
+
       {loading && (
         <p className="text-muted-foreground text-xs">読み込み中…</p>
       )}
@@ -287,8 +337,18 @@ export function FileView({ host, root, path, onClose }: Props) {
                効く**唯一の鍵になる。
 
                `srcdoc` に手元の本文を渡さないのは、**そちらには CSP が付かない**
-               ため（設計§14 の1）。二度運ぶことになるが、HTML と SVG はテキストの
-               上限（256 KiB）の内側と決まっている */
+               ため（設計§14 の1）。
+
+               **二度運んでいる**——上の `useEffect` が `readFile` で1回、この
+               `iframe` が `?as=raw` でもう1回。これを「HTML と SVG はテキストの
+               上限（256 KiB）の内側と決まっている」ことで許していたが、
+               **その上限は 3 MiB へ上がった**（`表示できるテキストの上限を3MBへ上げる`）。
+               桁が変わったので、許していた理由はもう効いていない。
+
+               直すなら「先にテキストを取りに行かず、押されたときに初めて取る」だが、
+               それは**断りの理由と生テキストの中身が1回で揃う**という上の作法を
+               手放すことになる。**上限の話とは別の判断**なので、ここでは事実だけ
+               残す */
             <iframe
               data-testid="file-frame"
               title={relative}
