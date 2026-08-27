@@ -46,17 +46,58 @@ export function VersionsCard() {
     void load()
   }, [load])
 
-  const running = versions.entries.find((entry) => entry.running)
+  // **走っている版は、一覧の行から探さない**（設計§3）。
+  //
+  // 以前はここで `entries.find((entry) => entry.running)` していた。ソースビルドの機械では
+  // 走ってきた実体が `make build` に消されていて**どの行とも一致しない**ので、
+  // いつも「不明」と出ていた——**サーバは答えを持っているのに、画面が使っていなかった。**
+  const running = versions.running
+  const runningPath = versions.running_path ?? null
+
+  // 予約に出せるのは保管庫の版だけ。**ビルドした版を選ばせない**（下の「なぜ増やさないか」）
   const stored = versions.entries.filter((entry) => entry.origin === 'stored')
   const usage = stored.reduce((total, entry) => total + entry.size_bytes, 0)
-  // 「新着か」はサーバが決めない。**走っている版より新しいか**で画面が決める（設計§8）
+
+  // 「新着か」はサーバが決めない。**走っている版より新しいか**で画面が決める（設計§8）。
+  // **これは「外に出た」の知らせ**で、取ってくる相手が居ることを意味する
   const update =
     versions.latest &&
     versions.latest.has_artifact &&
-    running &&
-    isNewer(versions.latest.version, running.version)
+    running !== '' &&
+    isNewer(versions.latest.version, running)
       ? versions.latest
       : null
+
+  // **こちらは「手元が新しい」**（設計§5）。外を見に行かず、自分の足元だけを見る。
+  // ソースビルドの機械に要るのはこちらだけ——取ってくる相手が居ないため
+  const diskUpdate = versions.next_differs === true
+
+  // **押す一式は1つにまとめる。** 予約から出るときと手元から出るときで文言が
+  // 食い違うと、同じ操作が別物に見える
+  const restartControls = (
+    <>
+      <p data-testid="versions-stranded" className="text-muted-foreground text-xs">
+        {versions.stranded_cards === 0
+          ? 'いま入れ替えても、失われるセッションはありません。'
+          : `いま入れ替えると ${versions.stranded_cards} 枚が抜け殻になります（履歴は残りますが、操作はできなくなります）。`}
+      </p>
+      <p className="text-muted-foreground text-xs">
+        入れ替えると画面は一度切れます。<strong>同じプロセスのまま</strong>
+        新しい版で起き直るので、戻ってきたらタブを読み込み直してください。
+        戻ってこない場合は、端末で <code>agentdashboard</code> を実行してください。
+      </p>
+      <div className="flex gap-2">
+        <Button
+          data-testid="versions-restart"
+          size="sm"
+          disabled={busy || !versions.editable}
+          onClick={() => void restart()}
+        >
+          いま入れ替える
+        </Button>
+      </div>
+    </>
+  )
 
   if (!versions.supported) {
     // できないことをボタンにしない（設計§14）
@@ -100,9 +141,9 @@ export function VersionsCard() {
 
       <p data-testid="versions-running" className="text-xs">
         <span className="text-muted-foreground">いま動いている版</span>{' '}
-        {running ? running.version : '不明'}
-        {running && (
-          <span className="text-muted-foreground ml-2">{running.path}</span>
+        {running === '' ? '不明' : running}
+        {runningPath !== null && (
+          <span className="text-muted-foreground ml-2">{runningPath}</span>
         )}
       </p>
 
@@ -120,8 +161,15 @@ export function VersionsCard() {
           }}
           className="border-border min-w-0 flex-1 rounded border px-1.5 py-0.5 text-xs"
         >
+          {/* **選択肢は増やさない。** ビルドした版をここへ足すと利用者が予約を作れて
+              しまい、**予約を入れると以後の `make build` が効かなくなる**（起動のたび
+              ポインタの先へ乗り換わる）。既定の選択肢が**まさにその版**なので、
+              何番なのかを添えるだけでよい */}
           <option value="">
-            入れる側が置いた版のまま（予約なし）
+            入れる側が置いた版のまま
+            {versions.next_version != null && versions.selected == null
+              ? `（${versions.next_version}）`
+              : ''}
           </option>
           {stored.map((entry) => (
             <option key={entry.path} value={entry.version} title={entry.path}>
@@ -131,6 +179,17 @@ export function VersionsCard() {
         </select>
       </label>
 
+      {/*
+        **「効かせる」を予約から切り離した**（設計§6）。
+
+        以前はこの一式が `versions.selected`（予約があるか）だけで出ていた。だが
+        **中身はプロセスを入れ替えるだけで、予約は要らない**——そして
+        **ソースビルドの機械は予約を使わない**（予約を入れると以後の `make build` が
+        効かなくなる）ので、**押すボタンが永久に出てこなかった。**
+
+        いまは「**走っている版 ≠ 次に起きる版**」で出す。予約はその条件を満たす
+        手段の1つに格下げされ、予約ゼロのままでもボタンが出る。
+      */}
       {versions.selected && (
         <div
           data-testid="versions-reservation"
@@ -140,34 +199,37 @@ export function VersionsCard() {
             <strong className="text-amber-300">{versions.selected}</strong>{' '}
             を予約しています。次に起こしたときから効きます。
           </p>
-          <p data-testid="versions-stranded" className="text-muted-foreground text-xs">
-            {versions.stranded_cards === 0
-              ? 'いま入れ替えても、失われるセッションはありません。'
-              : `いま入れ替えると ${versions.stranded_cards} 枚が抜け殻になります（履歴は残りますが、操作はできなくなります）。`}
+          {restartControls}
+          <Button
+            data-testid="versions-cancel"
+            variant="ghost"
+            size="sm"
+            disabled={busy || !versions.editable}
+            onClick={() => void unselect()}
+          >
+            予約を取り消す
+          </Button>
+        </div>
+      )}
+
+      {/*
+        **予約が無くても、手元が新しければ出す。** これがこのイシューの本体である。
+        外（GitHub）を見に行かないので、`make build` した直後にすぐ出る
+      */}
+      {!versions.selected && diskUpdate && (
+        <div
+          data-testid="versions-disk-update"
+          className="flex flex-col gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3"
+        >
+          <p className="text-xs">
+            <strong className="text-amber-300">ディスクに新しい版があります</strong>
+            {versions.next_version != null ? `（${versions.next_version}）` : ''}
+            。いま入れ替えられます。
           </p>
-          <p className="text-muted-foreground text-xs">
-            入れ替えると画面は一度切れます。戻ってこない場合は、端末で{' '}
-            <code>agentdashboard</code> を実行してください。
-          </p>
-          <div className="flex gap-2">
-            <Button
-              data-testid="versions-restart"
-              size="sm"
-              disabled={busy || !versions.editable}
-              onClick={() => void restart()}
-            >
-              いま入れ替える
-            </Button>
-            <Button
-              data-testid="versions-cancel"
-              variant="ghost"
-              size="sm"
-              disabled={busy || !versions.editable}
-              onClick={() => void unselect()}
-            >
-              予約を取り消す
-            </Button>
-          </div>
+          {versions.next_path != null && (
+            <p className="text-muted-foreground text-xs">{versions.next_path}</p>
+          )}
+          {restartControls}
         </div>
       )}
 
@@ -241,25 +303,43 @@ export function VersionsCard() {
         </p>
       )}
 
-      {stored.length > 0 && (
+      {/*
+        **一覧には `installed` の行も出す。** 以前は保管庫の版だけを出しており、
+        ソースビルドが置いた版が**どこにも現れなかった**。パスと大きさが見えることには
+        意味がある——同じ版名の行が並んだとき、どれが何かを見分ける材料になる。
+
+        **ただし消させない。** あそこは自分が走ってきた場所で、保管庫のように
+        「要らなくなった控え」ではない
+      */}
+      {versions.entries.length > 0 && (
         <ul data-testid="versions-stored" className="flex flex-col gap-1">
-          {stored.map((entry) => (
+          {versions.entries.map((entry) => (
             <li key={entry.path} className="flex items-center gap-2 text-xs">
               <span className="shrink-0">{entry.version}</span>
+              {entry.origin === 'installed' && (
+                <span
+                  data-testid="versions-installed-mark"
+                  className="text-muted-foreground shrink-0"
+                >
+                  入れる側
+                </span>
+              )}
               <span className="text-muted-foreground min-w-0 flex-1 truncate">
                 {entry.path}
               </span>
               <span className="text-muted-foreground shrink-0">
                 {formatBytes(entry.size_bytes)}
               </span>
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={busy || !versions.editable || entry.running}
-                onClick={() => void remove(entry.version)}
-              >
-                消す
-              </Button>
+              {entry.origin === 'stored' && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={busy || !versions.editable || entry.running}
+                  onClick={() => void remove(entry.version)}
+                >
+                  消す
+                </Button>
+              )}
             </li>
           ))}
         </ul>

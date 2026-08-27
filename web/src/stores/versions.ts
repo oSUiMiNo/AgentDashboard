@@ -102,11 +102,33 @@ export interface VersionsView {
    */
   binary_at: number | null
   /**
+   * 走っている実行ファイルの場所。
+   *
+   * **一覧の行から探さない**（設計§3）。ソースビルドの機械では走ってきた実体が
+   * 消えているので、どの行とも一致しない——探させると「不明」としか出せない。
+   */
+  running_path?: string | null
+  /**
    * このプロセスが起きた時刻。
    *
    * `binary_at` と対で見る。**更新したのか、再起動しただけなのか**が差で分かる。
    */
   started_at: number
+  /**
+   * **いま起こし直したら、どれで立ち上がるか**（設計§4）。
+   *
+   * `selected` は「予約があるか」しか答えない。**予約が無い機械でも次に起きる版は在る。**
+   */
+  next_version?: string | null
+  /** 次に起きる版の実行ファイルの場所。同じ版名の行を見分ける材料になる。 */
+  next_path?: string | null
+  /**
+   * **走っているものと、次に起きるものが違うか**（設計§5）。
+   *
+   * **外を見に行かない。** `latest` は「取ってくる相手が居る」ことの知らせで、
+   * こちらは**自分の足元**の話。ソースビルドの機械に要るのはこちらだけ。
+   */
+  next_differs?: boolean
 }
 
 /** 同意を求めている相手。 */
@@ -153,7 +175,12 @@ const FALLBACK: VersionsView = {
   // 同じ理由で版も時刻も埋めない。読めていないことは「不明」として画面へ出す
   running: '',
   binary_at: null,
+  running_path: null,
   started_at: 0,
+  // **何もできない側へ倒す。** 読めていないのに「入れ替えられます」と出さない
+  next_version: null,
+  next_path: null,
+  next_differs: false,
 }
 
 /** 取ってくる仕事の様子を見に行く間隔。 */

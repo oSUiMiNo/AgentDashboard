@@ -36,9 +36,15 @@ export function AboutCard() {
 
   const running = versions.running
   const latest = versions.latest
-  // 「新着か」はサーバが決めない。**走っている版より新しいか**で画面が決める（設計§8）
+  // 「新着か」はサーバが決めない。**走っている版より新しいか**で画面が決める（設計§8）。
+  //
+  // **`has_artifact` を見る。** ここだけ見ておらず、`VersionsCard` と食い違っていた——
+  // **自分の機械向けの配布物が無い版でも「新しい版があります」と言っていた**。
+  // 同じことを言おうとして条件が2通りあると、片方だけ直したときに静かにずれる
   const behind =
-    latest && running && isNewer(latest.version, running) ? latest : null
+    latest && latest.has_artifact && running && isNewer(latest.version, running)
+      ? latest
+      : null
 
   return (
     <div
