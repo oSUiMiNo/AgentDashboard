@@ -900,6 +900,80 @@ test('狭い画面では、両方が全幅の層になり、縁は出ない', as
   expect(overflows, '狭い画面でもページは横へ広がらない').toBe(false)
 })
 
+test('セッションを横へ流すと、中身の列も一緒に流れる', async ({ page }) => {
+  /*
+    **計画フェーズ8 の本体。** 0.1.44 までは中身の列だけレールの外に固定してあり、
+    セッションを横へ流しても**その場に残っていた**。列もセッションの札と同じ扱いに
+    する、というのが今回の要望である。
+
+    **手放したものがある。** 「流しても見えたままなので、どのセッションへでもパスを
+    貼れる」という利点を**意図して捨てた**（利用者の判断）。**不具合ではない。**
+
+    レールが実際に溢れる必要があるので、セッションを起こしてから測る。
+  */
+  await openDashboard(page)
+  await spawnSession(page, PROJECT_DIR)
+  const group = page.locator(
+    `[data-testid="project-group"][data-project="${PROJECT_DIR}"]`,
+  )
+  await group.click({ position: { x: 5, y: 5 } })
+  await expect(page.getByTestId('group-view')).toBeVisible()
+
+  await page.getByTestId('project-files-toggle').click()
+  const panel = page.getByTestId('project-files-panel')
+  await panel.getByTestId('folder-entry').filter({ hasText: 'MyDocs' }).click()
+  await panel.getByTestId('folder-entry').filter({ hasText: LONG }).click()
+  const column = page.getByTestId('file-column')
+  await expect(column).toBeVisible()
+
+  // サイドバーを畳む——被さったままだと測る対象が隠れる
+  await page.getByTestId('project-files-toggle').click()
+  await expect(panel).toBeHidden()
+
+  const rail = page.getByTestId('group-rail')
+  const 流す前 = await 左端(column)
+
+  /*
+    **流せる量は決め打ちできない。** 列（既定 672）と札（672）が窓に対してどれだけ
+    溢れるかは窓の幅で決まる（実測で 96px だった）。**大きい値を入れて、ブラウザが
+    実際に止まった位置を読み直す。**
+  */
+  const 流した = await rail.evaluate((el) => {
+    el.scrollLeft = 9999
+    return el.scrollLeft
+  })
+  expect(流した, 'レールが実際に溢れていること（溢れていないと何も言えない）').toBeGreaterThan(0)
+
+  /*
+    **レールの中に居れば、流した量だけ左へ動く。** 外に固定してあると
+    **1ピクセルも動かない**——そこがこのテストの見張っているところ。
+  */
+  await expect
+    .poll(async () => Math.round(流す前 - (await 左端(column))), {
+      message: '中身の列が、セッションと一緒に流れること',
+    })
+    .toBe(流した)
+})
+
+test('セッションが0本でも、ファイルを開けば中身が出る', async ({ page }) => {
+  /*
+    **列をレールの中へ入れたことで生まれた穴を塞ぐ**（計画フェーズ8）。レールは
+    以前「セッションが1本も無ければ描かない」作りだったので、そのままだと**0本の
+    PJT でファイルを開いても何も出なくなる。**
+
+    セッションを1本も起こさずに開く、というのがこの PJT のふつうの初期状態なので、
+    塞ぎ損ねると**いちばん最初に触った人が壊れた画面を見る。**
+  */
+  await openDashboard(page)
+  await openLongFile(page)
+
+  await expect(page.getByTestId('group-rail')).toBeVisible()
+  await expect(page.getByTestId('file-column')).toBeVisible()
+  await expect(page.getByTestId('file-view')).toBeVisible()
+  // セッションは1枚も無い。それでも中身は読める
+  await expect(page.getByTestId('session-tile')).toHaveCount(0)
+})
+
 test('中身の列の上で横へ回すと、セッションのレールが動く', async ({ page }) => {
   // **列はレールの兄弟**なので、ブラウザのスクロール連鎖（祖先だけを辿る）では
   // ここへ届かない。自分で渡している（設計§8）。
