@@ -55,7 +55,7 @@ export default defineConfig({
       use: { ...devices['Desktop Chrome'] },
       // セルフホスト構成のぶんは別のサーバ（4174）、2台構成のぶんは compose（4175）、
       // PC 3台のぶんはさらに別のサーバ（4177）
-      testIgnore: /(remote|account|compose|fleet|revive|versions)\.spec\.ts/,
+      testIgnore: /(remote|account|compose|fleet|revive|versions|handover)\.spec\.ts/,
     },
     {
       // 版の切替が**使える**構成（CICD設計§14）。既定の土台は版の機能ごと塞いで
@@ -66,6 +66,19 @@ export default defineConfig({
       name: 'chromium-versions',
       use: { ...devices['Desktop Chrome'], baseURL: 'http://127.0.0.1:4178' },
       testMatch: /versions\.spec\.ts/,
+    },
+    {
+      // **乗り換えを封じない**唯一の土台（`手元の新しい版をGUIだけで効かせる` 設計§9）。
+      //
+      // 他の土台は `AGENTDASHBOARD_VERSION_HANDED_OVER=1` で乗り換えを塞いでいる。
+      // 塞がないと E2E のサーバが別の実行ファイルへ化けてしまうためだが、その結果
+      // **「押して本当に切り替わる」経路が一度も通っていなかった**。
+      //
+      // ここでは行き先を**自分の複製**にしてある（同じ中身・別の時刻）ので、化けても
+      // 同じものが同じポートで戻ってくる。
+      name: 'chromium-handover',
+      use: { ...devices['Desktop Chrome'], baseURL: 'http://127.0.0.1:4179' },
+      testMatch: /handover\.spec\.ts/,
     },
     {
       // 別の PC のセッションを、実物のブラウザで見る（セルフホスト化設計§7）。
@@ -173,6 +186,36 @@ export default defineConfig({
         RUST_LOG: 'info',
       },
       url: 'http://127.0.0.1:4178',
+      reuseExistingServer: !process.env.CI,
+      stdout: 'pipe',
+      stderr: 'pipe',
+      timeout: 60_000,
+    },
+    {
+      // **乗り換えを実際に通す土台**（`手元の新しい版をGUIだけで効かせる` 設計§9）。
+      //
+      // 行き先を**実行ファイル3本の複製**にする。同じ中身なので化けても同じものが
+      // 戻ってくるが、**時刻が違う**ので「手元が新しい」と判定される——ソースビルドの
+      // 機械で `make build` した直後と同じ形を、実物で作れる。
+      //
+      // `AGENTDASHBOARD_VERSION_HANDED_OVER` を**立てない**のがこの土台の全部である。
+      command:
+        `rm -rf .e2e-state/handover-state && mkdir -p .e2e-state/handover-state/bin` +
+        ` && cp ${repoRoot}/server/target/debug/agentdashboard ${repoRoot}/server/target/debug/agentdashboard-agent ${repoRoot}/server/target/debug/transcript-parser .e2e-state/handover-state/bin/` +
+        ` && touch .e2e-state/handover-state/bin/*` +
+        ` && ${serverBinary} --config e2e/config.toml`,
+      env: {
+        AGENTDASHBOARD_CLAUDE_BIN: fakeClaude,
+        AGENTDASHBOARD_PORT: '4179',
+        AGENTDASHBOARD_STATE_DIR: '.e2e-state/handover-state',
+        AGENTDASHBOARD_CLAUDE_SETTINGS_PATH:
+          '.e2e-state/handover-state/claude-settings.json',
+        AGENTDASHBOARD_VERSION_SUPPORTED: '1',
+        // **行き先は自分の複製。** ここが `installed` の行として並び、押すとここへ乗る
+        AGENTDASHBOARD_VERSION_SOURCE_DIR: '.e2e-state/handover-state/bin',
+        RUST_LOG: 'info',
+      },
+      url: 'http://127.0.0.1:4179',
       reuseExistingServer: !process.env.CI,
       stdout: 'pipe',
       stderr: 'pipe',
