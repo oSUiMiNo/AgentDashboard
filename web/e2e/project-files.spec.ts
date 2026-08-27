@@ -854,50 +854,97 @@ test('縁は指でも掴める', async ({ page }) => {
   expect(await 幅(panel), '指でも広がること').toBeGreaterThan(前)
 })
 
-test('狭い画面では、両方が全幅の層になり、縁は出ない', async ({ page }) => {
+test('狭い画面では、サイドバーは左端の帯で、裏が見えている', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 780 })
   await openDashboard(page)
   await openLongFile(page)
 
   /*
-    両方とも全幅で被さるので、引っぱる縁が物理的に存在しない（設計§2）。
+    **2026-08-28 に期待が変わった。** それまでは「両方が全幅の層になる」ことを
+    見ていたが、実機で触って3つの不具合になった——裏が何も見えない・アプリの
+    ヘッダごと覆うので切り替えボタンへ届かない・被さっているのか画面が切り替わった
+    のか分からない。利用者が示した参考（ChatGPT のウェブアプリ）に合わせた。
 
-    **「無いこと」ではなく「見えないこと」で言う。** `md` を JS から読まない約束
-    （`lib/pointer.ts` の「画面幅では判定しない」）なので、出し分けは CSS
-    （`hidden md:block`）がやる——DOM には居たまま `display: none` になる
+    **縁は出ない**のは変わらない。`md` を JS から読まない約束（`lib/pointer.ts` の
+    「画面幅では判定しない」）なので、出し分けは CSS（`hidden md:block`）がやる
+    ——DOM には居たまま `display: none` になる
   */
   for (const 縁 of await page.getByTestId('files-resizer').all()) {
     await expect(縁).toBeHidden()
   }
 
-  // フォルダが手前（`z-40`）。全幅で、閉じる導線が届く位置に在る
   const panel = page.getByTestId('project-files-panel')
-  expect(await 幅(panel), 'フォルダは全幅').toBeCloseTo(390, 0)
+  const 帯 = await 矩形(panel)
+  expect(帯.width, 'サイドバーは 20rem の帯（全画面にしない）').toBeCloseTo(320, 0)
+  /*
+    **これが「裏が見えている」の本体。** 幅だけ見ても足りない——左端から出ているので、
+    **右端が画面の端に届いていないこと**まで見て初めて言える
+  */
+  expect(帯.x + 帯.width, '右端が画面の端に届いていないこと').toBeLessThan(390)
+
   await expect(page.getByTestId('project-files-close')).toBeInViewport()
 
   /*
-    **読むときだけ畳む**（設計§2）。ファイルを選んでもフォルダは閉じないので、
-    これが狭い画面での普通の使い方になる。
+    **膜が画面全体を覆っていること。** 裏がそのままの明るさだと、被さっているのか
+    画面が切り替わったのか分からない（参考の実測：ヘッダも本文も入力欄も、同じ比で
+    約半分の明るさへ落ちていた）
+  */
+  const 膜 = await 矩形(page.getByTestId('sidebar-scrim'))
+  expect(膜.width, '膜は画面いっぱい').toBeCloseTo(390, 0)
+  expect(膜.height, '膜は画面いっぱい').toBeCloseTo(780, 0)
 
-    **畳むのに押すのは切り替えボタンではなく「閉じる」。** 狭い画面ではサイドバーが
-    `fixed inset-0` で全面を覆う**オーバーレイ**になるので、ヘッダの切り替えボタンは
-    その下に隠れて押せない——だからこのボタンが在る（実際に押して確かめたら、覆われていて
-    畳めなかった）
+  // **膜を押しても畳める。** 押しても何も起きない膜は行き止まりになる
+  await page.mouse.click(370, 400)
+  await expect(panel).toBeHidden()
+})
+
+test('狭い画面でファイルを開いても、切り替えボタンへ届く', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 780 })
+  await openDashboard(page)
+  await openLongFile(page)
+
+  /*
+    **中身の列が全画面の層だったとき、ここが塞がっていた**（2026-08-28 に実機で踏んだ）。
+    列がアプリのヘッダごと覆うので、サイドバーを開き直す道が無くなる。
+
+    **「在ること」では言えない。** 覆われていても DOM には居るので、`toBeVisible` は
+    通ってしまう。**実際に押して**、Playwright の届くかどうかの判定に任せる
   */
   await page.getByTestId('project-files-close').click()
-  await expect(panel).toBeHidden()
+  await expect(page.getByTestId('project-files-panel')).toBeHidden()
+  await expect(page.getByTestId('file-column')).toBeVisible()
 
-  // その下に敷いてある中身の列（`z-30`）が出てくる
+  await page.getByTestId('project-files-toggle').click({ timeout: 3000 })
+  await expect(page.getByTestId('project-files-panel')).toBeVisible()
+})
+
+test('狭い画面でも、中身の列はセッションの札と同じ幅で流れる', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 780 })
+  await openDashboard(page)
+  await openLongFile(page)
+  await page.getByTestId('project-files-close').click()
+
+  /*
+    **窓の幅で作りを分けない**（2026-08-28）。セッションの札は狭い窓でも 672px 固定の
+    まま横スクロールするので、中身の列も同じにする——**列だけ全画面になるのが
+    おかしかった。**
+  */
   const column = page.getByTestId('file-column')
-  expect(await 幅(column), '中身も全幅').toBeCloseTo(390, 0)
-  // **「在るが届かない」を、位置まで見て否定する**
-  await expect(page.getByTestId('file-close')).toBeInViewport()
+  expect(await 幅(column), '札と同じ 42rem').toBeCloseTo(672, 0)
 
+  // 札より広いのに、**ページは横へ広がらない**（レールの中で流れる）
   const overflows = await page.evaluate(() => {
     const de = document.documentElement
     return de.scrollWidth > de.clientWidth
   })
   expect(overflows, '狭い画面でもページは横へ広がらない').toBe(false)
+
+  const rail = page.getByTestId('group-rail')
+  const 流した = await rail.evaluate((el) => {
+    el.scrollLeft = 9999
+    return el.scrollLeft
+  })
+  expect(流した, 'レールの中で実際に流せること').toBeGreaterThan(0)
 })
 
 test('セッションを横へ流すと、中身の列も一緒に流れる', async ({ page }) => {
