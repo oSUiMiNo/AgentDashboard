@@ -3,7 +3,12 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { SessionTile } from './SessionTile'
 import type { SessionMeta, SessionStatus } from '@/lib/protocol'
-import { statusAccentColor, statusInk } from '@/lib/protocol'
+import {
+  statusAccentColor,
+  statusGlyph,
+  statusInk,
+  statusLabel,
+} from '@/lib/protocol'
 import {
   applySessionSnapshot,
   clearSessions,
@@ -277,6 +282,49 @@ describe('SessionTile の骨格', () => {
 
     renderTile(meta({ status: { kind: 'waiting_permission' } }))
     expect(screen.getByTestId('tile-sticker')).toBeInTheDocument()
+  })
+
+  it('状態は右下のタグに出る。①行には残っていない', () => {
+    // 要件2-1。**上部に真面目に書く必要は無い**（0.1.41 を実物で見た利用者の指定）。
+    // ①行へ戻すとここが落ちる
+    for (const kind of ['stalled', 'waiting_input', 'starting', 'unknown'] as const) {
+      const { unmount } = renderTile(meta({ status: { kind } }))
+      expect(screen.getByTestId('tile-tag')).toHaveTextContent(statusLabel({ kind }))
+      // ①行の先頭に居た記号のスロットは無くなっている
+      expect(screen.queryByTestId('status-glyph')).not.toBeInTheDocument()
+      unmount()
+    }
+  })
+
+  it('記号はタグの中にある', () => {
+    // 要件2-2。**ラベルの直前（①行の先頭）へ戻すと落ちる**
+    renderTile(meta({ status: { kind: 'waiting_input' } }))
+    const タグ = screen.getByTestId('tile-tag')
+    expect(タグ.querySelector('.tile-glyph')?.textContent).toBe(
+      statusGlyph({ kind: 'waiting_input' }),
+    )
+  })
+
+  it('作業中だけタグを持たず、走るアニメーションになる', () => {
+    // 要件2-3。**文字も `↻` も出さない**——放っておいてよい状態なので、読ませるより
+    // 「動いている」ことだけが伝わればよい
+    renderTile(meta({ status: { kind: 'working' } }))
+    expect(screen.queryByTestId('tile-tag')).not.toBeInTheDocument()
+    expect(screen.getByTestId('tile-run')).toBeInTheDocument()
+
+    // 他の状態は逆
+    cleanup()
+    renderTile(meta({ status: { kind: 'stalled' } }))
+    expect(screen.getByTestId('tile-tag')).toBeInTheDocument()
+    expect(screen.queryByTestId('tile-run')).not.toBeInTheDocument()
+  })
+
+  it('権限確認待ちだけ、ANSWER と状態タグが2枚出る', () => {
+    // 利用者の判断（2026-08-27）。**ANSWER は状態名ではなく「押して答える」を促す語**
+    // なので、状態タグと役割が違うものとして両方出す。重ならないよう1段上へ逃がす
+    renderTile(meta({ status: { kind: 'waiting_permission' } }))
+    expect(screen.getByTestId('tile-sticker')).toBeInTheDocument()
+    expect(screen.getByTestId('tile-tag')).toHaveClass('tile-tag-raised')
   })
 
   it('ステッカーは切る枠の中に置く', () => {
@@ -608,6 +656,26 @@ describe('どの PC のセッションかと、その鮮度（セルフホスト
     // 状態は最後に知っていたまま
     expect(screen.getByTestId('session-tile').dataset.status).toBe('working')
     expect(screen.getByTestId('session-tile').dataset.connected).toBe('false')
+  })
+
+  it('接続断は①行（最終活動と同じ行）に出る', () => {
+    // 要件2-6。**②行へ戻すと落ちる。** 設計§10-1-3 は実測で「①行に入らない」と
+    // 決めていたが、状態が右下のタグへ抜けたので**要る幅が 290px → 166px になった**
+    useSettingsStore.setState({
+      settings: settingsFixture({
+        agents: [
+          { id: PC, name: '仕事用ノート', last_seen_at: 1, connected: false },
+        ],
+      }),
+      loading: false,
+    })
+    renderTile(meta({ agent_id: PC, agent_connected: false }))
+
+    const 接続断 = screen.getByTestId('disconnected-badge')
+    const 最終活動 = screen.getByTestId('elapsed')
+    expect(接続断.parentElement).toBe(最終活動.parentElement)
+    // ②行（モデル・モードが並ぶ行）には居ない
+    expect(screen.queryByTestId('tile-badges')?.contains(接続断)).not.toBe(true)
   })
 
   it('繋がっていれば接続断の印は出ない', () => {

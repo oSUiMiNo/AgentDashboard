@@ -171,14 +171,18 @@ describe('揺れるのは切る枠から内側', () => {
 })
 
 describe('静けさの3段', () => {
-  it('「控えめ」が止めるのは作業中の回転だけ', () => {
+  it('「控えめ」が止めるのは作業中のものだけ', () => {
     const 控えめ = 当たる("[data-quiet='calm']")
-    expect(控えめ).toHaveLength(1)
+    // 輪の回転と、**走るアニメーション**（フェーズ13。止める1本＋1コマ目で静止する1本）。
+    // どれも作業中のもの
+    expect(控えめ).toHaveLength(3)
+    const 当たり先 = 控えめ.map((rule) => rule.selector).join(' ')
+    expect(当たり先).toContain("[data-motion='spin-fast']")
+    expect(当たり先).toContain('.tile-run')
     // **停滞・入力待ち・承認待ちは動いたまま。** ここを広げると、いちばん見つけたい
     // ものの合図まで静けさと引き換えに失う
-    expect(控えめ[0].selector).toContain("[data-motion='spin-fast']")
     for (const 触ってはいけない of ['spin-slow', 'breathe', 'shake']) {
-      expect(控えめ[0].selector).not.toContain(触ってはいけない)
+      expect(当たり先).not.toContain(触ってはいけない)
     }
   })
 
@@ -269,9 +273,30 @@ describe('色が消える環境への退避', () => {
   it('切る枠が実線になる', () => {
     // 輪は背景画像なので丸ごと消える（調査§6-4）。カードの境目まで消えないようにする
     const 退避 = 当たる('forced-colors')
-    expect(退避).toHaveLength(1)
-    expect(退避[0].selector).toContain('.tile-frame')
-    expect(退避[0].body).toContain('CanvasText')
+    const 枠 = 退避.filter((rule) => rule.selector.includes('.tile-frame'))
+    expect(枠).toHaveLength(1)
+    expect(枠[0].body).toContain('CanvasText')
+  })
+
+  it('状態タグは、地が消えても文言が残る', () => {
+    // **地は画像・記号と文言は要素**（フェーズ13）。焼き込むとこの環境で状態が
+    // 丸ごと読めなくなり、完了条件「色を伏せても記号と文言だけで8状態が判別できる」を割る
+    const 退避 = 当たる('forced-colors')
+    const タグ = 退避.filter((rule) => rule.selector.includes('.tile-tag'))
+    expect(タグ).toHaveLength(1)
+    expect(タグ[0].body).toContain('CanvasText')
+  })
+
+  it('走るアニメーションは、絵の代わりに文字と記号が出る', () => {
+    // あれは**絵そのものが中身**（要件2-3 が「文字も ↻ も要らない」と明示）なので、
+    // 消えたときに残るものが無い。**この環境でだけ**退避の文字を出す
+    const 退避 = 当たる('forced-colors')
+    const 走る = 退避.filter((rule) => rule.selector.includes('.tile-run'))
+    expect(走る.length).toBeGreaterThanOrEqual(2)
+    const 当たり先 = 走る.map((rule) => rule.selector).join(' ')
+    // 絵（3コマ）を消す規則と、退避を出す規則が対で要る
+    expect(当たり先).toContain('.tile-run i')
+    expect(当たり先).toContain('.tile-run-fallback')
   })
 })
 
@@ -416,6 +441,8 @@ describe('濃さは1本の変数から配る', () => {
   const 除外 = [
     // 上に暗い文字が乗る。薄くすると `ANSWER` が読めない（`tile.css` に同じ理由）
     '.tile-sticker',
+    // 同上。状態タグは**文言そのものが状態の答え**なので、薄くして読めなくしない
+    '.tile-tag',
     // **濃さはキーフレームが持つ**（素の状態は `opacity: 0` で隠れている）。
     // その中身は下の「効果線もキーフレームで濃さを読む」が見ている
     '.tile-lines i',

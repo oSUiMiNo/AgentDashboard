@@ -403,6 +403,72 @@ test('ハイコントラストの環境では、切る枠が実線へ退避す�
   expect(await frameBorder()).toMatchObject({ width: '0px' })
 })
 
+test('状態は右下のタグに出て、①行は最終活動と接続断が収まる', async ({
+  page,
+}) => {
+  /*
+    フェーズ13。**jsdom では測れない**（レイアウトを持たないので実寸が全部固定値で
+    返る）ので、実物のブラウザでしか確かめられない。
+
+    設計§10-1-3 は実測で「①行に接続断は入らない」と決めていた——**使えるのは 212px
+    なのに 290px 要る**（記号24＋状態ラベル最大84＋最終活動112＋接続断54）。
+    **状態が右下へ抜けて 166px になったこと**を、ここで数字として押さえる。
+  */
+  await openDashboard(page)
+  const cardId = await spawnWith(page, 'UserPromptSubmit')
+
+  const 測る = async () =>
+    page.evaluate((id) => {
+      const shell = document.querySelector(
+        `[data-testid="tile-shell"][data-card-id="${id}"]`,
+      )
+      if (shell === null) throw new Error(`カードが見つかりません：${id}`)
+      const 最終活動 = shell.querySelector('[data-testid="elapsed"]')
+      // **作業中はタグを持たない**（走るアニメーションになる）。どちらかは必ず在る
+      const タグ =
+        shell.querySelector('[data-testid="tile-tag"]') ??
+        shell.querySelector('[data-testid="tile-run"]')
+      if (最終活動 === null) throw new Error('最終活動が見つかりません')
+      const 行 = 最終活動.parentElement as HTMLElement
+      return {
+        行幅: Math.round(行.getBoundingClientRect().width),
+        // ①行の中身が、行の幅を1pxでも超えていないこと
+        はみ出し: Math.round(行.scrollWidth - 行.clientWidth),
+        タグあり: タグ !== null,
+        // タグは中身より下・右にある（右下と言えること）
+        タグが右下: (() => {
+          if (タグ === null) return null
+          const t = タグ.getBoundingClientRect()
+          const s = shell.getBoundingClientRect()
+          return t.right <= s.right && t.bottom <= s.bottom && t.top > s.top
+        })(),
+      }
+    }, cardId)
+
+  const 実測 = await 測る()
+  // **①行は 212px を超えて広がらない**（カードの内容領域 260px から復旧ボタンぶんを引く前）
+  expect(実測.行幅).toBeLessThanOrEqual(260)
+  // **溢れていない。** 溢れると切る枠に削られ「接続断」が「接」だけになる（フェーズ6）
+  expect(実測.はみ出し).toBe(0)
+  // 状態は右下に出ている（作業中は走るアニメーション、他はタグ）
+  expect(実測.タグあり).toBe(true)
+  expect(実測.タグが右下).toBe(true)
+
+  // ①行に状態のラベルが残っていないこと（①行へ戻すとここが落ちる）
+  const 行のテキスト = await page.evaluate((id) => {
+    const shell = document.querySelector(
+      `[data-testid="tile-shell"][data-card-id="${id}"]`,
+    )
+    const 行 = shell?.querySelector('[data-testid="elapsed"]')?.parentElement
+    return 行?.textContent ?? ''
+  }, cardId)
+  expect(行のテキスト).toContain('最終活動')
+  // ①行に状態のラベルが残っていない（戻すとここが落ちる）
+  for (const ラベル of ['作業中', '入力待ち', '停滞', '権限確認待ち']) {
+    expect(行のテキスト).not.toContain(ラベル)
+  }
+})
+
 test('応答が変わると1行が出て、しばらくして消える', async ({
   page,
   context,
