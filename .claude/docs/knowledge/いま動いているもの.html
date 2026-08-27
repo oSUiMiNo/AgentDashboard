@@ -37,13 +37,13 @@
 <p class="lead">
   AgentDashboard に関係して、この機械や外で<strong>起動しっぱなしになっているもの</strong>の一覧。
   「どの URL がどれを指しているか」を取り違えると原因追跡が丸ごと空振りするので、そこを中心に書いてある。
-  <br>最終更新：2026-08-27 15時台（<strong>AWS はもう無い。セッションホスト<span class="mark">▽</span>も走っていない。</strong>動いているのは<strong>実機だけ</strong>で、trial は止まったまま。<strong>実機は 0.1.41 で走っており、ディスクは 0.1.44 で3つ分ずれている</strong>——0.1.44 は<strong>押す直前で止めてある</strong>（起こし直すのは人））
+  <br>最終更新：2026-08-27 18時台（<strong>AWS はもう無い。セッションホスト<span class="mark">▽</span>も走っていない。</strong>動いているのは<strong>実機だけ</strong>で、trial は止まったまま。<strong>実機は 0.1.41 で走っており、ディスクは 0.1.45 で4つ分ずれている</strong>——0.1.45 は<strong>押す直前で止めてある</strong>（起こし直すのは人））
   <br><strong>AWS のアカウントが閉鎖された。原因は無料プランの期限切れ（2026-08-15）。</strong>画面に「アカウントが閉鎖されました」と「無料プランはまもなく終了します（Aug 15, 2026 に、またはすべてのクレジットを使い切った時点で終了）」が出る（利用者が確認・08-16 22時台）。<strong>クレジットは $108.97 残っているが、無料プランの窓が閉じたので使えない。</strong><code>dash.underschaft.com</code> は <strong>530</strong> を返す。
   <br><strong>止まり方は段階的だった。</strong>08-16 の 16:30 と 17:57 は 530、<strong>18:24 は 200 に戻り</strong>、20時台から 530 のまま。閉鎖に伴って資源が順に止められていく途中だったと読める。<strong>「一度 200 が返ったから復旧した」と読まないこと。</strong>
   <br><strong>「IP が変わった」ではない。</strong>最初は SSH が届かないだけに見え、Elastic IP を持たない構成なので IP の付け替えを疑ったが、<strong>原因はアカウントごと消えていたこと</strong>だった。terraform の記録（<code>~/Dev/Test_AgentDashboard/terraform.tfstate</code>・08-03）にある <code>43.207.237.211</code> は<strong>もう誰のものでもない</strong>。<strong>ここを直すのも、別の場所へ立て直すのも人の作業。</strong>
   <br><strong>セッションホスト<span class="mark">▽</span>は、いま1本も走っていない</strong>（08-23 に数えて0本）。以前は<strong>生きたまま黙って固まる</strong>ことがあった——Cloudflare 宛に TLS が張られたまま無通信（<code>ESTAB</code>・送受信キュー0・CPU ほぼ0）で、<strong>ログも1行も出ていない</strong>。<code>link.rs</code> の <code>dial()</code> に<strong>時間切れが無い</strong>ため、相手が「断る」のではなく<strong>黙って握ったまま答えない</strong>と永久に待つ。<strong>画面には理由の分からない「接続断」だけが残る。</strong>別イシュー化の候補。
   <br><strong>実機は自動では起きない。</strong>常駐の仕組みに載せていないので、<strong>WSL を起こし直すと落ちたままになる</strong>（セッションホスト<span class="mark">▽</span>も同じ理由で、いま落ちたままである）。
-  <br><strong>版は 0.1.44 まで出ている（08-27）。</strong>いまの版でできること——<strong>抜け殻のカードを起こし直す</strong>（画面の「復旧」／「全て復旧」と <code>agentdashboard session revive [--all]</code>。入りきらないときはダイアログで断る）、<strong>ファイル閲覧で画像と HTML を出す</strong>（画像は<strong>バイト列で運ぶ</strong>・上限 8 MiB。HTML と SVG は<strong>隔離した箱</strong>で描く——<code>iframe sandbox</code> と応答の CSP の<strong>二重の鍵</strong>。一覧の印は<strong>種別ごとに分かれる</strong>）。
+  <br><strong>版は 0.1.45 まで出ている（08-27）。</strong>いまの版でできること——<strong>サイドバー（左から出るフォルダの区画）が広い窓では被さらずに右を押しのける</strong>（狭い窓は被さるまま。印も☰から「枠の中に左寄りの縦線」へ変わり、<strong>ファイルの中身の列がセッションと一緒に横へ流れる</strong>）、<strong>抜け殻のカードを起こし直す</strong>（画面の「復旧」／「全て復旧」と <code>agentdashboard session revive [--all]</code>。入りきらないときはダイアログで断る）、<strong>ファイル閲覧で画像と HTML を出す</strong>（画像は<strong>バイト列で運ぶ</strong>・上限 8 MiB。HTML と SVG は<strong>隔離した箱</strong>で描く——<code>iframe sandbox</code> と応答の CSP の<strong>二重の鍵</strong>。一覧の印は<strong>種別ごとに分かれる</strong>）。
   <br><strong>0.1.29 と 0.1.30 のうち、セッションホスト<span class="mark">▽</span>に関わるぶんは、いま誰も使っていない。</strong>あれが走っておらず、繋ぎ先の<strong>サーバも無い</strong>ためである。<strong>リモート経路（ブラウザ → サーバ → セッションホスト）でしか出ない壊れ方は、どこかにサーバを立て直すまで裏取りできない</strong>——スマホから触る確認は全部ここで止まる。
 </p>
 
@@ -77,7 +77,7 @@
 
   <rect x="30" y="62" width="200" height="72" rx="8" fill="#161a21" stroke="#2d4a22"/>
   <text x="44" y="88" fill="#9ece6a" font-size="14" font-weight="600">8787 実機</text>
-  <text x="44" y="108" fill="#e6e9ef" font-size="12">ローカルモード・走行 0.1.41 / ディスク 0.1.44</text>
+  <text x="44" y="108" fill="#e6e9ef" font-size="12">ローカルモード・走行 0.1.41 / ディスク 0.1.45</text>
   <text x="44" y="125" fill="#9aa4b2" font-size="11">~/AgentDashboard のソースビルド</text>
 
   <rect x="256" y="62" width="200" height="72" rx="8" fill="#161a21" stroke="#2d4a22"/>
@@ -88,7 +88,7 @@
   <rect x="30" y="178" width="200" height="62" rx="8" fill="#161a21" stroke="#2a313c"/>
   <text x="44" y="202" fill="#e6e9ef" font-size="13">セッションホスト（OMEN）</text>
   <text x="44" y="222" fill="#9aa4b2" font-size="11">claude を動かす → AWS へ繋ぐ</text>
-  <text x="44" y="236" fill="#e0af68" font-size="11">走っていない（ディスク 0.1.44）</text>
+  <text x="44" y="236" fill="#e0af68" font-size="11">走っていない（ディスク 0.1.45）</text>
 
   <rect x="256" y="178" width="200" height="62" rx="8" fill="#161a21" stroke="#2a313c"/>
   <text x="270" y="202" fill="#e6e9ef" font-size="13">cloudflared（この機械）</text>
@@ -127,7 +127,7 @@
   一方 AWS は<strong>配った箱</strong>なので、<strong>リリースを出すまで何も変わらない</strong>。
   画面に出る版だけを見て「同じものが動いている」と判断しないこと。<br><br>
 
-  <p class="note warn"><strong>実機は 0.1.41 で走っている（ディスクは 0.1.44）。</strong> AWS は無い（アカウント閉鎖）。<strong>セッションホスト<span class="mark">▽</span>は走っていない</strong>。<strong>走行 0.1.41 ／ ディスク 0.1.44 で3つ分ずれている</strong>——0.1.44（状態を右下の札へ移し作業中は人が走る＝0.1.43／ファイル閲覧の上限を 3 MiB へ上げ、大きいものは整形せずに出す＝0.1.44）は <code>make build</code> まで済ませて<strong>押す直前で止めてある</strong>。<strong>効かせるのは人</strong>。前回（2026-08-26 19:01・0.1.41）の記録は <code>~/agentdashboard-restart.log</code> の末尾。起こすと入るのは<strong>回遊する効果線の作り直し</strong>（巻きを小さくし、線を細くし、カードのある場所だけを回る）と<strong>ファイルのパネルの組み替え</strong>（フォルダが被さる層へ移り、中身が独立した列になり、縁をドラッグして幅を変えられる）。
+  <p class="note warn"><strong>実機は 0.1.41 で走っている（ディスクは 0.1.45）。</strong> AWS は無い（アカウント閉鎖）。<strong>セッションホスト<span class="mark">▽</span>は走っていない</strong>。<strong>走行 0.1.41 ／ ディスク 0.1.45 で4つ分ずれている</strong>——0.1.45（状態を右下の札へ移し作業中は人が走る＝0.1.43／ファイル閲覧の上限を 3 MiB へ上げ、大きいものは整形せずに出す＝0.1.44／サイドバーが広い窓では押しのける形になり印も変わる・中身の列がレールの中へ入る＝0.1.45）は <code>make build</code> まで済ませて<strong>押す直前で止めてある</strong>。<strong>効かせるのは人</strong>。前回（2026-08-26 19:01・0.1.41）の記録は <code>~/agentdashboard-restart.log</code> の末尾。起こすと入るのは<strong>回遊する効果線の作り直し</strong>（巻きを小さくし、線を細くし、カードのある場所だけを回る）と<strong>ファイルのパネルの組み替え</strong>（フォルダが被さる層へ移り、中身が独立した列になり、縁をドラッグして幅を変えられる）と、その続き（サイドバーが広い窓では押しのけ、印が☰でなくなり、中身の列がセッションと一緒に横へ流れる）。
   <br><strong>これはいちばん気づきにくいずれ方である。</strong>ヘッダに出る版はサーバに聞いた答えなので<strong>古いタブでも新しい版が表示される</strong>。「揃っているのに古い」という形になるので、<strong>数字ではなく「最後に起こし直したのはいつか」で判断すること。</strong>
   <br><strong>次に落とすときも、抱えている claude を先に数えること。</strong>起こし直すと道連れになり、<strong>作業中のセッション自身がその中に居ることがある</strong>（今回も居た）。<strong>いつ落としてよいかは人にしか決められない。</strong></p>
 
@@ -174,7 +174,7 @@ agentdashboard-agent logs --since 24h --state-dir ~/agentdashboard-agent/state</
   <tr>
     <td>実機</td>
     <td><code>127.0.0.1:8787</code></td>
-    <td><span class="tag"><strong>走行 0.1.41 ／ ディスク 0.1.44</strong>（3つ分ずれ・押す直前）</span><br><small><strong>いま生きたカードは15枚</strong>（作業中3・承認待ち1・入力待ち10・停滞1／終了7。2026-08-27 15時台に数えた）——<strong>起こし直すとこの15枚が道連れになる</strong>。<br><strong>切り離したスクリプト</strong>（<code>/tmp/agentdashboard-restart.sh</code>）で起こし直した（2026-08-26 19:01・PID=57255）。<strong>撃った側は道連れになる</strong>ので、起きたかどうかは <code>~/agentdashboard-restart.log</code> の末尾で確かめる。巻き添えは<strong>claude 6本</strong>——利用者が「今回は許容」と明示したうえで撃った。</small></td>
+    <td><span class="tag"><strong>走行 0.1.41 ／ ディスク 0.1.45</strong>（4つ分ずれ・押す直前）</span><br><small><strong>いま生きたカードは13枚</strong>（作業中2・承認待ち1・入力待ち9・停滞1／終了8。2026-08-27 18時台に数えた）——<strong>起こし直すとこの13枚が道連れになる</strong>。<br><strong>数えている claude 自身が、その子であることがある</strong>（2026-08-27 がそうだった。<code>ps -eo pid,ppid,args --forest</code> で親子を辿ってから決めること）。<br><strong>切り離したスクリプト</strong>（<code>/tmp/agentdashboard-restart.sh</code>）で起こし直した（2026-08-26 19:01・PID=57255）。<strong>撃った側は道連れになる</strong>ので、起きたかどうかは <code>~/agentdashboard-restart.log</code> の末尾で確かめる。巻き添えは<strong>claude 6本</strong>——利用者が「今回は許容」と明示したうえで撃った。</small></td>
     <td>ローカルモード<span class="mark">▽</span>。<code>~/AgentDashboard</code> で <code>make build</code> したものを引数なしで起動。端末の出力は <code>~/agentdashboard-run.log</code>、構造化ログは <code>~/.local/state/agentdashboard-run/logs/</code>。<br><strong>読むときは <code>--state-dir</code> が要る。</strong> 置き場所を設定で移してあるが、読む口は設定を読まない（設計§11-2 の非対称）——<code>agentdashboard logs --since 1h --state-dir ~/.local/state/agentdashboard-run</code><br><strong>起こすときは <code>setsid</code> で切り離す。</strong> ツール呼び出しの子として起こすと、呼び出しの終了で巻き添えに死ぬ（08-10 に一度この形で起こしてしまい、起こし直した）。<code>cd ~/AgentDashboard &amp;&amp; setsid nohup ./server/target/release/agentdashboard &gt;&gt; ~/agentdashboard-run.log 2&gt;&amp;1 &lt; /dev/null &amp;</code></td>
   </tr>
   <tr>
@@ -186,7 +186,7 @@ agentdashboard-agent logs --since 24h --state-dir ~/agentdashboard-agent/state</
   <tr>
     <td>セッションホスト<span class="mark">▽</span></td>
     <td>— （PC 名 <code>OMEN</code>）</td>
-    <td><span class="tag t-old">走っていない</span><br><small><strong>08-23 に数えて0本。</strong>実行ファイルは <code>~/AgentDashboard</code> のディスク（いま <code>0.1.44</code>）を使う。<br><strong>繋ぎ先のサーバが無い</strong>（AWS はアカウント閉鎖）ので、起こしても繋がる先が無い。<strong>立て直すまで、起こす意味が無い。</strong><br>以前は<strong>生きたまま黙って固まる</strong>ことがあった（<code>dial()</code> に時間切れが無い。上の説明）。<br><strong>起こすと、抱える claude は道連れになる側になる。</strong>落とす前に <code>ps -eo pid,ppid,args --forest</code> で子を数え、<strong>0本でなければ止まる</strong>こと。起こし直しは切り離したスクリプトに任せる（<code>/tmp/agentdashboard-agent-restart.sh</code>。記録は <code>~/agentdashboard-agent/restart.log</code>）——落とす相手が自分の親だと、ツール呼び出しの中で <code>kill</code> すると起こし直す行まで辿り着けない</small></td>
+    <td><span class="tag t-old">走っていない</span><br><small><strong>08-23 に数えて0本。</strong>実行ファイルは <code>~/AgentDashboard</code> のディスク（いま <code>0.1.45</code>）を使う。<br><strong>繋ぎ先のサーバが無い</strong>（AWS はアカウント閉鎖）ので、起こしても繋がる先が無い。<strong>立て直すまで、起こす意味が無い。</strong><br>以前は<strong>生きたまま黙って固まる</strong>ことがあった（<code>dial()</code> に時間切れが無い。上の説明）。<br><strong>起こすと、抱える claude は道連れになる側になる。</strong>落とす前に <code>ps -eo pid,ppid,args --forest</code> で子を数え、<strong>0本でなければ止まる</strong>こと。起こし直しは切り離したスクリプトに任せる（<code>/tmp/agentdashboard-agent-restart.sh</code>。記録は <code>~/agentdashboard-agent/restart.log</code>）——落とす相手が自分の親だと、ツール呼び出しの中で <code>kill</code> すると起こし直す行まで辿り着けない</small></td>
     <td><strong>AWS へ繋いでいる</strong>（<code>dash.underschaft.com</code>。この PC の名前は <code>OMEN</code>）。設定は <code>~/agentdashboard-agent/agent.toml</code>、ログは同じ場所の <code>run.log</code>。<br><strong>これが止まっていると、ブラウザに「指定された PC が繋がっていません」が出る</strong>——カードは PC に紐づくので、繋がっていないと引けない。ブラウザとサーバは繋がったままなので<strong>上の帯だけが赤くなる</strong>。
         <strong>ここを起こし直すと、抱えている claude が道連れになる。</strong>落とす前に <code>ps -eo pid,ppid,args --forest</code> で子を数えること——08-10 の入れ替えでは<strong>生きた claude が1本ぶら下がっていたので入れ替えを見送った</strong>。版を上げたら入れ替えないと、サーバだけ新しくなって<strong>フォルダを覗く口が「版が古い」で断られ続ける</strong>（実際に踏んだ）。<code>agent_id</code> はペアリングトークンから決まるので、<strong>起こし直しても同じ PC のまま</strong>——枠は孤児にならない。
         <strong>パーサだけなら落としてよい。</strong>子の <code>transcript-parser</code> を PID 直指定で <code>kill</code> すると、セッションホストが立て直して監視も保存済みの位置から張り直す（<strong>claude は道連れにならない</strong>）。本体が古い版のあいだにパーサが肥大したら、これで嵩が戻るうえ<strong>ディスク上の新しいパーサに入れ替わる</strong>。
