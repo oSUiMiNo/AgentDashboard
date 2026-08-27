@@ -52,9 +52,7 @@ import {
   reviveReason,
   reviveState,
   statusAccent,
-  statusAccentColor,
   statusGlyph,
-  statusInk,
   statusLabel,
   statusMotion,
 } from '@/lib/protocol'
@@ -62,7 +60,7 @@ import type { CardId } from '@/lib/protocol'
 import { sessionPath } from '@/lib/routes'
 import { measureField } from '@/lib/roam'
 import { useNow } from '@/lib/sessions'
-import { scheduleRoam } from '@/stores/roam'
+import { ROAM_ACCENT, ROAM_INK, scheduleRoam } from '@/stores/roam'
 import { useCardError, useReviving, useSessionCard } from '@/stores/sessions'
 import { agentName, agentOf, useSettingsStore } from '@/stores/settings'
 import { useWsStore } from '@/stores/ws'
@@ -214,11 +212,14 @@ export function SessionTile({ cardId }: Props) {
       if (field === null) return null
       return {
         field,
-        accent: statusAccentColor(session.status),
-        // **繋がっていない状態を渡す**（2026-08-26）。渡さないと、輪とバーは沈むのに
-        // 放った線だけが沈まない——減光は `tile.css` の `[data-connected='false']` に
-        // しか無く、この経路はあの CSS を通らないため（実測：枠 45% に対し線 75%）
-        ink: statusInk(session.status, session.agent_connected),
+        // **状態から引かない**（2026-08-28・要件14-6）。効果線だけが役割色の外に出た。
+        // **輪・バー・タグは `statusAccentColor` のままである**——外したのはここだけ
+        accent: ROAM_ACCENT,
+        // **常に不透明。接続が切れていても沈めない**（要件14-4・14-7）。
+        // 以前はここへ `statusInk(session.status, session.agent_connected)` を渡して
+        // いた（減光は `tile.css` の `[data-connected='false']` にしか無く、この経路は
+        // あの CSS を通らないため）。**「一旦」なので、戻すならこの1行を戻す**
+        ink: ROAM_INK,
         quiet,
       }
     })

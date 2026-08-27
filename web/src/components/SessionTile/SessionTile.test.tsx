@@ -16,7 +16,13 @@ import {
   setCardError,
   upsertSession,
 } from '@/stores/sessions'
-import { ROAM_DELAY_MAX_MS, resetRoam, setRoamDice, useRoamStore } from '@/stores/roam'
+import {
+  ROAM_ACCENT,
+  ROAM_DELAY_MAX_MS,
+  resetRoam,
+  setRoamDice,
+  useRoamStore,
+} from '@/stores/roam'
 import { useSettingsStore } from '@/stores/settings'
 import { useWsStore } from '@/stores/ws'
 import { settingsFixture } from '@/test/fixtures'
@@ -1025,7 +1031,9 @@ describe('跳ねるたびに、画面を回遊する線を放つ', () => {
     expect(useRoamStore.getState().lines).toHaveLength(0)
   })
 
-  it('放つ線は、そのカードの状態の色を持つ', () => {
+  it('放つ線は、状態から切り離した専用の色を持つ', () => {
+    // **フェーズ8 の成果を、効果線についてだけ覆す**（2026-08-28・要件14-6）。
+    // 輪・バー・タグは状態の色のままで、**外れるのは効果線だけ**である
     待つカードを描く()
     折り返す('tile-shake')
     撃たれるまで進める()
@@ -1034,25 +1042,65 @@ describe('跳ねるたびに、画面を回遊する線を放つ', () => {
     // ——**この工事の最頻出の罠そのもの**（2026-08-28 に実地で踏んだ）
     expect(lines.length).toBeGreaterThan(0)
     for (const line of lines) {
-      expect(line.accent).toBe(statusAccentColor({ kind: 'waiting_permission' }))
+      expect(line.accent).toBe(ROAM_ACCENT)
+      // **状態の色ではないこと。** ここが「切り離した」ことの番人である
+      expect(line.accent).not.toBe(statusAccentColor({ kind: 'waiting_permission' }))
     }
   })
 
-  it('繋がっているカードの線は、輪と同じ濃さで出る', () => {
+  it('状態が変わっても、線の色は変わらない', () => {
+    // **切り離しの本体はここ。** 上の1本だけだと「たまたま琥珀と違う色を書いた」
+    // でも緑になる——**状態を振っても動かないこと**で見る
+    const 色たち = new Set<string>()
+    for (const kind of ['waiting_permission', 'working', 'stalled'] as const) {
+      resetRoam()
+      setRoamDice(() => 1)
+      cleanup()
+      applySessionSnapshot([meta({ status: { kind } as SessionStatus })])
+      render(
+        <MemoryRouter initialEntries={['/']}>
+          <div data-roam-field>
+            <SessionTile cardId={CARD} />
+          </div>
+        </MemoryRouter>,
+      )
+      折り返す('tile-shake')
+      撃たれるまで進める()
+      for (const line of useRoamStore.getState().lines) 色たち.add(line.accent)
+    }
+    expect(色たち.size).toBe(1)
+    expect([...色たち][0]).toBe(ROAM_ACCENT)
+  })
+
+  it('線の色は、4つの役割色のどれとも一致しない', () => {
+    // `DESIGN.md` §11.2 の役割表は書き換えない。**表の外の装飾色を1つだけ立てた**
+    // ——役割色を奪っていないことの番人（設計§20-4-3）
+    for (const 役割 of ['#3DD9E6', '#F5A623', '#8FD14F', '#FF5A5F']) {
+      expect(ROAM_ACCENT.toUpperCase()).not.toBe(役割)
+    }
+  })
+
+  it('線は常に不透明で出る', () => {
+    // **輪と濃さを揃えるのをやめた**（2026-08-28・要件14-4）。フェーズ8 が揃えた
+    // 成果を効果線についてだけ覆す
     待つカードを描く()
     折り返す('tile-shake')
     撃たれるまで進める()
     const lines = useRoamStore.getState().lines
     expect(lines.length).toBeGreaterThan(0)
     for (const line of lines) {
-      expect(line.ink).toBe(statusInk({ kind: 'waiting_permission' }))
+      expect(line.ink).toBe('100%')
+      expect(line.ink).not.toBe(statusInk({ kind: 'waiting_permission' }))
     }
   })
 
-  it('繋がっていないカードの線も、輪と同じだけ沈む', () => {
-    // **0.1.41 の壊れ方。** 減光は `tile.css` の `[data-connected='false']` にしか
-    // 無く、線へ濃さを渡す経路はあの CSS を通らないので、**輪とバーだけが沈んで
-    // 線が取り残されていた**（実測：枠 45% に対し線 75%。比はちょうど 0.6）
+  it('繋がっていなくても、線は沈まない', () => {
+    // **フェーズ12 の成果を「一旦」覆す**（2026-08-28・要件14-7）。
+    // あちらは 0.1.41 の壊れ方——減光が `tile.css` の `[data-connected='false']` に
+    // しか無く、**輪とバーだけが沈んで線が取り残されていた**——を直したものである。
+    //
+    // **戻すときはこの1本を戻す。** 定数（`DISCONNECTED_INK_SCALE`）は消していない
+    // ので、`SessionTile.tsx` が渡す `ROAM_INK` へ掛け直せばよい
     applySessionSnapshot([
       meta({ status: { kind: 'waiting_permission' }, agent_connected: false }),
     ])
@@ -1068,8 +1116,9 @@ describe('跳ねるたびに、画面を回遊する線を放つ', () => {
     const lines = useRoamStore.getState().lines
     expect(lines.length).toBeGreaterThan(0)
     for (const line of lines) {
-      expect(line.ink).toBe('45%')
-      expect(line.ink).not.toBe(statusInk({ kind: 'waiting_permission' }))
+      // **繋がっているときと同じ。** 沈んでいたら、掛け直しが残っている
+      expect(line.ink).toBe('100%')
+      expect(line.ink).not.toBe(statusInk({ kind: 'waiting_permission' }, false))
     }
   })
 })

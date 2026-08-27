@@ -713,8 +713,20 @@ export function statusAccent(status: SessionStatus): CSSProperties {
  * 輪の色だけを取り出す（カード設計§9-7）。
  *
  * 上の `statusAccent` は CSS 変数を載せた `CSSProperties` を返すので、**型の上では
- * `--tile-accent` を読めない**。回遊する線は色を値として持ち回る（層は DOM を1度も
- * 読まない）ので、こちらから取る。**対応表は割らない**——どちらも同じ表を引く。
+ * `--tile-accent` を読めない**。値として色が要る側は、こちらから取る。
+ * **対応表は割らない**——どちらも同じ表を引く。
+ *
+ * # いまは製品コードから呼ばれていない（2026-08-28）
+ *
+ * **唯一の呼び元は回遊する線だった。** 効果線の色が状態から切り離され
+ * （`stores/roam.ts` の [`ROAM_ACCENT`]）、この関数を通らなくなった。
+ *
+ * **残してあるのは2つの理由による。**
+ *
+ * 1. **切り離しは「一旦」である**（利用者の言葉・要件14-7）。戻すときは
+ *    `SessionTile.tsx` が渡す1行をここへ戻すだけで済む
+ * 2. **テストが「効果線の色が、状態の色ではないこと」の基準として使う**——
+ *    比べる相手が無いと、切り離したことを機械で見張れない
  */
 export function statusAccentColor(status: SessionStatus): string {
   return STATUS_TONES[statusGroup(status)].accent
@@ -726,13 +738,16 @@ export function statusAccentColor(status: SessionStatus): string {
  * `tile.css` の `--tile-ink` が読んでいるのと**同じ値**である。回遊する線は色と同じく
  * 濃さも値として持ち回る（層は DOM を1度も読まない）ので、こちらから取る。
  *
- * **ここだけ外れたままにしない。** フェーズ8 が「同じ状態はどこでも同じ色で出る」を
- * 台帳にしたのに、回遊する線だけ `--roam-peak: 0.5` の固定値で塗っていた。
+ * # いまは製品コードから呼ばれていない（2026-08-28）
  *
- * **実際に乗るのは琥珀の 75% だけ**である——回遊が出るのは跳ねているカード、つまり
- * 権限確認待ちだけで（[`statusMotion`] で `shake` になるのはこの状態のみ）、他の状態は
- * この関数を通らない。**それでも状態から引く**：値を書き写すと、色を変えたときに
- * 片方だけ動く形が生まれる。
+ * **唯一の呼び元は回遊する線だった。** 効果線は**常に不透明**になり
+ * （`stores/roam.ts` の [`ROAM_INK`]）、**接続が切れていても沈めない**ことになったので、
+ * この関数を通らなくなった（要件14-4・14-7）。
+ *
+ * **フェーズ8 の規則そのものは生きている**——「同じ状態はどこでも同じ色で出る」は
+ * 輪・バー・タグに掛かったままで、**外れたのは効果線だけ**である。
+ *
+ * **残してある理由は [`statusAccentColor`] と同じ**（戻すときの1行と、テストの基準）。
  */
 export function statusInk(status: SessionStatus, connected = true): string {
   const dim = quieterDim(status) ?? STATUS_TONES[statusGroup(status)].dim
