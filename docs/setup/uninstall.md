@@ -73,13 +73,13 @@ curl -LsSf https://github.com/oSUiMiNo/AgentDashboard/releases/latest/download/a
 消してよいと決めたら `--purge` を付けます。
 
 ```
-curl -LsSf https://…/agentdashboard-uninstaller.sh | sh -s -- --purge
+curl -LsSf https://github.com/oSUiMiNo/AgentDashboard/releases/latest/download/agentdashboard-uninstaller.sh | sh -s -- --purge
 ```
 
 Windows は `-Purge`（いったん落としてから実行する）。**Windows の記録は `%LOCALAPPDATA%\agentdashboard\` に置かれます**（`HOME` が無いため、Unix とは場所が違います）。
 
 ```
-irm https://…/agentdashboard-uninstaller.ps1 -OutFile uninstall.ps1
+irm https://github.com/oSUiMiNo/AgentDashboard/releases/latest/download/agentdashboard-uninstaller.ps1 -OutFile uninstall.ps1
 .\uninstall.ps1 -Purge
 ```
 
