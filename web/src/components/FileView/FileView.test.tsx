@@ -401,6 +401,30 @@ describe('画像と HTML', () => {
     expect(calls[0]).not.toContain('as=raw')
   })
 
+  it('大きい HTML も箱に入る（整形を止める線を持ち込まない）', async () => {
+    // **同じ `readFile` を通るからといって、Markdown と同じ扱いにしない。**
+    // 箱の中を描くのはブラウザ自身のパーサ（別の文書）なので、`ReactMarkdown` の
+    // 重さは当てはまらない。取り違えて `<pre>` へ落とした前科がある
+    record(
+      () =>
+        new Response(
+          JSON.stringify({
+            path: `${ROOT}/理解.html`,
+            text: '<!doctype html><p>理解</p>',
+            truncated: false,
+            bytes: 2 * 1024 * 1024,
+          }),
+          { status: 200 },
+        ),
+    )
+    render(<FileView host="local" root={ROOT} path={`${ROOT}/理解.html`} />)
+
+    expect(await screen.findByTestId('file-frame')).toBeInTheDocument()
+    expect(screen.queryByTestId('file-raw')).toBeNull()
+    // 断り書きも出ない。**説明することが無い**（重くないので）
+    expect(screen.queryByTestId('file-heavy')).toBeNull()
+  })
+
   it('HTML が読めなかったら、箱を出さずに理由だけを出す', async () => {
     record(() => new Response('その場所は見つかりません', { status: 404 }))
     render(<FileView host="local" root={ROOT} path={`${ROOT}/無い.html`} />)

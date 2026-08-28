@@ -51,8 +51,15 @@ import {
 } from '@/lib/hostfs'
 
 /**
- * **これより大きいものは、整形を既定にしない**（`表示できるテキストの上限を3MBへ上げる`
+ * **これより大きい Markdown は、整形を既定にしない**（`表示できるテキストの上限を3MBへ上げる`
  * フェーズ3）。
+ *
+ * # 掛かるのは Markdown だけ
+ *
+ * **HTML と SVG には掛けない。** あちらを描くのは `iframe`——ブラウザ自身のパーサが
+ * 別の文書として描くので、この節が言う重さは当てはまらない。**同じ `readFile` を通る
+ * からといって同じ扱いにすると、大きい HTML が `iframe` へ行かなくなる**（実際に
+ * そうしてしまった）。
  *
  * # なぜ要るのか
  *
@@ -147,9 +154,17 @@ export function FileView({ host, root, path, onClose }: Props) {
           const result = await readFile(host, path)
           if (alive) {
             setContent(result)
-            // **大きいものは生テキストで始める**（`FORMAT_DEFAULT_LIMIT`）。
-            // 上限が 3 MiB へ上がったので、そのまま整形へ流すと画面が止まる
-            if (result.bytes > FORMAT_DEFAULT_LIMIT) {
+            // **大きい Markdown だけを生テキストで始める**（`FORMAT_DEFAULT_LIMIT`）。
+            //
+            // **種別を見ずに掛けてはいけない。** ここは HTML と SVG も通るが、
+            // あちらを描くのは `ReactMarkdown` ではなく `iframe`——**ブラウザ自身の
+            // パーサが別の文書として**描くので、主線を塞がない。重いのは整形の道
+            // だけであって、大きさそのものではない。
+            //
+            // 実際に取り違えて、**2 MB の HTML が `iframe` ではなく `<pre>` へ
+            // 落ちた**（利用者の報告・2026-08-27）。しかも断り書きは Markdown に
+            // 絞ってあるので、**理由も出ないまま整形が消えた**ように見えていた。
+            if (kind === 'markdown' && result.bytes > FORMAT_DEFAULT_LIMIT) {
               setRaw(true)
             }
           }
