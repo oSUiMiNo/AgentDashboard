@@ -11,7 +11,10 @@ import {
   replanRoute,
   roamSegmentAt,
   roamSpans,
-  routeVars,
+  ROAM_KOMA,
+  ROAM_WINDOW_PX,
+  roamMilestones,
+  roamPathData,
 } from '@/lib/roam'
 
 /**
@@ -73,16 +76,15 @@ function 範囲(): { 左: number; 右: number; 上: number; 下: number } {
 }
 
 /**
- * **実際に描かれる座標**。`routeVars` を通した値を読み直す。
+ * **実際に描かれる座標**。`d` へ入るのと同じ丸め（小数第1位）を通した値。
  *
- * `planRoute` の生の値と、CSS へ渡る値は**丸めのぶん違う**。巻きのように小さい形は
- * その差で性質が変わるので、**描かれる側で見る**。
+ * `planRoute` の生の値と、描かれる値は**丸めのぶん違う**。巻きのように小さい形は
+ * その差で性質が変わるので、**描かれる側で見る**（`roamPathData` と同じ丸め）。
  */
 function 描かれる経路(field: RoamField, seed: number): { x: number; y: number }[] {
-  const vars = routeVars(planRoute(field, seed))
-  return [...Array(ROAM_STOPS).keys()].map((i) => ({
-    x: Number.parseFloat(vars[`--roam-x${i}`]),
-    y: Number.parseFloat(vars[`--roam-y${i}`]),
+  return planRoute(field, seed).map((p) => ({
+    x: Math.round(p.x * 10) / 10,
+    y: Math.round(p.y * 10) / 10,
   }))
 }
 
@@ -382,15 +384,73 @@ describe('回遊の経路', () => {
   })
 })
 
-describe('停留点を CSS 変数へ写す', () => {
-  it('点ごとに x / y / r の3つを出す', () => {
-    const vars = routeVars(planRoute(FIELD, 2))
-    // 点ごとの3つだけ。**転回の1つは消えた**（経路そのものが回るので要らない）
-    expect(Object.keys(vars)).toHaveLength(ROAM_STOPS * 3)
-    for (let i = 0; i < ROAM_STOPS; i += 1) {
-      expect(vars[`--roam-x${i}`]).toMatch(/^-?\d+(\.\d)?px$/)
-      expect(vars[`--roam-y${i}`]).toMatch(/^-?\d+(\.\d)?px$/)
-      expect(vars[`--roam-r${i}`]).toMatch(/^-?\d+(\.\d)?deg$/)
+describe('経路を d と節目へ写す', () => {
+  it('d は M で始まり、停留点より十分多くの点を持つ＝波が焼けている', () => {
+    /*
+      **窓の中身は経路そのものの形になる**（設計§23-2）ので、手描きのうねりは
+      経路に焼くしかない。6px 刻みで密にするので、**点の数は停留点の数を大きく
+      超える**——超えていなければ波が焼けていない（折れ線のまま）。
+    */
+    const 経路 = planRoute(FIELD, 2)
+    const d = roamPathData(経路, 0, 0)
+    expect(d.startsWith('M')).toBe(true)
+    const 点の数 = d.split('L').length
+    expect(点の数).toBeGreaterThan(ROAM_STOPS * 3)
+  })
+
+  it('3種は波が違う＝同じ線が3本並ばない', () => {
+    // **同じ棒が3本並ぶと手書きに見えない**（設計§9-7-6）。箱の時代は `clip-path` の
+    // 中心線で持っていた性質を、経路へ焼く波のパラメータで持つ
+    const 経路 = planRoute(FIELD, 2)
+    const 形 = [0, 1, 2].map((shape) => roamPathData(経路, shape, 0))
+    expect(new Set(形).size).toBe(3)
+  })
+
+  it('コマ4枚は波の位相が違う＝切り替えると波が歩く', () => {
+    // 「うねった道を通るだけ」に見えない仕掛け（設計§23-5 の決着）。
+    // 位相を 90° ずつ送るので、同じ場所でも波の山の位置が変わる
+    const 経路 = planRoute(FIELD, 2)
+    const コマ = [...Array(ROAM_KOMA).keys()].map((k) => roamPathData(経路, 0, k))
+    expect(new Set(コマ).size).toBe(ROAM_KOMA)
+  })
+
+  it('節目は単調に増え、終端は全長から窓を引いた場所にある', () => {
+    /*
+      節目は `stroke-dashoffset` の値の出どころ（設計§23-2）。順序が崩れると
+      窓が逆走する。**終端＝全長−窓**でなければ、窓の頭が経路の端に着く前に
+      止まるか、端を通り過ぎる。
+    */
+    const 経路 = planRoute(FIELD, 2)
+    const 節目 = roamMilestones(経路, 0)
+    expect(節目.飛散).toBeGreaterThan(0)
+    expect(節目.巻き).toBeGreaterThan(節目.飛散)
+    expect(節目.終端).toBeGreaterThan(節目.巻き)
+    expect(節目.全長).toBeGreaterThan(節目.終端)
+    expect(節目.終端).toBeCloseTo(節目.全長 - ROAM_WINDOW_PX, 1)
+  })
+
+  it('全長は素の折れ線に近い＝波で系統的に伸びない', () => {
+    /*
+      **比べる相手は「同じ停留点の、波を焼く前の折れ線」である。** 呼び値
+      （`roamSpans` の和）と比べてはいけない——`歩く` の実長は通路の刻み方で
+      呼び値の 0.99〜1.13倍ばらつく（狭い場ほど伸びる）ので、**波の寄与が
+      その揺れに埋もれる**。素の折れ線との比なら、伸びは波と丸めの寄与だけになる。
+
+      波の伸びは理論値がある——傾き m ＝ 2πA/λ の正弦を足すと弧長は約 m²/4 伸びる。
+      3種の A/λ では **+3〜8%** が正常（shape0: m=0.44→+4.8%、shape1: m=0.57→+8.1%、
+      shape2: m=0.37→+3.4%。角で波が部分的に打ち消されるぶん実測は少し下回る）。
+      **10% を超えて伸びたら波の焼き方が壊れている**（速さが見た目に変わる）。
+    */
+    for (const seed of [1, 2, 17]) {
+      const 経路 = planRoute(FIELD, seed)
+      let 素 = 0
+      for (let i = 0; i < 経路.length - 1; i += 1) {
+        素 += Math.hypot(経路[i + 1].x - 経路[i].x, 経路[i + 1].y - 経路[i].y)
+      }
+      const 節目 = roamMilestones(経路, 0)
+      const 比 = 節目.全長 / 素
+      expect(比).toBeGreaterThan(0.99)
+      expect(比).toBeLessThan(1.1)
     }
   })
 
@@ -399,9 +459,6 @@ describe('停留点を CSS 変数へ写す', () => {
       `atan2` は (-180, 180] しか返さないので、そのまま並べると**輪を1周する途中で
       +170° → -170° と折り返し、線が逆回転して見える**。前の点にいちばん近い等価な角を
       選んで、通し番号で単調に増やしてある。
-
-      **前の版が角度へ 360度 を足していた細工は消えた**——足すのではなく、経路が回る
-      （設計§9-7-7 B）。
     */
     for (const seed of [1, 2, 3, 17, 99]) {
       const 経路 = planRoute(FIELD, seed)
@@ -412,10 +469,6 @@ describe('停留点を CSS 変数へ写す', () => {
       }
       /*
         輪を1周するあいだに、向きも1周ぶん近く回る（**プロペラへ戻すと 0 になる**）。
-
-        **測るのは弦の向きなので、1周ぶん＝(区間の数 - 1) × 45度 になる。**
-        各点が持つのは「次の点へ向かう向き」なので、入口の点（輪の1つ手前）から
-        **輪の最後の弦を持つ点**（＝閉じる点の1つ手前）までを見る。
       */
       const 輪 = 輪の添字(経路)
       const 回転 = Math.abs(経路[輪[輪.length - 1] - 1].r - 経路[輪[0] - 1].r)
@@ -440,7 +493,8 @@ describe('盤面が変わったら、残りの道を引き直す', () => {
 
   it('残りは、要求どおりの区間数で返る', () => {
     const 経路 = planRoute(FIELD, 5)
-    for (const 添字 of [12, 20, 40, ROAM_STOPS - 2]) {
+    // **添字は停留点の数に追随させる**（61→41 で 40 が「本数0」になった実例あり）
+    for (const 添字 of [8, 14, 27, ROAM_STOPS - 2]) {
       const 残り = replanRoute(FIELD, 5, 添字, いまの点(経路, 添字))
       expect(残り).not.toBeNull()
       // **停留点 添字+1 以降ぶん。** ずれると共有の % 表と噛み合わず、等速が崩れる
@@ -498,7 +552,7 @@ describe('盤面が変わったら、残りの道を引き直す', () => {
     const 折れの上限 = 180 + 1e-9
     for (const 種 of [1, 2, 3, 5, 17, 42, 99]) {
       const 道 = planRoute(FIELD, 種)
-      for (const i of [12, 25, 40, 50]) {
+      for (const i of [8, 17, 27, 33]) {
         const 尾 = replanRoute(FIELD, 種, i, いまの点(道, i))
         expect(尾).not.toBeNull()
         const 並び2 = [道[i], ...(尾 ?? [])]

@@ -1,12 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 import { archiveAll, fireHook, openDashboard, openSession, spawnSession } from './helpers'
-import {
-  ROAM_CURL_DELAY_MS,
-  ROAM_CURL_MS,
-  ROAM_FLIP_MS,
-  ROAM_MAX,
-} from '../src/stores/roam'
-import { ROAM_BOX_H, ROAM_INK_PX } from '../src/lib/roam'
+import { ROAM_EXIT_DELAY_MS, ROAM_EXIT_MS, ROAM_FLIP_MS, ROAM_MAX } from '../src/stores/roam'
+import { ROAM_KOMA, ROAM_WINDOW_PX } from '../src/lib/roam'
 
 /**
  * 画面を回遊する効果線（カード設計§9-7）。
@@ -109,59 +104,57 @@ test('跳ねるたびに線が飛び、しばらく画面に居る', async ({ pa
   expect(本数).toBeGreaterThanOrEqual(3)
   expect(本数).toBeLessThanOrEqual(ROAM_MAX)
 
-  // **線の中には紙片が1枚だけ入る**（設計§9-7-2）。外は「道と向き」、内は
-  // 「紙のたわみ」で、内側が無いと尺取り虫もひらひらも1つも動かない
-  expect(await page.getByTestId('roam-paper').count()).toBe(本数)
+  // **線の中には紙片（コマ）が4枚入る**（フェーズ18・設計§23-5）。波の位相を
+  // 90° ずつ送った path の変種で、opacity の steps(1) が1枚ずつ見せる
+  expect(await page.getByTestId('roam-paper').count()).toBe(本数 * ROAM_KOMA)
 })
 
 /**
- * 紙片の `clip-path` を、**時計を止めて狙った時刻で**読む。
+ * 線1本の見た目の実測を、**時計を止めて狙った時刻で**読む。
  *
- * **`currentTime` は遅れを含む**ので、4本ぜんぶへ同じ値を入れれば「生まれてから
- * t ミリ秒後の姿」になる。
+ * **`currentTime` は遅れを含む**ので、同じ線の全アニメーションへ同じ値を入れれば
+ * 「生まれてから t ミリ秒後の姿」になる。読むのは `stroke-dasharray`（窓の長さ）・
+ * `stroke-dashoffset`（窓の位置）・コマ4枚の `opacity`。
  */
-async function 形を読む(page: Page, t: number): Promise<string> {
+async function 窓を読む(
+  page: Page,
+  t: number,
+): Promise<{ 長さ: number; 位置: number; 見えるコマ: number[] }> {
   return page.evaluate((時刻) => {
-    const 紙 = document.querySelector('[data-testid="roam-paper"]')
-    if (!紙) return ''
-    for (const a of 紙.getAnimations()) {
-      a.pause()
-      a.currentTime = 時刻
+    const 線 = document.querySelector('[data-testid="roam-line"]')
+    if (!線) return { 長さ: -1, 位置: 0, 見えるコマ: [] }
+    const 紙たち = [...線.querySelectorAll('[data-testid="roam-paper"]')]
+    for (const 紙 of 紙たち) {
+      for (const a of (紙 as SVGPathElement).getAnimations()) {
+        a.pause()
+        a.currentTime = 時刻
+      }
     }
-    return getComputedStyle(紙).clipPath
+    const 基準 = getComputedStyle(紙たち[0])
+    const 長さ = Number.parseFloat(基準.strokeDasharray)
+    const 位置 = Number.parseFloat(基準.strokeDashoffset)
+    const 見えるコマ: number[] = []
+    紙たち.forEach((紙, i) => {
+      if (Number.parseFloat(getComputedStyle(紙).opacity) > 0.5) 見えるコマ.push(i)
+    })
+    return { 長さ, 位置, 見えるコマ }
   }, t)
 }
 
-/** `polygon()` から中心線を取り出し、箱の中心からいちばん離れた量（px）を返す */
-function 曲がり(形: string, 箱: number): number {
-  const 点 = [...形.matchAll(/(-?[\d.]+)%\s+(-?[\d.]+)%/g)].map((m) => Number(m[2]))
-  if (点.length < 4 || 点.length % 2 !== 0) return 0
-  let 最大 = 0
-  for (let i = 0; i < 点.length / 2; i += 1) {
-    const 中 = (点[i] + 点[点.length - 1 - i]) / 2
-    最大 = Math.max(最大, (Math.abs(中 - 50) * 箱) / 100)
-  }
-  return 最大
-}
-
-test('形は時間で切り替わり、巻きの窓だけ曲がって、明けたらまたコマ送りへ戻る', async ({
+test('窓は経路を滑り、コマは1枚ずつ入れ替わり、発生と退場で窓が開閉する', async ({
   page,
 }) => {
   /*
     **ここでしか確かめられないこと。**
 
-    紙片の `clip-path` は**3枚のアニメーションが後勝ちで争っている**
-    ——コマ送り（`roam-flip`・ずっと下に敷く）／巻きの曲げ（`roam-curl`・窓のあいだ
-    だけ）／退場（`roam-exit`・最後だけ）。CSS は「効いているうち並びで後のもの」を
-    採るので、`animation-fill-mode: none` なら窓が明けた瞬間に下が透ける。
-
-    **単体テスト（`roam.test.ts`）はこれを1ミリも見ていない。** jsdom は CSS を
-    適用しないので、字面に「そう書いてある」ことしか言えない。**どちらが勝つかは
-    実物の時計でしか分からない**——2026-08-28 に、まさに「規則は書いてあるが、
-    どちらが勝つかを見ていなかった」で後戻りを1度踏んでいる。
+    単体テスト（`roam.test.ts`）は jsdom で CSS を適用しないので、字面に
+    「そう書いてある」ことしか言えない。**4本のアニメーションが実際に効くか**
+    ——リストの数が揃っているか・`infinite` が生きているか・打ち消しに勝てて
+    いないか——は実物の時計でしか分からない（フェーズ15 で「規則は書いてあるが
+    どちらが勝つかを見ていなかった」を1度踏んでいる）。
 
     **時刻を進めるのではなく、時計を止めて狙った時刻へ置く。** 待つ形にすると
-    籤と遅れで揺れるうえ、90秒の寿命ぶん待つことになる。
+    籤と遅れで揺れるうえ、70秒の寿命ぶん待つことになる。
   */
   test.slow()
   await openDashboard(page)
@@ -170,37 +163,38 @@ test('形は時間で切り替わり、巻きの窓だけ曲がって、明け�
     timeout: 発火の上限,
   })
 
-  // ① コマ送りが動いている——同じ1巡の中で、コマが違えば形が違う
-  const コマ0 = await 形を読む(page, 0)
-  const コマ2 = await 形を読む(page, ROAM_FLIP_MS * 0.5 + 10)
-  expect(コマ0).not.toBe('')
-  expect(コマ2, 'コマ送りが効いていない（形が時間で変わらない）').not.toBe(コマ0)
+  // ① 発生の途中は窓が開ききっていない（0→30px へ伸びる最中）＝**フェードではない**
+  const 生まれたて = await 窓を読む(page, 120)
+  expect(生まれたて.長さ).toBeGreaterThanOrEqual(0)
+  expect(生まれたて.長さ).toBeLessThan(ROAM_WINDOW_PX)
 
-  // ② 1巡すると同じコマへ戻る＝`infinite` が生きている
-  //    **`animation-iteration-count` が繰り返しで潰れると、ここで止まって落ちる**
-  expect(await 形を読む(page, ROAM_FLIP_MS), '1巡しても戻らない').toBe(コマ0)
+  // ② 発生が明けると窓は 30px。コマは**ちょうど1枚**見える
+  const 飛行中 = await 窓を読む(page, 3_000)
+  expect(飛行中.長さ).toBeCloseTo(ROAM_WINDOW_PX, 0)
+  expect(飛行中.見えるコマ, '同時に見えるコマは1枚').toHaveLength(1)
 
-  // ③ 飛散のあいだは曲がっていない——**幾何的に真っ直ぐな区間なので曲げてはいけない**
-  const 飛散の曲がり = 曲がり(await 形を読む(page, ROAM_CURL_DELAY_MS - 50), ROAM_BOX_H)
-  expect(飛散の曲がり, '真っ直ぐな飛散の区間で紐が曲がっている').toBeLessThan(ROAM_INK_PX)
+  // ③ コマが入れ替わる——1/4 巡ずらすと別の1枚
+  const 次のコマ = await 窓を読む(page, 3_000 + ROAM_FLIP_MS / 4)
+  expect(次のコマ.見えるコマ).toHaveLength(1)
+  expect(次のコマ.見えるコマ[0], 'コマが入れ替わっていない').not.toBe(飛行中.見えるコマ[0])
 
-  // ④ 巻きの窓の真ん中では、**線自身が曲がっている**（要件2-1）
-  const 巻きの曲がり = 曲がり(
-    await 形を読む(page, ROAM_CURL_DELAY_MS + ROAM_CURL_MS / 2),
-    ROAM_BOX_H,
-  )
-  expect(巻きの曲がり, '巻きの窓で紐が曲がっていない').toBeGreaterThan(ROAM_INK_PX * 2)
+  // ④ 1巡すると同じコマへ戻る＝`infinite` が生きている
+  //    **リストの数が足りず `1, 1` の繰り返しに潰れると、ここで止まって落ちる**
+  const 一巡後 = await 窓を読む(page, 3_000 + ROAM_FLIP_MS)
+  expect(一巡後.見えるコマ[0], '1巡しても戻らない').toBe(飛行中.見えるコマ[0])
 
-  // ⑤ 窓が明けたら、下に敷いたコマ送りが**また透ける**
-  //    **`fill-mode` を `both` にすると曲げが居座り、ここで落ちる**
-  const 明けて = ROAM_CURL_DELAY_MS + ROAM_CURL_MS + 100
-  expect(曲がり(await 形を読む(page, 明けて), ROAM_BOX_H)).toBeLessThan(ROAM_INK_PX)
-  expect(await 形を読む(page, 明けて + ROAM_FLIP_MS), '明けたあとコマ送りが回っていない').toBe(
-    await 形を読む(page, 明けて),
-  )
-  expect(await 形を読む(page, 明けて + ROAM_FLIP_MS * 0.5)).not.toBe(
-    await 形を読む(page, 明けて),
-  )
+  // ⑤ 窓の位置は進む（dashoffset は負へ）——移動が生きている
+  const 後で = await 窓を読む(page, 20_000)
+  expect(後で.位置, '窓が進んでいない').toBeLessThan(飛行中.位置)
+
+  /*
+    ⑥ 退場の終わり際は窓がほぼ畳まれている（**捨てられても踏む形と同じ振り付け**）。
+
+    **測るのは終端の 10ms 手前。** 畳みの 130ms は後半加速（cubic-bezier(0.3, 0, …)）
+    なので、30ms 手前ではまだ半分ほど残っている——そこで測って落ちた（実測 17.0px）。
+  */
+  const 畳み際 = await 窓を読む(page, ROAM_EXIT_DELAY_MS + ROAM_EXIT_MS - 10)
+  expect(畳み際.長さ, '退場で窓が畳まれていない').toBeLessThan(ROAM_WINDOW_PX / 3)
 })
 
 test('層は中身と一緒にスクロールし、場からはみ出さない', async ({ page }) => {

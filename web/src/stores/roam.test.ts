@@ -4,6 +4,7 @@ import {
   ROAM_DELAY_MAX_MS,
   ROAM_DELAY_MIN_MS,
   ROAM_LIFE_MS,
+  ROAM_EXIT_MS,
   ROAM_LINES,
   ROAM_MAX,
   ROAM_SKIP,
@@ -98,28 +99,49 @@ describe('量を抑える', () => {
     expect(本数()).toBe(ROAM_LINES)
   })
 
-  it('画面の上限を超えない', () => {
+  it('生きている線は上限を超えない。退場中を足しても、はみ出しは1回の放出ぶんまで', () => {
     for (let i = 0; i < 20; i += 1) {
       emitRoam(種)
     }
-    // **上限に達していること**を先に見る（2026-08-28）。これが無いと、`emitRoam` が
-    // 壊れて1本も積まれなくても `0 <= 32` で緑になる——**上限を守っていることは
-    // 見えても、線が実際に積まれていることは見ていなかった**
+    const 全部 = useRoamStore.getState().lines
+    const 生き = 全部.filter((line) => line.exiting !== true)
+    /*
+      **上限に達していること**を先に見る（2026-08-28）。これが無いと、`emitRoam` が
+      壊れて1本も積まれなくても `0 <= 32` で緑になる。
+
+      **全体は上限を超えてよい**（フェーズ18）——捨てられる線も退場（1.13秒）を
+      踏むので、そのあいだ画面に残る。ここは偽タイマで時間が止まっているから
+      退場中が積もって見えるだけで、**時間が進めば全部消えて上限へ戻る**。
+      それを下で確かめる（残ると DOM が漏れる）。
+    */
+    expect(生き.length).toBe(ROAM_MAX)
+    expect(全部.length - 生き.length).toBe(全部.filter((line) => line.exiting === true).length)
+    vi.advanceTimersByTime(ROAM_EXIT_MS + 1)
     expect(本数()).toBe(ROAM_MAX)
-    expect(本数()).toBeLessThanOrEqual(ROAM_MAX)
+    expect(useRoamStore.getState().lines.some((line) => line.exiting === true)).toBe(false)
   })
 
-  it('満杯のときは、いちばん古い線から捨てる', () => {
-    // **新しいほうを捨てない。** 捨てると「このカードだけ線が出ない」と読めてしまい、
-    // 跳ねと線の対応が崩れて不具合に見える
+  it('満杯のときは、いちばん古い線から退場へ回し、演出が終わってから消える', () => {
+    /*
+      **新しいほうを捨てない**（捨てると「このカードだけ線が出ない」と読めてしまう）。
+
+      **即座に消しもしない**（フェーズ18・要件15-4）。前の版は満杯の線を
+      アニメーションを待たずに消していたので、**捨てられる線は退場の演出に一度も
+      出会えなかった**——「消える際もコミカルな演出が無い」の一因である。
+    */
     while (本数() < ROAM_MAX) {
       emitRoam(種)
     }
     const 最古 = useRoamStore.getState().lines[0].id
     emitRoam(種)
-    const 残り = useRoamStore.getState().lines.map((line) => line.id)
-    expect(残り).not.toContain(最古)
-    expect(残り.length).toBeLessThanOrEqual(ROAM_MAX)
+    // まだ居る。**ただし退場中の印が付いている**（層はこれを見て退場を今すぐ踏ませる）
+    const いま = useRoamStore.getState().lines
+    const 捨てられた = いま.find((line) => line.id === 最古)
+    expect(捨てられた).toBeDefined()
+    expect(捨てられた?.exiting).toBe(true)
+    // 退場（1.13秒）が終わったら、消える
+    vi.advanceTimersByTime(ROAM_EXIT_MS + 1)
+    expect(useRoamStore.getState().lines.map((line) => line.id)).not.toContain(最古)
   })
 })
 

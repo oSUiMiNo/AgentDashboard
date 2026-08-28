@@ -1,15 +1,14 @@
 import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { RoamLayer } from '@/components/RoamLayer/RoamLayer'
-import { ROAM_STOPS } from '@/lib/roam'
+import { ROAM_KOMA } from '@/lib/roam'
 import {
   ROAM_BIRTH_MS,
-  ROAM_CURL_DELAY_MS,
-  ROAM_CURL_MS,
   ROAM_EXIT_DELAY_MS,
   ROAM_EXIT_MS,
   ROAM_FLIP_MS,
   ROAM_LIFE_MS,
+  ROAM_MAX,
   emitRoam,
   resetRoam,
 } from '@/stores/roam'
@@ -58,7 +57,9 @@ afterEach(() => {
 describe('回遊の層', () => {
   it('線が無ければ何も描かない', () => {
     render(<RoamLayer />)
-    expect(screen.getByTestId('roam-layer').children).toHaveLength(0)
+    // 器の SVG は1枚だけ居る（線を入れる袋）。**線は1本も居ない**
+    expect(screen.queryAllByTestId('roam-line')).toHaveLength(0)
+    expect(screen.queryAllByTestId('roam-paper')).toHaveLength(0)
   })
 
   it('読み上げの対象にしない', () => {
@@ -72,10 +73,13 @@ describe('回遊の層', () => {
     render(<RoamLayer />)
     const 本数 = screen.getAllByTestId('roam-line').length
     expect(本数).toBeGreaterThanOrEqual(2)
-    expect(screen.getByTestId('roam-layer').children).toHaveLength(本数)
+    // 線は SVG の直下に並ぶ（層 > svg > g）
+    const svg = screen.getByTestId('roam-layer').querySelector('svg')
+    expect(svg).not.toBeNull()
+    expect(svg?.children).toHaveLength(本数)
   })
 
-  it('線には経路と色と濃さが載る', () => {
+  it('線には経路（d）と色と濃さと節目が載る', () => {
     // **層は DOM を1度も読まない。** 値は在庫から来る
     emitRoam({ ...種, accent: '#123456', ink: '42%' })
     render(<RoamLayer />)
@@ -84,72 +88,88 @@ describe('回遊の層', () => {
     // **濃さもカードから配られる**（カード設計§9-7）。固定値で塗ると、同じ状態
     // なのに輪と線で色が食い違う
     expect(線.getAttribute('style')).toContain('--roam-ink: 42%')
-    for (let i = 0; i < ROAM_STOPS; i += 1) {
-      expect(線.getAttribute('style')).toContain(`--roam-x${i}:`)
-      expect(線.getAttribute('style')).toContain(`--roam-y${i}:`)
-      expect(線.getAttribute('style')).toContain(`--roam-r${i}:`)
+    /*
+      **経路は変数ではなく `d` に入っている**（フェーズ18。`d` は CSS 変数を
+      読めない）。変数で渡るのは窓の動きの節目と、窓の長さの3態だけ。
+    */
+    for (const 変数 of [
+      '--roam-s1:',
+      '--roam-s2:',
+      '--roam-s3:',
+      '--roam-dash-closed:',
+      '--roam-dash-open:',
+      '--roam-dash-puff:',
+    ]) {
+      expect(線.getAttribute('style')).toContain(変数)
     }
-    // **③の転回の変数は消えた。** 経路そのものが回るので要らない（設計§9-7-7 B）
-    expect(線.getAttribute('style')).not.toContain('--roam-turn:')
+    expect(線.getAttribute('style')).not.toContain('--roam-x0:')
+    const 紙 = 線.querySelector('[data-testid="roam-paper"]')
+    expect(紙?.getAttribute('d')).toMatch(/^M-?[\d.]+ -?[\d.]+L/)
   })
 
-  it('線の中に紙片が1枚だけ入る', () => {
+  it('線の中に紙片（コマ）が4枚入り、秒数と遅れが4本ぶん揃う', () => {
     /*
-      **外側と内側で役割を分けてある**（設計§9-7-2）。外は「道と向き」、内は
-      「紙のたわみ」で、1つの要素に載せると進行方向を向く回転と尺取り虫が
-      同じ `transform-origin` を取り合う。
+      **1本の線 ＝ path 4枚**（フェーズ18・設計§23-5）。4枚は波の位相を 90° ずつ
+      送ったコマで、`opacity` の `steps(1)` が1枚ずつ見せる。
 
-      形は種から選ぶ——**同じ棒が3本並ぶと手書きに見えない**
+      **秒数はここでも層が渡す**（出どころを1つに保つ）。並びは `roam.css` の
+      `animation-name`（発生・コマ・移動・退場）と1対1——**1本でも数が食い違うと
+      CSS はリストを先頭から繰り返して別の秒数を食う**。エラーにならず、画面も
+      動き続けるので、この検査でしか気づけない。
     */
     emitRoam(種)
     render(<RoamLayer />)
     const 線 = screen.getAllByTestId('roam-line')
     const 紙 = screen.getAllByTestId('roam-paper')
-    expect(紙).toHaveLength(線.length)
+    expect(紙).toHaveLength(線.length * ROAM_KOMA)
     for (const [i, 一枚] of 紙.entries()) {
-      expect(一枚.parentElement).toBe(線[i])
+      expect(一枚.parentElement).toBe(線[Math.floor(i / ROAM_KOMA)])
       expect(一枚).toHaveAttribute('data-shape')
-      /*
-        **内側にも秒数を渡す。** 出どころを1つに保つ約束は内側にも掛かる。
-        内は寿命ではなく**それぞれの演出の長さ**（設計§9-7-9）。
-
-        **4本ぶんを数えている。** `roam.css` の `animation-name` が4本なので、
-        ここが2本のままだと **CSS がリストを先頭から繰り返して別の秒数を食う**
-        ——エラーにならず、画面も動き続けるので、この検査でしか気づけない。
-      */
-      expect((一枚 as HTMLElement).style.animationDuration).toBe(
-        `${ROAM_BIRTH_MS}ms, ${ROAM_FLIP_MS}ms, ${ROAM_CURL_MS}ms, ${ROAM_EXIT_MS}ms`,
+      // コマの番号がクラスで付く（`animation-name` は CSS 側の `.roam-koma-N` が持つ。
+      // **インラインに書くと `animation: none` の打ち消しに勝ってしまう**）
+      expect(一枚.getAttribute('class')).toContain(`roam-koma-${i % ROAM_KOMA}`)
+      expect((一枚 as unknown as SVGPathElement).style.animationDuration).toBe(
+        `${ROAM_BIRTH_MS}ms, ${ROAM_FLIP_MS}ms, ${ROAM_LIFE_MS}ms, ${ROAM_EXIT_MS}ms`,
       )
       /*
-        **曲げは巻きの窓だけ、退場は寿命の終わりだけ。** 遅れが明けるまでは
-        下に敷いたコマ送りがそのまま見えるので、**飛散（真っ直ぐな区間）で
-        紐が曲がらない**。**線ごとに散らしてはいけない**——散らすと寿命の
-        終わりと畳み終わりがずれる
+        **退場は寿命の終わりへ寄せる。** 遅れが明けるまで窓は開いたまま
+        （`--roam-dash-open`）なので、飛んでいるあいだの見た目に退場は混ざらない。
+        **線ごとに散らしてはいけない**——散らすと寿命の終わりと畳み終わりがずれる
       */
-      expect((一枚 as HTMLElement).style.animationDelay).toBe(
-        `0ms, 0ms, ${ROAM_CURL_DELAY_MS}ms, ${ROAM_EXIT_DELAY_MS}ms`,
-      )
-      /*
-        **巻きの向きは線ごとに違う。** 経路が持っている向きから選ぶので、
-        `data-shape` だけで決めると**半分の線が実際と逆へ曲がる**（要件2-1）。
-        **セレクタではなくインラインで渡す**のは、属性のセレクタへ
-        `animation-name` を書くと詳細度が上がって「止める規則」に勝つため
-      */
-      const 形 = 一枚.getAttribute('data-shape')
-      expect((一枚 as HTMLElement).style.getPropertyValue('--roam-curl')).toMatch(
-        new RegExp(`^roam-curl-${形}-(up|down)$`),
+      expect((一枚 as unknown as SVGPathElement).style.animationDelay).toBe(
+        `0ms, 0ms, 0ms, ${ROAM_EXIT_DELAY_MS}ms`,
       )
     }
   })
 
-  it('飛ぶ時間は層が渡す', () => {
-    // **秒数の出どころを1つにする。** CSS 側へ書くと、寿命のタイマと見た目の長さが
-    // 別々に育って食い違う（線が消える前に見えなくなる／消えたあとも残る）
+  it('コマ4枚は波の位相だけが違う＝同じ d が2枚無い', () => {
+    // 「うねった道を通るだけ」に見えない仕掛け（設計§23-5）。同じ d が並んだら
+    // コマを切り替えても絵が変わらない
     emitRoam(種)
     render(<RoamLayer />)
-    expect(screen.getAllByTestId('roam-line')[0].style.animationDuration).toBe(
-      `${ROAM_LIFE_MS}ms, ${ROAM_LIFE_MS}ms`,
+    const 線 = screen.getAllByTestId('roam-line')[0]
+    const d = [...線.querySelectorAll('[data-testid="roam-paper"]')].map((p) =>
+      p.getAttribute('d'),
     )
+    expect(d).toHaveLength(ROAM_KOMA)
+    expect(new Set(d).size).toBe(ROAM_KOMA)
+  })
+
+  it('捨てられた線（exiting）は、退場の遅れが 0 になる', () => {
+    /*
+      **上限で捨てられる線も退場を踏む**（要件15-4・フェーズ18）。店が `exiting` の
+      印を付け、層が退場の遅れを 0 に差し替える——差し替えを忘れると、捨てられた
+      線は**遅れが明けるまで見た目が何も変わらないまま**、店の除去で唐突に消える。
+    */
+    for (let i = 0; i < Math.ceil((ROAM_MAX + 1) / 3) + 1; i += 1) {
+      emitRoam(種)
+    }
+    render(<RoamLayer />)
+    const 退場中 = [...document.querySelectorAll('[data-testid="roam-paper"]')].filter((p) =>
+      ((p as unknown as SVGPathElement).style.animationDelay ?? '').endsWith(', 0ms'),
+    )
+    expect(退場中.length).toBeGreaterThan(0)
+    expect(退場中.length % ROAM_KOMA).toBe(0)
   })
 })
 
