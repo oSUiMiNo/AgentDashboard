@@ -1218,12 +1218,19 @@ impl Session {
         // 宛先は**合言葉を含まない形**（設計§9-3。入館証は伏せるのではなく載せない）
         let hook_url = hooks_settings::hook_url_shape(input.hook_port);
 
+        // **宛先が実在するかを必ず言う。** 置き場所（`settings_exists`）は出していたのに
+        // 宛先はパスを出すだけだったので、「settings は在るのに届かない」で行き止まりに
+        // なった。実際、`(deleted)` が焼き込まれてフックが全滅した回は、**この1欄が
+        // あれば2分待たずに切り分けが終わっていた**
+        let hook_bin_exists = input.hook_bin.is_file();
+
         if saw_output {
             tracing::warn!(
                 card_id = %self.card_id,
                 settings = %settings.display(),
                 settings_exists = settings.is_file(),
                 hook_bin = %input.hook_bin.display(),
+                hook_bin_exists,
                 hook_url = %hook_url,
                 elapsed_secs,
                 tail = %tail_for_log(&self.scrollback_tail(FOOTER_TAIL)),
@@ -1235,6 +1242,7 @@ impl Session {
                 settings = %settings.display(),
                 settings_exists = settings.is_file(),
                 hook_bin = %input.hook_bin.display(),
+                hook_bin_exists,
                 hook_url = %hook_url,
                 elapsed_secs,
                 "フックも端末への出力も1バイトもありません（まだ起動していない疑い）"
