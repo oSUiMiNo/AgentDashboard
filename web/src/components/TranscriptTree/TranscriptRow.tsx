@@ -26,13 +26,12 @@
 
 import { memo, useEffect, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import type { HunkTokens } from 'react-diff-view'
 import { Diff, Hunk } from 'react-diff-view'
 import type { CardId, Node } from '@/lib/protocol'
 import { countChanges, toDiffSource } from '@/lib/diff'
 import { tokenizeHunks } from '@/lib/highlight'
-import { foldMarkdown, rehypeLineBreaks } from '@/lib/markdown'
+import { REHYPE_PLUGINS, REMARK_PLUGINS, foldMarkdown } from '@/lib/markdown'
 import type { FlatRow, NodeRow, RewoundRow } from '@/stores/transcript'
 
 interface Props {
@@ -106,16 +105,6 @@ function summary(node: Node): string {
 function showsBodyAlways(node: Node): boolean {
   return node.kind === 'user_message' || node.kind === 'assistant_text'
 }
-
-/**
- * マークダウンのプラグイン。**モジュールの定数として1度だけ作る。**
- *
- * `ReactMarkdown` はプラグインの配列の**同一性**を見て処理系を組み直すので、
- * 呼ぶたびに `[remarkGfm]` と書くと、**中身が同じでも毎回作り直す**。履歴は流れて
- * いる間フレームごとに通知が来るので、可視の行数ぶんの解析がそのまま乗る。
- */
-const REMARK_PLUGINS = [remarkGfm]
-const REHYPE_PLUGINS = [rehypeLineBreaks]
 
 function summarizeInput(input: unknown): string {
   if (typeof input !== 'object' || input === null) {
@@ -305,8 +294,10 @@ function RowBody({
  * 元の JSONL を開く道が画面のどこにも無いので、消すと利用者は消えたことに気づけない。
  * 残った HTML は `react-markdown` がテキストノードへ落とすので、**描かれることは無い**。
  *
- * `rehypeLineBreaks` が `<br/>` だけを改行の要素へ変える。**`rehype-raw` は入れない**
- * ——入れないこと自体が「任意の HTML を描く道が無い」の実体になっている。
+ * 改行の決まりは `lib/markdown.ts` の `REMARK_PLUGINS` ／ `REHYPE_PLUGINS` が持つ（素の改行と
+ * `<br/>` の2つ。あちらの表を見ること）。**ここと `FileView` は同じ配列を使う**ので、同じ字を
+ * 貼れば同じ見え方になる。**`rehype-raw` は入れない**——入れないこと自体が「任意の HTML を
+ * 描く道が無い」の実体になっている。
  */
 function MarkdownBody({
   text,

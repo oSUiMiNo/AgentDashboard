@@ -22,9 +22,29 @@
  *
  * そのうえで `<br/>` だけは「1行空ける」という**意味を持って書かれている**ので、
  * その意味どおりに改行として出す。
+ *
+ * # 3. 素の改行を改行として出す
+ *
+ * マークダウンの決まりでは、行の途中の改行（softbreak）は改行にならず、前後が空白1つで
+ * 繋がる。**壊れているのではなく、マークダウンとして正しく出た結果**である。それでも
+ * 打った側は「打ったとおりに見える」ことを期待するので、**期待のほうを採る**。
+ *
+ * # 改行の決まりは、2つある
+ *
+ * **名前が近いので取り違えやすい。** どちらも「改行を出す」だが、見る木も、変える相手も
+ * 違う。**両方ともこのファイルに置いてある**ので、突き合わせるのに別の場所を開かなくてよい。
+ *
+ * | 何 | どの木を見るか | 何を変えるか |
+ * |---|---|---|
+ * | [`rehypeLineBreaks`] | **hast** の `raw` ノード | **`<br/>` というタグの字** |
+ * | [`remarkSoftBreaks`] | **mdast** の `text` ノード | **素の改行（`\n`）** |
+ *
+ * 接頭辞（`rehype` ／ `remark`）が既に層の違いを示しているので、名前は変えない。
  */
 
 import type { Element, Root, RootContent } from 'hast'
+import type { Root as MdastRoot, RootContent as MdastContent } from 'mdast'
+import remarkGfm from 'remark-gfm'
 
 /**
  * ここを超えたら本文を畳む、という文字数。
@@ -223,3 +243,104 @@ function walk(node: Root | Element): void {
 
   ;(node as { children: RootContent[] }).children = next
 }
+
+/** [`splitSoftBreaks`] が返す断片。 */
+export type SoftPiece =
+  /** 素の改行。`break` ノードへ変える */
+  | { kind: 'break' }
+  /** それ以外。本文の字としてそのまま残す */
+  | { kind: 'text'; value: string }
+
+/**
+ * 素の改行。**`\r` を落とすところまでを1つの綴りでやる。**
+ *
+ * `\n` だけで割ると、CRLF で書かれた本文では**割った断片の先頭に `\r` が残る**（実測。
+ * 読んだ時点の `text` は `"あいう\r\nかきく"` のまま）。Windows で書かれた `.md` や
+ * Windows から貼り付けた本文が普通に通る道なので、ここは端の話ではない。
+ */
+const SOFT_BREAK = /\r?\n/
+
+/**
+ * 本文の字を、改行のところで割る。
+ *
+ * **前後の空白は落とさない。** 続きの行の字下げは読んだ時点で既に落ちているので
+ * （実測。`"あいう\n    かきく"` → `text("あいう\nかきく")`）、こちらで落とす仕事は無い。
+ * 落とす処理を足すと、**意図して置いた空白まで消える**側の危険だけが残る。
+ *
+ * **空の断片はノードにしない。** 先頭や末尾が改行だと空文字列の断片ができるが、値の無い
+ * `text` ノードは木のノイズにしかならない（描いた結果は同じ）。
+ */
+export function splitSoftBreaks(value: string): SoftPiece[] {
+  const pieces: SoftPiece[] = []
+
+  const lines = value.split(SOFT_BREAK)
+  for (const [index, line] of lines.entries()) {
+    if (index > 0) {
+      pieces.push({ kind: 'break' })
+    }
+    if (line !== '') {
+      pieces.push({ kind: 'text', value: line })
+    }
+  }
+  return pieces
+}
+
+/**
+ * 素の改行を `break` ノードへ変える remark プラグイン。
+ *
+ * **見るのは `text` ノードだけでよい。** mdast では、囲みコードは `code` ノードの値、生の
+ * HTML は `html` ノードの値として**そもそも別の場所に居る**ので、`text` を歩いている限り
+ * 触りようがない（実測。設計§4）。hast まで下りると `\n` はブロックの隙間にも `pre` の中の
+ * コードそのものにも現れ、**木の形からは本文かどうかを区別できない**——[`rehypeLineBreaks`]
+ * と層を分けているのはそのためである。
+ *
+ * 依存を増やさないため `unist-util-visit` も使わず、素の再帰で歩く（既存側と同じ）。
+ */
+export function remarkSoftBreaks() {
+  return (tree: MdastRoot): void => {
+    splitText(tree)
+  }
+}
+
+function splitText(node: MdastRoot | MdastContent): void {
+  // 子を持たないノード（`code` ／ `html` ／ `inlineCode` など）はここで終わる。
+  // 歩き方は親の種別によらず同じなので、構造で見る
+  const parent = node as { children?: MdastContent[] }
+  if (parent.children === undefined) {
+    return
+  }
+
+  const next: MdastContent[] = []
+  for (const child of parent.children) {
+    if (child.type === 'text') {
+      for (const piece of splitSoftBreaks(child.value)) {
+        next.push(piece.kind === 'break' ? { type: 'break' } : { ...child, value: piece.value })
+      }
+      continue
+    }
+    splitText(child)
+    next.push(child)
+  }
+
+  parent.children = next
+}
+
+/**
+ * マークダウンのプラグイン。**モジュールの定数として1度だけ作る。**
+ *
+ * `ReactMarkdown` はプラグインの配列の**同一性**を見て処理系を組み直すので、呼ぶたびに
+ * `[remarkGfm]` と書くと、**中身が同じでも毎回作り直す**。履歴は流れている間フレームごとに
+ * 通知が来るので、可視の行数ぶんの解析がそのまま乗る。
+ *
+ * **本文を出すところは、全部この2つを使う**（[`TranscriptRow`] の `MarkdownBody` と
+ * [`FileView`]）。改行の見え方が場所によって違うと、同じ字を貼ったのに片方でだけ繋がる、
+ * という説明のつかない差になる。
+ *
+ * [`remarkSoftBreaks`] を**いちばん後ろ**に置くのは、他のプラグインが組み立て終わった木に
+ * 対して働かせるため。途中に挟むと「誰が作ったノードを見ているのか」が並びに依存して
+ * 読めなくなる。
+ */
+export const REMARK_PLUGINS = [remarkGfm, remarkSoftBreaks]
+
+/** 上と対。生の HTML の `<br/>` を `br` 要素へ変える段。 */
+export const REHYPE_PLUGINS = [rehypeLineBreaks]

@@ -38,10 +38,10 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import { Button } from '@/components/ui/button'
 import { copyToClipboard } from '@/lib/clipboard'
 import { fileKind, needsSandbox } from '@/lib/fileKind'
+import { REHYPE_PLUGINS, REMARK_PLUGINS } from '@/lib/markdown'
 import {
   rawUrl,
   readBlob,
@@ -366,8 +366,13 @@ export function FileView({ host, root, path, onClose }: Props) {
                   `skipHtml` は、その HTML を**字面としても出さない**（設計§27）。
                   外すと `<br/>` のような綴りが本文に混ざる——このリポジトリの
                   ドキュメントは段落の間隔に使っているので、節のたびに出る。
-                  外して困らないのは、消えた中身を「生テキストで見る」で確かめられるため */}
-              <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
+                  外して困らないのは、消えた中身を「生テキストで見る」で確かめられるため。
+
+                  **改行の扱いだけは履歴と揃える**（`構造化ビューでメッセージの改行が
+                  反映されない` 設計§5）。同じ配列を使うので、同じ字を貼れば同じ見え方に
+                  なる。`skipHtml` は rehype が走った**あと**に効くので、`<br/>` は先に
+                  `br` 要素へ変わって残り、残りの生 HTML はいままでどおり落ちる */}
+              <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS} skipHtml>
                 {content.text}
               </ReactMarkdown>
             </div>
