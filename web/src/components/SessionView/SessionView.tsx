@@ -19,6 +19,7 @@
 
 import { motion } from 'motion/react'
 import { useState } from 'react'
+import { Link } from 'react-router'
 import { Button } from '@/components/ui/button'
 import { InputDock } from '@/components/InputDock/InputDock'
 import { ModelPicker } from '@/components/ModelPicker/ModelPicker'
@@ -40,7 +41,8 @@ import {
 import { FilesToggle } from '@/components/ProjectFiles/FilesToggle'
 import { useFilesParts } from '@/components/ProjectFiles/useFilesParts'
 import { useFilesPanel } from '@/lib/filesPanel'
-import { LOCAL_HOST } from '@/lib/routes'
+import { projectPath, sessionPath } from '@/lib/routes'
+import { hostOf } from '@/lib/reviveBudget'
 import type { CardId } from '@/lib/protocol'
 import { useNow } from '@/lib/sessions'
 import { useAuthStore } from '@/stores/auth'
@@ -72,8 +74,11 @@ export function SessionView({ cardId, compact = false }: Props) {
   const [view, setView] = useState<View>(compact ? 'terminal' : 'transcript')
   // PJT 専用画面と**同じ部品・同じ経路**（設計§28）。開閉の記憶も共有する
   const [filesOpen, toggleFiles] = useFilesPanel()
+  // ファイルのパネルと、PJT 専用画面へのリンクの**両方**で使う。同じ意味の式を
+  // 2通りの綴りで置くと、片方だけ直す余地が残る
+  const host = hostOf(session?.agent_id)
   const { sidebar, column } = useFilesParts({
-    host: session?.agent_id ?? LOCAL_HOST,
+    host,
     project: session?.project ?? '',
     open: filesOpen,
     onToggle: toggleFiles,
@@ -116,9 +121,28 @@ export function SessionView({ cardId, compact = false }: Props) {
           中身の幅より小さくならず、`truncate` が効かない。実際、長いパスのときに
           状態のラベルが「入力 待ち」と縦に割れていた（**一番読みたいものが読めない**）
         */}
-        <span className="min-w-0 truncate font-medium" title={session.project}>
-          {session.project}
-        </span>
+        {/*
+          **単独画面のときだけ押せるようにする。** 横並びのときは既にその PJT の
+          画面に居るので、リンクにすると自分自身へ移ることになる——「押せるのに
+          何も起きない」は、壊れているのと見分けが付かない。
+
+          器を1つも足さないのは、置く先の帯に空き余白が無いため（設計§2）。
+          既に在るものを押せるようにすれば、行も要素も増えない。
+        */}
+        {compact ? (
+          <span className="min-w-0 truncate font-medium" title={session.project}>
+            {session.project}
+          </span>
+        ) : (
+          <Link
+            to={projectPath(host, session.project)}
+            data-testid="to-project"
+            className="decoration-muted-foreground/40 hover:decoration-foreground min-w-0 truncate font-medium underline underline-offset-2"
+            title={session.project}
+          >
+            {session.project}
+          </Link>
+        )}
         <span className="text-muted-foreground shrink-0">
           {statusLabel(session.status)}
         </span>
@@ -249,6 +273,25 @@ export function SessionView({ cardId, compact = false }: Props) {
         */}
         <div className="relative isolate flex min-h-0 min-w-0 flex-1 flex-col gap-2">
         <div className="flex items-center gap-2">
+          {/*
+            横並びの区画から、そのセッションの専用画面へ移る（設計§4）。
+
+            **終了とは行の反対の端に置く。** 「隣を見に行くつもり」と「これを
+            終わらせる」を取り違えたときの被害が釣り合わないので、いちばん遠くへ離す。
+
+            **`ml-auto` を付けない。** これは `compact` のときだけ出る＝出たり
+            消えたりする要素で、寄せる指定を付けると出ないときに寄せ先ごと消えて
+            並びが崩れる（モデル不明のときバッジが左詰まりした事故と同じ形）。
+          */}
+          {compact && (
+            <Link
+              to={sessionPath(session.card_id)}
+              data-testid="to-session"
+              className="text-primary shrink-0 text-xs underline"
+            >
+              開く
+            </Link>
+          )}
           <div
             role="tablist"
             className="border-border bg-background/60 flex w-fit gap-1 rounded-lg border p-0.5 text-sm"
