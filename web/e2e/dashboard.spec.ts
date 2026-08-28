@@ -1,3 +1,5 @@
+import fs from 'node:fs'
+import path from 'node:path'
 import { expect, test } from '@playwright/test'
 import {
   archiveAll,
@@ -142,4 +144,77 @@ test('リロードしても一覧はサーバの状態から作り直される',
     'data-status',
     'working',
   )
+})
+
+test('セッション画面と PJT 画面を行き来できる', async ({ page }) => {
+  await openDashboard(page)
+  // 同じ作業ディレクトリで2本＝1つの枠に2区画。**隣へ飛ばないこと**を見るのに要る
+  await spawnSession(page)
+  await spawnSession(page)
+
+  const tiles = page.getByTestId('session-tile')
+  await expect(tiles).toHaveCount(2)
+
+  // 一覧 → セッション専用画面
+  await tiles.first().click()
+  await expect(page).toHaveURL(/\/s\/[0-9a-f-]{36}$/)
+
+  // セッション専用画面 → PJT 専用画面。**パスそのものが行き先**（器を足していない）
+  await page.getByTestId('to-project').click()
+  await expect(page).toHaveURL(`/p/local/${encodeURIComponent(WORK_DIR)}`)
+
+  // PJT 専用画面 → セッション専用画面。**押した区画のセッションへ行くこと**。
+  // 先頭に固定する実装でも通ってしまわないよう、**最後の区画**の id を先に読む
+  const views = page.getByTestId('session-view')
+  await expect(views).toHaveCount(2)
+  const wanted = await views.last().getAttribute('data-card-id')
+  expect(wanted).not.toBeNull()
+  await views.last().getByTestId('to-session').click()
+  await expect(page).toHaveURL(`/s/${wanted}`)
+
+  // 一周して戻った先は単独画面。**行き先が自分自身になる導線は出さない**
+  await expect(page.getByTestId('to-session')).toHaveCount(0)
+  await expect(page.getByTestId('to-project')).toHaveCount(1)
+})
+
+test('狭い窓でも、リンクにしたパスが自分で行を増やさない', async ({ page }) => {
+  // **材料に長いパスを使う。** `WORK_DIR`（`os.tmpdir()`）は短すぎて、
+  // `min-w-0 truncate` を外しても切り詰めが要らない——それでは壊し方で落ちない。
+  //
+  // **測る相手はパスの要素そのもの**で、帯の高さではない。帯は狭い窓では
+  // もともと折り返しており、長いパスだと flex がそれを独立した行へ送るので
+  // 高さが変わる——**これは本イシューの変更前からそうだった**（実測 132px→188px）。
+  // 帯の高さで測ると、直していないものを直したことにしてしまう。
+  const deep = path.join(
+    WORK_DIR,
+    'agentdashboard-e2e-行き来',
+    'とても長い名前のディレクトリ',
+    '入れ子の奥のほう',
+    '作業場所',
+  )
+  fs.mkdirSync(deep, { recursive: true })
+
+  await page.setViewportSize({ width: 390, height: 780 })
+  await openDashboard(page)
+
+  // 短いパスのときの高さを先に測る（比べる相手）
+  const shortTile = await spawnSession(page)
+  await shortTile.click()
+  const shortLink = await page.getByTestId('to-project').boundingBox()
+  expect(shortLink).not.toBeNull()
+
+  await page.goto('/')
+  const deepTile = await spawnSession(page, deep)
+  await deepTile.click()
+  const deepLink = page.getByTestId('to-project')
+  const deepBox = await deepLink.boundingBox()
+  expect(deepBox).not.toBeNull()
+
+  // **パスは1行のまま。** `truncate`（`white-space: nowrap`）を外すと折り返して背が伸びる
+  expect(deepBox!.height).toBeCloseTo(shortLink!.height, 0)
+
+  // **押し広げるのではなく、切り詰められている。** `min-w-0` を外すと縮めなくなり、
+  // 中身の幅がそのまま出る＝切り詰めが起きない
+  const clipped = await deepLink.evaluate((el) => el.scrollWidth > el.clientWidth)
+  expect(clipped).toBe(true)
 })

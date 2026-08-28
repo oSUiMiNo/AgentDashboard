@@ -1,5 +1,6 @@
 import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SessionView } from './SessionView'
 import type { SessionMeta } from '@/lib/protocol'
@@ -53,6 +54,18 @@ function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
   }
 }
 
+/**
+ * `SessionView` は行き来の導線（`Link`）を持つので、**ルータの中でしか描けない**。
+ * 被せ方の前例は `GroupView.test.tsx`。
+ */
+function renderView(props: { compact?: boolean } = {}) {
+  return render(
+    <MemoryRouter>
+      <SessionView cardId={CARD} {...props} />
+    </MemoryRouter>,
+  )
+}
+
 function settings(screen_interval_ms: number) {
   useSettingsStore.setState({
     settings: settingsFixture({
@@ -84,7 +97,7 @@ describe('SessionView の更新間隔表示', () => {
     settings(20_000)
     applySessionSnapshot([meta({ agent_id: 'agent-1' })])
 
-    render(<SessionView cardId={CARD} compact />)
+    renderView({ compact: true })
 
     expect(screen.getByTestId('screen-interval')).toHaveTextContent('更新間隔 20秒')
   })
@@ -94,7 +107,7 @@ describe('SessionView の更新間隔表示', () => {
     settings(20_000)
     applySessionSnapshot([meta({ agent_id: null })])
 
-    render(<SessionView cardId={CARD} compact />)
+    renderView({ compact: true })
 
     expect(screen.queryByTestId('screen-interval')).toBeNull()
   })
@@ -105,7 +118,7 @@ describe('SessionView の更新間隔表示', () => {
     settings(20_000)
     applySessionSnapshot([meta({ agent_id: 'agent-1' })])
 
-    render(<SessionView cardId={CARD} />)
+    renderView()
 
     expect(screen.queryByTestId('screen-interval')).toBeNull()
   })
@@ -144,7 +157,7 @@ describe('セッション専用画面のファイル', () => {
     clearSessions()
     applySessionSnapshot([meta()])
     useSettingsStore.setState({ settings: settingsFixture(), loading: false, lastError: null })
-    render(<SessionView cardId={CARD} />)
+    renderView()
 
     expect(screen.queryByTestId('project-files-panel')).toBeNull()
     await userEvent.click(screen.getByTestId('project-files-toggle'))
@@ -163,7 +176,7 @@ describe('セッション専用画面のファイル', () => {
     clearSessions()
     applySessionSnapshot([meta()])
     useSettingsStore.setState({ settings: settingsFixture(), loading: false, lastError: null })
-    render(<SessionView cardId={CARD} compact />)
+    renderView({ compact: true })
 
     // PJT 専用画面が既に持っているので、セッションの数だけ同じものを出さない
     expect(screen.queryByTestId('project-files-toggle')).toBeNull()
@@ -194,7 +207,7 @@ describe('SessionView の復旧', () => {
   function show(session: SessionMeta, compact = false) {
     clearSessions()
     applySessionSnapshot([session])
-    render(<SessionView cardId={CARD} compact={compact} />)
+    renderView({ compact })
   }
 
   beforeEach(() => {
@@ -282,5 +295,96 @@ describe('SessionView の復旧', () => {
     expect(screen.getByTestId('card-error')).toHaveTextContent(
       'この PC の版が古くて対応していません',
     )
+  })
+})
+
+/**
+ * 行き来の導線（設計§3・§4）。
+ *
+ * **「セッション画面」は2つを指す**——単独の専用画面（`/s/:cardId`）と、PJT 専用画面に
+ * 横並びで出る各区画（`compact`）である。行き先はその2つで**逆になる**：単独画面からは
+ * その PJT へ、区画からはそのセッションへ。
+ *
+ * どちらの側でも「在るもの」と「無いもの」を**対で**見る。**無いことだけを見る主張は、
+ * セレクタが的外れでも通る**ので、片方だけだと「何も描かれていない」実装でも緑になる。
+ */
+describe('SessionView の行き来', () => {
+  const PC = '77777777-7777-7777-7777-777777777777'
+  const PROJECT = encodeURIComponent('/home/example/dev/app')
+
+  beforeEach(() => {
+    useSettingsStore.setState({ settings: settingsFixture(), loading: false })
+  })
+
+  it('単独画面では、パスが PJT 専用画面を指す', () => {
+    applySessionSnapshot([meta()])
+    renderView()
+
+    expect(screen.getByTestId('to-project')).toHaveAttribute(
+      'href',
+      `/p/local/${PROJECT}`,
+    )
+  })
+
+  it('単独画面に「開く」は出ない（行き先が自分自身になるため）', () => {
+    applySessionSnapshot([meta()])
+    renderView()
+
+    expect(screen.getByTestId('to-project')).toBeInTheDocument()
+    expect(screen.queryByTestId('to-session')).toBeNull()
+  })
+
+  it('横並びでは、「開く」がそのセッションの専用画面を指す', () => {
+    applySessionSnapshot([meta()])
+    renderView({ compact: true })
+
+    expect(screen.getByTestId('to-session')).toHaveAttribute('href', `/s/${CARD}`)
+  })
+
+  it('横並びのパスはリンクにしない（既にその PJT の画面に居るため）', () => {
+    applySessionSnapshot([meta()])
+    renderView({ compact: true })
+
+    expect(screen.getByTestId('to-session')).toBeInTheDocument()
+    expect(screen.queryByTestId('to-project')).toBeNull()
+  })
+
+  it('別の PC のセッションは、その PC の PJT 専用画面を指す', () => {
+    // 同じパスはどの PC にも在りうるので、鍵に PC が入る
+    applySessionSnapshot([meta({ agent_id: PC })])
+    renderView()
+
+    expect(screen.getByTestId('to-project')).toHaveAttribute(
+      'href',
+      `/p/${PC}/${PROJECT}`,
+    )
+  })
+
+  it('ローカルモード（PC という単位が無い構成）でも行ける', () => {
+    applySessionSnapshot([meta({ agent_id: null })])
+    renderView()
+
+    expect(screen.getByTestId('to-project')).toHaveAttribute(
+      'href',
+      `/p/local/${PROJECT}`,
+    )
+  })
+
+  it('パスは縮んでよいまま（帯の行数が増えないこと）', () => {
+    // `min-w-0` が無いと flex の子は中身より小さくならず `truncate` が効かない。
+    // 長いパスのときに状態のラベルが縦に割れる＝**行が増える**（設計§3）
+    applySessionSnapshot([meta()])
+    renderView()
+
+    const link = screen.getByTestId('to-project')
+    expect(link).toHaveClass('min-w-0')
+    expect(link).toHaveClass('truncate')
+  })
+
+  it('「開く」に寄せる指定を付けない（出ないときに並びが崩れるため）', () => {
+    applySessionSnapshot([meta()])
+    renderView({ compact: true })
+
+    expect(screen.getByTestId('to-session')).not.toHaveClass('ml-auto')
   })
 })
