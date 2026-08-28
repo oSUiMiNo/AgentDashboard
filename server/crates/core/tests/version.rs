@@ -321,16 +321,23 @@ fn 乗り換え先へはフックの入口として乗り換え前の自分を�
 }
 
 #[test]
-fn フックの入口が既に指定されていれば上書きしない() {
+fn 実在する指定は上書きしない() {
+    // 差し替え口を塞がないための約束。**「指定されていれば」ではなく「実在すれば」**——
+    // 実在しない指定を据え置くと、`(deleted)` が焼き込まれた機械が入れ替えを重ねても
+    // 直らなくなる（実機で2回の入れ替えを跨いで残った）。下のテストと対で見ること
     let fixture = Fixture::new("hook-bin-kept");
     let target = fixture.write_marker_version("0.9.9");
     fixture.point_at(&target);
+
+    // 実在する別の実行ファイル。「利用者が別の入口を指した」状態にあたる
+    let 指定 = testkit::binary_path("transcript-parser");
+    assert!(指定.is_file(), "指定する先は実在すること");
 
     let mut command = testkit::binary_command("agentdashboard");
     let out = command
         .env_remove(VERSION_HANDOVER_ENV)
         .env(VERSION_SUPPORTED_ENV, "0")
-        .env("AGENTDASHBOARD_HOOK_BIN", "/決め打ちの入口")
+        .env("AGENTDASHBOARD_HOOK_BIN", &指定)
         .arg("--config")
         .arg(fixture.config_that_cannot_start())
         .output()
@@ -338,8 +345,42 @@ fn フックの入口が既に指定されていれば上書きしない() {
     let text = text_of(&out);
 
     assert!(
-        text.contains("フックの入口=/決め打ちの入口"),
+        text.contains(&format!("フックの入口={}", 指定.display())),
         "統合テストが指定した入口を上書きしています:\n{text}"
+    );
+}
+
+#[test]
+fn 実在しない指定は入れる側の入口へ入れ替える() {
+    // **`make build` は走っているプロセスの実体を消す。** そのあと `current_exe()` は
+    // 行き先に `(deleted)` を付けた**存在しないパス**を答え、それが焼き込まれると
+    // 次のプロセスは**フックを1件も起動できない**まま生き続ける（`"async": true` なので
+    // claude は止まらない）。以前は「立っていれば何もしない」だったので、**入れ替えを
+    // 重ねても消えなかった**
+    let fixture = Fixture::new("hook-bin-healed");
+    let target = fixture.write_marker_version("0.9.9");
+    fixture.point_at(&target);
+
+    let 消えた入口 = "/決め打ちの入口 (deleted)";
+    let mut command = testkit::binary_command("agentdashboard");
+    let out = command
+        .env_remove(VERSION_HANDOVER_ENV)
+        .env(VERSION_SUPPORTED_ENV, "0")
+        .env("AGENTDASHBOARD_HOOK_BIN", 消えた入口)
+        .arg("--config")
+        .arg(fixture.config_that_cannot_start())
+        .output()
+        .expect("起こせること");
+    let text = text_of(&out);
+
+    assert!(
+        !text.contains(消えた入口),
+        "消えた入口をそのまま渡しています（毒が次の版へ移ります）:\n{text}"
+    );
+    let entry = testkit::binary_path("agentdashboard");
+    assert!(
+        text.contains(&format!("フックの入口={}", entry.display())),
+        "入れる側が置いた入口へ入れ替えていません:\n{text}"
     );
 }
 
