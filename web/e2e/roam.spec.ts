@@ -1,6 +1,12 @@
 import { expect, test, type Page } from '@playwright/test'
 import { archiveAll, fireHook, openDashboard, openSession, spawnSession } from './helpers'
-import { ROAM_MAX } from '../src/stores/roam'
+import {
+  ROAM_CURL_DELAY_MS,
+  ROAM_CURL_MS,
+  ROAM_FLIP_MS,
+  ROAM_MAX,
+} from '../src/stores/roam'
+import { ROAM_BOX_H, ROAM_INK_PX } from '../src/lib/roam'
 
 /**
  * 画面を回遊する効果線（カード設計§9-7）。
@@ -106,6 +112,95 @@ test('跳ねるたびに線が飛び、しばらく画面に居る', async ({ pa
   // **線の中には紙片が1枚だけ入る**（設計§9-7-2）。外は「道と向き」、内は
   // 「紙のたわみ」で、内側が無いと尺取り虫もひらひらも1つも動かない
   expect(await page.getByTestId('roam-paper').count()).toBe(本数)
+})
+
+/**
+ * 紙片の `clip-path` を、**時計を止めて狙った時刻で**読む。
+ *
+ * **`currentTime` は遅れを含む**ので、4本ぜんぶへ同じ値を入れれば「生まれてから
+ * t ミリ秒後の姿」になる。
+ */
+async function 形を読む(page: Page, t: number): Promise<string> {
+  return page.evaluate((時刻) => {
+    const 紙 = document.querySelector('[data-testid="roam-paper"]')
+    if (!紙) return ''
+    for (const a of 紙.getAnimations()) {
+      a.pause()
+      a.currentTime = 時刻
+    }
+    return getComputedStyle(紙).clipPath
+  }, t)
+}
+
+/** `polygon()` から中心線を取り出し、箱の中心からいちばん離れた量（px）を返す */
+function 曲がり(形: string, 箱: number): number {
+  const 点 = [...形.matchAll(/(-?[\d.]+)%\s+(-?[\d.]+)%/g)].map((m) => Number(m[2]))
+  if (点.length < 4 || 点.length % 2 !== 0) return 0
+  let 最大 = 0
+  for (let i = 0; i < 点.length / 2; i += 1) {
+    const 中 = (点[i] + 点[点.length - 1 - i]) / 2
+    最大 = Math.max(最大, (Math.abs(中 - 50) * 箱) / 100)
+  }
+  return 最大
+}
+
+test('形は時間で切り替わり、巻きの窓だけ曲がって、明けたらまたコマ送りへ戻る', async ({
+  page,
+}) => {
+  /*
+    **ここでしか確かめられないこと。**
+
+    紙片の `clip-path` は**3枚のアニメーションが後勝ちで争っている**
+    ——コマ送り（`roam-flip`・ずっと下に敷く）／巻きの曲げ（`roam-curl`・窓のあいだ
+    だけ）／退場（`roam-exit`・最後だけ）。CSS は「効いているうち並びで後のもの」を
+    採るので、`animation-fill-mode: none` なら窓が明けた瞬間に下が透ける。
+
+    **単体テスト（`roam.test.ts`）はこれを1ミリも見ていない。** jsdom は CSS を
+    適用しないので、字面に「そう書いてある」ことしか言えない。**どちらが勝つかは
+    実物の時計でしか分からない**——2026-08-28 に、まさに「規則は書いてあるが、
+    どちらが勝つかを見ていなかった」で後戻りを1度踏んでいる。
+
+    **時刻を進めるのではなく、時計を止めて狙った時刻へ置く。** 待つ形にすると
+    籤と遅れで揺れるうえ、90秒の寿命ぶん待つことになる。
+  */
+  test.slow()
+  await openDashboard(page)
+  await 待つカードを作る(page)
+  await expect(page.getByTestId('roam-line').first()).toBeVisible({
+    timeout: 発火の上限,
+  })
+
+  // ① コマ送りが動いている——同じ1巡の中で、コマが違えば形が違う
+  const コマ0 = await 形を読む(page, 0)
+  const コマ2 = await 形を読む(page, ROAM_FLIP_MS * 0.5 + 10)
+  expect(コマ0).not.toBe('')
+  expect(コマ2, 'コマ送りが効いていない（形が時間で変わらない）').not.toBe(コマ0)
+
+  // ② 1巡すると同じコマへ戻る＝`infinite` が生きている
+  //    **`animation-iteration-count` が繰り返しで潰れると、ここで止まって落ちる**
+  expect(await 形を読む(page, ROAM_FLIP_MS), '1巡しても戻らない').toBe(コマ0)
+
+  // ③ 飛散のあいだは曲がっていない——**幾何的に真っ直ぐな区間なので曲げてはいけない**
+  const 飛散の曲がり = 曲がり(await 形を読む(page, ROAM_CURL_DELAY_MS - 50), ROAM_BOX_H)
+  expect(飛散の曲がり, '真っ直ぐな飛散の区間で紐が曲がっている').toBeLessThan(ROAM_INK_PX)
+
+  // ④ 巻きの窓の真ん中では、**線自身が曲がっている**（要件2-1）
+  const 巻きの曲がり = 曲がり(
+    await 形を読む(page, ROAM_CURL_DELAY_MS + ROAM_CURL_MS / 2),
+    ROAM_BOX_H,
+  )
+  expect(巻きの曲がり, '巻きの窓で紐が曲がっていない').toBeGreaterThan(ROAM_INK_PX * 2)
+
+  // ⑤ 窓が明けたら、下に敷いたコマ送りが**また透ける**
+  //    **`fill-mode` を `both` にすると曲げが居座り、ここで落ちる**
+  const 明けて = ROAM_CURL_DELAY_MS + ROAM_CURL_MS + 100
+  expect(曲がり(await 形を読む(page, 明けて), ROAM_BOX_H)).toBeLessThan(ROAM_INK_PX)
+  expect(await 形を読む(page, 明けて + ROAM_FLIP_MS), '明けたあとコマ送りが回っていない').toBe(
+    await 形を読む(page, 明けて),
+  )
+  expect(await 形を読む(page, 明けて + ROAM_FLIP_MS * 0.5)).not.toBe(
+    await 形を読む(page, 明けて),
+  )
 })
 
 test('層は中身と一緒にスクロールし、場からはみ出さない', async ({ page }) => {

@@ -23,6 +23,7 @@ import {
   type RoamStop,
   planRoute,
   replanRoute,
+  roamLoopWindow,
 } from '@/lib/roam'
 
 /**
@@ -119,6 +120,39 @@ export const ROAM_EXIT_MS = ROAM_ACT_MS + ROAM_VANISH_MS
  * 位相は**放った時刻がすでに散らしている**（調査レポート §14-7）。
  */
 export const ROAM_EXIT_DELAY_MS = ROAM_LIFE_MS - ROAM_EXIT_MS
+
+/**
+ * 回遊のコマ送りが1巡する長さ。**4コマ ÷ 1.6秒 ＝ 毎秒2.5コマ。**
+ *
+ * 要件は「**回遊中は毎秒2〜3コマ。3コマを超えない**」（利用者の明示・2026-08-27）で、
+ * その真ん中を採った。**上限があるのは回遊だけ**で、演出（発生・飛散・巻き）は
+ * 増やしてよい——巻きは約3.6秒あり、粗いと「曲がっていない形」が巻きの最中に出る。
+ *
+ * **移動のコマ数（12.2コマ/秒）とは別物である。** あちらは `.roam-line` の `steps()`
+ * で、要件は「今のままでよい」と言っている。動かしたのは形の側だけ。
+ *
+ * コマ数は `roam.css` の `roam-flip-*` のキーフレームの数（4枚）で決まるので、
+ * **枚数を変えたらここも変える**——`roam.test.ts` が毎秒のコマ数を突き合わせている。
+ */
+export const ROAM_FLIP_MS = 1_600
+
+/** 回遊のコマ数。`roam.css` の `roam-flip-*` の枚数と揃える */
+export const ROAM_FLIP_FRAMES = 4
+
+/**
+ * 巻き（③）で線を曲げる窓。**経路のどこに巻きが乗っているかから引く。**
+ *
+ * **手で数えない。** 巻きの道のりは巻きの形から出ているので、[`roamLoopWindow`] が
+ * 唯一の出どころである。寿命や区間の数を変えても追随する。
+ *
+ * **飛散を窓に含めない。** 飛散は幾何的に完全な直線なので、そこを曲げると
+ * 「道はまっすぐ、紙はパタパタ」という基本設計と食い違う（直進中に紐が曲がって見える）。
+ * 飛散のあいだは `roam-flip` がそのまま流れる。
+ */
+export const ROAM_CURL_DELAY_MS = Math.round(ROAM_LIFE_MS * roamLoopWindow().前)
+
+/** 巻きで曲げているあいだの長さ。**層はこれを `animation-duration` として渡す** */
+export const ROAM_CURL_MS = Math.round(ROAM_LIFE_MS * roamLoopWindow().幅)
 
 /**
  * 1回の跳ねで飛ばす本数。

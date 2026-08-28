@@ -1,8 +1,8 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { ROAM_STOPS, roamSpans } from '@/lib/roam'
-import { ROAM_ACT_MS, ROAM_VANISH_MS } from '@/stores/roam'
+import { ROAM_BOX_H, ROAM_BOX_W, ROAM_INK_PX, ROAM_STOPS, roamSpans } from '@/lib/roam'
+import { ROAM_ACT_MS, ROAM_FLIP_FRAMES, ROAM_FLIP_MS, ROAM_VANISH_MS } from '@/stores/roam'
 import { ROAM_LIFE_MS } from '@/stores/roam'
 
 /**
@@ -185,11 +185,20 @@ describe('層は場所を取らず、何も塗らない', () => {
     const 塊 = 素のCSS().match(/@keyframes\s+[\w-]+\s*\{[\s\S]*?\n\}/g) ?? []
     expect(塊.map((k) => /@keyframes\s+([\w-]+)/.exec(k)?.[1]).sort()).toEqual([
       'roam-birth',
+      'roam-curl-0-down',
+      'roam-curl-0-up',
+      'roam-curl-1-down',
+      'roam-curl-1-up',
+      'roam-curl-2-down',
+      'roam-curl-2-up',
       'roam-drift',
       'roam-exit-0',
       'roam-exit-1',
       'roam-exit-2',
       'roam-fade',
+      'roam-flip-0',
+      'roam-flip-1',
+      'roam-flip-2',
     ])
     // 停留点ぶんの座標を読んでいること（`lib/roam.ts` の `ROAM_STOPS` と揃う）
     for (let i = 0; i < ROAM_STOPS; i += 1) {
@@ -200,6 +209,25 @@ describe('層は場所を取らず、何も塗らない', () => {
     expect(素のCSS()).not.toContain(`var(--roam-x${ROAM_STOPS})`)
     // **③の転回の変数は消えた。** 経路そのものが回るので要らない（設計§9-7-7 B）
     expect(素のCSS()).not.toContain('var(--roam-turn)')
+  })
+
+  it('箱の寸法が、CSS と定数で揃っている', () => {
+    /*
+      **`clip-path` の % は箱の高さでしか意味が決まらない。**（2026-08-28・フェーズ15）
+
+      箱を高くすると、同じ % が指す px が変わる。**CSS だけ変えて定数を置き去りにすると
+      [`MARGIN`]（線が場からはみ出さない余白）が足りなくなり、定数だけ変えると
+      このファイルの太さ・たわみの検査が丸ごと嘘になる**——どちらも**エラーにならず、
+      画面は動き続けるので目で気づけない**。
+
+      **だから両方を突き合わせる番人をここへ置く。** 片方だけ動かすと落ちる。
+    */
+    const [線] = 当たる('.roam-line')
+    expect(線).toBeDefined()
+    expect(線.body).toContain(`width: ${ROAM_BOX_W}px;`)
+    expect(線.body).toContain(`height: ${ROAM_BOX_H}px;`)
+    // **相殺の margin は箱の半分。** 片方だけ直すと、線の中心が停留点からずれる
+    expect(線.body).toContain(`margin: ${-ROAM_BOX_H / 2}px 0 0 ${-ROAM_BOX_W / 2}px;`)
   })
 
   it('線の太さがほぼ一定＝塊ではなく線に見える', () => {
@@ -246,8 +274,12 @@ describe('層は場所を取らず、何も塗らない', () => {
 
         マジックナンバーを置かない——前の版の 45 はインクが 5px（71.4%）だった頃の値で、
         **なぜ 45 なのかがどこにも書かれていなかった**。
+
+        **% は箱の高さで決まるので、直書きしない**（2026-08-28・フェーズ15）。
+        箱を 7px→18px にしたとき、ここに 35.71 と書いてあると**正しい実装が落ちる**
+        か、**間違った実装が緑になる**。[`ROAM_INK_PX`] と [`ROAM_BOX_H`] から引く。
       */
-      const インク = 35.71
+      const インク = (ROAM_INK_PX / ROAM_BOX_H) * 100
       expect(Math.min(...太さ)).toBeGreaterThan(インク * 0.75)
       expect(Math.max(...太さ) / Math.min(...太さ)).toBeLessThan(1.4)
 
@@ -300,8 +332,9 @@ describe('層は場所を取らず、何も塗らない', () => {
       for (let i = 0; i < 点.length / 2; i += 1) {
         中心.push((点[i].y + 点[点.length - 1 - i].y) / 2)
       }
-      // 箱は 7px なので、% の振れ × 7 ÷ 100 が px の振れ。**1〜2px たわませる**指定
-      const 振れ = ((Math.max(...中心) - Math.min(...中心)) * 7) / 100
+      // % の振れ × 箱の高さ ÷ 100 が px の振れ。**1〜2px たわませる**指定。
+      // **箱の高さを直書きしない**——変えたときにここが黙って嘘になる
+      const 振れ = ((Math.max(...中心) - Math.min(...中心)) * ROAM_BOX_H) / 100
       expect(振れ).toBeGreaterThan(2)
       expect(振れ).toBeLessThan(4)
     }
@@ -350,8 +383,8 @@ describe('層は場所を取らず、何も塗らない', () => {
       （利用者の指定・2026-08-26。設計§9-7-7）。
 
       `steps()` は**キーフレームの区間ごと**に効く。**% が弧長比例になったので区間の
-      実時間は2種類ある**（設計§9-7-9）——56px の区間は 0.96秒、巻きの区間は
-      0.10〜0.28秒。**1つの段数では揃わない**ので、既定を `.roam-line` に置き、
+      実時間は2種類ある**（設計§9-7-9）——56px の区間は 1.73秒、巻きの区間は
+      0.18〜0.51秒（寿命を 50→90秒 にしたぶん、どちらも 1.8倍になっている）。**1つの段数では揃わない**ので、既定を `.roam-line` に置き、
       巻きの区間だけキーフレームの側で上書きしてある。
 
       見るのは2つ。**全体のコマ数**（総和 ÷ 寿命）と、**区間ごとの段数が道のりから
@@ -411,20 +444,47 @@ describe('層は場所を取らず、何も塗らない', () => {
       expect(Number(y)).toBe(1)
     }
 
-    // **紙片に載る動きは2本**（生まれと退場）。**動かす持ち物が違う**ので
-    // `scale` を争わない——生まれは `scale`、退場は `clip-path` である
+    /*
+      **紙片に載る動きは4本**（生まれ・回遊のコマ送り・巻きの曲げ・退場）。
+      `scale` を動かすのは生まれだけで、あとの3本は `clip-path` を**後勝ちで**争う。
+
+      **4つのリストが全部4要素であること**まで見る——CSS は**足りないと先頭から
+      繰り返す**ので、`1, 1` が残っていると **flip の `infinite` が消えて1回で止まり**、
+      `ease-in-out, ease-in-out` が残っていると**コマ送りが滑らかな補間になる**。
+      **どちらもエラーにならず、画面は動き続けるので目で気づけない。**
+    */
     const [紙] = 当たる('.roam-paper')
-    expect(紙.body).toContain('animation-name: roam-birth, var(--roam-exit)')
-    // 形ごとに違うのは**変数の中身だけ**
+    expect(紙.body).toContain(
+      'animation-name: roam-birth, var(--roam-flip), var(--roam-curl), var(--roam-exit)',
+    )
+    for (const 欄 of [
+      'animation-timing-function: ease-in-out, steps(1), linear, ease-in-out',
+      'animation-iteration-count: 1, infinite, 1, 1',
+      'animation-fill-mode: none, none, none, none',
+    ]) {
+      expect(紙.body).toContain(欄)
+    }
+    // 形ごとに違うのは**変数の中身だけ**（`animation-name` はここに書けない）
     for (const 形 of [0, 1, 2]) {
       const [規則] = 当たる(`[data-shape='${形}']`)
       expect(規則.body).toContain(`--roam-exit: roam-exit-${形}`)
+      expect(規則.body).toContain(`--roam-flip: roam-flip-${形}`)
     }
-    // **退場は `scale` に一切触らない**（触ると生まれと争う）
-    for (const 形 of [0, 1, 2]) {
-      const 退 = new RegExp(`@keyframes\\s+roam-exit-${形}\\s*\\{[\\s\\S]*?\\n\\}`).exec(素のCSS())?.[0] ?? ''
-      expect(退).not.toBe('')
-      expect(退).not.toContain('scale')
+    /*
+      **`clip-path` を動かす3本は、どれも `scale` に一切触らない**（触ると生まれと争い、
+      「紐の太さが呼吸している」が再発する）。**巻きの向きを `scale` でミラーしたく
+      なるが、それがまさにこの穴である。**
+    */
+    const 名前 = [0, 1, 2].flatMap((形) => [
+      `roam-exit-${形}`,
+      `roam-flip-${形}`,
+      `roam-curl-${形}-up`,
+      `roam-curl-${形}-down`,
+    ])
+    for (const 名 of 名前) {
+      const 塊 = new RegExp(`@keyframes\\s+${名}\\s*\\{[\\s\\S]*?\\n\\}`).exec(素のCSS())?.[0] ?? ''
+      expect(塊, 名).not.toBe('')
+      expect(塊, 名).not.toContain('scale')
     }
   })
 
@@ -477,6 +537,91 @@ describe('層は場所を取らず、何も塗らない', () => {
       const [基] = 当たる(`[data-shape='${形}']`)
       expect([...基.body.matchAll(/(-?[\d.]+)%\s+(-?[\d.]+)%/g)]).toHaveLength(26)
     }
+  })
+
+  it('形のコマも巻きの曲げも、26頂点のまま', () => {
+    /*
+      **上と同じ理由。** `polygon()` は頂点数が揃っていないと補間されずスナップする。
+
+      **巻き（`roam-curl`）は補間そのものを使って滑らかに曲げている**ので、ここが
+      揃っていないと**曲がらずにカクッと飛ぶ**。**コマ送り（`roam-flip`）は
+      `steps(1)` なので補間しない**が、`roam-curl` と `roam-exit` へ受け渡すときに
+      揃っている必要がある（3枚が同じ `clip-path` を後勝ちで争っている）。
+    */
+    const 名前 = [0, 1, 2].flatMap((形) => [
+      `roam-flip-${形}`,
+      `roam-curl-${形}-up`,
+      `roam-curl-${形}-down`,
+    ])
+    for (const 名 of 名前) {
+      const 塊 = new RegExp(`@keyframes\\s+${名}\\s*\\{[\\s\\S]*?\\n\\}`).exec(素のCSS())?.[0] ?? ''
+      const 多角形 = [...塊.matchAll(/polygon\(([^)]*)\)/g)]
+      // **空振りを潰す。** 塊が拾えていないと、下の `for` が0回まわって緑になる
+      expect(多角形.length, 名).toBeGreaterThanOrEqual(4)
+      for (const [, 中身] of 多角形) {
+        expect([...中身.matchAll(/(-?[\d.]+)%\s+(-?[\d.]+)%/g)], 名).toHaveLength(26)
+      }
+    }
+  })
+
+  it('形が時間で切り替わり、回遊は毎秒3コマを超えない', () => {
+    /*
+      **要件2-3 の番人**（利用者の明示・2026-08-27）——「**回遊中は毎秒2〜3コマ。
+      3コマを超えない**」。**上限があるのは回遊だけ**で、演出（発生・飛散・巻き）は
+      増やしてよい。
+
+      コマ数は「キーフレームの枚数 ÷ 1巡の秒数」で決まる。**枚数だけ増やしても、
+      尺だけ縮めても超える**ので、両方を掛け合わせて見る。
+
+      **`100%` は巡回の閉じなので数えない**（`steps(1)` では 75% の値が終端まで
+      保たれ、そこで 0% へ戻る）。数に入れると 5コマと読めてしまう。
+
+      **不変へ戻すと落ちる**——キーフレームが1枚しか無ければ「切り替わっていない」。
+    */
+    for (const 形 of [0, 1, 2]) {
+      const 塊 = new RegExp(`@keyframes\\s+roam-flip-${形}\\s*\\{[\\s\\S]*?\\n\\}`).exec(素のCSS())?.[0] ?? ''
+      expect(塊, `roam-flip-${形}`).not.toBe('')
+      const 割合 = [...塊.matchAll(/^\s*([\d.]+)%\s*\{/gm)].map((m) => Number(m[1]))
+      // 形が時間で切り替わっていること（1枚だけなら不変）
+      expect(割合.length, `roam-flip-${形}`).toBeGreaterThan(2)
+      const コマ = 割合.filter((v) => v < 100).length
+      expect(コマ, `roam-flip-${形}`).toBe(ROAM_FLIP_FRAMES)
+      const 毎秒 = コマ / (ROAM_FLIP_MS / 1000)
+      expect(毎秒, `roam-flip-${形}`).toBeGreaterThanOrEqual(2)
+      expect(毎秒, `roam-flip-${形}`).toBeLessThanOrEqual(3)
+    }
+
+    /*
+      **演出は回遊の上限に縛られていないこと。** 巻きは約3.6秒あり、回遊と同じ
+      粗さ（毎秒2.5コマ＝9枚）で作ると**曲がっていない形が巻きの最中に出る**
+      ——要件2-1「巻くときに紐自身が曲がる」と正面から食い違う。
+      **補間で滑らかにしてあるので、枚数は回遊より多い。**
+    */
+    for (const 形 of [0, 1, 2]) {
+      for (const 側 of ['up', 'down']) {
+        const 塊 = new RegExp(`@keyframes\\s+roam-curl-${形}-${側}\\s*\\{[\\s\\S]*?\\n\\}`).exec(素のCSS())?.[0] ?? ''
+        const 割合 = [...塊.matchAll(/^\s*([\d.]+)%\s*\{/gm)].map((m) => Number(m[1]))
+        expect(割合.length, `roam-curl-${形}-${側}`).toBeGreaterThan(ROAM_FLIP_FRAMES)
+        // **入口と出口はベースの形へ戻す**（下に敷いたコマ送りと繋ぐため）
+        expect(割合[0], `roam-curl-${形}-${側}`).toBe(0)
+        expect(割合[割合.length - 1], `roam-curl-${形}-${側}`).toBe(100)
+      }
+    }
+  })
+
+  it('移動のコマ数は、形の切り替えに巻き込まれていない', () => {
+    /*
+      **要件2-3「移動のコマ数（12.2コマ/秒）は今のままでよい」**（利用者の明示）。
+
+      形の切り替えは `.roam-paper` に載り、移動のコマ送りは `.roam-line` に載る。
+      **別の要素なので争わないが、片方を触るときにもう片方を巻き込みやすい。**
+      ここは「`.roam-line` の刻みが `steps()` のままであること」だけを見る
+      ——値そのものは別の検査が `roamSpans()` と突き合わせている。
+    */
+    const [線] = 当たる('.roam-line')
+    expect(線.body).toMatch(/animation-timing-function:\s*steps\(\d+\), linear/)
+    // **紙片の側の `steps(1)` を、移動の側へ書き写していないこと**
+    expect(線.body).not.toContain('steps(1),')
   })
 
   it('退場の最後は、太さが 0 まで畳まれる', () => {

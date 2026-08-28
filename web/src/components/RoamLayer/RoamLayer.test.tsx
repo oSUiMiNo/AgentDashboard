@@ -4,8 +4,11 @@ import { RoamLayer } from '@/components/RoamLayer/RoamLayer'
 import { ROAM_STOPS } from '@/lib/roam'
 import {
   ROAM_BIRTH_MS,
+  ROAM_CURL_DELAY_MS,
+  ROAM_CURL_MS,
   ROAM_EXIT_DELAY_MS,
   ROAM_EXIT_MS,
+  ROAM_FLIP_MS,
   ROAM_LIFE_MS,
   emitRoam,
   resetRoam,
@@ -106,16 +109,35 @@ describe('回遊の層', () => {
     for (const [i, 一枚] of 紙.entries()) {
       expect(一枚.parentElement).toBe(線[i])
       expect(一枚).toHaveAttribute('data-shape')
-      // **内側にも秒数を渡す。** 出どころを1つに保つ約束は内側にも掛かる。
-      // 内は寿命ではなく**尺取り虫の長さと、退場の長さ**（設計§9-7-9）
+      /*
+        **内側にも秒数を渡す。** 出どころを1つに保つ約束は内側にも掛かる。
+        内は寿命ではなく**それぞれの演出の長さ**（設計§9-7-9）。
+
+        **4本ぶんを数えている。** `roam.css` の `animation-name` が4本なので、
+        ここが2本のままだと **CSS がリストを先頭から繰り返して別の秒数を食う**
+        ——エラーにならず、画面も動き続けるので、この検査でしか気づけない。
+      */
       expect((一枚 as HTMLElement).style.animationDuration).toBe(
-        `${ROAM_BIRTH_MS}ms, ${ROAM_EXIT_MS}ms`,
+        `${ROAM_BIRTH_MS}ms, ${ROAM_FLIP_MS}ms, ${ROAM_CURL_MS}ms, ${ROAM_EXIT_MS}ms`,
       )
-      // **退場は寿命の終わりへ寄せる。** 遅れが明けるまでは静的な `clip-path` が
-      // 生きるので、3種の描き分けが消えない。**線ごとに散らしてはいけない**
-      // ——散らすと寿命の終わりと畳み終わりがずれる
+      /*
+        **曲げは巻きの窓だけ、退場は寿命の終わりだけ。** 遅れが明けるまでは
+        下に敷いたコマ送りがそのまま見えるので、**飛散（真っ直ぐな区間）で
+        紐が曲がらない**。**線ごとに散らしてはいけない**——散らすと寿命の
+        終わりと畳み終わりがずれる
+      */
       expect((一枚 as HTMLElement).style.animationDelay).toBe(
-        `0ms, ${ROAM_EXIT_DELAY_MS}ms`,
+        `0ms, 0ms, ${ROAM_CURL_DELAY_MS}ms, ${ROAM_EXIT_DELAY_MS}ms`,
+      )
+      /*
+        **巻きの向きは線ごとに違う。** 経路が持っている向きから選ぶので、
+        `data-shape` だけで決めると**半分の線が実際と逆へ曲がる**（要件2-1）。
+        **セレクタではなくインラインで渡す**のは、属性のセレクタへ
+        `animation-name` を書くと詳細度が上がって「止める規則」に勝つため
+      */
+      const 形 = 一枚.getAttribute('data-shape')
+      expect((一枚 as HTMLElement).style.getPropertyValue('--roam-curl')).toMatch(
+        new RegExp(`^roam-curl-${形}-(up|down)$`),
       )
     }
   })
@@ -161,7 +183,15 @@ describe('盤面が変わったら引き直す（引き金）', () => {
     **繋いだ数**を数える。
   */
   let 繋いだ = 0
-  let 合図: (() => void)[] = []
+  /**
+   * 見張りへ渡した受け口。
+   *
+   * **記録を受け取れる形にしてある。** `MutationObserver` の受け口は
+   * **どの節点が動いたか**を引数で受け取り、`RoamLayer` はそれを見て
+   * 「効果線そのものの出入りか」を判じている。引数なしの型にすると、
+   * **その判じ方を試験できない**（型検査で弾かれる）
+   */
+  let 合図: ((記録?: { target: Node }[]) => void)[] = []
   let 元Mutation: typeof MutationObserver
   let 元Resize: typeof ResizeObserver
 
@@ -171,7 +201,7 @@ describe('盤面が変わったら引き直す（引き金）', () => {
     元Mutation = globalThis.MutationObserver
     元Resize = globalThis.ResizeObserver
     class 数える見張り {
-      constructor(受ける: () => void) {
+      constructor(受ける: (記録?: { target: Node }[]) => void) {
         合図.push(受ける)
       }
       observe() {
@@ -266,4 +296,5 @@ describe('盤面が変わったら引き直す（引き金）', () => {
     // 待ちを積み増す形なら 20 本になる
     expect(vi.getTimerCount()).toBe(1)
   })
+
 })

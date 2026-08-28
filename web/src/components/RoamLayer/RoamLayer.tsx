@@ -34,13 +34,17 @@ import { type CSSProperties, useEffect } from 'react'
 import {
   measureField,
   readRoamProgress,
+  roamCurlSide,
   roamSegmentAt,
   routeVars,
 } from '@/lib/roam'
 import {
   ROAM_BIRTH_MS,
+  ROAM_CURL_DELAY_MS,
+  ROAM_CURL_MS,
   ROAM_EXIT_DELAY_MS,
   ROAM_EXIT_MS,
+  ROAM_FLIP_MS,
   ROAM_LIFE_MS,
   useRoamStore,
 } from '@/stores/roam'
@@ -193,25 +197,42 @@ export function RoamLayer() {
 
             **秒数はここでも層が渡す。** 出どころを1つに保つ約束は内側にも掛かる。
 
-            **渡す秒数は1つだけ。** ひらひら（`roam-flutter`）をやめたので、
-            紙片に載るアニメーションは尺取り虫1本になった（2026-08-28）。
+            **紙片に載るのは4本になった**（2026-08-28・フェーズ15）——生まれ・
+            回遊のコマ送り・巻きの曲げ・退場。
 
-            **秒数は `animation-name` と並び順で対応している。** 片方だけ消すと
-            残ったほうが繰り上がって**別の秒数を食う**——やめたとき `roam-birth` が
-            450ms のまま残るのは、ここも一緒に1本へ畳んだからである。**畳み忘れると
-            画面は動き続けるので、目では気づけない。**
+            **秒数は `animation-name` と並び順で対応している。** 1本でも数が食い違うと
+            **CSS はリストを先頭から繰り返す**ので、残ったほうが繰り上がって
+            **別の秒数を食う**。**エラーにならず、画面は動き続けるので目では気づけない。**
+            `roam.css` の `animation-name` を触ったら、必ずここも数を合わせること。
           */}
           <b
             className="roam-paper"
             data-testid="roam-paper"
             data-shape={line.shape}
-            style={{
-              // 生まれ（尺取り虫）と、退場（ひと芝居してから畳む）の2本
-              animationDuration: `${ROAM_BIRTH_MS}ms, ${ROAM_EXIT_MS}ms`,
-              // **退場は寿命の終わりへ寄せる。** 遅れが明けるまでは静的な
-              // `clip-path` がそのまま生きるので、3種の描き分けが消えない
-              animationDelay: `0ms, ${ROAM_EXIT_DELAY_MS}ms`,
-            }}
+            style={
+              {
+                /*
+                  **巻きの向きは線ごとに違う。** どちらへ膨らむかは経路が持っているので、
+                  **引かれた点から読む**（`roamCurlSide`）。形を `data-shape` だけに
+                  紐付けると、**半分の線が実際と逆へ曲がる**。
+
+                  **セレクタではなくここで選ぶ。** `[data-shape]` のような属性の
+                  セレクタへ `animation-name` を書くと詳細度が (0,1,0)→(0,2,0) へ上がり、
+                  `roam.css` 末尾の「止める規則」に勝ってしまう（2026-08-28 に
+                  `prefers-reduced-motion` が効かなくなり、E2E が捕まえた）。
+                  インラインなら**セレクタを1つも増やさない。**
+                */
+                '--roam-curl': `roam-curl-${line.shape}-${roamCurlSide(line.stops)}`,
+                // 生まれ（尺取り虫）／回遊のコマ送り／巻きの曲げ／退場
+                animationDuration: `${ROAM_BIRTH_MS}ms, ${ROAM_FLIP_MS}ms, ${ROAM_CURL_MS}ms, ${ROAM_EXIT_MS}ms`,
+                /*
+                  **曲げは巻きの窓だけ、退場は寿命の終わりだけ。**
+                  遅れが明けるまでは下に敷いたコマ送りがそのまま見える
+                  ——だから飛散（幾何的に真っ直ぐな区間）で紐が曲がらない。
+                */
+                animationDelay: `0ms, 0ms, ${ROAM_CURL_DELAY_MS}ms, ${ROAM_EXIT_DELAY_MS}ms`,
+              } as CSSProperties
+            }
           />
         </i>
       ))}
