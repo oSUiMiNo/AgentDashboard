@@ -1,10 +1,17 @@
 /**
  * 画面を回遊する効果線の層（カード設計§9-7）。
  *
- * 権限確認待ちのカードが跳ねるたびに線が3本だけ飛び出し、画面じゅうを90秒ほど
- * 回遊してから消える（本数は 2026-08-26 に3本固定、寿命は 2026-08-28 に 50→90秒）。
- * **在庫と門は `stores/roam.ts`、経路は `lib/roam.ts`、見た目と止め方は `roam.css`**
- * が持っていて、ここは並べるだけである。
+ * 権限確認待ちのカードが跳ねるたびに線が3本だけ飛び出し、画面じゅうを70秒ほど
+ * 回遊してから消える（本数は 2026-08-26 に3本固定、寿命は実物を見ながら 50→90→70秒）。
+ * **在庫と門は `stores/roam.ts`、経路と `d` は `lib/roam.ts`、見た目と止め方は
+ * `roam.css`** が持っていて、ここは並べるだけである。
+ *
+ * # 1本の線 ＝ `<g>` の中に `<path>` 4枚（フェーズ18・設計§23）
+ *
+ * 線は「経路の一部」である——経路ぜんぶを持つ path に 30px の窓
+ * （`stroke-dasharray`）を滑らせる。4枚は波の位相を 90° ずつ送ったコマで、
+ * `opacity` の `steps(1)` 切り替えが1枚ずつ見せる。**位置も向きも `d` が持つ**ので、
+ * この層が渡す変数は色・濃さ・窓の節目（線ごとに全長が違う）だけである。
  *
  * # 置き場所
  *
@@ -32,16 +39,16 @@
 
 import { type CSSProperties, useEffect } from 'react'
 import {
+  ROAM_KOMA,
+  ROAM_WINDOW_PX,
   measureField,
-  readRoamProgress,
-  roamCurlSide,
+  roamMilestones,
+  roamPathData,
   roamSegmentAt,
-  routeVars,
+  roamSpans,
 } from '@/lib/roam'
 import {
   ROAM_BIRTH_MS,
-  ROAM_CURL_DELAY_MS,
-  ROAM_CURL_MS,
   ROAM_EXIT_DELAY_MS,
   ROAM_EXIT_MS,
   ROAM_FLIP_MS,
@@ -59,6 +66,14 @@ import { type MotionQuiet, useSettingsStore } from '@/stores/settings'
  * 計算を毎フレーム重ねると、**直そうとしている見た目そのものを壊す**。
  */
 export const REPLAN_WAIT_MS = 250
+
+/**
+ * 窓（30px）が呼び値の総道のりに占める割合。
+ *
+ * 引き直しの区間割り出しで**窓の頭の位置**を出すのに使う——`stroke-dashoffset` が
+ * 動かすのは窓の尻で、頭は窓1つぶん先に居る。
+ */
+const 窓の割合 = ROAM_WINDOW_PX / roamSpans().reduce((a, b) => a + b, 0)
 
 /**
  * 盤面が変わったら、飛んでいる線の残りの道を引き直す（設計§20-5）。
@@ -113,14 +128,22 @@ function useReplanOnLayout(quiet: MotionQuiet): void {
       // 寸法が同じなら古い格子が返る——引き直しはその変化のために呼ばれている
       const field = measureField(層, true)
       if (field === null) return
-      // **いま何区間目に居るかを読むだけ。** 画面の実測は取らない（設計§20-5-1）
+      /*
+        **いま何区間目に居るかは、生まれた時刻から計算する**（設計§23-6）。
+        DOM は読まない——CSS アニメーションの時計は壁時計なので、経過時間と一致する。
+
+        **窓の頭の側で数える。** `stroke-dashoffset` が動かすのは窓の尻で、頭は
+        30px 先に居る。尻で数えると、**窓が跨いでいる最中の区間を書き換えて
+        窓の形が飛ぶ**——頭の位置（尻＋窓）から区間を引けば、書き換えは必ず
+        窓より先になる。
+      */
+      const 今 = Date.now()
       const いま: { id: number; 添字: number }[] = []
-      for (const 線 of 層.querySelectorAll('[data-testid="roam-line"]')) {
-        const id = Number((線 as HTMLElement).dataset.roamId)
-        if (!Number.isFinite(id)) continue
-        const 進み = readRoamProgress(線)
-        if (進み === null) continue
-        いま.push({ id, 添字: roamSegmentAt(進み) })
+      for (const line of useRoamStore.getState().lines) {
+        if (line.exiting === true) continue
+        const 経過 = Math.min(1, Math.max(0, (今 - line.生まれた) / ROAM_LIFE_MS))
+        const 頭 = Math.min(1, 経過 * (1 - 窓の割合) + 窓の割合)
+        いま.push({ id: line.id, 添字: roamSegmentAt(頭) })
       }
       if (いま.length > 0) replanRoam(field, いま)
     }
@@ -193,72 +216,70 @@ export function RoamLayer() {
       data-quiet={quiet === 'lively' ? undefined : quiet}
       aria-hidden
     >
-      {lines.map((line) => (
-        <i
-          key={line.id}
-          className="roam-line"
-          data-testid="roam-line"
-          // **引き直しが線を見つけるための札**（設計§20-5-2）
-          data-roam-id={line.id}
-          style={
-            {
-              ...routeVars(line.stops),
-              '--roam-accent': line.accent,
-              // **濃さもカードから受け取る**（カード設計§9-7）。固定値で塗ると、
-              // 同じ状態なのに輪と線で色が食い違う（フェーズ8 が塞いだ形）
-              '--roam-ink': line.ink,
-              // **秒数の出どころを1つにする。** CSS 側へ書くと、寿命のタイマと
-              // 見た目の長さが別々に育って食い違う
-              animationDuration: `${ROAM_LIFE_MS}ms, ${ROAM_LIFE_MS}ms`,
-            } as CSSProperties
-          }
-        >
-          {/*
-            紙片そのもの。**外側と役割を分けてある**——外は「道と向き」、内は
-            「紙のたわみ」。1つの要素に載せると、進行方向を向く回転と尺取り虫が
-            同じ `transform-origin` を取り合う（設計§9-7-2）。
+      {/*
+        線を描く1枚の SVG。**線1本 ＝ `<g>` の中に `<path>` 4枚（コマ）**（設計§23-5）。
 
-            **秒数はここでも層が渡す。** 出どころを1つに保つ約束は内側にも掛かる。
+        位置も向きも `d` が持っている（`lib/roam.ts` の `roamPathData`）ので、
+        層が変数で渡すのは色・濃さ・**窓の動きの節目**（線ごとに全長が違う）だけ。
+      */}
+      <svg className="roam-svg">
+        {lines.map((line) => {
+          /*
+            節目（`stroke-dashoffset` の値）。**コマ0 の波で測った実長**（`lib/roam.ts` の
+            `roamMilestones`）。dashoffset は**負で前進**なので符号を反す。
+          */
+          const 節目 = roamMilestones(line.stops, line.shape)
+          const 変数 = {
+            '--roam-accent': line.accent,
+            // **濃さもカードから受け取る**（カード設計§9-7）。固定値で塗ると、
+            // 同じ状態なのに輪と線で色が食い違う（フェーズ8 が塞いだ形）
+            '--roam-ink': line.ink,
+            '--roam-s1': `${-節目.飛散}px`,
+            '--roam-s2': `${-節目.巻き}px`,
+            '--roam-s3': `${-節目.終端}px`,
+            // 窓の長さの3態。第2引数（描かない区間）は**全長そのもの**——
+            // 足りないと窓が2つ見える（dasharray は繰り返すため）
+            '--roam-dash-closed': `0 ${節目.全長}`,
+            '--roam-dash-open': `${ROAM_WINDOW_PX} ${節目.全長}`,
+            '--roam-dash-puff': `${Math.round(ROAM_WINDOW_PX * 1.2)} ${節目.全長}`,
+          } as CSSProperties
+          return (
+            <g
+              key={line.id}
+              className="roam-line"
+              data-testid="roam-line"
+              // **引き直しが線を見つけるための札**（設計§20-5-2）
+              data-roam-id={line.id}
+              style={変数}
+            >
+              {Array.from({ length: ROAM_KOMA }, (_, koma) => (
+                <path
+                  key={koma}
+                  className={`roam-paper roam-koma-${koma}`}
+                  data-testid="roam-paper"
+                  data-shape={line.shape}
+                  d={roamPathData(line.stops, line.shape, koma)}
+                  style={{
+                    /*
+                      **秒数の出どころを1つにする**（`stores/roam.ts`）。並びは
+                      `roam.css` の `animation-name`（発生・コマ・移動・退場）と
+                      1対1——**1本でも数が食い違うと CSS はリストを先頭から
+                      繰り返し、別の秒数を食う**。エラーにならず目で気づけない。
 
-            **紙片に載るのは4本になった**（2026-08-28・フェーズ15）——生まれ・
-            回遊のコマ送り・巻きの曲げ・退場。
-
-            **秒数は `animation-name` と並び順で対応している。** 1本でも数が食い違うと
-            **CSS はリストを先頭から繰り返す**ので、残ったほうが繰り上がって
-            **別の秒数を食う**。**エラーにならず、画面は動き続けるので目では気づけない。**
-            `roam.css` の `animation-name` を触ったら、必ずここも数を合わせること。
-          */}
-          <b
-            className="roam-paper"
-            data-testid="roam-paper"
-            data-shape={line.shape}
-            style={
-              {
-                /*
-                  **巻きの向きは線ごとに違う。** どちらへ膨らむかは経路が持っているので、
-                  **引かれた点から読む**（`roamCurlSide`）。形を `data-shape` だけに
-                  紐付けると、**半分の線が実際と逆へ曲がる**。
-
-                  **セレクタではなくここで選ぶ。** `[data-shape]` のような属性の
-                  セレクタへ `animation-name` を書くと詳細度が (0,1,0)→(0,2,0) へ上がり、
-                  `roam.css` 末尾の「止める規則」に勝ってしまう（2026-08-28 に
-                  `prefers-reduced-motion` が効かなくなり、E2E が捕まえた）。
-                  インラインなら**セレクタを1つも増やさない。**
-                */
-                '--roam-curl': `roam-curl-${line.shape}-${roamCurlSide(line.stops)}`,
-                // 生まれ（尺取り虫）／回遊のコマ送り／巻きの曲げ／退場
-                animationDuration: `${ROAM_BIRTH_MS}ms, ${ROAM_FLIP_MS}ms, ${ROAM_CURL_MS}ms, ${ROAM_EXIT_MS}ms`,
-                /*
-                  **曲げは巻きの窓だけ、退場は寿命の終わりだけ。**
-                  遅れが明けるまでは下に敷いたコマ送りがそのまま見える
-                  ——だから飛散（幾何的に真っ直ぐな区間）で紐が曲がらない。
-                */
-                animationDelay: `0ms, 0ms, ${ROAM_CURL_DELAY_MS}ms, ${ROAM_EXIT_DELAY_MS}ms`,
-              } as CSSProperties
-            }
-          />
-        </i>
-      ))}
+                      **退場の遅れだけ線ごとに違う**：寿命で死ぬ線は寿命の終わりへ
+                      寄せ、**上限で捨てられた線（`exiting`）は 0 にして今すぐ踏む**
+                      （要件15-4。退場は窓の長さしか動かさないので、どこに居ても
+                      同じ振り付けで畳める）。
+                    */
+                    animationDuration: `${ROAM_BIRTH_MS}ms, ${ROAM_FLIP_MS}ms, ${ROAM_LIFE_MS}ms, ${ROAM_EXIT_MS}ms`,
+                    animationDelay: `0ms, 0ms, 0ms, ${line.exiting === true ? 0 : ROAM_EXIT_DELAY_MS}ms`,
+                  }}
+                />
+              ))}
+            </g>
+          )
+        })}
+      </svg>
     </div>
   )
 }
