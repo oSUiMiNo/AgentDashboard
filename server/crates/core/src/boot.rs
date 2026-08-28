@@ -171,12 +171,57 @@ fn handover_command(target: &Path) -> std::process::Command {
     // `current_exe()` が保管庫の版フォルダを指すので、そのまま焼き込むと**版を消した
     // 瞬間に生きているセッションのフックが全滅する**。しかもフックは返事を待たない
     // 呼び方なので claude は止まらず、症状は「作業中のまま固まる」になる
-    if std::env::var_os(HOOK_BIN_ENV).is_none() {
-        if let Ok(current) = std::env::current_exe() {
-            command.env(HOOK_BIN_ENV, current);
-        }
+    if let Some(hook_bin) = handover_hook_bin(
+        std::env::var(HOOK_BIN_ENV).ok(),
+        version::installed_binary(),
+    ) {
+        command.env(HOOK_BIN_ENV, hook_bin);
     }
     command
+}
+
+/// 渡すフックの入口を決める（材料を受け取る純粋関数）。
+///
+/// # なぜ「立っていれば何もしない」では駄目なのか
+///
+/// **`make build` は走っているプロセスの実体を消す。** そのあと `current_exe()` を読むと
+/// カーネルは行き先に `(deleted)` を付けて答える——**存在しないパス**である。それを
+/// そのまま渡すと、次のプロセスは**フックを1件も起動できない**まま生き続ける。
+/// フックは返事を待たない呼び方（`"async": true`）なので claude は止まらず、症状は
+/// 「状態が不明のまま・構造化ビューに何も出ない・ターミナルだけ動く」になる。
+///
+/// そして**入れ替えを重ねても消えない**。以前は「既に立っていれば何もしない」だったので、
+/// 一度焼き込まれた値がその機械に居座り続けた（実機で2回の入れ替えを跨いで残った）。
+///
+/// **だから「実在しないときだけ入れ替える」。**
+///
+/// | いまの値 | どうするか |
+/// |---|---|
+/// | 立っていない | [`version::installed_binary`] を渡す |
+/// | 立っていて、**実在する** | **そのまま**（利用者が指定した道を塞がない） |
+/// | 立っていて、**実在しない** | 入れ替える（毒が自分で治る） |
+/// | 実在せず、入れる側の実行ファイルも無い | **そのまま渡す**（下記） |
+///
+/// # 最後の行で「渡さない」を選ばない理由
+///
+/// 渡さないと、次のプロセスは自分の `current_exe()`＝**乗り換え先＝保管庫**を使う。
+/// すると**版を消した瞬間に、生きているセッションのフックが全滅する**——このコードが
+/// もともと最も恐れていた状態へ戻る。**壊れた値を渡し続けるほうが、まだ被害が小さい。**
+///
+/// # 文字列から `(deleted)` を剥がさない
+///
+/// [`version::installed_binary`] は `source_dir()` の下を `is_file()` で確かめてから
+/// 答えるので、**実在しない答えを返さない**。「在るときだけ答える」はこのリポジトリの
+/// 既存の作法（`resolve_target` ／ `read_pointer` も同じ）で、文字列を加工する道を
+/// 1つ増やすより、そちらへ乗せる。
+#[cfg(unix)]
+fn handover_hook_bin(current: Option<String>, installed: Option<PathBuf>) -> Option<String> {
+    let entry = installed.map(|path| path.to_string_lossy().into_owned());
+    match current.filter(|raw| !raw.is_empty()) {
+        Some(raw) if Path::new(&raw).is_file() => Some(raw),
+        Some(raw) => Some(entry.unwrap_or(raw)),
+        None => entry,
+    }
 }
 
 /// 乗り換える。成功すればこの関数からは返らない。
@@ -226,15 +271,110 @@ mod tests {
             "印が無いと乗り換えが止まらない"
         );
 
-        // 焼き込み先は保管庫ではなく、乗り換える前の自分（＝入れる側が置いた入口）
-        let hook = envs.iter().find(|(key, _)| key == HOOK_BIN_ENV);
-        let expected = std::env::var(HOOK_BIN_ENV)
-            .ok()
-            .or_else(|| Some(std::env::current_exe().ok()?.to_string_lossy().into_owned()));
+        // 焼き込み先は保管庫ではなく、乗り換える前の自分（＝入れる側が置いた入口）。
+        //
+        // **期待値を `current_exe()` から組み立て直してはいけない。** 以前のこのテストは
+        // 実装と同じ式で期待値を作っていたので、実装が何を渡しても一致した——`(deleted)`
+        // 付きの存在しないパスを渡していた不具合を、**このテスト自身が素通しした**。
+        // 決め方そのものは [`handover_hook_bin`] が持ち、そちらは下の表で固めてある。
+        // ここが見るのは**繋ぎ込み**（決めた値がそのまま命令へ載ること）である。
+        let hook = envs
+            .iter()
+            .find(|(key, _)| key == HOOK_BIN_ENV)
+            .and_then(|(_, value)| value.clone());
         assert_eq!(
-            hook.and_then(|(_, value)| value.clone()),
-            expected,
-            "版を消した瞬間にフックが全滅しないよう、消えない入口を渡す"
+            hook,
+            handover_hook_bin(
+                std::env::var(HOOK_BIN_ENV).ok(),
+                version::installed_binary()
+            ),
+            "決めた値がそのまま乗ること"
+        );
+
+        // 性質そのものも見る。**渡す値が保管庫を指したら、版を消した瞬間に
+        // 生きているセッションのフックが全滅する**
+        if let Some(hook) = hook {
+            assert!(
+                !hook.starts_with("/state/versions"),
+                "保管庫を指していないこと: {hook}"
+            );
+            assert!(
+                !hook.contains(" (deleted)"),
+                "消えたパスを渡していないこと: {hook}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn 渡すフックの入口は実在しないときだけ入れ替える() {
+        let installed = std::env::current_exe().expect("テスト自身は実在する");
+        let entry = installed.to_string_lossy().into_owned();
+        let 消えた = "/home/x/.local/bin/agentdashboard (deleted)".to_string();
+
+        // 立っていない → 入れる側が置いたものを渡す
+        assert_eq!(
+            handover_hook_bin(None, Some(installed.clone())),
+            Some(entry.clone()),
+            "立っていなければ入れる側の入口を渡す"
+        );
+
+        // 立っていて実在する → そのまま（利用者が指定した道を塞がない）
+        //
+        // **入れる側の答えを「別の実在するもの」にしておく。** ここを `None` にすると、
+        // 「据え置く」と「入れ替える」がどちらも同じ答えになり、**取り違えを見逃す**
+        let 別の実在するもの =
+            std::env::temp_dir().join(format!("agentdashboard-handover-{}", std::process::id()));
+        std::fs::write(&別の実在するもの, b"").expect("使い捨ての印を置けること");
+        assert_eq!(
+            handover_hook_bin(Some(entry.clone()), Some(別の実在するもの.clone())),
+            Some(entry.clone()),
+            "実在する指定は据え置く（入れる側の答えで上書きしない）"
+        );
+        std::fs::remove_file(&別の実在するもの).expect("使い捨ての印を片付けられること");
+
+        // 立っていて実在しない → 入れ替える（毒が自分で治る）
+        assert_eq!(
+            handover_hook_bin(Some(消えた.clone()), Some(installed)),
+            Some(entry),
+            "消えたパスは入れ替える"
+        );
+
+        // 実在せず、入れる側の実行ファイルも無い → そのまま渡す
+        //
+        // ここで `None` を返すと、次のプロセスは自分の `current_exe()`＝保管庫を使う。
+        // **版を消した瞬間に全滅する**ほうが、壊れた値を渡し続けるより悪い
+        assert_eq!(
+            handover_hook_bin(Some(消えた.clone()), None),
+            Some(消えた),
+            "打つ手が無いときは、壊れていても渡す"
+        );
+
+        // 空は未指定と同じ（`hook_program_from` ／ `source_dir_from` と揃える）
+        assert_eq!(
+            handover_hook_bin(Some(String::new()), None),
+            None,
+            "空は未指定"
+        );
+        assert_eq!(handover_hook_bin(None, None), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn 渡すフックの入口は保管庫を指さない() {
+        // 乗り換え先（保管庫）が実在していても、そちらを渡してはいけない。
+        // **版を消した瞬間に、生きているセッションのフックが全滅する**
+        let 保管庫 = std::env::current_exe().expect("テスト自身は実在する");
+        let 入口 = "/home/x/.local/bin/agentdashboard (deleted)".to_string();
+
+        // 実在しない指定に対して渡すのは `installed_binary()` の答えだけで、
+        // あちらは定義上 `source_dir()` の下＝保管庫の外にある
+        let 答え = handover_hook_bin(Some(入口.clone()), None);
+        assert_eq!(答え, Some(入口), "保管庫を掴みに行かない");
+        assert_ne!(
+            答え,
+            Some(保管庫.to_string_lossy().into_owned()),
+            "乗り換え先を焼き込まない"
         );
     }
 
