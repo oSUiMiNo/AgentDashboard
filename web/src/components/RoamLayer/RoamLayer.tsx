@@ -137,7 +137,30 @@ function useReplanOnLayout(quiet: MotionQuiet): void {
       待ち = setTimeout(引き直す, REPLAN_WAIT_MS)
     }
 
-    const 見張り = new MutationObserver(変わった)
+    /*
+      **効果線そのものの出入りを、盤面の変化と数えない。**（2026-08-28・フェーズ15）
+
+      層は場の**中**に居る（設計§9-7-5。線を中身と一緒にスクロールさせるため）ので、
+      場の部分木をそのまま見張ると**線が1本生まれるたびに `childList` が動く**。
+      それを合図にすると、**生まれたばかりの線を添字0で引き直す**ことになり、
+      引き直しは巻きを持たない普通の歩きを返すので**巻きが丸ごと消える**。
+
+      **実測（8790・32本）では、巻きの区間が 11.7px であるべきところ全部 55px で、
+      1本も巻きが残っていなかった。** 経路が変わるだけなので絵としては破綻せず、
+      **線が真っ直ぐな棒だったフェーズ14 までは、消えていても気づけなかった。**
+
+      **記録の的が全部 層の中なら、盤面は動いていない。**
+    */
+    const 層の中 = (的: Node): boolean => {
+      const e = 的.nodeType === Node.ELEMENT_NODE ? (的 as Element) : 的.parentElement
+      return e?.closest('[data-testid="roam-layer"]') != null
+    }
+    const 見張り = new MutationObserver((記録) => {
+      // **判断が付かないときは引き直す側へ倒す。** 記録が空／無いのは「線の出入りだと
+      // 分かった」ではないので、見送ると盤面の変化を取りこぼしうる
+      if (記録?.length && 記録.every((r) => 層の中(r.target))) return
+      変わった()
+    })
     見張り.observe(場, { childList: true, subtree: true })
     const 寸法 = new ResizeObserver(変わった)
     寸法.observe(場)

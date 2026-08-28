@@ -297,4 +297,39 @@ describe('盤面が変わったら引き直す（引き金）', () => {
     expect(vi.getTimerCount()).toBe(1)
   })
 
+  it('効果線そのものの出入りでは、引き直さない', () => {
+    /*
+      **層は場の中に居る**（設計§9-7-5）ので、場の部分木をそのまま見張ると
+      **線が1本生まれるたびに `childList` が動く**。それを盤面の変化と数えると、
+      **生まれたばかりの線を添字0で引き直す**ことになり、引き直しは巻きを持たない
+      普通の歩きを返すので**巻きが丸ごと消える**。
+
+      **実測（8790・32本）では、巻きの区間が 11.7px であるべきところ全部 55px で、
+      1本も巻きが残っていなかった**（2026-08-28・フェーズ15）。経路が変わるだけなので
+      絵としては破綻せず、**線が真っ直ぐな棒だったフェーズ14 までは気づけなかった。**
+
+      **「線が出ない」では見分けられない**（引き直しても線は出る）。**待ちが積まれるか**を数える。
+    */
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    useSettingsStore.setState((state) => ({
+      settings: { ...state.settings, motion_quiet: 'lively' },
+    }))
+    場ごと描く()
+
+    const 層 = screen.getByTestId('roam-layer')
+    const 線 = document.createElement('i')
+    線.setAttribute('data-testid', 'roam-line')
+    層.appendChild(線)
+
+    // 層の中だけが動いた——**盤面は動いていない**
+    合図[0]([{ target: 線 }, { target: 層 }])
+    expect(vi.getTimerCount(), '線の出入りで引き直そうとしている').toBe(0)
+
+    // カードが増えた——**こちらは引き直す**
+    const カード = document.createElement('div')
+    カード.setAttribute('data-testid', 'tile-shell')
+    層.parentElement?.appendChild(カード)
+    合図[0]([{ target: カード }])
+    expect(vi.getTimerCount(), '盤面が動いたのに引き直していない').toBe(1)
+  })
 })
