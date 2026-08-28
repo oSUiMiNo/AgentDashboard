@@ -139,6 +139,38 @@ describe('ファイルの見せ方', () => {
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('見出し')
   })
 
+  it('素の改行が、改行として出る', async () => {
+    // **履歴と同じ配列を使っている**ことの現れ（`構造化ビューでメッセージの改行が
+    // 反映されない` 設計§5）。同じ字を貼れば同じ見え方になる
+    serve(content('あいう\nかきく\n'))
+    const { container } = render(<FileView host="local" root={ROOT} path={`${ROOT}/計画.md`} />)
+    await screen.findByTestId('file-markdown')
+
+    expect(container.querySelectorAll('br')).toHaveLength(1)
+  })
+
+  it('`<br/>` も改行として出る（`skipHtml` があっても消えない）', async () => {
+    // **`skipHtml` は rehype が走った「あと」に効く。** 先に `br` 要素へ変わったものは
+    // 残り、残りの生 HTML はいままでどおり落ちる。このリポジトリのドキュメントは
+    // 節の区切りに `<br/>` を2行置く作法なので、**意図した行間がここで戻る**
+    serve(content('# 見出し\n\n---\n<br/>\n<br/>\n\n本文\n'))
+    const { container } = render(<FileView host="local" root={ROOT} path={`${ROOT}/計画.md`} />)
+    await screen.findByTestId('file-markdown')
+
+    expect(container.querySelectorAll('br')).toHaveLength(2)
+    // 字面としては出ない（`skipHtml` は効いたまま）
+    expect(screen.getByTestId('file-markdown').textContent).not.toContain('<br')
+  })
+
+  it('囲みコードの中の改行は、二重にならない', async () => {
+    serve(content('```\n1行目\n2行目\n```\n'))
+    const { container } = render(<FileView host="local" root={ROOT} path={`${ROOT}/計画.md`} />)
+    await screen.findByTestId('file-markdown')
+
+    expect(container.querySelectorAll('br')).toHaveLength(0)
+    expect(screen.getByText(/1行目/).textContent).toContain('1行目\n2行目')
+  })
+
   it('生テキストへ切り替えられる', async () => {
     serve(content('# 計画\n\n本文\n'))
     show()

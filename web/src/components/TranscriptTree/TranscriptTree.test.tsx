@@ -238,6 +238,36 @@ describe('本文を整形して出す', () => {
     expect(within(rowByKind('user_message')).getByRole('heading', { level: 2 })).toBeInTheDocument()
   })
 
+  it('行が空いていなくても、改行が改行として出る', async () => {
+    // マークダウンの決まりでは素の改行は繋がってしまう。**打ったとおりに見せる**ほうを採る
+    appendNodes(CARD, [node('a1', null, { kind: 'assistant_text', text: 'あいう\nかきく\nさしす' })])
+    renderTree()
+    await waitForRows(1)
+
+    const body = within(rowByKind('assistant_text')).getByTestId('row-body')
+    expect(body.querySelectorAll('br')).toHaveLength(2)
+  })
+
+  it('利用者の本文でも改行が出る', async () => {
+    // **同じ部品・同じ配列を通る**ので、片方だけ直る形が構造的に作れない
+    appendNodes(CARD, [node('u1', null, { kind: 'user_message', text: 'あいう\nかきく' })])
+    renderTree()
+    await waitForRows(1)
+
+    const body = within(rowByKind('user_message')).getByTestId('row-body')
+    expect(body.querySelectorAll('br')).toHaveLength(1)
+  })
+
+  it('囲みコードと表の中では、改行が二重にならない', async () => {
+    appendNodes(CARD, [node('a1', null, { kind: 'assistant_text', text: MARKDOWN })])
+    renderTree()
+    await waitForRows(1)
+
+    const row = rowByKind('assistant_text')
+    expect(row.querySelector('pre')?.querySelectorAll('br')).toHaveLength(0)
+    expect(within(row).getByRole('table').querySelectorAll('br')).toHaveLength(0)
+  })
+
   it('思考は既定で畳まれ、開くと整形されて出る', async () => {
     appendNodes(CARD, [node('k1', null, { kind: 'thinking', text: MARKDOWN })])
     renderTree()

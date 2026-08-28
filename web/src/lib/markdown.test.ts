@@ -1,5 +1,15 @@
 import type { Element, Root } from 'hast'
-import { BODY_FOLD_LIMIT, foldMarkdown, rehypeLineBreaks, splitLineBreaks } from './markdown'
+import type { PhrasingContent, Root as MdastRoot } from 'mdast'
+import {
+  BODY_FOLD_LIMIT,
+  REHYPE_PLUGINS,
+  REMARK_PLUGINS,
+  foldMarkdown,
+  rehypeLineBreaks,
+  remarkSoftBreaks,
+  splitLineBreaks,
+  splitSoftBreaks,
+} from './markdown'
 
 /**
  * 本文の畳み方と `<br>` の読み替え（テスト計画フェーズ2）。
@@ -183,6 +193,164 @@ describe('rehype プラグイン', () => {
     const root = tree('<span>')
     rehypeLineBreaks()(root)
     expect(tagsOf(root)).toEqual(['element:p', 'raw(<span>)'])
+  })
+})
+
+describe('素の改行を割る', () => {
+  it('改行のところで割れる', () => {
+    expect(splitSoftBreaks('あいう\nかきく')).toEqual([
+      { kind: 'text', value: 'あいう' },
+      { kind: 'break' },
+      { kind: 'text', value: 'かきく' },
+    ])
+  })
+
+  it('CRLF でも `\\r` が残らない', () => {
+    // **`\n` だけで割ると断片の先頭に `\r` が残る。** Windows で書かれた `.md` や
+    // Windows から貼り付けた本文が普通に通る道なので、ここは端の話ではない
+    expect(splitSoftBreaks('あいう\r\nかきく')).toEqual([
+      { kind: 'text', value: 'あいう' },
+      { kind: 'break' },
+      { kind: 'text', value: 'かきく' },
+    ])
+  })
+
+  it('前後の空白は落とさない', () => {
+    expect(splitSoftBreaks('あいう  \n  かきく')).toEqual([
+      { kind: 'text', value: 'あいう  ' },
+      { kind: 'break' },
+      { kind: 'text', value: '  かきく' },
+    ])
+  })
+
+  it('空の断片はノードにしない', () => {
+    expect(splitSoftBreaks('\nあいう')).toEqual([{ kind: 'break' }, { kind: 'text', value: 'あいう' }])
+    expect(splitSoftBreaks('あいう\n')).toEqual([{ kind: 'text', value: 'あいう' }, { kind: 'break' }])
+  })
+
+  it('改行が無ければそのまま', () => {
+    expect(splitSoftBreaks('あいう')).toEqual([{ kind: 'text', value: 'あいう' }])
+  })
+})
+
+describe('remark プラグイン', () => {
+  /** `paragraph` の下に子を並べた木。 */
+  function tree(...children: PhrasingContent[]): MdastRoot {
+    return { type: 'root', children: [{ type: 'paragraph', children }] }
+  }
+
+  function shapeOf(root: MdastRoot): string[] {
+    const out: string[] = []
+    const visit = (node: { children?: unknown[] }) => {
+      for (const raw of node.children ?? []) {
+        const child = raw as { type: string; value?: string; children?: unknown[] }
+        out.push(child.value === undefined ? child.type : `${child.type}(${child.value})`)
+        visit(child)
+      }
+    }
+    visit(root)
+    return out
+  }
+
+  it('本文の `\\n` が `break` になる', () => {
+    const root = tree({ type: 'text', value: 'あいう\nかきく' })
+    remarkSoftBreaks()(root)
+    expect(shapeOf(root)).toEqual(['paragraph', 'text(あいう)', 'break', 'text(かきく)'])
+  })
+
+  it('囲みコードの中は触らない', () => {
+    // **`code` は `text` ではない別のノード。** 中の改行は値として持たれているので、
+    // `text` だけを歩いている限り構造的に触りようがない（設計§4 の実測）
+    const root: MdastRoot = { type: 'root', children: [{ type: 'code', value: '1行目\n2行目' }] }
+    remarkSoftBreaks()(root)
+    expect(shapeOf(root)).toEqual(['code(1行目\n2行目)'])
+  })
+
+  it('生の HTML の中は触らない', () => {
+    const root: MdastRoot = { type: 'root', children: [{ type: 'html', value: '<br/>\n<br/>' }] }
+    remarkSoftBreaks()(root)
+    expect(shapeOf(root)).toEqual(['html(<br/>\n<br/>)'])
+  })
+
+  it('表のセルの中まで歩く（セルに改行が無ければ何も起きない）', () => {
+    const root: MdastRoot = {
+      type: 'root',
+      children: [
+        {
+          type: 'table',
+          children: [
+            {
+              type: 'tableRow',
+              children: [{ type: 'tableCell', children: [{ type: 'text', value: 'あ' }] }],
+            },
+          ],
+        },
+      ],
+    }
+    remarkSoftBreaks()(root)
+    expect(shapeOf(root)).toEqual(['table', 'tableRow', 'tableCell', 'text(あ)'])
+  })
+
+  it('ハード改行（既にある `break`）は増やさない', () => {
+    const root = tree({ type: 'text', value: 'あいう' }, { type: 'break' }, { type: 'text', value: 'かきく' })
+    remarkSoftBreaks()(root)
+    expect(shapeOf(root)).toEqual(['paragraph', 'text(あいう)', 'break', 'text(かきく)'])
+  })
+})
+
+describe('改行が二重になるもの（許容した振る舞い）', () => {
+  it('行内の `<br/>` の直後の改行は、改行2つになる', () => {
+    // **抑えない。** 抑えるには「隣が `<br>` なら割らない」という兄弟を覗く規則が要り、
+    // どちらの規則が効いたのかを読む側が追えなくなる（設計§6）。打った側から見れば
+    // `<br/>` と改行を2つ書いているので、「打ったとおりに見せる」からは外れてもいない。
+    //
+    // 行頭の `<br/>`（このリポジトリの作法）はブロックの `html` ノード1つになるので
+    // ここを通らない——そちらが二重にならないことは E2E が `toHaveCount(2)` で固定している
+    const root: MdastRoot = {
+      type: 'root',
+      children: [
+        {
+          type: 'paragraph',
+          children: [
+            { type: 'text', value: 'あいう' },
+            { type: 'html', value: '<br/>' },
+            { type: 'text', value: '\nえお' },
+          ],
+        },
+      ],
+    }
+    remarkSoftBreaks()(root)
+    expect(shapeOfBreaks(root)).toEqual(['html(<br/>)', 'break'])
+  })
+
+  function shapeOfBreaks(root: MdastRoot): string[] {
+    const out: string[] = []
+    const visit = (node: { children?: unknown[] }) => {
+      for (const raw of node.children ?? []) {
+        const child = raw as { type: string; value?: string; children?: unknown[] }
+        if (child.type === 'break') {
+          out.push('break')
+        }
+        if (child.type === 'html') {
+          out.push(`html(${child.value})`)
+        }
+        visit(child)
+      }
+    }
+    visit(root)
+    return out
+  }
+})
+
+describe('プラグインの並び', () => {
+  it('素の改行の段は、いちばん後ろ', () => {
+    // 他のプラグインが組み立て終わった木に対して働かせる。途中に挟むと
+    // 「誰が作ったノードを見ているのか」が並びに依存して読めなくなる（設計§2）
+    expect(REMARK_PLUGINS.at(-1)).toBe(remarkSoftBreaks)
+  })
+
+  it('`<br/>` の段は rehype 側に居る', () => {
+    expect(REHYPE_PLUGINS).toEqual([rehypeLineBreaks])
   })
 })
 
