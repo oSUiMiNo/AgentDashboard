@@ -35,7 +35,9 @@ fixtures/
 │      └ resize.cast
 └ synthetic/                        手書き（下記）
    ├ rewound/
-   └ interactive-only/
+   ├ interactive-only/
+   ├ markdown-bodies/
+   └ softbreaks/
 ```
 
 `agent-*.meta.json` は `agentType` / `toolUseId` / `spawnDepth` を持つ。パーサはこの `toolUseId` を頼りに、親セッションの該当ツールコールへ子ツリーをマウントする（設計§8）。
@@ -49,6 +51,8 @@ fixtures/
 |---|---|
 | `rewound/` | `/rewind` で会話が分岐した状態（同じファイルに `parentUuid: null` の根が2つある）を最小の形で |
 | `interactive-only/` | **対話モードでしか現れないレコード種別**（`file-history-snapshot` / `file-history-delta` / `mode` / `permission-mode` / `summary`）が本文の間に挟まった状態 |
+| `markdown-bodies/` | 整形と折りたたみの材料。**切れ目が記法の途中（囲みコード・表の区切り行）へ来るように長さを合わせてある**——実物では境目を狙って作れない |
+| `softbreaks/` | 改行の形を1枚に集めたもの（素の改行・ハード改行・行頭の `<br/>`・囲みコード・表）。**畳まれない長さにしてある**ので、E2E が数える `br` の数がぶれない |
 
 手書きにしているのは、どちらも実採取物が対話モードでしか作れず、採取すると環境情報が混入するため（公開リポジトリに置けない）。バージョン別ディレクトリに置いていないのは、特定バージョンの実物ではないことを取り違えないようにするため。**「過去バージョンを壊していないこと」の担保には数えない**（実物ではないので、バージョン間の互換の証拠にならない）。
 

@@ -5,10 +5,14 @@ import type { Locator, Page } from '@playwright/test'
 import {
   addProject,
   archiveAll,
+  FIXTURES,
   openDashboard,
   spawnSession,
   WORK_DIR,
 } from './helpers'
+
+/** リポジトリの根。`fixtures/` の1つ上に居る。 */
+const REPO_ROOT = path.resolve(FIXTURES, '..')
 
 /**
  * PJT 専用画面の左パネル（イシューグループ_2026_0805_0514 設計§14・§15。
@@ -31,6 +35,14 @@ const LONG = '長い文書.md'
 const TAIL = 'いちばん最後の行'
 /** 一覧のほうも溢れさせる数。同じ器の中で高さを取り合うので、両方を見る。 */
 const FILLERS = 60
+/**
+ * 改行の見え方を確かめる材料（`構造化ビューでメッセージの改行が反映されない` 設計§5）。
+ *
+ * **このリポジトリのドキュメントの作法をそのまま写してある**——節の区切りに `<br/>` を
+ * 2行、本文は折り返しのために行を分ける。**利用者が実際に開くのはこの形**なので、
+ * ここが変わることが今回いちばん大きい見え方の変化になる。
+ */
+const BREAKS = '改行.md'
 
 /** 1x1 の PNG。**実物**（`<img>` が実際に描けることを幅で見る）。 */
 const TINY_PNG_BASE64 =
@@ -97,6 +109,12 @@ test.beforeAll(() => {
   fs.writeFileSync(
     path.join(docs, LONG),
     `# 長い文書\n\n${lines.join('')}\n## ${TAIL}\n`,
+    'utf8',
+  )
+
+  fs.writeFileSync(
+    path.join(docs, BREAKS),
+    '# 改行の見え方\n\n---\n<br/>\n<br/>\n\n## 節\nこの行と\nつぎの行は、折り返しのために分けてあるだけです。\n\n```\nコードの中\nここは触らない\n```\n',
     'utf8',
   )
 
@@ -422,6 +440,31 @@ test('狭い画面でも、ファイルの中身を遡れる', async ({ page }) 
  * 広い画面と狭い画面で**同じ手順**を通すのが要点——手順が分かれると、
  * 片方でしか踏まない道ができる。
  */
+test('ファイルでも、素の改行と `<br/>` が改行として出る', async ({ page }) => {
+  // **履歴と同じ配列を使っている**ことの現れ（`構造化ビューでメッセージの改行が
+  // 反映されない` 設計§5）。`skipHtml` は rehype の**あと**に効くので、`<br/>` は
+  // 先に `br` 要素へ変わって残る——**このリポジトリの文書が意図した行間が戻る**
+  await 開いて選ぶ(page, BREAKS)
+
+  const view = page.getByTestId('file-markdown')
+  await expect(view).toBeVisible()
+  // 行頭の `<br/>` が2つ ＋ 折り返しの改行が1つ
+  await expect(view.locator('br')).toHaveCount(3)
+  // 囲みコードの中では増えない
+  await expect(view.locator('pre br')).toHaveCount(0)
+  // `skipHtml` は効いたまま（字面としては出ない）
+  await expect(view).not.toContainText('<br')
+
+  // **見え方の良し悪しは目でしか言えない**（設計§10 の【要人間】）。判断できるよう
+  // 1枚だけ残す。置き場所は git 管理外なので、配るものには混ざらない
+  await view.screenshot({
+    path: path.join(
+      REPO_ROOT,
+      'MyDocs/ローカルイシュー/構造化ビューでメッセージの改行が反映されない/見え方-改行あり.png',
+    ),
+  })
+})
+
 async function openLongFile(page: Page) {
   const group = await addProject(page, PROJECT_DIR)
   await group.click({ position: { x: 5, y: 5 } })

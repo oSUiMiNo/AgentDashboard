@@ -145,11 +145,11 @@ test('巻き戻し前のやりとりは畳まれ、開けば読める', async ({
  * ここでしか分からない。使うのは狙って作った合成フィクスチャで、**切れ目が記法の途中へ
  * 来るように長さを合わせてある**（実物では境目を作れない）。
  */
-async function loadMarkdownBodies(page: Parameters<typeof openDashboard>[0]) {
+async function loadBodies(page: Parameters<typeof openDashboard>[0], fixture: string) {
   await startSession(page)
   await showTerminal(page)
   await fireHook(page, 'SessionStart')
-  await writeTranscript(page, 'synthetic/markdown-bodies/session.jsonl')
+  await writeTranscript(page, fixture)
   await showTranscript(page)
   await expect
     .poll(
@@ -158,6 +158,18 @@ async function loadMarkdownBodies(page: Parameters<typeof openDashboard>[0]) {
       { message: '履歴が届くこと', timeout: 30_000 },
     )
     .toBeGreaterThan(0)
+}
+
+async function loadMarkdownBodies(page: Parameters<typeof openDashboard>[0]) {
+  await loadBodies(page, 'synthetic/markdown-bodies/session.jsonl')
+}
+
+/**
+ * 改行の形を1枚へ集めたフィクスチャ。**畳まれない長さにしてある**ので、数がぶれない
+ * （畳むと切れ目の位置で `br` の数が変わる）。
+ */
+async function loadSoftBreaks(page: Parameters<typeof openDashboard>[0]) {
+  await loadBodies(page, 'synthetic/softbreaks/session.jsonl')
 }
 
 /** 畳む相手の行（しきい値を超えた本文）。 */
@@ -200,6 +212,31 @@ test('`<br/>` を含む本文でも行が消えない', async ({ page }) => {
     .filter({ hasText: '区切りの作法' })
   await expect(row.getByTestId('row-body').locator('br')).toHaveCount(2)
   await expect(row).toContainText('つぎの見出し')
+})
+
+test('行が空いていなくても、改行が改行として見える', async ({ page }) => {
+  // **単体では木の形しか見ていない。** 実際に `br` として画面へ出るのは、
+  // 「フック → パーサ → WebSocket → 整形」が全部繋がって初めて分かる
+  await loadSoftBreaks(page)
+
+  // 利用者の本文（`あいう` / `かきく`）
+  const user = page
+    .locator('[data-testid="transcript-row"][data-kind="user_message"]')
+    .filter({ hasText: 'あいう' })
+  await expect(user.getByTestId('row-body').locator('br')).toHaveCount(1)
+
+  // アシスタントの本文。素の改行2つ ＋ ハード改行1つ ＋ 行頭の `<br/>` 2つ ＝ 5
+  const row = page
+    .locator('[data-testid="transcript-row"][data-kind="assistant_text"]')
+    .filter({ hasText: '改行の見え方' })
+  const body = row.getByTestId('row-body')
+  await expect(body.locator('br')).toHaveCount(5)
+
+  // **囲みコードと表の中では増えない**（`text` ノードを通らないため）
+  await expect(body.locator('pre br')).toHaveCount(0)
+  await expect(body.locator('table br')).toHaveCount(0)
+  await expect(body.locator('table')).toHaveCount(1)
+  await expect(body.locator('pre code')).toHaveCount(1)
 })
 
 test('高さの違う行が混ざっていても、末尾に居るかどうかを正しく判定する', async ({ page }) => {
