@@ -128,7 +128,7 @@
   画面に出る版だけを見て「同じものが動いている」と判断しないこと。<br><br>
 
   <p class="note warn"><strong>実機は 0.1.57 で走っている（ディスクも 0.1.57）。</strong> AWS は無い（アカウント閉鎖）。<strong>セッションホスト<span class="mark">▽</span>は走っていない</strong>。<strong>走行とディスクは揃っている</strong>（<strong>フックの宛先に消えたパスが焼き込まれていた件は、0.1.56 が入って解けた</strong>——いまの <code>AGENTDASHBOARD_HOOK_BIN</code> は実在するパスを指しており、入れ替え後に「フックが1件も届いていません」は1度も出ていない）。0.1.47〜0.1.50（<strong>版のドロップダウンが反応しない件を直す</strong>＝0.1.47／狭い窓でサイドバーが全画面を覆うのをやめる＝0.1.48／<strong>合言葉を通った相手にも版の入れ替えを許す</strong>＝0.1.49／<strong>安全でないオリジンでもパスをコピーできる</strong>＝0.1.50）は<strong>すべて効いている</strong>。<strong>2026-08-28 05:17:49 に 0.1.50 で起き直った</strong>（<code>--config /home/osuim/AgentDashboard/config.toml</code> を名指しした起動）。<strong>この起こし直しは <code>~/agentdashboard-restart.log</code> に載っていない</strong>——切り離したスクリプトを通さず手で起こしたためで、<strong>あの記録の末尾（2026-08-27 23:04・0.1.46）は最後の起こし直しではない</strong>。<strong>走行版は本人（<code>/api/me</code>）に聞くこと。</strong>
-  <br><strong>ディスクは 0.1.55 で、リポジトリ（<code>~/Dev/AgentDashboard</code>）に追いついている</strong>——効果線（roam）の巻きの直しは 0.1.54、<strong>ファイル閲覧の上限を 3 MiB へ上げた</strong>のは 0.1.55（あわせて大きい Markdown は整形せずに出す。大きい HTML が箱へ行かなくなっていた不具合の修正も同じ版）。<strong>実機へ効かせるには <code>git pull</code> → <code>make build</code> → 起こし直しが要る</strong>（ソースビルド<span class="mark">▽</span>なので、リリースを出しても届かない）。
+  <br><strong>ディスクは 0.1.57 で、リポジトリ（<code>~/Dev/AgentDashboard</code>）に追いついている</strong>——効果線（roam）の巻きの直しは 0.1.54、<strong>ファイル閲覧の上限を 3 MiB へ上げた</strong>のは 0.1.55（あわせて大きい Markdown は整形せずに出す。大きい HTML が箱へ行かなくなっていた不具合の修正も同じ版）。<strong>実機へ効かせるには <code>git pull</code> → <code>make build</code> → 起こし直しが要る</strong>（ソースビルド<span class="mark">▽</span>なので、リリースを出しても届かない）。
   <br><strong>これはいちばん気づきにくいずれ方である。</strong>ヘッダに出る版はサーバに聞いた答えなので<strong>古いタブでも新しい版が表示される</strong>。「揃っているのに古い」という形になるので、<strong>数字ではなく「最後に起こし直したのはいつか」で判断すること。</strong>
   <br><strong>次に落とすときも、抱えている claude を先に数えること。</strong>起こし直すと道連れになり、<strong>作業中のセッション自身がその中に居ることがある</strong>（今回も居た）。<strong>いつ落としてよいかは人にしか決められない。</strong></p>
 
@@ -255,6 +255,6 @@ agentdashboard-agent logs --since 24h --state-dir ~/agentdashboard-agent/state</
 <div class="panel">
   <strong>なぜ「版」を必ず書くのか。</strong>
   ソースビルド<span class="mark">▽</span>で動かしているものは、<strong>リリースを出しても何も変わらない</strong>。
-  更新するには <code>git pull</code> → <code>make build</code> → 起こし直す、が要る。
+  更新するには <code>git pull</code> → <code>make build</code> → <strong>画面の「いま入れ替える」</strong>（または <code>agentdashboard version restart</code>）が要る。<strong>端末で起こし直す行は要らない</strong>——その場で自分を新しい実行ファイルへ入れ替えて同じ PID のまま戻ってくる（<code>手元の新しい版をGUIだけで効かせる</code>）。<strong>抱えている claude は道連れになる。</strong>
   「リリースしたのだから最新のはず」という思い込みが、いちばん時間を溶かす。
 </div>
