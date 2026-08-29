@@ -21,7 +21,9 @@
 
 import { useSyncExternalStore } from 'react'
 import type { CardId, Node, NodeId, TreeNode } from '@/lib/protocol'
+import type { ActivitySummaryInput } from '@/lib/markdown'
 import { shouldFoldBody } from '@/lib/markdown'
+import { countChanges, toDiffSource } from '@/lib/diff'
 
 /** ツリーの1ノードに対応する行。 */
 export interface NodeRow {
@@ -62,8 +64,30 @@ export interface RewoundRow {
   expanded: boolean
 }
 
+/**
+ * 発言と発言の間の活動を1行に束ねた行（設計§2）。
+ *
+ * 実ノードと1対1に対応しない合成行で、[`RewoundRow`] と同じ格好をしている。
+ * 束ねる相手は**ツールコールと未知のレコードだけ**——発言・思考・サブエージェントは
+ * 入らない（[`isActivity`]）ので、発言がそのまま境目になる。
+ */
+export interface ActivityRow {
+  kind: 'activity'
+  /** 束ねた中身が変わらない限り不変であること（設計§2-2） */
+  id: string
+  /** 束ねた子のIDの並び。開いたときはこの順で出す */
+  members: NodeId[]
+  /** 束ねた子と同じ深さ。**開いても増やさない**（設計§2-4） */
+  depth: number
+  expanded: boolean
+  /** 種類ごとの件数。文言は `activitySummary()` が組み立てる（設計§3-1） */
+  counts: ActivitySummaryInput
+  /** 子の差分の合計（設計§3-2）。編集を1つも含まなければ `null` */
+  diff: { added: number; removed: number } | null
+}
+
 /** ツリーを平らに並べた1行分。仮想化はこの配列に対して行う。 */
-export type FlatRow = NodeRow | RewoundRow
+export type FlatRow = NodeRow | RewoundRow | ActivityRow
 
 /**
  * 根の子を入れておくキー。`Map` のキーに `null` を使えないため。
@@ -76,6 +100,24 @@ const ROOT = '#root'
 
 /** 巻き戻しの見出し行のID。[`ROOT`] と同じ理由で `#` から始める。 */
 export const REWOUND_ROW_ID = '#rewound'
+
+/**
+ * まとめ行のIDの接頭辞。[`ROOT`] と同じ理由で `#` から始める。
+ *
+ * **種にするのは先頭の子のID**である（設計§2-2）。仮想化は `getItemKey` に `row.id` を
+ * そのまま渡しており（`TranscriptTree.tsx`）、**同じ行に対して毎回同じ値でないと実測した
+ * 高さが捨てられる**——遡っている最中に画面が跳ねる。活動は末尾へ足されるので、先頭の子は
+ * 後から増えても変わらない。
+ *
+ * | 採らない案 | 何が起きるか |
+ * |---|---|
+ * | 連番 | 上に活動が増えるたび、下のまとめ行の番号が全部ずれる |
+ * | 束ねた全IDのハッシュ | 活動が1つ増えるだけで別の行になる（走っているセッションでは増え続ける） |
+ *
+ * [`REWOUND_ROW_ID`] が固定の文字列でよかったのは、あちらがカードあたり高々1個しか
+ * 無いためである。まとめ行は何個も出るので同じ手は使えない。
+ */
+export const ACTIVITY_ROW_PREFIX = '#activity:'
 
 interface CardState {
   byId: Map<string, TreeNode>
@@ -91,6 +133,13 @@ interface CardState {
    * 困る形になる。
    */
   bodyOpen: Set<string>
+  /**
+   * 開いているまとめ行（鍵は [`ACTIVITY_ROW_PREFIX`] で始まる合成ID）。
+   *
+   * **[`CardState.expanded`] と混ぜない**（設計§2-5）。あちらの鍵は実ノードのIDで、
+   * こちらは合成ID——意味が違うものを同じ集合へ入れると、どちらの由来か分からなくなる。
+   */
+  expandedActivity: Set<string>
   /** 巻き戻し前の枝を開いているか */
   showRewound: boolean
   /** 平らにした結果。変化したら捨てて作り直す */
@@ -112,6 +161,7 @@ function stateOf(cardId: CardId): CardState {
       children: new Map(),
       expanded: new Set(),
       bodyOpen: new Set(),
+      expandedActivity: new Set(),
       showRewound: false,
       flat: null,
     }
@@ -145,6 +195,93 @@ function isExpandable(node: Node, hasChildren: boolean): boolean {
   return node.kind === 'tool_call' || node.kind === 'thinking' || node.kind === 'unknown'
 }
 
+/**
+ * まとめ行へ束ねる種別か（設計§2-3）。
+ *
+ * **発言・思考・サブエージェントは入らない。** 発言が入らないことで「発言と発言の間を
+ * 1行にまとめる」が自動的に成立する——パーサが「ツールコールは直前のアシスタント本文の
+ * 子」と決めているので、**同じ親の下**＝**発言と発言の間**になる。
+ */
+function isActivity(node: Node): boolean {
+  return node.kind === 'tool_call' || node.kind === 'unknown'
+}
+
+/**
+ * ツールの名前から、まとめ行の件数へ振り分ける（設計§3-1）。
+ *
+ * **名前を持つものは配列、持たないものは件数**で受ける。コマンドに短い名前が無いのが
+ * 分かれ目で、この区別は `ActivitySummaryInput` の側が決めている。
+ */
+function tally(counts: ActivitySummaryInput, node: Node) {
+  if (node.kind === 'unknown') {
+    counts.unknown += 1
+    return
+  }
+  if (node.kind !== 'tool_call') {
+    return
+  }
+  switch (node.name) {
+    case 'Edit':
+    case 'Write':
+    case 'NotebookEdit':
+      counts.edited.push(pathOf(node.input, node.name))
+      return
+    case 'Bash':
+      counts.ran += 1
+      return
+    case 'Read':
+      counts.read.push(pathOf(node.input, node.name))
+      return
+    default:
+      counts.used += 1
+  }
+}
+
+/**
+ * 編集・読み取りの相手のパス。
+ *
+ * 取れなかったらツール名で代える。**空文字を返さない**のは、文言が「編集済み 」で
+ * 途切れて何のことか分からなくなるためで、名乗れるものが他に無い以上ツール名が最善である。
+ */
+function pathOf(input: unknown, fallback: string): string {
+  if (typeof input !== 'object' || input === null) {
+    return fallback
+  }
+  const record = input as Record<string, unknown>
+  for (const key of ['file_path', 'notebook_path', 'path']) {
+    const value = record[key]
+    if (typeof value === 'string' && value.length > 0) {
+      return value
+    }
+  }
+  return fallback
+}
+
+/**
+ * 子1件ぶんの差分を覚えておく場所。
+ *
+ * [`flatten`] は `state.flat` が捨てられるたびに**根から全部作り直す**ので、素直に書くと
+ * **確定して二度と変わらない古い差分**まで、無関係なノードが1件届くたびに数え直すことに
+ * なる（`walkNode` の「ここで実際に切らない」と同じ理屈）。
+ *
+ * [`upsert`] は更新のたび**新しい `TreeNode` へ差し替える**ので、鍵をオブジェクトの参照に
+ * しておくと、**結果が届いたときだけ**取り直される。`WeakMap` なので、ノードが参照を
+ * 失えば一緒に消える。
+ */
+const diffCache = new WeakMap<TreeNode, { added: number; removed: number } | null>()
+
+/** 子1件の増減。差分が届いていなければ `null`（設計§3-2）。 */
+function diffOf(child: TreeNode): { added: number; removed: number } | null {
+  const known = diffCache.get(child)
+  if (known !== undefined) {
+    return known
+  }
+  const source = child.node.kind === 'tool_call' ? toDiffSource(child.node.result) : null
+  const counted = source ? countChanges(source.hunks) : null
+  diffCache.set(child, counted)
+  return counted
+}
+
 function upsert(state: CardState, node: TreeNode) {
   const key = node.id
   const known = state.byId.get(key)
@@ -174,20 +311,96 @@ function branchOf(state: CardState, id: string): number {
 function flatten(state: CardState): FlatRow[] {
   const rows: FlatRow[] = []
   const walkFrom = (parent: string, depth: number) => {
-    const ids = state.children.get(parent)
-    if (!ids) {
-      return
+    walkSiblings(state.children.get(parent) ?? [], depth)
+  }
+
+  /** その位置が活動か。並びの端を越えたら偽。 */
+  const activityAt = (ids: string[], index: number): boolean => {
+    if (index >= ids.length) {
+      return false
     }
-    for (const id of ids) {
-      walkNode(id, depth)
+    const node = state.byId.get(ids[index])
+    return node !== undefined && isActivity(node.node)
+  }
+
+  /**
+   * 同じ親の下の並びを、**連続する活動を束ねながら**積む（設計§2-3）。
+   *
+   * **子を回す道は3つある**——親の下・根・巻き戻し前の枝。3つともここを通す必要がある。
+   * パーサは直前にアシスタント本文が無ければツールコールを**根の直下**へ置くので
+   * （`transcript-parser` の `turn_anchor` が発言のたびに外れる）、根の並びにも活動が現れる。
+   * ここを素通しすると「根の直下の活動だけ束ねられない」という非対称ができる。
+   */
+  const walkSiblings = (ids: string[], depth: number) => {
+    let index = 0
+    while (index < ids.length) {
+      if (!activityAt(ids, index)) {
+        walkNode(ids[index], depth)
+        index += 1
+        continue
+      }
+      // 最長の並びを取る。**種類は混ぜる**ので、ツールコールと未知が隣り合っても切らない
+      const start = index
+      while (activityAt(ids, index)) {
+        index += 1
+      }
+      pushActivity(ids.slice(start, index), depth)
     }
   }
+
+  const pushActivity = (members: string[], depth: number) => {
+    const id = `${ACTIVITY_ROW_PREFIX}${members[0]}`
+    const expanded = state.expandedActivity.has(id)
+    const counts: ActivitySummaryInput = { edited: [], ran: 0, read: [], used: 0, unknown: 0 }
+    let added = 0
+    let removed = 0
+    // 差分が1件も取れなければ出さない（設計§3-2）。0 と「無い」を区別するために数で見ない
+    let edits = false
+    for (const memberId of members) {
+      const child = state.byId.get(memberId)
+      if (!child) {
+        continue
+      }
+      tally(counts, child.node)
+      const diff = diffOf(child)
+      if (diff) {
+        added += diff.added
+        removed += diff.removed
+        edits = true
+      }
+    }
+    rows.push({ kind: 'activity', id, members, depth, expanded, counts, diff: edits ? { added, removed } : null })
+    if (expanded) {
+      for (const memberId of members) {
+        // **[`walkSiblings`] を通してはいけない。** members は定義上すべて活動なので、
+        // その場でもう一度束ね直され、同じ id のまとめ行が入れ子で出る
+        walkNode(memberId, depth)
+      }
+    }
+  }
+
   const walkNode = (id: string, depth: number) => {
     const node = state.byId.get(id)
     if (!node) {
       return
     }
-    const hasChildren = (state.children.get(id)?.length ?? 0) > 0
+    const childIds = state.children.get(id) ?? []
+    const hasChildren = childIds.length > 0
+    // **活動はまとめ行へ移るので、本文の行では「開けば出るもの」として数えない**（設計§2-5）。
+    // これでアシスタント本文の expandable が偽になり、本文にトグルが出なくなる（要望1）。
+    //
+    // **本文を持つ種別に限る。** 全種別へ当てると、子がツールコールだけのサブエージェントが
+    // 開けなくなり、その下のまとめ行へ**辿り着く道が無くなる**（掘れることは要件そのもの）。
+    // 本文の行だけが「本文が既に出ているので、子を出す操作が要らない」という立場にある。
+    //
+    // 再帰そのものは hasChildren（生の構造）で判断する——ここを偽にすると、子を回さなく
+    // なって**まとめ行そのものが出なくなる**
+    const ownChildren = hasFoldableBody(node.node)
+      ? childIds.some((childId) => {
+          const child = state.byId.get(childId)
+          return child === undefined || !isActivity(child.node)
+        })
+      : hasChildren
     const expanded = state.expanded.has(id)
     // 畳む相手かを見るだけにする。ここで実際に切ると、数万件の履歴で全ノードぶんの
     // 文字列を作ることになる（切る仕事は、描くときで間に合う）
@@ -197,7 +410,7 @@ function flatten(state: CardState): FlatRow[] {
       id,
       node: node.node,
       depth,
-      expandable: isExpandable(node.node, hasChildren),
+      expandable: isExpandable(node.node, ownChildren),
       expanded,
       hasChildren,
       foldable,
@@ -222,16 +435,13 @@ function flatten(state: CardState): FlatRow[] {
       expanded: state.showRewound,
     })
     if (state.showRewound) {
-      for (const id of rewound) {
-        walkNode(id, 0)
-      }
+      walkSiblings(rewound, 0)
     }
   }
-  for (const id of roots) {
-    if (branchOf(state, id) >= latest) {
-      walkNode(id, 0)
-    }
-  }
+  walkSiblings(
+    roots.filter((id) => branchOf(state, id) >= latest),
+    0,
+  )
   return rows
 }
 
@@ -310,7 +520,7 @@ export function toggleNode(cardId: CardId, nodeId: NodeId) {
 /**
  * 本文の開け閉めを切り替える。
  *
- * [`toggleNode`] とは**別の操作**である。`▸▾` が担うのは「まだ出していないもの（＝子）を
+ * [`toggleNode`] とは**別の操作**である。開け閉めの記号が担うのは「まだ出していないもの（＝子）を
  * 出すこと」で、こちらは「切ってある本文を全部読むこと」。同じ操作にまとめると、
  * ツールを何本も呼んだターンを畳んで会話だけ追う、という読み方ができなくなる。
  */
@@ -320,6 +530,23 @@ export function toggleBody(cardId: CardId, nodeId: NodeId) {
     state.bodyOpen.delete(nodeId)
   } else {
     state.bodyOpen.add(nodeId)
+  }
+  state.flat = null
+  notify(cardId)
+}
+
+/**
+ * まとめ行の開け閉めを切り替える。
+ *
+ * [`toggleNode`] とは**別の集合**を使う（設計§2-5）。あちらの鍵は実ノードのID、こちらは
+ * 合成ID（[`ACTIVITY_ROW_PREFIX`]）で、意味が違うものを同じ `Set` へ入れない。
+ */
+export function toggleActivity(cardId: CardId, rowId: string) {
+  const state = stateOf(cardId)
+  if (state.expandedActivity.has(rowId)) {
+    state.expandedActivity.delete(rowId)
+  } else {
+    state.expandedActivity.add(rowId)
   }
   state.flat = null
   notify(cardId)

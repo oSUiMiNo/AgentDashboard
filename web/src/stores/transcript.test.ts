@@ -1,11 +1,14 @@
 import type { Node, TreeNode } from '@/lib/protocol'
 import { BODY_FOLD_GRACE_LINES, BODY_FOLD_LINES } from '@/lib/markdown'
+import type { ActivityRow } from './transcript'
 import {
+  ACTIVITY_ROW_PREFIX,
   appendNodes,
   clearAllTranscripts,
   getNode,
   getRows,
   resetTranscript,
+  toggleActivity,
   toggleBody,
   toggleNode,
   toggleRewound,
@@ -193,6 +196,8 @@ describe('本文の折りたたみ', () => {
       // 長さで決める規則は当てない（設計§2-4）
       node('k1', null, { kind: 'thinking', text: long }),
     ])
+    // ツールコールは**根の直下でも**まとめ行へ束ねられる（設計§2-3）。開かないと行が並ばない
+    toggleActivity(CARD, `${ACTIVITY_ROW_PREFIX}t1`)
     // ツールコールは既定で閉じているので、子のサブエージェントは開かないと並ばない
     toggleNode(CARD, 't1')
     expect(rowOf('t1').foldable).toBe(false)
@@ -251,11 +256,25 @@ describe('開閉の判定は動かしていない', () => {
     ['unknown', { kind: 'unknown', record_type: 'mystery', raw: {} }],
   ]
 
-  /** 種別 × 子の有無の総当たり。値はこの工事の**前**に観測したもの。 */
+  /**
+   * 種別 × 子の有無の総当たり。
+   *
+   * **判定式（`isExpandable`）は1文字も変えていない。** 変わったのは**渡す引数**だけで、
+   * 活動の子は「開けば出るもの」として数えなくなった（設計§2-5）——子がまとめ行へ移る
+   * ためである。
+   *
+   * **「子あり」が偽へ反転したのは、本文を持つ2種別だけ。** 子として付けているのが
+   * `tool_call` 1件＝**100%活動**なので、渡す引数が偽になる。`assistant_text` の行が
+   * これで**要望1（本文にトグルを出さない）を自動的に満たす**。
+   *
+   * **`subagent` は反転しない。** 全種別へ当てると、子がツールコールだけのサブエージェントが
+   * 開けなくなり、その下のまとめ行へ辿り着けなくなる。残り3種別（`thinking` ／ `tool_call` ／
+   * `unknown`）は**種別そのものが判定式のフォールバックに入っている**ので動かない。
+   */
   const EXPECTED: Record<string, { expandable: [boolean, boolean]; expanded: boolean }> = {
     // [子なし, 子あり]
-    user_message: { expandable: [false, true], expanded: true },
-    assistant_text: { expandable: [false, true], expanded: true },
+    user_message: { expandable: [false, false], expanded: true },
+    assistant_text: { expandable: [false, false], expanded: true },
     thinking: { expandable: [true, true], expanded: false },
     tool_call: { expandable: [true, true], expanded: false },
     subagent: { expandable: [false, true], expanded: false },
@@ -271,6 +290,15 @@ describe('開閉の判定は動かしていない', () => {
       }
       appendNodes(CARD, nodes)
 
+      // 活動そのもの（ツールコール・未知）は1件でもまとめ行へ束ねられるので、
+      // 開かないと実ノードの行が並ばない（設計§2-3）
+      const bundled = rowsOf(CARD).find(
+        (candidate) => candidate.kind === 'activity' && candidate.members.includes('n1'),
+      )
+      if (bundled) {
+        toggleActivity(CARD, bundled.id)
+      }
+
       const row = rowsOf(CARD).find((candidate) => candidate.kind === 'node' && candidate.id === 'n1')
       if (!row || row.kind !== 'node') {
         throw new Error('行が無い')
@@ -281,6 +309,299 @@ describe('開閉の判定は動かしていない', () => {
       expect(row.expanded, `${name} の既定`).toBe(EXPECTED[name].expanded)
     }
   })
+})
+
+/**
+ * 発言と発言の間の活動を1行に束ねる（テスト計画フェーズ3・設計§2・§3）。
+ *
+ * **仮想化の跳ねは目で見ても再現しにくい**ので、`id` が不変であることはここで機械が見る。
+ */
+describe('活動をまとめた行', () => {
+  /** アシスタント本文1つと、その下の活動。いちばんよく使う形。 */
+  const said = (id: string, text = 'やります') =>
+    node(id, null, { kind: 'assistant_text', text })
+
+  /** 差分の付いた編集の結果。`structuredPatch` があるものだけが合計に入る（設計§3-2）。 */
+  function edit(path: string, added: number, removed: number): Node {
+    return {
+      kind: 'tool_call',
+      name: 'Edit',
+      input: { file_path: path },
+      result: {
+        filePath: path,
+        originalFile: 'もとの中身',
+        structuredPatch: [
+          {
+            oldStart: 1,
+            oldLines: removed,
+            newStart: 1,
+            newLines: added,
+            lines: [
+              ...Array.from({ length: added }, (_, index) => `+足した ${index}`),
+              ...Array.from({ length: removed }, (_, index) => `-消した ${index}`),
+            ],
+          },
+        ],
+      },
+      status: 'ok',
+      subagent: null,
+    }
+  }
+
+  function activities(): ActivityRow[] {
+    return rowsOf(CARD).filter((row): row is ActivityRow => row.kind === 'activity')
+  }
+
+  function activityOf(index = 0): ActivityRow {
+    const row = activities()[index]
+    if (!row) {
+      throw new Error(`まとめ行が無い：${index}`)
+    }
+    return row
+  }
+
+  function nodeRowOf(id: string) {
+    const row = rowsOf(CARD).find((candidate) => candidate.kind === 'node' && candidate.id === id)
+    if (!row || row.kind !== 'node') {
+      throw new Error(`行が無い：${id}`)
+    }
+    return row
+  }
+
+  describe('まとめる規則', () => {
+    it('同じ親の下で連続する活動が、1行にまとまる', () => {
+      appendNodes(CARD, [
+        said('a1'),
+        node('t1', 'a1', tool('ok')),
+        node('t2', 'a1', tool('ok')),
+        node('t3', 'a1', tool('ok')),
+      ])
+      expect(activities()).toHaveLength(1)
+      expect(activityOf().members).toEqual(['t1', 't2', 't3'])
+    })
+
+    it('ツールコールと未知のレコードが混ざっても、1行のままである', () => {
+      appendNodes(CARD, [
+        said('a1'),
+        node('t1', 'a1', tool('ok')),
+        node('x1', 'a1', { kind: 'unknown', record_type: 'mystery', raw: {} }),
+        node('t2', 'a1', tool('ok')),
+      ])
+      expect(activities()).toHaveLength(1)
+      expect(activityOf().members).toEqual(['t1', 'x1', 't2'])
+      expect(activityOf().counts.unknown).toBe(1)
+    })
+
+    it('発言が境目になり、親が変われば別のまとめ行になる', () => {
+      appendNodes(CARD, [
+        said('a1', 'A'),
+        node('t1', 'a1', tool('ok')),
+        node('t2', 'a1', tool('ok')),
+        said('a2', 'B'),
+        node('t3', 'a2', tool('ok')),
+      ])
+      expect(activities().map((row) => row.members)).toEqual([['t1', 't2'], ['t3']])
+    })
+
+    it('親をまたいでまとめない（根の直下の活動と、発言の下の活動）', () => {
+      // パーサは直前にアシスタント本文が無ければツールコールを根の直下へ置く。
+      // 根の並びも束ねる相手だが、親が違う以上ひとつにしない
+      appendNodes(CARD, [node('t0', null, tool('ok')), said('a1'), node('t1', 'a1', tool('ok'))])
+      expect(activities().map((row) => row.members)).toEqual([['t0'], ['t1']])
+    })
+
+    it('同じ親の下でも、間に別の種別が挟まれば別のまとめ行になる', () => {
+      // 束ねるのは**連続する**並びである。飛び石を1つにまとめると、間に挟まったものが
+      // どちらのまとまりに属するのか読めなくなる
+      appendNodes(CARD, [
+        said('a1'),
+        node('t1', 'a1', tool('ok')),
+        node('k1', 'a1', { kind: 'thinking', text: '考え中' }),
+        node('t2', 'a1', tool('ok')),
+      ])
+      expect(activities().map((row) => row.members)).toEqual([['t1'], ['t2']])
+    })
+
+    it('活動が1件でも、まとめ行になる', () => {
+      appendNodes(CARD, [said('a1'), node('t1', 'a1', tool('ok'))])
+      expect(activityOf().members).toEqual(['t1'])
+    })
+
+    it('サブエージェントの中でも、同じ規則が効く', () => {
+      appendNodes(CARD, [
+        said('a1'),
+        node('t1', 'a1', tool('ok')),
+        node('s1', 't1', { kind: 'subagent', agent_type: 'general-purpose', spawn_depth: 1 }),
+        node('sa1', 's1', { kind: 'assistant_text', text: '中の発言' }),
+        node('st1', 'sa1', tool('ok')),
+        node('st2', 'sa1', tool('ok')),
+      ])
+      toggleActivity(CARD, `${ACTIVITY_ROW_PREFIX}t1`)
+      toggleNode(CARD, 't1')
+      toggleNode(CARD, 's1')
+      const inner = activities().find((row) => row.members.includes('st1'))
+      expect(inner?.members).toEqual(['st1', 'st2'])
+    })
+
+    it('発言・思考・サブエージェントは、まとめ行に入らない', () => {
+      appendNodes(CARD, [
+        node('u1', null, { kind: 'user_message', text: 'x' }),
+        said('a1'),
+        node('k1', null, { kind: 'thinking', text: 'x' }),
+        node('t1', null, tool('ok')),
+        node('s1', 't1', { kind: 'subagent', agent_type: 'general-purpose', spawn_depth: 1 }),
+      ])
+      expect(activities().map((row) => row.members)).toEqual([['t1']])
+      toggleActivity(CARD, `${ACTIVITY_ROW_PREFIX}t1`)
+      toggleNode(CARD, 't1')
+      // サブエージェントが出てきても、新しいまとめ行にはならない
+      expect(activities().map((row) => row.members)).toEqual([['t1']])
+    })
+  })
+
+  describe('id の安定', () => {
+    it('まとめ行の id は `#` で始まる（実ノードのIDとぶつからない）', () => {
+      appendNodes(CARD, [said('a1'), node('t1', 'a1', tool('ok'))])
+      expect(activityOf().id).toBe(`${ACTIVITY_ROW_PREFIX}t1`)
+      expect(activityOf().id.startsWith('#')).toBe(true)
+    })
+
+    it('活動が後から増えても、まとめ行の id が変わらない', () => {
+      appendNodes(CARD, [said('a1'), node('t1', 'a1', tool('ok'))])
+      const before = activityOf().id
+      appendNodes(CARD, [node('t2', 'a1', tool('ok')), node('t3', 'a1', tool('ok'))])
+      expect(activityOf().members).toEqual(['t1', 't2', 't3'])
+      expect(activityOf().id).toBe(before)
+    })
+
+    it('上に別のまとめ行が現れても、下のまとめ行の id が変わらない', () => {
+      // 巻き戻し前の枝を開くと、行が**上に**増える（新しいノードは末尾にしか付かないので、
+      // 上に増える形はこれで作る）
+      appendNodes(CARD, [
+        node('a0', null, { kind: 'assistant_text', text: '前の枝' }, 0),
+        node('t0', 'a0', tool('ok'), 0),
+        node('a1', null, { kind: 'assistant_text', text: '今の枝' }, 1),
+        node('t1', 'a1', tool('ok'), 1),
+      ])
+      const before = activityOf().id
+      toggleRewound(CARD)
+      expect(activities().map((row) => row.members)).toEqual([['t0'], ['t1']])
+      expect(activityOf(1).id).toBe(before)
+    })
+  })
+
+  describe('深さと開閉', () => {
+    it('まとめ行の深さは、束ねた子と同じ（親の深さ＋1）である', () => {
+      appendNodes(CARD, [said('a1'), node('t1', 'a1', tool('ok'))])
+      expect(nodeRowOf('a1').depth).toBe(0)
+      expect(activityOf().depth).toBe(1)
+    })
+
+    it('開いても、子の深さが増えない', () => {
+      appendNodes(CARD, [said('a1'), node('t1', 'a1', tool('ok'))])
+      toggleActivity(CARD, activityOf().id)
+      expect(activityOf().depth).toBe(1)
+      expect(nodeRowOf('t1').depth).toBe(1)
+    })
+
+    it('まとめ行の開閉が、ノードの開閉と混ざらない', () => {
+      appendNodes(CARD, [said('a1'), node('t1', 'a1', tool('ok'))])
+      toggleActivity(CARD, activityOf().id)
+      expect(activityOf().expanded).toBe(true)
+      // ツールコールは既定で閉じたまま——まとめ行を開いただけでは動かない
+      expect(nodeRowOf('t1').expanded).toBe(false)
+      toggleNode(CARD, 't1')
+      expect(nodeRowOf('t1').expanded).toBe(true)
+      expect(activityOf().expanded).toBe(true)
+    })
+
+    it('アシスタント本文の expandable が偽になる（子がまとめ行へ移るため）', () => {
+      appendNodes(CARD, [said('a1'), node('t1', 'a1', tool('ok'))])
+      expect(nodeRowOf('a1').expandable).toBe(false)
+      // 構造としては子を持っている。数えなくなったのは「開けば出るもの」のほうだけ
+      expect(nodeRowOf('a1').hasChildren).toBe(true)
+    })
+
+    it('子がツールコールだけのサブエージェントも、開ける', () => {
+      // 「活動の子は数えない」を**全種別へ当てると、ここが偽になる**。すると、その下の
+      // まとめ行へ辿り着く道が無くなり、「サブエージェント → ツールコール → 差分と掘れる」
+      // という要件そのものが壊れる（実際に踏んだ）
+      appendNodes(CARD, [
+        said('a1'),
+        node('t1', 'a1', tool('ok')),
+        node('s1', 't1', { kind: 'subagent', agent_type: 'general-purpose', spawn_depth: 1 }),
+        node('st1', 's1', tool('ok')),
+      ])
+      toggleActivity(CARD, `${ACTIVITY_ROW_PREFIX}t1`)
+      toggleNode(CARD, 't1')
+      expect(nodeRowOf('s1').expandable).toBe(true)
+    })
+
+    it('まとめ行の開閉が、描き直しをまたいで残る', () => {
+      appendNodes(CARD, [said('a1'), node('t1', 'a1', tool('ok'))])
+      toggleActivity(CARD, activityOf().id)
+      appendNodes(CARD, [said('a2', 'あとから来た発言')])
+      expect(activityOf().expanded).toBe(true)
+    })
+  })
+
+  describe('差分の合計', () => {
+    it('まとめ行の差分は、子の合計になる', () => {
+      appendNodes(CARD, [
+        said('a1'),
+        node('e1', 'a1', edit('src/one.ts', 3, 1)),
+        node('e2', 'a1', edit('src/two.ts', 4, 2)),
+      ])
+      expect(activityOf().diff).toEqual({ added: 7, removed: 3 })
+      expect(activityOf().counts.edited).toEqual(['src/one.ts', 'src/two.ts'])
+    })
+
+    it('編集を1つも含まないまとめ行には、差分が出ない', () => {
+      appendNodes(CARD, [said('a1'), node('t1', 'a1', tool('ok'))])
+      expect(activityOf().diff).toBeNull()
+      expect(activityOf().counts.ran).toBe(1)
+    })
+
+    it('`structuredPatch` が届かない子は、合計に数えない', () => {
+      const truncated: Node = {
+        kind: 'tool_call',
+        name: 'Edit',
+        input: { file_path: 'src/big.ts' },
+        // 巨大な差分はパーサ側で切り詰められ、structuredPatch ごと消える
+        result: { filePath: 'src/big.ts' },
+        status: 'ok',
+        subagent: null,
+      }
+      appendNodes(CARD, [
+        said('a1'),
+        node('e1', 'a1', edit('src/one.ts', 2, 0)),
+        node('e2', 'a1', truncated),
+      ])
+      // 合計は実際より小さくなる。**嘘の数を出すよりよい**（設計§3-2）
+      expect(activityOf().diff).toEqual({ added: 2, removed: 0 })
+      // 数えられなかった子も、件数のほうには出る
+      expect(activityOf().counts.edited).toEqual(['src/one.ts', 'src/big.ts'])
+    })
+  })
+
+  it(
+    '活動が数万件でも平らにできる',
+    () => {
+      // **既存の規模テストは `assistant_text` だけ**なので、束ねも差分の合計も一度も
+      // 通っていない。差分は `flatten()` のたびに全部数え直しうるので、ここで通す
+      const nodes: TreeNode[] = [said('a1')]
+      for (let index = 0; index < 30_000; index += 1) {
+        nodes.push(node(`e${index}`, 'a1', edit(`src/file${index}.ts`, 2, 1)))
+      }
+      appendNodes(CARD, nodes)
+      expect(activityOf().members).toHaveLength(30_000)
+      expect(activityOf().diff).toEqual({ added: 60_000, removed: 30_000 })
+      // 無関係なノードが1件届いて作り直しても、同じ答えが同じ速さで返ること
+      appendNodes(CARD, [said('a2', 'あと')])
+      expect(activityOf().diff).toEqual({ added: 60_000, removed: 30_000 })
+    },
+    20_000,
+  )
 })
 
 describe('規模', () => {
