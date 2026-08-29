@@ -31,7 +31,13 @@ import { Diff, Hunk } from 'react-diff-view'
 import type { CardId, Node } from '@/lib/protocol'
 import { countChanges, toDiffSource } from '@/lib/diff'
 import { tokenizeHunks } from '@/lib/highlight'
-import { REHYPE_PLUGINS, REMARK_PLUGINS, foldMarkdown } from '@/lib/markdown'
+import {
+  REHYPE_PLUGINS,
+  REMARK_PLUGINS,
+  foldDecision,
+  foldMarkdownByLines,
+  summarizeInput,
+} from '@/lib/markdown'
 import type { FlatRow, NodeRow, RewoundRow } from '@/stores/transcript'
 
 interface Props {
@@ -106,20 +112,6 @@ function showsBodyAlways(node: Node): boolean {
   return node.kind === 'user_message' || node.kind === 'assistant_text'
 }
 
-function summarizeInput(input: unknown): string {
-  if (typeof input !== 'object' || input === null) {
-    return ''
-  }
-  const record = input as Record<string, unknown>
-  // よく使うツールは「何に対して何をしたか」が1つの項目に入っている
-  for (const key of ['file_path', 'command', 'pattern', 'path', 'description', 'prompt']) {
-    const value = record[key]
-    if (typeof value === 'string') {
-      return value.replace(/\s+/g, ' ').slice(0, 200)
-    }
-  }
-  return JSON.stringify(input).slice(0, 200)
-}
 
 /**
  * 履歴の1行。**`memo` で包む。**
@@ -310,7 +302,7 @@ function MarkdownBody({
   onToggleBody: () => void
 }) {
   const folded = row?.foldable === true && !row.bodyOpen
-  const body = folded ? foldMarkdown(text).head : text
+  const body = folded ? foldMarkdownByLines(text, foldDecision(text).lines).head : text
 
   return (
     <div className="mt-1 ml-6">

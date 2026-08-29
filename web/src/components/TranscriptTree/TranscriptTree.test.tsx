@@ -1,7 +1,7 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { Node, TreeNode } from '@/lib/protocol'
-import { BODY_FOLD_LIMIT } from '@/lib/markdown'
+import { BODY_FOLD_GRACE_LINES, BODY_FOLD_LINES } from '@/lib/markdown'
 import { TranscriptTree } from './TranscriptTree'
 import { appendNodes, clearAllTranscripts } from '@/stores/transcript'
 import { useWsStore } from '@/stores/ws'
@@ -203,9 +203,13 @@ const MARKDOWN = [
 /**
  * しきい値を超える本文。冒頭は必ず整形できる形にしてある。
  *
- * 長さを**しきい値から作る**ので、実機で 1000 を決め直してもこの土台は追随する。
+ * 長さを**しきい値から作る**ので、実機で 75行 を決め直してもこの土台は追随する。
+ * **猶予まで含めて1行超える**ようにしてある（超えないと畳まれない）。
  */
-const LONG = `${MARKDOWN}\n\n${'ながい本文。'.repeat(Math.ceil(BODY_FOLD_LIMIT / 6))}`
+const LONG = `${MARKDOWN}\n\n${Array.from(
+  { length: BODY_FOLD_LINES + BODY_FOLD_GRACE_LINES + 1 },
+  () => 'ながい本文。',
+).join('\n')}`
 
 function rowByKind(kind: string) {
   const row = rowsOf(kind)[0]

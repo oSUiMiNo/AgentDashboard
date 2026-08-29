@@ -1,5 +1,5 @@
 import type { Node, TreeNode } from '@/lib/protocol'
-import { BODY_FOLD_LIMIT } from '@/lib/markdown'
+import { BODY_FOLD_GRACE_LINES, BODY_FOLD_LINES } from '@/lib/markdown'
 import {
   appendNodes,
   clearAllTranscripts,
@@ -148,8 +148,10 @@ describe('履歴ストア', () => {
  * - **本文の開閉と、子の開閉は独立している**（操作を2つに分けたことの、いちばん小さい担保）
  */
 describe('本文の折りたたみ', () => {
-  const short = 'あ'.repeat(BODY_FOLD_LIMIT)
-  const long = 'あ'.repeat(BODY_FOLD_LIMIT + 1)
+  // 実効行数で作る。**猶予まで含めたところが境目**なので、そこちょうどと1行超えを並べる
+  const linesOf = (count: number) => Array.from({ length: count }, () => 'あ').join('\n')
+  const short = linesOf(BODY_FOLD_LINES + BODY_FOLD_GRACE_LINES)
+  const long = linesOf(BODY_FOLD_LINES + BODY_FOLD_GRACE_LINES + 1)
 
   function rowOf(id: string) {
     const row = rowsOf(CARD).find((candidate) => candidate.kind === 'node' && candidate.id === id)
@@ -164,9 +166,23 @@ describe('本文の折りたたみ', () => {
       node('u1', null, { kind: 'user_message', text: short }),
       node('a1', null, { kind: 'assistant_text', text: long }),
     ])
-    // ちょうどは畳まない（`foldMarkdown` と同じ境目であることの確認でもある）
+    // 猶予まで含めてちょうどは畳まない（`foldDecision` と同じ境目であることの確認でもある）
     expect(rowOf('u1').foldable).toBe(false)
     expect(rowOf('a1').foldable).toBe(true)
+  })
+
+  it('利用者の発言とアシスタントの本文に、同じしきい値と同じ猶予が効く（設計§4-6）', () => {
+    // **片方だけ変えないこと。** 利用者が送った長い指示も同じ規則で畳まれている
+    appendNodes(CARD, [
+      node('u2', null, { kind: 'user_message', text: short }),
+      node('a2', null, { kind: 'assistant_text', text: short }),
+      node('u3', null, { kind: 'user_message', text: long }),
+      node('a3', null, { kind: 'assistant_text', text: long }),
+    ])
+    expect(rowOf('u2').foldable).toBe(false)
+    expect(rowOf('a2').foldable).toBe(false)
+    expect(rowOf('u3').foldable).toBe(true)
+    expect(rowOf('a3').foldable).toBe(true)
   })
 
   it('本文を持たない種別は、どれだけ子がいても畳む相手にならない', () => {

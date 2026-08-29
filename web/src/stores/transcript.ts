@@ -21,7 +21,7 @@
 
 import { useSyncExternalStore } from 'react'
 import type { CardId, Node, NodeId, TreeNode } from '@/lib/protocol'
-import { BODY_FOLD_LIMIT } from '@/lib/markdown'
+import { shouldFoldBody } from '@/lib/markdown'
 
 /** ツリーの1ノードに対応する行。 */
 export interface NodeRow {
@@ -189,9 +189,9 @@ function flatten(state: CardState): FlatRow[] {
     }
     const hasChildren = (state.children.get(id)?.length ?? 0) > 0
     const expanded = state.expanded.has(id)
-    // 長さを見るだけにする。ここで実際に切ると、数万件の履歴で全ノードぶんの
+    // 畳む相手かを見るだけにする。ここで実際に切ると、数万件の履歴で全ノードぶんの
     // 文字列を作ることになる（切る仕事は、描くときで間に合う）
-    const foldable = hasFoldableBody(node.node) && node.node.text.length > BODY_FOLD_LIMIT
+    const foldable = hasFoldableBody(node.node) && shouldFoldBody(node.node.text)
     rows.push({
       kind: 'node',
       id,

@@ -1,14 +1,24 @@
 import type { Element, Root } from 'hast'
 import type { PhrasingContent, Root as MdastRoot } from 'mdast'
 import {
-  BODY_FOLD_LIMIT,
+  type ActivitySummaryInput,
+  BODY_FOLD_GRACE_LINES,
+  BODY_FOLD_LINES,
+  BODY_FOLD_LINES_EXCESSIVE,
+  BODY_FOLD_LINES_MINIMAL,
+  NOMINAL_COLUMNS,
   REHYPE_PLUGINS,
   REMARK_PLUGINS,
+  activitySummary,
+  effectiveLines,
+  foldDecision,
   foldMarkdown,
+  foldMarkdownByLines,
   rehypeLineBreaks,
   remarkSoftBreaks,
   splitLineBreaks,
   splitSoftBreaks,
+  summarizeInput,
 } from './markdown'
 
 /**
@@ -18,8 +28,8 @@ import {
  * - **切った位置がマークダウンを壊さない**（長い応答こそ畳まれる側なので、壊れると被害が大きい）
  * - **`<br/>` だけを改行にし、それ以外の HTML は落とさない**（消えたことに気づけない側へ倒さない）
  *
- * しきい値は**小さい値を渡して**確かめる。既定の 1000 で試すと、境目を作るためだけに
- * 1000文字の本文を書くことになり、**どこで切れたのかがテストから読めなくなる**。
+ * 切る位置は**小さいしきい値を渡して**確かめる。既定の 75行で試すと、境目を作るためだけに
+ * 75行の本文を書くことになり、**どこで切れたのかがテストから読めなくなる**。
  */
 
 describe('本文を畳む', () => {
@@ -355,9 +365,13 @@ describe('プラグインの並び', () => {
 })
 
 describe('しきい値の既定', () => {
-  it('1000 文字', () => {
-    // 実装・設計・実機で確定した値の3つがずれると、どれが正なのか分からなくなる
-    expect(BODY_FOLD_LIMIT).toBe(1000)
+  it('実装・設計・実機で同じ値', () => {
+    // 3つがずれると、どれが正なのか分からなくなる。動かしたら `設計.md` §4 も直すこと
+    expect(NOMINAL_COLUMNS).toBe(80)
+    expect(BODY_FOLD_LINES).toBe(75)
+    expect(BODY_FOLD_LINES_EXCESSIVE).toBe(200)
+    expect(BODY_FOLD_LINES_MINIMAL).toBe(10)
+    expect(BODY_FOLD_GRACE_LINES).toBe(5)
   })
 })
 
@@ -381,5 +395,228 @@ describe('絵文字を割らない', () => {
     const text = ['一行目', '二行目', '三行目'].join('\n')
     // 行の切れ目まで戻すので、2行目までが残る（この振る舞いは変えていない）
     expect(foldMarkdown(text, 8).head).toBe('一行目\n二行目')
+  })
+})
+
+/**
+ * 量の測り方（イシューグループ_2026-0820-2129 テスト計画フェーズ2）。
+ *
+ * ここで守るべき約束は3つ。
+ * - **数えるのは縦の高さ**であって文字数ではない（要望5）
+ * - **画面の幅を見ない**。見ると同じ本文が端末によって違うところで畳まれる（設計§4-1）
+ * - **長いほど短く畳まれる**のは意図である（要望6・設計§4-3）
+ */
+describe('実効行数の数え方', () => {
+  it('空行も1行と数える', () => {
+    // 空行は縦の高さを食うので、数えないと「短い」と誤って判定する
+    expect(effectiveLines('あ\n\nい')).toBe(3)
+    expect(effectiveLines('\n\n\n')).toBe(4)
+  })
+
+  it('改行を打たない長い散文が、代表幅で割った行数として数えられる', () => {
+    // **文字数で測っていたときに拾えなかったもの。** 素朴に見れば1行だが、実際は折り返す
+    const 散文 = 'a'.repeat(NOMINAL_COLUMNS * 3)
+    expect(散文.split('\n')).toHaveLength(1)
+    expect(effectiveLines(散文)).toBe(3)
+  })
+
+  it('端数は切り上げる', () => {
+    expect(effectiveLines('a'.repeat(NOMINAL_COLUMNS + 1))).toBe(2)
+    expect(effectiveLines('a'.repeat(NOMINAL_COLUMNS))).toBe(1)
+  })
+
+  it('囲みコードと表を含んでいても、行の種類で重みを変えない', () => {
+    // 素朴に数える。種類で重みを付けると「なぜこの本文だけ畳まれたか」が説明できなくなる
+    const 囲み = ['```ts', 'const a = 1', '```'].join('\n')
+    const 表 = ['| a | b |', '|---|---|', '| 1 | 2 |'].join('\n')
+    const 素 = ['あ', 'い', 'う'].join('\n')
+
+    expect(effectiveLines(囲み)).toBe(3)
+    expect(effectiveLines(表)).toBe(3)
+    expect(effectiveLines(素)).toBe(3)
+  })
+
+  it('画面の幅を一切見ていない', () => {
+    // 代表幅は定数。引数にも環境にも依存しない（設計§4-1）
+    expect(effectiveLines.length).toBe(1)
+    expect(NOMINAL_COLUMNS).toBe(80)
+  })
+})
+
+/** 実効行数がちょうど `count` 行になる本文を作る。 */
+function linesOf(count: number): string {
+  return Array.from({ length: count }, () => 'あ').join('\n')
+}
+
+describe('しきい値の3段と猶予', () => {
+  const 境目 = BODY_FOLD_LINES + BODY_FOLD_GRACE_LINES
+
+  it('しきい値ちょうどは畳まない', () => {
+    expect(foldDecision(linesOf(BODY_FOLD_LINES)).fold).toBe(false)
+  })
+
+  it('猶予の中は畳まない', () => {
+    // **上の端だけを見ていると、猶予そのものを消しても気づけない**（壊し方2と1が
+    // 同じ落ち方になる）。中を1つ突いておく
+    expect(foldDecision(linesOf(BODY_FOLD_LINES + 1)).fold).toBe(false)
+  })
+
+  it('しきい値＋猶予ちょうどは畳まない', () => {
+    // `>` と `>=` の取り違えをここで固定する
+    expect(foldDecision(linesOf(境目)).fold).toBe(false)
+  })
+
+  it('しきい値＋猶予＋1で初めて畳む', () => {
+    const decision = foldDecision(linesOf(境目 + 1))
+    expect(decision.fold).toBe(true)
+    expect(decision.lines).toBe(BODY_FOLD_LINES)
+  })
+
+  it('2段目の境目ちょうどは1段目の量で畳み、＋1で2段目の量へ落ちる', () => {
+    expect(foldDecision(linesOf(BODY_FOLD_LINES_EXCESSIVE)).lines).toBe(BODY_FOLD_LINES)
+    expect(foldDecision(linesOf(BODY_FOLD_LINES_EXCESSIVE + 1)).lines).toBe(BODY_FOLD_LINES_MINIMAL)
+  })
+
+  it('2段目のほうが見せる量が少ない（長いほど短く畳まれるのは意図）', () => {
+    // 知らずに見ると不具合に見えるので、意図であることをここでも固定する（設計§4-3）
+    expect(BODY_FOLD_LINES_MINIMAL).toBeLessThan(BODY_FOLD_LINES)
+    const ふつうに長い = foldDecision(linesOf(BODY_FOLD_LINES_EXCESSIVE)).lines
+    const 度を超えて長い = foldDecision(linesOf(BODY_FOLD_LINES_EXCESSIVE + 1)).lines
+    expect(度を超えて長い).toBeLessThan(ふつうに長い)
+  })
+
+  it('2段目に猶予を当てていない', () => {
+    // 猶予を当てているなら、境目＋猶予までは1段目の量のままになるはず
+    expect(foldDecision(linesOf(BODY_FOLD_LINES_EXCESSIVE + BODY_FOLD_GRACE_LINES)).lines).toBe(
+      BODY_FOLD_LINES_MINIMAL,
+    )
+  })
+
+  it('畳まないときは、本文の実効行数がそのまま返る', () => {
+    expect(foldDecision(linesOf(10))).toEqual({ fold: false, lines: 10 })
+  })
+
+  it('本文の種別を見ていない（利用者の発言にも同じだけ効く）', () => {
+    // 判定は本文だけを受け取る。種別ごとの分岐を作れない形にしてある（設計§4-6）
+    expect(foldDecision.length).toBe(1)
+  })
+})
+
+describe('行数で切る', () => {
+  it('しきい値以下なら畳まない', () => {
+    const text = linesOf(3)
+    expect(foldMarkdownByLines(text, 5)).toEqual({ head: text, folded: false })
+  })
+
+  it('切る位置は行の切れ目へ寄る（文字数で切るときと同じ規則）', () => {
+    const { head, folded } = foldMarkdownByLines('一行目\n二行目\n三行目', 2)
+    expect(folded).toBe(true)
+    expect(head).toBe('一行目\n二行目')
+  })
+
+  it('折り返す長い行は、代表幅ぶんだけ取ってから行の切れ目へ戻す', () => {
+    const 長い行 = 'a'.repeat(NOMINAL_COLUMNS * 3)
+    const { head, folded } = foldMarkdownByLines(`先頭\n${長い行}`, 2)
+    expect(folded).toBe(true)
+    // 1行目（先頭）＋長い行の1行ぶんが予算。戻せる切れ目は「先頭」の後ろ
+    expect(head).toBe('先頭')
+  })
+
+  it('開いたままの囲みコードを閉じる（文字数で切るときと同じ）', () => {
+    const text = ['```ts', 'const a = 1', 'const b = 2', '```'].join('\n')
+    const { head } = foldMarkdownByLines(text, 2)
+    expect(head.endsWith('```')).toBe(true)
+  })
+
+  it('畳んだ末尾に `…` を足さない', () => {
+    const { head } = foldMarkdownByLines(linesOf(10), 3)
+    expect(head).not.toContain('…')
+  })
+})
+
+/**
+ * まとめ行の文言（テスト計画フェーズ2・設計§3-1）。
+ *
+ * **並びを固定していること**がいちばん大事な約束である。出た順にすると、同じ内容でも
+ * 並びが変わって読み比べられない。
+ */
+describe('まとめ行の文言', () => {
+  const 空: ActivitySummaryInput = { edited: [], ran: 0, read: [], used: 0, unknown: 0 }
+
+  it('1つなら名前、複数なら件数', () => {
+    expect(activitySummary({ ...空, edited: ['auth.rs'] })).toBe('編集済み auth.rs')
+    expect(activitySummary({ ...空, edited: ['a.rs', 'b.rs'] })).toBe('編集済み 2個のファイル')
+    expect(activitySummary({ ...空, read: ['a.rs'] })).toBe('読み取り a.rs')
+    expect(activitySummary({ ...空, read: ['a.rs', 'b.rs'] })).toBe('読み取り 2個のファイル')
+  })
+
+  it('ファイル名は末尾だけ', () => {
+    expect(activitySummary({ ...空, edited: ['server/crates/core/src/auth.rs'] })).toBe(
+      '編集済み auth.rs',
+    )
+    expect(activitySummary({ ...空, read: ['C:\\work\\notes.md'] })).toBe('読み取り notes.md')
+  })
+
+  it('コマンドは1件でも件数で書く', () => {
+    // コマンドには短い名前が無い（コマンドそのものは長い）ため（設計§3-1）
+    expect(activitySummary({ ...空, ran: 1 })).toBe('実行済み 1件のコマンド')
+    expect(activitySummary({ ...空, ran: 6 })).toBe('実行済み 6件のコマンド')
+  })
+
+  it('その他と未知も件数で書く', () => {
+    expect(activitySummary({ ...空, used: 1 })).toBe('使用済み 1個のツール')
+    expect(activitySummary({ ...空, unknown: 2 })).toBe('未知のレコード 2件')
+  })
+
+  it('複数の種類が混ざったら `, ` で連なり、並びが固定される', () => {
+    expect(
+      activitySummary({ edited: ['a.rs', 'b.rs'], ran: 5, read: ['c.rs'], used: 1, unknown: 1 }),
+    ).toBe('編集済み 2個のファイル, 実行済み 5件のコマンド, 読み取り c.rs, 使用済み 1個のツール, 未知のレコード 1件')
+  })
+
+  it('出た順に影響されない（同じ内容なら同じ文言）', () => {
+    const 先に編集: ActivitySummaryInput = { ...空, edited: ['a.rs', 'b.rs'], ran: 5 }
+    const 先に実行: ActivitySummaryInput = { ...空, ran: 5, edited: ['a.rs', 'b.rs'] }
+    expect(activitySummary(先に編集)).toBe(activitySummary(先に実行))
+    expect(activitySummary(先に編集)).toBe('編集済み 2個のファイル, 実行済み 5件のコマンド')
+  })
+
+  it('何も無ければ空になる', () => {
+    expect(activitySummary(空)).toBe('')
+  })
+})
+
+describe('子の1行の名前', () => {
+  it('`description` をいちばん先に見る', () => {
+    // Bash は `command` も持つ。**`description` が勝つ**のがこの節の変更点（設計§3-3）
+    expect(
+      summarizeInput({ command: 'git commit -m "..."', description: 'Committed stale-name fixes' }),
+    ).toBe('Committed stale-name fixes')
+  })
+
+  it('`description` を訳さない', () => {
+    // CLI が書いた文をそのまま見せるのが正直である（参考画面の実物が英語のまま）
+    expect(summarizeInput({ description: 'Checked git state' })).toBe('Checked git state')
+  })
+
+  it('`description` が無ければ、これまでの順で決まる', () => {
+    expect(summarizeInput({ file_path: 'a/b/auth.rs' })).toBe('a/b/auth.rs')
+    expect(summarizeInput({ command: 'ls -la' })).toBe('ls -la')
+    expect(summarizeInput({ pattern: 'foo' })).toBe('foo')
+    expect(summarizeInput({ path: '/tmp' })).toBe('/tmp')
+    expect(summarizeInput({ prompt: '調べて' })).toBe('調べて')
+  })
+
+  it('`file_path` より `description` が先（入れ替えたことの担保）', () => {
+    expect(summarizeInput({ file_path: 'a.rs', description: '書いた' })).toBe('書いた')
+  })
+
+  it('どれも無ければ、そのまま JSON を出す', () => {
+    expect(summarizeInput({ foo: 1 })).toBe('{"foo":1}')
+  })
+
+  it('オブジェクトでなければ空', () => {
+    expect(summarizeInput(null)).toBe('')
+    expect(summarizeInput('あ')).toBe('')
   })
 })

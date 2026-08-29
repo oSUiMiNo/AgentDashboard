@@ -172,13 +172,23 @@ async function loadSoftBreaks(page: Parameters<typeof openDashboard>[0]) {
   await loadBodies(page, 'synthetic/softbreaks/session.jsonl')
 }
 
+/**
+ * しきい値の境目を4本並べたフィクスチャ（実効行数 74／78／81／201）。
+ *
+ * **`markdown-bodies` は使えない。** あちらの最長は実効69行で、行数で測るようになってからは
+ * **畳まれる側に入らない**（イシューグループ_2026-0820-2129 フェーズ2）。
+ */
+async function loadFoldLines(page: Parameters<typeof openDashboard>[0]) {
+  await loadBodies(page, 'synthetic/fold-lines/session.jsonl')
+}
+
 /** 畳む相手の行（しきい値を超えた本文）。 */
 function foldableRow(page: Parameters<typeof openDashboard>[0]) {
   return page.locator('[data-testid="transcript-row"][data-foldable="true"]').first()
 }
 
 test('長い本文は畳まれて出て、押すと全文になる', async ({ page }) => {
-  await loadMarkdownBodies(page)
+  await loadFoldLines(page)
 
   const row = foldableRow(page)
   await expect(row).toBeVisible()
@@ -191,16 +201,30 @@ test('長い本文は畳まれて出て、押すと全文になる', async ({ pa
   expect((await row.innerText()).length).toBeGreaterThan(folded)
 })
 
+/**
+ * `markdown-bodies` の1本目。**表・箇条書き・囲みコードを1つの本文に全部持つ。**
+ *
+ * **「畳む相手の行」で引いてはいけない。** 行数で測るようになってから、この本文は
+ * 実効69行で**畳まれる側に入らない**（イシューグループ_2026-0820-2129 フェーズ2）。
+ * 確かめたいのは整形であって折りたたみではないので、本文そのもので引く。
+ */
+function markdownRow(page: Parameters<typeof openDashboard>[0]) {
+  return page
+    .locator('[data-testid="transcript-row"][data-kind="assistant_text"]')
+    .filter({ hasText: 'フォルダの決まり' })
+    .first()
+}
+
 test('表と箇条書きが要素として出る', async ({ page }) => {
   // 記号のまま並んでいたら、この画面の存在理由（読みやすさ）が立たない
   await loadMarkdownBodies(page)
 
-  const body = foldableRow(page).getByTestId('row-body')
+  const body = markdownRow(page).getByTestId('row-body')
   await expect(body.locator('table')).toHaveCount(1)
   await expect(body.locator('li')).toHaveCount(3)
   await expect(body.locator('pre code')).toHaveCount(1)
   // 見出しの横に本文の先頭が出ていない（二重の消滅）
-  await expect(foldableRow(page).getByRole('button').first()).not.toContainText('フォルダの決まり')
+  await expect(markdownRow(page).getByRole('button').first()).not.toContainText('フォルダの決まり')
 })
 
 test('`<br/>` を含む本文でも行が消えない', async ({ page }) => {
