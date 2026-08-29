@@ -110,21 +110,35 @@ describe('構造化ビュー', () => {
     expect(screen.getByText(/まだ履歴がありません/)).toBeInTheDocument()
   })
 
-  it('会話の本文は既定で見えており、ツールコールも並ぶ', async () => {
+  it('会話の本文は既定で見えており、活動は1行にまとまる', async () => {
     appendNodes(CARD, conversation())
     renderTree()
-    await waitForRows(4)
+    // 発言2つ＋まとめ行1つ。ツールコール2件は**束ねられて**1行になる（設計§2-3）
+    await waitForRows(3)
 
     expect(rowsOf('user_message')).toHaveLength(1)
     expect(rowsOf('assistant_text')).toHaveLength(1)
-    // アシスタント本文は既定で開いているので、その子のツールコールが見える
+    expect(rowsOf('tool_call')).toHaveLength(0)
+    expect(rowsOf('activity')).toHaveLength(1)
+    expect(rowsOf('activity')[0].dataset.memberCount).toBe('2')
+  })
+
+  it('まとめ行を開くと、束ねられていたツールコールが並ぶ', async () => {
+    appendNodes(CARD, conversation())
+    renderTree()
+    await waitForRows(3)
+
+    const bundled = rowsOf('activity')[0]
+    expect(bundled.dataset.expanded).toBe('false')
+    await userEvent.click(within(bundled).getByRole('button'))
     expect(rowsOf('tool_call')).toHaveLength(2)
   })
 
   it('ツールコールは既定で閉じており、開くと中身が出る', async () => {
     appendNodes(CARD, conversation())
     renderTree()
-    await waitForRows(4)
+    await waitForRows(3)
+    await userEvent.click(within(rowsOf('activity')[0]).getByRole('button'))
 
     const edit = rowsOf('tool_call')[0]
     expect(edit.dataset.expanded).toBe('false')
@@ -139,15 +153,23 @@ describe('構造化ビュー', () => {
   it('サブエージェントを開くとその中の作業まで掘れる', async () => {
     appendNodes(CARD, conversation())
     renderTree()
-    await waitForRows(4)
+    await waitForRows(3)
+    await userEvent.click(within(rowsOf('activity')[0]).getByRole('button'))
 
     // Agent のツールコールを開く → サブエージェントが現れる
     expect(rowsOf('subagent')).toHaveLength(0)
     await userEvent.click(within(rowsOf('tool_call')[1]).getByRole('button'))
     expect(rowsOf('subagent')).toHaveLength(1)
 
-    // サブエージェントを開く → その中のツールコールが現れる
+    // サブエージェントを開く → その中の活動も、同じ規則でまとめ行になる
     await userEvent.click(within(rowsOf('subagent')[0]).getByRole('button'))
+    const inner = rowsOf('activity').find((row) => (row.textContent ?? '').includes('README.md'))
+    if (!inner) {
+      throw new Error('サブエージェントの中のまとめ行が無い')
+    }
+
+    // さらに開くと、中のツールコールそのものまで掘れる
+    await userEvent.click(within(inner).getByRole('button'))
     const names = rowsOf('tool_call').map((row) => row.textContent ?? '')
     expect(names.some((text) => text.includes('Read'))).toBe(true)
   })
@@ -155,8 +177,14 @@ describe('構造化ビュー', () => {
   it('入れ子の深さが行に出る', async () => {
     appendNodes(CARD, conversation())
     renderTree()
-    await waitForRows(4)
+    await waitForRows(3)
     expect(rowsOf('assistant_text')[0].dataset.depth).toBe('0')
+    // まとめ行は束ねた子と同じ深さに置く（設計§2-4）
+    expect(rowsOf('activity')[0].dataset.depth).toBe('1')
+
+    // 開いても深さは増えない
+    await userEvent.click(within(rowsOf('activity')[0]).getByRole('button'))
+    expect(rowsOf('activity')[0].dataset.depth).toBe('1')
     expect(rowsOf('tool_call')[0].dataset.depth).toBe('1')
   })
 
@@ -164,7 +192,7 @@ describe('構造化ビュー', () => {
     appendNodes(CARD, conversation())
     renderTree()
     // 仮想化していると DOM に全行が無いので、件数は属性で見せる
-    await waitForRows(4)
+    await waitForRows(3)
   })
 
   it('パーサが縮退していると知らせる', () => {
@@ -272,14 +300,21 @@ describe('本文を整形して出す', () => {
     expect(within(row).getByRole('table').querySelectorAll('br')).toHaveLength(0)
   })
 
-  it('思考は既定で畳まれ、開くと整形されて出る', async () => {
+  it('思考は畳んでいるあいだ先頭1行だけを覗かせ、開くと全文が整形されて出る', async () => {
     appendNodes(CARD, [node('k1', null, { kind: 'thinking', text: MARKDOWN })])
     renderTree()
     await waitForRows(1)
 
-    expect(rowByKind('thinking').querySelector('h2')).toBeNull()
+    // 覗かせるのは先頭1行だけ（設計§8）。本文の残り（箇条書き・表）は出ていない
+    const folded = rowByKind('thinking')
+    expect(within(folded).queryAllByRole('listitem')).toHaveLength(0)
+    expect(within(folded).queryByRole('table')).toBeNull()
+
     await userEvent.click(within(rowByKind('thinking')).getByRole('button'))
-    expect(within(rowByKind('thinking')).getByRole('heading', { level: 2 })).toBeInTheDocument()
+    const opened = rowByKind('thinking')
+    expect(within(opened).getByRole('heading', { level: 2 })).toBeInTheDocument()
+    expect(within(opened).getAllByRole('listitem')).toHaveLength(2)
+    expect(within(opened).getByRole('table')).toBeInTheDocument()
   })
 
   it('ツールコールの中身は整形しない', async () => {
@@ -295,7 +330,9 @@ describe('本文を整形して出す', () => {
       }),
     ])
     renderTree()
+    // 根の直下のツールコールも束ねられるので、まず開く（設計§2-3）
     await waitForRows(1)
+    await userEvent.click(within(rowByKind('activity')).getByRole('button'))
 
     await userEvent.click(within(rowByKind('tool_call')).getByRole('button'))
     const row = rowByKind('tool_call')
@@ -310,28 +347,60 @@ describe('二重が消えて、全文が読める', () => {
   it.each([
     ['user_message', { kind: 'user_message', text: '一度きりの文' } as Node],
     ['assistant_text', { kind: 'assistant_text', text: '一度きりの文' } as Node],
-    ['thinking', { kind: 'thinking', text: '一度きりの文' } as Node],
-  ])('%s の本文が、見出しの横に出ない', async (kind, inner) => {
+  ])('%s には見出しの行が無く、本文が1度だけ出る', async (kind, inner) => {
+    // **発言には見出しを付けない**（設計§5-3）。利用者は右の吹き出し、アシスタントは
+    // 本文そのもので読み分けるので、横に同じ文字を並べる余地がそもそも無くなった
     appendNodes(CARD, [node('n1', null, inner)])
     renderTree()
     await waitForRows(1)
 
     const row = rowByKind(kind)
-    if (kind === 'thinking') {
-      await userEvent.click(within(row).getByRole('button'))
-    }
-    // 見出しの `<button>` の中に本文が入っていないこと（本文は button の外の兄弟にある）
-    const headingButton = within(rowByKind(kind)).getAllByRole('button')[0]
-    expect(headingButton.textContent).not.toContain('一度きりの文')
-    expect(rowByKind(kind).textContent).toContain('一度きりの文')
+    expect(within(row).queryAllByRole('button')).toHaveLength(0)
+    expect(row.textContent).toContain('一度きりの文')
+    // 本文は `row-body` の器に1つだけ
+    expect(within(row).getAllByTestId('row-body')).toHaveLength(1)
   })
 
-  it('ツールコールとサブエージェントの要約は残る', async () => {
+  it('思考の本文が、見出しの横に出ない', async () => {
+    appendNodes(CARD, [node('k1', null, { kind: 'thinking', text: '一度きりの文' })])
+    renderTree()
+    await waitForRows(1)
+
+    await userEvent.click(within(rowByKind('thinking')).getByRole('button'))
+    // 見出しの `<button>` の中に本文が入っていないこと（本文は button の外の兄弟にある）
+    const headingButton = within(rowByKind('thinking')).getAllByRole('button')[0]
+    expect(headingButton.textContent).not.toContain('一度きりの文')
+    expect(rowByKind('thinking').textContent).toContain('一度きりの文')
+  })
+
+  it('利用者の発言は右寄せの吹き出しになる', async () => {
+    appendNodes(CARD, [node('u1', null, { kind: 'user_message', text: 'こちらの指示' })])
+    renderTree()
+    await waitForRows(1)
+    expect(within(rowByKind('user_message')).getByTestId('user-bubble')).toBeInTheDocument()
+  })
+
+  it('アシスタントの本文は吹き出しにしない', async () => {
+    // 吹き出しは利用者の発言だけ。両方を箱に入れると、どちらが誰か読めなくなる
+    appendNodes(CARD, [node('a1', null, { kind: 'assistant_text', text: 'あちらの返事' })])
+    renderTree()
+    await waitForRows(1)
+    expect(within(rowByKind('assistant_text')).queryByTestId('user-bubble')).toBeNull()
+  })
+
+  it('まとめ行は「やったこと」を出し、ツールの要約は開けば残る', async () => {
     // 否定側だけを見ていると、要約を丸ごと消す実装でも通ってしまう
     appendNodes(CARD, conversation())
     renderTree()
-    await waitForRows(4)
+    await waitForRows(3)
 
+    // 束ねた行はツール名を出さず、過去形で「やったこと」を書く（設計§3-1）
+    const bundled = rowsOf('activity')[0]
+    expect(bundled.textContent).toContain('編集済み calc.py')
+    // 差分の合計も出る（+1 -1）
+    expect(within(bundled).getByTestId('activity-diff').textContent).toContain('+1')
+
+    await userEvent.click(within(bundled).getByRole('button'))
     expect(within(rowsOf('tool_call')[0]).getAllByRole('button')[0].textContent).toContain(
       '/work/calc.py',
     )
@@ -362,7 +431,7 @@ describe('二重が消えて、全文が読める', () => {
   })
 })
 
-describe('`▸▾` と「続きを読む」は別の操作', () => {
+describe('子の開け閉めと「続きを読む」は別の操作', () => {
   it('しきい値以内の本文には、本文を開く操作が出ない', async () => {
     appendNodes(CARD, [node('a1', null, { kind: 'assistant_text', text: 'みじかい' })])
     renderTree()
@@ -384,7 +453,7 @@ describe('`▸▾` と「続きを読む」は別の操作', () => {
     expect((rowByKind('assistant_text').textContent ?? '').length).toBeGreaterThan(folded.length)
   })
 
-  it('`▸▾` を押しても本文は隠れない', async () => {
+  it('まとめ行を開け閉めしても、本文は隠れない', async () => {
     // 本文を `expanded` で囲い直すと、ここだけが落ちる
     appendNodes(CARD, [
       node('a1', null, { kind: 'assistant_text', text: '畳んでも読める本文' }),
@@ -400,17 +469,31 @@ describe('`▸▾` と「続きを読む」は別の操作', () => {
     renderTree()
     await waitForRows(2)
 
-    await userEvent.click(within(rowByKind('assistant_text')).getAllByRole('button')[0])
+    await userEvent.click(within(rowByKind('activity')).getByRole('button'))
+    expect(rowsOf('tool_call')).toHaveLength(1)
+    await userEvent.click(within(rowByKind('activity')).getByRole('button'))
     // 子は畳まれ、本文は残る
     expect(rowsOf('tool_call')).toHaveLength(0)
     expect(rowByKind('assistant_text').textContent).toContain('畳んでも読める本文')
   })
 
-  it('子を持たない本文の行には `▸▾` が出ない', async () => {
-    appendNodes(CARD, [node('a1', null, { kind: 'assistant_text', text: 'ひとりごと' })])
+  it('子を持つ本文にも、開け閉めのボタンが出ない', async () => {
+    // 子はまとめ行へ移ったので、本文の行は「開けば出るもの」を持たない（設計§2-5）。
+    // 要望1（本文にトグルを出さない）が、この帰結として満たされる
+    appendNodes(CARD, [
+      node('a1', null, { kind: 'assistant_text', text: 'ひとりごと' }),
+      node('t1', 'a1', {
+        kind: 'tool_call',
+        name: 'Read',
+        input: { file_path: 'x' },
+        result: null,
+        status: 'ok',
+        subagent: null,
+      }),
+    ])
     renderTree()
-    await waitForRows(1)
-    expect(within(rowByKind('assistant_text')).getAllByRole('button')[0]).toBeDisabled()
+    await waitForRows(2)
+    expect(within(rowByKind('assistant_text')).queryAllByRole('button')).toHaveLength(0)
   })
 
   it('利用者の本文に子がついても、本文は隠れない', async () => {
@@ -422,7 +505,8 @@ describe('`▸▾` と「続きを読む」は別の操作', () => {
     renderTree()
     await waitForRows(2)
 
-    await userEvent.click(within(rowByKind('user_message')).getAllByRole('button')[0])
+    // 未知のレコードもまとめ行へ束ねられる。開け閉めしても発言は残る
+    await userEvent.click(within(rowByKind('activity')).getByRole('button'))
     expect(rowByKind('user_message').textContent).toContain('子がついた指示')
   })
 })

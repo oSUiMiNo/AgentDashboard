@@ -9,19 +9,26 @@
  *
  * | 操作 | 置き場所 | 何をするか |
  * |---|---|---|
- * | `▸▾` | 見出しの左 | **まだ出していないものを出す** |
+ * | `›` ／ `⌄` | **テキストのすぐ後ろ**（設計§5-2） | **まだ出していないものを出す** |
  * | 「続きを読む／畳む」 | **本文の中**（末尾） | **切ってある本文を全部読む** |
  *
- * `▸▾` を「この行を開く」と読むと、本文と子が一緒に出入りすることになり、**ツールを
+ * 記号を「この行を開く」と読むと、本文と子が一緒に出入りすることになり、**ツールを
  * 何本も呼んだターンを畳んで会話だけ追う**という読み方ができなくなる。「まだ出して
  * いないものを出す」と読み直すと、種別ごとの違いが例外ではなく帰結になる。
  *
- * | 種別 | 本文 | `▸▾` が出すもの |
+ * | 種別 | 本文 | 記号が出すもの |
  * |---|---|---|
- * | 利用者・アシスタント | **常に出す**（整形）。長ければ畳んで「続きを読む」 | 子だけ |
- * | 思考 | `▸▾` で開く。開いたら整形して全文 | 本文（子を持たない） |
+ * | 利用者・アシスタント | **常に出す**（整形）。長ければ畳んで「続きを読む」 | **無い**（子はまとめ行へ移った） |
+ * | 思考 | 畳んでいても**先頭1行**を覗かせる。開けば全文 | 本文（子を持たない） |
+ * | まとめ行 | — | 束ねた活動 |
  * | ツールコール・不明 | — | 中身と子 |
  * | サブエージェント | — | 子 |
+ *
+ * # 見出しと吹き出し（イシューグループ_2026-0820-2129 設計§5）
+ *
+ * **絵文字は使わない。** 種別の読み分けは、利用者＝**右寄せの吹き出し**、アシスタント＝
+ * **見出しごと無しの太く明るい本文**、それ以外＝**見出しのラベルと色**の3通りで作る。
+ * **主従はウェイトと明度で付ける**ので、箱にも罫線にも頼らない。
  */
 
 import { memo, useEffect, useState } from 'react'
@@ -34,37 +41,67 @@ import { tokenizeHunks } from '@/lib/highlight'
 import {
   REHYPE_PLUGINS,
   REMARK_PLUGINS,
+  activitySummary,
   foldDecision,
   foldMarkdownByLines,
   summarizeInput,
 } from '@/lib/markdown'
-import type { FlatRow, NodeRow, RewoundRow } from '@/stores/transcript'
+import type { ActivityRow, FlatRow, NodeRow, RewoundRow } from '@/stores/transcript'
 
 interface Props {
   cardId: CardId
   row: FlatRow
   /** 行そのものを渡す。巻き戻しの見出し行はノードではないので、IDでは足りない */
   onToggle: (row: FlatRow) => void
-  /** 本文の開け閉め。`▸▾` とは別の操作 */
+  /** 本文の開け閉め。子を出す操作とは別 */
   onToggleBody: (row: NodeRow) => void
 }
 
-/** 種別ごとの見出し（記号・ラベル・色）。 */
-function heading(node: Node): { icon: string; label: string; tone: string } {
+/**
+ * 種別ごとの見出し（ラベルと色）。
+ *
+ * **絵文字は使わない**（設計§5-1）。`DESIGN.md` §14.4 が正式 UI に OS 絵文字を使わないと
+ * 定めており、行の見た目を作り直す今回は §35 の言う「新しく書くコード」に当たる。
+ *
+ * **発言には見出しが無い**（[`showsHeading`]）。利用者は右の吹き出し、アシスタントは
+ * 本文そのもので読み分ける（設計§5-3）。
+ */
+function heading(node: Node): { label: string; tone: string } {
   switch (node.kind) {
     case 'user_message':
-      return { icon: '👤', label: 'あなた', tone: 'text-sky-300' }
+      return { label: 'あなた', tone: 'text-sky-300' }
     case 'assistant_text':
-      return { icon: '🤖', label: 'アシスタント', tone: 'text-emerald-300' }
+      return { label: 'アシスタント', tone: 'text-emerald-300' }
     case 'thinking':
-      return { icon: '💭', label: '思考', tone: 'text-muted-foreground' }
+      return { label: '思考', tone: 'text-muted-foreground' }
     case 'tool_call':
-      return { icon: '🔧', label: node.name, tone: 'text-violet-300' }
+      return { label: node.name, tone: 'text-violet-300' }
     case 'subagent':
-      return { icon: '🧩', label: `サブエージェント ${node.agent_type}`, tone: 'text-amber-300' }
+      return { label: `サブエージェント ${node.agent_type}`, tone: 'text-amber-300' }
     case 'unknown':
-      return { icon: '❔', label: `未知のレコード（${node.record_type}）`, tone: 'text-orange-300' }
+      return { label: `未知のレコード（${node.record_type}）`, tone: 'text-orange-300' }
   }
+}
+
+/**
+ * 見出しの行を出す種別か（設計§5-3）。
+ *
+ * **発言には出さない。** 利用者の発言は右寄せの吹き出しで、アシスタントの本文は
+ * 太く明るい本文そのもので読み分ける——**主従はウェイトと明度で付ける**ので、
+ * 箱にも罫線にも頼らない。
+ */
+function showsHeading(node: Node): boolean {
+  return node.kind !== 'user_message' && node.kind !== 'assistant_text'
+}
+
+/**
+ * 開け閉めの記号（設計§5-2）。
+ *
+ * **テキストのすぐ後ろに置く。** 右端揃えにすると、深いところで字下げが積み上がった
+ * ときに尻の記号が潰れ、横並び（PJT 専用画面）では列が狭くてテキストと遠く離れる。
+ */
+function chevron(expanded: boolean): string {
+  return expanded ? '⌄' : '›'
 }
 
 /** ツールの状態を1文字で表す。 */
@@ -107,9 +144,21 @@ function summary(node: Node): string {
   }
 }
 
-/** 本文を常に出す種別か（＝`▸▾` が子だけを担う種別か）。 */
+/** 本文を常に出す種別か（＝開け閉めが子だけを担う種別か）。 */
 function showsBodyAlways(node: Node): boolean {
   return node.kind === 'user_message' || node.kind === 'assistant_text'
+}
+
+/**
+ * 畳んだ思考に覗かせる先頭1行（設計§8）。
+ *
+ * **長さで畳む側へは入れない。** 短い思考まで出っぱなしになると会話の本文と
+ * 見分けが付かなくなる（直前の工事の判断）ので、常に1行だけにする。
+ */
+function firstLine(text: string): string {
+  const trimmed = text.trimStart()
+  const cut = trimmed.indexOf('\n')
+  return cut < 0 ? trimmed : trimmed.slice(0, cut)
 }
 
 
@@ -131,6 +180,9 @@ export const TranscriptRow = memo(function TranscriptRow({
 }: Props) {
   if (row.kind === 'rewound') {
     return <RewoundHeader row={row} onToggle={() => onToggle(row)} />
+  }
+  if (row.kind === 'activity') {
+    return <ActivityHeader row={row} onToggle={() => onToggle(row)} />
   }
   return (
     <NodeRowView
@@ -168,17 +220,61 @@ function RewoundHeader({
         onClick={onToggle}
         className="hover:bg-muted/40 flex w-full items-start gap-2 rounded px-1 text-left"
       >
-        <span aria-hidden className="text-muted-foreground w-3 shrink-0 text-xs">
-          {row.expanded ? '▾' : '▸'}
-        </span>
+        {/* 記号は他の行と揃えて**テキストの直後**に置く（設計§5-2） */}
         <span aria-hidden className="shrink-0">
           ⟲
         </span>
         <span className="shrink-0 font-medium text-slate-400">
           巻き戻し前のやりとり {row.count}件
         </span>
-        <span className="text-muted-foreground min-w-0 flex-1 truncate">
+        <span className="text-muted-foreground min-w-0 shrink truncate">
           {row.expanded ? '' : '（クリックで表示）'}
+        </span>
+        <span aria-hidden className="text-muted-foreground shrink-0 text-xs">
+          {chevron(row.expanded)}
+        </span>
+      </button>
+    </div>
+  )
+}
+
+/**
+ * 発言と発言の間の活動をまとめた行（設計§2・§3）。
+ *
+ * **ツール名を出さず、「やったこと」を過去形で書く。** 文言の組み立ては
+ * `activitySummary()`（`lib/markdown.ts`）が持つ——**画面を描かずに機械で確かめられる
+ * 判断**なので、部品側には置かない（設計§4-5）。
+ *
+ * **箱に入れない。** 吹き出しは利用者の発言だけに使い、活動は通常のウェイトと
+ * くすんだ前景色で従に見せる（設計§5-3）。
+ */
+function ActivityHeader({ row, onToggle }: { row: ActivityRow; onToggle: () => void }) {
+  return (
+    <div
+      data-testid="transcript-row"
+      data-kind="activity"
+      data-depth={row.depth}
+      data-expanded={row.expanded}
+      data-member-count={row.members.length}
+      style={{ paddingLeft: `${row.depth * 1.25}rem` }}
+      className="border-border/40 border-b py-1 text-sm"
+    >
+      <button
+        type="button"
+        onClick={onToggle}
+        className="hover:bg-muted/40 flex w-full items-start gap-2 rounded px-1 text-left"
+      >
+        <span className="text-muted-foreground min-w-0 shrink truncate">
+          {activitySummary(row.counts)}
+        </span>
+        {row.diff && (
+          <span data-testid="activity-diff" className="shrink-0 text-xs">
+            <span className="text-emerald-400">+{row.diff.added}</span>{' '}
+            <span className="text-red-400">-{row.diff.removed}</span>
+          </span>
+        )}
+        <span aria-hidden className="text-muted-foreground shrink-0 text-xs">
+          {chevron(row.expanded)}
         </span>
       </button>
     </div>
@@ -196,9 +292,13 @@ function NodeRowView({
   onToggle: () => void
   onToggleBody: () => void
 }) {
-  const { icon, label, tone } = heading(row.node)
+  const { label, tone } = heading(row.node)
   const mark = toolMark(row.node)
   const alwaysBody = showsBodyAlways(row.node)
+  const withHeading = showsHeading(row.node)
+  const isUser = row.node.kind === 'user_message'
+  // 思考は畳んでいても先頭1行を覗かせる（設計§8）。開くまで中身の見当がつかない行を残さない
+  const peeking = row.node.kind === 'thinking'
 
   return (
     <div
@@ -212,35 +312,49 @@ function NodeRowView({
       style={{ paddingLeft: `${row.depth * 1.25}rem` }}
       className="border-border/40 border-b py-1 text-sm"
     >
-      <button
-        type="button"
-        disabled={!row.expandable}
-        onClick={onToggle}
-        className="hover:bg-muted/40 flex w-full items-start gap-2 rounded px-1 text-left disabled:cursor-default"
-      >
-        <span aria-hidden className="w-3 shrink-0 text-xs text-muted-foreground">
-          {row.expandable ? (row.expanded ? '▾' : '▸') : ''}
-        </span>
-        <span aria-hidden className="shrink-0">
-          {icon}
-        </span>
-        <span className={`shrink-0 font-medium ${tone}`}>{label}</span>
-        {mark && (
-          <span
-            data-testid="tool-status"
-            className={row.node.kind === 'tool_call' && row.node.status === 'error' ? 'text-red-400' : 'text-muted-foreground'}
-          >
-            {mark}
-          </span>
-        )}
-        <span className="text-muted-foreground min-w-0 flex-1 truncate">{summary(row.node)}</span>
-      </button>
-
-      {/* 本文を持つ種別は `▸▾` に関わらず常に出す。ここを `row.expanded` で囲うと、
-          子を畳んだ瞬間に本文まで消えて操作が1つに戻ってしまう */}
-      {(alwaysBody || row.expanded) && (
-        <RowBody node={row.node} cardId={cardId} row={row} onToggleBody={onToggleBody} />
+      {withHeading && (
+        <button
+          type="button"
+          disabled={!row.expandable}
+          onClick={onToggle}
+          className="hover:bg-muted/40 flex w-full items-start gap-2 rounded px-1 text-left disabled:cursor-default"
+        >
+          <span className={`shrink-0 font-medium ${tone}`}>{label}</span>
+          {mark && (
+            <span
+              data-testid="tool-status"
+              className={row.node.kind === 'tool_call' && row.node.status === 'error' ? 'text-red-400' : 'text-muted-foreground'}
+            >
+              {mark}
+            </span>
+          )}
+          <span className="text-muted-foreground min-w-0 shrink truncate">{summary(row.node)}</span>
+          {/* 記号は**テキストのすぐ後ろ**。右端へ寄せない（設計§5-2） */}
+          {row.expandable && (
+            <span aria-hidden className="text-muted-foreground shrink-0 text-xs">
+              {chevron(row.expanded)}
+            </span>
+          )}
+        </button>
       )}
+
+      {/* 本文を持つ種別は開け閉めに関わらず常に出す。ここを `row.expanded` で囲うと、
+          子を畳んだ瞬間に本文まで消えて操作が1つに戻ってしまう */}
+      {(alwaysBody || peeking || row.expanded) &&
+        (isUser ? (
+          // 利用者の発言だけを右寄せの吹き出しにする（設計§5-3）。幅いっぱいにすると
+          // 右寄せであることが読み取れなくなるので、本文の70%を上限にする
+          <div className="flex justify-end">
+            <div
+              data-testid="user-bubble"
+              className="bg-muted/60 mt-1 max-w-[70%] rounded-2xl px-3 py-2"
+            >
+              <RowBody node={row.node} cardId={cardId} row={row} onToggleBody={onToggleBody} />
+            </div>
+          </div>
+        ) : (
+          <RowBody node={row.node} cardId={cardId} row={row} onToggleBody={onToggleBody} />
+        ))}
     </div>
   )
 }
@@ -261,10 +375,28 @@ function RowBody({
   switch (node.kind) {
     case 'user_message':
     case 'assistant_text':
-      return <MarkdownBody text={node.text} row={row} onToggleBody={onToggleBody} />
+      // 発言は**主**。太めのウェイトと明るい前景色で、活動の行と読み分ける（設計§5-3）
+      return (
+        <MarkdownBody
+          text={node.text}
+          row={row}
+          inset={false}
+          tone="text-foreground font-medium"
+          onToggleBody={onToggleBody}
+        />
+      )
     case 'thinking':
-      // 思考は畳む相手にしない（開いた時点で全文。設計§2-4）
-      return <MarkdownBody text={node.text} row={null} onToggleBody={onToggleBody} />
+      // 思考は長さで畳む相手にしない（開いた時点で全文。設計§2-4）。畳んでいるあいだは
+      // 先頭1行だけを覗かせる（設計§8）——開くまで中身の見当がつかない行を残さないため
+      return (
+        <MarkdownBody
+          text={row.expanded ? node.text : firstLine(node.text)}
+          row={null}
+          inset
+          tone="text-muted-foreground"
+          onToggleBody={onToggleBody}
+        />
+      )
     case 'tool_call':
       return <ToolCallBody input={node.input} result={node.result} />
     case 'unknown':
@@ -294,22 +426,28 @@ function RowBody({
 function MarkdownBody({
   text,
   row,
+  inset,
+  tone,
   onToggleBody,
 }: {
   text: string
   /** 畳む相手なら行を渡す。畳まない種別（思考）は `null` */
   row: NodeRow | null
+  /** 見出しの行がある種別だけ、見出しのぶん字下げする */
+  inset: boolean
+  /** 主従を付けるウェイトと明度（設計§5-3） */
+  tone: string
   onToggleBody: () => void
 }) {
   const folded = row?.foldable === true && !row.bodyOpen
   const body = folded ? foldMarkdownByLines(text, foldDecision(text).lines).head : text
 
   return (
-    <div className="mt-1 ml-6">
+    <div className={inset ? 'mt-1 ml-6' : 'mt-1'}>
       {/* 本文は**主役**なので、地の色で出す（`FileView` と同じ扱い）。
           要約を横に出していた頃の名残で薄い色にしていると、見出しも強調も
           本文と同じ灰色になって、整形した意味がほとんど消える（実物で確認） */}
-      <div data-testid="row-body" className="prose-dashboard text-xs leading-relaxed">
+      <div data-testid="row-body" className={`prose-dashboard text-xs leading-relaxed ${tone}`}>
         <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS}>
           {body}
         </ReactMarkdown>
@@ -328,28 +466,40 @@ function MarkdownBody({
   )
 }
 
+/**
+ * ツールコールの中身（設計§7-1）。
+ *
+ * **「入力」と「結果」を分けて書くことは残し、畳むのをやめた。** 分けてあること自体は
+ * 利用者が要ると言っているもので、畳みだけが要らない。
+ *
+ * **外すともう1つ直る。** `<details>` はブラウザが持つ状態なので、仮想化で画面外へ出て
+ * DOM が消えると開閉が失われる。畳まなければ、その食い違いも消える。
+ *
+ * 長い出力は**箱の中でスクロールさせる**（`max-h-64`）。外へ伸びないので行の高さが
+ * 暴れず、文字数そのものの上限は要らない（パーサ側が既に 256KB で切り詰めている）。
+ */
 function ToolCallBody({ input, result }: { input: unknown; result: unknown }) {
   const diff = toDiffSource(result)
 
   return (
     <div className="mt-1 ml-6 space-y-2">
-      <details>
-        <summary className="text-muted-foreground cursor-pointer text-xs">入力</summary>
+      <div>
+        <div className="text-muted-foreground text-xs">入力</div>
         <pre className="text-muted-foreground max-h-64 overflow-auto text-xs">
           {JSON.stringify(input, null, 2)}
         </pre>
-      </details>
+      </div>
 
       {diff ? (
         <DiffView diff={diff} />
       ) : (
         result != null && (
-          <details>
-            <summary className="text-muted-foreground cursor-pointer text-xs">結果</summary>
+          <div>
+            <div className="text-muted-foreground text-xs">結果</div>
             <pre className="text-muted-foreground max-h-64 overflow-auto text-xs">
               {typeof result === 'string' ? result : JSON.stringify(result, null, 2)}
             </pre>
-          </details>
+          </div>
         )
       )}
     </div>

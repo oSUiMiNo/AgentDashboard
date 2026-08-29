@@ -18,7 +18,7 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import { useCallback, useEffect, useRef } from 'react'
 import type { CardId } from '@/lib/protocol'
 import type { FlatRow, NodeRow } from '@/stores/transcript'
-import { toggleBody, toggleNode, toggleRewound, useTranscript } from '@/stores/transcript'
+import { toggleActivity, toggleBody, toggleNode, toggleRewound, useTranscript } from '@/stores/transcript'
 import { useWsStore } from '@/stores/ws'
 import { TranscriptRow } from './TranscriptRow'
 
@@ -60,12 +60,22 @@ export function TranscriptTree({ cardId }: { cardId: CardId }) {
     行へ渡す手は**同一性を保つ**。`TranscriptRow` は `memo` で包んであるが、ここで
     毎回新しい関数を作ると props が変わったことになり、**包んだ意味が消える**。
 
-    依存が `cardId` だけで済むのは、`toggleNode` / `toggleBody` / `toggleRewound` が
-    ストアの**モジュール関数**（`stores/transcript.ts`）で、描画のたびに作り直されないため。
+    依存が `cardId` だけで済むのは、`toggleNode` / `toggleBody` / `toggleRewound` /
+    `toggleActivity` がストアの**モジュール関数**（`stores/transcript.ts`）で、描画の
+    たびに作り直されないため。
   */
   const onToggle = useCallback(
-    (target: FlatRow) =>
-      target.kind === 'rewound' ? toggleRewound(cardId) : toggleNode(cardId, target.id),
+    (target: FlatRow) => {
+      switch (target.kind) {
+        case 'rewound':
+          return toggleRewound(cardId)
+        // まとめ行の鍵は合成IDなので、ノードとは別の口へ渡す（設計§2-5）
+        case 'activity':
+          return toggleActivity(cardId, target.id)
+        default:
+          return toggleNode(cardId, target.id)
+      }
+    },
     [cardId],
   )
   const onToggleBody = useCallback(
