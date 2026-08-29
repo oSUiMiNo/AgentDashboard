@@ -42,6 +42,7 @@ import {
   REHYPE_PLUGINS,
   REMARK_PLUGINS,
   activitySummary,
+  fadeDepth,
   foldDecision,
   foldMarkdownByLines,
   summarizeInput,
@@ -347,7 +348,9 @@ function NodeRowView({
           <div className="flex justify-end">
             <div
               data-testid="user-bubble"
-              className="bg-muted/60 mt-1 max-w-[70%] rounded-2xl px-3 py-2"
+              // フェードの地は吹き出しの地から取る（設計§6-2）。渡し忘れると、
+              // 吹き出しの中だけ帯が浮いて見える
+              className="bg-muted/60 fade-ground-bubble mt-1 max-w-[70%] rounded-2xl px-3 py-2"
             >
               <RowBody node={row.node} cardId={cardId} row={row} onToggleBody={onToggleBody} />
             </div>
@@ -441,13 +444,20 @@ function MarkdownBody({
 }) {
   const folded = row?.foldable === true && !row.bodyOpen
   const body = folded ? foldMarkdownByLines(text, foldDecision(text).lines).head : text
+  // 畳んだときだけ末尾をフェードさせる（設計§6-4）。`fadeDepth` は畳まない本文へ `null` を
+  // 返すので、**猶予に入って畳まなかった本文にも出ない**——ここで条件を書き足さないこと
+  const fade = folded ? fadeDepth(text) : null
 
   return (
     <div className={inset ? 'mt-1 ml-6' : 'mt-1'}>
       {/* 本文は**主役**なので、地の色で出す（`FileView` と同じ扱い）。
           要約を横に出していた頃の名残で薄い色にしていると、見出しも強調も
           本文と同じ灰色になって、整形した意味がほとんど消える（実物で確認） */}
-      <div data-testid="row-body" className={`prose-dashboard text-xs leading-relaxed ${tone}`}>
+      <div
+        data-testid="row-body"
+        data-fade={fade ?? undefined}
+        className={`prose-dashboard text-xs leading-relaxed ${tone}${fade ? ` body-fade body-fade-${fade}` : ''}`}
+      >
         <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS}>
           {body}
         </ReactMarkdown>

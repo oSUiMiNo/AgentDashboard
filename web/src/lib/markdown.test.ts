@@ -6,11 +6,14 @@ import {
   BODY_FOLD_LINES,
   BODY_FOLD_LINES_EXCESSIVE,
   BODY_FOLD_LINES_MINIMAL,
+  FADE_DEEP_LINES,
+  FADE_SHALLOW_LINES,
   NOMINAL_COLUMNS,
   REHYPE_PLUGINS,
   REMARK_PLUGINS,
   activitySummary,
   effectiveLines,
+  fadeDepth,
   foldDecision,
   foldMarkdown,
   foldMarkdownByLines,
@@ -499,6 +502,71 @@ describe('しきい値の3段と猶予', () => {
   it('本文の種別を見ていない（利用者の発言にも同じだけ効く）', () => {
     // 判定は本文だけを受け取る。種別ごとの分岐を作れない形にしてある（設計§4-6）
     expect(foldDecision.length).toBe(1)
+  })
+})
+
+describe('フェードの段', () => {
+  /** その本文を畳んだときに、まだ残る実効行数。 */
+  function remainingOf(total: number): number {
+    return total - foldDecision(linesOf(total)).lines
+  }
+
+  it('畳まない本文には段が付かない（設計§6-4）', () => {
+    // **マスクの有無が「続きがあるか」と1対1**であることの本体。呼ぶ側が条件を書き足さずに
+    // 済むよう、畳まない本文へは `null` を返す
+    expect(fadeDepth(linesOf(BODY_FOLD_LINES))).toBeNull()
+    expect(fadeDepth(linesOf(10))).toBeNull()
+  })
+
+  it('猶予に入って畳まなかった本文にも段が付かない（設計§6-4）', () => {
+    // 「フェードしている＝まだ続きがある」を嘘にしないための一点
+    expect(foldDecision(linesOf(BODY_FOLD_LINES + BODY_FOLD_GRACE_LINES)).fold).toBe(false)
+    expect(fadeDepth(linesOf(BODY_FOLD_LINES + BODY_FOLD_GRACE_LINES))).toBeNull()
+  })
+
+  it('畳み始めたところは一番浅い段', () => {
+    // 猶予を1行超えただけの本文は、畳んでも残りが数行しかない
+    expect(fadeDepth(linesOf(BODY_FOLD_LINES + BODY_FOLD_GRACE_LINES + 1))).toBe('shallow')
+  })
+
+  it('残りちょうど30は浅いまま、31で標準へ上がる', () => {
+    // `<=` と `<` の取り違えをここで固定する
+    const 浅い上限 = BODY_FOLD_LINES + FADE_SHALLOW_LINES
+    expect(remainingOf(浅い上限)).toBe(FADE_SHALLOW_LINES)
+    expect(fadeDepth(linesOf(浅い上限))).toBe('shallow')
+    expect(fadeDepth(linesOf(浅い上限 + 1))).toBe('standard')
+  })
+
+  it('2段目に入ると必ず一番深い段になる', () => {
+    expect(fadeDepth(linesOf(BODY_FOLD_LINES_EXCESSIVE))).toBe('standard')
+    expect(fadeDepth(linesOf(BODY_FOLD_LINES_EXCESSIVE + 1))).toBe('deep')
+  })
+
+  it('3段とも実際に出る（どれかが死んでいない）', () => {
+    const 出た = new Set(
+      [90, 150, 400].map((total) => fadeDepth(linesOf(total))),
+    )
+    expect(出た).toEqual(new Set(['shallow', 'standard', 'deep']))
+  })
+
+  it('深い段の境目は、いまのしきい値の組み合わせでは決め手になっていない', () => {
+    // **残りが126〜190行になる本文は作れない。** 1段目は75行見せるので残りは最大125行、
+    // 2段目へ落ちた瞬間に10行しか見せなくなるので残りは最低191行になる。
+    // つまり `FADE_DEEP_LINES` をこの範囲で動かしても**見た目は1ピクセルも変わらない**。
+    // 深い段へ切り替えているのは2段目のしきい値のほうである、と知らずに 150 をいじると
+    // 何も起きない理由が分からなくなるので、ここで固定しておく
+    const 届かない範囲 = { 下: 125, 上: 191 }
+    for (let total = BODY_FOLD_LINES; total <= 400; total += 1) {
+      const 残り = remainingOf(total)
+      const 隙間の中 = 残り > 届かない範囲.下 && 残り < 届かない範囲.上
+      expect(隙間の中).toBe(false)
+    }
+    expect(FADE_DEEP_LINES).toBeGreaterThan(届かない範囲.下)
+    expect(FADE_DEEP_LINES).toBeLessThan(届かない範囲.上)
+  })
+
+  it('本文だけを受け取る（種別ごとの分岐を作れない）', () => {
+    expect(fadeDepth.length).toBe(1)
   })
 })
 

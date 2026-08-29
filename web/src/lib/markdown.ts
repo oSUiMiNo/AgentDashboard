@@ -107,7 +107,14 @@ export const BODY_FOLD_LINES_MINIMAL = 10
  *
  * 仕掛けの高さは「続きを読む」の1行とフェードの帯で約3行。少し余裕を見て 5行としてある。
  *
- * **暫定。** 帯の高さは §6 を実際に敷いてみないと決まらないので、そこで合わせ直す。
+ * **フェーズ5で実ブラウザで測って据え置いた（暫定ではなくなった）。** 実測は
+ * **1行 19.5px ／ 帯 19.5px ／「続きを読む」 20px ＝ 2.03行**（`e2e/transcript.spec.ts`
+ * 「畳む仕掛けの高さが、猶予の行数を下回っている」が毎回測って出す）。
+ *
+ * 猶予がかかる本文は畳んでも残りが5行以下なので、帯は**必ず一番浅い段**（[`fadeDepth`] の
+ * `shallow` ＝1行）になる。**見込みの3行より小さかった**ので、5行は余裕を保ったまま
+ * 成り立つ。数を動かす理由が無いため据え置く。
+ *
  * **効くのは1段目だけ**で、2段目は定義上そこへ入る時点で超過が130行以上あるため当てない。
  */
 export const BODY_FOLD_GRACE_LINES = 5
@@ -170,6 +177,50 @@ export function foldDecision(text: string): FoldDecision {
  */
 export function shouldFoldBody(text: string): boolean {
   return foldDecision(text).fold
+}
+
+/**
+ * 畳んだ本文の末尾に敷くフェードの段（設計§6-3）。
+ *
+ * **畳んでいない本文には `null` を返す**（設計§6-4）。マスクの有無を「続きがあるか」と
+ * 1対1に保つのはこの一点で、**呼ぶ側が判断しないで済む形にしてある**——猶予に入って
+ * 畳まなかった本文にも出さない、という約束がここで自動的に守られる。
+ */
+export type FadeDepth = 'shallow' | 'standard' | 'deep'
+
+/** 残りがこれ以下なら一番浅い段（設計§6-3）。**未確認：実物を見て動かしてよい。** */
+export const FADE_SHALLOW_LINES = 30
+/** 残りがこれを超えたら一番深い段（設計§6-3）。**未確認：実物を見て動かしてよい。** */
+export const FADE_DEEP_LINES = 150
+
+/**
+ * 畳んだ先にどれだけ残っているかで、フェードの段を決める（設計§6-3）。
+ *
+ * ```
+ * 残りの実効行数 →  〜30        31〜150     151〜
+ * 段            →  shallow     standard    deep
+ * ```
+ *
+ * 狙いは「続きがどれだけあるか」を開く前に伝えることである。いまは**あと2行なのか
+ * 500行なのかが同じ見た目**になっている。
+ *
+ * **変えるのは、かかり始める位置だけ。** 濃さも色も変えない——暗い地の上では濃さの差が
+ * 出にくく、色を変えると**種別の色分けと混ざる**。3段に留めるのは、連続だと隣り合った行を
+ * 見比べないと差が分からないためで、離れた行どうしでも読める粒度がこれである。
+ */
+export function fadeDepth(text: string): FadeDepth | null {
+  const decision = foldDecision(text)
+  if (!decision.fold) {
+    return null
+  }
+  const remaining = effectiveLines(text) - decision.lines
+  if (remaining <= FADE_SHALLOW_LINES) {
+    return 'shallow'
+  }
+  if (remaining <= FADE_DEEP_LINES) {
+    return 'standard'
+  }
+  return 'deep'
 }
 
 /** 畳んだ結果。 */
