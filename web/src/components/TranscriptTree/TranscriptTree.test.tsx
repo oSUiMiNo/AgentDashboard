@@ -546,6 +546,164 @@ describe('生の HTML', () => {
   })
 })
 
+/**
+ * 見出しと記号（テスト計画フェーズ5「見出しと記号」「吹き出しと主従」・設計§5）。
+ *
+ * **無くなったことは、無くなった側で見ないと守れない。** 絵文字も `▸▾` も「出ていない」が
+ * 約束なので、置き換えたほうだけを見ていると、うっかり戻したときに誰も気づかない。
+ */
+describe('見出しと記号', () => {
+  /** 全廃した絵文字（設計§5-1）。 */
+  const 消した絵文字 = ['👤', '🤖', '💭', '🔧', '🧩', '❔']
+
+  it('絵文字も `▸▾` も、どこにも出ていない', async () => {
+    appendNodes(CARD, conversation())
+    renderTree()
+    await waitForRows(3)
+
+    // まとめ行を開いて、ツールコールとサブエージェントの見出しまで出しておく
+    for (const row of rowsOf('activity')) {
+      await userEvent.click(within(row).getByRole('button'))
+    }
+    const 画面 = rowsOf()
+      .map((row) => row.textContent ?? '')
+      .join('')
+    for (const 絵文字 of [...消した絵文字, '▸', '▾']) {
+      expect(画面).not.toContain(絵文字)
+    }
+  })
+
+  it('記号は `›`／`⌄` で、テキストの後ろに置かれる', async () => {
+    // **右端揃えにしない**（設計§5-2）。深いところで字下げが積み上がると尻の記号が潰れ、
+    // 横並びでは列が狭くてテキストと遠く離れる
+    appendNodes(CARD, conversation())
+    renderTree()
+    await waitForRows(3)
+
+    const まとめ = rowsOf('activity')[0]!
+    const ボタン = within(まとめ).getByRole('button')
+    expect(ボタン.textContent).toContain('›')
+    // 記号は中身の最後。間に伸びる詰め物（`flex-1`）を挟むと右端へ飛ぶ
+    expect(ボタン.lastElementChild?.textContent).toBe('›')
+
+    await userEvent.click(ボタン)
+    expect(within(rowsOf('activity')[0]!).getByRole('button').textContent).toContain('⌄')
+  })
+
+  it('見出しは、発言以外にだけ残る', async () => {
+    appendNodes(CARD, conversation())
+    renderTree()
+    await waitForRows(3)
+
+    // 発言には見出しの行が無い（本文だけ）
+    expect(within(rowByKind('user_message')).queryAllByRole('button')).toHaveLength(0)
+    expect(within(rowByKind('assistant_text')).queryAllByRole('button')).toHaveLength(0)
+    // まとめ行には見出しが残る
+    expect(within(rowByKind('activity')).getByRole('button').textContent).toContain('編集済み')
+  })
+
+  it('吹き出しは幅いっぱいにならない', async () => {
+    // 幅いっぱいだと右寄せであることが読み取れない（設計§5-3）
+    appendNodes(CARD, [node('u1', null, { kind: 'user_message', text: 'みじかい' })])
+    renderTree()
+    await waitForRows(1)
+
+    expect(screen.getByTestId('user-bubble').className).toContain('max-w-[70%]')
+  })
+
+  it('主従はウェイトと明度で付ける（発言は強く、活動は弱く）', async () => {
+    // **箱にも罫線にも頼らない**（設計§5-3）。同じ見た目になったらこの行が落ちる
+    appendNodes(CARD, conversation())
+    renderTree()
+    await waitForRows(3)
+
+    const 発言 = within(rowByKind('assistant_text')).getByTestId('row-body').className
+    const 活動 = within(rowByKind('activity')).getByRole('button').textContent
+    expect(発言).toContain('font-medium')
+    expect(発言).toContain('text-foreground')
+    expect(活動).toBeTruthy()
+    expect(
+      within(rowByKind('activity')).getByRole('button').firstElementChild?.className,
+    ).toContain('text-muted-foreground')
+  })
+})
+
+/**
+ * 畳んだ本文の末尾に敷くフェード（テスト計画フェーズ5「マスク」・設計§6）。
+ *
+ * **見た目そのものは jsdom では測れない**（`mask-image` の効きも帯の高さも実際には描かれない）。
+ * ここで固定するのは**どの行に出て、どの行に出ないか**——マスクの有無が「続きがあるか」と
+ * 1対1であること、という約束のほうである。実際に帯が見えるかは E2E と実機の仕事。
+ */
+describe('畳んだ本文のフェード', () => {
+  /** ちょうど猶予に収まり、畳まれない本文。 */
+  const GRACE = Array.from(
+    { length: BODY_FOLD_LINES + BODY_FOLD_GRACE_LINES },
+    () => 'ぎりぎり',
+  ).join('\n')
+
+  it('畳んだ本文にだけフェードが付く', async () => {
+    appendNodes(CARD, [node('a1', null, { kind: 'assistant_text', text: LONG })])
+    renderTree()
+    await waitForRows(1)
+
+    const body = within(rowByKind('assistant_text')).getByTestId('row-body')
+    expect(body.dataset.fade).toBe('shallow')
+    expect(body.className).toContain('body-fade')
+  })
+
+  it('開くとフェードが消え、畳み直すと戻る', async () => {
+    // 「フェードしている＝まだ続きがある」を守るのは、開いた側でも同じ（設計§6-4）
+    appendNodes(CARD, [node('a1', null, { kind: 'assistant_text', text: LONG })])
+    renderTree()
+    await waitForRows(1)
+
+    await userEvent.click(screen.getByTestId('body-toggle'))
+    const opened = within(rowByKind('assistant_text')).getByTestId('row-body')
+    expect(opened.dataset.fade).toBeUndefined()
+    expect(opened.className).not.toContain('body-fade')
+
+    await userEvent.click(screen.getByTestId('body-toggle'))
+    expect(within(rowByKind('assistant_text')).getByTestId('row-body').dataset.fade).toBe('shallow')
+  })
+
+  it('猶予に入って畳まなかった本文には出ない', async () => {
+    // **これが落ちるのは、畳んだかどうかではなく長さでフェードを決めたとき。**
+    // 猶予の本文は最後まで出ているので、フェードすると「続きがある」という嘘になる
+    appendNodes(CARD, [node('a1', null, { kind: 'assistant_text', text: GRACE })])
+    renderTree()
+    await waitForRows(1)
+
+    expect(screen.queryByTestId('body-toggle')).toBeNull()
+    const body = within(rowByKind('assistant_text')).getByTestId('row-body')
+    expect(body.dataset.fade).toBeUndefined()
+    expect(body.className).not.toContain('body-fade')
+  })
+
+  it('畳んだ思考の覗かせた1行には出ない', async () => {
+    // 覗かせているのは1行だけなので、そこへ2行分の帯を敷くと覗かせた意味が消える。
+    // 思考は長さで畳む道を通らない（設計§8）ので、構造として当たらないことを固定する
+    appendNodes(CARD, [node('t1', null, { kind: 'thinking', text: LONG })])
+    renderTree()
+    await waitForRows(1)
+
+    const body = within(rowByKind('thinking')).getByTestId('row-body')
+    expect(body.dataset.fade).toBeUndefined()
+  })
+
+  it('残りが多い本文では深い段になる', async () => {
+    // 3段が実際に描き分けられていること（`fadeDepth` の単体だけでは配線を見ていない）
+    const 度を超えて長い = Array.from({ length: 400 }, () => 'ながい本文。').join('\n')
+    appendNodes(CARD, [node('a1', null, { kind: 'assistant_text', text: 度を超えて長い })])
+    renderTree()
+    await waitForRows(1)
+
+    const body = within(rowByKind('assistant_text')).getByTestId('row-body')
+    expect(body.dataset.fade).toBe('deep')
+    expect(body.className).toContain('body-fade-deep')
+  })
+})
+
 describe('状態の持ち場', () => {
   it('本文を開け閉めしても、行が作り直されない', async () => {
     // 行の同一性はノードIDで見ている。添字にすると、実測した高さが捨てられる

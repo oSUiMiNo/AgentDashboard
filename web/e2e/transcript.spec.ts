@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { BODY_FOLD_GRACE_LINES } from '../src/lib/markdown'
 import {
   archiveAll,
   FIXTURES,
@@ -63,6 +64,32 @@ test('フィクスチャの履歴が構造化ビューに出る', async ({ page 
   ).toBeVisible()
 })
 
+/**
+ * まとめ行を、畳まれているものが無くなるまで開く。
+ *
+ * **ツールコールは1行ずつ並んでいない**（イシューグループ_2026-0820-2129 設計§2）。
+ * 発言と発言の間の活動は**まとめ行1つ**に束ねられているので、開かないと `tool_call` の
+ * 行は画面に1つも出ない。**開くと中から別のまとめ行が出てくることがある**（サブエージェント
+ * の中など）ので、1周では足りない——「畳まれたまとめ行が無い」を条件に回す。
+ */
+async function openActivities(page: Parameters<typeof openDashboard>[0]) {
+  const collapsed = page.locator(
+    '[data-testid="transcript-row"][data-kind="activity"][data-expanded="false"]',
+  )
+  await expect(
+    page.locator('[data-testid="transcript-row"][data-kind="activity"]').first(),
+  ).toBeVisible({ timeout: 30_000 })
+
+  // 上限は青天井にしない。開いても減らない形になったら、そこで止めて落とす
+  for (let guard = 0; guard < 30; guard += 1) {
+    if ((await collapsed.count()) === 0) {
+      return
+    }
+    await collapsed.first().getByRole('button').first().click()
+  }
+  throw new Error('まとめ行を開き切れなかった（開いても畳まれたままの行が残っている）')
+}
+
 test('ツールコールを開くとコードの差分が出る', async ({ page }) => {
   await startSession(page)
 
@@ -71,7 +98,8 @@ test('ツールコールを開くとコードの差分が出る', async ({ page 
   await writeTranscript(page, 'v2.1.220/basic-tools/session.jsonl')
   await showTranscript(page)
 
-  // Edit のツールコールを探して開く
+  // Edit のツールコールを探して開く。**まず、それを抱えているまとめ行を開く**
+  await openActivities(page)
   const editRow = page
     .locator('[data-testid="transcript-row"][data-kind="tool_call"]')
     .filter({ hasText: 'Edit' })
@@ -92,6 +120,7 @@ test('サブエージェントの中まで掘れる', async ({ page }) => {
   await writeTranscript(page, 'v2.1.220/subagent/session.jsonl')
   await showTranscript(page)
 
+  await openActivities(page)
   const agentRow = page
     .locator('[data-testid="transcript-row"][data-kind="tool_call"]')
     .filter({ hasText: 'Agent' })
@@ -103,6 +132,8 @@ test('サブエージェントの中まで掘れる', async ({ page }) => {
   const subagent = page.locator('[data-testid="transcript-row"][data-kind="subagent"]').first()
   await expect(subagent).toBeVisible()
   await subagent.getByRole('button').first().click()
+  // **中の作業も、また束ねられている。** ここを開き直さないと `Glob` は出てこない
+  await openActivities(page)
   await expect(
     page.locator('[data-testid="transcript-row"][data-kind="tool_call"]').filter({
       hasText: 'Glob',
@@ -201,6 +232,158 @@ test('長い本文は畳まれて出て、押すと全文になる', async ({ pa
   expect((await row.innerText()).length).toBeGreaterThan(folded)
 })
 
+/*
+ * 畳んだ本文の末尾に敷くフェード（設計§6 / テスト計画フェーズ5「マスク」）。
+ *
+ * **jsdom では確かめられない。** `mask-image` は描かれて初めて効き、帯の高さも行の高さも
+ * 実際に組版しないと出ない。ここは実物のブラウザでしか通らない道である。
+ *
+ * 土台は `synthetic/fold-lines`。4本の本文が
+ * **74行（しきい値の下）／78行（猶予の中）／81行（畳む・残り6行）／201行（2段目・残り191行）**
+ * になっており、**出ない・出ない・浅い・深い**が1枚で揃う。
+ */
+test('フェードは畳んだ行にだけ出る（猶予に入った行には出ない）', async ({ page }) => {
+  await loadFoldLines(page)
+  await expect(foldableRow(page)).toBeVisible()
+
+  // 畳んだ本文にだけ付く
+  const faded = page.locator('[data-testid="row-body"][data-fade]')
+  await expect(faded).toHaveCount(2)
+
+  // **畳んでいない行には、猶予に入ったものを含めて出ない。**
+  // ここが崩れると「フェードしている＝まだ続きがある」が嘘になる（設計§6-4）
+  const 畳まない行 = page.locator(
+    '[data-testid="transcript-row"][data-kind="assistant_text"][data-foldable="false"]',
+  )
+  await expect(畳まない行).toHaveCount(2)
+  await expect(畳まない行.locator('[data-testid="row-body"][data-fade]')).toHaveCount(0)
+})
+
+test('残りの量で段が変わり、変わるのはかかり始める位置だけ', async ({ page }) => {
+  await loadFoldLines(page)
+  await expect(foldableRow(page)).toBeVisible()
+
+  const 帯の高さ = async (depth: string) =>
+    page.locator(`[data-testid="row-body"][data-fade="${depth}"]`).evaluate((el) => {
+      const probe = document.createElement('div')
+      probe.style.height = 'var(--fade-band)'
+      el.append(probe)
+      const height = probe.getBoundingClientRect().height
+      probe.remove()
+      return height
+    })
+
+  const 浅い = await 帯の高さ('shallow')
+  const 深い = await 帯の高さ('deep')
+  expect(深い).toBeGreaterThan(浅い)
+
+  // **濃さも色も変えていない**こと（設計§6-3）。段で変わるのは帯の高さだけである
+  const 濃さと色 = async (depth: string) =>
+    page
+      .locator(`[data-testid="row-body"][data-fade="${depth}"]`)
+      .evaluate((el) => {
+        const style = getComputedStyle(el)
+        return { color: style.color, opacity: style.opacity }
+      })
+  expect(await 濃さと色('shallow')).toEqual(await 濃さと色('deep'))
+})
+
+test('帯の地は、その行の地から取られる', async ({ page }) => {
+  // **重ねて塗る以上、地の色を渡し忘れた行だけ帯が浮く**（設計§6-2）。吹き出しは
+  // 地が違うので、渡っていることを実際の色で見る。**変数の字面ではなく、塗った結果を測る**
+  await loadFoldLines(page)
+  await expect(foldableRow(page)).toBeVisible()
+
+  const 塗った色 = (locator: ReturnType<typeof foldableRow>) =>
+    locator.evaluate((el) => {
+      const probe = document.createElement('div')
+      probe.style.background = 'var(--fade-ground, var(--color-background))'
+      el.append(probe)
+      const color = getComputedStyle(probe).backgroundColor
+      probe.remove()
+      return color
+    })
+
+  const 吹き出しの中 = await 塗った色(page.getByTestId('user-bubble').first())
+  const 吹き出しの外 = await 塗った色(
+    page.locator('[data-testid="row-body"][data-fade]').first(),
+  )
+  expect(吹き出しの中).not.toBe(吹き出しの外)
+})
+
+test('フェードは行の高さを変えない', async ({ page }) => {
+  // 仮想化は行の高さを実測して覚えている。マスクが高さを動かすと、覚えた値が全部ずれる
+  await loadFoldLines(page)
+  const row = foldableRow(page)
+  await expect(row).toBeVisible()
+
+  const 高さ = async () => (await row.boundingBox())?.height ?? 0
+  const 敷いたまま = await 高さ()
+
+  await row.locator('[data-testid="row-body"]').evaluate((el) => el.classList.remove('body-fade'))
+  expect(await 高さ()).toBe(敷いたまま)
+})
+
+test('帯が押す判定を食わない', async ({ page }) => {
+  // **設計§6-1 が名指しした落とし穴。** 帯は本文の上に重ねてあるので、素通しさせないと
+  // その箱がクリックを吸って行が開けなくなる。**帯の上の一点を拾って、それが本文自身で
+  // あること**で見る——`pointer-events: none` を外すと、ここだけが落ちる。
+  await loadFoldLines(page)
+  const row = foldableRow(page)
+  await expect(row).toBeVisible()
+
+  const body = row.locator('[data-testid="row-body"]')
+  // **畳んでも本文は窓より高い。** 帯は末尾にかかるので、末尾を窓の中へ入れてから測る
+  // （入れずに測ると、点が窓の外に落ちて時々だけ失敗する）
+  await row.getByTestId('body-toggle').scrollIntoViewIfNeeded()
+  const 帯の上に居るもの = await body.evaluate((el) => {
+    const box = el.getBoundingClientRect()
+    const y = Math.min(box.bottom - 4, window.innerHeight - 4)
+    const found = document.elementFromPoint(box.left + box.width / 2, y)
+    return found?.closest('[data-testid="row-body"]') === el
+  })
+  expect(帯の上に居るもの).toBe(true)
+
+  // 帯の直下にある「続きを読む」も、遮られずに押せる
+  await row.getByTestId('body-toggle').click()
+  await expect(row).toHaveAttribute('data-body-open', 'true')
+})
+
+test('畳む仕掛けの高さが、猶予の行数を下回っている', async ({ page }) => {
+  // **設計§4-4 の原則そのもの**——「畳んで縮む量が仕掛けの高さを上回らないなら畳まない」。
+  // 猶予（`BODY_FOLD_GRACE_LINES`）は仕掛けの高さから決めた数なので、**実物を測って
+  // 上回っていることを確かめないと、根拠が見込みのままになる。**
+  await loadFoldLines(page)
+  const row = foldableRow(page)
+  await expect(row).toBeVisible()
+
+  const 実測 = await row.evaluate((el) => {
+    const body = el.querySelector('[data-testid="row-body"]') as HTMLElement
+    const toggle = el.querySelector('[data-testid="body-toggle"]') as HTMLElement
+    const probe = document.createElement('div')
+    probe.style.height = 'var(--fade-band)'
+    body.append(probe)
+    const band = probe.getBoundingClientRect().height
+    probe.remove()
+    const line = Number.parseFloat(getComputedStyle(body).lineHeight)
+    const toggleStyle = getComputedStyle(toggle)
+    const button =
+      toggle.getBoundingClientRect().height + Number.parseFloat(toggleStyle.marginTop)
+    return { band, line, button }
+  })
+
+  // 実測値をログへ残す。**次に触る人が測り直さずに済むのはこの1行**
+  console.log(
+    `畳む仕掛けの実測：1行=${実測.line}px 帯=${実測.band}px ボタン=${実測.button}px ` +
+      `→ ${((実測.band + 実測.button) / 実測.line).toFixed(2)}行`,
+  )
+
+  const 仕掛けの行数 = (実測.band + 実測.button) / 実測.line
+  expect(仕掛けの行数).toBeLessThan(BODY_FOLD_GRACE_LINES)
+  // 帯そのものは、設計が言う「約2行」の一番浅い段なので1行ぶん
+  expect(実測.band / 実測.line).toBeCloseTo(1, 1)
+})
+
 /**
  * `markdown-bodies` の1本目。**表・箇条書き・囲みコードを1つの本文に全部持つ。**
  *
@@ -215,6 +398,76 @@ function markdownRow(page: Parameters<typeof openDashboard>[0]) {
     .first()
 }
 
+test('行のどこを押しても開く（記号だけが押せるのではない）', async ({ page }) => {
+  // 記号は小さい。**スマホでは記号だけが的だと押せない**（テスト計画フェーズ5）
+  await startSession(page)
+  await showTerminal(page)
+  await fireHook(page, 'SessionStart')
+  await writeTranscript(page, 'v2.1.220/basic-tools/session.jsonl')
+  await showTranscript(page)
+
+  const まとめ行 = page.locator('[data-testid="transcript-row"][data-kind="activity"]').first()
+  await expect(まとめ行).toBeVisible({ timeout: 30_000 })
+  await expect(まとめ行).toHaveAttribute('data-expanded', 'false')
+
+  // **左端でも記号でもない、行の中ほどを押す**
+  const box = await まとめ行.boundingBox()
+  if (!box) {
+    throw new Error('まとめ行の位置が取れない')
+  }
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2)
+  await expect(まとめ行).toHaveAttribute('data-expanded', 'true')
+})
+
+test('本文を選んでも、行が開いてしまわない', async ({ page }) => {
+  // **押して開く**と**選んでコピーする**は両立しないといけない。本文をドラッグした
+  // だけで開くと、読んだところを引用できなくなる（テスト計画フェーズ5）
+  await loadFoldLines(page)
+  const row = foldableRow(page)
+  await expect(row).toBeVisible()
+
+  const body = row.locator('[data-testid="row-body"]')
+  // **畳んでも本文は窓より高い。** 素朴に上端を取ると画面の外を指すので、
+  // 窓と重なっているところから点を拾う（実際に外を指して選べなかった）
+  await row.getByTestId('body-toggle').scrollIntoViewIfNeeded()
+  const point = await body.evaluate((el) => {
+    const rect = el.getBoundingClientRect()
+    const top = Math.max(rect.top, 8)
+    const bottom = Math.min(rect.bottom, window.innerHeight - 8)
+    return { x: rect.left + 8, y: (top + bottom) / 2 }
+  })
+  await page.mouse.move(point.x, point.y)
+  await page.mouse.down()
+  await page.mouse.move(point.x + 200, point.y, { steps: 8 })
+  await page.mouse.up()
+
+  expect(await page.evaluate(() => window.getSelection()?.toString().length ?? 0)).toBeGreaterThan(0)
+  await expect(row).toHaveAttribute('data-body-open', 'false')
+})
+
+test('長い出力は、箱の中でスクロールする（外へ伸びない）', async ({ page }) => {
+  // 伸ばすと1件のツールコールで画面が埋まる。**箱に閉じ込めて中でスクロールさせる**
+  await startSession(page)
+  await showTerminal(page)
+  await fireHook(page, 'SessionStart')
+  await writeTranscript(page, 'v2.1.220/basic-tools/session.jsonl')
+  await showTranscript(page)
+
+  await openActivities(page)
+  const tool = page.locator('[data-testid="transcript-row"][data-kind="tool_call"]').first()
+  await expect(tool).toBeVisible({ timeout: 30_000 })
+  await tool.getByRole('button').first().click()
+
+  const 箱 = await tool.locator('pre').first().evaluate((el) => ({
+    client: el.clientHeight,
+    scroll: el.scrollHeight,
+    overflow: getComputedStyle(el).overflowY,
+  }))
+  expect(箱.overflow).toBe('auto')
+  // 中身が箱より高いなら、外へ伸びずに中でスクロールしている
+  expect(箱.client).toBeLessThanOrEqual(256)
+})
+
 test('表と箇条書きが要素として出る', async ({ page }) => {
   // 記号のまま並んでいたら、この画面の存在理由（読みやすさ）が立たない
   await loadMarkdownBodies(page)
@@ -223,8 +476,11 @@ test('表と箇条書きが要素として出る', async ({ page }) => {
   await expect(body.locator('table')).toHaveCount(1)
   await expect(body.locator('li')).toHaveCount(3)
   await expect(body.locator('pre code')).toHaveCount(1)
-  // 見出しの横に本文の先頭が出ていない（二重の消滅）
-  await expect(markdownRow(page).getByRole('button').first()).not.toContainText('フォルダの決まり')
+  // **アシスタントの発言には見出しの行そのものが無い**（イシューグループ_2026-0820-2129
+  // 設計§5-3）。要約を横に出す形が消えたので、「二重に出ていない」は
+  // **見出しが無く、本文が1度だけ出る**という形で見る
+  await expect(markdownRow(page).getByRole('button')).toHaveCount(0)
+  await expect(markdownRow(page).getByTestId('row-body')).toHaveCount(1)
 })
 
 test('`<br/>` を含む本文でも行が消えない', async ({ page }) => {
