@@ -348,9 +348,9 @@ function NodeRowView({
           <div className="flex justify-end">
             <div
               data-testid="user-bubble"
-              // フェードの地は吹き出しの地から取る（設計§6-2）。渡し忘れると、
-              // 吹き出しの中だけ帯が浮いて見える
-              className="bg-muted/60 fade-ground-bubble mt-1 max-w-[70%] rounded-2xl px-3 py-2"
+              // **フェードの地を渡す必要は無い**（設計§6-2）。マスクは文字を透明にする
+              // だけなので、透けるのは実際にこの吹き出しの地である
+              className="bg-muted/60 mt-1 max-w-[70%] rounded-2xl px-3 py-2"
             >
               <RowBody node={row.node} cardId={cardId} row={row} onToggleBody={onToggleBody} />
             </div>
