@@ -15,7 +15,7 @@
  */
 
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
 import type { CardId } from '@/lib/protocol'
 import type { FlatRow, NodeRow } from '@/stores/transcript'
 import { toggleActivity, toggleBody, toggleNode, toggleRewound, useTranscript } from '@/stores/transcript'
@@ -94,6 +94,74 @@ export function TranscriptTree({ cardId }: { cardId: CardId }) {
     followOnAppend: true,
     scrollEndThreshold: END_THRESHOLD,
     overscan: 8,
+  })
+
+  /*
+    開いたら、いちばん下（最新）から見せる（設計§3）。
+
+    **末尾追従（`followOnAppend`）だけでは届かない。** あちらが発火するのは
+    「件数が増えた」瞬間だけで、しかも**その時点で末尾の近くに居た**ときに限る。
+    実測したところ、届かない道が2つある。
+
+    | 道 | 何が起きているか |
+    |---|---|
+    | **隠れている間に届く** | 打ち込むのは端末なので、履歴が届くのは**構造化ビューが `hidden` の間**である。高さが 0 の箱に寄せても寄る先が無く、**表示へ切り替えても寄せ直されない** |
+    | **ストアが生き残る** | 履歴は module スコープの `Map`（`stores/transcript.ts`）で、閉じても消えない。**戻ってきたときは最初から N 件**なので、「増えた」ことすら観測されない |
+
+    どちらも**追従の土俵に乗らない**ので、初期位置はここから明示的に1回だけ寄せる。
+
+    # 条件が3つある理由
+
+    | 条件 | なぜ要るか |
+    |---|---|
+    | まだ寄せていない | **2回目以降を打たない。** `/rewind` と WS の再接続は購読開始と**同じ合図**で届くので（`transcript_reset`）、回数を許すと**読んでいる最中に引き戻す**（設計§6） |
+    | 行がある | 0件では寄せる先が無い。**そもそもスクロールの箱が描かれない**（下の分岐） |
+    | 箱が見えている | 上の表の1つ目。**隠れている間に寄せても効かないのに、印だけが立つ** |
+
+    **依存配列を持たない。** 行が増えた描画だけでなく、**タブが `hidden` から表示へ
+    変わった描画**も拾う必要がある（下の覗き口と同じ流儀）。切り替えで箱に高さが付くと
+    仮想化自身が大きさの変化を見て描き直すので、その描画でここが通る。
+
+    **`useLayoutEffect` なのは、描く前に寄せてちらつきを消すため。** 仮想化自身の
+    位置合わせも同じ層で動くので、足並みが揃う。
+
+    # 1回では足りない（実測で確かめた）
+
+    `scrollToEnd()` が狙うのは**その時点の DOM の末尾**である。ところが**開いた直後の
+    行はまだ実測されておらず**、見込み（[`ESTIMATED_ROW`]）で積んだ総高は本物より
+    ずっと低い。実測（`markdown-bodies` の6行）では総高が画面より小さく、
+    **「寄せる先が無い」まま印だけが立ち**、そのあと実測で背が伸びて上に取り残された。
+
+    そこで**背が伸びている間は寄せ続け、伸びなくなって末尾に着いたところで手を引く**。
+    印を立てる条件を「1回呼んだら」ではなく「**落ち着いて末尾に居る**」にしてある。
+
+    **測るのは DOM の実測だけにする。** ここで `getTotalSize()` や `isAtEnd()` を呼ぶと
+    **仮想化の内部再計算が走って描き直しを呼び、そのたびにこの効果がまた動く**——
+    実際に輪になって、テストが返ってこなくなった。`scrollHeight` と `scrollTop` は
+    ただの読み取りなので、この輪を作らない。
+
+    **暴走しない。** 背が伸びなくなれば必ず止まり、そこから先は末尾追従に任せる。
+    落ち着くまでの数フレームは利用者が触る前なので、**上を読んでいる人を引き戻さない**
+    という約束はここでは破れない（破れないことは E2E が見張っている）。
+  */
+  const alignedToEnd = useRef(false)
+  const lastHeight = useRef(-1)
+  useLayoutEffect(() => {
+    if (alignedToEnd.current || rows.length === 0) {
+      return
+    }
+    const container = scrollRef.current
+    if (!container || container.clientHeight === 0) {
+      return
+    }
+    const height = container.scrollHeight
+    const atEnd = container.scrollTop + container.clientHeight >= height - END_THRESHOLD
+    if (height === lastHeight.current && atEnd) {
+      alignedToEnd.current = true
+      return
+    }
+    lastHeight.current = height
+    virtualizer.scrollToEnd({ behavior: 'auto' })
   })
 
   // E2E から中身を確かめるための覗き口。仮想化していると DOM に全行が無いので、
