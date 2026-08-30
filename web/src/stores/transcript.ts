@@ -186,6 +186,34 @@ function hasFoldableBody(node: Node): node is Extract<Node, { kind: 'user_messag
   return node.kind === 'user_message' || node.kind === 'assistant_text'
 }
 
+/**
+ * 行にせず、並びから落とす思考か（設計§8-2）。
+ *
+ * **Claude Code が書く JSONL の思考ブロックは、本文が空である。** 入っているのは
+ * 暗号化された `signature` だけで、これは次のターンで API へ送り返すために要るもの——
+ * 本文は書き出す時点で落とされている。実測すると、CLI の版（2.1.220〜2.1.251）も
+ * モデルもまたいで例外が無かった（実セッション 1,555件・フィクスチャ 23件・
+ * 走行中の木 409ノードで、**本文があるものは0件**）。
+ *
+ * 開く操作を出しているのに何も出ない行は、**壊れているのと見分けが付かない**。
+ * 残す値も無いので、行にしない。
+ *
+ * **種別で決め打たず、本文が空かどうかで決める。** Claude Code が本文を書くように
+ * なるか、暗号化思考でないモデルを使えば中身は入る。決め打つと**本物の思考まで消え、
+ * しかも誰も気づかない**——空で判定しておけば、勝手に元へ戻る。
+ *
+ * **子を持つものは落とさない。** いまは1件も無いが、パーサは直前に出したノードを
+ * 次のレコードの親にするので（`transcript-parser` の `last_emitted`）、**思考が親に
+ * なりうる**。落とすと、その子が置き場所を失う。
+ */
+function droppableThinking(state: CardState, id: string): boolean {
+  const node = state.byId.get(id)
+  if (node?.node.kind !== 'thinking' || node.node.text.trim() !== '') {
+    return false
+  }
+  return (state.children.get(id) ?? []).length === 0
+}
+
 /** 中身を開いて見られる種別か。 */
 function isExpandable(node: Node, hasChildren: boolean): boolean {
   if (hasChildren) {
@@ -330,8 +358,13 @@ function flatten(state: CardState): FlatRow[] {
    * パーサは直前にアシスタント本文が無ければツールコールを**根の直下**へ置くので
    * （`transcript-parser` の `turn_anchor` が発言のたびに外れる）、根の並びにも活動が現れる。
    * ここを素通しすると「根の直下の活動だけ束ねられない」という非対称ができる。
+   *
+   * **中身の無い思考は、ここで並びから落とす**（設計§8-3）。**束ねるより前でなければ
+   * ならない**——描くときに隠すだけだと、思考は境目として残ったままなので、**その前後の
+   * 活動が別々のまとめ行に割れる**。並びから抜いて初めて、ひと続きの1行になる。
    */
-  const walkSiblings = (ids: string[], depth: number) => {
+  const walkSiblings = (all: string[], depth: number) => {
+    const ids = all.filter((id) => !droppableThinking(state, id))
     let index = 0
     while (index < ids.length) {
       if (!activityAt(ids, index)) {
@@ -384,7 +417,10 @@ function flatten(state: CardState): FlatRow[] {
     if (!node) {
       return
     }
-    const childIds = state.children.get(id) ?? []
+    // **落とす思考を除いてから数える。** ここを生の並びで数えると、子が中身の無い思考
+    // だけの行が「開ける」ことになり、**開いても何も出ない**——いま直しているものと
+    // 同じ壊れ方を、1つ内側に作ることになる
+    const childIds = (state.children.get(id) ?? []).filter((childId) => !droppableThinking(state, childId))
     const hasChildren = childIds.length > 0
     // **活動はまとめ行へ移るので、本文の行では「開けば出るもの」として数えない**（設計§2-5）。
     // これでアシスタント本文の expandable が偽になり、本文にトグルが出なくなる（要望1）。

@@ -621,3 +621,121 @@ describe('規模', () => {
     20_000,
   )
 })
+
+/**
+ * 中身の無い思考を落とす（設計§8-2・§8-3）。
+ *
+ * **Claude Code は思考の本文を JSONL へ書かない**（暗号化された署名だけが入る）。
+ * 開いても何も出ない行は壊れているのと見分けが付かないので、行にしない。
+ *
+ * **落とす場所が「束ねるより前」であることが、この節の主眼である。** 描くときに
+ * 隠すだけでは、思考が境目として残って前後の活動が別々のまとめ行に割れる。
+ */
+describe('中身の無い思考', () => {
+  const 空の思考 = (id: string, parent: string | null = null) =>
+    node(id, parent, { kind: 'thinking', text: '' })
+
+  it('本文が空の思考は、行にならない', () => {
+    appendNodes(CARD, [
+      node('a1', null, { kind: 'assistant_text', text: 'ひとこと' }),
+      空の思考('k1'),
+      空の思考('k2'),
+    ])
+
+    expect(rowsOf(CARD)).toHaveLength(1)
+    expect(rowsOf(CARD)[0].id).toBe('a1')
+  })
+
+  it('空白だけの思考も落とす（改行や全角空白を含む）', () => {
+    appendNodes(CARD, [node('k1', null, { kind: 'thinking', text: ' \n　\t' })])
+
+    expect(rowsOf(CARD)).toHaveLength(0)
+  })
+
+  /**
+   * **種別で決め打っていないこと。**
+   *
+   * Claude Code が本文を書くようになるか、暗号化思考でないモデルを使えば中身は入る。
+   * `kind === 'thinking'` で落とす実装だと、そのとき**本物の思考まで消え、しかも
+   * 誰も気づかない**。ここが落ちたら、判定が種別へ寄っている。
+   */
+  it('本文がある思考は、今までどおり行になる', () => {
+    appendNodes(CARD, [
+      空の思考('k1'),
+      node('k2', null, { kind: 'thinking', text: 'まず失敗を見る' }),
+      空の思考('k3'),
+    ])
+
+    const rows = rowsOf(CARD)
+    expect(rows).toHaveLength(1)
+    expect(rows[0].id).toBe('k2')
+  })
+
+  /**
+   * **子を持つ思考は落とさない。**
+   *
+   * 実データでは1件も無いが、パーサは直前に出したノードを次のレコードの親にするので
+   * （`transcript-parser` の `last_emitted`）、思考が親になりうる。落とすと子が
+   * 置き場所を失う。
+   */
+  it('子を持つ思考は、本文が空でも落とさない', () => {
+    appendNodes(CARD, [空の思考('k1'), node('t1', 'k1', tool('ok'))])
+    toggleNode(CARD, 'k1')
+
+    const rows = rowsOf(CARD)
+    expect(rows[0].id).toBe('k1')
+    // 子は落ちた思考の下に残り、まとめ行として出る
+    expect(rows[1].kind).toBe('activity')
+  })
+
+  /**
+   * **この節の肝。**
+   *
+   * 思考を挟んだ活動が、ひと続きの1つのまとめ行になること。**落とす場所を「束ねた後」へ
+   * 動かすと、ここだけが落ちる**——思考が境目として残り、2つのまとめ行に割れるためである。
+   */
+  it('思考を挟んだ活動が、ひと続きの1つのまとめ行になる', () => {
+    appendNodes(CARD, [
+      node('a1', null, { kind: 'assistant_text', text: '作業する' }),
+      node('t1', 'a1', tool('ok')),
+      node('t2', 'a1', tool('ok')),
+      空の思考('k1', 'a1'),
+      空の思考('k2', 'a1'),
+      node('t3', 'a1', tool('ok')),
+      node('t4', 'a1', tool('ok')),
+      node('t5', 'a1', tool('ok')),
+    ])
+
+    const activities = rowsOf(CARD).filter((row): row is ActivityRow => row.kind === 'activity')
+    expect(activities).toHaveLength(1)
+    expect(activities[0].members).toEqual(['t1', 't2', 't3', 't4', 't5'])
+  })
+
+  it('思考しか無い区間に、空のまとめ行や隙間が残らない', () => {
+    appendNodes(CARD, [
+      node('a1', null, { kind: 'assistant_text', text: 'ひとこと' }),
+      空の思考('k1', 'a1'),
+      空の思考('k2', 'a1'),
+    ])
+
+    // 子が中身の無い思考だけなら、開く操作そのものを出さない
+    // （出すと「開いても何も出ない」が1つ内側で再発する）
+    const [row] = rowsOf(CARD)
+    expect(row.kind === 'node' && row.expandable).toBe(false)
+    expect(rowsOf(CARD)).toHaveLength(1)
+  })
+
+  it('サブエージェントの中でも落ちる', () => {
+    appendNodes(CARD, [
+      node('s1', null, { kind: 'subagent', agent_type: 'general-purpose', spawn_depth: 1 }),
+      node('t1', 's1', tool('ok')),
+      空の思考('k1', 's1'),
+      node('t2', 's1', tool('ok')),
+    ])
+    toggleNode(CARD, 's1')
+
+    const activities = rowsOf(CARD).filter((row): row is ActivityRow => row.kind === 'activity')
+    expect(activities).toHaveLength(1)
+    expect(activities[0].members).toEqual(['t1', 't2'])
+  })
+})
