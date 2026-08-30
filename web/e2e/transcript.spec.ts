@@ -650,3 +650,90 @@ test('タブを往復してもターミナルの内容が残る', async ({ page 
     )
     .toBeGreaterThan(0)
 })
+
+/*
+ * 開いたら、いちばん下（最新）から見せる（設計§3・テスト計画フェーズ3）。
+ *
+ * **末尾追従（`followOnAppend`）では届かない。** あちらの判定は
+ * `prevOptions !== undefined && this.scrollElement !== null` を通った先にあり、
+ * `scrollElement` が入るのはレイアウトエフェクトの中なので、マウントの2回の
+ * `setOptions` はどちらも門を通れない（設計§2-1）。加えて履歴ストアはモジュール変数で
+ * unmount しても消えないため、戻ってきたときは**最初から N 件**で「増えた」ことすら
+ * 観測されない（設計§2-2）。
+ *
+ * **位置はここでしか測れない。** jsdom は `scrollHeight` を持たないので、単体では
+ * 「寄せる指示が何回出たか」しか見られない（設計§10-1）。
+ */
+
+test('開いたら、いちばん下（最新）から見せる', async ({ page }) => {
+  await loadMarkdownBodies(page)
+  const tree = page.getByTestId('transcript-tree')
+  const status = page.getByTestId('transcript-status')
+
+  // **材料が画面を超えていること**を先に確かめる（設計§10-2）。収まってしまうと
+  // 上と下の区別が付かず、この先の判定が素通りする
+  const あふれ = await tree.evaluate((el) => el.scrollHeight - el.clientHeight)
+  expect(あふれ).toBeGreaterThan(80)
+
+  // 手でスクロールしていないのに、末尾に居る
+  await expect(status).toHaveAttribute('data-at-end', 'true')
+})
+
+test('別のページへ行って戻ってきても、最新から始まる', async ({ page }) => {
+  await loadMarkdownBodies(page)
+  const tree = page.getByTestId('transcript-tree')
+  const status = page.getByTestId('transcript-status')
+  await expect(status).toHaveAttribute('data-at-end', 'true')
+
+  // 上まで遡ってから離れる。**戻ったときにその位置が残っていない**ことを見る
+  await tree.evaluate((el) => {
+    el.scrollTop = 0
+  })
+  await expect(status).toHaveAttribute('data-at-end', 'false')
+
+  // PJT 専用画面を経由して戻る（`dashboard.spec.ts` と同じ導線）。
+  // **この経路では履歴ストアが生き残っている**ので、戻った時点で最初から N 件ある
+  await page.getByTestId('to-project').click()
+  const view = page.getByTestId('session-view').first()
+  await view.getByTestId('to-session').click()
+  await showTranscript(page)
+
+  await expect(status).toHaveAttribute('data-at-end', 'true')
+})
+
+test('リロードしても、最新から始まる', async ({ page }) => {
+  await loadMarkdownBodies(page)
+  const tree = page.getByTestId('transcript-tree')
+  const status = page.getByTestId('transcript-status')
+  await tree.evaluate((el) => {
+    el.scrollTop = 0
+  })
+  await expect(status).toHaveAttribute('data-at-end', 'false')
+
+  // **こちらは履歴ストアごと作り直される**ので、本当に0件から始まる経路になる
+  await page.reload()
+  await showTranscript(page)
+  await expect
+    .poll(async () => Number(await status.getAttribute('data-row-count')), {
+      message: '履歴が届くこと',
+      timeout: 30_000,
+    })
+    .toBeGreaterThan(0)
+
+  await expect(status).toHaveAttribute('data-at-end', 'true')
+})
+
+test('横並びでは、構造化ビューへ切り替えたときに末尾から見える', async ({ page }) => {
+  await loadMarkdownBodies(page)
+
+  // PJT 専用画面の既定はターミナル。**構造化ビューは隠れたまま履歴を受け取る**ので、
+  // その間は寄せない（寄せても効かないのに印だけが立つ。設計§7）
+  await page.getByTestId('to-project').click()
+  const view = page.getByTestId('session-view').first()
+  await expect(view).toHaveAttribute('data-view', 'terminal')
+
+  // 切り替えて箱に高さが付いた、その描画で初めて寄せる
+  await view.getByTestId('view-tab-transcript').click()
+  await expect(view).toHaveAttribute('data-view', 'transcript')
+  await expect(view.getByTestId('transcript-status')).toHaveAttribute('data-at-end', 'true')
+})
