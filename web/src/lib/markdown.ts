@@ -277,7 +277,77 @@ function foldAt(text: string, limit: number): FoldedBody {
   // 戻した先が空＝1行目が limit より長い。戻す先が無いので、そのまま切る
   const head = backed.trim() === '' ? cut : backed
 
-  return { head: closeFence(head), folded: true }
+  return { head: trimHollowTail(closeFence(head)), folded: true }
+}
+
+/**
+ * 末尾に残った、中身を持たない構造物を落とす（設計§6-5）。
+ *
+ * **畳んだ末尾はフェードで薄れる**が、**そこに文字が無ければ何も起きない**。実際そう
+ * なっていた——[`closeFence`] は開いたままのフェンスを閉じるので、**切る位置がフェンスの
+ * 直後だと中身がゼロのコードブロックが末尾に残る**。実データで再現した末尾はこれである。
+ *
+ * ```text
+ * ### 3段のバリエーション
+ *                ← 空行
+ * ```            ← 本文が持っていた、開いたフェンス
+ * ```            ← closeFence が足した閉じフェンス
+ * ```
+ *
+ * 落とすのは**空のコードブロック・見出しだけ・`hr`**。どれも「続きがある」ことを示す
+ * 相手にならない。
+ *
+ * **見せる量がしきい値をわずかに下回るのは構わない。** 1〜2行の誤差より、フェードが
+ * 効いていないことのほうが重い（設計§6-5）。
+ *
+ * **全部落ちて空になるなら、落とさない。** 空の本文に「続きを読む」だけが付くほうが、
+ * 壊れて見える。
+ */
+function trimHollowTail(text: string): string {
+  const lines = text.split('\n')
+
+  while (lines.length > 0) {
+    const dropped = dropHollowTail(lines)
+    if (dropped === 0) {
+      break
+    }
+    const kept = lines.slice(0, lines.length - dropped)
+    if (kept.join('\n').trim() === '') {
+      // 落とし切ると空になる。**落とさないほうがまし**
+      break
+    }
+    lines.length = kept.length
+  }
+
+  return lines.join('\n')
+}
+
+/** 末尾から落とせる行数。落とすものが無ければ 0。 */
+function dropHollowTail(lines: string[]): number {
+  let end = lines.length
+  // 末尾の空行は、それだけでは落とす理由にならない（下に何があるかを見てから決める）
+  while (end > 0 && lines[end - 1].trim() === '') {
+    end -= 1
+  }
+  if (end === 0) {
+    return 0
+  }
+
+  const last = lines[end - 1]
+
+  // 中身がゼロのコードブロック（開いた直後に閉じている）
+  const closing = FENCE.exec(last)
+  if (closing && end >= 2) {
+    const opening = FENCE.exec(lines[end - 2])
+    if (opening && opening[1][0] === closing[1][0]) {
+      return lines.length - (end - 2)
+    }
+  }
+  // 見出しだけ・区切り線だけ
+  if (/^\s{0,3}#{1,6}\s/.test(last) || /^\s{0,3}([-*_])\s*(\1\s*){2,}$/.test(last)) {
+    return lines.length - (end - 1)
+  }
+  return 0
 }
 
 /**

@@ -688,3 +688,59 @@ describe('子の1行の名前', () => {
     expect(summarizeInput('あ')).toBe('')
   })
 })
+
+/**
+ * 切った末尾に、フェードする相手を残す（設計§6-5）。
+ *
+ * **マスクが正しく敷かれていても、末尾に文字が無ければ何も起きない。** 実機でそうなって
+ * いた——`closeFence` が閉じフェンスを足すので、切る位置によっては**中身がゼロの
+ * コードブロック**が末尾に残る。
+ */
+describe('畳んだ末尾に、薄れる相手が残る', () => {
+  /** 実効行数を稼ぐための、ふつうの段落。 */
+  const 段落 = (count: number) =>
+    Array.from({ length: count }, (_, index) => `本文の${index}行目。`).join('\n')
+
+  it('囲みコードの直後で切れても、空のコードブロックが残らない', () => {
+    // **実データで再現した形**（この会話の返答・実効192行→75行見せ）。
+    // 段落71 ＋ 空行 ＋ 見出し ＋ 空行 ＋ 開きフェンス でちょうど75行——
+    // **予算が開きフェンスの直後で尽き**、`closeFence` が閉じフェンスを足して空の箱になる
+    const text = `${段落(71)}\n\n### 3段のバリエーション\n\n\`\`\`\nコードの中身\n\`\`\`\n${段落(120)}`
+    const { head, folded } = foldMarkdownByLines(text, 75)
+
+    expect(folded).toBe(true)
+    expect(head.trimEnd().endsWith('```')).toBe(false)
+    // 落としたのは空の箱だけで、その手前の本文は残る
+    expect(head).toContain('本文の69行目。')
+  })
+
+  it('見出しだけで終わらない（続きがあることを示す相手にならない）', () => {
+    const text = `${段落(74)}\n### 次の節\n${段落(200)}`
+    const { head } = foldMarkdownByLines(text, 75)
+
+    expect(head.trimEnd().endsWith('### 次の節')).toBe(false)
+  })
+
+  it('区切り線だけで終わらない', () => {
+    const text = `${段落(74)}\n---\n${段落(200)}`
+    const { head } = foldMarkdownByLines(text, 75)
+
+    expect(head.trimEnd().endsWith('---')).toBe(false)
+  })
+
+  it('落とし切ると空になるなら、落とさない', () => {
+    // **空の本文に「続きを読む」だけが付くほうが壊れて見える**ので、こちらは残す
+    const text = `### 見出しだけ\n${段落(300)}`
+    const { head, folded } = foldMarkdownByLines(text, 1)
+
+    expect(folded).toBe(true)
+    expect(head.trim()).not.toBe('')
+  })
+
+  it('中身のあるコードブロックは落とさない', () => {
+    const text = `${段落(60)}\n\`\`\`\nnpm test\n\`\`\`\n${段落(200)}`
+    const { head } = foldMarkdownByLines(text, 75)
+
+    expect(head).toContain('npm test')
+  })
+})
