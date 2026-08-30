@@ -88,7 +88,7 @@
   <rect x="30" y="178" width="200" height="62" rx="8" fill="#161a21" stroke="#2a313c"/>
   <text x="44" y="202" fill="#e6e9ef" font-size="13">セッションホスト（OMEN）</text>
   <text x="44" y="222" fill="#9aa4b2" font-size="11">claude を動かす → AWS へ繋ぐ</text>
-  <text x="44" y="236" fill="#e0af68" font-size="11">走っていない（ディスク 0.1.59）</text>
+  <text x="44" y="236" fill="#e0af68" font-size="11">走っていない（ディスク 0.1.60）</text>
 
   <rect x="256" y="178" width="200" height="62" rx="8" fill="#161a21" stroke="#2a313c"/>
   <text x="270" y="202" fill="#e6e9ef" font-size="13">cloudflared（この機械）</text>
@@ -128,7 +128,7 @@
   画面に出る版だけを見て「同じものが動いている」と判断しないこと。<br><br>
 
   <p class="note warn"><strong>実機は 0.1.59 で走っている。ディスクは 0.1.60（ずれあり——<strong>新しい版を用意しただけで、まだ効かせていない</strong>）。</strong> <strong>0.1.60 は「構造化ビューを開いたら最新のところから見せる」</strong>（あわせて <code>transcript.spec.ts</code> の待ちを揃え、7回観測されていた不安定を是正した）。 <strong>2026-08-30 22時台に起こし直した</strong>——<strong>WSL ごと落ちていた</strong>（<code>uptime</code> が3分。常駐の仕組みに載せていないので、<strong>WSL を起こし直すと落ちたままになる</strong>）。<br><strong>このとき版は、押さずに 0.1.58 から 0.1.59 へ上がった。</strong> 予約が無いので<strong>ディスクの実行ファイルから起きる</strong>ためで、<strong>WSL の再起動は「いま入れ替える」を押したのと同じ結果になる</strong>。<strong>ずれを解消したいだけなら、これを待つ手もある</strong>——ただし<strong>生きたカードは全部抜け殻になる</strong>ので、代償は押した場合と変わらない。<br><strong>2026-08-28 20時台にも同じ形で起こし直している</strong>（そのときも<strong>落ちていた</strong>——8787 で誰も待ち受けていない状態）。<strong>常駐の仕組みに載せていないので、放っておくと落ちたままになる。</strong>このとき <code>portproxy</code> の行き先も受信規則もずれていなかったので、<strong>「別端末から開けない」の原因は経路ではなく、単に起きていなかったことだった</strong>——<strong>経路を疑う前に、まず <code>ss -tln | grep 8787</code> で待ち受けの有無を見ること。</strong> AWS は無い（アカウント閉鎖）。<strong>セッションホスト<span class="mark">▽</span>は走っていない</strong>。<strong>走行とディスクはずれている</strong>（新しい版を用意しただけで、<strong>まだ効かせていない</strong>。<strong>フックの宛先に消えたパスが焼き込まれていた件は、0.1.56 が入って解けた</strong>——いまの <code>AGENTDASHBOARD_HOOK_BIN</code> は実在するパスを指しており、入れ替え後に「フックが1件も届いていません」は1度も出ていない）。0.1.47〜0.1.50（<strong>版のドロップダウンが反応しない件を直す</strong>＝0.1.47／狭い窓でサイドバーが全画面を覆うのをやめる＝0.1.48／<strong>合言葉を通った相手にも版の入れ替えを許す</strong>＝0.1.49／<strong>安全でないオリジンでもパスをコピーできる</strong>＝0.1.50）は<strong>すべて効いている</strong>。<strong>2026-08-28 05:17:49 に 0.1.50 で起き直った</strong>（<code>--config /home/osuim/AgentDashboard/config.toml</code> を名指しした起動）。<strong>この起こし直しは <code>~/agentdashboard-restart.log</code> に載っていない</strong>——切り離したスクリプトを通さず手で起こしたためで、<strong>あの記録の末尾（2026-08-27 23:04・0.1.46）は最後の起こし直しではない</strong>。<strong>走行版は本人（<code>/api/me</code>）に聞くこと。</strong>
-  <br><strong>ディスクは 0.1.59 で、リポジトリ（<code>~/Dev/AgentDashboard</code>）に追いついている</strong>——効果線（roam）の巻きの直しは 0.1.54、<strong>ファイル閲覧の上限を 3 MiB へ上げた</strong>のは 0.1.55（あわせて大きい Markdown は整形せずに出す。大きい HTML が箱へ行かなくなっていた不具合の修正も同じ版）。<strong>実機へ効かせるには <code>git pull</code> → <code>make build</code> → 起こし直しが要る</strong>（ソースビルド<span class="mark">▽</span>なので、リリースを出しても届かない）。
+  <br><strong>ディスクは 0.1.60 で、リポジトリ（<code>~/Dev/AgentDashboard</code>）に追いついている</strong>——効果線（roam）の巻きの直しは 0.1.54、<strong>ファイル閲覧の上限を 3 MiB へ上げた</strong>のは 0.1.55（あわせて大きい Markdown は整形せずに出す。大きい HTML が箱へ行かなくなっていた不具合の修正も同じ版）。<strong>実機へ効かせるには <code>git pull</code> → <code>make build</code> → 起こし直しが要る</strong>（ソースビルド<span class="mark">▽</span>なので、リリースを出しても届かない）。
   <br><strong>これはいちばん気づきにくいずれ方である。</strong>ヘッダに出る版はサーバに聞いた答えなので<strong>古いタブでも新しい版が表示される</strong>。「揃っているのに古い」という形になるので、<strong>数字ではなく「最後に起こし直したのはいつか」で判断すること。</strong>
   <br><strong>次に落とすときも、抱えている claude を先に数えること。</strong>起こし直すと道連れになり、<strong>作業中のセッション自身がその中に居ることがある</strong>（今回も居た）。<strong>いつ落としてよいかは人にしか決められない。</strong></p>
 
