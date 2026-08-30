@@ -102,7 +102,9 @@ describe('SessionTile', () => {
   ])('状態 %o は「%s」と表示される', (status, label) => {
     renderTile(meta({ status }))
 
-    expect(screen.getByText(label)).toBeInTheDocument()
+    // 文言が1つ以上ある。**停滞は2つ**（走る人のハイコントラスト退避と、止めたとき
+    // 出る休みのタグ。フェーズ17）なので、1つに限らない
+    expect(screen.getAllByText(label).length).toBeGreaterThan(0)
     expect(screen.getByTestId('session-tile')).toHaveAttribute(
       'data-status',
       status.kind,
@@ -293,13 +295,34 @@ describe('SessionTile の骨格', () => {
   it('状態は右下のタグに出る。①行には残っていない', () => {
     // 要件2-1。**上部に真面目に書く必要は無い**（0.1.41 を実物で見た利用者の指定）。
     // ①行へ戻すとここが落ちる
-    for (const kind of ['stalled', 'waiting_input', 'starting', 'unknown'] as const) {
+    // **停滞はここに居ない**（フェーズ17 で走る人になった。下の専用のテストで見る）
+    for (const kind of ['waiting_input', 'starting', 'unknown'] as const) {
       const { unmount } = renderTile(meta({ status: { kind } }))
       expect(screen.getByTestId('tile-tag')).toHaveTextContent(statusLabel({ kind }))
       // ①行の先頭に居た記号のスロットは無くなっている
       expect(screen.queryByTestId('status-glyph')).not.toBeInTheDocument()
       unmount()
     }
+  })
+
+  it('停滞は走る人とタグの両方を持ち、タグは休みの印を持つ', () => {
+    // 設計§22-3。動いている間は走る人、**止めたときはタグへ戻す**。どちらを見せるかは
+    // CSS が決める（§9-5-3）ので、ここでは両方が置かれ、印が付いていることを見る。
+    // 走る人だけにすると、止めたとき作業中と見分けが濃さだけになる（要件の完了条件を割る）
+    renderTile(meta({ status: { kind: 'stalled' } }))
+    const 走る人 = screen.getByTestId('tile-run')
+    expect(走る人).toHaveClass('tile-run-rest')
+    expect(走る人).toHaveAttribute('aria-label', statusLabel({ kind: 'stalled' }))
+    const タグ = screen.getByTestId('tile-tag')
+    expect(タグ).toHaveClass('tile-tag-rest')
+    expect(タグ).toHaveTextContent(statusLabel({ kind: 'stalled' }))
+    expect(タグ.querySelector('.tile-glyph')?.textContent).toBe(
+      statusGlyph({ kind: 'stalled' }),
+    )
+    // 読み上げは走る人が担う。同じ状態名を二度読ませない
+    expect(タグ).toHaveAttribute('aria-hidden', 'true')
+    // ①行から記号が消えたままであること（上のループから停滞を外したぶんの回帰）
+    expect(screen.queryByTestId('status-glyph')).not.toBeInTheDocument()
   })
 
   it('記号はタグの中にある', () => {
@@ -316,12 +339,14 @@ describe('SessionTile の骨格', () => {
     // 「動いている」ことだけが伝わればよい
     renderTile(meta({ status: { kind: 'working' } }))
     expect(screen.queryByTestId('tile-tag')).not.toBeInTheDocument()
-    expect(screen.getByTestId('tile-run')).toBeInTheDocument()
+    // **休みの印は持たない**（据え置き。止めたときは1枚目で静止する。設計§22-3）
+    expect(screen.getByTestId('tile-run')).not.toHaveClass('tile-run-rest')
 
-    // 他の状態は逆
+    // 走る人を持たない状態は逆（停滞は両方持つので、ここでは使わない）
     cleanup()
-    renderTile(meta({ status: { kind: 'stalled' } }))
+    renderTile(meta({ status: { kind: 'waiting_input' } }))
     expect(screen.getByTestId('tile-tag')).toBeInTheDocument()
+    expect(screen.getByTestId('tile-tag')).not.toHaveClass('tile-tag-rest')
     expect(screen.queryByTestId('tile-run')).not.toBeInTheDocument()
   })
 

@@ -151,6 +151,16 @@ function 濃さだけ(rule: Rule): boolean {
   return 宣言.length > 0 && 宣言.every((s) => s.startsWith('--'))
 }
 
+/**
+ * 停滞の休みのタグ（`.tile-tag-rest`）を出す規則か。
+ *
+ * 止めたとき走る人からタグへ戻す側の規則で、**動きを止めるのではなく見せるものを
+ * 替える**（フェーズ17）。止める規則として数えると `animation: none` を求めて空振りする
+ */
+function 休みのタグを出す(rule: Rule): boolean {
+  return rule.selector.endsWith('.tile-tag-rest') && rule.body.includes('display:')
+}
+
 describe('動きの定義の読み込み', () => {
   it('index.css から取り込まれている', () => {
     // **書き忘れても、位置を誤っても、このファイルのテストは全部緑のまま通る。**
@@ -193,14 +203,20 @@ describe('揺れるのは切る枠から内側', () => {
 describe('静けさの3段', () => {
   it('「控えめ」が止めるのは作業中のものだけ', () => {
     const 控えめ = 当たる("[data-quiet='calm']")
-    // 輪の回転と、**走るアニメーション**（フェーズ13。止める1本＋1コマ目で静止する1本）。
-    // どれも作業中のもの
-    expect(控えめ).toHaveLength(3)
+    // 輪の回転と、**走るアニメーション**（フェーズ13。止める1本＋1コマ目で静止する1本）と、
+    // **停滞の休み**（フェーズ17。人を消す1本＋タグを出す1本）。当たり先はこの4種に閉じる
+    expect(控えめ.length).toBeGreaterThanOrEqual(5)
+    for (const rule of 控えめ) {
+      expect(rule.selector).toMatch(
+        /\[data-motion='spin-fast'\]|\.tile-run-rest|\.tile-tag-rest|\.tile-run/,
+      )
+    }
     const 当たり先 = 控えめ.map((rule) => rule.selector).join(' ')
     expect(当たり先).toContain("[data-motion='spin-fast']")
-    expect(当たり先).toContain('.tile-run')
-    // **停滞・入力待ち・承認待ちは動いたまま。** ここを広げると、いちばん見つけたい
-    // ものの合図まで静けさと引き換えに失う
+    expect(当たり先).toContain('.tile-run i')
+    // **停滞の枠線・入力待ち・承認待ちは動いたまま。** ここを広げると、いちばん見つけたい
+    // ものの合図まで静けさと引き換えに失う。停滞で止まるのは**走る人だけ**（タグへ戻る）で、
+    // 輪の回転（`spin-slow`）には触れない
     for (const 触ってはいけない of ['spin-slow', 'breathe', 'shake']) {
       expect(当たり先).not.toContain(触ってはいけない)
     }
@@ -218,6 +234,10 @@ describe('静けさの3段', () => {
       // 器へ載せる値であって、動きを止める宣言ではない。**`animation: none` を
       // 書き足して黙らせない**——効きもしない宣言をテストのために置くことになる
       if (濃さだけ(rule)) continue
+      // **休みのタグを出す規則も「止める規則」ではない**（フェーズ17）。停滞は止めたとき
+      // 走る人からタグへ戻るが、タグ自身は動きを持たないので `animation: none` を書く
+      // 相手が無い。人を消す側（`.tile-run-rest i`）は普通に止める規則として数える
+      if (休みのタグを出す(rule)) continue
       expect(rule.body).toContain('animation: none')
     }
   })
@@ -238,6 +258,8 @@ describe('OS の「動きを減らす」', () => {
     const 減らす = 当たる('prefers-reduced-motion')
     expect(減らす).not.toHaveLength(0)
     for (const rule of 減らす) {
+      // 休みのタグを出す規則は動きを持たない（「静止」と同じ扱い。フェーズ17）
+      if (休みのタグを出す(rule)) continue
       expect(rule.body).toContain('animation: none')
       // 段を条件に入れていない＝「賑やか」を選んでいても止まる
       expect(rule.selector).not.toContain('data-quiet')
@@ -657,5 +679,71 @@ describe('右下のタグは厚みを持ち、1.2倍になっている（フェ�
       px(値(s, 'padding').split(/\s+/)[0]) * 2
     const 逃がし = px(値(規則('.tile-tag-raised'), 'bottom'))
     expect(逃がし).toBeGreaterThanOrEqual(px(値(s, 'bottom')) + 高さ)
+  })
+})
+
+/**
+ * 停滞も走る人（フェーズ17）。
+ *
+ * 「動いていること」だけを見るとどの周期でも緑になる。**周期の比**と、**遅れが周期から
+ * 引かれていること**と、**止めたときタグへ戻る道が3つとも別に在ること**を見る。
+ */
+describe('停滞も走る人になり、止めたときはタグへ戻る（フェーズ17）', () => {
+  it('周期は変数1つから配られ、遅れは周期の 1/3 ずつ', () => {
+    // 遅れをリテラル（0 / 0.2 / 0.4秒）へ戻すと、周期だけ変えたとき3枚が重なるか1枚も出ない
+    expect(値(規則('.tile-run i'), 'animation')).toMatch(
+      /^tile-run var\(--run-period\) steps\(1, end\) infinite$/,
+    )
+    for (const n of [0, 1, 2]) {
+      expect(値(規則(`.tile-run i:nth-child(${n + 1})`), 'animation-delay')).toBe(
+        `calc(var(--run-period) * ${n} / 3)`,
+      )
+    }
+  })
+
+  it('停滞の周期は作業中のちょうど2倍', () => {
+    // 利用者の指定は「1/2 のスピード」。1.0秒でも 0.6秒でも「動いている」ので、比で見る
+    const 作業中 = Number.parseFloat(値(規則('.tile-run'), '--run-period'))
+    const 停滞 = Number.parseFloat(
+      値(規則("[data-motion='spin-slow'] .tile-run"), '--run-period'),
+    )
+    expect(作業中).toBe(0.6)
+    expect(停滞 / 作業中).toBe(2)
+  })
+
+  it('@keyframes tile-run は比のまま触られていない', () => {
+    // 先頭の 1/3 だけ `opacity: 1`。ここを書き換えると作業中まで壊れる
+    expect(素のCSS()).toMatch(
+      /@keyframes tile-run \{\s*0%,\s*33\.33% \{\s*opacity: 1;\s*\}\s*33\.34%,\s*100% \{\s*opacity: 0;\s*\}\s*\}/,
+    )
+  })
+
+  it('休みのタグは畳んであり、止める3つの段のどれでも出る', () => {
+    // 3つは別の規則。1つ直して3つとも効いたつもりになるのを防ぐ（テスト計画の壊し方）
+    expect(値(規則('.tile-tag-rest'), 'display')).toBe('none')
+    for (const 段 of ["[data-quiet='calm']", "[data-quiet='still']", 'prefers-reduced-motion']) {
+      const 出す = 当たる(段).filter((r) => r.selector.endsWith('.tile-tag-rest'))
+      expect(出す, `${段} でタグを出す規則`).toHaveLength(1)
+      expect(値(出す[0], 'display')).toBe('inline-flex')
+      // 人のほうは消す。**1枚目だけを出す規則より後ろ**に置かないと勝てない（詳細度が同じ）
+      const 消す = 当たる(段).filter((r) => r.selector.endsWith('.tile-run-rest i:nth-child(1)'))
+      expect(消す, `${段} で人を消す規則`).toHaveLength(1)
+      expect(値(消す[0], 'opacity')).toBe('0')
+      const 一枚目 = 当たる(段).filter((r) => r.selector.endsWith(' .tile-run i:nth-child(1)'))
+      expect(一枚目).toHaveLength(1)
+      expect(消す[0].at).toBeGreaterThan(一枚目[0].at)
+    }
+  })
+
+  it('ハイコントラストでは休みのタグを出さない', () => {
+    // あの環境では `.tile-run-fallback` が `‖ 停滞` を出すので、タグまで出すと二重になる。
+    // 静けさと OS の規則より後ろに置いて勝たせる
+    const 消す = 当たる('forced-colors').filter((r) => r.selector.endsWith('.tile-tag-rest'))
+    expect(消す).toHaveLength(1)
+    expect(値(消す[0], 'display')).toBe('none')
+    const 出す最後 = Math.max(
+      ...全規則.filter((r) => r.selector.endsWith('.tile-tag-rest') && r.body.includes('inline-flex')).map((r) => r.at),
+    )
+    expect(消す[0].at).toBeGreaterThan(出す最後)
   })
 })

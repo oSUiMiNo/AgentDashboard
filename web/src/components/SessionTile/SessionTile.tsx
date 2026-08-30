@@ -252,6 +252,13 @@ export function SessionTile({ cardId }: Props) {
   const revivable = reviveState(session, agentOf(agents, session.agent_id))
   const reviveWhy = reviveReason(revivable)
   const motionKind = statusMotion(session.status)
+  /*
+    右下に走る人を描くのは、作業中と停滞（フェーズ17）。**`statusMotion` は触らない**
+    ——あちらを変えると枠線の回転まで巻き込む（設計§22-5）。停滞だけ「休み」の印を
+    持ち、止めたときにタグへ戻る（下のコメント）
+  */
+  const running = motionKind === 'spin-fast' || motionKind === 'spin-slow'
+  const resting = motionKind === 'spin-slow'
 
 
   return (
@@ -576,16 +583,16 @@ export function SessionTile({ cardId }: Props) {
 
           副産物として、**どの状態にどの素材が当たっているかを字面で検査できる**。
         */}
-        {motionKind === 'spin-fast' ? (
+        {running && (
           <span
-            className="tile-run"
+            className={`tile-run${resting ? ' tile-run-rest' : ''}`}
             data-testid="tile-run"
             role="img"
             aria-label={statusLabel(session.status)}
           >
             {/*
               3コマ。**素材は形だけ**をマスクとして使い、塗るのは状態の色（`tile.css`）。
-              0.2秒おきに切り替わる
+              作業中は 0.2秒おき、停滞はその半分の速さで切り替わる（設計§22-1）
             */}
             <i aria-hidden />
             <i aria-hidden />
@@ -599,14 +606,31 @@ export function SessionTile({ cardId }: Props) {
               {statusLabel(session.status)}
             </span>
           </span>
-        ) : (
+        )}
+        {/*
+          # 停滞は、走る人とタグの**両方**を描く（設計§22-3）
+
+          動いている間は走る人だけが見え、**止めたとき（控えめ・静止・OS の「動きを
+          減らす」）はタグへ戻る**。走る人だけにすると、止めたとき作業中と停滞がどちらも
+          「静止した人」になり、残る手がかりが濃さと輪の太さだけになる——要件の完了条件
+          「止めても色・記号・文字で状態が読める」を割る。
+
+          **どちらを見せるかは CSS が決める**（§9-5-3「判定を JS へ散らさない」）。ここは
+          両方を置くだけで、`tile-tag-rest` の表示を静けさの印と `@media` が切り替える。
+          `forced-colors` の `.tile-run-fallback` と同じ作法。
+
+          休みのタグは `aria-hidden`——読み上げは走る人の `aria-label` が担うので、
+          同じ状態名を二度読ませない
+        */}
+        {(!running || resting) && (
           <span
             className={`tile-tag${
               session.status.kind === 'waiting_permission'
                 ? ' tile-tag-raised'
                 : ''
-            }`}
+            }${resting ? ' tile-tag-rest' : ''}`}
             data-testid="tile-tag"
+            aria-hidden={resting ? true : undefined}
           >
             <span className="tile-glyph" aria-hidden>
               {statusGlyph(session.status)}
