@@ -211,10 +211,94 @@
 .body-fade {
   --fade-line: calc(0.75rem * 1.625);
   --fade-band: calc(2 * var(--fade-line));
+  /*
+    **色は「畳まれているか」を伝える**（設計§6-6）。消すだけだと、暗い地の上では
+    畳まれた末尾なのか**ただの余白なのか見分けが付かない**（実機で指摘された）。
+
+    Primary Accent（`DESIGN.md` §11.2 の Cyan）の**ごく薄いティント**にする。
+    「続きがある」は**行の状態であって種別ではない**ので、あの表では Primary の側に当たる。
+    §11.2 の「Primary Accent は面で出す」とも噛み合う——帯は線でも点でもなく面である。
+
+    **カードの状態色（`--tile-accent`）を読まないこと。** あれはカードごとに変わるので、
+    色が「畳まれている」ではなく「状態」を表してしまう。
+  */
+  --fade-tint: color-mix(in oklch, #3dd9e6 16%, transparent);
+  position: relative;
+}
+/*
+  **ティントは、マスクを掛けた要素へ置いてはいけない**（設計§6-6）。`mask-image` は
+  **その要素の擬似要素にも効く**ので、同じ要素へ足すと**帯がいちばん濃くあるべき末尾で、
+  ティングごとマスクに消される**。外（`.body-fade`）が色、中（`.body-fade-text`）が文字を消す。
+
+  **半透明であること。** 不透明で塗り潰すと下の地を隠すので、コードブロックのように
+  自前の地を持つ要素の上で**矩形が浮く**——フェーズ7 で直した失敗に戻る。半透明の膜は
+  **どんな地の上でも、その地を色づけるだけ**なので、地を配る仕組みは要らない。
+*/
+.body-fade::after {
+  content: '';
+  position: absolute;
+  inset-inline: 0;
+  bottom: 0;
+  height: var(--fade-band);
+  /* **見た目のためだけに重ねるものは、押す判定を素通しさせる** */
+  pointer-events: none;
+  background: linear-gradient(to bottom, transparent, var(--fade-tint));
+}
+/*
+  文字を消すのはこちら。**ティントの濃さに関係なく末尾が読めなくなること**を保証する。
+
+  帯の高さは**行の高さの倍数**で書く。`4rem` のような絶対値にすると、本文が
+  `text-xs / leading-relaxed`（1行 ≒ 1.21875rem）なので**約3.3行**になる。
+
+  **行の高さは動かない。** 塗り方を変えるだけなので、仮想化が実測して覚えた高さに影響しない。
+*/
+.body-fade-text {
   /* Safari と iOS はいまも接頭辞が要る。**この道具はスマホから触るのが前提** */
   -webkit-mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - var(--fade-band)), transparent 100%);
   mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - var(--fade-band)), transparent 100%);
 }
-/* 残りの量で変えるのは**かかり始める位置だけ**（設計§6-3）。濃さも色も変えない */
+/* 残りの量で変えるのは**かかり始める位置だけ**（設計§6-3）。**色は変えない**——
+   色は「畳まれているか」、高さは「どれだけ残っているか」。2つの軸を混ぜない */
 .body-fade-shallow { --fade-band: calc(1 * var(--fade-line)); }
 .body-fade-deep { --fade-band: calc(3 * var(--fade-line)); }
+
+/*
+  利用者の発言の吹き出し（設計§5-4）。
+
+  **ただの角丸長方形にしない。** `DESIGN.md` の禁止「すべてを大きな角丸長方形で構成する」に
+  当たるうえ、**形からは何も読み取れない**。右上にしっぽを立てると、色に頼らず
+  シルエットだけで「これは発言だ」と分かる。
+
+  **`clip-path` を使わないこと。** この群がフェーズ8 で実測したとおり、**当たり判定に
+  効くのは `clip-path` であって `mask` ではない**。吹き出しの中には押せるもの（本文と
+  「続きを読む」）が入っているので、形を切ると**しっぽの周りだけ反応しない吹き出し**になる。
+
+  **地の色は1箇所から取る。** 本体としっぽで別々に書くと、片方だけ直したときに必ずずれる
+  （`--fade-ground` を配っていた頃に踏んだのと同じ形）。
+*/
+.speech-bubble {
+  --bubble-ground: color-mix(in oklch, var(--color-muted) 60%, transparent);
+  --bubble-radius: 1rem; /* DESIGN.md §10.3 の Large（16px前後） */
+  --bubble-tail: 0.5rem;
+  position: relative;
+  background: var(--bubble-ground);
+  border-radius: var(--bubble-radius);
+  /* 右上だけ角丸をやめる。ここへしっぽが立つ */
+  border-top-right-radius: 0;
+}
+/*
+  しっぽ。**上辺が右端まで伸びてから、えぐるように下へ折り返す**形を、
+  角の内側を丸く抜いた四角で作る。`radial-gradient` のマスクで抜くので `clip-path` は要らない。
+*/
+.speech-bubble::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: calc(-1 * var(--bubble-tail));
+  width: var(--bubble-tail);
+  height: calc(var(--bubble-tail) * 1.4);
+  pointer-events: none;
+  background: var(--bubble-ground);
+  -webkit-mask-image: radial-gradient(circle at 100% 100%, transparent var(--bubble-tail), #000 var(--bubble-tail));
+  mask-image: radial-gradient(circle at 100% 100%, transparent var(--bubble-tail), #000 var(--bubble-tail));
+}

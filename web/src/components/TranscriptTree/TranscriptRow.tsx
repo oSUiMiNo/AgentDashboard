@@ -345,12 +345,17 @@ function NodeRowView({
         (isUser ? (
           // 利用者の発言だけを右寄せの吹き出しにする（設計§5-3）。幅いっぱいにすると
           // 右寄せであることが読み取れなくなるので、本文の70%を上限にする
-          <div className="flex justify-end">
+          // **しっぽの分だけ右を空ける**（設計§5-4）。しっぽは吹き出しの右外へ出るので、
+          // 空けないと窓の端で切れる
+          <div className="flex justify-end pr-2">
             <div
               data-testid="user-bubble"
-              // **フェードの地を渡す必要は無い**（設計§6-2）。マスクは文字を透明にする
-              // だけなので、透けるのは実際にこの吹き出しの地である
-              className="bg-muted/60 mt-1 max-w-[70%] rounded-2xl px-3 py-2"
+              // **フェードの地を渡す必要は無い**（設計§6-2）。ティントは半透明なので、
+              // 透けるのは実際にこの吹き出しの地である。
+              //
+              // 角丸としっぽは `.speech-bubble` が持つ（設計§5-4）。**地の色もあちらが
+              // 1箇所で持つ**ので、ここで `bg-*` を重ねないこと——2箇所になった時点でずれる
+              className="speech-bubble mt-1 max-w-[70%] px-3 py-2"
             >
               <RowBody node={row.node} cardId={cardId} row={row} onToggleBody={onToggleBody} />
             </div>
@@ -453,14 +458,24 @@ function MarkdownBody({
       {/* 本文は**主役**なので、地の色で出す（`FileView` と同じ扱い）。
           要約を横に出していた頃の名残で薄い色にしていると、見出しも強調も
           本文と同じ灰色になって、整形した意味がほとんど消える（実物で確認） */}
+      {/* **層を2つに分ける**（設計§6-6）。`mask-image` は**その要素の擬似要素にも効く**ので、
+          マスクを掛けた要素へ色のティントを `::after` で足すと、**帯がいちばん濃くあるべき
+          末尾で、ティントごと消される**。外は色（マスクを掛けない）、中は文字を消すマスク。
+
+          **`prose-dashboard` は内側のまま**にする。`> :first-child` などが**直下の子**を
+          見ているので、間に箱を挟むと余白が変わる */}
       <div
         data-testid="row-body"
         data-fade={fade ?? undefined}
-        className={`prose-dashboard text-xs leading-relaxed ${tone}${fade ? ` body-fade body-fade-${fade}` : ''}`}
+        // **ウェイトと色は外側に残す**（継承するので内側でも効く）。行の主従を読む側は
+        // `row-body` を見るので、ここから動かすと「発言が強い」の検査が空振りする
+        className={`${tone}${fade ? ` body-fade body-fade-${fade}` : ''}`}
       >
-        <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS}>
-          {body}
-        </ReactMarkdown>
+        <div className={`prose-dashboard text-xs leading-relaxed${fade ? ' body-fade-text' : ''}`}>
+          <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS}>
+            {body}
+          </ReactMarkdown>
+        </div>
       </div>
       {row?.foldable === true && (
         <button
