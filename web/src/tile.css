@@ -330,7 +330,11 @@
 */
 .tile-glyph {
   display: inline-block;
-  width: 1rem;
+  /*
+    **字の大きさに追随させる**（フェーズ16）。`1rem` だとタグの `font-size` を上げても
+    枠だけ 16px に据え置かれ、記号と文言の釣り合いが崩れる。比は元の 16px / 11px
+  */
+  width: 1.45em;
   text-align: center;
   font-family: 'Geist Variable', 'Segoe UI Symbol', 'Noto Sans Symbols 2', sans-serif;
 }
@@ -746,26 +750,47 @@
   bottom: 9px;
   right: 10px;
   rotate: -3deg;
-  padding: 2px 8px;
-  /*
-    **状態タグと同じ地にする**（要件2-4「ANSWER タグも作り直す」）。揃えないと、同じ
-    カードの右下に**角丸の長方形と型抜きの紙片が並ぶ**——2枚出るのは権限確認待ちだけ
-    なので、そこだけ家族が違って見える
-  */
-  mask-image: url('./assets/tile/tag-plate.png');
-  mask-size: 100% 100%;
-  mask-repeat: no-repeat;
-  background: var(--tile-accent);
+  /* 1.2倍（フェーズ16。10px / 2px 8px から） */
+  padding: 2.4px 9.6px;
   color: #171717;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.08em;
   line-height: 1.4;
   pointer-events: none;
-  /* 貼ってある感じ。§12.1 の Printed Sticker。**厚みは 2.5倍**（2026-08-26） */
-  box-shadow:
-    0 2.5px 5px rgb(0 0 0 / 45%),
-    inset 0 2.5px 0 rgb(255 255 255 / 35%);
+  /*
+    貼ってある感じ。§12.1 の Printed Sticker。**厚みは 2.5倍**（2026-08-26）。
+
+    # 落ち影は `filter` で、地は `::before` で（フェーズ16）
+
+    `mask-image` は要素の描画そのものを切るので、**外側の `box-shadow` は消えていた**
+    （設計§21-1 の実測）。`filter: drop-shadow()` も**同じ要素に掛けると同じ理由で
+    切られる**（適用順が filter → mask なので、影までマスクに掛かる。実測・2026-08-31）。
+    **影を描く要素と、型抜きされる要素を分ける**——地を `::before` へ下ろし、この要素は
+    「型抜きされた子の alpha に沿って影を落とす」だけにする。DOM は増えない
+  */
+  filter: drop-shadow(0 2.5px 2.5px rgb(0 0 0 / 45%));
+}
+
+/*
+  **状態タグと同じ地にする**（要件2-4「ANSWER タグも作り直す」）。揃えないと、同じ
+  カードの右下に**角丸の長方形と型抜きの紙片が並ぶ**——2枚出るのは権限確認待ちだけ
+  なので、そこだけ家族が違って見える。
+
+  `z-index: -1` は親の `filter` が作る stacking context の中で効くので、文字の後ろには
+  回るがカードの後ろへは落ちない
+*/
+.tile-sticker::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: var(--tile-accent);
+  mask-image: url('./assets/tile/tag-plate.png');
+  mask-size: 100% 100%;
+  mask-repeat: no-repeat;
+  /* 内側のハイライトはマスクの中に収まるので、こちらに残す */
+  box-shadow: inset 0 2.5px 0 rgb(255 255 255 / 35%);
 }
 
 /* ───────────────── 状態タグと、走るアニメーション ───────────────── */
@@ -802,39 +827,47 @@
   right: 10px;
   display: inline-flex;
   align-items: center;
-  gap: 3px;
   rotate: -2deg;
-  padding: 2px 8px;
-  border-radius: 3px;
+  /* 1.2倍（フェーズ16。11px / 2px 8px / gap 3px から） */
+  gap: 3.6px;
+  padding: 2.4px 9.6px;
   /*
     **`--tile-ink` を通さない**（`tile.test.ts` の除外表に理由つきで載せてある）。
     上に暗い文字が乗るので、薄くすると文言そのものが読めなくなる。`.tile-sticker` と
     同じ扱い。
-
-    # 素材は「形」として使う（**色として使わない**）
-
-    生成した地は**琥珀色の紙片**だが、そのまま貼ると状態ごとの色（シアン・灰・珊瑚）が
-    出せない。**`mask-image` で形だけを取り、塗るのは `--tile-accent`** にしてある——
-    こうすると**色の対応表は1つのまま**（設計§8「色の対応表を2箇所に分けない」）で、
-    画像は**CSS では作れないもの＝型抜きの不規則な縁**だけを担う。
-
-    平らな角丸長方形なら CSS が1行で出せるので、そちらは素材にする意味が無い
-    （`DESIGN.md` §17 Small-Size First。門は §18.4。試作1枚目を実寸で見て落とした）。
   */
-  background: var(--tile-accent);
-  mask-image: url('./assets/tile/tag-plate.png');
-  mask-size: 100% 100%;
-  mask-repeat: no-repeat;
   color: #171717;
-  font-size: 11px;
+  font-size: 13.2px;
   font-weight: 700;
   letter-spacing: 0.06em;
   line-height: 1.4;
   white-space: nowrap;
   pointer-events: none;
-  box-shadow:
-    0 2.5px 5px rgb(0 0 0 / 45%),
-    inset 0 2.5px 0 rgb(255 255 255 / 35%);
+  /* 落ち影。地と分ける理由は `.tile-sticker` に書いてある（同じ家族なので同じ作り） */
+  filter: drop-shadow(0 2.5px 2.5px rgb(0 0 0 / 45%));
+}
+
+/*
+  # 素材は「形」として使う（**色として使わない**）
+
+  生成した地は**琥珀色の紙片**だが、そのまま貼ると状態ごとの色（シアン・灰・珊瑚）が
+  出せない。**`mask-image` で形だけを取り、塗るのは `--tile-accent`** にしてある——
+  こうすると**色の対応表は1つのまま**（設計§8「色の対応表を2箇所に分けない」）で、
+  画像は**CSS では作れないもの＝型抜きの不規則な縁**だけを担う。
+
+  平らな角丸長方形なら CSS が1行で出せるので、そちらは素材にする意味が無い
+  （`DESIGN.md` §17 Small-Size First。門は §18.4。試作1枚目を実寸で見て落とした）。
+*/
+.tile-tag::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: var(--tile-accent);
+  mask-image: url('./assets/tile/tag-plate.png');
+  mask-size: 100% 100%;
+  mask-repeat: no-repeat;
+  box-shadow: inset 0 2.5px 0 rgb(255 255 255 / 35%);
 }
 
 /*
@@ -847,8 +880,17 @@
   気づかなかったのと同じ形。**タグ自身が持つ修飾クラスで表す**
 */
 .tile-tag-raised {
-  bottom: 30px;
-  right: 18px;
+  /*
+    ANSWER の高さ 21.6px（12px × 1.4 ＋ 上下 2.4px）＋ 下 9px ＋ 隙間（フェーズ16）。
+    隙間を 5px 取るのは、**2枚とも傾いている**ため——回転した矩形は上下に 2px ほど
+    膨らむので、素の高さで詰めると角が触れる
+  */
+  bottom: 36px;
+  /*
+    ANSWER（右 10px）から 2px だけずらして段を見せる。フェーズ13 の 18px は 1.2倍で
+    伸びたタグ（最長 125px）が②行のバッジに触れる（実測）ので、右へ寄せた
+  */
+  right: 12px;
 }
 
 /*
@@ -950,6 +992,29 @@
   .tile-tag {
     border: 1px solid CanvasText;
     color: CanvasText;
+    /* 地が無いので影も要らない */
+    filter: none;
+  }
+
+  /* 同上。残すと `ANSWER` の字の周りに灰色の滲みだけが出る（実測） */
+  .tile-sticker {
+    filter: none;
+  }
+
+  /*
+    2枚出しの上段は、この環境では枠線（左右 1px）ぶん広がって②行のバッジに触れる
+    （実測：通常は 6px 空くが、ここでは 1〜3px 重なる）。ANSWER と右端を揃え、
+    横の余白だけ詰めて逃がす。字の大きさは変えない
+  */
+  .tile-tag-raised {
+    right: 10px;
+    padding-inline: 6px;
+  }
+
+  /* 地（型抜きの紙片）は背景なので強制的に落ちる。明示して消す */
+  .tile-tag::before,
+  .tile-sticker::before {
+    display: none;
   }
 
   /* 絵は消える（`mask` を掛けた地は背景なので強制的に落ちる）。明示して消す */

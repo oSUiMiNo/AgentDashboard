@@ -118,6 +118,26 @@ function 当たる(fragment: string): Rule[] {
   return 全規則.filter((rule) => rule.selector.includes(fragment))
 }
 
+/** セレクタが**そのもの**の規則を1つ返す。無ければ落とす（空振りを緑にしない） */
+function 規則(selector: string): Rule {
+  const found = 全規則.filter((rule) => rule.selector === selector)
+  expect(found, selector).toHaveLength(1)
+  return found[0]
+}
+
+/** `名前: 値` の値を取り出す。無ければ落とす */
+function 値(rule: Rule, name: string): string {
+  const match = new RegExp(`(?:^|;)\\s*${name}:\\s*([^;]+)`).exec(rule.body)
+  expect(match, `${rule.selector} に ${name} が無い`).not.toBeNull()
+  return (match as RegExpExecArray)[1].trim()
+}
+
+/** `12px` → 12 */
+function px(text: string): number {
+  expect(text).toMatch(/^-?[\d.]+px$/)
+  return Number.parseFloat(text)
+}
+
 /**
  * カスタムプロパティしか宣言していない規則か。
  *
@@ -282,9 +302,23 @@ describe('色が消える環境への退避', () => {
     // **地は画像・記号と文言は要素**（フェーズ13）。焼き込むとこの環境で状態が
     // 丸ごと読めなくなり、完了条件「色を伏せても記号と文言だけで8状態が判別できる」を割る
     const 退避 = 当たる('forced-colors')
-    const タグ = 退避.filter((rule) => rule.selector.includes('.tile-tag'))
+    // 地（`::before`）を消す規則は別に数える。ここで見るのはタグ本体の退避
+    const タグ = 退避.filter((rule) => rule.selector.endsWith(' .tile-tag'))
     expect(タグ).toHaveLength(1)
     expect(タグ[0].body).toContain('CanvasText')
+    // 地が無いのに影だけ落ちると、文字の周りに黒い滲みが残る（フェーズ16）。
+    // ステッカーも同じ（片方だけ残すと `ANSWER` にだけ灰色の滲みが出る。実測）
+    expect(タグ[0].body).toContain('filter: none')
+    const ステッカー = 退避.filter((rule) => rule.selector.endsWith(' .tile-sticker'))
+    expect(ステッカー).toHaveLength(1)
+    expect(ステッカー[0].body).toContain('filter: none')
+
+    // 地は背景なので強制的に落ちるが、明示して消す（フェーズ16）
+    const 地 = 退避.filter((rule) => rule.selector.includes('::before'))
+    expect(地).toHaveLength(1)
+    expect(地[0].selector).toContain('.tile-tag::before')
+    expect(地[0].selector).toContain('.tile-sticker::before')
+    expect(地[0].body).toContain('display: none')
   })
 
   it('走るアニメーションは、絵の代わりに文字と記号が出る', () => {
@@ -388,12 +422,14 @@ describe('DESIGN.md の床を満たしている', () => {
 
   it('ステッカーが物質を持っている（物質 1/2）', () => {
     // §12.3 は貼る場所まで決めている（状態バッジ → ステッカー → 強）。
-    // §12.1 の Printed Sticker なので、影で「貼ってある」を作る
-    const ステッカー = 当たる('.tile-sticker')
-    expect(ステッカー).toHaveLength(1)
-    expect(ステッカー[0].body).toMatch(/box-shadow/)
+    // §12.1 の Printed Sticker なので、影で「貼ってある」を作る。
+    // **影は `filter: drop-shadow()` で本体に、内側のハイライトは地（`::before`）に**
+    // ——同じ要素に `box-shadow` を書いても型抜きで切られて効かない（フェーズ16）
+    const ステッカー = 規則('.tile-sticker')
+    expect(ステッカー.body).toMatch(/filter: drop-shadow/)
     // 【崩し 2/2】§10.2「一部だけ少し傾ける」
-    expect(ステッカー[0].body).toMatch(/rotate/)
+    expect(ステッカー.body).toMatch(/rotate/)
+    expect(規則('.tile-sticker::before').body).toMatch(/box-shadow: inset/)
   })
 
   it('縁が段差を持っている（物質 2/2・ステッカー以外）', () => {
@@ -556,5 +592,70 @@ describe('復旧ボタンは指で押せる', () => {
     const 広げる = Math.abs(Number(inset![1]))
     // 高さが先に床へ当たる。23 + 広げる×2 ≥ 44
     expect(23 + 広げる * 2).toBeGreaterThanOrEqual(44)
+  })
+})
+
+/**
+ * 右下のタグの厚みと大きさ（フェーズ16）。
+ *
+ * フェーズ13 は `box-shadow` を**書いたまま効きだけ落としていた**（`mask-image` が
+ * 外側の影を切る）。「書いてあること」を見る検査では捕まらないので、**効く形で
+ * 書いてあること**——影を描く要素と型抜きされる要素が分かれていること——を見る。
+ */
+describe('右下のタグは厚みを持ち、1.2倍になっている（フェーズ16）', () => {
+  const タグ = () => 規則('.tile-tag')
+  const ステッカー = () => 規則('.tile-sticker')
+
+  it('落ち影は本体の filter で描き、型抜きは ::before に閉じる', () => {
+    for (const 本体 of ['.tile-tag', '.tile-sticker']) {
+      const rule = 規則(本体)
+      expect(rule.body).toMatch(/filter: drop-shadow\(/)
+      // **同じ要素にマスクを書くと影まで切られる**（filter → mask の順。実測 2026-08-31）
+      expect(rule.body).not.toContain('mask-image')
+      // 外側の `box-shadow` は効かない。書いてあると「効いている」と読んでしまう
+      expect(rule.body).not.toMatch(/box-shadow/)
+
+      const 地 = 規則(`${本体}::before`)
+      expect(値(地, 'mask-image')).toBe("url('./assets/tile/tag-plate.png')")
+      expect(値(地, 'inset')).toBe('0')
+      // 文字の後ろに回す。親の `filter` が stacking context を作るので、カードの後ろへは落ちない
+      expect(値(地, 'z-index')).toBe('-1')
+    }
+  })
+
+  it('タグとステッカーは同じ家族', () => {
+    // 2枚出るのは権限確認待ちだけ。片方だけ直すと、そこだけ家族が違って見える（フェーズ13）
+    expect(値(タグ(), 'filter')).toBe(値(ステッカー(), 'filter'))
+    expect(値(タグ(), 'padding')).toBe(値(ステッカー(), 'padding'))
+    expect(値(規則('.tile-tag::before'), 'mask-image')).toBe(
+      値(規則('.tile-sticker::before'), 'mask-image'),
+    )
+  })
+
+  it('寸法はフェーズ13 の 1.2倍', () => {
+    // フェーズ13 の値：タグ 11px / 2px 8px / gap 3px、ステッカー 10px / 2px 8px
+    expect(px(値(タグ(), 'font-size'))).toBeCloseTo(11 * 1.2, 5)
+    expect(px(値(タグ(), 'gap'))).toBeCloseTo(3 * 1.2, 5)
+    expect(px(値(ステッカー(), 'font-size'))).toBeCloseTo(10 * 1.2, 5)
+    for (const rule of [タグ(), ステッカー()]) {
+      const [縦, 横] = 値(rule, 'padding').split(/\s+/).map(px)
+      expect(縦).toBeCloseTo(2 * 1.2, 5)
+      expect(横).toBeCloseTo(8 * 1.2, 5)
+    }
+  })
+
+  it('記号の枠は字の大きさに追随する', () => {
+    // `1rem` へ戻すと、タグの字だけ大きくなり記号の枠が 16px に据え置かれる
+    expect(値(規則('.tile-glyph'), 'width')).toMatch(/^[\d.]+em$/)
+  })
+
+  it('2枚出しで重ならない', () => {
+    // ANSWER の高さ＝字 × 行送り ＋ 上下の余白。1段上のタグは、その上端より上に載る
+    const s = ステッカー()
+    const 高さ =
+      px(値(s, 'font-size')) * Number.parseFloat(値(s, 'line-height')) +
+      px(値(s, 'padding').split(/\s+/)[0]) * 2
+    const 逃がし = px(値(規則('.tile-tag-raised'), 'bottom'))
+    expect(逃がし).toBeGreaterThanOrEqual(px(値(s, 'bottom')) + 高さ)
   })
 })

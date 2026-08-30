@@ -522,6 +522,61 @@ test('状態は右下のタグに出て、①行は最終活動と接続断が�
   }
 })
 
+test('タグは厚みを持ち、2枚出しでも重ならない', async ({ page }) => {
+  /*
+    フェーズ16。**jsdom では測れない**——落ち影は描画の話で、`filter` が効いているか
+    どうかと、傾いた2枚の矩形が触れていないかは実物のブラウザでしか分からない。
+    フェーズ13 は `box-shadow` を書いたまま効きだけ落としていたので、「書いてある」
+    ではなく「計算済みスタイルに残っている」ことを見る。
+  */
+  await openDashboard(page)
+  const 待ち = await spawnWith(page, 'Stop', '{"last_assistant_message":"終わりました"}')
+  const 承認 = await spawnWith(
+    page,
+    'Notification',
+    '{"notification_type":"permission_prompt"}',
+  )
+
+  const 測る = async (id: string) =>
+    page.evaluate((cardId) => {
+      const shell = document.querySelector(
+        `[data-testid="tile-shell"][data-card-id="${cardId}"]`,
+      )
+      if (shell === null) throw new Error(`カードが見つかりません：${cardId}`)
+      const tag = shell.querySelector('[data-testid="tile-tag"]')
+      const sticker = shell.querySelector('[data-testid="tile-sticker"]')
+      if (tag === null) throw new Error('タグが見つかりません')
+      const box = (el: Element) => {
+        const r = el.getBoundingClientRect()
+        return { top: r.top, bottom: r.bottom, height: r.height }
+      }
+      return {
+        filter: getComputedStyle(tag).filter,
+        地のマスク: getComputedStyle(tag, '::before').maskImage,
+        タグ: box(tag),
+        ステッカー: sticker === null ? null : box(sticker),
+        カード高: Math.round(shell.getBoundingClientRect().height),
+      }
+    }, id)
+
+  const 入力待ち = await 測る(待ち)
+  // 落ち影が効いている（`box-shadow` へ戻すと `filter` は `none` になる）
+  expect(入力待ち.filter).toContain('drop-shadow')
+  // 型抜きは地（`::before`）が担う。本体に戻すと影ごと切られる
+  expect(入力待ち.地のマスク).toContain('tag-plate')
+  // 1.2倍の帯：13.2px × 1.4 ＋ 上下 2.4px ≒ 23.3px。傾いているぶん矩形は少し伸びる
+  expect(入力待ち.タグ.height).toBeGreaterThanOrEqual(23)
+  expect(入力待ち.タグ.height).toBeLessThanOrEqual(30)
+  expect(入力待ち.ステッカー).toBeNull()
+
+  const 承認待ち = await 測る(承認)
+  if (承認待ち.ステッカー === null) throw new Error('ANSWER が貼られていません')
+  // 2枚出しで重ならない：1段上のタグの下端が、ANSWER の上端より上にある
+  expect(承認待ち.タグ.bottom).toBeLessThanOrEqual(承認待ち.ステッカー.top)
+  // タグは絶対配置なので、2枚出てもカードの高さは変わらない
+  expect(承認待ち.カード高).toBe(入力待ち.カード高)
+})
+
 test('応答が変わると1行が出て、しばらくして消える', async ({
   page,
   context,
