@@ -20,6 +20,19 @@ import {
  * 見ないので、経路が繋がっているかはここでしか分からない。
  */
 
+/**
+ * 履歴が届いたあとの判定に与える待ち（`積み残し_運用/要件.md` §8 の案A）。
+ *
+ * **`toBeVisible(届くまで)` の既定は5秒で、この画面ではそれでは足りない。** 履歴が届いた合図
+ * （`data-row-count > 0`）が出た時点では**まだ行が流れ込んでいる最中**なので、重い通し
+ * では後続の判定だけが間に合わない。7回落ちていて、失敗時のスナップショットには
+ * **待っていた行が写っている**——出なかったのではなく、5秒を僅かに超えてから出た。
+ *
+ * **届く判定と同じ待ちを、行を見る判定にも与える。** 名前を付けてあるのは、次に足す人が
+ * 揃えやすいようにするため。**素の `toBeVisible(届くまで)` をこのファイルへ足さないこと。**
+ */
+const 届くまで = { timeout: 30_000 }
+
 test.afterEach(async ({ page }) => {
   await archiveAll(page)
 })
@@ -61,7 +74,7 @@ test('フィクスチャの履歴が構造化ビューに出る', async ({ page 
   )
   await expect(
     page.locator('[data-testid="transcript-row"][data-kind="assistant_text"]').first(),
-  ).toBeVisible()
+  ).toBeVisible(届くまで)
 })
 
 /**
@@ -78,7 +91,7 @@ async function openActivities(page: Parameters<typeof openDashboard>[0]) {
   )
   await expect(
     page.locator('[data-testid="transcript-row"][data-kind="activity"]').first(),
-  ).toBeVisible({ timeout: 30_000 })
+  ).toBeVisible(届くまで)
 
   // 上限は青天井にしない。開いても減らない形になったら、そこで止めて落とす
   for (let guard = 0; guard < 30; guard += 1) {
@@ -104,10 +117,10 @@ test('ツールコールを開くとコードの差分が出る', async ({ page 
     .locator('[data-testid="transcript-row"][data-kind="tool_call"]')
     .filter({ hasText: 'Edit' })
     .first()
-  await expect(editRow).toBeVisible({ timeout: 30_000 })
+  await expect(editRow).toBeVisible(届くまで)
   await editRow.getByRole('button').first().click()
 
-  await expect(editRow.getByTestId('diff-view')).toBeVisible()
+  await expect(editRow.getByTestId('diff-view')).toBeVisible(届くまで)
   // 差分の中身（消えた行・増えた行）が実際に描かれている
   await expect(editRow.getByTestId('diff-view')).toContainText('TODO')
 })
@@ -125,12 +138,12 @@ test('サブエージェントの中まで掘れる', async ({ page }) => {
     .locator('[data-testid="transcript-row"][data-kind="tool_call"]')
     .filter({ hasText: 'Agent' })
     .first()
-  await expect(agentRow).toBeVisible({ timeout: 30_000 })
+  await expect(agentRow).toBeVisible(届くまで)
   await agentRow.getByRole('button').first().click()
 
   // サブエージェントの行が現れ、開くとその中の作業が見える
   const subagent = page.locator('[data-testid="transcript-row"][data-kind="subagent"]').first()
-  await expect(subagent).toBeVisible()
+  await expect(subagent).toBeVisible(届くまで)
   await subagent.getByRole('button').first().click()
   // **中の作業も、また束ねられている。** ここを開き直さないと `Glob` は出てこない
   await openActivities(page)
@@ -138,7 +151,7 @@ test('サブエージェントの中まで掘れる', async ({ page }) => {
     page.locator('[data-testid="transcript-row"][data-kind="tool_call"]').filter({
       hasText: 'Glob',
     }),
-  ).toBeVisible()
+  ).toBeVisible(届くまで)
 })
 
 test('巻き戻し前のやりとりは畳まれ、開けば読める', async ({ page }) => {
@@ -153,20 +166,20 @@ test('巻き戻し前のやりとりは畳まれ、開けば読める', async ({
   await showTranscript(page)
 
   const rewound = page.locator('[data-testid="transcript-row"][data-kind="rewound"]')
-  await expect(rewound).toBeVisible({ timeout: 30_000 })
+  await expect(rewound).toBeVisible(届くまで)
   await expect(rewound).toContainText('巻き戻し前のやりとり 2件')
 
   // 畳んでいる間は、最新の枝の発言だけが見える
   await expect(
     page.getByText('やっぱり2つ目の TODO のほうを書き換えて。').first(),
-  ).toBeVisible()
+  ).toBeVisible(届くまで)
   await expect(page.getByText('notes.md の1つ目の TODO を DONE に書き換えて。')).toHaveCount(0)
 
   // 開けば読める（捨ててはいない）
   await page.getByTestId('rewound-toggle').click()
   await expect(
     page.getByText('notes.md の1つ目の TODO を DONE に書き換えて。').first(),
-  ).toBeVisible()
+  ).toBeVisible(届くまで)
 })
 
 /**
@@ -222,7 +235,7 @@ test('長い本文は畳まれて出て、押すと全文になる', async ({ pa
   await loadFoldLines(page)
 
   const row = foldableRow(page)
-  await expect(row).toBeVisible()
+  await expect(row).toBeVisible(届くまで)
   await expect(row).toHaveAttribute('data-body-open', 'false')
 
   const folded = (await row.innerText()).length
@@ -248,7 +261,7 @@ test('長い本文は畳まれて出て、押すと全文になる', async ({ pa
  */
 test('フェードは畳んだ行にだけ出る（猶予に入った行には出ない）', async ({ page }) => {
   await loadFoldLines(page)
-  await expect(foldableRow(page)).toBeVisible()
+  await expect(foldableRow(page)).toBeVisible(届くまで)
 
   // 畳んだ本文にだけ付く
   const faded = page.locator('[data-testid="row-body"][data-fade]')
@@ -265,7 +278,7 @@ test('フェードは畳んだ行にだけ出る（猶予に入った行には�
 
 test('残りの量で段が変わり、変わるのはかかり始める位置だけ', async ({ page }) => {
   await loadFoldLines(page)
-  await expect(foldableRow(page)).toBeVisible()
+  await expect(foldableRow(page)).toBeVisible(届くまで)
 
   const 帯の高さ = async (depth: string) =>
     page.locator(`[data-testid="row-body"][data-fade="${depth}"]`).evaluate((el) => {
@@ -292,42 +305,98 @@ test('残りの量で段が変わり、変わるのはかかり始める位置�
   expect(await 濃さと色('shallow')).toEqual(await 濃さと色('deep'))
 })
 
-test('フェードは、地を配らずにその行の地へ溶ける', async ({ page }) => {
-  // **重ねる箱でやっていた頃は、行き先の地を1色決め打っていた**ので、地の違う要素の上に
-  // 敷くと矩形が浮いた（設計§6-2 の訂正。`.prose-dashboard pre` は自前の地を持つ）。
-  // マスクは文字を透明にするだけなので、**透けるのは実際にその後ろにある地**である。
+test('フェードは色を持ち、地を配らずにどの地の上でも成り立つ', async ({ page }) => {
+  // **この検査が守っているのは「`::after` が無いこと」ではない**（設計§6-6-5）。
+  // 守っているのは**「地の色を決め打って、それに溶けようとしていないこと」**である。
+  // 色を持たせた結果 `::after` は戻ったが、性質は変わっていないので、そちらを見る。
   //
-  // **重ねる箱が1つも残っていないこと**で見る——`::after` へ戻すと、ここが落ちる。
+  // 半透明の膜は**どんな地の上でもその地を色づけるだけ**なので、地を配る必要が無い。
+  // 不透明で塗り潰すと下の地を隠し、コードブロックの上で矩形が浮く（フェーズ7 の失敗）。
   await loadFoldLines(page)
   await expect(foldableRow(page)).toBeVisible()
 
   const body = page.locator('[data-testid="row-body"][data-fade]').first()
-  const 重ねているか = await body.evaluate((el) => {
+  const 帯 = await body.evaluate((el) => {
     const after = getComputedStyle(el, '::after')
-    return after.content !== 'none' && after.height !== 'auto' && after.height !== '0px'
+    return { image: after.backgroundImage, events: after.pointerEvents }
   })
-  expect(重ねているか).toBe(false)
 
-  // マスクが実際に当たっていること。**クラスが付いているかではなく、塗り方で見る**
-  const マスク = await body.evaluate((el) => {
-    const style = getComputedStyle(el)
+  // 色が乗っていること。**畳まれていることを、色で見分けられる**
+  expect(帯.image).not.toBe('none')
+  // **見た目のためだけに重ねるものは、押す判定を素通しさせる**
+  expect(帯.events).toBe('none')
+
+  // **行き先が地の色ではないこと。** 塗った結果の色で見る（変数の字面ではない）
+  const 塗った色 = await body.evaluate((el) => {
+    const probe = document.createElement('div')
+    el.append(probe)
+    const read = (value: string) => {
+      probe.style.background = value
+      return getComputedStyle(probe).backgroundColor
+    }
+    const tint = read('var(--fade-tint)')
+    const background = read('var(--color-background)')
+    const muted = read('var(--color-muted)')
+    // **書式に依存しない取り方をする。** `color-mix` の計算値は `rgba(…)` ではなく
+    // `oklch(… / 0.16)` の形で返ることがあり、`rgba` 前提で読むと**不透明と誤読する**
+    const alpha = Number(/[/,]\s*([\d.]+)\s*\)\s*$/.exec(tint)?.[1] ?? '1')
+    probe.remove()
+    return { tint, background, muted, alpha }
+  })
+  expect(塗った色.tint).not.toBe(塗った色.background)
+  expect(塗った色.tint).not.toBe(塗った色.muted)
+  // **半透明であること。** 不透明だと、下に何があっても同じ矩形になる
+  expect(塗った色.alpha).toBeLessThan(1)
+
+  // 文字を消すのは内側の層である（マスクは擬似要素も消すので、同じ要素に置けない）
+  const 内側にマスク = await body.evaluate((el) => {
+    const inner = el.querySelector('.body-fade-text')
+    if (!inner) {
+      return false
+    }
+    const style = getComputedStyle(inner)
     return style.maskImage !== 'none' || style.webkitMaskImage !== 'none'
   })
-  expect(マスク).toBe(true)
+  expect(内側にマスク).toBe(true)
+})
 
-  // 吹き出しの中でも同じ1つの書き方で効いている（地を渡していないこと）
-  const 吹き出しの地 = await page
-    .getByTestId('user-bubble')
-    .first()
-    .evaluate((el) => getComputedStyle(el).getPropertyValue('--fade-ground').trim())
-  expect(吹き出しの地).toBe('')
+test('吹き出しにしっぽがあり、地が本体と一致する', async ({ page }) => {
+  // **`clip-path` を使っていないこと**を、押せることで見る（設計§5-4-1）。
+  // 当たり判定に効くのは `clip-path` であって `mask` ではないので、`clip-path` で
+  // 形を切ると**しっぽの周りだけ反応しない吹き出し**になる。
+  await loadFoldLines(page)
+  const bubble = page.getByTestId('user-bubble').first()
+  await expect(bubble).toBeVisible()
+
+  const 見た目 = await bubble.evaluate((el) => {
+    const self = getComputedStyle(el)
+    const tail = getComputedStyle(el, '::after')
+    return {
+      clip: self.clipPath,
+      radius: self.borderTopLeftRadius,
+      tailRadius: self.borderTopRightRadius,
+      tailContent: tail.content,
+      tailEvents: tail.pointerEvents,
+      本体の地: self.backgroundColor,
+      しっぽの地: tail.backgroundColor,
+    }
+  })
+
+  expect(見た目.clip).toBe('none')
+  expect(見た目.tailContent).not.toBe('none')
+  expect(見た目.tailEvents).toBe('none')
+  // 右上だけ角丸をやめ、しっぽを立てる
+  expect(見た目.tailRadius).toBe('0px')
+  expect(見た目.radius).not.toBe('0px')
+  // **地は1箇所から取る。** 2箇所に書くと、片方だけ直したときにずれる
+  expect(見た目.しっぽの地).toBe(見た目.本体の地)
 })
 
 test('フェードは行の高さを変えない', async ({ page }) => {
   // 仮想化は行の高さを実測して覚えている。マスクが高さを動かすと、覚えた値が全部ずれる
   await loadFoldLines(page)
   const row = foldableRow(page)
-  await expect(row).toBeVisible()
+  await expect(row).toBeVisible(届くまで)
 
   const 高さ = async () => (await row.boundingBox())?.height ?? 0
   const 敷いたまま = await 高さ()
@@ -342,7 +411,7 @@ test('帯が押す判定を食わない', async ({ page }) => {
   // あること**で見る——`pointer-events: none` を外すと、ここだけが落ちる。
   await loadFoldLines(page)
   const row = foldableRow(page)
-  await expect(row).toBeVisible()
+  await expect(row).toBeVisible(届くまで)
 
   const body = row.locator('[data-testid="row-body"]')
   // **畳んでも本文は窓より高い。** 帯は末尾にかかるので、末尾を窓の中へ入れてから測る
@@ -370,7 +439,7 @@ test('帯が押す判定を食わない', async ({ page }) => {
  */
 test('畳んだ末尾に、薄れる相手が残っている', async ({ page }) => {
   await loadFoldLines(page)
-  await expect(foldableRow(page)).toBeVisible()
+  await expect(foldableRow(page)).toBeVisible(届くまで)
 
   // 囲みコードの直後で切れる本文（フェーズ8 で足した土台）
   const 本文 = page
@@ -416,7 +485,7 @@ test('畳む仕掛けの高さが、猶予の行数を下回っている', async
   // 上回っていることを確かめないと、根拠が見込みのままになる。**
   await loadFoldLines(page)
   const row = foldableRow(page)
-  await expect(row).toBeVisible()
+  await expect(row).toBeVisible(届くまで)
 
   const 実測 = await row.evaluate((el) => {
     const body = el.querySelector('[data-testid="row-body"]') as HTMLElement
@@ -468,7 +537,7 @@ test('行のどこを押しても開く（記号だけが押せるのではな�
   await showTranscript(page)
 
   const まとめ行 = page.locator('[data-testid="transcript-row"][data-kind="activity"]').first()
-  await expect(まとめ行).toBeVisible({ timeout: 30_000 })
+  await expect(まとめ行).toBeVisible(届くまで)
   await expect(まとめ行).toHaveAttribute('data-expanded', 'false')
 
   // **左端でも記号でもない、行の中ほどを押す**
@@ -485,7 +554,7 @@ test('本文を選んでも、行が開いてしまわない', async ({ page }) 
   // だけで開くと、読んだところを引用できなくなる（テスト計画フェーズ5）
   await loadFoldLines(page)
   const row = foldableRow(page)
-  await expect(row).toBeVisible()
+  await expect(row).toBeVisible(届くまで)
 
   const body = row.locator('[data-testid="row-body"]')
   // **畳んでも本文は窓より高い。** 素朴に上端を取ると画面の外を指すので、
@@ -516,7 +585,7 @@ test('長い出力は、箱の中でスクロールする（外へ伸びない�
 
   await openActivities(page)
   const tool = page.locator('[data-testid="transcript-row"][data-kind="tool_call"]').first()
-  await expect(tool).toBeVisible({ timeout: 30_000 })
+  await expect(tool).toBeVisible(届くまで)
   await tool.getByRole('button').first().click()
 
   const 箱 = await tool.locator('pre').first().evaluate((el) => ({
