@@ -5,14 +5,10 @@ import type { Locator, Page } from '@playwright/test'
 import {
   addProject,
   archiveAll,
-  FIXTURES,
   openDashboard,
   spawnSession,
   WORK_DIR,
 } from './helpers'
-
-/** リポジトリの根。`fixtures/` の1つ上に居る。 */
-const REPO_ROOT = path.resolve(FIXTURES, '..')
 
 /**
  * PJT 専用画面の左パネル（イシューグループ_2026_0805_0514 設計§14・§15。
@@ -440,7 +436,7 @@ test('狭い画面でも、ファイルの中身を遡れる', async ({ page }) 
  * 広い画面と狭い画面で**同じ手順**を通すのが要点——手順が分かれると、
  * 片方でしか踏まない道ができる。
  */
-test('ファイルでも、素の改行と `<br/>` が改行として出る', async ({ page }) => {
+test('ファイルでも、素の改行と `<br/>` が改行として出る', async ({ page }, testInfo) => {
   // **履歴と同じ配列を使っている**ことの現れ（`構造化ビューでメッセージの改行が
   // 反映されない` 設計§5）。`skipHtml` は rehype の**あと**に効くので、`<br/>` は
   // 先に `br` 要素へ変わって残る——**このリポジトリの文書が意図した行間が戻る**
@@ -455,13 +451,15 @@ test('ファイルでも、素の改行と `<br/>` が改行として出る', as
   // `skipHtml` は効いたまま（字面としては出ない）
   await expect(view).not.toContainText('<br')
 
-  // **見え方の良し悪しは目でしか言えない**（設計§10 の【要人間】）。判断できるよう
-  // 1枚だけ残す。置き場所は git 管理外なので、配るものには混ざらない
-  await view.screenshot({
-    path: path.join(
-      REPO_ROOT,
-      'MyDocs/ローカルイシュー/構造化ビューでメッセージの改行が反映されない/見え方-改行あり.png',
-    ),
+  // **見え方の良し悪しは目でしか言えない**ので、1枚だけ残す。
+  //
+  // **ファイルのパスを焼き込まないこと。** `screenshot({ path })` は**親フォルダを勝手に
+  // 作る**ので、イシューのフォルダを指すと、そのイシューをクローズへ移したあとも
+  // **走るたびに元の場所へフォルダが生えてくる**（実際にそうなった）。報告への添付なら
+  // 置き場所は Playwright が決めるので、外に何も残らない
+  await testInfo.attach('ファイル閲覧の見え方', {
+    body: await view.screenshot(),
+    contentType: 'image/png',
   })
 })
 
