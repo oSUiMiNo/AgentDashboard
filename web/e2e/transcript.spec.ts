@@ -238,9 +238,13 @@ test('長い本文は畳まれて出て、押すと全文になる', async ({ pa
  * **jsdom では確かめられない。** `mask-image` は描かれて初めて効き、帯の高さも行の高さも
  * 実際に組版しないと出ない。ここは実物のブラウザでしか通らない道である。
  *
- * 土台は `synthetic/fold-lines`。4本の本文が
+ * 土台は `synthetic/fold-lines`。本文が
  * **74行（しきい値の下）／78行（猶予の中）／81行（畳む・残り6行）／201行（2段目・残り191行）**
  * になっており、**出ない・出ない・浅い・深い**が1枚で揃う。
+ *
+ * **フェーズ8 で1本足した。** 囲みコードの直後で切れる本文（設計§6-5）で、畳まれる側なので
+ * フェードの数が1つ増える。**中身の無い思考は別の土台（`synthetic/empty-thinking`）にした**
+ * ——ここへ足すと末尾に付き、**仮想化で窓の外へ出て DOM に現れない**。
  */
 test('フェードは畳んだ行にだけ出る（猶予に入った行には出ない）', async ({ page }) => {
   await loadFoldLines(page)
@@ -248,7 +252,7 @@ test('フェードは畳んだ行にだけ出る（猶予に入った行には�
 
   // 畳んだ本文にだけ付く
   const faded = page.locator('[data-testid="row-body"][data-fade]')
-  await expect(faded).toHaveCount(2)
+  await expect(faded).toHaveCount(3)
 
   // **畳んでいない行には、猶予に入ったものを含めて出ない。**
   // ここが崩れると「フェードしている＝まだ続きがある」が嘘になる（設計§6-4）
@@ -288,27 +292,35 @@ test('残りの量で段が変わり、変わるのはかかり始める位置�
   expect(await 濃さと色('shallow')).toEqual(await 濃さと色('deep'))
 })
 
-test('帯の地は、その行の地から取られる', async ({ page }) => {
-  // **重ねて塗る以上、地の色を渡し忘れた行だけ帯が浮く**（設計§6-2）。吹き出しは
-  // 地が違うので、渡っていることを実際の色で見る。**変数の字面ではなく、塗った結果を測る**
+test('フェードは、地を配らずにその行の地へ溶ける', async ({ page }) => {
+  // **重ねる箱でやっていた頃は、行き先の地を1色決め打っていた**ので、地の違う要素の上に
+  // 敷くと矩形が浮いた（設計§6-2 の訂正。`.prose-dashboard pre` は自前の地を持つ）。
+  // マスクは文字を透明にするだけなので、**透けるのは実際にその後ろにある地**である。
+  //
+  // **重ねる箱が1つも残っていないこと**で見る——`::after` へ戻すと、ここが落ちる。
   await loadFoldLines(page)
   await expect(foldableRow(page)).toBeVisible()
 
-  const 塗った色 = (locator: ReturnType<typeof foldableRow>) =>
-    locator.evaluate((el) => {
-      const probe = document.createElement('div')
-      probe.style.background = 'var(--fade-ground, var(--color-background))'
-      el.append(probe)
-      const color = getComputedStyle(probe).backgroundColor
-      probe.remove()
-      return color
-    })
+  const body = page.locator('[data-testid="row-body"][data-fade]').first()
+  const 重ねているか = await body.evaluate((el) => {
+    const after = getComputedStyle(el, '::after')
+    return after.content !== 'none' && after.height !== 'auto' && after.height !== '0px'
+  })
+  expect(重ねているか).toBe(false)
 
-  const 吹き出しの中 = await 塗った色(page.getByTestId('user-bubble').first())
-  const 吹き出しの外 = await 塗った色(
-    page.locator('[data-testid="row-body"][data-fade]').first(),
-  )
-  expect(吹き出しの中).not.toBe(吹き出しの外)
+  // マスクが実際に当たっていること。**クラスが付いているかではなく、塗り方で見る**
+  const マスク = await body.evaluate((el) => {
+    const style = getComputedStyle(el)
+    return style.maskImage !== 'none' || style.webkitMaskImage !== 'none'
+  })
+  expect(マスク).toBe(true)
+
+  // 吹き出しの中でも同じ1つの書き方で効いている（地を渡していないこと）
+  const 吹き出しの地 = await page
+    .getByTestId('user-bubble')
+    .first()
+    .evaluate((el) => getComputedStyle(el).getPropertyValue('--fade-ground').trim())
+  expect(吹き出しの地).toBe('')
 })
 
 test('フェードは行の高さを変えない', async ({ page }) => {
@@ -347,6 +359,55 @@ test('帯が押す判定を食わない', async ({ page }) => {
   // 帯の直下にある「続きを読む」も、遮られずに押せる
   await row.getByTestId('body-toggle').click()
   await expect(row).toHaveAttribute('data-body-open', 'true')
+})
+
+/**
+ * 切った末尾に、フェードする相手が残っていること（設計§6-5）。
+ *
+ * **クラスが付いているかでは見ない。** フェーズ7 まで `data-fade` は付いていたのに、
+ * **帯の下に文字が1つも無かった**——マスクが正しく敷けていても、消す相手が無ければ
+ * 何も起きない。ここは**実際に文字が末尾まで届いているか**で見る。
+ */
+test('畳んだ末尾に、薄れる相手が残っている', async ({ page }) => {
+  await loadFoldLines(page)
+  await expect(foldableRow(page)).toBeVisible()
+
+  // 囲みコードの直後で切れる本文（フェーズ8 で足した土台）
+  const 本文 = page
+    .locator('[data-testid="row-body"][data-fade]')
+    .filter({ hasText: '囲みコードの直後で切れる' })
+  await expect(本文).toHaveCount(1)
+
+  // **末尾が空のコードブロックになっていない。** `closeFence` が足した閉じフェンスだけが
+  // 残ると、帯はその上に乗って**ただの矩形**になる
+  const 末尾 = await 本文.evaluate((el) => {
+    const last = el.lastElementChild
+    return { tag: last?.tagName ?? '', text: (last?.textContent ?? '').trim() }
+  })
+  expect(末尾.tag).not.toBe('PRE')
+  expect(末尾.text).not.toBe('')
+})
+
+/**
+ * 中身の無い思考は行にならず、前後の活動がひと続きになること（設計§8-2・§8-3）。
+ *
+ * **落とす場所が「束ねるより前」であることを、実物で見る。** 描くときに隠すだけだと
+ * 行は消えるが、**まとめ行が2つに割れる**。
+ */
+test('中身の無い思考は出ず、前後の活動がひと続きになる', async ({ page }) => {
+  // **専用の土台を使う。** `fold-lines` へ足すと末尾に付き、**仮想化で窓の外へ出て
+  // DOM に現れない**——数えるものが最初から0になり、テストが何も見なくなる
+  await loadBodies(page, 'synthetic/empty-thinking/session.jsonl')
+  await expect(
+    page.locator('[data-testid="transcript-row"][data-kind="assistant_text"]'),
+  ).toHaveCount(1)
+
+  await expect(page.locator('[data-testid="transcript-row"][data-kind="thinking"]')).toHaveCount(0)
+
+  // 思考を挟んだ2件が、1つのまとめ行に入っている
+  const まとめ行 = page.locator('[data-testid="transcript-row"][data-kind="activity"]')
+  await expect(まとめ行).toHaveCount(1)
+  await expect(まとめ行).toHaveAttribute('data-member-count', '2')
 })
 
 test('畳む仕掛けの高さが、猶予の行数を下回っている', async ({ page }) => {
