@@ -440,7 +440,8 @@ function flatten(state: CardState): FlatRow[] {
     const expanded = state.expanded.has(id)
     // 畳む相手かを見るだけにする。ここで実際に切ると、数万件の履歴で全ノードぶんの
     // 文字列を作ることになる（切る仕事は、描くときで間に合う）
-    const foldable = hasFoldableBody(node.node) && shouldFoldBody(node.node.text)
+    const foldable =
+      hasFoldableBody(node.node) && shouldFoldBody(node.node.text, node.node.kind)
     rows.push({
       kind: 'node',
       id,

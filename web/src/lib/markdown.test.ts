@@ -4,6 +4,7 @@ import {
   type ActivitySummaryInput,
   BODY_FOLD_GRACE_LINES,
   BODY_FOLD_LINES,
+  BODY_FOLD_LINES_BUBBLE,
   BODY_FOLD_LINES_EXCESSIVE,
   BODY_FOLD_LINES_MINIMAL,
   FADE_DEEP_LINES,
@@ -15,10 +16,12 @@ import {
   effectiveLines,
   fadeDepth,
   foldDecision,
+  foldLinesFor,
   foldMarkdown,
   foldMarkdownByLines,
   rehypeLineBreaks,
   remarkSoftBreaks,
+  shouldFoldBody,
   splitLineBreaks,
   splitSoftBreaks,
   summarizeInput,
@@ -372,6 +375,8 @@ describe('しきい値の既定', () => {
     // 3つがずれると、どれが正なのか分からなくなる。動かしたら `設計.md` §4 も直すこと
     expect(NOMINAL_COLUMNS).toBe(80)
     expect(BODY_FOLD_LINES).toBe(75)
+    // 吹き出しだけ1段目が違う（設計§4-6）。**揃えるための差であって、書き忘れではない**
+    expect(BODY_FOLD_LINES_BUBBLE).toBe(50)
     expect(BODY_FOLD_LINES_EXCESSIVE).toBe(200)
     expect(BODY_FOLD_LINES_MINIMAL).toBe(10)
     expect(BODY_FOLD_GRACE_LINES).toBe(5)
@@ -455,96 +460,169 @@ describe('しきい値の3段と猶予', () => {
   const 境目 = BODY_FOLD_LINES + BODY_FOLD_GRACE_LINES
 
   it('しきい値ちょうどは畳まない', () => {
-    expect(foldDecision(linesOf(BODY_FOLD_LINES)).fold).toBe(false)
+    expect(foldDecision(linesOf(BODY_FOLD_LINES), 'assistant_text').fold).toBe(false)
   })
 
   it('猶予の中は畳まない', () => {
     // **上の端だけを見ていると、猶予そのものを消しても気づけない**（壊し方2と1が
     // 同じ落ち方になる）。中を1つ突いておく
-    expect(foldDecision(linesOf(BODY_FOLD_LINES + 1)).fold).toBe(false)
+    expect(foldDecision(linesOf(BODY_FOLD_LINES + 1), 'assistant_text').fold).toBe(false)
   })
 
   it('しきい値＋猶予ちょうどは畳まない', () => {
     // `>` と `>=` の取り違えをここで固定する
-    expect(foldDecision(linesOf(境目)).fold).toBe(false)
+    expect(foldDecision(linesOf(境目), 'assistant_text').fold).toBe(false)
   })
 
   it('しきい値＋猶予＋1で初めて畳む', () => {
-    const decision = foldDecision(linesOf(境目 + 1))
+    const decision = foldDecision(linesOf(境目 + 1), 'assistant_text')
     expect(decision.fold).toBe(true)
     expect(decision.lines).toBe(BODY_FOLD_LINES)
   })
 
   it('2段目の境目ちょうどは1段目の量で畳み、＋1で2段目の量へ落ちる', () => {
-    expect(foldDecision(linesOf(BODY_FOLD_LINES_EXCESSIVE)).lines).toBe(BODY_FOLD_LINES)
-    expect(foldDecision(linesOf(BODY_FOLD_LINES_EXCESSIVE + 1)).lines).toBe(BODY_FOLD_LINES_MINIMAL)
+    expect(foldDecision(linesOf(BODY_FOLD_LINES_EXCESSIVE), 'assistant_text').lines).toBe(BODY_FOLD_LINES)
+    expect(foldDecision(linesOf(BODY_FOLD_LINES_EXCESSIVE + 1), 'assistant_text').lines).toBe(BODY_FOLD_LINES_MINIMAL)
   })
 
   it('2段目のほうが見せる量が少ない（長いほど短く畳まれるのは意図）', () => {
     // 知らずに見ると不具合に見えるので、意図であることをここでも固定する（設計§4-3）
     expect(BODY_FOLD_LINES_MINIMAL).toBeLessThan(BODY_FOLD_LINES)
-    const ふつうに長い = foldDecision(linesOf(BODY_FOLD_LINES_EXCESSIVE)).lines
-    const 度を超えて長い = foldDecision(linesOf(BODY_FOLD_LINES_EXCESSIVE + 1)).lines
+    const ふつうに長い = foldDecision(linesOf(BODY_FOLD_LINES_EXCESSIVE), 'assistant_text').lines
+    const 度を超えて長い = foldDecision(linesOf(BODY_FOLD_LINES_EXCESSIVE + 1), 'assistant_text').lines
     expect(度を超えて長い).toBeLessThan(ふつうに長い)
   })
 
   it('2段目に猶予を当てていない', () => {
     // 猶予を当てているなら、境目＋猶予までは1段目の量のままになるはず
-    expect(foldDecision(linesOf(BODY_FOLD_LINES_EXCESSIVE + BODY_FOLD_GRACE_LINES)).lines).toBe(
+    expect(foldDecision(linesOf(BODY_FOLD_LINES_EXCESSIVE + BODY_FOLD_GRACE_LINES), 'assistant_text').lines).toBe(
       BODY_FOLD_LINES_MINIMAL,
     )
   })
 
   it('畳まないときは、本文の実効行数がそのまま返る', () => {
-    expect(foldDecision(linesOf(10))).toEqual({ fold: false, lines: 10 })
+    expect(foldDecision(linesOf(10), 'assistant_text')).toEqual({ fold: false, lines: 10 })
   })
 
-  it('本文の種別を見ていない（利用者の発言にも同じだけ効く）', () => {
-    // 判定は本文だけを受け取る。種別ごとの分岐を作れない形にしてある（設計§4-6）
-    expect(foldDecision.length).toBe(1)
+  it('1段目だけが器ごとに違う（設計§4-6）', () => {
+    // **同じ実効行数で、吹き出しだけが先に畳まれる。** 数え方（代表幅80）は同じで、
+    // 器の幅が70%しかないぶんをしきい値の側で吸収している
+    const 吹き出しだけ畳まれる長さ = BODY_FOLD_LINES_BUBBLE + BODY_FOLD_GRACE_LINES + 1
+
+    expect(foldDecision(linesOf(吹き出しだけ畳まれる長さ), 'user_message').fold).toBe(true)
+    expect(foldDecision(linesOf(吹き出しだけ畳まれる長さ), 'assistant_text').fold).toBe(false)
+  })
+
+  it('2段目・猶予・代表幅は器で変わらない（設計§4-6）', () => {
+    // **器の幅と関係しないものは、揃えたままにする。** ここが器ごとに割れ始めると、
+    // 「なぜ2つあるのか」が説明できなくなる
+    for (const kind of ['user_message', 'assistant_text'] as const) {
+      // 2段目：境目ちょうどは1段目の量、＋1で2段目の量
+      expect(foldDecision(linesOf(BODY_FOLD_LINES_EXCESSIVE + 1), kind).lines).toBe(
+        BODY_FOLD_LINES_MINIMAL,
+      )
+      // 猶予：1段目ちょうど＋猶予までは畳まない
+      const 一段目 = foldLinesFor(kind)
+      expect(foldDecision(linesOf(一段目 + BODY_FOLD_GRACE_LINES), kind).fold).toBe(false)
+      expect(foldDecision(linesOf(一段目 + BODY_FOLD_GRACE_LINES + 1), kind).fold).toBe(true)
+    }
+  })
+})
+
+describe('吹き出しの1段目（設計§4-6）', () => {
+  const 境目 = BODY_FOLD_LINES_BUBBLE + BODY_FOLD_GRACE_LINES
+
+  it('揃えるための差である（75 × 0.7 ≒ 52.5 → 50）', () => {
+    // **数字が2つあるのは書き忘れではない。** ここが崩れたら、まず定数のコメントを読むこと
+    expect(BODY_FOLD_LINES_BUBBLE).toBe(50)
+    expect(BODY_FOLD_LINES_BUBBLE).toBeLessThan(BODY_FOLD_LINES)
+    expect(Math.round(BODY_FOLD_LINES * 0.7)).toBeCloseTo(BODY_FOLD_LINES_BUBBLE, -1)
+  })
+
+  it('50ちょうどは畳まない', () => {
+    expect(foldDecision(linesOf(BODY_FOLD_LINES_BUBBLE), 'user_message').fold).toBe(false)
+  })
+
+  it('猶予の中は畳まない', () => {
+    // 上の端だけを見ていると、猶予そのものを消しても気づけない
+    expect(foldDecision(linesOf(BODY_FOLD_LINES_BUBBLE + 1), 'user_message').fold).toBe(false)
+    expect(foldDecision(linesOf(境目), 'user_message').fold).toBe(false)
+  })
+
+  it('猶予のすぐ上で初めて畳み、見せる量は50行', () => {
+    const decision = foldDecision(linesOf(境目 + 1), 'user_message')
+    expect(decision.fold).toBe(true)
+    expect(decision.lines).toBe(BODY_FOLD_LINES_BUBBLE)
+  })
+
+  it('2段目に入ると、吹き出しでも10行まで落ちる', () => {
+    expect(foldDecision(linesOf(BODY_FOLD_LINES_EXCESSIVE + 1), 'user_message').lines).toBe(
+      BODY_FOLD_LINES_MINIMAL,
+    )
+  })
+
+  it('マスクの3段が、吹き出しでも効く', () => {
+    // **残量は1段目に依存する**（残量 ＝ 実効行数 − 見せる行数）。`fadeDepth` に古い1段目を
+    // 渡していると、ここで段がずれる
+    expect(fadeDepth(linesOf(境目 + 1), 'user_message')).toBe('shallow')
+    expect(fadeDepth(linesOf(BODY_FOLD_LINES_BUBBLE + FADE_SHALLOW_LINES), 'user_message')).toBe(
+      'shallow',
+    )
+    expect(
+      fadeDepth(linesOf(BODY_FOLD_LINES_BUBBLE + FADE_SHALLOW_LINES + 1), 'user_message'),
+    ).toBe('standard')
+    expect(fadeDepth(linesOf(BODY_FOLD_LINES_EXCESSIVE + 1), 'user_message')).toBe('deep')
+  })
+
+  it('畳んだ本文の高さが、器をまたいで揃う', () => {
+    // **この工事の狙いそのもの。** 見せる行数 × 器の幅 が、だいたい同じになる
+    const 本文の高さ = BODY_FOLD_LINES * 1.0
+    const 吹き出しの高さ = BODY_FOLD_LINES_BUBBLE / 0.7
+
+    expect(Math.abs(吹き出しの高さ - 本文の高さ)).toBeLessThan(BODY_FOLD_LINES * 0.05)
   })
 })
 
 describe('フェードの段', () => {
   /** その本文を畳んだときに、まだ残る実効行数。 */
   function remainingOf(total: number): number {
-    return total - foldDecision(linesOf(total)).lines
+    return total - foldDecision(linesOf(total), 'assistant_text').lines
   }
 
   it('畳まない本文には段が付かない（設計§6-4）', () => {
     // **マスクの有無が「続きがあるか」と1対1**であることの本体。呼ぶ側が条件を書き足さずに
     // 済むよう、畳まない本文へは `null` を返す
-    expect(fadeDepth(linesOf(BODY_FOLD_LINES))).toBeNull()
-    expect(fadeDepth(linesOf(10))).toBeNull()
+    expect(fadeDepth(linesOf(BODY_FOLD_LINES), 'assistant_text')).toBeNull()
+    expect(fadeDepth(linesOf(10), 'assistant_text')).toBeNull()
   })
 
   it('猶予に入って畳まなかった本文にも段が付かない（設計§6-4）', () => {
     // 「フェードしている＝まだ続きがある」を嘘にしないための一点
-    expect(foldDecision(linesOf(BODY_FOLD_LINES + BODY_FOLD_GRACE_LINES)).fold).toBe(false)
-    expect(fadeDepth(linesOf(BODY_FOLD_LINES + BODY_FOLD_GRACE_LINES))).toBeNull()
+    expect(foldDecision(linesOf(BODY_FOLD_LINES + BODY_FOLD_GRACE_LINES), 'assistant_text').fold).toBe(false)
+    expect(fadeDepth(linesOf(BODY_FOLD_LINES + BODY_FOLD_GRACE_LINES), 'assistant_text')).toBeNull()
   })
 
   it('畳み始めたところは一番浅い段', () => {
     // 猶予を1行超えただけの本文は、畳んでも残りが数行しかない
-    expect(fadeDepth(linesOf(BODY_FOLD_LINES + BODY_FOLD_GRACE_LINES + 1))).toBe('shallow')
+    expect(fadeDepth(linesOf(BODY_FOLD_LINES + BODY_FOLD_GRACE_LINES + 1), 'assistant_text')).toBe('shallow')
   })
 
   it('残りちょうど30は浅いまま、31で標準へ上がる', () => {
     // `<=` と `<` の取り違えをここで固定する
     const 浅い上限 = BODY_FOLD_LINES + FADE_SHALLOW_LINES
     expect(remainingOf(浅い上限)).toBe(FADE_SHALLOW_LINES)
-    expect(fadeDepth(linesOf(浅い上限))).toBe('shallow')
-    expect(fadeDepth(linesOf(浅い上限 + 1))).toBe('standard')
+    expect(fadeDepth(linesOf(浅い上限), 'assistant_text')).toBe('shallow')
+    expect(fadeDepth(linesOf(浅い上限 + 1), 'assistant_text')).toBe('standard')
   })
 
   it('2段目に入ると必ず一番深い段になる', () => {
-    expect(fadeDepth(linesOf(BODY_FOLD_LINES_EXCESSIVE))).toBe('standard')
-    expect(fadeDepth(linesOf(BODY_FOLD_LINES_EXCESSIVE + 1))).toBe('deep')
+    expect(fadeDepth(linesOf(BODY_FOLD_LINES_EXCESSIVE), 'assistant_text')).toBe('standard')
+    expect(fadeDepth(linesOf(BODY_FOLD_LINES_EXCESSIVE + 1), 'assistant_text')).toBe('deep')
   })
 
   it('3段とも実際に出る（どれかが死んでいない）', () => {
     const 出た = new Set(
-      [90, 150, 400].map((total) => fadeDepth(linesOf(total))),
+      [90, 150, 400].map((total) => fadeDepth(linesOf(total), 'assistant_text')),
     )
     expect(出た).toEqual(new Set(['shallow', 'standard', 'deep']))
   })
@@ -565,9 +643,15 @@ describe('フェードの段', () => {
     expect(FADE_DEEP_LINES).toBeLessThan(届かない範囲.上)
   })
 
-  it('本文だけを受け取る（種別ごとの分岐を作れない）', () => {
-    expect(fadeDepth.length).toBe(1)
+  it('3つとも種別を受け取る（1つでも取り残すと食い違う）', () => {
+    // **`foldDecision` だけ直して `fadeDepth` を取り残す**のが、この工事でいちばん
+    // ありそうな落ち方である（畳む位置は正しいのに帯の段だけずれる）。引数を必須に
+    // してあるので取り残しは型で落ちるが、**必須のまま**であることをここで固定する
+    expect(foldDecision.length).toBe(2)
+    expect(shouldFoldBody.length).toBe(2)
+    expect(fadeDepth.length).toBe(2)
   })
+
 })
 
 describe('行数で切る', () => {

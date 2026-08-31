@@ -447,11 +447,16 @@ function MarkdownBody({
   tone: string
   onToggleBody: () => void
 }) {
-  const folded = row?.foldable === true && !row.bodyOpen
-  const body = folded ? foldMarkdownByLines(text, foldDecision(text).lines).head : text
+  // 畳んでいる行だけを持つ。**種別を引くために行そのものが要る**——1段目は器ごとに
+  // 違う（設計§4-6）ので、判断する純関数に `kind` を渡す。**ここで `if (isUser)` を
+  // 書かないこと**——しきい値の在り処が2つになる（設計§4-5）
+  const foldedRow = row?.foldable === true && !row.bodyOpen ? row : null
+  const body = foldedRow
+    ? foldMarkdownByLines(text, foldDecision(text, foldedRow.node.kind).lines).head
+    : text
   // 畳んだときだけ末尾をフェードさせる（設計§6-4）。`fadeDepth` は畳まない本文へ `null` を
   // 返すので、**猶予に入って畳まなかった本文にも出ない**——ここで条件を書き足さないこと
-  const fade = folded ? fadeDepth(text) : null
+  const fade = foldedRow ? fadeDepth(text, foldedRow.node.kind) : null
 
   return (
     <div className={inset ? 'mt-1 ml-6' : 'mt-1'}>

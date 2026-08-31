@@ -1,5 +1,5 @@
 import type { Node, TreeNode } from '@/lib/protocol'
-import { BODY_FOLD_GRACE_LINES, BODY_FOLD_LINES } from '@/lib/markdown'
+import { BODY_FOLD_GRACE_LINES, BODY_FOLD_LINES, BODY_FOLD_LINES_BUBBLE } from '@/lib/markdown'
 import type { ActivityRow } from './transcript'
 import {
   ACTIVITY_ROW_PREFIX,
@@ -155,6 +155,8 @@ describe('本文の折りたたみ', () => {
   const linesOf = (count: number) => Array.from({ length: count }, () => 'あ').join('\n')
   const short = linesOf(BODY_FOLD_LINES + BODY_FOLD_GRACE_LINES)
   const long = linesOf(BODY_FOLD_LINES + BODY_FOLD_GRACE_LINES + 1)
+  /** 吹き出しだけが畳まれる長さ。アシスタントの本文はまだ1段目に届いていない */
+  const 吹き出しだけ = linesOf(BODY_FOLD_LINES_BUBBLE + BODY_FOLD_GRACE_LINES + 1)
 
   function rowOf(id: string) {
     const row = rowsOf(CARD).find((candidate) => candidate.kind === 'node' && candidate.id === id)
@@ -166,26 +168,41 @@ describe('本文の折りたたみ', () => {
 
   it('しきい値を超えた本文だけが畳む相手になる', () => {
     appendNodes(CARD, [
-      node('u1', null, { kind: 'user_message', text: short }),
+      node('a0', null, { kind: 'assistant_text', text: short }),
       node('a1', null, { kind: 'assistant_text', text: long }),
     ])
-    // 猶予まで含めてちょうどは畳まない（`foldDecision` と同じ境目であることの確認でもある）
-    expect(rowOf('u1').foldable).toBe(false)
+    // 猶予まで含めてちょうどは畳まない（`foldDecision` と同じ境目であることの確認でもある）。
+    // **同じ器どうしで比べる**——1段目は器ごとに違うので、種別を混ぜると境目が2つになる
+    expect(rowOf('a0').foldable).toBe(false)
     expect(rowOf('a1').foldable).toBe(true)
   })
 
-  it('利用者の発言とアシスタントの本文に、同じしきい値と同じ猶予が効く（設計§4-6）', () => {
-    // **片方だけ変えないこと。** 利用者が送った長い指示も同じ規則で畳まれている
+  it('1段目だけが器ごとに違い、猶予は同じ（設計§4-6）', () => {
+    // **数字が2つあるのは書き忘れではない。** 実効行数は代表幅80桁で数えるが、吹き出しの
+    // 幅は本文の70%が上限なので、同じ実効行数でも吹き出しのほうが実際には高い。
+    // 75 × 0.7 ≒ 52.5 → 50 で「同じ高さで畳まれる」ように揃えてある
     appendNodes(CARD, [
       node('u2', null, { kind: 'user_message', text: short }),
       node('a2', null, { kind: 'assistant_text', text: short }),
       node('u3', null, { kind: 'user_message', text: long }),
       node('a3', null, { kind: 'assistant_text', text: long }),
     ])
-    expect(rowOf('u2').foldable).toBe(false)
-    expect(rowOf('a2').foldable).toBe(false)
+    // 1段目を超えれば、どちらも畳まれる
     expect(rowOf('u3').foldable).toBe(true)
     expect(rowOf('a3').foldable).toBe(true)
+    // `short` はアシスタントの猶予ちょうど＝畳まないが、**吹き出しは既に超えている**
+    expect(rowOf('a2').foldable).toBe(false)
+    expect(rowOf('u2').foldable).toBe(true)
+  })
+
+  it('吹き出しだけが先に畳まれる境目がある（設計§4-6）', () => {
+    // ストア側が種別を渡していないと、ここで両方とも `false` になる
+    appendNodes(CARD, [
+      node('u4', null, { kind: 'user_message', text: 吹き出しだけ }),
+      node('a4', null, { kind: 'assistant_text', text: 吹き出しだけ }),
+    ])
+    expect(rowOf('u4').foldable).toBe(true)
+    expect(rowOf('a4').foldable).toBe(false)
   })
 
   it('本文を持たない種別は、どれだけ子がいても畳む相手にならない', () => {

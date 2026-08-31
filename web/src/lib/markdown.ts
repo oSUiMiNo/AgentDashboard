@@ -58,6 +58,8 @@ import type { Element, Root, RootContent } from 'hast'
 import type { Root as MdastRoot, RootContent as MdastContent } from 'mdast'
 import remarkGfm from 'remark-gfm'
 
+import type { Node } from '@/lib/protocol'
+
 /**
  * 実効行数を出すときの、1行の代表幅（イシューグループ_2026-0820-2129 設計§4-1）。
  *
@@ -99,6 +101,44 @@ export const BODY_FOLD_LINES_EXCESSIVE = 200
 
 /** 2段目で見せる実効行数（設計§4-3。要望6 の「10行ほど」）。 */
 export const BODY_FOLD_LINES_MINIMAL = 10
+
+/**
+ * 吹き出し（利用者の発言）の1段目（設計§4-6）。
+ *
+ * > **数字が2つあるのは、片方を書き忘れたからではない。揃えるための差である。**
+ *
+ * 実効行数は代表幅80桁で数える（[`NOMINAL_COLUMNS`]）が、**吹き出しの幅は本文の70%が
+ * 上限**（設計§5-3）。数え方が同じでも**器の幅が違う**ので、同じ実効行数でも吹き出しの
+ * ほうが実際には高くなる。
+ *
+ * ```
+ * アシスタントの本文  幅100% → 75行で畳む
+ * 吹き出し            幅 70% → 同じ75行だと、実際には約107行ぶんの高さになる
+ *                              75 × 0.7 ＝ 52.5 → 丸めて 50行
+ * ```
+ *
+ * **したがって50行は「厳しくした」のではなく、「同じ高さで畳まれるように揃えた」もので
+ * ある。** [`BODY_FOLD_LINES`] と同じ75へ戻すと、**吹き出しだけが1.4倍の高さまで
+ * 出っぱなしになる。**
+ *
+ * **幅の違いを吸収するのは代表幅ではなく、こちら側である。** 代表幅を器ごとに変えると、
+ * 「PC とスマホで同じところで畳まれる」という [`NOMINAL_COLUMNS`] の狙いが壊れる。
+ */
+export const BODY_FOLD_LINES_BUBBLE = 50
+
+/**
+ * 器ごとの1段目を引く（設計§4-6）。
+ *
+ * **対応表をここ1箇所に置くために、呼ぶ側はしきい値ではなく種別を渡す。** しきい値を
+ * 渡す形にすると、[`foldDecision`] ／ [`shouldFoldBody`] ／ [`fadeDepth`] を呼ぶ3箇所が
+ * それぞれ引き直すことになり、**食い違う余地が残る**。
+ *
+ * 部品側に `if (isUser)` を書かせないための形でもある（設計§4-5「判断は純関数、描くのは
+ * 部品」）。書き始めると、しきい値の在り処が2つになる。
+ */
+export function foldLinesFor(kind: Node['kind']): number {
+  return kind === 'user_message' ? BODY_FOLD_LINES_BUBBLE : BODY_FOLD_LINES
+}
 
 /**
  * 超過がこれ以下なら畳まない（設計§4-4）。
@@ -152,19 +192,24 @@ export interface FoldDecision {
  * 畳むかどうかと、畳むなら何行見せるかを決める（設計§4-2〜§4-4）。
  *
  * ```
- * 実効行数 →   〜75          76〜80         81〜200        201〜
- * 見せる量 →   全部          全部（猶予）   75行           10行
+ * アシスタントの本文  実効行数 →   〜75      76〜80        81〜200   201〜
+ * 吹き出し            実効行数 →   〜50      51〜55        56〜200   201〜
+ *                     見せる量 →   全部      全部（猶予）  1段目     10行
  * ```
+ *
+ * **1段目だけが器ごとに違う**（[`foldLinesFor`]）。2段目と猶予は器の幅と関係しないので
+ * 同じである（設計§4-6）。
  *
  * **2段目に猶予を当てない**のは、そこへ入る時点で超過が130行以上あるためである。
  */
-export function foldDecision(text: string): FoldDecision {
+export function foldDecision(text: string, kind: Node['kind']): FoldDecision {
   const total = effectiveLines(text)
+  const first = foldLinesFor(kind)
   if (total > BODY_FOLD_LINES_EXCESSIVE) {
     return { fold: true, lines: BODY_FOLD_LINES_MINIMAL }
   }
-  if (total > BODY_FOLD_LINES + BODY_FOLD_GRACE_LINES) {
-    return { fold: true, lines: BODY_FOLD_LINES }
+  if (total > first + BODY_FOLD_GRACE_LINES) {
+    return { fold: true, lines: first }
   }
   return { fold: false, lines: total }
 }
@@ -175,8 +220,8 @@ export function foldDecision(text: string): FoldDecision {
  * ストア側が全件に対して呼ぶ。**ここで実際に切らない**——数万件の履歴で全ノードぶんの
  * 文字列を作ることになる。切る仕事は、描くときで間に合う。
  */
-export function shouldFoldBody(text: string): boolean {
-  return foldDecision(text).fold
+export function shouldFoldBody(text: string, kind: Node['kind']): boolean {
+  return foldDecision(text, kind).fold
 }
 
 /**
@@ -207,9 +252,13 @@ export const FADE_DEEP_LINES = 150
  * **変えるのは、かかり始める位置だけ。** 濃さも色も変えない——暗い地の上では濃さの差が
  * 出にくく、色を変えると**種別の色分けと混ざる**。3段に留めるのは、連続だと隣り合った行を
  * 見比べないと差が分からないためで、離れた行どうしでも読める粒度がこれである。
+ *
+ * **種別を受け取るのは、残量が1段目に依存するからである**（残量 ＝ 実効行数 − 見せる
+ * 行数）。ここだけ古い1段目を渡すと、**畳む位置は正しいのに帯の段だけがずれる**——
+ * [`foldDecision`] ／ [`shouldFoldBody`] と3つ揃って初めて成立する（設計§4-6）。
  */
-export function fadeDepth(text: string): FadeDepth | null {
-  const decision = foldDecision(text)
+export function fadeDepth(text: string, kind: Node['kind']): FadeDepth | null {
+  const decision = foldDecision(text, kind)
   if (!decision.fold) {
     return null
   }
