@@ -585,16 +585,19 @@ export async function archiveAll(page: Page) {
         break
       }
       await page.goto(`/s/${remaining[0]}`)
-      await page.getByRole('button', { name: '削除' }).click()
-      // 消えると専用画面は「見つかりません」に変わる。これを消えた合図にする。
+      // **ボタンは1つで、意味が状態で変わる**（帯の設計§5）。走っているカードには
+      // 「終了」、終わっているカードには「削除」が出る——`close-card` を押せば
+      // どちらでも片付く。走っているカードは `Kill` → `ended` を待つ → `Archive` と
+      // 進むので、**押しただけでは消えていない**
+      await page.getByTestId('close-card').click()
+      // **消えたかはサーバに聞く**（ガイドライン「E2E の後片付けは画面ではなく
+      // サーバに聞く」）。単独画面は外れたあと一覧へ移るので、以前見ていた
+      // 「見つかりません」はもう出ない。
       //
       // **待ちを長めに取る。** 片付けは全テストが共有する1台のサーバの上で走るので、
       // 通しで流すと起動直後（まだ「起動中」）のカードを消しに行くことがあり、
       // 往復が既定の5秒に収まらない。単独では出ず**通しでだけ、たまに落ちる**という
       // いちばん追いにくい形になっていた（`運用の積み残し` の7・8）
-      await expect(page.getByTestId('not-found')).toBeVisible({
-        timeout: 20_000,
-      })
       await expect
         .poll(async () => (await serverCardIds(page)).includes(remaining[0]), {
           message: 'サーバ側からもカードが消えること',

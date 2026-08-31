@@ -1,6 +1,6 @@
 import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter } from 'react-router'
+import { MemoryRouter, Route, Routes } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SessionView } from './SessionView'
 import type { SessionMeta } from '@/lib/protocol'
@@ -634,7 +634,6 @@ describe('SessionView の帯は4行', () => {
     const 中身 = Array.from(行!.children)
     expect(中身[0]).toHaveAttribute('data-testid', 'to-session')
     expect(中身[中身.length - 1]).toHaveTextContent('終了')
-    expect(中身[中身.length - 1]).toHaveTextContent('削除')
   })
 })
 
@@ -667,5 +666,198 @@ describe('SessionView の ✕（閉じる）', () => {
       'aria-label',
       '閉じる',
     )
+  })
+})
+
+/**
+ * 終了と削除の結合（設計§5・テスト計画フェーズ3）。
+ *
+ * **ここだけは見た目の工事ではない。** 押し間違いで走っている作業が止まる度合いが上がる
+ * ので、順序と断り方を機械で固定する。
+ */
+describe('SessionView の終了ボタン', () => {
+  function show(session: SessionMeta, compact = false) {
+    clearSessions()
+    applySessionSnapshot([session])
+    return render(
+      <MemoryRouter initialEntries={[`/s/${CARD}`]}>
+        <Routes>
+          <Route path="/" element={<p>一覧に居ます</p>} />
+          <Route
+            path="/s/:cardId"
+            element={<SessionView cardId={CARD} compact={compact} />}
+          />
+        </Routes>
+      </MemoryRouter>,
+    )
+  }
+
+  /** サーバから「終わった」が届いた、を作る */
+  function 終わったことにする() {
+    act(() => {
+      applySessionSnapshot([meta({ status: { kind: 'ended', ok: true } })])
+    })
+  }
+
+  beforeEach(() => {
+    useSettingsStore.setState({ settings: settingsFixture(), loading: false })
+    useWsStore.setState({ kill: vi.fn(), archive: vi.fn() })
+  })
+
+  it('走っているセッションでは「終了」1つだけが出る', () => {
+    show(meta())
+
+    const button = screen.getByTestId('close-card')
+    expect(button).toHaveTextContent('終了')
+    expect(button.dataset.mode).toBe('kill')
+    // **「削除」が同時に並ばない**（要件：冗長さを消す）
+    expect(screen.queryByRole('button', { name: '削除' })).toBeNull()
+  })
+
+  it('終わっているセッションでは「削除」1つだけが出る', () => {
+    // **消す道は残す。** 放っておくと消息不明のカードが一覧に溜まり、
+    // 一覧の小窓には消すボタンが無い（押すと開くだけ）
+    show(meta({ status: { kind: 'ended', ok: true } }))
+
+    const button = screen.getByTestId('close-card')
+    expect(button).toHaveTextContent('削除')
+    expect(button.dataset.mode).toBe('archive')
+  })
+
+  it('押すとまず Kill が送られ、ended になるまで Archive は送らない', async () => {
+    // **壊し方**：`Kill` の直後に `Archive` を送る形にすると、ここが落ちる。
+    // 先に外すと、飛行中だった報告が後から着地して**外したカードが一覧へ戻る**
+    const kill = vi.fn()
+    const archive = vi.fn()
+    useWsStore.setState({ kill, archive })
+    show(meta())
+
+    await userEvent.click(screen.getByTestId('close-card'))
+
+    expect(kill).toHaveBeenCalledWith(CARD)
+    expect(archive).not.toHaveBeenCalled()
+  })
+
+  it('待っている間はボタンが無効になる（連打で Kill が二重に飛ばない）', async () => {
+    const kill = vi.fn()
+    useWsStore.setState({ kill, archive: vi.fn() })
+    show(meta())
+
+    const button = screen.getByTestId('close-card')
+    await userEvent.click(button)
+
+    expect(button).toBeDisabled()
+    expect(button).toHaveTextContent('終了中…')
+    await userEvent.click(button)
+    expect(kill).toHaveBeenCalledTimes(1)
+  })
+
+  it('ended になったら Archive が送られ、単独画面なら一覧へ移る', async () => {
+    const archive = vi.fn()
+    useWsStore.setState({ kill: vi.fn(), archive })
+    show(meta())
+
+    await userEvent.click(screen.getByTestId('close-card'))
+    終わったことにする()
+
+    await waitFor(() => expect(archive).toHaveBeenCalledWith(CARD))
+    expect(screen.getByText('一覧に居ます')).toBeInTheDocument()
+  })
+
+  it('横並びでは、外れても移らない', async () => {
+    // その画面はまだ他のセッションを映している
+    const archive = vi.fn()
+    useWsStore.setState({ kill: vi.fn(), archive })
+    show(meta(), true)
+
+    await userEvent.click(screen.getByTestId('close-card'))
+    終わったことにする()
+
+    await waitFor(() => expect(archive).toHaveBeenCalledWith(CARD))
+    expect(screen.queryByText('一覧に居ます')).toBeNull()
+  })
+
+  it('上限を超えても ended にならないときは、Archive を送らずに断る', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const archive = vi.fn()
+      useWsStore.setState({ kill: vi.fn(), archive })
+      show(meta())
+
+      await userEvent.click(screen.getByTestId('close-card'))
+      await act(async () => {
+        // 上限は20秒（フェーズ1の実測は 80〜92ms だが、**通しの E2E で5秒では
+        // 足りなかった**——待つ相手は機械の速さではなく、その時の混み具合）
+        vi.advanceTimersByTime(20_100)
+      })
+
+      // **プロセスが落ちていないのに外すと、走ったままのセッションを辿れなくなる**
+      expect(archive).not.toHaveBeenCalled()
+      expect(screen.getByTestId('card-error')).toHaveTextContent(
+        '終了の合図が返りませんでした',
+      )
+      // 押し直せる状態へ戻る
+      expect(screen.getByTestId('close-card')).toBeEnabled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('終わっているカードで押すと、Archive だけが送られる', async () => {
+    const kill = vi.fn()
+    const archive = vi.fn()
+    useWsStore.setState({ kill, archive })
+    show(meta({ status: { kind: 'ended', ok: true } }))
+
+    await userEvent.click(screen.getByTestId('close-card'))
+
+    expect(kill).not.toHaveBeenCalled()
+    expect(archive).toHaveBeenCalledWith(CARD)
+  })
+})
+
+describe('SessionView の終了ボタン（届かないカード）', () => {
+  beforeEach(() => {
+    useSettingsStore.setState({ settings: settingsFixture(), loading: false })
+    useWsStore.setState({ kill: vi.fn(), archive: vi.fn() })
+  })
+
+  it('PC との線が切れているカードには「削除」を出す', () => {
+    // **終わってはいないが、届かない**——設計§5 が見落としていた3通り目。
+    // `Kill` を送っても届かないので `ended` は永遠に返らず、「終了」しか出さないと
+    // **そのカードは一覧から二度と外せなくなる**（E2E の後片付けが全滅して気づいた）
+    clearSessions()
+    applySessionSnapshot([
+      meta({
+        agent_id: 'agent-1',
+        agent_connected: false,
+        status: { kind: 'working' },
+      }),
+    ])
+    renderView()
+
+    const button = screen.getByTestId('close-card')
+    expect(button).toHaveTextContent('削除')
+    expect(button.dataset.mode).toBe('archive')
+  })
+
+  it('届かないカードを押すと、Kill を送らずに外すだけ', async () => {
+    const kill = vi.fn()
+    const archive = vi.fn()
+    useWsStore.setState({ kill, archive })
+    clearSessions()
+    applySessionSnapshot([
+      meta({
+        agent_id: 'agent-1',
+        agent_connected: false,
+        status: { kind: 'working' },
+      }),
+    ])
+    renderView()
+
+    await userEvent.click(screen.getByTestId('close-card'))
+
+    expect(kill).not.toHaveBeenCalled()
+    expect(archive).toHaveBeenCalledWith(CARD)
   })
 })

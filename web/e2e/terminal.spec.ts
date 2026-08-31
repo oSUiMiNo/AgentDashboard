@@ -42,13 +42,29 @@ test('セッションを起動してブラウザのターミナルから操作�
   await typeLine(page, 'こんにちは')
   await expectTerminalToContain(page, '[fake-claude] received: こんにちは')
 
-  // ダッシュボードから終了させたものは「異常終了」ではなく「終了」と出る
-  await page.getByRole('button', { name: '終了' }).click()
-  await expect(page.getByTestId('session-view')).toHaveAttribute(
-    'data-status',
-    'ended',
-  )
-  await expect(page.getByText('終了', { exact: true }).first()).toBeVisible()
+  // **ダッシュボードから終了させたカードは、そのまま一覧から消えて一覧へ移る**
+  // （帯の設計§5）。以前は `ended` として残り「終了」と出ていたが、**終了と削除を
+  // 1つのボタンへ結合した**ので、押すと `Kill` → `ended` を待つ → `Archive` と進む。
+  //
+  // **消えたことはサーバに聞く。** 画面の小窓を数えると「まだ描かれていない」と
+  // 「もう無い」を読み違える
+  const cardId = await page
+    .getByTestId('session-view')
+    .getAttribute('data-card-id')
+  await page.getByTestId('close-card').click()
+
+  await expect(page).toHaveURL('/')
+  await expect
+    .poll(
+      async () => {
+        const origin = new URL(page.url()).origin
+        const response = await page.request.get(`${origin}/api/sessions`)
+        const sessions = (await response.json()) as { card_id: string }[]
+        return sessions.some((session) => session.card_id === cardId)
+      },
+      { message: 'サーバ側からもカードが消えること', timeout: 20_000 },
+    )
+    .toBe(false)
 })
 
 test('Enter と Shift+Enter は改行し、Ctrl+Enter で送信する', async ({
@@ -625,4 +641,84 @@ test.describe('端末の窓を指で触る', () => {
     const after = await terminalScroll(page)
     expect(after.viewportY).toBeLessThan(bottom.viewportY)
   })
+})
+
+test('終了を続けて押しても、カードが一覧へ戻らない', async ({ page }) => {
+  // **押す機会が増えたぶんの見張り**（帯の設計§5）。以前は「削除」を押したときだけ
+  // `Archive` が飛んでいたが、いまは**終了のたびに飛ぶ**。`Kill` と `Archive` を
+  // 同時に送ると、飛行中だった報告が後から着地して**外したカードが一覧へ戻る**
+  // （未解決の既知の壊れ方）——`ended` を待ってから外すのはそれを避けるため
+  await openDashboard(page)
+  const first = await spawnSession(page)
+  await openSession(page, first)
+  await page.getByTestId('close-card').click()
+  await expect(page).toHaveURL('/')
+
+  const second = await spawnSession(page)
+  await openSession(page, second)
+  await page.getByTestId('close-card').click()
+  await expect(page).toHaveURL('/')
+
+  // **サーバに聞く。** 画面の小窓を数えると「まだ描かれていない」と「もう無い」を
+  // 読み違える。蘇りは遅れて着地するので、少し待ってから数える
+  await expect
+    .poll(
+      async () => {
+        const origin = new URL(page.url()).origin
+        const response = await page.request.get(`${origin}/api/sessions`)
+        return ((await response.json()) as unknown[]).length
+      },
+      { message: 'カードが1枚も残らないこと', timeout: 20_000 },
+    )
+    .toBe(0)
+})
+
+test('自分から終わったカードは「消息不明」として残り、削除で消せる', async ({
+  page,
+}) => {
+  // **こちらが頼んだ終了は、そもそも画面に残らない**（上のテスト）。したがって
+  // `ended` として残るカードは必ず「頼んでいない終わり方をしたもの」になり、
+  // そこへ「消息不明」という言い方を当てている（帯の設計§6）。
+  //
+  // **消す道が残っていることの担保**でもある——放っておくと消息不明のカードが
+  // 一覧に溜まり、一覧の小窓には消すボタンが無い（押すと開くだけ）
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  await openSession(page, tile)
+
+  // 擬似 claude は入力行 `exit` で自分から終わる
+  await typeLine(page, 'exit')
+  const view = page.getByTestId('session-view')
+  await expect(view).toHaveAttribute('data-status', 'ended', {
+    timeout: 20_000,
+  })
+  await expect(view).toContainText('消息不明')
+
+  // **一覧の小窓にも同じ語が出る。** 同じ関数（`statusLabel`）を使っているので
+  // 自動で揃うが、**勝手に死んだことに一覧で気づけること**がこの道具の目的そのもの
+  const cardId = await view.getAttribute('data-card-id')
+  await page.goto('/')
+  // **見る相手は `tile-shell`**（外側）。状態の札は右下へ抜けていて、`session-tile`
+  // （中のボタン）の中には入っていない——①行は最終活動と接続断で埋まっており、
+  // 状態ラベルを入れると 212px に 290px を詰めることになる（`tile.spec.ts` の実測）
+  const 小窓 = page.locator(
+    `[data-testid="tile-shell"][data-card-id="${cardId}"]`,
+  )
+  await expect(小窓).toContainText('消息不明')
+
+  // 消せる
+  await page.goto(`/s/${cardId}`)
+  await expect(page.getByTestId('close-card')).toHaveText('削除')
+  await page.getByTestId('close-card').click()
+  await expect
+    .poll(
+      async () => {
+        const origin = new URL(page.url()).origin
+        const response = await page.request.get(`${origin}/api/sessions`)
+        const sessions = (await response.json()) as { card_id: string }[]
+        return sessions.some((session) => session.card_id === cardId)
+      },
+      { message: '消息不明のカードを消せること', timeout: 20_000 },
+    )
+    .toBe(false)
 })

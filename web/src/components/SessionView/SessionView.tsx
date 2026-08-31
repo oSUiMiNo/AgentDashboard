@@ -18,7 +18,7 @@
  */
 
 import { motion } from 'motion/react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router'
 import { Button } from '@/components/ui/button'
 import { InputDock } from '@/components/InputDock/InputDock'
@@ -48,9 +48,33 @@ import { hostOf } from '@/lib/reviveBudget'
 import type { CardId } from '@/lib/protocol'
 import { useNow } from '@/lib/sessions'
 import { useAuthStore } from '@/stores/auth'
-import { useCardError, useReviving, useSessionCard } from '@/stores/sessions'
+import {
+  setCardError,
+  useCardError,
+  useReviving,
+  useSessionCard,
+} from '@/stores/sessions'
 import { agentOf, useSettingsStore } from '@/stores/settings'
 import { useWsStore } from '@/stores/ws'
+
+/**
+ * 「終了」を押してから `ended` を待つ上限（設計§5）。
+ *
+ * **実測（フェーズ1）は 80ms ／ 84ms ／ 92ms**（擬似 claude・ローカル・1本ずつ）。
+ * いったん5秒（その約50倍）に置いたが、**通しの E2E で足りなかった**（フェーズ5）。
+ *
+ * **短く置いた側の代償のほうが重い。** 上限を超えると `Archive` を送らないので、
+ * **終わっているのに一覧へ残る**。E2E の後片付けはそれを片付けきれず、席が埋まったまま
+ * 次のテストが始まって「セッションが起動しない」という**遠い症状**に化けた。
+ *
+ * `helpers.ts` の `archiveAll` が同じことを先に記録している——「**通しで流すと
+ * 往復が既定の5秒に収まらない。単独では出ず通しでだけ、たまに落ちる**」。
+ * 相手が別の PC なら A2S の往復も乗る。**待つ相手は機械の速さではなく、その時の混み具合**である。
+ *
+ * 超えたら **`Archive` は送らない**。プロセスが落ちていないのに一覧から外すと、
+ * 走ったままのセッションを画面から辿れなくなる。**待たせるのは、間違って外すより軽い。**
+ */
+const 終了を待つ上限ミリ秒 = 20_000
 
 type View = 'transcript' | 'terminal'
 
@@ -80,6 +104,9 @@ export function SessionView({ cardId, compact = false }: Props) {
   // `backTargetFor` が持ち、ここは鍵を渡して結果に従うだけ
   const navigate = useNavigate()
   const location = useLocation()
+  // 「終了」を押してから `ended` を待っている間だけ立つ。**押した時刻を持つ**のは、
+  // 状態が動くたびに待ち時間が延びないようにするため
+  const [終了を頼んだ時刻, set終了を頼んだ時刻] = useState<number | null>(null)
   // ファイルのパネルと、PJT 専用画面へのリンクの**両方**で使う。同じ意味の式を
   // 2通りの綴りで置くと、片方だけ直す余地が残る
   const host = hostOf(session?.agent_id)
@@ -89,6 +116,64 @@ export function SessionView({ cardId, compact = false }: Props) {
     open: filesOpen,
     onToggle: toggleFiles,
   })
+
+  const 終了中 = 終了を頼んだ時刻 !== null
+  const 終わっている = session ? isEnded(session.status) : false
+  /**
+   * **「終了」を頼める相手が居ないか**（設計§5・フェーズ5の実測で足した）。
+   *
+   * PC との線が切れているカードへ `Kill` を送っても届かないので、`ended` は永遠に
+   * 返ってこない。**そこで「終了」しか出さないと、そのカードは一覧から二度と外せなくなる**
+   * ——`archiveAll`（E2E の後片付け）が丸ごと動かなくなって気づいた。
+   *
+   * 設計§5 は「走っている＝終了／終わっている＝削除」の2通りしか見ていなかったが、
+   * **実際には3通り目（終わってはいないが、届かない）が在る。** 届かないなら、
+   * できるのは一覧から外すことだけである。
+   */
+  const 届かない = session ? !session.agent_connected : false
+  const 外すだけ = 終わっている || 届かない
+  /**
+   * 「終了」を押したあとの段取り（設計§5）。
+   *
+   * ```
+   * Kill を送る → ボタンを「終了中…」にして無効化 → **ended になるのを待つ**
+   *   → Archive を送る → 単独画面なら一覧へ
+   * ```
+   *
+   * **`Kill` と `Archive` を同時に送らない。** 先に外すと、飛行中だった報告
+   * （`SessionUpsert`）が後から着地して記録が作り直される——**外したカードが一覧へ戻る**
+   * という未解決の壊れ方を踏みに行くことになる。
+   *
+   * `ended` を書くのは PTY の終了（`on_exit`）だけなので、**待つ＝プロセスが本当に
+   * 終わったのを待つ**と同じ意味になる（`SessionEnd` フックは状態を動かさない）。
+   */
+  useEffect(() => {
+    if (終了を頼んだ時刻 === null) {
+      return
+    }
+    if (終わっている) {
+      // **カードを外したら書きかけも忘れる。** 残すと、二度と開かない相手の
+      // 下書きが積み上がる（十字ボタン設計§11）
+      dropDraft(cardId, account)
+      archive(cardId)
+      set終了を頼んだ時刻(null)
+      // 横並びでは移らない。その画面はまだ他のセッションを映している
+      if (!compact) {
+        navigate(HOME)
+      }
+      return
+    }
+    // **残り時間で測る。** 状態が動くたびに待ち直すと、上限がいくらでも延びる
+    const 残り = 終了を待つ上限ミリ秒 - (Date.now() - 終了を頼んだ時刻)
+    const timer = setTimeout(() => {
+      set終了を頼んだ時刻(null)
+      setCardError(
+        cardId,
+        '終了の合図が返りませんでした。もう一度押すか、PC の接続を確かめてください',
+      )
+    }, Math.max(0, 残り))
+    return () => clearTimeout(timer)
+  }, [終了を頼んだ時刻, 終わっている, cardId, account, archive, compact, navigate])
 
   if (!session) {
     // 消えた直後の一瞬。単独表示のときは呼び出し側が「見つかりません」を出す
@@ -391,25 +476,46 @@ export function SessionView({ cardId, compact = false }: Props) {
             中のボタンは状態で入れ替わるので、そちらへ付けると出ないときに寄せ先ごと消える
           */}
           <div className="ml-auto flex shrink-0 items-center gap-2">
+            {/*
+              **ボタンは常に1つ。状態で意味が変わる**（設計§5・利用者の指定）。
+
+              | 状態 | ボタン | 押すと |
+              |---|---|---|
+              | 走っている | 終了 | `Kill` → `ended` を待つ → `Archive` → 単独画面なら一覧へ |
+              | 終わっている | 削除 | `Archive` だけ |
+
+              走っている間は「削除」が意味を持たないのに並んでおり、狭い画面で2つぶんの
+              幅を食っていた。**終わったカードを外す道は残す**——放っておくと消息不明の
+              カードが一覧に溜まり、**一覧の小窓には消すボタンが無い**（押すと開くだけ）。
+
+              **確認は挟まない。** `archive` は一覧から外すだけで履歴も記録も残るので、
+              押し間違いの重さは**配置**（✕ は1行目・これは4行目）と `title` で吸う。
+            */}
             <Button
-              variant="outline"
+              variant={外すだけ ? 'ghost' : 'outline'}
               size="sm"
-              disabled={isEnded(session.status)}
-              onClick={() => kill(session.card_id)}
-            >
-              終了
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
+              data-testid="close-card"
+              data-mode={外すだけ ? 'archive' : 'kill'}
+              disabled={終了中}
+              title={
+                外すだけ
+                  ? 'カードを一覧から外します（履歴は残ります）'
+                  : 'セッションを終了し、カードを一覧から外します（履歴は残ります）'
+              }
               onClick={() => {
-                // **カードを外したら書きかけも忘れる。** 残すと、二度と開かない相手の
-                // 下書きが積み上がる（十字ボタン設計§11）
-                dropDraft(session.card_id, account)
-                archive(session.card_id)
+                if (外すだけ) {
+                  dropDraft(session.card_id, account)
+                  archive(session.card_id)
+                  if (!compact) {
+                    navigate(HOME)
+                  }
+                  return
+                }
+                kill(session.card_id)
+                set終了を頼んだ時刻(Date.now())
               }}
             >
-              削除
+              {終了中 ? '終了中…' : 外すだけ ? '削除' : '終了'}
             </Button>
           </div>
         </div>

@@ -5,6 +5,7 @@ import {
   openDashboard,
   openSession,
   spawnSession,
+  typeLine,
 } from './helpers'
 
 /**
@@ -72,10 +73,16 @@ test('終了したセッションでは指示を送れない', async ({ page }) 
   const tile = await spawnSession(page)
   await openSession(page, tile)
 
-  await page.getByRole('button', { name: '終了' }).click()
+  // **ボタンでは作れなくなった。** 「終了」を押すとカードごと一覧から外れるので
+  // （帯の設計§5）、`ended` のまま残るカードは**こちらが頼んでいない終わり方**を
+  // したものだけになる。擬似 claude は入力行 `exit` で自分から終わるので、それで作る
+  await typeLine(page, 'exit')
   await expect(page.getByTestId('session-view')).toHaveAttribute(
     'data-status',
     'ended',
+    { timeout: 20_000 },
   )
+  // 残ったカードは「消息不明」と出る（設計§6）
+  await expect(page.getByTestId('session-view')).toContainText('消息不明')
   await expect(page.getByTestId('composer-input')).toBeDisabled()
 })
