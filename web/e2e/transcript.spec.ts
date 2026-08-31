@@ -317,10 +317,24 @@ test('フェードは色を持ち、地を配らずにどの地の上でも成�
   await expect(foldableRow(page)).toBeVisible()
 
   const body = page.locator('[data-testid="row-body"][data-fade]').first()
+  // **帯は器そのものに敷く**（フェーズ11・設計§6-7-2）。本文の箱に敷くと、吹き出しの
+  // 内側余白のぶんだけ左右と下が届かず「中に貼った紙」に見える。
+  // **`::before` で読む**——しっぽが `::after` を使っているので、同じ器では衝突する
   const 帯 = await body.evaluate((el) => {
-    const after = getComputedStyle(el, '::after')
-    return { image: after.backgroundImage, events: after.pointerEvents }
+    const shell = el.parentElement
+    if (!shell) {
+      throw new Error('帯の器が見つからない')
+    }
+    const band = getComputedStyle(shell, '::before')
+    return {
+      image: band.backgroundImage,
+      events: band.pointerEvents,
+      器にある: shell.classList.contains('body-fade'),
+      本文の箱にない: !el.classList.contains('body-fade'),
+    }
   })
+  expect(帯.器にある).toBe(true)
+  expect(帯.本文の箱にない).toBe(true)
 
   // 色が乗っていること。**畳まれていることを、色で見分けられる**
   expect(帯.image).not.toBe('none')
@@ -402,35 +416,103 @@ test('フェードは行の高さを変えない', async ({ page }) => {
   const 高さ = async () => (await row.boundingBox())?.height ?? 0
   const 敷いたまま = await 高さ()
 
-  await row.locator('[data-testid="row-body"]').evaluate((el) => el.classList.remove('body-fade'))
+  // **器から外す。** 帯は器に敷いてあるので、本文の箱から外しても何も起きない
+  // （フェーズ11 以前の書き方のまま残すと、この検査は空振りになる）
+  await row
+    .locator('[data-testid="row-body"]')
+    .evaluate((el) => el.parentElement?.classList.remove('body-fade'))
   expect(await 高さ()).toBe(敷いたまま)
 })
 
+test('帯は器の端まで届く', async ({ page }) => {
+  // **要望①の本体**（設計§6-7-2）。帯を本文の箱に敷いていた頃は、吹き出しの内側余白
+  // （`px-3 py-2`）のぶんだけ左右と下が届かず、**器の中に貼った紙**に見えていた。
+  //
+  // **クラスが付いているかでは見ない。** この群は2度それで素通しした——実際に塗られた
+  // 矩形の幅と、器の幅を突き合わせる。
+  await loadFoldLines(page)
+  const row = foldableRow(page)
+  await expect(row).toBeVisible(届くまで)
+
+  const 帯と器 = await row.locator('[data-testid="row-body"]').evaluate((el) => {
+    const shell = el.parentElement
+    if (!shell) {
+      throw new Error('帯の器が見つからない')
+    }
+    const 器 = shell.getBoundingClientRect()
+    const 本文 = el.getBoundingClientRect()
+    return { 器の幅: 器.width, 本文の幅: 本文.width, 器の下: 器.bottom, 本文の下: 本文.bottom }
+  })
+
+  // 器は本文より広い（内側余白があるので、本文の箱に敷くと届かない）
+  expect(帯と器.器の幅).toBeGreaterThan(帯と器.本文の幅)
+  // 帯は器に敷いてあるので、器の幅と下端がそのまま帯の幅と下端になる
+  expect(帯と器.器の下).toBeGreaterThanOrEqual(帯と器.本文の下)
+})
+
+test('「続きを読む」が帯の前面に居る', async ({ page }) => {
+  // **要望②**（設計§6-7-3）。「マスクの中に書いてある感じ」にする。
+  // **帯の `pointer-events: none` は動かさず、重ね順だけ上げる**ので、ボタンの上の点は
+  // ボタン自身を返す——外すとここだけが落ちる。
+  await loadFoldLines(page)
+  const row = foldableRow(page)
+  await expect(row).toBeVisible(届くまで)
+
+  const toggle = row.getByTestId('body-toggle')
+  await toggle.scrollIntoViewIfNeeded()
+  await expect(toggle).toHaveClass(/body-toggle-float/)
+
+  const ボタンの上に居るもの = await toggle.evaluate((el) => {
+    const box = el.getBoundingClientRect()
+    const found = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2)
+    return found === el || el.contains(found)
+  })
+  expect(ボタンの上に居るもの).toBe(true)
+})
+
 test('帯が押す判定を食わない', async ({ page }) => {
-  // **設計§6-1 が名指しした落とし穴。** 帯は本文の上に重ねてあるので、素通しさせないと
-  // その箱がクリックを吸って行が開けなくなる。**帯の上の一点を拾って、それが本文自身で
-  // あること**で見る——`pointer-events: none` を外すと、ここだけが落ちる。
+  // **設計§6-1 が名指しした落とし穴。** 帯は本文に重なっているので、素通しさせないと
+  // その面がクリックを吸って行が開けなくなる。
+  //
+  // **見るのは「押したら開くか」そのものである。** 以前は帯の上の一点を
+  // `elementFromPoint` で拾って本文自身であることを見ていたが、フェーズ11 で帯を器へ
+  // 移したあと、**`pointer-events: none` を外してもこの形では落ちなくなった**
+  // （測定値は実行レポート フェーズ11）。**落ちない検査は何も守っていない**ので、
+  // 利用者に見える性質へ移した。
   await loadFoldLines(page)
   const row = foldableRow(page)
   await expect(row).toBeVisible(届くまで)
 
   const body = row.locator('[data-testid="row-body"]')
   // **畳んでも本文は窓より高い。** 帯は末尾にかかるので、末尾を窓の中へ入れてから測る
-  // （入れずに測ると、点が窓の外に落ちて時々だけ失敗する）
   await row.getByTestId('body-toggle').scrollIntoViewIfNeeded()
+
+  // **帯は「続きを読む」に重なっている**（フェーズ11 で前面へ載せた）。帯が押す判定を
+  // 食っていれば、Playwright の実行可能性検査がここで「他の要素が邪魔している」と言って
+  // 落ちる。**押して開くところまでを見る**——これが利用者に見える性質そのものである
+  const toggle = row.getByTestId('body-toggle')
+  await expect(toggle).toHaveText('続きを読む')
+  await toggle.click()
+  await expect(toggle).toHaveText('畳む')
+
+  // 帯の上の一点が本文自身であること（重なりの向きが逆転していないこと）。
+  // **`--fade-band` を `parseFloat` で読まないこと**——値は `calc(1 * calc(.75rem * 1.625))`
+  // のまま返って `NaN` になり、点が器の下端ちょうどへ落ちて**帯の外を測る**
+  await toggle.click()
+  await expect(toggle).toHaveText('続きを読む')
   const 帯の上に居るもの = await body.evaluate((el) => {
-    const box = el.getBoundingClientRect()
-    const y = Math.min(box.bottom - 4, window.innerHeight - 4)
-    const found = document.elementFromPoint(box.left + box.width / 2, y)
+    const shell = el.parentElement
+    if (!shell) {
+      throw new Error('帯の器が見つからない')
+    }
+    const 器 = shell.getBoundingClientRect()
+    const 帯 = parseFloat(getComputedStyle(shell, '::before').height) || 20
+    const y = Math.min(器.bottom - 帯 / 2, window.innerHeight - 4)
+    const found = document.elementFromPoint(器.left + 器.width * 0.25, y)
     return found?.closest('[data-testid="row-body"]') === el
   })
   expect(帯の上に居るもの).toBe(true)
-
-  // 帯の直下にある「続きを読む」も、遮られずに押せる
-  await row.getByTestId('body-toggle').click()
-  await expect(row).toHaveAttribute('data-body-open', 'true')
 })
-
 /**
  * 切った末尾に、フェードする相手が残っていること（設計§6-5）。
  *
