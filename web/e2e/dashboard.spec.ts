@@ -214,7 +214,17 @@ test('狭い窓でも、リンクにしたパスが自分で行を増やさな�
   expect(deepBox!.height).toBeCloseTo(shortLink!.height, 0)
 
   // **押し広げるのではなく、切り詰められている。** `min-w-0` を外すと縮めなくなり、
-  // 中身の幅がそのまま出る＝切り詰めが起きない
-  const clipped = await deepLink.evaluate((el) => el.scrollWidth > el.clientWidth)
+  // 中身の幅がそのまま出る＝切り詰めが起きない。
+  //
+  // **測る相手はリンクではなく、その中の前半**（帯の設計§3）。パスを「前半」と
+  // 「末尾2階層」の2つに割ったので、リンク自身は入れ物になり、溢れるのは前半だけに
+  // なった——末尾を切ると**違いが出るところがちょうど消える**ため、末尾は必ず残す。
+  // 前半から `min-w-0` を外すと、縮めなくなって溢れがリンク側へ出る＝ここが false になる
+  const head = deepLink.getByTestId('to-project-head')
+  const clipped = await head.evaluate((el) => el.scrollWidth > el.clientWidth)
   expect(clipped).toBe(true)
+
+  // **末尾は切り詰められていない。** ここが切れると、`…/accept/proj` と
+  // `…/accept/proj2` が同じ見た目になる（このイシューが直した症状そのもの）
+  await expect(deepLink).toContainText('作業場所')
 })

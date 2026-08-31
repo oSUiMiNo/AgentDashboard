@@ -373,12 +373,37 @@ describe('SessionView の行き来', () => {
   it('パスは縮んでよいまま（帯の行数が増えないこと）', () => {
     // `min-w-0` が無いと flex の子は中身より小さくならず `truncate` が効かない。
     // 長いパスのときに状態のラベルが縦に割れる＝**行が増える**（設計§3）
+    //
+    // **`truncate` は前半の `<span>` へ移した**（設計§3）。リンクは2つに割った中身の
+    // 入れ物になったので、リンク自身には `min-w-0` だけが要る
     applySessionSnapshot([meta()])
     renderView()
 
     const link = screen.getByTestId('to-project')
     expect(link).toHaveClass('min-w-0')
-    expect(link).toHaveClass('truncate')
+    expect(link).toHaveClass('flex')
+
+    const [head, tail] = Array.from(link.querySelectorAll('span'))
+    expect(head).toHaveClass('min-w-0')
+    expect(head).toHaveClass('truncate')
+    expect(tail).toHaveClass('shrink-0')
+  })
+
+  it('パスは前半だけが縮み、末尾2階層は必ず残る', () => {
+    // **壊し方**：`min-w-0` を前半から外すと、flex の子は中身より小さくならないので
+    // `truncate` が効かず、パスがそのまま行を押し広げる（設計§3・テスト計画フェーズ2の
+    // 最後の1項目をここへ送った）
+    applySessionSnapshot([meta()])
+    renderView()
+
+    const link = screen.getByTestId('to-project')
+    const [head, tail] = Array.from(link.querySelectorAll('span'))
+    expect(head).toHaveTextContent('/home/example')
+    expect(tail).toHaveTextContent('/dev/app')
+    // 割っても1文字も落とさない
+    expect((head.textContent ?? '') + (tail.textContent ?? '')).toBe(
+      '/home/example/dev/app',
+    )
   })
 
   it('「開く」に寄せる指定を付けない（出ないときに並びが崩れるため）', () => {
@@ -386,5 +411,239 @@ describe('SessionView の行き来', () => {
     renderView({ compact: true })
 
     expect(screen.getByTestId('to-session')).not.toHaveClass('ml-auto')
+  })
+})
+
+/**
+ * 帯を4行に決め打ったこと（設計§2・テスト計画フェーズ3）。
+ *
+ * # なぜ行を機械で見るのか
+ *
+ * **「4行に収まったか」は目でしか分からないが、「どの要素がどの行に居るか」は機械で
+ * 見られる。** 見え方の良し悪しは実機（フェーズ5）に任せ、ここでは**条件付きで出る
+ * ものが出ても行が増えないこと**を固定する——これは実機で毎回作れる状況ではない
+ * （PC の線を抜く・フックを止める、を組み合わせないと出ない）。
+ *
+ * 行の目印は `data-row`。1〜3行目は `<header>` の中に、**4行目はタブの行**にある
+ * （サイドバーより下の「中身の列」に居るため。設計§2）。
+ */
+describe('SessionView の帯は4行', () => {
+  function rows(): string[] {
+    return Array.from(document.querySelectorAll('[data-row]')).map(
+      (element) => element.getAttribute('data-row') ?? '',
+    )
+  }
+
+  /** その要素がどの行に居るか。居なければ `null` */
+  function rowOf(testId: string): string | null {
+    const element = screen.queryByTestId(testId)
+    return element?.closest('[data-row]')?.getAttribute('data-row') ?? null
+  }
+
+  function show(session: SessionMeta, compact = false) {
+    clearSessions()
+    applySessionSnapshot([session])
+    renderView({ compact })
+  }
+
+  beforeEach(() => {
+    useSettingsStore.setState({ settings: settingsFixture(), loading: false })
+  })
+
+  it('単独画面の帯はちょうど4行', () => {
+    show(meta())
+    expect(rows()).toEqual(['1', '2', '3', '4'])
+  })
+
+  it('どの要素がどの行に居るかが決まっている', () => {
+    show(meta({ agent_connected: true }))
+
+    expect(rowOf('project-files-toggle')).toBe('1')
+    expect(rowOf('to-project')).toBe('1')
+    expect(rowOf('close-session')).toBe('1')
+    expect(rowOf('model-picker')).toBe('3')
+    expect(rowOf('permission-mode-picker')).toBe('3')
+    expect(rowOf('view-tab-transcript')).toBe('4')
+    expect(rowOf('view-tab-terminal')).toBe('4')
+  })
+
+  it('フック未受信が出ても行が増えない（2行目に収まる）', () => {
+    show(meta({ status: { kind: 'unknown' }, hooks_seen: false }))
+
+    expect(rowOf('hook-warning')).toBe('2')
+    expect(rows()).toEqual(['1', '2', '3', '4'])
+  })
+
+  it('復旧が出ても行が増えない（3行目に収まる）', () => {
+    show(
+      meta({
+        agent_connected: false,
+        claude_session_id: '22222222-2222-2222-2222-222222222222',
+      }),
+    )
+
+    expect(rowOf('revive-button')).toBe('3')
+    expect(rows()).toEqual(['1', '2', '3', '4'])
+  })
+
+  it('終了したカードでは、起こし直しのモードのバッジと復旧が同じ行に並ぶ', () => {
+    // ピッカーが消えた場所へ入れ替わりに入る。**3行目は空にならない**
+    show(
+      meta({
+        status: { kind: 'ended', ok: true },
+        agent_connected: false,
+        claude_session_id: '22222222-2222-2222-2222-222222222222',
+      }),
+    )
+
+    expect(screen.queryByTestId('model-picker')).toBeNull()
+    expect(rowOf('revive-mode')).toBe('3')
+    expect(rowOf('revive-button')).toBe('3')
+    expect(rows()).toEqual(['1', '2', '3', '4'])
+  })
+
+  it('条件付きのものが重なっても行が増えない', () => {
+    // **片方ずつ見ても、重なったときのことは分からない。**
+    // `revive-mode` のバッジと「フック未受信」は同時には出ない（前者は `ended`・
+    // 後者は `unknown` が条件で、状態は1つしか持てない）ので、数えるのはこの組
+    show(
+      meta({
+        status: { kind: 'unknown' },
+        hooks_seen: false,
+        agent_connected: false,
+        claude_session_id: '22222222-2222-2222-2222-222222222222',
+      }),
+    )
+
+    expect(screen.getByTestId('hook-warning')).toBeInTheDocument()
+    expect(screen.getByTestId('revive-button')).toBeInTheDocument()
+    expect(rows()).toEqual(['1', '2', '3', '4'])
+  })
+
+  it('最終活動の表記が変わっても、行の数も所属も変わらない', () => {
+    // **3件目の要件そのもの。** 放っておくだけで文字数が変わる唯一の要素なので、
+    // 折り返す作りだと「画面を見ているだけで行数が入れ替わる」。
+    // **高さが動かないことは実ブラウザで見る**（jsdom は幅も高さも測らない）
+    // `たった今` → `30秒前` → `3分前` → `12日前`。字数が 4→4→3→5 と動く
+    const 経過 = [0, 30_000, 3 * 60_000, 12 * 86_400_000]
+    for (const 差 of 経過) {
+      clearSessions()
+      applySessionSnapshot([meta({ last_activity_at: NOW - 差 })])
+      const { unmount } = renderView()
+      expect(rows(), `経過 ${差}ms で行が変わった`).toEqual(['1', '2', '3', '4'])
+      expect(rowOf('to-project')).toBe('1')
+      unmount()
+    }
+  })
+
+  it('更新間隔が出ても行が増えない（4行目に収まる）', () => {
+    // 別の PC のセッションを、ターミナルで見ているときだけ出る（設計§2）
+    useSettingsStore.setState({
+      settings: settingsFixture({
+        intervals: {
+          sync_interval_secs: 20,
+          screen_interval_ms: 20_000,
+          scrollback_lines: 1000,
+        },
+      }),
+      loading: false,
+    })
+    clearSessions()
+    applySessionSnapshot([meta({ agent_id: 'agent-1' })])
+    renderView({ compact: true })
+
+    expect(rowOf('screen-interval')).toBe('4')
+    expect(rows()).toEqual(['2', '3', '4'])
+  })
+
+  it('フック未受信と更新間隔が同時に出ても行が増えない', () => {
+    // **片方ずつ見ても、重なったときのことは分からない。**
+    // 2行目と4行目に1つずつ増える形
+    useSettingsStore.setState({
+      settings: settingsFixture({
+        intervals: {
+          sync_interval_secs: 20,
+          screen_interval_ms: 20_000,
+          scrollback_lines: 1000,
+        },
+      }),
+      loading: false,
+    })
+    clearSessions()
+    applySessionSnapshot([
+      meta({
+        agent_id: 'agent-1',
+        status: { kind: 'unknown' },
+        hooks_seen: false,
+      }),
+    ])
+    renderView({ compact: true })
+
+    expect(rowOf('hook-warning')).toBe('2')
+    expect(rowOf('screen-interval')).toBe('4')
+    expect(rows()).toEqual(['2', '3', '4'])
+  })
+
+  it('横並びでは1行目を出さない', () => {
+    // パスは全カードで同じで、`GroupView` の見出しにも既に出ている（設計§2）
+    show(meta(), true)
+
+    expect(rows()).toEqual(['2', '3', '4'])
+    expect(screen.queryByTestId('to-project')).toBeNull()
+    expect(screen.queryByTestId('project-files-toggle')).toBeNull()
+    expect(screen.queryByTestId('close-session')).toBeNull()
+  })
+
+  it('横並びでも2〜4行目は出る（1行目だけが違う）', () => {
+    show(meta({ agent_connected: true }), true)
+
+    expect(rowOf('model-picker')).toBe('3')
+    expect(rowOf('view-tab-terminal')).toBe('4')
+    expect(screen.getByRole('button', { name: '終了' })).toBeInTheDocument()
+  })
+
+  it('4行目は、左端が「開く」で右端が終了・削除', () => {
+    // **「移る」と「消す」を隣り合わせにしない**（設計§2）。以前は折り返し次第で
+    // `削除` が左端へ回り込み、「開く」の真上に並んでいた
+    show(meta(), true)
+
+    const 行 = screen.getByTestId('to-session').closest('[data-row="4"]')
+    expect(行).not.toBeNull()
+    const 中身 = Array.from(行!.children)
+    expect(中身[0]).toHaveAttribute('data-testid', 'to-session')
+    expect(中身[中身.length - 1]).toHaveTextContent('終了')
+    expect(中身[中身.length - 1]).toHaveTextContent('削除')
+  })
+})
+
+describe('SessionView の ✕（閉じる）', () => {
+  function show(compact = false) {
+    clearSessions()
+    applySessionSnapshot([meta()])
+    renderView({ compact })
+  }
+
+  beforeEach(() => {
+    useSettingsStore.setState({ settings: settingsFixture(), loading: false })
+  })
+
+  it('単独画面に出る', () => {
+    show()
+    expect(screen.getByTestId('close-session')).toBeInTheDocument()
+  })
+
+  it('横並びには出ない（1行目ごと出ないため）', () => {
+    show(true)
+    expect(screen.queryByTestId('close-session')).toBeNull()
+  })
+
+  it('読み上げ用の名前が付いている', () => {
+    // **文字の記号ではなくアイコン**なので（`DESIGN.md` §14.4）、名前が無いと
+    // 読み上げでは何も無いのと同じになる
+    show()
+    expect(screen.getByTestId('close-session')).toHaveAttribute(
+      'aria-label',
+      '閉じる',
+    )
   })
 })

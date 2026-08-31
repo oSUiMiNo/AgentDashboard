@@ -19,7 +19,7 @@
 
 import { motion } from 'motion/react'
 import { useState } from 'react'
-import { Link } from 'react-router'
+import { Link, useLocation, useNavigate } from 'react-router'
 import { Button } from '@/components/ui/button'
 import { InputDock } from '@/components/InputDock/InputDock'
 import { ModelPicker } from '@/components/ModelPicker/ModelPicker'
@@ -35,13 +35,15 @@ import {
   permissionModeTone,
   reviveReason,
   reviveState,
+  statusDetail,
   statusLabel,
   statusTone,
 } from '@/lib/protocol'
 import { FilesToggle } from '@/components/ProjectFiles/FilesToggle'
 import { useFilesParts } from '@/components/ProjectFiles/useFilesParts'
 import { useFilesPanel } from '@/lib/filesPanel'
-import { projectPath, sessionPath } from '@/lib/routes'
+import { splitPathTail } from '@/lib/path'
+import { backTargetFor, HOME, projectPath, sessionPath } from '@/lib/routes'
 import { hostOf } from '@/lib/reviveBudget'
 import type { CardId } from '@/lib/protocol'
 import { useNow } from '@/lib/sessions'
@@ -74,6 +76,10 @@ export function SessionView({ cardId, compact = false }: Props) {
   const [view, setView] = useState<View>(compact ? 'terminal' : 'transcript')
   // PJT 専用画面と**同じ部品・同じ経路**（設計§28）。開閉の記憶も共有する
   const [filesOpen, toggleFiles] = useFilesPanel()
+  // ✕ の行き先（設計§7）。**履歴の件数では判定しない**——判断そのものは
+  // `backTargetFor` が持ち、ここは鍵を渡して結果に従うだけ
+  const navigate = useNavigate()
+  const location = useLocation()
   // ファイルのパネルと、PJT 専用画面へのリンクの**両方**で使う。同じ意味の式を
   // 2通りの綴りで置くと、片方だけ直す余地が残る
   const host = hostOf(session?.agent_id)
@@ -93,6 +99,8 @@ export function SessionView({ cardId, compact = false }: Props) {
   // ので、このボタンがその合図を兼ねる
   const revivable = reviveState(session, agentOf(agents, session.agent_id))
   const reviveWhy = reviveReason(revivable)
+  // 前半だけを縮ませ、末尾2階層は必ず残す（設計§3）
+  const { head, tail } = splitPathTail(session.project)
 
   return (
     <section
@@ -105,60 +113,138 @@ export function SessionView({ cardId, compact = false }: Props) {
       }`}
     >
       {/*
-        **折り返せるようにしておく。** 狭い画面では右側の道具（モデル・モード・
-        終了・削除）だけで画面幅を超える。はみ出したままだと、
-        **ページの横幅が画面より広くなる**——モバイルの `fixed` はその広い幅を
-        基準にするので、左パネルのドロワーの右端（閉じる・コピー）が画面の外へ出る。
+        **4行に決め打つ。行の中では折り返さない**（設計§2）。
+
+        以前は `flex-wrap` の1行に10個以上を詰めて折り返しに任せていた。どこで折れるかが
+        幅次第だと、**行数も、どれとどれが同じ行に来るかも、そのつど変わる**——狭い画面ほど
+        行が増えて本文の高さを削り、しかも**最終活動の文字数が変わっただけで行が入れ替わる**
+        （`たった今` と `5秒前` の2文字差で 1行⇄2行。実測）。下の本文ごと上下に動くので、
+        読んでいる場所が逃げる。
+
+        **折り返しは置き忘れではなく防具だった。** はみ出したままだとページの横幅が画面より
+        広くなり、狭い窓のサイドバー（`fixed`）の右端が画面の外へ出る。**外すぶんは、行ごとに
+        「溢れたとき何が縮むか」を決めて埋める**（1行目はパスの前半、2行目はフック未受信。
+        3行目と4行目は固定幅しか無いので、そもそも溢れさせない）。
+
+        **4行目はここに無い。** タブの行はサイドバーより下の「中身の列」に居るので、
+        あれがそのまま4行目になる。上へ移すと、広い窓でサイドバーの上に跨ってしまう。
       */}
-      <header className="flex flex-wrap items-center gap-2 text-sm">
-        {!compact && <FilesToggle open={filesOpen} onToggle={toggleFiles} />}
-        <span
-          aria-hidden
-          className={`size-2.5 shrink-0 rounded-full ${statusTone(session.status)}`}
-        />
+      <header className="flex flex-col gap-1 text-sm">
         {/*
-          縮んでよいのは作業ディレクトリだけ。`min-w-0` を付けないと flex の子は
-          中身の幅より小さくならず、`truncate` が効かない。実際、長いパスのときに
-          状態のラベルが「入力 待ち」と縦に割れていた（**一番読みたいものが読めない**）
+          **1行目は単独画面だけ**（設計§2）。横並びではパスが全カードで同じで、
+          `GroupView` の見出しにも既に出ている。判定は既存の `compact` でできる
         */}
-        {/*
-          **単独画面のときだけ押せるようにする。** 横並びのときは既にその PJT の
-          画面に居るので、リンクにすると自分自身へ移ることになる——「押せるのに
-          何も起きない」は、壊れているのと見分けが付かない。
+        {!compact && (
+          <div data-row="1" className="flex min-w-0 items-center gap-2">
+            <FilesToggle open={filesOpen} onToggle={toggleFiles} />
+            {/*
+              **押すと PJT 専用画面へ移る**（`v0.1.53`）。器を1つも足さないのは、
+              置く先に空き余白が無いため——既に在るものを押せるようにすれば行も要素も増えない。
 
-          器を1つも足さないのは、置く先の帯に空き余白が無いため（設計§2）。
-          既に在るものを押せるようにすれば、行も要素も増えない。
-        */}
-        {compact ? (
-          <span className="min-w-0 truncate font-medium" title={session.project}>
-            {session.project}
-          </span>
-        ) : (
-          <Link
-            to={projectPath(host, session.project)}
-            data-testid="to-project"
-            className="decoration-muted-foreground/40 hover:decoration-foreground min-w-0 truncate font-medium underline underline-offset-2"
-            title={session.project}
-          >
-            {session.project}
-          </Link>
+              **割るのはリンクの中身で、リンクそのものは1つのまま。** 2つに割ると押せる的が
+              2つになる。`min-w-0` はリンク自身にも要る（flex の入れ物になるため）で、
+              `truncate` は前半の `<span>` へ移す（設計§3）
+            */}
+            <Link
+              to={projectPath(host, session.project)}
+              data-testid="to-project"
+              className="decoration-muted-foreground/40 hover:decoration-foreground flex min-w-0 items-center font-medium underline underline-offset-2"
+              title={session.project}
+            >
+              {head !== '' && (
+                <span data-testid="to-project-head" className="min-w-0 truncate">
+                  {head}
+                </span>
+              )}
+              {/* **末尾2階層は必ず残す。** 違いが出るのはたいてい末尾（設計§3） */}
+              <span className="shrink-0">{tail}</span>
+            </Link>
+            {/*
+              **✕ は1行目の右端、終了は4行目の右端。** 縦に離してあるのは、閉じるつもりで
+              終了を押す事故を避けるため（設計§5・§7）。
+
+              **文字の記号は使わない**（`DESIGN.md` §14.4）。`FilesToggle` と同じ作りの
+              Outline のアイコンにしてある
+            */}
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              data-testid="close-session"
+              aria-label="閉じる"
+              title="閉じる"
+              className="ml-auto shrink-0"
+              onClick={() => {
+                // **三項演算子で1回にまとめない。** `navigate` の2つのオーバーロード
+                // （行き先 / 何個戻るか）に `string | number` は当たらず、`tsc -b` で落ちる
+                if (backTargetFor(location.key) === 'back') {
+                  navigate(-1)
+                  return
+                }
+                navigate(HOME)
+              }}
+            >
+              <svg
+                aria-hidden
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M18 6 6 18" />
+                <path d="m6 6 12 12" />
+              </svg>
+            </Button>
+          </div>
         )}
-        <span className="text-muted-foreground shrink-0">
-          {statusLabel(session.status)}
-        </span>
-        <span className="text-muted-foreground shrink-0 text-xs">
-          最終活動 {formatElapsed(now - session.last_activity_at)}
-        </span>
-        {isHookSilent(session) && (
+
+        {/*
+          **2行目は状態の行**（設計§2）。縮んでよいのはフック未受信だけで、
+          状態のラベルと最終活動は縮ませない——**いちばん読みたいものが「入力 待ち」と
+          縦に割れる**壊れ方を、初期実装のフェーズ4で実測している
+        */}
+        <div data-row="2" className="flex items-center gap-2">
           <span
-            data-testid="hook-warning"
-            className="shrink-0 text-xs text-amber-400"
+            aria-hidden
+            className={`size-2.5 shrink-0 rounded-full ${statusTone(session.status)}`}
+          />
+          {/*
+            `ended` は「消息不明」1本（設計§6）。**正常に終わったのか落ちたのかは
+            `title` に回してある**——捨てたのではなく、置き場所を移しただけ
+          */}
+          <span
+            className="text-muted-foreground shrink-0"
+            title={statusDetail(session.status)}
           >
-            フック未受信
+            {statusLabel(session.status)}
           </span>
-        )}
+          {/*
+            **この行で唯一、放っておくだけで文字数が変わる要素。** 1秒ごとに数え直すので、
+            行の中で折り返す作りだと**画面を見ているだけで行数が入れ替わる**（設計§2）
+          */}
+          <span className="text-muted-foreground shrink-0 text-xs">
+            最終活動 {formatElapsed(now - session.last_activity_at)}
+          </span>
+          {isHookSilent(session) && (
+            <span
+              data-testid="hook-warning"
+              className="min-w-0 truncate text-xs text-amber-400"
+            >
+              フック未受信
+            </span>
+          )}
+        </div>
 
-        <div className="ml-auto flex flex-wrap items-center gap-2">
+        {/*
+          **3行目は「そのセッションをどう動かすか」の行**（設計§2）。
+
+          終了しているときはモデルとモードのピッカーが消えるので、**そこが空くのと
+          入れ替わりに**起こし直しのモードのバッジと `復旧` が入る。したがってこの行は
+          どの状態でも空にならない——**4行が3行に化けない**
+        */}
+        <div data-row="3" className="flex items-center gap-2">
           {/*
             モードとモデルは小窓とセッション画面の両方に出す（要件）。ここは切替も兼ねる。
             並びは モデル → モード。モデルのほうが長い文字列になるので、
@@ -205,26 +291,6 @@ export function SessionView({ cardId, compact = false }: Props) {
               </Button>
             </>
           )}
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={isEnded(session.status)}
-            onClick={() => kill(session.card_id)}
-          >
-            終了
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => {
-              // **カードを外したら書きかけも忘れる。** 残すと、二度と開かない相手の
-              // 下書きが積み上がる（十字ボタン設計§11）
-              dropDraft(session.card_id, account)
-              archive(session.card_id)
-            }}
-          >
-            削除
-          </Button>
         </div>
       </header>
 
@@ -272,12 +338,18 @@ export function SessionView({ cardId, compact = false }: Props) {
           帯も入力欄も一緒に流れることになり、窓にした意味が消える（実測で踏んだ）。
         */}
         <div className="relative isolate flex min-h-0 min-w-0 flex-1 flex-col gap-2">
-        <div className="flex items-center gap-2">
+        {/*
+          **これが帯の4行目**（設計§2）。`<header>` の中に無いのは、この行がサイドバーより
+          下の「中身の列」に居るため——上へ移すと、広い窓でサイドバーの上に跨ってしまう。
+
+          **両端に別々のものを置く。** 左が「開く」（移る）、右が「終了・削除」（消す）。
+          **「移る」と「消す」を隣り合わせにしない**——以前は折り返し次第で `削除` が左端へ
+          回り込み、長いパスのときに「開く」の真上（約40px）に並んでいた（実測）。
+          4行に決め打つと、この回り込みそのものが起きなくなる
+        */}
+        <div data-row="4" className="flex items-center gap-2">
           {/*
             横並びの区画から、そのセッションの専用画面へ移る（設計§4）。
-
-            **終了とは行の反対の端に置く。** 「隣を見に行くつもり」と「これを
-            終わらせる」を取り違えたときの被害が釣り合わないので、いちばん遠くへ離す。
 
             **`ml-auto` を付けない。** これは `compact` のときだけ出る＝出たり
             消えたりする要素で、寄せる指定を付けると出ないときに寄せ先ごと消えて
@@ -314,6 +386,32 @@ export function SessionView({ cardId, compact = false }: Props) {
             </ViewTab>
           </div>
           <ScreenInterval remote={session.agent_id !== null} shown={view === 'terminal'} />
+          {/*
+            **寄せる指定は、必ず描かれる入れ物のほうへ持たせる**（ガイドライン）。
+            中のボタンは状態で入れ替わるので、そちらへ付けると出ないときに寄せ先ごと消える
+          */}
+          <div className="ml-auto flex shrink-0 items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={isEnded(session.status)}
+              onClick={() => kill(session.card_id)}
+            >
+              終了
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                // **カードを外したら書きかけも忘れる。** 残すと、二度と開かない相手の
+                // 下書きが積み上がる（十字ボタン設計§11）
+                dropDraft(session.card_id, account)
+                archive(session.card_id)
+              }}
+            >
+              削除
+            </Button>
+          </div>
         </div>
 
         {/* 表示していない側もマウントしたまま隠す（作り直さないため） */}
