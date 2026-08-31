@@ -91,13 +91,14 @@ pub enum PrefixError {
 /// 状態の日本語ラベル。README の一覧画面の表と同じ語を使う——CLI にだけ別の言い方が
 /// あると、画面と突き合わせて読む人が同じものを別物と受け取る。
 ///
-/// `Ended` が「消息不明」なのは画面と同じ理由（帯の設計§6）。**こちらが頼んだ終了は
-/// カードごと一覧から外れる**ので、`ended` として残っているのは頼んでいない終わり方を
-/// したものだけになる。`ok` の別は捨てていない——`session show` は終了コードを別に出す。
+/// `Ended` が「スリープ」なのは画面と同じ理由（帯の設計§14-4）。**止まっているが
+/// `session revive` で起こせる**——それがこの状態の意味そのものである。「スリープ」
+/// ボタンは `Kill` を送るだけでカードを残すので、**止めたことと、もう一度動かせることが
+/// 1つの言葉で言える**。`ok` の別は捨てていない——`session show` は終了コードを別に出す。
 ///
 /// **`client/wait.rs` の「正常終了 ／ 異常終了」はこれとは別物**なので揃えない。
 /// あちらは状態の**名前**ではなく、待っている本人への**出来事の報告**（`session kill` の
-/// 結果や、待っている間に終わったという断り）で、頼んだ本人にとっては消息不明ではない。
+/// 結果や、待っている間に終わったという断り）である。
 pub fn status_label(status: &SessionStatus) -> &'static str {
     match status {
         SessionStatus::Starting => "起動中",
@@ -105,7 +106,7 @@ pub fn status_label(status: &SessionStatus) -> &'static str {
         SessionStatus::WaitingPermission => "権限確認待ち",
         SessionStatus::WaitingInput => "入力待ち",
         SessionStatus::Stalled => "停滞",
-        SessionStatus::Ended { .. } => "消息不明",
+        SessionStatus::Ended { .. } => "スリープ",
         SessionStatus::Unknown => "不明",
     }
 }
@@ -432,22 +433,22 @@ mod tests {
     // --- 状態のラベル（帯の設計§6・テスト計画フェーズ2） ---
 
     #[test]
-    fn 終わったセッションは消息不明と出る() {
+    fn 終わったセッションはスリープと出る() {
         // 画面（`web/src/lib/protocol.ts` の `statusLabel`）と同じ語を使う。
-        // **ここがずれると「消息不明のカードはどれか」を CLI から引けなくなる**
-        assert_eq!(status_label(&SessionStatus::Ended { ok: true }), "消息不明");
+        // **ここがずれると「スリープのカードはどれか」を CLI から引けなくなる**
+        assert_eq!(status_label(&SessionStatus::Ended { ok: true }), "スリープ");
         assert_eq!(
             status_label(&SessionStatus::Ended { ok: false }),
-            "消息不明"
+            "スリープ"
         );
     }
 
     #[test]
-    fn 不明は消息不明に巻き込まれていない() {
+    fn 不明はスリープに巻き込まれていない() {
         // 2つは別物。`Unknown` は「状態を判断できない（生きているかもしれない）」で、
         // `Ended` は「もう終わっている」
         assert_eq!(status_label(&SessionStatus::Unknown), "不明");
-        assert_ne!(status_label(&SessionStatus::Unknown), "消息不明");
+        assert_ne!(status_label(&SessionStatus::Unknown), "スリープ");
     }
 
     #[test]

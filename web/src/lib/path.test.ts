@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { splitPathTail } from './path'
+import { projectDisplayName, splitPathTail } from './path'
 
 /**
  * 設計§3「パスの見せ方（末尾を必ず残す）」の純関数。
@@ -68,5 +68,52 @@ describe('パスを前半と末尾2階層に割る', () => {
       head: '/home/me',
       tail: '/dev/app/',
     })
+  })
+})
+
+describe('帯に出す PJT の名前', () => {
+  const 枠 = (path: string, created_at: number) => ({ path, created_at })
+
+  it('同じ名前が1つだけなら、番号を付けない', () => {
+    expect(
+      projectDisplayName('/home/me/dev/app', [枠('/home/me/dev/app', 1)]),
+    ).toBe('app')
+  })
+
+  it('同じ名前が複数なら、全部に番号が付く', () => {
+    // **片方だけに付けない。** 番号の無いほうが何番なのか分からなくなる
+    const 一覧 = [枠('/a/app', 1), 枠('/b/app', 2)]
+    expect(projectDisplayName('/a/app', 一覧)).toBe('app (1)')
+    expect(projectDisplayName('/b/app', 一覧)).toBe('app (2)')
+  })
+
+  it('番号は枠が作られた順（一覧の並びと同じ根拠）', () => {
+    // 押した瞬間に番号が入れ替わらないこと
+    const 一覧 = [枠('/後/app', 20), 枠('/先/app', 10)]
+    expect(projectDisplayName('/先/app', 一覧)).toBe('app (1)')
+    expect(projectDisplayName('/後/app', 一覧)).toBe('app (2)')
+  })
+
+  it('名前が違えば、番号は付かない', () => {
+    const 一覧 = [枠('/a/app', 1), 枠('/b/other', 2)]
+    expect(projectDisplayName('/a/app', 一覧)).toBe('app')
+    expect(projectDisplayName('/b/other', 一覧)).toBe('other')
+  })
+
+  it('記録に無いパスでも落ちない（名前だけ出す）', () => {
+    expect(projectDisplayName('/a/app', [])).toBe('app')
+    expect(projectDisplayName('/', [])).toBe('/')
+  })
+
+  it('壊し方：衝突していないものにも番号を付けると、最初の主張だけが落ちる', () => {
+    // **1通りの壊し方で全部が落ちるなら、テストが1本ぶんの働きしかしていない**
+    const 壊れた = (path: string, all: { path: string }[]) =>
+      `${path.split('/').filter(Boolean).pop()} (${all.findIndex((p) => p.path === path) + 1})`
+    expect(壊れた('/home/me/dev/app', [{ path: '/home/me/dev/app' }])).toBe(
+      'app (1)',
+    )
+    expect(
+      projectDisplayName('/home/me/dev/app', [枠('/home/me/dev/app', 1)]),
+    ).toBe('app')
   })
 })

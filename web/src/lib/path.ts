@@ -60,3 +60,61 @@ export function splitPathTail(path: string): SplitPath {
   }
   return { head: path.slice(0, index), tail: path.slice(index) }
 }
+
+/** 番号を付けるかどうかを決めるのに要る、枠の最小の姿。 */
+export interface NamedProject {
+  path: string
+  created_at: number
+}
+
+/** パスの末尾の名前（区切りだけの並びでも落ちない）。 */
+function basename(path: string): string {
+  const names = path.split('/').filter((name) => name !== '')
+  return names.length === 0 ? path : names[names.length - 1]
+}
+
+/**
+ * 帯に出す PJT の名前（設計§14-5）。
+ *
+ * # 名前だけにする
+ *
+ * 以前はパスを「前半」と「末尾2階層」に割って出していたが、**帯の1行目には
+ * 始末のボタンも並ぶ**ようになったので、パスの長さに幅を明け渡せなくなった。
+ * **フルパスは `title` に残す**ので、確かめたいときは乗せれば読める。
+ *
+ * # 同じ名前が複数あるときだけ番号を付ける
+ *
+ * `~/a/app` と `~/b/app` はどちらも `app` になり、**一覧では見分けられない**。
+ * そこで**衝突しているものにだけ**番号を付ける。
+ *
+ * | 状況 | 出るもの |
+ * |---|---|
+ * | 同じ名前が1つだけ | `app` |
+ * | 同じ名前が複数 | `app (1)` ／ `app (2)` … |
+ *
+ * **衝突していないものには付けない**（全部に付けると読む量が増える）。逆に
+ * **衝突しているものには全部に付ける**——片方だけに付けると「番号の無いほうは
+ * 何番なのか」が分からなくなる。
+ *
+ * **順番は枠が作られた順。** 一覧の並びと同じ根拠にしてあるので、**押した瞬間に
+ * 番号が入れ替わらない**。作られた時刻が同じときはパスの並び順で決める（安定させる
+ * ためで、意味は無い）。
+ */
+export function projectDisplayName(
+  path: string,
+  projects: readonly NamedProject[],
+): string {
+  const name = basename(path)
+  const 同名 = projects
+    .filter((project) => basename(project.path) === name)
+    .sort(
+      (a, b) =>
+        a.created_at - b.created_at || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0),
+    )
+  if (同名.length <= 1) {
+    return name
+  }
+  const 番号 = 同名.findIndex((project) => project.path === path)
+  // 記録に無いパス（消えた直後など）は、番号を付けずに名前だけ出す
+  return 番号 < 0 ? name : `${name} (${番号 + 1})`
+}
