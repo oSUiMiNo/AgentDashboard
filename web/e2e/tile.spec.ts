@@ -603,3 +603,64 @@ test('応答が変わると1行が出て、しばらくして消える', async (
 
   await other.close()
 })
+
+test('②行の札と復旧ボタンが、板として浮いている', async ({ page }) => {
+  /*
+    フェーズ20。**jsdom は Tailwind を適用しない**ので、単体が見られるのは
+    「そう書いてある」まで。**そう出ているか**はここでしか分からない——フェーズ12 は
+    「地と内側ハイライトを付けた」と記録しながら、**落ち影が1つも無かった**。
+
+    見るのは「持っているか」と「札より弱いか」の2つ。**強さの順序**（§12.3）が
+    崩れると、属性が状態より目立つ画になる。
+  */
+  await openDashboard(page)
+  const cardId = await spawnWith(page, 'Stop', '{"last_assistant_message":"終わりました"}')
+
+  const 読む = async () =>
+    page.evaluate((id) => {
+      const shell = document.querySelector(
+        `[data-testid="tile-shell"][data-card-id="${id}"]`,
+      )
+      if (shell === null) throw new Error(`カードが見つかりません：${id}`)
+      const 影 = (testId: string) => {
+        const el = shell.querySelector(`[data-testid="${testId}"]`)
+        return el === null ? null : getComputedStyle(el).boxShadow
+      }
+      const tag = shell.querySelector('[data-testid="tile-tag"]')
+      return {
+        モデル: 影('model'),
+        札の影: tag === null ? null : getComputedStyle(tag).filter,
+        カード高: Math.round(shell.getBoundingClientRect().height),
+      }
+    }, cardId)
+
+  const 実測 = await 読む()
+  if (実測.モデル === null) throw new Error('モデルの札が出ていません')
+
+  // **inset でない影を持っている。** これが「板になる」の本体で、
+  // `inset` だけへ戻すと（＝フェーズ12 の姿へ戻すと）ここが落ちる
+  const 指定 = 実測.モデル.split(/,(?![^(]*\))/).map((s) => s.trim())
+  expect(指定.some((s) => !s.includes('inset'))).toBe(true)
+  // 上のハイライトと下の暗い縁で、厚みの側面を作る
+  expect(指定.filter((s) => s.includes('inset'))).toHaveLength(2)
+
+  // **右下の札より弱い**（中が強を超えない。§12.3）。札は 2.5px ずらして 2.5px ぼかす。
+  //
+  // **`[^)]*` で書かない。** 影の色は `rgba(0, 0, 0, 0.45)` の形で括弧を含むので、
+  // そこで止まって数値へ届かない（実際に踏んだ）。
+  //
+  // **Tailwind は使っていない影の枠を `rgba(0, 0, 0, 0) 0px 0px 0px 0px` として残す**
+  // ので、`find` で先頭を拾うと**常に 0 が返り、比較が素通りする**。実体だけを見る。
+  const 数値 = (影: string) =>
+    /(\d+(?:\.\d+)?)px\s+(\d+(?:\.\d+)?)px/.exec(影.replace(/rgba?\([^)]*\)/g, ''))
+  expect(実測.札の影).toContain('drop-shadow')
+  const 札のずれ = 数値(実測.札の影 ?? '')
+  const 実体 = 指定.filter((s) => !s.includes('inset') && !/\b0px 0px 0px 0px$/.test(s))
+  expect(実体, '落ち影の実体が無い').toHaveLength(1)
+  const 板のずれ = 数値(実体[0])
+  if (札のずれ === null || 板のずれ === null) throw new Error('影の値を読めません')
+  expect(Number(板のずれ[2])).toBeLessThan(Number(札のずれ[2]))
+
+  // 影は場所を取らない。**カードの高さが動いていない**
+  expect(実測.カード高).toBeLessThanOrEqual(140)
+})

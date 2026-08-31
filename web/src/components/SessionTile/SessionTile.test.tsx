@@ -96,11 +96,11 @@ describe('SessionTile', () => {
     [{ kind: 'waiting_permission' }, '権限確認待ち'],
     [{ kind: 'waiting_input' }, '入力待ち'],
     [{ kind: 'stalled' }, '停滞'],
-    // **どちらも「消息不明」**（設計§6）。終了ボタンで終わらせたカードは一覧から
+    // **どちらも「スリープ」**（設計§6）。終了ボタンで終わらせたカードは一覧から
     // 外れるので、小窓に `ended` として残るのは頼んでいない終わり方をしたものだけ。
     // `ok` の別は記号（`✓` と `✕`）と `title` に残っている
-    [{ kind: 'ended', ok: true }, '消息不明'],
-    [{ kind: 'ended', ok: false }, '消息不明'],
+    [{ kind: 'ended', ok: true }, 'スリープ'],
+    [{ kind: 'ended', ok: false }, 'スリープ'],
     [{ kind: 'unknown' }, '不明'],
   ])('状態 %o は「%s」と表示される', (status, label) => {
     renderTile(meta({ status }))
@@ -1147,6 +1147,121 @@ describe('跳ねるたびに、画面を回遊する線を放つ', () => {
       // **繋がっているときと同じ。** 沈んでいたら、掛け直しが残っている
       expect(line.ink).toBe('100%')
       expect(line.ink).not.toBe(statusInk({ kind: 'waiting_permission' }, false))
+    }
+  })
+})
+
+/**
+ * ②行の札と復旧ボタンの物質（フェーズ20）。
+ *
+ * **jsdom は Tailwind を適用しない**ので、ここで見られるのは「そう書いてある」まで。
+ * **そう出ているか**は `tile.spec.ts` が実物のブラウザで見る——フェーズ12 は
+ * 「地と内側ハイライトを付けた」と記録しながら**落ち影が1つも無かった**ので、
+ * 「書いた」と「効いた」を別々に見張る。
+ */
+describe('札と復旧ボタンが物質を持つ（フェーズ20）', () => {
+  /** その要素の class から `shadow-[...]` の中身を取り出す */
+  function 影(testId: string): string {
+    const el = screen.getByTestId(testId)
+    const 見つけた = /shadow-\[([^\]]+)\]/.exec(el.className)
+    expect(見つけた, `${testId} に shadow-[...] が無い`).not.toBeNull()
+    return (見つけた as RegExpExecArray)[1]
+  }
+
+  it('札が落ち影を持つ。inset だけへ戻すと落ちる', () => {
+    // **この段の本体。** 「浮いている」を作るのは落ち影で、そこが無い面は
+    // 枠線を引いただけの矩形にしか見えない（`DESIGN.md` §27.3）
+    renderTile(
+      meta({
+        model: 'claude-haiku-4-5-20251001',
+        permission_mode: 'bypassPermissions',
+        agent_connected: false,
+      }),
+    )
+    for (const testId of ['model', 'permission-mode', 'disconnected-badge']) {
+      const 指定 = 影(testId)
+        .split(',')
+        .map((s) => s.trim())
+      // inset でない影が1つ以上ある
+      expect(
+        指定.some((s) => !s.startsWith('inset')),
+        `${testId} が落ち影を持たない`,
+      ).toBe(true)
+      // 上のハイライトと下の暗い縁で、厚みの側面を作る
+      expect(指定.filter((s) => s.startsWith('inset'))).toHaveLength(2)
+    }
+  })
+
+  it('札と復旧ボタンは同じ物質。片方だけ直すと家族が割れる', () => {
+    // フェーズ13 が札で通した「同じ行に丸いカプセルと角ばった札が混ざると
+    // 1組に見えない」と同じ理由。**復旧ボタンだけ元へ戻すと落ちる**
+    renderTile(meta({ model: 'claude-haiku-4-5-20251001', agent_connected: false }))
+    expect(影('revive-button')).toBe(影('model'))
+  })
+
+  it('札はステッカーにならない。傾けない・型抜きしない', () => {
+    // `DESIGN.md` §23.3「全行に出したい情報は、ステッカーではない」と §33 の禁止
+    // 「状態ステッカーを全行に付けて列にする」。**属性なので、貼ると必ず列になる**
+    renderTile(
+      meta({
+        model: 'claude-haiku-4-5-20251001',
+        permission_mode: 'bypassPermissions',
+        agent_connected: false,
+      }),
+    )
+    for (const testId of ['model', 'permission-mode', 'disconnected-badge']) {
+      const className = screen.getByTestId(testId).className
+      expect(className, `${testId} が傾いている`).not.toMatch(/\brotate-/)
+      expect(className, `${testId} が型抜きされている`).not.toMatch(/\bmask-/)
+    }
+    // 傾きと型抜きを持ってよいのはステッカーだけ（`tile.css` の `.tile-sticker`）
+    cleanup()
+    renderTile(meta({ status: { kind: 'waiting_permission' } }))
+    expect(screen.getByTestId('tile-sticker')).toBeInTheDocument()
+  })
+})
+
+describe('スリープの zzz（帯の設計§14-4）', () => {
+  it('スリープのカードでは、札ではなく zzz が出る', () => {
+    // **作業中と停滞が「札ではなく人が走る」のと同じ扱い**（利用者の指定）
+    renderTile(meta({ status: { kind: 'ended', ok: true } }))
+
+    expect(screen.getByTestId('tile-zzz')).toBeInTheDocument()
+    // 札は**置いてある**が、休みの印が付いていて CSS が畳む（判定を JS へ散らさない）
+    expect(screen.getByTestId('tile-tag')).toHaveClass('tile-tag-rest')
+  })
+
+  it('zzz は文字として置く（地を画像で作らない）', () => {
+    // `forced-colors: active` は背景画像を消すので、焼き込むとあの環境で状態が
+    // 読めなくなる（走る人が同じ理由で `tile-run-fallback` を持っている）
+    renderTile(meta({ status: { kind: 'ended', ok: false } }))
+
+    const zzz = screen.getByTestId('tile-zzz')
+    expect(Array.from(zzz.querySelectorAll('i')).map((i) => i.textContent)).toEqual([
+      'z',
+      'z',
+      'z',
+    ])
+    expect(zzz).toHaveAttribute('aria-label', 'スリープ')
+  })
+
+  it('走る人とは同時に出ない', () => {
+    // 状態は1つしか持てないので、`ended` と `working`/`stalled` は重ならない
+    const { unmount } = renderTile(meta({ status: { kind: 'working' } }))
+    expect(screen.queryByTestId('tile-zzz')).toBeNull()
+    expect(screen.getByTestId('tile-run')).toBeInTheDocument()
+    unmount()
+
+    renderTile(meta({ status: { kind: 'ended', ok: true } }))
+    expect(screen.queryByTestId('tile-run')).toBeNull()
+    expect(screen.getByTestId('tile-zzz')).toBeInTheDocument()
+  })
+
+  it('スリープ以外では出ない', () => {
+    for (const kind of ['starting', 'waiting_input', 'unknown'] as const) {
+      const { unmount } = renderTile(meta({ status: { kind } }))
+      expect(screen.queryByTestId('tile-zzz'), kind).toBeNull()
+      unmount()
     }
   })
 })

@@ -82,14 +82,36 @@ const ECHO_MS = 12_000
  *
  * **ANSWER タグと同じ「作り」を借りる**（利用者の指定・2026-08-26）。0.1.41 までは
  * 枠線1本と薄い文字だけで、ステッカーが持っている**物質感を1つも持っていなかった**。
- * 借りるのは4つ——**地をベタで塗る／内側に白のハイライト（紙の厚み）／角丸を小さく／
- * 字間を開ける**。
  *
- * **ステッカーの印は付けない。** 傾き（`rotate`）と厚い落ち影と
- * アクセント色のベタ塗りは、`.tile-sticker` に取ってある。`DESIGN.md` §23.3 が
- * 「**全行に出したい情報は、ステッカーではない**」「属性は行の静かな要素で示す」と
- * 決めており、§33 の禁止事項に「**状態ステッカーを全行に付けて列にする**」がある——
- * モデル・モードは全行に出る属性なので、そのまま貼ると 12枚ぶんの列ができる。
+ * # フェーズ12 は借り方が足りなかった（フェーズ20 で作り直し・設計§25）
+ *
+ * 「地と内側ハイライトを付けた」と記録しているが、**落ち影が1つも無く、ハイライトも
+ * 1px / 10%** で、実物では見えなかった（右下の札は `0 2.5px 2.5px / 45%` と 2.5px / 35%）。
+ * **枠線を引いただけの矩形**にしか見えない——`DESIGN.md` §27.3 が名指しで避けている形で、
+ * 実物を見た利用者に「以前と変わらない。何の面白みも無い」と言われた（2026-09-01）。
+ *
+ * **ステッカーの印は付けない。** 傾き（`rotate`）と型抜きとアクセント色のベタ塗りは
+ * `.tile-sticker` に取ってある。`DESIGN.md` §23.3 が「**全行に出したい情報は、
+ * ステッカーではない**」「属性は行の静かな要素で示す」と決めており、§33 の禁止事項に
+ * 「**状態ステッカーを全行に付けて列にする**」がある——モデル・モード・接続断は全行に
+ * 出る属性なので、そのまま貼ると 12枚ぶんの列ができ、**ANSWER の例外性まで道連れになる**。
+ * §12.3 の表でここは「中」＝印刷面・貼り紙である。
+ *
+ * そこで**傾けず型抜きせずに物質を足す**。3つ入れてある。
+ *
+ * | 何 | 何が起きるか |
+ * |---|---|
+ * | **落ち影** | 面が持ち上がる。**これが「板になる」の本体** |
+ * | **上のハイライト＋下の暗い縁** | 上下で光と影が付き、**厚みの側面**ができる |
+ * | **左下だけ角丸を大きく** | 矩形でなくなり、**荷札の輪郭**になる |
+ *
+ * **`clip-path` で角を切らない。** あれは `box-shadow` を切る（フェーズ16 が札で踏んだ
+ * filter → clip → mask の順序）。**角丸なら影は形に沿う**ので、影を残したまま輪郭を変えられる。
+ *
+ * 左の帯（`border-l-[3px]`）は**その札自身の枠の色**を太らせたもの。モードは自分の色を
+ * 持つので**危ないモードほど背骨が濃く出る**。カードの左端の Accent Bar と同じ語彙
+ * （`DESIGN.md` の Accent Element → Bar）で、**尺が違うので繰り返しには見えない**。
+ * `pl-[5px]` は帯のぶんを戻して、字の位置を動かさないため。
  *
  * **`--tile-accent` を地に使わない。** 使うと `tile.test.ts` の「`--tile-accent` を
  * 塗るものは必ず `--tile-ink` を通る」に掛かる（除外表はステッカーと効果線の2つだけ）。
@@ -99,7 +121,16 @@ const ECHO_MS = 12_000
  * 角丸を `tile.css` に書くと TSX 側が黙って効かなくなる。`tile.css` 冒頭の約束）。
  */
 const CHIP =
-  'shrink-0 rounded-[3px] border px-1.5 py-0.5 text-[0.7rem] tracking-[0.04em] shadow-[inset_0_1px_0_rgb(255_255_255/10%)]'
+  'shrink-0 rounded-[3px_3px_3px_10px] border border-l-[3px] py-0.5 pr-1.5 pl-[5px] text-[0.7rem] tracking-[0.04em] shadow-[inset_0_2px_0_rgb(255_255_255/28%),inset_0_-1px_0_rgb(0_0_0/30%),0_1.5px_3px_rgb(0_0_0/40%)]'
+
+/**
+ * 札の地。**`--muted`（`oklch(0.269)`）ではカードの地（`oklch(0.205)`）と差が小さく、
+ * 落ち影を足しても浮かない。** 一段だけ起こす。
+ *
+ * トークンにしていないのは、**この明るさを使うのが一覧の札だけ**だからである
+ * （`--secondary` も `--accent` も `--muted` と同じ値なので、どれを借りても同じ問題になる）。
+ */
+const CHIP_GROUND = 'bg-[oklch(0.32_0_0)]'
 
 /**
  * 札の地を、モードの色と喧嘩させずに足す。
@@ -259,6 +290,13 @@ export function SessionTile({ cardId }: Props) {
   */
   const running = motionKind === 'spin-fast' || motionKind === 'spin-slow'
   const resting = motionKind === 'spin-slow'
+  /**
+   * スリープは**札ではなく `zzz` が浮かぶ**（設計§14-4・利用者の指定）。
+   *
+   * 作業中と停滞が「札ではなく人が走る」のと同じ扱いで、**止めたら札へ戻す**ところまで
+   * 停滞に合わせてある——止めた画面でも状態が読めることが、要件の完了条件だった。
+   */
+  const sleeping = session.status.kind === 'ended'
 
 
   return (
@@ -383,7 +421,7 @@ export function SessionTile({ cardId }: Props) {
             {stale && (
               <span
                 data-testid="disconnected-badge"
-                className={`${CHIP} border-border bg-muted text-muted-foreground`}
+                className={`${CHIP} border-border ${CHIP_GROUND} text-muted-foreground`}
                 title="この PC からの報告が届いていません。表示は最後に分かっていた状態です"
               >
                 接続断
@@ -434,7 +472,7 @@ export function SessionTile({ cardId }: Props) {
                 <span
                   data-testid="model"
                   data-model={session.model}
-                  className={`${CHIP} border-border bg-muted text-foreground/80 max-w-28 truncate`}
+                  className={`${CHIP} border-border ${CHIP_GROUND} text-foreground/80 max-w-28 truncate`}
                   title={session.model}
                 >
                   {modelLabel(session.model, session.model_label)}
@@ -608,6 +646,33 @@ export function SessionTile({ cardId }: Props) {
           </span>
         )}
         {/*
+          スリープの `zzz`（設計§14-4）。**走る人と同じ居場所・同じ作法**で、
+          止めたら札へ戻る（下の `tile-tag-rest`）。
+
+          **文字として置く。** 地を画像で作らない——`forced-colors: active` は背景画像を
+          消すので、焼き込むとあの環境で状態が読めなくなる（走る人が同じ理由で
+          `tile-run-fallback` を持っている）。
+
+          **走る人とは同時に出ない。** 状態は1つしか持てないので、`ended` と
+          `working`/`stalled` が重なることは無い。
+        */}
+        {sleeping && (
+          <span
+            className="tile-zzz"
+            data-testid="tile-zzz"
+            role="img"
+            aria-label={statusLabel(session.status)}
+          >
+            <i aria-hidden>z</i>
+            <i aria-hidden>z</i>
+            <i aria-hidden>z</i>
+            <span className="tile-run-fallback" aria-hidden>
+              <span className="tile-glyph">{statusGlyph(session.status)}</span>
+              {statusLabel(session.status)}
+            </span>
+          </span>
+        )}
+        {/*
           # 停滞は、走る人とタグの**両方**を描く（設計§22-3）
 
           動いている間は走る人だけが見え、**止めたとき（控えめ・静止・OS の「動きを
@@ -628,7 +693,7 @@ export function SessionTile({ cardId }: Props) {
               session.status.kind === 'waiting_permission'
                 ? ' tile-tag-raised'
                 : ''
-            }${resting ? ' tile-tag-rest' : ''}`}
+            }${resting || sleeping ? ' tile-tag-rest' : ''}`}
             data-testid="tile-tag"
             aria-hidden={resting ? true : undefined}
           >
@@ -697,7 +762,7 @@ export function SessionTile({ cardId }: Props) {
             ——あちらは押下で `translate-y-px` するので、「復旧ボタンは揺らさない」と
             正面から食い違う。
           */
-          className="tile-revive border-border bg-muted text-foreground hover:border-primary/60 hover:bg-accent absolute top-2 right-2 rounded-[3px] border px-1.5 py-0.5 text-[0.7rem] tracking-[0.04em] shadow-[inset_0_1px_0_rgb(255_255_255/10%),0_1px_2px_rgb(0_0_0/35%)] transition-colors active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none"
+          className={`tile-revive border-border ${CHIP_GROUND} text-foreground hover:border-primary/60 hover:bg-accent absolute top-2 right-2 rounded-[3px] border px-1.5 py-0.5 text-[0.7rem] tracking-[0.04em] shadow-[inset_0_2px_0_rgb(255_255_255/28%),inset_0_-1px_0_rgb(0_0_0/30%),0_1.5px_3px_rgb(0_0_0/40%)] transition-colors active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none`}
         >
           {reviving ? '復旧中…' : '復旧'}
         </button>
