@@ -10,6 +10,7 @@ import {
   selfhealLabel,
   statusAccent,
   statusGlyph,
+  statusDetail,
   statusLabel,
   statusMotion,
   statusTextTone,
@@ -103,7 +104,31 @@ describe('サーバと同じ JSON になること', () => {
     expect(message.t).toBe('session_removed')
 
     const status = JSON.parse('{"kind":"ended","ok":false}') as SessionStatus
-    expect(statusLabel(status)).toBe('異常終了')
+    expect(statusLabel(status)).toBe('消息不明')
+  })
+
+  it('終わったカードは「消息不明」と出る（ok の別によらず）', () => {
+    // **画面に `ended` として残るのは、頼んでいない終わり方をしたカードだけ**
+    // （終了ボタンで終わらせたものは一覧から外れる。設計§5・§6）
+    expect(statusLabel({ kind: 'ended', ok: true })).toBe('消息不明')
+    expect(statusLabel({ kind: 'ended', ok: false })).toBe('消息不明')
+  })
+
+  it('「不明」は「消息不明」に巻き込まれていない', () => {
+    // 2つは別物。`unknown` は「状態を判断できない（生きているかもしれない）」で、
+    // `ended` は「もう終わっている」。**片方を変えたときにもう片方まで動いていないこと**
+    expect(statusLabel({ kind: 'unknown' })).toBe('不明')
+    expect(statusLabel({ kind: 'unknown' })).not.toBe('消息不明')
+  })
+
+  it('ok の別は捨てず、title へ回してある', () => {
+    expect(statusDetail({ kind: 'ended', ok: true })).toBe(
+      '終了コード 0 で終わりました',
+    )
+    expect(statusDetail({ kind: 'ended', ok: false })).toBe('異常終了しました')
+    // 終わっていない状態には出すものが無い
+    expect(statusDetail({ kind: 'working' })).toBeUndefined()
+    expect(statusDetail({ kind: 'unknown' })).toBeUndefined()
   })
 
   it('枠の増減は Rust と同じ綴りで往復する', () => {

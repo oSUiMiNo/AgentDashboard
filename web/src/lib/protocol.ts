@@ -438,7 +438,29 @@ export function permissionModeTone(mode: PermissionMode | null): string {
   }
 }
 
-/** 状態を日本語のラベルにする。 */
+/**
+ * 状態を日本語のラベルにする。
+ *
+ * # `ended` は「消息不明」（設計§6）
+ *
+ * **こちらが頼んだ終了は、そもそも画面に残らない。** 終了ボタンは `Kill` のあと
+ * カードを一覧から外すので（設計§5）、**`ended` として残っているカードは必ず
+ * 「頼んでいない終わり方をしたもの」**になる。だから状態を増やさずに、言い方の
+ * ほうを実態へ寄せてある。
+ *
+ * `ok` の別は捨てていない——[`statusDetail`] が `title` に出す。記号も分かれる
+ * （[`statusGlyph`] が `✓` と `✕`）ので、**色を伏せても2つは見分けられる**。
+ *
+ * **`unknown`（不明）とは別物。** あちらは「状態を判断できない。セッションは
+ * 生きているかもしれない」で、こちらは「もう終わっている」。1つのカードが同時に
+ * 両方になることは無い。
+ *
+ * # CLI とも同じ語を使う
+ *
+ * `server/crates/core/src/client/output.rs` の `status_label` が対。**画面の話を
+ * 受けてエージェントが CLI で確かめる**のがこの道具の使い方なので、ここがずれると
+ * 「消息不明のカードはどれか」を CLI から引けなくなる。
+ */
 export function statusLabel(status: SessionStatus): string {
   switch (status.kind) {
     case 'starting':
@@ -453,10 +475,28 @@ export function statusLabel(status: SessionStatus): string {
     case 'stalled':
       return '停滞'
     case 'ended':
-      return status.ok ? '終了' : '異常終了'
+      // 「終了 / 異常終了」から1本へ畳んだ（設計§6）。別は `statusDetail` が持つ
+      return '消息不明'
     case 'unknown':
       return '不明'
   }
+}
+
+/**
+ * ラベルだけでは落ちるぶんを、`title` へ回す（設計§6）。
+ *
+ * [`statusLabel`] が `ended` を「消息不明」1本へ畳んだので、**正常に終わったのか
+ * 落ちたのかがラベルから読めなくなった**。捨てたのではなく、置き場所を移しただけ
+ * であることを、この関数が受け持つ。
+ *
+ * 出すものが無い状態では `undefined` を返す（`title` を空文字で付けると、
+ * 何も書いていない吹き出しが出る環境がある）。
+ */
+export function statusDetail(status: SessionStatus): string | undefined {
+  if (status.kind !== 'ended') {
+    return undefined
+  }
+  return status.ok ? '終了コード 0 で終わりました' : '異常終了しました'
 }
 
 /**

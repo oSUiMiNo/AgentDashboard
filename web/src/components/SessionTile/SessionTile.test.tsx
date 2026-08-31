@@ -96,8 +96,11 @@ describe('SessionTile', () => {
     [{ kind: 'waiting_permission' }, '権限確認待ち'],
     [{ kind: 'waiting_input' }, '入力待ち'],
     [{ kind: 'stalled' }, '停滞'],
-    [{ kind: 'ended', ok: true }, '終了'],
-    [{ kind: 'ended', ok: false }, '異常終了'],
+    // **どちらも「消息不明」**（設計§6）。終了ボタンで終わらせたカードは一覧から
+    // 外れるので、小窓に `ended` として残るのは頼んでいない終わり方をしたものだけ。
+    // `ok` の別は記号（`✓` と `✕`）と `title` に残っている
+    [{ kind: 'ended', ok: true }, '消息不明'],
+    [{ kind: 'ended', ok: false }, '消息不明'],
     [{ kind: 'unknown' }, '不明'],
   ])('状態 %o は「%s」と表示される', (status, label) => {
     renderTile(meta({ status }))

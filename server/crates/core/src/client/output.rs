@@ -90,6 +90,14 @@ pub enum PrefixError {
 
 /// 状態の日本語ラベル。README の一覧画面の表と同じ語を使う——CLI にだけ別の言い方が
 /// あると、画面と突き合わせて読む人が同じものを別物と受け取る。
+///
+/// `Ended` が「消息不明」なのは画面と同じ理由（帯の設計§6）。**こちらが頼んだ終了は
+/// カードごと一覧から外れる**ので、`ended` として残っているのは頼んでいない終わり方を
+/// したものだけになる。`ok` の別は捨てていない——`session show` は終了コードを別に出す。
+///
+/// **`client/wait.rs` の「正常終了 ／ 異常終了」はこれとは別物**なので揃えない。
+/// あちらは状態の**名前**ではなく、待っている本人への**出来事の報告**（`session kill` の
+/// 結果や、待っている間に終わったという断り）で、頼んだ本人にとっては消息不明ではない。
 pub fn status_label(status: &SessionStatus) -> &'static str {
     match status {
         SessionStatus::Starting => "起動中",
@@ -97,8 +105,7 @@ pub fn status_label(status: &SessionStatus) -> &'static str {
         SessionStatus::WaitingPermission => "権限確認待ち",
         SessionStatus::WaitingInput => "入力待ち",
         SessionStatus::Stalled => "停滞",
-        SessionStatus::Ended { ok: true } => "終了",
-        SessionStatus::Ended { ok: false } => "異常終了",
+        SessionStatus::Ended { .. } => "消息不明",
         SessionStatus::Unknown => "不明",
     }
 }
@@ -421,6 +428,40 @@ fn first_line(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- 状態のラベル（帯の設計§6・テスト計画フェーズ2） ---
+
+    #[test]
+    fn 終わったセッションは消息不明と出る() {
+        // 画面（`web/src/lib/protocol.ts` の `statusLabel`）と同じ語を使う。
+        // **ここがずれると「消息不明のカードはどれか」を CLI から引けなくなる**
+        assert_eq!(status_label(&SessionStatus::Ended { ok: true }), "消息不明");
+        assert_eq!(
+            status_label(&SessionStatus::Ended { ok: false }),
+            "消息不明"
+        );
+    }
+
+    #[test]
+    fn 不明は消息不明に巻き込まれていない() {
+        // 2つは別物。`Unknown` は「状態を判断できない（生きているかもしれない）」で、
+        // `Ended` は「もう終わっている」
+        assert_eq!(status_label(&SessionStatus::Unknown), "不明");
+        assert_ne!(status_label(&SessionStatus::Unknown), "消息不明");
+    }
+
+    #[test]
+    fn 終わっていない状態の言い方は変えていない() {
+        // 畳んだのは `Ended` の2つだけ。**他まで動いていないこと**を見る
+        assert_eq!(status_label(&SessionStatus::Starting), "起動中");
+        assert_eq!(status_label(&SessionStatus::Working), "作業中");
+        assert_eq!(
+            status_label(&SessionStatus::WaitingPermission),
+            "権限確認待ち"
+        );
+        assert_eq!(status_label(&SessionStatus::WaitingInput), "入力待ち");
+        assert_eq!(status_label(&SessionStatus::Stalled), "停滞");
+    }
 
     // --- 出力の整形（テスト計画F2「出力の整形」） ---
 
