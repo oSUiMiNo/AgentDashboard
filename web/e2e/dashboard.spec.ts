@@ -228,3 +228,78 @@ test('狭い窓でも、リンクにしたパスが自分で行を増やさな�
   // `…/accept/proj2` が同じ見た目になる（このイシューが直した症状そのもの）
   await expect(deepLink).toContainText('作業場所')
 })
+
+test('帯の高さは、最終活動の表記が変わっても変わらない', async ({ page }) => {
+  /*
+    **このイシューの3件目そのもの。** 最終活動は「放っておくだけで文字数が変わる」
+    唯一の要素で、1秒ごとに数え直される。以前は帯を折り返しに任せていたので、
+    `たった今`（4字）と `5秒前`（3字）の差で **1行 ⇄ 2行** を行き来し、そのたびに
+    **下の作業用ビューごと上下に動いていた**（利用者の言葉で「使いにくい」）。
+
+    **jsdom では測れない。** レイアウトを持たないので高さが常に固定値で返る。
+    単体（`SessionView.test.tsx`）で見ているのは「行の数と所属が変わらないこと」＝
+    構造までで、**高さが動かないことは実物のブラウザでしか確かめられない**。
+
+    **材料に長いパスを使う。** 短いパスでは元から1行に収まっていて、
+    **直す前のコードでも通ってしまう**（`狭い窓でも、リンクにしたパスが自分で行を
+    増やさない` と同じ理由）。
+  */
+  const deep = path.join(
+    WORK_DIR,
+    'agentdashboard-e2e-帯の高さ',
+    'とても長い名前のディレクトリ',
+    '入れ子の奥のほう',
+    '作業場所',
+  )
+  fs.mkdirSync(deep, { recursive: true })
+
+  await page.setViewportSize({ width: 390, height: 780 })
+  await openDashboard(page)
+  const tile = await spawnSession(page, deep)
+  await tile.click()
+
+  const view = page.getByTestId('session-view')
+  const 帯 = view.locator('header')
+  const 最終活動 = view.getByTestId('elapsed')
+
+  // 起こした直後は「たった今」。ここで測る
+  await expect(最終活動).toContainText('たった今')
+  const 前 = await 帯.boundingBox()
+  expect(前).not.toBeNull()
+
+  // **固定の待ち時間ではなく、表記が変わることを条件に待つ**（5秒で `〜秒前` へ変わる）
+  await expect(最終活動).toContainText('秒前', { timeout: 20_000 })
+  const 後 = await 帯.boundingBox()
+  expect(後).not.toBeNull()
+
+  // **高さが1ピクセルも動かないこと。** 動くと下の本文がそのぶん上下する
+  expect(後!.height).toBeCloseTo(前!.height, 0)
+
+  // ページが横へはみ出していないこと（折り返しをやめた代償はここに出る）
+  const はみ出す = await page.evaluate(() => {
+    const de = document.documentElement
+    return de.scrollWidth > de.clientWidth
+  })
+  expect(はみ出す).toBe(false)
+
+  /*
+    **高さの一定性だけでは、折り返しへ戻す壊し方を捕まえられない**（実測）。
+    折り返す作りでも、その幅でたまたま両方の表記が同じ行数に収まれば高さは動かない。
+    元の不具合は「**ある幅でだけ** 1行⇄2行 を行き来する」形なので、幅を1つ選んで
+    測るやり方では当たり外れが出る。
+
+    そこで**行が箱として積まれていること**を見る。折り返しへ戻すと行の器は
+    透明になり（あるいは中身が複数行へ散り）、この主張が落ちる。
+  */
+  const 行たち = await view.locator('header [data-row]').all()
+  expect(行たち).toHaveLength(3)
+  let 前の下端 = -1
+  for (const 行 of 行たち) {
+    const box = await 行.boundingBox()
+    expect(box, '行が箱を持っていること（折り返しへ戻すと消える）').not.toBeNull()
+    expect(box!.height).toBeGreaterThan(0)
+    // **上から順に積まれている**（同じ帯の中で横に並んでいない）
+    expect(box!.y).toBeGreaterThanOrEqual(前の下端)
+    前の下端 = box!.y + box!.height
+  }
+})

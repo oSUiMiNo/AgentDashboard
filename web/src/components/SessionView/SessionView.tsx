@@ -309,7 +309,10 @@ export function SessionView({ cardId, compact = false }: Props) {
             **この行で唯一、放っておくだけで文字数が変わる要素。** 1秒ごとに数え直すので、
             行の中で折り返す作りだと**画面を見ているだけで行数が入れ替わる**（設計§2）
           */}
-          <span className="text-muted-foreground shrink-0 text-xs">
+          <span
+            data-testid="elapsed"
+            className="text-muted-foreground shrink-0 text-xs"
+          >
             最終活動 {formatElapsed(now - session.last_activity_at)}
           </span>
           {isHookSilent(session) && (

@@ -500,3 +500,41 @@ test('接続断のカードは、呼吸の山でも沈んだままになる', as
   // **呼吸そのものは残っている**（設計§24-3。止めると終了と同じ静けさになる）
   expect(接続断.山).toBeGreaterThan(接続断.底 * 1.5)
 })
+
+test('接続断のカードでも、3行目が狭い画面からはみ出さない', async ({ page }) => {
+  /*
+    帯の設計§11-7 の実物確認。**3行目がいちばん混むのはこの状態**——終わってはいない
+    のでモデルとモードのピッカーが出たまま、そこへ `復旧` が並ぶ。
+
+    ローカルの土台では線を切れないので、**この構成でしか作れない場面**である。
+    設計は測った部品の幅（128＋128＋48＋間隔16 ＝ 320px ≤ 351px）から「収まる見込み」
+    と書いていたが、**算術は算術**なので、ここで実物に当てる。
+  */
+  await page.setViewportSize({ width: 375, height: 780 })
+  await openDashboard(page)
+  const cardId = await spawnOn(page, 2)
+  await orphanAgent(page, 2)
+  await expect(tileOf(page, cardId).getByTestId('disconnected-badge')).toBeVisible({
+    timeout: 60_000,
+  })
+
+  await page.goto(`/s/${cardId}`)
+  const view = page.getByTestId('session-view')
+  // **ピッカーと復旧が同時に出ている**ことを先に確かめる。出ていなければ
+  // 「混んでいない行」を測っているだけになる
+  await expect(view.getByTestId('model-picker')).toBeVisible()
+  await expect(view.getByTestId('permission-mode-picker')).toBeVisible()
+  await expect(view.getByTestId('revive-button')).toBeVisible()
+
+  const 溢れ = await view.locator('[data-row="3"]').evaluate((el) => ({
+    行: el.scrollWidth - el.clientWidth,
+    ページ:
+      document.documentElement.scrollWidth -
+      document.documentElement.clientWidth,
+  }))
+  expect(溢れ.行, '3行目が入れ物からはみ出さないこと').toBeLessThanOrEqual(0)
+  expect(溢れ.ページ, 'ページが横へはみ出さないこと').toBeLessThanOrEqual(0)
+
+  // 帯は4行のまま（`復旧` が出ても増えない）
+  await expect(view.locator('header [data-row]')).toHaveCount(3)
+})
