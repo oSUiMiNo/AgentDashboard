@@ -430,22 +430,55 @@ export async function addProject(
   }
   await sheet.getByTestId('project-add-path').fill(cwd)
   await sheet.getByTestId('project-add-submit').click()
-  await expect(sheet).toHaveCount(0)
+
+  /*
+    **同時に同じ枠を作りに行くことがある。**
+
+    上の早期返却は「枠が既にあるか」を見てから作りに行くが、**並列で走るワーカーが
+    同時に「無い」を見ると、全員が作りに行く**。サーバは (PC, パス) の組で1つだけ通すので、
+    **負けた側はシートが開いたまま残る**——ここで `toHaveCount(0)` を待つと落ちる。
+
+    **普段これを踏まないのは、前回の実行が作った枠が記録に残っているからである。**
+    記録を消した状態（＝毎回まっさらな CI）では必ず踏む。実測（2026-08-31）で131本落ちた。
+    しかも落ちるのは「入力欄から送った指示が PTY まで届く」のような、**枠づくりと関係の
+    無い名前のテスト**なので、原因から遠く見える。
+
+    **欲しいのは「枠が在ること」**であって「自分が作ったこと」ではない。負けたらシートを
+    畳んで先へ進む。**枠が本当に出来たかは、この下でサーバに聞いて確かめる**ので、
+    入力が間違っていた場合はそちらで落ちる（負けと取り違えない）。
+  */
+  const 閉じた = await sheet
+    .waitFor({ state: 'detached', timeout: 10_000 })
+    .then(() => true)
+    .catch(() => false)
+  if (!閉じた) {
+    await sheet.getByTestId('project-add-close').click()
+    await expect(sheet).toHaveCount(0)
+  }
 
   // **入力した形で探さない。** Windows 側から貼ったパスは PC 側で読み替えられるので、
-  // 枠は解決後の絶対パスで作られる（設計§13）。真実はサーバ側にあるので、そちらに聞く
-  const added = await page.evaluate(async (target) => {
-    const response = await fetch('/api/projects')
-    const rows = (await response.json()) as {
-      host: string
-      path: string
-      created_at: number
-    }[]
-    const mine = rows.filter((row) => row.host === target)
-    return (
-      mine.sort((a, b) => b.created_at - a.created_at)[0]?.path ?? ''
-    )
-  }, host)
+  // 枠は解決後の絶対パスで作られる（設計§13）。真実はサーバ側にあるので、そちらに聞く。
+  //
+  // **ただし、そのまま通る形（絶対パス）で頼んだときは、それを優先して選ぶ。**
+  // 「その PC の新しい順で1件」だけだと、**並列で別の枠が作られたときに隣を掴む**
+  const added = await page.evaluate(
+    async ({ target, want }) => {
+      const response = await fetch('/api/projects')
+      const rows = (await response.json()) as {
+        host: string
+        path: string
+        created_at: number
+      }[]
+      const mine = rows.filter((row) => row.host === target)
+      const 完全一致 = mine.find((row) => row.path === want)
+      return (
+        完全一致?.path ??
+        mine.sort((a, b) => b.created_at - a.created_at)[0]?.path ??
+        ''
+      )
+    },
+    { target: host, want: cwd },
+  )
   const resolved = page.locator(
     `[data-testid="project-group"][data-host="${host}"][data-project="${added}"]`,
   )
