@@ -71,8 +71,12 @@ export function ModelPicker({ cardId }: Props) {
   const needsOwnRow = switching || alias === null
 
   return (
-    <label className="flex min-w-0 shrink-0 items-center gap-1.5 text-xs">
-      <span className="text-muted-foreground">モデル</span>
+    <label className="flex min-w-0 shrink-0 items-center text-xs">
+      {/*
+        **ラベルの文字は出さない**（帯の設計§4）。3行目は 8rem×2 に収める必要があり、
+        値そのもの（`Opus 5`）が名前として読めるので判別はできる。読み上げ用に
+        `aria-label` を残す
+      */}
       <select
         data-testid="model-picker"
         data-model={model ?? ''}
@@ -83,7 +87,10 @@ export function ModelPicker({ cardId }: Props) {
         // 切替が終わるまで受け付けない。サーバも同じ理由で断るので（連打がロック待ちの
         // 行列になり、他のカードの切替まで後ろへずれる）、ここはその写しにあたる
         disabled={switching}
-        className={`max-w-48 truncate rounded border px-1.5 py-0.5 text-xs ${
+        // **幅は 8rem に固定する**（帯の設計§4）。標準の `<select>` は
+        // いちばん長い選択肢で幅が決まるので、短いものを選んでいても縮まなかった。
+        // モードと同じ値にしてあるのは「揃える」が要件だから
+        className={`w-32 truncate rounded border px-1.5 py-0.5 text-xs ${
           switching
             ? 'border-amber-500/40 text-amber-300'
             : 'border-border text-muted-foreground'

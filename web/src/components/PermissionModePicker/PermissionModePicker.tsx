@@ -77,15 +77,18 @@ export function PermissionModePicker({ cardId }: Props) {
   )
 
   return (
-    <label className="flex shrink-0 items-center gap-1.5 text-xs">
-      <span className="text-muted-foreground">モード</span>
+    <label className="flex shrink-0 items-center text-xs">
+      {/* ラベルの文字は出さない（帯の設計§4）。モデル側と同じ扱い */}
       <select
         data-testid="permission-mode-picker"
         data-mode={current ?? ''}
         aria-label="権限モード"
         value={current ?? ''}
         onChange={(event) => setPermissionMode(cardId, event.target.value)}
-        className={`rounded border px-1.5 py-0.5 text-xs ${permissionModeTone(current)}`}
+        // **モデルと同じ 8rem**（帯の設計§4）。ここには上限が無かったので、
+        // `自動（環境によっては切り替えられません）` という1つの選択肢が
+        // 短いモードを選んでいるときも幅を決めていた
+        className={`w-32 truncate rounded border px-1.5 py-0.5 text-xs ${permissionModeTone(current)}`}
       >
         {/* まだ分からない状態を、空欄ではなく「不明」として出す */}
         {current === null && <option value="">不明</option>}
