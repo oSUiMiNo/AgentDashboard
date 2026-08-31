@@ -303,3 +303,62 @@ test('帯の高さは、最終活動の表記が変わっても変わらない',
     前の下端 = box!.y + box!.height
   }
 })
+
+test('✕ を押すと、開く前の画面へ戻る', async ({ page }) => {
+  // **「戻る」と「一覧へ落ちる」を区別できる道筋で確かめる。** 一覧から開いて
+  // ✕ を押すと、どちらの実装でも `/` へ行くので**見分けが付かない**（設計§7）
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  await tile.click()
+  await expect(page).toHaveURL(/\/s\/[0-9a-f-]{36}$/)
+
+  // セッション専用画面 → PJT 専用画面 → セッション専用画面、と2つ潜る
+  await page.getByTestId('to-project').click()
+  await expect(page).toHaveURL(/\/p\//)
+  await page.getByTestId('to-session').first().click()
+  await expect(page).toHaveURL(/\/s\/[0-9a-f-]{36}$/)
+
+  // ✕ で1つ戻る＝ PJT 専用画面。**一覧へ落ちたらこの主張が落ちる**
+  await page.getByTestId('close-session').click()
+  await expect(page).toHaveURL(/\/p\//)
+})
+
+test('いきなり開いた画面で ✕ を押しても、アプリの外へ出ずに一覧へ行く', async ({
+  page,
+}) => {
+  /*
+    **ここが本番の壊れ方**（設計§7）。履歴の件数で判定すると、このアプリへ来る前の
+    履歴が数に入って「戻れる」と誤って答え、素直に1つ戻ると**アプリの外へ出る**——
+    閉じるつもりでアプリから出る、という一番困る形になる。
+
+    リロードするとルータは作り直されるので、鍵は `default` に戻る。**単体では
+    作りにくい**（jsdom の履歴はこのアプリの中だけで完結する）ので、ここで見る。
+  */
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  await tile.click()
+  await expect(page).toHaveURL(/\/s\/[0-9a-f-]{36}$/)
+
+  const cardId = new URL(page.url()).pathname.split('/').pop()!
+
+  /*
+    **リロードでは見分けが付かない。** リロードしても履歴の並びは残っているので、
+    素直に1つ戻っても結局 `/`（一覧）に着く——正しい実装でも壊れた実装でも同じ
+    結果になり、**テストが何も守らない**。
+
+    **危ないのは「このアプリへ来る前の履歴がある」場合**（設計§7）。新しいタブで
+    いきなり `/s/:id` を開くと、1つ戻る先は**アプリの外**（空のページ）になる。
+  */
+  const 新しいタブ = await page.context().newPage()
+  await 新しいタブ.goto(`/s/${cardId}`)
+  await expect(新しいタブ.getByTestId('session-view')).toBeVisible()
+
+  await 新しいタブ.getByTestId('close-session').click()
+
+  // **一覧に着いていること。** `toHaveURL('/')` は土台の原点に対して解決されるので、
+  // アプリの外（空のページ）へ出ていたらここで落ちる
+  await expect(新しいタブ).toHaveURL('/')
+  // 着いた先が本当に一覧であること（URL だけでは、描けていない場合を見逃す）
+  await expect(新しいタブ.getByTestId('project-add-open')).toBeVisible()
+  await 新しいタブ.close()
+})
