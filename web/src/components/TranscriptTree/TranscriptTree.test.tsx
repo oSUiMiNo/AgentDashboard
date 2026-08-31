@@ -642,6 +642,24 @@ describe('畳んだ本文のフェード', () => {
     () => 'ぎりぎり',
   ).join('\n')
 
+  /**
+   * 帯を敷く**器**を引く（フェーズ11・設計§6-7-2）。
+   *
+   * 帯は本文の箱（`row-body`）ではなく**器そのもの**に敷く。本文の箱に敷くと、
+   * 吹き出しの内側余白のぶんだけ左右と下が届かず「中に貼った紙」に見える。
+   */
+  function shellOf(kind: 'assistant_text' | 'user_message'): HTMLElement {
+    const row = rowByKind(kind)
+    const shell =
+      kind === 'user_message'
+        ? within(row).getByTestId('user-bubble')
+        : row.querySelector<HTMLElement>('.body-shell')
+    if (!shell) {
+      throw new Error(`帯の器が見つからない（${kind}）`)
+    }
+    return shell
+  }
+
   it('畳んだ本文にだけフェードが付く', async () => {
     appendNodes(CARD, [node('a1', null, { kind: 'assistant_text', text: LONG })])
     renderTree()
@@ -649,7 +667,37 @@ describe('畳んだ本文のフェード', () => {
 
     const body = within(rowByKind('assistant_text')).getByTestId('row-body')
     expect(body.dataset.fade).toBe('shallow')
-    expect(body.className).toContain('body-fade')
+    expect(shellOf('assistant_text').className).toContain('body-fade')
+  })
+
+  it('帯は器に敷き、本文の箱には敷かない', async () => {
+    // **これが落ちるのは、帯を `row-body` へ戻したとき**（壊し方①）。器へ敷いていないと
+    // 吹き出しの内側余白のぶんだけ左右と下が届かず、要望①が満たせない
+    appendNodes(CARD, [
+      node('u1', null, { kind: 'user_message', text: LONG }),
+      node('a1', null, { kind: 'assistant_text', text: LONG }),
+    ])
+    renderTree()
+    await waitForRows(2)
+
+    for (const kind of ['user_message', 'assistant_text'] as const) {
+      expect(shellOf(kind).className).toContain('body-fade')
+      expect(within(rowByKind(kind)).getByTestId('row-body').className).not.toContain('body-fade')
+    }
+  })
+
+  it('「続きを読む」は帯の上へ重なり、開くと流れへ戻る', async () => {
+    // 要望②（マスクの中に書いてある感じ）。**重ねるのは畳んでいるあいだだけ**——
+    // 開いているときは重ねる相手（帯）が無い
+    appendNodes(CARD, [node('a1', null, { kind: 'assistant_text', text: LONG })])
+    renderTree()
+    await waitForRows(1)
+
+    const toggle = screen.getByTestId('body-toggle')
+    expect(toggle.className).toContain('body-toggle-float')
+
+    await userEvent.click(toggle)
+    expect(screen.getByTestId('body-toggle').className).not.toContain('body-toggle-float')
   })
 
   it('開くとフェードが消え、畳み直すと戻る', async () => {
@@ -661,7 +709,7 @@ describe('畳んだ本文のフェード', () => {
     await userEvent.click(screen.getByTestId('body-toggle'))
     const opened = within(rowByKind('assistant_text')).getByTestId('row-body')
     expect(opened.dataset.fade).toBeUndefined()
-    expect(opened.className).not.toContain('body-fade')
+    expect(shellOf('assistant_text').className).not.toContain('body-fade')
 
     await userEvent.click(screen.getByTestId('body-toggle'))
     expect(within(rowByKind('assistant_text')).getByTestId('row-body').dataset.fade).toBe('shallow')
@@ -677,7 +725,7 @@ describe('畳んだ本文のフェード', () => {
     expect(screen.queryByTestId('body-toggle')).toBeNull()
     const body = within(rowByKind('assistant_text')).getByTestId('row-body')
     expect(body.dataset.fade).toBeUndefined()
-    expect(body.className).not.toContain('body-fade')
+    expect(shellOf('assistant_text').className).not.toContain('body-fade')
   })
 
   it('畳んだ思考の覗かせた1行には出ない', async () => {
@@ -700,7 +748,7 @@ describe('畳んだ本文のフェード', () => {
 
     const body = within(rowByKind('assistant_text')).getByTestId('row-body')
     expect(body.dataset.fade).toBe('deep')
-    expect(body.className).toContain('body-fade-deep')
+    expect(shellOf('assistant_text').className).toContain('body-fade-deep')
   })
 })
 

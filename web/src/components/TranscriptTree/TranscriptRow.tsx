@@ -297,7 +297,6 @@ function NodeRowView({
   const mark = toolMark(row.node)
   const alwaysBody = showsBodyAlways(row.node)
   const withHeading = showsHeading(row.node)
-  const isUser = row.node.kind === 'user_message'
   // 思考は畳んでいても先頭1行を覗かせる（設計§8）。開くまで中身の見当がつかない行を残さない
   const peeking = row.node.kind === 'thinking'
 
@@ -341,28 +340,12 @@ function NodeRowView({
 
       {/* 本文を持つ種別は開け閉めに関わらず常に出す。ここを `row.expanded` で囲うと、
           子を畳んだ瞬間に本文まで消えて操作が1つに戻ってしまう */}
-      {(alwaysBody || peeking || row.expanded) &&
-        (isUser ? (
-          // 利用者の発言だけを右寄せの吹き出しにする（設計§5-3）。幅いっぱいにすると
-          // 右寄せであることが読み取れなくなるので、本文の70%を上限にする
-          // **しっぽの分だけ右を空ける**（設計§5-4）。しっぽは吹き出しの右外へ出るので、
-          // 空けないと窓の端で切れる
-          <div className="flex justify-end pr-2">
-            <div
-              data-testid="user-bubble"
-              // **フェードの地を渡す必要は無い**（設計§6-2）。ティントは半透明なので、
-              // 透けるのは実際にこの吹き出しの地である。
-              //
-              // 角丸としっぽは `.speech-bubble` が持つ（設計§5-4）。**地の色もあちらが
-              // 1箇所で持つ**ので、ここで `bg-*` を重ねないこと——2箇所になった時点でずれる
-              className="speech-bubble mt-1 max-w-[70%] px-3 py-2"
-            >
-              <RowBody node={row.node} cardId={cardId} row={row} onToggleBody={onToggleBody} />
-            </div>
-          </div>
-        ) : (
-          <RowBody node={row.node} cardId={cardId} row={row} onToggleBody={onToggleBody} />
-        ))}
+      {/* **器の作り分けは `MarkdownBody` が持つ**（フェーズ11・設計§6-7-2）。帯を器そのものへ
+          敷くようになったので、器を知っているのは帯を出す側でなければならない——ここで
+          吹き出しを巻くと、**帯を出す判断と器が別の部品に分かれて必ずずれる** */}
+      {(alwaysBody || peeking || row.expanded) && (
+        <RowBody node={row.node} cardId={cardId} row={row} onToggleBody={onToggleBody} />
+      )}
     </div>
   )
 }
@@ -384,11 +367,16 @@ function RowBody({
     case 'user_message':
     case 'assistant_text':
       // 発言は**主**。太めのウェイトと明るい前景色で、活動の行と読み分ける（設計§5-3）
+      //
+      // **器は種別で分ける**（フェーズ11・設計§6-7-2）。利用者は吹き出し、アシスタントは
+      // 平たい器。**アシスタントにも器を用意する**のは、帯を器そのものへ敷くようになった
+      // ためで、無いと帯がページの地へ直に透ける（要望③の実体）。**片方だけ直さないこと**
       return (
         <MarkdownBody
           text={node.text}
           row={row}
           inset={false}
+          shell={node.kind === 'user_message' ? 'bubble' : 'panel'}
           tone="text-foreground font-medium"
           onToggleBody={onToggleBody}
         />
@@ -401,6 +389,7 @@ function RowBody({
           text={row.expanded ? node.text : firstLine(node.text)}
           row={null}
           inset
+          shell="none"
           tone="text-muted-foreground"
           onToggleBody={onToggleBody}
         />
@@ -435,6 +424,7 @@ function MarkdownBody({
   text,
   row,
   inset,
+  shell,
   tone,
   onToggleBody,
 }: {
@@ -443,6 +433,13 @@ function MarkdownBody({
   row: NodeRow | null
   /** 見出しの行がある種別だけ、見出しのぶん字下げする */
   inset: boolean
+  /**
+   * 帯を敷く器（フェーズ11・設計§6-7-2）。
+   *
+   * **帯は器そのものに敷く。** 本文の箱に敷くと、吹き出しの内側余白のぶんだけ
+   * 左右と下が届かず、「中に貼った紙」に見える（要望①の実体）。
+   */
+  shell: 'bubble' | 'panel' | 'none'
   /** 主従を付けるウェイトと明度（設計§5-3） */
   tone: string
   onToggleBody: () => void
@@ -458,23 +455,27 @@ function MarkdownBody({
   // 返すので、**猶予に入って畳まなかった本文にも出ない**——ここで条件を書き足さないこと
   const fade = foldedRow ? fadeDepth(text, foldedRow.node.kind) : null
 
-  return (
-    <div className={inset ? 'mt-1 ml-6' : 'mt-1'}>
+  // **帯の高さの段は器が持つ**（設計§6-7-2）。`--fade-band` は `.body-fade` が定義して
+  // 子へ継承させるので、器へ載せれば内側の `.body-fade-text` にもそのまま届く
+  const fadeClass = fade ? ` body-fade body-fade-${fade}` : ''
+
+  const inner = (
+    <>
       {/* 本文は**主役**なので、地の色で出す（`FileView` と同じ扱い）。
           要約を横に出していた頃の名残で薄い色にしていると、見出しも強調も
           本文と同じ灰色になって、整形した意味がほとんど消える（実物で確認） */}
       {/* **層を2つに分ける**（設計§6-6）。`mask-image` は**その要素の擬似要素にも効く**ので、
-          マスクを掛けた要素へ色のティントを `::after` で足すと、**帯がいちばん濃くあるべき
-          末尾で、ティントごと消される**。外は色（マスクを掛けない）、中は文字を消すマスク。
+          マスクを掛けた要素へ色のティントを足すと、**帯がいちばん濃くあるべき末尾で、
+          ティントごと消される**。外（器）が色、中（本文）が文字を消すマスク。
 
           **`prose-dashboard` は内側のまま**にする。`> :first-child` などが**直下の子**を
           見ているので、間に箱を挟むと余白が変わる */}
       <div
         data-testid="row-body"
         data-fade={fade ?? undefined}
-        // **ウェイトと色は外側に残す**（継承するので内側でも効く）。行の主従を読む側は
+        // **ウェイトと色はここに残す**（継承するので内側でも効く）。行の主従を読む側は
         // `row-body` を見るので、ここから動かすと「発言が強い」の検査が空振りする
-        className={`${tone}${fade ? ` body-fade body-fade-${fade}` : ''}`}
+        className={tone}
       >
         <div className={`prose-dashboard text-xs leading-relaxed${fade ? ' body-fade-text' : ''}`}>
           <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS}>
@@ -487,13 +488,48 @@ function MarkdownBody({
           type="button"
           data-testid="body-toggle"
           onClick={onToggleBody}
-          className="text-muted-foreground hover:text-foreground mt-1 text-xs underline"
+          // **畳んでいるあいだだけ帯の上へ重ねる**（設計§6-7-3・要望②）。開いているときは
+          // 重ねる相手が無いので流れの中に置く。**帯の `pointer-events: none` は動かさない**
+          // ——重ね順だけ上げる（当たり判定を殺すと畳んだ本文が開けなくなる）
+          className={`text-muted-foreground hover:text-foreground body-toggle text-xs${
+            fade ? ' body-toggle-float' : ' mt-1'
+          }`}
         >
           {row.bodyOpen ? '畳む' : '続きを読む'}
         </button>
       )}
-    </div>
+    </>
   )
+
+  if (shell === 'bubble') {
+    // 利用者の発言だけを右寄せの吹き出しにする（設計§5-3）。幅いっぱいにすると
+    // 右寄せであることが読み取れなくなるので、本文の70%を上限にする
+    // **しっぽの分だけ右を空ける**（設計§5-4）。しっぽは吹き出しの右外へ出るので、
+    // 空けないと窓の端で切れる
+    return (
+      <div className="flex justify-end pr-2">
+        <div
+          data-testid="user-bubble"
+          // **フェードの地を渡す必要は無い**（設計§6-2）。ティントは半透明なので、
+          // 透けるのは実際にこの吹き出しの地である。
+          //
+          // 角丸としっぽは `.speech-bubble` が持つ（設計§5-4）。**地の色もあちらが
+          // 1箇所で持つ**ので、ここで `bg-*` を重ねないこと——2箇所になった時点でずれる
+          className={`speech-bubble mt-1 max-w-[70%] px-3 py-2${fadeClass}`}
+        >
+          {inner}
+        </div>
+      </div>
+    )
+  }
+
+  if (shell === 'panel') {
+    // アシスタントの器。**吹き出しより弱い地**にして、誰の発言かをシルエットで
+    // 読み分ける仕掛け（設計§5-3）を壊さない
+    return <div className={`body-shell mt-1${fadeClass}`}>{inner}</div>
+  }
+
+  return <div className={inset ? 'mt-1 ml-6' : 'mt-1'}>{inner}</div>
 }
 
 /**

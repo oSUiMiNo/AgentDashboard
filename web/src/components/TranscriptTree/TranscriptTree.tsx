@@ -197,7 +197,10 @@ export function TranscriptTree({ cardId }: { cardId: CardId }) {
       <div
         ref={scrollRef}
         data-testid="transcript-tree"
-        className="min-h-0 flex-1 overflow-auto rounded-md border border-border/60 bg-background"
+        // `transcript-panel` は縁の紙の厚み（`DESIGN.md` §12.3「パネルの縁＝弱」）。
+        // **物質を持たせるのは画面に数個しか無い面だけ**で、§12.3 は「一覧の行には
+        // 持たせない」と名指ししている——この器は画面に1つしか無いので条件に合う
+        className="transcript-panel min-h-0 flex-1 overflow-auto rounded-md border border-border/60 bg-background"
       >
         {rows.length === 0 ? (
           <p className="text-muted-foreground p-3 text-sm">

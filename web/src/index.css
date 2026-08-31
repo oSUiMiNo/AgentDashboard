@@ -249,7 +249,7 @@
   自前の地を持つ要素の上で**矩形が浮く**——フェーズ7 で直した失敗に戻る。半透明の膜は
   **どんな地の上でも、その地を色づけるだけ**なので、地を配る仕組みは要らない。
 */
-.body-fade::after {
+.body-fade::before {
   content: '';
   position: absolute;
   inset-inline: 0;
@@ -258,6 +258,13 @@
   /* **見た目のためだけに重ねるものは、押す判定を素通しさせる** */
   pointer-events: none;
   background: linear-gradient(to bottom, transparent, var(--fade-tint));
+  /*
+    **角丸は器から受け取る**（フェーズ11・設計§6-7-2）。帯は器そのものに敷くので、
+    器の下端の丸みに沿って切らないと、角から帯がはみ出す。`overflow: hidden` は
+    **しっぽを切る**ので使わない。
+  */
+  border-end-start-radius: var(--bubble-radius, var(--shell-radius, 0));
+  border-end-end-radius: var(--bubble-radius, var(--shell-radius, 0));
 }
 /*
   文字を消すのはこちら。**ティントの濃さに関係なく末尾が読めなくなること**を保証する。
@@ -316,4 +323,133 @@
   background: var(--bubble-ground);
   -webkit-mask-image: radial-gradient(circle at 100% 100%, transparent var(--bubble-tail), #000 var(--bubble-tail));
   mask-image: radial-gradient(circle at 100% 100%, transparent var(--bubble-tail), #000 var(--bubble-tail));
+}
+
+/*
+  ここから下は **フェーズ11**（イシューグループ_2026-0820-2129 設計§6-7・§6'）。
+
+  **帯を「中に貼った紙」から「器そのもの」へ移す。** 帯は `row-body`（本文の箱）に敷いて
+  あったが、吹き出しは `px-3 py-2` の内側余白を持つので、**帯の左右と下が吹き出しの端より
+  内側で止まっていた**。器の側へ移すと、器そのものが薄れていくように見える。
+
+  **`overflow: hidden` で切らないこと。** しっぽが器の右外 8px へ出ているので、切ると
+  しっぽごと消える。**帯の側へ角丸を当てる**（`border-end-*-radius`）。
+
+  **帯は `::before`、しっぽは `::after`。** 器が1つの擬似要素しか持てないので、
+  同じ `::after` へ両方を置くと**あとから書いたほうが勝って、しっぽが消える**。
+
+  **文字を消すマスク（`.body-fade-text`）は本文のままにする。** 器へ移すと、余白まで
+  文字扱いで消えて上端が欠ける。**外の器が色、中の本文が文字**という §6-6 の2層はそのまま。
+*/
+.body-shell {
+  /*
+    アシスタントの本文の器。**いままで箱が1つも無く**、帯がページの地へ直に透けていた
+    （要望③「エージェントのマスクも微妙」の実体）。
+
+    **地は持たせるが、吹き出しより弱くする。** 同じ濃さにすると、誰の発言かを
+    シルエットで読み分ける仕掛け（設計§5-3）が消える。
+  */
+  --shell-ground: color-mix(in oklch, var(--color-muted) 28%, transparent);
+  --shell-radius: 0.75rem;
+  position: relative;
+  padding: 0.25rem 0.5rem;
+  background: var(--shell-ground);
+  border-radius: var(--shell-radius);
+}
+
+/*
+  **「続きを読む」を帯の前面へ**（設計§6-7-3・要望②）。
+
+  畳んでいるあいだだけ帯の上へ重ねる。**流れから外すので、そのぶん行が低くなる**——
+  これは設計§6-7-3 が予期している方向（仕掛けの高さが減る）で、猶予5行の根拠が
+  緩む側へ動く。開いているときは重ねる相手（帯）が無いので、流れの中に置いたままにする。
+
+  **帯の `pointer-events: none` は動かさない。** 重ね順だけ上げる。ここは1度ひっくり返った
+  場所で、当たり判定を殺すと畳んだ本文が開けなくなる（設計§6-1 の訂正）。
+
+  **右端へ寄せる**のは `DESIGN.md` §10.2 の崩し（一辺だけ伸ばす／ラベルを少し重ねる）。
+  しっぽとは**別の部品**なので、§8 が要求する「崩し2つ・別々の部品に」を満たす。
+*/
+.body-toggle-float {
+  position: absolute;
+  right: 0.5rem;
+  bottom: 0.25rem;
+  z-index: 1;
+}
+
+/*
+  「続きを読む」の質感——**マット塗装・プレート**（`DESIGN.md` §12.3 の「主要操作ボタン」）。
+
+  帯の上へ載せた以上、**地を持たせないと読めない**。質感は飾りではなく必要から出ている。
+  §12.3 は「物質は**画面に数個しか無い面**に置く」と言い、「**一覧の行には持たせない**」と
+  名指ししている——このボタンは畳まれた行にしか出ないので、行そのものに質感を付けるのとは違う。
+*/
+.body-toggle {
+  border-radius: 0.375rem;
+  padding: 0.0625rem 0.5rem;
+  background: color-mix(in oklch, var(--color-muted) 92%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 10%),
+    0 1px 2px rgb(0 0 0 / 35%);
+  /* §28.2 の Micro（80〜140ms） */
+  transition:
+    color 120ms ease,
+    background-color 120ms ease,
+    transform 120ms ease;
+}
+.body-toggle:active {
+  /* §27.4 Pressed。`scale(0.97〜0.99)` */
+  transform: scale(0.98);
+}
+
+/*
+  **Selected**（`DESIGN.md` §27.3）。構造化ビューには「選択行」が無いので、
+  **開いている行**をそれとして扱う。§27.3 は「単なる 1px Border だけで済ませない」と言い、
+  候補に「左側の Accent」を挙げている。
+
+  **`data-*` は既に DOM にある**（検査用に付けてあった）。CSS が読んでいなかっただけなので、
+  読むだけで足りる——新しい属性も新しい要素も増やさない。
+
+  色は `--accent-edge`（Primary Accent）。**行の高さを変えない**よう、字下げの余白へ
+  重ねる形で置く。
+*/
+[data-testid='transcript-row'][data-expanded='true'],
+[data-testid='transcript-row'][data-body-open='true'] {
+  box-shadow: inset 2px 0 0 var(--accent-edge);
+}
+
+/* §27.4 Pressed。行のトグルにも押した手応えを付ける（§8 の床「目に見える反応3つ」） */
+[data-testid='transcript-row'] button {
+  transition:
+    background-color 120ms ease,
+    color 120ms ease,
+    transform 120ms ease;
+}
+[data-testid='transcript-row'] button:active:not(:disabled) {
+  transform: scale(0.99);
+}
+
+/*
+  **まとめ行は Dense、発言は Loose**（`DESIGN.md` §8「一覧はDense」）。
+
+  いままで3種の行の器クラスが**文字列として完全一致**していて、密度の差がゼロだった。
+  設計§6'-2 は「一応成立している」と書いていたが、**実測では成立していない**。
+
+  活動のまとめ行を詰めることで差を作る。**まとめ行を強くするのではない**——
+  主従はいまのまま（発言が主・活動が従。設計§5-3）で、**密度だけ**を分ける。
+*/
+[data-testid='transcript-row'][data-kind='activity'] {
+  padding-block: 0.125rem;
+}
+
+/*
+  **パネルの縁に紙の厚み**（`DESIGN.md` §12.3「パネルの縁＝紙の厚み・段差・弱」）。
+
+  §12.3 は「物質は画面に数個しか無い面に置く」と言う。**スクロールの器は画面に1つ**しか
+  無いので、ここが最も条件に合う。**弱く**——縁の段差だけで、中身には一切かけない。
+*/
+.transcript-panel {
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 6%),
+    0 1px 3px rgb(0 0 0 / 30%);
 }
