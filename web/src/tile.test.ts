@@ -701,14 +701,23 @@ describe('停滞も走る人になり、止めたときはタグへ戻る（フ�
     }
   })
 
-  it('停滞の周期は作業中のちょうど2倍', () => {
-    // 利用者の指定は「1/2 のスピード」。1.0秒でも 0.6秒でも「動いている」ので、比で見る
+  it('停滞の周期は作業中のちょうど3倍で、枠線の回転と比が揃っている', () => {
+    // 利用者の指定は「1/3 のスピード」（2026-08-31）。1.0秒でも 0.6秒でも「動いている」ので、
+    // 比で見る。**枠線と同じ3倍**なので、片方だけ動かすと下の突き合わせで落ちる
     const 作業中 = Number.parseFloat(値(規則('.tile-run'), '--run-period'))
     const 停滞 = Number.parseFloat(
       値(規則("[data-motion='spin-slow'] .tile-run"), '--run-period'),
     )
     expect(作業中).toBe(0.6)
-    expect(停滞 / 作業中).toBe(2)
+    // **`toBe` で見ない。** 1.8 / 0.6 は 2.9999999999999996 になる（二進小数の丸め）
+    expect(停滞 / 作業中).toBeCloseTo(3, 10)
+
+    // 枠線の回転（3.2秒 対 9.6秒）と同じ比。**揃えると決めた**ので、揃っていることを見る
+    const 回転 = (selector: string) =>
+      Number.parseFloat(/tile-spin ([\d.]+)s/.exec(値(規則(selector), 'animation'))![1])
+    const 速い = 回転("[data-motion='spin-fast'] .tile-ring::after")
+    const 遅い = 回転("[data-motion='spin-slow'] .tile-ring::after")
+    expect(遅い / 速い).toBeCloseTo(停滞 / 作業中, 10)
   })
 
   it('@keyframes tile-run は比のまま触られていない', () => {
