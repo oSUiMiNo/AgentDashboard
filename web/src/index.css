@@ -69,6 +69,21 @@
  */
 :root {
     color-scheme: dark;
+
+    /*
+      **Primary Accent を面で出すための1組**（`DESIGN.md` §8 の床・§11.2）。
+
+      §11.2 は Primary Accent を Cyan `#3DD9E6` に固定し、「**細い線と小さなバッジだけでは
+      到達しない。最低1か所は面で出す**」と書いている。面の例に「選択行の背景ティント」が
+      挙がっているので、**セッション画面では選択中のタブがその1か所**になる（§15.1 の
+      「主要操作は1つだけ塗る」とも噛み合う——タブは押す場所が1つに決まっている）。
+
+      **`--tile-accent` を読まないこと。** あれはカードごとに状態で変わるので、
+      色が「選択」ではなく「状態」を表してしまう（`--fade-tint` と同じ理由）。
+    */
+    --accent-face: color-mix(in oklch, #3dd9e6 18%, transparent);
+    --accent-edge: color-mix(in oklch, #3dd9e6 40%, transparent);
+
     --background: oklch(0.145 0 0);
     --foreground: oklch(0.985 0 0);
     --card: oklch(0.205 0 0);

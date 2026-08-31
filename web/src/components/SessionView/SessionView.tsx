@@ -600,12 +600,19 @@ function ViewTab({
         active ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'
       }`}
     >
-      {/* 選択中の下地だけを動かす。切り替えたことが分かればよく、中身は動かさない */}
+      {/*
+        選択中の下地だけを動かす。切り替えたことが分かればよく、中身は動かさない。
+
+        **ここが、この画面で Primary Accent を「面」で出す1か所**（`DESIGN.md` §8 の床・
+        §11.2・§15.1）。以前は `bg-muted` の灰色で、**画面にアクセントが面で1つも無かった**
+        ——禁止事項を全部守っても「ただの暗い IDE」に着地する、と §6 が言っている形そのもの
+        だった。押す場所が1つに決まっているタブは、§15.1 の「主要操作は1つだけ塗る」に合う。
+      */}
       {active && (
         <motion.span
           layoutId={`view-tab-active-${cardId}`}
           transition={{ type: 'spring', stiffness: 400, damping: 32 }}
-          className="bg-muted absolute inset-0 rounded-md shadow-sm"
+          className="absolute inset-0 rounded-md bg-[var(--accent-face)] shadow-sm ring-1 ring-[var(--accent-edge)]"
         />
       )}
       <span className="relative">{children}</span>
