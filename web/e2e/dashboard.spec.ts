@@ -177,27 +177,22 @@ test('セッション画面と PJT 画面を行き来できる', async ({ page }
   await expect(page.getByTestId('to-project')).toHaveCount(1)
 })
 
-test('狭い窓でも、リンクにしたパスが自分で行を増やさない', async ({ page }) => {
-  // **材料に長いパスを使う。** `WORK_DIR`（`os.tmpdir()`）は短すぎて、
-  // `min-w-0 truncate` を外しても切り詰めが要らない——それでは壊し方で落ちない。
-  //
-  // **測る相手はパスの要素そのもの**で、帯の高さではない。帯は狭い窓では
-  // もともと折り返しており、長いパスだと flex がそれを独立した行へ送るので
-  // 高さが変わる——**これは本イシューの変更前からそうだった**（実測 132px→188px）。
-  // 帯の高さで測ると、直していないものを直したことにしてしまう。
-  const deep = path.join(
-    WORK_DIR,
-    'agentdashboard-e2e-行き来',
-    'とても長い名前のディレクトリ',
-    '入れ子の奥のほう',
-    '作業場所',
-  )
+test('狭い窓でも、PJT の名前が自分で行を増やさない', async ({ page }) => {
+  /*
+    **出すのは名前だけになった**（設計§14-5）。1行目には始末のボタンも並ぶので、
+    名前が長いときに**押し広げるのではなく切り詰められる**ことがここの主張になる。
+
+    **材料に長い名前を使う。** 短い名前では `truncate` を外しても切り詰めが要らず、
+    **壊し方で落ちない**。
+  */
+  const 長い名前 = 'とても長い名前のディレクトリ-これは折り返させたい'
+  const deep = path.join(WORK_DIR, 'agentdashboard-e2e-名前', 長い名前)
   fs.mkdirSync(deep, { recursive: true })
 
   await page.setViewportSize({ width: 390, height: 780 })
   await openDashboard(page)
 
-  // 短いパスのときの高さを先に測る（比べる相手）
+  // 短い名前のときの高さを先に測る（比べる相手）
   const shortTile = await spawnSession(page)
   await shortTile.click()
   const shortLink = await page.getByTestId('to-project').boundingBox()
@@ -210,23 +205,16 @@ test('狭い窓でも、リンクにしたパスが自分で行を増やさな�
   const deepBox = await deepLink.boundingBox()
   expect(deepBox).not.toBeNull()
 
-  // **パスは1行のまま。** `truncate`（`white-space: nowrap`）を外すと折り返して背が伸びる
+  // **1行のまま。** `truncate`（`white-space: nowrap`）を外すと折り返して背が伸びる
   expect(deepBox!.height).toBeCloseTo(shortLink!.height, 0)
 
   // **押し広げるのではなく、切り詰められている。** `min-w-0` を外すと縮めなくなり、
-  // 中身の幅がそのまま出る＝切り詰めが起きない。
-  //
-  // **測る相手はリンクではなく、その中の前半**（帯の設計§3）。パスを「前半」と
-  // 「末尾2階層」の2つに割ったので、リンク自身は入れ物になり、溢れるのは前半だけに
-  // なった——末尾を切ると**違いが出るところがちょうど消える**ため、末尾は必ず残す。
-  // 前半から `min-w-0` を外すと、縮めなくなって溢れがリンク側へ出る＝ここが false になる
-  const head = deepLink.getByTestId('to-project-head')
-  const clipped = await head.evaluate((el) => el.scrollWidth > el.clientWidth)
+  // 中身の幅がそのまま出る＝切り詰めが起きない
+  const clipped = await deepLink.evaluate((el) => el.scrollWidth > el.clientWidth)
   expect(clipped).toBe(true)
 
-  // **末尾は切り詰められていない。** ここが切れると、`…/accept/proj` と
-  // `…/accept/proj2` が同じ見た目になる（このイシューが直した症状そのもの）
-  await expect(deepLink).toContainText('作業場所')
+  // **フルパスは `title` に残る。** 名前だけでは、どの機械のどこかが分からなくなる
+  await expect(deepLink).toHaveAttribute('title', deep)
 })
 
 test('帯の高さは、最終活動の表記が変わっても変わらない', async ({ page }) => {

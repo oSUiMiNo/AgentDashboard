@@ -674,7 +674,7 @@ test('終了を続けて押しても、カードが一覧へ戻らない', async
     .toBe(0)
 })
 
-test('自分から終わったカードは「スリープ」として残り、削除で消せる', async ({
+test('自分から終わったカードは「スリープ」として残り、終了で消せる', async ({
   page,
 }) => {
   // **こちらが頼んだ終了は、そもそも画面に残らない**（上のテスト）。したがって
@@ -709,7 +709,9 @@ test('自分から終わったカードは「スリープ」として残り、�
 
   // 消せる
   await page.goto(`/s/${cardId}`)
-  await expect(page.getByTestId('close-card')).toHaveText('削除')
+  await expect(page.getByTestId('close-card')).toHaveText('終了')
+  // **スリープは出ない**（止まっている相手へ送っても届かない。設計§14-2）
+  await expect(page.getByTestId('sleep-card')).toHaveCount(0)
   await page.getByTestId('close-card').click()
   await expect
     .poll(
