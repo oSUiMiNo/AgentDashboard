@@ -108,25 +108,26 @@
 
   | 区間 | 時間 | コマ/秒 | steps |
   |---|---|---|---|
-  | ② 飛散 | 2.22秒 | 12.2（今のまま） | 27 |
-  | ③ 巻き | 4.65秒 | 12.2（今のまま） | 57 |
-  | ④ 回遊 | 63.1秒 | **6（落とした）** | 379 |
+  | ② 飛散 | 2.75秒 | 12.2（今のまま） | 34 |
+  | ③ 巻き | 5.77秒 | 12.2（今のまま） | 70 |
+  | ④ 回遊 | 75.5秒 | **6（落とした）** | 453 |
 
-  数字は `roamSpans()`・寿命70秒・コマ/秒 から引いた（`roam.test.ts` が突き合わせる。
-  **手で数えない**）。
+  数字は `roamSpans()`・寿命84秒・コマ/秒 から引いた（`roam.test.ts` が突き合わせる。
+  **手で数えない**）。**寿命を変えたらここも引き直す**——2026-08-31 に 70→84秒で
+  引き直した（要件15-9）。
 */
 @keyframes roam-slide {
   0% {
     stroke-dashoffset: 0px;
-    animation-timing-function: steps(27);
+    animation-timing-function: steps(34);
   }
-  3.1685% {
+  3.2722% {
     stroke-dashoffset: var(--roam-s1);
-    animation-timing-function: steps(57);
+    animation-timing-function: steps(70);
   }
-  9.8115% {
+  10.1325% {
     stroke-dashoffset: var(--roam-s2);
-    animation-timing-function: steps(379);
+    animation-timing-function: steps(453);
   }
   100% {
     stroke-dashoffset: var(--roam-s3);
