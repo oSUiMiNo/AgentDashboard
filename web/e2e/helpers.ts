@@ -662,3 +662,21 @@ async function removeAllProjects(page: Page) {
     )
     .toBe('[]')
 }
+
+/**
+ * 自前のドロップダウンから選ぶ（帯の設計§4・案B）。
+ *
+ * **`selectOption` は標準の `<select>` 専用**なので、モデルとモードのピッカーには
+ * 使えなくなった。開いてから選ぶ、の2段を1つに固めてある——**呼ぶ側が2段を手で
+ * 書くと、開き忘れが「選べなかった」ではなく「押した相手が居ない」として出る。**
+ *
+ * 一覧はポータルで画面の直下へ出るので、**探す相手はページ全体**にする（ピッカーの
+ * 中を探しても見つからない）。同時に2つ開くことはないので取り違えない。
+ */
+export async function pickOption(picker: Locator, value: string) {
+  await picker.click()
+  await picker
+    .page()
+    .locator(`[role="option"][data-value="${value}"]`)
+    .click()
+}

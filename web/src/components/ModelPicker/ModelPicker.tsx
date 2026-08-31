@@ -23,12 +23,20 @@
  * **版番号はどれも表からは来ない**（設計§3）。別名の解決先はプロバイダで変わるので、
  * 表に正しい版番号は書けない。だから CLI が名乗った値と、実測して覚えた値だけを使う。
  *
- * # 現在値は選択肢に無い
+ * # 現在値は選択肢に無い——**が、もう小細工は要らない**
  *
- * CLI が名乗るのはフルID（`claude-opus-5`）で、選択肢は別名（`opus`）。文字列が
- * 一致しないので、`<select>` の値として成立させるには**現在値の選択肢を先頭に足す**しかない。
+ * CLI が名乗るのはフルID（`claude-opus-5`）で、選択肢は別名（`opus`）。文字列が一致しない。
+ * 標準の `<select>` はこれを合わせるために**現在値の選択肢を先頭へ足す**必要があったが、
+ * 自前の部品では**閉じたときに出す文字を自分で決められる**ので、その行ごと要らなくなった
+ * （帯の設計§4・案B）。言い当てられない現在値は、単に**どの選択肢にも印が付かない**。
  */
 
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+} from '@/components/ui/select'
 import {
   MODELS,
   aliasForCurrent,
@@ -44,6 +52,14 @@ import { useWsStore } from '@/stores/ws'
 interface Props {
   cardId: CardId
 }
+
+/**
+ * 「いま動いているモデルを、表の別名では言い当てられない」ときに置く値。
+ *
+ * **どの選択肢にも当たらない綴りにしてある**ので、印が付かない状態になる。空文字を
+ * 使わないのは、`radix-ui` の Select が空文字を「未選択」の意味で予約しているため。
+ */
+const 言い当てられない = '__current__'
 
 export function ModelPicker({ cardId }: Props) {
   const session = useSessionCard(cardId)
@@ -65,54 +81,49 @@ export function ModelPicker({ cardId }: Props) {
   // 切替中は要求した別名を出す。**確定した値と同じ顔をさせない**（設計§5）。
   // CLI に拒否されると確定は届かないので、これを確定と混ぜると画面が嘘をつき続ける
   const switching = requested !== null
-  // いま動いているモデルが表の別名で言い当てられるなら、その行を選択状態にする。
-  // 言い当てられないときだけ「現在値」の行を先頭へ足す（足すと同じ名前が2行並ぶため）
   const alias = aliasForCurrent(model, seen)
-  const needsOwnRow = switching || alias === null
 
   return (
-    <label className="flex min-w-0 shrink-0 items-center text-xs">
-      {/*
-        **ラベルの文字は出さない**（帯の設計§4）。3行目は 8rem×2 に収める必要があり、
-        値そのもの（`Opus 5`）が名前として読めるので判別はできる。読み上げ用に
-        `aria-label` を残す
-      */}
-      <select
+    <Select
+      value={alias ?? 言い当てられない}
+      onValueChange={(next) => setModel(cardId, next)}
+      // 切替が終わるまで受け付けない。サーバも同じ理由で断るので（連打がロック待ちの
+      // 行列になり、他のカードの切替まで後ろへずれる）、ここはその写しにあたる
+      disabled={switching}
+    >
+      <SelectTrigger
         data-testid="model-picker"
         data-model={model ?? ''}
         data-requested={requested ?? ''}
-        value={needsOwnRow ? (model ?? '') : alias}
-        onChange={(event) => setModel(cardId, event.target.value)}
         aria-label="モデル"
-        // 切替が終わるまで受け付けない。サーバも同じ理由で断るので（連打がロック待ちの
-        // 行列になり、他のカードの切替まで後ろへずれる）、ここはその写しにあたる
-        disabled={switching}
-        // **幅は 8rem に固定する**（帯の設計§4）。標準の `<select>` は
-        // いちばん長い選択肢で幅が決まるので、短いものを選んでいても縮まなかった。
-        // モードと同じ値にしてあるのは「揃える」が要件だから
-        className={`w-32 truncate rounded border px-1.5 py-0.5 text-xs ${
+        // **幅は 8rem に固定**（帯の設計§4）。モードと同じ値にしてあるのは「揃える」が
+        // 要件だから。**ラベルの文字（「モデル」）は出さない**——値そのものが名前として
+        // 読めるので判別はでき、読み上げには `aria-label` が効く
+        className={`w-32 ${
           switching
             ? 'border-amber-500/40 text-amber-300'
             : 'border-border text-muted-foreground'
         }`}
       >
-        {needsOwnRow && (
-          <option value={model ?? ''}>
-            {switching
-              ? `${modelLabel(requested, null)} へ切替中…`
-              : modelLabel(model, label)}
-          </option>
-        )}
+        {switching
+          ? `${modelLabel(requested, null)} へ切替中…`
+          : modelLabel(model, label)}
+      </SelectTrigger>
+      <SelectContent>
         {MODELS.map((entry) => (
-          <option
+          <SelectItem
             key={entry.value}
             value={entry.value}
-            title={modelInfo(entry.value).description}
+            data-testid="model-option"
+            data-value={entry.value}
+            // **説明は開いたときに読ませる。** 標準の `<select>` では `title` に
+            // 逃がすしかなく、**スマホではマウスを乗せられないので誰にも読めなかった**
+            note={modelInfo(entry.value).description}
           >
             {modelOptionLabel(entry.value, seen, catalog)}
-          </option>
+          </SelectItem>
         ))}
-      </select>
-    </label>
+      </SelectContent>
+    </Select>
   )
 }

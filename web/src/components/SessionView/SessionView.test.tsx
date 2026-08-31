@@ -536,6 +536,28 @@ describe('SessionView の帯は4行', () => {
     }
   })
 
+  it('モデルとモードは同じ幅で、ラベルの文字を出さない', () => {
+    // **3行目に 8rem×2 を収めるため**にラベルの文字を落とした（帯の設計§4）。
+    // 値そのもの（`Opus 5` ／ `手動確認`）が名前として読めるので判別はできるが、
+    // **読み上げには何も残らなくなる**ので `aria-label` は必ず要る
+    show(meta({ agent_connected: true, permission_mode: 'default' }))
+
+    const モデル = screen.getByTestId('model-picker')
+    const モード = screen.getByTestId('permission-mode-picker')
+
+    // 同じ幅（要件：「モードはモデルと同じ幅に揃える」）
+    expect(モデル).toHaveClass('w-32')
+    expect(モード).toHaveClass('w-32')
+
+    // ラベルの文字は出ない
+    expect(モデル).not.toHaveTextContent('モデル')
+    expect(モード).not.toHaveTextContent('モード')
+
+    // 読み上げ用は残っている
+    expect(モデル).toHaveAttribute('aria-label', 'モデル')
+    expect(モード).toHaveAttribute('aria-label', '権限モード')
+  })
+
   it('更新間隔が出ても行が増えない（4行目に収まる）', () => {
     // 別の PC のセッションを、ターミナルで見ているときだけ出る（設計§2）
     useSettingsStore.setState({

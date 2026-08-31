@@ -1,5 +1,11 @@
 import { expect, test } from '@playwright/test'
-import { archiveAll, openDashboard, openSession, spawnSession } from './helpers'
+import {
+  archiveAll,
+  openDashboard,
+  openSession,
+  pickOption,
+  spawnSession,
+} from './helpers'
 
 /**
  * モデル切替（テスト計画フェーズ5「切替」「購読の粒度」）。
@@ -52,7 +58,7 @@ test('セッション画面から切り替えると一覧の小窓にも反映�
   // 起動直後は注入した既定（利用者のグローバル設定）で始まる
   await expect(picker).not.toHaveAttribute('data-model', '', { timeout: SETTLE })
 
-  await picker.selectOption('haiku')
+  await pickOption(picker, 'haiku')
   // 送った値は別名、CLI が名乗るのはフルID。一致しないのが正しい
   await expect(picker).toHaveAttribute(
     'data-model',
@@ -87,7 +93,7 @@ test('片方を切り替えても、もう片方の表示は変わらない', as
   // 「連動しなかった」のか区別が付かない
   const before = await picker.getAttribute('data-model')
   expect(before).not.toBe('claude-haiku-4-5-20251001')
-  await picker.selectOption('haiku')
+  await pickOption(picker, 'haiku')
   await expect(picker).toHaveAttribute(
     'data-model',
     'claude-haiku-4-5-20251001',
@@ -137,7 +143,7 @@ test('横並び画面でも片方だけが変わる', async ({ page }) => {
   })
   // **注入された既定と違うモデルを選ぶ。** 2本とも既定で始まっているので、
   // 既定と同じものを選ぶと何も起きず、「連動しなかった」ことを確かめられない
-  await pickers.first().selectOption('haiku')
+  await pickOption(pickers.first(), 'haiku')
   await expect(pickers.first()).toHaveAttribute(
     'data-model',
     'claude-haiku-4-5-20251001',
@@ -159,7 +165,7 @@ test('切り替えたあとに起こしたセッションは元の既定で始�
     timeout: SETTLE,
   })
   const original = await picker.getAttribute('data-model')
-  await picker.selectOption('haiku')
+  await pickOption(picker, 'haiku')
   await expect(picker).toHaveAttribute(
     'data-model',
     'claude-haiku-4-5-20251001',

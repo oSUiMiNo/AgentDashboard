@@ -67,14 +67,26 @@ afterEach(() => {
   clearSessions()
 })
 
+/**
+ * 一覧を開く。**標準の `<select>` をやめたので `selectOptions` は使えない**
+ * （帯の設計§4・案B）。jsdom で開くために必要な口は `src/test/setup.ts` が生やしている。
+ */
+async function 開く() {
+  await userEvent.click(screen.getByTestId('permission-mode-picker'))
+}
+
 describe('PermissionModePicker', () => {
-  it('いまのモードが選ばれた状態で出る', () => {
-    applySessionSnapshot([meta(CARD, { permission_mode: 'acceptEdits' })])
+  it('閉じているときは、いまのモードだけが出る（括弧の補足を出さない）', () => {
+    // **要件の後半そのもの。** 以前は `自動（環境によっては切り替えられません）` と
+    // 補足まで出ていた。補足は「押す前に知りたいもの」であって、選び終わったあとに
+    // 毎回読まされるものではない（帯の設計§4）
+    applySessionSnapshot([meta(CARD, { permission_mode: 'auto' })])
     render(<PermissionModePicker cardId={CARD} />)
 
     const picker = screen.getByTestId('permission-mode-picker')
-    expect(picker).toHaveValue('acceptEdits')
-    expect(picker.dataset.mode).toBe('acceptEdits')
+    expect(picker.dataset.mode).toBe('auto')
+    expect(picker.textContent).not.toContain('（')
+    expect(picker.textContent).not.toContain('環境によっては')
   })
 
   it('まだ分からないときは「不明」と出す', () => {
@@ -82,26 +94,31 @@ describe('PermissionModePicker', () => {
     applySessionSnapshot([meta(CARD, { permission_mode: null })])
     render(<PermissionModePicker cardId={CARD} />)
 
-    expect(screen.getByTestId('permission-mode-picker')).toHaveValue('')
-    expect(screen.getByRole('option', { name: '不明' })).toBeInTheDocument()
+    const picker = screen.getByTestId('permission-mode-picker')
+    expect(picker).toHaveTextContent('不明')
+    expect(picker.dataset.mode).toBe('')
   })
 
-  it('切替で到達できないモードには押す前に印を出す', () => {
+  it('開いたときだけ、到達できないモードに注意書きが並ぶ', async () => {
     // 巡回に入るかどうかは起動条件とアカウントで変わる（設計§11）。
-    // 選択肢からは外さず、分かることは押す前に出す
+    // 選択肢からは外さず、分かることは押す前に出す。
+    //
+    // **括弧は付けない**（帯の設計§4）。開いたときに選択肢の下へ小さく置くので、
+    // 選んだあとの表示に紛れ込まない
     applySessionSnapshot([meta(CARD)])
     render(<PermissionModePicker cardId={CARD} />)
+    await 開く()
 
     expect(
-      screen.getByRole('option', { name: '確認しない（起動時にしか選べません）' }),
-    ).toBeInTheDocument()
+      screen.getByRole('option', { name: '確認しない' }),
+    ).toHaveTextContent('起動時にしか選べません')
     expect(
-      screen.getByRole('option', {
-        name: '全承認をスキップ（起動時に選んだ場合のみ）',
-      }),
-    ).toBeInTheDocument()
+      screen.getByRole('option', { name: '全承認をスキップ' }),
+    ).toHaveTextContent('起動時に選んだ場合のみ')
     // いつでも行けるものには何も足さない
-    expect(screen.getByRole('option', { name: 'プラン' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'プラン' })).toHaveTextContent(
+      /^プラン$/,
+    )
   })
 
   it('選ぶとサーバへ切替を要求する', async () => {
@@ -110,9 +127,11 @@ describe('PermissionModePicker', () => {
     applySessionSnapshot([meta(CARD)])
     render(<PermissionModePicker cardId={CARD} />)
 
-    await userEvent.selectOptions(
-      screen.getByTestId('permission-mode-picker'),
-      'plan',
+    await 開く()
+    await userEvent.click(
+      screen
+        .getAllByTestId('permission-mode-option')
+        .find((option) => option.dataset.value === 'plan')!,
     )
     expect(setPermissionMode).toHaveBeenCalledWith(CARD, 'plan')
   })
@@ -122,9 +141,9 @@ describe('PermissionModePicker', () => {
     applySessionSnapshot([meta(CARD, { permission_mode: 'まだ知らないモード' })])
     render(<PermissionModePicker cardId={CARD} />)
 
-    expect(screen.getByTestId('permission-mode-picker')).toHaveValue(
-      'まだ知らないモード',
-    )
+    const picker = screen.getByTestId('permission-mode-picker')
+    expect(picker).toHaveTextContent('まだ知らないモード')
+    expect(picker.dataset.mode).toBe('まだ知らないモード')
   })
 
   it('あるカードのモードが変わっても、他のカードのオブジェクトは変わらない', () => {

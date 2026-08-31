@@ -82,3 +82,32 @@ for (const [property, value] of [
     },
   })
 }
+
+/**
+ * jsdom に無いポインタ捕捉の口を生やす（帯の設計§11-1・フェーズ1の実測）。
+ *
+ * `radix-ui` の Select は、トリガーを押した瞬間に `hasPointerCapture` を呼ぶ。jsdom は
+ * これを実装していないので、**素のままだと `TypeError` で開かない**——「開かない」ではなく
+ * 「例外で落ちる」形なので、テストの側からは原因が見えにくい。
+ *
+ * 実測（2026-08-31）：この4本を生やすと**開いて選べる**（トリガーの表示が選んだ値へ
+ * 変わるところまで確認）。キーボード（Enter）でも開く。
+ *
+ * **測る前は「開けないかもしれないから、開閉の中身は E2E に任せる」と決めていた。**
+ * 4本の1行関数で済むと分かったので方針ごと畳んだ（設計§9）。上の `matchMedia` と
+ * `ResizeObserver` がここに在るのと同じ理由——**足りないのは環境であって、作りではない。**
+ */
+for (const name of [
+  'hasPointerCapture',
+  'setPointerCapture',
+  'releasePointerCapture',
+  'scrollIntoView',
+] as const) {
+  if (typeof HTMLElement.prototype[name] !== 'function') {
+    Object.defineProperty(HTMLElement.prototype, name, {
+      configurable: true,
+      // `hasPointerCapture` だけは真偽を返す。捕捉していないことにする
+      value: name === 'hasPointerCapture' ? () => false : () => {},
+    })
+  }
+}

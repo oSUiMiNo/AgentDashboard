@@ -6,6 +6,7 @@ import {
   expectTerminalToContain,
   openDashboard,
   openSession,
+  pickOption,
   spawnSession,
 } from './helpers'
 
@@ -63,7 +64,7 @@ test('セッション画面から切り替えると一覧の小窓にも反映�
     { timeout: 15_000 },
   )
 
-  await view.getByTestId('permission-mode-picker').selectOption('plan')
+  await pickOption(view.getByTestId('permission-mode-picker'), 'plan')
   await expect(view.getByTestId('permission-mode-picker')).toHaveAttribute(
     'data-mode',
     'plan',
@@ -92,7 +93,7 @@ test('巡回に入らないモードを選ぶと理由が画面に出る', async
   )
 
   // dontAsk は起動時にしか選べない（設計§11）。黙って何も起きないのが一番困る
-  await view.getByTestId('permission-mode-picker').selectOption('dontAsk')
+  await pickOption(view.getByTestId('permission-mode-picker'), 'dontAsk')
   /*
     **出る先はカードで、画面全体の帯ではない**（復旧設計§9-5）。この失敗は `card_id`
     を名乗っており、行き先は種別ではなく名指しの有無で決まる。横並びで見ているとき、
@@ -124,9 +125,7 @@ test('片方を切り替えても、もう片方の表示は変わらない', as
   }
 
   await page.goto(`/s/${firstId}`)
-  await page
-    .getByTestId('permission-mode-picker')
-    .selectOption('acceptEdits')
+  await pickOption(page.getByTestId('permission-mode-picker'), 'acceptEdits')
   await expect(page.getByTestId('permission-mode-picker')).toHaveAttribute(
     'data-mode',
     'acceptEdits',
@@ -227,4 +226,59 @@ test('全承認をスキップで起動すると、確認に自動で答えて�
   await expect(
     page.getByTestId('session-tile').first().getByTestId('permission-mode'),
   ).toHaveAttribute('data-mode', 'bypassPermissions', { timeout: 15_000 })
+})
+
+test('補足は開いたときだけ出る（選んだあとの表示には出ない）', async ({
+  page,
+}) => {
+  // **要件の後半そのもの。** 標準の `<select>` は閉じているときに選択肢の文字を
+  // そのまま出すので、`自動（環境によっては切り替えられません）` と補足まで出ていた。
+  // 自前にしたのはここだけのため（帯の設計§4・案B）
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  await openSession(page, tile)
+
+  const picker = page.getByTestId('permission-mode-picker')
+  await expect(picker).toBeVisible()
+
+  // 閉じているとき：補足は出ていない
+  await expect(picker).not.toContainText('起動時にしか選べません')
+  await expect(picker).not.toContainText('（')
+
+  // 開いたとき：補足が読める
+  await picker.click()
+  const 確認しない = page.locator('[role="option"][data-value="dontAsk"]')
+  await expect(確認しない).toContainText('確認しない')
+  await expect(確認しない).toContainText('起動時にしか選べません')
+  // いつでも行けるものには何も足さない
+  await expect(page.locator('[role="option"][data-value="plan"]')).toHaveText(
+    'プラン',
+  )
+
+  // 選んで閉じたあと：また出ない
+  await page.locator('[role="option"][data-value="plan"]').click()
+  await expect(picker).toHaveAttribute('data-mode', 'plan', { timeout: 15_000 })
+  await expect(picker).not.toContainText('（')
+})
+
+test('スマホ相当の幅でも開いて選べる', async ({ page }) => {
+  // **標準の部品をやめた瞬間に失われうるもの。** 実機（フェーズ5）より前に、
+  // 少なくとも「狭い窓で開いて押せる」ことは手元で見ておく
+  await page.setViewportSize({ width: 375, height: 780 })
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  await openSession(page, tile)
+
+  const picker = page.getByTestId('permission-mode-picker')
+  await pickOption(picker, 'plan')
+  await expect(picker).toHaveAttribute('data-mode', 'plan', { timeout: 15_000 })
+
+  // **一覧がトリガーに被さって、いま何を選んでいるか分からなくなっていないこと。**
+  // `position="popper"` にしてあるのはこのため
+  await picker.click()
+  const 一覧 = page.locator('[role="listbox"]')
+  await expect(一覧).toBeVisible()
+  const 上 = await picker.boundingBox()
+  const 下 = await 一覧.boundingBox()
+  expect(下!.y).toBeGreaterThanOrEqual(上!.y + 上!.height - 1)
 })
