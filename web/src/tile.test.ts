@@ -756,3 +756,54 @@ describe('停滞も走る人になり、止めたときはタグへ戻る（フ�
     expect(消す[0].at).toBeGreaterThan(出す最後)
   })
 })
+
+/**
+ * 接続断のカードで、輪も沈む（フェーズ19）。
+ *
+ * **`--tile-ink` は「いま塗る1つの濃さ」なので、2点を振れる呼吸には使えない。**
+ * だから接続断の ×0.6 が呼吸へ掛からず、繋がっていないカードでも山で満輝度まで
+ * 上がっていた（設計§24-1）。**率（`--tile-fade`）を変数へ出して、`--tile-ink` を
+ * 通れないものと、リテラルで上書きしているものを、そこへ通す。**
+ */
+describe('接続断のカードで、輪も沈む（フェーズ19）', () => {
+  it('呼吸の両端が、沈める率を通っている', () => {
+    // **この段の本体。** リテラル（`--tile-floor` と `1`）へ戻すと、接続断で沈まなくなる
+    const 塊 = /@keyframes\s+tile-breathe\s*\{[\s\S]*?\n\}/.exec(素のCSS())?.[0] ?? ''
+    expect(塊).not.toBe('')
+    const 濃さ = [...塊.matchAll(/opacity:\s*([^;]+);/g)].map((m) => m[1].trim())
+    expect(濃さ).toEqual([
+      'calc(var(--tile-floor) * var(--tile-fade))',
+      'calc(100% * var(--tile-fade))',
+    ])
+  })
+
+  it('沈める率を決めるのは2行だけ', () => {
+    // **散らすと、また片方だけ動く**（`--tile-ink` の4行と同じ理由）。
+    // 既定の1と、接続断の 0.6。3本目を書きたくなったら、それは別の概念である
+    const 決める = 全規則.filter((rule) => /--tile-fade:/.test(rule.body))
+    expect(決める).toHaveLength(2)
+    expect(値(規則('.tile-shell'), '--tile-fade')).toBe('1')
+    expect(値(規則("[data-connected='false']"), '--tile-fade')).toBe('0.6')
+  })
+
+  it('ホバーと「静止」の持ち上げも、率を通っている', () => {
+    // **どちらも接続断より後ろに書いてある**ので、リテラルの `100%` だと減光が
+    // 丸ごと捨てられる（テスト計画フェーズ8 が「踏めなかったもの」として残していた）。
+    // 率を通しても持ち上げの比は同じ（繋がっているとき 75→100、接続断で 45→60）
+    const 持ち上げ = 全規則.filter((rule) => /--tile-ink:/.test(rule.body) && rule.body.includes('100%'))
+    expect(持ち上げ).toHaveLength(2)
+    const 当たり先 = 持ち上げ.map((rule) => rule.selector).join(' ')
+    expect(当たり先).toContain(":where(:hover)")
+    expect(当たり先).toContain("[data-quiet='still']")
+    for (const rule of 持ち上げ) {
+      expect(値(rule, '--tile-ink'), rule.selector).toBe('calc(100% * var(--tile-fade))')
+    }
+  })
+
+  it('沈めるのは率であって、床ではない', () => {
+    // `--tile-floor` は「その色が 3:1 を保てる最小」（§9-2-2）。**接続断のときだけ
+    // 率で下げる**のであって、床の値そのものを書き換えるのではない——書き換えると
+    // 繋がっているカードの呼吸まで暗くなる
+    expect(素のCSS()).not.toMatch(/--tile-floor:\s*/)
+  })
+})

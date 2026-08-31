@@ -441,3 +441,62 @@ test('それでも全部を選ぶと、PC が床で断って理由がカード�
     await waitForAgent(page, 2, true)
   }
 })
+
+test('接続断のカードは、呼吸の山でも沈んだままになる', async ({ page }) => {
+  /*
+    フェーズ19。**jsdom では測れない**——`@keyframes tile-breathe` の濃さは
+    `--tile-fade` を掛けた `calc()` で、その解決はカスケードの先にある。
+    単体（`tile.test.ts`）が見られるのは「そう書いてある」ことまでで、
+    **そう出ているか**を確かめられるのはここだけ。
+
+    **属性を手で立てない。** `data-connected` の出どころ（サーバの報告）は上の
+    テストが見張っているので、ここでは**本物の抜け殻**を相手にする——
+    そうしないと「印は付くが沈まない」と「印が付かない」を切り分けられない。
+
+    見るのは**山**である。底だけ見ると、呼吸が止まっているだけでも通ってしまう。
+  */
+  await openDashboard(page)
+  const 沈むはず = await spawnOn(page, 2)
+  const 比べる相手 = await spawnOn(page, 1)
+
+  // どちらも入力待ち（呼吸）にする。**ターンが終わった印**を撃つ
+  for (const cardId of [沈むはず, 比べる相手]) {
+    await openSession(page, tileOf(page, cardId))
+    await fireHook(page, 'Stop', '{"last_assistant_message":"終わりました"}')
+    await page.goto('/')
+  }
+  await waitForResumeTarget(page, 沈むはず)
+  await orphanAgent(page, 2)
+  await expect(tileOf(page, 沈むはず).getByTestId('disconnected-badge')).toBeVisible({
+    timeout: 60_000,
+  })
+
+  /** 1周（2.8秒）ぶんを刻んで、輪の濃さの山と底を採る */
+  const 山と底 = async (cardId: string) =>
+    page.evaluate(async (id) => {
+      const ring = document
+        .querySelector(`[data-testid="tile-shell"][data-card-id="${id}"]`)
+        ?.querySelector('.tile-ring')
+      if (!ring) throw new Error(`輪が見つかりません：${id}`)
+      const 値 = []
+      // 2.8秒の周期を 3.2秒ぶん、40ms 刻みで。**山を必ず1回は跨ぐ**
+      for (let i = 0; i < 80; i += 1) {
+        値.push(Number.parseFloat(getComputedStyle(ring).opacity))
+        await new Promise((r) => setTimeout(r, 40))
+      }
+      return { 山: Math.max(...値), 底: Math.min(...値) }
+    }, cardId)
+
+  const 接続断 = await 山と底(沈むはず)
+  const 接続あり = await 山と底(比べる相手)
+
+  // **繋がっているほうは満輝度まで上がる**（呼吸の設計そのもの。フェーズ8 の 45点）
+  expect(接続あり.山).toBeGreaterThan(0.95)
+  // **接続断は山でも 60% どまり。** ここが 100% まで上がるのが直す前の姿だった
+  expect(接続断.山).toBeLessThan(0.7)
+  // 山も底も、繋がっているときの 0.6 倍（率を1本にしてあるので比が揃う）
+  expect(接続断.山 / 接続あり.山).toBeCloseTo(0.6, 1)
+  expect(接続断.底 / 接続あり.底).toBeCloseTo(0.6, 1)
+  // **呼吸そのものは残っている**（設計§24-3。止めると終了と同じ静けさになる）
+  expect(接続断.山).toBeGreaterThan(接続断.底 * 1.5)
+})

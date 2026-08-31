@@ -2466,6 +2466,35 @@ project を増やすのではなく既存の土台へ spec を載せる場合で
 
 **`pkill -f` を使わないこと。** `pkill -f "target/debug/agentdashboard --config e2e"` は、**そのパターンを含む自分のコマンド行にも当たって自滅する**（`exit 144` で返る。2回踏んだ）。`ss` で引いた PID を名指しするのが確実である。
 
+### 全部が 200ms で落ちるときは、**死んだサーバの待ち受けを子が握っている**
+上の「居座ったサーバ」と症状が似ているが**別物**で、こちらは**サーバがもう居ない**。
+
+| 見えるもの | 実際 |
+|---|---|
+| `ss -tln` に 4173/4174/4177 が **LISTEN で出る** | ソケットは生きている |
+| `curl` が **000**（応答なし） | 待ち受けているものが**答えられない** |
+| `ss -tlnp` に**プロセスが出ない** | 持ち主はもう居ない |
+| テストが**軒並み 200ms 前後で `ERR_CONNECTION_REFUSED`** | `reuseExistingServer` が「居る」と判断して、死んだソケットへ繋ぎに行っている |
+
+**犯人は孤児になった `agentdashboard-agent`。** サーバが死ぬとき、**子として起こされたエージェントが待ち受けのファイル記述子を相続する**ので、ポートだけが解放されずに残る（`ps -eo pid,ppid` で親が `1` や `121` へ移っている）。
+
+**直し方**：`ps -eo pid,ppid,etimes,args | grep "[t]arget/debug/agentdashboard-agent"` で孤児を引き、**PID を名指しで `kill`**。ポートが空いたことを `curl` で確かめてから流し直す。
+
+### 続けて走らせるときは、**前の走行のサーバを先に落とす**
+`reuseExistingServer` は「居れば使う」なので、**前の走行のサーバが生き残っていると次の走行がそれを掴む**。ところが次の走行の webServer は起動行で `rm -rf .e2e-state/state/dashboard.db*` を実行する——**掴んだ相手が開いたままのファイルを消す**ことになり、SQLite が `attempt to write a readonly database`（DBMOVED）を返し続ける。
+
+**症状は「ほぼ全部が落ちる」**で、`サーバ側からもカードが消えること` や `toHaveCount` の形で出る。**実装は何も壊れていない。**
+
+```
+ps -eo pid,args | grep "[t]arget/debug/agentdashboard" | awk '{print $1}' | xargs -r kill
+```
+
+**`make e2e` と `npx playwright test <spec>` を交互に打つと、これを踏む。** 落ちた数本だけ流し直したいときも、**先に上を通してから**にする。
+
+**`.e2e-state/` を手で消さないこと。** 消すと `logs.spec.ts`「経路ごとに1件以上のログが残る」が**3台構成のログが無い**で落ちる。掃除は webServer の起動行が名指しでやっている（`playwright.config.ts`）ので、**そこに書いていないものを消すと、書いた側の前提が崩れる**。
+
+**測定と `make e2e` を重ねないこと。** 使い捨てのダッシュボード（8790）を同時に走らせると、擬似 claude の置き場所（`/tmp/fake-claude/`）を取り合う。**片方ずつ走らせる。**
+
 ### 「画面が入れ替わったか」は、`server-core` が再コンパイルされたかで見る
 web アセットは `rust-embed` で**バイナリへ焼き込まれる**ので、順序は `build-web` → `build-debug` である。**`build-web` が空振りしていると `build-debug` は何も変えない**——`make build-web build-debug` の出力を `tail -2` などで刈ると、失敗が見えないまま次へ進む。
 
