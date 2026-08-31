@@ -8,6 +8,7 @@ import {
   openDashboard,
   openSession,
   scrollTerminalToBottom,
+  setTerminalView,
   spawnSession,
   swipeTerminal,
   takePrevented,
@@ -511,7 +512,7 @@ test.describe('端末の格子', () => {
     // もう1枚（別の端末の代わり）。**同じカードを同時に見ている状態**を作る
     const other = await page.context().newPage()
     await other.goto(`/s/${cardId}`)
-    await other.getByTestId('view-tab-terminal').click()
+    await setTerminalView(other, true)
     await expect(other.getByTestId('session-view')).toHaveAttribute(
       'data-view',
       'terminal',
@@ -673,14 +674,14 @@ test('終了を続けて押しても、カードが一覧へ戻らない', async
     .toBe(0)
 })
 
-test('自分から終わったカードは「消息不明」として残り、削除で消せる', async ({
+test('自分から終わったカードは「スリープ」として残り、削除で消せる', async ({
   page,
 }) => {
   // **こちらが頼んだ終了は、そもそも画面に残らない**（上のテスト）。したがって
   // `ended` として残るカードは必ず「頼んでいない終わり方をしたもの」になり、
-  // そこへ「消息不明」という言い方を当てている（帯の設計§6）。
+  // そこへ「スリープ」という言い方を当てている（帯の設計§6）。
   //
-  // **消す道が残っていることの担保**でもある——放っておくと消息不明のカードが
+  // **消す道が残っていることの担保**でもある——放っておくとスリープのカードが
   // 一覧に溜まり、一覧の小窓には消すボタンが無い（押すと開くだけ）
   await openDashboard(page)
   const tile = await spawnSession(page)
@@ -692,7 +693,7 @@ test('自分から終わったカードは「消息不明」として残り、�
   await expect(view).toHaveAttribute('data-status', 'ended', {
     timeout: 20_000,
   })
-  await expect(view).toContainText('消息不明')
+  await expect(view).toContainText('スリープ')
 
   // **一覧の小窓にも同じ語が出る。** 同じ関数（`statusLabel`）を使っているので
   // 自動で揃うが、**勝手に死んだことに一覧で気づけること**がこの道具の目的そのもの
@@ -704,7 +705,7 @@ test('自分から終わったカードは「消息不明」として残り、�
   const 小窓 = page.locator(
     `[data-testid="tile-shell"][data-card-id="${cardId}"]`,
   )
-  await expect(小窓).toContainText('消息不明')
+  await expect(小窓).toContainText('スリープ')
 
   // 消せる
   await page.goto(`/s/${cardId}`)
@@ -718,7 +719,7 @@ test('自分から終わったカードは「消息不明」として残り、�
         const sessions = (await response.json()) as { card_id: string }[]
         return sessions.some((session) => session.card_id === cardId)
       },
-      { message: '消息不明のカードを消せること', timeout: 20_000 },
+      { message: 'スリープのカードを消せること', timeout: 20_000 },
     )
     .toBe(false)
 })

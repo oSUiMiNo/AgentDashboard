@@ -1013,6 +1013,91 @@
   animation: none;
 }
 
+/*
+  # スリープの `zzz`（設計§14-4・利用者の指定）
+
+  **札ではなく、寝ている演出にする。** 走る人と**同じ居場所（右下）・同じ塗り方**で、
+  `--tile-ink` を通すので接続断のときは一緒に沈む。
+
+  **文字で置く**（走る人はマスク画像だが、こちらは素材が要らない）。`forced-colors` は
+  背景画像を消すが**文字は消さない**ので、あの環境でも `z` は残る——とはいえ状態の名前は
+  読めないほうがまずいので、走る人と同じ `tile-run-fallback` を併せて置いてある。
+
+  3枚が**周期の 1/3 ずつ遅れて**立ち上がり、上へ流れて消える。遅れを `calc` で書くのは
+  走る人と同じ理由（周期を変えたときに重なりや空白が出ないようにするため）。
+*/
+.tile-zzz {
+  position: absolute;
+  bottom: 7px;
+  right: 10px;
+  width: 32px;
+  height: 32px;
+  pointer-events: none;
+  --zzz-period: 3s;
+}
+
+.tile-zzz i {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  font-style: normal;
+  font-weight: 700;
+  line-height: 1;
+  /* 走る人と同じ作法。`--tile-ink` を地に混ぜる形で通す */
+  color: color-mix(
+    in srgb,
+    var(--tile-accent) var(--tile-ink),
+    var(--color-card)
+  );
+  opacity: 0;
+  animation: tile-zzz var(--zzz-period) ease-out infinite;
+}
+
+/* 後から出るものほど大きく、遠くまで昇る。**寝息の強弱**をこれで出す */
+.tile-zzz i:nth-child(1) {
+  font-size: 9px;
+  animation-delay: calc(var(--zzz-period) * 0 / 3);
+}
+
+.tile-zzz i:nth-child(2) {
+  font-size: 11px;
+  animation-delay: calc(var(--zzz-period) * 1 / 3);
+}
+
+.tile-zzz i:nth-child(3) {
+  font-size: 13px;
+  animation-delay: calc(var(--zzz-period) * 2 / 3);
+}
+
+@keyframes tile-zzz {
+  0% {
+    opacity: 0;
+    transform: translate(0, 0) rotate(-10deg);
+  }
+  25% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-12px, -20px) rotate(10deg);
+  }
+}
+
+/*
+  **止めたら消して、札へ戻す。** 停滞と同じ非対称（`tile-tag-rest` が出る）。
+  走る人は「1枚で静止」だが、`z` は静止させても意味を持たない——**眠っていることは
+  動きでしか伝わらない**ので、止めたら札の `✓ スリープ` に任せる。
+
+  **消すのは `opacity`。** `display: none` にしないのは、静けさの規則が「止める」で
+  あって「消す」ではないため（`tile.test.ts`「止めても色は残る」）。停滞の
+  `.tile-run-rest` が同じ理由で同じ形をしている
+*/
+[data-quiet='calm'] .tile-zzz i,
+[data-quiet='still'] .tile-zzz i {
+  animation: none;
+  opacity: 0;
+}
+
 /* 止めたら**1枚目だけを出す**。消えたままだと状態そのものが読めなくなる */
 [data-quiet='calm'] .tile-run i:nth-child(1),
 [data-quiet='still'] .tile-run i:nth-child(1) {
@@ -1147,6 +1232,15 @@
   /* 走るアニメーションも止める。**1枚で静止する**ので、形は残る */
   [data-motion] .tile-run i {
     animation: none;
+  }
+
+  /*
+    `zzz` は**消して札へ戻す**（`calm` ／ `still` と同じ扱い）。静止した `z` は
+    眠っていることを伝えないので、形を残す意味が無い。消すのは `opacity`
+  */
+  [data-motion] .tile-zzz i {
+    animation: none;
+    opacity: 0;
   }
 
   [data-motion] .tile-run i:nth-child(1) {

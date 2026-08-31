@@ -82,7 +82,7 @@ test('終了したセッションでは指示を送れない', async ({ page }) 
     'ended',
     { timeout: 20_000 },
   )
-  // 残ったカードは「消息不明」と出る（設計§6）
-  await expect(page.getByTestId('session-view')).toContainText('消息不明')
+  // 残ったカードは「スリープ」と出る（設計§6）
+  await expect(page.getByTestId('session-view')).toContainText('スリープ')
   await expect(page.getByTestId('composer-input')).toBeDisabled()
 })

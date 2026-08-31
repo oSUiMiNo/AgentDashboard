@@ -7,6 +7,7 @@ import {
   openDashboard,
   openSession,
   pickOption,
+  setTerminalView,
   spawnSession,
 } from './helpers'
 
@@ -216,7 +217,7 @@ test('全承認をスキップで起動すると、確認に自動で答えて�
 
   await page.getByTestId('session-tile').first().click()
   await expect(page.getByTestId('session-view')).toBeVisible()
-  await page.getByTestId('view-tab-terminal').click()
+  await setTerminalView(page, true)
 
   // 責任の受諾を尋ねる画面に、こちらで答えている（既定は「いいえ」なので決め打ち禁止）
   await expectTerminalToContain(page, '[fake-claude] bypass-accepted')

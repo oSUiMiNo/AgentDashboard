@@ -17,8 +17,7 @@
  * というのが要件の使い方なので、送るたびにターミナルへ切り替えさせない。
  */
 
-import { motion } from 'motion/react'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router'
 import { Button } from '@/components/ui/button'
 import { InputDock } from '@/components/InputDock/InputDock'
@@ -42,39 +41,16 @@ import {
 import { FilesToggle } from '@/components/ProjectFiles/FilesToggle'
 import { useFilesParts } from '@/components/ProjectFiles/useFilesParts'
 import { useFilesPanel } from '@/lib/filesPanel'
-import { splitPathTail } from '@/lib/path'
+import { projectDisplayName } from '@/lib/path'
 import { backTargetFor, HOME, projectPath, sessionPath } from '@/lib/routes'
 import { hostOf } from '@/lib/reviveBudget'
 import type { CardId } from '@/lib/protocol'
 import { useNow } from '@/lib/sessions'
 import { useAuthStore } from '@/stores/auth'
-import {
-  setCardError,
-  useCardError,
-  useReviving,
-  useSessionCard,
-} from '@/stores/sessions'
+import { useCardError, useReviving, useSessionCard } from '@/stores/sessions'
 import { agentOf, useSettingsStore } from '@/stores/settings'
+import { useProjects } from '@/stores/projects'
 import { useWsStore } from '@/stores/ws'
-
-/**
- * 「終了」を押してから `ended` を待つ上限（設計§5）。
- *
- * **実測（フェーズ1）は 80ms ／ 84ms ／ 92ms**（擬似 claude・ローカル・1本ずつ）。
- * いったん5秒（その約50倍）に置いたが、**通しの E2E で足りなかった**（フェーズ5）。
- *
- * **短く置いた側の代償のほうが重い。** 上限を超えると `Archive` を送らないので、
- * **終わっているのに一覧へ残る**。E2E の後片付けはそれを片付けきれず、席が埋まったまま
- * 次のテストが始まって「セッションが起動しない」という**遠い症状**に化けた。
- *
- * `helpers.ts` の `archiveAll` が同じことを先に記録している——「**通しで流すと
- * 往復が既定の5秒に収まらない。単独では出ず通しでだけ、たまに落ちる**」。
- * 相手が別の PC なら A2S の往復も乗る。**待つ相手は機械の速さではなく、その時の混み具合**である。
- *
- * 超えたら **`Archive` は送らない**。プロセスが落ちていないのに一覧から外すと、
- * 走ったままのセッションを画面から辿れなくなる。**待たせるのは、間違って外すより軽い。**
- */
-const 終了を待つ上限ミリ秒 = 20_000
 
 type View = 'transcript' | 'terminal'
 
@@ -95,6 +71,8 @@ export function SessionView({ cardId, compact = false }: Props) {
   const account = useAuthStore((state) => state.auth.account)
   // 中身は自分で購読する。横並びのとき、隣のセッションの状態変化で作り直されないため
   const session = useSessionCard(cardId)
+  // 名前の番号は**一覧ぜんぶ**を見て決まる（同じ名前が複数あるときだけ付く）
+  const projects = useProjects()
   const now = useNow()
   // 単独で開いたときは履歴が主役。横並びのときは一望して即操作したいのでターミナル
   const [view, setView] = useState<View>(compact ? 'terminal' : 'transcript')
@@ -104,9 +82,6 @@ export function SessionView({ cardId, compact = false }: Props) {
   // `backTargetFor` が持ち、ここは鍵を渡して結果に従うだけ
   const navigate = useNavigate()
   const location = useLocation()
-  // 「終了」を押してから `ended` を待っている間だけ立つ。**押した時刻を持つ**のは、
-  // 状態が動くたびに待ち時間が延びないようにするため
-  const [終了を頼んだ時刻, set終了を頼んだ時刻] = useState<number | null>(null)
   // ファイルのパネルと、PJT 専用画面へのリンクの**両方**で使う。同じ意味の式を
   // 2通りの綴りで置くと、片方だけ直す余地が残る
   const host = hostOf(session?.agent_id)
@@ -117,64 +92,6 @@ export function SessionView({ cardId, compact = false }: Props) {
     onToggle: toggleFiles,
   })
 
-  const 終了中 = 終了を頼んだ時刻 !== null
-  const 終わっている = session ? isEnded(session.status) : false
-  /**
-   * **「終了」を頼める相手が居ないか**（設計§5・フェーズ5の実測で足した）。
-   *
-   * PC との線が切れているカードへ `Kill` を送っても届かないので、`ended` は永遠に
-   * 返ってこない。**そこで「終了」しか出さないと、そのカードは一覧から二度と外せなくなる**
-   * ——`archiveAll`（E2E の後片付け）が丸ごと動かなくなって気づいた。
-   *
-   * 設計§5 は「走っている＝終了／終わっている＝削除」の2通りしか見ていなかったが、
-   * **実際には3通り目（終わってはいないが、届かない）が在る。** 届かないなら、
-   * できるのは一覧から外すことだけである。
-   */
-  const 届かない = session ? !session.agent_connected : false
-  const 外すだけ = 終わっている || 届かない
-  /**
-   * 「終了」を押したあとの段取り（設計§5）。
-   *
-   * ```
-   * Kill を送る → ボタンを「終了中…」にして無効化 → **ended になるのを待つ**
-   *   → Archive を送る → 単独画面なら一覧へ
-   * ```
-   *
-   * **`Kill` と `Archive` を同時に送らない。** 先に外すと、飛行中だった報告
-   * （`SessionUpsert`）が後から着地して記録が作り直される——**外したカードが一覧へ戻る**
-   * という未解決の壊れ方を踏みに行くことになる。
-   *
-   * `ended` を書くのは PTY の終了（`on_exit`）だけなので、**待つ＝プロセスが本当に
-   * 終わったのを待つ**と同じ意味になる（`SessionEnd` フックは状態を動かさない）。
-   */
-  useEffect(() => {
-    if (終了を頼んだ時刻 === null) {
-      return
-    }
-    if (終わっている) {
-      // **カードを外したら書きかけも忘れる。** 残すと、二度と開かない相手の
-      // 下書きが積み上がる（十字ボタン設計§11）
-      dropDraft(cardId, account)
-      archive(cardId)
-      set終了を頼んだ時刻(null)
-      // 横並びでは移らない。その画面はまだ他のセッションを映している
-      if (!compact) {
-        navigate(HOME)
-      }
-      return
-    }
-    // **残り時間で測る。** 状態が動くたびに待ち直すと、上限がいくらでも延びる
-    const 残り = 終了を待つ上限ミリ秒 - (Date.now() - 終了を頼んだ時刻)
-    const timer = setTimeout(() => {
-      set終了を頼んだ時刻(null)
-      setCardError(
-        cardId,
-        '終了の合図が返りませんでした。もう一度押すか、PC の接続を確かめてください',
-      )
-    }, Math.max(0, 残り))
-    return () => clearTimeout(timer)
-  }, [終了を頼んだ時刻, 終わっている, cardId, account, archive, compact, navigate])
-
   if (!session) {
     // 消えた直後の一瞬。単独表示のときは呼び出し側が「見つかりません」を出す
     return null
@@ -184,8 +101,9 @@ export function SessionView({ cardId, compact = false }: Props) {
   // ので、このボタンがその合図を兼ねる
   const revivable = reviveState(session, agentOf(agents, session.agent_id))
   const reviveWhy = reviveReason(revivable)
-  // 前半だけを縮ませ、末尾2階層は必ず残す（設計§3）
-  const { head, tail } = splitPathTail(session.project)
+  // **名前だけを出す**（設計§14-5）。同じ名前が複数あるときだけ番号が付く。
+  // フルパスは `title` に残すので、確かめたいときは乗せれば読める
+  const 名前 = projectDisplayName(session.project, projects)
 
   return (
     <section
@@ -219,71 +137,130 @@ export function SessionView({ cardId, compact = false }: Props) {
           **1行目は単独画面だけ**（設計§2）。横並びではパスが全カードで同じで、
           `GroupView` の見出しにも既に出ている。判定は既存の `compact` でできる
         */}
-        {!compact && (
-          <div data-row="1" className="flex min-w-0 items-center gap-2">
-            <FilesToggle open={filesOpen} onToggle={toggleFiles} />
-            {/*
-              **押すと PJT 専用画面へ移る**（`v0.1.53`）。器を1つも足さないのは、
-              置く先に空き余白が無いため——既に在るものを押せるようにすれば行も要素も増えない。
+        {/*
+          **1行目は「行き先と始末の行」**（設計§14-1）。**横並びでも出す**——始末の
+          ボタンと「開く」の置き場所がここしか無いため。出さないのは**パスと
+          サイドバーと ✕** の3つで、どれも横並びでは意味を持たない。
 
-              **割るのはリンクの中身で、リンクそのものは1つのまま。** 2つに割ると押せる的が
-              2つになる。`min-w-0` はリンク自身にも要る（flex の入れ物になるため）で、
-              `truncate` は前半の `<span>` へ移す（設計§3）
-            */}
+          **左が「移る」、右が「消す」。** 反対の端に置く原則は §2 のまま生きている。
+        */}
+        <div data-row="1" className="flex min-w-0 items-center gap-2">
+          {!compact && <FilesToggle open={filesOpen} onToggle={toggleFiles} />}
+          {compact ? (
+            /*
+              横並びの区画から、そのセッションの専用画面へ移る（設計§4）。
+              **`ml-auto` を付けない**——出たり消えたりする要素に寄せる指定を付けると、
+              出ないときに寄せ先ごと消えて並びが崩れる
+            */
+            <Link
+              to={sessionPath(session.card_id)}
+              data-testid="to-session"
+              className="text-primary shrink-0 text-xs underline"
+            >
+              開く
+            </Link>
+          ) : (
+            /*
+              **押すと PJT 専用画面へ移る**（`v0.1.53`）。器を1つも足さないのは、
+              置く先に空き余白が無いため。
+
+              **出すのは名前だけ**（設計§14-5）。この行には始末のボタンも並ぶので、
+              パスの長さに幅を明け渡せない。**フルパスは `title` に残す。**
+            */
             <Link
               to={projectPath(host, session.project)}
               data-testid="to-project"
-              className="decoration-muted-foreground/40 hover:decoration-foreground flex min-w-0 items-center font-medium underline underline-offset-2"
+              className="decoration-muted-foreground/40 hover:decoration-foreground min-w-0 truncate font-medium underline underline-offset-2"
               title={session.project}
             >
-              {head !== '' && (
-                <span data-testid="to-project-head" className="min-w-0 truncate">
-                  {head}
-                </span>
-              )}
-              {/* **末尾2階層は必ず残す。** 違いが出るのはたいてい末尾（設計§3） */}
-              <span className="shrink-0">{tail}</span>
+              {名前}
             </Link>
-            {/*
-              **✕ は1行目の右端、終了は4行目の右端。** 縦に離してあるのは、閉じるつもりで
-              終了を押す事故を避けるため（設計§5・§7）。
+          )}
 
-              **文字の記号は使わない**（`DESIGN.md` §14.4）。`FilesToggle` と同じ作りの
-              Outline のアイコンにしてある
-            */}
+          {/*
+            **始末の2つ**（設計§14-2）。結合はやめ、名前を入れ替えてある。
+
+            | ボタン | 送るもの |
+            |---|---|
+            | **スリープ** | `Kill`（止めるだけ。カードは残り、`復旧` で起こせる） |
+            | **終了** | `Archive`（カードを一覧から外す） |
+
+            **スリープは、走っていて届くときだけ出す。** 止まっている相手や線が
+            切れている相手へ送っても届かず、押せるのに何も起きないボタンは
+            **壊れているのと見分けが付かない**。
+
+            **終了はいつでも押せる。** 届かないカードを一覧から外す道が、ここしか無い。
+          */}
+          <div className="ml-auto flex shrink-0 items-center gap-2">
+            {!isEnded(session.status) && session.agent_connected && (
+              <Button
+                variant="outline"
+                size="sm"
+                data-testid="sleep-card"
+                title="セッションを止めます（カードは残り、復旧で起こせます）"
+                onClick={() => kill(session.card_id)}
+              >
+                スリープ
+              </Button>
+            )}
             <Button
-              type="button"
               variant="ghost"
-              size="icon"
-              data-testid="close-session"
-              aria-label="閉じる"
-              title="閉じる"
-              className="ml-auto shrink-0"
+              size="sm"
+              data-testid="close-card"
+              title="カードを一覧から外します（履歴は残ります）"
               onClick={() => {
-                // **三項演算子で1回にまとめない。** `navigate` の2つのオーバーロード
-                // （行き先 / 何個戻るか）に `string | number` は当たらず、`tsc -b` で落ちる
-                if (backTargetFor(location.key) === 'back') {
-                  navigate(-1)
-                  return
+                // **カードを外したら書きかけも忘れる。** 残すと、二度と開かない相手の
+                // 下書きが積み上がる（十字ボタン設計§11）
+                dropDraft(session.card_id, account)
+                archive(session.card_id)
+                // カードが無くなるので、その画面に留まる意味が無い
+                if (!compact) {
+                  navigate(HOME)
                 }
-                navigate(HOME)
               }}
             >
-              <svg
-                aria-hidden
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth={2}
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M18 6 6 18" />
-                <path d="m6 6 12 12" />
-              </svg>
+              終了
             </Button>
+            {/*
+              **✕ はいちばん右**（設計§14-6）。同じ行に「終了」が並ぶので、
+              **形で分ける**——✕ はアイコン、スリープと終了は文字。そして
+              **押し間違えても何も壊れない側を端に置く**（閉じるだけ）。
+            */}
+            {!compact && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                data-testid="close-session"
+                aria-label="閉じる"
+                title="閉じる"
+                className="shrink-0"
+                onClick={() => {
+                  // **三項演算子で1回にまとめない。** `navigate` の2つのオーバーロード
+                  // （行き先 / 何個戻るか）に `string | number` は当たらず、`tsc -b` で落ちる
+                  if (backTargetFor(location.key) === 'back') {
+                    navigate(-1)
+                    return
+                  }
+                  navigate(HOME)
+                }}
+              >
+                <svg
+                  aria-hidden
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M18 6 6 18" />
+                  <path d="m6 6 12 12" />
+                </svg>
+              </Button>
+            )}
           </div>
-        )}
+        </div>
 
         {/*
           **2行目は状態の行**（設計§2）。縮んでよいのはフック未受信だけで、
@@ -379,6 +356,27 @@ export function SessionView({ cardId, compact = false }: Props) {
               </Button>
             </>
           )}
+          {/*
+            **タブをやめてトグルにした**（設計§14-3）。2つの器が並ぶより1つの
+            スイッチのほうが簡単で、**行を1つ丸ごと減らせる**。
+
+            **既定は切れている＝構造化ビュー。** 別イシューで予定している
+            「既定を構造化ビューにする」と噛み合う（横並びだけは入った状態で始まる）。
+
+            **更新間隔もこの行へ。** ターミナルの話なので、トグルの隣が意味のまとまりに合う。
+          */}
+          <div className="ml-auto flex shrink-0 items-center gap-2">
+            <ScreenInterval
+              remote={session.agent_id !== null}
+              shown={view === 'terminal'}
+            />
+            <TerminalToggle
+              on={view === 'terminal'}
+              onToggle={() =>
+                setView(view === 'terminal' ? 'transcript' : 'terminal')
+              }
+            />
+          </div>
         </div>
       </header>
 
@@ -426,103 +424,6 @@ export function SessionView({ cardId, compact = false }: Props) {
           帯も入力欄も一緒に流れることになり、窓にした意味が消える（実測で踏んだ）。
         */}
         <div className="relative isolate flex min-h-0 min-w-0 flex-1 flex-col gap-2">
-        {/*
-          **これが帯の4行目**（設計§2）。`<header>` の中に無いのは、この行がサイドバーより
-          下の「中身の列」に居るため——上へ移すと、広い窓でサイドバーの上に跨ってしまう。
-
-          **両端に別々のものを置く。** 左が「開く」（移る）、右が「終了・削除」（消す）。
-          **「移る」と「消す」を隣り合わせにしない**——以前は折り返し次第で `削除` が左端へ
-          回り込み、長いパスのときに「開く」の真上（約40px）に並んでいた（実測）。
-          4行に決め打つと、この回り込みそのものが起きなくなる
-        */}
-        <div data-row="4" className="flex items-center gap-2">
-          {/*
-            横並びの区画から、そのセッションの専用画面へ移る（設計§4）。
-
-            **`ml-auto` を付けない。** これは `compact` のときだけ出る＝出たり
-            消えたりする要素で、寄せる指定を付けると出ないときに寄せ先ごと消えて
-            並びが崩れる（モデル不明のときバッジが左詰まりした事故と同じ形）。
-          */}
-          {compact && (
-            <Link
-              to={sessionPath(session.card_id)}
-              data-testid="to-session"
-              className="text-primary shrink-0 text-xs underline"
-            >
-              開く
-            </Link>
-          )}
-          <div
-            role="tablist"
-            className="border-border bg-background/60 flex w-fit gap-1 rounded-lg border p-0.5 text-sm"
-          >
-            <ViewTab
-              current={view}
-              value="transcript"
-              onSelect={setView}
-              cardId={cardId}
-            >
-              構造化ビュー
-            </ViewTab>
-            <ViewTab
-              current={view}
-              value="terminal"
-              onSelect={setView}
-              cardId={cardId}
-            >
-              ターミナル
-            </ViewTab>
-          </div>
-          <ScreenInterval remote={session.agent_id !== null} shown={view === 'terminal'} />
-          {/*
-            **寄せる指定は、必ず描かれる入れ物のほうへ持たせる**（ガイドライン）。
-            中のボタンは状態で入れ替わるので、そちらへ付けると出ないときに寄せ先ごと消える
-          */}
-          <div className="ml-auto flex shrink-0 items-center gap-2">
-            {/*
-              **ボタンは常に1つ。状態で意味が変わる**（設計§5・利用者の指定）。
-
-              | 状態 | ボタン | 押すと |
-              |---|---|---|
-              | 走っている | 終了 | `Kill` → `ended` を待つ → `Archive` → 単独画面なら一覧へ |
-              | 終わっている | 削除 | `Archive` だけ |
-
-              走っている間は「削除」が意味を持たないのに並んでおり、狭い画面で2つぶんの
-              幅を食っていた。**終わったカードを外す道は残す**——放っておくと消息不明の
-              カードが一覧に溜まり、**一覧の小窓には消すボタンが無い**（押すと開くだけ）。
-
-              **確認は挟まない。** `archive` は一覧から外すだけで履歴も記録も残るので、
-              押し間違いの重さは**配置**（✕ は1行目・これは4行目）と `title` で吸う。
-            */}
-            <Button
-              variant={外すだけ ? 'ghost' : 'outline'}
-              size="sm"
-              data-testid="close-card"
-              data-mode={外すだけ ? 'archive' : 'kill'}
-              disabled={終了中}
-              title={
-                外すだけ
-                  ? 'カードを一覧から外します（履歴は残ります）'
-                  : 'セッションを終了し、カードを一覧から外します（履歴は残ります）'
-              }
-              onClick={() => {
-                if (外すだけ) {
-                  dropDraft(session.card_id, account)
-                  archive(session.card_id)
-                  if (!compact) {
-                    navigate(HOME)
-                  }
-                  return
-                }
-                kill(session.card_id)
-                set終了を頼んだ時刻(Date.now())
-              }}
-            >
-              {終了中 ? '終了中…' : 外すだけ ? '削除' : '終了'}
-            </Button>
-          </div>
-        </div>
-
         {/* 表示していない側もマウントしたまま隠す（作り直さないため） */}
         <div className={`flex min-h-0 flex-1 flex-col ${view === 'transcript' ? '' : 'hidden'}`}>
           <TranscriptTree key={session.card_id} cardId={session.card_id} />
@@ -574,48 +475,55 @@ function ScreenInterval({ remote, shown }: { remote: boolean; shown: boolean }) 
   )
 }
 
-function ViewTab({
-  current,
-  value,
-  onSelect,
-  cardId,
-  children,
+/**
+ * ターミナルで見るかどうかのスイッチ（設計§14-3）。
+ *
+ * **2つのタブをやめた。** 「どちらを見るか」ではなく「**ターミナルで見るか**」に
+ * 言い換えると、器が1つで済み、帯の行を1つ減らせる。既定（切れている状態）が
+ * 構造化ビューなので、**別イシューで予定している「既定を構造化ビューにする」とも
+ * 噛み合う**。
+ *
+ * **`role="switch"` にしてある。** 見た目はトグルでも、読み上げに「押しボタン」と
+ * 伝わると、いまどちらを見ているのかが分からない。
+ *
+ * 入っているときの下地は **Primary Accent の面**（`DESIGN.md` §8 の床・§11.2）。
+ * 選択を面で出す1か所を、タブから引き継いでいる。
+ */
+function TerminalToggle({
+  on,
+  onToggle,
 }: {
-  current: View
-  value: View
-  onSelect: (view: View) => void
-  /** 下地の共有IDに混ぜる。横並び表示では同じ画面に複数のタブ列が並ぶため */
-  cardId: CardId
-  children: React.ReactNode
+  on: boolean
+  onToggle: () => void
 }) {
-  const active = current === value
   return (
     <button
       type="button"
-      role="tab"
-      aria-selected={active}
-      data-testid={`view-tab-${value}`}
-      onClick={() => onSelect(value)}
-      className={`relative rounded-md px-3 py-1 transition-colors ${
-        active ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'
+      role="switch"
+      aria-checked={on}
+      data-testid="terminal-toggle"
+      onClick={onToggle}
+      title="ターミナルで見る"
+      className={`flex shrink-0 items-center gap-1.5 rounded-md px-1.5 py-0.5 text-xs transition-colors ${
+        on ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'
       }`}
     >
-      {/*
-        選択中の下地だけを動かす。切り替えたことが分かればよく、中身は動かさない。
-
-        **ここが、この画面で Primary Accent を「面」で出す1か所**（`DESIGN.md` §8 の床・
-        §11.2・§15.1）。以前は `bg-muted` の灰色で、**画面にアクセントが面で1つも無かった**
-        ——禁止事項を全部守っても「ただの暗い IDE」に着地する、と §6 が言っている形そのもの
-        だった。押す場所が1つに決まっているタブは、§15.1 の「主要操作は1つだけ塗る」に合う。
-      */}
-      {active && (
-        <motion.span
-          layoutId={`view-tab-active-${cardId}`}
-          transition={{ type: 'spring', stiffness: 400, damping: 32 }}
-          className="absolute inset-0 rounded-md bg-[var(--accent-face)] shadow-sm ring-1 ring-[var(--accent-edge)]"
+      {/* 器（レール）と玉。**入っているときだけ面が色を持つ** */}
+      <span
+        aria-hidden
+        className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full border transition-colors ${
+          on
+            ? 'border-[var(--accent-edge)] bg-[var(--accent-face)]'
+            : 'border-border bg-muted/40'
+        }`}
+      >
+        <span
+          className={`absolute size-3 rounded-full transition-all ${
+            on ? 'left-[0.875rem] bg-foreground' : 'left-0.5 bg-muted-foreground'
+          }`}
         />
-      )}
-      <span className="relative">{children}</span>
+      </span>
+      ターミナル
     </button>
   )
 }

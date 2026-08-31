@@ -370,40 +370,27 @@ describe('SessionView の行き来', () => {
     )
   })
 
-  it('パスは縮んでよいまま（帯の行数が増えないこと）', () => {
+  it('出すのは PJT の名前だけで、フルパスは title に残る', () => {
+    // **1行目には始末のボタンも並ぶ**ので、パスの長さに幅を明け渡せない（設計§14-5）。
+    // 名前だけでは「どの機械のどこか」が分からなくなるので、フルパスは `title` へ
+    applySessionSnapshot([meta()])
+    renderView()
+
+    const link = screen.getByTestId('to-project')
+    expect(link).toHaveTextContent('app')
+    expect(link).not.toHaveTextContent('/home/example')
+    expect(link).toHaveAttribute('title', '/home/example/dev/app')
+  })
+
+  it('名前は縮んでよいまま（帯の行数が増えないこと）', () => {
     // `min-w-0` が無いと flex の子は中身より小さくならず `truncate` が効かない。
-    // 長いパスのときに状態のラベルが縦に割れる＝**行が増える**（設計§3）
-    //
-    // **`truncate` は前半の `<span>` へ移した**（設計§3）。リンクは2つに割った中身の
-    // 入れ物になったので、リンク自身には `min-w-0` だけが要る
+    // 長い名前のときに始末のボタンが押し出される
     applySessionSnapshot([meta()])
     renderView()
 
     const link = screen.getByTestId('to-project')
     expect(link).toHaveClass('min-w-0')
-    expect(link).toHaveClass('flex')
-
-    const [head, tail] = Array.from(link.querySelectorAll('span'))
-    expect(head).toHaveClass('min-w-0')
-    expect(head).toHaveClass('truncate')
-    expect(tail).toHaveClass('shrink-0')
-  })
-
-  it('パスは前半だけが縮み、末尾2階層は必ず残る', () => {
-    // **壊し方**：`min-w-0` を前半から外すと、flex の子は中身より小さくならないので
-    // `truncate` が効かず、パスがそのまま行を押し広げる（設計§3・テスト計画フェーズ2の
-    // 最後の1項目をここへ送った）
-    applySessionSnapshot([meta()])
-    renderView()
-
-    const link = screen.getByTestId('to-project')
-    const [head, tail] = Array.from(link.querySelectorAll('span'))
-    expect(head).toHaveTextContent('/home/example')
-    expect(tail).toHaveTextContent('/dev/app')
-    // 割っても1文字も落とさない
-    expect((head.textContent ?? '') + (tail.textContent ?? '')).toBe(
-      '/home/example/dev/app',
-    )
+    expect(link).toHaveClass('truncate')
   })
 
   it('「開く」に寄せる指定を付けない（出ないときに並びが崩れるため）', () => {
@@ -415,26 +402,24 @@ describe('SessionView の行き来', () => {
 })
 
 /**
- * 帯を4行に決め打ったこと（設計§2・テスト計画フェーズ3）。
+ * 帯を3行に決め打ったこと（設計§14-1・テスト計画フェーズ6）。
  *
  * # なぜ行を機械で見るのか
  *
- * **「4行に収まったか」は目でしか分からないが、「どの要素がどの行に居るか」は機械で
- * 見られる。** 見え方の良し悪しは実機（フェーズ5）に任せ、ここでは**条件付きで出る
- * ものが出ても行が増えないこと**を固定する——これは実機で毎回作れる状況ではない
- * （PC の線を抜く・フックを止める、を組み合わせないと出ない）。
+ * **「3行に収まったか」は目でしか分からないが、「どの要素がどの行に居るか」は機械で
+ * 見られる。** 見え方の良し悪しは実機に任せ、ここでは**条件付きで出るものが出ても
+ * 行が増えないこと**を固定する——これは実機で毎回作れる状況ではない。
  *
- * 行の目印は `data-row`。1〜3行目は `<header>` の中に、**4行目はタブの行**にある
- * （サイドバーより下の「中身の列」に居るため。設計§2）。
+ * **4行から3行になった**（要件の訂正・2026-09-01）。タブの行が消え、始末のボタンが
+ * 1行目へ来て、**横並びでも1行目が出る**ようになった。
  */
-describe('SessionView の帯は4行', () => {
+describe('SessionView の帯は3行', () => {
   function rows(): string[] {
     return Array.from(document.querySelectorAll('[data-row]')).map(
       (element) => element.getAttribute('data-row') ?? '',
     )
   }
 
-  /** その要素がどの行に居るか。居なければ `null` */
   function rowOf(testId: string): string | null {
     const element = screen.queryByTestId(testId)
     return element?.closest('[data-row]')?.getAttribute('data-row') ?? null
@@ -448,11 +433,19 @@ describe('SessionView の帯は4行', () => {
 
   beforeEach(() => {
     useSettingsStore.setState({ settings: settingsFixture(), loading: false })
+    useWsStore.setState({ kill: vi.fn(), archive: vi.fn() })
   })
 
-  it('単独画面の帯はちょうど4行', () => {
+  it('単独画面の帯はちょうど3行', () => {
     show(meta())
-    expect(rows()).toEqual(['1', '2', '3', '4'])
+    expect(rows()).toEqual(['1', '2', '3'])
+  })
+
+  it('横並びでも3行（1行目は中身が違うだけ）', () => {
+    // **§2 の「1行目は出さない」を覆した。** あの行は当時パスの行だったが、
+    // いまは「行き先と始末の行」なので、横並びにも要る（設計§14-1）
+    show(meta(), true)
+    expect(rows()).toEqual(['1', '2', '3'])
   })
 
   it('どの要素がどの行に居るかが決まっている', () => {
@@ -460,18 +453,35 @@ describe('SessionView の帯は4行', () => {
 
     expect(rowOf('project-files-toggle')).toBe('1')
     expect(rowOf('to-project')).toBe('1')
+    expect(rowOf('sleep-card')).toBe('1')
+    expect(rowOf('close-card')).toBe('1')
     expect(rowOf('close-session')).toBe('1')
     expect(rowOf('model-picker')).toBe('3')
     expect(rowOf('permission-mode-picker')).toBe('3')
-    expect(rowOf('view-tab-transcript')).toBe('4')
-    expect(rowOf('view-tab-terminal')).toBe('4')
+    expect(rowOf('terminal-toggle')).toBe('3')
+  })
+
+  it('横並びの1行目は、左端が「開く」で右端が始末', () => {
+    // **「移る」と「消す」を反対の端に置く**（設計§2 の原則はそのまま生きている）。
+    // パス・サイドバー・✕ は出ない
+    show(meta(), true)
+
+    expect(rowOf('to-session')).toBe('1')
+    expect(rowOf('close-card')).toBe('1')
+    expect(screen.queryByTestId('to-project')).toBeNull()
+    expect(screen.queryByTestId('project-files-toggle')).toBeNull()
+    expect(screen.queryByTestId('close-session')).toBeNull()
+
+    const 行 = screen.getByTestId('to-session').closest('[data-row="1"]')
+    const 中身 = Array.from(行!.children)
+    expect(中身[0]).toHaveAttribute('data-testid', 'to-session')
+    expect(中身[中身.length - 1]).toHaveTextContent('終了')
   })
 
   it('フック未受信が出ても行が増えない（2行目に収まる）', () => {
     show(meta({ status: { kind: 'unknown' }, hooks_seen: false }))
-
     expect(rowOf('hook-warning')).toBe('2')
-    expect(rows()).toEqual(['1', '2', '3', '4'])
+    expect(rows()).toEqual(['1', '2', '3'])
   })
 
   it('復旧が出ても行が増えない（3行目に収まる）', () => {
@@ -481,13 +491,28 @@ describe('SessionView の帯は4行', () => {
         claude_session_id: '22222222-2222-2222-2222-222222222222',
       }),
     )
-
     expect(rowOf('revive-button')).toBe('3')
-    expect(rows()).toEqual(['1', '2', '3', '4'])
+    expect(rows()).toEqual(['1', '2', '3'])
   })
 
-  it('終了したカードでは、起こし直しのモードのバッジと復旧が同じ行に並ぶ', () => {
-    // ピッカーが消えた場所へ入れ替わりに入る。**3行目は空にならない**
+  it('更新間隔も3行目（ターミナルの話なので、トグルの隣）', () => {
+    useSettingsStore.setState({
+      settings: settingsFixture({
+        intervals: {
+          sync_interval_secs: 20,
+          screen_interval_ms: 20_000,
+          scrollback_lines: 1000,
+        },
+      }),
+      loading: false,
+    })
+    show(meta({ agent_id: 'agent-1' }), true)
+
+    expect(rowOf('screen-interval')).toBe('3')
+    expect(rows()).toEqual(['1', '2', '3'])
+  })
+
+  it('スリープしたカードでは、起こし直しのモードのバッジと復旧が3行目に並ぶ', () => {
     show(
       meta({
         status: { kind: 'ended', ok: true },
@@ -499,13 +524,10 @@ describe('SessionView の帯は4行', () => {
     expect(screen.queryByTestId('model-picker')).toBeNull()
     expect(rowOf('revive-mode')).toBe('3')
     expect(rowOf('revive-button')).toBe('3')
-    expect(rows()).toEqual(['1', '2', '3', '4'])
+    expect(rows()).toEqual(['1', '2', '3'])
   })
 
   it('条件付きのものが重なっても行が増えない', () => {
-    // **片方ずつ見ても、重なったときのことは分からない。**
-    // `revive-mode` のバッジと「フック未受信」は同時には出ない（前者は `ended`・
-    // 後者は `unknown` が条件で、状態は1つしか持てない）ので、数えるのはこの組
     show(
       meta({
         status: { kind: 'unknown' },
@@ -514,126 +536,90 @@ describe('SessionView の帯は4行', () => {
         claude_session_id: '22222222-2222-2222-2222-222222222222',
       }),
     )
-
     expect(screen.getByTestId('hook-warning')).toBeInTheDocument()
     expect(screen.getByTestId('revive-button')).toBeInTheDocument()
-    expect(rows()).toEqual(['1', '2', '3', '4'])
+    expect(rows()).toEqual(['1', '2', '3'])
   })
 
   it('最終活動の表記が変わっても、行の数も所属も変わらない', () => {
-    // **3件目の要件そのもの。** 放っておくだけで文字数が変わる唯一の要素なので、
-    // 折り返す作りだと「画面を見ているだけで行数が入れ替わる」。
-    // **高さが動かないことは実ブラウザで見る**（jsdom は幅も高さも測らない）
-    // `たった今` → `30秒前` → `3分前` → `12日前`。字数が 4→4→3→5 と動く
     const 経過 = [0, 30_000, 3 * 60_000, 12 * 86_400_000]
     for (const 差 of 経過) {
       clearSessions()
       applySessionSnapshot([meta({ last_activity_at: NOW - 差 })])
       const { unmount } = renderView()
-      expect(rows(), `経過 ${差}ms で行が変わった`).toEqual(['1', '2', '3', '4'])
-      expect(rowOf('to-project')).toBe('1')
+      expect(rows(), `経過 ${差}ms で行が変わった`).toEqual(['1', '2', '3'])
       unmount()
     }
   })
 
   it('モデルとモードは同じ幅で、ラベルの文字を出さない', () => {
-    // **3行目に 8rem×2 を収めるため**にラベルの文字を落とした（帯の設計§4）。
-    // 値そのもの（`Opus 5` ／ `手動確認`）が名前として読めるので判別はできるが、
-    // **読み上げには何も残らなくなる**ので `aria-label` は必ず要る
     show(meta({ agent_connected: true, permission_mode: 'default' }))
 
     const モデル = screen.getByTestId('model-picker')
     const モード = screen.getByTestId('permission-mode-picker')
-
-    // 同じ幅（要件：「モードはモデルと同じ幅に揃える」）
     expect(モデル).toHaveClass('w-32')
     expect(モード).toHaveClass('w-32')
-
-    // ラベルの文字は出ない
     expect(モデル).not.toHaveTextContent('モデル')
     expect(モード).not.toHaveTextContent('モード')
-
-    // 読み上げ用は残っている
     expect(モデル).toHaveAttribute('aria-label', 'モデル')
     expect(モード).toHaveAttribute('aria-label', '権限モード')
   })
+})
 
-  it('更新間隔が出ても行が増えない（4行目に収まる）', () => {
-    // 別の PC のセッションを、ターミナルで見ているときだけ出る（設計§2）
-    useSettingsStore.setState({
-      settings: settingsFixture({
-        intervals: {
-          sync_interval_secs: 20,
-          screen_interval_ms: 20_000,
-          scrollback_lines: 1000,
-        },
-      }),
-      loading: false,
-    })
+describe('SessionView のターミナルのトグル', () => {
+  function show(compact = false) {
     clearSessions()
-    applySessionSnapshot([meta({ agent_id: 'agent-1' })])
-    renderView({ compact: true })
+    applySessionSnapshot([meta()])
+    renderView({ compact })
+  }
 
-    expect(rowOf('screen-interval')).toBe('4')
-    expect(rows()).toEqual(['2', '3', '4'])
+  beforeEach(() => {
+    useSettingsStore.setState({ settings: settingsFixture(), loading: false })
   })
 
-  it('フック未受信と更新間隔が同時に出ても行が増えない', () => {
-    // **片方ずつ見ても、重なったときのことは分からない。**
-    // 2行目と4行目に1つずつ増える形
-    useSettingsStore.setState({
-      settings: settingsFixture({
-        intervals: {
-          sync_interval_secs: 20,
-          screen_interval_ms: 20_000,
-          scrollback_lines: 1000,
-        },
-      }),
-      loading: false,
-    })
-    clearSessions()
-    applySessionSnapshot([
-      meta({
-        agent_id: 'agent-1',
-        status: { kind: 'unknown' },
-        hooks_seen: false,
-      }),
-    ])
-    renderView({ compact: true })
-
-    expect(rowOf('hook-warning')).toBe('2')
-    expect(rowOf('screen-interval')).toBe('4')
-    expect(rows()).toEqual(['2', '3', '4'])
+  it('単独画面は切れた状態（構造化ビュー）で始まる', () => {
+    // **別イシューで予定している「既定を構造化ビューにする」と噛み合う**（設計§14-3）
+    show()
+    expect(screen.getByTestId('terminal-toggle')).toHaveAttribute(
+      'aria-checked',
+      'false',
+    )
+    expect(screen.getByTestId('session-view')).toHaveAttribute(
+      'data-view',
+      'transcript',
+    )
   })
 
-  it('横並びでは1行目を出さない', () => {
-    // パスは全カードで同じで、`GroupView` の見出しにも既に出ている（設計§2）
-    show(meta(), true)
-
-    expect(rows()).toEqual(['2', '3', '4'])
-    expect(screen.queryByTestId('to-project')).toBeNull()
-    expect(screen.queryByTestId('project-files-toggle')).toBeNull()
-    expect(screen.queryByTestId('close-session')).toBeNull()
+  it('横並びは入った状態（ターミナル）で始まる', () => {
+    show(true)
+    expect(screen.getByTestId('terminal-toggle')).toHaveAttribute(
+      'aria-checked',
+      'true',
+    )
   })
 
-  it('横並びでも2〜4行目は出る（1行目だけが違う）', () => {
-    show(meta({ agent_connected: true }), true)
+  it('押すと行き来する', async () => {
+    show()
+    const toggle = screen.getByTestId('terminal-toggle')
 
-    expect(rowOf('model-picker')).toBe('3')
-    expect(rowOf('view-tab-terminal')).toBe('4')
-    expect(screen.getByRole('button', { name: '終了' })).toBeInTheDocument()
+    await userEvent.click(toggle)
+    expect(toggle).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByTestId('session-view')).toHaveAttribute(
+      'data-view',
+      'terminal',
+    )
+
+    await userEvent.click(toggle)
+    expect(toggle).toHaveAttribute('aria-checked', 'false')
   })
 
-  it('4行目は、左端が「開く」で右端が終了・削除', () => {
-    // **「移る」と「消す」を隣り合わせにしない**（設計§2）。以前は折り返し次第で
-    // `削除` が左端へ回り込み、「開く」の真上に並んでいた
-    show(meta(), true)
-
-    const 行 = screen.getByTestId('to-session').closest('[data-row="4"]')
-    expect(行).not.toBeNull()
-    const 中身 = Array.from(行!.children)
-    expect(中身[0]).toHaveAttribute('data-testid', 'to-session')
-    expect(中身[中身.length - 1]).toHaveTextContent('終了')
+  it('押しボタンではなくスイッチとして読み上げられる', () => {
+    // 見た目がトグルでも「押しボタン」と伝わると、いまどちらを見ているのか分からない
+    show()
+    expect(screen.getByTestId('terminal-toggle')).toHaveAttribute(
+      'role',
+      'switch',
+    )
   })
 })
 
@@ -653,29 +639,38 @@ describe('SessionView の ✕（閉じる）', () => {
     expect(screen.getByTestId('close-session')).toBeInTheDocument()
   })
 
-  it('横並びには出ない（1行目ごと出ないため）', () => {
+  it('横並びには出ない', () => {
     show(true)
     expect(screen.queryByTestId('close-session')).toBeNull()
   })
 
   it('読み上げ用の名前が付いている', () => {
-    // **文字の記号ではなくアイコン**なので（`DESIGN.md` §14.4）、名前が無いと
-    // 読み上げでは何も無いのと同じになる
     show()
     expect(screen.getByTestId('close-session')).toHaveAttribute(
       'aria-label',
       '閉じる',
     )
   })
+
+  it('同じ行の「終了」とは形が違う（アイコンと文字）', () => {
+    // **同じ行に並ぶようになった**ので、縦に離す形では分けられない（設計§14-6）。
+    // 押し間違えても何も壊れない側（閉じるだけ）をいちばん右に置く
+    show()
+    const 行 = screen.getByTestId('close-session').closest('[data-row="1"]')
+    const 右 = Array.from(行!.querySelectorAll('button'))
+    expect(右[右.length - 1]).toHaveAttribute('data-testid', 'close-session')
+    expect(screen.getByTestId('close-session').querySelector('svg')).not.toBeNull()
+    expect(screen.getByTestId('close-card').querySelector('svg')).toBeNull()
+  })
 })
 
 /**
- * 終了と削除の結合（設計§5・テスト計画フェーズ3）。
+ * スリープと終了（設計§14-2・テスト計画フェーズ6）。
  *
- * **ここだけは見た目の工事ではない。** 押し間違いで走っている作業が止まる度合いが上がる
- * ので、順序と断り方を機械で固定する。
+ * **結合をやめ、名前を入れ替えた。** 「スリープ」が `Kill` だけ（カードは残る）、
+ * 「終了」が `Archive` だけ。
  */
-describe('SessionView の終了ボタン', () => {
+describe('SessionView のスリープと終了', () => {
   function show(session: SessionMeta, compact = false) {
     clearSessions()
     applySessionSnapshot([session])
@@ -692,172 +687,77 @@ describe('SessionView の終了ボタン', () => {
     )
   }
 
-  /** サーバから「終わった」が届いた、を作る */
-  function 終わったことにする() {
-    act(() => {
-      applySessionSnapshot([meta({ status: { kind: 'ended', ok: true } })])
-    })
-  }
-
   beforeEach(() => {
     useSettingsStore.setState({ settings: settingsFixture(), loading: false })
     useWsStore.setState({ kill: vi.fn(), archive: vi.fn() })
   })
 
-  it('走っているセッションでは「終了」1つだけが出る', () => {
-    show(meta())
-
-    const button = screen.getByTestId('close-card')
-    expect(button).toHaveTextContent('終了')
-    expect(button.dataset.mode).toBe('kill')
-    // **「削除」が同時に並ばない**（要件：冗長さを消す）
-    expect(screen.queryByRole('button', { name: '削除' })).toBeNull()
+  it('走っているカードには、スリープと終了が両方出る', () => {
+    show(meta({ agent_connected: true }))
+    expect(screen.getByTestId('sleep-card')).toHaveTextContent('スリープ')
+    expect(screen.getByTestId('close-card')).toHaveTextContent('終了')
   })
 
-  it('終わっているセッションでは「削除」1つだけが出る', () => {
-    // **消す道は残す。** 放っておくと消息不明のカードが一覧に溜まり、
-    // 一覧の小窓には消すボタンが無い（押すと開くだけ）
-    show(meta({ status: { kind: 'ended', ok: true } }))
-
-    const button = screen.getByTestId('close-card')
-    expect(button).toHaveTextContent('削除')
-    expect(button.dataset.mode).toBe('archive')
-  })
-
-  it('押すとまず Kill が送られ、ended になるまで Archive は送らない', async () => {
-    // **壊し方**：`Kill` の直後に `Archive` を送る形にすると、ここが落ちる。
-    // 先に外すと、飛行中だった報告が後から着地して**外したカードが一覧へ戻る**
+  it('スリープを押すと Kill だけが送られ、カードは残る', async () => {
+    // **結合との違いそのもの。** 以前は `Kill` のあと `Archive` まで送っていた
     const kill = vi.fn()
     const archive = vi.fn()
     useWsStore.setState({ kill, archive })
-    show(meta())
+    show(meta({ agent_connected: true }))
 
-    await userEvent.click(screen.getByTestId('close-card'))
+    await userEvent.click(screen.getByTestId('sleep-card'))
 
     expect(kill).toHaveBeenCalledWith(CARD)
     expect(archive).not.toHaveBeenCalled()
-  })
-
-  it('待っている間はボタンが無効になる（連打で Kill が二重に飛ばない）', async () => {
-    const kill = vi.fn()
-    useWsStore.setState({ kill, archive: vi.fn() })
-    show(meta())
-
-    const button = screen.getByTestId('close-card')
-    await userEvent.click(button)
-
-    expect(button).toBeDisabled()
-    expect(button).toHaveTextContent('終了中…')
-    await userEvent.click(button)
-    expect(kill).toHaveBeenCalledTimes(1)
-  })
-
-  it('ended になったら Archive が送られ、単独画面なら一覧へ移る', async () => {
-    const archive = vi.fn()
-    useWsStore.setState({ kill: vi.fn(), archive })
-    show(meta())
-
-    await userEvent.click(screen.getByTestId('close-card'))
-    終わったことにする()
-
-    await waitFor(() => expect(archive).toHaveBeenCalledWith(CARD))
-    expect(screen.getByText('一覧に居ます')).toBeInTheDocument()
-  })
-
-  it('横並びでは、外れても移らない', async () => {
-    // その画面はまだ他のセッションを映している
-    const archive = vi.fn()
-    useWsStore.setState({ kill: vi.fn(), archive })
-    show(meta(), true)
-
-    await userEvent.click(screen.getByTestId('close-card'))
-    終わったことにする()
-
-    await waitFor(() => expect(archive).toHaveBeenCalledWith(CARD))
+    // 画面もそのまま（一覧へ移らない）
     expect(screen.queryByText('一覧に居ます')).toBeNull()
   })
 
-  it('上限を超えても ended にならないときは、Archive を送らずに断る', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true })
-    try {
-      const archive = vi.fn()
-      useWsStore.setState({ kill: vi.fn(), archive })
-      show(meta())
-
-      await userEvent.click(screen.getByTestId('close-card'))
-      await act(async () => {
-        // 上限は20秒（フェーズ1の実測は 80〜92ms だが、**通しの E2E で5秒では
-        // 足りなかった**——待つ相手は機械の速さではなく、その時の混み具合）
-        vi.advanceTimersByTime(20_100)
-      })
-
-      // **プロセスが落ちていないのに外すと、走ったままのセッションを辿れなくなる**
-      expect(archive).not.toHaveBeenCalled()
-      expect(screen.getByTestId('card-error')).toHaveTextContent(
-        '終了の合図が返りませんでした',
-      )
-      // 押し直せる状態へ戻る
-      expect(screen.getByTestId('close-card')).toBeEnabled()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('終わっているカードで押すと、Archive だけが送られる', async () => {
-    const kill = vi.fn()
-    const archive = vi.fn()
-    useWsStore.setState({ kill, archive })
+  it('スリープしたカードには、スリープを出さない', () => {
+    // 止まっている相手へ送っても届かない。**押せるのに何も起きないボタンは、
+    // 壊れているのと見分けが付かない**
     show(meta({ status: { kind: 'ended', ok: true } }))
-
-    await userEvent.click(screen.getByTestId('close-card'))
-
-    expect(kill).not.toHaveBeenCalled()
-    expect(archive).toHaveBeenCalledWith(CARD)
-  })
-})
-
-describe('SessionView の終了ボタン（届かないカード）', () => {
-  beforeEach(() => {
-    useSettingsStore.setState({ settings: settingsFixture(), loading: false })
-    useWsStore.setState({ kill: vi.fn(), archive: vi.fn() })
+    expect(screen.queryByTestId('sleep-card')).toBeNull()
+    expect(screen.getByTestId('close-card')).toBeInTheDocument()
   })
 
-  it('PC との線が切れているカードには「削除」を出す', () => {
-    // **終わってはいないが、届かない**——設計§5 が見落としていた3通り目。
-    // `Kill` を送っても届かないので `ended` は永遠に返らず、「終了」しか出さないと
-    // **そのカードは一覧から二度と外せなくなる**（E2E の後片付けが全滅して気づいた）
-    clearSessions()
-    applySessionSnapshot([
-      meta({
-        agent_id: 'agent-1',
-        agent_connected: false,
-        status: { kind: 'working' },
-      }),
-    ])
-    renderView()
-
-    const button = screen.getByTestId('close-card')
-    expect(button).toHaveTextContent('削除')
-    expect(button.dataset.mode).toBe('archive')
+  it('線が切れているカードにも、スリープを出さない', () => {
+    show(meta({ agent_connected: false, status: { kind: 'working' } }))
+    expect(screen.queryByTestId('sleep-card')).toBeNull()
   })
 
-  it('届かないカードを押すと、Kill を送らずに外すだけ', async () => {
+  it('終了を押すと Archive だけが送られ、単独画面なら一覧へ移る', async () => {
     const kill = vi.fn()
     const archive = vi.fn()
     useWsStore.setState({ kill, archive })
-    clearSessions()
-    applySessionSnapshot([
-      meta({
-        agent_id: 'agent-1',
-        agent_connected: false,
-        status: { kind: 'working' },
-      }),
-    ])
-    renderView()
+    show(meta({ agent_connected: true }))
 
     await userEvent.click(screen.getByTestId('close-card'))
 
-    expect(kill).not.toHaveBeenCalled()
     expect(archive).toHaveBeenCalledWith(CARD)
+    expect(kill).not.toHaveBeenCalled()
+    expect(screen.getByText('一覧に居ます')).toBeInTheDocument()
+  })
+
+  it('線が切れているカードでも、終了は押せる', async () => {
+    // **一覧から外す道が、ここしか無い**（設計§14-2）
+    const archive = vi.fn()
+    useWsStore.setState({ kill: vi.fn(), archive })
+    show(meta({ agent_connected: false, status: { kind: 'working' } }))
+
+    await userEvent.click(screen.getByTestId('close-card'))
+
+    expect(archive).toHaveBeenCalledWith(CARD)
+  })
+
+  it('横並びでは、終了を押しても移らない', async () => {
+    const archive = vi.fn()
+    useWsStore.setState({ kill: vi.fn(), archive })
+    show(meta({ agent_connected: true }), true)
+
+    await userEvent.click(screen.getByTestId('close-card'))
+
+    expect(archive).toHaveBeenCalledWith(CARD)
+    expect(screen.queryByText('一覧に居ます')).toBeNull()
   })
 })

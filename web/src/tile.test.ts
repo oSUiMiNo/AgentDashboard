@@ -204,11 +204,12 @@ describe('静けさの3段', () => {
   it('「控えめ」が止めるのは作業中のものだけ', () => {
     const 控えめ = 当たる("[data-quiet='calm']")
     // 輪の回転と、**走るアニメーション**（フェーズ13。止める1本＋1コマ目で静止する1本）と、
-    // **停滞の休み**（フェーズ17。人を消す1本＋タグを出す1本）。当たり先はこの4種に閉じる
+    // **停滞の休み**（フェーズ17。人を消す1本＋タグを出す1本）と、**スリープの `zzz`**
+    // （帯の設計§14-4。消して札へ戻す1本）。当たり先はこの5種に閉じる
     expect(控えめ.length).toBeGreaterThanOrEqual(5)
     for (const rule of 控えめ) {
       expect(rule.selector).toMatch(
-        /\[data-motion='spin-fast'\]|\.tile-run-rest|\.tile-tag-rest|\.tile-run/,
+        /\[data-motion='spin-fast'\]|\.tile-run-rest|\.tile-tag-rest|\.tile-run|\.tile-zzz/,
       )
     }
     const 当たり先 = 控えめ.map((rule) => rule.selector).join(' ')

@@ -6,6 +6,7 @@ import {
   fireHook,
   openDashboard,
   openSession,
+  setTerminalView,
   showTerminal,
   showTranscript,
   spawnSession,
@@ -802,7 +803,7 @@ test('横並びでは、構造化ビューへ切り替えたときに末尾か�
   await expect(view).toHaveAttribute('data-view', 'terminal')
 
   // 切り替えて箱に高さが付いた、その描画で初めて寄せる
-  await view.getByTestId('view-tab-transcript').click()
+  await setTerminalView(view, false)
   await expect(view).toHaveAttribute('data-view', 'transcript')
   await expect(view.getByTestId('transcript-status')).toHaveAttribute('data-at-end', 'true')
 })

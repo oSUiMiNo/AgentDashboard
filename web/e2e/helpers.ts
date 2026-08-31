@@ -526,15 +526,32 @@ export async function openSession(page: Page, tile: Locator) {
   await expectTerminalToContain(page, '[fake-claude] ready')
 }
 
-/** ターミナルのタブへ切り替える。 */
+/**
+ * ターミナルで見るかどうかを、狙った状態にする（帯の設計§14-3）。
+ *
+ * **2つのタブがトグル1つになった**ので、「押す」ではなく「**その状態にする**」形に
+ * してある——既に入っているものをもう一度押すと切れてしまう。
+ *
+ * 受け取るのはページでも区画（`Locator`）でもよい。**横並びでは同じ画面に複数の
+ * トグルが並ぶ**ので、そのときは区画で絞る。
+ */
+export async function setTerminalView(scope: Page | Locator, on: boolean) {
+  const toggle = scope.getByTestId('terminal-toggle')
+  if ((await toggle.getAttribute('aria-checked')) !== String(on)) {
+    await toggle.click()
+  }
+  await expect(toggle).toHaveAttribute('aria-checked', String(on))
+}
+
+/** ターミナルで見る状態にする。 */
 export async function showTerminal(page: Page) {
-  await page.getByTestId('view-tab-terminal').click()
+  await setTerminalView(page, true)
   await expect(page.getByTestId('session-view')).toHaveAttribute('data-view', 'terminal')
 }
 
-/** 構造化ビューのタブへ切り替える。 */
+/** 構造化ビューで見る状態にする。 */
 export async function showTranscript(page: Page) {
-  await page.getByTestId('view-tab-transcript').click()
+  await setTerminalView(page, false)
   await expect(page.getByTestId('session-view')).toHaveAttribute('data-view', 'transcript')
 }
 

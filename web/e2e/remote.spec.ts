@@ -7,6 +7,7 @@ import {
   openDashboard,
   openSession,
   scrollTerminalToBottom,
+  setTerminalView,
   spawnSession,
   swipeTerminal,
   takeSentFrames,
@@ -111,7 +112,7 @@ test('端末を閉じても一覧と履歴は動き続ける', async ({ page }) 
   await openSession(page, tile)
 
   // 構造化ビューへ戻す＝ターミナルの購読を続けたまま、画面を見ていない状態
-  await page.getByTestId('view-tab-transcript').click()
+  await setTerminalView(page, false)
   await expect(page.getByTestId('session-view')).toHaveAttribute(
     'data-view',
     'transcript',
@@ -121,7 +122,7 @@ test('端末を閉じても一覧と履歴は動き続ける', async ({ page }) 
   await page.getByTestId('composer-input').fill('画面を見ていなくても届く')
   await page.keyboard.press('Control+Enter')
 
-  await page.getByTestId('view-tab-terminal').click()
+  await setTerminalView(page, true)
   await expectTerminalToContain(
     page,
     '[fake-claude] received: 画面を見ていなくても届く',
