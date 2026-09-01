@@ -440,6 +440,7 @@ export function SessionView({ cardId, compact = false }: Props) {
         <InputDock
           cardId={session.card_id}
           status={session.status}
+          host={host}
           compact={compact}
           terminalShown={view === 'terminal'}
         />

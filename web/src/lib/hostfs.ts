@@ -137,6 +137,57 @@ export async function readBlob(
 }
 
 /**
+ * 置いた添付。Rust 側の `protocol::fs::WrittenBlob` と同じ綴り。
+ *
+ * **中身は返らない。** 要るのは置いた場所だけで、画像そのものは履歴のときに
+ * 生ファイルの口で取り返す（画像添付 設計§10-3）。
+ */
+export interface WrittenBlob {
+  /** 置いた絶対パス。**本文へ混ぜて claude へ渡す**のはこれ */
+  path: string
+  media_type: string
+  bytes: number
+}
+
+/**
+ * 画像を PC のディスクへ置く（画像添付 設計§3）。
+ *
+ * # なぜ送信を押してから運ぶのか
+ *
+ * 先に運んでおくと、外したときに**置いたものが残る**。要件は「送る前に見えて
+ * 取り消せる」ことを求めているので、**押すまではブラウザの中にしか無い**形にする
+ * （設計§2）。運ぶのは押したあと、本文を組み立てるより前。
+ *
+ * # 断り方は [`readBlob`] と同じ
+ *
+ * 415（種別が違う）と 413（大きすぎ）をサーバが言い分けているので、
+ * **本文をそのまま持ち上げる**。ここでまとめて「置けません」にすると、
+ * 利用者が直せるもの（別の形式で撮り直す）まで直せなくなる。
+ */
+export async function uploadAttachment(
+  host: string,
+  cardId: string,
+  file: File,
+): Promise<WrittenBlob> {
+  const response = await fetch(
+    `/api/hosts/${encodeURIComponent(host)}/attachments?card=${encodeURIComponent(cardId)}`,
+    {
+      method: 'POST',
+      // **媒体型はヘッダで言う。** サーバは中身から推測しない（設計§3）
+      headers: { 'Content-Type': file.type },
+      body: file,
+    },
+  )
+  if (!response.ok) {
+    throw new HostFsError(
+      response.status,
+      await reason(response, '画像を置けませんでした'),
+    )
+  }
+  return (await response.json()) as WrittenBlob
+}
+
+/**
  * `root` から見た相対パス。**基準を組み立てる場所をここ1つに閉じる**（設計§15）。
  *
  * 基準が分からない相対パスは、貼られた側で解釈できない。だから画面には必ず
@@ -178,15 +229,22 @@ function prefixOf(root: string): string {
   return base.endsWith('/') ? base : `${base}/`
 }
 
-/** 断りの本文。空なら状態コードから当たり障りのない文を作る。 */
-async function reason(response: Response): Promise<string> {
+/**
+ * 断りの本文。空なら状態コードから当たり障りのない文を作る。
+ *
+ * **既定の文を呼ぶ側から渡す。** 引く口と置く口では、本文が無いときに言うべきことが
+ * 違う（「読めませんでした」と「置けませんでした」）。1つに決め打つと、
+ * **押した操作と関係のない文**が画面に出る。
+ */
+async function reason(
+  response: Response,
+  fallback = 'フォルダを読めませんでした',
+): Promise<string> {
   const text = (await response.text()).trim()
   if (text !== '') {
     return text
   }
-  return response.status === 404
-    ? 'その場所は見つかりません'
-    : 'フォルダを読めませんでした'
+  return response.status === 404 ? 'その場所は見つかりません' : fallback
 }
 
 /** 子のパス。**画面で文字列を継ぎ足さない**（区切りの重なりがここに閉じる）。 */

@@ -45,6 +45,11 @@ interface Props {
   cardId: CardId
   status: SessionStatus
   /**
+   * このカードを抱えている PC。**素通しするだけ**で、ここでは使わない
+   * （画像添付 設計§9-2——添付の口を出すかどうかを `Composer` が決める）。
+   */
+  host?: string | null
+  /**
    * 横並び表示（グループビュー）で使うときは**十字を出さない**。
    *
    * 理由は「12個は多い」ではなく、**宛先が1つに定まらない**から。決定を離した瞬間に
@@ -67,6 +72,7 @@ interface Props {
 export function InputDock({
   cardId,
   status,
+  host = null,
   compact = false,
   terminalShown = true,
 }: Props) {
@@ -197,6 +203,7 @@ export function InputDock({
         <Composer
           cardId={cardId}
           status={status}
+          host={host}
           className="min-w-0 flex-1"
         />
       </div>

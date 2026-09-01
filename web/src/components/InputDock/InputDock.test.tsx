@@ -283,7 +283,8 @@ describe('十字が出ている間の入力欄', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '送信' }))
 
-    expect(sent).toHaveBeenCalledWith(CARD, '送る')
+    // 第3引数は添付のパス。付けていないので空（画像添付 設計§6）
+    expect(sent).toHaveBeenCalledWith(CARD, '送る', [])
   })
 })
 

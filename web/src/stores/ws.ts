@@ -141,7 +141,16 @@ interface WsState {
   sendPtyInput: (cardId: CardId, data: Uint8Array) => void
   /** Composer からの指示送信。改行の扱いはサーバ側で決まる（設計§6） */
   /** 指示を送る。**送れたら真**（入力欄が書きかけを消してよいかの判断に使う） */
-  sendInput: (cardId: CardId, text: string) => boolean
+  /**
+   * 指示を1つ送る。`attachments` は**置き終わった添付の絶対パス**（画像添付 設計§6）。
+   *
+   * 運ぶのはパスだけで、画像そのものは先に REST で置いてある。
+   */
+  sendInput: (
+    cardId: CardId,
+    text: string,
+    attachments?: string[],
+  ) => boolean
   /** ターミナルの購読を始める。戻り値を呼ぶと購読を止める */
   subscribeTerminal: (
     cardId: CardId,
@@ -374,7 +383,8 @@ export const useWsStore = create<WsState>((set) => ({
   },
 
   setFlow: (cardId, state) => send({ t: 'pty_flow', card_id: cardId, state }),
-  sendInput: (cardId, text) => send({ t: 'send_input', card_id: cardId, text }),
+  sendInput: (cardId, text, attachments) =>
+    send({ t: 'send_input', card_id: cardId, text, attachments }),
 
   sendPtyInput: (cardId, data) => {
     if (socket?.readyState !== WebSocket.OPEN) {

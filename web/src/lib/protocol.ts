@@ -167,6 +167,24 @@ export type Node =
       subagent: SubagentRef | null
     }
   | { kind: 'subagent'; agent_type: string; spawn_depth: number }
+  /**
+   * 送った画像（画像添付 設計§10-1）。
+   *
+   * **画像そのものは載らない。** 載るのは置き場所・媒体型・元の名前だけで、
+   * 絵は履歴を開いたときに生ファイルの口から取り返す（§10-3）。base64 を
+   * ここへ載せると、履歴を1画面ぶん配るたびに画像が丸ごと線に乗る。
+   *
+   * `path` が `null` になることがある。claude がクリップボードから直に受けた
+   * 画像には**ディスク上の置き場所が無い**ためで、そのときは
+   * **絵は出せないが「画像があった」ことは出せる**（§21 読み替え1）。
+   */
+  | {
+      kind: 'image'
+      path: string | null
+      media_type: string | null
+      /** 利用者が付けていた名前。ディスク上の採番した名前とは別物（§5） */
+      file_name: string | null
+    }
   /** 寛容パースの受け皿。知らない構造でも情報を落とさずに運ばれてくる */
   | { kind: 'unknown'; record_type: string; raw: unknown }
 
@@ -223,7 +241,16 @@ export type ClientMessage =
   // 以下は初期実装でフェーズ3〜4に回した3つ。**いまは全部サーバ側も配線済み**
   | { t: 'sub_transcript'; card_id: CardId }
   | { t: 'unsub_transcript'; card_id: CardId }
-  | { t: 'send_input'; card_id: CardId; text: string }
+  /**
+   * 指示を1つ送る。
+   *
+   * `attachments` は**置き終わった添付の絶対パス**（画像添付 設計§6）。画像そのものは
+   * 先に REST（`uploadAttachment`）で置いてあり、ここを通るのはその返事のパスだけ——
+   * JSON へ生のバイト列を出すと base64 で 4/3 に膨らむ（§3-1）。
+   *
+   * 省いてよい（Rust 側が `#[serde(default)]` で受ける）。
+   */
+  | { t: 'send_input'; card_id: CardId; text: string; attachments?: string[] }
 
 /** サーバ → ブラウザ。 */
 export type ServerMessage =

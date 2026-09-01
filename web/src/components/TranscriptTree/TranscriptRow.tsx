@@ -36,6 +36,9 @@ import ReactMarkdown from 'react-markdown'
 import type { HunkTokens } from 'react-diff-view'
 import { Diff, Hunk } from 'react-diff-view'
 import type { CardId, Node } from '@/lib/protocol'
+import { HostFsError, readBlob } from '@/lib/hostfs'
+import { hostOf } from '@/lib/reviveBudget'
+import { useSessionCard } from '@/stores/sessions'
 import { countChanges, toDiffSource } from '@/lib/diff'
 import { tokenizeHunks } from '@/lib/highlight'
 import {
@@ -79,6 +82,8 @@ function heading(node: Node): { label: string; tone: string } {
       return { label: node.name, tone: 'text-violet-300' }
     case 'subagent':
       return { label: `サブエージェント ${node.agent_type}`, tone: 'text-amber-300' }
+    case 'image':
+      return { label: '画像', tone: 'text-sky-300' }
     case 'unknown':
       return { label: `未知のレコード（${node.record_type}）`, tone: 'text-orange-300' }
   }
@@ -140,6 +145,10 @@ function summary(node: Node): string {
       return summarizeInput(node.input)
     case 'subagent':
       return `深さ ${node.spawn_depth}`
+    case 'image':
+      // **元の名前を出す**（画像添付 設計§10-1）。ディスク上は採番した名前なので、
+      // それを出しても押した人には何のことか分からない
+      return node.file_name ?? ''
     case 'unknown':
       return ''
   }
@@ -147,7 +156,13 @@ function summary(node: Node): string {
 
 /** 本文を常に出す種別か（＝開け閉めが子だけを担う種別か）。 */
 function showsBodyAlways(node: Node): boolean {
-  return node.kind === 'user_message' || node.kind === 'assistant_text'
+  return (
+    node.kind === 'user_message' ||
+    node.kind === 'assistant_text' ||
+    // 画像も常に出す。**畳んで名前だけにすると、何を送ったのかが読めない**
+    // ——絵そのものが本文にあたる種別である（画像添付 設計§10-3）
+    node.kind === 'image'
+  )
 }
 
 /**
@@ -356,6 +371,100 @@ function NodeRowView({
   )
 }
 
+/**
+ * 送った画像を出す（画像添付 設計§10-3）。
+ *
+ * **`Node` に絵は載っていない。** 載っているのは置き場所だけなので、ここで
+ * **生ファイルの口から取り返す**——履歴を配るたびに画像が線に乗るのを避けるための
+ * 分け方で、`FileView` が画像を出すのと同じ道である。
+ *
+ * **`<img src>` に口の URL を直に渡さない。** `<img>` の失敗は理由を運べないので、
+ * 断られたのか壊れているのかを画面が言えなくなる（`readBlob` が先に状態を見る）。
+ *
+ * # 消えた添付は「読めません」と言い分ける
+ *
+ * 添付は3カ月で掃かれるが、**記録には置き場所が残り続ける**（掃除は記録を触らない）。
+ * だから古い履歴を開くと 404 になる。これは壊れているのではなく**期限が来ただけ**
+ * なので、そう言う（§10-5）。
+ */
+function ImageBody({
+  node,
+  cardId,
+}: {
+  node: Extract<Node, { kind: 'image' }>
+  cardId: CardId
+}) {
+  const session = useSessionCard(cardId)
+  const host = hostOf(session?.agent_id)
+  const [url, setUrl] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const path = node.path
+
+  useEffect(() => {
+    if (path === null) {
+      return
+    }
+    let alive = true
+    let made: string | null = null
+    void (async () => {
+      try {
+        const found = await readBlob(host, path)
+        made = found.url
+        if (alive) {
+          setUrl(found.url)
+        } else {
+          URL.revokeObjectURL(found.url)
+          made = null
+        }
+      } catch (err) {
+        if (alive) {
+          setError(
+            err instanceof HostFsError && err.status === 404
+              ? 'この画像は保管期間を過ぎました'
+              : err instanceof Error
+                ? err.message
+                : '画像を読めませんでした',
+          )
+        }
+      }
+    })()
+    return () => {
+      alive = false
+      // **作った URL は必ず捨てる。** 忘れると、開くたびにブラウザの中で溜まる
+      if (made !== null) {
+        URL.revokeObjectURL(made)
+      }
+    }
+  }, [host, path])
+
+  // 置き場所そのものが無い（claude がクリップボードから直に受けた画像。§21 読み替え1）。
+  // **絵は出せないが、画像があったことは出せる**
+  if (path === null) {
+    return (
+      <p className="text-muted-foreground mt-1 ml-6 text-xs">
+        画像（この画像は手元に残っていません）
+      </p>
+    )
+  }
+  if (error !== null) {
+    return (
+      <p className="text-muted-foreground mt-1 ml-6 text-xs">{error}</p>
+    )
+  }
+  if (url === null) {
+    return (
+      <p className="text-muted-foreground mt-1 ml-6 text-xs">読み込み中…</p>
+    )
+  }
+  return (
+    <img
+      src={url}
+      alt={node.file_name ?? '添付した画像'}
+      className="mt-1 ml-6 max-h-96 max-w-full rounded border border-border object-contain"
+    />
+  )
+}
+
 /** 行の中身。本文は整形して出し、ツールの中身は現状のまま出す。 */
 function RowBody({
   node,
@@ -368,7 +477,6 @@ function RowBody({
   row: NodeRow
   onToggleBody: () => void
 }) {
-  void cardId
   switch (node.kind) {
     case 'user_message':
     case 'assistant_text':
@@ -402,6 +510,8 @@ function RowBody({
       )
     case 'tool_call':
       return <ToolCallBody input={node.input} result={node.result} />
+    case 'image':
+      return <ImageBody node={node} cardId={cardId} />
     case 'unknown':
       return (
         <pre className="text-muted-foreground mt-1 ml-6 max-h-64 overflow-auto text-xs">
