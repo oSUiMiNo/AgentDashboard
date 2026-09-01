@@ -25,6 +25,33 @@ pub enum Block {
         content: Value,
         is_error: bool,
     },
+    /// 送った画像（画像添付 設計§10-2）。
+    ///
+    /// **base64 は運ばない。** この段では媒体型しか分からず、**置き場所は相棒レコード
+    /// が持っている**（§21 読み替え1）。結びつけるのはスレッディング層の仕事。
+    Image {
+        media_type: Option<String>,
+    },
+    /// 相棒レコードが運ぶ置き場所（画像添付 設計§21 読み替え1）。
+    ///
+    /// 中身は `[Image: source: <絶対パス>]` の**パスだけ**を抜いたもの。
+    /// **それ自体はノードにならず**、同じ `promptId` の本体の [`Block::Image`] へ合流する。
+    ImageSource {
+        path: String,
+    },
+}
+
+/// 相棒レコードの text ブロックから、置き場所だけを抜く。
+///
+/// 綴りは `[Image: source: <絶対パス>]`（実測・claude 2.1.252）。**当たらなければ
+/// `None`**——形が変わったときに、パスでない文字列を置き場所として拾わないため。
+fn image_source(text: &str) -> Option<String> {
+    let inner = text.trim().strip_prefix("[Image:")?.strip_suffix(']')?;
+    let path = inner.trim().strip_prefix("source:")?.trim();
+    if path.is_empty() {
+        return None;
+    }
+    Some(path.to_string())
 }
 
 /// ブラウザへ運ぶ値の上限。
@@ -40,13 +67,14 @@ pub fn blocks(record: &Record) -> Vec<Block> {
         return Vec::new();
     };
     let assistant = record.record_type == "assistant";
+    let companion = record.is_turn_companion();
 
     match message.get("content") {
         // 最初のプロンプトは content が素の文字列で入る（実データで確認）
         Some(Value::String(text)) => vec![text_block(assistant, text)],
         Some(Value::Array(items)) => items
             .iter()
-            .filter_map(|item| block(assistant, item))
+            .filter_map(|item| block(assistant, companion, item))
             .collect(),
         _ => Vec::new(),
     }
@@ -60,13 +88,26 @@ fn text_block(assistant: bool, text: &str) -> Block {
     }
 }
 
-fn block(assistant: bool, item: &Value) -> Option<Block> {
+fn block(assistant: bool, companion: bool, item: &Value) -> Option<Block> {
     let block_type = item.get("type").and_then(Value::as_str).unwrap_or("");
     match block_type {
         "text" => {
             let text = item.get("text").and_then(Value::as_str).unwrap_or_default();
+            // 相棒レコードの text は**発言ではなく置き場所**（§21 読み替え1）。
+            // ここで見分けないと `[Image: source: …]` が発言として履歴に並ぶ
+            if companion {
+                return image_source(text).map(|path| Block::ImageSource { path });
+            }
             Some(text_block(assistant, text))
         }
+        // 送った画像。**中身（base64）は捨てる**——置き場所は相棒が持っている
+        "image" => Some(Block::Image {
+            media_type: item
+                .get("source")
+                .and_then(|source| source.get("media_type"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        }),
         "thinking" => {
             let text = item
                 .get("thinking")

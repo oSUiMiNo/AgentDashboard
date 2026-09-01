@@ -109,6 +109,32 @@ impl Record {
         self.raw.get("toolUseResult")
     }
 
+    /// この行が**相棒レコード**か（画像添付 設計§21 読み替え1）。
+    ///
+    /// claude は画像付きのターンで `user` レコードを**2つ**書く。本体が
+    /// `imagePasteIds` と `image` ブロックを持ち、相棒が `isMeta` ＋ `turnCompanion` で
+    /// **画像1枚につき1ブロック**の `[Image: source: <絶対パス>]` を持つ。
+    ///
+    /// **相棒は履歴に出さない。** そのまま通すと `[Image: source: …]` という発言が
+    /// 混ざって見える——あれは claude の内部の覚え書きであって、利用者が書いた文ではない。
+    pub fn is_turn_companion(&self) -> bool {
+        self.flag("isMeta") && self.flag("turnCompanion")
+    }
+
+    /// 本体と相棒を結ぶ鍵（画像添付 設計§21 読み替え1）。
+    ///
+    /// **`imagePasteIds` は鍵にしない。** あれは `[Image #N]` の表示番号で、
+    /// **セッションを跨いで通し番号が続く**（実測：`[1]` / `[2]` / `[3..7]` / `[8..27]`）。
+    /// 対応は本体と相棒の**並び**で取る。
+    pub fn prompt_id(&self) -> Option<&str> {
+        self.raw.get("promptId")?.as_str()
+    }
+
+    /// 真偽の欄を読む。**欄ごと無ければ `false`**。
+    fn flag(&self, key: &str) -> bool {
+        self.raw.get(key).and_then(Value::as_bool).unwrap_or(false)
+    }
+
     /// CLI が付けたセッションの名前（`ai-title` の行が持つ `aiTitle`）。
     ///
     /// **中身が無いときは `None` を返す。** 欄ごと無い・文字列でない・空白しか無い、の

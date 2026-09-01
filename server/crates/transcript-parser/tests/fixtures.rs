@@ -127,6 +127,7 @@ fn kind_of(node: &Node) -> &'static str {
         Node::Thinking { .. } => "thinking",
         Node::ToolCall { .. } => "tool",
         Node::Subagent { .. } => "subagent",
+        Node::Image { .. } => "image",
         Node::Unknown { .. } => "unknown",
     }
 }

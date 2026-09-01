@@ -251,6 +251,10 @@ fn main() {
     let mut choice = 0usize;
     // これまでに出した添付チップの数。**通し番号**なので送信をまたいでも戻さない
     let mut image_marks = 0usize;
+    // 貼り付けで受け取り、まだ確定していない画像の置き場所
+    let mut pending_images: Vec<String> = Vec::new();
+    // 記録に書いたターンの数。レコードの `uuid` と `promptId` を分けるための連番
+    let mut image_turns = 0usize;
 
     for input in InputReader::new() {
         let line = match input {
@@ -306,15 +310,20 @@ fn main() {
             Input::PasteEnd(images) => {
                 // 本物はディスクから読んで縮めるので、すぐには出ない
                 std::thread::sleep(IMAGE_DELAY);
-                for _ in images {
+                for _ in &images {
                     image_marks += 1;
                     let _ = write!(out, "[Image #{image_marks}]");
                 }
                 let _ = out.flush();
+                // 確定が来るまで抱えておく。**記録は確定したターンのぶんだけ**書く
+                // ——チップが出た時点で書くと、送らずに畳んだぶんまで履歴に残る
+                pending_images = images;
                 continue;
             }
             // 入力欄が畳まれた。**チップごと消える**のが `Ctrl+U` との違い
             Input::Cancel => {
+                // 送らずに畳んだので、記録にも残さない
+                pending_images.clear();
                 let _ = writeln!(out, "{CANCELLED_MARKER}");
                 let _ = out.flush();
                 continue;
@@ -444,6 +453,17 @@ fn main() {
             let _ = writeln!(out, "{RECEIVED_PREFIX}{line}");
         }
         let _ = out.flush();
+
+        // 画像を抱えたまま確定した＝画像付きのターン。**本物と同じ2レコード**を書く
+        if !pending_images.is_empty() {
+            image_turns += 1;
+            let paths = std::mem::take(&mut pending_images);
+            append_image_turn(&injected, line, &paths, image_turns);
+            // **書いただけでは読まれない。** 本物はターンの終わりにフックを撃ち、
+            // それがセッションホストに履歴を読ませる契機になる（初期実装§5）。
+            // ここを省くと「ファイルには在るのに画面に出ない」形で E2E だけが落ちる
+            hook(&mut out, &injected, "Stop");
+        }
 
         // 本物は「新しいアシスタントメッセージが届いたとき」に statusLine を走らせる
         conversation_started = true;
@@ -1012,6 +1032,60 @@ fn build_payload(injected: &Injected, event: &str, extra: &str) -> String {
 /// `--transcript` を渡されていればそれを使う（`jsonl` 命令で中身を書ける）。
 /// 渡されていなければ本物に似せた、存在しなくてよいパスを返す。**存在しないことは
 /// 異常ではない**（JSONL は結果整合のチャネルで、フックより遅れて現れる）。
+/// 画像を添付したターンの記録を、**本物と同じ2レコードの形**で書く
+/// （画像添付 設計§21 読み替え1）。
+///
+/// 本物は `user` レコードを2つ書く。本体が `imagePasteIds` と `image` ブロックを持ち、
+/// 相棒（`isMeta` ＋ `turnCompanion`）が**画像1枚につき1ブロック**の
+/// `[Image: source: <絶対パス>]` を持つ。両者は `promptId` が同じ。
+///
+/// **形を勝手に決めない。** ここが本物とずれると、擬似だけが通る実装ができる——
+/// パーサは相棒から置き場所を取るので、相棒が無い形にすると絵が出ないまま緑になる。
+fn append_image_turn(injected: &Injected, text: &str, paths: &[String], seq: usize) {
+    let target = transcript_path(injected);
+    if let Some(parent) = std::path::Path::new(&target).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&target)
+    else {
+        return;
+    };
+
+    let prompt = format!("prompt-{seq}");
+    let ids: Vec<String> = (1..=paths.len()).map(|n| n.to_string()).collect();
+    let images: Vec<String> = paths
+        .iter()
+        .map(|_| {
+            r#"{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}"#
+                .to_string()
+        })
+        .collect();
+    let body = format!(
+        r#"{{"type":"user","uuid":"img-body-{seq}","promptId":"{prompt}","imagePasteIds":[{}],"message":{{"content":[{{"type":"text","text":{}}},{}]}}}}"#,
+        ids.join(","),
+        serde_json::Value::String(text.to_string()),
+        images.join(",")
+    );
+    let sources: Vec<String> = paths
+        .iter()
+        .map(|path| {
+            let 綴り = serde_json::Value::String(format!("[Image: source: {path}]"));
+            format!(r#"{{"type":"text","text":{綴り}}}"#)
+        })
+        .collect();
+    let companion = format!(
+        r#"{{"type":"user","uuid":"img-companion-{seq}","promptId":"{prompt}","isMeta":true,"turnCompanion":true,"message":{{"content":[{}]}}}}"#,
+        sources.join(",")
+    );
+
+    let _ = writeln!(file, "{body}");
+    let _ = writeln!(file, "{companion}");
+    let _ = file.flush();
+}
+
 fn transcript_path(injected: &Injected) -> String {
     if let Some(path) = &injected.transcript {
         return path.clone();

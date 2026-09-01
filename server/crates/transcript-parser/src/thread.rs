@@ -106,6 +106,16 @@ struct FileState {
     branch: u32,
     /// 本体ファイルで観測した「根になるユーザ発言」の数。2件目以降が巻き戻しの跡
     roots_seen: u32,
+    /// 画像を出したが**置き場所がまだ届いていない**ノード（画像添付 設計§21 読み替え1）。
+    ///
+    /// claude は本体レコード（`image` ブロック）を先に書き、置き場所は
+    /// **相棒レコード**（`isMeta` ＋ `turnCompanion`）で後から書く。だから本体を
+    /// 読んだ時点では絵の在り処が分からない。**同じ `promptId` の相棒が来たら、
+    /// 並び順で結びつける**（`imagePasteIds` は通し番号なので鍵にしない）。
+    ///
+    /// 相棒が**来ないこともある**（クリップボードから直に貼った画像）。そのときは
+    /// `path` が `None` のまま残り、画面は「手元に残っていません」と出す。
+    pending_images: HashMap<String, std::collections::VecDeque<TreeNode>>,
 }
 
 /// 1セッション（本体＋サブエージェント群）ぶんのスレッディング。
@@ -327,6 +337,47 @@ impl SessionThreader {
                         branch,
                     });
                     last_emitted = Some(node_id);
+                }
+                // 送った画像。**この時点では置き場所が分からない**——相棒レコードが
+                // 後から運んでくる（§21 読み替え1）。先に出しておいて、届いたら
+                // 同じ ID で送り直す（ツールコールに結果が付くのと同じ形）
+                Block::Image { media_type } => {
+                    let node = TreeNode {
+                        id: node_id.clone(),
+                        parent: root.clone(),
+                        node: Node::Image {
+                            path: None,
+                            media_type,
+                            file_name: None,
+                        },
+                        ts,
+                        branch,
+                    };
+                    if let Some(prompt) = record.prompt_id() {
+                        self.file(source)
+                            .pending_images
+                            .entry(prompt.to_string())
+                            .or_default()
+                            .push_back(node.clone());
+                    }
+                    emitted.push(node);
+                    last_emitted = Some(node_id);
+                }
+                // 相棒が運んできた置き場所。**それ自体はノードにならない**——
+                // 待っている画像へ合流させ、同じ ID で送り直す
+                Block::ImageSource { path } => {
+                    let waiting = record
+                        .prompt_id()
+                        .and_then(|prompt| self.file(source).pending_images.get_mut(prompt))
+                        .and_then(std::collections::VecDeque::pop_front);
+                    if let Some(mut node) = waiting {
+                        if let Node::Image { path: slot, .. } = &mut node.node {
+                            *slot = Some(path);
+                        }
+                        emitted.push(node);
+                    }
+                    // 待っている画像が無ければ**黙って捨てる**。相棒だけが届く形
+                    // （本体を読み飛ばした・順序が入れ替わった）で、出せる絵は無い
                 }
                 Block::Thinking(text) => {
                     emitted.push(TreeNode {
@@ -566,6 +617,7 @@ mod tests {
                 Node::Thinking { .. } => "thinking",
                 Node::ToolCall { .. } => "tool",
                 Node::Subagent { .. } => "subagent",
+                Node::Image { .. } => "image",
                 Node::Unknown { .. } => "unknown",
             })
             .collect()
@@ -1015,5 +1067,124 @@ mod tests {
             r#"{"type":"user","uuid":"u2","version":"2.1.220"}"#,
         );
         assert_eq!(threader.stats().versions.len(), 2);
+    }
+
+    /// 本体レコードの中身（画像1枚）。**置き場所は入っていない**。
+    fn 本体(prompt: &str, 枚数: usize) -> String {
+        let images: Vec<String> = (0..枚数)
+            .map(|_| {
+                r#"{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}"#
+                    .to_string()
+            })
+            .collect();
+        let ids: Vec<String> = (1..=枚数).map(|n| n.to_string()).collect();
+        format!(
+            r#"{{"type":"user","uuid":"b-{prompt}","promptId":"{prompt}","imagePasteIds":[{}],
+               "message":{{"content":[{{"type":"text","text":"これを見て"}},{}]}}}}"#,
+            ids.join(","),
+            images.join(",")
+        )
+    }
+
+    /// 相棒レコード。**置き場所だけ**を1枚につき1ブロックで運ぶ。
+    fn 相棒(prompt: &str, paths: &[&str]) -> String {
+        let blocks: Vec<String> = paths
+            .iter()
+            .map(|path| format!(r#"{{"type":"text","text":"[Image: source: {path}]"}}"#))
+            .collect();
+        format!(
+            r#"{{"type":"user","uuid":"c-{prompt}","promptId":"{prompt}","isMeta":true,
+               "turnCompanion":true,"message":{{"content":[{}]}}}}"#,
+            blocks.join(",")
+        )
+    }
+
+    fn 置き場所(node: &TreeNode) -> Option<&str> {
+        match &node.node {
+            Node::Image { path, .. } => path.as_deref(),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn 画像は相棒レコードの置き場所と結びつく() {
+        // claude は本体（`image` ブロック）を先に書き、置き場所は相棒
+        // （`isMeta` ＋ `turnCompanion`）で後から書く（設計§21 読み替え1）
+        let mut threader = SessionThreader::new();
+        let body = feed(&mut threader, &本体("p1", 1));
+        assert_eq!(kinds(&body), ["user", "image"]);
+        // この時点では在り処が分からない
+        assert_eq!(置き場所(&body[1]), None);
+
+        let companion = feed(&mut threader, &相棒("p1", &["/state/a.png"]));
+        // **相棒そのものは発言にならない。** 出るのは画像の送り直し1件だけ
+        assert_eq!(kinds(&companion), ["image"]);
+        assert_eq!(置き場所(&companion[0]), Some("/state/a.png"));
+        // **同じ ID で送り直す**（ツールコールに結果が付くのと同じ形）
+        assert_eq!(companion[0].id, body[1].id);
+    }
+
+    #[test]
+    fn 複数枚は並びで対応を取る() {
+        // **`imagePasteIds` を鍵にしない。** あれはセッションを跨いで続く通し番号で、
+        // 1枚目が `#8` から始まることがある。対応は並びで取る
+        let mut threader = SessionThreader::new();
+        let body = feed(&mut threader, &本体("p2", 3));
+        assert_eq!(kinds(&body), ["user", "image", "image", "image"]);
+
+        let companion = feed(
+            &mut threader,
+            &相棒("p2", &["/state/a.png", "/state/b.png", "/state/c.png"]),
+        );
+        let paths: Vec<Option<&str>> = companion.iter().map(置き場所).collect();
+        assert_eq!(
+            paths,
+            [
+                Some("/state/a.png"),
+                Some("/state/b.png"),
+                Some("/state/c.png")
+            ]
+        );
+        // 送り直しの ID が、本体で出した画像の並びと一致すること
+        let 本体のID: Vec<&NodeId> = body[1..].iter().map(|n| &n.id).collect();
+        let 相棒のID: Vec<&NodeId> = companion.iter().map(|n| &n.id).collect();
+        assert_eq!(本体のID, 相棒のID);
+    }
+
+    #[test]
+    fn 相棒が来なければ置き場所は無いまま残る() {
+        // クリップボードから直に貼った画像には置き場所が無い（§21 読み替え1）。
+        // **絵は出せないが「画像があった」ことは出せる**
+        let mut threader = SessionThreader::new();
+        let body = feed(&mut threader, &本体("p3", 1));
+        assert_eq!(置き場所(&body[1]), None);
+        // 別の promptId の相棒が来ても、こちらは埋まらない
+        let 他人 = feed(&mut threader, &相棒("p9", &["/state/z.png"]));
+        assert!(他人.is_empty(), "覚えのない相棒から画像が生えた: {他人:?}");
+    }
+
+    #[test]
+    fn 相棒の文は発言として履歴に出ない() {
+        // そのまま通すと `[Image: source: …]` が発言に見える。あれは claude の
+        // 内部の覚え書きであって、利用者が書いた文ではない
+        let mut threader = SessionThreader::new();
+        feed(&mut threader, &本体("p4", 1));
+        let companion = feed(&mut threader, &相棒("p4", &["/state/a.png"]));
+        assert!(
+            !kinds(&companion).contains(&"user"),
+            "相棒が発言として出ている: {:?}",
+            kinds(&companion)
+        );
+    }
+
+    #[test]
+    fn 画像のbase64は運ばない() {
+        // 20枚のターン1本が 854,952 バイトになった実測がある（§19 前提2）。
+        // **載せるのは置き場所と媒体型だけ**
+        let mut threader = SessionThreader::new();
+        let body = feed(&mut threader, &本体("p5", 1));
+        let 中身 = serde_json::to_string(&body[1].node).expect("書けること");
+        assert!(!中身.contains("AAAA"), "base64 が載っている: {中身}");
+        assert!(中身.contains("image/png"), "媒体型が落ちている: {中身}");
     }
 }

@@ -212,6 +212,10 @@ pub fn render_transcript(nodes: &[TreeNode], has_more: bool) -> String {
                 format!("🔧 {name} [{status:?}]")
             }
             Node::Subagent { agent_type, .. } => format!("🧑‍🔧 サブエージェント: {agent_type}"),
+            // 名前が無いこともある（クリップボードから直に貼った画像）
+            Node::Image { file_name, .. } => {
+                format!("🖼 画像: {}", file_name.as_deref().unwrap_or("（名前なし）"))
+            }
             Node::Unknown { record_type, .. } => format!("？ 不明なイベント（{record_type}）"),
         };
         out.push_str(&format!("{}  {line}\n", node.id.0));
