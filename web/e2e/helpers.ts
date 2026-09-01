@@ -746,3 +746,26 @@ export async function pickOption(picker: Locator, value: string) {
     .locator(`[role="option"][data-value="${value}"]`)
     .click()
 }
+
+/**
+ * 画像を1枚添付する（画像添付 設計§9）。
+ *
+ * **「＋」の口（`<input type="file">`）から入れる。** ドラッグ＆ドロップと貼り付けは
+ * Playwright に素の口が無く、`DataTransfer` を自分で組み立てて撃つことになる——
+ * それは**ブラウザの中でイベントを合成しているだけ**で、実際に人が落としたのとは別物
+ * である。3経路が同じ入口を通ることは単体テスト（`lib/attachments.test.ts`）が
+ * 見ているので、ここでは**運んで届くところ**に絞る。
+ */
+export async function attachImage(
+  scope: Page | Locator,
+  name = 'shot.png',
+): Promise<void> {
+  // 1×1 の PNG。**中身は見ないので最小でよい**（擬似 claude は拡張子で拾う）
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64',
+  )
+  await scope
+    .getByTestId('composer-file')
+    .setInputFiles({ name, mimeType: 'image/png', buffer: png })
+}

@@ -2,12 +2,14 @@ import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 import {
   archiveAll,
+  attachImage,
   expectTerminalToContain,
   keyPayload,
   openDashboard,
   openSession,
   scrollTerminalToBottom,
   setTerminalView,
+  showTranscript,
   spawnSession,
   swipeTerminal,
   takeSentFrames,
@@ -420,4 +422,39 @@ test.describe('十字ボタン', () => {
     // 「閉じたのに選択待ちに見える」状態になっていた
     await expect(page.getByTestId('dpad')).toHaveCount(0)
   })
+})
+
+/**
+ * 添付した画像が、**セッションホスト側のディスク**へ置かれて届くこと
+ * （画像添付 テスト計画フェーズ6・設計§4）。
+ *
+ * # ローカルの E2E では確かめられない
+ *
+ * あちらは1プロセスなので、「サーバが自分で書いた」のか「PC へ渡してから書いた」のかを
+ * 見分けられない。ここは**サーバとセッションホストが別プロセス**なので、届いた時点で
+ * 経路が確定する——画像を読むのは PC 側で走っている claude であり、**その機械のディスクに
+ * 実体が無ければ印は出ない**。
+ *
+ * つまり「履歴に画像の行が出た」ことが、そのまま
+ * **REST → A2S（`WriteBlob`）→ PC のディスク → PTY → JSONL** の証明になる。
+ */
+test('添付した画像はセッションホストのディスクへ置かれて履歴に出る', async ({
+  page,
+}) => {
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  await openSession(page, tile)
+
+  await attachImage(page)
+  await expect(page.getByTestId('composer-attachments')).toBeVisible()
+
+  await page.getByTestId('composer-input').fill('リモートで見て')
+  await page.keyboard.press('Control+Enter')
+
+  // 印が出た＝PC 側の claude がディスクから実体を読めた
+  await expectTerminalToContain(page, '[Image #')
+  await expectTerminalToContain(page, '[fake-claude] received: リモートで見て')
+
+  await showTranscript(page)
+  await expect(page.getByText('画像').first()).toBeVisible({ timeout: 30_000 })
 })

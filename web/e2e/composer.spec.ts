@@ -1,10 +1,13 @@
 import { expect, test } from '@playwright/test'
 import {
   archiveAll,
+  attachImage,
   expectTerminalToContain,
   openDashboard,
   openSession,
+  showTranscript,
   spawnSession,
+  terminalText,
   typeLine,
 } from './helpers'
 
@@ -85,4 +88,96 @@ test('終了したセッションでは指示を送れない', async ({ page }) 
   // 残ったカードは「スリープ」と出る（設計§6）
   await expect(page.getByTestId('session-view')).toContainText('スリープ')
   await expect(page.getByTestId('composer-input')).toBeDisabled()
+})
+
+/**
+ * 画像を添付して送ると、履歴に画像の行が出ること（画像添付 テスト計画フェーズ6）。
+ *
+ * **ここが「端から端まで」の唯一の場所である。** ブラウザで付ける → REST で PC へ置く
+ * → 本文へパスを混ぜて PTY へ書く → 印を待って確定する → claude が JSONL を書く
+ * → パーサが相棒レコードから置き場所を取る → 画面に絵が出る、という鎖の全部が
+ * ここでしか一度に通らない。
+ */
+test('添付した画像が履歴の行として出る', async ({ page }) => {
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  await openSession(page, tile)
+
+  await attachImage(page)
+  // 送信を押すまではブラウザの中にしかない（設計§2）
+  await expect(page.getByTestId('composer-attachments')).toBeVisible()
+
+  await page.getByTestId('composer-input').fill('これを見て')
+  await page.keyboard.press('Control+Enter')
+
+  // 送れたら添付の列は畳まれる
+  await expect(page.getByTestId('composer-attachments')).toBeHidden()
+  await expectTerminalToContain(page, '[fake-claude] received: これを見て')
+
+  // 履歴に画像の行が出ること。**絵そのものは生ファイルの口から取り返す**ので、
+  // ここで見るのは「行が出たか」まで
+  // 履歴は**フックを契機に**読まれるので、届くまで少し待つ（`transcript.spec.ts` と同じ）
+  await showTranscript(page)
+  await expect(page.getByText('画像').first()).toBeVisible({ timeout: 30_000 })
+})
+
+test('付けてから外すと、添付なしの送信になる', async ({ page }) => {
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  await openSession(page, tile)
+
+  await attachImage(page)
+  await page.getByTestId('composer-attachment-remove').first().click()
+  await expect(page.getByTestId('composer-attachments')).toBeHidden()
+
+  await page.getByTestId('composer-input').fill('添付なし')
+  await page.keyboard.press('Control+Enter')
+
+  await expectTerminalToContain(page, '[fake-claude] received: 添付なし')
+  // 外したものが運ばれていないこと＝印が出ていないこと
+  const text = await terminalText(page)
+  expect(text).not.toContain('[Image #')
+})
+
+test('2枚付けると、2枚とも履歴に出る', async ({ page }) => {
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  await openSession(page, tile)
+
+  await attachImage(page, 'one.png')
+  await attachImage(page, 'two.png')
+  await expect(page.getByTestId('composer-attachment-remove')).toHaveCount(2)
+
+  await page.getByTestId('composer-input').fill('2枚見て')
+  await page.keyboard.press('Control+Enter')
+
+  // **印で見る。本文で見ない。**
+  //
+  // 端末は120桁で折り返すので、**本文の後ろに続く長いパスが行を割る**——実際に
+  // `received: 2` と `枚見て` に割れて、素直な部分一致では当たらなかった。印は短く、
+  // 割れる余地が無い。しかも `[Image #2]` が出たこと自体が「2枚ぶん揃うまで
+  // 確定しなかった」ことの証明になる（設計§7-1）
+  await expectTerminalToContain(page, '[Image #2]')
+
+  await showTranscript(page)
+  await expect(page.getByText('画像')).toHaveCount(2, { timeout: 30_000 })
+})
+
+test('大きすぎる画像は、運ぶ前に断られて理由が出る', async ({ page }) => {
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  await openSession(page, tile)
+
+  // 上限は 8 MiB（設計§8-1）。**運ばせてから断らない**ので、ここで止まる
+  await page
+    .getByTestId('composer-file')
+    .setInputFiles({
+      name: 'huge.png',
+      mimeType: 'image/png',
+      buffer: Buffer.alloc(8 * 1024 * 1024 + 1),
+    })
+
+  await expect(page.getByTestId('composer-trouble')).toContainText('上限')
+  // 断られたものは列に並ばない
+  await expect(page.getByTestId('composer-attachments')).toBeHidden()
 })

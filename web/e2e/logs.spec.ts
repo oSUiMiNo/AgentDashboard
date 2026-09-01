@@ -1,7 +1,13 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { expect, test } from '@playwright/test'
-import { openDashboard } from './helpers'
+import {
+  attachImage,
+  expectTerminalToContain,
+  openDashboard,
+  openSession,
+  spawnSession,
+} from './helpers'
 
 /**
  * 経路がすべて痕跡を残すことの確認（ログ設計§16-1 の1・§1-1）。
@@ -43,6 +49,8 @@ type 行 = {
   pid: number
   run_id: string
   msg: string
+  /** 相関キー。**7欄と違って必須ではない**——載る行と載らない行がある */
+  card_id?: string
 }
 
 /** 必須の7欄（設計§2-1）。 */
@@ -154,4 +162,52 @@ test('ローカルモードではサーバと PC が1本のファイルに混ざ
   ).toBe(true)
   // 1本に混ざっているので `proc` は全部 dashboard。**分かれていたら混ざっていない**
   expect([...new Set(行たち.map((行) => 行.proc))]).toEqual(['dashboard'])
+})
+
+/**
+ * 添付を運んだ跡が、**置いた側のログに残る**こと（画像添付 設計§13）。
+ *
+ * # なぜ経路の表に行を足さないのか
+ *
+ * 上の `経路` は**構成の一覧**（どのトポロジのファイルにも7欄が揃うか）であって、
+ * 操作の一覧ではない。添付は構成を増やさないので、あそこへ足す行が無い。
+ * 確かめたいのは「どの構成でも欄が揃うか」ではなく**「置いたことが1行残るか」**なので、
+ * 別のテストにする。
+ *
+ * # 相関キーを見る理由
+ *
+ * 置いたことだけが分かっても、**どのカードのぶんか**が分からなければ追跡に使えない。
+ * ガイドライン「ログを残すとき」が相関キーを要求しているのはそのためで、
+ * ここはその要求が実際に満たされているかを見る唯一の場所になる。
+ */
+test('添付を置いたことが、カードを名指しして1行残る', async ({ page }) => {
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  await openSession(page, tile)
+
+  await attachImage(page)
+  await page.getByTestId('composer-input').fill('ログに残ること')
+  await page.keyboard.press('Control+Enter')
+  await expectTerminalToContain(page, '[fake-claude] received: ログに残ること')
+
+  await expect
+    .poll(
+      () =>
+        直近の行('state', 'dashboard').filter((行) =>
+          行.msg.includes('添付を置きました'),
+        ),
+      {
+        message: '添付を置いた行が出ていない（設計§13）',
+        timeout: 10_000,
+      },
+    )
+    .not.toHaveLength(0)
+
+  const 置いた = 直近の行('state', 'dashboard').filter((行) =>
+    行.msg.includes('添付を置きました'),
+  )
+  // **相関キーが載っていること。** どのカードのぶんかが分からない行は追跡に使えない
+  for (const 行 of 置いた) {
+    expect(行, `card_id が無い: ${JSON.stringify(行)}`).toHaveProperty('card_id')
+  }
 })
