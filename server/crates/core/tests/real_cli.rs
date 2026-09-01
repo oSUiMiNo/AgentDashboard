@@ -1070,6 +1070,147 @@ async fn 指示送信は複数行もスラッシュコマンドも本物のtui�
 
 #[tokio::test]
 #[ignore = "本物の claude を起動し、アカウントのクォータを消費する（make test-cli）"]
+async fn 添付した画像は本物のclaudeに画像として届く() {
+    // 画像添付 テスト計画フェーズ7。**この工事でいちばん確かめたいのはここ**である。
+    //
+    // # 画面に印が出ることは、届いた証拠にならない
+    //
+    // `[Image #N]` は「入力欄に載った」ことしか言わない。要件の完了条件は
+    // **claude の応答の中身で確かめる**ことを求めている——だからここでは、
+    // 画像に焼き込んだ合言葉を claude に読ませて、その語が応答に出るかを見る。
+    //
+    // # 擬似 claude では代われない
+    //
+    // あちらは拡張子で拾う真似をしているだけで、**ディスクから画像を読んでいない**。
+    // 「置いたパスを本物が画像として拾うか」は本物でしか分からない。
+    let dir = WorkDir::new("attachment");
+    let state_dir = dir.path().join("state");
+    let config = Config {
+        state_dir: Some(state_dir.clone()),
+        ..Config::default()
+    };
+    let wrapper = claude_wrapper(&dir, &["--setting-sources", "project,local"]);
+    let server = common::TestServer::start_with_parser_and_program(
+        config,
+        wrapper.to_string_lossy().into_owned(),
+    )
+    .await;
+
+    let session = server
+        .manager
+        .spawn(&dir.as_str())
+        .expect("セッションを起動できること");
+    let mut watcher = common::Watcher::attach(&session);
+    accept_trust_prompt_if_any(&session, &mut watcher).await;
+    wait_for_status(&session, SessionStatus::WaitingInput).await;
+    // **入力欄が出るまで待つ。** `SessionStart` は TUI が貼り付けを受け付ける前に飛ぶので、
+    // 状態だけを見て送ると入力が捨てられる（フェーズ1 の実測）。CLI 経由の
+    // `wait_screen_settled` と同じ合図（プロンプトの `❯`）を、こちらは端末の出力で見る
+    watcher.wait_for("❯").await;
+
+    // 合言葉を焼き込んだ画像を作る。**中身が読めたかどうかを、応答の語で判定する**
+    const 合言葉: &str = "ZEBRA";
+    let 画像 = 合言葉の画像(&dir, 合言葉);
+
+    // 製品と同じ道で置く（`write_blob`）。手でファイルを置くと、採番と拡張子の
+    // 決め方を迂回してしまい、**この工事が作った経路を1つも通らない**
+    let written = session_host_core::attachments::write_blob(
+        &state_dir,
+        session.card_id,
+        "image/png",
+        &std::fs::read(&画像).expect("作った画像を読めること"),
+        90,
+        1 << 30,
+        200 * 1024 * 1024,
+    )
+    .expect("添付を置けること");
+
+    session
+        .send_instruction_with(
+            "この画像に書かれている英単語を、大文字のまま1語だけ答えてください。説明は不要です。",
+            &[written.path.clone()],
+        )
+        .await
+        .expect("印が出て確定まで進むこと");
+
+    // **応答の中身で確かめる。** 画面に印が出たことでは足りない
+    let deadline = Instant::now() + CLI_TIMEOUT;
+    let mut 答え = None;
+    while Instant::now() < deadline {
+        let nodes = server.transcript_of(session.card_id);
+        if let Some(text) = nodes.iter().find_map(|node| match &node.node {
+            protocol::Node::AssistantText { text } if text.contains(合言葉) => Some(text.clone()),
+            _ => None,
+        }) {
+            答え = Some(text);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let 答え = 答え.unwrap_or_else(|| {
+        panic!(
+            "claude が画像の中身に触れた応答を返しませんでした（画像として届いていない）:\n{}",
+            watcher.seen()
+        )
+    });
+    println!("応答: {答え:?}");
+
+    // 履歴の側にも画像の行が出ていること（§10 の経路）。**相棒レコードから置き場所を取る**
+    let 画像の行 = server
+        .transcript_of(session.card_id)
+        .into_iter()
+        .filter(|node| matches!(node.node, protocol::Node::Image { .. }))
+        .count();
+    assert!(
+        画像の行 > 0,
+        "構造化ビューに画像の行が出ていません（パーサが image ブロックを拾えていない）"
+    );
+
+    wait_for_status(&session, SessionStatus::WaitingInput).await;
+    session
+        .send_instruction("/exit")
+        .await
+        .expect("端末へ書き込めること");
+    wait_for_status(&session, SessionStatus::Ended { ok: true }).await;
+    server
+        .manager
+        .archive(session.card_id)
+        .expect("片付けられること");
+}
+
+/// 合言葉を焼き込んだ PNG を作る。
+///
+/// **`ffmpeg` で作る。** この環境には ImageMagick も PIL も無い（フェーズ1 で確認済み）。
+/// 作れなければテストを飛ばさずに落とす——**確かめられないまま緑になる**のがいちばん困る。
+fn 合言葉の画像(dir: &WorkDir, 合言葉: &str) -> std::path::PathBuf {
+    let path = dir.path().join("word.png");
+    let 出力 = std::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=white:s=640x200",
+            "-vf",
+            &format!(
+                "drawtext=text='{合言葉}':fontcolor=black:fontsize=96:x=(w-text_w)/2:y=(h-text_h)/2"
+            ),
+            "-frames:v",
+            "1",
+        ])
+        .arg(&path)
+        .output()
+        .expect("ffmpeg を起動できること");
+    assert!(
+        出力.status.success(),
+        "画像を作れませんでした: {}",
+        String::from_utf8_lossy(&出力.stderr)
+    );
+    path
+}
+
+#[tokio::test]
+#[ignore = "本物の claude を起動し、アカウントのクォータを消費する（make test-cli）"]
 async fn サブエージェントの稼働と子ツリーのマウントを検知できる() {
     // テスト計画フェーズ4「サブエージェント」。バッジのカウンタ（フック由来）と
     // 構造化ビューのマウント（JSONL 由来）は別系統なので、両方を1本で通して確かめる。
