@@ -32,14 +32,17 @@
  * 完結する。配置を選んだ理由そのものなので、右側の横並びには手を入れていない。
  */
 
-import { Link } from 'react-router'
+import { useLocation, useNavigate } from 'react-router'
+import { Button } from '@/components/ui/button'
 import { FilesToggle } from '@/components/ProjectFiles/FilesToggle'
 import { useFilesParts } from '@/components/ProjectFiles/useFilesParts'
 import { SessionAdd } from '@/components/SessionAdd/SessionAdd'
 import { SessionView } from '@/components/SessionView/SessionView'
 import { useFilesPanel } from '@/lib/filesPanel'
-import { HOME } from '@/lib/routes'
+import { projectDisplayName } from '@/lib/path'
+import { backTargetFor, HOME } from '@/lib/routes'
 import { useProjectCards } from '@/stores/sessions'
+import { useProjects } from '@/stores/projects'
 
 interface Props {
   /** `agent_id` かローカルを表す `'local'`（設計§16） */
@@ -59,6 +62,14 @@ interface Props {
 export function GroupView({ host, project }: Props) {
   const cards = useProjectCards(host, project)
   const [filesOpen, toggleFiles] = useFilesPanel()
+  const projects = useProjects()
+  const navigate = useNavigate()
+  const location = useLocation()
+  /*
+    **セッション専用画面と同じ関数で出す**（設計§16-2）。同じ規則で同じ番号が付く
+    ことが「揃える」の中身で、**別々に実装すると、同じ PJT が画面によって違う名前で出る**。
+  */
+  const 名前 = projectDisplayName(project, projects)
   /*
     **置き場所はこちらが決める**（`useFilesParts`）。サイドバーはレールの外、
     中身の列はレールの中のいちばん左。**横ホイールの受け渡しは要らなくなった**
@@ -78,24 +89,76 @@ export function GroupView({ host, project }: Props) {
       data-host={host}
       className="flex min-h-0 flex-1 flex-col gap-3"
     >
+      {/*
+        **セッション専用画面の1行目と同じ骨格にする**（設計§16-1）。
+
+        | 位置 | 置くもの |
+        |---|---|
+        | 左端 | サイドバーの開閉 |
+        | その右 | **PJT の名前**（どちらも `projectDisplayName`） |
+        | 続けて | **その画面に効く操作**（ここでは `+`） |
+        | `ml-auto` の右端 | **✕**（画面を閉じる） |
+
+        **右端が「画面に効く」場所**なのは §15-2 で決めた分け方。`+` は**その PJT に
+        効く**ので、名前の隣に置く——何に対する操作かが位置で分かる。
+      */}
       <header className="flex items-center gap-2">
         <FilesToggle open={filesOpen} onToggle={toggleFiles} />
 
+        {/* **画面の主題**なので見出しのまま。フルパスは `title` に残す（設計§16-2） */}
         <h2 className="min-w-0 truncate text-sm font-semibold" title={project}>
-          {project}
+          {名前}
         </h2>
+
+        {/* 0本の枠でも起こせる必要がある（設計§14）。押す前に権限モードを選ぶ形は
+            一覧の枠と同じ部品なので、危険度の見え方も揃う */}
+        <div className="shrink-0">
+          <SessionAdd host={host} project={project} compact />
+        </div>
+
         <span className="text-muted-foreground shrink-0 text-xs">
           {cards.length}セッション
         </span>
 
-        {/* 0本の枠でも起こせる必要がある（設計§14）。押す前に権限モードを選ぶ形は
-            一覧の枠と同じ部品なので、危険度の見え方も揃う */}
-        <div className="ml-auto shrink-0">
-          <SessionAdd host={host} project={project} compact />
-        </div>
-        <Link to={HOME} className="text-primary shrink-0 text-xs underline">
-          一覧へ戻る
-        </Link>
+        {/*
+          **「一覧へ戻る」をやめて ✕ にする**（設計§16-3）。振る舞いはセッション
+          専用画面と同じ——開いた画面なので「戻る」でよく、**いきなり `/p/...` を
+          開いたときだけ一覧へ落とす**。
+
+          **目印は `close-session` と別にする。** 同じにすると、テストが
+          どちらの画面の ✕ を掴んでいるのか読めなくなる。
+        */}
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          data-testid="close-group"
+          aria-label="閉じる"
+          title="閉じる"
+          className="ml-auto shrink-0"
+          onClick={() => {
+            // **三項演算子で1つにまとめない**（`navigate` の2つのオーバーロードに
+            // `string | number` は当たらず、`tsc -b` で落ちる。§7 で踏んでいる）
+            if (backTargetFor(location.key) === 'back') {
+              navigate(-1)
+              return
+            }
+            navigate(HOME)
+          }}
+        >
+          <svg
+            aria-hidden
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={2}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M18 6 6 18" />
+            <path d="m6 6 12 12" />
+          </svg>
+        </Button>
       </header>
 
       {/*

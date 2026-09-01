@@ -7,11 +7,12 @@
 
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter } from 'react-router'
+import { MemoryRouter, Route, Routes } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { GroupView } from '@/components/GroupView/GroupView'
 import type { SessionMeta } from '@/lib/protocol'
 import { applySessionSnapshot, clearSessions } from '@/stores/sessions'
+import { applyProjectSnapshot, clearProjects } from '@/stores/projects'
 import { useSettingsStore } from '@/stores/settings'
 import { settingsFixture } from '@/test/fixtures'
 
@@ -166,5 +167,105 @@ describe('PJT 専用画面', () => {
     expect(within(rail).getAllByTestId('session-view')).toHaveLength(2)
     // 横スクロールで全件並べる（上限を設けない、という既存の判断）
     expect(rail.className).toContain('overflow-x-auto')
+  })
+})
+
+/**
+ * セッション専用画面と骨格を揃える（設計§16・テスト計画フェーズ8）。
+ *
+ * **揃ったことの証明は「同じ関数を使っている」ことに置く。** 見た目の一致を
+ * 目で比べても、次に片方だけ直したときには何も言ってくれない。
+ */
+describe('GroupView のヘッダは、セッション専用画面と揃っている', () => {
+  function 開く(entries: string[] = ['/', `/p/${HOST}/x`]) {
+    return render(
+      <MemoryRouter initialEntries={entries} initialIndex={entries.length - 1}>
+        <Routes>
+          <Route path="/" element={<p>一覧に居ます</p>} />
+          <Route
+            path="/p/:host/:project"
+            element={<GroupView host={HOST} project={PROJECT} />}
+          />
+        </Routes>
+      </MemoryRouter>,
+    )
+  }
+
+  it('見出しはフォルダ名だけで、フルパスは title に残る', () => {
+    // **`projectDisplayName` を再利用している**ので、同じ PJT がセッション専用画面と
+    // 同じ名前・同じ番号で出る（設計§16-2）。別々に書くとここがずれる
+    show()
+    const 見出し = screen.getByRole('heading', { level: 2 })
+    expect(見出し).toHaveTextContent('app')
+    expect(見出し).not.toHaveTextContent(PROJECT)
+    expect(見出し).toHaveAttribute('title', PROJECT)
+  })
+
+  it('「+」は名前のすぐ右で、記号になっている', () => {
+    // 右端は「画面に効く」場所。`+` は**その PJT に効く**ので名前の隣（設計§16-4）
+    show()
+    const 見出し = screen.getByRole('heading', { level: 2 })
+    const 次 = 見出し.nextElementSibling
+    expect(次?.querySelector('[data-testid="spawn-open"]')).not.toBeNull()
+
+    const 足す = screen.getByTestId('spawn-open')
+    expect(足す.querySelector('svg')).not.toBeNull()
+    // 全角の `＋` を文字として置かない
+    expect(足す).not.toHaveTextContent('＋')
+  })
+
+  it('「一覧へ戻る」の文字は消え、✕ になっている', () => {
+    show()
+    expect(screen.queryByText('一覧へ戻る')).toBeNull()
+    const 閉じる = screen.getByTestId('close-group')
+    expect(閉じる).toHaveAttribute('aria-label', '閉じる')
+    expect(閉じる.querySelector('svg')).not.toBeNull()
+    // **目印はセッション専用画面と別。** 同じにすると、どちらの ✕ を掴んでいるか読めない
+    expect(screen.queryByTestId('close-session')).toBeNull()
+  })
+
+  it('✕ を押すと、開く前の画面へ戻る', async () => {
+    開く()
+    await userEvent.click(screen.getByTestId('close-group'))
+    expect(screen.getByText('一覧に居ます')).toBeInTheDocument()
+  })
+
+  it('いきなり開いた画面で ✕ を押しても、一覧へ行く', async () => {
+    // **戻り先が無いときの分岐**（`backTargetFor`）。セッション専用画面と同じ関数
+    開く([`/p/${HOST}/x`])
+    await userEvent.click(screen.getByTestId('close-group'))
+    expect(screen.getByText('一覧に居ます')).toBeInTheDocument()
+  })
+
+  it('同じ名前の PJT が複数あると、セッション専用画面と同じ番号が付く', () => {
+    /*
+      **ここが「揃った」ことの証明である。**
+
+      名前だけを出すことは、その場で `split('/').pop()` を書いても達成できてしまう。
+      **ずれるのは番号のほう**——衝突の見つけ方と並べる順（枠が作られた順）まで
+      同じでなければ、同じ PJT が画面によって `app` と `app (2)` に分かれる。
+      だから `projectDisplayName` の再利用を、番号で見張る（設計§16-2）。
+    */
+    applyProjectSnapshot([
+      { id: 'p2', host: HOST, path: '/後/app', created_at: 20 },
+      { id: 'p1', host: HOST, path: PROJECT, created_at: 10 },
+    ])
+    render(
+      <MemoryRouter>
+        <GroupView host={HOST} project={PROJECT} />
+      </MemoryRouter>,
+    )
+    // 先に作られたほうが (1)。**押した瞬間に入れ替わらない根拠**（`created_at`）
+    expect(screen.getByRole('heading', { level: 2 })).toHaveTextContent('app (1)')
+    clearProjects()
+  })
+
+  it('揃えないものは、揃えないままにしてある', () => {
+    // セッション数の札は残る（セッション専用画面には数える対象が無いだけ）
+    show()
+    expect(screen.getByText(/セッション$/)).toBeInTheDocument()
+    // **始末のボタンは出さない**——カードが複数あるので宛先が一意に定まらない（設計§16-5）
+    expect(screen.queryByTestId('power-card')).toBeNull()
+    expect(screen.queryByTestId('close-card')).toBeNull()
   })
 })

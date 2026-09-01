@@ -95,14 +95,37 @@ export function SessionAdd({ host, project, compact = false }: Props) {
         disabled={status !== 'open'}
         aria-label="この PJT でセッションを起こす"
         title="この PJT でセッションを起こす"
-        className={compact ? 'shrink-0 px-2 py-0.5 text-xs' : undefined}
+        size={compact ? 'icon-sm' : undefined}
+        className={compact ? 'shrink-0' : undefined}
         onClick={(event) => {
           // 枠の余白のクリック（＝画面を開く）と取り違えない
           event.stopPropagation()
           setOpen(true)
         }}
       >
-        ＋
+        {/*
+          **全角の `＋` という文字をやめ、記号にする**（帯設計§16-4）。✕・ゴミ箱・
+          電源と同じ作りに揃える。
+
+          **器や立体は持たせない。** この形は**一覧の枠のヘッダでも出る**ので、
+          `DESIGN.md` §12.3「一覧の行に物質を持たせない」が効く。**形だけを直す。**
+        */}
+        {compact ? (
+          <svg
+            aria-hidden
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={2}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M12 5v14" />
+            <path d="M5 12h14" />
+          </svg>
+        ) : (
+          '＋'
+        )}
       </Button>
     )
   }
