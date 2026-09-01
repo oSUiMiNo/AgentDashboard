@@ -518,12 +518,12 @@ describe('DESIGN.md の床を満たしている', () => {
 describe('濃さは1本の変数から配る', () => {
   /** 規則そのものが濃さを持たなくてよいもの。**理由を書けないものは足さない** */
   const 除外 = [
-    // 上に暗い文字が乗る。薄くすると `ANSWER` が読めない（`tile.css` に同じ理由）。
-    // **`--tile-ink` を通さないだけで、沈まないわけではない**——接続断のときは
-    // `--tile-fade` を通って沈む（フェーズ21）。受け皿は下の「右下の札も沈む」
+    // **繋がっているあいだは満輝度のまま**。上に暗い文字が乗るので、状態によって
+    // 35〜90% まで動く `--tile-ink` を素の規則へ通すと、スリープの `ANSWER` が読めない。
+    // **接続断のときだけ別の規則で `--tile-ink` を通す**（フェーズ22）。
+    // 受け皿は下の「右下の札も、輪とまったく同じだけ沈む」
     '.tile-sticker',
-    // 同上。状態タグは**文言そのものが状態の答え**なので、薄くして読めなくしない。
-    // こちらも率は通る（フェーズ21）
+    // 同上。状態タグは**文言そのものが状態の答え**なので、薄くして読めなくしない
     '.tile-tag',
     // **濃さはキーフレームが持つ**（素の状態は `opacity: 0` で隠れている）。
     // その中身は下の「効果線もキーフレームで濃さを読む」が見ている
@@ -833,61 +833,73 @@ describe('接続断のカードで、輪も沈む（フェーズ19）', () => {
 })
 
 /**
- * 接続断のカードで、右下の札も沈む（フェーズ21。設計§26）。
+ * 接続断のカードで、右下の札は**輪とまったく同じだけ**沈む（フェーズ22。設計§27）。
  *
- * **「接続断なのに沈まない」族の3つ目にして最後。** ①回遊する線はフェーズ12、
- * ②輪の呼吸とホバーはフェーズ19 で潰したが、**③右下の札だけが満輝度で残っていた**
- * （実測：輪 0.6 に対し板 1.0。色は同じ）。②を直したぶん③が浮いて目立っていた。
+ * # フェーズ21 では足りなかった
+ *
+ * あちらは**率**（`--tile-fade` ＝ 0.6）を通した。ところが**率は状態によらず一定**なのに
+ * 対し、**輪は状態ごとの濃さ（`--tile-dim`）にも率を掛ける**ので、実際の輪は 0.210〜0.540
+ * まで散らばる。札だけ 0.600 で高止まりし、**スリープでは 2.86倍明るい**ままだった。
+ *
+ * 直したのは2つ。**札を `--tile-ink` へ通す**ことと、**接続断では呼吸を止める**こと
+ * （呼吸する輪は 0.330〜0.600 を行き来するので、止めないと「周期のどこを見るか」で
+ * 一致したりしなかったりする）。
  *
  * # ここは除外表の受け皿である
  *
  * 上の除外表は `.tile-tag` と `.tile-sticker` を `--tile-ink` から外している。
- * **除外は「見なくてよい」ではなく「別のところで見る」でなければ穴になる**——
- * `.tile-lines i` にはキーフレームの受け皿があったが、**札には受け皿が無かった**。
- * その穴がそのまま③として残っていたので、ここで塞ぐ。
+ * **除外は「見なくてよい」ではなく「別のところで見る」でなければ穴になる。**
  */
-describe('接続断のカードで、右下の札も沈む（フェーズ21）', () => {
-  const 板 = ['.tile-tag::before', '.tile-sticker::before']
+describe('接続断のカードで、右下の札も、輪とまったく同じだけ沈む（フェーズ22）', () => {
+  const 沈む = () =>
+    当たる("[data-connected='false']").filter((rule) => rule.selector.includes('::before'))
 
-  it('板は沈める率を通っている', () => {
-    // **この段の本体。** 消すと接続断でも満輝度のままへ戻る
-    for (const selector of 板) {
-      expect(値(規則(selector), 'opacity'), selector).toBe('var(--tile-fade)')
+  it('板は輪と同じ濃さ（--tile-ink）を読む', () => {
+    // **この段の本体。** `--tile-fade`（率だけ）へ戻すと、状態ごとのずれが復活する
+    const 規則 = 沈む()
+    expect(規則).toHaveLength(1)
+    expect(規則[0].selector).toContain('.tile-tag::before')
+    expect(規則[0].selector).toContain('.tile-sticker::before')
+    expect(値(規則[0], 'opacity')).toBe('var(--tile-ink)')
+  })
+
+  it('繋がっているときの板には、濃さを書いていない', () => {
+    // **今回の指摘は接続断だけ**（§26-6）。素の規則へ `opacity` を書くと、
+    // 繋がっているカードの札まで `--tile-dim` で沈み、暗い文字が読めなくなる
+    for (const selector of ['.tile-tag::before', '.tile-sticker::before']) {
+      expect(規則(selector).body, selector).not.toMatch(/(^|;)\s*opacity:/)
     }
   })
 
-  it('板だけ別の数字を書いていない', () => {
-    // **率は1本に保つ**（§24-2）。`opacity: 0.8` のようなリテラルへ書き換えると、
-    // 輪（0.6）とのずれが戻る——利用者の指摘そのものが「枠色とずれている」だった
-    for (const selector of 板) {
-      expect(値(規則(selector), 'opacity'), selector).not.toMatch(/[\d.]/)
-    }
-    // 率の出どころは2本のまま（上の「沈める率を決めるのは2行だけ」と対）
-    expect(全規則.filter((rule) => /--tile-fade:/.test(rule.body))).toHaveLength(2)
+  it('接続断では呼吸を止める（設計§24-3 を覆した）', () => {
+    // 止めないと輪は 0.330〜0.600 を行き来し、**周期のどこを見るかで一致が変わる**。
+    // 止めれば輪は `--tile-ink` に座り、板と常に同じ値になる
+    const 止める = 当たる("[data-connected='false'][data-motion='breathe']")
+    expect(止める).toHaveLength(1)
+    expect(止める[0].selector).toContain('.tile-ring')
+    expect(止める[0].body).toContain('animation: none')
+    // **素の呼吸より後ろに書いてあること**（詳細度は上だが、順序でも守る）
+    const 呼吸 = 規則("[data-motion='breathe'] .tile-ring")
+    expect(止める[0].at).toBeGreaterThan(呼吸.at)
   })
 
-  it('沈めた板の文字は、色の対応表から来る', () => {
-    // **色を CSS へ直書きすると表が2箇所に割れる**（設計§8）。どちらを当てるかは
-    // 板の明るさで決まり、それを知っているのは `STATUS_TONES` のほうである
+  it('沈めた板の文字は、状態によらず白', () => {
+    // 沈めた地はどの状態でも暗い（いちばん明るい入力待ちで `rgb(123,87,28)`）ので、
+    // 白1色で足りる。**群ごとに分ける欄は畳んだ**（`protocol.ts`）
     const 入れ替え = 当たる("[data-connected='false']").filter((rule) =>
       /(^|\s)color:/.test(rule.body),
     )
     expect(入れ替え).toHaveLength(1)
-    expect(入れ替え[0].selector).toContain('.tile-tag')
-    expect(入れ替え[0].selector).toContain('.tile-sticker')
-    expect(値(入れ替え[0], 'color')).toBe('var(--tile-sunk-ink)')
+    expect(値(入れ替え[0], 'color')).toBe('#fff')
   })
 
   it('文字の入れ替えは詳細度を上げない', () => {
     // **上げるとハイコントラストの退避に勝つ。** あの環境では板が丸ごと消えるので、
-    // 勝った瞬間に文字が地の上へ浮いて読めなくなる。`:where()` で包み、
-    // **後ろに書いてある退避が勝つ**という素直な形にしてある
+    // 勝った瞬間に白い文字が白い地の上へ浮いて読めなくなる
     const 入れ替え = 当たる("[data-connected='false']").find((rule) =>
       /(^|\s)color:/.test(rule.body),
     )
-    expect(入れ替え).toBeDefined()
     expect(入れ替え!.selector).toContain(":where([data-connected='false'])")
-    // 退避より前に書いてあること（詳細度が同じなので、順序が効く）
     const 退避 = 当たる('forced-colors').filter((rule) =>
       rule.selector.endsWith(' .tile-tag'),
     )
@@ -897,77 +909,44 @@ describe('接続断のカードで、右下の札も沈む（フェーズ21）',
 
   it('接続断でも、文字が 4.5:1 を割らない', () => {
     /*
-      **除外表が守ろうとしたのはここである。** 数字で守らないと同じ穴がまた開く
-      （設計§26-5）。
+      **除外表が守ろうとしたのはここである**（設計§26-5）。模型は `protocol.test.ts` の
+      床の検査と揃える——合成の相手はカードの地（`--card` = `#171717`）、判定の相手は文字。
 
-      模型は `protocol.test.ts` の床の検査と揃える——**合成の相手はカードの地**
-      （`--card` = `#171717`。札は `.tile-body` の上に載っている）、**判定の相手は
-      文字**。沈める率は CSS と同じ `DISCONNECTED_INK_SCALE` から引く。
+      沈む先は **`--tile-dim` × 率**（＝輪と同じ）。フェーズ21 の率だけの模型とは違う。
     */
     const カードの地 = rgb('#171717')
     for (const status of 全状態) {
       const 色 = statusAccent(status) as Record<string, string>
-      const 沈めた板 = composite(
-        rgb(色['--tile-accent']),
-        カードの地,
-        DISCONNECTED_INK_SCALE,
-      )
-      const 比 = contrast(沈めた板, rgb(色['--tile-sunk-ink']))
-      expect(比, `${status.kind}：${色['--tile-accent']} の板`).toBeGreaterThanOrEqual(4.5)
+      const 濃さ = (Number.parseFloat(色['--tile-dim']) / 100) * DISCONNECTED_INK_SCALE
+      const 板 = composite(rgb(色['--tile-accent']), カードの地, 濃さ)
+      const 比 = contrast(板, rgb('#ffffff'))
+      expect(比, `${status.kind}：${色['--tile-accent']} を ${濃さ.toFixed(3)} で`).toBeGreaterThanOrEqual(4.5)
     }
   })
 
-  it('文字色が1つでは足りないことを、数で残す', () => {
-    /*
-      **「なぜ2色なのか」を、次に読む人が測り直さずに済むように置いておく。**
-      黒だけにすると灰（3.96）とコーラル（3.33）で割り、白だけにするとシアン（4.01）で
-      割る。**どちらか一方に寄せると必ずどこかが落ちる**ので、片方へ揃える整理を
-      入れたくなったら、このテストが止める。
-    */
+  it('白1色で足りることを、数で残す', () => {
+    // **黒へ寄せる整理を入れたくなったときに止める。** 沈めた地はどれも暗いので、
+    // 黒は7状態すべてで床を割る（1.71〜3.22）
     const カードの地 = rgb('#171717')
-    const 板 = (status: SessionStatus) =>
-      composite(
-        rgb((statusAccent(status) as Record<string, string>)['--tile-accent']),
-        カードの地,
-        DISCONNECTED_INK_SCALE,
-      )
-    for (const 単色 of ['#000000', '#ffffff']) {
-      const 割る = 全状態.filter((s) => contrast(板(s), rgb(単色)) < 4.5)
-      expect(割る.length, `${単色} だけで足りてしまっている`).toBeGreaterThan(0)
-    }
-  })
-
-  it('繋がっているときの札は変わっていない', () => {
-    // **今回の指摘は接続断だけ**（§26-6）。両方動かすと、どちらが効いたか分からなくなる。
-    // 率は 1 に解決されるので板は満輝度のまま、文字は暗いまま
-    for (const 本体 of ['.tile-tag', '.tile-sticker']) {
-      expect(値(規則(本体), 'color')).toBe('#171717')
-    }
-    const カードの地 = rgb('#171717')
-    for (const status of 全状態) {
+    const 割る = 全状態.filter((status) => {
       const 色 = statusAccent(status) as Record<string, string>
-      const 比 = contrast(rgb(色['--tile-accent']), rgb('#171717'))
-      expect(比, `${status.kind}`).toBeGreaterThanOrEqual(4.5)
-    }
-    expect(カードの地).toEqual([23, 23, 23])
+      const 濃さ = (Number.parseFloat(色['--tile-dim']) / 100) * DISCONNECTED_INK_SCALE
+      return contrast(composite(rgb(色['--tile-accent']), カードの地, 濃さ), rgb('#000000')) < 4.5
+    })
+    expect(割る.length, '黒だけで足りてしまっている').toBe(全状態.length)
   })
 
   it('タグとステッカーは、沈み方も同じ', () => {
     // 2枚出るのは権限確認待ちだけ。**片方だけ直すとまた家族が割れる**（§26-6）
-    expect(値(規則('.tile-tag::before'), 'opacity')).toBe(
-      値(規則('.tile-sticker::before'), 'opacity'),
-    )
+    const 規則 = 沈む()[0]
+    expect(規則.selector).toContain('.tile-tag::before')
+    expect(規則.selector).toContain('.tile-sticker::before')
   })
 
   it('記号と文言は消していない', () => {
     // **状態の答えそのもの**（§26-6）。沈めるのは地であって、中身ではない
-    const 触った = 当たる("[data-connected='false']").filter(
-      (rule) => rule.selector.includes('.tile-tag') || rule.selector.includes('.tile-sticker'),
-    )
-    expect(触った.length).toBeGreaterThan(0)
-    for (const rule of 触った) {
+    for (const rule of 当たる("[data-connected='false']")) {
       expect(rule.body, rule.selector).not.toMatch(/display:\s*none/)
-      expect(rule.body, rule.selector).not.toMatch(/content:/)
     }
   })
 })

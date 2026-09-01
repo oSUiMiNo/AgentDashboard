@@ -451,24 +451,32 @@ test('それでも全部を選ぶと、PC が床で断って理由がカード�
   }
 })
 
-test('接続断のカードは、呼吸の山でも沈んだままになる', async ({ page }) => {
+test('接続断のカードは呼吸せず、輪も札も同じ濃さで座る', async ({ page }) => {
   /*
-    フェーズ19。**jsdom では測れない**——`@keyframes tile-breathe` の濃さは
-    `--tile-fade` を掛けた `calc()` で、その解決はカスケードの先にある。
-    単体（`tile.test.ts`）が見られるのは「そう書いてある」ことまでで、
-    **そう出ているか**を確かめられるのはここだけ。
+    フェーズ19（輪も沈める）とフェーズ22（札を輪と同じだけ沈める・呼吸を止める）を、
+    1本で見る。**この2つは同じ不変条件の裏表**なので、別々に置くと片方だけ直したときに
+    もう片方が空振りする。
 
-    **属性を手で立てない。** `data-connected` の出どころ（サーバの報告）は上の
-    テストが見張っているので、ここでは**本物の抜け殻**を相手にする——
-    そうしないと「印は付くが沈まない」と「印が付かない」を切り分けられない。
+    **jsdom では測れない。** 濃さは `--tile-ink` を読む `opacity` で、疑似要素（`::before`）に
+    付いているものもある。単体（`tile.test.ts`）が見られるのは「そう書いてある」ことまでで、
+    **カスケードがそう解決するか**はここでしか分からない。
 
-    見るのは**山**である。底だけ見ると、呼吸が止まっているだけでも通ってしまう。
+    **属性を手で立てない。** `data-connected` の出どころ（サーバの報告）は上のテストが
+    見張っているので、ここでは**本物の抜け殻**を相手にする——そうしないと
+    「印は付くが沈まない」と「印が付かない」を切り分けられない。
+
+    # 呼吸を止めたのは、周期のどこを見るかで一致が変わったから（設計§27-2）
+
+    §24-3 は「呼吸は『あなたの番』の合図」として残す側に倒していたが、**輪だけが
+    0.330〜0.600 を行き来し、札は動かない**ので、**山では一致し、底では 1.8倍ずれる**。
+    利用者には「直っていない」と見えた。**抜け殻は答えても先へ進まない**ので、動きで
+    急かす意味も無い。
   */
   await openDashboard(page)
   const 沈むはず = await spawnOn(page, 2)
   const 比べる相手 = await spawnOn(page, 1)
 
-  // どちらも入力待ち（呼吸）にする。**ターンが終わった印**を撃つ
+  // どちらも入力待ち（＝繋がっていれば呼吸する状態）にする
   for (const cardId of [沈むはず, 比べる相手]) {
     await openSession(page, tileOf(page, cardId))
     await fireHook(page, 'Stop', '{"last_assistant_message":"終わりました"}')
@@ -480,75 +488,7 @@ test('接続断のカードは、呼吸の山でも沈んだままになる', as
     timeout: 60_000,
   })
 
-  /** 1周（2.8秒）ぶんを刻んで、輪の濃さの山と底を採る */
-  const 山と底 = async (cardId: string) =>
-    page.evaluate(async (id) => {
-      const ring = document
-        .querySelector(`[data-testid="tile-shell"][data-card-id="${id}"]`)
-        ?.querySelector('.tile-ring')
-      if (!ring) throw new Error(`輪が見つかりません：${id}`)
-      const 値 = []
-      // 2.8秒の周期を 3.2秒ぶん、40ms 刻みで。**山を必ず1回は跨ぐ**
-      for (let i = 0; i < 80; i += 1) {
-        値.push(Number.parseFloat(getComputedStyle(ring).opacity))
-        await new Promise((r) => setTimeout(r, 40))
-      }
-      return { 山: Math.max(...値), 底: Math.min(...値) }
-    }, cardId)
-
-  const 接続断 = await 山と底(沈むはず)
-  const 接続あり = await 山と底(比べる相手)
-
-  // **繋がっているほうは満輝度まで上がる**（呼吸の設計そのもの。フェーズ8 の 45点）
-  expect(接続あり.山).toBeGreaterThan(0.95)
-  // **接続断は山でも 60% どまり。** ここが 100% まで上がるのが直す前の姿だった
-  expect(接続断.山).toBeLessThan(0.7)
-  // 山も底も、繋がっているときの 0.6 倍（率を1本にしてあるので比が揃う）
-  expect(接続断.山 / 接続あり.山).toBeCloseTo(0.6, 1)
-  expect(接続断.底 / 接続あり.底).toBeCloseTo(0.6, 1)
-  // **呼吸そのものは残っている**（設計§24-3。止めると終了と同じ静けさになる）
-  expect(接続断.山).toBeGreaterThan(接続断.底 * 1.5)
-})
-
-test('接続断のカードでは、右下の札も輪と同じだけ沈む', async ({ page }) => {
-  /*
-    フェーズ21。**「接続断なのに沈まない」族の3つ目にして最後**——①回遊線（フェーズ12）、
-    ②輪の呼吸（上のテスト）を潰したあと、**右下の札だけが満輝度で残っていた**
-    （実測：輪 0.6 に対し板 1.0。色は同じ）。
-
-    **jsdom では測れない。** 板の濃さは `--tile-fade` を読む `opacity` で、しかも
-    **疑似要素（`::before`）に付いている**——単体（`tile.test.ts`）が見られるのは
-    「そう書いてある」ことまでで、**カスケードがそう解決するか**はここでしか分からない。
-
-    **`tile.spec.ts` へは置けない。** 既定の土台は PC を持たないので**本物の抜け殻を
-    作れず**、`data-connected` を手で立てるしかない——それは上のテストが明文で
-    禁じている（「印は付くが沈まない」と「印が付かない」を切り分けられなくなる）。
-
-    **比で見る。** 板は率だけを読む（0.6 固定）が、輪は状態ごとの濃さ（`--tile-dim`）に
-    率を掛けたものなので、**生の値どうしは揃わない**。揃うのは「繋がっているときの
-    自分に対する割合」のほうである。
-  */
-  await openDashboard(page)
-  const 沈むはず = await spawnOn(page, 2)
-  const 比べる相手 = await spawnOn(page, 1)
-
-  // **どちらも同じ状態にする。** 輪の濃さは状態で変わるので、揃えないと割合が比べられない
-  for (const cardId of [沈むはず, 比べる相手]) {
-    await openSession(page, tileOf(page, cardId))
-    await fireHook(page, 'Stop', '{"last_assistant_message":"終わりました"}')
-    await page.goto('/')
-  }
-  await waitForResumeTarget(page, 沈むはず)
-  await orphanAgent(page, 2)
-  await expect(tileOf(page, 沈むはず).getByTestId('disconnected-badge')).toBeVisible({
-    timeout: 60_000,
-  })
-
-  /**
-   * 輪と板の濃さの**山**、それに札の文字色を採る。
-   *
-   * **山を採るのは輪が呼吸しているため。** 板は動かないので、山も底も同じ値になる。
-   */
+  /** 1周（2.8秒）ぶんを刻んで、輪と札の濃さの山と底、それに文字色を採る */
   const 採る = async (cardId: string) =>
     page.evaluate(async (id) => {
       const shell = document.querySelector(
@@ -566,8 +506,10 @@ test('接続断のカードでは、右下の札も輪と同じだけ沈む', as
         await new Promise((r) => setTimeout(r, 40))
       }
       return {
-        輪: Math.max(...輪),
-        板: Math.max(...板),
+        輪の山: Math.max(...輪),
+        輪の底: Math.min(...輪),
+        板の山: Math.max(...板),
+        板の底: Math.min(...板),
         文字: getComputedStyle(tag).color,
       }
     }, cardId)
@@ -575,15 +517,23 @@ test('接続断のカードでは、右下の札も輪と同じだけ沈む', as
   const 接続断 = await 採る(沈むはず)
   const 接続あり = await 採る(比べる相手)
 
-  // **繋がっているほうの板は満輝度。** ここが 1 でなくなったら、率が漏れている
-  expect(接続あり.板).toBeCloseTo(1, 2)
-  // **この段の本体。** 直す前はここも 1 のままで、輪だけが 0.6 まで沈んでいた
-  expect(接続断.板).toBeCloseTo(0.6, 2)
-  // **輪と同じ割合であること**——利用者の指摘は「枠色とずれている」だった
-  expect(接続断.板 / 接続あり.板).toBeCloseTo(接続断.輪 / 接続あり.輪, 1)
+  // **繋がっているほうは呼吸する**（設計そのもの。山は満輝度まで上がる）
+  expect(接続あり.輪の山).toBeGreaterThan(0.95)
+  expect(接続あり.輪の山).toBeGreaterThan(接続あり.輪の底 * 1.5)
+  // **繋がっているほうの札は満輝度で、動かない**（§26-6「触らないもの」）
+  expect(接続あり.板の山).toBeCloseTo(1, 2)
+  expect(接続あり.板の底).toBeCloseTo(1, 2)
 
-  // 沈んだ板の上では文字が入れ替わる（設計§26-4 の案1）。入力待ちは琥珀なので黒
-  expect(接続断.文字).toBe('rgb(0, 0, 0)')
+  // **接続断は呼吸しない**（フェーズ22。§24-3 を覆した）。山と底が同じ値になる
+  expect(接続断.輪の山).toBeCloseTo(接続断.輪の底, 2)
+  // **輪は沈んだまま座る**（入力待ちの濃さ 75% × 0.6 ＝ 0.45）
+  expect(接続断.輪の山).toBeCloseTo(0.45, 2)
+  // **この段の本体：札は輪とまったく同じ濃さ。** 直す前は札だけ 0.600 で高止まりしていた
+  expect(接続断.板の山).toBeCloseTo(接続断.輪の山, 2)
+  expect(接続断.板の底).toBeCloseTo(接続断.輪の底, 2)
+
+  // 沈めた板の上では文字が白へ入れ替わる（設計§27-3）
+  expect(接続断.文字).toBe('rgb(255, 255, 255)')
   // **繋がっているほうは触らない**（§26-6）
   expect(接続あり.文字).toBe('rgb(23, 23, 23)')
 })
