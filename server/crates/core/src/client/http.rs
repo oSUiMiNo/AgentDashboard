@@ -24,6 +24,34 @@ use tokio::net::TcpStream;
 /// 「相手が固まっている」か「相手を取り違えている」のどちらか
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// 送る本文と、その媒体型（`メッセージに画像を添付できるようにする` 設計§3）。
+///
+/// **媒体型を本文と一緒に持つ。** かつては本文を `String` で受け、送るときに
+/// `application/json` を決め打ちしていた。画像を置く口ができて**本文が JSON とは
+/// 限らなくなった**ので、本文の持ち主に言わせる形へ変えた。
+pub struct Payload {
+    pub content_type: &'static str,
+    pub bytes: Vec<u8>,
+}
+
+impl Payload {
+    /// JSON の本文。**従来の決め打ちと同じ**なので、既存の呼び出しはこれに置き換わる。
+    pub fn json(text: String) -> Self {
+        Self {
+            content_type: "application/json",
+            bytes: text.into_bytes(),
+        }
+    }
+
+    /// 画像などのバイト列。
+    pub fn bytes(content_type: &'static str, bytes: Vec<u8>) -> Self {
+        Self {
+            content_type,
+            bytes,
+        }
+    }
+}
+
 /// 1往復する。成功なら（状態コード・本文）を返す。
 ///
 /// - 送るヘッダは `Host` / `Accept` / `Connection: close`（＋本文があるときだけ
@@ -34,7 +62,7 @@ pub async fn request(
     target: &Target,
     method: &str,
     path: &str,
-    body: Option<String>,
+    body: Option<Payload>,
 ) -> Result<(u16, String), ClientError> {
     let outcome = tokio::time::timeout(REQUEST_TIMEOUT, exchange(target, method, path, body)).await;
     match outcome {
@@ -101,7 +129,7 @@ async fn exchange(
     target: &Target,
     method: &str,
     path: &str,
-    body: Option<String>,
+    body: Option<Payload>,
 ) -> Result<(u16, String), ClientError> {
     let (status, bytes) = exchange_bytes(target, method, path, body).await?;
     Ok((status, String::from_utf8_lossy(&bytes).into_owned()))
@@ -115,7 +143,7 @@ async fn exchange_bytes(
     target: &Target,
     method: &str,
     path: &str,
-    body: Option<String>,
+    body: Option<Payload>,
 ) -> Result<(u16, Vec<u8>), ClientError> {
     let address = (target.host().to_string(), target.port());
     let stream = TcpStream::connect(address)
@@ -168,7 +196,7 @@ async fn drive<T>(
     io: TokioIo<T>,
     method: &str,
     path: &str,
-    body: Option<String>,
+    body: Option<Payload>,
 ) -> Result<(u16, Vec<u8>), ClientError>
 where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -197,12 +225,12 @@ where
         // 札（CLI設計§5-4）。サーバは Cookie より先にこれで判定する（§5-2）
         builder = builder.header(hyper::header::AUTHORIZATION, format!("Bearer {token}"));
     }
-    if body.is_some() {
-        builder = builder.header(hyper::header::CONTENT_TYPE, "application/json");
+    if let Some(payload) = &body {
+        builder = builder.header(hyper::header::CONTENT_TYPE, payload.content_type);
     }
     let request = builder
         .body(http_body_util::Full::new(bytes::Bytes::from(
-            body.unwrap_or_default(),
+            body.map(|payload| payload.bytes).unwrap_or_default(),
         )))
         .map_err(|err| ClientError::BadUrl(format!("要求を組み立てられません: {err}")))?;
 

@@ -47,6 +47,12 @@ pub struct PathQuery {
     pub shape: Option<String>,
 }
 
+/// `?card=<カードID>`。**どのカードへの添付か**を決める（設計§3）。
+#[derive(Debug, serde::Deserialize)]
+pub struct CardQuery {
+    pub card: String,
+}
+
 /// 生で返すときに必ず付ける CSP（`ファイル閲覧で画像とHTMLも表示する` 設計§5-3）。
 ///
 /// # なぜヘッダで出すのか
@@ -121,6 +127,55 @@ pub async fn api_file(
             "`as` を読めません：{other}\n合うのは raw です。"
         )))),
     }
+}
+
+/// 添付を1枚置く（`メッセージに画像を添付できるようにする` 設計§3）。
+///
+/// # なぜ新しい口を作るのか
+///
+/// [`api_file`] が `as=raw` で済ませたのは、**同じ資源を別の形で返すだけ**だったからである。
+/// こちらは**向きが逆で、資源も別**——「PC のファイルを見せる」ではなく「ブラウザの画像を
+/// PC のディスクへ置く」。読む口に書く動作を足すと、[`crate::session_host::SessionHost`]
+/// の doc が書いている「読むだけ。書く口は持たない」が嘘になる。
+///
+/// # 断り方
+///
+/// 媒体型は `Content-Type` から取る。表に無いものは **415**、大きすぎるものは **413**、
+/// 他人のカードは **403**——[`status_of`] の写し表に従う。
+pub async fn api_attachment(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<Identity>,
+    Path(host): Path<String>,
+    Query(query): Query<CardQuery>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    let target = parse_host(&host)?;
+    let ask = HostAskRequest {
+        account_id: identity.account_id,
+        target,
+    };
+
+    let card_id = protocol::CardId(query.card.parse().map_err(|_| {
+        refuse(HostAskError::BadRequest(
+            "card はカードIDである必要があります".to_string(),
+        ))
+    })?);
+
+    // **媒体型はヘッダから取る。** 中身から推測すると、外したときに嘘の拡張子で置くことになる
+    let media_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+
+    let written = state
+        .agent
+        .write_blob(ask, card_id, &media_type, body.to_vec())
+        .await
+        .map_err(refuse)?;
+
+    Ok(Json(written).into_response())
 }
 
 /// 生のバイト列で返す（設計§5-2・§5-3）。

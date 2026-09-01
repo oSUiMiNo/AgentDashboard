@@ -222,6 +222,24 @@ pub fn is_attachment_extension(extension: &str) -> bool {
         .any(|(known, kind, media)| *known == wanted && *kind == FileKind::Image && media.is_some())
 }
 
+/// 置いた添付1枚（`メッセージに画像を添付できるようにする` 設計§4）。
+///
+/// # なぜ [`FileBlob`] を使い回さないのか
+///
+/// あちらは「**読んだ中身**」で、`data` を必ず持つ。書いた側の答えに中身は要らない
+/// ——**要るのは置いた場所だけ**である（画像を取り返すのは生ファイルの口の仕事）。
+/// 使い回すと、返すたびに中身を線へ載せ直すことになり、**運んだばかりのバイト列が
+/// そのまま往復する**。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WrittenBlob {
+    /// 置いた絶対パス。**本文へ混ぜるのはこれ**（設計§6）
+    pub path: String,
+    /// `image/png` など。**受け取った媒体型をそのまま返す**（呼ぶ側が突き合わせられるように）
+    pub media_type: String,
+    /// 置いたバイト数
+    pub bytes: u64,
+}
+
 /// バイト列で返すファイル1つ（設計§3-1）。
 ///
 /// # なぜ [`FileContent`] に欄を足さないのか
@@ -245,7 +263,7 @@ pub struct FileBlob {
 }
 
 /// `Vec<u8>` を base64 の文字列として運ぶ（[`FileBlob::data`]）。
-mod base64_bytes {
+pub(crate) mod base64_bytes {
     use base64::Engine as _;
     use serde::{Deserialize as _, Deserializer, Serializer};
 

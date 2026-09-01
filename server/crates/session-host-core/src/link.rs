@@ -969,6 +969,10 @@ async fn handshake(mut socket: Socket, config: &LinkConfig) -> anyhow::Result<(S
         // （`ファイル閲覧で画像とHTMLも表示する` 設計§3-4）。上4つと同じで、
         // **この実行ファイルは `hostfs::read_blob` を持っている**ので常に真
         supports_blob_read: true,
+        // 添付をバイト列で書ける版であることを名乗る
+        // （`メッセージに画像を添付できるようにする` 設計§4-1）。上5つと同じで、
+        // **この実行ファイルは `hostfs::write_blob` を持っている**ので常に真
+        supports_blob_write: true,
     };
     socket
         .send(tungstenite::Message::text(serde_json::to_string(&hello)?))
@@ -1152,6 +1156,15 @@ enum Ask {
     /// バイト列で読む（`ファイル閲覧で画像とHTMLも表示する` 設計§3-2）。
     /// **`File` と別にしてある**——契約（テキストだけ／表に載る種別だけ）が違う
     Blob(String),
+    /// 添付を1枚置く（`メッセージに画像を添付できるようにする` 設計§4）。
+    /// **`Blob` と別にしてある**——向きが逆で、置き場所を決めるのはこちら側になる。
+    /// `Log` と同じく**置き場所を知るのに設定が要る**
+    Write(
+        protocol::CardId,
+        String,
+        Vec<u8>,
+        Arc<crate::config::SessionHostConfig>,
+    ),
     /// この PC のログ（ログ設計§13-1）。**置き場所を知るのに設定が要る**
     Log(
         Box<protocol::logs::LogQuery>,
@@ -1200,6 +1213,20 @@ fn answer_ask(outgoing: mpsc::UnboundedSender<Outgoing>, request_id: RequestId, 
                 Ok(blob) => HostReply::Blob(blob),
                 Err(err) => failed(err),
             },
+            Ask::Write(card, media_type, data, config) => {
+                match crate::attachments::write_blob(
+                    &config.resolved_state_dir(),
+                    card,
+                    &media_type,
+                    &data,
+                    config.attachment_retention_days,
+                    config.attachment_max_bytes,
+                    config.attachment_sweep_bytes,
+                ) {
+                    Ok(written) => HostReply::Written(written),
+                    Err(err) => failed(err),
+                }
+            }
             Ask::Log(query, config) => match crate::logs::collect(&config, &query) {
                 Ok(chunk) => HostReply::Log(chunk),
                 Err(err) => HostReply::Failed {
@@ -1401,6 +1428,21 @@ fn apply_command(
         }
         ServerToAgent::ReadBlob { request_id, path } => {
             answer_ask(outgoing.clone(), request_id, Ask::Blob(path));
+        }
+        // 添付を置く問い（`メッセージに画像を添付できるようにする` 設計§4）。
+        // **読む問いと同じ1本の問答の道に乗る。** 置き場所を知るのに設定が要るので、
+        // `Ask::Log` と同じく `SessionManager` から借りる
+        ServerToAgent::WriteBlob {
+            request_id,
+            card_id,
+            media_type,
+            data,
+        } => {
+            answer_ask(
+                outgoing.clone(),
+                request_id,
+                Ask::Write(card_id, media_type, data, manager.config().clone()),
+            );
         }
 
         // ログの問い（ログ設計§13-1）。**フォルダと同じ1本の問答の道に乗る。**

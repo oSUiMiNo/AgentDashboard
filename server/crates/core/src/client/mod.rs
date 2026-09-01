@@ -454,6 +454,47 @@ pub async fn host_file_raw(
     http::fetch_bytes(target, &url).await
 }
 
+/// `POST /api/hosts/{host}/attachments`（`メッセージに画像を添付できるようにする` 設計§3）。
+///
+/// **画面の「＋」と同じ口を叩く。** 台帳（`cli_surface.toml`）が、画面にできることは
+/// CLI でもできることを求めている。
+pub async fn attach(
+    target: &Target,
+    host: &str,
+    prefix: &str,
+    file: &std::path::Path,
+) -> Result<Outcome, ClientError> {
+    let card = resolve_card_id(target, prefix).await?;
+    let shown = file.display().to_string();
+
+    // **媒体型は拡張子から決める。** 中身から推測すると、外したときに嘘の拡張子で置く
+    let Some(media_type) = protocol::fs::media_type_of(&shown) else {
+        return Err(ClientError::BadUrl(format!(
+            "{shown} は添付として送れる種別ではありません（png / jpg / jpeg / gif / webp）"
+        )));
+    };
+
+    let data = std::fs::read(file)
+        .map_err(|err| ClientError::BadUrl(format!("{shown} を読めません: {err}")))?;
+
+    let path = format!(
+        "/api/hosts/{}/attachments?card={}",
+        http::percent_encode(host),
+        http::percent_encode(&card.0.to_string())
+    );
+    let raw = write_ok(
+        target,
+        "POST",
+        &path,
+        Some(http::Payload::bytes(media_type, data)),
+    )
+    .await?;
+    let written: protocol::fs::WrittenBlob = serde_json::from_str(&raw)
+        .map_err(|err| ClientError::BadUrl(format!("答えを読めません: {err}")))?;
+    let human = format!("{} （{} バイト）", written.path, written.bytes);
+    Ok(Outcome { raw, human })
+}
+
 /// `GET /api/settings`。**解釈しない**（CLI設計§12-1）ので生の本文だけを返す。
 pub async fn settings_raw(target: &Target) -> Result<String, ClientError> {
     http::fetch_ok(target, "/api/settings").await
@@ -513,7 +554,13 @@ pub async fn account_issue(
 ) -> Result<(String, String), ClientError> {
     ensure_account_mode(target).await?;
     let body = serde_json::json!({ "label": label, "kind": kind }).to_string();
-    let raw = write_ok(target, "POST", "/api/account/tokens", Some(body)).await?;
+    let raw = write_ok(
+        target,
+        "POST",
+        "/api/account/tokens",
+        Some(http::Payload::json(body)),
+    )
+    .await?;
     let value: serde_json::Value =
         serde_json::from_str(&raw).map_err(|err| ClientError::Refused {
             status: 200,
@@ -597,7 +644,7 @@ async fn write_ok(
     target: &Target,
     method: &str,
     path: &str,
-    body: Option<String>,
+    body: Option<http::Payload>,
 ) -> Result<String, ClientError> {
     let (status, text) = http::request(target, method, path, body).await?;
     if (200..300).contains(&status) {
@@ -1155,7 +1202,13 @@ pub async fn project_add(
     path: &str,
 ) -> Result<(server_core::projects::AddResponse, String), ClientError> {
     let body = serde_json::json!({ "host": host, "path": path }).to_string();
-    let raw = write_ok(target, "POST", "/api/projects", Some(body)).await?;
+    let raw = write_ok(
+        target,
+        "POST",
+        "/api/projects",
+        Some(http::Payload::json(body)),
+    )
+    .await?;
     let parsed = serde_json::from_str(&raw).map_err(|err| ClientError::Refused {
         status: 200,
         message: format!("追加の応答を読めません（{err}）"),
@@ -1240,7 +1293,13 @@ pub fn settings_update_body(key: &str, value: &str) -> Result<String, String> {
 
 /// `settings set`（`PUT /api/settings`）。応答は更新後の設定（解釈せずそのまま返す）。
 pub async fn settings_set(target: &Target, body: String) -> Result<String, ClientError> {
-    write_ok(target, "PUT", "/api/settings", Some(body)).await
+    write_ok(
+        target,
+        "PUT",
+        "/api/settings",
+        Some(http::Payload::json(body)),
+    )
+    .await
 }
 
 /// `settings export`。サーバが作った持ち出しファイルの中身をそのまま返す。
@@ -1251,7 +1310,13 @@ pub async fn settings_export(target: &Target) -> Result<String, ClientError> {
 /// `settings import`（`POST /api/settings/import`）。本文は生のまま渡す——検査も
 /// 「全部通るか、1つも入れないか」もサーバの仕事（持ち出し設計）。
 pub async fn settings_import(target: &Target, body: String) -> Result<String, ClientError> {
-    write_ok(target, "POST", "/api/settings/import", Some(body)).await
+    write_ok(
+        target,
+        "POST",
+        "/api/settings/import",
+        Some(http::Payload::json(body)),
+    )
+    .await
 }
 
 /// `version select`（`PUT /api/versions/selected`）。**予約であって、その瞬間には
@@ -1267,7 +1332,13 @@ pub async fn version_select(
         "confirm_unverified": confirm_unverified,
     })
     .to_string();
-    let (status, text) = http::request(target, "PUT", "/api/versions/selected", Some(body)).await?;
+    let (status, text) = http::request(
+        target,
+        "PUT",
+        "/api/versions/selected",
+        Some(http::Payload::json(body)),
+    )
+    .await?;
     if status == 428 {
         return Err(ClientError::Refused {
             status,

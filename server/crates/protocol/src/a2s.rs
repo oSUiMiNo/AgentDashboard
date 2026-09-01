@@ -91,6 +91,13 @@ pub enum HostReply {
     ///
     /// 中身は base64 の文字列として線に載る（[`crate::fs::FileBlob`]）。
     Blob(crate::fs::FileBlob),
+    /// 置いた添付の場所（`メッセージに画像を添付できるようにする` 設計§4）。
+    ///
+    /// **[`Self::Blob`] と別の腕にしてある。** あちらは「読んだ中身」で、こちらは
+    /// 「書いた場所」——同じ型に載せると、`data` が空なのは中身が空だからなのか
+    /// 書いた側だからなのかが読めなくなる（[`crate::fs::FileContent`] と
+    /// [`crate::fs::FileBlob`] を分けたのと同じ理由）。
+    Written(crate::fs::WrittenBlob),
     /// この PC の資源（起こし直し設計§18）。
     ///
     /// **`Log` と同じ理由でここへ足した。** 別の答えの型を作ると、待ち口・答えの解決・
@@ -217,6 +224,16 @@ pub enum AgentMessage {
         /// `#[serde(default)]` が要る理由も同じで、欄が足りないと Hello そのものが解けなくなる。
         #[serde(default)]
         supports_blob_read: bool,
+        /// 添付を**バイト列で書ける**か（`メッセージに画像を添付できるようにする` 設計§4-1）。
+        ///
+        /// 上の5つとまったく同じ形。**`supports_blob_read` に相乗りさせない**——読む道は
+        /// 既に配ったホストが持っているが、書く道は持っていない。まとめると
+        /// 「画像も見られません」と嘘をつく。
+        ///
+        /// [`ServerToAgent::WriteBlob`] は答えを返す種別だが、**名乗らない PC は接続を
+        /// 保ったまま無視する**ので、投げると永遠に答えが返らない。だから投げる前に見る。
+        #[serde(default)]
+        supports_blob_write: bool,
     },
     /// カード1枚の最新（意味は [`crate::ws::ServerMessage::SessionUpsert`] と同じ）。
     ///
@@ -401,6 +418,24 @@ pub enum ServerToAgent {
         request_id: RequestId,
         path: String,
     },
+    /// 添付を**置いてほしい**（`メッセージに画像を添付できるようにする` 設計§4）。
+    ///
+    /// **置き場所を決めるのは PC 側**である。サーバは「このカードの、この媒体型の
+    /// バイト列」だけを渡し、`<state_dir>` の下のどこへ置くかには口を出さない——
+    /// `state_dir` の解決は PC 側の設定に属するので、サーバが組み立てると
+    /// **繋いだ PC ごとに違う場所を指す**ことになる。
+    ///
+    /// 投げる前に**名乗り**（`supports_blob_write`）を見ること。名乗らない PC は
+    /// 接続を保ったまま無視するので、投げると永遠に答えが返らない。
+    WriteBlob {
+        request_id: RequestId,
+        card_id: CardId,
+        /// `image/png` など。**PC 側がここから拡張子を決める**
+        media_type: String,
+        /// 中身。**線に載るときだけ base64 の文字列になる**（[`crate::fs::WrittenBlob`] と同じ）
+        #[serde(with = "crate::fs::base64_bytes")]
+        data: Vec<u8>,
+    },
     /// この PC のログを引かせてほしい（ログ設計§13-1）。
     ///
     /// **答えは [`AgentMessage::HostReply`] で返る**——フォルダ・ファイルと同じ1本の
@@ -526,6 +561,7 @@ mod tests {
                 supports_resources: true,
                 supports_revive: true,
                 supports_blob_read: true,
+                supports_blob_write: true,
             },
             AgentMessage::SessionUpsert {
                 session: Box::new(sample_meta()),

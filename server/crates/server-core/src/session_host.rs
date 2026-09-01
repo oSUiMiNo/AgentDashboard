@@ -203,6 +203,23 @@ pub trait SessionHost: Send + Sync + 'static {
         path: &str,
     ) -> Result<protocol::fs::FileBlob, HostAskError>;
 
+    /// 添付を1枚**置いてもらう**（`メッセージに画像を添付できるようにする` 設計§4）。
+    ///
+    /// **[`SessionHost::read_blob`] の鏡だが、向きが逆である。** あちらは「読むだけ。
+    /// 書く口は持たない」と書いてあったので、その1文を嘘にしないために口を分けた。
+    ///
+    /// **置き場所を決めるのは PC 側**で、ここは「どのカードの、どの媒体型の、どのバイト列か」
+    /// しか渡さない——`state_dir` の解決は PC 側の設定に属するため。
+    ///
+    /// **ローカルモードもここを通る。** 理由は [`SessionHost::list_dir`] と同じ。
+    async fn write_blob(
+        &self,
+        request: HostAskRequest,
+        card_id: protocol::CardId,
+        media_type: &str,
+        data: Vec<u8>,
+    ) -> Result<protocol::fs::WrittenBlob, HostAskError>;
+
     // --- ログ -----------------------------------------------------------------
 
     /// その PC のログ（ログ設計§13-1）。

@@ -33,7 +33,7 @@ pub struct HostFsError {
 }
 
 impl HostFsError {
-    fn new(reason: HostFailure, detail: impl Into<String>) -> Self {
+    pub(crate) fn new(reason: HostFailure, detail: impl Into<String>) -> Self {
         Self {
             reason,
             detail: detail.into(),
@@ -44,7 +44,7 @@ impl HostFsError {
     ///
     /// **まとめて「読めません」にしない**（設計§8）。権限が無いのか消えているのかは
     /// どちらも利用者が直せるものなので、混ぜると直しようが無くなる。
-    fn from_io(err: &std::io::Error, path: &Path) -> Self {
+    pub(crate) fn from_io(err: &std::io::Error, path: &Path) -> Self {
         let reason = match err.kind() {
             std::io::ErrorKind::NotFound => HostFailure::NotFound,
             std::io::ErrorKind::PermissionDenied => HostFailure::Denied,

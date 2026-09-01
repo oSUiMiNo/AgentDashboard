@@ -236,6 +236,21 @@ enum SessionCmd {
         #[command(flatten)]
         out: OutputArgs,
     },
+    /// 画像を添付として置く（送信はしない。置いた場所を標準出力へ返す）。
+    ///
+    /// 画面の「＋」と同じ口を叩く。**送るのは `session send` の役目**で、
+    /// 返ってきたパスを本文の末尾へ1行で足す
+    Attach {
+        /// カードID。先頭の数文字で足りる
+        id: String,
+        /// 送る画像（png / jpg / jpeg / gif / webp）
+        file: String,
+        /// どの PC のカードか（繋がっている PC が2台以上のときは必須）
+        #[arg(long, value_name = "AGENT_ID", default_value = "local")]
+        host: String,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
     /// セッションを終了する（終了の知らせまで待つ）
     Kill {
         /// カードID。先頭の数文字で足りる
@@ -831,6 +846,15 @@ async fn client_session(
             let outcome = client::send_input(target, &id, &text, wait, timeout).await?;
             println!("{}", output::pick(out.json, &outcome.raw, &outcome.human));
         }
+        SessionCmd::Attach {
+            id,
+            file,
+            host,
+            out,
+        } => {
+            let outcome = client::attach(target, &host, &id, std::path::Path::new(&file)).await?;
+            println!("{}", output::pick(out.json, &outcome.raw, &outcome.human));
+        }
         SessionCmd::Kill { id, out } => {
             let outcome = client::kill(target, &id).await?;
             println!("{}", output::pick(out.json, &outcome.raw, &outcome.human));
@@ -1320,6 +1344,7 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                "attach",
                 "key",
                 "kill",
                 "ls",

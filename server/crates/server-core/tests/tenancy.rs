@@ -1515,6 +1515,65 @@ async fn agentの札ではブラウザ側の口を通れない() {
 }
 
 #[tokio::test]
+async fn 他人のpcへ添付を置けない() {
+    // `メッセージに画像を添付できるようにする` 設計§3-2。**書く口は帰属を必ず通る。**
+    // 読む口（`GET /api/hosts/{host}/…`）と違い、こちらは相手のディスクへ痕跡を残すので、
+    // すり抜けると「他人の機械にファイルを置ける」ことになる
+    for backend in common::backends("tenancy-attach").await {
+        let arena = Arena::start(backend.db.clone()).await;
+        let (mine, _mine_agent) = arena.tenant("わたし").await;
+        let (theirs, _their_agent) = arena.tenant("よそのひと").await;
+        let browser = arena.browser(&mine).await;
+
+        let their_agent_id = arena
+            .registry
+            .list(theirs.account_id)
+            .first()
+            .and_then(|meta| meta.agent_id)
+            .expect("相手の PC が分かること");
+        let my_agent_id = arena
+            .registry
+            .list(mine.account_id)
+            .first()
+            .and_then(|meta| meta.agent_id)
+            .expect("自分の PC が分かること");
+
+        let (status, body) = browser
+            .request(
+                "POST",
+                &format!(
+                    "/api/hosts/{their_agent_id}/attachments?card={}",
+                    theirs.card_id
+                ),
+                Some("dummy"),
+            )
+            .await;
+        assert!(
+            status == 403 || status == 404,
+            "[{}] 他人の PC へ添付を置けてしまった: {status} {body}",
+            backend.name
+        );
+
+        // **自分の PC は帰属で断られない。** ここを見ないと、口が丸ごと壊れていても
+        // 上の主張だけは通ってしまう
+        let (status, body) = browser
+            .request(
+                "POST",
+                &format!("/api/hosts/{my_agent_id}/attachments?card={}", mine.card_id),
+                Some("dummy"),
+            )
+            .await;
+        assert!(
+            status != 403 && status != 404,
+            "[{}] 自分の PC が帰属で断られた: {status} {body}",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
 async fn cliの札ではpcの受け口を通れない() {
     // 逆向きも同じ（§5-3）：CLI の札が漏れても `/agent/ws` は開かない
     for backend in common::backends("tenancy-cli-kind").await {

@@ -279,6 +279,33 @@ impl SessionHost for LocalSessionHost {
             .await
     }
 
+    /// 添付を1枚置く（`メッセージに画像を添付できるようにする` 設計§4）。
+    ///
+    /// **近道を作らない。** [`Self::read_blob`] と同じ理由で、同じプロセスでも trait を通る。
+    async fn write_blob(
+        &self,
+        request: server_core::session_host::HostAskRequest,
+        card_id: protocol::CardId,
+        media_type: &str,
+        data: Vec<u8>,
+    ) -> Result<protocol::fs::WrittenBlob, server_core::session_host::HostAskError> {
+        reject_target(&request)?;
+        let media_type = media_type.to_string();
+        let config = self.manager.config().clone();
+        blocking_ask(move || {
+            session_host_core::attachments::write_blob(
+                &config.resolved_state_dir(),
+                card_id,
+                &media_type,
+                &data,
+                config.attachment_retention_days,
+                config.attachment_max_bytes,
+                config.attachment_sweep_bytes,
+            )
+        })
+        .await
+    }
+
     /// この機械のログ（ログ設計§13-1）。
     ///
     /// フォルダと同じで、**読むのは `session_host_core::logs`**。ローカルだけの近道を

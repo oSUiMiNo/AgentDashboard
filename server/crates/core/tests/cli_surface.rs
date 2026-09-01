@@ -52,12 +52,12 @@ const TENANCY_SOURCE: &str = "crates/server-core/tests/tenancy.rs";
 /// 座るだけなので、この作業列で口は1つも増えない。**口を増やす設計判断をしたとき
 /// だけ**、意識してこの数字を上げる。
 const WS_VARIANTS: usize = 13;
-const INSIDE_DOORS: usize = 23;
+const INSIDE_DOORS: usize = 24;
 const OUTSIDE_DOORS: usize = 5;
 
 /// tenancy.rs の総当たりの本数。口が増えないなら総当たりも増えない（§1-1）。
 /// enforcement を足したときだけ意識して上げる。
-const TENANCY_TESTS: usize = 21;
+const TENANCY_TESTS: usize = 22;
 
 /// `command` に書ける群の先頭語。誤記（存在しない群）を機械で捕まえる。
 const 群: &[&str] = &[

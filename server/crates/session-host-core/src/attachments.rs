@@ -243,6 +243,94 @@ pub fn forget(state_dir: &Path, card: CardId) {
     }
 }
 
+/// 添付を1枚置く（`メッセージに画像を添付できるようにする` 設計§4・§5）。
+///
+/// [`read_blob`] の鏡。**置き場所を決めるのはここ**で、サーバは口を出さない
+/// ——`state_dir` の解決は PC 側の設定に属するため。
+///
+/// # 中身は検めない
+///
+/// [`read_blob`] と同じ理由。媒体型が表に在ることだけを見て、バイト列の中身は見ない。
+/// 拡張子と中身が食い違っていれば、**claude 側が受け取るときに断る**
+/// （`Pasted path has image extension but content is not a supported image`）。
+/// ここで見に行くと「受け取れない」と「壊れている」が同じ断りに潰れる。
+///
+/// # 置いたあとに掃く
+///
+/// 掃除を起動時の1回だけにすると、**長く起こしっぱなしの機械では溜まり続ける**
+/// （`README.md` がログの掃除について同じ弱点を書いている）。添付は1枚が数 MB あるので
+/// 効き方が大きい。数えるだけなら安いので、置いた直後にも掃く（設計§11-1）。
+pub fn write_blob(
+    state_dir: &Path,
+    card: protocol::CardId,
+    media_type: &str,
+    data: &[u8],
+    retention_days: u64,
+    max_bytes: u64,
+    sweep_bytes: u64,
+) -> Result<protocol::fs::WrittenBlob, crate::hostfs::HostFsError> {
+    // **種別を先に見る。** 表に無いものは、置く場所を作るまでもなく相手ではない。
+    // svg はここで落ちる——claude の貼り付け処理が拾わないので、置いても添付にならない
+    let Some(extension) = protocol::fs::attachment_extension_for(media_type) else {
+        return Err(crate::hostfs::HostFsError::new(
+            protocol::a2s::HostFailure::Unsupported,
+            format!("{media_type} は添付として受け取れる種別ではありません"),
+        ));
+    };
+
+    // **書く前に大きさで断る。** 書いてから消すのでは、上限を置いた意味が無い
+    let bytes = data.len() as u64;
+    if bytes > MAX_ATTACHMENT_BYTES {
+        let limit = MAX_ATTACHMENT_BYTES;
+        return Err(crate::hostfs::HostFsError::new(
+            protocol::a2s::HostFailure::TooLarge,
+            format!("添付は {bytes} バイトで、上限の {limit} バイトを超えています"),
+        ));
+    }
+
+    let dir = card_dir(state_dir, card);
+    std::fs::create_dir_all(&dir).map_err(|err| crate::hostfs::HostFsError::from_io(&err, &dir))?;
+
+    let unique = uuid::Uuid::new_v4().simple().to_string();
+    let name = build_name(time::OffsetDateTime::now_utc(), &unique[..8], extension);
+    let path = dir.join(&name);
+    std::fs::write(&path, data).map_err(|err| {
+        let failure = crate::hostfs::HostFsError::from_io(&err, &path);
+        tracing::warn!(
+            path = %path.display(),
+            bytes,
+            reason = ?failure.reason,
+            "添付を置けません",
+        );
+        failure
+    })?;
+
+    let shown = path.display().to_string();
+    tracing::info!(
+        card_id = %card.0,
+        path = %shown,
+        bytes,
+        media_type,
+        "添付を置きました",
+    );
+
+    let swept = sweep(state_dir, retention_days, max_bytes, sweep_bytes);
+    if swept.removed > 0 {
+        tracing::info!(
+            removed = swept.removed,
+            freed = swept.freed,
+            over_budget = swept.over_budget,
+            "添付を掃きました",
+        );
+    }
+
+    Ok(protocol::fs::WrittenBlob {
+        path: shown,
+        media_type: media_type.to_string(),
+        bytes,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(non_snake_case)]

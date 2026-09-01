@@ -279,6 +279,8 @@ pub struct Capabilities {
     /// フォルダとテキストは読めるので、まとめると「フォルダも読めません」と嘘になる。
     #[serde(default)]
     pub supports_blob_read: bool,
+    #[serde(default)]
+    pub supports_blob_write: bool,
 }
 
 /// 他インスタンスから回ってくる、PC への指示（設計§9-2 の `agent:{id}:cmd`）。
@@ -1225,6 +1227,7 @@ fn reply_kind(reply: &HostReply) -> &'static str {
         HostReply::File(_) => "file",
         HostReply::Log(_) => "log",
         HostReply::Blob(_) => "blob",
+        HostReply::Written(_) => "written",
         HostReply::Resources(_) => "resources",
         HostReply::Failed { .. } => "failed",
     }
@@ -1573,6 +1576,35 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
         }
     }
 
+    async fn write_blob(
+        &self,
+        request: crate::session_host::HostAskRequest,
+        card_id: protocol::CardId,
+        media_type: &str,
+        data: Vec<u8>,
+    ) -> Result<protocol::fs::WrittenBlob, crate::session_host::HostAskError> {
+        let media_type = media_type.to_string();
+        match self
+            // **`Need::Blob` ではない。** 読む道は既に配ったホストが持っているが、
+            // 書く道は持っていない。相乗りさせると「画像も見られません」と嘘をつく（設計§4-1）
+            .ask(request, Need::BlobWrite, move |request_id| {
+                ServerToAgent::WriteBlob {
+                    request_id,
+                    card_id,
+                    media_type,
+                    data,
+                }
+            })
+            .await?
+        {
+            HostReply::Written(written) => Ok(written),
+            HostReply::Failed { reason, detail } => {
+                Err(crate::session_host::HostAskError::Failed { reason, detail })
+            }
+            other => Err(wrong_answer(other)),
+        }
+    }
+
     async fn read_log(
         &self,
         request: crate::session_host::HostAskRequest,
@@ -1647,6 +1679,9 @@ enum Need {
     /// **`HostFs` に相乗りさせない。** 古い PC でもフォルダとテキストは読めるので、
     /// まとめると「フォルダも読めません」と嘘をつくことになる。
     Blob,
+    /// 添付を**書ける**か。**`Blob` に相乗りさせない**——読む道は既に配ったホストが
+    /// 持っているが、書く道は持っていない（`メッセージに画像を添付できるようにする` 設計§4-1）
+    BlobWrite,
 }
 
 /// 答えを待つ上限（設計§23-3 の実測で決めた値）。
@@ -1790,6 +1825,7 @@ impl RemoteSessionHost {
                 Need::LogRead => capabilities.supports_log_read,
                 Need::Revive => capabilities.supports_revive,
                 Need::Blob => capabilities.supports_blob_read,
+                Need::BlobWrite => capabilities.supports_blob_write,
                 Need::Resources => capabilities.supports_resources,
             })
     }
@@ -1927,6 +1963,7 @@ async fn agent_loop(
         supports_resources,
         supports_revive,
         supports_blob_read,
+        supports_blob_write,
     } = hello
     else {
         // next_hello が Hello 以外を返すことはない
@@ -1963,6 +2000,7 @@ async fn agent_loop(
         supports_resources,
         supports_revive,
         supports_blob_read,
+        supports_blob_write,
     };
     match serde_json::to_value(&capabilities) {
         Ok(value) => {
