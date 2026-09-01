@@ -421,7 +421,7 @@
   position: absolute;
   left: 50%;
   transform: translateX(-50%);
-  bottom: max(0.125rem, calc(var(--fade-band) * 0.4 - 0.625rem));
+  bottom: max(0.125rem, calc(var(--fade-band) * 0.4 - 0.4375rem));
   z-index: 2;
 }
 .body-toggle {

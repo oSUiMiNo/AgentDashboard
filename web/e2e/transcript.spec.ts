@@ -505,12 +505,11 @@ test('帯の外の本文は、いままでどおり選べる', async ({ page }) 
 test('「続きを読む」はただの文字で、中央のやや下に居る', async ({ page }) => {
   // 要望10。**地・枠・影を持たない**（クラスの有無ではなく計算値で見る）。
   // **いままでより大きい**（`text-xs` = 12px より上）
-  // **縦位置は深い段で測る。** 浅い段（19.5px）は**大きくした文字より低い**ので、
-  // 「帯の中央より下」を物理的に満たせない（文字が帯からはみ出す）
+  // **いちばん浅い段で測る。** 帯が1行（19.5px）しかない段が最も厳しく、ここで収まれば
+  // 他の段でも収まる。**文字の行送りを詰めていないと、ここで帯からはみ出す**——
+  // 既定の行送りだと箱が 20px になり、狭い窓でフェード中の最終行と重なった
   await loadFoldLines(page)
-  const row = page.locator('[data-testid="transcript-row"]', {
-    has: page.locator('[data-fade="deep"]'),
-  }).first()
+  const row = foldableRow(page)
   await expect(row).toBeVisible(届くまで)
   await row.getByTestId('body-toggle').scrollIntoViewIfNeeded()
 
@@ -529,6 +528,7 @@ test('「続きを読む」はただの文字で、中央のやや下に居る',
       // 帯の上端から文字の中心までの距離が、帯の高さの半分より下か
       帯の上端から: 文字.top + 文字.height / 2 - (器.bottom - 帯),
       帯の高さ: 帯,
+      文字の高さ: 文字.height,
     }
   })
 
@@ -542,6 +542,9 @@ test('「続きを読む」はただの文字で、中央のやや下に居る',
   expect(Math.abs(見た目.左の余白 - 見た目.右の余白)).toBeLessThanOrEqual(1)
   // **帯の中央より下**
   expect(見た目.帯の上端から).toBeGreaterThan(見た目.帯の高さ / 2)
+  // **帯からはみ出さない。** いちばん浅い段（19.5px）でも収まること——
+  // 行送りを詰めていないと 20px になって、ここで落ちる
+  expect(見た目.文字の高さ).toBeLessThan(見た目.帯の高さ)
 })
 
 test('帯は器の端まで届く', async ({ page }) => {

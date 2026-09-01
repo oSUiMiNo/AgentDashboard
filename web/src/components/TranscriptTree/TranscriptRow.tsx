@@ -510,7 +510,11 @@ function MarkdownBody({
           // **明るく出す。** プレートを外した以上、地を持たないぶんを**コントラストで
           // 読ませる**しかない——くすんだ色のままだと、薄れかけの本文と混ざって
           // 読めなくなる（狭い窓で実際にそうなった）。装飾ではなく可読性の手当てである
-          className={`text-foreground body-toggle text-sm font-medium${
+          // **行の高さを詰める**（`leading-none`）。既定の行送りだと箱が 20px になり、
+          // **いちばん浅い段の帯（1行＝19.5px）より背が高くなって、帯からはみ出す**——
+          // 狭い窓ではフェード中の最終行と重なった。字の大きさは変えずに箱だけ詰めれば、
+          // どの段でも帯の中へ収まり、「中央よりやや下」も成立する
+          className={`text-foreground body-toggle text-sm leading-none font-medium${
             fade ? ' body-toggle-float' : ' mt-1'
           }`}
         >
