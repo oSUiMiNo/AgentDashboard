@@ -17,7 +17,7 @@
  * というのが要件の使い方なので、送るたびにターミナルへ切り替えさせない。
  */
 
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router'
 import { Button } from '@/components/ui/button'
 import { InputDock } from '@/components/InputDock/InputDock'
@@ -44,7 +44,7 @@ import { useFilesPanel } from '@/lib/filesPanel'
 import { projectDisplayName } from '@/lib/path'
 import { backTargetFor, HOME, projectPath, sessionPath } from '@/lib/routes'
 import { hostOf } from '@/lib/reviveBudget'
-import type { CardId } from '@/lib/protocol'
+import type { CardId, ReviveState } from '@/lib/protocol'
 import { useNow } from '@/lib/sessions'
 import { useAuthStore } from '@/stores/auth'
 import { useCardError, useReviving, useSessionCard } from '@/stores/sessions'
@@ -67,6 +67,9 @@ export function SessionView({ cardId, compact = false }: Props) {
   const reviving = useReviving(cardId)
   const cardError = useCardError(cardId)
   const agents = useSettingsStore((state) => state.settings.agents)
+  // 復旧中の明滅を止めるのに要る。**印だけを出し、止める分岐は CSS 側に置く**
+  // （小窓と同じ作法。設計§15-5）
+  const quiet = useSettingsStore((state) => state.settings.motion_quiet)
   // 外したカードの書きかけを忘れるのに要る。**下書きの鍵はアカウントごと**
   const account = useAuthStore((state) => state.auth.account)
   // 中身は自分で購読する。横並びのとき、隣のセッションの状態変化で作り直されないため
@@ -132,7 +135,10 @@ export function SessionView({ cardId, compact = false }: Props) {
         **4行目はここに無い。** タブの行はサイドバーより下の「中身の列」に居るので、
         あれがそのまま4行目になる。上へ移すと、広い窓でサイドバーの上に跨ってしまう。
       */}
-      <header className="flex flex-col gap-1 text-sm">
+      <header
+        className="flex flex-col gap-1 text-sm"
+        data-quiet={quiet === 'lively' ? undefined : quiet}
+      >
         {/*
           **1行目は単独画面だけ**（設計§2）。横並びではパスが全カードで同じで、
           `GroupView` の見出しにも既に出ている。判定は既存の `compact` でできる
@@ -178,35 +184,42 @@ export function SessionView({ cardId, compact = false }: Props) {
           )}
 
           {/*
-            **始末の2つ**（設計§14-2）。結合はやめ、名前を入れ替えてある。
+            **始末の2つ**（設計§14-2・§15-1）。送るものは変わっていない。
 
             | ボタン | 送るもの |
             |---|---|
-            | **スリープ** | `Kill`（止めるだけ。カードは残り、`復旧` で起こせる） |
-            | **終了** | `Archive`（カードを一覧から外す） |
+            | **電源** | 点いていれば `Kill`（止めるだけ）／消えていれば `Revive`（起こす） |
+            | **ゴミ箱**（終了） | `Archive`（カードを一覧から外す） |
 
-            **スリープは、走っていて届くときだけ出す。** 止まっている相手や線が
-            切れている相手へ送っても届かず、押せるのに何も起きないボタンは
-            **壊れているのと見分けが付かない**。
+            **電源が1つで済むのは偶然ではない。** 「スリープが出る条件」と
+            「復旧が出る条件」は互いの否定そのもの（`reviveState` の `live` が
+            `走っている && 繋がっている`）なので、**常にどちらか片方しか出ていない**。
 
-            **終了はいつでも押せる。** 届かないカードを一覧から外す道が、ここしか無い。
+            **ゴミ箱はいつでも押せる。** 届かないカードを一覧から外す道が、ここしか無い。
+
+            **並びは「カードに効くもの」→ 間隔 →「画面に効くもの」**（設計§15-2）。
+            §14-6 は ✕ との取り違えを「アイコンと文字」で分けていたが、**訂正で
+            3つとも記号になった**ので、代わりに**間隔と大きさ**で群を作る。
           */}
-          <div className="ml-auto flex shrink-0 items-center gap-2">
-            {!isEnded(session.status) && session.agent_connected && (
-              <Button
-                variant="outline"
-                size="sm"
-                data-testid="sleep-card"
-                title="セッションを止めます（カードは残り、復旧で起こせます）"
-                onClick={() => kill(session.card_id)}
-              >
-                スリープ
-              </Button>
-            )}
+          <div className="ml-auto flex shrink-0 items-center gap-1.5">
+            <PowerButton
+              on={revivable.kind === 'live'}
+              state={revivable.kind}
+              busy={reviving}
+              why={reviveWhy}
+              onPress={() => {
+                if (revivable.kind === 'live') {
+                  kill(session.card_id)
+                  return
+                }
+                revive(session.card_id)
+              }}
+            />
             <Button
               variant="ghost"
-              size="sm"
+              size="icon-sm"
               data-testid="close-card"
+              aria-label="終了"
               title="カードを一覧から外します（履歴は残ります）"
               onClick={() => {
                 // **カードを外したら書きかけも忘れる。** 残すと、二度と開かない相手の
@@ -219,12 +232,15 @@ export function SessionView({ cardId, compact = false }: Props) {
                 }
               }}
             >
-              終了
+              <TrashIcon />
             </Button>
             {/*
-              **✕ はいちばん右**（設計§14-6）。同じ行に「終了」が並ぶので、
-              **形で分ける**——✕ はアイコン、スリープと終了は文字。そして
-              **押し間違えても何も壊れない側を端に置く**（閉じるだけ）。
+              **✕ はいちばん右**（設計§14-6）。**押し間違えても何も壊れない側を端に置く**。
+
+              **「形で分ける」はもう効かない**（訂正その2で3つとも記号になった）ので、
+              代わりに**間隔と大きさで分ける**（設計§15-2）——電源とゴミ箱は 28px で
+              近く、✕ だけ 32px で `ml-2` ぶん離す。**カードに効くもの**と
+              **画面に効くもの**の境目が、そこにある。
             */}
             {!compact && (
               <Button
@@ -234,7 +250,7 @@ export function SessionView({ cardId, compact = false }: Props) {
                 data-testid="close-session"
                 aria-label="閉じる"
                 title="閉じる"
-                className="shrink-0"
+                className="ml-2 shrink-0"
                 onClick={() => {
                   // **三項演算子で1回にまとめない。** `navigate` の2つのオーバーロード
                   // （行き先 / 何個戻るか）に `string | number` は当たらず、`tsc -b` で落ちる
@@ -322,40 +338,27 @@ export function SessionView({ cardId, compact = false }: Props) {
             </>
           )}
           {/*
-            **起こし直しは `compact` の分岐の外**に置く（設計§9-2）。宛先がカードごとに
-            一意なので、十字ボタンを横並びで出さなかった理由（どの端末へ撃つのか
-            曖昧になる）は当てはまらない。終了・削除が横並びでも出ているのと同じ扱い
+            **起こし直すボタンは1行目の電源へ移った**（設計§15-1）。ここに残るのは
+            **どのモードで起こすか**の札だけである——3行目はモデルとモードの行なので、
+            モードの話はこちらに居るのが筋。ボタンに付いて動かすと、モードの話が
+            2つの行に割れる。
+
+            押す前に権限モードを見せる（要件）。**終了したカードではピッカーが出ない**
+            ので、そのときだけ静的な札で補う——実機の記録では23枚とも
+            `bypassPermissions` だった（復旧設計§15-4）ので、これは飾りではない。
           */}
-          {revivable.kind !== 'live' && (
-            <>
-              {/*
-                押す前に権限モードを見せる（要件）。**終了したカードではピッカーが
-                出ない**ので、そのときだけ静的なバッジで補う——実機の記録では
-                23枚とも `bypassPermissions` だった（設計§15-4）ので、これは飾りではない
-              */}
-              {isEnded(session.status) && session.permission_mode !== null && (
-                <span
-                  data-testid="revive-mode"
-                  data-mode={session.permission_mode}
-                  className={`shrink-0 rounded border px-1.5 py-0.5 text-[0.7rem] ${permissionModeTone(session.permission_mode)}`}
-                  title="このモードで起こし直します"
-                >
-                  {permissionModeLabel(session.permission_mode)}
-                </span>
-              )}
-              <Button
-                variant="outline"
-                size="sm"
-                data-testid="revive-button"
-                data-state={revivable.kind}
-                disabled={revivable.kind !== 'ready' || reviving}
-                title={reviveWhy ?? '元の CLI セッションで起こし直します'}
-                onClick={() => revive(session.card_id)}
+          {revivable.kind !== 'live' &&
+            isEnded(session.status) &&
+            session.permission_mode !== null && (
+              <span
+                data-testid="revive-mode"
+                data-mode={session.permission_mode}
+                className={`shrink-0 rounded border px-1.5 py-0.5 text-[0.7rem] ${permissionModeTone(session.permission_mode)}`}
+                title="このモードで起こし直します"
               >
-                {reviving ? '復旧中…' : '復旧'}
-              </Button>
-            </>
-          )}
+                {permissionModeLabel(session.permission_mode)}
+              </span>
+            )}
           {/*
             **タブをやめてトグルにした**（設計§14-3）。2つの器が並ぶより1つの
             スイッチのほうが簡単で、**行を1つ丸ごと減らせる**。
@@ -489,6 +492,123 @@ function ScreenInterval({ remote, shown }: { remote: boolean; shown: boolean }) 
  * 入っているときの下地は **Primary Accent の面**（`DESIGN.md` §8 の床・§11.2）。
  * 選択を面で出す1か所を、タブから引き継いでいる。
  */
+/**
+ * 押したあと、これだけのあいだ**次の押下を捨てる**（設計§15-1）。
+ *
+ * **2つのボタンだったときは、連打しても同じものが2回送られるだけだった。**
+ * 1つにするとそうではなくなる——`Kill` から `ended` へ変わるまでには間があり
+ * （実測の上限は20秒）、**その切り替わりをまたいで2回目を押すと、止めたつもりで
+ * 起こす**。「効いたか分からないからもう一度押す」がいちばん起きやすい押し方で、
+ * しかも押した直後は輪の色が変わらないので、その動機がそこにある。
+ */
+const 連打よけ = 500
+
+/**
+ * スリープと復旧を1つにした電源ボタン（設計§15-1）。
+ *
+ * **押せなくするのは「本当に押せないとき」だけにする。** 連打よけで `disabled` に
+ * すると、点灯していた輪が 500ms だけ灰色へ落ちて**壊れたように見える**。捨てるのは
+ * 押下のほうで、見た目は動かさない。
+ *
+ * **「状態が切り替わるまで押せなくする」は採らない**（設計§15-1）。`Kill` が届か
+ * なければ**永久に押せないボタン**になり、しかも押せない理由を出す道が無い。
+ */
+function PowerButton({
+  on,
+  state,
+  busy,
+  why,
+  onPress,
+}: {
+  /** 点いているか（＝実体がある）。消えていれば押すと起きる */
+  on: boolean
+  /** 起こし直せるかの内訳。押せない理由を目印にも載せる */
+  state: ReviveState['kind']
+  /** いま起こしている最中か */
+  busy: boolean
+  /** 押せない理由（押せるときは `null`） */
+  why: string | null
+  onPress: () => void
+}) {
+  const [待つ, set待つ] = useState(false)
+  const 時計 = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(
+    () => () => {
+      if (時計.current !== null) {
+        clearTimeout(時計.current)
+      }
+    },
+    [],
+  )
+
+  // **色は読み上げられない。** ホバーの反応も文字ではないので、読み上げ環境では
+  // ここだけが手がかりになる（設計§15-1）
+  const 言葉 = on ? 'スリープ' : '復旧'
+  const 説明 = busy
+    ? '起こしています…'
+    : on
+      ? 'セッションを止めます（カードは残り、復旧で起こせます）'
+      : (why ?? '元の CLI セッションで起こし直します')
+
+  return (
+    <button
+      type="button"
+      className="power"
+      data-testid="power-card"
+      data-power={on ? 'on' : 'off'}
+      data-action={on ? 'sleep' : 'revive'}
+      data-state={state}
+      data-busy={busy ? 'true' : undefined}
+      disabled={(!on && state !== 'ready') || busy}
+      aria-label={言葉}
+      title={説明}
+      onClick={() => {
+        if (待つ) {
+          return
+        }
+        set待つ(true)
+        時計.current = setTimeout(() => set待つ(false), 連打よけ)
+        onPress()
+      }}
+    >
+      <svg
+        aria-hidden
+        viewBox="0 0 24 24"
+        className="size-3.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={2}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M12 3v9" />
+        <path d="M18.4 7a9 9 0 1 1-12.8 0" />
+      </svg>
+    </button>
+  )
+}
+
+/** 「終了」の印（設計§15-2）。**言葉は `aria-label` と `title` に残してある** */
+function TrashIcon() {
+  return (
+    <svg
+      aria-hidden
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M3 6h18" />
+      <path d="M8 6V4h8v2" />
+      <path d="m19 6-1 14H6L5 6" />
+      <path d="M10 11v6" />
+      <path d="M14 11v6" />
+    </svg>
+  )
+}
+
 function TerminalToggle({
   on,
   onToggle,
@@ -504,24 +624,20 @@ function TerminalToggle({
       data-testid="terminal-toggle"
       onClick={onToggle}
       title="ターミナルで見る"
-      className={`flex shrink-0 items-center gap-1.5 rounded-md px-1.5 py-0.5 text-xs transition-colors ${
+      /*
+        **上下の余白を持たない**（設計§15-3）。溝そのものが高さを持つので、
+        ここにも余白を付けると 1.3倍にしたときに3行目が伸びる。
+      */
+      className={`termswitch flex shrink-0 items-center gap-1.5 rounded-md px-1.5 text-xs transition-colors ${
         on ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'
       }`}
     >
-      {/* 器（レール）と玉。**入っているときだけ面が色を持つ** */}
-      <span
-        aria-hidden
-        className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full border transition-colors ${
-          on
-            ? 'border-[var(--accent-edge)] bg-[var(--accent-face)]'
-            : 'border-border bg-muted/40'
-        }`}
-      >
-        <span
-          className={`absolute size-3 rounded-full transition-all ${
-            on ? 'left-[0.875rem] bg-foreground' : 'left-0.5 bg-muted-foreground'
-          }`}
-        />
+      {/*
+        溝とつまみ。**大きさと位置は `controls.css` が持つ**——「入っている位置
+        だけは 1.3倍ではない」理由を、数字のすぐ隣に書いておきたいため。
+      */}
+      <span aria-hidden className="termswitch-track">
+        <span className="termswitch-knob" />
       </span>
       ターミナル
     </button>

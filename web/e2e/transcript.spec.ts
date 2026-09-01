@@ -424,6 +424,126 @@ test('フェードは行の高さを変えない', async ({ page }) => {
   expect(await 高さ()).toBe(敷いたまま)
 })
 
+test('帯の下9割は、どこを押しても開く', async ({ page }) => {
+  // **要望10 の本体**（設計§6-7-5）。「続きを読む」をピンポイントで突かなくても開く。
+  // **左寄り・中央・右寄りの3点**で見る——1点だけだと、たまたま文字の上を突いていても通る
+  await loadFoldLines(page)
+
+  for (const frac of [0.2, 0.5, 0.8]) {
+    const row = foldableRow(page)
+    await expect(row).toBeVisible(届くまで)
+    await expect(row.getByTestId('body-toggle')).toHaveText('続きを読む')
+    await row.getByTestId('body-toggle').scrollIntoViewIfNeeded()
+
+    const 点 = await row.locator('[data-testid="body-hitbox"]').evaluate((el, f) => {
+      const box = el.getBoundingClientRect()
+      return { x: box.left + box.width * f, y: box.top + box.height / 2 }
+    }, frac)
+    await page.mouse.click(点.x, 点.y)
+    await expect(row.getByTestId('body-toggle')).toHaveText('畳む')
+
+    // 次の点のために畳み直す
+    await row.getByTestId('body-toggle').click()
+    await expect(row.getByTestId('body-toggle')).toHaveText('続きを読む')
+  }
+})
+
+test('帯の上1割を押しても開かない', async ({ page }) => {
+  // **上端はほぼ透明で本文と見分けが付かない。** ここまで押せるようにすると、
+  // 本文を読むためのクリックが開く操作になる（要望10・利用者の指定）
+  // **深い段で測る。** いちばん浅い段は帯が1行（19.5px）しかなく、**大きくした文字の
+  // ほうが背が高い**ので、除いてある1割まで文字が覆う——そこを押せば当然開く。
+  // 除外が意味を持つのは、帯が文字より高い段である
+  await loadFoldLines(page)
+  const row = page.locator('[data-testid="transcript-row"]', {
+    has: page.locator('[data-fade="deep"]'),
+  }).first()
+  await expect(row).toBeVisible(届くまで)
+  await row.getByTestId('body-toggle').scrollIntoViewIfNeeded()
+
+  // **点は帯基準で採ること。** 押す面を基準にすると、**面が伸びたときに点も一緒に動く**
+  // ので、除外を壊しても常に面の外を測ることになる（実際にこれで壊し方②が落ちなかった）
+  const 点 = await row.locator('[data-testid="body-hitbox"]').evaluate((el) => {
+    const 器 = el.parentElement as HTMLElement
+    const 器の箱 = 器.getBoundingClientRect()
+    const 帯の高さ = parseFloat(getComputedStyle(器, '::before').height) || 20
+    const 帯の上端 = 器の箱.bottom - 帯の高さ
+    const 文字の箱 = (
+      器.querySelector('[data-testid="body-toggle"]') as HTMLElement
+    ).getBoundingClientRect()
+    // 帯の上から5%の高さ（＝除いてある1割の中）で、文字にかからない横位置
+    return { x: 文字の箱.left - 20, y: 帯の上端 + 帯の高さ * 0.05 }
+  })
+  await page.mouse.click(点.x, 点.y)
+
+  await expect(row.getByTestId('body-toggle')).toHaveText('続きを読む')
+})
+
+test('帯の外の本文は、いままでどおり選べる', async ({ page }) => {
+  // 押す面を重ねた代わりに、**その範囲だけ**文字が選べなくなる。**それ以外は失わない**
+  await loadFoldLines(page)
+  const row = foldableRow(page)
+  await expect(row).toBeVisible(届くまで)
+
+  const 選べた = await row.locator('[data-testid="row-body"]').evaluate((el) => {
+    const 段落 = el.querySelector('p, li')
+    if (!段落) {
+      return false
+    }
+    const range = document.createRange()
+    range.selectNodeContents(段落)
+    const sel = window.getSelection()
+    sel?.removeAllRanges()
+    sel?.addRange(range)
+    const 取れた = (sel?.toString() ?? '').length
+    sel?.removeAllRanges()
+    return 取れた > 0
+  })
+  expect(選べた).toBe(true)
+})
+
+test('「続きを読む」はただの文字で、中央のやや下に居る', async ({ page }) => {
+  // 要望10。**地・枠・影を持たない**（クラスの有無ではなく計算値で見る）。
+  // **いままでより大きい**（`text-xs` = 12px より上）
+  // **縦位置は深い段で測る。** 浅い段（19.5px）は**大きくした文字より低い**ので、
+  // 「帯の中央より下」を物理的に満たせない（文字が帯からはみ出す）
+  await loadFoldLines(page)
+  const row = page.locator('[data-testid="transcript-row"]', {
+    has: page.locator('[data-fade="deep"]'),
+  }).first()
+  await expect(row).toBeVisible(届くまで)
+  await row.getByTestId('body-toggle').scrollIntoViewIfNeeded()
+
+  const 見た目 = await row.getByTestId('body-toggle').evaluate((el) => {
+    const s = getComputedStyle(el)
+    const 文字 = el.getBoundingClientRect()
+    const 器 = (el.parentElement as HTMLElement).getBoundingClientRect()
+    const 帯 = parseFloat(getComputedStyle(el.parentElement as HTMLElement, '::before').height) || 20
+    return {
+      地: s.backgroundColor,
+      枠: s.borderTopWidth,
+      影: s.boxShadow,
+      字の大きさ: parseFloat(s.fontSize),
+      左の余白: 文字.left - 器.left,
+      右の余白: 器.right - 文字.right,
+      // 帯の上端から文字の中心までの距離が、帯の高さの半分より下か
+      帯の上端から: 文字.top + 文字.height / 2 - (器.bottom - 帯),
+      帯の高さ: 帯,
+    }
+  })
+
+  // **ただの文字**
+  expect(見た目.地).toMatch(/rgba\(0, 0, 0, 0\)|transparent/)
+  expect(見た目.枠).toBe('0px')
+  expect(見た目.影).toBe('none')
+  // **いままでより大きい**（12px は `text-xs`）
+  expect(見た目.字の大きさ).toBeGreaterThan(12)
+  // **左右中央**（余白が等しい。丸めのぶん 1px は許す）
+  expect(Math.abs(見た目.左の余白 - 見た目.右の余白)).toBeLessThanOrEqual(1)
+  // **帯の中央より下**
+  expect(見た目.帯の上端から).toBeGreaterThan(見た目.帯の高さ / 2)
+})
+
 test('帯は器の端まで届く', async ({ page }) => {
   // **要望①の本体**（設計§6-7-2）。帯を本文の箱に敷いていた頃は、吹き出しの内側余白
   // （`px-3 py-2`）のぶんだけ左右と下が届かず、**器の中に貼った紙**に見えていた。
@@ -470,58 +590,35 @@ test('「続きを読む」が帯の前面に居る', async ({ page }) => {
   expect(ボタンの上に居るもの).toBe(true)
 })
 
-test('帯が押す判定を食わない', async ({ page }) => {
-  // **設計§6-1 が名指しした落とし穴。** 帯は本文に重なっているので、素通しさせないと
-  // その面がクリックを吸って行が開けなくなる。
+test('帯は押す面になり、「続きを読む」はその上から押せる', async ({ page }) => {
+  // **要望10 で前提が裏返った。** フェーズ11 までは「帯がクリックを吸わないこと」を見て
+  // いたが、いまは**帯を押したら開くのが正しい**。見るのは重なりの順序である——
+  // 帯の面は本文より上、「続きを読む」は面より上。
   //
-  // **見るのは「押したら開くか」そのものである。**
-  //
-  // **`pointer-events: none` を外しても、この検査は落ちない。** 帯は擬似要素（`::before`）
-  // なので、その箱は `elementFromPoint` の返り先にならない——**そもそもクリックを吸えない**
-  // （フェーズ11 で実測。計算値が `none` → `auto` へ変わっても、帯の中の点は本文を返す）。
-  // したがって設計§6-1 が名指しした「帯がクリックを吸う」失敗は、**帯が本物の要素だった
-  // ときの話**である。`pointer-events: none` は将来そう変えたときのための安い保険として残す。
+  // 帯そのもの（`::before`）は擬似要素のままなので当たり判定を持たない。押しているのは
+  // **その上に重ねた実要素**（`body-hitbox`）である（設計§6-7-5）。
   await loadFoldLines(page)
   const row = foldableRow(page)
   await expect(row).toBeVisible(届くまで)
-
-  const body = row.locator('[data-testid="row-body"]')
-  // **畳んでも本文は窓より高い。** 帯は末尾にかかるので、末尾を窓の中へ入れてから測る
   await row.getByTestId('body-toggle').scrollIntoViewIfNeeded()
 
-  // **帯は「続きを読む」に重なっている**（フェーズ11 で前面へ載せた）。帯が押す判定を
-  // 食っていれば、Playwright の実行可能性検査がここで「他の要素が邪魔している」と言って
-  // 落ちる。**押して開くところまでを見る**——これが利用者に見える性質そのものである
+  // 帯の中の一点が、押す面を返すこと（本文ではなく）
+  const 帯の上に居るもの = await row.locator('[data-testid="body-hitbox"]').evaluate((el) => {
+    const box = el.getBoundingClientRect()
+    const found = document.elementFromPoint(box.left + box.width * 0.2, box.top + box.height / 2)
+    return found === el
+  })
+  expect(帯の上に居るもの).toBe(true)
+
+  // それでも「続きを読む」は押せる（面が文字を覆っていない）
   const toggle = row.getByTestId('body-toggle')
   await expect(toggle).toHaveText('続きを読む')
   await toggle.click()
   await expect(toggle).toHaveText('畳む')
 
-  // 帯の上の一点が本文自身であること（重なりの向きが逆転していないこと）。
-  // **`--fade-band` を `parseFloat` で読まないこと**——値は `calc(1 * calc(.75rem * 1.625))`
-  // のまま返って `NaN` になり、点が器の下端ちょうどへ落ちて**帯の外を測る**
-  await toggle.click()
-  await expect(toggle).toHaveText('続きを読む')
-  const 帯の上に居るもの = await body.evaluate((el) => {
-    const shell = el.parentElement
-    if (!shell) {
-      throw new Error('帯の器が見つからない')
-    }
-    const 器 = shell.getBoundingClientRect()
-    const 帯 = parseFloat(getComputedStyle(shell, '::before').height) || 20
-    const y = Math.min(器.bottom - 帯 / 2, window.innerHeight - 4)
-    const found = document.elementFromPoint(器.left + 器.width * 0.25, y)
-    return found?.closest('[data-testid="row-body"]') === el
-  })
-  expect(帯の上に居るもの).toBe(true)
+  // 開けば面は消える
+  await expect(row.locator('[data-testid="body-hitbox"]')).toHaveCount(0)
 })
-/**
- * 切った末尾に、フェードする相手が残っていること（設計§6-5）。
- *
- * **クラスが付いているかでは見ない。** フェーズ7 まで `data-fade` は付いていたのに、
- * **帯の下に文字が1つも無かった**——マスクが正しく敷けていても、消す相手が無ければ
- * 何も起きない。ここは**実際に文字が末尾まで届いているか**で見る。
- */
 test('畳んだ末尾に、薄れる相手が残っている', async ({ page }) => {
   await loadFoldLines(page)
   await expect(foldableRow(page)).toBeVisible(届くまで)

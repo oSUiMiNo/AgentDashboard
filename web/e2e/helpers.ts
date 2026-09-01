@@ -642,11 +642,15 @@ export async function archiveAll(page: Page) {
         いきなり終了を押すと、**カードは消えるのに擬似 claude は走り続ける**——
         後片付けとしては片手落ちで、通しで流すと走ったままのものが積み上がる。
 
-        「スリープ」は走っていて届くときだけ出るので、**在れば押す**。
+        **「在るか」ではなく「点いているか」で押す**（帯設計§15-1）。訂正その2で
+        スリープと復旧が1つの電源ボタンへ畳まれたので、**ボタンは常に在る**——
+        数だけ見ると必ず真になり、**寝ているカードで復旧を押す**ことになる。
+        後片付けのつもりでセッションを起こすので、席が埋まって
+        **無関係なテストが「起動しない」で落ちる**。
       */
-      const sleep = page.getByTestId('sleep-card')
-      if ((await sleep.count()) > 0) {
-        await sleep.click()
+      const power = page.getByTestId('power-card')
+      if ((await power.getAttribute('data-power')) === 'on') {
+        await power.click()
       }
       await page.getByTestId('close-card').click()
       // **消えたかはサーバに聞く**（ガイドライン「E2E の後片付けは画面ではなく

@@ -709,9 +709,16 @@ test('自分から終わったカードは「スリープ」として残り、�
 
   // 消せる
   await page.goto(`/s/${cardId}`)
-  await expect(page.getByTestId('close-card')).toHaveText('終了')
-  // **スリープは出ない**（止まっている相手へ送っても届かない。設計§14-2）
-  await expect(page.getByTestId('sleep-card')).toHaveCount(0)
+  // **文字は消えてゴミ箱の印になった**ので、言葉は読み上げ用の名前で見る（設計§15-2）
+  await expect(page.getByTestId('close-card')).toHaveAttribute(
+    'aria-label',
+    '終了',
+  )
+  // **電源は消えている**（止まっている相手へ `Kill` を送っても届かない。設計§14-2）
+  await expect(page.getByTestId('power-card')).toHaveAttribute(
+    'data-power',
+    'off',
+  )
   await page.getByTestId('close-card').click()
   await expect
     .poll(

@@ -1,0 +1,274 @@
+/*
+  セッション画面の帯に置く操作の見た目（設計§15）。
+
+  # なぜ `tile.css` へ混ぜないのか
+
+  `tile.css` は**一覧の小窓**のもので、`tile.test.ts` がクラス名の許可表で
+  見張っている。帯のものを同じ器へ入れると、**その許可表が何を守っているのか**が
+  ぼやける。数の多い面（小窓）と数の少ない面（帯）は、`DESIGN.md` §12.3 が
+  「物質を持たせてよいか」で正反対に扱っているので、**分けておく理由は見た目の
+  ルール側にもある。**
+
+  # なぜ Tailwind のクラスで書かないのか
+
+  電源ボタンもトグルも**多層の影**と**打ち消しの順序**（静けさ・OS の「動きを
+  減らす」）で成り立っている。並びが意味を持つものを属性の列に散らすと、
+  **1本足しただけで打ち消しが効かなくなった**ことに誰も気づけない。
+*/
+
+:root {
+  /*
+    電源が入っている印。`DESIGN.md` §11.2 の Positive（`#8FD14F`）。
+
+    **これは状態の色ではない。** 状態は2行目の●が5値で言っている（走っている＝
+    シアン）。ここが言うのは「実体があるか」という2値だけで、**別の軸**である
+    （設計§15-1）。ライムはこれまでどの状態にも当たっていなかった色で、
+    `STATUS_TONES.positive` が「出す場面が来たら使う」として空けてあった。
+  */
+  --power-lit: #8fd14f;
+}
+
+/* --- 電源ボタン（設計§15-1） ------------------------------------------- */
+
+.power {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  /*
+    28px。**1行目でいちばん高いのは ✕（32px）**なので、ここを超えなければ
+    帯の高さは変わらない（設計§15-4）。
+  */
+  inline-size: 1.75rem;
+  block-size: 1.75rem;
+  border-radius: 9999px;
+  /*
+    **消灯でも「押せる」ほうの輪は、はっきり出す。** 押せないほうを薄くするだけでは
+    差が付かない——`--color-border` は 10% の白なので、そこから更に薄くしても
+    どちらも「ほとんど見えない輪」になり、見分けが消える（実物を焼いて確かめた）。
+  */
+  border: 2px solid
+    var(--power-ring, color-mix(in oklch, var(--color-muted-foreground) 55%, transparent));
+  color: var(--power-ink, var(--color-muted-foreground));
+
+  /*
+    **地から浮き出させる。** 光源は左上に置く（`DESIGN.md` §12.3「主要操作
+    ボタン＝マット塗装・プレート・強さ中」）。
+
+    **参考画像はどれも明るい地なので、そのままは写せない。** 暗い地では
+    「上の縁だけを明るく・下に影を落とす」対で厚みを出す。
+
+    # 地の色を名指ししない（**ここが要）**
+
+    **塗りは半透明の明暗だけ**で作る。`--color-card` のような「地はこれだろう」と
+    いう色を混ぜて塗ると、**その推測が外れた瞬間に円の輪郭が出る。**
+
+    実際この帯は `--color-card` **ではなく** `body` の `--color-background` の上に
+    載っている——最初にそう書いて、地より明るい円になっていた。しかも
+    **横並び（PJT 専用画面）と単独画面で、将来どちらかだけ地が変わることがありうる。**
+
+    半透明で重ねているかぎり、ボタンの色は**常に「そのとき後ろに在るもの ± わずか」**
+    になる。背景の設計が変わっても、**追随のために誰かがここを直す必要が無い。**
+
+    `controls.test.ts` が「地の色を名指ししていないこと」を見張っている。
+  */
+  background-image: linear-gradient(
+    160deg,
+    color-mix(in oklch, white 7%, transparent),
+    color-mix(in oklch, black 12%, transparent)
+  );
+  box-shadow:
+    inset 0 1px 0 color-mix(in oklch, white 14%, transparent),
+    inset 0 -1px 1px color-mix(in oklch, black 38%, transparent),
+    /* 落ち影を2枚にすると、境目のない**なめらかな**浮き方になる */
+    0 1px 2px color-mix(in oklch, black 55%, transparent),
+    0 3px 6px color-mix(in oklch, black 32%, transparent);
+  transition:
+    border-color 150ms ease,
+    color 150ms ease,
+    box-shadow 120ms ease,
+    transform 80ms ease;
+}
+
+/* 点灯。**輪が緑であることが点灯であって、光を撒くことではない**（同 §27.1） */
+.power[data-power='on'] {
+  --power-ring: var(--power-lit);
+  --power-ink: var(--color-foreground);
+}
+
+/*
+  **押せる消灯だけが、触ると色づく。**
+
+  ボタンには文字を出す場所が無いので、**反応の有無が「押せる／押せない」を
+  分ける唯一の手がかり**になる（設計§15-1）。押せないほうへ同じ規則を当てると、
+  この見分けが消える。
+*/
+.power[data-power='off']:not(:disabled):hover {
+  --power-ring: color-mix(in oklch, var(--power-lit) 55%, var(--color-border));
+  --power-ink: var(--color-foreground);
+}
+
+/* 押したことを、その場で返す（同 §27.4）。**連打の動機を消すための対**でもある */
+.power:not(:disabled):active {
+  transform: scale(0.97);
+  box-shadow:
+    inset 0 1px 2px color-mix(in oklch, black 45%, transparent),
+    inset 0 -1px 0 color-mix(in oklch, white 6%, transparent);
+}
+
+/*
+  押せない消灯。**輪も印も、押せるほうよりはっきり薄くする**——ここが弱いと
+  「押せるのに反応しない」と読まれ、押し続けることになる（設計§15-1）。
+*/
+.power:disabled {
+  --power-ring: color-mix(in oklch, var(--color-muted-foreground) 18%, transparent);
+  --power-ink: color-mix(in oklch, var(--color-muted-foreground) 45%, transparent);
+  box-shadow:
+    inset 0 1px 0 color-mix(in oklch, white 6%, transparent),
+    0 1px 2px color-mix(in oklch, black 35%, transparent);
+  cursor: not-allowed;
+}
+
+.power:focus-visible {
+  outline: 2px solid var(--color-ring);
+  outline-offset: 2px;
+}
+
+/*
+  復旧中。**輪だけがゆっくり息をする。**
+
+  文字（「復旧中…」）を出す場所が無くなったので、進んでいることを伝えるのは
+  ここだけになる。`disabled` と重なるが、**止まっているから押せないのか、
+  働いているから押せないのか**は別の話なので、動きで分ける。
+*/
+.power[data-busy='true'] {
+  animation: power-breathe 1.6s ease-in-out infinite;
+}
+
+@keyframes power-breathe {
+  0%,
+  100% {
+    border-color: color-mix(in oklch, var(--power-lit) 30%, var(--color-border));
+  }
+  50% {
+    border-color: var(--power-lit);
+  }
+}
+
+/* --- ターミナルのトグル（設計§15-3） ------------------------------------ */
+
+.termswitch-track {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  /*
+    いまの 1.3倍（16 × 28px → 20.8 × 36.4px）。**上下の余白は持たせない**——
+    溝そのものが高さを持つので、ボタン側にも余白を付けると3行目が伸びる
+    （設計§15-3）。
+  */
+  inline-size: 2.275rem;
+  block-size: 1.3rem;
+  border-radius: 9999px;
+  border: 1px solid var(--color-border);
+  background: color-mix(in oklch, var(--color-muted) 55%, transparent);
+  /* 溝は**凹ませる**。浮いたつまみと対にすると、押せるものに見える */
+  box-shadow: inset 0 1px 2px color-mix(in oklch, black 40%, transparent);
+  transition:
+    background 150ms ease,
+    border-color 150ms ease;
+}
+
+/*
+  入っているときだけ、面にアクセントが乗る（`DESIGN.md` §11.2「Primary Accent は
+  面で出す」）。**グラデーションは面の中の差にとどめる**（同 §11.4「主役にしない」）。
+  紫青は使わない（同 §33）。
+*/
+.termswitch[aria-checked='true'] .termswitch-track {
+  border-color: var(--accent-edge);
+  background: linear-gradient(
+    150deg,
+    color-mix(in oklch, #3dd9e6 26%, transparent),
+    color-mix(in oklch, #3dd9e6 12%, transparent)
+  );
+}
+
+.termswitch-knob {
+  position: absolute;
+  /*
+    **入っている位置だけは 1.3倍ではない。**
+
+    いまは `left: 14px` で、中身（28 − 枠2 ＝ 26px）からつまみ 12px を引くと
+    右の余白がちょうど 0 になる——**右端に密着していて、左右が非対称**だった。
+    1.3倍するとズレも 1.3倍になり、**質感を上げるほど粗が見える。**
+
+    直した値：中身 34.4px − つまみ 15.6px − 余白 2.6px ＝ **16.2px**。
+  */
+  left: 0.1625rem;
+  inline-size: 0.975rem;
+  block-size: 0.975rem;
+  border-radius: 9999px;
+  /*
+    **つまみだけは、地に馴染ませてはいけない。** ここは動いて位置を示すものなので、
+    後ろが何色でも読めなければならない。
+
+    だから**明暗の主題色（`--color-foreground`）を使う**——これはテーマが反転すれば
+    一緒に反転するので、明るい地では暗いつまみ、暗い地では明るいつまみになる。
+    `white` を直に塗ると**明るいテーマで溝に溶ける**（変更前の実装が
+    `bg-foreground` だったのも同じ理由）。上に乗せる艶だけ半透明にする。
+  */
+  background-color: var(--color-foreground);
+  background-image: linear-gradient(
+    180deg,
+    color-mix(in oklch, white 22%, transparent),
+    color-mix(in oklch, black 10%, transparent)
+  );
+  box-shadow:
+    0 1px 2px color-mix(in oklch, black 55%, transparent),
+    inset 0 1px 0 color-mix(in oklch, white 35%, transparent);
+  transition:
+    left 150ms ease,
+    background 150ms ease;
+}
+
+.termswitch[aria-checked='true'] .termswitch-knob {
+  left: 1.0125rem;
+}
+
+/* --- 動きを止める ------------------------------------------------------- */
+
+/*
+  **止めるのであって、消すのではない。**
+
+  静けさを選んでも「いま起こしている最中だ」は読めなければならない。動きを
+  止めたぶん、**輪は点灯の色で置いておく**（`tile.css` の `zzz` と同じ作法）。
+
+  **打ち消しは、打ち消される規則より後ろに置くこと。** 上の `:hover` や
+  `[data-busy]` より前に書くと、詳細度が同じぶん**無言で効かなくなる。**
+*/
+[data-quiet='calm'] .power[data-busy='true'],
+[data-quiet='still'] .power[data-busy='true'] {
+  animation: none;
+  border-color: var(--power-lit);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .power {
+    transition: none;
+  }
+
+  .power[data-busy='true'] {
+    animation: none;
+    border-color: var(--power-lit);
+  }
+
+  .power:not(:disabled):active {
+    transform: none;
+  }
+
+  .termswitch-track,
+  .termswitch-knob {
+    transition: none;
+  }
+}

@@ -483,15 +483,34 @@ function MarkdownBody({
           </ReactMarkdown>
         </div>
       </div>
+      {/* **帯そのものを押せるようにする**（設計§6-7-5・要望10）。畳んでいるあいだだけ、
+          帯の**下9割**に押す面を1枚重ねる。**擬似要素では押せない**ので実要素で足す
+          （フェーズ11 で実測。`elementFromPoint` の返り先にならない）。
+
+          **上1割は残す。** 帯の上端はほぼ透明で本文と見分けが付かないので、そこまで
+          押せるようにすると**本文を読むためのクリックが開く操作になる** */}
+      {row?.foldable === true && fade && (
+        <div
+          data-testid="body-hitbox"
+          aria-hidden
+          onClick={onToggleBody}
+          className="body-hitbox"
+        />
+      )}
       {row?.foldable === true && (
         <button
           type="button"
           data-testid="body-toggle"
           onClick={onToggleBody}
-          // **畳んでいるあいだだけ帯の上へ重ねる**（設計§6-7-3・要望②）。開いているときは
-          // 重ねる相手が無いので流れの中に置く。**帯の `pointer-events: none` は動かさない**
-          // ——重ね順だけ上げる（当たり判定を殺すと畳んだ本文が開けなくなる）
-          className={`text-muted-foreground hover:text-foreground body-toggle text-xs${
+          // **ただの文字にする**（要望10）。地・枠・影・角丸は持たない——押せることは
+          // **面の広さと文字の大きさ**が伝える（`DESIGN.md` §13.2 の Main Item へ上げてある）。
+          //
+          // 畳んでいるあいだは帯の上へ重ね、**左右中央・帯の中央よりやや下**に置く。
+          // 開いているときは重ねる相手が無いので流れの中に置く
+          // **明るく出す。** プレートを外した以上、地を持たないぶんを**コントラストで
+          // 読ませる**しかない——くすんだ色のままだと、薄れかけの本文と混ざって
+          // 読めなくなる（狭い窓で実際にそうなった）。装飾ではなく可読性の手当てである
+          className={`text-foreground body-toggle text-sm font-medium${
             fade ? ' body-toggle-float' : ' mt-1'
           }`}
         >

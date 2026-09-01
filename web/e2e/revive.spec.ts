@@ -222,11 +222,18 @@ test('セッション専用画面からも押せる', async ({ page }) => {
   await orphanAgent(page, 2)
 
   await page.goto(`/s/${cardId}`)
-  const button = page.getByTestId('revive-button')
+  /*
+    **押しても消えない**（帯設計§15-1）。スリープと復旧は1つの電源ボタンに畳まれた
+    ので、起きたあとは**同じボタンが点灯へ変わる**——`toHaveCount(0)` で見ていた
+    ころの「消えたら成功」は、もう成立しない。
+  */
+  const button = page.getByTestId('power-card')
+  await expect(button).toHaveAttribute('data-power', 'off')
   await expect(button).toBeEnabled({ timeout: 60_000 })
   await button.click()
 
-  await expect(button).toHaveCount(0, { timeout: 60_000 })
+  await expect(button).toHaveAttribute('data-power', 'on', { timeout: 60_000 })
+  await expect(button).toHaveAttribute('data-action', 'sleep')
   await expect(page.getByTestId('session-view')).toBeVisible()
 })
 
@@ -243,11 +250,13 @@ test('横並び（PJT 専用画面）からも押せる', async ({ page }) => {
   await orphanAgent(page, 2)
 
   await page.goto(`/p/${encodeURIComponent(host ?? '')}/${encodeURIComponent(project ?? '')}`)
-  const button = page.getByTestId('revive-button')
+  const button = page.getByTestId('power-card')
+  await expect(button).toHaveAttribute('data-power', 'off')
   await expect(button).toBeEnabled({ timeout: 60_000 })
   await button.click()
 
-  await expect(button).toHaveCount(0, { timeout: 60_000 })
+  // 横並びでも、押したあとは同じボタンが点灯へ変わる（帯設計§15-1）
+  await expect(button).toHaveAttribute('data-power', 'on', { timeout: 60_000 })
   // 横並びの画面に居たまま戻ること。**移ってしまうと上の1行は「消えた」ではなく
   // 「画面ごと無い」で通る**
   await expect(page.getByTestId('session-view')).toBeVisible()
@@ -520,21 +529,33 @@ test('接続断のカードでも、3行目が狭い画面からはみ出さな�
 
   await page.goto(`/s/${cardId}`)
   const view = page.getByTestId('session-view')
-  // **ピッカーと復旧が同時に出ている**ことを先に確かめる。出ていなければ
-  // 「混んでいない行」を測っているだけになる
+  /*
+    **起こし直す道は1行目へ移った**（帯設計§15-1）。この場面がいちばん混む理由は
+    変わらない——終わってはいないのでピッカーが出たまま、そこへ**始末のボタンが
+    3つ並ぶ1行目**が加わる。**だから測る行を2つに増やす。**
+  */
   await expect(view.getByTestId('model-picker')).toBeVisible()
   await expect(view.getByTestId('permission-mode-picker')).toBeVisible()
-  await expect(view.getByTestId('revive-button')).toBeVisible()
+  const 電源 = view.getByTestId('power-card')
+  await expect(電源).toHaveAttribute('data-power', 'off')
 
-  const 溢れ = await view.locator('[data-row="3"]').evaluate((el) => ({
-    行: el.scrollWidth - el.clientWidth,
-    ページ:
-      document.documentElement.scrollWidth -
-      document.documentElement.clientWidth,
-  }))
+  const 溢れ = await view.evaluate((el) => {
+    const 行の溢れ = (n: string) => {
+      const row = el.querySelector(`[data-row="${n}"]`)
+      return row === null ? -1 : row.scrollWidth - row.clientWidth
+    }
+    return {
+      一行目: 行の溢れ('1'),
+      行: 行の溢れ('3'),
+      ページ:
+        document.documentElement.scrollWidth -
+        document.documentElement.clientWidth,
+    }
+  })
+  expect(溢れ.一行目, '1行目が入れ物からはみ出さないこと').toBeLessThanOrEqual(0)
   expect(溢れ.行, '3行目が入れ物からはみ出さないこと').toBeLessThanOrEqual(0)
   expect(溢れ.ページ, 'ページが横へはみ出さないこと').toBeLessThanOrEqual(0)
 
-  // 帯は4行のまま（`復旧` が出ても増えない）
+  // 帯は3行のまま（電源ボタンが消灯でも増えない）
   await expect(view.locator('header [data-row]')).toHaveCount(3)
 })

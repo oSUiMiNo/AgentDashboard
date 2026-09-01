@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -215,9 +215,29 @@ describe('SessionView の復旧', () => {
     useWsStore.setState({ revive: vi.fn() })
   })
 
-  it('実体があるカードには出さない', () => {
+  it('実体があるカードでは、同じボタンが点灯している', () => {
+    // **消えるのではなく、意味が入れ替わる**（設計§15-1）。畳めるのは
+    // 「スリープが出る条件」と「復旧が出る条件」が互いの否定だから
     show(meta({ agent_connected: true }))
-    expect(screen.queryByTestId('revive-button')).toBeNull()
+    const button = screen.getByTestId('power-card')
+    expect(button).toHaveAttribute('data-power', 'on')
+    expect(button).toHaveAttribute('data-action', 'sleep')
+    expect(button).toHaveAttribute('aria-label', 'スリープ')
+  })
+
+  it('どの状態でも、電源ボタンはちょうど1つ', () => {
+    // **これが「畳めた」ことの証明そのもの。** 2つ出る＝両方の条件が真、
+    // 0個＝両方偽で、どちらも起きないことが畳んだ根拠だった
+    for (const 場面 of [
+      meta({ agent_connected: true }),
+      stale(),
+      stale({ status: { kind: 'ended', ok: true } }),
+      stale({ claude_session_id: null }),
+    ]) {
+      show(場面)
+      expect(screen.getAllByTestId('power-card')).toHaveLength(1)
+      cleanup()
+    }
   })
 
   it('専用画面に出て、押すと起こし直すよう頼む', async () => {
@@ -225,15 +245,42 @@ describe('SessionView の復旧', () => {
     useWsStore.setState({ revive })
     show(stale())
 
-    await userEvent.click(screen.getByTestId('revive-button'))
+    await userEvent.click(screen.getByTestId('power-card'))
 
     expect(revive).toHaveBeenCalledWith(CARD)
+  })
+
+  it('連打しても、2回目は捨てられる', async () => {
+    // **1つに畳んだことで生まれた危険**（設計§15-1）。`Kill` から `ended` までには
+    // 間があり、切り替わりをまたいだ2回目は**止めたつもりで起こす**ことになる
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    show(stale())
+
+    const button = screen.getByTestId('power-card')
+    await userEvent.click(button)
+    await userEvent.click(button)
+
+    expect(revive).toHaveBeenCalledTimes(1)
+  })
+
+  it('捨てているあいだも、見た目は動かさない', async () => {
+    // `disabled` にすると点灯の輪が一瞬だけ灰色へ落ち、**壊れたように見える**
+    useWsStore.setState({ revive: vi.fn() })
+    show(stale())
+
+    const button = screen.getByTestId('power-card')
+    await userEvent.click(button)
+
+    expect(button).toBeEnabled()
   })
 
   it('横並び（compact）でも出る', () => {
     // 宛先がカードごとに一意なので、十字ボタンと違って曖昧にならない（設計§9-2）
     show(stale(), true)
-    expect(screen.getByTestId('revive-button')).toBeInTheDocument()
+    const button = screen.getByTestId('power-card')
+    expect(button).toHaveAttribute('data-power', 'off')
+    expect(button).toHaveAttribute('data-action', 'revive')
   })
 
   it('押せないときも出て、理由が読める', () => {
@@ -253,9 +300,11 @@ describe('SessionView の復旧', () => {
     })
     show(stale({ agent_id: PC }))
 
-    const button = screen.getByTestId('revive-button')
+    const button = screen.getByTestId('power-card')
     expect(button).toBeDisabled()
     expect(button).toHaveAttribute('title', 'この PC が繋がっていません')
+    // **理由は目印にも載せる。** 押せない3通りを見分ける道を消さない（設計§15-1）
+    expect(button).toHaveAttribute('data-state', 'pc-offline')
   })
 
   it('終了したカードでは、起こし直すモードを静的に見せる', () => {
@@ -278,13 +327,16 @@ describe('SessionView の復旧', () => {
     expect(screen.queryByTestId('revive-mode')).toBeNull()
   })
 
-  it('押している間は「復旧中…」になり、二度押せない', () => {
+  it('押している間は印が付き、二度押せない', () => {
+    // **文字を出す場所が無くなった**ので、進んでいることは動きで伝える（設計§15-1）。
+    // 「止まっているから押せない」のか「働いているから押せない」のかを分ける
     show(stale())
     act(() => markReviving(CARD))
 
-    const button = screen.getByTestId('revive-button')
-    expect(button).toHaveTextContent('復旧中…')
+    const button = screen.getByTestId('power-card')
+    expect(button).toHaveAttribute('data-busy', 'true')
     expect(button).toBeDisabled()
+    expect(button).toHaveAttribute('title', '起こしています…')
   })
 
   it('断りはこの画面に出る', () => {
@@ -453,7 +505,7 @@ describe('SessionView の帯は3行', () => {
 
     expect(rowOf('project-files-toggle')).toBe('1')
     expect(rowOf('to-project')).toBe('1')
-    expect(rowOf('sleep-card')).toBe('1')
+    expect(rowOf('power-card')).toBe('1')
     expect(rowOf('close-card')).toBe('1')
     expect(rowOf('close-session')).toBe('1')
     expect(rowOf('model-picker')).toBe('3')
@@ -475,7 +527,11 @@ describe('SessionView の帯は3行', () => {
     const 行 = screen.getByTestId('to-session').closest('[data-row="1"]')
     const 中身 = Array.from(行!.children)
     expect(中身[0]).toHaveAttribute('data-testid', 'to-session')
-    expect(中身[中身.length - 1]).toHaveTextContent('終了')
+    // 右端は始末の群。**横並びでは ✕ を出さない**ので、末尾はゴミ箱になる
+    const 右端 = Array.from(
+      中身[中身.length - 1].querySelectorAll('button'),
+    ).map((b) => b.dataset.testid)
+    expect(右端).toEqual(['power-card', 'close-card'])
   })
 
   it('フック未受信が出ても行が増えない（2行目に収まる）', () => {
@@ -491,7 +547,8 @@ describe('SessionView の帯は3行', () => {
         claude_session_id: '22222222-2222-2222-2222-222222222222',
       }),
     )
-    expect(rowOf('revive-button')).toBe('3')
+    // **起こし直す道は1行目へ移った**（設計§15-1）。3行目に残るのはモードの札だけ
+    expect(rowOf('power-card')).toBe('1')
     expect(rows()).toEqual(['1', '2', '3'])
   })
 
@@ -512,7 +569,7 @@ describe('SessionView の帯は3行', () => {
     expect(rows()).toEqual(['1', '2', '3'])
   })
 
-  it('スリープしたカードでは、起こし直しのモードのバッジと復旧が3行目に並ぶ', () => {
+  it('スリープしたカードでは、起こし直しのモードの札だけが3行目に残る', () => {
     show(
       meta({
         status: { kind: 'ended', ok: true },
@@ -521,9 +578,11 @@ describe('SessionView の帯は3行', () => {
       }),
     )
 
+    // **札はボタンに付いて動かさない**（設計§15-1）。3行目はモデルとモードの行
+    // なので、モードの話はこちらに居るのが筋——動かすと2つの行に割れる
     expect(screen.queryByTestId('model-picker')).toBeNull()
     expect(rowOf('revive-mode')).toBe('3')
-    expect(rowOf('revive-button')).toBe('3')
+    expect(rowOf('power-card')).toBe('1')
     expect(rows()).toEqual(['1', '2', '3'])
   })
 
@@ -537,7 +596,7 @@ describe('SessionView の帯は3行', () => {
       }),
     )
     expect(screen.getByTestId('hook-warning')).toBeInTheDocument()
-    expect(screen.getByTestId('revive-button')).toBeInTheDocument()
+    expect(screen.getByTestId('power-card')).toHaveAttribute('data-power', 'off')
     expect(rows()).toEqual(['1', '2', '3'])
   })
 
@@ -652,15 +711,21 @@ describe('SessionView の ✕（閉じる）', () => {
     )
   })
 
-  it('同じ行の「終了」とは形が違う（アイコンと文字）', () => {
-    // **同じ行に並ぶようになった**ので、縦に離す形では分けられない（設計§14-6）。
-    // 押し間違えても何も壊れない側（閉じるだけ）をいちばん右に置く
+  it('いちばん右に置き、始末の2つとは間隔で分ける', () => {
+    /*
+      **§14-6 の「形で分ける」はもう効かない。** 訂正その2で3つとも記号に
+      なったので（設計§15-2）、代わりに**間隔**で群を作る——電源とゴミ箱は
+      カードに効き、✕ は画面に効く。押し間違えても何も壊れない側が端に居る。
+    */
     show()
     const 行 = screen.getByTestId('close-session').closest('[data-row="1"]')
-    const 右 = Array.from(行!.querySelectorAll('button'))
-    expect(右[右.length - 1]).toHaveAttribute('data-testid', 'close-session')
-    expect(screen.getByTestId('close-session').querySelector('svg')).not.toBeNull()
-    expect(screen.getByTestId('close-card').querySelector('svg')).toBeNull()
+    const 並び = Array.from(行!.querySelectorAll('button')).map(
+      (b) => b.dataset.testid,
+    )
+    expect(並び.slice(-3)).toEqual(['power-card', 'close-card', 'close-session'])
+    // ✕ の前だけ間隔が空いている（`ml-2`）
+    expect(screen.getByTestId('close-session').className).toContain('ml-2')
+    expect(screen.getByTestId('close-card').className).not.toContain('ml-2')
   })
 })
 
@@ -692,10 +757,19 @@ describe('SessionView のスリープと終了', () => {
     useWsStore.setState({ kill: vi.fn(), archive: vi.fn() })
   })
 
-  it('走っているカードには、スリープと終了が両方出る', () => {
+  it('走っているカードには、点いた電源とゴミ箱が両方出る', () => {
+    // **文字は記号になったが、言葉は消えていない**（設計§15-1・§15-2）。
+    // 色もホバーの反応も読み上げられないので、ここが唯一の手がかりになる
     show(meta({ agent_connected: true }))
-    expect(screen.getByTestId('sleep-card')).toHaveTextContent('スリープ')
-    expect(screen.getByTestId('close-card')).toHaveTextContent('終了')
+    expect(screen.getByTestId('power-card')).toHaveAttribute(
+      'aria-label',
+      'スリープ',
+    )
+    expect(screen.getByTestId('close-card')).toHaveAttribute(
+      'aria-label',
+      '終了',
+    )
+    expect(screen.getByTestId('close-card').querySelector('svg')).not.toBeNull()
   })
 
   it('スリープを押すと Kill だけが送られ、カードは残る', async () => {
@@ -705,7 +779,7 @@ describe('SessionView のスリープと終了', () => {
     useWsStore.setState({ kill, archive })
     show(meta({ agent_connected: true }))
 
-    await userEvent.click(screen.getByTestId('sleep-card'))
+    await userEvent.click(screen.getByTestId('power-card'))
 
     expect(kill).toHaveBeenCalledWith(CARD)
     expect(archive).not.toHaveBeenCalled()
@@ -713,17 +787,25 @@ describe('SessionView のスリープと終了', () => {
     expect(screen.queryByText('一覧に居ます')).toBeNull()
   })
 
-  it('スリープしたカードには、スリープを出さない', () => {
-    // 止まっている相手へ送っても届かない。**押せるのに何も起きないボタンは、
-    // 壊れているのと見分けが付かない**
+  it('スリープしたカードでは、電源が消えていて Kill を送らない', async () => {
+    // 止まっている相手へ送っても届かない。**畳んだので「出さない」ではなく
+    // 「消灯して意味が入れ替わる」**（設計§15-1）
+    const kill = vi.fn()
+    useWsStore.setState({ kill, archive: vi.fn(), revive: vi.fn() })
     show(meta({ status: { kind: 'ended', ok: true } }))
-    expect(screen.queryByTestId('sleep-card')).toBeNull()
+
+    const button = screen.getByTestId('power-card')
+    expect(button).toHaveAttribute('data-power', 'off')
+    expect(button).toHaveAttribute('aria-label', '復旧')
     expect(screen.getByTestId('close-card')).toBeInTheDocument()
+
+    await userEvent.click(button)
+    expect(kill).not.toHaveBeenCalled()
   })
 
-  it('線が切れているカードにも、スリープを出さない', () => {
+  it('線が切れているカードでも、電源は消えている', () => {
     show(meta({ agent_connected: false, status: { kind: 'working' } }))
-    expect(screen.queryByTestId('sleep-card')).toBeNull()
+    expect(screen.getByTestId('power-card')).toHaveAttribute('data-power', 'off')
   })
 
   it('終了を押すと Archive だけが送られ、単独画面なら一覧へ移る', async () => {

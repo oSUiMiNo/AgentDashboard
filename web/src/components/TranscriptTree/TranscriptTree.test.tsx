@@ -686,6 +686,37 @@ describe('畳んだ本文のフェード', () => {
     }
   })
 
+  it('畳んでいるあいだだけ、帯に押す面が出る', async () => {
+    // 要望10。**擬似要素では押せない**ので実要素で足してある（設計§6-7-5）。
+    // 開けば帯が無くなるので、押す面も消える
+    appendNodes(CARD, [node('a1', null, { kind: 'assistant_text', text: LONG })])
+    renderTree()
+    await waitForRows(1)
+
+    expect(screen.getByTestId('body-hitbox')).toBeInTheDocument()
+    await userEvent.click(screen.getByTestId('body-toggle'))
+    expect(screen.queryByTestId('body-hitbox')).toBeNull()
+  })
+
+  it('押す面を押すと本文が開く', async () => {
+    // **これが要望10 の本体。**「続きを読む」の文字をピンポイントで突かなくても開く
+    appendNodes(CARD, [node('a1', null, { kind: 'assistant_text', text: LONG })])
+    renderTree()
+    await waitForRows(1)
+
+    await userEvent.click(screen.getByTestId('body-hitbox'))
+    expect(screen.getByTestId('body-toggle')).toHaveTextContent('畳む')
+  })
+
+  it('畳まない本文には押す面を出さない', async () => {
+    // 帯が無いところに押す面だけ在ると、**押しても何も起きない面**になる
+    appendNodes(CARD, [node('a1', null, { kind: 'assistant_text', text: 'みじかい' })])
+    renderTree()
+    await waitForRows(1)
+
+    expect(screen.queryByTestId('body-hitbox')).toBeNull()
+  })
+
   it('「続きを読む」は帯の上へ重なり、開くと流れへ戻る', async () => {
     // 要望②（マスクの中に書いてある感じ）。**重ねるのは畳んでいるあいだだけ**——
     // 開いているときは重ねる相手（帯）が無い
