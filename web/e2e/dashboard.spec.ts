@@ -292,6 +292,56 @@ test('帯の高さは、最終活動の表記が変わっても変わらない',
   }
 })
 
+test('ボタンの見た目を変えても、行の高さは変わらない', async ({ page }) => {
+  /*
+    訂正その2（帯設計§15-4）。**見た目の訂正が、このイシューの目的（行を増やさない）を
+    上回ることはない。**
+
+    **絶対値では書かない。** 「1行目は 32px」と書くと、部品の寸法を変えるたびに
+    数字だけを直すことになり、**何を守っていたのかが消える**。守りたいのは
+    「**いちばん高い部品が行の高さを決めていて、新しく足したものはそれを超えない**」
+    ことなので、そのまま主張にする。
+
+    - 1行目：✕（`size-8` ＝ 32px）が最も高い。電源（28px）とゴミ箱（28px）は超えない
+    - 3行目：ドロップダウンが最も高い。1.3倍にしたトグルは超えない
+
+    **壊し方：** トグルの上下の余白（`py-0.5`）を戻すと、3行目がドロップダウンより
+    高くなってここが落ちる。
+  */
+  await page.setViewportSize({ width: 390, height: 780 })
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  await tile.click()
+
+  const view = page.getByTestId('session-view')
+  await expect(view.getByTestId('power-card')).toBeVisible()
+
+  const 高さ = async (locator: ReturnType<typeof view.locator>) => {
+    const box = await locator.boundingBox()
+    expect(box).not.toBeNull()
+    return box!.height
+  }
+
+  // 1行目——足した2つは、いちばん高いもの（✕）を超えない
+  const 一行目 = await 高さ(view.locator('[data-row="1"]'))
+  const 閉じる = await 高さ(view.getByTestId('close-session'))
+  expect(await 高さ(view.getByTestId('power-card'))).toBeLessThanOrEqual(閉じる)
+  expect(await 高さ(view.getByTestId('close-card'))).toBeLessThanOrEqual(閉じる)
+  expect(一行目, '1行目の高さは ✕ が決めている').toBeCloseTo(閉じる, 0)
+
+  // 3行目——1.3倍にしたトグルは、ドロップダウンを超えない
+  const 三行目 = await 高さ(view.locator('[data-row="3"]'))
+  const ピッカー = await 高さ(view.getByTestId('model-picker'))
+  expect(
+    await 高さ(view.getByTestId('terminal-toggle')),
+    'トグルがドロップダウンより高くなっていない（余白を戻すとここが落ちる）',
+  ).toBeLessThanOrEqual(ピッカー)
+  expect(三行目, '3行目の高さはドロップダウンが決めている').toBeCloseTo(ピッカー, 0)
+
+  // 帯は3行のまま
+  await expect(view.locator('header [data-row]')).toHaveCount(3)
+})
+
 test('✕ を押すと、開く前の画面へ戻る', async ({ page }) => {
   // **「戻る」と「一覧へ落ちる」を区別できる道筋で確かめる。** 一覧から開いて
   // ✕ を押すと、どちらの実装でも `/` へ行くので**見分けが付かない**（設計§7）
