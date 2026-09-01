@@ -615,10 +615,36 @@ export function statusGroup(status: SessionStatus): StatusGroup {
  *
  * 文字は輪より1段明るい（§8-3）。細い文字に濃い色を当てると、いちばん読ませたい
  * ラベルがいちばん読みにくくなる。
+ *
+ * # 沈めた札の上に乗せる文字（`sunkText`。フェーズ21）
+ *
+ * 接続が切れたカードでは、右下の札の地も輪と同じ率（0.6）まで沈む。**沈んだ地は
+ * 中くらいの明るさになるので、どちらか一方の文字色では4色とも 4.5:1 を越えられない**
+ * （測った値は下の表）。**明るい板には黒、暗い板には白**を当てる。
+ *
+ * | 群 | 沈めた地 | 暗 `#171717`（繋がっているときの色） | 黒 | 白 |
+ * |---|---|---|---|---|
+ * | `primary` | `rgb(46,139,147)` | 4.47 | **5.23** | 4.01 |
+ * | `secondary` | `rgb(156,109,30)` | 3.94 | **4.62** | 4.55 |
+ * | `neutral` | `rgb(102,108,116)` | 3.38 | 3.96 | **5.30** |
+ * | `negative` | `rgb(162,63,66)` | 2.84 | 3.33 | **6.31** |
+ *
+ * **繋がっているときは触らない**（§26-6）。あちらは満輝度の板に暗い文字で 5.87〜10.47
+ * あり、動かす理由が無い。`tile.css` が接続断のときだけこの欄を読む。
+ *
+ * **数値は `tile.test.ts` が計算して見張る。** ここに書いた比は説明であって、守って
+ * いるのは検査のほうである（上の `floor` で「コメントの数字は誰も守らない」を踏んだ）。
  */
 const STATUS_TONES: Record<
   StatusGroup,
-  { accent: string; floor: string; dim: string; dot: string; text: string }
+  {
+    accent: string
+    floor: string
+    dim: string
+    dot: string
+    text: string
+    sunkText: string
+  }
 > = {
   // 進行中（`DESIGN.md` §11.2 Primary Accent）
   primary: {
@@ -627,6 +653,8 @@ const STATUS_TONES: Record<
     dim: '70%',
     dot: 'bg-cyan-400',
     text: 'text-cyan-300',
+    // 沈めた地は明るい側（5.23:1）
+    sunkText: '#000000',
   },
   // 注意・保留（同 Secondary Accent）
   secondary: {
@@ -635,6 +663,8 @@ const STATUS_TONES: Record<
     dim: '75%',
     dot: 'bg-amber-400',
     text: 'text-amber-300',
+    // 沈めた地は明るい側（4.62:1）。**4色でいちばん床に近い**
+    sunkText: '#000000',
   },
   // 役割を持たない静止。**地の色ではなく、文字の副色から取る**（同 §11.1 Text Secondary）
   //
@@ -646,6 +676,8 @@ const STATUS_TONES: Record<
     dim: '60%',
     dot: 'bg-slate-400',
     text: 'text-slate-300',
+    // 沈めた地は暗い側（5.30:1）。黒だと 3.96:1 で床を割る
+    sunkText: '#ffffff',
   },
   // 完了（同 Positive）
   // 完了・同期済み（同 Positive）。
@@ -661,6 +693,9 @@ const STATUS_TONES: Record<
     dim: '50%',
     dot: 'bg-lime-400',
     text: 'text-lime-300',
+    // 沈めた地は明るい側（5.01:1）。**この群はどの状態にも当たっていない**が、
+    // 欄を空けると表がそこで切れる（上の `accent` と同じ理由）
+    sunkText: '#000000',
   },
   // エラー（同 Negative）
   negative: {
@@ -669,6 +704,8 @@ const STATUS_TONES: Record<
     dim: '90%',
     dot: 'bg-rose-400',
     text: 'text-rose-300',
+    // 沈めた地は暗い側（6.31:1）。黒だと 3.33:1 で大きく割る
+    sunkText: '#ffffff',
   },
 }
 
@@ -751,6 +788,15 @@ export function statusAccent(status: SessionStatus): CSSProperties {
     '--tile-accent': tone.accent,
     '--tile-floor': tone.floor,
     '--tile-dim': quieterDim(status) ?? tone.dim,
+    /*
+      **接続が切れているときだけ**、右下の札の文字がこれになる（フェーズ21）。
+      繋がっているあいだは `tile.css` が読まないので、載っていても何も起きない。
+
+      **濃さ（`--tile-dim`）のように状態で下げたりしない。** 板の明るさは群で決まる
+      ので、同じ群なら同じ文字色でよい——終了だけ輪を静かにしても、板は 0.6 で沈む
+      ぶんだけ暗くなるわけではない（沈める率は `--tile-fade` の1本きり）。
+    */
+    '--tile-sunk-ink': tone.sunkText,
   } as CSSProperties
 }
 
