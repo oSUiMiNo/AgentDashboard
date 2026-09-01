@@ -510,6 +510,84 @@ test('接続断のカードは、呼吸の山でも沈んだままになる', as
   expect(接続断.山).toBeGreaterThan(接続断.底 * 1.5)
 })
 
+test('接続断のカードでは、右下の札も輪と同じだけ沈む', async ({ page }) => {
+  /*
+    フェーズ21。**「接続断なのに沈まない」族の3つ目にして最後**——①回遊線（フェーズ12）、
+    ②輪の呼吸（上のテスト）を潰したあと、**右下の札だけが満輝度で残っていた**
+    （実測：輪 0.6 に対し板 1.0。色は同じ）。
+
+    **jsdom では測れない。** 板の濃さは `--tile-fade` を読む `opacity` で、しかも
+    **疑似要素（`::before`）に付いている**——単体（`tile.test.ts`）が見られるのは
+    「そう書いてある」ことまでで、**カスケードがそう解決するか**はここでしか分からない。
+
+    **`tile.spec.ts` へは置けない。** 既定の土台は PC を持たないので**本物の抜け殻を
+    作れず**、`data-connected` を手で立てるしかない——それは上のテストが明文で
+    禁じている（「印は付くが沈まない」と「印が付かない」を切り分けられなくなる）。
+
+    **比で見る。** 板は率だけを読む（0.6 固定）が、輪は状態ごとの濃さ（`--tile-dim`）に
+    率を掛けたものなので、**生の値どうしは揃わない**。揃うのは「繋がっているときの
+    自分に対する割合」のほうである。
+  */
+  await openDashboard(page)
+  const 沈むはず = await spawnOn(page, 2)
+  const 比べる相手 = await spawnOn(page, 1)
+
+  // **どちらも同じ状態にする。** 輪の濃さは状態で変わるので、揃えないと割合が比べられない
+  for (const cardId of [沈むはず, 比べる相手]) {
+    await openSession(page, tileOf(page, cardId))
+    await fireHook(page, 'Stop', '{"last_assistant_message":"終わりました"}')
+    await page.goto('/')
+  }
+  await waitForResumeTarget(page, 沈むはず)
+  await orphanAgent(page, 2)
+  await expect(tileOf(page, 沈むはず).getByTestId('disconnected-badge')).toBeVisible({
+    timeout: 60_000,
+  })
+
+  /**
+   * 輪と板の濃さの**山**、それに札の文字色を採る。
+   *
+   * **山を採るのは輪が呼吸しているため。** 板は動かないので、山も底も同じ値になる。
+   */
+  const 採る = async (cardId: string) =>
+    page.evaluate(async (id) => {
+      const shell = document.querySelector(
+        `[data-testid="tile-shell"][data-card-id="${id}"]`,
+      )
+      const ring = shell?.querySelector('.tile-ring')
+      const tag = shell?.querySelector('[data-testid="tile-tag"]')
+      if (!ring || !tag) throw new Error(`輪か札が見つかりません：${id}`)
+      const 輪: number[] = []
+      const 板: number[] = []
+      // 2.8秒の周期を 3.2秒ぶん、40ms 刻みで。**山を必ず1回は跨ぐ**
+      for (let i = 0; i < 80; i += 1) {
+        輪.push(Number.parseFloat(getComputedStyle(ring).opacity))
+        板.push(Number.parseFloat(getComputedStyle(tag, '::before').opacity))
+        await new Promise((r) => setTimeout(r, 40))
+      }
+      return {
+        輪: Math.max(...輪),
+        板: Math.max(...板),
+        文字: getComputedStyle(tag).color,
+      }
+    }, cardId)
+
+  const 接続断 = await 採る(沈むはず)
+  const 接続あり = await 採る(比べる相手)
+
+  // **繋がっているほうの板は満輝度。** ここが 1 でなくなったら、率が漏れている
+  expect(接続あり.板).toBeCloseTo(1, 2)
+  // **この段の本体。** 直す前はここも 1 のままで、輪だけが 0.6 まで沈んでいた
+  expect(接続断.板).toBeCloseTo(0.6, 2)
+  // **輪と同じ割合であること**——利用者の指摘は「枠色とずれている」だった
+  expect(接続断.板 / 接続あり.板).toBeCloseTo(接続断.輪 / 接続あり.輪, 1)
+
+  // 沈んだ板の上では文字が入れ替わる（設計§26-4 の案1）。入力待ちは琥珀なので黒
+  expect(接続断.文字).toBe('rgb(0, 0, 0)')
+  // **繋がっているほうは触らない**（§26-6）
+  expect(接続あり.文字).toBe('rgb(23, 23, 23)')
+})
+
 test('接続断のカードでも、3行目が狭い画面からはみ出さない', async ({ page }) => {
   /*
     帯の設計§11-7 の実物確認。**3行目がいちばん混むのはこの状態**——終わってはいない
