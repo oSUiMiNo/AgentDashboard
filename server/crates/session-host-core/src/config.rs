@@ -158,6 +158,9 @@ const DEFAULT_ATTACHMENT_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// 段②で一度に掃く量の既定。**「上限を下回るまで」ではなく「決めた量だけ」**消す。
 const DEFAULT_ATTACHMENT_SWEEP_BYTES: u64 = 200 * 1024 * 1024;
+
+/// 添付の印を待つ上限の既定（ミリ秒。設計§21 読み替え2）。**実測 200ms の25倍**。
+const DEFAULT_ATTACHMENT_MARK_WAIT_MS: u64 = 5_000;
 /// ファイル層のレベル（ログ設計§7-1）。**端末層は `RUST_LOG`。**
 pub(crate) const DEFAULT_LOG_FILE_LEVEL: &str = "debug";
 
@@ -287,6 +290,19 @@ pub struct SessionHostConfig {
     pub attachment_max_bytes: u64,
     /// 段②で一度に掃く量（バイト）。**上限を下回るまでではなく、この量で止まる**
     pub attachment_sweep_bytes: u64,
+    /// 添付の印（`[Image #N]`）が出るのを待つ上限（ミリ秒。設計§7-1・§21 読み替え2）。
+    ///
+    /// 実測では貼り付けから印まで **200ms 以内**で、大きさにも枚数にも依らなかった。
+    /// 既定はその25倍の余裕を取った5秒。
+    ///
+    /// # なぜ動かせるようにしてあるのか
+    ///
+    /// **遅い機械のために厚くしておける**のがこの上限の値打ちなので、その厚みは
+    /// 機械ごとに違ってよい。あわせて**テストが待ち切る時間を短くできる**——
+    /// 「印が出ないこと」を確かめるテストは上限まで待つ作りになるため、既定のままだと
+    /// **待っている間ずっと枠を握って、時間に敏感な別のテストを落とす**（実際に
+    /// `a2s` と `cli_term` の待ちが並列時だけ落ちた）。
+    pub attachment_mark_wait_ms: u64,
     /// ファイル層のレベル（ログ設計§4-3）。
     ///
     /// **端末層はこれを見ない**——あちらは `RUST_LOG` に従う。`RUST_LOG` は1本しか
@@ -347,6 +363,7 @@ impl Default for SessionHostConfig {
             attachment_retention_days: DEFAULT_ATTACHMENT_RETENTION_DAYS,
             attachment_max_bytes: DEFAULT_ATTACHMENT_MAX_BYTES,
             attachment_sweep_bytes: DEFAULT_ATTACHMENT_SWEEP_BYTES,
+            attachment_mark_wait_ms: DEFAULT_ATTACHMENT_MARK_WAIT_MS,
             log_file_level: DEFAULT_LOG_FILE_LEVEL.to_string(),
             server_url: None,
             pairing_token: None,

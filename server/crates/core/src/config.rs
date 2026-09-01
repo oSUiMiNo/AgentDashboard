@@ -77,6 +77,8 @@ pub struct Config {
     pub attachment_retention_days: u64,
     pub attachment_max_bytes: u64,
     pub attachment_sweep_bytes: u64,
+    /// 添付の印が出るのを待つ上限（ミリ秒。画像添付 設計§21 読み替え2）
+    pub attachment_mark_wait_ms: u64,
     pub log_file_level: String,
     /// 起こし直し1枚あたりで減る空きメモリの見積もり（MB。起こし直し設計§18）
     pub revive_estimate_mb: u64,
@@ -121,6 +123,7 @@ impl Default for Config {
             attachment_retention_days: agent.attachment_retention_days,
             attachment_max_bytes: agent.attachment_max_bytes,
             attachment_sweep_bytes: agent.attachment_sweep_bytes,
+            attachment_mark_wait_ms: agent.attachment_mark_wait_ms,
             log_file_level: agent.log_file_level,
             revive_estimate_mb: agent.revive_estimate_mb,
             revive_headroom_mb: agent.revive_headroom_mb,
@@ -247,6 +250,7 @@ impl Config {
             attachment_retention_days: self.attachment_retention_days,
             attachment_max_bytes: self.attachment_max_bytes,
             attachment_sweep_bytes: self.attachment_sweep_bytes,
+            attachment_mark_wait_ms: self.attachment_mark_wait_ms,
             log_file_level: self.log_file_level.clone(),
             revive_estimate_mb: self.revive_estimate_mb,
             revive_headroom_mb: self.revive_headroom_mb,
@@ -352,6 +356,12 @@ impl Config {
             ));
         }
         // 0 だと段②が1枚も消せないまま回り続け、上限を超えたことにだけ気づく形になる
+        // 0 にすると印を1回も覗かずに諦めるので、添付が必ず断られる
+        if self.attachment_mark_wait_ms == 0 {
+            return Err(ConfigError::Invalid(
+                "attachment_mark_wait_ms は 1 以上である必要があります".to_string(),
+            ));
+        }
         if self.attachment_sweep_bytes == 0 {
             return Err(ConfigError::Invalid(
                 "attachment_sweep_bytes は 1 以上である必要があります".to_string(),

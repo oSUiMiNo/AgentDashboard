@@ -175,15 +175,6 @@ const MODEL_STEP: Duration = Duration::from_millis(200);
 /// 会話が進んでいるときだけ出る。出ないほうが普通なので、短く切って先へ進む。
 const MODEL_CONFIRM_WAIT: Duration = Duration::from_secs(4);
 
-/// 添付の印が出るのを待つ上限（画像添付 設計§21 読み替え2）。
-///
-/// 実測では貼り付けから `[Image #N]` まで **200ms 以内**で、15 KiB でも 2.9 MB でも
-/// 5枚でも変わらなかった（測定の分解能がそこ）。**大きさや枚数で伸ばす必要は無い**
-/// ので固定にし、実測の25倍の余裕を取ってある。
-///
-/// 上限を長くしないのは、諦めたときに人を待たせるのがこの値そのものだから。
-const ATTACHMENT_MARK_WAIT: Duration = Duration::from_secs(5);
-
 /// 添付の印を確かめる刻み。
 ///
 /// [`MODEL_STEP`] と同じ値だが**別に持つ**。あちらはモデル切替の確認画面を待つ刻みで、
@@ -503,6 +494,12 @@ pub struct Session {
     /// **状態を動かさない側**——出力が1バイトも無いセッションは `Starting` のままなので、
     /// 覚えておかないと毎秒言うことになる。
     hook_silence_noted: AtomicBool,
+    /// 添付の印を待つ上限（画像添付 設計§21 読み替え2）。
+    ///
+    /// **設定から取る**（`attachment_mark_wait_ms`）。定数のままにすると、
+    /// 「印が出ないこと」を確かめるテストが必ず既定の5秒を待ち切り、**その間ずっと
+    /// 枠を握って時間に敏感な別のテストを落とす**（実際に落ちた）。
+    attachment_mark_wait: Duration,
     /// いま効いていると分かっている**別名**。分からなければ `None`（設計§5）。
     ///
     /// [`SessionMeta::model`] が持つのは CLI が名乗った**フルID**で、別名とは別物である。
@@ -1051,7 +1048,7 @@ impl Session {
     /// 出そろったら**上限を待たずにすぐ帰る**。
     async fn await_image_marks(&self, since: u64, want: usize) -> anyhow::Result<()> {
         let started = tokio::time::Instant::now();
-        let deadline = started + ATTACHMENT_MARK_WAIT;
+        let deadline = started + self.attachment_mark_wait;
         let mut got = 0;
         while tokio::time::Instant::now() < deadline {
             tokio::time::sleep(ATTACHMENT_STEP).await;
@@ -2006,6 +2003,7 @@ impl SessionManager {
         let (output, _) = broadcast::channel(OUTPUT_QUEUE_FRAMES);
         let session = Arc::new(Session {
             card_id,
+            attachment_mark_wait: Duration::from_millis(self.config.attachment_mark_wait_ms),
             meta: Mutex::new(SessionMeta {
                 card_id,
                 project: ProjectId(project_path.to_string_lossy().into_owned()),
