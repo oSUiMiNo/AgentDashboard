@@ -74,6 +74,9 @@ pub struct Config {
     pub status_line_refresh_secs: u64,
     pub log_retention_days: u64,
     pub log_max_bytes: u64,
+    pub attachment_retention_days: u64,
+    pub attachment_max_bytes: u64,
+    pub attachment_sweep_bytes: u64,
     pub log_file_level: String,
     /// 起こし直し1枚あたりで減る空きメモリの見積もり（MB。起こし直し設計§18）
     pub revive_estimate_mb: u64,
@@ -115,6 +118,9 @@ impl Default for Config {
             status_line_refresh_secs: agent.status_line_refresh_secs,
             log_retention_days: agent.log_retention_days,
             log_max_bytes: agent.log_max_bytes,
+            attachment_retention_days: agent.attachment_retention_days,
+            attachment_max_bytes: agent.attachment_max_bytes,
+            attachment_sweep_bytes: agent.attachment_sweep_bytes,
             log_file_level: agent.log_file_level,
             revive_estimate_mb: agent.revive_estimate_mb,
             revive_headroom_mb: agent.revive_headroom_mb,
@@ -238,6 +244,9 @@ impl Config {
             hook_port: self.port,
             log_retention_days: self.log_retention_days,
             log_max_bytes: self.log_max_bytes,
+            attachment_retention_days: self.attachment_retention_days,
+            attachment_max_bytes: self.attachment_max_bytes,
+            attachment_sweep_bytes: self.attachment_sweep_bytes,
             log_file_level: self.log_file_level.clone(),
             revive_estimate_mb: self.revive_estimate_mb,
             revive_headroom_mb: self.revive_headroom_mb,
@@ -334,6 +343,18 @@ impl Config {
         if self.lan_session_ttl_hours == 0 {
             return Err(ConfigError::Invalid(
                 "lan_session_ttl_hours は 1 以上である必要があります".to_string(),
+            ));
+        }
+        // 0 だと今日書いたぶんまで「古い」扱いになり、起動のたびに直前のログを消す
+        if self.attachment_retention_days == 0 {
+            return Err(ConfigError::Invalid(
+                "attachment_retention_days は 1 以上である必要があります".to_string(),
+            ));
+        }
+        // 0 だと段②が1枚も消せないまま回り続け、上限を超えたことにだけ気づく形になる
+        if self.attachment_sweep_bytes == 0 {
+            return Err(ConfigError::Invalid(
+                "attachment_sweep_bytes は 1 以上である必要があります".to_string(),
             ));
         }
         // 0 だと今日書いたぶんまで「古い」扱いになり、起動のたびに直前のログを消す

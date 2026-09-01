@@ -59,7 +59,20 @@ const CLEAR_LINE: &str = "\x15";
 /// スラッシュコマンドで、制御シーケンスが混じる理由が無い。素通しすると、貼り付けの
 /// 終了記号を本文側から打ち込んで CLI の入力状態を壊すことができてしまう。
 pub fn encode_parts(text: &str) -> (Vec<u8>, Vec<u8>) {
-    let body = sanitize(text);
+    encode_parts_with(text, &[])
+}
+
+/// [`encode_parts`] に**添付のパス**を足した形（設計§6）。
+///
+/// 添付が0枚のときは [`encode_parts`] と**1バイトも変わらない**。添付を使わない送信を
+/// 巻き添えにしないための約束で、テストで固定してある。
+///
+/// パスは**本文の後ろへ、1行に1つ・行末**に並べる。claude の貼り付け処理は貼られた
+/// 文字列を改行と「スペース＋パスの始まり」で切り、**断片の末尾**が画像の拡張子のとき
+/// だけそれをディスクから読んで添付にする。したがって行の途中に置くと当たらない
+/// （2026-09-01 に実 claude で実測。設計§19 の前提1）。
+pub fn encode_parts_with(text: &str, attachments: &[String]) -> (Vec<u8>, Vec<u8>) {
+    let body = compose(sanitize(text), attachments);
     let submit = SUBMIT.as_bytes().to_vec();
 
     // 空送信は「メニューを確定させる」用途なので、入力行に触ってはいけない
@@ -70,6 +83,24 @@ pub fn encode_parts(text: &str) -> (Vec<u8>, Vec<u8>) {
         format!("{CLEAR_LINE}{PASTE_BEGIN}{body}{PASTE_END}").into_bytes(),
         submit,
     )
+}
+
+/// 本文の後ろへ添付のパスを1行ずつ足す。
+///
+/// **本文は1文字も変えない。** 足すのは行の区切りとパスだけで、本文が空なら
+/// パスだけの本文になる（画像だけを送る形）。
+fn compose(body: String, attachments: &[String]) -> String {
+    if attachments.is_empty() {
+        return body;
+    }
+    let mut out = body;
+    for path in attachments {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(path);
+    }
+    out
 }
 
 /// 改行コードを LF に揃え、ESC を落とし、末尾の空行を落とす。
@@ -205,5 +236,79 @@ mod tests {
             encoded("わるいこ\u{1b}[201~ここは本文"),
             "\u{15}\u{1b}[200~わるいこ[201~ここは本文\u{1b}[201~\r"
         );
+    }
+
+    /// 添付つきの見た目。[`encoded`] と同じく、繋げて中身だけを見る。
+    fn encoded_with(text: &str, attachments: &[&str]) -> String {
+        let owned: Vec<String> = attachments.iter().map(|p| (*p).to_string()).collect();
+        let (body, submit) = encode_parts_with(text, &owned);
+        String::from_utf8([body, submit].concat()).expect("UTF-8 のまま")
+    }
+
+    #[test]
+    fn 添付が無ければ従来と1バイトも変わらない() {
+        // 添付を使わない送信を巻き添えにしないための約束。ここが崩れると、
+        // 画像と関係のない指示の送り方まで変わってしまう
+        for text in ["こんにちは", "/rewind", "1行目\n2行目", ""] {
+            assert_eq!(
+                encode_parts_with(text, &[]),
+                encode_parts(text),
+                "添付0枚で食い違った: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn 添付のパスは本文の後ろへ1行ずつ並ぶ() {
+        // 行の途中に置くと claude の貼り付け処理に当たらない（実測・設計§19 前提1）
+        assert_eq!(
+            encoded_with("この画像を見て", &["/tmp/a.png"]),
+            "\u{15}\u{1b}[200~この画像を見て\n/tmp/a.png\u{1b}[201~\r"
+        );
+    }
+
+    #[test]
+    fn 添付が複数でも1行に1つずつ並ぶ() {
+        assert_eq!(
+            encoded_with("見て", &["/tmp/a.png", "/tmp/b.jpg"]),
+            "\u{15}\u{1b}[200~見て\n/tmp/a.png\n/tmp/b.jpg\u{1b}[201~\r"
+        );
+    }
+
+    #[test]
+    fn 添付があっても本文は1文字も変わらない() {
+        // 足すのは行の区切りとパスだけ。本文へ手を入れないことを、
+        // 添付ありと添付なしの差分が「\n＋パス」ちょうどであることで示す
+        let text = "1行目\n2行目　全角空白あり\n3行目";
+        let without = encoded(text);
+        let with = encoded_with(text, &["/tmp/a.png"]);
+        let inserted = with.len() - without.len();
+        assert_eq!(
+            inserted,
+            "\n/tmp/a.png".len(),
+            "本文が変わっている: {with:?}"
+        );
+        assert!(
+            with.starts_with(without.trim_end_matches("\u{1b}[201~\r")),
+            "本文の前半が変わっている: {with:?}"
+        );
+    }
+
+    #[test]
+    fn 本文が空でも添付だけで送れる() {
+        // 画像だけを投げる形。空送信（メニューの確定）とは別物なので、
+        // 入力行を消す先頭の kill-line が付くこと
+        assert_eq!(
+            encoded_with("", &["/tmp/a.png"]),
+            "\u{15}\u{1b}[200~/tmp/a.png\u{1b}[201~\r"
+        );
+    }
+
+    #[test]
+    fn 添付が無い空送信は入力行に触らない() {
+        // TUI のメニューを確定させる用途。ここで kill-line を打つと選択が壊れる
+        let (body, submit) = encode_parts_with("", &[]);
+        assert!(body.is_empty(), "空送信で入力行に触っている: {body:?}");
+        assert_eq!(submit, b"\r");
     }
 }

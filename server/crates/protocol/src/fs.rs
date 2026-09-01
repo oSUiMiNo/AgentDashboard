@@ -189,6 +189,39 @@ pub fn media_type_of(path: &str) -> Option<&'static str> {
         .and_then(|(_, _, media)| *media)
 }
 
+/// 添付として受け取る媒体型 → 置くときの拡張子。
+///
+/// **`svg` は返さない。** claude の貼り付け処理が拾うのは `png` / `jpg` / `jpeg` /
+/// `gif` / `webp` だけで、`svg` は当たらない（2026-09-01 に実 claude の実行ファイルで
+/// 確認）。置いても絶対に添付にならないので、**受け取る前に断るほうが正しい**。
+/// script を書ける形式を書き込みの口から遠ざけられる、という都合も重なる。
+///
+/// **`None` は「添付として受け取らない」**という意味である。呼ぶ側はここで断る。
+pub fn attachment_extension_for(media_type: &str) -> Option<&'static str> {
+    let wanted = media_type
+        .split(';')
+        .next()
+        .unwrap_or(media_type)
+        .trim()
+        .to_ascii_lowercase();
+    TABLE
+        .iter()
+        .find(|(_, kind, media)| {
+            *kind == FileKind::Image && media.is_some_and(|known| known == wanted)
+        })
+        .map(|(ext, _, _)| *ext)
+}
+
+/// その拡張子を添付として受け取るか。[`attachment_extension_for`] の裏返し。
+///
+/// 置いた名前を読み戻す側（掃除）が、**見覚えのある名前だけを触る**ために使う。
+pub fn is_attachment_extension(extension: &str) -> bool {
+    let wanted = extension.to_ascii_lowercase();
+    TABLE
+        .iter()
+        .any(|(known, kind, media)| *known == wanted && *kind == FileKind::Image && media.is_some())
+}
+
 /// バイト列で返すファイル1つ（設計§3-1）。
 ///
 /// # なぜ [`FileContent`] に欄を足さないのか

@@ -149,6 +149,15 @@ const DEFAULT_LOG_RETENTION_DAYS: u64 = 7;
 /// 既にあり、12セッション61fps なら毎秒732行——日次ローテーションは日が変わるまで
 /// ファイルを閉じないので、そこまで止まらない。
 const DEFAULT_LOG_MAX_BYTES: u64 = 512 * 1024 * 1024;
+
+/// 添付を残す日数の既定（設計§11・利用者の指定・2026-09-01）。
+const DEFAULT_ATTACHMENT_RETENTION_DAYS: u64 = 90;
+
+/// 添付の合計の上限の既定。**超えたら古い順に掃く**（段②）。
+const DEFAULT_ATTACHMENT_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// 段②で一度に掃く量の既定。**「上限を下回るまで」ではなく「決めた量だけ」**消す。
+const DEFAULT_ATTACHMENT_SWEEP_BYTES: u64 = 200 * 1024 * 1024;
 /// ファイル層のレベル（ログ設計§7-1）。**端末層は `RUST_LOG`。**
 pub(crate) const DEFAULT_LOG_FILE_LEVEL: &str = "debug";
 
@@ -272,6 +281,12 @@ pub struct SessionHostConfig {
     /// 超えていたら古い順に消す（ログ設計§6-2）。時間軸だけでは、フレーム1枚ごとに
     /// 警告が出る条件が続いたときに1日で数十ギガバイトになりうる。
     pub log_max_bytes: u64,
+    /// 添付を残す日数。これより古いものは、合計の大きさによらず消える（設計§11 の段①）
+    pub attachment_retention_days: u64,
+    /// `<state_dir>/attachments/` の**合計**の上限（バイト）。超えたら古い順に掃く（段②）
+    pub attachment_max_bytes: u64,
+    /// 段②で一度に掃く量（バイト）。**上限を下回るまでではなく、この量で止まる**
+    pub attachment_sweep_bytes: u64,
     /// ファイル層のレベル（ログ設計§4-3）。
     ///
     /// **端末層はこれを見ない**——あちらは `RUST_LOG` に従う。`RUST_LOG` は1本しか
@@ -329,6 +344,9 @@ impl Default for SessionHostConfig {
             hook_port: DEFAULT_HOOK_PORT,
             log_retention_days: DEFAULT_LOG_RETENTION_DAYS,
             log_max_bytes: DEFAULT_LOG_MAX_BYTES,
+            attachment_retention_days: DEFAULT_ATTACHMENT_RETENTION_DAYS,
+            attachment_max_bytes: DEFAULT_ATTACHMENT_MAX_BYTES,
+            attachment_sweep_bytes: DEFAULT_ATTACHMENT_SWEEP_BYTES,
             log_file_level: DEFAULT_LOG_FILE_LEVEL.to_string(),
             server_url: None,
             pairing_token: None,
