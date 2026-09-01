@@ -1128,7 +1128,7 @@ async fn 添付した画像は本物のclaudeに画像として届く() {
     session
         .send_instruction_with(
             "この画像に書かれている英単語を、大文字のまま1語だけ答えてください。説明は不要です。",
-            &[written.path.clone()],
+            std::slice::from_ref(&written.path),
         )
         .await
         .expect("印が出て確定まで進むこと");
@@ -1139,7 +1139,9 @@ async fn 添付した画像は本物のclaudeに画像として届く() {
     while Instant::now() < deadline {
         let nodes = server.transcript_of(session.card_id);
         if let Some(text) = nodes.iter().find_map(|node| match &node.node {
-            protocol::Node::AssistantText { text } if text.contains(合言葉) => Some(text.clone()),
+            protocol::Node::AssistantText { text } if text.contains(合言葉) => {
+                Some(text.clone())
+            }
             _ => None,
         }) {
             答え = Some(text);
