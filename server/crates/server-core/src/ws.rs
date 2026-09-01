@@ -598,8 +598,12 @@ async fn handle_request(
 
         // Composer からの指示送信（設計§6）。実体は PTY への書き込みなので、
         // スラッシュコマンドも自然文も同じ経路を通る
-        ClientMessage::SendInput { card_id, text } => {
-            if let Err(message) = state.agent.send_input(card_id, text).await {
+        ClientMessage::SendInput {
+            card_id,
+            text,
+            attachments,
+        } => {
+            if let Err(message) = state.agent.send_input(card_id, text, attachments).await {
                 send_error(outbound, Some(card_id), message).await;
             }
         }

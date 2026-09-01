@@ -655,6 +655,7 @@ async fn 指示が詰まっても_ack_は捨てられず先に出て線も切れ
             &browser,
             card_id,
             "x".repeat(4 * 1024 * 1024),
+            Vec::new(),
         )
         .await
         .expect("宛先が引けること");
@@ -683,6 +684,7 @@ async fn 指示が詰まっても_ack_は捨てられず先に出て線も切れ
                 &browser,
                 card_id,
                 NOKORI.to_string(),
+                Vec::new(),
             )
             .await
             .expect("宛先が引けること");

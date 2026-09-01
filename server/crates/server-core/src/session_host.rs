@@ -154,7 +154,16 @@ pub trait SessionHost: Send + Sync + 'static {
     // --- 指示・切替 -----------------------------------------------------------
 
     /// Composer からの指示送信。PTY へ届くまでの作法（初期実装§18）は向こう側の責任。
-    async fn send_input(&self, card_id: CardId, text: String) -> Result<(), String>;
+    ///
+    /// `attachments` は添付の置き場所（画像添付 設計§6）。**サーバは中身を持たない**——
+    /// 画像は先に [`SessionHost::write_blob`] で向こうへ置いてあり、ここを通るのは
+    /// その返事に入っていた絶対パスだけ。
+    async fn send_input(
+        &self,
+        card_id: CardId,
+        text: String,
+        attachments: Vec<String>,
+    ) -> Result<(), String>;
 
     /// 権限モードの切替（TUI へのキー送出なので時間がかかる）。
     async fn set_permission_mode(

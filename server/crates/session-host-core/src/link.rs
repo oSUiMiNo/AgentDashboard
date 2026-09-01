@@ -1359,14 +1359,18 @@ fn apply_command(
 
         // 時間のかかるものは別のタスクへ逃がす。**ここで待つと、その間ほかの指示も
         // 履歴の送り出しも全部止まる**（ブラウザ側の client_loop と同じ判断）
-        ServerToAgent::SendInput { card_id, text } => {
+        ServerToAgent::SendInput {
+            card_id,
+            text,
+            attachments,
+        } => {
             let manager = Arc::clone(manager);
             tokio::spawn(async move {
                 let Some(session) = manager.get(card_id) else {
                     report_error(&manager, card_id, NOT_FOUND.to_string());
                     return;
                 };
-                if let Err(err) = session.send_instruction(&text).await {
+                if let Err(err) = session.send_instruction_with(&text, &attachments).await {
                     report_error(
                         &manager,
                         card_id,

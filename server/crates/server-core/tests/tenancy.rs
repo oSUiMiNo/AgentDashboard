@@ -423,6 +423,7 @@ async fn 他人のカードへの購読と操作は全部断られる() {
                 ClientMessage::SendInput {
                     card_id,
                     text: "こっそり".to_string(),
+                    attachments: Vec::new(),
                 },
             ),
             ("終了", ClientMessage::Kill { card_id }),

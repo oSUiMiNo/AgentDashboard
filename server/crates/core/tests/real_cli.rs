@@ -2223,6 +2223,7 @@ async fn リモートの画面越しに権限確認へ答えると作業中へ�
         .send(&protocol::ws::ClientMessage::SendInput {
             card_id: card.card_id,
             text: "report.txt というファイルを作って、中身は ok の1行にして。".to_string(),
+            attachments: Vec::new(),
         })
         .await;
 
@@ -2283,6 +2284,7 @@ async fn リモートの画面越しに_rewind_のメニューを操作できる
         .send(&protocol::ws::ClientMessage::SendInput {
             card_id: card.card_id,
             text: "「あお」とだけ答えて。説明は不要。".to_string(),
+            attachments: Vec::new(),
         })
         .await;
     browser
@@ -2296,6 +2298,7 @@ async fn リモートの画面越しに_rewind_のメニューを操作できる
         .send(&protocol::ws::ClientMessage::SendInput {
             card_id: card.card_id,
             text: "/rewind".to_string(),
+            attachments: Vec::new(),
         })
         .await;
     browser.wait_for_screen("rewind").await;
@@ -2666,6 +2669,7 @@ async fn 版を消しても生きているセッションのフックは届き�
         .send(&protocol::ws::ClientMessage::SendInput {
             card_id: card.card_id,
             text: "1+1 は？ 数字だけ答えて".to_string(),
+            attachments: Vec::new(),
         })
         .await;
 

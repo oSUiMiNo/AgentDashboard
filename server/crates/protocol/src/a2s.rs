@@ -358,6 +358,18 @@ pub enum ServerToAgent {
     SendInput {
         card_id: CardId,
         text: String,
+        /// 添付の置き場所（画像添付 設計§6）。**セッションホストのディスク上の絶対パス。**
+        ///
+        /// 画像は先に [`ServerToAgent::WriteBlob`] で向こうへ置いてあるので、ここを
+        /// 通るのはその返事に入っていたパスだけ。サーバは中身を持たない。
+        ///
+        /// `#[serde(default)]` を付けるのは **`A2S_VERSION` を上げないため**。上げると
+        /// 既に配ったセッションホストが全部繋がらなくなる（`supports_blob_read` の doc と
+        /// 同じ判断）。古いセッションホストはこの欄を無視するので、添付の付いた指示は
+        /// パスが本文に混ざったまま届く——ただし**そもそも名乗りを見てから投げる**ので、
+        /// 古いセッションホストのカードには添付の口が出ない（§4-1）。
+        #[serde(default)]
+        attachments: Vec<String>,
     },
     SetPermissionMode {
         card_id: CardId,
@@ -653,6 +665,12 @@ mod tests {
             ServerToAgent::SendInput {
                 card_id,
                 text: "/rewind".to_string(),
+                attachments: Vec::new(),
+            },
+            ServerToAgent::SendInput {
+                card_id,
+                text: "これを見て".to_string(),
+                attachments: vec!["/state/attachments/x/20260902-010203-a1b2c3d4.png".to_string()],
             },
             ServerToAgent::SetPermissionMode {
                 card_id,

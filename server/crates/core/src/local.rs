@@ -199,10 +199,15 @@ impl SessionHost for LocalSessionHost {
         self.parser.as_ref().map(|parser| parser.state())
     }
 
-    async fn send_input(&self, card_id: CardId, text: String) -> Result<(), String> {
+    async fn send_input(
+        &self,
+        card_id: CardId,
+        text: String,
+        attachments: Vec<String>,
+    ) -> Result<(), String> {
         let session = self.manager.get(card_id).ok_or(NOT_FOUND)?;
         session
-            .send_instruction(&text)
+            .send_instruction_with(&text, &attachments)
             .await
             .map_err(|err| format!("指示を送れませんでした: {err:#}"))
     }

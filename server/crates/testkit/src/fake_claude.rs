@@ -40,6 +40,13 @@ pub const JSONL_FAILED_PREFIX: &str = "[fake-claude] jsonl-failed: ";
 pub const RESIZED_PREFIX: &str = "[fake-claude] resized: ";
 /// `crash` で自ら異常終了する直前のマーカー。
 pub const CRASH_MARKER: &str = "[fake-claude] crash";
+/// `Esc` を2回受けて入力欄を畳んだときのマーカー（画像添付 設計§21 読み替え3）。
+///
+/// **本物は画面から消えるだけで何も言わない。** ここでマーカーを出すのは、
+/// 「消えた」ことを PTY の外から観測する口が他に無いためで、`RESIZED_PREFIX` と
+/// 同じ立場にある。畳めたかどうかは**次に送るときに二重添付になるか**を分けるので、
+/// 確かめられない状態にはしておけない。
+pub const CANCELLED_MARKER: &str = "[fake-claude] input-cancelled";
 /// 終了時のマーカー。
 pub const BYE_MARKER: &str = "[fake-claude] bye";
 /// `flood` が繰り返し吐くパターン。ASCII のみで、端末の制御シーケンスを含まない。

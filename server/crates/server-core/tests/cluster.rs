@@ -575,7 +575,7 @@ async fn 別のインスタンスに繋がった_PC_へ指示が届く() {
         let (a, _b, mut agent, card_id, _account) = split(&backend.db, &broker).await;
 
         RemoteSessionHost::new(Arc::clone(&a.hub))
-            .send_input(card_id, "こんにちは".to_string())
+            .send_input(card_id, "こんにちは".to_string(), Vec::new())
             .await
             .expect("指示を出せること");
 
@@ -657,7 +657,7 @@ async fn 連絡係が切れている間の跨ぎの指示は理由を返す() {
 
         broker.cut();
         let err = RemoteSessionHost::new(Arc::clone(&a.hub))
-            .send_input(card_id, "届かない".to_string())
+            .send_input(card_id, "届かない".to_string(), Vec::new())
             .await
             .expect_err("断られること");
         assert!(

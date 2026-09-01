@@ -348,6 +348,7 @@ async fn ペアリングして起動しフックまで通る() {
         .send(&ClientMessage::SendInput {
             card_id,
             text: "hook UserPromptSubmit".to_string(),
+            attachments: Vec::new(),
         })
         .await;
 

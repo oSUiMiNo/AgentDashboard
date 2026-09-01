@@ -811,7 +811,7 @@ async fn ブラウザからの指示が_PC_まで届く() {
     // 指示送信も渡る。**PTY まで届いたこと**を PC 側で確かめる——ここで止まっていると、
     // 画面には出ているのに CLI は何も受け取っていない、という形で壊れる
     a2s.browser
-        .send_input(card_id, "こんにちは".to_string())
+        .send_input(card_id, "こんにちは".to_string(), Vec::new())
         .await
         .expect("指示を送れること");
     let session = a2s.manager.get(card_id).expect("実体があること");
@@ -2565,7 +2565,7 @@ async fn 約束を積めないときは理由が残って畳まれる() {
     // --- 書き手を詰まらせる ------------------------------------------------
     sniffer.hold();
     a2s.browser
-        .send_input(session.card_id, "x".repeat(4 * 1024 * 1024))
+        .send_input(session.card_id, "x".repeat(4 * 1024 * 1024), Vec::new())
         .await
         .expect("宛先が引けること");
     a2s.wait_until("書き手が大きな指示を掴む", || {
@@ -2666,7 +2666,7 @@ async fn 生存確認を積めないときも理由が残る() {
 
     sniffer.hold();
     a2s.browser
-        .send_input(session.card_id, "x".repeat(4 * 1024 * 1024))
+        .send_input(session.card_id, "x".repeat(4 * 1024 * 1024), Vec::new())
         .await
         .expect("宛先が引けること");
     a2s.wait_until("書き手が大きな指示を掴む", || {

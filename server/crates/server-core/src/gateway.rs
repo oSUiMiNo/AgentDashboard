@@ -1495,8 +1495,20 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
         None
     }
 
-    async fn send_input(&self, card_id: CardId, text: String) -> Result<(), String> {
-        self.relay(card_id, ServerToAgent::SendInput { card_id, text })
+    async fn send_input(
+        &self,
+        card_id: CardId,
+        text: String,
+        attachments: Vec<String>,
+    ) -> Result<(), String> {
+        self.relay(
+            card_id,
+            ServerToAgent::SendInput {
+                card_id,
+                text,
+                attachments,
+            },
+        )
     }
 
     async fn set_permission_mode(
@@ -1584,6 +1596,17 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
         data: Vec<u8>,
     ) -> Result<protocol::fs::WrittenBlob, crate::session_host::HostAskError> {
         let media_type = media_type.to_string();
+        // **境を跨ぐところに1行残す**（画像添付 設計§13／PJTガイドライン「ログを残すとき」）。
+        // ここから先はサーバの外なので、届かなかったときに**どちら側の話なのか**が
+        // この行の有無で分かれる。1件ごとに回る場所ではないので入れてよい
+        tracing::info!(
+            account_id = %request.account_id,
+            agent_id = ?request.target,
+            card_id = %card_id,
+            media_type = %media_type,
+            bytes = data.len(),
+            "添付を PC へ渡します"
+        );
         match self
             // **`Need::Blob` ではない。** 読む道は既に配ったホストが持っているが、
             // 書く道は持っていない。相乗りさせると「画像も見られません」と嘘をつく（設計§4-1）
@@ -2371,6 +2394,7 @@ mod envelope_tests {
         let command = SessionHostCommand::Message(Box::new(ServerToAgent::SendInput {
             card_id: CardId::new(),
             text: "こんにちは".to_string(),
+            attachments: Vec::new(),
         }));
         let bytes = bus::encode_json(Uuid::new_v4(), &command);
         let (_, back) = bus::decode_json::<SessionHostCommand>(&bytes).expect("読めること");

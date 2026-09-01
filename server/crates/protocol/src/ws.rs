@@ -147,6 +147,17 @@ pub enum ClientMessage {
     SendInput {
         card_id: CardId,
         text: String,
+        /// 添付の置き場所（画像添付 設計§6）。**画像そのものは載せない。**
+        ///
+        /// バイト列は先に REST（`POST /api/hosts/{host}/attachments`）で置いてあり、
+        /// ここを通るのはその**返ってきた絶対パスだけ**。JSON へ生のバイト列を出すと
+        /// base64 で 4/3 に膨らむ（設計§3-1）。
+        ///
+        /// `#[serde(default)]` は**古いブラウザのタブのため**。開きっぱなしのタブは
+        /// 焼き込まれた古い画面のまま喋り続けるので、欄を必須にするとメッセージ全体が
+        /// 丸ごと解けなくなる。
+        #[serde(default)]
+        attachments: Vec<String>,
     },
     Resize {
         card_id: CardId,
@@ -366,6 +377,12 @@ mod tests {
             ClientMessage::SendInput {
                 card_id,
                 text: "/rewind".to_string(),
+                attachments: Vec::new(),
+            },
+            ClientMessage::SendInput {
+                card_id,
+                text: "これを見て".to_string(),
+                attachments: vec!["/state/attachments/x/20260902-010203-a1b2c3d4.png".to_string()],
             },
             ClientMessage::Resize {
                 card_id,

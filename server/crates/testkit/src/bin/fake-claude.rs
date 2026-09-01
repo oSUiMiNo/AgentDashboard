@@ -40,12 +40,12 @@ use std::io::{Read as _, Write};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use testkit::fake_claude::{
-    ARGV_PREFIX, BYE_MARKER, BYPASS_ACCEPTED_MARKER, BYPASS_NOTICE, BYPASS_OPTIONS, CRASH_MARKER,
-    CYCLE_MODES, DUMP_END_MARKER, ENV_PREFIX, FLOOD_END_MARKER, FLOOD_PATTERN, FOOTER_PREFIX,
-    HOOK_FAILED_PREFIX, HOOK_SENT_PREFIX, JSONL_APPENDED_PREFIX, JSONL_FAILED_PREFIX,
-    MODEL_SET_PREFIX, MODEL_SWITCH_NOTICE, MODEL_SWITCH_OPTIONS, READY_MARKER, RECEIVED_PREFIX,
-    RESIZED_PREFIX, STATUS_LINE_SENT_PREFIX, footer_for, physical_lines, render_dialog,
-    resolve_model,
+    ARGV_PREFIX, BYE_MARKER, BYPASS_ACCEPTED_MARKER, BYPASS_NOTICE, BYPASS_OPTIONS,
+    CANCELLED_MARKER, CRASH_MARKER, CYCLE_MODES, DUMP_END_MARKER, ENV_PREFIX, FLOOD_END_MARKER,
+    FLOOD_PATTERN, FOOTER_PREFIX, HOOK_FAILED_PREFIX, HOOK_SENT_PREFIX, JSONL_APPENDED_PREFIX,
+    JSONL_FAILED_PREFIX, MODEL_SET_PREFIX, MODEL_SWITCH_NOTICE, MODEL_SWITCH_OPTIONS, READY_MARKER,
+    RECEIVED_PREFIX, RESIZED_PREFIX, STATUS_LINE_SENT_PREFIX, footer_for, physical_lines,
+    render_dialog, resolve_model,
 };
 
 /// 起動時に受け取った、フック実行に必要な情報。
@@ -249,6 +249,8 @@ fn main() {
     let mut awaiting_model_choice: Option<String> = None;
     // 選択ダイアログで**いま選ばれている位置**。本物は方向キーで動き、Enter で確定する
     let mut choice = 0usize;
+    // これまでに出した添付チップの数。**通し番号**なので送信をまたいでも戻さない
+    let mut image_marks = 0usize;
 
     for input in InputReader::new() {
         let line = match input {
@@ -297,6 +299,24 @@ fn main() {
                     let _ = writeln!(out, "{}", render_dialog(header, items, choice));
                     let _ = out.flush();
                 }
+                continue;
+            }
+            // 貼り付けから拾った画像のぶんだけチップを出す。**番号は通し**で、
+            // セッションを跨いでも振り直さない（本物の実測・設計§21 読み替え1）
+            Input::PasteEnd(images) => {
+                // 本物はディスクから読んで縮めるので、すぐには出ない
+                std::thread::sleep(IMAGE_DELAY);
+                for _ in images {
+                    image_marks += 1;
+                    let _ = write!(out, "[Image #{image_marks}]");
+                }
+                let _ = out.flush();
+                continue;
+            }
+            // 入力欄が畳まれた。**チップごと消える**のが `Ctrl+U` との違い
+            Input::Cancel => {
+                let _ = writeln!(out, "{CANCELLED_MARKER}");
+                let _ = out.flush();
                 continue;
             }
             Input::Line(line) => line,
@@ -621,6 +641,43 @@ enum Input {
     Up,
     /// 下矢印（`ESC [ B`）。選択ダイアログの選択を1つ進める
     Down,
+    /// 貼り付けが終わった（`ESC [ 2 0 1 ~`）。中身は**行末が画像の拡張子だった行**。
+    ///
+    /// 本物は貼り付けを受け取った時点でディスクから画像を読み、入力欄へチップを出す
+    /// （画像添付 設計§1-1）。**確定より前に出る**ので、送る側はこれを見てから確定できる。
+    PasteEnd(Vec<String>),
+    /// `Esc` を2回。本物はこれで入力欄が畳まれる（画像添付 設計§21 読み替え3）。
+    ///
+    /// **`Ctrl+U` とは別物。** あちらはテキストしか消さず、添付のチップは残る。
+    Cancel,
+}
+
+/// 画像を読み終えてチップを出すまでの間。
+///
+/// **0 にしてはいけない。** 本物は貼り付けからチップまで実測 200ms 前後かかる
+/// （画像添付 設計§21 読み替え2）ので、ここを即時にすると **「印を待たずに確定する」
+/// 実装でもテストが通ってしまう**——待たせる仕組みを確かめられなくなる。
+/// 待ちの上限（5秒）よりは十分短くする。
+const IMAGE_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// 貼り付けの中から、画像として拾われる行を抜き出す。
+///
+/// 本物の判定は**断片の末尾**が画像の拡張子かどうかで、切れ目は改行と「スペース＋パスの
+/// 始まり」しかない（設計§6-1）。ここでは**行末だけ**を見る——ダッシュボードがパスを
+/// 1行に1つ・行末に置くと決めた（§6）ので、擬似が拾う形もそれに合わせる。
+///
+/// **表を製品と共有しない。** ここは本物の claude の代役であって、ダッシュボードの
+/// 対応表を写すと「自分で決めた表を自分で満たす」テストになる。
+fn pasted_images(body: &str) -> Vec<String> {
+    const 拡張子: &[&str] = &[".png", ".jpg", ".jpeg", ".gif", ".webp"];
+    body.lines()
+        .map(str::trim_end)
+        .filter(|line| {
+            let lower = line.to_lowercase();
+            拡張子.iter().any(|ext| lower.ends_with(ext))
+        })
+        .map(str::to_string)
+        .collect()
 }
 
 /// 標準入力を**バイト単位**で読み、行と Shift+Tab に振り分ける。
@@ -628,11 +685,27 @@ enum Input {
 /// 行編集を切ってあるので、1バイトずつ届く。改行を待たずに制御シーケンスを拾えるのが要点。
 struct InputReader {
     buffer: Vec<u8>,
+    /// 貼り付けの最中に見つけた画像のパス。
+    ///
+    /// **貼り付けの終わりでまとめて数えられない。** この読み手は貼り付けの中の改行も
+    /// 行の区切りとして扱う（複数行の指示が行ごとに届く、という既存の振る舞い）ので、
+    /// `201~` に着いた時点で手元に残っているのは**最後の断片だけ**になる。
+    /// 通り過ぎるたびに拾っておかないと、2枚目以降を取りこぼす。
+    pasted: Vec<String>,
 }
 
 impl InputReader {
     fn new() -> Self {
-        Self { buffer: Vec::new() }
+        Self {
+            buffer: Vec::new(),
+            pasted: Vec::new(),
+        }
+    }
+
+    /// いま溜まっている断片が画像なら覚える。
+    fn 拾う(&mut self) {
+        let fragment = String::from_utf8_lossy(&self.buffer).into_owned();
+        self.pasted.extend(pasted_images(&fragment));
     }
 
     fn read_byte(&mut self) -> Option<u8> {
@@ -675,6 +748,13 @@ impl Iterator for InputReader {
                 0x15 => self.buffer.clear(),
                 // ESC で始まる並び。`[Z` が Shift+Tab、`CR` が改行で、他は解釈して捨てる
                 0x1b => match self.read_byte()? {
+                    // `Esc` を2回。入力欄を畳む（画像添付 設計§21 読み替え3）。
+                    // **溜めていた本文も添付のチップも消える**
+                    0x1b => {
+                        self.buffer.clear();
+                        self.pasted.clear();
+                        return Some(Input::Cancel);
+                    }
                     // Shift+Enter（と Option+Enter）。**確定ではなく改行**。
                     //
                     // 本物がこの並びを改行として扱うことは、claude のバイナリが
@@ -687,12 +767,26 @@ impl Iterator for InputReader {
                         "Z" => return Some(Input::Cycle),
                         "A" => return Some(Input::Up),
                         "B" => return Some(Input::Down),
+                        // 貼り付けの終わり。**ここで拾う**——確定の CR より前に出さないと、
+                        // 送る側が「印を見てから確定する」道を確かめられない
+                        // 貼り付けの始まり。前の貼り付けの拾い物を持ち越さない
+                        "200~" => self.pasted.clear(),
+                        "201~" => {
+                            // 最後の断片はまだ行になっていないので、ここで拾う
+                            self.拾う();
+                            let images = std::mem::take(&mut self.pasted);
+                            if !images.is_empty() {
+                                return Some(Input::PasteEnd(images));
+                            }
+                        }
                         _ => {}
                     },
                     _ => {}
                 },
                 // 端末の作法では確定は CR。行編集を切っているので自分で扱う
                 b'\n' | b'\r' => {
+                    // 行になる前に、それが画像だったかを覚えておく（[`InputReader::pasted`]）
+                    self.拾う();
                     let line =
                         String::from_utf8_lossy(&std::mem::take(&mut self.buffer)).into_owned();
                     return Some(Input::Line(line));

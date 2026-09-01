@@ -175,6 +175,21 @@ const MODEL_STEP: Duration = Duration::from_millis(200);
 /// 会話が進んでいるときだけ出る。出ないほうが普通なので、短く切って先へ進む。
 const MODEL_CONFIRM_WAIT: Duration = Duration::from_secs(4);
 
+/// 添付の印が出るのを待つ上限（画像添付 設計§21 読み替え2）。
+///
+/// 実測では貼り付けから `[Image #N]` まで **200ms 以内**で、15 KiB でも 2.9 MB でも
+/// 5枚でも変わらなかった（測定の分解能がそこ）。**大きさや枚数で伸ばす必要は無い**
+/// ので固定にし、実測の25倍の余裕を取ってある。
+///
+/// 上限を長くしないのは、諦めたときに人を待たせるのがこの値そのものだから。
+const ATTACHMENT_MARK_WAIT: Duration = Duration::from_secs(5);
+
+/// 添付の印を確かめる刻み。
+///
+/// [`MODEL_STEP`] と同じ値だが**別に持つ**。あちらはモデル切替の確認画面を待つ刻みで、
+/// 片方を実測で動かしたときにもう片方が黙って付いてくると理由が追えなくなる。
+const ATTACHMENT_STEP: Duration = Duration::from_millis(200);
+
 /// 同時に起こし直せる本数（接続断のカードを復旧ボタンで戻す 設計§8-4）。
 ///
 /// 1本あたり実測 **1190MB・14プロセス**（ローカルイシュー
@@ -991,14 +1006,119 @@ impl Session {
     /// 指示を送る経路はここに集約する。`write_input` を直に呼んで組み立て直すと、
     /// 同じ壊れ方が別の場所で再発する。
     pub async fn send_instruction(&self, text: &str) -> anyhow::Result<()> {
-        let (body, submit) = input::encode_parts(text);
+        self.send_instruction_with(text, &[]).await
+    }
+
+    /// [`Session::send_instruction`] に**添付のパス**を足した形（画像添付 設計§6・§7）。
+    ///
+    /// 添付が0枚のときは [`Session::send_instruction`] と**振る舞いが1つも変わらない**
+    /// ——書くバイト列も、待ちの長さも、覗く回数も同じ（設計§14）。添付を使わない送信を
+    /// 巻き添えにしないための約束で、テストで固定してある。
+    ///
+    /// 添付があるときだけ、確定の前に**画面へ印が出るのを待つ**。claude 側の添付は
+    /// ディスクから読んで縮める非同期の処理なので、[`INSTRUCTION_SETTLE`]（30ms）では
+    /// 間に合わない。間に合わないまま確定すると、**パスの文字列だけが送られる**——
+    /// 利用者から見て「送ったのに画像が届いていない」形になる。
+    pub async fn send_instruction_with(
+        &self,
+        text: &str,
+        attachments: &[String],
+    ) -> anyhow::Result<()> {
+        let (body, submit) = input::encode_parts_with(text, attachments);
+        // 印を数えるのは**書いたあとに届いたぶんだけ**にする。末尾から探すと、前回の
+        // 送信で出た印に当たって「もう出ている」と誤って進む（`answer_switch_confirmation`
+        // が同じ理由で目印を使っている）。添付が無いなら覗きもしない
+        let since = (!attachments.is_empty()).then(|| self.scrollback_mark());
         if !body.is_empty() {
             self.write_input(&body)?;
-            // 貼り付けを受け取り終えてから確定を渡す。ここを詰めると、
-            // 2つの書き込みが1回の読み取りにまとまって元の破綻へ戻る
-            tokio::time::sleep(INSTRUCTION_SETTLE).await;
+            match since {
+                // 貼り付けを受け取り終えてから確定を渡す。ここを詰めると、
+                // 2つの書き込みが1回の読み取りにまとまって元の破綻へ戻る
+                None => tokio::time::sleep(INSTRUCTION_SETTLE).await,
+                Some(since) => self.await_image_marks(since, attachments.len()).await?,
+            }
         }
         self.write_input(&submit)
+    }
+
+    /// 画面に添付の印が `want` 個出るまで待つ（設計§7-1）。
+    ///
+    /// 写し元は [`Session::answer_switch_confirmation`]——目印より後だけを見て、刻みで
+    /// 確かめ、上限で諦める形。**固定の待ち時間にしない**のは、画像の大きさと機械の
+    /// 速さで変わるためで、長めの固定値にすると遅い機械で取りこぼすか、速い機械を
+    /// 無駄に待たせるかのどちらかになる。
+    ///
+    /// 出そろったら**上限を待たずにすぐ帰る**。
+    async fn await_image_marks(&self, since: u64, want: usize) -> anyhow::Result<()> {
+        let started = tokio::time::Instant::now();
+        let deadline = started + ATTACHMENT_MARK_WAIT;
+        let mut got = 0;
+        while tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(ATTACHMENT_STEP).await;
+            got = input::count_image_marks(&self.scrollback_since(since, FOOTER_TAIL));
+            if got >= want {
+                tracing::info!(
+                    card_id = %self.card_id,
+                    want,
+                    got,
+                    waited_ms = started.elapsed().as_millis() as u64,
+                    "添付の印が出そろいました"
+                );
+                return Ok(());
+            }
+        }
+
+        // 諦める。**確定は送らない**——パスの文字列だけが本文として送られる結末は、
+        // 完了条件がいちばん嫌っている形（設計§7-2）
+        let folded = self.fold_input().await;
+        tracing::warn!(
+            card_id = %self.card_id,
+            want,
+            got,
+            folded,
+            waited_ms = started.elapsed().as_millis() as u64,
+            "添付の印が出ませんでした"
+        );
+        // この Err は `local.rs` と `link.rs` が `ServerMessage::Error` へ移して画面まで
+        // 運ぶ。**「画像を添付できませんでした」で終わらせない**——もう一度押せばよいのか、
+        // 大きすぎて諦めるべきなのかを、利用者が読んで判断できる形にする（設計§7-2）
+        let 状況 = format!(
+            "画像の印が {want} 枚ぶん出ませんでした（出たのは {got} 枚）。確定は送っていません"
+        );
+        Err(anyhow::anyhow!(if folded {
+            format!("{状況}。入力欄は畳んであるので、そのままもう一度送れます")
+        } else {
+            format!(
+                "{状況}。端末側の入力欄を畳めなかったので、\
+                 **このまま送ると同じ画像が二重に添付されます**。\
+                 ターミナルビューで Esc を2回押して入力欄を空にしてから送り直してください"
+            )
+        }))
+    }
+
+    /// 端末側の入力欄を畳む（設計§21 読み替え3）。畳めたら `true`。
+    ///
+    /// **`Ctrl+U` では畳めない。** あれはテキストしか消さず、添付のチップ（`[Image #N]`）は
+    /// 残る。[`Session::send_instruction`] は毎回 `Ctrl+U` から始まるので、諦めたあとに
+    /// 残しておくと**次の送信で前回の添付の上に積み上がる**（実測で7枚積んだ）。`Esc` は
+    /// **2回**要る（1回では畳まれないことを実測済み）。
+    ///
+    /// ブラウザ側の添付一覧は**残す**（もう一度押せる）。畳むのは端末側だけで、この2つを
+    /// 混同しないこと。
+    ///
+    /// # 確かめ方には限界がある
+    ///
+    /// 覗けるのは追記しかない生のバイト列なので、「消えた」ことは直接には見られない。
+    /// **畳んだあとに描き直された分に印が載っていなければ畳めたとみなす。** 畳めていない
+    /// ときは入力欄がそのまま描き直されるので、この見方でも取りこぼしは少ない。
+    async fn fold_input(&self) -> bool {
+        self.send_key(b"\x1b", "添付の取り消し（1回目）");
+        tokio::time::sleep(INSTRUCTION_SETTLE).await;
+        self.send_key(b"\x1b", "添付の取り消し（2回目）");
+
+        let since = self.scrollback_mark();
+        tokio::time::sleep(ATTACHMENT_STEP).await;
+        input::count_image_marks(&self.scrollback_since(since, FOOTER_TAIL)) == 0
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> anyhow::Result<()> {

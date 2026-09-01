@@ -369,6 +369,26 @@ mod tests {
     }
 
     #[test]
+    fn 名前に制御文字が入らない() {
+        // 採番した名前は**本文へ混ぜて PTY へ書かれる**（画像添付 設計§6）。ESC が
+        // 混ざると貼り付けの終了記号を本文側から打ち込めてしまうので、`sanitize` が
+        // 本文から ESC を落としている前提と噛み合わなくなる。
+        //
+        // **`sanitize` を緩めて通す道を選ばなかった**根拠がここにある——名前を
+        // こちらで採る限り、緩める必要が最初から無い（§6-3）。
+        for ext in ["png", "jpg", "jpeg", "gif", "webp"] {
+            let name = build_name(日時(2026, 9, 1, 21, 43, 6), "a1b2c3d4", ext);
+            assert!(
+                !name.chars().any(char::is_control),
+                "制御文字が入っている: {name:?}"
+            );
+            // パスの区切りも入らない（利用者が付けた名前を使わないため）
+            assert!(!name.contains('/'), "区切りが入っている: {name:?}");
+            assert!(!name.contains('\\'), "区切りが入っている: {name:?}");
+        }
+    }
+
+    #[test]
     fn 見覚えのない名前は読み戻せない() {
         // 掃除はここが Some を返したものにしか触らない
         for name in [
@@ -535,6 +555,119 @@ mod tests {
             "名前ではなく時刻を見ている: {outcome:?}"
         );
         std::fs::remove_dir_all(&state).ok();
+    }
+
+    /// 既定の設定で1枚置く。掃除は効かせない（置くことだけを見たいので上限を大きく取る）。
+    fn 置いてみる(
+        state: &Path,
+        card: CardId,
+        media_type: &str,
+        size: usize,
+    ) -> Result<protocol::fs::WrittenBlob, crate::hostfs::HostFsError> {
+        write_blob(
+            state,
+            card,
+            media_type,
+            &vec![0u8; size],
+            90,
+            1 << 30,
+            200 * 1024 * 1024,
+        )
+    }
+
+    #[test]
+    fn 表に無い種別は置く前に断る() {
+        // **場所を作るまでもなく相手ではない。** `svg` もここで落ちる——claude の
+        // 貼り付け処理が拾わないので、置いても添付にならない（設計§17）
+        let state = 使い捨て("unsupported");
+        let card = CardId(uuid::Uuid::from_u128(1));
+        for media_type in ["image/svg+xml", "text/plain", "application/pdf"] {
+            let err = 置いてみる(&state, card, media_type, 8).expect_err("断ること");
+            assert_eq!(
+                err.reason,
+                protocol::a2s::HostFailure::Unsupported,
+                "{media_type}"
+            );
+        }
+        // **1バイトも書かれていないこと。** 断ったのに場所ができていては意味が無い
+        assert!(
+            !card_dir(&state, card).exists(),
+            "断ったのに置き場所ができている"
+        );
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn 上限を超えるものは書く前に断る() {
+        // 書いてから消すのでは、上限を置いた意味が無い
+        let state = 使い捨て("toolarge");
+        let card = CardId(uuid::Uuid::from_u128(1));
+        let size = (MAX_ATTACHMENT_BYTES + 1) as usize;
+        let err = 置いてみる(&state, card, "image/png", size).expect_err("断ること");
+        assert_eq!(err.reason, protocol::a2s::HostFailure::TooLarge);
+        assert!(
+            !card_dir(&state, card).exists(),
+            "断ったのに置き場所ができている"
+        );
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn 受け取る種別は拡張子つきで置かれる() {
+        let state = 使い捨て("accepted");
+        let card = CardId(uuid::Uuid::from_u128(1));
+        for (media_type, ext) in [
+            ("image/png", "png"),
+            ("image/jpeg", "jpg"),
+            ("image/gif", "gif"),
+            ("image/webp", "webp"),
+        ] {
+            let written = 置いてみる(&state, card, media_type, 16).expect("置けること");
+            assert!(
+                written.path.ends_with(&format!(".{ext}")),
+                "拡張子が違う: {} ({media_type})",
+                written.path
+            );
+            assert_eq!(written.bytes, 16);
+            // **縮めていないこと。** 渡したバイト列がそのまま置かれる（設計§8-1）
+            let 中身 = std::fs::read(&written.path).expect("読めること");
+            assert_eq!(中身.len(), 16, "ダッシュボード側で縮めている");
+        }
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn 掃除の古い順は日付と時刻と名前の3段で決まる() {
+        // 段②が消す順序。**日付だけで並べると、同じ日に置いたものの間で順序が決まらない**
+        // ——決まらないまま「古い順に決めた量だけ」消すと、何が消えるかが実行ごとに変わる
+        let state = 使い捨て("order");
+        let card = CardId(uuid::Uuid::from_u128(1));
+        // 同じ日・同じ時刻で名前だけ違うもの、同じ日で時刻だけ違うもの、を混ぜる
+        置く(&state, card, "20260901-000000-aaaaaaaa.png", 400);
+        置く(&state, card, "20260901-000000-bbbbbbbb.png", 400);
+        置く(&state, card, "20260901-235959-cccccccc.png", 400);
+        置く(&state, card, "20260902-000000-dddddddd.png", 400);
+
+        // 合計 1600。上限を 1000 にして 900 ぶん消させる＝古い順に3件
+        let _ = sweep_at(&state, 日("2026-09-03"), 90, 1000, 900);
+
+        assert!(
+            !残っている(&state, card, "20260901-000000-aaaaaaaa.png"),
+            "1番目が残っている"
+        );
+        assert!(
+            !残っている(&state, card, "20260901-000000-bbbbbbbb.png"),
+            "2番目が残っている"
+        );
+        assert!(
+            !残っている(&state, card, "20260901-235959-cccccccc.png"),
+            "3番目が残っている"
+        );
+        assert!(
+            残っている(&state, card, "20260902-000000-dddddddd.png"),
+            "いちばん新しいものまで消えた"
+        );
+        let _ = std::fs::remove_dir_all(&state);
     }
 
     #[test]

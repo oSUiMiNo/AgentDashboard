@@ -717,6 +717,9 @@ pub async fn send_input(
     ws.send(&ClientMessage::SendInput {
         card_id: card,
         text: text.to_string(),
+        // CLI から添付を付ける道はまだ無い（画像添付 設計§17「やらないこと」——
+        // 添付付き送信の CLI 一括実行はスコープ外）。置くのは `session attach` が担う
+        attachments: Vec::new(),
     })
     .await?;
     let outcome = if wait_turn {

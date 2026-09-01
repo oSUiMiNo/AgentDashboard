@@ -1,5 +1,10 @@
 //! Composer から届いた指示を、PTY へ書くバイト列に変換する（設計§4/§6）。
 //!
+//! **添付については、書く側と読む側の両方をここに置く。** 本文へパスを混ぜるのが
+//! [`encode_parts_with`]、混ぜた結果として画面に出る印を数えるのが
+//! [`count_image_marks`] で、**この2つは対になっている**（何を書いたから何が出るはず
+//! なのか、という関係）。離して置くと、片方を直したときにもう片方が取り残される。
+//!
 //! # なぜ長さに関わらず包むのか
 //!
 //! ターミナル上の CLI は、改行が届いた時点で「確定した」とみなして処理を始める。
@@ -28,6 +33,8 @@
 //! ただし**ここだけでは足りない**ことが上の破綻で分かった。包まないと壊れることも、
 //! 1回で書くと壊れることも、本物の TUI を動かすまで見えない。実CLIテスト側に「長い
 //! 単一行が1つの指示として届くこと」を置いてある。
+
+use super::permission::{squeeze, strip_ansi};
 
 /// bracketed paste の開始と終了。
 const PASTE_BEGIN: &str = "\x1b[200~";
@@ -101,6 +108,26 @@ fn compose(body: String, attachments: &[String]) -> String {
         out.push_str(path);
     }
     out
+}
+
+/// 画面に出る添付の印（設計§7-1）。
+///
+/// claude は貼り付けから画像を拾うと、入力欄へ `[Image #1]` のようなチップを出す。
+/// **番号は当てにしない**——あれはセッションを跨いで通し番号が続く（§21 読み替え1）。
+/// 数えるのは**個数だけ**で、何番が付いたかは見ない。
+const IMAGE_MARK: &str = "[Image #";
+
+/// 画面に出ている添付の印を数える（設計§7-1）。
+///
+/// 読む対象は**画面の見た目ではなく印の綴り**にする（PJTガイドライン「端末の表示を
+/// 読んで判断するとき」）。装飾は端末の都合で変わるが、綴りは claude が書いたもの
+/// なので、揺れるとしたら CLI 側の変更のときだけになる。
+///
+/// [`super::permission::squeeze`] を通してから照合するのは、**チップが行の折り返しで
+/// 割れることがある**ため。空白を全部落とせば、割れても1つの綴りとして当たる。
+pub fn count_image_marks(screen: &str) -> usize {
+    let plain = squeeze(&strip_ansi(screen)).to_lowercase();
+    plain.matches(&squeeze(IMAGE_MARK).to_lowercase()).count()
 }
 
 /// 改行コードを LF に揃え、ESC を落とし、末尾の空行を落とす。
@@ -310,5 +337,43 @@ mod tests {
         let (body, submit) = encode_parts_with("", &[]);
         assert!(body.is_empty(), "空送信で入力行に触っている: {body:?}");
         assert_eq!(submit, b"\r");
+    }
+
+    #[test]
+    fn 印は枚数ぶん数える() {
+        assert_eq!(count_image_marks(""), 0);
+        assert_eq!(count_image_marks("なにも出ていない"), 0);
+        assert_eq!(count_image_marks("[Image #1]"), 1);
+        assert_eq!(count_image_marks("[Image #1] [Image #2] [Image #3]"), 3);
+    }
+
+    #[test]
+    fn 印の番号は当てにしない() {
+        // 番号はセッションを跨いで通し番号が続く（実測・設計§21 読み替え1）。
+        // 1枚目が `#8` から始まっても、枚数として数えられること
+        assert_eq!(count_image_marks("[Image #8] [Image #27]"), 2);
+    }
+
+    #[test]
+    fn 印は装飾に埋もれても数える() {
+        // 端末は色や位置の指定を挟む。**読むのは見た目ではなく綴り**なので、
+        // ESC 列を落としてから数える
+        assert_eq!(count_image_marks("\u{1b}[1;36m[Image #1]\u{1b}[0m"), 1);
+    }
+
+    #[test]
+    fn 印は折り返しで割れても数える() {
+        // 入力欄の幅で `[Image #1]` の途中に改行が挟まることがある。空白を
+        // 全部落としてから照合するので、割れても1つとして当たる
+        assert_eq!(count_image_marks("[Image\n #1]"), 1);
+        assert_eq!(count_image_marks("[Ima\r\nge  #2]"), 1);
+    }
+
+    #[test]
+    fn 添付のパスそのものは印として数えない() {
+        // 貼り付けた本文は画面へ echo される。**パスを印と取り違えると、
+        // claude が画像を読み終える前に確定してしまう**——この工事が防ぎたい形そのもの
+        let echoed = encoded_with("見て", &["/tmp/a.png", "/tmp/b.jpg"]);
+        assert_eq!(count_image_marks(&echoed), 0);
     }
 }
