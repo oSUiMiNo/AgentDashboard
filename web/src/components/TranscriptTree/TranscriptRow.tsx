@@ -212,6 +212,7 @@ function RewoundHeader({
     <div
       data-testid="transcript-row"
       data-kind="rewound"
+      data-expandable="true"
       data-expanded={row.expanded}
       className="border-border/40 border-b py-1 text-sm"
     >
@@ -255,6 +256,7 @@ function ActivityHeader({ row, onToggle }: { row: ActivityRow; onToggle: () => v
       data-testid="transcript-row"
       data-kind="activity"
       data-depth={row.depth}
+      data-expandable="true"
       data-expanded={row.expanded}
       data-member-count={row.members.length}
       style={{ paddingLeft: `${row.depth * 1.25}rem` }}
@@ -305,6 +307,10 @@ function NodeRowView({
       data-testid="transcript-row"
       data-kind={row.node.kind}
       data-depth={row.depth}
+      // **開けるかどうかを出す。** `data-expanded` は開けない行でも `true` になりうるので、
+      // これだけを見て「開いている」と読むと**ほぼ全部の行に当たる**（実際に踏んだ——
+      // Selected の印が全行に付き、「選ばれたもの」を示さなくなっていた）
+      data-expandable={row.expandable}
       data-expanded={row.expanded}
       data-foldable={row.foldable}
       data-body-open={row.bodyOpen}

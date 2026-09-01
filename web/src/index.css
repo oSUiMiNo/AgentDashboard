@@ -446,7 +446,12 @@
   色は `--accent-edge`（Primary Accent）。**行の高さを変えない**よう、字下げの余白へ
   重ねる形で置く。
 */
-[data-testid='transcript-row'][data-expanded='true'],
+/*
+  **`data-expanded` だけを見ないこと。** あれは**開けない行でも `true`** になりうるので、
+  単独で使うと**ほぼ全行に当たり、「選ばれたもの」を示さなくなる**（実際に踏んだ。
+  畳んだ行と開いた行で計算値が同じになっていた）。**開けること**と対で見る。
+*/
+[data-testid='transcript-row'][data-expandable='true'][data-expanded='true'],
 [data-testid='transcript-row'][data-body-open='true'] {
   box-shadow: inset 2px 0 0 var(--accent-edge);
 }

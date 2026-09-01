@@ -424,6 +424,37 @@ test('フェードは行の高さを変えない', async ({ page }) => {
   expect(await 高さ()).toBe(敷いたまま)
 })
 
+test('Selected の印は、開いた行にだけ付く', async ({ page }) => {
+  // `DESIGN.md` §27.3。**「選ばれたもの」を示さなければ Selected ではない。**
+  //
+  // **`data-expanded` だけを見てはいけない**——あれは**開けない行でも `true`**
+  // になりうるので、単独で使うと**ほぼ全行に当たる**。実際にそうなっていて、
+  // 畳んだ行と開いた行で `box-shadow` の計算値が一致していた。
+  // **CSS が在ることは確かめていたが、効いているかを確かめていなかった。**
+  await loadFoldLines(page)
+  await expect(page.locator('[data-testid="transcript-row"]').first()).toBeVisible(届くまで)
+  await page.getByTestId('body-toggle').first().click()
+
+  const 印 = await page.evaluate(() => {
+    const 見る = (sel: string) => {
+      const el = document.querySelector(sel) as HTMLElement | null
+      return el ? getComputedStyle(el).boxShadow : null
+    }
+    return {
+      開いた行: 見る('[data-testid="transcript-row"][data-body-open="true"]'),
+      畳んだ行: 見る('[data-testid="transcript-row"][data-body-open="false"]'),
+    }
+  })
+
+  expect(印.開いた行).not.toBeNull()
+  expect(印.畳んだ行).not.toBeNull()
+  // 開いた行には印が付く
+  expect(印.開いた行).not.toBe('none')
+  // **畳んだ行には付かない。**ここが本体——付いていたら「選ばれたもの」を示していない
+  expect(印.畳んだ行).toBe('none')
+  expect(印.開いた行).not.toBe(印.畳んだ行)
+})
+
 test('帯の下9割は、どこを押しても開く', async ({ page }) => {
   // **要望10 の本体**（設計§6-7-5）。「続きを読む」をピンポイントで突かなくても開く。
   // **左寄り・中央・右寄りの3点**で見る——1点だけだと、たまたま文字の上を突いていても通る
