@@ -194,6 +194,23 @@ export function TranscriptTree({ cardId }: { cardId: CardId }) {
         </div>
       )}
 
+      {/* **画面の主題を示す見出し**（`DESIGN.md` §8 の床・§13.4）。構造化ビューは
+          UI 自身の見出しを1つも持っておらず、いちばん大きい文字が 14px/500 だった
+          ——階層が実質2段しかない状態で、§8 の1行がそのまま未達だった。
+
+          **質感もここが引き受ける**（§12.3 の「見出し帯・セクション見出し＝印刷面・
+          プレート・中」）。§12.3 は「物質は**画面に数個しか無い面**に置く」と言う——
+          この帯は画面に1つしかないので、いちばん条件に合う面である。
+
+          **薄く保つこと。** この道具はスマホからも触るので、主題を名乗るためだけに
+          行を厚くすると §4.5 の「情報より装飾が前に出る」へ寄る */}
+      <div data-testid="transcript-heading" className="transcript-heading">
+        <span className="transcript-heading-title">履歴</span>
+        {rows.length > 0 && (
+          <span className="text-muted-foreground text-xs">{rows.length}件</span>
+        )}
+      </div>
+
       <div
         ref={scrollRef}
         data-testid="transcript-tree"

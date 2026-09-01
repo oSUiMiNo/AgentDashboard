@@ -547,6 +547,42 @@ test('「続きを読む」はただの文字で、中央のやや下に居る',
   expect(見た目.文字の高さ).toBeLessThan(見た目.帯の高さ)
 })
 
+test('画面の主題を示す見出しがある', async ({ page }) => {
+  // `DESIGN.md` §8 の床。**構造化ビューは UI 自身の見出しを1つも持っていなかった**
+  // ——いちばん大きい文字が 14px/500 で、階層が実質2段しかなかった。
+  //
+  // §8 の不合格例は「**既定のUIフォントを太字にしただけ**」なので、**大きさとウェイトの
+  // 両方**を見る（§13.2 の Section Title＝15〜18px / Semibold）。
+  await loadFoldLines(page)
+  const 見出し = page.getByTestId('transcript-heading')
+  await expect(見出し).toBeVisible(届くまで)
+
+  const 見た目 = await 見出し.evaluate((el) => {
+    const 題 = el.querySelector('.transcript-heading-title') as HTMLElement
+    const t = getComputedStyle(題)
+    const h = getComputedStyle(el)
+    const 本文 = document.querySelector('[data-testid="row-body"]') as HTMLElement
+    return {
+      大きさ: parseFloat(t.fontSize),
+      太さ: Number(t.fontWeight),
+      // **物質感**（§12.3 の「見出し帯＝印刷面・プレート」）。平らな塗りではないこと
+      影: h.boxShadow,
+      地: h.backgroundColor,
+      本文の大きさ: parseFloat(getComputedStyle(本文).fontSize),
+    }
+  })
+
+  // §13.2 の Section Title
+  expect(見た目.大きさ).toBeGreaterThanOrEqual(15)
+  expect(見た目.大きさ).toBeLessThanOrEqual(18)
+  expect(見た目.太さ).toBeGreaterThanOrEqual(600)
+  // **画面でいちばん大きい**こと（本文より上）
+  expect(見た目.大きさ).toBeGreaterThan(見た目.本文の大きさ)
+  // **物質を持つ面**であること（平らな塗りでも透明でもない）
+  expect(見た目.影).not.toBe('none')
+  expect(見た目.地).not.toMatch(/rgba\(0, 0, 0, 0\)/)
+})
+
 test('帯は器の端まで届く', async ({ page }) => {
   // **要望①の本体**（設計§6-7-2）。帯を本文の箱に敷いていた頃は、吹き出しの内側余白
   // （`px-3 py-2`）のぶんだけ左右と下が届かず、**器の中に貼った紙**に見えていた。
