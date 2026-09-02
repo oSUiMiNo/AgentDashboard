@@ -131,11 +131,17 @@ describe('地のデザインが変わっても、境目が出ないこと', () =
 })
 
 describe('電源ボタン', () => {
-  it('点灯の緑が、役割表（`DESIGN.md` §11.2 Positive）と同じ色である', () => {
-    // **色を2箇所へ書くと、片方だけ古くなる。** 役割表を差し替えたときに
-    // ここが取り残されたら、このテストが落ちて教える
-    const 当たり = /positive:\s*\{[\s\S]*?accent:\s*'([^']+)'/.exec(PROTOCOL)
-    expect(当たり, 'protocol.ts の positive.accent を拾えていない').not.toBeNull()
+  it('点灯が、進行中の色（`DESIGN.md` §11.2 Primary Accent）と同じである', () => {
+    /*
+      **かつてライム（Positive）だった。** 「状態の●とは別の軸だから別の色でよい」と
+      整理していたが、**軸が違うことは色を分ける理由にならない**（同 §11.2 の判定・
+      帯設計§17-5）——●も輪も「走っている」という**同じ言葉で説明できる**。
+
+      **色を2箇所へ書くと、片方だけ古くなる。** 役割表を差し替えたときに
+      ここが取り残されたら、このテストが落ちて教える。
+    */
+    const 当たり = /primary:\s*\{[\s\S]*?accent:\s*'([^']+)'/.exec(PROTOCOL)
+    expect(当たり, 'protocol.ts の primary.accent を拾えていない').not.toBeNull()
     expect(素).toContain(`--power-lit: ${当たり?.[1]}`)
   })
 
@@ -190,37 +196,53 @@ describe('動きの止め方', () => {
   })
 })
 
-describe('ターミナルのトグルは 1.3倍', () => {
-  const 元 = { 溝の高さ: 1, 溝の幅: 1.75, つまみ: 0.75, 余白: 0.125 } // rem
-
-  it('溝とつまみが 1.3倍になっている', () => {
-    expect(rem(宣言('.termswitch-track {', 'block-size'))).toBeCloseTo(
-      元.溝の高さ * 1.3,
-      4,
-    )
-    expect(rem(宣言('.termswitch-track {', 'inline-size'))).toBeCloseTo(
-      元.溝の幅 * 1.3,
-      4,
-    )
-    expect(rem(宣言('.termswitch-knob {', 'inline-size'))).toBeCloseTo(
-      元.つまみ * 1.3,
-      4,
-    )
+describe('ターミナルのトグルは、文字を落として絵にした', () => {
+  it('§15-3 の 1.3倍から、さらに大きくなっている', () => {
+    // **文字が消えた以上、何のトグルかを言うのは絵だけ**（設計§17-4）。
+    // 小さいと `DESIGN.md` §18.2 の下限を割り、**文字を落とした意味が消える**
+    expect(rem(宣言('.termswitch-track {', 'block-size'))).toBeGreaterThan(1.3)
+    expect(rem(宣言('.termswitch-track {', 'inline-size'))).toBeGreaterThan(2.275)
+    expect(rem(宣言('.termswitch-knob {', 'inline-size'))).toBeGreaterThan(0.975)
   })
 
-  it('入っている位置だけは 1.3倍ではない——左右を対称にする', () => {
-    // **元の数字がずれていた。** いまは `left: 14px` で、中身（28 − 枠2 ＝ 26px）
-    // からつまみ 12px を引くと**右の余白がちょうど 0**——右端に密着していた。
-    // そのまま 1.3倍するとズレも 1.3倍になる（設計§15-3）
+  it('つまみの左右が対称である', () => {
+    // **§15-3 で直した非対称を、大きくするたびに作り直さない。**
+    // 元の実装は入っているときにつまみが右端へ密着していた
     const 枠 = 0.0625 * 2
     const 中身 = rem(宣言('.termswitch-track {', 'inline-size')) - 枠
     const つまみ = rem(宣言('.termswitch-knob {', 'inline-size'))
     const 左余白 = rem(宣言('.termswitch-knob {', 'left'))
     const 入り = rem(宣言(".termswitch[aria-checked='true'] .termswitch-knob", 'left'))
-
-    // 左右が同じ余白であること＝これが「対称」の意味
     expect(中身 - 入り - つまみ).toBeCloseTo(左余白, 4)
-    // **素朴な 1.3倍（0.875 × 1.3 ＝ 1.1375rem）ではない**ことを名指しで残す
-    expect(入り).not.toBeCloseTo(0.875 * 1.3, 4)
+  })
+
+  it('絵は消さずに沈める（切り替えで位置が飛ばない）', () => {
+    // 切れているときも同じ場所に在って濃さだけが落ちる（設計§17-4）
+    const at = 位置('.termswitch-mark {')
+    const 本体 = 素.slice(素.indexOf('{', at), 素.indexOf('}', 素.indexOf('{', at)))
+    expect(本体).toContain('opacity: 0')
+    expect(本体).not.toContain('display: none')
+    expect(素).toContain(".termswitch[aria-checked='true'] .termswitch-mark")
+  })
+
+  it('入っているときの面は夜空で、紫青ではない', () => {
+    /*
+      `DESIGN.md` §11.4・§33——**同じ青でも Purple → Blue へ寄せると
+      「AI SaaS 感」の側へ落ちる**。濃紺の側に紫を混ぜていないことを見る。
+
+      **透明へ向けて混ぜてある**ことも見る（同 §11.4「画面でいちばん派手な面に
+      しない」）。地が明るくなれば一緒に薄まる。
+    */
+    const at = 位置(".termswitch[aria-checked='true'] .termswitch-track")
+    const 本体 = 素.slice(素.indexOf('{', at), 素.indexOf('}', 素.indexOf('{', at)))
+    expect(本体).toContain('#0b2545')
+    expect(本体).toContain('#3dd9e6')
+    for (const 紫 of ['purple', 'violet', 'indigo', '#7', '#8', '#9']) {
+      expect(本体.toLowerCase(), `紫へ寄っている: ${紫}`).not.toContain(紫)
+    }
+    const 混ぜた = (本体.match(/color-mix\(/g) ?? []).length
+    const 透明へ = (本体.match(/transparent/g) ?? []).length
+    expect(混ぜた).toBeGreaterThan(0)
+    expect(透明へ).toBe(混ぜた)
   })
 })

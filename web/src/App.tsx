@@ -87,7 +87,14 @@ function Shell() {
   }, [entered, connect, loadSettings])
 
   return (
-    <main className="flex h-dvh flex-col gap-2 p-3 md:gap-4 md:p-6">
+    <main
+      /*
+        **外周と段の間隔**（帯設計§17-2・`DESIGN.md` §39.4）。ここが**いちばん外**なので、
+        内側はここから半分以下に細くしていく。**上だけ更に詰めてある**——利用者の言葉が
+        「**セッションの真上**が広すぎる」だったため。
+      */
+      className="flex h-dvh flex-col gap-2 p-3 pt-2 md:gap-4 md:p-6 md:pt-4"
+    >
       <header className="flex items-center gap-3">
         <Link to={HOME} className="text-xl font-semibold tracking-tight">
           <h1>AgentDashboard</h1>

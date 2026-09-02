@@ -611,32 +611,36 @@ test('接続断のカードでも、3行目が狭い画面からはみ出さな�
   await page.goto(`/s/${cardId}`)
   const view = page.getByTestId('session-view')
   /*
-    **起こし直す道は1行目へ移った**（帯設計§15-1）。この場面がいちばん混む理由は
-    変わらない——終わってはいないのでピッカーが出たまま、そこへ**始末のボタンが
-    3つ並ぶ1行目**が加わる。**だから測る行を2つに増やす。**
+    **測る先が操作列へ移った**（帯設計§17-1）。この場面がいちばん混む理由は変わらない
+    ——終わってはいないのでピッカーが出たまま、そこへ**操作が4つ並ぶ行**が加わる。
+
+    **帯（`screen-bar`）はもう行を持たない。** サイドバー・PJT 名・✕ が1列に並ぶだけで、
+    数える対象はセッションの操作列（`session-ops`）のほうにある。
   */
   await expect(view.getByTestId('model-picker')).toBeVisible()
   await expect(view.getByTestId('permission-mode-picker')).toBeVisible()
   const 電源 = view.getByTestId('power-card')
   await expect(電源).toHaveAttribute('data-power', 'off')
 
-  const 溢れ = await view.evaluate((el) => {
+  const 溢れ = await view.getByTestId('session-ops').evaluate((el) => {
     const 行の溢れ = (n: string) => {
       const row = el.querySelector(`[data-row="${n}"]`)
       return row === null ? -1 : row.scrollWidth - row.clientWidth
     }
     return {
-      一行目: 行の溢れ('1'),
-      行: 行の溢れ('3'),
+      操作の行: 行の溢れ('1'),
+      選ぶ行: 行の溢れ('2'),
       ページ:
         document.documentElement.scrollWidth -
         document.documentElement.clientWidth,
     }
   })
-  expect(溢れ.一行目, '1行目が入れ物からはみ出さないこと').toBeLessThanOrEqual(0)
-  expect(溢れ.行, '3行目が入れ物からはみ出さないこと').toBeLessThanOrEqual(0)
+  expect(溢れ.操作の行, '操作の行が入れ物からはみ出さないこと').toBeLessThanOrEqual(0)
+  expect(溢れ.選ぶ行, 'モデルとモードの行がはみ出さないこと').toBeLessThanOrEqual(0)
   expect(溢れ.ページ, 'ページが横へはみ出さないこと').toBeLessThanOrEqual(0)
 
-  // 帯は3行のまま（電源ボタンが消灯でも増えない）
-  await expect(view.locator('header [data-row]')).toHaveCount(3)
+  // 操作列は2行のまま（電源ボタンが消灯でも増えない）
+  await expect(
+    view.locator('[data-testid="session-ops"] [data-row]'),
+  ).toHaveCount(2)
 })

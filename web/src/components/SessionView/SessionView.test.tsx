@@ -360,118 +360,86 @@ describe('SessionView の復旧', () => {
  * どちらの側でも「在るもの」と「無いもの」を**対で**見る。**無いことだけを見る主張は、
  * セレクタが的外れでも通る**ので、片方だけだと「何も描かれていない」実装でも緑になる。
  */
-describe('SessionView の行き来', () => {
-  const PC = '77777777-7777-7777-7777-777777777777'
+/**
+ * 画面の行き来（設計§17-3）。**入り口が2つに割れていたのを1つにした。**
+ *
+ * 以前は「横並びは文字の『開く』、単独画面は PJT 名のリンク」で、**片側だけに出す
+ * 正しい例**として扱っていた（行き先がいま居る画面になるため）。**切替ボタンには
+ * その理由が当たらない**——あれは常に別の画面へ行く。
+ */
+describe('SessionView の行き来は、1つの切替ボタン', () => {
   const PROJECT = encodeURIComponent('/home/example/dev/app')
+
+  function show(compact = false) {
+    clearSessions()
+    applySessionSnapshot([meta()])
+    return render(
+      <MemoryRouter initialEntries={[`/s/${CARD}`]}>
+        <Routes>
+          <Route path="/" element={<p>一覧に居ます</p>} />
+          <Route path="/p/:host/:project" element={<p>PJT の画面です</p>} />
+          <Route path="/s/:cardId" element={<SessionView compact={compact} cardId={CARD} />} />
+        </Routes>
+      </MemoryRouter>,
+    )
+  }
 
   beforeEach(() => {
     useSettingsStore.setState({ settings: settingsFixture(), loading: false })
+    useWsStore.setState({ kill: vi.fn(), archive: vi.fn(), revive: vi.fn() })
   })
 
-  it('単独画面では、パスが PJT 専用画面を指す', () => {
-    applySessionSnapshot([meta()])
-    renderView()
+  it('両方の画面に出て、向きだけが変わる', () => {
+    // **同じボタンだと分かることが要件**（設計§17-3）。色や器で分けない
+    show()
+    expect(screen.getByTestId('zoom-toggle')).toHaveAttribute('data-zoom', 'out')
+    cleanup()
 
-    expect(screen.getByTestId('to-project')).toHaveAttribute(
-      'href',
-      `/p/local/${PROJECT}`,
-    )
+    show(true)
+    expect(screen.getByTestId('zoom-toggle')).toHaveAttribute('data-zoom', 'in')
   })
 
-  it('単独画面に「開く」は出ない（行き先が自分自身になるため）', () => {
-    applySessionSnapshot([meta()])
-    renderView()
-
-    expect(screen.getByTestId('to-project')).toBeInTheDocument()
-    expect(screen.queryByTestId('to-session')).toBeNull()
+  it('単独画面では、押すと PJT の画面へ移る', async () => {
+    show()
+    await userEvent.click(screen.getByTestId('zoom-toggle'))
+    expect(screen.getByText('PJT の画面です')).toBeInTheDocument()
   })
 
-  it('横並びでは、「開く」がそのセッションの専用画面を指す', () => {
-    applySessionSnapshot([meta()])
-    renderView({ compact: true })
-
-    expect(screen.getByTestId('to-session')).toHaveAttribute('href', `/s/${CARD}`)
-  })
-
-  it('横並びのパスはリンクにしない（既にその PJT の画面に居るため）', () => {
-    applySessionSnapshot([meta()])
-    renderView({ compact: true })
-
-    expect(screen.getByTestId('to-session')).toBeInTheDocument()
-    expect(screen.queryByTestId('to-project')).toBeNull()
-  })
-
-  it('別の PC のセッションは、その PC の PJT 専用画面を指す', () => {
-    // 同じパスはどの PC にも在りうるので、鍵に PC が入る
+  it('別の PC のセッションでも、その PC の PJT 画面を指す', async () => {
+    const PC = '77777777-7777-7777-7777-777777777777'
+    clearSessions()
     applySessionSnapshot([meta({ agent_id: PC })])
-    renderView()
-
-    expect(screen.getByTestId('to-project')).toHaveAttribute(
-      'href',
-      `/p/${PC}/${PROJECT}`,
+    render(
+      <MemoryRouter initialEntries={[`/s/${CARD}`]}>
+        <Routes>
+          <Route
+            path={`/p/${PC}/${PROJECT}`}
+            element={<p>その PC の画面です</p>}
+          />
+          <Route path="/s/:cardId" element={<SessionView cardId={CARD} />} />
+        </Routes>
+      </MemoryRouter>,
     )
+    await userEvent.click(screen.getByTestId('zoom-toggle'))
+    expect(screen.getByText('その PC の画面です')).toBeInTheDocument()
   })
 
-  it('ローカルモード（PC という単位が無い構成）でも行ける', () => {
-    applySessionSnapshot([meta({ agent_id: null })])
-    renderView()
-
-    expect(screen.getByTestId('to-project')).toHaveAttribute(
-      'href',
-      `/p/local/${PROJECT}`,
-    )
-  })
-
-  it('出すのは PJT の名前だけで、フルパスは title に残る', () => {
-    // **1行目には始末のボタンも並ぶ**ので、パスの長さに幅を明け渡せない（設計§14-5）。
-    // 名前だけでは「どの機械のどこか」が分からなくなるので、フルパスは `title` へ
-    applySessionSnapshot([meta()])
-    renderView()
-
-    const link = screen.getByTestId('to-project')
-    expect(link).toHaveTextContent('app')
-    expect(link).not.toHaveTextContent('/home/example')
-    expect(link).toHaveAttribute('title', '/home/example/dev/app')
-  })
-
-  it('名前は縮んでよいまま（帯の行数が増えないこと）', () => {
-    // `min-w-0` が無いと flex の子は中身より小さくならず `truncate` が効かない。
-    // 長い名前のときに始末のボタンが押し出される
-    applySessionSnapshot([meta()])
-    renderView()
-
-    const link = screen.getByTestId('to-project')
-    expect(link).toHaveClass('min-w-0')
-    expect(link).toHaveClass('truncate')
-  })
-
-  it('「開く」に寄せる指定を付けない（出ないときに並びが崩れるため）', () => {
-    applySessionSnapshot([meta()])
-    renderView({ compact: true })
-
-    expect(screen.getByTestId('to-session')).not.toHaveClass('ml-auto')
+  it('「開く」の文字とパスのリンクは、どちらも無くなっている', () => {
+    show(true)
+    expect(screen.queryByTestId('to-session')).toBeNull()
+    expect(screen.queryByTestId('to-project')).toBeNull()
+    expect(screen.queryByText('開く')).toBeNull()
   })
 })
 
 /**
- * 帯を3行に決め打ったこと（設計§14-1・テスト計画フェーズ6）。
+ * 帯とセッションの操作列（設計§17-1・`DESIGN.md` §39.2・§39.3）。
  *
- * # なぜ行を機械で見るのか
- *
- * **「3行に収まったか」は目でしか分からないが、「どの要素がどの行に居るか」は機械で
- * 見られる。** 見え方の良し悪しは実機に任せ、ここでは**条件付きで出るものが出ても
- * 行が増えないこと**を固定する——これは実機で毎回作れる状況ではない。
- *
- * **4行から3行になった**（要件の訂正・2026-09-01）。タブの行が消え、始末のボタンが
- * 1行目へ来て、**横並びでも1行目が出る**ようになった。
+ * **置き場所は「効く相手」で決まる。** 画面ぜんぶに効くものは帯、セッション1本に
+ * 効くものはその区画の真上。**1本しか無い画面では両者が同じ場所に見える**ので、
+ * **横並びと単独画面の両方で見る**——片方だけ見ている限り取り違えに気づけない。
  */
-describe('SessionView の帯は3行', () => {
-  function rows(): string[] {
-    return Array.from(document.querySelectorAll('[data-row]')).map(
-      (element) => element.getAttribute('data-row') ?? '',
-    )
-  }
-
+describe('SessionView の操作列は、区画の真上', () => {
   function rowOf(testId: string): string | null {
     const element = screen.queryByTestId(testId)
     return element?.closest('[data-row]')?.getAttribute('data-row') ?? null
@@ -483,110 +451,82 @@ describe('SessionView の帯は3行', () => {
     renderView({ compact })
   }
 
+  /** その目印が、操作列（＝端末と同じ列）の中に居るか */
+  function 列の中(testId: string): boolean {
+    return screen.getByTestId(testId).closest('[data-testid="session-ops"]') !== null
+  }
+
   beforeEach(() => {
     useSettingsStore.setState({ settings: settingsFixture(), loading: false })
-    useWsStore.setState({ kill: vi.fn(), archive: vi.fn() })
+    useWsStore.setState({ kill: vi.fn(), archive: vi.fn(), revive: vi.fn() })
   })
 
-  it('単独画面の帯はちょうど3行', () => {
+  it('セッションに効くものは、両方の画面で操作列の中に居る', () => {
+    /*
+      **これが §39.3 の本体。** 以前は `header`（取り合いの器の外）に居たので、
+      セッション専用画面では**サイドバーごと跨いだ全幅の帯**になっていた。
+      横並びはサイドバーが無いぶん**たまたま**区画の真上に来ていただけである。
+    */
+    for (const compact of [false, true]) {
+      show(meta({ agent_connected: true }), compact)
+      for (const 目印 of [
+        'elapsed',
+        'model-picker',
+        'permission-mode-picker',
+        'terminal-toggle',
+        'zoom-toggle',
+        'power-card',
+        'close-card',
+      ]) {
+        expect(列の中(目印), `${目印} が操作列の外に居る（compact=${compact}）`).toBe(true)
+      }
+      cleanup()
+    }
+  })
+
+  it('画面に効くものは帯に残る', () => {
     show(meta())
-    expect(rows()).toEqual(['1', '2', '3'])
+    const 帯 = screen.getByTestId('screen-bar')
+    expect(帯.querySelector('[data-testid="project-files-toggle"]')).not.toBeNull()
+    expect(帯.querySelector('[data-testid="close-session"]')).not.toBeNull()
+    // 逆に、セッションに効くものが紛れ込んでいないこと
+    expect(帯.querySelector('[data-testid="power-card"]')).toBeNull()
+    expect(帯.querySelector('[data-testid="zoom-toggle"]')).toBeNull()
   })
 
-  it('横並びでも3行（1行目は中身が違うだけ）', () => {
-    // **§2 の「1行目は出さない」を覆した。** あの行は当時パスの行だったが、
-    // いまは「行き先と始末の行」なので、横並びにも要る（設計§14-1）
+  it('横並びでは帯そのものを描かない（空の段を作らない）', () => {
+    // サイドバー・PJT 名・✕ はどれも横並びでは出さないので、**中身が1つも残らない**
+    // （`DESIGN.md` §39.4）。**§14-1「横並びでも1行目を出す」の撤回**
     show(meta(), true)
-    expect(rows()).toEqual(['1', '2', '3'])
+    expect(screen.queryByTestId('screen-bar')).toBeNull()
+    expect(screen.getByTestId('session-ops')).toBeInTheDocument()
   })
 
-  it('どの要素がどの行に居るかが決まっている', () => {
+  it('操作列はちょうど2行で、どこに何が居るかが決まっている', () => {
     show(meta({ agent_connected: true }))
+    const ops = screen.getByTestId('session-ops')
+    expect(ops.querySelectorAll('[data-row]')).toHaveLength(2)
 
-    expect(rowOf('project-files-toggle')).toBe('1')
-    expect(rowOf('to-project')).toBe('1')
+    expect(rowOf('elapsed')).toBe('1')
+    expect(rowOf('terminal-toggle')).toBe('1')
+    expect(rowOf('zoom-toggle')).toBe('1')
     expect(rowOf('power-card')).toBe('1')
     expect(rowOf('close-card')).toBe('1')
-    expect(rowOf('close-session')).toBe('1')
-    expect(rowOf('model-picker')).toBe('3')
-    expect(rowOf('permission-mode-picker')).toBe('3')
-    expect(rowOf('terminal-toggle')).toBe('3')
+    expect(rowOf('model-picker')).toBe('2')
+    expect(rowOf('permission-mode-picker')).toBe('2')
   })
 
-  it('横並びの1行目は、左端が「開く」で右端が始末', () => {
-    // **「移る」と「消す」を反対の端に置く**（設計§2 の原則はそのまま生きている）。
-    // パス・サイドバー・✕ は出ない
-    show(meta(), true)
-
-    expect(rowOf('to-session')).toBe('1')
-    expect(rowOf('close-card')).toBe('1')
-    expect(screen.queryByTestId('to-project')).toBeNull()
-    expect(screen.queryByTestId('project-files-toggle')).toBeNull()
-    expect(screen.queryByTestId('close-session')).toBeNull()
-
-    const 行 = screen.getByTestId('to-session').closest('[data-row="1"]')
-    const 中身 = Array.from(行!.children)
-    expect(中身[0]).toHaveAttribute('data-testid', 'to-session')
-    // 右端は始末の群。**横並びでは ✕ を出さない**ので、末尾はゴミ箱になる
-    const 右端 = Array.from(
-      中身[中身.length - 1].querySelectorAll('button'),
-    ).map((b) => b.dataset.testid)
-    expect(右端).toEqual(['power-card', 'close-card'])
+  it('操作の群は、間隔で2つに分かれている', () => {
+    // 左は「見せ方を変える」、右は「始末する」（設計§17-6）。
+    // **押し間違えたときの取り返しの付かなさが違う**
+    show(meta({ agent_connected: true }))
+    const 始末 = screen.getByTestId('power-card').parentElement
+    expect(始末?.className).toContain('ml-')
+    expect(始末?.querySelector('[data-testid="close-card"]')).not.toBeNull()
+    expect(始末?.querySelector('[data-testid="terminal-toggle"]')).toBeNull()
   })
 
-  it('フック未受信が出ても行が増えない（2行目に収まる）', () => {
-    show(meta({ status: { kind: 'unknown' }, hooks_seen: false }))
-    expect(rowOf('hook-warning')).toBe('2')
-    expect(rows()).toEqual(['1', '2', '3'])
-  })
-
-  it('復旧が出ても行が増えない（3行目に収まる）', () => {
-    show(
-      meta({
-        agent_connected: false,
-        claude_session_id: '22222222-2222-2222-2222-222222222222',
-      }),
-    )
-    // **起こし直す道は1行目へ移った**（設計§15-1）。3行目に残るのはモードの札だけ
-    expect(rowOf('power-card')).toBe('1')
-    expect(rows()).toEqual(['1', '2', '3'])
-  })
-
-  it('更新間隔も3行目（ターミナルの話なので、トグルの隣）', () => {
-    useSettingsStore.setState({
-      settings: settingsFixture({
-        intervals: {
-          sync_interval_secs: 20,
-          screen_interval_ms: 20_000,
-          scrollback_lines: 1000,
-        },
-      }),
-      loading: false,
-    })
-    show(meta({ agent_id: 'agent-1' }), true)
-
-    expect(rowOf('screen-interval')).toBe('3')
-    expect(rows()).toEqual(['1', '2', '3'])
-  })
-
-  it('スリープしたカードでは、起こし直しのモードの札だけが3行目に残る', () => {
-    show(
-      meta({
-        status: { kind: 'ended', ok: true },
-        agent_connected: false,
-        claude_session_id: '22222222-2222-2222-2222-222222222222',
-      }),
-    )
-
-    // **札はボタンに付いて動かさない**（設計§15-1）。3行目はモデルとモードの行
-    // なので、モードの話はこちらに居るのが筋——動かすと2つの行に割れる
-    expect(screen.queryByTestId('model-picker')).toBeNull()
-    expect(rowOf('revive-mode')).toBe('3')
-    expect(rowOf('power-card')).toBe('1')
-    expect(rows()).toEqual(['1', '2', '3'])
-  })
-
-  it('条件付きのものが重なっても行が増えない', () => {
+  it('条件付きのものが重なっても、行が増えない', () => {
     show(
       meta({
         status: { kind: 'unknown' },
@@ -597,34 +537,23 @@ describe('SessionView の帯は3行', () => {
     )
     expect(screen.getByTestId('hook-warning')).toBeInTheDocument()
     expect(screen.getByTestId('power-card')).toHaveAttribute('data-power', 'off')
-    expect(rows()).toEqual(['1', '2', '3'])
+    expect(
+      screen.getByTestId('session-ops').querySelectorAll('[data-row]'),
+    ).toHaveLength(2)
   })
 
   it('最終活動の表記が変わっても、行の数も所属も変わらない', () => {
-    const 経過 = [0, 30_000, 3 * 60_000, 12 * 86_400_000]
-    for (const 差 of 経過) {
-      clearSessions()
-      applySessionSnapshot([meta({ last_activity_at: NOW - 差 })])
-      const { unmount } = renderView()
-      expect(rows(), `経過 ${差}ms で行が変わった`).toEqual(['1', '2', '3'])
-      unmount()
+    // **放っておくだけで文字数が変わる唯一の要素**（このイシューの3件目）
+    for (const 差 of [0, 30_000, 3 * 60_000, 12 * 86_400_000]) {
+      show(meta({ last_activity_at: NOW - 差 }))
+      expect(
+        screen.getByTestId('session-ops').querySelectorAll('[data-row]'),
+      ).toHaveLength(2)
+      expect(rowOf('elapsed')).toBe('1')
+      cleanup()
     }
   })
-
-  it('モデルとモードは同じ幅で、ラベルの文字を出さない', () => {
-    show(meta({ agent_connected: true, permission_mode: 'default' }))
-
-    const モデル = screen.getByTestId('model-picker')
-    const モード = screen.getByTestId('permission-mode-picker')
-    expect(モデル).toHaveClass('w-32')
-    expect(モード).toHaveClass('w-32')
-    expect(モデル).not.toHaveTextContent('モデル')
-    expect(モード).not.toHaveTextContent('モード')
-    expect(モデル).toHaveAttribute('aria-label', 'モデル')
-    expect(モード).toHaveAttribute('aria-label', '権限モード')
-  })
 })
-
 describe('SessionView のターミナルのトグル', () => {
   function show(compact = false) {
     clearSessions()
@@ -711,21 +640,19 @@ describe('SessionView の ✕（閉じる）', () => {
     )
   })
 
-  it('いちばん右に置き、始末の2つとは間隔で分ける', () => {
+  it('帯にはこれだけが残る（始末のボタンは操作列へ移った）', () => {
     /*
-      **§14-6 の「形で分ける」はもう効かない。** 訂正その2で3つとも記号に
-      なったので（設計§15-2）、代わりに**間隔**で群を作る——電源とゴミ箱は
-      カードに効き、✕ は画面に効く。押し間違えても何も壊れない側が端に居る。
+      **§15-2 の「間隔で分ける」は、分ける場所が移った**（設計§17-6・§17-7）。
+      電源とゴミ箱は**セッションに効く**ので操作列へ、✕ は**画面に効く**ので帯に残る
+      ——`DESIGN.md` §39.2「操作は、それが効く相手と同じ入れ子に置く」。
     */
     show()
-    const 行 = screen.getByTestId('close-session').closest('[data-row="1"]')
-    const 並び = Array.from(行!.querySelectorAll('button')).map(
+    const 帯 = screen.getByTestId('screen-bar')
+    const 並び = Array.from(帯.querySelectorAll('button')).map(
       (b) => b.dataset.testid,
     )
-    expect(並び.slice(-3)).toEqual(['power-card', 'close-card', 'close-session'])
-    // ✕ の前だけ間隔が空いている（`ml-2`）
-    expect(screen.getByTestId('close-session').className).toContain('ml-2')
-    expect(screen.getByTestId('close-card').className).not.toContain('ml-2')
+    expect(並び).toEqual(['project-files-toggle', 'close-session'])
+    expect(screen.getByTestId('close-session').className).toContain('ml-auto')
   })
 })
 

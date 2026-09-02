@@ -87,7 +87,7 @@ export function GroupView({ host, project }: Props) {
       data-testid="group-view"
       data-project={project}
       data-host={host}
-      className="flex min-h-0 flex-1 flex-col gap-3"
+      className="flex min-h-0 flex-1 flex-col gap-1 md:gap-2"
     >
       {/*
         **セッション専用画面の1行目と同じ骨格にする**（設計§16-1）。

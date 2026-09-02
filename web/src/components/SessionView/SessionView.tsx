@@ -18,7 +18,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react'
-import { Link, useLocation, useNavigate } from 'react-router'
+import { useLocation, useNavigate } from 'react-router'
 import { Button } from '@/components/ui/button'
 import { InputDock } from '@/components/InputDock/InputDock'
 import { ModelPicker } from '@/components/ModelPicker/ModelPicker'
@@ -114,274 +114,83 @@ export function SessionView({ cardId, compact = false }: Props) {
       data-card-id={session.card_id}
       data-status={session.status.kind}
       data-view={view}
-      className={`flex min-h-0 flex-col gap-2 ${
+      className={`flex min-h-0 flex-col gap-1 ${
         compact ? 'w-[42rem] shrink-0' : 'min-w-0 flex-1'
       }`}
     >
       {/*
-        **4行に決め打つ。行の中では折り返さない**（設計§2）。
+        **画面の帯**（設計§17-1・`DESIGN.md` §39.2）。ここに置くのは
+        **画面ぜんぶに効くもの**だけ——サイドバーの開閉・PJT の名前・閉じる。
 
-        以前は `flex-wrap` の1行に10個以上を詰めて折り返しに任せていた。どこで折れるかが
-        幅次第だと、**行数も、どれとどれが同じ行に来るかも、そのつど変わる**——狭い画面ほど
-        行が増えて本文の高さを削り、しかも**最終活動の文字数が変わっただけで行が入れ替わる**
-        （`たった今` と `5秒前` の2文字差で 1行⇄2行。実測）。下の本文ごと上下に動くので、
-        読んでいる場所が逃げる。
+        **セッションに効くものは、下の列の中へ移した。** `header` は取り合いの器の
+        **外**なので、ここへ置くと**サイドバーごと跨いだ全幅の帯**になる。横並びでは
+        サイドバーが無いぶん**たまたま**区画の真上に来ていた——**揃っていたのは偶然**で、
+        1本しか無い画面では「区画の真上」と「画面の帯」が同じ場所に見えるため、
+        **2つ並べて初めて分かる**（§39.2）。
 
-        **折り返しは置き忘れではなく防具だった。** はみ出したままだとページの横幅が画面より
-        広くなり、狭い窓のサイドバー（`fixed`）の右端が画面の外へ出る。**外すぶんは、行ごとに
-        「溢れたとき何が縮むか」を決めて埋める**（1行目はパスの前半、2行目はフック未受信。
-        3行目と4行目は固定幅しか無いので、そもそも溢れさせない）。
-
-        **4行目はここに無い。** タブの行はサイドバーより下の「中身の列」に居るので、
-        あれがそのまま4行目になる。上へ移すと、広い窓でサイドバーの上に跨ってしまう。
+        **横並びでは描かない。** 上の3つはどれも横並びでは出さないので、**中身が1つも
+        残らない**。`DESIGN.md` §39.4 が「**空の段を作らない**」と決めているので、器ごと落とす。
+        **これは §14-1「横並びでも1行目を出す」の撤回**にあたる——あの行を出したのは
+        「始末のボタンと『開く』の置き場所がそこしか無かった」ためで、**その理由ごと消えた**。
       */}
-      <header
-        className="flex flex-col gap-1 text-sm"
-        data-quiet={quiet === 'lively' ? undefined : quiet}
-      >
-        {/*
-          **1行目は単独画面だけ**（設計§2）。横並びではパスが全カードで同じで、
-          `GroupView` の見出しにも既に出ている。判定は既存の `compact` でできる
-        */}
-        {/*
-          **1行目は「行き先と始末の行」**（設計§14-1）。**横並びでも出す**——始末の
-          ボタンと「開く」の置き場所がここしか無いため。出さないのは**パスと
-          サイドバーと ✕** の3つで、どれも横並びでは意味を持たない。
-
-          **左が「移る」、右が「消す」。** 反対の端に置く原則は §2 のまま生きている。
-        */}
-        <div data-row="1" className="flex min-w-0 items-center gap-2">
-          {!compact && <FilesToggle open={filesOpen} onToggle={toggleFiles} />}
-          {compact ? (
-            /*
-              横並びの区画から、そのセッションの専用画面へ移る（設計§4）。
-              **`ml-auto` を付けない**——出たり消えたりする要素に寄せる指定を付けると、
-              出ないときに寄せ先ごと消えて並びが崩れる
-            */
-            <Link
-              to={sessionPath(session.card_id)}
-              data-testid="to-session"
-              className="text-primary shrink-0 text-xs underline"
-            >
-              開く
-            </Link>
-          ) : (
-            /*
-              **押すと PJT 専用画面へ移る**（`v0.1.53`）。器を1つも足さないのは、
-              置く先に空き余白が無いため。
-
-              **出すのは名前だけ**（設計§14-5）。この行には始末のボタンも並ぶので、
-              パスの長さに幅を明け渡せない。**フルパスは `title` に残す。**
-            */
-            <Link
-              to={projectPath(host, session.project)}
-              data-testid="to-project"
-              className="decoration-muted-foreground/40 hover:decoration-foreground min-w-0 truncate font-medium underline underline-offset-2"
-              title={session.project}
-            >
-              {名前}
-            </Link>
-          )}
+      {!compact && (
+        <header
+          data-testid="screen-bar"
+          className="flex min-w-0 items-center gap-2 text-sm"
+        >
+          <FilesToggle open={filesOpen} onToggle={toggleFiles} />
 
           {/*
-            **始末の2つ**（設計§14-2・§15-1）。送るものは変わっていない。
-
-            | ボタン | 送るもの |
-            |---|---|
-            | **電源** | 点いていれば `Kill`（止めるだけ）／消えていれば `Revive`（起こす） |
-            | **ゴミ箱**（終了） | `Archive`（カードを一覧から外す） |
-
-            **電源が1つで済むのは偶然ではない。** 「スリープが出る条件」と
-            「復旧が出る条件」は互いの否定そのもの（`reviveState` の `live` が
-            `走っている && 繋がっている`）なので、**常にどちらか片方しか出ていない**。
-
-            **ゴミ箱はいつでも押せる。** 届かないカードを一覧から外す道が、ここしか無い。
-
-            **並びは「カードに効くもの」→ 間隔 →「画面に効くもの」**（設計§15-2）。
-            §14-6 は ✕ との取り違えを「アイコンと文字」で分けていたが、**訂正で
-            3つとも記号になった**ので、代わりに**間隔と大きさ**で群を作る。
+            **押せない見出しに戻した**（設計§17-3）。移る手段は切替ボタンへ出て行った
+            ので、ここは PJT 専用画面の見出しと**同じ役割**になる——§16-2 が
+            「同じ文字列を違う役割のまま出す」と但し書きしていたが、**その但し書きごと
+            要らなくなった**。**出すのは名前だけ**（設計§14-5）。フルパスは `title` に残す。
           */}
-          <div className="ml-auto flex shrink-0 items-center gap-1.5">
-            <PowerButton
-              on={revivable.kind === 'live'}
-              state={revivable.kind}
-              busy={reviving}
-              why={reviveWhy}
-              onPress={() => {
-                if (revivable.kind === 'live') {
-                  kill(session.card_id)
-                  return
-                }
-                revive(session.card_id)
-              }}
-            />
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              data-testid="close-card"
-              aria-label="終了"
-              title="カードを一覧から外します（履歴は残ります）"
-              onClick={() => {
-                // **カードを外したら書きかけも忘れる。** 残すと、二度と開かない相手の
-                // 下書きが積み上がる（十字ボタン設計§11）
-                dropDraft(session.card_id, account)
-                archive(session.card_id)
-                // カードが無くなるので、その画面に留まる意味が無い
-                if (!compact) {
-                  navigate(HOME)
-                }
-              }}
-            >
-              <TrashIcon />
-            </Button>
-            {/*
-              **✕ はいちばん右**（設計§14-6）。**押し間違えても何も壊れない側を端に置く**。
-
-              **「形で分ける」はもう効かない**（訂正その2で3つとも記号になった）ので、
-              代わりに**間隔と大きさで分ける**（設計§15-2）——電源とゴミ箱は 28px で
-              近く、✕ だけ 32px で `ml-2` ぶん離す。**カードに効くもの**と
-              **画面に効くもの**の境目が、そこにある。
-            */}
-            {!compact && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                data-testid="close-session"
-                aria-label="閉じる"
-                title="閉じる"
-                className="ml-2 shrink-0"
-                onClick={() => {
-                  // **三項演算子で1回にまとめない。** `navigate` の2つのオーバーロード
-                  // （行き先 / 何個戻るか）に `string | number` は当たらず、`tsc -b` で落ちる
-                  if (backTargetFor(location.key) === 'back') {
-                    navigate(-1)
-                    return
-                  }
-                  navigate(HOME)
-                }}
-              >
-                <svg
-                  aria-hidden
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth={2}
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d="M18 6 6 18" />
-                  <path d="m6 6 12 12" />
-                </svg>
-              </Button>
-            )}
-          </div>
-        </div>
-
-        {/*
-          **2行目は状態の行**（設計§2）。縮んでよいのはフック未受信だけで、
-          状態のラベルと最終活動は縮ませない——**いちばん読みたいものが「入力 待ち」と
-          縦に割れる**壊れ方を、初期実装のフェーズ4で実測している
-        */}
-        <div data-row="2" className="flex items-center gap-2">
-          <span
-            aria-hidden
-            className={`size-2.5 shrink-0 rounded-full ${statusTone(session.status)}`}
-          />
-          {/*
-            `ended` は「消息不明」1本（設計§6）。**正常に終わったのか落ちたのかは
-            `title` に回してある**——捨てたのではなく、置き場所を移しただけ
-          */}
-          <span
-            className="text-muted-foreground shrink-0"
-            title={statusDetail(session.status)}
+          <h2
+            data-testid="project-name"
+            className="min-w-0 truncate font-medium"
+            title={session.project}
           >
-            {statusLabel(session.status)}
-          </span>
+            {名前}
+          </h2>
+
           {/*
-            **この行で唯一、放っておくだけで文字数が変わる要素。** 1秒ごとに数え直すので、
-            行の中で折り返す作りだと**画面を見ているだけで行数が入れ替わる**（設計§2）
+            **✕ は画面を閉じる操作**なので帯に残る（設計§17-6）。セッションに効く
+            ものと同じ列へ混ぜない——**効く相手が違う**（§39.2）。
           */}
-          <span
-            data-testid="elapsed"
-            className="text-muted-foreground shrink-0 text-xs"
-          >
-            最終活動 {formatElapsed(now - session.last_activity_at)}
-          </span>
-          {isHookSilent(session) && (
-            <span
-              data-testid="hook-warning"
-              className="min-w-0 truncate text-xs text-amber-400"
-            >
-              フック未受信
-            </span>
-          )}
-        </div>
-
-        {/*
-          **3行目は「そのセッションをどう動かすか」の行**（設計§2）。
-
-          終了しているときはモデルとモードのピッカーが消えるので、**そこが空くのと
-          入れ替わりに**起こし直しのモードのバッジと `復旧` が入る。したがってこの行は
-          どの状態でも空にならない——**4行が3行に化けない**
-        */}
-        <div data-row="3" className="flex items-center gap-2">
-          {/*
-            モードとモデルは小窓とセッション画面の両方に出す（要件）。ここは切替も兼ねる。
-            並びは モデル → モード。モデルのほうが長い文字列になるので、
-            幅の変動を右端の固定幅ボタンから遠ざける
-          */}
-          {!isEnded(session.status) && (
-            <>
-              <ModelPicker cardId={session.card_id} />
-              <PermissionModePicker cardId={session.card_id} />
-            </>
-          )}
-          {/*
-            **起こし直すボタンは1行目の電源へ移った**（設計§15-1）。ここに残るのは
-            **どのモードで起こすか**の札だけである——3行目はモデルとモードの行なので、
-            モードの話はこちらに居るのが筋。ボタンに付いて動かすと、モードの話が
-            2つの行に割れる。
-
-            押す前に権限モードを見せる（要件）。**終了したカードではピッカーが出ない**
-            ので、そのときだけ静的な札で補う——実機の記録では23枚とも
-            `bypassPermissions` だった（復旧設計§15-4）ので、これは飾りではない。
-          */}
-          {revivable.kind !== 'live' &&
-            isEnded(session.status) &&
-            session.permission_mode !== null && (
-              <span
-                data-testid="revive-mode"
-                data-mode={session.permission_mode}
-                className={`shrink-0 rounded border px-1.5 py-0.5 text-[0.7rem] ${permissionModeTone(session.permission_mode)}`}
-                title="このモードで起こし直します"
-              >
-                {permissionModeLabel(session.permission_mode)}
-              </span>
-            )}
-          {/*
-            **タブをやめてトグルにした**（設計§14-3）。2つの器が並ぶより1つの
-            スイッチのほうが簡単で、**行を1つ丸ごと減らせる**。
-
-            **既定は切れている＝構造化ビュー。** 別イシューで予定している
-            「既定を構造化ビューにする」と噛み合う（横並びだけは入った状態で始まる）。
-
-            **更新間隔もこの行へ。** ターミナルの話なので、トグルの隣が意味のまとまりに合う。
-          */}
-          <div className="ml-auto flex shrink-0 items-center gap-2">
-            <ScreenInterval
-              remote={session.agent_id !== null}
-              shown={view === 'terminal'}
-            />
-            <TerminalToggle
-              on={view === 'terminal'}
-              onToggle={() =>
-                setView(view === 'terminal' ? 'transcript' : 'terminal')
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            data-testid="close-session"
+            aria-label="閉じる"
+            title="閉じる"
+            className="ml-auto shrink-0"
+            onClick={() => {
+              // **三項演算子で1回にまとめない。** `navigate` の2つのオーバーロードに
+              // `string | number` は当たらず、`tsc -b` で落ちる
+              if (backTargetFor(location.key) === 'back') {
+                navigate(-1)
+                return
               }
-            />
-          </div>
-        </div>
-      </header>
+              navigate(HOME)
+            }}
+          >
+            <svg
+              aria-hidden
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M18 6 6 18" />
+              <path d="m6 6 12 12" />
+            </svg>
+          </Button>
+        </header>
+      )}
 
       {/*
         断りはそのカードに出す（設計§9-5）。画面全体の帯へ出すと、横並びのときに
@@ -426,7 +235,185 @@ export function SessionView({ cardId, compact = false }: Props) {
           **格子の幅（720px）がこの列の下限になり、ページ全体が横へ広がる**——狭い画面では
           帯も入力欄も一緒に流れることになり、窓にした意味が消える（実測で踏んだ）。
         */}
-        <div className="relative isolate flex min-h-0 min-w-0 flex-1 flex-col gap-2">
+        <div className="relative isolate flex min-h-0 min-w-0 flex-1 flex-col gap-1.5">
+        {/*
+          **セッションに効く行は、端末／履歴と同じ列の中に置く**（設計§17-1・
+          `DESIGN.md` §39.3）。
+
+          **以前は `header` に居た。** あそこは取り合いの器の**外**なので、
+          セッション専用画面では**サイドバーごと跨いだ全幅の帯**になっていた。
+          横並びはサイドバーが無いぶん**たまたま**区画の真上に来ていただけで、
+          **揃っていたのは偶然**である。
+
+          **`compact` で分岐して置き場所を変えない**（§39.3）。分岐で辻褄を合わせると、
+          次に片方だけ触った人がまた食い違わせる。
+        */}
+        <div
+          data-testid="session-ops"
+          className="flex flex-col gap-0.5 text-sm"
+          data-quiet={quiet === 'lively' ? undefined : quiet}
+        >
+          {/*
+            **2行目は状態の行**（設計§2）。縮んでよいのはフック未受信だけで、
+            状態のラベルと最終活動は縮ませない——**いちばん読みたいものが「入力 待ち」と
+            縦に割れる**壊れ方を、初期実装のフェーズ4で実測している
+          */}
+          <div data-row="1" className="flex items-center gap-2">
+            <span
+              aria-hidden
+              className={`size-2.5 shrink-0 rounded-full ${statusTone(session.status)}`}
+            />
+            {/*
+              `ended` は「消息不明」1本（設計§6）。**正常に終わったのか落ちたのかは
+              `title` に回してある**——捨てたのではなく、置き場所を移しただけ
+            */}
+            <span
+              className="text-muted-foreground shrink-0"
+              title={statusDetail(session.status)}
+            >
+              {statusLabel(session.status)}
+            </span>
+            {/*
+              **この行で唯一、放っておくだけで文字数が変わる要素。** 1秒ごとに数え直すので、
+              行の中で折り返す作りだと**画面を見ているだけで行数が入れ替わる**（設計§2）
+            */}
+            <span
+              data-testid="elapsed"
+              className="text-muted-foreground shrink-0 text-xs"
+            >
+              最終活動 {formatElapsed(now - session.last_activity_at)}
+            </span>
+            {isHookSilent(session) && (
+              <span
+                data-testid="hook-warning"
+                className="min-w-0 truncate text-xs text-amber-400"
+              >
+                フック未受信
+              </span>
+            )}
+
+            {/*
+              **操作の群**（設計§17-6）。左から **トグル → 拡大／縮小 →（間隔）→
+              電源 → 終了**。**間隔で2つに分ける**——左は「見せ方を変える」、右は
+              「始末する」で、**押し間違えたときの取り返しの付かなさが違う**
+              （§15-2 と同じ作法。分ける場所が帯からこの列へ移っただけ）。
+
+              **状態の行に置いてある。** モデルとモードの行は 8rem が2つで既に埋まって
+              おり、そこへ4つ足すと狭い画面で溢れる。**状態の文字は短い**ので、こちらが空く。
+            */}
+            <div className="ml-auto flex shrink-0 items-center gap-1.5">
+              <TerminalToggle
+                on={view === 'terminal'}
+                onToggle={() =>
+                  setView(view === 'terminal' ? 'transcript' : 'terminal')
+                }
+              />
+              <ZoomToggle
+                compact={compact}
+                onPress={() => {
+                  if (compact) {
+                    navigate(sessionPath(session.card_id))
+                    return
+                  }
+                  navigate(projectPath(host, session.project))
+                }}
+              />
+              <div className="ml-1.5 flex shrink-0 items-center gap-1.5">
+                <PowerButton
+                  on={revivable.kind === 'live'}
+                  state={revivable.kind}
+                  busy={reviving}
+                  why={reviveWhy}
+                  onPress={() => {
+                    if (revivable.kind === 'live') {
+                      kill(session.card_id)
+                      return
+                    }
+                    revive(session.card_id)
+                  }}
+                />
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  data-testid="close-card"
+                  aria-label="終了"
+                  title="カードを一覧から外します（履歴は残ります）"
+                  onClick={() => {
+                    // **カードを外したら書きかけも忘れる。** 残すと、二度と開かない
+                    // 相手の下書きが積み上がる（十字ボタン設計§11）
+                    dropDraft(session.card_id, account)
+                    archive(session.card_id)
+                    // カードが無くなるので、その画面に留まる意味が無い
+                    if (!compact) {
+                      navigate(HOME)
+                    }
+                  }}
+                >
+                  <TrashIcon />
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          {/*
+            **3行目は「そのセッションをどう動かすか」の行**（設計§2）。
+
+            終了しているときはモデルとモードのピッカーが消えるので、**そこが空くのと
+            入れ替わりに**起こし直しのモードのバッジと `復旧` が入る。したがってこの行は
+            どの状態でも空にならない——**4行が3行に化けない**
+          */}
+          <div data-row="2" className="flex items-center gap-2">
+            {/*
+              モードとモデルは小窓とセッション画面の両方に出す（要件）。ここは切替も兼ねる。
+              並びは モデル → モード。モデルのほうが長い文字列になるので、
+              幅の変動を右端の固定幅ボタンから遠ざける
+            */}
+            {!isEnded(session.status) && (
+              <>
+                <ModelPicker cardId={session.card_id} />
+                <PermissionModePicker cardId={session.card_id} />
+              </>
+            )}
+            {/*
+              **起こし直すボタンは1行目の電源へ移った**（設計§15-1）。ここに残るのは
+              **どのモードで起こすか**の札だけである——3行目はモデルとモードの行なので、
+              モードの話はこちらに居るのが筋。ボタンに付いて動かすと、モードの話が
+              2つの行に割れる。
+
+              押す前に権限モードを見せる（要件）。**終了したカードではピッカーが出ない**
+              ので、そのときだけ静的な札で補う——実機の記録では23枚とも
+              `bypassPermissions` だった（復旧設計§15-4）ので、これは飾りではない。
+            */}
+            {revivable.kind !== 'live' &&
+              isEnded(session.status) &&
+              session.permission_mode !== null && (
+                <span
+                  data-testid="revive-mode"
+                  data-mode={session.permission_mode}
+                  className={`shrink-0 rounded border px-1.5 py-0.5 text-[0.7rem] ${permissionModeTone(session.permission_mode)}`}
+                  title="このモードで起こし直します"
+                >
+                  {permissionModeLabel(session.permission_mode)}
+                </span>
+              )}
+            {/*
+              **タブをやめてトグルにした**（設計§14-3）。2つの器が並ぶより1つの
+              スイッチのほうが簡単で、**行を1つ丸ごと減らせる**。
+
+              **既定は切れている＝構造化ビュー。** 別イシューで予定している
+              「既定を構造化ビューにする」と噛み合う（横並びだけは入った状態で始まる）。
+
+              **更新間隔もこの行へ。** ターミナルの話なので、トグルの隣が意味のまとまりに合う。
+            */}
+            {/* **更新間隔だけが残る。** ボタンは1行目の操作の群へ移った（設計§17-6） */}
+            <div className="ml-auto shrink-0">
+              <ScreenInterval
+                remote={session.agent_id !== null}
+                shown={view === 'terminal'}
+              />
+            </div>
+          </div>
+        </div>
         {/* 表示していない側もマウントしたまま隠す（作り直さないため） */}
         <div className={`flex min-h-0 flex-1 flex-col ${view === 'transcript' ? '' : 'hidden'}`}>
           <TranscriptTree key={session.card_id} cardId={session.card_id} />
@@ -589,6 +576,70 @@ function PowerButton({
   )
 }
 
+/**
+ * 画面の行き来を1つにしたボタン（設計§17-3）。**動画プレイヤーの全画面ボタンと同じ形。**
+ *
+ * | いま居る画面 | 印 | 押すと |
+ * |---|---|---|
+ * | PJT 専用画面（`compact`） | **拡大**（四隅へ開く） | そのセッションの専用画面へ |
+ * | セッション専用画面 | **縮小**（四隅から閉じる） | その PJT の専用画面へ |
+ *
+ * **2つの状態は向きだけで分ける。** 色や器を変えると**同じボタンだと分からなくなる**
+ * ——利用者が探すのは「行き来するボタン」1つであって、2種類のボタンではない。
+ *
+ * **`backTargetFor` は使わない。** あれは「戻る先が在るか」を見るものだが、
+ * こちらは**常に決まった相手へ行く**。履歴の状態に依らない。
+ */
+function ZoomToggle({
+  compact,
+  onPress,
+}: {
+  /** 横並び（PJT 専用画面）に居るか。居るなら「拡大」 */
+  compact: boolean
+  onPress: () => void
+}) {
+  const 言葉 = compact ? 'このセッションを大きく見る' : 'この PJT の画面へ戻る'
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon-sm"
+      data-testid="zoom-toggle"
+      data-zoom={compact ? 'in' : 'out'}
+      aria-label={言葉}
+      title={言葉}
+      className="shrink-0"
+      onClick={onPress}
+    >
+      <svg
+        aria-hidden
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={2}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        {compact ? (
+          <>
+            <path d="M8 3H5a2 2 0 0 0-2 2v3" />
+            <path d="M21 8V5a2 2 0 0 0-2-2h-3" />
+            <path d="M3 16v3a2 2 0 0 0 2 2h3" />
+            <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+          </>
+        ) : (
+          <>
+            <path d="M8 3v3a2 2 0 0 1-2 2H3" />
+            <path d="M21 8h-3a2 2 0 0 1-2-2V3" />
+            <path d="M3 16h3a2 2 0 0 1 2 2v3" />
+            <path d="M16 21v-3a2 2 0 0 1 2-2h3" />
+          </>
+        )}
+      </svg>
+    </Button>
+  )
+}
+
 /** 「終了」の印（設計§15-2）。**言葉は `aria-label` と `title` に残してある** */
 function TrashIcon() {
   return (
@@ -624,23 +675,36 @@ function TerminalToggle({
       aria-checked={on}
       data-testid="terminal-toggle"
       onClick={onToggle}
+      aria-label="ターミナルで見る"
       title="ターミナルで見る"
       /*
-        **上下の余白を持たない**（設計§15-3）。溝そのものが高さを持つので、
-        ここにも余白を付けると 1.3倍にしたときに3行目が伸びる。
+        **文字を落とした**（設計§17-4）。何のトグルかは**レールの絵**が言う。
+        言葉は `aria-label` と `title` に残す——色も絵も読み上げられない。
       */
-      className={`termswitch flex shrink-0 items-center gap-1.5 rounded-md px-1.5 text-xs transition-colors ${
-        on ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'
-      }`}
+      className="termswitch flex shrink-0 items-center rounded-md"
     >
       {/*
-        溝とつまみ。**大きさと位置は `controls.css` が持つ**——「入っている位置
-        だけは 1.3倍ではない」理由を、数字のすぐ隣に書いておきたいため。
+        溝・つまみ・絵。**大きさと位置は `controls.css` が持つ**。
+
+        **絵はつまみに隠れていない側に出る**（`参考/トグル.png` の方式）。太陽と月の
+        トグルと同じで、**入っているときだけ**、つまみが右へ寄って空いた左側に現れる。
       */}
       <span aria-hidden className="termswitch-track">
+        <svg
+          className="termswitch-mark"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={2.5}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          {/* **`>` とカーソルの2要素まで削ってある**（小さく置くため。§18.2） */}
+          <path d="M5 7l5 5-5 5" />
+          <path d="M13 17h6" />
+        </svg>
         <span className="termswitch-knob" />
       </span>
-      ターミナル
     </button>
   )
 }

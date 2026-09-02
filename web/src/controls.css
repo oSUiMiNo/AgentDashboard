@@ -18,14 +18,18 @@
 
 :root {
   /*
-    電源が入っている印。`DESIGN.md` §11.2 の Positive（`#8FD14F`）。
+    電源が入っている印。`DESIGN.md` §11.2 の **Primary Accent（`#3DD9E6`）**。
 
-    **これは状態の色ではない。** 状態は2行目の●が5値で言っている（走っている＝
-    シアン）。ここが言うのは「実体があるか」という2値だけで、**別の軸**である
-    （設計§15-1）。ライムはこれまでどの状態にも当たっていなかった色で、
-    `STATUS_TONES.positive` が「出す場面が来たら使う」として空けてあった。
+    **かつてライム（Positive）だった。** 「状態の●とは別の軸を指しているのだから、
+    別の色でよい」と整理していたが、**それは色を分ける理由にならない**（同 §11.2 の
+    判定・設計§17-5）——**軸の数は作る側の都合で、読む側の手掛かりにはならない**。
+    ●も輪も「走っている」という**同じ言葉で説明できる**ので、同じ色にする。
+
+    **同じ色になっても混ざらない。** 電源は設計§17-1 で**帯から操作列へ移った**ので、
+    ●とは**位置で**分かれる——「分けたいなら、色ではなく形か位置で」がそのまま効いている。
+    **だから色の変更と場所の移動は、同じ版で入れる。**
   */
-  --power-lit: #8fd14f;
+  --power-lit: #3dd9e6;
 }
 
 /* --- 電源ボタン（設計§15-1） ------------------------------------------- */
@@ -91,7 +95,7 @@
     transform 80ms ease;
 }
 
-/* 点灯。**輪が緑であることが点灯であって、光を撒くことではない**（同 §27.1） */
+/* 点灯。**輪がシアンであることが点灯であって、光を撒くことではない**（同 §27.1） */
 .power[data-power='on'] {
   --power-ring: var(--power-lit);
   --power-ink: var(--color-foreground);
@@ -164,12 +168,17 @@
   flex: none;
   align-items: center;
   /*
-    いまの 1.3倍（16 × 28px → 20.8 × 36.4px）。**上下の余白は持たせない**——
-    溝そのものが高さを持つので、ボタン側にも余白を付けると3行目が伸びる
-    （設計§15-3）。
+    **文字を落としたぶん、さらに大きくした**（設計§17-4）。§15-3 で 1.3倍
+    （16 × 28px → 20.8 × 36.4px）にしたところから、**25.6 × 44.8px** へ。
+
+    **狙いは絵が読めること。** 文字が消えた以上、何のトグルかを言うのは絵だけになる
+    ——小さくすると `DESIGN.md` §18.2 の下限を割り、**文字を落とした意味が消える**。
+
+    **上下の余白は持たせない**（同 §15-3）。溝そのものが高さを持つので、ボタン側にも
+    付けると行が伸びる。**行が伸びないことは E2E が見張っている。**
   */
-  inline-size: 2.275rem;
-  block-size: 1.3rem;
+  inline-size: 2.8rem;
+  block-size: 1.6rem;
   border-radius: 9999px;
   border: 1px solid var(--color-border);
   background: color-mix(in oklch, var(--color-muted) 55%, transparent);
@@ -185,13 +194,45 @@
   面で出す」）。**グラデーションは面の中の差にとどめる**（同 §11.4「主役にしない」）。
   紫青は使わない（同 §33）。
 */
+/*
+  **入っているときは夜空**（設計§17-4）——濃紺からシアンへ。参考の太陽／月の
+  トグルと同じ考えで、**面そのものが「いまターミナルだ」と言う。**
+
+  **紫青へ寄せない**（`DESIGN.md` §11.4・§33）。同じ青でも Purple → Blue にすると
+  「AI SaaS 感」の側へ落ちる。**濃紺の側に紫を混ぜないこと。**
+
+  **画面でいちばん派手な面にしない**（同 §11.4）。透明へ向けて混ぜてあるので、
+  地が明るくなれば一緒に薄まる。
+*/
 .termswitch[aria-checked='true'] .termswitch-track {
   border-color: var(--accent-edge);
   background: linear-gradient(
     150deg,
-    color-mix(in oklch, #3dd9e6 26%, transparent),
-    color-mix(in oklch, #3dd9e6 12%, transparent)
+    color-mix(in oklch, #0b2545 70%, transparent),
+    color-mix(in oklch, #3dd9e6 34%, transparent)
   );
+  box-shadow: inset 0 1px 2px color-mix(in oklch, black 45%, transparent);
+}
+
+/*
+  レールの絵（設計§17-4）。**つまみに隠れていない側に出る**——つまみが右へ寄って
+  空いた左側に現れる。`参考/トグル.png` の太陽と月がまさにこの置き方である。
+
+  **消すのではなく沈める。** 切れているときも同じ場所に在って濃さだけが落ちるので、
+  **切り替えたときに位置が飛ばない。**
+*/
+.termswitch-mark {
+  position: absolute;
+  left: 0.3rem;
+  inline-size: 0.85rem;
+  block-size: 0.85rem;
+  color: color-mix(in oklch, #3dd9e6 85%, white);
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+
+.termswitch[aria-checked='true'] .termswitch-mark {
+  opacity: 1;
 }
 
 .termswitch-knob {
@@ -205,9 +246,9 @@
 
     直した値：中身 34.4px − つまみ 15.6px − 余白 2.6px ＝ **16.2px**。
   */
-  left: 0.1625rem;
-  inline-size: 0.975rem;
-  block-size: 0.975rem;
+  left: 0.2rem;
+  inline-size: 1.2rem;
+  block-size: 1.2rem;
   border-radius: 9999px;
   /*
     **つまみだけは、地に馴染ませてはいけない。** ここは動いて位置を示すものなので、
@@ -232,8 +273,9 @@
     background 150ms ease;
 }
 
+/* 中身 2.675rem − つまみ 1.2rem − 余白 0.2rem ＝ 1.275rem（左右が対称になる値） */
 .termswitch[aria-checked='true'] .termswitch-knob {
-  left: 1.0125rem;
+  left: 1.275rem;
 }
 
 /* --- 動きを止める ------------------------------------------------------- */
@@ -268,7 +310,8 @@
   }
 
   .termswitch-track,
-  .termswitch-knob {
+  .termswitch-knob,
+  .termswitch-mark {
     transition: none;
   }
 }

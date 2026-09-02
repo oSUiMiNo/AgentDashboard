@@ -159,8 +159,14 @@ test('セッション画面と PJT 画面を行き来できる', async ({ page }
   await tiles.first().click()
   await expect(page).toHaveURL(/\/s\/[0-9a-f-]{36}$/)
 
-  // セッション専用画面 → PJT 専用画面。**パスそのものが行き先**（器を足していない）
-  await page.getByTestId('to-project').click()
+  /*
+    **行き来は1つの切替ボタンになった**（設計§17-3）。以前は「単独画面はパスの
+    リンク、横並びは文字の『開く』」と**入り口が2つに割れていた**が、
+    **同じボタンが向きだけ変えて両方の画面に出る**。
+  */
+  const 縮小 = page.getByTestId('zoom-toggle')
+  await expect(縮小).toHaveAttribute('data-zoom', 'out')
+  await 縮小.click()
   await expect(page).toHaveURL(`/p/local/${encodeURIComponent(WORK_DIR)}`)
 
   // PJT 専用画面 → セッション専用画面。**押した区画のセッションへ行くこと**。
@@ -169,12 +175,14 @@ test('セッション画面と PJT 画面を行き来できる', async ({ page }
   await expect(views).toHaveCount(2)
   const wanted = await views.last().getAttribute('data-card-id')
   expect(wanted).not.toBeNull()
-  await views.last().getByTestId('to-session').click()
+  const 拡大 = views.last().getByTestId('zoom-toggle')
+  await expect(拡大).toHaveAttribute('data-zoom', 'in')
+  await 拡大.click()
   await expect(page).toHaveURL(`/s/${wanted}`)
 
-  // 一周して戻った先は単独画面。**行き先が自分自身になる導線は出さない**
-  await expect(page.getByTestId('to-session')).toHaveCount(0)
-  await expect(page.getByTestId('to-project')).toHaveCount(1)
+  // 一周して戻った先は単独画面。**同じボタンが、向きだけ戻っている**
+  await expect(page.getByTestId('zoom-toggle')).toHaveCount(1)
+  await expect(page.getByTestId('zoom-toggle')).toHaveAttribute('data-zoom', 'out')
 })
 
 test('狭い窓でも、PJT の名前が自分で行を増やさない', async ({ page }) => {
@@ -195,13 +203,13 @@ test('狭い窓でも、PJT の名前が自分で行を増やさない', async (
   // 短い名前のときの高さを先に測る（比べる相手）
   const shortTile = await spawnSession(page)
   await shortTile.click()
-  const shortLink = await page.getByTestId('to-project').boundingBox()
+  const shortLink = await page.getByTestId('project-name').boundingBox()
   expect(shortLink).not.toBeNull()
 
   await page.goto('/')
   const deepTile = await spawnSession(page, deep)
   await deepTile.click()
-  const deepLink = page.getByTestId('to-project')
+  const deepLink = page.getByTestId('project-name')
   const deepBox = await deepLink.boundingBox()
   expect(deepBox).not.toBeNull()
 
@@ -247,7 +255,9 @@ test('帯の高さは、最終活動の表記が変わっても変わらない',
   await tile.click()
 
   const view = page.getByTestId('session-view')
-  const 帯 = view.locator('header')
+  // **測る相手が変わった**（設計§17-1）。最終活動はセッションに効く行なので、
+  // 帯ではなく**操作列**に居る
+  const 帯 = view.getByTestId('session-ops')
   const 最終活動 = view.getByTestId('elapsed')
 
   // 起こした直後は「たった今」。ここで測る
@@ -279,8 +289,8 @@ test('帯の高さは、最終活動の表記が変わっても変わらない',
     そこで**行が箱として積まれていること**を見る。折り返しへ戻すと行の器は
     透明になり（あるいは中身が複数行へ散り）、この主張が落ちる。
   */
-  const 行たち = await view.locator('header [data-row]').all()
-  expect(行たち).toHaveLength(3)
+  const 行たち = await view.locator('[data-testid="session-ops"] [data-row]').all()
+  expect(行たち).toHaveLength(2)
   let 前の下端 = -1
   for (const 行 of 行たち) {
     const box = await 行.boundingBox()
@@ -322,24 +332,31 @@ test('ボタンの見た目を変えても、行の高さは変わらない', as
     return box!.height
   }
 
-  // 1行目——足した2つは、いちばん高いもの（✕）を超えない
-  const 一行目 = await 高さ(view.locator('[data-row="1"]'))
-  const 閉じる = await 高さ(view.getByTestId('close-session'))
-  expect(await 高さ(view.getByTestId('power-card'))).toBeLessThanOrEqual(閉じる)
-  expect(await 高さ(view.getByTestId('close-card'))).toBeLessThanOrEqual(閉じる)
-  expect(一行目, '1行目の高さは ✕ が決めている').toBeCloseTo(閉じる, 0)
+  /*
+    **測る相手が操作列へ移った**（設計§17-1）。守りたいことは変わらない——
+    **いちばん高い部品が行の高さを決めていて、足したものはそれを超えない。**
+  */
+  const ops = view.getByTestId('session-ops')
 
-  // 3行目——1.3倍にしたトグルは、ドロップダウンを超えない
-  const 三行目 = await 高さ(view.locator('[data-row="3"]'))
-  const ピッカー = await 高さ(view.getByTestId('model-picker'))
+  // 操作の行——トグルを大きくしても、ボタン（`icon-sm`）を超えない
+  const 操作の行 = await 高さ(ops.locator('[data-row="1"]'))
+  const ゴミ箱 = await 高さ(view.getByTestId('close-card'))
+  expect(await 高さ(view.getByTestId('power-card'))).toBeLessThanOrEqual(ゴミ箱)
+  expect(await 高さ(view.getByTestId('zoom-toggle'))).toBeLessThanOrEqual(ゴミ箱)
   expect(
     await 高さ(view.getByTestId('terminal-toggle')),
-    'トグルがドロップダウンより高くなっていない（余白を戻すとここが落ちる）',
-  ).toBeLessThanOrEqual(ピッカー)
-  expect(三行目, '3行目の高さはドロップダウンが決めている').toBeCloseTo(ピッカー, 0)
+    'トグルがボタンより高くなっていない（大きくしすぎるとここが落ちる）',
+  ).toBeLessThanOrEqual(ゴミ箱)
+  expect(操作の行, '操作の行の高さはボタンが決めている').toBeCloseTo(ゴミ箱, 0)
 
-  // 帯は3行のまま
-  await expect(view.locator('header [data-row]')).toHaveCount(3)
+  // モデルとモードの行
+  const 選ぶ行 = await 高さ(ops.locator('[data-row="2"]'))
+  const ピッカー = await 高さ(view.getByTestId('model-picker'))
+  expect(選ぶ行, 'この行の高さはドロップダウンが決めている').toBeCloseTo(ピッカー, 0)
+
+  // 操作列は2行、帯は1行（設計§17-1・§39.4）
+  await expect(ops.locator('[data-row]')).toHaveCount(2)
+  await expect(view.getByTestId('screen-bar')).toHaveCount(1)
 })
 
 test('✕ を押すと、開く前の画面へ戻る', async ({ page }) => {
@@ -351,9 +368,9 @@ test('✕ を押すと、開く前の画面へ戻る', async ({ page }) => {
   await expect(page).toHaveURL(/\/s\/[0-9a-f-]{36}$/)
 
   // セッション専用画面 → PJT 専用画面 → セッション専用画面、と2つ潜る
-  await page.getByTestId('to-project').click()
+  await page.getByTestId('zoom-toggle').click()
   await expect(page).toHaveURL(/\/p\//)
-  await page.getByTestId('to-session').first().click()
+  await page.getByTestId('zoom-toggle').first().click()
   await expect(page).toHaveURL(/\/s\/[0-9a-f-]{36}$/)
 
   // ✕ で1つ戻る＝ PJT 専用画面。**一覧へ落ちたらこの主張が落ちる**
