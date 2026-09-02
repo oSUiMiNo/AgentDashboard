@@ -15,6 +15,7 @@
 //! （バイナリだけのクレートは `tests/` から参照できない）。
 
 pub mod boot;
+pub mod children;
 pub mod cli;
 pub mod client;
 pub mod client_logs;

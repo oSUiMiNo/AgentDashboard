@@ -52,6 +52,10 @@ futures-util.workspace = true
 # もとはテストの**ブラウザの役**として dev 側に居たが、その役がそのまま製品になった
 # （tokio-tungstenite と同じ経緯）。feature はセッションホスト側と同じなので嵩は動かない
 vt100.workspace = true
+# 自分の子を畳んで引き取るのに使う（ゾンビ設計§6-2）。`waitpid` と `kill` は標準ライブラリに
+# 無い。**版の入れ替えは `exec` で自分を置き換えるので、その手前で片付けないと引き取る
+# 手立てごと消える**——だから、この1点のためだけに入れている
+libc.workspace = true
 
 [dev-dependencies]
 testkit.workspace = true
