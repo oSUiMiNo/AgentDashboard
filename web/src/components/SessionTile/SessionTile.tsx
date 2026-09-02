@@ -88,6 +88,23 @@ interface Props {
  * **根拠は弱い。**「見に行くかどうかを決めるのに要る時間」以上の裏付けは無いので、
  * 実物を見て決め直す（§16 の7）。
  */
+/**
+ * 器の `transform` を、`motion` に奪わせないための型紙。
+ *
+ * **クラスで傾けても画面には出ていなかった。**
+ *
+ * `motion` は `y` のような変形の値を1つでも持つと `style.transform` を自分で書き、
+ * **値が既定（`y: 0`）に戻った瞬間に `transform: none` をインラインで書き込む**
+ * （`motion-dom` の `buildTransform`）。インラインはクラスに勝つので、
+ * 掴んだときの `scale-[1.02] rotate-[1deg]` は**一度も効いていなかった**。
+ *
+ * 型紙を渡すと `none` を書く分岐そのものを通らなくなる。何も動かしていないときは
+ * 空文字を返すので、**インラインの指定が消えてクラスが効く**。
+ *
+ * **モジュール直下に置くこと。** 毎回作ると `motion` が描き直しの判定に入る。
+ */
+const 変形の型紙 = (_: unknown, generated: string) => generated
+
 const ECHO_MS = 12_000
 
 /**
@@ -345,6 +362,7 @@ export function SessionTile({
           ? 'tile-shell relative z-10 scale-[1.02] rotate-[1deg]'
           : 'tile-shell relative'
       }
+      transformTemplate={変形の型紙}
       initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, scale: 0.97 }}
@@ -363,6 +381,21 @@ export function SessionTile({
       // **兄弟**なので、中身にだけ印を付けても CSS が届かない——繋がっていない
       // カードでも枠だけ元の明るさで出ていた
       data-connected={session.agent_connected}
+      /*
+        **カードの押しは枠へ渡さない。**
+
+        `click` は前から止めていた（中身の側）のに、`pointerdown` は素通しだった。
+        指で長押しすると、カードの 400ms と枠の 400ms が同時に走り、カードが選ばれた
+        直後に枠が上書きする（`stores/selection.ts` の「種類が違えば選び直す」）
+        ——**掴もうとしたカードではなく枠が選ばれる。**
+
+        **中身ではなく器で止める。** 中身で止めると、その外側に居る**このカード自身の
+        掴み**まで止まる。
+
+        枠の余白・見出し・「＋」「×」はカードの外なので、そちらを押したときは
+        今までどおり枠へ届く。
+      */
+      onPointerDown={(event) => event.stopPropagation()}
       style={statusAccent(session.status)}
     >
       {/*

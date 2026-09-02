@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { clearSelection, getSelection } from '@/stores/selection'
 import { MemoryRouter, Route, Routes } from 'react-router'
@@ -82,12 +82,17 @@ function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
   }
 }
 
-function renderTile(session: SessionMeta) {
+function renderTile(session: SessionMeta, options: { dragging?: boolean } = {}) {
   applySessionSnapshot([session])
   return render(
     <MemoryRouter initialEntries={['/']}>
       <Routes>
-        <Route path="/" element={<SessionTile cardId={session.card_id} />} />
+        <Route
+          path="/"
+          element={
+            <SessionTile cardId={session.card_id} dragging={options.dragging} />
+          }
+        />
         <Route path="/s/:cardId" element={<p>専用画面</p>} />
       </Routes>
     </MemoryRouter>,
@@ -293,6 +298,33 @@ describe('SessionTile の骨格', () => {
     )
     // 器そのものに動きのクラスを持たせない（CSS が `.tile-frame` を名指しする）
     expect(screen.getByTestId('tile-shell').className).toBe('tile-shell relative')
+  })
+
+  it('掴んでいるカードは、実際に傾く', async () => {
+    /*
+      **クラスで傾けても画面には出ない。**
+
+      器は `motion.div` で `animate={{ y: 0 }}` を持つ。`motion-dom` の
+      `buildTransform` は、`y` のような変形の値を1つでも持つと `hasTransform` を立て、
+      **値が既定（`y: 0`）に戻った瞬間に `style.transform = "none"` をインラインで書く**。
+      インラインは Tailwind のクラスに勝つので、`scale-[1.02] rotate-[1deg]` は
+      **一度も画面に出ていなかった**（`build-transform.mjs` を読んで確認）。
+
+      **だから見るのはクラス名ではなく、インラインの `transform` そのもの。**
+      クラスを数えるテストだと、死んでいるクラスを「在る」と数えて緑になる。
+    */
+    renderTile(meta(), { dragging: true })
+    const 器 = screen.getByTestId('tile-shell')
+
+    /*
+      **入場アニメが着くまで待つ。** 途中は `translateY(…)` が残っているので、
+      待たずに見ると「変形が在る」と読めてしまう——**壊れているのに緑になる**。
+      `none` が書かれるのは `y` が 0 に着いた後である。
+    */
+    await waitFor(() => {
+      expect(器.style.transform).not.toContain('translateY')
+    })
+    expect(器.style.transform).not.toBe('none')
   })
 
   it('効果線は承認待ちのときだけ描く', () => {
