@@ -6,8 +6,8 @@
  * 押せるようになったりする。画面越しでは気づきにくいので、直接固定する。
  */
 
-import { describe, expect, it } from 'vitest'
-import { childOf, crumbsOf, isUnder, relativeOf } from '@/lib/hostfs'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { childOf, crumbsOf, isUnder, readBlob, relativeOf } from '@/lib/hostfs'
 
 describe('内側かどうか', () => {
   it('自分自身と、その下は内側', () => {
@@ -69,5 +69,39 @@ describe('子のパスとパンくず', () => {
       { label: 'me', path: '/home/me' },
       { label: 'dev', path: '/home/me/dev' },
     ])
+  })
+})
+
+describe('断り文', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  /** 本文の無い失敗を返す `fetch`。**空だからこそ既定の文が出る。** */
+  function 本文なしで断る(status: number) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('', { status })),
+    )
+  }
+
+  it('画像の取得が失敗したとき、フォルダの話にしない', async () => {
+    // `reason()` の既定は「フォルダを読めませんでした」。`readBlob` が既定のまま
+    // 呼ぶと、**画像の行の上にフォルダの話が出る**（コードレビュー対応8）。
+    //
+    // **`readBlob` を差し替えずに `fetch` を差し替える。** 差し替える先を間違えると、
+    // 直した当の関数を1行も通らないテストになる（実際に一度そう書いた）
+    本文なしで断る(500)
+    await expect(readBlob('local', '/x.png')).rejects.toThrow(
+      '画像を読めませんでした',
+    )
+  })
+
+  it('404 は場所の話になる（引く側と共通）', async () => {
+    // ここは既定を渡していても変わらない。**404 だけは呼ぶ側によらず同じ**
+    本文なしで断る(404)
+    await expect(readBlob('local', '/x.png')).rejects.toThrow(
+      'その場所は見つかりません',
+    )
   })
 })

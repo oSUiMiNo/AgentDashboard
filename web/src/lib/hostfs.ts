@@ -126,7 +126,12 @@ export async function readBlob(
 ): Promise<{ url: string; bytes: number; mediaType: string }> {
   const response = await fetch(rawUrl(host, path))
   if (!response.ok) {
-    throw new HostFsError(response.status, await reason(response))
+    // **フォルダの話にしない。** ここを既定のままにすると、履歴の画像が本文なしで
+    // 失敗したときに「フォルダを読めませんでした」と出る（画像の行の上で）
+    throw new HostFsError(
+      response.status,
+      await reason(response, '画像を読めませんでした'),
+    )
   }
   const blob = await response.blob()
   return {

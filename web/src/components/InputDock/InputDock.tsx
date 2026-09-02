@@ -47,8 +47,10 @@ interface Props {
   /**
    * このカードを抱えている PC。**素通しするだけ**で、ここでは使わない
    * （画像添付 設計§9-2——添付の口を出すかどうかを `Composer` が決める）。
+   *
+   * **必ず在る。** `hostOf()` はローカルモードでも文字列（`"local"`）を返す。
    */
-  host?: string | null
+  host: string
   /**
    * 横並び表示（グループビュー）で使うときは**十字を出さない**。
    *
@@ -72,7 +74,7 @@ interface Props {
 export function InputDock({
   cardId,
   status,
-  host = null,
+  host,
   compact = false,
   terminalShown = true,
 }: Props) {

@@ -70,6 +70,7 @@ function dock(
   return render(
     <InputDock
       cardId={CARD}
+      host="local"
       status={status}
       compact={compact}
       terminalShown={terminalShown}
@@ -215,7 +216,7 @@ describe('十字ボタンを出す条件', () => {
 
     // 印も下りた
     rerender(
-      <InputDock cardId={CARD} status={{ kind: 'working' }} compact={false} />,
+      <InputDock cardId={CARD} status={{ kind: 'working' }} host="local" compact={false} />,
     )
 
     await waitFor(() => expect(dpad()).not.toBeInTheDocument())
@@ -238,6 +239,7 @@ describe('Esc ボタン', () => {
     rerender(
       <InputDock
         cardId={CARD}
+        host="local"
         status={{ kind: 'ended', ok: true }}
         compact={false}
       />,

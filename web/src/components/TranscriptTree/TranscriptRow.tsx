@@ -406,6 +406,15 @@ function ImageBody({
     if (path === null) {
       return
     }
+    // **前のぶんを戻してから読みに行く。** 戻さないと、一度失敗した行が
+    // `host` の変化で読み直せても「読めませんでした」を出したままになる
+    // （描画が `error !== null` で先に返るため）。`url` も同じで、後始末が古い
+    // `blob:` を捨てたあとに残っていると、**捨てた URL を `<img src>` へ渡す**。
+    //
+    // `host` は `useSessionCard(cardId)` から引くので、**カードがストアへ入る前に
+    // 一度描画される**経路が現にある——絵に描いた餅ではない
+    setError(null)
+    setUrl(null)
     let alive = true
     let made: string | null = null
     void (async () => {

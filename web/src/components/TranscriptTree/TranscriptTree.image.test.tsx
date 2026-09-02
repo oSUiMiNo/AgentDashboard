@@ -129,6 +129,39 @@ describe('画像の行', () => {
   })
 })
 
+describe('読み直し', () => {
+  it('同じ行の置き場所が差し替わったら、前の失敗を引きずらない', async () => {
+    // **同じ ID で送り直される**ことが要点（相棒レコードが置き場所を運んでくると、
+    // パーサは同じ NodeId で出し直す）。そのとき**部品は作り直されない**ので、
+    // 効果の入口で状態を戻さないと `error` が残り、**二度と絵が出ない**
+    // （コードレビュー対応7）。
+    //
+    // **新しい行を足すテストでは捕まらない。** あちらは部品ごと新しくなるので、
+    // 状態を戻していなくても通ってしまう（実際に一度そう書いた）
+    const readBlob = vi
+      .spyOn(hostfs, 'readBlob')
+      .mockRejectedValueOnce(new hostfs.HostFsError(503, '応じません'))
+      .mockResolvedValue({
+        url: 'blob:picture',
+        bytes: 8,
+        mediaType: 'image/png',
+      })
+
+    render(<TranscriptTree cardId={CARD} />)
+    appendNodes(CARD, [画像ノード()])
+    await waitFor(() => expect(screen.getByText(/応じません/)).toBeTruthy())
+
+    // **同じ ID のまま**置き場所だけ差し替える（相棒が届いたのと同じ形）
+    appendNodes(CARD, [
+      { ...画像ノード({ path: '/state/b.png' }) },
+    ])
+
+    await waitFor(() => expect(screen.getByRole('img')).toBeTruthy())
+    expect(screen.queryByText(/応じません/)).toBeNull()
+    expect(readBlob).toHaveBeenCalledTimes(2)
+  })
+})
+
 describe('出せないとき', () => {
   it('404 は「保管期間を過ぎた」と言う', async () => {
     // 添付は3カ月で掃かれるが、**記録には置き場所が残り続ける**（掃除は記録を触らない）。
@@ -141,6 +174,19 @@ describe('出せないとき', () => {
       expect(screen.getByText(/保管期間を過ぎました/)).toBeTruthy(),
     )
     expect(screen.queryByText(/読めません/)).toBeNull()
+  })
+
+  it('本文の無い失敗でも、フォルダの語が出ない', async () => {
+    // `reason()` の既定は「フォルダを読めませんでした」。`readBlob` が既定のままだと、
+    // **画像の行の上にフォルダの話が出る**（コードレビュー対応8）
+    vi.spyOn(hostfs, 'readBlob').mockRejectedValue(
+      new hostfs.HostFsError(500, '画像を読めませんでした'),
+    )
+    置く(画像ノード())
+    await waitFor(() =>
+      expect(screen.getByText(/画像を読めませんでした/)).toBeTruthy(),
+    )
+    expect(screen.queryByText(/フォルダ/)).toBeNull()
   })
 
   it('404 以外は理由をそのまま出す', async () => {

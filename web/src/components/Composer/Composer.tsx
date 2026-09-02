@@ -92,11 +92,16 @@ interface Props {
   /**
    * このカードを抱えている PC（画像添付 設計§9-2）。
    *
-   * **`null` のときは添付の口を出さない。** 宛先が決まらないと画像を置けないので、
-   * できないことをボタンにしない（`README.md`「版を切り替えられない構成がある」と
-   * 同じ扱い）。
+   * **必ず在る。** `hostOf()` は `agentId ?? LOCAL_HOST` を返すので、ローカルモードでも
+   * 文字列（`"local"`）になる。**「宛先が分からないから口を出さない」という分岐は
+   * 作らない**——`null` になる経路が無いので、書いても一度も通らない死んだ枝になる。
+   *
+   * **古い PC のカードでも口は出る。** 設計§4-1 は「名乗らない PC には出さない」と
+   * 書いているが、そうは作っていない（ブラウザは `supports_blob_write` を読まない）。
+   * 置く側が **409 で断る**ので、押した人には「いまのこの相手ではできない」が届く——
+   * **同じ仕組みを使うファイル閲覧も口を隠していない**ので、そちらへ揃えてある。
    */
-  host?: string | null
+  host: string
   /**
    * 十字ボタンが出ている間は高さを詰める（十字ボタン設計§11）。
    *
@@ -106,12 +111,7 @@ interface Props {
    */
 }
 
-export function Composer({
-  cardId,
-  status,
-  host = null,
-  className = '',
-}: Props) {
+export function Composer({ cardId, status, host, className = '' }: Props) {
   const sendInput = useWsStore((state) => state.sendInput)
   // 下書きの鍵を分けるためのアカウント。**`lib/` から `stores/` は読まない**ので、
   // 読むのはこちら側（十字ボタン設計§11 のフェーズ3 の訂正）
@@ -125,12 +125,16 @@ export function Composer({
   // 運んでいる最中。二度押しで同じ画像を2回置かせない
   const [sending, setSending] = useState(false)
   // 断られた理由と、運びに失敗した理由。**画面にそのまま出す**
-  const [trouble, setTrouble] = useState<string[]>([])
+  // 断りの並び。**文字列そのものを React の鍵にしない**——同じ名前のファイルを
+  // 2つ落とすと鍵がぶつかって、片方しか出ない
+  const [trouble, setTrouble] = useState<{ id: string; text: string }[]>([])
   // 送ったものの控え。**断られたら戻す**（設計§7-2）
   const 控え中 = useRef<控え | null>(null)
   const cardError = useCardError(cardId)
   const ended = isEnded(status)
-  const 添付できる = host !== null && !ended
+  // 添付の口を出すかどうかは**終わっているか**だけで決まる。`host` は必ず在るので
+  // 「宛先が分からない」という枝は作らない（作っても一度も通らない）
+  const 添付できる = !ended
 
   /** 控えを畳む。**絵もここで捨てる**——捨てる場所を散らすと必ず取り残しが出る */
   const 控えを捨てる = () => {
@@ -169,6 +173,25 @@ export function Composer({
   // 畳まれるときも控えを捨てる。**残すと `blob:` がブラウザの中に溜まる**
   useEffect(() => 控えを捨てる, [])
 
+  // 置いたままの添付も、畳まれるときに捨てる。
+  //
+  // **控えとは別の集合である。** 控えは「送ったが断られるかもしれないぶん」で、こちらは
+  // 「まだ送っていないぶん」——付けたまま別の画面へ移ると、こちらだけが残る。
+  // 送った時点で `attachments` は空になり中身は控えへ移るので、**二重に捨てることは無い**。
+  //
+  // ref を経由するのは、後始末が**畳まれた瞬間の中身**を要るため。依存に
+  // `attachments` を置くと、付け外しのたびに後始末が走って捨ててはいけないものまで捨てる
+  const 置いたまま = useRef<Attachment[]>([])
+  置いたまま.current = attachments
+  useEffect(
+    () => () => {
+      for (const one of 置いたまま.current) {
+        releasePreview(one)
+      }
+    },
+    [],
+  )
+
   /** 3経路の共通の入口。**判定は `pickImages` の1つを通る**（設計§9） */
   const 受け取る = (files: readonly File[]) => {
     if (!添付できる || files.length === 0) {
@@ -176,7 +199,7 @@ export function Composer({
     }
     const { accepted, rejected } = pickImages(files)
     setAttachments((now) => [...now, ...accepted])
-    setTrouble(rejected)
+    setTrouble(rejected.map((text) => ({ id: crypto.randomUUID(), text })))
   }
 
   const 外す = (id: string) => {
@@ -197,10 +220,6 @@ export function Composer({
     // **押してから運ぶ。** 先に運んでおくと、外したときに置いたものが残る（§2）
     let paths: string[] = []
     if (attachments.length > 0) {
-      if (host === null) {
-        setTrouble(['この PC には画像を置けません'])
-        return
-      }
       setSending(true)
       try {
         paths = []
@@ -212,7 +231,10 @@ export function Composer({
         // **運びに失敗したら送らない。** 添付も入力欄の中身も残す（§9-1）——
         // ここで消すと、押し直すために画像を選び直すことになる
         setTrouble([
-          err instanceof Error ? err.message : '画像を置けませんでした',
+          {
+            id: crypto.randomUUID(),
+            text: err instanceof Error ? err.message : '画像を置けませんでした',
+          },
         ])
         return
       } finally {
@@ -310,8 +332,8 @@ export function Composer({
 
       {trouble.length > 0 && (
         <ul data-testid="composer-trouble" className="text-xs text-destructive">
-          {trouble.map((文) => (
-            <li key={文}>{文}</li>
+          {trouble.map((断り) => (
+            <li key={断り.id}>{断り.text}</li>
           ))}
         </ul>
       )}

@@ -95,6 +95,34 @@ describe('付ける', () => {
     expect(screen.queryByTestId('composer-attachments')).toBeNull()
   })
 
+  it('同じ名前のファイルを2つ断っても、鍵がぶつからない', () => {
+    // **文字列そのものを React の鍵にしない。** 同じ名前なら断り文も同じ文字列になる。
+    //
+    // **数を数えても捕まらない。** 鍵がぶつかっても React は両方を描くので、
+    // `toHaveLength(2)` はどちらでも通る（実際に一度そう書いた）。**React が出す
+    // 警告**が、鍵がぶつかったことを外から見る唯一の口である
+    const 警告 = vi.spyOn(console, 'error').mockImplementation(() => {})
+    置く()
+    選ぶ([画像('same.svg', 'image/svg+xml'), 画像('same.svg', 'image/svg+xml')])
+
+    expect(
+      screen.getByTestId('composer-trouble').querySelectorAll('li'),
+    ).toHaveLength(2)
+    const 文言 = 警告.mock.calls.flat().join(' ')
+    expect(文言).not.toMatch(/same key|同じキー/i)
+  })
+
+  it('畳まれるとき、置いたままの添付の絵を捨てる', () => {
+    // 付けたまま別の画面へ移ると、**送っていないぶんの `blob:` が残る**。控えの
+    // 後始末は送ったぶんしか見ていないので、こちらは別に要る（コードレビュー対応9）
+    const view = render(
+      <Composer cardId={CARD} status={動いている} host={HOST} />,
+    )
+    選ぶ([画像()])
+    view.unmount()
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:preview')
+  })
+
   it('1つずつ外せる', () => {
     置く()
     選ぶ([画像('a.png'), 画像('b.png')])
@@ -104,9 +132,19 @@ describe('付ける', () => {
     expect(URL.revokeObjectURL).toHaveBeenCalled()
   })
 
-  it('宛先の PC が分からないときは添付の口を出さない', () => {
-    // できないことをボタンにしない（設計§4-1）
-    render(<Composer cardId={CARD} status={動いている} host={null} />)
+  it('終わったセッションでは添付の口を出さない', () => {
+    // **出し分けの理由はこれだけ。** かつては「宛先の PC が分からないときも出さない」と
+    // していたが、`hostOf()` は `agentId ?? LOCAL_HOST` を返すので**その状態は起こらない**
+    // ——本番で通らない枝を試すテストになっていた（コードレビュー対応3）。
+    //
+    // 古い PC のカードでも口は出る。置く側が 409 で断る（ファイル閲覧と同じ形）
+    render(
+      <Composer
+        cardId={CARD}
+        status={{ kind: 'ended', ok: true }}
+        host={HOST}
+      />,
+    )
     expect(screen.queryByTestId('composer-attach')).toBeNull()
     expect(screen.queryByTestId('composer-file')).toBeNull()
   })
