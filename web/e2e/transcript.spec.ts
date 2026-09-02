@@ -455,6 +455,171 @@ test('Selected の印は、開いた行にだけ付く', async ({ page }) => {
   expect(印.開いた行).not.toBe(印.畳んだ行)
 })
 
+test('シンプルへ寄せた5件が、実物で成り立っている', async ({ page }) => {
+  // フェーズ13（要望5件・設計§12）。**変えたものはどれも「無いこと」が正しい状態**
+  // （枠が無い・線が無い）なので、**壊しても静かに通る**。落ちる形にしてある。
+  //
+  // **jsdom では測れない**——縁も角丸も色も、解決するのはカスケードの先である。
+  await loadFoldLines(page)
+  const row = foldableRow(page)
+  await expect(row).toBeVisible(届くまで)
+
+  const 実測 = await page.evaluate(() => {
+    // **色の字面を正規表現で解かないこと。** `getComputedStyle` は `oklch()` を返すことが
+    // あり、`rgb()` 前提で読むと**解けずに黒として扱われる**（実際にこれで比が 1.99 と
+    // 出て、10.13 のはずが床を割ったように見えた）。**キャンバスに塗って読めば**、
+    // ブラウザが解ける書式はすべて同じ手で扱える
+    const 画 = document.createElement('canvas')
+    画.width = 1
+    画.height = 1
+    const 筆 = 画.getContext('2d', { willReadFrequently: true })
+    const 明度 = (c: string) => {
+      if (!筆) return null
+      筆.clearRect(0, 0, 1, 1)
+      筆.fillStyle = c
+      筆.fillRect(0, 0, 1, 1)
+      const [r0, g0, b0] = 筆.getImageData(0, 0, 1, 1).data
+      const [r, g, b] = [r0, g0, b0].map((n) => {
+        const v = n / 255
+        return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4
+      })
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b
+    }
+    const 比 = (a: number, b: number) => (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05)
+    const q = (s: string) => document.querySelector(s) as HTMLElement | null
+
+    const 行 = Array.from(
+      document.querySelectorAll('[data-testid="transcript-row"]'),
+    ) as HTMLElement[]
+    const 器 = q('.body-shell')
+    const 吹き出し = q('[data-testid="user-bubble"]')
+    const 本文 = q('[data-testid="row-body"]')
+
+    return {
+      // 要望4：3種の行に境目の線が無い
+      線の太さ: [...new Set(行.map((el) => getComputedStyle(el).borderBottomWidth))],
+      // 要望2（案B）：器の縁と角丸が見えない。**箱そのものは残っている**
+      器がある: !!器,
+      器の縁: 器 ? getComputedStyle(器).borderTopWidth : null,
+      器の地: 器 ? getComputedStyle(器).backgroundColor : null,
+      // §8 の崩し②：左上の角丸ゼロは生きている
+      器の左上: 器 ? getComputedStyle(器).borderTopLeftRadius : null,
+      // 崩し①：しっぽ（吹き出しの右上）
+      吹き出しの右上: 吹き出し ? getComputedStyle(吹き出し).borderTopRightRadius : null,
+      // 要望3：吹き出しの地と、文字とのコントラスト
+      吹き出しの地: 吹き出し ? getComputedStyle(吹き出し).backgroundColor : null,
+      吹き出しの比:
+        吹き出し && 本文
+          ? 比(
+              明度(getComputedStyle(吹き出し).backgroundColor) ?? 0,
+              明度(getComputedStyle(本文).color) ?? 0,
+            )
+          : null,
+      発言の明度: 本文 ? 明度(getComputedStyle(本文).color) : null,
+    }
+  })
+
+  // 要望4：**境目の線が無い**（3種とも 0px の1種類だけ）
+  expect(実測.線の太さ).toEqual(['0px'])
+  // 要望2（案B）：**箱は残し、見た目だけ消す**。役目（帯の敷き場所・崩し②）が要る
+  expect(実測.器がある).toBe(true)
+  expect(実測.器の縁).toBe('0px')
+  expect(実測.器の地).toMatch(/rgba\(0, 0, 0, 0\)|transparent/)
+  // §8 の崩し2つが別々の部品に生きている
+  expect(実測.器の左上).toBe('0px')
+  expect(実測.吹き出しの右上).toBe('0px')
+  // 要望3：利用者の指定した青と、床を割らないコントラスト
+  expect(実測.吹き出しの地).toBe('rgb(23, 62, 118)')
+  expect(実測.吹き出しの比).toBeGreaterThanOrEqual(4.5)
+  // 要望1（活動を暗く）は、**活動の行があるフィクスチャで別に測る**（下のテスト）
+  expect(実測.発言の明度).not.toBeNull()
+})
+
+test('活動の行は、発言の行より暗い', async ({ page }) => {
+  // 要望1・§5-3 の主従。**同じ明るさへ戻すと落ちる。**
+  // このフィクスチャにしか活動の行が無いので、上のテストから分けてある
+  await startSession(page)
+  await showTerminal(page)
+  await fireHook(page, 'SessionStart')
+  await writeTranscript(page, 'v2.1.220/basic-tools/session.jsonl')
+  await showTranscript(page)
+  // **活動はまとめ行の中に束ねてある**（設計§2）ので、開かないと出てこない
+  await openActivities(page)
+  await expect(
+    page.locator('[data-testid="transcript-row"][data-kind="tool_call"]').first(),
+  ).toBeVisible(届くまで)
+
+  const 明るさ = await page.evaluate(() => {
+    const 画 = document.createElement('canvas')
+    画.width = 1
+    画.height = 1
+    const 筆 = 画.getContext('2d', { willReadFrequently: true })
+    const 明度 = (c: string) => {
+      if (!筆) return null
+      筆.clearRect(0, 0, 1, 1)
+      筆.fillStyle = c
+      筆.fillRect(0, 0, 1, 1)
+      const [r0, g0, b0] = 筆.getImageData(0, 0, 1, 1).data
+      const [r, g, b] = [r0, g0, b0].map((n) => {
+        const v = n / 255
+        return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4
+      })
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b
+    }
+    const 活動 = document.querySelector(
+      '[data-kind="tool_call"] span',
+    ) as HTMLElement | null
+    const 発言 = document.querySelector('[data-testid="row-body"]') as HTMLElement | null
+    // **不透明度も見る。** 「発言より暗い」だけだと、種別の色（violet）はもともと白より
+    // 暗いので、**暗くする指定を外しても通ってしまう**（実際にこれで壊し方が落ちなかった）。
+    //
+    // **ここも字面を正規表現で解かないこと。** Tailwind の `/60` は
+    // `oklab(… / 0.6)` に解決されるので、`rgba()` 前提で読むと**不透明として扱われる**
+    // （これで一度、直したはずの見張りがまた素通しした）。**キャンバスの α を読む。**
+    const 不透明度 = (c: string) => {
+      if (!筆) return 1
+      筆.clearRect(0, 0, 1, 1)
+      筆.fillStyle = c
+      筆.fillRect(0, 0, 1, 1)
+      return 筆.getImageData(0, 0, 1, 1).data[3] / 255
+    }
+    return {
+      活動: 活動 ? 明度(getComputedStyle(活動).color) : null,
+      発言: 発言 ? 明度(getComputedStyle(発言).color) : null,
+      活動の不透明度: 活動 ? 不透明度(getComputedStyle(活動).color) : null,
+    }
+  })
+
+  expect(明るさ.活動).not.toBeNull()
+  expect(明るさ.発言).not.toBeNull()
+  // **はっきり暗いこと。** 「少し違う」では主従にならない
+  expect(明るさ.活動 ?? 1).toBeLessThan((明るさ.発言 ?? 1) * 0.75)
+  // **暗くしてあること。** 種別の色はもともと白より暗いので、上だけでは
+  // 「暗くする指定を外した」が捕まらない（要望1・設計§12-1）
+  expect(明るさ.活動の不透明度 ?? 1).toBeLessThan(1)
+})
+
+test('狭い窓とハイコントラストでも壊れない', async ({ page }) => {
+  // §4.5 が「狭い幅を一度も確かめていない」と書いている。**スマホからも触る道具である。**
+  await page.setViewportSize({ width: 390, height: 780 })
+  await loadFoldLines(page)
+  const row = foldableRow(page)
+  await expect(row).toBeVisible(届くまで)
+
+  // 横にはみ出していないこと
+  const はみ出し = await page.getByTestId('transcript-tree').evaluate((el) => ({
+    中身: el.scrollWidth,
+    窓: el.clientWidth,
+  }))
+  expect(はみ出し.中身).toBeLessThanOrEqual(はみ出し.窓 + 1)
+
+  // **`forced-colors` で消えないこと。** 色を奪われても、行と操作は残る
+  await page.emulateMedia({ forcedColors: 'active' })
+  await expect(row).toBeVisible()
+  await expect(row.getByTestId('body-toggle')).toBeVisible()
+  await expect(page.getByTestId('transcript-heading')).toBeVisible()
+})
+
 test('帯の下9割は、どこを押しても開く', async ({ page }) => {
   // **要望10 の本体**（設計§6-7-5）。「続きを読む」をピンポイントで突かなくても開く。
   // **左寄り・中央・右寄りの3点**で見る——1点だけだと、たまたま文字の上を突いていても通る
@@ -1014,9 +1179,9 @@ test('別のページへ行って戻ってきても、最新から始まる', as
 
   // PJT 専用画面を経由して戻る（`dashboard.spec.ts` と同じ導線）。
   // **この経路では履歴ストアが生き残っている**ので、戻った時点で最初から N 件ある
-  await page.getByTestId('to-project').click()
+  await page.getByTestId('zoom-toggle').click()
   const view = page.getByTestId('session-view').first()
-  await view.getByTestId('to-session').click()
+  await view.getByTestId('zoom-toggle').click()
   await showTranscript(page)
 
   await expect(status).toHaveAttribute('data-at-end', 'true')
@@ -1049,7 +1214,7 @@ test('横並びでは、構造化ビューへ切り替えたときに末尾か�
 
   // PJT 専用画面の既定はターミナル。**構造化ビューは隠れたまま履歴を受け取る**ので、
   // その間は寄せない（寄せても効かないのに印だけが立つ。設計§7）
-  await page.getByTestId('to-project').click()
+  await page.getByTestId('zoom-toggle').click()
   const view = page.getByTestId('session-view').first()
   await expect(view).toHaveAttribute('data-view', 'terminal')
 
