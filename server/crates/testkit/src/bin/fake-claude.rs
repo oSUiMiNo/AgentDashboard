@@ -426,6 +426,22 @@ fn main() {
             continue;
         }
 
+        // 画面へ好きな1行を出す。**停滞したカードの画面読み**（`session::activity`）を
+        // 相手にするテストのために足した。
+        //
+        // **本物の claude が出す「走っている印」（`✽ Ebbing… (2m 10s)`）を再現する口が
+        // 他に無い。** 既定のエコーは `[fake-claude] received: ` が付くので印にならず、
+        // 印は行の頭に無ければならない。`RESIZED_PREFIX` を足したときと同じ理由で、
+        // PTY の外から観測できる形が要る。
+        //
+        // **打鍵のエコー側は印にならない。** こちらの行は `paint ` で始まるので、
+        // 行の頭が5文字の語になり、判定は落ちる。
+        if let Some(rest) = line.strip_prefix("paint ") {
+            let _ = writeln!(out, "{}", rest.trim_end());
+            let _ = out.flush();
+            continue;
+        }
+
         if let Some(size) = line.strip_prefix("flood ") {
             flood(&mut out, size.trim().parse::<usize>().unwrap_or(0));
             continue;
