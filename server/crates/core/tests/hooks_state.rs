@@ -715,6 +715,89 @@ async fn 作業中のまま無音が続くと停滞として表示される() {
     common::wait_for_status(&session, SessionStatus::Working).await;
 }
 
+/// 停滞したカードが、走っている印の無い画面なら自分で入力待ちへ戻ること（設計§3・§4）。
+///
+/// **これが本イシューの本体である。** ターンが完了せずに終わると `Stop` が飛ばないので、
+/// カードは停滞のまま永久に取り残される——端末は空のプロンプトで待っているのに。
+///
+/// **5秒より短い間隔では起きないこと**（設計§5-3）も同時に確かめる。分けると5秒の待ちが
+/// 2回になる。
+#[tokio::test]
+async fn 停滞したカードは画面に印が無ければ入力待ちへ戻る() {
+    let config = agentdashboard_core::config::Config {
+        stalled_threshold_secs: 1,
+        ..Default::default()
+    };
+
+    let server = common::TestServer::start_with(config).await;
+    let (session, _watcher) = common::start_session(&server.manager).await;
+
+    server
+        .post_hook(session.token(), "UserPromptSubmit", "{}")
+        .await;
+    common::wait_for_status(&session, SessionStatus::Working).await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    server.manager.sweep_once();
+    assert_eq!(session.status(), SessionStatus::Stalled, "まず停滞へ落ちる");
+
+    // **落ちた周では見ない**（設計§13-7）ので、何周回してもまだ戻らない。ここが
+    // 5秒の間引きの検査でもある——相乗りしている1秒巡回で倒れてしまわないこと
+    for _ in 0..5 {
+        server.manager.sweep_once();
+    }
+    assert_eq!(
+        session.status(),
+        SessionStatus::Stalled,
+        "5秒より短い間隔では画面を見に行かない"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(5100)).await;
+    server.manager.sweep_once();
+    assert_eq!(
+        session.status(),
+        SessionStatus::WaitingInput,
+        "印が無いので入力待ちへ倒れる"
+    );
+}
+
+/// 走っている印が出ていれば、停滞のまま留まること（設計§3-3 の陰性対照）。
+///
+/// **この対照が無いと、「常に入力待ちへ倒す」実装でも上のテストは緑になる。**
+#[tokio::test]
+async fn 走っている印が出ていれば停滞のまま戻らない() {
+    let config = agentdashboard_core::config::Config {
+        stalled_threshold_secs: 1,
+        ..Default::default()
+    };
+
+    let server = common::TestServer::start_with(config).await;
+    let (session, _watcher) = common::start_session(&server.manager).await;
+
+    server
+        .post_hook(session.token(), "UserPromptSubmit", "{}")
+        .await;
+    common::wait_for_status(&session, SessionStatus::Working).await;
+
+    // 実物と同じ形の印を画面へ出す（`fixtures/v2.1.232/screens/working-long.txt`）
+    session
+        .send_instruction("paint ✽ Ebbing… (2m 10s · ↓ 543 tokens · thinking)")
+        .await
+        .expect("印を描かせる");
+
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    server.manager.sweep_once();
+    assert_eq!(session.status(), SessionStatus::Stalled);
+
+    tokio::time::sleep(std::time::Duration::from_millis(5100)).await;
+    server.manager.sweep_once();
+    assert_eq!(
+        session.status(),
+        SessionStatus::Stalled,
+        "印が出ているので停滞に留まる"
+    );
+}
+
 #[tokio::test]
 async fn 出力はあるのにフックが来なければ判断できない状態になる() {
     // 設計§11。注入した settings が効いていない（ポートが塞がっている等）とき、
