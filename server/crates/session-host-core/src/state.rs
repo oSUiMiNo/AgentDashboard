@@ -328,6 +328,36 @@ pub fn sweep_stalled(meta: &mut SessionMeta, now: Timestamp, threshold_secs: u64
     true
 }
 
+/// 停滞に落ちたカードを、画面の様子で入力待ちへ戻す（設計§4）。
+///
+/// `running` は「端末に走っている印が出ているか」で、[`crate::session::activity`] が
+/// 画面から求める。**判定そのものをここへ持ち込まない**——この module は時刻も副作用も
+/// 持たず、遷移表をそのまま表駆動テストに落とせることを設計の要点にしている。
+///
+/// # `Stalled` のときしか動かないのは、範囲を絞るためではない
+///
+/// **これは競合に対する唯一の防壁である。** 呼ぶ側（`Session::sweep`）は `meta` のロックを
+/// **一度離してから**画面を読み、取り直してここへ来る。その隙間にフックが1件でも届いて
+/// いれば、[`apply`] が状態を `Working` へ戻している——そこへ入力待ちを書くと、**届いた
+/// ばかりのフックを踏み潰す**ことになる。
+///
+/// # `last_activity_at` は更新しない
+///
+/// [`sweep_stalled`] と同じ。ここは「新しい活動があった」場面ではなく、「もともと活動が
+/// 無かったことに気づいた」場面である。進めると小窓の経過時間が嘘になる。
+///
+/// # 往復はしない
+///
+/// [`sweep_stalled`] は `Working` のときしか動かないので、入力待ちへ入れたあと停滞へ戻る
+/// ことはない（設計§4-2）。カードが点滅する心配は要らない。
+pub fn sweep_stalled_idle(meta: &mut SessionMeta, running: bool) -> bool {
+    if meta.status != SessionStatus::Stalled || running {
+        return false;
+    }
+    meta.status = SessionStatus::WaitingInput;
+    true
+}
+
 /// フックが1件も届かないまま動いているセッションを「判断できない」に落とす（設計§11）。
 ///
 /// **PTY からは出力があるのにフックが0件**という組み合わせは、CLI は動いているのに
@@ -820,6 +850,77 @@ mod tests {
             meta.last_activity_at = NOW - 999_999;
             assert!(!sweep_stalled(&mut meta, NOW, 120), "{status:?}");
         }
+    }
+
+    #[test]
+    fn 停滞したカードは印が無ければ入力待ちへ戻る() {
+        // 設計§4-2。走っている印が見つからないので倒す
+        let mut meta = meta_with(SessionStatus::Stalled);
+
+        assert!(sweep_stalled_idle(&mut meta, false));
+        assert_eq!(meta.status, SessionStatus::WaitingInput);
+    }
+
+    #[test]
+    fn 停滞したカードに印があれば停滞のまま留まる() {
+        let mut meta = meta_with(SessionStatus::Stalled);
+
+        assert!(!sweep_stalled_idle(&mut meta, true));
+        assert_eq!(meta.status, SessionStatus::Stalled);
+    }
+
+    /// **倒す側の入力（印が無い）で回すこと。** 印がある側で回すと、どのみち何も起きない
+    /// ので、状態の絞り込みを確かめたことにならない。
+    #[test]
+    fn 停滞以外は画面を見ても動かない() {
+        for status in [
+            SessionStatus::Starting,
+            SessionStatus::Working,
+            SessionStatus::WaitingInput,
+            SessionStatus::WaitingPermission,
+            SessionStatus::Ended { ok: true },
+            SessionStatus::Ended { ok: false },
+            SessionStatus::Unknown,
+        ] {
+            let mut meta = meta_with(status);
+            assert!(!sweep_stalled_idle(&mut meta, false), "{status:?}");
+            assert_eq!(meta.status, status, "{status:?}");
+        }
+    }
+
+    #[test]
+    fn 入力待ちにしたあと続けて呼んでも二度目は変化しない() {
+        // 変化を返し続けると、配信が無駄に増える
+        let mut meta = meta_with(SessionStatus::Stalled);
+
+        assert!(sweep_stalled_idle(&mut meta, false), "一度目は変わる");
+        assert!(!sweep_stalled_idle(&mut meta, false), "二度目は変わらない");
+        assert_eq!(meta.status, SessionStatus::WaitingInput);
+    }
+
+    /// 停滞へ落とす側と戻す側で往復しないこと（設計§4-2）。
+    #[test]
+    fn 入力待ちへ戻したカードは停滞へ落ち直さない() {
+        let mut meta = meta_with(SessionStatus::Stalled);
+        meta.last_activity_at = NOW - 6 * 60 * 60 * 1000;
+
+        assert!(sweep_stalled_idle(&mut meta, false));
+        assert!(
+            !sweep_stalled(&mut meta, NOW, 120),
+            "作業中ではないので停滞へは落ちない"
+        );
+        assert_eq!(meta.status, SessionStatus::WaitingInput);
+    }
+
+    /// 画面を見て倒しても、経過時間の起点は動かさない（設計§4）。
+    #[test]
+    fn 画面で倒しても最終活動の時刻は進めない() {
+        let mut meta = meta_with(SessionStatus::Stalled);
+        meta.last_activity_at = NOW - 999_999;
+        let before = meta.last_activity_at;
+
+        assert!(sweep_stalled_idle(&mut meta, false));
+        assert_eq!(meta.last_activity_at, before);
     }
 
     #[test]
