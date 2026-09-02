@@ -916,57 +916,44 @@ describe('接続断のカードで、右下の札も、輪とまったく同じ�
     expect(止める[0].at).toBeGreaterThan(呼吸.at)
   })
 
-  it('沈めた板の文字は、状態によらず白', () => {
-    // 沈めた地はどの状態でも暗い（いちばん明るい入力待ちで `rgb(123,87,28)`）ので、
-    // 白1色で足りる。**群ごとに分ける欄は畳んだ**（`protocol.ts`）
+  it('沈めた板でも、文字は繋がっているときと同じ', () => {
+    /*
+      **文字を入れ替える規則を置かない**（フェーズ24。利用者の指定・2026-09-02）。
+      かつては沈めた板の上で白へ寄せていたが、**床を割る側へ倒した**——
+      「**文字以外の要素からぱっと見でステータスを判断できるため、コントラストは許容する**」。
+
+      **白へ戻したくなったら、`tile.css` の理由の段落ごと戻すこと。** 規則だけ足すと、
+      **なぜ黒だったのかが消える。**
+    */
     const 入れ替え = 当たる("[data-connected='false']").filter((rule) =>
       /(^|\s)color:/.test(rule.body),
     )
-    expect(入れ替え).toHaveLength(1)
-    expect(値(入れ替え[0], 'color')).toBe('#fff')
-  })
-
-  it('文字の入れ替えは詳細度を上げない', () => {
-    // **上げるとハイコントラストの退避に勝つ。** あの環境では板が丸ごと消えるので、
-    // 勝った瞬間に白い文字が白い地の上へ浮いて読めなくなる
-    const 入れ替え = 当たる("[data-connected='false']").find((rule) =>
-      /(^|\s)color:/.test(rule.body),
-    )
-    expect(入れ替え!.selector).toContain(":where([data-connected='false'])")
-    const 退避 = 当たる('forced-colors').filter((rule) =>
-      rule.selector.endsWith(' .tile-tag'),
-    )
-    expect(退避).toHaveLength(1)
-    expect(入れ替え!.at).toBeLessThan(退避[0].at)
-  })
-
-  it('接続断でも、文字が 4.5:1 を割らない', () => {
-    /*
-      **除外表が守ろうとしたのはここである**（設計§26-5）。模型は `protocol.test.ts` の
-      床の検査と揃える——合成の相手はカードの地（`--card` = `#171717`）、判定の相手は文字。
-
-      沈む先は **`--tile-dim` × 率**（＝輪と同じ）。フェーズ21 の率だけの模型とは違う。
-    */
-    const カードの地 = rgb('#171717')
-    for (const status of 全状態) {
-      const 色 = statusAccent(status) as Record<string, string>
-      const 濃さ = (Number.parseFloat(色['--tile-dim']) / 100) * DISCONNECTED_INK_SCALE
-      const 板 = composite(rgb(色['--tile-accent']), カードの地, 濃さ)
-      const 比 = contrast(板, rgb('#ffffff'))
-      expect(比, `${status.kind}：${色['--tile-accent']} を ${濃さ.toFixed(3)} で`).toBeGreaterThanOrEqual(4.5)
+    expect(入れ替え, '接続断で文字色を上書きしていないこと').toHaveLength(0)
+    for (const 本体 of ['.tile-tag', '.tile-sticker']) {
+      expect(値(規則(本体), 'color'), 本体).toBe('#171717')
     }
   })
 
-  it('白1色で足りることを、数で残す', () => {
-    // **黒へ寄せる整理を入れたくなったときに止める。** 沈めた地はどれも暗いので、
-    // 黒は7状態すべてで床を割る（1.71〜3.22）
+  it('床を割っていることを、数で残す', () => {
+    /*
+      **意図して割っている**ので、**割っていること自体を台帳にする**。
+      黙って割ると、次に読む人が「壊れている」と読んで白へ戻す——そのとき
+      **なぜ黒なのかを知る手掛かりが残らない**。
+
+      模型は `protocol.test.ts` の床の検査と揃える（合成の相手はカードの地）。
+      同じ形の判断は §8-4 にもある（輪が 3:1 を割ることを、判別を記号と文言が
+      担っているという理由で受け入れた）。
+    */
     const カードの地 = rgb('#171717')
-    const 割る = 全状態.filter((status) => {
+    const 文字 = rgb('#171717')
+    const 比 = 全状態.map((status) => {
       const 色 = statusAccent(status) as Record<string, string>
       const 濃さ = (Number.parseFloat(色['--tile-dim']) / 100) * DISCONNECTED_INK_SCALE
-      return contrast(composite(rgb(色['--tile-accent']), カードの地, 濃さ), rgb('#000000')) < 4.5
+      return contrast(composite(rgb(色['--tile-accent']), カードの地, 濃さ), 文字)
     })
-    expect(割る.length, '黒だけで足りてしまっている').toBe(全状態.length)
+    // 実測 1.46〜2.75。**全状態で床（4.5）を割る**——これが承知のうえの姿
+    expect(Math.min(...比)).toBeGreaterThan(1.4)
+    expect(Math.max(...比)).toBeLessThan(4.5)
   })
 
   it('タグとステッカーは、沈み方も同じ', () => {
