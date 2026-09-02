@@ -860,14 +860,47 @@ describe('接続断のカードで、右下の札も、輪とまったく同じ�
     expect(規則).toHaveLength(1)
     expect(規則[0].selector).toContain('.tile-tag::before')
     expect(規則[0].selector).toContain('.tile-sticker::before')
-    expect(値(規則[0], 'opacity')).toBe('var(--tile-ink)')
+    expect(値(規則[0], 'background')).toBe(
+      'color-mix(in srgb, var(--tile-accent) var(--tile-ink), var(--color-card))',
+    )
+  })
+
+  it('板を `opacity` で沈めていない（フェーズ23）', () => {
+    /*
+      **`opacity` は要素ごと透かすので、板の裏にあるものが透ける**（設計§28-1）。
+      札は3行目のセッション名の上に重なる作りなので、**名前が板越しに出る**——
+      0.1.71 でそう見えていた。**混ぜた色を不透明に塗る**のが正しい。
+
+      **`.tile-ring` は別。** 輪は中身の裏にあるので、透けて困るものが無い
+      （下の「輪は `opacity` のままでよい」が受ける）。
+    */
+    for (const rule of 沈む()) {
+      expect(rule.body, rule.selector).not.toMatch(/(^|;)\s*opacity:/)
+    }
+  })
+
+  it('内側のハイライトも同じ率を通す', () => {
+    // 沈めないと、**暗い板の上端だけ白い縁が残る**（`opacity` のときは一緒に沈んでいた）
+    const 影 = 値(沈む()[0], 'box-shadow')
+    expect(影).toContain('inset 0 2.5px 0')
+    expect(影).toContain('var(--tile-ink)')
+    expect(影).toContain('transparent')
+  })
+
+  it('輪は `opacity` のままでよい', () => {
+    // **同じ「沈める」でも、重なっているものが在るかどうかで当て方が変わる**（§28-2）。
+    // 輪は中身の裏なので透けて困らない。ここまで `color-mix` へ倒すと、
+    // **濃さを二重に掛ける**という別の穴（このファイル冒頭の注意）へ近づく
+    expect(値(規則('.tile-ring'), 'opacity')).toBe('var(--tile-ink)')
   })
 
   it('繋がっているときの板には、濃さを書いていない', () => {
-    // **今回の指摘は接続断だけ**（§26-6）。素の規則へ `opacity` を書くと、
+    // **今回の指摘は接続断だけ**（§26-6）。素の規則へ濃さを書くと、
     // 繋がっているカードの札まで `--tile-dim` で沈み、暗い文字が読めなくなる
     for (const selector of ['.tile-tag::before', '.tile-sticker::before']) {
-      expect(規則(selector).body, selector).not.toMatch(/(^|;)\s*opacity:/)
+      const body = 規則(selector).body
+      expect(body, selector).not.toMatch(/(^|;)\s*opacity:/)
+      expect(値(規則(selector), 'background'), selector).toBe('var(--tile-accent)')
     }
   })
 
