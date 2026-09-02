@@ -581,15 +581,25 @@ describe('まとめて操作の帯', () => {
     clearSelection()
   })
 
-  it('1枚選んだ時点から出る', async () => {
+  it('1枚選んだ時点から見えるが、場所は最初から空いている', async () => {
     // **「複数選んだときだけ」にしない**（設計§5-2）。2枚目を選んだ瞬間に
-    // ボタンが生えて画面が跳ねる
+    // ボタンが生えて画面が跳ねる。
+    //
+    // **そして「選んだときだけ器ごと作る」のも駄目だった。** 1打目で器が生まれると
+    // 下の一覧がずれ、**ダブルクリックの2打目が別の場所に当たって開けなくなる**
+    // （E2E がこれで落ちた）。器は最初から置き、見え方だけを変える
     applySessionSnapshot([meta('a')])
     renderGrid()
-    expect(screen.queryByTestId('bulk-row')).toBeNull()
+    // **jsdom は Tailwind の CSS を読まない**ので `toBeVisible()` では見分けられない。
+    // 見えるのはクラス名と属性まで
+    const 帯 = screen.getByTestId('bulk-row')
+    expect(帯.className).toContain('invisible')
+    expect(帯).toHaveAttribute('aria-hidden', 'true')
 
     await userEvent.click(screen.getByTestId('session-tile'))
-    expect(screen.getByTestId('bulk-row')).toBeVisible()
+    const 出た = screen.getByTestId('bulk-row')
+    expect(出た.className).not.toContain('invisible')
+    expect(出た).toHaveAttribute('aria-hidden', 'false')
   })
 
   it('電源マークは、止まっているものだけを数える', async () => {
