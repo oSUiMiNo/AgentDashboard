@@ -162,8 +162,8 @@ test('セッション画面と PJT 画面を行き来できる', async ({ page }
   const tiles = page.getByTestId('session-tile')
   await expect(tiles).toHaveCount(2)
 
-  // 一覧 → セッション専用画面
-  await tiles.first().click()
+  // 一覧 → セッション専用画面。**開くのはダブルクリック**（並べ替え設計§4-1）
+  await tiles.first().dblclick()
   await expect(page).toHaveURL(/\/s\/[0-9a-f-]{36}$/)
 
   /*
@@ -209,13 +209,13 @@ test('狭い窓でも、PJT の名前が自分で行を増やさない', async (
 
   // 短い名前のときの高さを先に測る（比べる相手）
   const shortTile = await spawnSession(page)
-  await shortTile.click()
+  await shortTile.dblclick()
   const shortLink = await page.getByTestId('project-name').boundingBox()
   expect(shortLink).not.toBeNull()
 
   await page.goto('/')
   const deepTile = await spawnSession(page, deep)
-  await deepTile.click()
+  await deepTile.dblclick()
   const deepLink = page.getByTestId('project-name')
   const deepBox = await deepLink.boundingBox()
   expect(deepBox).not.toBeNull()

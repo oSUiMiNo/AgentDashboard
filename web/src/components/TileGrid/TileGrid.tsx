@@ -362,12 +362,21 @@ export function TileGrid() {
         <div
           data-testid="bulk-row"
           aria-hidden={選択.ids.length === 0}
-          className={`border-primary/30 bg-primary/5 flex flex-wrap items-center gap-3 rounded-md border px-2 py-1.5 text-xs ${
+          /*
+            **高さを固定する。** 場所を空けるだけでは足りなかった——中身が変わると
+            行の高さが変わり（文字が折り返す・ボタンの分だけ背が伸びる）、**選んだ
+            瞬間にやはり下の一覧がずれる**。ずれるとダブルクリックの2打目が別の場所へ
+            当たり、開く操作が成立しない。
+
+            折り返さない（`flex-nowrap`）ことと、文字を切る（`truncate`）ことも
+            同じ理由。**数が増えて2行になった瞬間に、また同じ壊れ方をする。**
+          */
+          className={`border-primary/30 bg-primary/5 flex h-10 flex-nowrap items-center gap-3 overflow-hidden rounded-md border px-2 text-xs ${
             選択.ids.length === 0 ? 'invisible' : ''
           }`}
           onClick={(event) => event.stopPropagation()}
         >
-          <span data-testid="bulk-count" className="text-muted-foreground">
+          <span data-testid="bulk-count" className="text-muted-foreground truncate">
             {選択.kind === 'card'
               ? `${選択.ids.length}枚を選んでいます（起こせるのは ${起こせる.length}枚／走っている ${選択.ids.length - 起こせる.length}枚は触りません）`
               : `${選択.ids.length}枠を選んでいます`}
