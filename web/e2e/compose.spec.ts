@@ -90,6 +90,7 @@ test.afterEach(async ({ page }) => {
   await page.evaluate(() => {
     globalThis.localStorage?.removeItem('agentdashboard.project-files-open')
     globalThis.localStorage?.removeItem('agentdashboard.project-files-width')
+    globalThis.localStorage?.removeItem('agentdashboard.project-files-place')
   })
   await archiveAll(page)
 })

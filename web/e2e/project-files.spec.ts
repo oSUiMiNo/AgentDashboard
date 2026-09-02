@@ -27,6 +27,8 @@ const PROJECT_DIR = path.join(WORK_DIR, 'adash-e2e-files')
 const PLAN = '計画.md'
 /** 画面に収まらない長さの文書（`ファイルの中身をスクロールできない` 設計§8）。 */
 const LONG = '長い文書.md'
+/** 2段目のフォルダ。**掘った位置の記憶は、1段では確かめられない** */
+const DEEP = '設計'
 /** 末尾に置く目印。**辿り着けたこと**は、数ではなくこれが見えることで言う。 */
 const TAIL = 'いちばん最後の行'
 /** 一覧のほうも溢れさせる数。同じ器の中で高さを取り合うので、両方を見る。 */
@@ -92,6 +94,16 @@ test.use({ permissions: ['clipboard-read', 'clipboard-write'] })
 test.beforeAll(() => {
   const docs = path.join(PROJECT_DIR, 'MyDocs')
   fs.mkdirSync(docs, { recursive: true })
+  /*
+    **2段目を作る。** 1段しか無いと「深く掘った位置を覚えている」を作れない——
+    起点の子で止まっていては、覚えていなくても同じ場所に見えてしまう
+  */
+  fs.mkdirSync(path.join(docs, DEEP), { recursive: true })
+  fs.writeFileSync(
+    path.join(docs, DEEP, '奥.md'),
+    '# 奥\n',
+    'utf8',
+  )
   fs.writeFileSync(
     path.join(docs, PLAN),
     '# 計画\n\n- [x] 済んだこと\n- [ ] まだのこと\n',
@@ -188,6 +200,8 @@ test.afterEach(async ({ page }) => {
     // **幅も戻す。** 足さないと、幅を変えたテストが後続へ漏れる——症状は
     // 「別のテストがランダムに落ちる」で、原因からいちばん遠いところに出る
     globalThis.localStorage?.removeItem('agentdashboard.project-files-width')
+    // **見ていた場所も戻す。** 残すと、次のテストが前のテストの掘った先から始まる
+    globalThis.localStorage?.removeItem('agentdashboard.project-files-place')
   })
   await page.reload()
   await archiveAll(page)
@@ -959,7 +973,14 @@ test('変えた幅は、読み込み直しても残る', async ({ page }) => {
   expect(変えた幅).toBeGreaterThan(400)
 
   await page.reload()
-  await page.getByTestId('project-files-toggle').click()
+  /*
+    **押し直さない。** 開閉は `localStorage` に残るので、読み込み直すと**開いた状態で
+    戻ってくる**——押すと畳む側へ倒れる。
+
+    それでも以前これが通っていたのは、畳む動きが `x` の平行移動だけで**幅を変えない**
+    まま 220ms のあいだ要素を DOM に残すからで、**退場の最中に測っていた**。実行機が遅ければ
+    `boundingBox()` が `null` を返して落ちる形だった
+  */
   await expect(page.getByTestId('project-files-panel')).toBeVisible()
 
   // **離した時点の値が正**（設計§5）。読み込み直しても同じ幅で始まる
@@ -967,6 +988,82 @@ test('変えた幅は、読み込み直しても残る', async ({ page }) => {
     変えた幅,
     0,
   )
+})
+
+test('掘った位置は、読み込み直しても残る', async ({ page }) => {
+  await openDashboard(page)
+  const group = await addProject(page, PROJECT_DIR)
+  await group.dblclick({ position: { x: 5, y: 5 } })
+  await page.getByTestId('project-files-toggle').click()
+  const panel = page.getByTestId('project-files-panel')
+  await expect(panel).toBeVisible()
+
+  // **2段掘る。** 1段では、覚えていなくても同じ場所に見えてしまう
+  await panel.getByTestId('folder-entry').filter({ hasText: 'MyDocs' }).click()
+  await panel.getByTestId('folder-entry').filter({ hasText: DEEP }).click()
+  const 掘った先 = path.join(PROJECT_DIR, 'MyDocs', DEEP)
+  await expect(page.getByTestId('folder-browser')).toHaveAttribute(
+    'data-path',
+    掘った先,
+  )
+
+  await page.reload()
+
+  // **押し直さない。** 開閉も覚えているので、開いた状態で戻ってくる
+  await expect(page.getByTestId('folder-browser')).toHaveAttribute(
+    'data-path',
+    掘った先,
+  )
+})
+
+test('開いていたファイルは、読み込み直しても残る', async ({ page }) => {
+  await openDashboard(page)
+  await openLongFile(page)
+  const 開いた先 = path.join(PROJECT_DIR, 'MyDocs', LONG)
+  await expect(page.getByTestId('file-view')).toHaveAttribute(
+    'data-path',
+    開いた先,
+  )
+
+  await page.reload()
+
+  await expect(page.getByTestId('file-view')).toHaveAttribute(
+    'data-path',
+    開いた先,
+  )
+})
+
+test('覚えていた場所が消えていたら、黙って起点へ落ちる', async ({ page }) => {
+  const 消える = path.join(PROJECT_DIR, 'MyDocs', '消える')
+  fs.mkdirSync(消える, { recursive: true })
+  try {
+    await openDashboard(page)
+    const group = await addProject(page, PROJECT_DIR)
+    await group.dblclick({ position: { x: 5, y: 5 } })
+    await page.getByTestId('project-files-toggle').click()
+    const panel = page.getByTestId('project-files-panel')
+    await expect(panel).toBeVisible()
+
+    await panel.getByTestId('folder-entry').filter({ hasText: 'MyDocs' }).click()
+    await panel.getByTestId('folder-entry').filter({ hasText: '消える' }).click()
+    await expect(page.getByTestId('folder-browser')).toHaveAttribute(
+      'data-path',
+      消える,
+    )
+
+    // **実際に消してから読み込み直す。** 覚えている先が無くなった状況を作る
+    fs.rmSync(消える, { recursive: true, force: true })
+    await page.reload()
+
+    await expect(page.getByTestId('folder-browser')).toHaveAttribute(
+      'data-path',
+      PROJECT_DIR,
+    )
+    // **断り文を出さない。** 覚えていた場所は、利用者がいま押したものではない
+    await expect(page.getByTestId('folder-error')).toHaveCount(0)
+  } finally {
+    fs.rmSync(消える, { recursive: true, force: true })
+  }
 })
 
 test('縁は指でも掴める', async ({ page }) => {
