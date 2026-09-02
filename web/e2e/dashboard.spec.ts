@@ -91,7 +91,9 @@ test('サブエージェントの稼働中はバッジが出る', async ({ page 
   ).toHaveCount(0)
 })
 
-test('小窓とグループ余白でクリックの意味が変わる', async ({ page }) => {
+test('小窓とグループ余白でダブルクリックの意味が変わる', async ({ page }) => {
+  // **落ちたから直したのではなく、仕様が変わったので書き換えた**（並べ替え設計§10-1）。
+  // 掴む操作と開く操作が同じ押し方だと、並べ替えようとして開いてしまう（§4-1）
   await openDashboard(page)
   // 同じ作業ディレクトリで2本走らせる＝1つのグループにまとまる
   const first = await spawnSession(page)
@@ -101,14 +103,19 @@ test('小窓とグループ余白でクリックの意味が変わる', async ({
   await expect(group).toHaveCount(1)
   await expect(page.getByTestId('session-tile')).toHaveCount(2)
 
-  // 小窓をクリック → そのセッション1つだけ
+  // **シングルクリックでは開かない。** 開くことと同じだけ、開かないことを確かめる
   await first.click()
+  await expect(page).not.toHaveURL(/\/s\/[0-9a-f-]{36}$/)
+  await expect(first).toHaveAttribute('data-selected', 'true')
+
+  // 小窓をダブルクリック → そのセッション1つだけ
+  await first.dblclick()
   await expect(page).toHaveURL(/\/s\/[0-9a-f-]{36}$/)
   await expect(page.getByTestId('session-view')).toHaveCount(1)
 
   // グループの余白をクリック → 全セッションが横並びで開く
   await page.goto('/')
-  await page.getByTestId('project-group').click({ position: { x: 5, y: 5 } })
+  await page.getByTestId('project-group').dblclick({ position: { x: 5, y: 5 } })
   // 鍵に PC が入る（設計§16）。ローカルは `local`
   await expect(page).toHaveURL(`/p/local/${encodeURIComponent(WORK_DIR)}`)
   await expect(page.getByTestId('group-view')).toBeVisible()
@@ -252,7 +259,7 @@ test('帯の高さは、最終活動の表記が変わっても変わらない',
   await page.setViewportSize({ width: 390, height: 780 })
   await openDashboard(page)
   const tile = await spawnSession(page, deep)
-  await tile.click()
+  await tile.dblclick()
 
   const view = page.getByTestId('session-view')
   // **測る相手が変わった**（設計§17-1）。最終活動はセッションに効く行なので、
@@ -321,7 +328,7 @@ test('ボタンの見た目を変えても、行の高さは変わらない', as
   await page.setViewportSize({ width: 390, height: 780 })
   await openDashboard(page)
   const tile = await spawnSession(page)
-  await tile.click()
+  await tile.dblclick()
 
   const view = page.getByTestId('session-view')
   await expect(view.getByTestId('power-card')).toBeVisible()
@@ -364,7 +371,7 @@ test('✕ を押すと、開く前の画面へ戻る', async ({ page }) => {
   // ✕ を押すと、どちらの実装でも `/` へ行くので**見分けが付かない**（設計§7）
   await openDashboard(page)
   const tile = await spawnSession(page)
-  await tile.click()
+  await tile.dblclick()
   await expect(page).toHaveURL(/\/s\/[0-9a-f-]{36}$/)
 
   // セッション専用画面 → PJT 専用画面 → セッション専用画面、と2つ潜る
@@ -391,7 +398,7 @@ test('いきなり開いた画面で ✕ を押しても、アプリの外へ出
   */
   await openDashboard(page)
   const tile = await spawnSession(page)
-  await tile.click()
+  await tile.dblclick()
   await expect(page).toHaveURL(/\/s\/[0-9a-f-]{36}$/)
 
   const cardId = new URL(page.url()).pathname.split('/').pop()!

@@ -215,7 +215,7 @@ test('全承認をスキップで起動すると、確認に自動で答えて�
   await group.getByTestId('spawn-button').click()
   await expect(page.getByTestId('session-tile')).toHaveCount(1)
 
-  await page.getByTestId('session-tile').first().click()
+  await page.getByTestId('session-tile').first().dblclick()
   await expect(page.getByTestId('session-view')).toBeVisible()
   await setTerminalView(page, true)
 

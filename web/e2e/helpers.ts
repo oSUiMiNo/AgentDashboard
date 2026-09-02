@@ -520,7 +520,8 @@ async function hostIdOf(page: Page, agentName?: string): Promise<string> {
  * 隠れている要素はクリックできず、端末へ打ち込む手順（[`typeLine`]）が使えないため。
  */
 export async function openSession(page: Page, tile: Locator) {
-  await tile.click()
+  // **開くのはダブルクリック**（並べ替え設計§4-1）。シングルは「選ぶ」になった
+  await tile.dblclick()
   await expect(page.getByTestId('session-view')).toBeVisible()
   await showTerminal(page)
   await expectTerminalToContain(page, '[fake-claude] ready')

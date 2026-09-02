@@ -200,7 +200,7 @@ test('左パネルを開き、ファイルを読み、相対パスをコピー�
   const group = await addProject(page, PROJECT_DIR)
 
   // 枠の余白から PJT 専用画面へ（セッションは1本も起こしていない）
-  await group.click({ position: { x: 5, y: 5 } })
+  await group.dblclick({ position: { x: 5, y: 5 } })
   await expect(page).toHaveURL(`/p/local/${encodeURIComponent(PROJECT_DIR)}`)
   await expect(page.getByTestId('group-view')).toBeVisible()
 
@@ -274,7 +274,7 @@ test('新しい口が無いとき、古い方法が実物のブラウザで写�
 
   await openDashboard(page)
   const group = await addProject(page, PROJECT_DIR)
-  await group.click({ position: { x: 5, y: 5 } })
+  await group.dblclick({ position: { x: 5, y: 5 } })
   await page.getByTestId('project-files-toggle').click()
   const panel = page.getByTestId('project-files-panel')
   await expect(panel).toBeVisible()
@@ -312,7 +312,7 @@ test('どちらの口も無いとき、一覧とファイルの両方で値を�
 
   await openDashboard(page)
   const group = await addProject(page, PROJECT_DIR)
-  await group.click({ position: { x: 5, y: 5 } })
+  await group.dblclick({ position: { x: 5, y: 5 } })
   await page.getByTestId('project-files-toggle').click()
   const panel = page.getByTestId('project-files-panel')
   await expect(panel).toBeVisible()
@@ -353,7 +353,7 @@ test('狭い画面で、セッション専用画面が横にはみ出さない',
 
   await page.getByTestId('spawn-open').click()
   await page.getByTestId('spawn-button').click()
-  await page.getByTestId('session-tile').first().click()
+  await page.getByTestId('session-tile').first().dblclick()
   await expect(page.getByTestId('session-view')).toBeVisible()
 
   await page.getByTestId('project-files-toggle').click()
@@ -465,7 +465,7 @@ test('ファイルでも、素の改行と `<br/>` が改行として出る', as
 
 async function openLongFile(page: Page) {
   const group = await addProject(page, PROJECT_DIR)
-  await group.click({ position: { x: 5, y: 5 } })
+  await group.dblclick({ position: { x: 5, y: 5 } })
   await expect(page.getByTestId('group-view')).toBeVisible()
 
   await page.getByTestId('project-files-toggle').click()
@@ -489,7 +489,7 @@ async function openLongFile(page: Page) {
 async function 開いて選ぶ(page: Page, name: string) {
   await openDashboard(page)
   const group = await addProject(page, PROJECT_DIR)
-  await group.click({ position: { x: 5, y: 5 } })
+  await group.dblclick({ position: { x: 5, y: 5 } })
   await page.getByTestId('project-files-toggle').click()
   const panel = page.getByTestId('project-files-panel')
   await expect(panel).toBeVisible()
@@ -709,7 +709,7 @@ test('一覧の印が、種別ごとに分かれている', async ({ page }) => 
   // 一覧を描いてみないと分からない
   await openDashboard(page)
   const group = await addProject(page, PROJECT_DIR)
-  await group.click({ position: { x: 5, y: 5 } })
+  await group.dblclick({ position: { x: 5, y: 5 } })
   await page.getByTestId('project-files-toggle').click()
   const panel = page.getByTestId('project-files-panel')
   await panel.getByTestId('folder-entry').filter({ hasText: 'MyDocs' }).click()
@@ -879,7 +879,7 @@ test('広い窓では、サイドバーが被さらずに右のものを押し�
   const group = page.locator(
     `[data-testid="project-group"][data-project="${PROJECT_DIR}"]`,
   )
-  await group.click({ position: { x: 5, y: 5 } })
+  await group.dblclick({ position: { x: 5, y: 5 } })
   await expect(page.getByTestId('group-view')).toBeVisible()
 
   await page.getByTestId('project-files-toggle').click()
@@ -1091,7 +1091,7 @@ test('セッションを横へ流すと、中身の列も一緒に流れる', as
   const group = page.locator(
     `[data-testid="project-group"][data-project="${PROJECT_DIR}"]`,
   )
-  await group.click({ position: { x: 5, y: 5 } })
+  await group.dblclick({ position: { x: 5, y: 5 } })
   await expect(page.getByTestId('group-view')).toBeVisible()
 
   await page.getByTestId('project-files-toggle').click()
@@ -1160,7 +1160,7 @@ test('中身の列の上で横へ回すと、セッションのレールが動�
   const group = page.locator(
     `[data-testid="project-group"][data-project="${PROJECT_DIR}"]`,
   )
-  await group.click({ position: { x: 5, y: 5 } })
+  await group.dblclick({ position: { x: 5, y: 5 } })
   await expect(page.getByTestId('group-view')).toBeVisible()
 
   await page.getByTestId('project-files-toggle').click()

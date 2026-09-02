@@ -123,7 +123,7 @@ test('横並び画面でも片方だけが変わる', async ({ page }) => {
   await spawnSession(page)
   await spawnSession(page)
 
-  await page.getByTestId('session-tile').first().click()
+  await page.getByTestId('session-tile').first().dblclick()
   await page.goBack()
   // 同じプロジェクトの2本を横並びで開く
   const group = page.getByTestId('project-group').first()
