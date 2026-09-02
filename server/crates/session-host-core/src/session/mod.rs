@@ -17,6 +17,7 @@
 //! リングバッファのスナップショット（フレーム種別 `0x03`）を送り直して復帰させる。
 
 pub mod account_toml;
+pub mod activity;
 pub mod cwd;
 pub mod hooks_settings;
 pub mod input;
@@ -47,7 +48,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicI64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -190,6 +191,24 @@ const ATTACHMENT_STEP: Duration = Duration::from_millis(200);
 ///
 /// フッタ側を厚くしないのは、あちらが**毎秒回る見張り**で、しかも末尾しか要らないため。
 const ATTACHMENT_TAIL: usize = 256 * 1024;
+
+/// 停滞したカードの画面を描き直すときに読む、スクロールバックの末尾の長さ（バイト）。
+///
+/// **[`FOOTER_TAIL`] と比べてはいけない。** 数字が近いのは偶然で、根拠が別である——
+/// あちらは「フッタ**1行**を読むのに要る厚み」、こちらは「**画面全体**を描き直すのに要る
+/// 厚み」。片方を動かしたときにもう片方が黙って壊れる形にしないため、定数を分けてある。
+///
+/// 値は実測で決めた（設計§13-3）。頭から全量再生した画面を正解として、末尾 N バイトだけを
+/// 新しいパーサへ食わせて一致する最小の N を探した結果、最悪が 32 KiB（`basic` の録画）
+/// だった。**そこは 16 KiB が外れて 32 KiB で当たった境目そのもの**で余裕が無いので、
+/// 1つ上の段を採っている。
+///
+/// **足りなかったときは安全側へ倒れる。** 末尾が薄いと画面が崩れて走っている印が見つからず、
+/// 設計§3-3 のとおり入力待ちへ倒れる——「放っておけば直る」ほうである。
+///
+/// 停滞したカードだけが**5秒に1回**複製する量なので、厚くしても負担は変わらない
+/// （`pty_ring_buffer` の既定は 1 MiB）。
+const ACTIVITY_TAIL: usize = 64 * 1024;
 
 /// 同時に起こし直せる本数（接続断のカードを復旧ボタンで戻す 設計§8-4）。
 ///
@@ -504,6 +523,29 @@ pub struct Session {
     /// **状態を動かさない側**——出力が1バイトも無いセッションは `Starting` のままなので、
     /// 覚えておかないと毎秒言うことになる。
     hook_silence_noted: AtomicBool,
+    /// この端末にいま効いている桁行（設計§5-1）。
+    ///
+    /// **リングの中身は「そのとき描かれた桁行の生バイト」である。** 違う幅で描き直すと
+    /// 折り返しがずれて行として読めなくなるので、画面を作り直すときはこの値を使う
+    /// （`core/src/client/render.rs` の冒頭が同じ注意を書いている）。
+    ///
+    /// **固定値では足りない。** ブラウザが端末を1回でも開くと `SubPty` がリサイズを撃ち、
+    /// `UnsubPty` は元に戻さない。停滞するのは人がよく見ているカードなので、固定値にすると
+    /// **狙って外れる**。
+    ///
+    /// 更新は [`Session::resize`] が **PTY へ通ったあと**だけ。先に控えると、`process` 側が
+    /// 失敗したときに PTY が知らない幅を持つことになる。
+    terminal_size: Mutex<(u16, u16)>,
+    /// 停滞したカードの画面を、最後に見に行った時刻（設計§5-3）。
+    ///
+    /// [`hook_silence_noted`](Self::hook_silence_noted) と同じ「覚えておく器」だが、
+    /// あちらが「もう言ったか」の1ビットなのに対し、こちらは**間引きの時計**である。
+    /// 1秒周期の見張りに相乗りしつつ、描画は5秒に1回しかしない。
+    ///
+    /// **停滞へ落ちた周に `now` を書き込む**ので、最初の確認はその5秒後になる。落ちた
+    /// 瞬間は、直前まで走っていたカードの最後のコマがまだ画面に残っていることがあり、
+    /// **いちばん当てにならない瞬間**である（設計§13-7）。
+    activity_checked_at: AtomicI64,
     /// 添付の印を待つ上限（画像添付 設計§21 読み替え2）。
     ///
     /// **設定から取る**（`attachment_mark_wait_ms`）。定数のままにすると、
@@ -641,8 +683,27 @@ impl Session {
     /// 書き直されるので末尾に必ず現れる。1秒周期の見張りから毎回呼ばれるため、
     /// [`Session::scrollback_text`] のように全体を複製してはいけない。
     pub fn scrollback_tail(&self, limit: usize) -> String {
-        let payload = self.ring.lock().expect("ロックが壊れていない").tail(limit);
-        String::from_utf8_lossy(&payload).into_owned()
+        String::from_utf8_lossy(&self.scrollback_tail_bytes(limit)).into_owned()
+    }
+
+    /// 端末の末尾を**生バイトのまま**覗く。
+    ///
+    /// 端末エミュレータへ食わせるための口（設計§5-1）。[`Session::scrollback_tail`] を
+    /// 通してから `as_bytes()` で戻してはいけない——**末尾で切れたマルチバイト文字が
+    /// `U+FFFD` に化けて元へ戻らない**ので、パーサが本来と違うものを描く。
+    pub fn scrollback_tail_bytes(&self, limit: usize) -> Vec<u8> {
+        self.ring.lock().expect("ロックが壊れていない").tail(limit)
+    }
+
+    /// 停滞したカードの端末に、走っている印が出ているか（設計§3・§5）。
+    ///
+    /// **`ring` のロックの中で描かない。** 64 KiB の複製を取ったらすぐ離す——毎フレーム
+    /// `ring` を握る出力の配信と、一覧を読む側を待たせないためである（[`Session::sweep`]
+    /// の既存の並びと同じ考え方）。
+    fn terminal_shows_activity(&self) -> bool {
+        let (cols, rows) = *self.terminal_size.lock().expect("ロックが壊れていない");
+        let tail = self.scrollback_tail_bytes(ACTIVITY_TAIL);
+        activity::is_running(&activity::render(&tail, cols, rows))
     }
 
     /// いまの位置に目印を打つ。
@@ -1173,7 +1234,11 @@ impl Session {
             // 大きさが変わったら画面を作り直して送る。差分では追いつけない
             screen.refresh();
         }
-        self.process.resize(cols, rows)
+        self.process.resize(cols, rows)?;
+        // **PTY へ通ったあとに控える**（設計§5-1）。先に書くと、`process` 側が失敗した
+        // ときに PTY が知らない幅を持ち、画面を作り直すときの折り返しがずれる
+        *self.terminal_size.lock().expect("ロックが壊れていない") = (cols, rows);
+        Ok(())
     }
 
     /// 遡れる行数を変える（設計§13-3）。作り直しになるので、手元の生バイトから復元する。
@@ -1348,15 +1413,38 @@ impl Session {
         // 読む側が、32 KiB の複製ぶんだけ待たされる。
         //
         // `ring` → 離す → `meta` の順は既存の並びで、**ここだけ逆順を持たせない**。
-        let (stalled, silent, quiet, created_at) = {
+        let (stalled, silent, quiet, created_at, status) = {
             let mut meta = self.meta.lock().expect("ロックが壊れていない");
             let stalled = state::sweep_stalled(&mut meta, now, input.threshold_secs);
             let silent =
                 state::sweep_hook_silence(&mut meta, now, input.threshold_secs, saw_output);
             let quiet =
                 state::hook_silent_without_output(&meta, now, input.threshold_secs, saw_output);
-            (stalled, silent, quiet, meta.created_at)
+            (stalled, silent, quiet, meta.created_at, meta.status)
         };
+
+        // **落ちた周では画面を見ない**（設計§13-7）。直前まで走っていたカードは、最後の
+        // コマがまだ画面に残っていることがある。ここで時計を始めれば5秒ぶんの猶予になる
+        if stalled {
+            self.activity_checked_at.store(now, Ordering::Relaxed);
+        }
+
+        // 停滞に落ちたカードだけ、5秒に1回、端末に走っている印が残っているかを見に行く
+        // （設計§4・§5-3）。印が無ければ入力待ちへ倒す。
+        //
+        // **`meta` を離してから `ring` を握り、また `meta` を取る。** 同時に握らないので
+        // 既存の並び（`ring` → 離す → `meta`）は破っていない。この隙間にフックが届いて
+        // 状態が戻っていた場合は、`sweep_stalled_idle` の `Stalled` 判定が弾く——あの `if`
+        // は範囲を絞るためではなく、**この競合に対する唯一の防壁**である。
+        let woke = status == SessionStatus::Stalled
+            && !stalled
+            && activity::due(self.activity_checked_at.load(Ordering::Relaxed), now)
+            && {
+                self.activity_checked_at.store(now, Ordering::Relaxed);
+                let running = self.terminal_shows_activity();
+                let mut meta = self.meta.lock().expect("ロックが壊れていない");
+                state::sweep_stalled_idle(&mut meta, running)
+            };
 
         if silent {
             // `Starting → Unknown` の遷移そのものがラッチ。ここへ来るのは1本につき1回だけ
@@ -1366,7 +1454,10 @@ impl Session {
         }
 
         Changed {
-            status: stalled || silent,
+            // **`woke` を落とさないこと。** 落とすと状態は変わるのに配信が呼ばれず、
+            // ブラウザは停滞のまま見続ける。テストは `session.status()` を直に見るので
+            // **緑になってしまう**
+            status: stalled || silent || woke,
             meta: mode_changed,
         }
     }
@@ -2110,6 +2201,8 @@ impl SessionManager {
             end_report: EndReportCell::default(),
             saw_output: AtomicBool::new(false),
             hook_silence_noted: AtomicBool::new(false),
+            terminal_size: Mutex::new((INITIAL_COLS, INITIAL_ROWS)),
+            activity_checked_at: AtomicI64::new(0),
             model_alias: Mutex::new(initial_alias),
             model_switching: AtomicBool::new(false),
             // 画面を作るかどうかは**報告先が決める**（設計§7-2・§22 読み替え2）
