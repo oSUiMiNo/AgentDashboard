@@ -100,6 +100,7 @@ pub async fn add(
         agent_id: Set(agent_column),
         path: Set(path.to_string()),
         created_at: Set(now),
+        position: Set(next_position(db, account_id).await?),
     };
     projects::Entity::insert(row)
         .on_conflict_do_nothing()
@@ -111,6 +112,25 @@ pub async fn add(
     find_same(db, account_id, agent_column, path)
         .await?
         .ok_or_else(|| DbErr::Custom("枠を足したのに読み戻せません".to_string()))
+}
+
+/// そのアカウントの枠に振る、次の並び順（並べ替え設計§2-4）。**末尾へ足す。**
+///
+/// 末尾にする理由は2つある。1つは「増えたものが目の前に割り込まない」こと。もう1つは
+/// **既存の E2E の土台がこれに乗っている**ことで、`web/e2e/helpers.ts` の `spawnSession` は
+/// 「起こす前の枚数を数え、`nth(その数)` で新しいカードを掴む」作りになっている。
+/// ここを変えると、並べ替えと関係のない spec まで一斉に落ちる。
+///
+/// 枠が1つも無ければ 0。**空きがあっても詰め直さない**——並べ替えの口
+/// （`PUT /api/projects/order`）が丸ごと受け取って 0 から振り直すので、
+/// 穴はそこで消える。
+async fn next_position(db: &DatabaseConnection, account_id: Uuid) -> Result<i32, DbErr> {
+    let last = projects::Entity::find()
+        .filter(projects::Column::AccountId.eq(account_id))
+        .order_by_desc(projects::Column::Position)
+        .one(db)
+        .await?;
+    Ok(last.map_or(0, |row| row.position.saturating_add(1)))
 }
 
 /// 枠を消す。消えたら `true`、もともと無い（または他人のもの）なら `false`。

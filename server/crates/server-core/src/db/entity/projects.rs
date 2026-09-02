@@ -30,6 +30,11 @@ pub struct Model {
     pub agent_id: Uuid,
     pub path: String,
     pub created_at: i64,
+    /// そのアカウントの中での並び（並べ替え設計§2-1）。**0 から詰めて振る。**
+    ///
+    /// **並びの正はこの列**であって `created_at` ではない。`created_at` は値としては
+    /// 守り続けるが、もう並びを決めない（設計§10）。
+    pub position: i32,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -1077,6 +1077,15 @@ impl SessionRegistry {
 
     /// 記録を DB へ書く（無ければ作る）。
     async fn write_session(&self, origin: &ReportOrigin, meta: &SessionMeta) -> Result<(), DbErr> {
+        // **この値が効くのは行が無いときだけ。** 下の `on_conflict` は `Position` を
+        // 更新列に入れていないので、既にあるカードの並びは報告のたびに動いたりしない
+        let position = next_card_position(
+            &self.db,
+            origin.account_id,
+            meta.agent_id.map(|id| id.0),
+            &meta.project.0,
+        )
+        .await?;
         let row = entity::sessions::ActiveModel {
             card_id: Set(meta.card_id.0),
             agent_id: Set(meta.agent_id.map(|id| id.0)),
@@ -1102,6 +1111,7 @@ impl SessionRegistry {
             archived: Set(false),
             toml_account: Set(meta.toml_account.clone()),
             session_title: Set(meta.session_title.clone()),
+            position: Set(position),
         };
         entity::sessions::Entity::insert(row)
             .on_conflict(
@@ -1180,6 +1190,35 @@ impl SessionRegistry {
         records.insert(card_id, Arc::clone(&record));
         Ok(record)
     }
+}
+
+/// その枠に振る、次のカードの並び順（並べ替え設計§2-4）。**末尾へ足す。**
+///
+/// カードの `position` は**枠の中で閉じている**ので、絞りは枠の同一性
+/// `(account_id, agent_id, project)` と同じ3つで掛ける。**`agent_id` は
+/// ローカルモードで `NULL` になる**ので、`eq(None)` ではなく `is_null()` を使う——
+/// SQL の `= NULL` はどの行にも当たらず、ローカルのカードが毎回 0 から振り直される。
+///
+/// 枠にカードが1枚も無ければ 0。**空きは詰め直さない**（並べ替えの口が丸ごと
+/// 受け取って 0 から振り直すので、穴はそこで消える）。
+async fn next_card_position(
+    db: &DatabaseConnection,
+    account_id: Uuid,
+    agent_id: Option<Uuid>,
+    project: &str,
+) -> Result<i32, DbErr> {
+    let found = entity::sessions::Entity::find()
+        .filter(entity::sessions::Column::AccountId.eq(account_id))
+        .filter(entity::sessions::Column::Project.eq(project));
+    let found = match agent_id {
+        Some(id) => found.filter(entity::sessions::Column::AgentId.eq(id)),
+        None => found.filter(entity::sessions::Column::AgentId.is_null()),
+    };
+    let last = found
+        .order_by_desc(entity::sessions::Column::Position)
+        .one(db)
+        .await?;
+    Ok(last.map_or(0, |row| row.position.saturating_add(1)))
 }
 
 /// [`SessionRecord`] を作る瞬間だけ使う仮の中身。

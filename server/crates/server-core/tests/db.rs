@@ -36,6 +36,9 @@ async fn seed_session(db: &sea_orm::DatabaseConnection, card_id: CardId) {
         archived: Set(false),
         toml_account: Set(None),
         session_title: Set(None),
+        // 並びはこの一式の関心事ではない。**枠の中で 0 が重なっても構わない**——
+        // 並び順そのものを見るテストは、入れたあとで明示的に振り直す
+        position: Set(0),
     };
     entity::sessions::Entity::insert(row)
         .exec(db)
@@ -755,6 +758,7 @@ async fn seed_card(
         archived: Set(archived),
         toml_account: Set(None),
         session_title: Set(None),
+        position: Set(0),
     };
     entity::sessions::Entity::insert(row)
         .exec(db)
@@ -770,15 +774,28 @@ async fn seed_card(
 async fn 枠の表を巻き戻す(db: &sea_orm::DatabaseConnection) {
     use sea_orm::ConnectionTrait as _;
 
-    let version = db::migration_names()
-        .into_iter()
+    let names = db::migration_names();
+    let projects = names
+        .iter()
         .find(|name| name.contains("projects"))
         .expect("枠のマイグレーションが一覧に居ること");
+    // **並び順の列は、枠の表へ後から足している。** 枠だけ巻き戻すと、作り直しで
+    // できる表に `position` が無いまま残る（後の1本は適用済みなので再実行されない）。
+    // 列を足した側も一緒に巻き戻して、両方が順に効き直すようにする。
+    //
+    // **`sessions` の列は落とさない。** 巻き戻してから作り直すまでの間にカードを
+    // 入れるテストがあるので、ここで落とすとその挿入が通らなくなる。落とさなくても、
+    // あちらの `up` は既にある列を飛ばす作りになっている
+    let position = names
+        .iter()
+        .find(|name| name.contains("position"))
+        .expect("並び順のマイグレーションが一覧に居ること");
+
     db.execute_unprepared("DROP TABLE projects")
         .await
         .expect("枠の表を落とせること");
     db.execute_unprepared(&format!(
-        "DELETE FROM seaql_migrations WHERE version = '{version}'"
+        "DELETE FROM seaql_migrations WHERE version IN ('{projects}', '{position}')"
     ))
     .await
     .expect("適用済みの記録を消せること");

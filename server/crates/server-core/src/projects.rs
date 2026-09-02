@@ -262,6 +262,7 @@ mod tests {
             agent_id: agent,
             path: "/home/example/dev/app".to_string(),
             created_at: 1,
+            position: 0,
         };
         assert_eq!(to_view(&remote).host, agent.to_string());
 
