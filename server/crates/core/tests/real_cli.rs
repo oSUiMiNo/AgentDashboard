@@ -225,7 +225,7 @@ async fn ヘッドレスで起動するとフックが届き必須フィール�
 
     let received = mock.received();
     let events: Vec<&str> = received.iter().map(|hook| hook.event.as_str()).collect();
-    // 実際に発火した種別を記録しておく。設計§5 が挙げる9種のうちどれが本当に来るのかは、
+    // 実際に発火した種別を記録しておく。注入している種別のうちどれが本当に来るのかは、
     // ここでしか確かめられない（--nocapture で実行するので出力が残る）
     println!("実際に発火したフック: {events:?}");
 

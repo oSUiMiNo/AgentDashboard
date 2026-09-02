@@ -915,3 +915,26 @@ async fn 一本のセッションを起こすと_card_id_で串刺しにでき�
         .collect();
     assert!(!targets.is_empty(), "target が読めない: {lines:#?}");
 }
+
+/// API エラーで終わったターンが、継ぎ目を通って入力待ちになる（設計§6）。
+///
+/// 単体では `apply` の腕を見ているだけなので、**注入した settings に `StopFailure` が
+/// 現れているか**はここでしか確かめられない。`hooks_settings.rs` は `HookEvent::ALL` を
+/// 回すだけなので、腕を足せば注入も付いてくる——その主張が本当かを通しで見る。
+#[tokio::test]
+async fn stop_failureは継ぎ目を通って入力待ちにする() {
+    let server = common::TestServer::start().await;
+    let (session, mut watcher) = common::start_session(&server.manager).await;
+
+    common::fire_hook(&session, &mut watcher, "UserPromptSubmit", "").await;
+    common::wait_for_status(&session, SessionStatus::Working).await;
+
+    common::fire_hook(
+        &session,
+        &mut watcher,
+        "StopFailure",
+        r#"{"error":"rate_limit"}"#,
+    )
+    .await;
+    common::wait_for_status(&session, SessionStatus::WaitingInput).await;
+}

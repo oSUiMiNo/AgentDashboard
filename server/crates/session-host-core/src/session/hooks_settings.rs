@@ -257,10 +257,10 @@ mod tests {
     }
 
     #[test]
-    fn 設計5の9イベントすべてが注入される() {
+    fn 注入するイベントがすべてsettingsへ現れる() {
         let value = settings();
         let hooks = value["hooks"].as_object().expect("hooks があること");
-        assert_eq!(hooks.len(), 9);
+        assert_eq!(hooks.len(), HookEvent::ALL.len());
         for event in HookEvent::ALL {
             assert!(
                 hooks.contains_key(event.as_str()),
@@ -347,7 +347,10 @@ mod tests {
 
         let text = std::fs::read_to_string(&written.path).unwrap();
         let parsed: Value = serde_json::from_str(&text).expect("JSON として読めること");
-        assert_eq!(parsed["hooks"].as_object().unwrap().len(), 9);
+        assert_eq!(
+            parsed["hooks"].as_object().unwrap().len(),
+            HookEvent::ALL.len()
+        );
         assert!(
             parsed["hooks"]["Stop"][0]["hooks"][0]["command"]
                 .as_str()
@@ -439,7 +442,10 @@ mod tests {
             },
         );
         assert!(value.get("statusLine").is_none());
-        assert_eq!(value["hooks"].as_object().unwrap().len(), 9);
+        assert_eq!(
+            value["hooks"].as_object().unwrap().len(),
+            HookEvent::ALL.len()
+        );
         assert_eq!(value["model"], "opus", "model の注入は statusLine とは独立");
     }
 }

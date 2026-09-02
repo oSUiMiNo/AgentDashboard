@@ -4,8 +4,23 @@
 //!
 //! ターミナルの表示（ANSI）を読んで「いま何をしているか」を推測する方式は、CLI の見た目が
 //! 変わるたびに壊れる。フックは「どのツールを使ったか」「権限を求めたか」を**構造化された
-//! JSON** で渡してくるので、表示の変更に左右されない。要件が画面のスクレイピングを禁じて
-//! いるのはこのため。
+//! JSON** で渡してくるので、表示の変更に左右されない。状態をフックから導くのはこのため。
+//!
+//! # 「画面を読むな」という禁止ではない
+//!
+//! **ここにはかつて「要件が画面のスクレイピングを禁じている」と書いてあったが、言い過ぎ
+//! だった。** 要件（初期実装 `要件.md`）が禁じているのは **ANSI 画面のスクレイピングで
+//! 構造化UIを作ること**だけで、方針・設計にはそもそも記述が無い。
+//!
+//! 実際、カードの属性を画面から読む例はこの crate に既にある。
+//!
+//! - **権限モード**は端末のフッタを読んで決める（`Session::read_footer_mode`。呼び出し元は
+//!   [`sweep_stalled`] と**同じ1秒周期の見張り**）
+//! - **フォルダ信頼の確認**が出ているかも画面で見分ける（`selfheal`）
+//!
+//! つまり**フックで足りるなら使わない、というだけ**である。フックが存在しない場面
+//! （例：`AskUserQuestion` は `PreToolUse` も `Notification` も出さない）で画面を見る判断は、
+//! この段落を根拠に禁止されるものではない。**採否は「壊れやすさに見合うか」で決めること。**
 //!
 //! # 設計の要点：時刻も副作用も持たない
 //!
@@ -16,7 +31,7 @@
 use protocol::{ClaudeSessionId, PermissionMode, SessionMeta, SessionStatus, Timestamp};
 use serde_json::Value;
 
-/// Claude Code に注入するフックイベント（設計§5 の9種）。
+/// Claude Code に注入するフックイベント（設計§5 の9種＋`StopFailure`）。
 ///
 /// これがそのまま「注入する settings のキー」であり「受信URLの末尾」でもある。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -27,6 +42,7 @@ pub enum HookEvent {
     PostToolUse,
     Notification,
     Stop,
+    StopFailure,
     SubagentStart,
     SubagentStop,
     SessionEnd,
@@ -34,13 +50,14 @@ pub enum HookEvent {
 
 impl HookEvent {
     /// 注入する全イベント。settings の生成と、受信側の解釈の両方がこの並びを使う。
-    pub const ALL: [HookEvent; 9] = [
+    pub const ALL: [HookEvent; 10] = [
         Self::SessionStart,
         Self::UserPromptSubmit,
         Self::PreToolUse,
         Self::PostToolUse,
         Self::Notification,
         Self::Stop,
+        Self::StopFailure,
         Self::SubagentStart,
         Self::SubagentStop,
         Self::SessionEnd,
@@ -54,6 +71,7 @@ impl HookEvent {
             Self::PostToolUse => "PostToolUse",
             Self::Notification => "Notification",
             Self::Stop => "Stop",
+            Self::StopFailure => "StopFailure",
             Self::SubagentStart => "SubagentStart",
             Self::SubagentStop => "SubagentStop",
             Self::SessionEnd => "SessionEnd",
@@ -239,6 +257,18 @@ pub fn apply(meta: &mut SessionMeta, input: &HookInput, now: Timestamp) -> Chang
                 meta.last_assistant_message = message;
                 changed.meta = true;
             }
+        }
+
+        // **`Stop` と同じ扱いにする。** どちらも「そのターンは終わった」を意味する。
+        //
+        // `Stop` は応答が完了したときのイベントなので、API エラーで終わったターンでは
+        // 飛ばない——代わりにこちらが飛ぶ（公式）。受け取らないと、レート制限で止まった
+        // セッションが `Working` のまま取り残され、120秒で停滞に落ちて戻らなくなる。
+        //
+        // エラーの種別（`rate_limit` ほか）で表示を変えないのは、それが新しい状態を作る
+        // 話になるため（設計§6-2・§10-1）。エラーで終わったことは端末に出ている。
+        HookEvent::StopFailure => {
+            set_unless_permission(meta, SessionStatus::WaitingInput, &mut changed);
         }
 
         // サブエージェントはバッジの数だけを動かす。状態そのものは遷移させない（設計§5）
@@ -487,7 +517,11 @@ mod tests {
 
     #[test]
     fn 権限確認待ちは入力待ちで上書きされない() {
-        for event in [HookEvent::SessionStart, HookEvent::Stop] {
+        for event in [
+            HookEvent::SessionStart,
+            HookEvent::Stop,
+            HookEvent::StopFailure,
+        ] {
             let mut meta = meta_with(SessionStatus::WaitingPermission);
             apply(&mut meta, &hook(event), NOW);
             assert_eq!(
@@ -731,6 +765,45 @@ mod tests {
 
         // 二度目は変化なし（同じ通知を配信し続けない）
         assert!(!sweep_stalled(&mut meta, NOW, 120));
+    }
+
+    /// API エラーで終わったターンも「終わった」として扱う（設計§6）。
+    ///
+    /// `Stop` は応答が完了したときにしか飛ばないので、レート制限などで落ちたターンは
+    /// これを受け取らないと `Working` のまま残り、120秒で停滞へ落ちて戻らなくなる。
+    #[test]
+    fn stop_failureは入力待ちにする() {
+        for status in [
+            SessionStatus::Starting,
+            SessionStatus::Working,
+            SessionStatus::Stalled,
+        ] {
+            let mut meta = meta_with(status);
+            apply(&mut meta, &hook(HookEvent::StopFailure), NOW);
+            assert_eq!(
+                meta.status,
+                SessionStatus::WaitingInput,
+                "{status:?} から入力待ちへ戻ること"
+            );
+        }
+    }
+
+    /// 人の答えを待っている画面は、停滞の判定に触れない（設計§4-3 の根拠）。
+    ///
+    /// 停滞へ落ちるのは `Working` からだけなので、権限確認待ちのカードは何時間
+    /// 放置されても `sweep_stalled` の対象にならない。**画面を読む判定はここから
+    /// 先にしか置かない**ので、この一点が「権限確認待ちを拾わなくてよい」根拠に
+    /// なっている。崩れたら設計§4 ごと見直すこと。
+    #[test]
+    fn 権限確認待ちは何時間経っても停滞にならない() {
+        let mut meta = meta_with(SessionStatus::WaitingPermission);
+        meta.last_activity_at = NOW - 6 * 60 * 60 * 1000;
+
+        assert!(
+            !sweep_stalled(&mut meta, NOW, 120),
+            "権限確認待ちは停滞へ落ちない"
+        );
+        assert_eq!(meta.status, SessionStatus::WaitingPermission);
     }
 
     #[test]
