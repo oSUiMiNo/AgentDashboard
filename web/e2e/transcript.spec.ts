@@ -620,6 +620,74 @@ test('狭い窓とハイコントラストでも壊れない', async ({ page }) 
   await expect(page.getByTestId('transcript-heading')).toBeVisible()
 })
 
+test('文字のど真ん中を押しても開き、押下中に横へ動かない', async ({ page }) => {
+  // 要望12（設計§12-7）。**`locator.click()` で確かめないこと**——あれは要素の位置を
+  // 追いかけるので、**逃げても通ってしまう**。`page.mouse` で押して離す。
+  //
+  // **`transform` は取り合う。** 行のボタン共通の Pressed が `.body-toggle:active` に
+  // 勝って中央寄せを消し、押した瞬間に幅の半分（35px）右へ飛んでいた。
+  await loadFoldLines(page)
+  const row = foldableRow(page)
+  await expect(row).toBeVisible(届くまで)
+  const toggle = row.getByTestId('body-toggle')
+  await toggle.scrollIntoViewIfNeeded()
+  await expect(toggle).toHaveText('続きを読む')
+
+  const 前 = (await toggle.boundingBox())!
+  await page.mouse.move(前.x + 前.width / 2, 前.y + 前.height / 2)
+  await page.mouse.down()
+  await page.waitForTimeout(150)
+  const 押下 = (await toggle.boundingBox())!
+  const 変換 = await toggle.evaluate((el) => {
+    const s = getComputedStyle(el)
+    return { transform: s.transform, translate: s.translate }
+  })
+  await page.mouse.up()
+
+  // **横へ動かない。** 1px は丸めのぶん
+  expect(Math.abs(押下.x - 前.x)).toBeLessThanOrEqual(1)
+  // **文字の上を押して開く**（要望12 の本体）
+  await expect(toggle).toHaveText('畳む')
+  // **取り合っていないこと。** 縮みは `transform`、中央寄せは `translate` が持つ
+  expect(変換.transform).not.toBe('none')
+  expect(変換.translate).not.toBe('none')
+})
+
+test('「畳む」も左右中央にあり、上の余白が倍', async ({ page }) => {
+  // 要望11。**開閉で位置が変わらない**こと。**浮かせない**（帯が無いので重ねる相手が無い）
+  await loadFoldLines(page)
+  const row = foldableRow(page)
+  await expect(row).toBeVisible(届くまで)
+  const toggle = row.getByTestId('body-toggle')
+  await toggle.scrollIntoViewIfNeeded()
+
+  const 畳んだとき = await toggle.evaluate((el) => ({
+    上の余白: getComputedStyle(el).marginTop,
+  }))
+  await toggle.click()
+  await expect(toggle).toHaveText('畳む')
+
+  const 開いたとき = await toggle.evaluate((el) => {
+    const s = getComputedStyle(el)
+    const 箱 = el.getBoundingClientRect()
+    const 親 = (el.parentElement as HTMLElement).getBoundingClientRect()
+    return {
+      position: s.position,
+      上の余白: s.marginTop,
+      左の余白: 箱.left - 親.left,
+      右の余白: 親.right - 箱.right,
+    }
+  })
+
+  // **浮かせない**（流れの中に居る）
+  expect(開いたとき.position).not.toBe('absolute')
+  // **左右中央**（丸めのぶん 1px は許す）
+  expect(Math.abs(開いたとき.左の余白 - 開いたとき.右の余白)).toBeLessThanOrEqual(1)
+  // **上の余白が倍。** 畳んでいるときは浮いていて余白を持たないので、絶対値で見る
+  expect(parseFloat(開いたとき.上の余白)).toBeGreaterThanOrEqual(8)
+  void 畳んだとき
+})
+
 test('帯の下9割は、どこを押しても開く', async ({ page }) => {
   // **要望10 の本体**（設計§6-7-5）。「続きを読む」をピンポイントで突かなくても開く。
   // **左寄り・中央・右寄りの3点**で見る——1点だけだと、たまたま文字の上を突いていても通る

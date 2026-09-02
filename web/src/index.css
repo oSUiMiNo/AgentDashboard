@@ -431,26 +431,31 @@
 
   `max()` で押さえているのは、**浅い段（19.5px）が拡大した文字より低い**ためである。
 */
+/*
+  **位置は `translate` プロパティで持つ。`transform` を使わない**（設計§12-7・要望12）。
+
+  **`transform` は取り合う。** 複数の規則で組み立てると、**特異度で勝った側が全部を持って
+  いく**——「足す」つもりで書いても足されない。実際に、行のボタン共通の Pressed
+  （`[data-testid='transcript-row'] button:active:not(:disabled)`・特異度 (0,3,1)）が
+  `.body-toggle:active`（(0,2,0)）に勝ち、**中央寄せの `translateX(-50%)` を丸ごと消していた**。
+
+  結果、押した瞬間に**幅の半分（35px）右へ飛び**、離した位置がボタンの外になって
+  **`click` が発火しなかった**（要望12 の症状そのもの）。**`scale(0.98)` を書いたのに
+  `0.99` で効いていた**ことが、上書きの証拠だった。
+
+  **`translate` は `transform` とは別のプロパティ**なので、Pressed の `scale` と取り合わない。
+  **位置と、押した反応は、別の関心事である。**
+*/
 .body-toggle-float {
   position: absolute;
   left: 50%;
-  transform: translateX(-50%);
+  translate: -50%;
   bottom: max(0.125rem, calc(var(--fade-band) * 0.4 - 0.4375rem));
   z-index: 2;
 }
 .body-toggle {
-  /* §28.2 の Micro（80〜140ms） */
-  transition:
-    color 120ms ease,
-    transform 120ms ease;
-}
-.body-toggle:active {
-  /* §27.4 Pressed。`scale(0.97〜0.99)`。**中央寄せの `translateX` を消さない** */
-  transform: translateX(-50%) scale(0.98);
-}
-/* 流れの中に居るとき（開いているとき）は、中央寄せの変換を持たない */
-.body-toggle:not(.body-toggle-float):active {
-  transform: scale(0.98);
+  /* §28.2 の Micro（80〜140ms）。**縮みは行のボタン共通の Pressed に任せる** */
+  transition: color 120ms ease;
 }
 
 /*

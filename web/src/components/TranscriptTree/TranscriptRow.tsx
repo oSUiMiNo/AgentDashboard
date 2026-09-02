@@ -632,8 +632,10 @@ function MarkdownBody({
           // **いちばん浅い段の帯（1行＝19.5px）より背が高くなって、帯からはみ出す**——
           // 狭い窓ではフェード中の最終行と重なった。字の大きさは変えずに箱だけ詰めれば、
           // どの段でも帯の中へ収まり、「中央よりやや下」も成立する
+          // **開いているときも左右中央**（要望11）。**浮かせない**——帯が無いので重ねる
+          // 相手が無い（設計§6-7-3）。流れの中で中央に置き、**上の余白は倍**（`mt-2`）
           className={`text-foreground body-toggle text-sm leading-none font-medium${
-            fade ? ' body-toggle-float' : ' mt-1'
+            fade ? ' body-toggle-float' : ' mx-auto mt-2 block'
           }`}
         >
           {row.bodyOpen ? '畳む' : '続きを読む'}
