@@ -32,7 +32,7 @@ services:
     # 上げるかどうかは利用者が決める形にしてある。
     # 版を上げるときは `docker/compose.yml` のここを書き換えて `pull` する。
     # ワークスペースの版と食い違っていないことは `make ci` が見ている
-    image: ghcr.io/osuimino/agentdashboard:0.1.73
+    image: ghcr.io/osuimino/agentdashboard:0.1.74
     environment:
       # 待ち受けを広げないとコンテナの外から届かない。**鍵はアカウントのログイン**
       # なので、広げること自体は危険ではない（設計§8-1）
