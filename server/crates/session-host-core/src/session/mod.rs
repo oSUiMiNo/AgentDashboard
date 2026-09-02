@@ -181,6 +181,16 @@ const MODEL_CONFIRM_WAIT: Duration = Duration::from_secs(4);
 /// 片方を実測で動かしたときにもう片方が黙って付いてくると理由が追えなくなる。
 const ATTACHMENT_STEP: Duration = Duration::from_millis(200);
 
+/// 添付の印を探すときに読むスクロールバックの長さ（バイト）。
+///
+/// **[`FOOTER_TAIL`] より厚い。** [`RingBuffer::since`] は目印より後が上限を超えると
+/// **古いほうから捨てる**が、印は貼り付けの直後——つまり**窓の先頭側**に出る。
+/// フッタと同じ 32 KiB にすると、**送信のあいだに 32 KiB を超える出力が流れただけで
+/// 印が窓から落ち、添付できているのに断られる**（応答が流れている最中に画像を送ると起きる）。
+///
+/// フッタ側を厚くしないのは、あちらが**毎秒回る見張り**で、しかも末尾しか要らないため。
+const ATTACHMENT_TAIL: usize = 256 * 1024;
+
 /// 同時に起こし直せる本数（接続断のカードを復旧ボタンで戻す 設計§8-4）。
 ///
 /// 1本あたり実測 **1190MB・14プロセス**（ローカルイシュー
@@ -551,9 +561,26 @@ impl std::fmt::Debug for Session {
     }
 }
 
+/// フックが知らせてきた JSONL の場所と、**それが乗り換えかどうか**。
+///
+/// **区別が要る理由。** ダッシュボードを起こし直すと `transcript_path` は `None` へ戻り、
+/// **最初のフックで必ず「新しい場所」に見える**。ここで木を捨てると
+/// **再起動のたびに全カードの履歴が消える**。**初めて名乗ったのか、別のファイルへ
+/// 移ったのか**を、呼ぶ側が見分けられなければならない。
+#[derive(Debug, Clone)]
+struct TranscriptLearned {
+    /// 監視してほしい JSONL の場所。
+    path: String,
+    /// **それまで別のファイルを見ていたか。** ターミナルの中で `/resume` や `/clear` を
+    /// 打つと、claude は**別の JSONL へ移る**。このとき捨てないと、1枚のカードの木に
+    /// **前のセッションと新しいセッションのノードが積み上がる**（実測：1,963件）。
+    switched: bool,
+}
+
 impl Session {
     pub fn meta(&self) -> SessionMeta {
-        self.meta.lock().expect("ロックが壊れていない").clone()
+        self.meta.lock().expect("ロックが壊れていない").clone(),
+        position: 0,
     }
 
     pub fn status(&self) -> SessionStatus {
@@ -1046,13 +1073,27 @@ impl Session {
     /// 無駄に待たせるかのどちらかになる。
     ///
     /// 出そろったら**上限を待たずにすぐ帰る**。
+    ///
+    /// # 本文が印の綴りを含んでいると、数を多く見る
+    ///
+    /// 貼り付けた本文は端末へ echo され、しかも TUI は入力欄を**何度も描き直す**ので、
+    /// 利用者が `[Image #1]` と打つと**その字が何度も印として数えられる**。
+    ///
+    /// **「本文に含まれる数だけ差し引く」では直らない。** 描き直しの回数は端末と CLI の
+    /// 都合で決まるので、**差し引くべき数が分からない**（擬似 claude で実測したところ、
+    /// 本文の印1つが3つに見えた——生の echo と `received:` の行と、両方に写るため）。
+    ///
+    /// **起きたときの結末は「早く確定する」**——claude が画像を読み終える前に送ってしまう。
+    /// 添付を付けたうえで本文に `[Image #N]` と打つ場合にしか起きないので、いまは
+    /// **直さずに残してある**。直すなら、数えるのではなく**いま画面に出ているものだけを
+    /// 見る**（＝端末エミュレータを通す）ことになるが、ローカルモードにはそれが無い。
     async fn await_image_marks(&self, since: u64, want: usize) -> anyhow::Result<()> {
         let started = tokio::time::Instant::now();
         let deadline = started + self.attachment_mark_wait;
         let mut got = 0;
         while tokio::time::Instant::now() < deadline {
             tokio::time::sleep(ATTACHMENT_STEP).await;
-            got = input::count_image_marks(&self.scrollback_since(since, FOOTER_TAIL));
+            got = input::count_image_marks(&self.scrollback_since(since, ATTACHMENT_TAIL));
             if got >= want {
                 tracing::info!(
                     card_id = %self.card_id,
@@ -1106,8 +1147,12 @@ impl Session {
     /// # 確かめ方には限界がある
     ///
     /// 覗けるのは追記しかない生のバイト列なので、「消えた」ことは直接には見られない。
-    /// **畳んだあとに描き直された分に印が載っていなければ畳めたとみなす。** 畳めていない
-    /// ときは入力欄がそのまま描き直されるので、この見方でも取りこぼしは少ない。
+    /// **畳んだあとに描き直された分に印が載っていなければ畳めたとみなす。**
+    ///
+    /// **描き直しが1バイトも来なかったときは「畳めていない」側に倒す。** 忙しい・遅い・
+    /// 詰まっている端末では `Esc` が効かないまま何も起きないことがあり、そこを「畳めた」と
+    /// 読むと、断り文が「そのままもう一度送れます」と言ったうえで**次の送信で積み上がる**
+    /// ——この関数が防ぐために在る失敗そのものになる。**安全側は「畳めた」ではない。**
     async fn fold_input(&self) -> bool {
         self.send_key(b"\x1b", "添付の取り消し（1回目）");
         tokio::time::sleep(INSTRUCTION_SETTLE).await;
@@ -1115,7 +1160,9 @@ impl Session {
 
         let since = self.scrollback_mark();
         tokio::time::sleep(ATTACHMENT_STEP).await;
-        input::count_image_marks(&self.scrollback_since(since, FOOTER_TAIL)) == 0
+        let 描き直し = self.scrollback_since(since, ATTACHMENT_TAIL);
+        // 何も来ていない＝畳めたかどうかを**確かめられなかった**
+        !描き直し.is_empty() && input::count_image_marks(&描き直し) == 0
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> anyhow::Result<()> {
@@ -1242,13 +1289,19 @@ impl Session {
     /// 判定そのものは [`crate::state::apply`] に閉じている。ここがやるのは
     /// 「時計を読む」「ロックを取る」「JSONL の場所を控える」という周辺の世話だけ。
     /// 変わった場合は、新しい JSONL の場所も返す（パーサへ監視を頼む引き金になる）。
-    fn apply_hook(&self, input: &HookInput) -> (Changed, Option<String>) {
+    fn apply_hook(&self, input: &HookInput) -> (Changed, Option<TranscriptLearned>) {
         let mut new_path = None;
         if let Some(path) = input.transcript_path() {
             let mut current = self.transcript_path.lock().expect("ロックが壊れていない");
             if current.as_deref() != Some(path) {
+                // **初回か、乗り換えか。** 呼ぶ側はこれで振る舞いを変える——
+                // 乗り換えのときだけ、それまでの木を捨てる必要がある
+                let switched = current.is_some();
                 *current = Some(path.to_string());
-                new_path = Some(path.to_string());
+                new_path = Some(TranscriptLearned {
+                    path: path.to_string(),
+                    switched,
+                });
             }
         }
         let mut meta = self.meta.lock().expect("ロックが壊れていない");
@@ -2044,6 +2097,7 @@ impl SessionManager {
                 // 書かれる）。起動した時点では存在しないので、ここで埋められる値が無い。
                 // パーサが拾って報告してくるまで `None` のままでよい（設計§2）
                 session_title: None,
+                position: 0,
             }),
             process,
             ring: Mutex::new(RingBuffer::new(self.config.pty_ring_buffer)),
@@ -2345,12 +2399,30 @@ impl SessionManager {
         let (changed, new_transcript) = session.apply_hook(input);
         // JSONL の場所が分かった／変わった時点でパーサへ監視を頼む。resume で別ファイルに
         // なった場合も同じ経路で張り替わる（設計§6）
-        if let Some(path) = new_transcript {
+        if let Some(learned) = new_transcript {
+            let TranscriptLearned { path, switched } = learned;
+            // **乗り換えなら、張り替える前に捨てる。** ターミナルの中で `/resume` や
+            // `/clear` を打つと claude は別の JSONL へ移るが、それまでに積んだ木を
+            // 捨てないと**1枚のカードに2つのセッションのノードが積み上がる**
+            // （実測：混入 1,963件。利用者からは「隣のカードのログが出る」と見える）。
+            //
+            // **初回は捨ててはいけない。** 起こし直すと `transcript_path` は `None` へ
+            // 戻るので、**最初のフックは必ず「新しい場所」に見える**——ここで捨てると
+            // **再起動のたびに全カードの履歴が消える**
+            if switched {
+                tracing::info!(
+                    card_id = %session.card_id,
+                    %path,
+                    "履歴の場所が変わったので、それまでの木を捨てます"
+                );
+                self.report_transcript_reset(session.card_id);
+            }
             match self.parser.lock().expect("ロックが壊れていない").as_ref() {
                 Some(parser) => {
                     tracing::info!(
                         card_id = %session.card_id,
                         %path,
+                        switched,
                         "パーサへ履歴の監視を頼みました"
                     );
                     parser.watch(session.card_id, path);
@@ -2927,6 +2999,19 @@ mod tests {
     ///
     /// 到達可能性ではなく**綴りそのもの**を見るのは、`write_input` が公開の口で
     /// あり続ける必要があるため（`crate::link` のブラウザの打鍵が通る）。
+    #[test]
+    fn 印を探す窓はフッタ読みより厚い() {
+        // `RingBuffer::since` は目印より後が上限を超えると**古いほうから捨てる**。
+        // 印は貼り付けの直後（＝窓の先頭側）に出るので、フッタと同じ厚さだと
+        // **送信のあいだに流れた出力に押し出される**（添付できているのに断られる）
+        assert!(
+            ATTACHMENT_TAIL > FOOTER_TAIL,
+            "印の窓がフッタ読みと同じかそれより薄い"
+        );
+        // フッタ側は**毎秒回る見張り**なので厚くしない。値ごと固定する
+        assert_eq!(FOOTER_TAIL, 32 * 1024);
+    }
+
     #[test]
     fn 端末への書き込みは声を持つ口だけを通る() {
         /// 許した綴り。**増やすときは、その口が失敗を残すことを確かめてから。**

@@ -96,6 +96,16 @@ impl OffsetStore {
                     path: transcript_path.to_string(),
                     files: BTreeMap::new(),
                 });
+            // **場所が変わったら、読み位置も捨てる。** `path` だけ差し替えて `files` を
+            // 残すと、`resume()` が**前のセッションのファイルまで返す**——パーサは
+            // それを**このカードの `card_id` で読み続ける**ので、隣のセッションの行が
+            // リアルタイムで流れ込む（実測：`offsets.json` に残骸が1件あった）。
+            //
+            // **`report_transcript_reset` を取り逃がしても効く保険である。** あちらは
+            // フックの経路、こちらは読み位置の経路で、**別々に壊れうる**
+            if entry.path != transcript_path {
+                entry.files.clear();
+            }
             entry.path = transcript_path.to_string();
             entry.files.insert(source.to_string(), next_offset);
         }
@@ -127,6 +137,50 @@ mod tests {
     #![allow(non_snake_case)]
 
     use super::*;
+
+    /// 履歴の場所が変わったら、**前のセッションの読み位置を捨てる**。
+    ///
+    /// **捨てないと、隣のセッションが流れ込む。** `path` だけ差し替えて `files` を残すと
+    /// `resume()` が前のファイルまで返し、パーサは**このカードの `card_id` で**それを
+    /// 読み続ける。実機の `offsets.json` に、実際にその残骸が1件あった。
+    #[test]
+    fn 履歴の場所が変わったら前の読み位置を捨てる() {
+        let dir = temp_dir("switch");
+        let store = OffsetStore::open(dir.clone());
+        let card = CardId::new();
+
+        store.commit(card, "/p/前.jsonl", "/p/前.jsonl", 100);
+        assert_eq!(store.resume(card, "/p/前.jsonl").len(), 1, "まず1件覚えていること");
+
+        // ここで `/resume` や `/clear` が起きて、別の JSONL へ移った
+        store.commit(card, "/p/後.jsonl", "/p/後.jsonl", 10);
+
+        let 残り = store.resume(card, "/p/後.jsonl");
+        assert_eq!(残り.len(), 1, "**前のファイルが残っていないこと**");
+        assert!(
+            残り.contains_key("/p/後.jsonl"),
+            "新しいファイルだけを覚えていること: {残り:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **同じ場所への commit では捨てない。** 読み進めるたびに捨てたら、
+    /// サブエージェントのファイルが毎回失われる。
+    #[test]
+    fn 同じ場所なら読み位置を捨てない() {
+        let dir = temp_dir("same");
+        let store = OffsetStore::open(dir.clone());
+        let card = CardId::new();
+
+        store.commit(card, "/p/主.jsonl", "/p/主.jsonl", 100);
+        store.commit(card, "/p/主.jsonl", "/p/主/subagents/子.jsonl", 20);
+        store.commit(card, "/p/主.jsonl", "/p/主.jsonl", 300);
+
+        let 残り = store.resume(card, "/p/主.jsonl");
+        assert_eq!(残り.len(), 2, "**子のぶんが消えていないこと**: {残り:?}");
+        assert_eq!(残り.get("/p/主.jsonl"), Some(&300));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     fn temp_dir(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
