@@ -150,7 +150,11 @@ mod tests {
         let card = CardId::new();
 
         store.commit(card, "/p/前.jsonl", "/p/前.jsonl", 100);
-        assert_eq!(store.resume(card, "/p/前.jsonl").len(), 1, "まず1件覚えていること");
+        assert_eq!(
+            store.resume(card, "/p/前.jsonl").len(),
+            1,
+            "まず1件覚えていること"
+        );
 
         // ここで `/resume` や `/clear` が起きて、別の JSONL へ移った
         store.commit(card, "/p/後.jsonl", "/p/後.jsonl", 10);
