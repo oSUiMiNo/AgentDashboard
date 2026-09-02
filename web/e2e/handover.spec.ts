@@ -18,7 +18,16 @@
  */
 
 import { expect, test } from '@playwright/test'
-import { openDashboard } from './helpers'
+import {
+  openDashboard,
+  spawnSession,
+  ダッシュボードのPID,
+  プロセス表を読める,
+  引き取られていない子,
+} from './helpers'
+
+/** この土台の記録の置き場所（`playwright.config.ts` の `AGENTDASHBOARD_STATE_DIR`）。 */
+const 記録の置き場所 = '.e2e-state/handover-state'
 
 /** 応答の `started_at` を読む。**入れ替わったかは、これが動いたかで見る。** */
 async function startedAt(request: {
@@ -65,6 +74,16 @@ test('入れる側が置いた版も一覧に並ぶが、消せない', async ({
 
 test('押すと本当に入れ替わり、同じ入口で戻ってくる', async ({ page, request }) => {
   await openDashboard(page)
+
+  // **抱えている子が1本も無いと、この検査は何も見ていない**（ゾンビ設計§5-4）。
+  // 入れ替えで道連れになる相手を1本作ってから押す
+  const 数えられる = プロセス表を読める()
+  if (数えられる) {
+    await spawnSession(page)
+  }
+  const pid = 数えられる ? ダッシュボードのPID(記録の置き場所) : 0
+  const 入れ替える前のゾンビ = 数えられる ? 引き取られていない子(pid) : 0
+
   await page.goto('/settings')
 
   const before = await startedAt(request)
@@ -95,4 +114,16 @@ test('押すと本当に入れ替わり、同じ入口で戻ってくる', async
     'open',
     { timeout: 30_000 },
   )
+
+  if (!数えられる) {
+    return
+  }
+  // **`exec` なので PID は変わらない。** 変わっていたら入れ替えではなく起こし直しで、
+  // 以降の突き合わせは別のプロセスを見ていることになる
+  expect(ダッシュボードのPID(記録の置き場所)).toBe(pid)
+  // **ここがこのイシューの本丸。** 入れ替えは抱えている子を道連れにするが、
+  // 落とす前に引き取っていれば、引き取られていない子は1体も増えない
+  await expect
+    .poll(() => 引き取られていない子(pid), { timeout: 15_000, intervals: [200] })
+    .toBe(入れ替える前のゾンビ)
 })

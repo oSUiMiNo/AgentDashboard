@@ -1,3 +1,4 @@
+import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -769,4 +770,68 @@ export async function attachImage(
   await scope
     .getByTestId('composer-file')
     .setInputFiles({ name, mimeType: 'image/png', buffer: png })
+}
+
+/**
+ * この機械でプロセス表を読めるか（ゾンビ設計§5-1）。
+ *
+ * **「読めない」と「0体」を区別する。** 潰すと Linux 以外で「ゾンビは居ません」と嘘をつく。
+ */
+export function プロセス表を読める(): boolean {
+  return fs.existsSync('/proc')
+}
+
+/**
+ * 走っているダッシュボードの PID を、ログのファイル名から読む。
+ *
+ * `<state_dir>/logs/dashboard-<pid>.<日付>.jsonl` という名前の約束に乗る
+ * （`logs.spec.ts` と同じ作法）。**Playwright の `webServer` からは PID を取れない**
+ * ——`sh -c` を挟むので、取れたとしてもそれは殻の PID になる。
+ *
+ * **版の入れ替えは `exec` なので PID は変わらない。** 前後で同じ値が返るのが正しい姿。
+ */
+export function ダッシュボードのPID(stateDir: string): number {
+  const dir = path.join(stateDir, 'logs')
+  const 生きている = [
+    ...new Set(
+      fs
+        .readdirSync(dir)
+        .flatMap((name) => {
+          const 当たり = /^dashboard-(\d+)\./.exec(name)
+          return 当たり ? [Number(当たり[1])] : []
+        })
+        .filter((pid) => fs.existsSync(`/proc/${pid}`)),
+    ),
+  ]
+  if (生きている.length !== 1) {
+    throw new Error(
+      `走っているダッシュボードを1つに絞れない（${dir}）: ${生きている.join(',') || '該当なし'}`,
+    )
+  }
+  return 生きている[0]
+}
+
+/**
+ * その PID の子のうち、**引き取られていないもの**の数（ゾンビ設計§5-4）。
+ *
+ * `comm` は括弧で囲まれていて空白も括弧も含みうるので、**最後の `)` で切ってから**
+ * 残りの欄を割る。先頭から空白で割ると欄がずれる。
+ */
+export function 引き取られていない子(pid: number): number {
+  return fs
+    .readdirSync('/proc')
+    .filter((name) => /^\d+$/.test(name))
+    .filter((child) => {
+      let 行: string
+      try {
+        行 = fs.readFileSync(`/proc/${child}/stat`, 'utf8')
+      } catch {
+        // 読んでいる最中に消える子が居るのは普通
+        return false
+      }
+      const 閉じ = 行.lastIndexOf(')')
+      if (閉じ < 0) return false
+      const [state, ppid] = 行.slice(閉じ + 1).trim().split(/\s+/)
+      return state === 'Z' && Number(ppid) === pid
+    }).length
 }
