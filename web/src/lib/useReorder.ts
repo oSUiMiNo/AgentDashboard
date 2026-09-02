@@ -93,20 +93,6 @@ export function useReorder<T extends string>({
   const measured = useRef<{ rects: Rect[]; from: number; base: readonly T[] } | null>(null)
   const 送り = useRef<{ x: number; y: number }>({ x: 0, y: 0 })
 
-  // 掴んでいないあいだは、サーバから来た並びをそのまま映す。**掴んでいる最中は
-  // 映さない**——運んでいる途中に外から並びが来ると、指の下で場所取りが飛ぶ。
-  //
-  // **中身が同じなら、同じ配列を返して React に降りてもらう。** 呼び元は毎描画で
-  // 新しい配列を作る（`groups.map(...)`）ので、素直に入れると
-  // 「描く→状態が変わる→描く」が止まらなくなる。**実際に無限に回した。**
-  useEffect(() => {
-    if (dragging !== null) {
-      return
-    }
-    setOrder((now) =>
-      now.length === ids.length && now.every((each, at) => each === ids[at]) ? now : ids,
-    )
-  }, [ids, dragging])
 
   // 端に指がある間だけ送る。**掴んでいないときは回さない**
   useEffect(() => {
@@ -146,7 +132,8 @@ export function useReorder<T extends string>({
   const bind = useCallback(
     (id: T): Bound => ({
       onGrab: () => {
-        const base = order
+        // **掴んだ瞬間の並びを土台にする。** 以後はここから動かす
+        const base = ids
         const from = base.indexOf(id)
         if (from < 0) {
           return
@@ -161,6 +148,14 @@ export function useReorder<T extends string>({
           return { left: box.left, top: box.top, width: box.width, height: box.height }
         })
         measured.current = { rects, from, base }
+        /*
+          **掴んだ瞬間に、手元の並びへ土台を入れる。**
+
+          掴んでいない間は渡された並びをそのまま返しているので、手元の状態は
+          **マウント時のまま古い**（枠は起動後に足されるので、多くの場合は空）。
+          入れずに掴むと、掴んだ瞬間に一覧が空になる——**実際にそうなった。**
+        */
+        setOrder(base)
         setDragging(id)
       },
       onMove: (point) => {
@@ -208,8 +203,19 @@ export function useReorder<T extends string>({
         })
       },
     }),
-    [order, onCommit, scroller],
+    [ids, onCommit, scroller],
   )
 
-  return { order, dragging, bind, itemRef }
+  /*
+    **掴んでいないあいだは、渡された並びをそのまま返す。**
+
+    状態へ写して effect で追いかける形にしていたが、それだと**新しいものが現れてから
+    描かれるまでに1周ぶんの遅れ**が出る——一覧に来たばかりのカードが1フレームだけ
+    居ない状態になり、**「起こした直後に掴もうとすると見つからない」という揺らぎ**を
+    生んだ（E2E が負荷時にだけ落ちる形で出た）。
+
+    運んでいる最中だけは手元の並び（場所取りを動かしたもの）を返す。**外から新しい
+    並びが来ても、指の下では動かさない。**
+  */
+  return { order: dragging === null ? ids : order, dragging, bind, itemRef }
 }
