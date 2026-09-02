@@ -49,6 +49,11 @@ export const HANDLE_HIT_COARSE_PX = 44
 const GRIP_STYLE: CSSProperties = {
   touchAction: 'none',
   WebkitTapHighlightColor: 'transparent',
+  // **端末の長押しメニューを抑える**（設計§4-4）。iOS Safari は `contextmenu` を
+  // 発火しないので `preventDefault()` で止める道が無く、使えるのはこの2枚だけ
+  WebkitTouchCallout: 'none',
+  WebkitUserSelect: 'none',
+  userSelect: 'none',
 }
 
 interface Grip {
@@ -68,16 +73,25 @@ interface Props {
   onMove: (point: Point) => void
   /** 離した・取り消された */
   onDrop: () => void
+  /**
+   * **掴まずに離した**（＝叩いた）。触る画面で選択モードへ入る保険（設計§4-4）。
+   *
+   * iOS Safari は `contextmenu` を発火しないので長押しの抑止が効かないかもしれず、
+   * **行の長押しだけに賭けない**。掴み手は既に `touch-action: none` を持っているので、
+   * ここは端末と取り合わない。
+   */
+  onTap?: () => void
 }
 
-export function ReorderHandle({ label, kind, onGrab, onMove, onDrop }: Props) {
+export function ReorderHandle({ label, kind, onGrab, onMove, onDrop, onTap }: Props) {
   // **幅では判定しない**（`lib/pointer.ts` 冒頭）。タッチ対応 PC も折りたたみもある
   const coarse = useCoarsePointer()
   const [dragging, setDragging] = useState(false)
   const grip = useRef<Grip | null>(null)
 
   const stop = useCallback(() => {
-    if (grip.current === null) {
+    const held = grip.current
+    if (held === null) {
       // 何度呼ばれてもよい形にしておく。`pointerup` のあとブラウザがキャプチャを
       // 自動で解くので、`lostpointercapture` が続けて飛ぶ
       return
@@ -85,7 +99,11 @@ export function ReorderHandle({ label, kind, onGrab, onMove, onDrop }: Props) {
     grip.current = null
     setDragging(false)
     onDrop()
-  }, [onDrop])
+    // **一度も動かさずに離したら「叩いた」。** 長押しの抑止が効かない端末への保険
+    if (!held.moved) {
+      onTap?.()
+    }
+  }, [onDrop, onTap])
 
   /*
     **引っぱるたびに周りの文字が選択されるのを防ぐ。** 掴み手そのものではなく `body` に

@@ -9,7 +9,7 @@
  * まとまりの組み立てと並びの安定は [`@/stores/sessions`] が持つ。
  */
 
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { useReorder } from '@/lib/useReorder'
 
@@ -37,6 +37,7 @@ import {
   useTomlAccounts,
 } from '@/stores/sessions'
 import { saveProjectOrder } from '@/stores/projects'
+import { clearSelection, toggleSelect } from '@/stores/selection'
 import { agentOf, useSettingsStore } from '@/stores/settings'
 import { useWsStore } from '@/stores/ws'
 
@@ -48,6 +49,20 @@ export function TileGrid() {
   const agents = useSettingsStore((state) => state.settings.agents)
   const revive = useWsStore((state) => state.revive)
   const [orderError, setOrderError] = useState<string | null>(null)
+
+  /*
+    **入れる道を作ったら、出る道も作る**（設計§4-2）。出られないと、触る画面で
+    開けなくなる——選択モードのあいだ、シングルタップは「選ぶ」になっているため
+  */
+  useEffect(() => {
+    const 押した = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        clearSelection()
+      }
+    }
+    globalThis.addEventListener('keydown', 押した)
+    return () => globalThis.removeEventListener('keydown', 押した)
+  }, [])
 
   /*
     枠の並べ替え（並べ替え設計§3）。
@@ -188,7 +203,15 @@ export function TileGrid() {
   }
 
   return (
-    <div className="flex flex-col gap-3">
+    <div
+      className="flex flex-col gap-3"
+      /*
+        **一覧の地（枠でもカードでもないところ）を押すと全部外れる**（設計§4-2）。
+        子は自分の `onClick` で `stopPropagation` しているので、ここへ届くのは
+        本当に地を押したときだけ
+      */
+      onClick={() => clearSelection()}
+    >
       {/*
         絞り込みの `<select>` に相乗りさせず、**独立した行**にする（設計§9-3）。
         あちらは名乗りを持つカードが1枚も無ければ消えるので、載せると一緒に消える。
@@ -296,6 +319,8 @@ export function TileGrid() {
                     kind="project"
                     label={`${group.project} を掴んで並べ替える`}
                     {...bind(鍵(group))}
+                    // 掴まずに離したら選ぶ（設計§4-4 の保険）
+                    onTap={() => toggleSelect('project', group.projectId as string)}
                   />
                 )
               }

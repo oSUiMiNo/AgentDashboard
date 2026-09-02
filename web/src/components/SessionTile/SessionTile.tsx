@@ -418,6 +418,13 @@ export function SessionTile({
           data-connected={session.agent_connected}
           data-selected={押し方.selected ? 'true' : 'false'}
           /*
+            **端末の長押しメニューを抑える**（設計§4-4）。iOS Safari は `contextmenu` を
+            発火しないので `preventDefault()` で止める道が無く、使えるのはこの2枚だけ。
+            **素のスタイルで書く**——綴りを間違えても黙って効かなくなる指定なので、
+            単体テストから実値を読めるようにしておく
+          */
+          style={{ WebkitTouchCallout: 'none', WebkitUserSelect: 'none', userSelect: 'none' }}
+          /*
             **押し分けは1箇所で決める**（設計§4-1）。PC はシングルで選びダブルで開く、
             触る画面はシングルで開き長押しで選ぶ——この分岐をここへ書かない。
 

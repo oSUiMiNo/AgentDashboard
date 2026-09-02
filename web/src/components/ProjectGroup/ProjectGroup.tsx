@@ -29,6 +29,7 @@ import { useCallback, useState, type ReactNode } from 'react'
 
 import { ReorderHandle } from '@/components/ReorderHandle/ReorderHandle'
 import { useReorder } from '@/lib/useReorder'
+import { toggleSelect } from '@/stores/selection'
 import { usePress } from '@/lib/usePress'
 import { saveCardOrder } from '@/stores/sessions'
 import { useNavigate } from 'react-router'
@@ -142,6 +143,8 @@ export function ProjectGroup({
       onPointerUp={押し方.onPointerUp}
       onPointerCancel={押し方.onPointerCancel}
       data-selected={押し方.selected ? 'true' : 'false'}
+      // 端末の長押しメニューを抑える（設計§4-4）。素のスタイルで書く理由は SessionTile と同じ
+      style={{ WebkitTouchCallout: 'none', WebkitUserSelect: 'none', userSelect: 'none' }}
       /*
         掴んでいる枠は流れから浮かせる（設計§3-5）。**影ではなく `transform` で作る**
         ——`DESIGN.md` §27.5 の4候補（1.02倍・1〜2°の傾き・影・落とし先の反応）は
@@ -221,6 +224,8 @@ export function ProjectGroup({
                     kind="card"
                     label="このセッションを掴んで並べ替える"
                     {...bind(cardId)}
+                    // 掴まずに離したら選ぶ（設計§4-4 の保険）
+                    onTap={() => toggleSelect('card', cardId)}
                   />
                 }
                 rootRef={itemRef(cardId)}

@@ -11,6 +11,7 @@ import {
 import { useAuthStore } from '@/stores/auth'
 import { useSettingsStore } from '@/stores/settings'
 import { useWsStore } from '@/stores/ws'
+import { clearSelection, getSelection } from '@/stores/selection'
 import { remoteAgent, settingsFixture } from '@/test/fixtures'
 
 /**
@@ -543,5 +544,34 @@ describe('全て復旧のメモリの歯止め', () => {
     const 文 = 行.map((row) => row.textContent ?? '').join('\n')
     expect(文).toContain('OMEN')
     expect(文).not.toContain('11111111-2222-3333-4444-555555555555')
+  })
+})
+
+describe('選択モードから出る道', () => {
+  // **入れる道を作ったら、出る道も作る**（並べ替え設計§4-2）。出られないと、
+  // 触る画面ではシングルタップが「選ぶ」のままになり、**二度と開けなくなる**
+
+  beforeEach(() => {
+    clearSelection()
+  })
+
+  it('地（枠でもカードでもないところ）を押すと全部外れる', async () => {
+    applySessionSnapshot([meta('a')])
+    renderGrid()
+    await userEvent.click(screen.getByTestId('session-tile'))
+    expect(getSelection().ids).toHaveLength(1)
+
+    await userEvent.click(screen.getByTestId('revive-breakdown'))
+    expect(getSelection().ids).toEqual([])
+  })
+
+  it('Esc でも全部外れる', async () => {
+    applySessionSnapshot([meta('a')])
+    renderGrid()
+    await userEvent.click(screen.getByTestId('session-tile'))
+    expect(getSelection().ids).toHaveLength(1)
+
+    await userEvent.keyboard('{Escape}')
+    expect(getSelection().ids).toEqual([])
   })
 })

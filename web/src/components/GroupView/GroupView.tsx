@@ -45,6 +45,7 @@ import { projectDisplayName } from '@/lib/path'
 import { backTargetFor, HOME } from '@/lib/routes'
 import { saveCardOrder, useProjectCards } from '@/stores/sessions'
 import { useReorder } from '@/lib/useReorder'
+import { toggleSelect } from '@/stores/selection'
 import { useProjects } from '@/stores/projects'
 
 interface Props {
@@ -235,6 +236,8 @@ export function GroupView({ host, project }: Props) {
                     kind="card"
                     label="このセッションを掴んで並べ替える"
                     {...bind(cardId)}
+                    // 掴まずに離したら選ぶ（設計§4-4 の保険）
+                    onTap={() => toggleSelect('card', cardId)}
                   />
                 }
                 rootRef={itemRef(cardId)}
