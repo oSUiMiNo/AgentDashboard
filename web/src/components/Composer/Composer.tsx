@@ -126,6 +126,9 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
   // 運んでいる最中。二度押しで同じ画像を2回置かせない
   const [sending, setSending] = useState(false)
   // 断られた理由と、運びに失敗した理由。**画面にそのまま出す**
+  // 大きく見ている1枚。**送る前に中身を確かめる道**（利用者の指定 2026-09-03）——
+  // 細かい字のスクショは、小窓の大きさでは読めない
+  const [拡大中, set拡大中] = useState<Attachment | null>(null)
   // 断りの並び。**文字列そのものを React の鍵にしない**——同じ名前のファイルを
   // 2つ落とすと鍵がぶつかって、片方しか出ない
   const [trouble, setTrouble] = useState<{ id: string; text: string }[]>([])
@@ -203,7 +206,11 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
     setTrouble(rejected.map((text) => ({ id: 鍵を採る(), text })))
   }
 
+  const 拡大する = (one: Attachment) => set拡大中(one)
+
   const 外す = (id: string) => {
+    // 大きく見ているものを外したら、そちらも閉じる（消えた絵を見せ続けない）
+    set拡大中((いま) => (いま?.id === id ? null : いま))
     setAttachments((now) => {
       const 出す = now.find((one) => one.id === id)
       if (出す) {
@@ -263,6 +270,7 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
     }
 
     setText('')
+    set拡大中(null)
     setAttachments([])
     setTrouble([])
     inputRef.current?.focus()
@@ -299,29 +307,58 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
           className="flex flex-wrap items-center gap-2"
         >
           {attachments.map((one) => (
-            <li key={one.id} className="relative">
-              <img
-                src={one.preview}
-                alt={one.file.name}
+            <li
+              key={one.id}
+              data-testid="composer-attachment"
+              // **札の形にする。** 絵だけを並べると、何を付けたのかが名前で確かめられない
+              // （メッセンジャーの見せ方に揃えた・利用者の指定 2026-09-03）
+              className="border-border bg-card relative flex w-[7.5rem] flex-col gap-1
+                rounded-lg border p-2"
+            >
+              {/* **絵は切り抜かない。** 横長の画像で端が切れると、何を付けたのかが
+                  確かめられない。`object-contain` で全体を入れ、余りは地の色で埋める */}
+              <button
+                type="button"
+                data-testid="composer-attachment-open"
+                aria-label={`${one.file.name} を大きく見る`}
+                title="大きく見る"
+                onClick={() => 拡大する(one)}
+                className="bg-muted/40 focus-visible:ring-ring flex h-20 items-center
+                  justify-center overflow-hidden rounded transition-opacity
+                  hover:opacity-80 focus-visible:ring-2 focus-visible:outline-none
+                  active:opacity-60"
+              >
+                <img
+                  src={one.preview}
+                  alt={one.file.name}
+                  className="max-h-full max-w-full object-contain"
+                />
+              </button>
+              {/* 名前は1行で切る。**全体は `title` に残す**ので、乗せれば読める */}
+              <span
+                data-testid="composer-attachment-name"
                 title={one.file.name}
-                className="size-14 rounded border border-border object-cover"
-              />
+                className="text-muted-foreground truncate text-[0.7rem] leading-tight"
+              >
+                {one.file.name}
+              </span>
               <button
                 type="button"
                 data-testid="composer-attachment-remove"
                 aria-label={`${one.file.name} を外す`}
+                title="外す"
                 onClick={() => 外す(one.id)}
                 // **当たり判定を 48px 取る**（DESIGN.md §24.3）。見た目は小さくてよいが、
                 // 指で外せないと「付けたら取れない」になる
-                className="absolute -right-2 -top-2 flex size-12 items-center justify-center
-                  text-muted-foreground transition-colors
-                  hover:text-foreground active:text-foreground"
+                className="text-muted-foreground hover:text-foreground active:text-foreground
+                  absolute -top-3 -right-3 flex size-12 items-center justify-center
+                  transition-colors"
               >
                 {/* 絵文字を使わない（DESIGN.md §33）。線で描く */}
                 <span
                   aria-hidden
-                  className="flex size-5 items-center justify-center rounded-full
-                    border border-border bg-background text-xs leading-none"
+                  className="border-border bg-background flex size-5 items-center
+                    justify-center rounded-full text-xs leading-none"
                 >
                   ×
                 </span>
@@ -416,6 +453,49 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
           {sending ? '送信中' : '送信'}
         </Button>
       </div>
+
+      {拡大中 !== null && (
+        <>
+          {/* 暗い幕。**押したら閉じる**——見るだけの窓なので、取り違えても害が無い
+              （`ReviveBudgetDialog` は「全部戻す」を抱えているので閉じない側だった） */}
+          <button
+            type="button"
+            data-testid="composer-preview-backdrop"
+            aria-label="閉じる"
+            onClick={() => set拡大中(null)}
+            className="fixed inset-0 z-40 cursor-default bg-black/70"
+          />
+          <div
+            data-testid="composer-preview"
+            role="dialog"
+            aria-label={`${拡大中.file.name} を大きく見る`}
+            className="bg-background fixed inset-4 z-50 flex flex-col gap-2 rounded-xl
+              border p-3 shadow-xl sm:inset-x-auto sm:inset-y-10 sm:left-1/2
+              sm:w-[min(48rem,92vw)] sm:-translate-x-1/2"
+          >
+            <header className="flex shrink-0 items-center justify-between gap-2">
+              <span className="truncate text-sm font-semibold">
+                {拡大中.file.name}
+              </span>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                data-testid="composer-preview-close"
+                onClick={() => set拡大中(null)}
+              >
+                閉じる
+              </Button>
+            </header>
+            {/* **ここでも切り抜かない。** 確かめるために開いた窓で端が切れては意味が無い */}
+            <img
+              src={拡大中.preview}
+              alt={拡大中.file.name}
+              className="min-h-0 flex-1 rounded object-contain"
+            />
+          </div>
+        </>
+      )}
     </form>
   )
 }

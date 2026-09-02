@@ -123,6 +123,50 @@ describe('付ける', () => {
     expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:preview')
   })
 
+  it('名前が札に出る（乗せなくても読める）', () => {
+    // **絵だけを並べない。** 何を付けたのかを名前で確かめられること
+    // （メッセンジャーの見せ方に揃えた・利用者の指定 2026-09-03）
+    置く()
+    選ぶ([画像('スクショ.png')])
+    expect(screen.getByTestId('composer-attachment-name').textContent).toBe(
+      'スクショ.png',
+    )
+  })
+
+  it('サムネを押すと大きく見られる', () => {
+    // 細かい字のスクショは、札の大きさでは読めない。**送る前に確かめる道**
+    置く()
+    選ぶ([画像('スクショ.png')])
+    expect(screen.queryByTestId('composer-preview')).toBeNull()
+
+    fireEvent.click(screen.getByTestId('composer-attachment-open'))
+    const 窓 = screen.getByTestId('composer-preview')
+    expect(窓.querySelector('img')?.getAttribute('alt')).toBe('スクショ.png')
+
+    fireEvent.click(screen.getByTestId('composer-preview-close'))
+    expect(screen.queryByTestId('composer-preview')).toBeNull()
+  })
+
+  it('幕を押しても閉じる', () => {
+    // 見るだけの窓なので、取り違えて閉じても害が無い（`ReviveBudgetDialog` は
+    // 「全部戻す」を抱えているので閉じない側だった）
+    置く()
+    選ぶ([画像()])
+    fireEvent.click(screen.getByTestId('composer-attachment-open'))
+    fireEvent.click(screen.getByTestId('composer-preview-backdrop'))
+    expect(screen.queryByTestId('composer-preview')).toBeNull()
+  })
+
+  it('大きく見ている1枚を外したら、窓も閉じる', () => {
+    // **消えた絵を見せ続けない。** `blob:` は外した時点で捨てているので、
+    // 開いたままにすると壊れた絵が残る
+    置く()
+    選ぶ([画像()])
+    fireEvent.click(screen.getByTestId('composer-attachment-open'))
+    fireEvent.click(screen.getByTestId('composer-attachment-remove'))
+    expect(screen.queryByTestId('composer-preview')).toBeNull()
+  })
+
   it('1つずつ外せる', () => {
     置く()
     選ぶ([画像('a.png'), 画像('b.png')])
