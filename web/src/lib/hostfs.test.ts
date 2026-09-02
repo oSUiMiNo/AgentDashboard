@@ -7,7 +7,14 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { childOf, crumbsOf, isUnder, readBlob, relativeOf } from '@/lib/hostfs'
+import {
+  childOf,
+  crumbsOf,
+  isUnder,
+  readBlob,
+  relativeOf,
+  uploadAttachment,
+} from '@/lib/hostfs'
 
 describe('内側かどうか', () => {
   it('自分自身と、その下は内側', () => {
@@ -103,5 +110,55 @@ describe('断り文', () => {
     await expect(readBlob('local', '/x.png')).rejects.toThrow(
       'その場所は見つかりません',
     )
+  })
+})
+
+describe('応答が1つも返らなかったとき', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  /**
+   * **`fetch` は、届かなかったことを `TypeError` でしか言わない。**
+   *
+   * その `message` は `Failed to fetch` という英語の1行で、状態コードも理由も無い。
+   * 素通しすると**日本語の画面に読めない字が出るだけ**で、押した人には何もできない
+   * ——利用者のスマホの画面へ実際にそのまま出た（2026-09-03）。
+   */
+  it('英語の1行をそのまま画面へ出さない', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new TypeError('Failed to fetch')
+      }),
+    )
+    await expect(
+      uploadAttachment('local', 'card', new Blob([new Uint8Array(4)])),
+    ).rejects.toThrow('画像をサーバへ送れませんでした')
+  })
+
+  it('元の文言は捨てない', async () => {
+    // **消してしまわない。** 原因を追う人には `Failed to fetch` が手掛かりになる
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new TypeError('Failed to fetch')
+      }),
+    )
+    await expect(
+      uploadAttachment('local', 'card', new Blob([new Uint8Array(4)])),
+    ).rejects.toThrow('Failed to fetch')
+  })
+
+  it('応答が返った失敗は、これまでどおりサーバの言い分を出す', async () => {
+    // **投げられた失敗だけを包む。** ここで一緒に包むと、サーバが言い分けている
+    // 理由（権限・大きすぎ・種別違い）が全部同じ文になる
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('画像が大きすぎます', { status: 413 })),
+    )
+    await expect(
+      uploadAttachment('local', 'card', new Blob([new Uint8Array(4)])),
+    ).rejects.toThrow('画像が大きすぎます')
   })
 })

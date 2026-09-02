@@ -172,17 +172,36 @@ export interface WrittenBlob {
 export async function uploadAttachment(
   host: string,
   cardId: string,
-  file: File,
+  /**
+   * 送る中身。**`File` ではなく写しを受け取る**（`lib/attachments.ts` の `Attachment`）。
+   *
+   * `File` をそのまま渡すと、選んだあとに元が書き換わっていた場合に Chrome が
+   * `net::ERR_UPLOAD_FILE_CHANGED` で弾き、**HTTP の応答が無いまま
+   * `TypeError: Failed to fetch` になる**。
+   */
+  bytes: Blob,
 ): Promise<WrittenBlob> {
-  const response = await fetch(
-    `/api/hosts/${encodeURIComponent(host)}/attachments?card=${encodeURIComponent(cardId)}`,
-    {
-      method: 'POST',
-      // **媒体型はヘッダで言う。** サーバは中身から推測しない（設計§3）
-      headers: { 'Content-Type': file.type },
-      body: file,
-    },
-  )
+  let response: Response
+  try {
+    response = await fetch(
+      `/api/hosts/${encodeURIComponent(host)}/attachments?card=${encodeURIComponent(cardId)}`,
+      {
+        method: 'POST',
+        // **媒体型はヘッダで言う。** サーバは中身から推測しない（設計§3）
+        headers: { 'Content-Type': bytes.type },
+        body: bytes,
+      },
+    )
+  } catch (err) {
+    // **応答が1つも返らなかった。** `fetch` は理由を持たない `TypeError` しか投げず、
+    // その `message` は `Failed to fetch` という英語の1行である。素通しすると、
+    // 日本語の画面に読めない字が出るだけで、押した人には何もできない
+    // （実際にスマホの画面へそのまま出た。2026-09-03）
+    throw new HostFsError(
+      0,
+      `画像をサーバへ送れませんでした（${err instanceof Error ? err.message : '理由は返りませんでした'}）`,
+    )
+  }
   if (!response.ok) {
     throw new HostFsError(
       response.status,

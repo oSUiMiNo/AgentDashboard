@@ -52,11 +52,35 @@ export function 鍵を採る(): string {
   return `a${通し番号}`
 }
 
-/** 入力欄に付いた1枚。**送信を押すまでブラウザの外へ出ない**（設計§2）。 */
+/**
+ * 入力欄に付いた1枚。**送信を押すまでブラウザの外へ出ない**（設計§2）。
+ *
+ * # なぜ `File` を持たないのか
+ *
+ * **`File` は、その場で読めることを保証しない。** 中身はディスク（スマホなら
+ * `content://` の一時ファイル）に在り、`File` はそこへの参照でしかない。選んだあとに
+ * 元が書き換わる・消える・クリップボードが入れ替わると、**送ろうとした瞬間に読めなくなる**。
+ *
+ * Chrome はこれを `net::ERR_UPLOAD_FILE_CHANGED` として弾き、`fetch` は
+ * **`TypeError: Failed to fetch`** を投げる——HTTP の応答が無いので、こちらには
+ * 状態コードも理由も届かない。実際に利用者のスマホで出た（2026-09-03）。
+ * 手元でも同じ形で再現できる（選んでから中身を書き換えて送ると必ず落ちる）。
+ *
+ * **だから付けた時点で写しを取り、送るのは写しにする。** 元がどうなろうと送れる。
+ * 小窓の絵も写しから作るので、**絵が壊れることも無くなる**。
+ *
+ * 代金はメモリで、上限は1枚 8 MiB（`MAX_ATTACHMENT_BYTES`）×枚数。**先に運んでしまう
+ * 案は採らない**——外したときや画面を移ったときに、置いたものが向こうに残る（設計§2）。
+ */
 export interface Attachment {
-  /** 画面での付け外しに使う鍵。`file` の中身とは無関係 */
+  /** 画面での付け外しに使う鍵。中身とは無関係 */
   id: string
-  file: File
+  /** 画面に出す名前。**ディスク上の名前はサーバが採番する**ので、表示にしか使わない */
+  name: string
+  /** 媒体型。運ぶときのヘッダに載せる */
+  mediaType: string
+  /** **付けた時点で取った写し。** 送るのはこれ */
+  bytes: Blob
   /** 小窓に出す絵。`URL.createObjectURL` の値なので、外すときに捨てる */
   preview: string
 }
@@ -78,8 +102,10 @@ function mib(bytes: number): string {
  *
  * **3つの経路で同じ形の添付ができる**ことが要件なので、判定はこの1つを通す
  * （設計§9）。経路ごとに書き分けると、片方だけ svg が通るような食い違いが生まれる。
+ *
+ * **非同期なのは、ここで中身を読んで写しを取るからである**（`Attachment` の説明）。
  */
-export function pickImages(files: readonly File[]): Picked {
+export async function pickImages(files: readonly File[]): Promise<Picked> {
   const accepted: Attachment[] = []
   const rejected: string[] = []
   for (const file of files) {
@@ -96,10 +122,25 @@ export function pickImages(files: readonly File[]): Picked {
       )
       continue
     }
+    // **ここで読む。** 大きさと種別を先に見てから読むので、断るものは読まない。
+    // 読めなかったら**その場で言う**——送信を押してから「Failed to fetch」と出るより、
+    // 付けた瞬間に「読めませんでした」と出るほうが、撮り直す判断ができる
+    let bytes: Blob
+    try {
+      bytes = new Blob([await file.arrayBuffer()], { type: file.type })
+    } catch {
+      rejected.push(
+        `${file.name} を読めませんでした（元の画像が入れ替わったか、消えた可能性があります）`,
+      )
+      continue
+    }
     accepted.push({
       id: 鍵を採る(),
-      file,
-      preview: URL.createObjectURL(file),
+      name: file.name,
+      mediaType: file.type,
+      bytes,
+      // **写しから作る。** 元から作ると、元が消えたときに絵も壊れる
+      preview: URL.createObjectURL(bytes),
     })
   }
   return { accepted, rejected }

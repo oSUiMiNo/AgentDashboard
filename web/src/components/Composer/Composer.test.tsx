@@ -58,44 +58,65 @@ function 置く() {
   render(<Composer cardId={CARD} status={動いている} host={HOST} />)
 }
 
+/**
+ * 3経路の入口。**どれも待つ**——付けた時点で中身の写しを取るので、
+ * `fireEvent` を撃っただけでは列に並ばない（`lib/attachments.ts` の `Attachment`）。
+ */
+
 /** 「＋」から選んだのと同じ形。 */
-function 選ぶ(files: File[]) {
+async function 選ぶ(files: File[]) {
   const input = screen.getByTestId('composer-file')
-  fireEvent.change(input, { target: { files } })
+  await act(async () => {
+    fireEvent.change(input, { target: { files } })
+  })
+}
+
+/** 入力欄へ貼り付けたのと同じ形。 */
+async function 貼る(files: File[]) {
+  await act(async () => {
+    fireEvent.paste(screen.getByTestId('composer-input'), {
+      clipboardData: { files },
+    })
+  })
+}
+
+/** 入力欄へ落としたのと同じ形。 */
+async function 落とす(files: File[]) {
+  await act(async () => {
+    fireEvent.drop(screen.getByTestId('composer'), {
+      dataTransfer: { files },
+    })
+  })
 }
 
 describe('付ける', () => {
-  it('「＋」から選ぶと添付の列に出る', () => {
+  it('「＋」から選ぶと添付の列に出る', async () => {
     置く()
-    選ぶ([画像()])
+    await 選ぶ([画像()])
     expect(screen.getByTestId('composer-attachments')).toBeTruthy()
     expect(screen.getAllByTestId('composer-attachment-remove')).toHaveLength(1)
   })
 
-  it('貼り付けからも同じ列に出る', () => {
+  it('貼り付けからも同じ列に出る', async () => {
     置く()
-    fireEvent.paste(screen.getByTestId('composer-input'), {
-      clipboardData: { files: [画像('pasted.png')] },
-    })
+    await 貼る([画像('pasted.png')])
     expect(screen.getAllByTestId('composer-attachment-remove')).toHaveLength(1)
   })
 
-  it('落としても同じ列に出る', () => {
+  it('落としても同じ列に出る', async () => {
     置く()
-    fireEvent.drop(screen.getByTestId('composer'), {
-      dataTransfer: { files: [画像('dropped.png')] },
-    })
+    await 落とす([画像('dropped.png')])
     expect(screen.getAllByTestId('composer-attachment-remove')).toHaveLength(1)
   })
 
-  it('断られたものは理由が出て、列には並ばない', () => {
+  it('断られたものは理由が出て、列には並ばない', async () => {
     置く()
-    選ぶ([画像('e.svg', 'image/svg+xml')])
+    await 選ぶ([画像('e.svg', 'image/svg+xml')])
     expect(screen.getByTestId('composer-trouble').textContent).toContain('e.svg')
     expect(screen.queryByTestId('composer-attachments')).toBeNull()
   })
 
-  it('同じ名前のファイルを2つ断っても、鍵がぶつからない', () => {
+  it('同じ名前のファイルを2つ断っても、鍵がぶつからない', async () => {
     // **文字列そのものを React の鍵にしない。** 同じ名前なら断り文も同じ文字列になる。
     //
     // **数を数えても捕まらない。** 鍵がぶつかっても React は両方を描くので、
@@ -103,7 +124,7 @@ describe('付ける', () => {
     // 警告**が、鍵がぶつかったことを外から見る唯一の口である
     const 警告 = vi.spyOn(console, 'error').mockImplementation(() => {})
     置く()
-    選ぶ([画像('same.svg', 'image/svg+xml'), 画像('same.svg', 'image/svg+xml')])
+    await 選ぶ([画像('same.svg', 'image/svg+xml'), 画像('same.svg', 'image/svg+xml')])
 
     expect(
       screen.getByTestId('composer-trouble').querySelectorAll('li'),
@@ -112,31 +133,31 @@ describe('付ける', () => {
     expect(文言).not.toMatch(/same key|同じキー/i)
   })
 
-  it('畳まれるとき、置いたままの添付の絵を捨てる', () => {
+  it('畳まれるとき、置いたままの添付の絵を捨てる', async () => {
     // 付けたまま別の画面へ移ると、**送っていないぶんの `blob:` が残る**。控えの
     // 後始末は送ったぶんしか見ていないので、こちらは別に要る（コードレビュー対応9）
     const view = render(
       <Composer cardId={CARD} status={動いている} host={HOST} />,
     )
-    選ぶ([画像()])
+    await 選ぶ([画像()])
     view.unmount()
     expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:preview')
   })
 
-  it('名前が札に出る（乗せなくても読める）', () => {
+  it('名前が札に出る（乗せなくても読める）', async () => {
     // **絵だけを並べない。** 何を付けたのかを名前で確かめられること
     // （メッセンジャーの見せ方に揃えた・利用者の指定 2026-09-03）
     置く()
-    選ぶ([画像('スクショ.png')])
+    await 選ぶ([画像('スクショ.png')])
     expect(screen.getByTestId('composer-attachment-name').textContent).toBe(
       'スクショ.png',
     )
   })
 
-  it('サムネを押すと大きく見られる', () => {
+  it('サムネを押すと大きく見られる', async () => {
     // 細かい字のスクショは、札の大きさでは読めない。**送る前に確かめる道**
     置く()
-    選ぶ([画像('スクショ.png')])
+    await 選ぶ([画像('スクショ.png')])
     expect(screen.queryByTestId('composer-preview')).toBeNull()
 
     fireEvent.click(screen.getByTestId('composer-attachment-open'))
@@ -147,36 +168,36 @@ describe('付ける', () => {
     expect(screen.queryByTestId('composer-preview')).toBeNull()
   })
 
-  it('幕を押しても閉じる', () => {
+  it('幕を押しても閉じる', async () => {
     // 見るだけの窓なので、取り違えて閉じても害が無い（`ReviveBudgetDialog` は
     // 「全部戻す」を抱えているので閉じない側だった）
     置く()
-    選ぶ([画像()])
+    await 選ぶ([画像()])
     fireEvent.click(screen.getByTestId('composer-attachment-open'))
     fireEvent.click(screen.getByTestId('composer-preview-backdrop'))
     expect(screen.queryByTestId('composer-preview')).toBeNull()
   })
 
-  it('大きく見ている1枚を外したら、窓も閉じる', () => {
+  it('大きく見ている1枚を外したら、窓も閉じる', async () => {
     // **消えた絵を見せ続けない。** `blob:` は外した時点で捨てているので、
     // 開いたままにすると壊れた絵が残る
     置く()
-    選ぶ([画像()])
+    await 選ぶ([画像()])
     fireEvent.click(screen.getByTestId('composer-attachment-open'))
     fireEvent.click(screen.getByTestId('composer-attachment-remove'))
     expect(screen.queryByTestId('composer-preview')).toBeNull()
   })
 
-  it('1つずつ外せる', () => {
+  it('1つずつ外せる', async () => {
     置く()
-    選ぶ([画像('a.png'), 画像('b.png')])
+    await 選ぶ([画像('a.png'), 画像('b.png')])
     fireEvent.click(screen.getAllByTestId('composer-attachment-remove')[0])
     expect(screen.getAllByTestId('composer-attachment-remove')).toHaveLength(1)
     // 外したものの小窓は捨てる
     expect(URL.revokeObjectURL).toHaveBeenCalled()
   })
 
-  it('終わったセッションでは添付の口を出さない', () => {
+  it('終わったセッションでは添付の口を出さない', async () => {
     // **出し分けの理由はこれだけ。** かつては「宛先の PC が分からないときも出さない」と
     // していたが、`hostOf()` は `agentId ?? LOCAL_HOST` を返すので**その状態は起こらない**
     // ——本番で通らない枝を試すテストになっていた（コードレビュー対応3）。
@@ -199,7 +220,7 @@ describe('送る', () => {
     // **先に運ばない。** 運んでおくと、外したときに置いたものが残る（設計§2）
     const upload = vi.spyOn(hostfs, 'uploadAttachment')
     置く()
-    選ぶ([画像()])
+    await 選ぶ([画像()])
     fireEvent.click(screen.getAllByTestId('composer-attachment-remove')[0])
     expect(upload).not.toHaveBeenCalled()
   })
@@ -212,7 +233,7 @@ describe('送る', () => {
     fireEvent.change(screen.getByTestId('composer-input'), {
       target: { value: 'これを見て' },
     })
-    選ぶ([画像()])
+    await 選ぶ([画像()])
     fireEvent.submit(screen.getByTestId('composer'))
 
     await waitFor(() => expect(upload).toHaveBeenCalledTimes(1))
@@ -242,7 +263,7 @@ describe('送る', () => {
     fireEvent.change(screen.getByTestId('composer-input'), {
       target: { value: '消えないこと' },
     })
-    選ぶ([画像()])
+    await 選ぶ([画像()])
     fireEvent.submit(screen.getByTestId('composer'))
 
     await waitFor(() =>
@@ -261,7 +282,7 @@ describe('送る', () => {
   it('送れたら添付の列が空になる', async () => {
     置けたことにする()
     置く()
-    選ぶ([画像()])
+    await 選ぶ([画像()])
     fireEvent.submit(screen.getByTestId('composer'))
 
     await waitFor(() =>
@@ -274,7 +295,7 @@ describe('送る', () => {
     // 絵の出ないチップが並ぶ
     置けたことにする()
     置く()
-    選ぶ([画像()])
+    await 選ぶ([画像()])
     fireEvent.submit(screen.getByTestId('composer'))
 
     await waitFor(() =>
@@ -290,7 +311,7 @@ describe('断られたら戻す', () => {
     置けたことにする()
     置く()
     fireEvent.change(screen.getByTestId('composer-input'), { target: { value: text } })
-    選ぶ([画像()])
+    await 選ぶ([画像()])
     fireEvent.submit(screen.getByTestId('composer'))
     await waitFor(() =>
       expect(screen.queryByTestId('composer-attachments')).toBeNull(),
@@ -373,7 +394,7 @@ describe('断られたら戻す', () => {
       置けたことにする()
       置く()
       fireEvent.change(screen.getByTestId('composer-input'), { target: { value: '古い文' } })
-      選ぶ([画像()])
+      await 選ぶ([画像()])
       fireEvent.submit(screen.getByTestId('composer'))
       // 運びは Promise なので、時計を進める前に流し切る
       await act(async () => {
@@ -401,7 +422,7 @@ describe('断られたら戻す', () => {
     // 残すとブラウザの中に溜まる（`FileView` が後始末で捨てているのと同じ約束）
     置けたことにする()
     const view = render(<Composer cardId={CARD} status={動いている} host={HOST} />)
-    選ぶ([画像()])
+    await 選ぶ([画像()])
     fireEvent.submit(screen.getByTestId('composer'))
     await waitFor(() =>
       expect(screen.queryByTestId('composer-attachments')).toBeNull(),

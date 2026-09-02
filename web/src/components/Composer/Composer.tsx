@@ -197,11 +197,13 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
   )
 
   /** 3経路の共通の入口。**判定は `pickImages` の1つを通る**（設計§9） */
-  const 受け取る = (files: readonly File[]) => {
+  const 受け取る = async (files: readonly File[]) => {
     if (!添付できる || files.length === 0) {
       return
     }
-    const { accepted, rejected } = pickImages(files)
+    // **待つのは、中身の写しを取るからである**（`pickImages` の説明）。
+    // 呼ぶ側（落とす・貼る・選ぶ）はどれも待たない——待たせても画面ですることが無い
+    const { accepted, rejected } = await pickImages(files)
     setAttachments((now) => [...now, ...accepted])
     setTrouble(rejected.map((text) => ({ id: 鍵を採る(), text })))
   }
@@ -232,7 +234,7 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
       try {
         paths = []
         for (const one of attachments) {
-          const written = await uploadAttachment(host, cardId, one.file)
+          const written = await uploadAttachment(host, cardId, one.bytes)
           paths.push(written.path)
         }
       } catch (err) {
@@ -320,7 +322,7 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
               <button
                 type="button"
                 data-testid="composer-attachment-open"
-                aria-label={`${one.file.name} を大きく見る`}
+                aria-label={`${one.name} を大きく見る`}
                 title="大きく見る"
                 onClick={() => 拡大する(one)}
                 className="bg-muted/40 focus-visible:ring-ring flex h-20 items-center
@@ -330,22 +332,22 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
               >
                 <img
                   src={one.preview}
-                  alt={one.file.name}
+                  alt={one.name}
                   className="max-h-full max-w-full object-contain"
                 />
               </button>
               {/* 名前は1行で切る。**全体は `title` に残す**ので、乗せれば読める */}
               <span
                 data-testid="composer-attachment-name"
-                title={one.file.name}
+                title={one.name}
                 className="text-muted-foreground truncate text-[0.7rem] leading-tight"
               >
-                {one.file.name}
+                {one.name}
               </span>
               <button
                 type="button"
                 data-testid="composer-attachment-remove"
-                aria-label={`${one.file.name} を外す`}
+                aria-label={`${one.name} を外す`}
                 title="外す"
                 onClick={() => 外す(one.id)}
                 // **当たり判定を 48px 取る**（DESIGN.md §24.3）。見た目は小さくてよいが、
@@ -468,14 +470,14 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
           <div
             data-testid="composer-preview"
             role="dialog"
-            aria-label={`${拡大中.file.name} を大きく見る`}
+            aria-label={`${拡大中.name} を大きく見る`}
             className="bg-background fixed inset-4 z-50 flex flex-col gap-2 rounded-xl
               border p-3 shadow-xl sm:inset-x-auto sm:inset-y-10 sm:left-1/2
               sm:w-[min(48rem,92vw)] sm:-translate-x-1/2"
           >
             <header className="flex shrink-0 items-center justify-between gap-2">
               <span className="truncate text-sm font-semibold">
-                {拡大中.file.name}
+                {拡大中.name}
               </span>
               <Button
                 type="button"
@@ -490,7 +492,7 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
             {/* **ここでも切り抜かない。** 確かめるために開いた窓で端が切れては意味が無い */}
             <img
               src={拡大中.preview}
-              alt={拡大中.file.name}
+              alt={拡大中.name}
               className="min-h-0 flex-1 rounded object-contain"
             />
           </div>
