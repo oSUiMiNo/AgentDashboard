@@ -3005,10 +3005,7 @@ mod tests {
         // `RingBuffer::since` は目印より後が上限を超えると**古いほうから捨てる**。
         // 印は貼り付けの直後（＝窓の先頭側）に出るので、フッタと同じ厚さだと
         // **送信のあいだに流れた出力に押し出される**（添付できているのに断られる）
-        assert!(
-            ATTACHMENT_TAIL > FOOTER_TAIL,
-            "印の窓がフッタ読みと同じかそれより薄い"
-        );
+        const { assert!(ATTACHMENT_TAIL > FOOTER_TAIL) };
         // フッタ側は**毎秒回る見張り**なので厚くしない。値ごと固定する
         assert_eq!(FOOTER_TAIL, 32 * 1024);
     }

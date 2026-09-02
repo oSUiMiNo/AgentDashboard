@@ -173,6 +173,61 @@ async fn 印が出なければ確定を送らず断って入力欄を畳む() {
         .await;
 }
 
+/// 本文が印の綴りを含んでいると、**数を多く見てしまう**こと（既知の穴）。
+///
+/// # 直せなかった理由を、テストの側に残す
+///
+/// 貼り付けた本文は端末へ echo され、しかも TUI は入力欄を何度も描き直すので、
+/// 利用者が `[Image #1]` と打つと**その字が何度も印として数えられる**。
+///
+/// **「本文に含まれる数だけ差し引く」では直らない。** ここで実測しているとおり、
+/// 本文の印1つが**3つ**に見える（生の echo と `received:` の行の両方に写る）ので、
+/// 差し引くべき数が分からない。
+///
+/// **このテストは「直っていること」ではなく「いまこうなっている」を固定する。**
+/// 直し方を思いついた人が、まずここを見て前提を疑えるようにするため。
+#[tokio::test]
+async fn 本文が印の綴りを含むと数を多く見る() {
+    let manager = 短い上限();
+    let (session, mut watcher) = common::start_session(&manager).await;
+
+    let path = 画像パス("a");
+    session
+        .send_instruction_with("[Image #1] これを見て", std::slice::from_ref(&path))
+        .await
+        .expect("送れること");
+
+    watcher.wait_for(&format!("received: {path}")).await;
+    let seen = watcher.seen();
+    assert_eq!(
+        seen.matches("[Image #").count(),
+        3,
+        "本文の印が echo と received: の両方へ写り、擬似 claude のチップと合わせて3つ:\n{seen}"
+    );
+}
+
+/// 本文に印の綴りが入っていても、**添付が無ければ待たない**こと。
+///
+/// 上の穴を「印が1つでもあれば待つ」で塞ごうとすると、ここが遅くなる。
+#[tokio::test]
+async fn 本文に印の綴りが入っていても添付が無ければ待たない() {
+    let manager = 短い上限();
+    let (session, mut watcher) = common::start_session(&manager).await;
+
+    let 始め = Instant::now();
+    session
+        .send_instruction("[Image #1] と書いただけ")
+        .await
+        .expect("指示を送れること");
+    let かかった = 始め.elapsed();
+
+    watcher.wait_for("received: [Image #1] と書いただけ").await;
+    assert!(
+        かかった < Duration::from_millis(200),
+        "添付0枚なのに待っている（{かかった:?}）"
+    );
+}
+
 /// 添付が0枚なら、**待ちが1msも入らない**こと（設計§14）。
 ///
 /// 添付を使わない送信を巻き添えにしないための約束。ここが崩れると、画像と関係のない
