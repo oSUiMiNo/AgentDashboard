@@ -52,6 +52,7 @@ import { Textarea } from '@/components/ui/textarea'
 import {
   ACCEPT_ATTRIBUTE,
   pickImages,
+  鍵を採る,
   releasePreview,
   type Attachment,
 } from '@/lib/attachments'
@@ -199,7 +200,7 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
     }
     const { accepted, rejected } = pickImages(files)
     setAttachments((now) => [...now, ...accepted])
-    setTrouble(rejected.map((text) => ({ id: crypto.randomUUID(), text })))
+    setTrouble(rejected.map((text) => ({ id: 鍵を採る(), text })))
   }
 
   const 外す = (id: string) => {
@@ -232,7 +233,7 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
         // ここで消すと、押し直すために画像を選び直すことになる
         setTrouble([
           {
-            id: crypto.randomUUID(),
+            id: 鍵を採る(),
             text: err instanceof Error ? err.message : '画像を置けませんでした',
           },
         ])

@@ -128,6 +128,41 @@ describe('3経路が同じ形を作る', () => {
   })
 })
 
+describe('安全でないオリジンでも動く', () => {
+  /**
+   * **`crypto.randomUUID` が無い場所がある。** スマホから
+   * `http://<LAN の IP>:8787` で開くと `isSecureContext` が `false` になり、
+   * `crypto.randomUUID` は `undefined` になる（実測）。呼べば例外で、
+   * **画像を1枚拾った瞬間に添付の道が丸ごと死ぬ**——押しても貼っても何も起きない
+   * という形で表に出た。
+   *
+   * **jsdom は持っているので、既存のテストは全部通っていた。** 取り上げないと
+   * この穴は二度と見えない。
+   */
+  it('`crypto.randomUUID` が無くても添付を作れる', () => {
+    const 素のcrypto = globalThis.crypto
+    vi.stubGlobal('crypto', {
+      ...素のcrypto,
+      randomUUID: undefined,
+      getRandomValues: 素のcrypto.getRandomValues?.bind(素のcrypto),
+    })
+
+    const { accepted, rejected } = pickImages([画像('a.png', 'image/png')])
+    expect(accepted).toHaveLength(1)
+    expect(accepted[0].id).toBeTruthy()
+    expect(rejected).toEqual([])
+  })
+
+  it('鍵は重ならない', () => {
+    // 外すときの目印と React の鍵に使う。**同じ画像を2枚付けても別々**であること
+    const { accepted } = pickImages([
+      画像('same.png', 'image/png'),
+      画像('same.png', 'image/png'),
+    ])
+    expect(accepted[0].id).not.toBe(accepted[1].id)
+  })
+})
+
 describe('後始末', () => {
   it('外すときに小窓の絵を捨てる', () => {
     // 忘れると、付け外しを繰り返すたびにブラウザの中で溜まる

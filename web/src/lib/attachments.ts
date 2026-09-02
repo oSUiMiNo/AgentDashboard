@@ -31,6 +31,27 @@ export const ACCEPTED_MEDIA_TYPES = [
 /** `<input type="file">` の `accept` に渡す文字列。 */
 export const ACCEPT_ATTRIBUTE = ACCEPTED_MEDIA_TYPES.join(',')
 
+/**
+ * 画面の中だけで使う鍵を採る。
+ *
+ * # なぜ `crypto.randomUUID()` を使わないのか
+ *
+ * **安全なオリジンでないと存在しない。** スマホから `http://<LAN の IP>:8787` で開くと
+ * `window.isSecureContext` が `false` になり、`crypto.randomUUID` は `undefined` になる
+ * （実測。`navigator.clipboard` が無いのと同じ理由で、README「既知の制約」が書いている
+ * 形そのもの）。呼ぶと例外になり、**画像を1枚拾った瞬間に添付の道が丸ごと死ぬ**——
+ * 押しても貼っても何も起きない、という形で表に出た。
+ *
+ * **通し番号で足りる。** ここで要るのは「この画面の中で重ならないこと」だけで、
+ * 別の端末や再読み込みをまたいで一意である必要は無い（React の鍵と、外すときの
+ * 目印にしか使わない）。`Math.random()` も使わない——テストが揺れる（`roam.ts` と同じ判断）。
+ */
+let 通し番号 = 0
+export function 鍵を採る(): string {
+  通し番号 += 1
+  return `a${通し番号}`
+}
+
 /** 入力欄に付いた1枚。**送信を押すまでブラウザの外へ出ない**（設計§2）。 */
 export interface Attachment {
   /** 画面での付け外しに使う鍵。`file` の中身とは無関係 */
@@ -76,7 +97,7 @@ export function pickImages(files: readonly File[]): Picked {
       continue
     }
     accepted.push({
-      id: crypto.randomUUID(),
+      id: 鍵を採る(),
       file,
       preview: URL.createObjectURL(file),
     })
