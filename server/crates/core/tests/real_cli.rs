@@ -2831,3 +2831,182 @@ async fn 版を消しても生きているセッションのフックは届き�
         "版を消したあとフックが1件も届いていません（{before} のまま）"
     );
 }
+
+/// 見張りを回しながら、目的の状態になるまで待つ。
+///
+/// **`TestServer` は見張りを自動で回さない。** `start_sweeper` を呼ぶのは製品の
+/// `LocalServer` だけで、テストの土台は `sweep_once` を手で回す作りになっている
+/// （`hooks_state.rs` も `permission_mode.rs` もそうしている）。
+///
+/// **停滞の判定も、停滞したカードの画面の見直しも、どちらも見張りの中にある。** 回さずに
+/// 待つと何も起きないまま時間だけが過ぎる。
+async fn wait_for_status_sweeping(
+    server: &common::TestServer,
+    session: &Session,
+    expected: SessionStatus,
+) {
+    let deadline = Instant::now() + CLI_TIMEOUT;
+    loop {
+        server.manager.sweep_once();
+        let status = session.status();
+        if status == expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{CLI_TIMEOUT:?} 以内に {expected:?} になりませんでした。実際: {status:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// 停滞に落ちたカードが、本物の TUI の画面を見て入力待ちへ戻ること（テスト計画フェーズ4）。
+///
+/// # 不具合そのものは再現していない
+///
+/// 引き金は「ターンが完了せずに終わり `Stop` が飛ばない」ことだが、**なぜそうなるかは
+/// 未解明である**（調査レポートの自信度70%。出力せず停止／中断／API エラーの3択のまま）。
+/// **狙って起こせないものを、テストの前提にはできない。**
+///
+/// そこで**結果の形だけを本物で作る**。ターンを普通に終わらせてから `UserPromptSubmit` を
+/// 1件注入し、**カードだけを作業中へ戻す**。端末は空のプロンプトのままで、フックはもう
+/// 来ない——これが不具合と同じ形である。
+///
+/// **確かめたいのは画面のほうである。** 判定器が読むのは、実際に claude が描いた「ターンが
+/// 終わったあとの画面」（`fixtures/v2.1.232/screens/after-turn.txt` と同じ形。完了の印は
+/// `✻ Brewed for 6s` のように ` for ` が続き、走っている印の `…` にはならない）。擬似
+/// claude では、この画面を本物が描いたことにできない。
+///
+/// # 1本でフェーズ4の3項目を消化する
+///
+/// claude の起動は1回で済ませたい（クォータと時間）。
+///
+/// | 確かめること | どこで |
+/// |---|---|
+/// | 停滞に落ちたあと入力待ちへ戻る | 注入 → `Stalled` → `WaitingInput` |
+/// | 戻ったカードへ指示を送ると動く | そのあと指示を送って `Working` |
+/// | 長いツール実行の最中は倒れない | 走っている間、`WaitingInput` が一度も出ないこと |
+///
+/// # しきい値1秒だと、普通に応答している最中も停滞を通る
+///
+/// フックの間隔が1秒を超えれば落ちるためで、**壊れではない**。印が出ていれば停滞に留まる
+/// ので、最後の判定は `WaitingInput` が出ないことだけを見る（`Stalled` の出現は許す）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "本物の claude を起動し、アカウントのクォータを消費する（make test-cli）"]
+async fn 停滞したカードは本物の画面を見て入力待ちへ戻る() {
+    let dir = WorkDir::new("stalled-revive");
+    // 長いコマンドを確認なしで走らせたいので承認を飛ばす。**利用者のグローバル設定を
+    // 外すのと必ず組で使う**——バイパスだけだと利用者のフックやスキルまで自動承認で走る
+    let program = claude_wrapper(
+        &dir,
+        &[
+            "--model",
+            "haiku",
+            "--setting-sources",
+            "project,local",
+            "--permission-mode",
+            "bypassPermissions",
+        ],
+    );
+    // 停滞の判定を待っていられないので最短にする。意味は変わらない
+    let config = Config {
+        stalled_threshold_secs: 1,
+        ..Default::default()
+    };
+    let server =
+        common::TestServer::start_with_program(config, program.to_string_lossy().into_owned())
+            .await;
+
+    let session = server
+        .manager
+        .spawn(&dir.as_str())
+        .expect("セッションを起動できること");
+    let mut watcher = common::Watcher::attach(&session);
+
+    accept_trust_prompt_if_any(&session, &mut watcher).await;
+    wait_for_status(&session, SessionStatus::WaitingInput).await;
+
+    // --- ターンを1つ、普通に終わらせる ---------------------------------------
+    // ここで画面が「ターンが終わったあとの形」になる。判定器が読むのはこれ
+    session
+        .send_instruction("1 たす 1 の答えを数字だけで教えて。説明は要りません。")
+        .await
+        .expect("指示を送れること");
+    wait_for_status(&session, SessionStatus::Working).await;
+    wait_for_status(&session, SessionStatus::WaitingInput).await;
+
+    // --- 不具合と同じ形を作る -------------------------------------------------
+    // カードだけを作業中へ戻す。端末は空のプロンプトのままで、フックはもう来ない
+    let code = server
+        .post_hook(session.token(), "UserPromptSubmit", "{}")
+        .await;
+    // **受け口は成功でも 204 を返す**（合言葉が違えば 404）。204 は「注入していない
+    // イベント名」でも返るので、効いたことの証拠は次の状態変化のほうである
+    assert_eq!(code, 204, "合言葉が通ること");
+    wait_for_status(&session, SessionStatus::Working).await;
+
+    // --- 放っておくと、自分で戻ってくる ---------------------------------------
+    // しきい値1秒で停滞へ落ち、その5秒後に画面を見る（落ちた周では見ない）。
+    // **見張りは手で回す**（`TestServer` は自動で回さない）
+    wait_for_status_sweeping(&server, &session, SessionStatus::Stalled).await;
+    wait_for_status_sweeping(&server, &session, SessionStatus::WaitingInput).await;
+
+    // --- 戻ったカードは、本当に指示を受け付ける -------------------------------
+    // 「入力待ち」が嘘でないことの確認。本イシューの発端はここが真だった
+    //
+    // **素の `sleep` は Claude Code 側が拒む**（`Blocked: standalone sleep`）ので、
+    // 前面で回り続ける計算にする。バックグラウンドへ逃がさないことも明示する
+    session
+        .send_instruction(
+            "bash で次を実行して。バックグラウンドにはせず、終わるまで前面で待って。\n\
+             python3 -c \"import time; end=time.time()+30\nwhile time.time()<end: pass\nprint('ok')\"\n\
+             終わったら「おわり」とだけ言って。他には何もしないで。",
+        )
+        .await
+        .expect("戻ったカードへ指示を送れること");
+    wait_for_status(&session, SessionStatus::Working).await;
+
+    // --- 走っている間は倒れない -----------------------------------------------
+    // 印が出ている間は停滞に留まるのが正しい。**`Stalled` は許す**（しきい値1秒なので
+    // フックの間隔だけで落ちる）が、`WaitingInput` が出たら走っているカードを
+    // 入力待ちと表示したことになる
+    // **見張りを回しながら見る。** 回さないと画面の判定が一度も走らず、
+    // 「倒れなかった」ではなく「何も起きなかった」だけで緑になる
+    let started = Instant::now();
+    let mut 標本: Vec<(u64, SessionStatus)> = Vec::new();
+    let mut 停滞を見た = false;
+    while started.elapsed() < Duration::from_secs(25) {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        server.manager.sweep_once();
+        let status = session.status();
+        if status == SessionStatus::Stalled {
+            停滞を見た = true;
+        }
+        標本.push((started.elapsed().as_secs(), status));
+        // 途中で終わってしまったら、そこから先の標本には意味が無い
+        if matches!(status, SessionStatus::Ended { .. }) {
+            break;
+        }
+    }
+    // **停滞を1度も通っていないなら、画面の判定は走っていない。** 倒れなかったことの
+    // 根拠にならないので、素通りで緑にしないためにここで落とす
+    assert!(
+        停滞を見た,
+        "走っている間に停滞を1度も通りませんでした。画面の判定が走っていないので、\
+         「倒れない」ことを確かめられていません。標本: {標本:?}"
+    );
+    let 倒れた: Vec<_> = 標本
+        .iter()
+        .filter(|(_, status)| *status == SessionStatus::WaitingInput)
+        .collect();
+    assert!(
+        倒れた.is_empty(),
+        "走っている最中に入力待ちへ倒れました（{倒れた:?}）。\
+         走っている印を見落としているので、設計§3-3 へ戻ること。標本: {標本:?}"
+    );
+
+    server
+        .manager
+        .archive(session.card_id)
+        .expect("片付けられること");
+}
