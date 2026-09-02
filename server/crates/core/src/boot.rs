@@ -20,6 +20,7 @@ use session_host_core::session::hooks_settings::HOOK_BIN_ENV;
 use session_host_core::session::now_ms;
 use session_host_core::version::{self, Attempt, Capability, Outcome};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// 選ばれている版があれば、そちらへ乗り換える。
 ///
@@ -126,12 +127,66 @@ fn hand_over(state_dir: &Path, target: &Path) {
         target.display()
     );
 
+    // **`exec` の手前で、抱えている子を引き取る**（ゾンビ設計§6-2）。ここを飛ばすと、
+    // `exec` でプロセスの中身が消えたあと、閉じた PTY で死んだ子を引き取る者が
+    // 1人も居なくなる（実機で78体溜まった原因）
+    reap_before_handover();
+
     let error = exec_into(target);
 
     // ここへ来た＝乗り換えられなかった。印を消して自分で続ける
     version::clear_attempt(state_dir);
     eprintln!(
         "AgentDashboard: 選ばれている版を起こせません（入れる側が置いた版で続けます）: {error}"
+    );
+}
+
+/// 乗り換える前に、抱えている子を畳んで引き取る（ゾンビ設計§6-2）。
+///
+/// # 経路ごとに分岐しなくてよい
+///
+/// [`hand_over_if_selected`]（起動直後・まだ子が1本も居ない）からも通るが、そのときは
+/// 数えて0体と分かって即座に返る。**「走っている最中の入れ替えか」を判定する必要が無い。**
+///
+/// # ここだけは `eprintln!` ではなく `tracing`
+///
+/// このモジュールは普段ログの初期化より前に走るので標準エラーへ直接書いている。
+/// **ただしこの1件は、あとから `agentdashboard logs` で辿れないと意味が無い**——
+/// 引き取れたかどうかは、その場で読む情報ではなく、後日ゾンビを数えたときに
+/// 突き合わせる情報だからである。起動直後の経路では `tracing` がまだ生きていないため
+/// この行は落ちるが、そちらは常に0体なので失うものが無い。
+fn reap_before_handover() {
+    /// 穏やかに頼んでから待つ時間。
+    const GRACE: Duration = Duration::from_millis(500);
+    /// 強く止めたあと、引き取りきるまで待つ上限。
+    ///
+    /// **ここを長くすると入れ替えがそのぶん遅くなる。** 入れ替えの売りは「落ちないこと」
+    /// なので、引き取れなくても先へ進む（ゾンビ設計§6-3）。
+    const DEADLINE: Duration = Duration::from_secs(2);
+
+    let Some(result) = crate::children::reap(GRACE, DEADLINE) else {
+        return;
+    };
+    if result.left.is_empty() {
+        if result.reaped > 0 {
+            tracing::info!(
+                reaped = result.reaped,
+                "入れ替える前に、抱えていた子を引き取りました"
+            );
+        }
+        return;
+    }
+    let left_pids = result
+        .left
+        .iter()
+        .map(|pid| pid.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    tracing::warn!(
+        reaped = result.reaped,
+        left = result.left.len(),
+        left_pids,
+        "引き取れないまま入れ替えます。この子はゾンビとして残ります"
     );
 }
 
