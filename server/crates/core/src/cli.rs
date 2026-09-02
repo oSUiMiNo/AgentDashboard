@@ -251,6 +251,20 @@ enum SessionCmd {
         #[command(flatten)]
         out: OutputArgs,
     },
+    /// カードに**自分で名前を付ける**（反映まで待つ）。
+    /// 名前は CLI セッションに付くので、`--resume` で乗り換えても付いてきます
+    Nickname {
+        /// カードID。先頭の数文字で足りる
+        id: String,
+        /// 付ける名前。改行は使えません（200文字まで）
+        #[arg(required_unless_present = "clear")]
+        name: Option<String>,
+        /// 名前を消す
+        #[arg(long, conflicts_with = "name")]
+        clear: bool,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
     /// セッションを終了する（終了の知らせまで待つ）
     Kill {
         /// カードID。先頭の数文字で足りる
@@ -916,6 +930,13 @@ async fn client_session(
             let human = format!("カードを並べ替えました：{} 枚", ordered.len());
             println!("{}", output::pick(out.json, &raw, &human));
         }
+        // `clear` は読まない。**clap が「name か --clear のどちらか片方」を強制している**
+        // （`required_unless_present` と `conflicts_with`）ので、name が無いことが
+        // そのまま `--clear` を意味する。ここで両方を見ると、同じ約束を2箇所で持つことになる
+        SessionCmd::Nickname { id, name, out, .. } => {
+            let outcome = client::set_nickname(target, &id, name).await?;
+            println!("{}", output::pick(out.json, &outcome.raw, &outcome.human));
+        }
         SessionCmd::Kill { id, out } => {
             let outcome = client::kill(target, &id).await?;
             println!("{}", output::pick(out.json, &outcome.raw, &outcome.human));
@@ -1417,6 +1438,10 @@ mod tests {
                 "ls",
                 "mode",
                 "model",
+                // カードに自分で名前を付ける（名前付け設計§11-1）。
+                // **生バイトは1つも運ばない**——運ぶのはカードIDと文字列だけで、
+                // 宛先の CLI セッションはサーバが記録から引く
+                "nickname",
                 // 1つの枠の中でカードを並べ替える（並べ替え設計§9-1）。
                 // **運ぶのはカードIDの並びだけ**で、生バイトは1つも通らない
                 "reorder",

@@ -51,7 +51,7 @@ const TENANCY_SOURCE: &str = "crates/server-core/tests/tenancy.rs";
 /// 口の数の固定（設計§1-1「新しい口を1つも作らない」）。CLI はブラウザの席に
 /// 座るだけなので、この作業列で口は1つも増えない。**口を増やす設計判断をしたとき
 /// だけ**、意識してこの数字を上げる。
-const WS_VARIANTS: usize = 13;
+const WS_VARIANTS: usize = 14;
 const INSIDE_DOORS: usize = 26;
 const OUTSIDE_DOORS: usize = 5;
 

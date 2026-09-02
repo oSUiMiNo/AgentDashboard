@@ -56,6 +56,19 @@ pub struct SpawnRequest<'a> {
 /// [`SpawnRequest`] と同じく `account_id` を持つのは、**他人のカードを起こし直せない**ことを
 /// 実装側でも確かめるため。ブラウザ配信の入口（`crate::ws`）が既に門を通しているが、
 /// 引数から落とすと「門を通らずにここへ来る道」を型が許してしまう。
+/// 過去のセッションを起こす頼み（名前付け設計§7）。
+///
+/// **作業ディレクトリを持たない。** 記録が持っているので、実装側が引く——
+/// ブラウザに持たせると、画面が抱えている古い写しで起こす経路ができる。
+pub struct RecallRequest {
+    pub account_id: uuid::Uuid,
+    /// どの PC で起こすか。**記録から引いた値**で、ブラウザの指定ではない。
+    pub target: Option<AgentId>,
+    pub cwd: String,
+    pub permission_mode: Option<PermissionMode>,
+    pub claude_session_id: protocol::ClaudeSessionId,
+}
+
 pub struct ReviveRequest {
     pub account_id: uuid::Uuid,
     pub card_id: CardId,
@@ -106,6 +119,29 @@ pub trait SessionHost: Send + Sync + 'static {
     /// **待つ形にしてある**のは [`SessionHost::spawn`] と同じで、宛先を決めるのに連絡係と
     /// DB を引くため。起こし直せたかどうかは `SessionUpsert` が記録層へ届いた時点で分かる。
     async fn revive(&self, request: ReviveRequest) -> Result<(), String>;
+
+    /// **過去の CLI セッションを指定して、新しいカードで起こす**（名前付け設計§7）。
+    ///
+    /// [`SessionHost::revive`] との違いは**採番する**こと（カードはまだ無い）。
+    /// [`SessionHost::spawn`] との違いは**呼び戻し先を渡す**ことだけで、採番も
+    /// 戻り値の形もあちらと同じ——できた CardId は返さない（ネットワークを跨ぐと
+    /// 同期には返せない）。
+    ///
+    /// 作業ディレクトリは**記録から引く**ので、ここでは受け取らない。
+    async fn recall(&self, request: RecallRequest) -> Result<(), String>;
+
+    /// 渡したIDのうち、**履歴が実在するもの**を返す（名前付け設計§8-3）。
+    ///
+    /// **「確かめられなかった」と「無い」は別物。** PC が繋がっていない・版が古い・
+    /// 時間切れのときは `Err` が返る——呼ぶ側はそれを「**確かめていない**」として
+    /// 扱い、一覧から消してはならない（設計§8-5）。記録を消したら復元できない。
+    ///
+    /// **IDをまとめて渡す。** 1件ずつ聞くと、一覧を開くたびに件数ぶんの往復が出る。
+    async fn sessions_exist(
+        &self,
+        request: HostAskRequest,
+        ids: &[protocol::ClaudeSessionId],
+    ) -> Result<Vec<protocol::ClaudeSessionId>, HostAskError>;
 
     fn kill(&self, card_id: CardId) -> Result<(), String>;
     fn archive(&self, card_id: CardId) -> Result<(), String>;

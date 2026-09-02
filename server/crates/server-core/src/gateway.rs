@@ -281,6 +281,10 @@ pub struct Capabilities {
     pub supports_blob_read: bool,
     #[serde(default)]
     pub supports_blob_write: bool,
+    /// 過去の CLI セッションを指定して起こせるか、実在を確かめられるか
+    /// （名前付け設計§7-2）。上の6つとまったく同じ形。
+    #[serde(default)]
+    pub supports_recall: bool,
 }
 
 /// 他インスタンスから回ってくる、PC への指示（設計§9-2 の `agent:{id}:cmd`）。
@@ -1229,6 +1233,7 @@ fn reply_kind(reply: &HostReply) -> &'static str {
         HostReply::Blob(_) => "blob",
         HostReply::Written(_) => "written",
         HostReply::Resources(_) => "resources",
+        HostReply::Sessions { .. } => "sessions",
         HostReply::Failed { .. } => "failed",
     }
 }
@@ -1388,6 +1393,56 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
             Route::Across => self
                 .hub
                 .relay_across(target, SessionHostCommand::Message(Box::new(message))),
+        }
+    }
+
+    async fn recall(&self, request: crate::session_host::RecallRequest) -> Result<(), String> {
+        // 宛先は**記録から引いた値**（呼ぶ側が入れる）。リモートのカードは必ず PC を
+        // 名乗るので、`None` は実装の食い違いか、ローカルの記録を渡された場合
+        let target = request
+            .target
+            .ok_or_else(|| "このセッションは PC を名乗っていません".to_string())?;
+
+        // **能力を見てから投げる**（設計§7-3）。答えを返さない種別なので、名乗らない
+        // PC へ投げると永遠に何も起きず、画面に理由を出せない
+        let route = self
+            .route(request.account_id, target, Need::Recall)
+            .await
+            .map_err(|err| err.message())?;
+
+        let message = ServerToAgent::RecallSession {
+            cwd: request.cwd,
+            permission_mode: request.permission_mode,
+            claude_session_id: request.claude_session_id,
+        };
+        match route {
+            Route::Here(conn) => {
+                conn.send(&message);
+                Ok(())
+            }
+            Route::Across => self
+                .hub
+                .relay_across(target, SessionHostCommand::Message(Box::new(message))),
+        }
+    }
+
+    async fn sessions_exist(
+        &self,
+        request: crate::session_host::HostAskRequest,
+        ids: &[protocol::ClaudeSessionId],
+    ) -> Result<Vec<protocol::ClaudeSessionId>, crate::session_host::HostAskError> {
+        let ids = ids.to_vec();
+        match self
+            .ask(request, Need::Recall, move |request_id| {
+                ServerToAgent::SessionsExist { request_id, ids }
+            })
+            .await?
+        {
+            HostReply::Sessions { ids } => Ok(ids),
+            HostReply::Failed { reason, detail } => {
+                Err(crate::session_host::HostAskError::Failed { reason, detail })
+            }
+            other => Err(wrong_answer(other)),
         }
     }
 
@@ -1692,6 +1747,13 @@ enum Need {
     /// 見る。古いホストは知らない種別を**接続を保ったまま無視する**ので、投げると
     /// 永遠に何も起きず、画面には時間切れすら出せない。
     Revive,
+    /// 過去の CLI セッションを指定して起こせるか、実在を確かめられるか
+    /// （名前付け設計§7-3）。
+    ///
+    /// **2つの口をまとめて1つの名乗りで見る**——どちらも同じ工事で入るので、片方だけ
+    /// 持つ版は存在しない。起こす側は答えを待たない頼みなので、`Revive` と同じ理由で
+    /// 名乗りを見る（投げると永遠に何も起きない）。
+    Recall,
     /// この PC の資源を答えられるか（起こし直し設計§18-4）。
     ///
     /// 名乗らない相手に聞くと**永遠に答えが返らない**。聞けなければ画面は
@@ -1849,6 +1911,7 @@ impl RemoteSessionHost {
                 Need::Revive => capabilities.supports_revive,
                 Need::Blob => capabilities.supports_blob_read,
                 Need::BlobWrite => capabilities.supports_blob_write,
+                Need::Recall => capabilities.supports_recall,
                 Need::Resources => capabilities.supports_resources,
             })
     }
@@ -1987,6 +2050,7 @@ async fn agent_loop(
         supports_revive,
         supports_blob_read,
         supports_blob_write,
+        supports_recall,
     } = hello
     else {
         // next_hello が Hello 以外を返すことはない
@@ -2024,6 +2088,7 @@ async fn agent_loop(
         supports_revive,
         supports_blob_read,
         supports_blob_write,
+        supports_recall,
     };
     match serde_json::to_value(&capabilities) {
         Ok(value) => {

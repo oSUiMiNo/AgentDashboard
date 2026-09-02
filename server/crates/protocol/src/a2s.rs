@@ -98,6 +98,22 @@ pub enum HostReply {
     /// 書いた側だからなのかが読めなくなる（[`crate::fs::FileContent`] と
     /// [`crate::fs::FileBlob`] を分けたのと同じ理由）。
     Written(crate::fs::WrittenBlob),
+    /// **履歴が実在する CLI セッション**（名前付け設計§8-3）。
+    ///
+    /// `Log` や `Resources` と同じ理由でここへ足した。別の答えの型を作ると、待ち口・
+    /// 答えの解決・連絡係の封筒の5箇所が二重になる。
+    ///
+    /// **返るのは「実在したものだけ」**で、渡した全部ではない。差が「消えたもの」に
+    /// あたるが、**答えが返らなかったとき（PC が居ない・版が古い・時間切れ）とは
+    /// 区別する**——あちらは「確かめていない」であって「無い」ではない（§8-5）。
+    ///
+    /// **欄に名前を付けてある。** 内部タグ付き（`#[serde(tag = "t")]`）の列挙では、
+    /// 列を直に包む腕を serde が**シリアライズできない**（`cannot serialize tagged
+    /// newtype variant ... containing a sequence`）。他の腕が構造体を包んでいるのは
+    /// 地図になるからで、**列だけは名前を付けて包む必要がある**。
+    Sessions {
+        ids: Vec<crate::ClaudeSessionId>,
+    },
     /// この PC の資源（起こし直し設計§18）。
     ///
     /// **`Log` と同じ理由でここへ足した。** 別の答えの型を作ると、待ち口・答えの解決・
@@ -234,6 +250,16 @@ pub enum AgentMessage {
         /// 保ったまま無視する**ので、投げると永遠に答えが返らない。だから投げる前に見る。
         #[serde(default)]
         supports_blob_write: bool,
+        /// 過去の CLI セッションを**指定して起こせる**か、そして**実在を確かめられる**か
+        /// （名前付け設計§7-2）。
+        ///
+        /// 上の6つとまったく同じ形。**2つの口をまとめて1つの名乗りにしてある**——
+        /// どちらも同じ工事で入るので、片方だけ持つ版は存在しない。
+        ///
+        /// [`ServerToAgent::RecallSession`] は**答えを返さない種別**なので、名乗りが
+        /// 無いと投げても永遠に何も起きず、画面に理由を出せない。
+        #[serde(default)]
+        supports_recall: bool,
     },
     /// カード1枚の最新（意味は [`crate::ws::ServerMessage::SessionUpsert`] と同じ）。
     ///
@@ -347,6 +373,34 @@ pub enum ServerToAgent {
         cwd: String,
         permission_mode: Option<PermissionMode>,
         claude_session_id: crate::ClaudeSessionId,
+    },
+    /// **過去の CLI セッションを指定して、新しいカードで起こす**（名前付け設計§7-1）。
+    ///
+    /// # `Spawn` に欄を足さなかった理由
+    ///
+    /// [`ServerToAgent::ReviveSession`] とまったく同じ。古いセッションホストは知らない
+    /// 欄を読み飛ばすので、`Spawn` に呼び戻し先を足すと**あちらではふつうの起動として
+    /// 成立してしまう**——呼び戻したつもりが、まっさらな新しいセッションが立つ。
+    /// しかも利用者から見れば「起こせた」ので、**間違いに気づくのは履歴を開いたとき**になる。
+    ///
+    /// # `ReviveSession` との違いは CardId を運ばないこと
+    ///
+    /// あちらは**既にあるカード**を起こし直すのでサーバが CardId を渡す。こちらは
+    /// **新しいカードを作る**ので、採番はセッションホスト側（`Spawn` と同じ）。
+    RecallSession {
+        cwd: String,
+        permission_mode: Option<PermissionMode>,
+        claude_session_id: crate::ClaudeSessionId,
+    },
+    /// 渡したIDのうち、**履歴が実在するもの**を尋ねる（名前付け設計§8-3）。
+    ///
+    /// **答えを待つ種別**（`request_id` を持つ）。[`AgentMessage::HostReply`] の
+    /// [`HostReply::Sessions`] で返る。
+    ///
+    /// **IDをまとめて渡す。** 1件ずつ聞くと、一覧を開くたびに件数ぶんの往復が出る。
+    SessionsExist {
+        request_id: RequestId,
+        ids: Vec<crate::ClaudeSessionId>,
     },
     Kill {
         card_id: CardId,
@@ -585,6 +639,7 @@ mod tests {
                 supports_revive: true,
                 supports_blob_read: true,
                 supports_blob_write: true,
+                supports_recall: true,
             },
             AgentMessage::SessionUpsert {
                 session: Box::new(sample_meta()),
@@ -778,7 +833,7 @@ mod tests {
     }
 
     #[test]
-    fn 答えの6種と理由の6値がすべて往復する() {
+    fn 答えの7種と理由の6値がすべて往復する() {
         // 断る側を1つでも落とすと、その理由だけが画面へ出せなくなる。
         // 「まとめて駄目でした」に潰れるのを防ぐため、**6値を数え上げて**固定する
         let reasons = [
@@ -815,6 +870,10 @@ mod tests {
                 headroom_mb: 2_048,
                 fits_now: Some(7),
             }),
+            // 実在する CLI セッション（名前付け設計§8-3）。**足したら必ずここへ足す**
+            HostReply::Sessions {
+                ids: vec![crate::ClaudeSessionId::new()],
+            },
         ];
         for reason in reasons {
             all.push(HostReply::Failed {
@@ -822,7 +881,7 @@ mod tests {
                 detail: "実際の理由がここに入る".to_string(),
             });
         }
-        assert_eq!(all.len(), 5 + reasons.len());
+        assert_eq!(all.len(), 6 + reasons.len());
         for reply in &all {
             assert_eq!(&roundtrip(reply), reply);
         }

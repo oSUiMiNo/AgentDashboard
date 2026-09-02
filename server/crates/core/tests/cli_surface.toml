@@ -226,6 +226,11 @@ command = "session model"
 
 [[entry]]
 kind = "ws"
+target = "ClientMessage::SetNickname"
+command = "session nickname"
+
+[[entry]]
+kind = "ws"
 target = "ClientMessage::SetPermissionMode"
 command = "session mode"
 

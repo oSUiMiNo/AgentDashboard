@@ -758,6 +758,39 @@ pub async fn kill(target: &Target, prefix: &str) -> Result<Outcome, ClientError>
     outcome
 }
 
+/// `session nickname`。カードに付いている CLI セッションへ利用者の名前を付ける
+/// （名前付け設計§11-1）。
+///
+/// **宛先の CLI セッションは送らない。** カードIDだけを渡し、サーバが記録から引く——
+/// ここで持たせると、手元の古い写しで別のセッションへ書く経路ができる（設計§5-1）。
+///
+/// `nickname` が `None` なら消す。
+pub async fn set_nickname(
+    target: &Target,
+    prefix: &str,
+    nickname: Option<String>,
+) -> Result<Outcome, ClientError> {
+    let card = resolve_card_id(target, prefix).await?;
+    let mut ws = ws::Ws::connect(target).await?;
+    ws.send(&ClientMessage::SetNickname {
+        card_id: card,
+        nickname: nickname.clone(),
+    })
+    .await?;
+    let outcome = wait::run(
+        &mut ws,
+        Goal::NicknameSet {
+            card,
+            expected: nickname,
+        },
+        "名前の反映",
+        wait::NICKNAME_CAP,
+    )
+    .await;
+    ws.close().await;
+    outcome
+}
+
 /// `session revive`。抜け殻のカードを元の CLI セッションで起こし直し、起動を待つ
 /// （接続断のカードを復旧ボタンで戻す 設計§10-1）。
 pub async fn revive(target: &Target, prefix: &str) -> Result<Outcome, ClientError> {

@@ -585,16 +585,9 @@ fn claude_version(program: &str) -> anyhow::Result<String> {
 
 /// 採取したセッションのトランスクリプトを `~/.claude/projects` から探す。
 fn find_transcript(session_id: &str) -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    let root = PathBuf::from(home).join(".claude").join("projects");
-    let wanted = format!("{session_id}.jsonl");
-    for project in std::fs::read_dir(root).ok()?.flatten() {
-        let candidate = project.path().join(&wanted);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    // **走査元は `claude_home` に集めてある**（名前付け設計§13-1）。ここが別に
+    // `$HOME` を読むと、片方だけ偽装できる状態になってテストが嘘をつく
+    crate::claude_home::find_transcript(session_id)
 }
 
 fn tempdir(prefix: &str) -> anyhow::Result<PathBuf> {

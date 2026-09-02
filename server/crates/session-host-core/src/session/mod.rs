@@ -2020,6 +2020,40 @@ impl SessionManager {
         self.spawn_with(cwd, Some(session_id), &[], None)
     }
 
+    /// **過去の CLI セッションを指定して、新しいカードで起こす**（名前付け設計§7-4・§7-5）。
+    ///
+    /// [`SessionManager::resume`] との違いは2つ。
+    ///
+    /// | | `resume` | `recall` |
+    /// |---|---|---|
+    /// | 権限モード | 渡せない | **渡せる**（`--permission-mode` と `--resume` は組で効く） |
+    /// | `claude_session_id` | 最初のフックが確定させる | **先に入れる** |
+    ///
+    /// # なぜ先に入れるのか
+    ///
+    /// **こちらがどのセッションを指定したかを知っているから**（復旧と同じ理由・設計§7-3）。
+    /// フックが1件も届かないまま失敗しても、そのカードは呼び戻し先を失わない。
+    ///
+    /// そしてこれが「**起こしたあとも名前が付いている**」（要件）を自動的に満たす——
+    /// 名前は `claude_session_id` で引くので、先に入っていれば最初の報告から名前が出る。
+    ///
+    /// CLI が別のIDを名乗った場合は、[`crate::state`] の張り替えが追随する。
+    pub fn recall(
+        self: &Arc<Self>,
+        cwd: &str,
+        initial_mode: Option<PermissionMode>,
+        claude_session_id: ClaudeSessionId,
+    ) -> Result<Arc<Session>, SessionError> {
+        self.spawn_as(
+            CardId::new(),
+            cwd,
+            lifecycle::SessionStart::Resume(claude_session_id),
+            &[],
+            initial_mode,
+            Some(claude_session_id),
+        )
+    }
+
     /// カードを**新しく採番して**起こす。既存の4入口はすべてここを通る。
     ///
     /// 採番の1行だけをここに残し、中身は [`SessionManager::spawn_as`] へ寄せてある

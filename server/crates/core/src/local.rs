@@ -146,6 +146,39 @@ impl SessionHost for LocalSessionHost {
         Ok(())
     }
 
+    async fn recall(
+        &self,
+        request: server_core::session_host::RecallRequest,
+    ) -> Result<(), String> {
+        // 材料（作業ディレクトリ・権限モード・呼び戻し先）は呼ぶ側が記録から引いてある。
+        // **席は取らない**——復旧と違い、毎回新しいカードを作るので二度押しは
+        // カードが2枚できるだけになる（利用者から見て説明の付く結果）
+        self.manager
+            .recall(
+                &request.cwd,
+                request.permission_mode,
+                request.claude_session_id,
+            )
+            .map(|_| ())
+            .map_err(|err| err.to_string())
+    }
+
+    async fn sessions_exist(
+        &self,
+        request: server_core::session_host::HostAskRequest,
+        ids: &[protocol::ClaudeSessionId],
+    ) -> Result<Vec<protocol::ClaudeSessionId>, server_core::session_host::HostAskError> {
+        reject_target(&request)?;
+        // **ローカルもこの口を通す。** 近道を作ると経路の違いが原因の壊れ方が残る
+        // （`list_dir` と同じ理由）。走査はファイルを触るので逃がす
+        let ids = ids.to_vec();
+        Ok(tokio::task::spawn_blocking(move || {
+            session_host_core::claude_home::existing_sessions(&ids)
+        })
+        .await
+        .unwrap_or_default())
+    }
+
     fn kill(&self, card_id: CardId) -> Result<(), String> {
         self.manager.kill(card_id).map_err(|err| err.to_string())
     }

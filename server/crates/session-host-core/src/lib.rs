@@ -19,6 +19,7 @@
 //! セルフホストモードでは同じ境界の向こうが A2S 越しのサーバに変わる（フェーズ3）。
 
 pub mod attachments;
+pub mod claude_home;
 pub mod claude_settings;
 pub mod config;
 pub mod events;

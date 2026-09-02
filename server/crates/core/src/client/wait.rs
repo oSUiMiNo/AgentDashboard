@@ -27,6 +27,8 @@ pub const REMOVE_CAP: Duration = Duration::from_secs(30);
 pub const REVIVE_CAP: Duration = Duration::from_secs(60);
 pub const MODEL_CAP: Duration = Duration::from_secs(60);
 pub const MODE_CAP: Duration = Duration::from_secs(60);
+/// 名前を付ける（名前付け設計§11-2）。**記録へ書くだけ**なので PTY を待たない
+pub const NICKNAME_CAP: Duration = Duration::from_secs(30);
 /// `send --wait` の既定。`--timeout` で変えられる唯一の枠（他は固定でよい——
 /// 変えたくなる長さを持つのは「本物のターンの終わり」を待つ send だけ）
 pub const SEND_DEFAULT_CAP_SECS: u64 = 600;
@@ -63,6 +65,20 @@ pub enum Goal {
     TurnEnded { card: CardId, seen_busy: bool },
     /// `kill`：status が `Ended` になる
     Ended { card: CardId },
+    /// `session nickname`：そのカードの `SessionUpsert` が、頼んだ名前を持って返る
+    /// （名前付け設計§11-2）。
+    ///
+    /// **二段にしない。** 復旧（[`Goal::Revived`]）が二段なのは、満ちる条件
+    /// （`Starting` かつ繋がっている）を**接続直後の写しがそのまま満たしてしまう**ため
+    /// だった。こちらが待つのは「頼んだ名前になっていること」で、**まだ頼んでいない
+    /// 写しがその値を持っているなら、それは既にそうなっているということ**である——
+    /// 嘘にならないので、見送る必要が無い。
+    ///
+    /// **`Status`（差分）では満ちない。** あちらは名前を運ばない（設計§5-4）。
+    NicknameSet {
+        card: CardId,
+        expected: Option<String>,
+    },
     /// `rm`：`SessionRemoved` が来る
     Removed { card: CardId },
     /// `revive`：**接続直後の写しを1枚見送ってから**、`SessionUpsert` で `Starting` かつ
@@ -152,6 +168,20 @@ impl Goal {
                 ),
                 _ => Step::Continue,
             },
+            Self::NicknameSet { card, expected } => match message {
+                ServerMessage::SessionUpsert { session }
+                    if session.card_id == *card && session.nickname == *expected =>
+                {
+                    done(
+                        match expected {
+                            Some(name) => format!("名前を「{name}」にしました"),
+                            None => "名前を消しました".to_string(),
+                        },
+                        message,
+                    )
+                }
+                _ => Step::Continue,
+            },
             Self::Removed { card } => match message {
                 ServerMessage::SessionRemoved { card_id } if card_id == card => {
                     done("一覧から外しました".to_string(), message)
@@ -228,6 +258,7 @@ impl Goal {
             Self::TurnEnded { card, .. }
             | Self::Ended { card }
             | Self::Removed { card }
+            | Self::NicknameSet { card, .. }
             | Self::Revived { card, .. }
             | Self::ModelApplied { card, .. }
             | Self::ModeApplied { card, .. } => Some(card),

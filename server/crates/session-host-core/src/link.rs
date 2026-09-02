@@ -973,6 +973,7 @@ async fn handshake(mut socket: Socket, config: &LinkConfig) -> anyhow::Result<(S
         // （`メッセージに画像を添付できるようにする` 設計§4-1）。上5つと同じで、
         // **この実行ファイルは `hostfs::write_blob` を持っている**ので常に真
         supports_blob_write: true,
+        supports_recall: true,
     };
     socket
         .send(tungstenite::Message::text(serde_json::to_string(&hello)?))
@@ -1176,6 +1177,9 @@ enum Ask {
     /// 2つめは**通したぶんを差し引いた見込みの空き**（設計§19）。床の判定と同じ数を
     /// 渡さないと、**画面が「入る」と言ったものを PC が断る**ことになる。
     Resources(crate::resources::Gauge, Option<u64>),
+    /// 渡したIDのうち履歴が実在するもの（名前付け設計§8-3）。**設定は要らない**——
+    /// 走査元は環境変数から引く（`claude_home`）
+    Sessions(Vec<protocol::ClaudeSessionId>),
 }
 
 /// 答えの要る問いに、**別のスレッドで**答える（設計§4・§8・§9、ログ設計§13-1）。
@@ -1233,6 +1237,12 @@ fn answer_ask(outgoing: mpsc::UnboundedSender<Outgoing>, request_id: RequestId, 
                     reason: err.reason,
                     detail: err.detail,
                 },
+            },
+            // **答えるのは「実在したもの」だけ**。渡した全部は返さない（設計§8-3）。
+            // 走査で落ちる道が無いので `Failed` にならない——フォルダが無い機械では
+            // 空が返り、聞いた側はそれを「全部消えている」として扱う
+            Ask::Sessions(ids) => HostReply::Sessions {
+                ids: crate::claude_home::existing_sessions(&ids),
             },
             // **読めないことは異常ではない**（Linux 以外）。そう言えば、聞いた側は
             // 歯止め無しで進む——分からないことを理由に止めない（設計§18-4）
@@ -1336,6 +1346,29 @@ fn apply_command(
                     report_error(&manager, card_id, err.to_string());
                 }
             });
+        }
+        // 過去の CLI セッションを指定して、新しいカードで起こす（名前付け設計§7）。
+        //
+        // **復旧と違い、席（`begin_revive`）を取らない。** あちらは「抜け殻を戻す」ので
+        // 同じカードへ二度撃たれると二重に起きるが、こちらは毎回新しいカードを作るので
+        // 二度押しは**カードが2枚できる**だけ——利用者から見て説明の付く結果になる。
+        ServerToAgent::RecallSession {
+            cwd,
+            permission_mode,
+            claude_session_id,
+        } => {
+            if let Err(err) = manager.recall(&cwd, permission_mode, claude_session_id) {
+                // **カードを名指しできない**（`Spawn` と同じ）。採番はこちらなので、
+                // 失敗した時点ではまだIDが無い（設計§7-6）
+                manager.broadcast(ServerMessage::Error {
+                    card_id: None,
+                    message: err.to_string(),
+                });
+            }
+        }
+        // 履歴が実在するIDを尋ねる問い（名前付け設計§8-3）。**読む問いと同じ1本の道**
+        ServerToAgent::SessionsExist { request_id, ids } => {
+            answer_ask(outgoing.clone(), request_id, Ask::Sessions(ids));
         }
         ServerToAgent::Kill { card_id } => {
             if let Err(err) = manager.kill(card_id) {

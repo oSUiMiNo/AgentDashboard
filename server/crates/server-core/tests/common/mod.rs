@@ -347,6 +347,7 @@ pub fn hello(name: &str) -> AgentMessage {
         supports_revive: true,
         supports_blob_read: true,
         supports_blob_write: true,
+        supports_recall: true,
     }
 }
 
