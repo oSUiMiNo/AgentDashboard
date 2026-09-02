@@ -214,7 +214,6 @@ impl SessionRecord {
 pub(crate) const NOT_FOUND: &str = "セッションが見つかりません";
 
 /// 全カードの記録と、その配信。
-
 pub struct SessionRegistry {
     db: DatabaseConnection,
     records: Mutex<HashMap<CardId, Arc<SessionRecord>>>,
