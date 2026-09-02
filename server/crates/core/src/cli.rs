@@ -654,6 +654,32 @@ pub fn run() -> anyhow::Result<()> {
     run_async(cli, config)
 }
 
+/// 起動した時点で、自分の子にゾンビが何体ぶら下がっているかを1行残す（ゾンビ設計§5-2）。
+///
+/// # なぜ起動のときに数えるのか
+///
+/// 版の入れ替えは `exec` で自分を置き換えるので、**プロセスの中で数え上げた値は入れ替えの
+/// たびに消える**。一方 OS の親子関係は PID が同じまま残るので、**入れ替えを跨いで効く
+/// 数え方はこれ1つだけ**である。入れ替えは起動をまるごとやり直すため、この行は入れ替えの
+/// たびに自動で出る——周期の見張りを足す必要が無い。
+///
+/// # 0体でも出す
+///
+/// この検査そのものが動いたことを、後から確かめられるようにするため。ただし `DEBUG` なので
+/// 端末には出ず、ファイルにだけ残る。
+fn report_zombie_children() {
+    match crate::children::zombie_count() {
+        Some(0) => tracing::debug!(zombie_children = 0, "起動時点でゾンビはありません"),
+        Some(zombie_children) => tracing::warn!(
+            zombie_children,
+            "起動時点で、自分の子にゾンビが残っています\
+             （前の版入れ替えの置き土産。実害はありません）"
+        ),
+        // 読めない機械（Linux 以外）。**0体と書かない**
+        None => {}
+    }
+}
+
 /// ここから先は今までどおり。
 #[tokio::main]
 async fn run_async(cli: Cli, config: Config) -> anyhow::Result<()> {
@@ -730,6 +756,7 @@ async fn run_async(cli: Cli, config: Config) -> anyhow::Result<()> {
                     .display(),
                 env!("CARGO_PKG_VERSION")
             );
+            report_zombie_children();
             // 渡すのは**門が行き先へ渡す `--config`**（CICD設計§9）。受け取ったときだけ渡す。
             // 設定画面からの書き戻し先はもう無い——保存先は記録（持ち出し設計§6）
             match cli.mode {

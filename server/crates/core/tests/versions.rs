@@ -501,6 +501,12 @@ async fn 入れ替えは返してから落とす() {
         view["stranded_cards"].is_number(),
         "何枚が抜け殻になるかを返していない: {body}"
     );
+    // **引き取れていない子の数も一緒に返す**（ゾンビ設計§5-3）。読めない機械では `null`
+    // になるが、**欄そのものが無いのは駄目**——画面と CLI がこの欄を読む
+    assert!(
+        view["zombie_children"].is_number() || view["zombie_children"].is_null(),
+        "引き取れていない子の数を返していない: {body}"
+    );
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while !server.stopped.load(std::sync::atomic::Ordering::SeqCst) {

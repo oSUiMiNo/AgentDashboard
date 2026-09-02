@@ -34,6 +34,7 @@ function show(overrides: Partial<VersionsView> = {}) {
       outcome: null,
       latest: null,
       stranded_cards: 0,
+      zombie_children: null,
       install: null,
       install_unavailable: null,
       // 既定と違う場所を入れておく。**決め打ちに戻っても気づけるようにするため**
@@ -121,6 +122,44 @@ describe('版のカード', () => {
     expect(await screen.findByTestId('versions-stranded')).toHaveTextContent(
       '失われるセッションはありません',
     )
+  })
+
+  it('引き取れていない子が居れば、静かに数を出す', async () => {
+    show({
+      entries: [entry({ version: '0.2.0', selected: true })],
+      selected: '0.2.0',
+      zombie_children: 78,
+    })
+
+    const 段落 = await screen.findByTestId('versions-zombies')
+    expect(段落).toHaveTextContent('78')
+    expect(段落).toHaveTextContent('実害はありません')
+    // **警報の色を使わない。** 押せるボタンが無いので、色を強めると「対処できる差分」と
+    // 見分けが付かなくなる（ゾンビ設計§5-4）
+    expect(段落.className).toContain('text-muted-foreground')
+    expect(段落.className).not.toMatch(/amber|red|destructive/)
+  })
+
+  it('引き取れていない子が0体なら、段落ごと出さない', async () => {
+    show({
+      entries: [entry({ version: '0.2.0', selected: true })],
+      selected: '0.2.0',
+      zombie_children: 0,
+    })
+
+    await screen.findByTestId('versions-stranded')
+    expect(screen.queryByTestId('versions-zombies')).toBeNull()
+  })
+
+  it('読めない機械では、0体と言わずに黙る', async () => {
+    show({
+      entries: [entry({ version: '0.2.0', selected: true })],
+      selected: '0.2.0',
+      zombie_children: null,
+    })
+
+    await screen.findByTestId('versions-stranded')
+    expect(screen.queryByTestId('versions-zombies')).toBeNull()
   })
 
   it('保管庫の使用量を出す', async () => {

@@ -81,6 +81,14 @@ export function VersionsCard() {
           ? 'いま入れ替えても、失われるセッションはありません。'
           : `いま入れ替えると ${versions.stranded_cards} 枚が抜け殻になります（履歴は残りますが、操作はできなくなります）。`}
       </p>
+      {versions.zombie_children !== null && versions.zombie_children > 0 && (
+        // **警報の色を使わない。** 押せるボタンが無いので、琥珀を当てると「対処できる差分」
+        // （版が遅れている等）と見分けが付かなくなる。0体のときは段落ごと出さない
+        <p data-testid="versions-zombies" className="text-muted-foreground text-xs">
+          これまでの入れ替えで、OS 上に {versions.zombie_children}{' '}
+          体のゾンビ（終了状態を引き取れていない子プロセス）が残っています。実害はありません。
+        </p>
+      )}
       <p className="text-muted-foreground text-xs">
         入れ替えると画面は一度切れます。<strong>同じプロセスのまま</strong>
         新しい版で起き直るので、戻ってきたらタブを読み込み直してください。

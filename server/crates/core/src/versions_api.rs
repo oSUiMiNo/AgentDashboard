@@ -170,6 +170,15 @@ pub struct VersionsView {
     /// 既に繋がっていないカードは**既に抜け殻**なので数えない。ここが数えるのは
     /// **これから失うぶん**だけ。
     pub stranded_cards: usize,
+    /// **引き取られていない子プロセスの数**（ゾンビ設計§5-2）。読めなければ `None`。
+    ///
+    /// 版の入れ替えは `exec` で自分を置き換えるので、**プロセスの中で数え上げた値は
+    /// 入れ替えのたびに消える**。入れ替えを跨いで効く数え方は「いま自分の子に何体
+    /// ぶら下がっているか」を OS に聞くこの1つだけである。
+    ///
+    /// **`None`（読めない）と `Some(0)`（居ない）を混ぜない。** 潰すと Linux 以外の
+    /// 機械で「ゾンビは居ません」と嘘をつく。
+    pub zombie_children: Option<usize>,
     /// 取ってくる仕事の様子（設計§15）。押していなければ `None`。
     pub install: Option<InstallView>,
     /// 取ってくる道具が無いときの理由（設計§23-6）。
@@ -415,6 +424,9 @@ async fn build_view(state: &VersionsState, identity: &Identity) -> VersionsView 
             outcome: None,
             latest: latest_of(&state.state_dir),
             stranded_cards: 0,
+            // **版を切り替えられない構成でも数える。** 子を抱えていることは版の切替とは
+            // 別の話で、箱の中でも `exec` 以外の理由でゾンビは生まれうる
+            zombie_children: crate::children::zombie_count(),
             install: None,
             install_unavailable: None,
             pointer_path,
@@ -465,6 +477,7 @@ async fn build_view(state: &VersionsState, identity: &Identity) -> VersionsView 
         outcome: version::read_outcome(&state.state_dir),
         latest: latest_of(&state.state_dir),
         stranded_cards: stranded_cards(state, identity),
+        zombie_children: crate::children::zombie_count(),
         install: state.install.lock().expect("ロックが壊れていない").clone(),
         install_unavailable: state.ops.unavailable_reason(),
         pointer_path,
@@ -720,10 +733,20 @@ async fn api_restart(
     }
 
     let view = build_view(&state, &identity).await;
-    tracing::info!(
-        stranded = view.stranded_cards,
-        "版を入れ替えるために終了します"
-    );
+    // **入れ替えの前後を突き合わせるための数**（ゾンビ設計§5-2）。繋ぐ鍵は `pid` である——
+    // `run_id` は入れ替えのたびに新しくなるので、前の行と後の行を辿れない
+    match view.zombie_children {
+        Some(zombie_children) => tracing::info!(
+            stranded = view.stranded_cards,
+            zombie_children,
+            "版を入れ替えるために終了します"
+        ),
+        // 読めない機械では欄ごと出さない。0 と書くと嘘になる
+        None => tracing::info!(
+            stranded = view.stranded_cards,
+            "版を入れ替えるために終了します"
+        ),
+    }
     let stop = Arc::clone(&state.stop);
     tokio::spawn(async move {
         // **返してから落とす。** 応答が届かないと「押したのに失敗した」と見分けが付かない

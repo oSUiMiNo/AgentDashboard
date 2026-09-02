@@ -310,6 +310,15 @@ pub fn render_versions(view: &crate::versions_api::VersionsView) -> String {
     if let Some(latest) = &view.latest {
         out.push_str(&format!("知っている最新: {}\n", latest.version.0));
     }
+    // **0体のときは行ごと出さない**（ゾンビ設計§5-3）。平時に増える行ではない。
+    // 読めない機械（`None`）でも出さない——0 と書くと嘘になる
+    if let Some(zombie_children) = view.zombie_children
+        && zombie_children > 0
+    {
+        out.push_str(&format!(
+            "引き取れていない子: {zombie_children}（過去の入れ替えの置き土産。実害はありません）\n"
+        ));
+    }
     if view.entries.is_empty() {
         out.push_str("手元に置いてある版はありません");
         return out;

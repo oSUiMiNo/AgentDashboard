@@ -78,6 +78,13 @@ export interface VersionsView {
   latest: LatestVersion | null
   /** いま入れ替えると抜け殻になるカードの枚数（設計§10） */
   stranded_cards: number
+  /**
+   * 引き取られていない子プロセスの数（ゾンビ設計§5-2）。**読めなければ `null`**。
+   *
+   * `null`（読めない）と `0`（居ない）を混ぜないこと。潰すと Linux 以外の機械で
+   * 「ゾンビは居ません」と嘘をつく
+   */
+  zombie_children: number | null
   install: InstallProgress | null
   /** 取ってくる道具が無いときの理由。**`supported` とは別物** */
   install_unavailable: string | null
@@ -168,6 +175,8 @@ const FALLBACK: VersionsView = {
   outcome: null,
   latest: null,
   stranded_cards: 0,
+  // 読めていない間は「居ない」と言い切らない
+  zombie_children: null,
   install: null,
   install_unavailable: null,
   // 読めていない間は出口を名指ししない。**知らない場所を書くより、書かないほうがよい**
