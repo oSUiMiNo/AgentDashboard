@@ -113,9 +113,22 @@ struct FileState {
     /// 読んだ時点では絵の在り処が分からない。**同じ `promptId` の相棒が来たら、
     /// 並び順で結びつける**（`imagePasteIds` は通し番号なので鍵にしない）。
     ///
-    /// 相棒が**来ないこともある**（クリップボードから直に貼った画像）。そのときは
-    /// `path` が `None` のまま残り、画面は「手元に残っていません」と出す。
-    pending_images: HashMap<String, std::collections::VecDeque<TreeNode>>,
+    /// # 表ではなく枠を1つだけ持つ
+    ///
+    /// **育たないことを型で言うため。** 表にすると、相棒が来なかったぶんの鍵とノードが
+    /// [`SessionThreader`] の寿命ぶん居座る——相棒が来ない道は実在する
+    /// （クリップボードから直に貼った画像）ので、放っておくと画像を含むプロンプトの数だけ
+    /// 増え続ける。**このクレートは、差し替えたパーサが 8GB まで育って機械を落としかけた
+    /// 歴史を持つ。**
+    ///
+    /// 1つで足りるのは、**レコードを1つのファイルから順に読む**ためである。claude は
+    /// 本体 → 相棒 → 本体 → 相棒 と書くので、**同時に2つのプロンプトが待つ形にならない。**
+    /// 新しい本体が来たら、前のぶんは相棒が来なかったものとして捨てる。
+    ///
+    /// **代償。** 本体（p1）→ 本体（p2）→ 相棒（p1）の順で来たら p1 は置き場所を持てない。
+    /// 実測でこの順は起きないが、起きても**絵が出ないだけ**で落ちはしない
+    /// （`path` が `None` の [`Node::Image`] は「手元に残っていません」と出る）。
+    pending_images: Option<(String, std::collections::VecDeque<TreeNode>)>,
 }
 
 /// 1セッション（本体＋サブエージェント群）ぶんのスレッディング。
@@ -354,11 +367,18 @@ impl SessionThreader {
                         branch,
                     };
                     if let Some(prompt) = record.prompt_id() {
-                        self.file(source)
-                            .pending_images
-                            .entry(prompt.to_string())
-                            .or_default()
-                            .push_back(node.clone());
+                        let waiting = &mut self.file(source).pending_images;
+                        // 別のプロンプトが待っていたなら、それは相棒が来なかったぶん。捨てる
+                        match waiting {
+                            Some((holding, queue)) if holding == prompt => {
+                                queue.push_back(node.clone())
+                            }
+                            _ => {
+                                let mut queue = std::collections::VecDeque::new();
+                                queue.push_back(node.clone());
+                                *waiting = Some((prompt.to_string(), queue));
+                            }
+                        }
                     }
                     emitted.push(node);
                     last_emitted = Some(node_id);
@@ -366,10 +386,17 @@ impl SessionThreader {
                 // 相棒が運んできた置き場所。**それ自体はノードにならない**——
                 // 待っている画像へ合流させ、同じ ID で送り直す
                 Block::ImageSource { path } => {
-                    let waiting = record
-                        .prompt_id()
-                        .and_then(|prompt| self.file(source).pending_images.get_mut(prompt))
-                        .and_then(std::collections::VecDeque::pop_front);
+                    let waiting = record.prompt_id().and_then(|prompt| {
+                        let slot = &mut self.file(source).pending_images;
+                        // 枠が別のプロンプトを抱えていれば、この相棒の相手は居ない
+                        let (_, queue) = slot.as_mut().filter(|(held, _)| held == prompt)?;
+                        let node = queue.pop_front();
+                        // 出し切ったら枠ごと空ける。**抱えたままにしない**
+                        if queue.is_empty() {
+                            *slot = None;
+                        }
+                        node
+                    });
                     if let Some(mut node) = waiting {
                         if let Node::Image { path: slot, .. } = &mut node.node {
                             *slot = Some(path);
@@ -1175,6 +1202,56 @@ mod tests {
             "相棒が発言として出ている: {:?}",
             kinds(&companion)
         );
+    }
+
+    /// その源のファイルが抱えている、置き場所待ちの画像の数。
+    fn 待っている数(threader: &SessionThreader) -> usize {
+        threader
+            .files
+            .get(MAIN)
+            .and_then(|file| file.pending_images.as_ref())
+            .map_or(0, |(_, queue)| queue.len())
+    }
+
+    #[test]
+    fn 相棒が揃ったら待ちの枠が空く() {
+        // **抱えたままにしない。** このクレートは、差し替えたパーサが 8GB まで育って
+        // 機械を落としかけた歴史を持つ——際限が無いことそのものを残さない
+        let mut threader = SessionThreader::new();
+        feed(&mut threader, &本体("p6", 2));
+        assert_eq!(待っている数(&threader), 2, "本体を読んだら待ちに入ること");
+
+        feed(
+            &mut threader,
+            &相棒("p6", &["/state/a.png", "/state/b.png"]),
+        );
+        assert_eq!(待っている数(&threader), 0, "揃ったのに枠が残っている");
+        assert!(
+            threader.files[MAIN].pending_images.is_none(),
+            "中身は出たのに枠だけ残っている"
+        );
+    }
+
+    #[test]
+    fn 相棒が来ないまま次の本体が来たら前のぶんは捨てる() {
+        // 相棒が来ない道は実在する（クリップボードから直に貼った画像）。放っておくと
+        // **画像を含むプロンプトの数だけ増え続ける**
+        let mut threader = SessionThreader::new();
+        feed(&mut threader, &本体("p7", 3));
+        assert_eq!(待っている数(&threader), 3);
+
+        // 相棒を挟まずに次の本体。前の3枚は置き場所を持てないまま捨てられる
+        feed(&mut threader, &本体("p8", 1));
+        assert_eq!(
+            待っている数(&threader),
+            1,
+            "前のプロンプトのぶんが残っている"
+        );
+
+        // 新しいほうの相棒はちゃんと結びつく
+        let companion = feed(&mut threader, &相棒("p8", &["/state/z.png"]));
+        assert_eq!(置き場所(&companion[0]), Some("/state/z.png"));
+        assert_eq!(待っている数(&threader), 0);
     }
 
     #[test]
