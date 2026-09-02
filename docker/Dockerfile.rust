@@ -30,7 +30,9 @@ RUN curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C /usr/local/cargo
 # dist（旧 cargo-dist）：配布物の生成とリリース CI の生成（セルフホスト化設計§14-3）。
 # 版を固定するのは、生成した `.github/workflows/release.yml` に自分の版が焼き込まれるため。
 # 上げるときは設定（`dist-workspace.toml` の `cargo-dist-version`）と一緒に上げ、
-# `dist generate` を掛け直すこと——`make dist-check` が食い違いを見つける。
+# `dist generate` を掛け直すこと——食い違いは `make ci` が見つける
+# （`crates/dist/tests/artifacts.rs` が `dist generate --check` を叩く）。
+# **専用ターゲットは無い**ので `make dist-check` を探さないこと。
 #
 # musl 版を取るのは、このイメージの glibc に縛られないため（nextest と同じ扱い）。
 RUN curl -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-x86_64-unknown-linux-musl.tar.xz \
