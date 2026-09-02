@@ -208,6 +208,8 @@ describe('元が読めなくなっても送れる形にする', () => {
     expect(rejected).toHaveLength(1)
     expect(rejected[0]).toContain('gone.png')
     expect(rejected[0]).toContain('読めませんでした')
+    // **選び直しへ倒す。** リトライしても同じ失敗を繰り返すだけ
+    expect(rejected[0]).toContain('選び直して')
   })
 
   it('1枚読めなくても、読めた側は残る', async () => {
@@ -224,17 +226,51 @@ describe('元が読めなくなっても送れる形にする', () => {
     expect(rejected).toHaveLength(1)
   })
 
-  it('断るものは読まない', async () => {
-    // 8 MiB を読んでから「大きすぎます」と言うのでは、写しを取る意味が薄れる。
-    // **大きさと種別を見てから読む**順序であることを、読む口が呼ばれないことで見る
-    const 大きい = 画像('huge.png', 'image/png', MAX_ATTACHMENT_BYTES + 1)
-    const 読む = vi.fn(() => Promise.resolve(new ArrayBuffer(0)))
-    大きい.arrayBuffer = 読む
+  it('大きさを見る前に読む', async () => {
+    // **`file.size` に触れると、Chrome が「この File はこれ」という控えを焼き付ける。**
+    // Android の画像選択が返す `content://` は問い合わせのたびに違う更新時刻を答える
+    // ことがあり、焼き付けた控えと実物が食い違うと**読み出しごと失敗する**
+    // （crbug 40123366。Canva の実測いわく「`size` にも `slice()` にも触れなければ毎回通る」）。
+    //
+    // **順序で固定する。** 「大きすぎるものを断れること」だけを見ると、
+    // 先に `size` を見る書き方でも通ってしまう
+    const 順序: string[] = []
+    const f = 画像('a.png', 'image/png', 8)
+    Object.defineProperty(f, 'size', {
+      get() {
+        順序.push('size')
+        return 8
+      },
+    })
+    const 元の読む = f.arrayBuffer.bind(f)
+    f.arrayBuffer = () => {
+      順序.push('read')
+      return 元の読む()
+    }
+
+    await pickImages([f])
+    expect(順序[0]).toBe('read')
+  })
+
+  it('種別で断るものは読まない', async () => {
+    // **種別は `size` と違って触っても控えを焼き付けない**ので、こちらは先に見てよい。
+    // 8 MiB を読んでから「png ではありません」と言う必要は無い
     const 種別違い = 画像('e.svg', 'image/svg+xml')
+    const 読む = vi.fn(() => Promise.resolve(new ArrayBuffer(0)))
     種別違い.arrayBuffer = 読む
 
-    await pickImages([大きい, 種別違い])
+    await pickImages([種別違い])
     expect(読む).not.toHaveBeenCalled()
+  })
+
+  it('上限を超えるものは、読んだ写しの大きさで断る', async () => {
+    // 順序を入れ替えたので、断りが**写し側の大きさ**から出ることを確かめる
+    const { accepted, rejected } = await pickImages([
+      画像('huge.png', 'image/png', MAX_ATTACHMENT_BYTES + 1),
+    ])
+    expect(accepted).toEqual([])
+    expect(rejected[0]).toContain('上限')
+    expect(rejected[0]).toContain('huge.png')
   })
 })
 

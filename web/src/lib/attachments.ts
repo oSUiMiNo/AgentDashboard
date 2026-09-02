@@ -71,6 +71,16 @@ export function 鍵を採る(): string {
  *
  * 代金はメモリで、上限は1枚 8 MiB（`MAX_ATTACHMENT_BYTES`）×枚数。**先に運んでしまう
  * 案は採らない**——外したときや画面を移ったときに、置いたものが向こうに残る（設計§2）。
+ *
+ * # ただし、これは保証ではない
+ *
+ * **写しを取ろうとした時点で既に読めないことがある。** Android のクラウド由来・
+ * 写真選択由来の `content://` では `arrayBuffer()` 自身が投げる（crbug 40123366 #89・#105。
+ * Canva の実測で「エラー率は下がるが決してゼロにはならない」）。だから**読めなかったときに
+ * 選び直しへ倒す道**が要る——`pickImages` が付けた時点で断るのはこのためである。
+ *
+ * 参照の寿命そのものを消す道は「付けた瞬間に運んでしまう」だが、設計§2 がそれを採らないと
+ * 決めている。**写しで足りなくなったら、そこを見直すことになる。**
  */
 export interface Attachment {
   /** 画面での付け外しに使う鍵。中身とは無関係 */
@@ -116,21 +126,31 @@ export async function pickImages(files: readonly File[]): Promise<Picked> {
       rejected.push(`${file.name}（${種別}）は添付できません`)
       continue
     }
-    if (file.size > MAX_ATTACHMENT_BYTES) {
-      rejected.push(
-        `${file.name}（${mib(file.size)}）は上限の ${mib(MAX_ATTACHMENT_BYTES)} を超えています`,
-      )
-      continue
-    }
-    // **ここで読む。** 大きさと種別を先に見てから読むので、断るものは読まない。
-    // 読めなかったら**その場で言う**——送信を押してから「Failed to fetch」と出るより、
-    // 付けた瞬間に「読めませんでした」と出るほうが、撮り直す判断ができる
+    // **大きさを見る前に読む。** 順序が逆だと、読む前に元が読めなくなる。
+    //
+    // `file.size` ／ `file.lastModified` ／ `file.slice()` は、**その場の中身で
+    // 「この File はこれ」という控えを Chrome の中に焼き付ける**。Android の画像選択が
+    // 返す `content://` は問い合わせのたびに違う更新時刻を答えることがあるので、
+    // 焼き付けた控えと後から読んだ実物が食い違い、**読み出しごと失敗する**
+    // （crbug 40123366。Canva の実測いわく「`size` にも `slice()` にも触れなければ毎回通る」）。
+    // 読む口（`arrayBuffer()` ／ `stream()` ／ `FileReader`）は控えを焼き付けない。
+    //
+    // **代金は、大きすぎるものも一度は読むこと。** 種別で先に絞ってあるので画像だけだが、
+    // 「運ぶ前に断る」というこの関数の狙いのうち、**運ばない**は守られ、**読まない**は
+    // 諦めている。読めた写しの大きさで断るので、断りの文言は変わらない。
     let bytes: Blob
     try {
       bytes = new Blob([await file.arrayBuffer()], { type: file.type })
     } catch {
+      // **リトライしない。** 同じ失敗を繰り返すだけなので、選び直しへ倒す
       rejected.push(
-        `${file.name} を読めませんでした（元の画像が入れ替わったか、消えた可能性があります）`,
+        `${file.name} を読めませんでした。もう一度選び直してください`,
+      )
+      continue
+    }
+    if (bytes.size > MAX_ATTACHMENT_BYTES) {
+      rejected.push(
+        `${file.name}（${mib(bytes.size)}）は上限の ${mib(MAX_ATTACHMENT_BYTES)} を超えています`,
       )
       continue
     }
