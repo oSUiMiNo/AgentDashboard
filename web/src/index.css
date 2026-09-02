@@ -328,6 +328,39 @@
   しっぽ。**上辺が右端まで伸びてから、えぐるように下へ折り返す**形を、
   角の内側を丸く抜いた四角で作る。`radial-gradient` のマスクで抜くので `clip-path` は要らない。
 */
+/*
+  **吹き出しの中は、青基調で揃える**（要望13・2026-09-02）。
+
+  `.prose-dashboard` の囲みコード・表・引用は**無彩色の灰**（`--color-muted` /
+  `--color-border`）を地にしている。本文の上では正しいが、**青い吹き出しの中では
+  そこだけ色が変わって見え、読みにくい**——利用者の指摘はこれである。
+
+  **色を足すのではなく、吹き出しの地から作る。** `--bubble-ground`（`#173E76`）を
+  明暗へ振るだけなので、**青を動かせば全部が付いてくる**（`#173E76` は「参考画像と
+  全く同じ青」という指定なので、こちらで動かせない。だから**派生で持つ**）。
+
+  **`DESIGN.md` §11.2 の役割固定には当たらない。** これは種別の区別ではなく、
+  **同じ器の中の面の階層**である。
+*/
+.speech-bubble .prose-dashboard code {
+  background: color-mix(in oklch, var(--bubble-ground) 62%, white 8%);
+}
+.speech-bubble .prose-dashboard pre {
+  background: color-mix(in oklch, var(--bubble-ground) 70%, black 12%);
+}
+.speech-bubble .prose-dashboard blockquote {
+  border-left-color: color-mix(in oklch, var(--bubble-ground) 40%, white 25%);
+  /* 引用の文字だけ沈めない。**青の上では、くすんだ灰は読みにくい** */
+  color: color-mix(in oklch, var(--color-foreground) 78%, transparent);
+}
+.speech-bubble .prose-dashboard th,
+.speech-bubble .prose-dashboard td {
+  border-color: color-mix(in oklch, var(--bubble-ground) 40%, white 22%);
+}
+.speech-bubble .prose-dashboard hr {
+  border-top-color: color-mix(in oklch, var(--bubble-ground) 40%, white 22%);
+}
+
 .speech-bubble::after {
   content: '';
   position: absolute;

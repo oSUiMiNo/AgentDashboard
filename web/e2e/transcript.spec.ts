@@ -688,6 +688,51 @@ test('「畳む」も左右中央にあり、上の余白が倍', async ({ page 
   void 畳んだとき
 })
 
+test('吹き出しの中は、青基調で揃っている', async ({ page }) => {
+  // 要望13。囲みコードや表が**無彩色の灰のまま**だと、青の上でそこだけ色が変わって
+  // 見え、読みにくい。**色相で見る**——「灰でないこと」を数字で言うには彩度が要る
+  await startSession(page)
+  await showTerminal(page)
+  await fireHook(page, 'SessionStart')
+  await writeTranscript(page, 'v2.1.220/basic-tools/session.jsonl')
+  await showTranscript(page)
+  const bubble = page.getByTestId('user-bubble').first()
+  await expect(bubble).toBeVisible(届くまで)
+
+  const 色 = await bubble.evaluate((el) => {
+    const 画 = document.createElement('canvas')
+    画.width = 1
+    画.height = 1
+    const 筆 = 画.getContext('2d', { willReadFrequently: true })!
+    const rgb = (c: string) => {
+      筆.clearRect(0, 0, 1, 1)
+      筆.fillStyle = c
+      筆.fillRect(0, 0, 1, 1)
+      const d = 筆.getImageData(0, 0, 1, 1).data
+      return [d[0], d[1], d[2]]
+    }
+    // 青みの強さ＝青が赤より十分に大きいこと
+    const 青み = (c: string) => {
+      const [r, , b] = rgb(c)
+      return b - r
+    }
+    const 地 = getComputedStyle(el).backgroundColor
+    // 吹き出しの中へ囲みコードを1つ差し込んで測る（フィクスチャに無いことがある）
+    const 中 = el.querySelector('.prose-dashboard') as HTMLElement
+    const 印 = document.createElement('code')
+    印.textContent = 'x'
+    中.append(印)
+    const コード = getComputedStyle(印).backgroundColor
+    印.remove()
+    return { 吹き出しの青み: 青み(地), コードの青み: 青み(コード) }
+  })
+
+  // 吹き出しは青い
+  expect(色.吹き出しの青み).toBeGreaterThan(40)
+  // **囲みコードも青い。** 無彩色（青み ≒ 0）へ戻すと落ちる
+  expect(色.コードの青み).toBeGreaterThan(15)
+})
+
 test('帯の下9割は、どこを押しても開く', async ({ page }) => {
   // **要望10 の本体**（設計§6-7-5）。「続きを読む」をピンポイントで突かなくても開く。
   // **左寄り・中央・右寄りの3点**で見る——1点だけだと、たまたま文字の上を突いていても通る
