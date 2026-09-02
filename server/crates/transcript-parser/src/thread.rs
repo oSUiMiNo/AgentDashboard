@@ -1191,6 +1191,34 @@ mod tests {
     }
 
     #[test]
+    fn 文字列で来た相棒も発言として出ない() {
+        // 実測では相棒は配列で来るが、**本体が文字列で来る形が現に在る**（最初の
+        // プロンプト）ので、相棒だけは必ず配列だと決めてかかれない
+        let mut threader = SessionThreader::new();
+        let body = feed(&mut threader, &本体("p6", 1));
+        let companion = feed(
+            &mut threader,
+            r#"{"type":"user","uuid":"c-p6","promptId":"p6","isMeta":true,
+               "turnCompanion":true,"message":{"content":"[Image: source: /state/s.png]"}}"#,
+        );
+        assert_eq!(kinds(&companion), ["image"], "相棒が発言として出ている");
+        assert_eq!(置き場所(&companion[0]), Some("/state/s.png"));
+        assert_eq!(companion[0].id, body[1].id, "同じ ID で送り直していない");
+    }
+
+    #[test]
+    fn 相棒でない文字列は従来どおり発言になる() {
+        // 最初のプロンプトはこの形で来る。**相棒の見分けを広げすぎて、ここを
+        // 巻き込まないこと**
+        let mut threader = SessionThreader::new();
+        let 発言 = feed(
+            &mut threader,
+            r#"{"type":"user","uuid":"u1","message":{"content":"テストを直して"}}"#,
+        );
+        assert_eq!(kinds(&発言), ["user"]);
+    }
+
+    #[test]
     fn 相棒の文は発言として履歴に出ない() {
         // そのまま通すと `[Image: source: …]` が発言に見える。あれは claude の
         // 内部の覚え書きであって、利用者が書いた文ではない

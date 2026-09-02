@@ -70,7 +70,15 @@ pub fn blocks(record: &Record) -> Vec<Block> {
     let companion = record.is_turn_companion();
 
     match message.get("content") {
-        // 最初のプロンプトは content が素の文字列で入る（実データで確認）
+        // 最初のプロンプトは content が素の文字列で入る（実データで確認）。
+        //
+        // **相棒はここも通りうる。** 実測では相棒は配列で来るが、本体が文字列で来る形が
+        // 現に在る以上、相棒だけは必ず配列だと決めてかかれない。ここで見分けを外すと
+        // `[Image: source: /…]` が**利用者の発言として履歴に出る**——`is_turn_companion`
+        // を足した理由そのものが破れる
+        Some(Value::String(text)) if companion => image_source(text)
+            .map(|path| vec![Block::ImageSource { path }])
+            .unwrap_or_default(),
         Some(Value::String(text)) => vec![text_block(assistant, text)],
         Some(Value::Array(items)) => items
             .iter()
