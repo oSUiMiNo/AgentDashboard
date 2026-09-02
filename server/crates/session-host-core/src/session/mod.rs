@@ -579,8 +579,7 @@ struct TranscriptLearned {
 
 impl Session {
     pub fn meta(&self) -> SessionMeta {
-        self.meta.lock().expect("ロックが壊れていない").clone(),
-        position: 0,
+        self.meta.lock().expect("ロックが壊れていない").clone()
     }
 
     pub fn status(&self) -> SessionStatus {
@@ -2097,7 +2096,6 @@ impl SessionManager {
                 // 書かれる）。起動した時点では存在しないので、ここで埋められる値が無い。
                 // パーサが拾って報告してくるまで `None` のままでよい（設計§2）
                 session_title: None,
-                position: 0,
             }),
             process,
             ring: Mutex::new(RingBuffer::new(self.config.pty_ring_buffer)),
