@@ -1,9 +1,10 @@
-import { render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router'
 import { ProjectGroup } from './ProjectGroup'
 import type { SessionMeta } from '@/lib/protocol'
 import { applySessionSnapshot, clearSessions } from '@/stores/sessions'
+import { clearSelection, getSelection } from '@/stores/selection'
 
 /**
  * クリックの作り分け（テスト計画フェーズ5「クリック挙動」の単体側）。
@@ -16,8 +17,27 @@ import { applySessionSnapshot, clearSessions } from '@/stores/sessions'
 const NOW = 1_700_000_000_000
 const PROJECT = '/home/example/dev/app'
 
+/** 指で触る端末の見分け方（`lib/pointer.ts` と同じ文字列）。 */
+const COARSE = '(pointer: coarse) and (hover: none)'
+
+/**
+ * 指の画面を作る。**`matches` は getter にする**——プロパティで持たせると
+ * `matchMedia()` を呼んだ瞬間の値で固まる。`InputDock.test.tsx` から写した。
+ */
+function 指の画面にする() {
+  vi.stubGlobal('matchMedia', (query: string) => ({
+    get matches() {
+      return query === COARSE
+    },
+    media: query,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }))
+}
+
 beforeEach(() => {
   clearSessions()
+  clearSelection()
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
     callback(0)
     return 0
@@ -25,7 +45,9 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.unstubAllGlobals()
+  clearSelection()
   clearSessions()
 })
 
@@ -136,6 +158,57 @@ describe('ProjectGroup', () => {
     const remove = screen.getByTestId('project-remove')
     expect(remove).toBeDisabled()
     expect(remove).toHaveAttribute('title', expect.stringContaining('セッションが動いている'))
+  })
+
+  it('指でカードを長押しすると、選ばれるのはカードで、枠ではない', () => {
+    /*
+      **カードの押しが枠まで届いていた。**
+
+      `onClick` は `tile-body` で止めていたが、**`pointerdown` はどこも止めていない**。
+      指で長押しすると、カードの 400ms タイマーと枠の 400ms タイマーが同時に走り、
+      カードが先に選ばれた直後に枠が上書きする（`stores/selection.ts` の
+      「種類が違えば選び直す」）。**結果、掴もうとしたカードではなく枠が選ばれる。**
+
+      本体をドラッグで掴めるようにすると、同じ経路で**枠まで一緒に掴んでしまう**ので、
+      先にここを塞ぐ。
+    */
+    指の画面にする()
+    vi.useFakeTimers()
+    renderGroup([meta('a')], 'p1')
+
+    fireEvent.pointerDown(screen.getByTestId('session-tile'), {
+      pointerType: 'touch',
+      clientX: 10,
+      clientY: 10,
+    })
+    act(() => {
+      vi.advanceTimersByTime(500)
+    })
+
+    expect(getSelection()).toEqual({ kind: 'card', ids: ['a'] })
+  })
+
+  it('記録を持たない枠は、長押ししても選ばれない', () => {
+    /*
+      **コメントは「選べない」と書いてあるのに、選べていた。** `usePress` へ
+      空文字の ID を渡しているだけで、選択を抑える分岐がどこにも無かった。
+      空文字で選ばれても消す相手が見つからないので、**押しても何も起きない**
+      ——壊れているのと見分けが付かない。
+    */
+    指の画面にする()
+    vi.useFakeTimers()
+    renderGroup([meta('a')])
+
+    fireEvent.pointerDown(screen.getByTestId('project-group'), {
+      pointerType: 'touch',
+      clientX: 10,
+      clientY: 10,
+    })
+    act(() => {
+      vi.advanceTimersByTime(500)
+    })
+
+    expect(getSelection()).toEqual({ kind: null, ids: [] })
   })
 
   it('セッションが0本なら「×」が押せる', () => {

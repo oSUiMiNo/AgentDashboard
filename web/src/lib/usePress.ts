@@ -24,6 +24,15 @@ interface Options {
   id: string
   /** 開く（専用画面へ移る） */
   onOpen: () => void
+  /**
+   * 選べるか。**記録を持たない箱は選べない**（既定は選べる）。
+   *
+   * カードから逆算しただけの枠には ID が無く、選んでも消す相手が見つからない
+   * ——**押しても何も起きないので、壊れているのと見分けが付かない**。
+   * 偽のときは長押しの計測そのものを始めない。**成立だけして何も選ばないと、
+   * 直後の `click` が捨てられて「開く」まで死ぬ。**
+   */
+  selectable?: boolean
 }
 
 export interface PressBinding {
@@ -37,7 +46,12 @@ export interface PressBinding {
   selected: boolean
 }
 
-export function usePress({ kind, id, onOpen }: Options): PressBinding {
+export function usePress({
+  kind,
+  id,
+  onOpen,
+  selectable = true,
+}: Options): PressBinding {
   const coarse = useCoarsePointer()
   const selection = useSelection()
   const mapping = pressMapping(coarse, selection.ids.length > 0)
@@ -61,7 +75,11 @@ export function usePress({ kind, id, onOpen }: Options): PressBinding {
 
   const onPointerDown = useCallback(
     (event: ReactPointerEvent) => {
-      if (!mapping.longPressSelects || event.pointerType === 'mouse') {
+      if (
+        !mapping.longPressSelects ||
+        !selectable ||
+        event.pointerType === 'mouse'
+      ) {
         return
       }
       やめる()
@@ -78,7 +96,7 @@ export function usePress({ kind, id, onOpen }: Options): PressBinding {
         }, LONG_PRESS_MS),
       }
     },
-    [mapping.longPressSelects, kind, id, やめる],
+    [mapping.longPressSelects, selectable, kind, id, やめる],
   )
 
   const onPointerMove = useCallback(
@@ -133,9 +151,17 @@ export function usePress({ kind, id, onOpen }: Options): PressBinding {
         onOpen()
         return
       }
+      /*
+        **選べない箱では、何も起きないのが正しい。** ここで「開く」に倒すと、
+        PC のシングルで枠が開いてしまう——**ダブルで開く**という割り当てが崩れ、
+        並べ替えようとして画面が飛ぶ。
+      */
+      if (!selectable) {
+        return
+      }
       toggleSelect(kind, id)
     },
-    [mapping.single, kind, id, onOpen],
+    [mapping.single, selectable, kind, id, onOpen],
   )
 
   const onDoubleClick = useCallback(

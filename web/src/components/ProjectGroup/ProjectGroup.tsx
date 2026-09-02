@@ -81,6 +81,8 @@ export function ProjectGroup({
     kind: 'project',
     id: projectId ?? '',
     onOpen: () => navigate(projectPath(host, project)),
+    // **コメントだけでは実装にならない。** 空文字の ID でも選べてしまっていた
+    selectable: projectId !== undefined,
   })
 
   /*
