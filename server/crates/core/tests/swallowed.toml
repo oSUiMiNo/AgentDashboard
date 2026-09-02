@@ -413,10 +413,24 @@ reason = "見始めた端末の桁へ合わせるだけ。合わなければ次�
 
 [[entry]]
 path = "server/crates/session-host-core/src/session/pty.rs"
+fn = "abandon"
+expr = '''child.wait()'''
+class = "by-design"
+reason = "引き取るのが目的で、終了コードは使わない。ここで失敗しても返す先はもとのエラーである"
+
+[[entry]]
+path = "server/crates/session-host-core/src/session/pty.rs"
+fn = "abandon"
+expr = '''killer.kill()'''
+class = "by-design"
+reason = "待ちスレッドを立てる前に畳むときの停止。既に終わっていれば空振りするが、目的は達成されている"
+
+[[entry]]
+path = "server/crates/session-host-core/src/session/pty.rs"
 fn = "drop"
 expr = '''self.killer.lock().expect("ロックが壊れていない").kill()'''
 class = "by-design"
-reason = "畳むときの停止。既に終わっている子への kill は、失敗しても目的が達成されている"
+reason = "畳むときの停止。既に終わっている子への kill は、失敗しても目的が達成されている。失敗を見ても呼び手にできることが無い（Drop の途中なので返す先も無い）"
 
 [[entry]]
 path = "server/crates/session-host-core/src/session/pty.rs"

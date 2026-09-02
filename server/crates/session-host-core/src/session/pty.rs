@@ -17,7 +17,7 @@
 //! つまりブラウザの遅さが CLI まで伝わって自然に減速する。バイトを捨てないのが要点で、
 //! 途中を捨てると端末の制御シーケンスが割れて表示が崩れてしまう。
 
-use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::{
     io::{Read as _, Write as _},
     sync::{Arc, Condvar, Mutex},
@@ -124,8 +124,17 @@ impl PtyProcess {
         let child = pair.slave.spawn_command(command)?;
         let killer = child.clone_killer();
 
-        let reader = pair.master.try_clone_reader()?;
-        let writer = pair.master.take_writer()?;
+        // **ここで失敗したときに `?` で返ってはいけない。** 子は既に居るのに、待ちスレッドは
+        // まだ立っていない。捨てるだけだと誰も終了状態を引き取らず、ゾンビになる
+        // （ゾンビ設計§1-5・§6-2）
+        let reader = match pair.master.try_clone_reader() {
+            Ok(reader) => reader,
+            Err(error) => return Err(abandon(child, error)),
+        };
+        let writer = match pair.master.take_writer() {
+            Ok(writer) => writer,
+            Err(error) => return Err(abandon(child, error)),
+        };
 
         // 子プロセスだけが slave を握る状態にする。こうしておくと、子が終わった時点で
         // master 側の読み取りが必ず終わり、読み取りスレッドが残らない。
@@ -201,6 +210,20 @@ impl PtyProcess {
         self.gate.set_paused(false);
         let _ = self.killer.lock().expect("ロックが壊れていない").kill();
     }
+}
+
+/// 起こしたばかりの子を、待ちスレッドを立てる前に畳む。
+///
+/// **落とすだけでは引き取られない。** Rust の子プロセスは `Drop` で `wait` しないので、
+/// ここを通さずに返ると、その子は終了状態を引き取られないまま残る。`proc::run` が
+/// 打ち切るときに `kill` → `wait` の両方をやっているのと同じ形に揃えてある。
+fn abandon(mut child: Box<dyn Child + Send + Sync>, error: anyhow::Error) -> anyhow::Error {
+    let mut killer = child.clone_killer();
+    // 既に終わっていれば空振りするが、それは目的が達成されている姿である
+    let _ = killer.kill();
+    // **殺したあとに必ず待つ。** ここを抜くと、塞いだつもりで塞げていない
+    let _ = child.wait();
+    error
 }
 
 impl Drop for PtyProcess {
