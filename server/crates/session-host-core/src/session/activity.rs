@@ -86,7 +86,11 @@ pub fn due(last_checked_at: Timestamp, now: Timestamp) -> bool {
 /// [`vt100::Screen::contents`] が返すのは可視画面だけなので、持たせても読めない。停滞した
 /// カードの数だけメモリを積むことになる。
 pub fn render(tail: &[u8], cols: u16, rows: u16) -> String {
-    let mut parser = vt100::Parser::new(rows, cols, 0);
+    // **0 を渡さない。** 桁行はブラウザが送ってきた値が `Session::resize` を通って
+    // ここまで来るので、`0` が混ざりうる。vt100 の格子は行数から `scroll_bottom` を
+    // 導くため、**見張りのタスクごと落ちる**おそれがある——落ちれば停滞の判定だけで
+    // なく、全セッションのフッタ読みも止まる。妥当な値には何も影響しない。
+    let mut parser = vt100::Parser::new(rows.max(1), cols.max(1), 0);
     parser.process(tail);
     parser.screen().contents()
 }
@@ -113,7 +117,14 @@ pub fn is_running_line(line: &str) -> bool {
     if mark.chars().count() != 1 {
         return false;
     }
-    let Some((word, after)) = rest.trim_start().split_once('…') else {
+    // **記号と語の間は空白1つ。** 実物20枚では、スピナーが空白1つ（`✽ Ebbing…`）、
+    // ツール結果の続き行が空白2つ（`⎿  Running in the background`）で一貫している。
+    // ここを緩めると `⎿  Running…` のような行が印に化け、**カードが停滞のまま戻らなく
+    // なる**——設計§3-3 が「重い」と名指しした側の外し方である。
+    if rest.starts_with(char::is_whitespace) {
+        return false;
+    }
+    let Some((word, after)) = rest.split_once('…') else {
         return false;
     };
     // `…` の直前が半角の語であること。枠の中で切られた案内（`…for Cla…`）や
@@ -285,7 +296,39 @@ mod tests {
 
     #[test]
     fn 常に走っているへ変えると陰性17枚が落ちる() {
-        assert_eq!(misses(|_| true).len(), 17);
+        // **枚数ではなく名前で照合する。** 数だけを見ると、陽性を1枚取り違えて陰性を
+        // 1枚足しても同じ17になり、表の期待値が狂ったまま緑になる（`misses` の趣旨）
+        assert_eq!(
+            misses(|_| true),
+            [
+                "広い幅 after-turn",
+                "狭い幅 after-turn",
+                "広い幅 welcome",
+                "狭い幅 welcome",
+                "前の版 welcome",
+                "広い幅 permission",
+                "狭い幅 permission",
+                "広い幅 rewind",
+                "狭い幅 rewind",
+                "広い幅 multi-select",
+                "狭い幅 multi-select",
+                "広い幅 numbered-echo",
+                "狭い幅 numbered-echo",
+                "前の版 after-turn",
+                "前の版 permission",
+                "前の版 rewind",
+                "前の版 trust",
+            ]
+        );
+    }
+
+    #[test]
+    fn 記号と語の間が空白2つなら走っていない() {
+        // ツール結果の続き行。実物の `⎿  Running in the background` と同じ空き方で、
+        // ここを通すとカードが停滞のまま戻らなくなる（設計§3-3 の「重い」側）
+        assert!(!is_running_line("  ⎿  Running…"));
+        // 空白1つの本物は通ること（絞りすぎていないことの確認）
+        assert!(is_running_line("  ⎿ Running…"));
     }
 
     #[test]
@@ -335,7 +378,11 @@ mod tests {
 
     #[test]
     fn 時計が巻き戻っても見に行かない() {
-        // `saturating_sub` が負にならないこと。時刻が戻ると毎周描き直すことになる
+        // **`saturating_sub` が 0 で止まるからではない。** `Timestamp` は `i64` なので
+        // 差は負のまま（`-9_000`）で、それが 5_000 未満だから偽になる。飽和が効くのは
+        // `i64::MIN` の側だけである。**比較の向きを変えるときはここが崩れる**——絶対値を
+        // 取る形へ直すと、時刻が戻った周に毎回 64 KiB を描き直すようになる
         assert!(!due(10_000, 1_000));
+        assert!(!due(Timestamp::MAX, 0));
     }
 }
