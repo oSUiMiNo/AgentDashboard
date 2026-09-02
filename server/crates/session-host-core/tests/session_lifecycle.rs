@@ -163,7 +163,9 @@ fn 自分の子(parent: u32) -> Vec<u32> {
         let Ok(line) = std::fs::read_to_string(entry.path().join("stat")) else {
             continue;
         };
-        let Some(close) = line.rfind(')') else { continue };
+        let Some(close) = line.rfind(')') else {
+            continue;
+        };
         let mut rest = line[close + 1..].split_whitespace();
         let (Some(_state), Some(ppid)) = (rest.next(), rest.next()) else {
             continue;
