@@ -289,6 +289,11 @@ function flush() {
           structureChanged = true
         } else if (known.project !== op.meta.project) {
           structureChanged = true
+        } else if (known.position !== op.meta.position) {
+          // **並びが動いたら、並べ直す**（並べ替え設計§2-3）。並べ替えた結果は
+          // `session_upsert` として戻ってくるので、ここで動かさないと**画面が
+          // 元へ戻る**（枠の側で同じ形の落ち方を E2E が捕まえた）
+          structureChanged = true
         }
         touched.add(op.meta.card_id)
         break
@@ -333,6 +338,20 @@ function flush() {
   }
 
   if (structureChanged) {
+    /*
+      **並びの正は `position`**（並べ替え設計§2-3）。`order` は届いた順で積んで
+      いるだけなので、ここで並べ直してから箱を組む。**カードの `position` は枠の中で
+      閉じている**ので、平らに並べても枠ごとにまとめ直したときの枠内の相対順が
+      正しくなる。同着は時刻で崩す
+    */
+    order = [...order].sort((left, right) => {
+      const a = metas.get(left)
+      const b = metas.get(right)
+      if (a === undefined || b === undefined) {
+        return 0
+      }
+      return a.position - b.position || a.created_at - b.created_at
+    })
     rebuildGroups()
     notifyStructure()
   } else if (rebuildReviveTargets()) {

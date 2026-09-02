@@ -37,16 +37,24 @@ export function applyProjectSnapshot(list: ProjectView[]) {
 /**
  * `project_upsert` を取り込む。
  *
- * 同じ ID が既にあれば置き換える。**並びは動かさない**——足したときに末尾へ、
- * 直したときはその場で、という形にしておかないと、一覧の箱が押した拍子に動く。
+ * **並びは `position` に従う**（並べ替え設計§2-3）。以前は「足したときに末尾へ、
+ * 直したときはその場で」と、届いた順をそのまま保っていた——押した拍子に一覧の箱が
+ * 動かないようにするためである。
+ *
+ * **並べ替えを入れたので、そこは逆になった。** 並べ替えた結果はサーバから
+ * `project_upsert` として戻ってくるので、**ここで並びを動かさないと画面が元へ戻る**
+ * （実際に E2E がこれで落ちた）。
+ *
+ * **狙いは変わっていない。** 押した拍子に動かないことは `position` が保証する
+ * ——新しい枠は `position = 最大値 + 1` で末尾へ入り、状態が変わっても番号は動かない。
  */
 export function upsertProject(project: ProjectView) {
   const at = projects.findIndex((entry) => entry.id === project.id)
-  if (at < 0) {
-    projects = [...projects, project]
-  } else {
-    projects = projects.map((entry) => (entry.id === project.id ? project : entry))
-  }
+  const next =
+    at < 0
+      ? [...projects, project]
+      : projects.map((entry) => (entry.id === project.id ? project : entry))
+  projects = [...next].sort((a, b) => a.position - b.position || a.id.localeCompare(b.id))
   notify()
 }
 

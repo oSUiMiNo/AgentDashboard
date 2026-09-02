@@ -339,8 +339,7 @@ export function TileGrid() {
         </label>
       )}
 
-      {選択.ids.length > 0 && (
-        /*
+      {/*
           **まとめて操作の帯**（設計§5-2）。「全て復旧」の行の**すぐ下**に置く
           ——選択は一覧全体に効くので、画面の帯に属する（`DESIGN.md` §39.2）。
 
@@ -349,11 +348,23 @@ export function TileGrid() {
 
           **同じ形の器の等間隔の列にしない**（`DESIGN.md` §33）。2つしか無いこと・
           既存の「全て復旧」と役割が違うことを、**間隔と地の色**で見せる——数を
-          先に置き、ボタンはその右へ寄せて、2つのあいだだけを詰める
-        */
+          先に置き、ボタンはその右へ寄せて、2つのあいだだけを詰める。
+
+          # 何も選んでいなくても、場所は空けておく
+
+          **消すと、1枚目を選んだ瞬間に下の一覧がずれる。** ずれると、ダブルクリックの
+          1打目と2打目が別の場所へ当たり、**開く操作が成立しなくなる**——1打目で
+          帯が生まれ、2打目が届く頃には枠が下へ動いている。E2E がこれで落ちた。
+
+          「全て復旧」の行そのものへ混ぜないのは、あちらの内訳の文字数で行の高さが
+          変わるため。**別の器にしたうえで、高さだけを常に確保する。**
+        */}
         <div
           data-testid="bulk-row"
-          className="border-primary/30 bg-primary/5 flex flex-wrap items-center gap-3 rounded-md border px-2 py-1.5 text-xs"
+          aria-hidden={選択.ids.length === 0}
+          className={`border-primary/30 bg-primary/5 flex flex-wrap items-center gap-3 rounded-md border px-2 py-1.5 text-xs ${
+            選択.ids.length === 0 ? 'invisible' : ''
+          }`}
           onClick={(event) => event.stopPropagation()}
         >
           <span data-testid="bulk-count" className="text-muted-foreground">
@@ -402,7 +413,6 @@ export function TileGrid() {
             </Button>
           </div>
         </div>
-      )}
 
       {orderError !== null && (
         <p data-testid="project-order-error" className="text-destructive text-xs">

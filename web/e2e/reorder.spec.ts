@@ -94,10 +94,16 @@ async function 指で運ぶ(
   }
 }
 
-/** 2つの枠を作る。戻り値は（先, 後）のパス。 */
-async function 枠を2つ(page: Page): Promise<[string, string]> {
-  const 先 = path.join(WORK_DIR, 'reorder-a')
-  const 後 = path.join(WORK_DIR, 'reorder-b')
+/**
+ * 2つの枠を作る。戻り値は（先, 後）のパス。
+ *
+ * **テストごとに別の名前を使う。** 同じサーバを共有しているので、前のテストが
+ * 並べ替えた結果がそのまま残る——同じ枠を使い回すと、2本目は「もう並んでいる」
+ * ところから始まって**何も確かめない**（実際にそうなった）。
+ */
+async function 枠を2つ(page: Page, 印: string): Promise<[string, string]> {
+  const 先 = path.join(WORK_DIR, `reorder-${印}-a`)
+  const 後 = path.join(WORK_DIR, `reorder-${印}-b`)
   await addProject(page, 先)
   await addProject(page, 後)
   return [先, 後]
@@ -105,7 +111,7 @@ async function 枠を2つ(page: Page): Promise<[string, string]> {
 
 test('枠をマウスで掴んで並べ替えられる', async ({ page }) => {
   await openDashboard(page)
-  const [先, 後] = await 枠を2つ(page)
+  const [先, 後] = await 枠を2つ(page, 'mouse')
 
   const 前 = await 枠の並び(page)
   expect(前.indexOf(先)).toBeLessThan(前.indexOf(後))
@@ -138,7 +144,7 @@ test('枠をマウスで掴んで並べ替えられる', async ({ page }) => {
 
 test('枠を指で掴んでも並べ替えられる', async ({ page }) => {
   await openDashboard(page)
-  const [先, 後] = await 枠を2つ(page)
+  const [先, 後] = await 枠を2つ(page, 'touch')
 
   const 後の枠 = page.locator(`[data-testid="project-group"][data-project="${後}"]`)
   const 先の枠 = page.locator(`[data-testid="project-group"][data-project="${先}"]`)
@@ -163,7 +169,9 @@ test('カードを並べ替えると、PJT 専用画面も同じ順になる', a
   // **正が1本であることを実物で見る**（設計§2）。ホームで動かした結果が、
   // 横並びの画面にもそのまま出る
   await openDashboard(page)
-  const cwd = path.join(WORK_DIR, 'reorder-cards')
+  // **実在するフォルダでしか起こせない。** 枠は名前だけで作れるが、セッションは
+  // そこで claude を起こすので、無いパスだと起動そのものが通らない
+  const cwd = WORK_DIR
   await spawnSession(page, cwd)
   await spawnSession(page, cwd)
 
@@ -187,7 +195,8 @@ test('カードを並べ替えると、PJT 専用画面も同じ順になる', a
 
   // PJT 専用画面でも同じ順であること
   // **開くのはダブルクリック**（設計§4-1）
-  await 枠.dblclick({ position: { x: 5, y: 40 } })
+  // **開くのはダブルクリック**（設計§4-1）。既存の通しと同じ場所（枠の左上5px）
+  await 枠.dblclick({ position: { x: 5, y: 5 } })
   await expect(page.getByTestId('group-view')).toBeVisible()
   const 横並び = await page
     .getByTestId('session-view')
