@@ -27,6 +27,7 @@ import { fileIcon } from '@/lib/fileKind'
 import {
   childOf,
   crumbsOf,
+  HostFsError,
   isUnder,
   listDir,
   relativeOf,
@@ -45,16 +46,38 @@ interface Props {
   start?: string
   /** ここより上へは辿らせない（PJT 専用画面の左パネル用。設計§15） */
   root?: string
+  /**
+   * `start` が**無かった**ときに、黙って行き直す先（`イシューグループ_2026-0813-1804` 設計§6-2）。
+   *
+   * **省略すると断り文を出す。追加シートはこちら**——あちらの `start` は利用者が
+   * 押した場所なので、着けなかったなら理由を見せるのが正しい。渡すのは左パネルだけで、
+   * あちらの `start` は**覚えていた場所**＝利用者がいま押したものではないため、
+   * 開いた瞬間に赤い1行が出迎えるのを避ける。
+   *
+   * **黙るのは「無い」（404）ときだけ。** 権限・未接続・時間切れでは理由を出す。
+   */
+  fallback?: string
   /** いま見ている場所が変わるたびに呼ばれる。確定ボタンの相手を呼び出し側が持つため */
   onPathChange?: (path: string) => void
   /** ファイルを押したとき。省略するとファイルは押せない（選ぶ対象がフォルダだけの場面） */
   onPickFile?: (path: string) => void
 }
 
+/**
+ * 辿った結果。**`stale` を `failed` に混ぜない**——追い越された失敗で起点へ行き直すと、
+ * **利用者が新しく開いた場所を上書きする**。
+ *
+ * `gone` と `failed` を分けるのは、**行き直してよいのが「無い」ときだけ**だから
+ * （設計§6-3）。寝ている PC で全部の失敗を拾うと、時間切れが2回並んで倍待たされ、
+ * しかも起点も同じ理由で失敗するので**見える結果は変わらない**。
+ */
+type Arrival = 'ok' | 'gone' | 'failed' | 'stale'
+
 export function FolderBrowser({
   host,
   start,
   root,
+  fallback,
   onPathChange,
   onPickFile,
 }: Props) {
@@ -112,27 +135,33 @@ export function FolderBrowser({
   }, [])
 
   const go = useCallback(
-    async (next: string | undefined) => {
+    async (next: string | undefined, 黙る = false): Promise<Arrival> => {
       const mine = ++asked.current
       setLoading(true)
       setError(null)
       try {
         const result = await listDir(host, next)
         if (mine !== asked.current) {
-          return
+          return 'stale'
         }
         setListing(result)
         // **着いた先はサーバが返す値を正とする。** 省略して問うたときは
         // ここで初めてホームのパスが分かる
         setPath(result.path)
         onPathChange?.(result.path)
+        return 'ok'
       } catch (err) {
         // 古い問いの失敗も捨てる。拾うと、**新しい場所の正しい一覧が消える**
         if (mine !== asked.current) {
-          return
+          return 'stale'
+        }
+        // **黙るのは「無い」ときだけ。** 権限・未接続・時間切れは理由をそのまま出す
+        if (黙る && err instanceof HostFsError && err.status === 404) {
+          return 'gone'
         }
         setError(err instanceof Error ? err.message : '読めませんでした')
         setListing(null)
+        return 'failed'
       } finally {
         if (mine === asked.current) {
           setLoading(false)
@@ -147,8 +176,16 @@ export function FolderBrowser({
     // `start` が変わった描画では `path` はまだ古く、渡すと「古い場所を引き直して
     // 上書きする」ことになる。症状は**一瞬だけ新しい場所が見えて元へ戻る**で、
     // 状態の更新が非同期であることに由来するので、目で追っても原因が見えない。
-    void go(start)
-  }, [host, start, go])
+    void (async () => {
+      const 着いたか = await go(start, fallback !== undefined)
+      // **行き直すのは1度だけ。** `go` の中から自分を呼ぶ形にすると、消えた先が
+      // 連なっていたときに止まらなくなる
+      if (着いたか === 'gone' && fallback !== undefined) {
+        // 着けば `onPathChange` が飛ぶので、**死んだ記憶はその場で上書きされる**
+        await go(fallback)
+      }
+    })()
+  }, [host, start, fallback, go])
 
   // ルートより上は出さない（左パネル用）。現在地までの道筋は見せて、外側だけを塞ぐ。
   // **内側かどうかの判定は `isUnder` に寄せる**——区切りを見ない前方一致で書くと、

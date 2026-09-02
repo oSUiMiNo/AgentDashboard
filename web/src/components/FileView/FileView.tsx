@@ -36,13 +36,14 @@
  * SVG にも同じ理由が当てはまるので、そちらにも出す（設計§7-4）。
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { Button } from '@/components/ui/button'
 import { copyToClipboard } from '@/lib/clipboard'
 import { fileKind, needsSandbox } from '@/lib/fileKind'
 import { REHYPE_PLUGINS, REMARK_PLUGINS } from '@/lib/markdown'
 import {
+  HostFsError,
   rawUrl,
   readBlob,
   readFile,
@@ -101,6 +102,17 @@ interface Props {
   path: string
   /** 閉じる。省略すると閉じる操作を出さない */
   onClose?: () => void
+  /**
+   * 読めなかったことを親へ知らせる（`イシューグループ_2026-0813-1804` 設計§6-5）。
+   *
+   * **省略すると断り文を出すだけで、列は開いたまま。** 渡すのは**復元した1件**のときだけで、
+   * 利用者が自分で押した1件には渡さない——押した人には理由を見せるのが正しく、
+   * **渡さないことがそのまま仕様の実体**になる。
+   *
+   * `status` は畳むか忘れるかの判断に要る。**畳むのは全部の失敗で、忘れるのは「無い」
+   * （404）のときだけ**——寝ている PC で忘れると、起きたときに戻れなくなる。
+   */
+  onUnreadable?: (status: number | null) => void
 }
 
 /** 取ってきた画像。`url` は `blob:` なので、**使い終わったら捨てる**。 */
@@ -110,8 +122,20 @@ interface Picture {
   mediaType: string
 }
 
-export function FileView({ host, root, path, onClose }: Props) {
+export function FileView({
+  host,
+  root,
+  path,
+  onClose,
+  onUnreadable,
+}: Props) {
   const kind = fileKind(path)
+  /**
+   * 最新の知らせ先。**効果の依存に入れない**——渡し方が変わるたびに読み直しが走り、
+   * 同じファイルをもう一度取りに行くことになる。
+   */
+  const 知らせ先 = useRef(onUnreadable)
+  知らせ先.current = onUnreadable
   const [content, setContent] = useState<FileContent | null>(null)
   const [picture, setPicture] = useState<Picture | null>(null)
   /** 拡張子は画像なのに、中身が画像として読めなかった（設計§7-2） */
@@ -172,6 +196,9 @@ export function FileView({ host, root, path, onClose }: Props) {
       } catch (err) {
         if (alive) {
           setError(err instanceof Error ? err.message : '読めませんでした')
+          // **`if (alive)` の中で呼ぶ。** 外で呼ぶと、既に外れた古い `FileView` が
+          // 親へ「読めなかった」を報告し、いま開いている列を巻き添えに畳む
+          知らせ先.current?.(err instanceof HostFsError ? err.status : null)
         }
       } finally {
         if (alive) {

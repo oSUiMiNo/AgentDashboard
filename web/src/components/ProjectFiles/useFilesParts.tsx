@@ -32,10 +32,25 @@
  */
 
 import { AnimatePresence } from 'motion/react'
-import { useState, type ReactNode } from 'react'
+import { useCallback, useState, type ReactNode } from 'react'
 import { FileColumn } from '@/components/ProjectFiles/FileColumn'
 import { Sidebar } from '@/components/ProjectFiles/Sidebar'
 import { usePanelWidths } from '@/lib/filesPanel'
+import { putDir, putPick, readPlace } from '@/lib/filesPlace'
+
+/**
+ * いま出しているファイル。**押した1枚と、覚えていて戻した1枚を1つの状態で持つ。**
+ *
+ * 2つに分けない——分けると「どちらが正か」を読む側が毎回決めることになる。
+ * `復元` が立っているときだけ、読めなかったら黙って畳む（設計§6-5）。
+ */
+type Picked = { path: string; 復元: boolean } | null
+
+/** 覚えていたファイルを、復元の印つきで取り出す。覚えが無ければ出さない */
+function 覚えた一枚(host: string, project: string): Picked {
+  const pick = readPlace(host, project).pick
+  return pick === null ? null : { path: pick, 復元: true }
+}
 
 interface Args {
   /** `agent_id` かローカルを表す `'local'` */
@@ -79,8 +94,83 @@ export function useFilesParts({
 
     ここに持つことで、**サイドバーを畳んでも中身の列が残る**（設計§2）
   */
-  const [picked, setPicked] = useState<string | null>(null)
+  const [picked, setPicked] = useState<Picked>(() => 覚えた一枚(host, project))
+  const [起点, set起点] = useState(() => readPlace(host, project).dir ?? project)
   const [widths, grip, dragging] = usePanelWidths()
+
+  /*
+    **相手が変わったら、描画中に直す。**
+
+    効果で拾うと「新しい PJT ＋ 古い開いていたファイル」の描画が1回コミットされ、
+    中身の列が**前の PJT のファイルを実際に読みに行く**。セッション専用画面は
+    セッションが届くまで `project` が空文字なので、この一瞬が必ず起きる。
+  */
+  const 相手 = `${host}\u0000${project}`
+  const [前の相手, set前の相手] = useState(相手)
+  if (前の相手 !== 相手) {
+    set前の相手(相手)
+    setPicked(覚えた一枚(host, project))
+    set起点(readPlace(host, project).dir ?? project)
+  }
+
+  /*
+    **畳んだサイドバーを開き直したときも読み直す。**
+
+    `start` を固定するだけだと、畳んで開き直したときに起点へ戻る。「リロードでは
+    覚えているのに畳むと戻る」は、利用者から見て同じ不満になる（設計§5-5）。
+
+    開いていない間サイドバーは木から消えているので、`false → true` の描画は
+    辿る側がマウントする描画そのもの——**余計な問い合わせは1回も増えない**。
+  */
+  const [前の開閉, set前の開閉] = useState(open)
+  if (前の開閉 !== open) {
+    set前の開閉(open)
+    if (open) {
+      set起点(readPlace(host, project).dir ?? project)
+    }
+  }
+
+  /*
+    **`useCallback` を外さないこと。** 辿る側の `go` はこれを依存に持ち、辿り直しの
+    効果が `go` を依存に持つ。渡すたびに新しい関数だと、効果が走る → 状態が変わる →
+    また新しい関数、と**問い合わせが回り続ける**（設計§5-3）。
+  */
+  const 掘った先を覚える = useCallback(
+    (path: string) => {
+      putDir(host, project, path)
+    },
+    [host, project],
+  )
+
+  const ファイルを選ぶ = useCallback(
+    (path: string) => {
+      // **押した1枚は「復元ではない」。** 読めなかったときに畳まず、理由を見せる
+      setPicked({ path, 復元: false })
+      putPick(host, project, path)
+    },
+    [host, project],
+  )
+
+  const 列を閉じる = useCallback(() => {
+    setPicked(null)
+    putPick(host, project, null)
+  }, [host, project])
+
+  /*
+    **畳むのは全部の失敗で、忘れるのは「無い」ときだけ**（設計§6-5）。
+
+    畳むのに往復は要らないので、時間切れが並ぶ心配が無い。逆に寝ている PC で
+    忘れてしまうと、**起きたときに戻る先が消えている**。
+  */
+  const 読めなかった = useCallback(
+    (status: number | null) => {
+      setPicked(null)
+      if (status === 404) {
+        putPick(host, project, null)
+      }
+    },
+    [host, project],
+  )
 
   return {
     sidebar: (
@@ -91,6 +181,8 @@ export function useFilesParts({
             key="folder"
             host={host}
             project={project}
+            start={起点}
+            onPathChange={掘った先を覚える}
             width={widths.folder}
             /*
               **掴んでいる間だけ、場所取りの動きを止める**（`Sidebar.tsx`）。
@@ -101,7 +193,7 @@ export function useFilesParts({
               **ファイルを選んでも畳まない**（利用者の判断・2026-08-24）。続けて別の
               ファイルを開けるようにするため（設計§2）
             */
-            onPickFile={setPicked}
+            onPickFile={ファイルを選ぶ}
             onClose={onToggle}
             {...grip}
           />
@@ -113,9 +205,14 @@ export function useFilesParts({
         <FileColumn
           host={host}
           project={project}
-          path={picked}
+          path={picked.path}
           width={widths.file}
-          onClose={() => setPicked(null)}
+          onClose={列を閉じる}
+          /*
+            **押した1枚には渡さない。** 渡さないことがそのまま「押した人には理由を
+            見せる」の実体になる（設計§6-5）
+          */
+          onUnreadable={picked.復元 ? 読めなかった : undefined}
           {...grip}
         />
       ),

@@ -83,6 +83,15 @@ function settings(screen_interval_ms: number) {
 
 beforeEach(() => {
   clearSessions()
+  /*
+    **記憶はファイル全体で消す。** 以前はファイルの節の中だけで消していたので、
+    あの節が書いた「サイドバーが開いている」が**後ろの8節へ漏れていた**——
+    あちらは fetch を差し替えていないので、素の口へ問い合わせに行く形になっていた。
+
+    主張の対象がそこに触っていなかったから緑だっただけで、前提としては壊れている。
+    覚える鍵が増えるほど漏れ方も増えるので、入口を1つにする。
+  */
+  globalThis.localStorage.clear()
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
     callback(0)
     return 0

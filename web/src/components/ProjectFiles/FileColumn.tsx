@@ -62,6 +62,11 @@ interface Props {
   width: number
   /** 閉じる。**列ごと消え、セッションが左へ寄る**（設計§2） */
   onClose: () => void
+  /**
+   * 読めなかったことを親へ知らせる（`イシューグループ_2026-0813-1804` 設計§6-5）。
+   * **ここは素通しするだけ**——畳むか忘れるかを決めるのは束ね役の仕事。
+   */
+  onUnreadable?: (status: number | null) => void
   onGrab: () => void
   onMove: (edge: PanelEdge, width: number) => void
   onDrop: () => void
@@ -73,6 +78,7 @@ export function FileColumn({
   path,
   width,
   onClose,
+  onUnreadable,
   onGrab,
   onMove,
   onDrop,
@@ -89,7 +95,13 @@ export function FileColumn({
         縦に積むのをやめたので、配分そのものが消える
       */}
       <div className="min-h-0 flex-1 overflow-hidden">
-        <FileView host={host} root={project} path={path} onClose={onClose} />
+        <FileView
+          host={host}
+          root={project}
+          path={path}
+          onClose={onClose}
+          onUnreadable={onUnreadable}
+        />
       </div>
 
       <FilesResizer

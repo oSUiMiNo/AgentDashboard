@@ -106,6 +106,16 @@ interface Props {
   host: string
   /** その枠のパス。起点であり、相対パスの基準でもある */
   project: string
+  /**
+   * 最初に見せる場所。**覚えていた場所がここへ来る**（`イシューグループ_2026-0813-1804` 設計§5-1）。
+   *
+   * `project` と分けてあるのが要点で、**辿らせる範囲（`root`）は起点のままに、
+   * 始める場所だけを動かす**。同じ値を両方へ渡していた頃は、覚えた場所を渡すと
+   * 辿れる範囲まで動いてしまう形だった。
+   */
+  start: string
+  /** いま見ている場所が変わるたびに呼ばれる。**覚えるのは受け取った側**（設計§4） */
+  onPathChange: (path: string) => void
   /** 幅（px）。**利用者が縁で決める**ので動的 */
   width: number
   /** 縁を掴んでいるか。**場所取りの動きを止めるためだけに使う** */
@@ -121,6 +131,8 @@ interface Props {
 export function Sidebar({
   host,
   project,
+  start,
+  onPathChange,
   width,
   dragging,
   onPickFile,
@@ -191,8 +203,16 @@ export function Sidebar({
         <div data-testid="project-files" className="min-h-0 flex-1 overflow-hidden">
           <FolderBrowser
             host={host}
-            start={project}
+            start={start}
             root={project}
+            /*
+              **起点を「黙って行き直す先」として渡す。** `start` は覚えていた場所で、
+              利用者がいま押したものではない——着けなかったときに赤い1行で出迎えない
+              ようにする（設計§6-2）。追加シートはこれを渡さないので、あちらは
+              いままでどおり理由を出す
+            */
+            fallback={project}
+            onPathChange={onPathChange}
             onPickFile={onPickFile}
           />
         </div>

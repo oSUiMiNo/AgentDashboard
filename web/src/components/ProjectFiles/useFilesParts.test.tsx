@@ -311,15 +311,38 @@ describe('ファイルの中身の列', () => {
     expect(screen.getByTestId('file-column')).toBeInTheDocument()
   })
 
-  it('選んでいるファイルを覚えていない', async () => {
-    // 開いていたファイルを戻すかどうかは `イシューグループ_2026-0813-1804` が
-    // 範囲を切っているので、そちらの結論を待つ（設計§3）
+  it('選んでいたファイルを覚えていて、置き直すと戻る', async () => {
+    /*
+      **以前は「覚えていない」ことを主張していた**（`イシューグループ_2026-0813-1804`
+      の結論待ちとして）。結論が出たので反転させた——覚える側が正しい姿である。
+
+      押した1枚と復元した1枚は**落とし方が違う**ので、ここで見ているのは復元した側。
+    */
     const { view } = 置く()
     await userEvent.click(await screen.findByRole('button', { name: /計画\.md/ }))
     await screen.findByTestId('file-view')
 
     view.unmount()
     置く()
+
+    const 戻った = await screen.findByTestId('file-view')
+    expect(戻った).toHaveAttribute('data-path', `${ROOT}/計画.md`)
+  })
+
+  it('覚えが無ければ、中身の列は出ない', async () => {
+    置く()
+    await screen.findByTestId('folder-browser')
+    expect(screen.queryByTestId('file-column')).toBeNull()
+  })
+
+  it('別の枠は、別の記憶を引く', async () => {
+    const { view } = 置く()
+    await userEvent.click(await screen.findByRole('button', { name: /計画\.md/ }))
+    await screen.findByTestId('file-view')
+
+    view.unmount()
+    // **鍵に PJT が入っている**ので、隣の枠へは持ち越さない
+    置く({ project: '/home/me/dev/other' })
     await screen.findByTestId('folder-browser')
 
     expect(screen.queryByTestId('file-column')).toBeNull()
