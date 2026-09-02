@@ -216,13 +216,40 @@ describe('ターミナルのトグルは、文字を落として絵にした', (
     expect(中身 - 入り - つまみ).toBeCloseTo(左余白, 4)
   })
 
+  it('オフでも絵が出る（何のトグルか分かる）', () => {
+    /*
+      **これが利用者の指摘そのもの。** 文字を落としておきながら絵を片側にしか
+      置かなかったので、**切れているときだけ手掛かりがゼロ**になっていた
+      ——「オフ時に何のトグルか分からない」（設計§17-4 の訂正）。
+
+      **壊し方：** `--end` の規則を消すと、ここだけが落ちる。
+    */
+    expect(素).toContain(".termswitch[aria-checked='false'] .termswitch-mark--end")
+  })
+
+  it('空いている側だけが出る（つまみに隠れる側は沈む）', () => {
+    // オフはつまみが左なので**右**の絵、オンはつまみが右なので**左**の絵
+    expect(素).toContain(".termswitch[aria-checked='true'] .termswitch-mark--start")
+    // 逆の組み合わせを出すと、つまみの下に絵が潜って**汚れて見える**
+    expect(素).not.toContain(".termswitch[aria-checked='false'] .termswitch-mark--start")
+    expect(素).not.toContain(".termswitch[aria-checked='true'] .termswitch-mark--end")
+  })
+
   it('絵は消さずに沈める（切り替えで位置が飛ばない）', () => {
-    // 切れているときも同じ場所に在って濃さだけが落ちる（設計§17-4）
     const at = 位置('.termswitch-mark {')
     const 本体 = 素.slice(素.indexOf('{', at), 素.indexOf('}', 素.indexOf('{', at)))
     expect(本体).toContain('opacity: 0')
     expect(本体).not.toContain('display: none')
-    expect(素).toContain(".termswitch[aria-checked='true'] .termswitch-mark")
+  })
+
+  it('絵は両端に置いてあり、位置が対称である', () => {
+    // 中身 2.675rem − つまみ 1.2rem − 余白 0.2rem ＝ 空き 1.275rem。
+    // 絵は 0.85rem なので、左右に 0.2125rem ずつで中央に来る
+    const 左 = rem(宣言('.termswitch-mark--start', 'left'))
+    const 右 = rem(宣言('.termswitch-mark--end', 'left'))
+    const 絵 = rem(宣言('.termswitch-mark {', 'inline-size'))
+    const 中身 = rem(宣言('.termswitch-track {', 'inline-size')) - 0.0625 * 2
+    expect(中身 - 右 - 絵).toBeCloseTo(左, 3)
   })
 
   it('入っているときの面は夜空で、紫青ではない', () => {

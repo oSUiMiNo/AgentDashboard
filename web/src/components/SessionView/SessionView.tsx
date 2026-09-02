@@ -661,6 +661,29 @@ function TrashIcon() {
   )
 }
 
+/**
+ * レールに描く端末の印（設計§17-4）。
+ *
+ * **`>` とカーソルの2要素まで削ってある。** 参考の端末の絵は陰影の付いた大きなもので、
+ * 小さく置くと潰れる（`DESIGN.md` §19.2）。**§18.2 の下限に収まる形へ削る**。
+ */
+function TerminalMark({ className }: { className: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M5 7l5 5-5 5" />
+      <path d="M13 17h6" />
+    </svg>
+  )
+}
+
 function TerminalToggle({
   on,
   onToggle,
@@ -686,23 +709,16 @@ function TerminalToggle({
       {/*
         溝・つまみ・絵。**大きさと位置は `controls.css` が持つ**。
 
-        **絵はつまみに隠れていない側に出る**（`参考/トグル.png` の方式）。太陽と月の
-        トグルと同じで、**入っているときだけ**、つまみが右へ寄って空いた左側に現れる。
+        **絵は両端に置き、つまみに隠れていない側だけを出す**（`参考/トグル.png` の方式。
+        太陽は左・月は右に出ている）。
+
+        **かつては入っているときだけ出していた。** §17-4 で文字を落としておきながら
+        絵を片側にしか置かなかったので、**切れているときだけ手掛かりがゼロ**になっていた
+        ——「何のトグルか分からない」（利用者・設計§17-4 の訂正）。
       */}
       <span aria-hidden className="termswitch-track">
-        <svg
-          className="termswitch-mark"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth={2.5}
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          {/* **`>` とカーソルの2要素まで削ってある**（小さく置くため。§18.2） */}
-          <path d="M5 7l5 5-5 5" />
-          <path d="M13 17h6" />
-        </svg>
+        <TerminalMark className="termswitch-mark termswitch-mark--start" />
+        <TerminalMark className="termswitch-mark termswitch-mark--end" />
         <span className="termswitch-knob" />
       </span>
     </button>

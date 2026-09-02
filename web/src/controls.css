@@ -181,19 +181,34 @@
   block-size: 1.6rem;
   border-radius: 9999px;
   border: 1px solid var(--color-border);
-  background: color-mix(in oklch, var(--color-muted) 55%, transparent);
-  /* 溝は**凹ませる**。浮いたつまみと対にすると、押せるものに見える */
-  box-shadow: inset 0 1px 2px color-mix(in oklch, black 40%, transparent);
+  /*
+    **平らな面をやめる**（設計§17-4 の訂正）。参考（`参考/トグル.png`）の灰色の
+    トグルは、**上が暗く下が明るい**微かな傾斜で凹んで見えている。
+
+    **参考は明るい地なので、そのままは写せない。** あちらは外側の白い輪で「溝に
+    沈んだ」ように見せているが、**暗い地では逆**——**上を暗く、下をわずかに明るく**が
+    凹みになる（電源ボタンで採った手の裏返し）。
+
+    **地の色は名指ししない。** `--color-muted` を透明へ混ぜてあるので、地が変われば
+    一緒に動く。
+  */
+  background-image: linear-gradient(
+    180deg,
+    color-mix(in oklch, black 22%, transparent),
+    color-mix(in oklch, var(--color-muted) 70%, transparent)
+  );
+  /*
+    溝は**凹ませ**、縁で**厚みを出す**。上辺の内側に影（沈み）、下辺の内側に
+    明るい線（底の照り返し）——**2本で1組**にすると、1本だけのときより深く見える。
+  */
+  box-shadow:
+    inset 0 1px 2px color-mix(in oklch, black 45%, transparent),
+    inset 0 -1px 0 color-mix(in oklch, white 8%, transparent);
   transition:
     background 150ms ease,
     border-color 150ms ease;
 }
 
-/*
-  入っているときだけ、面にアクセントが乗る（`DESIGN.md` §11.2「Primary Accent は
-  面で出す」）。**グラデーションは面の中の差にとどめる**（同 §11.4「主役にしない」）。
-  紫青は使わない（同 §33）。
-*/
 /*
   **入っているときは夜空**（設計§17-4）——濃紺からシアンへ。参考の太陽／月の
   トグルと同じ考えで、**面そのものが「いまターミナルだ」と言う。**
@@ -206,33 +221,68 @@
 */
 .termswitch[aria-checked='true'] .termswitch-track {
   border-color: var(--accent-edge);
-  background: linear-gradient(
+  background-image: linear-gradient(
     150deg,
-    color-mix(in oklch, #0b2545 70%, transparent),
-    color-mix(in oklch, #3dd9e6 34%, transparent)
+    color-mix(in oklch, #0b2545 92%, transparent),
+    color-mix(in oklch, #3dd9e6 62%, transparent)
   );
-  box-shadow: inset 0 1px 2px color-mix(in oklch, black 45%, transparent);
+  box-shadow:
+    inset 0 1px 2px color-mix(in oklch, black 45%, transparent),
+    inset 0 -1px 0 color-mix(in oklch, white 12%, transparent);
 }
 
 /*
-  レールの絵（設計§17-4）。**つまみに隠れていない側に出る**——つまみが右へ寄って
-  空いた左側に現れる。`参考/トグル.png` の太陽と月がまさにこの置き方である。
+  レールの絵（設計§17-4）。**両端に置き、つまみに隠れていない側だけを出す**
+  ——`参考/トグル.png` の太陽（左）と月（右）がまさにこの置き方である。
 
-  **消すのではなく沈める。** 切れているときも同じ場所に在って濃さだけが落ちるので、
+  **かつては入っているときだけ出していた。** 文字を落としておきながら絵を片側にしか
+  置かなかったので、**切れているときだけ手掛かりがゼロ**になっていた（利用者の指摘
+  「オフ時に何のトグルか分からない」）。
+
+  **消すのではなく沈める。** どちらの絵も同じ場所に在り続けて濃さだけが変わるので、
   **切り替えたときに位置が飛ばない。**
+
+  位置の根拠——中身 42.8px からつまみ 19.2px と余白 3.2px を引くと**空きは 20.4px**。
+  絵は 13.6px なので、**左右に 3.4px（0.2125rem）ずつ**で中央に来る。
 */
 .termswitch-mark {
   position: absolute;
-  left: 0.3rem;
   inline-size: 0.85rem;
   block-size: 0.85rem;
-  color: color-mix(in oklch, #3dd9e6 85%, white);
   opacity: 0;
-  transition: opacity 150ms ease;
+  transition:
+    opacity 150ms ease,
+    color 150ms ease;
 }
 
-.termswitch[aria-checked='true'] .termswitch-mark {
+.termswitch-mark--start {
+  left: 0.2125rem;
+}
+
+/* 22.4px（つまみの右端）＋ 3.4px ＝ 25.8px */
+.termswitch-mark--end {
+  left: 1.6125rem;
+}
+
+/*
+  **空いている側だけ出す。**
+
+  | 状態 | つまみ | 出る絵 |
+  |---|---|---|
+  | オフ | 左 | **右**（`--end`） |
+  | オン | 右 | **左**（`--start`） |
+
+  **色は面に合わせる。** オンの面は濃紺なので淡いシアン、**オフの面は灰なので
+  `--color-muted-foreground`**——**オフでも読めることが要件**なので、消え入る濃さにしない。
+*/
+.termswitch[aria-checked='false'] .termswitch-mark--end {
   opacity: 1;
+  color: var(--color-muted-foreground);
+}
+
+.termswitch[aria-checked='true'] .termswitch-mark--start {
+  opacity: 1;
+  color: color-mix(in oklch, #3dd9e6 85%, white);
 }
 
 .termswitch-knob {
@@ -265,8 +315,13 @@
     color-mix(in oklch, white 22%, transparent),
     color-mix(in oklch, black 10%, transparent)
   );
+  /*
+    **落ち影を2枚にする**（設計§17-4 の訂正）。参考のつまみは**大きく柔らかい影**で
+    明確に浮いている。1枚だと縁が立って「貼ってある」ように見える。
+  */
   box-shadow:
     0 1px 2px color-mix(in oklch, black 55%, transparent),
+    0 2px 5px color-mix(in oklch, black 35%, transparent),
     inset 0 1px 0 color-mix(in oklch, white 35%, transparent);
   transition:
     left 150ms ease,
