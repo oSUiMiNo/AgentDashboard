@@ -496,20 +496,55 @@ test('接続断のカードは呼吸せず、輪も札も同じ濃さで座る',
       )
       const ring = shell?.querySelector('.tile-ring')
       const tag = shell?.querySelector('[data-testid="tile-tag"]')
-      if (!ring || !tag) throw new Error(`輪か札が見つかりません：${id}`)
+      const body = shell?.querySelector('[data-testid="session-tile"]')
+      if (!ring || !tag || !body) throw new Error(`輪か札が見つかりません：${id}`)
+
+      /*
+        **色は自分で解釈しない。** `color-mix` の解決先は `color(srgb …)` で、
+        地は `oklch()` である。**文字列から数を拾うと違う色として読む**（ガイドライン）。
+        canvas へ描かせて、ブラウザが解決した画素を読む。
+      */
+      const c = document.createElement('canvas')
+      c.width = c.height = 1
+      const ctx = c.getContext('2d', { willReadFrequently: true })!
+      const 画素 = (色: string, 地?: string, alpha = 1) => {
+        ctx.clearRect(0, 0, 1, 1)
+        ctx.globalAlpha = 1
+        if (地) {
+          ctx.fillStyle = 地
+          ctx.fillRect(0, 0, 1, 1)
+        }
+        ctx.globalAlpha = alpha
+        ctx.fillStyle = 色
+        ctx.fillRect(0, 0, 1, 1)
+        return [...ctx.getImageData(0, 0, 1, 1).data].slice(0, 3)
+      }
+
       const 輪: number[] = []
-      const 板: number[] = []
       // 2.8秒の周期を 3.2秒ぶん、40ms 刻みで。**山を必ず1回は跨ぐ**
       for (let i = 0; i < 80; i += 1) {
         輪.push(Number.parseFloat(getComputedStyle(ring).opacity))
-        板.push(Number.parseFloat(getComputedStyle(tag, '::before').opacity))
         await new Promise((r) => setTimeout(r, 40))
       }
+
+      const 板 = getComputedStyle(tag, '::before')
+      const 地 = getComputedStyle(body).backgroundColor
+      const 色 = getComputedStyle(shell!).getPropertyValue('--tile-accent')
+      /*
+        **濃さは `--tile-ink` から読めない。** カスタムプロパティは
+        `calc(var(--tile-dim) * 0.6)` という**書いたままの字面**で返り、数にならない。
+        **輪の `opacity` が、その解決済みの値そのもの**（`.tile-ring` が読んでいる）。
+      */
+      const 濃さ = Math.max(...輪)
       return {
         輪の山: Math.max(...輪),
         輪の底: Math.min(...輪),
-        板の山: Math.max(...板),
-        板の底: Math.min(...板),
+        // **板は不透明でなければならない**（フェーズ23。半透明だと裏の名前が透ける）
+        板の不透明度: 板.opacity,
+        板の色: 画素(板.backgroundColor),
+        // 繋がっているときは満輝度、接続断は「輪と同じ濃さで地に混ぜた色」
+        満輝度の色: 画素(色),
+        沈めた色: 画素(色, 地, 濃さ),
         文字: getComputedStyle(tag).color,
       }
     }, cardId)
@@ -520,17 +555,35 @@ test('接続断のカードは呼吸せず、輪も札も同じ濃さで座る',
   // **繋がっているほうは呼吸する**（設計そのもの。山は満輝度まで上がる）
   expect(接続あり.輪の山).toBeGreaterThan(0.95)
   expect(接続あり.輪の山).toBeGreaterThan(接続あり.輪の底 * 1.5)
-  // **繋がっているほうの札は満輝度で、動かない**（§26-6「触らないもの」）
-  expect(接続あり.板の山).toBeCloseTo(1, 2)
-  expect(接続あり.板の底).toBeCloseTo(1, 2)
 
   // **接続断は呼吸しない**（フェーズ22。§24-3 を覆した）。山と底が同じ値になる
   expect(接続断.輪の山).toBeCloseTo(接続断.輪の底, 2)
   // **輪は沈んだまま座る**（入力待ちの濃さ 75% × 0.6 ＝ 0.45）
   expect(接続断.輪の山).toBeCloseTo(0.45, 2)
-  // **この段の本体：札は輪とまったく同じ濃さ。** 直す前は札だけ 0.600 で高止まりしていた
-  expect(接続断.板の山).toBeCloseTo(接続断.輪の山, 2)
-  expect(接続断.板の底).toBeCloseTo(接続断.輪の底, 2)
+
+  /*
+    **板は不透明**（フェーズ23。設計§28）。`opacity` で沈めると**裏のセッション名が透ける**
+    ——札は3行目の名前の上に重なる作りなので、半透明にした瞬間に文字が板越しに出る。
+  */
+  expect(接続断.板の不透明度).toBe('1')
+  expect(接続あり.板の不透明度).toBe('1')
+
+  /*
+    **色は輪と同じ濃さで作る**（フェーズ22。設計§27）。不透明にしても**見える色は変わらない**
+    ——`opacity: α` で地の上に置いた色と、α だけ混ぜて塗った色は同じ。
+  */
+  /*
+    **一致は ±1 で見る。** `color-mix` の丸めと canvas の α 合成の丸めは一段違うので、
+    **同じ色でも成分が1ずれる**。**厳密一致にすると、正しい実装でも落ちる。**
+  */
+  const 同じ色 = (a: number[], b: number[], 何: string) => {
+    for (let i = 0; i < 3; i += 1) {
+      expect(Math.abs(a[i] - b[i]), `${何}：rgb(${a}) と rgb(${b})`).toBeLessThanOrEqual(1)
+    }
+  }
+  同じ色(接続断.板の色, 接続断.沈めた色, '接続断の札')
+  // **繋がっているほうは満輝度のまま**（§26-6「触らないもの」）
+  同じ色(接続あり.板の色, 接続あり.満輝度の色, '接続ありの札')
 
   // 沈めた板の上では文字が白へ入れ替わる（設計§27-3）
   expect(接続断.文字).toBe('rgb(255, 255, 255)')
