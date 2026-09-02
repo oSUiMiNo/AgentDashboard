@@ -67,6 +67,7 @@ function meta(cardId: string, overrides: Partial<SessionMeta> = {}): SessionMeta
     account: null,
     toml_account: null,
     session_title: null,
+    position: 0,
     ...overrides,
   }
 }

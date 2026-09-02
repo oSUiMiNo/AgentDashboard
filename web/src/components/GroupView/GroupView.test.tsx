@@ -45,6 +45,7 @@ function card(cardId: string): SessionMeta {
     account: null,
     toml_account: null,
     session_title: null,
+    position: 0,
   } as unknown as SessionMeta
 }
 
@@ -247,8 +248,8 @@ describe('GroupView のヘッダは、セッション専用画面と揃ってい
       だから `projectDisplayName` の再利用を、番号で見張る（設計§16-2）。
     */
     applyProjectSnapshot([
-      { id: 'p2', host: HOST, path: '/後/app', created_at: 20 },
-      { id: 'p1', host: HOST, path: PROJECT, created_at: 10 },
+      { id: 'p2', host: HOST, path: '/後/app', created_at: 20, position: 0 },
+      { id: 'p1', host: HOST, path: PROJECT, created_at: 10, position: 0 },
     ])
     render(
       <MemoryRouter>

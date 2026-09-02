@@ -17,7 +17,7 @@
 import { useSyncExternalStore } from 'react'
 import type { ProjectView } from '@/lib/protocol'
 
-/** 作成順のまま持つ。並べ替えは一覧の側（設計§13）。 */
+/** 利用者が並べた順（`position`）のまま持つ（並べ替え設計§2-3）。 */
 let projects: ProjectView[] = []
 const listeners = new Set<() => void>()
 
@@ -29,7 +29,8 @@ function notify() {
 
 /** `GET /api/projects` の結果を取り込む（接続時・再接続時の作り直し）。 */
 export function applyProjectSnapshot(list: ProjectView[]) {
-  projects = [...list].sort((a, b) => a.created_at - b.created_at)
+  // 並びの正は `position`。同着は `id` で崩す——崩さないとサーバと並びが食い違う
+  projects = [...list].sort((a, b) => a.position - b.position || a.id.localeCompare(b.id))
   notify()
 }
 

@@ -196,15 +196,18 @@ function rebuildGroups() {
     }
   }
 
-  // ③ セッションが居る箱を上へ（設計§13）。**群は2つだけ**で、群の中は今までどおり
-  //    出現順のまま——並びが動くのは起動と終了の瞬間だけになる
-  const busy = next.filter((group) => group.cards.length > 0)
-  const idle = next.filter((group) => group.cards.length === 0)
-  groups = [...busy, ...idle]
+  // ③ **群分けはやめた**（並べ替え設計§2-3）。以前は「セッションが居る箱を上」に
+  //    していたが、利用者が自分で並べられるようになると正面から衝突する——
+  //    自分で並べた順に並んでいても、**セッションが1本起動しただけで箱が群をまたいで
+  //    動く**ことになる。並びの正は `position` の1本だけにする。
+  //
+  //    以前の見え方（居る箱が上）は、列を足したときのバックフィルで**そのまま焼き
+  //    付けてある**ので、入れ替えた瞬間に並びが変わることはない。
+  groups = next
 
   // 絞り込み中は、枠だけの箱を出さない（名乗りで絞ったのに減らないように見える）
   if (accountFilter !== null) {
-    groups = busy
+    groups = next.filter((group) => group.cards.length > 0)
   }
   const sorted = [...names].sort()
   // 同じ内容なら同じ配列を返し続ける（`useSyncExternalStore` が無限に回らないため）
@@ -265,7 +268,12 @@ function flush() {
         }
         metas.clear()
         order = []
-        for (const meta of [...op.list].sort((a, b) => a.created_at - b.created_at)) {
+        // 並びの正は `position`（並べ替え設計§2-3）。カードの `position` は**枠の中で
+        // 閉じている**ので、ここで平らに並べても、枠ごとにまとめ直したときの枠内の
+        // 相対順が正しくなる。同着は時刻で崩す
+        for (const meta of [...op.list].sort(
+          (a, b) => a.position - b.position || a.created_at - b.created_at,
+        )) {
           metas.set(meta.card_id, meta)
           order.push(meta.card_id)
           touched.add(meta.card_id)

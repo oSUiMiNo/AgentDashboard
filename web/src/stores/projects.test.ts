@@ -21,8 +21,8 @@ import {
   getProjectGroups,
 } from '@/stores/sessions'
 
-function frame(id: string, path: string, host = 'local'): ProjectView {
-  return { id, host, path, created_at: 1 }
+function frame(id: string, path: string, host = 'local', position = 0): ProjectView {
+  return { id, host, path, created_at: 1, position }
 }
 
 function card(id: string, project: string, agent: string | null = null): SessionMeta {
@@ -45,6 +45,7 @@ function card(id: string, project: string, agent: string | null = null): Session
     account: null,
     toml_account: null,
     session_title: null,
+    position: 0,
   } as SessionMeta
 }
 
@@ -114,31 +115,56 @@ describe('枠から箱を作る', () => {
   })
 
   it('PC が違えば同じパスでも別の箱になる', () => {
-    applyProjectSnapshot([frame('a', '/same', 'local'), frame('b', '/same', 'pc-1')])
+    applyProjectSnapshot([
+      frame('a', '/same', 'local', 0),
+      frame('b', '/same', 'pc-1', 1),
+    ])
     applySessionSnapshot([card('c1', '/same', 'pc-1')])
     const groups = getProjectGroups()
     expect(groups).toHaveLength(2)
-    // セッションが居るほうが上（次のテストで見る規則）なので、pc-1 が先頭
-    expect(groups[0].host).toBe('pc-1')
-    expect(groups[0].cards).toEqual(['c1'])
-    expect(groups[1].host).toBe('local')
-    expect(groups[1].cards).toEqual([])
+    // **並びの正は `position` だけ。** セッションが居るかどうかは並びを動かさない
+    expect(groups[0].host).toBe('local')
+    expect(groups[0].cards).toEqual([])
+    expect(groups[1].host).toBe('pc-1')
+    expect(groups[1].cards).toEqual(['c1'])
   })
 
-  it('セッションが居る箱が上、群の中は出現順で固定', () => {
-    // 群は2つだけ（設計§13）。細かい優先度を作らないので、並びが変わるのは
-    // 起動と終了の瞬間だけになる
+  it('並びは position だけで決まり、セッションが起動しても動かない', () => {
+    // **かつては「セッションが居る箱を上」に置いていた**（設計§13）。利用者が自分で
+    // 並べられるようになると、その規則は正面から衝突する——自分で並べた順に並んで
+    // いても、**1本起動しただけで箱が群をまたいで飛ぶ**ことになるため、外した
+    // （並べ替え設計§2-3）。
     applyProjectSnapshot([
-      { ...frame('a', '/a'), created_at: 10 },
-      { ...frame('b', '/b'), created_at: 20 },
-      { ...frame('c', '/c'), created_at: 30 },
+      frame('a', '/a', 'local', 0),
+      frame('b', '/b', 'local', 1),
+      frame('c', '/c', 'local', 2),
     ])
+    const 並び = () => getProjectGroups().map((group) => group.project)
+
+    expect(並び()).toEqual(['/a', '/b', '/c'])
+
+    // 真ん中の箱でセッションが起きても、並びは1つも動かない
     applySessionSnapshot([card('c1', '/b')])
+    expect(並び()).toEqual(['/a', '/b', '/c'])
+
+    // 終わっても同じ
+    applySessionSnapshot([])
+    expect(並び()).toEqual(['/a', '/b', '/c'])
+  })
+
+  it('枠は created_at ではなく position の順に並ぶ', () => {
+    // **時刻はもう並びを決めない。** 値としては守り続けるが、逆順に振っても
+    // 並びは `position` のとおりになる
+    applyProjectSnapshot([
+      { ...frame('a', '/a', 'local', 2), created_at: 10 },
+      { ...frame('b', '/b', 'local', 0), created_at: 20 },
+      { ...frame('c', '/c', 'local', 1), created_at: 30 },
+    ])
 
     expect(getProjectGroups().map((group) => group.project)).toEqual([
       '/b',
-      '/a',
       '/c',
+      '/a',
     ])
   })
 })

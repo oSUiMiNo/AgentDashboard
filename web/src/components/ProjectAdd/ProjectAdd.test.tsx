@@ -59,7 +59,7 @@ beforeEach(() => {
         posted = JSON.parse(String(init.body)) as { host: string; path: string }
         return new Response(
           JSON.stringify({
-            project: { id: 'p1', host: 'local', path: '/x', created_at: 1 },
+            project: { id: 'p1', host: 'local', path: '/x', created_at: 1, position: 0 },
             spawned: false,
           }),
           { status: 200 },
@@ -143,7 +143,7 @@ describe('PJT を追加', () => {
 
   it('最近使った場所が並び、追加済みが分かる', () => {
     const frames: ProjectView[] = [
-      { id: 'p1', host: 'local', path: '/dev/already', created_at: 1 },
+      { id: 'p1', host: 'local', path: '/dev/already', created_at: 1, position: 0 },
     ]
     applyProjectSnapshot(frames)
     render(<ProjectAdd disabled={false} />)
@@ -161,7 +161,7 @@ describe('PJT を追加', () => {
     // **回帰テスト。** 直す前は「一瞬だけ移動して元へ戻る」——辿り直す効果が
     // 変わる前の値を掴んでいたため、古い場所を引き直して上書きしていた
     applyProjectSnapshot([
-      { id: 'p1', host: 'local', path: '/dev/already', created_at: 1 },
+      { id: 'p1', host: 'local', path: '/dev/already', created_at: 1, position: 0 },
     ])
     const sheet = await openSheet()
     await screen.findByTestId('folder-browser')
@@ -189,7 +189,7 @@ describe('PJT を追加', () => {
 
   it('同じ行をもう一度押しても、そこへ戻れる', async () => {
     applyProjectSnapshot([
-      { id: 'p1', host: 'local', path: '/dev/already', created_at: 1 },
+      { id: 'p1', host: 'local', path: '/dev/already', created_at: 1, position: 0 },
     ])
     const sheet = await openSheet()
     await screen.findByTestId('folder-browser')

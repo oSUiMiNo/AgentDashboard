@@ -132,6 +132,13 @@ export interface SessionMeta {
    * **切るのは画面の仕事**。
    */
   session_title: string | null
+  /**
+   * **その枠の中での**カードの並び（並べ替え設計§9-2）。小さいほうが先。
+   *
+   * 枠をまたぐと同じ番号が何度も出てくる（枠の中で閉じているため）。サーバが返す
+   * 平らな一覧をそのまま枠ごとにまとめ直すと、枠の中の相対順がこの値で決まる。
+   */
+  position: number
 }
 
 /** JSONL レコードの `uuid` に対応するノードID。 */
@@ -289,6 +296,13 @@ export interface ProjectView {
   host: string
   path: string
   created_at: number
+  /**
+   * そのアカウントの中での並び（並べ替え設計§9-2）。**小さいほうが先。**
+   *
+   * **並びの正はこの欄**であって `created_at` ではない。時刻は値としては守り続けるが、
+   * もう並びを決めない。
+   */
+  position: number
 }
 
 /**

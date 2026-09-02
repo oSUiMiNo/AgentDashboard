@@ -49,6 +49,7 @@ function meta(cardId: string): SessionMeta {
     account: null,
     toml_account: null,
     session_title: null,
+    position: 0,
   }
 }
 

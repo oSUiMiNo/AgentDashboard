@@ -142,10 +142,11 @@ describe('サーバと同じ JSON になること', () => {
         host: 'local',
         path: '/home/example/dev/app',
         created_at: 1700000000000,
+        position: 0,
       },
     }
     expect(JSON.stringify(upsert)).toBe(
-      `{"t":"project_upsert","project":{"id":"${id}","host":"local","path":"/home/example/dev/app","created_at":1700000000000}}`,
+      `{"t":"project_upsert","project":{"id":"${id}","host":"local","path":"/home/example/dev/app","created_at":1700000000000,"position":0}}`,
     )
 
     const removed: ServerMessage = { t: 'project_removed', project_id: id }
@@ -513,6 +514,7 @@ describe('状態のラベル', () => {
       account: null,
       toml_account: null,
       session_title: null,
+      position: 0,
     }
     expect(isHookSilent(base)).toBe(true)
     expect(isHookSilent({ ...base, hooks_seen: true })).toBe(false)
@@ -700,6 +702,7 @@ describe('戻せるかの判定', () => {
       account: null,
       toml_account: null,
       session_title: null,
+      position: 0,
       ...overrides,
     }
   }

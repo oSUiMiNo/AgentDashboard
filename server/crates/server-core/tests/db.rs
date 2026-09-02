@@ -1046,8 +1046,13 @@ async fn 枠は持ち主で絞って読み書きされる() {
 }
 
 #[tokio::test]
-async fn 枠は追加した順に並ぶ() {
-    // 一覧の箱が「最初に現れた順」で安定している既存の作りと揃える
+async fn 枠は足した順に末尾へ並ぶ() {
+    // **並びの正は `position`**（並べ替え設計§2-3・§2-4）。足したものは末尾へ入るので、
+    // 並びは `add` を呼んだ順そのものになる。
+    //
+    // **時刻はもう並びを決めない。** ここで渡している時刻はわざと逆順にしてあり、
+    // `created_at` で並べていた頃なら `/a → /b → /c` になった。値としては守り続けるが、
+    // 順序の根拠ではなくなったことをこの並びが示している
     for backend in common::backends("proj-order").await {
         for (path, at) in [("/c", 30), ("/a", 10), ("/b", 20)] {
             db::projects::add(&backend.db, db::LOCAL_ACCOUNT_ID, None, path, at)
@@ -1060,8 +1065,15 @@ async fn 枠は追加した順に並ぶ() {
         let paths: Vec<&str> = rows.iter().map(|row| row.path.as_str()).collect();
         assert_eq!(
             paths,
-            vec!["/a", "/b", "/c"],
-            "[{}] 並びが違う",
+            vec!["/c", "/a", "/b"],
+            "[{}] 足した順に末尾へ並んでいない",
+            backend.name
+        );
+        let positions: Vec<i32> = rows.iter().map(|row| row.position).collect();
+        assert_eq!(
+            positions,
+            vec![0, 1, 2],
+            "[{}] 0 から詰めて振られていない",
             backend.name
         );
         backend.finish().await;
