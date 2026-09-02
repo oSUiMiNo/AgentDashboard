@@ -12,6 +12,7 @@ import {
   setCardError,
   upsertSession,
   useCardError,
+  getProjectGroups,
   useProjectCards,
   useProjectGroups,
   useReviveTargets,
@@ -30,6 +31,7 @@ import {
 
 const A = 'aaaaaaaa-0000-0000-0000-000000000001'
 const B = 'bbbbbbbb-0000-0000-0000-000000000002'
+const C = 'cccccccc-0000-0000-0000-000000000003'
 const PROJECT = '/home/example/dev/app'
 const OTHER = '/home/example/dev/other'
 
@@ -188,6 +190,24 @@ describe('一覧ストア', () => {
     const before = missing.result.current
     missing.rerender()
     expect(missing.result.current).toBe(before)
+  })
+
+  it('ホームの箱の中身と useProjectCards は同じ並びを返す', () => {
+    // **正が1本であることの担保**（並べ替え設計§2）。ホーム（`getProjectGroups`）と
+    // PJT 専用画面（`useProjectCards`）が別々に並べ始めた瞬間、2つの画面の並びが
+    // 食い違う。**わざと position を崩した入力**を与えて、両方が同じ順に直すことを見る
+    applySessionSnapshot([
+      { ...meta(A), position: 2 },
+      { ...meta(B), position: 0 },
+      { ...meta(C), position: 1 },
+    ])
+
+    const 箱 = getProjectGroups().find((group) => group.project === PROJECT)
+    expect(箱).toBeDefined()
+
+    const hook = renderHook(() => useProjectCards('local', PROJECT))
+    expect(hook.result.current).toEqual([B, C, A])
+    expect(箱?.cards).toEqual(hook.result.current)
   })
 
   it('知らないカードへの状態差分は捨てる', () => {

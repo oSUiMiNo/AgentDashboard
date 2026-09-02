@@ -284,3 +284,113 @@ async fn 前段がchunkedで返しても読める() {
     assert!(sessions.is_empty(), "chunked の本文が解けること: {raw}");
     serve.await.expect("スタブが最後まで生きること");
 }
+
+#[tokio::test]
+async fn 並べ替えは画面と同じことがCLIからできる() {
+    // **画面に口を足したら CLI にも同じことができる**という約束（CLI設計）の実地確認。
+    // 台帳（`cli_surface.toml`）は「写したか」を見るだけなので、**実際に効くか**は
+    // ここで見る
+    let dir = work_dir("reorder-cli");
+    let server = TestServer::start().await;
+    let target = target_of(&server);
+
+    // 枠を3つ足す。**足した順に末尾へ入る**ので、この順が出発点になる
+    for name in ["a", "b", "c"] {
+        let path = dir.join(name);
+        let body = format!(r#"{{"host":"local","path":"{}"}}"#, path.to_string_lossy());
+        let (status, response) = server.request("POST", "/api/projects", Some(&body)).await;
+        assert_eq!(status, 200, "枠を足せること: {response}");
+    }
+    let (projects, _) = client::projects(&target).await.expect("枠を引けること");
+    let 名前 = |list: &[protocol::ws::ProjectView]| -> Vec<String> {
+        list.iter()
+            .map(|view| {
+                std::path::Path::new(&view.path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            })
+            .collect()
+    };
+    assert_eq!(
+        名前(&projects),
+        vec!["a", "b", "c"],
+        "足した順に並んでいること"
+    );
+
+    // **ID の前方一致で解決できること。** 画面は ID を全部持っているが、CLI は
+    // 一覧の先頭数文字しか打たないので、ここが効かないと使い物にならない
+    let 短い: Vec<String> = projects
+        .iter()
+        .rev()
+        .map(|view| view.id.to_string()[..8].to_string())
+        .collect();
+    let ordered = client::project_reorder(&target, &短い)
+        .await
+        .expect("並べ替えられること");
+    assert_eq!(ordered.len(), 3, "3枚とも解決されること");
+
+    let (projects, _) = client::projects(&target).await.expect("枠を引けること");
+    assert_eq!(
+        名前(&projects),
+        vec!["c", "b", "a"],
+        "CLI から渡した順になっていること"
+    );
+
+    // **知らない ID は断られ、並びは動かない**（画面と同じ門が効いていること）
+    let 前 = 名前(&projects);
+    let err = client::project_reorder(&target, &[uuid::Uuid::new_v4().to_string()])
+        .await
+        .expect_err("断られること");
+    assert!(
+        format!("{err}").contains("見つかりません"),
+        "断りの言葉が違う: {err}"
+    );
+    let (projects, _) = client::projects(&target).await.expect("枠を引けること");
+    assert_eq!(名前(&projects), 前, "断ったのに並びが動いた");
+}
+
+#[tokio::test]
+async fn CLIから並べ替えるとブラウザにも届く() {
+    // 画面を開いたまま CLI で並べ替えたとき、**開いているタブが古い並びのまま
+    // 残らないこと**。残ると、次にそのタブで触ったときに古い並びで上書きされる
+    let dir = work_dir("reorder-broadcast");
+    let server = TestServer::start().await;
+    let target = target_of(&server);
+
+    for name in ["a", "b"] {
+        let path = dir.join(name);
+        let body = format!(r#"{{"host":"local","path":"{}"}}"#, path.to_string_lossy());
+        let (status, _) = server.request("POST", "/api/projects", Some(&body)).await;
+        assert_eq!(status, 200);
+    }
+    let (projects, _) = client::projects(&target).await.expect("枠を引けること");
+    let ids: Vec<String> = projects.iter().map(|view| view.id.to_string()).collect();
+
+    // 並べ替えの前から購読しておく（後から繋ぐと、配られた知らせを取りこぼす）。
+    // **見るのは記録層の配信**——`manager` は実体（PTY）側で、枠の知らせは通らない
+    let mut events = server.registry.subscribe_events();
+
+    client::project_reorder(&target, &[ids[1].clone(), ids[0].clone()])
+        .await
+        .expect("並べ替えられること");
+
+    // 枠の数だけ配り直す（動いた枠だけを配ると、受け手が動かなかった枠の番号を
+    // 推し量ることになる）ので、少なくとも1件は届く
+    let 届いた = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let event = events.recv().await.expect("配信されること");
+            if let protocol::ws::ServerMessage::ProjectUpsert { project } = event.message {
+                return project;
+            }
+        }
+    })
+    .await
+    .expect("5秒以内に届くこと");
+
+    assert!(
+        届いた.path.ends_with("a") || 届いた.path.ends_with("b"),
+        "知らない枠が届いた: {}",
+        届いた.path
+    );
+}
