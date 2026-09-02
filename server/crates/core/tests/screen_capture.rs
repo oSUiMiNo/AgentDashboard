@@ -596,3 +596,203 @@ async fn 判定を直すために足りない画面を実物から採る() {
     println!("\n採取先: {}", out.display());
     println!("**匿名化と残存検査を通してから fixtures へ置くこと**");
 }
+
+/// 120秒を超えるツール実行の最中も、走っている印が出続けるか。
+///
+/// **これは採取ではなく前提の検証である**（ローカルイシュー「止まっていて入力待ちの
+/// はずのセッションが停滞ステータスになっている」テスト計画フェーズ1-B）。
+///
+/// あちらの設計は「停滞に落ちたカードの画面を見て、走っている印が無ければ入力待ちへ
+/// 倒す」というもので、**長い作業を誤って入力待ちにしない**ことがその成立条件になって
+/// いる（設計§3-3 が「この前提が崩れると案ごと崩れる」と名指ししている）。
+///
+/// 停滞は120秒の無音で落ちる。1本のツールが120秒を超えて走ると、その間フックは
+/// 1件も来ないので**必ず停滞へ落ちる**——そこで画面に印が出ていなければ、走っている
+/// カードを入力待ちと表示してしまう。
+///
+/// **既存の録画では確かめられない。** `fixtures/*/terminal/*.cast` は最長でも54秒で、
+/// 120秒を超えるものが1本も無い（実測）。だからここだけ本物を起こす。
+///
+/// # 実行方法
+///
+/// ```text
+/// TEST_TARGET=screen_capture ./scripts/test-cli 120秒
+/// ```
+///
+/// **既存の5枚採りとは別関数にしてある。** 1回あたりの実行時間を混ぜないためと、
+/// 採り直すときのクォータを分けるため。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "本物の claude を起動し、アカウントのクォータを消費する（make capture-screens）"]
+async fn 長いツール実行の最中も走っている印が出続ける() {
+    /// 走っている印。`<記号> <半角の語>…` の行がまるごとこの形をしているか。
+    ///
+    /// **判定器の本体はフェーズ2で `session/activity.rs` に作る。** ここは前提を
+    /// 確かめるだけなので、同じ考え方の最小の実装を置いている。
+    fn 走っている(text: &str) -> bool {
+        text.lines().any(|line| {
+            let Some((mark, rest)) = line.trim().split_once(' ') else {
+                return false;
+            };
+            if mark.chars().count() != 1 {
+                return false;
+            }
+            let Some((word, after)) = rest.trim_start().split_once('…') else {
+                return false;
+            };
+            // `…` の直前が半角の語であること。枠の中で切られた案内（`…for Cla…`）や
+            // エコーされたコマンド（`pass…)`）はここで落ちる
+            !word.is_empty()
+                && word.chars().all(|ch| ch.is_ascii_alphabetic())
+                // 実物は `…` の後ろに `(経過 · 付随情報)` が続く（実測）。
+                // 何も続かない形（採取済みフィクスチャ）も同じ印である
+                && (after.is_empty() || after.starts_with(" ("))
+        })
+    }
+
+    let out = capture_dir();
+    let dir = WorkDir::new("long-run");
+    // 長いコマンドを確認なしで走らせたいので承認を飛ばす。**利用者のグローバル設定を
+    // 外すのと必ず組で使う**——バイパスだけだと利用者のフックやスキルまで自動承認で
+    // 走る（PJTガイドライン「本物の claude を実験やテストで起動するとき」）
+    let program = claude_wrapper(
+        &dir,
+        &[
+            "--model",
+            "haiku",
+            "--setting-sources",
+            "project,local",
+            "--permission-mode",
+            "bypassPermissions",
+        ],
+    );
+    let server = common::TestServer::start_with_program(
+        Config::default(),
+        program.to_string_lossy().into_owned(),
+    )
+    .await;
+    let target =
+        client::Target::from_url(&format!("http://{}", server.addr)).expect("接続先を読めること");
+
+    let spawned = client::spawn(&target, &dir.as_str(), None, None)
+        .await
+        .expect("CLI から起こせること");
+    let card = spawned.human.clone();
+    let prefix = &card[..8];
+
+    // 信頼確認が出たら既定へ戻して確定する（1枚目の採取と同じ作法）
+    let deadline = Instant::now() + CLI_TIMEOUT;
+    loop {
+        let text = cli_screen_text(&target, prefix).await;
+        let lower = text.to_lowercase();
+        if TRUST_MARKERS.iter().any(|marker| lower.contains(marker)) {
+            client::send_keys(
+                &target,
+                prefix,
+                &["down".to_string(), "up".to_string(), "enter".to_string()],
+            )
+            .await
+            .expect("キーを送れること");
+            break;
+        }
+        if lower.contains("welcome back") || text.contains("❯") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "起動後の画面を読めませんでした");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    wait_via_cli(&target, &card, "入力待ち", |meta| {
+        meta.status == SessionStatus::WaitingInput
+    })
+    .await;
+
+    // --- 120秒を超えるツールを1本だけ走らせる --------------------------------
+    // **素の `sleep` は使えない。** Claude Code 側が `standalone sleep` を拒み、
+    // claude はバックグラウンドへ回してターンを18秒で終える（実測）。それでは
+    // 「120秒走り続けるツール」が1本も走らず、確かめたい前提に触れないまま
+    // 静止画面を眺めることになる（実際に2回そうなった）。
+    //
+    // 前面で回り続ける計算にする。バックグラウンドへ逃がさないことも明示する。
+    client::send_input(
+        &target,
+        prefix,
+        "bash で次を実行して。バックグラウンドにはせず、終わるまで前面で待って。\n\
+         python3 -c \"import time; end=time.time()+150\nwhile time.time()<end: pass\nprint('ok')\"\n\
+         終わったら「おわり」とだけ言って。他には何もしないで。",
+        false,
+        5,
+    )
+    .await
+    .expect("指示を送れること");
+    wait_via_cli(&target, &card, "作業中", |meta| {
+        meta.status == SessionStatus::Working
+    })
+    .await;
+
+    // --- 10秒ごとに画面を見る。120秒の境目をまたぐ ---------------------------
+    let started = Instant::now();
+    let mut 印が消えた: Vec<u64> = Vec::new();
+    let mut 境目の後で見た回数 = 0;
+    let mut 境目の後の画面: Option<String> = None;
+
+    while started.elapsed() < Duration::from_secs(155) {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let 経過 = started.elapsed().as_secs();
+        // **状態も一緒に採る。** これが無いと「印が出ていない」のか
+        // 「そもそも走っていない」のかを区別できず、段取りの失敗を
+        // 前提の崩れと読み違える（実際に読み違えかけた）
+        let (list, _) = client::sessions(&target).await.expect("一覧を引けること");
+        let 作業中 = list
+            .iter()
+            .find(|meta| meta.card_id.to_string() == card)
+            .is_some_and(|meta| meta.status == SessionStatus::Working);
+        let text = cli_screen_text(&target, prefix).await;
+        let 出ている = 走っている(&text);
+        // **当たらなかったときに材料を残す。** 印が出ていないのか、判定が実物に
+        // 当たっていないのかは、画面を見ないと区別が付かない
+        let 気になる行: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.contains('…') || line.contains("esc to interrupt"))
+            .collect();
+        println!(
+            "  {経過:>3}秒: 状態 {} / 走っている印 {} / 気になる行 {:?}",
+            if 作業中 {
+                "作業中"
+            } else {
+                "作業中でない"
+            },
+            if 出ている { "あり" } else { "なし" },
+            気になる行
+        );
+        // **見るのは作業中の標本だけ。** ターンが終わったあとの静止画面に
+        // 印が無いのは当たり前で、前提とは関係がない
+        if 作業中 && !出ている {
+            印が消えた.push(経過);
+        }
+        if 経過 > 120 && 作業中 {
+            境目の後で見た回数 += 1;
+            if 境目の後の画面.is_none() {
+                境目の後の画面 = Some(text);
+            }
+        }
+    }
+
+    // **当たっても外れても1枚残す。** 外れたときこそ実物が要る
+    if let Some(text) = 境目の後の画面.as_deref() {
+        save(&out, "working-long", text);
+    }
+
+    // **ここが落ちたら、崩れているのは前提ではなく段取りである。**
+    // 長い作業が最後まで走らなかったということなので、指示か環境を直して採り直す
+    assert!(
+        境目の後で見た回数 > 0,
+        "120秒を越えても作業中である標本が1つも取れていません。\
+         長い作業が最後まで走っていないので、**前提の可否は判定できていない**。\
+         指示の出し方を直して採り直すこと（設計へ戻る話ではない）"
+    );
+    assert!(
+        印が消えた.is_empty(),
+        "走っている印が消えた時点があります（{印が消えた:?} 秒）。\
+         設計§3-3 の前提が崩れるので、設計へ戻ること"
+    );
+}

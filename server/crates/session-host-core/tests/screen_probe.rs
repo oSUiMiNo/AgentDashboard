@@ -726,3 +726,90 @@ fn 実機検証3前倒し_入力から再描画までの遅れ() {
         );
     }
 }
+
+/// 末尾だけを食わせても画面が再現できるか。できるなら何バイト要るか。
+///
+/// **停滞したカードの画面を読む**（`止まっていて入力待ちのはずのセッションが停滞
+/// ステータスになっている` 設計§5）ために測る。あちらは PTY のリングバッファの
+/// 末尾を切り出して使い捨てのパーサへ食わせる計画だが、**この経路は製品で一度も
+/// 通っていない**——`core/src/client/render.rs` が食っているのは端末エミュレータが
+/// 組み立てた自己完結したエスケープ列で、途中から始まる生バイトとは別物である
+/// （設計§13-1）。
+///
+/// 末尾は**エスケープ列の途中でも UTF-8 の途中でも切れる**。それが実機の条件その
+/// ものなので、整えずにそのまま食わせて測る。
+///
+/// 2つの基準で出す。判定器が要るのは後者だけなので、前者が厚くても採れる。
+///
+/// - **セル一致**：色・装飾・カーソルまで含めて完全に同じか（`compare`）
+/// - **本文一致**：画面の文字だけが同じか（`contents`）
+#[test]
+#[ignore = "録画フィクスチャを読む実測（make probe-screen）"]
+fn 実機検証5_末尾だけで画面が再現できる最小の量() {
+    const CANDIDATES: [usize; 8] = [
+        1 << 10, // 1 KiB
+        2 << 10,
+        4 << 10,
+        8 << 10,
+        16 << 10,
+        32 << 10, // FOOTER_TAIL と同じ厚み
+        64 << 10,
+        128 << 10,
+    ];
+
+    for name in ["basic", "interactive", "resize"] {
+        let cast = load(name);
+        let truth = replay(&cast, f64::INFINITY);
+        let (rows, cols) = truth.screen().size();
+        let truth_text = truth.screen().contents();
+
+        // 出力イベントを1本の生バイト列につなぐ。リングバッファが持っているものと同じ形
+        let mut stream: Vec<u8> = Vec::new();
+        for event in cast.outputs() {
+            stream.extend_from_slice(event.data.as_bytes());
+        }
+
+        let mut cell_fit: Option<usize> = None;
+        let mut text_fit: Option<usize> = None;
+
+        println!(
+            "\n[{name}] 全体 {} バイト / 画面 {rows}x{cols}",
+            stream.len()
+        );
+        for size in CANDIDATES {
+            let tail = &stream[stream.len().saturating_sub(size)..];
+            let mut parser = vt100::Parser::new(rows, cols, SCROLLBACK);
+            parser.process(tail);
+
+            let (differences, first) = compare(truth.screen(), parser.screen());
+            let same_text = parser.screen().contents() == truth_text;
+            if same_text && text_fit.is_none() {
+                text_fit = Some(size);
+            }
+            if differences == 0 && cell_fit.is_none() {
+                cell_fit = Some(size);
+            }
+            println!(
+                "  {:>4} KiB: 食い違い {differences:>5} セル / 本文 {} {}",
+                size >> 10,
+                if same_text { "一致" } else { "不一致" },
+                first.as_deref().unwrap_or(""),
+            );
+            if tail.len() < size {
+                // 全体より厚い候補は測っても同じなので、ここで打ち切る
+                break;
+            }
+        }
+
+        println!(
+            "  → 本文が一致する最小 {} / セルまで一致する最小 {}",
+            text_fit.map_or("届かず".to_string(), |n| format!("{} KiB", n >> 10)),
+            cell_fit.map_or("届かず".to_string(), |n| format!("{} KiB", n >> 10)),
+        );
+
+        assert!(
+            text_fit.is_some(),
+            "[{name}] どの厚みでも本文が再現できない。末尾投入は成立しないので設計§5 へ戻ること"
+        );
+    }
+}
