@@ -20,6 +20,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 import { Button } from '@/components/ui/button'
+import { PowerGlyph, TrashGlyph } from '@/components/ui/glyphs'
 import { InputDock } from '@/components/InputDock/InputDock'
 import { ModelPicker } from '@/components/ModelPicker/ModelPicker'
 import { PermissionModePicker } from '@/components/PermissionModePicker/PermissionModePicker'
@@ -375,7 +376,7 @@ export function SessionView({
                     }
                   }}
                 >
-                  <TrashIcon />
+                  <TrashGlyph />
                 </Button>
               </div>
             </div>
@@ -585,19 +586,7 @@ function PowerButton({
         onPress()
       }}
     >
-      <svg
-        aria-hidden
-        viewBox="0 0 24 24"
-        className="size-3.5"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth={2}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <path d="M12 3v9" />
-        <path d="M18.4 7a9 9 0 1 1-12.8 0" />
-      </svg>
+      <PowerGlyph className="size-3.5" />
     </button>
   )
 }
@@ -663,27 +652,6 @@ function ZoomToggle({
         )}
       </svg>
     </Button>
-  )
-}
-
-/** 「終了」の印（設計§15-2）。**言葉は `aria-label` と `title` に残してある** */
-function TrashIcon() {
-  return (
-    <svg
-      aria-hidden
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M3 6h18" />
-      <path d="M8 6V4h8v2" />
-      <path d="m19 6-1 14H6L5 6" />
-      <path d="M10 11v6" />
-      <path d="M14 11v6" />
-    </svg>
   )
 }
 

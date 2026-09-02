@@ -17,6 +17,7 @@ import { ProjectGroup } from '@/components/ProjectGroup/ProjectGroup'
 import { ReorderHandle } from '@/components/ReorderHandle/ReorderHandle'
 import { ReviveBudgetDialog } from '@/components/TileGrid/ReviveBudgetDialog'
 import { Button } from '@/components/ui/button'
+import { PowerGlyph, TrashGlyph } from '@/components/ui/glyphs'
 import { reviveState } from '@/lib/protocol'
 import {
   fetchHostResources,
@@ -37,7 +38,7 @@ import {
   useTomlAccounts,
 } from '@/stores/sessions'
 import { saveProjectOrder } from '@/stores/projects'
-import { clearSelection, toggleSelect } from '@/stores/selection'
+import { clearSelection, toggleSelect, useSelection } from '@/stores/selection'
 import { agentOf, useSettingsStore } from '@/stores/settings'
 import { useWsStore } from '@/stores/ws'
 
@@ -48,6 +49,7 @@ export function TileGrid() {
   const candidates = useReviveTargets()
   const agents = useSettingsStore((state) => state.settings.agents)
   const revive = useWsStore((state) => state.revive)
+  const archive = useWsStore((state) => state.archive)
   const [orderError, setOrderError] = useState<string | null>(null)
 
   /*
@@ -166,10 +168,61 @@ export function TileGrid() {
     }
   }
 
-  const 押した = async () => {
+  /*
+    **選んだものに、いま何ができるか**（設計§5-3・§5-5）。
+
+    **電源マークは止まっているカードだけを起こす。** 走っているカードには触らない
+    ——押し間違いで作業中の claude を止めないため。復旧は取り返しがつくが、
+    止めるのはつかない。**何枚が対象で何枚を飛ばすかは、押す前に数で出す。**
+
+    **新しい口は作らない**（§5-5）。既存の復旧・外すを、選んだぶんだけ繰り返す。
+  */
+  const 選択 = useSelection()
+  const 起こせる =
+    選択.kind === 'card'
+      ? targets.filter((target) => 選択.ids.includes(target.cardId))
+      : []
+  const 消せる =
+    選択.kind === 'card'
+      ? 選択.ids
+      : // **走っているセッションを持つ枠は外せない**（設計§10）。まとめて押しても同じ
+        選択.ids.filter((id) => {
+          const group = frames.find((each) => each.projectId === id)
+          return group !== undefined && group.cards.length === 0
+        })
+
+  const まとめて外す = async () => {
+    if (選択.kind === 'card') {
+      for (const cardId of 消せる) {
+        archive(cardId)
+      }
+    } else {
+      for (const id of 消せる) {
+        // 口は増やさない。既存の削除を、選んだぶんだけ呼ぶ
+        try {
+          await fetch(`/api/projects/${id}`, { method: 'DELETE' })
+        } catch {
+          // 消えたことは `project_removed` で届く。届かなければ画面は変わらない
+        }
+      }
+    }
+    clearSelection()
+  }
+
+  /**
+   * 起こし直しの門を通す（設計§5-4）。
+   *
+   * **「全て復旧」もまとめて復旧も、同じ門を通る。** 通さないと、「全て復旧」では
+   * 止められる枚数が、選んで押すと止められないことになる——**同じ結果になる操作に、
+   * 片方だけ保護が付いている状態を作らない**。
+   */
+  const 押した = async (対象: ReviveTarget[] = targets) => {
+    if (対象.length === 0) {
+      return
+    }
     setAsking(true)
     try {
-      const hosts = [...new Set(targets.map((target) => target.host))]
+      const hosts = [...new Set(対象.map((target) => target.host))]
       const answers = await Promise.all(
         hosts.map(
           async (host) =>
@@ -190,7 +243,7 @@ export function TileGrid() {
       const 数えた = new Map(
         answers.map(([host, answer]) => [host, answer as HostResources | null]),
       )
-      const 立てた = planRevive(targets, 数えた)
+      const 立てた = planRevive(対象, 数えた)
       if (!立てた.over) {
         // 全部入る。**いままでどおり黙って進む**
         送る(立てた.all)
@@ -284,6 +337,71 @@ export function TileGrid() {
             ))}
           </select>
         </label>
+      )}
+
+      {選択.ids.length > 0 && (
+        /*
+          **まとめて操作の帯**（設計§5-2）。「全て復旧」の行の**すぐ下**に置く
+          ——選択は一覧全体に効くので、画面の帯に属する（`DESIGN.md` §39.2）。
+
+          **1枚選んだ時点から出す。**「複数選んだときだけ」にすると、2枚目を選んだ
+          瞬間にボタンが生えて画面が跳ねる。
+
+          **同じ形の器の等間隔の列にしない**（`DESIGN.md` §33）。2つしか無いこと・
+          既存の「全て復旧」と役割が違うことを、**間隔と地の色**で見せる——数を
+          先に置き、ボタンはその右へ寄せて、2つのあいだだけを詰める
+        */
+        <div
+          data-testid="bulk-row"
+          className="border-primary/30 bg-primary/5 flex flex-wrap items-center gap-3 rounded-md border px-2 py-1.5 text-xs"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <span data-testid="bulk-count" className="text-muted-foreground">
+            {選択.kind === 'card'
+              ? `${選択.ids.length}枚を選んでいます（起こせるのは ${起こせる.length}枚／走っている ${選択.ids.length - 起こせる.length}枚は触りません）`
+              : `${選択.ids.length}枠を選んでいます`}
+          </span>
+          <div className="ml-auto flex items-center gap-1">
+            {選択.kind === 'card' && (
+              <Button
+                type="button"
+                variant="outline"
+                size="icon-sm"
+                data-testid="bulk-revive"
+                disabled={起こせる.length === 0 || asking}
+                aria-label={`選んだうち、止まっている ${起こせる.length}枚を起こす`}
+                title={`選んだうち、止まっている ${起こせる.length}枚を起こします（走っているセッションには触りません）`}
+                onClick={() => {
+                  void 押した(起こせる)
+                }}
+              >
+                <PowerGlyph className="size-3.5" />
+              </Button>
+            )}
+            <Button
+              type="button"
+              variant="outline"
+              size="icon-sm"
+              data-testid="bulk-remove"
+              disabled={消せる.length === 0}
+              aria-label={
+                選択.kind === 'card'
+                  ? `選んだ ${消せる.length}枚を一覧から外す`
+                  : `選んだ ${消せる.length}枠を一覧から外す`
+              }
+              title={
+                選択.kind === 'card'
+                  ? '選んだカードを一覧から外します（履歴は残ります）'
+                  : '選んだ PJT 枠を外します（セッションが動いている枠は外せません）'
+              }
+              onClick={() => {
+                void まとめて外す()
+              }}
+            >
+              <TrashGlyph className="size-3.5" />
+            </Button>
+          </div>
+        </div>
       )}
 
       {orderError !== null && (

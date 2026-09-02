@@ -406,7 +406,17 @@ export function SessionTile({
             ここは行間を詰めて **Dense** にし、①行の側で余白を取って **Loose** にする。
             **高さは 99px のまま**（「縦を詰める」という要件を崩さない）。
           */
-          className="tile-body bg-card flex w-full flex-col gap-1 rounded-[7px] px-3 pt-2.5 pb-3 text-left"
+          /*
+            **選ばれた見た目は、枠線の色で表さない**（設計§8-3）。枠線は状態の色が
+            使っているので、そこへ足すと**状態と選択が同じ場所を取り合う**。
+            使うのは**地の色味**と、右上の**小さな印**の2つ。
+
+            **浮きは影ではなく `transform`**（設計§8-2）。カードは `mask-image` を
+            使っており、外へ描くものは切られる
+          */
+          className={`tile-body bg-card flex w-full flex-col gap-1 rounded-[7px] px-3 pt-2.5 pb-3 text-left ${
+            押し方.selected ? 'bg-primary/10 scale-[1.01]' : ''
+          }`}
           data-testid="session-tile"
           data-card-id={session.card_id}
           data-status={session.status.kind}
@@ -438,6 +448,17 @@ export function SessionTile({
           onPointerUp={押し方.onPointerUp}
           onPointerCancel={押し方.onPointerCancel}
         >
+          {/*
+            選ばれていることの印。**小さく、右上に。** 中身の並びを押しのけないよう
+            絶対配置で置く（`tile-body` は `relative` ではないので、切る枠を基準にする）
+          */}
+          {押し方.selected && (
+            <span
+              data-testid="tile-selected-mark"
+              aria-hidden
+              className="bg-primary absolute top-1.5 right-1.5 size-2 rounded-full"
+            />
+          )}
           {/*
             ① 状態と最終活動を1行に収める（カード設計§10-1）。
 

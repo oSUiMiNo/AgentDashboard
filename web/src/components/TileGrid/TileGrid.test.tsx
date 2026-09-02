@@ -575,3 +575,66 @@ describe('選択モードから出る道', () => {
     expect(getSelection().ids).toEqual([])
   })
 })
+
+describe('まとめて操作の帯', () => {
+  beforeEach(() => {
+    clearSelection()
+  })
+
+  it('1枚選んだ時点から出る', async () => {
+    // **「複数選んだときだけ」にしない**（設計§5-2）。2枚目を選んだ瞬間に
+    // ボタンが生えて画面が跳ねる
+    applySessionSnapshot([meta('a')])
+    renderGrid()
+    expect(screen.queryByTestId('bulk-row')).toBeNull()
+
+    await userEvent.click(screen.getByTestId('session-tile'))
+    expect(screen.getByTestId('bulk-row')).toBeVisible()
+  })
+
+  it('電源マークは、止まっているものだけを数える', async () => {
+    // **走っているカードには触らない**（設計§5-3）。押し間違いで作業中の claude を
+    // 止めないため。**何枚が対象で何枚を飛ばすかを、押す前に数で出す**
+    // **起こし直せるカードには、戻る先（`claude_session_id`）が要る。**
+    // 走っているカードと止まっているカードを1枚ずつ選ぶ
+    applySessionSnapshot([
+      meta('a', { status: { kind: 'working' } }),
+      meta('b', {
+        status: { kind: 'ended', ok: true },
+        agent_connected: false,
+        claude_session_id: '2222b',
+      }),
+    ])
+    renderGrid()
+    const tiles = screen.getAllByTestId('session-tile')
+    await userEvent.click(tiles[0])
+    await userEvent.click(tiles[1])
+
+    expect(screen.getByTestId('bulk-count')).toHaveTextContent('2枚を選んでいます')
+    expect(screen.getByTestId('bulk-count')).toHaveTextContent('走っている 1枚は触りません')
+  })
+
+  it('走っているカードしか選んでいなければ、電源マークは押せない', async () => {
+    applySessionSnapshot([meta('a', { status: { kind: 'working' } })])
+    renderGrid()
+    await userEvent.click(screen.getByTestId('session-tile'))
+
+    expect(screen.getByTestId('bulk-revive')).toBeDisabled()
+    expect(screen.getByTestId('bulk-count')).toHaveTextContent('起こせるのは 0枚')
+  })
+
+  it('印だけで、文字は使わない', async () => {
+    // **利用者の指定**（設計§5-2）。何をするものかはマウスを乗せたときと、
+    // 読み上げ用の名前で伝える
+    applySessionSnapshot([meta('a')])
+    renderGrid()
+    await userEvent.click(screen.getByTestId('session-tile'))
+
+    for (const id of ['bulk-revive', 'bulk-remove']) {
+      const button = screen.getByTestId(id)
+      expect(button.textContent).toBe('')
+      expect(button.getAttribute('aria-label')).toBeTruthy()
+      expect(button.getAttribute('title')).toBeTruthy()
+    }
+  })
+})
