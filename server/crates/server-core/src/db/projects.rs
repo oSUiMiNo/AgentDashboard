@@ -138,6 +138,75 @@ async fn next_position(db: &DatabaseConnection, account_id: Uuid) -> Result<i32,
     Ok(last.map_or(0, |row| row.position.saturating_add(1)))
 }
 
+/// 並べ替えを断る理由（並べ替え設計§9-1）。
+///
+/// **半分だけ入ると、並びが壊れたまま残る。** どちらの理由でも1行も書かない。
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReorderRefusal {
+    /// 知らない ID か、他人のもの。**言い分けない**（設計§18）——言い分けると、
+    /// ID を総当たりして他人の枠の存在を調べられる
+    Unknown(Uuid),
+    /// 同じ ID が2回入っていた。並びが決まらないので受けない
+    Duplicate(Uuid),
+}
+
+/// 枠の並びを**丸ごと**差し替える（並べ替え設計§9-1）。
+///
+/// # 差分ではなく全部を受け取る
+///
+/// 「この1枚をここへ動かした」を受け取ると、送り手と受け手で番号の解釈が食い違った
+/// ときにずれが溜まる。**確定した並び全部を受け取って 0 から詰め直す**なら、
+/// 毎回そこで揃う。枠は高々数十なので、疎な採番や分数採番より読み違えが少ない。
+///
+/// # 渡されなかった枠は、後ろへ回す
+///
+/// 別のタブが枠を足した直後だと、送られてくる並びにその1枚が入っていない。
+/// **断ると、足した側と並べ替えた側のどちらかが必ず損をする**ので、渡されたものを
+/// 先頭から詰めたあと、残りを今の順のまま後ろへ続ける。**番号が重ならないことだけ**を
+/// 守れば、次の並べ替えでまた揃う。
+pub async fn reorder(
+    db: &DatabaseConnection,
+    account_id: Uuid,
+    ids: &[Uuid],
+) -> Result<Result<(), ReorderRefusal>, DbErr> {
+    let rows = list(db, account_id).await?;
+
+    let mut seen = std::collections::HashSet::new();
+    for id in ids {
+        if !seen.insert(*id) {
+            return Ok(Err(ReorderRefusal::Duplicate(*id)));
+        }
+        if !rows.iter().any(|row| row.id == *id) {
+            return Ok(Err(ReorderRefusal::Unknown(*id)));
+        }
+    }
+
+    // 渡された順に 0 から。そのあと、渡されなかったものを今の順のまま続ける
+    let tail = rows
+        .iter()
+        .map(|row| row.id)
+        .filter(|id| !seen.contains(id));
+    let ordered: Vec<Uuid> = ids.iter().copied().chain(tail).collect();
+
+    for (position, id) in ordered.iter().enumerate() {
+        let position = i32::try_from(position).unwrap_or(i32::MAX);
+        // 変わらない行は触らない。書き込みの本数がそのまま「動いた枚数」になる
+        if rows
+            .iter()
+            .any(|row| row.id == *id && row.position == position)
+        {
+            continue;
+        }
+        projects::Entity::update_many()
+            .col_expr(projects::Column::Position, position.into())
+            .filter(projects::Column::Id.eq(*id))
+            .filter(projects::Column::AccountId.eq(account_id))
+            .exec(db)
+            .await?;
+    }
+    Ok(Ok(()))
+}
+
 /// 枠を消す。消えたら `true`、もともと無い（または他人のもの）なら `false`。
 pub async fn remove(db: &DatabaseConnection, account_id: Uuid, id: Uuid) -> Result<bool, DbErr> {
     let outcome = projects::Entity::delete_many()

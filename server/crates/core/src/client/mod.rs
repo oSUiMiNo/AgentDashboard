@@ -1249,6 +1249,81 @@ pub async fn project_remove(target: &Target, prefix: &str) -> Result<String, Cli
     Ok(id)
 }
 
+/// `project reorder`（`PUT /api/projects/order`）。**並びを丸ごと送る。**
+///
+/// 差分ではなく確定した並び全部を送るのは、送り手と受け手で番号の解釈が食い違った
+/// ときにずれが溜まらないようにするため（並べ替え設計§9-1）。ID は枠の一覧から
+/// 前方一致で解決するので、`project ls` に出る先頭数文字で足りる。
+pub async fn project_reorder(
+    target: &Target,
+    prefixes: &[String],
+) -> Result<Vec<String>, ClientError> {
+    let (list, _) = projects(target).await?;
+    let ids: Vec<String> = list.iter().map(|view| view.id.to_string()).collect();
+    let borrowed: Vec<&str> = ids.iter().map(String::as_str).collect();
+
+    let mut resolved = Vec::with_capacity(prefixes.len());
+    for prefix in prefixes {
+        match output::resolve_prefix(prefix, &borrowed) {
+            Ok(id) => resolved.push(id.to_string()),
+            Err(output::PrefixError::Empty) => return Err(空の識別子("PJT 枠")),
+            Err(output::PrefixError::NotFound) => {
+                return Err(ClientError::Refused {
+                    status: 404,
+                    message: format!(
+                        "`{prefix}` に当たる PJT 枠は見つかりません。一覧は `agentdashboard project ls`"
+                    ),
+                });
+            }
+            Err(output::PrefixError::Ambiguous(hits)) => {
+                return Err(ClientError::Refused {
+                    status: 409,
+                    message: format!("`{prefix}` に当たる PJT 枠が {} 件あります", hits.len()),
+                });
+            }
+        }
+    }
+
+    let body = serde_json::json!({ "ids": resolved }).to_string();
+    write_ok(
+        target,
+        "PUT",
+        "/api/projects/order",
+        Some(http::Payload::json(body)),
+    )
+    .await?;
+    Ok(resolved)
+}
+
+/// `session reorder`（`PUT /api/sessions/order`）。**1つの枠の中だけ**を丸ごと送る。
+///
+/// 枠を名指すのは、**枠をまたいだ移動をやらない**ため（要件の「やらないこと」）。
+/// 宛先を要求に書いておけば、その枠に居ないカードは受け手が断れる。
+pub async fn session_reorder(
+    target: &Target,
+    host: &str,
+    path: &str,
+    prefixes: &[String],
+) -> Result<Vec<String>, ClientError> {
+    let (list, _) = sessions(target).await?;
+    let ids: Vec<String> = list.iter().map(|meta| meta.card_id.to_string()).collect();
+
+    let mut resolved = Vec::with_capacity(prefixes.len());
+    for prefix in prefixes {
+        resolved.push(resolve_card(prefix, &ids)?);
+    }
+
+    let body = serde_json::json!({ "host": host, "path": path, "card_ids": resolved }).to_string();
+    write_ok(
+        target,
+        "PUT",
+        "/api/sessions/order",
+        Some(http::Payload::json(body)),
+    )
+    .await?;
+    Ok(resolved)
+}
+
 /// `settings set` の本文を組み立てる（CLI設計§12-1）。**触った1項目だけ**を持つ JSON。
 ///
 /// 純関数にしてあるのは「1項目だけが載っている」ことを机の上で確かめるため。

@@ -154,6 +154,61 @@ async fn bypass_default(db: &DatabaseConnection, account_id: Uuid) -> Option<Per
         .then(|| PermissionMode::new("bypassPermissions"))
 }
 
+/// `PUT /api/projects/order` の中身（並べ替え設計§9-1）。
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct ReorderRequest {
+    /// 並べたい順の枠 ID。**丸ごと送る**（差分ではない）
+    pub ids: Vec<Uuid>,
+}
+
+/// `PUT /api/projects/order` — 枠の並びを丸ごと差し替える。
+///
+/// **知らない ID・他人の ID が混ざっていたら1つも書かない**（設計§9-1）。半分だけ
+/// 入ると、並びが壊れたまま残る。
+///
+/// 書けてから配る（設計§11）。**並べ替えた本人以外のタブにも届く**必要がある——
+/// 届かないと、別の端末で開いた一覧が古い並びのまま残り、次に触ったときにそちらの
+/// 並びで上書きされる。
+pub async fn api_reorder(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<Identity>,
+    Json(request): Json<ReorderRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let db = state.registry.db();
+
+    match db::projects::reorder(db, identity.account_id, &request.ids)
+        .await
+        .map_err(unavailable)?
+    {
+        Ok(()) => {}
+        // **言い分けない。** 知らない ID も他人の ID も同じ断り方にする（設計§18）
+        Err(db::projects::ReorderRefusal::Unknown(_)) => {
+            return Err(refuse(HostAskError::UnknownHost));
+        }
+        Err(db::projects::ReorderRefusal::Duplicate(id)) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("同じ枠が2回入っています: {id}"),
+            ));
+        }
+    }
+
+    // 全部を配り直す。**動いた枠だけを配ると、受け手が「動かなかった枠の番号」を
+    // 推し量ることになる**——枠は高々数十なので、丸ごと配るほうが読み違えが無い
+    for row in db::projects::list(db, identity.account_id)
+        .await
+        .map_err(unavailable)?
+    {
+        state.registry.announce_account(
+            identity.account_id,
+            ServerMessage::ProjectUpsert {
+                project: to_view(&row),
+            },
+        );
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// `DELETE /api/projects/{id}` — 枠を消す。
 ///
 /// 消えるのは「この PJT を追加した」という記録だけで、カードでも履歴でもない。

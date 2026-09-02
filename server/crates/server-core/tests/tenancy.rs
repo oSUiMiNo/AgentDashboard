@@ -1683,3 +1683,180 @@ async fn 札が通らなくてもcookieへ落ちない() {
         backend.finish().await;
     }
 }
+
+#[tokio::test]
+async fn 他人の枠は並べ替えられない() {
+    // 並べ替えの口は**丸ごと受け取って 0 から詰め直す**（並べ替え設計§9-1）ので、
+    // 他人の ID が1つ混ざっただけで**他人の並びを書き換えられる**形になりうる。
+    // 「1つでも知らない ID があれば1行も書かない」がその防ぎ方で、ここで固定する
+    for backend in common::backends("tenancy-project-order").await {
+        let arena = Arena::start(backend.db.clone()).await;
+        let (mine, _mine_agent) = arena.tenant("わたし").await;
+        let (theirs, _their_agent) = arena.tenant("よそのひと").await;
+        let browser = arena.browser(&mine).await;
+
+        let first =
+            server_core::db::projects::add(&backend.db, mine.account_id, None, "/mine/a", 1)
+                .await
+                .expect("自分の枠を作れること");
+        let second =
+            server_core::db::projects::add(&backend.db, mine.account_id, None, "/mine/b", 2)
+                .await
+                .expect("自分の枠を作れること");
+        let theirs_project =
+            server_core::db::projects::add(&backend.db, theirs.account_id, None, "/theirs", 3)
+                .await
+                .expect("よその枠を作れること");
+
+        // ① 他人の枠を混ぜた並べ替えは、**知らない枠と同じ 404**
+        let body = serde_json::json!({ "ids": [second.id, theirs_project.id] }).to_string();
+        let (status, _) = browser
+            .request("PUT", "/api/projects/order", Some(&body))
+            .await;
+        assert_eq!(
+            status, 404,
+            "[{}] 他人の枠を並べ替えられてしまった",
+            backend.name
+        );
+        let unknown = serde_json::json!({ "ids": [Uuid::new_v4()] }).to_string();
+        let (unknown_status, _) = browser
+            .request("PUT", "/api/projects/order", Some(&unknown))
+            .await;
+        assert_eq!(
+            unknown_status, status,
+            "[{}] 他人の枠と知らない枠を言い分けている",
+            backend.name
+        );
+
+        // ② 断られただけでは足りない。**自分の枠も1行も動いていないこと**
+        //    （半分だけ入ると、並びが壊れたまま残る）
+        let still = server_core::db::projects::get(&backend.db, mine.account_id, second.id)
+            .await
+            .expect("読めること")
+            .expect("自分の枠が残っていること");
+        assert_eq!(
+            still.position, second.position,
+            "[{}] 断ったのに自分の枠が動いている",
+            backend.name
+        );
+
+        // ③ 相手の枠も無傷であること
+        let untouched =
+            server_core::db::projects::get(&backend.db, theirs.account_id, theirs_project.id)
+                .await
+                .expect("読めること")
+                .expect("よその枠が残っていること");
+        assert_eq!(
+            untouched.position, theirs_project.position,
+            "[{}] 他人の枠の並びが動いている",
+            backend.name
+        );
+
+        // ④ 正当な側では通ること（全部断っているだけの実装でも通らないように）
+        let body = serde_json::json!({ "ids": [second.id, first.id] }).to_string();
+        let (status, _) = browser
+            .request("PUT", "/api/projects/order", Some(&body))
+            .await;
+        assert_eq!(status, 204, "[{}] 自分の枠を並べ替えられない", backend.name);
+        let ordered = server_core::db::projects::list(&backend.db, mine.account_id)
+            .await
+            .expect("読めること");
+        let paths: Vec<&str> = ordered.iter().map(|row| row.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["/mine/b", "/mine/a"],
+            "[{}] 渡した順になっていない",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 他人のカードは並べ替えられない() {
+    // カードの並びは**枠の中で閉じている**ので、宛先の枠を要求の側で名指しする。
+    // 自分の枠を名指しても、そこに居ないカード（＝他人のカード）は通らないこと
+    for backend in common::backends("tenancy-session-order").await {
+        let arena = Arena::start(backend.db.clone()).await;
+        let (mine, _mine_agent) = arena.tenant("わたし").await;
+        let (theirs, _their_agent) = arena.tenant("よそのひと").await;
+        let browser = arena.browser(&mine).await;
+
+        let listed = arena.registry.list(mine.account_id);
+        let ours = listed.first().expect("自分のカードが1枚あること");
+        let host = ours
+            .agent_id
+            .map(|id| id.0.to_string())
+            .unwrap_or_else(|| "local".to_string());
+        let path = ours.project.0.clone();
+
+        let before = arena
+            .registry
+            .list(theirs.account_id)
+            .first()
+            .expect("よそのカードが1枚あること")
+            .position;
+
+        // ① 他人のカードを混ぜた並べ替えは、**知らないカードと同じ 404**
+        let body = serde_json::json!({
+            "host": host,
+            "path": path,
+            "card_ids": [theirs.card_id],
+        })
+        .to_string();
+        let (status, _) = browser
+            .request("PUT", "/api/sessions/order", Some(&body))
+            .await;
+        assert_eq!(
+            status, 404,
+            "[{}] 他人のカードを並べ替えられてしまった",
+            backend.name
+        );
+        let unknown = serde_json::json!({
+            "host": host,
+            "path": path,
+            "card_ids": [Uuid::new_v4()],
+        })
+        .to_string();
+        let (unknown_status, _) = browser
+            .request("PUT", "/api/sessions/order", Some(&unknown))
+            .await;
+        assert_eq!(
+            unknown_status, status,
+            "[{}] 他人のカードと知らないカードを言い分けている",
+            backend.name
+        );
+
+        // ② 相手のカードが無傷であること
+        let after = arena
+            .registry
+            .list(theirs.account_id)
+            .first()
+            .expect("よそのカードが残っていること")
+            .position;
+        assert_eq!(
+            after, before,
+            "[{}] 他人のカードの並びが動いている",
+            backend.name
+        );
+
+        // ③ 正当な側では通ること
+        let body = serde_json::json!({
+            "host": host,
+            "path": path,
+            "card_ids": [mine.card_id],
+        })
+        .to_string();
+        let (status, _) = browser
+            .request("PUT", "/api/sessions/order", Some(&body))
+            .await;
+        assert_eq!(
+            status, 204,
+            "[{}] 自分のカードを並べ替えられない",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}

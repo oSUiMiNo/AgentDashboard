@@ -125,6 +125,52 @@ pub async fn api_sessions(
     Json(state.registry.list(identity.account_id))
 }
 
+/// `PUT /api/sessions/order` の中身（並べ替え設計§9-1）。
+#[derive(Debug, serde::Serialize, Deserialize)]
+pub struct ReorderRequest {
+    /// どの枠か。`agent_id` の文字列表現か、ローカルを表す `"local"`
+    pub host: String,
+    /// どの枠か。作業ディレクトリの絶対パス
+    pub path: String,
+    /// 並べたい順のカード ID。**丸ごと送る**（差分ではない）
+    pub card_ids: Vec<uuid::Uuid>,
+}
+
+/// `PUT /api/sessions/order` — 1つの枠の中で、カードの並びを丸ごと差し替える。
+///
+/// **枠をまたいだ移動は受けない。** カードの作業ディレクトリは起動時に決まるので、
+/// 別の枠へは移せない（要件の「やらないこと」）。だから宛先の枠を要求の側で名指しし、
+/// **その枠の中に居ないカードは「知らない ID」として断る**。
+pub async fn api_sessions_reorder(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    Json(request): Json<ReorderRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let agent_id = crate::hosts::parse_host(&request.host)?;
+    let card_ids: Vec<CardId> = request.card_ids.into_iter().map(CardId).collect();
+
+    match state
+        .registry
+        .reorder_cards(identity.account_id, agent_id, &request.path, &card_ids)
+        .await
+        .map_err(|err| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("記録に繋がりません: {err}"),
+            )
+        })? {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        // **言い分けない**（設計§18）。知らないカードも他人のカードも同じ断り方
+        Err(crate::db::projects::ReorderRefusal::Unknown(_)) => Err(crate::hosts::refuse(
+            crate::session_host::HostAskError::UnknownHost,
+        )),
+        Err(crate::db::projects::ReorderRefusal::Duplicate(id)) => Err((
+            StatusCode::BAD_REQUEST,
+            format!("同じカードが2回入っています: {id}"),
+        )),
+    }
+}
+
 /// `GET /api/sessions/{card_id}/transcript` の絞り込み。
 #[derive(Debug, Default, Deserialize)]
 pub struct TranscriptQuery {

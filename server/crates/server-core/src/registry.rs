@@ -365,6 +365,71 @@ impl SessionRegistry {
         metas
     }
 
+    /// 1つの枠の中で、カードの並びを**丸ごと**差し替える（並べ替え設計§9-1）。
+    ///
+    /// 枠は `(agent, project)` で名指す。**カードの `position` は枠の中で閉じている**ので、
+    /// 書き換える行もその枠の中だけで済む。
+    ///
+    /// 断り方と、渡されなかったカードの扱いは枠の側（[`db::projects::reorder`]）と同じ
+    /// ——**1つでも知らない ID があれば1行も書かない**／渡されなかったものは今の順の
+    /// まま後ろへ続ける。
+    pub async fn reorder_cards(
+        &self,
+        account_id: Uuid,
+        agent_id: Option<AgentId>,
+        project: &str,
+        card_ids: &[CardId],
+    ) -> Result<Result<(), db::projects::ReorderRefusal>, DbErr> {
+        // いまの枠の中身を、並び順のまま取り出す
+        let mut inside: Vec<SessionMeta> = self
+            .list(account_id)
+            .into_iter()
+            .filter(|meta| meta.agent_id == agent_id && meta.project.0 == project)
+            .collect();
+        inside.sort_by_key(|meta| (meta.position, meta.created_at));
+
+        let mut seen = std::collections::HashSet::new();
+        for card_id in card_ids {
+            if !seen.insert(*card_id) {
+                return Ok(Err(db::projects::ReorderRefusal::Duplicate(card_id.0)));
+            }
+            if !inside.iter().any(|meta| meta.card_id == *card_id) {
+                return Ok(Err(db::projects::ReorderRefusal::Unknown(card_id.0)));
+            }
+        }
+
+        let tail = inside
+            .iter()
+            .map(|meta| meta.card_id)
+            .filter(|card_id| !seen.contains(card_id));
+        let ordered: Vec<CardId> = card_ids.iter().copied().chain(tail).collect();
+
+        for (position, card_id) in ordered.iter().enumerate() {
+            let position = i32::try_from(position).unwrap_or(i32::MAX);
+            if inside
+                .iter()
+                .any(|meta| meta.card_id == *card_id && meta.position == position)
+            {
+                continue;
+            }
+            entity::sessions::Entity::update_many()
+                .col_expr(entity::sessions::Column::Position, position.into())
+                .filter(entity::sessions::Column::CardId.eq(card_id.0))
+                .filter(entity::sessions::Column::AccountId.eq(account_id))
+                .exec(&self.db)
+                .await?;
+
+            // **手元の写しも直して配る。** 直さないと、次の報告が来るまで一覧が古い並びの
+            // ままになり、そのあいだに別のタブが並べ替えると古い値を土台に上書きされる
+            if let Some(record) = self.get(*card_id) {
+                let mut meta = record.meta();
+                meta.position = position;
+                self.announce_card(account_id, meta);
+            }
+        }
+        Ok(Ok(()))
+    }
+
     /// そのカードの持ち主。知らないカードなら `None`。
     ///
     /// 操作の可否（§8-6 の WS 操作の行）はこれ1つで判断する。**「実体が居るか」とは

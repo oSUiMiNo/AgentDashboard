@@ -277,6 +277,20 @@ enum SessionCmd {
         #[command(flatten)]
         out: OutputArgs,
     },
+    /// 1つの PJT 枠の中で、カードを並べ替える（画面のドラッグと同じ口）
+    ///
+    /// **枠をまたいだ移動はできない。** カードの作業ディレクトリは起動時に決まる。
+    /// 並びは丸ごと渡し、渡さなかったカードは今の順のまま後ろへ続く。
+    Reorder {
+        /// どの PC か。この機械なら `local`、繋いだ PC はその ID
+        host: String,
+        /// どの枠か。作業ディレクトリのパス
+        path: String,
+        /// 並べたい順のカードID。先頭の数文字で足りる
+        ids: Vec<String>,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
     /// モデルを切り替える（切り替わったの知らせまで待つ）
     Model {
         /// カードID。先頭の数文字で足りる
@@ -358,6 +372,15 @@ enum ProjectCmd {
     Rm {
         /// 枠のID。先頭の数文字で足りる（一覧は `project ls --json`）
         id: String,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// PJT 枠を並べ替える（画面のドラッグと同じ口）
+    ///
+    /// **並びを丸ごと渡す。** 渡さなかった枠は今の順のまま後ろへ続く。
+    Reorder {
+        /// 並べたい順の枠ID。先頭の数文字で足りる（一覧は `project ls --json`）
+        ids: Vec<String>,
         #[command(flatten)]
         out: OutputArgs,
     },
@@ -855,6 +878,17 @@ async fn client_session(
             let outcome = client::attach(target, &host, &id, std::path::Path::new(&file)).await?;
             println!("{}", output::pick(out.json, &outcome.raw, &outcome.human));
         }
+        SessionCmd::Reorder {
+            host,
+            path,
+            ids,
+            out,
+        } => {
+            let ordered = client::session_reorder(target, &host, &path, &ids).await?;
+            let raw = serde_json::json!({ "card_ids": ordered }).to_string();
+            let human = format!("カードを並べ替えました：{} 枚", ordered.len());
+            println!("{}", output::pick(out.json, &raw, &human));
+        }
         SessionCmd::Kill { id, out } => {
             let outcome = client::kill(target, &id).await?;
             println!("{}", output::pick(out.json, &outcome.raw, &outcome.human));
@@ -988,6 +1022,12 @@ async fn client_project(
                 // 理由は標準エラーへ（CLI設計§10-4）
                 eprintln!("セッションは起きませんでした：{reason}");
             }
+            println!("{}", output::pick(out.json, &raw, &human));
+        }
+        ProjectCmd::Reorder { ids, out } => {
+            let ordered = client::project_reorder(target, &ids).await?;
+            let raw = serde_json::json!({ "ids": ordered }).to_string();
+            let human = format!("PJT 枠を並べ替えました：{} 枚", ordered.len());
             println!("{}", output::pick(out.json, &raw, &human));
         }
         ProjectCmd::Rm { id, out } => {
@@ -1350,6 +1390,9 @@ mod tests {
                 "ls",
                 "mode",
                 "model",
+                // 1つの枠の中でカードを並べ替える（並べ替え設計§9-1）。
+                // **運ぶのはカードIDの並びだけ**で、生バイトは1つも通らない
+                "reorder",
                 "resize",
                 // 抜け殻のカードを起こし直す（接続断のカードを復旧ボタンで戻す 設計§10-1）。
                 // **生バイトは1つも運ばない**——運ぶのはカードIDだけで、材料は

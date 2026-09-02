@@ -31,7 +31,7 @@ use axum::{
     Router,
     http::{StatusCode, Uri, header},
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 use std::sync::Arc;
 
@@ -62,6 +62,8 @@ pub fn routes(state: ws::AppState, auth: Arc<auth::AuthContext>) -> Router {
     let protected = Router::new()
         .route("/ws", get(ws::ws_handler))
         .route("/api/sessions", get(ws::api_sessions))
+        // 並べ替えの保存（並べ替え設計§9-1）。**丸ごと受け取って 0 から詰め直す**
+        .route("/api/sessions/order", put(ws::api_sessions_reorder))
         .route(
             "/api/sessions/{card_id}/transcript",
             get(ws::api_transcript),
@@ -79,6 +81,7 @@ pub fn routes(state: ws::AppState, auth: Arc<auth::AuthContext>) -> Router {
             "/api/projects",
             get(projects::api_list).post(projects::api_add),
         )
+        .route("/api/projects/order", put(projects::api_reorder))
         .route("/api/projects/{id}", delete(projects::api_remove))
         .with_state(state);
 

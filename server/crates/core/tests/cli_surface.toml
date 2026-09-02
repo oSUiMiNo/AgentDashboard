@@ -170,6 +170,16 @@ command = "version install"
 
 [[entry]]
 kind = "rest"
+target = "PUT /api/projects/order"
+command = "project reorder"
+
+[[entry]]
+kind = "rest"
+target = "PUT /api/sessions/order"
+command = "session reorder"
+
+[[entry]]
+kind = "rest"
 target = "PUT /api/settings"
 command = "settings set"
 
