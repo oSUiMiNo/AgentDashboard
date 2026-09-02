@@ -13,6 +13,7 @@ function view(overrides: Partial<VersionsView> = {}): VersionsView {
     outcome: null,
     latest: null,
     stranded_cards: 0,
+    zombie_children: null,
     install: null,
     install_unavailable: null,
     pointer_path: '/tmp/使い捨て/version-current',
