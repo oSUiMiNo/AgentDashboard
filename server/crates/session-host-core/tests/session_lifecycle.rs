@@ -106,6 +106,75 @@ async fn 異常終了の終了コードを取得できる() {
     drop(process);
 }
 
+/// 終わった子が、終了状態を引き取られずに残らない（ゾンビ設計§6-2）。
+///
+/// **`exit_rx` が返るだけでは足りない。** あれは待ちスレッドが `wait()` を終えた合図だが、
+/// 「OS のプロセス表から消えたか」までは言っていない。**実機で78体溜まったときも、
+/// カードは正しく `Ended` になっていた**——画面の勘定と OS の勘定は別々に動く。
+#[tokio::test]
+async fn 終わった子はプロセス表に残らない() {
+    let Some(root) = std::fs::read_dir("/proc").ok() else {
+        // Linux 以外。**読めないことは異常ではない**
+        return;
+    };
+    drop(root);
+
+    let (chunks_tx, _chunks_rx) = mpsc::channel(8);
+    let mut command = CommandBuilder::new(common::fake_claude());
+    command.arg("--exit-code");
+    command.arg("0");
+
+    let (process, exit_rx) =
+        PtyProcess::spawn(command, test_size(), chunks_tx).expect("PTY を開けること");
+    let child = 自分の子(std::process::id());
+    assert_eq!(child.len(), 1, "起こした子が1本だけ見えること: {child:?}");
+    let pid = child[0];
+
+    timeout(common::TIMEOUT, exit_rx)
+        .await
+        .expect("時間内に終了すること")
+        .expect("終了状態が届くこと");
+    drop(process);
+
+    // 待ちスレッドが引き取り終えるまでの間、プロセス表にはまだ見えうる
+    let 期限 = std::time::Instant::now() + common::TIMEOUT;
+    while std::path::Path::new(&format!("/proc/{pid}")).exists() {
+        assert!(
+            std::time::Instant::now() < 期限,
+            "終わった子が引き取られないまま残っている: {pid}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// `/proc` を読んで、親が `parent` の子の PID を並べる。
+///
+/// **`comm` は括弧で囲まれていて空白も括弧も含みうる**ので、最後の `)` で切ってから割る。
+fn 自分の子(parent: u32) -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str().and_then(|name| name.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Ok(line) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        let Some(close) = line.rfind(')') else { continue };
+        let mut rest = line[close + 1..].split_whitespace();
+        let (Some(_state), Some(ppid)) = (rest.next(), rest.next()) else {
+            continue;
+        };
+        if ppid.parse::<u32>() == Ok(parent) {
+            found.push(name);
+        }
+    }
+    found
+}
+
 #[tokio::test]
 async fn 子プロセスが終わると読み取りスレッドが畳まれて待ち行列が閉じる() {
     // slave を先に落としているおかげで、子が終われば master 側の読み取りも必ず終わる。
