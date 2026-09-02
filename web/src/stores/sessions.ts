@@ -404,6 +404,22 @@ export function markReviving(cardId: CardId) {
   }
   reviving.add(cardId)
   // 前の理由は消す。押し直したのに古い断りが残っていると、今回の結果と読めてしまう
+  clearCardError(cardId)
+}
+
+/**
+ * そのカードに出ている断りを消す。
+ *
+ * **押し直す前に呼ぶ。** 古い断りが残っていると、今回の結果と読めてしまう——
+ * `markReviving` が前からやっていたことを、名前のある口として切り出した。
+ *
+ * # 同じ文言が2回続く場合に効く
+ *
+ * [`useCardError`] は文字列をそのまま返すので、**同じ断りが2回続くと
+ * `useSyncExternalStore` が `Object.is` で弾き、React からは変化に見えない。**
+ * 送る前にここを通しておけば、断りは毎回 `null → 文言` の変化になる。
+ */
+export function clearCardError(cardId: CardId) {
   cardErrors.delete(cardId)
   // **カード1枚だけを鳴らす。** 全体に持つと、6枚を並べたときに一覧が丸ごと描き直される
   notifyCard(cardId)

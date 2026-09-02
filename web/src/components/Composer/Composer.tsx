@@ -29,9 +29,24 @@
  *
  * **送信を押すまで、画像はブラウザの外へ出ない**（§2）。押してから運び、
  * 置き終わってから本文を組み立てる。運びに失敗したら送らない——添付も本文も残す。
+ *
+ * # 断られたら戻す（設計§7-2）
+ *
+ * **`sendInput` が `true` を返しても、届いたとは限らない。** 言えるのは WebSocket が
+ * フレームを受け取ったことだけで、指示そのものは**印を待って断られる**ことがある
+ * （`Session::send_instruction_with`）。断りは遅れて届くので、そのときには本文も添付も
+ * 消えている——設計§7-2 が「もう一度押せる」と約束しているのに、打ち直しと画像の
+ * 選び直しが要る形になっていた。
+ *
+ * そこで**送ったものを控えておき、断りが届いたら戻す**。相関IDが線に無いので、
+ * 「直後に届いた同じカードの断り」が本当にこの送信への返事かは**推測でしかない**——
+ * だから [`RESTORE_WINDOW_MS`] の窓で区切る。
+ *
+ * **文言はここに出さない。** `SessionView` が `card-error` として既に出しているので、
+ * 再掲すると同じ文が上下に2つ並ぶ。
  */
 
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import {
@@ -46,7 +61,28 @@ import { isComposerSubmit } from '@/lib/keys'
 import { isEnded, type SessionStatus } from '@/lib/protocol'
 import type { CardId } from '@/lib/protocol'
 import { useAuthStore } from '@/stores/auth'
+import { clearCardError, useCardError } from '@/stores/sessions'
 import { useWsStore } from '@/stores/ws'
+
+/**
+ * 送ったものを控えておく長さ（ミリ秒）。
+ *
+ * 断りは**印の待ちの上限**（`attachment_mark_wait_ms`・既定5000）を待ってから返るので、
+ * 既定の4倍の余裕を取る。**上限をこれより厚く設定した機械では戻らなくなる**が、それは
+ * 「控えを取る前と同じ振る舞い」に落ちるだけで、新しい害は出ない。
+ *
+ * 窓で区切るのは、`ServerMessage::Error` に**相関IDが無い**ため。窓を外すと、
+ * ずっと後で来た無関係な断り（権限モードの切替が断られた等）で古い本文が戻ってしまう。
+ */
+const RESTORE_WINDOW_MS = 20_000
+
+/** 送ったものの控え。断りが届いたらこれを画面へ戻す。 */
+interface 控え {
+  text: string
+  attachments: Attachment[]
+  /** 窓を閉じるための時計。差し替え・解決・畳みのときに止める */
+  timer: ReturnType<typeof setTimeout>
+}
 
 interface Props {
   /** 外から寸法を決める（帯へ横並びに置くため） */
@@ -90,8 +126,48 @@ export function Composer({
   const [sending, setSending] = useState(false)
   // 断られた理由と、運びに失敗した理由。**画面にそのまま出す**
   const [trouble, setTrouble] = useState<string[]>([])
+  // 送ったものの控え。**断られたら戻す**（設計§7-2）
+  const 控え中 = useRef<控え | null>(null)
+  const cardError = useCardError(cardId)
   const ended = isEnded(status)
   const 添付できる = host !== null && !ended
+
+  /** 控えを畳む。**絵もここで捨てる**——捨てる場所を散らすと必ず取り残しが出る */
+  const 控えを捨てる = () => {
+    const held = 控え中.current
+    if (held === null) {
+      return
+    }
+    控え中.current = null
+    clearTimeout(held.timer)
+    for (const one of held.attachments) {
+      releasePreview(one)
+    }
+  }
+
+  // 断りが届いたら、送ったものを戻す（設計§7-2）。**文言は出さない**——
+  // `SessionView` が `card-error` として既に出しているので、再掲すると2つ並ぶ
+  useEffect(() => {
+    const held = 控え中.current
+    if (cardError === null || held === null) {
+      return
+    }
+    控え中.current = null
+    clearTimeout(held.timer)
+    // **打ち直しの途中なら邪魔しない。** 押したあとに書き始めた文のほうが新しい
+    if (text !== '' || attachments.length > 0) {
+      for (const one of held.attachments) {
+        releasePreview(one)
+      }
+      return
+    }
+    setText(held.text)
+    setAttachments(held.attachments)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 断りが届いた瞬間だけ動かす
+  }, [cardError])
+
+  // 畳まれるときも控えを捨てる。**残すと `blob:` がブラウザの中に溜まる**
+  useEffect(() => 控えを捨てる, [])
 
   /** 3経路の共通の入口。**判定は `pickImages` の1つを通る**（設計§9） */
   const 受け取る = (files: readonly File[]) => {
@@ -144,14 +220,26 @@ export function Composer({
       }
     }
 
+    // **前の断りを消してから送る。** 残したままだと、同じ文言の断りが2回続いたときに
+    // `useCardError` の値が変わらず、React から「届いた」ことが見えない
+    // （`useSyncExternalStore` が `Object.is` で弾く）
+    clearCardError(cardId)
+
     // **送れたときだけ消す。** 送れていない文が消えるのが、いちばん困る形
     if (!sendInput(cardId, text, paths)) {
       return
     }
-    setText('')
-    for (const one of attachments) {
-      releasePreview(one)
+
+    // **控えを取る。絵はまだ捨てない**（設計§7-2——断られたらそのまま戻せること）。
+    // 前の控えが残っていれば、そちらはもう戻す相手が居ないので畳む
+    控えを捨てる()
+    控え中.current = {
+      text,
+      attachments,
+      timer: setTimeout(控えを捨てる, RESTORE_WINDOW_MS),
     }
+
+    setText('')
     setAttachments([])
     setTrouble([])
     inputRef.current?.focus()

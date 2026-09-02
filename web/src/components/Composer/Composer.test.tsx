@@ -11,11 +11,12 @@
  * 「両方の画面に出る」ことの根拠**なので、ここで分岐を試すと、あとから分岐を足しても
  * 気づけない試験を書くことになる（設計§9-2）。
  */
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Composer } from './Composer'
 import type { CardId } from '@/lib/protocol'
 import * as hostfs from '@/lib/hostfs'
+import { clearSessions, setCardError } from '@/stores/sessions'
 import { useWsStore } from '@/stores/ws'
 
 const CARD = '11111111-2222-3333-4444-555555555555' as CardId
@@ -39,9 +40,19 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  clearSessions()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
 })
+
+/** 置き終わったことにする（運びは別のところで見ている）。 */
+function 置けたことにする() {
+  vi.spyOn(hostfs, 'uploadAttachment').mockResolvedValue({
+    path: '/state/x.png',
+    media_type: 'image/png',
+    bytes: 8,
+  })
+}
 
 function 置く() {
   render(<Composer cardId={CARD} status={動いている} host={HOST} />)
@@ -165,12 +176,8 @@ describe('送る', () => {
     ).toBe('消えないこと')
   })
 
-  it('送れたら添付の列が空になり、小窓の絵を捨てる', async () => {
-    vi.spyOn(hostfs, 'uploadAttachment').mockResolvedValue({
-      path: '/state/x.png',
-      media_type: 'image/png',
-      bytes: 8,
-    })
+  it('送れたら添付の列が空になる', async () => {
+    置けたことにする()
     置く()
     選ぶ([画像()])
     fireEvent.submit(screen.getByTestId('composer'))
@@ -178,6 +185,158 @@ describe('送る', () => {
     await waitFor(() =>
       expect(screen.queryByTestId('composer-attachments')).toBeNull(),
     )
+  })
+
+  it('送った直後は、小窓の絵をまだ捨てない', async () => {
+    // **断られたらそのまま戻せること**（設計§7-2）。ここで捨てると、戻したときに
+    // 絵の出ないチップが並ぶ
+    置けたことにする()
+    置く()
+    選ぶ([画像()])
+    fireEvent.submit(screen.getByTestId('composer'))
+
+    await waitFor(() =>
+      expect(screen.queryByTestId('composer-attachments')).toBeNull(),
+    )
+    expect(URL.revokeObjectURL).not.toHaveBeenCalledWith('blob:preview')
+  })
+})
+
+describe('断られたら戻す', () => {
+  /** 送って、そのあと断りが届いたことにする。 */
+  async function 送って断られる(text = '消えないこと') {
+    置けたことにする()
+    置く()
+    fireEvent.change(screen.getByTestId('composer-input'), { target: { value: text } })
+    選ぶ([画像()])
+    fireEvent.submit(screen.getByTestId('composer'))
+    await waitFor(() =>
+      expect(screen.queryByTestId('composer-attachments')).toBeNull(),
+    )
+    act(() => setCardError(CARD, '画像の印が 1 枚ぶん出ませんでした'))
+  }
+
+  it('入力欄の本文が戻る', async () => {
+    await 送って断られる()
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId('composer-input') as HTMLTextAreaElement).value,
+      ).toBe('消えないこと'),
+    )
+  })
+
+  it('添付の列が戻り、もう一度送れる', async () => {
+    await 送って断られる()
+    await waitFor(() =>
+      expect(screen.getAllByTestId('composer-attachment-remove')).toHaveLength(1),
+    )
+    // 戻ったものをそのまま送れること（**画像を選び直さなくてよい**）
+    fireEvent.submit(screen.getByTestId('composer'))
+    await waitFor(() => expect(sendInput).toHaveBeenCalledTimes(2))
+  })
+
+  it('戻すぶんの小窓の絵は捨てられていない', async () => {
+    await 送って断られる()
+    await waitFor(() =>
+      expect(screen.getAllByTestId('composer-attachment-remove')).toHaveLength(1),
+    )
+    expect(URL.revokeObjectURL).not.toHaveBeenCalledWith('blob:preview')
+  })
+
+  it('同じ文言の断りが2回続けて来ても、2回目も戻る', async () => {
+    // `useCardError` は文字列をそのまま返すので、**同じ断りが2回続くと React からは
+    // 変化に見えない**（`Object.is` で弾かれる）。送る前に消しているから通る
+    const 同じ文言 = '画像の印が 1 枚ぶん出ませんでした'
+    await 送って断られる('1回目')
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId('composer-input') as HTMLTextAreaElement).value,
+      ).toBe('1回目'),
+    )
+
+    fireEvent.submit(screen.getByTestId('composer'))
+    await waitFor(() => expect(sendInput).toHaveBeenCalledTimes(2))
+    act(() => setCardError(CARD, 同じ文言))
+
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId('composer-input') as HTMLTextAreaElement).value,
+      ).toBe('1回目'),
+    )
+  })
+
+  it('押したあとに打ち直していたら、戻さない', async () => {
+    // 押したあとに書き始めた文のほうが新しい。**それを上書きしない**
+    置けたことにする()
+    置く()
+    fireEvent.change(screen.getByTestId('composer-input'), { target: { value: '古い文' } })
+    fireEvent.submit(screen.getByTestId('composer'))
+    await waitFor(() => expect(sendInput).toHaveBeenCalled())
+
+    fireEvent.change(screen.getByTestId('composer-input'), { target: { value: '新しい文' } })
+    act(() => setCardError(CARD, '断り'))
+
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId('composer-input') as HTMLTextAreaElement).value,
+      ).toBe('新しい文'),
+    )
+  })
+
+  it('窓を過ぎたら控えを捨て、そのあとの断りでは戻さない', async () => {
+    // 断りには**相関IDが無い**ので、いつまでも待つと無関係な断り（権限モードの切替が
+    // 断られた等）で古い本文が戻ってしまう
+    vi.useFakeTimers()
+    try {
+      置けたことにする()
+      置く()
+      fireEvent.change(screen.getByTestId('composer-input'), { target: { value: '古い文' } })
+      選ぶ([画像()])
+      fireEvent.submit(screen.getByTestId('composer'))
+      // 運びは Promise なので、時計を進める前に流し切る
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      expect(screen.queryByTestId('composer-attachments')).toBeNull()
+
+      // 窓を閉じる。ここで控えの絵が捨てられる
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(20_000)
+      })
+      expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:preview')
+
+      // そのあとに断りが来ても、もう戻さない
+      act(() => setCardError(CARD, 'ずっと後の断り'))
+      expect(
+        (screen.getByTestId('composer-input') as HTMLTextAreaElement).value,
+      ).toBe('')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('畳まれるとき、控えの絵を捨てる', async () => {
+    // 残すとブラウザの中に溜まる（`FileView` が後始末で捨てているのと同じ約束）
+    置けたことにする()
+    const view = render(<Composer cardId={CARD} status={動いている} host={HOST} />)
+    選ぶ([画像()])
+    fireEvent.submit(screen.getByTestId('composer'))
+    await waitFor(() =>
+      expect(screen.queryByTestId('composer-attachments')).toBeNull(),
+    )
+
+    view.unmount()
     expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:preview')
+  })
+
+  it('断り文をここには出さない', async () => {
+    // `SessionView` が `card-error` として既に出している。再掲すると同じ文が上下に2つ並ぶ
+    await 送って断られる()
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId('composer-input') as HTMLTextAreaElement).value,
+      ).toBe('消えないこと'),
+    )
+    expect(screen.queryByTestId('composer-trouble')).toBeNull()
   })
 })
