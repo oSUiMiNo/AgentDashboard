@@ -171,14 +171,14 @@ test('カードを並べ替えると、PJT 専用画面も同じ順になる', a
   const 前 = await カードの並び(枠)
   expect(前).toHaveLength(2)
 
-  const 2枚目 = 枠.getByTestId('tile-shell').nth(1)
-  const 1枚目の箱 = await 枠.getByTestId('tile-shell').nth(0).boundingBox()
-  if (!1枚目の箱) {
+  const 二枚目 = 枠.getByTestId('tile-shell').nth(1)
+  const 一枚目の箱 = await 枠.getByTestId('tile-shell').nth(0).boundingBox()
+  if (!一枚目の箱) {
     throw new Error('カードの位置が取れません')
   }
-  await マウスで運ぶ(page, 2枚目.getByTestId('reorder-handle'), {
-    x: 1枚目の箱.x + 1枚目の箱.width / 2,
-    y: 1枚目の箱.y + 1枚目の箱.height / 2,
+  await マウスで運ぶ(page, 二枚目.getByTestId('reorder-handle'), {
+    x: 一枚目の箱.x + 一枚目の箱.width / 2,
+    y: 一枚目の箱.y + 一枚目の箱.height / 2,
   })
 
   await expect
@@ -186,7 +186,8 @@ test('カードを並べ替えると、PJT 専用画面も同じ順になる', a
     .toBe(前[1])
 
   // PJT 専用画面でも同じ順であること
-  await 枠.click({ position: { x: 5, y: 40 } })
+  // **開くのはダブルクリック**（設計§4-1）
+  await 枠.dblclick({ position: { x: 5, y: 40 } })
   await expect(page.getByTestId('group-view')).toBeVisible()
   const 横並び = await page
     .getByTestId('session-view')
