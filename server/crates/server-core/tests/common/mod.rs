@@ -372,5 +372,6 @@ pub fn meta(card_id: CardId) -> SessionMeta {
         toml_account: None,
         session_title: None,
         position: 0,
+        nickname: None,
     }
 }

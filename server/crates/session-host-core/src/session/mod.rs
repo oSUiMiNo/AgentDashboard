@@ -2190,6 +2190,7 @@ impl SessionManager {
                 // **並びは記録の側が決める**（設計§9-2）。セッションホストは自分が
                 // 何番目かを知らないので 0 を名乗り、サーバが記録の値で上書きする
                 position: 0,
+                nickname: None,
             }),
             process,
             ring: Mutex::new(RingBuffer::new(self.config.pty_ring_buffer)),

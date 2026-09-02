@@ -204,7 +204,17 @@ impl SessionRecord {
     }
 }
 
+/// 見つからないカードへの断り文言（設計§8-6・名前付け設計§11-4）。
+///
+/// **他人のカードでも、存在しないカードでも同じ言葉を返す。** 呼び分けると、IDを
+/// 総当たりして「他人のカードがあること」だけを言い当てられる。
+///
+/// 記録層に置いてあるのは、**絞り込みの入口がここだから**（設計§8-6 の読み替え2）。
+/// 断る場所と断り文言が別の層にあると、片方だけ直したときに言葉がずれる。
+pub(crate) const NOT_FOUND: &str = "セッションが見つかりません";
+
 /// 全カードの記録と、その配信。
+
 pub struct SessionRegistry {
     db: DatabaseConnection,
     records: Mutex<HashMap<CardId, Arc<SessionRecord>>>,
@@ -227,6 +237,15 @@ pub struct SessionRegistry {
     /// 無くなるため（§8-6）——他人のチャネルは名前を作れないから購読できない、
     /// という形が分離の実体になっている
     browsers: Mutex<HashMap<Uuid, usize>>,
+    /// 利用者が付けた名前（名前付け設計§4-2）。**記録側が正**なので手元にも写しを持つ。
+    ///
+    /// 鍵が `(アカウント, CLI セッション)` なのは、名前が**カードではなく CLI セッション**に
+    /// 付くため（要件4）。カードが乗り換えても、乗り換え先の名前がそのまま出る。
+    ///
+    /// 写しを持つのは、報告が届くたびに DB を引かないため。`position` が記録の値を
+    /// 引き直しているのと違い、こちらは**カードの数だけ引くことになる**——一覧の
+    /// 復元1回で枚数ぶんの問い合わせが出る。
+    nicknames: Mutex<HashMap<(Uuid, ClaudeSessionId), String>>,
 }
 
 impl SessionRegistry {
@@ -260,6 +279,10 @@ impl SessionRegistry {
             .map(|row| (row.id, row.name))
             .collect();
 
+        // 利用者が付けた名前をまとめて読む。**カードごとに引かない**——復元するだけで
+        // 枚数ぶんの問い合わせになる（アカウント名を先に引いているのと同じ理由）
+        let nicknames = load_nicknames(&db, None).await?;
+
         let mut records = HashMap::new();
         for row in rows {
             let account_id = row.account_id;
@@ -268,6 +291,11 @@ impl SessionRegistry {
             if account_id != db::LOCAL_ACCOUNT_ID {
                 meta.account = names.get(&account_id).cloned();
             }
+            // **名前は記録の側が正**（設計§4-2）。行から作った `meta` は必ず空なので、
+            // ここでかぶせる
+            meta.nickname = meta
+                .claude_session_id
+                .and_then(|id| nicknames.get(&(account_id, id)).cloned());
             let card_id = meta.card_id;
             let next_seq = db_transcript::next_seq(&db, card_id).await?;
             // 窓を DB の直近ぶんで満たす。空のままだと、購読を始めたクライアントに
@@ -296,6 +324,7 @@ impl SessionRegistry {
             bus,
             instance_id: Uuid::new_v4(),
             browsers: Mutex::new(HashMap::new()),
+            nicknames: Mutex::new(nicknames),
         }))
     }
 
@@ -445,6 +474,123 @@ impl SessionRegistry {
     pub fn owned(&self, account_id: Uuid, card_id: CardId) -> Option<Arc<SessionRecord>> {
         self.get(card_id)
             .filter(|record| record.account_id == account_id)
+    }
+
+    /// そのアカウントが CLI セッションへ付けている名前（名前付け設計§4-2）。
+    fn nickname_of(&self, account_id: Uuid, claude_session_id: ClaudeSessionId) -> Option<String> {
+        self.nicknames
+            .lock()
+            .expect("ロックが壊れていない")
+            .get(&(account_id, claude_session_id))
+            .cloned()
+    }
+
+    /// カードに付いている CLI セッションへ、利用者の名前を付ける（名前付け設計§5）。
+    ///
+    /// # 宛先はカードから引く
+    ///
+    /// 呼ぶ側はカードIDしか渡さない。**ブラウザに `ClaudeSessionId` を持たせると、
+    /// 画面が抱えている古い写しで別のセッションへ書ける**（設計§5-1）。
+    ///
+    /// # 名前が付くのはカードではなくセッション
+    ///
+    /// したがって、**同じセッションを指しているカードすべて**の表示が変わる。配り直しも
+    /// その全部に対して行う——1枚だけ配ると、乗り換えの履歴で残っている別のカードが
+    /// 古い名前のまま画面に居座る。
+    ///
+    /// # 消すときは行ごと消す
+    ///
+    /// 空文字を入れない。「付いていない」と「空の名前が付いている」を記録の上で
+    /// 区別しないため（設計§10）。
+    pub async fn set_nickname(
+        &self,
+        account_id: Uuid,
+        card_id: CardId,
+        raw: Option<&str>,
+    ) -> Result<(), String> {
+        let record = self
+            .owned(account_id, card_id)
+            .ok_or_else(|| NOT_FOUND.to_string())?;
+        let claude_session_id = record.meta().claude_session_id.ok_or_else(|| {
+            "まだ名前を付けられません（このセッションのIDが決まっていません）".to_string()
+        })?;
+
+        // 断るのは保存側の仕事。画面だけで止めると CLI から入る（設計§10）
+        let nickname = match raw {
+            Some(text) => protocol::normalize_nickname(text)?,
+            None => None,
+        };
+
+        let now = db::now_ms();
+        let key = (account_id, claude_session_id);
+        match &nickname {
+            Some(name) => {
+                let row = entity::session_nicknames::ActiveModel {
+                    account_id: Set(account_id),
+                    claude_session_id: Set(claude_session_id.0),
+                    nickname: Set(name.clone()),
+                    updated_at: Set(now),
+                };
+                entity::session_nicknames::Entity::insert(row)
+                    .on_conflict(
+                        OnConflict::columns([
+                            entity::session_nicknames::Column::AccountId,
+                            entity::session_nicknames::Column::ClaudeSessionId,
+                        ])
+                        .update_columns([
+                            entity::session_nicknames::Column::Nickname,
+                            entity::session_nicknames::Column::UpdatedAt,
+                        ])
+                        .to_owned(),
+                    )
+                    .exec(&self.db)
+                    .await
+                    .map_err(|err| format!("名前を保存できませんでした：{err}"))?;
+            }
+            None => {
+                entity::session_nicknames::Entity::delete_many()
+                    .filter(entity::session_nicknames::Column::AccountId.eq(account_id))
+                    .filter(
+                        entity::session_nicknames::Column::ClaudeSessionId.eq(claude_session_id.0),
+                    )
+                    .exec(&self.db)
+                    .await
+                    .map_err(|err| format!("名前を消せませんでした：{err}"))?;
+            }
+        }
+
+        // **書いてから配る**（設計§9-1）。手元の写しもここで揃える
+        {
+            let mut map = self.nicknames.lock().expect("ロックが壊れていない");
+            match &nickname {
+                Some(name) => map.insert(key, name.clone()),
+                None => map.remove(&key),
+            };
+        }
+
+        // 同じセッションを指しているカードを**全部**配り直す。`Status` の差分は名前を
+        // 運ばないので、丸ごと（`SessionUpsert`）配る（設計§5-4）
+        let affected: Vec<Arc<SessionRecord>> = self
+            .records
+            .lock()
+            .expect("ロックが壊れていない")
+            .values()
+            .filter(|record| record.account_id == account_id)
+            .filter(|record| record.meta().claude_session_id == Some(claude_session_id))
+            .cloned()
+            .collect();
+        for record in affected {
+            let mut meta = record.meta();
+            meta.nickname = nickname.clone();
+            record.store_meta(meta);
+            self.publish(
+                account_id,
+                ServerMessage::SessionUpsert {
+                    session: Box::new(record.meta()),
+                },
+            );
+        }
+        Ok(())
     }
 
     /// その PC のカードの**鮮度の印**を切り替えて配り直す（設計§6-3）。
@@ -997,6 +1143,16 @@ impl SessionRegistry {
                 .await?
             }
         };
+        // **利用者が付けた名前も記録の側が正**（設計§4-2）。セッションホストは名前を
+        // 知らないので `None` を名乗ってくるが、**素直に取り込むと報告が届くたびに
+        // 名前が消える**——生まれた時刻・題・並びとまったく同じ性質である。
+        //
+        // 引く鍵はカードではなく **CLI セッション**なので、`--resume` で乗り換えた
+        // カードには乗り換え先の名前が出る（要件4）。呼び戻し先を持たないカード
+        // （起こした直後など）は空のまま。
+        meta.nickname = meta
+            .claude_session_id
+            .and_then(|id| self.nickname_of(origin.account_id, id));
         // 申告が持ち主と食い違ったら**記録には残すが帰属は動かさない**。警告を出すのは、
         // 利用者から見ると「toml に書いたのに効かない」だけに見えるため
         if let (Some(claimed), Some(actual)) = (&meta.toml_account, &origin.account)
@@ -1317,6 +1473,32 @@ async fn next_card_position(
     Ok(last.map_or(0, |row| row.position.saturating_add(1)))
 }
 
+/// 利用者が付けた名前を DB からまとめて読む（名前付け設計§4-1）。
+///
+/// `account` を渡せばそのアカウントのぶんだけ、渡さなければ全アカウントぶん。
+/// **1回の問い合わせで済ませる**——カードごとに引くと、一覧の復元だけで枚数ぶんの
+/// 往復が出る。
+async fn load_nicknames(
+    db: &DatabaseConnection,
+    account: Option<Uuid>,
+) -> Result<HashMap<(Uuid, ClaudeSessionId), String>, anyhow::Error> {
+    let mut query = entity::session_nicknames::Entity::find();
+    if let Some(account_id) = account {
+        query = query.filter(entity::session_nicknames::Column::AccountId.eq(account_id));
+    }
+    Ok(query
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|row| {
+            (
+                (row.account_id, ClaudeSessionId(row.claude_session_id)),
+                row.nickname,
+            )
+        })
+        .collect())
+}
+
 /// [`SessionRecord`] を作る瞬間だけ使う仮の中身。
 ///
 /// 直後に本物の [`SessionMeta`] で上書きされる。空の入れ物を作らないのは、
@@ -1342,6 +1524,7 @@ fn placeholder_meta(card_id: CardId) -> SessionMeta {
         toml_account: None,
         session_title: None,
         position: 0,
+        nickname: None,
     }
 }
 
@@ -1368,5 +1551,6 @@ fn meta_from_row(row: entity::sessions::Model) -> SessionMeta {
         toml_account: row.toml_account,
         session_title: row.session_title,
         position: row.position,
+        nickname: None,
     }
 }

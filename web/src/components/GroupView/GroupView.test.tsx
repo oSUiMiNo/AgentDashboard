@@ -46,6 +46,7 @@ function card(cardId: string): SessionMeta {
     toml_account: null,
     session_title: null,
     position: 0,
+    nickname: null,
   } as unknown as SessionMeta
 }
 

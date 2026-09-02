@@ -496,6 +496,25 @@ async fn handle_request(
             }
         }
 
+        // カードに付いている CLI セッションへ、利用者の名前を付ける（名前付け設計§5）。
+        //
+        // **宛先はサーバが記録から引く。** ブラウザに `ClaudeSessionId` を持たせると、
+        // 画面が抱えている古い写しで別のセッションへ書ける（設計§5-1）。
+        //
+        // 名前の決まり（改行を許さない・上限・空は消すと同義）は**保存側で断る**。
+        // 画面だけで止めると CLI から入る（設計§10）。
+        ClientMessage::SetNickname { card_id, nickname } => {
+            if let Err(message) = state
+                .registry
+                .set_nickname(identity.account_id, card_id, nickname.as_deref())
+                .await
+            {
+                // 配り直しは記録層が行う（同じセッションを指すカード全部）。ここは
+                // 断りだけを返す
+                send_error(outbound, Some(card_id), message).await;
+            }
+        }
+
         ClientMessage::Kill { card_id } => {
             if let Err(message) = state.agent.kill(card_id) {
                 send_error(outbound, Some(card_id), message).await;
@@ -673,6 +692,7 @@ fn target_card(request: &ClientMessage) -> Option<CardId> {
         | ClientMessage::Resize { card_id, .. }
         | ClientMessage::PtyFlow { card_id, .. }
         | ClientMessage::ReviveSession { card_id }
+        | ClientMessage::SetNickname { card_id, .. }
         | ClientMessage::Kill { card_id }
         | ClientMessage::Archive { card_id } => Some(*card_id),
         // まだカードが無い（作る側）
@@ -680,11 +700,9 @@ fn target_card(request: &ClientMessage) -> Option<CardId> {
     }
 }
 
-/// 見つからないときの言い分。
-///
-/// **他人のカードにも同じ言葉を返す。** 「あなたのものではありません」と言い分けると、
-/// IDを総当たりして「そのカードは存在する」ことだけを調べられる。
-const NOT_FOUND: &str = "セッションが見つかりません";
+// 見つからないときの言い分は**記録層が持つ**（`registry::NOT_FOUND`）。断る場所と
+// 断り文言が別の層にあると、片方だけ直したときに言葉がずれる
+use crate::registry::NOT_FOUND;
 
 /// 起こし直しを断る2つの言い分（接続断のカードを復旧ボタンで戻す 設計§3-2）。
 ///

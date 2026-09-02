@@ -46,6 +46,7 @@ function card(id: string, project: string, agent: string | null = null): Session
     toml_account: null,
     session_title: null,
     position: 0,
+    nickname: null,
   } as SessionMeta
 }
 

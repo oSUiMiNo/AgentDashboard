@@ -8,7 +8,8 @@
 mod common;
 
 use protocol::{
-    CardId, Node, NodeId, ProjectId, SessionMeta, SessionStatus, TreeNode, ws::ServerMessage,
+    CardId, ClaudeSessionId, Node, NodeId, ProjectId, SessionMeta, SessionStatus, TreeNode,
+    ws::ServerMessage,
 };
 use server_core::registry::{ReportOrigin, SessionRegistry};
 
@@ -44,6 +45,7 @@ fn meta(card_id: CardId) -> SessionMeta {
         toml_account: None,
         session_title: None,
         position: 0,
+        nickname: None,
     }
 }
 
@@ -876,6 +878,369 @@ async fn カードの並べ替えは枠の中で丸ごと詰め直す() {
             .collect();
         assert_eq!(前, 後, "[{}] 断ったのに並びが動いた", backend.name);
 
+        backend.finish().await;
+    }
+}
+
+// --- 利用者が付けた名前（名前付け設計§4）
+//
+// **記録側が正**である、を4つの向きから確かめる。名前は `sessions` の列ではなく
+// 別表（`session_nicknames`）に置き、鍵は**カードではなく CLI セッション**である。
+
+/// 宛先の CLI セッションを持つカードの報告を作る。
+///
+/// 名前は `claude_session_id` に紐づくので、**それを持たないカードには名前が付かない**。
+fn meta_with_session(card_id: CardId, session: ClaudeSessionId) -> SessionMeta {
+    let mut meta = meta(card_id);
+    meta.claude_session_id = Some(session);
+    meta
+}
+
+#[tokio::test]
+async fn 利用者が付けた名前は記録へ残り読み直しても戻る() {
+    for backend in common::backends("nickname_persist").await {
+        let card = CardId::new();
+        let session = ClaudeSessionId::new();
+        {
+            let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+                .await
+                .expect("記録層を立てられること");
+            registry
+                .apply(
+                    &local(),
+                    ServerMessage::SessionUpsert {
+                        session: Box::new(meta_with_session(card, session)),
+                    },
+                )
+                .await;
+            registry
+                .set_nickname(local().account_id, card, Some("あとで直すやつ"))
+                .await
+                .expect("名前を付けられること");
+        }
+
+        let restored = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+            .await
+            .expect("立て直せること");
+        assert_eq!(
+            restored
+                .get(card)
+                .expect("記録があること")
+                .meta()
+                .nickname
+                .as_deref(),
+            Some("あとで直すやつ"),
+            "[{}] 名前が記録から戻らない",
+            backend.name
+        );
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 名前を消すと行ごと消える() {
+    for backend in common::backends("nickname_clear").await {
+        let card = CardId::new();
+        let session = ClaudeSessionId::new();
+        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+            .await
+            .expect("記録層を立てられること");
+        registry
+            .apply(
+                &local(),
+                ServerMessage::SessionUpsert {
+                    session: Box::new(meta_with_session(card, session)),
+                },
+            )
+            .await;
+        registry
+            .set_nickname(local().account_id, card, Some("あとで直すやつ"))
+            .await
+            .expect("付けられること");
+        registry
+            .set_nickname(local().account_id, card, None)
+            .await
+            .expect("消せること");
+
+        assert_eq!(
+            registry.get(card).expect("記録があること").meta().nickname,
+            None,
+            "[{}] 消したのに残っている",
+            backend.name
+        );
+
+        // 立て直しても戻ってこない（**行ごと消えている**）
+        let restored = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+            .await
+            .expect("立て直せること");
+        assert_eq!(
+            restored.get(card).expect("記録があること").meta().nickname,
+            None,
+            "[{}] 消した名前が記録から蘇った",
+            backend.name
+        );
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 報告に名前が入っていても記録の側が勝つ() {
+    // **セッションホストは名前を知らない**（設計§4-2）。素直に取り込むと、報告が届く
+    // たびに名前が入れ替わる——生まれた時刻・題・並びとまったく同じ性質である。
+    for backend in common::backends("nickname_record_wins").await {
+        let card = CardId::new();
+        let session = ClaudeSessionId::new();
+        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+            .await
+            .expect("記録層を立てられること");
+        registry
+            .apply(
+                &local(),
+                ServerMessage::SessionUpsert {
+                    session: Box::new(meta_with_session(card, session)),
+                },
+            )
+            .await;
+        registry
+            .set_nickname(local().account_id, card, Some("記録の名前"))
+            .await
+            .expect("付けられること");
+
+        // PC が勝手な名前を名乗ってくる（あるいは古い写しを送ってくる）
+        let mut 嘘の報告 = meta_with_session(card, session);
+        嘘の報告.nickname = Some("報告の名前".to_string());
+        registry
+            .apply(
+                &local(),
+                ServerMessage::SessionUpsert {
+                    session: Box::new(嘘の報告),
+                },
+            )
+            .await;
+
+        assert_eq!(
+            registry
+                .get(card)
+                .expect("記録があること")
+                .meta()
+                .nickname
+                .as_deref(),
+            Some("記録の名前"),
+            "[{}] 報告の値が記録を上書きした",
+            backend.name
+        );
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 名前と_cli_の題は互いを潰さない() {
+    // **これが別表にした決定的な理由**（設計§4-1 の理由3）。同じ欄へ載せると、
+    // パーサが `ai-title` を運んだ瞬間に利用者の名前が消える。
+    for backend in common::backends("nickname_vs_title").await {
+        let card = CardId::new();
+        let session = ClaudeSessionId::new();
+        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+            .await
+            .expect("記録層を立てられること");
+        registry
+            .apply(
+                &local(),
+                ServerMessage::SessionUpsert {
+                    session: Box::new(meta_with_session(card, session)),
+                },
+            )
+            .await;
+        registry
+            .set_nickname(local().account_id, card, Some("あとで直すやつ"))
+            .await
+            .expect("付けられること");
+
+        // パーサが履歴から題を拾って運んでくる
+        let mut 題つきの報告 = meta_with_session(card, session);
+        題つきの報告.session_title = Some("TODOを完了に変更する".to_string());
+        registry
+            .apply(
+                &local(),
+                ServerMessage::SessionUpsert {
+                    session: Box::new(題つきの報告),
+                },
+            )
+            .await;
+
+        let meta = registry.get(card).expect("記録があること").meta();
+        assert_eq!(
+            meta.nickname.as_deref(),
+            Some("あとで直すやつ"),
+            "[{}] CLI の題が利用者の名前を潰した",
+            backend.name
+        );
+        assert_eq!(
+            meta.session_title.as_deref(),
+            Some("TODOを完了に変更する"),
+            "[{}] 利用者の名前が CLI の題を潰した",
+            backend.name
+        );
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 呼び戻し先を持たないカードには名前を付けられない() {
+    // 名前は CLI セッションに紐づくので、宛先が決まっていなければ書きようがない。
+    // **黙って何もしない道を作らない**——理由を言って断る（設計§5-3）。
+    for backend in common::backends("nickname_no_target").await {
+        let card = CardId::new();
+        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+            .await
+            .expect("記録層を立てられること");
+        registry.apply(&local(), upsert(card)).await; // `claude_session_id` を持たない
+
+        let err = registry
+            .set_nickname(local().account_id, card, Some("あとで直すやつ"))
+            .await
+            .expect_err("断られること");
+        assert!(
+            err.contains("まだ名前を付けられません"),
+            "[{}] 理由を言っていない：{err}",
+            backend.name
+        );
+        assert_eq!(
+            registry.get(card).expect("記録があること").meta().nickname,
+            None,
+            "[{}] 断ったのに何かが入った",
+            backend.name
+        );
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 同じセッションを指すカードには同じ名前が出る() {
+    // 名前が付くのは**カードではなくセッション**なので、乗り換えの履歴で残っている
+    // 別のカードにも同じ名前が出る。1枚だけ配ると、もう1枚が古い名前のまま居座る。
+    for backend in common::backends("nickname_shared").await {
+        let 一枚目 = CardId::new();
+        let 二枚目 = CardId::new();
+        let session = ClaudeSessionId::new();
+        let 別のセッション = ClaudeSessionId::new();
+        let 無関係 = CardId::new();
+
+        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+            .await
+            .expect("記録層を立てられること");
+        for (card, s) in [
+            (一枚目, session),
+            (二枚目, session),
+            (無関係, 別のセッション),
+        ] {
+            registry
+                .apply(
+                    &local(),
+                    ServerMessage::SessionUpsert {
+                        session: Box::new(meta_with_session(card, s)),
+                    },
+                )
+                .await;
+        }
+
+        registry
+            .set_nickname(local().account_id, 一枚目, Some("あとで直すやつ"))
+            .await
+            .expect("付けられること");
+
+        for card in [一枚目, 二枚目] {
+            assert_eq!(
+                registry
+                    .get(card)
+                    .expect("記録があること")
+                    .meta()
+                    .nickname
+                    .as_deref(),
+                Some("あとで直すやつ"),
+                "[{}] 同じセッションを指すカードに名前が出ていない",
+                backend.name
+            );
+        }
+        assert_eq!(
+            registry
+                .get(無関係)
+                .expect("記録があること")
+                .meta()
+                .nickname,
+            None,
+            "[{}] 別のセッションのカードにまで名前が付いた",
+            backend.name
+        );
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 名前の決まりは記録層が断る() {
+    // 画面だけで止めると CLI から入る（設計§10）
+    for backend in common::backends("nickname_rules").await {
+        let card = CardId::new();
+        let session = ClaudeSessionId::new();
+        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+            .await
+            .expect("記録層を立てられること");
+        registry
+            .apply(
+                &local(),
+                ServerMessage::SessionUpsert {
+                    session: Box::new(meta_with_session(card, session)),
+                },
+            )
+            .await;
+
+        assert!(
+            registry
+                .set_nickname(local().account_id, card, Some("上の行\n下の行"))
+                .await
+                .is_err(),
+            "[{}] 改行が通った",
+            backend.name
+        );
+        assert!(
+            registry
+                .set_nickname(
+                    local().account_id,
+                    card,
+                    Some(&"あ".repeat(protocol::NICKNAME_MAX_CHARS + 1))
+                )
+                .await
+                .is_err(),
+            "[{}] 上限を超える名前が通った",
+            backend.name
+        );
+
+        // 前後の空白は落ち、空白だけは「消す」と同義になる
+        registry
+            .set_nickname(local().account_id, card, Some("  あとで直すやつ  "))
+            .await
+            .expect("通ること");
+        assert_eq!(
+            registry
+                .get(card)
+                .expect("記録があること")
+                .meta()
+                .nickname
+                .as_deref(),
+            Some("あとで直すやつ"),
+            "[{}] 前後の空白が落ちていない",
+            backend.name
+        );
+        registry
+            .set_nickname(local().account_id, card, Some("   "))
+            .await
+            .expect("通ること");
+        assert_eq!(
+            registry.get(card).expect("記録があること").meta().nickname,
+            None,
+            "[{}] 空白だけの名前が付いている扱いになった",
+            backend.name
+        );
         backend.finish().await;
     }
 }

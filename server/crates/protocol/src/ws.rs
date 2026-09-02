@@ -182,6 +182,18 @@ pub enum ClientMessage {
     ReviveSession {
         card_id: CardId,
     },
+    /// カードに付いている CLI セッションへ、**利用者の名前を付ける**（名前付け設計§5-1）。
+    ///
+    /// # 運ぶのはカードIDだけ
+    ///
+    /// 宛先の `ClaudeSessionId` は**サーバが記録から引く**。ブラウザに持たせると、
+    /// 画面が抱えている古い写しで**別のセッションへ書く**経路ができる。
+    ///
+    /// `nickname` が `None` のときは**消す**。消すための口を別に作らない。
+    SetNickname {
+        card_id: CardId,
+        nickname: Option<String>,
+    },
     /// セッションを終了させる（PTY プロセスを落とす）
     Kill {
         card_id: CardId,
@@ -353,6 +365,7 @@ mod tests {
             toml_account: None,
             session_title: None,
             position: 0,
+            nickname: None,
         }
     }
 
@@ -410,6 +423,14 @@ mod tests {
                 state: FlowState::Resume,
             },
             ClientMessage::ReviveSession { card_id },
+            ClientMessage::SetNickname {
+                card_id,
+                nickname: Some("あとで直すやつ".to_string()),
+            },
+            ClientMessage::SetNickname {
+                card_id,
+                nickname: None,
+            },
             ClientMessage::Kill { card_id },
             ClientMessage::Archive { card_id },
         ];
@@ -603,6 +624,30 @@ mod tests {
         assert_eq!(
             text,
             format!(r#"{{"t":"revive_session","card_id":"{card_id}"}}"#)
+        );
+
+        // 名前を付ける口もカードIDだけを運ぶ。**宛先の CLI セッションは載せない**——
+        // 載せるとブラウザの古い写しで別のセッションへ書ける（名前付け設計§5-1）
+        let text = serde_json::to_string(&ClientMessage::SetNickname {
+            card_id,
+            nickname: Some("あとで直すやつ".to_string()),
+        })
+        .unwrap();
+        assert_eq!(
+            text,
+            format!(r#"{{"t":"set_nickname","card_id":"{card_id}","nickname":"あとで直すやつ"}}"#)
+        );
+
+        // 消すときは `null` を運ぶ。**キーごと省かない**——省くと「触っていない」と
+        // 区別が付かなくなる
+        let text = serde_json::to_string(&ClientMessage::SetNickname {
+            card_id,
+            nickname: None,
+        })
+        .unwrap();
+        assert_eq!(
+            text,
+            format!(r#"{{"t":"set_nickname","card_id":"{card_id}","nickname":null}}"#)
         );
 
         let text = serde_json::to_string(&ServerMessage::Hello {

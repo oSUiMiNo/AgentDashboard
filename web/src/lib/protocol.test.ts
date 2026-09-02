@@ -238,6 +238,31 @@ describe('サーバと同じ JSON になること', () => {
     )
   })
 
+  it('set_nickname', () => {
+    // 4箇所同期の最後の1つ（名前付け設計§5-1）。Rust 側
+    // `client_messageは全種が往復する` が固定している綴りと1文字も違わないこと。
+    // **運ぶのはカードIDだけ**——宛先の CLI セッションはサーバが記録から引く
+    const 付ける: ClientMessage = {
+      t: 'set_nickname',
+      card_id: CARD_ID,
+      nickname: 'あとで直すやつ',
+    }
+    expect(JSON.stringify(付ける)).toBe(
+      `{"t":"set_nickname","card_id":"${CARD_ID}","nickname":"あとで直すやつ"}`,
+    )
+
+    // 消すときは `null` を運ぶ。**キーごと省かない**——省くと「触っていない」と
+    // 区別が付かなくなる
+    const 消す: ClientMessage = {
+      t: 'set_nickname',
+      card_id: CARD_ID,
+      nickname: null,
+    }
+    expect(JSON.stringify(消す)).toBe(
+      `{"t":"set_nickname","card_id":"${CARD_ID}","nickname":null}`,
+    )
+  })
+
   it('SessionMeta はモデルを3つのフィールドで運ぶ', () => {
     // 確定値と要求値を同じ入れ物に潰すと、CLI に拒否されたときに画面が
     // 嘘をつき続ける（設計§5）。Rust 側の
@@ -377,6 +402,36 @@ describe('サーバと同じ JSON になること', () => {
       '"agent_id":null,"agent_connected":true,"account":null,"toml_account":null}'
     expect((JSON.parse(名前の欄が無い) as SessionMeta).session_title).toBeUndefined()
   })
+
+  it('SessionMeta は利用者が付けた名前を運ぶ', () => {
+    // Rust 側 `session_metaは利用者が付けた名前を運ぶ` と対になる。
+    // **CLI が付ける `session_title` とは別の欄**で、互いを潰さない
+    const 両方ある =
+      '{"card_id":"' +
+      CARD_ID +
+      '","project":"/dev/app","claude_session_id":null,' +
+      '"permission_mode":null,"model":null,"model_label":null,"model_requested":null,' +
+      '"status":{"kind":"idle"},"subagent_active":0,"last_activity_at":1,' +
+      '"last_assistant_message":null,"created_at":1,"hooks_seen":true,' +
+      '"agent_id":null,"agent_connected":true,"account":null,"toml_account":null,' +
+      '"session_title":"TODOを完了に変更し作業内容をまとめる",' +
+      '"nickname":"あとで直すやつ"}'
+    const meta = JSON.parse(両方ある) as SessionMeta
+    expect(meta.nickname).toBe('あとで直すやつ')
+    expect(meta.session_title).toBe('TODOを完了に変更し作業内容をまとめる')
+
+    // **欄ごと無い形も来る**——名前の欄を知らない古い版の PC が名乗る場合。
+    // 読む側は `undefined` を受け取るので、画面は「付けていない」側へ倒す
+    const 名前の欄が無い =
+      '{"card_id":"' +
+      CARD_ID +
+      '","project":"/dev/app","claude_session_id":null,' +
+      '"permission_mode":null,"model":null,"model_label":null,"model_requested":null,' +
+      '"status":{"kind":"idle"},"subagent_active":0,"last_activity_at":1,' +
+      '"last_assistant_message":null,"created_at":1,"hooks_seen":true,' +
+      '"agent_id":null,"agent_connected":true,"account":null,"toml_account":null}'
+    expect((JSON.parse(名前の欄が無い) as SessionMeta).nickname).toBeUndefined()
+  })
 })
 
 /**
@@ -515,6 +570,7 @@ describe('状態のラベル', () => {
       toml_account: null,
       session_title: null,
       position: 0,
+      nickname: null,
     }
     expect(isHookSilent(base)).toBe(true)
     expect(isHookSilent({ ...base, hooks_seen: true })).toBe(false)
@@ -703,6 +759,7 @@ describe('戻せるかの判定', () => {
       toml_account: null,
       session_title: null,
       position: 0,
+      nickname: null,
       ...overrides,
     }
   }

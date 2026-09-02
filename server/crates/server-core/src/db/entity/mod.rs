@@ -10,6 +10,7 @@ pub mod accounts;
 pub mod agents;
 pub mod pairing_tokens;
 pub mod projects;
+pub mod session_nicknames;
 pub mod sessions;
 pub mod settings;
 pub mod transcript_nodes;

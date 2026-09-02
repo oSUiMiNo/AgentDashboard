@@ -459,6 +459,87 @@ pub struct SessionMeta {
     /// 上げない**ので、配ってある PC はそのまま繋がり続ける。
     #[serde(default)]
     pub position: i32,
+    /// **利用者が付けた名前**（名前付け設計§4）。`None` は「まだ付けていない」。
+    ///
+    /// CLI が付ける [`SessionMeta::session_title`] とは**別物**である。あちらは履歴に
+    /// 書かれた `ai-title` を運んでいるだけで、パーサが読むたびに上書きされる。
+    /// 同じ欄へ載せると、**名前を付けた直後に CLI の名前へ潰される**。
+    ///
+    /// # セッションホストはこれを知らない
+    ///
+    /// 名前は `ClaudeSessionId` に紐づく**記録の側の性質**で、[`SessionMeta::position`]
+    /// と同じ扱いになる。セッションホストは `None` を置いて名乗り、**サーバが記録の値で
+    /// かぶせる**。報告の値は捨てる。
+    ///
+    /// # なぜ `#[serde(default)]` を書くのか
+    ///
+    /// 欄を持たない古い版の名乗りを `None` として受けるため。**版（`A2S_VERSION`）は
+    /// 上げない**ので、配ってある PC はそのまま繋がり続ける。
+    #[serde(default)]
+    pub nickname: Option<String>,
+}
+
+/// 利用者が付けたものの**宛先**（名前付け設計§3-2）。
+///
+/// 名前もメモも「人がカードへ付けたもの」で、**宛先が1つの値として表せていれば
+/// 画面も口も記録も1組で済む**。入れ物の形は違う（名前は欄1つ、メモは表1つ）ので
+/// **入れ物は共有しない**——共有するのはこの型と、記録側を正とする作法だけである。
+///
+/// | 枝 | 何を指すか |
+/// |---|---|
+/// | [`AnnotationTarget::Global`] | どのセッションにも紐づかない、アカウントに1つのもの |
+/// | [`AnnotationTarget::Session`] | 1つの CLI セッション |
+///
+/// # なぜ `CardId` ではなく `ClaudeSessionId` なのか
+///
+/// **乗り換えても付いてこなければならない**（名前付け要件4）。カードは `--resume` で
+/// 別のセッションへ移れるので、カードに紐づけると**別のセッションに前の名前が残る**。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "t", rename_all = "snake_case")]
+pub enum AnnotationTarget {
+    /// アカウントに1つ。特定のセッションに紐づかない。
+    Global,
+    /// 1つの CLI セッション。
+    Session {
+        /// 宛先の CLI セッション。
+        claude_session_id: ClaudeSessionId,
+    },
+}
+
+/// 利用者が付けた名前の長さの上限（名前付け設計§10）。
+///
+/// カードは幅 294px・両側の余白 12px ずつ・字の大きさ 12px なので、**日本語で約22文字、
+/// 英数字で約40文字**で「…」に切れる。ここはその9倍ほどで、**長い名前を書きたい人を
+/// 止めず、記録に無制限のものを入れない**線として置いてある。
+///
+/// **画面ではなく保存側で断る。** 画面だけで止めると CLI から入る。
+pub const NICKNAME_MAX_CHARS: usize = 200;
+
+/// 受け取った名前を整える。断るべきものは `Err` で理由を返す（名前付け設計§10）。
+///
+/// | 決め | 何をするか |
+/// |---|---|
+/// | 前後の空白 | 落とす |
+/// | 空になったもの | `Ok(None)` ——「消す」と同義 |
+/// | 改行を含む | **断る。** カードは1行で「…」に切る作りなので、切った先が読めなくなる |
+/// | [`NICKNAME_MAX_CHARS`] を超える | **断る** |
+///
+/// 数えるのは**文字**であってバイトではない。日本語で 200 文字書ける。
+pub fn normalize_nickname(raw: &str) -> Result<Option<String>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.contains(['\n', '\r']) {
+        return Err("名前に改行は使えません".to_string());
+    }
+    let chars = trimmed.chars().count();
+    if chars > NICKNAME_MAX_CHARS {
+        return Err(format!(
+            "名前が長すぎます（{chars} 文字。{NICKNAME_MAX_CHARS} 文字まで）"
+        ));
+    }
+    Ok(Some(trimmed.to_string()))
 }
 
 impl SessionMeta {
@@ -658,6 +739,7 @@ mod tests {
             toml_account: None,
             session_title: None,
             position: 0,
+            nickname: None,
         }
     }
 
@@ -733,6 +815,7 @@ mod tests {
             toml_account: None,
             session_title: None,
             position: 0,
+            nickname: None,
         };
         assert_eq!(roundtrip(&meta), meta);
     }
@@ -762,10 +845,73 @@ mod tests {
             toml_account: None,
             session_title: None,
             position: 0,
+            nickname: None,
         };
         assert_eq!(
             serde_json::to_string(&meta).unwrap(),
-            r#"{"card_id":"00000000-0000-0000-0000-000000000001","project":"/p","claude_session_id":null,"permission_mode":null,"model":null,"model_label":null,"model_requested":null,"status":{"kind":"working"},"subagent_active":0,"last_activity_at":1,"last_assistant_message":null,"created_at":1,"hooks_seen":false,"agent_id":null,"agent_connected":true,"account":null,"toml_account":null,"session_title":null,"position":0}"#
+            r#"{"card_id":"00000000-0000-0000-0000-000000000001","project":"/p","claude_session_id":null,"permission_mode":null,"model":null,"model_label":null,"model_requested":null,"status":{"kind":"working"},"subagent_active":0,"last_activity_at":1,"last_assistant_message":null,"created_at":1,"hooks_seen":false,"agent_id":null,"agent_connected":true,"account":null,"toml_account":null,"session_title":null,"position":0,"nickname":null}"#
+        );
+    }
+
+    #[test]
+    fn session_metaは利用者が付けた名前を運ぶ() {
+        // 対になる TypeScript 側：`web/src/lib/protocol.test.ts` の
+        // `SessionMeta は利用者が付けた名前を運ぶ`。
+        let mut meta = 生きたカード();
+        meta.nickname = Some("あとで直すやつ".to_string());
+        assert_eq!(roundtrip(&meta).nickname.as_deref(), Some("あとで直すやつ"));
+
+        // 付けていないカードはここを通る
+        meta.nickname = None;
+        assert_eq!(roundtrip(&meta).nickname, None);
+    }
+
+    #[test]
+    fn 利用者の名前とcliの名前は別々に残る() {
+        // **これが別表にした理由そのもの**（名前付け設計§4-1）。同じ欄へ載せると、
+        // パーサが `ai-title` を運んだ瞬間に利用者の名前が消える。
+        let mut meta = 生きたカード();
+        meta.nickname = Some("あとで直すやつ".to_string());
+        meta.session_title = Some("TODOを完了に変更し作業内容をまとめる".to_string());
+        let back = roundtrip(&meta);
+        assert_eq!(back.nickname.as_deref(), Some("あとで直すやつ"));
+        assert_eq!(
+            back.session_title.as_deref(),
+            Some("TODOを完了に変更し作業内容をまとめる"),
+            "片方がもう片方を潰さない"
+        );
+    }
+
+    #[test]
+    fn 名前の決まりは保存側で断る() {
+        // 画面だけで止めると CLI から入る（名前付け設計§10）
+        assert_eq!(
+            normalize_nickname("  あとで直すやつ  ").unwrap().as_deref(),
+            Some("あとで直すやつ"),
+            "前後の空白は落とす"
+        );
+        assert_eq!(
+            normalize_nickname("   ").unwrap(),
+            None,
+            "空白だけは「付いている」扱いにしない"
+        );
+        assert_eq!(normalize_nickname("").unwrap(), None, "空は消すと同義");
+        assert!(
+            normalize_nickname("上の行\n下の行").is_err(),
+            "改行は断る。カードは1行で切るので、切った先が読めなくなる"
+        );
+        assert!(
+            normalize_nickname(&"あ".repeat(NICKNAME_MAX_CHARS)).is_ok(),
+            "上限ちょうどは通る"
+        );
+        assert!(
+            normalize_nickname(&"あ".repeat(NICKNAME_MAX_CHARS + 1)).is_err(),
+            "上限を1文字でも超えたら断る"
+        );
+        // 数えるのは文字であってバイトではない。日本語で 200 文字書ける
+        assert!(
+            "あ".repeat(NICKNAME_MAX_CHARS).len() > NICKNAME_MAX_CHARS,
+            "この主張が意味を持つのは、日本語がバイトでは溢れるから"
         );
     }
 
@@ -929,6 +1075,7 @@ mod tests {
                 toml_account: None,
                 session_title: None,
                 position: 0,
+                nickname: None,
             }
         };
         let back = roundtrip(&meta);
@@ -985,6 +1132,7 @@ mod tests {
             toml_account: None,
             session_title: None,
             position: 0,
+            nickname: None,
         };
         let back = roundtrip(&meta);
         assert_eq!(back.model, meta.model);
@@ -1019,6 +1167,7 @@ mod tests {
             toml_account: None,
             session_title: None,
             position: 0,
+            nickname: None,
         };
         let text = serde_json::to_string(&meta).unwrap();
         assert!(text.contains(r#""model":null"#), "実際: {text}");

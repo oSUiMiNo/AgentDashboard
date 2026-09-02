@@ -1463,3 +1463,128 @@ async fn 並べ替えても生まれた時刻は動かない() {
         backend.finish().await;
     }
 }
+
+// --- 利用者が付けた名前の表（名前付け設計§4-1・§4-3）
+
+#[tokio::test]
+async fn 名前の表は同じ宛先へ二度書いても行が増えない() {
+    // 主キーは `(account_id, claude_session_id)`。**付け替えであって、積み上げではない**
+    for backend in common::backends("nickname_table").await {
+        let session = uuid::Uuid::new_v4();
+        for (n, 名前) in ["ひとつ目", "ふたつ目"].iter().enumerate() {
+            let row = entity::session_nicknames::ActiveModel {
+                account_id: Set(db::LOCAL_ACCOUNT_ID),
+                claude_session_id: Set(session),
+                nickname: Set((*名前).to_string()),
+                updated_at: Set(n as i64),
+            };
+            entity::session_nicknames::Entity::insert(row)
+                .on_conflict(
+                    sea_orm::sea_query::OnConflict::columns([
+                        entity::session_nicknames::Column::AccountId,
+                        entity::session_nicknames::Column::ClaudeSessionId,
+                    ])
+                    .update_columns([
+                        entity::session_nicknames::Column::Nickname,
+                        entity::session_nicknames::Column::UpdatedAt,
+                    ])
+                    .to_owned(),
+                )
+                .exec(&backend.db)
+                .await
+                .expect("書けること");
+        }
+
+        let rows = entity::session_nicknames::Entity::find()
+            .all(&backend.db)
+            .await
+            .expect("読めること");
+        assert_eq!(rows.len(), 1, "[{}] 行が積み上がった", backend.name);
+        assert_eq!(
+            rows[0].nickname, "ふたつ目",
+            "[{}] 付け替わっていない",
+            backend.name
+        );
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 名前はアカウントごとに分かれる() {
+    // `claude_session_id` だけを主キーにすると、同じセッションを別のアカウントが
+    // 見たときに名前を共有してしまう（設計§4-1）。
+    //
+    // **ここでは表の形だけを見る。** 口から越境できないことは `tenancy.rs` が見る。
+    for backend in common::backends("nickname_by_account").await {
+        let session = uuid::Uuid::new_v4();
+        let よそのアカウント = uuid::Uuid::new_v4();
+        let account = entity::accounts::ActiveModel {
+            id: Set(よそのアカウント),
+            name: Set("よその人".to_string()),
+            password_hash: Set(None),
+            is_admin: Set(false),
+            created_at: Set(0),
+        };
+        entity::accounts::Entity::insert(account)
+            .exec(&backend.db)
+            .await
+            .expect("アカウントを作れること");
+
+        for (account_id, 名前) in [
+            (db::LOCAL_ACCOUNT_ID, "こちらの名前"),
+            (よそのアカウント, "よその名前"),
+        ] {
+            let row = entity::session_nicknames::ActiveModel {
+                account_id: Set(account_id),
+                claude_session_id: Set(session),
+                nickname: Set(名前.to_string()),
+                updated_at: Set(0),
+            };
+            entity::session_nicknames::Entity::insert(row)
+                .exec(&backend.db)
+                .await
+                .expect("同じセッションでも別のアカウントなら入ること");
+        }
+
+        let rows = entity::session_nicknames::Entity::find()
+            .all(&backend.db)
+            .await
+            .expect("読めること");
+        assert_eq!(
+            rows.len(),
+            2,
+            "[{}] アカウントで分かれていない",
+            backend.name
+        );
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 名前は_sessions_の列になっていない() {
+    // **別表であることそのものの検査**（設計§4-1）。`sessions` へ列を足す形に戻すと、
+    // パーサが `ai-title` を運んだ瞬間に利用者の名前が消える。
+    //
+    // 列の有無は `has_column` で直に問う——entity を見るだけでは、
+    // 「entity にあるが migration に無い」形を捕まえられない。
+    for backend in common::backends("nickname_not_in_sessions").await {
+        let manager = sea_orm_migration::SchemaManager::new(&backend.db);
+        assert!(
+            !manager
+                .has_column("sessions", "nickname")
+                .await
+                .expect("問い合わせられること"),
+            "[{}] 名前が `sessions` の列になっている",
+            backend.name
+        );
+        assert!(
+            manager
+                .has_table("session_nicknames")
+                .await
+                .expect("問い合わせられること"),
+            "[{}] 名前の表が無い",
+            backend.name
+        );
+        backend.finish().await;
+    }
+}

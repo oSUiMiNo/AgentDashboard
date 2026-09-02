@@ -515,6 +515,7 @@ mod tests {
             toml_account: None,
             session_title: None,
             position: 0,
+            nickname: None,
         }
     }
 
