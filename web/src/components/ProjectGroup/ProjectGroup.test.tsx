@@ -91,20 +91,32 @@ describe('ProjectGroup', () => {
     expect(screen.getAllByTestId('session-tile')).toHaveLength(2)
   })
 
-  it('余白をクリックするとプロジェクトの画面へ移る', async () => {
+  it('余白をダブルクリックするとプロジェクトの画面へ移る', async () => {
+    // **落ちたから直したのではなく、仕様が変わったので書き換えた**（設計§10-1）。
+    // PC はシングルで「選ぶ」、ダブルで「開く」になった（§4-1）——掴む操作と
+    // 開く操作が同じ押し方だと、並べ替えようとして開いてしまうため
     renderGroup([meta('a')])
 
-    await userEvent.click(screen.getByTestId('project-group'))
+    await userEvent.dblClick(screen.getByTestId('project-group'))
     // 鍵に PC が入る（設計§16）。パスだけでは別の PC の同名 PJT を指し分けられない
     expect(screen.getByTestId('current-path')).toHaveTextContent(
       `/p/local/${encodeURIComponent(PROJECT)}`,
     )
   })
 
-  it('小窓をクリックしたときは余白のクリックにならない', async () => {
+  it('余白をシングルクリックしても開かない', async () => {
+    // **開かないことを、開くことと同じだけ確かめる。** ここが緩むと、
+    // 並べ替えている最中に画面が飛ぶ
     renderGroup([meta('a')])
 
-    await userEvent.click(screen.getByTestId('session-tile'))
+    await userEvent.click(screen.getByTestId('project-group'))
+    expect(screen.getByTestId('current-path')).not.toHaveTextContent('/p/')
+  })
+
+  it('小窓をダブルクリックしたときは余白のクリックにならない', async () => {
+    renderGroup([meta('a')])
+
+    await userEvent.dblClick(screen.getByTestId('session-tile'))
     expect(screen.getByTestId('current-path')).toHaveTextContent('/s/a')
   })
 

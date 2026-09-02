@@ -29,6 +29,7 @@ import { useCallback, useState, type ReactNode } from 'react'
 
 import { ReorderHandle } from '@/components/ReorderHandle/ReorderHandle'
 import { useReorder } from '@/lib/useReorder'
+import { usePress } from '@/lib/usePress'
 import { saveCardOrder } from '@/stores/sessions'
 import { useNavigate } from 'react-router'
 import { SessionAdd } from '@/components/SessionAdd/SessionAdd'
@@ -71,6 +72,15 @@ export function ProjectGroup({
   const navigate = useNavigate()
   const [error, setError] = useState<string | null>(null)
   const busy = cards.length > 0
+  /*
+    **枠に効く押し分け。** 記録を持たない箱（カードから逆算したもの）は選べない
+    ——まとめて削除の相手にならないので、選んでも何もできない
+  */
+  const 押し方 = usePress({
+    kind: 'project',
+    id: projectId ?? '',
+    onOpen: () => navigate(projectPath(host, project)),
+  })
 
   /*
     箱の中のカードの並べ替え（並べ替え設計§3）。**枠の中で閉じている**ので、
@@ -121,7 +131,17 @@ export function ProjectGroup({
       data-project={project}
       data-host={host}
       data-dragging={dragging ? 'true' : 'false'}
-      onClick={() => navigate(projectPath(host, project))}
+      /*
+        **押し分けは1箇所で決める**（設計§4-1）。枠の余白も、カードと同じ規則で
+        「選ぶ／開く」が入れ替わる
+      */
+      onClick={押し方.onClick}
+      onDoubleClick={押し方.onDoubleClick}
+      onPointerDown={押し方.onPointerDown}
+      onPointerMove={押し方.onPointerMove}
+      onPointerUp={押し方.onPointerUp}
+      onPointerCancel={押し方.onPointerCancel}
+      data-selected={押し方.selected ? 'true' : 'false'}
       /*
         掴んでいる枠は流れから浮かせる（設計§3-5）。**影ではなく `transform` で作る**
         ——`DESIGN.md` §27.5 の4候補（1.02倍・1〜2°の傾き・影・落とし先の反応）は

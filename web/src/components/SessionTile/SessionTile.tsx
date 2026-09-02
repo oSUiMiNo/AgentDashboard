@@ -40,6 +40,7 @@
  */
 
 import { modelLabel } from '@/lib/models'
+import { usePress } from '@/lib/usePress'
 import { motion } from 'motion/react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router'
@@ -221,6 +222,11 @@ export function SessionTile({
   const quiet = useSettingsStore((state) => state.settings.motion_quiet)
   const frameRef = useRef<HTMLDivElement>(null)
   const revive = useWsStore((state) => state.revive)
+  const 押し方 = usePress({
+    kind: 'card',
+    id: cardId,
+    onOpen: () => navigate(sessionPath(cardId)),
+  })
   const reviving = useReviving(cardId)
   const cardError = useCardError(cardId)
   const now = useNow()
@@ -410,12 +416,20 @@ export function SessionTile({
             session.status.kind === 'ended' ? String(session.status.ok) : undefined
           }
           data-connected={session.agent_connected}
-          onClick={(event) => {
-            // 小窓をクリックしたときは、その1枚だけを開く。止めないと親（グループの余白）へ
-            // 伝わってしまい、常に全員の横並びが開いてしまう（仕様§10 の作り分け）
-            event.stopPropagation()
-            navigate(sessionPath(session.card_id))
-          }}
+          data-selected={押し方.selected ? 'true' : 'false'}
+          /*
+            **押し分けは1箇所で決める**（設計§4-1）。PC はシングルで選びダブルで開く、
+            触る画面はシングルで開き長押しで選ぶ——この分岐をここへ書かない。
+
+            止めているのは、親（グループの余白）へ伝わると常に全員の横並びが
+            開いてしまうため（仕様§10 の作り分け）
+          */
+          onClick={押し方.onClick}
+          onDoubleClick={押し方.onDoubleClick}
+          onPointerDown={押し方.onPointerDown}
+          onPointerMove={押し方.onPointerMove}
+          onPointerUp={押し方.onPointerUp}
+          onPointerCancel={押し方.onPointerCancel}
         >
           {/*
             ① 状態と最終活動を1行に収める（カード設計§10-1）。

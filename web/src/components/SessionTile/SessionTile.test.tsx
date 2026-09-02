@@ -1,5 +1,6 @@
 import { act, cleanup, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { clearSelection, getSelection } from '@/stores/selection'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { SessionTile } from './SessionTile'
 import type { SessionMeta, SessionStatus } from '@/lib/protocol'
@@ -42,6 +43,8 @@ const CARD = '11111111-2222-3333-4444-555555555555'
 
 beforeEach(() => {
   clearSessions()
+  // **選択はテストをまたいで残る**（画面の一時的な状態なので、店じまいはこちらの仕事）
+  clearSelection()
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
     callback(0)
     return 0
@@ -225,10 +228,29 @@ describe('SessionTile', () => {
     expect(screen.queryByTestId('hook-warning')).not.toBeInTheDocument()
   })
 
-  it('小窓をクリックすると専用画面へ移る', async () => {
+  it('小窓をダブルクリックすると専用画面へ移る', async () => {
+    // **落ちたから直したのではなく、仕様が変わったので書き換えた**（設計§10-1）。
+    // PC はシングルで「選ぶ」、ダブルで「開く」（§4-1）
+    renderTile(meta())
+    await userEvent.dblClick(screen.getByTestId('session-tile'))
+    expect(screen.getByText('専用画面')).toBeInTheDocument()
+  })
+
+  it('小窓をシングルクリックすると、開かずに選ばれる', async () => {
     renderTile(meta())
     await userEvent.click(screen.getByTestId('session-tile'))
+    expect(screen.queryByText('専用画面')).toBeNull()
+    expect(screen.getByTestId('session-tile')).toHaveAttribute('data-selected', 'true')
+  })
+
+  it('ダブルクリックのあと、選んだものは残らない', async () => {
+    // **ブラウザは `dblclick` の前に `click` を2回発火する**ので、シングルが
+    // 「選ぶ」なら2回で打ち消し合って元へ戻る。**開いたうえに選ばれたまま**に
+    // ならないことを、開いた先で見る（小窓そのものは外れている）
+    renderTile(meta())
+    await userEvent.dblClick(screen.getByTestId('session-tile'))
     expect(screen.getByText('専用画面')).toBeInTheDocument()
+    expect(getSelection().ids).toEqual([])
   })
 })
 
