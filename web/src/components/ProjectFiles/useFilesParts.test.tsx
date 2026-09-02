@@ -21,6 +21,21 @@ const ROOT = '/home/me/dev/app'
 let slow: Record<string, number> = {}
 
 /**
+ * 場所ごとに返す失敗の番号。**「無い」と「読めない」を撃ち分ける**ために使う。
+ *
+ * 復元が落ちる先は 404 のときだけなので、403・503 と区別できないとこの節は書けない。
+ */
+let 失敗: Record<string, number> = {}
+
+/** 覚えている場所を、テスト側から直に置く。綴りは実装から import しない */
+function 覚えさせる(place: { dir?: string; pick?: string }, project = ROOT) {
+  globalThis.localStorage.setItem(
+    'agentdashboard.project-files-place',
+    JSON.stringify({ [JSON.stringify(['local', project])]: place }),
+  )
+}
+
+/**
  * **実物と同じ置き方をする。** `useFilesParts` は組み立て済みの2つを返すだけで、
  * どこへ置くかは画面が決める——**サイドバーはレールの外、中身の列はレールの中**
  * （`GroupView.tsx`）。ここで並べて置いてしまうと、置き場所の取り違えを見逃す。
@@ -66,18 +81,27 @@ function 置く(props: { project?: string; open?: boolean } = {}) {
 
 beforeEach(() => {
   slow = {}
+  失敗 = {}
   globalThis.localStorage.clear()
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url: string) => {
       if (url.includes('/file?')) {
         const path = new URL(url, 'http://x').searchParams.get('path') ?? ''
+        const 番号 = 失敗[path]
+        if (番号 !== undefined) {
+          return new Response('読めません', { status: 番号 })
+        }
         return new Response(
           JSON.stringify({ path, text: '# 中身\n', truncated: false, bytes: 8 }),
           { status: 200 },
         )
       }
       const at = new URL(url, 'http://x').searchParams.get('path') ?? ROOT
+      const 番号 = 失敗[at]
+      if (番号 !== undefined) {
+        return new Response('読めません', { status: 番号 })
+      }
       const delay = slow[at] ?? 0
       if (delay > 0) {
         await new Promise((done) => setTimeout(done, delay))
@@ -327,6 +351,104 @@ describe('ファイルの中身の列', () => {
 
     const 戻った = await screen.findByTestId('file-view')
     expect(戻った).toHaveAttribute('data-path', `${ROOT}/計画.md`)
+  })
+
+  it('掘っていた場所を覚えていて、置き直すと戻る', async () => {
+    覚えさせる({ dir: `${ROOT}/MyDocs` })
+    置く()
+
+    // **起点が1フレームも見えないこと**は目でしか言えないが、着く先はここで言える
+    await waitFor(() =>
+      expect(screen.getByTestId('folder-browser')).toHaveAttribute(
+        'data-path',
+        `${ROOT}/MyDocs`,
+      ),
+    )
+  })
+
+  it('畳んで開き直しても、掘っていた場所を覚えている', async () => {
+    const { view } = 置く()
+    await screen.findByTestId('folder-browser')
+    const into = screen
+      .getAllByTestId('folder-entry')
+      .find((row) => row.getAttribute('data-name') === 'MyDocs')
+    await userEvent.click(into as HTMLElement)
+    await waitFor(() =>
+      expect(screen.getByTestId('folder-browser')).toHaveAttribute(
+        'data-path',
+        `${ROOT}/MyDocs`,
+      ),
+    )
+
+    // 畳む → 開き直す。**「リロードでは覚えているのに畳むと戻る」を作らない**
+    view.rerender(
+      <Placement host="local" project={ROOT} open={false} onToggle={() => {}} />,
+    )
+    view.rerender(
+      <Placement host="local" project={ROOT} open onToggle={() => {}} />,
+    )
+
+    await waitFor(() =>
+      expect(screen.getByTestId('folder-browser')).toHaveAttribute(
+        'data-path',
+        `${ROOT}/MyDocs`,
+      ),
+    )
+  })
+
+  it('覚えていた場所が無ければ、黙って起点へ落ちる', async () => {
+    覚えさせる({ dir: `${ROOT}/消えた` })
+    失敗[`${ROOT}/消えた`] = 404
+    置く()
+
+    await waitFor(() =>
+      expect(screen.getByTestId('folder-browser')).toHaveAttribute(
+        'data-path',
+        ROOT,
+      ),
+    )
+    // **断り文を出さない。** 覚えていた場所は利用者がいま押したものではない
+    expect(screen.queryByTestId('folder-error')).toBeNull()
+  })
+
+  it('覚えていた場所が「読めない」だけなら、落とさずに理由を出す', async () => {
+    覚えさせる({ dir: `${ROOT}/MyDocs` })
+    失敗[`${ROOT}/MyDocs`] = 403
+    置く()
+
+    /*
+      **起点へ行き直さない。** 寝ている PC では起点も同じ理由で失敗するので、
+      見える結果は変わらないまま時間切れが2回並ぶ（設計§6-3）。
+      記憶も残るので、PC が起きれば戻る。
+    */
+    expect(await screen.findByTestId('folder-error')).toBeInTheDocument()
+    expect(screen.getByTestId('folder-browser')).not.toHaveAttribute(
+      'data-path',
+      ROOT,
+    )
+  })
+
+  it('覚えていたファイルが読めなければ、列ごと畳む', async () => {
+    覚えさせる({ pick: `${ROOT}/消えた.md` })
+    失敗[`${ROOT}/消えた.md`] = 404
+    置く()
+
+    await screen.findByTestId('folder-browser')
+    // **赤い1行を出したまま開かない。** 開いた瞬間に断り文で出迎えることになる
+    await waitFor(() =>
+      expect(screen.queryByTestId('file-column')).toBeNull(),
+    )
+  })
+
+  it('押したファイルが読めなければ、畳まずに理由を出す', async () => {
+    失敗[`${ROOT}/計画.md`] = 404
+    置く()
+
+    await userEvent.click(await screen.findByRole('button', { name: /計画\.md/ }))
+
+    // **押した1枚には知らせ先を渡していない。** 押した人には理由を見せる
+    expect(await screen.findByTestId('file-error')).toBeInTheDocument()
+    expect(screen.getByTestId('file-column')).toBeInTheDocument()
   })
 
   it('覚えが無ければ、中身の列は出ない', async () => {
