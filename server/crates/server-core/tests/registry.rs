@@ -752,3 +752,130 @@ async fn サーバを起こし直しても最初の空の報告で名前が消�
         backend.finish().await;
     }
 }
+
+#[tokio::test]
+async fn 新しいカードは枠の末尾へ入り報告のたびに戻らない() {
+    // **末尾へ入る**のは §2-4 の決めごとで、既存の E2E の土台（`helpers.ts` の
+    // `nth(before)`）がこれに乗っている。あわせて、**報告が届くたびに並びが 0 へ
+    // 戻らない**ことを見る——セッションホストは並び順を知らないので 0 を名乗る。
+    // 記録の値で上書きしないと、並べ替えた結果がフックのたびに巻き戻る
+    for backend in common::backends("card-position").await {
+        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+            .await
+            .expect("記録層を立てられること");
+
+        let first = CardId::new();
+        let second = CardId::new();
+        registry.apply(&local(), upsert(first)).await;
+        registry.apply(&local(), upsert(second)).await;
+
+        let listed = registry.list(server_core::db::LOCAL_ACCOUNT_ID);
+        assert_eq!(
+            listed.iter().map(|meta| meta.position).collect::<Vec<_>>(),
+            vec![0, 1],
+            "[{}] 末尾へ入っていない",
+            backend.name
+        );
+        assert_eq!(listed[1].card_id, second, "[{}] 並びが違う", backend.name);
+
+        // 2枚目の報告がもう一度届いても、番号は 0 へ戻らない
+        registry.apply(&local(), upsert(second)).await;
+        let listed = registry.list(server_core::db::LOCAL_ACCOUNT_ID);
+        let again = listed
+            .iter()
+            .find(|meta| meta.card_id == second)
+            .expect("残っていること");
+        assert_eq!(
+            again.position, 1,
+            "[{}] 報告のたびに並びが先頭へ戻っている",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn カードの並べ替えは枠の中で丸ごと詰め直す() {
+    // 枠は `(agent, project)` で名指す。**その枠に居ないカードは断る**——枠をまたいだ
+    // 移動をやらないので、宛先を要求の側に書かせておけば受け手が見分けられる
+    for backend in common::backends("card-reorder").await {
+        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+            .await
+            .expect("記録層を立てられること");
+
+        let first = CardId::new();
+        let second = CardId::new();
+        let third = CardId::new();
+        for card_id in [first, second, third] {
+            registry.apply(&local(), upsert(card_id)).await;
+        }
+
+        // ① 逆順に並べ替える
+        registry
+            .reorder_cards(
+                server_core::db::LOCAL_ACCOUNT_ID,
+                None,
+                "/tmp/project",
+                &[third, second, first],
+            )
+            .await
+            .expect("読み書きできること")
+            .expect("通ること");
+        let order: Vec<CardId> = registry
+            .list(server_core::db::LOCAL_ACCOUNT_ID)
+            .into_iter()
+            .map(|meta| meta.card_id)
+            .collect();
+        assert_eq!(
+            order,
+            vec![third, second, first],
+            "[{}] 渡した順になっていない",
+            backend.name
+        );
+
+        // ② 別に立てた記録層（＝DB だけを見る側）にも同じ並びで見えること
+        let other = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+            .await
+            .expect("同じ DB から立て直せること");
+        let stored: Vec<CardId> = other
+            .list(server_core::db::LOCAL_ACCOUNT_ID)
+            .into_iter()
+            .map(|meta| meta.card_id)
+            .collect();
+        assert_eq!(
+            stored, order,
+            "[{}] 記録に残っていない（手元の写しだけ直している）",
+            backend.name
+        );
+
+        // ③ その枠に居ないカードは断る。**1枚も動かない**
+        let 前: Vec<CardId> = order.clone();
+        let refused = registry
+            .reorder_cards(
+                server_core::db::LOCAL_ACCOUNT_ID,
+                None,
+                "/tmp/別の枠",
+                &[first],
+            )
+            .await
+            .expect("読み書きできること")
+            .expect_err("断られること");
+        assert!(
+            matches!(
+                refused,
+                server_core::db::projects::ReorderRefusal::Unknown(_)
+            ),
+            "[{}] 断り方が違う: {refused:?}",
+            backend.name
+        );
+        let 後: Vec<CardId> = registry
+            .list(server_core::db::LOCAL_ACCOUNT_ID)
+            .into_iter()
+            .map(|meta| meta.card_id)
+            .collect();
+        assert_eq!(前, 後, "[{}] 断ったのに並びが動いた", backend.name);
+
+        backend.finish().await;
+    }
+}

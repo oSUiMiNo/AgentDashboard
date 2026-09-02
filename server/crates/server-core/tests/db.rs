@@ -1188,3 +1188,278 @@ async fn 静けさは行が無ければ賑やかで読める() {
         backend.finish().await;
     }
 }
+
+/// 並び順の backfill だけをもう一度効かせる（列は残す）。
+///
+/// **列を落とさないのは、巻き戻してから作り直すまでの間に行を入れるテストがあるため。**
+/// 適用済みの記録を消して番号を 0 へ均せば、`up` は在る列を飛ばして backfill だけを
+/// 通す——「入れ替えた瞬間の見え方」を、入れ替え後の DB で作り直せる。
+async fn 並び順を巻き戻す(db: &sea_orm::DatabaseConnection) {
+    use sea_orm::ConnectionTrait as _;
+
+    let names = db::migration_names();
+    let version = names
+        .iter()
+        .find(|name| name.contains("position"))
+        .expect("並び順のマイグレーションが一覧に居ること");
+    db.execute_unprepared("UPDATE projects SET position = 0")
+        .await
+        .expect("枠の番号を均せること");
+    db.execute_unprepared("UPDATE sessions SET position = 0")
+        .await
+        .expect("カードの番号を均せること");
+    db.execute_unprepared(&format!(
+        "DELETE FROM seaql_migrations WHERE version = '{version}'"
+    ))
+    .await
+    .expect("適用済みの記録を消せること");
+}
+
+#[tokio::test]
+async fn バックフィルはいまの見え方を焼き付ける() {
+    // **この工事でいちばん見えやすい失敗**が「入れ替えた瞬間に並びが変わる」こと。
+    // 列を足す前の見え方は「非 archived のカードを持つ枠 → 持たない枠」の2群で、
+    // 各群の中は `created_at` 昇順だった。時刻をわざと交互にしてあるので、
+    // **群分けを写さずに時刻順だけで振ると必ず落ちる**
+    for backend in common::backends("backfill-order").await {
+        let agent = uuid::Uuid::new_v4();
+        entity::agents::Entity::insert(entity::agents::ActiveModel {
+            id: Set(agent),
+            account_id: Set(db::LOCAL_ACCOUNT_ID),
+            name: Set("仕事用ノート".to_string()),
+            created_at: Set(1),
+            last_seen_at: Set(None),
+            model_table: Set(None),
+            capabilities: Set(None),
+        })
+        .exec(&backend.db)
+        .await
+        .expect("PC を登録できること");
+
+        for (path, at) in [
+            ("/居ない-古", 100),
+            ("/居る-新", 400),
+            ("/居ない-新", 500),
+            ("/居る-古", 200),
+            ("/外したのだけ", 300),
+        ] {
+            db::projects::add(
+                &backend.db,
+                db::LOCAL_ACCOUNT_ID,
+                Some(AgentId(agent)),
+                path,
+                at,
+            )
+            .await
+            .expect("枠を作れること");
+        }
+        seed_card(&backend.db, Some(agent), "/居る-新", 410, false).await;
+        seed_card(&backend.db, Some(agent), "/居る-古", 210, false).await;
+        // **外したカードしか無い枠は「居ない」側**。ここを間違えると群が入れ替わる
+        seed_card(&backend.db, Some(agent), "/外したのだけ", 310, true).await;
+
+        並び順を巻き戻す(&backend.db).await;
+        let again = db::connect(&backend.url)
+            .await
+            .unwrap_or_else(|err| panic!("[{}] 繋ぎ直せない: {err}", backend.name));
+
+        let rows = db::projects::list(&again, db::LOCAL_ACCOUNT_ID)
+            .await
+            .expect("読めること");
+        let paths: Vec<&str> = rows.iter().map(|row| row.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "/居る-古",
+                "/居る-新",
+                "/居ない-古",
+                "/外したのだけ",
+                "/居ない-新"
+            ],
+            "[{}] 入れ替える前の見え方が焼き付いていない",
+            backend.name
+        );
+        let positions: Vec<i32> = rows.iter().map(|row| row.position).collect();
+        assert_eq!(
+            positions,
+            vec![0, 1, 2, 3, 4],
+            "[{}] 0 から詰めて振られていない",
+            backend.name
+        );
+
+        let _ = sea_orm::DatabaseConnection::close(again).await;
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn カードの並びは枠の中で閉じ外したカードにも番号が付く() {
+    // **枠の中で閉じている**ので、別の枠のカードと番号は混ざらない（どちらも 0 から）。
+    // **外したカードにも振る**——振らないと既定値の 0 が重なり、起こし直したときに
+    // 生きているカードと番号がぶつかる
+    for backend in common::backends("backfill-cards").await {
+        seed_card(&backend.db, None, "/枠A", 120, false).await;
+        seed_card(&backend.db, None, "/枠A", 110, false).await;
+        seed_card(&backend.db, None, "/枠A", 105, true).await;
+        seed_card(&backend.db, None, "/枠B", 900, false).await;
+
+        並び順を巻き戻す(&backend.db).await;
+        let again = db::connect(&backend.url)
+            .await
+            .unwrap_or_else(|err| panic!("[{}] 繋ぎ直せない: {err}", backend.name));
+
+        let mut 枠A: Vec<(i32, i64, bool)> = Vec::new();
+        let mut 枠B: Vec<(i32, i64, bool)> = Vec::new();
+        for row in entity::sessions::Entity::find()
+            .all(&again)
+            .await
+            .expect("読めること")
+        {
+            match row.project.as_str() {
+                "/枠A" => 枠A.push((row.position, row.created_at, row.archived)),
+                "/枠B" => 枠B.push((row.position, row.created_at, row.archived)),
+                _ => {}
+            }
+        }
+        枠A.sort();
+        枠B.sort();
+
+        // 生きているものが時刻順に 0,1。**外したものはその続き**
+        assert_eq!(
+            枠A,
+            vec![(0, 110, false), (1, 120, false), (2, 105, true)],
+            "[{}] 枠A の番号が違う",
+            backend.name
+        );
+        // **別の枠も 0 から始まる**（枠をまたいで通し番号にしない）
+        assert_eq!(
+            枠B,
+            vec![(0, 900, false)],
+            "[{}] 枠B の番号が違う",
+            backend.name
+        );
+
+        let _ = sea_orm::DatabaseConnection::close(again).await;
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 並べ替えは丸ごと受け取って0から詰め直す() {
+    // 差分ではなく確定した並び全部を受け取る（設計§9-1）。**空きが空いていても、
+    // 受け取った時点で 0 から詰め直る**ので、ずれが溜まらない
+    for backend in common::backends("reorder-projects").await {
+        let mut ids = Vec::new();
+        for (path, at) in [("/a", 10), ("/b", 20), ("/c", 30)] {
+            let row = db::projects::add(&backend.db, db::LOCAL_ACCOUNT_ID, None, path, at)
+                .await
+                .expect("足せること");
+            ids.push(row.id);
+        }
+
+        // ① 逆順に並べ替える
+        let 逆順: Vec<uuid::Uuid> = ids.iter().rev().copied().collect();
+        db::projects::reorder(&backend.db, db::LOCAL_ACCOUNT_ID, &逆順)
+            .await
+            .expect("読み書きできること")
+            .expect("通ること");
+        let rows = db::projects::list(&backend.db, db::LOCAL_ACCOUNT_ID)
+            .await
+            .expect("読めること");
+        assert_eq!(
+            rows.iter().map(|row| row.path.as_str()).collect::<Vec<_>>(),
+            vec!["/c", "/b", "/a"],
+            "[{}] 渡した順になっていない",
+            backend.name
+        );
+        assert_eq!(
+            rows.iter().map(|row| row.position).collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "[{}] 0 から詰め直していない",
+            backend.name
+        );
+
+        // ② 渡さなかった枠は、今の順のまま後ろへ続く
+        db::projects::reorder(&backend.db, db::LOCAL_ACCOUNT_ID, &[ids[0]])
+            .await
+            .expect("読み書きできること")
+            .expect("通ること");
+        let rows = db::projects::list(&backend.db, db::LOCAL_ACCOUNT_ID)
+            .await
+            .expect("読めること");
+        assert_eq!(
+            rows.iter().map(|row| row.path.as_str()).collect::<Vec<_>>(),
+            vec!["/a", "/c", "/b"],
+            "[{}] 渡されなかった枠が今の順のまま後ろへ続いていない",
+            backend.name
+        );
+
+        // ③ 知らない ID が混ざったら、**1行も書かない**
+        let 前 = rows.iter().map(|row| row.position).collect::<Vec<_>>();
+        let 混ぜた = vec![ids[1], uuid::Uuid::new_v4()];
+        let refused = db::projects::reorder(&backend.db, db::LOCAL_ACCOUNT_ID, &混ぜた)
+            .await
+            .expect("読み書きできること")
+            .expect_err("断られること");
+        assert!(
+            matches!(refused, db::projects::ReorderRefusal::Unknown(_)),
+            "[{}] 断り方が違う: {refused:?}",
+            backend.name
+        );
+        let 後 = db::projects::list(&backend.db, db::LOCAL_ACCOUNT_ID)
+            .await
+            .expect("読めること")
+            .iter()
+            .map(|row| row.position)
+            .collect::<Vec<_>>();
+        assert_eq!(前, 後, "[{}] 断ったのに並びが動いた", backend.name);
+
+        // ④ 同じ ID が2回なら受けない（並びが決まらない）
+        let 重複 = vec![ids[0], ids[0]];
+        let refused = db::projects::reorder(&backend.db, db::LOCAL_ACCOUNT_ID, &重複)
+            .await
+            .expect("読み書きできること")
+            .expect_err("断られること");
+        assert!(
+            matches!(refused, db::projects::ReorderRefusal::Duplicate(_)),
+            "[{}] 断り方が違う: {refused:?}",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 並べ替えても生まれた時刻は動かない() {
+    // 時刻は**並びの根拠ではなくなったが、値としては生き続ける**（§10）。
+    // 小窓の「N分前」がここに乗っているので、並べ替えのついでに動くと表示が狂う
+    for backend in common::backends("reorder-created-at").await {
+        let mut ids = Vec::new();
+        for (path, at) in [("/a", 10), ("/b", 20)] {
+            let row = db::projects::add(&backend.db, db::LOCAL_ACCOUNT_ID, None, path, at)
+                .await
+                .expect("足せること");
+            ids.push(row.id);
+        }
+        db::projects::reorder(&backend.db, db::LOCAL_ACCOUNT_ID, &[ids[1], ids[0]])
+            .await
+            .expect("読み書きできること")
+            .expect("通ること");
+
+        let rows = db::projects::list(&backend.db, db::LOCAL_ACCOUNT_ID)
+            .await
+            .expect("読めること");
+        let times: Vec<(&str, i64)> = rows
+            .iter()
+            .map(|row| (row.path.as_str(), row.created_at))
+            .collect();
+        assert_eq!(
+            times,
+            vec![("/b", 20), ("/a", 10)],
+            "[{}] 並べ替えで時刻が動いた",
+            backend.name
+        );
+        backend.finish().await;
+    }
+}
