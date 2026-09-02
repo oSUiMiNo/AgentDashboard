@@ -20,6 +20,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { moveItem, nearestIndex, NO_TARGET, type Point, type Rect } from './reorder'
+import { resetField } from './roam'
 
 /**
  * スクロール容器の端から、これだけ内側に入ったら送り始める（px）。
@@ -188,6 +189,11 @@ export function useReorder<T extends string>({
         measured.current = null
         送り.current = { x: 0, y: 0 }
         setDragging(null)
+        // **並べ替えたら、回遊する線の場を測り直す**（設計§8-1）。線は掴む前に測った
+        // 矩形の上を飛ぶので、並びが変わったのに測り直さないと**もう居ない場所を
+        // なぞる**。掴んでいる間は `data-motion` が `still` なので線そのものは
+        // 撃たれておらず、ここで捨てておけば次に撃つときに測り直される
+        resetField()
         if (held === null) {
           return
         }
