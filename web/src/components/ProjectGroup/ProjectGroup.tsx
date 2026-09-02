@@ -25,7 +25,7 @@
  */
 
 import { AnimatePresence } from 'motion/react'
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router'
 import { SessionAdd } from '@/components/SessionAdd/SessionAdd'
 import { SessionTile } from '@/components/SessionTile/SessionTile'
@@ -41,9 +41,29 @@ interface Props {
   projectId?: string
   /** この箱に入るカードID。中身は小窓が自分で購読する（設計§10） */
   cards: CardId[]
+  /**
+   * 掴み手（並べ替え設計§3-1）。**枠の `header` の左端**に置く——枠に効く操作は
+   * 既にそこへ集まっている（「＋」「×」）。
+   *
+   * 作るのは並びを持っている側（`TileGrid`）。**この箱は自分が何番目かを知らない**ので、
+   * ここで作ると並び全体を渡すことになる
+   */
+  handle?: ReactNode
+  /** 落とし先を測るための `ref`。並びを持っている側が矩形を測る */
+  rootRef?: (element: HTMLElement | null) => void
+  /** いま浮かせているか。**掴んでいる本人だけ** */
+  dragging?: boolean
 }
 
-export function ProjectGroup({ host, project, projectId, cards }: Props) {
+export function ProjectGroup({
+  host,
+  project,
+  projectId,
+  cards,
+  handle,
+  rootRef,
+  dragging = false,
+}: Props) {
   const navigate = useNavigate()
   const [error, setError] = useState<string | null>(null)
   const busy = cards.length > 0
@@ -68,13 +88,28 @@ export function ProjectGroup({ host, project, projectId, cards }: Props) {
 
   return (
     <section
+      ref={rootRef}
       data-testid="project-group"
       data-project={project}
       data-host={host}
+      data-dragging={dragging ? 'true' : 'false'}
       onClick={() => navigate(projectPath(host, project))}
-      className="border-border hover:border-primary/40 hover:bg-muted/20 cursor-pointer rounded-xl border border-dashed p-3 transition-colors"
+      /*
+        掴んでいる枠は流れから浮かせる（設計§3-5）。**影ではなく `transform` で作る**
+        ——`DESIGN.md` §27.5 の4候補（1.02倍・1〜2°の傾き・影・落とし先の反応）は
+        「物を掴んで運ぶ操作」のためのもので、こちらはまさにそれに当たる
+      */
+      className={`border-border hover:border-primary/40 hover:bg-muted/20 cursor-pointer rounded-xl border border-dashed p-3 transition-colors ${
+        dragging ? 'relative z-10 scale-[1.02] rotate-[1deg] opacity-90' : ''
+      }`}
     >
       <header className="mb-2 flex items-baseline gap-2">
+        {handle !== undefined && (
+          // 余白のクリック（＝画面を開く）と取り違えない
+          <div className="shrink-0 self-center" onClick={(event) => event.stopPropagation()}>
+            {handle}
+          </div>
+        )}
         {/* 縮んでよいのはパスだけ。`min-w-0` が無いと `truncate` が効かず、
             隣のセッション数が縦に割れる */}
         <h2 className="min-w-0 truncate text-sm font-semibold" title={project}>

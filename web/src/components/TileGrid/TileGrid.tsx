@@ -9,9 +9,12 @@
  * まとまりの組み立てと並びの安定は [`@/stores/sessions`] が持つ。
  */
 
-import { useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
+
+import { useReorder } from '@/lib/useReorder'
 
 import { ProjectGroup } from '@/components/ProjectGroup/ProjectGroup'
+import { ReorderHandle } from '@/components/ReorderHandle/ReorderHandle'
 import { ReviveBudgetDialog } from '@/components/TileGrid/ReviveBudgetDialog'
 import { Button } from '@/components/ui/button'
 import { reviveState } from '@/lib/protocol'
@@ -33,6 +36,7 @@ import {
   useReviveTargets,
   useTomlAccounts,
 } from '@/stores/sessions'
+import { saveProjectOrder } from '@/stores/projects'
 import { agentOf, useSettingsStore } from '@/stores/settings'
 import { useWsStore } from '@/stores/ws'
 
@@ -43,6 +47,46 @@ export function TileGrid() {
   const candidates = useReviveTargets()
   const agents = useSettingsStore((state) => state.settings.agents)
   const revive = useWsStore((state) => state.revive)
+  const [orderError, setOrderError] = useState<string | null>(null)
+
+  /*
+    枠の並べ替え（並べ替え設計§3）。
+
+    **並べ替えられるのは記録を持つ枠だけ。** カードから逆算した箱は DB に行が無いので、
+    書き戻す先が無い。あちらは必ず記録のある枠の**後ろ**に並ぶ（`rebuildGroups` が
+    `getProjects()` を先に置く）ので、前半だけを並べ替えれば足りる。
+  */
+  const 鍵 = (group: { host: string; project: string }) =>
+    `${group.host}\u0000${group.project}`
+  const frames = groups.filter((group) => group.projectId !== undefined)
+  const others = groups.filter((group) => group.projectId === undefined)
+  // 送るのは枠の ID。**鍵から引くための対応表を、最新の描画のぶんで持ち回る**
+  const idByKey = useRef(new Map<string, string>())
+  idByKey.current = new Map(
+    frames.map((group) => [鍵(group), group.projectId as string]),
+  )
+
+  const 並びを送る = useCallback(async (next: readonly string[]) => {
+    const ids = next
+      .map((key) => idByKey.current.get(key))
+      .filter((id): id is string => id !== undefined)
+    setOrderError(await saveProjectOrder(ids))
+  }, [])
+
+  const { order, dragging, bind, itemRef } = useReorder({
+    ids: frames.map(鍵),
+    onCommit: (next) => {
+      void 並びを送る(next)
+    },
+  })
+
+  const byKey = new Map(frames.map((group) => [鍵(group), group]))
+  const 並び = [
+    ...order
+      .map((key) => byKey.get(key))
+      .filter((group): group is (typeof frames)[number] => group !== undefined),
+    ...others,
+  ]
 
   /*
     起こし直せるカードを数える（復旧設計§9-3）。**ストアが持っているのは候補まで**
@@ -219,6 +263,12 @@ export function TileGrid() {
         </label>
       )}
 
+      {orderError !== null && (
+        <p data-testid="project-order-error" className="text-destructive text-xs">
+          {orderError}
+        </p>
+      )}
+
       {groups.length === 0 ? (
         <p className="text-muted-foreground text-sm">
           {filter === null
@@ -227,14 +277,30 @@ export function TileGrid() {
         </p>
       ) : (
         <div data-testid="tile-grid" className="flex flex-col gap-4">
-          {groups.map((group) => (
+          {並び.map((group) => (
             <ProjectGroup
               // 鍵は（PC, パス）の組（設計§13）。パスだけだと別の PC の同名 PJT と衝突する
-              key={`${group.host}\u0000${group.project}`}
+              key={鍵(group)}
               host={group.host}
               project={group.project}
               projectId={group.projectId}
               cards={group.cards}
+              /*
+                **掴み手は、記録を持つ枠にだけ出す。** カードから逆算した箱は DB に
+                行が無いので、並べ替えた結果を書き戻す先が無い——押しても何も起きない
+                ものを置くと、壊れているのと見分けが付かない
+              */
+              handle={
+                group.projectId === undefined ? undefined : (
+                  <ReorderHandle
+                    kind="project"
+                    label={`${group.project} を掴んで並べ替える`}
+                    {...bind(鍵(group))}
+                  />
+                )
+              }
+              rootRef={itemRef(鍵(group))}
+              dragging={dragging === 鍵(group)}
             />
           ))}
         </div>

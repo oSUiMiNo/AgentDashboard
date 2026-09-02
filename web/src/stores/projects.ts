@@ -116,3 +116,32 @@ export async function loadProjects(): Promise<void> {
     // 読めなくても画面は出す。枠が無い状態＝カードから逆算した箱だけが並ぶ
   }
 }
+
+/**
+ * 並べ替えた結果をサーバへ送る（並べ替え設計§9-1）。
+ *
+ * **丸ごと送る。** 差分ではなく確定した並び全部を送るので、送り手と受け手で番号の
+ * 解釈が食い違ってもずれが溜まらない。
+ *
+ * **手元は先に書き換えない。** 書けてから配られる `project_upsert` で戻ってくる
+ * （設計§11）ので、ここで先回りすると**断られたときに画面だけが動いたまま残る**。
+ * 運んでいる最中の見た目は掴んでいる側が持っており、離した時点で手元の並びへ戻る
+ * ——サーバが受けていれば、そのすぐ後に新しい並びが届いて上書きされる。
+ *
+ * 戻り値は断られた理由。通れば `null`。
+ */
+export async function saveProjectOrder(ids: readonly string[]): Promise<string | null> {
+  try {
+    const response = await fetch('/api/projects/order', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    })
+    if (!response.ok) {
+      return (await response.text()).trim() || '並べ替えを保存できませんでした'
+    }
+    return null
+  } catch {
+    return '並べ替えを保存できませんでした'
+  }
+}
