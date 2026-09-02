@@ -301,7 +301,15 @@
   （`--fade-ground` を配っていた頃に踏んだのと同じ形）。
 */
 .speech-bubble {
-  --bubble-ground: color-mix(in oklch, var(--color-muted) 60%, transparent);
+  /*
+    **利用者の指定した青**（要望3・設計§12-3）。参考画像の画素を3,500点読んで確定した
+    単色で、**役割表（§11.2）のどの色でもない**——だから「Primary Accent を種別の区別に
+    使わない」には当たらない。**文字は本文色のまま**（比 10.13）。暗い文字は床を割る。
+
+    **カードの地（`#171717`）との差は、ChatGPT（真っ黒）より縮む。** 目立たなければ
+    **動かすのは地の側**で、青は動かせない（「参考画像と全く同じ青」が指定のため）。
+  */
+  --bubble-ground: #173e76;
   --bubble-radius: 1rem; /* DESIGN.md §10.3 の Large（16px前後） */
   --bubble-tail: 0.5rem;
   position: relative;
@@ -357,10 +365,20 @@
     **地は持たせるが、吹き出しより弱くする。** 同じ濃さにすると、誰の発言かを
     シルエットで読み分ける仕掛け（設計§5-3）が消える。
   */
-  --shell-ground: color-mix(in oklch, var(--color-muted) 28%, transparent);
+  /*
+    **見た目だけ器に見えないようにする**（要望2・案B。設計§12-2）。
+
+    **箱そのものは外さない。** この器は見た目のために在るのではなく、**帯を敷く場所**
+    （§6-7-2）と**崩し②の置き場所**（§6'-2）という2つの役目のために在る。外すと
+    **要望①③がアシスタント側で後退し、`DESIGN.md` §8 の崩しも2つから1つへ割れる**。
+
+    **地を透明にし、余白を左右だけにする。** 縁も角丸も持たないので枠には見えないが、
+    **帯は器の幅いっぱいに敷けるまま**である。
+  */
+  --shell-ground: transparent;
   --shell-radius: 0.75rem;
   position: relative;
-  padding: 0.25rem 0.5rem;
+  padding: 0 0.5rem;
   background: var(--shell-ground);
   border-radius: var(--shell-radius);
   /*

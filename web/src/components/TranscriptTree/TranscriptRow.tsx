@@ -79,13 +79,15 @@ function heading(node: Node): { label: string; tone: string } {
     case 'thinking':
       return { label: '思考', tone: 'text-muted-foreground' }
     case 'tool_call':
-      return { label: node.name, tone: 'text-violet-300' }
+      // **活動の行は暗く**（要望1・設計§12-1）。発言との主従を、明度でさらに開ける
+      return { label: node.name, tone: 'text-violet-300/60' }
     case 'subagent':
       return { label: `サブエージェント ${node.agent_type}`, tone: 'text-amber-300' }
     case 'image':
       return { label: '画像', tone: 'text-sky-300' }
     case 'unknown':
-      return { label: `未知のレコード（${node.record_type}）`, tone: 'text-orange-300' }
+      // 同上。**未知のレコードは、いちばん静かでよい**（読む相手が居ないことのほうが多い）
+      return { label: `未知のレコード（${node.record_type}）`, tone: 'text-orange-300/60' }
   }
 }
 
@@ -229,7 +231,7 @@ function RewoundHeader({
       data-kind="rewound"
       data-expandable="true"
       data-expanded={row.expanded}
-      className="border-border/40 border-b py-1 text-sm"
+      className="py-1 text-sm"
     >
       <button
         type="button"
@@ -275,7 +277,7 @@ function ActivityHeader({ row, onToggle }: { row: ActivityRow; onToggle: () => v
       data-expanded={row.expanded}
       data-member-count={row.members.length}
       style={{ paddingLeft: `${row.depth * 1.25}rem` }}
-      className="border-border/40 border-b py-1 text-sm"
+      className="py-1 text-sm"
     >
       <button
         type="button"
@@ -331,7 +333,7 @@ function NodeRowView({
       data-body-open={row.bodyOpen}
       // 入れ子の深さは余白で見せる。1段あたり 1.25rem
       style={{ paddingLeft: `${row.depth * 1.25}rem` }}
-      className="border-border/40 border-b py-1 text-sm"
+      className="py-1 text-sm"
     >
       {withHeading && (
         <button
