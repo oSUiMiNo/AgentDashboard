@@ -64,6 +64,7 @@ fn meta(card_id: CardId) -> SessionMeta {
         account: None,
         toml_account: None,
         session_title: None,
+        position: 0,
     }
 }
 

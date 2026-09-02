@@ -2096,6 +2096,9 @@ impl SessionManager {
                 // 書かれる）。起動した時点では存在しないので、ここで埋められる値が無い。
                 // パーサが拾って報告してくるまで `None` のままでよい（設計§2）
                 session_title: None,
+                // **並びは記録の側が決める**（設計§9-2）。セッションホストは自分が
+                // 何番目かを知らないので 0 を名乗り、サーバが記録の値で上書きする
+                position: 0,
             }),
             process,
             ring: Mutex::new(RingBuffer::new(self.config.pty_ring_buffer)),

@@ -44,18 +44,23 @@ pub fn from_column(value: Uuid) -> Option<AgentId> {
     }
 }
 
-/// そのアカウントの枠を、**追加した順**に並べて返す。
+/// そのアカウントの枠を、**利用者が並べた順**に並べて返す。
 ///
-/// 並びを `created_at` で固定するのは、一覧の箱が「最初に現れた順」で安定している
-/// 既存の作り（`web/src/stores/sessions.ts`）と揃えるため。セッションが居るかどうかで
-/// 2群に分けるのは画面の仕事で、ここは順序だけを保証する。
+/// 並びの正は `position`（並べ替え設計§2-3）。以前は `created_at` で固定していたが、
+/// **利用者が自分で並べ替えられるようになった**ので、時刻はもう順序を決めない。
+/// `created_at` は値としては守り続ける（起こし直しで動かさない）。
+///
+/// **セッションが居るかどうかで2群に分けることは、もうしない。** 群分けは画面の
+/// 仕事だったが、利用者の並びと正面から衝突する（起動しただけで枠が飛ぶ）ので
+/// 外した。ここは順序だけを保証する。
 pub async fn list(
     db: &DatabaseConnection,
     account_id: Uuid,
 ) -> Result<Vec<projects::Model>, DbErr> {
     projects::Entity::find()
         .filter(projects::Column::AccountId.eq(account_id))
-        .order_by_asc(projects::Column::CreatedAt)
+        .order_by_asc(projects::Column::Position)
+        // 同着は `id` で崩す。崩さないと SQLite と PostgreSQL で並びが変わりうる
         .order_by_asc(projects::Column::Id)
         .all(db)
         .await

@@ -445,6 +445,20 @@ pub struct SessionMeta {
     /// そのとき壊れるのは名前の表示ではなく、**カードの報告そのもの**である。
     #[serde(default)]
     pub session_title: Option<String>,
+    /// **その枠の中での**カードの並び（並べ替え設計§9-2）。小さいほうが先。
+    ///
+    /// # セッションホストはこれを知らない
+    ///
+    /// 並びは**記録の側の性質**で、生まれた時刻や名前と同じ扱いになる。セッションホストは
+    /// 0 を置いて名乗り、**サーバが記録の値で上書きする**。上書きしないと、報告が届く
+    /// たびに並べ替えた結果が 0 へ戻る。
+    ///
+    /// # なぜ `#[serde(default)]` を書くのか
+    ///
+    /// 欄を持たない古い版の名乗りを 0 として受けるため。**版（`A2S_VERSION`）は
+    /// 上げない**ので、配ってある PC はそのまま繋がり続ける。
+    #[serde(default)]
+    pub position: i32,
 }
 
 impl SessionMeta {
@@ -643,6 +657,7 @@ mod tests {
             account: None,
             toml_account: None,
             session_title: None,
+            position: 0,
         }
     }
 
@@ -717,6 +732,7 @@ mod tests {
             account: Some("mao".to_string()),
             toml_account: None,
             session_title: None,
+            position: 0,
         };
         assert_eq!(roundtrip(&meta), meta);
     }
@@ -745,10 +761,11 @@ mod tests {
             account: None,
             toml_account: None,
             session_title: None,
+            position: 0,
         };
         assert_eq!(
             serde_json::to_string(&meta).unwrap(),
-            r#"{"card_id":"00000000-0000-0000-0000-000000000001","project":"/p","claude_session_id":null,"permission_mode":null,"model":null,"model_label":null,"model_requested":null,"status":{"kind":"working"},"subagent_active":0,"last_activity_at":1,"last_assistant_message":null,"created_at":1,"hooks_seen":false,"agent_id":null,"agent_connected":true,"account":null,"toml_account":null,"session_title":null}"#
+            r#"{"card_id":"00000000-0000-0000-0000-000000000001","project":"/p","claude_session_id":null,"permission_mode":null,"model":null,"model_label":null,"model_requested":null,"status":{"kind":"working"},"subagent_active":0,"last_activity_at":1,"last_assistant_message":null,"created_at":1,"hooks_seen":false,"agent_id":null,"agent_connected":true,"account":null,"toml_account":null,"session_title":null,"position":0}"#
         );
     }
 
@@ -911,6 +928,7 @@ mod tests {
                 account: None,
                 toml_account: None,
                 session_title: None,
+                position: 0,
             }
         };
         let back = roundtrip(&meta);
@@ -966,6 +984,7 @@ mod tests {
             account: None,
             toml_account: None,
             session_title: None,
+            position: 0,
         };
         let back = roundtrip(&meta);
         assert_eq!(back.model, meta.model);
@@ -999,6 +1018,7 @@ mod tests {
             account: None,
             toml_account: None,
             session_title: None,
+            position: 0,
         };
         let text = serde_json::to_string(&meta).unwrap();
         assert!(text.contains(r#""model":null"#), "実際: {text}");

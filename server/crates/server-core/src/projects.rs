@@ -232,6 +232,7 @@ fn to_view(row: &entity::projects::Model) -> ProjectView {
         },
         path: row.path.clone(),
         created_at: row.created_at,
+        position: row.position,
     }
 }
 

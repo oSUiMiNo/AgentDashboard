@@ -375,6 +375,7 @@ mod tests {
             account: None,
             toml_account: None,
             session_title: None,
+            position: 0,
         }
     }
 

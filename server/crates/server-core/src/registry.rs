@@ -343,7 +343,15 @@ impl SessionRegistry {
         let _ = self.revocations.send(token_id);
     }
 
-    /// そのアカウントのカード一覧を作成順に返す（設計§8-6）。
+    /// そのアカウントのカード一覧を、**利用者が並べた順**に返す（設計§8-6）。
+    ///
+    /// 並びの正は `position`（並べ替え設計§2-3）。**カードの `position` は枠の中で
+    /// 閉じている**ので、枠をまたぐと同じ番号が何度も出てくる——ここが返すのは
+    /// アカウント全体の平らな一覧なので、枠が入れ子に並ぶわけではない。**枠ごとに
+    /// まとめ直すのは画面の仕事**で、そのとき枠の中の相対順がこの並びで決まる。
+    ///
+    /// 同着は `created_at` で崩す。崩さないと、同じ番号のカードの前後が呼ぶたびに
+    /// 変わる（`HashMap` を辿っているため）。
     pub fn list(&self, account_id: Uuid) -> Vec<SessionMeta> {
         let mut metas: Vec<SessionMeta> = self
             .records
@@ -353,7 +361,7 @@ impl SessionRegistry {
             .filter(|record| record.account_id == account_id)
             .map(|record| record.meta())
             .collect();
-        metas.sort_by_key(|meta| meta.created_at);
+        metas.sort_by_key(|meta| (meta.position, meta.created_at));
         metas
     }
 
@@ -508,7 +516,7 @@ impl SessionRegistry {
                 // 一覧へ戻ってくる。しかも `list` はメモリの記録を見るので、
                 // **DB では外れているのに画面には出続ける**という食い違いになる
                 if self.get(card_id).is_none()
-                    && matches!(self.stored(card_id).await, Ok(Some((_, true))))
+                    && matches!(self.stored(card_id).await, Ok(Some((_, true, _))))
                 {
                     return;
                 }
@@ -844,6 +852,7 @@ impl SessionRegistry {
         // 既に知っているカードなら、生まれた時刻と名前は**記録の側が正**（下記）
         let mut 記録の生まれた時刻 = None;
         let mut 記録の名前 = None;
+        let mut 記録の並び = None;
         match self.get(meta.card_id) {
             Some(record) => {
                 if self.refuse_crossing(&origin.account_id, record.account_id, meta.card_id) {
@@ -851,15 +860,19 @@ impl SessionRegistry {
                 }
                 記録の生まれた時刻 = Some(record.meta().created_at);
                 記録の名前 = record.meta().session_title;
+                記録の並び = Some(record.meta().position);
             }
             None => match self.stored(meta.card_id).await? {
-                Some((owner, _))
+                Some((owner, _, _))
                     if self.refuse_crossing(&origin.account_id, owner, meta.card_id) =>
                 {
                     return Ok(());
                 }
-                Some((_, true)) => return Ok(()),
-                _ => {}
+                Some((_, true, _)) => return Ok(()),
+                // 記録にはあるが手元に無い（起こし直しの直後・他インスタンス経由）。
+                // **並びは記録の側が正**なので、そちらを持ち帰る
+                Some((_, false, 並び)) => 記録の並び = Some(並び),
+                None => {}
             },
         }
 
@@ -872,12 +885,18 @@ impl SessionRegistry {
         // カードは起こし直しをまたいで同じものであり続ける（初期実装§3）。
         //
         // 起こし直し（`revive`）は同じ CardId に別の実体を載せ直すので、セッションホストは
-        // **そのとき採った時刻**を申告してくる。素直に取り込むと、**一覧の並びが動く**——
-        // 並びは `created_at` の昇順で、しかも「群の中の並びは追加した順で固定してあり、
-        // 状態が変わっても動かない」と約束してある（README。押そうとした瞬間に的が逃げないため）。
+        // **そのとき採った時刻**を申告してくる。
         //
-        // 実機で踏んだ（2026-08-23）。復旧した2枚が枠の末尾へ動いた。「全て復旧」を押すと
-        // **群ごと並び替わる**ことになるので、約束のほうが先に壊れる。
+        // **並びの正はもう `created_at` ではない**（並べ替え設計§2-3）。利用者が自分で
+        // 並べた順（`position`）が正になり、時刻は順序を決めなくなった。**それでもここは
+        // 残す。** 約束そのもの——「一覧の並びは、状態が変わっても動かない」（README。
+        // 押そうとした瞬間に的が逃げないため）——は今回いっそう強くなったからで、
+        // 時刻が動くこと自体が別の場所（小窓の「N分前」）で嘘になる。
+        //
+        // 実機で踏んだ（2026-08-23）。復旧した2枚が枠の末尾へ動いた。当時は `created_at` が
+        // 並びを決めていたので、「全て復旧」を押すと**群ごと並び替わる**形で表に出た。
+        // いま同じことが起きても並びは動かないが、**時刻の表示だけが静かに狂う**——
+        // 表に出にくくなったぶん、ここを外すと気づけない。
         if let Some(生まれた時刻) = 記録の生まれた時刻 {
             meta.created_at = 生まれた時刻;
         }
@@ -895,6 +914,24 @@ impl SessionRegistry {
         {
             meta.session_title = Some(名前);
         }
+        // **並びも記録の側が正**（設計§9-2）。セッションホストは並び順を知らないので
+        // 0 を名乗ってくる。素直に取り込むと、**報告が届くたびに並べ替えた結果が
+        // 先頭へ戻る**——生まれた時刻や名前とまったく同じ性質である。
+        //
+        // 記録がどこにも無いカード（本当に新しい1枚）だけ、**その枠の末尾**を振る。
+        // ここで決めた値を下の `write_session` がそのまま入れるので、採番は1回で済む
+        meta.position = match 記録の並び {
+            Some(並び) => 並び,
+            None => {
+                next_card_position(
+                    &self.db,
+                    origin.account_id,
+                    meta.agent_id.map(|id| id.0),
+                    &meta.project.0,
+                )
+                .await?
+            }
+        };
         // 申告が持ち主と食い違ったら**記録には残すが帰属は動かさない**。警告を出すのは、
         // 利用者から見ると「toml に書いたのに効かない」だけに見えるため
         if let (Some(claimed), Some(actual)) = (&meta.toml_account, &origin.account)
@@ -1077,15 +1114,6 @@ impl SessionRegistry {
 
     /// 記録を DB へ書く（無ければ作る）。
     async fn write_session(&self, origin: &ReportOrigin, meta: &SessionMeta) -> Result<(), DbErr> {
-        // **この値が効くのは行が無いときだけ。** 下の `on_conflict` は `Position` を
-        // 更新列に入れていないので、既にあるカードの並びは報告のたびに動いたりしない
-        let position = next_card_position(
-            &self.db,
-            origin.account_id,
-            meta.agent_id.map(|id| id.0),
-            &meta.project.0,
-        )
-        .await?;
         let row = entity::sessions::ActiveModel {
             card_id: Set(meta.card_id.0),
             agent_id: Set(meta.agent_id.map(|id| id.0)),
@@ -1111,7 +1139,10 @@ impl SessionRegistry {
             archived: Set(false),
             toml_account: Set(meta.toml_account.clone()),
             session_title: Set(meta.session_title.clone()),
-            position: Set(position),
+            // **この値が効くのは行が無いときだけ。** 下の `on_conflict` は `Position` を
+            // 更新列に入れていないので、既にあるカードの並びは報告のたびに動かない。
+            // 値そのものは `upsert` が決めている（記録の側が正・新しい1枚だけ末尾）
+            position: Set(meta.position),
         };
         entity::sessions::Entity::insert(row)
             .on_conflict(
@@ -1150,11 +1181,11 @@ impl SessionRegistry {
     ///
     /// 記録が手元に無いときだけ引く。**持ち主と外した印を一度に取る**のは、
     /// 別々に引くと2回問い合わせることになり、しかも間に状態が変わりうるため。
-    async fn stored(&self, card_id: CardId) -> Result<Option<(Uuid, bool)>, DbErr> {
+    async fn stored(&self, card_id: CardId) -> Result<Option<(Uuid, bool, i32)>, DbErr> {
         Ok(entity::sessions::Entity::find_by_id(card_id.0)
             .one(&self.db)
             .await?
-            .map(|row| (row.account_id, row.archived)))
+            .map(|row| (row.account_id, row.archived, row.position)))
     }
 
     /// そのカードの記録を取り出す。無ければ作る。
@@ -1245,6 +1276,7 @@ fn placeholder_meta(card_id: CardId) -> SessionMeta {
         account: None,
         toml_account: None,
         session_title: None,
+        position: 0,
     }
 }
 
@@ -1270,5 +1302,6 @@ fn meta_from_row(row: entity::sessions::Model) -> SessionMeta {
         account: None,
         toml_account: row.toml_account,
         session_title: row.session_title,
+        position: row.position,
     }
 }

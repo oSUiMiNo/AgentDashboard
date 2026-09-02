@@ -210,6 +210,17 @@ pub struct ProjectView {
     pub host: String,
     pub path: String,
     pub created_at: Timestamp,
+    /// そのアカウントの中での並び（並べ替え設計§9-2）。**小さいほうが先。**
+    ///
+    /// **並びの正はこの欄**であって `created_at` ではない。`created_at` は値としては
+    /// 守り続けるが、もう並びを決めない。
+    ///
+    /// # なぜ `#[serde(default)]` を書くのか
+    ///
+    /// 欄を持たない古い名乗りを 0 として受けるため。**版（`PROTOCOL_VERSION`）は
+    /// 上げない**ので、欠けた名乗りが来る道が残る。
+    #[serde(default)]
+    pub position: i32,
 }
 
 /// サーバ → ブラウザ。
@@ -341,6 +352,7 @@ mod tests {
             account: None,
             toml_account: None,
             session_title: None,
+            position: 0,
         }
     }
 
@@ -467,6 +479,7 @@ mod tests {
                     host: "local".to_string(),
                     path: "/home/example/dev/app".to_string(),
                     created_at: 1_700_000_000_000,
+                    position: 0,
                 },
             },
             ServerMessage::ProjectRemoved {
@@ -491,13 +504,14 @@ mod tests {
                 host: "local".to_string(),
                 path: "/home/example/dev/app".to_string(),
                 created_at: 1_700_000_000_000,
+                position: 0,
             },
         })
         .unwrap();
         assert_eq!(
             text,
             format!(
-                r#"{{"t":"project_upsert","project":{{"id":"{id}","host":"local","path":"/home/example/dev/app","created_at":1700000000000}}}}"#
+                r#"{{"t":"project_upsert","project":{{"id":"{id}","host":"local","path":"/home/example/dev/app","created_at":1700000000000,"position":0}}}}"#
             )
         );
 

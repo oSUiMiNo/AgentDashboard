@@ -611,6 +611,7 @@ mod tests {
             account: None,
             toml_account: None,
             session_title: session_title.map(str::to_string),
+            position: 0,
         }
     }
 
