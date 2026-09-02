@@ -17,7 +17,7 @@
  * というのが要件の使い方なので、送るたびにターミナルへ切り替えさせない。
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 import { Button } from '@/components/ui/button'
 import { InputDock } from '@/components/InputDock/InputDock'
@@ -58,9 +58,28 @@ interface Props {
   cardId: CardId
   /** 横並び表示（グループビュー）で使うときは幅を固定する */
   compact?: boolean
+  /**
+   * 掴み手（並べ替え設計§3-1・読み替え1）。**`session-ops` の `data-row="1"` の左端**へ
+   * 置く——セッションに効く操作はそこに集まっている（`DESIGN.md` §39.2）。
+   *
+   * **単独のセッション専用画面には出さない。** 並べる相手が1本も無いので、押しても
+   * 何も起きないものを置くと壊れているのと見分けが付かない。**置き場所は分岐させず、
+   * 有無だけが変わる**（§39.3 が禁じているのは場所の分岐であって、有無ではない）。
+   */
+  handle?: ReactNode
+  /** 落とし先を測るための `ref`。並びを持っている側（`GroupView`）が矩形を測る */
+  rootRef?: (element: HTMLElement | null) => void
+  /** いま浮かせているか */
+  dragging?: boolean
 }
 
-export function SessionView({ cardId, compact = false }: Props) {
+export function SessionView({
+  cardId,
+  compact = false,
+  handle,
+  rootRef,
+  dragging = false,
+}: Props) {
   const kill = useWsStore((state) => state.kill)
   const archive = useWsStore((state) => state.archive)
   const revive = useWsStore((state) => state.revive)
@@ -114,9 +133,15 @@ export function SessionView({ cardId, compact = false }: Props) {
       data-card-id={session.card_id}
       data-status={session.status.kind}
       data-view={view}
+      data-dragging={dragging ? 'true' : 'false'}
+      ref={rootRef}
+      /*
+        掴んでいる区画を流れから浮かせる（設計§3-5）。倍率と傾きは `DESIGN.md` §27.5 の
+        候補そのまま。**横並びは横1列**なので、傾けても隣を押しのけない
+      */
       className={`flex min-h-0 flex-col gap-1 ${
         compact ? 'w-[42rem] shrink-0' : 'min-w-0 flex-1'
-      }`}
+      }${dragging ? ' z-10 scale-[1.02] rotate-[1deg]' : ''}`}
     >
       {/*
         **画面の帯**（設計§17-1・`DESIGN.md` §39.2）。ここに置くのは
@@ -259,6 +284,7 @@ export function SessionView({ cardId, compact = false }: Props) {
             縦に割れる**壊れ方を、初期実装のフェーズ4で実測している
           */}
           <div data-row="1" className="flex items-center gap-2">
+            {handle}
             <span
               aria-hidden
               className={`size-2.5 shrink-0 rounded-full ${statusTone(session.status)}`}

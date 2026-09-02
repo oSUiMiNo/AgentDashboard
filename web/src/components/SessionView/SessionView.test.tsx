@@ -1,4 +1,5 @@
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
+import type { ReactNode } from 'react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -59,7 +60,7 @@ function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
  * `SessionView` は行き来の導線（`Link`）を持つので、**ルータの中でしか描けない**。
  * 被せ方の前例は `GroupView.test.tsx`。
  */
-function renderView(props: { compact?: boolean } = {}) {
+function renderView(props: { compact?: boolean; handle?: ReactNode } = {}) {
   return render(
     <MemoryRouter>
       <SessionView cardId={CARD} {...props} />
@@ -769,5 +770,43 @@ describe('SessionView のスリープと終了', () => {
 
     expect(archive).toHaveBeenCalledWith(CARD)
     expect(screen.queryByText('一覧に居ます')).toBeNull()
+  })
+})
+
+describe('掴み手の居場所は、2つの画面で同じ', () => {
+  it('渡された掴み手は `session-ops` の中に居る（横並びでも単独でも）', () => {
+    // **セッションに効く操作は、そのセッションの区画の真上**（`DESIGN.md` §39.2）。
+    // 帯へ上げると単独画面と場所が食い違い、**片方の画面だけを見ている限り
+    // 気づけない**。§39.3 が禁じているのは**場所の分岐**なので、ここは分岐させない
+    const 手 = <button data-testid="ため-の-掴み手" type="button" />
+    applySessionSnapshot([meta()])
+
+    renderView({ handle: 手 })
+    expect(
+      screen.getByTestId('ため-の-掴み手').closest('[data-testid="session-ops"]'),
+    ).not.toBeNull()
+
+    cleanup()
+    renderView({ compact: true, handle: 手 })
+    expect(
+      screen.getByTestId('ため-の-掴み手').closest('[data-testid="session-ops"]'),
+    ).not.toBeNull()
+  })
+})
+
+describe('単独のセッション専用画面には掴み手を出さない', () => {
+  it('並べる相手が1本も無いので、掴み手そのものが無い', () => {
+    // **押しても何も起きないものを置くと、壊れているのと見分けが付かない**
+    // （設計§3-1）。置き場所は分岐させず、有無だけが変わる——`GroupView` が
+    // 横並びのときにだけ渡す形にしてある
+    applySessionSnapshot([meta()])
+    renderView()
+    expect(screen.queryByTestId('reorder-handle')).toBeNull()
+
+    // **横並びでも、渡されなければ出ない。** 出す・出さないを決めるのは
+    // 並びを持っている側（`GroupView`）で、この区画は受け取るだけ
+    cleanup()
+    renderView({ compact: true })
+    expect(screen.queryByTestId('reorder-handle')).toBeNull()
   })
 })

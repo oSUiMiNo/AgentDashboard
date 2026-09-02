@@ -25,7 +25,11 @@
  */
 
 import { AnimatePresence } from 'motion/react'
-import { useState, type ReactNode } from 'react'
+import { useCallback, useState, type ReactNode } from 'react'
+
+import { ReorderHandle } from '@/components/ReorderHandle/ReorderHandle'
+import { useReorder } from '@/lib/useReorder'
+import { saveCardOrder } from '@/stores/sessions'
 import { useNavigate } from 'react-router'
 import { SessionAdd } from '@/components/SessionAdd/SessionAdd'
 import { SessionTile } from '@/components/SessionTile/SessionTile'
@@ -67,6 +71,30 @@ export function ProjectGroup({
   const navigate = useNavigate()
   const [error, setError] = useState<string | null>(null)
   const busy = cards.length > 0
+
+  /*
+    箱の中のカードの並べ替え（並べ替え設計§3）。**枠の中で閉じている**ので、
+    送り先はこの枠（host ＋ path）だけ。枠をまたいだ移動はやらない
+  */
+  const 並びを送る = useCallback(
+    async (next: readonly string[]) => {
+      setError(await saveCardOrder(host, project, next))
+    },
+    [host, project],
+  )
+  // **名前を分ける。** この箱自身が浮いているか（`dragging` prop）と、箱の中で
+  // どのカードが浮いているかは別物で、混ぜると片方が黙って消える
+  const {
+    order,
+    dragging: 掴んでいるカード,
+    bind,
+    itemRef,
+  } = useReorder<CardId>({
+    ids: cards,
+    onCommit: (next) => {
+      void 並びを送る(next)
+    },
+  })
 
   const remove = async () => {
     if (projectId === undefined) {
@@ -164,8 +192,20 @@ export function ProjectGroup({
         <div className="flex flex-wrap gap-3">
           {/* 起動と削除が分かるように出入りだけ動かす（増減はめったに起きない） */}
           <AnimatePresence initial={false}>
-            {cards.map((cardId) => (
-              <SessionTile key={cardId} cardId={cardId} />
+            {order.map((cardId) => (
+              <SessionTile
+                key={cardId}
+                cardId={cardId}
+                handle={
+                  <ReorderHandle
+                    kind="card"
+                    label="このセッションを掴んで並べ替える"
+                    {...bind(cardId)}
+                  />
+                }
+                rootRef={itemRef(cardId)}
+                dragging={掴んでいるカード === cardId}
+              />
             ))}
           </AnimatePresence>
         </div>

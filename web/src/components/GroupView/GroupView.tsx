@@ -32,16 +32,19 @@
  * 完結する。配置を選んだ理由そのものなので、右側の横並びには手を入れていない。
  */
 
+import { useState } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 import { Button } from '@/components/ui/button'
 import { FilesToggle } from '@/components/ProjectFiles/FilesToggle'
 import { useFilesParts } from '@/components/ProjectFiles/useFilesParts'
 import { SessionAdd } from '@/components/SessionAdd/SessionAdd'
+import { ReorderHandle } from '@/components/ReorderHandle/ReorderHandle'
 import { SessionView } from '@/components/SessionView/SessionView'
 import { useFilesPanel } from '@/lib/filesPanel'
 import { projectDisplayName } from '@/lib/path'
 import { backTargetFor, HOME } from '@/lib/routes'
-import { useProjectCards } from '@/stores/sessions'
+import { saveCardOrder, useProjectCards } from '@/stores/sessions'
+import { useReorder } from '@/lib/useReorder'
 import { useProjects } from '@/stores/projects'
 
 interface Props {
@@ -61,6 +64,17 @@ interface Props {
  */
 export function GroupView({ host, project }: Props) {
   const cards = useProjectCards(host, project)
+  const [orderError, setOrderError] = useState<string | null>(null)
+  /*
+    区画の並べ替え（並べ替え設計§3・読み替え1）。**ホームのカードと同じ並び**を
+    動かしている——正が1本なので、こちらで動かせばあちらにも出る
+  */
+  const { order, dragging, bind, itemRef } = useReorder<string>({
+    ids: cards,
+    onCommit: (next) => {
+      void saveCardOrder(host, project, next).then(setOrderError)
+    },
+  })
   const [filesOpen, toggleFiles] = useFilesPanel()
   const projects = useProjects()
   const navigate = useNavigate()
@@ -192,13 +206,40 @@ export function GroupView({ host, project }: Props) {
           */}
           {column}
 
+          {orderError !== null && (
+            <p
+              data-testid="card-order-error"
+              className="text-destructive shrink-0 self-center text-xs"
+            >
+              {orderError}
+            </p>
+          )}
+
           {cards.length === 0 ? (
             <p className="text-muted-foreground shrink-0 text-sm">
               このプロジェクトのセッションはありません
             </p>
           ) : (
-            cards.map((cardId) => (
-              <SessionView key={cardId} cardId={cardId} compact />
+            order.map((cardId) => (
+              <SessionView
+                key={cardId}
+                cardId={cardId}
+                compact
+                /*
+                  **横並びのときだけ掴み手を出す。** 単独のセッション専用画面には
+                  並べる相手が1本も無い（設計§3-1）。置き場所は分岐させず、
+                  有無だけが変わる
+                */
+                handle={
+                  <ReorderHandle
+                    kind="card"
+                    label="このセッションを掴んで並べ替える"
+                    {...bind(cardId)}
+                  />
+                }
+                rootRef={itemRef(cardId)}
+                dragging={dragging === cardId}
+              />
             ))
           )}
         </div>

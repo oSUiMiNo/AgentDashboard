@@ -41,7 +41,7 @@
 
 import { modelLabel } from '@/lib/models'
 import { motion } from 'motion/react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router'
 import { Badge } from '@/components/ui/badge'
 import { formatElapsed } from '@/lib/time'
@@ -67,6 +67,18 @@ import { useWsStore } from '@/stores/ws'
 
 interface Props {
   cardId: CardId
+  /**
+   * 掴み手（並べ替え設計§3-1）。**器（`tile-shell`）の直下**、復旧ボタンと同じ層に
+   * 置く——**器は揺れない**ので、承認待ちでカタカタしていても掴み手は動かない。
+   * 切る枠の内側に置くと、揺れる的を掴ませることになる。
+   *
+   * 作るのは並びを持っている側（`ProjectGroup`）。**小窓は自分が何番目かを知らない。**
+   */
+  handle?: ReactNode
+  /** 落とし先を測るための `ref`。並びを持っている側が矩形を測る */
+  rootRef?: (element: HTMLElement | null) => void
+  /** いま浮かせているか。**掴んでいる本人だけ** */
+  dragging?: boolean
 }
 
 /**
@@ -197,7 +209,12 @@ function useEcho(message: string | null): boolean {
   return shown && message !== null
 }
 
-export function SessionTile({ cardId }: Props) {
+export function SessionTile({
+  cardId,
+  handle,
+  rootRef,
+  dragging = false,
+}: Props) {
   const navigate = useNavigate()
   const session = useSessionCard(cardId)
   const agents = useSettingsStore((state) => state.settings.agents)
@@ -308,14 +325,32 @@ export function SessionTile({ cardId }: Props) {
       中身だけを縮めると裏の輪が覗く。
     */
     <motion.div
-      className="tile-shell relative"
+      ref={rootRef}
+      /*
+        掴んでいるものを流れから浮かせる（設計§3-5・§8-2）。**影ではなく `transform`
+        で作る**——カードは `mask-image` を使っており、外へ描くものは切られる。
+        倍率と傾きは `DESIGN.md` §27.5 の候補そのまま。
+
+        **掴んでいないときは1文字も足さない。** 骨格を字で固定しているテストがあり、
+        末尾に空白が1つ入るだけで落ちる（実際に落ちた）
+      */
+      className={
+        dragging
+          ? 'tile-shell relative z-10 scale-[1.02] rotate-[1deg]'
+          : 'tile-shell relative'
+      }
       initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, scale: 0.97 }}
       transition={{ duration: 0.18, ease: 'easeOut' }}
       data-testid="tile-shell"
       data-card-id={session.card_id}
-      data-motion={motionKind}
+      data-dragging={dragging ? 'true' : 'false'}
+      /*
+        **掴んでいる間は揺れを止める**（設計§8-1）。揺れながら動くと落とし先が読めない。
+        `still` は「動きを止める」段と同じ扱いなので、承認待ちのカタカタも止まる
+      */
+      data-motion={dragging ? 'still' : motionKind}
       // **賑やかのときは属性ごと出さない**（カード設計§9-5-3）
       data-quiet={quiet === 'lively' ? undefined : quiet}
       // **中身と同じ印を器にも出す**（カード設計§7-4-4）。輪と効果線は中身の
@@ -736,6 +771,20 @@ export function SessionTile({ cardId }: Props) {
         **揺らさない**（カード設計§7）。器の直下に置いてあるので、枠が揺れても
         このボタンだけは動かない
       */}
+      {/*
+        掴み手も**器の直下**（復旧ボタンと同じ層）。器は揺れないので、承認待ちで
+        カタカタしていても掴む的は動かない（設計§3-1）
+      */}
+      {handle !== undefined && (
+        <div
+          className="absolute top-1 left-1 z-20"
+          // 小窓のクリック（＝専用画面を開く）と取り違えない
+          onClick={(event) => event.stopPropagation()}
+        >
+          {handle}
+        </div>
+      )}
+
       {revivable.kind !== 'live' && (
         <button
           type="button"

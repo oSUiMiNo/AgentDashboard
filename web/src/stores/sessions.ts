@@ -600,3 +600,33 @@ export function getSessions(): SessionMeta[] {
     return meta === undefined ? [] : [meta]
   })
 }
+
+/**
+ * 1つの枠の中で、カードの並びをサーバへ送る（並べ替え設計§9-1）。
+ *
+ * **枠を名指す。** カードの `position` は枠の中で閉じているので、宛先が無いと
+ * 受け手はどの枠の話か分からない。**枠をまたいだ移動はやらない**ので、
+ * その枠に居ないカードは受け手が断る。
+ *
+ * 手元は先に書き換えない（`session_upsert` で戻ってくる）。戻り値は断られた理由で、
+ * 通れば `null`。
+ */
+export async function saveCardOrder(
+  host: string,
+  path: string,
+  cardIds: readonly string[],
+): Promise<string | null> {
+  try {
+    const response = await fetch('/api/sessions/order', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ host, path, card_ids: cardIds }),
+    })
+    if (!response.ok) {
+      return (await response.text()).trim() || '並べ替えを保存できませんでした'
+    }
+    return null
+  } catch {
+    return '並べ替えを保存できませんでした'
+  }
+}

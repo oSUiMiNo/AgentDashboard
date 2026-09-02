@@ -270,3 +270,4 @@ describe('GroupView のヘッダは、セッション専用画面と揃ってい
     expect(screen.queryByTestId('close-card')).toBeNull()
   })
 })
+
