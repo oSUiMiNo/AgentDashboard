@@ -16,9 +16,22 @@
  *
  * 一覧のカード（折り返しの2次元）・枠（縦1列）・PJT 専用画面の区画（横1列）を、
  * 同じフックで扱う。**次元ごとに分岐を書かない**（設計§3-4）。
+ *
+ * # 動きの本体と、食い違いの記録は `reorder.css` にある
+ *
+ * ここが持つのは**動かす量**（FLIP の逆算）だけで、**動き方**——時間・曲線・止める段
+ * （静けさ・OS の「動きを減らす」）——は CSS 側にある。**ガイドラインの禁止
+ * （「一覧の小窓に `layout` を付けるのも禁止」）との食い違いも、あちらが正本。**
+ *
+ * # 端での自動送りは、いまどこからも使われていない
+ *
+ * `scroller` は3つの呼び出し元のどこからも渡していない（実装は在るが死んでいる）。
+ * **繋ぐ前に直すことがある**——`rects` は掴んだ瞬間の**画面の座標**で凍結してあるので、
+ * 容器がスクロールすると**土台だけが取り残されて落とし先がずれる**。繋ぐなら、
+ * 矩形をスクロール量ぶん補正するか、容器の座標で持ち直すこと。
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { moveItem, nearestIndex, NO_TARGET, type Point, type Rect } from './reorder'
 import { resetField } from './roam'
 
@@ -27,6 +40,19 @@ import { resetField } from './roam'
  *
  * **無いと画面外へ運べない**（方針§2-4）。指が端に触れている間だけ送る。
  */
+/**
+ * 押しのけられる側が滑る時間（ms）。**`reorder.css` の `--reorder-ms` と同じ値**
+ * （検査が突き合わせる）。`DESIGN.md` §28.2 の Normal（140〜220ms）の中。
+ */
+export const REORDER_SLIDE_MS = 180
+
+/**
+ * 離してから「掴んでいる」印を降ろすまで（ms）。
+ *
+ * **同時に降ろすと、持ち上げが元へ戻る動きが瞬時に切れる。** 滑り終わるまで待つ。
+ */
+export const REORDER_SETTLE_MS = REORDER_SLIDE_MS + 20
+
 export const AUTO_SCROLL_EDGE_PX = 48
 
 /** 1フレームあたりの送り量（px）。 */
@@ -84,6 +110,13 @@ export interface Reorder<T extends string> {
   bind: (id: T) => Bound
   /** 並びの中の要素を覚えるための `ref` */
   itemRef: (id: T) => (element: HTMLElement | null) => void
+  /**
+   * いま並べ替えている最中か。**掴んでいる本人だけでなく、並び全員に配る印。**
+   *
+   * 押しのけられる側も滑らせるので、`dragging`（1つだけ）とは別に要る。
+   * **離してからも滑り終わるまで真のまま**（`REORDER_SETTLE_MS`）。
+   */
+  reordering: boolean
 }
 
 export function useReorder<T extends string>({
@@ -93,9 +126,26 @@ export function useReorder<T extends string>({
 }: Options<T>): Reorder<T> {
   const [dragging, setDragging] = useState<T | null>(null)
   const [order, setOrder] = useState<readonly T[]>(ids)
+  /**
+   * 並び全員に配る「いま並べ替えている」印。**離してからも滑り終わるまで真のまま。**
+   */
+  const [reordering, setReordering] = useState(false)
+  const 降ろす予定 = useRef<ReturnType<typeof setTimeout> | null>(null)
   const elements = useRef(new Map<T, HTMLElement>())
+  /**
+   * 並びが変わる**直前**の見え方。**変わったときだけ**控える。
+   *
+   * ここに入っていると、次の描画の直後に FLIP（逆算を当てて 0 へ戻す）が走る。
+   */
+  const 控え = useRef<Map<T, { left: number; top: number }> | null>(null)
   // 掴んだ瞬間に測った矩形と、掴んだものの元の添字。**運びの最中は動かさない**
-  const measured = useRef<{ rects: Rect[]; from: number; base: readonly T[] } | null>(null)
+  const measured = useRef<{
+    rects: Rect[]
+    from: number
+    base: readonly T[]
+    /** いまの落とし先。**変わったときだけ並びを作り直す** */
+    to: number
+  } | null>(null)
   const 送り = useRef<{ x: number; y: number }>({ x: 0, y: 0 })
 
 
@@ -134,6 +184,75 @@ export function useReorder<T extends string>({
     [],
   )
 
+  /** いまの見え方を控える。**DOM を読むのはここと、掴んだ瞬間の1回だけ** */
+  const 位置を控える = useCallback(() => {
+    const 表 = new Map<T, { left: number; top: number }>()
+    for (const [id, element] of elements.current) {
+      const box = element.getBoundingClientRect()
+      表.set(id, { left: box.left, top: box.top })
+    }
+    return 表
+  }, [])
+
+  /*
+    **押しのけられる側も滑らせる**（並べ替え設計§7-3 の読み替え・利用者の指摘 2026-09-03）。
+
+    やり方は FLIP——**並びを差し替えた直後に、動いたぶんを逆向きの `transform` で
+    打ち消し**（見た目は元の位置のまま）、**1フレームだけ滑りを切って確定させ**、
+    **0 へ戻して滑らせる**。動き方（時間・曲線・止める段）は `reorder.css` が持つ。
+
+    **`motion` の `layout` は使わない。** あれは掴んでいなくても効くので、
+    禁止（`guideline.md`「一覧の小窓に `layout` を付けるのも禁止」）の射程を越える。
+  */
+  useLayoutEffect(() => {
+    const 前 = 控え.current
+    控え.current = null
+    if (前 === null) {
+      return
+    }
+    const 動いた: HTMLElement[] = []
+    for (const [id, element] of elements.current) {
+      const was = 前.get(id)
+      if (was === undefined) {
+        continue
+      }
+      const box = element.getBoundingClientRect()
+      const dx = was.left - box.left
+      const dy = was.top - box.top
+      if (dx === 0 && dy === 0) {
+        // jsdom は矩形を固定で返すので、**必ずここを通る**（動きは E2E が見る）
+        continue
+      }
+      element.dataset.reorderSnap = 'true'
+      element.style.setProperty('--reorder-dx', `${dx}px`)
+      element.style.setProperty('--reorder-dy', `${dy}px`)
+      動いた.push(element)
+    }
+    if (動いた.length === 0) {
+      return
+    }
+    /*
+      **1回だけ読んで、逆算を「いまの見た目」として確定させる。**
+      読まないと、次の行で戻したときにブラウザが「変化が無かった」と畳んでしまい、
+      1ピクセルも滑らない。
+    */
+    void 動いた[0].getBoundingClientRect()
+    for (const element of 動いた) {
+      delete element.dataset.reorderSnap
+      element.style.setProperty('--reorder-dx', '0px')
+      element.style.setProperty('--reorder-dy', '0px')
+    }
+  }, [order])
+
+  // 外れるときに予定を残さない
+  useEffect(() => {
+    return () => {
+      if (降ろす予定.current !== null) {
+        clearTimeout(降ろす予定.current)
+      }
+    }
+  }, [])
+
   const bind = useCallback(
     (id: T): Bound => ({
       onGrab: () => {
@@ -152,7 +271,13 @@ export function useReorder<T extends string>({
           const box = element.getBoundingClientRect()
           return { left: box.left, top: box.top, width: box.width, height: box.height }
         })
-        measured.current = { rects, from, base }
+        measured.current = { rects, from, base, to: from }
+        // 離した直後にもう一度掴んだら、降ろす予定は捨てる
+        if (降ろす予定.current !== null) {
+          clearTimeout(降ろす予定.current)
+          降ろす予定.current = null
+        }
+        setReordering(true)
         /*
           **掴んだ瞬間に、手元の並びへ土台を入れる。**
 
@@ -179,9 +304,19 @@ export function useReorder<T extends string>({
           })
         }
         const target = nearestIndex(held.rects, point)
-        if (target === NO_TARGET) {
+        /*
+          **落とし先が変わったときだけ並びを作り直す。**
+
+          `moveItem` は動かないときも新しい配列を返すので、素朴に呼ぶと
+          `pointermove` のたびに描き直しが走る。加えて FLIP は「並びが変わった瞬間」を
+          捉える必要があるので、**変わっていないのに控えを取ると、動いていない要素に
+          逆算を当てて動かしてしまう**。
+        */
+        if (target === NO_TARGET || target === held.to) {
           return
         }
+        held.to = target
+        控え.current = 位置を控える()
         setOrder(moveItem(held.base, held.from, target))
       },
       onDrop: () => {
@@ -189,6 +324,17 @@ export function useReorder<T extends string>({
         measured.current = null
         送り.current = { x: 0, y: 0 }
         setDragging(null)
+        /*
+          **印は、滑り終わるまで降ろさない。** 同時に降ろすと持ち上げ（1.02倍・1度）が
+          元へ戻る動きが瞬時に切れて、離した瞬間にカクつく。
+        */
+        if (降ろす予定.current !== null) {
+          clearTimeout(降ろす予定.current)
+        }
+        降ろす予定.current = setTimeout(() => {
+          降ろす予定.current = null
+          setReordering(false)
+        }, REORDER_SETTLE_MS)
         // **並べ替えたら、回遊する線の場を測り直す**（設計§8-1）。線は掴む前に測った
         // 矩形の上を飛ぶので、並びが変わったのに測り直さないと**もう居ない場所を
         // なぞる**。掴んでいる間は `data-motion` が `still` なので線そのものは
@@ -222,5 +368,11 @@ export function useReorder<T extends string>({
     運んでいる最中だけは手元の並び（場所取りを動かしたもの）を返す。**外から新しい
     並びが来ても、指の下では動かさない。**
   */
-  return { order: dragging === null ? ids : order, dragging, bind, itemRef }
+  return {
+    order: dragging === null ? ids : order,
+    dragging,
+    bind,
+    itemRef,
+    reordering,
+  }
 }

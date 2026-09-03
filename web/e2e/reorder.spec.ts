@@ -299,6 +299,93 @@ test('カードを並べ替えると、PJT 専用画面も同じ順になる', a
   expect(横並び[0]).toBe(前[1])
 })
 
+test('掴んでいる間だけ、押しのけられる側も滑る', async ({ page }) => {
+  /*
+    **ここは実物のブラウザでしか言えない。** jsdom は矩形を固定で返すので FLIP の差分が
+    必ず 0 になり、**滑る動きそのものを1つも確かめられない**。
+
+    見るのは3つ——**印が掴んでいる間だけ立つ**こと、**押しのけられた側にも走っている
+    動きが在る**こと（＝「持っているカードだけでなく、入れ替わる側も」の実体）、
+    **傾きが実際に出ている**こと（クラスは付いていても `motion` に潰されていた）。
+  */
+  await openDashboard(page)
+  const [先, 後] = await 枠を2つ(page, 'motion')
+
+  const 後の枠 = page.locator(`[data-testid="project-group"][data-project="${後}"]`)
+  const 先の枠 = page.locator(`[data-testid="project-group"][data-project="${先}"]`)
+  await 後の枠.scrollIntoViewIfNeeded()
+  const 箱 = await 後の枠.boundingBox()
+  const 的 = await 先の枠.boundingBox()
+  if (!箱 || !的) {
+    throw new Error('枠の位置が取れません')
+  }
+
+  // 掴む前は立っていない
+  await expect(後の枠).toHaveAttribute('data-reordering', 'false')
+
+  const from = { x: 箱.x + 5, y: 箱.y + 5 }
+  const to = { x: 的.x + 的.width / 2, y: 的.y + 的.height / 2 }
+  await page.mouse.move(from.x, from.y)
+  await page.mouse.down()
+  for (let step = 1; step <= 8; step += 1) {
+    await page.mouse.move(
+      from.x + ((to.x - from.x) * step) / 8,
+      from.y + ((to.y - from.y) * step) / 8,
+    )
+  }
+
+  // **掴んでいる間は立つ**
+  await expect(後の枠).toHaveAttribute('data-reordering', 'true')
+  await expect(後の枠).toHaveAttribute('data-dragging', 'true')
+
+  // **傾きが実際に出ている**（`transform: none` に潰されていない）
+  const 変形 = await 後の枠.evaluate((el) => getComputedStyle(el).transform)
+  expect(変形).not.toBe('none')
+
+  // **押しのけられた側にも動きが走っている**
+  const 押しのけられた側 = await 先の枠.evaluate((el) => el.getAnimations().length)
+  expect(押しのけられた側).toBeGreaterThan(0)
+
+  await page.mouse.up()
+
+  // **離してもすぐには降ろさない**（戻る動きが切れないため）。滑り終われば降りる
+  await expect(後の枠).toHaveAttribute('data-reordering', 'false', { timeout: 3_000 })
+})
+
+test('「静止」を選ぶと、並べ替えは滑らない', async ({ page }) => {
+  /*
+    **設定の約束を守っていることを、実物で見る。** 「すべて止める」と言っている段で
+    ここだけ動くと、約束が嘘になる。並べ替えそのものは動かなくても機能する。
+  */
+  await openDashboard(page)
+  const [, 後] = await 枠を2つ(page, 'quiet')
+  const 後の枠 = page.locator(`[data-testid="project-group"][data-project="${後}"]`)
+  await 後の枠.scrollIntoViewIfNeeded()
+  const 箱 = await 後の枠.boundingBox()
+  if (!箱) {
+    throw new Error('枠の位置が取れません')
+  }
+
+  await page.request.put('/api/settings', { data: { motion_quiet: 'still' } })
+  await page.reload()
+  await openDashboard(page)
+
+  try {
+    await page.mouse.move(箱.x + 5, 箱.y + 5)
+    await page.mouse.down()
+    await page.mouse.move(箱.x + 40, 箱.y + 5)
+    await page.mouse.move(箱.x + 80, 箱.y + 5)
+    const 時間 = await 後の枠.evaluate(
+      (el) => getComputedStyle(el).transitionDuration,
+    )
+    expect(時間).toBe('0s')
+    await page.mouse.up()
+  } finally {
+    // **戻し忘れると、後続の無関係なテストが静止のまま走る**
+    await page.request.put('/api/settings', { data: { motion_quiet: 'lively' } })
+  }
+})
+
 test('区画の掴み手は、いまも出る', async ({ page }) => {
   /*
     **このテストは末尾に置く。** 同じ作業フォルダにセッションを1本増やすので、

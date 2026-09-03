@@ -89,7 +89,7 @@ export function TileGrid() {
     setOrderError(await saveProjectOrder(ids))
   }, [])
 
-  const { order, dragging, bind, itemRef } = useReorder({
+  const { order, dragging, bind, itemRef, reordering } = useReorder({
     ids: frames.map(鍵),
     onCommit: (next) => {
       void 並びを送る(next)
@@ -452,6 +452,7 @@ export function TileGrid() {
               grab={group.projectId === undefined ? undefined : bind(鍵(group))}
               rootRef={itemRef(鍵(group))}
               dragging={dragging === 鍵(group)}
+              reordering={reordering}
             />
           ))}
         </div>

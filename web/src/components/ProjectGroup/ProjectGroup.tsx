@@ -31,6 +31,7 @@ import { useReorder, type Bound } from '@/lib/useReorder'
 import { useGrip } from '@/lib/useGrip'
 import { 重ねる } from '@/lib/handlers'
 import { usePress } from '@/lib/usePress'
+import { useSettingsStore } from '@/stores/settings'
 import { saveCardOrder } from '@/stores/sessions'
 import { useNavigate } from 'react-router'
 import { SessionAdd } from '@/components/SessionAdd/SessionAdd'
@@ -61,6 +62,12 @@ interface Props {
   rootRef?: (element: HTMLElement | null) => void
   /** いま浮かせているか。**掴んでいる本人だけ** */
   dragging?: boolean
+  /**
+   * いま並べ替えている最中か。**並び全員に配る**（押しのけられる側も滑らせるため）。
+   *
+   * `dragging` は1つだけなので、これとは別に要る。
+   */
+  reordering?: boolean
 }
 
 export function ProjectGroup({
@@ -71,6 +78,7 @@ export function ProjectGroup({
   grab,
   rootRef,
   dragging = false,
+  reordering = false,
 }: Props) {
   const navigate = useNavigate()
   const [error, setError] = useState<string | null>(null)
@@ -84,6 +92,7 @@ export function ProjectGroup({
     見るが、**取り合わない**——マウスは押した瞬間には掴まず 3px で、指は長押しが
     成立するまで掴まない。長押しの計測（8px で捨てる）より先に掴むことがない。
   */
+  const quiet = useSettingsStore((state) => state.settings.motion_quiet)
   const 掴み = useGrip({
     enabled: grab !== undefined,
     when: (event) => (event.pointerType === 'mouse' ? 'move' : 'hold'),
@@ -118,6 +127,7 @@ export function ProjectGroup({
     dragging: 掴んでいるカード,
     bind,
     itemRef,
+    reordering: 並べ替え中,
   } = useReorder<CardId>({
     ids: cards,
     onCommit: (next) => {
@@ -168,6 +178,15 @@ export function ProjectGroup({
       // **運んだ直後の `click` を捨てる。** 捨てないと並べ替えるたびに選択が入れ替わる
       onClickCapture={掴み.handlers.onClickCapture}
       data-selected={押し方.selected ? 'true' : 'false'}
+      /*
+        並べ替えの動きは `reorder.css` が持つ（設計§7-3 の読み替え）。**掴んでいる間だけ**
+        滑らせるので、印は2つ要る——**並び全員が滑る**（`data-reorder-item` ＋
+        `data-reordering`）のと、**持っているものだけが浮く**（`data-dragging`）。
+      */
+      data-reorder-item=""
+      data-reordering={reordering ? 'true' : 'false'}
+      // **賑やかのときは属性ごと出さない**（カード設計§9-5-3）。「静止」なら滑らせない
+      data-quiet={quiet === 'lively' ? undefined : quiet}
       // 端末の長押しメニューを抑える（設計§4-4）。素のスタイルで書く理由は SessionTile と同じ
       style={{ WebkitTouchCallout: 'none', WebkitUserSelect: 'none', userSelect: 'none' }}
       /*
@@ -271,6 +290,7 @@ export function ProjectGroup({
                 key={cardId}
                 cardId={cardId}
                 grab={bind(cardId)}
+                reordering={並べ替え中}
                 rootRef={itemRef(cardId)}
                 dragging={掴んでいるカード === cardId}
               />

@@ -1,0 +1,114 @@
+/*
+  並べ替えの動き（並べ替え設計§7-3 の読み替え）。
+
+  # `.claude/docs/guideline.md` の禁止と食い違っている。承知のうえで残す（§35.1）
+
+  原文：「一覧の小窓に `layout` を付けるのも禁止 — 並びが変わるたびに小窓が動き、
+  **押そうとした瞬間に的が逃げる**。一覧は『押して開く』ための画面なので、
+  見栄えより狙いやすさを優先する」
+
+  **この規則の理由は、いまも 100% 正しい。** それでも、掴んでいる間だけ動かす。
+
+  1. **禁止が守っているのは「押そうとした瞬間」である。** 指やボタンが既に乗っていて
+     運んでいる最中は、押す動作がこれから始まることが無い——**逃げる的が無い**
+  2. **利用者の指摘そのものが発動条件だった**（2026-09-03）。並べ替え設計§7-3 が
+     「瞬間で流れるのが実際に見づらいなら、**掴んでいる間だけ**動きを許す道はある」と
+     道を残しており、実物を見ての指摘（「ぬるんと入れ替わってほしい。持っている
+     カードだけでなく、入れ替わる側も」）がその条件を満たした
+  3. **`motion` の `layout` は使わない。** あれは掴んでいなくても効くので、
+     **切り替え忘れが静かに禁止を破る**。ここは `--reorder-ms` の既定を `0ms` にし、
+     `[data-reordering='true']` の中にしか `transform` と `transition` を書かないことで、
+     **掴んでいない間は規則ごと存在しない**状態にしてある
+
+  **射程はここまで。** 新着・削除・他の機械からの並べ替えでは 1px も動かない。
+  **動かしたくなったら、この段落を書き換えてからにすること。**
+
+  # なぜ `tile.css` へ混ぜないのか
+
+  あちらは**小窓の中身**のもので、「位置と大きさを動かさない」「`will-change` を
+  書かない」という許可表を検査が見張っている。ここは**器そのものを動かす**規則なので、
+  同じ器へ入れると許可表が何を守っているのか分からなくなる（`controls.css` を
+  分けたのと同じ理由）。
+
+  # 動かす量は JavaScript が渡し、動き方は CSS が持つ
+
+  `useReorder` が並びを差し替える直前に位置を控え、差し替えた直後に**差分を
+  `--reorder-dx` / `--reorder-dy` へ入れて1フレームだけ滑りを切り、0 へ戻す**（FLIP）。
+  止める段（静けさ・OS の設定）を JavaScript へ散らさないための分担である。
+*/
+
+[data-reorder-item] {
+  /* **既定は 0ms。掴んでいない間は、どの規則からもここを動かせない** */
+  --reorder-ms: 0ms;
+  /* `Sidebar` の「スライド」と同じ語彙。強い ease-out で、行き過ぎない */
+  --reorder-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --reorder-dx: 0px;
+  --reorder-dy: 0px;
+  --reorder-lift: 1;
+  --reorder-tilt: 0deg;
+}
+
+/*
+  **ここが「掴んでいる間だけ」の1行。** これ以外に滑る規則を書かない。
+
+  180ms は `DESIGN.md` §28.2 の **Normal（140〜220ms）**。Micro（80〜140）だと
+  「どれが動いたか」が読めず瞬間と区別が付かない。運びの最中に何度も走るので、
+  パネルの 220ms よりわずかに速い側に置く。
+*/
+[data-reorder-item][data-reordering='true'] {
+  --reorder-ms: 180ms;
+  transition: transform var(--reorder-ms) var(--reorder-ease);
+  transform: translate(var(--reorder-dx), var(--reorder-dy))
+    scale(var(--reorder-lift)) rotate(var(--reorder-tilt));
+}
+
+/*
+  持っているもの。**倍率と傾きは `DESIGN.md` §27.5 の候補そのまま**（値は据え置き
+  ——利用者が「コミカルでいい感じ」と言っている）。**影は使わない**——カードは
+  `mask-image` を使う層を持ち、外へ描くものは切られる（並べ替え設計§8-2）。
+*/
+[data-reorder-item][data-dragging='true'] {
+  --reorder-lift: 1.02;
+  --reorder-tilt: 1deg;
+  position: relative;
+  z-index: 10;
+}
+
+/* 枠は面が大きいので、浮いていることを薄さでも出す */
+[data-testid='project-group'][data-dragging='true'] {
+  opacity: 0.9;
+}
+
+/*
+  FLIP の逆算を当てる1フレームだけ、滑りを切る。**後ろに置いて順序で勝つ**
+  ——切らずに逆算を入れると、逆算そのものが滑って二重に動く。
+*/
+[data-reorder-item][data-reorder-snap='true'] {
+  transition: none;
+}
+
+/*
+  **「静止」は滑らせない。** 設定は「すべて止める。色・記号・文字は残るので状態は
+  読める」と宣言しているので、ここを例外にすると**設定の約束が嘘になる**。
+  並べ替えは動かなくても機能する（入れ替わりが瞬時に戻るだけ）。
+
+  **「控えめ」は止めない。** あの段の役目は「人が頼んでいない周囲の動きを止め、
+  動いているカード＝見に行くカードにする」ことで、**いま自分が指で起こしている
+  動きは対象ではない**。
+*/
+[data-reorder-item][data-quiet='still'] {
+  --reorder-ms: 0ms;
+}
+
+/*
+  OS の「動きを減らす」。**ファイルの最後に置く。** 上の規則と詳細度が並ぶので、
+  順序だけで勝つ——**この下に規則を足さないこと。**
+
+  `MotionConfig reducedMotion="user"` は `motion` の transform と layout にしか
+  効かず、**CSS の `transition` には届かない**ので、ここに自分で書く必要がある。
+*/
+@media (prefers-reduced-motion: reduce) {
+  [data-reorder-item][data-reordering='true'] {
+    --reorder-ms: 0ms;
+  }
+}

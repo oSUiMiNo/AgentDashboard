@@ -72,6 +72,8 @@ interface Props {
   rootRef?: (element: HTMLElement | null) => void
   /** いま浮かせているか */
   dragging?: boolean
+  /** いま並べ替えている最中か。**並び全員に配る**（押しのけられる側も滑らせるため） */
+  reordering?: boolean
 }
 
 export function SessionView({
@@ -80,6 +82,7 @@ export function SessionView({
   handle,
   rootRef,
   dragging = false,
+  reordering = false,
 }: Props) {
   const kill = useWsStore((state) => state.kill)
   const archive = useWsStore((state) => state.archive)
@@ -135,6 +138,10 @@ export function SessionView({
       data-status={session.status.kind}
       data-view={view}
       data-dragging={dragging ? 'true' : 'false'}
+      /* 並べ替えの動きは `reorder.css` が持つ（設計§7-3 の読み替え） */
+      data-reorder-item=""
+      data-reordering={reordering ? 'true' : 'false'}
+      data-quiet={quiet === 'lively' ? undefined : quiet}
       ref={rootRef}
       /*
         掴んでいる区画を流れから浮かせる（設計§3-5）。倍率と傾きは `DESIGN.md` §27.5 の

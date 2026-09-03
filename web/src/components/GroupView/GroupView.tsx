@@ -70,7 +70,7 @@ export function GroupView({ host, project }: Props) {
     区画の並べ替え（並べ替え設計§3・読み替え1）。**ホームのカードと同じ並び**を
     動かしている——正が1本なので、こちらで動かせばあちらにも出る
   */
-  const { order, dragging, bind, itemRef } = useReorder<string>({
+  const { order, dragging, bind, itemRef, reordering } = useReorder<string>({
     ids: cards,
     onCommit: (next) => {
       void saveCardOrder(host, project, next).then(setOrderError)
@@ -242,6 +242,7 @@ export function GroupView({ host, project }: Props) {
                 }
                 rootRef={itemRef(cardId)}
                 dragging={dragging === cardId}
+                reordering={reordering}
               />
             ))
           )}

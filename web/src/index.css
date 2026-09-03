@@ -12,6 +12,8 @@
 @import './roam.css';
 /* 帯に置く操作（電源ボタン・ターミナルのトグル）。位置の理由は上と同じ（帯設計§15） */
 @import './controls.css';
+/* 掴んで並べ替えている間だけの動き。位置の理由は上と同じ（並べ替え設計§7-3 の読み替え） */
+@import './reorder.css';
 
 @custom-variant dark (&:is(.dark *));
 
