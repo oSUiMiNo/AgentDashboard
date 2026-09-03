@@ -153,6 +153,40 @@ export interface SessionMeta {
   nickname: string | null
 }
 
+/**
+ * 過去のセッション1本（名前付け設計§6-2）。`GET /api/sessions/past` が返す行。
+ *
+ * **カードではなく CLI セッションを表す**ので `card_id` を持たない——同じセッションを
+ * 指すカードが複数あることがあり（乗り換えの履歴）、どれを代表にするかは意味を持たない。
+ */
+export interface PastSession {
+  /** 呼び戻す先。**これが一覧の同一性**（同じIDの行は1つに畳んである） */
+  claude_session_id: string
+  /** 利用者が付けた名前。`null` は付けていない */
+  nickname: string | null
+  /** CLI が付けた名前。名前が無いときに薄く出す側 */
+  session_title: string | null
+  /** 作業ディレクトリ。**起こすときはサーバが記録から引く**ので、ブラウザは運ばない */
+  project: string
+  /** どの PC のものか。ローカルモードは `null` */
+  agent_id: string | null
+  /** 記録に残っている権限モード。**画面が既定として使うだけ**で、選び直せる */
+  permission_mode: PermissionMode | null
+  last_activity_at: number
+  /**
+   * 履歴が実在するか（設計§8-5）。
+   *
+   * | 値 | 意味 |
+   * |---|---|
+   * | `true` | 確かめて在った |
+   * | `null` | **確かめていない**（PC が繋がっていない・版が古い・時間切れ） |
+   *
+   * `false` はここへ来ない——確かめて無かったものは**サーバが一覧から外す**。
+   * **`null` を「無い」と混同しないこと。** 選べる形で残す。
+   */
+  exists: boolean | null
+}
+
 /** JSONL レコードの `uuid` に対応するノードID。 */
 export type NodeId = string
 

@@ -136,6 +136,26 @@ interface WsState {
    * くれるが、こちらは**席が空くまでカードが1バイトも変わらない**（§9-4）。
    */
   revive: (cardId: CardId) => void
+  /**
+   * カードに付いている CLI セッションへ、利用者の名前を付ける（名前付け設計§9-5）。
+   *
+   * **楽観更新しない。** 手元を先に書き換えず、サーバが配る `session_upsert` で
+   * 変わるのを待つ——ブラウザ側にも持つと2箇所が食い違う（`setModel` と同じ流儀）。
+   *
+   * `nickname` が `null` なら消す。
+   */
+  setNickname: (cardId: CardId, nickname: string | null) => void
+  /**
+   * 過去の CLI セッションを指定して、新しいカードで起こす（名前付け設計§9-4）。
+   *
+   * **カードIDを運ばない**（カードはまだ無い）。作業ディレクトリも運ばない——
+   * サーバの記録が持っている。
+   */
+  recall: (
+    claudeSessionId: string,
+    mode?: PermissionMode | null,
+    agentId?: string | null,
+  ) => void
   resize: (cardId: CardId, cols: number, rows: number) => void
   setFlow: (cardId: CardId, state: FlowState) => void
   sendPtyInput: (cardId: CardId, data: Uint8Array) => void
@@ -371,6 +391,28 @@ export const useWsStore = create<WsState>((set) => ({
     }
     markReviving(cardId)
   },
+
+  setNickname: (cardId, nickname) => {
+    send({ t: 'set_nickname', card_id: cardId, nickname })
+  },
+
+  recall: (claudeSessionId, mode = null, agentId = null) =>
+    // 宛先は**選ばれているときだけ**載せる（`spawn` と同じ形）。null のときは
+    // キーごと省く——`protocol.test.ts` がその形を固定している
+    send(
+      agentId === null || agentId === undefined
+        ? {
+            t: 'recall_session',
+            claude_session_id: claudeSessionId,
+            permission_mode: mode ?? null,
+          }
+        : {
+            t: 'recall_session',
+            claude_session_id: claudeSessionId,
+            permission_mode: mode ?? null,
+            agent_id: agentId,
+          },
+    ),
 
   resize: (cardId, cols, rows) => {
     // 台帳の大きさも更新する。繋ぎ直したときに古い大きさで購読し直さないため

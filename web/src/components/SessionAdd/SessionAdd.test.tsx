@@ -1,9 +1,10 @@
 import { act, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SessionAdd } from './SessionAdd'
 import { useSettingsStore } from '@/stores/settings'
 import { useWsStore } from '@/stores/ws'
+import type { PastSession } from '@/lib/protocol'
 import { settingsFixture } from '@/test/fixtures'
 
 /**
@@ -44,6 +45,12 @@ async function open(host = 'local') {
 beforeEach(() => {
   setToggle(false)
   useWsStore.setState({ status: 'open' })
+  // 既定では過去のセッションを引けない形にしておく（引く道を試すテストが自分で差し替える）
+  vi.stubGlobal('fetch', () => Promise.resolve({ ok: false, json: () => Promise.resolve([]) }))
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
 })
 
 describe('枠からセッションを起こす', () => {
@@ -132,5 +139,158 @@ describe('枠からセッションを起こす', () => {
     render(<SessionAdd host={PC} project={PROJECT} />)
 
     expect(screen.getByTestId('spawn-open')).toBeDisabled()
+  })
+})
+
+/**
+ * 過去のセッションから起こす（名前付け設計§9-4。テスト計画フェーズ5「過去から起こす」）。
+ *
+ * **開いたときに1回だけ引く**のが要点。実在を確かめるのに PC へ問い合わせが出るので、
+ * 開くたびに引くと、一覧を開き閉じするだけで問い合わせが積み上がる。
+ */
+
+const 過去 = (extra: Partial<PastSession> = {}): PastSession => ({
+  claude_session_id: '22222222-2222-2222-2222-222222222222',
+  nickname: null,
+  session_title: null,
+  project: PROJECT,
+  agent_id: null,
+  permission_mode: null,
+  last_activity_at: 1,
+  exists: true,
+  ...extra,
+})
+
+/** `GET /api/sessions/past` の答えを差し替え、呼ばれた回数を数える。 */
+function 過去を返す(rows: PastSession[]) {
+  const calls = { count: 0 }
+  vi.stubGlobal('fetch', (path: string) => {
+    if (path === '/api/sessions/past') calls.count += 1
+    return Promise.resolve({ ok: true, json: () => Promise.resolve(rows) })
+  })
+  return calls
+}
+
+describe('過去のセッションから起こす', () => {
+  it('開いたときに1回だけ引く', async () => {
+    const calls = 過去を返す([過去()])
+    render(<SessionAdd host="local" project={PROJECT} />)
+    await userEvent.click(screen.getByTestId('spawn-open'))
+    await screen.findByTestId('spawn-past')
+
+    // 閉じて開き直しても引き直さない（問い合わせを積み上げない）
+    await userEvent.click(screen.getByTestId('spawn-cancel'))
+    await userEvent.click(screen.getByTestId('spawn-open'))
+    await screen.findByTestId('spawn-past')
+
+    expect(calls.count).toBe(1)
+  })
+
+  it('名前があればそれ、無ければ CLI の名前が出る', async () => {
+    過去を返す([
+      過去({
+        claude_session_id: 'aaaaaaaa-0000-0000-0000-000000000000',
+        nickname: 'あとで直すやつ',
+        session_title: 'TODOを完了に変更する',
+      }),
+      過去({
+        claude_session_id: 'bbbbbbbb-0000-0000-0000-000000000000',
+        session_title: 'CLI が付けた名前',
+      }),
+    ])
+    render(<SessionAdd host="local" project={PROJECT} />)
+    await userEvent.click(screen.getByTestId('spawn-open'))
+    const picker = await screen.findByTestId('spawn-past')
+
+    // **利用者の名前が CLI の名前より優先される**
+    expect(picker.textContent).toContain('あとで直すやつ')
+    expect(picker.textContent).not.toContain('TODOを完了に変更する')
+    expect(picker.textContent).toContain('CLI が付けた名前')
+  })
+
+  it('確かめていないものは、そう分かる形で出て、選べる', async () => {
+    // **「確かめていない」を「無い」と混同しない**（設計§8-5）。PC が寝ているだけで
+    // 無いとは限らないので、消さずに印を添える
+    過去を返す([過去({ nickname: '寝ている PC のやつ', exists: null })])
+    render(<SessionAdd host="local" project={PROJECT} />)
+    await userEvent.click(screen.getByTestId('spawn-open'))
+    const picker = (await screen.findByTestId('spawn-past')) as HTMLSelectElement
+
+    expect(picker.textContent).toContain('（未確認）')
+    const option = Array.from(picker.options).find((entry) =>
+      entry.textContent?.includes('寝ている PC のやつ'),
+    )
+    expect(option?.disabled).toBe(false)
+  })
+
+  it('選んで押すと、作業ディレクトリを運ばずに呼び戻す', async () => {
+    const recall = vi.fn()
+    useWsStore.setState({ recall })
+    const session = 'cccccccc-0000-0000-0000-000000000000'
+    過去を返す([過去({ claude_session_id: session, nickname: '呼び戻すやつ' })])
+
+    render(<SessionAdd host="local" project={PROJECT} />)
+    await userEvent.click(screen.getByTestId('spawn-open'))
+    const picker = await screen.findByTestId('spawn-past')
+    await userEvent.selectOptions(picker, session)
+    // ボタンの言葉も変わる（何が起きるかを押す前に伝える）
+    expect(screen.getByTestId('spawn-button').textContent).toBe('呼び戻す')
+    await userEvent.click(screen.getByTestId('spawn-button'))
+
+    // **`project` を渡していない。** 作業ディレクトリはサーバの記録が持っている
+    expect(recall).toHaveBeenCalledWith(session, null, null)
+  })
+
+  it('権限モードは選び直せる', async () => {
+    // 記録に残っているモードは**既定でしかない**（設計§9-4）
+    const recall = vi.fn()
+    useWsStore.setState({ recall })
+    const session = 'dddddddd-0000-0000-0000-000000000000'
+    過去を返す([
+      過去({
+        claude_session_id: session,
+        nickname: '記録は指定なし',
+        permission_mode: null,
+      }),
+    ])
+
+    render(<SessionAdd host="local" project={PROJECT} />)
+    await userEvent.click(screen.getByTestId('spawn-open'))
+    await userEvent.selectOptions(
+      await screen.findByTestId('spawn-past'),
+      session,
+    )
+    await userEvent.selectOptions(modeSelect(), 'acceptEdits')
+    await userEvent.click(screen.getByTestId('spawn-button'))
+
+    expect(recall).toHaveBeenCalledWith(session, 'acceptEdits', null)
+  })
+
+  it('別の枠のセッションは出ない', async () => {
+    // 枠の「＋」は「この PJT で起こす」操作。別の PJT のものを出すと、
+    // 押した先に別の枠のカードができる
+    過去を返す([
+      過去({ nickname: 'この枠のやつ' }),
+      過去({
+        claude_session_id: 'eeeeeeee-0000-0000-0000-000000000000',
+        nickname: 'よその枠のやつ',
+        project: '/home/example/dev/other',
+      }),
+    ])
+    render(<SessionAdd host="local" project={PROJECT} />)
+    await userEvent.click(screen.getByTestId('spawn-open'))
+    const picker = await screen.findByTestId('spawn-past')
+
+    expect(picker.textContent).toContain('この枠のやつ')
+    expect(picker.textContent).not.toContain('よその枠のやつ')
+  })
+
+  it('過去が1本も無ければ、選ぶところ自体を出さない', async () => {
+    過去を返す([])
+    render(<SessionAdd host="local" project={PROJECT} />)
+    await userEvent.click(screen.getByTestId('spawn-open'))
+    await screen.findByTestId('spawn-button')
+
+    expect(screen.queryByTestId('spawn-past')).toBeNull()
   })
 })

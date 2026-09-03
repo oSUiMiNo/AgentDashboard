@@ -18,12 +18,19 @@
  * - 起動したら選択を捨てるので、**前回の選択が残って意図しないモードで起こす**ことがない
  */
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
-import { permissionModeTone, type PermissionMode } from '@/lib/protocol'
+import {
+  permissionModeTone,
+  type PastSession,
+  type PermissionMode,
+} from '@/lib/protocol'
 import { LOCAL_HOST } from '@/lib/routes'
 import { useSettingsStore } from '@/stores/settings'
 import { useWsStore } from '@/stores/ws'
+
+/** 「新しく起こす」を表す値。過去のセッションのIDと混ざらない綴りにする。 */
+const FRESH = ''
 
 interface Props {
   /** `agent_id` かローカルを表す `'local'` */
@@ -66,12 +73,45 @@ const BYPASS_VALUE = 'bypassPermissions'
 export function SessionAdd({ host, project, compact = false }: Props) {
   const [open, setOpen] = useState(false)
   const spawn = useWsStore((state) => state.spawn)
+  const recall = useWsStore((state) => state.recall)
   const status = useWsStore((state) => state.status)
+  // 過去のセッション（名前付け設計§9-4）。**開いたときに1回だけ引く**——
+  // 実在を確かめるのに PC へ問い合わせが出るので、開くたびに何度も引かない
+  const [past, setPast] = useState<PastSession[] | null>(null)
+  const [pickedSession, setPickedSession] = useState<string>(FRESH)
   const alwaysBypass = useSettingsStore(
     (state) => state.settings.always_bypass_permissions,
   )
   // `undefined` は「まだ選んでいない」＝既定に従う（上のドキュメント参照）
   const [picked, setPicked] = useState<string | undefined>(undefined)
+
+  // 開いた瞬間に1回だけ引く。閉じても捨てない（開き直しても再取得しないため）
+  useEffect(() => {
+    if (!open || past !== null) return
+    let alive = true
+    void fetch('/api/sessions/past')
+      .then((response) => (response.ok ? response.json() : []))
+      .then((rows: PastSession[]) => {
+        if (!alive) return
+        // **この枠のぶんだけ**に絞る。枠の「＋」は「この PJT で起こす」操作なので、
+        // 別の PJT のセッションを出すと、押した先に別の枠のカードができる
+        setPast(
+          rows.filter(
+            (row) =>
+              row.project === project &&
+              (row.agent_id ?? LOCAL_HOST) === host,
+          ),
+        )
+      })
+      .catch(() => {
+        // **引けなかったことを「無い」にしない。** 空配列を置くと「過去のセッションは
+        // ありません」と出てしまう
+        if (alive) setPast([])
+      })
+    return () => {
+      alive = false
+    }
+  }, [open, past, project, host])
 
   const value = picked ?? (alwaysBypass ? BYPASS_VALUE : '')
   const mode: PermissionMode | null = value === '' ? null : value
@@ -79,10 +119,18 @@ export function SessionAdd({ host, project, compact = false }: Props) {
     LAUNCH_MODES.find((entry) => (entry.mode ?? '') === value) ?? LAUNCH_MODES[0]
 
   const launch = () => {
-    // 宛先は枠が持っている。**ローカルは指名しない**（サーバが選ぶ余地の無いときだけ通す）
-    spawn(project, mode, host === LOCAL_HOST ? null : host)
+    const target = host === LOCAL_HOST ? null : host
+    if (pickedSession === FRESH) {
+      // 宛先は枠が持っている。**ローカルは指名しない**（サーバが選ぶ余地の無いときだけ通す）
+      spawn(project, mode, target)
+    } else {
+      // 作業ディレクトリは運ばない。**サーバの記録が持っている**（設計§7-1）。
+      // 権限モードはここで選び直せる（記録の値は既定でしかない）
+      recall(pickedSession, mode, target)
+    }
     // 選択を捨てて既定へ戻す。次の1本を前回のモードで起こさないため
     setPicked(undefined)
+    setPickedSession(FRESH)
     setOpen(false)
   }
 
@@ -155,6 +203,35 @@ export function SessionAdd({ host, project, compact = false }: Props) {
           ))}
         </select>
       </label>
+      {past !== null && past.length > 0 && (
+        <label className="flex items-center gap-1.5 text-xs">
+          <span className="text-muted-foreground">どれを</span>
+          <select
+            data-testid="spawn-past"
+            aria-label="起こすセッション"
+            value={pickedSession}
+            onChange={(event) => setPickedSession(event.target.value)}
+            className="max-w-56 rounded border px-1.5 py-1 text-xs"
+          >
+            <option value={FRESH}>新しく起こす</option>
+            {past.map((row) => (
+              <option
+                key={row.claude_session_id}
+                value={row.claude_session_id}
+                // **確かめていないものも選べる**（設計§8-5）。PC が寝ているだけで
+                // 無いとは限らないので、印を添えて残す
+                title={
+                  row.exists === null
+                    ? 'この PC が繋がっていないので、まだ実在を確かめていません'
+                    : undefined
+                }
+              >
+                {pastLabel(row)}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       <Button
         type="button"
         data-testid="spawn-button"
@@ -163,7 +240,7 @@ export function SessionAdd({ host, project, compact = false }: Props) {
         className="px-2 py-0.5 text-xs"
         onClick={launch}
       >
-        セッションを起動
+        {pickedSession === FRESH ? 'セッションを起動' : '呼び戻す'}
       </Button>
       <Button
         type="button"
@@ -179,4 +256,16 @@ export function SessionAdd({ host, project, compact = false }: Props) {
       </Button>
     </div>
   )
+}
+
+/**
+ * 過去のセッション1本の見出し（名前付け設計§9-1・§9-4）。
+ *
+ * **利用者が付けた名前があればそれ、無ければ CLI の名前**。どちらも無ければIDの頭。
+ * 確かめていないものには印を添える——「確かめていない」を「無い」と混同させない。
+ */
+function pastLabel(row: PastSession): string {
+  const name =
+    row.nickname ?? row.session_title ?? `${row.claude_session_id.slice(0, 8)}…`
+  return row.exists === null ? `${name}（未確認）` : name
 }
