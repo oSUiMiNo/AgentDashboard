@@ -14,6 +14,7 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Composer } from './Composer'
+import { anyComposerBusy } from '@/lib/composerBusy'
 import type { CardId } from '@/lib/protocol'
 import * as hostfs from '@/lib/hostfs'
 import { clearSessions, setCardError } from '@/stores/sessions'
@@ -212,6 +213,57 @@ describe('付ける', () => {
     )
     expect(screen.queryByTestId('composer-attach')).toBeNull()
     expect(screen.queryByTestId('composer-file')).toBeNull()
+  })
+})
+
+/**
+ * 台帳（`lib/composerBusy.ts`）への配線。
+ *
+ * 台帳そのものの性質は `lib/composerBusy.test.ts` が見ている。ここで見るのは**継ぎ目**
+ * ——添付の増減と畳みが、台帳の行の出入りに繋がっていることである。
+ *
+ * **ここが無いと、配線を丸ごと消す壊し方が単体で1本も落ちない**（E2E だけが落ちる＝
+ * 原因からいちばん遠い場所で落ちる）。
+ *
+ * # 依存を真偽値にしたことは、ここでは確かめていない
+ *
+ * `attachments`（配列）を依存に置いても答えは同じになるので、下の3本はどちらでも通る。
+ * 真偽値にしたのは**登録し直しの隙間を縮めるため**であって、答えの性質ではない
+ * （`lib/terminalBridge.test.ts` の「同値なら通知しない」と同じ扱い）。
+ *
+ * 後始末は `@testing-library/react` の自動 cleanup（`globals: true`）が畳んでくれる
+ * ので、この describe では明示的な取り下げを置いていない。
+ */
+describe('抱えていることを台帳へ知らせる', () => {
+  it('添付を1枚付けると、抱えていることになる', async () => {
+    expect(anyComposerBusy()).toBe(false)
+    置く()
+
+    await 選ぶ([画像()])
+
+    expect(anyComposerBusy()).toBe(true)
+  })
+
+  it('全部外すと、抱えていないことに戻る', async () => {
+    置く()
+    await 選ぶ([画像()])
+
+    fireEvent.click(screen.getByTestId('composer-attachment-remove'))
+
+    expect(anyComposerBusy()).toBe(false)
+  })
+
+  it('抱えたまま畳まれると、抱えていないことに戻る', async () => {
+    // 付けたまま別の画面へ移ったとき。**行を残すと、そのタブは以後ずっと読み直さない**
+    const view = render(
+      <Composer cardId={CARD} status={動いている} host={HOST} />,
+    )
+    await 選ぶ([画像()])
+    expect(anyComposerBusy()).toBe(true)
+
+    view.unmount()
+
+    expect(anyComposerBusy()).toBe(false)
   })
 })
 

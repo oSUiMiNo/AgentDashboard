@@ -29,10 +29,21 @@
  * 「Chrome は、ここでの画像の貼り付けをサポートしていません」と自分で断る。
  *
  * あれは `paste` ではなく Android の `InputConnection.commitContent` という別の口で、
- * Chrome は実装を持っているものの `AndroidMediaInsertion` という旗の内側にあり、
- * **スマホでは既定で閉じている**（M155 時点。開いているのはデスクトップ Android だけ）。
- * かつ開いても、申告するのは `contenteditable` のときだけなので、
- * **`<textarea>` である限り届かない**。**web 側で直せる余地は無い**（調査 2026-09-03）。
+ * **キーボードがアプリへ直接手渡す仕組み**である。Chrome は実装を持っているものの
+ * `AndroidMediaInsertion` という旗の内側にあり、**スマホでは既定で閉じている**
+ * （開いているのはデスクトップ Android だけ。かつ旗自体に期限があり、
+ * `expiry_milestone: 155`＝2026-10 ごろに `chrome://flags` から消える）。
+ *
+ * **`<textarea>` である限り、どのブラウザでも1枚も届かない。** 申告の対象が
+ * 書式付きの入力欄だけだからである。**逆に言えば `contenteditable` にすれば道はある**
+ * ——**Firefox for Android は 2022年から既定で効く**（期限なし）。ここを作り替えるなら、
+ * **拾い口を2本持つことになる**：Chrome は `onPaste` の `clipboardData.files`、
+ * Firefox は `input`（`insertFromPaste`）のあと DOM に増えた `<img src="data:...">`。
+ * **しかも Firefox では `preventDefault()` を呼んではいけない**——挿入ごと取り消される。
+ *
+ * **やらない判断であって、できない判断ではない**（調査 2026-09-03）。作り替えの代金が
+ * 大きいので見送っている。やるならイシュー
+ * `キーボードのクリップボードから選んで画像を添付する`。
  *
  * **`compact` で分岐しない。** `compact` は `InputDock` が消費してここへは渡らないので、
  * ここへ足すだけで単独画面と横並びの両方に出る（§9-2）。分岐を書くと片側に出なくなる。
@@ -66,6 +77,7 @@ import {
   releasePreview,
   type Attachment,
 } from '@/lib/attachments'
+import { markComposerBusy } from '@/lib/composerBusy'
 import { useDraft } from '@/lib/drafts'
 import { uploadAttachment } from '@/lib/hostfs'
 import { isComposerSubmit } from '@/lib/keys'
@@ -205,6 +217,23 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
     },
     [],
   )
+
+  // 抱えている間だけ、台帳へ1行置く（`lib/composerBusy.ts`）。**版が切り替わったとき、
+  // このタブが自分で読み直してよいか**の判定に使う——添付は読み直すと消えるので、
+  // 抱えているタブは読み直さずバナーを出して人に任せる。
+  //
+  // **依存は真偽値1つにする。** `attachments` を依存に置くと、上の後始末と同じ罠を踏む
+  // （付け外しのたびに効果が走り、登録し直しの隙間が増える）。真偽値なら動くのは
+  // 0→1 と 1→0 の2回だけで、2枚目・3枚目を足しても1枚外しても走らない。
+  //
+  // **`sending` は数えない。** あれが立つのは `attachments.length > 0` の内側だけなので、
+  // ここが真なら必ず真である。判定を2本持つと、片方だけ直したときに食い違う。
+  //
+  // **`控え中` も数えない。** あれは送信が通るたびに 20 秒持つが、版の入れ替えでは
+  // 接続が既に切れており、控えが待っている断り（`ServerMessage::Error`）は届かない。
+  // 数えると「送信直後の20秒はどのタブも読み直さない」という、誰も得しない停止になる。
+  const 抱えている = attachments.length > 0
+  useEffect(() => (抱えている ? markComposerBusy() : undefined), [抱えている])
 
   /** 3経路の共通の入口。**判定は `pickImages` の1つを通る**（設計§9） */
   const 受け取る = async (files: readonly File[]) => {
