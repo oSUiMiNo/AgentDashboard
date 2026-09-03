@@ -17,7 +17,12 @@ import { Terminal, type ITerminalInitOnlyOptions, type ITerminalOptions } from '
 import '@xterm/xterm/css/xterm.css'
 import { createFlowController } from '@/lib/flow'
 import { KIND_PTY_SNAPSHOT } from '@/lib/frame'
-import { looksSelecting, sequenceFor, terminalKeyOverride } from '@/lib/keys'
+import {
+  acceptsTyping,
+  looksSelecting,
+  sequenceFor,
+  terminalKeyOverride,
+} from '@/lib/keys'
 import { visibleLines, visibleScreen } from '@/lib/screen'
 import {
   hasWatcher,
@@ -110,6 +115,36 @@ export function TerminalPane({ cardId }: Props) {
     const grid = container.querySelector('.xterm')
     if (grid instanceof HTMLElement) {
       grid.style.minWidth = 'max-content'
+    }
+
+    // スマホでソフトキーボードを出してよいかを、**焦点を渡す直前に**決めて当てる
+    // （設計§4）。
+    //
+    // xterm はキーを**不可視の `<textarea class="xterm-helper-textarea">`** で受け取る。
+    // そこへ焦点が入るとブラウザが「文字を打つ場所に入った」と判断してキーボードを出す
+    // ——端末は1枚の面なので、**面のどこを触っても同じテキストエリアが掴まれる**。
+    // だから「入力欄でない場所」を押しても出る。
+    //
+    // # なぜ「直前」でなければならないか
+    //
+    // **iOS Safari は、焦点が当たったままの `inputmode` の変更を無視する**（入れ直すまで
+    // 反映されない）。状態が変わってから書き換える形は効かないので、**焦点が入る前に
+    // 決めるしかない**。タッチで焦点が渡る箇所は下の `onTouchEnd` 1つだけなので、
+    // 当てる継ぎ目はそこに絞られている。
+    //
+    // 要素は `open()` の中で一度だけ作られ、以後作り直されない。**見つからなくても
+    // 落とさない**——xterm の内部構造に寄りかかっているので、変わったときに端末ごと
+    // 使えなくなるのは、キーボードが出るより悪い。
+    const helper = container.querySelector('.xterm-helper-textarea')
+    /** 自分たちが「打てる」とみて渡した焦点か。**閉じる方向の追従にだけ使う**。 */
+    let 打てるとみて渡した = false
+    const 打てる場所として焦点を渡す = () => {
+      const 打てる = acceptsTyping(visibleScreen(term))
+      if (helper instanceof HTMLTextAreaElement) {
+        helper.inputMode = 打てる ? 'text' : 'none'
+      }
+      term.focus()
+      return 打てる
     }
 
     const setRendererLabel = (renderer: 'webgl' | 'dom') => {
@@ -265,6 +300,22 @@ export function TerminalPane({ cardId }: Props) {
     const unprobe = registerProbe(cardId, 測る)
 
     const parsed = term.onWriteParsed(() => {
+      // **打てるとみて渡した焦点だけを、閉じる方向に追いかける**（設計§4）。
+      //
+      // 向きで扱いを変えるのは、**効くものと効かないものが違う**から。`blur()` は
+      // 利用者の操作を要らずに効くが、キーボードを**開く**には操作起因のイベントが
+      // 要る——フレームの到着は操作ではないので、開く側は狙っても届かない。
+      //
+      // 放っておくと、選択待ちへ移ったのにキーボードが出たまま十字ボタンとメニューを
+      // 覆う。**印が立っていない間は画面を組み立てない**ので、PC と非フォーカス時の
+      // 負担は増えない。
+      if (打てるとみて渡した && !acceptsTyping(visibleScreen(term))) {
+        打てるとみて渡した = false
+        if (helper instanceof HTMLTextAreaElement) {
+          helper.inputMode = 'none'
+          helper.blur()
+        }
+      }
       if (!hasWatcher(cardId)) {
         return
       }
@@ -393,7 +444,7 @@ export function TerminalPane({ cardId }: Props) {
       // 打ち始められるように）。なぞりでは渡さない——渡すとスマホでソフト
       // キーボードが出て、遡ろうとするたびに画面が半分隠れる
       if (!なぞった) {
-        term.focus()
+        打てるとみて渡した = 打てる場所として焦点を渡す()
       }
       if (debugOn) {
         tally.end += 1
@@ -463,7 +514,9 @@ export function TerminalPane({ cardId }: Props) {
     // グローバルを汚さないよう、この要素にだけ生やしている（読み取り専用の用途）。
     ;(container as TerminalContainer).__terminal = term
 
-    term.focus()
+    // マウント時の初期フォーカスも同じ口を通す。**空の画面は「打てない」に倒れる**ので、
+    // 起こした直後にキーボードが出ることはない
+    打てるとみて渡した = 打てる場所として焦点を渡す()
 
     return () => {
       container.removeEventListener('pointerdown', onPointerDown)
