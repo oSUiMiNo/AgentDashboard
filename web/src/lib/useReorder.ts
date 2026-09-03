@@ -498,9 +498,15 @@ export function useReorder<T extends string>({
             h.scrollLast = now
             h.scrollDelta = { x: now.x - h.scroll0.x, y: now.y - h.scroll0.y }
             追従する(h, h.last, t)
-            判定する(h, h.last, t)
           }
         }
+        /*
+          **判定はフレームごとにやり直す。** 1回の判定で動くのは1歩なので、指を大きく
+          飛ばして止めたり、ホイールや自動送りで指の下のスロットが遠ざかったりすると、
+          `pointermove` 頼みでは1歩手前で止まる。フレームごとなら 60歩/秒で追いつき、
+          歩幅は変わらない（封印が往復を止める）。
+        */
+        判定する(h, h.last, t)
       }
       requestAnimationFrame(回す)
     }
