@@ -191,4 +191,39 @@ export async function 落ち着くまで待つ(page: Page): Promise<void> {
     .toBe(0)
 }
 
+/** これから n フレームぶん、枠の中のカードの並びを標本する。**張ってから離すこと** */
+export async function 並びを標本する(page: Page, group: Locator, frames: number): Promise<void> {
+  const selector = await group.evaluate((el) => {
+    el.setAttribute('data-sampling', '')
+    return '[data-sampling] [data-testid="tile-shell"]'
+  })
+  await page.evaluate(
+    ({ selector, frames }) => {
+      const w = window as unknown as { __orders: string[][]; __ordering: Promise<void> }
+      w.__orders = []
+      w.__ordering = new Promise<void>((resolve) => {
+        let left = frames
+        const tick = () => {
+          w.__orders.push(
+            [...document.querySelectorAll(selector)].map((el) => el.getAttribute('data-card-id') ?? ''),
+          )
+          left -= 1
+          if (left > 0) requestAnimationFrame(tick)
+          else resolve()
+        }
+        requestAnimationFrame(tick)
+      })
+    },
+    { selector, frames },
+  )
+}
+
+export async function 並びの標本(page: Page): Promise<string[][]> {
+  return page.evaluate(async () => {
+    const w = window as unknown as { __orders: string[][]; __ordering: Promise<void> }
+    await w.__ordering
+    return w.__orders
+  })
+}
+
 export { expect }

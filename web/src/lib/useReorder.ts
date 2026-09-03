@@ -202,6 +202,12 @@ interface Held<T> {
   scrollLast: Point
   /** いまのスクロール差分（`scrollLast − scroll0`）。着地の逆算に使う */
   scrollDelta: Point
+  /**
+   * 掴んだ瞬間に居た帯の向き（軸ごと。−1／0／+1）。**その帯に居続ける間は送らない**
+   * ——端の近くで掴んで少し持ち上げただけで画面が流れ始めるのは、意図しない動き。
+   * 帯の外へ出るか、反対の端の帯へ入れば 0 になり、以後は普通に送る。
+   */
+  holdBack: { x: number; y: number }
 }
 
 function parseTranslate(value: string): Point {
@@ -346,6 +352,43 @@ export function useReorder<T extends string>({
   /** 印を降ろす条件。**滑りの時間とバネの両方**が済んだときに降ろす */
   const 降ろす条件 = useRef<{ timer: boolean; spring: boolean }>({ timer: true, spring: true })
 
+  /** その点で、送る軸の送り量。箱が無ければ 0 */
+  const 送り量 = useCallback(
+    (point: Point): number => {
+      const box = scroller?.get() ?? null
+      if (scroller === undefined || box === null) {
+        return 0
+      }
+      const bounds = box.getBoundingClientRect()
+      const step = autoScrollStep(point, {
+        left: bounds.left,
+        top: bounds.top,
+        width: bounds.width,
+        height: bounds.height,
+      })
+      return scroller.axis === 'x' ? step.x : step.y
+    },
+    [scroller],
+  )
+
+  /**
+   * 掴んだ瞬間の帯に居続けているかを更新し、**いま送ってよいか**を返す。
+   * 帯の外へ出るか反対の端へ入れば解ける（以後は普通に送る）。
+   */
+  const 送ってよいか = useCallback(
+    (h: Held<T>, along: number): boolean => {
+      if (scroller === undefined) {
+        return false
+      }
+      const axis = scroller.axis
+      if (h.holdBack[axis] !== 0 && Math.sign(along) !== h.holdBack[axis]) {
+        h.holdBack[axis] = 0
+      }
+      return along !== 0 && h.holdBack[axis] === 0
+    },
+    [scroller],
+  )
+
   /** 本人を指の下へ。`translate` ＝ 引き継ぎ ＋（指 − 握り点）＋ スクロール差分 */
   const 追従する = useCallback((h: Held<T>, point: Point, now: number) => {
     if (h.origin === null) {
@@ -417,7 +460,7 @@ export function useReorder<T extends string>({
     `scrollBy` が自然に止まり、再判定も止まる。
   */
   useEffect(() => {
-    if (dragging === null || scroller === undefined) {
+    if (dragging === null) {
       return
     }
     let 生きている = true
@@ -426,26 +469,37 @@ export function useReorder<T extends string>({
         return
       }
       const h = held.current
-      const box = scroller.get()
-      if (h !== null && box !== null && h.last !== null) {
-        const bounds = box.getBoundingClientRect()
-        const step = autoScrollStep(h.last, {
-          left: bounds.left,
-          top: bounds.top,
-          width: bounds.width,
-          height: bounds.height,
-        })
-        const along = scroller.axis === 'x' ? step.x : step.y
-        if (along !== 0) {
-          box.scrollBy(scroller.axis === 'x' ? along : 0, scroller.axis === 'y' ? along : 0)
+      if (h !== null && h.last !== null) {
+        const t = performance.now()
+        /*
+          **指を止めたら傾きは戻る。** 速度は直近 100ms の窓で測るので、標本が古びれば
+          0 になる——`pointermove` が来なくても、フレームごとに読み直す
+        */
+        const self = elements.current.get(h.base[h.from])
+        if (self !== undefined) {
+          const swing = clamp(velocityOf(h.samples, t).x * TILT_SWING_DEG_PER_PX_S, TILT_SWING_MAX_DEG)
+          self.style.setProperty('--reorder-swing', `${swing}deg`)
         }
-        const now = scrollOf(box)
-        if (now.x !== h.scrollLast.x || now.y !== h.scrollLast.y) {
-          h.scrollLast = now
-          h.scrollDelta = { x: now.x - h.scroll0.x, y: now.y - h.scroll0.y }
-          const t = performance.now()
-          追従する(h, h.last, t)
-          判定する(h, h.last, t)
+        const box = scroller?.get() ?? null
+        if (scroller !== undefined && box !== null) {
+          const bounds = box.getBoundingClientRect()
+          const step = autoScrollStep(h.last, {
+            left: bounds.left,
+            top: bounds.top,
+            width: bounds.width,
+            height: bounds.height,
+          })
+          const along = scroller.axis === 'x' ? step.x : step.y
+          if (送ってよいか(h, along)) {
+            box.scrollBy(scroller.axis === 'x' ? along : 0, scroller.axis === 'y' ? along : 0)
+          }
+          const now = scrollOf(box)
+          if (now.x !== h.scrollLast.x || now.y !== h.scrollLast.y) {
+            h.scrollLast = now
+            h.scrollDelta = { x: now.x - h.scroll0.x, y: now.y - h.scroll0.y }
+            追従する(h, h.last, t)
+            判定する(h, h.last, t)
+          }
         }
       }
       requestAnimationFrame(回す)
@@ -454,7 +508,7 @@ export function useReorder<T extends string>({
     return () => {
       生きている = false
     }
-  }, [dragging, scroller, 追従する, 判定する])
+  }, [dragging, scroller, 追従する, 判定する, 送ってよいか])
 
   const itemRef = useCallback(
     (id: T) => (element: HTMLElement | null) => {
@@ -722,6 +776,11 @@ export function useReorder<T extends string>({
           scroll0: scrollOf(scroller?.get() ?? null),
           scrollLast: scrollOf(scroller?.get() ?? null),
           scrollDelta: { x: 0, y: 0 },
+          holdBack: { x: 0, y: 0 },
+        }
+        // **掴んだ瞬間に帯の中なら、その帯に居続ける間は送らない**
+        if (origin !== undefined && scroller !== undefined) {
+          held.current.holdBack[scroller.axis] = Math.sign(送り量(origin))
         }
         // 引き継いだぶんを、測った直後に書き戻す（見た目が飛ばない）
         if (carry.x !== 0 || carry.y !== 0) {
@@ -756,6 +815,7 @@ export function useReorder<T extends string>({
           h.samples.shift()
         }
         h.last = point
+        送ってよいか(h, 送り量(point))
         // ホイールで箱が動いていたら、ここで差分を取り込む（送りの輪が無いときのため）
         const box = scroller?.get() ?? null
         if (box !== null) {
@@ -827,6 +887,8 @@ export function useReorder<T extends string>({
       元へ戻す,
       追従する,
       判定する,
+      送り量,
+      送ってよいか,
     ],
   )
 

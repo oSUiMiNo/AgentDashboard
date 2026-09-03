@@ -15,6 +15,8 @@ import {
   書き換えを数え始める,
   標本を張る,
   標本を読む,
+  並びの標本,
+  並びを標本する,
   近い,
 } from './reorder-helpers'
 
@@ -182,4 +184,45 @@ test('区画を掴み手で右へ3回続けて動かしても、掴みが解け�
       ).indexOf(ids[0]),
     )
     .toBe(3)
+})
+
+test('離した直後の並びが、掴む前の並びへ一度も戻らない', async ({ page }) => {
+  /*
+    **設計§15-4。** 離した瞬間に `ids`（サーバの並び）へ戻すと、返事が届くまでの
+    2〜4フレーム、掴む前の並びが描かれて跳ぶ。手元の並びを返事まで保つ。
+  */
+  test.setTimeout(120_000)
+  await openDashboard(page)
+  const { group, ids } = await カードを並べる(page, 3)
+  const 本人 = カード(page, ids[0])
+  const 握り = await 掴む(page, await 中心(本人))
+  await フレームごとに運ぶ(page, 握り, await 中心(カード(page, ids[1])), 10)
+  await page.waitForTimeout(300)
+  await 並びを標本する(page, group, 12)
+  await page.mouse.up()
+  const 期待 = [ids[1], ids[0], ids[2]]
+  const samples = await 並びの標本(page)
+  for (const [frame, 並び] of samples.entries()) {
+    expect(並び, `${frame} フレーム目`).toEqual(期待)
+  }
+  await expect.poll(() => カードの並び(group)).toEqual(期待)
+})
+
+test('断られたら、元の並びへ滑って戻る', async ({ page }) => {
+  test.setTimeout(120_000)
+  await openDashboard(page)
+  const { group, ids } = await カードを並べる(page, 3)
+  await page.route('**/api/sessions/order', (route) =>
+    route.fulfill({ status: 409, contentType: 'text/plain', body: 'いまは並べ替えられません' }),
+  )
+  const 本人 = カード(page, ids[0])
+  const 隣 = カード(page, ids[1])
+  const 握り = await 掴む(page, await 中心(本人))
+  await フレームごとに運ぶ(page, 握り, await 中心(隣), 10)
+  await page.waitForTimeout(300)
+  await page.mouse.up()
+  // いったん手元の並びになり、断られて元へ戻る。**戻りは滑る**（隣に動きが走る）
+  await expect.poll(() => カードの並び(group)).toEqual(ids)
+  await expect(group.getByTestId('project-remove-error')).toContainText('いまは並べ替えられません')
+  await page.unroute('**/api/sessions/order')
 })

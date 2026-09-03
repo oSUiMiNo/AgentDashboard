@@ -356,6 +356,31 @@ describe('端での自動送りと、スクロールの補正', () => {
     act(() => 口().bind('a').onDrop())
   })
 
+  it('帯の中で掴んだときは、いったん帯の外へ出るまで送らない', () => {
+    // 端の近くで掴んで少し持ち上げただけで画面が流れ始めるのは、意図しない動き
+    vi.useFakeTimers({ toFake: ['requestAnimationFrame', 'cancelAnimationFrame'] })
+    const box = 偽の箱({ left: 0, top: 0, width: 1000, height: 600 })
+    const scroller: Scroller = { get: () => box as unknown as HTMLElement, axis: 'y' }
+    const { 口 } = 置く(['a', 'b', 'c'], 格子(3), () => {}, scroller)
+    act(() => 口().bind('a').onGrab({ x: 100, y: 590 }))
+    act(() => 口().bind('a').onMove({ x: 100, y: 585 }))
+    act(() => {
+      vi.advanceTimersToNextFrame()
+    })
+    expect(box.scrolled).toEqual([])
+    // 帯の外へ出て、また端へ戻れば送る
+    act(() => 口().bind('a').onMove({ x: 100, y: 300 }))
+    act(() => {
+      vi.advanceTimersToNextFrame()
+    })
+    act(() => 口().bind('a').onMove({ x: 100, y: 600 }))
+    act(() => {
+      vi.advanceTimersToNextFrame()
+    })
+    expect(box.scrolled).toEqual([{ x: 0, y: 16 }])
+    act(() => 口().bind('a').onDrop())
+  })
+
   it('送っている間は、指を動かさなくても本人が追従し、落とし先を判定し直す', () => {
     vi.useFakeTimers({ toFake: ['requestAnimationFrame', 'cancelAnimationFrame'] })
     // 縦1列の枠（高さ 100・隙間 16）。指を 2 枚目の下端付近に止め、箱が送られる
