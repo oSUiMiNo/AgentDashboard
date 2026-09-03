@@ -35,6 +35,15 @@ function 覚えさせる(place: { dir?: string; pick?: string }, project = ROOT)
   )
 }
 
+/** 覚えている中身を読み戻す。**忘れたかどうか**を見るのに要る */
+function 覚えている(project = ROOT): { dir?: unknown; pick?: unknown } {
+  const raw = globalThis.localStorage.getItem(
+    'agentdashboard.project-files-place',
+  )
+  const table = JSON.parse(raw ?? '{}') as Record<string, never>
+  return table[JSON.stringify(['local', project])] ?? {}
+}
+
 /**
  * **実物と同じ置き方をする。** `useFilesParts` は組み立て済みの2つを返すだけで、
  * どこへ置くかは画面が決める——**サイドバーはレールの外、中身の列はレールの中**
@@ -438,6 +447,56 @@ describe('ファイルの中身の列', () => {
     await waitFor(() =>
       expect(screen.queryByTestId('file-column')).toBeNull(),
     )
+  })
+
+  it('覚えていた場所が「繋がっていない」だけなら、落とさずに理由を出す', async () => {
+    覚えさせる({ dir: `${ROOT}/MyDocs` })
+    失敗[`${ROOT}/MyDocs`] = 503
+    置く()
+
+    // **寝ている PC で記憶を消さない。** 起点も同じ理由で失敗するので、
+    // 行き直しても見える結果は変わらないまま時間切れが2回並ぶ（設計§6-3）
+    expect(await screen.findByTestId('folder-error')).toBeInTheDocument()
+    expect(覚えている().dir).toBe(`${ROOT}/MyDocs`)
+  })
+
+  it('起点へ落ちたあと、覚えていた場所が起点で上書きされる', async () => {
+    覚えさせる({ dir: `${ROOT}/消えた` })
+    失敗[`${ROOT}/消えた`] = 404
+    置く()
+
+    await waitFor(() =>
+      expect(screen.getByTestId('folder-browser')).toHaveAttribute(
+        'data-path',
+        ROOT,
+      ),
+    )
+    /*
+      **専用の「忘れる」通知を持たずに済んでいること**（設計§6-2）。
+      起点へ着けば `onPathChange` が飛ぶので、死んだ値はその場で上書きされる。
+    */
+    await waitFor(() => expect(覚えている().dir).toBe(ROOT))
+  })
+
+  it('覚えていたファイルが「無い」ときは忘れ、「読めない」ときは忘れない', async () => {
+    覚えさせる({ pick: `${ROOT}/消えた.md` })
+    失敗[`${ROOT}/消えた.md`] = 404
+    const 一度目 = 置く()
+    // **忘れる＝行から鍵を消すのではなく `null` を書く**（`putPick(…, null)`）
+    await waitFor(() => expect(覚えている().pick).toBeNull())
+    一度目.view.unmount()
+
+    // **寝ている PC で忘れると、起きたときに戻る先が消えている**（設計§6-5）
+    globalThis.localStorage.clear()
+    覚えさせる({ pick: `${ROOT}/眠い.md` })
+    失敗[`${ROOT}/眠い.md`] = 503
+    置く()
+    await screen.findByTestId('folder-browser')
+    await waitFor(() =>
+      expect(screen.queryByTestId('file-column')).toBeNull(),
+    )
+    // **畳むのは全部の失敗で、忘れるのは「無い」ときだけ**
+    expect(覚えている().pick).toBe(`${ROOT}/眠い.md`)
   })
 
   it('押したファイルが読めなければ、畳まずに理由を出す', async () => {
