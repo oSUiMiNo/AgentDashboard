@@ -87,8 +87,15 @@ e2e-compose: build build-debug ## サーバ2台＋PostgreSQL＋Valkey をブラ�
 # E2E は実際の core サーバに繋いで動かす（web/playwright.config.ts）。
 # web → core の順にビルドするのは、core が web/dist をコンパイル時に取り込むため。
 # 順序を崩すと古い画面が配信され、直したはずの不具合が再現し続ける。
+# **同時に走れるのは1本だけ。** 使うポートが 4173〜4179 で固定なので、2本走ると
+# 互いのサーバを掴み、自分の変更とは無関係なテストが散らばって落ちる。
+# **待ち合わせでは防げない**（ビルドの数分ぶん窓が残る）ので、鍵で直列化する。
+# **ビルドには掛けない**——ポートを使わないので重なってよい。
+# `-w 3600` は、前の走行が固まったときに永久に待たないため。待ちきれなければ
+# `make` が落ちるので、黙って詰まるより気づける。
+# 鍵はカーネルが持つので、**持ち主が死ねば自動で外れる**（消し忘れで詰まらない）。
 e2e: build-web build-debug ## E2E テスト（Playwright / chromium・実サーバに接続）
-	cd web && npm run e2e
+	cd web && flock -w 3600 /tmp/agentdashboard-e2e.lock npm run e2e
 
 build-debug: ## core をデバッグビルドする（E2E が使うバイナリ）
 	$(CARGO) build
