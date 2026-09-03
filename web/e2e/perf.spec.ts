@@ -145,13 +145,31 @@ const WAITING = 3
 /** 運びのステップ数。**各ステップで1フレーム待つ**（束ねられると追従も費用も測れない） */
 const DRAG_STEPS = 40
 
-/** 門の出発点（設計§15-9）。実測を見て据える */
-const MAX_GAP_MS = 50
-const MAX_BLOCKING_MS = 100
+/**
+ * 門（設計§15-9「値を見て据える」）。**2つとも「並べ替えが線の費用に上乗せしないこと」を見る。**
+ *
+ * 線が 32本あると、**触らなくても** SVG と CSS アニメーションの描き直しだけでフレームが
+ * 50ms 前後まで伸びる（調査レポート：33本で maxGap 50ms・41fps）。それは効果線の
+ * 上限の話で、この工事の約束ではない（設計§15-10）。だから絶対値ではなく、
+ * **運んでいない間の隙間と比べる**。
+ *
+ * - `rafMaxGap`：運搬中の最大の隙間が、運ぶ前（線だけが動いている状態）の 1.5倍以内
+ * - `loafScriptMs`：長いフレームの中で JS が走った時間の合計。直す前は `引き直す` が
+ *   34〜79ms 乗っていた。直した後は 5〜6ms
+ */
+const GAP_RATIO = 1.5
+const MAX_SCRIPT_MS = 30
+/** 運ぶ前に隙間を測る時間 */
+const IDLE_SAMPLE_MS = 2_000
 
 interface PerfProbe {
   alive: boolean
+  /** 運ぶ前の最大の隙間（線だけが動いている状態） */
+  idleMaxGap: number
+  /** 運び始めてからの最大の隙間 */
   rafMaxGap: number
+  /** 運び始めたら真。それまでの隙間は idle 側へ積む */
+  dragging: boolean
   loafSupported: boolean
   loaf: { count: number; blocking: number; max: number; byScript: Record<string, number> }
 }
@@ -172,8 +190,6 @@ async function 一フレーム待つ(page: Page): Promise<void> {
 
 test('線が多いときに、端から端へ運んでも固まらない', async ({ page }) => {
   test.setTimeout(600_000)
-  // 20枚が全部見える高さにする。**端から端へ**を、スクロール無しで運ぶため
-  await page.setViewportSize({ width: 1280, height: 2000 })
   await openDashboard(page)
 
   for (let index = 0; index < REORDER_CARDS; index += 1) {
@@ -197,17 +213,29 @@ test('線が多いときに、端から端へ運んでも固まらない', async
     .toBeGreaterThanOrEqual(ROAM_MAX)
   const lines = await page.getByTestId('roam-line').count()
 
+  // **20枚が全部見える高さにしてから測る。** 端から端へを、スクロール無しで運ぶため。
+  // 起こす・承認待ちにする手順は既定の窓で行う（端末へ打ち込む手順が窓の高さに
+  // 影響されないように）。広げた直後は寸法の見張りが1回引き直すので、収まるまで待つ
+  await page.setViewportSize({ width: 1280, height: 2000 })
+  await page.waitForTimeout(1_000)
+
   await page.evaluate(() => {
     const probe: PerfProbe = {
       alive: true,
+      idleMaxGap: 0,
       rafMaxGap: 0,
+      dragging: false,
       loafSupported: PerformanceObserver.supportedEntryTypes.includes('long-animation-frame'),
       loaf: { count: 0, blocking: 0, max: 0, byScript: {} },
     }
     ;(window as unknown as { __perf: PerfProbe }).__perf = probe
     let last = performance.now()
     const tick = (now: number) => {
-      probe.rafMaxGap = Math.max(probe.rafMaxGap, now - last)
+      if (probe.dragging) {
+        probe.rafMaxGap = Math.max(probe.rafMaxGap, now - last)
+      } else {
+        probe.idleMaxGap = Math.max(probe.idleMaxGap, now - last)
+      }
       last = now
       if (probe.alive) requestAnimationFrame(tick)
     }
@@ -248,6 +276,12 @@ test('線が多いときに、端から端へ運んでも固まらない', async
   const start = { x: from.x + from.width / 2, y: from.y + from.height / 2 }
   const goal = { x: to.x + to.width / 2, y: to.y + to.height / 2 }
 
+  // **運ぶ前の隙間を採る。** 線だけが動いている状態の費用が、比べる相手
+  await page.waitForTimeout(IDLE_SAMPLE_MS)
+  await page.evaluate(() => {
+    ;(window as unknown as { __perf: PerfProbe }).__perf.dragging = true
+  })
+
   const started = Date.now()
   await page.mouse.move(start.x, start.y)
   await page.mouse.down()
@@ -281,22 +315,24 @@ test('線が多いときに、端から端へ運んでも固まらない', async
     w.__perfObserver?.disconnect()
     return w.__perf
   })
-  const top = Object.entries(probe.loaf.byScript)
-    .sort((a, b) => b[1] - a[1])
+  const 帰属 = Object.entries(probe.loaf.byScript).sort((a, b) => b[1] - a[1])
+  const scriptMs = 帰属.reduce((sum, [, ms]) => sum + ms, 0)
+  const top = 帰属
     .slice(0, 3)
     .map(([key, ms]) => `${key}=${Math.round(ms)}`)
     .join(',')
   console.log(
     `[perf] reorder cards=${REORDER_CARDS} waiting=${WAITING} lines=${lines} dragMs=${dragMs}` +
-      ` rafMaxGapMs=${Math.round(probe.rafMaxGap)} loafSupported=${probe.loafSupported}` +
-      ` loafCount=${probe.loaf.count} loafBlockingMs=${Math.round(probe.loaf.blocking)}` +
-      ` loafMaxMs=${Math.round(probe.loaf.max)} loafTop=${top}`,
+      ` idleMaxGapMs=${Math.round(probe.idleMaxGap)} rafMaxGapMs=${Math.round(probe.rafMaxGap)}` +
+      ` loafSupported=${probe.loafSupported} loafCount=${probe.loaf.count}` +
+      ` loafBlockingMs=${Math.round(probe.loaf.blocking)} loafMaxMs=${Math.round(probe.loaf.max)}` +
+      ` loafScriptMs=${Math.round(scriptMs)} loafTop=${top}`,
   )
 
-  // **門はいちばん最後。** 値が先に残るように
-  expect(probe.rafMaxGap).toBeLessThan(MAX_GAP_MS)
+  // **門はいちばん最後。** 値が先に残るように。絶対値ではなく、運ぶ前との比で見る
+  expect(probe.rafMaxGap).toBeLessThanOrEqual(Math.max(50, probe.idleMaxGap * GAP_RATIO))
   if (probe.loafSupported) {
-    expect(probe.loaf.blocking).toBeLessThan(MAX_BLOCKING_MS)
+    expect(scriptMs).toBeLessThan(MAX_SCRIPT_MS)
   } else {
     test.info().annotations.push({ type: 'note', description: 'Long Animation Frames 非対応' })
   }
