@@ -4,7 +4,7 @@ import { MemoryRouter, Route, Routes, useLocation } from 'react-router'
 import { ProjectGroup } from './ProjectGroup'
 import type { SessionMeta } from '@/lib/protocol'
 import { applySessionSnapshot, clearSessions } from '@/stores/sessions'
-import { clearSelection, getSelection } from '@/stores/selection'
+import { clearSelection, getSelection, toggleSelect } from '@/stores/selection'
 
 /**
  * クリックの作り分け（テスト計画フェーズ5「クリック挙動」の単体側）。
@@ -236,6 +236,53 @@ describe('ProjectGroup', () => {
     指の画面にする()
     vi.useFakeTimers()
     renderGroup([meta('a')], 'p1')
+
+    fireEvent.pointerDown(screen.getByTestId('session-tile'), {
+      pointerType: 'touch',
+      clientX: 10,
+      clientY: 10,
+    })
+    act(() => {
+      vi.advanceTimersByTime(500)
+    })
+
+    expect(getSelection()).toEqual({ kind: 'card', ids: ['a'] })
+  })
+
+  it('カードを選んでいても、枠のタップは「開く」のまま', async () => {
+    /*
+      **選択モードの単位は「同格の集合」**（並べ替え設計§15-5・要件の指摘「カードで選択
+      モードが発火すると枠も選べる」）。直す前は、カードを1枚選んだ瞬間に枠のシングルが
+      「選ぶ」へ変わり、余白をタップすると**カードの選択が消えて枠が選ばれ、PJT 専用画面は
+      開かなかった**。
+    */
+    指の画面にする()
+    renderGroup([meta('a')], 'p1')
+    act(() => toggleSelect('card', 'a'))
+
+    await userEvent.click(screen.getByTestId('project-group'))
+
+    expect(screen.getByTestId('current-path')).toHaveTextContent('/p/')
+    expect(getSelection()).toEqual({ kind: 'card', ids: ['a'] })
+  })
+
+  it('記録を持たない枠は、選択モード中でもタップで開く', async () => {
+    // 直す前は「選ぶ道も開く道も無い」死んだ領域だった（設計§15-5）
+    指の画面にする()
+    renderGroup([meta('a')])
+    act(() => toggleSelect('card', 'a'))
+
+    await userEvent.click(screen.getByTestId('project-group'))
+
+    expect(screen.getByTestId('current-path')).toHaveTextContent('/p/')
+  })
+
+  it('選ばれているカードを長押しして掴んでも、選択は外れない', () => {
+    // 直す前は `toggleSelect` で外れ、**色が消えた的を運ぶ**ことになっていた
+    指の画面にする()
+    vi.useFakeTimers()
+    renderGroup([meta('a')], 'p1')
+    act(() => toggleSelect('card', 'a'))
 
     fireEvent.pointerDown(screen.getByTestId('session-tile'), {
       pointerType: 'touch',

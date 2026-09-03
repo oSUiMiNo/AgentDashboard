@@ -5,6 +5,7 @@ import {
   getSelection,
   isSelected,
   isSelecting,
+  select,
   toggleSelect,
 } from './selection'
 
@@ -57,5 +58,26 @@ describe('選択モードから出る道', () => {
     toggleSelect('card', 'a')
     clearSelection()
     expect(isSelecting()).toBe(false)
+  })
+})
+
+describe('必ず選ぶ', () => {
+  it('選んでいないものは足す', () => {
+    select('card', 'a')
+    select('card', 'b')
+    expect(getSelection()).toEqual({ kind: 'card', ids: ['a', 'b'] })
+  })
+
+  it('既に選んでいるものは外さない', () => {
+    // `toggleSelect` なら外れる。**長押しで掴むときは外れてはいけない**（並べ替え設計§15-5）
+    toggleSelect('card', 'a')
+    select('card', 'a')
+    expect(isSelected('card', 'a')).toBe(true)
+  })
+
+  it('違う種類なら選び直す', () => {
+    toggleSelect('card', 'a')
+    select('project', 'p1')
+    expect(getSelection()).toEqual({ kind: 'project', ids: ['p1'] })
   })
 })

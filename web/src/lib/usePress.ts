@@ -17,7 +17,7 @@
 import { useCallback, useEffect, useRef, type PointerEvent as ReactPointerEvent } from 'react'
 import { useCoarsePointer } from './pointer'
 import { LONG_PRESS_MS, movedTooFar, pressMapping } from './press'
-import { toggleSelect, useSelection, type SelectionKind } from '@/stores/selection'
+import { select, toggleSelect, useSelection, type SelectionKind } from '@/stores/selection'
 
 interface Options {
   kind: SelectionKind
@@ -63,7 +63,14 @@ export function usePress({
 }: Options): PressBinding {
   const coarse = useCoarsePointer()
   const selection = useSelection()
-  const mapping = pressMapping(coarse, selection.ids.length > 0)
+  /*
+    **選択モードの単位は「同格の集合」**（並べ替え設計§15-5）。同じ種類を選んでいるときだけ
+    シングルが「選ぶ」になる。**記録を持たない箱は同格の集合に属さない**——その箱から
+    見れば常に「1つも選んでいない」ので、選択モード中でもタップで開く（死んだ領域を
+    作らない）。PC は `selecting` に依らないので変わらず、下の `!selectable → return` が
+    「シングルは何もしない」を保つ。
+  */
+  const mapping = pressMapping(coarse, selectable ? selection.kind : null, kind)
   const selected = selection.kind === kind && selection.ids.includes(id)
 
   // 長押しの計測。**押した場所からどれだけ動いたか**を見て、動いたらやめる
@@ -101,7 +108,9 @@ export function usePress({
             return
           }
           長押し.current.成立 = true
-          toggleSelect(kind, id)
+          // **必ず選ぶ**（`toggleSelect` ではない）。既に選ばれているカードを長押しして
+          // 掴んだ瞬間に選択が外れる穴を塞ぐ（並べ替え設計§15-5）
+          select(kind, id)
           // **選んだうえで、そのまま掴める。** 指を離せば選ばれただけ
           onLongPress?.()
         }, LONG_PRESS_MS),

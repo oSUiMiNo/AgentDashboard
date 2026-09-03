@@ -72,6 +72,26 @@ export function toggleSelect(kind: SelectionKind, id: string): void {
   notify()
 }
 
+/**
+ * **必ず選ぶ**（並べ替え設計§15-5）。長押しで掴むときに使う。
+ *
+ * `toggleSelect` だと、**既に選ばれているものを長押しして掴んだ瞬間に選択が外れる**
+ * （「色が消えた的を運ぶ」）。違う種類なら選び直し（§5-1）、既に選んでいれば何もしない
+ * （通知もしない）。
+ */
+export function select(kind: SelectionKind, id: string): void {
+  if (selection.kind !== kind) {
+    selection = { kind, ids: [id] }
+    notify()
+    return
+  }
+  if (selection.ids.includes(id)) {
+    return
+  }
+  selection = { kind, ids: [...selection.ids, id] }
+  notify()
+}
+
 /** 全部外す。**選択モードから抜ける道**（設計§4-2）。 */
 export function clearSelection(): void {
   if (selection.ids.length === 0) {
