@@ -185,6 +185,27 @@
   html {
     @apply font-sans;
     }
+
+  /* **開いた一覧は OS が描く。** Tailwind の preflight が全ての `select` へ
+     `background-color: transparent` を当てるので、Chromium は「作者が地を指定した」と
+     見なして**明るい地**で一覧を描く。そこへ `:root` の `color-scheme: dark` 向けの
+     文字色（ほぼ白）が乗ると、**白地に白**になって選ばれている行しか読めない。
+
+     実際に踏んだ——起動フォームの「どれを起こすか」が、マウスを乗せた行以外
+     見えなくなっていた。読めていた `select` があったのは、そちらが偶然
+     `text-muted-foreground`（中間グレー）を持っていたからで、地の問題は同じだった。
+
+     だから**地と文字を両方その場で決める**。`option` にも書くのは、一覧の行が
+     `select` の色を継がないため。危険な権限モードの色づけ（`bg-red-500/15` 等）は
+     utilities 層なので、こちらより強い。 */
+  select {
+    background-color: var(--background);
+    color: var(--foreground);
+    }
+  select option {
+    background-color: var(--background);
+    color: var(--foreground);
+    }
 }
 /* 差分の色。ライブラリの既定は明るい背景向けなので、両方のテーマで読めるように上書きする */
 .diff {

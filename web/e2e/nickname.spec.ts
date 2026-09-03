@@ -123,6 +123,10 @@ test('カードから名前を付けると、読み込み直しても残る', as
   await openDashboard(page)
   const tile = await spawnSession(page)
   const cardId = (await tile.getAttribute('data-card-id'))!
+  // **呼び戻し先が決まるまで待つ。** 名前は `claude_session_id` に付くので、
+  // 起こした直後に押すと記録側が「まだ名前を付けられません」で断る（設計§5-2）。
+  // 待たずに書くと、**速い機械では通り遅い機械では落ちる**テストになる
+  await セッションIDを取る(page, cardId)
   const shell = page.locator(`[data-testid="tile-shell"][data-card-id="${cardId}"]`)
 
   // **鉛筆は小窓の中に居ない**（器の直下の兄弟）。中から探すと 0 件で通ってしまう。
@@ -189,6 +193,10 @@ test('名前を消すと、CLI の名前が薄く出る側へ戻る', async ({ p
   await openDashboard(page)
   const tile = await spawnSession(page)
   const cardId = (await tile.getAttribute('data-card-id'))!
+  // **呼び戻し先が決まるまで待つ。** 名前は `claude_session_id` に付くので、
+  // 起こした直後に押すと記録側が「まだ名前を付けられません」で断る（設計§5-2）。
+  // 待たずに書くと、**速い機械では通り遅い機械では落ちる**テストになる
+  await セッションIDを取る(page, cardId)
   const shell = page.locator(`[data-testid="tile-shell"][data-card-id="${cardId}"]`)
   const title = page.locator(
     `[data-testid="session-tile"][data-card-id="${cardId}"] [data-testid="session-title"]`,
@@ -224,6 +232,10 @@ test('名前は、別のページへ行って戻っても残る', async ({ page 
   await openDashboard(page)
   const tile = await spawnSession(page)
   const cardId = (await tile.getAttribute('data-card-id'))!
+  // **呼び戻し先が決まるまで待つ。** 名前は `claude_session_id` に付くので、
+  // 起こした直後に押すと記録側が「まだ名前を付けられません」で断る（設計§5-2）。
+  // 待たずに書くと、**速い機械では通り遅い機械では落ちる**テストになる
+  await セッションIDを取る(page, cardId)
   const shell = page.locator(`[data-testid="tile-shell"][data-card-id="${cardId}"]`)
   const title = page.locator(
     `[data-testid="session-tile"][data-card-id="${cardId}"] [data-testid="session-title"]`,
@@ -248,6 +260,10 @@ test('セッション名がまだ無いカードにも名前を付けられる',
   await openDashboard(page)
   const tile = await spawnSession(page)
   const cardId = (await tile.getAttribute('data-card-id'))!
+  // **呼び戻し先が決まるまで待つ。** 名前は `claude_session_id` に付くので、
+  // 起こした直後に押すと記録側が「まだ名前を付けられません」で断る（設計§5-2）。
+  // 待たずに書くと、**速い機械では通り遅い機械では落ちる**テストになる
+  await セッションIDを取る(page, cardId)
   const shell = page.locator(`[data-testid="tile-shell"][data-card-id="${cardId}"]`)
   const title = page.locator(
     `[data-testid="session-tile"][data-card-id="${cardId}"] [data-testid="session-title"]`,
@@ -310,4 +326,33 @@ test('選んで起こすと、新しいカードに同じ名前が付いてい�
   await openSession(page, 起きたカード)
   await typeLine(page, 'echo 起きたよ')
   await expectTerminalToContain(page, '起きたよ')
+})
+
+test('起動フォームの選択肢が、開いた状態で読めること', async ({ page }) => {
+  // **ここは単体テストでは見られない。** 開いた一覧はブラウザが描く別の面で、
+  // DOM に無い。見られるのは `option` 要素に効いている色までだが、**地と文字が
+  // 同じ値なら、開いたときに読めないことが確定する**——実際にそうなっていた。
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  const cardId = (await tile.getAttribute('data-card-id'))!
+  const session = await セッションIDを取る(page, cardId)
+  履歴を置く(session)
+  await archiveAll(page)
+
+  const 次 = await spawnSession(page)
+  await 次.click({ button: 'left' })
+  await page.getByTestId('spawn-open').first().click()
+  const picker = page.getByTestId('spawn-past').first()
+  await expect(picker).toBeVisible({ timeout: 30_000 })
+
+  const 色 = await picker.locator('option').first().evaluate((node) => {
+    const 計算 = getComputedStyle(node)
+    return { 文字: 計算.color, 地: 計算.backgroundColor }
+  })
+
+  // **透明のままにしない。** 透明だと OS が明るい地で描き、白文字が消える
+  expect(色.地, `地が透明のまま: ${JSON.stringify(色)}`).not.toBe(
+    'rgba(0, 0, 0, 0)',
+  )
+  expect(色.文字, `地と文字が同じ色: ${JSON.stringify(色)}`).not.toBe(色.地)
 })
