@@ -23,7 +23,17 @@ function 置く(when: GrabWhen, options: { enabled?: boolean } = {}) {
   const 記録: 記録 = { grabs: 0, moves: [], drops: 0, taps: 0 }
   let arm: (() => void) | null = null
 
-  function 器() {
+  /*
+    **この器だけは英字で名づける。**
+
+    `oxlint` の `rules-of-hooks` は、フックを呼んでよい相手を**名前の1文字目**で
+    判定する——大文字で始まる（コンポーネント）か `use` で始まる（カスタムフック）か。
+    **日本語の名前は大文字始まりになりようがない**ので、この PJT の作法どおり
+    `器` と名づけると `make ci` の `lint-web` が落ちる。
+
+    **抑制のコメントで黙らせない。** 黙らせると、次に同じ形で器を書いた人がまた踏む。
+  */
+  function Harness() {
     const 掴み = useGrip({
       enabled: options.enabled,
       when: () => when,
@@ -52,7 +62,7 @@ function 置く(when: GrabWhen, options: { enabled?: boolean } = {}) {
     )
   }
 
-  render(<器 />)
+  render(<Harness />)
   return { 記録, 本体: screen.getByTestId('body'), arm: () => arm?.() }
 }
 
