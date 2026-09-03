@@ -2072,11 +2072,16 @@ impl SessionManager {
         initial_mode: Option<PermissionMode>,
         claude_session_id: ClaudeSessionId,
     ) -> Result<Arc<Session>, SessionError> {
+        // **引数にも積む。** `initial_mode` はカードの記録の初期値でしかないので、
+        // これだけでは CLI に何も伝わらない——記録上は頼んだモードなのに、実際は
+        // 利用者の既定で起動する、という食い違いになる（`spawn_with_mode` と
+        // 復旧が同じ形で積んでいる）
+        let args = lifecycle::permission_mode_args(initial_mode.as_ref());
         self.spawn_as(
             CardId::new(),
             cwd,
             lifecycle::SessionStart::Resume(claude_session_id),
-            &[],
+            &args,
             initial_mode,
             Some(claude_session_id),
         )

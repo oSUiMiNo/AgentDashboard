@@ -75,6 +75,69 @@ async fn 権限モードを渡せる() {
 }
 
 #[tokio::test]
+async fn 権限モードと呼び戻し先は組で子プロセスまで届く() {
+    // **カードの記録を見るだけでは足りない。** 記録の初期値と、CLI へ渡す起動引数は
+    // 別々に積むので、片方だけ積んで「渡せている」と読める形になりうる——実際に
+    // そうなっていた（引数に積み忘れていて、記録上は頼んだモード・実際は利用者の
+    // 既定、という食い違いが起きる）。
+    //
+    // なので**起動された子プロセス自身に聞く**（`session_env.rs` と同じ流儀）。
+    let manager = common::manager();
+    let session = ClaudeSessionId::new();
+    let mode = PermissionMode::new("acceptEdits");
+
+    let recalled = manager
+        .recall(&common::work_dir(), Some(mode), session)
+        .expect("起こせること");
+    let mut watcher = common::Watcher::attach(&recalled);
+    watcher.wait_for(testkit::fake_claude::READY_MARKER).await;
+
+    common::send_line(&recalled, "dump");
+    watcher
+        .wait_for(testkit::fake_claude::DUMP_END_MARKER)
+        .await;
+
+    let argv: Vec<String> = watcher
+        .seen()
+        .lines()
+        .filter_map(|line| {
+            line.trim_end_matches('\r')
+                .strip_prefix(testkit::fake_claude::ARGV_PREFIX)
+        })
+        .map(str::to_string)
+        .collect();
+
+    let resume = argv
+        .iter()
+        .position(|arg| arg == "--resume")
+        .unwrap_or_else(|| panic!("--resume が渡っていない: {argv:?}"));
+    assert_eq!(
+        argv.get(resume + 1).map(String::as_str),
+        Some(session.to_string().as_str()),
+        "頼んだセッションが渡っていない: {argv:?}"
+    );
+
+    let permission = argv
+        .iter()
+        .position(|arg| arg == "--permission-mode")
+        .unwrap_or_else(|| panic!("--permission-mode が渡っていない: {argv:?}"));
+    assert_eq!(
+        argv.get(permission + 1).map(String::as_str),
+        Some("acceptEdits"),
+        "頼んだ権限モードが渡っていない: {argv:?}"
+    );
+
+    // **自己採番していないこと。** `--session-id` が混ざると、指定した過去の
+    // セッションではなく新しいセッションが始まる
+    assert!(
+        !argv.iter().any(|arg| arg == "--session-id"),
+        "引き継ぎなのに自己採番している: {argv:?}"
+    );
+
+    recalled.kill();
+}
+
+#[tokio::test]
 async fn 起こした先は本当に動く() {
     // 型の上で通っていても、**擬似 claude が起動していなければ意味が無い**。
     // 起動の合図（`READY_MARKER`）まで見る
