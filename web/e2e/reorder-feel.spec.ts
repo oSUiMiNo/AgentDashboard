@@ -334,3 +334,48 @@ test('区画は、レールの端で横に送られる', async ({ page }) => {
     )
     .toBeGreaterThan(1)
 })
+
+test('帯の「前へ」で並びが変わり、読み上げの文言が出る', async ({ page }) => {
+  // **ドラッグ以外の道**（設計§15-6・WCAG 2.2 SC 2.5.7）。PC はシングルで「選ぶ」
+  test.setTimeout(120_000)
+  await openDashboard(page)
+  const { group, ids } = await カードを並べる(page, 3)
+  await group.locator(`[data-testid="session-tile"][data-card-id="${ids[2]}"]`).click()
+  const 前へ = page.getByTestId('bulk-move-back')
+  await expect(前へ).toBeVisible()
+  await 前へ.click()
+  await expect.poll(() => カードの並び(group)).toEqual([ids[0], ids[2], ids[1]])
+  await expect(page.getByTestId('bulk-live')).toContainText('移動しました')
+  // 覚えている（読み直しても残る）
+  await page.reload()
+  await openDashboard(page)
+  await expect.poll(() => カードの並び(page.getByTestId('project-group').first())).toEqual([
+    ids[0],
+    ids[2],
+    ids[1],
+  ])
+})
+
+test('キーボードだけで、選んで動かして開ける', async ({ page }) => {
+  test.setTimeout(120_000)
+  await openDashboard(page)
+  const { group, ids } = await カードを並べる(page, 3)
+  const 的 = group.locator(`[data-testid="session-tile"][data-card-id="${ids[1]}"]`)
+  await 的.focus()
+  await page.keyboard.press('Space')
+  await expect(的).toHaveAttribute('aria-pressed', 'true')
+  expect(page.url()).not.toContain('/s/')
+  // 帯の「前へ」へ Tab で辿り着く
+  const 前へ = page.getByTestId('bulk-move-back')
+  for (let i = 0; i < 12; i += 1) {
+    if (await 前へ.evaluate((el) => el === document.activeElement)) break
+    await page.keyboard.press('Tab')
+  }
+  await expect(前へ).toBeFocused()
+  await page.keyboard.press('Enter')
+  await expect.poll(() => カードの並び(group)).toEqual([ids[1], ids[0], ids[2]])
+  // 戻って Enter で開く
+  await 的.focus()
+  await page.keyboard.press('Enter')
+  await expect(page).toHaveURL(new RegExp(`/s/${ids[1]}`))
+})

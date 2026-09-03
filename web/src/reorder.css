@@ -49,9 +49,16 @@
 
   # 動かす量は JavaScript が渡し、動き方は CSS が持つ
 
-  `useReorder` が並びを差し替える直前に位置を控え、差し替えた直後に**差分を
-  `--reorder-dx` / `--reorder-dy` へ入れて1フレームだけ滑りを切り、0 へ戻す**（FLIP）。
-  止める段（静けさ・OS の設定）を JavaScript へ散らさないための分担である。
+  **運んでいる間は DOM を並べ替えない**（設計§15-11）。`useReorder` が凍結した矩形と
+  仮想の並びから各要素の行き先を出し、`translate` をインラインで書く——押しのけられる
+  側はここの `transition` で滑り、**本人は指に 1:1 で追従する**（`translate` に
+  transition を掛けない）。離したら React が DOM を並べ替え、直後に測って差があるもの
+  だけ 0 へ滑らせる。**本人だけはバネ**（`motion` の `animate`。速度を引き継ぐ）で、
+  `data-reorder-settling` の間は `translate` を滑らせない。止める段（静けさ・OS の設定）
+  を JavaScript へ散らさないための分担である。
+
+  `--reorder-dx` / `--reorder-dy` は 0 のまま置いてある（`translate` の受け皿。インラインが
+  無いときの既定）。
 */
 
 [data-reorder-item] {
