@@ -338,9 +338,14 @@ test('掴んでいる間だけ、押しのけられる側も滑る', async ({ pa
   await expect(後の枠).toHaveAttribute('data-reordering', 'true')
   await expect(後の枠).toHaveAttribute('data-dragging', 'true')
 
-  // **傾きが実際に出ている**（`transform: none` に潰されていない）
-  const 変形 = await 後の枠.evaluate((el) => getComputedStyle(el).transform)
-  expect(変形).not.toBe('none')
+  // **傾きと縮みが実際に出ている**（個別プロパティ。`transform` は `motion` のもの）。
+  // 枠は面が大きいので 1.02 ではなく 0.97（要件「追加要望」1）。滑りの途中を読まないよう待つ
+  await expect
+    .poll(() => 後の枠.evaluate((el) => getComputedStyle(el).rotate))
+    .toBe('1deg')
+  await expect
+    .poll(() => 後の枠.evaluate((el) => getComputedStyle(el).scale))
+    .toBe('0.97')
 
   // **押しのけられた側にも動きが走っている**
   const 押しのけられた側 = await 先の枠.evaluate((el) => el.getAnimations().length)
@@ -375,10 +380,13 @@ test('「静止」を選ぶと、並べ替えは滑らない', async ({ page }) 
     await page.mouse.down()
     await page.mouse.move(箱.x + 40, 箱.y + 5)
     await page.mouse.move(箱.x + 80, 箱.y + 5)
+    // 個別プロパティごとに1つずつ並ぶ（`translate, scale, rotate`）。**全部 0 であること**
     const 時間 = await 後の枠.evaluate(
       (el) => getComputedStyle(el).transitionDuration,
     )
-    expect(時間).toBe('0s')
+    expect(時間.split(',').map((each) => each.trim())).toEqual(
+      時間.split(',').map(() => '0s'),
+    )
     await page.mouse.up()
   } finally {
     // **戻し忘れると、後続の無関係なテストが静止のまま走る**

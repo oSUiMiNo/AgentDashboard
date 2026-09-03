@@ -108,29 +108,6 @@ interface Props {
  * **根拠は弱い。**「見に行くかどうかを決めるのに要る時間」以上の裏付けは無いので、
  * 実物を見て決め直す（§16 の7）。
  */
-/**
- * 器の `transform` を、`motion` に奪わせないための型紙。
- *
- * **クラスで傾けても画面には出ていなかった。**
- *
- * `motion` は `y` のような変形の値を1つでも持つと `style.transform` を自分で書き、
- * **値が既定（`y: 0`）に戻った瞬間に `transform: none` をインラインで書き込む**
- * （`motion-dom` の `buildTransform`）。インラインはクラスに勝つので、
- * 掴んだときの `scale-[1.02] rotate-[1deg]` は**一度も効いていなかった**。
- *
- * 型紙を渡すと `none` を書く分岐そのものを通らなくなる。何も動かしていないときは
- * 空文字を返すので、**インラインの指定が消えてクラスが効く**。
- *
- * **モジュール直下に置くこと。** 毎回作ると `motion` が描き直しの判定に入る。
- *
- * **並べ替えのぶんを先頭に置く。** `reorder.css` の変数を読むので、掴んでいない間は
- * すべて既定値（0px・1倍・0度）になり、何も動かさないのと同じになる。出入りの `y` は
- * `generated` として後ろに付き、両方が生きる。
- */
-const 変形の型紙 = (_: unknown, generated: string) =>
-  `translate(var(--reorder-dx, 0px), var(--reorder-dy, 0px))` +
-  ` scale(var(--reorder-lift, 1)) rotate(var(--reorder-tilt, 0deg))` +
-  (generated === '' ? '' : ` ${generated}`)
 
 const ECHO_MS = 12_000
 
@@ -410,19 +387,17 @@ export function SessionTile({
     <motion.div
       ref={rootRef}
       /*
-        掴んでいるものを流れから浮かせる（設計§3-5・§8-2）。**影ではなく `transform`
-        で作る**——カードは `mask-image` を使っており、外へ描くものは切られる。
-        倍率と傾きは `DESIGN.md` §27.5 の候補そのまま。
+        掴んでいるものの浮き（倍率・傾き）は `reorder.css` が持つ（設計§15-2・§15-7）。
+        **ここに `scale-`／`rotate-` を置かない**——Tailwind のそれは個別プロパティを
+        出すので、`reorder.css` と二重に掛かる（1.0404倍・2度。実際にそうなっていた）。
 
-        **掴んでいないときは1文字も足さない。** 骨格を字で固定しているテストがあり、
-        末尾に空白が1つ入るだけで落ちる（実際に落ちた）
+        `transform` は `motion` のもの（入場の `y`）。こちらは `translate`／`scale`／
+        `rotate` しか触らないので奪い合わず、型紙も要らない。
+
+        **クラスは固定。** 骨格を字で固定しているテストがあり、末尾に空白が1つ入る
+        だけで落ちる（実際に落ちた）
       */
-      className={
-        dragging
-          ? 'tile-shell relative z-10 scale-[1.02] rotate-[1deg]'
-          : 'tile-shell relative'
-      }
-      transformTemplate={変形の型紙}
+      className="tile-shell relative"
       initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, scale: 0.97 }}
@@ -437,6 +412,7 @@ export function SessionTile({
         （`data-dragging`）。
       */
       data-reorder-item=""
+      data-reorder-kind="card"
       data-reordering={reordering ? 'true' : 'false'}
       /*
         **掴んでいる間は揺れを止める**（設計§8-1）。揺れながら動くと落とし先が読めない。

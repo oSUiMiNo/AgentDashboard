@@ -188,15 +188,17 @@ export function ProjectGroup({
         `data-reordering`）のと、**持っているものだけが浮く**（`data-dragging`）。
       */
       data-reorder-item=""
+      data-reorder-kind="frame"
       data-reordering={reordering ? 'true' : 'false'}
       // **賑やかのときは属性ごと出さない**（カード設計§9-5-3）。「静止」なら滑らせない
       data-quiet={quiet === 'lively' ? undefined : quiet}
       // 端末の長押しメニューを抑える（設計§4-4）。素のスタイルで書く理由は SessionTile と同じ
       style={{ WebkitTouchCallout: 'none', WebkitUserSelect: 'none', userSelect: 'none' }}
       /*
-        掴んでいる枠は流れから浮かせる（設計§3-5）。**影ではなく `transform` で作る**
-        ——`DESIGN.md` §27.5 の4候補（1.02倍・1〜2°の傾き・影・落とし先の反応）は
-        「物を掴んで運ぶ操作」のためのもので、こちらはまさにそれに当たる。
+        掴んでいる枠の浮き（縮み・傾き・薄さ）は `reorder.css` が持つ（設計§15-7）。
+        **ここに `scale-`／`rotate-` を置かない**——Tailwind のそれは個別プロパティを
+        出すので、`reorder.css` と二重に掛かる。枠は面が大きいので 1.02倍ではなく
+        0.97倍に縮める（要件「追加要望」1）。
 
         # 選ばれた枠（§27.3・利用者の指摘 2026-09-03）
 
@@ -226,7 +228,7 @@ export function ProjectGroup({
         押し方.selected
           ? 'border-select bg-select-field hover:bg-select-field-hover shadow-[inset_3px_0_0_var(--select)]'
           : 'border-border hover:border-primary/40 hover:bg-muted/20'
-      } ${dragging ? 'relative z-10 scale-[1.02] rotate-[1deg] opacity-90' : ''}`}
+      }`}
     >
       <header className="mb-2 flex items-baseline gap-2">
         {/* 縮んでよいのはパスだけ。`min-w-0` が無いと `truncate` が効かず、

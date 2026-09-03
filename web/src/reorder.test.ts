@@ -129,7 +129,10 @@ describe('掴んでいる間だけ動く', () => {
 
   it('動かす指定も、掴んでいる印の中にしかない', () => {
     // 掴んでいなければ**変形そのものが存在しない**（包含ブロックも作らない）
-    const 動かす = 全規則.filter((rule) => /(?:^|;)\s*transform:/.test(rule.body))
+    // **個別プロパティも数える。** `transform` だけを見ると、`translate:` で動かす規則を見逃す
+    const 動かす = 全規則.filter((rule) =>
+      /(?:^|;)\s*(?:transform|translate|scale|rotate):/.test(rule.body),
+    )
     expect(動かす.length).toBeGreaterThan(0)
     for (const rule of 動かす) {
       expect(rule.selector).toContain("[data-reordering='true']")
@@ -189,9 +192,32 @@ describe('止める段', () => {
 describe('持っているものの見せ方', () => {
   it('倍率と傾きは `DESIGN.md` §27.5 の候補そのまま', () => {
     // **利用者が「コミカルでいい感じ」と言っている値。** 変えるときは実物を見てから
-    const 持つ = 規則("[data-reorder-item][data-dragging='true']")
+    const 持つ = 規則("[data-reorder-item][data-reordering='true'][data-dragging='true']")
     expect(値(持つ, '--reorder-lift')).toBe('1.02')
     expect(値(持つ, '--reorder-tilt')).toBe('1deg')
+  })
+
+  it('枠と区画は縮め、カードは持ち上げる', () => {
+    /*
+      **1度傾けると、角が `寸法 × 0.0175` だけはみ出す**（要件「追加要望」1・設計§15-7）。
+      カード（294×200）は 1.02倍でも隙間 12px に収まるが、枠（940×600 級）と区画
+      （1000×900 級）は収まらない。大きいものは 0.97 に縮める——Pressed と同じ数
+    */
+    const 縮める = 全規則.filter((rule) => rule.selector.includes("data-reorder-kind='frame'"))
+    expect(縮める.length).toBeGreaterThan(0)
+    const 倍率 = 縮める.find((rule) => rule.body.includes('--reorder-lift'))
+    expect(倍率).toBeDefined()
+    expect(値(倍率 as Rule, '--reorder-lift')).toBe('0.97')
+    expect((倍率 as Rule).selector).toContain("data-reorder-kind='section'")
+    // カードの持ち上げは据え置き。**縮める規則がカードに当たってはいけない**
+    expect((倍率 as Rule).selector).not.toContain("data-reorder-kind='card'")
+  })
+
+  it('`transform` は書かない。`motion` のもの', () => {
+    // 個別プロパティで書く（設計§15-2）。`transform` を書くと入場の `y` と奪い合う
+    for (const rule of 全規則) {
+      expect(rule.body).not.toMatch(/(?:^|;)\s*transform:/)
+    }
   })
 
   it('影は使わない', () => {

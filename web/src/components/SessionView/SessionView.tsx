@@ -152,16 +152,19 @@ export function SessionView({
       data-dragging={dragging ? 'true' : 'false'}
       /* 並べ替えの動きは `reorder.css` が持つ（設計§7-3 の読み替え） */
       data-reorder-item=""
+      data-reorder-kind="section"
       data-reordering={reordering ? 'true' : 'false'}
       data-quiet={quiet === 'lively' ? undefined : quiet}
       ref={rootRef}
       /*
-        掴んでいる区画を流れから浮かせる（設計§3-5）。倍率と傾きは `DESIGN.md` §27.5 の
-        候補そのまま。**横並びは横1列**なので、傾けても隣を押しのけない
+        掴んでいる区画の浮き（縮み・傾き）は `reorder.css` が持つ（設計§15-7）。
+        **ここに `scale-`／`rotate-` を置かない**——二重に掛かる。区画は幅 672px で
+        1度傾けると角が 12px ずれるので、1.02倍ではなく 0.97倍に縮める
+        （要件「追加要望」1「同じ大きさのまま傾くので端がはみ出る」）
       */
       className={`flex min-h-0 flex-col gap-1 ${
         compact ? 'w-[42rem] shrink-0' : 'min-w-0 flex-1'
-      }${dragging ? ' z-10 scale-[1.02] rotate-[1deg]' : ''}`}
+      }`}
     >
       {/*
         **画面の帯**（設計§17-1・`DESIGN.md` §39.2）。ここに置くのは

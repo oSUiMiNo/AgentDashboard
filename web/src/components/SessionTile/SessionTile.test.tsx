@@ -379,31 +379,27 @@ describe('SessionTile の骨格', () => {
     )
   })
 
-  it('掴んでいるカードは、実際に傾く', async () => {
+  it('掴んでいるカードの倍率と傾きは、CSS だけが持つ', async () => {
     /*
-      **クラスで傾けても画面には出ない。**
+      **クラスで傾けない。** Tailwind の `scale-[1.02]` は個別プロパティ（`scale:`）を
+      出すので、`reorder.css` の `scale` と**二重に掛かって 1.0404倍・2度**になっていた
+      （設計§15-2）。`transformTemplate` で `transform` を奪い返す形もやめ、`transform` は
+      `motion`（入場の `y`）に返す。
 
-      器は `motion.div` で `animate={{ y: 0 }}` を持つ。`motion-dom` の
-      `buildTransform` は、`y` のような変形の値を1つでも持つと `hasTransform` を立て、
-      **値が既定（`y: 0`）に戻った瞬間に `style.transform = "none"` をインラインで書く**。
-      インラインは Tailwind のクラスに勝つので、`scale-[1.02] rotate-[1deg]` は
-      **一度も画面に出ていなかった**（`build-transform.mjs` を読んで確認）。
-
-      **だから見るのはクラス名ではなく、インラインの `transform` そのもの。**
-      クラスを数えるテストだと、死んでいるクラスを「在る」と数えて緑になる。
+      ここで見るのは「クラスに無い」「印が出ている」「`transform` を自分で触っていない」
+      まで。実際の倍率と傾きは E2E が計算値で読む（jsdom は CSS を適用しない）。
     */
     renderTile(meta(), { dragging: true })
     const 器 = screen.getByTestId('tile-shell')
+    expect(器.className).not.toMatch(/scale-|rotate-/)
+    expect(器.dataset.reorderKind).toBe('card')
 
-    /*
-      **入場アニメが着くまで待つ。** 途中は `translateY(…)` が残っているので、
-      待たずに見ると「変形が在る」と読めてしまう——**壊れているのに緑になる**。
-      `none` が書かれるのは `y` が 0 に着いた後である。
-    */
+    // 入場アニメが着くと `motion` が `transform` を自分の値（`none`）へ戻す。
+    // **型紙が無いので、こちらの変形は `transform` に混ざらない**
     await waitFor(() => {
       expect(器.style.transform).not.toContain('translateY')
     })
-    expect(器.style.transform).not.toBe('none')
+    expect(['', 'none']).toContain(器.style.transform)
   })
 
   it('効果線は承認待ちのときだけ描く', () => {

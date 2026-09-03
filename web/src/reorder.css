@@ -30,6 +30,23 @@
   同じ器へ入れると許可表が何を守っているのか分からなくなる（`controls.css` を
   分けたのと同じ理由）。
 
+  # `transform` は使わない。個別プロパティで書く
+
+  倍率と傾きを `transform` 1本に合成すると、`motion` が入場で書く `transform`
+  （`translateY`）と奪い合う——読み替え5 では `transformTemplate` で凌いだが、
+  Tailwind の `scale-[1.02]` が**個別プロパティ**（`scale:`）を出すので、型紙の
+  `scale(1.02)` と**二重に掛かって 1.0404倍・2度**になっていた（設計§15-2）。
+  ここでは `translate`／`scale`／`rotate` だけを書き、`transform` は `motion` に返す。
+  **器のクラスに `scale-`／`rotate-` を置かないこと**——このファイルはレイヤ外なので
+  クラスは黙って負けるが、負ける前に二重に掛かる。
+
+  # 大きさで倍率を分ける（要件「追加要望」1・設計§15-7）
+
+  1度傾けると角が `高さ × 0.0175` だけ横へ、`幅 × 0.0175` だけ縦へはみ出す。
+  カード（294×200）は 1.02倍でも隙間（12px）に収まるが、枠（940×600 級）と
+  区画（1000×900 級）は収まらない。**`data-reorder-kind` で分け、大きいものは 0.97倍に
+  縮める**（`DESIGN.md` §27.4 の Pressed と同じ数。語彙を増やさない）。
+
   # 動かす量は JavaScript が渡し、動き方は CSS が持つ
 
   `useReorder` が並びを差し替える直前に位置を控え、差し替えた直後に**差分を
@@ -49,7 +66,7 @@
 }
 
 /*
-  **ここが「掴んでいる間だけ」の1行。** これ以外に滑る規則を書かない。
+  **ここが「掴んでいる間だけ」の1行。** これ以外に滑る規則・動かす規則を書かない。
 
   180ms は `DESIGN.md` §28.2 の **Normal（140〜220ms）**。Micro（80〜140）だと
   「どれが動いたか」が読めず瞬間と区別が付かない。運びの最中に何度も走るので、
@@ -57,9 +74,13 @@
 */
 [data-reorder-item][data-reordering='true'] {
   --reorder-ms: 180ms;
-  transition: transform var(--reorder-ms) var(--reorder-ease);
-  transform: translate(var(--reorder-dx), var(--reorder-dy))
-    scale(var(--reorder-lift)) rotate(var(--reorder-tilt));
+  transition:
+    translate var(--reorder-ms) var(--reorder-ease),
+    scale var(--reorder-ms) var(--reorder-ease),
+    rotate var(--reorder-ms) var(--reorder-ease);
+  translate: var(--reorder-dx) var(--reorder-dy);
+  scale: var(--reorder-lift);
+  rotate: var(--reorder-tilt);
 }
 
 /*
@@ -67,15 +88,21 @@
   ——利用者が「コミカルでいい感じ」と言っている）。**影は使わない**——カードは
   `mask-image` を使う層を持ち、外へ描くものは切られる（並べ替え設計§8-2）。
 */
-[data-reorder-item][data-dragging='true'] {
+[data-reorder-item][data-reordering='true'][data-dragging='true'] {
   --reorder-lift: 1.02;
   --reorder-tilt: 1deg;
   position: relative;
   z-index: 10;
 }
 
+/* 面が大きいものは縮める（要件「追加要望」1・設計§15-7）。傾いた角が隙間に収まらない */
+[data-reorder-item][data-reorder-kind='frame'][data-dragging='true'],
+[data-reorder-item][data-reorder-kind='section'][data-dragging='true'] {
+  --reorder-lift: 0.97;
+}
+
 /* 枠は面が大きいので、浮いていることを薄さでも出す */
-[data-testid='project-group'][data-dragging='true'] {
+[data-reorder-item][data-reorder-kind='frame'][data-dragging='true'] {
   opacity: 0.9;
 }
 
