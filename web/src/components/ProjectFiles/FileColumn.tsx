@@ -60,6 +60,19 @@ interface Props {
   /** 読むファイルの絶対パス */
   path: string
   width: number
+  /**
+   * **狭い窓での幅。置いた画面が決める**（`スマホでファイルビュアを開くと画面が崩れる`
+   * 設計§3-2）。**窓の幅で分岐しないという上の決めは、そのまま生きている**——
+   * 変えるのは「どの画面へ置かれたときにどの幅を取るか」で、それは置く側の知識である。
+   *
+   * | 値 | どこ | なぜ |
+   * |---|---|---|
+   * | `'札'`（既定） | PJT 専用画面 | レールに札が並ぶ場所。**札と同じ 672px** |
+   * | `'画面'` | セッション専用画面 | **2面のページ送り**にするので、面は1画面ぶん |
+   *
+   * **広い窓（`md` 以上）では、どちらも変わらない**——あちらは縁で変えた幅が効く。
+   */
+  狭い窓の幅?: '札' | '画面'
   /** 閉じる。**列ごと消え、セッションが左へ寄る**（設計§2） */
   onClose: () => void
   /**
@@ -77,6 +90,7 @@ export function FileColumn({
   project,
   path,
   width,
+  狭い窓の幅 = '札',
   onClose,
   onUnreadable,
   onGrab,
@@ -87,7 +101,14 @@ export function FileColumn({
     <div
       data-testid="file-column"
       style={{ '--files-file-w': `${width}px` } as CSSProperties}
-      className="relative flex w-[42rem] min-h-0 shrink-0 flex-col gap-2 pr-3 md:w-[var(--files-file-w,42rem)]"
+      /*
+        **`snap-start snap-always` は、レールの中に居るときだけ効く**（設計§4）。
+        PJT 専用画面のレールにスナップは無いので、あちらでは**字が在るだけで何も
+        起きない**。置き場所で分岐させるより、札に付けて回るほうが穴が無い。
+      */
+      className={`relative flex min-h-0 shrink-0 snap-start snap-always flex-col gap-2 pr-3 md:w-[var(--files-file-w,42rem)] ${
+        狭い窓の幅 === '画面' ? 'w-full' : 'w-[42rem]'
+      }`}
     >
       {/*
         **高さの鎖の最後の輪**（設計§7）。`FileView` の `h-full` はこの段に対して

@@ -60,6 +60,12 @@ interface Args {
   /** サイドバーが開いているか。**記憶は `useFilesPanel` が持つ**ので、受け取るだけ */
   open: boolean
   onToggle: () => void
+  /**
+   * 狭い窓での中身の列の幅。**素通しするだけ**——決めるのは置く側で、
+   * 意味は `FileColumn` の Props にある（`スマホでファイルビュアを開くと画面が崩れる`
+   * 設計§3-2）。
+   */
+  狭い窓の幅?: '札' | '画面'
 }
 
 export interface FilesParts {
@@ -75,10 +81,20 @@ export interface FilesParts {
    * 一緒に横へ流れる。ファイルを開いていなければ `null`。
    *
    * セッション専用画面には**レールが無い**（セッションを1本しか出さない）ので、
-   * あちらでは取り合いの器の兄弟として置く。**片方だけ形が違うのは入れ忘れではなく、
-   * 揃える先が存在しないため。**
+   * **セッション専用画面にもレールを足した**（2026-09-04・`スマホでファイルビュアを
+   * 開くと画面が崩れる` 設計§2）。**それまでは「揃える先が存在しない」として
+   * 取り合いの器の兄弟に置いていたが、そのせいで狭い窓ではセッションの面が 0px まで
+   * 潰れていた**——672px という寸法が「レールが受け止める」前提で選ばれていたのに、
+   * 前提のほうを持って来ていなかった。**いまは両方ともレールの中に居る。**
    */
   column: ReactNode
+  /**
+   * いま開いている1枚の絶対パス。開いていなければ `null`。
+   *
+   * **レールを持っているのは画面の側**なので、「開いたらファイル側へ寄せる」（設計§5）
+   * を成立させるには、**変わったこと**を外から見られる必要がある。
+   */
+  開いている一枚: string | null
 }
 
 export function useFilesParts({
@@ -86,6 +102,7 @@ export function useFilesParts({
   project,
   open,
   onToggle,
+  狭い窓の幅,
 }: Args): FilesParts {
   /*
     いま出しているファイル。**覚える**——読み込み直すと戻る
@@ -211,6 +228,7 @@ export function useFilesParts({
           project={project}
           path={picked.path}
           width={widths.file}
+          狭い窓の幅={狭い窓の幅}
           onClose={列を閉じる}
           /*
             **押した1枚には渡さない。** 渡さないことがそのまま「押した人には理由を
@@ -220,5 +238,6 @@ export function useFilesParts({
           {...grip}
         />
       ),
+    開いている一枚: picked === null ? null : picked.path,
   }
 }

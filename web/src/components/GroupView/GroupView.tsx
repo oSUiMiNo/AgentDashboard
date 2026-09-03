@@ -41,6 +41,7 @@ import { SessionAdd } from '@/components/SessionAdd/SessionAdd'
 import { ReorderHandle } from '@/components/ReorderHandle/ReorderHandle'
 import { SessionView } from '@/components/SessionView/SessionView'
 import { useFilesPanel } from '@/lib/filesPanel'
+import { useSnapToFile } from '@/lib/snapToFile'
 import { projectDisplayName } from '@/lib/path'
 import { backTargetFor, HOME } from '@/lib/routes'
 import { saveCardOrder, useProjectCards } from '@/stores/sessions'
@@ -97,12 +98,26 @@ export function GroupView({ host, project }: Props) {
     中身の列はレールの中のいちばん左。**横ホイールの受け渡しは要らなくなった**
     ——列がレールの中に居れば、ブラウザのスクロール連鎖がそのまま届く
   */
-  const { sidebar, column } = useFilesParts({
+  const { sidebar, column, 開いている一枚 } = useFilesParts({
     host,
     project,
     open: filesOpen,
     onToggle: toggleFiles,
+    /*
+      **狭い窓の幅は渡さない。** ここは札が並ぶ場所なので、中身の列も**札と同じ
+      672px** のまま（`スマホでファイルビュアを開くと画面が崩れる` 設計§3-3）。
+      1画面ぶんにするのはセッション専用画面だけ
+    */
   })
+  /*
+    **開いたファイルが変わったら、レールをファイル側へ寄せる**（同 設計§5）。
+    セッション専用画面と同じ不具合がここにもある——セッションを何本か横へ流した
+    あとで別のファイルを開くと、レールが動かないので「開いたのに変わらない」。
+
+    **並べ替え中は寄せない。** このレールは**並べ替えの自動送りと同じもの**なので、
+    掴んでいる指の下で動かすと掴んだものがずれる
+  */
+  useSnapToFile(railRef, 開いている一枚, reordering)
 
   return (
     <section

@@ -17,7 +17,13 @@
  * というのが要件の使い方なので、送るたびにターミナルへ切り替えさせない。
  */
 
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from 'react'
 import { useLocation, useNavigate } from 'react-router'
 import { Button } from '@/components/ui/button'
 import { PencilGlyph, PowerGlyph, TrashGlyph } from '@/components/ui/glyphs'
@@ -28,6 +34,7 @@ import { PermissionModePicker } from '@/components/PermissionModePicker/Permissi
 import { TerminalPane } from '@/components/TerminalPane/TerminalPane'
 import { TranscriptTree } from '@/components/TranscriptTree/TranscriptTree'
 import { dropDraft } from '@/lib/drafts'
+import { useSnapToFile } from '@/lib/snapToFile'
 import { formatElapsed, formatScreenInterval } from '@/lib/time'
 import {
   isEnded,
@@ -122,12 +129,19 @@ export function SessionView({
   // ファイルのパネルと、PJT 専用画面へのリンクの**両方**で使う。同じ意味の式を
   // 2通りの綴りで置くと、片方だけ直す余地が残る
   const host = hostOf(session?.agent_id)
-  const { sidebar, column } = useFilesParts({
+  const { sidebar, column, 開いている一枚 } = useFilesParts({
     host,
     project: session?.project ?? '',
     open: filesOpen,
     onToggle: toggleFiles,
+    /*
+      **狭い窓では、面は1画面ぶん**（`スマホでファイルビュアを開くと画面が崩れる`
+      設計§3）。PJT 専用画面は渡さない——あちらは札が並ぶ場所なので 672px のまま
+    */
+    狭い窓の幅: '画面',
   })
+  const railRef = useRef<HTMLDivElement>(null)
+  useSnapToFile(railRef, 開いている一枚)
 
   if (!session) {
     // 消えた直後の一瞬。単独表示のときは呼び出し側が「見つかりません」を出す
@@ -264,11 +278,15 @@ export function SessionView({
         */}
         {!compact && sidebar}
         {/*
-          **ここにレールは無い**（セッションを1本しか出さない）ので、中身の列は
-          取り合いの器の兄弟のまま。**PJT 専用画面だけ形が違うのは入れ忘れではなく、
-          揃える先が存在しないため**（`useFilesParts` の JSDoc）
+          **レール。** 中身の列とセッションの面をここへ入れ、狭い窓では**2面のページ
+          送り**にする（`スマホでファイルビュアを開くと画面が崩れる` 設計§2）。
+
+          **2026-09-04 まで、ここにレールは無かった。** 「セッションを1本しか出さない
+          ので揃える先が存在しない」という判断だったが、**中身の列の 672px という寸法は
+          「レールが受け止める」前提で選ばれていた**——寸法だけを持ってきて前提を
+          持ってこなかったので、狭い窓ではセッションの面が **0px** まで潰れていた。
         */}
-        {!compact && column}
+        <SessionRail compact={compact} column={column} railRef={railRef}>
 
         {/*
           **重ねる基準はここ**（十字ボタン設計§10）。横向きのとき、十字ボタンは
@@ -282,8 +300,13 @@ export function SessionView({
           ところが flex の子は既定で「中身より小さくならない」ので、これが無いと
           **格子の幅（720px）がこの列の下限になり、ページ全体が横へ広がる**——狭い画面では
           帯も入力欄も一緒に流れることになり、窓にした意味が消える（実測で踏んだ）。
+
+          **`min-w-full md:min-w-0` にした**（設計§3）。`min-w-0` だけだと、レールの
+          中で**隣の 672px に押されて 0px まで潰れる**——縮む側が不足分を全部引き受け
+          るためで、これがこのイシューの不具合そのものだった。狭い窓では**1画面ぶんの
+          床**を与え、広い窓では今までどおり残りを取る。
         */}
-        <div className="relative isolate flex min-h-0 min-w-0 flex-1 flex-col gap-1.5">
+        <div className="relative isolate flex min-h-0 min-w-full flex-1 snap-start snap-always flex-col gap-1.5 md:min-w-0">
         {/*
           **セッションに効く行は、端末／履歴と同じ列の中に置く**（設計§17-1・
           `DESIGN.md` §39.3）。
@@ -543,6 +566,7 @@ export function SessionView({
           terminalShown={view === 'terminal'}
         />
         </div>
+        </SessionRail>
       </div>
     </section>
   )
@@ -559,6 +583,59 @@ export function SessionView({
  *
  * この PC のセッション（ローカル）では生バイトがそのまま届くので、出す値が無い。
  */
+/**
+ * 中身の列とセッションの面を横に並べ、**狭い窓ではページ送りにする**入れ物
+ * （`スマホでファイルビュアを開くと画面が崩れる` 設計§2・§4）。
+ *
+ * # 横並びでは描かない
+ *
+ * 横並び（`compact`）には中身の列が無いので、レールを描くと**中身が1つだけの段**に
+ * なる（`DESIGN.md` §39「空の段を作らない」）。加えて横並びは**既に PJT 専用画面の
+ * レールの中に居る**ので、**同じ向きのスクロール容器が二重になる**。
+ *
+ * **この分岐で作り直しは起きない。** 横並びかどうかは取り付けごとに固定で、走っている
+ * 途中では変わらない。**「ファイルを開いているときだけ描く」形にしてはいけない**——
+ * 開け閉めのたびにセッションの面が作り直され、**端末が死ぬ**。
+ *
+ * # 付けないもの
+ *
+ * | 付けない | なぜ |
+ * |---|---|
+ * | `relative` | 十字ボタンの重なりの基準は**セッションの面のまま**。ここに付けると基準が増える |
+ * | `overflow-anchor: none` | **横方向には効かないと実測した**（面を挿しても消しても送り位置が変わらない）。PJT 専用画面のそれは**並べ替え中の指の位置との干渉**が理由で、こちらには並べ替えが無い |
+ *
+ * # 端末には漏れ止めを付けない
+ *
+ * 端末は自分でも横スクロールする（120桁≒720px）。**端まで来たら払いがここへ渡る**——
+ * この繋がりは残す（設計§6-1）。塞ぐと**端末の上から面を移れなくなる**。止めるのは
+ * 外側だけで、`overscroll-x-contain` が**ブラウザの「戻る」への漏れ**を断つ。
+ */
+function SessionRail({
+  compact,
+  column,
+  railRef,
+  children,
+}: {
+  compact: boolean
+  column: ReactNode
+  railRef: RefObject<HTMLDivElement | null>
+  children: ReactNode
+}) {
+  if (compact) {
+    return children
+  }
+  return (
+    <div
+      ref={railRef}
+      data-testid="session-rail"
+      className="flex min-h-0 min-w-0 flex-1 snap-x snap-mandatory gap-4 overflow-x-auto overscroll-x-contain"
+    >
+      {column}
+      {children}
+    </div>
+  )
+}
+
 function ScreenInterval({ remote, shown }: { remote: boolean; shown: boolean }) {
   const intervalMs = useSettingsStore(
     (state) => state.settings.intervals.screen_interval_ms,
