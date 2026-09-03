@@ -356,3 +356,36 @@ test('起動フォームの選択肢が、開いた状態で読めること', as
   )
   expect(色.文字, `地と文字が同じ色: ${JSON.stringify(色)}`).not.toBe(色.地)
 })
+
+test('セッションを開いた画面の帯からも、名前を付けられる', async ({ page }) => {
+  // **同じ記録を見ていることまで見る。** 帯で付けた名前が小窓にも出ること——
+  // 別々に持つと、片方を直したときにもう片方が古いまま居座る
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  const cardId = (await tile.getAttribute('data-card-id'))!
+  await セッションIDを取る(page, cardId)
+
+  await openSession(page, tile)
+  const 帯 = page.getByTestId('session-ops')
+  await expect(帯).toBeVisible()
+
+  // 名前がまだ無いので、名前の欄は出ていない（鉛筆だけがある）
+  await expect(page.getByTestId('session-name')).toHaveCount(0)
+  await page.getByTestId('nickname-edit').click()
+  await page.getByTestId('nickname-input').fill('帯から付けた')
+  await page.getByTestId('nickname-input').press('Enter')
+
+  const 名前 = page.getByTestId('session-name')
+  await expect(名前).toHaveText('帯から付けた', { timeout: 30_000 })
+  await expect(名前).toHaveAttribute('data-nickname', 'user')
+  // **帯は操作列の中に居る。** 画面の帯へ上げると、横並びで名前だけが消える
+  await expect(帯.getByTestId('session-name')).toHaveCount(1)
+
+  // 一覧へ戻ると、小窓にも同じ名前が出ている
+  await page.goBack()
+  await expect(
+    page.locator(
+      `[data-testid="session-tile"][data-card-id="${cardId}"] [data-testid="session-title"]`,
+    ),
+  ).toHaveText('帯から付けた', { timeout: 30_000 })
+})

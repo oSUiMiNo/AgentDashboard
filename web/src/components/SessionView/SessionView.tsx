@@ -20,7 +20,8 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 import { Button } from '@/components/ui/button'
-import { PowerGlyph, TrashGlyph } from '@/components/ui/glyphs'
+import { PencilGlyph, PowerGlyph, TrashGlyph } from '@/components/ui/glyphs'
+import { NicknameInput } from '@/components/SessionNickname/NicknameInput'
 import { InputDock } from '@/components/InputDock/InputDock'
 import { ModelPicker } from '@/components/ModelPicker/ModelPicker'
 import { PermissionModePicker } from '@/components/PermissionModePicker/PermissionModePicker'
@@ -31,6 +32,8 @@ import { formatElapsed, formatScreenInterval } from '@/lib/time'
 import {
   isEnded,
   isHookSilent,
+  nicknameOf,
+  送る名前,
   permissionModeLabel,
   permissionModeTone,
   reviveReason,
@@ -100,6 +103,14 @@ export function SessionView({
   // 名前の番号は**一覧ぜんぶ**を見て決まる（同じ名前が複数あるときだけ付く）
   const projects = useProjects()
   const now = useNow()
+  const setNickname = useWsStore((state) => state.setNickname)
+  /*
+    **名前を書き換えている最中か**（名前付け設計§9-5）。`null` は「編集していない」。
+
+    小窓（`SessionTile`）と同じ持ち方にしてある。**手元の表示は書き換えない**——
+    確定してもサーバの `session_upsert` が戻るまで名前は変わらない。
+  */
+  const [draft, setDraft] = useState<string | null>(null)
   // 単独で開いたときは履歴が主役。横並びのときは一望して即操作したいのでターミナル
   const [view, setView] = useState<View>(compact ? 'terminal' : 'transcript')
   // PJT 専用画面と**同じ部品・同じ経路**（設計§28）。開閉の記憶も共有する
@@ -125,6 +136,7 @@ export function SessionView({
 
   // 起こし直せるか（復旧設計§3-2）。**この画面には「接続断」の表示そのものが無い**
   // ので、このボタンがその合図を兼ねる
+  const セッション名 = nicknameOf(session)
   const revivable = reviveState(session, agentOf(agents, session.agent_id))
   const reviveWhy = reviveReason(revivable)
   // **名前だけを出す**（設計§14-5）。同じ名前が複数あるときだけ番号が付く。
@@ -307,6 +319,68 @@ export function SessionView({
             >
               {statusLabel(session.status)}
             </span>
+            {/*
+              **セッションの名前**（名前付け設計§9-1）。**カードの小窓と同じ見せ方**に
+              揃える——利用者が付けたものは通常の濃さ、CLI が付けたものは薄く。
+              決め方は `nicknameOf` が1つだけ持つ（2箇所に書くと食い違う）。
+
+              **ここに置くのは、名前がセッション1本に効くから**（`DESIGN.md` §39.2）。
+              画面の帯（`screen-bar`）へ上げると、横並びではあの帯ごと描かれないので
+              名前だけが消える。**`compact` で分岐させない**——§39.3 が禁じているのは
+              場所の分岐である。
+
+              **縮むのはここだけ。** 右の操作は `shrink-0` なので、狭い画面では名前が
+              先に切れる。`min-w-0` が無いと `truncate` が効かず、行が横へ溢れる。
+            */}
+            {draft === null ? (
+              セッション名.text !== null && (
+                <span
+                  data-testid="session-name"
+                  data-nickname={セッション名.kind}
+                  className={`min-w-0 truncate text-xs ${セッション名.tone}`}
+                  title={セッション名.text}
+                >
+                  {セッション名.text}
+                </span>
+              )
+            ) : (
+              <form
+                data-testid="nickname-form"
+                className="min-w-0 flex-1"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  setNickname(session.card_id, 送る名前(draft))
+                  setDraft(null)
+                }}
+              >
+                <NicknameInput
+                  value={draft}
+                  onChange={setDraft}
+                  onCancel={() => setDraft(null)}
+                  // **行の高さを変えない。** 高さは行の中でいちばん高い部品が決めるので、
+                  // ここが太ると帯が伸びる（`dashboard.spec.ts` が見ている）
+                  className="border-border bg-card text-foreground w-full rounded-[3px] border px-1 py-0 text-xs leading-5"
+                />
+              </form>
+            )}
+            {/*
+              **名前を付ける鉛筆。** 小窓と違い、ここは器が `<button>` ではないので
+              その場に置ける（小窓は絶対配置の兄弟にするしかない）。
+            */}
+            {draft === null && (
+              <button
+                type="button"
+                data-testid="nickname-edit"
+                title="このセッションに名前を付ける"
+                aria-label="このセッションに名前を付ける"
+                // 下書きの初期値は**利用者の名前だけ**。CLI の名前を入れると、
+                // 触っていないのに「自分で付けた」ことになってしまう
+                onClick={() => setDraft(session.nickname ?? '')}
+                className="text-muted-foreground hover:text-foreground shrink-0 transition-colors"
+              >
+                <PencilGlyph className="size-3.5" />
+              </button>
+            )}
             {/*
               **この行で唯一、放っておくだけで文字数が変わる要素。** 1秒ごとに数え直すので、
               行の中で折り返す作りだと**画面を見ているだけで行数が入れ替わる**（設計§2）

@@ -560,6 +560,54 @@ export function permissionModeTone(mode: PermissionMode | null): string {
   }
 }
 
+/** セッションの名前の出し方（名前付け設計§9-1）。 */
+export interface Nickname {
+  /** 出す文字。どちらの名前も無ければ `null` */
+  text: string | null
+  /** どちらの名前か。**薄さは CSS なのでテストから見えない**ので、印を別に持つ */
+  kind: 'user' | 'cli' | 'none'
+  /** 濃さ。利用者が付けたものは通常、CLI が付けたものは薄く */
+  tone: string
+}
+
+/**
+ * セッションの名前を、**利用者のもの優先**で1つに決める（名前付け設計§9-1）。
+ *
+ * # 2箇所に同じ規則を書かない
+ *
+ * 名前は**カードの小窓**と**セッションの帯**の両方に出る。優先順位と薄さを別々に
+ * 書くと、片方だけ直したときに同じセッションが2つの見た目を持つ。
+ *
+ * CLI 由来を薄くするのは、行を増やさずに「まだ自分では付けていない」を伝えるため
+ * （利用者の判断・2026-09-03）。
+ */
+export function nicknameOf(session: SessionMeta): Nickname {
+  if (session.nickname !== null) {
+    return {
+      text: session.nickname,
+      kind: 'user',
+      tone: 'text-muted-foreground',
+    }
+  }
+  return {
+    text: session.session_title,
+    kind: session.session_title !== null ? 'cli' : 'none',
+    tone: 'text-muted-foreground/60',
+  }
+}
+
+/**
+ * 打ち込まれた名前を、送る形へ整える（名前付け設計§10）。
+ *
+ * **前後の空白は落とし、空は「消す」と同義**にする。保存側も断るが画面でも弾く
+ * ——画面だけで止めても CLI から入るし、保存側だけだと押した手応えが
+ * 「断られました」になる。
+ */
+export function 送る名前(draft: string): string | null {
+  const trimmed = draft.trim()
+  return trimmed === '' ? null : trimmed
+}
+
 /**
  * 状態を日本語のラベルにする。
  *

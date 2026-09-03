@@ -51,10 +51,12 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { Badge } from '@/components/ui/badge'
 import { PencilGlyph } from '@/components/ui/glyphs'
+import { NicknameInput } from '@/components/SessionNickname/NicknameInput'
 import { formatElapsed } from '@/lib/time'
 import {
   isHookSilent,
-  NICKNAME_MAX_CHARS,
+  nicknameOf,
+  送る名前,
   permissionModeLabel,
   permissionModeTone,
   reviveReason,
@@ -371,7 +373,7 @@ export function SessionTile({
     **利用者が付けた名前があればそれ、無ければ CLI が付けた名前。** どちらも無ければ
     `null` で、行の場所だけが残る（既存の作りをそのまま使う）。
   */
-  const 表示名 = session.nickname ?? session.session_title
+  const 名前 = nicknameOf(session)
   // 繋がっていないカードは**薄くして印を付ける**。状態そのものは書き換えない——
   // 「作業中（接続断）」が要件2-3 の充足形で、最後に知っていた状態は残す（設計§6-3）
   const stale = !session.agent_connected
@@ -471,9 +473,6 @@ export function SessionTile({
         (event) => event.stopPropagation(),
         掴み.handlers.onPointerDown,
       )}
-      onPointerMove={掴み.handlers.onPointerMove}
-      onPointerUp={掴み.handlers.onPointerUp}
-      onPointerCancel={掴み.handlers.onPointerCancel}
       onLostPointerCapture={掴み.handlers.onLostPointerCapture}
       // **運んだ直後の `click` を捨てる。** 捨てないと並べ替えるたびに選択が入れ替わる
       onClickCapture={掴み.handlers.onClickCapture}
@@ -780,22 +779,12 @@ export function SessionTile({
           */}
           <p
             data-testid="session-title"
-            data-named={表示名 !== null}
-            data-nickname={
-              session.nickname !== null
-                ? 'user'
-                : session.session_title !== null
-                  ? 'cli'
-                  : 'none'
-            }
-            className={`truncate text-xs ${
-              session.nickname !== null
-                ? 'text-muted-foreground'
-                : 'text-muted-foreground/60'
-            }`}
-            title={表示名 ?? undefined}
+            data-named={名前.text !== null}
+            data-nickname={名前.kind}
+            className={`truncate text-xs ${名前.tone}`}
+            title={名前.text ?? undefined}
           >
-            {表示名 ?? '\u00a0'}
+            {名前.text ?? '\u00a0'}
           </p>
         </button>
 
@@ -1033,26 +1022,15 @@ export function SessionTile({
             event.preventDefault()
             // **保存側も断るが、画面でも弾く**（設計§10）。前後の空白は落とし、
             // 空は「消す」と同義にする
-            const trimmed = draft.trim()
-            setNickname(session.card_id, trimmed === '' ? null : trimmed)
+            setNickname(session.card_id, 送る名前(draft))
             setDraft(null)
           }}
           className="absolute inset-x-1 bottom-1 z-20"
         >
-          <input
-            data-testid="nickname-input"
-            autoFocus
+          <NicknameInput
             value={draft}
-            maxLength={NICKNAME_MAX_CHARS}
-            aria-label="セッションの名前"
-            // **改行は入力の時点で弾く**（カードは1行で切るので、切った先が読めない）
-            onChange={(event) => setDraft(event.target.value.replace(/[\r\n]/g, ''))}
-            onKeyDown={(event) => {
-              event.stopPropagation()
-              if (event.key === 'Escape') setDraft(null)
-            }}
-            onBlur={() => setDraft(null)}
-            className="border-border bg-card text-foreground w-full rounded-[3px] border px-1 py-0.5 text-xs"
+            onChange={setDraft}
+            onCancel={() => setDraft(null)}
           />
         </form>
       )}

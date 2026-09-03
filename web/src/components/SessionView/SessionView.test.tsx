@@ -1,4 +1,11 @@
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react'
 import type { ReactNode } from 'react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router'
@@ -526,6 +533,69 @@ describe('SessionView の操作列は、区画の真上', () => {
     expect(rowOf('close-card')).toBe('1')
     expect(rowOf('model-picker')).toBe('2')
     expect(rowOf('permission-mode-picker')).toBe('2')
+  })
+
+  it('セッションの名前も、両方の画面で操作列の1行目に居る', () => {
+    // **名前はセッション1本に効く**ので、居場所は操作列（`DESIGN.md` §39.2）。
+    // 画面の帯（`screen-bar`）へ上げると、横並びではあの帯ごと描かれないので
+    // **名前だけが消える**。`compact` で分岐させないことを両方で見る
+    for (const compact of [false, true]) {
+      show(meta({ nickname: 'あとで直すやつ' }), compact)
+      expect(列の中('session-name'), `名前が操作列の外に居る（compact=${compact}）`).toBe(
+        true,
+      )
+      expect(rowOf('session-name')).toBe('1')
+      expect(列の中('nickname-edit')).toBe(true)
+      cleanup()
+    }
+  })
+
+  it('名前を足しても、行はちょうど2つのまま', () => {
+    // **行が増えると帯が伸び、横並びの区画がずれる**（`dashboard.spec.ts` と
+    // `revive.spec.ts` が実物の高さで見ているものを、ここでは構造で見る）
+    for (const 名前 of [
+      { nickname: 'あとで直すやつ', session_title: null },
+      { nickname: null, session_title: 'CLI が付けた名前' },
+      { nickname: null, session_title: null },
+    ]) {
+      show(meta({ agent_connected: true, ...名前 }))
+      expect(
+        screen.getByTestId('session-ops').querySelectorAll('[data-row]'),
+      ).toHaveLength(2)
+      cleanup()
+    }
+  })
+
+  it('利用者の名前が CLI の名前より優先され、出どころが印で分かる', () => {
+    // **薄さは CSS なのでテストから見えない。** だから印を別に持つ（小窓と同じ）
+    show(meta({ nickname: '自分で付けた', session_title: 'CLI が付けた' }))
+    expect(screen.getByTestId('session-name').textContent).toBe('自分で付けた')
+    expect(screen.getByTestId('session-name')).toHaveAttribute('data-nickname', 'user')
+    cleanup()
+
+    show(meta({ nickname: null, session_title: 'CLI が付けた' }))
+    expect(screen.getByTestId('session-name').textContent).toBe('CLI が付けた')
+    expect(screen.getByTestId('session-name')).toHaveAttribute('data-nickname', 'cli')
+    cleanup()
+
+    // どちらも無ければ**何も出さない**。小窓と違って場所を空けておく必要が無い
+    // （帯は横並びなので、消えても他のカードが動かない）
+    show(meta({ nickname: null, session_title: null }))
+    expect(screen.queryByTestId('session-name')).toBeNull()
+  })
+
+  it('鉛筆を押すと、その場で名前を付けられる', () => {
+    const setNickname = vi.fn()
+    useWsStore.setState({ setNickname })
+    show(meta({ nickname: null, session_title: null }))
+
+    fireEvent.click(screen.getByTestId('nickname-edit'))
+    const input = screen.getByTestId('nickname-input')
+    fireEvent.change(input, { target: { value: '  帯から付けた  ' } })
+    fireEvent.submit(input.closest('form')!)
+
+    // **前後の空白は落とす**（設計§10）。小窓と同じ決まりを通ること
+    expect(setNickname).toHaveBeenCalledWith(CARD, '帯から付けた')
   })
 
   it('操作の群は、間隔で2つに分かれている', () => {
