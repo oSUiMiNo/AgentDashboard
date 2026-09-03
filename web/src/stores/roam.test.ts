@@ -16,6 +16,7 @@ import {
   setRoamDice,
   useRoamStore,
 } from '@/stores/roam'
+import { clearReorderingStore, lowerReordering, raiseReordering } from './reordering'
 
 /**
  * 回遊の在庫（`stores/roam.ts`）。
@@ -51,6 +52,7 @@ function 本数(): number {
 
 beforeEach(() => {
   resetRoam()
+  clearReorderingStore()
   // **`toFake` を絞る。** 既定の偽装は `requestAnimationFrame` まで差し替えるので、
   // rAF で束ねている他のストアが黙って止まる（フェーズ4 で踏んだ）
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
@@ -274,6 +276,41 @@ describe('跳ねから切り離して撃つ', () => {
   it('場が無ければ、遅れたあとでも出さない', () => {
     setRoamDice(() => 0.99)
     scheduleRoam('lively', () => null)
+    vi.advanceTimersByTime(ROAM_DELAY_MAX_MS + 1)
+    expect(本数()).toBe(0)
+  })
+})
+
+describe('並べ替え中は撃たない', () => {
+  /*
+    **並べ替えの最中と滑り終わるまでは、誰も撃たない**（並べ替え設計§15-1）。
+    掴んでいる本人は `still` になるが、承認待ちの他のカードは運搬中も跳ね続けて
+    ここへ来る——だから門は `data-motion` ではなくストアで要る。
+  */
+  const 測る = () => 種
+
+  it('印が立っていれば、タイマを1本も積まない', () => {
+    // **積む前の門**（設計§9-7）。線が出ないことだけを見るとタイマが回っていても緑になる
+    setRoamDice(() => 0.99)
+    const 主 = {}
+    raiseReordering(主)
+    scheduleRoam('lively', 測る)
+    expect(vi.getTimerCount()).toBe(0)
+    vi.advanceTimersByTime(ROAM_DELAY_MAX_MS * 2)
+    expect(本数()).toBe(0)
+  })
+
+  it('積んだあとに印が立ったら、その回は撃たない', () => {
+    // 掴む前に積まれたタイマ（遅れは 1.2〜3.6秒）が、掴んでいる最中に発火する
+    setRoamDice(() => 0.99)
+    scheduleRoam('lively', 測る)
+    expect(vi.getTimerCount()).toBe(1)
+    const 主 = {}
+    raiseReordering(主)
+    vi.advanceTimersByTime(ROAM_DELAY_MAX_MS + 1)
+    expect(本数(), '並べ替え中に撃った').toBe(0)
+    // 降りても撃ち直さない。**見送った回は見送りのまま**
+    lowerReordering(主)
     vi.advanceTimersByTime(ROAM_DELAY_MAX_MS + 1)
     expect(本数()).toBe(0)
   })

@@ -57,6 +57,7 @@ import {
 } from '@/stores/roam'
 import { replanRoam } from '@/stores/roam'
 import { type MotionQuiet, useSettingsStore } from '@/stores/settings'
+import { isReordering, subscribeReordering } from '@/stores/reordering'
 
 /**
  * 盤面が変わってから引き直すまでの待ち。
@@ -122,6 +123,9 @@ function useReplanOnLayout(quiet: MotionQuiet): void {
 
     const 引き直す = (): void => {
       待ち = undefined
+      // **並べ替えの最中は引き直さない**（設計§15-1）。印が立つ前に積まれた待ちが
+      // ここで発火しうるので、積む側だけでなく走る側にも門を置く
+      if (isReordering()) return
       const 層 = document.querySelector('[data-testid="roam-layer"]')
       if (層 === null) return
       // **控えを使わない。** 控えは場の寸法しか見ていないので、カードが増減しても
@@ -156,6 +160,15 @@ function useReplanOnLayout(quiet: MotionQuiet): void {
         **先に1回撃つ形にはしない**——それだと掴んでいる間ずっと 250ms ごとに
         引き直すことになり、**いちばん重い瞬間に重い処理を足す**（設計§20-5-4）。
       */
+      /*
+        **並べ替えの最中の記録は捨てる。待ち直さない**（設計§15-1）。
+
+        待ち直しでは束ねられない——指を止めた瞬間に 250ms 経って走り、押しのけた
+        枚数ぶん `measureField` を丸ごと繰り返す（実測で単発 805ms。線が34本なら
+        同じ操作が 7.7倍かかった）。並べ替えの間は誰も撃たないので、盤面が変わって
+        いても線が古い道を泳ぐだけで、**降りたときに1回引き直せば足りる**。
+      */
+      if (isReordering()) return
       if (待ち !== undefined) clearTimeout(待ち)
       待ち = setTimeout(引き直す, REPLAN_WAIT_MS)
     }
@@ -192,11 +205,31 @@ function useReplanOnLayout(quiet: MotionQuiet): void {
     }
     // サイドバーの開閉と窓の伸縮は、場の寸法に出る
     window.addEventListener('resize', 変わった)
+    /*
+      **並べ替えの印を見る。** 立った瞬間に、積んであった待ちを捨てる（立つ直前の
+      記録で走ろうとしているもの）。降りた瞬間に `変わった()` を1回——250ms の待ちを
+      挟むのは、離した直後にサーバの返事で並びが確定する `childList` と束ねるためと、
+      本人がまだ枠へ収まる途中のときに矩形を読まないため。
+
+      **effect の依存には入れない。** 入れると掴むたびに見張りが切れて張り直され、
+      いちばん重い瞬間に重い処理を足すことになる（上の「待ち直し」と同じ理由）。
+    */
+    const 印を離す = subscribeReordering(() => {
+      if (isReordering()) {
+        if (待ち !== undefined) {
+          clearTimeout(待ち)
+          待ち = undefined
+        }
+        return
+      }
+      変わった()
+    })
 
     return () => {
       見張り.disconnect()
       寸法.disconnect()
       window.removeEventListener('resize', 変わった)
+      印を離す()
       if (待ち !== undefined) clearTimeout(待ち)
     }
   }, [quiet])

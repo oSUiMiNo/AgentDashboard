@@ -419,3 +419,59 @@ test('OS が「動きを減らす」と言えば、飛んでいる線もその�
     await page.emulateMedia({ reducedMotion: 'no-preference' })
   }
 })
+
+test('掴んでいる間は線を引き直さず、離すと1回だけ引き直す', async ({ page }) => {
+  /*
+    **並べ替え中の引き直しが「たまにカクつく」の主犯**（並べ替え設計§15-1）。
+    運んでいる間は DOM が動いて盤面の見張りが鳴り続けるが、印が立っている間は捨て、
+    降りたときに1回だけ引き直す。
+
+    「線の本数」では見分けられない（引き直しても本数は変わらない）。**線の道（`d`）**
+    を控えて、運んでいる間に変わらないことを見る。
+  */
+  test.setTimeout(240_000)
+  await openDashboard(page)
+  await 待つカードを作る(page)
+  await spawnSession(page)
+  await expect(page.getByTestId('roam-line').first()).toBeVisible({ timeout: 発火の上限 })
+
+  const 道を控える = () =>
+    page.getByTestId('roam-paper').evaluateAll((nodes) =>
+      nodes.map((node) => node.getAttribute('d') ?? ''),
+    )
+  // **掴むのは承認待ちでない側。** 承認待ちは運搬中も跳ね続けて線を撃ちに来るので、
+  // 門が実際に働く条件になる。**id で追う**——並びが変わると `nth()` は別のカードを指す
+  const 承認待ち = page.locator('[data-testid="tile-shell"][data-motion="shake"]').first()
+  const 待ちID = await 承認待ち.getAttribute('data-card-id')
+  const 運ぶ = page.locator(`[data-testid="tile-shell"]:not([data-card-id="${待ちID}"])`).first()
+  const from = await 運ぶ.boundingBox()
+  const to = await 承認待ち.boundingBox()
+  if (!from || !to) throw new Error('カードの位置が取れません')
+
+  await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2)
+  await page.mouse.down()
+  for (let step = 1; step <= 8; step += 1) {
+    await page.mouse.move(
+      from.x + from.width / 2 + ((to.x - from.x) * step) / 8,
+      from.y + from.height / 2 + ((to.y - from.y) * step) / 8,
+    )
+  }
+  await expect(運ぶ).toHaveAttribute('data-dragging', 'true')
+  const 運びの途中 = await 道を控える()
+  // 待ち直し（250ms）の2倍以上、離さずに止める。**直す前はここで引き直されて道が変わる**
+  await page.waitForTimeout(600)
+  expect(await 道を控える(), '運んでいる間に引き直された').toEqual(運びの途中)
+
+  await page.mouse.up()
+  // 降りてから1回引き直す。引き直しが `null` を返した線は退場するので、
+  // **道が変わるか、本数が減るか**のどちらか
+  await expect
+    .poll(
+      async () => {
+        const いま = await 道を控える()
+        return いま.length !== 運びの途中.length || いま.some((d, i) => d !== 運びの途中[i])
+      },
+      { message: '離したあとに引き直されること', timeout: 5_000 },
+    )
+    .toBe(true)
+})

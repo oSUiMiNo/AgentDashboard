@@ -24,6 +24,7 @@ import {
   planRoute,
   replanRoute,
 } from '@/lib/roam'
+import { isReordering } from './reordering'
 
 /**
  * 画面に同時に居てよい線の数。
@@ -371,12 +372,18 @@ function 退場させる(id: number): void {
 export function scheduleRoam(quiet: MotionQuiet, 種を作る: () => RoamSeed | null): void {
   if (quiet !== 'lively') return
   if (減らす()) return
+  // **並べ替えの最中は誰も撃たない**（設計§15-1）。門は積む前——下の作法どおり
+  if (isReordering()) return
   // **籤で見送る。** ここが「揺れ2回につき1回」を作っている
   if (籤() < ROAM_SKIP) return
 
   const 遅れ = ROAM_DELAY_MIN_MS + 籤() * (ROAM_DELAY_MAX_MS - ROAM_DELAY_MIN_MS)
   const タイマ = setTimeout(() => {
     待ち.delete(タイマ)
+    // **積んだあとに掴まれたら、その回は見送る。** 撃つ直前の門はこの1枚だけで、
+    // 先頭の門（仕事を作らない）の代わりではない——掴む前に積まれたタイマが、
+    // 掴んでいる最中に発火するのを塞ぐ
+    if (isReordering()) return
     const 種 = 種を作る()
     if (種 !== null) emitRoam(種)
   }, 遅れ)

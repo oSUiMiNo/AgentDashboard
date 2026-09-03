@@ -33,7 +33,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { moveItem, nearestIndex, NO_TARGET, type Point, type Rect } from './reorder'
-import { resetField } from './roam'
+import { lowerReordering, raiseReordering } from '@/stores/reordering'
 
 /**
  * スクロール容器の端から、これだけ内側に入ったら送り始める（px）。
@@ -130,6 +130,13 @@ export function useReorder<T extends string>({
    * 並び全員に配る「いま並べ替えている」印。**離してからも滑り終わるまで真のまま。**
    */
   const [reordering, setReordering] = useState(false)
+  /**
+   * 並べ替え中の印の主。**インスタンスごとに安定した札**（`stores/reordering.ts`）。
+   *
+   * 印はストアが主ごとに持つので、枠の並びとカードの並びが同時にマウントされていても
+   * 互いの印を消さない。
+   */
+  const 主 = useRef<object>({})
   const 降ろす予定 = useRef<ReturnType<typeof setTimeout> | null>(null)
   const elements = useRef(new Map<T, HTMLElement>())
   /**
@@ -244,12 +251,14 @@ export function useReorder<T extends string>({
     }
   }, [order])
 
-  // 外れるときに予定を残さない
+  // 外れるときに予定も印も残さない（掴んだまま画面が消えることがある）
   useEffect(() => {
+    const 札 = 主.current
     return () => {
       if (降ろす予定.current !== null) {
         clearTimeout(降ろす予定.current)
       }
+      lowerReordering(札)
     }
   }, [])
 
@@ -278,6 +287,8 @@ export function useReorder<T extends string>({
           降ろす予定.current = null
         }
         setReordering(true)
+        // **効果線を止める**（設計§15-1）。引き直しと発射は、印が降りるまで待つ
+        raiseReordering(主.current)
         /*
           **掴んだ瞬間に、手元の並びへ土台を入れる。**
 
@@ -334,12 +345,11 @@ export function useReorder<T extends string>({
         降ろす予定.current = setTimeout(() => {
           降ろす予定.current = null
           setReordering(false)
+          // **印が降りたら、`RoamLayer` が場を測り直して1回だけ引き直す**（設計§15-1）。
+          // 線は掴む前に測った矩形の上を飛ぶので、並びが変わったのに測り直さないと
+          // **もう居ない場所をなぞる**。測り直しは向こうの仕事で、ここは降ろすだけ
+          lowerReordering(主.current)
         }, REORDER_SETTLE_MS)
-        // **並べ替えたら、回遊する線の場を測り直す**（設計§8-1）。線は掴む前に測った
-        // 矩形の上を飛ぶので、並びが変わったのに測り直さないと**もう居ない場所を
-        // なぞる**。掴んでいる間は `data-motion` が `still` なので線そのものは
-        // 撃たれておらず、ここで捨てておけば次に撃つときに測り直される
-        resetField()
         if (held === null) {
           return
         }

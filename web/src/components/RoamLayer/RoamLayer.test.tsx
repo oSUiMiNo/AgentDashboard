@@ -13,6 +13,11 @@ import {
   resetRoam,
 } from '@/stores/roam'
 import { useSettingsStore } from '@/stores/settings'
+import {
+  clearReorderingStore,
+  lowerReordering,
+  raiseReordering,
+} from '@/stores/reordering'
 
 /**
  * 回遊の層（`components/RoamLayer`）。
@@ -241,6 +246,7 @@ describe('盤面が変わったら引き直す（引き金）', () => {
     globalThis.MutationObserver = 元Mutation
     globalThis.ResizeObserver = 元Resize
     vi.useRealTimers()
+    clearReorderingStore()
   })
 
   function 場ごと描く(): void {
@@ -315,6 +321,61 @@ describe('盤面が変わったら引き直す（引き金）', () => {
     // **待ちは1本だけ。** 変化のたびに引き直す形なら 0 本（もう走ってしまっている）、
     // 待ちを積み増す形なら 20 本になる
     expect(vi.getTimerCount()).toBe(1)
+  })
+
+  it('並べ替えの印が立っている間は記録を捨て、降りたら1回だけ引き直す', () => {
+    /*
+      **並べ替え中の引き直しが「たまにカクつく」の主犯だった**（並べ替え設計§15-1。
+      同じ操作が線の有無だけで 7.7倍、単発 805ms）。待ち直しでは束ねられない——
+      指を止めた瞬間に 250ms 経って走る。**立っている間は捨て、降りたときに1回**。
+
+      「線が出ない」では見分けられない。**待ちの本数**を数える。
+    */
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    useSettingsStore.setState((state) => ({
+      settings: { ...state.settings, motion_quiet: 'lively' },
+    }))
+    場ごと描く()
+    const 主 = {}
+    raiseReordering(主)
+
+    // 運んでいる最中のつもりで、盤面の変化を立て続けに知らせる
+    for (let i = 0; i < 20; i += 1) 合図[0]()
+    expect(vi.getTimerCount(), '並べ替え中に引き直そうとしている').toBe(0)
+
+    // 降りたら1回だけ
+    lowerReordering(主)
+    expect(vi.getTimerCount(), '降りたのに引き直していない').toBe(1)
+  })
+
+  it('印が立った瞬間に、積んであった待ちを捨てる', () => {
+    // 掴む直前の記録で走ろうとしているものは、掴んでいる最中に発火する。**それも止める**
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    useSettingsStore.setState((state) => ({
+      settings: { ...state.settings, motion_quiet: 'lively' },
+    }))
+    場ごと描く()
+    合図[0]()
+    expect(vi.getTimerCount()).toBe(1)
+
+    const 主 = {}
+    raiseReordering(主)
+    expect(vi.getTimerCount(), '立ったのに待ちが残っている').toBe(0)
+    lowerReordering(主)
+  })
+
+  it('外れたあとは、印が上がり下がりしても何も積まない', () => {
+    // 購読を残すと、消えた層のために引き直そうとする
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    useSettingsStore.setState((state) => ({
+      settings: { ...state.settings, motion_quiet: 'lively' },
+    }))
+    場ごと描く()
+    cleanup()
+    const 主 = {}
+    raiseReordering(主)
+    lowerReordering(主)
+    expect(vi.getTimerCount()).toBe(0)
   })
 
   it('効果線そのものの出入りでは、引き直さない', () => {
