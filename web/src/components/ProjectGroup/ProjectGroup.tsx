@@ -172,6 +172,16 @@ export function ProjectGroup({
       onClick={押し方.onClick}
       onDoubleClick={押し方.onDoubleClick}
       /*
+        **キーボードで到達できるようにする**（並べ替え設計§15-6・WCAG 2.2 SC 2.5.7）。
+        枠は `<section>` なので、そのままでは Tab が止まらない。`role` は付けない——
+        `role="button"` は子を presentational にするので、中の「＋」「×」とカードの
+        ボタンが支援技術から消える。`aria-label` を持つ `<section>` は region として読める。
+        Space で選び、Enter で開く。
+      */
+      tabIndex={0}
+      aria-label={`PJT 枠 ${project}`}
+      onKeyDown={押し方.onKeyDown}
+      /*
         **押し分けと掴みを重ねる**（`lib/handlers.ts`）。順番は「先に押し分け、次に掴み」
         ——長押しの計測を張ってから掴みの記録を作る。
       */
@@ -229,7 +239,7 @@ export function ProjectGroup({
         `transition-colors` から広げているのは、**左端の帯（`box-shadow`）が瞬間で出ると、
         色だけがなめらかに変わって帯だけ飛び出す**ため。
       */
-      className={`cursor-pointer rounded-xl border border-dashed p-3 transition-[color,background-color,border-color,box-shadow] ${
+      className={`cursor-pointer rounded-xl border border-dashed p-3 transition-[color,background-color,border-color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 ${
         押し方.selected
           ? 'border-select bg-select-field hover:bg-select-field-hover shadow-[inset_3px_0_0_var(--select)]'
           : 'border-border hover:border-primary/40 hover:bg-muted/20'

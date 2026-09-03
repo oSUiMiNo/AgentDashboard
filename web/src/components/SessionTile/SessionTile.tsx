@@ -547,6 +547,8 @@ export function SessionTile({
             開いてしまうため（仕様§10 の作り分け）
           */
           onClick={押し方.onClick}
+          // **Space で選び、Enter で開く**（並べ替え設計§15-6）。キーボードで帯へ辿り着くため
+          onKeyDown={押し方.onKeyDown}
           onDoubleClick={押し方.onDoubleClick}
           onPointerDown={押し方.onPointerDown}
           onPointerMove={押し方.onPointerMove}

@@ -6,6 +6,13 @@
  * 2箇所に散った瞬間、片方だけ直されて画面が食い違う（設計§4-1）。割り当てそのものは
  * `lib/press.ts` の純関数が持ち、ここは**それを DOM の合図へ配線するだけ**。
  *
+ * # キーボードは Space で選び、Enter で開く（並べ替え設計§15-6）
+ *
+ * `<button>` は Enter と Space の両方で `click`（`detail === 0`）を出す。どちらも「開く」に
+ * 倒すと**キーボードでは選べず、帯（前へ／後ろへ）へ辿り着けない**。`keydown` で Space を
+ * 先に捌いて選び、続く `click` は捨てる。Enter は `<button>` なら `click` に任せ、
+ * `<section>`（枠）は自分で開く。
+ *
  * # ダブルクリックの1打目を打ち消す
  *
  * **`dblclick` は `click` を打ち消さない。** 素朴に作ると、ダブルクリックのたびに
@@ -45,6 +52,12 @@ interface Options {
 
 export interface PressBinding {
   onClick: (event: { stopPropagation: () => void; detail?: number }) => void
+  onKeyDown: (event: {
+    key: string
+    target: EventTarget | null
+    currentTarget: EventTarget | null
+    preventDefault: () => void
+  }) => void
   onDoubleClick: (event: { stopPropagation: () => void }) => void
   onPointerDown: (event: ReactPointerEvent) => void
   onPointerMove: (event: ReactPointerEvent) => void
@@ -85,6 +98,43 @@ export function usePress({
       clearTimeout(長押し.current.timer)
     }
   }, [])
+
+  /** Space で選んだ直後の `click`（`detail === 0`）を捨てるための印 */
+  const 空白で選んだ = useRef(false)
+
+  const onKeyDown = useCallback(
+    (event: {
+      key: string
+      target: EventTarget | null
+      currentTarget: EventTarget | null
+      preventDefault: () => void
+    }) => {
+      // **内側の部品（＋・×・カードのボタン・入力欄）から泡立ってきたキーは、この器のものではない。**
+      // `stopPropagation` は使わない——`TileGrid` の Esc は `globalThis` で受けている
+      if (event.target !== event.currentTarget) {
+        return
+      }
+      if (event.key === ' ') {
+        // 器が `<section>` のときページが流れるのを止める
+        event.preventDefault()
+        if (!selectable) {
+          return
+        }
+        // キーボードは押すたびに入れ替える（PC のシングルと同じ）
+        空白で選んだ.current = true
+        toggleSelect(kind, id)
+        return
+      }
+      // Space 以外が来たら印は古い（`preventDefault` で `click` が来ない環境への保険）
+      空白で選んだ.current = false
+      if (event.key === 'Enter' && !(event.currentTarget instanceof HTMLButtonElement)) {
+        // `<button>` は自分で `click`（`detail === 0`）を出すので二重に開かない
+        event.preventDefault()
+        onOpen()
+      }
+    },
+    [selectable, kind, id, onOpen],
+  )
 
   // 外れるときに計測を残さない（押したまま画面が消えることがある）
   useEffect(() => やめる, [やめる])
@@ -159,11 +209,16 @@ export function usePress({
         `<button>` は Enter と Space で `click` を発火する。PC の割り当てでは
         シングルが「選ぶ」なので、素直に通すと**キーボードでは二度と開けなくなる**
         ——ダブルクリックはキーボードで表せない。押した回数で区別できない以上、
-        **開く道を残すほうを採る**（選ぶのは、まとめて操作のための補助である）。
+        **開く道を残すほうを採る**。選ぶほうは Space の `keydown` が持つ（上）。
 
         マウスの `click` は `detail` が1以上なので、ここを通らない。
       */
       if (event.detail === 0) {
+        if (空白で選んだ.current) {
+          // Space は `keydown` で選んだ。続く `click` で開いてはいけない
+          空白で選んだ.current = false
+          return
+        }
         onOpen()
         return
       }
@@ -208,6 +263,7 @@ export function usePress({
 
   return {
     onClick,
+    onKeyDown,
     onDoubleClick,
     onPointerDown,
     onPointerMove,

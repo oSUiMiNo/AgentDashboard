@@ -965,6 +965,16 @@ describe('SessionTile の復旧', () => {
     expect(screen.getByText('専用画面')).toBeInTheDocument()
   })
 
+  it('小窓は Space で選ぶだけで、開かない', async () => {
+    // **キーボードで帯へ辿り着くため**（並べ替え設計§15-6）。Enter は上のとおり開く
+    renderTile(stale())
+
+    await userEvent.tab()
+    await userEvent.keyboard(' ')
+    expect(screen.getByTestId('session-tile')).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.queryByText('専用画面')).not.toBeInTheDocument()
+  })
+
   it('押せないときも、ボタンは出て理由が読める', () => {
     // 出さないと「なぜこのカードにだけ無いのか」を推測させることになる
     renderTile(stale({ claude_session_id: null }))

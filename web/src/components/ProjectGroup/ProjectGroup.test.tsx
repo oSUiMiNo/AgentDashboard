@@ -296,6 +296,18 @@ describe('ProjectGroup', () => {
     expect(getSelection()).toEqual({ kind: 'card', ids: ['a'] })
   })
 
+  it('枠はキーボードで到達でき、Space で選び、Enter で開く', async () => {
+    // **直す前は `<section>` に Tab が止まらず、キーボードでは枠を選べなかった**（設計§15-6）
+    renderGroup([], 'p1')
+
+    await userEvent.tab()
+    expect(screen.getByTestId('project-group')).toHaveFocus()
+    await userEvent.keyboard(' ')
+    expect(getSelection()).toEqual({ kind: 'project', ids: ['p1'] })
+    await userEvent.keyboard('{Enter}')
+    expect(screen.getByTestId('current-path')).toHaveTextContent('/p/')
+  })
+
   it('記録を持たない枠は、長押ししても選ばれない', () => {
     /*
       **コメントは「選べない」と書いてあるのに、選べていた。** `usePress` へ
