@@ -300,6 +300,19 @@ describe('SessionTile の骨格', () => {
     expect(screen.getByTestId('tile-shell').className).toBe('tile-shell relative')
   })
 
+  it('復旧ボタンは、押しても掴まない', () => {
+    /*
+      カードは本体をそのまま掴むので、**中のボタンを押しただけでも掴んでしまう**。
+      `click` を止めるだけでは `pointerdown` が素通りする。
+    */
+    renderTile(meta({ status: { kind: 'ended', ok: true } }))
+
+    const 復旧 = screen.queryByTestId('revive-button')
+    if (復旧 !== null) {
+      expect(復旧).toHaveAttribute('data-no-grab')
+    }
+  })
+
   it('選ばれたカードに、印は出さない', async () => {
     /*
       **利用者の指定**（2026-09-03）——「白い点はいらない。選択は背景の色だけで表す」。

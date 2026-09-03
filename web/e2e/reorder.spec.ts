@@ -32,13 +32,27 @@ async function カードの並び(group: Locator): Promise<string[]> {
   )
 }
 
-/** 掴み手をマウスで掴んで、点まで運ぶ。 */
-async function マウスで運ぶ(page: Page, handle: Locator, to: { x: number; y: number }) {
-  const box = await handle.boundingBox()
+/**
+ * マウスで掴んで、点まで運ぶ。
+ *
+ * **掴む場所を指定できる。** 掴み手を外して**本体をそのまま掴む**ようになったので
+ * （利用者の指定・2026-09-03）、枠は中心を掴むと**中のカードを掴んでしまう**
+ * ——枠を運びたいときは余白（左上）を渡す。
+ */
+async function マウスで運ぶ(
+  page: Page,
+  target: Locator,
+  to: { x: number; y: number },
+  位置?: { x: number; y: number },
+) {
+  const box = await target.boundingBox()
   if (!box) {
-    throw new Error('掴み手の位置が取れません')
+    throw new Error('掴む相手の位置が取れません')
   }
-  const from = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+  const from =
+    位置 === undefined
+      ? { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+      : { x: box.x + 位置.x, y: box.y + 位置.y }
   await page.mouse.move(from.x, from.y)
   await page.mouse.down()
   for (let step = 1; step <= 8; step += 1) {
@@ -51,28 +65,39 @@ async function マウスで運ぶ(page: Page, handle: Locator, to: { x: number; 
 }
 
 /**
- * 掴み手を**指で**掴んで運ぶ。
+ * **指で**掴んで運ぶ。
  *
  * `jitter` の1回目は「横へ 30px・縦へ 15px」。**ここで向きを確定させると、その
  * なぞりは二度と握れない**という道が実機にあるので、真っ直ぐには動かさない。
+ *
+ * **押してすぐには動かさない。** 本体を掴むようになったので、指は**長押しが成立して
+ * から**掴む（利用者の指定・スマホのホーム画面と同じ形）。ここで待たずに動かすと、
+ * 8px を超えた時点で長押しの計測が捨てられ、**縦スクロールになる**——それは
+ * 壊れているのではなく仕様どおりで、別のテストがその側を見ている。
  */
 async function 指で運ぶ(
   page: Page,
-  handle: Locator,
+  target: Locator,
   to: { x: number; y: number },
   jitter = 30,
+  位置?: { x: number; y: number },
 ) {
-  const box = await handle.boundingBox()
+  const box = await target.boundingBox()
   if (!box) {
-    throw new Error('掴み手の位置が取れません')
+    throw new Error('掴む相手の位置が取れません')
   }
-  const from = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+  const from =
+    位置 === undefined
+      ? { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+      : { x: box.x + 位置.x, y: box.y + 位置.y }
   const cdp = await page.context().newCDPSession(page)
   try {
     await cdp.send('Input.dispatchTouchEvent', {
       type: 'touchStart',
       touchPoints: [{ x: from.x, y: from.y }],
     })
+    // **長押しが成立するまで待つ**（400ms ＋ 余白）。動かさずに待つのが条件
+    await page.waitForTimeout(600)
     await cdp.send('Input.dispatchTouchEvent', {
       type: 'touchMove',
       touchPoints: [{ x: from.x + jitter, y: from.y + jitter / 2 }],
@@ -123,10 +148,13 @@ test('枠をマウスで掴んで並べ替えられる', async ({ page }) => {
   if (!的) {
     throw new Error('枠の位置が取れません')
   }
-  await マウスで運ぶ(page, 後の枠.getByTestId('reorder-handle'), {
-    x: 的.x + 的.width / 2,
-    y: 的.y + 的.height / 2,
-  })
+  // **枠の余白を掴む。** 中心はカードなので、そちらを掴んでしまう
+  await マウスで運ぶ(
+    page,
+    後の枠,
+    { x: 的.x + 的.width / 2, y: 的.y + 的.height / 2 },
+    { x: 5, y: 5 },
+  )
 
   await expect
     .poll(async () => {
@@ -142,27 +170,87 @@ test('枠をマウスで掴んで並べ替えられる', async ({ page }) => {
   expect(読み直し.indexOf(後)).toBeLessThan(読み直し.indexOf(先))
 })
 
-test('枠を指で掴んでも並べ替えられる', async ({ page }) => {
-  await openDashboard(page)
-  const [先, 後] = await 枠を2つ(page, 'touch')
+/*
+  **指の話は、指の文脈でしか確かめられない。**
 
-  const 後の枠 = page.locator(`[data-testid="project-group"][data-project="${後}"]`)
-  const 先の枠 = page.locator(`[data-testid="project-group"][data-project="${先}"]`)
-  const 的 = await 先の枠.boundingBox()
-  if (!的) {
-    throw new Error('枠の位置が取れません')
-  }
-  await 指で運ぶ(page, 後の枠.getByTestId('reorder-handle'), {
-    x: 的.x + 的.width / 2,
-    y: 的.y + 的.height / 2,
+  押し方の割り当ては `(pointer: coarse) and (hover: none)` で切り替わる（`lib/pointer.ts`）。
+  素のデスクトップ文脈に CDP でタッチを撃っても**その問い合わせは偽のまま**なので、
+  長押しの計測そのものが始まらない——**実機では起きない状況を試して落ちていた**。
+
+  `isMobile` を立てると Chromium が携帯の見立てになり、粗いポインタとして答える。
+*/
+test.describe('指で触る画面', () => {
+  test.use({ hasTouch: true, isMobile: true })
+
+  test('枠を指で掴んでも並べ替えられる', async ({ page }) => {
+    await openDashboard(page)
+    const [先, 後] = await 枠を2つ(page, 'touch')
+
+    const 後の枠 = page.locator(`[data-testid="project-group"][data-project="${後}"]`)
+    const 先の枠 = page.locator(`[data-testid="project-group"][data-project="${先}"]`)
+    const 的 = await 先の枠.boundingBox()
+    if (!的) {
+      throw new Error('枠の位置が取れません')
+    }
+    await 指で運ぶ(
+      page,
+      後の枠,
+      { x: 的.x + 的.width / 2, y: 的.y + 的.height / 2 },
+      30,
+      { x: 5, y: 5 },
+    )
+
+    await expect
+      .poll(async () => {
+        const 後で = await 枠の並び(page)
+        return 後で.indexOf(後) < 後で.indexOf(先)
+      })
+      .toBe(true)
   })
 
-  await expect
-    .poll(async () => {
-      const 後で = await 枠の並び(page)
-      return 後で.indexOf(後) < 後で.indexOf(先)
-    })
-    .toBe(true)
+  test('長押しせずに指でなぞると、並びは変わらず縦に流れる', async ({ page }) => {
+    /*
+      **これが「縦スクロールを殺していない」ことを見る唯一の道である。**
+
+      本体を掴めるようにしたので、指で触ったときに**スクロールと運びを見分ける**必要が
+      ある。見分け方は長押しで、成立するまでは `preventDefault()` を1本も呼ばない
+      ——だから**押してすぐ動かせば、普通にページが流れる**。
+
+      jsdom では言えない（スクロールを持たない）。
+    */
+    await openDashboard(page)
+    const [先, 後] = await 枠を2つ(page, 'scroll')
+
+    const 前 = await 枠の並び(page)
+    const 後の枠 = page.locator(`[data-testid="project-group"][data-project="${後}"]`)
+    const 箱 = await 後の枠.boundingBox()
+    if (!箱) {
+      throw new Error('枠の位置が取れません')
+    }
+
+    const cdp = await page.context().newCDPSession(page)
+    try {
+      const from = { x: 箱.x + 5, y: 箱.y + 5 }
+      await cdp.send('Input.dispatchTouchEvent', {
+        type: 'touchStart',
+        touchPoints: [{ x: from.x, y: from.y }],
+      })
+      // **待たずにすぐ動かす。** 8px を超えた時点で長押しの計測が捨てられる
+      for (let step = 1; step <= 8; step += 1) {
+        await cdp.send('Input.dispatchTouchEvent', {
+          type: 'touchMove',
+          touchPoints: [{ x: from.x, y: from.y - step * 20 }],
+        })
+      }
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+    } finally {
+      await cdp.detach()
+    }
+
+    // **並びは1つも動かない**
+    expect(await 枠の並び(page)).toEqual(前)
+    expect(前.indexOf(先)).toBeLessThan(前.indexOf(後))
+  })
 })
 
 test('カードを並べ替えると、PJT 専用画面も同じ順になる', async ({ page }) => {
@@ -180,11 +268,18 @@ test('カードを並べ替えると、PJT 専用画面も同じ順になる', a
   expect(前).toHaveLength(2)
 
   const 二枚目 = 枠.getByTestId('tile-shell').nth(1)
+  /*
+    **測る前に見えるところへ持ってくる。** `boundingBox()` が返すのは見えている場所の
+    座標で、**スクロールの外にあるものは的が合わない**。前のテストが枠を6つ作るので、
+    この枠は下へ押し出されている——**通しでだけ落ちる**形で出た（単独では通る）。
+  */
+  await 二枚目.scrollIntoViewIfNeeded()
   const 一枚目の箱 = await 枠.getByTestId('tile-shell').nth(0).boundingBox()
   if (!一枚目の箱) {
     throw new Error('カードの位置が取れません')
   }
-  await マウスで運ぶ(page, 二枚目.getByTestId('reorder-handle'), {
+  // **カードは本体をそのまま掴む**（掴み手は無くなった）
+  await マウスで運ぶ(page, 二枚目, {
     x: 一枚目の箱.x + 一枚目の箱.width / 2,
     y: 一枚目の箱.y + 一枚目の箱.height / 2,
   })
@@ -202,4 +297,30 @@ test('カードを並べ替えると、PJT 専用画面も同じ順になる', a
     .getByTestId('session-view')
     .evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-card-id') ?? ''))
   expect(横並び[0]).toBe(前[1])
+})
+
+test('区画の掴み手は、いまも出る', async ({ page }) => {
+  /*
+    **このテストは末尾に置く。** 同じ作業フォルダにセッションを1本増やすので、
+    枚数を数えるテストより前に置くと、あちらが「2枚のはず」で落ちる（実際に落ちた）。
+
+    **掴み手を外したのはカードと PJT枠だけ**（利用者の指定）。セッションの区画は
+    このままである——「セッションの上にハンドルがあるのはいい」。
+
+    ここが消えると、**横並びの画面で並べ替える道が1つも無くなる**。
+  */
+  await openDashboard(page)
+  const cwd = WORK_DIR
+  await spawnSession(page, cwd)
+
+  const 枠 = page.locator(`[data-testid="project-group"][data-project="${cwd}"]`)
+  // 一覧には無い
+  await expect(枠.getByTestId('reorder-handle')).toHaveCount(0)
+
+  await 枠.dblclick({ position: { x: 5, y: 5 } })
+  await expect(page.getByTestId('group-view')).toBeVisible()
+  // 横並びには有る
+  await expect(
+    page.getByTestId('group-view').getByTestId('reorder-handle').first(),
+  ).toBeVisible()
 })

@@ -25,11 +25,11 @@
  */
 
 import { AnimatePresence } from 'motion/react'
-import { useCallback, useState, type ReactNode } from 'react'
+import { useCallback, useState } from 'react'
 
-import { ReorderHandle } from '@/components/ReorderHandle/ReorderHandle'
-import { useReorder } from '@/lib/useReorder'
-import { toggleSelect } from '@/stores/selection'
+import { useReorder, type Bound } from '@/lib/useReorder'
+import { useGrip } from '@/lib/useGrip'
+import { 重ねる } from '@/lib/handlers'
 import { usePress } from '@/lib/usePress'
 import { saveCardOrder } from '@/stores/sessions'
 import { useNavigate } from 'react-router'
@@ -48,13 +48,15 @@ interface Props {
   /** この箱に入るカードID。中身は小窓が自分で購読する（設計§10） */
   cards: CardId[]
   /**
-   * 掴み手（並べ替え設計§3-1）。**枠の `header` の左端**に置く——枠に効く操作は
-   * 既にそこへ集まっている（「＋」「×」）。
+   * 並べ替えの3つの合図（並べ替え設計§3・読み替え4）。
+   *
+   * **掴み手は出さない。枠の本体（余白・見出し）をそのまま掴む**（利用者の指定・
+   * 2026-09-03）。渡ってこなければ掴めない（記録を持たない箱）。
    *
    * 作るのは並びを持っている側（`TileGrid`）。**この箱は自分が何番目かを知らない**ので、
    * ここで作ると並び全体を渡すことになる
    */
-  handle?: ReactNode
+  grab?: Bound
   /** 落とし先を測るための `ref`。並びを持っている側が矩形を測る */
   rootRef?: (element: HTMLElement | null) => void
   /** いま浮かせているか。**掴んでいる本人だけ** */
@@ -66,7 +68,7 @@ export function ProjectGroup({
   project,
   projectId,
   cards,
-  handle,
+  grab,
   rootRef,
   dragging = false,
 }: Props) {
@@ -77,9 +79,23 @@ export function ProjectGroup({
     **枠に効く押し分け。** 記録を持たない箱（カードから逆算したもの）は選べない
     ——まとめて削除の相手にならないので、選んでも何もできない
   */
+  /*
+    **枠の本体をそのまま掴む**（読み替え4）。押し分け（`usePress`）と同じ `pointerdown` を
+    見るが、**取り合わない**——マウスは押した瞬間には掴まず 3px で、指は長押しが
+    成立するまで掴まない。長押しの計測（8px で捨てる）より先に掴むことがない。
+  */
+  const 掴み = useGrip({
+    enabled: grab !== undefined,
+    when: (event) => (event.pointerType === 'mouse' ? 'move' : 'hold'),
+    onGrab: () => grab?.onGrab(),
+    onMove: (point) => grab?.onMove(point),
+    onDrop: () => grab?.onDrop(),
+  })
   const 押し方 = usePress({
     kind: 'project',
     id: projectId ?? '',
+    // 長押しで選んだら、**そのまま掴めるようにする**
+    onLongPress: 掴み.arm,
     onOpen: () => navigate(projectPath(host, project)),
     // **コメントだけでは実装にならない。** 空文字の ID でも選べてしまっていた
     selectable: projectId !== undefined,
@@ -140,10 +156,17 @@ export function ProjectGroup({
       */
       onClick={押し方.onClick}
       onDoubleClick={押し方.onDoubleClick}
-      onPointerDown={押し方.onPointerDown}
-      onPointerMove={押し方.onPointerMove}
-      onPointerUp={押し方.onPointerUp}
-      onPointerCancel={押し方.onPointerCancel}
+      /*
+        **押し分けと掴みを重ねる**（`lib/handlers.ts`）。順番は「先に押し分け、次に掴み」
+        ——長押しの計測を張ってから掴みの記録を作る。
+      */
+      onPointerDown={重ねる(押し方.onPointerDown, 掴み.handlers.onPointerDown)}
+      onPointerMove={重ねる(押し方.onPointerMove, 掴み.handlers.onPointerMove)}
+      onPointerUp={重ねる(押し方.onPointerUp, 掴み.handlers.onPointerUp)}
+      onPointerCancel={重ねる(押し方.onPointerCancel, 掴み.handlers.onPointerCancel)}
+      onLostPointerCapture={掴み.handlers.onLostPointerCapture}
+      // **運んだ直後の `click` を捨てる。** 捨てないと並べ替えるたびに選択が入れ替わる
+      onClickCapture={掴み.handlers.onClickCapture}
       data-selected={押し方.selected ? 'true' : 'false'}
       // 端末の長押しメニューを抑える（設計§4-4）。素のスタイルで書く理由は SessionTile と同じ
       style={{ WebkitTouchCallout: 'none', WebkitUserSelect: 'none', userSelect: 'none' }}
@@ -183,12 +206,6 @@ export function ProjectGroup({
       } ${dragging ? 'relative z-10 scale-[1.02] rotate-[1deg] opacity-90' : ''}`}
     >
       <header className="mb-2 flex items-baseline gap-2">
-        {handle !== undefined && (
-          // 余白のクリック（＝画面を開く）と取り違えない
-          <div className="shrink-0 self-center" onClick={(event) => event.stopPropagation()}>
-            {handle}
-          </div>
-        )}
         {/* 縮んでよいのはパスだけ。`min-w-0` が無いと `truncate` が効かず、
             隣のセッション数が縦に割れる */}
         <h2 className="min-w-0 truncate text-sm font-semibold" title={project}>
@@ -199,7 +216,12 @@ export function ProjectGroup({
         </span>
         {/* 起動の入口はここ（設計§13）。追加は「枠を置く」操作なので、
             危険度の判断が要るのは起こす瞬間だけになる */}
-        <div className="ml-auto shrink-0" onClick={(event) => event.stopPropagation()}>
+        {/* **押しても掴まない。** `click` を止めるだけでは `pointerdown` が素通りする */}
+        <div
+          className="ml-auto shrink-0"
+          data-no-grab=""
+          onClick={(event) => event.stopPropagation()}
+        >
           <SessionAdd host={host} project={project} compact />
         </div>
         {projectId !== undefined && (
@@ -207,6 +229,7 @@ export function ProjectGroup({
             type="button"
             variant="ghost"
             data-testid="project-remove"
+            data-no-grab=""
             disabled={busy}
             aria-label="この PJT を一覧から外す"
             title={
@@ -247,15 +270,7 @@ export function ProjectGroup({
               <SessionTile
                 key={cardId}
                 cardId={cardId}
-                handle={
-                  <ReorderHandle
-                    kind="card"
-                    label="このセッションを掴んで並べ替える"
-                    {...bind(cardId)}
-                    // 掴まずに離したら選ぶ（設計§4-4 の保険）
-                    onTap={() => toggleSelect('card', cardId)}
-                  />
-                }
+                grab={bind(cardId)}
                 rootRef={itemRef(cardId)}
                 dragging={掴んでいるカード === cardId}
               />

@@ -14,7 +14,6 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useReorder } from '@/lib/useReorder'
 
 import { ProjectGroup } from '@/components/ProjectGroup/ProjectGroup'
-import { ReorderHandle } from '@/components/ReorderHandle/ReorderHandle'
 import { ReviveBudgetDialog } from '@/components/TileGrid/ReviveBudgetDialog'
 import { Button } from '@/components/ui/button'
 import { PowerGlyph, TrashGlyph } from '@/components/ui/glyphs'
@@ -38,7 +37,7 @@ import {
   useTomlAccounts,
 } from '@/stores/sessions'
 import { saveProjectOrder } from '@/stores/projects'
-import { clearSelection, toggleSelect, useSelection } from '@/stores/selection'
+import { clearSelection, useSelection } from '@/stores/selection'
 import { agentOf, useSettingsStore } from '@/stores/settings'
 import { useWsStore } from '@/stores/ws'
 
@@ -446,21 +445,11 @@ export function TileGrid() {
               projectId={group.projectId}
               cards={group.cards}
               /*
-                **掴み手は、記録を持つ枠にだけ出す。** カードから逆算した箱は DB に
-                行が無いので、並べ替えた結果を書き戻す先が無い——押しても何も起きない
-                ものを置くと、壊れているのと見分けが付かない
+                **掴めるのは、記録を持つ枠だけ。** カードから逆算した箱は DB に
+                行が無いので、並べ替えた結果を書き戻す先が無い——動かせても何も
+                残らないものは、壊れているのと見分けが付かない
               */
-              handle={
-                group.projectId === undefined ? undefined : (
-                  <ReorderHandle
-                    kind="project"
-                    label={`${group.project} を掴んで並べ替える`}
-                    {...bind(鍵(group))}
-                    // 掴まずに離したら選ぶ（設計§4-4 の保険）
-                    onTap={() => toggleSelect('project', group.projectId as string)}
-                  />
-                )
-              }
+              grab={group.projectId === undefined ? undefined : bind(鍵(group))}
               rootRef={itemRef(鍵(group))}
               dragging={dragging === 鍵(group)}
             />

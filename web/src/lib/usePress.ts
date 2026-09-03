@@ -33,6 +33,14 @@ interface Options {
    * 直後の `click` が捨てられて「開く」まで死ぬ。**
    */
   selectable?: boolean
+  /**
+   * **長押しが成立した。**
+   *
+   * 指の画面では、長押しで選んだうえで**そのまま掴んで運べる**（利用者の指定・
+   * 2026-09-03。スマホのホーム画面と同じ形）。掴む側（`useGrip`）へ渡す唯一の口で、
+   * **依存は一方向**——`usePress` は掴みのことを何も知らない。
+   */
+  onLongPress?: () => void
 }
 
 export interface PressBinding {
@@ -51,6 +59,7 @@ export function usePress({
   id,
   onOpen,
   selectable = true,
+  onLongPress,
 }: Options): PressBinding {
   const coarse = useCoarsePointer()
   const selection = useSelection()
@@ -93,10 +102,12 @@ export function usePress({
           }
           長押し.current.成立 = true
           toggleSelect(kind, id)
+          // **選んだうえで、そのまま掴める。** 指を離せば選ばれただけ
+          onLongPress?.()
         }, LONG_PRESS_MS),
       }
     },
-    [mapping.longPressSelects, selectable, kind, id, やめる],
+    [mapping.longPressSelects, selectable, kind, id, onLongPress, やめる],
   )
 
   const onPointerMove = useCallback(

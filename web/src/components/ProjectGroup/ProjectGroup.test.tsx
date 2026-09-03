@@ -160,6 +160,29 @@ describe('ProjectGroup', () => {
     expect(remove).toHaveAttribute('title', expect.stringContaining('セッションが動いている'))
   })
 
+  it('カードにも枠にも、掴み手は出さない', () => {
+    /*
+      **本体をそのまま掴む**（利用者の指定・2026-09-03）。「セッションの上に掴み手が
+      あるのはいいが、カードと PJT枠はハンドルではなく余白やカードそのものを
+      ドラッグすれば動くようにしてほしい」。
+
+      **区画（`SessionView`）の掴み手は残る**——あちらは別の検査が見ている。
+    */
+    renderGroup([meta('a')], 'p1')
+
+    expect(screen.queryByTestId('reorder-handle')).toBeNull()
+  })
+
+  it('中のボタンは、押しても掴まない', () => {
+    /*
+      本体で掴めるようにすると、**中のボタンを押しただけでも掴んでしまう**。
+      `click` を止めるだけでは足りない——`pointerdown` は別に止める必要がある。
+    */
+    renderGroup([meta('a')], 'p1')
+
+    expect(screen.getByTestId('project-remove')).toHaveAttribute('data-no-grab')
+  })
+
   it('選ばれた枠は、地と枠線と左端の帯で分かる', async () => {
     /*
       **枠は選んでも見た目が何も変わっていなかった**（利用者の指摘 2026-09-03）。

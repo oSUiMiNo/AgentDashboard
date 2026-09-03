@@ -41,8 +41,11 @@
 
 import { modelLabel } from '@/lib/models'
 import { usePress } from '@/lib/usePress'
+import { useGrip } from '@/lib/useGrip'
+import { 重ねる } from '@/lib/handlers'
+import type { Bound } from '@/lib/useReorder'
 import { motion } from 'motion/react'
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { Badge } from '@/components/ui/badge'
 import { formatElapsed } from '@/lib/time'
@@ -69,13 +72,18 @@ import { useWsStore } from '@/stores/ws'
 interface Props {
   cardId: CardId
   /**
-   * 掴み手（並べ替え設計§3-1）。**器（`tile-shell`）の直下**、復旧ボタンと同じ層に
-   * 置く——**器は揺れない**ので、承認待ちでカタカタしていても掴み手は動かない。
-   * 切る枠の内側に置くと、揺れる的を掴ませることになる。
+   * 並べ替えの3つの合図（並べ替え設計§3・読み替え4）。
+   *
+   * **掴み手は出さない。カードの本体をそのまま掴む**（利用者の指定・2026-09-03）。
+   * 付ける先は**器（`tile-shell`）**——`rootRef` で測っているのが器なので、
+   * **測る箱と掴む箱を一致させる**。中身（`tile-body`）に付けると、掴んだ的と
+   * 落とし先の計算に使う矩形が別の箱になる。
+   *
+   * 渡ってこなければ掴めない（記録を持たない箱）。
    *
    * 作るのは並びを持っている側（`ProjectGroup`）。**小窓は自分が何番目かを知らない。**
    */
-  handle?: ReactNode
+  grab?: Bound
   /** 落とし先を測るための `ref`。並びを持っている側が矩形を測る */
   rootRef?: (element: HTMLElement | null) => void
   /** いま浮かせているか。**掴んでいる本人だけ** */
@@ -229,7 +237,7 @@ function useEcho(message: string | null): boolean {
 
 export function SessionTile({
   cardId,
-  handle,
+  grab,
   rootRef,
   dragging = false,
 }: Props) {
@@ -239,9 +247,25 @@ export function SessionTile({
   const quiet = useSettingsStore((state) => state.settings.motion_quiet)
   const frameRef = useRef<HTMLDivElement>(null)
   const revive = useWsStore((state) => state.revive)
+  /*
+    **掴む作法は器（`tile-shell`）に付ける**（読み替え4）。
+
+    - マウスは**本体を 3px 動かしたら**掴む（押して離すだけなら「選ぶ」）
+    - 指は**長押しで持ち上げてから**運ぶ。長押しが成立するまで 1本も止めないので、
+      **縦スクロールはそのまま効く**（`useGrip` の冒頭）
+  */
+  const 掴み = useGrip({
+    enabled: grab !== undefined,
+    when: (event) => (event.pointerType === 'mouse' ? 'move' : 'hold'),
+    onGrab: () => grab?.onGrab(),
+    onMove: (point) => grab?.onMove(point),
+    onDrop: () => grab?.onDrop(),
+  })
   const 押し方 = usePress({
     kind: 'card',
     id: cardId,
+    // 長押しで選んだら、**そのまま掴めるようにする**（指を離せば選ばれただけ）
+    onLongPress: 掴み.arm,
     onOpen: () => navigate(sessionPath(cardId)),
   })
   const reviving = useReviving(cardId)
@@ -401,7 +425,16 @@ export function SessionTile({
         枠の余白・見出し・「＋」「×」はカードの外なので、そちらを押したときは
         今までどおり枠へ届く。
       */
-      onPointerDown={(event) => event.stopPropagation()}
+      onPointerDown={重ねる(
+        (event) => event.stopPropagation(),
+        掴み.handlers.onPointerDown,
+      )}
+      onPointerMove={掴み.handlers.onPointerMove}
+      onPointerUp={掴み.handlers.onPointerUp}
+      onPointerCancel={掴み.handlers.onPointerCancel}
+      onLostPointerCapture={掴み.handlers.onLostPointerCapture}
+      // **運んだ直後の `click` を捨てる。** 捨てないと並べ替えるたびに選択が入れ替わる
+      onClickCapture={掴み.handlers.onClickCapture}
       style={statusAccent(session.status)}
     >
       {/*
@@ -857,24 +890,13 @@ export function SessionTile({
         **揺らさない**（カード設計§7）。器の直下に置いてあるので、枠が揺れても
         このボタンだけは動かない
       */}
-      {/*
-        掴み手も**器の直下**（復旧ボタンと同じ層）。器は揺れないので、承認待ちで
-        カタカタしていても掴む的は動かない（設計§3-1）
-      */}
-      {handle !== undefined && (
-        <div
-          className="absolute top-1 left-1 z-20"
-          // 小窓のクリック（＝専用画面を開く）と取り違えない
-          onClick={(event) => event.stopPropagation()}
-        >
-          {handle}
-        </div>
-      )}
 
       {revivable.kind !== 'live' && (
         <button
           type="button"
           data-testid="revive-button"
+          // **押しても掴まない。** `click` を止めるだけでは `pointerdown` が素通りする
+          data-no-grab=""
           data-state={revivable.kind}
           disabled={revivable.kind !== 'ready' || reviving}
           title={reviveWhy ?? '元の CLI セッションで起こし直します'}

@@ -64,7 +64,12 @@ interface Options<T extends string> {
   scroller?: () => HTMLElement | null
 }
 
-interface Bound {
+/**
+ * 掴む側へ渡す3つの合図。
+ *
+ * **掴み手にも本体にも同じものを渡す。** 受け取った側が `useGrip` へそのまま流す。
+ */
+export interface Bound {
   onGrab: () => void
   onMove: (point: Point) => void
   onDrop: () => void
