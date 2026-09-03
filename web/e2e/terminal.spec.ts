@@ -287,6 +287,34 @@ test('粗いポインタでなければ、選択ダイアログでも十字は�
 })
 
 /**
+ * PC ではキーボードの出し入れに触らない（ローカルイシュー「スマホでターミナルビュー内に
+ * 触れるとキーボードが出てくる」設計§5）。
+ *
+ * **門は置いていない。** 入力方式を決めるのは `touchend` の中だけで、タッチの無い機械では
+ * そもそも発火しない——**載せる場所そのものが門**になっている。だから「マウスで押しても
+ * 指定が付かない」ことが、その門が効いていることの証拠になる。
+ *
+ * 逆側（タップすると付くこと）は `keyboard.spec.ts` が見る。
+ */
+test('マウスで押しても、端末の入力方式は決め直されない', async ({ page }) => {
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  await openSession(page, tile)
+
+  // マウント時の初期フォーカスが当てた値。**空の画面は「打てない」に倒れる**（設計§4）
+  const helper = page.getByTestId('terminal').locator('.xterm-helper-textarea')
+  await expect(helper).toHaveAttribute('inputmode', 'none')
+
+  // 会話を進めて、**画面としては「打てる」側**にする。ここでマウスの経路が判定を
+  // 走らせていれば `text` に変わる——変わらないことが、門が効いている証拠になる
+  await typeLine(page, 'こんにちは')
+  await expectTerminalToContain(page, '[fake-claude] received: こんにちは')
+  await page.getByTestId('terminal').click()
+
+  await expect(helper).toHaveAttribute('inputmode', 'none')
+})
+
+/**
  * タッチで遡る（テスト計画フェーズ4「ローカル経路」）。
  *
  * ここで xterm に入るのは**擬似ターミナルの生バイトそのまま**。サーバが作った画面が

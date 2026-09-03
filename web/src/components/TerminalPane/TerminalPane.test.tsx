@@ -272,6 +272,146 @@ describe('TerminalPane の焦点', () => {
 })
 
 /**
+ * スマホでソフトキーボードを出してよいか（設計§4・§5）。
+ *
+ * **「キーボードが出るか」はここでは見られない。** 出すかどうかを決めているのは
+ * ブラウザなので、確かめられるのは**隠しテキストエリアへ指定が当たっていること**まで。
+ *
+ * **PC への門は置いていない。** `onTouchEnd` はタッチの無い機械で発火しないので、
+ * 載せる場所そのものが門になる（設計§5）。だから「マウスでは触らない」を対で置く。
+ */
+describe('TerminalPane の入力方式', () => {
+  /** 罫線に挟まれた入力欄がある画面（＝打てる）。 */
+  const 入力欄のある画面 = ['', '─'.repeat(60), '❯ ', '─'.repeat(60), '  Haiku 4.5'].join(
+    '\r\n',
+  )
+  /** 選択待ちの画面（＝打てない）。 */
+  const 選択待ちの画面 = ['', ' ❯ 1. Yes', '   2. No', '', ' Esc to cancel'].join('\r\n')
+
+  async function 端末と隠し欄(container: HTMLElement) {
+    const box = container.querySelector('[data-testid="terminal"]') as HTMLElement
+    const term = await 描かれた端末(box)
+    const helper = box.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement
+    return { box, term, helper }
+  }
+
+  /** 画面を書き込んで、書き終わるまで待つ。 */
+  function 書き込む(term: Terminal, text: string): Promise<void> {
+    return new Promise((done) => term.write(text, () => done()))
+  }
+
+  function タップ(box: HTMLElement) {
+    fireEvent.pointerDown(box, { pointerType: 'touch', button: 0 })
+    touch(box, 'touchstart', [{ x: 0, y: 0 }])
+    touch(box, 'touchend', [])
+  }
+
+  it('隠しテキストエリアが実在すること', async () => {
+    // **この1本が前提。** 掴めていなければ、以下の断言はすべて空振りになる
+    const { container } = render(<TerminalPane cardId={CARD} />)
+    const { helper } = await 端末と隠し欄(container)
+
+    expect(helper).toBeInstanceOf(HTMLTextAreaElement)
+  })
+
+  it('打てる画面をタップしたら、キーボードを塞がないこと', async () => {
+    const { container } = render(<TerminalPane cardId={CARD} />)
+    const { box, term, helper } = await 端末と隠し欄(container)
+    await 書き込む(term, 入力欄のある画面)
+
+    タップ(box)
+
+    expect(helper.inputMode).toBe('text')
+  })
+
+  it('選択待ちの画面をタップしたら、キーボードを塞ぐこと', async () => {
+    // **これが要件そのもの。** ログを読んでいるだけの場所を押しても出さない
+    const { container } = render(<TerminalPane cardId={CARD} />)
+    const { box, term, helper } = await 端末と隠し欄(container)
+    await 書き込む(term, 選択待ちの画面)
+
+    タップ(box)
+
+    expect(helper.inputMode).toBe('none')
+  })
+
+  it('指でなぞったときは、指定を触らないこと', async () => {
+    // なぞりでは焦点を渡さないので、入力方式を決める理由も無い
+    const { container } = render(<TerminalPane cardId={CARD} />)
+    const { box, term, helper } = await 端末と隠し欄(container)
+    vi.spyOn(term.buffer.active, 'viewportY', 'get').mockReturnValue(50)
+    vi.spyOn(term.buffer.active, 'baseY', 'get').mockReturnValue(100)
+    await 書き込む(term, 入力欄のある画面)
+    helper.inputMode = '見張り'
+
+    fireEvent.pointerDown(box, { pointerType: 'touch', button: 0 })
+    touch(box, 'touchstart', [{ x: 0, y: 0 }])
+    touch(box, 'touchmove', [{ x: 0, y: 60 }])
+    touch(box, 'touchend', [])
+
+    expect(helper.inputMode).toBe('見張り')
+  })
+
+  it('マウスで押したときは、指定を触らないこと', async () => {
+    // **PC 非干渉の直接の担保。** マウスの焦点は `onPointerDown` だけを通る
+    const { container } = render(<TerminalPane cardId={CARD} />)
+    const { box, term, helper } = await 端末と隠し欄(container)
+    await 書き込む(term, 選択待ちの画面)
+    helper.inputMode = '見張り'
+
+    fireEvent.pointerDown(box, { pointerType: 'mouse', button: 0 })
+
+    expect(helper.inputMode).toBe('見張り')
+  })
+
+  it('焦点を渡す前に、指定が決まっていること', async () => {
+    // **iOS は焦点が当たったままの変更を読まない**（設計§4）。値だけでなく順序を固定する
+    const { container } = render(<TerminalPane cardId={CARD} />)
+    const { box, term, helper } = await 端末と隠し欄(container)
+    await 書き込む(term, 選択待ちの画面)
+    // **前の値を「塞がない」側にしておく。** マウント時の初期フォーカスが既に `none` を
+    // 当てているので、そのまま測ると**順序が逆でも同じ値**が見え、何も確かめられない
+    helper.inputMode = 'text'
+    let 焦点のときの指定: string | undefined
+    vi.spyOn(term, 'focus').mockImplementation(() => {
+      焦点のときの指定 = helper.inputMode
+    })
+
+    タップ(box)
+
+    expect(焦点のときの指定).toBe('none')
+  })
+
+  it('打てる状態から打てない状態へ移ったら、焦点を外すこと', async () => {
+    // 放っておくと、選択待ちへ移ってもキーボードが出たまま十字ボタンを覆う（設計§4）
+    const { container } = render(<TerminalPane cardId={CARD} />)
+    const { box, term, helper } = await 端末と隠し欄(container)
+    await 書き込む(term, 入力欄のある画面)
+    タップ(box)
+    const blur = vi.spyOn(helper, 'blur')
+
+    await 書き込む(term, `[2J[H${選択待ちの画面}`)
+
+    expect(blur).toHaveBeenCalled()
+    expect(helper.inputMode).toBe('none')
+  })
+
+  it('打てない状態から打てる状態へ戻っても、何もしないこと', async () => {
+    // **開く向きは追いかけない。** キーボードを開くには利用者の操作起因のイベントが要る
+    const { container } = render(<TerminalPane cardId={CARD} />)
+    const { box, term, helper } = await 端末と隠し欄(container)
+    await 書き込む(term, 選択待ちの画面)
+    タップ(box)
+    const focus = vi.spyOn(term, 'focus')
+
+    await 書き込む(term, `[2J[H${入力欄のある画面}`)
+
+    expect(focus).not.toHaveBeenCalled()
+    expect(helper.inputMode).toBe('none')
+  })
+})
+
+/**
  * タッチの結線（テスト計画フェーズ3「結線」）。
  *
  * 判断そのものは `lib/touch.test.ts` が持つ。ここで見るのは**繋がっているか**だけ。
