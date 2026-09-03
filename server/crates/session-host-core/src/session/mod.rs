@@ -703,7 +703,23 @@ impl Session {
     fn terminal_shows_activity(&self) -> bool {
         let (cols, rows) = *self.terminal_size.lock().expect("ロックが壊れていない");
         let tail = self.scrollback_tail_bytes(ACTIVITY_TAIL);
-        activity::is_running(&activity::render(&tail, cols, rows))
+        let screen = activity::render(&tail, cols, rows);
+        let running = activity::is_running(&screen);
+        // **材料を並べる。** ここを外すと「走っているのに入力待ち」になり、しかも
+        // 停滞から出たあとは二度と見に行かないので**その1回で確定してしまう**。
+        // 桁行・読んだ量・描けた量を残しておかないと、外した理由を後から絞れない
+        // （実際に、証拠が無くて原因を絞れない場面を踏んだ）。カード1枚につき5秒に
+        // 1回で、しかも停滞している間だけなので、量は問題にならない
+        tracing::debug!(
+            card_id = %self.card_id,
+            running,
+            cols,
+            rows,
+            tail_bytes = tail.len(),
+            screen_chars = screen.chars().count(),
+            "停滞したカードの画面を見た"
+        );
+        running
     }
 
     /// いまの位置に目印を打つ。
@@ -1443,7 +1459,19 @@ impl Session {
                 self.activity_checked_at.store(now, Ordering::Relaxed);
                 let running = self.terminal_shows_activity();
                 let mut meta = self.meta.lock().expect("ロックが壊れていない");
-                state::sweep_stalled_idle(&mut meta, running)
+                let woke = state::sweep_stalled_idle(&mut meta, running);
+                if woke {
+                    // **この1行が無いと、外したことに誰も気づけない。** 倒したあとは
+                    // 状態が `Stalled` でなくなるので**二度と見に行かない**——つまり
+                    // 誤りは自分では直らず、フックが1件届くまで残る。設計§8-2 が
+                    // 「スピナーの形が変わる」を想定した壊れ方に挙げているのだから、
+                    // 起きたことは必ず残す（ガイドライン「ログを残すとき」）
+                    tracing::info!(
+                        card_id = %self.card_id,
+                        "画面に走っている印が無いので、停滞から入力待ちへ戻した"
+                    );
+                }
+                woke
             };
 
         if silent {
