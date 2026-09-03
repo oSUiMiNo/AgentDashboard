@@ -356,7 +356,12 @@ function HomePage() {
       横スクロールバーが生え、**バーが生えると可視領域が変わってタイルが再レイアウト
       され、次に測る矩形がずれる**——直った直後にまた狂う輪になる。
     */
-    <div className="flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto">
+    <div
+      // **並べ替えの端で送る箱**（並べ替え設計§15-12）。`overflow-anchor: none` は、並びが
+      // 変わるとスクロール固定が位置を動かして指の位置の計算と干渉するため
+      data-scroll-box="home"
+      className="flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto [overflow-anchor:none]"
+    >
       {/*
         **場**（カード設計§9-7-5）。一覧の中身を包む in-flow のラッパで、
         **高さが中身の全高と一致する**。

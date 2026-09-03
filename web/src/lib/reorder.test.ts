@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
+  AUTO_SCROLL_EDGE_PX,
+  AUTO_SCROLL_MAX_PX,
+  autoScrollStep,
   centerOf,
   dropTarget,
   headingOf,
@@ -467,5 +470,39 @@ describe('並びの照合', () => {
     // サーバの返事に新しいカードが混ざっていても、共通部分が同じなら確定と読む
     expect(sameOrder(['a', 'b'], ['a', 'x', 'b'])).toBe(true)
     expect(sameOrder(['a', 'b'], ['b'])).toBe(true)
+  })
+})
+
+describe('端で送る量', () => {
+  const 容器 = rect(100, 100, 400, 300)
+
+  it('帯は 64px、端で 16px/フレーム', () => {
+    expect(AUTO_SCROLL_EDGE_PX).toBe(64)
+    expect(AUTO_SCROLL_MAX_PX).toBe(16)
+    // 帯の内側の縁（まだ端ではない）
+    expect(autoScrollStep({ x: 100 + 64, y: 250 }, 容器).x).toBe(0)
+    // 端そのもの
+    expect(autoScrollStep({ x: 100, y: 250 }, 容器).x).toBe(-16)
+    expect(autoScrollStep({ x: 500, y: 250 }, 容器).x).toBe(16)
+  })
+
+  it('帯の深さに比例する（半分では半分）', () => {
+    expect(autoScrollStep({ x: 100 + 32, y: 250 }, 容器).x).toBe(-8)
+    expect(autoScrollStep({ x: 500 - 32, y: 250 }, 容器).x).toBe(8)
+  })
+
+  it('箱の外へ出ても最大のまま', () => {
+    expect(autoScrollStep({ x: 0, y: 250 }, 容器).x).toBe(-16)
+    expect(autoScrollStep({ x: 900, y: 250 }, 容器).x).toBe(16)
+  })
+
+  it('真ん中では 0、角では両方', () => {
+    expect(autoScrollStep({ x: 300, y: 250 }, 容器)).toEqual({ x: 0, y: 0 })
+    expect(autoScrollStep({ x: 100, y: 100 }, 容器)).toEqual({ x: -16, y: -16 })
+  })
+
+  it('測れなければ送らない', () => {
+    expect(autoScrollStep({ x: Number.NaN, y: 250 }, 容器)).toEqual({ x: 0, y: 0 })
+    expect(autoScrollStep({ x: 300, y: 250 }, rect(Number.NaN, 0, 0, 0))).toEqual({ x: 0, y: 0 })
   })
 })

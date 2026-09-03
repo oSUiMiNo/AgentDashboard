@@ -27,7 +27,7 @@
 import { AnimatePresence } from 'motion/react'
 import { useCallback, useState } from 'react'
 
-import { useReorder, type Bound } from '@/lib/useReorder'
+import { useReorder, type Bound, type Scroller } from '@/lib/useReorder'
 import { useGrip } from '@/lib/useGrip'
 import { 重ねる } from '@/lib/handlers'
 import { usePress } from '@/lib/usePress'
@@ -68,6 +68,8 @@ interface Props {
    * `dragging` は1つだけなので、これとは別に要る。
    */
   reordering?: boolean
+  /** 端で送る箱（一覧の縦の箱）。カードの並びも同じ箱を送る（並べ替え設計§15-12） */
+  scroller?: Scroller
 }
 
 export function ProjectGroup({
@@ -79,6 +81,7 @@ export function ProjectGroup({
   rootRef,
   dragging = false,
   reordering = false,
+  scroller,
 }: Props) {
   const navigate = useNavigate()
   const [error, setError] = useState<string | null>(null)
@@ -133,6 +136,7 @@ export function ProjectGroup({
     reordering: 並べ替え中,
   } = useReorder<CardId>({
     ids: cards,
+    scroller,
     onCommit: (next) => 並びを送る(next),
   })
 

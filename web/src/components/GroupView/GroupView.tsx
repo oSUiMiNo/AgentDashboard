@@ -32,7 +32,7 @@
  * 完結する。配置を選んだ理由そのものなので、右側の横並びには手を入れていない。
  */
 
-import { useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 import { Button } from '@/components/ui/button'
 import { FilesToggle } from '@/components/ProjectFiles/FilesToggle'
@@ -44,7 +44,7 @@ import { useFilesPanel } from '@/lib/filesPanel'
 import { projectDisplayName } from '@/lib/path'
 import { backTargetFor, HOME } from '@/lib/routes'
 import { saveCardOrder, useProjectCards } from '@/stores/sessions'
-import { useReorder } from '@/lib/useReorder'
+import { useReorder, type Scroller } from '@/lib/useReorder'
 import { toggleSelect } from '@/stores/selection'
 import { useProjects } from '@/stores/projects'
 
@@ -70,8 +70,12 @@ export function GroupView({ host, project }: Props) {
     区画の並べ替え（並べ替え設計§3・読み替え1）。**ホームのカードと同じ並び**を
     動かしている——正が1本なので、こちらで動かせばあちらにも出る
   */
+  // **端で送るのはレール**（横）。並べ替え設計§15-12
+  const railRef = useRef<HTMLDivElement>(null)
+  const scroller = useMemo<Scroller>(() => ({ get: () => railRef.current, axis: 'x' }), [])
   const { order, dragging, bind, itemRef, reordering } = useReorder<string>({
     ids: cards,
+    scroller,
     onCommit: async (next) => {
       const reason = await saveCardOrder(host, project, next)
       setOrderError(reason)
@@ -200,8 +204,11 @@ export function GroupView({ host, project }: Props) {
           ページを横へ広げるのを防ぐ字としての保険（設計§7）
         */}
         <div
+          ref={railRef}
           data-testid="group-rail"
-          className="flex min-h-0 min-w-0 flex-1 gap-4 overflow-x-auto pb-2"
+          // `overflow-anchor: none`：並びが変わるとスクロール固定が位置を動かし、
+          // 指の位置の計算と干渉する（並べ替え設計§15-2）
+          className="flex min-h-0 min-w-0 flex-1 gap-4 overflow-x-auto pb-2 [overflow-anchor:none]"
         >
           {/*
             **いちばん左。セッションの札と同じ扱い**（設計§8 の 2026-08-27 の変更）。

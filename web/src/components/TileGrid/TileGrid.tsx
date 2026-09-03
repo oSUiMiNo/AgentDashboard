@@ -9,9 +9,9 @@
  * まとまりの組み立てと並びの安定は [`@/stores/sessions`] が持つ。
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import { useReorder } from '@/lib/useReorder'
+import { useReorder, type Scroller } from '@/lib/useReorder'
 
 import { ProjectGroup } from '@/components/ProjectGroup/ProjectGroup'
 import { ReviveBudgetDialog } from '@/components/TileGrid/ReviveBudgetDialog'
@@ -92,8 +92,18 @@ export function TileGrid() {
     return reason
   }, [])
 
+  // **端で送るのは本体の縦の箱**（`App.tsx`）。並べ替え設計§15-12。`RoamLayer` が場を
+  // `querySelector` で引くのと同じ形で、目印で引く
+  const 縦の箱 = useMemo<Scroller>(
+    () => ({
+      get: () => document.querySelector<HTMLElement>('[data-scroll-box="home"]'),
+      axis: 'y',
+    }),
+    [],
+  )
   const { order, dragging, bind, itemRef, reordering } = useReorder({
     ids: frames.map(鍵),
+    scroller: 縦の箱,
     onCommit: (next) => 並びを送る(next),
   })
 
@@ -451,6 +461,7 @@ export function TileGrid() {
                 残らないものは、壊れているのと見分けが付かない
               */
               grab={group.projectId === undefined ? undefined : bind(鍵(group))}
+              scroller={縦の箱}
               rootRef={itemRef(鍵(group))}
               dragging={dragging === 鍵(group)}
               reordering={reordering}

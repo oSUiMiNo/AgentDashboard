@@ -34,17 +34,20 @@
  *
  * ここが持つのは**動かす量**だけで、**動き方**——時間・曲線・止める段——は CSS 側にある。
  *
- * # 端での自動送りは、いまどこからも使われていない
+ * # 端での自動送りと、スクロールの補正（設計§15-12）
  *
- * `scroller` は3つの呼び出し元のどこからも渡していない。**繋ぐ前に直すことがある**
- * ——`rects` は掴んだ瞬間の**画面の座標**で凍結してあるので、容器がスクロールすると
- * 土台だけが取り残されて落とし先がずれる。繋ぐなら、指の位置をスクロール差分で
- * 補正すること（設計§15-12）。
+ * `rects` は掴んだ瞬間の**画面の座標**で凍結してある。容器がスクロールすると土台だけが
+ * 取り残されるので、**指の側を凍結した座標系へ写す**——判定に渡す点は「指の位置＋
+ * （いまのスクロール − 掴んだ瞬間のスクロール）」。矩形は1回しか測らない。
+ *
+ * 送る箱は呼び元が渡す（一覧は本体の縦の箱、PJT 専用画面はレール）。指を止めたままでも
+ * 送り続け、**スクロールが変わったフレームだけ**追従と判定をやり直す。
  */
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { animate } from 'motion'
 import {
+  autoScrollStep,
   dropTarget,
   headingOf,
   layoutOf,
@@ -96,34 +99,6 @@ export const SPRING_DAMPING = 36
 export const TILT_SWING_DEG_PER_PX_S = 0.0015
 export const TILT_SWING_MAX_DEG = 2
 
-export const AUTO_SCROLL_EDGE_PX = 48
-
-/** 1フレームあたりの送り量（px）。 */
-export const AUTO_SCROLL_STEP_PX = 12
-
-/**
- * その点が容器の端にいるとき、どちらへどれだけ送るか。**純粋な計算。**
- *
- * 戻り値は `{ x, y }` の送り量（px）。端にいなければどちらも 0。
- */
-export function autoScrollStep(point: Point, bounds: Rect): { x: number; y: number } {
-  const right = bounds.left + bounds.width
-  const bottom = bounds.top + bounds.height
-  let x = 0
-  let y = 0
-  if (point.x - bounds.left < AUTO_SCROLL_EDGE_PX) {
-    x = -AUTO_SCROLL_STEP_PX
-  } else if (right - point.x < AUTO_SCROLL_EDGE_PX) {
-    x = AUTO_SCROLL_STEP_PX
-  }
-  if (point.y - bounds.top < AUTO_SCROLL_EDGE_PX) {
-    y = -AUTO_SCROLL_STEP_PX
-  } else if (bottom - point.y < AUTO_SCROLL_EDGE_PX) {
-    y = AUTO_SCROLL_STEP_PX
-  }
-  return { x, y }
-}
-
 /** 標本を持つ数の上限。窓（100ms）に収まる数より十分多い */
 const SAMPLE_LIMIT = 32
 
@@ -148,8 +123,19 @@ interface Options<T extends string> {
    * `undefined`（何も返さない）なら、サーバの返事（`ids`）が一致するまで手元を保つ。
    */
   onCommit: (next: readonly T[]) => Promise<string | null> | void
-  /** 端で送るスクロール容器。無ければ送らない */
-  scroller?: () => HTMLElement | null
+  /** 端で送るスクロール容器と、送る軸。無ければ送らない（設計§15-12） */
+  scroller?: Scroller
+}
+
+/** 端で送る箱。**呼び元が渡す**——3箇所で箱が違うので、フックは探さない */
+export interface Scroller {
+  get: () => HTMLElement | null
+  /** 送る軸。一覧の箱は横に `overflow-x-hidden` でもプログラムからは動くので、軸を限る */
+  axis: 'x' | 'y'
+}
+
+function scrollOf(box: HTMLElement | null): Point {
+  return box === null ? { x: 0, y: 0 } : { x: box.scrollLeft, y: box.scrollTop }
 }
 
 /**
@@ -208,6 +194,14 @@ interface Held<T> {
   /** 掴んだ瞬間に既に付いていた `translate`（収まる途中の掴み直し）。追従に足す */
   carry: Point
   samples: Sample[]
+  /** 最後の指の位置（生）。送っている間の再判定に使う */
+  last: Point | null
+  /** 掴んだ瞬間の箱のスクロール */
+  scroll0: Point
+  /** 直前に見た箱のスクロール。変わったフレームだけ追従と判定をやり直す */
+  scrollLast: Point
+  /** いまのスクロール差分（`scrollLast − scroll0`）。着地の逆算に使う */
+  scrollDelta: Point
 }
 
 function parseTranslate(value: string): Point {
@@ -351,9 +345,77 @@ export function useReorder<T extends string>({
   const バネ = useRef<{ id: T; stop: () => void } | null>(null)
   /** 印を降ろす条件。**滑りの時間とバネの両方**が済んだときに降ろす */
   const 降ろす条件 = useRef<{ timer: boolean; spring: boolean }>({ timer: true, spring: true })
-  const 送り = useRef<{ x: number; y: number }>({ x: 0, y: 0 })
 
-  // 端に指がある間だけ送る。**掴んでいないときは回さない**
+  /** 本人を指の下へ。`translate` ＝ 引き継ぎ ＋（指 − 握り点）＋ スクロール差分 */
+  const 追従する = useCallback((h: Held<T>, point: Point, now: number) => {
+    if (h.origin === null) {
+      h.origin = point
+    }
+    h.followed = {
+      x: h.carry.x + point.x - h.origin.x + h.scrollDelta.x,
+      y: h.carry.y + point.y - h.origin.y + h.scrollDelta.y,
+    }
+    const self = elements.current.get(h.base[h.from])
+    if (self !== undefined) {
+      self.style.translate = translateOf(h.followed)
+      // **速度に応じた傾き**（設計§15-7）。基準の1度に、横速度に比例した傾きを足す
+      const swing = clamp(velocityOf(h.samples, now).x * TILT_SWING_DEG_PER_PX_S, TILT_SWING_MAX_DEG)
+      self.style.setProperty('--reorder-swing', `${swing}deg`)
+    }
+  }, [])
+
+  /** 落とし先を決め直し、変わっていれば押しのけられる側の行き先を書く */
+  const 判定する = useCallback((h: Held<T>, point: Point, now: number) => {
+    /*
+      **落とし先は「行→矩形→1歩→封印」で決める**（設計§15-3）。目標へ直接飛ばさず、
+      1回の判定で動くのは隣の1枚だけ。直前に居た添字へは、指が 10px 動くか向きが
+      1 rad 変わるまで戻さない——境界上で毎フレーム往復しないため。
+
+      判定に渡す点は**凍結した座標系へ写した指**（スクロール差分を足す）。
+    */
+    const judged = { x: point.x + h.scrollDelta.x, y: point.y + h.scrollDelta.y }
+    const result = dropTarget({
+      rects: h.rects,
+      point: judged,
+      current: h.current,
+      seal: h.seal,
+      heading: headingOf(h.samples, now),
+    })
+    h.seal = result.seal
+    if (result.index === h.current) {
+      return
+    }
+    h.placement = moveItem(h.placement, h.current, result.index).slice()
+    h.current = result.index
+    /*
+      **押しのけられる側の行き先を書く。** DOM は動かさず、凍結した矩形と仮想の並び
+      から出した差を `translate` に入れる。滑り方（時間・曲線）は CSS が持つ。
+    */
+    const offsets = virtualOffsets(h.rects, h.placement, h.layout)
+    for (let at = 0; at < h.base.length; at += 1) {
+      if (at === h.from) {
+        continue
+      }
+      const element = elements.current.get(h.base[at])
+      if (element === undefined) {
+        continue
+      }
+      // **動かない要素には書かない。** 1歩で書き換わるのは隣の1枚だけ（E2E が数える）
+      const next = offsets[at].x === 0 && offsets[at].y === 0 ? '' : translateOf(offsets[at])
+      if (element.style.translate !== next) {
+        element.style.translate = next
+      }
+    }
+  }, [])
+
+  /*
+    **端に指がある間だけ送る。掴んでいないときは回さない**（設計§15-12）。
+
+    指を止めていても送り続ける（`pointermove` が来ないと止まる作りでは、端へ着いた
+    瞬間に止まる）。送って**スクロールが変わったフレームだけ**、追従と判定をやり直す
+    ——指は動いていなくても、凍結した座標系の中では指が動いている。端に着けば
+    `scrollBy` が自然に止まり、再判定も止まる。
+  */
   useEffect(() => {
     if (dragging === null || scroller === undefined) {
       return
@@ -363,19 +425,36 @@ export function useReorder<T extends string>({
       if (!生きている) {
         return
       }
-      const box = scroller()
-      const step = 送り.current
-      if (box !== null && (step.x !== 0 || step.y !== 0)) {
-        box.scrollBy(step.x, step.y)
+      const h = held.current
+      const box = scroller.get()
+      if (h !== null && box !== null && h.last !== null) {
+        const bounds = box.getBoundingClientRect()
+        const step = autoScrollStep(h.last, {
+          left: bounds.left,
+          top: bounds.top,
+          width: bounds.width,
+          height: bounds.height,
+        })
+        const along = scroller.axis === 'x' ? step.x : step.y
+        if (along !== 0) {
+          box.scrollBy(scroller.axis === 'x' ? along : 0, scroller.axis === 'y' ? along : 0)
+        }
+        const now = scrollOf(box)
+        if (now.x !== h.scrollLast.x || now.y !== h.scrollLast.y) {
+          h.scrollLast = now
+          h.scrollDelta = { x: now.x - h.scroll0.x, y: now.y - h.scroll0.y }
+          const t = performance.now()
+          追従する(h, h.last, t)
+          判定する(h, h.last, t)
+        }
       }
       requestAnimationFrame(回す)
     }
     requestAnimationFrame(回す)
     return () => {
       生きている = false
-      送り.current = { x: 0, y: 0 }
     }
-  }, [dragging, scroller])
+  }, [dragging, scroller, 追従する, 判定する])
 
   const itemRef = useCallback(
     (id: T) => (element: HTMLElement | null) => {
@@ -570,8 +649,12 @@ export function useReorder<T extends string>({
     const 表 = new Map<T, Point>()
     for (const [id, element] of elements.current) {
       if (id === h.base[h.from]) {
+        // 凍結した矩形はスクロール前の座標。箱が Δ 動いていれば、見た目はそのぶん戻る
         const rect = h.rects[h.from]
-        表.set(id, { x: rect.left + h.followed.x, y: rect.top + h.followed.y })
+        表.set(id, {
+          x: rect.left + h.followed.x - h.scrollDelta.x,
+          y: rect.top + h.followed.y - h.scrollDelta.y,
+        })
         continue
       }
       const box = element.getBoundingClientRect()
@@ -635,6 +718,10 @@ export function useReorder<T extends string>({
           followed: carry,
           carry,
           samples: [],
+          last: null,
+          scroll0: scrollOf(scroller?.get() ?? null),
+          scrollLast: scrollOf(scroller?.get() ?? null),
+          scrollDelta: { x: 0, y: 0 },
         }
         // 引き継いだぶんを、測った直後に書き戻す（見た目が飛ばない）
         if (carry.x !== 0 || carry.y !== 0) {
@@ -663,75 +750,26 @@ export function useReorder<T extends string>({
         if (h === null) {
           return
         }
-        if (h.origin === null) {
-          h.origin = point
-        }
         const now = performance.now()
         h.samples.push({ t: now, x: point.x, y: point.y })
         while (h.samples.length > SAMPLE_LIMIT || h.samples[0].t < now - VELOCITY_WINDOW_MS) {
           h.samples.shift()
         }
-        const box = scroller?.() ?? null
+        h.last = point
+        // ホイールで箱が動いていたら、ここで差分を取り込む（送りの輪が無いときのため）
+        const box = scroller?.get() ?? null
         if (box !== null) {
-          const bounds = box.getBoundingClientRect()
-          送り.current = autoScrollStep(point, {
-            left: bounds.left,
-            top: bounds.top,
-            width: bounds.width,
-            height: bounds.height,
-          })
+          const current = scrollOf(box)
+          h.scrollLast = current
+          h.scrollDelta = { x: current.x - h.scroll0.x, y: current.y - h.scroll0.y }
         }
         // **本人は指に 1:1 で追従する**（設計§15-2）。React を経由せず、要素へ直接書く
-        h.followed = { x: h.carry.x + point.x - h.origin.x, y: h.carry.y + point.y - h.origin.y }
-        const self = elements.current.get(h.base[h.from])
-        if (self !== undefined) {
-          self.style.translate = translateOf(h.followed)
-          // **速度に応じた傾き**（設計§15-7）。基準の1度に、横速度に比例した傾きを足す
-          const swing = clamp(velocityOf(h.samples, now).x * TILT_SWING_DEG_PER_PX_S, TILT_SWING_MAX_DEG)
-          self.style.setProperty('--reorder-swing', `${swing}deg`)
-        }
-        /*
-          **落とし先は「行→矩形→1歩→封印」で決める**（設計§15-3）。目標へ直接飛ばさず、
-          1回の `pointermove` で動くのは隣の1枚だけ。直前に居た添字へは、指が 10px
-          動くか向きが 1 rad 変わるまで戻さない——境界上で毎フレーム往復しないため。
-        */
-        const result = dropTarget({
-          rects: h.rects,
-          point,
-          current: h.current,
-          seal: h.seal,
-          heading: headingOf(h.samples, now),
-        })
-        h.seal = result.seal
-        if (result.index === h.current) {
-          return
-        }
-        h.placement = moveItem(h.placement, h.current, result.index).slice()
-        h.current = result.index
-        /*
-          **押しのけられる側の行き先を書く。** DOM は動かさず、凍結した矩形と仮想の並び
-          から出した差を `translate` に入れる。滑り方（時間・曲線）は CSS が持つ。
-        */
-        const offsets = virtualOffsets(h.rects, h.placement, h.layout)
-        for (let at = 0; at < h.base.length; at += 1) {
-          if (at === h.from) {
-            continue
-          }
-          const element = elements.current.get(h.base[at])
-          if (element === undefined) {
-            continue
-          }
-          // **動かない要素には書かない。** 1歩で書き換わるのは隣の1枚だけ（E2E が数える）
-          const next = offsets[at].x === 0 && offsets[at].y === 0 ? '' : translateOf(offsets[at])
-          if (element.style.translate !== next) {
-            element.style.translate = next
-          }
-        }
+        追従する(h, point, now)
+        判定する(h, point, now)
       },
       onDrop: () => {
         const h = held.current
         held.current = null
-        送り.current = { x: 0, y: 0 }
         if (h === null) {
           return
         }
@@ -779,7 +817,17 @@ export function useReorder<T extends string>({
         )
       },
     }),
-    [ids, onCommit, scroller, 位置を控える, 書いたものを外す, 滑り終わったら降ろす, 元へ戻す],
+    [
+      ids,
+      onCommit,
+      scroller,
+      位置を控える,
+      書いたものを外す,
+      滑り終わったら降ろす,
+      元へ戻す,
+      追従する,
+      判定する,
+    ],
   )
 
   return {

@@ -1,7 +1,13 @@
 import { act, render, screen } from '@testing-library/react'
 import { useRef, type MutableRefObject } from 'react'
 import { clearReorderingStore, isReordering } from '@/stores/reordering'
-import { useReorder, ECHO_TIMEOUT_MS, REORDER_SETTLE_MS, type Reorder } from './useReorder'
+import {
+  useReorder,
+  ECHO_TIMEOUT_MS,
+  REORDER_SETTLE_MS,
+  type Reorder,
+  type Scroller,
+} from './useReorder'
 import type { Rect } from './reorder'
 
 /**
@@ -34,12 +40,14 @@ function Harness({
   ids,
   out,
   onCommit,
+  scroller,
 }: {
   ids: readonly string[]
   out: MutableRefObject<Reorder<string> | null>
   onCommit: (next: readonly string[]) => Promise<string | null> | void
+  scroller?: Scroller
 }) {
-  const reorder = useReorder<string>({ ids, onCommit })
+  const reorder = useReorder<string>({ ids, onCommit, scroller })
   out.current = reorder
   return (
     <div>
@@ -64,20 +72,23 @@ function Outer({
   ids,
   onCommit,
   outRef,
+  scroller,
 }: {
   ids: readonly string[]
   onCommit: (next: readonly string[]) => Promise<string | null> | void
   outRef: (口: 器の口) => void
+  scroller?: Scroller
 }) {
   const out = useRef<Reorder<string> | null>(null)
   outRef(out)
-  return <Harness ids={ids} out={out} onCommit={onCommit} />
+  return <Harness ids={ids} out={out} onCommit={onCommit} scroller={scroller} />
 }
 
 function 置く(
   ids: readonly string[],
   rects: Rect[],
   answer: (next: readonly string[]) => Promise<string | null> | void = () => {},
+  scroller?: Scroller,
 ) {
   const 送った: (readonly string[])[] = []
   let 口: 器の口 = { current: null }
@@ -89,6 +100,7 @@ function 置く(
         return answer(next)
       }}
       outRef={(o) => (口 = o)}
+      scroller={scroller}
     />,
   )
   // **要素ごとに矩形を差し替える。** プロトタイプの固定値に勝つ
@@ -295,5 +307,96 @@ describe('断られたら、元へ戻す', () => {
       await Promise.resolve()
     })
     expect(並び()).toEqual(['b', 'c', 'a'])
+  })
+})
+
+/** 偽のスクロール箱。`scrollBy` で `scrollTop` が動く */
+function 偽の箱(bounds: Rect) {
+  const box = {
+    scrollTop: 0,
+    scrollLeft: 0,
+    scrolled: [] as { x: number; y: number }[],
+    getBoundingClientRect: () => ({
+      left: bounds.left,
+      top: bounds.top,
+      width: bounds.width,
+      height: bounds.height,
+      right: bounds.left + bounds.width,
+      bottom: bounds.top + bounds.height,
+      x: bounds.left,
+      y: bounds.top,
+      toJSON: () => ({}),
+    }),
+    scrollBy(x: number, y: number) {
+      box.scrollLeft += x
+      box.scrollTop += y
+      box.scrolled.push({ x, y })
+    },
+  }
+  return box
+}
+
+describe('端での自動送りと、スクロールの補正', () => {
+  it('端に指を止めると、深さに比例して箱を送り続ける', () => {
+    vi.useFakeTimers({ toFake: ['requestAnimationFrame', 'cancelAnimationFrame'] })
+    const box = 偽の箱({ left: 0, top: 0, width: 1000, height: 600 })
+    const scroller: Scroller = { get: () => box as unknown as HTMLElement, axis: 'y' }
+    const { 口 } = 置く(['a', 'b', 'c'], 格子(3), () => {}, scroller)
+    act(() => 口().bind('a').onGrab({ x: 100, y: 100 }))
+    // 下端（600）の帯の中、深さ 32 → 8px/フレーム
+    act(() => 口().bind('a').onMove({ x: 100, y: 600 - 32 }))
+    act(() => {
+      vi.advanceTimersToNextFrame()
+      vi.advanceTimersToNextFrame()
+    })
+    expect(box.scrolled).toEqual([
+      { x: 0, y: 8 },
+      { x: 0, y: 8 },
+    ])
+    act(() => 口().bind('a').onDrop())
+  })
+
+  it('送っている間は、指を動かさなくても本人が追従し、落とし先を判定し直す', () => {
+    vi.useFakeTimers({ toFake: ['requestAnimationFrame', 'cancelAnimationFrame'] })
+    // 縦1列の枠（高さ 100・隙間 16）。指を 2 枚目の下端付近に止め、箱が送られる
+    const rects: Rect[] = [0, 1, 2, 3].map((i) => ({ left: 0, top: i * 116, width: 940, height: 100 }))
+    const box = 偽の箱({ left: 0, top: 0, width: 1000, height: 200 })
+    const scroller: Scroller = { get: () => box as unknown as HTMLElement, axis: 'y' }
+    const { 口 } = 置く(['a', 'b', 'c', 'd'], rects, () => {}, scroller)
+    act(() => 口().bind('a').onGrab({ x: 100, y: 50 }))
+    // 箱の下端（200）に指を置く。判定の点は y=50+Δ… ここでは Δ=0 で 1 枚目の中
+    act(() => 口().bind('a').onMove({ x: 100, y: 200 }))
+    // 1フレームで 16px 送られる。指は止めたまま
+    act(() => {
+      vi.advanceTimersToNextFrame()
+    })
+    expect(box.scrollTop).toBe(16)
+    // 追従：translate ＝（200 − 50）＋ Δ(16) ＝ 166
+    expect(screen.getByTestId('a').style.translate).toBe('0px 166px')
+    // 何フレームか送ると、判定の点（200 + Δ）が 2 枚目の帯（116〜216）を越えて 3 枚目へ向かう
+    act(() => {
+      for (let i = 0; i < 6; i += 1) vi.advanceTimersToNextFrame()
+    })
+    expect(box.scrollTop).toBe(16 * 7)
+    // 1 歩ずつ：a は 1 → 2 と進み、b は上へ 116、c も上へ 116
+    expect(screen.getByTestId('b').style.translate).toBe('0px -116px')
+    expect(screen.getByTestId('c').style.translate).toBe('0px -116px')
+    act(() => 口().bind('a').onDrop())
+  })
+
+  it('ホイールで箱が動いても、判定は凍結した座標系で行う', () => {
+    const rects: Rect[] = [0, 1, 2].map((i) => ({ left: 0, top: i * 116, width: 940, height: 100 }))
+    const box = 偽の箱({ left: 0, top: 0, width: 1000, height: 600 })
+    const scroller: Scroller = { get: () => box as unknown as HTMLElement, axis: 'y' }
+    const { 口 } = 置く(['a', 'b', 'c'], rects, () => {}, scroller)
+    act(() => 口().bind('a').onGrab({ x: 100, y: 50 }))
+    // ホイールで 116px 送られた（画面の中身が上へ動いた）。指は同じ画面位置（y=50）のまま
+    box.scrollTop = 116
+    act(() => 口().bind('a').onMove({ x: 100, y: 50 }))
+    // 凍結した座標系では指は y=166 ＝ 2 枚目の中 → 1 歩
+    expect(screen.getByTestId('b').style.translate).toBe('0px -116px')
+    // 本人は Δ ぶん余計に動いて、画面上は指の下に居る
+    expect(screen.getByTestId('a').style.translate).toBe('0px 116px')
+    act(() => 口().bind('a').onDrop())
   })
 })

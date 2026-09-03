@@ -523,3 +523,43 @@ export function sameOrder<T>(a: readonly T[], b: readonly T[]): boolean {
   const right = b.filter((each) => inA.has(each))
   return left.length === right.length && left.every((each, at) => each === right[at])
 }
+
+/**
+ * 端で送り始める帯（px）（設計§15-12）。
+ *
+ * 区画は掴み手が左上にあり、指が箱の端へ届くまでに区画そのものが端を大きく越える。
+ * 帯が狭いと「端まで持って行ったのに動かない」になる。**実機で決め直す**（設計§15-10）。
+ */
+export const AUTO_SCROLL_EDGE_PX = 64
+
+/** 端での最大の送り量（px/フレーム）。帯の深さに比例して 0 からここまで */
+export const AUTO_SCROLL_MAX_PX = 16
+
+/**
+ * その点が容器の端にいるとき、どちらへどれだけ送るか。**純粋な計算。**
+ *
+ * 帯の深さに比例する（一定速度だと帯に触れた瞬間に走り出して行き過ぎる）。箱の外へ
+ * 出ても最大のまま。**小数のまま返す**——丸めると帯の浅いところで 0 に潰れて
+ * 「動かない」に見える（Chromium は小数の `scrollBy` を積む）。
+ */
+export function autoScrollStep(point: Point, bounds: Rect): Point {
+  const axis = (position: number, start: number, size: number): number => {
+    const end = start + size
+    const depthStart = Math.max(0, Math.min(AUTO_SCROLL_EDGE_PX, AUTO_SCROLL_EDGE_PX - (position - start)))
+    const depthEnd = Math.max(0, Math.min(AUTO_SCROLL_EDGE_PX, AUTO_SCROLL_EDGE_PX - (end - position)))
+    if (depthStart > 0 && depthStart >= depthEnd) {
+      return (-AUTO_SCROLL_MAX_PX * depthStart) / AUTO_SCROLL_EDGE_PX
+    }
+    if (depthEnd > 0) {
+      return (AUTO_SCROLL_MAX_PX * depthEnd) / AUTO_SCROLL_EDGE_PX
+    }
+    return 0
+  }
+  if (!finite(point.x) || !finite(point.y) || !usable(bounds)) {
+    return { x: 0, y: 0 }
+  }
+  return {
+    x: axis(point.x, bounds.left, bounds.width),
+    y: axis(point.y, bounds.top, bounds.height),
+  }
+}
