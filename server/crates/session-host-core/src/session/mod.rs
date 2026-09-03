@@ -2392,6 +2392,18 @@ impl SessionManager {
 
     /// カードを一覧から消す。生きていれば先に終了させる。
     pub fn archive(&self, card_id: CardId) -> Result<(), SessionError> {
+        /*
+          **添付も一緒に畳む**（`入力欄の状態を端末をまたいで保つ` 段1）。外したカードの
+          履歴はもう読めないので、添付だけ残しても誰も取り戻せない。
+
+          **`fold` の中へ入れてはいけない。** あちらは起こし直し（復旧）と本体を
+          共有しているので、入れると**復旧のたびに添付が消える**。
+
+          **`fold` より前に置く。** `fold` は表に居ないカードで `None` を返して抜ける
+          ——PC が起き直して記録を失った場合がこれで、そのとき添付だけが残る。
+          畳む先が無ければ黙って何もしないので、前に置いて損をしない。
+        */
+        crate::attachments::forget(&self.config().resolved_state_dir(), card_id);
         self.fold(card_id).ok_or(SessionError::NotFound(card_id))?;
         // **配るのはこちらだけ。** 復旧は同じ本体を通るが、ここを配ると
         // 起こし直すつもりのカードが画面から消えてしまう（設計§7-1）

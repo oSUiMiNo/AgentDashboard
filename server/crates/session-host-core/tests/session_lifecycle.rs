@@ -8,7 +8,8 @@
 mod common;
 
 use portable_pty::{CommandBuilder, PtySize};
-use protocol::SessionStatus;
+use protocol::{ClaudeSessionId, SessionStatus};
+use session_host_core::config::SessionHostConfig;
 use session_host_core::session::pty::PtyProcess;
 use testkit::fake_claude;
 use tokio::{sync::mpsc, time::timeout};
@@ -334,6 +335,78 @@ async fn archiveでカードが一覧から消える() {
     manager.archive(session.card_id).expect("消せること");
     assert!(manager.list().is_empty());
     assert!(manager.get(session.card_id).is_none());
+}
+
+/// カードを外したら、そのカードの添付も畳まれること
+/// （`入力欄の状態を端末をまたいで保つ` 段1）。
+///
+/// # なぜ `attachments::forget` を直に呼ぶテストでは足りないのか
+///
+/// あちらは**畳む関数そのもの**が効くことしか言わない。**呼ばれているか**は別の主張で、
+/// 実際この配線は長らく繋がっていなかった——`forget` は定義だけがあり、製品コードから
+/// 1本も呼ばれていなかった。**ここで見るのは「`archive` から届くこと」だけ**である。
+#[tokio::test]
+async fn archiveでそのカードの添付も畳まれる() {
+    let state = std::env::temp_dir().join(format!(
+        "agentdashboard-archive-attachments-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let config = SessionHostConfig {
+        state_dir: Some(state.clone()),
+        ..SessionHostConfig::default()
+    };
+    let manager = common::manager_with(config);
+    let (session, _watcher) = common::start_session(&manager).await;
+
+    // 添付を1枚置いた形を作る（置く口は通さない——見たいのは畳む側）
+    let dir = state
+        .join("attachments")
+        .join(session.card_id.0.to_string());
+    std::fs::create_dir_all(&dir).expect("作れること");
+    let one = dir.join("20200101-000000-aaaaaaaa.png");
+    std::fs::write(&one, "x").expect("書けること");
+    assert!(one.exists(), "前提：置けていること");
+
+    manager.archive(session.card_id).expect("消せること");
+
+    assert!(!one.exists(), "カードを外したのに添付が残っている");
+    assert!(!dir.exists(), "カードのディレクトリごと畳まれていない");
+    std::fs::remove_dir_all(&state).ok();
+}
+
+/// 起こし直し（復旧）では添付を畳まないこと。
+///
+/// **復旧は `archive` と本体（`fold`）を共有している。** 畳む処理をあちらへ入れると、
+/// **復旧のたびに添付が消える**——外したときと同じ道を通るためで、目で見て気づけない。
+/// 畳む呼び出しを `fold` の中ではなく `archive` に置いた理由が、これである。
+#[tokio::test]
+async fn 復旧では添付を畳まない() {
+    let state = std::env::temp_dir().join(format!(
+        "agentdashboard-revive-attachments-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let config = SessionHostConfig {
+        state_dir: Some(state.clone()),
+        ..SessionHostConfig::default()
+    };
+    let manager = common::manager_with(config);
+    let (session, _watcher) = common::start_session(&manager).await;
+
+    let dir = state
+        .join("attachments")
+        .join(session.card_id.0.to_string());
+    std::fs::create_dir_all(&dir).expect("作れること");
+    let one = dir.join("20200101-000000-aaaaaaaa.png");
+    std::fs::write(&one, "x").expect("書けること");
+
+    let in_flight = manager.begin_revive(session.card_id).expect("印が立つこと");
+    manager
+        .revive(in_flight, &common::work_dir(), None, ClaudeSessionId::new())
+        .await
+        .expect("起こし直せること");
+
+    assert!(one.exists(), "復旧の道で添付が消えている");
+    std::fs::remove_dir_all(&state).ok();
 }
 
 #[tokio::test]

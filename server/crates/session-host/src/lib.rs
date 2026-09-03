@@ -136,6 +136,13 @@ async fn run_async(cli: Cli) -> anyhow::Result<()> {
 
     // **返り値を捨ててはいけない。** 落とすと書き終わる前に消える（実測：200行のうち0行）
     let _log = logging::install(logging::Proc::SessionHost, &config);
+    // **添付の掃除も、ここで1回**（ダッシュボード側と同じ理由・同じ位置）
+    {
+        let config = config.clone();
+        tokio::task::spawn_blocking(move || {
+            session_host_core::attachments::sweep_on_start(&config);
+        });
+    }
     let Some(link_config) = link_config(&config) else {
         // **繋ぎ先が無ければ起動しない。** 繋がらないまま黙って動くと、PTY だけが
         // 増えていって誰も見ていない状態になる

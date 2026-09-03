@@ -21,6 +21,8 @@ use std::path::{Path, PathBuf};
 
 use protocol::CardId;
 
+use crate::config::SessionHostConfig;
+
 /// `<state_dir>` の下のディレクトリ名。
 pub const DIR_NAME: &str = "attachments";
 
@@ -224,6 +226,47 @@ fn remove_one(path: &Path, size: u64, outcome: &mut SweepOutcome) -> bool {
             );
             false
         }
+    }
+}
+
+/// 起きたときに1回だけ掃く（`入力欄の状態を端末をまたいで保つ` 段1）。
+///
+/// # なぜ要るのか
+///
+/// [`sweep`] を呼んでいたのは [`write_blob`] の末尾**だけ**だった。つまり
+/// **誰かが新しい添付を置いたときにしか掃除が走らない**。付けたきり送らなかったぶんは、
+/// **次に誰かが添付を置くまでディスクに残り続ける**。
+///
+/// 設計（`メッセージに画像を添付できるようにする` 設計§11）は「**起動時に1回**走らせる
+/// （ログの掃除と同じ）」と書いていたが、実装が入っていなかった。ここがその1回にあたる。
+///
+/// # 呼ぶ場所
+///
+/// **`logging::install` の直後、入口ごとに1回。** ログの掃除とまったく同じ位置で、
+/// 実行ファイルの入口は2つしかない（ダッシュボードとセッションホスト）。
+///
+/// **[`crate::session::SessionManager`] の組み立ての中へ入れてはいけない。**
+/// テストの世話役が同じ道を通るので、**テストを走らせるたびに実機の添付を掃く**ことになる。
+///
+/// # 走らせ方
+///
+/// ファイルを数える仕事なので、非同期の文脈から呼ぶなら
+/// [`tokio::task::spawn_blocking`] へ逃がすこと。枚数は利用者の使い方次第で伸びる。
+pub fn sweep_on_start(config: &SessionHostConfig) {
+    let swept = sweep(
+        &config.resolved_state_dir(),
+        config.attachment_retention_days,
+        config.attachment_max_bytes,
+        config.attachment_sweep_bytes,
+    );
+    // **0件のときは黙る。** 起動のたびに出すと、読む人が慣れて見なくなる
+    if swept.removed > 0 {
+        tracing::info!(
+            removed = swept.removed,
+            freed = swept.freed,
+            over_budget = swept.over_budget,
+            "起きたときに添付を掃きました",
+        );
     }
 }
 
@@ -687,5 +730,49 @@ mod tests {
         // 二度目でも落ちないこと（既に無い）
         forget(&state, mine);
         std::fs::remove_dir_all(&state).ok();
+    }
+
+    /// 起きたときの掃除が、設定の3値をそのまま [`sweep`] へ渡していること。
+    ///
+    /// **`sweep` の中身はここで見ない**（上の節が見ている）。ここで確かめたいのは
+    /// **入口が繋がっていること**だけ——繋がっていなかったのが段1 で直した穴である。
+    #[test]
+    fn 起きたときの掃除は設定のとおりに掃く() {
+        let state = 使い捨て("start-sweep");
+        let card = CardId(uuid::Uuid::new_v4());
+        // 今日のぶんは、どの段でも消さない決まりなので、古い日付で置く
+        置く(&state, card, "20200101-000000-aaaaaaaa.png", 10);
+        置く(&state, card, "20200102-000000-bbbbbbbb.png", 10);
+
+        let mut config = SessionHostConfig::default();
+        config.state_dir = Some(state.clone());
+        config.attachment_retention_days = 1;
+
+        sweep_on_start(&config);
+
+        assert!(
+            !残っている(&state, card, "20200101-000000-aaaaaaaa.png"),
+            "保持期間を過ぎたものが残っている"
+        );
+        assert!(
+            !残っている(&state, card, "20200102-000000-bbbbbbbb.png"),
+            "保持期間を過ぎたものが残っている"
+        );
+        std::fs::remove_dir_all(&state).ok();
+    }
+
+    /// 掃除の対象が無くても落ちないこと。
+    ///
+    /// **起動のたびに通る道なので、ここで落ちると起動そのものが落ちる。**
+    /// 置き場所がまだ1度も作られていない機械（入れた直後）がこれにあたる。
+    #[test]
+    fn 置き場所が無くても起きたときの掃除は落ちない() {
+        let state = 使い捨て("start-sweep-empty");
+        std::fs::remove_dir_all(&state).ok();
+
+        let mut config = SessionHostConfig::default();
+        config.state_dir = Some(state.clone());
+
+        sweep_on_start(&config);
     }
 }

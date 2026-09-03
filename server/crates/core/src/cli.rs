@@ -780,6 +780,14 @@ async fn run_async(cli: Cli, config: Config) -> anyhow::Result<()> {
             // 落とすと書き終わる前にプロセスが終わりうる（実測：200行のうち0行）。
             // `serve` の間ずっと持つ形になっている
             let _log = logging::install(logging::Proc::Dashboard, &config.agent());
+            // **添付の掃除も、ここで1回。** 置くたびの掃除だけだと、付けたきり送らなかった
+            // ぶんが「次に誰かが添付を置くまで」残る。ログの掃除と同じ位置に並べる
+            {
+                let agent = config.agent();
+                tokio::task::spawn_blocking(move || {
+                    session_host_core::attachments::sweep_on_start(&agent);
+                });
+            }
             // **どの実行ファイルで動いているかを最初に出す。** 版を切り替えられるように
             // なると「更新したのに変わらない」が起こりうるが、画面へ版が出るのは先の
             // フェーズなので、実機で異常が出たときの切り分けはここだけが頼りになる
