@@ -57,46 +57,54 @@
 [data-reorder-item] {
   /* **既定は 0ms。掴んでいない間は、どの規則からもここを動かせない** */
   --reorder-ms: 0ms;
-  /* `Sidebar` の「スライド」と同じ語彙。強い ease-out で、行き過ぎない */
-  --reorder-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --reorder-lift-ms: 0ms;
+  /*
+    rbd の退避カーブ＝Material 3 の `standard`。**助走・素早い退避・文字が読める長い尾**
+    （設計§15-7）。前の `(0.22, 1, 0.36, 1)` は最初の1フレームで 37.6% 進む頭の重い形で、
+    どのライブラリより速かった。
+  */
+  --reorder-ease: cubic-bezier(0.2, 0, 0, 1);
   --reorder-dx: 0px;
   --reorder-dy: 0px;
   --reorder-lift: 1;
   --reorder-tilt: 0deg;
+  /* 速度に応じた傾き。JS がインラインで書く（掴んでいる本人だけ） */
+  --reorder-swing: 0deg;
 }
 
 /*
   **ここが「掴んでいる間だけ」の1行。** これ以外に滑る規則・動かす規則を書かない。
 
-  180ms は `DESIGN.md` §28.2 の **Normal（140〜220ms）**。Micro（80〜140）だと
-  「どれが動いたか」が読めず瞬間と区別が付かない。運びの最中に何度も走るので、
-  パネルの 220ms よりわずかに速い側に置く。
+  200ms は `DESIGN.md` §28.2 の **Normal（140〜220ms）**。押しのけは常に隣の1枚ぶん
+  （距離が一定）なので、固定の時間で正しい。持ち上げは Micro（120ms）。
 */
 [data-reorder-item][data-reordering='true'] {
-  --reorder-ms: 180ms;
+  --reorder-ms: 200ms;
+  --reorder-lift-ms: 120ms;
   transition:
     translate var(--reorder-ms) var(--reorder-ease),
-    scale var(--reorder-ms) var(--reorder-ease),
-    rotate var(--reorder-ms) var(--reorder-ease);
+    scale var(--reorder-lift-ms) ease-out,
+    rotate var(--reorder-lift-ms) ease-out;
   translate: var(--reorder-dx) var(--reorder-dy);
   scale: var(--reorder-lift);
-  rotate: var(--reorder-tilt);
+  rotate: calc(var(--reorder-tilt) + var(--reorder-swing));
 }
 
 /*
   持っているもの。**倍率と傾きは `DESIGN.md` §27.5 の候補そのまま**（値は据え置き
   ——利用者が「コミカルでいい感じ」と言っている）。**影は使わない**——カードは
   `mask-image` を使う層を持ち、外へ描くものは切られる（並べ替え設計§8-2）。
+
+  **追従は 1:1。** 本人の `translate` は指が決めるので、滑らせない（設計§15-2）。
 */
 [data-reorder-item][data-reordering='true'][data-dragging='true'] {
   --reorder-lift: 1.02;
   --reorder-tilt: 1deg;
   position: relative;
   z-index: 10;
-  /* **追従は 1:1。** 本人の `translate` は指が決めるので、滑らせない（設計§15-2） */
   transition:
-    scale var(--reorder-ms) var(--reorder-ease),
-    rotate var(--reorder-ms) var(--reorder-ease);
+    scale var(--reorder-lift-ms) ease-out,
+    rotate var(--reorder-lift-ms) ease-out;
 }
 
 /* 面が大きいものは縮める（要件「追加要望」1・設計§15-7）。傾いた角が隙間に収まらない */
@@ -111,17 +119,30 @@
 }
 
 /*
-  FLIP の逆算を当てる1フレームだけ、滑りを切る。**後ろに置いて順序で勝つ**
-  ——切らずに逆算を入れると、逆算そのものが滑って二重に動く。
+  離してから収まるまで。**バネが `translate` を毎フレーム書くので、滑らせない**
+  （滑らせると二重に動く）。持ち上げと傾きは 120ms で戻る。前面のまま
 */
-[data-reorder-item][data-reorder-snap='true'] {
+[data-reorder-item][data-reordering='true'][data-reorder-settling='true'] {
+  position: relative;
+  z-index: 10;
+  transition:
+    scale var(--reorder-lift-ms) ease-out,
+    rotate var(--reorder-lift-ms) ease-out;
+}
+
+/*
+  FLIP の逆算を当てる1フレームだけ、滑りを切る。**上の規則より後ろに置き、詳細度を
+  揃えて順序で勝つ**——切らずに逆算を入れると、逆算そのものが滑って二重に動く。
+*/
+[data-reorder-item][data-reordering='true'][data-reorder-snap='true'] {
   transition: none;
 }
 
 /*
   **「静止」は滑らせない。** 設定は「すべて止める。色・記号・文字は残るので状態は
   読める」と宣言しているので、ここを例外にすると**設定の約束が嘘になる**。
-  並べ替えは動かなくても機能する（入れ替わりが瞬時に戻るだけ）。
+  並べ替えは動かなくても機能する（入れ替わりが瞬時に戻るだけ）。追従（1:1）は
+  アニメーションではないので止めない。
 
   **「控えめ」は止めない。** あの段の役目は「人が頼んでいない周囲の動きを止め、
   動いているカード＝見に行くカードにする」ことで、**いま自分が指で起こしている
@@ -129,6 +150,7 @@
 */
 [data-reorder-item][data-quiet='still'] {
   --reorder-ms: 0ms;
+  --reorder-lift-ms: 0ms;
 }
 
 /*
@@ -141,5 +163,6 @@
 @media (prefers-reduced-motion: reduce) {
   [data-reorder-item][data-reordering='true'] {
     --reorder-ms: 0ms;
+    --reorder-lift-ms: 0ms;
   }
 }

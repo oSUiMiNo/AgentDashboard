@@ -340,6 +340,35 @@ export const VELOCITY_WINDOW_MS = 100
 export const HEADING_MIN_PX = 6
 
 /**
+ * 直近の窓の中で、最古→最新の変位から速度（px/s）を出す（設計§15-7）。
+ *
+ * 離した瞬間の速度をそのまま次のバネの初速に渡す——切り替わった瞬間を作らないため。
+ * 標本が窓に2つ無い（指を止めて離した）なら `{0,0}`。
+ */
+export function velocityOf(samples: readonly Sample[], now: number): Point {
+  const since = now - VELOCITY_WINDOW_MS
+  let first: Sample | null = null
+  let last: Sample | null = null
+  for (const sample of samples) {
+    if (sample.t < since) {
+      continue
+    }
+    if (first === null) {
+      first = sample
+    }
+    last = sample
+  }
+  if (first === null || last === null || first === last) {
+    return { x: 0, y: 0 }
+  }
+  const dt = (last.t - first.t) / 1000
+  if (!finite(dt) || dt < 0.001) {
+    return { x: 0, y: 0 }
+  }
+  return { x: (last.x - first.x) / dt, y: (last.y - first.y) / dt }
+}
+
+/**
  * 直近の窓の中で、最古→最新の変位から進行方向（単位ベクトル）を出す。
  * 標本が2つ無い、または変位が [`HEADING_MIN_PX`] 未満なら null。
  */

@@ -50,6 +50,9 @@ function Harness({
           data-reorder-item=""
           data-dragging={reorder.dragging === id ? 'true' : 'false'}
           data-reordering={reorder.reordering ? 'true' : 'false'}
+          // **「静止」にしておく。** バネを通らず、その場で収まる（決定的に試験できる）。
+          // バネそのものは E2E が見る
+          data-quiet="still"
           ref={reorder.itemRef(id)}
         />
       ))}

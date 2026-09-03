@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { REORDER_SETTLE_MS, REORDER_SLIDE_MS } from '@/lib/useReorder'
+import { REORDER_LIFT_MS, REORDER_SETTLE_MS, REORDER_SLIDE_MS } from '@/lib/useReorder'
 
 /**
  * 並べ替えの動きの定義（`reorder.css`）を、**テキストとして**確かめる。
@@ -144,6 +144,27 @@ describe('掴んでいる間だけ動く', () => {
     expect(値(規則('[data-reorder-item]'), '--reorder-ms')).toBe('0ms')
   })
 
+  it('押しのけの曲線は、rbd の退避カーブ（M3 standard）', () => {
+    // 助走・素早い退避・文字が読める長い尾（設計§15-7）
+    expect(値(規則('[data-reorder-item]'), '--reorder-ease')).toBe('cubic-bezier(0.2, 0, 0, 1)')
+  })
+
+  it('持ち上げの時間も、TypeScript 側の定数と一致する', () => {
+    const 中 = 規則("[data-reorder-item][data-reordering='true']")
+    expect(値(中, '--reorder-lift-ms')).toBe(`${REORDER_LIFT_MS}ms`)
+    expect(REORDER_LIFT_MS).toBeLessThan(REORDER_SLIDE_MS)
+  })
+
+  it('本人と、収まる途中のものは、translate を滑らせない', () => {
+    // 追従は 1:1、収まるのはバネが毎フレーム書く（設計§15-2・§15-7）
+    for (const selector of [
+      "[data-reorder-item][data-reordering='true'][data-dragging='true']",
+      "[data-reorder-item][data-reordering='true'][data-reorder-settling='true']",
+    ]) {
+      expect(値(規則(selector), 'transition')).not.toContain('translate')
+    }
+  })
+
   it('滑る時間は、TypeScript 側の定数と一致する', () => {
     /*
       **同じ数字を2箇所へ書かない。** ずれると「印を降ろすまで待つ時間」が
@@ -158,9 +179,9 @@ describe('掴んでいる間だけ動く', () => {
 describe('止める段', () => {
   it('「静止」は滑らせない', () => {
     // 設定は「すべて止める」と宣言している。**例外にすると約束が嘘になる**
-    expect(値(規則("[data-reorder-item][data-quiet='still']"), '--reorder-ms')).toBe(
-      '0ms',
-    )
+    const 静止 = 規則("[data-reorder-item][data-quiet='still']")
+    expect(値(静止, '--reorder-ms')).toBe('0ms')
+    expect(値(静止, '--reorder-lift-ms')).toBe('0ms')
   })
 
   it('OS の「動きを減らす」も滑らせない', () => {
@@ -173,6 +194,7 @@ describe('止める段', () => {
     )
     expect(打ち消し).toHaveLength(1)
     expect(値(打ち消し[0], '--reorder-ms')).toBe('0ms')
+    expect(値(打ち消し[0], '--reorder-lift-ms')).toBe('0ms')
   })
 
   it('打ち消しは、止める対象より後ろに書いてある', () => {

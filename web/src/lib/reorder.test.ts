@@ -6,6 +6,7 @@ import {
   HEADING_MIN_PX,
   layoutOf,
   sameOrder,
+  velocityOf,
   virtualOffsets,
   SEAL_RELEASE_PX,
   VELOCITY_WINDOW_MS,
@@ -305,6 +306,34 @@ describe('封印：直前に居た添字へは戻さない', () => {
     const 封印 = 判定(rects, { x: 302, y: 100 }, 0).seal
     const result = 判定(rects, { x: 299, y: 100 }, 1, 封印)
     expect(result.seal).toBe(封印)
+  })
+})
+
+describe('速度', () => {
+  it('直近の窓の差分を px/s で出す', () => {
+    expect(
+      velocityOf(
+        [
+          { t: 0, x: 0, y: 0 },
+          { t: 50, x: 30, y: -10 },
+          { t: 100, x: 60, y: -20 },
+        ],
+        100,
+      ),
+    ).toEqual({ x: 600, y: -200 })
+  })
+
+  it('窓の外の標本は捨てる', () => {
+    const 古い = { t: 0, x: -1000, y: 0 }
+    expect(
+      velocityOf([古い, { t: 200, x: 0, y: 0 }, { t: 250, x: 25, y: 0 }], 200 + VELOCITY_WINDOW_MS),
+    ).toEqual({ x: 500, y: 0 })
+  })
+
+  it('標本が窓に2つ無ければ 0（指を止めて離した）', () => {
+    expect(velocityOf([{ t: 0, x: 0, y: 0 }], 50)).toEqual({ x: 0, y: 0 })
+    expect(velocityOf([{ t: 0, x: 0, y: 0 }, { t: 10, x: 5, y: 0 }], 500)).toEqual({ x: 0, y: 0 })
+    expect(velocityOf([], 0)).toEqual({ x: 0, y: 0 })
   })
 })
 

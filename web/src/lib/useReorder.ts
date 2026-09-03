@@ -43,12 +43,14 @@
  */
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { animate } from 'motion'
 import {
   dropTarget,
   headingOf,
   layoutOf,
   moveItem,
   sameOrder,
+  velocityOf,
   virtualOffsets,
   type Layout,
   type Point,
@@ -62,15 +64,37 @@ import { lowerReordering, raiseReordering } from '@/stores/reordering'
 /**
  * 押しのけられる側が滑る時間（ms）。**`reorder.css` の `--reorder-ms` と同じ値**
  * （検査が突き合わせる）。`DESIGN.md` §28.2 の Normal（140〜220ms）の中。
+ *
+ * 曲線は rbd の退避カーブ（＝Material 3 の `standard`）。**助走・素早い退避・文字が
+ * 読める長い尾**の3段で、小窓に文字が載るこの道具にそのまま当たる（設計§15-7）。
  */
-export const REORDER_SLIDE_MS = 180
+export const REORDER_SLIDE_MS = 200
+
+/** 持ち上げ・傾きが付く時間（ms）。`DESIGN.md` §28.2 の Micro。押した手応えの延長 */
+export const REORDER_LIFT_MS = 120
 
 /**
  * 離してから「掴んでいる」印を降ろすまで（ms）。
  *
  * **同時に降ろすと、持ち上げが元へ戻る動きが瞬時に切れる。** 滑り終わるまで待つ。
+ * 本人はバネで収まるので、**バネの終わりも待つ**（両方が済んだときに降ろす）。
  */
 export const REORDER_SETTLE_MS = REORDER_SLIDE_MS + 20
+
+/**
+ * 落とすときのバネ（設計§15-7）。`motion` が x/y に当てる既定（500／25・わずかに弾む）と
+ * Material 3 Expressive の空間の既定（減衰比 0.8）の中間。**実機で決め直す**（設計§15-10）。
+ */
+export const SPRING_STIFFNESS = 500
+export const SPRING_DAMPING = 36
+
+/**
+ * 速度に応じた傾き（設計§15-7）。横速度（px/s）に掛けて度にする係数と、その上限。
+ * 基準の 1度と合わせて最大 3度。react-tinder-card の ±25° は投げ捨てるカードの値なので
+ * 桁を落としてある。**実機で決め直す**（設計§15-10）。
+ */
+export const TILT_SWING_DEG_PER_PX_S = 0.0015
+export const TILT_SWING_MAX_DEG = 2
 
 export const AUTO_SCROLL_EDGE_PX = 48
 
@@ -181,7 +205,103 @@ interface Held<T> {
   origin: Point | null
   /** 本人の最後の `translate`（着地の逆算に使う） */
   followed: Point
+  /** 掴んだ瞬間に既に付いていた `translate`（収まる途中の掴み直し）。追従に足す */
+  carry: Point
   samples: Sample[]
+}
+
+function parseTranslate(value: string): Point {
+  if (value === '' || value === 'none') {
+    return { x: 0, y: 0 }
+  }
+  const [x, y = '0px'] = value.split(' ')
+  const px = Number.parseFloat(x)
+  const py = Number.parseFloat(y)
+  return { x: Number.isFinite(px) ? px : 0, y: Number.isFinite(py) ? py : 0 }
+}
+
+/** 設定か OS が動きを止めているか。**器の `data-quiet` を読む**（フックに設定を渡さない） */
+function 動きを止めるか(element: HTMLElement): boolean {
+  if (element.dataset.quiet === 'still') {
+    return true
+  }
+  return globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true
+}
+
+/**
+ * 本人を枠へ収める（設計§15-7）。**値だけ回して、書くのはこちら。**
+ *
+ * 要素を `animate` に渡すと `transform` を書きに来て、器の `motion.div` と奪い合う
+ * （読み替え5 で踏んだ穴）。数値のバネを x・y で別々に回し、`onUpdate` で `translate`
+ * を書く——1つの値で進めると初速の向きが変位の向きと違うときに出せない。
+ * 初速はポインタの速度そのもの（切り替わった瞬間を作らない）。
+ *
+ * 戻り値は止める手。止めたときは `onDone` を呼ばない。
+ */
+function バネで収める(
+  element: HTMLElement,
+  from: Point,
+  velocity: Point,
+  onDone: () => void,
+): () => void {
+  if (動きを止めるか(element)) {
+    element.style.translate = ''
+    onDone()
+    return () => {}
+  }
+  let x = from.x
+  let y = from.y
+  let 止めた = false
+  let 残り = 2
+  const 書く = () => {
+    element.style.translate = `${x}px ${y}px`
+  }
+  const 済んだ = () => {
+    if (止めた) {
+      return
+    }
+    残り -= 1
+    if (残り === 0) {
+      element.style.translate = ''
+      onDone()
+    }
+  }
+  const 共通 = {
+    type: 'spring' as const,
+    stiffness: SPRING_STIFFNESS,
+    damping: SPRING_DAMPING,
+    // 目に見えない尾を切る（px 単位）。既定（0.01）だと数十 ms 長く回る
+    restDelta: 0.5,
+    restSpeed: 10,
+  }
+  書く()
+  const ax = animate(from.x, 0, {
+    ...共通,
+    velocity: velocity.x,
+    onUpdate: (v) => {
+      x = v
+      書く()
+    },
+    onComplete: 済んだ,
+  })
+  const ay = animate(from.y, 0, {
+    ...共通,
+    velocity: velocity.y,
+    onUpdate: (v) => {
+      y = v
+      書く()
+    },
+    onComplete: 済んだ,
+  })
+  return () => {
+    止めた = true
+    ax.stop()
+    ay.stop()
+  }
+}
+
+function clamp(value: number, limit: number): number {
+  return Math.max(-limit, Math.min(limit, value))
 }
 
 function translateOf(point: Point): string {
@@ -225,6 +345,12 @@ export function useReorder<T extends string>({
   const 諦める予定 = useRef<ReturnType<typeof setTimeout> | null>(null)
   /** 運びの世代。**非同期の帰りが古い運びのものなら捨てる** */
   const 世代 = useRef(0)
+  /** 離した本人を収めるバネ。着地の直後に張る */
+  const バネの相手 = useRef<{ id: T; velocity: Point } | null>(null)
+  /** 走っているバネ。掴み直したら止める */
+  const バネ = useRef<{ id: T; stop: () => void } | null>(null)
+  /** 印を降ろす条件。**滑りの時間とバネの両方**が済んだときに降ろす */
+  const 降ろす条件 = useRef<{ timer: boolean; spring: boolean }>({ timer: true, spring: true })
   const 送り = useRef<{ x: number; y: number }>({ x: 0, y: 0 })
 
   // 端に指がある間だけ送る。**掴んでいないときは回さない**
@@ -266,9 +392,23 @@ export function useReorder<T extends string>({
   const 書いたものを外す = useCallback(() => {
     for (const element of elements.current.values()) {
       element.style.translate = ''
+      element.style.removeProperty('--reorder-swing')
       delete element.dataset.reorderSnap
+      delete element.dataset.reorderSettling
     }
   }, [])
+
+  /** 両方の条件が揃ったら印を降ろす */
+  const 降ろせるなら降ろす = useCallback(() => {
+    const 条件 = 降ろす条件.current
+    if (!条件.timer || !条件.spring) {
+      return
+    }
+    setReordering(false)
+    書いたものを外す()
+    // **印が降りたら、`RoamLayer` が場を測り直して1回だけ引き直す**（設計§15-1）
+    lowerReordering(主.current)
+  }, [書いたものを外す])
 
   /*
     **着地**（設計§15-11）。離した直後、React が DOM を並べ替えた**後**に走る。
@@ -291,6 +431,8 @@ export function useReorder<T extends string>({
       element.dataset.reorderSnap = 'true'
       element.style.translate = ''
     }
+    const 相手 = バネの相手.current
+    バネの相手.current = null
     const 動いた: HTMLElement[] = []
     for (const [id, element] of elements.current) {
       const was = 前.get(id)
@@ -301,6 +443,27 @@ export function useReorder<T extends string>({
       const box = element.getBoundingClientRect()
       const dx = was.x - box.left
       const dy = was.y - box.top
+      if (相手 !== null && 相手.id === id) {
+        /*
+          **本人はバネで収める**（設計§15-7）。CSS の滑りではなく、離した瞬間の速度を
+          初速に渡す。`data-reorder-settling` で前面に置き、`translate` の transition を
+          切っておく（バネが毎フレーム書くので、滑らせると二重に動く）。
+        */
+        delete element.dataset.reorderSnap
+        element.dataset.reorderSettling = 'true'
+        降ろす条件.current.spring = false
+        バネ.current?.stop()
+        バネ.current = {
+          id,
+          stop: バネで収める(element, { x: dx, y: dy }, 相手.velocity, () => {
+            バネ.current = null
+            delete element.dataset.reorderSettling
+            降ろす条件.current.spring = true
+            降ろせるなら降ろす()
+          }),
+        }
+        continue
+      }
       if (Math.abs(dx) <= SETTLED_PX && Math.abs(dy) <= SETTLED_PX) {
         // jsdom は矩形を固定で返すので、**必ずここを通る**（動きは E2E が見る）
         delete element.dataset.reorderSnap
@@ -322,7 +485,7 @@ export function useReorder<T extends string>({
       delete element.dataset.reorderSnap
       element.style.translate = '0px 0px'
     }
-  }, [shown, dragging])
+  }, [shown, dragging, 降ろせるなら降ろす])
 
   /*
     **サーバの返事が手元の並びと一致したら、手元を捨てる**（設計§15-4）。
@@ -355,19 +518,21 @@ export function useReorder<T extends string>({
     }
   }, [])
 
-  /** 印を、滑り終わってから降ろす。**同時に降ろすと持ち上げが戻る動きが瞬時に切れる** */
+  /**
+   * 印を、滑り終わってから降ろす。**同時に降ろすと持ち上げが戻る動きが瞬時に切れる。**
+   * 本人がバネで収まる途中なら、その終わりも待つ（`降ろす条件`）。
+   */
   const 滑り終わったら降ろす = useCallback(() => {
+    降ろす条件.current.timer = false
     if (降ろす予定.current !== null) {
       clearTimeout(降ろす予定.current)
     }
     降ろす予定.current = setTimeout(() => {
       降ろす予定.current = null
-      setReordering(false)
-      書いたものを外す()
-      // **印が降りたら、`RoamLayer` が場を測り直して1回だけ引き直す**（設計§15-1）
-      lowerReordering(主.current)
+      降ろす条件.current.timer = true
+      降ろせるなら降ろす()
     }, REORDER_SETTLE_MS)
-  }, [書いたものを外す])
+  }, [降ろせるなら降ろす])
 
   /**
    * 手元の並びを捨てて `ids` へ戻す（断られた・諦めた。設計§15-4）。
@@ -431,6 +596,20 @@ export function useReorder<T extends string>({
           return
         }
         /*
+          **収まる途中に掴み直したら、バネを止めて付いていた `translate` を引き継ぐ**
+          （設計§15-7）。見た目が飛ばない。
+        */
+        let carry = { x: 0, y: 0 }
+        if (バネ.current !== null) {
+          バネ.current.stop()
+          if (バネ.current.id === id) {
+            const element = elements.current.get(id)
+            carry = parseTranslate(element?.style.translate ?? '')
+          }
+          バネ.current = null
+        }
+        降ろす条件.current = { timer: true, spring: true }
+        /*
           **測る前に、書いたものを全部外す。** 着地の途中（滑り残り）で掴み直すと、
           `translate` を含んだ矩形を凍結してしまう。
         */
@@ -453,8 +632,16 @@ export function useReorder<T extends string>({
           current: from,
           seal: null,
           origin: origin ?? null,
-          followed: { x: 0, y: 0 },
+          followed: carry,
+          carry,
           samples: [],
+        }
+        // 引き継いだぶんを、測った直後に書き戻す（見た目が飛ばない）
+        if (carry.x !== 0 || carry.y !== 0) {
+          const self = elements.current.get(id)
+          if (self !== undefined) {
+            self.style.translate = translateOf(carry)
+          }
         }
         // 離した直後にもう一度掴んだら、降ろす予定は捨てる
         if (降ろす予定.current !== null) {
@@ -495,10 +682,13 @@ export function useReorder<T extends string>({
           })
         }
         // **本人は指に 1:1 で追従する**（設計§15-2）。React を経由せず、要素へ直接書く
-        h.followed = { x: point.x - h.origin.x, y: point.y - h.origin.y }
+        h.followed = { x: h.carry.x + point.x - h.origin.x, y: h.carry.y + point.y - h.origin.y }
         const self = elements.current.get(h.base[h.from])
         if (self !== undefined) {
           self.style.translate = translateOf(h.followed)
+          // **速度に応じた傾き**（設計§15-7）。基準の1度に、横速度に比例した傾きを足す
+          const swing = clamp(velocityOf(h.samples, now).x * TILT_SWING_DEG_PER_PX_S, TILT_SWING_MAX_DEG)
+          self.style.setProperty('--reorder-swing', `${swing}deg`)
         }
         /*
           **落とし先は「行→矩形→1歩→封印」で決める**（設計§15-3）。目標へ直接飛ばさず、
@@ -547,8 +737,10 @@ export function useReorder<T extends string>({
         }
         const next = h.placement.map((at) => h.base[at])
         const 動いた = next.some((each, at) => each !== h.base[at])
-        // 着地の逆算のために、離した瞬間の見え方を控える
+        // 着地の逆算のために、離した瞬間の見え方を控える。本人は離した瞬間の速度でバネへ
         控え.current = 位置を控える(h)
+        バネの相手.current = { id, velocity: velocityOf(h.samples, performance.now()) }
+        elements.current.get(id)?.style.removeProperty('--reorder-swing')
         setDragging(null)
         /*
           **離した後も手元の並びを見せ続ける**（設計§15-4）。いったん `ids` へ戻すと、
