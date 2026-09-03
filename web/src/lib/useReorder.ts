@@ -32,7 +32,16 @@
  */
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { moveItem, nearestIndex, NO_TARGET, type Point, type Rect } from './reorder'
+import {
+  dropTarget,
+  headingOf,
+  moveItem,
+  type Point,
+  type Rect,
+  type Sample,
+  type Seal,
+  VELOCITY_WINDOW_MS,
+} from './reorder'
 import { lowerReordering, raiseReordering } from '@/stores/reordering'
 
 /**
@@ -152,6 +161,10 @@ export function useReorder<T extends string>({
     base: readonly T[]
     /** いまの落とし先。**変わったときだけ並びを作り直す** */
     to: number
+    /** 直前に居た添字へ戻さないための封印（設計§15-3）。`dropTarget` が持ち回る */
+    seal: Seal | null
+    /** 直近の指の標本。進行方向（封印の解除条件）に使う */
+    samples: Sample[]
   } | null>(null)
   const 送り = useRef<{ x: number; y: number }>({ x: 0, y: 0 })
 
@@ -280,7 +293,7 @@ export function useReorder<T extends string>({
           const box = element.getBoundingClientRect()
           return { left: box.left, top: box.top, width: box.width, height: box.height }
         })
-        measured.current = { rects, from, base, to: from }
+        measured.current = { rects, from, base, to: from, seal: null, samples: [] }
         // 離した直後にもう一度掴んだら、降ろす予定は捨てる
         if (降ろす予定.current !== null) {
           clearTimeout(降ろす予定.current)
@@ -314,7 +327,24 @@ export function useReorder<T extends string>({
             height: bounds.height,
           })
         }
-        const target = nearestIndex(held.rects, point)
+        /*
+          **落とし先は「行→矩形→1歩→封印」で決める**（設計§15-3）。目標へ直接飛ばさず、
+          1回の `pointermove` で動くのは隣の1枚だけ。直前に居た添字へは、指が 10px
+          動くか向きが 1 rad 変わるまで戻さない——境界上で毎フレーム往復しないため。
+        */
+        const now = performance.now()
+        held.samples.push({ t: now, x: point.x, y: point.y })
+        while (held.samples.length > 32 || held.samples[0].t < now - VELOCITY_WINDOW_MS) {
+          held.samples.shift()
+        }
+        const result = dropTarget({
+          rects: held.rects,
+          point,
+          current: held.to,
+          seal: held.seal,
+          heading: headingOf(held.samples, now),
+        })
+        held.seal = result.seal
         /*
           **落とし先が変わったときだけ並びを作り直す。**
 
@@ -323,9 +353,10 @@ export function useReorder<T extends string>({
           捉える必要があるので、**変わっていないのに控えを取ると、動いていない要素に
           逆算を当てて動かしてしまう**。
         */
-        if (target === NO_TARGET || target === held.to) {
+        if (result.index === held.to) {
           return
         }
+        const target = result.index
         held.to = target
         控え.current = 位置を控える()
         setOrder(moveItem(held.base, held.from, target))

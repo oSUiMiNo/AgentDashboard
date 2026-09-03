@@ -11,13 +11,16 @@
  * したがってここには**矩形の配列と点を引数で受け取る純関数だけ**を置く。`window` も
  * `document` も読まない（`lib/panelWidth.ts` ／ `touch.ts` ／ `repeat.ts` と同じ作り）。
  *
- * # 次元で場合分けしない
+ * # 落とし先は「行 → 矩形 → 1歩 → 封印」で決める（設計§15-3）
  *
  * 並べ替える場所は3つあり、並び方はそれぞれ違う——一覧のカードは**折り返して2次元**、
- * 枠は**縦1列**、PJT 専用画面の区画は**横1列**。それでも規則は1つでよい：
- * **いちばん近い中心を選ぶ**。中心からの距離で選ぶなら、縦か横か2次元かを意識する
- * 必要が無い。次元ごとに分岐を書くと、**折り返しの端でだけ挙動が変わる**ような
- * 直しにくい食い違いが生まれる。
+ * 枠は**縦1列**、PJT 専用画面の区画は**横1列**。規則は1つで、次元で分岐しない：
+ * **y の重なりで行を作り、行を帯までの距離で選び、同じ行なら矩形までの距離で選ぶ。
+ * 目標へ直接飛ばず1歩だけ動き、直前に居た添字へは封印が解けるまで戻さない。**
+ *
+ * 前の規則「いちばん近い中心」（[`nearestIndex`]）には、実寸で確定した帰結が3つあった
+ * ——境界が箱の 6px 外に出る・折り返しで列数ぶん飛ぶ・境界上で毎フレーム往復する。
+ * **`nearestIndex` は判定に使わない。** 対照（旧規則ならこうなる）としてテストが呼ぶ。
  *
  * # 矩形は掴んだ瞬間の1回だけ測る
  *
@@ -66,6 +69,9 @@ export function centerOf(rect: Rect): Point {
 
 /**
  * いちばん近い中心の添字。決められなければ [`NO_TARGET`]。
+ *
+ * **判定には使わない**（設計§15-3）。旧規則の帰結——境界が箱の 6px 外・折り返しで
+ * 列数ぶん飛ぶ・境界上で往復——を示す対照として残してある。消すときはテストごと。
  *
  * **決められない場合を 0 に倒さない。** 0 は「先頭へ落とす」という立派な答えなので、
  * 混ぜると**測れなかったときに黙って先頭へ飛ぶ**。呼び元が「いまの添字のまま」を
@@ -135,4 +141,229 @@ export function passedThreshold(deltaX: number, deltaY: number): boolean {
     return false
   }
   return Math.hypot(deltaX, deltaY) >= REORDER_THRESHOLD_PX
+}
+
+/**
+ * 直前に居た添字へ戻さないための封印（設計§15-3 段5）。
+ *
+ * **呼び元が持ち回り、中身は書き換えない。** [`dropTarget`] は動かなかったとき
+ * 渡された封印をそのまま返す（同じ参照）。動いたときだけ新しい封印を作る。
+ */
+export interface Seal {
+  /** 戻さない添字（直前に居たスロット） */
+  readonly index: number
+  /** 封印した瞬間の指（スクロール補正済み） */
+  readonly at: Point
+  /** 封印した瞬間の進行方向（単位ベクトル）。測れなければ null（角度の条件は見ない） */
+  readonly heading: Point | null
+}
+
+/**
+ * 封印を解く距離（px）。dnd-kit の `hysteresis = 10`（`fix/collision-notifier-oscillation`）。
+ * 指の接触重心は常時 1〜3px 揺れるので、それより十分大きく取る。
+ */
+export const SEAL_RELEASE_PX = 10
+
+/** 封印を解く方向の変化（rad）。Muuri の `dragSortHeuristics`（1 rad ≒ 57°）。 */
+export const SEAL_RELEASE_RAD = 1
+
+export interface DropInput {
+  /** 凍結した矩形。**添字＝スロット**（掴んだ瞬間の DOM の並び） */
+  rects: readonly Rect[]
+  /** 指の位置。**スクロール補正済み**（凍結した座標系へ写した点） */
+  point: Point
+  /** 掴んでいるものが、いま居る仮想のスロット */
+  current: number
+  seal: Seal | null
+  /** いまの進行方向（単位ベクトル）。[`headingOf`] の値。測れなければ null */
+  heading: Point | null
+}
+
+export interface DropResult {
+  /** 次のスロット。動かなければ `current` */
+  index: number
+  /** 新しい封印。動かなければ渡されたものと同じ参照 */
+  seal: Seal | null
+}
+
+interface Row {
+  top: number
+  bottom: number
+  /** スロット添字。左から順 */
+  members: number[]
+}
+
+/** y の重なりで行を作る。**測れない矩形は行に入れない** */
+function rowsOf(rects: readonly Rect[]): Row[] {
+  const order: number[] = []
+  for (let index = 0; index < rects.length; index += 1) {
+    if (usable(rects[index])) {
+      order.push(index)
+    }
+  }
+  order.sort((a, b) => rects[a].top - rects[b].top || rects[a].left - rects[b].left || a - b)
+  const rows: Row[] = []
+  for (const index of order) {
+    const rect = rects[index]
+    const bottom = rect.top + rect.height
+    const last = rows[rows.length - 1]
+    if (last !== undefined && rect.top < last.bottom && bottom > last.top) {
+      last.members.push(index)
+      last.top = Math.min(last.top, rect.top)
+      last.bottom = Math.max(last.bottom, bottom)
+    } else {
+      rows.push({ top: rect.top, bottom, members: [index] })
+    }
+  }
+  for (const row of rows) {
+    row.members.sort((a, b) => rects[a].left - rects[b].left || a - b)
+  }
+  return rows
+}
+
+/** 帯までの距離。内側なら 0 */
+function distanceToBand(y: number, row: Row): number {
+  if (y < row.top) {
+    return row.top - y
+  }
+  if (y > row.bottom) {
+    return y - row.bottom
+  }
+  return 0
+}
+
+/** 矩形までの距離の二乗。内側なら 0 */
+function distanceToRect(point: Point, rect: Rect): number {
+  const right = rect.left + rect.width
+  const bottom = rect.top + rect.height
+  const dx = point.x < rect.left ? rect.left - point.x : point.x > right ? point.x - right : 0
+  const dy = point.y < rect.top ? rect.top - point.y : point.y > bottom ? point.y - bottom : 0
+  return dx * dx + dy * dy
+}
+
+/** 2つの単位ベクトルのなす角（rad） */
+function angleBetween(a: Point, b: Point): number {
+  const dot = a.x * b.x + a.y * b.y
+  return Math.acos(Math.max(-1, Math.min(1, dot)))
+}
+
+/**
+ * 落とし先。**1回の呼び出しで動くのは高々1歩。**
+ *
+ * 1. y の重なりで行を作る（測れない矩形は入れない）
+ * 2. 指の y から帯までの距離が最小の行を選ぶ（同点は先の行）
+ * 3. 選んだ行に `current` が居れば、矩形までの距離が最小のもの（内側は 0。同点は
+ *    `current` を優先——指を止めても震えない）。居なければ中心 x が最も近いもの
+ * 4. `Math.sign(目標 − current)` で1歩
+ * 5. その1歩が封印した添字なら、封印が解けているときだけ動く（10px か 1 rad）。
+ *    **外す方向（封印から離れる歩）は常に通る**
+ *
+ * 決められなければ `current` と渡された封印をそのまま返す。**0 に倒さない。**
+ */
+export function dropTarget(input: DropInput): DropResult {
+  const { rects, point, current, seal, heading } = input
+  const stay: DropResult = { index: current, seal }
+  if (!finite(point.x) || !finite(point.y)) {
+    return stay
+  }
+  const rows = rowsOf(rects)
+  if (rows.length === 0) {
+    return stay
+  }
+
+  let row = rows[0]
+  let rowDistance = distanceToBand(point.y, row)
+  for (let at = 1; at < rows.length; at += 1) {
+    const distance = distanceToBand(point.y, rows[at])
+    if (distance < rowDistance) {
+      row = rows[at]
+      rowDistance = distance
+    }
+  }
+
+  let target = current
+  if (row.members.includes(current)) {
+    let best = Number.POSITIVE_INFINITY
+    for (const member of row.members) {
+      const distance = distanceToRect(point, rects[member])
+      if (distance < best) {
+        best = distance
+        target = member
+      }
+    }
+    // **同点は current を優先。** 隙間の真ん中で震えない
+    if (distanceToRect(point, rects[current]) <= best) {
+      target = current
+    }
+  } else {
+    let best = Number.POSITIVE_INFINITY
+    for (const member of row.members) {
+      const distance = Math.abs(centerOf(rects[member]).x - point.x)
+      if (distance < best) {
+        best = distance
+        target = member
+      }
+    }
+  }
+
+  const step = current + Math.sign(target - current)
+  if (step === current) {
+    return stay
+  }
+  if (seal !== null && step === seal.index) {
+    const moved = Math.hypot(point.x - seal.at.x, point.y - seal.at.y) >= SEAL_RELEASE_PX
+    const turned =
+      heading !== null && seal.heading !== null && angleBetween(heading, seal.heading) >= SEAL_RELEASE_RAD
+    if (!moved && !turned) {
+      return stay
+    }
+  }
+  return { index: step, seal: { index: current, at: point, heading } }
+}
+
+/** 指の位置の標本（`performance.now()` の時刻つき）。 */
+export interface Sample {
+  t: number
+  x: number
+  y: number
+}
+
+/** 速度と進行方向を読む窓（ms）。直近だけを見る */
+export const VELOCITY_WINDOW_MS = 100
+
+/**
+ * 進行方向が立つ最小の変位（px）。
+ *
+ * ±2px の揺れ（幅 4px）では方向が立たないための下限。**封印を「方向が変わった」で
+ * 解くのは、指が本当に向きを変えたときだけ**。実機で決め直す定数（設計§15-10）。
+ */
+export const HEADING_MIN_PX = 6
+
+/**
+ * 直近の窓の中で、最古→最新の変位から進行方向（単位ベクトル）を出す。
+ * 標本が2つ無い、または変位が [`HEADING_MIN_PX`] 未満なら null。
+ */
+export function headingOf(samples: readonly Sample[], now: number): Point | null {
+  const since = now - VELOCITY_WINDOW_MS
+  let first: Sample | null = null
+  let last: Sample | null = null
+  for (const sample of samples) {
+    if (sample.t < since) {
+      continue
+    }
+    if (first === null) {
+      first = sample
+    }
+    last = sample
+  }
+  if (first === null || last === null || first === last) {
+    return null
+  }
+  const dx = last.x - first.x
+  const dy = last.y - first.y
+  const length = Math.hypot(dx, dy)
+  if (!finite(length) || length < HEADING_MIN_PX) {
+    return null
+  }
+  return { x: dx / length, y: dy / length }
 }
