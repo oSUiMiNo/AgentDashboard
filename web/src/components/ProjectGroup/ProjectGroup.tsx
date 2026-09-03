@@ -171,9 +171,13 @@ export function ProjectGroup({
         ——長押しの計測を張ってから掴みの記録を作る。
       */
       onPointerDown={重ねる(押し方.onPointerDown, 掴み.handlers.onPointerDown)}
-      onPointerMove={重ねる(押し方.onPointerMove, 掴み.handlers.onPointerMove)}
-      onPointerUp={重ねる(押し方.onPointerUp, 掴み.handlers.onPointerUp)}
-      onPointerCancel={重ねる(押し方.onPointerCancel, 掴み.handlers.onPointerCancel)}
+      /*
+        **運びは窓で受けるので、ここには重ねない**（`useGrip`）。ここに残るのは
+        押し分けの側だけ——長押しの計測は、押した要素の上で見れば足りる。
+      */
+      onPointerMove={押し方.onPointerMove}
+      onPointerUp={押し方.onPointerUp}
+      onPointerCancel={押し方.onPointerCancel}
       onLostPointerCapture={掴み.handlers.onLostPointerCapture}
       // **運んだ直後の `click` を捨てる。** 捨てないと並べ替えるたびに選択が入れ替わる
       onClickCapture={掴み.handlers.onClickCapture}

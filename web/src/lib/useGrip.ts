@@ -115,9 +115,13 @@ export interface Grip {
   arm: () => void
   handlers: {
     onPointerDown: (event: ReactPointerEvent) => void
-    onPointerMove: (event: ReactPointerEvent) => void
-    onPointerUp: () => void
-    onPointerCancel: () => void
+    /**
+     * **運びと終わりは窓で受けるので、ここには置かない。**
+     *
+     * 要素の上で受けると、掴む前に指が外へ出たときに届かない。窓なら届くうえ、
+     * **`click` の行き先も変わらない**（キャプチャを早く取ると `click` が
+     * キャプチャした要素へ飛び、中身の押し分けが効かなくなる）。
+     */
     onLostPointerCapture: () => void
     /** **運んだ直後の `click` を1回だけ捨てる** */
     onClickCapture: (event: {
@@ -210,6 +214,47 @@ export function useGrip({
     掴む(now)
   }, [掴む])
 
+  /**
+   * 運ぶ。**窓（`window`）から呼ばれる。**
+   *
+   * 要素の上で受けないのは、**掴む前に指が外へ出ると届かなくなる**ため。
+   */
+  const 動かす = useCallback(
+    (event: PointerEvent) => {
+      const now = held.current
+      if (now === null || now.pointerId !== event.pointerId) {
+        return
+      }
+      // **1回目で握る。** しきい値を待つと2回目から `cancelable` が偽になり、
+      // 以後どれだけ呼んでも効かない（設計§3-3）
+      if (event.cancelable) {
+        event.preventDefault()
+      }
+      const dx = event.clientX - now.origin.x
+      const dy = event.clientY - now.origin.y
+      const 超えた = passedThreshold(dx, dy)
+      if (!now.grabbed) {
+        /*
+          **`hold` はしきい値を見ない。** 見ると、長押しの計測（8px で捨てる）より
+          先に 3px で掴んでしまい、**なぞってスクロールするつもりが運びになる**。
+          `hold` が掴むのは `arm()` が呼ばれたときだけ。
+        */
+        if (now.when !== 'move' || !超えた) {
+          return
+        }
+        掴む(now)
+      }
+      if (!now.moved && !超えた) {
+        // 握ってはいるが、まだ動かさない。**握るかどうかとは別の判断**
+        return
+      }
+      now.moved = true
+      // **測るのは呼び元。** 決めるのは `lib/reorder.ts` の純関数（設計§3-4）
+      onMove({ x: event.clientX, y: event.clientY })
+    },
+    [掴む, onMove],
+  )
+
   const onPointerDown = useCallback(
     (event: ReactPointerEvent) => {
       if (!enabled || held.current !== null) {
@@ -277,61 +322,44 @@ export function useGrip({
       }
 
       /*
-        **掴む前でも、押した瞬間にキャプチャを取る**（`move` と `hold` だけ）。
+        **運びと終わりは窓（`window`）で受ける。要素の上では受けない。**
 
-        この2つは押した時点ではまだ掴まない。**掴まないあいだ、指やマウスが要素の
-        外へ出ると `pointermove` が届かなくなる**——本体は掴み手と違って小さくないが、
-        1回目の移動でいきなり隣の枠まで飛ぶ運び方をすると、**握る機会そのものが
-        来ない**（実際に E2E で枠が1つも動かなかった）。
+        `move` と `hold` は押した時点ではまだ掴まない。**掴まないあいだに指やマウスが
+        要素の外へ出ると、要素へ届く `pointermove` が来なくなる**——1回目の移動で
+        いきなり隣の枠まで飛ぶ運び方をすると、**握る機会そのものが来ない**
+        （E2E で枠が1つも動かなかった）。
 
-        **掴み手（`press`）で同じことをしてはいけない。** あちらは押した瞬間に
-        DOM を動かすので、**キャプチャは動かした後**でなければ要素を見失う（方針§4-2）。
-        だから取る時刻が2つに分かれている。
+        **ここでキャプチャを取ってはいけない。** 一度そう直したが、**続く `click` が
+        キャプチャした要素へ飛ぶ**ので、中身に付いている押し分け（選ぶ・開く）が
+        丸ごと効かなくなった——**カードを押して始まるテストが24本落ちた**。
 
-        掴んだあと（`掴む()` の中）でもう一度取るのは、**DOM を動かすとキャプチャが
-        外れる**ため。二度取っても害は無い。
+        窓で受ければ、要素の外へ出ても届き、`click` の行き先も変わらない。
+        **キャプチャは掴んだあとだけ**取る（`掴む()` の中）——そこから先は運びであって
+        押し分けではないので、`click` を奪って構わない。
       */
-      ;(
-        element as Element & { setPointerCapture?: (id: number) => void }
-      ).setPointerCapture?.(event.pointerId)
-    },
-    [enabled, when, 掴む, stop],
-  )
-
-  const onPointerMove = useCallback(
-    (event: ReactPointerEvent) => {
-      const now = held.current
-      if (now === null || now.pointerId !== event.pointerId) {
-        return
-      }
-      // **1回目で握る。** しきい値を待つと2回目から `cancelable` が偽になり、
-      // 以後どれだけ呼んでも効かない（設計§3-3）
-      if (event.cancelable) {
-        event.preventDefault()
-      }
-      const dx = event.clientX - now.origin.x
-      const dy = event.clientY - now.origin.y
-      const 超えた = passedThreshold(dx, dy)
-      if (!now.grabbed) {
-        /*
-          **`hold` はしきい値を見ない。** 見ると、長押しの計測（8px で捨てる）より
-          先に 3px で掴んでしまい、**なぞってスクロールするつもりが運びになる**。
-          `hold` が掴むのは `arm()` が呼ばれたときだけ。
-        */
-        if (now.when !== 'move' || !超えた) {
+      const 窓で受ける = (native: Event) => {
+        const pointer = native as PointerEvent
+        if (native.type === 'pointermove') {
+          動かす(pointer)
           return
         }
-        掴む(now)
+        if (held.current !== null && held.current.pointerId !== pointer.pointerId) {
+          return
+        }
+        stop()
       }
-      if (!now.moved && !超えた) {
-        // 握ってはいるが、まだ動かさない。**握るかどうかとは別の判断**
-        return
+      window.addEventListener('pointermove', 窓で受ける)
+      window.addEventListener('pointerup', 窓で受ける)
+      window.addEventListener('pointercancel', 窓で受ける)
+      const 前の後始末 = now.detach
+      now.detach = () => {
+        前の後始末?.()
+        window.removeEventListener('pointermove', 窓で受ける)
+        window.removeEventListener('pointerup', 窓で受ける)
+        window.removeEventListener('pointercancel', 窓で受ける)
       }
-      now.moved = true
-      // **測るのは呼び元。** 決めるのは `lib/reorder.ts` の純関数（設計§3-4）
-      onMove({ x: event.clientX, y: event.clientY })
     },
-    [掴む, onMove],
+    [enabled, when, 掴む, stop, 動かす],
   )
 
   const onClickCapture = useCallback(
@@ -358,13 +386,10 @@ export function useGrip({
     arm,
     handlers: {
       onPointerDown,
-      onPointerMove,
       /*
-        **契機を1つずつ別の行に書く。** まとめると、1通り壊しただけで全部落ちて、
-        テストが何本ぶんの働きをしているのか分からなくなる
+        **止める契機は3つある**（`pointerup` ／ `pointercancel` ／
+        `lostpointercapture`）。前の2つは窓で受けるので、ここに残るのは3つ目だけ。
       */
-      onPointerUp: stop,
-      onPointerCancel: stop,
       onLostPointerCapture: stop,
       onClickCapture,
     },
