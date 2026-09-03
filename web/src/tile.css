@@ -355,6 +355,15 @@
   width: 1.45em;
   text-align: center;
   font-family: 'Geist Variable', 'Segoe UI Symbol', 'Noto Sans Symbols 2', sans-serif;
+  /*
+    **絵文字ではなく字として描かせる**（設計§14）。`☕`（サブ待ち）は既定で色付きの
+    絵文字になり、**他の記号と違って濃さ（`--tile-ink`）に従わない**——接続が切れて
+    他が沈んでも1字だけ沈まずに残る。字形へ寄せれば上の `font-family` が効く。
+
+    **効かない環境では色付きのまま出る。** それでも状態は読めるので害は無く、
+    実物を見て決め直す（設計§14-6「決めないこと」）
+  */
+  font-variant-emoji: text;
 }
 
 /*

@@ -157,12 +157,13 @@ function 濃さだけ(rule: Rule): boolean {
 }
 
 /**
- * 8つの姿（カード設計§8）。**色は4つに畳んであるが、当てるのは状態のほう**なので、
- * 群ではなく状態で回す——`ended` は同じ灰でも `ok` の真偽で群が分かれる。
+ * 9つの姿（カード設計§8 ＋ 設計§14）。**色は4つに畳んであるが、当てるのは状態のほう**
+ * なので、群ではなく状態で回す——`ended` は同じ灰でも `ok` の真偽で群が分かれる。
  */
 const 全状態: SessionStatus[] = [
   { kind: 'working' },
   { kind: 'stalled' },
+  { kind: 'waiting_subagents' },
   { kind: 'waiting_input' },
   { kind: 'waiting_permission' },
   { kind: 'starting' },

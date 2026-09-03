@@ -523,6 +523,7 @@ describe('状態のラベル', () => {
       { kind: 'working' },
       { kind: 'waiting_permission' },
       { kind: 'waiting_input' },
+      { kind: 'waiting_subagents' },
       { kind: 'stalled' },
       { kind: 'ended', ok: true },
       { kind: 'ended', ok: false },
@@ -612,10 +613,11 @@ describe('状態のラベル', () => {
  * 判断を純関数へ集めてあるのはそのためで、部品はここが返した値を貼るだけにする。
  */
 describe('状態から見た目を決める', () => {
-  /** 8つの姿。**`ended` は ok で2つに割れる**ので、`kind` の数（7）とは合わない */
+  /** 9つの姿。**`ended` は ok で2つに割れる**ので、`kind` の数（8）とは合わない */
   const ALL: SessionStatus[] = [
     { kind: 'working' },
     { kind: 'stalled' },
+    { kind: 'waiting_subagents' },
     { kind: 'waiting_input' },
     { kind: 'waiting_permission' },
     { kind: 'starting' },
@@ -631,11 +633,13 @@ describe('状態から見た目を決める', () => {
   const floorOf = (status: SessionStatus) =>
     (statusAccent(status) as Record<string, string>)['--tile-floor']
 
-  it('8つの姿それぞれに動きの種類が対応づいている', () => {
+  it('9つの姿それぞれに動きの種類が対応づいている', () => {
     // 作業中＝速く回る／停滞＝遅く回る／入力待ち＝呼吸／承認待ち＝揺れ／残りは動かさない
     expect(statusMotion({ kind: 'working' })).toBe('spin-fast')
     expect(statusMotion({ kind: 'stalled' })).toBe('spin-slow')
     expect(statusMotion({ kind: 'waiting_input' })).toBe('breathe')
+    // **サブ待ちは入力待ちと同じ明滅。** 色が違うので混ざらない（設計§14）
+    expect(statusMotion({ kind: 'waiting_subagents' })).toBe('breathe')
     expect(statusMotion({ kind: 'waiting_permission' })).toBe('shake')
     expect(statusMotion({ kind: 'starting' })).toBe('still')
     expect(statusMotion({ kind: 'ended', ok: true })).toBe('still')
@@ -643,10 +647,10 @@ describe('状態から見た目を決める', () => {
     expect(statusMotion({ kind: 'unknown' })).toBe('still')
   })
 
-  it('8つの姿それぞれに記号が対応づいている', () => {
+  it('9つの姿それぞれに記号が対応づいている', () => {
     // **色が消える環境でも、動きを止めても残る**のは記号と文字だけ（設計§8-4）。
     // 入力待ちは `DESIGN.md` §14.1「Filled / Solid 主体」へ寄せて `▶`（塗り）にした
-    expect(ALL.map(statusGlyph)).toEqual(['⟳', '‖', '▶', '!', '◌', '✓', '✕', '?'])
+    expect(ALL.map(statusGlyph)).toEqual(['⟳', '‖', '☕', '▶', '!', '◌', '✓', '✕', '?'])
   })
 
   it('輪の色が4種類しか現れない', () => {
@@ -656,24 +660,30 @@ describe('状態から見た目を決める', () => {
     expect(new Set(ALL.map(accentOf)).size).toBe(4)
   })
 
-  it('同じ色を持つ組は、記号で分かれている', () => {
+  it('同じ色を持つものは、記号で分かれている', () => {
     // 色だけでは見分けられないことを承知で畳んだので、記号が最後の砦になる。
     // **停滞は進行中（Primary）へ移した**（2026-08-26）——作業中の一種なので同じ
     // シアンにし、弱さは太さと濃さで作る。**起動中と終了は同じ灰**にしてある——
     // どちらも「動いていない・対処が要らない」ので、静かな側でまとめている
-    const 同色の組: [SessionStatus, SessionStatus][] = [
-      [{ kind: 'waiting_input' }, { kind: 'waiting_permission' }],
-      [{ kind: 'working' }, { kind: 'stalled' }],
-      [{ kind: 'ended', ok: false }, { kind: 'unknown' }],
-      [{ kind: 'starting' }, { kind: 'ended', ok: true }],
-    ]
-    for (const [左, 右] of 同色の組) {
-      expect(accentOf(左)).toBe(accentOf(右))
-      expect(statusGlyph(左)).not.toBe(statusGlyph(右))
+    //
+    // **2つ組ではなく群で見る。** サブ待ちが入ってシアンが3つになったため（設計§14）、
+    // 対で書くと組み合わせを書き漏らす。**実際の色で束ねて、群ごとに記号が全部違うこと**
+    // を見れば、何色が何個になっても同じ検査で足りる
+    const 群ごと = new Map<string, SessionStatus[]>()
+    for (const status of ALL) {
+      const 色 = accentOf(status)
+      群ごと.set(色, [...(群ごと.get(色) ?? []), status])
     }
+    for (const [色, 仲間] of 群ごと) {
+      expect(仲間.length, `${色} が1つだけ`).toBeGreaterThan(1)
+      const 記号 = 仲間.map(statusGlyph)
+      expect(new Set(記号).size, `${色} の記号: ${記号.join('')}`).toBe(仲間.length)
+    }
+    // シアンは3つ（作業中・停滞・サブ待ち）。畳んだ結果をここで固定しておく
+    expect(群ごと.get(accentOf({ kind: 'working' }))?.length).toBe(3)
   })
 
-  it('色を伏せても、記号と文言だけで8つの姿を判別できる', () => {
+  it('色を伏せても、記号と文言だけで9つの姿を判別できる', () => {
     // ハイコントラストの環境では輪が丸ごと消える（調査§6-4）。そこでも状態が読めること
     const 手掛かり = ALL.map((status) => statusGlyph(status) + statusLabel(status))
     expect(new Set(手掛かり).size).toBe(ALL.length)

@@ -16,6 +16,8 @@ export type SessionStatus =
   | { kind: 'starting' }
   | { kind: 'working' }
   | { kind: 'waiting_permission' }
+  /** メインは手を止めたが、サブエージェントがまだ走っている（設計§14） */
+  | { kind: 'waiting_subagents' }
   | { kind: 'waiting_input' }
   | { kind: 'stalled' }
   | { kind: 'ended'; ok: boolean }
@@ -646,6 +648,9 @@ export function statusLabel(status: SessionStatus): string {
       return '権限確認待ち'
     case 'waiting_input':
       return '入力待ち'
+    case 'waiting_subagents':
+      // CLI（`server/crates/core/src/client/output.rs` の `status_label`）と同じ語
+      return 'サブ待ち'
     case 'stalled':
       return '停滞'
     case 'ended':
@@ -737,6 +742,11 @@ export function statusGroup(status: SessionStatus): StatusGroup {
       // **弱さは色相ではなく、太さと濃さで作る**——輪の見える太さを半分にし
       // （`tile.css` の `[data-motion='spin-slow']`）、濃さを 55% へ落とす
       // （下の `QUIETER_DIM`）。色を1つ増やさずに済む
+      return 'primary'
+    case 'waiting_subagents':
+      // **進行中。** メインは手を止めたが、サブエージェントがまだ走っている（設計§14）。
+      // 指示は受け付けるので「保留」でもあるが、**一覧で先に読まれるのは色**なので、
+      // 「終わっていない」と読める側へ置く。あなたの番かどうかは動き（明滅）が言う
       return 'primary'
     case 'waiting_permission':
     case 'waiting_input':
@@ -1035,6 +1045,10 @@ export function statusMotion(status: SessionStatus): StatusMotion {
       return 'spin-slow'
     case 'waiting_input':
       return 'breathe'
+    case 'waiting_subagents':
+      // 入力待ちと同じ明滅。**動きが「あなたも入力できる」を言い、色が「終わって
+      // いない」を言う**——2つを別々の軸で伝えるので、同じ動きでも混ざらない（設計§14）
+      return 'breathe'
     case 'waiting_permission':
       // **人が答えないと先に進まない唯一の状態。** ここだけ位置を動かしてよい
       return 'shake'
@@ -1072,6 +1086,10 @@ export function statusGlyph(status: SessionStatus): string {
       return '‖'
     case 'waiting_input':
       return '▶'
+    case 'waiting_subagents':
+      // **メインが一服している**（利用者の指定・設計§14）。同梱フォントの外へ落ちるので
+      // `.tile-glyph` の `font-family` に落ち先を名指ししてある
+      return '☕'
     case 'waiting_permission':
       return '!'
     case 'starting':
