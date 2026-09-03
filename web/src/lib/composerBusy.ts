@@ -63,3 +63,19 @@ export function markComposerBusy(): () => void {
 export function anyComposerBusy(): boolean {
   return 抱えている.size > 0
 }
+
+/**
+ * 抱えている入力欄の数。**画面へ理由を出すためだけに在る。**
+ *
+ * 判定そのものは [`anyComposerBusy`] で足りる。それでも数を出すのは、**抱えているのが
+ * 画面の外にありうる**ためである——PJT 専用画面はセッション全数の入力欄を仮想化なしに
+ * 描くので、横スクロールの外にある入力欄が読み直しを止めていても、利用者には見えない。
+ * 「なぜ止まっているのか」と「いくつ片付ければよいか」に、この1つで答えられる。
+ *
+ * **どのカードが抱えているかは出さない。** 鍵を `Map<object, CardId>` へ変える工事に
+ * 対して、**バナーは画面の最上段・カードは横スクロールのレールの中**なので、名前が
+ * 分かっても飛べない。名指しは別イシューへ切り出す。
+ */
+export function composerBusyCount(): number {
+  return 抱えている.size
+}

@@ -220,6 +220,12 @@ pub enum ClientLogKind {
     WsError,
     /// WebSocket の `onclose`
     WsClose,
+    /// 版が変わったときに、タブが読み直したか見送ったか。
+    ///
+    /// **これだけは失敗ではない。** 他の種別は「拾った異常」だが、こちらは判断の分岐点を
+    /// 残すためのもので、レベルは `INFO` で来る。**分岐点が残らないと、読み直しが
+    /// 不発だったときにログから原因を追えない**（実際に追えなかった）。
+    VersionReload,
 }
 
 impl ClientLogKind {
@@ -232,6 +238,7 @@ impl ClientLogKind {
             ClientLogKind::ReactRecoverable => "react_recoverable",
             ClientLogKind::WsError => "ws_error",
             ClientLogKind::WsClose => "ws_close",
+            ClientLogKind::VersionReload => "version_reload",
         }
     }
 }
@@ -277,6 +284,13 @@ mod tests {
             serde_json::to_string(&ClientLogKind::ReactUncaught).unwrap(),
             r#""react_uncaught""#
         );
+        // **知らない種別は、バッチ丸ごとが 400 で拒まれる**（この列挙は閉じている）。
+        // ブラウザ側の union と綴りが1文字でも違えば、そのタブのログは以後ずっと届かない
+        assert_eq!(
+            serde_json::to_string(&ClientLogKind::VersionReload).unwrap(),
+            r#""version_reload""#
+        );
+        assert_eq!(ClientLogKind::VersionReload.as_str(), "version_reload");
     }
 
     #[test]

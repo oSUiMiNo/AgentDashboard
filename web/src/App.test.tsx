@@ -40,6 +40,19 @@ const OPEN_MODE = JSON.stringify({
 /** 差し替えた `location.reload`。呼ばれたかどうかで読み直しを見る。 */
 let 読み直した: ReturnType<typeof vi.fn>
 
+/** その版を名乗っているサーバの応答。**版が変わったことを作るのに使う。** */
+function 版(version: string) {
+  return {
+    mode: 'open' as const,
+    authenticated: true,
+    account: null,
+    is_admin: false,
+    setup_open: false,
+    from_loopback: true,
+    version,
+  }
+}
+
 beforeEach(() => {
   // **鍵の状態を毎回まっさらに戻す。** ストアはモジュールに1つなので、前のテストで
   // 通った状態が残ると「聞く前から入れている」テストができてしまう
@@ -225,6 +238,67 @@ describe('版が切り替わったときの読み直し', () => {
     fireEvent.click(screen.getByText('読み込み直す'))
 
     expect(読み直した).toHaveBeenCalledTimes(1)
+  })
+
+  /**
+   * **いちばん重い1本**（設計§17）。印は掛け金で降りないので、依存が `[serverChanged]`
+   * だけだと**そのタブの一生で1回しか試さない**——1回目が抱えていて塞がれると、以後
+   * どれだけ版が変わっても二度と読み直さなかった。実機で不発だったのがこの形である。
+   */
+  it('見送ったあと、取り下げてから版が変わると読み直す', () => {
+    取り下げ = markComposerBusy()
+    render(<App />)
+    act(() => {
+      useAuthStore.setState({ serverChanged: true, auth: 版('0.1.79') })
+    })
+    expect(読み直した).not.toHaveBeenCalled()
+
+    取り下げ()
+    取り下げ = null
+    act(() => {
+      useAuthStore.setState({ auth: 版('0.1.81') })
+    })
+
+    expect(読み直した).toHaveBeenCalledTimes(1)
+  })
+
+  /**
+   * **添付の増減では走らせない**（§6）。押していない瞬間に画面が飛ぶと、利用者から
+   * 見れば「消したら壊れた」に見える。走るのは版が変わったときだけ。
+   */
+  it('同じ版のままなら、取り下げても読み直さない', () => {
+    取り下げ = markComposerBusy()
+    render(<App />)
+    act(() => {
+      useAuthStore.setState({ serverChanged: true, auth: 版('0.1.79') })
+    })
+
+    取り下げ()
+    取り下げ = null
+    act(() => {
+      useAuthStore.setState({ auth: 版('0.1.79') })
+    })
+
+    expect(読み直した).not.toHaveBeenCalled()
+  })
+
+  /**
+   * 抱えているのは**画面の外**でありうる（PJT 専用画面はセッション全数の入力欄を
+   * 仮想化なしに描く）。理由を書かないと、なぜ止まっているのかが永久に見えない。
+   */
+  it('見送ったバナーには、添付が理由だと件数つきで出る', () => {
+    取り下げ = markComposerBusy()
+    const もう一つ = markComposerBusy()
+    render(<App />)
+    act(() => {
+      useAuthStore.setState({ serverChanged: true })
+    })
+
+    const banner = screen.getByTestId('server-changed-banner')
+    expect(banner).toHaveTextContent('添付')
+    expect(banner).toHaveTextContent('2 件')
+
+    もう一つ()
   })
 })
 

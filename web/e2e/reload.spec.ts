@@ -51,10 +51,18 @@ async function 版を差し替える(page: Page) {
     const body = (await response.json()) as Record<string, unknown>
     await route.fulfill({
       response,
-      json: { ...body, version: 新しい版 },
+      json: { ...body, version: 名乗る版 },
     })
   })
 }
+
+/**
+ * いま名乗っている版。**書き換えると、次の `/api/me` から新しい版になる。**
+ *
+ * 「見送ったあと、次の版で試し直す」を通すのに要る——版を2回変える必要があり、
+ * 定数のままでは1回しか作れない。
+ */
+let 名乗る版 = 新しい版
 
 /**
  * ページの中で作られた WebSocket を控えて、あとから落とせるようにする。
@@ -92,6 +100,10 @@ async function 線を落とす(page: Page) {
     箱?.at(-1)?.close()
   })
 }
+
+test.beforeEach(() => {
+  名乗る版 = 新しい版
+})
 
 test.afterEach(async ({ page }) => {
   await archiveAll(page)
@@ -160,4 +172,53 @@ test('添付を抱えたタブは読み直さず、バナーを出す', async ({
   await page.getByRole('button', { name: '読み込み直す' }).click()
   await 読み直しを待つ
   expect(読み直した).toBe(1)
+})
+
+/**
+ * **いちばん重い1本**（設計§17）。印は掛け金で降りないので、依存が `[serverChanged]`
+ * だけだと**そのタブの一生で1回しか試さない**——1回目が抱えていて塞がれると、以後
+ * どれだけ版が変わっても二度と読み直さなかった。実機で不発だったのがこの形である。
+ *
+ * 単体（`App.test.tsx`）はストアへ直に値を置いて同じことを見ているが、**ここは
+ * 本物の線が切れて繋ぎ直り、`/api/me` を2回聞き直す経路**を通る。
+ */
+test('見送ったあと、添付を外して次の版が来ると読み直す', async ({ page }) => {
+  await 線を控える(page)
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  await openSession(page, tile)
+
+  await attachImage(page)
+  await expect(page.getByTestId('composer-attachments')).toBeVisible()
+
+  let 読み直した = 0
+  page.on('load', () => {
+    読み直した += 1
+  })
+
+  // 1回目：抱えているので見送る。**理由が画面に出る**
+  await 版を差し替える(page)
+  await 線を落とす(page)
+  const banner = page.getByTestId('server-changed-banner')
+  await expect(banner).toBeVisible({ timeout: 30_000 })
+  await expect(banner).toContainText('添付')
+  expect(読み直した).toBe(0)
+
+  // 添付を外す。**ここでは読み直さない**——添付の増減では走らせない（§6）
+  await page.getByTestId('composer-attachment-remove').click()
+  await expect(page.getByTestId('composer-attachments')).toHaveCount(0)
+  expect(読み直した).toBe(0)
+
+  // 2回目：次の版が来たら試し直す
+  名乗る版 = '99.99.100-e2e'
+  const 読み直しを待つ = page.waitForEvent('load', { timeout: 30_000 })
+  await 線を落とす(page)
+  await 読み直しを待つ
+
+  expect(読み直した).toBe(1)
+  await expect(page.getByTestId('connection-status')).toHaveAttribute(
+    'data-status',
+    'open',
+    { timeout: 30_000 },
+  )
 })

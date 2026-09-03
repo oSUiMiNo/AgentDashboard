@@ -25,7 +25,8 @@ import { SettingsPage } from '@/components/Settings/SettingsPage'
 import { TileGrid } from '@/components/TileGrid/TileGrid'
 import { ProjectAdd } from '@/components/ProjectAdd/ProjectAdd'
 import { RoamLayer } from '@/components/RoamLayer/RoamLayer'
-import { anyComposerBusy } from '@/lib/composerBusy'
+import { report } from '@/lib/clientLogs'
+import { composerBusyCount } from '@/lib/composerBusy'
 import { selfhealLabel } from '@/lib/protocol'
 import { ACCOUNT, HOME, LOCAL_HOST, SETTINGS } from '@/lib/routes'
 import { canEnter, useAuthStore } from '@/stores/auth'
@@ -293,9 +294,18 @@ function SelfhealBanner() {
  * したがって、抱えているものが無ければ読み直し、抱えているタブにだけバナーを出す。
  * 抱えているかは `lib/composerBusy.ts` が答える。
  *
- * **判定は印が立った瞬間の1度だけで、あとから読み直さない。** 添付を1枚外した直後に
- * ページが飛ぶと、利用者から見れば「消したら壊れた」に見える。バナーを出したなら、
- * 押すまで待つ。
+ * **判定は「版が変わるたびに、その時点の状態で1度だけ」**（設計§17）。添付を1枚外した
+ * 直後にページが飛ぶと、利用者から見れば「消したら壊れた」に見えるので、**添付の増減では
+ * 走らせない**——バナーを出したなら、その版のあいだは押すまで待つ。
+ *
+ * **かつては「印が立った瞬間の1度だけ」だった。** 印は掛け金で降りないので、依存を
+ * `[serverChanged]` だけにすると**そのタブの一生で1回しか試さない**——1回目が抱えていて
+ * 塞がれたら、以後どれだけ版が変わっても二度と読み直さなかった。実機で不発だったのを
+ * 追ってこれが分かり、依存へ `version` を足した。
+ *
+ * **見送ったときは、理由を画面に出す。** 抱えているのは**画面の外**でありうる（PJT 専用
+ * 画面はセッション全数の入力欄を仮想化なしに描く）ので、書かないと「なぜ自動で読み直さ
+ * ないのか」が利用者から永久に見えない。
  *
  * **輪にはならない。** 読み直すとページごと作り直され、ストアの初期値に `version` が
  * 無い（`undefined`）ので、`load()` の `known !== undefined` が偽になって印が立たない。
@@ -314,16 +324,35 @@ function SelfhealBanner() {
  */
 function ServerChangedBanner() {
   const serverChanged = useAuthStore((state) => state.serverChanged)
+  const version = useAuthStore((state) => state.auth.version)
+  const 抱えている数 = composerBusyCount()
 
-  // **早期 return より前に置く**（フックの規則）。依存は `serverChanged` だけにする
-  // ——台帳を依存に入れると「添付を外したら読み直す」が1行で書けてしまい、上で退けた形に
-  // なる。`[]` では印があとから立つので一度も反応しない
+  // **早期 return より前に置く**（フックの規則）。
+  //
+  // **依存に `version` を足してあるのは、版が変わるたびに試し直すため**（設計§17）。
+  // 印は掛け金で降りないので、`[serverChanged]` だけにすると**そのタブの一生で1回しか
+  // 試さない**——1回目が抱えていて塞がれたら、以後どれだけ版が変わっても二度と読み直さない。
+  //
+  // **台帳は依然として依存に入れない。** 入れると「添付を外したら読み直す」になり、
+  // 押していない瞬間に画面が飛ぶ（§6 で退けた形）。**版が変わったときだけ試し直す。**
   useEffect(() => {
-    if (!serverChanged || anyComposerBusy()) {
+    if (!serverChanged) {
       return
     }
+    const 抱えている = composerBusyCount()
+    if (抱えている > 0) {
+      report(
+        'version_reload',
+        'INFO',
+        `版が変わったが、読み直しを見送った：抱えている入力欄が ${抱えている} 件`,
+      )
+      return
+    }
+    // **積んでから読み直す。** `location.reload()` は `pagehide` を発火させ、
+    // `installClientLogs` がそこで `sendBeacon` へ載せ替えるので、この1行は持ち出される
+    report('version_reload', 'INFO', '版が変わったので、この画面を読み直す')
     window.location.reload()
-  }, [serverChanged])
+  }, [serverChanged, version])
 
   if (!serverChanged) {
     return null
@@ -336,7 +365,9 @@ function ServerChangedBanner() {
       <span>
         ダッシュボードの版が変わりました。
         <span className="text-muted-foreground ml-2 text-xs">
-          この画面は古いままなので、読み込み直してください
+          {抱えている数 > 0
+            ? `添付があるため、自動では読み直しません（${抱えている数} 件）`
+            : 'この画面は古いままなので、読み込み直してください'}
         </span>
       </span>
       <Button size="sm" onClick={() => window.location.reload()}>

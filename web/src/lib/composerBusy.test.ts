@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { anyComposerBusy, markComposerBusy } from './composerBusy'
+import {
+  anyComposerBusy,
+  composerBusyCount,
+  markComposerBusy,
+} from './composerBusy'
 
 /**
  * 読み直すと消えるものを抱えた入力欄の台帳（テスト計画フェーズ1）。
@@ -75,5 +79,17 @@ describe('複数の入力欄', () => {
     取り下げA()
 
     expect(anyComposerBusy()).toBe(true)
+  })
+
+  /**
+   * 数は**画面へ理由を出すためだけ**に在る。抱えているのは横スクロールの外にあり
+   * うるので、「いくつ片付ければよいか」を答えられないと利用者が動けない。
+   */
+  it('抱えている数を返す', () => {
+    expect(composerBusyCount()).toBe(0)
+    申告する()
+    申告する()
+
+    expect(composerBusyCount()).toBe(2)
   })
 })
