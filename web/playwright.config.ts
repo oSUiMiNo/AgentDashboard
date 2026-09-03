@@ -181,6 +181,7 @@ export default defineConfig({
         // テストが理由の分からない形で落ちる）
         AGENTDASHBOARD_CLAUDE_SETTINGS_PATH:
           '.e2e-state/versions-state/claude-settings.json',
+        AGENTDASHBOARD_CLAUDE_HOME: '.e2e-state/claude-home',
         // **乗り換えだけは塞ぐ。** 画面から選べる状態にはするが、実際に乗り換えると
         // E2E のサーバが別の実行ファイルへ化けてしまう
         AGENTDASHBOARD_VERSION_HANDED_OVER: '1',
@@ -218,6 +219,7 @@ export default defineConfig({
         AGENTDASHBOARD_VERSION_SUPPORTED: '1',
         // **行き先は自分の複製。** ここが `installed` の行として並び、押すとここへ乗る
         AGENTDASHBOARD_VERSION_SOURCE_DIR: '.e2e-state/handover-state/bin',
+        AGENTDASHBOARD_CLAUDE_HOME: '.e2e-state/claude-home',
         RUST_LOG: 'info',
       },
       url: 'http://127.0.0.1:4179',
@@ -231,7 +233,10 @@ export default defineConfig({
       // トークンの発行から後始末まで1本のスクリプトに寄せてある
       command: `${repoRoot}/scripts/e2e-remote`,
       cwd: repoRoot,
-      env: { RUST_LOG: 'info' },
+      // **履歴の走査元を隔離する**（名前付け設計§13-1）。塞がないとセッションホストが
+      // 開発者の本物のホーム（1,119フォルダ・27,499本）を舐める——「＋」を開くたびに
+      // 走るので、遅いうえに機械ごとに結果が変わる
+      env: { RUST_LOG: 'info', AGENTDASHBOARD_CLAUDE_HOME: '.e2e-state/claude-home' },
       url: 'http://127.0.0.1:4174',
       reuseExistingServer: !process.env.CI,
       stdout: 'pipe',
@@ -244,7 +249,8 @@ export default defineConfig({
       // 順序を持つので、こちらも1本のスクリプトに寄せてある
       command: `${repoRoot}/scripts/e2e-fleet`,
       cwd: repoRoot,
-      env: { RUST_LOG: 'info' },
+      // 同上。**3台とも**同じ場所を見る（台数ぶん走査が走らないため）
+      env: { RUST_LOG: 'info', AGENTDASHBOARD_CLAUDE_HOME: '.e2e-state/claude-home' },
       url: 'http://127.0.0.1:4177',
       reuseExistingServer: !process.env.CI,
       stdout: 'pipe',
