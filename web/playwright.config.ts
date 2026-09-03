@@ -162,7 +162,16 @@ export default defineConfig({
       RUST_LOG: 'info',
     },
     url: 'http://127.0.0.1:4173',
-    reuseExistingServer: !process.env.CI,
+    // **居残りを再利用しない。** DB の消去は `command` の中に置いてあるので、
+    // 再利用すると**消去が一度も走らない**——前の走行が作った枠がそのまま残り、
+    // 「1個のはず」「2枚のはず」を数えているテストが一斉に崩れる（実測で 24 本）。
+    //
+    // しかも**落ち方が毎回違う**ので、自分の変更を疑って何時間も溶かすことになる。
+    // 再利用をやめると、ポートが塞がっているときは**大声で落ちる**。
+    //
+    // 速さは捨てていない。`make e2e` は鍵（`flock`）で直列化してあるので、
+    // 待ち合わせのために再利用していた場面はもう無い。
+    reuseExistingServer: false,
     stdout: 'pipe',
     stderr: 'pipe',
     timeout: 60_000,
@@ -192,7 +201,7 @@ export default defineConfig({
         RUST_LOG: 'info',
       },
       url: 'http://127.0.0.1:4178',
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: false,
       stdout: 'pipe',
       stderr: 'pipe',
       timeout: 60_000,
@@ -223,7 +232,7 @@ export default defineConfig({
         RUST_LOG: 'info',
       },
       url: 'http://127.0.0.1:4179',
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: false,
       stdout: 'pipe',
       stderr: 'pipe',
       timeout: 60_000,
@@ -238,7 +247,7 @@ export default defineConfig({
       // 走るので、遅いうえに機械ごとに結果が変わる
       env: { RUST_LOG: 'info', AGENTDASHBOARD_CLAUDE_HOME: '.e2e-state/claude-home' },
       url: 'http://127.0.0.1:4174',
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: false,
       stdout: 'pipe',
       stderr: 'pipe',
       timeout: 60_000,
@@ -252,7 +261,7 @@ export default defineConfig({
       // 同上。**3台とも**同じ場所を見る（台数ぶん走査が走らないため）
       env: { RUST_LOG: 'info', AGENTDASHBOARD_CLAUDE_HOME: '.e2e-state/claude-home' },
       url: 'http://127.0.0.1:4177',
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: false,
       stdout: 'pipe',
       stderr: 'pipe',
       timeout: 60_000,
