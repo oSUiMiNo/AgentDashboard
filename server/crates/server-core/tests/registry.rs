@@ -1244,3 +1244,194 @@ async fn 名前の決まりは記録層が断る() {
         backend.finish().await;
     }
 }
+
+// --- 過去のセッションの一覧（名前付け設計§6）
+
+/// 外したカードを1枚作る。**`archive` を通す**——`archived` を直に書くと、
+/// 実際の経路（画面の「×」）と違う道を試すことになる。
+async fn 外したカード(
+    registry: &std::sync::Arc<SessionRegistry>,
+    session: ClaudeSessionId,
+    last_activity_at: i64,
+) -> CardId {
+    let card = CardId::new();
+    let mut meta = meta_with_session(card, session);
+    meta.last_activity_at = last_activity_at;
+    registry
+        .apply(
+            &local(),
+            ServerMessage::SessionUpsert {
+                session: Box::new(meta),
+            },
+        )
+        .await;
+    registry
+        .archive_owned(local().account_id, card)
+        .await
+        .expect("外せること");
+    card
+}
+
+#[tokio::test]
+async fn 過去の一覧は外したカードも返す() {
+    // `GET /api/sessions` は外したカードを返さない（読み込みから除かれている）。
+    // **この口が無いと、過去のセッションを引く道が1つも無い**（設計§6-1）
+    for backend in common::backends("past_archived").await {
+        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+            .await
+            .expect("記録層を立てられること");
+        let session = ClaudeSessionId::new();
+        外したカード(&registry, session, 100).await;
+
+        let past = registry
+            .past_sessions(local().account_id, 20)
+            .await
+            .expect("引けること");
+        assert_eq!(past.len(), 1, "[{}] 外したカードが出てこない", backend.name);
+        assert_eq!(past[0].claude_session_id, session, "[{}]", backend.name);
+        assert!(
+            registry.list(local().account_id).is_empty(),
+            "[{}] 外したのに一覧へ残っている（前提の確認）",
+            backend.name
+        );
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 同じセッションを指すカードは1件に畳まれる() {
+    // 実機で実際に起きている——外したカード90枚に対して別のセッションは81本しかない
+    // （設計§13）。**新しいほうを採る**
+    for backend in common::backends("past_fold").await {
+        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+            .await
+            .expect("記録層を立てられること");
+        let session = ClaudeSessionId::new();
+        外したカード(&registry, session, 100).await;
+        外したカード(&registry, session, 300).await;
+
+        let past = registry
+            .past_sessions(local().account_id, 20)
+            .await
+            .expect("引けること");
+        assert_eq!(past.len(), 1, "[{}] 畳まれていない", backend.name);
+        assert_eq!(
+            past[0].last_activity_at, 300,
+            "[{}] 古いほうが採られている",
+            backend.name
+        );
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 実体があるカードが指しているセッションは出ない() {
+    // 起こしても二重になるだけで、利用者が求めているのは「戻ってこないもの」（設計§6-4）。
+    // **接続断・終了のカードが指しているものは出す**
+    for backend in common::backends("past_live").await {
+        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+            .await
+            .expect("記録層を立てられること");
+
+        let 生きている = ClaudeSessionId::new();
+        let mut meta = meta_with_session(CardId::new(), 生きている);
+        meta.agent_connected = true;
+        meta.status = SessionStatus::Working;
+        registry
+            .apply(
+                &local(),
+                ServerMessage::SessionUpsert {
+                    session: Box::new(meta),
+                },
+            )
+            .await;
+
+        let 終わった = ClaudeSessionId::new();
+        let mut meta = meta_with_session(CardId::new(), 終わった);
+        meta.agent_connected = true;
+        meta.status = SessionStatus::Ended { ok: true };
+        registry
+            .apply(
+                &local(),
+                ServerMessage::SessionUpsert {
+                    session: Box::new(meta),
+                },
+            )
+            .await;
+
+        let past = registry
+            .past_sessions(local().account_id, 20)
+            .await
+            .expect("引けること");
+        let ids: Vec<ClaudeSessionId> = past.iter().map(|row| row.claude_session_id).collect();
+        assert!(
+            !ids.contains(&生きている),
+            "[{}] 動いているセッションが選択肢に出ている",
+            backend.name
+        );
+        assert!(
+            ids.contains(&終わった),
+            "[{}] 終わったセッションが出てこない",
+            backend.name
+        );
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 名前を付けたものは件数で切られない() {
+    // **付けた行為そのものが「また使う」の意思表示**（設計§6-3）。件数で切ると、
+    // 大事に取っておいたものが新しいものに押し出されて消える
+    for backend in common::backends("past_limit").await {
+        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+            .await
+            .expect("記録層を立てられること");
+
+        // いちばん古いものへ名前を付ける。**外す前に付ける**——外したカードは一覧から
+        // 消えているので、そもそも押せない（`set_nickname` も「見つかりません」で断る）
+        let 名付き = ClaudeSessionId::new();
+        let card = CardId::new();
+        let mut meta = meta_with_session(card, 名付き);
+        meta.last_activity_at = 1;
+        registry
+            .apply(
+                &local(),
+                ServerMessage::SessionUpsert {
+                    session: Box::new(meta),
+                },
+            )
+            .await;
+        registry
+            .set_nickname(local().account_id, card, Some("大事なやつ"))
+            .await
+            .expect("付けられること");
+        registry
+            .archive_owned(local().account_id, card)
+            .await
+            .expect("外せること");
+
+        // 名前の無いものを5本、あとから足す
+        for n in 0..5 {
+            外したカード(&registry, ClaudeSessionId::new(), 100 + n).await;
+        }
+
+        // 上限2で引く——名前の無いものは2本に切られ、名前付きは残る
+        let past = registry
+            .past_sessions(local().account_id, 2)
+            .await
+            .expect("引けること");
+        let ids: Vec<ClaudeSessionId> = past.iter().map(|row| row.claude_session_id).collect();
+        assert!(
+            ids.contains(&名付き),
+            "[{}] 名前を付けたものが件数で切られた",
+            backend.name
+        );
+        assert_eq!(
+            past.len(),
+            3,
+            "[{}] 名前の無いものが上限どおりに切られていない",
+            backend.name
+        );
+        backend.finish().await;
+    }
+}
