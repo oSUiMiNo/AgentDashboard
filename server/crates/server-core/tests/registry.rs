@@ -1171,6 +1171,100 @@ async fn 呼び戻し先を持たないカードには名前を付けられな�
 }
 
 #[tokio::test]
+async fn 乗り換えると乗り換え先の名前が出て前の名前は残らない() {
+    // **要件が名指しした失敗そのもの**——名前をカードに紐づけると、`--resume` で
+    // 乗り換えたときに前の名前が残る。紐づけ先が CLI セッションなら、カードの
+    // 呼び戻し先が張り替わった時点で名前も入れ替わる。
+    //
+    // **実際には張り替わらない**（本物の `--resume` はIDを振り直さない。設計§2）ので、
+    // 張り替えを人工的に起こして見る。**起きない前提に寄りかかると、CLI の振る舞いが
+    // 変わった日に静かに壊れる。**
+    for backend in common::backends("nickname_switch").await {
+        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+            .await
+            .expect("記録層を立てられること");
+        let card = CardId::new();
+        let 前 = ClaudeSessionId::new();
+        let 後 = ClaudeSessionId::new();
+
+        // 前のセッションで起こして、名前を付ける
+        registry
+            .apply(
+                &local(),
+                ServerMessage::SessionUpsert {
+                    session: Box::new(meta_with_session(card, 前)),
+                },
+            )
+            .await;
+        registry
+            .set_nickname(local().account_id, card, Some("前の名前"))
+            .await
+            .expect("付けられること");
+
+        // **同じカードのまま、呼び戻し先だけが張り替わる**（フックが別のIDを名乗った形）
+        registry
+            .apply(
+                &local(),
+                ServerMessage::SessionUpsert {
+                    session: Box::new(meta_with_session(card, 後)),
+                },
+            )
+            .await;
+
+        assert_eq!(
+            registry
+                .get(card)
+                .expect("記録があること")
+                .meta()
+                .nickname,
+            None,
+            "[{}] 乗り換えたのに前の名前が残っている",
+            backend.name
+        );
+
+        // 乗り換え先へ名前を付けると、そちらが出る
+        registry
+            .set_nickname(local().account_id, card, Some("後の名前"))
+            .await
+            .expect("付けられること");
+        assert_eq!(
+            registry
+                .get(card)
+                .expect("記録があること")
+                .meta()
+                .nickname
+                .as_deref(),
+            Some("後の名前"),
+            "[{}] 乗り換え先の名前が出ていない",
+            backend.name
+        );
+
+        // **前の名前は消えていない。** 戻ってきたらまた出る（記録は CLI セッションに付く）
+        registry
+            .apply(
+                &local(),
+                ServerMessage::SessionUpsert {
+                    session: Box::new(meta_with_session(card, 前)),
+                },
+            )
+            .await;
+        assert_eq!(
+            registry
+                .get(card)
+                .expect("記録があること")
+                .meta()
+                .nickname
+                .as_deref(),
+            Some("前の名前"),
+            "[{}] 前のセッションへ戻ったのに名前が失われている",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
 async fn 同じセッションを指すカードには同じ名前が出る() {
     // 名前が付くのは**カードではなくセッション**なので、乗り換えの履歴で残っている
     // 別のカードにも同じ名前が出る。1枚だけ配ると、もう1枚が古い名前のまま居座る。
