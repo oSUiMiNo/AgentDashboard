@@ -112,7 +112,7 @@ build-debug: ## core をデバッグビルドする（E2E が使うバイナリ�
 perf: build-web build-debug ## 性能の実測値を採る（合否ではなく記録用）
 	@echo "=== サーバ側（コアレッシング効果・巨大履歴・遅いクライアント）==="
 	$(CARGO) nextest run -p agentdashboard-core --test perf --no-capture --run-ignored all
-	@echo "=== ブラウザ側（12セッション同時稼働）==="
+	@echo "=== ブラウザ側（12セッション同時稼働・線が多いときの並べ替え）==="
 	cd web && npx playwright test perf.spec.ts
 
 # --- 静的検査 -----------------------------------------------------------------

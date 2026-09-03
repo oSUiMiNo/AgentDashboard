@@ -1,14 +1,16 @@
 import { expect, test } from '@playwright/test'
-import type { Page } from '@playwright/test'
+import type { Locator, Page } from '@playwright/test'
 import {
   archiveAll,
   fireHook,
   openDashboard,
+  openSession,
   showTerminal,
   spawnSession,
   typeLine,
   WORK_DIR,
 } from './helpers'
+import { ROAM_MAX } from '../src/stores/roam'
 
 /**
  * 並列負荷の通し確認（テスト計画フェーズ6「並列負荷」のブラウザ側）。
@@ -110,3 +112,192 @@ async function measureFps(page: Page): Promise<number> {
       }),
   )
 }
+
+/**
+ * 並べ替えの計測（並べ替え設計§15-9・テスト計画フェーズ8「効果線（性能）」）。
+ *
+ * # なぜ線を溜めてから測るのか
+ *
+ * 「たまにカクつく」の主犯は並べ替えではなく、**同時に走っている効果線の引き直し**
+ * だった（調査レポート：同じ操作が線の有無だけで 7.7倍違う。単発 805ms）。
+ * **線が0本なら費用は本当にゼロ**なので、線0本で測ると必ず通る——承認待ちのカードを
+ * 置き、線が上限まで溜まってから運ぶ。
+ *
+ * # 何を採るか
+ *
+ * - `rafMaxGapMs`：描けたフレームの最大の隙間（調査レポートの maxGap と同じ物差し）
+ * - Long Animation Frames（`blockingDuration` の合計と最大、帰属の上位）。**製品コードには
+ *   1行も入れない**（jsdom に `PerformanceObserver` が無い）。ここの `page.evaluate` に閉じる
+ *
+ * # 門は末尾に置く
+ *
+ * `make perf` は落ちた時点で打ち切られる（ガイドライン「負荷に左右される数値をテストに
+ * するとき」）。値は先に印字し、門はテストのいちばん最後で見る。**門の値は出発点**で、
+ * 直す前後の2〜3回の値を見て据える（設計§15-10）。
+ */
+
+/** 並べ替えの計測の規模（設計§15-9：線34本・20枚・端から端へ） */
+const REORDER_CARDS = 20
+
+/** 承認待ちにする枚数。線は跳ねの折り返しごとに籤で撃たれるので、複数枚で早く溜まる */
+const WAITING = 3
+
+/** 運びのステップ数。**各ステップで1フレーム待つ**（束ねられると追従も費用も測れない） */
+const DRAG_STEPS = 40
+
+/** 門の出発点（設計§15-9）。実測を見て据える */
+const MAX_GAP_MS = 50
+const MAX_BLOCKING_MS = 100
+
+interface PerfProbe {
+  alive: boolean
+  rafMaxGap: number
+  loafSupported: boolean
+  loaf: { count: number; blocking: number; max: number; byScript: Record<string, number> }
+}
+
+/** 権限確認待ち（承認待ち）にして、一覧へ戻る。`roam.spec.ts` の作法そのまま */
+async function 承認待ちにする(page: Page, tile: Locator): Promise<void> {
+  await openSession(page, tile)
+  await fireHook(page, 'Notification', '{"notification_type":"permission_prompt"}')
+  await page.goto('/')
+}
+
+/** 1フレーム待つ。`mouse.move` を束ねさせないため */
+async function 一フレーム待つ(page: Page): Promise<void> {
+  await page.evaluate(
+    () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+  )
+}
+
+test('線が多いときに、端から端へ運んでも固まらない', async ({ page }) => {
+  test.setTimeout(600_000)
+  // 20枚が全部見える高さにする。**端から端へ**を、スクロール無しで運ぶため
+  await page.setViewportSize({ width: 1280, height: 2000 })
+  await openDashboard(page)
+
+  for (let index = 0; index < REORDER_CARDS; index += 1) {
+    await spawnSession(page, WORK_DIR)
+  }
+  await expect(page.getByTestId('session-tile')).toHaveCount(REORDER_CARDS)
+
+  for (let index = 0; index < WAITING; index += 1) {
+    await 承認待ちにする(page, page.getByTestId('session-tile').nth(index))
+  }
+  await expect(
+    page.locator('[data-testid="tile-shell"][data-motion="shake"]'),
+  ).toHaveCount(WAITING)
+
+  // **線が上限まで溜まるのを待つ。** 籤の外れで揺れるので、上限は長めに取る
+  await expect
+    .poll(() => page.getByTestId('roam-line').count(), {
+      message: '効果線が上限まで溜まること',
+      timeout: 240_000,
+    })
+    .toBeGreaterThanOrEqual(ROAM_MAX)
+  const lines = await page.getByTestId('roam-line').count()
+
+  await page.evaluate(() => {
+    const probe: PerfProbe = {
+      alive: true,
+      rafMaxGap: 0,
+      loafSupported: PerformanceObserver.supportedEntryTypes.includes('long-animation-frame'),
+      loaf: { count: 0, blocking: 0, max: 0, byScript: {} },
+    }
+    ;(window as unknown as { __perf: PerfProbe }).__perf = probe
+    let last = performance.now()
+    const tick = (now: number) => {
+      probe.rafMaxGap = Math.max(probe.rafMaxGap, now - last)
+      last = now
+      if (probe.alive) requestAnimationFrame(tick)
+    }
+    requestAnimationFrame(tick)
+    if (probe.loafSupported) {
+      const observer = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          const frame = entry as PerformanceEntry & {
+            blockingDuration?: number
+            scripts?: { sourceURL?: string; sourceFunctionName?: string; duration: number }[]
+          }
+          probe.loaf.count += 1
+          probe.loaf.blocking += frame.blockingDuration ?? 0
+          probe.loaf.max = Math.max(probe.loaf.max, frame.duration)
+          for (const script of frame.scripts ?? []) {
+            const key = `${script.sourceURL ?? '?'}#${script.sourceFunctionName ?? '?'}`
+            probe.loaf.byScript[key] = (probe.loaf.byScript[key] ?? 0) + script.duration
+          }
+        }
+      })
+      observer.observe({ type: 'long-animation-frame', buffered: false })
+      ;(window as unknown as { __perfObserver: PerformanceObserver }).__perfObserver = observer
+    }
+  })
+
+  // **承認待ちでない**最後のカードを先頭へ。承認待ちのカードは運搬中も跳ね続ける
+  // （`still` になるのは掴んでいる本人だけ）ので、線を撃つ側の門が実際に働く条件になる
+  const group = page.getByTestId('project-group').first()
+  const shells = group.getByTestId('tile-shell')
+  const 運ぶ = shells.nth(REORDER_CARDS - 1)
+  const 先頭 = shells.first()
+  const 運ぶID = await 運ぶ.getAttribute('data-card-id')
+  const from = await 運ぶ.boundingBox()
+  const to = await 先頭.boundingBox()
+  if (!from || !to || !運ぶID) {
+    throw new Error('運ぶカードの位置が取れません')
+  }
+  const start = { x: from.x + from.width / 2, y: from.y + from.height / 2 }
+  const goal = { x: to.x + to.width / 2, y: to.y + to.height / 2 }
+
+  const started = Date.now()
+  await page.mouse.move(start.x, start.y)
+  await page.mouse.down()
+  for (let step = 1; step <= DRAG_STEPS; step += 1) {
+    await page.mouse.move(
+      start.x + ((goal.x - start.x) * step) / DRAG_STEPS,
+      start.y + ((goal.y - start.y) * step) / DRAG_STEPS,
+    )
+    await 一フレーム待つ(page)
+  }
+  await page.mouse.up()
+  await expect
+    .poll(
+      async () =>
+        (
+          await shells.evaluateAll((nodes) =>
+            nodes.map((node) => node.getAttribute('data-card-id') ?? ''),
+          )
+        )[0],
+      { message: '運んだカードが先頭に来ること' },
+    )
+    .toBe(運ぶID)
+  await expect(
+    page.locator(`[data-testid="tile-shell"][data-card-id="${運ぶID}"]`),
+  ).toHaveAttribute('data-reordering', 'false', { timeout: 5_000 })
+  const dragMs = Date.now() - started
+
+  const probe = await page.evaluate(() => {
+    const w = window as unknown as { __perf: PerfProbe; __perfObserver?: PerformanceObserver }
+    w.__perf.alive = false
+    w.__perfObserver?.disconnect()
+    return w.__perf
+  })
+  const top = Object.entries(probe.loaf.byScript)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([key, ms]) => `${key}=${Math.round(ms)}`)
+    .join(',')
+  console.log(
+    `[perf] reorder cards=${REORDER_CARDS} waiting=${WAITING} lines=${lines} dragMs=${dragMs}` +
+      ` rafMaxGapMs=${Math.round(probe.rafMaxGap)} loafSupported=${probe.loafSupported}` +
+      ` loafCount=${probe.loaf.count} loafBlockingMs=${Math.round(probe.loaf.blocking)}` +
+      ` loafMaxMs=${Math.round(probe.loaf.max)} loafTop=${top}`,
+  )
+
+  // **門はいちばん最後。** 値が先に残るように
+  expect(probe.rafMaxGap).toBeLessThan(MAX_GAP_MS)
+  if (probe.loafSupported) {
+    expect(probe.loaf.blocking).toBeLessThan(MAX_BLOCKING_MS)
+  } else {
+    test.info().annotations.push({ type: 'note', description: 'Long Animation Frames 非対応' })
+  }
+})
