@@ -1212,11 +1212,7 @@ async fn 乗り換えると乗り換え先の名前が出て前の名前は残�
             .await;
 
         assert_eq!(
-            registry
-                .get(card)
-                .expect("記録があること")
-                .meta()
-                .nickname,
+            registry.get(card).expect("記録があること").meta().nickname,
             None,
             "[{}] 乗り換えたのに前の名前が残っている",
             backend.name
