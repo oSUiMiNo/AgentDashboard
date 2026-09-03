@@ -392,6 +392,102 @@ test('狭い画面で、セッション専用画面が横にはみ出さない',
 })
 
 /**
+ * **狭い窓でファイルを開いたときの、セッション専用画面**
+ * （`スマホでファイルビュアを開くと画面が崩れる` 設計§9-2）。
+ *
+ * # なぜ上の1本では足りなかったのか
+ *
+ * 上のテストは**サイドバーを開くだけで、ファイルを開かない**。中身の列は
+ * **ファイルを開いていなければ描かれない**ので、**問題の 672px の面がそもそも
+ * 存在しない状態**を測っていた。名前のうえではこの不具合を捕まえるはずだったのに、
+ * 壊れている側でも通っていたのはこのためである。
+ *
+ * 「狭い窓 × セッション専用画面 × **ファイルを開く**」の3つが揃うのはこの1本だけ。
+ * 2つずつの組み合わせは既に覆われている。
+ *
+ * # 幅の話を、高さでも検算する
+ *
+ * 面が潰れると、入力欄のプレースホルダが**1文字ずつ折り返して縦に伸びる**
+ * （実測で 954px）。**幅と高さのどちらから壊れても捕まる**ようにしてある。
+ */
+test('狭い画面でファイルを開いても、セッションの面が潰れない', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 780 })
+  await openDashboard(page)
+  await addProject(page, PROJECT_DIR)
+
+  await page.getByTestId('spawn-open').click()
+  await page.getByTestId('spawn-button').click()
+  await page.getByTestId('session-tile').first().dblclick()
+  await expect(page.getByTestId('session-view')).toBeVisible()
+
+  await page.getByTestId('project-files-toggle').click()
+  const panel = page.getByTestId('project-files-panel')
+  await expect(panel).toBeVisible()
+  await panel.getByTestId('folder-entry').filter({ hasText: 'MyDocs' }).click()
+  await panel.getByTestId('folder-entry').filter({ hasText: LONG }).click()
+  await expect(page.getByTestId('file-view')).toBeVisible()
+
+  const レール = page.getByTestId('session-rail')
+  await expect(レール, 'レールが在ること').toBeVisible()
+
+  // ① ページが横へ広がっていない（直す前は 1054 対 390 だった）
+  const はみ出す = await page.evaluate(() => {
+    const de = document.documentElement
+    return de.scrollWidth > de.clientWidth
+  })
+  expect(はみ出す, 'ページが横へ広がっていないこと').toBe(false)
+
+  // ② セッションの面が潰れていない（直す前は 0px）
+  const 面 = await レール.evaluate((el) => {
+    const セッション = [...el.children].find((c) =>
+      c.className.toString().includes('isolate'),
+    )
+    const 列 = el.querySelector('[data-testid="file-column"]')
+    return {
+      レール: Math.round(el.getBoundingClientRect().width),
+      セッション: Math.round(セッション?.getBoundingClientRect().width ?? 0),
+      ファイル: Math.round(列?.getBoundingClientRect().width ?? 0),
+    }
+  })
+  expect(面.セッション, 'セッションの面が1画面ぶんあること').toBeCloseTo(
+    面.レール,
+    0,
+  )
+  expect(面.ファイル, 'ファイルの面も1画面ぶんであること').toBeCloseTo(
+    面.レール,
+    0,
+  )
+
+  // ③ 入力欄が縦に伸びていない（直す前は 954px で窓の 780 を超えていた）
+  const 入力欄の高さ = await page
+    .getByTestId('composer-input')
+    .evaluate((el) => Math.round(el.getBoundingClientRect().height))
+  expect(入力欄の高さ, '入力欄が窓の高さを超えていないこと').toBeLessThan(780)
+
+  // ④ 開いた直後はファイル側が見えている（設計§5）
+  expect(
+    await レール.evaluate((el) => el.scrollLeft),
+    '開いた直後はファイル側',
+  ).toBe(0)
+
+  // ⑤ 払ってから別のファイルを開くと、ファイル側へ戻る
+  await レール.evaluate((el) => {
+    el.scrollLeft = 99999
+  })
+  expect(
+    await レール.evaluate((el) => el.scrollLeft),
+    'セッション側へ払えること',
+  ).toBeGreaterThan(0)
+  await panel.getByTestId('folder-entry').filter({ hasText: PLAN }).click()
+  await expect(page.getByTestId('file-view')).toBeVisible()
+  await expect
+    .poll(async () => レール.evaluate((el) => el.scrollLeft), {
+      message: '別のファイルを開いたらファイル側へ戻ること',
+    })
+    .toBe(0)
+})
+
+/**
  * ファイルの中身を末尾まで辿れること（`ファイルの中身をスクロールできない` 設計§8）。
  *
  * # なぜ E2E でしか捕まらないのか
