@@ -285,6 +285,10 @@ agentdashboard version restart      # 生きたカードがあればここで止
 | `server/crates/testkit/` | フック受信モックサーバと擬似 claude |
 | `server/crates/session-host-core/src/session/screen.rs` | 端末エミュレータと画面の配信（設計§7）。**画面を作るのはここだけ**——vt100 を使うもう1箇所は `core/src/client/render.rs`（CLI が画面を読むため。作らずに描くだけ）で、`dependencies.rs` が見張るのは**`server-core` へ漏れていないこと**と、**`agentdashboard-core` が通常依存で持つこと**の2つ（`session-host-core` 側は必須宣言の対象に入れていない） |
 | `server/crates/server-core/src/gateway.rs` | エージェントの受け口。画面のフレームはここで種別を移し替えてブラウザへ流す（0x04→0x03 / 0x05→0x01） |
+| `web/src/lib/reorder.ts` | 並べ替えの**決める側**（落とし先・並びの形・行き先・速度）。**`window` も `document` も読まない純関数だけ**——測る側と混ざると、jsdom が矩形を固定で返すので**何も確かめないまま緑になる**。落とし先は「行→矩形までの距離→1歩→封印」（並べ替え設計§15-3） |
+| `web/src/lib/useReorder.ts` | 並べ替えの**測る側・書く側**。**運んでいる間は DOM を並べ替えない**（React に並べ替えさせると掴んでいる本人のノードが差し直され、キャプチャが落ちて掴みが解ける）。矩形は掴んだ瞬間の1回だけ測り、見た目は `translate` で作る（§15-11） |
+| `web/src/stores/reordering.ts` | 「いま並べ替え中か」の印。**効果線（`RoamLayer`・`scheduleRoam`）がこれを見て止まる**（§15-1）。主ごとの `Set` で持つ——`useReorder` は枠とカードで同時にマウントされる |
+| `web/src/reorder.css` | 並べ替えの動き方（時間・曲線・止める段）と、**ガイドラインの「一覧の小窓に `layout` を付けるのも禁止」との食い違いの正本**（`DESIGN.md` §35.1 の作法）。`transform` は書かない——個別プロパティで書き、`transform` は `motion` に返す |
 | `server/config.toml.example` | 設定の雛形。**全キーが `AGENTDASHBOARD_<キー>` で上書きできる**（設計§14-1） |
 | `docker/compose.test.yml` ／ `scripts/test-compose` | 永続化層を PostgreSQL に対しても流す（`make test-compose`）。**新しい DB テストは両方へ通す** |
 | `docker/compose.yml` ／ `docker/Dockerfile.server` | セルフホストの本番構成。**利用者が取ってくる1枚**なので `build:` を書かない（材料を持っているのは開発者だけ）。指す箱の版はワークスペースと揃える |
