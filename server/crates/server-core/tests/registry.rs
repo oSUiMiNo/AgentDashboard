@@ -897,6 +897,61 @@ fn meta_with_session(card_id: CardId, session: ClaudeSessionId) -> SessionMeta {
 }
 
 #[tokio::test]
+async fn 付けた名前は丸ごとの写しで配られる() {
+    // **要件は「PC で付けた名前をスマホで読む」こと**なので、頼んだ端末へ返すだけでは
+    // 足りない。配信に載らないと、他のブラウザは**読み込み直すまで古い名前のまま**になる。
+    //
+    // そして**`Status` の差分では届かない**（名前を運ぶ欄が無い）。丸ごとの写し
+    // （`SessionUpsert`）で配ること——ここが設計§5-4 の言っていることである。
+    for backend in common::backends("nickname_publish").await {
+        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+            .await
+            .expect("記録層を立てられること");
+        let card = CardId::new();
+        let session = ClaudeSessionId::new();
+        registry
+            .apply(
+                &local(),
+                ServerMessage::SessionUpsert {
+                    session: Box::new(meta_with_session(card, session)),
+                },
+            )
+            .await;
+
+        // **名前を付ける前に**耳を立てる（別のブラウザが繋がっている状態）
+        let mut 別のブラウザ = registry.subscribe_events();
+
+        registry
+            .set_nickname(local().account_id, card, Some("スマホで読むやつ"))
+            .await
+            .expect("名前を付けられること");
+
+        let event = 別のブラウザ.recv().await.expect("配信されること");
+        assert_eq!(
+            event.account_id,
+            server_core::db::LOCAL_ACCOUNT_ID,
+            "[{}] 誰のカードの話かが添えられていない",
+            backend.name
+        );
+        let ServerMessage::SessionUpsert { session: meta } = event.message else {
+            panic!(
+                "[{}] 丸ごとの写しで配られていない: {:?}",
+                backend.name, event.message
+            );
+        };
+        assert_eq!(meta.card_id, card, "[{}]", backend.name);
+        assert_eq!(
+            meta.nickname.as_deref(),
+            Some("スマホで読むやつ"),
+            "[{}] 配られた写しに名前が載っていない",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
 async fn 利用者が付けた名前は記録へ残り読み直しても戻る() {
     for backend in common::backends("nickname_persist").await {
         let card = CardId::new();

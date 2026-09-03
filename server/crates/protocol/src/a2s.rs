@@ -914,6 +914,7 @@ mod tests {
             supports_log_read,
             supports_resources,
             supports_revive,
+            supports_recall,
             agent_version,
             ..
         } = parsed
@@ -929,6 +930,9 @@ mod tests {
         assert!(!supports_revive);
         // 資源の能力も同じ。名乗らないホストへ聞くと永遠に答えが返らない（設計§18-4）
         assert!(!supports_resources);
+        // 呼び戻しの能力も同じ（名前付け設計§7-3）。名乗らないホストへ投げると、
+        // 過去のセッションを起こしたつもりで**何も起きない**
+        assert!(!supports_recall);
         assert_eq!(agent_version, "0.1.5");
     }
 

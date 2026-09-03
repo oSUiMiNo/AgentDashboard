@@ -15,7 +15,9 @@ use protocol::{
     a2s::{A2S_PROTOCOL, A2S_VERSION, AgentMessage, BatchId, ServerToAgent},
 };
 use sea_orm::DatabaseConnection;
-use server_core::{db::pairing, gateway::SessionHostHub, registry::SessionRegistry};
+use server_core::{
+    db::pairing, gateway::SessionHostHub, registry::SessionRegistry, session_host::SessionHost as _,
+};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio_tungstenite::tungstenite;
 use uuid::Uuid;
@@ -827,5 +829,68 @@ async fn 指示が詰まっても_ack_は捨てられず先に出て線も切れ
             .await;
 
         backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 答えない_PC_への問いは時間切れになる() {
+    // **「確かめられなかった」の3つ目**（名前付け設計§8-5）。寝ている・版が古いは
+    // 投げる前に断るが、**繋がっているのに黙る**相手には投げてから待つしかない。
+    //
+    // ここが `Ok(空)` を返すようになると、上の層（`api_sessions_past`）は「無い」と
+    // 読んで**選択肢から消す**。回線が重い日だけ過去のセッションが消える、という
+    // 再現しにくい壊れ方になる。
+    for backend in common::backends("gw-ask-timeout").await {
+        let gateway = TestGateway::start(backend.db.clone()).await;
+        let (token, account_id) = issue(&backend.db, "利用者").await;
+
+        // **受け取るだけで答えない PC。** `_socket` を持ち続けるのが要点で、落とすと
+        // 「繋がっていません」になり、確かめたい枝を通らない
+        let _socket = gateway.connect_as(&token, "黙る PC").await;
+        let target = 名乗るまで待つ(&gateway, account_id).await;
+
+        let host = server_core::gateway::RemoteSessionHost::new(Arc::clone(&gateway.hub));
+        let started = tokio::time::Instant::now();
+        let error = host
+            .sessions_exist(
+                server_core::session_host::HostAskRequest {
+                    account_id,
+                    target: Some(target),
+                },
+                &[protocol::ClaudeSessionId::new()],
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, server_core::session_host::HostAskError::Timeout),
+            "[{}] 時間切れとして扱われていない: {error:?}",
+            backend.name
+        );
+        // **待ってから諦めていること。** 即座に返るなら、投げる前に断る枝を通っている
+        assert!(
+            started.elapsed() >= Duration::from_secs(4),
+            "[{}] 待たずに諦めている（{:?}）",
+            backend.name,
+            started.elapsed()
+        );
+
+        backend.finish().await;
+    }
+}
+
+/// PC が接続表へ載るまで待って、その `AgentId` を返す。
+async fn 名乗るまで待つ(gateway: &TestGateway, account_id: Uuid) -> protocol::AgentId {
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    loop {
+        let online = gateway.hub.online_of(account_id).await;
+        if let Some(agent_id) = online.first() {
+            return *agent_id;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{TIMEOUT:?} 以内に PC が接続表へ載りませんでした"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }

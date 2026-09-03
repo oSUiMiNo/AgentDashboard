@@ -2704,3 +2704,318 @@ async fn 生存確認を積めないときも理由が残る() {
 
     session.kill();
 }
+
+// --- 過去のセッション：実在の確認と呼び戻し（名前付け設計§6〜§8）------------------
+
+/// 偽のホームへ履歴を1本置く。**実在の判定はここを総なめする**（設計§8-4）。
+///
+/// フォルダ名はわざと規則から外してある。規則を当てにする実装へ戻したら見つからなくなる。
+fn 履歴を置く(home: &Path, id: protocol::ClaudeSessionId) {
+    let dir = home
+        .join(".claude")
+        .join("projects")
+        .join("規則では当たらない名前");
+    std::fs::create_dir_all(&dir).expect("作れること");
+    std::fs::write(dir.join(format!("{id}.jsonl")), "{}\n").expect("置けること");
+}
+
+/// 走査元を偽装する。**環境変数にしてあるのは、別プロセスのサーバへも届かせるため**
+/// （設計§13-1）。`cargo nextest` はテストごとにプロセスを分けるので混ざらない。
+fn 偽のホーム(a2s: &A2s) -> PathBuf {
+    let home = a2s.dir.join("claude-home");
+    std::fs::create_dir_all(&home).expect("作れること");
+    unsafe { std::env::set_var(session_host_core::claude_home::CLAUDE_HOME_ENV, &home) };
+    home
+}
+
+/// カードを1枚起こして CLI セッションを名乗らせ、**外して過去のものにする**。
+///
+/// 「×」を通す——`archived` を直に書くと、画面が通る道と違うところを試すことになる。
+///
+/// `nickname` は**外す前に**付ける。外したカードは `owned` から引けないので、あとからは
+/// 付けられない（設計§5-2-1）。画面でも同じで、一覧に居ないカードの鉛筆は押せない。
+async fn 過去のセッションを1本作る(
+    a2s: &A2s,
+    nickname: Option<&str>,
+) -> protocol::ClaudeSessionId {
+    let (claude_session_id, card_id) = セッションを1本起こす(a2s).await;
+    if let Some(name) = nickname {
+        a2s.registry
+            .set_nickname(a2s.account_id, card_id, Some(name))
+            .await
+            .expect("名前を付けられること");
+    }
+    外す(a2s, card_id).await;
+    claude_session_id
+}
+
+/// カードを1枚起こし、CLI セッションを名乗らせる。**外さない**ので、外す前に手を
+/// 入れたいテスト（宛先の付け替えなど）はこちらを使う。
+async fn セッションを1本起こす(a2s: &A2s) -> (protocol::ClaudeSessionId, CardId) {
+    let (session, _) = a2s.start_session();
+    let claude_session_id = protocol::ClaudeSessionId::new();
+    a2s.post_hook(
+        session.token(),
+        "SessionStart",
+        &format!(r#"{{"session_id":"{claude_session_id}"}}"#),
+    )
+    .await;
+    let listed = a2s
+        .wait_for_listed("呼び戻し先が載る", |listed| {
+            listed
+                .iter()
+                .any(|meta| meta.claude_session_id == Some(claude_session_id))
+        })
+        .await;
+    let card_id = listed
+        .iter()
+        .find(|meta| meta.claude_session_id == Some(claude_session_id))
+        .expect("いま作ったカード")
+        .card_id;
+    session.kill();
+    (claude_session_id, card_id)
+}
+
+async fn 外す(a2s: &A2s, card_id: CardId) {
+    a2s.registry
+        .archive_owned(a2s.account_id, card_id)
+        .await
+        .expect("外せること");
+}
+
+/// `GET /api/sessions/past` をブラウザと同じ道で叩く。
+async fn 過去の一覧(a2s: &A2s) -> Vec<protocol::PastSession> {
+    let addr = a2s.addr;
+    let response = tokio::task::spawn_blocking(move || {
+        testkit::request(addr, "GET", "/api/sessions/past", None, None)
+    })
+    .await
+    .expect("HTTPスレッドが落ちないこと")
+    .expect("応答を読めること");
+    assert_eq!(response.status, 200, "{}", response.body);
+    serde_json::from_str(&response.body).expect("一覧として読めること")
+}
+
+#[tokio::test]
+async fn 繋がっている_PC_には実在を確かめて結果が載る() {
+    let a2s = A2s::start("past-exists").await;
+    let home = 偽のホーム(&a2s);
+    let 在る = 過去のセッションを1本作る(&a2s, None).await;
+    履歴を置く(&home, 在る);
+
+    let past = 過去の一覧(&a2s).await;
+
+    let row = past
+        .iter()
+        .find(|row| row.claude_session_id == 在る)
+        .expect("一覧に出ること");
+    assert_eq!(
+        row.exists,
+        Some(true),
+        "繋がっているのに確かめた結果が載っていない"
+    );
+}
+
+#[tokio::test]
+async fn 実体の無いものだけが一覧から外れ_名前は残る() {
+    // **記録は消さない。** 実体が消えただけで、名前を付けた事実は残る——PC を繋ぎ直せば
+    // また選べるようにするため（設計§8-5）
+    let a2s = A2s::start("past-gone").await;
+    let home = 偽のホーム(&a2s);
+    let 在る = 過去のセッションを1本作る(&a2s, None).await;
+    let 消えた = 過去のセッションを1本作る(&a2s, Some("消えたやつ")).await;
+    履歴を置く(&home, 在る);
+
+    let past = 過去の一覧(&a2s).await;
+
+    assert!(
+        past.iter().any(|row| row.claude_session_id == 在る),
+        "実在するものが消えている"
+    );
+    assert!(
+        !past.iter().any(|row| row.claude_session_id == 消えた),
+        "実体の無いものが選択肢に残っている"
+    );
+    // **記録が残っていることは、戻してみて確かめる。** 実体が戻れば、名前つきで
+    // また選べること——これが「消していない」の意味である
+    履歴を置く(&home, 消えた);
+    let past = 過去の一覧(&a2s).await;
+    let 戻った = past
+        .iter()
+        .find(|row| row.claude_session_id == 消えた)
+        .expect("実体が戻ったのに選択肢へ出てこない");
+    assert_eq!(
+        戻った.nickname.as_deref(),
+        Some("消えたやつ"),
+        "一覧から外すときに記録の名前まで消している"
+    );
+}
+
+#[tokio::test]
+async fn PC_が寝ていても一覧から消えない() {
+    // **「確かめられなかった」と「無い」は別物**（設計§8-5）。ここで消すと、PC を
+    // 閉じている間だけ選択肢が空になり、しかも消えた理由が画面に出ない
+    let a2s = A2s::start("past-offline").await;
+    let _home = 偽のホーム(&a2s);
+    // 履歴は**置かない**。それでも消えないことを見る
+    let (session, card_id) = セッションを1本起こす(&a2s).await;
+
+    // 一度も繋がっていない PC へ宛先を付け替える（`起こし直しの宛先が無い_PC_は理由が返る`
+    // と同じ手）。**鮮度の旗を落とすだけでは足りない**——線はまだ生きているので、
+    // サーバは問いを投げられてしまい「無い」という答えが返る
+    let 寝ている先 = pairing::ensure_agent(a2s.hub.db(), a2s.account_id, "寝ている PC")
+        .await
+        .expect("PC を登録できること");
+    let mut meta = a2s.registry.get(card_id).expect("記録があること").meta();
+    meta.agent_id = Some(寝ている先);
+    meta.agent_connected = false;
+    a2s.registry
+        .apply(
+            &server_core::registry::ReportOrigin {
+                account_id: a2s.account_id,
+                agent_id: Some(寝ている先),
+                account: None,
+            },
+            protocol::ws::ServerMessage::SessionUpsert {
+                session: Box::new(meta),
+            },
+        )
+        .await;
+    外す(&a2s, card_id).await;
+
+    let past = 過去の一覧(&a2s).await;
+
+    let row = past
+        .iter()
+        .find(|row| row.claude_session_id == session)
+        .expect("PC が寝ている間に選択肢から消えている");
+    assert_eq!(row.exists, None, "確かめていないのに答えが載っている");
+}
+
+#[tokio::test]
+async fn 版の古い_PC_にも実在は聞かず一覧から消さない() {
+    // 古いホストは知らない種別を**接続を保ったまま無視する**ので、投げると時間切れまで
+    // 待つことになる。投げる前に断り、**答えは「確かめていない」にする**
+    let a2s = A2s::start("past-old").await;
+    let _home = 偽のホーム(&a2s);
+    let session = 過去のセッションを1本作る(&a2s, None).await;
+    let target = a2s.hub.online_of(a2s.account_id).await[0];
+
+    // 呼び戻しの欄を持たない、この工事より前の名乗り
+    let 古い名乗り = serde_json::json!({
+        "available_modes": ["default"],
+        "always_bypass_permissions": false,
+        "agent_version": "0.1.29",
+        "supports_host_fs": true,
+        "supports_revive": true,
+    });
+    pairing::save_capabilities(a2s.hub.db(), target, 古い名乗り)
+        .await
+        .expect("名乗りを書き換えられること");
+
+    let started = tokio::time::Instant::now();
+    let past = 過去の一覧(&a2s).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "投げる前に断っていない（{:?} かかった）",
+        started.elapsed()
+    );
+
+    let row = past
+        .iter()
+        .find(|row| row.claude_session_id == session)
+        .expect("版が古いというだけで選択肢から消えている");
+    assert_eq!(row.exists, None, "確かめていないのに答えが載っている");
+}
+
+#[tokio::test]
+async fn 過去のセッションを起こすと名前つきの新しいカードが現れる() {
+    // **これが要件そのもの。** 名前は `claude_session_id` で引くので、呼び戻し先を
+    // 先に入れてあれば**最初の報告から**名前が出る（設計§7-5）
+    let a2s = A2s::start("recall-named").await;
+    let home = 偽のホーム(&a2s);
+    let session = 過去のセッションを1本作る(&a2s, Some("あとで読む")).await;
+    履歴を置く(&home, session);
+
+    let past = 過去の一覧(&a2s).await;
+    let row = past
+        .iter()
+        .find(|row| row.claude_session_id == session)
+        .expect("一覧に出ること");
+
+    a2s.browser
+        .recall(server_core::session_host::RecallRequest {
+            account_id: a2s.account_id,
+            target: row.agent_id,
+            cwd: row.project.0.clone(),
+            permission_mode: None,
+            claude_session_id: session,
+        })
+        .await
+        .expect("起こせること");
+
+    let listed = a2s
+        .wait_for_listed("起こしたカードが現れる", |listed| {
+            listed
+                .iter()
+                .any(|meta| meta.claude_session_id == Some(session))
+        })
+        .await;
+    let 起きた = listed
+        .iter()
+        .find(|meta| meta.claude_session_id == Some(session))
+        .expect("いま起こしたカード");
+    assert_eq!(
+        起きた.nickname.as_deref(),
+        Some("あとで読む"),
+        "起こしたカードに名前が付いていない"
+    );
+    assert_eq!(
+        起きた.project.0, row.project.0,
+        "作業ディレクトリが記録から引かれていない"
+    );
+}
+
+#[tokio::test]
+async fn 呼び戻しを名乗らない_PC_へは投げない() {
+    // 投げると**永遠に何も起きず、画面には理由すら出せない**。時間切れを待つのではなく
+    // 投げる前に断る（設計§7-3）
+    let a2s = A2s::start("recall-old").await;
+    let home = 偽のホーム(&a2s);
+    let session = 過去のセッションを1本作る(&a2s, None).await;
+    履歴を置く(&home, session);
+    let target = a2s.hub.online_of(a2s.account_id).await[0];
+
+    let 古い名乗り = serde_json::json!({
+        "available_modes": ["default"],
+        "always_bypass_permissions": false,
+        "agent_version": "0.1.29",
+        "supports_host_fs": true,
+        "supports_revive": true,
+    });
+    pairing::save_capabilities(a2s.hub.db(), target, 古い名乗り)
+        .await
+        .expect("名乗りを書き換えられること");
+
+    let started = tokio::time::Instant::now();
+    let err = a2s
+        .browser
+        .recall(server_core::session_host::RecallRequest {
+            account_id: a2s.account_id,
+            target: Some(target),
+            cwd: a2s.dir.join("project").to_string_lossy().into_owned(),
+            permission_mode: None,
+            claude_session_id: session,
+        })
+        .await
+        .expect_err("断ること");
+    assert!(
+        err.contains("版が古い"),
+        "版が古いことが読めない断り方: {err}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "投げる前に断ること（{:?} かかった）",
+        started.elapsed()
+    );
+}
