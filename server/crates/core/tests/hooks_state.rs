@@ -1021,3 +1021,39 @@ async fn stop_failureは継ぎ目を通って入力待ちにする() {
     .await;
     common::wait_for_status(&session, SessionStatus::WaitingInput).await;
 }
+
+/// サブエージェントが残っているターンの終わりが、継ぎ目を通して「サブ待ち」になる
+/// （設計§14）。
+///
+/// **単体（`state.rs`）とは見ているものが違う。** あちらは遷移の表そのもの、こちらは
+/// **注入した settings → 擬似 claude → HTTP → 受信口 → 状態機械**の一式が繋がっていること。
+/// `SubagentStart` は `HookEvent::ALL` に載っているだけで settings へ書き出されるので、
+/// **この経路が通ることは名前だけでは確かめられない。**
+#[tokio::test]
+async fn サブが残ったままターンが終わるとサブ待ちになる() {
+    let server = common::TestServer::start().await;
+    let (session, mut watcher) = common::start_session(&server.manager).await;
+
+    common::fire_hook(&session, &mut watcher, "UserPromptSubmit", "").await;
+    common::wait_for_status(&session, SessionStatus::Working).await;
+
+    // **同じイベントを続けて撃たない。** 擬似 claude は「撃った」合図を端末へ出し、
+    // `fire_hook` はそれを待つ作りなので、2回続けると1回目の合図で待ちが解けてしまう。
+    // **本数の勘定は `state.rs` の単体テストが持っている**ので、ここは継ぎ目だけを見る
+    common::fire_hook(&session, &mut watcher, "SubagentStart", "").await;
+    assert_eq!(session.meta().subagent_active, 1);
+    assert_eq!(
+        session.status(),
+        SessionStatus::Working,
+        "メインが走っている間は、サブが立っても状態を動かさない"
+    );
+
+    // メインが手を止めた。サブが残っているので入力待ちにはしない
+    common::fire_hook(&session, &mut watcher, "Stop", "").await;
+    common::wait_for_status(&session, SessionStatus::WaitingSubagents).await;
+
+    // 最後の1本が終わって初めて入力待ちへ
+    common::fire_hook(&session, &mut watcher, "SubagentStop", "").await;
+    common::wait_for_status(&session, SessionStatus::WaitingInput).await;
+    assert_eq!(session.meta().subagent_active, 0);
+}

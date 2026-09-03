@@ -146,10 +146,13 @@ impl Goal {
                     // 武装するのは**ターンの進行中と言える状態だけ**を名指しで。
                     // Starting（指示がまだ届いていないかもしれない）と Unknown で
                     // 武装すると、届かなかった指示を「終わった」と読み違える
+                    // `WaitingSubagents` もここに入れる。**ターンは終わっているが仕事は
+                    // 終わっていない**ので（設計§14）、待っている側から見れば進行中である
                     Some(
                         SessionStatus::Working
                         | SessionStatus::WaitingPermission
-                        | SessionStatus::Stalled,
+                        | SessionStatus::Stalled
+                        | SessionStatus::WaitingSubagents,
                     ) => {
                         *seen_busy = true;
                         Step::Continue

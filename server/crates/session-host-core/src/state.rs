@@ -180,12 +180,16 @@ impl Changed {
 
 /// フック1件を適用して、次の状態を決める（設計§5 の遷移表）。
 ///
-/// 優先順位 `Ended > WaitingPermission > Working|Stalled > WaitingInput > Starting > Unknown`
-/// は、次の2つのガードとして表現している。
+/// 優先順位 `Ended > WaitingPermission > Working|Stalled > WaitingSubagents > WaitingInput
+/// > Starting > Unknown` は、次の2つのガードとして表現している。
 ///
 /// - **`Ended` は終端**。終了後に遅れて届いたフックでカードを生き返らせない
 /// - **`WaitingInput` は `WaitingPermission` を上書きしない**。権限確認で止まっているのに
 ///   「入力待ち」と出ると、人が対処すべき状況を見落とす
+///
+/// `WaitingSubagents` が `WaitingInput` より上にあるのは、**ターンが終わっていても仕事は
+/// 終わっていない**からである（設計§14）。どちらも指示は受け付けるので、優先されるのは
+/// 「まだ終わっていない」と読める側になる。
 pub fn apply(meta: &mut SessionMeta, input: &HookInput, now: Timestamp) -> Changed {
     let mut changed = Changed::default();
     // ここへ来る `Ended` は**プロセスが消えたことが確定したもの**だけになった
@@ -251,7 +255,7 @@ pub fn apply(meta: &mut SessionMeta, input: &HookInput, now: Timestamp) -> Chang
         }
 
         HookEvent::Stop => {
-            set_unless_permission(meta, SessionStatus::WaitingInput, &mut changed);
+            set_unless_permission(meta, turn_ended_status(meta), &mut changed);
             let message = input.last_assistant_message().map(str::to_string);
             if message.is_some() && meta.last_assistant_message != message {
                 meta.last_assistant_message = message;
@@ -268,18 +272,29 @@ pub fn apply(meta: &mut SessionMeta, input: &HookInput, now: Timestamp) -> Chang
         // エラーの種別（`rate_limit` ほか）で表示を変えないのは、それが新しい状態を作る
         // 話になるため（設計§6-2・§10-1）。エラーで終わったことは端末に出ている。
         HookEvent::StopFailure => {
-            set_unless_permission(meta, SessionStatus::WaitingInput, &mut changed);
+            set_unless_permission(meta, turn_ended_status(meta), &mut changed);
         }
 
-        // サブエージェントはバッジの数だけを動かす。状態そのものは遷移させない（設計§5）
+        // **数を動かし、手が空いているときだけ状態も動かす**（設計§14）。
+        //
+        // メインが走っている（`Working`）間は状態を触らない——サブが増えても減っても、
+        // 動いているのはメインだからである。動かすのは「ターンが終わっている」と
+        // 分かっている2つの状態のあいだだけ。
         HookEvent::SubagentStart => {
             meta.subagent_active += 1;
             changed.status = true;
+            if meta.status == SessionStatus::WaitingInput {
+                set(meta, SessionStatus::WaitingSubagents, &mut changed);
+            }
         }
         HookEvent::SubagentStop => {
             // 取りこぼしや二重送信で 0 を下回らないようにする
             meta.subagent_active = meta.subagent_active.saturating_sub(1);
             changed.status = true;
+            // **最後の1本が終わったときだけ戻す。** 残っているなら待ち続ける
+            if meta.subagent_active == 0 && meta.status == SessionStatus::WaitingSubagents {
+                set(meta, SessionStatus::WaitingInput, &mut changed);
+            }
         }
 
         // **状態を動かさない。** フックは「会話が終わった」までしか言えない。
@@ -300,6 +315,21 @@ fn set(meta: &mut SessionMeta, next: SessionStatus, changed: &mut Changed) {
     if meta.status != next {
         meta.status = next;
         changed.status = true;
+    }
+}
+
+/// ターンが終わったときに落ち着く先（設計§14）。
+///
+/// **サブエージェントが1本でも残っていれば「サブ待ち」。** メインは手を止めたが、仕事は
+/// 終わっていない。0 本なら従来どおり「入力待ち」。
+///
+/// **`Stop` と `StopFailure` の両方から呼ぶ。** どちらも「そのターンは終わった」を意味し、
+/// サブが残っているかどうかで行き先が変わる点も同じである。
+fn turn_ended_status(meta: &SessionMeta) -> SessionStatus {
+    if meta.subagent_active > 0 {
+        SessionStatus::WaitingSubagents
+    } else {
+        SessionStatus::WaitingInput
     }
 }
 
@@ -878,6 +908,7 @@ mod tests {
             SessionStatus::Starting,
             SessionStatus::Working,
             SessionStatus::WaitingInput,
+            SessionStatus::WaitingSubagents,
             SessionStatus::WaitingPermission,
             SessionStatus::Ended { ok: true },
             SessionStatus::Ended { ok: false },
@@ -887,6 +918,101 @@ mod tests {
             assert!(!sweep_stalled_idle(&mut meta, false), "{status:?}");
             assert_eq!(meta.status, status, "{status:?}");
         }
+    }
+
+    /// サブエージェントが残っているターンの終わり方（設計§14-2）。
+    ///
+    /// **既存の遷移表には足せない。** あの表は `(開始状態, イベント, 期待状態)` の3つ組で、
+    /// `subagent_active` を条件にできない（`meta_with` は 0 で作る）。
+    #[test]
+    fn サブが残っていればターンの終わりはサブ待ちになる() {
+        for event in [HookEvent::Stop, HookEvent::StopFailure] {
+            let mut meta = meta_with(SessionStatus::Working);
+            meta.subagent_active = 2;
+            apply(&mut meta, &hook(event), NOW);
+            assert_eq!(
+                meta.status,
+                SessionStatus::WaitingSubagents,
+                "{} が届いたとき",
+                event.as_str()
+            );
+            // 数は触らない。あれはサブエージェント自身のフックが動かすもの
+            assert_eq!(meta.subagent_active, 2);
+        }
+    }
+
+    #[test]
+    fn サブが居なければターンの終わりは今までどおり入力待ち() {
+        for event in [HookEvent::Stop, HookEvent::StopFailure] {
+            let mut meta = meta_with(SessionStatus::Working);
+            apply(&mut meta, &hook(event), NOW);
+            assert_eq!(
+                meta.status,
+                SessionStatus::WaitingInput,
+                "{} が届いたとき",
+                event.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn 手が空いている間にサブが立つとサブ待ちへ移る() {
+        let mut meta = meta_with(SessionStatus::WaitingInput);
+        apply(&mut meta, &hook(HookEvent::SubagentStart), NOW);
+        assert_eq!(meta.status, SessionStatus::WaitingSubagents);
+        assert_eq!(meta.subagent_active, 1);
+    }
+
+    #[test]
+    fn 最後の1本が終わったときだけ入力待ちへ戻る() {
+        let mut meta = meta_with(SessionStatus::WaitingSubagents);
+        meta.subagent_active = 2;
+
+        apply(&mut meta, &hook(HookEvent::SubagentStop), NOW);
+        assert_eq!(meta.subagent_active, 1);
+        assert_eq!(
+            meta.status,
+            SessionStatus::WaitingSubagents,
+            "1本残っているうちは戻らない"
+        );
+
+        apply(&mut meta, &hook(HookEvent::SubagentStop), NOW);
+        assert_eq!(meta.subagent_active, 0);
+        assert_eq!(meta.status, SessionStatus::WaitingInput);
+    }
+
+    /// **メインが走っている間は、サブの増減で状態を動かさない**（設計§14-2）。
+    ///
+    /// 動いているのはメインなので、`Working` のままでなければならない。
+    #[test]
+    fn 作業中はサブが増えても減っても状態が動かない() {
+        for event in [HookEvent::SubagentStart, HookEvent::SubagentStop] {
+            let mut meta = meta_with(SessionStatus::Working);
+            meta.subagent_active = 1;
+            apply(&mut meta, &hook(event), NOW);
+            assert_eq!(meta.status, SessionStatus::Working, "{}", event.as_str());
+        }
+    }
+
+    /// **権限確認待ちは、サブが残っていても上書きしない**（既存のガードに乗る）。
+    #[test]
+    fn 権限確認待ちはサブ待ちに上書きされない() {
+        let mut meta = meta_with(SessionStatus::WaitingPermission);
+        meta.subagent_active = 3;
+        apply(&mut meta, &hook(HookEvent::Stop), NOW);
+        assert_eq!(meta.status, SessionStatus::WaitingPermission);
+    }
+
+    /// **サブ待ちは停滞に落ちない**（設計§14）。
+    ///
+    /// 落とすと、落ちた先の画面判定（[`sweep_stalled_idle`]）が走る。サブを待っている間の
+    /// 端末には走っている印が出ないので、**入力待ちへ倒されて新しい状態が自分で消える。**
+    #[test]
+    fn サブ待ちは停滞に落ちない() {
+        let mut meta = meta_with(SessionStatus::WaitingSubagents);
+        meta.last_activity_at = NOW - 999_000;
+        assert!(!sweep_stalled(&mut meta, NOW, 120));
+        assert_eq!(meta.status, SessionStatus::WaitingSubagents);
     }
 
     #[test]

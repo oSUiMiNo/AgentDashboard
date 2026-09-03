@@ -1113,6 +1113,8 @@ async fn wait_ready(
             // SessionStart が届いた＝指示を受け付けられる
             Some(SessionStatus::WaitingInput) => return true,
             Some(SessionStatus::Ended { .. }) | None => return false,
+            // `WaitingSubagents`（設計§14）もここへ落ちて待ち続ける。**これでよい**——
+            // サブが終われば `WaitingInput` になるので、待っていれば必ず捕まる
             _ => {}
         }
 
@@ -1192,6 +1194,7 @@ async fn wait_for_waiting_input(
             SessionStatus::WaitingInput => return true,
             // 終わったセッションにこれ以上頼めることは無い
             SessionStatus::Ended { .. } => return false,
+            // `WaitingSubagents` は待ち続ける（上の `wait_ready` と同じ理由）
             _ => continue,
         }
     }
