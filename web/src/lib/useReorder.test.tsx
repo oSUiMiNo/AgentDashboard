@@ -1,7 +1,7 @@
 import { act, render, screen } from '@testing-library/react'
 import { useRef, type MutableRefObject } from 'react'
 import { clearReorderingStore, isReordering } from '@/stores/reordering'
-import { useReorder, REORDER_SETTLE_MS, type Reorder } from './useReorder'
+import { useReorder, ECHO_TIMEOUT_MS, REORDER_SETTLE_MS, type Reorder } from './useReorder'
 import type { Rect } from './reorder'
 
 /**
@@ -37,7 +37,7 @@ function Harness({
 }: {
   ids: readonly string[]
   out: MutableRefObject<Reorder<string> | null>
-  onCommit: (next: readonly string[]) => void
+  onCommit: (next: readonly string[]) => Promise<string | null> | void
 }) {
   const reorder = useReorder<string>({ ids, onCommit })
   out.current = reorder
@@ -63,7 +63,7 @@ function Outer({
   outRef,
 }: {
   ids: readonly string[]
-  onCommit: (next: readonly string[]) => void
+  onCommit: (next: readonly string[]) => Promise<string | null> | void
   outRef: (口: 器の口) => void
 }) {
   const out = useRef<Reorder<string> | null>(null)
@@ -71,11 +71,22 @@ function Outer({
   return <Harness ids={ids} out={out} onCommit={onCommit} />
 }
 
-function 置く(ids: readonly string[], rects: Rect[]) {
+function 置く(
+  ids: readonly string[],
+  rects: Rect[],
+  answer: (next: readonly string[]) => Promise<string | null> | void = () => {},
+) {
   const 送った: (readonly string[])[] = []
   let 口: 器の口 = { current: null }
   const view = render(
-    <Outer ids={ids} onCommit={(next) => 送った.push(next)} outRef={(o) => (口 = o)} />,
+    <Outer
+      ids={ids}
+      onCommit={(next) => {
+        送った.push(next)
+        return answer(next)
+      }}
+      outRef={(o) => (口 = o)}
+    />,
   )
   // **要素ごとに矩形を差し替える。** プロトタイプの固定値に勝つ
   ids.forEach((id, at) => {
@@ -214,5 +225,72 @@ describe('印', () => {
     act(() => 口().bind('a').onMove({ x: 420, y: 100 }))
     view.unmount()
     expect(isReordering()).toBe(false)
+  })
+})
+
+describe('断られたら、元へ戻す', () => {
+  it('理由が返ってきたら ids の並びへ戻し、滑り終わるまで印を立てる', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const { 口, 並び } = 置く(['a', 'b', 'c'], 格子(3), () => Promise.resolve('だめ'))
+    act(() => 口().bind('a').onGrab({ x: 100, y: 100 }))
+    act(() => 口().bind('a').onMove({ x: 420, y: 100 }))
+    act(() => 口().bind('a').onDrop())
+    expect(並び()).toEqual(['b', 'a', 'c'])
+
+    // 返事（断り）が届く
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(並び()).toEqual(['a', 'b', 'c'])
+    expect(口().reordering).toBe(true)
+    act(() => {
+      vi.advanceTimersByTime(REORDER_SETTLE_MS)
+    })
+    expect(口().reordering).toBe(false)
+  })
+
+  it('2秒返事が無ければ、ids の並びへ戻す', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const { 口, 並び } = 置く(['a', 'b', 'c'], 格子(3))
+    act(() => 口().bind('a').onGrab({ x: 100, y: 100 }))
+    act(() => 口().bind('a').onMove({ x: 420, y: 100 }))
+    act(() => 口().bind('a').onDrop())
+    expect(並び()).toEqual(['b', 'a', 'c'])
+    act(() => {
+      vi.advanceTimersByTime(ECHO_TIMEOUT_MS - 1)
+    })
+    expect(並び()).toEqual(['b', 'a', 'c'])
+    act(() => {
+      vi.advanceTimersByTime(1)
+    })
+    expect(並び()).toEqual(['a', 'b', 'c'])
+  })
+
+  it('掴み直した後に届いた古い断りは、いまの運びを戻さない', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    let 答え: (reason: string | null) => void = () => {}
+    const { 口, 並び } = 置く(
+      ['a', 'b', 'c'],
+      格子(3),
+      () =>
+        new Promise<string | null>((resolve) => {
+          答え = resolve
+        }),
+    )
+    act(() => 口().bind('a').onGrab({ x: 100, y: 100 }))
+    act(() => 口().bind('a').onMove({ x: 420, y: 100 }))
+    act(() => 口().bind('a').onDrop())
+    const 一度目の答え = 答え
+    // 返事が来る前に掴み直して運ぶ（見えている並びが土台）
+    act(() => 口().bind('c').onGrab({ x: 700, y: 100 }))
+    act(() => 口().bind('c').onMove({ x: 300, y: 100 }))
+    act(() => 口().bind('c').onDrop())
+    expect(並び()).toEqual(['b', 'c', 'a'])
+    // 古い運びの断りが今ごろ届いても、いまの並びは動かない
+    await act(async () => {
+      一度目の答え('だめ')
+      await Promise.resolve()
+    })
+    expect(並び()).toEqual(['b', 'c', 'a'])
   })
 })

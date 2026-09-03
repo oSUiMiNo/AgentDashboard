@@ -72,8 +72,11 @@ export function GroupView({ host, project }: Props) {
   */
   const { order, dragging, bind, itemRef, reordering } = useReorder<string>({
     ids: cards,
-    onCommit: (next) => {
-      void saveCardOrder(host, project, next).then(setOrderError)
+    onCommit: async (next) => {
+      const reason = await saveCardOrder(host, project, next)
+      setOrderError(reason)
+      // **理由を返すと、掴んだ側が手元の並びを元へ滑らせて戻す**（並べ替え設計§15-4）
+      return reason
     },
   })
   const [filesOpen, toggleFiles] = useFilesPanel()

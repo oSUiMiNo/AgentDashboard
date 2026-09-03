@@ -86,14 +86,15 @@ export function TileGrid() {
     const ids = next
       .map((key) => idByKey.current.get(key))
       .filter((id): id is string => id !== undefined)
-    setOrderError(await saveProjectOrder(ids))
+    const reason = await saveProjectOrder(ids)
+    setOrderError(reason)
+    // **理由を返すと、掴んだ側が手元の並びを元へ滑らせて戻す**（並べ替え設計§15-4）
+    return reason
   }, [])
 
   const { order, dragging, bind, itemRef, reordering } = useReorder({
     ids: frames.map(鍵),
-    onCommit: (next) => {
-      void 並びを送る(next)
-    },
+    onCommit: (next) => 並びを送る(next),
   })
 
   const byKey = new Map(frames.map((group) => [鍵(group), group]))

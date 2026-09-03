@@ -116,7 +116,10 @@ export function ProjectGroup({
   */
   const 並びを送る = useCallback(
     async (next: readonly string[]) => {
-      setError(await saveCardOrder(host, project, next))
+      const reason = await saveCardOrder(host, project, next)
+      setError(reason)
+      // **理由を返すと、掴んだ側が手元の並びを元へ滑らせて戻す**（並べ替え設計§15-4）
+      return reason
     },
     [host, project],
   )
@@ -130,9 +133,7 @@ export function ProjectGroup({
     reordering: 並べ替え中,
   } = useReorder<CardId>({
     ids: cards,
-    onCommit: (next) => {
-      void 並びを送る(next)
-    },
+    onCommit: (next) => 並びを送る(next),
   })
 
   const remove = async () => {

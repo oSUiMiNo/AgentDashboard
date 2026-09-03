@@ -106,11 +106,24 @@ const SAMPLE_LIMIT = 32
 /** 着地の逆算で「動いていない」と見なす差（px） */
 const SETTLED_PX = 0.5
 
+/**
+ * 離してから、サーバの返事を待つ上限（ms）（設計§15-4）。
+ *
+ * 返事は実測 18〜70ms で来る。来ないまま手元の並びを見せ続けると**サーバと画面が
+ * ずれたまま**になるので、ここで諦めて `ids` へ戻す。
+ */
+export const ECHO_TIMEOUT_MS = 2_000
+
 interface Options<T extends string> {
   /** いまの並び（サーバから来た順） */
   ids: readonly T[]
-  /** 離したときに呼ぶ。**変わったときだけ**呼ばれる */
-  onCommit: (next: readonly T[]) => void
+  /**
+   * 離したときに呼ぶ。**変わったときだけ**呼ばれる。
+   *
+   * **理由を返せば断り**（設計§15-4）——手元の並びを元へ滑らせて戻す。`null` か
+   * `undefined`（何も返さない）なら、サーバの返事（`ids`）が一致するまで手元を保つ。
+   */
+  onCommit: (next: readonly T[]) => Promise<string | null> | void
   /** 端で送るスクロール容器。無ければ送らない */
   scroller?: () => HTMLElement | null
 }
@@ -208,6 +221,10 @@ export function useReorder<T extends string>({
   const 控え = useRef<Map<T, Point> | null>(null)
   /** 離した後、サーバの返事を待っている並び。一致したら `shown` を捨てる */
   const 返事待ち = useRef<readonly T[] | null>(null)
+  /** 返事を諦める予定 */
+  const 諦める予定 = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** 運びの世代。**非同期の帰りが古い運びのものなら捨てる** */
+  const 世代 = useRef(0)
   const 送り = useRef<{ x: number; y: number }>({ x: 0, y: 0 })
 
   // 端に指がある間だけ送る。**掴んでいないときは回さない**
@@ -317,6 +334,10 @@ export function useReorder<T extends string>({
       return
     }
     返事待ち.current = null
+    if (諦める予定.current !== null) {
+      clearTimeout(諦める予定.current)
+      諦める予定.current = null
+    }
     setShown(null)
   }, [ids])
 
@@ -327,9 +348,57 @@ export function useReorder<T extends string>({
       if (降ろす予定.current !== null) {
         clearTimeout(降ろす予定.current)
       }
+      if (諦める予定.current !== null) {
+        clearTimeout(諦める予定.current)
+      }
       lowerReordering(札)
     }
   }, [])
+
+  /** 印を、滑り終わってから降ろす。**同時に降ろすと持ち上げが戻る動きが瞬時に切れる** */
+  const 滑り終わったら降ろす = useCallback(() => {
+    if (降ろす予定.current !== null) {
+      clearTimeout(降ろす予定.current)
+    }
+    降ろす予定.current = setTimeout(() => {
+      降ろす予定.current = null
+      setReordering(false)
+      書いたものを外す()
+      // **印が降りたら、`RoamLayer` が場を測り直して1回だけ引き直す**（設計§15-1）
+      lowerReordering(主.current)
+    }, REORDER_SETTLE_MS)
+  }, [書いたものを外す])
+
+  /**
+   * 手元の並びを捨てて `ids` へ戻す（断られた・諦めた。設計§15-4）。
+   *
+   * いまの見え方を控えてから戻すので、React が DOM を並べ替えた直後に着地の FLIP が
+   * 走り、**全員が元の場所へ滑って戻る**。理由の表示はフックの仕事ではない（呼び元が
+   * `onCommit` の戻り値で出す）。
+   */
+  const 元へ戻す = useCallback(
+    (generation: number) => {
+      if (generation !== 世代.current || 返事待ち.current === null) {
+        return
+      }
+      返事待ち.current = null
+      if (諦める予定.current !== null) {
+        clearTimeout(諦める予定.current)
+        諦める予定.current = null
+      }
+      const 表 = new Map<T, Point>()
+      for (const [id, element] of elements.current) {
+        const box = element.getBoundingClientRect()
+        表.set(id, { x: box.left, y: box.top })
+      }
+      控え.current = 表
+      setReordering(true)
+      raiseReordering(主.current)
+      setShown(null)
+      滑り終わったら降ろす()
+    },
+    [滑り終わったら降ろす],
+  )
 
   /** 本人の見た目の左上。**矩形ではなく凍結した矩形＋`translate`**（倍率と傾きで箱が膨らむため） */
   const 位置を控える = useCallback((h: Held<T>) => {
@@ -349,6 +418,12 @@ export function useReorder<T extends string>({
   const bind = useCallback(
     (id: T): Bound => ({
       onGrab: (origin) => {
+        世代.current += 1
+        // 返事待ちの最中に掴み直したら、前の運びの返事はもう戻さない（土台にはする）
+        if (諦める予定.current !== null) {
+          clearTimeout(諦める予定.current)
+          諦める予定.current = null
+        }
         // **掴んだ瞬間の並びを土台にする。** 返事待ちの最中なら、見えている並びが土台
         const base = 返事待ち.current ?? ids
         const from = base.indexOf(id)
@@ -486,28 +561,33 @@ export function useReorder<T extends string>({
           返事待ち.current = null
           setShown(null)
         }
-        /*
-          **印は、滑り終わるまで降ろさない。** 同時に降ろすと持ち上げ（1.02倍・1度）が
-          元へ戻る動きが瞬時に切れて、離した瞬間にカクつく。
-        */
-        if (降ろす予定.current !== null) {
-          clearTimeout(降ろす予定.current)
-        }
-        降ろす予定.current = setTimeout(() => {
-          降ろす予定.current = null
-          setReordering(false)
-          書いたものを外す()
-          // **印が降りたら、`RoamLayer` が場を測り直して1回だけ引き直す**（設計§15-1）
-          lowerReordering(主.current)
-        }, REORDER_SETTLE_MS)
+        滑り終わったら降ろす()
         // **変わったときだけ送る。** 掴んで離しただけで書き込みが飛ぶと、
         // 押し間違いのたびにサーバが動く
-        if (動いた) {
-          onCommit(next)
+        if (!動いた) {
+          return
         }
+        const generation = 世代.current
+        if (諦める予定.current !== null) {
+          clearTimeout(諦める予定.current)
+        }
+        諦める予定.current = setTimeout(() => {
+          諦める予定.current = null
+          元へ戻す(generation)
+        }, ECHO_TIMEOUT_MS)
+        Promise.resolve(onCommit(next)).then(
+          (reason) => {
+            if (reason !== null && reason !== undefined) {
+              元へ戻す(generation)
+            }
+          },
+          () => {
+            元へ戻す(generation)
+          },
+        )
       },
     }),
-    [ids, onCommit, scroller, 位置を控える, 書いたものを外す],
+    [ids, onCommit, scroller, 位置を控える, 書いたものを外す, 滑り終わったら降ろす, 元へ戻す],
   )
 
   return {

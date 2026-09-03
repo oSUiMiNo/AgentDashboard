@@ -627,8 +627,9 @@ export function getSessions(): SessionMeta[] {
  * 受け手はどの枠の話か分からない。**枠をまたいだ移動はやらない**ので、
  * その枠に居ないカードは受け手が断る。
  *
- * 手元は先に書き換えない（`session_upsert` で戻ってくる）。戻り値は断られた理由で、
- * 通れば `null`。
+ * ストアは先に書き換えない（`session_upsert` で戻ってくる）。**見せ続けるのは掴んだ側**
+ * （`useReorder`。並べ替え設計§15-4）。戻り値は断られた理由で、通れば `null`——
+ * 理由を返すと、掴んだ側が手元の並びを元へ滑らせて戻す。
  */
 export async function saveCardOrder(
   host: string,
