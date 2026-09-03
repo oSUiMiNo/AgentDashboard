@@ -22,6 +22,19 @@
 use protocol::ClaudeSessionId;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// 走査の回数。**「1回で判定する」という約束を、外から数えられるようにするためだけに在る。**
+///
+/// 結果だけを見ても、IDごとに走査する実装と1回で済ます実装は**同じ答えを返す**ので
+/// 見分けが付かない。違うのは重さだけで、それは時間で測ると機械と負荷に左右される。
+/// だから回数そのものを数える。
+static SCANS: AtomicU64 = AtomicU64::new(0);
+
+/// これまでに走査した回数（[`SCANS`]）。テストが「1回で判定する」を確かめるのに使う。
+pub fn scan_count() -> u64 {
+    SCANS.load(Ordering::Relaxed)
+}
 
 /// 走査元を差し替える環境変数（設計§13-1）。
 ///
@@ -60,6 +73,7 @@ pub fn existing_sessions(ids: &[ClaudeSessionId]) -> Vec<ClaudeSessionId> {
     let Some(root) = projects_dir() else {
         return Vec::new();
     };
+    SCANS.fetch_add(1, Ordering::Relaxed);
     let Ok(projects) = std::fs::read_dir(&root) else {
         // フォルダごと無い＝履歴が1つも無い。落とさずに空を返す
         return Vec::new();

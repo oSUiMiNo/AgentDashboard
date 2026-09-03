@@ -128,3 +128,25 @@ fn 何も聞かれなければ走査しない() {
     let _home = 偽のホーム("nothing", &[]);
     assert!(claude_home::existing_sessions(&[]).is_empty());
 }
+
+#[test]
+fn 何件聞かれても走査は1回() {
+    // **結果を見ても、IDごとに回す実装と見分けが付かない**（同じ答えが返る）。
+    // 違うのは重さだけで、開発機では 1,119 フォルダ・27,499本を舐めるので、
+    // 件数ぶん繰り返すと一覧を開くたびに数十秒かかる。だから回数を数える。
+    let 在る = ClaudeSessionId::new();
+    let _home = 偽のホーム("once", &[("-home-me-app", 在る)]);
+
+    let 前 = claude_home::scan_count();
+    let ids: Vec<ClaudeSessionId> = std::iter::once(在る)
+        .chain(std::iter::repeat_with(ClaudeSessionId::new).take(9))
+        .collect();
+    let found = claude_home::existing_sessions(&ids);
+
+    assert_eq!(found, vec![在る], "答えが変わっている");
+    assert_eq!(
+        claude_home::scan_count() - 前,
+        1,
+        "10件聞いたのに走査が1回で済んでいない"
+    );
+}

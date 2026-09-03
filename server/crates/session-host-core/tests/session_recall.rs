@@ -10,7 +10,10 @@
 
 mod common;
 
-use protocol::{ClaudeSessionId, PermissionMode};
+use std::sync::Arc;
+
+use protocol::{ClaudeSessionId, PermissionMode, SessionStatus};
+use session_host_core::config::SessionHostConfig;
 
 #[tokio::test]
 async fn 過去のセッションを起こすと新しいカードができる() {
@@ -149,4 +152,34 @@ async fn 起こした先は本当に動く() {
         .expect("起こせること");
     let mut watcher = common::Watcher::attach(&recalled);
     watcher.wait_for(testkit::fake_claude::READY_MARKER).await;
+}
+
+#[tokio::test]
+async fn 起動に失敗しても呼び戻し先は残る() {
+    // **ここが `None` へ戻ると、名前の付いていないカードが残る**——名前は
+    // `claude_session_id` で引くので、指定して起こしたのに名前が出ない、という
+    // 要件そのものの失敗になる。
+    //
+    // 素直に擬似 claude で書くと**最初のフックが埋めてしまい落ちない**ので、
+    // 起動を失敗させてから判定する（復旧側と同じ罠。テスト計画フェーズ3 の注意）
+    let manager = common::build_manager(
+        Arc::new(SessionHostConfig::default()),
+        "/bin/false".to_string(),
+    );
+    let session = ClaudeSessionId::new();
+
+    let recalled = manager
+        .recall(&common::work_dir(), None, session)
+        .expect("起こす頼み自体は通ること");
+
+    common::wait_for_status(&recalled, SessionStatus::Ended { ok: false }).await;
+    assert!(
+        !recalled.meta().hooks_seen,
+        "フックが1件も届いていないこと（この前提が崩れると何も確かめていない）"
+    );
+    assert_eq!(
+        recalled.meta().claude_session_id,
+        Some(session),
+        "起動に失敗しても呼び戻し先を失わないこと"
+    );
 }
