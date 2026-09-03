@@ -131,17 +131,25 @@ async fn 終わった子はプロセス表に残らない() {
     // **終了コードを渡さない**＝指示を待ち続ける。数え終えるまで生きている
     let command = CommandBuilder::new(common::fake_claude());
 
+    // **起こす前の顔ぶれを控える。** 「子はちょうど1本」を仮定すると、他に1本でも
+    // 居る機械で落ちる——**増えたぶんを見る**ほうが、何が同居していても成り立つ
+    let 起こす前 = 自分の子(std::process::id());
+
     let (process, exit_rx) =
         PtyProcess::spawn(command, test_size(), chunks_tx).expect("PTY を開けること");
 
-    // 起こした子が見えるまで待つ。**`fork` から `/proc` に現れるまでには間がある**
+    // 増えた子が見えるまで待つ。**`fork` から `/proc` に現れるまでには間がある**
     let 期限 = std::time::Instant::now() + common::TIMEOUT;
     let pid = loop {
-        match 自分の子(std::process::id()).as_slice() {
+        let 増えた: Vec<u32> = 自分の子(std::process::id())
+            .into_iter()
+            .filter(|pid| !起こす前.contains(pid))
+            .collect();
+        match 増えた.as_slice() {
             [pid] => break *pid,
             found => assert!(
                 std::time::Instant::now() < 期限,
-                "起こした子が1本だけ見えること: {found:?}"
+                "起こした子が1本だけ増えること: {found:?}（起こす前: {起こす前:?}）"
             ),
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
