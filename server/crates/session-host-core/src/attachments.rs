@@ -744,9 +744,11 @@ mod tests {
         置く(&state, card, "20200101-000000-aaaaaaaa.png", 10);
         置く(&state, card, "20200102-000000-bbbbbbbb.png", 10);
 
-        let mut config = SessionHostConfig::default();
-        config.state_dir = Some(state.clone());
-        config.attachment_retention_days = 1;
+        let config = SessionHostConfig {
+            state_dir: Some(state.clone()),
+            attachment_retention_days: 1,
+            ..Default::default()
+        };
 
         sweep_on_start(&config);
 
@@ -770,8 +772,10 @@ mod tests {
         let state = 使い捨て("start-sweep-empty");
         std::fs::remove_dir_all(&state).ok();
 
-        let mut config = SessionHostConfig::default();
-        config.state_dir = Some(state.clone());
+        let config = SessionHostConfig {
+            state_dir: Some(state.clone()),
+            ..Default::default()
+        };
 
         sweep_on_start(&config);
     }
