@@ -104,6 +104,7 @@ pub fn status_label(status: &SessionStatus) -> &'static str {
         SessionStatus::Starting => "起動中",
         SessionStatus::Working => "作業中",
         SessionStatus::WaitingPermission => "権限確認待ち",
+        SessionStatus::WaitingSubagents => "サブ待ち",
         SessionStatus::WaitingInput => "入力待ち",
         SessionStatus::Stalled => "停滞",
         SessionStatus::Ended { .. } => "スリープ",
@@ -517,6 +518,8 @@ mod tests {
             "権限確認待ち"
         );
         assert_eq!(status_label(&SessionStatus::WaitingInput), "入力待ち");
+        // 画面（`web/src/lib/protocol.ts` の `statusLabel`）と同じ語であること
+        assert_eq!(status_label(&SessionStatus::WaitingSubagents), "サブ待ち");
         assert_eq!(status_label(&SessionStatus::Stalled), "停滞");
     }
 

@@ -341,6 +341,12 @@ pub enum SessionStatus {
     Starting,
     Working,
     WaitingPermission,
+    /// メインは手を止めたが、サブエージェントがまだ走っている（設計§14）。
+    ///
+    /// **入力待ちと分けているのは、色が先に読まれるからである。** 指示は受け付けるので
+    /// 「入力待ち」も嘘ではないが、一覧を流し見たときに「終わった」と読めてしまい、
+    /// 放っておいてよいカードと次の指示を待っているカードが同じ顔になる。
+    WaitingSubagents,
     WaitingInput,
     /// Working のままイベントが途絶した（ハング検知）
     Stalled,
@@ -816,6 +822,7 @@ mod tests {
             SessionStatus::Starting,
             SessionStatus::Working,
             SessionStatus::WaitingPermission,
+            SessionStatus::WaitingSubagents,
             SessionStatus::WaitingInput,
             SessionStatus::Stalled,
             SessionStatus::Ended { ok: true },
