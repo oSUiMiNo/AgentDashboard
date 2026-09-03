@@ -161,11 +161,14 @@ const 過去 = (extra: Partial<PastSession> = {}): PastSession => ({
   ...extra,
 })
 
-/** `GET /api/sessions/past` の答えを差し替え、呼ばれた回数を数える。 */
+/** `GET /api/sessions/past` の答えを差し替え、呼ばれた回数と宛先を控える。 */
 function 過去を返す(rows: PastSession[]) {
-  const calls = { count: 0 }
+  const calls = { count: 0, urls: [] as string[] }
   vi.stubGlobal('fetch', (path: string) => {
-    if (path === '/api/sessions/past') calls.count += 1
+    if (path.startsWith('/api/sessions/past')) {
+      calls.count += 1
+      calls.urls.push(path)
+    }
     return Promise.resolve({ ok: true, json: () => Promise.resolve(rows) })
   })
   return calls
@@ -266,23 +269,40 @@ describe('過去のセッションから起こす', () => {
     expect(recall).toHaveBeenCalledWith(session, 'acceptEdits', null)
   })
 
-  it('別の枠のセッションは出ない', async () => {
-    // 枠の「＋」は「この PJT で起こす」操作。別の PJT のものを出すと、
-    // 押した先に別の枠のカードができる
+  it('どの枠かをサーバへ伝える（手元では絞らない）', async () => {
+    // 枠の「＋」は「この PJT で起こす」操作なので、別の PJT のものを出すと
+    // 押した先に別の枠のカードができる。**絞るのはサーバの仕事**。
+    //
+    // かつては全件を受け取って画面が捨てていたが、**「どの枠か」の規則が2箇所に
+    // 在る**うえ、件数の上限がサーバ側で枠を跨いで先に効くので、枠あたり数件しか
+    // 残らなかった（実測：75本 → 上限20 → 画面が絞って8件）。
+    const calls = 過去を返す([過去({ nickname: 'この枠のやつ' })])
+    render(<SessionAdd host="local" project={PROJECT} />)
+    await userEvent.click(screen.getByTestId('spawn-open'))
+    await screen.findByTestId('spawn-past')
+
+    expect(calls.urls).toHaveLength(1)
+    const 問い = new URL(calls.urls[0], 'http://x').searchParams
+    expect(問い.get('host')).toBe('local')
+    expect(問い.get('project')).toBe(PROJECT)
+  })
+
+  it('サーバが返したものは、そのまま全部出す', async () => {
+    // **手元で捨てない。** 捨てると、サーバが枠で絞ったうえに画面がもう一度
+    // 絞ることになり、片方の規則を直したときに黙って食い違う
     過去を返す([
-      過去({ nickname: 'この枠のやつ' }),
+      過去({ nickname: '1本目' }),
       過去({
         claude_session_id: 'eeeeeeee-0000-0000-0000-000000000000',
-        nickname: 'よその枠のやつ',
-        project: '/home/example/dev/other',
+        nickname: '2本目',
       }),
     ])
     render(<SessionAdd host="local" project={PROJECT} />)
     await userEvent.click(screen.getByTestId('spawn-open'))
     const picker = await screen.findByTestId('spawn-past')
 
-    expect(picker.textContent).toContain('この枠のやつ')
-    expect(picker.textContent).not.toContain('よその枠のやつ')
+    expect(picker.textContent).toContain('1本目')
+    expect(picker.textContent).toContain('2本目')
   })
 
   it('過去が1本も無ければ、選ぶところ自体を出さない', async () => {

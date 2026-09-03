@@ -831,3 +831,73 @@ async fn 従来の呼び方は一文字も変わっていない() {
     assert!(content.text.contains("- [x] 済み"));
     assert!(raw.contains("\"truncated\""), "生の本文もそのまま返ること");
 }
+
+#[tokio::test]
+async fn 過去の一覧は_CLI_からも枠で絞れる() {
+    // **画面の口は CLI からも同じようにできること**（設計§11）。画面は枠の「＋」
+    // から自分の枠だけを引くので、CLI にも同じ絞り込みが要る。
+    //
+    // 枠は**組でしか意味を持たない**——パスだけで絞ると、同じパスの PJT を持つ
+    // 別の機械のセッションが混ざる（設計§16）。
+    let server = TestServer::start().await;
+    let target = target_of(&server);
+    let ここ = work_dir("past-here");
+    let よそ = work_dir("past-there");
+
+    // **走査元を偽装する。** 実在を確かめる側は履歴のあるものしか残さないので、
+    // 塞がないと一覧が必ず空になる（設計§8-5）
+    let home = work_dir("past-home");
+    let 履歴置き場 = home.join(".claude").join("projects").join("どこでもよい");
+    std::fs::create_dir_all(&履歴置き場).expect("作れること");
+    unsafe { std::env::set_var(session_host_core::claude_home::CLAUDE_HOME_ENV, &home) };
+
+    // 2つの枠に1本ずつ起こし、履歴を置いてから終わらせて外す
+    let mut 外した = Vec::new();
+    for cwd in [&ここ, &よそ] {
+        let outcome = client::spawn(&target, &cwd.to_string_lossy(), None, None)
+            .await
+            .expect("起こせること");
+        外した.push(outcome.human.clone());
+    }
+    let (一覧, _) = client::sessions(&target).await.expect("一覧を引けること");
+    for card in &外した {
+        let meta = 一覧
+            .iter()
+            .find(|meta| meta.card_id.to_string() == *card)
+            .expect("いま起こしたカード");
+        let session = meta.claude_session_id.expect("起動時に採番されていること");
+        std::fs::write(履歴置き場.join(format!("{session}.jsonl")), "{}\n").expect("置けること");
+    }
+    // **終わらせてから外す。** 実体があるカードが指しているセッションは過去に
+    // 出さない決まりなので（設計§6-4）、生かしたまま外すと一覧に出てこない
+    for card in &外した {
+        client::kill(&target, card).await.expect("終われること");
+        client::archive(&target, card).await.expect("外せること");
+    }
+
+    let (絞った, _) = client::past_sessions(&target, Some(("local", &ここ.to_string_lossy())))
+        .await
+        .expect("引けること");
+    assert_eq!(
+        絞った.len(),
+        1,
+        "頼んだ枠のぶんが1本だけ返っていない: {:?}",
+        絞った.iter().map(|r| r.project.0.clone()).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        絞った[0].project.0,
+        ここ.to_string_lossy(),
+        "頼んでいない枠のものが返っている"
+    );
+
+    // 枠を渡さなければ、両方の枠のものが見える（CLI から眺める道を塞がない）
+    let (全部, _) = client::past_sessions(&target, None)
+        .await
+        .expect("引けること");
+    assert!(
+        全部.iter()
+            .any(|row| row.project.0 == よそ.to_string_lossy()),
+        "枠なしなのに、別の枠のものが出てこない: {:?}",
+        全部.iter().map(|r| r.project.0.clone()).collect::<Vec<_>>()
+    );
+}

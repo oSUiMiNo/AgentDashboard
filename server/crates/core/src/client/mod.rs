@@ -764,8 +764,19 @@ pub async fn kill(target: &Target, prefix: &str) -> Result<Outcome, ClientError>
 /// ただし**どの PC のものかは出力に出る**。
 pub async fn past_sessions(
     target: &Target,
+    frame: Option<(&str, &str)>,
 ) -> Result<(Vec<protocol::PastSession>, String), ClientError> {
-    http::fetch_as(target, "/api/sessions/past").await
+    // **枠は組でしか意味を持たない。** パスだけで絞ると、同じパスの PJT を持つ
+    // 別の機械のセッションが混ざる（設計§16）。だから型の上でも組にしてある
+    let path = match frame {
+        Some((host, project)) => format!(
+            "/api/sessions/past?host={}&project={}",
+            http::percent_encode(host),
+            http::percent_encode(project)
+        ),
+        None => "/api/sessions/past".to_string(),
+    };
+    http::fetch_as(target, &path).await
 }
 
 /// `session recall`。過去の CLI セッションを指定して、新しいカードで起こす

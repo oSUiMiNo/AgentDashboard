@@ -254,6 +254,13 @@ enum SessionCmd {
     /// **過去のセッションを並べる**。名前を付けたものは全部、付けていないものは最近のぶんだけ。
     /// PC が繋がっていないものは「確かめていない」と出ます（勝手に消しません）
     Past {
+        /// どの PC のぶんか。`--project` と**組で**指定します
+        #[arg(long, value_name = "AGENT_ID", requires = "project")]
+        host: Option<String>,
+        /// どの枠（作業ディレクトリ）のぶんか。`--host` と**組で**指定します。
+        /// 片方だけでは枠が定まりません——同じパスの PJT が別の PC にもありうるためです
+        #[arg(long, value_name = "PATH", requires = "host")]
+        project: Option<String>,
         #[command(flatten)]
         out: OutputArgs,
     },
@@ -958,8 +965,13 @@ async fn client_session(
             let human = format!("カードを並べ替えました：{} 枚", ordered.len());
             println!("{}", output::pick(out.json, &raw, &human));
         }
-        SessionCmd::Past { out } => {
-            let (past, raw) = client::past_sessions(target).await?;
+        SessionCmd::Past {
+            host,
+            project,
+            out,
+        } => {
+            let frame = host.as_deref().zip(project.as_deref());
+            let (past, raw) = client::past_sessions(target, frame).await?;
             let human = output::render_past_sessions(&past, now_ms(), home().as_deref());
             println!("{}", output::pick(out.json, &raw, &human));
         }

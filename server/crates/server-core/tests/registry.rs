@@ -1429,7 +1429,7 @@ async fn 過去の一覧は外したカードも返す() {
         外したカード(&registry, session, 100).await;
 
         let past = registry
-            .past_sessions(local().account_id, 20)
+            .past_sessions(local().account_id, None)
             .await
             .expect("引けること");
         assert_eq!(past.len(), 1, "[{}] 外したカードが出てこない", backend.name);
@@ -1456,7 +1456,7 @@ async fn 同じセッションを指すカードは1件に畳まれる() {
         外したカード(&registry, session, 300).await;
 
         let past = registry
-            .past_sessions(local().account_id, 20)
+            .past_sessions(local().account_id, None)
             .await
             .expect("引けること");
         assert_eq!(past.len(), 1, "[{}] 畳まれていない", backend.name);
@@ -1505,7 +1505,7 @@ async fn 実体があるカードが指しているセッションは出ない()
             .await;
 
         let past = registry
-            .past_sessions(local().account_id, 20)
+            .past_sessions(local().account_id, None)
             .await
             .expect("引けること");
         let ids: Vec<ClaudeSessionId> = past.iter().map(|row| row.claude_session_id).collect();
@@ -1519,6 +1519,85 @@ async fn 実体があるカードが指しているセッションは出ない()
             "[{}] 終わったセッションが出てこない",
             backend.name
         );
+        backend.finish().await;
+    }
+}
+
+/// 枠（PC と作業ディレクトリの組）を指定して、外したカードを1枚作る。
+async fn 枠つきの外したカード(
+    registry: &std::sync::Arc<SessionRegistry>,
+    session: ClaudeSessionId,
+    agent_id: Option<protocol::AgentId>,
+    project: &str,
+) -> CardId {
+    let card = CardId::new();
+    let mut meta = meta_with_session(card, session);
+    meta.agent_id = agent_id;
+    meta.project = ProjectId(project.to_string());
+    registry
+        .apply(
+            &ReportOrigin {
+                account_id: local().account_id,
+                agent_id,
+                account: None,
+            },
+            ServerMessage::SessionUpsert {
+                session: Box::new(meta),
+            },
+        )
+        .await;
+    registry
+        .archive_owned(local().account_id, card)
+        .await
+        .expect("外せること");
+    card
+}
+
+#[tokio::test]
+async fn 枠を指定するとその枠のぶんだけ返る() {
+    // **枠の「＋」は「この PJT で起こす」操作**なので、別の PJT のセッションを混ぜると
+    // 押した先に別の枠のカードができる（設計§6-2）。
+    //
+    // **絞るのは記録層の仕事。** かつては全件返して画面が捨てていたが、そうすると
+    // 「どの枠か」の規則が2箇所に在ることになり、しかも件数の上限が枠を跨いで先に
+    // 効くので、枠あたり数件しか残らなかった（実測：75本 → 上限20 → 枠で絞って8件）。
+    for backend in common::backends("past_frame").await {
+        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
+            .await
+            .expect("記録層を立てられること");
+
+        // **PC は先に登録する。** 記録の側が実在する PC しか受けないので、
+        // 登録せずに名乗ると行が書けずに黙って消える（テストの下ごしらえの話）
+        let 別の_pc = server_core::db::pairing::ensure_agent(
+            &backend.db,
+            local().account_id,
+            "別の PC",
+        )
+        .await
+        .expect("PC を登録できること");
+        let ここ = ClaudeSessionId::new();
+        let 別のパス = ClaudeSessionId::new();
+        let 別の機械 = ClaudeSessionId::new();
+        枠つきの外したカード(&registry, ここ, None, "/tmp/ここ").await;
+        枠つきの外したカード(&registry, 別のパス, None, "/tmp/よそ").await;
+        // **パスが同じでも PC が違えば別の枠。** パスだけで絞ると、別の機械の
+        // 同名 PJT のセッションが混ざる（設計§16）
+        枠つきの外したカード(&registry, 別の機械, Some(別の_pc), "/tmp/ここ").await;
+
+        let 絞った = registry
+            .past_sessions(local().account_id, Some((None, "/tmp/ここ")))
+            .await
+            .expect("引けること");
+        let ids: Vec<ClaudeSessionId> = 絞った.iter().map(|row| row.claude_session_id).collect();
+        assert_eq!(ids, vec![ここ], "[{}] 実際: {ids:?}", backend.name);
+
+        // 枠を指定しなければ全部返る（CLI から眺める道を塞がない）
+        let 全部 = registry
+            .past_sessions(local().account_id, None)
+            .await
+            .expect("引けること");
+        assert_eq!(全部.len(), 3, "[{}] 枠なしで絞られている", backend.name);
+
         backend.finish().await;
     }
 }
@@ -1560,11 +1639,14 @@ async fn 名前を付けたものは件数で切られない() {
             外したカード(&registry, ClaudeSessionId::new(), 100 + n).await;
         }
 
-        // 上限2で引く——名前の無いものは2本に切られ、名前付きは残る
-        let past = registry
-            .past_sessions(local().account_id, 2)
+        // 上限2で切る——名前の無いものは2本に切られ、名前付きは残る。
+        // **切るのは引くのと別の関数**（`cap_unnamed`）である。実在を確かめたあとで
+        // なければ、落ちたぶんが補充されず必ず上限より少なくなるため
+        let mut past = registry
+            .past_sessions(local().account_id, None)
             .await
             .expect("引けること");
+        SessionRegistry::cap_unnamed(&mut past, 2);
         let ids: Vec<ClaudeSessionId> = past.iter().map(|row| row.claude_session_id).collect();
         assert!(
             ids.contains(&名付き),

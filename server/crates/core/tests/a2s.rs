@@ -3019,3 +3019,78 @@ async fn 呼び戻しを名乗らない_PC_へは投げない() {
         started.elapsed()
     );
 }
+
+#[tokio::test]
+async fn 実在しないものが混ざっても上限のぶんだけ返る() {
+    // **順序が噛み合っているかを見る。** 正しい順は「枠で絞る → 実在を確かめる →
+    // 件数を切る」で、逆にすると**先に確保した枠から実在しないものが抜けて、必ず
+    // 上限より少なくなる**（実測で 20 の枠から 5 件が消え、15 件しか出ていなかった）。
+    //
+    // 実在しないものを**いちばん新しい側**へ置く。こうすると、切るのが先なら
+    // 必ず枠の中に入り込むので、順序の違いが件数にそのまま出る。
+    let a2s = A2s::start("past-cap-order").await;
+    let home = 偽のホーム(&a2s);
+
+    // 1本だけ本物を起こして、記録の雛形にする（残りは PTY を起こさずに書く）
+    let (種, card_id) = セッションを1本起こす(&a2s).await;
+    履歴を置く(&home, 種);
+    let 雛形 = a2s.registry.get(card_id).expect("記録があること").meta();
+    let agent_id = 雛形.agent_id;
+    外す(&a2s, card_id).await;
+
+    // 上限ちょうどまで「実在するもの」を積み、その上に「実在しないもの」を2本乗せる
+    let 上限 = 20usize;
+    for n in 0..上限 {
+        let session = protocol::ClaudeSessionId::new();
+        履歴を置く(&home, session);
+        書き足す(&a2s, &雛形, agent_id, session, 100 + n as i64).await;
+    }
+    let mut 消えたもの = Vec::new();
+    for n in 0..2 {
+        let session = protocol::ClaudeSessionId::new();
+        // **履歴は置かない**
+        書き足す(&a2s, &雛形, agent_id, session, 900 + n).await;
+        消えたもの.push(session);
+    }
+
+    let past = 過去の一覧(&a2s).await;
+
+    for 消えた in &消えたもの {
+        assert!(
+            !past.iter().any(|row| row.claude_session_id == *消えた),
+            "実体の無いものが残っている"
+        );
+    }
+    assert_eq!(
+        past.len(),
+        上限,
+        "上限のぶんだけ返っていない（実在を確かめる前に切っていないか）"
+    );
+}
+
+/// 記録へ1行だけ足す。**PTY は起こさない**——件数の性質を見るのに実体は要らない。
+async fn 書き足す(
+    a2s: &A2s,
+    雛形: &protocol::SessionMeta,
+    agent_id: Option<protocol::AgentId>,
+    session: protocol::ClaudeSessionId,
+    last_activity_at: i64,
+) {
+    let mut meta = 雛形.clone();
+    meta.card_id = CardId::new();
+    meta.claude_session_id = Some(session);
+    meta.last_activity_at = last_activity_at;
+    a2s.registry
+        .apply(
+            &server_core::registry::ReportOrigin {
+                account_id: a2s.account_id,
+                agent_id,
+                account: None,
+            },
+            protocol::ws::ServerMessage::SessionUpsert {
+                session: Box::new(meta.clone()),
+            },
+        )
+        .await;
+    外す(a2s, meta.card_id).await;
+}

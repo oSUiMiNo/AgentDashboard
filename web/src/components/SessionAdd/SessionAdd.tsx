@@ -89,19 +89,15 @@ export function SessionAdd({ host, project, compact = false }: Props) {
   useEffect(() => {
     if (!open || past !== null) return
     let alive = true
-    void fetch('/api/sessions/past')
+    // **枠はサーバへ渡す。手元では絞らない。** 「どの枠か」の規則が2箇所に在ると
+    // 片方だけ直したときに食い違う。実際に食い違っていた——件数の上限がサーバ側で
+    // 枠を跨いで先に効き、そのあと画面が絞るので、枠あたり数件しか残らなかった
+    const 問い = new URLSearchParams({ host, project })
+    void fetch(`/api/sessions/past?${問い.toString()}`)
       .then((response) => (response.ok ? response.json() : []))
       .then((rows: PastSession[]) => {
         if (!alive) return
-        // **この枠のぶんだけ**に絞る。枠の「＋」は「この PJT で起こす」操作なので、
-        // 別の PJT のセッションを出すと、押した先に別の枠のカードができる
-        setPast(
-          rows.filter(
-            (row) =>
-              row.project === project &&
-              (row.agent_id ?? LOCAL_HOST) === host,
-          ),
-        )
+        setPast(rows)
       })
       .catch(() => {
         // **引けなかったことを「無い」にしない。** 空配列を置くと「過去のセッションは

@@ -1987,6 +1987,21 @@ async fn 他人の過去のセッションは一覧に出ない() {
             "[{}] 他人の過去のセッションが一覧に出ている",
             backend.name
         );
+
+        // **枠を名指ししても越えられない。** 絞り込みはアカウントを引いたあとに
+        // 掛かるので、他人の枠を指定しても自分のぶんしか見えない——ここを
+        // アカウントより先に効かせると、枠を総当たりして他人の記録を覗ける
+        let 相手の枠 = format!(
+            "/api/sessions/past?host=local&project={}",
+            common::meta(theirs.card_id).project.0
+        );
+        let (status, body) = browser.get(&相手の枠).await;
+        assert_eq!(status, 200, "[{}] 枠を指定した一覧が引けない", backend.name);
+        assert!(
+            !body.contains(&相手のセッション.to_string()),
+            "[{}] 枠を名指しすると他人の過去のセッションが出る",
+            backend.name
+        );
         backend.finish().await;
     }
 }

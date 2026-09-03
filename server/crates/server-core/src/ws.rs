@@ -134,18 +134,57 @@ pub async fn api_sessions(
 /// 81本あり、**絞らないと選べなくなる**。
 const PAST_UNNAMED_LIMIT: usize = 20;
 
-/// `GET /api/sessions/past`（名前付け設計§6-2）。
+/// `GET /api/sessions/past` の絞り込み（名前付け設計§6-2）。
 ///
-/// **`exists` は埋めずに返す。** 実在を確かめるには PC へ聞く必要があり、
-/// 答えが返らないこと（PC が居ない・版が古い・時間切れ）と「無い」ことは**別物**である
-/// （設計§8-5）。ここで勝手に「無い」と決めると、記録を消せないぶん取り返しがつかない。
+/// **両方揃ったときだけ枠として使う。** 片方だけでは枠が定まらない——同じパスの PJT が
+/// 別の PC にもありうるので、パスだけで絞ると別の機械のセッションが混ざる（設計§16）。
+#[derive(Debug, Default, Deserialize)]
+pub struct PastQuery {
+    /// どの PC か。`agent_id` の文字列表現か、ローカルを表す `"local"`
+    pub host: Option<String>,
+    /// どの枠か。作業ディレクトリの絶対パス
+    pub project: Option<String>,
+}
+
+/// `GET /api/sessions/past[?host=…&project=…]`（名前付け設計§6-2）。
+///
+/// # 枠を渡すと、その枠のぶんだけ返す
+///
+/// **枠の「＋」は「この PJT で起こす」操作**なので、別の PJT のセッションを混ぜると
+/// 押した先に別の枠のカードができる。**絞るのはここ**で、画面には絞らせない——
+/// 「どの枠か」の規則が2箇所に在ると、片方だけ直したときに食い違う。
+///
+/// 省略すると全部返す（CLI から枠を指定せずに眺める道を塞がない）。
+///
+/// # 順序が決まっている
+///
+/// **枠で絞る → 実在を確かめる → 件数を切る。** この順でないと数が合わない。
+/// 先に切ってから実在を確かめると、落ちたぶんが補充されず**必ず上限より少なくなる**
+/// ——実測で、20件の枠から5件が消えて15件しか出ていなかった。
+///
+/// **`exists` を埋めるのは実在を確かめたところだけ。** 答えが返らないこと（PC が居ない・
+/// 版が古い・時間切れ）と「無い」ことは**別物**である（設計§8-5）。ここで勝手に「無い」と
+/// 決めると、記録を消せないぶん取り返しがつかない。
 pub async fn api_sessions_past(
     State(state): State<AppState>,
     Extension(identity): Extension<Identity>,
+    Query(query): Query<PastQuery>,
 ) -> Result<Json<Vec<protocol::PastSession>>, StatusCode> {
+    let frame = match (query.host.as_deref(), query.project.as_deref()) {
+        (Some(host), Some(project)) => {
+            // 知らない PC は**空の一覧**で返す。断ると、繋いでいない枠を開いただけで
+            // 画面にエラーが出る（設計§10 の「知らない PC を言い分けない」と同じ扱い）
+            let Ok(agent_id) = crate::hosts::parse_host(host) else {
+                return Ok(Json(Vec::new()));
+            };
+            Some((agent_id, project))
+        }
+        _ => None,
+    };
+
     let mut past = state
         .registry
-        .past_sessions(identity.account_id, PAST_UNNAMED_LIMIT)
+        .past_sessions(identity.account_id, frame)
         .await
         .map_err(|err| {
             tracing::warn!("過去のセッションを引けません: {err}");
@@ -187,6 +226,8 @@ pub async fn api_sessions_past(
     }
     // 確かめて無かったものだけ外す。**記録の名前は消さない**
     past.retain(|row| row.exists != Some(false));
+    // **実在を確かめたあとで切る。** 逆にすると、落ちたぶんが補充されない
+    SessionRegistry::cap_unnamed(&mut past, PAST_UNNAMED_LIMIT);
     Ok(Json(past))
 }
 
