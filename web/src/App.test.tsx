@@ -1,5 +1,6 @@
-import { render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import App from './App'
+import { markComposerBusy } from '@/lib/composerBusy'
 import { useAuthStore } from '@/stores/auth'
 import { useWsStore } from '@/stores/ws'
 
@@ -36,6 +37,9 @@ const OPEN_MODE = JSON.stringify({
   from_loopback: true,
 })
 
+/** 差し替えた `location.reload`。呼ばれたかどうかで読み直しを見る。 */
+let 読み直した: ReturnType<typeof vi.fn>
+
 beforeEach(() => {
   // **鍵の状態を毎回まっさらに戻す。** ストアはモジュールに1つなので、前のテストで
   // 通った状態が残ると「聞く前から入れている」テストができてしまう
@@ -50,8 +54,16 @@ beforeEach(() => {
     },
     loading: true,
     lastError: null,
+    // **印も毎回降ろす。** 掛け金なので降ろす口が製品コードに無く、足さないと
+    // 一度立った時点で以降の全テストが読み直しを走らせる
+    serverChanged: false,
   })
   vi.stubGlobal('WebSocket', FakeWebSocket)
+  // 読み直しは実際には起こさせない。`Object.defineProperty(window.location, 'reload')`
+  // は jsdom が拒む（[LegacyUnforgeable]）が、`location` ごと差し替えるのは通る。
+  // `host` と `protocol` は綴りを保つ——`ws.ts` が繋ぎ先を組み立てるのに読む
+  読み直した = vi.fn()
+  vi.stubGlobal('location', { ...window.location, reload: 読み直した })
   // 接続時に取りにいく初期スナップショット（設計§4）と、入口の鍵の状態
   vi.stubGlobal(
     'fetch',
@@ -150,6 +162,69 @@ describe('App', () => {
 
     const banner = screen.getByTestId('selfheal-banner')
     expect(banner.className).toContain('red')
+  })
+})
+
+/**
+ * 版が切り替わったら、タブが自分で読み直す。
+ *
+ * 検知そのものは `stores/auth.test.ts` が、抱えているかの台帳は
+ * `lib/composerBusy.test.ts` と `Composer.test.tsx` が見ている。ここで見るのは**分岐**
+ * ——抱えていなければ読み直し、抱えていればバナーを出して人に任せることである。
+ */
+describe('版が切り替わったときの読み直し', () => {
+  /** 取り下げ忘れが次のテストへ漏れないようにする（台帳はモジュールに1つ）。 */
+  let 取り下げ: (() => void) | null = null
+
+  afterEach(() => {
+    取り下げ?.()
+    取り下げ = null
+  })
+
+  /**
+   * **描いたあとに印を立てる。** 立った状態で描く形にすると、効果の依存を `[]` に
+   * 壊しても通ってしまう（マウント時に一度だけ走れば足りるため）。
+   */
+  it('抱えているものが無ければ、自分で読み直す', () => {
+    render(<App />)
+
+    act(() => {
+      useAuthStore.setState({ serverChanged: true })
+    })
+
+    expect(読み直した).toHaveBeenCalledTimes(1)
+  })
+
+  it('抱えているタブは読み直さず、バナーを出す', () => {
+    取り下げ = markComposerBusy()
+    render(<App />)
+
+    act(() => {
+      useAuthStore.setState({ serverChanged: true })
+    })
+
+    expect(読み直した).not.toHaveBeenCalled()
+    expect(screen.getByTestId('server-changed-banner')).toBeTruthy()
+  })
+
+  it('印が立っていなければ、読み直しもバナーも無い', () => {
+    render(<App />)
+
+    expect(読み直した).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('server-changed-banner')).toBeNull()
+  })
+
+  /** 抱えているタブにとっては、これが唯一の道。**押せることまで確かめる。** */
+  it('抱えていても、「読み込み直す」を押せば読み直す', () => {
+    取り下げ = markComposerBusy()
+    render(<App />)
+    act(() => {
+      useAuthStore.setState({ serverChanged: true })
+    })
+
+    fireEvent.click(screen.getByText('読み込み直す'))
+
+    expect(読み直した).toHaveBeenCalledTimes(1)
   })
 })
 

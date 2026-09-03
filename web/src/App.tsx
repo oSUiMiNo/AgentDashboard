@@ -25,6 +25,7 @@ import { SettingsPage } from '@/components/Settings/SettingsPage'
 import { TileGrid } from '@/components/TileGrid/TileGrid'
 import { ProjectAdd } from '@/components/ProjectAdd/ProjectAdd'
 import { RoamLayer } from '@/components/RoamLayer/RoamLayer'
+import { anyComposerBusy } from '@/lib/composerBusy'
 import { selfhealLabel } from '@/lib/protocol'
 import { ACCOUNT, HOME, LOCAL_HOST, SETTINGS } from '@/lib/routes'
 import { canEnter, useAuthStore } from '@/stores/auth'
@@ -278,13 +279,51 @@ function SelfhealBanner() {
  * 捨てられる**——壊れ方が「エラーが出る」ではなく「一部が黙って更新されなくなる」
  * になるので、気づける形にしておく。
  *
- * **勝手に読み込み直さない。** 入力欄に書きかけの指示があると消える。
+ * # 抱えているものが無ければ、自分で読み直す
+ *
+ * **かつては「勝手に読み込み直さない——書きかけの指示が消える」としていたが、その理由は
+ * もう成り立たない。** 入力欄の書きかけは `lib/drafts.ts` が `localStorage` に置くので、
+ * 読み直しても残る（十字ボタンの工事で入った）。フォルダの掘った位置もサイドバーの幅も
+ * 同じく残る。**読み直して実際に消えるのは、添付した画像だけ**である。
+ *
+ * **「版を勝手に入れ替えない」と「タブを勝手に読み直さない」は別の話。** 前者は走っている
+ * セッションが道連れになるので押すのは人のままだが、**読み直しはその決定の後始末**で
+ * あって、新しい決定ではない（利用者の確認済み・2026-09-03）。
+ *
+ * したがって、抱えているものが無ければ読み直し、抱えているタブにだけバナーを出す。
+ * 抱えているかは `lib/composerBusy.ts` が答える。
+ *
+ * **判定は印が立った瞬間の1度だけで、あとから読み直さない。** 添付を1枚外した直後に
+ * ページが飛ぶと、利用者から見れば「消したら壊れた」に見える。バナーを出したなら、
+ * 押すまで待つ。
+ *
+ * **輪にはならない。** 読み直すとページごと作り直され、ストアの初期値に `version` が
+ * 無い（`undefined`）ので、`load()` の `known !== undefined` が偽になって印が立たない。
+ * 「初回は立たない」がそのまま「読み直しは一度きり」になっているので、**読み直したことを
+ * 覚える置き場所（`sessionStorage` 等）は要らない**。記憶を持つと「いつ消すか」を決める
+ * ことになり、消し忘れれば**本当に新しくなったのに読み直さない**という逆の壊れ方を作る。
+ *
+ * **残る穴を1つ。** 印の立ち上がりと添付の追加が**同一の commit** に畳まれた場合、効果は
+ * 木の順に走るのでこちらが先になり、台帳が空のまま読み直す。踏むには「画像を貼った瞬間と、
+ * 入れ替え後の再接続の応答が同じバッチに乗る」ことが要る。失うのはその瞬間に貼った1枚
+ * だけなので、塞ぐために効果を `<Routes>` の後ろへ移す案は採らない——**JSX の並びが仕様に
+ * なり、テストで固定できない暗黙の依存を作る**ため。
  *
  * 自己修復と枠を分けてあるのは、あちらが単一スロットで、片方がもう片方を
  * 押し出してしまうため（設計§11）。
  */
 function ServerChangedBanner() {
   const serverChanged = useAuthStore((state) => state.serverChanged)
+
+  // **早期 return より前に置く**（フックの規則）。依存は `serverChanged` だけにする
+  // ——台帳を依存に入れると「添付を外したら読み直す」が1行で書けてしまい、上で退けた形に
+  // なる。`[]` では印があとから立つので一度も反応しない
+  useEffect(() => {
+    if (!serverChanged || anyComposerBusy()) {
+      return
+    }
+    window.location.reload()
+  }, [serverChanged])
 
   if (!serverChanged) {
     return null
