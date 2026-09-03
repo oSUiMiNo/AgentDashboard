@@ -506,6 +506,40 @@ pub enum AnnotationTarget {
     },
 }
 
+/// 過去のセッション1本（名前付け設計§6-2）。
+///
+/// `GET /api/sessions/past` が返す行。**カードではなく CLI セッション**を表しているので
+/// `CardId` を持たない——同じセッションを指すカードが複数あることがあり（乗り換えの
+/// 履歴）、どれを代表にするかは意味を持たないため。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PastSession {
+    /// 呼び戻す先。**これが一覧の同一性**（同じIDの行は1つに畳んである）。
+    pub claude_session_id: ClaudeSessionId,
+    /// 利用者が付けた名前。`None` は付けていない
+    pub nickname: Option<String>,
+    /// CLI が付けた名前。名前が無いときに薄く出す側
+    pub session_title: Option<String>,
+    /// 作業ディレクトリ。**起こすときはサーバがここから引く**（ブラウザは運ばない）
+    pub project: ProjectId,
+    /// どの PC のものか。ローカルモードは `None`
+    pub agent_id: Option<AgentId>,
+    /// 記録に残っている権限モード。**画面が既定として使うだけ**で、起こすときは選び直せる
+    pub permission_mode: Option<PermissionMode>,
+    /// 最後に動いた時刻。並びを決める
+    pub last_activity_at: Timestamp,
+    /// **履歴が実在するか**（設計§8-5）。
+    ///
+    /// | 値 | 意味 |
+    /// |---|---|
+    /// | `Some(true)` | 確かめて在った |
+    /// | `Some(false)` | 確かめて無かった。**一覧から外す** |
+    /// | `None` | **確かめていない**（PC が繋がっていない・版が古い・時間切れ） |
+    ///
+    /// **`None` を「無い」と混同しないこと。** 記録を消したら復元できないので、
+    /// 確かめられていないものは残したまま「確かめていない」と出す。
+    pub exists: Option<bool>,
+}
+
 /// 利用者が付けた名前の長さの上限（名前付け設計§10）。
 ///
 /// カードは幅 294px・両側の余白 12px ずつ・字の大きさ 12px なので、**日本語で約22文字、

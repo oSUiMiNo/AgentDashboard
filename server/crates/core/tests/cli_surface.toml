@@ -96,6 +96,11 @@ command = "session ls / session show"
 
 [[entry]]
 kind = "rest"
+target = "GET /api/sessions/past"
+command = "session past"
+
+[[entry]]
+kind = "rest"
 target = "GET /api/sessions/{card_id}/transcript"
 command = "session transcript"
 
@@ -203,6 +208,11 @@ kind = "ws"
 target = "ClientMessage::PtyFlow"
 skip = true
 reason = "受信が追いつかないときにブラウザが送る流量制御。CLI に描画が無いので、送る動機そのものが存在しない（設計§3-3）"
+
+[[entry]]
+kind = "ws"
+target = "ClientMessage::RecallSession"
+command = "session recall"
 
 [[entry]]
 kind = "ws"

@@ -758,6 +758,56 @@ pub async fn kill(target: &Target, prefix: &str) -> Result<Outcome, ClientError>
     outcome
 }
 
+/// `session past`。過去のセッションを並べる（名前付け設計§11-1）。
+///
+/// **`--host` を取らない。** 記録はサーバが持っており、PC ごとに分かれていない——
+/// ただし**どの PC のものかは出力に出る**。
+pub async fn past_sessions(
+    target: &Target,
+) -> Result<(Vec<protocol::PastSession>, String), ClientError> {
+    http::fetch_as(target, "/api/sessions/past").await
+}
+
+/// `session recall`。過去の CLI セッションを指定して、新しいカードで起こす
+/// （名前付け設計§11-1・§11-2）。
+///
+/// # 待ち方は `spawn` と同じ
+///
+/// **新しいカードが1枚増えるまで**待つ。「状態が `Starting` になること」で待つと、
+/// 接続直後に流れてくる写しがそのまま条件を満たし、**サーバが断っているのに
+/// 「起こしました」と言ってしまう**（復旧が同じ罠を踏んでいる）。
+pub async fn recall(
+    target: &Target,
+    claude_session_id: protocol::ClaudeSessionId,
+    permission_mode: Option<PermissionMode>,
+    agent_id: Option<protocol::AgentId>,
+) -> Result<Outcome, ClientError> {
+    // 送る前に既存のIDを控える。`cwd` の一致で待つと、同じフォルダで既に走っている
+    // カードの更新を掴む（`spawn` と同じ理由）
+    let (before, _) = sessions(target).await?;
+    let known = before
+        .iter()
+        .map(|meta| meta.card_id.to_string())
+        .collect::<std::collections::HashSet<_>>();
+
+    let mut ws = ws::Ws::connect(target).await?;
+    ws.send(&ClientMessage::RecallSession {
+        claude_session_id,
+        permission_mode,
+        agent_id,
+    })
+    .await?;
+    let outcome = wait::run(
+        &mut ws,
+        Goal::NewCard { known },
+        "過去のセッションの起動",
+        wait::SPAWN_CAP,
+    )
+    .await;
+    ws.close().await;
+    outcome
+}
+
 /// `session nickname`。カードに付いている CLI セッションへ利用者の名前を付ける
 /// （名前付け設計§11-1）。
 ///

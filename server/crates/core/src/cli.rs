@@ -251,6 +251,26 @@ enum SessionCmd {
         #[command(flatten)]
         out: OutputArgs,
     },
+    /// **過去のセッションを並べる**。名前を付けたものは全部、付けていないものは最近のぶんだけ。
+    /// PC が繋がっていないものは「確かめていない」と出ます（勝手に消しません）
+    Past {
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// **過去のセッションを呼び戻す**（新しいカードで起こし、起動まで待つ）。
+    /// 名前を付けてあれば、起こしたカードにもその名前が付きます
+    Recall {
+        /// CLI のセッションID（`session past` に出るもの）
+        id: String,
+        /// 権限モード。省略すると記録に残っているモードで起こします
+        #[arg(long, value_name = "MODE")]
+        mode: Option<String>,
+        /// どの PC で起こすか。**記録が PC を知っていればそちらが勝ちます**
+        #[arg(long, value_name = "AGENT_ID")]
+        host: Option<String>,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
     /// カードに**自分で名前を付ける**（反映まで待つ）。
     /// 名前は CLI セッションに付くので、`--resume` で乗り換えても付いてきます
     Nickname {
@@ -930,6 +950,43 @@ async fn client_session(
             let human = format!("カードを並べ替えました：{} 枚", ordered.len());
             println!("{}", output::pick(out.json, &raw, &human));
         }
+        SessionCmd::Past { out } => {
+            let (past, raw) = client::past_sessions(target).await?;
+            let human = output::render_past_sessions(&past, now_ms(), home().as_deref());
+            println!("{}", output::pick(out.json, &raw, &human));
+        }
+        SessionCmd::Recall {
+            id,
+            mode,
+            host,
+            out,
+        } => {
+            // **IDは丸ごと要る**（カードIDのような前方一致にしない）。過去のセッションは
+            // 一覧に出ていないものも指せるので、前方一致で解決する相手が居ない
+            let session = protocol::ClaudeSessionId(id.parse().map_err(|_| {
+                client::ClientError::Refused {
+                    status: 400,
+                    message: "セッションIDの形が違います".to_string(),
+                }
+            })?);
+            let agent = match host.as_deref() {
+                None | Some("local") => None,
+                Some(raw) => Some(protocol::AgentId(raw.parse().map_err(|_| {
+                    client::ClientError::Refused {
+                        status: 400,
+                        message: "PC の ID の形が違います".to_string(),
+                    }
+                })?)),
+            };
+            let outcome = client::recall(
+                target,
+                session,
+                mode.map(protocol::PermissionMode::new),
+                agent,
+            )
+            .await?;
+            println!("{}", output::pick(out.json, &outcome.raw, &outcome.human));
+        }
         // `clear` は読まない。**clap が「name か --clear のどちらか片方」を強制している**
         // （`required_unless_present` と `conflicts_with`）ので、name が無いことが
         // そのまま `--clear` を意味する。ここで両方を見ると、同じ約束を2箇所で持つことになる
@@ -1442,6 +1499,11 @@ mod tests {
                 // **生バイトは1つも運ばない**——運ぶのはカードIDと文字列だけで、
                 // 宛先の CLI セッションはサーバが記録から引く
                 "nickname",
+                // 過去のセッションを並べる（名前付け設計§11-1）。**読むだけ**
+                "past",
+                // 過去のセッションを呼び戻す（名前付け設計§11-1）。
+                // **生バイトは1つも運ばない**——運ぶのはセッションIDと選択肢だけ
+                "recall",
                 // 1つの枠の中でカードを並べ替える（並べ替え設計§9-1）。
                 // **運ぶのはカードIDの並びだけ**で、生バイトは1つも通らない
                 "reorder",

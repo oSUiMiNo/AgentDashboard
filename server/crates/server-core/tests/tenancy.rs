@@ -10,7 +10,9 @@
 //! |---|---|
 //! | REST 全エンドポイント | 他人のカードの一覧・履歴を要求する／**他人の枠を一覧・削除し、他人の PC へ枠を作る** |
 //! | WS 購読 | `SubTranscript` / `SubPty` を他人のカードへ出す |
-//! | WS 操作 | `Kill` / `Archive` / `SetModel` / `SetPermissionMode` / `SendInput` / `Resize` / `PtyFlow` / 生の入力 / `Spawn`（他人の PC 宛て）を出す |
+//! | WS 操作 | `Kill` / `Archive` / `SetModel` / `SetPermissionMode` / `SendInput` / `Resize` / `PtyFlow` / **`SetNickname`** / 生の入力 / `Spawn`（他人の PC 宛て）を出す |
+//! | **カードIDを運ばない口** | **他人の CLI セッションを名指しして `RecallSession` を出す**（名前付け設計§11-4）。`target_card` の門が効かないので、記録を引くところで絞れていないと素通りする |
+//! | **過去のセッションの一覧** | `GET /api/sessions/past` に他人のぶんが混ざらない |
 //! | A2S | 自分の接続から**他人の card_id** を報告する |
 //! | 別の PC のログを引く口 | 他人の PC を宛先に `GET /api/hosts/{id}/logs` する（ログ設計§13-1） |
 //! | ブラウザのログの受け口 | 他人の card_id を名乗って `POST /api/client-logs` する（ログ設計§12-5） |
@@ -448,6 +450,15 @@ async fn 他人のカードへの購読と操作は全部断られる() {
             // 起こし直しは**他人の PC で本物の claude を起動させる**操作なので、
             // 越えられると被害がいちばん大きい
             ("起こし直し", ClientMessage::ReviveSession { card_id }),
+            // 名前を付ける口（名前付け設計§11-4）。**書き込みなので越えられると
+            // 他人のカードの見た目を変えられる**
+            (
+                "名前を付ける",
+                ClientMessage::SetNickname {
+                    card_id,
+                    nickname: Some("勝手に付けた名前".to_string()),
+                },
+            ),
         ];
         for (what, message) in crossings {
             browser.expect_refused(message, what).await;
@@ -1857,6 +1868,125 @@ async fn 他人のカードは並べ替えられない() {
             backend.name
         );
 
+        backend.finish().await;
+    }
+}
+
+/// 他人の CLI セッションは呼び戻せない（名前付け設計§11-4）。
+///
+/// # なぜ専用のテストが要るのか
+///
+/// `RecallSession` は**カードIDを運ばない**。`target_card` は「カードを名指しする口」に
+/// 門をかける仕組みなので、この口はそこを素通りする——**記録を引くところで
+/// `account_id` を条件に入れていないと、他人のセッションで本物の claude が起動する。**
+///
+/// 越境の配列（`他人のカードへの購読と操作は全部断られる`）には載せられない。
+/// あちらは `card_id` を持つ口のためのもので、こちらは形が違う。
+#[tokio::test]
+async fn 他人のセッションは呼び戻せない() {
+    for backend in common::backends("tenancy-recall").await {
+        let arena = Arena::start(backend.db.clone()).await;
+        let (mine, _mine_agent) = arena.tenant("わたし").await;
+        let (theirs, mut their_agent) = arena.tenant("よそのひと").await;
+
+        // **呼び戻し先を持つカードを相手側に作る。** 既定の標本は
+        // `claude_session_id` を持たないので、そのままだと「呼び戻す先が無い」で
+        // 断られ、帰属で断られたのかが区別できない
+        let 相手のセッション = protocol::ClaudeSessionId::new();
+        let mut theirs_meta = common::meta(theirs.card_id);
+        theirs_meta.claude_session_id = Some(相手のセッション);
+        their_agent
+            .send(&AgentMessage::SessionUpsert {
+                session: Box::new(theirs_meta),
+            })
+            .await;
+        // 記録に載るまで待つ（載る前に撃つと、無いから断られたのか帰属で断られたのかが
+        // 区別できない）
+        for _ in 0..100 {
+            let listed = arena.registry.list(theirs.account_id);
+            if listed
+                .iter()
+                .any(|meta| meta.claude_session_id == Some(相手のセッション))
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        let mut browser = arena.browser(&mine).await;
+        browser
+            .send(&ClientMessage::RecallSession {
+                claude_session_id: 相手のセッション,
+                permission_mode: None,
+                agent_id: None,
+            })
+            .await;
+
+        // **他人のセッションでも知らないセッションでも同じ言葉**
+        let error = browser
+            .wait_for("呼び戻しの断り", |message| {
+                matches!(message, ServerMessage::Error { .. })
+            })
+            .await;
+        match error {
+            ServerMessage::Error { message, .. } => assert_eq!(
+                message, "セッションが見つかりません",
+                "[{}] 他人のセッションと知らないセッションを呼び分けている",
+                backend.name
+            ),
+            other => panic!("[{}] 断りが返らなかった: {other:?}", backend.name),
+        }
+
+        // 相手のカードが無傷であること（増えていない）
+        let theirs_after = arena.wait_for_listed(theirs.account_id, 1).await;
+        assert_eq!(
+            theirs_after.len(),
+            1,
+            "[{}] 相手のカードが増えている",
+            backend.name
+        );
+        backend.finish().await;
+    }
+}
+
+/// 過去のセッションの一覧に、他人のぶんが混ざらない（名前付け設計§11-4）。
+#[tokio::test]
+async fn 他人の過去のセッションは一覧に出ない() {
+    for backend in common::backends("tenancy-past").await {
+        let arena = Arena::start(backend.db.clone()).await;
+        let (mine, _mine_agent) = arena.tenant("わたし").await;
+        let (theirs, mut their_agent) = arena.tenant("よそのひと").await;
+
+        // 相手側に、**外した（＝過去の）カード**を1枚作る
+        let 相手のセッション = protocol::ClaudeSessionId::new();
+        let mut theirs_meta = common::meta(theirs.card_id);
+        theirs_meta.claude_session_id = Some(相手のセッション);
+        theirs_meta.status = protocol::SessionStatus::Ended { ok: true };
+        their_agent
+            .send(&AgentMessage::SessionUpsert {
+                session: Box::new(theirs_meta),
+            })
+            .await;
+        for _ in 0..100 {
+            if arena
+                .registry
+                .list(theirs.account_id)
+                .iter()
+                .any(|meta| meta.claude_session_id == Some(相手のセッション))
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        let browser = arena.browser(&mine).await;
+        let (status, body) = browser.get("/api/sessions/past").await;
+        assert_eq!(status, 200, "[{}] 自分の一覧が引けない", backend.name);
+        assert!(
+            !body.contains(&相手のセッション.to_string()),
+            "[{}] 他人の過去のセッションが一覧に出ている",
+            backend.name
+        );
         backend.finish().await;
     }
 }

@@ -484,6 +484,129 @@ impl SessionRegistry {
             .cloned()
     }
 
+    /// **過去のセッションの一覧**（名前付け設計§6）。
+    ///
+    /// # `GET /api/sessions` では引けない
+    ///
+    /// あちらは外していないカードだけを返す。外したカードの行は残っているが、
+    /// **読み込みから除かれている**（`Archived.eq(false)` で絞る）ので、記録から
+    /// 直に引く道がここに要る。
+    ///
+    /// # 何を出すか
+    ///
+    /// **名前を付けたものは全部、名前の無いものは最近の N 件**（設計§6-3）。付けた
+    /// 行為そのものが「また使う」の意思表示なので、件数で切ると大事に取っておいた
+    /// ものが新しいものに押し出されて消える。
+    ///
+    /// # 何を出さないか
+    ///
+    /// **実体があるカードが指しているセッション**（§6-4）。起こしても二重になるだけで、
+    /// 利用者が求めているのは「戻ってこないもの」である。接続断・終了のカードが
+    /// 指しているものは**出す**（あちらは「復旧」で戻すほうが自然だが、選べること
+    /// 自体は妨げない）。
+    ///
+    /// `exists` はここでは埋めない（PC に聞くのは呼ぶ側の仕事）。
+    pub async fn past_sessions(
+        &self,
+        account_id: Uuid,
+        unnamed_limit: usize,
+    ) -> Result<Vec<protocol::PastSession>, DbErr> {
+        // いま実体があるカードが指しているセッションは外す。**手元の記録から数える**
+        // ——DB には「繋がっているか」が無い（読み出し時にかぶせる値）
+        let 生きている: std::collections::HashSet<ClaudeSessionId> = self
+            .records
+            .lock()
+            .expect("ロックが壊れていない")
+            .values()
+            .filter(|record| record.account_id == account_id)
+            .filter_map(|record| {
+                let meta = record.meta();
+                // 「実体がある」の裏は `revivable`（実体が無く戻す先がある）。
+                // **同じ規則を二度書かない**
+                (!meta.revivable())
+                    .then_some(meta.claude_session_id)
+                    .flatten()
+            })
+            .collect();
+
+        let rows = entity::sessions::Entity::find()
+            .filter(entity::sessions::Column::AccountId.eq(account_id))
+            .filter(entity::sessions::Column::ClaudeSessionId.is_not_null())
+            .order_by_desc(entity::sessions::Column::LastActivityAt)
+            .all(&self.db)
+            .await?;
+
+        let nicknames = load_nicknames(&self.db, Some(account_id))
+            .await
+            .unwrap_or_default();
+
+        // 同じ CLI セッションを指す行を1つに畳む。**新しいほうを採る**——
+        // 並びが降順なので、最初に見たものが最新
+        let mut 畳んだ: Vec<protocol::PastSession> = Vec::new();
+        let mut 見た = std::collections::HashSet::new();
+        for row in rows {
+            let Some(session) = row.claude_session_id.map(ClaudeSessionId) else {
+                continue;
+            };
+            if 生きている.contains(&session) || !見た.insert(session) {
+                continue;
+            }
+            畳んだ.push(protocol::PastSession {
+                claude_session_id: session,
+                nickname: nicknames.get(&(account_id, session)).cloned(),
+                session_title: row.session_title,
+                project: ProjectId(row.project),
+                agent_id: row.agent_id.map(protocol::AgentId),
+                permission_mode: row.permission_mode.map(PermissionMode::new),
+                last_activity_at: row.last_activity_at,
+                exists: None,
+            });
+        }
+
+        // 名前を付けたものは全部、付けていないものは最近の N 件だけ
+        let mut 無名 = 0usize;
+        畳んだ.retain(|past| {
+            if past.nickname.is_some() {
+                return true;
+            }
+            無名 += 1;
+            無名 <= unnamed_limit
+        });
+        Ok(畳んだ)
+    }
+
+    /// 過去のセッションを**1本だけ**引く（名前付け設計§7・§11-4）。
+    ///
+    /// # `account_id` を必ず条件に入れる
+    ///
+    /// この口を使う `RecallSession` は**カードIDを運ばない**ので `target_card` の門が
+    /// 効かない。ここで絞らないと、**他人のセッションを起こせてしまう**。
+    ///
+    /// 一覧（[`Self::past_sessions`]）と違い、**実体があるかは見ない**。押した時点で
+    /// 走っていたとしても、新しいカードで起こすこと自体は成立する。
+    pub async fn past_session_of(
+        &self,
+        account_id: Uuid,
+        claude_session_id: ClaudeSessionId,
+    ) -> Result<Option<protocol::PastSession>, DbErr> {
+        let row = entity::sessions::Entity::find()
+            .filter(entity::sessions::Column::AccountId.eq(account_id))
+            .filter(entity::sessions::Column::ClaudeSessionId.eq(claude_session_id.0))
+            .order_by_desc(entity::sessions::Column::LastActivityAt)
+            .one(&self.db)
+            .await?;
+        Ok(row.map(|row| protocol::PastSession {
+            claude_session_id,
+            nickname: self.nickname_of(account_id, claude_session_id),
+            session_title: row.session_title,
+            project: ProjectId(row.project),
+            agent_id: row.agent_id.map(protocol::AgentId),
+            permission_mode: row.permission_mode.map(PermissionMode::new),
+            last_activity_at: row.last_activity_at,
+            exists: None,
+        }))
+    }
+
     /// カードに付いている CLI セッションへ、利用者の名前を付ける（名前付け設計§5）。
     ///
     /// # 宛先はカードから引く

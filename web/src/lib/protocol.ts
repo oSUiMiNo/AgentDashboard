@@ -265,6 +265,20 @@ export type ClientMessage =
    * 省かずに `null` を送る。
    */
   | { t: 'set_nickname'; card_id: CardId; nickname: string | null }
+  /**
+   * 過去の CLI セッションを指定して、新しいカードで起こす（名前付け設計§7-1）。
+   *
+   * **カードIDを持たない**（カードはまだ無い）。作業ディレクトリも運ばない——
+   * サーバの記録が持っているので、ここに持たせると古い写しで起こす経路ができる。
+   *
+   * `agent_id` は `spawn` と同じ扱いで、**選択肢が無い場面ではキーごと省く**。
+   */
+  | {
+      t: 'recall_session'
+      claude_session_id: string
+      permission_mode: PermissionMode | null
+      agent_id?: string
+    }
   | { t: 'kill'; card_id: CardId }
   | { t: 'archive'; card_id: CardId }
   // 以下は初期実装でフェーズ3〜4に回した3つ。**いまは全部サーバ側も配線済み**

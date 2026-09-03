@@ -51,13 +51,13 @@ const TENANCY_SOURCE: &str = "crates/server-core/tests/tenancy.rs";
 /// 口の数の固定（設計§1-1「新しい口を1つも作らない」）。CLI はブラウザの席に
 /// 座るだけなので、この作業列で口は1つも増えない。**口を増やす設計判断をしたとき
 /// だけ**、意識してこの数字を上げる。
-const WS_VARIANTS: usize = 14;
-const INSIDE_DOORS: usize = 26;
+const WS_VARIANTS: usize = 15;
+const INSIDE_DOORS: usize = 27;
 const OUTSIDE_DOORS: usize = 5;
 
 /// tenancy.rs の総当たりの本数。口が増えないなら総当たりも増えない（§1-1）。
 /// enforcement を足したときだけ意識して上げる。
-const TENANCY_TESTS: usize = 24;
+const TENANCY_TESTS: usize = 26;
 
 /// `command` に書ける群の先頭語。誤記（存在しない群）を機械で捕まえる。
 const 群: &[&str] = &[
@@ -650,7 +650,7 @@ fn 口の数が設計から動いていない() {
 }
 
 #[test]
-fn wsの13種はブラウザ側の型にも全部ある() {
+fn wsの15種はブラウザ側の型にも全部ある() {
     let path = repo_root().join("web/src/lib/protocol.ts");
     let ts = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("{} を読めること: {e}", path.display()));

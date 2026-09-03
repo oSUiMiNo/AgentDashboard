@@ -182,6 +182,31 @@ pub enum ClientMessage {
     ReviveSession {
         card_id: CardId,
     },
+    /// **過去の CLI セッションを指定して、新しいカードで起こす**（名前付け設計§7-1）。
+    ///
+    /// # なぜ `Spawn` に欄を足さないのか
+    ///
+    /// 古いセッションホストは**知らない欄を読み飛ばす**。`Spawn` に呼び戻し先を足す形に
+    /// すると、あちらでは**ふつうの起動として成立してしまう**——呼び戻したつもりが、
+    /// まっさらな新しいセッションが立つ。しかも利用者から見れば「起こせた」ので、
+    /// **間違いに気づくのは履歴を開いたとき**になる。
+    ///
+    /// 同じ判断が復旧（[`ClientMessage::ReviveSession`]）でも下されている。
+    ///
+    /// # 作業ディレクトリを運ばない
+    ///
+    /// **記録が持っている**（`ReviveSession` と同じ理由）。ブラウザに持たせると、
+    /// 画面が抱えている古い写しで起こす経路ができる。
+    RecallSession {
+        /// 呼び戻す先の CLI セッション。
+        claude_session_id: crate::ClaudeSessionId,
+        /// 起こすときの権限モード。`None` なら CLI に何も渡さない
+        permission_mode: Option<PermissionMode>,
+        /// どの PC で起こすか。`Spawn` と同じ扱いで、`default` と
+        /// `skip_serializing_if` を**組で**付ける
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<crate::AgentId>,
+    },
     /// カードに付いている CLI セッションへ、**利用者の名前を付ける**（名前付け設計§5-1）。
     ///
     /// # 運ぶのはカードIDだけ
@@ -423,6 +448,16 @@ mod tests {
                 state: FlowState::Resume,
             },
             ClientMessage::ReviveSession { card_id },
+            ClientMessage::RecallSession {
+                claude_session_id: crate::ClaudeSessionId::new(),
+                permission_mode: None,
+                agent_id: None,
+            },
+            ClientMessage::RecallSession {
+                claude_session_id: crate::ClaudeSessionId::new(),
+                permission_mode: Some(PermissionMode::new("acceptEdits")),
+                agent_id: Some(crate::AgentId::new()),
+            },
             ClientMessage::SetNickname {
                 card_id,
                 nickname: Some("あとで直すやつ".to_string()),
@@ -624,6 +659,22 @@ mod tests {
         assert_eq!(
             text,
             format!(r#"{{"t":"revive_session","card_id":"{card_id}"}}"#)
+        );
+
+        // 過去から起こす口は**カードIDを持たない**（カードはまだ無い）。`agent_id` は
+        // 選択肢が無い場面でキーごと省く——`Spawn` と同じ形（設計§7-1）
+        let session = crate::ClaudeSessionId::new();
+        let text = serde_json::to_string(&ClientMessage::RecallSession {
+            claude_session_id: session,
+            permission_mode: None,
+            agent_id: None,
+        })
+        .unwrap();
+        assert_eq!(
+            text,
+            format!(
+                r#"{{"t":"recall_session","claude_session_id":"{session}","permission_mode":null}}"#
+            )
         );
 
         // 名前を付ける口もカードIDだけを運ぶ。**宛先の CLI セッションは載せない**——

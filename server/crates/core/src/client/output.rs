@@ -10,7 +10,7 @@
 //! 文字数で数えるので全角が混ざると少しずれるが、読めなくなるほどではなく、
 //! 依存を増やす理由にならない。
 
-use protocol::{SessionMeta, SessionStatus, TreeNode};
+use protocol::{PastSession, SessionMeta, SessionStatus, TreeNode};
 
 /// `--json` のときはサーバの応答を**そのまま**出す（CLI設計§10-2）。
 ///
@@ -149,6 +149,49 @@ pub fn render_sessions(sessions: &[SessionMeta], now_ms: i64, home: Option<&str>
             format_ago(now_ms, meta.last_activity_at),
             host,
             fold_home(&meta.project.0, home),
+        ));
+    }
+    out.pop();
+    out
+}
+
+/// `session past` の一覧（名前付け設計§11-1）。
+///
+/// **「確かめていない」を「無い」と混同させない。** PC が繋がっていないものは
+/// 一覧に残り、その旨が印で出る（設計§8-5）。
+pub fn render_past_sessions(past: &[PastSession], now_ms: i64, home: Option<&str>) -> String {
+    if past.is_empty() {
+        return "過去のセッションはありません".to_string();
+    }
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{:<9} {:<7} {:<9} {:<7} {:<24} {}\n",
+        "SESSION", "実在", "最終活動", "PC", "名前", "PJT"
+    ));
+    for row in past {
+        let host = row
+            .agent_id
+            .map(|id| short_id(&id.to_string()).to_string())
+            .unwrap_or_else(|| "-".to_string());
+        // 利用者の名前があればそれ、無ければ CLI の名前。**どちらも無ければ空**
+        let name = row
+            .nickname
+            .as_deref()
+            .or(row.session_title.as_deref())
+            .unwrap_or("-");
+        out.push_str(&format!(
+            "{:<9} {:<7} {:<9} {:<7} {:<24} {}\n",
+            short_id(&row.claude_session_id.to_string()),
+            match row.exists {
+                Some(true) => "あり",
+                // 確かめて無かったものは一覧に載らないので、ここへは来ない
+                Some(false) => "なし",
+                None => "未確認",
+            },
+            format_ago(now_ms, row.last_activity_at),
+            host,
+            name,
+            fold_home(&row.project.0, home),
         ));
     }
     out.pop();

@@ -125,6 +125,71 @@ pub async fn api_sessions(
     Json(state.registry.list(identity.account_id))
 }
 
+/// 名前を付けていない過去のセッションを、いくつまで一覧に出すか（名前付け設計§6-3）。
+///
+/// **設定キーには出さない。** 画面から数えられる量に収めるための線であって、機械の
+/// 性能で変える値ではない（起こし直し設計§17-3 が同時本数の上限で採った判断と同じ）。
+///
+/// 20 という値は実機の記録から決めた（設計§13）——外したカードは90枚、別のセッションは
+/// 81本あり、**絞らないと選べなくなる**。
+const PAST_UNNAMED_LIMIT: usize = 20;
+
+/// `GET /api/sessions/past`（名前付け設計§6-2）。
+///
+/// **`exists` は埋めずに返す。** 実在を確かめるには PC へ聞く必要があり、
+/// 答えが返らないこと（PC が居ない・版が古い・時間切れ）と「無い」ことは**別物**である
+/// （設計§8-5）。ここで勝手に「無い」と決めると、記録を消せないぶん取り返しがつかない。
+pub async fn api_sessions_past(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+) -> Result<Json<Vec<protocol::PastSession>>, StatusCode> {
+    let mut past = state
+        .registry
+        .past_sessions(identity.account_id, PAST_UNNAMED_LIMIT)
+        .await
+        .map_err(|err| {
+            tracing::warn!("過去のセッションを引けません: {err}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    // 実在を確かめる。**確かめられなかったものは `None` のまま残す**。
+    // PC ごとに分けて聞く（宛先の違うものを1回で聞けない）
+    let mut 宛先: std::collections::BTreeMap<
+        Option<protocol::AgentId>,
+        Vec<protocol::ClaudeSessionId>,
+    > = std::collections::BTreeMap::new();
+    for row in &past {
+        宛先
+            .entry(row.agent_id)
+            .or_default()
+            .push(row.claude_session_id);
+    }
+    let mut 実在 = std::collections::HashSet::new();
+    let mut 確かめた = std::collections::HashSet::new();
+    for (target, ids) in 宛先 {
+        let request = crate::session_host::HostAskRequest {
+            account_id: identity.account_id,
+            target,
+        };
+        match state.agent.sessions_exist(request, &ids).await {
+            Ok(found) => {
+                実在.extend(found);
+                確かめた.extend(ids);
+            }
+            // **消さない。** 聞けなかっただけで、無いとは限らない（設計§8-5）
+            Err(err) => tracing::info!("実在を確かめられませんでした（{target:?}）: {err:?}"),
+        }
+    }
+    for row in &mut past {
+        if 確かめた.contains(&row.claude_session_id) {
+            row.exists = Some(実在.contains(&row.claude_session_id));
+        }
+    }
+    // 確かめて無かったものだけ外す。**記録の名前は消さない**
+    past.retain(|row| row.exists != Some(false));
+    Ok(Json(past))
+}
+
 /// `PUT /api/sessions/order` の中身（並べ替え設計§9-1）。
 #[derive(Debug, serde::Serialize, Deserialize)]
 pub struct ReorderRequest {
@@ -496,6 +561,51 @@ async fn handle_request(
             }
         }
 
+        // 過去の CLI セッションを指定して、新しいカードで起こす（名前付け設計§7）。
+        //
+        // **記録を引くときに `account_id` を条件に入れる。** この口はカードIDを
+        // 運ばないので `target_card` の門が効かない——入れないと、他人のセッションを
+        // 起こせてしまう
+        ClientMessage::RecallSession {
+            claude_session_id,
+            permission_mode,
+            agent_id,
+        } => {
+            match state
+                .registry
+                .past_session_of(identity.account_id, claude_session_id)
+                .await
+            {
+                Ok(Some(past)) => {
+                    // 宛先はブラウザの指定より**記録の値**を優先する。記録が PC を
+                    // 知っているのに別の PC を指定されたら、そこには履歴が無い
+                    let target = past.agent_id.or(agent_id);
+                    if let Err(message) = state
+                        .agent
+                        .recall(crate::session_host::RecallRequest {
+                            account_id: identity.account_id,
+                            target,
+                            cwd: past.project.0.clone(),
+                            // 記録のモードは**既定**でしかない。選び直せる（設計§9-4）
+                            permission_mode: permission_mode.or(past.permission_mode),
+                            claude_session_id,
+                        })
+                        .await
+                    {
+                        // **カードを名指ししない**（`Spawn` と同じ）。採番は PC 側なので、
+                        // 失敗した時点ではまだIDが無い
+                        send_error(outbound, None, message).await;
+                    }
+                }
+                // **他人のセッションでも知らないセッションでも同じ言葉**（設計§11-4）
+                Ok(None) => send_error(outbound, None, NOT_FOUND.to_string()).await,
+                Err(err) => {
+                    tracing::warn!("過去のセッションを引けません: {err}");
+                    send_error(outbound, None, "記録を読めませんでした".to_string()).await;
+                }
+            }
+        }
+
         // カードに付いている CLI セッションへ、利用者の名前を付ける（名前付け設計§5）。
         //
         // **宛先はサーバが記録から引く。** ブラウザに `ClaudeSessionId` を持たせると、
@@ -695,8 +805,12 @@ fn target_card(request: &ClientMessage) -> Option<CardId> {
         | ClientMessage::SetNickname { card_id, .. }
         | ClientMessage::Kill { card_id }
         | ClientMessage::Archive { card_id } => Some(*card_id),
-        // まだカードが無い（作る側）
-        ClientMessage::Spawn { .. } => None,
+        // まだカードが無い（作る側）。
+        //
+        // **`RecallSession` はここに入るが、門が効かないぶん記録を引くところで
+        // `account_id` を条件に入れる**（名前付け設計§11-4）。カードIDを運ばないので
+        // `target_card` では守れない——今回いちばん抜けやすいところである
+        ClientMessage::Spawn { .. } | ClientMessage::RecallSession { .. } => None,
     }
 }
 

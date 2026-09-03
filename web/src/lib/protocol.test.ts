@@ -238,6 +238,33 @@ describe('サーバと同じ JSON になること', () => {
     )
   })
 
+  it('recall_session', () => {
+    // 4箇所同期の最後の1つ（名前付け設計§7-1）。Rust 側
+    // `client_messageは全種が往復する` が固定している綴りと1文字も違わないこと。
+    // **カードIDを持たない**（カードはまだ無い）
+    const session = '11111111-2222-3333-4444-555555555555'
+    const 指名なし: ClientMessage = {
+      t: 'recall_session',
+      claude_session_id: session,
+      permission_mode: null,
+    }
+    expect(JSON.stringify(指名なし)).toBe(
+      `{"t":"recall_session","claude_session_id":"${session}","permission_mode":null}`,
+    )
+
+    // `agent_id` は **`spawn` と同じで、選択肢が無い場面ではキーごと省く**
+    const 指名あり: ClientMessage = {
+      t: 'recall_session',
+      claude_session_id: session,
+      permission_mode: 'acceptEdits',
+      agent_id: '66666666-7777-8888-9999-000000000000',
+    }
+    expect(JSON.stringify(指名あり)).toBe(
+      `{"t":"recall_session","claude_session_id":"${session}",` +
+        `"permission_mode":"acceptEdits","agent_id":"66666666-7777-8888-9999-000000000000"}`,
+    )
+  })
+
   it('set_nickname', () => {
     // 4箇所同期の最後の1つ（名前付け設計§5-1）。Rust 側
     // `client_messageは全種が往復する` が固定している綴りと1文字も違わないこと。

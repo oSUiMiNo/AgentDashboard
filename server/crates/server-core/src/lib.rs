@@ -62,6 +62,7 @@ pub fn routes(state: ws::AppState, auth: Arc<auth::AuthContext>) -> Router {
     let protected = Router::new()
         .route("/ws", get(ws::ws_handler))
         .route("/api/sessions", get(ws::api_sessions))
+        .route("/api/sessions/past", get(ws::api_sessions_past))
         // 並べ替えの保存（並べ替え設計§9-1）。**丸ごと受け取って 0 から詰め直す**
         .route("/api/sessions/order", put(ws::api_sessions_reorder))
         .route(
