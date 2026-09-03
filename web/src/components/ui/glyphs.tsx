@@ -83,3 +83,33 @@ export function PencilGlyph({ className }: { className?: string }) {
     </svg>
   )
 }
+
+/**
+ * 「前へ／後ろへ」「上へ／下へ」の印（並べ替え設計§15-6）。**言葉は `aria-label` と `title` に残す。**
+ *
+ * 帯（まとめて操作）に置き、1つ選んでいるときだけ出す——ドラッグ以外の道
+ * （WCAG 2.2 SC 2.5.7）。向きは4つで、同じ山形を回して使う。
+ */
+export function ChevronGlyph({
+  direction,
+  className,
+}: {
+  direction: 'up' | 'down' | 'left' | 'right'
+  className?: string
+}) {
+  const rotate = { up: 0, right: 90, down: 180, left: 270 }[direction]
+  return (
+    <svg
+      aria-hidden
+      viewBox="0 0 24 24"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="m6 15 6-6 6 6" transform={`rotate(${rotate} 12 12)`} />
+    </svg>
+  )
+}

@@ -1,7 +1,7 @@
-import { act, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
-import { TileGrid } from './TileGrid'
+import { ANNOUNCE_DEBOUNCE_MS, TileGrid, 移動の文言 } from './TileGrid'
 import type { SessionMeta } from '@/lib/protocol'
 import {
   applySessionSnapshot,
@@ -634,6 +634,118 @@ describe('まとめて操作の帯', () => {
     expect(screen.getByTestId('bulk-count')).toHaveTextContent('起こせるのは 0枚')
   })
 
+  /** 並びを送る口の `fetch` を偽り、送った body を控える */
+  function 送り先を偽る(status = 200, body = '') {
+    const 送った: { url: string; body: unknown }[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        送った.push({ url, body: init?.body ? JSON.parse(init.body as string) : null })
+        return { ok: status < 400, status, text: async () => body } as unknown as Response
+      }),
+    )
+    return 送った
+  }
+
+  /** 同じ枠のカード。**枠が違うと「並び」は1枚しか無い**（帯のボタンは同じ枠の中で動かす） */
+  const 同じ枠 = (id: string) => meta(id, { project: '/dev/same' })
+
+  it('1つだけ選んでいるときに「前へ」「後ろへ」が出て、2つ選ぶと消える', async () => {
+    // **ドラッグ以外の道**（設計§15-6・WCAG 2.2 SC 2.5.7）。2つ以上では宛先が定まらない
+    applySessionSnapshot([同じ枠('a'), 同じ枠('b')])
+    renderGrid()
+    expect(screen.queryByTestId('bulk-move-back')).not.toBeInTheDocument()
+
+    const tiles = screen.getAllByTestId('session-tile')
+    await userEvent.click(tiles[0])
+    expect(screen.getByTestId('bulk-move-back')).toBeInTheDocument()
+    expect(screen.getByTestId('bulk-move-forward')).toBeInTheDocument()
+
+    await userEvent.click(tiles[1])
+    expect(screen.queryByTestId('bulk-move-back')).not.toBeInTheDocument()
+  })
+
+  it('先頭では「前へ」が押せず、末尾では「後ろへ」が押せない', async () => {
+    applySessionSnapshot([同じ枠('a'), 同じ枠('b')])
+    renderGrid()
+    const tiles = screen.getAllByTestId('session-tile')
+    await userEvent.click(tiles[0])
+    expect(screen.getByTestId('bulk-move-back')).toBeDisabled()
+    expect(screen.getByTestId('bulk-move-forward')).toBeEnabled()
+  })
+
+  it('「後ろへ」を押すと、そのカードの枠の並びをドラッグと同じ口で送る', async () => {
+    const 送った = 送り先を偽る()
+    applySessionSnapshot([同じ枠('a'), 同じ枠('b')])
+    renderGrid()
+    await userEvent.click(screen.getAllByTestId('session-tile')[0])
+    await userEvent.click(screen.getByTestId('bulk-move-forward'))
+
+    expect(送った).toHaveLength(1)
+    expect(送った[0].url).toBe('/api/sessions/order')
+    expect(送った[0].body).toMatchObject({ card_ids: ['b', 'a'] })
+  })
+
+  it('動かした結果は、帯の外の status に読み上げの文言として出る', async () => {
+    送り先を偽る()
+    applySessionSnapshot([同じ枠('a'), 同じ枠('b')])
+    renderGrid()
+    await userEvent.click(screen.getAllByTestId('session-tile')[0])
+    await userEvent.click(screen.getByTestId('bulk-move-forward'))
+
+    const live = await screen.findByText(/移動しました/)
+    expect(live).toHaveAttribute('role', 'status')
+    // **帯の中に置くと、何も選んでいないとき `aria-hidden` ごと消えて読まれない**
+    expect(screen.getByTestId('bulk-row').contains(live)).toBe(false)
+  })
+
+  it('断られたら、理由を読み上げる', async () => {
+    送り先を偽る(409, 'いまは並べ替えられません')
+    applySessionSnapshot([同じ枠('a'), 同じ枠('b')])
+    renderGrid()
+    await userEvent.click(screen.getAllByTestId('session-tile')[0])
+    await userEvent.click(screen.getByTestId('bulk-move-forward'))
+
+    expect(await screen.findByText('いまは並べ替えられません', { selector: '[role="status"]' })).toBeInTheDocument()
+  })
+
+  it('連打しても、文言の差し替えは 100ms に1回', async () => {
+    送り先を偽る()
+    applySessionSnapshot([同じ枠('a'), 同じ枠('b'), 同じ枠('c')])
+    renderGrid()
+    await userEvent.click(screen.getAllByTestId('session-tile')[0])
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      fireEvent.click(screen.getByTestId('bulk-move-forward'))
+      await act(async () => {
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      fireEvent.click(screen.getByTestId('bulk-move-forward'))
+      await act(async () => {
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      expect(screen.getByTestId('bulk-live')).toHaveTextContent('')
+      act(() => {
+        vi.advanceTimersByTime(ANNOUNCE_DEBOUNCE_MS)
+      })
+      expect(screen.getByTestId('bulk-live')).toHaveTextContent(/移動しました/)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('帯の高さは固定のまま（増やしたボタンで崩していない）', async () => {
+    applySessionSnapshot([meta('a')])
+    renderGrid()
+    await userEvent.click(screen.getByTestId('session-tile'))
+    const 帯 = screen.getByTestId('bulk-row')
+    for (const 字 of ['h-10', 'flex-nowrap', 'overflow-hidden']) {
+      expect(帯.className).toContain(字)
+    }
+  })
+
   it('印だけで、文字は使わない', async () => {
     // **利用者の指定**（設計§5-2）。何をするものかはマウスを乗せたときと、
     // 読み上げ用の名前で伝える
@@ -641,11 +753,22 @@ describe('まとめて操作の帯', () => {
     renderGrid()
     await userEvent.click(screen.getByTestId('session-tile'))
 
-    for (const id of ['bulk-revive', 'bulk-remove']) {
+    for (const id of ['bulk-move-back', 'bulk-move-forward', 'bulk-revive', 'bulk-remove']) {
       const button = screen.getByTestId(id)
       expect(button.textContent).toBe('')
       expect(button.getAttribute('aria-label')).toBeTruthy()
       expect(button.getAttribute('title')).toBeTruthy()
     }
+  })
+})
+
+describe('移動の文言', () => {
+  it('前後とも居れば「あいだへ」', () => {
+    expect(移動の文言('B', ['A', 'B', 'C'], 1)).toBe('「B」を「A」と「C」のあいだへ移動しました')
+  })
+
+  it('先頭と末尾は名指しで言う', () => {
+    expect(移動の文言('A', ['A', 'B'], 0)).toBe('「A」を先頭へ移動しました（「B」の前）')
+    expect(移動の文言('B', ['A', 'B'], 1)).toBe('「B」を末尾へ移動しました（「A」の後ろ）')
   })
 })

@@ -16,7 +16,9 @@ import { useReorder, type Scroller } from '@/lib/useReorder'
 import { ProjectGroup } from '@/components/ProjectGroup/ProjectGroup'
 import { ReviveBudgetDialog } from '@/components/TileGrid/ReviveBudgetDialog'
 import { Button } from '@/components/ui/button'
-import { PowerGlyph, TrashGlyph } from '@/components/ui/glyphs'
+import { ChevronGlyph, PowerGlyph, TrashGlyph } from '@/components/ui/glyphs'
+import { moveItem } from '@/lib/reorder'
+import { nicknameOf } from '@/lib/protocol'
 import { reviveState } from '@/lib/protocol'
 import {
   fetchHostResources,
@@ -30,6 +32,7 @@ import {
 } from '@/lib/reviveBudget'
 import {
   getSession,
+  saveCardOrder,
   setAccountFilter,
   useAccountFilter,
   useProjectGroups,
@@ -40,6 +43,30 @@ import { saveProjectOrder } from '@/stores/projects'
 import { clearSelection, useSelection } from '@/stores/selection'
 import { agentOf, useSettingsStore } from '@/stores/settings'
 import { useWsStore } from '@/stores/ws'
+
+/** 読み上げの文言を差し替えるまでの待ち（ms）。連打を1回にまとめる（設計§15-6） */
+export const ANNOUNCE_DEBOUNCE_MS = 100
+
+/**
+ * 「前へ／後ろへ」で動かした結果の文言（並べ替え設計§15-6）。**純関数。**
+ *
+ * `並び` は新しい並びの**名前**、`添字` は動かしたものの新しい位置。Atlassian の作法
+ * どおり「A と B のあいだへ」と言い、端では「先頭へ」「末尾へ」と言う。
+ */
+export function 移動の文言(名前: string, 並び: readonly string[], 添字: number): string {
+  const 前 = 添字 > 0 ? 並び[添字 - 1] : null
+  const 後 = 添字 < 並び.length - 1 ? 並び[添字 + 1] : null
+  if (前 !== null && 後 !== null) {
+    return `「${名前}」を「${前}」と「${後}」のあいだへ移動しました`
+  }
+  if (後 !== null) {
+    return `「${名前}」を先頭へ移動しました（「${後}」の前）`
+  }
+  if (前 !== null) {
+    return `「${名前}」を末尾へ移動しました（「${前}」の後ろ）`
+  }
+  return `「${名前}」を移動しました`
+}
 
 export function TileGrid() {
   const groups = useProjectGroups()
@@ -188,6 +215,91 @@ export function TileGrid() {
     **新しい口は作らない**（§5-5）。既存の復旧・外すを、選んだぶんだけ繰り返す。
   */
   const 選択 = useSelection()
+  /*
+    **ドラッグ以外の道**（並べ替え設計§15-6・WCAG 2.2 SC 2.5.7）。1つだけ選んでいるときに
+    「前へ／後ろへ」（枠なら「上へ／下へ」）を帯に出す。2つ以上では宛先が定まらないので
+    出さない——十字ボタンを横並びで出さないのと同じ理由。送り先は**ドラッグと同じ口**。
+  */
+  const 一つだけ = 選択.ids.length === 1 ? 選択.ids[0] : null
+  const カードの名前 = (id: string): string => {
+    const session = getSession(id)
+    const 名 = session === undefined ? null : nicknameOf(session).text
+    return 名 !== null && 名 !== '' ? 名 : id.slice(0, 8)
+  }
+  /** 選んでいる1つの、いまの位置と並び（名前）。無ければ null */
+  const 一つの居場所 = ((): {
+    at: number
+    並び: readonly string[]
+    名前: (id: string) => string
+    送る: (next: readonly string[]) => Promise<string | null>
+  } | null => {
+    if (一つだけ === null) {
+      return null
+    }
+    if (選択.kind === 'project') {
+      const keys = frames.map(鍵)
+      const at = keys.findIndex((key) => idByKey.current.get(key) === 一つだけ)
+      if (at < 0) {
+        return null
+      }
+      const 名前 = (key: string) => key.slice(key.indexOf('\u0000') + 1)
+      return { at, 並び: keys, 名前, 送る: 並びを送る }
+    }
+    const group = groups.find((each) => each.cards.includes(一つだけ))
+    if (group === undefined) {
+      return null
+    }
+    return {
+      at: group.cards.indexOf(一つだけ),
+      並び: group.cards,
+      名前: カードの名前,
+      送る: (next) => saveCardOrder(group.host, group.project, next),
+    }
+  })()
+  const [通知, set通知] = useState('')
+  const 通知の予定 = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    return () => {
+      if (通知の予定.current !== null) {
+        clearTimeout(通知の予定.current)
+      }
+    }
+  }, [])
+  /** 読み上げの文言を、少し待ってから差し替える（連打を1回にまとめる） */
+  const 告げる = (文: string) => {
+    if (通知の予定.current !== null) {
+      clearTimeout(通知の予定.current)
+    }
+    通知の予定.current = setTimeout(() => {
+      通知の予定.current = null
+      set通知(文)
+    }, ANNOUNCE_DEBOUNCE_MS)
+  }
+  const 前への札 = useRef<HTMLButtonElement>(null)
+  const 後ろへの札 = useRef<HTMLButtonElement>(null)
+  const 隣へ = async (向き: -1 | 1) => {
+    if (一つだけ === null || 一つの居場所 === null) {
+      return
+    }
+    const { at, 並び, 名前, 送る } = 一つの居場所
+    const next = moveItem(並び, at, at + 向き)
+    if (next === 並び) {
+      return
+    }
+    const 断られた = await 送る(next)
+    if (断られた !== null) {
+      告げる(断られた)
+      return
+    }
+    const 新しい添字 = at + 向き
+    告げる(移動の文言(名前(並び[at]), next.map(名前), 新しい添字))
+    // 端へ着いて押したボタンが押せなくなるなら、反対側へフォーカスを移す（落とさない）
+    if (新しい添字 === 0) {
+      後ろへの札.current?.focus()
+    } else if (新しい添字 === next.length - 1) {
+      前への札.current?.focus()
+    }
+  }
   const 起こせる =
     選択.kind === 'card'
       ? targets.filter((target) => 選択.ids.includes(target.cardId))
@@ -369,6 +481,15 @@ export function TileGrid() {
           「全て復旧」の行そのものへ混ぜないのは、あちらの内訳の文字数で行の高さが
           変わるため。**別の器にしたうえで、高さだけを常に確保する。**
         */}
+        {/*
+          **読み上げは帯の外に置く**（並べ替え設計§15-6）。帯は何も選んでいないとき
+          `aria-hidden` なので、中に置くと `role="status"` ごと支援技術から消え、次に現れても
+          「動的な変化」として読まれない。空のまま先に DOM へ置く（`InputDock` と同じ作法）。
+          `sr-only` は絶対配置なので高さを取らず、帯の高さ固定を崩さない。
+        */}
+        <div role="status" aria-live="polite" data-testid="bulk-live" className="sr-only">
+          {通知}
+        </div>
         <div
           data-testid="bulk-row"
           aria-hidden={選択.ids.length === 0}
@@ -392,6 +513,48 @@ export function TileGrid() {
               : `${選択.ids.length}枠を選んでいます`}
           </span>
           <div className="ml-auto flex items-center gap-1">
+            {一つの居場所 !== null && (
+              <>
+                <Button
+                  ref={前への札}
+                  type="button"
+                  variant="outline"
+                  size="icon-sm"
+                  data-testid="bulk-move-back"
+                  disabled={一つの居場所.at === 0}
+                  aria-label={選択.kind === 'card' ? '選んだカードを1つ前へ' : '選んだ枠を1つ上へ'}
+                  title={
+                    選択.kind === 'card'
+                      ? '選んだカードを1つ前へ動かします（掴んで運ぶのと同じ結果になります）'
+                      : '選んだ PJT 枠を1つ上へ動かします（掴んで運ぶのと同じ結果になります）'
+                  }
+                  onClick={() => {
+                    void 隣へ(-1)
+                  }}
+                >
+                  <ChevronGlyph direction={選択.kind === 'card' ? 'left' : 'up'} className="size-3.5" />
+                </Button>
+                <Button
+                  ref={後ろへの札}
+                  type="button"
+                  variant="outline"
+                  size="icon-sm"
+                  data-testid="bulk-move-forward"
+                  disabled={一つの居場所.at === 一つの居場所.並び.length - 1}
+                  aria-label={選択.kind === 'card' ? '選んだカードを1つ後ろへ' : '選んだ枠を1つ下へ'}
+                  title={
+                    選択.kind === 'card'
+                      ? '選んだカードを1つ後ろへ動かします（掴んで運ぶのと同じ結果になります）'
+                      : '選んだ PJT 枠を1つ下へ動かします（掴んで運ぶのと同じ結果になります）'
+                  }
+                  onClick={() => {
+                    void 隣へ(1)
+                  }}
+                >
+                  <ChevronGlyph direction={選択.kind === 'card' ? 'right' : 'down'} className="size-3.5" />
+                </Button>
+              </>
+            )}
             {選択.kind === 'card' && (
               <Button
                 type="button"
