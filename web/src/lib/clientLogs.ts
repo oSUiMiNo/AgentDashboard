@@ -55,6 +55,15 @@ export type ClientLogKind =
   | 'react_recoverable'
   | 'ws_error'
   | 'ws_close'
+  /**
+   * 版が変わったときに、読み直したか見送ったか。
+   *
+   * **これだけは失敗ではない**（レベルは `INFO`）。分岐点を残さないと、読み直しが
+   * 不発だったときにログから原因を追えない。綴りは `crates/protocol` の
+   * `ClientLogKind` と揃っていること——**あちらは閉じた列挙なので、食い違うと
+   * そのバッチが丸ごと 400 で拒まれ、同じ便を延々と送り直す**
+   */
+  | 'version_reload'
 
 export interface ClientLogEntry {
   ts: string
