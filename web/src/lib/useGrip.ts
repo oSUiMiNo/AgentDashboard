@@ -223,6 +223,18 @@ export function useGrip({
         // 掴める本体の中のボタン。**押しても掴まない**
         return
       }
+      /*
+        **前の運びの印を、ここで捨てる。**
+
+        `onClickCapture` は「運んだ直後の `click`」を1回だけ捨てるが、
+        **指で運んだときは `click` がそもそも飛ばないことがある**（`touchmove` を
+        止めているため合成の `click` が抑えられる）。捨て損ねた印が残ると、
+        **次のタップが1回だけ食われる**——押しても何も起きないので、
+        壊れているのと見分けが付かない。
+
+        押し直した時点で「直後」ではなくなるので、ここで落とすのが正しい。
+      */
+      運んだ.current = false
       const element = event.currentTarget
       const now: Held = {
         pointerId: event.pointerId,
