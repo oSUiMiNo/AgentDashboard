@@ -154,6 +154,11 @@ export default defineConfig({
       // 実行ファイル3本ぶん（数十MB）を test-results へ控えにいく
       AGENTDASHBOARD_VERSION_HANDED_OVER: '1',
       AGENTDASHBOARD_VERSION_SUPPORTED: '0',
+      // **履歴の走査元を隔離する**（名前付け設計§13-1）。過去のセッションの実在確認は
+      // `<ここ>/.claude/projects` を舐めるので、塞がないと**開発者の本物のホーム**を
+      // 見にいく——開発機には 1,119 フォルダ・27,499本の `.jsonl` があり、
+      // 遅いうえに機械ごとに結果が変わる。テストは自分でここへ置く
+      AGENTDASHBOARD_CLAUDE_HOME: '.e2e-state/claude-home',
       RUST_LOG: 'info',
     },
     url: 'http://127.0.0.1:4173',
