@@ -148,6 +148,10 @@ test('枠をマウスで掴んで並べ替えられる', async ({ page }) => {
   if (!的) {
     throw new Error('枠の位置が取れません')
   }
+  // **保存の返事を待つ相手を先に用意する。** 離した瞬間に手元の並びが見えるので
+  // （設計§15-4）、画面の並びだけ見て読み直すと、まだ送っている途中の PUT を
+  // 読み直しで打ち切ることがある（通しで1回落ちた）
+  const 保存 = page.waitForResponse((response) => response.url().includes('/api/projects/order'))
   // **枠の余白を掴む。** 中心はカードなので、そちらを掴んでしまう
   await マウスで運ぶ(
     page,
@@ -162,6 +166,7 @@ test('枠をマウスで掴んで並べ替えられる', async ({ page }) => {
       return 後で.indexOf(後) < 後で.indexOf(先)
     })
     .toBe(true)
+  expect((await 保存).ok()).toBe(true)
 
   // **リロードしても残る**（記録に入っていることの担保。§2）
   await page.reload()
@@ -278,6 +283,8 @@ test('カードを並べ替えると、PJT 専用画面も同じ順になる', a
   if (!一枚目の箱) {
     throw new Error('カードの位置が取れません')
   }
+  // 保存の返事を待つ相手を先に用意する（上の枠のテストと同じ理由）
+  const 保存 = page.waitForResponse((response) => response.url().includes('/api/sessions/order'))
   // **カードは本体をそのまま掴む**（掴み手は無くなった）
   await マウスで運ぶ(page, 二枚目, {
     x: 一枚目の箱.x + 一枚目の箱.width / 2,
@@ -287,6 +294,7 @@ test('カードを並べ替えると、PJT 専用画面も同じ順になる', a
   await expect
     .poll(async () => (await カードの並び(枠))[0])
     .toBe(前[1])
+  expect((await 保存).ok()).toBe(true)
 
   // PJT 専用画面でも同じ順であること
   // **開くのはダブルクリック**（設計§4-1）
