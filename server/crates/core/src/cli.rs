@@ -965,11 +965,7 @@ async fn client_session(
             let human = format!("カードを並べ替えました：{} 枚", ordered.len());
             println!("{}", output::pick(out.json, &raw, &human));
         }
-        SessionCmd::Past {
-            host,
-            project,
-            out,
-        } => {
+        SessionCmd::Past { host, project, out } => {
             let frame = host.as_deref().zip(project.as_deref());
             let (past, raw) = client::past_sessions(target, frame).await?;
             let human = output::render_past_sessions(&past, now_ms(), home().as_deref());

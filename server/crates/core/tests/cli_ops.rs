@@ -882,7 +882,10 @@ async fn 過去の一覧は_CLI_からも枠で絞れる() {
         絞った.len(),
         1,
         "頼んだ枠のぶんが1本だけ返っていない: {:?}",
-        絞った.iter().map(|r| r.project.0.clone()).collect::<Vec<_>>()
+        絞った
+            .iter()
+            .map(|r| r.project.0.clone())
+            .collect::<Vec<_>>()
     );
     assert_eq!(
         絞った[0].project.0,
@@ -895,7 +898,8 @@ async fn 過去の一覧は_CLI_からも枠で絞れる() {
         .await
         .expect("引けること");
     assert!(
-        全部.iter()
+        全部
+            .iter()
             .any(|row| row.project.0 == よそ.to_string_lossy()),
         "枠なしなのに、別の枠のものが出てこない: {:?}",
         全部.iter().map(|r| r.project.0.clone()).collect::<Vec<_>>()

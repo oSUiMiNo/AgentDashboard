@@ -1568,13 +1568,10 @@ async fn 枠を指定するとその枠のぶんだけ返る() {
 
         // **PC は先に登録する。** 記録の側が実在する PC しか受けないので、
         // 登録せずに名乗ると行が書けずに黙って消える（テストの下ごしらえの話）
-        let 別の_pc = server_core::db::pairing::ensure_agent(
-            &backend.db,
-            local().account_id,
-            "別の PC",
-        )
-        .await
-        .expect("PC を登録できること");
+        let 別の_pc =
+            server_core::db::pairing::ensure_agent(&backend.db, local().account_id, "別の PC")
+                .await
+                .expect("PC を登録できること");
         let ここ = ClaudeSessionId::new();
         let 別のパス = ClaudeSessionId::new();
         let 別の機械 = ClaudeSessionId::new();
