@@ -111,25 +111,43 @@ async fn 異常終了の終了コードを取得できる() {
 /// **`exit_rx` が返るだけでは足りない。** あれは待ちスレッドが `wait()` を終えた合図だが、
 /// 「OS のプロセス表から消えたか」までは言っていない。**実機で78体溜まったときも、
 /// カードは正しく `Ended` になっていた**——画面の勘定と OS の勘定は別々に動く。
+///
+/// # 即死する子を使わない
+///
+/// 最初は `--exit-code 0` で起こしていたが、**あれは起こした瞬間に終わる**ので、
+/// 数えに行くまでに引き取られていることがある。すると「1本見えること」の側で落ちて、
+/// **本題（引き取られたか）を確かめる前に赤くなる**（別セッションの機械で実際に起きた）。
+///
+/// **生き続ける子を起こし、見えたことを確かめてから、こちらで終わらせる。** 競合そのものが
+/// 無くなるうえ、実機で起きている形（走っているセッションを畳む）にも近い。
 #[tokio::test]
 async fn 終わった子はプロセス表に残らない() {
-    let Some(root) = std::fs::read_dir("/proc").ok() else {
+    if std::fs::read_dir("/proc").is_err() {
         // Linux 以外。**読めないことは異常ではない**
         return;
-    };
-    drop(root);
+    }
 
     let (chunks_tx, _chunks_rx) = mpsc::channel(8);
-    let mut command = CommandBuilder::new(common::fake_claude());
-    command.arg("--exit-code");
-    command.arg("0");
+    // **終了コードを渡さない**＝指示を待ち続ける。数え終えるまで生きている
+    let command = CommandBuilder::new(common::fake_claude());
 
     let (process, exit_rx) =
         PtyProcess::spawn(command, test_size(), chunks_tx).expect("PTY を開けること");
-    let child = 自分の子(std::process::id());
-    assert_eq!(child.len(), 1, "起こした子が1本だけ見えること: {child:?}");
-    let pid = child[0];
 
+    // 起こした子が見えるまで待つ。**`fork` から `/proc` に現れるまでには間がある**
+    let 期限 = std::time::Instant::now() + common::TIMEOUT;
+    let pid = loop {
+        match 自分の子(std::process::id()).as_slice() {
+            [pid] => break *pid,
+            found => assert!(
+                std::time::Instant::now() < 期限,
+                "起こした子が1本だけ見えること: {found:?}"
+            ),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+
+    process.kill();
     timeout(common::TIMEOUT, exit_rx)
         .await
         .expect("時間内に終了すること")
