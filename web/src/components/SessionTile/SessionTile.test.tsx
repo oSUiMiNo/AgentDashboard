@@ -1,4 +1,11 @@
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { clearSelection, getSelection } from '@/stores/selection'
 import { MemoryRouter, Route, Routes } from 'react-router'
@@ -1391,5 +1398,125 @@ describe('スリープの zzz（帯の設計§14-4）', () => {
       expect(screen.queryByTestId('tile-zzz'), kind).toBeNull()
       unmount()
     }
+  })
+})
+
+describe('SessionTile の名前（利用者が付けたもの）', () => {
+  /**
+   * 名前は CLI が付ける `session_title` とは別物（名前付け設計§9-1）。
+   *
+   * **薄さは CSS の話なので jsdom からは見えない。** 見分けは `data-nickname` の
+   * 3つの値（`user` ／ `cli` ／ `none`）で行う。
+   */
+
+  it('利用者の名前があれば、それが出る', () => {
+    renderTile(
+      meta({ nickname: 'あとで直すやつ', session_title: 'CLI が付けた名前' }),
+    )
+    const row = screen.getByTestId('session-title')
+    expect(row.textContent).toBe('あとで直すやつ')
+    expect(row.dataset.nickname).toBe('user')
+  })
+
+  it('名前が無ければ CLI の名前が出る', () => {
+    renderTile(meta({ nickname: null, session_title: 'CLI が付けた名前' }))
+    const row = screen.getByTestId('session-title')
+    expect(row.textContent).toBe('CLI が付けた名前')
+    // **薄く出す側**。利用者から見て「まだ自分では付けていない」が伝わる
+    expect(row.dataset.nickname).toBe('cli')
+  })
+
+  it('どちらも無ければ、行の場所だけが残る', () => {
+    renderTile(meta({ nickname: null, session_title: null }))
+    const row = screen.getByTestId('session-title')
+    expect(row.textContent).toBe(' ')
+    expect(row.dataset.nickname).toBe('none')
+  })
+
+  it('鉛筆は器の直下に居て、カードの中には居ない', () => {
+    // カードの本体は `<button>` なので、中に別のボタンを入れられない
+    // （復旧ボタンと同じ理由・設計§9-2）
+    renderTile(meta())
+    const pencil = screen.getByTestId('nickname-edit')
+    const body = screen.getByTestId('session-tile')
+    expect(body.contains(pencil)).toBe(false)
+    expect(screen.getByTestId('tile-shell').contains(pencil)).toBe(true)
+  })
+
+  it('鉛筆を押してもカードを掴まない', () => {
+    // **`click` を止めるだけでは足りない**（`pointerdown` が素通りする）。
+    // カードは本体で掴む作りなので、印が無いと押しただけで持ち上がる
+    renderTile(meta())
+    expect(screen.getByTestId('nickname-edit').hasAttribute('data-no-grab')).toBe(
+      true,
+    )
+  })
+
+  it('押すと編集に入り、確定すると口が呼ばれる', async () => {
+    const setNickname = vi.fn()
+    useWsStore.setState({ setNickname })
+    renderTile(meta({ nickname: null, session_title: 'CLI が付けた名前' }))
+
+    await userEvent.click(screen.getByTestId('nickname-edit'))
+    const input = screen.getByTestId('nickname-input') as HTMLInputElement
+    // **下書きの初期値は利用者の名前だけ。** CLI の名前を入れると、触っていないのに
+    // 「自分で付けた」ことになる
+    expect(input.value).toBe('')
+
+    await userEvent.type(input, '  あとで直すやつ  ')
+    await userEvent.keyboard('{Enter}')
+
+    // 前後の空白は落ちる
+    expect(setNickname).toHaveBeenCalledWith(CARD, 'あとで直すやつ')
+  })
+
+  it('楽観更新しない', async () => {
+    // 手元を先に書き換えず、サーバの `session_upsert` が戻るまで名前は変わらない
+    // （`setModel` と同じ流儀）
+    useWsStore.setState({ setNickname: vi.fn() })
+    renderTile(meta({ nickname: null, session_title: 'CLI が付けた名前' }))
+
+    await userEvent.click(screen.getByTestId('nickname-edit'))
+    await userEvent.type(screen.getByTestId('nickname-input'), '新しい名前')
+    await userEvent.keyboard('{Enter}')
+
+    expect(screen.getByTestId('session-title').textContent).toBe('CLI が付けた名前')
+  })
+
+  it('空で確定すると消す', async () => {
+    const setNickname = vi.fn()
+    useWsStore.setState({ setNickname })
+    renderTile(meta({ nickname: 'あとで直すやつ' }))
+
+    await userEvent.click(screen.getByTestId('nickname-edit'))
+    await userEvent.clear(screen.getByTestId('nickname-input'))
+    await userEvent.keyboard('{Enter}')
+
+    expect(setNickname).toHaveBeenCalledWith(CARD, null)
+  })
+
+  it('改行は入力の時点で弾く', async () => {
+    // カードは1行で「…」に切る作りなので、切った先が読めなくなる（設計§10）
+    useWsStore.setState({ setNickname: vi.fn() })
+    renderTile(meta())
+
+    await userEvent.click(screen.getByTestId('nickname-edit'))
+    const input = screen.getByTestId('nickname-input') as HTMLInputElement
+    fireEvent.change(input, { target: { value: '上の行\n下の行' } })
+
+    expect(input.value).toBe('上の行下の行')
+  })
+
+  it('Escape でやめられる', async () => {
+    const setNickname = vi.fn()
+    useWsStore.setState({ setNickname })
+    renderTile(meta({ nickname: 'もとの名前' }))
+
+    await userEvent.click(screen.getByTestId('nickname-edit'))
+    await userEvent.type(screen.getByTestId('nickname-input'), 'まちがえた')
+    await userEvent.keyboard('{Escape}')
+
+    expect(setNickname).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('nickname-input')).toBeNull()
   })
 })

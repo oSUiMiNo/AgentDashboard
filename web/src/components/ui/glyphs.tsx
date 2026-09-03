@@ -58,3 +58,28 @@ export function TrashGlyph({ className }: { className?: string }) {
     </svg>
   )
 }
+
+/**
+ * 「名前を付ける」の印（名前付け設計§9-6）。**絵文字は使わない**（`DESIGN.md` §14.4）。
+ *
+ * 鉛筆の軸と先端の2本だけで描く。`DESIGN.md` §18.2 の下限（線の太さはグリッドの
+ * 1/8 以上）を満たすため、24 のグリッドで `strokeWidth={2}` にしてある——
+ * 小さく置いても消えない。
+ */
+export function PencilGlyph({ className }: { className?: string }) {
+  return (
+    <svg
+      aria-hidden
+      viewBox="0 0 24 24"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+      <path d="M15 5l4 4" />
+    </svg>
+  )
+}

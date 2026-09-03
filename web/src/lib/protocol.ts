@@ -187,6 +187,17 @@ export interface PastSession {
   exists: boolean | null
 }
 
+/**
+ * 利用者が付けた名前の長さの上限（名前付け設計§10）。
+ *
+ * **Rust 側（`protocol::NICKNAME_MAX_CHARS`）と同じ値にすること。** 画面はここで
+ * 打てる長さを止めるだけで、**断るのは保存側**——画面だけで止めても CLI から入る。
+ *
+ * 200 の根拠：カードは幅 294px・両側の余白 12px・字 12px なので、日本語で約22文字、
+ * 英数字で約40文字で「…」に切れる。その9倍ほどにあたる。
+ */
+export const NICKNAME_MAX_CHARS = 200
+
 /** JSONL レコードの `uuid` に対応するノードID。 */
 export type NodeId = string
 

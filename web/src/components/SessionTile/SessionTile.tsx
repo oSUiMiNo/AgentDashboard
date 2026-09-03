@@ -48,9 +48,11 @@ import { motion } from 'motion/react'
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { Badge } from '@/components/ui/badge'
+import { PencilGlyph } from '@/components/ui/glyphs'
 import { formatElapsed } from '@/lib/time'
 import {
   isHookSilent,
+  NICKNAME_MAX_CHARS,
   permissionModeLabel,
   permissionModeTone,
   reviveReason,
@@ -88,6 +90,12 @@ interface Props {
   rootRef?: (element: HTMLElement | null) => void
   /** いま浮かせているか。**掴んでいる本人だけ** */
   dragging?: boolean
+  /**
+   * いま並べ替えている最中か。**並び全員に配る**（押しのけられる側も滑らせるため）。
+   *
+   * `dragging` は1つだけなので、これとは別に要る。
+   */
+  reordering?: boolean
 }
 
 /**
@@ -110,8 +118,15 @@ interface Props {
  * 空文字を返すので、**インラインの指定が消えてクラスが効く**。
  *
  * **モジュール直下に置くこと。** 毎回作ると `motion` が描き直しの判定に入る。
+ *
+ * **並べ替えのぶんを先頭に置く。** `reorder.css` の変数を読むので、掴んでいない間は
+ * すべて既定値（0px・1倍・0度）になり、何も動かさないのと同じになる。出入りの `y` は
+ * `generated` として後ろに付き、両方が生きる。
  */
-const 変形の型紙 = (_: unknown, generated: string) => generated
+const 変形の型紙 = (_: unknown, generated: string) =>
+  `translate(var(--reorder-dx, 0px), var(--reorder-dy, 0px))` +
+  ` scale(var(--reorder-lift, 1)) rotate(var(--reorder-tilt, 0deg))` +
+  (generated === '' ? '' : ` ${generated}`)
 
 const ECHO_MS = 12_000
 
@@ -240,6 +255,7 @@ export function SessionTile({
   grab,
   rootRef,
   dragging = false,
+  reordering = false,
 }: Props) {
   const navigate = useNavigate()
   const session = useSessionCard(cardId)
@@ -247,6 +263,15 @@ export function SessionTile({
   const quiet = useSettingsStore((state) => state.settings.motion_quiet)
   const frameRef = useRef<HTMLDivElement>(null)
   const revive = useWsStore((state) => state.revive)
+  const setNickname = useWsStore((state) => state.setNickname)
+  /*
+    **名前を書き換えている最中か**（名前付け設計§9-5）。
+
+    `null` は「編集していない」。編集中は下書きを持つが、**手元の表示は書き換えない**
+    ——確定してもサーバの `session_upsert` が戻るまで名前は変わらない（`setModel` と
+    同じ流儀）。ブラウザ側にも正を持つと、2箇所が食い違う。
+  */
+  const [draft, setDraft] = useState<string | null>(null)
   /*
     **掴む作法は器（`tile-shell`）に付ける**（読み替え4）。
 
@@ -338,6 +363,13 @@ export function SessionTile({
   // **どの PC のセッションかは一覧で判別できる**（要件4-4）。名前は起動時に読む
   // 設定から引く（`agent_id` は変わらないが、名前は後から変わりうるため）
   const pc = agentName(agents, session.agent_id)
+  /*
+    カードの③行に出す名前（名前付け設計§9-1）。
+
+    **利用者が付けた名前があればそれ、無ければ CLI が付けた名前。** どちらも無ければ
+    `null` で、行の場所だけが残る（既存の作りをそのまま使う）。
+  */
+  const 表示名 = session.nickname ?? session.session_title
   // 繋がっていないカードは**薄くして印を付ける**。状態そのものは書き換えない——
   // 「作業中（接続断）」が要件2-3 の充足形で、最後に知っていた状態は残す（設計§6-3）
   const stale = !session.agent_connected
@@ -394,6 +426,14 @@ export function SessionTile({
       data-testid="tile-shell"
       data-card-id={session.card_id}
       data-dragging={dragging ? 'true' : 'false'}
+      /*
+        並べ替えの動きは `reorder.css` が持つ（並べ替え設計§7-3 の読み替え）。
+        **掴んでいる間だけ**滑らせるので印は2つ要る——**並び全員が滑る**
+        （`data-reorder-item` ＋ `data-reordering`）のと、**持っているものだけが浮く**
+        （`data-dragging`）。
+      */
+      data-reorder-item=""
+      data-reordering={reordering ? 'true' : 'false'}
       /*
         **掴んでいる間は揺れを止める**（設計§8-1）。揺れながら動くと落とし先が読めない。
         `still` は「動きを止める」段と同じ扱いなので、承認待ちのカタカタも止まる
@@ -726,13 +766,34 @@ export function SessionTile({
             マウスを乗せて全体を出すのは補助にとどめる——**タッチにホバーは存在しない**
             ので、スマホからはこの手段に届かない。全体を読む道はカードを開けば必ずある
           */}
+          {/*
+            **利用者が付けた名前があればそれ、無ければ CLI の名前**（名前付け設計§9-1）。
+
+            CLI 由来のときは**薄く出す**（利用者の判断・2026-09-03）。行を増やさずに
+            「まだ自分では付けていない」を伝えるためで、行を2つにすると一覧の主役
+            （状態の色と経過時間）が痩せる。
+
+            `data-nickname` が3つの状態（`user` ／ `cli` ／ `none`）を持つのは、
+            **薄さは CSS の話なのでテストから見えない**ため。
+          */}
           <p
             data-testid="session-title"
-            data-named={session.session_title !== null}
-            className="text-muted-foreground truncate text-xs"
-            title={session.session_title ?? undefined}
+            data-named={表示名 !== null}
+            data-nickname={
+              session.nickname !== null
+                ? 'user'
+                : session.session_title !== null
+                  ? 'cli'
+                  : 'none'
+            }
+            className={`truncate text-xs ${
+              session.nickname !== null
+                ? 'text-muted-foreground'
+                : 'text-muted-foreground/60'
+            }`}
+            title={表示名 ?? undefined}
           >
-            {session.session_title ?? '\u00a0'}
+            {表示名 ?? '\u00a0'}
           </p>
         </button>
 
@@ -923,6 +984,75 @@ export function SessionTile({
         >
           {reviving ? '復旧中…' : '復旧'}
         </button>
+      )}
+
+      {/*
+        **鉛筆と編集欄は、器（`tile-shell`）の直下に置く**（名前付け設計§9-2）。
+
+        カードの本体は `<button>` なので、中に別のボタンや入力欄を入れられない。
+        復旧ボタンが同じ問題を絶対配置の兄弟で解いているので、そちらを写す。
+
+        **`data-no-grab` を必ず付ける。** カードは本体で掴む作りになったので、
+        付けないと**鉛筆を押しただけでカードを掴む**（`click` を止めるだけでは
+        `pointerdown` が素通りする）。
+
+        # 出る条件
+        **マウスが乗っている（PC）か、選ばれている（タッチからの到達路）。**
+        タッチには hover が無いので、長押し → 選ぶ → 鉛筆が出る、という道になる。
+        `pressMapping()` には手を入れない——「コンポーネントごとに `if (coarse)` を
+        書かない」という既存の約束を守る。出し方は `tile.css` が持つ。
+
+        **常時は出さない。** 全カードに同じボタンが並ぶと表の1列になり、
+        `DESIGN.md` §23.3・§33 が禁じている形になる。
+      */}
+      {draft === null ? (
+        <button
+          type="button"
+          data-testid="nickname-edit"
+          data-no-grab=""
+          title="このセッションに名前を付ける"
+          aria-label="このセッションに名前を付ける"
+          onClick={(event) => {
+            event.stopPropagation()
+            // 下書きの初期値は**利用者の名前だけ**。CLI の名前を入れると、
+            // 触っていないのに「自分で付けた」ことになってしまう
+            setDraft(session.nickname ?? '')
+          }}
+          className="tile-pencil border-border bg-card text-foreground hover:border-primary/60 hover:bg-accent absolute top-2 left-2 rounded-[3px] border p-1 shadow-[inset_0_2px_0_rgb(255_255_255/28%),inset_0_-1px_0_rgb(0_0_0/30%),0_1.5px_3px_rgb(0_0_0/40%)] transition-colors active:scale-[0.98]"
+        >
+          <PencilGlyph className="size-3.5" />
+        </button>
+      ) : (
+        <form
+          data-testid="nickname-form"
+          data-no-grab=""
+          onClick={(event) => event.stopPropagation()}
+          onSubmit={(event) => {
+            event.preventDefault()
+            // **保存側も断るが、画面でも弾く**（設計§10）。前後の空白は落とし、
+            // 空は「消す」と同義にする
+            const trimmed = draft.trim()
+            setNickname(session.card_id, trimmed === '' ? null : trimmed)
+            setDraft(null)
+          }}
+          className="absolute inset-x-1 bottom-1 z-20"
+        >
+          <input
+            data-testid="nickname-input"
+            autoFocus
+            value={draft}
+            maxLength={NICKNAME_MAX_CHARS}
+            aria-label="セッションの名前"
+            // **改行は入力の時点で弾く**（カードは1行で切るので、切った先が読めない）
+            onChange={(event) => setDraft(event.target.value.replace(/[\r\n]/g, ''))}
+            onKeyDown={(event) => {
+              event.stopPropagation()
+              if (event.key === 'Escape') setDraft(null)
+            }}
+            onBlur={() => setDraft(null)}
+            className="border-border bg-card text-foreground w-full rounded-[3px] border px-1 py-0.5 text-xs"
+          />
+        </form>
       )}
     </motion.div>
   )

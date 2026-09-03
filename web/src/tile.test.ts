@@ -768,6 +768,45 @@ describe('復旧ボタンは指で押せる', () => {
 })
 
 /**
+ * 名前を付ける鉛筆（名前付け設計§9-2・§9-3）。
+ *
+ * **常時出すと表の1列になる**（`DESIGN.md` §23.3・§33）。出るのは「いま触っている
+ * 1枚」——マウスが乗っているか、選ばれているかのどちらか。**タッチに hover は
+ * 無い**ので、選択の側が無いとスマホから永久に届かない。
+ */
+describe('名前の鉛筆は、いま触っている1枚にだけ出る', () => {
+  it('既定では出ていない', () => {
+    expect(規則('.tile-pencil').body).toMatch(/opacity:\s*0\b/)
+  })
+
+  it('選ばれていれば出る（タッチからの到達路）', () => {
+    // ここが無いと、hover を持たない端末から**永久に届かない**
+    const 出す = 当たる(".tile-shell[data-selected='true'] .tile-pencil")
+    expect(出す.length).toBeGreaterThanOrEqual(1)
+    expect(出す.some((rule) => /opacity:\s*1\b/.test(rule.body))).toBe(true)
+  })
+
+  it('マウスで出す規則は、マウスのある機械にだけ効く', () => {
+    // 素の `:hover` は指の端末でも「触れたまま」で成立し、選択と二重に出る
+    // **メディアクエリはセレクタの頭に畳まれている**（このファイルのパーサの作り）
+    const hover = 当たる('.tile-shell:where(:hover) .tile-pencil')
+    expect(hover).toHaveLength(1)
+    expect(hover[0].selector).toContain('hover: hover')
+    expect(hover[0].selector).toContain('pointer: fine')
+  })
+
+  it('当たり判定が 44px の床を割らない', () => {
+    // 見た目は 24×24px（印 14px ＋ 余白 8px ＋ 枠 2px）
+    const 判定 = 当たる('.tile-pencil::after')
+    expect(判定).toHaveLength(1)
+    const inset = 判定[0].body.match(/inset:\s*(-?[\d.]+)px/)
+    expect(inset).not.toBeNull()
+    const 広げる = Math.abs(Number(inset![1]))
+    expect(24 + 広げる * 2).toBeGreaterThanOrEqual(44)
+  })
+})
+
+/**
  * 右下のタグの厚みと大きさ（フェーズ16）。
  *
  * フェーズ13 は `box-shadow` を**書いたまま効きだけ落としていた**（`mask-image` が
