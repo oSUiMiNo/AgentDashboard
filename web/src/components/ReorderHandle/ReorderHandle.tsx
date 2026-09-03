@@ -81,7 +81,7 @@ interface Props {
   /** 何の並びか。`data-kind` にそのまま出る（`project` ／ `card`） */
   kind: 'project' | 'card'
   /** 掴んだ。**DOM を動かすならここで動かす**（キャプチャはこの後で取る） */
-  onGrab: () => void
+  onGrab: (origin?: Point) => void
   /** 運んでいる。座標をそのまま渡す（決めるのは `lib/reorder.ts` の純関数） */
   onMove: (point: Point) => void
   /** 離した・取り消された */
@@ -159,7 +159,7 @@ export function ReorderHandle({ label, kind, onGrab, onMove, onDrop, onTap }: Pr
         setDragging(true)
         // **DOM を動かすのはここ。** キャプチャはこの後で取る（方針§4-2）——
         // 先に取ると、動かした拍子に要素を見失う
-        onGrab()
+        onGrab({ x: event.clientX, y: event.clientY })
         // jsdom に無い。**取れないときも、テストは要素へ直接配るので結果は変わらない**
         event.currentTarget.setPointerCapture?.(event.pointerId)
       }}

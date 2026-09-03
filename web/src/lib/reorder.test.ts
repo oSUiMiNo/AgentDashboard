@@ -4,6 +4,9 @@ import {
   dropTarget,
   headingOf,
   HEADING_MIN_PX,
+  layoutOf,
+  sameOrder,
+  virtualOffsets,
   SEAL_RELEASE_PX,
   VELOCITY_WINDOW_MS,
   type Seal,
@@ -330,5 +333,110 @@ describe('進行方向', () => {
     expect(headingOf([{ t: 0, x: 0, y: 0 }, { t: 50, x: HEADING_MIN_PX - 1, y: 0 }], 60)).toBeNull()
     expect(headingOf([{ t: 0, x: 0, y: 0 }], 60)).toBeNull()
     expect(headingOf([], 60)).toBeNull()
+  })
+})
+
+describe('並びの形を凍結した矩形から読む', () => {
+  it('左端が揃えば縦1列、上端が揃えば横1列、どちらでもなければ格子', () => {
+    expect(layoutOf(枠の並び([1300, 45, 600]))).toEqual({ kind: 'column', gap: 16 })
+    expect(layoutOf(区画の並び(3))).toEqual({ kind: 'row', gap: 16 })
+    expect(layoutOf(格子(6))).toEqual({ kind: 'grid' })
+  })
+
+  it('隙間は隣り合う矩形の間隔の中央値', () => {
+    // 1つだけ狂った間隔（100px）に引きずられない
+    const rects = [rect(0, 0, 940, 100), rect(0, 116, 940, 100), rect(0, 316, 940, 100), rect(0, 432, 940, 100)]
+    expect(layoutOf(rects)).toEqual({ kind: 'column', gap: 16 })
+  })
+
+  it('1つしか無ければ格子（動かすものが無い）', () => {
+    expect(layoutOf(格子(1))).toEqual({ kind: 'grid' })
+    expect(layoutOf([])).toEqual({ kind: 'grid' })
+  })
+
+  it('測れない矩形は数えない', () => {
+    const rects = 枠の並び([100, 100, 100])
+    rects[1] = rect(Number.NaN, Number.NaN, 0, 0)
+    expect(layoutOf(rects).kind).toBe('column')
+  })
+})
+
+describe('仮想の並びから、各要素の行き先を出す', () => {
+  it('同寸の格子：仮想の添字 j の要素は、凍結した j 番目の矩形へ', () => {
+    // 0 を 2 のスロットへ運んだ：仮想の並びは [1, 2, 0]
+    const rects = 格子(3)
+    const offsets = virtualOffsets(rects, [1, 2, 0], { kind: 'grid' })
+    expect(offsets[1]).toEqual({ x: -306, y: 0 })
+    expect(offsets[2]).toEqual({ x: -306, y: 0 })
+    expect(offsets[0]).toEqual({ x: 612, y: 0 })
+  })
+
+  it('格子で行をまたぐ入れ替え', () => {
+    // 4 を 1 のスロットへ：[0, 4, 1, 2, 3, 5]
+    const rects = 格子(6)
+    const offsets = virtualOffsets(rects, [0, 4, 1, 2, 3, 5], { kind: 'grid' })
+    expect(offsets[4]).toEqual({ x: 0, y: -212 })
+    expect(offsets[1]).toEqual({ x: 306, y: 0 })
+    expect(offsets[2]).toEqual({ x: -612, y: 212 })
+    expect(offsets[3]).toEqual({ x: 306, y: 0 })
+    expect(offsets[0]).toEqual({ x: 0, y: 0 })
+    expect(offsets[5]).toEqual({ x: 0, y: 0 })
+  })
+
+  it('縦1列（不揃いの枠）：寸法を積む', () => {
+    // 高さ 1300／45／600。1 を先頭へ：[1, 0, 2]
+    const rects = 枠の並び([1300, 45, 600])
+    const offsets = virtualOffsets(rects, [1, 0, 2], { kind: 'column', gap: 16 })
+    expect(offsets[1]).toEqual({ x: 0, y: -1316 })
+    expect(offsets[0]).toEqual({ x: 0, y: 61 })
+    expect(offsets[2]).toEqual({ x: 0, y: 0 })
+  })
+
+  it('横1列（区画）：寸法を積む', () => {
+    const rects = 区画の並び(3)
+    const offsets = virtualOffsets(rects, [2, 0, 1], { kind: 'row', gap: 16 })
+    expect(offsets[2]).toEqual({ x: -1376, y: 0 })
+    expect(offsets[0]).toEqual({ x: 688, y: 0 })
+    expect(offsets[1]).toEqual({ x: 688, y: 0 })
+  })
+
+  it('仮想の並びが凍結時と同じなら、全員 0', () => {
+    for (const rects of [格子(6), 枠の並び([100, 200]), 区画の並び(2)]) {
+      const layout = layoutOf(rects)
+      const same = rects.map((_, at) => at)
+      for (const offset of virtualOffsets(rects, same, layout)) {
+        expect(offset).toEqual({ x: 0, y: 0 })
+      }
+    }
+  })
+
+  it('測れなかった矩形は 0 として積み、自分は動かさない', () => {
+    const rects = 枠の並び([100, 100, 100])
+    rects[1] = rect(Number.NaN, Number.NaN, 0, 0)
+    const offsets = virtualOffsets(rects, [2, 1, 0], { kind: 'column', gap: 16 })
+    expect(offsets[1]).toEqual({ x: 0, y: 0 })
+    expect(offsets[2]).toEqual({ x: 0, y: -232 })
+    expect(offsets[0]).toEqual({ x: 0, y: 116 })
+  })
+
+  it('長さが合わなければ、全員 0（例外を投げない）', () => {
+    expect(virtualOffsets(格子(3), [0, 1], { kind: 'grid' })).toEqual([
+      { x: 0, y: 0 },
+      { x: 0, y: 0 },
+      { x: 0, y: 0 },
+    ])
+  })
+})
+
+describe('並びの照合', () => {
+  it('共通のものの並びが同じなら真', () => {
+    expect(sameOrder(['a', 'b', 'c'], ['a', 'b', 'c'])).toBe(true)
+    expect(sameOrder(['a', 'b', 'c'], ['b', 'a', 'c'])).toBe(false)
+  })
+
+  it('片方にしか無いものは無視する', () => {
+    // サーバの返事に新しいカードが混ざっていても、共通部分が同じなら確定と読む
+    expect(sameOrder(['a', 'b'], ['a', 'x', 'b'])).toBe(true)
+    expect(sameOrder(['a', 'b'], ['b'])).toBe(true)
   })
 })

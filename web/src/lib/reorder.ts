@@ -367,3 +367,130 @@ export function headingOf(samples: readonly Sample[], now: number): Point | null
   }
   return { x: dx / length, y: dy / length }
 }
+
+/**
+ * 並びの形（設計§15-11）。**運んでいる間は DOM を並べ替えない**ので、見た目の並びは
+ * 凍結した矩形と仮想の並びから `translate` で作る。作り方が2通りある。
+ *
+ * - `grid`：矩形を入れ替える（仮想スロット j の要素は、凍結した j 番目の矩形へ）
+ * - `column`／`row`：寸法を積む（先頭から「前の要素の寸法＋隙間」を足して位置を出す）
+ */
+export type Layout =
+  | { kind: 'grid' }
+  | { kind: 'column'; gap: number }
+  | { kind: 'row'; gap: number }
+
+/** 「揃っている」と見なす誤差（px）。サブピクセルの丸めを吸う */
+const ALIGN_TOLERANCE_PX = 1
+
+function median(values: number[]): number {
+  if (values.length === 0) {
+    return 0
+  }
+  const sorted = values.slice().sort((a, b) => a - b)
+  return sorted[Math.floor(sorted.length / 2)]
+}
+
+/**
+ * 凍結した矩形から並びの形を読む。**掴んだ瞬間に1回だけ呼ぶ。**
+ *
+ * 設計§15-11 の「同寸でなければ1列へ倒す」を、**軸で測る**形にしたもの——全部の
+ * 左端が揃えば縦1列、上端が揃えば横1列、どちらでもなければ格子。寸法で見ないのは、
+ * 一覧のカードが行の高さまで伸びて行ごとに高さが違いうるため。カードが1列になる
+ * 狭い画面では自動的に縦1列になり、高さ違いも正しく積まれる。
+ *
+ * 隙間は隣り合う矩形の間隔の**中央値**（1つ狂った間隔に引きずられない）。
+ */
+export function layoutOf(rects: readonly Rect[]): Layout {
+  const used = rects.filter(usable)
+  if (used.length < 2) {
+    return { kind: 'grid' }
+  }
+  const lefts = used.map((r) => r.left)
+  const tops = used.map((r) => r.top)
+  const aligned = (values: number[]) =>
+    Math.max(...values) - Math.min(...values) <= ALIGN_TOLERANCE_PX
+  if (aligned(lefts)) {
+    const byTop = used.slice().sort((a, b) => a.top - b.top)
+    const gaps: number[] = []
+    for (let i = 1; i < byTop.length; i += 1) {
+      gaps.push(Math.max(0, byTop[i].top - (byTop[i - 1].top + byTop[i - 1].height)))
+    }
+    return { kind: 'column', gap: median(gaps) }
+  }
+  if (aligned(tops)) {
+    const byLeft = used.slice().sort((a, b) => a.left - b.left)
+    const gaps: number[] = []
+    for (let i = 1; i < byLeft.length; i += 1) {
+      gaps.push(Math.max(0, byLeft[i].left - (byLeft[i - 1].left + byLeft[i - 1].width)))
+    }
+    return { kind: 'row', gap: median(gaps) }
+  }
+  return { kind: 'grid' }
+}
+
+/**
+ * 各要素の `translate`（設計§15-11）。
+ *
+ * `placement[j]` は**仮想スロット j に居る要素の元の添字**。戻り値は元の添字で引く
+ * （`offsets[元の添字]`）。測れなかった矩形は `{0,0}`（勝手に位置を決めない）で、
+ * 積むときの寸法は 0 として扱う。長さが合わない・範囲外なら `{0,0}` で埋める——
+ * 毎フレーム呼ばれうる関数なので、例外を投げない。
+ */
+export function virtualOffsets(
+  rects: readonly Rect[],
+  placement: readonly number[],
+  layout: Layout,
+): Point[] {
+  const offsets: Point[] = rects.map(() => ({ x: 0, y: 0 }))
+  if (placement.length !== rects.length) {
+    return offsets
+  }
+  const valid = (index: number) => index >= 0 && index < rects.length && usable(rects[index])
+  if (layout.kind === 'grid') {
+    for (let slot = 0; slot < placement.length; slot += 1) {
+      const from = placement[slot]
+      if (!valid(from) || !usable(rects[slot])) {
+        continue
+      }
+      offsets[from] = {
+        x: rects[slot].left - rects[from].left,
+        y: rects[slot].top - rects[from].top,
+      }
+    }
+    return offsets
+  }
+  const along = layout.kind === 'column' ? 'top' : 'left'
+  const size = layout.kind === 'column' ? 'height' : 'width'
+  let cursor = Number.POSITIVE_INFINITY
+  for (const rect of rects) {
+    if (usable(rect)) {
+      cursor = Math.min(cursor, rect[along])
+    }
+  }
+  if (!finite(cursor)) {
+    return offsets
+  }
+  for (const from of placement) {
+    if (!valid(from)) {
+      continue
+    }
+    const delta = cursor - rects[from][along]
+    offsets[from] = layout.kind === 'column' ? { x: 0, y: delta } : { x: delta, y: 0 }
+    cursor += rects[from][size] + layout.gap
+  }
+  return offsets
+}
+
+/**
+ * 両方に在るものだけを見て、並びが同じか（楽観の照合。設計§15-4）。
+ *
+ * サーバの返事に新しいものが混ざっていても、共通部分の並びが一致すれば「確定した」と読む。
+ */
+export function sameOrder<T>(a: readonly T[], b: readonly T[]): boolean {
+  const inB = new Set(b)
+  const inA = new Set(a)
+  const left = a.filter((each) => inB.has(each))
+  const right = b.filter((each) => inA.has(each))
+  return left.length === right.length && left.every((each, at) => each === right[at])
+}

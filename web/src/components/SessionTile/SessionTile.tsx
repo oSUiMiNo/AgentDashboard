@@ -263,7 +263,7 @@ export function SessionTile({
   const 掴み = useGrip({
     enabled: grab !== undefined,
     when: (event) => (event.pointerType === 'mouse' ? 'move' : 'hold'),
-    onGrab: () => grab?.onGrab(),
+    onGrab: (origin) => grab?.onGrab(origin),
     onMove: (point) => grab?.onMove(point),
     onDrop: () => grab?.onDrop(),
   })

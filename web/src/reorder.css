@@ -93,6 +93,10 @@
   --reorder-tilt: 1deg;
   position: relative;
   z-index: 10;
+  /* **追従は 1:1。** 本人の `translate` は指が決めるので、滑らせない（設計§15-2） */
+  transition:
+    scale var(--reorder-ms) var(--reorder-ease),
+    rotate var(--reorder-ms) var(--reorder-ease);
 }
 
 /* 面が大きいものは縮める（要件「追加要望」1・設計§15-7）。傾いた角が隙間に収まらない */

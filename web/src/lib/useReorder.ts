@@ -1,41 +1,56 @@
 /**
- * 掴んで並べ替えるときの配線（並べ替え設計§3-4・§3-5）。
+ * 掴んで並べ替えるときの配線（並べ替え設計§3-4・§15-2・§15-11）。
  *
  * # ここは「測る側」
  *
- * 矩形を測り、スクロールを動かし、状態を持つ。**決めるのは [`nearestIndex`] と
- * [`moveItem`]**（`lib/reorder.ts` の純関数）で、あちらは `window` も `document` も
- * 読まない。分けてある理由は `lib/reorder.ts` の冒頭にある。
+ * 矩形を測り、要素へ書き、状態を持つ。**決めるのは `lib/reorder.ts` の純関数**
+ * （[`dropTarget`]・[`virtualOffsets`]・[`layoutOf`]）で、あちらは `window` も
+ * `document` も読まない。分けてある理由は `lib/reorder.ts` の冒頭にある。
+ *
+ * # 運んでいる間は DOM を並べ替えない（設計§15-11）
+ *
+ * React に並びを差し替えさせると、**後ろへ動く要素のノードだけが外して差し直される**
+ * （`insertBefore`）。右（下）へ運ぶと動かされるのは掴んでいる本人で、外れた瞬間に
+ * ポインタキャプチャが落ちて掴みが終わる——「右へ1回動かすと掴みが解ける」の正体。
+ * 走っている `transition` も切れる。
+ *
+ * だから**離すまで `order` は掴んだ瞬間の並びのまま**返し、見た目の並びは各要素の
+ * `translate` で作る。本人は指に 1:1 で追従し（設計§15-2）、他は凍結した矩形と
+ * 仮想の並びから出した行き先へ滑る。離したときだけ `order` を確定して React に
+ * 並べ替えさせ、直後に新しい位置を測って `translate` を 0 へ戻す（差が 0 なら動かない）。
+ *
+ * # React の状態は3つだけ
+ *
+ * 「掴んでいるのは誰か」「見せる並び」「並べ替え中か」。座標・仮想の並び・封印・標本は
+ * すべて `useRef`。**`pointermove` で `setState` を呼ばない**——60回/秒の描き直しは
+ * 追従を1フレーム遅らせる。要素へ直接書くのは `style.translate` と `data-reorder-snap`
+ * だけで、React が持つ属性には触らない。
  *
  * # 矩形は掴んだ瞬間の1回だけ測る
  *
- * 運んでいる最中に測り直さない。場所取りが動くたびに周りの位置は変わるので、
- * **判断の土台が動くと、指を止めていても落とし先が揺れる**。
- *
- * # 並びは3箇所にあるが、規則は1つ
- *
- * 一覧のカード（折り返しの2次元）・枠（縦1列）・PJT 専用画面の区画（横1列）を、
- * 同じフックで扱う。**次元ごとに分岐を書かない**（設計§3-4）。
+ * 運んでいる最中に測り直さない。**判断の土台が動くと、指を止めていても落とし先が揺れる**。
  *
  * # 動きの本体と、食い違いの記録は `reorder.css` にある
  *
- * ここが持つのは**動かす量**（FLIP の逆算）だけで、**動き方**——時間・曲線・止める段
- * （静けさ・OS の「動きを減らす」）——は CSS 側にある。**ガイドラインの禁止
- * （「一覧の小窓に `layout` を付けるのも禁止」）との食い違いも、あちらが正本。**
+ * ここが持つのは**動かす量**だけで、**動き方**——時間・曲線・止める段——は CSS 側にある。
  *
  * # 端での自動送りは、いまどこからも使われていない
  *
- * `scroller` は3つの呼び出し元のどこからも渡していない（実装は在るが死んでいる）。
- * **繋ぐ前に直すことがある**——`rects` は掴んだ瞬間の**画面の座標**で凍結してあるので、
- * 容器がスクロールすると**土台だけが取り残されて落とし先がずれる**。繋ぐなら、
- * 矩形をスクロール量ぶん補正するか、容器の座標で持ち直すこと。
+ * `scroller` は3つの呼び出し元のどこからも渡していない。**繋ぐ前に直すことがある**
+ * ——`rects` は掴んだ瞬間の**画面の座標**で凍結してあるので、容器がスクロールすると
+ * 土台だけが取り残されて落とし先がずれる。繋ぐなら、指の位置をスクロール差分で
+ * 補正すること（設計§15-12）。
  */
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   dropTarget,
   headingOf,
+  layoutOf,
   moveItem,
+  sameOrder,
+  virtualOffsets,
+  type Layout,
   type Point,
   type Rect,
   type Sample,
@@ -44,11 +59,6 @@ import {
 } from './reorder'
 import { lowerReordering, raiseReordering } from '@/stores/reordering'
 
-/**
- * スクロール容器の端から、これだけ内側に入ったら送り始める（px）。
- *
- * **無いと画面外へ運べない**（方針§2-4）。指が端に触れている間だけ送る。
- */
 /**
  * 押しのけられる側が滑る時間（ms）。**`reorder.css` の `--reorder-ms` と同じ値**
  * （検査が突き合わせる）。`DESIGN.md` §28.2 の Normal（140〜220ms）の中。
@@ -90,6 +100,12 @@ export function autoScrollStep(point: Point, bounds: Rect): { x: number; y: numb
   return { x, y }
 }
 
+/** 標本を持つ数の上限。窓（100ms）に収まる数より十分多い */
+const SAMPLE_LIMIT = 32
+
+/** 着地の逆算で「動いていない」と見なす差（px） */
+const SETTLED_PX = 0.5
+
 interface Options<T extends string> {
   /** いまの並び（サーバから来た順） */
   ids: readonly T[]
@@ -105,13 +121,19 @@ interface Options<T extends string> {
  * **掴み手にも本体にも同じものを渡す。** 受け取った側が `useGrip` へそのまま流す。
  */
 export interface Bound {
-  onGrab: () => void
+  /** 掴んだ。引数は押した点（握り点）。無ければ最初の `onMove` の点を握り点にする */
+  onGrab: (origin?: Point) => void
   onMove: (point: Point) => void
   onDrop: () => void
 }
 
 export interface Reorder<T extends string> {
-  /** いま描くべき並び。掴んでいなければ `ids` そのまま */
+  /**
+   * いま描くべき並び。
+   *
+   * **運んでいる間は掴んだ瞬間の並びのまま**（React に DOM を動かさせない）。
+   * 離したら仮想の並びになり、サーバの返事（`ids`）が一致したら `ids` へ戻る。
+   */
   order: readonly T[]
   /** いま浮かせているもの。掴んでいなければ `null` */
   dragging: T | null
@@ -128,13 +150,42 @@ export interface Reorder<T extends string> {
   reordering: boolean
 }
 
+/** 掴んでいる間だけ在る、運びの土台。**離すまで書き換えるのは仮想の並びと封印だけ** */
+interface Held<T> {
+  /** 掴んだ瞬間の並び（＝DOM の並び。離すまで固定） */
+  base: readonly T[]
+  /** 凍結した矩形（`base` 順＝スロット） */
+  rects: Rect[]
+  layout: Layout
+  /** 本人の `base` での添字 */
+  from: number
+  /** 仮想の並び。`placement[スロット] = base の添字` */
+  placement: number[]
+  /** 本人がいま居る仮想のスロット */
+  current: number
+  seal: Seal | null
+  /** 握り点。押した点か、無ければ最初の `onMove` の点 */
+  origin: Point | null
+  /** 本人の最後の `translate`（着地の逆算に使う） */
+  followed: Point
+  samples: Sample[]
+}
+
+function translateOf(point: Point): string {
+  return `${point.x}px ${point.y}px`
+}
+
 export function useReorder<T extends string>({
   ids,
   onCommit,
   scroller,
 }: Options<T>): Reorder<T> {
   const [dragging, setDragging] = useState<T | null>(null)
-  const [order, setOrder] = useState<readonly T[]>(ids)
+  /**
+   * 見せる並び。掴んだ瞬間＝`base`（DOM と同じ）、離した後＝仮想の並び、
+   * サーバの返事が一致したら `null`（＝`ids` をそのまま返す）。
+   */
+  const [shown, setShown] = useState<readonly T[] | null>(null)
   /**
    * 並び全員に配る「いま並べ替えている」印。**離してからも滑り終わるまで真のまま。**
    */
@@ -148,26 +199,16 @@ export function useReorder<T extends string>({
   const 主 = useRef<object>({})
   const 降ろす予定 = useRef<ReturnType<typeof setTimeout> | null>(null)
   const elements = useRef(new Map<T, HTMLElement>())
+  const held = useRef<Held<T> | null>(null)
   /**
-   * 並びが変わる**直前**の見え方。**変わったときだけ**控える。
+   * 着地の直前の見え方（左上）。**離した瞬間にだけ**入る。
    *
    * ここに入っていると、次の描画の直後に FLIP（逆算を当てて 0 へ戻す）が走る。
    */
-  const 控え = useRef<Map<T, { left: number; top: number }> | null>(null)
-  // 掴んだ瞬間に測った矩形と、掴んだものの元の添字。**運びの最中は動かさない**
-  const measured = useRef<{
-    rects: Rect[]
-    from: number
-    base: readonly T[]
-    /** いまの落とし先。**変わったときだけ並びを作り直す** */
-    to: number
-    /** 直前に居た添字へ戻さないための封印（設計§15-3）。`dropTarget` が持ち回る */
-    seal: Seal | null
-    /** 直近の指の標本。進行方向（封印の解除条件）に使う */
-    samples: Sample[]
-  } | null>(null)
+  const 控え = useRef<Map<T, Point> | null>(null)
+  /** 離した後、サーバの返事を待っている並び。一致したら `shown` を捨てる */
+  const 返事待ち = useRef<readonly T[] | null>(null)
   const 送り = useRef<{ x: number; y: number }>({ x: 0, y: 0 })
-
 
   // 端に指がある間だけ送る。**掴んでいないときは回さない**
   useEffect(() => {
@@ -204,25 +245,24 @@ export function useReorder<T extends string>({
     [],
   )
 
-  /** いまの見え方を控える。**DOM を読むのはここと、掴んだ瞬間の1回だけ** */
-  const 位置を控える = useCallback(() => {
-    const 表 = new Map<T, { left: number; top: number }>()
-    for (const [id, element] of elements.current) {
-      const box = element.getBoundingClientRect()
-      表.set(id, { left: box.left, top: box.top })
+  /** 書いた `translate` と印を全部外す。**React が持つ属性には触らない** */
+  const 書いたものを外す = useCallback(() => {
+    for (const element of elements.current.values()) {
+      element.style.translate = ''
+      delete element.dataset.reorderSnap
     }
-    return 表
   }, [])
 
   /*
-    **押しのけられる側も滑らせる**（並べ替え設計§7-3 の読み替え・利用者の指摘 2026-09-03）。
+    **着地**（設計§15-11）。離した直後、React が DOM を並べ替えた**後**に走る。
 
-    やり方は FLIP——**並びを差し替えた直後に、動いたぶんを逆向きの `transform` で
-    打ち消し**（見た目は元の位置のまま）、**1フレームだけ滑りを切って確定させ**、
-    **0 へ戻して滑らせる**。動き方（時間・曲線・止める段）は `reorder.css` が持つ。
+    運んでいる間は各要素が `translate` で仮想の位置に居る。並べ替えた DOM の位置は
+    その見た目と一致するはずなので、①全員の `translate` を外して滑りを切り、②新しい
+    位置を測り、③差があるものにだけ逆算を当てて 0 へ滑らせる。理想どおりなら差は 0 で
+    誰も動かない（E2E ⑪）。最後の1歩の途中で離したときは残りを滑って繋がる。
 
-    **`motion` の `layout` は使わない。** あれは掴んでいなくても効くので、
-    禁止（`guideline.md`「一覧の小窓に `layout` を付けるのも禁止」）の射程を越える。
+    **「差が 0 なら何もしない」ではなく FLIP を通す**のは、`getBoundingClientRect` が
+    `translate` を含んだ見た目の位置を返すため——途中で離しても飛ばない。
   */
   useLayoutEffect(() => {
     const 前 = 控え.current
@@ -230,22 +270,26 @@ export function useReorder<T extends string>({
     if (前 === null) {
       return
     }
+    for (const element of elements.current.values()) {
+      element.dataset.reorderSnap = 'true'
+      element.style.translate = ''
+    }
     const 動いた: HTMLElement[] = []
     for (const [id, element] of elements.current) {
       const was = 前.get(id)
       if (was === undefined) {
+        delete element.dataset.reorderSnap
         continue
       }
       const box = element.getBoundingClientRect()
-      const dx = was.left - box.left
-      const dy = was.top - box.top
-      if (dx === 0 && dy === 0) {
+      const dx = was.x - box.left
+      const dy = was.y - box.top
+      if (Math.abs(dx) <= SETTLED_PX && Math.abs(dy) <= SETTLED_PX) {
         // jsdom は矩形を固定で返すので、**必ずここを通る**（動きは E2E が見る）
+        delete element.dataset.reorderSnap
         continue
       }
-      element.dataset.reorderSnap = 'true'
-      element.style.setProperty('--reorder-dx', `${dx}px`)
-      element.style.setProperty('--reorder-dy', `${dy}px`)
+      element.style.translate = translateOf({ x: dx, y: dy })
       動いた.push(element)
     }
     if (動いた.length === 0) {
@@ -259,12 +303,24 @@ export function useReorder<T extends string>({
     void 動いた[0].getBoundingClientRect()
     for (const element of 動いた) {
       delete element.dataset.reorderSnap
-      element.style.setProperty('--reorder-dx', '0px')
-      element.style.setProperty('--reorder-dy', '0px')
+      element.style.translate = '0px 0px'
     }
-  }, [order])
+  }, [shown, dragging])
 
-  // 外れるときに予定も印も残さない（掴んだまま画面が消えることがある）
+  /*
+    **サーバの返事が手元の並びと一致したら、手元を捨てる**（設計§15-4）。
+    並びは同じなので DOM は動かない。
+  */
+  useEffect(() => {
+    const waiting = 返事待ち.current
+    if (waiting === null || !sameOrder(ids, waiting)) {
+      return
+    }
+    返事待ち.current = null
+    setShown(null)
+  }, [ids])
+
+  // 外れるときに予定も印も、書いたものも残さない（掴んだまま画面が消えることがある）
   useEffect(() => {
     const 札 = 主.current
     return () => {
@@ -275,15 +331,35 @@ export function useReorder<T extends string>({
     }
   }, [])
 
+  /** 本人の見た目の左上。**矩形ではなく凍結した矩形＋`translate`**（倍率と傾きで箱が膨らむため） */
+  const 位置を控える = useCallback((h: Held<T>) => {
+    const 表 = new Map<T, Point>()
+    for (const [id, element] of elements.current) {
+      if (id === h.base[h.from]) {
+        const rect = h.rects[h.from]
+        表.set(id, { x: rect.left + h.followed.x, y: rect.top + h.followed.y })
+        continue
+      }
+      const box = element.getBoundingClientRect()
+      表.set(id, { x: box.left, y: box.top })
+    }
+    return 表
+  }, [])
+
   const bind = useCallback(
     (id: T): Bound => ({
-      onGrab: () => {
-        // **掴んだ瞬間の並びを土台にする。** 以後はここから動かす
-        const base = ids
+      onGrab: (origin) => {
+        // **掴んだ瞬間の並びを土台にする。** 返事待ちの最中なら、見えている並びが土台
+        const base = 返事待ち.current ?? ids
         const from = base.indexOf(id)
         if (from < 0) {
           return
         }
+        /*
+          **測る前に、書いたものを全部外す。** 着地の途中（滑り残り）で掴み直すと、
+          `translate` を含んだ矩形を凍結してしまう。
+        */
+        書いたものを外す()
         // **ここが唯一の測定**。以後は指の座標だけが答えを決める
         const rects = base.map((each) => {
           const element = elements.current.get(each)
@@ -293,7 +369,18 @@ export function useReorder<T extends string>({
           const box = element.getBoundingClientRect()
           return { left: box.left, top: box.top, width: box.width, height: box.height }
         })
-        measured.current = { rects, from, base, to: from, seal: null, samples: [] }
+        held.current = {
+          base,
+          rects,
+          layout: layoutOf(rects),
+          from,
+          placement: base.map((_, at) => at),
+          current: from,
+          seal: null,
+          origin: origin ?? null,
+          followed: { x: 0, y: 0 },
+          samples: [],
+        }
         // 離した直後にもう一度掴んだら、降ろす予定は捨てる
         if (降ろす予定.current !== null) {
           clearTimeout(降ろす予定.current)
@@ -303,19 +390,24 @@ export function useReorder<T extends string>({
         // **効果線を止める**（設計§15-1）。引き直しと発射は、印が降りるまで待つ
         raiseReordering(主.current)
         /*
-          **掴んだ瞬間に、手元の並びへ土台を入れる。**
-
-          掴んでいない間は渡された並びをそのまま返しているので、手元の状態は
-          **マウント時のまま古い**（枠は起動後に足されるので、多くの場合は空）。
-          入れずに掴むと、掴んだ瞬間に一覧が空になる——**実際にそうなった。**
+          **掴んだ瞬間の並びを見せ続ける。** これが「運んでいる間は DOM を並べ替えない」
+          の実体——`shown` が `base` と同じなので、React は何も動かさない。
         */
-        setOrder(base)
+        setShown(base)
         setDragging(id)
       },
       onMove: (point) => {
-        const held = measured.current
-        if (held === null) {
+        const h = held.current
+        if (h === null) {
           return
+        }
+        if (h.origin === null) {
+          h.origin = point
+        }
+        const now = performance.now()
+        h.samples.push({ t: now, x: point.x, y: point.y })
+        while (h.samples.length > SAMPLE_LIMIT || h.samples[0].t < now - VELOCITY_WINDOW_MS) {
+          h.samples.shift()
         }
         const box = scroller?.() ?? null
         if (box !== null) {
@@ -327,45 +419,73 @@ export function useReorder<T extends string>({
             height: bounds.height,
           })
         }
+        // **本人は指に 1:1 で追従する**（設計§15-2）。React を経由せず、要素へ直接書く
+        h.followed = { x: point.x - h.origin.x, y: point.y - h.origin.y }
+        const self = elements.current.get(h.base[h.from])
+        if (self !== undefined) {
+          self.style.translate = translateOf(h.followed)
+        }
         /*
           **落とし先は「行→矩形→1歩→封印」で決める**（設計§15-3）。目標へ直接飛ばさず、
           1回の `pointermove` で動くのは隣の1枚だけ。直前に居た添字へは、指が 10px
           動くか向きが 1 rad 変わるまで戻さない——境界上で毎フレーム往復しないため。
         */
-        const now = performance.now()
-        held.samples.push({ t: now, x: point.x, y: point.y })
-        while (held.samples.length > 32 || held.samples[0].t < now - VELOCITY_WINDOW_MS) {
-          held.samples.shift()
-        }
         const result = dropTarget({
-          rects: held.rects,
+          rects: h.rects,
           point,
-          current: held.to,
-          seal: held.seal,
-          heading: headingOf(held.samples, now),
+          current: h.current,
+          seal: h.seal,
+          heading: headingOf(h.samples, now),
         })
-        held.seal = result.seal
-        /*
-          **落とし先が変わったときだけ並びを作り直す。**
-
-          `moveItem` は動かないときも新しい配列を返すので、素朴に呼ぶと
-          `pointermove` のたびに描き直しが走る。加えて FLIP は「並びが変わった瞬間」を
-          捉える必要があるので、**変わっていないのに控えを取ると、動いていない要素に
-          逆算を当てて動かしてしまう**。
-        */
-        if (result.index === held.to) {
+        h.seal = result.seal
+        if (result.index === h.current) {
           return
         }
-        const target = result.index
-        held.to = target
-        控え.current = 位置を控える()
-        setOrder(moveItem(held.base, held.from, target))
+        h.placement = moveItem(h.placement, h.current, result.index).slice()
+        h.current = result.index
+        /*
+          **押しのけられる側の行き先を書く。** DOM は動かさず、凍結した矩形と仮想の並び
+          から出した差を `translate` に入れる。滑り方（時間・曲線）は CSS が持つ。
+        */
+        const offsets = virtualOffsets(h.rects, h.placement, h.layout)
+        for (let at = 0; at < h.base.length; at += 1) {
+          if (at === h.from) {
+            continue
+          }
+          const element = elements.current.get(h.base[at])
+          if (element === undefined) {
+            continue
+          }
+          // **動かない要素には書かない。** 1歩で書き換わるのは隣の1枚だけ（E2E が数える）
+          const next = offsets[at].x === 0 && offsets[at].y === 0 ? '' : translateOf(offsets[at])
+          if (element.style.translate !== next) {
+            element.style.translate = next
+          }
+        }
       },
       onDrop: () => {
-        const held = measured.current
-        measured.current = null
+        const h = held.current
+        held.current = null
         送り.current = { x: 0, y: 0 }
+        if (h === null) {
+          return
+        }
+        const next = h.placement.map((at) => h.base[at])
+        const 動いた = next.some((each, at) => each !== h.base[at])
+        // 着地の逆算のために、離した瞬間の見え方を控える
+        控え.current = 位置を控える(h)
         setDragging(null)
+        /*
+          **離した後も手元の並びを見せ続ける**（設計§15-4）。いったん `ids` へ戻すと、
+          サーバの返事が届くまでの 2〜4 フレーム、掴む前の並びが描かれて跳ぶ。
+        */
+        if (動いた) {
+          返事待ち.current = next
+          setShown(next)
+        } else {
+          返事待ち.current = null
+          setShown(null)
+        }
         /*
           **印は、滑り終わるまで降ろさない。** 同時に降ろすと持ち上げ（1.02倍・1度）が
           元へ戻る動きが瞬時に切れて、離した瞬間にカクつく。
@@ -376,41 +496,22 @@ export function useReorder<T extends string>({
         降ろす予定.current = setTimeout(() => {
           降ろす予定.current = null
           setReordering(false)
-          // **印が降りたら、`RoamLayer` が場を測り直して1回だけ引き直す**（設計§15-1）。
-          // 線は掴む前に測った矩形の上を飛ぶので、並びが変わったのに測り直さないと
-          // **もう居ない場所をなぞる**。測り直しは向こうの仕事で、ここは降ろすだけ
+          書いたものを外す()
+          // **印が降りたら、`RoamLayer` が場を測り直して1回だけ引き直す**（設計§15-1）
           lowerReordering(主.current)
         }, REORDER_SETTLE_MS)
-        if (held === null) {
-          return
-        }
         // **変わったときだけ送る。** 掴んで離しただけで書き込みが飛ぶと、
         // 押し間違いのたびにサーバが動く
-        setOrder((now) => {
-          const 動いた = now.length === held.base.length && now.some((each, at) => each !== held.base[at])
-          if (動いた) {
-            onCommit(now)
-          }
-          return now
-        })
+        if (動いた) {
+          onCommit(next)
+        }
       },
     }),
-    [ids, onCommit, scroller],
+    [ids, onCommit, scroller, 位置を控える, 書いたものを外す],
   )
 
-  /*
-    **掴んでいないあいだは、渡された並びをそのまま返す。**
-
-    状態へ写して effect で追いかける形にしていたが、それだと**新しいものが現れてから
-    描かれるまでに1周ぶんの遅れ**が出る——一覧に来たばかりのカードが1フレームだけ
-    居ない状態になり、**「起こした直後に掴もうとすると見つからない」という揺らぎ**を
-    生んだ（E2E が負荷時にだけ落ちる形で出た）。
-
-    運んでいる最中だけは手元の並び（場所取りを動かしたもの）を返す。**外から新しい
-    並びが来ても、指の下では動かさない。**
-  */
   return {
-    order: dragging === null ? ids : order,
+    order: shown ?? ids,
     dragging,
     bind,
     itemRef,

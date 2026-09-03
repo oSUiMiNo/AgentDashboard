@@ -85,8 +85,8 @@ interface Options {
   enabled?: boolean
   /** いつ掴むか。**押した瞬間に1回だけ聞く** */
   when: (event: ReactPointerEvent) => GrabWhen
-  /** 掴んだ。**DOM を動かすならここ**（キャプチャはこの後で取る） */
-  onGrab: () => void
+  /** 掴んだ。**DOM を動かすならここ**（キャプチャはこの後で取る）。引数は押した点（握り点） */
+  onGrab: (origin?: Point) => void
   /** 運んでいる。座標をそのまま渡す（決めるのは `lib/reorder.ts` の純関数） */
   onMove: (point: Point) => void
   /** 離した・取り消された */
@@ -171,7 +171,7 @@ export function useGrip({
     (now: Held) => {
       now.grabbed = true
       setDragging(true)
-      onGrab()
+      onGrab(now.origin)
       // jsdom に無い。**取れないときも、テストは要素へ直接配るので結果は変わらない**
       ;(
         now.element as Element & {
