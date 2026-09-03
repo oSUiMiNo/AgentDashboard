@@ -302,6 +302,70 @@ mod tests {
         assert_eq!(found.len(), 1, "1件読めなくても止めない");
     }
 
+    /// **前から溜まっていたゾンビも引き取る**（ゾンビ設計§6-2）。
+    ///
+    /// これが成り立たないと、実機に既に溜まっている78体は永久に残る。`waitpid(-1)` は
+    /// 「いま引き取れる子」を見境なく拾うので、**自分が殺した子だけを拾うのではない**
+    /// ——そこが要点である。
+    ///
+    /// **`nextest` はテストごとにプロセスを分ける**ので、`waitpid(-1)` が他のテストの子を
+    /// 拾う心配は無い。
+    #[cfg(unix)]
+    #[test]
+    fn 前から溜まっていたゾンビも引き取る() {
+        if children().is_none() {
+            // Linux 以外
+            return;
+        }
+
+        // 引き取られていない子を2本作る。**`wait` しないまま終わらせる**のが要点
+        let mut 置き去り = Vec::new();
+        for _ in 0..2 {
+            let child = std::process::Command::new("true")
+                .spawn()
+                .expect("起こせること");
+            置き去り.push(child.id());
+        }
+        // 終わってゾンビになるまで待つ（`wait` は呼ばない）
+        let 期限 = Instant::now() + Duration::from_secs(5);
+        while 置き去り.iter().any(|pid| {
+            !children()
+                .unwrap_or_default()
+                .iter()
+                .any(|c| c.pid as u32 == *pid && c.zombie)
+        }) {
+            assert!(Instant::now() < 期限, "ゾンビになるのを待てなかった");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let 引き取る前 = children().expect("読めること");
+        assert_eq!(
+            引き取る前.iter().filter(|c| c.zombie).count(),
+            2,
+            "溜まった状態を作れていること"
+        );
+
+        // **生きた子は1本も無い状態で呼ぶ。** 実機で押したときと同じ形
+        let result =
+            reap(Duration::from_millis(100), Duration::from_secs(2)).expect("引き取れること");
+
+        assert_eq!(result.reaped, 2, "溜まっていた2本を引き取ったこと");
+        assert!(
+            result.left.is_empty(),
+            "取り残しが無いこと: {:?}",
+            result.left
+        );
+        assert_eq!(
+            children()
+                .expect("読めること")
+                .iter()
+                .filter(|c| c.zombie)
+                .count(),
+            0,
+            "プロセス表からも消えたこと"
+        );
+    }
+
     /// 偽の `/proc` を組み立てる小道具。
     mod tempdir {
         use std::path::{Path, PathBuf};
