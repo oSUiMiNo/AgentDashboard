@@ -338,6 +338,11 @@ test('掴んでいる間だけ、押しのけられる側も滑る', async ({ pa
   await expect(後の枠).toHaveAttribute('data-reordering', 'true')
   await expect(後の枠).toHaveAttribute('data-dragging', 'true')
 
+  // **押しのけられた側にも動きが走っている。** 滑りは 200ms しか無いので、**待ちを挟む
+  // 前に読む**（下の持ち上げの待ちの後だと、通しで混んでいるときに滑り終わって 0 になる）
+  const 押しのけられた側 = await 先の枠.evaluate((el) => el.getAnimations().length)
+  expect(押しのけられた側).toBeGreaterThan(0)
+
   // **傾きと縮みが実際に出ている**（個別プロパティ。`transform` は `motion` のもの）。
   // 枠は面が大きいので 1.02 ではなく 0.97（要件「追加要望」1）。滑りの途中を読まないよう待つ
   await expect
@@ -346,10 +351,6 @@ test('掴んでいる間だけ、押しのけられる側も滑る', async ({ pa
   await expect
     .poll(() => 後の枠.evaluate((el) => getComputedStyle(el).scale))
     .toBe('0.97')
-
-  // **押しのけられた側にも動きが走っている**
-  const 押しのけられた側 = await 先の枠.evaluate((el) => el.getAnimations().length)
-  expect(押しのけられた側).toBeGreaterThan(0)
 
   await page.mouse.up()
 
