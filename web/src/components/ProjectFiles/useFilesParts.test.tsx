@@ -405,6 +405,56 @@ describe('ファイルの中身の列', () => {
     )
   })
 
+  it('枠が空文字から実体へ変わっても、前の枠のファイルを読みに行かない', async () => {
+    /*
+      **セッション専用画面は、セッションが届くまで枠が空文字である**（設計§5-6）。
+      相手の変化を効果で拾うと「新しい枠＋古い開いていたファイル」の描画が1回
+      コミットされ、中身の列が**前の枠のファイルを実際に取りに行く**。
+      描画中に直していれば、その問い合わせは1本も出ない。
+    */
+    覚えさせる({ pick: `${ROOT}/計画.md` })
+    const { view } = 置く({ project: '' })
+    await new Promise((done) => setTimeout(done, 20))
+
+    view.rerender(
+      <Placement host="local" project={ROOT} open onToggle={() => {}} />,
+    )
+    await screen.findByTestId('file-view')
+
+    // **出さないことは、回数でしか言えない**
+    const calls = (globalThis.fetch as unknown as { mock: { calls: [string][] } })
+      .mock.calls.map(([url]) => url)
+    expect(calls.filter((url) => url.includes('/file?'))).toHaveLength(1)
+  })
+
+  it('開いている最中に掘っても、読み直しは走らない', async () => {
+    /*
+      **覚えた値を `start` へ流し続けない**（設計§5-2）。流すと `start` が変わる
+      たびに辿り直しの効果が走り、**移動1回につき問い合わせが2回**になる。
+      跨いだ配置では1回あたり最大5秒かかるので、実害が出る。
+    */
+    置く()
+    await screen.findByTestId('folder-browser')
+    const 前 = (globalThis.fetch as unknown as { mock: { calls: [string][] } })
+      .mock.calls.length
+
+    const into = screen
+      .getAllByTestId('folder-entry')
+      .find((row) => row.getAttribute('data-name') === 'MyDocs')
+    await userEvent.click(into as HTMLElement)
+    await waitFor(() =>
+      expect(screen.getByTestId('folder-browser')).toHaveAttribute(
+        'data-path',
+        `${ROOT}/MyDocs`,
+      ),
+    )
+    await new Promise((done) => setTimeout(done, 50))
+
+    const 後 = (globalThis.fetch as unknown as { mock: { calls: [string][] } })
+      .mock.calls.length
+    expect(後 - 前).toBe(1)
+  })
+
   it('覚えていた場所が無ければ、黙って起点へ落ちる', async () => {
     覚えさせる({ dir: `${ROOT}/消えた` })
     失敗[`${ROOT}/消えた`] = 404
