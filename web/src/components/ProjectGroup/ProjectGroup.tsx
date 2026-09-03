@@ -150,11 +150,37 @@ export function ProjectGroup({
       /*
         掴んでいる枠は流れから浮かせる（設計§3-5）。**影ではなく `transform` で作る**
         ——`DESIGN.md` §27.5 の4候補（1.02倍・1〜2°の傾き・影・落とし先の反応）は
-        「物を掴んで運ぶ操作」のためのもので、こちらはまさにそれに当たる
+        「物を掴んで運ぶ操作」のためのもので、こちらはまさにそれに当たる。
+
+        # 選ばれた枠（§27.3・利用者の指摘 2026-09-03）
+
+        枠は**状態の色を1つも持たない**ので、カードより自由に使える。§27.3 の候補から
+        **3つ**当てる——**背景 Tint**・**左側の Accent**（左端 3px の帯）・**枠線の色**。
+        §27.3 が避けている「単なる 1px Border だけ」には当たらない。
+
+        **選択と Hover を同じ class 属性に両方置いてはいけない。** Tailwind では
+        `hover:bg-muted/20`（詳細度 0,2,0）が `bg-select-field`（0,1,0）に**必ず勝つ**ので、
+        **選ばれた枠にマウスを乗せた瞬間に選択の色が消える**。三項で排他にすれば、
+        選ばれているときは選択用の Hover（一段だけ上げる）だけが残る。
+
+        **`tile.css` 側へ書かないこと。** あちらはレイヤ外なので Hover に無条件で勝ち、
+        **選ばれた枠では Hover が一切効かなくなる**。枠の色は className が全部持つ。
+
+        **破線は外さない。** 破線は「枠の内側そのものが押せる」ことを示しているので、
+        選んだからといって押せなくなるわけではない。線種は変えず**色だけ**変える。
+
+        **Pressed は作らない**（§35.1）。`:active` は**押した要素の先祖にも当たる**ので、
+        `active:` を足すと**中のカードを押すたびに枠ごと縮む**。§8 の床「反応3つ」は
+        画面単位で数えるもので、この画面では小窓が4つとも持っている。
+
+        `transition-colors` から広げているのは、**左端の帯（`box-shadow`）が瞬間で出ると、
+        色だけがなめらかに変わって帯だけ飛び出す**ため。
       */
-      className={`border-border hover:border-primary/40 hover:bg-muted/20 cursor-pointer rounded-xl border border-dashed p-3 transition-colors ${
-        dragging ? 'relative z-10 scale-[1.02] rotate-[1deg] opacity-90' : ''
-      }`}
+      className={`cursor-pointer rounded-xl border border-dashed p-3 transition-[color,background-color,border-color,box-shadow] ${
+        押し方.selected
+          ? 'border-select bg-select-field hover:bg-select-field-hover shadow-[inset_3px_0_0_var(--select)]'
+          : 'border-border hover:border-primary/40 hover:bg-muted/20'
+      } ${dragging ? 'relative z-10 scale-[1.02] rotate-[1deg] opacity-90' : ''}`}
     >
       <header className="mb-2 flex items-baseline gap-2">
         {handle !== undefined && (

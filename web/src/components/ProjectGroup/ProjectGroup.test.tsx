@@ -160,6 +160,44 @@ describe('ProjectGroup', () => {
     expect(remove).toHaveAttribute('title', expect.stringContaining('セッションが動いている'))
   })
 
+  it('選ばれた枠は、地と枠線と左端の帯で分かる', async () => {
+    /*
+      **枠は選んでも見た目が何も変わっていなかった**（利用者の指摘 2026-09-03）。
+      `data-selected` は出しているのに、それを読む className も CSS も無かった。
+
+      枠は**状態の色を1つも持たない**ので、カードより自由に使える。
+      §27.3 の候補から3つ当てる——背景・枠線の色・左端の帯。
+    */
+    renderGroup([meta('a')], 'p1')
+
+    await userEvent.click(screen.getByTestId('project-group'))
+    const 枠 = screen.getByTestId('project-group')
+    expect(枠).toHaveAttribute('data-selected', 'true')
+    expect(枠.className).toContain('bg-select-field')
+    expect(枠.className).toContain('border-select')
+    expect(枠.className).toMatch(/shadow-\[inset_3px/)
+  })
+
+  it('選択と Hover のクラスは、同時に出ない', async () => {
+    /*
+      **これは「Hover が選択を消す」事故の再発防止である。**
+
+      Tailwind では `hover:bg-muted/20`（詳細度 0,2,0）が `bg-select-field`（0,1,0）に
+      **必ず勝つ**ので、両方が並んだ瞬間に**乗せた間だけ選択の色が消える**。
+      三項で排他にしてあることを、字で固定する。
+    */
+    renderGroup([meta('a')], 'p1')
+    const 枠 = screen.getByTestId('project-group')
+
+    expect(枠.className).toContain('hover:bg-muted/20')
+    expect(枠.className).not.toContain('bg-select-field')
+
+    await userEvent.click(枠)
+
+    expect(枠.className).not.toContain('hover:bg-muted/20')
+    expect(枠.className).toContain('hover:bg-select-field-hover')
+  })
+
   it('指でカードを長押しすると、選ばれるのはカードで、枠ではない', () => {
     /*
       **カードの押しが枠まで届いていた。**

@@ -41,6 +41,10 @@
     --color-muted: var(--muted);
     --color-secondary-foreground: var(--secondary-foreground);
     --color-secondary: var(--secondary);
+    --color-select-field-hover: var(--select-field-hover);
+    --color-select-field: var(--select-field);
+    --color-select-face: var(--select-face);
+    --color-select: var(--select);
     --color-primary-foreground: var(--primary-foreground);
     --color-primary: var(--primary);
     --color-popover-foreground: var(--popover-foreground);
@@ -85,6 +89,54 @@
     */
     --accent-face: color-mix(in oklch, #3dd9e6 18%, transparent);
     --accent-edge: color-mix(in oklch, #3dd9e6 40%, transparent);
+
+    /*
+      **一覧で「選ばれている」ことを表す色**（`DESIGN.md` §27.3）。
+
+      # §11.2 と食い違う。承知のうえで残す（§35.1）
+
+      §11.2 は「選択」を Primary Accent（シアン）に固定しているが、**一覧のカードでは
+      同じシアンが既に「進行中」に割り当たっている**——輪（`--tile-accent`）だけでなく
+      **面**（`tile.css` の `[data-motion='spin-fast'] .tile-body`）まで取っている。
+
+      §11.2 の逃げ道は「分けたいなら色ではなく**形か位置**で分ける」だが、
+      **面も縁も進行中が先に取っている**ので、この画面では使えない。実測でも、
+      シアンで濃さだけを変えた面は**作業中の面との差が ΔE 0.056**（この道具が
+      「一段変わった」として使っている段差 0.064 より小さい）にしかならず、
+      **「作業中のカードでも選択が見える」を満たさない**。
+
+      そこで**状態の5色（シアン・琥珀・青灰・ライム・珊瑚）のどれとも隣り合わない紫**を、
+      「一覧で選ばれている」専用に立てる。**逆向きの誤読（選択を状態と読む）も起きない。**
+
+      **セッション画面は変えない。** あちらのタブ・開いている行・ターミナルのトグルは
+      `--accent-face` / `--accent-edge`（シアン）のままである——**シアンが「選択」を
+      意味しないのは一覧の上だけ**であって、他は §11.2 どおりに動く。
+
+      **枠とカードは同時に選ばれない**（`stores/selection.ts` が種類を混ぜない）ので、
+      この紫が画面に2つの意味で出ることはない。
+
+      **戻すなら、この1本を書き換えるだけで全部が付いてくる。** 進行中の面を別の形へ
+      移せた日には、シアンへ戻せる。
+    */
+    --select: #7c3aed;
+    /*
+      選ばれたカードの地。**不透明で持つこと。**
+
+      半透明（旧 `bg-primary/10`）にすると、**裏の輪（状態の色）が透けて地が消える**
+      ——琥珀のカードでは文字が読めなくなる。`color-mix` の両辺が不透明なので、
+      結果も不透明になる。
+
+      **可動域は 22〜30%。** これより薄いと作業中の面と見分けが付かず、
+      濃いと `text-rose-400`（エラー）が 4.5:1 に寄る。単体テストが床と天井を見張る。
+    */
+    --select-face: color-mix(in srgb, var(--select) 26%, var(--card));
+    /*
+      選ばれた PJT枠の地。**カードより薄い。** 枠はカード十数枚ぶんの面積を持つので、
+      カードと同じ濃さで塗ると §11.3 の比率（Neutral 75〜85%）を一枚で割る。
+    */
+    --select-field: color-mix(in srgb, var(--select) 14%, var(--background));
+    /* 選ばれた枠に、さらにマウスを乗せたとき。**選択を消さずに一段だけ上げる** */
+    --select-field-hover: color-mix(in srgb, var(--select) 20%, var(--background));
 
     --background: oklch(0.145 0 0);
     --foreground: oklch(0.985 0 0);

@@ -300,6 +300,65 @@ describe('SessionTile の骨格', () => {
     expect(screen.getByTestId('tile-shell').className).toBe('tile-shell relative')
   })
 
+  it('選ばれたカードに、印は出さない', async () => {
+    /*
+      **利用者の指定**（2026-09-03）——「白い点はいらない。選択は背景の色だけで表す」。
+
+      **消したことを検査で残す。** 次に触る人が「選択が分かりにくい」と読んで、
+      親切のつもりで点を戻すのを止めるため。戻すなら、まずこの検査を消すことになる。
+
+      もとの点は**復旧ボタンの矩形の内側**に居て、ボタンのほうが後ろの DOM にあるため
+      **復旧ボタンが出るカードでは1ピクセルも見えていなかった**。
+    */
+    renderTile(meta())
+    await userEvent.click(screen.getByTestId('session-tile'))
+
+    expect(screen.getByTestId('session-tile')).toHaveAttribute(
+      'data-selected',
+      'true',
+    )
+    expect(screen.queryByTestId('tile-selected-mark')).toBeNull()
+  })
+
+  it('選ばれたカードの地は、className が持たない', async () => {
+    /*
+      **地は `tile.css` の持ち物。** ここへ書き戻すと、作業中のカードで黙って
+      効かなくなる（レイヤ外の規則に勝てない）。**浮きだけはここに残す**
+      ——`:active` の 0.98 に負けるのが正しい。
+    */
+    renderTile(meta())
+    await userEvent.click(screen.getByTestId('session-tile'))
+
+    const 中身 = screen.getByTestId('session-tile')
+    expect(中身.className).not.toMatch(/\bbg-(primary|select)/)
+    expect(中身.className).toContain('scale-[1.01]')
+  })
+
+  it('選ばれたことを、見た目以外でも伝える', async () => {
+    // 印を外して**合図が 100% 色になった**ので、ここが唯一の非視覚の道になった
+    renderTile(meta())
+    await userEvent.click(screen.getByTestId('session-tile'))
+
+    expect(screen.getByTestId('session-tile')).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+  })
+
+  it('選択の印は、器にも複製される', async () => {
+    /*
+      切る枠は中身の**親**なので、中身に付けた印では CSS が届かない。
+      **色が消える環境で選択を伝えるのは、その枠の線種だけ**である。
+    */
+    renderTile(meta())
+    await userEvent.click(screen.getByTestId('session-tile'))
+
+    expect(screen.getByTestId('tile-shell')).toHaveAttribute(
+      'data-selected',
+      'true',
+    )
+  })
+
   it('掴んでいるカードは、実際に傾く', async () => {
     /*
       **クラスで傾けても画面には出ない。**

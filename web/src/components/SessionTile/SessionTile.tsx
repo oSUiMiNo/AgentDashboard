@@ -382,6 +382,12 @@ export function SessionTile({
       // カードでも枠だけ元の明るさで出ていた
       data-connected={session.agent_connected}
       /*
+        **選択の印も器へ複製する**（カード設計§7-4-4）。切る枠（`.tile-frame`）は
+        中身の**親**なので、中身に付けた印では CSS が届かない。**色が消える環境で
+        選択を伝えるのは、その枠の線種だけ**になるため、届く必要がある。
+      */
+      data-selected={押し方.selected ? 'true' : 'false'}
+      /*
         **カードの押しは枠へ渡さない。**
 
         `click` は前から止めていた（中身の側）のに、`pointerdown` は素通しだった。
@@ -442,13 +448,21 @@ export function SessionTile({
           /*
             **選ばれた見た目は、枠線の色で表さない**（設計§8-3）。枠線は状態の色が
             使っているので、そこへ足すと**状態と選択が同じ場所を取り合う**。
-            使うのは**地の色味**と、右上の**小さな印**の2つ。
+            使うのは**地の色**と**わずかな浮き**の2つ（印の点は置かない）。
 
-            **浮きは影ではなく `transform`**（設計§8-2）。カードは `mask-image` を
-            使っており、外へ描くものは切られる
+            **地はここに書かない。** `tile.css` が作業中の面をレイヤ外で持っており、
+            **ここへ何を書いても勝てない**——`bg-primary/10` が作業中のカードで一度も
+            効いていなかったのがその実例で、さらに α0.1 だったので**不透明な地が消えて
+            裏の輪が透けていた**。地は `tile.css` の `[data-selected='true']` が持つ。
+
+            **浮きだけはここに残す。** `scale-[1.01]` は Tailwind のユーティリティ層に
+            居るので、`tile.css` の `:active { scale: 0.98 }`（レイヤ外）に必ず負ける
+            ——**押した手応えが選択に潰されない**のは、この非対称のおかげである。
+            影ではなく `transform` なのは、カードが `mask-image` を使っており
+            外へ描くものが切られるため（設計§8-2）。
           */
           className={`tile-body bg-card flex w-full flex-col gap-1 rounded-[7px] px-3 pt-2.5 pb-3 text-left ${
-            押し方.selected ? 'bg-primary/10 scale-[1.01]' : ''
+            押し方.selected ? 'scale-[1.01]' : ''
           }`}
           data-testid="session-tile"
           data-card-id={session.card_id}
@@ -460,6 +474,14 @@ export function SessionTile({
           }
           data-connected={session.agent_connected}
           data-selected={押し方.selected ? 'true' : 'false'}
+          /*
+            **選ばれていることを、見た目以外でも伝える。**
+
+            印の点を外したので（利用者の指定）、**合図が 100% 色になった**——
+            色が見えない人には、ここが唯一の道である。`role` を変えずに済むので
+            `aria-pressed` を使う（`aria-selected` は listbox 等の中でしか意味を持たない）。
+          */
+          aria-pressed={押し方.selected}
           /*
             **端末の長押しメニューを抑える**（設計§4-4）。iOS Safari は `contextmenu` を
             発火しないので `preventDefault()` で止める道が無く、使えるのはこの2枚だけ。
@@ -481,17 +503,6 @@ export function SessionTile({
           onPointerUp={押し方.onPointerUp}
           onPointerCancel={押し方.onPointerCancel}
         >
-          {/*
-            選ばれていることの印。**小さく、右上に。** 中身の並びを押しのけないよう
-            絶対配置で置く（`tile-body` は `relative` ではないので、切る枠を基準にする）
-          */}
-          {押し方.selected && (
-            <span
-              data-testid="tile-selected-mark"
-              aria-hidden
-              className="bg-primary absolute top-1.5 right-1.5 size-2 rounded-full"
-            />
-          )}
           {/*
             ① 状態と最終活動を1行に収める（カード設計§10-1）。
 

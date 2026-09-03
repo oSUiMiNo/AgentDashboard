@@ -336,9 +336,36 @@ describe('色が消える環境への退避', () => {
   it('切る枠が実線になる', () => {
     // 輪は背景画像なので丸ごと消える（調査§6-4）。カードの境目まで消えないようにする
     const 退避 = 当たる('forced-colors')
-    const 枠 = 退避.filter((rule) => rule.selector.includes('.tile-frame'))
+    /*
+      **選択の退避は別の話なので、ここでは数えない。** あちらが見ているのは
+      「どのカードが選ばれているか」で、ここが見ているのは「カードの境目が残るか」。
+      同じ `.tile-frame` に当たるが、主語が違う（下の「選ばれたカードは〜」で数える）。
+    */
+    const 枠 = 退避.filter(
+      (rule) =>
+        rule.selector.includes('.tile-frame') &&
+        !rule.selector.includes('data-selected'),
+    )
     expect(枠).toHaveLength(1)
     expect(枠[0].body).toContain('CanvasText')
+  })
+
+  it('選ばれたカードは、地が消えても線種で分かる', () => {
+    /*
+      **面（`--select-face`）は強制配色で丸ごと落ちる。** 印の点も外したので
+      （利用者の指定）、**ここが唯一の受け皿**になっている。
+
+      `outline` で作っていないことも見る——中身へ `outline` を書くと、
+      **選ばれたカードだけフォーカスの輪を失う**（作者の指定が UA の輪を置き換える）。
+      太さを触っていないことも見る——変えると**選択の有無でカードの外寸が動く**。
+    */
+    const 退避 = 当たる('forced-colors').filter((rule) =>
+      rule.selector.includes("[data-selected='true']"),
+    )
+    expect(退避).toHaveLength(1)
+    expect(値(退避[0], 'border-style')).toBe('dashed')
+    expect(退避[0].body).not.toContain('outline')
+    expect(退避[0].body).not.toMatch(/border-width|(?:^|;)\s*border:/)
   })
 
   it('状態タグは、地が消えても文言が残る', () => {
@@ -374,6 +401,105 @@ describe('色が消える環境への退避', () => {
     // 絵（3コマ）を消す規則と、退避を出す規則が対で要る
     expect(当たり先).toContain('.tile-run i')
     expect(当たり先).toContain('.tile-run-fallback')
+  })
+})
+
+describe('選ばれたカードは、面ごと色が変わる（フェーズ7）', () => {
+  const 選択 = () => 規則(".tile-body[data-selected='true']")
+
+  it('作業中の面より後ろに書いてある', () => {
+    /*
+      **これが「作業中のカードでも選択が見える」の機械的な裏取りである。**
+
+      3本とも詳細度が (0,2,0) で並ぶので、勝敗は書いた順だけで決まる。前は
+      `bg-primary/10`（Tailwind のユーティリティ層）で書いていたため、
+      レイヤ外のこの行に**一度も勝てていなかった**——作業中のカードだけ
+      選んでも背景が変わらない、という形で出ていた。
+    */
+    const 作業中 = 当たる("[data-motion='spin-fast']").filter((rule) =>
+      rule.selector.includes('.tile-body'),
+    )
+    expect(作業中).toHaveLength(1)
+    expect(選択().at).toBeGreaterThan(作業中[0].at)
+  })
+
+  it('フォーカスの面より後ろに書いてある', () => {
+    /*
+      **フォーカスは「いまどこか」、選択は「何に効くか」。** 片方が片方を消しては
+      いけない。面を譲っても、フォーカスの合図は**輪と左端の帯**が持つ。
+    */
+    // **`.tile-body:focus-visible` は2本ある**（輪と面）。後ろのほうより後ろに要る
+    const フォーカス = 全規則.filter(
+      (rule) => rule.selector === '.tile-body:focus-visible',
+    )
+    expect(フォーカス.length).toBeGreaterThan(0)
+    const 最後 = Math.max(...フォーカス.map((rule) => rule.at))
+    expect(選択().at).toBeGreaterThan(最後)
+  })
+
+  it('面は不透明で、状態の色を読まない', () => {
+    /*
+      **α を持つと裏の輪（状態の色）が透けて地が消える**（`bg-primary/10` が
+      踏んだ穴。琥珀のカードでは文字が読めなくなる）。
+      **`--tile-accent` を読むと、色が「選択」ではなく「状態」を表す。**
+    */
+    expect(値(選択(), 'background-color')).toBe('var(--select-face)')
+    expect(選択().body).not.toContain('--tile-accent')
+
+    const 定義 = /--select-face:\s*([^;]+)/.exec(INDEX)
+    expect(定義, 'index.css に --select-face が無い').not.toBeNull()
+    // 不透明な地を織り込んでいる＝結果も不透明
+    expect((定義 as RegExpExecArray)[1]).toContain('var(--card)')
+    expect((定義 as RegExpExecArray)[1]).not.toContain('transparent')
+  })
+
+  it('面の濃さは、決めた可動域の中にある', () => {
+    /*
+      **薄いと作業中の面と見分けが付かず、濃いとエラーの文字が 4.5:1 に寄る。**
+      印の点を外したぶん一段濃く（26%）してあるが、上下に床と天井を置く。
+      **実際の色が違って見えることは、実ブラウザでしか言えない**（E2E が見る）
+      ——jsdom は `color-mix` も `oklch` も計算しない。
+    */
+    const 比 = /--select-face:[^;]*?(\d+)%/.exec(INDEX)
+    expect(比, '--select-face の割合が読めない').not.toBeNull()
+    const 値 = Number((比 as RegExpExecArray)[1])
+    expect(値).toBeGreaterThanOrEqual(22)
+    expect(値).toBeLessThanOrEqual(30)
+  })
+
+  it('影も枠線も使わない', () => {
+    // 影は「物質 2/2」に1本だけ、枠線は状態の色のもの（並べ替え設計§8-3）
+    expect(選択().body).not.toContain('box-shadow')
+    expect(選択().body).not.toMatch(/(?:^|;)\s*border/)
+  })
+
+  it('動きの印を混ぜない', () => {
+    // 混ぜると「進行中は Primary Accent を面で出している」が2本一致して落ちる。
+    // **混ぜる必要も無い**——選択は状態によらず同じ1色
+    expect(選択().selector).not.toContain('data-motion')
+  })
+
+  it('浮きは tile.css 側に置かない', () => {
+    /*
+      **置くと押した手応えに勝ってしまう**（`:active` より後ろに書くため）。
+      浮きは TSX の `scale-[1.01]`（Tailwind のユーティリティ層）が持ち、
+      レイヤ外の `:active { scale: 0.98 }` に**負けるのが正しい**。
+    */
+    expect(選択().body).not.toContain('scale')
+  })
+
+  it('左端の帯を取らない', () => {
+    /*
+      **Hover の合図は「帯が出てくること」である。** 選択が常時そこを塗ると、
+      乗せても「色が変わる」だけになり、Hover が一段弱る——
+      選択を強くするために別の反応を削る取り引きになってしまう。
+    */
+    const 帯 = 全規則.filter(
+      (rule) =>
+        /\.tile-body::(before|after)/.test(rule.selector) &&
+        rule.body.includes('--select'),
+    )
+    expect(帯).toHaveLength(0)
   })
 })
 
