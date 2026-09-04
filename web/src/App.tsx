@@ -27,9 +27,12 @@ import { ProjectAdd } from '@/components/ProjectAdd/ProjectAdd'
 import { RoamLayer } from '@/components/RoamLayer/RoamLayer'
 import { report } from '@/lib/clientLogs'
 import { composerBusyCount } from '@/lib/composerBusy'
+import { useDocumentTitle } from '@/lib/documentTitle'
+import { projectDisplayName } from '@/lib/path'
 import { selfhealLabel } from '@/lib/protocol'
 import { ACCOUNT, HOME, LOCAL_HOST, SETTINGS } from '@/lib/routes'
 import { canEnter, useAuthStore } from '@/stores/auth'
+import { useProjects } from '@/stores/projects'
 import { useSessionCard } from '@/stores/sessions'
 import { useSettingsStore } from '@/stores/settings'
 import { useWsStore } from '@/stores/ws'
@@ -424,12 +427,27 @@ function GroupPage() {
   const { host, projectId } = useParams()
   // react-router が符号を戻してくれるので、そのまま作業ディレクトリの絶対パスになる。
   // **鍵に PC が入る**（設計§16）——パスだけでは別の PC の同名 PJT を指し分けられない
-  return <GroupView host={host ?? LOCAL_HOST} project={projectId ?? ''} />
+  const project = projectId ?? ''
+  const projects = useProjects()
+  /*
+    タブの名前（タブ設計「書き手はページ層に置く」）。**帯と同じ関数で決める**ので、
+    同名の PJT に付く番号までタブと画面で揃う。ここは URL に作業ディレクトリが
+    入っているので、**開いた最初の瞬間から名乗れる**（番号だけは枠の一覧を待つ）。
+  */
+  useDocumentTitle(projectDisplayName(project, projects))
+  return <GroupView host={host ?? LOCAL_HOST} project={project} />
 }
 
 function SessionPage() {
   const { cardId } = useParams()
   const session = useSessionCard(cardId ?? '')
+  const projects = useProjects()
+  /*
+    **早期 return より前で呼ぶ**（フックの規則）。カードが届くまでは PJT が分からない
+    ので何も渡さず、既定のまま待つ——**空にするとブラウザが URL を代わりに出す**ので、
+    カードの ID がタブに並んでいまより読みにくくなる。
+  */
+  useDocumentTitle(session && projectDisplayName(session.project, projects))
 
   if (!session) {
     return (
