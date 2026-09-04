@@ -276,9 +276,21 @@ test("左パネルを開き、ファイルを読み、相対パスをコピー�
 
   // **写す道はサイドバーだけになった**（要件24）。値がそのまま貼れる形で入ること
   await expect(view.getByTestId("file-copy")).toHaveCount(0);
-  await panel.getByTestId("folder-copy").first().click();
+  /*
+    **値を固定で書かない。** ここへ来るまでに `MyDocs` の中へ入っているので、一覧の
+    最初の行は**その時点で開いているフォルダの中身**である（`MyDocs/設計/` だった）。
+    階層をどこまで辿ったかに寄りかかると、途中の手順を1つ足しただけで落ちる。
+
+    **ボタンが「写す」と言っている値と突き合わせる。** 確かめたいのは
+    「押した値がそのまま入ること」であって、行の並びではない。
+  */
+  const 押す = panel.getByTestId("folder-copy").first();
+  const 写す値 = await 押す.getAttribute("data-value");
+  await 押す.click();
   const copied = await page.evaluate(() => navigator.clipboard.readText());
-  expect(copied).toBe("MyDocs/");
+  expect(copied).toBe(写す値);
+  // **そのまま貼れる形**であること（絶対パスではなく、枠からの相対パス）
+  expect(copied).not.toMatch(/^\//);
 
   // 開いたことは覚えている（設計§14）。一覧へ出て戻っても畳まれていない
   await page.goto("/");
