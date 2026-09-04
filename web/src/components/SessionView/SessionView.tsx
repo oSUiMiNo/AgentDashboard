@@ -26,6 +26,7 @@ import {
 import { useLocation, useNavigate } from 'react-router'
 import { Button } from '@/components/ui/button'
 import { CloseGlyph, PencilGlyph, TrashGlyph } from '@/components/ui/glyphs'
+import { NoticeBell } from '@/components/NoticeBell/NoticeBell'
 import { PowerButton } from '@/components/ui/power-button'
 import { NicknameInput } from '@/components/SessionNickname/NicknameInput'
 import { InputDock } from '@/components/InputDock/InputDock'
@@ -58,7 +59,7 @@ import { hostOf } from '@/lib/reviveBudget'
 import type { CardId } from '@/lib/protocol'
 import { useNow } from '@/lib/sessions'
 import { useAuthStore } from '@/stores/auth'
-import { useCardError, useReviving, useSessionCard } from '@/stores/sessions'
+import { useCardError, useCardNotices, useReviving, useSessionCard } from '@/stores/sessions'
 import { agentOf, useSettingsStore } from '@/stores/settings'
 import { useProjects } from '@/stores/projects'
 import { useWsStore } from '@/stores/ws'
@@ -99,6 +100,7 @@ export function SessionView({
   const revive = useWsStore((state) => state.revive)
   const reviving = useReviving(cardId)
   const cardError = useCardError(cardId)
+  const notices = useCardNotices(cardId)
   const agents = useSettingsStore((state) => state.settings.agents)
   // 復旧中の明滅を止めるのに要る。**印だけを出し、止める分岐は CSS 側に置く**
   // （小窓と同じ作法。設計§15-5）
@@ -256,10 +258,25 @@ export function SessionView({
         断りはそのカードに出す（設計§9-5）。画面全体の帯へ出すと、横並びのときに
         **どのカードの話なのか分からなくなる**
       */}
-      {cardError && (
-        <p data-testid="card-error" className="text-xs text-rose-400">
-          {cardError}
-        </p>
+      {(cardError !== null || notices.length > 0) && (
+        <div className="flex items-center gap-2">
+          {cardError !== null && (
+            // **`aria-live` を付ける**（細かい修正 設計§7-4）。5秒で消える形にすると、
+            // 見ていない人には存在しなかったのと同じになる。遮らないよう `polite`
+            <p
+              data-testid="card-error"
+              aria-live="polite"
+              className="min-w-0 flex-1 text-xs text-rose-400"
+            >
+              {cardError}
+            </p>
+          )}
+          {/*
+            溜まっている断りのベル（細かい修正 設計§7-4）。**断りの定位置に置く**——
+            ここは既に空けてある段なので、空の段も新しい段も増えない
+          */}
+          <NoticeBell notices={notices} />
+        </div>
       )}
 
       {/*

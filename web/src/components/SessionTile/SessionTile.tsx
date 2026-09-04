@@ -51,6 +51,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { Badge } from '@/components/ui/badge'
 import { PencilGlyph, TrashGlyph } from '@/components/ui/glyphs'
+import { NoticeBell } from '@/components/NoticeBell/NoticeBell'
 import { PowerButton } from '@/components/ui/power-button'
 import { NicknameInput } from '@/components/SessionNickname/NicknameInput'
 import { formatElapsed } from '@/lib/time'
@@ -72,7 +73,7 @@ import { sessionPath } from '@/lib/routes'
 import { measureField } from '@/lib/roam'
 import { useNow } from '@/lib/sessions'
 import { ROAM_ACCENT, ROAM_INK, scheduleRoam } from '@/stores/roam'
-import { useCardError, useReviving, useSessionCard } from '@/stores/sessions'
+import { useCardError, useCardNotices, useReviving, useSessionCard } from '@/stores/sessions'
 import { agentName, agentOf, useSettingsStore } from '@/stores/settings'
 import { useWsStore } from '@/stores/ws'
 
@@ -279,6 +280,7 @@ export function SessionTile({
   })
   const reviving = useReviving(cardId)
   const cardError = useCardError(cardId)
+  const notices = useCardNotices(cardId)
   const now = useNow()
   const echo = useEcho(session?.last_assistant_message ?? null)
 
@@ -691,6 +693,12 @@ export function SessionTile({
                   @{session.toml_account}
                 </span>
               )}
+              {/*
+                溜まっている断りのベル（細かい修正 設計§7-4）。**この行の中に入れる**——
+                カードの左上と右上はホバーで出る3つで埋まっているので、**新しい絶対配置を
+                増やさない**
+              */}
+              <NoticeBell notices={notices} />
             </div>
           )}
 
@@ -714,7 +722,13 @@ export function SessionTile({
             戻せない」を区別できること**が完了条件に入っている
           */}
           {cardError && (
-            <span data-testid="card-error" className="text-xs text-rose-400">
+            // **`aria-live` を付ける**（細かい修正 設計§7-4）。5秒で消える形にすると、
+            // 見ていない人には存在しなかったのと同じになる。遮らないよう `polite`
+            <span
+              data-testid="card-error"
+              aria-live="polite"
+              className="text-xs text-rose-400"
+            >
               {cardError}
             </span>
           )}
