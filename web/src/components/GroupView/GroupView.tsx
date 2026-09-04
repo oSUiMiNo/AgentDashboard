@@ -35,6 +35,7 @@
 import { useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 import { Button } from '@/components/ui/button'
+import { CloseGlyph } from '@/components/ui/glyphs'
 import { FilesToggle } from '@/components/ProjectFiles/FilesToggle'
 import { useFilesParts } from '@/components/ProjectFiles/useFilesParts'
 import { SessionAdd } from '@/components/SessionAdd/SessionAdd'
@@ -183,18 +184,7 @@ export function GroupView({ host, project }: Props) {
             navigate(HOME)
           }}
         >
-          <svg
-            aria-hidden
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth={2}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <path d="M18 6 6 18" />
-            <path d="m6 6 12 12" />
-          </svg>
+          <CloseGlyph />
         </Button>
       </header>
 

@@ -18,7 +18,6 @@
  */
 
 import {
-  useEffect,
   useRef,
   useState,
   type ReactNode,
@@ -26,7 +25,8 @@ import {
 } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 import { Button } from '@/components/ui/button'
-import { PencilGlyph, PowerGlyph, TrashGlyph } from '@/components/ui/glyphs'
+import { CloseGlyph, PencilGlyph, TrashGlyph } from '@/components/ui/glyphs'
+import { PowerButton } from '@/components/ui/power-button'
 import { NicknameInput } from '@/components/SessionNickname/NicknameInput'
 import { InputDock } from '@/components/InputDock/InputDock'
 import { ModelPicker } from '@/components/ModelPicker/ModelPicker'
@@ -55,7 +55,7 @@ import { useFilesPanel } from '@/lib/filesPanel'
 import { projectDisplayName } from '@/lib/path'
 import { backTargetFor, HOME, projectPath, sessionPath } from '@/lib/routes'
 import { hostOf } from '@/lib/reviveBudget'
-import type { CardId, ReviveState } from '@/lib/protocol'
+import type { CardId } from '@/lib/protocol'
 import { useNow } from '@/lib/sessions'
 import { useAuthStore } from '@/stores/auth'
 import { useCardError, useReviving, useSessionCard } from '@/stores/sessions'
@@ -238,18 +238,7 @@ export function SessionView({
               navigate(HOME)
             }}
           >
-            <svg
-              aria-hidden
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth={2}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="M18 6 6 18" />
-              <path d="m6 6 12 12" />
-            </svg>
+            <CloseGlyph />
           </Button>
         </header>
       )}
@@ -668,90 +657,6 @@ function ScreenInterval({ remote, shown }: { remote: boolean; shown: boolean }) 
  * 入っているときの下地は **Primary Accent の面**（`DESIGN.md` §8 の床・§11.2）。
  * 選択を面で出す1か所を、タブから引き継いでいる。
  */
-/**
- * 押したあと、これだけのあいだ**次の押下を捨てる**（設計§15-1）。
- *
- * **2つのボタンだったときは、連打しても同じものが2回送られるだけだった。**
- * 1つにするとそうではなくなる——`Kill` から `ended` へ変わるまでには間があり
- * （実測の上限は20秒）、**その切り替わりをまたいで2回目を押すと、止めたつもりで
- * 起こす**。「効いたか分からないからもう一度押す」がいちばん起きやすい押し方で、
- * しかも押した直後は輪の色が変わらないので、その動機がそこにある。
- */
-const 連打よけ = 500
-
-/**
- * スリープと復旧を1つにした電源ボタン（設計§15-1）。
- *
- * **押せなくするのは「本当に押せないとき」だけにする。** 連打よけで `disabled` に
- * すると、点灯していた輪が 500ms だけ灰色へ落ちて**壊れたように見える**。捨てるのは
- * 押下のほうで、見た目は動かさない。
- *
- * **「状態が切り替わるまで押せなくする」は採らない**（設計§15-1）。`Kill` が届か
- * なければ**永久に押せないボタン**になり、しかも押せない理由を出す道が無い。
- */
-function PowerButton({
-  on,
-  state,
-  busy,
-  why,
-  onPress,
-}: {
-  /** 点いているか（＝実体がある）。消えていれば押すと起きる */
-  on: boolean
-  /** 起こし直せるかの内訳。押せない理由を目印にも載せる */
-  state: ReviveState['kind']
-  /** いま起こしている最中か */
-  busy: boolean
-  /** 押せない理由（押せるときは `null`） */
-  why: string | null
-  onPress: () => void
-}) {
-  const [待つ, set待つ] = useState(false)
-  const 時計 = useRef<ReturnType<typeof setTimeout> | null>(null)
-  useEffect(
-    () => () => {
-      if (時計.current !== null) {
-        clearTimeout(時計.current)
-      }
-    },
-    [],
-  )
-
-  // **色は読み上げられない。** ホバーの反応も文字ではないので、読み上げ環境では
-  // ここだけが手がかりになる（設計§15-1）
-  const 言葉 = on ? 'スリープ' : '復旧'
-  const 説明 = busy
-    ? '起こしています…'
-    : on
-      ? 'セッションを止めます（カードは残り、復旧で起こせます）'
-      : (why ?? '元の CLI セッションで起こし直します')
-
-  return (
-    <button
-      type="button"
-      className="power"
-      data-testid="power-card"
-      data-power={on ? 'on' : 'off'}
-      data-action={on ? 'sleep' : 'revive'}
-      data-state={state}
-      data-busy={busy ? 'true' : undefined}
-      disabled={(!on && state !== 'ready') || busy}
-      aria-label={言葉}
-      title={説明}
-      onClick={() => {
-        if (待つ) {
-          return
-        }
-        set待つ(true)
-        時計.current = setTimeout(() => set待つ(false), 連打よけ)
-        onPress()
-      }}
-    >
-      <PowerGlyph className="size-3.5" />
-    </button>
-  )
-}
-
 /**
  * 画面の行き来を1つにしたボタン（設計§17-3）。**動画プレイヤーの全画面ボタンと同じ形。**
  *
