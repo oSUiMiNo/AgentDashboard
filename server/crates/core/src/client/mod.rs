@@ -1160,7 +1160,7 @@ pub async fn snapshot_after(ws: &mut ws::Ws, card: CardId) -> Result<Vec<u8>, Cl
                     }
                 }
                 ws::WsEvent::Frame { .. } => {}
-                ws::WsEvent::Message(ServerMessage::Error { card_id, message })
+                ws::WsEvent::Message(ServerMessage::Error { card_id, message, .. })
                     if card_id.is_none() || card_id == Some(card) =>
                 {
                     return Err(ClientError::Refused { status: 400, message });
@@ -1185,9 +1185,9 @@ async fn first_snapshot(ws: &mut ws::Ws, card: CardId) -> Result<Vec<u8>, Client
                 }
                 // 自カードの 0x01（前の購読の増分）も、他カードのフレームも読み飛ばす
             }
-            ws::WsEvent::Message(ServerMessage::Error { card_id, message })
-                if card_id.is_none() || card_id == Some(card) =>
-            {
+            ws::WsEvent::Message(ServerMessage::Error {
+                card_id, message, ..
+            }) if card_id.is_none() || card_id == Some(card) => {
                 // 開けないカード（リモートの生バイト経路が無い等）はサーバが理由を言う
                 return Err(ClientError::Refused {
                     status: 400,
@@ -1283,9 +1283,9 @@ impl Follow {
                 ServerMessage::TranscriptReset { card_id } if *card_id == self.card => {
                     return Ok(FollowEvent::Reset);
                 }
-                ServerMessage::Error { card_id, message }
-                    if card_id.is_none() || *card_id == Some(self.card) =>
-                {
+                ServerMessage::Error {
+                    card_id, message, ..
+                } if card_id.is_none() || *card_id == Some(self.card) => {
                     return Err(ClientError::Refused {
                         status: 400,
                         message: message.clone(),

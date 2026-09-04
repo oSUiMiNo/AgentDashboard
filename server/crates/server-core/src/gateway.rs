@@ -2340,9 +2340,20 @@ async fn handle_report(
                 .apply(origin, ServerMessage::Selfheal { phase, detail })
                 .await;
         }
-        AgentMessage::Error { card_id, message } => {
+        AgentMessage::Error {
+            card_id,
+            message,
+            kind,
+        } => {
             hub.registry
-                .apply(origin, ServerMessage::Error { card_id, message })
+                .apply(
+                    origin,
+                    ServerMessage::Error {
+                        card_id,
+                        message,
+                        kind,
+                    },
+                )
                 .await;
         }
 

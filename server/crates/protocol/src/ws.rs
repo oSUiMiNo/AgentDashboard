@@ -49,6 +49,49 @@ pub enum BusState {
 /// 文字列ではなく型にしてあるのは、送り手と受け手が別々の言語で手書きされているため。
 /// 綴り違いはコンパイルを通ってしまい、「進行が画面に出ない」という追いにくい形でしか
 /// 表に出ない。段階の増減は [`ServerMessage::Selfheal`] と同じく4箇所同期の対象。
+/// 断りが**何をしようとして出たか**（細かい修正 設計§7-2）。
+///
+/// **エラーの原因ではなく、呼び出し側の操作で割る。** 解消の判定が「次に同じ操作が
+/// 通ったか」になるためで、原因で割ると**同じ原因の別操作**まで一緒に消える。
+///
+/// # なぜ `NotFound` だけ操作ではないのか
+///
+/// 持ち主とカードの存在を確かめる関門は**どの操作より前**にあり、そこで断ったときには
+/// まだ操作が決まっていない。しかも設計§7-3 は「カードが見つからない」を**消えない**側に
+/// 置いているので、操作の名前へ混ぜると寿命が引けなくなる。
+///
+/// # 増やすときは寿命も決める
+///
+/// 値を足したら `web/src/stores/sessions.ts` の寿命の表にも足すこと。**既定は5秒**なので、
+/// 足しただけだと「消えてほしくないもの」が黙って5秒で消える。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorKind {
+    /// 権限モードの切替
+    PermissionMode,
+    /// モデルの切替
+    Model,
+    /// 起こし直し
+    Revive,
+    /// 名前を付ける
+    Nickname,
+    /// 止める
+    Kill,
+    /// 片付ける
+    Archive,
+    /// 端末の購読（**端末が開けない**）
+    SubPty,
+    /// 履歴の購読
+    SubTranscript,
+    /// 指示の送信
+    SendInput,
+    /// カードが見つからない（持ち主違いを含む。**呼び分けない**）
+    NotFound,
+    /// 上のどれでもないもの
+    #[default]
+    Other,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SelfhealPhase {
@@ -341,6 +384,14 @@ pub enum ServerMessage {
     Error {
         card_id: Option<CardId>,
         message: String,
+        /// 何をしようとして断られたか（細かい修正 設計§7-2）。
+        ///
+        /// # なぜ `#[serde(default)]` を書くのか
+        ///
+        /// 欄を持たない古い名乗りを [`ErrorKind::Other`] として受けるため。
+        /// **版（`PROTOCOL_VERSION`）は上げない**ので、欠けた名乗りが来る道が残る。
+        #[serde(default)]
+        kind: ErrorKind,
     },
     /// PJT 枠1枚の最新（イシューグループ_2026_0805_0514 設計§11）。
     ///
@@ -475,6 +526,33 @@ mod tests {
     }
 
     #[test]
+    fn 断りの種別は欄が欠けていても受かる() {
+        /*
+            **版を上げずに欄を足す**ための約束（細かい修正 設計§7-2）。欄を持たない古い
+            名乗りが来る道が残っているので、`#[serde(default)]` が効いていないと
+            **その相手からの断りが1件も届かなくなる**。
+        */
+        let 古い名乗り = r#"{"t":"error","card_id":null,"message":"しくじりました"}"#;
+        let message: ServerMessage = serde_json::from_str(古い名乗り).unwrap();
+        let ServerMessage::Error { kind, .. } = message else {
+            panic!("error として読めていない");
+        };
+        assert_eq!(kind, ErrorKind::Other);
+    }
+
+    #[test]
+    fn 断りの種別は綴りのまま運ばれる() {
+        // 綴りが変わると、**ブラウザ側の寿命の表が黙って引けなくなる**（既定の5秒へ落ちる）
+        let json = serde_json::to_string(&ServerMessage::Error {
+            card_id: None,
+            message: "起こせません".to_string(),
+            kind: ErrorKind::Revive,
+        })
+        .unwrap();
+        assert!(json.contains(r#""kind":"revive""#), "{json}");
+    }
+
+    #[test]
     fn server_messageは全種が往復する() {
         let card_id = CardId::new();
         let all = vec![
@@ -524,10 +602,12 @@ mod tests {
             ServerMessage::Error {
                 card_id: Some(card_id),
                 message: "作業ディレクトリが存在しません".to_string(),
+                kind: ErrorKind::NotFound,
             },
             ServerMessage::Error {
                 card_id: None,
                 message: "claude を起動できませんでした".to_string(),
+                kind: ErrorKind::Other,
             },
             ServerMessage::ProjectUpsert {
                 project: ProjectView {

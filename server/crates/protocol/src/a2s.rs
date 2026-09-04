@@ -19,6 +19,7 @@
 
 use crate::{
     AgentId, CardId, ModelId, PermissionMode, SessionMeta, SessionStatus, Timestamp, TreeNode,
+    ws::ErrorKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -305,6 +306,16 @@ pub enum AgentMessage {
     Error {
         card_id: Option<CardId>,
         message: String,
+        /// 何をしようとして断られたか（細かい修正 設計§7-2）。
+        ///
+        /// **ここを運ばないと、セルフホストでだけ寿命が引けなくなる。** PC 側で起きた
+        /// 断りはサーバを素通りして画面へ出るので、途中で捨てると全部が既定（5秒）に
+        /// なり、**復旧の失敗まで読む前に消える**。
+        ///
+        /// `#[serde(default)]` なので、欄を持たない古い PC から来ても
+        /// [`ErrorKind::Other`] として受かる。**版は上げない。**
+        #[serde(default)]
+        kind: ErrorKind,
     },
     /// モデルの表（§13-4）。接続直後と、変化した時だけ送る。定期送信はしない。
     ///
@@ -679,6 +690,7 @@ mod tests {
             AgentMessage::Error {
                 card_id: Some(card_id),
                 message: "切替中です".to_string(),
+                kind: ErrorKind::Model,
             },
             AgentMessage::ModelTable {
                 cli_version: "2.1.220".to_string(),

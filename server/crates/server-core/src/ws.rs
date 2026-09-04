@@ -43,7 +43,7 @@ use futures_util::{SinkExt as _, StreamExt as _};
 use protocol::{
     CardId, NodeId, SessionMeta,
     frame::{self, FrameKind},
-    ws::{ClientMessage, FlowState, ServerMessage},
+    ws::{ClientMessage, ErrorKind, FlowState, ServerMessage},
 };
 use serde::Deserialize;
 use std::{
@@ -424,6 +424,7 @@ async fn client_loop(state: AppState, identity: Identity, socket: WebSocket) {
                         ServerMessage::Error {
                             card_id: None,
                             message: format!("解釈できないメッセージです: {text}"),
+                            kind: ErrorKind::Other,
                         },
                     )
                     .await;
@@ -490,7 +491,13 @@ async fn handle_request(
     {
         // **他人のカードと知らないカードを呼び分けない**（IDの総当たりで存在を
         // 調べられないように）
-        send_error(outbound, Some(card_id), NOT_FOUND.to_string()).await;
+        send_error(
+            outbound,
+            Some(card_id),
+            NOT_FOUND.to_string(),
+            ErrorKind::NotFound,
+        )
+        .await;
         return;
     }
 
@@ -517,6 +524,7 @@ async fn handle_request(
                     ServerMessage::Error {
                         card_id: None,
                         message,
+                        kind: ErrorKind::Other,
                     },
                 )
                 .await;
@@ -528,7 +536,13 @@ async fn handle_request(
         // ここで待つと、切替のあいだ同じブラウザからの他の操作が全部止まる
         ClientMessage::SetPermissionMode { card_id, mode } => {
             if !state.agent.exists(card_id) {
-                send_error(outbound, Some(card_id), NOT_FOUND.to_string()).await;
+                send_error(
+                    outbound,
+                    Some(card_id),
+                    NOT_FOUND.to_string(),
+                    ErrorKind::NotFound,
+                )
+                .await;
                 return;
             }
             let agent = Arc::clone(&state.agent);
@@ -536,7 +550,7 @@ async fn handle_request(
             tokio::spawn(async move {
                 // 着いたことも、途中まで動いたことも SessionMeta 経由で全クライアントへ届く
                 if let Err(message) = agent.set_permission_mode(card_id, mode).await {
-                    send_error(&outbound, Some(card_id), message).await;
+                    send_error(&outbound, Some(card_id), message, ErrorKind::PermissionMode).await;
                 }
             });
         }
@@ -547,14 +561,20 @@ async fn handle_request(
         // `~/.claude/settings.json` を汚すので、並走すると元の値が失われる（設計§6）。
         ClientMessage::SetModel { card_id, model } => {
             if !state.agent.exists(card_id) {
-                send_error(outbound, Some(card_id), NOT_FOUND.to_string()).await;
+                send_error(
+                    outbound,
+                    Some(card_id),
+                    NOT_FOUND.to_string(),
+                    ErrorKind::NotFound,
+                )
+                .await;
                 return;
             }
             let agent = Arc::clone(&state.agent);
             let outbound = outbound.clone();
             tokio::spawn(async move {
                 if let Err(message) = agent.set_model(card_id, model).await {
-                    send_error(&outbound, Some(card_id), message).await;
+                    send_error(&outbound, Some(card_id), message, ErrorKind::Model).await;
                 }
             });
         }
@@ -574,7 +594,15 @@ async fn handle_request(
                 .map(|record| record.meta());
             match meta {
                 // 門を通った直後に外された、という細い隙間。**黙って何もしない道を作らない**
-                None => send_error(outbound, Some(card_id), NOT_FOUND.to_string()).await,
+                None => {
+                    send_error(
+                        outbound,
+                        Some(card_id),
+                        NOT_FOUND.to_string(),
+                        ErrorKind::NotFound,
+                    )
+                    .await
+                }
                 Some(meta) if !meta.revivable() => {
                     // **理由を言い分ける**（設計§3-2）。どちらも「押しても戻らない」だが、
                     // 利用者から見ればまったく別の事情である
@@ -583,7 +611,13 @@ async fn handle_request(
                     } else {
                         ALREADY_LIVE
                     };
-                    send_error(outbound, Some(card_id), message.to_string()).await;
+                    send_error(
+                        outbound,
+                        Some(card_id),
+                        message.to_string(),
+                        ErrorKind::Revive,
+                    )
+                    .await;
                 }
                 Some(_) => {
                     if let Err(message) = state
@@ -596,7 +630,7 @@ async fn handle_request(
                     {
                         // **カードを名指しする**（設計§7-5）。`Spawn` が名指ししないのは
                         // 採番前に失敗しうるからで、復旧はIDが最初から確定している
-                        send_error(outbound, Some(card_id), message).await;
+                        send_error(outbound, Some(card_id), message, ErrorKind::Revive).await;
                     }
                 }
             }
@@ -635,14 +669,22 @@ async fn handle_request(
                     {
                         // **カードを名指ししない**（`Spawn` と同じ）。採番は PC 側なので、
                         // 失敗した時点ではまだIDが無い
-                        send_error(outbound, None, message).await;
+                        send_error(outbound, None, message, ErrorKind::Other).await;
                     }
                 }
                 // **他人のセッションでも知らないセッションでも同じ言葉**（設計§11-4）
-                Ok(None) => send_error(outbound, None, NOT_FOUND.to_string()).await,
+                Ok(None) => {
+                    send_error(outbound, None, NOT_FOUND.to_string(), ErrorKind::NotFound).await
+                }
                 Err(err) => {
                     tracing::warn!("過去のセッションを引けません: {err}");
-                    send_error(outbound, None, "記録を読めませんでした".to_string()).await;
+                    send_error(
+                        outbound,
+                        None,
+                        "記録を読めませんでした".to_string(),
+                        ErrorKind::Other,
+                    )
+                    .await;
                 }
             }
         }
@@ -662,13 +704,13 @@ async fn handle_request(
             {
                 // 配り直しは記録層が行う（同じセッションを指すカード全部）。ここは
                 // 断りだけを返す
-                send_error(outbound, Some(card_id), message).await;
+                send_error(outbound, Some(card_id), message, ErrorKind::Nickname).await;
             }
         }
 
         ClientMessage::Kill { card_id } => {
             if let Err(message) = state.agent.kill(card_id) {
-                send_error(outbound, Some(card_id), message).await;
+                send_error(outbound, Some(card_id), message, ErrorKind::Kill).await;
             }
         }
 
@@ -687,7 +729,7 @@ async fn handle_request(
             // すると、そういうカードは一覧から二度と消せなくなる
             if state.agent.exists(card_id) {
                 if let Err(message) = state.agent.archive(card_id) {
-                    send_error(outbound, Some(card_id), message).await;
+                    send_error(outbound, Some(card_id), message, ErrorKind::Archive).await;
                 }
             } else if let Err(err) = state
                 .registry
@@ -699,6 +741,7 @@ async fn handle_request(
                     outbound,
                     Some(card_id),
                     "記録を外せませんでした".to_string(),
+                    ErrorKind::Archive,
                 )
                 .await;
             }
@@ -710,7 +753,13 @@ async fn handle_request(
             rows,
         } => {
             if !state.agent.exists(card_id) {
-                send_error(outbound, Some(card_id), NOT_FOUND.to_string()).await;
+                send_error(
+                    outbound,
+                    Some(card_id),
+                    NOT_FOUND.to_string(),
+                    ErrorKind::NotFound,
+                )
+                .await;
                 return;
             }
             // 二重購読を防ぐ。同じカードを開き直したときは古い方を畳む
@@ -731,6 +780,7 @@ async fn handle_request(
                     outbound,
                     Some(card_id),
                     "この PC の端末はまだ開けません".into(),
+                    ErrorKind::SubPty,
                 )
                 .await;
                 return;
@@ -773,7 +823,13 @@ async fn handle_request(
                 previous.abort();
             }
             let Some(record) = state.registry.owned(identity.account_id, card_id) else {
-                send_error(outbound, Some(card_id), NOT_FOUND.to_string()).await;
+                send_error(
+                    outbound,
+                    Some(card_id),
+                    NOT_FOUND.to_string(),
+                    ErrorKind::NotFound,
+                )
+                .await;
                 return;
             };
             let (snapshot, receiver) = record.subscribe_transcript();
@@ -820,7 +876,7 @@ async fn handle_request(
             attachments,
         } => {
             if let Err(message) = state.agent.send_input(card_id, text, attachments).await {
-                send_error(outbound, Some(card_id), message).await;
+                send_error(outbound, Some(card_id), message, ErrorKind::SendInput).await;
             }
         }
     }
@@ -881,6 +937,7 @@ async fn handle_pty_input(
                 outbound,
                 None,
                 format!("壊れたフレームを受け取りました: {err}"),
+                ErrorKind::Other,
             )
             .await;
             return;
@@ -894,6 +951,7 @@ async fn handle_pty_input(
                 "クライアントから送ってよい種別ではありません: {:?}",
                 frame.kind
             ),
+            ErrorKind::SendInput,
         )
         .await;
         return;
@@ -912,7 +970,7 @@ async fn handle_pty_input(
         return;
     }
     if let Err(message) = state.agent.write_input(frame.card_id, frame.payload) {
-        send_error(outbound, Some(frame.card_id), message).await;
+        send_error(outbound, Some(frame.card_id), message, ErrorKind::SendInput).await;
     }
 }
 
@@ -1031,6 +1089,24 @@ async fn send_json(outbound: &mpsc::Sender<Message>, message: ServerMessage) -> 
     }
 }
 
-async fn send_error(outbound: &mpsc::Sender<Message>, card_id: Option<CardId>, message: String) {
-    send_json(outbound, ServerMessage::Error { card_id, message }).await;
+/// 断りを1件返す。
+///
+/// **`kind` は「何をしようとして断られたか」**（細かい修正 設計§7-2）。エラーの原因では
+/// なく操作で割るのは、解消の判定が「次に同じ操作が通ったか」になるためである。
+/// **寿命はブラウザ側がこの値から引く**ので、増やしたら向こうの表にも足すこと。
+async fn send_error(
+    outbound: &mpsc::Sender<Message>,
+    card_id: Option<CardId>,
+    message: String,
+    kind: ErrorKind,
+) {
+    send_json(
+        outbound,
+        ServerMessage::Error {
+            card_id,
+            message,
+            kind,
+        },
+    )
+    .await;
 }

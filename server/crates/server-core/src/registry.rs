@@ -28,7 +28,8 @@ use crate::{
 };
 use protocol::{
     AgentId, CardId, ClaudeSessionId, ModelId, NodeId, PermissionMode, ProjectId, SessionMeta,
-    SessionStatus, TreeNode, ws::ServerMessage,
+    SessionStatus, TreeNode,
+    ws::{ErrorKind, ServerMessage},
 };
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
@@ -1196,6 +1197,7 @@ impl SessionRegistry {
                     ServerMessage::Error {
                         card_id: None,
                         message: format!("記録を保存できませんでした: {err}"),
+                        kind: ErrorKind::Other,
                     },
                 );
                 false

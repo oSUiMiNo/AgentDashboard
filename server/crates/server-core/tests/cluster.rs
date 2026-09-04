@@ -21,7 +21,8 @@
 mod common;
 
 use protocol::{
-    CardId, Node, NodeId, ProjectId, SessionMeta, SessionStatus, TreeNode, ws::ServerMessage,
+    CardId, Node, NodeId, ProjectId, SessionMeta, SessionStatus, TreeNode,
+    ws::{ErrorKind, ServerMessage},
 };
 use server_core::{
     bus::{Bus, memory::MemoryBroker},
@@ -990,6 +991,7 @@ async fn 知らせは_7_種類とも跨ぐ() {
             ServerMessage::Error {
                 card_id: Some(card_id),
                 message: "しくじりました".to_string(),
+                kind: ErrorKind::Other,
             },
         )
         .await;

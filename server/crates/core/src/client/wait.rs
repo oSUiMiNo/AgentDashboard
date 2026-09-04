@@ -113,7 +113,10 @@ impl Goal {
         // Error はどの Goal でも同じ扱い（CLI設計§8-2・§7-3）：
         // 対象カード宛てか宛先なし（Spawn の失敗・解釈不能）は即座に落ち、
         // 別のカード宛ては標準エラーへ出して待ち続ける
-        if let ServerMessage::Error { card_id, message } = message {
+        if let ServerMessage::Error {
+            card_id, message, ..
+        } = message
+        {
             return match (card_id, self.card()) {
                 (None, _) => Step::Fail(message.clone()),
                 (Some(errored), Some(card)) if errored == card => Step::Fail(message.clone()),
@@ -327,7 +330,7 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{ProjectId, SessionMeta};
+    use protocol::{ProjectId, SessionMeta, ws::ErrorKind};
 
     fn meta(card: CardId, status: SessionStatus) -> SessionMeta {
         SessionMeta {
@@ -461,6 +464,7 @@ mod tests {
             goal.observe(&ServerMessage::Error {
                 card_id: Some(card),
                 message: "駄目でした".to_string(),
+                kind: ErrorKind::Other,
             }),
             Step::Fail(_)
         ));
@@ -472,6 +476,7 @@ mod tests {
             spawn_goal.observe(&ServerMessage::Error {
                 card_id: None,
                 message: "起こせませんでした".to_string(),
+                kind: ErrorKind::Other,
             }),
             Step::Fail(_)
         ));
@@ -488,6 +493,7 @@ mod tests {
         match goal.observe(&ServerMessage::Error {
             card_id: Some(other),
             message: "よそで何か".to_string(),
+            kind: ErrorKind::Other,
         }) {
             // 黙って失敗させないための Note（CLI設計§7-3）。待ちそのものは続く
             Step::Note(text) => assert!(text.contains("よそで何か"), "本文が残ること: {text}"),
@@ -567,6 +573,7 @@ mod tests {
             goal.observe(&ServerMessage::Error {
                 card_id: Some(card),
                 message: "このセッションは動いています（復旧は要りません）".to_string(),
+                kind: ErrorKind::Other,
             }),
             Step::Fail(_)
         ));

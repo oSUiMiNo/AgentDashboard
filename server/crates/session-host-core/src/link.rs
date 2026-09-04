@@ -43,7 +43,7 @@ use protocol::{
         ServerToAgent,
     },
     frame::{self, FrameKind},
-    ws::ServerMessage,
+    ws::{ErrorKind, ServerMessage},
 };
 use std::{
     collections::{HashMap, VecDeque},
@@ -337,9 +337,14 @@ fn to_agent_message(event: &ServerMessage) -> Option<AgentMessage> {
             phase: *phase,
             detail: detail.clone(),
         },
-        ServerMessage::Error { card_id, message } => AgentMessage::Error {
+        ServerMessage::Error {
+            card_id,
+            message,
+            kind,
+        } => AgentMessage::Error {
             card_id: *card_id,
             message: message.clone(),
+            kind: *kind,
         },
         // `BusStatus` はサーバ同士の話（インスタンスの間の連絡係。設計§12）。
         // **PC は自分が繋いだ1台としか話さない**ので、運ぶ意味も運ぶ手段も無い。
@@ -1315,6 +1320,7 @@ fn apply_command(
                 manager.broadcast(ServerMessage::Error {
                     card_id: None,
                     message: err.to_string(),
+                    kind: ErrorKind::Other,
                 });
             }
         }
@@ -1332,7 +1338,12 @@ fn apply_command(
             let Some(in_flight) = manager.begin_revive(card_id) else {
                 // 待ち行列に並ばせない。同じカードが2つ並ぶと、席が空いたとき
                 // 両方とも通る（設計§8-1）
-                report_error(manager, card_id, ALREADY_REVIVING.to_string());
+                report_error(
+                    manager,
+                    card_id,
+                    ALREADY_REVIVING.to_string(),
+                    ErrorKind::Revive,
+                );
                 return;
             };
             let manager = Arc::clone(manager);
@@ -1343,7 +1354,7 @@ fn apply_command(
                 {
                     // **カードを名指しする**（設計§7-5）。`Spawn` が名指ししないのは
                     // 採番前に失敗しうるからで、復旧はIDが最初から確定している
-                    report_error(&manager, card_id, err.to_string());
+                    report_error(&manager, card_id, err.to_string(), ErrorKind::Revive);
                 }
             });
         }
@@ -1363,6 +1374,7 @@ fn apply_command(
                 manager.broadcast(ServerMessage::Error {
                     card_id: None,
                     message: err.to_string(),
+                    kind: ErrorKind::Other,
                 });
             }
         }
@@ -1372,12 +1384,12 @@ fn apply_command(
         }
         ServerToAgent::Kill { card_id } => {
             if let Err(err) = manager.kill(card_id) {
-                report_error(manager, card_id, err.to_string());
+                report_error(manager, card_id, err.to_string(), ErrorKind::Kill);
             }
         }
         ServerToAgent::Archive { card_id } => {
             if let Err(err) = manager.archive(card_id) {
-                report_error(manager, card_id, err.to_string());
+                report_error(manager, card_id, err.to_string(), ErrorKind::Archive);
             }
         }
         ServerToAgent::Resize {
@@ -1400,7 +1412,12 @@ fn apply_command(
             let manager = Arc::clone(manager);
             tokio::spawn(async move {
                 let Some(session) = manager.get(card_id) else {
-                    report_error(&manager, card_id, NOT_FOUND.to_string());
+                    report_error(
+                        &manager,
+                        card_id,
+                        NOT_FOUND.to_string(),
+                        ErrorKind::NotFound,
+                    );
                     return;
                 };
                 if let Err(err) = session.send_instruction_with(&text, &attachments).await {
@@ -1408,6 +1425,7 @@ fn apply_command(
                         &manager,
                         card_id,
                         format!("指示を送れませんでした: {err:#}"),
+                        ErrorKind::SendInput,
                     );
                 }
             });
@@ -1416,14 +1434,24 @@ fn apply_command(
             let manager = Arc::clone(manager);
             tokio::spawn(async move {
                 let Some(session) = manager.get(card_id) else {
-                    report_error(&manager, card_id, NOT_FOUND.to_string());
+                    report_error(
+                        &manager,
+                        card_id,
+                        NOT_FOUND.to_string(),
+                        ErrorKind::NotFound,
+                    );
                     return;
                 };
                 let outcome = session.switch_permission_mode(&mode).await;
                 // 着いても着かなくても、いまどこに居るのかは配る
                 manager.broadcast_session(&session);
                 if let Err(err) = outcome {
-                    report_error(&manager, card_id, err.to_string());
+                    report_error(
+                        &manager,
+                        card_id,
+                        err.to_string(),
+                        ErrorKind::PermissionMode,
+                    );
                 }
             });
         }
@@ -1431,13 +1459,18 @@ fn apply_command(
             let manager = Arc::clone(manager);
             tokio::spawn(async move {
                 let Some(session) = manager.get(card_id) else {
-                    report_error(&manager, card_id, NOT_FOUND.to_string());
+                    report_error(
+                        &manager,
+                        card_id,
+                        NOT_FOUND.to_string(),
+                        ErrorKind::NotFound,
+                    );
                     return;
                 };
                 if let Err(err) = manager.switch_model(&session, &model).await {
                     // 途中まで動いた結果も配る（楽観更新が立っていれば、それも伝わる）
                     manager.broadcast_session(&session);
-                    report_error(&manager, card_id, err.to_string());
+                    report_error(&manager, card_id, err.to_string(), ErrorKind::Model);
                 }
             });
         }
@@ -1509,10 +1542,11 @@ fn apply_command(
 const NOT_FOUND: &str = "セッションが見つかりません";
 
 /// 操作の失敗を上へ返す（§5-6）。サーバが `ServerMessage::Error` として配る。
-fn report_error(manager: &Arc<SessionManager>, card_id: CardId, message: String) {
+fn report_error(manager: &Arc<SessionManager>, card_id: CardId, message: String, kind: ErrorKind) {
     manager.broadcast(ServerMessage::Error {
         card_id: Some(card_id),
         message,
+        kind,
     });
 }
 

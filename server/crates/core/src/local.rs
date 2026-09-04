@@ -18,7 +18,9 @@
 //! 境界を挟んだぶんの手数を足してはいけない。
 
 use bytes::Bytes;
-use protocol::{CardId, ModelId, PermissionMode, ws::ParserState, ws::ServerMessage};
+use protocol::{
+    CardId, ModelId, PermissionMode, ws::ErrorKind, ws::ParserState, ws::ServerMessage,
+};
 use server_core::{registry::SessionRegistry, session_host::SessionHost};
 use session_host_core::{
     events::{EventSink, LocalEventBus, TranscriptReport},
@@ -140,6 +142,7 @@ impl SessionHost for LocalSessionHost {
                 manager.broadcast(ServerMessage::Error {
                     card_id: Some(request.card_id),
                     message: err.to_string(),
+                    kind: ErrorKind::Other,
                 });
             }
         });
