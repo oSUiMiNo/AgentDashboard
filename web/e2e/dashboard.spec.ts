@@ -6,6 +6,7 @@ import {
   fireHook,
   openDashboard,
   openSession,
+  setTerminalView,
   spawnSession,
   WORK_DIR,
 } from './helpers'
@@ -497,4 +498,52 @@ test('いきなり開いた画面で ✕ を押しても、アプリの外へ出
   */
   await expect(新しいタブ).toHaveTitle('AgentDashboard')
   await 新しいタブ.close()
+})
+
+test('ターミナルの地が、アプリの地と一致して見える', async ({ page }) => {
+  /*
+    要件6（細かい修正 設計§5-4）。**「透明にする」ではなく「同じ値で塗る」**——
+    端末の描画層を透かすと裏の要素が透けて文字が読めなくなる。
+
+    **単体では確かめきれない。** 端末は WebGL で描くので、**値を揃えただけでは結果が
+    分からない**（設計§11-2）。ここで見るのは、端末を載せている入れ物の計算後の地が、
+    ページの地と**同じ画素になる**こと——`#0b0f14` が2箇所に別々に書かれていた頃は、
+    **端末の外周にだけ古い色が残る**形で食い違っていた。
+
+    **色の字面を正規表現で解かないこと。** `getComputedStyle` は `oklch()` を返すことが
+    あるので、**キャンバスに塗ってブラウザに解かせて**から画素で突き合わせる。
+  */
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  await tile.dblclick()
+
+  const view = page.getByTestId('session-view')
+  await setTerminalView(view, true)
+  const 端末 = view.getByTestId('terminal')
+  await expect(端末).toBeVisible()
+
+  const 画素 = await page.evaluate(() => {
+    const 画 = document.createElement('canvas')
+    画.width = 1
+    画.height = 1
+    const 筆 = 画.getContext('2d', { willReadFrequently: true })
+    const 読む = (c: string) => {
+      if (!筆) return null
+      筆.clearRect(0, 0, 1, 1)
+      筆.fillStyle = c
+      筆.fillRect(0, 0, 1, 1)
+      const d = 筆.getImageData(0, 0, 1, 1).data
+      return `${d[0]},${d[1]},${d[2]}`
+    }
+    // **地を塗っているのは端末の器そのもの**（`bg-background`）。親ではない——
+    // 目印を取り違えると `tsc` は通るのに実物で空振りする（フェーズ2で3件踏んだ形）
+    const 器 = document.querySelector('[data-testid="terminal"]') as HTMLElement | null
+    return {
+      端末の地: 器 === null ? null : 読む(getComputedStyle(器).backgroundColor),
+      ページの地: 読む(getComputedStyle(document.body).backgroundColor),
+    }
+  })
+
+  expect(画素.端末の地).not.toBeNull()
+  expect(画素.端末の地).toBe(画素.ページの地)
 })
