@@ -106,7 +106,14 @@ test('カードの操作は、マウスを乗せたときに3つ出る', async (
   await openDashboard(page)
   const tile = await spawnSession(page)
 
-  const 群 = tile.getByTestId('tile-ops')
+  /*
+    **絞り込む先は器（`tile-shell`）であって、`session-tile` ではない。**
+    群は器の直下に置いた**兄弟**で、`session-tile`（器の中の本体ボタン）の
+    子ではない——本体は `<button>` なので、中に別のボタンを入れられないためである
+    （名前付け設計§9-2 が鉛筆で採った形をそのまま引き継いでいる）。
+  */
+  const 器 = page.getByTestId('tile-shell').first()
+  const 群 = 器.getByTestId('tile-ops')
   await tile.hover()
   await expect(群).toBeVisible()
 
@@ -114,13 +121,13 @@ test('カードの操作は、マウスを乗せたときに3つ出る', async (
   await expect(群.locator('[data-testid]')).toHaveCount(3)
 
   // 走っているので、電源は点いていて「スリープ」を名乗る
-  const 電源 = tile.getByTestId('power-tile')
+  const 電源 = 器.getByTestId('power-tile')
   await expect(電源).toHaveAttribute('data-power', 'on')
   await expect(電源).toHaveAttribute('aria-label', 'スリープ')
 
   // 板を作っていない（塗るのは電源だけ・`DESIGN.md` §12.3・§15.1）
   for (const id of ['nickname-edit', 'archive-card']) {
-    await expect(tile.getByTestId(id)).not.toHaveClass(/shadow-\[/)
+    await expect(器.getByTestId(id)).not.toHaveClass(/shadow-\[/)
   }
 })
 
