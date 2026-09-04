@@ -1,6 +1,6 @@
 import { Terminal } from '@xterm/xterm'
 import { isSelectionPrompt } from './keys'
-import { joinWrapped, visibleScreen, type ScreenRow } from './screen'
+import { joinWrapped, liveScreen, visibleScreen, type ScreenRow } from './screen'
 
 /**
  * 画面の取り出し（テスト計画フェーズ3・設計§5）。
@@ -29,6 +29,32 @@ describe('visibleScreen', () => {
     expect(text).not.toContain('行4')
     // 見えている側は含む
     expect(text).toContain('行9')
+    term.dispose()
+  })
+
+  it('遡っていても、生きている側は端末のいまの姿を返す', async () => {
+    // **`visibleScreen` と問いが違う。** あちらは「利用者にいま見えているもの」、
+    // こちらは「端末がいまどうなっているか」。**ソフトキーボードを出してよいかは後者で決める**
+    // ——遡って過去を読んでいる最中にタップしたとき、前者で判定すると
+    // **過去の画面で「打てない」と答え、何度タップしても同じ答えが返って詰む**
+    const term = new Terminal({ rows: 5, cols: 20, scrollback: 100 })
+    await write(term, Array.from({ length: 10 }, (_, i) => `行${i}`).join('\r\n'))
+    term.scrollLines(-5)
+
+    // 見えているのは遡った先。生きているのは末尾
+    expect(visibleScreen(term)).toContain('行0')
+    expect(visibleScreen(term)).not.toContain('行9')
+    expect(liveScreen(term)).toContain('行9')
+    expect(liveScreen(term)).not.toContain('行0')
+    term.dispose()
+  })
+
+  it('遡っていなければ、見えている側と生きている側は同じ', async () => {
+    // **常に片方だけを返す実装でも、上の1本だけなら通る。** 対で置く
+    const term = new Terminal({ rows: 5, cols: 20, scrollback: 100 })
+    await write(term, Array.from({ length: 10 }, (_, i) => `行${i}`).join('\r\n'))
+
+    expect(liveScreen(term)).toBe(visibleScreen(term))
     term.dispose()
   })
 

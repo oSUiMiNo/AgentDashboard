@@ -510,6 +510,36 @@ describe('acceptsTyping', () => {
     expect(acceptsTyping(打ちかけの画面('1. 手順を書く'))).toBe(true)
   })
 
+  it('打った文が折り返して枠が縦に伸びても、入力欄と分かる', () => {
+    // **長文を打っている最中こそ、取りこぼしたときの損が大きい。** 閉じの罫線を
+    // 「カーソルの1行下」に決め打つと、折り返した瞬間に枠が見つからなくなる
+    const 折り返した = [
+      '  なにか',
+      '─'.repeat(60),
+      '❯ 長い指示の1行目',
+      '  折り返した続き',
+      '  さらに続き',
+      '─'.repeat(60),
+      ' ❯ 1. Yes',
+      ' Esc to cancel',
+    ].join('\n')
+    expect(looksSelecting(折り返した)).toBe(true)
+    expect(acceptsTyping(折り返した)).toBe(true)
+  })
+
+  it('罫線で閉じないまま次の入力欄が来たら、枠とみなさない', () => {
+    // 跨いでよいのは折り返しの続きだけ。**際限なく跨ぐと、離れた罫線どうしが
+    // 繋がって枠に化ける**
+    const 閉じない = [
+      '─'.repeat(60),
+      '❯ ひとつめ',
+      '❯ ふたつめ',
+      ' ❯ 1. Yes',
+      ' Esc to cancel',
+    ].join('\n')
+    expect(acceptsTyping(閉じない)).toBe(false)
+  })
+
   it('空の画面では打てない', () => {
     // マウント直後の初期フォーカスがここを通る。**安全側へ倒す**
     expect(acceptsTyping('')).toBe(false)

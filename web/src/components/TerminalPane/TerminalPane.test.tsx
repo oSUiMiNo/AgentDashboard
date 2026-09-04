@@ -396,6 +396,67 @@ describe('TerminalPane の入力方式', () => {
     expect(helper.inputMode).toBe('none')
   })
 
+  it('既に焦点が入っていても、指定を当て直せること', async () => {
+    // **この端末はマウント時に自分で焦点を取る。** だから2回目以降のタップでは
+    // `focus()` が何も起こさず、iOS は「焦点が当たったままの変更」として読み飛ばす
+    // ——外して当て直さないと、**2回目以降が一度も効かない**
+    const { container } = render(<TerminalPane cardId={CARD} />)
+    const { box, term, helper } = await 端末と隠し欄(container)
+    await 書き込む(term, 選択待ちの画面)
+    タップ(box)
+    expect(helper.inputMode).toBe('none')
+    const blur = vi.spyOn(helper, 'blur')
+
+    await 書き込む(term, `[2J[H${入力欄のある画面}`)
+    タップ(box)
+
+    expect(blur).toHaveBeenCalled()
+    expect(helper.inputMode).toBe('text')
+  })
+
+  it('値が変わらないときは、焦点を外さないこと', async () => {
+    // **外すのは当て直しのため。** 同じ値なら外す理由が無く、外すと打鍵が途切れる
+    const { container } = render(<TerminalPane cardId={CARD} />)
+    const { box, term, helper } = await 端末と隠し欄(container)
+    await 書き込む(term, 選択待ちの画面)
+    タップ(box)
+    const blur = vi.spyOn(helper, 'blur')
+
+    タップ(box)
+
+    expect(blur).not.toHaveBeenCalled()
+  })
+
+  it('遡って読んでいる最中にタップしても、いまの姿で判定すること', async () => {
+    // 過去の選択待ちを読み返しているとき、**見えているもの**で判定すると「打てない」に
+    // 倒れる。しかも判定は画面から決まるので、**何度タップしても同じ答えが返って詰む**
+    const { container } = render(<TerminalPane cardId={CARD} />)
+    const { box, term, helper } = await 端末と隠し欄(container)
+    await 書き込む(term, 選択待ちの画面)
+    await 書き込む(term, '\r\n'.repeat(60))
+    await 書き込む(term, 入力欄のある画面)
+    term.scrollLines(-50)
+
+    タップ(box)
+
+    expect(helper.inputMode).toBe('text')
+  })
+
+  it('閉じたあとも、端末は焦点を持ったままであること', async () => {
+    // **外したままだと、物理キーボードを繋いだ端末で Enter も矢印も届かなくなる**
+    // ——確定が要るその瞬間に、である。閉じたいのはソフトキーボードだけ
+    const { container } = render(<TerminalPane cardId={CARD} />)
+    const { box, term, helper } = await 端末と隠し欄(container)
+    await 書き込む(term, 入力欄のある画面)
+    タップ(box)
+    const focus = vi.spyOn(term, 'focus')
+
+    await 書き込む(term, `[2J[H${選択待ちの画面}`)
+
+    expect(helper.inputMode).toBe('none')
+    expect(focus).toHaveBeenCalled()
+  })
+
   it('打てない状態から打てる状態へ戻っても、何もしないこと', async () => {
     // **開く向きは追いかけない。** キーボードを開くには利用者の操作起因のイベントが要る
     const { container } = render(<TerminalPane cardId={CARD} />)
