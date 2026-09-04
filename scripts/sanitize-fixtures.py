@@ -67,6 +67,32 @@ REDACTION_NOTE = "環境固有の情報を含むため除去（scripts/sanitize-
 # 置換後のスキル名に付ける接頭辞。
 PLACEHOLDER_PREFIX = "sample-skill-"
 
+# 打っただけのスラッシュコマンド名を拾う綴り。
+#
+# `collect_skill_names` はツールとして呼んだスキルしか集めない。**コマンドとして
+# 打っただけのスキル名は `tool_use` に現れない**ので、そちらは素通りしていた
+# （`人が打っていないものを、人の発言として出さない` 設計§7-3）。
+COMMAND_NAME_PATTERN = re.compile(r"<command-name>/?([^<>\s]+)</command-name>")
+
+# 他セッションからの連絡だけに付く名乗り。
+#
+# **これは `type: "user"` に入る。** レコード種別で伏せる方式（[`REDACT_TYPES`]）を
+# 当てられない——`user` はプロンプトもツール結果も運ぶので、丸ごと伏せると
+# **フィクスチャが門として機能しなくなる**。だから種別ではなく**欄で**落とす。
+PEER_ORIGIN_KIND = "peer"
+
+# `origin` の中で落とす欄。**`kind` は残す**（判定の検証に要る）。
+#
+# `body` は送り主の本文が**まるごと**入る（`message.content` と同じものが二重に載る）。
+# `from` は送信元のソケットのパス、`verifiedPeer*` は相手のプロセスの素性である。
+PEER_ORIGIN_DROP_KEYS = ("body", "from", "msg_id", "verifiedPeerPid", "verifiedPeerProcStart")
+
+# 送り主のセッション名の置き換え先。
+PEER_NAME_PLACEHOLDER = "sample-peer-session"
+
+# 残存検査で必ず落とす綴り。**採取のたびに人が目で見るのではなく、機械を最後の網にする。**
+FORBIDDEN_SUBSTRINGS = ("uds:/tmp/cc-socks/",)
+
 
 # 中身を落とすレコード種別。
 #
@@ -90,6 +116,37 @@ REDACT_KEYS = {
     # 残り、待ちの行がフィクスチャからも出る——ゴールデンの門が働き続ける
     "queue-operation": ("content",),
 }
+
+
+def redact_peer_origin(record: dict) -> bool:
+    """他セッションからの連絡の中身を落とし、形だけ残す。落としたら真を返す。
+
+    **`user` レコードを丸ごと伏せてはいけない。** あの種別はプロンプトもツール結果も
+    運ぶので、種別ごと落とすとフィクスチャが門として死ぬ。落とすのは
+    **`origin.kind == "peer"` のときの、危ない欄だけ**である。
+
+    落とすもの：
+    - `origin` の中の本文・送信元・相手のプロセスの素性（[`PEER_ORIGIN_DROP_KEYS`]）
+    - `origin.name`（送り主のセッション名）は固定の代替名へ差し替える
+    - **`message.content`**。同じ本文がここにも入っているので、片方だけでは漏れる
+
+    残すもの：`origin.kind`。**判定（誰が入れたか）の検証にはこれだけあれば足りる。**
+    """
+    origin = record.get("origin")
+    if not isinstance(origin, dict) or origin.get("kind") != PEER_ORIGIN_KIND:
+        return False
+
+    for key in PEER_ORIGIN_DROP_KEYS:
+        if key in origin:
+            origin[key] = REDACTION_NOTE
+    if "name" in origin:
+        origin["name"] = PEER_NAME_PLACEHOLDER
+
+    # 本文は2か所にある。**`origin.body` だけ落としても、こちらから漏れる**
+    message = record.get("message")
+    if isinstance(message, dict) and "content" in message:
+        message["content"] = REDACTION_NOTE
+    return True
 
 
 def redact_attachments(path: Path) -> int:
@@ -117,7 +174,11 @@ def redact_attachments(path: Path) -> int:
             continue
 
         record_type = record.get("type") if isinstance(record, dict) else None
-        if record_type in REDACT_TYPES:
+        if record_type == "user" and redact_peer_origin(record):
+            out_lines.append(json.dumps(record, ensure_ascii=False))
+            redacted += 1
+            changed = True
+        elif record_type in REDACT_TYPES:
             if record_type == "attachment":
                 attachment = record.get("attachment")
                 inner_type = (
@@ -179,6 +240,11 @@ def collect_skill_names(root: Path) -> list[str]:
             line = line.strip()
             if not line:
                 continue
+            # **打っただけのコマンド名は `tool_use` に現れない。** 木を歩いても拾えない
+            # ので、行の字面から直に取る（`message.content` が素の文字列の形もあるため）
+            for found in COMMAND_NAME_PATTERN.findall(line):
+                if not is_placeholder(found):
+                    names.add(found)
             try:
                 walk(json.loads(line))
             except json.JSONDecodeError:
@@ -447,6 +513,42 @@ def find_leaks(root: Path, rules: list[tuple[str, str]], secrets: set[str]) -> l
         for found in sorted(set(EMAIL_PATTERN.findall(text))):
             if not is_example_address(found):
                 leaks.append(f"{path}: メールアドレスらしき文字列 {found!r}")
+        # 綴りが決まっているものは、種別によらず落とす（端末録画にも入りうる）
+        for forbidden in FORBIDDEN_SUBSTRINGS:
+            if forbidden in text:
+                leaks.append(f"{path}: 伏せ損ねた綴り {forbidden!r}")
+    return leaks
+
+
+def find_origin_leaks(root: Path) -> list[str]:
+    """他セッションからの連絡が伏せ切れていないかを、機械で見る最後の網。
+
+    採取は使い捨てのディレクトリで行うので連絡が来る確率は低いが、**来たら丸ごと
+    公開される**。人が目で見て気づく形にしておかない（`人が打っていないものを、
+    人の発言として出さない` 設計§7-3）。
+    """
+    leaks: list[str] = []
+    for path in sorted(root.rglob("*.jsonl")):
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            for forbidden in FORBIDDEN_SUBSTRINGS:
+                if forbidden in stripped:
+                    leaks.append(f"{path}:{number}: 伏せ損ねた綴り {forbidden!r}")
+            try:
+                record = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(record, dict) or record.get("type") != "user":
+                continue
+            origin = record.get("origin")
+            if not isinstance(origin, dict):
+                continue
+            for key in PEER_ORIGIN_DROP_KEYS:
+                value = origin.get(key)
+                if value is not None and value != REDACTION_NOTE:
+                    leaks.append(f"{path}:{number}: origin.{key} が残っています")
     return leaks
 
 
@@ -490,6 +592,9 @@ def find_cast_leaks(root: Path, rules: list[tuple[str, str]], secrets: set[str])
             for found in sorted(set(EMAIL_PATTERN.findall(text))):
                 if not is_example_address(found):
                     leaks.append(f"{path}（{view}）: メールアドレスらしき文字列 {found!r}")
+            for forbidden in FORBIDDEN_SUBSTRINGS:
+                if forbidden in text:
+                    leaks.append(f"{path}（{view}）: 伏せ損ねた綴り {forbidden!r}")
     return leaks
 
 
@@ -515,7 +620,7 @@ def main() -> int:
     redacted_total = 0
     for path in sorted(root.rglob("*.jsonl")):
         redacted_total += redact_attachments(path)
-    print(f"環境情報を持つレコード（attachment / system）を {redacted_total} 件除去")
+    print(f"環境情報を持つレコード（attachment / system / 他セッションの連絡）を {redacted_total} 件除去")
 
     # 採取物から動的に見つけたスキル名も置換対象へ足す
     skill_names = collect_skill_names(root)
@@ -546,7 +651,11 @@ def main() -> int:
 
     print(f"走査 {scanned} ファイル / 置換 {changed} ファイル")
 
-    leaks = find_leaks(root, rules, secrets) + find_cast_leaks(root, rules, secrets)
+    leaks = (
+        find_leaks(root, rules, secrets)
+        + find_cast_leaks(root, rules, secrets)
+        + find_origin_leaks(root)
+    )
     if leaks:
         print("機微情報が残っています:", file=sys.stderr)
         for leak in leaks:
