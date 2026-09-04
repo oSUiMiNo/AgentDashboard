@@ -19,12 +19,32 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// 使い捨ての作業場所。
+///
+/// **名前は1件ごとに変える。** 以前はプロセスIDだけで作っていたが、**同じ実行ファイルの
+/// 中の別のテストとぶつかる**——テストは既定で並列に走るので、片方が使っている最中に
+/// もう片方の `Sandbox::new()`（と `Drop`）が**同じパスを消す**。
+///
+/// 症状は2通りに出て、どちらも自分の変更のせいに見える。
+///
+/// | 何が見えるか | いつ消されたか |
+/// |---|---|
+/// | 一覧に `src` が無い | 中身を作っている途中で消された |
+/// | フォルダごと「開けません」 | 作り終えてから読むまでの間に消された |
+///
+/// **`--test-threads=1` にすると通ってしまう**ので、負荷や実行順のせいだと読み違えやすい。
+/// プロセスIDに連番を足して、**そもそもぶつからない**ようにする。
 struct Sandbox(PathBuf);
+
+/// [`Sandbox`] の名前を1件ごとに分けるための連番。
+static SANDBOX_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 impl Sandbox {
     fn new() -> Self {
-        let path =
-            std::env::temp_dir().join(format!("agentdashboard-local-fs-{}", std::process::id()));
+        let seq = SANDBOX_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "agentdashboard-local-fs-{}-{seq}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("作業場所を作れること");
         Self(path)
