@@ -21,6 +21,7 @@
 //!   queue <本文>  待ち行列へ1件入れる（`queue-operation` の `enqueue` を書く）
 //!   dequeue       待ち行列から1件取り出す（本文を持たない）
 //!   said <本文>   読まれた指示を、本物の発言レコードとして書く
+//!   /branch       会話を枝分かれさせる（**名乗るIDだけが新しくなり、席はそのまま**）
 //!   crash <N>     終了コード N で自ら異常終了する
 //!   exit          終了する
 //!   その他        受け取った行を返す
@@ -43,9 +44,9 @@ use std::io::{Read as _, Write};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use testkit::fake_claude::{
-    ARGV_PREFIX, BYE_MARKER, BYPASS_ACCEPTED_MARKER, BYPASS_NOTICE, BYPASS_OPTIONS,
-    CANCELLED_MARKER, CRASH_MARKER, CYCLE_MODES, DEQUEUED_MARKER, DUMP_END_MARKER, ENV_PREFIX,
-    FLOOD_END_MARKER, FLOOD_PATTERN, FOOTER_PREFIX, HOOK_FAILED_PREFIX, HOOK_SENT_PREFIX,
+    ARGV_PREFIX, BRANCHED_PREFIX, BYE_MARKER, BYPASS_ACCEPTED_MARKER, BYPASS_NOTICE,
+    BYPASS_OPTIONS, CANCELLED_MARKER, CRASH_MARKER, CYCLE_MODES, DEQUEUED_MARKER, DUMP_END_MARKER,
+    ENV_PREFIX, FLOOD_END_MARKER, FLOOD_PATTERN, FOOTER_PREFIX, HOOK_FAILED_PREFIX, HOOK_SENT_PREFIX,
     JSONL_APPENDED_PREFIX, JSONL_FAILED_PREFIX, MODEL_SET_PREFIX, MODEL_SWITCH_NOTICE,
     MODEL_SWITCH_OPTIONS, QUEUED_PREFIX, READY_MARKER, RECEIVED_PREFIX, REPLIED_PREFIX,
     RESIZED_PREFIX, SAID_PREFIX, STATUS_LINE_SENT_PREFIX, footer_for, physical_lines,
@@ -54,7 +55,13 @@ use testkit::fake_claude::{
 
 /// 起動時に受け取った、フック実行に必要な情報。
 struct Injected {
-    session_id: String,
+    /// いま名乗っている CLI 側のセッションID。
+    ///
+    /// **`/branch` で張り替わる**ので、`model` と同じく共有して持つ。起動時の値を
+    /// 複製して配ると、**周期実行のスレッドが古いIDを送り続け**、ダッシュボードの
+    /// カードが枝へ移った直後に元へ引き戻される（張り替えを見て待っている段取り役
+    /// からは、枝分かれが起きなかったように見える）。
+    session_id: Arc<Mutex<String>>,
     /// `--transcript` で渡された書き出し先。フックが運ぶ値もこれになる
     transcript: Option<String>,
     settings: Option<serde_json::Value>,
@@ -104,6 +111,11 @@ impl Injected {
     /// いま名乗っているモデルの別名。
     fn model(&self) -> String {
         self.model.lock().expect("ロックが壊れていない").clone()
+    }
+
+    /// いま名乗っている CLI 側のセッションID。
+    fn session_id(&self) -> String {
+        self.session_id.lock().expect("ロックが壊れていない").clone()
     }
 
     /// 1つ進めた先のモード。いまのモードが巡回に入っていなければ先頭へ。
@@ -205,7 +217,7 @@ fn main() {
         .unwrap_or("default")
         .to_string();
     let mut injected = Injected {
-        session_id,
+        session_id: Arc::new(Mutex::new(session_id)),
         transcript: transcript_path,
         settings,
         // 指定が無ければ本物と同じく既定（毎回確認する）で始まる
@@ -426,6 +438,28 @@ fn main() {
             } else {
                 apply_model(&mut out, &injected, &target);
             }
+            continue;
+        }
+
+        // 本物と同じく `/branch` で会話を枝分かれさせる。
+        //
+        // **押した席がそのまま枝になる**（本物の実測。ブランチ設計§1）。プロセスは
+        // 生きたままで、**名乗る CLI 側のセッションIDだけが新しいものへ張り替わる**。
+        // 元の会話は残っており、`--resume <元のID>` で別の席へ呼び戻せる。
+        //
+        // 張り替えをダッシュボードへ伝える経路は**フックだけ**である（画面の出力は
+        // 読ませない）。ここで `SessionStart` を撃つのは、新しい会話が始まったことを
+        // 運ぶイベントがそれだから——`state.rs` はどのフックでも `session_id` を見て
+        // 張り替えるので、待っている側はこれで枝分かれを知る。
+        if line == "/branch" {
+            let 枝 = protocol::ClaudeSessionId::new().to_string();
+            *injected
+                .session_id
+                .lock()
+                .expect("ロックが壊れていない") = 枝.clone();
+            let _ = writeln!(out, "{BRANCHED_PREFIX}{枝}");
+            let _ = out.flush();
+            hook(&mut out, &injected, "SessionStart");
             continue;
         }
 
@@ -672,7 +706,7 @@ fn send_status_line(out: &mut impl Write, injected: &mut Injected, announce: boo
     let alias = injected.model();
     let (id, display_name) = resolve_model(&alias);
     let payload = serde_json::json!({
-        "session_id": injected.session_id,
+        "session_id": injected.session_id(),
         "transcript_path": transcript_path(injected),
         "cwd": std::env::current_dir().unwrap_or_default().to_string_lossy(),
         "model": { "id": id, "display_name": display_name },
@@ -705,17 +739,24 @@ fn start_refresh_ticker(injected: &Injected) {
     let Some(command) = injected.status_line_command() else {
         return;
     };
-    let session_id = injected.session_id.clone();
-    let transcript = transcript_path(injected);
+    // **IDは複製せず共有する。** 起動時の値を持たせると、`/branch` で張り替わったあとも
+    // 古いIDを送り続け、ダッシュボードのカードが枝から元へ引き戻される
+    let session_id = Arc::clone(&injected.session_id);
     let model = Arc::clone(&injected.model);
+    // 書き出し先はIDから決まるので、こちらも都度引き直す（`--transcript` 指定時は固定）
+    let transcript_override = injected.transcript.clone();
 
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(std::time::Duration::from_secs(secs));
             let alias = model.lock().expect("ロックが壊れていない").clone();
+            let id_now = session_id.lock().expect("ロックが壊れていない").clone();
+            let transcript = transcript_override
+                .clone()
+                .unwrap_or_else(|| default_transcript_path(&id_now));
             let (id, display_name) = resolve_model(&alias);
             let payload = serde_json::json!({
-                "session_id": session_id,
+                "session_id": id_now,
                 "transcript_path": transcript,
                 "model": { "id": id, "display_name": display_name },
                 "version": "2.1.220",
@@ -1071,7 +1112,7 @@ fn hook(out: &mut impl Write, injected: &Injected, rest: &str) {
 /// テストが指定した追加フィールド（`notification_type` など）を混ぜる。
 fn build_payload(injected: &Injected, event: &str, extra: &str) -> String {
     let mut payload = serde_json::json!({
-        "session_id": injected.session_id,
+        "session_id": injected.session_id(),
         "transcript_path": transcript_path(injected),
         "hook_event_name": event,
     });
@@ -1193,7 +1234,7 @@ fn append_queue(injected: &Injected, operation: &str, content: Option<&str>) {
         ),
         None => String::new(),
     };
-    let session = &injected.session_id;
+    let session = injected.session_id();
     append_transcript_line(
         injected,
         &format!(
@@ -1236,9 +1277,15 @@ fn transcript_path(injected: &Injected) -> String {
     if let Some(path) = &injected.transcript {
         return path.clone();
     }
+    default_transcript_path(&injected.session_id())
+}
+
+/// 指定が無いときの書き出し先。**IDから決まる**ので、`/branch` で張り替わると
+/// 書き出し先も別のファイルへ移る（本物も枝には別の履歴を作る）。
+fn default_transcript_path(session_id: &str) -> String {
     std::env::temp_dir()
         .join("fake-claude")
-        .join(format!("{}.jsonl", injected.session_id))
+        .join(format!("{session_id}.jsonl"))
         .to_string_lossy()
         .into_owned()
 }
