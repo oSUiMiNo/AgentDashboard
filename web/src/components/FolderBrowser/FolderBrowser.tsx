@@ -20,10 +20,17 @@
  * 同じ列挙の口を使う部品が2つの作法を持つと、片方だけ直したときに食い違う。
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { Button } from '@/components/ui/button'
-import { copyToClipboard } from '@/lib/clipboard'
-import { fileIcon } from '@/lib/fileKind'
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
+import { ChevronGlyph, CopyGlyph } from "@/components/ui/glyphs";
+import { copyToClipboard } from "@/lib/clipboard";
+import { fileIcon } from "@/lib/fileKind";
 import {
   childOf,
   crumbsOf,
@@ -33,19 +40,19 @@ import {
   relativeOf,
   type DirEntry,
   type DirListing,
-} from '@/lib/hostfs'
+} from "@/lib/hostfs";
 
 interface Props {
   /** `agent_id` かローカルを表す `'local'` */
-  host: string
+  host: string;
   /**
    * 最初に見せる場所。**省略するとその PC のホーム**（設計§26-2）。
    *
    * 変わると辿り直す。呼び出し側が「最近使った場所」を押したときの移動もこれで起きる。
    */
-  start?: string
+  start?: string;
   /** ここより上へは辿らせない（PJT 専用画面の左パネル用。設計§15） */
-  root?: string
+  root?: string;
   /**
    * `start` が**無かった**ときに、黙って行き直す先（`イシューグループ_2026-0813-1804` 設計§6-2）。
    *
@@ -56,11 +63,11 @@ interface Props {
    *
    * **黙るのは「無い」（404）ときだけ。** 権限・未接続・時間切れでは理由を出す。
    */
-  fallback?: string
+  fallback?: string;
   /** いま見ている場所が変わるたびに呼ばれる。確定ボタンの相手を呼び出し側が持つため */
-  onPathChange?: (path: string) => void
+  onPathChange?: (path: string) => void;
   /** ファイルを押したとき。省略するとファイルは押せない（選ぶ対象がフォルダだけの場面） */
-  onPickFile?: (path: string) => void
+  onPickFile?: (path: string) => void;
 }
 
 /**
@@ -71,7 +78,7 @@ interface Props {
  * （設計§6-3）。寝ている PC で全部の失敗を拾うと、時間切れが2回並んで倍待たされ、
  * しかも起点も同じ理由で失敗するので**見える結果は変わらない**。
  */
-type Arrival = 'ok' | 'gone' | 'failed' | 'stale'
+type Arrival = "ok" | "gone" | "failed" | "stale";
 
 export function FolderBrowser({
   host,
@@ -81,11 +88,11 @@ export function FolderBrowser({
   onPathChange,
   onPickFile,
 }: Props) {
-  const [listing, setListing] = useState<DirListing | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [listing, setListing] = useState<DirListing | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   // `undefined` は「まだ聞いていない」＝ホームから始める（設計§26-2）
-  const [path, setPath] = useState<string | undefined>(start)
+  const [path, setPath] = useState<string | undefined>(start);
   /**
    * 何番目の問いか。**最後に投げたものの答えだけを採る**（設計§29）。
    *
@@ -96,7 +103,7 @@ export function FolderBrowser({
    * `useRef` で持つのは、これが描画に出ない値だから——`useState` にすると
    * `go` が作り直され、それを見ている効果まで走り直す。
    */
-  const asked = useRef(0)
+  const asked = useRef(0);
 
   /**
    * **コピーの答えは1組しか持たない**（設計§5）。「どの行の、どの値が、どうなったか」
@@ -108,12 +115,12 @@ export function FolderBrowser({
    * 番号を `useRef` で持つ理由は `asked` と同じ——描画に出ない値なので、
    * `useState` にすると押すたびに関数が作り直される。
    */
-  const copyAsked = useRef(0)
+  const copyAsked = useRef(0);
   const [copied, setCopied] = useState<{
-    path: string
-    value: string
-    state: 'done' | 'failed'
-  } | null>(null)
+    path: string;
+    value: string;
+    state: "done" | "failed";
+  } | null>(null);
 
   /**
    * **`await` を1つも挟まずに [`copyToClipboard`] を呼ぶ**（設計§3）。ここに
@@ -121,55 +128,55 @@ export function FolderBrowser({
    * 切れるかどうかはブラウザ任せなので、**動いたり動かなかったりする**形になる。
    */
   const copy = useCallback((at: string, value: string) => {
-    const mine = ++copyAsked.current
+    const mine = ++copyAsked.current;
     // 押した瞬間に前の答えを消す。**結果を待たない**——待つと、次の行を押しても
     // 前の行の答えが残って見える
-    setCopied(null)
+    setCopied(null);
     void copyToClipboard(value).then((ok) => {
       // 割り込まれた古い答えは捨てる（`asked` と同じ理由）
       if (mine !== copyAsked.current) {
-        return
+        return;
       }
-      setCopied({ path: at, value, state: ok ? 'done' : 'failed' })
-    })
-  }, [])
+      setCopied({ path: at, value, state: ok ? "done" : "failed" });
+    });
+  }, []);
 
   const go = useCallback(
     async (next: string | undefined, 黙る = false): Promise<Arrival> => {
-      const mine = ++asked.current
-      setLoading(true)
-      setError(null)
+      const mine = ++asked.current;
+      setLoading(true);
+      setError(null);
       try {
-        const result = await listDir(host, next)
+        const result = await listDir(host, next);
         if (mine !== asked.current) {
-          return 'stale'
+          return "stale";
         }
-        setListing(result)
+        setListing(result);
         // **着いた先はサーバが返す値を正とする。** 省略して問うたときは
         // ここで初めてホームのパスが分かる
-        setPath(result.path)
-        onPathChange?.(result.path)
-        return 'ok'
+        setPath(result.path);
+        onPathChange?.(result.path);
+        return "ok";
       } catch (err) {
         // 古い問いの失敗も捨てる。拾うと、**新しい場所の正しい一覧が消える**
         if (mine !== asked.current) {
-          return 'stale'
+          return "stale";
         }
         // **黙るのは「無い」ときだけ。** 権限・未接続・時間切れは理由をそのまま出す
         if (黙る && err instanceof HostFsError && err.status === 404) {
-          return 'gone'
+          return "gone";
         }
-        setError(err instanceof Error ? err.message : '読めませんでした')
-        setListing(null)
-        return 'failed'
+        setError(err instanceof Error ? err.message : "読めませんでした");
+        setListing(null);
+        return "failed";
       } finally {
         if (mine === asked.current) {
-          setLoading(false)
+          setLoading(false);
         }
       }
     },
     [host, onPathChange],
-  )
+  );
 
   useEffect(() => {
     // **辿り直す先は `start`。`path` を渡してはいけない。**
@@ -177,30 +184,46 @@ export function FolderBrowser({
     // 上書きする」ことになる。症状は**一瞬だけ新しい場所が見えて元へ戻る**で、
     // 状態の更新が非同期であることに由来するので、目で追っても原因が見えない。
     void (async () => {
-      const 着いたか = await go(start, fallback !== undefined)
+      const 着いたか = await go(start, fallback !== undefined);
       // **行き直すのは1度だけ。** `go` の中から自分を呼ぶ形にすると、消えた先が
       // 連なっていたときに止まらなくなる
-      if (着いたか === 'gone' && fallback !== undefined) {
+      if (着いたか === "gone" && fallback !== undefined) {
         // 着けば `onPathChange` が飛ぶので、**死んだ記憶はその場で上書きされる**
-        await go(fallback)
+        await go(fallback);
       }
-    })()
-  }, [host, start, fallback, go])
+    })();
+  }, [host, start, fallback, go]);
 
   // ルートより上は出さない（左パネル用）。現在地までの道筋は見せて、外側だけを塞ぐ。
   // **内側かどうかの判定は `isUnder` に寄せる**——区切りを見ない前方一致で書くと、
   // `app` の内側に `app-old` が通り、起点の外へ抜ける段ができる
-  const crumbs = crumbsOf(path ?? '/').filter(
+  const 全部 = crumbsOf(path ?? "/");
+  const crumbs = 全部.filter(
     (crumb) =>
       root === undefined ||
       isUnder(root, crumb.path) ||
       isUnder(crumb.path, root),
-  )
+  );
+
+  /*
+    **「1つ上」は、パンくずの末尾から2番目**（細かい修正 設計§8-2）。新しい関数を
+    足さずに済むうえ、**上のフィルタと同じ材料**から引くので、押した先が必ず
+    パンくずのどれかになる。
+
+    **ルートでは押せなくする。** `ファイル設計§15` は「左パネルはその枠のパスから
+    始まり、**上へは出られない**——相対パスの基準が壊れるため」と決めている。
+    出られなくすれば基準は壊れないので、**設計を覆さずに要件3を満たせる**。
+    判定は既存のパンくずと同じ `isUnder` に寄せる——別の書き方をすると挙動がずれる。
+  */
+  const ひとつ上 = 全部.length >= 2 ? 全部[全部.length - 2] : undefined;
+  const 上へ行ける =
+    ひとつ上 !== undefined &&
+    (root === undefined || isUnder(root, ひとつ上.path));
 
   return (
     <div
       data-testid="folder-browser"
-      data-path={path ?? ''}
+      data-path={path ?? ""}
       // **入れ物の高さいっぱいに広がる。** これが無いと一覧が伸び放題になり、
       // `ul` の `overflow-y-auto` が効かずに親ごとはみ出す
       className="flex h-full min-h-0 flex-col gap-2"
@@ -210,6 +233,33 @@ export function FolderBrowser({
         aria-label="いまの場所"
         className="flex flex-wrap items-center gap-x-1 gap-y-0.5 text-xs"
       >
+        {/*
+          **パンくずの左に置く**（要件3）。行き先はパンくずの中にあるが、**押す場所が
+          パンくずの中だと、深い階層では横に流れて見つからない**——位置が固定の的を1つ
+          置くことで、どこに居ても同じ場所を押せば1つ上へ行ける。
+        */}
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          data-testid="folder-up"
+          aria-label="1つ上のフォルダへ"
+          title={
+            上へ行ける
+              ? `1つ上のフォルダへ：${ひとつ上?.path ?? ""}`
+              : "ここが起点なので、これより上へは出られません"
+          }
+          disabled={!上へ行ける}
+          className="shrink-0"
+          onClick={() => {
+            if (ひとつ上 !== undefined) {
+              void go(ひとつ上.path);
+            }
+          }}
+        >
+          <ChevronGlyph direction="up" />
+        </Button>
+
         {crumbs.map((crumb, at) => (
           <span key={crumb.path} className="flex items-center gap-1">
             {at > 0 && <span className="text-muted-foreground">/</span>}
@@ -246,11 +296,12 @@ export function FolderBrowser({
           最後の一歩だけ自分でやってほしい」。赤（`folder-error`）は読めないときのもので、
           ここは読めている。
 
-          文言と形は `FileView` の `file-copy-fallback` と揃えてある。**同じことが起きた
-          ときに同じものが出る**のが要件の完了条件（設計§10）。 */}
-      {copied?.state === 'failed' && (
+          **かつては `FileView` の `file-copy-fallback` と文言も形も揃えてあった**が、
+          あちらの「パスをコピー」は要件24 で無くなったので、**逃げ道はここ1箇所だけ**に
+          なった。揃える相手が居なくなっただけで、出す理由は変わっていない。 */}
+      {copied?.state === "failed" && (
         <p data-testid="folder-copy-failed" className="text-xs text-amber-300">
-          コピーできません。この値を選んで取ってください：{' '}
+          コピーできません。この値を選んで取ってください：{" "}
           <code
             data-testid="folder-copy-fallback"
             className="bg-muted/60 rounded px-1 py-0.5 font-mono select-all"
@@ -262,7 +313,9 @@ export function FolderBrowser({
 
       <ul className="min-h-0 flex-1 overflow-y-auto text-sm">
         {loading && (
-          <li className="text-muted-foreground px-2 py-1.5 text-xs">読み込み中…</li>
+          <li className="text-muted-foreground px-2 py-1.5 text-xs">
+            読み込み中…
+          </li>
         )}
         {!loading && listing?.entries.length === 0 && (
           <li className="text-muted-foreground px-2 py-1.5 text-xs">
@@ -271,7 +324,7 @@ export function FolderBrowser({
         )}
         {!loading &&
           listing?.entries.map((entry) => {
-            const full = childOf(listing.path, entry.name)
+            const full = childOf(listing.path, entry.name);
             return (
               <Row
                 key={entry.name}
@@ -283,14 +336,14 @@ export function FolderBrowser({
                   onPickFile === undefined ? undefined : () => onPickFile(full)
                 }
                 // **答えを持っているのは1行だけ。** 他の行は常に手つかずへ戻る
-                copyState={copied?.path === full ? copied.state : 'idle'}
+                copyState={copied?.path === full ? copied.state : "idle"}
                 onCopy={(value) => copy(full, value)}
               />
-            )
+            );
           })}
       </ul>
     </div>
-  )
+  );
 }
 
 /**
@@ -312,64 +365,89 @@ function Row({
   copyState,
   onCopy,
 }: {
-  entry: DirEntry
+  entry: DirEntry;
   /** この行が指す絶対パス */
-  full: string
+  full: string;
   /** 相対パスの基準。無ければ絶対パスをコピーする */
-  root?: string
-  onOpen: () => void
-  onPickFile?: () => void
+  root?: string;
+  onOpen: () => void;
+  onPickFile?: () => void;
   /** この行のコピーがどうなったか。**答えを持つのは1行だけ**（親が決める） */
-  copyState: 'idle' | 'done' | 'failed'
-  onCopy: (value: string) => void
+  copyState: "idle" | "done" | "failed";
+  onCopy: (value: string) => void;
 }) {
-  const openable = entry.kind === 'dir'
-  const pressable = openable || (entry.kind === 'file' && onPickFile !== undefined)
+  const openable = entry.kind === "dir";
+  const pressable =
+    openable || (entry.kind === "file" && onPickFile !== undefined);
 
   return (
-    <li className="flex items-center gap-1">
-      <Button
-        type="button"
-        variant="ghost"
-        data-testid="folder-entry"
-        data-kind={entry.kind}
-        data-name={entry.name}
-        disabled={!pressable}
-        onClick={openable ? onOpen : onPickFile}
-        // 的はできるだけ大きく取る。高さも狭い画面で押しやすい値にしてある
-        className="h-auto min-w-0 flex-1 justify-start gap-2 px-2 py-2 text-left font-normal"
-      >
-        {/* **開く前に、何が起きるかが分かる印。** 画像とテキストが同じ印だと、
+    /*
+      **右クリックでメニューを出す**（要件27・設計§8-4）。`radix-ui` の `ContextMenu` は
+      DOM を足さない器なので、`ul` の直下は `li` のままである——**表の構造を崩さずに
+      掛けられる**。中身はまず「絶対パスをコピー」だけ（要件の指定）。
+
+      **押した結果は行のコピーと同じ道を通す。** 別の道を作ると、写せない環境の逃げ道
+      （`folder-copy-fallback`）が右クリック経由のときだけ出なくなる。
+    */
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <li className="flex items-center gap-1">
+          <Button
+            type="button"
+            variant="ghost"
+            data-testid="folder-entry"
+            data-kind={entry.kind}
+            data-name={entry.name}
+            disabled={!pressable}
+            onClick={openable ? onOpen : onPickFile}
+            // 的はできるだけ大きく取る。高さも狭い画面で押しやすい値にしてある
+            className="h-auto min-w-0 flex-1 justify-start gap-2 px-2 py-2 text-left font-normal"
+          >
+            {/* **開く前に、何が起きるかが分かる印。** 画像とテキストが同じ印だと、
             押してみるまで箱が出るのか字が出るのか分からない（種別ごとに見せ方が
             違うと決めてあるので、印もそこへ合わせる） */}
-        <span aria-hidden data-testid="folder-entry-icon" className="shrink-0">
-          {entry.kind === 'dir'
-            ? '📁'
-            : entry.kind === 'symlink'
-              ? '🔗'
-              : fileIcon(entry.name)}
-        </span>
-        <span className="min-w-0 truncate">{entry.name}</span>
-        {entry.is_project && (
-          // 深い階層で「どれが目的地か」を1階層ぶん先に教える（設計§8）
-          <span
-            data-testid="folder-project-mark"
-            title="このフォルダは .git を持っています"
-            className="border-primary/40 text-primary ml-auto shrink-0 rounded border px-1 text-[10px]"
-          >
-            PJT
-          </span>
-        )}
-      </Button>
-      <CopyPath
-        full={full}
-        root={root}
-        isDir={entry.kind === 'dir'}
-        state={copyState}
-        onCopy={onCopy}
-      />
-    </li>
-  )
+            <span
+              aria-hidden
+              data-testid="folder-entry-icon"
+              className="shrink-0"
+            >
+              {entry.kind === "dir"
+                ? "📁"
+                : entry.kind === "symlink"
+                  ? "🔗"
+                  : fileIcon(entry.name)}
+            </span>
+            <span className="min-w-0 truncate">{entry.name}</span>
+            {entry.is_project && (
+              // 深い階層で「どれが目的地か」を1階層ぶん先に教える（設計§8）
+              <span
+                data-testid="folder-project-mark"
+                title="このフォルダは .git を持っています"
+                className="border-primary/40 text-primary ml-auto shrink-0 rounded border px-1 text-[10px]"
+              >
+                PJT
+              </span>
+            )}
+          </Button>
+          <CopyPath
+            full={full}
+            root={root}
+            isDir={entry.kind === "dir"}
+            state={copyState}
+            onCopy={onCopy}
+          />
+        </li>
+      </ContextMenuTrigger>
+      <ContextMenuContent data-testid="folder-menu">
+        <ContextMenuItem
+          data-testid="folder-menu-copy-abs"
+          onSelect={() => onCopy(full)}
+        >
+          絶対パスをコピー
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
+  );
 }
 
 /**
@@ -383,6 +461,14 @@ function Row({
  * 上へ伝え、返ってきた答えを字にするだけである。
  *
  * **`title` と `data-value` はそのまま残す。** マウスのある環境では、いまも役に立つ。
+ *
+ * # 絵にしたのはボタンだけで、結果ではない（要件23・設計§8-3）
+ *
+ * **結果まで絵にすると、成功と失敗が見分けられない。** 押したあとに文字が一時的に
+ * 出る形は変えていない。
+ *
+ * **`aria-label` には基準を付ける。** 絵だけになると、読み上げでは「何をコピーするのか」
+ * が分からなくなる——`title` は指で触る画面では読めないので、**両方に持たせる**。
  */
 function CopyPath({
   full,
@@ -391,16 +477,16 @@ function CopyPath({
   state,
   onCopy,
 }: {
-  full: string
-  root?: string
-  isDir: boolean
-  state: 'idle' | 'done' | 'failed'
-  onCopy: (value: string) => void
+  full: string;
+  root?: string;
+  isDir: boolean;
+  state: "idle" | "done" | "failed";
+  onCopy: (value: string) => void;
 }) {
-  const base = root === undefined ? full : relativeOf(root, full)
+  const base = root === undefined ? full : relativeOf(root, full);
   // **フォルダは末尾に `/` を付ける。** 貼られた側で「これは入れ物か中身か」が
   // 一目で分かり、続けて名前を書き足すときにも区切りを打ち直さずに済む
-  const value = isDir && !base.endsWith('/') ? `${base}/` : base
+  const value = isDir && !base.endsWith("/") ? `${base}/` : base;
 
   return (
     <Button
@@ -414,10 +500,20 @@ function CopyPath({
           ? `コピーする値：${value}`
           : `コピーする値：${value}（${root} からの相対パス）`
       }
-      className="text-muted-foreground shrink-0 text-xs"
+      aria-label={
+        root === undefined
+          ? `パスをコピー：${value}`
+          : `パスをコピー：${value}（${root} からの相対パス）`
+      }
+      className="text-muted-foreground shrink-0 gap-1 text-xs"
       onClick={() => onCopy(value)}
     >
-      {state === 'done' ? 'コピーしました' : state === 'failed' ? 'コピーできません' : 'コピー'}
+      <CopyGlyph className="size-3.5" />
+      {state !== "idle" && (
+        <span data-testid="folder-copy-state">
+          {state === "done" ? "コピーしました" : "コピーできません"}
+        </span>
+      )}
     </Button>
-  )
+  );
 }
