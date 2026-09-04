@@ -1040,7 +1040,9 @@ async fn 指示送信は複数行もスラッシュコマンドも本物のtui�
     while Instant::now() < deadline {
         let nodes = server.transcript_of(session.card_id);
         if let Some(text) = nodes.iter().find_map(|node| match &node.node {
-            protocol::Node::UserMessage { text, .. } if text.contains(LONG_MARK) => Some(text.clone()),
+            protocol::Node::UserMessage { text, .. } if text.contains(LONG_MARK) => {
+                Some(text.clone())
+            }
             _ => None,
         }) {
             long_prompt = Some(text);
