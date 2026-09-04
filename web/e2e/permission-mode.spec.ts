@@ -108,6 +108,30 @@ test('巡回に入らないモードを選ぶと理由が画面に出る', async
     { timeout: 30_000 },
   )
   await expect(page.getByTestId('error-banner')).toHaveCount(0)
+
+  /*
+    **溜まっている間はベルが出る**（細かい修正 設計§7-4）。1件も無いときは出さないので、
+    ここで出ていることが「溜まっている」の証拠になる。
+  */
+  const bell = view.getByTestId('notice-bell')
+  await expect(bell).toBeVisible()
+  await bell.click()
+  /*
+    **一覧は区画の中に居ない。** `Popover` は Portal で `body` の直下へ出るので、
+    `session-view` から引くと見つからない（フェーズ2の `tile-ops` と同じ形の取り違え）。
+  */
+  await expect(page.getByTestId('notice-item').first()).toContainText('切り替えられません')
+  await page.keyboard.press('Escape')
+
+  /*
+    **5秒で消える**（同 §7-3）。モードの切替は単発の操作結果なので流してよい——
+    要件が名指ししていた「ずっと出続けて邪魔」がこれである。
+
+    **消えるところまで見る。** jsdom では時計を進めれば済むが、実際に消えるかは
+    ここでしか分からない。
+  */
+  await expect(view.getByTestId('card-error')).toHaveCount(0, { timeout: 15_000 })
+  await expect(view.getByTestId('notice-bell')).toHaveCount(0)
 })
 
 test('片方を切り替えても、もう片方の表示は変わらない', async ({ page }) => {

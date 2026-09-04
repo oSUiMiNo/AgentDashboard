@@ -69,6 +69,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
+import { PlusGlyph, SendGlyph } from '@/components/ui/glyphs'
 import { Textarea } from '@/components/ui/textarea'
 import {
   ACCEPT_ATTRIBUTE,
@@ -435,16 +436,23 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
             />
             <Button
               type="button"
-              // **塗らない。** 塗るのは送信だけ（DESIGN.md §5）——同じ濃さで並べると、
-              // どちらが「実行」なのかが読めなくなる
-              variant="outline"
-              size="sm"
+              /*
+                **枠を外して線画だけにする**（細かい修正 設計§6-1・要件9）。お手本にした
+                LINE と Discord は、どちらも入力欄まわりの補助操作に枠を持たない——
+                器が並ぶと、どれが入力欄なのかが読み取りにくくなる。
+
+                **塗らない。** 塗るのは送信だけ（`DESIGN.md` §15.1）——同じ濃さで
+                並べると、どちらが「実行」なのかが読めなくなる。
+              */
+              variant="ghost"
+              size="icon-sm"
               data-testid="composer-attach"
               aria-label="画像を添付"
+              title="画像を添付"
               disabled={sending}
               onClick={() => fileRef.current?.click()}
             >
-              ＋
+              <PlusGlyph className="size-4" />
             </Button>
           </>
         )}
@@ -490,8 +498,28 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
           }}
           className="min-h-0 flex-1 resize-none"
         />
-        <Button type="submit" size="sm" disabled={ended || sending}>
-          {sending ? '送信中' : '送信'}
+        {/*
+          **入力欄まわりで唯一塗るもの**（`DESIGN.md` §15.1「主要操作は1つだけ塗る」・
+          細かい修正 設計§6-1）。枠は外したが、ここだけは Primary Accent で塗る——
+          枠を全部外したうえで塗りも無くすと、**送信がどれか分からなくなる**。
+
+          色は `DESIGN.md` §11.2 の Primary Accent。**新しい色は増やしていない**
+          （`index.css` の `--accent-face` / `--accent-edge` と同じ値を、
+          `color-mix` を通さずそのまま塗っているだけ）。
+
+          **文字を絵に替えたので、言葉は `aria-label` と `title` に残す。**
+        */}
+        <Button
+          type="submit"
+          variant="ghost"
+          size="icon-sm"
+          data-testid="composer-send"
+          aria-label={sending ? '送信中' : '送信'}
+          title={sending ? '送信中' : '送信（Ctrl+Enter）'}
+          disabled={ended || sending}
+          className="rounded-full bg-[#3dd9e6] text-neutral-900 hover:bg-[#3dd9e6]/85 disabled:opacity-50"
+        >
+          <SendGlyph className="size-4" />
         </Button>
       </div>
 
