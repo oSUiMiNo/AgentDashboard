@@ -2,10 +2,13 @@ import { expect, test } from '@playwright/test'
 import { BODY_FOLD_GRACE_LINES } from '../src/lib/markdown'
 import {
   archiveAll,
+  dequeue,
+  enqueue,
   FIXTURES,
   fireHook,
   openDashboard,
   openSession,
+  say,
   setTerminalView,
   showTerminal,
   showTranscript,
@@ -1335,4 +1338,55 @@ test('横並びでは、構造化ビューへ切り替えたときに末尾か�
   await setTerminalView(view, false)
   await expect(view).toHaveAttribute('data-view', 'transcript')
   await expect(view.getByTestId('transcript-status')).toHaveAttribute('data-at-end', 'true')
+})
+
+/**
+ * まだ読まれていない追加メッセージ（作業中に送った追加メッセージ テスト計画フェーズ5）。
+ *
+ * **単体では届かない鎖がここにある。** 擬似 claude が JSONL へ書き、フックが読ませ、
+ * パーサが行列を再現して行を出し、WebSocket を通って画面へ届く——この鎖の全部が
+ * 一度に通るのはここだけである。
+ */
+test('待っている指示が出て、読まれると消える', async ({ page }) => {
+  await startSession(page)
+
+  await showTerminal(page)
+  await fireHook(page, 'SessionStart')
+  await enqueue(page, 'あとで直して')
+
+  await showTranscript(page)
+  const 待ち = page.locator('[data-testid="transcript-row"][data-kind="queued_message"]')
+  await expect(待ち).toHaveCount(1, 届くまで)
+  await expect(page.getByText('待機中').first()).toBeVisible(届くまで)
+  // **何が待っているのかが読めること**（設計§7-3 の床）。「待機中」だけでは手応えにならない
+  await expect(page.getByText('あとで直して').first()).toBeVisible(届くまで)
+
+  // 読まれた（待ち行列から出た）
+  await showTerminal(page)
+  await dequeue(page)
+
+  await showTranscript(page)
+  // **消える。** 単一ノードを消す経路は無いので、`taken` を立てて行から落としている
+  await expect(待ち).toHaveCount(0, 届くまで)
+})
+
+test('読まれたあと、同じ本文が2つ並ばない', async ({ page }) => {
+  // **このイシューがいちばん避けたい形。** 待ちを出したまま本物が並ぶと、送った文が
+  // 画面に2回出る。パーサは同じ本文の発言が出た時点で畳む（設計§4-1 の合図(a)）
+  await startSession(page)
+
+  await showTerminal(page)
+  await fireHook(page, 'SessionStart')
+  await enqueue(page, 'イシューの設計を進めて')
+  // **取り出しを挟まずに本物が先に来る道**を通す。実データにこの順序が実在する
+  await say(page, 'イシューの設計を進めて')
+
+  await showTranscript(page)
+  await expect(
+    page.locator('[data-testid="transcript-row"][data-kind="user_message"]'),
+  ).toHaveCount(1, 届くまで)
+  await expect(
+    page.locator('[data-testid="transcript-row"][data-kind="queued_message"]'),
+  ).toHaveCount(0, 届くまで)
+  await expect(page.getByText('イシューの設計を進めて')).toHaveCount(1, 届くまで)
 })

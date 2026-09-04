@@ -673,7 +673,7 @@ PJT 専用画面の狭い窓は、いまも実機で見ていない。
 | 役割 | 色 | 使う場所 | 使わない場所 |
 |---|---|---|---|
 | Primary Accent | Cyan `#3DD9E6` 系 | 現在地・選択・主要操作・進行中 | 種別の区別 |
-| Secondary Accent | Amber `#F5A623` 系 | Folder・注意・保留 | 主要操作 |
+| Secondary Accent | Amber `#F5A623` 系 | Folder・注意・保留・**待機**（まだ読まれていない指示） | 主要操作 |
 | Positive | Lime `#8FD14F` 系 | 完了・同期済み | 装飾 |
 | Negative | Coral `#FF5A5F` 系 | エラー・破壊的操作 | 装飾 |
 

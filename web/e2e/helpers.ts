@@ -587,6 +587,30 @@ export async function fireHook(page: Page, event: string, extra = '') {
  * その場所を core へ知らせたあとに呼べば、パーサが読んで構造化ビューに出る。
  * 行数を渡すと途中まで書けるので、「書きかけの状態」も作れる。
  */
+/**
+ * 擬似 claude に、待ち行列へ1件入れさせる
+ * （作業中に送った追加メッセージ テスト計画フェーズ5）。
+ *
+ * **`writeTranscript` と混ぜないこと。** あちらは書き出し先の**既存の行数を数えて**
+ * 位置を決めるので、こちらが先に書くとフィクスチャの先頭がその数だけ飛ばされる。
+ */
+export async function enqueue(page: Page, text: string) {
+  await typeLine(page, `queue ${text}`)
+  await expectTerminalToContain(page, `[fake-claude] queued: ${text}`)
+}
+
+/** 擬似 claude に、待ち行列から1件取り出させる（読まれた／取り消された）。 */
+export async function dequeue(page: Page) {
+  await typeLine(page, 'dequeue')
+  await expectTerminalToContain(page, '[fake-claude] dequeued')
+}
+
+/** 擬似 claude に、読まれた指示を本物の発言レコードとして書かせる。 */
+export async function say(page: Page, text: string) {
+  await typeLine(page, `said ${text}`)
+  await expectTerminalToContain(page, `[fake-claude] said: ${text}`)
+}
+
 export async function writeTranscript(page: Page, fixture: string, lines?: number) {
   const source = path.resolve(FIXTURES, fixture)
   await typeLine(page, lines ? `jsonl ${source} ${lines}` : `jsonl ${source}`)

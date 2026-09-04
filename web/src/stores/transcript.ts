@@ -87,7 +87,37 @@ export interface ActivityRow {
 }
 
 /** ツリーを平らに並べた1行分。仮想化はこの配列に対して行う。 */
-export type FlatRow = NodeRow | RewoundRow | ActivityRow
+/**
+ * 待ちが続いたときに、出し切らずに残りの数だけを言う行
+ * （作業中に送った追加メッセージ 設計§7-3 の天井）。
+ *
+ * **実測では、ほとんど出ない。** 待ち行列の深さは9割方1で、3以上は数%しか無い。
+ * これは**模型が破綻したときに画面が埋まるのを止める歯止め**であって、
+ * 普段の見え方を決めるものではない。
+ *
+ * **開けない。** 開く道を作ると「待ちを全部読む」という用途が生まれるが、
+ * 待ちは数秒で消えるものなので、読み終わる前に行が入れ替わる。
+ */
+export interface QueuedMoreRow {
+  kind: 'queued-more'
+  id: string
+  /** 出さなかった件数 */
+  count: number
+}
+
+/** ツリーを平らに並べた1行分。仮想化はこの配列に対して行う。 */
+export type FlatRow = NodeRow | RewoundRow | ActivityRow | QueuedMoreRow
+
+/**
+ * 続けて出す待ちの上限（設計§7-3 の天井）。
+ *
+ * **ゼロにしない。** 同じ場所の床が「最低1行は必ず行として出す」と定めている——
+ * 弱くする規則だけを書くと、実装はゼロへ落ちる（`DESIGN.md` §8.3）。
+ */
+const MAX_QUEUED_ROWS = 3
+
+/** 「ほか N 件」の行のID。[`ROOT`] と同じ理由で `#` から始める。 */
+export const QUEUED_MORE_PREFIX = '#queued-more:'
 
 /**
  * 根の子を入れておくキー。`Map` のキーに `null` を使えないため。
@@ -398,10 +428,40 @@ function flatten(state: CardState): FlatRow[] {
    * ならない**——描くときに隠すだけだと、思考は境目として残ったままなので、**その前後の
    * 活動が別々のまとめ行に割れる**。並びから抜いて初めて、ひと続きの1行になる。
    */
+  /** その位置が、まだ読まれていない待ちか。並びの端を越えたら偽。 */
+  const queuedAt = (ids: string[], index: number): boolean => {
+    if (index >= ids.length) {
+      return false
+    }
+    return state.byId.get(ids[index])?.node.kind === 'queued_message'
+  }
+
   const walkSiblings = (all: string[], depth: number) => {
     const ids = all.filter((id) => !droppable(state, id))
     let index = 0
     while (index < ids.length) {
+      // 待ちが続いたら、頭から3つだけ出して残りは数で言う（設計§7-3 の天井）。
+      // **活動の束ねより先に見る**——待ちは活動ではないので、ここで拾わないと
+      // 1件ずつ全部並ぶ
+      if (queuedAt(ids, index)) {
+        const start = index
+        while (queuedAt(ids, index)) {
+          index += 1
+        }
+        const run = ids.slice(start, index)
+        for (const id of run.slice(0, MAX_QUEUED_ROWS)) {
+          walkNode(id, depth)
+        }
+        const 残り = run.length - MAX_QUEUED_ROWS
+        if (残り > 0) {
+          rows.push({
+            kind: 'queued-more',
+            id: `${QUEUED_MORE_PREFIX}${run[0]}`,
+            count: 残り,
+          })
+        }
+        continue
+      }
       if (!activityAt(ids, index)) {
         walkNode(ids[index], depth)
         index += 1

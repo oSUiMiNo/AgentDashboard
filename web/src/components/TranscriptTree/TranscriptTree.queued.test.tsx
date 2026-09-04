@@ -134,3 +134,35 @@ describe('読まれたら消える', () => {
     expect(screen.queryByTestId('rewound-toggle')).toBeNull()
   })
 })
+
+describe('続いたときは数で言う', () => {
+  // **実測ではほとんど出ない**（待ち行列の深さは9割方1）。これは模型が破綻したときに
+  // 画面が埋まるのを止める歯止めで、普段の見え方を決めるものではない（設計§7-3 の天井）
+  const 待ちを = (n: number) =>
+    Array.from({ length: n }, (_, i) => 待ち(`指示${i}`, false, `queue:s1:${i}`))
+
+  it('3件までは全部出る（床：ゼロにしない）', async () => {
+    置く(...待ちを(3))
+    await screen.findAllByText('待機中')
+    expect(待ちの行()).toHaveLength(3)
+    expect(document.querySelector('[data-kind="queued-more"]')).toBeNull()
+  })
+
+  it('4件以上は3行と「ほか N 件」になる', async () => {
+    置く(...待ちを(5))
+    await screen.findAllByText('待機中')
+    expect(待ちの行()).toHaveLength(3)
+    const 残り = document.querySelector('[data-kind="queued-more"]')
+    expect(残り).not.toBeNull()
+    expect(残り?.getAttribute('data-count')).toBe('2')
+    expect(screen.getByText(/ほか 2 件/)).toBeTruthy()
+  })
+
+  it('畳んだものは数に入らない', async () => {
+    // 読まれたものは並びから落ちているので、束ねの数にも入らない
+    置く(待ち('済1', true, 'queue:s1:0'), 待ち('済2', true, 'queue:s1:1'), ...待ちを(2))
+    await screen.findAllByText('待機中')
+    expect(待ちの行()).toHaveLength(2)
+    expect(document.querySelector('[data-kind="queued-more"]')).toBeNull()
+  })
+})

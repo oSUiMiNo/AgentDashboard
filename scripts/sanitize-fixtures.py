@@ -76,12 +76,19 @@ PLACEHOLDER_PREFIX = "sample-skill-"
 # - attachment … 導入済みスキルの一覧・カスタムサブエージェント・接続中のMCPサーバ等
 # - system     … `subtype: "stop_hook_summary"` が **利用者のフックのコマンド行**を
 #                そのまま持つ（スクリプトのパスと名前を含む）
-REDACT_TYPES = ("attachment", "system")
+# - queue-operation … `content` が**利用者が打った指示そのもの**。フックが差し込む
+#                文脈やサブエージェントの完了通知も丸ごと入る（実データで確認）。
+#                **待ちを画面に出すようになった以上、ここは必ず伏せる**
+#                （作業中に送った追加メッセージ 設計§11-3）
+REDACT_TYPES = ("attachment", "system", "queue-operation")
 
 # 中身として落とすキー（トップレベルのキー構成は変えない）。
 REDACT_KEYS = {
     "attachment": ("attachment",),
     "system": ("hookInfos", "hookErrors", "hookAdditionalContext", "content", "toolUseID"),
+    # **欄ごと消さない。** 印の文字列へ差し替えるので、`enqueue` は本文を持ったまま
+    # 残り、待ちの行がフィクスチャからも出る——ゴールデンの門が働き続ける
+    "queue-operation": ("content",),
 }
 
 

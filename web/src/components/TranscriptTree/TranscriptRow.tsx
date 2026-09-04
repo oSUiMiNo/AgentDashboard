@@ -50,7 +50,7 @@ import {
   foldMarkdownByLines,
   summarizeInput,
 } from '@/lib/markdown'
-import type { ActivityRow, FlatRow, NodeRow, RewoundRow } from '@/stores/transcript'
+import type { ActivityRow, FlatRow, NodeRow, QueuedMoreRow, RewoundRow } from '@/stores/transcript'
 
 interface Props {
   cardId: CardId
@@ -218,6 +218,12 @@ export const TranscriptRow = memo(function TranscriptRow({
   if (row.kind === 'activity') {
     return <ActivityHeader row={row} onToggle={() => onToggle(row)} />
   }
+  // **`FlatRow` を増やしたら、必ずここへ腕を足す。** この並びは `if` で書かれていて
+  // 最後が `NodeRowView` へ落ちるので、**型検査では捕まらない**（新しい行が
+  // `row.node` の無いまま流れ込む）
+  if (row.kind === 'queued-more') {
+    return <QueuedMore row={row} />
+  }
   return (
     <NodeRowView
       cardId={cardId}
@@ -227,6 +233,29 @@ export const TranscriptRow = memo(function TranscriptRow({
     />
   )
 })
+
+/**
+ * 出し切らなかった待ちの数だけを言う行
+ * （作業中に送った追加メッセージ 設計§7-3 の天井）。
+ *
+ * **開けない。** 待ちは数秒で消えるものなので、全部読む道を作っても読み終わる前に
+ * 入れ替わる。**押せないものを押せる顔にしない**ので、記号も出さない。
+ *
+ * **琥珀にしない。** 色は見出しのラベル1語だけに使うと決めてある（§7-3 の天井）。
+ * ここは件数を言うだけの静かな行で、待ちそのものではない。
+ */
+function QueuedMore({ row }: { row: QueuedMoreRow }) {
+  return (
+    <div
+      data-testid="transcript-row"
+      data-kind="queued-more"
+      data-count={row.count}
+      className="text-muted-foreground py-1 pl-1 text-sm"
+    >
+      ほか {row.count} 件が待っています
+    </div>
+  )
+}
 
 /**
  * 巻き戻し前のやりとりをまとめた見出し（設計§16）。

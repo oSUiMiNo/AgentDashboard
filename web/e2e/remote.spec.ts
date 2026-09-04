@@ -3,7 +3,10 @@ import type { Page } from '@playwright/test'
 import {
   archiveAll,
   attachImage,
+  dequeue,
+  enqueue,
   expectTerminalToContain,
+  fireHook,
   keyPayload,
   openDashboard,
   openSession,
@@ -457,4 +460,35 @@ test('添付した画像はセッションホストのディスクへ置かれ�
 
   await showTranscript(page)
   await expect(page.getByText('画像').first()).toBeVisible({ timeout: 30_000 })
+})
+
+/**
+ * 待っている指示が、リモート経路でも同じに見えること
+ * （作業中に送った追加メッセージ テスト計画フェーズ5）。
+ *
+ * **ローカルモードでは通らない道がある。** こちらはサーバとセッションホストの2プロセスを
+ * 本当に起こすので、履歴は PC 側で読まれ、束ねられ、ack を経てサーバへ渡り、そこから
+ * ブラウザへ配られる。要件の「リモート経路でも同じに見える」はここでしか確かめられない。
+ *
+ * **ack は「欠落より重複を選ぶ」側**なので、畳んだ知らせが二重に届くことがある。
+ * 同じ ID の upsert なので吸収されるはずで、それが崩れていれば行が増える。
+ */
+test('待っている指示が、リモート経路でも出て消える', async ({ page }) => {
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  await openSession(page, tile)
+
+  await fireHook(page, 'SessionStart')
+  await enqueue(page, 'リモートでも待つ')
+
+  await showTranscript(page)
+  const 待ち = page.locator('[data-testid="transcript-row"][data-kind="queued_message"]')
+  await expect(待ち).toHaveCount(1, { timeout: 30_000 })
+  await expect(page.getByText('リモートでも待つ').first()).toBeVisible({ timeout: 30_000 })
+
+  await setTerminalView(page, true)
+  await dequeue(page)
+
+  await showTranscript(page)
+  await expect(待ち).toHaveCount(0, { timeout: 30_000 })
 })
