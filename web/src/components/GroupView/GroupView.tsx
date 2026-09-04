@@ -104,11 +104,6 @@ export function GroupView({ host, project }: Props) {
     project,
     open: filesOpen,
     onToggle: toggleFiles,
-    /*
-      **狭い窓の幅は渡さない。** ここは札が並ぶ場所なので、中身の列も**札と同じ
-      672px** のまま（`スマホでファイルビュアを開くと画面が崩れる` 設計§3-3）。
-      1画面ぶんにするのはセッション専用画面だけ
-    */
   })
   /*
     **開いたファイルが変わったら、レールをファイル側へ寄せる**（同 設計§5）。
@@ -215,7 +210,16 @@ export function GroupView({ host, project }: Props) {
           data-testid="group-rail"
           // `overflow-anchor: none`：並びが変わるとスクロール固定が位置を動かし、
           // 指の位置の計算と干渉する（並べ替え設計§15-2）
-          className="flex min-h-0 min-w-0 flex-1 gap-4 overflow-x-auto pb-2 [overflow-anchor:none]"
+          /*
+            **`-mx-3` は、アプリの地の余白の外へ出るため**（`スマホでファイルビュアを
+            開くと画面が崩れる` 設計§13）。読む面を画面いっぱいにするのに要る。
+
+            **札は 672px のまま、位置だけが 12px 寄る。** ここは**スナップの無い自由な
+            スクロール**なので、札がどこで止まるかはもともと指の位置で決まる——
+            12px の寄りは見た目に出ない（実測で確認）。相殺の余白を札へ足すと、
+            **札の中の端末の桁が変わる**ので足さない。
+          */
+          className="-mx-3 flex min-h-0 min-w-0 flex-1 gap-4 overflow-x-auto pb-2 md:mx-0 [overflow-anchor:none]"
         >
           {/*
             **いちばん左。セッションの札と同じ扱い**（設計§8 の 2026-08-27 の変更）。

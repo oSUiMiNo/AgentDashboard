@@ -478,6 +478,15 @@ test('狭い画面でファイルを開いても、セッションの面が潰�
     .evaluate((el) => Math.round(el.getBoundingClientRect().height))
   expect(入力欄の高さ, '入力欄が窓の高さを超えていないこと').toBeLessThan(780)
 
+  // ③-2 中身が左右とも画面の端に届いている（追加要望2・設計§13）
+  const 中身 = await page.getByTestId('file-column').evaluate((el) => {
+    const e = el.querySelector('iframe') ?? el.querySelector('[data-testid="file-body"]')
+    const r = e?.getBoundingClientRect()
+    return r ? { 左: Math.round(r.left), 右: Math.round(r.right) } : null
+  })
+  expect(中身?.左, '中身の左が画面の端に届いている').toBe(0)
+  expect(中身?.右, '中身の右が画面の端に届いている').toBe(390)
+
   // ④ 開いた直後はファイル側が見えている（設計§5）
   expect(
     await レール.evaluate((el) => el.scrollLeft),
@@ -1442,27 +1451,45 @@ test('狭い画面でファイルを開いても、切り替えボタンへ届�
   await expect(page.getByTestId('project-files-panel')).toBeVisible()
 })
 
-test('狭い画面でも、中身の列はセッションの札と同じ幅で流れる', async ({ page }) => {
+test('狭い画面では、中身の列が画面いっぱいで、地の余白が残らない', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 780 })
   await openDashboard(page)
   await openLongFile(page)
   await page.getByTestId('project-files-close').click()
 
   /*
-    **窓の幅で作りを分けない**（2026-08-28）。セッションの札は狭い窓でも 672px 固定の
-    まま横スクロールするので、中身の列も同じにする——**列だけ全画面になるのが
-    おかしかった。**
+    **【2026-09-04 に覆した】** それまでは「札と同じ 672px」を確かめていた——
+    `窓の幅で作りを分けない`（2026-08-28）から、中身の列も札と同じ寸法にする、
+    という理屈だった。
+
+    **利用者の指定で、読む面だけは並びの都合より読みやすさを優先する**ことにした
+    （`スマホでファイルビュアを開くと画面が崩れる` 追加要望1・設計§12）。672px は
+    狭い窓で画面からはみ出し、**横に払わないと読めない**。
+
+    あわせて**地の余白も外す**（追加要望2・設計§13）。独立したタブで同じ HTML を
+    開いたときと、横幅だけは同じにする。
   */
   const column = page.getByTestId('file-column')
-  expect(await 幅(column), '札と同じ 42rem').toBeCloseTo(672, 0)
+  const 窓 = page.viewportSize()?.width ?? 0
+  expect(await 幅(column), '画面幅ぴったり').toBeCloseTo(窓, 0)
 
-  // 札より広いのに、**ページは横へ広がらない**（レールの中で流れる）
+  // **中身が左右とも画面の端に届いている**（直す前は左 12px・右 24px の地が見えた）
+  const 中身 = await column.evaluate((el) => {
+    const e = el.querySelector('iframe') ?? el.querySelector('[data-testid="file-body"]')
+    const r = e?.getBoundingClientRect()
+    return r ? { 左: Math.round(r.left), 右: Math.round(r.right) } : null
+  })
+  expect(中身?.左, '左が画面の端に届いている').toBe(0)
+  expect(中身?.右, '右が画面の端に届いている').toBe(窓)
+
+  // **端まで伸ばした代償にしていない。** ページは横へ広がらない
   const overflows = await page.evaluate(() => {
     const de = document.documentElement
     return de.scrollWidth > de.clientWidth
   })
   expect(overflows, '狭い画面でもページは横へ広がらない').toBe(false)
 
+  // 札（672px）はそのままなので、レールは流せる
   const rail = page.getByTestId('group-rail')
   const 流した = await rail.evaluate((el) => {
     el.scrollLeft = 9999

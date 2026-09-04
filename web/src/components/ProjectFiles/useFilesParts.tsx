@@ -60,12 +60,6 @@ interface Args {
   /** サイドバーが開いているか。**記憶は `useFilesPanel` が持つ**ので、受け取るだけ */
   open: boolean
   onToggle: () => void
-  /**
-   * 狭い窓での中身の列の幅。**素通しするだけ**——決めるのは置く側で、
-   * 意味は `FileColumn` の Props にある（`スマホでファイルビュアを開くと画面が崩れる`
-   * 設計§3-2）。
-   */
-  狭い窓の幅?: '札' | '画面'
 }
 
 export interface FilesParts {
@@ -106,7 +100,6 @@ export function useFilesParts({
   project,
   open,
   onToggle,
-  狭い窓の幅,
 }: Args): FilesParts {
   /*
     いま出しているファイル。**覚える**——読み込み直すと戻る
@@ -237,7 +230,6 @@ export function useFilesParts({
           project={project}
           path={picked.path}
           width={widths.file}
-          狭い窓の幅={狭い窓の幅}
           onClose={列を閉じる}
           /*
             **押した1枚には渡さない。** 渡さないことがそのまま「押した人には理由を

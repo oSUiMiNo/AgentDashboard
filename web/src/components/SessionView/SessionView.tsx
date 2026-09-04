@@ -136,11 +136,6 @@ export function SessionView({
     project: session?.project ?? '',
     open: filesOpen,
     onToggle: toggleFiles,
-    /*
-      **狭い窓では、面は1画面ぶん**（`スマホでファイルビュアを開くと画面が崩れる`
-      設計§3）。PJT 専用画面は渡さない——あちらは札が並ぶ場所なので 672px のまま
-    */
-    狭い窓の幅: '画面',
   })
   const railRef = useRef<HTMLDivElement>(null)
   useSnapToFile(railRef, 選んだ回数)
@@ -321,7 +316,12 @@ export function SessionView({
           るためで、これがこのイシューの不具合そのものだった。狭い窓では**1画面ぶんの
           床**を与え、広い窓では今までどおり残りを取る。
         */}
-        <div className="relative isolate flex min-h-0 min-w-full flex-1 snap-start snap-always flex-col gap-1.5 md:min-w-0">
+        {/*
+          **`px-3` は、レールが外した地の余白を戻すため**（設計§13）。読む面だけを
+          画面いっぱいにしたいので、**外すのはレール・戻すのはここ**という分担にした。
+          これで操作行も入力欄も端末も**1ピクセルも動かない**（実測で確認）。
+        */}
+        <div className="relative isolate flex min-h-0 min-w-full flex-1 snap-start snap-always flex-col gap-1.5 px-3 md:min-w-0 md:px-0">
         {/*
           **セッションに効く行は、端末／履歴と同じ列の中に置く**（設計§17-1・
           `DESIGN.md` §39.3）。
@@ -637,7 +637,15 @@ function SessionRail({
     <div
       ref={railRef}
       data-testid="session-rail"
-      className="flex min-h-0 min-w-0 flex-1 snap-x snap-mandatory gap-4 overflow-x-auto overscroll-x-contain"
+      /*
+        **`-mx-3` は、アプリの地の余白の外へ出るため**（設計§13）。`main` が
+        `p-3` を持っているので、そのままだと読む面の左右に 12px の地が残る。
+        **`md:mx-0` で広い窓は元のまま。**
+
+        **相殺はセッションの面が持つ**（下の `px-3 md:px-0`）ので、あちらの中身は
+        1ピクセルも動かない。**ここで相殺すると、読む面まで元へ戻ってしまう。**
+      */
+      className="-mx-3 flex min-h-0 min-w-0 flex-1 snap-x snap-mandatory gap-4 overflow-x-auto overscroll-x-contain md:mx-0"
     >
       {column}
       {children}
