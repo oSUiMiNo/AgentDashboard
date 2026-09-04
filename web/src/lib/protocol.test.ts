@@ -474,7 +474,10 @@ describe('構造化ビューのノード', () => {
       '{"kind":"thinking","text":"まず失敗を確認する"}',
       '{"kind":"tool_call","name":"Edit","input":{"old_string":"a"},"result":null,"status":"pending","subagent":null}',
       '{"kind":"subagent","agent_type":"Explore","spawn_depth":1}',
-      '{"kind":"unknown","record_type":"queue-operation","raw":{"type":"queue-operation"}}',
+      '{"kind":"queued_message","text":"あとで直して","taken":false}',
+      // **`queue-operation` はもう未知ではない**（作業中に送った追加メッセージ 設計§2-1）。
+      // 例に使い続けると、次に読む人が分類を取り違える
+      '{"kind":"unknown","record_type":"atis-latch","raw":{"type":"atis-latch"}}',
     ]
     const kinds = raws.map((raw) => (JSON.parse(raw) as Node).kind)
     expect(kinds).toEqual([
@@ -483,6 +486,7 @@ describe('構造化ビューのノード', () => {
       'thinking',
       'tool_call',
       'subagent',
+      'queued_message',
       'unknown',
     ])
   })

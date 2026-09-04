@@ -214,13 +214,46 @@ function droppableThinking(state: CardState, id: string): boolean {
   return (state.children.get(id) ?? []).length === 0
 }
 
+/**
+ * 読まれた（あるいは取り消された）待ちの行か（作業中に送った追加メッセージ 設計§4）。
+ *
+ * **消すのではなく、行にしない。** 単一ノードを消す手段は経路上のどこにも無い
+ * （`ParserEvent`・`ServerMessage`・DB・このストア、すべて）。消せる粒度はカード丸ごと
+ * だけなので、**ノードは残したまま並びから落とす**——上の中身の無い思考と同じ手である。
+ *
+ * これで「同じ本文が2つ並ばない」が**約束ではなく機構**になる。読まれると本物の
+ * `user` レコードが出るので、待ちを落とさないと**同じ文字が2回並ぶ**。
+ */
+function droppableQueued(state: CardState, id: string): boolean {
+  const node = state.byId.get(id)
+  return node?.node.kind === 'queued_message' && node.node.taken
+}
+
+/**
+ * 行にせず、並びから落とすか。
+ *
+ * **判断を1箇所にまとめる。** 落とす相手が2種類（中身の無い思考・畳んだ待ち）に増えたが、
+ * 呼ぶ側（[`flatten`] の2箇所）はどちらかを知らなくてよい——**散らすと、片方だけ
+ * 落とし忘れた並びができる**。
+ */
+function droppable(state: CardState, id: string): boolean {
+  return droppableThinking(state, id) || droppableQueued(state, id)
+}
+
 /** 中身を開いて見られる種別か。 */
 function isExpandable(node: Node, hasChildren: boolean): boolean {
   if (hasChildren) {
     return true
   }
-  // 子が無くても、展開すると中身（入力・結果・差分・生データ）が出るもの
-  return node.kind === 'tool_call' || node.kind === 'thinking' || node.kind === 'unknown'
+  // 子が無くても、展開すると中身（入力・結果・差分・生データ）が出るもの。
+  // **待ちの行も入る**——畳んでいるあいだは先頭1行だけを覗かせ、開けば全文が出る
+  // （作業中に送った追加メッセージ 設計§7-3）
+  return (
+    node.kind === 'tool_call' ||
+    node.kind === 'thinking' ||
+    node.kind === 'queued_message' ||
+    node.kind === 'unknown'
+  )
 }
 
 /**
@@ -231,6 +264,8 @@ function isExpandable(node: Node, hasChildren: boolean): boolean {
  * 子」と決めているので、**同じ親の下**＝**発言と発言の間**になる。
  */
 function isActivity(node: Node): boolean {
+  // **待ちの行は入れない**（作業中に送った追加メッセージ 設計§11-2）。まとめ行へ沈めると
+  // 「送ったものが受理された」という手応えが1行の中に埋もれ、出す意味が消える
   return node.kind === 'tool_call' || node.kind === 'unknown'
 }
 
@@ -364,7 +399,7 @@ function flatten(state: CardState): FlatRow[] {
    * 活動が別々のまとめ行に割れる**。並びから抜いて初めて、ひと続きの1行になる。
    */
   const walkSiblings = (all: string[], depth: number) => {
-    const ids = all.filter((id) => !droppableThinking(state, id))
+    const ids = all.filter((id) => !droppable(state, id))
     let index = 0
     while (index < ids.length) {
       if (!activityAt(ids, index)) {
@@ -420,7 +455,7 @@ function flatten(state: CardState): FlatRow[] {
     // **落とす思考を除いてから数える。** ここを生の並びで数えると、子が中身の無い思考
     // だけの行が「開ける」ことになり、**開いても何も出ない**——いま直しているものと
     // 同じ壊れ方を、1つ内側に作ることになる
-    const childIds = (state.children.get(id) ?? []).filter((childId) => !droppableThinking(state, childId))
+    const childIds = (state.children.get(id) ?? []).filter((childId) => !droppable(state, childId))
     const hasChildren = childIds.length > 0
     // **活動はまとめ行へ移るので、本文の行では「開けば出るもの」として数えない**（設計§2-5）。
     // これでアシスタント本文の expandable が偽になり、本文にトグルが出なくなる（要望1）。

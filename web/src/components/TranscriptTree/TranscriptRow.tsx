@@ -85,6 +85,13 @@ function heading(node: Node): { label: string; tone: string } {
       return { label: `サブエージェント ${node.agent_type}`, tone: 'text-amber-300' }
     case 'image':
       return { label: '画像', tone: 'text-sky-300' }
+    case 'queued_message':
+      // **琥珀は保留の色**（`DESIGN.md` §11.2 の役割表）。待ちは保留そのものなので素直に載る。
+      //
+      // **減光しない**（作業中に送った追加メッセージ 設計§7-3 の床）。`/60` を掛けると
+      // 未知のレコードより弱くなり、`DESIGN.md` §34.5 の「抑制のしすぎ」へ落ちる。
+      // **色を弱くする規則を書くなら、下限も同じ場所に書く**（§8.3）
+      return { label: '待機中', tone: 'text-amber-300' }
     case 'unknown':
       // 同上。**未知のレコードは、いちばん静かでよい**（読む相手が居ないことのほうが多い）
       return { label: `未知のレコード（${node.record_type}）`, tone: 'text-orange-300/60' }
@@ -114,6 +121,11 @@ function chevron(expanded: boolean): string {
 
 /** ツールの状態を1文字で表す。 */
 function toolMark(node: Node): string {
+  // **待ちにも同じ記号を使う**（作業中に送った追加メッセージ 設計§7-2）。この画面で
+  // `…` は既に「まだ終わっていない」を意味しているので、**新しい記号を作らない**
+  if (node.kind === 'queued_message') {
+    return '…'
+  }
   if (node.kind !== 'tool_call') {
     return ''
   }
@@ -151,6 +163,10 @@ function summary(node: Node): string {
       // **元の名前を出す**（画像添付 設計§10-1）。ディスク上は採番した名前なので、
       // それを出しても押した人には何のことか分からない
       return node.file_name ?? ''
+    case 'queued_message':
+      // **本文そのものは下の行に出る**（畳んでいても先頭1行を覗かせる）ので、
+      // 横に同じ文字を並べない——思考と同じ扱い
+      return ''
     case 'unknown':
       return ''
   }
@@ -316,8 +332,10 @@ function NodeRowView({
   const mark = toolMark(row.node)
   const alwaysBody = showsBodyAlways(row.node)
   const withHeading = showsHeading(row.node)
-  // 思考は畳んでいても先頭1行を覗かせる（設計§8）。開くまで中身の見当がつかない行を残さない
-  const peeking = row.node.kind === 'thinking'
+  // 思考は畳んでいても先頭1行を覗かせる（設計§8）。開くまで中身の見当がつかない行を残さない。
+  // **待ちも同じ**——「待機中」だけの行にすると、何が待っているのか読めず手応えにならない
+  // （作業中に送った追加メッセージ 設計§7-3 の床）
+  const peeking = row.node.kind === 'thinking' || row.node.kind === 'queued_message'
 
   return (
     <div
@@ -509,6 +527,23 @@ function RowBody({
     case 'thinking':
       // 思考は長さで畳む相手にしない（開いた時点で全文。設計§2-4）。畳んでいるあいだは
       // 先頭1行だけを覗かせる（設計§8）——開くまで中身の見当がつかない行を残さないため
+      return (
+        <MarkdownBody
+          text={row.expanded ? node.text : firstLine(node.text)}
+          row={null}
+          inset
+          shell="none"
+          tone="text-muted-foreground"
+          onToggleBody={onToggleBody}
+        />
+      )
+    case 'queued_message':
+      // **器を持たせない**（作業中に送った追加メッセージ 設計§7-1）。吹き出しにすると、
+      // 姉妹イシュー `人が打っていないものを、人の発言として出さない` が塗りに来る面と
+      // 取り合う。あちらが塗るのは器、こちらが塗るのは見出しのラベルなので、
+      // **面が違えば取り合わない**。
+      //
+      // 畳んでいるあいだは先頭1行、開けば全文（思考と同じ扱い）
       return (
         <MarkdownBody
           text={row.expanded ? node.text : firstLine(node.text)}
