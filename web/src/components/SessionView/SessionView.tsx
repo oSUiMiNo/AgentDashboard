@@ -129,7 +129,7 @@ export function SessionView({
   // ファイルのパネルと、PJT 専用画面へのリンクの**両方**で使う。同じ意味の式を
   // 2通りの綴りで置くと、片方だけ直す余地が残る
   const host = hostOf(session?.agent_id)
-  const { sidebar, column, 開いている一枚 } = useFilesParts({
+  const { sidebar, column, 選んだ回数 } = useFilesParts({
     host,
     project: session?.project ?? '',
     open: filesOpen,
@@ -141,7 +141,7 @@ export function SessionView({
     狭い窓の幅: '画面',
   })
   const railRef = useRef<HTMLDivElement>(null)
-  useSnapToFile(railRef, 開いている一枚)
+  useSnapToFile(railRef, 選んだ回数)
 
   if (!session) {
     // 消えた直後の一瞬。単独表示のときは呼び出し側が「見つかりません」を出す
@@ -573,17 +573,6 @@ export function SessionView({
 }
 
 /**
- * 別の PC の画面がどれくらいの間隔で届くかを小さく出す（セルフホスト化設計§11-3）。
- *
- * # 出さないと区別がつかない
- *
- * 無操作のあいだ、リモートの画面は間隔をあけて届く（既定20秒）。数字が無いと
- * **「相手が止まっている」と「間引かれているだけ」が同じに見える**。入力した直後だけは
- * 細かく届く（ホットウィンドウ。§7-5）ので、ここに出るのは「何もしていないとき」の話。
- *
- * この PC のセッション（ローカル）では生バイトがそのまま届くので、出す値が無い。
- */
-/**
  * 中身の列とセッションの面を横に並べ、**狭い窓ではページ送りにする**入れ物
  * （`スマホでファイルビュアを開くと画面が崩れる` 設計§2・§4）。
  *
@@ -636,6 +625,17 @@ function SessionRail({
   )
 }
 
+/**
+ * 別の PC の画面がどれくらいの間隔で届くかを小さく出す（セルフホスト化設計§11-3）。
+ *
+ * # 出さないと区別がつかない
+ *
+ * 無操作のあいだ、リモートの画面は間隔をあけて届く（既定20秒）。数字が無いと
+ * **「相手が止まっている」と「間引かれているだけ」が同じに見える**。入力した直後だけは
+ * 細かく届く（ホットウィンドウ。§7-5）ので、ここに出るのは「何もしていないとき」の話。
+ *
+ * この PC のセッション（ローカル）では生バイトがそのまま届くので、出す値が無い。
+ */
 function ScreenInterval({ remote, shown }: { remote: boolean; shown: boolean }) {
   const intervalMs = useSettingsStore(
     (state) => state.settings.intervals.screen_interval_ms,

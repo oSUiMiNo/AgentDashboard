@@ -485,6 +485,28 @@ test('狭い画面でファイルを開いても、セッションの面が潰�
       message: '別のファイルを開いたらファイル側へ戻ること',
     })
     .toBe(0)
+
+  /*
+    **同じ1枚を押し直したときも寄る**（設計§5）。押すのは「見たい」という意思表示なので、
+    いま開いているものと同じかどうかは関係ない。
+
+    **ここは1度落とし穴になった。** 「開いているファイルが変わったか」をパスで数える形に
+    していたので、同じ1枚を押しても何も起きなかった——**セッション側に居るときに同じ
+    ファイルを押した人が、押しても変わらないのを見る**ことになる。
+  */
+  await レール.evaluate((el) => {
+    el.scrollLeft = 99999
+  })
+  expect(
+    await レール.evaluate((el) => el.scrollLeft),
+    'もう一度セッション側へ払えること',
+  ).toBeGreaterThan(0)
+  await panel.getByTestId('folder-entry').filter({ hasText: PLAN }).click()
+  await expect
+    .poll(async () => レール.evaluate((el) => el.scrollLeft), {
+      message: '同じファイルを押し直してもファイル側へ戻ること',
+    })
+    .toBe(0)
 })
 
 /**

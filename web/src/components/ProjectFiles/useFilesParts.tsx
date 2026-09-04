@@ -88,12 +88,17 @@ export interface FilesParts {
    */
   column: ReactNode
   /**
-   * いま開いている1枚の絶対パス。開いていなければ `null`。
+   * **人がファイルを選んだ回数。**「選んだらファイル側へ寄せる」（設計§5）に使う。
    *
-   * **レールを持っているのは画面の側**なので、「開いたらファイル側へ寄せる」（設計§5）
-   * を成立させるには、**変わったこと**を外から見られる必要がある。
+   * **開いている1枚のパスではなく、回数を出す。** パスで数えると、**同じ1枚をもう一度
+   * 選んだときに増えない**——セッション側へ払ったまま同じファイルを押した人が、何も
+   * 起きないのを見ることになる。押すのは「見たい」という意思表示なので、いま開いて
+   * いるものと同じかどうかは関係ない。
+   *
+   * 覚えていた1枚を復元したときと、閉じたときは**増えない**（どちらも人が押した瞬間
+   * ではない）。
    */
-  開いている一枚: string | null
+  選んだ回数: number
 }
 
 export function useFilesParts({
@@ -115,6 +120,8 @@ export function useFilesParts({
     （`イシューグループ_2026-0826-1146` 設計§2）
   */
   const [picked, setPicked] = useState<Picked>(() => 覚えた一枚(host, project))
+  // **人が押した回数**（設計§5）。復元と閉じるでは増やさない
+  const [選んだ回数, set選んだ回数] = useState(0)
   const [起点, set起点] = useState(() => readPlace(host, project).dir ?? project)
   const [widths, grip, dragging] = usePanelWidths()
 
@@ -166,6 +173,9 @@ export function useFilesParts({
     (path: string) => {
       // **押した1枚は「復元ではない」。** 読めなかったときに畳まず、理由を見せる
       setPicked({ path, 復元: false })
+      // **同じ1枚を押し直したときも増やす。** 押すのは「見たい」という意思表示で、
+      // いま開いているものと同じかどうかは関係ない（設計§5）
+      set選んだ回数((n) => n + 1)
       putPick(host, project, path)
     },
     [host, project],
@@ -237,6 +247,6 @@ export function useFilesParts({
           {...grip}
         />
       ),
-    開いている一枚: picked === null ? null : picked.path,
+    選んだ回数,
   }
 }

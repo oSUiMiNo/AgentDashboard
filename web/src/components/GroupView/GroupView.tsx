@@ -98,7 +98,7 @@ export function GroupView({ host, project }: Props) {
     中身の列はレールの中のいちばん左。**横ホイールの受け渡しは要らなくなった**
     ——列がレールの中に居れば、ブラウザのスクロール連鎖がそのまま届く
   */
-  const { sidebar, column, 開いている一枚 } = useFilesParts({
+  const { sidebar, column, 選んだ回数 } = useFilesParts({
     host,
     project,
     open: filesOpen,
@@ -117,7 +117,7 @@ export function GroupView({ host, project }: Props) {
     **並べ替え中は寄せない。** このレールは**並べ替えの自動送りと同じもの**なので、
     掴んでいる指の下で動かすと掴んだものがずれる
   */
-  useSnapToFile(railRef, 開いている一枚, reordering)
+  useSnapToFile(railRef, 選んだ回数, reordering)
 
   return (
     <section
