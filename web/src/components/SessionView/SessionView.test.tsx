@@ -60,6 +60,7 @@ function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
     session_title: null,
     position: 0,
     nickname: null,
+    branched_from: null,
     ...overrides,
   }
 }
@@ -511,6 +512,76 @@ describe('SessionView の操作列は、区画の真上', () => {
     // 逆に、セッションに効くものが紛れ込んでいないこと
     expect(帯.querySelector('[data-testid="power-card"]')).toBeNull()
     expect(帯.querySelector('[data-testid="zoom-toggle"]')).toBeNull()
+  })
+
+  /*
+    **枝分かれのボタンは PJT 専用画面にだけ出る**（ブランチ設計§7-1・§10-1）。
+
+    上の「セッションに効くものは、両方の画面で操作列の中に居る」の一覧へは
+    **登録しない**——あれは7つの目印を両方の画面で数えるループなので、
+    登録した瞬間に `compact=false` の側で落ちる。**そこには出さないボタンだから**である。
+    代わりに、隣の `'画面に効くものは帯に残る'` と同じ形（在るべき側に在る／
+    無いべき側に無い）で対にして見る。
+  */
+  it('枝分かれは横並びにだけ出て、単独の画面には出ない', () => {
+    show(meta({ status: { kind: 'waiting_input' } }), true)
+    const 横並び = screen.getByTestId('branch-card')
+    expect(横並び.closest('[data-testid="session-ops"]')).not.toBeNull()
+    cleanup()
+
+    show(meta({ status: { kind: 'waiting_input' } }))
+    expect(screen.queryByTestId('branch-card')).toBeNull()
+  })
+
+  it('枝分かれを足しても、操作列は2行のまま', () => {
+    // **罠2**（ブランチ設計§10-2）。段を折り返した瞬間に、行数を数えている4箇所が落ちる
+    show(meta({ status: { kind: 'waiting_input' } }), true)
+    const ops = screen.getByTestId('session-ops')
+    expect(ops.querySelectorAll('[data-row]')).toHaveLength(2)
+    expect(screen.getByTestId('branch-card').closest('[data-row]')?.getAttribute('data-row')).toBe(
+      '1',
+    )
+  })
+
+  it('指示を受け付けられない状態では押せず、理由が読める', () => {
+    // ブランチ設計§3-4。**`/branch` は指示として送られる**ので、作業中に押すと
+    // 入力欄へ積まれ、**しばらく後の別の地点で分かれる**——取り返しがつかない
+    const 押せない: readonly (readonly [SessionMeta['status'], string])[] = [
+      [{ kind: 'working' }, '作業中'],
+      [{ kind: 'stalled' }, '作業中'],
+      [{ kind: 'waiting_permission' }, '権限確認'],
+      [{ kind: 'starting' }, '起動中'],
+      [{ kind: 'ended', ok: true }, '止まっている'],
+    ]
+    for (const [status, 一部] of 押せない) {
+      show(meta({ status }), true)
+      const ボタン = screen.getByTestId('branch-card')
+      expect(ボタン, `${status.kind} で押せてしまう`).toBeDisabled()
+      expect(ボタン.getAttribute('title') ?? '').toContain(一部)
+      cleanup()
+    }
+  })
+
+  it('入力待ちとサブ待ちでは押せる', () => {
+    const 押せる: readonly SessionMeta['status'][] = [
+      { kind: 'waiting_input' },
+      { kind: 'waiting_subagents' },
+    ]
+    for (const status of 押せる) {
+      show(meta({ status }), true)
+      expect(screen.getByTestId('branch-card'), `${status.kind} で押せない`).toBeEnabled()
+      cleanup()
+    }
+  })
+
+  it('枝であることは、名前ではなく札で分かる', () => {
+    // ブランチ設計§7-5・§6。**名前は利用者のもの**なので機械が書き換えない
+    show(meta({ branched_from: '11111111-1111-4111-8111-111111111111' }), true)
+    expect(screen.getByTestId('branch-badge')).toBeInTheDocument()
+    cleanup()
+
+    show(meta(), true)
+    expect(screen.queryByTestId('branch-badge')).toBeNull()
   })
 
   it('横並びでは帯そのものを描かない（空の段を作らない）', () => {

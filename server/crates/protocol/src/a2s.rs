@@ -581,6 +581,7 @@ mod tests {
             session_title: None,
             position: 0,
             nickname: None,
+            branched_from: None,
         }
     }
 

@@ -56,10 +56,16 @@ import { useFilesPanel } from '@/lib/filesPanel'
 import { projectDisplayName } from '@/lib/path'
 import { backTargetFor, HOME, projectPath, sessionPath } from '@/lib/routes'
 import { hostOf } from '@/lib/reviveBudget'
-import type { CardId } from '@/lib/protocol'
+import type { CardId, SessionStatus } from '@/lib/protocol'
 import { useNow } from '@/lib/sessions'
 import { useAuthStore } from '@/stores/auth'
-import { useCardError, useCardNotices, useReviving, useSessionCard } from '@/stores/sessions'
+import {
+  useBranching,
+  useCardError,
+  useCardNotices,
+  useReviving,
+  useSessionCard,
+} from '@/stores/sessions'
 import { agentOf, useSettingsStore } from '@/stores/settings'
 import { useProjects } from '@/stores/projects'
 import { useWsStore } from '@/stores/ws'
@@ -98,7 +104,11 @@ export function SessionView({
   const kill = useWsStore((state) => state.kill)
   const archive = useWsStore((state) => state.archive)
   const revive = useWsStore((state) => state.revive)
+  const branch = useWsStore((state) => state.branch)
   const reviving = useReviving(cardId)
+  // 枝分かれの進行中（ブランチ設計§7-4）。**早期 return より前で呼ぶ**——
+  // カードが一瞬消える瞬間があるので、`session` を待つとフックの数が回ごとに変わる
+  const branching = useBranching(cardId)
   const cardError = useCardError(cardId)
   const notices = useCardNotices(cardId)
   const agents = useSettingsStore((state) => state.settings.agents)
@@ -150,6 +160,9 @@ export function SessionView({
   const セッション名 = nicknameOf(session)
   const revivable = reviveState(session, agentOf(agents, session.agent_id))
   const reviveWhy = reviveReason(revivable)
+  // **押せる条件はサーバが正**（ブランチ設計§3-4）だが、押せないものを押せる形で
+  // 出さないために画面も同じ判定を持つ
+  const 枝分かれの可否 = 枝分かれできる理由(session.status)
   // **名前だけを出す**（設計§14-5）。同じ名前が複数あるときだけ番号が付く。
   // フルパスは `title` に残すので、確かめたいときは乗せれば読める
   const 名前 = projectDisplayName(session.project, projects)
@@ -373,6 +386,19 @@ export function SessionView({
               **縮むのはここだけ。** 右の操作は `shrink-0` なので、狭い画面では名前が
               先に切れる。`min-w-0` が無いと `truncate` が効かず、行が横へ溢れる。
             */}
+            {session.branched_from !== null && (
+              /*
+                **どちらが枝かを、名前と同じ視線の中で読ませる**（ブランチ設計§7-5）。
+                名前は利用者のものなので機械が書き換えない——代わりに札で示す
+              */
+              <span
+                data-testid="branch-badge"
+                className="shrink-0 rounded border border-cyan-500/40 px-1 text-[0.65rem] text-cyan-300"
+                title="この会話は、別の会話から枝分かれしたものです"
+              >
+                枝
+              </span>
+            )}
             {draft === null ? (
               セッション名.text !== null && (
                 <span
@@ -469,6 +495,27 @@ export function SessionView({
                   navigate(projectPath(host, session.project))
                 }}
               />
+              {/*
+                **PJT 専用画面にだけ出す**（ブランチ設計§7-1）。セッション専用画面には
+                「左隣」が存在しないので、押しても置き先が無い——**押せるのに何も
+                起きないボタンは、壊れているのと見分けが付かない**。
+                `DESIGN.md` §39.3 が禁じているのは**場所の分岐**であって、
+                有無の分岐ではない（サイドバーが同じ形で出し分けている）。
+
+                置き場所は §39.6 の並びに従い、**見せ方を変える群と始末する群の間**へ
+                1つの群として挟む——枝を作るのはどちらでもなく「増やす」操作である
+              */}
+              {compact && (
+                <div className="ml-3 flex shrink-0 items-center gap-2">
+                  <BranchButton
+                    busy={branching}
+                    why={枝分かれの可否}
+                    onPress={() => {
+                      branch(session.card_id, session.claude_session_id)
+                    }}
+                  />
+                </div>
+              )}
               <div className="ml-3 flex shrink-0 items-center gap-2">
                 <PowerButton
                   on={revivable.kind === 'live'}
@@ -710,6 +757,89 @@ function ScreenInterval({ remote, shown }: { remote: boolean; shown: boolean }) 
  * **`backTargetFor` は使わない。** あれは「戻る先が在るか」を見るものだが、
  * こちらは**常に決まった相手へ行く**。履歴の状態に依らない。
  */
+/**
+ * 枝分かれを頼めるか（ブランチ設計§3-4）。押せないときは**理由を返す**。
+ *
+ * **`/branch` は指示として送られる**ので、作業中に押すと入力欄へ積まれ、いまのターンが
+ * 終わってから効く。押した本人は「いま分かれた」と思っているのに、**実際にはしばらく
+ * 後の別の地点で分かれる**——取り返しがつかないので、押せなくする。
+ *
+ * 正はサーバ側（同設計§3-4）。ここで持つのは、押せないものを押せる形で出さないため。
+ */
+function 枝分かれできる理由(status: SessionStatus): string | null {
+  switch (status.kind) {
+    case 'waiting_input':
+    case 'waiting_subagents':
+      return null
+    case 'working':
+    case 'stalled':
+      return '作業中は枝分かれできません（いまのターンが終わってから分かれることになります）'
+    case 'waiting_permission':
+      return '権限確認に答えてから枝分かれしてください'
+    case 'starting':
+      return '起動中です。少し待ってください'
+    case 'ended':
+      return '止まっているセッションからは枝分かれできません'
+    default:
+      return 'いまの状態が分からないので枝分かれできません'
+  }
+}
+
+/**
+ * 会話を枝分かれさせるボタン（ブランチ設計§7-2・§7-3）。
+ *
+ * 印は**線で描く**（`DESIGN.md` §14.4 の絵文字禁止）。1本の線から1本が分かれる形で、
+ * 同じ列に並ぶ4つ（ターミナル・拡大縮小・電源・終了）と実寸で見分けが付く。
+ */
+function BranchButton({
+  busy,
+  why,
+  onPress,
+}: {
+  /** いま段取りが走っているか */
+  busy: boolean
+  /** 押せない理由。`null` なら押せる */
+  why: string | null
+  onPress: () => void
+}) {
+  const 説明 = busy
+    ? '枝分かれしています…'
+    : (why ?? '会話を枝分かれさせ、元の会話を左隣へ戻します')
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon-sm"
+      data-testid="branch-card"
+      data-busy={busy ? 'true' : undefined}
+      disabled={busy || why !== null}
+      aria-label="枝分かれ"
+      title={説明}
+      className="ops-raised shrink-0"
+      onClick={onPress}
+    >
+      <svg
+        aria-hidden
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={2}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        {/* 幹（下から上へ） */}
+        <path d="M7 21V6" />
+        {/* 枝（幹の途中から右上へ分かれる） */}
+        <path d="M7 13c0-3 3-4 6-4h4" />
+        {/* 分かれた先の芽 */}
+        <circle cx="18" cy="9" r="2.5" />
+        {/* 幹の根元 */}
+        <circle cx="7" cy="21" r="0.5" />
+      </svg>
+    </Button>
+  )
+}
+
 function ZoomToggle({
   compact,
   onPress,

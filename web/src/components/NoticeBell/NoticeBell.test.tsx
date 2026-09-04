@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 
 import { NoticeBell } from './NoticeBell'
 import type { Notice } from '@/stores/sessions'
+import { useWsStore } from '@/stores/ws'
 
 /** ベル（細かい修正 設計§7-4。テスト計画フェーズ4・5）。 */
 let 連番 = 0
@@ -79,6 +80,42 @@ describe('ベル', () => {
     expect(items[0]).toHaveTextContent('新しいほう')
     expect(items[1]).toHaveTextContent('古いほう')
     expect(items[0].querySelector('time')?.textContent).not.toBe('')
+  })
+
+  it('席を失った断りには、そのまま押せる呼び戻しが付く', async () => {
+    // ブランチ設計§4-3。**利用者は UUID を読まない**——押す相手は断りが抱えている。
+    // 押した先は**既存の呼び戻し**で、この復旧のために新しい口は作っていない
+    const 呼び戻し = vi.fn()
+    useWsStore.setState({ recall: 呼び戻し })
+    const user = userEvent.setup()
+    render(
+      <NoticeBell
+        notices={[
+          notice({
+            kind: 'branch',
+            message: '元の会話を呼び戻せませんでした',
+            recover: {
+              label: 'もう一度呼び戻す',
+              claudeSessionId: 'bbbbbbbb-0000-0000-0000-000000000001',
+            },
+          }),
+        ]}
+      />,
+    )
+    await user.click(screen.getByTestId('notice-bell'))
+    await user.click(await screen.findByTestId('notice-recover'))
+
+    expect(呼び戻し).toHaveBeenCalledWith('bbbbbbbb-0000-0000-0000-000000000001')
+  })
+
+  it('席が残っている断りには、押せる道を出さない', async () => {
+    // 並べ替えだけ失敗した場合など。**押しても戻す先が無いボタン**を置かない
+    const user = userEvent.setup()
+    render(<NoticeBell notices={[notice({ kind: 'branch', message: '並べ直せません' })]} />)
+    await user.click(screen.getByTestId('notice-bell'))
+    await screen.findAllByTestId('notice-item')
+
+    expect(screen.queryByTestId('notice-recover')).toBeNull()
   })
 
   it('種別が目印に出る（どの操作の断りかを機械から見られる）', async () => {

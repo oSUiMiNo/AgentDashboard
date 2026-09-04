@@ -74,6 +74,11 @@ pub struct AppState {
     /// ブラウザで起きたことの書き出し先（設計§12）。**居なくても動く**——
     /// 受け取って捨てるだけになる
     pub client_logs: Option<Arc<dyn crate::client_logs::ClientLogSink>>,
+    /// いま枝分かれの段取りが走っているカード（ブランチ設計§4-1 の二度押しの門）。
+    ///
+    /// **接続ごとの入れ物には置けない。** 段取りは接続に紐づかず、押した端末が
+    /// 閉じても走り続ける
+    pub branching: crate::branch::Branching,
     next_client_id: Arc<AtomicU64>,
 }
 
@@ -88,6 +93,7 @@ impl AppState {
             registry,
             config,
             client_logs: None,
+            branching: crate::branch::Branching::default(),
             next_client_id: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -708,6 +714,18 @@ async fn handle_request(
             }
         }
 
+        ClientMessage::BranchSession { card_id } => {
+            // **待たない。** 段取りには2回の待ちがあり、この受け口で待つと同じ接続の
+            // 他の操作が止まる。結果も断りも配信で届く（ブランチ設計§3-1）
+            crate::branch::start(crate::branch::Branch {
+                registry: Arc::clone(&state.registry),
+                agent: Arc::clone(&state.agent),
+                branching: state.branching.clone(),
+                account_id: identity.account_id,
+                card_id,
+            });
+        }
+
         ClientMessage::Kill { card_id } => {
             if let Err(message) = state.agent.kill(card_id) {
                 send_error(outbound, Some(card_id), message, ErrorKind::Kill).await;
@@ -900,6 +918,7 @@ fn target_card(request: &ClientMessage) -> Option<CardId> {
         | ClientMessage::PtyFlow { card_id, .. }
         | ClientMessage::ReviveSession { card_id }
         | ClientMessage::SetNickname { card_id, .. }
+        | ClientMessage::BranchSession { card_id }
         | ClientMessage::Kill { card_id }
         | ClientMessage::Archive { card_id } => Some(*card_id),
         // まだカードが無い（作る側）。

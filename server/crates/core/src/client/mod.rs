@@ -774,6 +774,41 @@ pub async fn kill(target: &Target, prefix: &str) -> Result<Outcome, ClientError>
     outcome
 }
 
+/// `session branch`。会話を枝分かれさせ、元の会話を隣の席へ呼び戻す
+/// （ブランチ設計§8-1）。
+///
+/// # 待ち方は `recall` と同じ
+///
+/// **新しいカードが1枚増えるまで**待つ。枝は押した席がそのままなり替わるので
+/// カードは増えず、**増えるのは呼び戻した元のほう**である。送る前に既存のIDを
+/// 控えるのも同じ理由（同じフォルダで走っている別のカードの更新を掴まないため）。
+///
+/// # 段取りはサーバが持っている
+///
+/// ここが送るのは1通だけ。撃つ・待つ・呼び戻す・並べ替えるはサーバ側で完結する
+/// （設計§2-2）——ブラウザと CLI で同じ手順を二重に持たないため。
+pub async fn branch(target: &Target, prefix: &str) -> Result<Outcome, ClientError> {
+    let card = resolve_card_id(target, prefix).await?;
+    let (before, _) = sessions(target).await?;
+    let known = before
+        .iter()
+        .map(|meta| meta.card_id.to_string())
+        .collect::<std::collections::HashSet<_>>();
+
+    let mut ws = ws::Ws::connect(target).await?;
+    ws.send(&ClientMessage::BranchSession { card_id: card })
+        .await?;
+    let outcome = wait::run(
+        &mut ws,
+        Goal::NewCard { known },
+        "枝分かれ",
+        wait::SPAWN_CAP,
+    )
+    .await;
+    ws.close().await;
+    outcome
+}
+
 /// `session past`。過去のセッションを並べる（名前付け設計§11-1）。
 ///
 /// **`--host` を取らない。** 記録はサーバが持っており、PC ごとに分かれていない——

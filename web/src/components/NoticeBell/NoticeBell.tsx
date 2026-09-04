@@ -19,8 +19,10 @@
  */
 
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Button } from '@/components/ui/button'
 import { BellGlyph } from '@/components/ui/glyphs'
 import type { Notice } from '@/stores/sessions'
+import { useWsStore } from '@/stores/ws'
 
 /** 時刻を「いま起きたことか、昔のことか」が読める最小の形で出す。 */
 function 時刻(at: number): string {
@@ -32,6 +34,9 @@ function 時刻(at: number): string {
 }
 
 export function NoticeBell({ notices }: { notices: readonly Notice[] }) {
+  // **押せる復旧は断りが持っている**（ブランチ設計§4-3）。ここが呼ぶのは
+  // **既存の呼び戻し**で、そのための口を新しく作ってはいない
+  const recall = useWsStore((state) => state.recall)
   if (notices.length === 0) {
     return null
   }
@@ -70,6 +75,25 @@ export function NoticeBell({ notices }: { notices: readonly Notice[] }) {
                 {時刻(notice.createdAt)}
               </time>
               <span className="text-xs">{notice.message}</span>
+              {/*
+                **席を失った断りにだけ、そのまま押せる道を置く**（設計§4-3）。
+                利用者は UUID を読まない——押す相手は断りが抱えている。
+                並べ替えだけ失敗した場合など、席が残っている断りには付かない
+              */}
+              {notice.recover !== undefined && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  data-testid="notice-recover"
+                  className="mt-1 self-start"
+                  onClick={() => {
+                    recall(notice.recover!.claudeSessionId)
+                  }}
+                >
+                  {notice.recover.label}
+                </Button>
+              )}
             </li>
           ))}
         </ul>

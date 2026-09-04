@@ -743,6 +743,7 @@ mod tests {
             session_title: session_title.map(str::to_string),
             position: 0,
             nickname: None,
+            branched_from: None,
         }
     }
 

@@ -12,6 +12,7 @@
 
 pub mod account;
 pub mod auth;
+pub mod branch;
 pub mod bus;
 pub mod client_logs;
 pub mod cluster;

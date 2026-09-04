@@ -654,6 +654,7 @@ describe('状態のラベル', () => {
       session_title: null,
       position: 0,
       nickname: null,
+      branched_from: null,
     }
     expect(isHookSilent(base)).toBe(true)
     expect(isHookSilent({ ...base, hooks_seen: true })).toBe(false)
@@ -852,6 +853,7 @@ describe('戻せるかの判定', () => {
       session_title: null,
       position: 0,
       nickname: null,
+      branched_from: null,
       ...overrides,
     }
   }

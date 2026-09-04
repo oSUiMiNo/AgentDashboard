@@ -122,9 +122,26 @@ export interface Notice {
    * 変えたときに**既に溜まっているものの寿命まで遡って変わる**。
    */
   expiresAt: number | null
+  /**
+   * **そのまま押せる復旧**（ブランチ設計§4-3）。`undefined` なら押すものは無い。
+   *
+   * **配線には乗せない。** サーバから来るのは今までどおり文言と種別だけで、これは
+   * ブラウザが**押した時点の写しから組み立てる**。乗せると A2S にも記録にも波及する
+   * うえ、押せる相手を知っているのは押した端末だけである。
+   */
+  recover?: { readonly label: string; readonly claudeSessionId: string }
 }
 
 const reviving = new Set<CardId>()
+
+/**
+ * いま枝分かれを頼んでいるカードと、**押した時点の元の会話**（ブランチ設計§7-4）。
+ *
+ * `reviving` と違って `Set` ではないのは、**失敗したときの断りに呼び戻しの道を
+ * 添えるため**。元の会話のIDは、押した瞬間の写しからしか取れない——枝分かれが
+ * 効いた後のカードは、もう枝のIDを名乗っている。
+ */
+const branching = new Map<CardId, string | null>()
 
 /**
  * そのカードに溜まっている断り（復旧設計§9-5・細かい修正 設計§7-1）。
@@ -163,10 +180,16 @@ const 寿命 = 5_000
  * | `revive` | **空きメモリ不足のような、解消を観測する手段が無いもの**が混ざる。5秒で消すと押した理由そのものが読めなくなる |
  * | `not_found` | 恒常的な制約に近い。カードが消えれば一緒に消える（既存の道） |
  * | `sub_pty` | 端末が開けない。同上 |
+ * | `branch` | **途中で失敗すると元の会話が席を失う**。5秒で消すと、会話が消えたと読む |
  *
  * **ここに無いものは 5 秒で消える。** 種別を足したら、消えないほうに入れるかを必ず決めること。
  */
-const 消えない: ReadonlySet<ErrorKind> = new Set(['revive', 'not_found', 'sub_pty'])
+const 消えない: ReadonlySet<ErrorKind> = new Set([
+  'revive',
+  'branch',
+  'not_found',
+  'sub_pty',
+])
 
 /**
  * 実体が無いカード（＝起こし直しの候補。復旧設計§3-1）。**作成順・絞り込み後**。
@@ -402,6 +425,28 @@ function flush() {
     reviving.delete(cardId)
   }
 
+  // **枝分かれが済んだかを見る**（ブランチ設計§7-4）。済んだ合図は
+  // 「控えた元の会話が、押した席とは別のカードで立った」こと——枝ができただけでは
+  // 終わりではない（元が席を持って初めて並ぶ）。
+  //
+  // **押した席のIDが変わっただけで降ろさない。** そこで降ろすと、呼び戻しが失敗して
+  // 席を1つ失っている最中でも、押した人には「終わった」ように見える
+  if (branching.size > 0) {
+    for (const [cardId, 元の会話] of [...branching]) {
+      if (元の会話 == null) {
+        continue
+      }
+      const 戻った = [...metas.values()].some(
+        (meta) =>
+          meta.card_id !== cardId && meta.claude_session_id === 元の会話,
+      )
+      if (戻った) {
+        branching.delete(cardId)
+        touched.add(cardId)
+      }
+    }
+  }
+
   if (structureChanged) {
     /*
       **並びの正は `position`**（並べ替え設計§2-3）。`order` は届いた順で積んで
@@ -536,6 +581,39 @@ export function clearCardNotices(cardId: CardId, kind?: ErrorKind) {
   notifyCard(cardId)
 }
 
+/**
+ * 枝分かれを頼んだ印を立てる（ブランチ設計§7-4）。
+ *
+ * `markReviving` と同じ形だが、**元の会話も一緒に控える**——失敗したときの断りへ
+ * 「もう一度呼び戻す」を出すのに要る。
+ */
+export function markBranching(cardId: CardId, claudeSessionId: string | null) {
+  if (branching.has(cardId)) {
+    return
+  }
+  branching.set(cardId, claudeSessionId)
+  // 前の理由は消す。押し直したのに古い断りが残っていると、今回の結果と読めてしまう
+  clearCardNotices(cardId, 'branch')
+  // **鳴らすのは、消す断りが無くても**（`markReviving` と同じ理由）
+  notifyCard(cardId)
+}
+
+/** 枝分かれの印を降ろす。 */
+export function clearBranching(cardId: CardId) {
+  if (branching.delete(cardId)) {
+    notifyCard(cardId)
+  }
+}
+
+/** そのカードが枝分かれの最中か。 */
+export function useBranching(cardId: CardId): boolean {
+  return useSyncExternalStore(
+    (listener) => subscribeCard(cardId, listener),
+    () => branching.has(cardId),
+    () => false,
+  )
+}
+
 /** そのカードを起こし直している最中か。 */
 export function useReviving(cardId: CardId): boolean {
   return useSyncExternalStore(
@@ -623,17 +701,26 @@ export function pushCardNotice(cardId: CardId, message: string, kind: ErrorKind 
   const いま = Date.now()
   const 溜まり = cardNotices.get(cardId) ?? []
   積んだ数 += 1
+  // **押した時点の写しから組み立てる**（ブランチ設計§4-3）。枝分かれが断られたとき
+  // だけ、元の会話へ戻る道を添える——ここでしか元のIDを持っていない
+  const 控え = branching.get(cardId)
+  const recover =
+    kind === 'branch' && 控え != null
+      ? { label: 'もう一度呼び戻す', claudeSessionId: 控え }
+      : undefined
   const notice: Notice = {
     kind,
     message,
     createdAt: いま,
     seq: 積んだ数,
     expiresAt: 消えない.has(kind) ? null : いま + 寿命,
+    ...(recover === undefined ? {} : { recover }),
   }
   // 溢れたら古いほうから捨てる
   const 次 = [...溜まり, notice].slice(-溜める上限)
   cardNotices.set(cardId, 次)
   reviving.delete(cardId)
+  branching.delete(cardId)
   if (notice.expiresAt !== null) {
     張り直す(notice.expiresAt)
   }

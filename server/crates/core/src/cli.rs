@@ -307,6 +307,16 @@ enum SessionCmd {
         out: OutputArgs,
     },
     /// セッションを終了する（終了の知らせまで待つ）
+    /// **会話を枝分かれさせ、元の会話を隣の席へ呼び戻す**（ブランチ設計§8-1）。
+    ///
+    /// 押した席がそのまま枝になり、元の会話は**新しい席**へ戻ってくる。
+    /// 待つのは「新しい席が立つまで」で、並べ替えはサーバが済ませる。
+    Branch {
+        /// カードID。先頭の数文字で足りる
+        id: String,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
     Kill {
         /// カードID。先頭の数文字で足りる
         id: String,
@@ -1057,6 +1067,10 @@ async fn client_session(
             let outcome = client::set_nickname(target, &id, name).await?;
             println!("{}", output::pick(out.json, &outcome.raw, &outcome.human));
         }
+        SessionCmd::Branch { id, out } => {
+            let outcome = client::branch(target, &id).await?;
+            println!("{}", output::pick(out.json, &outcome.raw, &outcome.human));
+        }
         SessionCmd::Kill { id, out } => {
             let outcome = client::kill(target, &id).await?;
             println!("{}", output::pick(out.json, &outcome.raw, &outcome.human));
@@ -1625,6 +1639,7 @@ mod tests {
             names,
             vec![
                 "attach",
+                "branch",
                 "key",
                 "kill",
                 "ls",

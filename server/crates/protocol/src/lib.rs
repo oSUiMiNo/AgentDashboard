@@ -483,6 +483,25 @@ pub struct SessionMeta {
     /// 上げない**ので、配ってある PC はそのまま繋がり続ける。
     #[serde(default)]
     pub nickname: Option<String>,
+    /// **どの会話から分かれたか**（ブランチ設計§5-1）。`None` は「枝ではない」。
+    ///
+    /// # 印が付くのはカードではなく会話
+    ///
+    /// カードは乗り換え（`--resume` など）で中身が入れ替わるが、**「この会話はあの会話
+    /// から分かれた」は会話そのものの性質**なので、[`SessionMeta::nickname`] と同じく
+    /// `ClaudeSessionId` に紐づけて記録する。乗り換えても印は消えない。
+    ///
+    /// # セッションホストはこれを知らない
+    ///
+    /// 名前・並びと同じ**記録の側の性質**である。セッションホストは `None` を置いて
+    /// 名乗り、**サーバが記録の値でかぶせる**。報告の値は捨てる。
+    ///
+    /// # なぜ `#[serde(default)]` を書くのか
+    ///
+    /// 欄を持たない古い版の名乗りを `None` として受けるため。**版（`A2S_VERSION`）は
+    /// 上げない**ので、配ってある PC はそのまま繋がり続ける。
+    #[serde(default)]
+    pub branched_from: Option<ClaudeSessionId>,
 }
 
 /// 利用者が付けたものの**宛先**（名前付け設計§3-2）。
@@ -897,6 +916,7 @@ mod tests {
             session_title: None,
             position: 0,
             nickname: None,
+            branched_from: None,
         }
     }
 
@@ -974,6 +994,7 @@ mod tests {
             session_title: None,
             position: 0,
             nickname: None,
+            branched_from: None,
         };
         assert_eq!(roundtrip(&meta), meta);
     }
@@ -1004,6 +1025,7 @@ mod tests {
             session_title: None,
             position: 0,
             nickname: None,
+            branched_from: None,
         };
         assert_eq!(
             serde_json::to_string(&meta).unwrap(),
@@ -1311,6 +1333,7 @@ mod tests {
                 session_title: None,
                 position: 0,
                 nickname: None,
+                branched_from: None,
             }
         };
         let back = roundtrip(&meta);
@@ -1368,6 +1391,7 @@ mod tests {
             session_title: None,
             position: 0,
             nickname: None,
+            branched_from: None,
         };
         let back = roundtrip(&meta);
         assert_eq!(back.model, meta.model);
@@ -1403,6 +1427,7 @@ mod tests {
             session_title: None,
             position: 0,
             nickname: None,
+            branched_from: None,
         };
         let text = serde_json::to_string(&meta).unwrap();
         assert!(text.contains(r#""model":null"#), "実際: {text}");

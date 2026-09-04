@@ -225,6 +225,11 @@ command = "session rm"
 
 [[entry]]
 kind = "ws"
+target = "ClientMessage::BranchSession"
+command = "session branch"
+
+[[entry]]
+kind = "ws"
 target = "ClientMessage::Kill"
 command = "session kill"
 

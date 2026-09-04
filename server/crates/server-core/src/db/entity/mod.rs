@@ -11,6 +11,7 @@ pub mod agents;
 pub mod notices;
 pub mod pairing_tokens;
 pub mod projects;
+pub mod session_branches;
 pub mod session_nicknames;
 pub mod sessions;
 pub mod settings;

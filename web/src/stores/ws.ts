@@ -55,6 +55,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useSettingsStore } from '@/stores/settings'
 import {
   applySessionSnapshot,
+  markBranching,
   markReviving,
   patchSessionStatus,
   removeSession,
@@ -145,6 +146,17 @@ interface WsState {
    * くれるが、こちらは**席が空くまでカードが1バイトも変わらない**（§9-4）。
    */
   revive: (cardId: CardId) => void
+  /**
+   * 会話を枝分かれさせ、元の会話を隣の席へ呼び戻す（ブランチ設計§7-4）。
+   *
+   * **運ぶのはカードIDだけ。** 元の会話のIDはサーバが記録から引く。
+   *
+   * `revive` と同じく**印を立てる**——段取りには2回の待ちがあり、その間カードは
+   * 1バイトも変わらないので、押した手応えが無いと二度押しされる。**元の会話のIDを
+   * 一緒に控える**のは、失敗したときの断りへ「もう一度呼び戻す」を出すため
+   * （§4-3。押した時点の写しからしか取れない）。
+   */
+  branch: (cardId: CardId, claudeSessionId: string | null) => void
   /**
    * カードに付いている CLI セッションへ、利用者の名前を付ける（名前付け設計§9-5）。
    *
@@ -454,6 +466,14 @@ export const useWsStore = create<WsState>((set) => ({
       return
     }
     markReviving(cardId)
+  },
+
+  branch: (cardId, claudeSessionId) => {
+    if (!send({ t: 'branch_session', card_id: cardId })) {
+      // `revive` と同じ。届いていない頼みを待ち続けさせない
+      return
+    }
+    markBranching(cardId, claudeSessionId)
   },
 
   setNickname: (cardId, nickname) => {

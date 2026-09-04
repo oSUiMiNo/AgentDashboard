@@ -153,6 +153,14 @@ export interface SessionMeta {
    * 切るのは画面の仕事。
    */
   nickname: string | null
+  /**
+   * **どの会話から分かれたか**（ブランチ設計§5-1）。`null` は「枝ではない」。
+   *
+   * 印が付くのは**カードではなく会話**なので、`--resume` で乗り換えても消えない。
+   * 画面はこれを見て札を出す——**名前で見分けさせない**（名前は利用者のもので、
+   * 機械が書き換えてはいけない）。
+   */
+  branched_from: string | null
 }
 
 /**
@@ -224,6 +232,7 @@ export type ErrorKind =
   | 'sub_pty'
   | 'sub_transcript'
   | 'send_input'
+  | 'branch'
   | 'not_found'
   | 'other'
 
@@ -418,6 +427,13 @@ export type ClientMessage =
       permission_mode: PermissionMode | null
       agent_id?: string
     }
+  /**
+   * 会話を枝分かれさせ、元の会話を隣の席へ呼び戻す（ブランチ設計§2-1）。
+   *
+   * **運ぶのはカードIDだけ。** 元の会話のIDはサーバが記録から引く——利用者に
+   * UUID を扱わせないことがこの機能の芯である。
+   */
+  | { t: 'branch_session'; card_id: CardId }
   | { t: 'kill'; card_id: CardId }
   | { t: 'archive'; card_id: CardId }
   // 以下は初期実装でフェーズ3〜4に回した3つ。**いまは全部サーバ側も配線済み**

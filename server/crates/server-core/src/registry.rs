@@ -288,6 +288,13 @@ pub struct SessionRegistry {
     /// 引き直しているのと違い、こちらは**カードの数だけ引くことになる**——一覧の
     /// 復元1回で枚数ぶんの問い合わせが出る。
     nicknames: Mutex<HashMap<(Uuid, ClaudeSessionId), String>>,
+    /// 枝分かれの印（ブランチ設計§5-1）。鍵は**枝の側**、値は**分かれ元**。
+    ///
+    /// 名前とまったく同じ性質・同じ扱いである——**記録側が正**で、鍵が
+    /// `(アカウント, CLI セッション)` なのは、印が**カードではなく会話**に付くため。
+    /// カードが乗り換えても印は消えない。写しを持つ理由も名前と同じ（報告のたびに
+    /// カードの数だけ DB を引かないため）。
+    branches: Mutex<HashMap<(Uuid, ClaudeSessionId), ClaudeSessionId>>,
 }
 
 impl SessionRegistry {
@@ -328,6 +335,8 @@ impl SessionRegistry {
         // 利用者が付けた名前をまとめて読む。**カードごとに引かない**——復元するだけで
         // 枚数ぶんの問い合わせになる（アカウント名を先に引いているのと同じ理由）
         let nicknames = load_nicknames(&db, None).await?;
+        // 枝分かれの印も同じくまとめて読む（ブランチ設計§5-1）
+        let branches = load_branches(&db, None).await?;
 
         let mut records = HashMap::new();
         for row in rows {
@@ -342,6 +351,10 @@ impl SessionRegistry {
             meta.nickname = meta
                 .claude_session_id
                 .and_then(|id| nicknames.get(&(account_id, id)).cloned());
+            // 枝の印も同じく記録の側が正
+            meta.branched_from = meta
+                .claude_session_id
+                .and_then(|id| branches.get(&(account_id, id)).copied());
             let card_id = meta.card_id;
             let next_seq = db_transcript::next_seq(&db, card_id).await?;
             // 窓を DB の直近ぶんで満たす。空のままだと、購読を始めたクライアントに
@@ -378,6 +391,7 @@ impl SessionRegistry {
             instance_id: Uuid::new_v4(),
             browsers: Mutex::new(HashMap::new()),
             nicknames: Mutex::new(nicknames),
+            branches: Mutex::new(branches),
         }))
     }
 
@@ -536,6 +550,87 @@ impl SessionRegistry {
             .expect("ロックが壊れていない")
             .get(&(account_id, claude_session_id))
             .cloned()
+    }
+
+    /// その会話が**どの会話から分かれたか**（ブランチ設計§5-1）。枝でなければ `None`。
+    fn branch_of(
+        &self,
+        account_id: Uuid,
+        claude_session_id: ClaudeSessionId,
+    ) -> Option<ClaudeSessionId> {
+        self.branches
+            .lock()
+            .expect("ロックが壊れていない")
+            .get(&(account_id, claude_session_id))
+            .copied()
+    }
+
+    /// 枝分かれの印を残す（ブランチ設計§5-2）。
+    ///
+    /// # 印が付くのは枝の側
+    ///
+    /// 鍵は**枝**の `ClaudeSessionId`、値は**分かれ元**。画面はこれを見て札を出し、
+    /// 呼び戻しの宛先もここから引ける。
+    ///
+    /// # 書いてから配る
+    ///
+    /// 名前と同じ作法（設計§9-1）。手元の写しもここで揃え、**その会話を指している
+    /// カードを全部**配り直す——1枚だけ配ると、乗り換えの履歴で残っている別のカードが
+    /// 印の無いまま画面に居座る。
+    pub async fn mark_branch(
+        &self,
+        account_id: Uuid,
+        claude_session_id: ClaudeSessionId,
+        branched_from: ClaudeSessionId,
+    ) -> Result<(), String> {
+        let row = entity::session_branches::ActiveModel {
+            account_id: Set(account_id),
+            claude_session_id: Set(claude_session_id.0),
+            branched_from: Set(branched_from.0),
+            created_at: Set(db::now_ms()),
+        };
+        entity::session_branches::Entity::insert(row)
+            .on_conflict(
+                OnConflict::columns([
+                    entity::session_branches::Column::AccountId,
+                    entity::session_branches::Column::ClaudeSessionId,
+                ])
+                .update_columns([
+                    entity::session_branches::Column::BranchedFrom,
+                    entity::session_branches::Column::CreatedAt,
+                ])
+                .to_owned(),
+            )
+            .exec(&self.db)
+            .await
+            .map_err(|err| format!("枝の印を保存できませんでした：{err}"))?;
+
+        self.branches
+            .lock()
+            .expect("ロックが壊れていない")
+            .insert((account_id, claude_session_id), branched_from);
+
+        let 対象: Vec<Arc<SessionRecord>> = self
+            .records
+            .lock()
+            .expect("ロックが壊れていない")
+            .values()
+            .filter(|record| record.account_id == account_id)
+            .filter(|record| record.meta().claude_session_id == Some(claude_session_id))
+            .cloned()
+            .collect();
+        for record in 対象 {
+            let mut meta = record.meta();
+            meta.branched_from = Some(branched_from);
+            record.store_meta(meta);
+            self.publish(
+                account_id,
+                ServerMessage::SessionUpsert {
+                    session: Box::new(record.meta()),
+                },
+            );
+        }
+        Ok(())
     }
 
     /// **過去のセッションの一覧**（名前付け設計§6）。
@@ -1190,6 +1285,16 @@ impl SessionRegistry {
             if account_id != db::LOCAL_ACCOUNT_ID {
                 meta.account = account_name.clone();
             }
+            // **枝の印はここで引き直す**（ブランチ設計§5-2）。`meta_from_row` は必ず
+            // `None` を返すので、かぶせないと**読み直しのたびに札が消える**。
+            //
+            // **名前（`nickname`）にはこの引き直しが無い。** あちらは消えたあと、
+            // 名乗り直し（[`Self::request_resync`]）が `upsert` を通ることで戻る——
+            // 副作用に頼っている。同じ形にすると、名乗り直しが来ない場面で札だけが
+            // 消えたままになるので、こちらは自分で引く
+            meta.branched_from = meta
+                .claude_session_id
+                .and_then(|id| self.branch_of(account_id, id));
             // DB は接続を知らない（`meta_from_row` は必ず false を返す）ので、
             // 手元の見立てを残す。**知らないカードは繋がっていない扱い**で始め、
             // 生きているものは名乗り直し（[`Self::request_resync`]）で印が戻る——
@@ -1443,6 +1548,11 @@ impl SessionRegistry {
         meta.nickname = meta
             .claude_session_id
             .and_then(|id| self.nickname_of(origin.account_id, id));
+        // **枝の印も記録の側が正**（ブランチ設計§5-1）。セッションホストは印を知らないので
+        // `None` を名乗ってくる。名前とまったく同じ扱いで、ここでかぶせる
+        meta.branched_from = meta
+            .claude_session_id
+            .and_then(|id| self.branch_of(origin.account_id, id));
         // 申告が持ち主と食い違ったら**記録には残すが帰属は動かさない**。警告を出すのは、
         // 利用者から見ると「toml に書いたのに効かない」だけに見えるため
         if let (Some(claimed), Some(actual)) = (&meta.toml_account, &origin.account)
@@ -1789,6 +1899,32 @@ async fn load_nicknames(
         .collect())
 }
 
+/// 枝分かれの印を DB からまとめて読む（ブランチ設計§5-2）。
+///
+/// `account` を渡せばそのアカウントのぶんだけ、渡さなければ全アカウントぶん。
+/// **1回の問い合わせで済ませる**——名前と同じ理由で、カードごとに引くと一覧の復元
+/// だけで枚数ぶんの往復が出る。
+async fn load_branches(
+    db: &DatabaseConnection,
+    account: Option<Uuid>,
+) -> Result<HashMap<(Uuid, ClaudeSessionId), ClaudeSessionId>, anyhow::Error> {
+    let mut query = entity::session_branches::Entity::find();
+    if let Some(account_id) = account {
+        query = query.filter(entity::session_branches::Column::AccountId.eq(account_id));
+    }
+    Ok(query
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|row| {
+            (
+                (row.account_id, ClaudeSessionId(row.claude_session_id)),
+                ClaudeSessionId(row.branched_from),
+            )
+        })
+        .collect())
+}
+
 /// [`SessionRecord`] を作る瞬間だけ使う仮の中身。
 ///
 /// 直後に本物の [`SessionMeta`] で上書きされる。空の入れ物を作らないのは、
@@ -1815,6 +1951,7 @@ fn placeholder_meta(card_id: CardId) -> SessionMeta {
         session_title: None,
         position: 0,
         nickname: None,
+        branched_from: None,
     }
 }
 
@@ -1842,5 +1979,6 @@ fn meta_from_row(row: entity::sessions::Model) -> SessionMeta {
         session_title: row.session_title,
         position: row.position,
         nickname: None,
+        branched_from: None,
     }
 }

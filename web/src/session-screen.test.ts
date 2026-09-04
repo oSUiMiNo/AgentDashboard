@@ -156,7 +156,9 @@ describe('操作列（§5-5）', () => {
 
   it('平らな器を、電源側の質感へ寄せてある', () => {
     expect(CONTROLS).toMatch(/\.ops-raised \{[\s\S]*?box-shadow:/)
-    expect(SESSION.match(/ops-raised/g) ?? []).toHaveLength(2)
+    // ターミナル切替・拡大縮小・終了に加え、**枝分かれ**の4つ
+    // （ブランチ設計§7-2 で操作列へ1つ増えた。電源は別の器を持っている）
+    expect(SESSION.match(/ops-raised/g) ?? []).toHaveLength(3)
   })
 
   it('塗るのは電源の点灯だけ（4つとも同じ盛り上がりにしない）', () => {
