@@ -24,7 +24,7 @@ describe('名乗り', () => {
   })
 
   it('名乗ったものは機械の側', () => {
-    const 機械: Node['kind'] extends never ? never : Node[] = [
+    const 機械: Node[] = [
       { kind: 'user_message', text: 'x', origin: { kind: 'peer', name: null } },
       { kind: 'user_message', text: 'x', origin: { kind: 'task_notification' } },
       { kind: 'user_message', text: 'x', origin: { kind: 'injected' } },

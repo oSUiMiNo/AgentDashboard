@@ -709,9 +709,13 @@ test('吹き出しの中は、青基調で揃っている', async ({ page }) => 
   await startSession(page)
   await showTerminal(page)
   await fireHook(page, 'SessionStart')
-  await writeTranscript(page, 'v2.1.220/basic-tools/session.jsonl')
+  // **`basic-tools` は使えない。** あのフィクスチャは `claude -p` で採ったので
+  // 1通目が `promptSource: "sdk"` になり、**機械の吹き出し（琥珀）**として出る
+  // （`人が打っていないものを、人の発言として出さない` 設計§1-1 の #6）。
+  // ここで測りたいのは**人の青い吹き出し**なので、人の発言を持つほうを使う
+  await writeTranscript(page, 'synthetic/message-origin/session.jsonl')
   await showTranscript(page)
-  const bubble = page.getByTestId('user-bubble').first()
+  const bubble = page.locator('[data-testid="user-bubble"]:not(.speech-bubble-machine)').first()
   await expect(bubble).toBeVisible(届くまで)
 
   const 色 = await bubble.evaluate((el) => {
@@ -746,6 +750,25 @@ test('吹き出しの中は、青基調で揃っている', async ({ page }) => 
   expect(色.吹き出しの青み).toBeGreaterThan(40)
   // **囲みコードも青い。** 無彩色（青み ≒ 0）へ戻すと落ちる
   expect(色.コードの青み).toBeGreaterThan(15)
+
+  // **線を両側から挟む。** 人が青いだけでは「機械も青いまま」を捕まえられない
+  // ——琥珀に塗り替えてよいのは機械の側だけ、という線がここで守られる
+  // （`人が打っていないものを、人の発言として出さない` 設計§6-2）
+  const 機械の青み = await page
+    .locator('[data-testid="user-bubble"].speech-bubble-machine')
+    .first()
+    .evaluate((el) => {
+      const 画 = document.createElement('canvas')
+      画.width = 1
+      画.height = 1
+      const 筆 = 画.getContext('2d', { willReadFrequently: true })!
+      筆.fillStyle = getComputedStyle(el).backgroundColor
+      筆.fillRect(0, 0, 1, 1)
+      const d = 筆.getImageData(0, 0, 1, 1).data
+      return d[2] - d[0]
+    })
+  // 琥珀は**赤が青より強い**ので、青みは負になる
+  expect(機械の青み).toBeLessThan(0)
 })
 
 test('帯の下9割は、どこを押しても開く', async ({ page }) => {
@@ -1486,4 +1509,76 @@ test('読まれたあと、同じ本文が2つ並ばない', async ({ page }) =>
     page.locator('[data-testid="transcript-row"][data-kind="queued_message"]'),
   ).toHaveCount(0, 届くまで)
   await expect(page.getByText('イシューの設計を進めて')).toHaveCount(1, 届くまで)
+})
+
+/**
+ * 人が打っていないものの見分けが、実ブラウザで出ること
+ * （`人が打っていないものを、人の発言として出さない` テスト計画フェーズ7）。
+ *
+ * **単体だけでは配線を見ていない。** 判定はパーサ（Rust）、名乗りと器は画面（React）で、
+ * その間を `protocol` の欄が渡っている——**3層とも繋がっていることは、ここでしか分からない。**
+ */
+test('人が打っていないものが、逆側の吹き出しで並ぶ', async ({ page }) => {
+  await startSession(page)
+  await showTerminal(page)
+  await fireHook(page, 'SessionStart')
+  await writeTranscript(page, 'synthetic/message-origin/session.jsonl')
+
+  await showTranscript(page)
+  await expect
+    .poll(
+      async () =>
+        Number(await page.getByTestId('transcript-status').getAttribute('data-row-count')),
+      { message: '履歴が届くこと', timeout: 30_000 },
+    )
+    .toBeGreaterThan(0)
+
+  // 人が3枚（素の指示・スラッシュコマンド・印が1つも無い `/clear`）、機械が2枚。
+  // **`hasNot` は子孫を見る**ので、要素自身のクラスは `:not()` で選ぶ
+  await expect(
+    page.locator('[data-testid="user-bubble"]:not(.speech-bubble-machine)'),
+  ).toHaveCount(3, 届くまで)
+  await expect(page.locator('[data-testid="user-bubble"].speech-bubble-machine')).toHaveCount(
+    2,
+    届くまで,
+  )
+
+  // **名乗りが出る。** 送り主のセッション名まで含めて出ること
+  await expect(page.getByTestId('origin-label').first()).toBeVisible(届くまで)
+  await expect(page.getByText('他セッションから（sample-peer-session）')).toBeVisible(届くまで)
+})
+
+test('スラッシュコマンドは打った形で出て、生のタグが1文字も出ない', async ({ page }) => {
+  await startSession(page)
+  await showTerminal(page)
+  await fireHook(page, 'SessionStart')
+  await writeTranscript(page, 'synthetic/message-origin/session.jsonl')
+
+  await showTranscript(page)
+  await expect(page.getByText('/sample-skill-1 calc.py')).toBeVisible(届くまで)
+
+  // **画面のどこにも生のタグが出ていないこと。** 本文を丸ごと拾って字面で見る
+  const 全文 = await page.getByTestId('transcript-tree').innerText()
+  expect(全文).not.toContain('command-name')
+  expect(全文).not.toContain('command-message')
+  expect(全文).not.toContain('command-args')
+})
+
+test('コマンドの展開は、開くと同じ吹き出しの中に出る', async ({ page }) => {
+  await startSession(page)
+  await showTerminal(page)
+  await fireHook(page, 'SessionStart')
+  await writeTranscript(page, 'synthetic/message-origin/session.jsonl')
+
+  await showTranscript(page)
+  const コマンド行 = page
+    .locator('[data-testid="transcript-row"][data-kind="user_message"]')
+    .filter({ hasText: '/sample-skill-1 calc.py' })
+  await expect(コマンド行).toHaveCount(1, 届くまで)
+
+  // 畳んでいるあいだは打った形だけ
+  await expect(コマンド行.getByText('指定されたファイルを読み')).toHaveCount(0)
+
+  await コマンド行.getByTestId('body-toggle').click()
+  await expect(コマンド行.getByText('指定されたファイルを読み')).toBeVisible(届くまで)
 })

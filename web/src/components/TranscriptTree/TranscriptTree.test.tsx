@@ -1,6 +1,6 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import type { Node, TreeNode } from '@/lib/protocol'
+import type { MessageOrigin, Node, TreeNode } from '@/lib/protocol'
 import { BODY_FOLD_GRACE_LINES, BODY_FOLD_LINES } from '@/lib/markdown'
 import { TranscriptTree } from './TranscriptTree'
 import { appendNodes, clearAllTranscripts } from '@/stores/transcript'
@@ -825,8 +825,11 @@ function linesOf(count: number): string {
  */
 describe('誰が入れたか', () => {
   const 人 = (text: string): Node => ({ kind: 'user_message', text, origin: { kind: 'human' } })
-  const 機械 = (text: string, origin: Node extends { origin?: infer O } ? O : never): Node =>
-    ({ kind: 'user_message', text, origin }) as Node
+  const 機械 = (text: string, origin: MessageOrigin): Node => ({
+    kind: 'user_message',
+    text,
+    origin,
+  })
 
   async function 出す(inner: Node) {
     appendNodes(CARD, [node('n1', null, inner)])
