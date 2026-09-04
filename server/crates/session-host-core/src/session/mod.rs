@@ -1385,7 +1385,30 @@ impl Session {
             }
         }
         let mut meta = self.meta.lock().expect("ロックが壊れていない");
-        (state::apply(&mut meta, input, now_ms()), new_path)
+        let changed = state::apply(&mut meta, input, now_ms());
+
+        // **ターンの終わりだけ、何をどう決めたかを残す**（設計§14）。
+        //
+        // 行き先は `subagent_active` で分かれるが、**あの数はログに出る経路がどこにも
+        // 無く、DB の欄にいまの値があるだけである**。あとから「あの瞬間いくつだったか」
+        // を知る手段が無いと、**サブ待ちにならなかった理由を追えない**（実際に追えなかった）。
+        //
+        // **ターン1回につき1行**なので量は増えない。フックはツールコールのたびに飛ぶが、
+        // ここを通るのは `Stop` と `StopFailure` だけである
+        if matches!(
+            input.event,
+            state::HookEvent::Stop | state::HookEvent::StopFailure
+        ) {
+            tracing::info!(
+                card_id = %self.card_id,
+                event = input.event.as_str(),
+                subagent_active = meta.subagent_active,
+                status = ?meta.status,
+                "ターンが終わった"
+            );
+        }
+
+        (changed, new_path)
     }
 
     /// 見張りの1周ぶんをこのセッションに適用する（停滞・フック未受信・権限モード）。
