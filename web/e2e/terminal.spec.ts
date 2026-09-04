@@ -296,22 +296,36 @@ test('粗いポインタでなければ、選択ダイアログでも十字は�
  *
  * 逆側（タップすると付くこと）は `keyboard.spec.ts` が見る。
  */
-test('マウスで押しても、端末の入力方式は決め直されない', async ({ page }) => {
+test('マウスで押したときは、これまでどおり焦点が渡る', async ({ page }) => {
   await openDashboard(page)
   const tile = await spawnSession(page)
   await openSession(page, tile)
 
-  // マウント時の初期フォーカスが当てた値。**空の画面は「打てない」に倒れる**（設計§4）
+  // **キーボードは既定で塞がっている**（設計§12）。PC には仮想キーボードが無いので
+  // 実害は無く、`text` にする理由も無い
   const helper = page.getByTestId('terminal').locator('.xterm-helper-textarea')
   await expect(helper).toHaveAttribute('inputmode', 'none')
 
-  // 会話を進めて、**画面としては「打てる」側**にする。ここでマウスの経路が判定を
-  // 走らせていれば `text` に変わる——変わらないことが、門が効いている証拠になる
+  // **PC では焦点を渡す。** タッチと違い、押した場所で打ち始めるのが自然
+  await page.getByTestId('terminal').click()
+  expect(
+    await page.evaluate(() =>
+      document.activeElement?.classList.contains('xterm-helper-textarea') === true,
+    ),
+  ).toBe(true)
+
+  // 打てば届く（焦点が渡っていることの、もう一段の証拠）
   await typeLine(page, 'こんにちは')
   await expectTerminalToContain(page, '[fake-claude] received: こんにちは')
-  await page.getByTestId('terminal').click()
+})
 
-  await expect(helper).toHaveAttribute('inputmode', 'none')
+test('PC にはキーボードボタンを出さない', async ({ page }) => {
+  // 物理キーボードがあるので、押す理由が無い（設計§12）
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  await openSession(page, tile)
+
+  await expect(page.getByTestId('keyboard-key')).toHaveCount(0)
 })
 
 /**

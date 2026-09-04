@@ -2,8 +2,11 @@ import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { TerminalKey } from './keys'
 import {
+  hasKeyboard,
   hasWatcher,
   HIDE_SETTLE_MS,
+  openKeyboard,
+  registerKeyboard,
   measure,
   registerProbe,
   KEY_GAP_MS,
@@ -379,5 +382,69 @@ describe('測る契機', () => {
     release()
     renderHook(() => useSelecting(id))
     expect(回数).toBe(0)
+  })
+})
+
+/**
+ * キーボードを開く車線（設計§12）。
+ *
+ * 押すボタンは入力欄の帯、開けるのは端末——**兄弟なので直接は触れない**。キーを送る
+ * 車線とまったく同じ理由でここに1本ある。
+ */
+describe('キーボードを開く', () => {
+  it('登録した手が、そのまま呼ばれる', () => {
+    const id = card()
+    let 回数 = 0
+    registerKeyboard(id, () => {
+      回数 += 1
+    })
+
+    openKeyboard(id)
+
+    expect(回数).toBe(1)
+  })
+
+  it('**待たずにその場で呼ぶ**', () => {
+    // **iOS は信頼されたユーザ操作の中の `focus()` でしかキーボードを開かない。**
+    // キーの送信のように待ち行列へ積むと、押した操作の印が外れて**二度と開かない**
+    const id = card()
+    const 呼ばれた: string[] = []
+    registerKeyboard(id, () => 呼ばれた.push('開いた'))
+
+    openKeyboard(id)
+
+    // タイマーを進めずに、もう入っている
+    expect(呼ばれた).toEqual(['開いた'])
+  })
+
+  it('手が無いカードへ頼んでも落ちない', () => {
+    // 閉じた直後に届いたぶんで壊さない
+    expect(() => openKeyboard(card())).not.toThrow()
+  })
+
+  it('解除したら呼ばれなくなる', () => {
+    const id = card()
+    let 回数 = 0
+    const release = registerKeyboard(id, () => {
+      回数 += 1
+    })
+
+    release()
+    openKeyboard(id)
+
+    expect(回数).toBe(0)
+    expect(hasKeyboard(id)).toBe(false)
+  })
+
+  it('あとから登録し直しても、古い手は解除できない', () => {
+    // **登録し直しは後勝ち。** 古い解除関数で新しい手を消すと、生きている端末の
+    // キーボードが黙って開かなくなる
+    const id = card()
+    const release旧 = registerKeyboard(id, () => {})
+    registerKeyboard(id, () => {})
+
+    release旧()
+
+    expect(hasKeyboard(id)).toBe(true)
   })
 })

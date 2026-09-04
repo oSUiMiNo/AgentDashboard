@@ -3,7 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
 import { InputDock } from './InputDock'
 import type { SessionStatus } from '@/lib/protocol'
-import { hasWatcher, HIDE_SETTLE_MS, setSelecting } from '@/lib/terminalBridge'
+import {
+  hasWatcher,
+  HIDE_SETTLE_MS,
+  registerKeyboard,
+  setSelecting,
+} from '@/lib/terminalBridge'
 import { useWsStore } from '@/stores/ws'
 
 /**
@@ -377,5 +382,94 @@ describe('出入りでレイアウトを動かさない', () => {
     stubMedia({ [COARSE]: false, [LANDSCAPE]: false })
     dock()
     expect(screen.queryByTestId('dpad-slot')).toBeNull()
+  })
+})
+
+/**
+ * キーボードボタン（設計§12）。
+ *
+ * **端末をタップしてもキーボードは出ない**作りにしたので、打ちたいときに押す場所が要る。
+ * これが端末へ文字を打つ**唯一の入口**である。
+ */
+describe('キーボードボタン', () => {
+  it('粗いポインタなら出る', () => {
+    stubMedia({ [COARSE]: true, [LANDSCAPE]: false })
+    dock()
+
+    expect(screen.getByTestId('keyboard-key')).toBeInTheDocument()
+  })
+
+  it('PC には出ない', () => {
+    // **物理キーボードがあるので、押す理由が無い。** 肯定側と対で置く
+    stubMedia({ [COARSE]: false, [LANDSCAPE]: false })
+    dock()
+
+    expect(screen.queryByTestId('keyboard-key')).not.toBeInTheDocument()
+  })
+
+  it('横並びでは出ない', () => {
+    // 宛先が1つに定まらない。十字と同じ理由
+    stubMedia({ [COARSE]: true, [LANDSCAPE]: false })
+    render(
+      <InputDock cardId={CARD} host="local" status={{ kind: 'waiting_input' }} compact />,
+    )
+
+    expect(screen.queryByTestId('keyboard-key')).not.toBeInTheDocument()
+  })
+
+  it('構造化ビューを見ているあいだは出ない', () => {
+    // 見えていない端末へキーボードを出しても意味が無い
+    stubMedia({ [COARSE]: true, [LANDSCAPE]: false })
+    render(
+      <InputDock
+        cardId={CARD}
+        host="local"
+        status={{ kind: 'waiting_input' }}
+        compact={false}
+        terminalShown={false}
+      />,
+    )
+
+    expect(screen.queryByTestId('keyboard-key')).not.toBeInTheDocument()
+  })
+
+  it('終了したセッションでは出ない', () => {
+    stubMedia({ [COARSE]: true, [LANDSCAPE]: false })
+    dock({ kind: 'ended', ok: true })
+
+    expect(screen.queryByTestId('keyboard-key')).not.toBeInTheDocument()
+  })
+
+  it('選択待ちでなくても出る', () => {
+    // **十字とは出す条件が違う。** あちらは選択待ちのときだけだが、こちらは
+    // 「打ちたいとき」——いつでも押せなければ、打つ手段が場面に縛られる
+    stubMedia({ [COARSE]: true, [LANDSCAPE]: false })
+    dock({ kind: 'waiting_input' })
+
+    expect(screen.queryByTestId('dpad')).not.toBeInTheDocument()
+    expect(screen.getByTestId('keyboard-key')).toBeInTheDocument()
+  })
+
+  it('押すと端末へ「開け」が届く', () => {
+    stubMedia({ [COARSE]: true, [LANDSCAPE]: false })
+    let 回数 = 0
+    const release = registerKeyboard(CARD, () => {
+      回数 += 1
+    })
+    dock()
+
+    fireEvent.click(screen.getByTestId('keyboard-key'))
+
+    expect(回数).toBe(1)
+    release()
+  })
+
+  it('押したときに既定を止めない', () => {
+    // **Esc とは逆。** こちらは焦点を動かすことが仕事なので、`mousedown` の既定を
+    // 止めると `focus()` の相手が変わってしまう
+    stubMedia({ [COARSE]: true, [LANDSCAPE]: false })
+    dock()
+
+    expect(fireEvent.mouseDown(screen.getByTestId('keyboard-key'))).toBe(true)
   })
 })

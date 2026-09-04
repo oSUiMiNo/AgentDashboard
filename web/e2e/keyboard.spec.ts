@@ -10,16 +10,19 @@ import {
 } from './helpers'
 
 /**
- * スマホで端末をタップしたとき、ソフトキーボードを出してよいか
+ * スマホでソフトキーボードを出す道
  * （ローカルイシュー「スマホでターミナルビュー内に触れるとキーボードが出てくる」
  * テスト計画フェーズ4）。
  *
- * # 見られるのは属性まで
+ * # 端末をタップしても、何も起きない
+ *
+ * **焦点も渡さない**（設計§12-2）。渡すとカーソルが出て、「打つ場所が光っているのに
+ * 打てない」という見え方になる。打つ道は**「キーボード」ボタン1つ**に絞ってある。
+ *
+ * # 見られるのは属性と焦点まで
  *
  * **「キーボードが実際に出るか」は確かめられない。** 出すかどうかを決めているのは
- * ブラウザで、ここで走る chromium にソフトキーボードは無い。見るのは
- * `.xterm-helper-textarea` の `inputmode` が正しく当たっているかまでで、
- * その先は実機で見る。
+ * ブラウザで、ここで走る chromium にソフトキーボードは無い。その先は実機で見る。
  *
  * # なぜファイルを分けるのか
  *
@@ -29,13 +32,6 @@ import {
  *
  * ただし `terminal.spec.ts` には**PC 側（タッチ無し）の担保**が要り、そちらは
  * ファイル既定の土台でなければ書けない。**逆側は必ずあちらに残る。**
- *
- * # 土台は擬似 claude の `/model` の確認画面
- *
- * `dpad.spec.ts` と同じものを使う。**擬似 claude は入力欄の枠（罫線）を描かない**ので、
- * 通常の画面は「選択待ちに見えない」経路で打てる側に倒れる——実物の枠を見分ける側
- * （罫線に挟まれた字下げ0の `❯`）は、実物のゴールデン15枚を相手に `keys.test.ts` が
- * 見ている。
  */
 
 test.use({ hasTouch: true })
@@ -53,7 +49,7 @@ async function tapTerminal(page: Page) {
   const point = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
   const cdp = await page.context().newCDPSession(page)
   try {
-    // **握らせない。** `touchMove` を挟むと「なぞり」と判定され、焦点が渡らない
+    // **握らせない。** `touchMove` を挟むと「なぞり」と判定され、経路が変わる
     await cdp.send('Input.dispatchTouchEvent', {
       type: 'touchStart',
       touchPoints: [point],
@@ -75,32 +71,61 @@ function inputMode(page: Page) {
     .getAttribute('inputmode')
 }
 
+/** 端末の隠しテキストエリアが、いま焦点を持っているか。 */
+function terminalFocused(page: Page) {
+  return page.evaluate(() =>
+    document.activeElement?.classList.contains('xterm-helper-textarea') === true,
+  )
+}
+
 /** セッションを起こし、端末を開いて会話を1往復させる。 */
 async function openTerminal(page: Page) {
   await openDashboard(page)
   const tile = await spawnSession(page)
   await openSession(page, tile)
-  // 会話が進んでいないと `/model` の確認画面は出ない（本物と同じ）
   await typeLine(page, 'こんにちは')
   await expectTerminalToContain(page, '[fake-claude] received: こんにちは')
 }
 
-test('選択待ちの画面をタップしても、キーボードを出さない', async ({ page }) => {
-  // **これが要件そのもの。** 選びたいものも押したいものも、キーボードで隠れてはいけない
+test('端末をタップしても、キーボードは塞がれたまま', async ({ page }) => {
+  // **これが要件そのもの。** ログを読んでいるだけのときに出てはいけない
   await openTerminal(page)
-  await typeLine(page, '/model haiku')
-  await expectTerminalToContain(page, 'Esc to cancel')
 
   await tapTerminal(page)
 
   await expect.poll(() => inputMode(page)).toBe('none')
 })
 
-test('打てる画面をタップしたら、キーボードを塞がない', async ({ page }) => {
-  // 否定側と対で置く。**常に `none` を当てる実装でも、上の1本だけなら通る**
+test('端末をタップしても、焦点は渡らない', async ({ page }) => {
+  // 焦点を渡すとカーソルが出る。**「打つ場所が光っているのに打てない」**は、
+  // 壊れていると読まれる（利用者の観測・2026-09-04）
   await openTerminal(page)
+  // まず入力欄から焦点を外しておく（打ち終わった直後は端末に焦点がある）
+  await page.getByTestId('composer-input').click()
 
   await tapTerminal(page)
 
+  expect(await terminalFocused(page)).toBe(false)
+})
+
+test('キーボードを押すと、開いて焦点も来る', async ({ page }) => {
+  // 否定側と対で置く。**常に塞ぐ実装でも、上の2本だけなら通る**
+  await openTerminal(page)
+
+  await page.getByTestId('keyboard-key').click()
+
   await expect.poll(() => inputMode(page)).toBe('text')
+  expect(await terminalFocused(page)).toBe(true)
+})
+
+test('キーボードを閉じると、塞ぎ直される', async ({ page }) => {
+  // 戻さないと、次に端末をタップしただけで開いてしまい**元の問題に戻る**
+  await openTerminal(page)
+  await page.getByTestId('keyboard-key').click()
+  await expect.poll(() => inputMode(page)).toBe('text')
+
+  // 端末から焦点を外す＝スマホでキーボードが閉じたときと同じ形
+  await page.getByTestId('composer-input').click()
+
+  await expect.poll(() => inputMode(page)).toBe('none')
 })
