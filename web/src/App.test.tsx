@@ -3,6 +3,7 @@ import App, { 読み直すまでの間 } from './App'
 import { markComposerBusy } from '@/lib/composerBusy'
 import { useAuthStore } from '@/stores/auth'
 import { useWsStore } from '@/stores/ws'
+import { clearAppNotices, pushSelfhealNotice } from '@/stores/appNotices'
 
 /**
  * jsdom には本物の WebSocket サーバがないので、接続だけを差し替える。
@@ -54,6 +55,7 @@ function 版(version: string) {
 }
 
 beforeEach(() => {
+  clearAppNotices()
   // **鍵の状態を毎回まっさらに戻す。** ストアはモジュールに1つなので、前のテストで
   // 通った状態が残ると「聞く前から入れている」テストができてしまう
   useAuthStore.setState({
@@ -176,29 +178,27 @@ describe('App', () => {
     expect(点?.className).toMatch(/bg-(cyan|amber|rose)-400/)
   })
 
-  it('自己修復の進行が段階つきで出る', () => {
+  it('自己修復の進行が段階つきでトーストに出る', () => {
     // 「勝手に直った」を黙って起こさないための表示（設計§9）。
-    // バナーは鍵の外側にある（通っていなくても、直っていることは見せる）
-    useWsStore.setState({
-      selfheal: { phase: 'repairing', detail: '1/3 回目' },
-    })
+    // **帯からトーストへ移った**（トーストとベル設計§2）——場所を押しのけずに出る
+    pushSelfhealNotice('repairing', '1/3 回目')
     render(<App />)
 
-    const banner = screen.getByTestId('selfheal-banner')
-    expect(banner).toHaveTextContent('修復セッションが作業しています')
-    expect(banner).toHaveTextContent('1/3 回目')
-    expect(banner.dataset.phase).toBe('repairing')
+    const toast = screen.getByTestId('toast')
+    expect(toast).toHaveTextContent('修復セッションが作業しています')
+    expect(toast).toHaveTextContent('1/3 回目')
+    expect(toast.dataset.kind).toBe('repairing')
+    expect(toast.dataset.source).toBe('selfheal')
   })
 
-  it('直せなかったときは人が気づける見た目にする', () => {
-    // 直った・進行中と、人の手が要る状態を同じ見た目にすると見落とす
-    useWsStore.setState({
-      selfheal: { phase: 'failed', detail: null },
-    })
+  it('段階が進んでも前のものが消えない', () => {
+    // **かつては単一スロットで、新しい段階が来ると前が黙って消えていた**（設計§6-2）。
+    // ベルへ溜めるには積み重なる必要がある
+    pushSelfhealNotice('detected', null)
+    pushSelfhealNotice('failed', null)
     render(<App />)
 
-    const banner = screen.getByTestId('selfheal-banner')
-    expect(banner.className).toContain('red')
+    expect(screen.getAllByTestId('toast')).toHaveLength(2)
   })
 })
 

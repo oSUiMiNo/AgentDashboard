@@ -215,7 +215,11 @@ async fn 掃除は古いものを落とす() {
             .await
             .unwrap();
         assert_eq!(rows.len(), 1, "{}", backend.name);
-        assert_eq!(rows[0].message, "きのう", "{}：残す側を消している", backend.name);
+        assert_eq!(
+            rows[0].message, "きのう",
+            "{}：残す側を消している",
+            backend.name
+        );
         backend.finish().await;
     }
 }

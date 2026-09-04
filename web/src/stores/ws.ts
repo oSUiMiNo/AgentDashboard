@@ -47,7 +47,6 @@ import type {
   FlowState,
   ModelId,
   PermissionMode,
-  SelfhealPhase,
   ServerMessage,
   SessionMeta,
   SessionStatus,
@@ -63,6 +62,13 @@ import {
   upsertSession,
 } from '@/stores/sessions'
 import { loadProjects, removeProject, upsertProject } from '@/stores/projects'
+import {
+  markAllRead,
+  pushBrowserNotice,
+  pushReplyNotice,
+  pushSelfhealNotice,
+  pushServerNotice,
+} from '@/stores/appNotices'
 import { appendNodes, resetTranscript } from '@/stores/transcript'
 
 export type ConnectionStatus = 'connecting' | 'open' | 'closed'
@@ -84,8 +90,6 @@ interface WsState {
   /** サーバから受け取ったフロー制御のしきい値（バイト） */
   flowHigh: number
   flowLow: number
-  /** 直近の失敗。ユーザに見せたら消す */
-  lastError: string | null
   /** 構造化ビューの健康状態。縮退していてもターミナルは動く（設計§11） */
   parserState: 'ok' | 'degraded'
   parserDetail: string | null
@@ -97,13 +101,6 @@ interface WsState {
    */
   busState: 'ok' | 'degraded'
   busDetail: string | null
-  /**
-   * 自己修復の進み具合（設計§9）。まだ一度も起きていなければ null。
-   *
-   * 履歴を持たず**最新の1件だけ**にしてある。ここは「いま何をしているか」を伝える
-   * ための表示で、経過を追いたいときは修復セッション自体が一覧に出ている
-   */
-  selfheal: { phase: SelfhealPhase; detail: string | null } | null
 
   connect: () => Promise<void>
   disconnect: () => void
@@ -192,8 +189,6 @@ interface WsState {
   ) => () => void
   /** 履歴の購読を始める。戻り値を呼ぶと購読を止める */
   subscribeTranscript: (cardId: CardId) => () => void
-  clearError: () => void
-  clearSelfheal: () => void
 }
 
 /**
@@ -369,7 +364,7 @@ async function openSocket(set: SetState) {
 
   next.onopen = () => {
     retryAttempt = 0
-    set({ status: 'open', lastError: null })
+    set({ status: 'open' })
     // 開き直したときに台帳の購読を出し直す。初回は台帳が空なので何も起きない
     resubscribe()
     // **繋がった相手の版を聞き直す**（CICD設計§11）。版を切り替えるとサーバごと
@@ -390,7 +385,9 @@ async function openSocket(set: SetState) {
   }
 
   next.onerror = () => {
-    set({ lastError: 'サーバへ接続できません。起動しているか確認してください' })
+    // **ブラウザ自身の気づき**（トーストとベル設計§6-3）。サーバへ届いていないので
+    // 記録に残しようがなく、リロードで消える
+    pushBrowserNotice('サーバへ接続できません。起動しているか確認してください')
     // `onerror` の `Event` は理由を持たない（仕様でそう決まっている）。
     // **分からなかったことを、分かる形で残す**
     report('ws_error', 'ERROR', 'WebSocket でエラーが起きました（理由は通知されません）')
@@ -401,7 +398,7 @@ async function openSocket(set: SetState) {
       handleJson(event.data, set)
       return
     }
-    handleBinary(event.data as ArrayBuffer, set)
+    handleBinary(event.data as ArrayBuffer)
   }
 }
 
@@ -410,12 +407,10 @@ export const useWsStore = create<WsState>((set) => ({
   // サーバの hello が届くまでの暫定値（設計§12 の既定値と同じ）
   flowHigh: 256 * 1024,
   flowLow: 32 * 1024,
-  lastError: null,
   parserState: 'ok',
   parserDetail: null,
   busState: 'ok',
   busDetail: null,
-  selfheal: null,
 
   connect: async () => {
     closedByUs = false
@@ -524,9 +519,7 @@ export const useWsStore = create<WsState>((set) => ({
     }
   },
 
-  clearError: () => set({ lastError: null }),
 
-  clearSelfheal: () => set({ selfheal: null }),
 }))
 
 function handleJson(raw: string, set: SetState) {
@@ -534,7 +527,8 @@ function handleJson(raw: string, set: SetState) {
   try {
     message = JSON.parse(raw) as ServerMessage
   } catch {
-    set({ lastError: `サーバから解釈できない応答が届きました: ${raw}` })
+    // **この接続への返事**（設計§4-2 の6箇所のうち、ブラウザ側で気づくぶん）
+    pushReplyNotice(`サーバから解釈できない応答が届きました: ${raw}`)
     return
   }
 
@@ -575,7 +569,9 @@ function handleJson(raw: string, set: SetState) {
       set({ busState: message.state, busDetail: message.detail })
       break
     case 'selfheal':
-      set({ selfheal: { phase: message.phase, detail: message.detail } })
+      // **押し出さずに積む**（設計§6-2）。かつては単一スロットで、新しい段階が
+      // 届くと前のものが黙って消えていた
+      pushSelfhealNotice(message.phase, message.detail)
       break
     case 'project_upsert':
       // 枠は**書けてから配られる**（設計§11）。押した瞬間に手元へ足さないので、
@@ -585,11 +581,22 @@ function handleJson(raw: string, set: SetState) {
     case 'project_removed':
       removeProject(message.project_id)
       break
+    case 'notice_created':
+      // **記録に載ったもの。** 未読の数はサーバが数えたぶんを使う（設計§6-1）
+      pushServerNotice(message.notice, message.unread_count)
+      break
+    case 'notice_read':
+      // 別のタブや端末で既読にされた。**バッジを揃える**
+      markAllRead(message.read_at)
+      break
     case 'error':
       // **行き先を決めるのは種別ではなく名指しの有無**（復旧設計§9-5）。こうしておけば、
       // 名指しできる失敗を持つ経路が増えても、ここを直さずに済む
       if (message.card_id === null) {
-        set({ lastError: message.message })
+        // **捨てていた種別を拾う。** これまでは文言だけを取って帯へ出していた
+        // （設計§12-1）。合流点を通ったものは `notice_created` が別に届くので、
+        // ここで積むのは**この接続への返事**（`ws.rs` の6箇所）だけになる
+        pushReplyNotice(message.message, message.kind ?? 'other')
       } else {
         // **種別は運ばれてこないことがある**（欄を持たない古いサーバ）。既定は `other` で、
         // 5秒で消える側に落ちる（細かい修正 設計§7-2）
@@ -599,12 +606,13 @@ function handleJson(raw: string, set: SetState) {
   }
 }
 
-function handleBinary(buffer: ArrayBuffer, set: SetState) {
+function handleBinary(buffer: ArrayBuffer) {
   let frame
   try {
     frame = decodeFrame(buffer)
   } catch (error) {
-    set({ lastError: `壊れたフレームを受け取りました: ${String(error)}` })
+    // ブラウザ自身の気づき（受け取ったものを解けなかった）
+    pushBrowserNotice(`壊れたフレームを受け取りました: ${String(error)}`)
     return
   }
   if (frame.kind === KIND_PTY_INPUT) {

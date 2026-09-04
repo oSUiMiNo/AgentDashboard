@@ -1,5 +1,6 @@
 import type { ClientMessage, ServerMessage } from '@/lib/protocol'
 import { clearSessions, isReviving } from './sessions'
+import { clearAppNotices, getAppNotices, unreadCount } from './appNotices'
 import { useWsStore } from './ws'
 
 /**
@@ -88,6 +89,7 @@ function snapshots(): number {
 
 beforeEach(() => {
   clearSessions()
+  clearAppNotices()
   FakeSocket.instances = []
   fetched = []
   vi.useFakeTimers()
@@ -261,10 +263,14 @@ describe('起こし直しの頼み', () => {
       message: 'この PC が繋がっていません',
     })
 
-    expect(useWsStore.getState().lastError).toBeNull()
+    // **名指しがあるものはそのカードへ。** アプリ全体の器へは積まれない
+    expect(getAppNotices()).toHaveLength(0)
   })
 
-  it('名指しの無い失敗は、いままでどおり帯に出す', async () => {
+  it('名指しの無い失敗は、この接続への返事として積まれる', async () => {
+    // **帯から器へ移った**（トーストとベル設計§12-1）。合流点を通ったものは
+    // `notice_created` が別に届くので、ここへ来るのは `ws.rs` が直接返した
+    // ぶん——つまり「いまこのタブがやった操作への返事」だけになる
     await useWsStore.getState().connect()
     latest().accept()
 
@@ -272,9 +278,47 @@ describe('起こし直しの頼み', () => {
       t: 'error',
       card_id: null,
       message: '起動できませんでした',
+      kind: 'revive',
     })
 
-    expect(useWsStore.getState().lastError).toBe('起動できませんでした')
+    const 溜まり = getAppNotices()
+    expect(溜まり).toHaveLength(1)
+    expect(溜まり[0]?.message).toBe('起動できませんでした')
+    expect(溜まり[0]?.origin).toBe('reply')
+    // **捨てていた種別を拾えるようになった**（設計§12-1）
+    expect(溜まり[0]?.kind).toBe('revive')
+  })
+
+  it('記録に載った知らせは、未読の数と一緒に届く', async () => {
+    await useWsStore.getState().connect()
+    latest().accept()
+
+    latest().deliver({
+      t: 'notice_created',
+      notice: {
+        id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+        source: 'selfheal',
+        kind: 'swapped',
+        message: 'パーサを差し替えました',
+        created_at: Date.now(),
+      },
+      unread_count: 2,
+    })
+
+    expect(getAppNotices()[0]?.origin).toBe('server')
+    // **サーバが数えたぶんを使う**（手元で数え直さない。設計§6-1）
+    expect(unreadCount()).toBe(2)
+  })
+
+  it('自己修復は押し出さずに積まれる', async () => {
+    await useWsStore.getState().connect()
+    latest().accept()
+
+    latest().deliver({ t: 'selfheal', phase: 'detected', detail: null })
+    latest().deliver({ t: 'selfheal', phase: 'repairing', detail: '1/3 回目' })
+
+    // **かつては単一スロットで、前の段階が黙って消えていた**（設計§6-2）
+    expect(getAppNotices().map((n) => n.kind)).toEqual(['detected', 'repairing'])
   })
 })
 

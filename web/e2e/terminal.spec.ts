@@ -140,7 +140,8 @@ test('存在しない作業ディレクトリを指定すると理由が表示�
   await group.getByTestId('spawn-mode').selectOption('')
   await group.getByTestId('spawn-button').click()
 
-  await expect(page.getByTestId('error-banner')).toContainText(
+  // **帯からトーストへ移った**（トーストとベル設計§2）。場所を押しのけずに出る
+  await expect(page.getByTestId('toast')).toContainText(
     '作業ディレクトリが存在しません',
   )
   await expect(page.getByTestId('session-tile')).toHaveCount(0)

@@ -31,10 +31,15 @@ function 部品(src: string, testId: string, 終わり: string): string {
   return src.slice(頭, 尻)
 }
 
-/** 面を閉じるもの。**8箇所**——この工事で6つを絵にし、元から絵だった2つと揃えた */
+/**
+ * 面を閉じるもの。**7箇所**。
+ *
+ * かつては8箇所あり、うち2つが `App.tsx` の帯（`error-banner-close` と
+ * `selfheal-banner-close`）だった。**トーストへ移したので、代わりに `toast-close` が
+ * 入っている**（トーストとベル設計§12-2）——作法そのものは1つも緩めていない。
+ */
 const 閉じる: ReadonlyArray<readonly [string, string]> = [
-  ['App.tsx', 'error-banner-close'],
-  ['App.tsx', 'selfheal-banner-close'],
+  ['components/ToastLayer/ToastLayer.tsx', 'toast-close'],
   ['components/Composer/Composer.tsx', 'composer-preview-close'],
   ['components/ProjectFiles/Sidebar.tsx', 'project-files-close'],
   ['components/FileView/FileView.tsx', 'file-close'],

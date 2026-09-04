@@ -17,7 +17,10 @@ import { MotionConfig } from 'motion/react'
 import { useEffect } from 'react'
 import { BrowserRouter, Link, Route, Routes, useParams } from 'react-router'
 import { Button } from '@/components/ui/button'
-import { CloseGlyph, GearGlyph } from '@/components/ui/glyphs'
+import { GearGlyph } from '@/components/ui/glyphs'
+import { ToastLayer } from '@/components/ToastLayer/ToastLayer'
+import { AppNoticeBell } from '@/components/AppNoticeBell/AppNoticeBell'
+import { loadServerNotices } from '@/lib/notices'
 import { AccountPage } from '@/components/Account/AccountPage'
 import { AuthGate } from '@/components/Auth/AuthGate'
 import { GroupView } from '@/components/GroupView/GroupView'
@@ -30,7 +33,7 @@ import { report } from '@/lib/clientLogs'
 import { composerBusyCount } from '@/lib/composerBusy'
 import { useDocumentTitle } from '@/lib/documentTitle'
 import { projectDisplayName } from '@/lib/path'
-import { connectionDot, selfhealLabel } from '@/lib/protocol'
+import { connectionDot } from '@/lib/protocol'
 import { ACCOUNT, HOME, LOCAL_HOST, SETTINGS } from '@/lib/routes'
 import { canEnter, useAuthStore } from '@/stores/auth'
 import { useProjects } from '@/stores/projects'
@@ -80,13 +83,11 @@ function App() {
 
 function Shell() {
   const status = useWsStore((state) => state.status)
-  const lastError = useWsStore((state) => state.lastError)
   const parserState = useWsStore((state) => state.parserState)
   const parserDetail = useWsStore((state) => state.parserDetail)
   const busState = useWsStore((state) => state.busState)
   const busDetail = useWsStore((state) => state.busDetail)
   const connect = useWsStore((state) => state.connect)
-  const clearError = useWsStore((state) => state.clearError)
   const loadSettings = useSettingsStore((state) => state.load)
   const auth = useAuthStore((state) => state.auth)
   const authLoading = useAuthStore((state) => state.loading)
@@ -106,6 +107,9 @@ function Shell() {
     void connect()
     // 起動ボタンの数と切替の選択肢がこれで決まるので、接続と同時に読む
     void loadSettings()
+    // **開いたときに全体を取り、以後は差分だけを見る**（トーストとベル設計§6-1）。
+    // ここで取らないと、ベルは「このタブが開いてから起きたこと」しか持てない
+    void loadServerNotices()
   }, [entered, connect, loadSettings])
 
   return (
@@ -167,6 +171,18 @@ function Shell() {
                 </Link>
               )}
               {/*
+                アプリ全体の知らせ（トーストとベル設計§10-2）。**歯車の左**に置く。
+
+                **`LAN内端末から開くアドレスを、押すだけで手に入るようにする` が、
+                同じ場所（歯車の左）へボタンを足すことを設計済みである。** 並びは
+                `アカウント → ベル → （LAN のアドレス）→ 歯車`。**後から来たほうが
+                相手の実コードを見て挿入点を確かめること**——行番号では指さない。
+
+                知らせは画面全体に効くので、置き場所は帯（ヘッダ）が筋に合う
+                （`DESIGN.md` §39.2「置き場所は効く相手で決まる」）。
+              */}
+              <AppNoticeBell />
+              {/*
                 **歯車にする**（設計§9-2）。**絵文字（`⚙️`）は使わない**——
                 `DESIGN.md` §14.4 が禁止例に名指しで挙げている。隣の「アカウント」は
                 文字のまま：要件が名指ししているのは「設定」だけで、**言われていない
@@ -186,30 +202,6 @@ function Shell() {
           </>
         )}
       </header>
-
-      {lastError && (
-        <div
-          data-testid="error-banner"
-          className="flex items-center justify-between gap-4 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm"
-        >
-          <span>{lastError}</span>
-          {/*
-            **面を閉じるのは ✕、操作をやめるのは文字**（細かい修正 設計§9-1）。
-            取り返しの付かなさが違うものを、同じ形にしない——閉じるのはいつでも
-            やり直せるが、「やめる」は選択の1つである。**読み上げ用の名前は残す。**
-          */}
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            data-testid="error-banner-close"
-            aria-label="閉じる"
-            title="閉じる"
-            onClick={clearError}
-          >
-            <CloseGlyph />
-          </Button>
-        </div>
-      )}
 
       {/*
         構造化ビューだけが壊れている状態を、はっきり見せる（設計§11）。
@@ -250,8 +242,14 @@ function Shell() {
         </div>
       )}
 
-      <SelfhealBanner />
       <ServerChangedBanner />
+
+      {/*
+        最前面のトースト（トーストとベル設計§8-2）。**`Shell` の直下に置く**——
+        一覧の中（`HomePage`）に置くと、PJT 専用画面とセッション専用画面で出なくなる。
+        場所を押しのけないので、ここに在っても本体は下がらない
+      */}
+      <ToastLayer />
 
       {/*
         通っていない間は中身を出さない。**扉は開いているが中は返さない**という
@@ -271,58 +269,6 @@ function Shell() {
       )}
 
     </main>
-  )
-}
-
-/**
- * 自己修復の進み具合を出す（設計§9）。
- *
- * 「勝手に直った」ことを黙って起こさないための表示。修復セッション自体は一覧に
- * 通常のセッションとして現れるので、ここで出すのは**いま何段目か**だけにしてある。
- *
- * 更新はフォーマット変更のときにしか来ない低頻度の出来事なので、まとめて反映する
- * 仕組みも動きも付けない（一覧やターミナルの経路とは性質が違う）。
- */
-function SelfhealBanner() {
-  const selfheal = useWsStore((state) => state.selfheal)
-  const clearSelfheal = useWsStore((state) => state.clearSelfheal)
-
-  if (!selfheal) {
-    return null
-  }
-  // 直せなかった・戻したは、人が次の一手を決める必要があるので目立たせる
-  const needsAttention =
-    selfheal.phase === 'failed' || selfheal.phase === 'rolled_back'
-
-  return (
-    <div
-      data-testid="selfheal-banner"
-      data-phase={selfheal.phase}
-      className={`flex items-center justify-between gap-4 rounded-md border px-3 py-2 text-sm ${
-        needsAttention
-          ? 'border-red-500/40 bg-red-500/10'
-          : 'border-sky-500/40 bg-sky-500/10'
-      }`}
-    >
-      <span>
-        自己修復：{selfhealLabel(selfheal.phase)}
-        {selfheal.detail && (
-          <span className="text-muted-foreground ml-2 text-xs">
-            {selfheal.detail}
-          </span>
-        )}
-      </span>
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        data-testid="selfheal-banner-close"
-        aria-label="閉じる"
-        title="閉じる"
-        onClick={clearSelfheal}
-      >
-        <CloseGlyph />
-      </Button>
-    </div>
   )
 }
 

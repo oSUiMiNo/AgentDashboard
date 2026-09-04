@@ -107,7 +107,8 @@ test('巡回に入らないモードを選ぶと理由が画面に出る', async
     '切り替えられません',
     { timeout: 30_000 },
   )
-  await expect(page.getByTestId('error-banner')).toHaveCount(0)
+  // **名指しのある失敗は、アプリ全体の側へ漏れない**（トーストとベル設計§2）
+  await expect(page.getByTestId('toast')).toHaveCount(0)
 
   /*
     **溜まっている間はベルが出る**（細かい修正 設計§7-4）。1件も無いときは出さないので、
