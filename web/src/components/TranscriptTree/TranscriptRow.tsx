@@ -731,7 +731,7 @@ function MarkdownBody({
           //
           // 角丸としっぽは `.speech-bubble` が持つ（設計§5-4）。**地の色もあちらが
           // 1箇所で持つ**ので、ここで `bg-*` を重ねないこと——2箇所になった時点でずれる
-          className={`speech-bubble mt-1 max-w-[70%] px-3 py-2${fadeClass}`}
+          className={`speech-bubble row-shell mt-1 max-w-[70%] px-3 py-2${fadeClass}`}
         >
           {inner}
         </div>
@@ -742,10 +742,10 @@ function MarkdownBody({
   if (shell === 'panel') {
     // アシスタントの器。**吹き出しより弱い地**にして、誰の発言かをシルエットで
     // 読み分ける仕掛け（設計§5-3）を壊さない
-    return <div className={`body-shell mt-1${fadeClass}`}>{inner}</div>
+    return <div className={`body-shell row-shell mt-1${fadeClass}`}>{inner}</div>
   }
 
-  return <div className={inset ? 'mt-1 ml-6' : 'mt-1'}>{inner}</div>
+  return <div className={inset ? 'row-shell mt-1 ml-6' : 'row-shell mt-1'}>{inner}</div>
 }
 
 /**

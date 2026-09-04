@@ -333,6 +333,64 @@
   left: 1.275rem;
 }
 
+/* --- 操作列の、平らでないほうの器（細かい修正 設計§5-5） ---------------- */
+
+/*
+  **寸法はもう揃っている。** 拡大縮小もゴミ箱も `icon-sm`（28px）で、電源（`.power`）と
+  同じ値である——**違って見えていたのは質感と絵の大きさ**だった（要件7）。
+
+  # どこまで電源へ寄せるか
+
+  **4つとも同じ盛り上がりにしない。** `DESIGN.md` §15.1 は「同じ形の器を等間隔で
+  並べない」と言い、**塗るのは主要操作の1つだけ**とも言う。したがって列はこう分かれる。
+
+  | もの | 器 |
+  |---|---|
+  | ターミナルのトグル | レール（別の形） |
+  | 拡大／縮小・終了 | **ここ。薄く起こすだけで、塗らない** |
+  | 電源 | 2px の輪・多重の影・**点いたら塗る** |
+
+  **電源より弱く作ること。** 同じにすると、押し間違えていちばん痛いものが列の中で
+  埋もれる。枠は 1px、影は電源の半分の深さ、グラデーションも浅くしてある。
+
+  **枠は内側に描く**（`inset`）。`icon-sm` の 28px を1ピクセルも超えないためで、
+  `dashboard.spec.ts` が「ボタンの見た目を変えても行の高さは変わらない」を見張っている。
+*/
+.ops-raised {
+  background-image: linear-gradient(
+    160deg,
+    color-mix(in oklch, white 5%, transparent),
+    color-mix(in oklch, black 8%, transparent)
+  );
+  box-shadow:
+    /* 枠。**外へ広げない**——`border` にすると 28px を超える */
+    inset 0 0 0 1px color-mix(in oklch, var(--color-muted-foreground) 28%, transparent),
+    inset 0 1px 0 color-mix(in oklch, white 8%, transparent),
+    0 1px 2px color-mix(in oklch, black 30%, transparent);
+}
+
+/* 触ると輪郭だけ立つ。**塗らない**——塗るのは電源の点灯だけ（§15.1） */
+.ops-raised:where(:hover):not(:disabled) {
+  box-shadow:
+    inset 0 0 0 1px color-mix(in oklch, var(--color-muted-foreground) 50%, transparent),
+    inset 0 1px 0 color-mix(in oklch, white 12%, transparent),
+    0 1px 3px color-mix(in oklch, black 38%, transparent);
+}
+
+/* 押したことを、その場で返す（§27.4）。電源と同じ作法で、沈める */
+.ops-raised:not(:disabled):active {
+  box-shadow:
+    inset 0 1px 2px color-mix(in oklch, black 40%, transparent),
+    inset 0 0 0 1px color-mix(in oklch, var(--color-muted-foreground) 28%, transparent);
+}
+
+/*
+  **ここに打ち消しは要らない。** `.ops-raised` は自分で `transition` も `animation` も
+  持たず、影と地しか書いていない——動くのは `Button` 側の `transition-all` である。
+  **意味の無い打ち消しを足すと、`controls.test.ts` の「打ち消しは打ち消される規則より
+  後ろ」が、この位置のせいで落ちる**（実際に踏んだ）。
+*/
+
 /* --- 動きを止める ------------------------------------------------------- */
 
 /*

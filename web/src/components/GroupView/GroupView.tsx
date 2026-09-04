@@ -143,8 +143,10 @@ export function GroupView({ host, project }: Props) {
       <header className="flex items-center gap-2">
         <FilesToggle open={filesOpen} onToggle={toggleFiles} />
 
-        {/* **画面の主題**なので見出しのまま。フルパスは `title` に残す（設計§16-2） */}
-        <h2 className="min-w-0 truncate text-sm font-semibold" title={project}>
+        {/* **画面の主題**なので見出しのまま。フルパスは `title` に残す（設計§16-2）。
+            **大きさは §13.2 の Section Title**——セッション専用画面と揃える（§39.2）。
+            構造化ビューの「履歴」の帯を外したぶん、§8 の床の見出しはここが引き受ける */}
+        <h2 className="min-w-0 truncate text-base font-semibold tracking-wide" title={project}>
           {名前}
         </h2>
 

@@ -208,9 +208,18 @@ export function SessionView({
             「同じ文字列を違う役割のまま出す」と但し書きしていたが、**その但し書きごと
             要らなくなった**。**出すのは名前だけ**（設計§14-5）。フルパスは `title` に残す。
           */}
+          {/*
+            **画面の主題を示す見出し**（`DESIGN.md` §8 の床・§13.2 の Section Title）。
+            **【2026-09-04】構造化ビューの「履歴」の帯を外した**（細かい修正 設計§5-2）ので、
+            床の見出しはここが引き受ける——それまで 14px/500 で、Section Title
+            （15〜18px / Semibold）に届いていなかった。
+
+            **PJT 専用画面の見出しと揃えること**（§39.2）。片方だけ大きくすると、
+            同じものが画面によって違う顔で出る。
+          */}
           <h2
             data-testid="project-name"
-            className="min-w-0 truncate font-medium"
+            className="min-w-0 truncate text-base font-semibold tracking-wide"
             title={session.project}
           >
             {名前}
@@ -426,7 +435,7 @@ export function SessionView({
               **状態の行に置いてある。** モデルとモードの行は 8rem が2つで既に埋まって
               おり、そこへ4つ足すと狭い画面で溢れる。**状態の文字は短い**ので、こちらが空く。
             */}
-            <div className="ml-auto flex shrink-0 items-center gap-1.5">
+            <div className="ml-auto flex shrink-0 items-center gap-2">
               <TerminalToggle
                 on={view === 'terminal'}
                 onToggle={() =>
@@ -443,7 +452,7 @@ export function SessionView({
                   navigate(projectPath(host, session.project))
                 }}
               />
-              <div className="ml-1.5 flex shrink-0 items-center gap-1.5">
+              <div className="ml-3 flex shrink-0 items-center gap-2">
                 <PowerButton
                   on={revivable.kind === 'live'}
                   state={revivable.kind}
@@ -460,6 +469,7 @@ export function SessionView({
                 <Button
                   variant="ghost"
                   size="icon-sm"
+                  className="ops-raised"
                   data-testid="close-card"
                   aria-label="終了"
                   title="カードを一覧から外します（履歴は残ります）"
@@ -474,7 +484,9 @@ export function SessionView({
                     }
                   }}
                 >
-                  <TrashGlyph />
+                  {/* **電源と同じ 14px に揃える**（細かい修正 設計§5-5）。ここだけ
+                      無指定で 16px になっていた */}
+                  <TrashGlyph className="size-3.5" />
                 </Button>
               </div>
             </div>
@@ -691,7 +703,7 @@ function ZoomToggle({
       data-zoom={compact ? 'in' : 'out'}
       aria-label={言葉}
       title={言葉}
-      className="shrink-0"
+      className="ops-raised shrink-0"
       onClick={onPress}
     >
       <svg
