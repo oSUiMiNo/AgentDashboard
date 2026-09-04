@@ -283,13 +283,18 @@ describe('ファイルの中身の列', () => {
   it('ファイルを押すと列が現れ、中身が出る', async () => {
     置く()
 
-    await userEvent.click(await screen.findByRole('button', { name: /計画\.md/ }))
+    await userEvent.click(await screen.findByRole('button', { name: '計画.md' }))
 
     const view = await screen.findByTestId('file-view')
     expect(view).toHaveAttribute('data-path', `${ROOT}/計画.md`)
     expect(screen.getByTestId('file-column')).toBeInTheDocument()
     // 基準は枠のパス。パネルの起点と同じものであることが要る
-    expect(screen.getByTestId('file-relative-base')).toHaveTextContent(ROOT)
+    // **基準は画面から `title` へ移った**（要件26・設計§8-6）。注記そのものは消えている
+    expect(screen.queryByTestId('file-relative-base')).toBeNull()
+    expect(screen.getByTestId('file-relative-path')).toHaveAttribute(
+      'title',
+      expect.stringContaining(ROOT),
+    )
   })
 
   /*
@@ -302,7 +307,7 @@ describe('ファイルの中身の列', () => {
   it('「閉じる」で列ごと消えるが、サイドバーは開いたまま', async () => {
     置く()
 
-    await userEvent.click(await screen.findByRole('button', { name: /計画\.md/ }))
+    await userEvent.click(await screen.findByRole('button', { name: '計画.md' }))
     await screen.findByTestId('file-view')
 
     await userEvent.click(screen.getByTestId('file-close'))
@@ -316,7 +321,7 @@ describe('ファイルの中身の列', () => {
     // **利用者が名指しで決めた振る舞い**（2026-08-24）。実装の都合で変えないこと
     const { toggles } = 置く()
 
-    await userEvent.click(await screen.findByRole('button', { name: /計画\.md/ }))
+    await userEvent.click(await screen.findByRole('button', { name: '計画.md' }))
     await screen.findByTestId('file-view')
 
     expect(screen.getByTestId('project-files-panel')).toBeInTheDocument()
@@ -331,7 +336,7 @@ describe('ファイルの中身の列', () => {
     // 器へ上げたことで「ふだん（ファイルを開いている）」の並びが成立する（設計§2）
     const { view } = 置く()
 
-    await userEvent.click(await screen.findByRole('button', { name: /計画\.md/ }))
+    await userEvent.click(await screen.findByRole('button', { name: '計画.md' }))
     await screen.findByTestId('file-view')
 
     view.rerender(
@@ -352,7 +357,7 @@ describe('ファイルの中身の列', () => {
       押した1枚と復元した1枚は**落とし方が違う**ので、ここで見ているのは復元した側。
     */
     const { view } = 置く()
-    await userEvent.click(await screen.findByRole('button', { name: /計画\.md/ }))
+    await userEvent.click(await screen.findByRole('button', { name: '計画.md' }))
     await screen.findByTestId('file-view')
 
     view.unmount()
@@ -553,7 +558,7 @@ describe('ファイルの中身の列', () => {
     失敗[`${ROOT}/計画.md`] = 404
     置く()
 
-    await userEvent.click(await screen.findByRole('button', { name: /計画\.md/ }))
+    await userEvent.click(await screen.findByRole('button', { name: '計画.md' }))
 
     // **押した1枚には知らせ先を渡していない。** 押した人には理由を見せる
     expect(await screen.findByTestId('file-error')).toBeInTheDocument()
@@ -568,7 +573,7 @@ describe('ファイルの中身の列', () => {
 
   it('別の枠は、別の記憶を引く', async () => {
     const { view } = 置く()
-    await userEvent.click(await screen.findByRole('button', { name: /計画\.md/ }))
+    await userEvent.click(await screen.findByRole('button', { name: '計画.md' }))
     await screen.findByTestId('file-view')
 
     view.unmount()
@@ -589,7 +594,7 @@ describe('ファイルの中身の列', () => {
       確かめられない（テスト計画フェーズ4）。
     */
     置く()
-    await userEvent.click(await screen.findByRole('button', { name: /計画\.md/ }))
+    await userEvent.click(await screen.findByRole('button', { name: '計画.md' }))
 
     const view = await screen.findByTestId('file-view')
     expect(view.className).toContain('h-full')
@@ -599,7 +604,7 @@ describe('ファイルの中身の列', () => {
 describe('縁', () => {
   it('フォルダと中身の両方に出る', async () => {
     置く()
-    await userEvent.click(await screen.findByRole('button', { name: /計画\.md/ }))
+    await userEvent.click(await screen.findByRole('button', { name: '計画.md' }))
     await screen.findByTestId('file-view')
 
     const edges = screen

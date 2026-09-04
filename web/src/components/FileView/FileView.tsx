@@ -36,10 +36,9 @@
  * SVG にも同じ理由が当てはまるので、そちらにも出す（設計§7-4）。
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { Button } from '@/components/ui/button'
-import { copyToClipboard } from '@/lib/clipboard'
 import { fileKind, needsSandbox } from '@/lib/fileKind'
 import { REHYPE_PLUGINS, REMARK_PLUGINS } from '@/lib/markdown'
 import {
@@ -145,14 +144,12 @@ export function FileView({
   // 整形できる相手のときだけ意味を持つ。既定は整形（進捗を読むのが目的のため）
   const [raw, setRaw] = useState(false)
   // `CopyPath`（`FolderBrowser`）と同じ3つの状態。**片方だけ黙る作りにしない**
-  const [copied, setCopied] = useState<'idle' | 'done' | 'failed'>('idle')
 
   useEffect(() => {
     let alive = true
     let made: string | null = null
     setLoading(true)
     setError(null)
-    setCopied('idle')
     setRaw(false)
     setBroken(false)
     setContent(null)
@@ -218,15 +215,6 @@ export function FileView({
 
   const relative = relativeOf(root, path)
 
-  const copy = useCallback(async () => {
-    // **黙って失敗させない。** 使えない環境（http の別ホスト・古いブラウザ）では
-    // 選べる形で出して、利用者が自分で取れるようにする。
-    //
-    // 写す手は `lib/clipboard.ts` が1つだけ持つ（設計§4）。**ここへ書き直さない**
-    // ——一覧（`CopyPath`）と同じ手を使うので、片方だけ直る形が作れない
-    setCopied((await copyToClipboard(relative)) ? 'done' : 'failed')
-  }, [relative])
-
   const markdown = kind === 'markdown'
   const boxed = needsSandbox(kind)
   // 整形の逃げ道を出す相手（設計§7-4）。**画像には出さない**——テキストではないので、
@@ -246,35 +234,28 @@ export function FileView({
       className="border-border flex h-full min-h-0 flex-col gap-2 border-t pt-2"
     >
       <header className="flex flex-wrap items-center gap-1.5">
-        {/* **何からの相対パスかを必ず出す。** 基準の分からない相対パスは、
-            貼られた側で解釈できない（設計§15） */}
+        {/*
+          **基準は画面から落とし、`title` へ移した**（要件26・設計§8-6）。
+
+          `ファイル設計§15` は「基準の分からない相対パスは貼られた側で解釈できない」
+          として画面に出すことを決めていた。**その要求は消えていない**ので、
+          出し方だけを変えてある——**画面の面積を使わずに基準を残せる**。
+
+          **絶対パスも同じ `title` に残す。** 落としたのは注記であって、
+          「これがどこのファイルか」を確かめる道ではない。
+        */}
         <code
           data-testid="file-relative-path"
           className="bg-muted min-w-0 truncate rounded px-1.5 py-0.5 text-xs"
-          title={path}
+          title={`${path}（${root} からの相対パス）`}
         >
           {relative}
         </code>
-        <span
-          data-testid="file-relative-base"
-          className="text-muted-foreground shrink-0 text-[11px]"
-        >
-          （{root} からの相対パス）
-        </span>
 
         {/* **折り返しを許す。** 4つ目を足したので、狭い窓（セッション専用画面の幅）では
             1行に収まらない。`shrink-0` のまま折り返さないと、そのまま横へはみ出す
             （`ファイルの中身に掛けた隔離を、script の1段だけ解く` 設計§6-4） */}
         <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-1">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            data-testid="file-copy"
-            onClick={() => void copy()}
-          >
-            パスをコピー
-          </Button>
           {canShowSource && (
             <Button
               type="button"
@@ -318,24 +299,6 @@ export function FileView({
           )}
         </div>
       </header>
-
-      {copied === 'done' && (
-        <p data-testid="file-copied" className="text-xs text-emerald-400">
-          コピーしました
-        </p>
-      )}
-
-      {copied === 'failed' && (
-        <p data-testid="file-copied" className="text-xs text-amber-300">
-          コピーできません。この値を選んで取ってください：{' '}
-          <code
-            data-testid="file-copy-fallback"
-            className="bg-muted/60 rounded px-1 py-0.5 font-mono select-all"
-          >
-            {relative}
-          </code>
-        </p>
-      )}
 
       {error !== null && (
         <p data-testid="file-error" className="text-xs text-red-400">
