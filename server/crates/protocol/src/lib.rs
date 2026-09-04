@@ -1199,7 +1199,10 @@ mod tests {
     #[test]
     fn 名乗りの欄が無ければ名乗り無しとして受ける() {
         let node: Node = serde_json::from_str(名乗りの欄が無い古い行).expect("古い行が解けること");
-        let Node::UserMessage { origin, command, .. } = &node else {
+        let Node::UserMessage {
+            origin, command, ..
+        } = &node
+        else {
             panic!("user_message として解けること");
         };
         assert_eq!(

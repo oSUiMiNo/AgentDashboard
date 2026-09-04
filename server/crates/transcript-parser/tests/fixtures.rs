@@ -148,7 +148,11 @@ fn basic_toolsのフィクスチャが期待どおりのツリーになる() {
     // あって、製品の動きではない（ダッシュボードは PTY 上の対話 CLI を起こすので
     // 利用者の入力は `typed` になる）
     assert_eq!(parsed.count("user"), 0, "人が打ったと名乗る発言は無い");
-    assert_eq!(parsed.count("user-machine"), 1, "最初のプロンプト1件（SDK 由来）");
+    assert_eq!(
+        parsed.count("user-machine"),
+        1,
+        "最初のプロンプト1件（SDK 由来）"
+    );
     assert_eq!(parsed.count("thinking"), 5);
     assert_eq!(parsed.count("assistant"), 5);
     assert_eq!(
@@ -686,14 +690,20 @@ fn message_originのフィクスチャで人と機械が分かれる() {
     // 生のタグが1文字も出ないこと
     for (text, _, _) in &発言 {
         assert!(!text.contains("command-name"), "生のタグが出ている: {text}");
-        assert!(!text.contains("command-message"), "生のタグが出ている: {text}");
+        assert!(
+            !text.contains("command-message"),
+            "生のタグが出ている: {text}"
+        );
     }
 
     let コマンド = 発言
         .iter()
         .find(|(_, _, command)| command.is_some())
         .expect("スラッシュコマンドが1つあること");
-    assert_eq!(コマンド.0, "/sample-skill-1 calc.py", "打った形＝名前＋引数");
+    assert_eq!(
+        コマンド.0, "/sample-skill-1 calc.py",
+        "打った形＝名前＋引数"
+    );
     assert!(コマンド.1.is_human(), "打った本人は人のまま");
     assert_eq!(
         コマンド.2.as_ref().unwrap().expansion.as_deref(),

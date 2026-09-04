@@ -13,8 +13,8 @@
 //! tokio が解く問題がここには無い。
 
 pub mod cli;
-pub mod origin;
 pub mod normalize;
+pub mod origin;
 pub mod parse;
 pub mod session;
 pub mod stats;

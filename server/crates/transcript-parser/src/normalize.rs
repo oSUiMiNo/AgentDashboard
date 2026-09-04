@@ -80,7 +80,10 @@ fn strip_tag(text: &str, tag: &str) -> String {
     let Some(start) = text.find(&open) else {
         return text.to_string();
     };
-    let Some(end) = text[start..].find(&close).map(|at| at + start + close.len()) else {
+    let Some(end) = text[start..]
+        .find(&close)
+        .map(|at| at + start + close.len())
+    else {
         return text.to_string();
     };
     format!("{}{}", &text[..start], &text[end..])

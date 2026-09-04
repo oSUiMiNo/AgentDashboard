@@ -148,7 +148,10 @@ mod tests {
 
     #[test]
     fn 人の印があるものは人() {
-        assert_eq!(判定(&発言(r#""origin":{"kind":"human"}"#, "やって")), MessageOrigin::Human);
+        assert_eq!(
+            判定(&発言(r#""origin":{"kind":"human"}"#, "やって")),
+            MessageOrigin::Human
+        );
     }
 
     #[test]
@@ -187,18 +190,30 @@ mod tests {
 
     #[test]
     fn 打った指示は人() {
-        assert_eq!(判定(&発言(r#""promptSource":"typed""#, "やって")), MessageOrigin::Human);
-        assert_eq!(判定(&発言(r#""promptSource":"queued""#, "やって")), MessageOrigin::Human);
+        assert_eq!(
+            判定(&発言(r#""promptSource":"typed""#, "やって")),
+            MessageOrigin::Human
+        );
+        assert_eq!(
+            判定(&発言(r#""promptSource":"queued""#, "やって")),
+            MessageOrigin::Human
+        );
     }
 
     #[test]
     fn sdkが渡した指示は機械() {
-        assert_eq!(判定(&発言(r#""promptSource":"sdk""#, "長い指示")), MessageOrigin::Sdk);
+        assert_eq!(
+            判定(&発言(r#""promptSource":"sdk""#, "長い指示")),
+            MessageOrigin::Sdk
+        );
     }
 
     #[test]
     fn systemが差し込んだ文は機械() {
-        assert_eq!(判定(&発言(r#""promptSource":"system""#, "通知")), MessageOrigin::Injected);
+        assert_eq!(
+            判定(&発言(r#""promptSource":"system""#, "通知")),
+            MessageOrigin::Injected
+        );
     }
 
     #[test]
@@ -211,7 +226,10 @@ mod tests {
 
     #[test]
     fn フックが差し込んだ文は機械() {
-        assert_eq!(判定(&発言(r#""isMeta":true"#, "注入")), MessageOrigin::Injected);
+        assert_eq!(
+            判定(&発言(r#""isMeta":true"#, "注入")),
+            MessageOrigin::Injected
+        );
     }
 
     #[test]
@@ -225,7 +243,11 @@ mod tests {
     #[test]
     fn 中断の定型文は機械() {
         for marker in INTERRUPTION_MARKERS {
-            assert_eq!(判定(&発言("", marker)), MessageOrigin::Interrupted, "{marker}");
+            assert_eq!(
+                判定(&発言("", marker)),
+                MessageOrigin::Interrupted,
+                "{marker}"
+            );
         }
         // 配列の形でも同じ
         let line = r#"{"type":"user","uuid":"u1","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#;

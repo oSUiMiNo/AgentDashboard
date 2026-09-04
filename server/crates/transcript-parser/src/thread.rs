@@ -359,12 +359,7 @@ impl SessionThreader {
     /// **返したノードは、呼ぶ側が `last_emitted` に据えること。** そうすると
     /// [`Self::feed_message`] 末尾の解決で**展開の `uuid` が本体のノードを指す**ので、
     /// 展開にぶら下がる子（`attachment` など）が置き場所を見失わない（設計§5-1）。
-    fn absorb_expansion(
-        &mut self,
-        source: &str,
-        record: &Record,
-        text: &str,
-    ) -> Option<TreeNode> {
+    fn absorb_expansion(&mut self, source: &str, record: &Record, text: &str) -> Option<TreeNode> {
         // 画像の相棒はここへ来ない（あちらは `ImageSource` になる）が、念のため外す
         if !record.is_meta() || record.is_turn_companion() {
             return None;
@@ -443,10 +438,8 @@ impl SessionThreader {
                     };
                     // 前の本体が展開を持たなかったぶんは、ここで手放す。**抱えたままにしない**
                     // ——展開が来ないほうが多数派である（実測で34%にしか展開が無い。設計§3-4）
-                    self.file(source).pending_command = record
-                        .uuid
-                        .clone()
-                        .map(|uuid| (uuid, node.clone()));
+                    self.file(source).pending_command =
+                        record.uuid.clone().map(|uuid| (uuid, node.clone()));
                     emitted.push(node);
                     last_emitted = Some(node_id);
                 }
@@ -1776,7 +1769,11 @@ mod スラッシュコマンド {
             slash_command("これを見て <command-name>/pjt_read</command-name>"),
             None
         );
-        assert_eq!(slash_command("<command-name>pjt_read</command-name>"), None, "/ が無い");
+        assert_eq!(
+            slash_command("<command-name>pjt_read</command-name>"),
+            None,
+            "/ が無い"
+        );
         assert_eq!(slash_command("ただの発言"), None);
     }
 
@@ -1785,7 +1782,10 @@ mod スラッシュコマンド {
         let mut threader = SessionThreader::new();
         let out = feed(
             &mut threader,
-            &本体("u1", "<command-message>x</command-message>\n<command-name>/x</command-name>"),
+            &本体(
+                "u1",
+                "<command-message>x</command-message>\n<command-name>/x</command-name>",
+            ),
         );
         assert_eq!(out.len(), 1);
         let (text, command) = 発言(&out[0]);
@@ -1795,17 +1795,29 @@ mod スラッシュコマンド {
 
         let out = feed(&mut threader, &展開("u2", "u1", "コマンドの中身"));
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].id, 本体のid, "**同じ ID で送り直す**（新しい行にしない）");
+        assert_eq!(
+            out[0].id, 本体のid,
+            "**同じ ID で送り直す**（新しい行にしない）"
+        );
         let (text, command) = 発言(&out[0]);
         assert_eq!(text, "/x", "打った形は変わらない");
-        assert_eq!(command.unwrap().expansion.as_deref(), Some("コマンドの中身"));
+        assert_eq!(
+            command.unwrap().expansion.as_deref(),
+            Some("コマンドの中身")
+        );
     }
 
     #[test]
     fn 展開が無い本体はそのまま出る() {
         // **展開が無いほうが多数派である**（実測でコマンド本体の34%にしか展開が無い）
         let mut threader = SessionThreader::new();
-        let out = feed(&mut threader, &本体("u1", "<command-message>clear</command-message>\n<command-name>/clear</command-name>"));
+        let out = feed(
+            &mut threader,
+            &本体(
+                "u1",
+                "<command-message>clear</command-message>\n<command-name>/clear</command-name>",
+            ),
+        );
         let (text, command) = 発言(&out[0]);
         assert_eq!(text, "/clear");
         assert_eq!(command.unwrap().expansion, None, "トグルを出さないための印");
@@ -1815,16 +1827,34 @@ mod スラッシュコマンド {
     fn 二つ打ったコマンドはそれぞれの展開を持つ() {
         // `[本体1][展開1][本体2][展開2]` の並び。**枠1つで捌ける**（設計§3-3）
         let mut threader = SessionThreader::new();
-        let a = feed(&mut threader, &本体("u1", "<command-message>a</command-message>\n<command-name>/a</command-name>"));
+        let a = feed(
+            &mut threader,
+            &本体(
+                "u1",
+                "<command-message>a</command-message>\n<command-name>/a</command-name>",
+            ),
+        );
         let ea = feed(&mut threader, &展開("u2", "u1", "Aの中身"));
-        let b = feed(&mut threader, &本体("u3", "<command-message>b</command-message>\n<command-name>/b</command-name>"));
+        let b = feed(
+            &mut threader,
+            &本体(
+                "u3",
+                "<command-message>b</command-message>\n<command-name>/b</command-name>",
+            ),
+        );
         let eb = feed(&mut threader, &展開("u4", "u3", "Bの中身"));
 
         assert_eq!(ea[0].id, a[0].id);
         assert_eq!(eb[0].id, b[0].id);
         assert_ne!(a[0].id, b[0].id);
-        assert_eq!(発言(&ea[0]).1.unwrap().expansion.as_deref(), Some("Aの中身"));
-        assert_eq!(発言(&eb[0]).1.unwrap().expansion.as_deref(), Some("Bの中身"));
+        assert_eq!(
+            発言(&ea[0]).1.unwrap().expansion.as_deref(),
+            Some("Aの中身")
+        );
+        assert_eq!(
+            発言(&eb[0]).1.unwrap().expansion.as_deref(),
+            Some("Bの中身")
+        );
     }
 
     #[test]
@@ -1832,13 +1862,28 @@ mod スラッシュコマンド {
         // **展開が来ない本体のほうが多数派である**（実測66%）。抱えたままにすると、
         // 次のコマンドの展開が前の本体を指していないせいで**行として溢れる**（設計§3-4）
         let mut threader = SessionThreader::new();
-        feed(&mut threader, &本体("u1", "<command-message>clear</command-message>\n<command-name>/clear</command-name>"));
-        let 次 = feed(&mut threader, &本体("u3", "<command-message>b</command-message>\n<command-name>/b</command-name>"));
+        feed(
+            &mut threader,
+            &本体(
+                "u1",
+                "<command-message>clear</command-message>\n<command-name>/clear</command-name>",
+            ),
+        );
+        let 次 = feed(
+            &mut threader,
+            &本体(
+                "u3",
+                "<command-message>b</command-message>\n<command-name>/b</command-name>",
+            ),
+        );
         let 展 = feed(&mut threader, &展開("u4", "u3", "Bの中身"));
 
         assert_eq!(展.len(), 1);
         assert_eq!(展[0].id, 次[0].id, "**新しいほうの本体が展開を受け取る**");
-        assert_eq!(発言(&展[0]).1.unwrap().expansion.as_deref(), Some("Bの中身"));
+        assert_eq!(
+            発言(&展[0]).1.unwrap().expansion.as_deref(),
+            Some("Bの中身")
+        );
     }
 
     #[test]
@@ -1846,8 +1891,17 @@ mod スラッシュコマンド {
         // **フックの注入をコマンドの展開として吸わない。** `promptId` を鍵にすると
         // ここが壊れる（設計§3-2）
         let mut threader = SessionThreader::new();
-        let 本 = feed(&mut threader, &本体("u1", "<command-message>x</command-message>\n<command-name>/x</command-name>"));
-        let 注入 = feed(&mut threader, &展開("u9", "別のレコード", "フックが差し込んだ文"));
+        let 本 = feed(
+            &mut threader,
+            &本体(
+                "u1",
+                "<command-message>x</command-message>\n<command-name>/x</command-name>",
+            ),
+        );
+        let 注入 = feed(
+            &mut threader,
+            &展開("u9", "別のレコード", "フックが差し込んだ文"),
+        );
 
         assert_eq!(注入.len(), 1, "独立した行として出る");
         assert_ne!(注入[0].id, 本[0].id, "本体へ吸い込まれていない");
@@ -1855,7 +1909,10 @@ mod スラッシュコマンド {
         assert!(
             matches!(
                 &注入[0].node,
-                Node::UserMessage { origin: protocol::MessageOrigin::Injected, .. }
+                Node::UserMessage {
+                    origin: protocol::MessageOrigin::Injected,
+                    ..
+                }
             ),
             "差し込まれた文として名乗る"
         );
@@ -1866,7 +1923,13 @@ mod スラッシュコマンド {
         // 吸収してノードを出さないと、**展開の uuid が根へ解決される**（設計§5-1）。
         // その先の未知レコードが置き場所を見失うことを、ここで止める
         let mut threader = SessionThreader::new();
-        let 本 = feed(&mut threader, &本体("u1", "<command-message>x</command-message>\n<command-name>/x</command-name>"));
+        let 本 = feed(
+            &mut threader,
+            &本体(
+                "u1",
+                "<command-message>x</command-message>\n<command-name>/x</command-name>",
+            ),
+        );
         feed(&mut threader, &展開("u2", "u1", "中身"));
         // 置き場所の解決を実際に使うのは未知レコードのほう（`feed_unknown`）
         let 子 = feed(
@@ -1883,11 +1946,26 @@ mod スラッシュコマンド {
     #[test]
     fn 生のタグはノードに残らない() {
         let mut threader = SessionThreader::new();
-        let out = feed(&mut threader, &本体("u1", "<command-message>x</command-message>\n<command-name>/x</command-name>\n<command-args>引数</command-args>"));
+        let out = feed(
+            &mut threader,
+            &本体(
+                "u1",
+                "<command-message>x</command-message>\n<command-name>/x</command-name>\n<command-args>引数</command-args>",
+            ),
+        );
         let text = serde_json::to_string(&out[0].node).unwrap();
-        assert!(!text.contains("command-name"), "生のタグが残っている: {text}");
-        assert!(!text.contains("command-message"), "生のタグが残っている: {text}");
-        assert!(!text.contains("command-args"), "生のタグが残っている: {text}");
+        assert!(
+            !text.contains("command-name"),
+            "生のタグが残っている: {text}"
+        );
+        assert!(
+            !text.contains("command-message"),
+            "生のタグが残っている: {text}"
+        );
+        assert!(
+            !text.contains("command-args"),
+            "生のタグが残っている: {text}"
+        );
     }
 }
 
