@@ -63,11 +63,31 @@ export function joinWrapped(rows: ScreenRow[]): string[] {
 
 /** いま見えているぶんの画面を、折り返しを繋いだ論理行として返す。 */
 export function visibleLines(term: Terminal): string[] {
-  return linesFrom(term, term.buffer.active.viewportY)
+  return joinWrapped(rowsFrom(term, term.buffer.active.viewportY))
 }
 
-/** `top` 行目から `rows` 行ぶんを、折り返しを繋いだ論理行として返す。 */
-function linesFrom(term: Terminal, top: number): string[] {
+/**
+ * いま見えているぶんの画面を、**折り返しを繋がない物理行**として返す。
+ *
+ * 返る本数は必ず `term.rows` で、**添字がそのまま画面の上から何行目か**になる。
+ *
+ * # 触った場所を行に直す側は、こちらしか使えない
+ *
+ * [`visibleLines`] は折り返しを1本に繋ぐので、**繋いだぶんだけ添字が上へ詰まる**。
+ * 指が触れた高さから出した行番号と突き合わせると、**画面の上のほうで1度でも折り返しが
+ * あった日から、静かに1行ずれる**（設計§13-3）。ずれても例外は出ず、押した場所と
+ * 反応した場所が食い違うだけなので、気づくのは実機で触ったときになる。
+ *
+ * 逆に、目印を語で探す判定（`lib/keys.ts`）は繋いだほうを使う——狭い画面では案内文が
+ * 物理行の途中で割れるので、繋がないと目印が2行に分かれて当たらない。
+ * **用途が逆なので、口を2つに分けてある。**
+ */
+export function visibleRows(term: Terminal): string[] {
+  return rowsFrom(term, term.buffer.active.viewportY).map((row) => row.text)
+}
+
+/** `top` 行目から `rows` 行ぶんを、折り返しの印を付けたまま返す。 */
+function rowsFrom(term: Terminal, top: number): ScreenRow[] {
   const buffer = term.buffer.active
   const rows: ScreenRow[] = []
   for (let y = 0; y < term.rows; y += 1) {
@@ -77,5 +97,5 @@ function linesFrom(term: Terminal, top: number): string[] {
       wrapped: line?.isWrapped ?? false,
     })
   }
-  return joinWrapped(rows)
+  return rows
 }

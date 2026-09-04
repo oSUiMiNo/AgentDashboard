@@ -17,8 +17,14 @@ import { Terminal, type ITerminalInitOnlyOptions, type ITerminalOptions } from '
 import '@xterm/xterm/css/xterm.css'
 import { createFlowController } from '@/lib/flow'
 import { KIND_PTY_SNAPSHOT } from '@/lib/frame'
-import { looksSelecting, sequenceFor, terminalKeyOverride } from '@/lib/keys'
-import { visibleLines, visibleScreen } from '@/lib/screen'
+import {
+  inputBoxRows,
+  looksSelecting,
+  rowInRange,
+  sequenceFor,
+  terminalKeyOverride,
+} from '@/lib/keys'
+import { visibleLines, visibleRows, visibleScreen } from '@/lib/screen'
 import {
   hasWatcher,
   registerKeyboard,
@@ -26,7 +32,7 @@ import {
   registerTerminal,
   setSelecting,
 } from '@/lib/terminalBridge'
-import { createTouchScroller } from '@/lib/touch'
+import { createTouchScroller, DEFAULT_TUNING } from '@/lib/touch'
 import type { CardId } from '@/lib/protocol'
 import { useWsStore } from '@/stores/ws'
 
@@ -123,18 +129,18 @@ export function TerminalPane({ cardId }: Props) {
       grid.style.minWidth = 'max-content'
     }
 
-    // スマホでソフトキーボードを出す道を、**明示のボタン1つに絞る**（設計§12）。
+    // スマホでソフトキーボードを出す道（設計§12・§13）。
     //
     // xterm はキーを**不可視の textarea**（`term.textarea`）で受け取る。そこへ焦点が
     // 入るとブラウザが「文字を打つ場所に入った」と判断してキーボードを出す——端末は
     // 1枚の面なので、**面のどこを触っても同じテキストエリアが掴まれる**。だから
     // 「入力欄でない場所」を押しても出ていた。
     //
-    // # 画面を読んで決めるのはやめた
+    // # 状態で決めるのはやめ、場所で決める
     //
     // 「いま打てる状態か」を画面から判定する形にしていたが、**プロンプトが出ている
-    // 通常状態では真になる**ので、ログの部分を押してもキーボードが出る——利用者の
-    // 求めるものにならなかった（設計§12）。
+    // 通常状態では真になる**ので、ログの部分を押してもキーボードが出る（設計§12）。
+    // いまは**入力欄が画面のどの行にあるか**を出し、触った行と突き合わせる（設計§13）。
     //
     // # 既定で塞ぎ、押されたときだけ開く
     //
@@ -142,11 +148,17 @@ export function TerminalPane({ cardId }: Props) {
     // Android はもっと緩く「一度操作があれば以降は許可」なので、**焦点を遅らせるだけ
     // では漏れる**——だから塞ぐ側を既定にし、開けるのは押した操作の中だけにする。
     //
-    // # タッチでは焦点も渡さない
+    // # タッチは、触った場所で入り／抜けする（設計§13）
     //
-    // 当初は「焦点は渡すがキーボードは塞ぐ」形にしたが、**焦点を渡すとカーソルが出る**
-    // ——「打つ場所が光っているのに打てない」という見え方になり、壊れていると読まれた
-    // （利用者の観測・2026-09-04）。**カーソルも出さない**ことで齟齬そのものを無くす。
+    // 「タッチでは焦点を一切渡さない」形にした時期があったが、**入力欄そのものを押しても
+    // 何も起きない**——打つ道がボタン1つしか無くなった（利用者の観測・2026-09-05）。
+    // いまは触った場所で分ける。
+    //
+    // ```
+    // 入力欄の枠の中   → 入力可能にする（[`開く`]。焦点もキーボードも来る）
+    // それ以外をタップ → 入力可能を抜ける（[`入力可能を抜ける`]。カーソルもキーボードも消える）
+    // なぞり           → 焦点は動かさない（読んでいるだけなので、奪う理由が無い）
+    // ```
     //
     // **マウスの経路は変えない。** PC はタップと違って、押した場所で打ち始めるのが自然。
     const helper = term.textarea
@@ -171,6 +183,24 @@ export function TerminalPane({ cardId }: Props) {
       helper.blur()
       helper.inputMode = 'text'
       helper.focus()
+    }
+
+    /**
+     * 入力可能を抜ける。**焦点そのものを外す**ので、カーソルもキーボードも消える。
+     *
+     * # 端末の隠し欄を塞ぐだけでは足りない
+     *
+     * **焦点は、本アプリの入力欄（`Composer`）にあることがある。** その状態で端末を
+     * タップすると、外さないかぎり入力欄は焦点を持ったままで、**ブラウザがそれを画面内へ
+     * 引き戻す**——関係ない所を押したのに入力欄へ飛び、キーボードも開いたままになる
+     * （利用者の観測・2026-09-05）。だから、いま焦点を持っているものを名指しせずに外す。
+     */
+    const 入力可能を抜ける = () => {
+      塞ぐ()
+      const active = document.activeElement
+      if (active instanceof HTMLElement && active !== document.body) {
+        active.blur()
+      }
     }
 
     // **閉じたら塞ぎ直す。** 戻さないと、次に端末をタップしただけで開いてしまい、
@@ -366,6 +396,44 @@ export function TerminalPane({ cardId }: Props) {
       return screen.clientHeight / term.rows
     }
 
+    /**
+     * 触った高さが、いま画面の何行目に当たるか（可視領域の 0 起点）。読めなければ `null`。
+     *
+     * **基準は `.xterm-screen` の上端**で、`cellHeightOf` と同じ場所から引く。外側の
+     * 入れ物を使うと、格子より入れ物が大きいぶんの余白（設計§3-4）が混ざって1行ずれる。
+     * 格子は下端へ貼り付けてあり上が切り落とされる（`alignContent: end`）ので、**上端は
+     * 画面の外＝負の値になりうる**——`getBoundingClientRect()` はそれをそのまま返すので、
+     * 触った点（同じく窓の座標）と引き算するだけで正しく揃う。
+     *
+     * **格子の外（上下の余白。設計§3-4）なら、範囲の外の数がそのまま返る。** ここで
+     * 丸めたり弾いたりしない——**外かどうかを決める場所は [`rowInRange`] 1箇所**に
+     * しておく。2箇所で弾くと、片方を壊しても落ちないぶんだけ見張りが緩む。
+     */
+    const rowAt = (clientY: number): number | null => {
+      const screen = container.querySelector('.xterm-screen')
+      const cell = cellHeightOf()
+      if (!(screen instanceof HTMLElement) || cell <= 0) {
+        // 高さが読めない間（隠れている・描き終わる前）。**割ると NaN か ±Infinity に
+        // なる**ので、比較へ流さずここで諦める。流しても範囲の判定は偽と答えるため
+        // 振る舞いは変わらない——**この番兵だけを外しても1本も落ちない**（フェーズ8 の実測）
+        return null
+      }
+      return Math.floor((clientY - screen.getBoundingClientRect().top) / cell)
+    }
+
+    /**
+     * その行は入力欄の中か。**決めるのは [`inputBoxRows`]、測るのはここ**（設計§13-2）。
+     *
+     * **カーソルの位置は基準（`baseY`）からの数**なので、遡っているぶんを足して画面の
+     * 行へ直す。遡って画面の外に居るときは範囲の外の値になり、どの行とも一致しない
+     * ——ログを読んでいる最中のタップで打ち始めることにはならない。
+     */
+    const 入力欄の行か = (row: number): boolean => {
+      const buffer = term.buffer.active
+      const cursorRow = buffer.cursorY + buffer.baseY - buffer.viewportY
+      return rowInRange(inputBoxRows(visibleRows(term), cursorRow), row)
+    }
+
     const scroller = createTouchScroller({
       cellHeight: cellHeightOf,
       scrollLines: (lines) => term.scrollLines(lines),
@@ -413,16 +481,36 @@ export function TerminalPane({ cardId }: Props) {
         // 何を読んで偽になったのかは**その画面を見ないと分からない**。推測で直すと
         // 往復が増えるので、読む口をここに置く（既定では何も出ない）
         `選択待ち=${測る()} 論理行=${lines.length}`,
+        // **場所で決める判定の材料も出す。** 「入力欄を押したのに入らない」を実機で
+        // 踏んだとき、枠が何行目に見つかったのかは**その画面を見ないと分からない**
+        `入力欄=${JSON.stringify(inputBoxRows(visibleRows(term), buffer.cursorY + buffer.baseY - buffer.viewportY))}`,
         '--- 末尾8行（判定はここを見る） ---',
         ...lines.slice(-8).map((l, i) => `${i}| ${l}`),
       ].join('\n')
     }
 
-    // **「なぞったか」はもう持たない。** タッチでは焦点を渡さなくなったので
-    // （設計§12-2）、タップとなぞりを見分ける理由が消えた。`preventDefault()` は
-    // `scroller.move()` の戻り値だけで決まる
+    /**
+     * 触った点。**タップとなぞりを見分けるのと、当たった行を出すのに使う。**
+     *
+     * 見分ける必要が戻ってきたのは、行き先が3つに分かれたため（入る／抜ける／何もしない）。
+     * 指が2本以上なら `null` のまま——ピンチはタップではない。
+     */
+    let 触れた: { x: number; y: number } | null = null
+    /** 置いた点から離れた最大の距離（px）。これが小さいものだけをタップと呼ぶ。 */
+    let 離れた = 0
+    /**
+     * タップと呼べる動きの幅（px）。
+     *
+     * **遡り始めるしきい値と同じ値を使う。** 別に持つと、「遡ってはいないがタップでもない」
+     * という、どちらの道にも入らない動きが生まれる。
+     */
+    const TAP_SLOP = DEFAULT_TUNING.threshold
+
     const onTouchStart = (event: TouchEvent) => {
-      scroller.start(points(event))
+      const 指 = points(event)
+      触れた = 指.length === 1 ? 指[0] : null
+      離れた = 0
+      scroller.start(指)
       if (debugOn) {
         tally.start += 1
         showDebug('start')
@@ -431,7 +519,11 @@ export function TerminalPane({ cardId }: Props) {
     // **握ったかどうかだけを見て `preventDefault()` を決める。** 判断を2箇所に
     // 分けると、片方だけ直して片方が取り残される
     const onTouchMove = (event: TouchEvent) => {
-      const grabbed = scroller.move(points(event))
+      const 指 = points(event)
+      if (触れた && 指.length === 1) {
+        離れた = Math.max(離れた, Math.hypot(指[0].x - 触れた.x, 指[0].y - 触れた.y))
+      }
+      const grabbed = scroller.move(指)
       if (grabbed && event.cancelable) {
         event.preventDefault()
       }
@@ -447,34 +539,62 @@ export function TerminalPane({ cardId }: Props) {
         showDebug('move')
       }
     }
+    /**
+     * 指が離れた。**行き先を決めるのはここ1箇所**（設計§13-1）。
+     *
+     * | 何が起きたか | 焦点 | `preventDefault()` |
+     * |---|---|---|
+     * | 入力欄の枠をタップ | [`開く`]（焦点＋キーボード） | **呼ばない** |
+     * | それ以外をタップ | [`入力可能を抜ける`]（カーソルも消える） | 呼ぶ |
+     * | なぞり | 動かさない（読んでいるだけ） | 呼ぶ |
+     *
+     * # 入るときに `preventDefault()` を呼ばない理由
+     *
+     * 呼ぶと**ブラウザ既定の「焦点の移し替え」まで止まる**。以前ここで無条件に
+     * 呼んでいたせいで、本アプリの入力欄に焦点があるまま端末をタップすると、
+     * **画面が入力欄へ引き戻されキーボードが開いた**（利用者の観測・2026-09-05）。
+     * 止めたかったのは互換マウスイベントだけだったのに、道連れにしていた。
+     *
+     * 加えて、**iOS が「利用者の操作の中の `focus()`」と認めるかどうかに余計な変数を
+     * 持ち込まない**。開けてよい唯一の場面なので、既定の邪魔をしない。
+     *
+     * # 抜けるとき・なぞりでは呼ぶ
+     *
+     * 止めないと `touchend` のあとにブラウザが `pointerdown`（`pointerType: 'mouse'`）を
+     * 撃ち、**下の `onPointerDown` が焦点を渡してしまう**——タッチの経路で渡さなくても、
+     * マウスの経路から回り込まれる。**E2E が実際にこれを捕まえた。**
+     *
+     * # なぞりでは焦点を動かさない
+     *
+     * 利用者が求めたのは「**タップ**したら抜ける」であって、遡って読む操作で打ちかけの
+     * 文から焦点を奪う話ではない。
+     */
     const onTouchEnd = (event: TouchEvent) => {
+      // **決めるのは `scroller.end()` より先。** あちらは勢いが残っていれば滑り始め、
+      // 滑れば `viewportY` が動く＝行の対応が変わる
+      const 点 = 触れた
+      const タップ = 点 !== null && 離れた <= TAP_SLOP
+      const 行 = タップ && 点 ? rowAt(点.y) : null
+      const 入る = 行 !== null && 入力欄の行か(行)
       scroller.end()
-      // **互換マウスイベントを止める。** これを止めないと、`touchend` のあとに
-      // ブラウザが `pointerdown`（`pointerType: 'mouse'`）を撃ち、**下の
-      // `onPointerDown` が焦点を渡してしまう**——タッチの経路で渡さないようにしても、
-      // マウスの経路から回り込まれる。**E2E が実際にこれを捕まえた。**
-      //
-      // なぞりのときは `onTouchMove` が既に止めているが、**タップは通り抜ける**
-      // （動いていないので `preventDefault()` を呼ぶ枝に入らない）。
-      if (event.cancelable) {
-        event.preventDefault()
+      触れた = null
+      if (入る) {
+        開く()
+      } else {
+        if (event.cancelable) {
+          event.preventDefault()
+        }
+        if (タップ) {
+          入力可能を抜ける()
+        }
       }
-      // **タッチでは焦点を渡さない**（設計§12-2）。
-      //
-      // 焦点を渡すと**カーソルが出る**。スマホでは「打つ場所が光っているのに打てない」
-      // という見え方になり、**壊れていると読まれる**——キーボードだけを塞いでも、
-      // 齟齬はそこに残っていた（利用者の観測・2026-09-04）。
-      //
-      // カーソルも出さなければ、その齟齬そのものが起きない。端末へ打つ道は
-      // 入力欄の帯の「キーボード」ボタン1つに絞ってある。
-      //
-      // **マウスの経路（`onPointerDown`）は今までどおり渡す。** PC は何も変わらない。
       if (debugOn) {
         tally.end += 1
-        showDebug('end')
+        showDebug(`end 行=${行 ?? '-'} 入る=${入る}`)
       }
     }
     const onTouchCancel = () => {
+      触れた = null
       scroller.cancel()
       if (debugOn) {
         tally.cancel += 1
@@ -517,9 +637,8 @@ export function TerminalPane({ cardId }: Props) {
     //
     // `pointerdown` は**タップとなぞりを区別しない**。指を置いた瞬間に焦点を移すと、
     // **遡ろうとなぞるたびにソフトキーボードが出て**画面が半分隠れるうえ、入力欄に
-    // 打ちかけの文があっても焦点を奪う。**なぞりでは移さない**のが元の振る舞いで、
-    // それは `onTouchMove` の `preventDefault()` が互換マウスイベントを抑えていた
-    // ことによる。タッチは `touchend` まで待ち、**一度も握らなかったときだけ**移す。
+    // 打ちかけの文があっても焦点を奪う。タッチは `touchend` まで待ち、**触った場所を
+    // 見てから**決める（[`onTouchEnd`]）。
     //
     // 主ボタン以外（右クリック）でも移さない。
     const onPointerDown = (event: PointerEvent) => {
