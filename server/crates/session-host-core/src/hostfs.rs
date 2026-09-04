@@ -19,8 +19,8 @@
 
 use protocol::a2s::HostFailure;
 use protocol::fs::{
-    DirEntry, DirListing, EntryKind, FileBlob, FileContent, MAX_BLOB_BYTES, MAX_ENTRIES,
-    MAX_FILE_BYTES, MAX_LISTING_BYTES, media_type_of,
+    DirEntry, DirListing, EntryKind, FileBlob, FileContent, FileKind, MAX_BLOB_BYTES, MAX_ENTRIES,
+    MAX_FILE_BYTES, MAX_LISTING_BYTES, kind_of, media_type_of,
 };
 use std::path::{Path, PathBuf};
 
@@ -230,13 +230,18 @@ pub fn list_dir(path: &Path) -> Result<DirListing, HostFsError> {
 pub fn read_blob(path: &Path) -> Result<FileBlob, HostFsError> {
     let shown = path.display().to_string();
 
-    // **種別を先に見る。** 表に無いものは、大きさを測るまでもなく相手ではない
-    let Some(media_type) = media_type_of(&shown) else {
+    // **種別を先に見る。** ここは画像専用の道なので、大きさを測るまでもなく相手ではない。
+    //
+    // **媒体型の有無で見ない**（`ファイルの中身に掛けた隔離を、script の1段だけ解く`
+    // 設計§5-2）。あちらは表に無いものにも `text/plain` を返すようになったので、
+    // 門として使うと**テキストが画像の道へ入り込む**
+    if kind_of(&shown) != FileKind::Image {
         return Err(HostFsError::new(
             HostFailure::Unsupported,
-            format!("{shown} は生で返せる種別ではありません"),
+            format!("{shown} は画像ではないので、バイト列では返せません"),
         ));
-    };
+    }
+    let media_type = media_type_of(&shown);
 
     // **判定と読み取りが同じものを見る。** 下の `fs::read` はリンクを辿るので、
     // ここで `symlink_metadata`（辿らない側）を使うと、リンク1本で上限をすり抜けられる

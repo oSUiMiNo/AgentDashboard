@@ -142,21 +142,32 @@ pub enum FileKind {
     Text,
 }
 
+/// 表に無い拡張子と、整形して出す種別に与える型（`ファイルの中身に掛けた隔離を、script の
+/// 1段だけ解く` 設計§5-1）。
+///
+/// **`text/javascript` を返さないことが要点である。** `.js` もここへ落ちるので、
+/// `nosniff` と組んで**`<script src>` から実行できない**（設計§5-3。2026-09-04 に実測）。
+const TEXT_PLAIN: &str = "text/plain; charset=utf-8";
+
 /// 拡張子 → 種別と媒体型の対応（設計§2-1）。
 ///
-/// **媒体型を持たない種別（`markdown` / `text`）は生で返さない**（設計§5-2）。
-/// なんでも生で返せる口にすると、`.js` をダッシュボードと同じ出自で読ませる道ができる。
-const TABLE: &[(&str, FileKind, Option<&str>)] = &[
-    ("md", FileKind::Markdown, None),
-    ("markdown", FileKind::Markdown, None),
-    ("html", FileKind::Html, Some("text/html; charset=utf-8")),
-    ("htm", FileKind::Html, Some("text/html; charset=utf-8")),
-    ("svg", FileKind::Svg, Some("image/svg+xml")),
-    ("png", FileKind::Image, Some("image/png")),
-    ("jpg", FileKind::Image, Some("image/jpeg")),
-    ("jpeg", FileKind::Image, Some("image/jpeg")),
-    ("gif", FileKind::Image, Some("image/gif")),
-    ("webp", FileKind::Image, Some("image/webp")),
+/// **表に無いものも生で返す**（`ファイルの中身に掛けた隔離を、script の1段だけ解く`
+/// 設計§5-1）。かつては媒体型を持たない種別を 415 で断っていたが、**押しても意味の無い
+/// 相手にエラー画面を見せることになる**ので、[`TEXT_PLAIN`] を与えて字で出す。
+///
+/// **危なさは型のほうで抑えている。** `.js` を `text/javascript` で返さない限り、
+/// ダッシュボードと同じ出自でスクリプトを読ませる道はできない（設計§5-3）。
+const TABLE: &[(&str, FileKind, &str)] = &[
+    ("md", FileKind::Markdown, TEXT_PLAIN),
+    ("markdown", FileKind::Markdown, TEXT_PLAIN),
+    ("html", FileKind::Html, "text/html; charset=utf-8"),
+    ("htm", FileKind::Html, "text/html; charset=utf-8"),
+    ("svg", FileKind::Svg, "image/svg+xml"),
+    ("png", FileKind::Image, "image/png"),
+    ("jpg", FileKind::Image, "image/jpeg"),
+    ("jpeg", FileKind::Image, "image/jpeg"),
+    ("gif", FileKind::Image, "image/gif"),
+    ("webp", FileKind::Image, "image/webp"),
 ];
 
 /// 拡張子を小文字で取り出す。**大文字小文字は区別しない**（設計§2-3）——
@@ -178,15 +189,18 @@ pub fn kind_of(path: &str) -> FileKind {
         .map_or(FileKind::Text, |(_, kind, _)| *kind)
 }
 
-/// 生で返すときの `Content-Type`（設計§5-2）。
+/// 生で返すときの `Content-Type`（設計§5-2、および `ファイルの中身に掛けた隔離を、
+/// script の1段だけ解く` 設計§5-1）。
 ///
-/// **`None` は「生では返さない」**という意味である。呼ぶ側はここで断る。
-pub fn media_type_of(path: &str) -> Option<&'static str> {
+/// **すべての拡張子に型がある。** 表に無いものは [`TEXT_PLAIN`] になるので、**ここは
+/// 門にならない**。生で返してよいかを決めるのは呼ぶ側で、[`kind_of`] を見て道を選ぶ
+/// （設計§5-2）。かつてこの `None` を門にしていた3箇所は、**種別を見る形へ移してある**。
+pub fn media_type_of(path: &str) -> &'static str {
     let ext = extension_of(path);
     TABLE
         .iter()
         .find(|(known, _, _)| *known == ext)
-        .and_then(|(_, _, media)| *media)
+        .map_or(TEXT_PLAIN, |(_, _, media)| *media)
 }
 
 /// 添付として受け取る媒体型 → 置くときの拡張子。
@@ -206,9 +220,7 @@ pub fn attachment_extension_for(media_type: &str) -> Option<&'static str> {
         .to_ascii_lowercase();
     TABLE
         .iter()
-        .find(|(_, kind, media)| {
-            *kind == FileKind::Image && media.is_some_and(|known| known == wanted)
-        })
+        .find(|(_, kind, media)| *kind == FileKind::Image && **media == wanted)
         .map(|(ext, _, _)| *ext)
 }
 
@@ -219,7 +231,7 @@ pub fn is_attachment_extension(extension: &str) -> bool {
     let wanted = extension.to_ascii_lowercase();
     TABLE
         .iter()
-        .any(|(known, kind, media)| *known == wanted && *kind == FileKind::Image && media.is_some())
+        .any(|(known, kind, _)| *known == wanted && *kind == FileKind::Image)
 }
 
 /// 置いた添付1枚（`メッセージに画像を添付できるようにする` 設計§4）。
@@ -249,7 +261,8 @@ pub struct WrittenBlob {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileBlob {
     pub path: String,
-    /// `image/png` など。**拡張子から決める**（[`media_type_of`]）
+    /// `image/png` など。**拡張子から決める**（[`media_type_of`]）。
+    /// **ここへ来るのは画像だけ**——バイト列で運ぶ道は [`FileKind::Image`] に限ってある
     pub media_type: String,
     /// 元のファイルの大きさ
     pub bytes: u64,
@@ -325,7 +338,7 @@ mod tests {
             // Windows 側から持ち込まれたファイルで普通に起こる（設計§2-3）
             assert_eq!(kind_of("A.PNG"), FileKind::Image);
             assert_eq!(kind_of("B.Html"), FileKind::Html);
-            assert_eq!(media_type_of("A.JPEG"), Some("image/jpeg"));
+            assert_eq!(media_type_of("A.JPEG"), "image/jpeg");
         }
 
         #[test]
@@ -351,17 +364,37 @@ mod tests {
         }
 
         #[test]
-        fn 生で返してよいのは表に載る種別だけ() {
-            // **`None` は「生では返さない」という意味**（設計§5-2）
-            assert_eq!(media_type_of("撮った.png"), Some("image/png"));
-            assert_eq!(media_type_of("理解.html"), Some("text/html; charset=utf-8"));
-            assert_eq!(media_type_of("図.svg"), Some("image/svg+xml"));
-            assert_eq!(media_type_of("動く.gif"), Some("image/gif"));
-            assert_eq!(media_type_of("軽い.webp"), Some("image/webp"));
-            // 整形して出すものと素のテキストは、生で返す相手ではない
-            assert_eq!(media_type_of("計画.md"), None);
-            assert_eq!(media_type_of("メモ.txt"), None);
-            assert_eq!(media_type_of("組み込み.js"), None);
+        fn 表に載る種別は決まった型で返る() {
+            assert_eq!(media_type_of("撮った.png"), "image/png");
+            assert_eq!(media_type_of("理解.html"), "text/html; charset=utf-8");
+            assert_eq!(media_type_of("図.svg"), "image/svg+xml");
+            assert_eq!(media_type_of("動く.gif"), "image/gif");
+            assert_eq!(media_type_of("軽い.webp"), "image/webp");
+        }
+
+        #[test]
+        fn 表の外も素のテキストとして返る() {
+            // **415 を見せない**（`ファイルの中身に掛けた隔離を、script の1段だけ解く`
+            // 設計§5-1）。押しても意味の無い相手でも、字か理由のどちらかは必ず出る
+            assert_eq!(media_type_of("計画.md"), "text/plain; charset=utf-8");
+            assert_eq!(media_type_of("メモ.txt"), "text/plain; charset=utf-8");
+            assert_eq!(media_type_of("組み込み.js"), "text/plain; charset=utf-8");
+            assert_eq!(media_type_of("README"), "text/plain; charset=utf-8");
+        }
+
+        #[test]
+        fn jsを実行できる型で返さない() {
+            // **綴りを1つ字で固定する。** ここが崩れると、`nosniff` と組んで
+            // 「`<script src>` から実行できない」と言えた根拠が消える（設計§5-3）。
+            // 守っているのは nosniff の1枚だけなので、型のほうも見ておく
+            for name in ["組み込み.js", "型.ts", "束.mjs"] {
+                let media = media_type_of(name);
+                assert!(
+                    !media.contains("javascript"),
+                    "{name} を実行できる型で返さないこと（{media}）"
+                );
+                assert!(!media.contains("ecmascript"), "{name}（{media}）");
+            }
         }
     }
 

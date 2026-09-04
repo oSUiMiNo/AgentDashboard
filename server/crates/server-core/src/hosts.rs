@@ -53,7 +53,8 @@ pub struct CardQuery {
     pub card: String,
 }
 
-/// 生で返すときに必ず付ける CSP（`ファイル閲覧で画像とHTMLも表示する` 設計§5-3）。
+/// 生で返すときに必ず付ける CSP（`ファイル閲覧で画像とHTMLも表示する` 設計§5-3、
+/// および `ファイルの中身に掛けた隔離を、script の1段だけ解く` 設計§3）。
 ///
 /// # なぜヘッダで出すのか
 ///
@@ -61,11 +62,20 @@ pub struct CardQuery {
 /// `sandbox` 属性は埋め込む側にしか付けられないので、これが無いと、この URL を直接
 /// 開いた人の画面で他人の HTML が**ダッシュボードと同じ出自**で動く。
 ///
-/// 許可は3つだけ。**理解doc の作法（インライン `<style>`・`data:` の画像・インライン SVG）**
-/// がそのまま読めることを実測してある（設計§15 の4）ので、これ以上は緩めない。
-/// 緩めるときは**1つずつ**足して、理由を設計§5-3 へ書く。
-pub const RAW_CSP: &str =
-    "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:";
+/// # script を1段だけ通してある
+///
+/// 許したのは `allow-scripts` と `script-src 'unsafe-inline'` の2段だけである。**理解
+/// ドキュメントの作法が、文書内で完結するインライン script を許しているため**——落として
+/// いることを誰にも知らせないので、読者は文書が壊れたと受け取る（設計§1-2）。
+///
+/// **`allow-same-origin` は書かない。** 両方付くと箱がダッシュボードと同じ出自を名乗れ、
+/// script が自分で `sandbox` を外せる——鍵を渡したうえで「外してよい」と言うのと同じに
+/// なる（設計§4-2）。`allow-popups` ／ `allow-modals` ／ `allow-forms` ／
+/// `allow-top-navigation` も書かない。**要る文書が現れたときに、そのとき理由を添えて足す。**
+///
+/// **`default-src 'none'` は据え置く。** 取ってくる方向は1つも開いていない（設計§3-3）。
+/// 緩めるときは**1つずつ**足して、理由を設計§3 へ書く。
+pub const RAW_CSP: &str = "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; img-src data:; style-src 'unsafe-inline'; font-src data:";
 
 /// `GET /api/hosts/{host}/dir?path=…`
 pub async fn api_dir(
@@ -178,22 +188,27 @@ pub async fn api_attachment(
     Ok(Json(written).into_response())
 }
 
-/// 生のバイト列で返す（設計§5-2・§5-3）。
+/// 生のバイト列で返す（設計§5-2・§5-3、および `ファイルの中身に掛けた隔離を、
+/// script の1段だけ解く` 設計§5）。
 ///
-/// **なんでも生で返せる口にしてはいけない。** `.js` を `text/javascript` で返せる口が
-/// あると、ダッシュボードと同じ出自でスクリプトを読ませる道になる。表に載っている
-/// 種別だけを返し、載っていないものは既定の JSON の口で読む。
+/// # 種別で断らない
+///
+/// **どの拡張子も返す。** かつては媒体型を持たない種別を 415 で断っていたが、画面に
+/// 「ブラウザで開く」を置いた以上、**押しても意味の無い相手にエラー画面を見せることに
+/// なる**。表に無いものは `text/plain` で字として出す（設計§5-1）。
+///
+/// **`.js` を `text/javascript` で返さないことは変わっていない。** 危なさは種別の門では
+/// なく型のほうで抑えており、`nosniff` と組んで `<script src>` から実行できない
+/// （設計§5-3。2026-09-04 に実ブラウザで実測）。
+///
+/// **読めないものは、読めない理由で断られる。** バイナリ（NUL を含む）と非 UTF-8 は
+/// この下の `read_file` が落とすので、素のエラー画面にはならない（設計§5-4）。
 async fn raw_file(
     state: &AppState,
     ask: HostAskRequest,
     path: &str,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
-    let Some(media_type) = protocol::fs::media_type_of(path) else {
-        return Err(refuse(HostAskError::Failed {
-            reason: HostFailure::Unsupported,
-            detail: format!("{path} は生で返せる種別ではありません"),
-        }));
-    };
+    let media_type = protocol::fs::media_type_of(path);
 
     // **作り方は種別で分かれる。** HTML と SVG はテキストなので既存の道から作れる
     // （それぞれの上限がそのまま効く）。画像だけが新設のバイト列の道を通る（設計§5-2）
@@ -396,26 +411,58 @@ mod tests {
     #[test]
     fn 生で返すときのcspは字で固定する() {
         // **綴りを1つ字で書く。** 定数から組み立てると、崩れたときに一緒に動いて通る。
-        // ここが崩れても画面は普通に動くので、気づく手段が他に無い（設計§5-3）
+        // ここが崩れても画面は普通に動くので、気づく手段が他に無い（設計§3-1）
         assert_eq!(
             RAW_CSP,
-            "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:"
+            "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; img-src data:; style-src 'unsafe-inline'; font-src data:"
         );
-        // 4つの部品を名指しでも見る。並べ替えただけの崩れを、上の1本と別に捕まえる
+        // 部品を名指しでも見る。並べ替えただけの崩れを、上の1本と別に捕まえる
         for piece in [
-            "sandbox",
+            "sandbox allow-scripts",
             "default-src 'none'",
+            "script-src 'unsafe-inline'",
             "img-src data:",
             "style-src 'unsafe-inline'",
         ] {
             assert!(RAW_CSP.contains(piece), "{piece} が要る");
         }
-        // **script は1つも許さない。** ここが緩むと、隔離そのものが意味を失う
-        assert!(
-            !RAW_CSP.contains("script-src"),
-            "script を許す指定を持たないこと"
-        );
         assert!(!RAW_CSP.contains("unsafe-eval"));
+    }
+
+    #[test]
+    fn 緩めたのはscriptの1段だけである() {
+        // **`allow-same-origin` を書かない。** `allow-scripts` と両方付くと、箱が
+        // ダッシュボードと同じ出自を名乗れて自分で `sandbox` を外せる——隔離が実質
+        // 消える（設計§4-2）。**ここが崩れても画面は普通に動く**ので、字で見る
+        assert!(
+            !RAW_CSP.contains("allow-same-origin"),
+            "出自を名乗らせないこと"
+        );
+        // 足していない許可を1つずつ名指しする。**黙って増えないこと**が要点で、
+        // 要る文書が現れたときに理由を添えて足す（設計§4-3）
+        for 足していない in [
+            "allow-popups",
+            "allow-modals",
+            "allow-forms",
+            "allow-top-navigation",
+            "allow-downloads",
+            "allow-pointer-lock",
+        ] {
+            assert!(
+                !RAW_CSP.contains(足していない),
+                "{足していない} は足していないこと"
+            );
+        }
+        // **取ってくる方向は閉じたまま。** ここが緩むと、開いただけで外部へ痕跡が残る
+        // （`ファイル閲覧で画像とHTMLも表示する` 設計§6-3）
+        assert!(
+            RAW_CSP.contains("default-src 'none'"),
+            "外は閉じたままのこと"
+        );
+        assert!(
+            !RAW_CSP.contains("connect-src"),
+            "通信を開く指定を持たないこと"
+        );
     }
 
     #[test]

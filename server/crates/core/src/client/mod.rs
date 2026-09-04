@@ -467,12 +467,21 @@ pub async fn attach(
     let card = resolve_card_id(target, prefix).await?;
     let shown = file.display().to_string();
 
-    // **媒体型は拡張子から決める。** 中身から推測すると、外したときに嘘の拡張子で置く
-    let Some(media_type) = protocol::fs::media_type_of(&shown) else {
+    // **媒体型は拡張子から決める。** 中身から推測すると、外したときに嘘の拡張子で置く。
+    //
+    // **門は種別で見る**（`ファイルの中身に掛けた隔離を、script の1段だけ解く` 設計§5-2）。
+    // `media_type_of` は表に無いものにも `text/plain` を返すようになったので、**あれを
+    // 門にすると `.md` や `.txt` が添付として PC へ書き込めるようになる**——ここは読む口
+    // ではなく**書く口**なので、素通しにすると被害の向きが変わる。
+    //
+    // 種別で見ると、断り文が名指ししている顔ぶれと実装が**初めて一致する**。以前は
+    // `svg` が `media_type_of` を通ってしまい、文言と食い違っていた
+    if protocol::fs::kind_of(&shown) != protocol::fs::FileKind::Image {
         return Err(ClientError::BadUrl(format!(
             "{shown} は添付として送れる種別ではありません（png / jpg / jpeg / gif / webp）"
         )));
-    };
+    }
+    let media_type = protocol::fs::media_type_of(&shown);
 
     let data = std::fs::read(file)
         .map_err(|err| ClientError::BadUrl(format!("{shown} を読めません: {err}")))?;
