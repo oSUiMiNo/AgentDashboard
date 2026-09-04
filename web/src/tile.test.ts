@@ -817,19 +817,52 @@ describe('操作の群は、いま触っている1枚にだけ出る', () => {
     expect(群).toMatch(/display:\s*flex/)
   })
 
-  it('3つとも当たり判定が 44px の床を割らない', () => {
-    // 見た目は変えずに疑似要素で広げる（ボタン自体を大きくすると①②行の押し場所を食う）
-    const 広げ幅 = (selector: string) => {
-      const 判定 = 当たる(selector)
-      expect(判定, selector).toHaveLength(1)
-      const inset = 判定[0].body.match(/inset:\s*(-?[\d.]+)px/)
-      expect(inset, selector).not.toBeNull()
-      return Math.abs(Number(inset![1]))
-    }
+  /**
+   * `inset` の4辺を読む。
+   *
+   * **先頭の値だけを見ないこと。** 横だけ縮めた形（隣と重ならないようにするため）を
+   * 先頭値で測ると、**縮めた側を見ずに合格を出す**。
+   */
+  const 広げ幅 = (selector: string) => {
+    const 判定 = 当たる(selector)
+    expect(判定, selector).toHaveLength(1)
+    const inset = 判定[0].body.match(/inset:\s*([^;]+);/)
+    expect(inset, selector).not.toBeNull()
+    const 値 = inset![1]
+      .trim()
+      .split(/\s+/)
+      .map((v) => Math.abs(Number.parseFloat(v)))
+    // CSS の省略記法：1つ＝全辺、2つ＝縦横、3つ＝上・横・下、4つ＝上右下左
+    const [上, 右 = 上, 下 = 上, 左 = 右] = 値
+    return { 上, 右, 下, 左 }
+  }
+
+  it('3つとも、縦の当たり判定が 44px の床を割らない', () => {
+    // 見た目は変えずに疑似要素で広げる（ボタン自体を大きくすると①②行の押し場所を食う）。
     // 編集とゴミ箱は 24×24px（印 14px ＋ 余白）、電源は 28×28px
-    expect(24 + 広げ幅('.tile-pencil::after') * 2).toBeGreaterThanOrEqual(44)
-    expect(24 + 広げ幅('.tile-archive::after') * 2).toBeGreaterThanOrEqual(44)
-    expect(28 + 広げ幅('.tile-ops .power::after') * 2).toBeGreaterThanOrEqual(44)
+    const 鉛筆 = 広げ幅('.tile-pencil::after')
+    const ゴミ箱 = 広げ幅('.tile-archive::after')
+    const 電源 = 広げ幅('.tile-ops .power::after')
+    expect(24 + 鉛筆.上 + 鉛筆.下).toBeGreaterThanOrEqual(44)
+    expect(24 + ゴミ箱.上 + ゴミ箱.下).toBeGreaterThanOrEqual(44)
+    expect(28 + 電源.上 + 電源.下).toBeGreaterThanOrEqual(44)
+  })
+
+  it('隣の見えているボタンの上へ、当たり判定がはみ出さない', () => {
+    /*
+      **兄弟は後ろが上に描かれる。** 横へ等方に広げると、隣の**見えているボタンの上まで**
+      判定が伸び、DOM 順で後ろに居るほうが取る——「取り返しの付く順」（編集 → ゴミ箱 →
+      電源）と**逆向き**に漏れて、鉛筆を狙うとゴミ箱、ゴミ箱を狙うと電源が出る。
+
+      隙間の半分までなら、どの点も狙った相手にしか当たらない。
+    */
+    const 隙間 = Number.parseFloat(値(規則('.tile-ops'), 'gap'))
+    expect(隙間).toBeGreaterThan(0)
+    const 半分 = 隙間 / 2
+    expect(広げ幅('.tile-pencil::after').右).toBeLessThanOrEqual(半分)
+    expect(広げ幅('.tile-archive::after').左).toBeLessThanOrEqual(半分)
+    expect(広げ幅('.tile-archive::after').右).toBeLessThanOrEqual(半分)
+    expect(広げ幅('.tile-ops .power::after').左).toBeLessThanOrEqual(半分)
   })
 })
 

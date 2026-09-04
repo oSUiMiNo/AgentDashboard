@@ -486,13 +486,20 @@
 .tile-ops .power::after {
   content: '';
   position: absolute;
-  inset: -8px;
+  /*
+    **横は隣との隙間の半分までしか広げない**（`gap` が 6px なので 3px）。
+    等方に広げると**隣の見えているボタンの上まで当たり判定が伸び**、兄弟は後ろが上に
+    描かれるので、**見えているゴミ箱の右端を押すと電源（止める）が出る**——「取り返しの
+    付く順に並べた」意図と逆向きに漏れる。右端は群の外側なので広げてよい。
+  */
+  inset: -8px -8px -8px -3px;
 }
 
 .tile-archive::after {
   content: '';
   position: absolute;
-  inset: -11px;
+  /* 左右とも隣が居るので、隙間の半分（3px）まで。理由は電源の `::after` と同じ */
+  inset: -11px -3px;
 }
 
 /*
@@ -531,7 +538,8 @@
 .tile-pencil::after {
   content: '';
   position: absolute;
-  inset: -11px;
+  /* 左端は群の外側なので広げてよい。右はゴミ箱が居るので隙間の半分（3px）まで */
+  inset: -11px -3px -11px -11px;
 }
 
 /* ───────────────── 状態ごとの動き ───────────────── */

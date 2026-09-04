@@ -51,6 +51,8 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { Badge } from '@/components/ui/badge'
 import { PencilGlyph, TrashGlyph } from '@/components/ui/glyphs'
+import { dropDraft } from '@/lib/drafts'
+import { useAuthStore } from '@/stores/auth'
 import { NoticeBell } from '@/components/NoticeBell/NoticeBell'
 import { PowerButton } from '@/components/ui/power-button'
 import { NicknameInput } from '@/components/SessionNickname/NicknameInput'
@@ -248,6 +250,8 @@ export function SessionTile({
   const revive = useWsStore((state) => state.revive)
   const kill = useWsStore((state) => state.kill)
   const archive = useWsStore((state) => state.archive)
+  // 下書きの置き場所はアカウントごと。**外すときに一緒に畳む**ため（下の `archive-card`）
+  const account = useAuthStore((state) => state.auth.account)
   const setNickname = useWsStore((state) => state.setNickname)
   /*
     **名前を書き換えている最中か**（名前付け設計§9-5）。
@@ -988,6 +992,10 @@ export function SessionTile({
             aria-label="終了"
             onClick={(event) => {
               event.stopPropagation()
+              // **カードを外したら書きかけも忘れる。** 残すと、二度と開かない相手の
+              // 下書きが積み上がる（十字ボタン設計§11）。セッション画面の `close-card`
+              // が既にこの形なので、**同じ操作で片方だけ残さない**
+              dropDraft(session.card_id, account)
               archive(session.card_id)
             }}
             className="tile-archive text-muted-foreground hover:text-foreground relative rounded-[3px] p-1 transition-colors active:scale-[0.98]"
