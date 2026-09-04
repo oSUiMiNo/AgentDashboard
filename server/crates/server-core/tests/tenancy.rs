@@ -10,7 +10,7 @@
 //! |---|---|
 //! | REST 全エンドポイント | 他人のカードの一覧・履歴を要求する／**他人の枠を一覧・削除し、他人の PC へ枠を作る** |
 //! | WS 購読 | `SubTranscript` / `SubPty` を他人のカードへ出す |
-//! | WS 操作 | `Kill` / `Archive` / `SetModel` / `SetPermissionMode` / `SendInput` / `Resize` / `PtyFlow` / **`SetNickname`** / 生の入力 / `Spawn`（他人の PC 宛て）を出す |
+//! | WS 操作 | `Kill` / `Archive` / `SetModel` / `SetPermissionMode` / `SendInput` / `Resize` / `PtyFlow` / **`SetNickname`** / **`BranchSession`** / 生の入力 / `Spawn`（他人の PC 宛て）を出す |
 //! | **カードIDを運ばない口** | **他人の CLI セッションを名指しして `RecallSession` を出す**（名前付け設計§11-4）。`target_card` の門が効かないので、記録を引くところで絞れていないと素通りする |
 //! | **過去のセッションの一覧** | `GET /api/sessions/past` に他人のぶんが混ざらない |
 //! | A2S | 自分の接続から**他人の card_id** を報告する |
@@ -462,6 +462,9 @@ async fn 他人のカードへの購読と操作は全部断られる() {
                     nickname: Some("勝手に付けた名前".to_string()),
                 },
             ),
+            // 枝分かれ（ブランチ設計§3-2）。**他人のカードで本物の claude を
+            // 2本立てる**操作なので、起こし直しと同じ重さがある
+            ("枝分かれ", ClientMessage::BranchSession { card_id }),
         ];
         for (what, message) in crossings {
             browser.expect_refused(message, what).await;

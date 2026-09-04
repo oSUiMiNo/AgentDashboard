@@ -46,11 +46,11 @@ use std::sync::{Arc, Mutex};
 use testkit::fake_claude::{
     ARGV_PREFIX, BRANCHED_PREFIX, BYE_MARKER, BYPASS_ACCEPTED_MARKER, BYPASS_NOTICE,
     BYPASS_OPTIONS, CANCELLED_MARKER, CRASH_MARKER, CYCLE_MODES, DEQUEUED_MARKER, DUMP_END_MARKER,
-    ENV_PREFIX, FLOOD_END_MARKER, FLOOD_PATTERN, FOOTER_PREFIX, HOOK_FAILED_PREFIX, HOOK_SENT_PREFIX,
-    JSONL_APPENDED_PREFIX, JSONL_FAILED_PREFIX, MODEL_SET_PREFIX, MODEL_SWITCH_NOTICE,
-    MODEL_SWITCH_OPTIONS, QUEUED_PREFIX, READY_MARKER, RECEIVED_PREFIX, REPLIED_PREFIX,
-    RESIZED_PREFIX, SAID_PREFIX, STATUS_LINE_SENT_PREFIX, footer_for, physical_lines,
-    render_dialog, resolve_model,
+    ENV_PREFIX, FLOOD_END_MARKER, FLOOD_PATTERN, FOOTER_PREFIX, HOOK_FAILED_PREFIX,
+    HOOK_SENT_PREFIX, JSONL_APPENDED_PREFIX, JSONL_FAILED_PREFIX, MODEL_SET_PREFIX,
+    MODEL_SWITCH_NOTICE, MODEL_SWITCH_OPTIONS, QUEUED_PREFIX, READY_MARKER, RECEIVED_PREFIX,
+    REPLIED_PREFIX, RESIZED_PREFIX, SAID_PREFIX, STATUS_LINE_SENT_PREFIX, footer_for,
+    physical_lines, render_dialog, resolve_model,
 };
 
 /// 起動時に受け取った、フック実行に必要な情報。
@@ -115,7 +115,10 @@ impl Injected {
 
     /// いま名乗っている CLI 側のセッションID。
     fn session_id(&self) -> String {
-        self.session_id.lock().expect("ロックが壊れていない").clone()
+        self.session_id
+            .lock()
+            .expect("ロックが壊れていない")
+            .clone()
     }
 
     /// 1つ進めた先のモード。いまのモードが巡回に入っていなければ先頭へ。
@@ -453,10 +456,7 @@ fn main() {
         // 張り替えるので、待っている側はこれで枝分かれを知る。
         if line == "/branch" {
             let 枝 = protocol::ClaudeSessionId::new().to_string();
-            *injected
-                .session_id
-                .lock()
-                .expect("ロックが壊れていない") = 枝.clone();
+            *injected.session_id.lock().expect("ロックが壊れていない") = 枝.clone();
             let _ = writeln!(out, "{BRANCHED_PREFIX}{枝}");
             let _ = out.flush();
             hook(&mut out, &injected, "SessionStart");

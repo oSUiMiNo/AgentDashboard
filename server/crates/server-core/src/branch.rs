@@ -234,8 +234,13 @@ impl Branch {
                 return None;
             }
             let 待つ = POLL.min(期限 - tokio::time::Instant::now());
-            match tokio::time::timeout(待つ, events.recv()).await {
-                Ok(Ok(event)) => {
+            // **待つ間隔が過ぎただけなら、次の周回で記録を直に確かめる。**
+            // ここを `Err(_) => {}` と書くと「別の綴りで結果を捨てている」ことになる
+            let Ok(受け取った) = tokio::time::timeout(待つ, events.recv()).await else {
+                continue;
+            };
+            match 受け取った {
+                Ok(event) => {
                     if event.account_id != self.account_id {
                         continue;
                     }
@@ -245,11 +250,10 @@ impl Branch {
                         return Some(*session);
                     }
                 }
-                // 取りこぼした。次の周回で記録を直に確かめるので、ここでは何もしない
-                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+                // 取りこぼした。次の周回で記録を直に確かめるので、ここでは待ちへ戻る
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 // 配信そのものが閉じた。記録の確認だけで続ける意味は無い
-                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return None,
-                Err(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
             }
         }
     }

@@ -3012,3 +3012,131 @@ async fn 停滞したカードは本物の画面を見て入力待ちへ戻る()
         .archive(session.card_id)
         .expect("片付けられること");
 }
+
+// ---------------------------------------------------------------------------
+// N. 枝分かれ（`/branch`）の実測（ブランチ設計§12）
+//
+// **この1本は合否ではなく数値を採るために在る。** ブランチ機能の設計は「`/branch` を
+// 撃つと押した席が枝になり、CLI 側のセッションIDが張り替わる」という前提の上に
+// 建っているが、**その前提を実物で見た者が居なかった**（設計はコードと既存の注釈
+// だけから組んである）。段取り役が置く2つの待ちの上限は、ここで測らないと決まらない。
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "本物の claude を起動し、アカウントのクォータを消費する（make test-cli）"]
+async fn branchは席を枝にしてIDだけを張り替える() {
+    let dir = WorkDir::new("branch");
+    let program = claude_wrapper(&dir, &[]);
+    let server = common::TestServer::start_with_program(
+        Config::default(),
+        program.to_string_lossy().into_owned(),
+    )
+    .await;
+
+    let session = server
+        .manager
+        .spawn(&dir.as_str())
+        .expect("セッションを起動できること");
+    let mut watcher = common::Watcher::attach(&session);
+    accept_trust_prompt_if_any(&session, &mut watcher).await;
+    wait_for_status(&session, SessionStatus::WaitingInput).await;
+
+    let 元のID = wait_for_session_id(&session).await;
+    let 元のカード = session.card_id;
+    let 元の履歴 = session.transcript_path();
+    println!("【実測】元のID={元のID} 元のカード={元のカード}");
+
+    // **撃つ前に控える。** 段取り役も同じ順で控える（設計§3-2 の①）
+    watcher.drain_quiet_for(Duration::from_millis(500)).await;
+    let 撃った時刻 = Instant::now();
+    session
+        .write_input(b"/branch\r")
+        .expect("端末へ書き込めること");
+
+    // 待ち①：席の CLI 側IDが別物へ張り替わる
+    let deadline = Instant::now() + CLI_TIMEOUT;
+    let 枝のID = loop {
+        let now = session.meta().claude_session_id;
+        if let Some(id) = now
+            && id != 元のID
+        {
+            break id;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{CLI_TIMEOUT:?} 以内に CLI 側のIDが張り替わりませんでした。\
+             `/branch` が効いていないか、押した席が枝にならない作りに変わっています。\
+             画面に出ていたもの: {}",
+            watcher.seen()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let 待ち1 = 撃った時刻.elapsed();
+
+    println!("【実測】待ち①（/branch → IDの張り替え）= {待ち1:?}");
+    println!("【実測】枝のID={枝のID}");
+    println!(
+        "【実測】画面に出ていたもの（**製品は読まない。参考のみ**）:\n{}",
+        watcher.seen()
+    );
+
+    // カードは死なない（設計§3-2 の前提。ここが崩れると段取りが丸ごと成立しない）
+    assert_eq!(
+        session.card_id, 元のカード,
+        "枝になってもカードは同じ（CardId は生涯不変）"
+    );
+    let 枝の状態 = session.status();
+    println!("【実測】枝になった直後の状態={枝の状態:?}");
+    assert!(
+        !matches!(枝の状態, SessionStatus::Ended { .. }),
+        "`/branch` で席が終端へ落ちました（{枝の状態:?}）。設計§3-2 の前提が崩れています"
+    );
+
+    // 履歴は別のファイルになるか（同じファイルへ二重に書いていないこと）
+    let 枝の履歴 = session.transcript_path();
+    println!("【実測】元の履歴={元の履歴:?}");
+    println!("【実測】枝の履歴={枝の履歴:?}");
+    assert_ne!(
+        元の履歴, 枝の履歴,
+        "枝と元が同じ履歴ファイルを指しています。二重に書き込む形になっており危険です"
+    );
+
+    // 待ち②：元の会話を別の席へ呼び戻し、立ち上がるまでを測る
+    let 呼び戻し時刻 = Instant::now();
+    let 呼び戻した = server
+        .manager
+        .resume(&dir.as_str(), 元のID)
+        .expect("元の会話を呼び戻せること");
+    let mut watcher2 = common::Watcher::attach(&呼び戻した);
+    accept_trust_prompt_if_any(&呼び戻した, &mut watcher2).await;
+    let 戻ったID = wait_for_session_id(&呼び戻した).await;
+    let 待ち2 = 呼び戻し時刻.elapsed();
+
+    println!("【実測】待ち②（呼び戻し → 席が立つ）= {待ち2:?}");
+    assert_eq!(
+        戻ったID, 元のID,
+        "呼び戻した席が元の会話を名乗っていません（{戻ったID} ≠ {元のID}）"
+    );
+    assert_ne!(
+        呼び戻した.card_id, 元のカード,
+        "呼び戻しは新しいカードになること"
+    );
+
+    // 枝の席は生きたまま（呼び戻しに巻き込まれていないこと）
+    assert_eq!(
+        session.meta().claude_session_id,
+        Some(枝のID),
+        "呼び戻しのあとも、枝の席は枝のIDを名乗ったままであること"
+    );
+
+    println!("【実測まとめ】待ち①={待ち1:?} 待ち②={待ち2:?}（設計§3-5 の上限はこの値から決める）");
+
+    server
+        .manager
+        .archive(呼び戻した.card_id)
+        .expect("片付けられること");
+    server
+        .manager
+        .archive(session.card_id)
+        .expect("片付けられること");
+}

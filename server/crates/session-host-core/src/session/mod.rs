@@ -2281,6 +2281,7 @@ impl SessionManager {
                 // 何番目かを知らないので 0 を名乗り、サーバが記録の値で上書きする
                 position: 0,
                 nickname: None,
+                branched_from: None,
             }),
             process,
             ring: Mutex::new(RingBuffer::new(self.config.pty_ring_buffer)),
