@@ -85,7 +85,7 @@ import { isComposerSubmit } from '@/lib/keys'
 import { isEnded, type SessionStatus } from '@/lib/protocol'
 import type { CardId } from '@/lib/protocol'
 import { useAuthStore } from '@/stores/auth'
-import { clearCardError, useCardError } from '@/stores/sessions'
+import { clearCardNotices, useCardError } from '@/stores/sessions'
 import { useWsStore } from '@/stores/ws'
 
 /**
@@ -295,7 +295,11 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
     // **前の断りを消してから送る。** 残したままだと、同じ文言の断りが2回続いたときに
     // `useCardError` の値が変わらず、React から「届いた」ことが見えない
     // （`useSyncExternalStore` が `Object.is` で弾く）
-    clearCardError(cardId)
+    //
+    // **消すのは送信の断りだけ。** 種別を省くと全部消えるので、復旧の失敗や端末が
+    // 開けない断り（どちらも消えない側・設計§7-3）が、指示を1つ送っただけで
+    // **読む前に消える**——`clearCardError` の doc がまさにこれを禁じている
+    clearCardNotices(cardId, 'send_input')
 
     // **送れたときだけ消す。** 送れていない文が消えるのが、いちばん困る形
     if (!sendInput(cardId, text, paths)) {

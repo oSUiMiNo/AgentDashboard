@@ -6,17 +6,35 @@ import { NoticeBell } from './NoticeBell'
 import type { Notice } from '@/stores/sessions'
 
 /** ベル（細かい修正 設計§7-4。テスト計画フェーズ4・5）。 */
+let 連番 = 0
 function notice(over: Partial<Notice> = {}): Notice {
+  連番 += 1
   return {
     kind: 'revive',
     message: '起こせません',
     createdAt: Date.parse('2026-09-05T01:23:45'),
+    seq: 連番,
     expiresAt: null,
     ...over,
   }
 }
 
 describe('ベル', () => {
+  it('同じ時刻・同じ種別・同じ文言でも、2件として並ぶ', () => {
+    // **時刻では一意にならない。** 送信を連打すると同じミリ秒に同じ断りが2件届く。
+    // 時刻・種別・文言を繋いだものを `key` にすると重複し、React が並びを取り違える
+    const 同時 = Date.parse('2026-09-05T01:23:45')
+    render(
+      <NoticeBell
+        notices={[
+          { kind: 'send_input', message: '送れません', createdAt: 同時, seq: 1, expiresAt: null },
+          { kind: 'send_input', message: '送れません', createdAt: 同時, seq: 2, expiresAt: null },
+        ]}
+      />,
+    )
+    expect(screen.getByTestId('notice-bell-count')).toHaveTextContent('2')
+  })
+
   it('1件も無ければ出ない', () => {
     // **常に出すと、押す意味のない印が画面に居座る**。要件が消したかったのは
     // 「ずっと出続けて邪魔」な表示なので、代わりに常駐する印を建てては本末転倒

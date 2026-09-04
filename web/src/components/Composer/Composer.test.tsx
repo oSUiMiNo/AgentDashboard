@@ -368,7 +368,10 @@ describe('断られたら戻す', () => {
     await waitFor(() =>
       expect(screen.queryByTestId('composer-attachments')).toBeNull(),
     )
-    act(() => setCardError(CARD, '画像の印が 1 枚ぶん出ませんでした'))
+    // **種別は実経路に合わせる。** `stores/ws.ts` はサーバの `kind` をそのまま渡すので、
+    // 送信の断りは `send_input` で届く。ここを省いて `other` にすると、送信前の地ならしで
+    // 消えず、**実際には起きない筋**（前の断りが残ったまま次が届く）を固定してしまう
+    act(() => setCardError(CARD, '画像の印が 1 枚ぶん出ませんでした', 'send_input'))
   }
 
   it('入力欄の本文が戻る', async () => {
@@ -411,7 +414,10 @@ describe('断られたら戻す', () => {
 
     fireEvent.submit(screen.getByTestId('composer'))
     await waitFor(() => expect(sendInput).toHaveBeenCalledTimes(2))
-    act(() => setCardError(CARD, 同じ文言))
+    // **種別を渡す。** 実際の経路（`stores/ws.ts`）はサーバの `kind` をそのまま渡すので、
+    // 送信の断りは `send_input` で届く。送信前の地ならしが消すのもこの種別だけである
+    // ——種別を省くと**復旧の失敗など「消えない側」まで巻き添えで消える**
+    act(() => setCardError(CARD, 同じ文言, 'send_input'))
 
     await waitFor(() =>
       expect(

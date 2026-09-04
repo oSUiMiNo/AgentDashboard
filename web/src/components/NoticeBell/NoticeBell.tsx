@@ -41,6 +41,13 @@ export function NoticeBell({ notices }: { notices: readonly Notice[] }) {
     <Popover>
       <PopoverTrigger
         data-testid="notice-bell"
+        /*
+          **掴みと、外側の押下から切り離す。** カードの本体は `<button>`（`tile-body`）で、
+          ベルはその中に居る——押下をそのまま通すと**ベルを押すとセッションが開き**、
+          `pointerdown` は**並べ替えの掴みを始める**。`data-no-grab` は `useGrip` が見る印。
+        */
+        data-no-grab=""
+        onClick={(event) => event.stopPropagation()}
         aria-label={`溜まっている知らせ ${notices.length}件`}
         title={`溜まっている知らせ ${notices.length}件`}
         className="text-muted-foreground hover:text-foreground inline-flex shrink-0 items-center gap-0.5 rounded px-1 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
@@ -52,7 +59,7 @@ export function NoticeBell({ notices }: { notices: readonly Notice[] }) {
         <ul className="flex flex-col gap-2">
           {新しい順.map((notice) => (
             <li
-              key={`${notice.createdAt}-${notice.kind}-${notice.message}`}
+              key={notice.seq}
               data-testid="notice-item"
               data-kind={notice.kind}
               className="flex flex-col gap-0.5"

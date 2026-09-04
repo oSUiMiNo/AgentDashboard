@@ -108,6 +108,14 @@ export interface Notice {
   /** 受け取った時刻。**ベルの一覧に添える**——いま起きたことか昔のことか判断できない */
   createdAt: number
   /**
+   * 積んだ順の通し番号。
+   *
+   * **時刻では一意にならない。** 同じミリ秒に同じ種別・同じ文言が2件届くことは実際に
+   * 起きる（送信を連打したときなど）ので、時刻・種別・文言を繋いだものを一覧の `key`
+   * にすると重複する。
+   */
+  seq: number
+  /**
    * いつ消えるか（`null` なら時間では消えない）。
    *
    * **`kind` から引いた結果をここへ焼いておく。** 読むたびに引き直すと、寿命の表を
@@ -528,16 +536,6 @@ export function clearCardNotices(cardId: CardId, kind?: ErrorKind) {
   notifyCard(cardId)
 }
 
-/**
- * そのカードの断りを全部消す。
- *
- * **`clearCardNotices` の種別を省いた形。** 押す前の地ならしには使わないこと——
- * あちらは「次に同じ操作が通ったとき」だけを消す（設計§7-3）。
- */
-export function clearCardError(cardId: CardId) {
-  clearCardNotices(cardId)
-}
-
 /** そのカードを起こし直している最中か。 */
 export function useReviving(cardId: CardId): boolean {
   return useSyncExternalStore(
@@ -547,8 +545,20 @@ export function useReviving(cardId: CardId): boolean {
   )
 }
 
+/** 積んだ断りの通し番号。**一覧の `key` に使う**——時刻だけでは一意にならない */
+let 積んだ数 = 0
+
 /** 次に掃きにいく時計。**1本だけ持つ**——カードごとに持つと、数が増えるほど時計が増える */
 let 掃除の時計: ReturnType<typeof setTimeout> | null = null
+
+/**
+ * いま張ってある時計が指している時刻。
+ *
+ * **これが無いと、後から積んだ断りが先の予定を押しのける。** 寿命は種別ごとに決まって
+ * いて多くは5秒なので、**後から積んだものの期限は必ず先のもの以降**になる——断りが
+ * 5秒より短い間隔で届き続けるあいだ、期限の来た古い断りが掃かれずに居座る。
+ */
+let 掃除の予定 = Number.POSITIVE_INFINITY
 
 /**
  * 寿命の来た断りを落とす。
@@ -558,6 +568,7 @@ let 掃除の時計: ReturnType<typeof setTimeout> | null = null
  */
 function 掃く() {
   掃除の時計 = null
+  掃除の予定 = Number.POSITIVE_INFINITY
   const いま = Date.now()
   let 次 = Number.POSITIVE_INFINITY
   for (const [cardId, 溜まり] of [...cardNotices]) {
@@ -588,9 +599,15 @@ function 張り直す(次: number) {
   if (次 === Number.POSITIVE_INFINITY) {
     return
   }
+  // **既に、より早い予定が張ってあるなら触らない。** 張り替えると、その早い予定が
+  // 遅い時刻へ押しのけられる（上の `掃除の予定` の理由）
+  if (掃除の時計 !== null && 次 >= 掃除の予定) {
+    return
+  }
   if (掃除の時計 !== null) {
     clearTimeout(掃除の時計)
   }
+  掃除の予定 = 次
   掃除の時計 = setTimeout(掃く, Math.max(0, 次 - Date.now()))
 }
 
@@ -605,10 +622,12 @@ function 張り直す(次: number) {
 export function pushCardNotice(cardId: CardId, message: string, kind: ErrorKind = 'other') {
   const いま = Date.now()
   const 溜まり = cardNotices.get(cardId) ?? []
+  積んだ数 += 1
   const notice: Notice = {
     kind,
     message,
     createdAt: いま,
+    seq: 積んだ数,
     expiresAt: 消えない.has(kind) ? null : いま + 寿命,
   }
   // 溢れたら古いほうから捨てる
@@ -696,7 +715,13 @@ export function clearSessions() {
   scheduled = false
   reviving.clear()
   cardNotices.clear()
+  // **時計を取り消してから捨てる。** 変数だけ `null` にすると本体は生き残り、
+  // 以後に張った時計を誰も取り消せなくなる（古いほうが発火して印を消すため）
+  if (掃除の時計 !== null) {
+    clearTimeout(掃除の時計)
+  }
   掃除の時計 = null
+  掃除の予定 = Number.POSITIVE_INFINITY
   reviveTargets = []
   reviveFingerprint = ''
 }
