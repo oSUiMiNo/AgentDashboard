@@ -68,6 +68,23 @@ const watchers = new Map<CardId, Set<() => void>>()
 const terminals = new Map<CardId, (key: TerminalKey) => void>()
 
 /**
+ * ソフトキーボードを開かせる手。**押した操作の中から呼ぶ。**
+ *
+ * # なぜ「頼む」形になるのか
+ *
+ * 開けるのは端末側だけである（隠しテキストエリアを持っているのはあちら）。だが
+ * **押すボタンは入力欄の帯**に居る兄弟なので、直接は触れない。キーを送る車線と
+ * まったく同じ理由で、ここに1本足す。
+ *
+ * # なぜ「あとで」ではいけないか
+ *
+ * **iOS は、信頼されたユーザ操作の中の `focus()` でしかキーボードを開かない。**
+ * 待ち行列に積んで後から流すと、その印が外れて**二度と開かなくなる**——[`sendTerminalKey`]
+ * とは違い、**これは間隔を空けずにその場で呼ぶ**。
+ */
+const keyboards = new Map<CardId, () => void>()
+
+/**
  * いまの画面を測り直す手。**見ている人が現れた瞬間に呼ぶ。**
  *
  * # なぜ要るのか（**実機で2度踏んだ**）
@@ -318,6 +335,35 @@ export function registerTerminal(
     cancelHide(cardId)
     applySelecting(cardId, false)
   }
+}
+
+/**
+ * ソフトキーボードを開く手を登録する。解除する関数を返す。
+ *
+ * 受け口（[`registerTerminal`]）と**寿命も鍵も同じ**なので、同じ `useEffect` で登録し
+ * 同じ `return` で解除する。
+ */
+export function registerKeyboard(cardId: CardId, open: () => void): () => void {
+  keyboards.set(cardId, open)
+  return () => {
+    if (keyboards.get(cardId) === open) {
+      keyboards.delete(cardId)
+    }
+  }
+}
+
+/**
+ * ソフトキーボードを開かせる。**押した操作の中から、その場で呼ぶこと。**
+ *
+ * 手が無いカードへの依頼は黙って捨てる（閉じた直後に届いたぶんで壊さない）。
+ */
+export function openKeyboard(cardId: CardId): void {
+  keyboards.get(cardId)?.()
+}
+
+/** その端末が、いま開く手を持っているか。**テストが空振りを見分けるために使う。** */
+export function hasKeyboard(cardId: CardId): boolean {
+  return keyboards.has(cardId)
 }
 
 /**

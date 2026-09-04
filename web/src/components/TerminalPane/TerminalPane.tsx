@@ -17,15 +17,11 @@ import { Terminal, type ITerminalInitOnlyOptions, type ITerminalOptions } from '
 import '@xterm/xterm/css/xterm.css'
 import { createFlowController } from '@/lib/flow'
 import { KIND_PTY_SNAPSHOT } from '@/lib/frame'
-import {
-  acceptsTyping,
-  looksSelecting,
-  sequenceFor,
-  terminalKeyOverride,
-} from '@/lib/keys'
-import { liveScreen, visibleLines, visibleScreen } from '@/lib/screen'
+import { looksSelecting, sequenceFor, terminalKeyOverride } from '@/lib/keys'
+import { visibleLines, visibleScreen } from '@/lib/screen'
 import {
   hasWatcher,
+  registerKeyboard,
   registerProbe,
   registerTerminal,
   setSelecting,
@@ -127,63 +123,60 @@ export function TerminalPane({ cardId }: Props) {
       grid.style.minWidth = 'max-content'
     }
 
-    // スマホでソフトキーボードを出してよいかを、**焦点を渡す直前に**決めて当てる
-    // （設計§4）。
+    // スマホでソフトキーボードを出す道を、**明示のボタン1つに絞る**（設計§12）。
     //
-    // xterm はキーを**不可視の `<textarea class="xterm-helper-textarea">`** で受け取る。
-    // そこへ焦点が入るとブラウザが「文字を打つ場所に入った」と判断してキーボードを出す
-    // ——端末は1枚の面なので、**面のどこを触っても同じテキストエリアが掴まれる**。
-    // だから「入力欄でない場所」を押しても出る。
+    // xterm はキーを**不可視の textarea**（`term.textarea`）で受け取る。そこへ焦点が
+    // 入るとブラウザが「文字を打つ場所に入った」と判断してキーボードを出す——端末は
+    // 1枚の面なので、**面のどこを触っても同じテキストエリアが掴まれる**。だから
+    // 「入力欄でない場所」を押しても出ていた。
     //
-    // # なぜ「直前」でなければならないか
+    // # 画面を読んで決めるのはやめた
     //
-    // **iOS Safari は、焦点が当たったままの `inputmode` の変更を無視する**（入れ直すまで
-    // 反映されない）。状態が変わってから書き換える形は効かないので、**焦点が入る前に
-    // 決めるしかない**。タッチで焦点が渡る箇所は下の `onTouchEnd` 1つだけなので、
-    // 当てる継ぎ目はそこに絞られている。
+    // 「いま打てる状態か」を画面から判定する形にしていたが、**プロンプトが出ている
+    // 通常状態では真になる**ので、ログの部分を押してもキーボードが出る——利用者の
+    // 求めるものにならなかった（設計§12）。
     //
-    // 要素は `open()` の中で一度だけ作られ、以後作り直されない。**見つからなくても
-    // 落とさない**——xterm の内部構造に寄りかかっているので、変わったときに端末ごと
-    // 使えなくなるのは、キーボードが出るより悪い。
-    const helper = container.querySelector('.xterm-helper-textarea')
-    /** 自分たちが「打てる」とみて渡した焦点か。**閉じる方向の追従にだけ使う**。 */
-    let 打てるとみて渡した = false
+    // # 既定で塞ぎ、押されたときだけ開く
+    //
+    // **iOS は、信頼されたユーザ操作の中の `focus()` でしかキーボードを開かない。**
+    // Android はもっと緩く「一度操作があれば以降は許可」なので、**焦点を遅らせるだけ
+    // では漏れる**——だから塞ぐ側を既定にし、開けるのは押した操作の中だけにする。
+    //
+    // # タッチでは焦点も渡さない
+    //
+    // 当初は「焦点は渡すがキーボードは塞ぐ」形にしたが、**焦点を渡すとカーソルが出る**
+    // ——「打つ場所が光っているのに打てない」という見え方になり、壊れていると読まれた
+    // （利用者の観測・2026-09-04）。**カーソルも出さない**ことで齟齬そのものを無くす。
+    //
+    // **マウスの経路は変えない。** PC はタップと違って、押した場所で打ち始めるのが自然。
+    const helper = term.textarea
+
+    /** ソフトキーボードを塞ぐ。**既定はこちら。** */
+    const 塞ぐ = () => {
+      if (helper) {
+        helper.inputMode = 'none'
+      }
+    }
 
     /**
-     * 入力方式を当てる。**値が変わるときは、焦点を一度外してから当てる。**
+     * ソフトキーボードを開く。**押した操作の中から呼ぶこと。**
      *
-     * iOS は焦点が当たったままの変更を読まない。ところが**この端末はマウント時に
-     * 自分で焦点を取る**ので、以後のタップでは焦点が既に入っており、`focus()` は
-     * 何も起こさない——つまり「焦点が入る直前に当てる」だけでは、**2回目以降が
-     * 一度も効かない**。外して当て直す道が要る。
-     *
-     * **外したままにはしない。** 呼び出し側が直後に `term.focus()` で戻す——
-     * 焦点を失うと、物理キーボードを繋いだ端末（iPad ＋ キーボードなど）で
-     * **Enter も矢印も端末へ届かなくなる**。ソフトキーボードだけを閉じたいのであって、
-     * 端末を使えなくしたいのではない。
+     * iOS は**焦点が当たったままの `inputmode` の変更を読まない**ので、入れ直す。
+     * 外して・当てて・戻す、の3つで1組になる。
      */
-    const 入力方式を当てる = (打てる: boolean) => {
-      if (!(helper instanceof HTMLTextAreaElement)) {
+    const 開く = () => {
+      if (!helper) {
         return
       }
-      const 方式 = 打てる ? 'text' : 'none'
-      if (helper.inputMode === 方式) {
-        return
-      }
-      if (document.activeElement === helper) {
-        helper.blur()
-      }
-      helper.inputMode = 方式
+      helper.blur()
+      helper.inputMode = 'text'
+      helper.focus()
     }
 
-    const 打てる場所として焦点を渡す = () => {
-      // **測るのは「いま生きている画面」。** 遡って過去を読んでいる最中にタップしても、
-      // 過去の画面で「打てない」と判定しない（`liveScreen` の注記）
-      const 打てる = acceptsTyping(liveScreen(term))
-      入力方式を当てる(打てる)
-      term.focus()
-      return 打てる
-    }
+    // **閉じたら塞ぎ直す。** 戻さないと、次に端末をタップしただけで開いてしまい、
+    // 直したはずの問題がそのまま戻る
+    helper?.addEventListener('blur', 塞ぐ)
+    塞ぐ()
 
     const setRendererLabel = (renderer: 'webgl' | 'dom') => {
       statusRef.current?.setAttribute('data-renderer', renderer)
@@ -338,42 +331,10 @@ export function TerminalPane({ cardId }: Props) {
     const unprobe = registerProbe(cardId, 測る)
 
     const parsed = term.onWriteParsed(() => {
-      const 見張り = hasWatcher(cardId)
-      // **どちらの用も無ければ、画面を1文字も組み立てない。** PC は購読者が0で、
-      // 印も立たない（マウント時は空の画面なので「打てない」に倒れる）ので、
-      // ここで即座に戻る
-      if (!打てるとみて渡した && !見張り) {
+      if (!hasWatcher(cardId)) {
         return
       }
-      // **1フレームに1回だけ組み立てる。** 2つの用（キーボードの出し入れと十字の
-      // 出し入れ）は同じ画面を見るので、別々に組み立てると**同じ機械で2回**走る——
-      // しかもそれが起きるのは、いちばん力の弱いスマホである
-      const 見えている = visibleScreen(term)
-      if (打てるとみて渡した) {
-        // 遡っている最中は、見えているものと生きているものが違う。**判定は生きている側**
-        const buffer = term.buffer.active
-        const 生きている =
-          buffer.viewportY === buffer.baseY ? 見えている : liveScreen(term)
-        // **打てるとみて渡した焦点だけを、閉じる方向に追いかける**（設計§4）。
-        //
-        // 向きで扱いを変えるのは、**効くものと効かないものが違う**から。焦点を外すのは
-        // 利用者の操作を要らずに効くが、キーボードを**開く**には操作起因のイベントが
-        // 要る——フレームの到着は操作ではないので、開く側は狙っても届かない。
-        //
-        // 放っておくと、選択待ちへ移ったのにキーボードが出たまま十字ボタンとメニューを
-        // 覆う。
-        if (!acceptsTyping(生きている)) {
-          打てるとみて渡した = false
-          入力方式を当てる(false)
-          // **焦点は端末へ戻す。** 外したままだと、物理キーボードを繋いだ端末で
-          // Enter も矢印も届かなくなる——確定が要るその瞬間に、である
-          term.focus()
-        }
-      }
-      if (!見張り) {
-        return
-      }
-      setSelecting(cardId, looksSelecting(見えている))
+      setSelecting(cardId, 測る())
     })
 
     // 下り：頼まれた「意味」をバイト列へ直して流す。**`term` そのものは渡さない**
@@ -386,6 +347,10 @@ export function TerminalPane({ cardId }: Props) {
     const unregisterKeys = registerTerminal(cardId, (key) => {
       term.input(sequenceFor(key, term.modes.applicationCursorKeysMode), false)
     })
+
+    // 3つ目の車線。**キーボードを開く手**を外へ出す（設計§12）。押すボタンは
+    // 入力欄の帯に居る兄弟なので、直接は触れない
+    const unregisterKeyboard = registerKeyboard(cardId, 開く)
 
     // --- タッチで遡る（設計§3・§4・§7）---------------------------------
     //
@@ -453,17 +418,10 @@ export function TerminalPane({ cardId }: Props) {
       ].join('\n')
     }
 
-    /**
-     * 指を置いてから離すまでに、一度でも握ったか。
-     *
-     * **なぞりで焦点を移さないために持つ**（下の `onPointerDown` の注記）。判断の
-     * 材料は `scroller.move()` の戻り値だけにする——`preventDefault()` を決めるのと
-     * 同じ答えを見ておけば、握ったかどうかの判断が2箇所に分かれない。
-     */
-    let なぞった = false
-
+    // **「なぞったか」はもう持たない。** タッチでは焦点を渡さなくなったので
+    // （設計§12-2）、タップとなぞりを見分ける理由が消えた。`preventDefault()` は
+    // `scroller.move()` の戻り値だけで決まる
     const onTouchStart = (event: TouchEvent) => {
-      なぞった = false
       scroller.start(points(event))
       if (debugOn) {
         tally.start += 1
@@ -474,9 +432,6 @@ export function TerminalPane({ cardId }: Props) {
     // 分けると、片方だけ直して片方が取り残される
     const onTouchMove = (event: TouchEvent) => {
       const grabbed = scroller.move(points(event))
-      if (grabbed) {
-        なぞった = true
-      }
       if (grabbed && event.cancelable) {
         event.preventDefault()
       }
@@ -492,14 +447,28 @@ export function TerminalPane({ cardId }: Props) {
         showDebug('move')
       }
     }
-    const onTouchEnd = () => {
+    const onTouchEnd = (event: TouchEvent) => {
       scroller.end()
-      // **なぞらずに離した＝タップ。** ここでだけ焦点を渡す（空き地を押して
-      // 打ち始められるように）。なぞりでは渡さない——渡すとスマホでソフト
-      // キーボードが出て、遡ろうとするたびに画面が半分隠れる
-      if (!なぞった) {
-        打てるとみて渡した = 打てる場所として焦点を渡す()
+      // **互換マウスイベントを止める。** これを止めないと、`touchend` のあとに
+      // ブラウザが `pointerdown`（`pointerType: 'mouse'`）を撃ち、**下の
+      // `onPointerDown` が焦点を渡してしまう**——タッチの経路で渡さないようにしても、
+      // マウスの経路から回り込まれる。**E2E が実際にこれを捕まえた。**
+      //
+      // なぞりのときは `onTouchMove` が既に止めているが、**タップは通り抜ける**
+      // （動いていないので `preventDefault()` を呼ぶ枝に入らない）。
+      if (event.cancelable) {
+        event.preventDefault()
       }
+      // **タッチでは焦点を渡さない**（設計§12-2）。
+      //
+      // 焦点を渡すと**カーソルが出る**。スマホでは「打つ場所が光っているのに打てない」
+      // という見え方になり、**壊れていると読まれる**——キーボードだけを塞いでも、
+      // 齟齬はそこに残っていた（利用者の観測・2026-09-04）。
+      //
+      // カーソルも出さなければ、その齟齬そのものが起きない。端末へ打つ道は
+      // 入力欄の帯の「キーボード」ボタン1つに絞ってある。
+      //
+      // **マウスの経路（`onPointerDown`）は今までどおり渡す。** PC は何も変わらない。
       if (debugOn) {
         tally.end += 1
         showDebug('end')
@@ -568,9 +537,8 @@ export function TerminalPane({ cardId }: Props) {
     // グローバルを汚さないよう、この要素にだけ生やしている（読み取り専用の用途）。
     ;(container as TerminalContainer).__terminal = term
 
-    // マウント時の初期フォーカスも同じ口を通す。**空の画面は「打てない」に倒れる**ので、
-    // 起こした直後にキーボードが出ることはない
-    打てるとみて渡した = 打てる場所として焦点を渡す()
+    // マウント時の初期フォーカス。**塞いであるので、起こした直後にキーボードは出ない**
+    term.focus()
 
     return () => {
       container.removeEventListener('pointerdown', onPointerDown)
@@ -583,6 +551,8 @@ export function TerminalPane({ cardId }: Props) {
       parsed.dispose()
       // 受け口・送信待ちの列・選択待ちの値の3つとも片付く
       unregisterKeys()
+      unregisterKeyboard()
+      helper?.removeEventListener('blur', 塞ぐ)
       dataSubscription.dispose()
       resizeSubscription.dispose()
       unprobe()

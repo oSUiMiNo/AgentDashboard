@@ -275,3 +275,27 @@ export function PlusGlyph({ className }: { className?: string }) {
     </svg>
   )
 }
+
+/**
+ * キーボードの印（設計§12）。**言葉は `aria-label` と `title` に残す。**
+ *
+ * 端末へ文字を打つ唯一の入口に付ける。**絵文字（⌨）は使わない**——`DESIGN.md` §35.1 の
+ * 台帳が増えるうえ、字形が機械ごとに変わるので線の太さを揃えられない。
+ */
+export function KeyboardGlyph({ className }: { className?: string }) {
+  return (
+    <svg
+      aria-hidden
+      viewBox="0 0 24 24"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="2" y="6" width="20" height="12" rx="2" />
+      <path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8" />
+    </svg>
+  )
+}

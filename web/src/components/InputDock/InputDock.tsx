@@ -34,12 +34,13 @@
 import { AnimatePresence, motion } from 'motion/react'
 import { useEffect, useRef } from 'react'
 import { Button } from '@/components/ui/button'
+import { KeyboardGlyph } from '@/components/ui/glyphs'
 import { Composer } from '@/components/Composer/Composer'
 import { Dpad } from '@/components/Dpad/Dpad'
 import { isEnded, type SessionStatus } from '@/lib/protocol'
 import type { CardId } from '@/lib/protocol'
 import { useCoarsePointer, useLandscape } from '@/lib/pointer'
-import { sendTerminalKey, useSelecting } from '@/lib/terminalBridge'
+import { openKeyboard, sendTerminalKey, useSelecting } from '@/lib/terminalBridge'
 
 interface Props {
   cardId: CardId
@@ -143,6 +144,38 @@ export function InputDock({
         >
           Esc
         </Button>
+
+        {/*
+          **端末へ打つための、唯一の入口**（設計§12）。
+
+          端末をタップしただけではキーボードが出ない作りにしたので、**打ちたいときに
+          押す場所**が要る。押さないと出ないぶん手数が1つ増えるが、**詰まない**——
+          ボタンは端末を見ているあいだ常にここに在る。
+
+          # なぜ「押した操作の中」でなければならないか
+
+          **iOS は、信頼されたユーザ操作の中の `focus()` でしかキーボードを開かない。**
+          待ち行列へ積んで後から流すと印が外れて**二度と開かない**ので、[`openKeyboard`]
+          は間隔を空けずにその場で呼ぶ（キーの送信とはそこが違う）。
+
+          # 端末からフォーカスを奪わない…とはしない
+
+          Esc とは逆で、**こちらは焦点を動かすことが仕事**である。`onMouseDown` で
+          既定を止めると、`focus()` の相手が変わってしまう。
+        */}
+        {watching && !ended && (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            data-testid="keyboard-key"
+            aria-label="キーボードを出す"
+            title="端末へ文字を打つ（キーボードを出します）"
+            onClick={() => openKeyboard(cardId)}
+          >
+            <KeyboardGlyph className="size-4" />
+          </Button>
+        )}
 
       {/*
         **縦でも端末へ重ねる**（設計§10 の訂正。実機で3度踏んだ輪の対処 ＋ 利用者判断）。
