@@ -43,6 +43,13 @@ pub const QUEUED_PREFIX: &str = "[fake-claude] queued: ";
 pub const DEQUEUED_MARKER: &str = "[fake-claude] dequeued";
 /// `said` が本物の発言レコードを1件書いたことを示す行頭。
 pub const SAID_PREFIX: &str = "[fake-claude] said: ";
+/// `replied` がアシスタントの発言レコードを1件書いたことを示す行頭。
+///
+/// **`jsonl` で代用できない。** 手持ちのフィクスチャには `queue-operation` が
+/// 入っているものがあり、その `dequeue` は**行列の先頭を落とす**（`retire_front`）
+/// ので、待たせている本人の指示が巻き添えで畳まれる。**「待っているあいだに
+/// エージェントの発言だけが届く」を作るには、発言だけを書く口が要る。**
+pub const REPLIED_PREFIX: &str = "[fake-claude] replied: ";
 /// 画面サイズが変わった（SIGWINCH を受けた）ときのマーカー。`<cols>x<rows>` が続く。
 ///
 /// 本物の claude も SIGWINCH には反応する（再描画で応える）。擬似はテストが読める形で

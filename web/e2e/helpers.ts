@@ -611,6 +611,19 @@ export async function say(page: Page, text: string) {
   await expectTerminalToContain(page, `[fake-claude] said: ${text}`)
 }
 
+/**
+ * 擬似 claude に、アシスタントの発言レコードを1件書かせる。
+ *
+ * **`writeTranscript` では代用できない。** フィクスチャには `queue-operation` が
+ * 入っているものがあり、その `dequeue` は**行列の先頭を落とす**ので、
+ * 待たせている本人の指示まで巻き添えで畳まれる。「待っているあいだに
+ * エージェントの発言だけが届く」を作るには、発言だけを書く口が要る。
+ */
+export async function reply(page: Page, text: string) {
+  await typeLine(page, `replied ${text}`)
+  await expectTerminalToContain(page, `[fake-claude] replied: ${text}`)
+}
+
 export async function writeTranscript(page: Page, fixture: string, lines?: number) {
   const source = path.resolve(FIXTURES, fixture)
   await typeLine(page, lines ? `jsonl ${source} ${lines}` : `jsonl ${source}`)

@@ -8,6 +8,7 @@ import {
   fireHook,
   openDashboard,
   openSession,
+  reply,
   say,
   setTerminalView,
   showTerminal,
@@ -1428,16 +1429,24 @@ test('あとから履歴が届いても、待っている指示はいちばん�
   const 待ち = page.locator('[data-testid="transcript-row"][data-kind="queued_message"]')
   await expect(待ち).toHaveCount(1, 届くまで)
 
-  // 待っているあいだに、エージェント側のやりとりが届く
+  // 待っているあいだに、エージェント側の発言が2件届く。
+  //
+  // **フィクスチャを流してはいけない。** 手持ちのフィクスチャには `queue-operation` が
+  // 入っており、その `dequeue` は**行列の先頭を落とす**ので、いま待たせている
+  // 「あとで直して」が巻き添えで畳まれる（`retire_front`）。発言だけを書く口を使う
   await showTerminal(page)
-  await writeTranscript(page, 'v2.1.220/basic-tools/session.jsonl')
+  await reply(page, 'まず調べています')
+  await reply(page, 'つぎに直します')
 
   await showTranscript(page)
   const 全部 = page.locator('[data-testid="transcript-row"]')
-  await expect.poll(async () => await 全部.count(), { message: '履歴が届くこと', timeout: 30_000 })
-    .toBeGreaterThan(1)
+  await expect
+    .poll(async () => await 全部.count(), { message: '発言が届くこと', timeout: 30_000 })
+    .toBeGreaterThanOrEqual(3)
   // **末尾に寄せてあるので、最後に描かれている行が並びの最後**である
   await expect(全部.last()).toHaveAttribute('data-kind', 'queued_message', 届くまで)
+  // 待ちは1件のまま（エージェントの発言に押し出されて消えたりしない）
+  await expect(待ち).toHaveCount(1, 届くまで)
 })
 
 test('読まれたあと、同じ本文が2つ並ばない', async ({ page }) => {

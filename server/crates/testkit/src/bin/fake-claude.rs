@@ -47,8 +47,9 @@ use testkit::fake_claude::{
     CANCELLED_MARKER, CRASH_MARKER, CYCLE_MODES, DEQUEUED_MARKER, DUMP_END_MARKER, ENV_PREFIX,
     FLOOD_END_MARKER, FLOOD_PATTERN, FOOTER_PREFIX, HOOK_FAILED_PREFIX, HOOK_SENT_PREFIX,
     JSONL_APPENDED_PREFIX, JSONL_FAILED_PREFIX, MODEL_SET_PREFIX, MODEL_SWITCH_NOTICE,
-    MODEL_SWITCH_OPTIONS, QUEUED_PREFIX, READY_MARKER, RECEIVED_PREFIX, RESIZED_PREFIX,
-    SAID_PREFIX, STATUS_LINE_SENT_PREFIX, footer_for, physical_lines, render_dialog, resolve_model,
+    MODEL_SWITCH_OPTIONS, QUEUED_PREFIX, READY_MARKER, RECEIVED_PREFIX, REPLIED_PREFIX,
+    RESIZED_PREFIX, SAID_PREFIX, STATUS_LINE_SENT_PREFIX, footer_for, physical_lines,
+    render_dialog, resolve_model,
 };
 
 /// 起動時に受け取った、フック実行に必要な情報。
@@ -260,6 +261,8 @@ fn main() {
     let mut image_turns = 0usize;
     // `said` で書いた発言の数。こちらも `uuid` を分けるための連番
     let mut said_turns = 0usize;
+    // `replied` で書いたアシスタント本文の数。同じく `uuid` を分けるための連番
+    let mut replied_turns = 0usize;
 
     for input in InputReader::new() {
         let line = match input {
@@ -491,6 +494,22 @@ fn main() {
             said_turns += 1;
             append_said(&injected, text, said_turns);
             let _ = writeln!(out, "{SAID_PREFIX}{text}");
+            let _ = out.flush();
+            hook(&mut out, &injected, "Stop");
+            continue;
+        }
+
+        // アシスタントの発言レコードを1件書く。
+        //
+        // **待っているあいだに、エージェント側だけが喋る状況を作るための口**である
+        // （作業中に送った追加メッセージ 設計§7-5）。`jsonl` でフィクスチャを流すと
+        // **その中の `dequeue` が待たせている指示を巻き添えで畳む**ので、
+        // 並びを見たいテストでは使えない
+        if let Some(rest) = line.strip_prefix("replied ") {
+            let text = rest.trim();
+            replied_turns += 1;
+            append_replied(&injected, text, replied_turns);
+            let _ = writeln!(out, "{REPLIED_PREFIX}{text}");
             let _ = out.flush();
             hook(&mut out, &injected, "Stop");
             continue;
@@ -1193,6 +1212,21 @@ fn append_said(injected: &Injected, text: &str, seq: usize) {
         injected,
         &format!(
             r#"{{"type":"user","uuid":"said-{seq}","message":{{"content":{}}}}}"#,
+            serde_json::Value::String(text.to_string())
+        ),
+    );
+}
+
+/// アシスタントの発言レコードを1件書く。
+///
+/// **`append_said` と対になる形にする。** あちらが `"type":"user"` を書くのに対し、
+/// こちらは `"type":"assistant"` と `message.content` の配列を書く——本物が
+/// アシスタント本文を運ぶ形（`content` が `[{"type":"text","text":…}]`）に合わせる。
+fn append_replied(injected: &Injected, text: &str, seq: usize) {
+    append_transcript_line(
+        injected,
+        &format!(
+            r#"{{"type":"assistant","uuid":"replied-{seq}","message":{{"content":[{{"type":"text","text":{}}}]}}}}"#,
             serde_json::Value::String(text.to_string())
         ),
     );
