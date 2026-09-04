@@ -1390,16 +1390,34 @@ test('待っている指示が出て、読まれると消える', async ({ page 
       '[data-kind="queued_message"] [data-testid="user-bubble"]',
     )
     if (!器) return null
+    // **文字列を自分で読まない。** 派生は `oklch(from …)` で書いてあるので、
+    // Chromium は計算値を `rgb()` ではなく **`oklch()` のまま**返すことがある。
+    // canvas に一度塗ると、**どんな記法でも RGBA へ正規化される**
+    // ——この画面の他の色の実測（`吹き出しの地` ほか）と同じ手である
+    const 画 = document.createElement('canvas')
+    画.width = 1
+    画.height = 1
+    const 筆 = 画.getContext('2d', { willReadFrequently: true })
     const 読む = (c: string): [number, number, number] | null => {
-      const m = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(c)
-      return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null
+      if (!筆) return null
+      筆.clearRect(0, 0, 1, 1)
+      筆.fillStyle = c
+      筆.fillRect(0, 0, 1, 1)
+      const [r, g, b] = 筆.getImageData(0, 0, 1, 1).data
+      return [r, g, b]
     }
     // 彩度は「いちばん明るい成分と暗い成分の開き」で見る（HSL の S と同じ向き）
     const 彩度 = ([r, g, b]: [number, number, number]) => (Math.max(r, g, b) - Math.min(r, g, b)) / 255
     const 明度 = ([r, g, b]: [number, number, number]) => (Math.max(r, g, b) + Math.min(r, g, b)) / 2 / 255
     const 待ち = 読む(getComputedStyle(器).backgroundColor)
     const 青: [number, number, number] = [23, 62, 118]
-    return 待ち && { 待ちの彩度: 彩度(待ち), 青の彩度: 彩度(青), 待ちの明度: 明度(待ち), 青の明度: 明度(青) }
+    return 待ち && {
+      生の値: getComputedStyle(器).backgroundColor,
+      待ちの彩度: 彩度(待ち),
+      青の彩度: 彩度(青),
+      待ちの明度: 明度(待ち),
+      青の明度: 明度(青),
+    }
   })
   expect(地, '待機中の吹き出しの地が読めない').not.toBeNull()
   // **青のままではない**（灰色側へ寄っている）
