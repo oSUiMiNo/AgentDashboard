@@ -1,0 +1,210 @@
+/*
+  最前面のトースト（トーストとベル設計§8・§9）。
+
+  # 場所を押しのけない
+
+  画面のいちばん上に知らせが縦に積まれると、**消えるまで場所が返ってこない**。
+  狭い画面では1件が画面の何分の一かを持っていく。重ねて出せば場所は取らない。
+
+  # 効果線の層とは、位置の取り方が違う
+
+  あちらは `position: absolute`（場と一緒に流れる）だが、トーストは
+  **スクロールに追従してはいけない**——画面のどこを見ていても見える必要がある。
+  だから `fixed` を使う。
+
+  # 動きの値は利用者が確定させたもの
+
+  手本にした FAIX（`react-toastify`）は画面外 3000px から飛び込み、3回揺り返し、
+  500ms かける。**そのまま採らない**——`DESIGN.md` §28.1 が「大きく跳ねる動き」と
+  「過剰な Elastic」を避ける側に置き、§28.2 が「500ms 以上待たせない」と書いている。
+
+  採った値は、移動が**自分の幅ぶん**（Short Slide）、揺り返しが**1回**
+  （Tiny Overshoot）、時間が**入り 420ms・出 200ms**（Special と Normal の中）。
+  **§28 の枠内に収まっているので、例外を作る必要が無い。**
+
+  枠の外に出るのはゲージだけで、これは効果線（84秒）と同じ理屈で通す——
+  **測っているのは操作への反応ではなく、操作の結果（残り時間そのもの）である。**
+*/
+
+.toast-layer {
+  /*
+    **この PJT で `z-index` を初めて決める場所。** 効果線の層は「書かない」で
+    済ませていた（DOM 順で足りた）。
+
+    既存の最大は 50（ポップオーバー・ダイアログ・選択メニュー。暗幕が 40）。
+    **面を開いている最中にも知らせは前へ出るべき**——接続が切れた・自己修復が
+    失敗した、はモーダル操作中にも起こる。
+
+    **次に上へ出す層ができたら、ここを基準に引き直すこと。**
+  */
+  z-index: 60;
+  position: fixed;
+  top: 0;
+  left: 0;
+  /* 縁からの余白は器の側が持つ（下の `--toast-offset`）。層は角に貼るだけ */
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: var(--toast-offset) 0 0 var(--toast-offset);
+  /* **層は下の操作を食わない。** 触れるのは個々のトーストだけ（設計§8-2） */
+  pointer-events: none;
+}
+
+.toast-layer {
+  --toast-offset: 16px;
+  --toast-width: 320px;
+  --toast-radius: 6px;
+  --toast-gauge-height: 4px;
+}
+
+/* 1件。**ここだけ `pointer-events` を戻す**——✕ とマウスオーバーを効かせるため */
+.toast {
+  pointer-events: auto;
+  position: relative;
+  width: var(--toast-width);
+  max-width: calc(100vw - var(--toast-offset) * 2);
+  border-radius: var(--toast-radius);
+  overflow: hidden;
+  animation: toast-in 420ms cubic-bezier(0.215, 0.61, 0.355, 1) both;
+}
+
+.toast[data-exiting='true'] {
+  animation: toast-out 200ms ease-in both;
+}
+
+/*
+  入り。**自分の幅ぶんだけ左から入り、6px 行き過ぎて収まる。**
+
+  行き過ぎは1回だけ（Tiny Overshoot）。FAIX は +25 → -10 → +5 の3回だが、
+  §28.1 が「大きく跳ねる動き」を避ける側に置いている。
+*/
+@keyframes toast-in {
+  0% {
+    opacity: 0;
+    translate: -100% 0;
+  }
+  70% {
+    opacity: 1;
+    translate: 6px 0;
+  }
+  100% {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+
+/* 出。**薄くなりながら自分の幅ぶん左へ。** 溜めは作らない（入りより短く済ませる） */
+@keyframes toast-out {
+  0% {
+    opacity: 1;
+    translate: 0 0;
+  }
+  100% {
+    opacity: 0;
+    translate: -100% 0;
+  }
+}
+
+/*
+  残り時間のゲージ（設計§8-3・§8-4）。
+
+  **等速（linear）で、左端を固定して右から縮む。** 曲線を付けると「残り時間」
+  ではなくなる——見ているのは経過そのものである。
+
+  **マウスを乗せている間は止まる。** `:hover` で切り替わるので、**マウスの位置と
+  必ず一致する**（JS の側とずれようがない）。消す時計のほうは `stores/appNotices.ts`
+  が別に止める。
+*/
+.toast-gauge {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 100%;
+  height: var(--toast-gauge-height);
+  transform-origin: left;
+  opacity: 0.7;
+  animation: toast-gauge var(--toast-life, 7000ms) linear forwards;
+}
+
+.toast:hover .toast-gauge {
+  animation-play-state: paused;
+}
+
+@keyframes toast-gauge {
+  from {
+    scale: 1 1;
+  }
+  to {
+    scale: 0 1;
+  }
+}
+
+/*
+  狭い窓（設計§8-3）。**全幅にして角丸を外す。**
+
+  動機がスマホなので、ここは手本（FAIX）をそのまま踏襲する価値が高い。
+  縁の余白も外す——320px の器を 375px の画面に置くと、両脇が細く余って落ち着かない。
+*/
+@media (max-width: 480px) {
+  .toast-layer {
+    --toast-offset: 0px;
+    right: 0;
+  }
+
+  .toast {
+    width: 100vw;
+    max-width: 100vw;
+    border-radius: 0;
+  }
+}
+
+/*
+  動きの3段（設計§9）。
+
+  **7秒で消えることは段によらない**（利用者の決定）。止めるのは動きだけである。
+
+  ゲージは「止める」のではなく**隠す**。止まった満タンの棒を出すと、
+  **「まだ時間がたっぷりある」と読めてしまう**——動かないなら、無いほうが正直である。
+
+  **消えるところまでは省かない。** 動きは止めるが、消えること自体は同じ時間で起きる。
+
+  「静けさ」段は詳細度 (0,3,0) で常勝。`prefers-reduced-motion` は (0,1,0) なので
+  **ファイルの最後に置く**——順序だけで勝たせる。
+  **この下に規則を足さないこと。**
+*/
+.toast-layer[data-quiet='calm'] .toast,
+.toast-layer[data-quiet='still'] .toast {
+  animation: none;
+  opacity: 1;
+  translate: 0 0;
+}
+
+.toast-layer[data-quiet='calm'] .toast[data-exiting='true'],
+.toast-layer[data-quiet='still'] .toast[data-exiting='true'] {
+  animation: none;
+  opacity: 0;
+}
+
+.toast-layer[data-quiet='calm'] .toast-gauge,
+.toast-layer[data-quiet='still'] .toast-gauge {
+  animation: none;
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toast {
+    animation: none;
+    opacity: 1;
+    translate: 0 0;
+  }
+
+  .toast[data-exiting='true'] {
+    animation: none;
+    opacity: 0;
+  }
+
+  .toast-gauge {
+    animation: none;
+    opacity: 0;
+  }
+}

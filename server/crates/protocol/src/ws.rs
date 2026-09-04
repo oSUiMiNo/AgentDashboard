@@ -487,19 +487,23 @@ impl SelfhealPhase {
         }
     }
 
-    /// 画面に出す日本語（`web/src/lib/protocol.ts` の `selfhealLabel` と同じ文言）。
+    /// 画面に出す日本語。
+    ///
+    /// **`web/src/lib/protocol.ts` の `selfhealLabel` と一字一句同じにすること。**
+    /// 片方だけ直すと、同じ出来事が画面と CLI で違う文言になる——どちらが正なのか
+    /// 読む側には分からない。
     pub fn label(self) -> &'static str {
         match self {
-            Self::Detected => "自己修復：知らない版を見つけました",
-            Self::Canary => "自己修復：サンプルを採っています",
-            Self::Testing => "自己修復：ゴールデンテストを実行しています",
-            Self::Repairing => "自己修復：パーサを直しています",
-            Self::Verifying => "自己修復：直った結果を確かめています",
-            Self::Passed => "自己修復：直す必要はありませんでした",
-            Self::Swapped => "自己修復：新しいパーサへ差し替えました",
-            Self::RolledBack => "自己修復：前のパーサへ戻しました",
-            Self::Failed => "自己修復：直せませんでした",
-            Self::Cooldown => "自己修復：同じ版への再挑戦を控えています",
+            Self::Detected => "履歴の異常を検知しました",
+            Self::Canary => "新しい版のサンプルを採っています",
+            Self::Testing => "サンプルでパーサを検証しています",
+            Self::Repairing => "修復セッションが作業しています",
+            Self::Verifying => "修復の結果を検証しています",
+            Self::Passed => "対応済みでした（修復は不要）",
+            Self::Swapped => "パーサを差し替えました",
+            Self::RolledBack => "悪化したため前のパーサへ戻しました",
+            Self::Failed => "自動修復に失敗しました",
+            Self::Cooldown => "同じ版への再挑戦を控えています",
         }
     }
 }

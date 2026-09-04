@@ -14,6 +14,8 @@
 @import './controls.css';
 /* 掴んで並べ替えている間だけの動き。位置の理由は上と同じ（並べ替え設計§7-3 の読み替え） */
 @import './reorder.css';
+/* 最前面のトースト。位置の理由は上と同じ（トーストとベル設計§8） */
+@import './toast.css';
 
 @custom-variant dark (&:is(.dark *));
 
