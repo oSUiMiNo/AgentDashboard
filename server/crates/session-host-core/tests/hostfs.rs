@@ -444,17 +444,23 @@ fn 表にある種別はバイト列で返る() {
 }
 
 #[test]
-fn 表の外は断る() {
-    // **なんでも生で返せる口にしない**（設計§5-2）。`.js` は生で返すと危ないほうの代表
+fn 画像でないものはバイト列の道へ入れない() {
+    // **門は種別で見る**（`ファイルの中身に掛けた隔離を、script の1段だけ解く` 設計§5-2）。
+    // 媒体型の有無で見ていた頃はここが門になっていたが、**表に無いものにも
+    // `text/plain` を返すようになった**ので、あれに頼るとテキストが画像の道へ入り込む。
+    //
+    // **`html` と `svg` も入れない。** あちらはテキストの道から作る（設計§5-2）
     let sandbox = Sandbox::new("blob-unknown");
     sandbox.file("組み込み.js", b"alert(1)");
     sandbox.file("計画.md", b"# a");
+    sandbox.file("理解.html", b"<p>a</p>");
+    sandbox.file("図.svg", b"<svg/>");
 
-    for name in ["組み込み.js", "計画.md"] {
+    for name in ["組み込み.js", "計画.md", "理解.html", "図.svg"] {
         let err = hostfs::read_blob(&sandbox.path().join(name)).expect_err("断ること");
         assert_eq!(err.reason, HostFailure::Unsupported, "{name}");
         assert!(
-            err.detail.contains("生で返せる種別ではありません"),
+            err.detail.contains("画像ではない"),
             "何が駄目なのか分かる説明であること（{}）",
             err.detail
         );

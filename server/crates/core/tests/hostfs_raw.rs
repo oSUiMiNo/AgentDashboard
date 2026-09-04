@@ -114,7 +114,7 @@ async fn 画像は四つのヘッダを付けてバイト列で返る() {
     assert_eq!(
         response.header("content-security-policy").as_deref(),
         Some(
-            "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:"
+            "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; img-src data:; style-src 'unsafe-inline'; font-src data:"
         )
     );
 }
@@ -171,9 +171,10 @@ async fn svgも同じ道を通る() {
 }
 
 #[tokio::test]
-async fn 表の外は生で返さない() {
-    // **`.js` は生で返すと危ないほうの代表。** ダッシュボードと同じ出自で
-    // スクリプトを読ませる道になる（設計§5-2）
+async fn 表の外は素のテキストとして返る() {
+    // **415 を見せない**（`ファイルの中身に掛けた隔離を、script の1段だけ解く` 設計§5-1）。
+    // 画面に「ブラウザで開く」を置いた以上、押しても意味の無い相手にエラー画面を
+    // 出すことになる。字で出して、読む人に判断させる
     let sandbox = Sandbox::new("outside");
     let server = common::TestServer::start_with(config_for("outside")).await;
 
@@ -185,12 +186,45 @@ async fn 表の外は生で返さない() {
                 escape(&path)
             ))
             .await;
-        assert_eq!(response.status, 415, "{name} は生で返さないこと");
-        assert!(
-            String::from_utf8_lossy(&response.body).contains("生で返せる種別ではありません"),
-            "理由が読めること（{name}）"
+        assert_eq!(response.status, 200, "{name} は字で返ること");
+        assert_eq!(String::from_utf8_lossy(&response.body), body, "{name}");
+        assert_eq!(
+            response.header("content-type").as_deref(),
+            Some("text/plain; charset=utf-8"),
+            "{name}"
+        );
+        // **`text/javascript` で返さないことが、この工事の唯一の守り**（設計§5-3）。
+        // `nosniff` と組んで `<script src>` から実行できない。**両方見る**
+        assert_eq!(
+            response.header("x-content-type-options").as_deref(),
+            Some("nosniff"),
+            "{name}"
         );
     }
+}
+
+#[tokio::test]
+async fn バイナリは読めない理由で断られ続ける() {
+    // **口を広げても、読めないものは読めない。** 「生で返せる種別ではありません」は
+    // 消えたが、**「読めなかった理由」を言う断りは残る**（設計§5-4）——押した人に
+    // 必要なのは後者である
+    let sandbox = Sandbox::new("binary");
+    let path = sandbox.file("書類.pdf", &[0x25, 0x50, 0x44, 0x46, 0x00, 0x01]);
+    let server = common::TestServer::start_with(config_for("binary")).await;
+
+    let response = server
+        .get_raw(&format!(
+            "/api/hosts/local/file?path={}&as=raw",
+            escape(&path)
+        ))
+        .await;
+
+    assert_eq!(response.status, 415);
+    assert!(
+        String::from_utf8_lossy(&response.body).contains("テキストではありません"),
+        "何が駄目なのか分かる説明であること（{}）",
+        String::from_utf8_lossy(&response.body)
+    );
 }
 
 #[tokio::test]

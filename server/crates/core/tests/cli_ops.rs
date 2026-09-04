@@ -798,10 +798,29 @@ async fn 画像はバイト列のまま取れる() {
 }
 
 #[tokio::test]
-async fn 生で返せない相手は理由ごと断られる() {
-    let dir = work_dir("host-file-raw-refused");
+async fn 表の外も生の口から字で取れる() {
+    // **415 を見せない**（`ファイルの中身に掛けた隔離を、script の1段だけ解く` 設計§5-1）。
+    // 画面の「ブラウザで開く」と同じ口なので、**CLI と画面で結果が食い違わないこと**が要る
+    let dir = work_dir("host-file-raw-text");
     let path = dir.join("計画.md");
     std::fs::write(&path, "# 計画\n").expect("置けること");
+    let server = TestServer::start().await;
+
+    let body = client::host_file_raw(&target_of(&server), "local", &path.display().to_string())
+        .await
+        .expect("字で取れること");
+
+    assert_eq!(String::from_utf8_lossy(&body), "# 計画\n");
+}
+
+#[tokio::test]
+async fn 読めない相手は理由ごと断られる() {
+    // **口を広げても、読めないものは読めない**（設計§5-4）。「生で返せる種別では
+    // ありません」は消えたが、**「読めなかった理由」を言う断りは残る**——押した人に
+    // 必要なのは後者である
+    let dir = work_dir("host-file-raw-refused");
+    let path = dir.join("書類.pdf");
+    std::fs::write(&path, [0x25, 0x50, 0x44, 0x46, 0x00, 0x01]).expect("置けること");
     let server = TestServer::start().await;
 
     let err = client::host_file_raw(&target_of(&server), "local", &path.display().to_string())
@@ -810,7 +829,7 @@ async fn 生で返せない相手は理由ごと断られる() {
 
     // **断り文をそのまま持ち上げる**（状態コードごとの言い換えをしない）
     assert!(
-        format!("{err}").contains("生で返せる種別ではありません"),
+        format!("{err}").contains("テキストではありません"),
         "理由が読めること: {err}"
     );
 }

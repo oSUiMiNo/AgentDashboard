@@ -86,6 +86,9 @@ const DANGEROUS_HTML = `<!doctype html><html><head><meta charset="utf-8"></head>
 <script>document.getElementById('印').textContent = '書き換えられた'</script>
 </body></html>`
 
+/** 生で返しても実行されないことを見る材料（`ファイルの中身に掛けた隔離を、script の1段だけ解く` 設計§5-3）。 */
+const SCRIPTY = '組み込み.js'
+
 const TINY_SVG =
   '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><rect id="四角" width="20" height="20" fill="green"/></svg>'
 
@@ -146,6 +149,12 @@ test.beforeAll(() => {
   // script と外部への読み込みを持つ材料。**隔離が効いているかを言うのはこれ**
   fs.writeFileSync(path.join(docs, DANGEROUS), DANGEROUS_HTML, 'utf8')
   fs.writeFileSync(path.join(docs, VECTOR), TINY_SVG, 'utf8')
+  // 生で返しても `<script src>` から実行できないことを見る材料（設計§5-3）
+  fs.writeFileSync(
+    path.join(docs, SCRIPTY),
+    'window.__走った = "実行されてしまった"\n',
+    'utf8',
+  )
 })
 
 /**
@@ -647,7 +656,7 @@ test('理解doc と同じ作りの HTML が、箱の中で読める', async ({ p
 
   const frame = page.getByTestId('file-frame')
   await expect(frame).toBeVisible()
-  await expect(frame).toHaveAttribute('sandbox', '')
+  await expect(frame).toHaveAttribute('sandbox', 'allow-scripts')
 
   const inside = page.frameLocator('[data-testid="file-frame"]')
   await expect(inside.locator('#見出し')).toHaveText('理解ドキュメント')
@@ -673,7 +682,10 @@ test('理解doc と同じ作りの HTML が、箱の中で読める', async ({ p
 test('SVG も箱の中で描かれる', async ({ page }) => {
   await 開いて選ぶ(page, VECTOR)
 
-  await expect(page.getByTestId('file-frame')).toHaveAttribute('sandbox', '')
+  await expect(page.getByTestId('file-frame')).toHaveAttribute(
+    'sandbox',
+    'allow-scripts',
+  )
   const inside = page.frameLocator('[data-testid="file-frame"]')
   await expect
     .poll(async () =>
@@ -713,7 +725,7 @@ async function 外の受け口() {
   }
 }
 
-test('隔離が効く——script が動かず、外へも出ない', async ({ page }) => {
+test('script は動くが、外へは1件も出ない', async ({ page }) => {
   const 外 = await 外の受け口()
   // **宛先はここで焼き込む。** 受け口の番号は立ててみないと分からないので、
   // 材料もこの場で書く（固定の番号にすると、埋まっている機械で嘘の緑になる）
@@ -726,14 +738,28 @@ test('隔離が効く——script が動かず、外へも出ない', async ({ p
     await expect(page.getByTestId('file-frame')).toBeVisible()
 
     const inside = page.frameLocator('[data-testid="file-frame"]')
-    await expect(inside.locator('#印')).toHaveText('元のまま')
+    /*
+      **script は動くようになった**（`ファイルの中身に掛けた隔離を、script の1段だけ
+      解く` 設計§2）。理解ドキュメントの作法が文書内で完結するインライン script を
+      許しているのに、読む側が黙って落としていた——それがこの工事の出発点である。
+    */
+    await expect(inside.locator('#印')).toHaveText('書き換えられた')
     // 描き終わってから数える。**先に数えると、まだ出ていないだけの0を見る**
     await expect
       .poll(async () =>
         inside.locator('#外').evaluate((el: HTMLImageElement) => el.complete),
       )
       .toBe(true)
+    /*
+      **ここがこの工事の要である**（設計§7-1）。「動かないから出ない」では、緩めた
+      意味が確かめられていない。**動く script が居てなお0件**であることを見る。
+    */
     expect(外.届いた, '網へは1バイトも出ていないこと').toHaveLength(0)
+    // **箱は出自を持たない。** `allow-same-origin` を書き忘れたらここが落ちる（設計§4-2）
+    expect(
+      await inside.locator('#印').evaluate(() => String(window.origin)),
+      '出自を名乗れないこと',
+    ).toBe('null')
 
     // **肯定側の裏取り。** 同じ材料が、隔離の外でなら動いて外へも出る。
     // これが無いと、材料の script が最初から壊れていても上は通る
@@ -748,6 +774,11 @@ test('隔離が効く——script が動かず、外へも出ない', async ({ p
       return frame.contentDocument?.getElementById('印')?.textContent ?? '(読めず)'
     }, html)
     expect(control, '隔離の外でなら、この材料の script は動く').toBe('書き換えられた')
+    /*
+      **肯定側の裏取りは、外への読み込みのほうへ移した。** script が動くことは箱の中で
+      既に見ているので、ここで裏を取りたいのは**「出ないこと」が探し方の誤りでない**
+      ことだけである。隔離の外でなら同じ材料が実際に外へ出る。
+    */
     await expect
       .poll(() => 外.届いた.length, {
         message: '隔離の外でなら、この材料は外へ出る',
@@ -760,9 +791,15 @@ test('隔離が効く——script が動かず、外へも出ない', async ({ p
   }
 })
 
-test('sandbox 属性を外しても、ヘッダだけで script は止まる', async ({ page }) => {
-  // **二重の鍵の、片方ずつ。** 属性を外して初めて、CSP の `sandbox` 指令が
-  // 効いているかを言える（設計§6-1）
+test('箱の側から allow-scripts を外すと、script は動かなくなる', async ({ page }) => {
+  /*
+    **二重の鍵の、片方ずつ**（設計§9-2）。緩めた先でも鍵は2枚あり、**片方ずつ効くことを
+    見ないと、二重であることを確かめたことにならない。**
+
+    ここで見るのは**箱の側**。属性から `allow-scripts` を落とすと、サーバの CSP が
+    許していても動かなくなる。**両方が同じ1段で揃っていないと効かない**という設計
+    （§2）の裏返しである。
+  */
   await 開いて選ぶ(page, DANGEROUS)
   await expect(page.getByTestId('file-frame')).toBeVisible()
 
@@ -773,13 +810,143 @@ test('sandbox 属性を外しても、ヘッダだけで script は止まる', a
     if (frame === null) {
       throw new Error('箱が見つかりません')
     }
-    frame.removeAttribute('sandbox')
-    // 属性を外しただけでは読み込み直されない。同じ宛先へ入れ直す
+    frame.setAttribute('sandbox', '')
+    // 属性を変えただけでは読み込み直されない。同じ宛先へ入れ直す
     frame.src = `${frame.src}&再読み込み=1`
   })
 
   const inside = page.frameLocator('[data-testid="file-frame"]')
   await expect(inside.locator('#印')).toHaveText('元のまま')
+})
+
+test('生で返した .js は、script として実行できない', async ({ page }) => {
+  /*
+    **口を広げたぶんの守りを固定する**（設計§5-3）。`.js` も `text/plain` で返るように
+    なったが、**`text/javascript` では返さない**。守っているのは `nosniff` の1枚だけで、
+    ダッシュボード本体は CSP を1つも出していないので二重にする道が無い。
+
+    2026-09-04 に実ブラウザで測ってあるが、**製品の口でも固定しておく**。
+  */
+  // **画面の口をそのまま叩く。** `.js` は箱に入らない種別なので、宛先は自分で組む
+  const 宛先 = `/api/hosts/local/file?path=${encodeURIComponent(
+    path.join(PROJECT_DIR, 'MyDocs', SCRIPTY),
+  )}&as=raw`
+
+  await openDashboard(page)
+  await addProject(page, PROJECT_DIR)
+
+  const 走った = await page.evaluate(async (src) => {
+    await new Promise((done) => {
+      const el = document.createElement('script')
+      el.src = src
+      el.onload = () => done(null)
+      el.onerror = () => done(null)
+      document.head.appendChild(el)
+      setTimeout(() => done(null), 2000)
+    })
+    return (window as unknown as { __走った?: string }).__走った ?? '(走っていない)'
+  }, 宛先)
+
+  expect(走った, '実行されないこと').toBe('(走っていない)')
+
+  // **肯定側の裏取り。** 同じ中身が、実行できる型で返れば走る。これが無いと
+  // 「材料がもともと動かないだけ」と見分けが付かない
+  const 裏取り = await page.evaluate(async () => {
+    const blob = new Blob(['window.__裏 = "走った"'], { type: 'text/javascript' })
+    const src = URL.createObjectURL(blob)
+    await new Promise((done) => {
+      const el = document.createElement('script')
+      el.src = src
+      el.onload = () => done(null)
+      el.onerror = () => done(null)
+      document.head.appendChild(el)
+      setTimeout(() => done(null), 2000)
+    })
+    return (window as unknown as { __裏?: string }).__裏 ?? '(走っていない)'
+  })
+  expect(裏取り, '実行できる型でなら走ること').toBe('走った')
+})
+
+test('ブラウザで開くと、新しいタブでも script が動く', async ({ page, context }) => {
+  /*
+    **2件を1つの設計として解いた理由が、ここに出る。** 新しいタブで開いても通るのは
+    同じ `?as=raw` の口なので、**サーバの CSP がそのまま効く**。片方だけ緩めていたら、
+    ファイルビュアの中では動くのに新しいタブでは黙って死ぬ——**表からは見えない**
+    食い違いになる（`メタ.md`）。
+  */
+  const 外 = await 外の受け口()
+  const html = DANGEROUS_HTML.replace(OUTSIDE_MARK, `${外.origin}/beacon.png`)
+  const 材料 = path.join(PROJECT_DIR, 'MyDocs', DANGEROUS)
+  fs.writeFileSync(材料, html, 'utf8')
+
+  try {
+    await 開いて選ぶ(page, DANGEROUS)
+    const 開く = page.getByTestId('file-open-tab')
+    await expect(開く).toBeVisible()
+
+    const 新タブ = await Promise.all([
+      context.waitForEvent('page'),
+      開く.click(),
+    ]).then(([出た]) => 出た)
+    await 新タブ.waitForLoadState('load')
+
+    // **ファイルビュアの中と同じ結果になること。** これが要件の「通常通りビューアーで
+    // 表示される」の実体である
+    await expect(新タブ.locator('#印')).toHaveText('書き換えられた')
+    // **それでも外へは出ない。** ヘッダ側の鍵はトップレベルでも効いている
+    expect(外.届いた, '新しいタブでも網へは出ないこと').toHaveLength(0)
+    await 新タブ.close()
+  } finally {
+    await 外.close()
+    fs.writeFileSync(材料, DANGEROUS_HTML, 'utf8')
+  }
+})
+
+test('描けない種別も、新しいタブで字が出る', async ({ page, context }) => {
+  /*
+    **415 を見せない**（設計§5-1）。要件が「ファイルによって表示するか判別する必要は
+    今のところない」と言っているので、押した結果がエラー画面では辻褄が合わない。
+  */
+  await 開いて選ぶ(page, PLAN)
+
+  const 新タブ = await Promise.all([
+    context.waitForEvent('page'),
+    page.getByTestId('file-open-tab').click(),
+  ]).then(([出た]) => 出た)
+  await 新タブ.waitForLoadState('load')
+
+  await expect(新タブ.locator('body')).toContainText('済んだこと')
+  await 新タブ.close()
+})
+
+test('狭い窓でも、操作の列が横へはみ出さない', async ({ page }) => {
+  /*
+    **4つ目を足したぶん**（設計§6-4）。操作の群は「縮まない・折り返さない」設定だった
+    ので、そのままだと狭い窓で横へはみ出す。**jsdom は矩形を固定で返すので、ここでしか
+    言えない**——設計§11 の未決4 をここで解消する。
+  */
+  await page.setViewportSize({ width: 390, height: 780 })
+  await 開いて選ぶ(page, PLAN)
+
+  const 溢れ = await page
+    .getByTestId('file-open-tab')
+    .evaluate((el) => {
+      const 群 = el.parentElement
+      if (群 === null) {
+        throw new Error('操作の列が見つかりません')
+      }
+      return { はみ出し: 群.scrollWidth - 群.clientWidth }
+    })
+  expect(溢れ.はみ出し, '操作の列が入れ物からはみ出していないこと').toBeLessThanOrEqual(1)
+
+  // 4つとも押せること（隠れていないこと）
+  for (const id of ['file-copy', 'file-toggle-raw', 'file-open-tab', 'file-close']) {
+    const 的 = page.getByTestId(id)
+    if ((await 的.count()) === 0) {
+      continue
+    }
+    await expect(的).toBeVisible()
+  }
 })
 
 test('壊れた画像でも画面は壊れない', async ({ page }) => {

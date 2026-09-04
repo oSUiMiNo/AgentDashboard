@@ -9,6 +9,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FileView } from '@/components/FileView/FileView'
+import { rawUrl } from '@/lib/hostfs'
 
 const ROOT = '/home/me/dev/app'
 
@@ -271,6 +272,58 @@ describe('ファイルの見せ方', () => {
  * **否定側の主張が多いので、肯定側と対で書く。** 「叩かない」「出さない」は、
  * 探し方が間違っているときにも同じ答えを返す。
  */
+describe('ブラウザで開く', () => {
+  /**
+   * 押す道はリンク（`ファイルの中身に掛けた隔離を、script の1段だけ解く` 設計§6-2）。
+   *
+   * **`window.open` を呼ぶボタンにしない。** 中クリック・修飾キー・キーボード操作・
+   * ブラウザ自身の「新しいタブで開く」を、こちらで作り直すことになる。
+   */
+  it('宛先は rawUrl と字で一致する——画面で継ぎ足さない', async () => {
+    serve(content('# 計画'))
+    show()
+
+    const 開く = await screen.findByTestId('file-open-tab')
+    // **`rawUrl` の戻りと字で突き合わせる**（設計§6-3）。画面で組み立てると、
+    // 符号化の仕方が2通りになる
+    expect(開く).toHaveAttribute('href', rawUrl('local', `${ROOT}/計画.md`))
+    expect(開く).toHaveAttribute('target', '_blank')
+    expect(開く).toHaveAttribute('rel', 'noopener')
+  })
+
+  it('種別で出し分けない——どのファイルでも出る', async () => {
+    // 要件が「ファイルによって表示するか判別する必要は今のところない」と明記している。
+    // 口を広げたので、押して意味の無い相手でも**字か理由のどちらかは必ず出る**（設計§6-6）
+    for (const name of ['計画.md', 'メモ.txt', '組み込み.js']) {
+      serve(content('中身'))
+      const { unmount } = render(
+        <FileView host="local" root={ROOT} path={`${ROOT}/${name}`} />,
+      )
+      expect(await screen.findByTestId('file-open-tab')).toBeInTheDocument()
+      unmount()
+    }
+  })
+
+  it('閉じるは右端に残る', async () => {
+    // いちばん結果の重い操作が、押し間違いで動かない位置に居ること（設計§6-1）
+    serve(content('# 計画'))
+    render(
+      <FileView host="local" root={ROOT} path={`${ROOT}/計画.md`} onClose={() => {}} />,
+    )
+
+    await screen.findByTestId('file-open-tab')
+    const 並び = ['file-copy', 'file-toggle-raw', 'file-open-tab', 'file-close'].map(
+      (id) => screen.getByTestId(id),
+    )
+    for (let at = 0; at + 1 < 並び.length; at += 1) {
+      expect(
+        並び[at].compareDocumentPosition(並び[at + 1]) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy()
+    }
+  })
+})
+
 describe('画像と HTML', () => {
   /** 呼ばれた URL を全部控える。**「叩かない」を数で言うため。** */
   function record(handler: (url: string) => Response) {
@@ -392,8 +445,9 @@ describe('画像と HTML', () => {
     render(<FileView host="local" root={ROOT} path={`${ROOT}/理解.html`} />)
 
     const frame = await screen.findByTestId('file-frame')
-    // **鍵の片方。** 空の `sandbox` は「許可を1つも与えない」の意味
-    expect(frame).toHaveAttribute('sandbox', '')
+    // **鍵の片方。** 許すのは script の1段だけで、**`allow-same-origin` は書かない**
+    // （`ファイルの中身に掛けた隔離を、script の1段だけ解く` 設計§4-2）
+    expect(frame).toHaveAttribute('sandbox', 'allow-scripts')
     expect(frame.getAttribute('src')).toContain('as=raw')
     expect(frame.getAttribute('src')).toContain(encodeURIComponent(`${ROOT}/理解.html`))
     // 先に叩くのはテキストの口（`as=raw` を含まない）
@@ -450,8 +504,42 @@ describe('画像と HTML', () => {
     )
     render(<FileView host="local" root={ROOT} path={`${ROOT}/図.svg`} />)
 
-    expect(await screen.findByTestId('file-frame')).toHaveAttribute('sandbox', '')
+    expect(await screen.findByTestId('file-frame')).toHaveAttribute(
+      'sandbox',
+      'allow-scripts',
+    )
     expect(screen.queryByTestId('file-image')).toBeNull()
+  })
+
+  it('箱は出自を名乗れない——allow-same-origin を書かない', async () => {
+    record(
+      () =>
+        new Response(
+          JSON.stringify({
+            path: `${ROOT}/理解.html`,
+            text: '<!doctype html><p>理解</p>',
+            truncated: false,
+            bytes: 26,
+          }),
+          { status: 200 },
+        ),
+    )
+    render(<FileView host="local" root={ROOT} path={`${ROOT}/理解.html`} />)
+
+    // **両方付くと隔離が実質消える。** 箱がダッシュボードと同じ出自を名乗れて、
+    // script が自分で `sandbox` を外せる（設計§4-2）。**ここが崩れても画面は普通に
+    // 動く**ので、字で見るしかない
+    const sandbox = (await screen.findByTestId('file-frame')).getAttribute('sandbox')
+    expect(sandbox).not.toContain('allow-same-origin')
+    // 足していない許可も名指しで見る。**黙って増えないこと**が要点（設計§4-3）
+    for (const 足していない of [
+      'allow-popups',
+      'allow-modals',
+      'allow-forms',
+      'allow-top-navigation',
+    ]) {
+      expect(sandbox).not.toContain(足していない)
+    }
   })
 
   it('HTML でも生テキストへ行き来できる', async () => {
