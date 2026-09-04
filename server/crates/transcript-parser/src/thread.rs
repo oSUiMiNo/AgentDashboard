@@ -367,7 +367,11 @@ impl SessionThreader {
                     emitted.push(TreeNode {
                         id: node_id.clone(),
                         parent: root.clone(),
-                        node: Node::UserMessage { text },
+                        node: Node::UserMessage {
+                            text,
+                            origin: protocol::MessageOrigin::Unmarked,
+                            command: None,
+                        },
                         ts,
                         branch,
                     });

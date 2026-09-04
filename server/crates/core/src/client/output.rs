@@ -249,7 +249,7 @@ pub fn render_transcript(nodes: &[TreeNode], has_more: bool) -> String {
     }
     for node in nodes {
         let line = match &node.node {
-            Node::UserMessage { text } => format!("👤 {}", first_line(text, 100)),
+            Node::UserMessage { text, .. } => format!("👤 {}", first_line(text, 100)),
             Node::AssistantText { text } => format!("🤖 {}", first_line(text, 100)),
             Node::Thinking { text } => format!("💭 {}", first_line(text, 100)),
             Node::ToolCall { name, status, .. } => {

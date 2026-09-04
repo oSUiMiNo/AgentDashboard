@@ -643,12 +643,101 @@ pub struct SubagentRef {
     pub spawn_depth: u32,
 }
 
+/// その発言を**誰が入れたか**（`人が打っていないものを、人の発言として出さない` 設計§1）。
+///
+/// **記録が名乗っている。** 推測しているのではなく、`origin.kind` ／ `promptSource` ／
+/// `isMeta` ／ `isSidechain` のどれかが積極的に申告した内容を写している。
+///
+/// # 既定が [`MessageOrigin::Unmarked`] であること
+///
+/// この値は**2つの状況を同時に表す**。
+///
+/// 1. 今日のパーサが見て、**印が1つも無かった**（設計§1-1 の #12）
+/// 2. **この欄を知らない版が書いた古い行**（[`Node::UserMessage::origin`] の
+///    `#[serde(default)]` が効いた場合）
+///
+/// 2つを同じ値にできるのは、**どちらも「従来どおり人として出す」に倒したから**である
+/// （設計§2-2）。分けようとすると「パーサが決して出さない変種」が要り、**型で守れない
+/// 約束**が1つ増える。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MessageOrigin {
+    /// 記録が何も名乗っていない。**従来どおり人の発言として出す**（安全側）
+    #[default]
+    Unmarked,
+    /// 人が打った（`origin.kind == "human"`、または `promptSource` が `typed` / `queued`）
+    Human,
+    /// 他セッションからの連絡。`name` は送り主のセッション名
+    Peer {
+        #[serde(default)]
+        name: Option<String>,
+    },
+    /// サブエージェントの完了通知
+    TaskNotification,
+    /// フックなどが差し込んだ文
+    Injected,
+    /// 圧縮された要約（`isCompactSummary`）
+    CompactSummary,
+    /// SDK が起動時に渡した指示
+    Sdk,
+    /// サブエージェントへ渡した指示（`isSidechain`）
+    SubagentPrompt,
+    /// 人が止めた印（`[Request interrupted by user]` などの定型文）
+    Interrupted,
+    /// **記録は名乗ったが、こちらが知らない名前**（実測で `coordinator` と
+    /// `unclassified` がある。設計§2-3）。
+    ///
+    /// 丸めずに名前のまま運ぶ。[`Node::Unknown`] が未知の**種別**に対してやっていることを、
+    /// **欄の粒度**で同じようにやる——丸めると、記録が名乗ったことを捨てることになる。
+    Other { name: String },
+}
+
+impl MessageOrigin {
+    /// 人の発言として出すか（設計§1-1）。
+    ///
+    /// **`Unmarked` は人の側である。** 印が無いものを機械と読むことは、要件が明示的に
+    /// 禁じている（「`origin` を推測で補わない。欄が無ければ人として出す」）。
+    pub fn is_human(&self) -> bool {
+        matches!(self, Self::Human | Self::Unmarked)
+    }
+}
+
+/// スラッシュコマンドとして打たれた発言（設計§3）。
+///
+/// **記録は2レコードに分かれている。** 本体が `<command-name>` などのタグを持ち、
+/// 展開後の中身は**別のレコード**（`isMeta` ＋ `parentUuid` が本体を指す）で来る。
+/// ここはその2つを1つにまとめたもので、**画面は組み立てるだけで済む**。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlashCommand {
+    /// 打ったままの形（`/名前` または `/名前 引数`）。**生のタグは入らない**
+    pub typed: String,
+    /// 展開後の中身（コマンド／スキルの本文）。
+    ///
+    /// **無いほうが多数派である。** 実測でコマンド本体1782件のうち展開があるのは
+    /// 604件（34%）だけで、`/clear` `/model` のような組み込みには展開が無い（設計§3-4）。
+    #[serde(default)]
+    pub expansion: Option<String>,
+}
+
 /// 正規化イベントモデル。transcript-parser の出力単位（設計§3）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Node {
     UserMessage {
         text: String,
+        /// 誰が入れたか（`人が打っていないものを、人の発言として出さない` 設計§2-1）。
+        ///
+        /// `#[serde(default)]` は [`Node::Image`] と同じ理由——`transcript_nodes.payload`
+        /// はこの型を丸ごと JSON で持つので、欄を必須にすると**この欄を知らない版が
+        /// 書いた行が解けなくなる**。既定は [`MessageOrigin::Unmarked`]（＝人の側）。
+        #[serde(default)]
+        origin: MessageOrigin,
+        /// スラッシュコマンドとして打たれたときの、打った形と展開後の中身。
+        ///
+        /// **`text` とは別に持つ。** `text` には打った形が入るので画面はそのまま出せるが、
+        /// 「これはコマンドである」ことと展開の有無は、字面からではなくここで分かる。
+        #[serde(default)]
+        command: Option<SlashCommand>,
     },
     AssistantText {
         text: String,
@@ -703,10 +792,12 @@ pub enum Node {
     /// `user` レコードのほうで、あちらは `origin.kind` と `promptSource` を持つ。
     /// だから**人の発言と同じ器へ入れない**。
     ///
-    /// **[`Node::UserMessage`] に旗を足す形にしていない**のはそのためである。あの種別は
-    /// 「人の言葉」として吹き出し・右寄せ・本文の折り畳みを引き当てる。まだ人と分かって
-    /// いないものをそこへ入れると、`user_message` を読むすべての場所が
-    /// 「ただし本物か確かめる」を背負うことになる。
+    /// **[`Node::UserMessage`] のほうには、あとから名乗り（[`MessageOrigin`]）が付いた**
+    /// （`人が打っていないものを、人の発言として出さない`）。**それでもこの種別を
+    /// そちらへ寄せない**のは理由が別だからである——あちらは「記録が名乗ったことを写す」
+    /// 欄で、こちらは**名乗る材料が記録に無い**。`Unmarked` で入れると
+    /// 「印が無い＝人」という安全側の既定に乗ってしまい、**まだ人と分かっていないものが
+    /// 人として出る**。
     QueuedMessage {
         text: String,
         /// 待ち行列から出たか。**出たら行にしない**（同じ本文が本物と二重に並ばないため）。
@@ -1088,6 +1179,74 @@ mod tests {
         assert_eq!(parsed.session_title, "");
     }
 
+    /// 名乗りの欄を足す前の版が書いた `user_message` の行。
+    ///
+    /// **`transcript_nodes.payload` はこの型を丸ごと JSON で持つ**ので、実際に DB へ
+    /// 入っているのはこの形である（`人が打っていないものを、人の発言として出さない` 設計§2-1）。
+    const 名乗りの欄が無い古い行: &str = r#"{"kind":"user_message","text":"前の版で書いた発言"}"#;
+
+    #[test]
+    fn 名乗りの欄を持たない古い行が解ける() {
+        // ここが落ちると、**版を戻した瞬間に履歴が丸ごと読めなくなる**。
+        // `version restart` で前の版へ戻せる作りなので、これは実際に起きる
+        let node: Node = serde_json::from_str(名乗りの欄が無い古い行).expect("古い行が解けること");
+        let Node::UserMessage { text, .. } = &node else {
+            panic!("user_message として解けること");
+        };
+        assert_eq!(text, "前の版で書いた発言");
+    }
+
+    #[test]
+    fn 名乗りの欄が無ければ名乗り無しとして受ける() {
+        let node: Node = serde_json::from_str(名乗りの欄が無い古い行).expect("古い行が解けること");
+        let Node::UserMessage { origin, command, .. } = &node else {
+            panic!("user_message として解けること");
+        };
+        assert_eq!(
+            *origin,
+            MessageOrigin::Unmarked,
+            "既定は名乗り無し。**機械にしてはいけない**——古い行が全部琥珀になる"
+        );
+        assert_eq!(*command, None, "コマンドの欄も既定は空");
+    }
+
+    #[test]
+    fn 名乗り無しは人の側に倒れる() {
+        // 設計§1-3。**印が無いものを機械と読むことは要件が明示的に禁じている**
+        assert!(
+            MessageOrigin::Unmarked.is_human(),
+            "印が1つも無い記録は人として出す（安全側）"
+        );
+        assert!(MessageOrigin::Human.is_human());
+        assert!(
+            !MessageOrigin::Peer { name: None }.is_human(),
+            "名乗ったものは名乗ったとおりに扱う"
+        );
+        assert!(!MessageOrigin::Sdk.is_human());
+        assert!(
+            !MessageOrigin::Other {
+                name: "coordinator".to_string()
+            }
+            .is_human(),
+            "知らない名前でも、名乗っている以上は人ではない"
+        );
+    }
+
+    #[test]
+    fn 知らない名乗りは名前を持ったまま往復する() {
+        // 設計§2-3。丸めると**記録が名乗ったことを捨てる**ことになる
+        let node = Node::UserMessage {
+            text: "通知".to_string(),
+            origin: MessageOrigin::Other {
+                name: "coordinator".to_string(),
+            },
+            command: None,
+        };
+        let text = serde_json::to_string(&node).expect("書けること");
+        let back: Node = serde_json::from_str(&text).expect("読めること");
+        assert_eq!(back, node, "知らない名前がそのまま戻ること");
+    }
+
     #[test]
     fn session_metaは知らない欄を黙って読み飛ばす() {
         // 逆向き——**新しい PC ＋ 古いサーバ**。`deny_unknown_fields` を持たないので通る。
@@ -1349,6 +1508,19 @@ mod tests {
         let nodes = vec![
             Node::UserMessage {
                 text: "テストを流して".to_string(),
+                origin: MessageOrigin::Human,
+                command: None,
+            },
+            // 名乗りとコマンドを持つ形も往復させる。**画面はこちらを読む**
+            Node::UserMessage {
+                text: "/pjt_read".to_string(),
+                origin: MessageOrigin::Peer {
+                    name: Some("sample-peer-session".to_string()),
+                },
+                command: Some(SlashCommand {
+                    typed: "/pjt_read".to_string(),
+                    expansion: Some("このPJTの仕様を把握せよ".to_string()),
+                }),
             },
             Node::AssistantText {
                 text: "了解しました".to_string(),

@@ -375,7 +375,7 @@ async fn followで後から書かれた履歴が届く() {
                 "raw は届いた知らせのまま"
             );
             for node in &nodes {
-                if let protocol::Node::UserMessage { text } = &node.node {
+                if let protocol::Node::UserMessage { text, .. } = &node.node {
                     texts.push(text.clone());
                 }
             }

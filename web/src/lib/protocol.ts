@@ -239,13 +239,60 @@ export interface SubagentRef {
 }
 
 /**
+ * その発言を**誰が入れたか**（`人が打っていないものを、人の発言として出さない` 設計§1）。
+ *
+ * Rust 側 `crates/protocol/src/lib.rs` の `MessageOrigin` と対応する。**型はどちらも
+ * 手書き**なので、片方だけ直すと「繋がるのに見分けだけ効かない」形で静かに壊れる。
+ *
+ * `unmarked` は「記録が何も名乗っていない」で、**人の側**として出す（設計§1-3）。
+ */
+export type MessageOrigin =
+  | { kind: 'unmarked' }
+  | { kind: 'human' }
+  | { kind: 'peer'; name: string | null }
+  | { kind: 'task_notification' }
+  | { kind: 'injected' }
+  | { kind: 'compact_summary' }
+  | { kind: 'sdk' }
+  | { kind: 'subagent_prompt' }
+  | { kind: 'interrupted' }
+  /** 記録は名乗ったが、こちらが知らない名前。**丸めずに名前のまま出す**（設計§2-3） */
+  | { kind: 'other'; name: string }
+
+/** スラッシュコマンドとして打たれた発言（設計§3）。 */
+export type SlashCommand = {
+  /** 打ったままの形（`/名前` または `/名前 引数`）。**生のタグは入らない** */
+  typed: string
+  /**
+   * 展開後の中身。
+   *
+   * **無いほうが多数派である**（実測でコマンド本体の34%にしか展開が無い。設計§3-4）。
+   * 無いときは**トグルを出さない**——開いても何も無いトグルを作らない。
+   */
+  expansion?: string | null
+}
+
+/**
  * 構造化ビューの1ノード（設計§3）。
  *
  * Rust 側 `crates/protocol/src/lib.rs` の `Node` と対応する。`#[serde(tag = "kind")]`
  * なので、状態（`SessionStatus`）と同じ判別共用体の形で届く。
  */
 export type Node =
-  | { kind: 'user_message'; text: string }
+  | {
+      kind: 'user_message'
+      text: string
+      /**
+       * 誰が入れたか（`人が打っていないものを、人の発言として出さない` 設計§1）。
+       *
+       * **欄が来ないことがありうる。** 古いサーバに新しい画面が繋がる形が実在する
+       * （`version restart` で版を戻したとき）。実行時の検証は無いので、
+       * **既定への倒し込みは `messageOrigin()` 1か所に閉じる**（設計§2-5）。
+       */
+      origin?: MessageOrigin
+      /** スラッシュコマンドとして打たれたときの、打った形と展開後の中身（設計§3） */
+      command?: SlashCommand | null
+    }
   | { kind: 'assistant_text'; text: string }
   | { kind: 'thinking'; text: string }
   | {
@@ -616,9 +663,9 @@ export function permissionModeLabel(mode: PermissionMode | null): string {
  * **色相が 19.0° しか離れておらず**、作業中のカードは枠線がシアンで光るので、
  * その内側に置くと**状態の色の一部に見える**。
  */
-const MODE_TONES: Readonly<Record<string, string>> = {
-  plan: 'border-blue-400/50 bg-blue-400/10 text-blue-300',
-}
+const MODE_TONES = new Map<string, string>([
+  ['plan', 'border-blue-400/50 bg-blue-400/10 text-blue-300'],
+])
 
 /**
  * モードのバッジの見た目。
@@ -635,7 +682,10 @@ export function permissionModeTone(mode: PermissionMode | null): string {
   if (mode === null) {
     return 'border-border text-muted-foreground'
   }
-  const 専用 = MODE_TONES[mode]
+  // **素のオブジェクトで引かない。** `PermissionMode` は `string` なので CLI が
+  // 増やしたモードがそのまま来る——`'constructor'` や `'toString'` が来ると、
+  // プロトタイプの関数が返って `className` に載る（`Map` なら構造的に起きない）
+  const 専用 = MODE_TONES.get(mode)
   if (専用 !== undefined) {
     return 専用
   }
