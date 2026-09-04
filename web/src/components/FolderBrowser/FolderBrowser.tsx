@@ -20,17 +20,17 @@
  * 同じ列挙の口を使う部品が2つの作法を持つと、片方だけ直したときに食い違う。
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Button } from "@/components/ui/button";
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Button } from '@/components/ui/button'
 import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
   ContextMenuTrigger,
-} from "@/components/ui/context-menu";
-import { ChevronGlyph, CopyGlyph } from "@/components/ui/glyphs";
-import { copyToClipboard } from "@/lib/clipboard";
-import { fileIcon } from "@/lib/fileKind";
+} from '@/components/ui/context-menu'
+import { ChevronGlyph, CopyGlyph } from '@/components/ui/glyphs'
+import { copyToClipboard } from '@/lib/clipboard'
+import { fileIcon } from '@/lib/fileKind'
 import {
   childOf,
   crumbsOf,
@@ -40,19 +40,19 @@ import {
   relativeOf,
   type DirEntry,
   type DirListing,
-} from "@/lib/hostfs";
+} from '@/lib/hostfs'
 
 interface Props {
   /** `agent_id` かローカルを表す `'local'` */
-  host: string;
+  host: string
   /**
    * 最初に見せる場所。**省略するとその PC のホーム**（設計§26-2）。
    *
    * 変わると辿り直す。呼び出し側が「最近使った場所」を押したときの移動もこれで起きる。
    */
-  start?: string;
+  start?: string
   /** ここより上へは辿らせない（PJT 専用画面の左パネル用。設計§15） */
-  root?: string;
+  root?: string
   /**
    * `start` が**無かった**ときに、黙って行き直す先（`イシューグループ_2026-0813-1804` 設計§6-2）。
    *
@@ -63,11 +63,11 @@ interface Props {
    *
    * **黙るのは「無い」（404）ときだけ。** 権限・未接続・時間切れでは理由を出す。
    */
-  fallback?: string;
+  fallback?: string
   /** いま見ている場所が変わるたびに呼ばれる。確定ボタンの相手を呼び出し側が持つため */
-  onPathChange?: (path: string) => void;
+  onPathChange?: (path: string) => void
   /** ファイルを押したとき。省略するとファイルは押せない（選ぶ対象がフォルダだけの場面） */
-  onPickFile?: (path: string) => void;
+  onPickFile?: (path: string) => void
 }
 
 /**
@@ -78,7 +78,7 @@ interface Props {
  * （設計§6-3）。寝ている PC で全部の失敗を拾うと、時間切れが2回並んで倍待たされ、
  * しかも起点も同じ理由で失敗するので**見える結果は変わらない**。
  */
-type Arrival = "ok" | "gone" | "failed" | "stale";
+type Arrival = "ok" | "gone" | "failed" | "stale"
 
 export function FolderBrowser({
   host,
@@ -88,11 +88,11 @@ export function FolderBrowser({
   onPathChange,
   onPickFile,
 }: Props) {
-  const [listing, setListing] = useState<DirListing | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [listing, setListing] = useState<DirListing | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
   // `undefined` は「まだ聞いていない」＝ホームから始める（設計§26-2）
-  const [path, setPath] = useState<string | undefined>(start);
+  const [path, setPath] = useState<string | undefined>(start)
   /**
    * 何番目の問いか。**最後に投げたものの答えだけを採る**（設計§29）。
    *
@@ -103,7 +103,7 @@ export function FolderBrowser({
    * `useRef` で持つのは、これが描画に出ない値だから——`useState` にすると
    * `go` が作り直され、それを見ている効果まで走り直す。
    */
-  const asked = useRef(0);
+  const asked = useRef(0)
 
   /**
    * **コピーの答えは1組しか持たない**（設計§5）。「どの行の、どの値が、どうなったか」
@@ -115,12 +115,12 @@ export function FolderBrowser({
    * 番号を `useRef` で持つ理由は `asked` と同じ——描画に出ない値なので、
    * `useState` にすると押すたびに関数が作り直される。
    */
-  const copyAsked = useRef(0);
+  const copyAsked = useRef(0)
   const [copied, setCopied] = useState<{
-    path: string;
-    value: string;
-    state: "done" | "failed";
-  } | null>(null);
+    path: string
+    value: string
+    state: "done" | "failed"
+  } | null>(null)
 
   /**
    * **`await` を1つも挟まずに [`copyToClipboard`] を呼ぶ**（設計§3）。ここに
@@ -128,55 +128,55 @@ export function FolderBrowser({
    * 切れるかどうかはブラウザ任せなので、**動いたり動かなかったりする**形になる。
    */
   const copy = useCallback((at: string, value: string) => {
-    const mine = ++copyAsked.current;
+    const mine = ++copyAsked.current
     // 押した瞬間に前の答えを消す。**結果を待たない**——待つと、次の行を押しても
     // 前の行の答えが残って見える
-    setCopied(null);
+    setCopied(null)
     void copyToClipboard(value).then((ok) => {
       // 割り込まれた古い答えは捨てる（`asked` と同じ理由）
       if (mine !== copyAsked.current) {
-        return;
+        return
       }
-      setCopied({ path: at, value, state: ok ? "done" : "failed" });
-    });
-  }, []);
+      setCopied({ path: at, value, state: ok ? "done" : "failed" })
+    })
+  }, [])
 
   const go = useCallback(
     async (next: string | undefined, 黙る = false): Promise<Arrival> => {
-      const mine = ++asked.current;
-      setLoading(true);
-      setError(null);
+      const mine = ++asked.current
+      setLoading(true)
+      setError(null)
       try {
-        const result = await listDir(host, next);
+        const result = await listDir(host, next)
         if (mine !== asked.current) {
-          return "stale";
+          return "stale"
         }
-        setListing(result);
+        setListing(result)
         // **着いた先はサーバが返す値を正とする。** 省略して問うたときは
         // ここで初めてホームのパスが分かる
-        setPath(result.path);
-        onPathChange?.(result.path);
-        return "ok";
+        setPath(result.path)
+        onPathChange?.(result.path)
+        return "ok"
       } catch (err) {
         // 古い問いの失敗も捨てる。拾うと、**新しい場所の正しい一覧が消える**
         if (mine !== asked.current) {
-          return "stale";
+          return "stale"
         }
         // **黙るのは「無い」ときだけ。** 権限・未接続・時間切れは理由をそのまま出す
         if (黙る && err instanceof HostFsError && err.status === 404) {
-          return "gone";
+          return "gone"
         }
-        setError(err instanceof Error ? err.message : "読めませんでした");
-        setListing(null);
-        return "failed";
+        setError(err instanceof Error ? err.message : "読めませんでした")
+        setListing(null)
+        return "failed"
       } finally {
         if (mine === asked.current) {
-          setLoading(false);
+          setLoading(false)
         }
       }
     },
     [host, onPathChange],
-  );
+  )
 
   useEffect(() => {
     // **辿り直す先は `start`。`path` を渡してはいけない。**
@@ -184,26 +184,26 @@ export function FolderBrowser({
     // 上書きする」ことになる。症状は**一瞬だけ新しい場所が見えて元へ戻る**で、
     // 状態の更新が非同期であることに由来するので、目で追っても原因が見えない。
     void (async () => {
-      const 着いたか = await go(start, fallback !== undefined);
+      const 着いたか = await go(start, fallback !== undefined)
       // **行き直すのは1度だけ。** `go` の中から自分を呼ぶ形にすると、消えた先が
       // 連なっていたときに止まらなくなる
       if (着いたか === "gone" && fallback !== undefined) {
         // 着けば `onPathChange` が飛ぶので、**死んだ記憶はその場で上書きされる**
-        await go(fallback);
+        await go(fallback)
       }
-    })();
-  }, [host, start, fallback, go]);
+    })()
+  }, [host, start, fallback, go])
 
   // ルートより上は出さない（左パネル用）。現在地までの道筋は見せて、外側だけを塞ぐ。
   // **内側かどうかの判定は `isUnder` に寄せる**——区切りを見ない前方一致で書くと、
   // `app` の内側に `app-old` が通り、起点の外へ抜ける段ができる
-  const 全部 = crumbsOf(path ?? "/");
+  const 全部 = crumbsOf(path ?? "/")
   const crumbs = 全部.filter(
     (crumb) =>
       root === undefined ||
       isUnder(root, crumb.path) ||
       isUnder(crumb.path, root),
-  );
+  )
 
   /*
     **「1つ上」は、パンくずの末尾から2番目**（細かい修正 設計§8-2）。新しい関数を
@@ -215,10 +215,10 @@ export function FolderBrowser({
     出られなくすれば基準は壊れないので、**設計を覆さずに要件3を満たせる**。
     判定は既存のパンくずと同じ `isUnder` に寄せる——別の書き方をすると挙動がずれる。
   */
-  const ひとつ上 = 全部.length >= 2 ? 全部[全部.length - 2] : undefined;
+  const ひとつ上 = 全部.length >= 2 ? 全部[全部.length - 2] : undefined
   const 上へ行ける =
     ひとつ上 !== undefined &&
-    (root === undefined || isUnder(root, ひとつ上.path));
+    (root === undefined || isUnder(root, ひとつ上.path))
 
   return (
     <div
@@ -253,7 +253,7 @@ export function FolderBrowser({
           className="shrink-0"
           onClick={() => {
             if (ひとつ上 !== undefined) {
-              void go(ひとつ上.path);
+              void go(ひとつ上.path)
             }
           }}
         >
@@ -324,7 +324,7 @@ export function FolderBrowser({
         )}
         {!loading &&
           listing?.entries.map((entry) => {
-            const full = childOf(listing.path, entry.name);
+            const full = childOf(listing.path, entry.name)
             return (
               <Row
                 key={entry.name}
@@ -339,11 +339,11 @@ export function FolderBrowser({
                 copyState={copied?.path === full ? copied.state : "idle"}
                 onCopy={(value) => copy(full, value)}
               />
-            );
+            )
           })}
       </ul>
     </div>
-  );
+  )
 }
 
 /**
@@ -365,20 +365,20 @@ function Row({
   copyState,
   onCopy,
 }: {
-  entry: DirEntry;
+  entry: DirEntry
   /** この行が指す絶対パス */
-  full: string;
+  full: string
   /** 相対パスの基準。無ければ絶対パスをコピーする */
-  root?: string;
-  onOpen: () => void;
-  onPickFile?: () => void;
+  root?: string
+  onOpen: () => void
+  onPickFile?: () => void
   /** この行のコピーがどうなったか。**答えを持つのは1行だけ**（親が決める） */
-  copyState: "idle" | "done" | "failed";
-  onCopy: (value: string) => void;
+  copyState: "idle" | "done" | "failed"
+  onCopy: (value: string) => void
 }) {
-  const openable = entry.kind === "dir";
+  const openable = entry.kind === "dir"
   const pressable =
-    openable || (entry.kind === "file" && onPickFile !== undefined);
+    openable || (entry.kind === "file" && onPickFile !== undefined)
 
   return (
     /*
@@ -447,7 +447,7 @@ function Row({
         </ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
-  );
+  )
 }
 
 /**
@@ -477,16 +477,16 @@ function CopyPath({
   state,
   onCopy,
 }: {
-  full: string;
-  root?: string;
-  isDir: boolean;
-  state: "idle" | "done" | "failed";
-  onCopy: (value: string) => void;
+  full: string
+  root?: string
+  isDir: boolean
+  state: "idle" | "done" | "failed"
+  onCopy: (value: string) => void
 }) {
-  const base = root === undefined ? full : relativeOf(root, full);
+  const base = root === undefined ? full : relativeOf(root, full)
   // **フォルダは末尾に `/` を付ける。** 貼られた側で「これは入れ物か中身か」が
   // 一目で分かり、続けて名前を書き足すときにも区切りを打ち直さずに済む
-  const value = isDir && !base.endsWith("/") ? `${base}/` : base;
+  const value = isDir && !base.endsWith("/") ? `${base}/` : base
 
   return (
     <Button
@@ -515,5 +515,5 @@ function CopyPath({
         </span>
       )}
     </Button>
-  );
+  )
 }
