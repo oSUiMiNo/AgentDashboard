@@ -32,6 +32,9 @@ const buttonVariants = cva(
         "icon-sm":
           "size-7 rounded-[min(var(--radius-md),12px)] in-data-[slot=button-group]:rounded-lg",
         "icon-lg": "size-9",
+        // 48px。`icon`（32/16）と器と絵の比を揃えてある——既定の `size-4` のままだと
+        // 器の中で絵が泳ぐ（細かい修正 設計§2-3）
+        "icon-xl": "size-12 [&_svg:not([class*='size-'])]:size-6",
       },
     },
     defaultVariants: {
