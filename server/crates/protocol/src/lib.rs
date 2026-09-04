@@ -695,6 +695,32 @@ pub enum Node {
         #[serde(default)]
         file_name: Option<String>,
     },
+    /// 待ち行列に入ったが、まだ読まれていない指示
+    /// （`queue-operation` の `enqueue`。作業中に送った追加メッセージ 設計§3-1）。
+    ///
+    /// **これは発言ではない。** 誰が書いたかを記録が名乗っていない
+    /// （`queue-operation` に `origin` は実測 0/72,058 件）。名乗るのは読まれたあとの
+    /// `user` レコードのほうで、あちらは `origin.kind` と `promptSource` を持つ。
+    /// だから**人の発言と同じ器へ入れない**。
+    ///
+    /// **[`Node::UserMessage`] に旗を足す形にしていない**のはそのためである。あの種別は
+    /// 「人の言葉」として吹き出し・右寄せ・本文の折り畳みを引き当てる。まだ人と分かって
+    /// いないものをそこへ入れると、`user_message` を読むすべての場所が
+    /// 「ただし本物か確かめる」を背負うことになる。
+    QueuedMessage {
+        text: String,
+        /// 待ち行列から出たか。**出たら行にしない**（同じ本文が本物と二重に並ばないため）。
+        ///
+        /// 単一ノードを消す経路は [`crate::ipc::ParserEvent`] にも
+        /// [`crate::ws::ServerMessage`] にも DB にもブラウザのストアにも無い。
+        /// **消す代わりに、ここを立てて畳む**（設計§4）。
+        ///
+        /// `#[serde(default)]` は [`Node::Image`] と同じ理由——`transcript_nodes.payload`
+        /// はこの型を丸ごと JSON で持つので、欄を必須にすると欄を知らない版が書いた行が
+        /// 解けなくなる。
+        #[serde(default)]
+        taken: bool,
+    },
     /// 寛容パースの受け皿。未知の type / 構造はすべてここへ写像する。
     ///
     /// このバリアントがあるおかげで、パーサは共有境界（このクレート）を変更せずに
@@ -1077,15 +1103,21 @@ mod tests {
     }
 
     #[test]
-    fn 名前を運ぶ工事でパーサとの契約の版は上がらない() {
-        // **ここが上がると、自己修復が差し替えた古いパーサを抱えている機械で、
-        // 構造化ビューが丸ごと縮退する**（設計§3-2）。名前が出ないだけで済むはずの差で、
-        // 履歴を殺すことになる。
+    fn パーサとの契約の版はノードの形を変えたときだけ上がる() {
+        // **ここを上げると、自己修復が差し替えた古いパーサを抱えている機械で、
+        // 構造化ビューが丸ごと縮退する**（設計§3-2）。だから安売りしない。
         //
-        // 報告を1つ足すのは `ParserEvent` の変種を増やすだけでよい——受け口
-        // （`session-host-core/src/parser.rs`）が知らない報告を警告1行で捨てる作りに
-        // なっているので、古い PC 側は落ちない。
-        assert_eq!(crate::ipc::PROTOCOL_VERSION, 1);
+        // **報告を1つ足すだけでは上げない。** 受け口（`session-host-core/src/parser.rs`）は
+        // 知らない [`crate::ipc::ParserEvent`] を警告1行で捨てるので、古い PC 側は落ちない
+        // ——名前が出ないだけで、履歴も状態も無傷である（`ai-title` の工事はこれで据え置いた）。
+        //
+        // **[`Node`] の形を変えたときは上げる。** 知らない `kind` は解けないので、古い core は
+        // **その `Nodes` に載っていたノードを丸ごと捨て、読み位置も進めない**——名前が出ない
+        // のではなく、**その範囲の履歴が静かに死ぬ**（作業中に送った追加メッセージ 設計§3-3
+        // で 1 → 2）。
+        //
+        // **この数字を動かすときは、どちら側の理由なのかを必ず書くこと。**
+        assert_eq!(crate::ipc::PROTOCOL_VERSION, 2);
     }
 
     #[test]
@@ -1347,14 +1379,39 @@ mod tests {
                 agent_type: "Explore".to_string(),
                 spawn_depth: 1,
             },
+            Node::QueuedMessage {
+                text: "あとで直して".to_string(),
+                taken: false,
+            },
+            Node::QueuedMessage {
+                text: "あとで直して".to_string(),
+                taken: true,
+            },
+            // **`queue-operation` はもう未知ではない**（設計§2-1 で行を作る側へ移した）。
+            // 例に使い続けると、次に読む人が分類を取り違える
             Node::Unknown {
-                record_type: "queue-operation".to_string(),
-                raw: json!({ "type": "queue-operation", "未知フィールド": 1 }),
+                record_type: "atis-latch".to_string(),
+                raw: json!({ "type": "atis-latch", "未知フィールド": 1 }),
             },
         ];
         for node in &nodes {
             assert_eq!(&roundtrip(node), node);
         }
+    }
+
+    #[test]
+    fn 待ちの行はtakenが欠けていれば畳まれていない扱いになる() {
+        // [`Node::Image`] と同じ理由——`transcript_nodes.payload` はこの型を丸ごと JSON で
+        // 持つので、**欄を知らない版が書いた行**を読み直せる必要がある（設計§3-1）
+        let node: Node = serde_json::from_str(r#"{"kind":"queued_message","text":"あとで"}"#)
+            .expect("taken が無くても解けること");
+        assert_eq!(
+            node,
+            Node::QueuedMessage {
+                text: "あとで".to_string(),
+                taken: false,
+            }
+        );
     }
 
     #[test]

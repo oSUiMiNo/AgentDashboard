@@ -260,6 +260,12 @@ pub fn render_transcript(nodes: &[TreeNode], has_more: bool) -> String {
             Node::Image { file_name, .. } => {
                 format!("🖼 画像: {}", file_name.as_deref().unwrap_or("（名前なし）"))
             }
+            // **畳んだものも出す。** 画面は行にしないが、こちらは「何が待っていて、
+            // それがいつ読まれたか」を追う道具なので、消える側の記録にも値がある
+            Node::QueuedMessage { text, taken } => {
+                let 印 = if *taken { "済" } else { "待" };
+                format!("⏳ {印} {}", first_line(text, 100))
+            }
             Node::Unknown { record_type, .. } => format!("？ 不明なイベント（{record_type}）"),
         };
         out.push_str(&format!("{}  {line}\n", node.id.0));

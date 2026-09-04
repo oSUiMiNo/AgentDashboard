@@ -25,11 +25,21 @@ const TRANSPARENT_TYPES: &[&str] = &["attachment", "system"];
 /// 画面のいちばん下に出すものが無くなる（`一覧のカードのレイアウトを変える` 設計§2-1）。
 const ATTRIBUTE_TYPES: &[&str] = &["ai-title"];
 
+/// `uuid` を持たず鎖にも参加しないが、**待ち行列の出入りとして行を作る**種別
+/// （作業中に送った追加メッセージ 設計§2）。
+///
+/// 他の4本と違い、この種別は**あとから自分の行を書き換える**（読まれたら畳む）。
+/// 単一ノードを消す経路は経路上のどこにも無いので、消すのではなく
+/// 「行にしない」で畳む（設計§4）。
+///
+/// **捨てる側に置いてはいけない。** 送った追加メッセージが読まれるまでのあいだ、
+/// 送った本人に手応えを返す経路がこの1行しか無い。
+const QUEUE_TYPES: &[&str] = &["queue-operation"];
+
 /// `uuid` を持たず、ツリーに置き場所が無い種別。
 ///
 /// 履歴表示には寄与しないので数えるだけにする。root に積むと画面がノイズで埋まる。
 const NOISE_TYPES: &[&str] = &[
-    "queue-operation",
     "last-prompt",
     "mode",
     "permission-mode",
@@ -49,6 +59,8 @@ pub enum Kind {
     Transparent,
     /// ノードは作らず鎖にも参加しないが、**値をセッションの属性として拾う**
     Attribute,
+    /// 鎖には参加しないが、**待ち行列の出入りとして行を作る**（設計§2-1）
+    Queue,
     /// 捨てる（数えるだけ）
     Noise,
     /// 知らない種別。`uuid` があればツリーに置き、無ければ合成IDで root へ
@@ -62,6 +74,8 @@ pub fn classify(record_type: &str) -> Kind {
         Kind::Transparent
     } else if ATTRIBUTE_TYPES.contains(&record_type) {
         Kind::Attribute
+    } else if QUEUE_TYPES.contains(&record_type) {
+        Kind::Queue
     } else if NOISE_TYPES.contains(&record_type) {
         Kind::Noise
     } else {
@@ -143,6 +157,32 @@ impl Record {
     pub fn ai_title(&self) -> Option<&str> {
         let title = self.raw.get("aiTitle")?.as_str()?;
         (!title.trim().is_empty()).then_some(title)
+    }
+
+    /// 待ち行列の出入りの種類（`enqueue` / `dequeue` / `remove` / `popAll`）。
+    ///
+    /// **知らない値もそのまま返す。** 選り分けるのは呼ぶ側の仕事で、ここでは判定しない
+    /// ——`popAll` が分類表にもコメントにも無いまま実在していた（実測36件）ので、
+    /// **5つ目は必ず来る**（設計§10）。
+    pub fn queue_operation(&self) -> Option<&str> {
+        self.raw.get("operation")?.as_str()
+    }
+
+    /// 待ち行列へ入った指示の本文。
+    ///
+    /// **`message` の中ではなくトップレベルにある。** `queue-operation` は `message` を
+    /// 持たないので [`crate::normalize::blocks`] は通らない（あちらは `message` が無ければ
+    /// 空を返す）。だからここで直に読む。
+    ///
+    /// 中身が無いときは `None`。`dequeue` は本文を持たない（実測 32,022件）。
+    pub fn queue_content(&self) -> Option<&str> {
+        let content = self.raw.get("content")?.as_str()?;
+        (!content.is_empty()).then_some(content)
+    }
+
+    /// そのレコードが属するセッション。ノードIDの素材に使う（設計§3-2）。
+    pub fn session_id(&self) -> Option<&str> {
+        self.raw.get("sessionId")?.as_str()
     }
 }
 
@@ -226,9 +266,12 @@ mod tests {
         // 実データで親子の鎖に挟まることを確認済み。捨てるとツリーが切れる
         assert_eq!(classify("attachment"), Kind::Transparent);
         assert_eq!(classify("system"), Kind::Transparent);
-        assert_eq!(classify("queue-operation"), Kind::Noise);
+        // 捨てる側から**行を作る側**へ移した。送った追加メッセージが読まれるまでの
+        // あいだ、送った本人に手応えを返す経路がこの1行しか無い（設計§2-1）
+        assert_eq!(classify("queue-operation"), Kind::Queue);
         // 捨てる側から**属性**へ移した。名前を運ぶ経路がこの1行しか無い
         assert_eq!(classify("ai-title"), Kind::Attribute);
+        assert_eq!(classify("last-prompt"), Kind::Noise);
         assert_eq!(classify("brand-new-type"), Kind::Unknown);
     }
 

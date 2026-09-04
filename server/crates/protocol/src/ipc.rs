@@ -36,7 +36,12 @@ use std::collections::{BTreeMap, BTreeSet};
 /// 自己修復（設計§9）が差し替えたバイナリが古い/新しい契約で喋っていた場合、
 /// core はこれを見て縮退（`ParserStatus::Degraded`）に落とす。照合が無いと、
 /// 噛み合わないバイナリが**静かに間違ったツリー**を作る — 目に見える縮退より悪い。
-pub const PROTOCOL_VERSION: u32 = 1;
+/// # 版を上げた履歴
+///
+/// - **1 → 2**（作業中に送った追加メッセージ 設計§3-3）：[`crate::Node`] に
+///   `QueuedMessage` を足した。**足したものが小さいかどうかでは決めない**——
+///   下の [`ParserEvent::SessionTitle`] と逆の結論になった理由はそちらに書いてある。
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// core → parser の指示。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,6 +140,14 @@ pub enum ParserEvent {
     /// 一方この報告を知らない受け手は、**警告1行を出して捨てる**だけで済む——
     /// 名前が出ないだけで、履歴も状態も無傷である。**名前が出ないことと、
     /// 履歴が丸ごと死ぬことを、同じ重さで扱わない。**
+    ///
+    /// ## 逆の結論になった例（[`crate::Node::QueuedMessage`]・版 2）
+    ///
+    /// **基準は「知らない受け手が何を失うか」であって、足したものの大きさではない。**
+    /// あちらは [`crate::Node`] のバリアントなので、知らない core は `kind` を解けず
+    /// **その [`ParserEvent::Nodes`] に載っていたノードを丸ごと捨て、`next_offset` も
+    /// 進まない**——名前が出ないのではなく、**その範囲の履歴が静かに死ぬ**。
+    /// だから版を上げて、見える形で縮退させる。
     SessionTitle { card_id: CardId, title: String },
     /// パースの健康状態。自己修復（設計§9）の検知の入力になる。
     ///

@@ -36,7 +36,7 @@
 //! 消すと「サブエージェントが走ったのに画面に何も出ない」という、いちばん困る形になる。
 
 use crate::normalize::{self, Block};
-use crate::parse::{Kind, Record};
+use crate::parse::{Kind, Record, truncate_text};
 use crate::stats::Stats;
 use protocol::{Node, NodeId, SubagentRef, ToolStatus, TreeNode};
 use serde_json::Value;
@@ -129,7 +129,34 @@ struct FileState {
     /// 実測でこの順は起きないが、起きても**絵が出ないだけ**で落ちはしない
     /// （`path` が `None` の [`Node::Image`] は「手元に残っていません」と出る）。
     pending_images: Option<(String, std::collections::VecDeque<TreeNode>)>,
+    /// まだ読まれていない追加メッセージ（設計§4）。`(ノードID, 本文)` を入った順に持つ。
+    ///
+    /// # 育たないことを、型ではなく数で言う
+    ///
+    /// [`FileState::pending_images`] は枠を1つに絞ることで育たなさを型で言えたが、
+    /// **こちらは行列そのものが対象**なので絞れない。代わりに [`MAX_QUEUED`] で頭打ちに
+    /// する——実測の最大は8前後（アンダーフロー0件・ほぼ全セッションが深さ0で終わる）
+    /// なので通常は効かず、**模型が破綻したときに画面が埋まるのを止める歯止め**である。
+    ///
+    /// **このクレートは、差し替えたパーサが 8GB まで育って機械を落としかけた歴史を持つ。**
+    queued: std::collections::VecDeque<(NodeId, String)>,
+    /// このファイルで何件目の `enqueue` か。ノードIDの通し番号（設計§3-2）。
+    ///
+    /// **[`SessionThreader::synthetic_id`] を使わない。** あちらは本体とサブエージェントの
+    /// 全ファイルで1本の連番を共有するので、**サブエージェントのファイルが見つかる時機で
+    /// 番号がずれる**。こちらはファイル内に閉じており、読む経路3つ（通常の追尾・再開時の
+    /// `catch_up`・`read_range`）が**すべて先頭から食わせる**ので、読み直しても同じ ID になる。
+    queue_seq: u64,
 }
+
+/// 待ち行列に同時に並べる上限（設計§4-2）。
+const MAX_QUEUED: usize = 64;
+
+/// 待ち行列の本文の上限（設計§4-2）。
+///
+/// 実データの `enqueue` には `<task-notification>` を丸ごと抱えたものがある
+/// （フィクスチャにも実在）。畳まれるまでのあいだ抱え続けるので、ここで切る。
+const MAX_QUEUED_TEXT: usize = 64 * 1024;
 
 /// 1セッション（本体＋サブエージェント群）ぶんのスレッディング。
 ///
@@ -253,6 +280,7 @@ impl SessionThreader {
                 }
                 Vec::new()
             }
+            Kind::Queue => self.feed_queue(source, record, ts),
             Kind::Noise => Vec::new(),
             Kind::Unknown => self.feed_unknown(source, record, ts),
         }
@@ -331,6 +359,11 @@ impl SessionThreader {
                     // 新しい指示が来たらターンが変わる。以後のツールコールは
                     // 次のアシスタント本文にぶら下がる
                     self.file(source).turn_anchor = None;
+                    // **合図(a)**：待っていた同じ本文を畳む（設計§4-1）。**行列の出入り
+                    // だけを見ていると足りない**——本物の `user` レコードが `dequeue` より
+                    // 先に書かれる場面があり、その間ずっと同じ本文が2つ並ぶ
+                    let retired = self.retire_matching(source, &text, root.clone(), ts, branch);
+                    emitted.extend(retired);
                     emitted.push(TreeNode {
                         id: node_id.clone(),
                         parent: root.clone(),
@@ -505,6 +538,145 @@ impl SessionThreader {
         }]
     }
 
+    /// 待ち行列の出入りを行にする（設計§4・§10）。
+    ///
+    /// **`enqueue` だけがノードを作る。** 他は既にあるノードを `taken: true` で送り直す
+    /// ——単一ノードを消す経路が経路上のどこにも無いので、消す代わりに「行にしない」で畳む。
+    ///
+    /// # 出しているのは「送った」ではない
+    ///
+    /// **`enqueue` の行が実際に JSONL へ書かれ、パーサがそれを読んだ**ことである。
+    /// **送信が失敗すればこの行は書かれないので、画面が嘘をつく余地が無い。**
+    ///
+    /// 姉妹イシュー `送信した指示が構造化ビューにすぐ出ない` は**楽観表示**（押した瞬間に、
+    /// まだ書かれていないものを出す）を「送ったと届いたは別だから」と名指しで不採用に
+    /// している。**こちらはその楽観表示ではない**（設計§8）。
+    fn feed_queue(&mut self, source: &str, record: &Record, ts: i64) -> Vec<TreeNode> {
+        let branch = self.branch_of(source);
+        let root = self.files.get(source).and_then(|file| file.root.clone());
+
+        match record.queue_operation().unwrap_or_default() {
+            "enqueue" => {
+                let Some(content) = record.queue_content() else {
+                    return Vec::new();
+                };
+                let text = truncate_text(content, MAX_QUEUED_TEXT);
+                let session = record.session_id().unwrap_or_default().to_string();
+                let file = self.file(source);
+                let ordinal = file.queue_seq;
+                file.queue_seq += 1;
+                // 区切りに `#` を使わない。ノードIDは履歴の遡り（`?before=<id>`）で
+                // URL に載るため、`#` だとフラグメント扱いになって値が途中で切れる
+                let node_id = NodeId(format!("queue:{session}:{ordinal}"));
+                file.queued.push_back((node_id.clone(), text.clone()));
+                // 溢れたぶんは畳んで手放す。**抱えたままにしない**
+                let mut overflow = Vec::new();
+                while file.queued.len() > MAX_QUEUED {
+                    if let Some(old) = file.queued.pop_front() {
+                        overflow.push(old);
+                    }
+                }
+                let mut emitted: Vec<TreeNode> = overflow
+                    .into_iter()
+                    .map(|(id, held)| taken_node(id, held, root.clone(), ts, branch))
+                    .collect();
+                emitted.push(TreeNode {
+                    id: node_id,
+                    parent: root,
+                    node: Node::QueuedMessage { text, taken: false },
+                    ts,
+                    branch,
+                });
+                emitted
+            }
+            // 本文を持たないので**位置で決める**。実データでアンダーフローは0件だった
+            "dequeue" => self.retire_front(source, root, ts, branch),
+            // 本文の一致で抜く（**先頭とは限らない**）。一致が無ければ最も古いものを落とす
+            "remove" => match record.queue_content() {
+                Some(content) => self.retire_text(source, content, root, ts, branch),
+                None => self.retire_front(source, root, ts, branch),
+            },
+            "popAll" => {
+                let drained: Vec<_> = self.file(source).queued.drain(..).collect();
+                drained
+                    .into_iter()
+                    .map(|(id, held)| taken_node(id, held, root.clone(), ts, branch))
+                    .collect()
+            }
+            // 知らない値は**何もしない**（設計§10）。`popAll` は分類表にもコメントにも
+            // 設計文書にも無いまま実在していた（実測36件）ので、**5つ目は必ず来る**。
+            // 来たときに壊れるより、無視して合図(a) に拾わせるほうがよい
+            _ => Vec::new(),
+        }
+    }
+
+    /// 行列の先頭を1つ畳む。
+    fn retire_front(
+        &mut self,
+        source: &str,
+        root: Option<NodeId>,
+        ts: i64,
+        branch: u32,
+    ) -> Vec<TreeNode> {
+        match self.file(source).queued.pop_front() {
+            Some((id, held)) => vec![taken_node(id, held, root, ts, branch)],
+            None => Vec::new(),
+        }
+    }
+
+    /// 本文の一致で1つ畳む。一致が無ければ先頭を落とす。
+    fn retire_text(
+        &mut self,
+        source: &str,
+        content: &str,
+        root: Option<NodeId>,
+        ts: i64,
+        branch: u32,
+    ) -> Vec<TreeNode> {
+        let needle = truncate_text(content, MAX_QUEUED_TEXT);
+        let hit = {
+            let queued = &mut self.file(source).queued;
+            queued
+                .iter()
+                .position(|(_, held)| *held == needle)
+                .and_then(|at| queued.remove(at))
+        };
+        match hit {
+            Some((id, held)) => vec![taken_node(id, held, root, ts, branch)],
+            None => self.retire_front(source, root, ts, branch),
+        }
+    }
+
+    /// **合図(a)**：同じ本文の発言が出たので、待っている行を畳む（設計§4-1）。
+    ///
+    /// **これが「二重に並ばない」の主保証である。** 本物の `user` レコードが
+    /// `dequeue` より先に書かれる場面があるので、行列の出入りだけを見ていると
+    /// **その間ずっと同じ本文が2つ並ぶ**。
+    ///
+    /// 本文の一致に頼るが、それでよい——**一致するのは「画面に出したら見分けが
+    /// 付かない2つ」だけ**なので、どちらを畳んでも読む人には同じものが1つ残る。
+    fn retire_matching(
+        &mut self,
+        source: &str,
+        text: &str,
+        root: Option<NodeId>,
+        ts: i64,
+        branch: u32,
+    ) -> Vec<TreeNode> {
+        let needle = truncate_text(text, MAX_QUEUED_TEXT);
+        let hit = {
+            let queued = &mut self.file(source).queued;
+            queued
+                .iter()
+                .position(|(_, held)| *held == needle)
+                .and_then(|at| queued.remove(at))
+        };
+        match hit {
+            Some((id, held)) => vec![taken_node(id, held, root, ts, branch)],
+            None => Vec::new(),
+        }
+    }
+
     fn synthetic_id(&mut self) -> String {
         self.synthetic_seq += 1;
         format!("synthetic:{}", self.synthetic_seq)
@@ -621,6 +793,20 @@ impl SessionThreader {
     }
 }
 
+/// 畳んだ待ちの行。**同じ ID で送り直す**ので、受け手は upsert で置き換える。
+///
+/// 本文を残したまま `taken` だけを立てるのは、**行にしない判断を画面側が持つ**ため
+/// （設計§4）。ここで本文を空にすると、落とす条件を「本文が空か」で書けなくなる。
+fn taken_node(id: NodeId, text: String, parent: Option<NodeId>, ts: i64, branch: u32) -> TreeNode {
+    TreeNode {
+        id,
+        parent,
+        node: Node::QueuedMessage { text, taken: true },
+        ts,
+        branch,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(non_snake_case)]
@@ -645,6 +831,13 @@ mod tests {
                 Node::ToolCall { .. } => "tool",
                 Node::Subagent { .. } => "subagent",
                 Node::Image { .. } => "image",
+                Node::QueuedMessage { taken, .. } => {
+                    if taken {
+                        "queued-taken"
+                    } else {
+                        "queued"
+                    }
+                }
                 Node::Unknown { .. } => "unknown",
             })
             .collect()
@@ -839,14 +1032,135 @@ mod tests {
     #[test]
     fn ノイズ種別はノードにならない() {
         let mut threader = SessionThreader::new();
-        assert!(
-            feed(
-                &mut threader,
-                r#"{"type":"queue-operation","operation":"enqueue"}"#
-            )
-            .is_empty()
-        );
+        // `queue-operation` はここから外した。**捨てる側から行を作る側へ移した**ので、
+        // 残しておくと通ったまま意味が反対になる（設計§2-1）
+        assert!(feed(&mut threader, r#"{"type":"last-prompt","prompt":"x"}"#).is_empty());
+        assert!(feed(&mut threader, r#"{"type":"mode","mode":"default"}"#).is_empty());
         assert!(feed(&mut threader, r#"{"type":"ai-title","aiTitle":"題"}"#).is_empty());
+    }
+
+    /// 待ち行列の1件を組み立てる。`content` を省くと本文を持たない形になる。
+    fn queue(operation: &str, content: Option<&str>) -> String {
+        let body = match content {
+            Some(text) => format!(
+                r#","content":{}"#,
+                serde_json::Value::String(text.to_string())
+            ),
+            None => String::new(),
+        };
+        format!(r#"{{"type":"queue-operation","operation":"{operation}","sessionId":"s1"{body}}}"#)
+    }
+
+    fn 発言(text: &str) -> String {
+        format!(
+            r#"{{"type":"user","uuid":"u1","message":{{"content":{}}}}}"#,
+            serde_json::Value::String(text.to_string())
+        )
+    }
+
+    #[test]
+    fn 待ち行列に入った指示が行になる() {
+        let mut threader = SessionThreader::new();
+        let nodes = feed(&mut threader, &queue("enqueue", Some("あとで直して")));
+        assert_eq!(kinds(&nodes), ["queued"]);
+        assert_eq!(nodes[0].id, NodeId("queue:s1:0".into()));
+        // 根へ置く。読まれた本物も根へ出るので、待ちも根が正しい位置（設計§5-1）
+        assert!(nodes[0].parent.is_none());
+    }
+
+    #[test]
+    fn 読まれた待ちは同じIDで畳まれる() {
+        let mut threader = SessionThreader::new();
+        feed(&mut threader, &queue("enqueue", Some("あとで直して")));
+        let nodes = feed(&mut threader, &queue("dequeue", None));
+        // **行は増えない。** 同じ ID を `taken` で送り直す（upsert 契約）
+        assert_eq!(kinds(&nodes), ["queued-taken"]);
+        assert_eq!(nodes[0].id, NodeId("queue:s1:0".into()));
+    }
+
+    #[test]
+    fn removeは本文の一致で抜く_先頭とは限らない() {
+        let mut threader = SessionThreader::new();
+        feed(&mut threader, &queue("enqueue", Some("A")));
+        feed(&mut threader, &queue("enqueue", Some("B")));
+        let nodes = feed(&mut threader, &queue("remove", Some("B")));
+        assert_eq!(nodes.len(), 1);
+        // B を抜く。先頭固定だと A が消えてしまう
+        assert_eq!(nodes[0].id, NodeId("queue:s1:1".into()));
+    }
+
+    #[test]
+    fn popAllは全部畳む() {
+        let mut threader = SessionThreader::new();
+        feed(&mut threader, &queue("enqueue", Some("A")));
+        feed(&mut threader, &queue("enqueue", Some("B")));
+        let nodes = feed(&mut threader, &queue("popAll", None));
+        assert_eq!(kinds(&nodes), ["queued-taken", "queued-taken"]);
+    }
+
+    #[test]
+    fn 同じ本文の発言が先に来ても畳まれる() {
+        // **合図(a)**（設計§4-1）。本物が `dequeue` より先に書かれる場面があるので、
+        // ここが無いとその間ずっと同じ本文が2つ並ぶ
+        let mut threader = SessionThreader::new();
+        feed(&mut threader, &queue("enqueue", Some("あとで直して")));
+        let nodes = feed(&mut threader, &発言("あとで直して"));
+        assert_eq!(kinds(&nodes), ["queued-taken", "user"]);
+    }
+
+    #[test]
+    fn 空の行列から取り出しても壊れない() {
+        let mut threader = SessionThreader::new();
+        assert!(feed(&mut threader, &queue("dequeue", None)).is_empty());
+        assert!(feed(&mut threader, &queue("popAll", None)).is_empty());
+    }
+
+    #[test]
+    fn 知らない出入りは何もしない() {
+        // `popAll` が分類表にも設計文書にも無いまま実在していた。**5つ目は必ず来る**
+        let mut threader = SessionThreader::new();
+        feed(&mut threader, &queue("enqueue", Some("A")));
+        assert!(feed(&mut threader, &queue("shuffle", None)).is_empty());
+        // 行列は触られていないので、あとから畳める
+        let nodes = feed(&mut threader, &queue("dequeue", None));
+        assert_eq!(kinds(&nodes), ["queued-taken"]);
+    }
+
+    #[test]
+    fn 待ち行列は上限で頭打ちになる() {
+        // **育たないことを数で言う**（設計§4-2）。差し替えたパーサが 8GB まで育った
+        // 歴史があるので、模型が破綻しても画面が埋まらないことを確かめる
+        let mut threader = SessionThreader::new();
+        for n in 0..(MAX_QUEUED + 2) {
+            feed(&mut threader, &queue("enqueue", Some(&format!("指示{n}"))));
+        }
+        let file = threader.files.get(MAIN).expect("ファイルの状態がある");
+        assert_eq!(file.queued.len(), MAX_QUEUED);
+    }
+
+    #[test]
+    fn 長すぎる本文は切られる() {
+        let mut threader = SessionThreader::new();
+        let 長文 = "あ".repeat(MAX_QUEUED_TEXT);
+        let nodes = feed(&mut threader, &queue("enqueue", Some(&長文)));
+        let Node::QueuedMessage { text, .. } = &nodes[0].node else {
+            panic!("待ちの行であること");
+        };
+        assert!(text.len() <= MAX_QUEUED_TEXT + 64, "切られていること");
+        assert!(text.contains("省略"));
+    }
+
+    #[test]
+    fn 同じファイルを2回読むと同じIDになる() {
+        // ID が内容から決まること。**`synthetic_id` はファイルをまたぐ連番なので使えない**
+        let ids = |()| {
+            let mut threader = SessionThreader::new();
+            let mut out = Vec::new();
+            out.extend(feed(&mut threader, &queue("enqueue", Some("A"))));
+            out.extend(feed(&mut threader, &queue("enqueue", Some("B"))));
+            out.into_iter().map(|node| node.id).collect::<Vec<_>>()
+        };
+        assert_eq!(ids(()), ids(()));
     }
 
     #[test]

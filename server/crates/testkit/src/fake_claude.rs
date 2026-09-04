@@ -32,6 +32,17 @@ pub const HOOK_FAILED_PREFIX: &str = "[fake-claude] hook-failed: ";
 pub const JSONL_APPENDED_PREFIX: &str = "[fake-claude] jsonl-appended: ";
 /// `jsonl` に失敗したことを示す行頭。
 pub const JSONL_FAILED_PREFIX: &str = "[fake-claude] jsonl-failed: ";
+
+/// `queue` が待ち行列へ1件入れたことを示す行頭
+/// （作業中に送った追加メッセージ テスト計画フェーズ1）。
+///
+/// **待てる同期点を必ず1つ作る**のが、このバイナリへ命令を足すときの掟である
+/// （`jsonl` と同じ）。無いと、書き終わる前に画面を見に行って落ちる。
+pub const QUEUED_PREFIX: &str = "[fake-claude] queued: ";
+/// `dequeue` が待ち行列から1件取り出したことを示す行。
+pub const DEQUEUED_MARKER: &str = "[fake-claude] dequeued";
+/// `said` が本物の発言レコードを1件書いたことを示す行頭。
+pub const SAID_PREFIX: &str = "[fake-claude] said: ";
 /// 画面サイズが変わった（SIGWINCH を受けた）ときのマーカー。`<cols>x<rows>` が続く。
 ///
 /// 本物の claude も SIGWINCH には反応する（再描画で応える）。擬似はテストが読める形で

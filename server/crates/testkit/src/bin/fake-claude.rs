@@ -18,6 +18,9 @@
 //!   flood <N>     N バイトをまとめて吐き出す（フロー制御と大量出力の検証用）
 //!   hook <名前> [JSON]  注入された settings のフックを実際に起動する
 //!   jsonl <元ファイル> [行数]  フックが運ぶトランスクリプトへ JSONL を追記する
+//!   queue <本文>  待ち行列へ1件入れる（`queue-operation` の `enqueue` を書く）
+//!   dequeue       待ち行列から1件取り出す（本文を持たない）
+//!   said <本文>   読まれた指示を、本物の発言レコードとして書く
 //!   crash <N>     終了コード N で自ら異常終了する
 //!   exit          終了する
 //!   その他        受け取った行を返す
@@ -41,11 +44,11 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use testkit::fake_claude::{
     ARGV_PREFIX, BYE_MARKER, BYPASS_ACCEPTED_MARKER, BYPASS_NOTICE, BYPASS_OPTIONS,
-    CANCELLED_MARKER, CRASH_MARKER, CYCLE_MODES, DUMP_END_MARKER, ENV_PREFIX, FLOOD_END_MARKER,
-    FLOOD_PATTERN, FOOTER_PREFIX, HOOK_FAILED_PREFIX, HOOK_SENT_PREFIX, JSONL_APPENDED_PREFIX,
-    JSONL_FAILED_PREFIX, MODEL_SET_PREFIX, MODEL_SWITCH_NOTICE, MODEL_SWITCH_OPTIONS, READY_MARKER,
-    RECEIVED_PREFIX, RESIZED_PREFIX, STATUS_LINE_SENT_PREFIX, footer_for, physical_lines,
-    render_dialog, resolve_model,
+    CANCELLED_MARKER, CRASH_MARKER, CYCLE_MODES, DEQUEUED_MARKER, DUMP_END_MARKER, ENV_PREFIX,
+    FLOOD_END_MARKER, FLOOD_PATTERN, FOOTER_PREFIX, HOOK_FAILED_PREFIX, HOOK_SENT_PREFIX,
+    JSONL_APPENDED_PREFIX, JSONL_FAILED_PREFIX, MODEL_SET_PREFIX, MODEL_SWITCH_NOTICE,
+    MODEL_SWITCH_OPTIONS, QUEUED_PREFIX, READY_MARKER, RECEIVED_PREFIX, RESIZED_PREFIX,
+    SAID_PREFIX, STATUS_LINE_SENT_PREFIX, footer_for, physical_lines, render_dialog, resolve_model,
 };
 
 /// 起動時に受け取った、フック実行に必要な情報。
@@ -255,6 +258,8 @@ fn main() {
     let mut pending_images: Vec<String> = Vec::new();
     // 記録に書いたターンの数。レコードの `uuid` と `promptId` を分けるための連番
     let mut image_turns = 0usize;
+    // `said` で書いた発言の数。こちらも `uuid` を分けるための連番
+    let mut said_turns = 0usize;
 
     for input in InputReader::new() {
         let line = match input {
@@ -454,6 +459,40 @@ fn main() {
 
         if let Some(rest) = line.strip_prefix("jsonl ") {
             append_jsonl(&mut out, &injected, rest.trim());
+            continue;
+        }
+
+        // 待ち行列へ1件入れる（作業中に送った追加メッセージ テスト計画フェーズ1）。
+        //
+        // **書いただけでは読まれない。** 本物はターンの区切りでフックを撃ち、それが
+        // セッションホストに履歴を読ませる契機になる（画像のターンと同じ理由）。
+        // ここを省くと「ファイルには在るのに画面に出ない」形で E2E だけが落ちる
+        if let Some(rest) = line.strip_prefix("queue ") {
+            let text = rest.trim();
+            append_queue(&injected, "enqueue", Some(text));
+            let _ = writeln!(out, "{QUEUED_PREFIX}{text}");
+            let _ = out.flush();
+            hook(&mut out, &injected, "Stop");
+            continue;
+        }
+
+        // 待ち行列から取り出す（読まれた／取り消された）。**本文は持たない**
+        if line.trim() == "dequeue" {
+            append_queue(&injected, "dequeue", None);
+            let _ = writeln!(out, "{DEQUEUED_MARKER}");
+            let _ = out.flush();
+            hook(&mut out, &injected, "Stop");
+            continue;
+        }
+
+        // 読まれた指示を、本物の発言レコードとして書く
+        if let Some(rest) = line.strip_prefix("said ") {
+            let text = rest.trim();
+            said_turns += 1;
+            append_said(&injected, text, said_turns);
+            let _ = writeln!(out, "{SAID_PREFIX}{text}");
+            let _ = out.flush();
+            hook(&mut out, &injected, "Stop");
             continue;
         }
 
@@ -1100,6 +1139,63 @@ fn append_image_turn(injected: &Injected, text: &str, paths: &[String], seq: usi
     let _ = writeln!(file, "{body}");
     let _ = writeln!(file, "{companion}");
     let _ = file.flush();
+}
+
+/// トランスクリプトへ1行足す。
+///
+/// 書き出し先は必ず [`transcript_path`]（フックが運ぶ値と同じ場所）。ずれると
+/// 「フックは届くのに履歴が出ない」という追いにくい状態になる。
+fn append_transcript_line(injected: &Injected, line: &str) {
+    let target = transcript_path(injected);
+    if let Some(parent) = std::path::Path::new(&target).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&target)
+    else {
+        return;
+    };
+    let _ = writeln!(file, "{line}");
+    let _ = file.flush();
+}
+
+/// 待ち行列の出入りを1件書く（作業中に送った追加メッセージ テスト計画フェーズ1）。
+///
+/// **本物と同じ形にする。** `uuid` も `parentUuid` も持たず、`content` は
+/// **トップレベル**に置く（実データ 72,058件で確認した形。`message` の中ではない）。
+/// **形を勝手に決めない**——ここが本物とずれると、擬似だけが通る実装ができる。
+fn append_queue(injected: &Injected, operation: &str, content: Option<&str>) {
+    let body = match content {
+        Some(text) => format!(
+            r#","content":{}"#,
+            serde_json::Value::String(text.to_string())
+        ),
+        None => String::new(),
+    };
+    let session = &injected.session_id;
+    append_transcript_line(
+        injected,
+        &format!(
+            r#"{{"type":"queue-operation","operation":"{operation}","timestamp":"2026-01-01T00:00:00.000Z","sessionId":"{session}"{body}}}"#
+        ),
+    );
+}
+
+/// 読まれた指示（本物の `user` レコード）を1件書く。
+///
+/// **待ち行列とは別の経路である。** 本物は、待ちが読まれたときに**初めて**この形の
+/// レコードを書く。だから「待ちが消えて本物が並ぶ」を擬似で作るには、この2つを
+/// 別々に打てる必要がある。
+fn append_said(injected: &Injected, text: &str, seq: usize) {
+    append_transcript_line(
+        injected,
+        &format!(
+            r#"{{"type":"user","uuid":"said-{seq}","message":{{"content":{}}}}}"#,
+            serde_json::Value::String(text.to_string())
+        ),
+    );
 }
 
 fn transcript_path(injected: &Injected) -> String {

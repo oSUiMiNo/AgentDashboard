@@ -128,6 +128,9 @@ fn kind_of(node: &Node) -> &'static str {
         Node::ToolCall { .. } => "tool",
         Node::Subagent { .. } => "subagent",
         Node::Image { .. } => "image",
+        // 畳んだかどうかで別に数える。**ゴールデンで「消える側」を守る**ため
+        Node::QueuedMessage { taken: false, .. } => "queued",
+        Node::QueuedMessage { taken: true, .. } => "queued-taken",
         Node::Unknown { .. } => "unknown",
     }
 }
@@ -267,10 +270,14 @@ fn ツールコールは直前のアシスタント本文の子になる() {
         .map(|node| kind_of(&node.node))
         .collect();
     assert!(
-        root_kinds
-            .iter()
-            .all(|kind| matches!(*kind, "user" | "assistant" | "thinking")),
-        "根に来てよいのは会話の本文だけ: {root_kinds:?}"
+        root_kinds.iter().all(|kind| matches!(
+            *kind,
+            // 待ち行列の指示は、まだどのターンにも属していない。**読まれたときに本物は
+            // 根へ出るので、待ちも根に置く**——置き場所が無いからではなく、そこが
+            // 正しい位置だから広げた（作業中に送った追加メッセージ 設計§5-1）
+            "user" | "assistant" | "thinking" | "queued" | "queued-taken"
+        )),
+        "根に来てよいのは会話の本文と、まだ読まれていない指示だけ: {root_kinds:?}"
     );
 }
 
@@ -474,7 +481,9 @@ fn read_rangeは範囲内のノードだけを正しい親付きで返す() {
 
 #[test]
 fn 表示対象外のレコードが混ざっていても孤児を作らない() {
-    // attachment / queue-operation / ai-title / last-prompt が実際に混ざっているセット
+    // attachment / ai-title / last-prompt が実際に混ざっているセット。
+    // **`queue-operation` はもう表示対象外ではない**（設計§2-1 で行を作る側へ移した）
+    // が、`parentUuid` を持たないので孤児には数えられないままである
     for name in [
         "v2.1.220/basic-tools/session.jsonl",
         "v2.1.220/subagent/session.jsonl",
