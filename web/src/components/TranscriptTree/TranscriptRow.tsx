@@ -674,8 +674,8 @@ function MarkdownBody({
   //
   // **判断は `messageOrigin.ts` の純関数が持つ。** ここで `?? 'unmarked'` を書かない
   // ——既定への倒し込みが2箇所になる（設計§2-5）
-  const machine = row !== undefined && isMachine(row.node)
-  const label = machine ? originLabel(originOf(row.node)) : ''
+  const machine = row != null && isMachine(row.node)
+  const label = row != null && machine ? originLabel(originOf(row.node)) : ''
 
   const inner = (
     <>
@@ -763,7 +763,7 @@ function MarkdownBody({
           // 派生の計算（`color-mix`）まで背負うことになる**
           data-queued={queued ? 'true' : undefined}
           // 誰が入れたかも、機械が読める形で出す（色と位置を見て確かめずに済む）
-          data-origin={machine ? originOf(row.node).kind : undefined}
+          data-origin={row != null && machine ? originOf(row.node).kind : undefined}
           // **フェードの地を渡す必要は無い**（設計§6-2）。ティントは半透明なので、
           // 透けるのは実際にこの吹き出しの地である。
           //

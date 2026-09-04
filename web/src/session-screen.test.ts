@@ -76,13 +76,22 @@ describe('選択の印（§5-3）', () => {
     expect(INDEX).not.toMatch(/\[data-body-open='true'\] \{/)
   })
 
-  it('器は3種類とも掛かりを持っている', () => {
-    // 吹き出し（利用者）・`body-shell`（アシスタント）・素の器（ツールコール）。
-    // **1つの規則で3種類を覆える**のは、掛かりが共通だから
-    // 器は3種類だが、`shell === 'none'` は字下げの有無で2度書いているので4箇所になる
-    expect(ROW.match(/row-shell/g) ?? []).toHaveLength(4)
+  it('本文を持つ種別は、どれも掛かりを持っている', () => {
+    /*
+      **「3種類」は器の作り分け（吹き出し／`body-shell`／素）であって、行の種類ではない。**
+      ここを取り違えて `MarkdownBody` にだけ付けていたため、**ツールコールと未知の行は
+      開いても印が出なかった**——それらは `MarkdownBody` を通らない。
+
+      内訳：`MarkdownBody` が4（吹き出し・`body-shell`・素を字下げの有無で2度）、
+      ツールコールが1、未知が1。**サブエージェントは本文を持たない**（子を出し入れする
+      だけ）ので対象外。
+    */
+    expect(ROW.match(/row-shell/g) ?? []).toHaveLength(6)
     expect(ROW).toContain('speech-bubble row-shell')
     expect(ROW).toContain('body-shell row-shell')
+    // ツールコールと未知の器。**ここが落ちたら、その種別だけ印が消えている**
+    expect(ROW).toContain('row-shell mt-1 ml-6 space-y-2')
+    expect(ROW).toMatch(/row-shell[^"]*max-h-64/)
   })
 
   it('左辺の Accent と背景 Tint の2つを重ねている', () => {
