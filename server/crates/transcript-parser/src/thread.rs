@@ -406,7 +406,10 @@ impl SessionThreader {
             && !record.is_sidechain
             && blocks
                 .iter()
-                .any(|block| matches!(block, Block::UserText(_)))
+                // **スラッシュコマンドも会話の根になる。** セッションの1通目が
+                // `/pjt_read` のような形は普通に起きるので、ここを外すと
+                // `/rewind` の枝が数えられなくなる
+                .any(|block| matches!(block, Block::UserText(_) | Block::SlashCommand { .. }))
         {
             let file = self.file(source);
             file.roots_seen += 1;
@@ -1885,5 +1888,24 @@ mod スラッシュコマンド {
         assert!(!text.contains("command-name"), "生のタグが残っている: {text}");
         assert!(!text.contains("command-message"), "生のタグが残っている: {text}");
         assert!(!text.contains("command-args"), "生のタグが残っている: {text}");
+    }
+}
+
+#[cfg(test)]
+mod コマンドが根になる場合 {
+    #![allow(non_snake_case)]
+    use super::*;
+    use crate::parse::parse_line;
+
+    #[test]
+    fn 一通目がスラッシュコマンドでも会話の根になる() {
+        // ここを外すと `/rewind` の枝が数えられなくなる（巻き戻しが検知されない）
+        let mut threader = SessionThreader::new();
+        let line = r#"{"type":"user","uuid":"u1","parentUuid":null,"origin":{"kind":"human"},"message":{"role":"user","content":"<command-message>x</command-message>\n<command-name>/x</command-name>"}}"#;
+        threader.feed_record("/p/s.jsonl", None, &parse_line(line));
+        assert_eq!(
+            threader.files["/p/s.jsonl"].roots_seen, 1,
+            "コマンドも根として数える"
+        );
     }
 }

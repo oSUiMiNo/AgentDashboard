@@ -122,6 +122,9 @@ impl Parsed {
 
 fn kind_of(node: &Node) -> &'static str {
     match node {
+        // **人と機械を別に数える**（`人が打っていないものを、人の発言として出さない` 設計§8）。
+        // **人の側は `"user"` のまま**にしてある——既存のゴールデンの数値を動かさないため
+        Node::UserMessage { origin, .. } if !origin.is_human() => "user-machine",
         Node::UserMessage { .. } => "user",
         Node::AssistantText { .. } => "assistant",
         Node::Thinking { .. } => "thinking",
@@ -139,7 +142,13 @@ fn kind_of(node: &Node) -> &'static str {
 fn basic_toolsのフィクスチャが期待どおりのツリーになる() {
     let parsed = Parsed::of(fixture("v2.1.220/basic-tools/session.jsonl"));
 
-    assert_eq!(parsed.count("user"), 1, "最初のプロンプト1件");
+    // **実採取のフィクスチャは `claude -p` で採るので、1通目が `promptSource: "sdk"`
+    // になる**（`人が打っていないものを、人の発言として出さない` 設計§1-1 の #6）。
+    // つまり「人が打った」とは名乗っていない。**判定はこれで正しい**——採り方の性質で
+    // あって、製品の動きではない（ダッシュボードは PTY 上の対話 CLI を起こすので
+    // 利用者の入力は `typed` になる）
+    assert_eq!(parsed.count("user"), 0, "人が打ったと名乗る発言は無い");
+    assert_eq!(parsed.count("user-machine"), 1, "最初のプロンプト1件（SDK 由来）");
     assert_eq!(parsed.count("thinking"), 5);
     assert_eq!(parsed.count("assistant"), 5);
     assert_eq!(
@@ -275,7 +284,7 @@ fn ツールコールは直前のアシスタント本文の子になる() {
             // 待ち行列の指示は、まだどのターンにも属していない。**読まれたときに本物は
             // 根へ出るので、待ちも根に置く**——置き場所が無いからではなく、そこが
             // 正しい位置だから広げた（作業中に送った追加メッセージ 設計§5-1）
-            "user" | "assistant" | "thinking" | "queued" | "queued-taken"
+            "user" | "user-machine" | "assistant" | "thinking" | "queued" | "queued-taken"
         )),
         "根に来てよいのは会話の本文と、まだ読まれていない指示だけ: {root_kinds:?}"
     );
@@ -633,4 +642,84 @@ fn 実物のフィクスチャから題を1回だけ拾える() {
             parsed.titles.len()
         );
     }
+}
+
+/// 5通りが正しく分かれること
+/// （`人が打っていないものを、人の発言として出さない` 設計§8・テスト計画フェーズ5）。
+///
+/// **この崩れが今まで門に掛からなかったのは、`origin` を持つフィクスチャが1つしか
+/// 無かったからである。** ここが最後の砦になる。
+#[test]
+fn message_originのフィクスチャで人と機械が分かれる() {
+    let parsed = Parsed::of(fixture("synthetic/message-origin/session.jsonl"));
+
+    assert_eq!(
+        parsed.count("user"),
+        3,
+        "人＝素の指示・スラッシュコマンド・印が1つも無い記録（/clear）"
+    );
+    assert_eq!(
+        parsed.count("user-machine"),
+        2,
+        "機械＝フックの注入・他セッションからの連絡。**展開は行にならない**"
+    );
+    assert_eq!(parsed.orphans(), 0, "親を見失ったレコードは無い");
+    assert!(
+        parsed.unknown_types().is_empty(),
+        "未知の種別が出た: {:?}",
+        parsed.unknown_types()
+    );
+
+    let 発言: Vec<_> = parsed
+        .nodes
+        .values()
+        .filter_map(|node| match &node.node {
+            Node::UserMessage {
+                text,
+                origin,
+                command,
+            } => Some((text.as_str(), origin.clone(), command.clone())),
+            _ => None,
+        })
+        .collect();
+
+    // 生のタグが1文字も出ないこと
+    for (text, _, _) in &発言 {
+        assert!(!text.contains("command-name"), "生のタグが出ている: {text}");
+        assert!(!text.contains("command-message"), "生のタグが出ている: {text}");
+    }
+
+    let コマンド = 発言
+        .iter()
+        .find(|(_, _, command)| command.is_some())
+        .expect("スラッシュコマンドが1つあること");
+    assert_eq!(コマンド.0, "/sample-skill-1 calc.py", "打った形＝名前＋引数");
+    assert!(コマンド.1.is_human(), "打った本人は人のまま");
+    assert_eq!(
+        コマンド.2.as_ref().unwrap().expansion.as_deref(),
+        Some("指定されたファイルを読み、要点をまとめよ。"),
+        "展開が同じ吹き出しの中に入る"
+    );
+
+    // 他セッションからの連絡は、送り主の名前を持って出る
+    let 連絡 = 発言
+        .iter()
+        .find(|(_, origin, _)| matches!(origin, protocol::MessageOrigin::Peer { .. }))
+        .expect("連絡が1つあること");
+    assert!(
+        matches!(
+            &連絡.1,
+            protocol::MessageOrigin::Peer { name: Some(name) } if name == "sample-peer-session"
+        ),
+        "送り主の名前が出る: {:?}",
+        連絡.1
+    );
+
+    // **印が1つも無い記録は人**（安全側の門。ここに `/clear` が来る）
+    let 印無し = 発言
+        .iter()
+        .find(|(text, _, _)| *text == "/clear")
+        .expect("印の無い記録が1つあること");
+    assert_eq!(印無し.1, protocol::MessageOrigin::Unmarked);
+    assert!(印無し.1.is_human(), "印が無いものは人として出す");
 }
