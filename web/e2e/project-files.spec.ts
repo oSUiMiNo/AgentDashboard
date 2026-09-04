@@ -83,7 +83,12 @@ const RICH_HTML = `<!doctype html><html><head><meta charset="utf-8">
 const DANGEROUS_HTML = `<!doctype html><html><head><meta charset="utf-8"></head><body>
 <p id="印">元のまま</p>
 <img id="外" src="${OUTSIDE_MARK}">
-<script>document.getElementById('印').textContent = '書き換えられた'</script>
+<script>
+document.getElementById('印').textContent = '書き換えられた'
+// **取ってくる道は2本ある。** 上の <img> は img-src が、こちらは default-src が止める。
+// 片方だけ試すと、もう片方の指令を落としても「出ない」が通ってしまう
+try { fetch('${OUTSIDE_MARK}/fetch-beacon', { mode: 'no-cors' }) } catch (e) {}
+</script>
 </body></html>`
 
 /** 生で返しても実行されないことを見る材料（`ファイルの中身に掛けた隔離を、script の1段だけ解く` 設計§5-3）。 */
@@ -729,7 +734,7 @@ test('script は動くが、外へは1件も出ない', async ({ page }) => {
   const 外 = await 外の受け口()
   // **宛先はここで焼き込む。** 受け口の番号は立ててみないと分からないので、
   // 材料もこの場で書く（固定の番号にすると、埋まっている機械で嘘の緑になる）
-  const html = DANGEROUS_HTML.replace(OUTSIDE_MARK, `${外.origin}/beacon.png`)
+  const html = DANGEROUS_HTML.replaceAll(OUTSIDE_MARK, `${外.origin}/beacon.png`)
   const 材料 = path.join(PROJECT_DIR, 'MyDocs', DANGEROUS)
   fs.writeFileSync(材料, html, 'utf8')
 
@@ -753,7 +758,15 @@ test('script は動くが、外へは1件も出ない', async ({ page }) => {
     /*
       **ここがこの工事の要である**（設計§7-1）。「動かないから出ない」では、緩めた
       意味が確かめられていない。**動く script が居てなお0件**であることを見る。
+
+      **取ってくる道は2本ある**（`<img>` と `fetch`）ので、材料は両方を試している。
+      片方だけだと、もう片方の指令を落としても「出ない」が通ってしまう——実際に
+      `default-src 'none'` を外して確かめたら、`img-src data:` だけで止まっていた。
+
+      **数える前に間を置く。** `fetch` は非同期なので、すぐ数えると**まだ出ていない
+      だけの0**を見る。
     */
+    await page.waitForTimeout(700)
     expect(外.届いた, '網へは1バイトも出ていないこと').toHaveLength(0)
     // **箱は出自を持たない。** `allow-same-origin` を書き忘れたらここが落ちる（設計§4-2）
     expect(
@@ -875,7 +888,7 @@ test('ブラウザで開くと、新しいタブでも script が動く', async 
     食い違いになる（`メタ.md`）。
   */
   const 外 = await 外の受け口()
-  const html = DANGEROUS_HTML.replace(OUTSIDE_MARK, `${外.origin}/beacon.png`)
+  const html = DANGEROUS_HTML.replaceAll(OUTSIDE_MARK, `${外.origin}/beacon.png`)
   const 材料 = path.join(PROJECT_DIR, 'MyDocs', DANGEROUS)
   fs.writeFileSync(材料, html, 'utf8')
 
@@ -894,6 +907,7 @@ test('ブラウザで開くと、新しいタブでも script が動く', async 
     // 表示される」の実体である
     await expect(新タブ.locator('#印')).toHaveText('書き換えられた')
     // **それでも外へは出ない。** ヘッダ側の鍵はトップレベルでも効いている
+    await 新タブ.waitForTimeout(700)
     expect(外.届いた, '新しいタブでも網へは出ないこと').toHaveLength(0)
     await 新タブ.close()
   } finally {
