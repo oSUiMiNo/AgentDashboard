@@ -426,6 +426,76 @@
 }
 
 /*
+  カードの操作は、**右上に1つの群**にまとめる（細かい修正 設計§4-1）。
+
+  # なぜ両端に散らさないのか
+
+  鉛筆が左上、復旧が右上で**両端が埋まっていた**。3つに増やすと視線が往復するので、
+  右上へ寄せる。並びは**取り返しの付く順**（編集 → ゴミ箱 → 電源）——逆にすると、
+  押し間違えたときにいちばん痛いものが指の近くに来る。
+
+  **3つまで**（`DESIGN.md` §15.3「群は2〜3個までにする」）。4つ目を足さない。
+
+  # 出る条件
+
+  **マウスのある機械では、乗っているときだけ。指で触る画面では常に出す。**
+  タッチには hover が無いので、隠すほうを `@media (hover: hover) and (pointer: fine)`
+  の中だけに置く——**既定を「出る」にしておけば、hover を持たない端末から永久に
+  届かない、という形が構造的に作れない**。
+
+  選ばれているときと、キーボードで中に入ったときも出す。見えないボタンにフォーカスが
+  当たると、どこに居るのか分からなくなる。
+
+  # 物質を持つのは電源だけ
+
+  `DESIGN.md` §12.3 は**一覧の行に物質を持たせない**と定めている。電源ボタンは
+  「主要操作ボタン」として§12.3 の表に載っているので別枠だが、**編集とゴミ箱には
+  板を作らない**——`DESIGN.md` §15.1「主要操作は1つだけ塗る」もここに効く。
+*/
+.tile-ops {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* 指で触る画面：常に出す */
+  opacity: 1;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .tile-ops {
+    opacity: 0;
+    transition: opacity 120ms ease-out;
+  }
+
+  .tile-shell:where(:hover) .tile-ops,
+  .tile-shell[data-selected='true'] .tile-ops,
+  .tile-ops:where(:focus-within) {
+    opacity: 1;
+  }
+}
+
+/*
+  当たり判定を 44px まで広げる（鉛筆・復旧ボタンと同じ作り）。
+
+  電源の実寸は 28×28px なので `-8px` で 44×44px ちょうど。**見た目は変えずに
+  判定だけ広げる**——`.power` そのものを大きくすると `controls.test.ts` の
+  「✕ の 32px を超えない」に当たる。
+*/
+.tile-ops .power::after {
+  content: '';
+  position: absolute;
+  inset: -8px;
+}
+
+.tile-archive::after {
+  content: '';
+  position: absolute;
+  inset: -11px;
+}
+
+/*
   名前を付ける鉛筆（名前付け設計§9-2・§9-3）。
 
   # 常時は出さない
@@ -445,25 +515,11 @@
   キーボードで辿り着いたときも出す——見えないボタンにフォーカスが当たると、
   どこに居るのか分からなくなる。
 */
-.tile-pencil {
-  opacity: 0;
-  transition: opacity 120ms ease-out;
-}
-
-.tile-shell[data-selected='true'] .tile-pencil,
-.tile-pencil:where(:focus-visible) {
-  opacity: 1;
-}
-
 /*
-  **鎮まりと同じで、マウスのある機械にだけ効かせる。** 素の `:hover` は指の端末でも
-  「触れたまま」で成立してしまい、タッチでは選択と二重に出る。
+  **出し入れは `.tile-ops` が群ごと持つ**（細かい修正 設計§4-1）。ここが個別に
+  `opacity` を持っていたころは鉛筆1つだけの話だったが、**3つになった時点で
+  ばらばらに出入りする理由が無くなった**。
 */
-@media (hover: hover) and (pointer: fine) {
-  .tile-shell:where(:hover) .tile-pencil {
-    opacity: 1;
-  }
-}
 
 /*
   当たり判定を 44px まで広げる（復旧ボタンと同じ理由・同じ作り）。
@@ -1123,13 +1179,19 @@
   width: 32px;
   height: 32px;
   pointer-events: none;
-  --run-period: 0.6s;
+  /*
+    **1.4倍に速めた**（細かい修正 要件21。0.6s → 0.4286s）。
+  */
+  --run-period: 0.4286s;
 }
 
 /*
-  停滞は **1/3 の速さ**（利用者の指定・2026-08-31。0.1.61 では 1/2 だった）。
-  **枠線の 9.6秒（3.2秒の3倍）と比が揃う**——設計§22-4 が「揃える指定は無い。実物を見て
-  決める」と残していた論点で、揃える側に決まった
+  停滞は**据え置き**（細かい修正 要件21 が「停滞中のカードは今のままでOK」と明示）。
+
+  **「枠線の回転と比が揃っている」という約束は、ここで捨てた**（細かい修正 設計§4-4）。
+  作業中だけ 1.4倍にすれば比は必ず崩れる（1.8 / 0.4286 ＝ 4.2 に対し、枠線は 3 のまま）。
+  **利用者が2つのうち片方だけを名指しで指定しているので、内側の一貫性を守るために
+  指定されていない3つ目（枠線の速さ）を動かさない。**
 */
 [data-motion='spin-slow'] .tile-run {
   --run-period: 1.8s;
@@ -1238,19 +1300,25 @@
   animation: tile-zzz var(--zzz-period) ease-out infinite;
 }
 
-/* 後から出るものほど大きく、遠くまで昇る。**寝息の強弱**をこれで出す */
+/*
+  後から出るものほど大きく、遠くまで昇る。**寝息の強弱**をこれで出す。
+
+  **3つとも 1.8倍にした**（細かい修正 要件20・設計§4-4）。要件が名指ししているのは
+  最大（3文字目）だけだが、**最大だけ伸ばすと「後から出るものほど大きい」並びが崩れる**
+  ので、比を保って3つとも伸ばしてある（9/11/13 → 16.2/19.8/23.4）。
+*/
 .tile-zzz i:nth-child(1) {
-  font-size: 9px;
+  font-size: 16.2px;
   animation-delay: calc(var(--zzz-period) * 0 / 3);
 }
 
 .tile-zzz i:nth-child(2) {
-  font-size: 11px;
+  font-size: 19.8px;
   animation-delay: calc(var(--zzz-period) * 1 / 3);
 }
 
 .tile-zzz i:nth-child(3) {
-  font-size: 13px;
+  font-size: 23.4px;
   animation-delay: calc(var(--zzz-period) * 2 / 3);
 }
 

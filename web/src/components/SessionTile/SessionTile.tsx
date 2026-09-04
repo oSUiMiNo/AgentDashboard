@@ -50,7 +50,8 @@ import { motion } from 'motion/react'
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { Badge } from '@/components/ui/badge'
-import { PencilGlyph } from '@/components/ui/glyphs'
+import { PencilGlyph, TrashGlyph } from '@/components/ui/glyphs'
+import { PowerButton } from '@/components/ui/power-button'
 import { NicknameInput } from '@/components/SessionNickname/NicknameInput'
 import { formatElapsed } from '@/lib/time'
 import {
@@ -244,6 +245,8 @@ export function SessionTile({
   const quiet = useSettingsStore((state) => state.settings.motion_quiet)
   const frameRef = useRef<HTMLDivElement>(null)
   const revive = useWsStore((state) => state.revive)
+  const kill = useWsStore((state) => state.kill)
+  const archive = useWsStore((state) => state.archive)
   const setNickname = useWsStore((state) => state.setNickname)
   /*
     **名前を書き換えている最中か**（名前付け設計§9-5）。
@@ -576,9 +579,14 @@ export function SessionTile({
             <span
               data-testid="elapsed"
               className="text-muted-foreground min-w-0 flex-1 truncate text-[11px] whitespace-nowrap tabular-nums"
+              /*
+                **語は説明にだけ残す**（細かい修正 要件22・設計§4-4）。画面から
+                「最終活動」を消すのは場所を空けるためだが、**語ごと消すと何の時刻なのかが
+                読めなくなる**ので、マウスを乗せたときには出す
+              */
               title={`最終活動 ${formatElapsed(now - session.last_activity_at)}`}
             >
-              最終活動 {formatElapsed(now - session.last_activity_at)}
+              {formatElapsed(now - session.last_activity_at)}
             </span>
             {/*
               **「接続断」は①行に置く**（要件2-6・設計§10-1-3 の読み替え）。
@@ -914,49 +922,8 @@ export function SessionTile({
       )}
 
       {/*
-        押す前に権限モードが見えていること（要件）は、上のバッジが既に満たしている
-        ——記録どおりのモードで起き直るので、全承認スキップのまま戻ることが分かる
-
-        **揺らさない**（カード設計§7）。器の直下に置いてあるので、枠が揺れても
-        このボタンだけは動かない
-      */}
-
-      {revivable.kind !== 'live' && (
-        <button
-          type="button"
-          data-testid="revive-button"
-          // **押しても掴まない。** `click` を止めるだけでは `pointerdown` が素通りする
-          data-no-grab=""
-          data-state={revivable.kind}
-          disabled={revivable.kind !== 'ready' || reviving}
-          title={reviveWhy ?? '元の CLI セッションで起こし直します'}
-          onClick={(event) => {
-            // 止めないと器（小窓）のクリックまで伝わり、専用画面が開いてしまう
-            event.stopPropagation()
-            revive(session.card_id)
-          }}
-          /*
-            **押せるものに見せる**（利用者の指摘・2026-08-26）。0.1.41 までは透明な地に
-            薄い枠と薄い文字だけで、`DESIGN.md` §27.3 が名指しで避けている
-            「単なる 1px Border だけ」そのものだった。§12.3 の「主要操作ボタン →
-            マット塗装・プレート」に寄せ、**地・内側ハイライト・落ち影**で板にする。
-
-            **大きさ（36×23px）は変えない。** 変えなければ `tile.css` の
-            `.tile-revive::after { inset: -11px }` が作る当たり判定 58×45px が
-            44px の床を割らず、①行の `pr-12` の前提も動かない。
-
-            押下は `scale(0.98)`（§27.4 の 0.97〜0.99）。**`Button` 部品へは寄せない**
-            ——あちらは押下で `translate-y-px` するので、「復旧ボタンは揺らさない」と
-            正面から食い違う。
-          */
-          className={`tile-revive border-border ${CHIP_GROUND} text-foreground hover:border-primary/60 hover:bg-accent absolute top-2 right-2 rounded-[3px] border px-1.5 py-0.5 text-[0.7rem] tracking-[0.04em] shadow-[inset_0_2px_0_rgb(255_255_255/28%),inset_0_-1px_0_rgb(0_0_0/30%),0_1.5px_3px_rgb(0_0_0/40%)] transition-colors active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none`}
-        >
-          {reviving ? '復旧中…' : '復旧'}
-        </button>
-      )}
-
-      {/*
-        **鉛筆と編集欄は、器（`tile-shell`）の直下に置く**（名前付け設計§9-2）。
+        **操作の群と編集欄は、器（`tile-shell`）の直下に置く**（名前付け設計§9-2・
+        細かい修正 設計§4-1）。
 
         カードの本体は `<button>` なので、中に別のボタンや入力欄を入れられない。
         復旧ボタンが同じ問題を絶対配置の兄弟で解いているので、そちらを写す。
@@ -975,22 +942,66 @@ export function SessionTile({
         `DESIGN.md` §23.3・§33 が禁じている形になる。
       */}
       {draft === null ? (
-        <button
-          type="button"
-          data-testid="nickname-edit"
-          data-no-grab=""
-          title="このセッションに名前を付ける"
-          aria-label="このセッションに名前を付ける"
-          onClick={(event) => {
-            event.stopPropagation()
-            // 下書きの初期値は**利用者の名前だけ**。CLI の名前を入れると、
-            // 触っていないのに「自分で付けた」ことになってしまう
-            setDraft(session.nickname ?? '')
-          }}
-          className="tile-pencil border-border bg-card text-foreground hover:border-primary/60 hover:bg-accent absolute top-2 left-2 rounded-[3px] border p-1 shadow-[inset_0_2px_0_rgb(255_255_255/28%),inset_0_-1px_0_rgb(0_0_0/30%),0_1.5px_3px_rgb(0_0_0/40%)] transition-colors active:scale-[0.98]"
-        >
-          <PencilGlyph className="size-3.5" />
-        </button>
+        /*
+          **並びは取り返しの付く順**（編集 → ゴミ箱 → 電源）。逆にすると、押し間違えた
+          ときにいちばん痛いものが指の近くに来る（細かい修正 設計§4-1）。
+
+          **板は作らない。** `DESIGN.md` §12.3 が一覧の行に物質を持たせないと定めており、
+          §15.1 の「主要操作は1つだけ塗る」もここに効く——塗るのは電源だけである。
+        */
+        <div className="tile-ops" data-testid="tile-ops" data-no-grab="">
+          <button
+            type="button"
+            data-testid="nickname-edit"
+            data-no-grab=""
+            title="このセッションに名前を付ける"
+            aria-label="このセッションに名前を付ける"
+            onClick={(event) => {
+              event.stopPropagation()
+              // 下書きの初期値は**利用者の名前だけ**。CLI の名前を入れると、
+              // 触っていないのに「自分で付けた」ことになってしまう
+              setDraft(session.nickname ?? '')
+            }}
+            className="tile-pencil text-muted-foreground hover:text-foreground relative rounded-[3px] p-1 transition-colors active:scale-[0.98]"
+          >
+            <PencilGlyph className="size-3.5" />
+          </button>
+          <button
+            type="button"
+            data-testid="archive-card"
+            data-no-grab=""
+            title="カードを一覧から外します（履歴は残ります）"
+            aria-label="終了"
+            onClick={(event) => {
+              event.stopPropagation()
+              archive(session.card_id)
+            }}
+            className="tile-archive text-muted-foreground hover:text-foreground relative rounded-[3px] p-1 transition-colors active:scale-[0.98]"
+          >
+            <TrashGlyph className="size-3.5" />
+          </button>
+          {/*
+            **止めることと起こすことを1つのボタンで言う**（細かい修正 要件11）。
+            稼働中は点灯した電源＝スリープ、消えていれば復旧。**同じ位置に出る**ので、
+            どちらの状態でも押す場所を探し直さなくてよい。
+          */}
+          <span onClick={(event) => event.stopPropagation()} role="presentation">
+            <PowerButton
+              testId="power-tile"
+              on={revivable.kind === 'live'}
+              state={revivable.kind}
+              busy={reviving}
+              why={reviveWhy}
+              onPress={() => {
+                if (revivable.kind === 'live') {
+                  kill(session.card_id)
+                  return
+                }
+                revive(session.card_id)
+              }}
+            />
+          </span>
+        </div>
       ) : (
         <form
           data-testid="nickname-form"

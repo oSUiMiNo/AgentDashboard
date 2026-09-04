@@ -775,35 +775,61 @@ describe('復旧ボタンは指で押せる', () => {
  * 1枚」——マウスが乗っているか、選ばれているかのどちらか。**タッチに hover は
  * 無い**ので、選択の側が無いとスマホから永久に届かない。
  */
-describe('名前の鉛筆は、いま触っている1枚にだけ出る', () => {
-  it('既定では出ていない', () => {
-    expect(規則('.tile-pencil').body).toMatch(/opacity:\s*0\b/)
+describe('操作の群は、いま触っている1枚にだけ出る', () => {
+  it('指で触る画面では常に出る（既定が「出る」）', () => {
+    /*
+      **隠すほうをメディアクエリの中だけに置く**（細かい修正 設計§4-1）。
+      既定を「出る」にしておけば、**hover を持たない端末から永久に届かない、という形が
+      構造的に作れない**——鉛筆1つだったころは既定が `opacity: 0` で、選択の側を
+      足して届かせていた。
+    */
+    expect(規則('.tile-ops').body).toMatch(/opacity:\s*1\b/)
   })
 
-  it('選ばれていれば出る（タッチからの到達路）', () => {
-    // ここが無いと、hover を持たない端末から**永久に届かない**
-    const 出す = 当たる(".tile-shell[data-selected='true'] .tile-pencil")
-    expect(出す.length).toBeGreaterThanOrEqual(1)
-    expect(出す.some((rule) => /opacity:\s*1\b/.test(rule.body))).toBe(true)
+  it('マウスのある機械でだけ、乗るまで隠す', () => {
+    // 素の `:hover` は指の端末でも「触れたまま」で成立し、常時表示と二重になる
+    const 隠す = 当たる('.tile-ops').filter((rule) => /opacity:\s*0\b/.test(rule.body))
+    expect(隠す).toHaveLength(1)
+    expect(隠す[0].selector).toContain('hover: hover')
+    expect(隠す[0].selector).toContain('pointer: fine')
   })
 
-  it('マウスで出す規則は、マウスのある機械にだけ効く', () => {
-    // 素の `:hover` は指の端末でも「触れたまま」で成立し、選択と二重に出る
-    // **メディアクエリはセレクタの頭に畳まれている**（このファイルのパーサの作り）
-    const hover = 当たる('.tile-shell:where(:hover) .tile-pencil')
-    expect(hover).toHaveLength(1)
-    expect(hover[0].selector).toContain('hover: hover')
-    expect(hover[0].selector).toContain('pointer: fine')
+  it('乗っている・選ばれている・中に居るの3つで出る', () => {
+    // キーボードで辿り着いたときも出す——見えないボタンに焦点が当たると、
+    // どこに居るのか分からなくなる
+    for (const selector of [
+      '.tile-shell:where(:hover) .tile-ops',
+      ".tile-shell[data-selected='true'] .tile-ops",
+      '.tile-ops:where(:focus-within)',
+    ]) {
+      const 出す = 当たる(selector)
+      expect(出す.length, selector).toBeGreaterThanOrEqual(1)
+      expect(出す.some((rule) => /opacity:\s*1\b/.test(rule.body)), selector).toBe(true)
+    }
   })
 
-  it('当たり判定が 44px の床を割らない', () => {
-    // 見た目は 24×24px（印 14px ＋ 余白 8px ＋ 枠 2px）
-    const 判定 = 当たる('.tile-pencil::after')
-    expect(判定).toHaveLength(1)
-    const inset = 判定[0].body.match(/inset:\s*(-?[\d.]+)px/)
-    expect(inset).not.toBeNull()
-    const 広げる = Math.abs(Number(inset![1]))
-    expect(24 + 広げる * 2).toBeGreaterThanOrEqual(44)
+  it('右上に1つの群として、横一列に並ぶ', () => {
+    // 両端に散らすと視線が往復する（細かい修正 設計§4-1）
+    const 群 = 規則('.tile-ops').body
+    expect(群).toMatch(/position:\s*absolute/)
+    expect(群).toMatch(/top:\s*8px/)
+    expect(群).toMatch(/right:\s*8px/)
+    expect(群).toMatch(/display:\s*flex/)
+  })
+
+  it('3つとも当たり判定が 44px の床を割らない', () => {
+    // 見た目は変えずに疑似要素で広げる（ボタン自体を大きくすると①②行の押し場所を食う）
+    const 広げ幅 = (selector: string) => {
+      const 判定 = 当たる(selector)
+      expect(判定, selector).toHaveLength(1)
+      const inset = 判定[0].body.match(/inset:\s*(-?[\d.]+)px/)
+      expect(inset, selector).not.toBeNull()
+      return Math.abs(Number(inset![1]))
+    }
+    // 編集とゴミ箱は 24×24px（印 14px ＋ 余白）、電源は 28×28px
+    expect(24 + 広げ幅('.tile-pencil::after') * 2).toBeGreaterThanOrEqual(44)
+    expect(24 + 広げ幅('.tile-archive::after') * 2).toBeGreaterThanOrEqual(44)
+    expect(28 + 広げ幅('.tile-ops .power::after') * 2).toBeGreaterThanOrEqual(44)
   })
 })
 
@@ -891,23 +917,53 @@ describe('停滞も走る人になり、止めたときはタグへ戻る（フ�
     }
   })
 
-  it('停滞の周期は作業中のちょうど3倍で、枠線の回転と比が揃っている', () => {
-    // 利用者の指定は「1/3 のスピード」（2026-08-31）。1.0秒でも 0.6秒でも「動いている」ので、
-    // 比で見る。**枠線と同じ3倍**なので、片方だけ動かすと下の突き合わせで落ちる
+  it('作業中だけ速くなり、停滞は据え置かれている', () => {
+    /*
+      **「停滞は作業中のちょうど3倍で、枠線の回転と比が揃っている」という約束は捨てた**
+      （細かい修正 要件21・設計§4-4）。利用者の指定は「作業中だけ 1.4倍。停滞中のカードは
+      今のままでOK」なので、**比は必ず崩れる**（1.8 / 0.4286 ＝ 4.2）。
+
+      **枠線との突き合わせも外した。** 揃え続けるには指定されていない3つ目（枠線の速さ）を
+      動かすことになり、**約束を守るために見た目を勝手に変える**ことになる。
+      枠線の回転（3.2秒 対 9.6秒）は別のテストが据え置きを見ている。
+    */
     const 作業中 = Number.parseFloat(値(規則('.tile-run'), '--run-period'))
     const 停滞 = Number.parseFloat(
       値(規則("[data-motion='spin-slow'] .tile-run"), '--run-period'),
     )
-    expect(作業中).toBe(0.6)
-    // **`toBe` で見ない。** 1.8 / 0.6 は 2.9999999999999996 になる（二進小数の丸め）
-    expect(停滞 / 作業中).toBeCloseTo(3, 10)
+    expect(作業中).toBe(0.4286)
+    // 停滞は動かしていない。ここが変わったら、指定されていないものを動かしている
+    expect(停滞).toBe(1.8)
+    // 1.4倍になっていること。**`toBe` で見ない**（0.6 / 0.4286 は割り切れない）
+    expect(0.6 / 作業中).toBeCloseTo(1.4, 3)
+  })
 
-    // 枠線の回転（3.2秒 対 9.6秒）と同じ比。**揃えると決めた**ので、揃っていることを見る
+  it('スリープの zzz は、比を保ったまま 1.8倍になっている', () => {
+    /*
+      要件20 が名指ししているのは**最大（3文字目）だけ**だが、3つは「後から出るものほど
+      大きい」という並びで作ってある——**最大だけ伸ばすと、その並びが崩れる**
+      （細かい修正 設計§4-4）。9/11/13 → 16.2/19.8/23.4。
+    */
+    const 大きさ = (n: number) =>
+      Number.parseFloat(値(規則(`.tile-zzz i:nth-child(${n})`), 'font-size'))
+    expect(大きさ(3)).toBe(23.4)
+    expect(大きさ(2)).toBe(19.8)
+    expect(大きさ(1)).toBe(16.2)
+    // 比が保たれていること。**後から出るものほど大きい**が崩れていない
+    expect(大きさ(1)).toBeLessThan(大きさ(2))
+    expect(大きさ(2)).toBeLessThan(大きさ(3))
+    for (const n of [1, 2, 3]) {
+      expect(大きさ(n) / [9, 11, 13][n - 1]).toBeCloseTo(1.8, 6)
+    }
+  })
+
+  it('枠線の回転は据え置かれている（走る人だけを速めた）', () => {
+    // 上のテストが枠線との比較を外したので、**枠線そのものはここで見る**。
+    // 3.2秒 対 9.6秒の3倍は、利用者の指定に入っていないので動かさない
     const 回転 = (selector: string) =>
       Number.parseFloat(/tile-spin ([\d.]+)s/.exec(値(規則(selector), 'animation'))![1])
-    const 速い = 回転("[data-motion='spin-fast'] .tile-ring::after")
-    const 遅い = 回転("[data-motion='spin-slow'] .tile-ring::after")
-    expect(遅い / 速い).toBeCloseTo(停滞 / 作業中, 10)
+    expect(回転("[data-motion='spin-fast'] .tile-ring::after")).toBe(3.2)
+    expect(回転("[data-motion='spin-slow'] .tile-ring::after")).toBe(9.6)
   })
 
   it('@keyframes tile-run は比のまま触られていない', () => {

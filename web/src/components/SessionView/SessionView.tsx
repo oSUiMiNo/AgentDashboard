@@ -403,8 +403,10 @@ export function SessionView({
             <span
               data-testid="elapsed"
               className="text-muted-foreground shrink-0 text-xs"
+              // 語は説明にだけ残す（細かい修正 要件22）。カード側と同じ扱い
+              title={`最終活動 ${formatElapsed(now - session.last_activity_at)}`}
             >
-              最終活動 {formatElapsed(now - session.last_activity_at)}
+              {formatElapsed(now - session.last_activity_at)}
             </span>
             {isHookSilent(session) && (
               <span

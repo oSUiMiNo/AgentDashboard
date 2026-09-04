@@ -204,9 +204,14 @@ describe('SessionTile', () => {
     )
   })
 
-  it('最終活動からの経過時間が出る', () => {
+  it('経過時間だけが出る。「最終活動」の語は説明に残る', () => {
+    // 細かい修正 要件22。**語ごと消すと何の時刻なのか読めなくなる**ので、
+    // 画面からは落として、マウスを乗せたときには出す（設計§4-4）
     renderTile(meta({ last_activity_at: Date.now() - 3 * 60_000 }))
-    expect(screen.getByTestId('elapsed')).toHaveTextContent('最終活動 3分前')
+    const 経過 = screen.getByTestId('elapsed')
+    expect(経過).toHaveTextContent('3分前')
+    expect(経過.textContent).not.toContain('最終活動')
+    expect(経過).toHaveAttribute('title', '最終活動 3分前')
   })
 
   it('サブエージェントが動いている間だけバッジが出る', () => {
@@ -314,10 +319,10 @@ describe('SessionTile の骨格', () => {
     */
     renderTile(meta({ status: { kind: 'ended', ok: true } }))
 
-    const 復旧 = screen.queryByTestId('revive-button')
-    if (復旧 !== null) {
-      expect(復旧).toHaveAttribute('data-no-grab')
-    }
+    // **群がまとめて持つ。** `useGrip` は `closest('[data-no-grab]')` で見るので、
+    // 中の3つはこれ1枚で覆われる（細かい修正 設計§4-1）
+    expect(screen.getByTestId('tile-ops')).toHaveAttribute('data-no-grab')
+    expect(screen.getByTestId('power-tile').closest('[data-no-grab]')).not.toBeNull()
   })
 
   it('選ばれたカードに、印は出さない', async () => {
@@ -891,22 +896,26 @@ describe('SessionTile の復旧', () => {
     useWsStore.setState({ revive: vi.fn() })
   })
 
-  it('実体があるカードにはボタンを出さない', () => {
-    // 出さないのはこの1通りだけ（設計§3-2）
+  it('実体があるカードには、点灯した電源（＝スリープ）が出る', () => {
+    // **止めることと起こすことを1つのボタンで言う**（細かい修正 要件11）。
+    // 以前は「実体があるならボタンを出さない」だったが、いまは同じ位置に点いて出る
     renderTile(meta({ agent_connected: true, status: { kind: 'working' } }))
-    expect(screen.queryByTestId('revive-button')).toBeNull()
+    const 電源 = screen.getByTestId('power-tile')
+    expect(電源).toHaveAttribute('data-power', 'on')
+    expect(電源).toHaveAttribute('data-action', 'sleep')
+    expect(電源).toHaveAttribute('aria-label', 'スリープ')
   })
 
   it('接続断のカードには押せるボタンが出る', () => {
     renderTile(stale())
-    const button = screen.getByTestId('revive-button')
+    const button = screen.getByTestId('power-tile')
     expect(button).toBeEnabled()
     expect(button.dataset.state).toBe('ready')
   })
 
   it('終了したカードにも出る', () => {
     renderTile(stale({ agent_connected: true, status: { kind: 'ended', ok: true } }))
-    expect(screen.getByTestId('revive-button')).toBeEnabled()
+    expect(screen.getByTestId('power-tile')).toBeEnabled()
   })
 
   it('押すと、そのカードを起こし直すよう頼む', async () => {
@@ -914,7 +923,7 @@ describe('SessionTile の復旧', () => {
     useWsStore.setState({ revive })
     renderTile(stale())
 
-    await userEvent.click(screen.getByTestId('revive-button'))
+    await userEvent.click(screen.getByTestId('power-tile'))
 
     expect(revive).toHaveBeenCalledWith(CARD)
   })
@@ -948,7 +957,7 @@ describe('SessionTile の復旧', () => {
       </MemoryRouter>,
     )
 
-    await userEvent.click(screen.getByTestId('revive-button'))
+    await userEvent.click(screen.getByTestId('power-tile'))
 
     expect(onGroupClick).not.toHaveBeenCalled()
     expect(screen.queryByText('専用画面')).toBeNull()
@@ -979,7 +988,7 @@ describe('SessionTile の復旧', () => {
     // 出さないと「なぜこのカードにだけ無いのか」を推測させることになる
     renderTile(stale({ claude_session_id: null }))
 
-    const button = screen.getByTestId('revive-button')
+    const button = screen.getByTestId('power-tile')
     expect(button).toBeDisabled()
     expect(button.dataset.state).toBe('no-target')
     expect(button).toHaveAttribute('title', '呼び戻す先が記録されていません')
@@ -1002,7 +1011,7 @@ describe('SessionTile の復旧', () => {
     })
     renderTile(stale({ agent_id: PC2 }))
 
-    const button = screen.getByTestId('revive-button')
+    const button = screen.getByTestId('power-tile')
     expect(button).toBeDisabled()
     expect(button).toHaveAttribute('title', 'この PC が繋がっていません')
   })
@@ -1018,7 +1027,7 @@ describe('SessionTile の復旧', () => {
     })
     renderTile(stale({ agent_id: PC2 }))
 
-    expect(screen.getByTestId('revive-button')).toHaveAttribute(
+    expect(screen.getByTestId('power-tile')).toHaveAttribute(
       'title',
       'この PC の版が古くて対応していません',
     )
@@ -1030,24 +1039,27 @@ describe('SessionTile の復旧', () => {
     useWsStore.setState({ revive })
     renderTile(stale())
 
-    await userEvent.click(screen.getByTestId('revive-button'))
+    await userEvent.click(screen.getByTestId('power-tile'))
 
-    const button = screen.getByTestId('revive-button')
-    expect(button).toHaveTextContent('復旧中…')
+    const button = screen.getByTestId('power-tile')
+    // 文字を出す場所が無いので、進んでいることは data 属性と説明が伝える
+    expect(button).toHaveAttribute('data-busy', 'true')
+    expect(button).toHaveAttribute('title', '起こしています…')
     expect(button).toBeDisabled()
   })
 
   it('サーバ由来の状態が届いたら、印が消える', () => {
     renderTile(stale())
     act(() => markReviving(CARD))
-    expect(screen.getByTestId('revive-button')).toHaveTextContent('復旧中…')
+    expect(screen.getByTestId('power-tile')).toHaveAttribute('data-busy', 'true')
 
     // 起こし直しが始まると、そのカードの `session_upsert` が流れてくる
     act(() =>
       upsertSession(stale({ status: { kind: 'starting' }, agent_connected: true })),
     )
 
-    expect(screen.queryByTestId('revive-button')).toBeNull()
+    // ボタンは消えない（点灯した電源＝スリープへ変わる）。**印だけが消える**
+    expect(screen.getByTestId('power-tile')).not.toHaveAttribute('data-busy')
   })
 
   it('断りはそのカードに出る', () => {
@@ -1058,8 +1070,8 @@ describe('SessionTile の復旧', () => {
     expect(screen.getByTestId('card-error')).toHaveTextContent(
       'この PC が繋がっていません',
     )
-    // 断られたのに「復旧中…」が残ると、二度と押せないカードになる
-    expect(screen.getByTestId('revive-button')).toHaveTextContent('復旧')
+    // 断られたのに印が残ると、二度と押せないカードになる
+    expect(screen.getByTestId('power-tile')).not.toHaveAttribute('data-busy')
   })
 
   it('印は押したカードだけに立つ', () => {
@@ -1073,9 +1085,8 @@ describe('SessionTile の復旧', () => {
     )
     act(() => markReviving(CARD))
 
-    // **部分一致で見ない。**「復旧中…」は「復旧」を含むので、
-    // `toHaveTextContent('復旧')` では巻き添えを捕まえられない（実際に空振りした）
-    expect(screen.getByTestId('revive-button')).not.toHaveTextContent('復旧中')
+    // 印は data 属性で持つので、文言の部分一致で空振りする心配がなくなった
+    expect(screen.getByTestId('power-tile')).not.toHaveAttribute('data-busy')
   })
 })
 
@@ -1333,11 +1344,48 @@ describe('札と復旧ボタンが物質を持つ（フェーズ20）', () => {
     }
   })
 
-  it('札と復旧ボタンは同じ物質。片方だけ直すと家族が割れる', () => {
-    // フェーズ13 が札で通した「同じ行に丸いカプセルと角ばった札が混ざると
-    // 1組に見えない」と同じ理由。**復旧ボタンだけ元へ戻すと落ちる**
+  it('群は3つまでで、取り返しの付く順に並ぶ', () => {
+    /*
+      左から**編集 → ゴミ箱 → 電源**（細かい修正 設計§4-1）。逆にすると、押し間違えた
+      ときにいちばん痛いものが指の近くに来る。
+
+      **3つまで**（`DESIGN.md` §15.3「群は2〜3個までにする」）。4つ目を足さない。
+    */
+    renderTile(meta({ agent_connected: false }))
+    const 群 = screen.getByTestId('tile-ops')
+    const 並び = [...群.querySelectorAll('[data-testid]')].map((e) =>
+      e.getAttribute('data-testid'),
+    )
+    expect(並び).toEqual(['nickname-edit', 'archive-card', 'power-tile'])
+  })
+
+  it('ゴミ箱はカードを外す（履歴は残る）', async () => {
+    const archive = vi.fn()
+    useWsStore.setState({ archive })
+    renderTile(meta({ agent_connected: false }))
+
+    await userEvent.click(screen.getByTestId('archive-card'))
+
+    expect(archive).toHaveBeenCalledWith(CARD)
+  })
+
+  it('操作の群には物質を足していない（塗るのは電源だけ）', () => {
+    /*
+      **復旧ボタン（板）は電源ボタンへ置き換わった**ので、「札と同じ物質」という
+      対はもう成り立たない（細かい修正 設計§4-1）。
+
+      いま守るのは逆側——`DESIGN.md` §12.3「一覧の行に物質を持たせない」と
+      §15.1「主要操作は1つだけ塗る」。**編集とゴミ箱に板を作らない。**
+      電源だけは §12.3 の表に「主要操作ボタン」として載っているので別枠である。
+    */
     renderTile(meta({ model: 'claude-haiku-4-5-20251001', agent_connected: false }))
-    expect(影('revive-button')).toBe(影('model'))
+    for (const id of ['nickname-edit', 'archive-card']) {
+      const cls = screen.getByTestId(id).className
+      expect(cls, `${id} に落ち影がある`).not.toMatch(/shadow-\[/)
+      expect(cls, `${id} に枠がある`).not.toMatch(/\bborder\b/)
+    }
+    // 電源は自前の物質を持つ（`controls.css` の `.power`）
+    expect(screen.getByTestId('power-tile').className).toBe('power')
   })
 
   it('札はステッカーにならない。傾けない・型抜きしない', () => {
