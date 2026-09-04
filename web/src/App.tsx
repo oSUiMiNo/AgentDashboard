@@ -17,6 +17,7 @@ import { MotionConfig } from 'motion/react'
 import { useEffect } from 'react'
 import { BrowserRouter, Link, Route, Routes, useParams } from 'react-router'
 import { Button } from '@/components/ui/button'
+import { CloseGlyph, GearGlyph } from '@/components/ui/glyphs'
 import { AccountPage } from '@/components/Account/AccountPage'
 import { AuthGate } from '@/components/Auth/AuthGate'
 import { GroupView } from '@/components/GroupView/GroupView'
@@ -150,13 +151,22 @@ function Shell() {
                   アカウント
                 </Link>
               )}
-              <Link
-                to={SETTINGS}
-                data-testid="settings-link"
-                className="text-muted-foreground hover:text-foreground text-sm underline"
-              >
-                設定
-              </Link>
+              {/*
+                **歯車にする**（設計§9-2）。**絵文字（`⚙️`）は使わない**——
+                `DESIGN.md` §14.4 が禁止例に名指しで挙げている。隣の「アカウント」は
+                文字のまま：要件が名指ししているのは「設定」だけで、**言われていない
+                ものを揃えるために変えない**。
+              */}
+              <Button asChild variant="ghost" size="icon-sm">
+                <Link
+                  to={SETTINGS}
+                  data-testid="settings-link"
+                  aria-label="設定"
+                  title="設定"
+                >
+                  <GearGlyph />
+                </Link>
+              </Button>
             </div>
           </>
         )}
@@ -168,8 +178,20 @@ function Shell() {
           className="flex items-center justify-between gap-4 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm"
         >
           <span>{lastError}</span>
-          <Button variant="ghost" size="sm" onClick={clearError}>
-            閉じる
+          {/*
+            **面を閉じるのは ✕、操作をやめるのは文字**（細かい修正 設計§9-1）。
+            取り返しの付かなさが違うものを、同じ形にしない——閉じるのはいつでも
+            やり直せるが、「やめる」は選択の1つである。**読み上げ用の名前は残す。**
+          */}
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            data-testid="error-banner-close"
+            aria-label="閉じる"
+            title="閉じる"
+            onClick={clearError}
+          >
+            <CloseGlyph />
           </Button>
         </div>
       )}
@@ -275,8 +297,15 @@ function SelfhealBanner() {
           </span>
         )}
       </span>
-      <Button variant="ghost" size="sm" onClick={clearSelfheal}>
-        閉じる
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        data-testid="selfheal-banner-close"
+        aria-label="閉じる"
+        title="閉じる"
+        onClick={clearSelfheal}
+      >
+        <CloseGlyph />
       </Button>
     </div>
   )

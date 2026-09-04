@@ -39,6 +39,7 @@
 import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { Button } from '@/components/ui/button'
+import { CloseGlyph } from '@/components/ui/glyphs'
 import { fileKind, needsSandbox } from '@/lib/fileKind'
 import { REHYPE_PLUGINS, REMARK_PLUGINS } from '@/lib/markdown'
 import {
@@ -290,11 +291,13 @@ export function FileView({
             <Button
               type="button"
               variant="ghost"
-              size="sm"
+              size="icon-sm"
               data-testid="file-close"
+              aria-label="閉じる"
+              title="閉じる"
               onClick={onClose}
             >
-              閉じる
+              <CloseGlyph />
             </Button>
           )}
         </div>

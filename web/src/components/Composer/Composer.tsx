@@ -69,7 +69,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
-import { PlusGlyph, SendGlyph } from '@/components/ui/glyphs'
+import { CloseGlyph, PlusGlyph, SendGlyph } from '@/components/ui/glyphs'
 import { Textarea } from '@/components/ui/textarea'
 import {
   ACCEPT_ATTRIBUTE,
@@ -546,14 +546,20 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
               <span className="truncate text-sm font-semibold">
                 {拡大中.name}
               </span>
+              {/*
+                **`outline` をやめて他の ✕ と揃える**（設計§9-1）。ここだけ濃かった
+                のは、6箇所が別々に書かれていたころの名残である。
+              */}
               <Button
                 type="button"
-                variant="outline"
-                size="sm"
+                variant="ghost"
+                size="icon-sm"
                 data-testid="composer-preview-close"
+                aria-label="閉じる"
+                title="閉じる"
                 onClick={() => set拡大中(null)}
               >
-                閉じる
+                <CloseGlyph />
               </Button>
             </header>
             {/* **ここでも切り抜かない。** 確かめるために開いた窓で端が切れては意味が無い */}

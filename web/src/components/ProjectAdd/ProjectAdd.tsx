@@ -24,7 +24,7 @@ import { useMemo, useState } from 'react'
 import { FolderBrowser } from '@/components/FolderBrowser/FolderBrowser'
 import { listDir } from '@/lib/hostfs'
 import { Button } from '@/components/ui/button'
-import { PlusGlyph } from '@/components/ui/glyphs'
+import { CloseGlyph, PlusGlyph } from '@/components/ui/glyphs'
 import { Input } from '@/components/ui/input'
 import { LOCAL_HOST } from '@/lib/routes'
 import { getSessions } from '@/stores/sessions'
@@ -200,14 +200,19 @@ function AddSheet({ onClose }: { onClose: () => void }) {
       >
       <header className="flex shrink-0 items-center gap-2">
         <h2 className="text-sm font-semibold">PJT を追加</h2>
+        {/* **大きさを名指しする。** 既定（`h-8`）のままだと、絵にしたときに器が
+            四角のままで他の ✕ と揃わない */}
         <Button
           type="button"
           variant="ghost"
+          size="icon"
           data-testid="project-add-close"
+          aria-label="閉じる"
+          title="閉じる"
           className="ml-auto"
           onClick={onClose}
         >
-          閉じる
+          <CloseGlyph />
         </Button>
       </header>
 

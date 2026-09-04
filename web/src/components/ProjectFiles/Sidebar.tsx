@@ -88,6 +88,7 @@ import type { CSSProperties } from 'react'
 import { FolderBrowser } from '@/components/FolderBrowser/FolderBrowser'
 import { FilesResizer } from '@/components/ProjectFiles/FilesResizer'
 import { Button } from '@/components/ui/button'
+import { CloseGlyph } from '@/components/ui/glyphs'
 import type { PanelEdge } from '@/lib/panelWidth'
 
 /**
@@ -186,12 +187,14 @@ export function Sidebar({
           <Button
             type="button"
             variant="ghost"
-            size="sm"
+            size="icon-sm"
             data-testid="project-files-close"
+            aria-label="閉じる"
+            title="閉じる"
             className="ml-auto"
             onClick={onClose}
           >
-            閉じる
+            <CloseGlyph />
           </Button>
         </div>
 
