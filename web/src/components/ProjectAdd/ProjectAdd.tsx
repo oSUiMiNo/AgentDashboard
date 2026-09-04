@@ -24,6 +24,7 @@ import { useMemo, useState } from 'react'
 import { FolderBrowser } from '@/components/FolderBrowser/FolderBrowser'
 import { listDir } from '@/lib/hostfs'
 import { Button } from '@/components/ui/button'
+import { PlusGlyph } from '@/components/ui/glyphs'
 import { Input } from '@/components/ui/input'
 import { LOCAL_HOST } from '@/lib/routes'
 import { getSessions } from '@/stores/sessions'
@@ -39,13 +40,24 @@ export function ProjectAdd({ disabled }: Props) {
 
   return (
     <div className="flex flex-wrap items-center gap-2">
+      {/*
+        **文字から「＋」へ**（細かい修正 要件16・設計§4-3）。枠の中の「＋」と同じ形に
+        なるので、**足す操作はどこでも同じ形**になる。
+
+        **読み上げ用の名前を必ず付ける。** いまは文字がラベルを兼ねていたので、絵にすると
+        読み上げでは何のボタンか分からなくなる
+      */}
       <Button
         type="button"
         data-testid="project-add-open"
+        variant="ghost"
+        size="icon"
+        aria-label="PJT を追加"
+        title="PJT を追加"
         disabled={disabled}
         onClick={() => setOpen(true)}
       >
-        PJT を追加
+        <PlusGlyph />
       </Button>
       {open && <AddSheet onClose={() => setOpen(false)} />}
     </div>

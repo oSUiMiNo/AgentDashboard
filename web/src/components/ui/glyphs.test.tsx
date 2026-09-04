@@ -8,6 +8,7 @@ import {
   CopyGlyph,
   GearGlyph,
   PencilGlyph,
+  PlusGlyph,
   PowerGlyph,
   SendGlyph,
   TrashGlyph,
@@ -30,13 +31,15 @@ const 印 = {
   SendGlyph: <SendGlyph />,
   CopyGlyph: <CopyGlyph />,
   BellGlyph: <BellGlyph />,
+  PlusGlyph: <PlusGlyph />,
 }
 
 describe('印の作法', () => {
-  it('9つそろっている', () => {
-    // 既存4つ＋この工事で足した5つ。**編集と上向き矢印は足していない**——
-    // `PencilGlyph` と `ChevronGlyph({direction:'up'})` が既にある
-    expect(Object.keys(印)).toHaveLength(9)
+  it('10 そろっている', () => {
+    // 既存4つ＋フェーズ1の5つ＋フェーズ2の `PlusGlyph`。**編集と上向き矢印は
+    // 足していない**——`PencilGlyph` と `ChevronGlyph({direction:'up'})` が既にある。
+    // `PlusGlyph` は `SessionAdd` に手描きで在ったものを、✕ と同じ理由で寄せた
+    expect(Object.keys(印)).toHaveLength(10)
   })
 
   it.each(Object.entries(印))('%s が作法どおりに描かれている', (_name, node) => {

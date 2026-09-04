@@ -106,10 +106,20 @@ function renderGroup(sessions: SessionMeta[], projectId?: string) {
 }
 
 describe('ProjectGroup', () => {
-  it('プロジェクトのパスとセッション数が出る', () => {
+  it('PJT の名前とセッション数が出る。フルパスは説明に残る', () => {
+    /*
+      **フォルダ名だけにした**（細かい修正 要件14・設計§4-3）。PJT 専用画面と同じ
+      `projectDisplayName` を通すので、**同じ PJT が画面によって違う名前で出ることがない**。
+
+      **フルパスは `title` に残す。** 完全に捨てると、名前だけではどの枠か分からない
+      場合が残る（同名が衝突したときだけ番号が付く作りなので、番号の無い名前は一意でない）。
+    */
     renderGroup([meta('a'), meta('b')])
 
-    expect(screen.getByText(PROJECT)).toBeInTheDocument()
+    const 見出し = screen.getByRole('heading', { level: 2 })
+    expect(見出し).toHaveTextContent('app')
+    expect(見出し.textContent).not.toContain('/home/example')
+    expect(見出し).toHaveAttribute('title', PROJECT)
     expect(screen.getByText('2セッション')).toBeInTheDocument()
     expect(screen.getAllByTestId('session-tile')).toHaveLength(2)
   })

@@ -20,6 +20,7 @@
 
 import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
+import { PlusGlyph } from '@/components/ui/glyphs'
 import {
   permissionModeTone,
   type PastSession,
@@ -154,22 +155,7 @@ export function SessionAdd({ host, project, compact = false }: Props) {
           **器や立体は持たせない。** この形は**一覧の枠のヘッダでも出る**ので、
           `DESIGN.md` §12.3「一覧の行に物質を持たせない」が効く。**形だけを直す。**
         */}
-        {compact ? (
-          <svg
-            aria-hidden
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth={2}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <path d="M12 5v14" />
-            <path d="M5 12h14" />
-          </svg>
-        ) : (
-          '＋'
-        )}
+        {compact ? <PlusGlyph /> : '＋'}
       </Button>
     )
   }

@@ -35,6 +35,8 @@ import { useSettingsStore } from '@/stores/settings'
 import { saveCardOrder } from '@/stores/sessions'
 import { useNavigate } from 'react-router'
 import { SessionAdd } from '@/components/SessionAdd/SessionAdd'
+import { projectDisplayName } from '@/lib/path'
+import { useProjects } from '@/stores/projects'
 import { SessionTile } from '@/components/SessionTile/SessionTile'
 import { Button } from '@/components/ui/button'
 import type { CardId } from '@/lib/protocol'
@@ -84,6 +86,12 @@ export function ProjectGroup({
   scroller,
 }: Props) {
   const navigate = useNavigate()
+  /*
+    **PJT 専用画面と同じ関数で名前を出す**（細かい修正 設計§4-3）。同じ規則で同じ番号が
+    付くことが「揃える」の中身である
+  */
+  const projects = useProjects()
+  const 名前 = projectDisplayName(project, projects)
   const [error, setError] = useState<string | null>(null)
   const busy = cards.length > 0
   /*
@@ -246,24 +254,40 @@ export function ProjectGroup({
       }`}
     >
       <header className="mb-2 flex items-baseline gap-2">
-        {/* 縮んでよいのはパスだけ。`min-w-0` が無いと `truncate` が効かず、
-            隣のセッション数が縦に割れる */}
+        {/*
+          **PJT 専用画面と同じ関数で、フォルダ名だけを出す**（細かい修正 要件14・設計§4-3）。
+          同じ規則で同じ番号が付くことが「揃える」の中身で、**別々に実装すると、同じ PJT が
+          画面によって違う名前で出る**。
+
+          **フルパスは `title` に残す。** 完全に捨てると、名前だけではどの枠か分からない
+          場合が残る（`projectDisplayName` は同名が衝突したときだけ番号を付ける）。
+
+          縮んでよいのは名前だけ。`min-w-0` が無いと `truncate` が効かず、
+          隣のセッション数が縦に割れる
+        */}
         <h2 className="min-w-0 truncate text-sm font-semibold" title={project}>
-          {project}
+          {名前}
         </h2>
-        <span className="text-muted-foreground shrink-0 text-xs">
-          {cards.length}セッション
-        </span>
-        {/* 起動の入口はここ（設計§13）。追加は「枠を置く」操作なので、
-            危険度の判断が要るのは起こす瞬間だけになる */}
-        {/* **押しても掴まない。** `click` を止めるだけでは `pointerdown` が素通りする */}
+        {/*
+          **「＋」は名前の直後**（細かい修正 要件15・設計§4-3）。PJT 専用画面と並び順を
+          揃える——**何に対する操作かが位置で分かる**。見た目は既に同じ部品なので、
+          揃えるのは配置だけでよい。
+
+          起動の入口はここ（設計§13）。追加は「枠を置く」操作なので、危険度の判断が
+          要るのは起こす瞬間だけになる。
+
+          **押しても掴まない。** `click` を止めるだけでは `pointerdown` が素通りする
+        */}
         <div
-          className="ml-auto shrink-0"
+          className="shrink-0"
           data-no-grab=""
           onClick={(event) => event.stopPropagation()}
         >
           <SessionAdd host={host} project={project} compact />
         </div>
+        <span className="text-muted-foreground ml-auto shrink-0 text-xs">
+          {cards.length}セッション
+        </span>
         {projectId !== undefined && (
           <Button
             type="button"
