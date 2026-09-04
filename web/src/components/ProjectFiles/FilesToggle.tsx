@@ -12,8 +12,13 @@
  * 指定）。呼び名も**サイドバー**に揃えてあり、「ハンバーガー」とは呼ばない。
  *
  * **文字の記号は使わない**（`DESIGN.md` §14.4）。操作アイコンなので Outline で可
- * （§14.3 の Expand 系）。線の太さは、24 の枠を 16px で描くので実効 1.3px 前後になり、
- * **同じ画面の本文の太さと揃う**（§15.4）。
+ * （§14.3 の Expand 系）。
+ *
+ * **線の太さの根拠は 1.5倍にした時点で作り直した**（細かい修正 要件8）。32px の器に
+ * 16px で描いていたころは実効 1.3px 前後で「同じ画面の本文の太さと揃う」と言えたが、
+ * 48px の器に 24px で描くと**実効 2px** になる。**器・絵・線がそろって 1.5倍になる**のは
+ * 相似としては正しく、要件が求めているのもそれである——**本文と揃うという理屈のほうが
+ * 失効した**ので、そちらを書き換えてある。
  *
  * **開いていても閉じていても同じ印を出す。** 状態は `aria-expanded` が持っている。
  * 押す前に形が変わると、何を押すことになるのか分からなくなる。
@@ -37,7 +42,7 @@ export function FilesToggle({ open, onToggle }: Props) {
     <Button
       type="button"
       variant="ghost"
-      size="icon"
+      size="icon-xl"
       data-testid="project-files-toggle"
       aria-expanded={open}
       aria-label="サイドバー"
@@ -45,7 +50,7 @@ export function FilesToggle({ open, onToggle }: Props) {
       className="shrink-0"
       onClick={onToggle}
     >
-      {/* 寸法はボタン側が当てる（`[&_svg:not([class*='size-'])]:size-4`） */}
+      {/* 寸法はボタン側が当てる（`icon-xl` は `size-6`＝24px を当てる） */}
       <svg
         aria-hidden
         viewBox="0 0 24 24"
