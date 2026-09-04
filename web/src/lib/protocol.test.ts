@@ -555,6 +555,44 @@ describe('状態のラベル', () => {
     )
   })
 
+  it('プランは、危険度ではなく専用の色で決まる', () => {
+    /*
+      **プランは危険度が低いのではなく、危険度の軸に乗らない**（細かい修正 設計§3-1）。
+      計画を立てるだけで何も実行しないので「どれくらい危ないか」で位置が決まらない。
+
+      長らく `danger: 'low'` として**手動確認とまったく同じ無彩色**を返していた。
+    */
+    expect(permissionModeTone('plan')).not.toBe(permissionModeTone('default'))
+    expect(permissionModeTone('plan')).toContain('blue-400')
+  })
+
+  it('プランは自分の地を持つ（カードの札が地を二重に足さない）', () => {
+    // `SessionTile` の `chipGround` は「トーンに `bg-` が無いときだけ `bg-muted` を足す」
+    // 作りなので、**自分の地を持った瞬間にその手当てが外れる**。これは正しい挙動だが、
+    // 気づかずに戻すと札だけ灰色に戻る
+    expect(permissionModeTone('plan')).toContain('bg-')
+    expect(permissionModeTone('default')).not.toContain('bg-')
+  })
+
+  it('他の5モードの色は変わっていない', () => {
+    // 直すのはプランだけ（設計§3-2）。6つのうち4つは Claude Code と既に一致しており、
+    // 「編集を自動承認」は §3-4 の理由で据え置いている
+    expect(permissionModeTone('default')).toBe('border-border text-muted-foreground')
+    expect(permissionModeTone('acceptEdits')).toBe(
+      'border-amber-500/50 bg-amber-500/10 text-amber-300',
+    )
+    expect(permissionModeTone('auto')).toBe(permissionModeTone('acceptEdits'))
+    expect(permissionModeTone('dontAsk')).toBe('border-red-500/60 bg-red-500/15 text-red-300')
+    expect(permissionModeTone('bypassPermissions')).toBe(permissionModeTone('dontAsk'))
+  })
+
+  it('危険度の関係は保たれている（プランが全承認スキップより目立たない）', () => {
+    // 一覧の目的は「見るべきものが埋もれないこと」。プランへ色を付けたせいで
+    // 全承認をスキップしているセッションが埋もれたら、この工事は失敗である
+    expect(permissionModeTone('bypassPermissions')).toContain('red')
+    expect(permissionModeTone('plan')).not.toContain('red')
+  })
+
   it('表に無いモードでも落ちずにそのまま表示する', () => {
     // CLI がモードを増やしても画面が壊れないこと（union 型にしない理由そのもの）
     const info = permissionModeInfo('まだ知らないモード')

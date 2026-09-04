@@ -242,7 +242,18 @@
 .prose-dashboard ol { list-style: decimal; }
 /* 作業の進み具合そのものなので、印は本文より目立ってよい */
 .prose-dashboard li:has(> input[type='checkbox']) { list-style: none; margin-left: -1.4em; }
-.prose-dashboard input[type='checkbox'] { margin-right: 0.45em; vertical-align: middle; }
+/*
+  チェック済みの印を **Primary Accent** で塗る（細かい修正 設計§3-5）。**新しい色は
+  1つも増やしていない**——`--accent-edge` などと同じ `#3dd9e6` である。
+
+  **これはアプリの「完了」状態ではなく、文書の中身である。** チェックボックスは
+  ファイルに書いてある字をそのまま描いたものなので、`DESIGN.md` §11.2 が完了に
+  当てている Lime は使わない。
+
+  それまで色の指定が**1つも無く**ブラウザ任せだった（灰色に見えていた）。
+  `accent-color` の使用はコードベースでここが最初の1つ。
+*/
+.prose-dashboard input[type='checkbox'] { margin-right: 0.45em; vertical-align: middle; accent-color: #3dd9e6; }
 .prose-dashboard code {
   background: var(--color-muted);
   border-radius: 4px;
