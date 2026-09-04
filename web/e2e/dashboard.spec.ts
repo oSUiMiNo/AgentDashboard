@@ -162,9 +162,18 @@ test('セッション画面と PJT 画面を行き来できる', async ({ page }
   const tiles = page.getByTestId('session-tile')
   await expect(tiles).toHaveCount(2)
 
+  /*
+    **タブの名前も一緒に見る**（タブ設計「書き手はページ層に置く」）。ここは
+    一覧 →`/s/`→`/p/` を回る唯一のテストなので、**移った先で名前が付いてくるか**を
+    確かめられるのはここしかない。一覧は PJT に属さないので既定のまま。
+  */
+  const タブ名 = `${path.basename(WORK_DIR)} — AgentDashboard`
+  await expect(page).toHaveTitle('AgentDashboard')
+
   // 一覧 → セッション専用画面。**開くのはダブルクリック**（並べ替え設計§4-1）
   await tiles.first().dblclick()
   await expect(page).toHaveURL(/\/s\/[0-9a-f-]{36}$/)
+  await expect(page).toHaveTitle(タブ名)
 
   /*
     **行き来は1つの切替ボタンになった**（設計§17-3）。以前は「単独画面はパスの
@@ -175,6 +184,8 @@ test('セッション画面と PJT 画面を行き来できる', async ({ page }
   await expect(縮小).toHaveAttribute('data-zoom', 'out')
   await 縮小.click()
   await expect(page).toHaveURL(`/p/local/${encodeURIComponent(WORK_DIR)}`)
+  // **同じ PJT なので名前は変わらない。** 画面が変わっても呼ぶ場所が変わるだけ
+  await expect(page).toHaveTitle(タブ名)
 
   // PJT 専用画面 → セッション専用画面。**押した区画のセッションへ行くこと**。
   // 先頭に固定する実装でも通ってしまわないよう、**最後の区画**の id を先に読む
@@ -414,6 +425,7 @@ test('いきなり開いた画面で ✕ を押しても、アプリの外へ出
   const 新しいタブ = await page.context().newPage()
   await 新しいタブ.goto(`/s/${cardId}`)
   await expect(新しいタブ.getByTestId('session-view')).toBeVisible()
+  await expect(新しいタブ).toHaveTitle(`${path.basename(WORK_DIR)} — AgentDashboard`)
 
   await 新しいタブ.getByTestId('close-session').click()
 
@@ -422,5 +434,11 @@ test('いきなり開いた画面で ✕ を押しても、アプリの外へ出
   await expect(新しいタブ).toHaveURL('/')
   // 着いた先が本当に一覧であること（URL だけでは、描けていない場合を見逃す）
   await expect(新しいタブ.getByTestId('project-add-open')).toBeVisible()
+  /*
+    **タブの名前も既定へ戻っていること**（タブ設計「離れたら既定へ戻す」）。
+    読み込み直しではなく**画面を移っただけ**で戻ることを見たいので、ここで見る
+    ——`goto` で確かめると、`index.html` の `<title>` が出ているだけの姿でも通る。
+  */
+  await expect(新しいタブ).toHaveTitle('AgentDashboard')
   await 新しいタブ.close()
 })
