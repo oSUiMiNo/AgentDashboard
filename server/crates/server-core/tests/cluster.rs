@@ -28,7 +28,7 @@ use server_core::{
     bus::{Bus, memory::MemoryBroker},
     cluster,
     gateway::{RemoteSessionHost, SessionHostHub},
-    registry::{AccountEvent, ReportOrigin, SessionRegistry},
+    registry::{AccountEvent, NoticeLimits, ReportOrigin, SessionRegistry},
     session_host::SessionHost as _,
 };
 use std::{net::SocketAddr, sync::Arc, time::Duration};
@@ -116,9 +116,14 @@ async fn instance(db: &sea_orm::DatabaseConnection, broker: &Arc<MemoryBroker>) 
     let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
     let bus = broker.connect(incoming_tx);
     let state = bus.state();
-    let registry = SessionRegistry::load(db.clone(), WINDOW, Some(bus as Arc<dyn Bus>))
-        .await
-        .expect("記録層を立てられること");
+    let registry = SessionRegistry::load(
+        db.clone(),
+        WINDOW,
+        Some(bus as Arc<dyn Bus>),
+        NoticeLimits::default(),
+    )
+    .await
+    .expect("記録層を立てられること");
     let hub = SessionHostHub::new(db.clone(), Arc::clone(&registry));
 
     // セッションホストの受け口も本当に開ける。**繋ぐ先を選べる**ようにしないと、

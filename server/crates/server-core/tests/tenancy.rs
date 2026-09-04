@@ -38,7 +38,10 @@ use protocol::{
 };
 use sea_orm::DatabaseConnection;
 use server_core::{
-    client_logs::ClientLogSink, db::pairing, gateway::SessionHostHub, registry::SessionRegistry,
+    client_logs::ClientLogSink,
+    db::pairing,
+    gateway::SessionHostHub,
+    registry::{NoticeLimits, SessionRegistry},
 };
 use std::{
     net::SocketAddr,
@@ -101,7 +104,7 @@ impl Drop for Arena {
 impl Arena {
     async fn start(db: DatabaseConnection) -> Self {
         let config = Arc::new(server_core::config::ServerConfig::default());
-        let registry = SessionRegistry::load(db.clone(), WINDOW, None)
+        let registry = SessionRegistry::load(db.clone(), WINDOW, None, NoticeLimits::default())
             .await
             .expect("記録層を立てられること");
         let auth = server_core::auth::AuthContext::server(db.clone(), &config);

@@ -14,7 +14,7 @@ use protocol::{
     CardId, Node, NodeId, ProjectId, SessionMeta, SessionStatus, TreeNode, ws::ServerMessage,
 };
 use sea_orm::DatabaseConnection;
-use server_core::registry::SessionRegistry;
+use server_core::registry::{NoticeLimits, SessionRegistry};
 use session_host_core::{
     events::{EventSink, TranscriptReport},
     offsets::OffsetStore,
@@ -43,7 +43,7 @@ async fn harness(label: &str) -> Harness {
     let db = server_core::db::connect(&format!("sqlite://{}", dir.join("dashboard.db").display()))
         .await
         .expect("使い捨ての DB へ繋げること");
-    let registry = SessionRegistry::load(db.clone(), WINDOW, None)
+    let registry = SessionRegistry::load(db.clone(), WINDOW, None, NoticeLimits::default())
         .await
         .expect("記録層を立てられること");
     let offsets = OffsetStore::open(dir.clone());

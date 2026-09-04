@@ -11,7 +11,7 @@ use protocol::{
     CardId, ClaudeSessionId, Node, NodeId, ProjectId, SessionMeta, SessionStatus, TreeNode,
     ws::ServerMessage,
 };
-use server_core::registry::{ReportOrigin, SessionRegistry};
+use server_core::registry::{NoticeLimits, ReportOrigin, SessionRegistry};
 
 const WINDOW: usize = 100;
 
@@ -72,9 +72,10 @@ async fn 報告は書いてから配られる() {
     // 配信を受け取った時点で DB に入っていること（設計§9-1）。逆だと、ブラウザには
     // 出ているのに再読み込みで消えるという嘘になる
     for backend in common::backends("apply").await {
-        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("記録層を立てられること");
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
         let mut events = registry.subscribe_events();
         let card_id = CardId::new();
 
@@ -94,9 +95,10 @@ async fn 報告は書いてから配られる() {
             event.message
         );
         // 配信を受け取った時点で、別に立てた記録層（＝DB だけを見る側）にも見えている
-        let other = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("同じ DB から立て直せること");
+        let other =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("同じ DB から立て直せること");
         assert_eq!(
             other.list(server_core::db::LOCAL_ACCOUNT_ID).len(),
             1,
@@ -117,9 +119,10 @@ async fn 外したカードは後から届いた報告で戻らない() {
     // 実際に E2E がこれで壊れた——片付けたはずのカードが次のテストへ漏れ、
     // 通しで流すと一覧の枚数が合わなくなる形で出た
     for backend in common::backends("archived").await {
-        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("記録層を立てられること");
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
         let card_id = CardId::new();
 
         registry.apply(&local(), upsert(card_id)).await;
@@ -148,9 +151,10 @@ async fn 外したカードは後から届いた報告で戻らない() {
         );
 
         // 立て直しても戻らない（DB 側にも外した印が残っている）
-        let again = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("立て直せること");
+        let again =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("立て直せること");
         assert!(
             again.list(server_core::db::LOCAL_ACCOUNT_ID).is_empty(),
             "[{}] 再起動で戻ってきた",
@@ -168,9 +172,10 @@ async fn 再起動しても履歴は残り接続していない印が付く() {
     for backend in common::backends("restore").await {
         let card_id = CardId::new();
         {
-            let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-                .await
-                .expect("記録層を立てられること");
+            let registry =
+                SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                    .await
+                    .expect("記録層を立てられること");
             registry.apply(&local(), upsert(card_id)).await;
             registry
                 .apply(
@@ -184,9 +189,10 @@ async fn 再起動しても履歴は残り接続していない印が付く() {
         }
 
         // サーバだけを起動し直した状態
-        let restored = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("立て直せること");
+        let restored =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("立て直せること");
 
         let listed = restored.list(server_core::db::LOCAL_ACCOUNT_ID);
         assert_eq!(listed.len(), 1, "[{}] 復元されていない", backend.name);
@@ -221,9 +227,10 @@ async fn 巻き戻りのあとも番号は最初から振り直される() {
     // 巻き戻し（/rewind）で全部消えるので、続きの番号から始めると並びに穴が空いたまま
     // 大きな値へ飛ぶ。消したなら番号も戻す
     for backend in common::backends("rewind").await {
-        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("記録層を立てられること");
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
         let card_id = CardId::new();
         registry.apply(&local(), upsert(card_id)).await;
 
@@ -264,9 +271,10 @@ async fn 巻き戻りのあとも番号は最初から振り直される() {
 async fn 知らないカードの履歴は捨てる() {
     // 外した直後に届いたノードで一覧を汚さない
     for backend in common::backends("orphan").await {
-        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("記録層を立てられること");
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
         let card_id = CardId::new();
 
         registry
@@ -308,9 +316,10 @@ async fn モデルの3つは未設定のまま往復する() {
         let bare = CardId::new();
         let filled = CardId::new();
         {
-            let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-                .await
-                .expect("記録層を立てられること");
+            let registry =
+                SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                    .await
+                    .expect("記録層を立てられること");
             registry.apply(&local(), upsert(bare)).await;
 
             let mut with_model = meta(filled);
@@ -327,9 +336,10 @@ async fn モデルの3つは未設定のまま往復する() {
                 .await;
         }
 
-        let restored = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("立て直せること");
+        let restored =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("立て直せること");
 
         let bare = restored.get(bare).expect("記録があること").meta();
         assert_eq!(bare.model, None, "[{}] 未設定が埋まった", backend.name);
@@ -372,16 +382,18 @@ async fn 実体が居ないカードもブラウザから外せる() {
     for backend in common::backends("archive-owned").await {
         let card_id = CardId::new();
         {
-            let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-                .await
-                .expect("記録層を立てられること");
+            let registry =
+                SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                    .await
+                    .expect("記録層を立てられること");
             registry.apply(&local(), upsert(card_id)).await;
         }
 
         // 立て直す＝実体がどこにも居ない状態
-        let restored = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("同じ DB から立て直せること");
+        let restored =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("同じ DB から立て直せること");
         assert_eq!(restored.list(server_core::db::LOCAL_ACCOUNT_ID).len(), 1);
 
         restored
@@ -403,9 +415,10 @@ async fn 他人のカードは名指ししても外せない() {
     // 実体の居ないカードを外す口を開けたので、**そこにも持ち主の確認が要る**。
     // 無いと、IDを名指しするだけで他人のカードを一覧から消せる（§8-6）
     for backend in common::backends("archive-owned-cross").await {
-        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("記録層を立てられること");
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
         let card_id = CardId::new();
         registry.apply(&local(), upsert(card_id)).await;
 
@@ -438,9 +451,10 @@ async fn 他人のカードは名指ししても外せない() {
 #[tokio::test]
 async fn 起こし直しの報告でカードの生まれた時刻は動かない() {
     for backend in common::backends("created_at").await {
-        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("記録層を立てられること");
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
         let card_id = CardId::new();
 
         registry.apply(&local(), upsert(card_id)).await;
@@ -477,9 +491,10 @@ async fn 起こし直しの報告でカードの生まれた時刻は動かな�
         );
 
         // **記録にも残っていること。** メモリだけ守っても、起こし直しで元へ戻る
-        let 読み直し = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("記録層を立て直せること");
+        let 読み直し =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立て直せること");
         assert_eq!(
             読み直し
                 .get(card_id)
@@ -504,9 +519,10 @@ async fn セッションの名前は記録へ残り読み直しても戻る() {
         let 名無し = CardId::new();
         let 名付き = CardId::new();
         {
-            let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-                .await
-                .expect("記録層を立てられること");
+            let registry =
+                SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                    .await
+                    .expect("記録層を立てられること");
             registry.apply(&local(), upsert(名無し)).await;
 
             let mut with_title = meta(名付き);
@@ -521,9 +537,10 @@ async fn セッションの名前は記録へ残り読み直しても戻る() {
                 .await;
         }
 
-        let restored = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("立て直せること");
+        let restored =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("立て直せること");
 
         assert_eq!(
             restored
@@ -563,9 +580,10 @@ async fn セッションの名前は記録へ残り読み直しても戻る() {
 #[tokio::test]
 async fn 名前の無い報告は記録の名前を消さない() {
     for backend in common::backends("session_title_keep").await {
-        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("記録層を立てられること");
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
         let card_id = CardId::new();
 
         let mut 名付き = meta(card_id);
@@ -606,9 +624,10 @@ async fn 名前の無い報告は記録の名前を消さない() {
         );
 
         // **記録にも残っていること。** メモリだけ守っても、起こし直しで元へ戻る
-        let 読み直し = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("記録層を立て直せること");
+        let 読み直し =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立て直せること");
         assert_eq!(
             読み直し
                 .get(card_id)
@@ -633,9 +652,10 @@ async fn 名前の無い報告は記録の名前を消さない() {
 #[tokio::test]
 async fn 新しい名前の報告はちゃんと更新される() {
     for backend in common::backends("session_title_update").await {
-        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("記録層を立てられること");
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
         let card_id = CardId::new();
 
         let mut 最初 = meta(card_id);
@@ -672,9 +692,10 @@ async fn 新しい名前の報告はちゃんと更新される() {
             backend.name
         );
 
-        let 読み直し = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("記録層を立て直せること");
+        let 読み直し =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立て直せること");
         assert_eq!(
             読み直し
                 .get(card_id)
@@ -703,9 +724,10 @@ async fn 新しい名前の報告はちゃんと更新される() {
 async fn サーバを起こし直しても最初の空の報告で名前が消えない() {
     for backend in common::backends("session_title_reboot").await {
         {
-            let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-                .await
-                .expect("記録層を立てられること");
+            let registry =
+                SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                    .await
+                    .expect("記録層を立てられること");
             let mut 名付き = meta(CardId::new());
             名付き.session_title = Some("起こし直しをまたぐ題".to_string());
             let card_id = 名付き.card_id;
@@ -721,9 +743,10 @@ async fn サーバを起こし直しても最初の空の報告で名前が消�
             // ここでサーバが落ちる。メモリは失われ、記録だけが残る
             drop(registry);
 
-            let 起こし直し = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-                .await
-                .expect("立て直せること");
+            let 起こし直し =
+                SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                    .await
+                    .expect("立て直せること");
 
             // 立て直した直後、**セッションホストは名前を持たずに名乗ってくる**
             // （パーサが読み直して報告し直すのは、このあと）
@@ -762,9 +785,10 @@ async fn 新しいカードは枠の末尾へ入り報告のたびに戻らな�
     // 戻らない**ことを見る——セッションホストは並び順を知らないので 0 を名乗る。
     // 記録の値で上書きしないと、並べ替えた結果がフックのたびに巻き戻る
     for backend in common::backends("card-position").await {
-        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("記録層を立てられること");
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
 
         let first = CardId::new();
         let second = CardId::new();
@@ -802,9 +826,10 @@ async fn カードの並べ替えは枠の中で丸ごと詰め直す() {
     // 枠は `(agent, project)` で名指す。**その枠に居ないカードは断る**——枠をまたいだ
     // 移動をやらないので、宛先を要求の側に書かせておけば受け手が見分けられる
     for backend in common::backends("card-reorder").await {
-        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("記録層を立てられること");
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
 
         let first = CardId::new();
         let second = CardId::new();
@@ -837,9 +862,10 @@ async fn カードの並べ替えは枠の中で丸ごと詰め直す() {
         );
 
         // ② 別に立てた記録層（＝DB だけを見る側）にも同じ並びで見えること
-        let other = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("同じ DB から立て直せること");
+        let other =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("同じ DB から立て直せること");
         let stored: Vec<CardId> = other
             .list(server_core::db::LOCAL_ACCOUNT_ID)
             .into_iter()
@@ -904,9 +930,10 @@ async fn 付けた名前は丸ごとの写しで配られる() {
     // そして**`Status` の差分では届かない**（名前を運ぶ欄が無い）。丸ごとの写し
     // （`SessionUpsert`）で配ること——ここが設計§5-4 の言っていることである。
     for backend in common::backends("nickname_publish").await {
-        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("記録層を立てられること");
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
         let card = CardId::new();
         let session = ClaudeSessionId::new();
         registry
@@ -957,9 +984,10 @@ async fn 利用者が付けた名前は記録へ残り読み直しても戻る()
         let card = CardId::new();
         let session = ClaudeSessionId::new();
         {
-            let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-                .await
-                .expect("記録層を立てられること");
+            let registry =
+                SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                    .await
+                    .expect("記録層を立てられること");
             registry
                 .apply(
                     &local(),
@@ -974,9 +1002,10 @@ async fn 利用者が付けた名前は記録へ残り読み直しても戻る()
                 .expect("名前を付けられること");
         }
 
-        let restored = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("立て直せること");
+        let restored =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("立て直せること");
         assert_eq!(
             restored
                 .get(card)
@@ -997,9 +1026,10 @@ async fn 名前を消すと行ごと消える() {
     for backend in common::backends("nickname_clear").await {
         let card = CardId::new();
         let session = ClaudeSessionId::new();
-        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("記録層を立てられること");
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
         registry
             .apply(
                 &local(),
@@ -1025,9 +1055,10 @@ async fn 名前を消すと行ごと消える() {
         );
 
         // 立て直しても戻ってこない（**行ごと消えている**）
-        let restored = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("立て直せること");
+        let restored =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("立て直せること");
         assert_eq!(
             restored.get(card).expect("記録があること").meta().nickname,
             None,
@@ -1045,9 +1076,10 @@ async fn 報告に名前が入っていても記録の側が勝つ() {
     for backend in common::backends("nickname_record_wins").await {
         let card = CardId::new();
         let session = ClaudeSessionId::new();
-        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("記録層を立てられること");
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
         registry
             .apply(
                 &local(),
@@ -1095,9 +1127,10 @@ async fn 名前と_cli_の題は互いを潰さない() {
     for backend in common::backends("nickname_vs_title").await {
         let card = CardId::new();
         let session = ClaudeSessionId::new();
-        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("記録層を立てられること");
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
         registry
             .apply(
                 &local(),
@@ -1146,9 +1179,10 @@ async fn 呼び戻し先を持たないカードには名前を付けられな�
     // **黙って何もしない道を作らない**——理由を言って断る（設計§5-3）。
     for backend in common::backends("nickname_no_target").await {
         let card = CardId::new();
-        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("記録層を立てられること");
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
         registry.apply(&local(), upsert(card)).await; // `claude_session_id` を持たない
 
         let err = registry
@@ -1180,9 +1214,10 @@ async fn 乗り換えると乗り換え先の名前が出て前の名前は残�
     // 張り替えを人工的に起こして見る。**起きない前提に寄りかかると、CLI の振る舞いが
     // 変わった日に静かに壊れる。**
     for backend in common::backends("nickname_switch").await {
-        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("記録層を立てられること");
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
         let card = CardId::new();
         let 前 = ClaudeSessionId::new();
         let 後 = ClaudeSessionId::new();
@@ -1271,9 +1306,10 @@ async fn 同じセッションを指すカードには同じ名前が出る() {
         let 別のセッション = ClaudeSessionId::new();
         let 無関係 = CardId::new();
 
-        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("記録層を立てられること");
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
         for (card, s) in [
             (一枚目, session),
             (二枚目, session),
@@ -1327,9 +1363,10 @@ async fn 名前の決まりは記録層が断る() {
     for backend in common::backends("nickname_rules").await {
         let card = CardId::new();
         let session = ClaudeSessionId::new();
-        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("記録層を立てられること");
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
         registry
             .apply(
                 &local(),
@@ -1422,9 +1459,10 @@ async fn 過去の一覧は外したカードも返す() {
     // `GET /api/sessions` は外したカードを返さない（読み込みから除かれている）。
     // **この口が無いと、過去のセッションを引く道が1つも無い**（設計§6-1）
     for backend in common::backends("past_archived").await {
-        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("記録層を立てられること");
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
         let session = ClaudeSessionId::new();
         外したカード(&registry, session, 100).await;
 
@@ -1448,9 +1486,10 @@ async fn 同じセッションを指すカードは1件に畳まれる() {
     // 実機で実際に起きている——外したカード90枚に対して別のセッションは81本しかない
     // （設計§13）。**新しいほうを採る**
     for backend in common::backends("past_fold").await {
-        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("記録層を立てられること");
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
         let session = ClaudeSessionId::new();
         外したカード(&registry, session, 100).await;
         外したカード(&registry, session, 300).await;
@@ -1474,9 +1513,10 @@ async fn 実体があるカードが指しているセッションは出ない()
     // 起こしても二重になるだけで、利用者が求めているのは「戻ってこないもの」（設計§6-4）。
     // **接続断・終了のカードが指しているものは出す**
     for backend in common::backends("past_live").await {
-        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("記録層を立てられること");
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
 
         let 生きている = ClaudeSessionId::new();
         let mut meta = meta_with_session(CardId::new(), 生きている);
@@ -1562,9 +1602,10 @@ async fn 枠を指定するとその枠のぶんだけ返る() {
     // 「どの枠か」の規則が2箇所に在ることになり、しかも件数の上限が枠を跨いで先に
     // 効くので、枠あたり数件しか残らなかった（実測：75本 → 上限20 → 枠で絞って8件）。
     for backend in common::backends("past_frame").await {
-        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("記録層を立てられること");
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
 
         // **PC は先に登録する。** 記録の側が実在する PC しか受けないので、
         // 登録せずに名乗ると行が書けずに黙って消える（テストの下ごしらえの話）
@@ -1604,9 +1645,10 @@ async fn 名前を付けたものは件数で切られない() {
     // **付けた行為そのものが「また使う」の意思表示**（設計§6-3）。件数で切ると、
     // 大事に取っておいたものが新しいものに押し出されて消える
     for backend in common::backends("past_limit").await {
-        let registry = SessionRegistry::load(backend.db.clone(), WINDOW, None)
-            .await
-            .expect("記録層を立てられること");
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
 
         // いちばん古いものへ名前を付ける。**外す前に付ける**——外したカードは一覧から
         // 消えているので、そもそも押せない（`set_nickname` も「見つかりません」で断る）

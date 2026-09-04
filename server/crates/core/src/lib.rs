@@ -29,9 +29,24 @@ use axum::Router;
 use config::Config;
 use local::LocalSessionHost;
 use server_core::{
-    auth::AuthContext, config::ServerConfig, embed, gateway::SessionHostHub,
-    registry::SessionRegistry, ws,
+    auth::AuthContext,
+    config::ServerConfig,
+    embed,
+    gateway::SessionHostHub,
+    registry::{NoticeLimits, SessionRegistry},
+    ws,
 };
+
+/// 設定から知らせの上限を写す（トーストとベル設計§5-1）。
+///
+/// **2つの数を裸で並べて渡さない。** どちらも `u64` なので、入れ替えても
+/// コンパイルは通り、「30件で頭打ち・200日保持」という誰も気づかない設定になる。
+fn notice_limits(server: &ServerConfig) -> NoticeLimits {
+    NoticeLimits {
+        retention_days: server.notice_retention_days,
+        max_rows: server.notice_max_rows,
+    }
+}
 use session_host_core::{
     hooks, model_catalog, offsets::OffsetStore, parser, parser::ParserSupervisor, selfheal,
     session, session::SessionManager, settings, settings::SettingsStore,
@@ -249,6 +264,7 @@ pub async fn serve_server(
         db.clone(),
         server_config.transcript_window_nodes,
         bus.clone(),
+        notice_limits(&server_config),
     )
     .await?;
     let auth = AuthContext::server(db.clone(), &server_config);
@@ -437,7 +453,13 @@ pub async fn serve(config: Config, config_arg: Option<std::path::PathBuf>) -> an
     let update_db = db.clone();
     let gate_db = db.clone();
 
-    let registry = SessionRegistry::load(db, server_config.transcript_window_nodes, None).await?;
+    let registry = SessionRegistry::load(
+        db,
+        server_config.transcript_window_nodes,
+        None,
+        notice_limits(&server_config),
+    )
+    .await?;
 
     // 再開位置の置き場所は、パーサの世話役（読む側）と報告の運び手（進める側）で
     // 共有する。**進めてよいのは記録に入ってから**（設計§6-1）

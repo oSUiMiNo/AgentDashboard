@@ -14,7 +14,7 @@ pub use session::*;
 
 use agentdashboard_core::{LocalServer, config::Config, local};
 use protocol::ws::ServerMessage;
-use server_core::registry::SessionRegistry;
+use server_core::registry::{NoticeLimits, SessionRegistry};
 use session_host_core::{
     claude_settings::ClaudeSettings,
     model_aliases::ModelAliases,
@@ -454,9 +454,14 @@ impl TestServer {
         // 認証を通る経路が一度も踏まれないまま緑になる
         let auth = server_core::auth::AuthContext::local(db.clone(), &server_config);
         let gate_db = db.clone();
-        let registry = SessionRegistry::load(db, server_config.transcript_window_nodes, None)
-            .await
-            .expect("記録層を立てられること");
+        let registry = SessionRegistry::load(
+            db,
+            server_config.transcript_window_nodes,
+            None,
+            NoticeLimits::default(),
+        )
+        .await
+        .expect("記録層を立てられること");
         // 再開位置は、読む側（パーサの世話役）と進める側（報告の運び手）で共有する。
         // 置き場所は `state_dir` の下なので、テストごとの使い捨てになる
         let offsets = OffsetStore::open(agent_config.resolved_state_dir());

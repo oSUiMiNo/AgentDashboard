@@ -16,7 +16,10 @@ use protocol::{
 };
 use sea_orm::DatabaseConnection;
 use server_core::{
-    db::pairing, gateway::SessionHostHub, registry::SessionRegistry, session_host::SessionHost as _,
+    db::pairing,
+    gateway::SessionHostHub,
+    registry::{NoticeLimits, SessionRegistry},
+    session_host::SessionHost as _,
 };
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio_tungstenite::tungstenite;
@@ -37,7 +40,7 @@ struct TestGateway {
 
 impl TestGateway {
     async fn start(db: DatabaseConnection) -> Self {
-        let registry = SessionRegistry::load(db.clone(), WINDOW, None)
+        let registry = SessionRegistry::load(db.clone(), WINDOW, None, NoticeLimits::default())
             .await
             .expect("記録層を立てられること");
         let hub = SessionHostHub::new(db, Arc::clone(&registry));

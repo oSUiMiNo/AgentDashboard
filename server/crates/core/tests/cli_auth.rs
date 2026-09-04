@@ -13,6 +13,7 @@ mod common;
 use agentdashboard_core::client;
 use common::TestServer;
 use server_core::db::pairing;
+use server_core::registry::NoticeLimits;
 use std::net::SocketAddr;
 
 /// アカウントログインの構成だけを立てる（`tests/auth.rs` の `Selfhost` の写し。
@@ -45,9 +46,14 @@ impl Selfhost {
                 .expect("使い捨ての DB へ繋げること");
 
         let config = std::sync::Arc::new(server_core::config::ServerConfig::default());
-        let registry = server_core::registry::SessionRegistry::load(db.clone(), 100, None)
-            .await
-            .expect("記録層を立てられること");
+        let registry = server_core::registry::SessionRegistry::load(
+            db.clone(),
+            100,
+            None,
+            NoticeLimits::default(),
+        )
+        .await
+        .expect("記録層を立てられること");
         let auth = server_core::auth::AuthContext::server(db.clone(), &config);
         let hub =
             server_core::gateway::SessionHostHub::new(db.clone(), std::sync::Arc::clone(&registry));

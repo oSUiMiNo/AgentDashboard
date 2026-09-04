@@ -13,6 +13,7 @@ mod m20260810_000004_token_kind;
 mod m20260825_000005_session_title;
 mod m20260902_000006_position;
 mod m20260903_000007_session_nicknames;
+mod m20260905_000008_notices;
 
 use sea_orm_migration::prelude::*;
 
@@ -29,6 +30,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260825_000005_session_title::Migration),
             Box::new(m20260902_000006_position::Migration),
             Box::new(m20260903_000007_session_nicknames::Migration),
+            Box::new(m20260905_000008_notices::Migration),
         ]
     }
 }

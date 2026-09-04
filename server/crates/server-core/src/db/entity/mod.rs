@@ -8,6 +8,7 @@
 
 pub mod accounts;
 pub mod agents;
+pub mod notices;
 pub mod pairing_tokens;
 pub mod projects;
 pub mod session_nicknames;

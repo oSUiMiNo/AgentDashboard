@@ -29,7 +29,7 @@ use crate::{
 use protocol::{
     AgentId, CardId, ClaudeSessionId, ModelId, NodeId, PermissionMode, ProjectId, SessionMeta,
     SessionStatus, TreeNode,
-    ws::{ErrorKind, ServerMessage},
+    ws::{ErrorKind, NoticeView, ServerMessage},
 };
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
@@ -70,6 +70,48 @@ pub struct TranscriptPage {
     pub nodes: Vec<TreeNode>,
     /// さらに前があるかもしれない
     pub has_more: bool,
+}
+
+/// 記録の行を、線に乗る形へ写す。
+///
+/// **写す場所を1つに閉じてある。** REST とプッシュで別々に組み立てると、片方だけ列を
+/// 足したときに黙ってずれる。
+pub fn notice_view(row: entity::notices::Model) -> NoticeView {
+    NoticeView {
+        id: row.id,
+        card_id: row.card_id.map(CardId),
+        source: row.source,
+        kind: row.kind,
+        message: row.message,
+        created_at: row.created_at,
+        read_at: row.read_at,
+    }
+}
+
+/// 知らせを溜めておく量の上限（トーストとベル設計§5-1）。
+///
+/// **2本立てにしてあるのは、片方だけだと取りこぼすためである。** 日数だけだと
+/// 「1日で200件出た」を、件数だけだと「30日かけて少しずつ溜まった」を取りこぼす。
+///
+/// 2つの数を裸で並べて渡さないのは、**どちらも `u64` で入れ替えても気づけない**から。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NoticeLimits {
+    /// これより古いものは消える。
+    pub retention_days: u64,
+    /// **アカウントごと**の件数の上限。超えたら古い順に削る。
+    pub max_rows: u64,
+}
+
+impl Default for NoticeLimits {
+    /// `server/config.toml.example` の既定と揃えてある。
+    ///
+    /// **テストのためだけの値ではない。** 設定を書かずに起動した人がこの値で動く。
+    fn default() -> Self {
+        Self {
+            retention_days: 30,
+            max_rows: 200,
+        }
+    }
 }
 
 /// 報告の出どころ（セルフホスト化設計§5-1 の手順4）。
@@ -259,10 +301,14 @@ impl SessionRegistry {
     /// **全アカウントぶんを読む。** このインスタンスは誰のブラウザも受けるので、
     /// 読む時点で絞る相手が決まっていない。絞るのは配るとき・返すときで、
     /// その判定は [`SessionRecord::account_id`] が持つ（§8-6）。
+    /// **知らせの上限を引数で取るのは、掃除を起こし忘れないためである**（トーストと
+    /// ベル設計§5-3）。掃除を起こす行は、忘れても何も起きない——だから忘れる。
+    /// ここで受け取って内部で起こせば、**渡し忘れた時点でコンパイルが通らない**。
     pub async fn load(
         db: DatabaseConnection,
         window_nodes: usize,
         bus: Option<Arc<dyn Bus>>,
+        notice_limits: NoticeLimits,
     ) -> Result<Arc<Self>, anyhow::Error> {
         let rows = entity::sessions::Entity::find()
             .filter(entity::sessions::Column::Archived.eq(false))
@@ -314,6 +360,13 @@ impl SessionRegistry {
         if !records.is_empty() {
             tracing::info!("前回の記録から {} 枚のカードを復元しました", records.len());
         }
+
+        // **知らせの掃除をここで起こす。** 呼び出し側に任せると忘れる（設計§5-3）
+        db::notices::start_sweeper(
+            db.clone(),
+            notice_limits.retention_days,
+            notice_limits.max_rows,
+        );
 
         Ok(Arc::new(Self {
             db,
@@ -785,6 +838,57 @@ impl SessionRegistry {
         self.publish_local(account_id, message);
     }
 
+    /// アプリ全体の知らせを記録へ積み、積めたら未読の数と一緒に配る（設計§4-2・§6-1）。
+    ///
+    /// # 失敗しても `Err` を返さない
+    ///
+    /// **書けなくても、リアルタイムの配信は続ける**（設計§4-3）。`Err` を返すと
+    /// [`Self::apply`] の失敗側が「記録を保存できませんでした」を**同じ経路で**知らせに
+    /// 行き、それがまた記録を試みる——**DB が落ちているときに DB へ書きに行く輪**になる。
+    ///
+    /// **知らせは、残すことよりも届くことが先である。**
+    async fn record_notice(
+        &self,
+        origin: &ReportOrigin,
+        card_id: Option<Uuid>,
+        source: &str,
+        kind: &str,
+        message: &str,
+    ) {
+        let now = db::now_ms();
+        let row = match db::notices::push(
+            &self.db,
+            origin.account_id,
+            card_id,
+            source,
+            kind,
+            message,
+            now,
+        )
+        .await
+        {
+            Ok(row) => row,
+            Err(err) => {
+                tracing::warn!("知らせを記録できませんでした: {err}");
+                return;
+            }
+        };
+
+        // **未読の数を同梱する。** そうしないと、1件届くたびにバッジのために
+        // 数えに行くことになる（設計§6-1）
+        let unread = db::notices::unread_count(&self.db, origin.account_id)
+            .await
+            .unwrap_or_default();
+
+        self.publish(
+            origin.account_id,
+            ServerMessage::NoticeCreated {
+                notice: notice_view(row),
+                unread_count: unread as u32,
+            },
+        );
+    }
+
     /// このインスタンスの中だけへ配る。
     ///
     /// **他インスタンスから回ってきたものはこちらを使う。** `publish` を使うと、
@@ -1178,6 +1282,38 @@ impl SessionRegistry {
                 self.append(origin, card_id, nodes).await
             }
             ServerMessage::TranscriptReset { card_id } => self.reset(origin, card_id).await,
+            // **アプリ全体の知らせは記録に残す**（トーストとベル設計§4-2）。
+            // 7秒で消えるトーストの代わりに、ベルから後で読めるようにするため
+            ServerMessage::Error {
+                card_id: None,
+                ref message,
+                kind,
+            } => {
+                self.record_notice(origin, None, "error", kind.as_str(), message)
+                    .await;
+                self.publish(
+                    origin.account_id,
+                    ServerMessage::Error {
+                        card_id: None,
+                        message: message.clone(),
+                        kind,
+                    },
+                );
+                Ok(())
+            }
+            ServerMessage::Selfheal { phase, ref detail } => {
+                let text = protocol::ws::selfheal_label(phase, detail.as_deref());
+                self.record_notice(origin, None, "selfheal", phase.as_str(), &text)
+                    .await;
+                self.publish(
+                    origin.account_id,
+                    ServerMessage::Selfheal {
+                        phase,
+                        detail: detail.clone(),
+                    },
+                );
+                Ok(())
+            }
             // 揮発の知らせ。真実として残す性質のものではないので素通しする。
             // **配る先は報告してきたアカウントの中だけ**（§8-6 の A2S の行）
             other => {

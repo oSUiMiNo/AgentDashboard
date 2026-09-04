@@ -18,6 +18,10 @@ const DEFAULT_TRANSCRIPT_PAGE_LIMIT: usize = 200;
 const DEFAULT_TRANSCRIPT_WINDOW_NODES: usize = 2000;
 /// LAN 開放で入館証が切れるまで（時間。設計§8-3）。
 const DEFAULT_LAN_SESSION_TTL_HOURS: u64 = 5;
+/// 知らせを記録に残す日数（トーストとベル設計§5-1）。
+const DEFAULT_NOTICE_RETENTION_DAYS: u64 = 30;
+/// アカウントごとに溜めておく知らせの件数（同上）。
+const DEFAULT_NOTICE_MAX_ROWS: u64 = 200;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
@@ -71,6 +75,20 @@ pub struct ServerConfig {
     /// 誰でも入れる**状態が続く。作業のひと区切りより長く、置き忘れた端末が翌日まで
     /// 生き残らない長さとして既定5時間。
     pub lan_session_ttl_hours: u64,
+    /// アプリ全体の知らせを記録に残す日数（トーストとベル設計§5-1）。
+    ///
+    /// **ログ（7日）より長く、添付（90日）より短い。** ベルは「見逃した知らせを後から
+    /// 拾う」ためのもので、長期の追跡は `agentdashboard logs` に任せる。
+    ///
+    /// **ここが `SessionHostConfig` ではなく `ServerConfig` にあるのは正しい。**
+    /// ログと添付はセッションホストがファイルとして持つが、知らせは DB に載る——
+    /// **DB を持つのは `server-core` だけ**である。
+    pub notice_retention_days: u64,
+    /// **アカウントごと**に溜めておく知らせの件数の上限（設計§5-1）。
+    ///
+    /// 日数と2本立てにしてあるのは、片方だけだと取りこぼすため。日数だけだと
+    /// 「1日で200件出た」を、件数だけだと「30日かけて少しずつ溜まった」を取りこぼす。
+    pub notice_max_rows: u64,
 }
 
 impl Default for ServerConfig {
@@ -86,6 +104,8 @@ impl Default for ServerConfig {
             valkey_url: None,
             cookie_secure: false,
             lan_session_ttl_hours: DEFAULT_LAN_SESSION_TTL_HOURS,
+            notice_retention_days: DEFAULT_NOTICE_RETENTION_DAYS,
+            notice_max_rows: DEFAULT_NOTICE_MAX_ROWS,
         }
     }
 }

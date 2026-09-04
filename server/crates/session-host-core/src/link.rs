@@ -352,12 +352,18 @@ fn to_agent_message(event: &ServerMessage) -> Option<AgentMessage> {
         // PJT 枠（`ProjectUpsert` / `ProjectRemoved`）は**サーバの記録**で、PC は
         // 持っていない（イシューグループ_2026_0805_0514 設計§2）。足すのも消すのも
         // ブラウザ → サーバの REST で完結するので、こちらへ運ぶ経路は要らない
+        //
+        // アプリ全体の知らせ（`NoticeCreated` / `NoticeRead`）も**サーバの記録**である
+        // （トーストとベル設計§4-2）。PC が報告した `Error` / `Selfheal` を受けて
+        // **サーバ側が組み立てる**ものなので、PC へ運ぶと元の報告と二重になる
         ServerMessage::Hello { .. }
         | ServerMessage::TranscriptAppend { .. }
         | ServerMessage::TranscriptReset { .. }
         | ServerMessage::BusStatus { .. }
         | ServerMessage::ProjectUpsert { .. }
-        | ServerMessage::ProjectRemoved { .. } => return None,
+        | ServerMessage::ProjectRemoved { .. }
+        | ServerMessage::NoticeCreated { .. }
+        | ServerMessage::NoticeRead { .. } => return None,
     })
 }
 

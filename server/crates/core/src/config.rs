@@ -69,6 +69,10 @@ pub struct Config {
     pub valkey_url: Option<String>,
     pub cookie_secure: bool,
     pub lan_session_ttl_hours: u64,
+    /// アプリ全体の知らせを記録に残す日数（トーストとベル設計§5-1）。
+    pub notice_retention_days: u64,
+    /// **アカウントごと**に溜めておく知らせの件数の上限（同上）。
+    pub notice_max_rows: u64,
     pub inject_status_line: bool,
     pub claude_settings_path: Option<PathBuf>,
     pub status_line_refresh_secs: u64,
@@ -115,6 +119,8 @@ impl Default for Config {
             valkey_url: server.valkey_url,
             cookie_secure: server.cookie_secure,
             lan_session_ttl_hours: server.lan_session_ttl_hours,
+            notice_retention_days: server.notice_retention_days,
+            notice_max_rows: server.notice_max_rows,
             inject_status_line: agent.inject_status_line,
             claude_settings_path: agent.claude_settings_path,
             status_line_refresh_secs: agent.status_line_refresh_secs,
@@ -280,6 +286,8 @@ impl Config {
             valkey_url: self.valkey_url.clone(),
             cookie_secure: self.cookie_secure,
             lan_session_ttl_hours: self.lan_session_ttl_hours,
+            notice_retention_days: self.notice_retention_days,
+            notice_max_rows: self.notice_max_rows,
         }
     }
 
@@ -344,6 +352,18 @@ impl Config {
         // 0 だと「発行した瞬間に切れる入館証」になり、LAN からは永久に入れない。
         // 期限を無くしたい要望はここではなく §16 の持ち越し（共有パスワードのまま
         // 無期限にするのは、置き忘れた端末がそのまま鍵になることを意味する）
+        if self.notice_retention_days == 0 {
+            // 0 だと、今日書いたぶんまで「古い」扱いになって即座に消える
+            return Err(ConfigError::Invalid(
+                "notice_retention_days は 1 以上である必要があります".to_string(),
+            ));
+        }
+        if self.notice_max_rows == 0 {
+            // 0 だと、積んだ端から掃除が全部を消しにいく
+            return Err(ConfigError::Invalid(
+                "notice_max_rows は 1 以上である必要があります".to_string(),
+            ));
+        }
         if self.lan_session_ttl_hours == 0 {
             return Err(ConfigError::Invalid(
                 "lan_session_ttl_hours は 1 以上である必要があります".to_string(),

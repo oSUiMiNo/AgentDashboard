@@ -91,7 +91,10 @@ pub enum ErrorKind {
 ///
 /// 文字列ではなく型にしてあるのは、送り手と受け手が別々の言語で手書きされているため。
 /// 綴り違いはコンパイルを通ってしまい、「進行が画面に出ない」という追いにくい形でしか
-/// 表に出ない。段階の増減は [`ServerMessage::Selfheal`] と同じく4箇所同期の対象。
+/// 表に出ない。段階の増減は [`ServerMessage::Selfheal`] と同じく**5箇所**同期の対象——
+/// この型・`session-host-core` の状態遷移・`web/src/lib/protocol.ts`・`core/tests/selfheal.rs`
+/// に加えて、**[`SelfhealPhase::as_str`] と [`SelfhealPhase::label`]**（記録と CLI が
+/// 読む綴りと日本語。トーストとベル設計§7-1）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SelfhealPhase {
@@ -403,6 +406,113 @@ pub enum ServerMessage {
     /// 消したブラウザ以外の画面にも届ける必要があるので、`SessionRemoved` と同じ形で
     /// 用意してある。
     ProjectRemoved { project_id: uuid::Uuid },
+    /// アプリ全体の知らせが1件増えた（トーストとベル設計§6-1）。
+    ///
+    /// **未読の数を同梱する。** 別に数えさせると、1件届くたびにバッジのために
+    /// 問い合わせが飛ぶ。
+    ///
+    /// **既存の [`ServerMessage::Error`] と [`ServerMessage::Selfheal`] は残してある。**
+    /// これは横に流す追加のプッシュで、置き換えではない。
+    NoticeCreated {
+        notice: NoticeView,
+        unread_count: u32,
+    },
+    /// 未読をまとめて既読にした。**別のタブや端末のバッジを揃えるために配る。**
+    NoticeRead {
+        read_at: Timestamp,
+        unread_count: u32,
+    },
+}
+
+/// アプリ全体の知らせ1件（トーストとベル設計§4-1・§6-1）。
+///
+/// REST の一覧応答と WebSocket のプッシュで**同じ型**を使う。CLI もこれを読み戻すので、
+/// `Deserialize` を持たせてある（CLI 側に写しの型を作らない）。
+///
+/// # カード単位の断りとは別物
+///
+/// `web/src/stores/sessions.ts` の断りは**カード1枚に効く**もので、メモリだけに積む。
+/// こちらは**アプリ全体に効く**もので、記録に残って端末をまたぐ。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoticeView {
+    pub id: uuid::Uuid,
+    /// 名指し先。**いまは常に `None`**（将来カードを名指しする知らせの受け皿）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub card_id: Option<CardId>,
+    /// `"error"` か `"selfheal"`。
+    pub source: String,
+    /// `source` に応じた種別の snake_case。
+    pub kind: String,
+    /// 画面へそのまま出す1行。
+    pub message: String,
+    pub created_at: Timestamp,
+    /// **空なら未読。**
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_at: Option<Timestamp>,
+}
+
+impl ErrorKind {
+    /// 記録に書く綴り。**JSON の綴りと同じ**（`serde` の `snake_case` に合わせてある）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PermissionMode => "permission_mode",
+            Self::Model => "model",
+            Self::Revive => "revive",
+            Self::Nickname => "nickname",
+            Self::Kill => "kill",
+            Self::Archive => "archive",
+            Self::SubPty => "sub_pty",
+            Self::SubTranscript => "sub_transcript",
+            Self::SendInput => "send_input",
+            Self::NotFound => "not_found",
+            Self::Other => "other",
+        }
+    }
+}
+
+impl SelfhealPhase {
+    /// 記録に書く綴り。**JSON の綴りと同じ。**
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Detected => "detected",
+            Self::Canary => "canary",
+            Self::Testing => "testing",
+            Self::Repairing => "repairing",
+            Self::Verifying => "verifying",
+            Self::Passed => "passed",
+            Self::Swapped => "swapped",
+            Self::RolledBack => "rolled_back",
+            Self::Failed => "failed",
+            Self::Cooldown => "cooldown",
+        }
+    }
+
+    /// 画面に出す日本語（`web/src/lib/protocol.ts` の `selfhealLabel` と同じ文言）。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Detected => "自己修復：知らない版を見つけました",
+            Self::Canary => "自己修復：サンプルを採っています",
+            Self::Testing => "自己修復：ゴールデンテストを実行しています",
+            Self::Repairing => "自己修復：パーサを直しています",
+            Self::Verifying => "自己修復：直った結果を確かめています",
+            Self::Passed => "自己修復：直す必要はありませんでした",
+            Self::Swapped => "自己修復：新しいパーサへ差し替えました",
+            Self::RolledBack => "自己修復：前のパーサへ戻しました",
+            Self::Failed => "自己修復：直せませんでした",
+            Self::Cooldown => "自己修復：同じ版への再挑戦を控えています",
+        }
+    }
+}
+
+/// 自己修復の段階を、記録に書く1行へ組み立てる（トーストとベル設計§7-1）。
+///
+/// **サーバ側にラベルを持たせたのは、CLI が画面を通らないためである。** これまで日本語は
+/// `web/src/lib/protocol.ts` にしか無く、`agentdashboard notice ls` からは読めなかった。
+pub fn selfheal_label(phase: SelfhealPhase, detail: Option<&str>) -> String {
+    match detail {
+        Some(detail) if !detail.is_empty() => format!("{} {detail}", phase.label()),
+        _ => phase.label().to_string(),
+    }
 }
 
 #[cfg(test)]

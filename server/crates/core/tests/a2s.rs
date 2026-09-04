@@ -17,7 +17,7 @@ use protocol::{CardId, SessionStatus, TreeNode};
 use server_core::{
     db::{pairing, settings as db_settings},
     gateway::{RemoteSessionHost, SessionHostHub},
-    registry::SessionRegistry,
+    registry::{NoticeLimits, SessionRegistry},
     session_host::SessionHost,
 };
 use session_host_core::{
@@ -452,7 +452,7 @@ impl A2s {
             server_core::db::connect(&format!("sqlite://{}", dir.join("dashboard.db").display()))
                 .await
                 .expect("使い捨ての DB へ繋げること");
-        let registry = SessionRegistry::load(db.clone(), WINDOW, None)
+        let registry = SessionRegistry::load(db.clone(), WINDOW, None, NoticeLimits::default())
             .await
             .expect("記録層を立てられること");
         let hub = SessionHostHub::new(db.clone(), Arc::clone(&registry));
