@@ -20,6 +20,7 @@ pub mod db;
 pub mod embed;
 pub mod gateway;
 pub mod hosts;
+pub mod notices;
 pub mod portable;
 pub mod projects;
 pub mod registry;
@@ -84,6 +85,14 @@ pub fn routes(state: ws::AppState, auth: Arc<auth::AuthContext>) -> Router {
         )
         .route("/api/projects/order", put(projects::api_reorder))
         .route("/api/projects/{id}", delete(projects::api_remove))
+        // アプリ全体の知らせ（トーストとベル設計§6-1）。**鍵の内側**——
+        // 誰の知らせかで中身が変わるので、素通しにしてよい理由が無い
+        .route(
+            "/api/notices",
+            get(notices::api_list).delete(notices::api_clear),
+        )
+        .route("/api/notices/read", post(notices::api_read))
+        .route("/api/notices/{id}", delete(notices::api_remove))
         .with_state(state);
 
     guard(protected, Arc::clone(&auth))

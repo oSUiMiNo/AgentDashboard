@@ -456,6 +456,32 @@ export type ServerMessage =
   | { t: 'selfheal'; phase: SelfhealPhase; detail: string | null }
   | { t: 'project_upsert'; project: ProjectView }
   | { t: 'project_removed'; project_id: string }
+  | { t: 'notice_created'; notice: NoticeView; unread_count: number }
+  | { t: 'notice_read'; read_at: number; unread_count: number }
+
+/**
+ * アプリ全体の知らせ1件（トーストとベル設計§4-1・§6-1）。
+ *
+ * # カード単位の断りとは別物
+ *
+ * `stores/sessions.ts` の断り（`Notice`）は**カード1枚に効く**もので、メモリだけに
+ * 積んでリロードで消える。こちらは**アプリ全体に効く**もので、記録に残って端末を
+ * またぐ。名前が似ているので、置き場所も型も分けてある。
+ */
+export interface NoticeView {
+  id: string
+  /** 名指し先。**いまは常に付かない**（将来カードを名指しする知らせの受け皿）。 */
+  card_id?: CardId
+  /** `'error'` か `'selfheal'`。 */
+  source: string
+  /** `source` に応じた種別の snake_case。 */
+  kind: string
+  /** 画面へそのまま出す1行。 */
+  message: string
+  created_at: number
+  /** **付いていなければ未読。** */
+  read_at?: number
+}
 
 /**
  * 追加した PJT 枠1枚（イシューグループ_2026_0805_0514 設計§11）。

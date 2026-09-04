@@ -149,6 +149,9 @@ enum Command {
     /// PJT 枠を見る・操作する
     #[command(subcommand)]
     Project(ProjectCmd),
+    /// アプリ全体の知らせ（ベルに溜まっているもの）
+    #[command(subcommand)]
+    Notice(NoticeCmd),
     /// 繋がっている PC のフォルダやファイルを覗く
     ///
     /// **ログを引く口はここには無い。** 別 PC のログは既存の `logs --host <ID>` を使う
@@ -393,6 +396,33 @@ enum SessionCmd {
     },
 }
 
+/// アプリ全体の知らせ（トーストとベル設計§7）。
+///
+/// **画面のベルと同じものを読む。** 7秒で消えるトーストを見逃しても、ここから拾える。
+#[derive(Subcommand)]
+enum NoticeCmd {
+    /// 溜まっている知らせを新しい順に出す
+    Ls {
+        /// 何件まで出すか（既定50・上限200）
+        #[arg(long, value_name = "N")]
+        limit: Option<u64>,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// 未読をまとめて既読にする
+    Read {
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// 知らせを消す。IDを渡せば1件、渡さなければ全部
+    Rm {
+        /// 知らせのID。先頭の数文字で足りる（一覧は `notice ls --json`）
+        id: Option<String>,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+}
+
 #[derive(Subcommand)]
 enum ProjectCmd {
     /// PJT 枠の一覧
@@ -581,6 +611,7 @@ impl Command {
             self,
             Self::Session(_)
                 | Self::Project(_)
+                | Self::Notice(_)
                 | Self::Host(_)
                 | Self::Settings(_)
                 | Self::Version(_)
@@ -778,6 +809,7 @@ async fn run_async(cli: Cli, config: Config) -> anyhow::Result<()> {
         | Some(Command::Logs(_))
         | Some(Command::Session(_))
         | Some(Command::Project(_))
+        | Some(Command::Notice(_))
         | Some(Command::Host(_))
         | Some(Command::Settings(_))
         | Some(Command::Version(_))
@@ -841,6 +873,7 @@ async fn run_client(cli: Cli) -> anyhow::Result<()> {
     let outcome = match command {
         Command::Session(cmd) => client_session(cmd, &target).await,
         Command::Project(cmd) => client_project(cmd, &target).await,
+        Command::Notice(cmd) => client_notice(cmd, &target).await,
         Command::Host(cmd) => client_host(cmd, &target).await,
         Command::Settings(cmd) => client_settings(cmd, &target).await,
         Command::Version(cmd) => client_version(cmd, &target).await,
@@ -1115,6 +1148,42 @@ async fn follow_transcript(
         }
     }
     stream.close().await;
+    Ok(())
+}
+
+async fn client_notice(cmd: NoticeCmd, target: &client::Target) -> Result<(), client::ClientError> {
+    match cmd {
+        NoticeCmd::Ls { limit, out } => {
+            let (page, raw) = client::notices(target, limit).await?;
+            let human = output::render_notices(&page);
+            println!("{}", output::pick(out.json, &raw, &human));
+        }
+        NoticeCmd::Read { out } => {
+            let (response, raw) = client::notice_read(target).await?;
+            let human = if response.marked == 0 {
+                "未読はありませんでした".to_string()
+            } else {
+                format!("{} 件を既読にしました", response.marked)
+            };
+            println!("{}", output::pick(out.json, &raw, &human));
+        }
+        NoticeCmd::Rm { id, out } => {
+            match id {
+                Some(id) => {
+                    let removed = client::notice_remove(target, &id).await?;
+                    // DELETE の応答は本文なし（204）なので、`--json` には受け取り証を出す
+                    let raw = serde_json::json!({ "removed": removed }).to_string();
+                    let human = format!("知らせを消しました：{}", output::short_id(&removed));
+                    println!("{}", output::pick(out.json, &raw, &human));
+                }
+                None => {
+                    client::notice_clear(target).await?;
+                    let raw = serde_json::json!({ "cleared": true }).to_string();
+                    println!("{}", output::pick(out.json, &raw, "知らせを全部消しました"));
+                }
+            }
+        }
+    }
     Ok(())
 }
 

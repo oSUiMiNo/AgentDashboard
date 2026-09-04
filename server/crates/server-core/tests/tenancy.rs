@@ -2008,3 +2008,46 @@ async fn 他人の過去のセッションは一覧に出ない() {
         backend.finish().await;
     }
 }
+
+/// 他人の知らせは、一覧にも未読の数にも出ない（トーストとベル設計§4-2）。
+///
+/// **ベルは記録に残るので、越境すると後からいくらでも読める。** カード単位の断りは
+/// メモリだけなので画面を閉じれば消えるが、こちらは残り続ける——だから総当たりへ足す。
+#[tokio::test]
+async fn 他人の知らせは一覧にも未読にも出ない() {
+    for backend in common::backends("tenancy-notices").await {
+        let arena = Arena::start(backend.db.clone()).await;
+        let (mine, _mine_agent) = arena.tenant("わたし").await;
+        let (theirs, _their_agent) = arena.tenant("よそのひと").await;
+
+        // 相手側にだけ知らせを1件積む。**記録へ直に積む**——`apply()` 経由だと
+        // 報告の届く順を待つことになり、この総当たりの主題（絞り込み）がぼやける
+        server_core::db::notices::push(
+            &backend.db,
+            theirs.account_id,
+            None,
+            "error",
+            "other",
+            "よそのひとの知らせ",
+            server_core::db::now_ms(),
+        )
+        .await
+        .expect("積めること");
+
+        let browser = arena.browser(&mine).await;
+        let (status, body) = browser.get("/api/notices").await;
+        assert_eq!(status, 200, "[{}] 自分の知らせが引けない", backend.name);
+        assert!(
+            !body.contains("よそのひとの知らせ"),
+            "[{}] 他人の知らせが一覧に出ている",
+            backend.name
+        );
+        assert!(
+            body.contains("\"unread_count\":0"),
+            "[{}] 未読の数に他人のぶんが入っている：{body}",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}

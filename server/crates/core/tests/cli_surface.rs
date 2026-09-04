@@ -52,16 +52,19 @@ const TENANCY_SOURCE: &str = "crates/server-core/tests/tenancy.rs";
 /// 座るだけなので、この作業列で口は1つも増えない。**口を増やす設計判断をしたとき
 /// だけ**、意識してこの数字を上げる。
 const WS_VARIANTS: usize = 15;
-const INSIDE_DOORS: usize = 27;
+// 2026-09-05：知らせ（ベル）で4口増やした（トーストとベル設計§6-1・§10-3）。
+// 一覧・既読・1件消し・全消し。**消す道の2口は §10-3 が要求している**——
+// ベルに溜めたものを消せないと、上限で流れるまで消えない
+const INSIDE_DOORS: usize = 31;
 const OUTSIDE_DOORS: usize = 5;
 
 /// tenancy.rs の総当たりの本数。口が増えないなら総当たりも増えない（§1-1）。
 /// enforcement を足したときだけ意識して上げる。
-const TENANCY_TESTS: usize = 26;
+const TENANCY_TESTS: usize = 27;
 
 /// `command` に書ける群の先頭語。誤記（存在しない群）を機械で捕まえる。
 const 群: &[&str] = &[
-    "session", "project", "host", "settings", "version", "account", "logs",
+    "session", "project", "notice", "host", "settings", "version", "account", "logs",
 ];
 
 /// 理由として認めない逃げ文句（`swallowed.rs` と同じ一覧）。

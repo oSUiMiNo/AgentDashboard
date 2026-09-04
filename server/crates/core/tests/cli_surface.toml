@@ -35,6 +35,16 @@ command = "account revoke"
 
 [[entry]]
 kind = "rest"
+target = "DELETE /api/notices"
+command = "notice rm"
+
+[[entry]]
+kind = "rest"
+target = "DELETE /api/notices/{id}"
+command = "notice rm <id>"
+
+[[entry]]
+kind = "rest"
 target = "DELETE /api/projects/{id}"
 command = "project rm"
 
@@ -83,6 +93,11 @@ kind = "rest"
 target = "GET /api/me"
 skip = true
 reason = "「何を出すべきか」をブラウザが決めるための口。CLI は札を持っているかどうかを自分で知っている。モードの見分けに内部で読むが、コマンドとしては出さない（設計§3-4）"
+
+[[entry]]
+kind = "rest"
+target = "GET /api/notices"
+command = "notice ls"
 
 [[entry]]
 kind = "rest"
@@ -146,6 +161,11 @@ kind = "rest"
 target = "POST /api/logout"
 skip = true
 reason = "ログインと同じ理由。札は失効（account revoke）で無効になるのであって、ログアウトする対象が無い"
+
+[[entry]]
+kind = "rest"
+target = "POST /api/notices/read"
+command = "notice read"
 
 [[entry]]
 kind = "rest"

@@ -1352,6 +1352,67 @@ pub async fn project_remove(target: &Target, prefix: &str) -> Result<String, Cli
     Ok(id)
 }
 
+/// `notice ls`（`GET /api/notices`）。
+///
+/// **画面のベルと同じものを読む**（トーストとベル設計§7）。7秒で消えるトーストを
+/// 見逃しても、ここから拾える。
+pub async fn notices(
+    target: &Target,
+    limit: Option<u64>,
+) -> Result<(server_core::notices::NoticePage, String), ClientError> {
+    let url = match limit {
+        Some(limit) => format!("/api/notices?limit={limit}"),
+        None => "/api/notices".to_string(),
+    };
+    http::fetch_as(target, &url).await
+}
+
+/// `notice read`（`POST /api/notices/read`）。**未読をまとめて既読にする。**
+pub async fn notice_read(
+    target: &Target,
+) -> Result<(server_core::notices::ReadResponse, String), ClientError> {
+    let raw = write_ok(target, "POST", "/api/notices/read", None).await?;
+    let parsed = serde_json::from_str(&raw)
+        .map_err(|err| ClientError::BadUrl(format!("応答を読めません: {err}")))?;
+    Ok((parsed, raw))
+}
+
+/// `notice rm <id>`（`DELETE /api/notices/{id}`）。ID は前方一致で解決する。
+pub async fn notice_remove(target: &Target, prefix: &str) -> Result<String, ClientError> {
+    let (page, _) = notices(target, Some(server_core::db::notices::MAX_PAGE_LIMIT)).await?;
+    let ids: Vec<String> = page.notices.iter().map(|v| v.id.to_string()).collect();
+    let borrowed: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let id = match output::resolve_prefix(prefix, &borrowed) {
+        Ok(id) => id.to_string(),
+        Err(output::PrefixError::Empty) => return Err(空の識別子("知らせ")),
+        Err(output::PrefixError::NotFound) => {
+            return Err(ClientError::Refused {
+                status: 404,
+                message: format!(
+                    "`{prefix}` に当たる知らせは見つかりません。一覧は `agentdashboard notice ls`"
+                ),
+            });
+        }
+        Err(output::PrefixError::Ambiguous(hits)) => {
+            return Err(ClientError::Refused {
+                status: 409,
+                message: format!(
+                    "`{prefix}` は複数の知らせに当たります。どれかまで打ってください：\n  {}",
+                    hits.join("\n  ")
+                ),
+            });
+        }
+    };
+    write_ok(target, "DELETE", &format!("/api/notices/{id}"), None).await?;
+    Ok(id)
+}
+
+/// `notice rm`（引数なし＝`DELETE /api/notices`）。**全部消す。**
+pub async fn notice_clear(target: &Target) -> Result<(), ClientError> {
+    write_ok(target, "DELETE", "/api/notices", None).await?;
+    Ok(())
+}
+
 /// `project reorder`（`PUT /api/projects/order`）。**並びを丸ごと送る。**
 ///
 /// 差分ではなく確定した並び全部を送るのは、送り手と受け手で番号の解釈が食い違った

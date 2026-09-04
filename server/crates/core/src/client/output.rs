@@ -297,6 +297,75 @@ pub fn render_projects(projects: &[protocol::ws::ProjectView], home: Option<&str
     out
 }
 
+/// `notice ls` の一覧（トーストとベル設計§7）。
+///
+/// **未読に印を付ける。** 画面のバッジに当たるものが CLI には無いので、
+/// 行の頭で見分けられるようにしてある。
+///
+/// 時刻は**そのまま epoch ミリ秒では出さない**——読む相手は人である。日付が今日なら
+/// 時刻だけ、違う日なら日付も出す、といった作り分けはしない（`--json` があるので、
+/// 機械が読むならそちらを使えばよい）。
+pub fn render_notices(page: &server_core::notices::NoticePage) -> String {
+    if page.notices.is_empty() {
+        return "知らせはありません".to_string();
+    }
+    let mut out = String::new();
+    if page.unread_count > 0 {
+        out.push_str(&format!("未読 {} 件\n", page.unread_count));
+    }
+    for view in &page.notices {
+        let id = view.id.to_string();
+        // 未読は `*`、既読は空白。**記号を1つだけにする**——印を増やすと、
+        // 何が未読なのかを読む前に凡例を探すことになる
+        let mark = if view.read_at.is_none() { "*" } else { " " };
+        out.push_str(&format!(
+            "{mark} {:<9} {}  {}\n",
+            short_id(&id),
+            format_epoch_ms(view.created_at),
+            view.message,
+        ));
+    }
+    if page.has_more {
+        out.push_str("（さらに古いものがあります）\n");
+    }
+    out.pop();
+    out
+}
+
+/// epoch ミリ秒を、人が読める日時へ。
+///
+/// **依存を増やさないために自前で割っている。** 秒までで足り、`chrono` を入れる
+/// ほどの用ではない。うるう秒は無視する（知らせの一覧で1秒がずれても困らない）。
+fn format_epoch_ms(ms: i64) -> String {
+    let secs = ms.div_euclid(1000);
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}",
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
+}
+
+/// 1970-01-01 からの日数を年月日へ（Howard Hinnant の `civil_from_days`）。
+///
+/// **UTC のまま出す。** 手元の時差へ寄せると、CLI と画面で違う時刻が出る——
+/// 画面はブラウザの時差で描くので、揃えようとすると必ずどちらかが嘘になる。
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
 /// `host dir` の一覧。フォルダが先・ファイルが後という並べ替えはしない——
 /// サーバが返した順（読み比べる相手はブラウザの画面）をそのまま出す。
 pub fn render_dir(listing: &protocol::fs::DirListing) -> String {
