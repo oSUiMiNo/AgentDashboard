@@ -277,3 +277,179 @@ describe('起こし直しの頼み', () => {
     expect(useWsStore.getState().lastError).toBe('起動できませんでした')
   })
 })
+
+/**
+ * 起こし直したあとに、購読を出し直すか（イシュー
+ * `電源ボタンで起こし直すと、ターミナルがリロードするまで描かれない`）。
+ *
+ * **線は最初から最後まで健康なまま**なので `onopen` は起きない。それでも実体は
+ * 入れ替わっているので、購読を出し直さないとサーバ側に汲む者が居ないままになる。
+ * ここで見るのは「状態の移り変わりを合図にできているか」だけである。
+ */
+describe('起こし直しと購読', () => {
+  /** そのカードが `status` を1通受け取ったことにする。 */
+  function status(kind: 'working' | 'waiting_input', ok = true) {
+    latest().deliver({
+      t: 'status',
+      card_id: CARD,
+      status: kind === 'working' ? { kind: 'working' } : { kind: 'waiting_input' },
+      subagent_active: 0,
+      last_activity_at: 0,
+    })
+    void ok
+  }
+
+  /** そのカードが止まったことにする。 */
+  function ended() {
+    latest().deliver({
+      t: 'status',
+      card_id: CARD,
+      status: { kind: 'ended', ok: true },
+      subagent_active: 0,
+      last_activity_at: 0,
+    })
+  }
+
+  /** 購読したあとに送られたものだけを見る。 */
+  function 購読を出し直したか(): ClientMessage[] {
+    return latest()
+      .requests()
+      .filter((request) => request.t === 'sub_pty' || request.t === 'sub_transcript')
+  }
+
+  async function 開いて購読する() {
+    await useWsStore.getState().connect()
+    latest().accept()
+    const store = useWsStore.getState()
+    store.subscribeTerminal(CARD, 120, 50, () => {})
+    store.subscribeTranscript(CARD)
+    // 購読そのものが送った2通を数えないよう、ここまでを捨てる
+    latest().sent = []
+  }
+
+  it('止まっていたカードが動き出したら、端末と履歴を出し直す', async () => {
+    await 開いて購読する()
+
+    ended()
+    status('working')
+
+    expect(購読を出し直したか()).toEqual([
+      { t: 'sub_pty', card_id: CARD, cols: 120, rows: 50 },
+      { t: 'sub_transcript', card_id: CARD },
+    ])
+  })
+
+  it('動いている間は出し直さない', async () => {
+    // 出し直すたびに画面を作り直すので、状態が届くたびに出すと明滅する
+    await 開いて購読する()
+
+    status('working')
+    status('waiting_input')
+    status('working')
+
+    expect(購読を出し直したか()).toEqual([])
+  })
+
+  it('初めて見るカードでは出し直さない', async () => {
+    // 購読した直後にもう一度出すことになる（購読自体が `sub_pty` を送っている）
+    await 開いて購読する()
+
+    status('working')
+
+    expect(購読を出し直したか()).toEqual([])
+  })
+
+  it('開いていない口には送らない', async () => {
+    await useWsStore.getState().connect()
+    latest().accept()
+    // 端末だけ開き、履歴は開いていない
+    useWsStore.getState().subscribeTerminal(CARD, 80, 24, () => {})
+    latest().sent = []
+
+    ended()
+    status('working')
+
+    expect(購読を出し直したか()).toEqual([
+      { t: 'sub_pty', card_id: CARD, cols: 80, rows: 24 },
+    ])
+  })
+
+  it('何も見ていないカードでは何も送らない', async () => {
+    await useWsStore.getState().connect()
+    latest().accept()
+    latest().sent = []
+
+    ended()
+    status('working')
+
+    expect(購読を出し直したか()).toEqual([])
+  })
+
+  it('繰り返し止めて起こしても、そのつど出し直す', async () => {
+    // 短い間に何度も押したときに取りこぼさないこと（要件の確かめ方）
+    await 開いて購読する()
+
+    ended()
+    status('working')
+    ended()
+    status('working')
+
+    expect(購読を出し直したか().filter((r) => r.t === 'sub_pty')).toHaveLength(2)
+  })
+
+  it('カード全体が届く形（session_upsert）でも合図になる', async () => {
+    // 起こし直しでは状態以外も変わるので、こちらで届くことがある
+    await 開いて購読する()
+
+    ended()
+    latest().deliver({
+      t: 'session_upsert',
+      session: {
+        card_id: CARD,
+        project: '/tmp/x',
+        claude_session_id: null,
+        permission_mode: null,
+        model: null,
+        model_label: null,
+        model_requested: null,
+        status: { kind: 'starting' },
+        subagent_active: 0,
+        last_activity_at: 0,
+        last_assistant_message: null,
+        created_at: 0,
+        hooks_seen: false,
+        agent_id: null,
+        agent_connected: true,
+        account: null,
+        toml_account: null,
+        session_title: null,
+        position: 0,
+        nickname: null,
+      },
+    })
+
+    expect(購読を出し直したか()).toContainEqual({
+      t: 'sub_pty',
+      card_id: CARD,
+      cols: 120,
+      rows: 50,
+    })
+  })
+
+  it('繋ぎ直したあとは、直前の生死を引きずらない', async () => {
+    // `onopen` が全部出し直すので、そのあとに状態が1通来ただけで
+    // もう一度出すと画面が明滅する
+    await 開いて購読する()
+    ended()
+
+    latest().drop()
+    await vi.advanceTimersByTimeAsync(500)
+    latest().accept()
+    // 繋ぎ直しの出し直しぶんを捨てる
+    latest().sent = []
+
+    status('working')
+
+    expect(購読を出し直したか()).toEqual([])
+  })
+})

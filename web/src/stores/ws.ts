@@ -25,6 +25,17 @@
  * どのカードのターミナル・履歴を見ているかは**モジュールが持つ台帳**にある。接続が
  * 切れても台帳は消えないので、繋ぎ直したあとに同じ購読を出し直せる。台帳を持たずに
  * 「送ったら忘れる」ようにすると、再接続はできても画面が二度と更新されない。
+ *
+ * # 出し直す合図は2つある
+ *
+ * | 合図 | 何が起きた |
+ * |---|---|
+ * | 線が開いた（`onopen`） | 接続そのものが張り直された |
+ * | **カードが止まりから動きへ移った**（[`noteLiveness`]） | **線は無事のまま、実体だけが入れ替わった** |
+ *
+ * 2つ目が要るのは、**起こし直しでカードIDが変わらない**ため。IDが同じだと接続も購読も
+ * 健康に見えるが、サーバ側の運び手は古い擬似ターミナルと一緒に終わっている。
+ * **線に何も起きないので `onopen` は来ない**——状態を見て自分で気づくしかない。
  */
 
 import { create } from 'zustand'
@@ -39,6 +50,7 @@ import type {
   SelfhealPhase,
   ServerMessage,
   SessionMeta,
+  SessionStatus,
 } from '@/lib/protocol'
 import { useAuthStore } from '@/stores/auth'
 import { useSettingsStore } from '@/stores/settings'
@@ -202,6 +214,18 @@ const terminals = new Map<CardId, TerminalEntry>()
 /** 開いている履歴の台帳。 */
 const transcripts = new Set<CardId>()
 
+/**
+ * カードごとの「前に見たとき生きていたか」。購読を出し直す合図を作るためだけに持つ。
+ *
+ * 起こし直しでは**カードIDが変わらない**ので、ブラウザもサーバも「同じカードだから
+ * 購読も生きている」と扱ってしまう。実際にはサーバ側の運び手は古い擬似ターミナルが
+ * 閉じた時点で終わっており、新しい実体のバイトを汲む者が居ない。**線は健康なままなので
+ * `onopen` も起きず、購読は二度と出し直されない。**
+ *
+ * 状態を見て自分で気づくしかないのはこのためで、ここが唯一の合図になる。
+ */
+const alive = new Map<CardId, boolean>()
+
 /** 自分から切ったのか、落ちたのか。落ちたときだけ繋ぎ直す。 */
 let closedByUs = false
 let retryTimer: ReturnType<typeof setTimeout> | undefined
@@ -263,11 +287,55 @@ async function loadSnapshot() {
  * 作り直す**ので、切れている間に進んだぶんも含めて画面が現在に追いつく。
  */
 function resubscribe() {
+  // **ここで全部出し直すので、それ以前の生死は用済み。** 残すと、切れている間に
+  // 起こし直されたカードで「出し直したばかりなのにもう一度出す」が起きて画面が明滅する
+  alive.clear()
   for (const [cardId, entry] of terminals) {
     send({ t: 'sub_pty', card_id: cardId, cols: entry.cols, rows: entry.rows })
   }
   for (const cardId of transcripts) {
     send({ t: 'sub_transcript', card_id: cardId })
+  }
+}
+
+/**
+ * 1枚ぶんだけ購読を出し直す。開いていない口には何も送らない。
+ *
+ * [`resubscribe`] と同じことを1枚に絞ってやる。**どちらもサーバが持っている内容で
+ * 作り直す**ので、`sub_pty` にはスクロールバックのスナップショットが、`sub_transcript`
+ * には作り直しの指示に続けて手元ぶんが返る。
+ */
+function resubscribeCard(cardId: CardId) {
+  const entry = terminals.get(cardId)
+  if (entry) {
+    send({ t: 'sub_pty', card_id: cardId, cols: entry.cols, rows: entry.rows })
+  }
+  if (transcripts.has(cardId)) {
+    send({ t: 'sub_transcript', card_id: cardId })
+  }
+}
+
+/**
+ * カードの生死を見て、**止まっていたものが動き出したら購読を出し直す**。
+ *
+ * # なぜ「変わった瞬間」だけなのか
+ *
+ * `sub_pty` の応答はスクロールバックのスナップショットで、受け取った端末は画面を
+ * 作り直す。**動いている間ずっと出し直すと、状態が届くたびに画面が明滅する。**
+ * 出し直すのは実体が入れ替わったときだけでよい。
+ *
+ * # なぜ最初の1回では出し直さないのか
+ *
+ * 初めて見るカードは、まだ生きていたかどうかを知らない。ここで出し直すと、
+ * **購読した直後にもう一度出す**ことになる（購読自体が `sub_pty` を送っている）。
+ * したがって前の値を持っていないときは覚えるだけにする。
+ */
+function noteLiveness(cardId: CardId, status: SessionStatus) {
+  const now = status.kind !== 'ended'
+  const before = alive.get(cardId)
+  alive.set(cardId, now)
+  if (before === false && now) {
+    resubscribeCard(cardId)
   }
 }
 
@@ -365,6 +433,7 @@ export const useWsStore = create<WsState>((set) => ({
     socket = null
     terminals.clear()
     transcripts.clear()
+    alive.clear()
     set({ status: 'closed' })
   },
 
@@ -475,17 +544,22 @@ function handleJson(raw: string, set: SetState) {
       break
     case 'session_upsert':
       upsertSession(message.session)
+      // 起こし直しは線に触らないので、**状態を見て自分で気づくしかない**
+      noteLiveness(message.session.card_id, message.session.status)
       // 別名の実測はサーバが覚えるので、**切り替えた直後は画面の手元が古い**。
       // 知らないモデルを見たら設定を取り直す（設計§12）
       useSettingsStore.getState().noteModelSeen(message.session.model)
       break
     case 'session_removed':
       removeSession(message.card_id)
+      // 台帳に残すと、同じIDが二度と来ないのに死んだ値を持ち続ける
+      alive.delete(message.card_id)
       break
     case 'status':
       // 状態だけの差分。フックはツールコールのたびに飛んでくるので、
       // カード全体を送り直すのはそれ以外が変わったときに限られる（設計§4）
       patchSessionStatus(message)
+      noteLiveness(message.card_id, message.status)
       break
     case 'transcript_append':
       appendNodes(message.card_id, message.nodes)
