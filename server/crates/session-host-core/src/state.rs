@@ -241,10 +241,26 @@ pub fn apply(meta: &mut SessionMeta, input: &HookInput, now: Timestamp) -> Chang
             set_unless_permission(meta, SessionStatus::WaitingInput, &mut changed)
         }
 
-        HookEvent::UserPromptSubmit | HookEvent::PreToolUse | HookEvent::PostToolUse => {
+        // 人が打ったのだから、メインが動き出したことが確かである
+        HookEvent::UserPromptSubmit => {
+            set(meta, SessionStatus::Working, &mut changed);
+        }
+
+        HookEvent::PreToolUse | HookEvent::PostToolUse => {
             // ツールが動いた＝権限確認は解けている。ターミナルで直接許可した場合も
             // この経路で自然に復帰する
-            set(meta, SessionStatus::Working, &mut changed);
+            //
+            // **ただしサブ待ちのときは動かさない**（設計§14）。**ツールを叩いたのが
+            // メインとは限らない**——サブエージェントのツールコールも同じフックを
+            // 飛ばすので、ここで作業中へ戻すと、`Stop` でせっかくサブ待ちにしても
+            // **サブの次の一手で即座に消える**。実際、画面には出ないまま「作業中」に
+            // 見え続けていた（利用者が実機で踏んだ）。
+            //
+            // **サブ待ちから出る道は2つだけ**にする——人が指示を打つ
+            // （`UserPromptSubmit`）か、最後のサブが終わる（`SubagentStop`）か。
+            if meta.status != SessionStatus::WaitingSubagents {
+                set(meta, SessionStatus::Working, &mut changed);
+            }
         }
 
         HookEvent::Notification => {
@@ -1001,6 +1017,52 @@ mod tests {
         meta.subagent_active = 3;
         apply(&mut meta, &hook(HookEvent::Stop), NOW);
         assert_eq!(meta.status, SessionStatus::WaitingPermission);
+    }
+
+    /// **サブのツールコールで、サブ待ちが消えないこと**（設計§14）。
+    ///
+    /// **ツールを叩いたのがメインとは限らない。** サブエージェントのツールコールも
+    /// 同じフックを飛ばすので、ここで作業中へ戻すと `Stop` でサブ待ちにした直後に
+    /// 消える。**利用者が実機で踏んだ壊れ方そのもの**で、画面には「作業中」としか
+    /// 出ず、サブ待ちが一度も見えなかった。
+    #[test]
+    fn サブ待ちはツールのフックで作業中へ戻らない() {
+        for event in [HookEvent::PreToolUse, HookEvent::PostToolUse] {
+            let mut meta = meta_with(SessionStatus::WaitingSubagents);
+            meta.subagent_active = 1;
+            apply(&mut meta, &hook(event), NOW);
+            assert_eq!(
+                meta.status,
+                SessionStatus::WaitingSubagents,
+                "{} が届いたとき",
+                event.as_str()
+            );
+        }
+    }
+
+    /// **人が打ったときは、サブが残っていても作業中へ戻る。**
+    ///
+    /// `UserPromptSubmit` はメインが動き出したことが確かな唯一のフックである。
+    #[test]
+    fn サブ待ちでも人が打てば作業中へ戻る() {
+        let mut meta = meta_with(SessionStatus::WaitingSubagents);
+        meta.subagent_active = 1;
+        apply(&mut meta, &hook(HookEvent::UserPromptSubmit), NOW);
+        assert_eq!(meta.status, SessionStatus::Working);
+    }
+
+    /// サブ待ち**でなければ**、ツールのフックは今までどおり作業中へ戻す。
+    #[test]
+    fn サブ待ち以外はツールのフックで今までどおり作業中になる() {
+        for start in [
+            SessionStatus::WaitingInput,
+            SessionStatus::Stalled,
+            SessionStatus::Starting,
+        ] {
+            let mut meta = meta_with(start);
+            apply(&mut meta, &hook(HookEvent::PreToolUse), NOW);
+            assert_eq!(meta.status, SessionStatus::Working, "{start:?}");
+        }
     }
 
     /// **サブ待ちは停滞に落ちない**（設計§14）。

@@ -1052,6 +1052,18 @@ async fn サブが残ったままターンが終わるとサブ待ちになる()
     common::fire_hook(&session, &mut watcher, "Stop", "").await;
     common::wait_for_status(&session, SessionStatus::WaitingSubagents).await;
 
+    // **サブが動かすツールで、サブ待ちが消えないこと。**
+    //
+    // ツールを叩いたのがメインとは限らない——サブエージェントのツールコールも同じ
+    // フックを飛ばす。ここで作業中へ戻ると、`Stop` でサブ待ちにした直後に消える
+    // （利用者が実機で踏んだ壊れ方）
+    common::fire_hook(&session, &mut watcher, "PostToolUse", "").await;
+    assert_eq!(
+        session.status(),
+        SessionStatus::WaitingSubagents,
+        "サブのツールコールで作業中へ戻ってはいけない"
+    );
+
     // 最後の1本が終わって初めて入力待ちへ
     common::fire_hook(&session, &mut watcher, "SubagentStop", "").await;
     common::wait_for_status(&session, SessionStatus::WaitingInput).await;
