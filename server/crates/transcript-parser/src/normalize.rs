@@ -32,6 +32,16 @@ pub enum Block {
     Image {
         media_type: Option<String>,
     },
+    /// スラッシュコマンドとして打たれた発言
+    /// （`人が打っていないものを、人の発言として出さない` 設計§3）。
+    ///
+    /// **[`Block::UserText`] と分けてある。** `Image` / `ImageSource` の対と同じ形に
+    /// することで、スレッディング層の `match` に**網羅を強制させる**——ここを増やしたら
+    /// あちらが必ずコンパイルエラーになる。
+    SlashCommand {
+        /// 打ったままの形（`/名前` または `/名前 引数`）
+        typed: String,
+    },
     /// 相棒レコードが運ぶ置き場所（画像添付 設計§21 読み替え1）。
     ///
     /// 中身は `[Image: source: <絶対パス>]` の**パスだけ**を抜いたもの。
@@ -52,6 +62,61 @@ fn image_source(text: &str) -> Option<String> {
         return None;
     }
     Some(path.to_string())
+}
+
+/// タグの中身を取り出す。無ければ `None`。
+fn tag_body<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = text.find(&open)? + open.len();
+    let end = text[start..].find(&close)? + start;
+    Some(&text[start..end])
+}
+
+/// タグを中身ごと取り除く（最初の1つだけ）。
+fn strip_tag(text: &str, tag: &str) -> String {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let Some(start) = text.find(&open) else {
+        return text.to_string();
+    };
+    let Some(end) = text[start..].find(&close).map(|at| at + start + close.len()) else {
+        return text.to_string();
+    };
+    format!("{}{}", &text[..start], &text[end..])
+}
+
+/// スラッシュコマンドの本体から、**打ったままの形**を組み立てる
+/// （`人が打っていないものを、人の発言として出さない` 設計§4）。
+///
+/// 綴りは `<command-message>` ＋ `<command-name>` ＋（あれば）`<command-args>`。
+/// 返すのは `/名前` または `/名前 引数` で、**生のタグは1文字も混ざらない**。
+///
+/// # 当たらなければ `None`
+///
+/// [`image_source`] と同じ倒れ方にしてある。**3つのタグ以外の字が残っていたら触らない**
+/// ——CLI が綴りを変えたときに、コマンドでない文をコマンドとして出さないため。
+/// 外れたときは生のテキストのまま出るので、**壊れるのではなく元に戻る**。
+pub fn slash_command(text: &str) -> Option<String> {
+    let name = tag_body(text, "command-name")?.trim();
+    if !name.starts_with('/') || name.len() < 2 {
+        return None;
+    }
+    // 知っているタグを全部落として、何も残らないときにだけ当てる
+    let mut rest = text.to_string();
+    for tag in ["command-message", "command-name", "command-args"] {
+        rest = strip_tag(&rest, tag);
+    }
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    let args = tag_body(text, "command-args")
+        .map(str::trim)
+        .filter(|args| !args.is_empty());
+    Some(match args {
+        Some(args) => format!("{name} {args}"),
+        None => name.to_string(),
+    })
 }
 
 /// ブラウザへ運ぶ値の上限。
@@ -90,9 +155,12 @@ pub fn blocks(record: &Record) -> Vec<Block> {
 
 fn text_block(assistant: bool, text: &str) -> Block {
     if assistant {
-        Block::AssistantText(text.to_string())
-    } else {
-        Block::UserText(text.to_string())
+        return Block::AssistantText(text.to_string());
+    }
+    // **打った形が分かるなら、そちらを運ぶ。** 当たらなければ生のテキストのまま
+    match slash_command(text) {
+        Some(typed) => Block::SlashCommand { typed },
+        None => Block::UserText(text.to_string()),
     }
 }
 

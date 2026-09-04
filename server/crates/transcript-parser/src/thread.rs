@@ -129,6 +129,28 @@ struct FileState {
     /// 実測でこの順は起きないが、起きても**絵が出ないだけ**で落ちはしない
     /// （`path` が `None` の [`Node::Image`] は「手元に残っていません」と出る）。
     pending_images: Option<(String, std::collections::VecDeque<TreeNode>)>,
+    /// スラッシュコマンドの本体を1つだけ覚えておく枠
+    /// （`人が打っていないものを、人の発言として出さない` 設計§3-3）。
+    ///
+    /// `(本体レコードの uuid, 発行したノードそのもの)` を持つ。展開後の中身は
+    /// **別のレコード**で来るので、届いたら**同じ ID のまま**送り直す。
+    ///
+    /// ノードを丸ごと覚えるのは、**名乗り・親・時刻を展開で上書きしないため**である
+    /// （持ち主は本体のほうで、展開は中身を足すだけ）。
+    ///
+    /// # [`FileState::pending_images`] を汎用化しなかった理由
+    ///
+    /// **鍵が違う。** 画像は「同じ `promptId` の中での並び順」で対応を取るが、
+    /// こちらは **`展開.parentUuid == 本体.uuid`** のレコード対レコードである。
+    /// 1つの仕組みに載せて `promptId` を鍵にすると、**1つのプロンプトに2つコマンドを
+    /// 打った形（実測131件）でフックの注入をコマンドの展開として吸い込む**（設計§3-2）。
+    ///
+    /// # 枠1つで足りる根拠は、画像より強い
+    ///
+    /// あちらは「実測でこの順序は起きない」という経験則だったが、こちらは**因果**である
+    /// ——**存在しない `uuid` は参照できないので、展開が本体より先に来ることは原理的に無い。**
+    /// `[本体1][展開1][本体2][展開2]` の並びも、枠1つで正しく捌ける。
+    pending_command: Option<(String, TreeNode)>,
     /// まだ読まれていない追加メッセージ（設計§4）。`(ノードID, 本文)` を入った順に持つ。
     ///
     /// # 育たないことを、型ではなく数で言う
@@ -327,6 +349,45 @@ impl SessionThreader {
         }
     }
 
+    /// スラッシュコマンドの展開後の中身なら、本体の吹き出しへ入れて送り直す
+    /// （`人が打っていないものを、人の発言として出さない` 設計§3-1）。
+    ///
+    /// 見分ける鍵は **`展開.parentUuid == 本体.uuid`** ただ1つ。`promptId` は使わない
+    /// ——1つのプロンプトにコマンドを2つ打てるので**一対多**になり、どちらの展開が
+    /// どちらの本体のものか決まらない（設計§3-1）。
+    ///
+    /// **返したノードは、呼ぶ側が `last_emitted` に据えること。** そうすると
+    /// [`Self::feed_message`] 末尾の解決で**展開の `uuid` が本体のノードを指す**ので、
+    /// 展開にぶら下がる子（`attachment` など）が置き場所を見失わない（設計§5-1）。
+    fn absorb_expansion(
+        &mut self,
+        source: &str,
+        record: &Record,
+        text: &str,
+    ) -> Option<TreeNode> {
+        // 画像の相棒はここへ来ない（あちらは `ImageSource` になる）が、念のため外す
+        if !record.is_meta() || record.is_turn_companion() {
+            return None;
+        }
+        let parent = record.parent_uuid.clone()?;
+        let file = self.file(source);
+        let (uuid, node) = file.pending_command.as_ref()?;
+        if *uuid != parent {
+            return None;
+        }
+        let mut node = node.clone();
+        if let Node::UserMessage {
+            command: Some(command),
+            ..
+        } = &mut node.node
+        {
+            command.expansion = Some(text.to_string());
+        }
+        // 展開は本体1つにつき1回。**受け取ったら手放す**
+        file.pending_command = None;
+        Some(node)
+    }
+
     fn feed_message(&mut self, source: &str, record: &Record, ts: i64) -> Vec<TreeNode> {
         let root = self.files.get(source).and_then(|file| file.root.clone());
         let blocks = normalize::blocks(record);
@@ -358,7 +419,41 @@ impl SessionThreader {
             // 載るため、`#` だとフラグメント扱いになって値が途中で切れる
             let node_id = NodeId(format!("{uuid}.{index}"));
             match block {
+                // スラッシュコマンド。**打った形をそのまま出し、展開を待つ枠を張る**
+                Block::SlashCommand { typed } => {
+                    self.file(source).turn_anchor = None;
+                    let retired = self.retire_matching(source, &typed, root.clone(), ts, branch);
+                    emitted.extend(retired);
+                    let node = TreeNode {
+                        id: node_id.clone(),
+                        parent: root.clone(),
+                        node: Node::UserMessage {
+                            text: typed.clone(),
+                            origin: origin.clone(),
+                            command: Some(protocol::SlashCommand {
+                                typed,
+                                expansion: None,
+                            }),
+                        },
+                        ts,
+                        branch,
+                    };
+                    // 前の本体が展開を持たなかったぶんは、ここで手放す。**抱えたままにしない**
+                    // ——展開が来ないほうが多数派である（実測で34%にしか展開が無い。設計§3-4）
+                    self.file(source).pending_command = record
+                        .uuid
+                        .clone()
+                        .map(|uuid| (uuid, node.clone()));
+                    emitted.push(node);
+                    last_emitted = Some(node_id);
+                }
                 Block::UserText(text) => {
+                    // 展開後の中身なら、**新しい行にせず本体の吹き出しへ入れる**（設計§3-1）
+                    if let Some(node) = self.absorb_expansion(source, record, &text) {
+                        last_emitted = Some(node.id.clone());
+                        emitted.push(node);
+                        continue;
+                    }
                     // 新しい指示が来たらターンが変わる。以後のツールコールは
                     // 次のアシスタント本文にぶら下がる
                     self.file(source).turn_anchor = None;
@@ -1612,5 +1707,183 @@ mod tests {
         let 中身 = serde_json::to_string(&body[1].node).expect("書けること");
         assert!(!中身.contains("AAAA"), "base64 が載っている: {中身}");
         assert!(中身.contains("image/png"), "媒体型が落ちている: {中身}");
+    }
+}
+
+/// スラッシュコマンドの解析と結合
+/// （`人が打っていないものを、人の発言として出さない` 設計§3・§4・§5）。
+#[cfg(test)]
+mod スラッシュコマンド {
+    #![allow(non_snake_case)]
+
+    use super::*;
+    use crate::normalize::slash_command;
+    use crate::parse::parse_line;
+
+    const MAIN: &str = "/p/s.jsonl";
+
+    fn feed(threader: &mut SessionThreader, line: &str) -> Vec<TreeNode> {
+        threader.feed_record(MAIN, None, &parse_line(line))
+    }
+
+    /// 本体レコード（`origin.kind == "human"`。`promptSource` は持たない）
+    fn 本体(uuid: &str, tags: &str) -> String {
+        format!(
+            r#"{{"type":"user","uuid":"{uuid}","parentUuid":null,"origin":{{"kind":"human"}},"message":{{"role":"user","content":{}}}}}"#,
+            serde_json::to_string(tags).unwrap()
+        )
+    }
+
+    /// 展開レコード（`isMeta` ＋ `parentUuid` が本体を指す）
+    fn 展開(uuid: &str, parent: &str, body: &str) -> String {
+        format!(
+            r#"{{"type":"user","uuid":"{uuid}","parentUuid":"{parent}","isMeta":true,"message":{{"role":"user","content":{}}}}}"#,
+            serde_json::to_string(body).unwrap()
+        )
+    }
+
+    fn 発言(node: &TreeNode) -> (&str, Option<&protocol::SlashCommand>) {
+        match &node.node {
+            Node::UserMessage { text, command, .. } => (text.as_str(), command.as_ref()),
+            other => panic!("user_message ではない: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn 引数の無いコマンドは名前だけになる() {
+        let typed = slash_command(
+            "<command-message>pjt_read</command-message>\n<command-name>/pjt_read</command-name>",
+        );
+        assert_eq!(typed.as_deref(), Some("/pjt_read"));
+    }
+
+    #[test]
+    fn 引数があれば名前の後ろに付く() {
+        // `<command-args>` は要件に無かったが実在する（設計§0-2）
+        let typed = slash_command(
+            "<command-message>issue_doc_design</command-message>\n<command-name>/issue_doc_design</command-name>\n<command-args>設計を書いて</command-args>",
+        );
+        assert_eq!(typed.as_deref(), Some("/issue_doc_design 設計を書いて"));
+    }
+
+    #[test]
+    fn タグ以外の字が混ざっていたら触らない() {
+        // 当たらなければ生のテキストのまま出る。**壊れるのではなく元に戻る**（設計§4）
+        assert_eq!(
+            slash_command("これを見て <command-name>/pjt_read</command-name>"),
+            None
+        );
+        assert_eq!(slash_command("<command-name>pjt_read</command-name>"), None, "/ が無い");
+        assert_eq!(slash_command("ただの発言"), None);
+    }
+
+    #[test]
+    fn 展開は同じ吹き出しの中身になる() {
+        let mut threader = SessionThreader::new();
+        let out = feed(
+            &mut threader,
+            &本体("u1", "<command-message>x</command-message>\n<command-name>/x</command-name>"),
+        );
+        assert_eq!(out.len(), 1);
+        let (text, command) = 発言(&out[0]);
+        assert_eq!(text, "/x", "**生のタグが1文字も残らない**");
+        assert_eq!(command.unwrap().expansion, None, "この時点では展開が無い");
+        let 本体のid = out[0].id.clone();
+
+        let out = feed(&mut threader, &展開("u2", "u1", "コマンドの中身"));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, 本体のid, "**同じ ID で送り直す**（新しい行にしない）");
+        let (text, command) = 発言(&out[0]);
+        assert_eq!(text, "/x", "打った形は変わらない");
+        assert_eq!(command.unwrap().expansion.as_deref(), Some("コマンドの中身"));
+    }
+
+    #[test]
+    fn 展開が無い本体はそのまま出る() {
+        // **展開が無いほうが多数派である**（実測でコマンド本体の34%にしか展開が無い）
+        let mut threader = SessionThreader::new();
+        let out = feed(&mut threader, &本体("u1", "<command-message>clear</command-message>\n<command-name>/clear</command-name>"));
+        let (text, command) = 発言(&out[0]);
+        assert_eq!(text, "/clear");
+        assert_eq!(command.unwrap().expansion, None, "トグルを出さないための印");
+    }
+
+    #[test]
+    fn 二つ打ったコマンドはそれぞれの展開を持つ() {
+        // `[本体1][展開1][本体2][展開2]` の並び。**枠1つで捌ける**（設計§3-3）
+        let mut threader = SessionThreader::new();
+        let a = feed(&mut threader, &本体("u1", "<command-message>a</command-message>\n<command-name>/a</command-name>"));
+        let ea = feed(&mut threader, &展開("u2", "u1", "Aの中身"));
+        let b = feed(&mut threader, &本体("u3", "<command-message>b</command-message>\n<command-name>/b</command-name>"));
+        let eb = feed(&mut threader, &展開("u4", "u3", "Bの中身"));
+
+        assert_eq!(ea[0].id, a[0].id);
+        assert_eq!(eb[0].id, b[0].id);
+        assert_ne!(a[0].id, b[0].id);
+        assert_eq!(発言(&ea[0]).1.unwrap().expansion.as_deref(), Some("Aの中身"));
+        assert_eq!(発言(&eb[0]).1.unwrap().expansion.as_deref(), Some("Bの中身"));
+    }
+
+    #[test]
+    fn 展開を待たずに次の本体が来たら枠を手放す() {
+        // **展開が来ない本体のほうが多数派である**（実測66%）。抱えたままにすると、
+        // 次のコマンドの展開が前の本体を指していないせいで**行として溢れる**（設計§3-4）
+        let mut threader = SessionThreader::new();
+        feed(&mut threader, &本体("u1", "<command-message>clear</command-message>\n<command-name>/clear</command-name>"));
+        let 次 = feed(&mut threader, &本体("u3", "<command-message>b</command-message>\n<command-name>/b</command-name>"));
+        let 展 = feed(&mut threader, &展開("u4", "u3", "Bの中身"));
+
+        assert_eq!(展.len(), 1);
+        assert_eq!(展[0].id, 次[0].id, "**新しいほうの本体が展開を受け取る**");
+        assert_eq!(発言(&展[0]).1.unwrap().expansion.as_deref(), Some("Bの中身"));
+    }
+
+    #[test]
+    fn 親が違う差し込みは吸い込まれない() {
+        // **フックの注入をコマンドの展開として吸わない。** `promptId` を鍵にすると
+        // ここが壊れる（設計§3-2）
+        let mut threader = SessionThreader::new();
+        let 本 = feed(&mut threader, &本体("u1", "<command-message>x</command-message>\n<command-name>/x</command-name>"));
+        let 注入 = feed(&mut threader, &展開("u9", "別のレコード", "フックが差し込んだ文"));
+
+        assert_eq!(注入.len(), 1, "独立した行として出る");
+        assert_ne!(注入[0].id, 本[0].id, "本体へ吸い込まれていない");
+        assert_eq!(発言(&本[0]).1.unwrap().expansion, None, "本体は空のまま");
+        assert!(
+            matches!(
+                &注入[0].node,
+                Node::UserMessage { origin: protocol::MessageOrigin::Injected, .. }
+            ),
+            "差し込まれた文として名乗る"
+        );
+    }
+
+    #[test]
+    fn 展開にぶら下がる子は吹き出しへ繋がる() {
+        // 吸収してノードを出さないと、**展開の uuid が根へ解決される**（設計§5-1）。
+        // その先の未知レコードが置き場所を見失うことを、ここで止める
+        let mut threader = SessionThreader::new();
+        let 本 = feed(&mut threader, &本体("u1", "<command-message>x</command-message>\n<command-name>/x</command-name>"));
+        feed(&mut threader, &展開("u2", "u1", "中身"));
+        // 置き場所の解決を実際に使うのは未知レコードのほう（`feed_unknown`）
+        let 子 = feed(
+            &mut threader,
+            r#"{"type":"知らない種別","uuid":"u3","parentUuid":"u2"}"#,
+        );
+        assert_eq!(
+            子[0].parent.as_ref(),
+            Some(&本[0].id),
+            "展開の子が、本体の吹き出しにぶら下がる"
+        );
+    }
+
+    #[test]
+    fn 生のタグはノードに残らない() {
+        let mut threader = SessionThreader::new();
+        let out = feed(&mut threader, &本体("u1", "<command-message>x</command-message>\n<command-name>/x</command-name>\n<command-args>引数</command-args>"));
+        let text = serde_json::to_string(&out[0].node).unwrap();
+        assert!(!text.contains("command-name"), "生のタグが残っている: {text}");
+        assert!(!text.contains("command-message"), "生のタグが残っている: {text}");
+        assert!(!text.contains("command-args"), "生のタグが残っている: {text}");
     }
 }
