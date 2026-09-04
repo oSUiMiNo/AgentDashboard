@@ -58,29 +58,36 @@ function tileOf(page: Page, cardId: string): Locator {
 }
 
 /**
- * その小窓の復旧ボタン。
+ * その小窓の電源ボタン。
  *
  * **小窓の中には居ない。** 小窓そのものがボタンなので中に別のボタンを置けず、器へ
  * **絶対配置の兄弟**として重ねてある（設計§9-1）。したがって
- * `tileOf(...).getByTestId('revive-button')` は**何も見つけずに 0 件で通る**——
+ * `tileOf(...).getByTestId('power-tile')` は**何も見つけずに 0 件で通る**——
  * 実際にそう書いて、5本が「消えていること」を確かめたつもりで空振りした。
  *
  * **かつては隣接兄弟（`+`）で書いていたが、カードが4層になって隣ではなくなった**
  * （カード設計§7）。いまは器（`tile-shell`）から辿る——器は小窓と同じ `card_id` を
  * 名乗るので、間に何が挟まっても対応が崩れない。
+ *
+ * # 「消える」で見分けない
+ *
+ * **かつては「復旧」の板で、実体があるカードには出ていなかった**ので、`toHaveCount(0)`
+ * が「戻った」の合図になっていた。いまは**止めることと起こすことを1つのボタンで言う**
+ * ので（細かい修正 要件11）、**戻っても消えない——点いて `data-power="on"` になる。**
  */
 function reviveButtonOf(page: Page, cardId: string): Locator {
   return page.locator(
-    `[data-testid="tile-shell"][data-card-id="${cardId}"] [data-testid="revive-button"]`,
+    `[data-testid="tile-shell"][data-card-id="${cardId}"] [data-testid="power-tile"]`,
   )
 }
 
-/** 渡したカードのうち、いま「復旧中…」を出しているものだけ。 */
+/** 渡したカードのうち、いま起こしている最中のものだけ。 */
 async function revivingIds(page: Page, ids: string[]): Promise<string[]> {
   const found: string[] = []
   for (const cardId of ids) {
     const button = reviveButtonOf(page, cardId)
-    if ((await button.count()) > 0 && (await button.innerText()).includes('復旧中')) {
+    // 文字を出す場所が無くなったので、進んでいることは `data-busy` が伝える
+    if ((await button.getAttribute('data-busy')) === 'true') {
       found.push(cardId)
     }
   }
@@ -142,6 +149,14 @@ function 消えている(page: Page) {
  * 「全て復旧」は廃止——**取り返しの付かない範囲を、押す人が決められる。**
  */
 async function 選んで起こす(page: Page) {
+  /*
+    **必ず地ならしする。** 小窓のクリックは「選ぶ」ではなく**切り替え**なので、
+    既に選ばれている状態で呼ぶと**外しにいく**——2度呼ぶテストでは帯ごと消えて、
+    押す相手が無くなる（実際に踏んだ）。Esc は選択を全部外す道（並べ替え設計§4-2）。
+  */
+  await page.keyboard.press('Escape')
+  await expect(page.getByTestId('bulk-revive')).toHaveCount(0)
+
   const cards = page.getByTestId('session-tile')
   const 枚数 = await cards.count()
   for (let i = 0; i < 枚数; i += 1) {
@@ -205,7 +220,8 @@ test('起こし直した PC のカードは、接続断のまま残る', async (
   // **落とした1台に引きずられて全部が接続断になる**のがいちばんありがちな壊れ方
   for (const bystander of bystanders) {
     await expect(tileOf(page, bystander).getByTestId('disconnected-badge')).toHaveCount(0)
-    await expect(reviveButtonOf(page, bystander)).toHaveCount(0)
+    // **戻っていれば点いている**（消えるのではない・要件11）
+    await expect(reviveButtonOf(page, bystander)).toHaveAttribute('data-power', 'on')
   }
 })
 
@@ -218,9 +234,11 @@ test('小窓の復旧ボタンを押すと、そのカードが戻る', async ({
   await expect(reviveButtonOf(page, cardId)).toBeEnabled({ timeout: 60_000 })
   await reviveButtonOf(page, cardId).click()
 
-  // 戻ると `live` になるので、接続断のバッジも復旧ボタンも消える
+  // 戻ると `live` になるので、接続断のバッジは消え、**電源は点く**（消えない・要件11）
   await expect(tile.getByTestId('disconnected-badge')).toHaveCount(0, { timeout: 60_000 })
-  await expect(reviveButtonOf(page, cardId)).toHaveCount(0)
+  await expect(reviveButtonOf(page, cardId)).toHaveAttribute('data-power', 'on', {
+    timeout: 60_000,
+  })
   // **小窓がまだそこに在ること**まで見る。器（小窓そのものがボタン）へクリックが
   // 伝わっていると専用画面へ移ってしまい、上の2行は「消えた」ではなく
   // 「画面ごと無い」で通ってしまう
