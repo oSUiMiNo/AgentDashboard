@@ -6,10 +6,12 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
+  inputBoxRows,
   isComposerSubmit,
   isSelectionPrompt,
   looksSelecting,
   NEWLINE,
+  rowInRange,
   sequenceFor,
   SUBMIT,
   terminalKeyOverride,
@@ -395,6 +397,210 @@ describe('looksSelecting', () => {
     expect(looksSelecting(狭い画面('after-turn'))).toBe(false)
     expect(looksSelecting(狭い画面('working'))).toBe(false)
     expect(looksSelecting(狭い画面('numbered-echo'))).toBe(false)
+  })
+})
+
+/**
+ * 入力欄が画面のどの行にあるか（設計§13-2）。
+ *
+ * **触った場所で入り／抜けするための口**なので、答えるのは真偽ではなく**行の範囲**である。
+ * 「打てる状態か」を真偽で答えていた時期は、**通常状態では常に真**になってログの部分を
+ * 押してもキーボードが出た——利用者が求めていたのは状態ではなく場所だった。
+ *
+ * # 実物で確かめる
+ *
+ * 作った文字列だけで固めない。実物のゴールデン15枚（2つの版・広い／狭い）を通し、
+ * **枠の出る8枚では行が返り、選択待ちの7枚では枠が見つからない**ことまで固定する。
+ */
+describe('inputBoxRows', () => {
+  /** 実物の画面を**物理行**の並びにして渡す。折り返しは繋がない（行番号がずれる）。 */
+  function 実物の行(name: string, 版 = 'v2.1.228', 棚 = 'screens'): string[] {
+    return 実物の画面(name, 版, 棚).split('\n')
+  }
+
+  function 狭い行(name: string): string[] {
+    return 実物の行(name, 'v2.1.232', 'screens-narrow')
+  }
+
+  /** カーソルは画面の外に置く。**枠が見つかったことだけ**を見たいとき用。 */
+  const 画面の外 = -1
+
+  /** 罫線に挟まれた入力欄。`線` を差し替えると、罫線の種類を当てられる。 */
+  function 入力欄のある画面(あと: string[] = [], 線 = '─'.repeat(60)): string[] {
+    return ['  なにか作業の跡', '', 線, '❯ ', 線, ...あと]
+  }
+
+  it('入力欄が出ている実物の画面では、枠の行を返す', () => {
+    // **上下の罫線を含む**（描かれた枠そのもの）。中身だけにすると実機では1行しか
+    // 的が無く、指では狙えない
+    expect(inputBoxRows(実物の行('after-turn'), 画面の外)).toEqual({ top: 23, bottom: 25 })
+    expect(inputBoxRows(実物の行('welcome'), 画面の外)).toEqual({ top: 13, bottom: 15 })
+    expect(inputBoxRows(実物の行('numbered-echo', 'v2.1.232'), 画面の外)).toEqual({
+      top: 27,
+      bottom: 29,
+    })
+    expect(inputBoxRows(実物の行('working', 'v2.1.232'), 画面の外)).toEqual({
+      top: 17,
+      bottom: 19,
+    })
+    expect(inputBoxRows(実物の行('working-long', 'v2.1.232'), 画面の外)).toEqual({
+      top: 19,
+      bottom: 21,
+    })
+  })
+
+  it('選択待ちの実物の画面では、枠を見つけない', () => {
+    // **常に枠を返す実装でも上のテストは通る。** 否定側を対で置く
+    expect(inputBoxRows(実物の行('permission'), 画面の外)).toBeNull()
+    expect(inputBoxRows(実物の行('rewind'), 画面の外)).toBeNull()
+    expect(inputBoxRows(実物の行('trust'), 画面の外)).toBeNull()
+    expect(inputBoxRows(実物の行('multi-select', 'v2.1.232'), 画面の外)).toBeNull()
+  })
+
+  it('版が変わっても同じ行を返す', () => {
+    expect(inputBoxRows(実物の行('after-turn', 'v2.1.232'), 画面の外)).toEqual({
+      top: 23,
+      bottom: 25,
+    })
+    expect(inputBoxRows(実物の行('permission', 'v2.1.232'), 画面の外)).toBeNull()
+  })
+
+  it('狭い相手でも枠を見つける', () => {
+    // **罫線の長さで判定していないことの担保。** 実物は 120文字と 45文字（実測）
+    expect(inputBoxRows(狭い行('after-turn'), 画面の外)).toEqual({ top: 15, bottom: 17 })
+    expect(inputBoxRows(狭い行('welcome'), 画面の外)).toEqual({ top: 15, bottom: 17 })
+    expect(inputBoxRows(狭い行('numbered-echo'), 画面の外)).toEqual({ top: 16, bottom: 18 })
+    expect(inputBoxRows(狭い行('working'), 画面の外)).toEqual({ top: 16, bottom: 18 })
+    expect(inputBoxRows(狭い行('permission'), 画面の外)).toBeNull()
+    expect(inputBoxRows(狭い行('rewind'), 画面の外)).toBeNull()
+    expect(inputBoxRows(狭い行('multi-select'), 画面の外)).toBeNull()
+  })
+
+  it('過去の発言のエコーを、生きている入力欄と取り違えない', () => {
+    // **この1本が要。** 実物の `permission` には、利用者が打った字下げ0の `❯` が
+    // 残ったまま選択待ちになっている。字下げだけを見ると、この行が入力欄に化ける
+    const エコーだけ = ['❯ report.txt を作って', '', ' ❯ 1. Yes', ' Esc to cancel']
+    expect(inputBoxRows(エコーだけ, 画面の外)).toBeNull()
+  })
+
+  it('選択待ちの区切り（`╌`）を罫線に数えない', () => {
+    // 実物の `permission` は `╌`（U+254C）で区切る。数えると選択待ちが入力欄に化ける
+    expect(inputBoxRows(入力欄のある画面([], '╌'.repeat(60)), 画面の外)).toBeNull()
+  })
+
+  it('罫線が上にしか無ければ、入力欄とみなさない', () => {
+    // **枠の下半分が画面から切れている形。** 上だけを見る実装に壊すと、ここが通ってしまう
+    const 上だけ = ['  なにか', '─'.repeat(60), '❯ ', ' ❯ 1. Yes', ' Esc to cancel']
+    expect(inputBoxRows(上だけ, 画面の外)).toBeNull()
+  })
+
+  it('罫線が下にしか無ければ、入力欄とみなさない', () => {
+    // 上と対。片側だけ置くと、**もう片方の条件を消しても落ちない**
+    const 下だけ = ['  なにか', '❯ ', '─'.repeat(60), ' ❯ 1. Yes', ' Esc to cancel']
+    expect(inputBoxRows(下だけ, 画面の外)).toBeNull()
+  })
+
+  it('罫線に挟まれていても、字下げされたカーソルなら入力欄ではない', () => {
+    // **字下げ0 が入力欄の印**。ここを緩めると、罫線で区切られたメニューが入力欄に化ける
+    const 字下げされている = [
+      '  なにか',
+      '─'.repeat(60),
+      ' ❯ 1. Yes',
+      '─'.repeat(60),
+      ' Esc to cancel',
+    ]
+    expect(inputBoxRows(字下げされている, 画面の外)).toBeNull()
+  })
+
+  it('起動バナーの枠を罫線に数えない', () => {
+    // `╭───╮` は罫線だけの行ではない。角の文字が混ざっていれば外れる
+    const バナー = [
+      '╭' + '─'.repeat(58) + '╮',
+      '❯ ',
+      '╰' + '─'.repeat(58) + '╯',
+      ' ❯ 1. Yes',
+    ]
+    expect(inputBoxRows(バナー, 画面の外)).toBeNull()
+  })
+
+  it('打った文が折り返して枠が縦に伸びても、下端まで返す', () => {
+    // **長文を打っている最中こそ、取りこぼしたときの損が大きい。** 閉じの罫線を
+    // 「カーソルの1行下」に決め打つと、折り返した瞬間に枠が見つからなくなる
+    const 折り返した = [
+      '  なにか',
+      '─'.repeat(60),
+      '❯ 長い指示の1行目',
+      '  折り返した続き',
+      '  さらに続き',
+      '─'.repeat(60),
+      ' Esc to cancel',
+    ]
+    expect(inputBoxRows(折り返した, 画面の外)).toEqual({ top: 1, bottom: 5 })
+  })
+
+  it('罫線で閉じないまま次の入力欄が来たら、枠とみなさない', () => {
+    // 跨いでよいのは折り返しの続きだけ。**際限なく跨ぐと、離れた罫線どうしが
+    // 繋がって枠に化ける**
+    const 閉じない = ['─'.repeat(60), '❯ ひとつめ', '❯ ふたつめ', ' ❯ 1. Yes']
+    expect(inputBoxRows(閉じない, 画面の外)).toBeNull()
+  })
+
+  it('末尾の空行に埋もれていても枠を見つける', () => {
+    // 可視領域は必ず `rows` 本ぶん返る（`visibleRows`）ので、**下は空行で埋まる**。
+    // 末尾から窓を切るだけの実装だと、ここで枠を見失う
+    expect(inputBoxRows([...入力欄のある画面(), '', '', '', ''], 画面の外)).toEqual({
+      top: 2,
+      bottom: 4,
+    })
+  })
+
+  it('枠が見つからなければ、カーソルの行へ落とす', () => {
+    // 枠を出さない画面（起動直後・全画面の TUI）でも、打つ道を失わせない
+    expect(inputBoxRows(実物の行('permission'), 20)).toEqual({ top: 20, bottom: 20 })
+  })
+
+  it('枠が見つかれば、カーソルの行より枠を優先する', () => {
+    // **落とすのは見つからなかったときだけ。** 常にカーソルへ落とす実装に壊すと落ちる
+    expect(inputBoxRows(実物の行('after-turn'), 3)).toEqual({ top: 23, bottom: 25 })
+  })
+
+  it('遡ってカーソルが画面の外に居るなら、どの行も入口にしない', () => {
+    // ログを読んでいる最中のタップで打ち始めることにはならない
+    expect(inputBoxRows(実物の行('permission'), -3)).toBeNull()
+    expect(inputBoxRows(実物の行('permission'), 999)).toBeNull()
+  })
+
+  it('空の画面では枠もカーソルも返さない', () => {
+    // マウント直後の初期フォーカスがここを通る。**安全側へ倒す**
+    expect(inputBoxRows([], 0)).toBeNull()
+    expect(inputBoxRows(['', '', ''], 1)).toBeNull()
+  })
+})
+
+/**
+ * 触った行が範囲の中か（設計§13-2）。
+ *
+ * **両端を含む。** 枠の罫線そのものを押しても入れないと、実機では的が1行しか無くなる。
+ */
+describe('rowInRange', () => {
+  it('上端と下端を含む', () => {
+    const 範囲 = { top: 23, bottom: 25 }
+    expect(rowInRange(範囲, 23)).toBe(true)
+    expect(rowInRange(範囲, 24)).toBe(true)
+    expect(rowInRange(範囲, 25)).toBe(true)
+  })
+
+  it('範囲の外は偽', () => {
+    // **常に真を返す実装でも上は通る。** 否定側を対で置く
+    const 範囲 = { top: 23, bottom: 25 }
+    expect(rowInRange(範囲, 22)).toBe(false)
+    expect(rowInRange(範囲, 26)).toBe(false)
+    expect(rowInRange(範囲, 0)).toBe(false)
+  })
+
+  it('範囲が無ければ、どの行も外', () => {
+    expect(rowInRange(null, 0)).toBe(false)
+    expect(rowInRange(null, 24)).toBe(false)
   })
 })
 

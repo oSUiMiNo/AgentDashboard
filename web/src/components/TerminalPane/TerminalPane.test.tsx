@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import type { Terminal } from '@xterm/xterm'
+import type { IBufferLine, Terminal } from '@xterm/xterm'
 import { TERMINAL_GRID, TERMINAL_OPTIONS, TerminalPane } from './TerminalPane'
 import { KIND_PTY_OUTPUT, KIND_PTY_SNAPSHOT } from '@/lib/frame'
 import { hasKeyboard, openKeyboard } from '@/lib/terminalBridge'
@@ -228,7 +228,8 @@ function touch(target: HTMLElement, type: string, points: { x: number; y: number
  *
  * **ただしタッチは別。** `pointerdown` はタップとなぞりを区別しないので、そのまま
  * 渡すと**遡ろうとなぞるたびにソフトキーボードが出る**（実測で再現した回帰）。
- * タッチは離すまで待ち、**一度も握らなかったときだけ**渡す。
+ * タッチは離すまで待ち、**触った場所を見てから**決める（設計§13。担保は
+ * 「TerminalPane の触った場所」）。
  */
 describe('TerminalPane の焦点', () => {
   async function 端末(container: HTMLElement) {
@@ -272,10 +273,10 @@ describe('TerminalPane の焦点', () => {
     expect(focus).not.toHaveBeenCalled()
   })
 
-  it('指でなぞらずに離しても渡さないこと', async () => {
-    // **タップでも渡さない**（設計§12-2）。焦点を渡すとカーソルが出て、
-    // 「打つ場所が光っているのに打てない」という見え方になる——スマホでは
-    // 打つ道を「キーボード」ボタン1つに絞ってある
+  it('入力欄の外をタップしても渡さないこと', async () => {
+    // ログの部分を押しただけで焦点が来ると、**カーソルが出てキーボードも開く**
+    // ——読んでいるだけのときに画面が半分隠れる（設計§13）。
+    // **入力欄を押したときに渡ること**は「TerminalPane の触った場所」が見張る
     const { container } = render(<TerminalPane cardId={CARD} />)
     const { box, term } = await 端末(container)
     // マウント時の初期フォーカスは数えない。**タップのぶんだけを見る**
@@ -519,10 +520,239 @@ describe('TerminalPane の遡り位置', () => {
 })
 
 /**
- * ソフトキーボードを出す道（設計§12）。
+ * 触った場所で入力可能を入り／抜けする（設計§13）。
  *
- * **端末をタップしても出ない。** 出るのは「キーボード」ボタンを押したときだけで、
- * その道は橋（`lib/terminalBridge.ts`）を通って端末へ届く。
+ * **ここは測る側の担保である。** 「入力欄が何行目にあるか」を決めるのは純関数
+ * （`lib/keys.ts` の `inputBoxRows`）で、そちらは実物のゴールデン15枚で見張ってある。
+ * こちらが確かめるのは、**触った高さを行に直す計算と、その行をどう使うか**の2つ。
+ *
+ * # jsdom は寸法を持たない
+ *
+ * だから `.xterm-screen` の高さと位置を差し込んでから触らせる。差し込まずに書くと
+ * 行はいつも `null` になり、**何を壊しても緑のまま**になる（`lib/reorder.ts` と
+ * `lib/useReorder.ts` を分けてあるのと同じ理由）。
+ */
+describe('TerminalPane の触った場所', () => {
+  /** 1行の高さ（px）。差し込む値で、実測値ではない。 */
+  const CELL = 15
+  /** 枠を 30〜32 行目に置いた画面。31行目が打つところ。 */
+  const 枠のある画面 = [
+    ...Array.from({ length: 30 }, (_, i) => `ログ${i}`),
+    '─'.repeat(60),
+    '❯ ',
+    '─'.repeat(60),
+  ]
+
+  /** その行の真ん中の高さ。 */
+  function 行の高さ(row: number, 上端 = 0): number {
+    return 上端 + row * CELL + CELL / 2
+  }
+
+  async function 端末と隠し欄(container: HTMLElement) {
+    const box = container.querySelector('[data-testid="terminal"]') as HTMLElement
+    const term = await 描かれた端末(box)
+    return { box, term, helper: term.textarea as HTMLTextAreaElement }
+  }
+
+  /** 可視領域を、この行の並びに見せかける。 */
+  function 画面を(term: Terminal, rows: string[]) {
+    vi.spyOn(term.buffer.active, 'getLine').mockImplementation(
+      (y: number) =>
+        ({
+          translateToString: () => rows[y] ?? '',
+          isWrapped: false,
+        }) as unknown as IBufferLine,
+    )
+  }
+
+  /** `.xterm-screen` の高さと位置を差し込む。**jsdom はどちらも 0 を返す。** */
+  function 寸法を(box: HTMLElement, term: Terminal, 上端 = 0) {
+    const screen = box.querySelector('.xterm-screen') as HTMLElement
+    Object.defineProperty(screen, 'clientHeight', {
+      value: CELL * term.rows,
+      configurable: true,
+    })
+    vi.spyOn(screen, 'getBoundingClientRect').mockReturnValue({
+      top: 上端,
+    } as DOMRect)
+    return screen
+  }
+
+  /** 打てる状態から始める（外れたことを見たいので、先に入れておく）。 */
+  function 入力可能にしておく(helper: HTMLTextAreaElement) {
+    helper.focus()
+    helper.inputMode = 'text'
+  }
+
+  it('入力欄の枠をタップしたら、入力可能にすること', async () => {
+    // **これが問題1の受け皿。** 入力欄そのものを押しても何も起きなかった
+    // （利用者の観測・2026-09-05）
+    const { container } = render(<TerminalPane cardId={CARD} />)
+    const { box, term, helper } = await 端末と隠し欄(container)
+    画面を(term, 枠のある画面)
+    寸法を(box, term)
+    const focus = vi.spyOn(helper, 'focus')
+
+    touch(box, 'touchstart', [{ x: 0, y: 行の高さ(31) }])
+    touch(box, 'touchend', [])
+
+    expect(helper.inputMode).toBe('text')
+    expect(focus).toHaveBeenCalled()
+  })
+
+  it('枠の罫線そのものを押しても入れること', async () => {
+    // 中身だけを的にすると**1行（10px 前後）しか無く、指では狙えない**。
+    // 範囲の端を切り詰める壊し方は、ここでだけ落ちる
+    const { container } = render(<TerminalPane cardId={CARD} />)
+    const { box, term, helper } = await 端末と隠し欄(container)
+    画面を(term, 枠のある画面)
+    寸法を(box, term)
+
+    touch(box, 'touchstart', [{ x: 0, y: 行の高さ(30) }])
+    touch(box, 'touchend', [])
+
+    expect(helper.inputMode).toBe('text')
+  })
+
+  it('入るときは、既定の動きを止めないこと', async () => {
+    // **ここが問題2の本体。** 止めると**焦点の移し替えごと止まる**ので、本アプリの
+    // 入力欄が焦点を持ったままになり、ブラウザがそれを画面内へ引き戻す。
+    // 加えて、iOS が「利用者の操作の中の focus」と認めるかに余計な変数を持ち込まない
+    const { container } = render(<TerminalPane cardId={CARD} />)
+    const { box, term } = await 端末と隠し欄(container)
+    画面を(term, 枠のある画面)
+    寸法を(box, term)
+
+    touch(box, 'touchstart', [{ x: 0, y: 行の高さ(31) }])
+    const end = touch(box, 'touchend', [])
+
+    expect(end.defaultPrevented).toBe(false)
+  })
+
+  it('枠の外をタップしたら、入力可能を抜けること', async () => {
+    // **常に入る実装でも上のテストは通る。** 否定側を対で置く
+    const { container } = render(<TerminalPane cardId={CARD} />)
+    const { box, term, helper } = await 端末と隠し欄(container)
+    画面を(term, 枠のある画面)
+    寸法を(box, term)
+    入力可能にしておく(helper)
+    const blur = vi.spyOn(helper, 'blur')
+
+    touch(box, 'touchstart', [{ x: 0, y: 行の高さ(5) }])
+    const end = touch(box, 'touchend', [])
+
+    expect(blur).toHaveBeenCalled()
+    expect(helper.inputMode).toBe('none')
+    // 抜けるときは止める。**止めないと互換マウスイベントが焦点を渡し直す**
+    expect(end.defaultPrevented).toBe(true)
+  })
+
+  it('本アプリの入力欄に焦点があっても、外すこと', async () => {
+    // **これが利用者の言う「関係ない所をタップして入力欄に飛ぶのはおかしい」。**
+    // 端末の隠し欄を塞ぐだけでは、焦点は入力欄に残ったままで画面が引き戻される
+    const { container } = render(<TerminalPane cardId={CARD} />)
+    const { box, term } = await 端末と隠し欄(container)
+    画面を(term, 枠のある画面)
+    寸法を(box, term)
+    const 入力欄 = document.createElement('textarea')
+    document.body.appendChild(入力欄)
+    入力欄.focus()
+    expect(document.activeElement).toBe(入力欄)
+
+    touch(box, 'touchstart', [{ x: 0, y: 行の高さ(5) }])
+    touch(box, 'touchend', [])
+
+    expect(document.activeElement).not.toBe(入力欄)
+    入力欄.remove()
+  })
+
+  it('なぞったときは、焦点を動かさないこと', async () => {
+    // 利用者が求めたのは「**タップ**したら抜ける」であって、遡って読む操作で
+    // 打ちかけの文から焦点を奪う話ではない
+    const { container } = render(<TerminalPane cardId={CARD} />)
+    const { box, term, helper } = await 端末と隠し欄(container)
+    画面を(term, 枠のある画面)
+    寸法を(box, term)
+    // 過去へ遡る余地がある＝握れる状態にする
+    vi.spyOn(term.buffer.active, 'viewportY', 'get').mockReturnValue(50)
+    vi.spyOn(term.buffer.active, 'baseY', 'get').mockReturnValue(100)
+    入力可能にしておく(helper)
+    const blur = vi.spyOn(helper, 'blur')
+
+    touch(box, 'touchstart', [{ x: 0, y: 行の高さ(31) }])
+    touch(box, 'touchmove', [{ x: 0, y: 行の高さ(31) + 60 }])
+    const end = touch(box, 'touchend', [])
+
+    expect(blur).not.toHaveBeenCalled()
+    expect(helper.inputMode).toBe('text')
+    expect(end.defaultPrevented).toBe(true)
+  })
+
+  it('行は .xterm-screen の上端から数えること', async () => {
+    // 格子は下端へ貼り付けてあり、**上が切り落とされる**（設計§3-4）ので、上端は
+    // 負になりうる。0 と決め打つと、切り落とされている日だけ何行もずれる
+    const { container } = render(<TerminalPane cardId={CARD} />)
+    const { box, term, helper } = await 端末と隠し欄(container)
+    画面を(term, 枠のある画面)
+    寸法を(box, term, -100)
+
+    touch(box, 'touchstart', [{ x: 0, y: 行の高さ(31, -100) }])
+    touch(box, 'touchend', [])
+
+    expect(helper.inputMode).toBe('text')
+  })
+
+  it('枠の無い画面では、カーソルの行だけが入口になること', async () => {
+    // 枠を出さない画面（起動直後・全画面の TUI）でも、打つ道を失わせない
+    const { container } = render(<TerminalPane cardId={CARD} />)
+    const { box, term, helper } = await 端末と隠し欄(container)
+    画面を(term, ['ログ', 'ログ', 'ログ'])
+    寸法を(box, term)
+    vi.spyOn(term.buffer.active, 'cursorY', 'get').mockReturnValue(7)
+
+    touch(box, 'touchstart', [{ x: 0, y: 行の高さ(8) }])
+    touch(box, 'touchend', [])
+    expect(helper.inputMode).toBe('none')
+
+    touch(box, 'touchstart', [{ x: 0, y: 行の高さ(7) }])
+    touch(box, 'touchend', [])
+    expect(helper.inputMode).toBe('text')
+  })
+
+  it('格子の外を触っても、入力可能にしないこと', async () => {
+    // 格子より入れ物が大きいと、**上下に地の色の余白ができる**（設計§3-4）。見た目は
+    // 端末の一部なので普通に押されるが、そこはどの行でもない。1行の高さが読めない間
+    // （隠れている・描き終わる前）も同じ扱いで、**迷ったら入らない**——入力可能を
+    // 余計に与えるのが、直そうとしている症状そのものだった
+    const { container } = render(<TerminalPane cardId={CARD} />)
+    const { box, term, helper } = await 端末と隠し欄(container)
+    画面を(term, 枠のある画面)
+    寸法を(box, term)
+
+    for (const y of [-20, 行の高さ(term.rows + 1)]) {
+      touch(box, 'touchstart', [{ x: 0, y }])
+      touch(box, 'touchend', [])
+      expect(helper.inputMode).toBe('none')
+    }
+
+    // 高さが読めない間（`clientHeight` が 0）も同じ
+    Object.defineProperty(box.querySelector('.xterm-screen') as HTMLElement, 'clientHeight', {
+      value: 0,
+      configurable: true,
+    })
+    touch(box, 'touchstart', [{ x: 0, y: 行の高さ(31) }])
+    touch(box, 'touchend', [])
+
+    expect(helper.inputMode).toBe('none')
+  })
+})
+
+/**
+ * ソフトキーボードを出す道（設計§12・§13）。
+ *
+ * 道は2つある——**入力欄の枠をタップする**（上の describe が見張る）のと、
+ * **「キーボード」ボタンを押す**（こちら）。押した道は橋（`lib/terminalBridge.ts`）を
+ * 通って端末へ届く。**入力欄が見えていない場面の逃げ道**として残してある。
  *
  * **「キーボードが実際に出るか」はここでは見られない。** 決めているのはブラウザなので、
  * 確かめられるのは**隠しテキストエリアの指定**までである。
@@ -542,7 +772,7 @@ describe('TerminalPane のキーボード', () => {
     expect(helper.inputMode).toBe('none')
   })
 
-  it('タップしたら、互換マウスイベントを止めること', async () => {
+  it('入力欄の外をタップしたら、互換マウスイベントを止めること', async () => {
     // **止めないと、`touchend` のあとにブラウザが `pointerdown`（mouse）を撃ち、
     // マウスの経路から焦点が渡ってしまう**——タッチで渡さないようにした意味が消える。
     // **E2E が実際にこれを捕まえた**（実装したつもりで、回り込まれていた）
@@ -555,7 +785,7 @@ describe('TerminalPane のキーボード', () => {
     expect(end.defaultPrevented).toBe(true)
   })
 
-  it('タップしても塞いだままであること', async () => {
+  it('入力欄の外をタップしたら塞いだままであること', async () => {
     const { container } = render(<TerminalPane cardId={CARD} />)
     const { box, helper } = await 端末と隠し欄(container)
 

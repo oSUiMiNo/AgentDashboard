@@ -1,6 +1,6 @@
 import { Terminal } from '@xterm/xterm'
 import { isSelectionPrompt } from './keys'
-import { joinWrapped, visibleScreen, type ScreenRow } from './screen'
+import { joinWrapped, visibleRows, visibleScreen, type ScreenRow } from './screen'
 
 /**
  * 画面の取り出し（テスト計画フェーズ3・設計§5）。
@@ -61,6 +61,48 @@ describe('visibleScreen', () => {
     await write(term, 'あいうえおかきくけこさしすせそ')
 
     expect(visibleScreen(term).split('\n')[0]).toBe('あいうえおかきくけこさしすせそ')
+    term.dispose()
+  })
+})
+
+/**
+ * 折り返しを繋がない物理行（設計§13-3）。
+ *
+ * **触った高さから出した行番号と突き合わせる側は、こちらしか使えない。** 繋ぐと
+ * 繋いだぶんだけ添字が上へ詰まるので、画面の上のほうで1度でも折り返しがあった日から、
+ * **押した場所と反応した場所が静かに1行ずれる**。
+ */
+describe('visibleRows', () => {
+  function write(term: Terminal, data: string): Promise<void> {
+    return new Promise((resolve) => term.write(data, resolve))
+  }
+
+  it('折り返した行を繋がずに、割れたまま返す', async () => {
+    // **これが `visibleScreen` との違いそのもの。** あちらは1行に繋いで返す
+    const term = new Terminal({ rows: 5, cols: 10, scrollback: 0 })
+    await write(term, 'あいうえおかきくけこ')
+
+    expect(visibleRows(term).slice(0, 2)).toEqual(['あいうえお', 'かきくけこ'])
+    expect(visibleScreen(term).split('\n')[0]).toBe('あいうえおかきくけこ')
+    term.dispose()
+  })
+
+  it('必ず画面の行数ぶん返る（添字がそのまま上から何行目か）', async () => {
+    // 本数が変わると、触った高さから出した行番号と対応しなくなる
+    const term = new Terminal({ rows: 5, cols: 10, scrollback: 0 })
+    await write(term, 'あいうえおかきくけこ\r\nつぎ')
+
+    const rows = visibleRows(term)
+    expect(rows).toHaveLength(5)
+    expect(rows[2]).toBe('つぎ')
+    term.dispose()
+  })
+
+  it('スクロールバックは混ぜない', async () => {
+    const term = new Terminal({ rows: 5, cols: 20, scrollback: 100 })
+    await write(term, Array.from({ length: 10 }, (_, i) => `行${i}`).join('\r\n'))
+
+    expect(visibleRows(term)).toEqual(['行5', '行6', '行7', '行8', '行9'])
     term.dispose()
   })
 })
