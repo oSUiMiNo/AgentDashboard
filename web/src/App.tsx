@@ -29,7 +29,7 @@ import { report } from '@/lib/clientLogs'
 import { composerBusyCount } from '@/lib/composerBusy'
 import { useDocumentTitle } from '@/lib/documentTitle'
 import { projectDisplayName } from '@/lib/path'
-import { selfhealLabel } from '@/lib/protocol'
+import { connectionDot, selfhealLabel } from '@/lib/protocol'
 import { ACCOUNT, HOME, LOCAL_HOST, SETTINGS } from '@/lib/routes'
 import { canEnter, useAuthStore } from '@/stores/auth'
 import { useProjects } from '@/stores/projects'
@@ -42,6 +42,7 @@ const CONNECTION_LABEL: Record<string, string> = {
   open: '接続済み',
   closed: '切断',
 }
+
 
 function App() {
   return (
@@ -129,9 +130,15 @@ function Shell() {
             <span
               data-testid="connection-status"
               data-status={status}
-              className="text-muted-foreground text-sm"
+              title={CONNECTION_LABEL[status]}
+              className="flex shrink-0 items-center"
             >
-              {CONNECTION_LABEL[status]}
+              <span
+                aria-hidden
+                className={`size-2 rounded-full ${connectionDot(status)}`}
+              />
+              {/* **色は読み上げられない。** 文字を消しても、意味は残す */}
+              <span className="sr-only">{CONNECTION_LABEL[status]}</span>
             </span>
             <div className="ml-auto flex items-center gap-3">
               {auth.mode === 'account' && (

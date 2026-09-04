@@ -18,6 +18,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { connectionDot } from '@/lib/protocol'
 import { formatElapsed } from '@/lib/time'
 import { HOME } from '@/lib/routes'
 import { useNow } from '@/lib/sessions'
@@ -253,10 +254,16 @@ export function AccountPage() {
               data-connected={agent.connected}
               className="flex items-center gap-2"
             >
+              {/*
+                **アプリの版番号の横と同じ印を使う**（細かい修正 要件19・設計§3-6）。
+                緑（`emerald`）は役割色の表に無い色だったので、繋がっているときは
+                進行中のシアンへ寄せた。**繋がっていないのは異常ではない**ので、
+                コーラルではなく静かな灰のまま置く。
+              */}
               <span
                 aria-hidden
                 className={`size-2 shrink-0 rounded-full ${
-                  agent.connected ? 'bg-emerald-400' : 'bg-muted-foreground/40'
+                  agent.connected ? connectionDot('open') : 'bg-muted-foreground/40'
                 }`}
               />
               <span className="min-w-0 flex-1 truncate font-medium">{agent.name}</span>
@@ -280,12 +287,20 @@ export function AccountPage() {
                   版 {agent.version}
                 </span>
               )}
+              {/*
+                **点が言っていることを、文字で二度言わない**（細かい修正 要件19）。
+                「接続中」「未接続」は左の点と同じことなので落とし、**点が持てない情報
+                （最後に見かけた時刻）だけ**を残す。
+
+                色は読み上げられないので、**点の意味は文字で必ず残す**。
+              */}
               <span className="text-muted-foreground shrink-0">
-                {agent.connected
-                  ? '接続中'
-                  : agent.last_seen_at === null
-                    ? '未接続'
-                    : `最終 ${formatElapsed(now - agent.last_seen_at)}`}
+                <span className="sr-only">
+                  {agent.connected ? '接続中' : '未接続'}
+                </span>
+                {!agent.connected && agent.last_seen_at !== null
+                  ? `最終 ${formatElapsed(now - agent.last_seen_at)}`
+                  : null}
               </span>
             </li>
           ))}

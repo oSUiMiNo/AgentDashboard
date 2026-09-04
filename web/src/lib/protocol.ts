@@ -604,6 +604,37 @@ export function permissionModeTone(mode: PermissionMode | null): string {
   }
 }
 
+/**
+ * 繋がっているかを**点で伝える**（細かい修正 要件19・設計§3-6）。
+ *
+ * # なぜ文字をやめたのか
+ *
+ * 「接続済み」「接続断」「接続中」は**どれも同じ長さの文字列**で、流し見では見分けが
+ * 付かない。しかも**正常なときにいちばん多く出る**ので、画面の面積をいちばん要らない
+ * 情報が取っていた。
+ *
+ * # 新しい色は増やしていない
+ *
+ * 状態の役割色（`STATUS_TONES`）から、進行中のシアン・保留の琥珀・エラーのコーラルを
+ * そのまま借りる。**接続済みは静止**——ここが動くと、正常なのに何か起きているように見える。
+ *
+ * # 色は読み上げられない
+ *
+ * **呼ぶ側は必ず `sr-only` の文字と `title` を添えること。** 点だけにすると、
+ * 読み上げ環境からは何も無いのと同じになる。
+ */
+export function connectionDot(state: 'connecting' | 'open' | 'closed'): string {
+  switch (state) {
+    case 'connecting':
+      // 繋ぎに行っている最中だけ、ゆっくり明滅する
+      return 'bg-amber-400 motion-safe:animate-pulse'
+    case 'open':
+      return 'bg-cyan-400'
+    case 'closed':
+      return 'bg-rose-400'
+  }
+}
+
 /** セッションの名前の出し方（名前付け設計§9-1）。 */
 export interface Nickname {
   /** 出す文字。どちらの名前も無ければ `null` */

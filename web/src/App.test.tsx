@@ -152,6 +152,30 @@ describe('App', () => {
     expect(screen.queryByTestId('app-version')).toBeNull()
   })
 
+  it('接続の様子は文字ではなく点で出て、意味は読み上げに残る', async () => {
+    /*
+      **文字をやめた**（細かい修正 要件19・設計§3-6）。「接続済み」「接続断」「接続中」は
+      どれも同じ長さで流し見では見分けが付かず、しかも**正常なときにいちばん多く出る**ので、
+      画面の面積をいちばん要らない情報が取っていた。
+
+      **色は読み上げられない**ので、意味は `sr-only` の文字と `title` に残す。
+    */
+    useAuthStore.setState({
+      auth: { ...useAuthStore.getState().auth, authenticated: true },
+      loading: false,
+    })
+    render(<App />)
+
+    const 印 = await screen.findByTestId('connection-status')
+    // 画面に読める文字は出ていない（点だけ）
+    expect(印.querySelector('.sr-only')).not.toBeNull()
+    expect(印).toHaveAttribute('title')
+    // 丸い点が1つ。**新しい色は増やさず、役割色から借りる**
+    const 点 = 印.querySelector('[aria-hidden]')
+    expect(点?.className).toMatch(/rounded-full/)
+    expect(点?.className).toMatch(/bg-(cyan|amber|rose)-400/)
+  })
+
   it('自己修復の進行が段階つきで出る', () => {
     // 「勝手に直った」を黙って起こさないための表示（設計§9）。
     // バナーは鍵の外側にある（通っていなくても、直っていることは見せる）

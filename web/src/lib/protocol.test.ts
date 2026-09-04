@@ -4,6 +4,7 @@ import {
   PERMISSION_MODES,
   permissionModeInfo,
   permissionModeLabel,
+  connectionDot,
   permissionModeTone,
   reviveReason,
   reviveState,
@@ -591,6 +592,18 @@ describe('状態のラベル', () => {
     // 全承認をスキップしているセッションが埋もれたら、この工事は失敗である
     expect(permissionModeTone('bypassPermissions')).toContain('red')
     expect(permissionModeTone('plan')).not.toContain('red')
+  })
+
+  it('接続の印は、静止・明滅・エラーで分かれる', () => {
+    // 細かい修正 設計§3-6。**接続済みは静止**——ここが動くと、正常なのに何か
+    // 起きているように見える
+    expect(connectionDot('open')).toBe('bg-cyan-400')
+    expect(connectionDot('connecting')).toContain('animate-pulse')
+    expect(connectionDot('closed')).toContain('rose')
+    // **新しい色を増やしていない**（役割色の dot と同じ綴り）
+    for (const state of ['open', 'connecting', 'closed'] as const) {
+      expect(connectionDot(state)).toMatch(/bg-(cyan|amber|rose)-400/)
+    }
   })
 
   it('表に無いモードでも落ちずにそのまま表示する', () => {
