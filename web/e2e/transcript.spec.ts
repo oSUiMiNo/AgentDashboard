@@ -438,10 +438,17 @@ test('Selected の印は、開いた行にだけ付く', async ({ page }) => {
   await expect(page.locator('[data-testid="transcript-row"]').first()).toBeVisible(届くまで)
   await page.getByTestId('body-toggle').first().click()
 
+  // **【2026-09-04】印は行ではなく中身の器に付く**（細かい修正 設計§5-3）。
+  // 行の左端に引いていた頃は、右寄せの吹き出しとの間に画面3割ぶんの空白ができ、
+  // **長い発言を開くと線だけが縦に伸びて何を指した線か読めなかった**。
+  // したがって**見る相手は器（`.row-shell`）**であって、行ではない。
   const 印 = await page.evaluate(() => {
     const 見る = (sel: string) => {
-      const el = document.querySelector(sel) as HTMLElement | null
-      return el ? getComputedStyle(el).boxShadow : null
+      const 行 = document.querySelector(sel) as HTMLElement | null
+      const 器 = 行?.querySelector('.row-shell') as HTMLElement | null
+      if (!行 || !器) return null
+      const k = getComputedStyle(器)
+      return { 影: k.boxShadow, 地: k.backgroundImage, 行の影: getComputedStyle(行).boxShadow }
     }
     return {
       開いた行: 見る('[data-testid="transcript-row"][data-body-open="true"]'),
@@ -451,11 +458,14 @@ test('Selected の印は、開いた行にだけ付く', async ({ page }) => {
 
   expect(印.開いた行).not.toBeNull()
   expect(印.畳んだ行).not.toBeNull()
-  // 開いた行には印が付く
-  expect(印.開いた行).not.toBe('none')
+  // 開いた行の器には印が付く。**左辺の Accent と背景 Tint の2つ重ね**（§27.3）
+  expect(印.開いた行!.影).not.toBe('none')
+  expect(印.開いた行!.地).not.toBe('none')
   // **畳んだ行には付かない。**ここが本体——付いていたら「選ばれたもの」を示していない
-  expect(印.畳んだ行).toBe('none')
-  expect(印.開いた行).not.toBe(印.畳んだ行)
+  expect(印.畳んだ行!.影).toBe('none')
+  expect(印.開いた行!.影).not.toBe(印.畳んだ行!.影)
+  // **行そのものには引かない。**引くと、右寄せの吹き出しとの間に空白ができる
+  expect(印.開いた行!.行の影).toBe('none')
 })
 
 test('シンプルへ寄せた5件が、実物で成り立っている', async ({ page }) => {
