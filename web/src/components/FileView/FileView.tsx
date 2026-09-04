@@ -262,7 +262,10 @@ export function FileView({
           （{root} からの相対パス）
         </span>
 
-        <div className="ml-auto flex shrink-0 items-center gap-1">
+        {/* **折り返しを許す。** 4つ目を足したので、狭い窓（セッション専用画面の幅）では
+            1行に収まらない。`shrink-0` のまま折り返さないと、そのまま横へはみ出す
+            （`ファイルの中身に掛けた隔離を、script の1段だけ解く` 設計§6-4） */}
+        <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-1">
           <Button
             type="button"
             variant="ghost"
@@ -284,6 +287,24 @@ export function FileView({
               {raw ? '整形して見る' : '生テキストで見る'}
             </Button>
           )}
+          {/* **押す道はリンクにする**（設計§6-2）。`window.open` を呼ぶボタンにすると、
+              中クリック・修飾キー・キーボード操作・ブラウザ自身の「新しいタブで開く」を
+              こちらで作り直すことになる。
+
+              **宛先は `rawUrl` そのまま**（設計§6-3）——画面で文字列を継ぎ足さない。
+
+              **種別で出し分けない**（設計§6-6）。表に無いものも `text/plain` で字が出る
+              ようになったので、押して意味の無い相手でも字か理由のどちらかは必ず出る */}
+          <Button asChild variant="ghost" size="sm">
+            <a
+              data-testid="file-open-tab"
+              href={rawUrl(host, path)}
+              target="_blank"
+              rel="noopener"
+            >
+              ブラウザで開く
+            </a>
+          </Button>
           {onClose !== undefined && (
             <Button
               type="button"
@@ -377,6 +398,15 @@ export function FileView({
                応答に付く CSP の `sandbox` 指令。後者は**URL を直接開かれたときにも
                効く**唯一の鍵になる。
 
+               **`allow-scripts` を1段だけ許してある**（`ファイルの中身に掛けた隔離を、
+               script の1段だけ解く` 設計§4）。理解ドキュメントの作法が文書内で完結する
+               インライン script を許しているのに、こちらが黙って落としていたためである。
+
+               **`allow-same-origin` は書かない。** 両方付くと箱がダッシュボードと同じ
+               出自を名乗れて、script が自分で `sandbox` を外せる——鍵を渡したうえで
+               「外してよい」と言うのと同じになる（設計§4-2）。**サーバの CSP と同じ1段
+               でなければ効かない**ので、片方だけ直さないこと。
+
                `srcdoc` に手元の本文を渡さないのは、**そちらには CSP が付かない**
                ため（設計§14 の1）。
 
@@ -393,7 +423,7 @@ export function FileView({
             <iframe
               data-testid="file-frame"
               title={relative}
-              sandbox=""
+              sandbox="allow-scripts"
               src={rawUrl(host, path)}
               className="h-full w-full border-0 bg-white"
             />
