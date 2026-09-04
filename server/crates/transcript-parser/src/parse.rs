@@ -145,8 +145,44 @@ impl Record {
     }
 
     /// 真偽の欄を読む。**欄ごと無ければ `false`**。
-    fn flag(&self, key: &str) -> bool {
+    pub(crate) fn flag(&self, key: &str) -> bool {
         self.raw.get(key).and_then(Value::as_bool).unwrap_or(false)
+    }
+
+    /// 記録が名乗った出どころの種別（`origin.kind`）。
+    ///
+    /// **ここでは選り分けない。** 知っている値かどうかを判断するのは
+    /// [`crate::origin`] の仕事で、この層は「その行に何と書いてあるか」だけを返す
+    /// （`人が打っていないものを、人の発言として出さない` 設計§1-5）。
+    pub fn origin_kind(&self) -> Option<&str> {
+        self.raw.get("origin")?.get("kind")?.as_str()
+    }
+
+    /// 他セッションからの連絡に付く、送り主のセッション名（`origin.name`）。
+    pub fn origin_name(&self) -> Option<&str> {
+        self.raw.get("origin")?.get("name")?.as_str()
+    }
+
+    /// その指示がどこから来たか（`promptSource`）。実測で `typed` / `queued` /
+    /// `system` / `sdk` の4つがある。
+    ///
+    /// **`origin` とは独立に入る。** スラッシュコマンドの本体は `origin.kind` を
+    /// 持つがこちらを持たず、SDK 起動の指示文はこちらだけを持つ（設計§0-1）。
+    pub fn prompt_source(&self) -> Option<&str> {
+        self.raw.get("promptSource")?.as_str()
+    }
+
+    /// 差し込まれた文の印（`isMeta`）。
+    ///
+    /// **[`Record::is_turn_companion`] とは別物。** あちらは画像の相棒だけを指す
+    /// 狭い判定（`isMeta` ＋ `turnCompanion`）で、こちらは印そのものを読む。
+    pub fn is_meta(&self) -> bool {
+        self.flag("isMeta")
+    }
+
+    /// 圧縮された要約の印（`isCompactSummary`）。
+    pub fn is_compact_summary(&self) -> bool {
+        self.flag("isCompactSummary")
     }
 
     /// CLI が付けたセッションの名前（`ai-title` の行が持つ `aiTitle`）。

@@ -330,6 +330,9 @@ impl SessionThreader {
     fn feed_message(&mut self, source: &str, record: &Record, ts: i64) -> Vec<TreeNode> {
         let root = self.files.get(source).and_then(|file| file.root.clone());
         let blocks = normalize::blocks(record);
+        // 誰が入れたか（`人が打っていないものを、人の発言として出さない` 設計§1）。
+        // **レコードにつき1回だけ決める**——1レコードの中の複数ブロックは同じ出どころ
+        let origin = crate::origin::message_origin(record);
         let uuid = record.uuid.clone().unwrap_or_else(|| self.synthetic_id());
         let mut emitted = Vec::new();
         let mut last_emitted: Option<NodeId> = None;
@@ -369,7 +372,7 @@ impl SessionThreader {
                         parent: root.clone(),
                         node: Node::UserMessage {
                             text,
-                            origin: protocol::MessageOrigin::Unmarked,
+                            origin: origin.clone(),
                             command: None,
                         },
                         ts,
