@@ -52,7 +52,7 @@ function 製品コード(dir: string, acc: string[] = []): string[] {
 
 describe('documentTitle（決める側）', () => {
   it('名前を渡すと、PJT 名と既定が区切りで並ぶ', () => {
-    expect(documentTitle('家計簿')).toBe('家計簿 — AgentDashboard')
+    expect(documentTitle('家計簿')).toBe('家計簿 | AgentDashboard')
   })
 
   it('PJT 名が先、既定が後になる', () => {
@@ -79,7 +79,7 @@ describe('documentTitle（決める側）', () => {
     const 名前 = projectDisplayName('/home/example/b/app', projects)
 
     expect(名前).toBe('app (2)')
-    expect(documentTitle(名前)).toBe('app (2) — AgentDashboard')
+    expect(documentTitle(名前)).toBe('app (2) | AgentDashboard')
   })
 })
 
@@ -96,13 +96,13 @@ describe('useDocumentTitle（書く側）', () => {
   it('回すとタブの名前が変わる', () => {
     renderHook(() => useDocumentTitle('家計簿'))
 
-    expect(document.title).toBe('家計簿 — AgentDashboard')
+    expect(document.title).toBe('家計簿 | AgentDashboard')
   })
 
   it('離れると既定へ戻る', () => {
     // 戻さないと、一覧へ帰ったタブに前の PJT 名が残ったままになる
     const { unmount } = renderHook(() => useDocumentTitle('家計簿'))
-    expect(document.title).toBe('家計簿 — AgentDashboard')
+    expect(document.title).toBe('家計簿 | AgentDashboard')
 
     unmount()
 
@@ -114,11 +114,11 @@ describe('useDocumentTitle（書く側）', () => {
     const { rerender } = renderHook(({ 名前 }) => useDocumentTitle(名前), {
       initialProps: { 名前: '家計簿' as string | undefined },
     })
-    expect(document.title).toBe('家計簿 — AgentDashboard')
+    expect(document.title).toBe('家計簿 | AgentDashboard')
 
     rerender({ 名前: '日記' })
 
-    expect(document.title).toBe('日記 — AgentDashboard')
+    expect(document.title).toBe('日記 | AgentDashboard')
   })
 })
 

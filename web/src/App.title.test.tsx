@@ -145,7 +145,7 @@ describe('タブの名前', () => {
     //
     // 名前が先、既定が後。**タブが狭まったときに残るのは前半**なので、ここが逆だと
     // この工事そのものが消える
-    await waitFor(() => expect(document.title).toBe(`家計簿 — ${BASE_TITLE}`))
+    await waitFor(() => expect(document.title).toBe(`家計簿 | ${BASE_TITLE}`))
   })
 
   it('セッション専用画面では、そのカードが属する PJT の名前が出る', async () => {
@@ -154,7 +154,7 @@ describe('タブの名前', () => {
 
     開く(`/s/${CARD}`)
 
-    await waitFor(() => expect(document.title).toBe(`家計簿 — ${BASE_TITLE}`))
+    await waitFor(() => expect(document.title).toBe(`家計簿 | ${BASE_TITLE}`))
   })
 
   it('同名の PJT を開くと、タブにも番号が付く', async () => {
@@ -172,7 +172,7 @@ describe('タブの名前', () => {
     開く(`/p/local/${encodeURIComponent(別の道)}`)
 
     await waitFor(() =>
-      expect(document.title).toBe(`家計簿 (2) — ${BASE_TITLE}`),
+      expect(document.title).toBe(`家計簿 (2) | ${BASE_TITLE}`),
     )
   })
 

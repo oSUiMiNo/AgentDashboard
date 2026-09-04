@@ -224,7 +224,7 @@ test('セッション画面と PJT 画面を行き来できる', async ({ page }
     一覧 →`/s/`→`/p/` を回る唯一のテストなので、**移った先で名前が付いてくるか**を
     確かめられるのはここしかない。一覧は PJT に属さないので既定のまま。
   */
-  const タブ名 = `${path.basename(WORK_DIR)} — AgentDashboard`
+  const タブ名 = `${path.basename(WORK_DIR)} | AgentDashboard`
   await expect(page).toHaveTitle('AgentDashboard')
 
   // 一覧 → セッション専用画面。**開くのはダブルクリック**（並べ替え設計§4-1）
@@ -482,7 +482,7 @@ test('いきなり開いた画面で ✕ を押しても、アプリの外へ出
   const 新しいタブ = await page.context().newPage()
   await 新しいタブ.goto(`/s/${cardId}`)
   await expect(新しいタブ.getByTestId('session-view')).toBeVisible()
-  await expect(新しいタブ).toHaveTitle(`${path.basename(WORK_DIR)} — AgentDashboard`)
+  await expect(新しいタブ).toHaveTitle(`${path.basename(WORK_DIR)} | AgentDashboard`)
 
   await 新しいタブ.getByTestId('close-session').click()
 
