@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen } from '@testing-library/react'
-import App from './App'
+import App, { 読み直すまでの間 } from './App'
 import { markComposerBusy } from '@/lib/composerBusy'
 import { useAuthStore } from '@/stores/auth'
 import { useWsStore } from '@/stores/ws'
@@ -213,10 +213,27 @@ describe('版が切り替わったときの読み直し', () => {
   /** 取り下げ忘れが次のテストへ漏れないようにする（台帳はモジュールに1つ）。 */
   let 取り下げ: (() => void) | null = null
 
+  /**
+   * **偽の時計を使う。** 読み直しは一言を読ませてから走る（§18）ので、素の時計だと
+   * 1.2秒待つテストが並ぶ。**この describe の中だけ**に閉じてある——外の非同期を
+   * 待つテストを止めないため。
+   */
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
   afterEach(() => {
+    vi.useRealTimers()
     取り下げ?.()
     取り下げ = null
   })
+
+  /** 一言を読ませる間を飛ばす。 */
+  function 間を飛ばす() {
+    act(() => {
+      vi.advanceTimersByTime(読み直すまでの間)
+    })
+  }
 
   /**
    * **描いたあとに印を立てる。** 立った状態で描く形にすると、効果の依存を `[]` に
@@ -229,7 +246,44 @@ describe('版が切り替わったときの読み直し', () => {
       useAuthStore.setState({ serverChanged: true })
     })
 
+    // **すぐには読み直さない。** 一言を読ませてから（§18）
+    expect(読み直した).not.toHaveBeenCalled()
+    間を飛ばす()
+
     expect(読み直した).toHaveBeenCalledTimes(1)
+  })
+
+  /**
+   * **頼んでいないのに読み直すので、指示の形にすると嘘になる**（§18）。
+   * 「読み込み直してください」は、押さないと何も起きないときの言い方である。
+   */
+  it('読み直す側のバナーは、指示ではなく予告になっている', () => {
+    render(<App />)
+
+    act(() => {
+      useAuthStore.setState({ serverChanged: true })
+    })
+
+    const banner = screen.getByTestId('server-changed-banner')
+    expect(banner).toHaveTextContent('読み直します')
+    expect(banner).not.toHaveTextContent('読み込み直してください')
+  })
+
+  /**
+   * **畳まれたら時計を止める。** 止めないと、別の画面へ移ったあとに前の画面の判断で
+   * ページが飛ぶ——押していない瞬間に画面が入れ替わる形（§6 で退けたもの）が、
+   * 待ちを入れたことで新しく生まれる。
+   */
+  it('一言を出したあと畳まれたら、読み直さない', () => {
+    const view = render(<App />)
+    act(() => {
+      useAuthStore.setState({ serverChanged: true })
+    })
+
+    view.unmount()
+    間を飛ばす()
+
+    expect(読み直した).not.toHaveBeenCalled()
   })
 
   it('抱えているタブは読み直さず、バナーを出す', () => {
@@ -282,6 +336,7 @@ describe('版が切り替わったときの読み直し', () => {
     act(() => {
       useAuthStore.setState({ auth: 版('0.1.81') })
     })
+    間を飛ばす()
 
     expect(読み直した).toHaveBeenCalledTimes(1)
   })

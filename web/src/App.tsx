@@ -44,6 +44,21 @@ const CONNECTION_LABEL: Record<string, string> = {
   closed: '切断',
 }
 
+/**
+ * 版が変わったと知らせてから、実際に読み直すまでの間（ミリ秒。設計§18）。
+ *
+ * **無言で画面が入れ替わると、押していない人には故障に見える**（利用者の指定
+ * 2026-09-05）。**ただし承認は求めない**——待つのは一言を読ませるためだけで、
+ * 押さなくても読み直る。
+ *
+ * **1200ms は「短い1文を読める最短」から取った。** これより短いと読む前に消え、
+ * 長いと「早く読み直せ」という待たされ感になる。**`DESIGN.md` §28 の「最長450ms」は
+ * 当たらない**——あれは動きの長さの上限で、こちらは文字を読ませる時間である。
+ *
+ * **待っている間に押せる。** バナーのボタンは残してあるので、待てない人はそちらへ行ける。
+ */
+export const 読み直すまでの間 = 1200
+
 
 function App() {
   return (
@@ -390,7 +405,11 @@ function ServerChangedBanner() {
     // **積んでから読み直す。** `location.reload()` は `pagehide` を発火させ、
     // `installClientLogs` がそこで `sendBeacon` へ載せ替えるので、この1行は持ち出される
     report('version_reload', 'INFO', '版が変わったので、この画面を読み直す')
-    window.location.reload()
+    // **一言出してから読み直す**（設計§18・利用者の指定 2026-09-05）。無言で画面が
+    // 入れ替わると、押していない人には故障に見える。**承認は求めない**——待つのは
+    // 読ませるためだけで、押さなくても読み直る
+    const 時計 = setTimeout(() => window.location.reload(), 読み直すまでの間)
+    return () => clearTimeout(時計)
   }, [serverChanged, version])
 
   if (!serverChanged) {
@@ -404,9 +423,13 @@ function ServerChangedBanner() {
       <span>
         ダッシュボードの版が変わりました。
         <span className="text-muted-foreground ml-2 text-xs">
+          {/*
+            **読み直す側では「してください」と言わない。** 頼んでいないのに
+            勝手に読み直すので、指示の形にすると嘘になる（§18）
+          */}
           {抱えている数 > 0
             ? `添付があるため、自動では読み直しません（${抱えている数} 件）`
-            : 'この画面は古いままなので、読み込み直してください'}
+            : 'この画面を読み直します'}
         </span>
       </span>
       <Button size="sm" onClick={() => window.location.reload()}>
