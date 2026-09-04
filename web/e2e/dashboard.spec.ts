@@ -68,7 +68,9 @@ test('フックの受信にあわせて小窓の状態が変わる', async ({ pa
     'false',
   )
   await expect(back.getByTestId('session-echo')).toHaveCount(0)
-  await expect(back.getByTestId('elapsed')).toContainText('最終活動')
+  // 画面からは語を落とし、説明にだけ残した（細かい修正 要件22）
+  await expect(back.getByTestId('elapsed')).not.toContainText('最終活動')
+  await expect(back.getByTestId('elapsed')).toHaveAttribute('title', /最終活動/)
 })
 
 test('サブエージェントの稼働中はバッジが出る', async ({ page }) => {
@@ -89,6 +91,53 @@ test('サブエージェントの稼働中はバッジが出る', async ({ page 
   await expect(
     page.getByTestId('session-tile').first().getByTestId('subagent-badge'),
   ).toHaveCount(0)
+})
+
+test('カードの操作は、マウスを乗せたときに3つ出る', async ({ page }) => {
+  /*
+    **「復旧」の板は電源ボタンへ置き換わり、ゴミ箱と編集が並んだ**（細かい修正 要件11・12）。
+
+    **並びは取り返しの付く順**（編集 → ゴミ箱 → 電源）。逆にすると、押し間違えたときに
+    いちばん痛いものが指の近くに来る。
+
+    走っているカードでは**点灯した電源＝スリープ**が同じ位置に出る——止めることと
+    起こすことを1つのボタンで言えるようにした（設計§4-1）。
+  */
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+
+  const 群 = tile.getByTestId('tile-ops')
+  await tile.hover()
+  await expect(群).toBeVisible()
+
+  // 3つまで（`DESIGN.md` §15.3）。4つ目を足さない
+  await expect(群.locator('[data-testid]')).toHaveCount(3)
+
+  // 走っているので、電源は点いていて「スリープ」を名乗る
+  const 電源 = tile.getByTestId('power-tile')
+  await expect(電源).toHaveAttribute('data-power', 'on')
+  await expect(電源).toHaveAttribute('aria-label', 'スリープ')
+
+  // 板を作っていない（塗るのは電源だけ・`DESIGN.md` §12.3・§15.1）
+  for (const id of ['nickname-edit', 'archive-card']) {
+    await expect(tile.getByTestId(id)).not.toHaveClass(/shadow-\[/)
+  }
+})
+
+test('「全て復旧」は無くなり、まとめて起こすのは帯の電源だけになった', async ({
+  page,
+}) => {
+  // **取り返しの付かない範囲を、押す人が決められる**（細かい修正 要件13・設計§4-2）
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+
+  await expect(page.getByTestId('revive-all')).toHaveCount(0)
+  await expect(page.getByTestId('revive-all-row')).toHaveCount(0)
+
+  // 選ぶまで帯そのものが出ない
+  await expect(page.getByTestId('bulk-revive')).toHaveCount(0)
+  await tile.click()
+  await expect(page.getByTestId('bulk-revive')).toBeVisible()
 })
 
 test('小窓とグループ余白でダブルクリックの意味が変わる', async ({ page }) => {

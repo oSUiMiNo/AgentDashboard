@@ -6,12 +6,13 @@ import type { SessionMeta } from '@/lib/protocol'
 import {
   applySessionSnapshot,
   clearSessions,
+  getSessions,
   upsertSession,
 } from '@/stores/sessions'
 import { useAuthStore } from '@/stores/auth'
 import { useSettingsStore } from '@/stores/settings'
 import { useWsStore } from '@/stores/ws'
-import { clearSelection, getSelection } from '@/stores/selection'
+import { clearSelection, getSelection, toggleSelect } from '@/stores/selection'
 import { remoteAgent, settingsFixture } from '@/test/fixtures'
 
 /**
@@ -47,6 +48,26 @@ function meta(cardId: string, overrides: Partial<SessionMeta> = {}): SessionMeta
     nickname: null,
     ...overrides,
   }
+}
+
+/**
+ * **「全て復旧」は廃止された**ので、まとめて起こす道は「選ぶ → 帯の電源」だけになった
+ * （細かい修正 要件13・設計§4-2）。**取り返しの付かない範囲を、押す人が決められる。**
+ *
+ * 以前は `revive-all` を1回押すだけだった。ここが増えたぶんは、**選ばずに全部起こす道が
+ * 無くなったこと**そのものである。
+ */
+async function 選んで起こす(...cardIds: string[]) {
+  const 対象 = cardIds.length > 0 ? cardIds : getSessions().map((m) => m.card_id)
+  act(() => {
+    // **必ず地ならしする。** `toggleSelect` は既に選ばれているものを外すので、
+    // 前の選択が残っていると狙いと逆に働く
+    clearSelection()
+    for (const id of 対象) {
+      toggleSelect('card', id)
+    }
+  })
+  await userEvent.click(screen.getByTestId('bulk-revive'))
 }
 
 function renderGrid() {
@@ -143,32 +164,49 @@ describe('全て復旧', () => {
   }
 
   beforeEach(() => {
+    // **選択を持ち越さない。** まとめて起こす道が「選ぶ → 帯の電源」になったので、
+    // 前のテストの選択が残っていると `toggleSelect` が**外す側**に働いて数が合わなくなる
+    clearSelection()
     useSettingsStore.setState({ settings: settingsFixture(), loading: false })
     useWsStore.setState({ revive: vi.fn() })
   })
 
-  it('0枚のときは0枚と言い、押させない', () => {
+  it('起こせるカードが1枚も無ければ、帯の電源は押せない', () => {
+    /*
+      **「全て復旧」の行は廃止した**（細かい修正 要件13・設計§4-2）。0枚を言葉で
+      出していた場所も一緒に消えたので、**押せないことは帯の電源が示す**。
+
+      内訳（`接続断 X枚／終了 Y枚`）は**帯へ移さずに落とした**。帯は選んだものについての
+      面なので、**選んでいないものの集計を置くと意味が食い違う**。
+    */
     applySessionSnapshot([meta('a'), meta('b')])
     renderGrid()
+    act(() => toggleSelect('card', 'a'))
 
-    expect(screen.getByTestId('revive-breakdown')).toHaveTextContent(
-      '起こし直せるカードはありません（0枚）',
-    )
-    expect(screen.getByTestId('revive-all')).toBeDisabled()
+    expect(screen.getByTestId('bulk-revive')).toBeDisabled()
   })
 
-  it('内訳を接続断と終了に分けて出す', () => {
-    // 合計だけだと、**自分で閉じたものが黙って蘇る**ことに気づけない
-    applySessionSnapshot([
-      stale('a'),
-      stale('b'),
-      stale('c', { agent_connected: true, status: { kind: 'ended', ok: true } }),
-      meta('d'),
-    ])
+  it('「全て復旧」の行そのものが無くなっている', () => {
+    applySessionSnapshot([stale('a'), meta('b')])
     renderGrid()
 
-    expect(screen.getByTestId('revive-breakdown')).toHaveTextContent(
-      '起こし直せるカード：接続断 2枚／終了 1枚',
+    expect(screen.queryByTestId('revive-all-row')).toBeNull()
+    expect(screen.queryByTestId('revive-all')).toBeNull()
+    expect(screen.queryByTestId('revive-breakdown')).toBeNull()
+  })
+
+  it('帯の電源は、選んだうち起こせる枚数を名乗る', () => {
+    // **押す前に数が出る**（要件）。選んでいないものは数に入らない
+    applySessionSnapshot([stale('a'), stale('b'), meta('c')])
+    renderGrid()
+    act(() => {
+      toggleSelect('card', 'a')
+      toggleSelect('card', 'c')
+    })
+
+    expect(screen.getByTestId('bulk-revive')).toHaveAttribute(
+      'aria-label',
+      '選んだうち、止まっている 1枚を起こす',
     )
   })
 
@@ -178,7 +216,7 @@ describe('全て復旧', () => {
     applySessionSnapshot([stale('a'), meta('b'), stale('c')])
     renderGrid()
 
-    await userEvent.click(screen.getByTestId('revive-all'))
+    await 選んで起こす()
 
     expect(revive).toHaveBeenCalledTimes(2)
     expect(revive).toHaveBeenCalledWith('a')
@@ -213,10 +251,7 @@ describe('全て復旧', () => {
     ])
     renderGrid()
 
-    expect(screen.getByTestId('revive-breakdown')).toHaveTextContent(
-      '接続断 1枚／終了 0枚',
-    )
-    await userEvent.click(screen.getByTestId('revive-all'))
+    await 選んで起こす()
     expect(revive).toHaveBeenCalledTimes(1)
     expect(revive).toHaveBeenCalledWith('a')
   })
@@ -230,43 +265,32 @@ describe('全て復旧', () => {
     ])
     renderGrid()
 
-    expect(screen.getByTestId('revive-breakdown')).toHaveTextContent('接続断 2枚')
     await userEvent.selectOptions(screen.getByTestId('account-filter'), 'しごと')
 
-    expect(screen.getByTestId('revive-breakdown')).toHaveTextContent('接続断 1枚')
-    await userEvent.click(screen.getByTestId('revive-all'))
+    await 選んで起こす()
     expect(revive).toHaveBeenCalledTimes(1)
     expect(revive).toHaveBeenCalledWith('a')
   })
 
-  it('接続断になった瞬間に内訳が動く', () => {
-    // **接続断は構造を変えない**（同じ箱に同じカードが並んだまま）ので、
-    // 構造の購読だけに任せると内訳が古いまま残る
+  it('接続断になった瞬間に、帯の数え直しが効く', () => {
+    /*
+      **接続断は構造を変えない**（同じ箱に同じカードが並んだまま）ので、構造の購読だけに
+      任せると数が古いまま残る。内訳の文言は落としたが（要件13）、**数え直しそのものは
+      帯の電源が引き継いでいる**ので、ここで見る相手を替えて残す。
+    */
     applySessionSnapshot([meta('a')])
     renderGrid()
-    expect(screen.getByTestId('revive-breakdown')).toHaveTextContent('0枚')
+    act(() => toggleSelect('card', 'a'))
+    expect(screen.getByTestId('bulk-revive')).toBeDisabled()
 
     act(() => {
       upsertSession(stale('a'))
     })
 
-    expect(screen.getByTestId('revive-breakdown')).toHaveTextContent('接続断 1枚')
-  })
-
-  it('接続断から終了へ移ったら、内訳の内わけも動く', () => {
-    // 顔ぶれだけを比べると、同じカードが別の欄へ移ったときに気づけない
-    applySessionSnapshot([stale('a')])
-    renderGrid()
-    expect(screen.getByTestId('revive-breakdown')).toHaveTextContent(
-      '接続断 1枚／終了 0枚',
-    )
-
-    act(() => {
-      upsertSession(stale('a', { status: { kind: 'ended', ok: false } }))
-    })
-
-    expect(screen.getByTestId('revive-breakdown')).toHaveTextContent(
-      '接続断 0枚／終了 1枚',
+    expect(screen.getByTestId('bulk-revive')).toBeEnabled()
+    expect(screen.getByTestId('bulk-revive')).toHaveAttribute(
+      'aria-label',
+      '選んだうち、止まっている 1枚を起こす',
     )
   })
 })
@@ -338,7 +362,7 @@ describe('全て復旧のメモリの歯止め', () => {
     applySessionSnapshot([stale('a', 1), stale('b', 2)])
     renderGrid()
 
-    await userEvent.click(screen.getByTestId('revive-all'))
+    await 選んで起こす()
 
     expect(screen.queryByTestId('revive-budget-dialog')).not.toBeInTheDocument()
     expect(revive).toHaveBeenCalledTimes(2)
@@ -351,7 +375,7 @@ describe('全て復旧のメモリの歯止め', () => {
     applySessionSnapshot([stale('a', 1), stale('b', 2), stale('c', 3)])
     renderGrid()
 
-    await userEvent.click(screen.getByTestId('revive-all'))
+    await 選んで起こす()
 
     expect(screen.getByTestId('revive-budget-dialog')).toBeInTheDocument()
     // **数と、いま入る枚数の両方を出す。** 枚数だけでは資源が読めない
@@ -367,7 +391,7 @@ describe('全て復旧のメモリの歯止め', () => {
     applySessionSnapshot([stale('古い', 100), stale('新しい', 300), stale('中', 200)])
     renderGrid()
 
-    await userEvent.click(screen.getByTestId('revive-all'))
+    await 選んで起こす()
     await userEvent.click(screen.getByTestId('revive-budget-fitting'))
 
     expect(revive).toHaveBeenCalledTimes(2)
@@ -385,7 +409,7 @@ describe('全て復旧のメモリの歯止め', () => {
     applySessionSnapshot([stale('a', 1), stale('b', 2), stale('c', 3)])
     renderGrid()
 
-    await userEvent.click(screen.getByTestId('revive-all'))
+    await 選んで起こす()
     await userEvent.click(screen.getByTestId('revive-budget-all'))
 
     expect(revive).toHaveBeenCalledTimes(3)
@@ -398,7 +422,7 @@ describe('全て復旧のメモリの歯止め', () => {
     applySessionSnapshot([stale('a', 1), stale('b', 2)])
     renderGrid()
 
-    await userEvent.click(screen.getByTestId('revive-all'))
+    await 選んで起こす()
     await userEvent.click(screen.getByTestId('revive-budget-cancel'))
 
     expect(revive).not.toHaveBeenCalled()
@@ -410,7 +434,7 @@ describe('全て復旧のメモリの歯止め', () => {
     applySessionSnapshot([stale('a', 1)])
     renderGrid()
 
-    await userEvent.click(screen.getByTestId('revive-all'))
+    await 選んで起こす()
 
     expect(screen.getByTestId('revive-budget-fitting')).toBeDisabled()
     expect(screen.getByTestId('revive-budget-all')).toBeEnabled()
@@ -425,7 +449,7 @@ describe('全て復旧のメモリの歯止め', () => {
     applySessionSnapshot([stale('a', 1), stale('b', 2), stale('c', 3)])
     renderGrid()
 
-    await userEvent.click(screen.getByTestId('revive-all'))
+    await 選んで起こす()
 
     expect(screen.queryByTestId('revive-budget-dialog')).not.toBeInTheDocument()
     expect(revive).toHaveBeenCalledTimes(3)
@@ -445,7 +469,7 @@ describe('全て復旧のメモリの歯止め', () => {
     applySessionSnapshot([stale('a', 1), stale('b', 2), stale('c', 3)])
     renderGrid()
 
-    await userEvent.click(screen.getByTestId('revive-all'))
+    await 選んで起こす()
     expect(screen.getByTestId('revive-budget-dialog')).toBeInTheDocument()
 
     // 開けている間に、別の画面から `b` が戻った（＝もう抜け殻ではない）
@@ -466,7 +490,7 @@ describe('全て復旧のメモリの歯止め', () => {
     applySessionSnapshot([stale('a', 1), stale('b', 2), stale('c', 3)])
     renderGrid()
 
-    await userEvent.click(screen.getByTestId('revive-all'))
+    await 選んで起こす()
     act(() => {
       applySessionSnapshot([stale('a', 1), stale('c', 3)])
     })
@@ -486,7 +510,7 @@ describe('全て復旧のメモリの歯止め', () => {
     applySessionSnapshot([stale('a', 1), stale('b', 2)])
     renderGrid()
 
-    await userEvent.click(screen.getByTestId('revive-all'))
+    await 選んで起こす()
 
     expect(screen.queryByTestId('revive-budget-dialog')).not.toBeInTheDocument()
     expect(revive).toHaveBeenCalledTimes(2)
@@ -511,7 +535,7 @@ describe('全て復旧のメモリの歯止め', () => {
     applySessionSnapshot([stale('a', 1), stale('b', 2)])
     renderGrid()
 
-    await userEvent.click(screen.getByTestId('revive-all'))
+    await 選んで起こす()
 
     expect(revive).not.toHaveBeenCalled()
     expect(screen.queryByTestId('revive-budget-dialog')).not.toBeInTheDocument()
@@ -539,7 +563,7 @@ describe('全て復旧のメモリの歯止め', () => {
     ])
     renderGrid()
 
-    await userEvent.click(screen.getByTestId('revive-all'))
+    await 選んで起こす()
 
     const 行 = screen.getAllByTestId('revive-budget-host')
     const 文 = 行.map((row) => row.textContent ?? '').join('\n')
@@ -562,7 +586,7 @@ describe('選択モードから出る道', () => {
     await userEvent.click(screen.getByTestId('session-tile'))
     expect(getSelection().ids).toHaveLength(1)
 
-    await userEvent.click(screen.getByTestId('revive-breakdown'))
+    await userEvent.click(screen.getByTestId('tile-grid-ground'))
     expect(getSelection().ids).toEqual([])
   })
 

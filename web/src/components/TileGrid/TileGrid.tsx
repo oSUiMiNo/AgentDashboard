@@ -148,8 +148,6 @@ export function TileGrid() {
     あるため。数はブラウザが手元のカードから数える。版の切替と違い、**全カードを
     既に持っている**ので、サーバに数えさせる理由が無い。
   */
-  let disconnected = 0
-  let ended = 0
   const targets: ReviveTarget[] = []
   for (const cardId of candidates) {
     const meta = getSession(cardId)
@@ -166,11 +164,6 @@ export function TileGrid() {
       host: hostOf(meta.agent_id),
       lastActivityAt: meta.last_activity_at,
     })
-    if (meta.status.kind === 'ended') {
-      ended += 1
-    } else {
-      disconnected += 1
-    }
   }
 
   /*
@@ -381,6 +374,11 @@ export function TileGrid() {
     <div
       className="flex flex-col gap-3"
       /*
+        **目印を持たせる**（細かい修正 要件13）。「全て復旧」の行を外したとき、
+        地を押す検査がその行を的にしていたので、**地そのものを名指しできるようにした**
+      */
+      data-testid="tile-grid-ground"
+      /*
         **一覧の地（枠でもカードでもないところ）を押すと全部外れる**（設計§4-2）。
         子は自分の `onClick` で `stopPropagation` しているので、ここへ届くのは
         本当に地を押したときだけ
@@ -388,36 +386,16 @@ export function TileGrid() {
       onClick={() => clearSelection()}
     >
       {/*
-        絞り込みの `<select>` に相乗りさせず、**独立した行**にする（設計§9-3）。
-        あちらは名乗りを持つカードが1枚も無ければ消えるので、載せると一緒に消える。
+        **「全て復旧」は廃止した**（細かい修正 要件13・設計§4-2）。代わりは**帯の電源**で、
+        あちらは**選んだものだけ**に効く——**取り返しの付かない範囲を、押す人が決められる**。
 
-        内訳は**押すボタンより上**に出す（版の切替の雛形）。**0枚なら0枚と言う**——
-        「全て」の中身が分からないと押せない、という要件はここで満たす
+        内訳の文言（`接続断 X枚／終了 Y枚`）は**帯へ移さずに落とした**。帯は選んだものに
+        ついての面なので、**選んでいないものの集計を置くと意味が食い違う**。数が知りたければ
+        カードを見れば分かる。
+
+        **メモリの歯止めのダイアログは残っている**（下の `plan`）。まとめて起こす限り必要で、
+        いまは帯の電源から出る。
       */}
-      <div
-        data-testid="revive-all-row"
-        className="flex flex-wrap items-center gap-2 text-xs"
-      >
-        <span data-testid="revive-breakdown" className="text-muted-foreground">
-          {targets.length === 0
-            ? '起こし直せるカードはありません（0枚）'
-            : `起こし直せるカード：接続断 ${disconnected}枚／終了 ${ended}枚`}
-        </span>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          data-testid="revive-all"
-          disabled={targets.length === 0 || asking}
-          title="接続断・終了しているカードを、元の CLI セッションでまとめて起こし直します"
-          onClick={() => {
-            void 押した()
-          }}
-        >
-          {asking ? '数えています…' : '全て復旧'}
-        </Button>
-      </div>
-
       {plan !== null && (
         <ReviveBudgetDialog
           plan={plan}

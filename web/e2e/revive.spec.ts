@@ -132,17 +132,33 @@ interface Queued {
  * `Starting` のまま席を握り続ける（天井は60秒）。**この間だけ、待っている側の
  * 「復旧中…」と、二度目の頼みへの断りを落ち着いて観測できる。**
  */
+/** 消灯した電源＝止まっているカード。**「接続断 N枚」の内訳表示の置き換え** */
+function 消えている(page: Page) {
+  return page.locator('[data-testid="power-tile"][data-power="off"]')
+}
+
+/**
+ * まとめて起こす道は**「選ぶ → 帯の電源」だけ**になった（細かい修正 要件13・設計§4-2）。
+ * 「全て復旧」は廃止——**取り返しの付かない範囲を、押す人が決められる。**
+ */
+async function 選んで起こす(page: Page) {
+  const cards = page.getByTestId('session-tile')
+  const 枚数 = await cards.count()
+  for (let i = 0; i < 枚数; i += 1) {
+    await cards.nth(i).click()
+  }
+  await page.getByTestId('bulk-revive').click()
+}
+
 async function queueOne(page: Page, index: number): Promise<Queued> {
   const ids: string[] = []
   for (let count = 0; count < 3; count += 1) {
     ids.push(await spawnOn(page, index))
   }
   await orphanAgent(page, index)
-  await expect(page.getByTestId('revive-breakdown')).toContainText('接続断 3枚', {
-    timeout: 60_000,
-  })
+  await expect(消えている(page)).toHaveCount(3, { timeout: 60_000 })
 
-  await page.getByTestId('revive-all').click()
+  await 選んで起こす(page)
 
   // 押した直後は3枚とも「復旧中…」で、席を取った2枚が `live` になってボタンごと
   // 消えると1枚だけが残る。**0 でも 3 でもなく 1 に落ち着くのを待つ**ので、
@@ -273,12 +289,9 @@ test('全て復旧を押すと、抜け殻がまとめて戻る', async ({ page 
 
   await orphanAgent(page, 2)
 
-  // 押す前に内訳が出ていること。**「全て」の中身が分からないと押せない**（要件）
-  await expect(page.getByTestId('revive-breakdown')).toContainText(
-    '接続断 2枚／終了 0枚',
-    { timeout: 60_000 },
-  )
-  await page.getByTestId('revive-all').click()
+  // 押す前に枚数が分かること（要件）。**内訳の文言は落としたが、数は帯の電源が名乗る**
+  await expect(消えている(page)).toHaveCount(2, { timeout: 60_000 })
+  await 選んで起こす(page)
 
   for (const cardId of [first, second]) {
     await expect(tileOf(page, cardId).getByTestId('disconnected-badge')).toHaveCount(0, {
@@ -286,8 +299,7 @@ test('全て復旧を押すと、抜け殻がまとめて戻る', async ({ page 
     })
   }
   // 戻りきったら対象は0枚。**0枚なら0枚と言う**——沈黙させない
-  await expect(page.getByTestId('revive-breakdown')).toContainText('0枚')
-  await expect(page.getByTestId('revive-all')).toBeDisabled()
+  await expect(消えている(page)).toHaveCount(0)
 })
 
 test('席が空くまで、順番待ちのカードは復旧中のまま', async ({ page }) => {
@@ -313,8 +325,8 @@ test('順番待ちのカードへもう一度頼むと、そのカードに断�
   const { pending, started } = await queueOne(page, 2)
 
   // 対象は待っている1枚だけになっている（起き上がった2枚は `live`）
-  await expect(page.getByTestId('revive-breakdown')).toContainText('接続断 1枚／終了 0枚')
-  await page.getByTestId('revive-all').click()
+  await expect(消えている(page)).toHaveCount(1)
+  await 選んで起こす(page)
 
   // **待ち行列に並ばせない**（設計§8-1）。同じカードが2つ並ぶと、席が空いたときに
   // 両方とも通る。断りは画面全体の帯ではなく**そのカード**に出る（§9-5）
@@ -387,11 +399,9 @@ test('入りきらないときはダイアログが出て、押すまで1枚も�
     await orphanAgent(page, 2, {
       AGENTDASHBOARD_REVIVE_HEADROOM_MB: '100000000',
     })
-    await expect(page.getByTestId('revive-breakdown')).toContainText('接続断 2枚', {
-      timeout: 60_000,
-    })
+    await expect(消えている(page)).toHaveCount(2, { timeout: 60_000 })
 
-    await page.getByTestId('revive-all').click()
+    await 選んで起こす(page)
 
     const dialog = page.getByTestId('revive-budget-dialog')
     await expect(dialog).toBeVisible({ timeout: 60_000 })
@@ -429,11 +439,9 @@ test('それでも全部を選ぶと、PC が床で断って理由がカード�
     await orphanAgent(page, 2, {
       AGENTDASHBOARD_REVIVE_HEADROOM_MB: '100000000',
     })
-    await expect(page.getByTestId('revive-breakdown')).toContainText('接続断 1枚', {
-      timeout: 60_000,
-    })
+    await expect(消えている(page)).toHaveCount(1, { timeout: 60_000 })
 
-    await page.getByTestId('revive-all').click()
+    await 選んで起こす(page)
     await expect(page.getByTestId('revive-budget-dialog')).toBeVisible({ timeout: 60_000 })
     await page.getByTestId('revive-budget-all').click()
 
