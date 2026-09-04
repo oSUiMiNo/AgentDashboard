@@ -485,6 +485,11 @@ test('待っている指示が、リモート経路でも出て消える', async
   const 待ち = page.locator('[data-testid="transcript-row"][data-kind="queued_message"]')
   await expect(待ち).toHaveCount(1, { timeout: 30_000 })
   await expect(page.getByText('リモートでも待つ').first()).toBeVisible({ timeout: 30_000 })
+  // **見え方もリモートで同じ**（設計§7-1・2026-09-05）。器は利用者の発言と同じ吹き出しで、
+  // 待ちであることは印1つで名乗る——「待機中」という語は出さない
+  await expect(待ち.getByTestId('user-bubble')).toHaveAttribute('data-queued', 'true', {
+    timeout: 30_000,
+  })
 
   await setTerminalView(page, true)
   await dequeue(page)

@@ -1374,9 +1374,37 @@ test('待っている指示が出て、読まれると消える', async ({ page 
   await showTranscript(page)
   const 待ち = page.locator('[data-testid="transcript-row"][data-kind="queued_message"]')
   await expect(待ち).toHaveCount(1, 届くまで)
-  await expect(page.getByText('待機中').first()).toBeVisible(届くまで)
-  // **何が待っているのかが読めること**（設計§7-3 の床）。「待機中」だけでは手応えにならない
+  // **利用者の発言と同じ吹き出しで出る**（設計§7-1・2026-09-05 に作り直し）。
+  // 「待機中」という語は出さず、**状態は地の色だけ**で言う（要件1-4）
+  await expect(待ち.getByTestId('user-bubble')).toHaveAttribute('data-queued', 'true', 届くまで)
+  await expect(page.getByText('待機中')).toHaveCount(0)
+  // **何が待っているのかが読めること**（設計§7-3 の床）
   await expect(page.getByText('あとで直して').first()).toBeVisible(届くまで)
+
+  // **地の色は、吹き出しの青を灰色側へ寄せたもの**（設計§7-2・要件1-3）。
+  // `oklch(from …)` の派生は jsdom が解けないので、**実物のブラウザで測るのはここだけ**。
+  // 明度は動かさず彩度だけを落とすので、**文字とのコントラストの床は割れない**
+  const 地 = await page.evaluate(() => {
+    const 器 = document.querySelector(
+      '[data-kind="queued_message"] [data-testid="user-bubble"]',
+    )
+    if (!器) return null
+    const 読む = (c: string): [number, number, number] | null => {
+      const m = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(c)
+      return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null
+    }
+    // 彩度は「いちばん明るい成分と暗い成分の開き」で見る（HSL の S と同じ向き）
+    const 彩度 = ([r, g, b]: [number, number, number]) => (Math.max(r, g, b) - Math.min(r, g, b)) / 255
+    const 明度 = ([r, g, b]: [number, number, number]) => (Math.max(r, g, b) + Math.min(r, g, b)) / 2 / 255
+    const 待ち = 読む(getComputedStyle(器).backgroundColor)
+    const 青: [number, number, number] = [23, 62, 118]
+    return 待ち && { 待ちの彩度: 彩度(待ち), 青の彩度: 彩度(青), 待ちの明度: 明度(待ち), 青の明度: 明度(青) }
+  })
+  expect(地, '待機中の吹き出しの地が読めない').not.toBeNull()
+  // **青のままではない**（灰色側へ寄っている）
+  expect(地!.待ちの彩度).toBeLessThan(地!.青の彩度)
+  // **明度は動かしていない**（床＝文字とのコントラストを守るため）
+  expect(Math.abs(地!.待ちの明度 - 地!.青の明度)).toBeLessThan(0.06)
 
   // 読まれた（待ち行列から出た）
   await showTerminal(page)
@@ -1385,6 +1413,31 @@ test('待っている指示が出て、読まれると消える', async ({ page 
   await showTranscript(page)
   // **消える。** 単一ノードを消す経路は無いので、`taken` を立てて行から落としている
   await expect(待ち).toHaveCount(0, 届くまで)
+})
+
+test('あとから履歴が届いても、待っている指示はいちばん下に残る', async ({ page }) => {
+  // **要件1-5。** 届いた順に積むと、待っているあいだに来たエージェントの発言が
+  // 待ちの**下**に付いてしまう。抜いて末尾へ回しているかを、実物の鎖で見る
+  await startSession(page)
+
+  await showTerminal(page)
+  await fireHook(page, 'SessionStart')
+  await enqueue(page, 'あとで直して')
+
+  await showTranscript(page)
+  const 待ち = page.locator('[data-testid="transcript-row"][data-kind="queued_message"]')
+  await expect(待ち).toHaveCount(1, 届くまで)
+
+  // 待っているあいだに、エージェント側のやりとりが届く
+  await showTerminal(page)
+  await writeTranscript(page, 'v2.1.220/basic-tools/session.jsonl')
+
+  await showTranscript(page)
+  const 全部 = page.locator('[data-testid="transcript-row"]')
+  await expect.poll(async () => await 全部.count(), { message: '履歴が届くこと', timeout: 30_000 })
+    .toBeGreaterThan(1)
+  // **末尾に寄せてあるので、最後に描かれている行が並びの最後**である
+  await expect(全部.last()).toHaveAttribute('data-kind', 'queued_message', 届くまで)
 })
 
 test('読まれたあと、同じ本文が2つ並ばない', async ({ page }) => {
