@@ -620,7 +620,8 @@ test('狭い窓とハイコントラストでも壊れない', async ({ page }) 
   await page.emulateMedia({ forcedColors: 'active' })
   await expect(row).toBeVisible()
   await expect(row.getByTestId('body-toggle')).toBeVisible()
-  await expect(page.getByTestId('transcript-heading')).toBeVisible()
+  // 見出しは**画面の帯**が持つ（「履歴」の帯を外したため。細かい修正 設計§5-2）
+  await expect(page.getByTestId('project-name')).toBeVisible()
 })
 
 test('文字のど真ん中を押しても開き、押下中に横へ動かない', async ({ page }) => {
@@ -863,24 +864,30 @@ test('画面の主題を示す見出しがある', async ({ page }) => {
   // `DESIGN.md` §8 の床。**構造化ビューは UI 自身の見出しを1つも持っていなかった**
   // ——いちばん大きい文字が 14px/500 で、階層が実質2段しかなかった。
   //
+  // **【2026-09-04】受け皿が「履歴」の帯から画面の帯へ移った**（細かい修正 設計§5-2）。
+  // 帯は件数以外に何も出しておらず、場所を取る割に何も言っていない面だったので外し、
+  // **床は既にある面で満たす**ことにした——見出しは PJT 名、物質感は電源ボタンと
+  // 履歴の器の縁。**新しい帯を建てないこと**（建てると、消したかったものが戻る）。
+  //
   // §8 の不合格例は「**既定のUIフォントを太字にしただけ**」なので、**大きさとウェイトの
   // 両方**を見る（§13.2 の Section Title＝15〜18px / Semibold）。
   await loadFoldLines(page)
-  const 見出し = page.getByTestId('transcript-heading')
+  const 見出し = page.getByTestId('project-name')
   await expect(見出し).toBeVisible(届くまで)
 
   const 見た目 = await 見出し.evaluate((el) => {
-    const 題 = el.querySelector('.transcript-heading-title') as HTMLElement
-    const t = getComputedStyle(題)
-    const h = getComputedStyle(el)
+    const t = getComputedStyle(el)
     const 本文 = document.querySelector('[data-testid="row-body"]') as HTMLElement
+    const 電源 = document.querySelector('[data-testid="power-card"]') as HTMLElement
+    const 器 = document.querySelector('.transcript-panel') as HTMLElement
     return {
       大きさ: parseFloat(t.fontSize),
       太さ: Number(t.fontWeight),
-      // **物質感**（§12.3 の「見出し帯＝印刷面・プレート」）。平らな塗りではないこと
-      影: h.boxShadow,
-      地: h.backgroundColor,
       本文の大きさ: parseFloat(getComputedStyle(本文).fontSize),
+      // **物質を持つ面が2つ**（§8 の床・§12.3）。電源は「主要操作ボタン＝プレート」で
+      // **ステッカー以外**にあたり、履歴の器の縁は「パネルの縁＝弱」
+      電源の影: 電源 === null ? 'none' : getComputedStyle(電源).boxShadow,
+      器の影: 器 === null ? 'none' : getComputedStyle(器).boxShadow,
     }
   })
 
@@ -888,11 +895,11 @@ test('画面の主題を示す見出しがある', async ({ page }) => {
   expect(見た目.大きさ).toBeGreaterThanOrEqual(15)
   expect(見た目.大きさ).toBeLessThanOrEqual(18)
   expect(見た目.太さ).toBeGreaterThanOrEqual(600)
-  // **画面でいちばん大きい**こと（本文より上）
+  // **本文より上**であること
   expect(見た目.大きさ).toBeGreaterThan(見た目.本文の大きさ)
-  // **物質を持つ面**であること（平らな塗りでも透明でもない）
-  expect(見た目.影).not.toBe('none')
-  expect(見た目.地).not.toMatch(/rgba\(0, 0, 0, 0\)/)
+  // **物質を持つ面が、平らな塗りではないこと**
+  expect(見た目.電源の影).not.toBe('none')
+  expect(見た目.器の影).not.toBe('none')
 })
 
 test('帯は器の端まで届く', async ({ page }) => {
