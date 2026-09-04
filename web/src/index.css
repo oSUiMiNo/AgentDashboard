@@ -233,9 +233,18 @@
 .prose-dashboard h2,
 .prose-dashboard h3,
 .prose-dashboard h4 { font-weight: 600; line-height: 1.4; margin: 1.2em 0 0.5em; }
-.prose-dashboard h1 { font-size: 1.3em; }
-.prose-dashboard h2 { font-size: 1.15em; }
-.prose-dashboard h3 { font-size: 1.05em; }
+/*
+  **上ほど大きく開ける**（要件25・細かい修正 設計§8-5）。以前は3段の差が 0.25em しか
+  なく、**階層が字の大きさから読めなかった**。
+
+  **構造化ビューにも波及する。** この整形はファイルビュアと構造化ビューが共有して
+  いるので、セッションの履歴に出る見出しも一緒に大きくなる——`README.md` が
+  「同じ字を貼れば同じ見え方になる」と約束しているので、**片方だけ大きくすると
+  その約束が崩れる**。専用のクラスを足して分けるほうが、整形が2つに割れて悪い。
+*/
+.prose-dashboard h1 { font-size: 1.6em; }
+.prose-dashboard h2 { font-size: 1.35em; }
+.prose-dashboard h3 { font-size: 1.15em; }
 .prose-dashboard p, .prose-dashboard ul, .prose-dashboard ol { margin: 0.6em 0; }
 .prose-dashboard ul, .prose-dashboard ol { padding-left: 1.4em; }
 .prose-dashboard ul { list-style: disc; }
