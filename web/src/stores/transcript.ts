@@ -200,9 +200,18 @@ function stateOf(cardId: CardId): CardState {
   return state
 }
 
-/** 既定で開いておく種別。会話の本文は開いた状態で見せ、詳細は畳んでおく。 */
+/**
+ * 既定で開いておく種別。会話の本文は開いた状態で見せ、詳細は畳んでおく。
+ *
+ * **待ちも会話の本文である**（作業中に送った追加メッセージ 設計§7-1）。読まれれば
+ * 同じ文が利用者の発言として出るので、**読まれる前と後で扱いを変えない**。
+ */
 function opensByDefault(node: Node): boolean {
-  return node.kind === 'user_message' || node.kind === 'assistant_text'
+  return (
+    node.kind === 'user_message' ||
+    node.kind === 'assistant_text' ||
+    node.kind === 'queued_message'
+  )
 }
 
 /**
@@ -211,9 +220,19 @@ function opensByDefault(node: Node): boolean {
  * 思考は**読まなくてよいもの**として既定で畳んである（開けば整形して全文が出る）。
  * 長さで決める規則を当てると短い思考が全部出っぱなしになり、会話の本文と見分けが
  * 付かなくなるので、こちらには入れない。
+ *
+ * **待ちは入る**（作業中に送った追加メッセージ 設計§7-1）。読まれる前と後で同じ器
+ * （吹き出し）に入るので、**畳み方も同じでなければならない**——独自の規則を作ると、
+ * 読まれた瞬間に同じ文の見え方が変わる。
  */
-function hasFoldableBody(node: Node): node is Extract<Node, { kind: 'user_message' | 'assistant_text' }> {
-  return node.kind === 'user_message' || node.kind === 'assistant_text'
+function hasFoldableBody(
+  node: Node,
+): node is Extract<Node, { kind: 'user_message' | 'assistant_text' | 'queued_message' }> {
+  return (
+    node.kind === 'user_message' ||
+    node.kind === 'assistant_text' ||
+    node.kind === 'queued_message'
+  )
 }
 
 /**
@@ -276,14 +295,12 @@ function isExpandable(node: Node, hasChildren: boolean): boolean {
     return true
   }
   // 子が無くても、展開すると中身（入力・結果・差分・生データ）が出るもの。
-  // **待ちの行も入る**——畳んでいるあいだは先頭1行だけを覗かせ、開けば全文が出る
-  // （作業中に送った追加メッセージ 設計§7-3）
-  return (
-    node.kind === 'tool_call' ||
-    node.kind === 'thinking' ||
-    node.kind === 'queued_message' ||
-    node.kind === 'unknown'
-  )
+  //
+  // **待ちの行は入らない**（作業中に送った追加メッセージ 設計§7-1・2026-09-05 に作り直し）。
+  // 本文を常に全部出す器（吹き出し）へ移したので、**記号を押しても出るものが1つも無い**
+  // ——押せる顔をしていて何も起きないものは、壊れているのと見分けが付かない。
+  // 長い本文は「続きを読む」で開く（利用者の発言とまったく同じ道）
+  return node.kind === 'tool_call' || node.kind === 'thinking' || node.kind === 'unknown'
 }
 
 /**
@@ -416,6 +433,31 @@ function flatten(state: CardState): FlatRow[] {
     return node !== undefined && isActivity(node.node)
   }
 
+  /** まだ読まれていない待ちか。 */
+  const isQueued = (id: string): boolean =>
+    state.byId.get(id)?.node.kind === 'queued_message'
+
+  /**
+   * 待ちの塊を、いちばん最後に積む（設計§7-5・2026-09-05）。
+   *
+   * **頭から3つだけ出して、残りは数で言う**（設計§7-3 の天井）。束ねの行も塊の一部
+   * なので、**待ちと離さずここで一緒に積む**——上の行だけ末尾へ動かすと、
+   * 「ほか N 件」が届いた順の位置に取り残される。
+   */
+  const pushQueued = (run: string[], depth: number) => {
+    for (const id of run.slice(0, MAX_QUEUED_ROWS)) {
+      walkNode(id, depth)
+    }
+    const 残り = run.length - MAX_QUEUED_ROWS
+    if (残り > 0) {
+      rows.push({
+        kind: 'queued-more',
+        id: `${QUEUED_MORE_PREFIX}${run[0]}`,
+        count: 残り,
+      })
+    }
+  }
+
   /**
    * 同じ親の下の並びを、**連続する活動を束ねながら**積む（設計§2-3）。
    *
@@ -428,40 +470,20 @@ function flatten(state: CardState): FlatRow[] {
    * ならない**——描くときに隠すだけだと、思考は境目として残ったままなので、**その前後の
    * 活動が別々のまとめ行に割れる**。並びから抜いて初めて、ひと続きの1行になる。
    */
-  /** その位置が、まだ読まれていない待ちか。並びの端を越えたら偽。 */
-  const queuedAt = (ids: string[], index: number): boolean => {
-    if (index >= ids.length) {
-      return false
-    }
-    return state.byId.get(ids[index])?.node.kind === 'queued_message'
-  }
-
   const walkSiblings = (all: string[], depth: number) => {
-    const ids = all.filter((id) => !droppable(state, id))
+    const alive = all.filter((id) => !droppable(state, id))
+    // **待ちは、届いた順の位置から抜いて末尾へ回す**（設計§7-5・要件1-5）。
+    //
+    // 待っているあいだに来たエージェントの発言は**待ちの上へ割り込む**のが要件で、
+    // 届いた順のまま積むと下に付いてしまう。**抜くのは並べる前**でなければならない
+    // ——描くときに動かすと、活動の束ねが待ちを境目として割ってしまう。
+    //
+    // **`filter` は順序を保つ**ので、待ちどうしの並びは送った順のまま残る。
+    // 読まれたものは `droppable` で既に落ちているから、ここには来ない
+    const ids = alive.filter((id) => !isQueued(id))
+    const queued = alive.filter((id) => isQueued(id))
     let index = 0
     while (index < ids.length) {
-      // 待ちが続いたら、頭から3つだけ出して残りは数で言う（設計§7-3 の天井）。
-      // **活動の束ねより先に見る**——待ちは活動ではないので、ここで拾わないと
-      // 1件ずつ全部並ぶ
-      if (queuedAt(ids, index)) {
-        const start = index
-        while (queuedAt(ids, index)) {
-          index += 1
-        }
-        const run = ids.slice(start, index)
-        for (const id of run.slice(0, MAX_QUEUED_ROWS)) {
-          walkNode(id, depth)
-        }
-        const 残り = run.length - MAX_QUEUED_ROWS
-        if (残り > 0) {
-          rows.push({
-            kind: 'queued-more',
-            id: `${QUEUED_MORE_PREFIX}${run[0]}`,
-            count: 残り,
-          })
-        }
-        continue
-      }
       if (!activityAt(ids, index)) {
         walkNode(ids[index], depth)
         index += 1
@@ -473,6 +495,10 @@ function flatten(state: CardState): FlatRow[] {
         index += 1
       }
       pushActivity(ids.slice(start, index), depth)
+    }
+    // **積み終えたあとに、待ちを足す。** ここが「常にいちばん下」の実体である
+    if (queued.length > 0) {
+      pushQueued(queued, depth)
     }
   }
 

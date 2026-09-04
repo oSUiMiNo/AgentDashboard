@@ -135,9 +135,15 @@ export const BODY_FOLD_LINES_BUBBLE = 50
  *
  * 部品側に `if (isUser)` を書かせないための形でもある（設計§4-5「判断は純関数、描くのは
  * 部品」）。書き始めると、しきい値の在り処が2つになる。
+ *
+ * **待ちも吹き出しである**（作業中に送った追加メッセージ 設計§7-1）。器が同じなら
+ * 幅も同じなので、**しきい値も同じでなければならない**——ここで分けると、同じ文が
+ * 読まれる前と後で違うところで畳まれ、**読まれた瞬間に行の高さが跳ねる**。
  */
 export function foldLinesFor(kind: Node['kind']): number {
-  return kind === 'user_message' ? BODY_FOLD_LINES_BUBBLE : BODY_FOLD_LINES
+  return kind === 'user_message' || kind === 'queued_message'
+    ? BODY_FOLD_LINES_BUBBLE
+    : BODY_FOLD_LINES
 }
 
 /**

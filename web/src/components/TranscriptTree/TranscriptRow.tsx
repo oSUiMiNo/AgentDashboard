@@ -73,6 +73,14 @@ interface Props {
 function heading(node: Node): { label: string; tone: string } {
   switch (node.kind) {
     case 'user_message':
+    // **待ちも利用者の発言である**（作業中に送った追加メッセージ 設計§7-1・
+    // 2026-09-05 に作り直し）。読まれれば同じ文がこの種別で出てくるので、
+    // **読まれる前と後で名乗りを変えない**。
+    //
+    // どちらも [`showsHeading`] が偽なので**この値は描かれない**。switch が総当たりを
+    // 求めるので置いてあるだけで、**ここへ「待機中」と書き足さないこと**——状態は
+    // 色で伝えると決めた（要件1-4）
+    case 'queued_message':
       return { label: 'あなた', tone: 'text-sky-300' }
     case 'assistant_text':
       return { label: 'アシスタント', tone: 'text-emerald-300' }
@@ -85,13 +93,6 @@ function heading(node: Node): { label: string; tone: string } {
       return { label: `サブエージェント ${node.agent_type}`, tone: 'text-amber-300' }
     case 'image':
       return { label: '画像', tone: 'text-sky-300' }
-    case 'queued_message':
-      // **琥珀は保留の色**（`DESIGN.md` §11.2 の役割表）。待ちは保留そのものなので素直に載る。
-      //
-      // **減光しない**（作業中に送った追加メッセージ 設計§7-3 の床）。`/60` を掛けると
-      // 未知のレコードより弱くなり、`DESIGN.md` §34.5 の「抑制のしすぎ」へ落ちる。
-      // **色を弱くする規則を書くなら、下限も同じ場所に書く**（§8.3）
-      return { label: '待機中', tone: 'text-amber-300' }
     case 'unknown':
       // 同上。**未知のレコードは、いちばん静かでよい**（読む相手が居ないことのほうが多い）
       return { label: `未知のレコード（${node.record_type}）`, tone: 'text-orange-300/60' }
@@ -104,9 +105,17 @@ function heading(node: Node): { label: string; tone: string } {
  * **発言には出さない。** 利用者の発言は右寄せの吹き出しで、アシスタントの本文は
  * 太く明るい本文そのもので読み分ける——**主従はウェイトと明度で付ける**ので、
  * 箱にも罫線にも頼らない。
+ *
+ * **待ちにも出さない**（作業中に送った追加メッセージ 設計§7-1・2026-09-05 に作り直し）。
+ * 「待機中」というラベルも `…` の記号も出さず、**状態は吹き出しの地の色だけで言う**
+ * （要件1-4）。位置（常にいちばん下）と色の2つで読めるので、語は要らない。
  */
 function showsHeading(node: Node): boolean {
-  return node.kind !== 'user_message' && node.kind !== 'assistant_text'
+  return (
+    node.kind !== 'user_message' &&
+    node.kind !== 'assistant_text' &&
+    node.kind !== 'queued_message'
+  )
 }
 
 /**
@@ -119,13 +128,14 @@ function chevron(expanded: boolean): string {
   return expanded ? '⌄' : '›'
 }
 
-/** ツールの状態を1文字で表す。 */
+/**
+ * ツールの状態を1文字で表す。
+ *
+ * **待ちには出さない**（作業中に送った追加メッセージ 設計§7-2・2026-09-05 に作り直し）。
+ * 一時は `…` を借りていたが、待ちは**見出しごと持たない**器（吹き出し）へ移ったので、
+ * 記号を置く場所そのものが無くなった。状態は色で言う（要件1-4）。
+ */
 function toolMark(node: Node): string {
-  // **待ちにも同じ記号を使う**（作業中に送った追加メッセージ 設計§7-2）。この画面で
-  // `…` は既に「まだ終わっていない」を意味しているので、**新しい記号を作らない**
-  if (node.kind === 'queued_message') {
-    return '…'
-  }
   if (node.kind !== 'tool_call') {
     return ''
   }
@@ -154,6 +164,9 @@ function summary(node: Node): string {
     case 'user_message':
     case 'assistant_text':
     case 'thinking':
+    // 待ちも本文を常に全部出す器（吹き出し）に入ったので、要約する相手ではなくなった。
+    // そもそも [`showsHeading`] が偽なので、この値は描かれない
+    case 'queued_message':
       return ''
     case 'tool_call':
       return summarizeInput(node.input)
@@ -163,10 +176,6 @@ function summary(node: Node): string {
       // **元の名前を出す**（画像添付 設計§10-1）。ディスク上は採番した名前なので、
       // それを出しても押した人には何のことか分からない
       return node.file_name ?? ''
-    case 'queued_message':
-      // **本文そのものは下の行に出る**（畳んでいても先頭1行を覗かせる）ので、
-      // 横に同じ文字を並べない——思考と同じ扱い
-      return ''
     case 'unknown':
       return ''
   }
@@ -177,6 +186,10 @@ function showsBodyAlways(node: Node): boolean {
   return (
     node.kind === 'user_message' ||
     node.kind === 'assistant_text' ||
+    // **待ちも常に出す**（作業中に送った追加メッセージ 設計§7-1・2026-09-05 に作り直し）。
+    // 先頭1行だけを覗かせる扱いをやめ、**利用者の発言とまったく同じ道**を通す
+    // ——長ければ「続きを読む」で畳む。独自の規則を作らない（要件1-2）
+    node.kind === 'queued_message' ||
     // 画像も常に出す。**畳んで名前だけにすると、何を送ったのかが読めない**
     // ——絵そのものが本文にあたる種別である（画像添付 設計§10-3）
     node.kind === 'image'
@@ -241,8 +254,11 @@ export const TranscriptRow = memo(function TranscriptRow({
  * **開けない。** 待ちは数秒で消えるものなので、全部読む道を作っても読み終わる前に
  * 入れ替わる。**押せないものを押せる顔にしない**ので、記号も出さない。
  *
- * **琥珀にしない。** 色は見出しのラベル1語だけに使うと決めてある（§7-3 の天井）。
- * ここは件数を言うだけの静かな行で、待ちそのものではない。
+ * **吹き出しにしない。** ここは件数を言うだけの静かな行で、**待ちそのものではない**
+ * ——器を与えると、出し切らなかったぶんが1件の指示に見える。
+ *
+ * **置き場所は待ちの塊の中**（`stores/transcript.ts` の `pushQueued`）。塊ごと画面の
+ * いちばん下へ回るので、**この行だけが届いた順の位置に取り残されることは無い**。
  */
 function QueuedMore({ row }: { row: QueuedMoreRow }) {
   return (
@@ -362,9 +378,10 @@ function NodeRowView({
   const alwaysBody = showsBodyAlways(row.node)
   const withHeading = showsHeading(row.node)
   // 思考は畳んでいても先頭1行を覗かせる（設計§8）。開くまで中身の見当がつかない行を残さない。
-  // **待ちも同じ**——「待機中」だけの行にすると、何が待っているのか読めず手応えにならない
-  // （作業中に送った追加メッセージ 設計§7-3 の床）
-  const peeking = row.node.kind === 'thinking' || row.node.kind === 'queued_message'
+  //
+  // **待ちはここに入らなくなった**（2026-09-05）。本文を常に全部出す側
+  // （[`showsBodyAlways`]）へ移ったので、覗かせる必要そのものが消えた
+  const peeking = row.node.kind === 'thinking'
 
   return (
     <div
@@ -537,6 +554,15 @@ function RowBody({
 }) {
   switch (node.kind) {
     case 'user_message':
+    // **待ちも同じ腕を通す**（作業中に送った追加メッセージ 設計§7-1・2026-09-05 に
+    // 作り直し）。待ちは**まだ読まれていない利用者の発言**そのものなので、
+    // 器・畳み方・しきい値のどれも別立てにしない（要件1-1・1-2）。
+    //
+    // **待ちであることは、器の地の色だけで言う**——[`MarkdownBody`] が
+    // `speech-bubble-queued` を足し、`index.css` が `--bubble-ground` を青から
+    // 灰色側へ寄せた値へ差し替える。**派生元を差し替える形にしてある**ので、
+    // 吹き出しの中の囲みコード・表・引用も自動で付いてくる（要件1-3）
+    case 'queued_message':
     case 'assistant_text':
       // 発言は**主**。太めのウェイトと明るい前景色で、活動の行と読み分ける（設計§5-3）
       //
@@ -548,7 +574,7 @@ function RowBody({
           text={node.text}
           row={row}
           inset={false}
-          shell={node.kind === 'user_message' ? 'bubble' : 'panel'}
+          shell={node.kind === 'assistant_text' ? 'panel' : 'bubble'}
           tone="text-foreground font-medium"
           onToggleBody={onToggleBody}
         />
@@ -556,23 +582,6 @@ function RowBody({
     case 'thinking':
       // 思考は長さで畳む相手にしない（開いた時点で全文。設計§2-4）。畳んでいるあいだは
       // 先頭1行だけを覗かせる（設計§8）——開くまで中身の見当がつかない行を残さないため
-      return (
-        <MarkdownBody
-          text={row.expanded ? node.text : firstLine(node.text)}
-          row={null}
-          inset
-          shell="none"
-          tone="text-muted-foreground"
-          onToggleBody={onToggleBody}
-        />
-      )
-    case 'queued_message':
-      // **器を持たせない**（作業中に送った追加メッセージ 設計§7-1）。吹き出しにすると、
-      // 姉妹イシュー `人が打っていないものを、人の発言として出さない` が塗りに来る面と
-      // 取り合う。あちらが塗るのは器、こちらが塗るのは見出しのラベルなので、
-      // **面が違えば取り合わない**。
-      //
-      // 畳んでいるあいだは先頭1行、開けば全文（思考と同じ扱い）
       return (
         <MarkdownBody
           text={row.expanded ? node.text : firstLine(node.text)}
@@ -650,6 +659,14 @@ function MarkdownBody({
   // 子へ継承させるので、器へ載せれば内側の `.body-fade-text` にもそのまま届く
   const fadeClass = fade ? ` body-fade body-fade-${fade}` : ''
 
+  // まだ読まれていない待ちか（作業中に送った追加メッセージ 設計§7-1・2026-09-05）。
+  //
+  // **色は `index.css` が持つ。** ここで足すのはクラス1つだけで、値は1文字も書かない
+  // ——`--bubble-ground` を1箇所で持つ約束（`index.css` の `.speech-bubble`）が、
+  // 本体としっぽと中の面の全部を同時に動かす仕掛けである
+  const queued = row?.node.kind === 'queued_message'
+  const queuedClass = queued ? ' speech-bubble-queued' : ''
+
   const inner = (
     <>
       {/* 本文は**主役**なので、地の色で出す（`FileView` と同じ扱い）。
@@ -722,16 +739,23 @@ function MarkdownBody({
     // 右寄せであることが読み取れなくなるので、本文の70%を上限にする
     // **しっぽの分だけ右を空ける**（設計§5-4）。しっぽは吹き出しの右外へ出るので、
     // 空けないと窓の端で切れる
+    //
+    // **まだ読まれていない待ちも、この器に入る**（作業中に送った追加メッセージ
+    // 設計§7-1・2026-09-05）。**足すのは1クラスだけ**で、形も幅もしっぽも動かさない
+    // ——動かすと、読まれた瞬間に同じ文の見た目が変わってしまう（要件1-6）
     return (
       <div className="flex justify-end pr-2">
         <div
           data-testid="user-bubble"
+          // 読まれる前かどうかを、機械が読める形でも出す。**色だけを見て確かめると、
+          // 派生の計算（`color-mix`）まで背負うことになる**
+          data-queued={queued ? 'true' : undefined}
           // **フェードの地を渡す必要は無い**（設計§6-2）。ティントは半透明なので、
           // 透けるのは実際にこの吹き出しの地である。
           //
           // 角丸としっぽは `.speech-bubble` が持つ（設計§5-4）。**地の色もあちらが
           // 1箇所で持つ**ので、ここで `bg-*` を重ねないこと——2箇所になった時点でずれる
-          className={`speech-bubble row-shell mt-1 max-w-[70%] px-3 py-2${fadeClass}`}
+          className={`speech-bubble row-shell mt-1 max-w-[70%] px-3 py-2${queuedClass}${fadeClass}`}
         >
           {inner}
         </div>
