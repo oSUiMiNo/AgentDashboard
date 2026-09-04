@@ -810,3 +810,120 @@ describe('状態の持ち場', () => {
     expect(screen.getByTestId('body-toggle')).toHaveTextContent('畳む')
   })
 })
+
+/** 実効行数がちょうど `count` になる本文（畳みの境目を字で書くため）。 */
+function linesOf(count: number): string {
+  return Array.from({ length: count }, (_, i) => `${i + 1}行目`).join('\n')
+}
+
+/**
+ * 人が打っていないものの見分け
+ * （`人が打っていないものを、人の発言として出さない` テスト計画フェーズ6）。
+ *
+ * **要件の最優先事項は「人が打った文を機械側へ落とさない」こと。** 器・左右・畳み・
+ * トグルは、その見分けが画面に出ているかを確かめるためにある。
+ */
+describe('誰が入れたか', () => {
+  const 人 = (text: string): Node => ({ kind: 'user_message', text, origin: { kind: 'human' } })
+  const 機械 = (text: string, origin: Node extends { origin?: infer O } ? O : never): Node =>
+    ({ kind: 'user_message', text, origin }) as Node
+
+  async function 出す(inner: Node) {
+    appendNodes(CARD, [node('n1', null, inner)])
+    renderTree()
+    await waitForRows(1)
+    return within(rowsOf('user_message')[0])
+  }
+
+  it('人の発言は右寄せの吹き出しのまま', async () => {
+    const row = await 出す(人('こちらの指示'))
+    const bubble = row.getByTestId('user-bubble')
+    expect(bubble).toBeInTheDocument()
+    expect(bubble.className).not.toContain('speech-bubble-machine')
+    expect(bubble.parentElement?.className).toContain('justify-end')
+    expect(row.queryByTestId('origin-label')).not.toBeInTheDocument()
+  })
+
+  it('印が1つも無い記録も、人の発言のまま', async () => {
+    // **安全側の門。** ここに人が打った `/clear` `/model` が来る（設計§1-3）
+    const row = await 出す({ kind: 'user_message', text: '/clear' })
+    expect(row.getByTestId('user-bubble').className).not.toContain('speech-bubble-machine')
+    expect(row.queryByTestId('origin-label')).not.toBeInTheDocument()
+  })
+
+  it('機械が入れたものは左寄せの吹き出しになる', async () => {
+    const row = await 出す(機械('通知です', { kind: 'task_notification' }))
+    const bubble = row.getByTestId('user-bubble')
+    expect(bubble.className).toContain('speech-bubble-machine')
+    expect(bubble.parentElement?.className).toContain('justify-start')
+    expect(bubble.dataset.origin).toBe('task_notification')
+  })
+
+  it('機械が入れたものは、名乗りを画面に出す', async () => {
+    // **7種の文言そのものは純関数の側で見る**（`messageOrigin.test.ts`）。
+    // ここで確かめるのは「名乗りが画面へ配線されていること」だけ
+    const row = await 出す(機械('連絡', { kind: 'peer', name: 'sample-peer-session' }))
+    expect(row.getByTestId('origin-label').textContent).toBe(
+      '他セッションから（sample-peer-session）',
+    )
+  })
+
+  it('知らない名乗りは、その名前のまま出る', async () => {
+    // 丸めると**記録が名乗ったことを捨てる**ことになる（設計§2-3）
+    const row = await 出す(機械('調整', { kind: 'other', name: 'coordinator' }))
+    expect(row.getByTestId('origin-label').textContent).toBe('coordinator')
+  })
+
+  it('機械が入れたものは11行で畳まれる', async () => {
+    const row = await 出す(機械(linesOf(11), { kind: 'injected' }))
+    expect(row.getByTestId('body-toggle')).toBeInTheDocument()
+  })
+
+  it('12行の機械も畳まれる（猶予を当てない）', async () => {
+    // **既存の原則を1つ外している**（設計§6-6）。猶予は高さの話、こちらは格の話
+    const row = await 出す(機械(linesOf(12), { kind: 'injected' }))
+    expect(row.getByTestId('body-toggle')).toBeInTheDocument()
+  })
+
+  it('10行の機械は畳まれない', async () => {
+    const row = await 出す(機械(linesOf(10), { kind: 'injected' }))
+    expect(row.queryByTestId('body-toggle')).not.toBeInTheDocument()
+  })
+
+  it('人の発言は、同じ行数でも畳まれない', async () => {
+    // 畳みの規則は機械だけのもの。人へ当てると、短い指示まで畳まれる
+    const row = await 出す(人(linesOf(12)))
+    expect(row.queryByTestId('body-toggle')).not.toBeInTheDocument()
+  })
+
+  it('スラッシュコマンドは打った形で出て、開くと展開が見える', async () => {
+    const inner: Node = {
+      kind: 'user_message',
+      text: '/sample-skill-1 calc.py',
+      origin: { kind: 'human' },
+      command: { typed: '/sample-skill-1 calc.py', expansion: '指定されたファイルを読め。' },
+    }
+    const row = await 出す(inner)
+    const body = row.getByTestId('row-body')
+    expect(body.textContent).toContain('/sample-skill-1 calc.py')
+    expect(body.textContent).not.toContain('指定されたファイルを読め。')
+    // **生のタグが1文字も出ない**
+    expect(body.textContent).not.toContain('command-name')
+
+    await userEvent.click(row.getByTestId('body-toggle'))
+    expect(row.getByTestId('row-body').textContent).toContain('指定されたファイルを読め。')
+  })
+
+  it('展開が無いコマンドにはトグルが出ない', async () => {
+    // **展開が無いほうが多数派である**（実測66%。設計§3-4）
+    const inner: Node = {
+      kind: 'user_message',
+      text: '/clear',
+      origin: { kind: 'human' },
+      command: { typed: '/clear', expansion: null },
+    }
+    const row = await 出す(inner)
+    expect(row.getByTestId('row-body').textContent).toContain('/clear')
+    expect(row.queryByTestId('body-toggle')).not.toBeInTheDocument()
+  })
+})

@@ -58,6 +58,7 @@ import type { Element, Root, RootContent } from 'hast'
 import type { Root as MdastRoot, RootContent as MdastContent } from 'mdast'
 import remarkGfm from 'remark-gfm'
 
+import { MACHINE_FOLD_LINES, bodyTextOf, isMachine } from '@/lib/messageOrigin'
 import type { Node } from '@/lib/protocol'
 
 /**
@@ -140,7 +141,26 @@ export const BODY_FOLD_LINES_BUBBLE = 50
  * 幅も同じなので、**しきい値も同じでなければならない**——ここで分けると、同じ文が
  * 読まれる前と後で違うところで畳まれ、**読まれた瞬間に行の高さが跳ねる**。
  */
-export function foldLinesFor(kind: Node['kind']): number {
+export type FoldKind = Node['kind'] | 'machine_message'
+
+/**
+ * その行を、どの畳み方の表で見るか
+ * （`人が打っていないものを、人の発言として出さない` 設計§6-6・§6-8）。
+ *
+ * **種別だけでは足りなくなった。** `user_message` の中に、人が打ったものと機械が
+ * 入れたものが混ざっているためで、**同じ器でも規則が違う**（機械は無条件に畳む）。
+ *
+ * 対応表を1箇所に保つために、**呼ぶ側はしきい値ではなくこれを渡す**——[`foldLinesFor`]
+ * の作法をそのまま広げたもので、部品側に `if (機械)` を書かせないための形でもある。
+ */
+export function foldKindOf(node: Node): FoldKind {
+  return isMachine(node) ? 'machine_message' : node.kind
+}
+
+export function foldLinesFor(kind: FoldKind): number {
+  if (kind === 'machine_message') {
+    return MACHINE_FOLD_LINES
+  }
   return kind === 'user_message' || kind === 'queued_message'
     ? BODY_FOLD_LINES_BUBBLE
     : BODY_FOLD_LINES
@@ -208,9 +228,18 @@ export interface FoldDecision {
  *
  * **2段目に猶予を当てない**のは、そこへ入る時点で超過が130行以上あるためである。
  */
-export function foldDecision(text: string, kind: Node['kind']): FoldDecision {
+export function foldDecision(text: string, kind: FoldKind): FoldDecision {
   const total = effectiveLines(text)
   const first = foldLinesFor(kind)
+  // **機械が入れたものは無条件に畳む**（設計§6-6・利用者の指定）。
+  //
+  // ここだけ猶予（[`BODY_FOLD_GRACE_LINES`]）を当てない。**既存の原則を1つ外している。**
+  // 猶予は「畳んでも縮まないなら畳まない」という**高さ**の話だが、こちらは
+  // **人の発言と同じ面積を機械に与えない**という格の話で、目的が違う。
+  // 結果として12行の通知も畳まれる（畳んでもほとんど縮まない）。
+  if (kind === 'machine_message') {
+    return total > first ? { fold: true, lines: first } : { fold: false, lines: total }
+  }
   if (total > BODY_FOLD_LINES_EXCESSIVE) {
     return { fold: true, lines: BODY_FOLD_LINES_MINIMAL }
   }
@@ -226,7 +255,7 @@ export function foldDecision(text: string, kind: Node['kind']): FoldDecision {
  * ストア側が全件に対して呼ぶ。**ここで実際に切らない**——数万件の履歴で全ノードぶんの
  * 文字列を作ることになる。切る仕事は、描くときで間に合う。
  */
-export function shouldFoldBody(text: string, kind: Node['kind']): boolean {
+export function shouldFoldBody(text: string, kind: FoldKind): boolean {
   return foldDecision(text, kind).fold
 }
 
@@ -263,7 +292,7 @@ export const FADE_DEEP_LINES = 150
  * 行数）。ここだけ古い1段目を渡すと、**畳む位置は正しいのに帯の段だけがずれる**——
  * [`foldDecision`] ／ [`shouldFoldBody`] と3つ揃って初めて成立する（設計§4-6）。
  */
-export function fadeDepth(text: string, kind: Node['kind']): FadeDepth | null {
+export function fadeDepth(text: string, kind: FoldKind): FadeDepth | null {
   const decision = foldDecision(text, kind)
   if (!decision.fold) {
     return null
@@ -761,3 +790,43 @@ export const REMARK_PLUGINS = [remarkGfm, remarkSoftBreaks]
 
 /** 上と対。生の HTML の `<br/>` を `br` 要素へ変える段。 */
 export const REHYPE_PLUGINS = [rehypeLineBreaks]
+
+/**
+ * 行そのものから畳み方を決める、**製品コードの入口**
+ * （`人が打っていないものを、人の発言として出さない` 設計§6-8）。
+ *
+ * [`foldDecision`] は表そのもので、こちらはそれを行に当てる薄い層である。**表は
+ * 1つのまま**——ここでしきい値を引き直さない。
+ *
+ * スラッシュコマンドだけは表を通さない。**畳んだ頭を「打った形」に固定する**ので、
+ * 実効行数ではなく打った行の高さがそのまま答えになる。こうすると
+ * 「畳んだ頭＝打った形／開くと展開」が**既にある「続きを読む」にそのまま乗る**
+ * ——新しいトグルを作らずに済む。
+ */
+export function foldDecisionOf(node: Node): FoldDecision {
+  if (node.kind === 'user_message' && node.command?.expansion) {
+    return { fold: true, lines: effectiveLines(node.text) }
+  }
+  return foldDecision(bodyTextOf(node), foldKindOf(node))
+}
+
+/** [`foldDecisionOf`] の真偽だけが要るとき（ストアが全件に対して呼ぶ）。 */
+export function shouldFoldBodyOf(node: Node): boolean {
+  return foldDecisionOf(node).fold
+}
+
+/** 畳んだ本文の末尾に敷くフェードの段を、行そのものから決める。 */
+export function fadeDepthOf(node: Node): FadeDepth | null {
+  const decision = foldDecisionOf(node)
+  if (!decision.fold) {
+    return null
+  }
+  const remaining = effectiveLines(bodyTextOf(node)) - decision.lines
+  if (remaining <= FADE_SHALLOW_LINES) {
+    return 'shallow'
+  }
+  if (remaining <= FADE_DEEP_LINES) {
+    return 'standard'
+  }
+  return 'deep'
+}

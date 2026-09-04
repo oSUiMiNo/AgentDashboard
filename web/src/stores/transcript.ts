@@ -22,7 +22,7 @@
 import { useSyncExternalStore } from 'react'
 import type { CardId, Node, NodeId, TreeNode } from '@/lib/protocol'
 import type { ActivitySummaryInput } from '@/lib/markdown'
-import { shouldFoldBody } from '@/lib/markdown'
+import { shouldFoldBodyOf } from '@/lib/markdown'
 import { countChanges, toDiffSource } from '@/lib/diff'
 
 /** ツリーの1ノードに対応する行。 */
@@ -561,8 +561,7 @@ function flatten(state: CardState): FlatRow[] {
     const expanded = state.expanded.has(id)
     // 畳む相手かを見るだけにする。ここで実際に切ると、数万件の履歴で全ノードぶんの
     // 文字列を作ることになる（切る仕事は、描くときで間に合う）
-    const foldable =
-      hasFoldableBody(node.node) && shouldFoldBody(node.node.text, node.node.kind)
+    const foldable = hasFoldableBody(node.node) && shouldFoldBodyOf(node.node)
     rows.push({
       kind: 'node',
       id,

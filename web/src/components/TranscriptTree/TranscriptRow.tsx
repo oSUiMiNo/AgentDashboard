@@ -45,11 +45,12 @@ import {
   REHYPE_PLUGINS,
   REMARK_PLUGINS,
   activitySummary,
-  fadeDepth,
-  foldDecision,
+  fadeDepthOf,
+  foldDecisionOf,
   foldMarkdownByLines,
   summarizeInput,
 } from '@/lib/markdown'
+import { bodyTextOf, isMachine, originLabel, originOf } from '@/lib/messageOrigin'
 import type { ActivityRow, FlatRow, NodeRow, QueuedMoreRow, RewoundRow } from '@/stores/transcript'
 
 interface Props {
@@ -571,7 +572,9 @@ function RowBody({
       // ためで、無いと帯がページの地へ直に透ける（要望③の実体）。**片方だけ直さないこと**
       return (
         <MarkdownBody
-          text={node.text}
+          // **スラッシュコマンドは、打った形のうしろに展開を継いだものが本文**になる
+          // （設計§6-8）。継ぐ判断は `bodyTextOf` が持つ——ここで `if` を書かない
+          text={bodyTextOf(node)}
           row={row}
           inset={false}
           shell={node.kind === 'assistant_text' ? 'panel' : 'bubble'}
@@ -598,7 +601,7 @@ function RowBody({
       return <ImageBody node={node} cardId={cardId} />
     case 'unknown':
       return (
-        <pre className="text-muted-foreground mt-1 ml-6 max-h-64 overflow-auto text-xs">
+        <pre className="row-shell text-muted-foreground mt-1 ml-6 max-h-64 overflow-auto text-xs">
           {JSON.stringify(node.raw, null, 2)}
         </pre>
       )
@@ -649,11 +652,11 @@ function MarkdownBody({
   // 書かないこと**——しきい値の在り処が2つになる（設計§4-5）
   const foldedRow = row?.foldable === true && !row.bodyOpen ? row : null
   const body = foldedRow
-    ? foldMarkdownByLines(text, foldDecision(text, foldedRow.node.kind).lines).head
+    ? foldMarkdownByLines(text, foldDecisionOf(foldedRow.node).lines).head
     : text
-  // 畳んだときだけ末尾をフェードさせる（設計§6-4）。`fadeDepth` は畳まない本文へ `null` を
+  // 畳んだときだけ末尾をフェードさせる（設計§6-4）。`fadeDepthOf` は畳まない本文へ `null` を
   // 返すので、**猶予に入って畳まなかった本文にも出ない**——ここで条件を書き足さないこと
-  const fade = foldedRow ? fadeDepth(text, foldedRow.node.kind) : null
+  const fade = foldedRow ? fadeDepthOf(foldedRow.node) : null
 
   // **帯の高さの段は器が持つ**（設計§6-7-2）。`--fade-band` は `.body-fade` が定義して
   // 子へ継承させるので、器へ載せれば内側の `.body-fade-text` にもそのまま届く
@@ -666,6 +669,13 @@ function MarkdownBody({
   // 本体としっぽと中の面の全部を同時に動かす仕掛けである
   const queued = row?.node.kind === 'queued_message'
   const queuedClass = queued ? ' speech-bubble-queued' : ''
+
+  // 人が打っていないものか（`人が打っていないものを、人の発言として出さない` 設計§6）。
+  //
+  // **判断は `messageOrigin.ts` の純関数が持つ。** ここで `?? 'unmarked'` を書かない
+  // ——既定への倒し込みが2箇所になる（設計§2-5）
+  const machine = row !== undefined && isMachine(row.node)
+  const label = machine ? originLabel(originOf(row.node)) : ''
 
   const inner = (
     <>
@@ -743,20 +753,34 @@ function MarkdownBody({
     // **まだ読まれていない待ちも、この器に入る**（作業中に送った追加メッセージ
     // 設計§7-1・2026-09-05）。**足すのは1クラスだけ**で、形も幅もしっぽも動かさない
     // ——動かすと、読まれた瞬間に同じ文の見た目が変わってしまう（要件1-6）
+    // **人が打っていないものは、逆側（左）から出す**（利用者の指定・設計§6-4）。
+    // しっぽの向きと角丸も左右を入れ替える——`.speech-bubble-machine` が持つ
     return (
-      <div className="flex justify-end pr-2">
+      <div className={machine ? 'flex justify-start pl-2' : 'flex justify-end pr-2'}>
         <div
           data-testid="user-bubble"
           // 読まれる前かどうかを、機械が読める形でも出す。**色だけを見て確かめると、
           // 派生の計算（`color-mix`）まで背負うことになる**
           data-queued={queued ? 'true' : undefined}
+          // 誰が入れたかも、機械が読める形で出す（色と位置を見て確かめずに済む）
+          data-origin={machine ? originOf(row.node).kind : undefined}
           // **フェードの地を渡す必要は無い**（設計§6-2）。ティントは半透明なので、
           // 透けるのは実際にこの吹き出しの地である。
           //
           // 角丸としっぽは `.speech-bubble` が持つ（設計§5-4）。**地の色もあちらが
           // 1箇所で持つ**ので、ここで `bg-*` を重ねないこと——2箇所になった時点でずれる
-          className={`speech-bubble row-shell mt-1 max-w-[70%] px-3 py-2${queuedClass}${fadeClass}`}
+          className={`speech-bubble row-shell mt-1 max-w-[70%] px-3 py-2${
+            machine ? ' speech-bubble-machine' : ''
+          }${queuedClass}${fadeClass}`}
         >
+          {/* **誰が入れたかを名乗らせる**（利用者の指定・設計§1-1）。開かないと
+              出どころが分からない状態にしない。**この1行は本文の外**なので、
+              畳みの行数には数えない */}
+          {label !== '' && (
+            <div data-testid="origin-label" className="mb-1 text-[11px] font-medium text-amber-200/80">
+              {label}
+            </div>
+          )}
           {inner}
         </div>
       </div>
@@ -788,7 +812,7 @@ function ToolCallBody({ input, result }: { input: unknown; result: unknown }) {
   const diff = toDiffSource(result)
 
   return (
-    <div className="mt-1 ml-6 space-y-2">
+    <div className="row-shell mt-1 ml-6 space-y-2">
       <div>
         <div className="text-muted-foreground text-xs">入力</div>
         <pre className="text-muted-foreground max-h-64 overflow-auto text-xs">
