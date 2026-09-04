@@ -57,7 +57,17 @@ export const TERMINAL_OPTIONS: ITerminalOptions = {
   fontSize: 10,
   fontFamily:
     'ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", monospace',
-  theme: { background: '#0b0f14' },
+  /*
+    **アプリの地と同じ値で塗る**（細かい修正 設計§5-4・要件6）。要件は「透明にする」だが、
+    **透明にはしない**——端末の描画層を透かすと裏の要素が透けて文字が読めなくなる。
+    地と同じ色で塗るほうが結果が安定する。
+
+    **`--background`（`oklch(0.145 0 0)`）と同じ**。xterm は CSS 変数を読めないので
+    ここだけは字で持つが、**入れ物の側は `bg-background` で変数から取っている**ので
+    リテラルはこの1つだけである。以前は `#0b0f14` が2箇所に別々に書かれていて、
+    **片方だけ直すと端末の外周にだけ古い色が残る**形になっていた。
+  */
+  theme: { background: '#0a0a0a' },
   // xterm 自身のスクロールバックはサーバのリングバッファとは別物。
   // 画面内の遡り用に控えめに確保する
   scrollback: 5000,
@@ -631,7 +641,7 @@ export function TerminalPane({ cardId }: Props) {
           overflowX: 'auto',
           overflowY: 'hidden',
         }}
-        className="min-h-0 min-w-0 flex-1 rounded-md bg-[#0b0f14] p-2"
+        className="bg-background min-h-0 min-w-0 flex-1 rounded-md p-2"
       />
       {/*
         実機からタッチの数字を読む口（`?touchdebug=1` のときだけ中身が入る）。
