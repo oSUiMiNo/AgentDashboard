@@ -63,10 +63,37 @@ export function joinWrapped(rows: ScreenRow[]): string[] {
 
 /** いま見えているぶんの画面を、折り返しを繋いだ論理行として返す。 */
 export function visibleLines(term: Terminal): string[] {
+  return linesFrom(term, term.buffer.active.viewportY)
+}
+
+/**
+ * **いま生きている**ぶんの画面をテキストにする。遡っていても、端末の現在の姿を返す。
+ *
+ * # [`visibleScreen`] と使い分ける
+ *
+ * あちらは「**利用者にいま見えているもの**」で、キーを送る判定（`isSelectionPrompt` /
+ * `looksSelecting`）が使う。**遡った先の古いダイアログに反応してキーを送る事故**を
+ * 構造的に防ぐため、可視領域に限ってある。
+ *
+ * こちらは「**端末がいまどうなっているか**」で、**ソフトキーボードを出してよいかの判定**
+ * （`acceptsTyping`）が使う。問いが違うので、読む場所も違う。
+ *
+ * 遡って過去を読んでいる最中にタップしたとき、あちらを使うと**過去の画面で「打てない」と
+ * 判定してしまう**——しかも判定は画面から決まるので、同じ場所で何度タップしても同じ答えが
+ * 返り、**打つ手段が無いまま詰む**。生きている側を見れば、その形にならない。
+ *
+ * 遡っていなければ `viewportY === baseY` なので、**両者は同じものを返す。**
+ */
+export function liveScreen(term: Terminal): string {
+  return linesFrom(term, term.buffer.active.baseY).join('\n')
+}
+
+/** `top` 行目から `rows` 行ぶんを、折り返しを繋いだ論理行として返す。 */
+function linesFrom(term: Terminal, top: number): string[] {
   const buffer = term.buffer.active
   const rows: ScreenRow[] = []
   for (let y = 0; y < term.rows; y += 1) {
-    const line = buffer.getLine(buffer.viewportY + y)
+    const line = buffer.getLine(top + y)
     rows.push({
       text: line?.translateToString(true) ?? '',
       wrapped: line?.isWrapped ?? false,

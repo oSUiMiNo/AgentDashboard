@@ -323,12 +323,23 @@ const INPUT_BOX_WINDOW = 8
  */
 function hasInputBox(lines: string[]): boolean {
   for (let i = Math.max(0, lines.length - INPUT_BOX_WINDOW); i + 2 < lines.length; i += 1) {
-    if (
-      RULE_LINE.test(lines[i].trimEnd()) &&
-      isTypedLine(lines[i + 1]) &&
-      RULE_LINE.test(lines[i + 2].trimEnd())
-    ) {
-      return true
+    if (!RULE_LINE.test(lines[i].trimEnd()) || !isTypedLine(lines[i + 1])) {
+      continue
+    }
+    // **打った文が長いと、枠は縦に伸びる。** 折り返したぶんの続きを跨いで、
+    // 閉じの罫線を探す——ここを `lines[i + 2]` に決め打つと、**長い文を打っている
+    // 最中だけ枠が見つからなくなる**。長文こそ、取りこぼしたときの損が大きい。
+    //
+    // **跨いでよいのは罫線でない行だけ。** 罫線に当たったらそこで閉じる（当たらずに
+    // 窓を出たら、枠ではなかったということ）。
+    for (let j = i + 2; j < lines.length; j += 1) {
+      if (RULE_LINE.test(lines[j].trimEnd())) {
+        return true
+      }
+      if (isTypedLine(lines[j])) {
+        // 次の入力欄の始まり。ここまでで閉じていないなら枠ではない
+        break
+      }
     }
   }
   return false

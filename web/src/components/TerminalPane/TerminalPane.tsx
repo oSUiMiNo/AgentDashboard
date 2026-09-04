@@ -23,7 +23,7 @@ import {
   sequenceFor,
   terminalKeyOverride,
 } from '@/lib/keys'
-import { visibleLines, visibleScreen } from '@/lib/screen'
+import { liveScreen, visibleLines, visibleScreen } from '@/lib/screen'
 import {
   hasWatcher,
   registerProbe,
@@ -138,11 +138,39 @@ export function TerminalPane({ cardId }: Props) {
     const helper = container.querySelector('.xterm-helper-textarea')
     /** 自分たちが「打てる」とみて渡した焦点か。**閉じる方向の追従にだけ使う**。 */
     let 打てるとみて渡した = false
-    const 打てる場所として焦点を渡す = () => {
-      const 打てる = acceptsTyping(visibleScreen(term))
-      if (helper instanceof HTMLTextAreaElement) {
-        helper.inputMode = 打てる ? 'text' : 'none'
+
+    /**
+     * 入力方式を当てる。**値が変わるときは、焦点を一度外してから当てる。**
+     *
+     * iOS は焦点が当たったままの変更を読まない。ところが**この端末はマウント時に
+     * 自分で焦点を取る**ので、以後のタップでは焦点が既に入っており、`focus()` は
+     * 何も起こさない——つまり「焦点が入る直前に当てる」だけでは、**2回目以降が
+     * 一度も効かない**。外して当て直す道が要る。
+     *
+     * **外したままにはしない。** 呼び出し側が直後に `term.focus()` で戻す——
+     * 焦点を失うと、物理キーボードを繋いだ端末（iPad ＋ キーボードなど）で
+     * **Enter も矢印も端末へ届かなくなる**。ソフトキーボードだけを閉じたいのであって、
+     * 端末を使えなくしたいのではない。
+     */
+    const 入力方式を当てる = (打てる: boolean) => {
+      if (!(helper instanceof HTMLTextAreaElement)) {
+        return
       }
+      const 方式 = 打てる ? 'text' : 'none'
+      if (helper.inputMode === 方式) {
+        return
+      }
+      if (document.activeElement === helper) {
+        helper.blur()
+      }
+      helper.inputMode = 方式
+    }
+
+    const 打てる場所として焦点を渡す = () => {
+      // **測るのは「いま生きている画面」。** 遡って過去を読んでいる最中にタップしても、
+      // 過去の画面で「打てない」と判定しない（`liveScreen` の注記）
+      const 打てる = acceptsTyping(liveScreen(term))
+      入力方式を当てる(打てる)
       term.focus()
       return 打てる
     }
@@ -300,26 +328,42 @@ export function TerminalPane({ cardId }: Props) {
     const unprobe = registerProbe(cardId, 測る)
 
     const parsed = term.onWriteParsed(() => {
-      // **打てるとみて渡した焦点だけを、閉じる方向に追いかける**（設計§4）。
-      //
-      // 向きで扱いを変えるのは、**効くものと効かないものが違う**から。`blur()` は
-      // 利用者の操作を要らずに効くが、キーボードを**開く**には操作起因のイベントが
-      // 要る——フレームの到着は操作ではないので、開く側は狙っても届かない。
-      //
-      // 放っておくと、選択待ちへ移ったのにキーボードが出たまま十字ボタンとメニューを
-      // 覆う。**印が立っていない間は画面を組み立てない**ので、PC と非フォーカス時の
-      // 負担は増えない。
-      if (打てるとみて渡した && !acceptsTyping(visibleScreen(term))) {
-        打てるとみて渡した = false
-        if (helper instanceof HTMLTextAreaElement) {
-          helper.inputMode = 'none'
-          helper.blur()
-        }
-      }
-      if (!hasWatcher(cardId)) {
+      const 見張り = hasWatcher(cardId)
+      // **どちらの用も無ければ、画面を1文字も組み立てない。** PC は購読者が0で、
+      // 印も立たない（マウント時は空の画面なので「打てない」に倒れる）ので、
+      // ここで即座に戻る
+      if (!打てるとみて渡した && !見張り) {
         return
       }
-      setSelecting(cardId, 測る())
+      // **1フレームに1回だけ組み立てる。** 2つの用（キーボードの出し入れと十字の
+      // 出し入れ）は同じ画面を見るので、別々に組み立てると**同じ機械で2回**走る——
+      // しかもそれが起きるのは、いちばん力の弱いスマホである
+      const 見えている = visibleScreen(term)
+      if (打てるとみて渡した) {
+        // 遡っている最中は、見えているものと生きているものが違う。**判定は生きている側**
+        const buffer = term.buffer.active
+        const 生きている =
+          buffer.viewportY === buffer.baseY ? 見えている : liveScreen(term)
+        // **打てるとみて渡した焦点だけを、閉じる方向に追いかける**（設計§4）。
+        //
+        // 向きで扱いを変えるのは、**効くものと効かないものが違う**から。焦点を外すのは
+        // 利用者の操作を要らずに効くが、キーボードを**開く**には操作起因のイベントが
+        // 要る——フレームの到着は操作ではないので、開く側は狙っても届かない。
+        //
+        // 放っておくと、選択待ちへ移ったのにキーボードが出たまま十字ボタンとメニューを
+        // 覆う。
+        if (!acceptsTyping(生きている)) {
+          打てるとみて渡した = false
+          入力方式を当てる(false)
+          // **焦点は端末へ戻す。** 外したままだと、物理キーボードを繋いだ端末で
+          // Enter も矢印も届かなくなる——確定が要るその瞬間に、である
+          term.focus()
+        }
+      }
+      if (!見張り) {
+        return
+      }
+      setSelecting(cardId, looksSelecting(見えている))
     })
 
     // 下り：頼まれた「意味」をバイト列へ直して流す。**`term` そのものは渡さない**
