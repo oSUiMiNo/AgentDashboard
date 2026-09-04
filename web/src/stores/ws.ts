@@ -517,7 +517,9 @@ function handleJson(raw: string, set: SetState) {
       if (message.card_id === null) {
         set({ lastError: message.message })
       } else {
-        setCardError(message.card_id, message.message)
+        // **種別は運ばれてこないことがある**（欄を持たない古いサーバ）。既定は `other` で、
+        // 5秒で消える側に落ちる（細かい修正 設計§7-2）
+        setCardError(message.card_id, message.message, message.kind ?? 'other')
       }
       break
   }

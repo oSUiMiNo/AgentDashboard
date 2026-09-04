@@ -203,6 +203,30 @@ export const NICKNAME_MAX_CHARS = 200
 /** JSONL レコードの `uuid` に対応するノードID。 */
 export type NodeId = string
 
+/**
+ * 断りが**何をしようとして出たか**（細かい修正 設計§7-2）。
+ *
+ * **エラーの原因ではなく、呼び出し側の操作で割る。** 解消の判定が「次に同じ操作が
+ * 通ったか」になるためで、原因で割ると**同じ原因の別操作**まで一緒に消える。
+ *
+ * `not_found` だけは操作ではない——持ち主とカードの存在を確かめる関門は**どの操作より
+ * 前**にあり、そこで断ったときにはまだ操作が決まっていない。
+ *
+ * **古いサーバは欄を持たない**ので、欠けていたら `other` として扱う。
+ */
+export type ErrorKind =
+  | 'permission_mode'
+  | 'model'
+  | 'revive'
+  | 'nickname'
+  | 'kill'
+  | 'archive'
+  | 'sub_pty'
+  | 'sub_transcript'
+  | 'send_input'
+  | 'not_found'
+  | 'other'
+
 /** ツールコールの完了状態。 */
 export type ToolStatus = 'pending' | 'ok' | 'error'
 
@@ -359,7 +383,7 @@ export type ServerMessage =
   | { t: 'hello'; flow_high: number; flow_low: number }
   | { t: 'session_upsert'; session: SessionMeta }
   | { t: 'session_removed'; card_id: CardId }
-  | { t: 'error'; card_id: CardId | null; message: string }
+  | { t: 'error'; card_id: CardId | null; message: string; kind?: ErrorKind }
   // 以下は初期実装でフェーズ2〜5に回したもの。**いまは全部サーバ側も配線済み**
   | {
       t: 'status'

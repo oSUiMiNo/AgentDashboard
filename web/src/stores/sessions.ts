@@ -26,7 +26,7 @@
  */
 
 import { useSyncExternalStore } from 'react'
-import type { CardId, SessionMeta, SessionStatus } from '@/lib/protocol'
+import type { CardId, ErrorKind, SessionMeta, SessionStatus } from '@/lib/protocol'
 import { LOCAL_HOST } from '@/lib/routes'
 import { getProjects, subscribeProjects } from '@/stores/projects'
 
@@ -92,16 +92,73 @@ let accountFilter: string | null = null
  *
  * サーバ由来の状態が1件でも届いたら消す（[`flush`]）。居座らせない。
  */
+/**
+ * カードに溜まる断り1件（細かい修正 設計§7-1）。
+ *
+ * **「宛先」と「本体」を別にしてある。** 宛先（どのカードか）は器の鍵が持ち、こちらは
+ * 自分がどこへ出るのかを知らない——**アプリ全体の知らせ**（隣のイシュー
+ * `上部に居座る知らせを、最前面のトーストとベルへ移す`）と後から1つにするなら、
+ * 分かれているこの形が要る（設計§7-5）。
+ */
+export interface Notice {
+  /** 何をしようとして断られたか */
+  kind: ErrorKind
+  /** 画面に出す文言 */
+  message: string
+  /** 受け取った時刻。**ベルの一覧に添える**——いま起きたことか昔のことか判断できない */
+  createdAt: number
+  /**
+   * いつ消えるか（`null` なら時間では消えない）。
+   *
+   * **`kind` から引いた結果をここへ焼いておく。** 読むたびに引き直すと、寿命の表を
+   * 変えたときに**既に溜まっているものの寿命まで遡って変わる**。
+   */
+  expiresAt: number | null
+}
+
 const reviving = new Set<CardId>()
 
 /**
- * そのカードに出す断りの言葉（復旧設計§9-5）。
+ * そのカードに溜まっている断り（復旧設計§9-5・細かい修正 設計§7-1）。
  *
  * `ServerMessage::Error` は `card_id` を運んでいるのに、ブラウザは捨てて画面全体の帯へ
  * 出していた。**名指しがあるものはそのカードへ**出す。行き先を決めるのは種別ではなく
  * 名指しの有無なので、経路が増えても迷わない。
+ *
+ * # 1本の文字列から、積む器へ
+ *
+ * **かつては1枚に1本しか持てず、新しいものが来ると無条件に上書きしていた。** 種別も
+ * 無いので「解消されたもの」を種類ごとに判定できず、時間で消える道も無かった
+ * （細かい修正 設計§7-1）。
+ *
+ * **上書きではなく積む。** 続けざまに別の操作が断られたとき、新しいほうが前のものを
+ * 消してしまわないようにするためである。
  */
-const cardErrors = new Map<CardId, string>()
+const cardNotices = new Map<CardId, Notice[]>()
+
+/**
+ * 1枚のカードに溜めておく上限。
+ *
+ * **上限を決めないと、`記録が際限なく育ち、掃除する道が無い` と同じ道を通る。** 溢れたら
+ * 古いほうから捨てる——読みたいのは直近の断りで、古いものほど手掛かりとしての値打ちが薄い。
+ */
+const 溜める上限 = 20
+
+/** 時間で消える種別の寿命（ミリ秒）。 */
+const 寿命 = 5_000
+
+/**
+ * 時間では消えない種別（細かい修正 設計§7-3）。
+ *
+ * | 種別 | なぜ消さないか |
+ * |---|---|
+ * | `revive` | **空きメモリ不足のような、解消を観測する手段が無いもの**が混ざる。5秒で消すと押した理由そのものが読めなくなる |
+ * | `not_found` | 恒常的な制約に近い。カードが消えれば一緒に消える（既存の道） |
+ * | `sub_pty` | 端末が開けない。同上 |
+ *
+ * **ここに無いものは 5 秒で消える。** 種別を足したら、消えないほうに入れるかを必ず決めること。
+ */
+const 消えない: ReadonlySet<ErrorKind> = new Set(['revive', 'not_found', 'sub_pty'])
 
 /**
  * 実体が無いカード（＝起こし直しの候補。復旧設計§3-1）。**作成順・絞り込み後**。
@@ -300,8 +357,8 @@ function flush() {
       }
       case 'remove': {
         if (metas.delete(op.cardId)) {
-          // カードごと消えたら、そのカードに出していた断りも消す
-          cardErrors.delete(op.cardId)
+          // カードごと消えたら、そのカードに溜まっていた断りも消す
+          cardNotices.delete(op.cardId)
           order = order.filter((cardId) => cardId !== op.cardId)
           structureChanged = true
           touched.add(op.cardId)
@@ -430,26 +487,55 @@ export function markReviving(cardId: CardId) {
     return
   }
   reviving.add(cardId)
-  // 前の理由は消す。押し直したのに古い断りが残っていると、今回の結果と読めてしまう
-  clearCardError(cardId)
+  // 前の理由は消す。押し直したのに古い断りが残っていると、今回の結果と読めてしまう。
+  // **消すのは起こし直しの断りだけ**（細かい修正 設計§7-3）——押した操作と関係の無い
+  // 断りまで畳むと、読む前に消える
+  clearCardNotices(cardId, 'revive')
+  // **鳴らすのは、消す断りが無くても。** `clearCardNotices` は中身が変わったときだけ
+  // 鳴らすので、そこに任せると**断りが無いカードでは「復旧中…」が画面に出ない**
+  notifyCard(cardId)
 }
 
 /**
- * そのカードに出ている断りを消す。
+ * そのカードに溜まっている断りのうち、**その操作のもの**を消す。
  *
- * **押し直す前に呼ぶ。** 古い断りが残っていると、今回の結果と読めてしまう——
- * `markReviving` が前からやっていたことを、名前のある口として切り出した。
+ * **押し直す前に呼ぶ。** 古い断りが残っていると、今回の結果と読めてしまう。
  *
- * # 同じ文言が2回続く場合に効く
+ * # なぜ種別で絞るのか
  *
- * [`useCardError`] は文字列をそのまま返すので、**同じ断りが2回続くと
- * `useSyncExternalStore` が `Object.is` で弾き、React からは変化に見えない。**
- * 送る前にここを通しておけば、断りは毎回 `null → 文言` の変化になる。
+ * 消えてよいのは「**次に同じ操作が通った**」ときだけである（細かい修正 設計§7-3）。
+ * 全部を畳むと、隣の操作の断りが**読まれる前に**消える——実際、権限モードの切替が
+ * 断られた理由が E2E で1度も画面に出せなかったことがある。
+ *
+ * `kind` を省くとそのカードの断りを全部消す。**カードごと消えたとき**と、
+ * 記録を丸ごと入れ替えるときだけに使う。
  */
-export function clearCardError(cardId: CardId) {
-  cardErrors.delete(cardId)
+export function clearCardNotices(cardId: CardId, kind?: ErrorKind) {
+  const 溜まり = cardNotices.get(cardId)
+  if (溜まり === undefined) {
+    return
+  }
+  const 残り = kind === undefined ? [] : 溜まり.filter((notice) => notice.kind !== kind)
+  if (残り.length === 溜まり.length) {
+    return
+  }
+  if (残り.length === 0) {
+    cardNotices.delete(cardId)
+  } else {
+    cardNotices.set(cardId, 残り)
+  }
   // **カード1枚だけを鳴らす。** 全体に持つと、6枚を並べたときに一覧が丸ごと描き直される
   notifyCard(cardId)
+}
+
+/**
+ * そのカードの断りを全部消す。
+ *
+ * **`clearCardNotices` の種別を省いた形。** 押す前の地ならしには使わないこと——
+ * あちらは「次に同じ操作が通ったとき」だけを消す（設計§7-3）。
+ */
+export function clearCardError(cardId: CardId) {
+  clearCardNotices(cardId)
 }
 
 /** そのカードを起こし直している最中か。 */
@@ -461,22 +547,116 @@ export function useReviving(cardId: CardId): boolean {
   )
 }
 
+/** 次に掃きにいく時計。**1本だけ持つ**——カードごとに持つと、数が増えるほど時計が増える */
+let 掃除の時計: ReturnType<typeof setTimeout> | null = null
+
 /**
- * そのカードに出す断りを立てる（復旧設計§9-5）。
+ * 寿命の来た断りを落とす。
+ *
+ * **`Date.now()` で判定して、時計は「次に落ちるもの」まで1本だけ張る。** 断りごとに
+ * `setTimeout` を持つと、カードが消えたときに取り消し忘れた時計が残る。
+ */
+function 掃く() {
+  掃除の時計 = null
+  const いま = Date.now()
+  let 次 = Number.POSITIVE_INFINITY
+  for (const [cardId, 溜まり] of [...cardNotices]) {
+    const 残り = 溜まり.filter((notice) => {
+      if (notice.expiresAt === null) {
+        return true
+      }
+      if (notice.expiresAt <= いま) {
+        return false
+      }
+      次 = Math.min(次, notice.expiresAt)
+      return true
+    })
+    if (残り.length === 溜まり.length) {
+      continue
+    }
+    if (残り.length === 0) {
+      cardNotices.delete(cardId)
+    } else {
+      cardNotices.set(cardId, 残り)
+    }
+    notifyCard(cardId)
+  }
+  張り直す(次)
+}
+
+function 張り直す(次: number) {
+  if (次 === Number.POSITIVE_INFINITY) {
+    return
+  }
+  if (掃除の時計 !== null) {
+    clearTimeout(掃除の時計)
+  }
+  掃除の時計 = setTimeout(掃く, Math.max(0, 次 - Date.now()))
+}
+
+/**
+ * そのカードに断りを1件積む（復旧設計§9-5・細かい修正 設計§7-1〜§7-3）。
  *
  * **印も一緒に外す。** 断られたのに「復旧中…」が残ると、二度と押せないカードになる。
+ *
+ * **上書きしない。** 続けざまに別の操作が断られたとき、新しいほうが前のものを消して
+ * しまうと、先に断られた理由が読めなくなる。
  */
-export function setCardError(cardId: CardId, message: string) {
-  cardErrors.set(cardId, message)
+export function pushCardNotice(cardId: CardId, message: string, kind: ErrorKind = 'other') {
+  const いま = Date.now()
+  const 溜まり = cardNotices.get(cardId) ?? []
+  const notice: Notice = {
+    kind,
+    message,
+    createdAt: いま,
+    expiresAt: 消えない.has(kind) ? null : いま + 寿命,
+  }
+  // 溢れたら古いほうから捨てる
+  const 次 = [...溜まり, notice].slice(-溜める上限)
+  cardNotices.set(cardId, 次)
   reviving.delete(cardId)
+  if (notice.expiresAt !== null) {
+    張り直す(notice.expiresAt)
+  }
   notifyCard(cardId)
 }
 
-/** そのカードに出ている断り（無ければ `null`）。 */
+/**
+ * そのカードに断りを立てる。
+ *
+ * **`pushCardNotice` の別名として残してある**——押し手の側は「種別を持たない失敗」を
+ * 立てることがあり、そこまで書き換えると呼び出し側が読みにくくなる。
+ */
+export function setCardError(cardId: CardId, message: string, kind: ErrorKind = 'other') {
+  pushCardNotice(cardId, message, kind)
+}
+
+/**
+ * そのカードに溜まっている断り（**新しい順**）。
+ *
+ * ベルを押したときに出す一覧がこれ。**新しい順**なのは、いま起きたことから読みたいためである。
+ */
+export function useCardNotices(cardId: CardId): readonly Notice[] {
+  return useSyncExternalStore(
+    (listener) => subscribeCard(cardId, listener),
+    () => cardNotices.get(cardId) ?? 空の溜まり,
+    () => 空の溜まり,
+  )
+}
+
+/** 何も溜まっていないときに返す不変の配列。**毎回新しい配列を返すと購読が無限に鳴る** */
+const 空の溜まり: readonly Notice[] = []
+
+/**
+ * そのカードに出ている**いちばん新しい**断りの文言（無ければ `null`）。
+ *
+ * 画面の定位置に出す1行がこれ。**溜まっている全部を読むのはベル**（[`useCardNotices`]）で、
+ * ここは「いま何が起きたか」だけを出す。
+ */
 export function useCardError(cardId: CardId): string | null {
   return useSyncExternalStore(
     (listener) => subscribeCard(cardId, listener),
-    () => cardErrors.get(cardId) ?? null,
+    () => cardNotices.get(cardId)?.at(-1)?.message ?? null,
     () => null,
   )
 }
@@ -515,7 +695,8 @@ export function clearSessions() {
   pending = []
   scheduled = false
   reviving.clear()
-  cardErrors.clear()
+  cardNotices.clear()
+  掃除の時計 = null
   reviveTargets = []
   reviveFingerprint = ''
 }

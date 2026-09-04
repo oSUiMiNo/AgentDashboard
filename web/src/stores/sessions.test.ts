@@ -387,15 +387,30 @@ describe('断りが消える契機', () => {
     expect(result.current).toBe('切り替えられません')
   })
 
-  it('押し直したら消える', () => {
+  it('押し直したら、その操作の断りだけが消える', () => {
     // 古い断りが残っていると、今回の結果と読めてしまう
     applySessionSnapshot([stale(A)])
     const { result } = renderHook(() => useCardError(A))
-    act(() => setCardError(A, '切り替えられません'))
+    act(() => setCardError(A, '起こせませんでした', 'revive'))
 
     act(() => markReviving(A))
 
     expect(result.current).toBeNull()
+  })
+
+  it('押し直しても、別の操作の断りは残る', () => {
+    /*
+      **消えてよいのは「次に同じ操作が通った」ときだけ**（細かい修正 設計§7-3）。
+      1本の文字列だったころは押し直しが全部を畳んでいたので、**隣の操作の断りが
+      読まれる前に消えていた**。
+    */
+    applySessionSnapshot([stale(A)])
+    const { result } = renderHook(() => useCardError(A))
+    act(() => setCardError(A, '切り替えられません', 'permission_mode'))
+
+    act(() => markReviving(A))
+
+    expect(result.current).toBe('切り替えられません')
   })
 
   it('カードごと消えたら消える', () => {
