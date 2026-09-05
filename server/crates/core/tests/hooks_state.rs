@@ -1150,3 +1150,116 @@ async fn 画面から一覧が消えればサブ待ちから戻る() {
         "一覧が消えたので入力待ちへ戻る"
     );
 }
+
+/// **末尾に一覧が入らなくなっても、サブ待ちへ移れること**（設計§14 読み替え3）。
+///
+/// これが今回の不具合そのものである。判定していた画面は、リングバッファの末尾 64 KiB を
+/// まっさらな端末エミュレータへ流し直して組み立てたものだった。**claude の TUI は変わった
+/// 行しか描き直さない**ので、待ちが長引くと末尾にはスピナーの更新しか入らなくなる——
+/// **一覧はサブが立った瞬間に一度描かれたきり動かない**ものなので、窓の外へ落ちたまま
+/// 二度と現れない。実機では、一覧が画面に実在するのに **113 回続けて「出ていない」**と
+/// 答えていた（実物 1486 文字に対し、末尾から組み立てた画面は 149〜259 文字）。
+///
+/// **リングが小さいテストでは踏めない。** 末尾にも一覧が入ってしまうので、末尾から読む
+/// 実装のままでも緑になる。だから `overdraw` で**行を流さずに**末尾を埋める。
+#[tokio::test]
+async fn 末尾に一覧が残っていなくてもサブ待ちへ移る() {
+    let server = common::TestServer::start().await;
+    let (session, mut watcher) = common::start_session(&server.manager).await;
+
+    server.post_hook(session.token(), "Stop", "{}").await;
+    common::wait_for_status(&session, SessionStatus::WaitingInput).await;
+
+    // 画面を埋めてから描く。**一覧を最下行へ置く**ためで、上書きの当たる行と離す
+    session
+        .send_instruction("flood 4096")
+        .await
+        .expect("画面を埋めさせる");
+    watcher
+        .wait_for(testkit::fake_claude::FLOOD_END_MARKER)
+        .await;
+    // **描くところまで1つの指示でやる。** 描いたあとに指示を送ると打鍵のエコーが
+    // 一覧の下に載り、画面のいちばん下の塊が一覧でなくなる。そのあと、一覧を
+    // 描き直さない更新だけで末尾を埋める——ここを通ったあと、末尾 64 KiB に一覧は
+    // 1バイトも入っていない
+    session
+        .send_instruction(
+            "overdraw 131072 ◯ fork  Verifying version path      13m 59s · ↓ 775.3k tokens",
+        )
+        .await
+        .expect("一覧を描かせてから、フッタを残したまま画面を流させる");
+    watcher
+        .wait_for(testkit::fake_claude::OVERDRAW_END_MARKER)
+        .await;
+
+    server.manager.sweep_once();
+    assert_eq!(
+        session.status(),
+        SessionStatus::WaitingSubagents,
+        "端末の実物には一覧が出ている。末尾に残っていないだけである"
+    );
+}
+
+/// **作業中からもサブ待ちへ移れること**（設計§14 読み替え4）。
+///
+/// サブのツールコールもメインと同じフックを飛ばすので、ターンが終わった直後にサブが
+/// 一手打つと作業中へ落ちる。**フックには叩いたのがどちらか分からない**が、画面には
+/// 分かる——メインが走っていればスピナーが出る。実機ではこの形で、誰もキーボードの前に
+/// 居ないのに「作業中」に見え続けていた（120秒の無音で停滞へ落ちては画面判定で
+/// 入力待ちへ救出される、を14回繰り返していた）。
+#[tokio::test]
+async fn 作業中でもスピナーが無ければサブ待ちへ移る() {
+    let server = common::TestServer::start().await;
+    let (session, _watcher) = common::start_session(&server.manager).await;
+
+    // サブがツールを叩いた形。フックはメインと見分けが付かない
+    server.post_hook(session.token(), "PreToolUse", "{}").await;
+    common::wait_for_status(&session, SessionStatus::Working).await;
+
+    session
+        .send_instruction("paint ◯ fork  Verifying version path      13m 59s · ↓ 775.3k tokens")
+        .await
+        .expect("一覧の行を描かせる");
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+    server.manager.sweep_once();
+    assert_eq!(
+        session.status(),
+        SessionStatus::WaitingSubagents,
+        "手が空いていて一覧が出ているのだから、作業中ではない"
+    );
+}
+
+/// **メインが走っているうちは動かさないこと。**
+///
+/// 「作業中からも入る」の唯一の歯止めなので、これが外れると走っているカードが
+/// サブ待ちに見える。**この対照が無いと、無条件に移す実装でも上のテストは緑になる。**
+#[tokio::test]
+async fn メインが走っていれば作業中のまま動かない() {
+    let server = common::TestServer::start().await;
+    let (session, _watcher) = common::start_session(&server.manager).await;
+
+    server.post_hook(session.token(), "PreToolUse", "{}").await;
+    common::wait_for_status(&session, SessionStatus::Working).await;
+
+    // スピナーと一覧が同時に出ている＝メインもサブも走っている
+    session
+        .send_instruction("paint ✽ Ebbing… (2m 10s · ↓ 543 tokens · thinking)")
+        .await
+        .expect("走っている印を描かせる");
+    // 一覧は**いちばん下**に要るので、打鍵のエコーが下に載らない口で描く
+    session
+        .send_instruction(
+            "overdraw 0 ◯ fork  Verifying version path      13m 59s · ↓ 775.3k tokens",
+        )
+        .await
+        .expect("一覧の行を描かせる");
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+    server.manager.sweep_once();
+    assert_eq!(
+        session.status(),
+        SessionStatus::Working,
+        "メインが走っているのだからサブ待ちではない"
+    );
+}

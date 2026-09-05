@@ -18,6 +18,12 @@ pub const ENV_PREFIX: &str = "[fake-claude] env: ";
 pub const DUMP_END_MARKER: &str = "[fake-claude] dump-end";
 /// `flood` の出力が終わったことを示すマーカー。
 pub const FLOOD_END_MARKER: &str = "[fake-claude] flood-end";
+
+/// [`overdraw`] が描き終えた印。
+///
+/// **行を流さずに置く**ので、画面の下に出ている一覧は押し出されない。読み手は生の
+/// バイト列を走査するだけなので、位置決めして書いても見つけられる。
+pub const OVERDRAW_END_MARKER: &str = "[fake-claude] overdraw-end";
 /// `hook` がフックコマンドを実行し終えたことを示す行頭。
 ///
 /// 実行が終わってから出すので、テストはこれを待てば「ダッシュボード側が受け取り終えた」と

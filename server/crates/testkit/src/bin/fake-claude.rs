@@ -48,9 +48,9 @@ use testkit::fake_claude::{
     BYPASS_OPTIONS, CANCELLED_MARKER, CRASH_MARKER, CYCLE_MODES, DEQUEUED_MARKER, DUMP_END_MARKER,
     ENV_PREFIX, FLOOD_END_MARKER, FLOOD_PATTERN, FOOTER_PREFIX, HOOK_FAILED_PREFIX,
     HOOK_SENT_PREFIX, JSONL_APPENDED_PREFIX, JSONL_FAILED_PREFIX, MODEL_SET_PREFIX,
-    MODEL_SWITCH_NOTICE, MODEL_SWITCH_OPTIONS, QUEUED_PREFIX, READY_MARKER, RECEIVED_PREFIX,
-    REPLIED_PREFIX, RESIZED_PREFIX, SAID_PREFIX, STATUS_LINE_SENT_PREFIX, footer_for,
-    physical_lines, render_dialog, resolve_model,
+    MODEL_SWITCH_NOTICE, MODEL_SWITCH_OPTIONS, OVERDRAW_END_MARKER, QUEUED_PREFIX, READY_MARKER,
+    RECEIVED_PREFIX, REPLIED_PREFIX, RESIZED_PREFIX, SAID_PREFIX, STATUS_LINE_SENT_PREFIX,
+    footer_for, physical_lines, render_dialog, resolve_model,
 };
 
 /// 起動時に受け取った、フック実行に必要な情報。
@@ -479,13 +479,22 @@ fn main() {
         // **打鍵のエコー側は印にならない。** こちらの行は `paint ` で始まるので、
         // 行の頭が5文字の語になり、判定は落ちる。
         if let Some(rest) = line.strip_prefix("paint ") {
-            let _ = writeln!(out, "{}", rest.trim_end());
+            // **必ず行頭から描く。** 打鍵のエコーには改行が付かないので、頭に1つ入れないと
+            // エコーと同じ行に載り、**行の頭の形を見る判定が落ちる**（実物では印は行頭に
+            // 出るので、載ってしまうほうが偽物である）
+            let _ = writeln!(out, "\n{}", rest.trim_end());
             let _ = out.flush();
             continue;
         }
 
         if let Some(size) = line.strip_prefix("flood ") {
             flood(&mut out, size.trim().parse::<usize>().unwrap_or(0));
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix("overdraw ") {
+            let (size, pinned) = rest.trim().split_once(' ').unwrap_or((rest.trim(), ""));
+            overdraw(&mut out, size.parse::<usize>().unwrap_or(0), pinned);
             continue;
         }
 
@@ -1048,6 +1057,36 @@ fn dump(out: &mut impl Write) {
 }
 
 /// 指定バイト数をまとめて吐く。フロー制御と大量出力の検証用。
+/// **フッタを描き直さずに画面だけを動かす**（設計§14 読み替え3 の再現）。
+///
+/// 本物の TUI は**変わった行しか描き直さない**ので、待ちが長引くほど端末の末尾には
+/// スピナーの更新しか入らなくなる——**一度描かれたきり動かない一覧は、末尾からは
+/// 二度と読めない**。[`flood`] と違って**行を流さない**のがここの肝で、カーソルを
+/// 1行目へ置いて上書きするだけなので、下に出ている一覧は画面に残ったままになる。
+///
+/// これが無いと、リングが小さいテストでは末尾にも一覧が入ってしまい、
+/// **末尾から読む実装のままでも緑になる**（実際にそうなっていた）。
+fn overdraw(out: &mut impl Write, bytes: usize, pinned: &str) {
+    // **描くのも自分でやる。** 描いたあとに指示を1つでも送ると、打鍵のエコーが
+    // その下の行に載り、**画面のいちばん下の塊**を見る判定が届かなくなる。本物の TUI では
+    // フッタより下に何も出ないので、載るほうが偽物である
+    if !pinned.is_empty() {
+        let _ = writeln!(out, "\n{}", pinned.trim_end());
+    }
+    let mut written = 0usize;
+    let mut tick = 0u32;
+    while written < bytes {
+        // 保存 → 1行目へ → 上書き → 復帰。行送りを1つも出さない
+        let chunk = format!("\x1b7\x1b[1;1H spinner {tick:>10} \x1b8");
+        written += chunk.len();
+        let _ = out.write_all(chunk.as_bytes());
+        tick = tick.wrapping_add(1);
+    }
+    // 印も2行目へ置く（改行を出すと一覧が流れてしまう）
+    let _ = write!(out, "\x1b7\x1b[2;1H{OVERDRAW_END_MARKER}\x1b8");
+    let _ = out.flush();
+}
+
 fn flood(out: &mut impl Write, size: usize) {
     let mut written = 0;
     while written < size {
