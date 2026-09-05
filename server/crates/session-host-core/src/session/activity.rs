@@ -136,6 +136,89 @@ pub fn is_running_line(line: &str) -> bool {
         && (after.is_empty() || after.starts_with(" ("))
 }
 
+/// **走っているサブエージェントの一覧**（`◯`）が画面のいちばん下に出ているか
+/// （設計§14 読み替え）。
+///
+/// # なぜ `subagent_active` を当てにしないのか
+///
+/// **あの数は、サブエージェントが生きているうちに 0 へ戻る**（実機のログで確認）。
+/// フォークが走り続けている最中に `Stop` が届き、そこでは既に 0 だったため、
+/// **サブ待ちにならず入力待ちになっていた。**
+///
+/// ```text
+/// 13:29:01 sub=1 status=WaitingSubagents   ← 立った
+/// 13:31:18 sub=0 status=WaitingInput       ← まだ走っているのに 0 へ戻った
+/// ```
+///
+/// # `Waiting for N background agents to finish` は使えない
+///
+/// CLI は確かにこの文を書く。**しかしこれは会話の履歴として流れる本文で、待ちが
+/// 終わっても画面から消えない。** 実物のカード1枚に**2回**残っていた（別々のターンで
+/// 書かれたもの）。これを根拠に解くと、**サブが終わってもサブ待ちのまま**になる——
+/// 直そうとした間違い（終わったのに入力待ち）の裏返しを作ることになる。
+///
+/// **消えるものだけを根拠にする。** フッタの一覧は毎フレーム描き直されるので、
+/// サブが終われば消える（実測：一覧が出ていたカードが、フォークの終了後に消えた）。
+///
+/// # 拾うのは画面のいちばん下の塊だけ
+///
+/// フッタはこの形で、**入力欄より下**に描かれる。
+///
+/// ```text
+///   ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent
+///
+///   ● main
+///   ◯ fork  Verifying version path in /api/versions      13m 59s · ↓ 775.3k tokens
+/// ```
+///
+/// 画面の全体から `◯` を探さないのは、**会話の本文にも記号が出るから**である。実物の
+/// カード30枚では `◯` は一覧にしか出ていなかったが、`●` は本文の行頭に普通に出る。
+/// 同じ理由で塊の終わりは `●`／`◯` 以外の行とし、**`● main` の綴りは求めない**——
+/// 根の名前が変わっただけで黙って効かなくなる作りにしないため。
+///
+/// # 壊れたときにどちらへ倒れるか
+///
+/// 画面読みは版で壊れる前提である（設計§8-2）。ここが読めなくなると**サブ待ちに
+/// 入らなくなる**＝いままでどおり入力待ちになる。**サブ待ちのまま張り付く側へは
+/// 倒れない**ので、壊れ方としては軽いほうを選んである。
+pub fn waits_for_subagents(screen: &str) -> bool {
+    agent_tree_block(screen).any(is_agent_line)
+}
+
+/// 一覧の行の記号。走っているサブエージェント1本につき1行。
+const TREE_RUNNING: char = '◯';
+
+/// 一覧の根（`● main`）。**塊の終わりを見分けるためだけに使う。**
+const TREE_ROOT: char = '●';
+
+/// 画面のいちばん下にある一覧の塊を、**下から順に**返す。
+///
+/// 末尾の空行を飛ばし、記号で始まる行が続くあいだだけを取る。フッタとその上の本文は
+/// 空行で隔てられているので、ここで止まる。
+fn agent_tree_block(screen: &str) -> impl Iterator<Item = &str> {
+    screen
+        .lines()
+        .rev()
+        .skip_while(|line| line.trim().is_empty())
+        .take_while(|line| {
+            let head = line.trim_start();
+            head.starts_with(TREE_RUNNING) || head.starts_with(TREE_ROOT)
+        })
+}
+
+/// 1行が「走っているサブエージェント」の行か。
+///
+/// 公開しているのは、テストが**本物の判定を絞り込む形で**変異体を作れるようにするため
+/// （[`is_running_line`] と同じ理由）。
+pub fn is_agent_line(line: &str) -> bool {
+    let Some(rest) = line.trim_start().strip_prefix(TREE_RUNNING) else {
+        return false;
+    };
+    // 記号のあとは空白で区切られ、中身がある。`◯` だけの行や、記号に文字が続く行
+    // （`◯◯` のような飾り）は一覧ではない
+    rest.starts_with(char::is_whitespace) && !rest.trim().is_empty()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,6 +449,128 @@ mod tests {
         for mark in ['·', '✶', '✻', '✽', '✳'] {
             assert!(is_running_line(&format!("{mark} Ebbing…")), "{mark}");
         }
+    }
+
+    /// 実機のカードから写した、フッタの一覧つきの画面（設計§14 読み替え）。
+    ///
+    /// **フィクスチャが無いのでリテラルで持っている。** 走っているフォークが在るカードの
+    /// 実物から、行の形を変えずに写した（説明と数字だけ短くしてある）。
+    ///
+    /// **本文の側に紛らわしいものを混ぜてある。** 履歴に残る
+    /// `✻ Waiting for 1 background agent to finish` と、行頭の `●` である。
+    /// どちらも実物に出ていて、**どちらも判定に使ってはいけない側**である。
+    const TREE_SCREEN: &str = "\
+● さっきの返事です
+  ⎿  Stop says: 完了前チェック
+✻ Waiting for 1 background agent to finish
+────────────────────────
+❯
+────────────────────────
+  Opus 5
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent
+
+  ● main
+  ◯ fork  Verifying version path in /api/versions      13m 59s · ↓ 775.3k tokens
+";
+
+    /// 一覧が消えたあとの同じ画面。**本文に残った待ちの行はそのまま**である。
+    const TREE_GONE: &str = "\
+● さっきの返事です
+  ⎿  Stop says: 完了前チェック
+✻ Waiting for 1 background agent to finish
+────────────────────────
+❯
+────────────────────────
+  Opus 5
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent
+";
+
+    #[test]
+    fn 実機で採った一覧つきの画面を読み取れる() {
+        assert!(waits_for_subagents(TREE_SCREEN));
+    }
+
+    /// **一覧が消えれば偽に戻ること。** ここが戻らないと、サブが終わってもカードが
+    /// サブ待ちのまま張り付く（直そうとした間違いの裏返し）。
+    #[test]
+    fn 一覧が消えれば待ちではなくなる() {
+        assert!(!waits_for_subagents(TREE_GONE));
+        // 末尾に空行が続いても同じ（描き直しの途中で行が空くことがある）
+        assert!(!waits_for_subagents(&format!("{TREE_GONE}\n\n   \n")));
+        assert!(waits_for_subagents(&format!("{TREE_SCREEN}\n\n   \n")));
+    }
+
+    /// **履歴に残った文は根拠にしない**（設計§14 読み替え）。
+    ///
+    /// `Waiting for N background agents to finish` は会話の本文として流れるので、
+    /// 待ちが終わっても消えない。実物のカード1枚に2回残っていた。
+    #[test]
+    fn 本文に残った待ちの文は拾わない() {
+        assert!(
+            !waits_for_subagents(
+                "✻ Waiting for 1 background agent to finish\nなにか\n✻ Waiting for 2 background agents to finish"
+            ),
+            "本文の文だけでは立たない"
+        );
+    }
+
+    /// **本文の途中に記号があっても拾わない。** 拾うのはいちばん下の塊だけである。
+    #[test]
+    fn 本文の途中の記号は拾わない() {
+        let screen = format!("◯ 本文に出てきた記号\nなにか\n{TREE_GONE}");
+        assert!(!waits_for_subagents(&screen));
+    }
+
+    /// 根だけの一覧（走っているサブが1本も無い）では立たない。
+    #[test]
+    fn 根だけの一覧では立たない() {
+        assert!(!waits_for_subagents("なにか\n\n  ● main\n"));
+    }
+
+    #[test]
+    fn 一覧の行かどうかを見分ける() {
+        assert!(is_agent_line("  ◯ fork  なにか  13m 59s"));
+        // 字下げが無い形も受ける（描き直しで欠けることがある）
+        assert!(is_agent_line("◯ general-purpose  調べもの"));
+        for line in [
+            // 記号だけ
+            "◯",
+            "  ◯   ",
+            // 記号に文字が続く（飾り）
+            "◯◯ なにか",
+            // 根の側
+            "  ● main",
+            // 走っている印
+            "✽ Ebbing… (2m 10s · ↓ 543 tokens · thinking)",
+            "",
+        ] {
+            assert!(!is_agent_line(line), "{line}");
+        }
+    }
+
+    /// **走っている印と混ざらないこと。** どちらも行の頭に記号が付くので、
+    /// 片方の判定がもう片方を拾うと状態が入れ替わる。
+    #[test]
+    fn 一覧の行と走っている印は互いに拾わない() {
+        assert!(
+            !is_running_line("◯ fork  なにか  13m 59s · ↓ 775.3k tokens"),
+            "一覧の行を走行中と読まない"
+        );
+        assert!(
+            !is_agent_line("✽ Ebbing… (2m 10s · ↓ 543 tokens · thinking)"),
+            "スピナーを一覧と読まない"
+        );
+    }
+
+    /// 実物20枚のどれにも一覧は出ていない（誤爆しないことの確認）。
+    #[test]
+    fn 実物20枚には一覧が無い() {
+        let 拾った: Vec<&str> = SAMPLES
+            .iter()
+            .filter(|(_, screen, _)| waits_for_subagents(screen))
+            .map(|(name, _, _)| *name)
+            .collect();
+        assert_eq!(拾った, Vec::<&str>::new());
     }
 
     #[test]

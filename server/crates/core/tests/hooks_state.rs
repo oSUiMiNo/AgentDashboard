@@ -1022,15 +1022,21 @@ async fn stop_failureは継ぎ目を通って入力待ちにする() {
     common::wait_for_status(&session, SessionStatus::WaitingInput).await;
 }
 
-/// サブエージェントが残っているターンの終わりが、継ぎ目を通して「サブ待ち」になる
-/// （設計§14）。
+/// サブエージェントのフックが継ぎ目を通ることと、**それが状態を動かさない**こと
+/// （設計§14 読み替え）。
 ///
 /// **単体（`state.rs`）とは見ているものが違う。** あちらは遷移の表そのもの、こちらは
 /// **注入した settings → 擬似 claude → HTTP → 受信口 → 状態機械**の一式が繋がっていること。
 /// `SubagentStart` は `HookEvent::ALL` に載っているだけで settings へ書き出されるので、
 /// **この経路が通ることは名前だけでは確かめられない。**
+///
+/// # なぜ数で状態を動かさないのか
+///
+/// `subagent_active` は**サブが生きているうちに 0 へ戻る**。実機のログで、`sub=1` で
+/// 立ったサブ待ちが2分後に `sub=0` へ戻り、そのときサブはまだ走っていた。出入りは
+/// 端末のフッタに出る**走っているサブの一覧**を根拠にする（下の2本）。
 #[tokio::test]
-async fn サブが残ったままターンが終わるとサブ待ちになる() {
+async fn サブのフックは数だけを動かす() {
     let server = common::TestServer::start().await;
     let (session, mut watcher) = common::start_session(&server.manager).await;
 
@@ -1038,34 +1044,109 @@ async fn サブが残ったままターンが終わるとサブ待ちになる()
     common::wait_for_status(&session, SessionStatus::Working).await;
 
     // **同じイベントを続けて撃たない。** 擬似 claude は「撃った」合図を端末へ出し、
-    // `fire_hook` はそれを待つ作りなので、2回続けると1回目の合図で待ちが解けてしまう。
-    // **本数の勘定は `state.rs` の単体テストが持っている**ので、ここは継ぎ目だけを見る
+    // `fire_hook` はそれを待つ作りなので、2回続けると1回目の合図で待ちが解けてしまう
     common::fire_hook(&session, &mut watcher, "SubagentStart", "").await;
     assert_eq!(session.meta().subagent_active, 1);
     assert_eq!(
         session.status(),
         SessionStatus::Working,
-        "メインが走っている間は、サブが立っても状態を動かさない"
+        "サブが立っても状態は動かさない"
     );
 
-    // メインが手を止めた。サブが残っているので入力待ちにはしない
+    // メインが手を止めた。**数が残っていても行き先は入力待ち**
     common::fire_hook(&session, &mut watcher, "Stop", "").await;
-    common::wait_for_status(&session, SessionStatus::WaitingSubagents).await;
+    common::wait_for_status(&session, SessionStatus::WaitingInput).await;
+    assert_eq!(session.meta().subagent_active, 1, "数はそのまま");
 
-    // **サブが動かすツールで、サブ待ちが消えないこと。**
-    //
-    // ツールを叩いたのがメインとは限らない——サブエージェントのツールコールも同じ
-    // フックを飛ばす。ここで作業中へ戻ると、`Stop` でサブ待ちにした直後に消える
-    // （利用者が実機で踏んだ壊れ方）
-    common::fire_hook(&session, &mut watcher, "PostToolUse", "").await;
+    common::fire_hook(&session, &mut watcher, "SubagentStop", "").await;
+    assert_eq!(session.meta().subagent_active, 0);
+    assert_eq!(session.status(), SessionStatus::WaitingInput);
+}
+
+/// **画面のフッタにサブエージェントの一覧が出ていれば、入力待ちからサブ待ちへ移る**
+/// （設計§14 読み替え）。
+///
+/// # なぜフックの本数では足りないのか
+///
+/// `subagent_active` は**サブが生きているうちに 0 へ戻る**。実機のログで、`sub=1` で
+/// 立ったサブ待ちが2分後に `sub=0` へ戻り、そのときサブはまだ走っていた。数だけを
+/// 根拠にすると、**待ちが長いときに限って「入力待ち」に見える**——利用者が踏んだのは
+/// この形である。
+///
+/// そこで**停滞判定と同じ画面読みの土台**（`session::activity`）を使い、CLI がフッタへ
+/// 描く**走っているサブエージェントの一覧**を材料にする。ここで確かめるのは、
+/// リング → 描画 → 判定 → 状態 → 配信という一式が繋がっていること。
+/// **行の形そのものは単体テストが持っている。**
+#[tokio::test]
+async fn 画面にサブの一覧が出ていれば入力待ちからサブ待ちへ移る() {
+    let server = common::TestServer::start().await;
+    let (session, _watcher) = common::start_session(&server.manager).await;
+
+    // 数は 0 のままターンが終わる＝いまの実機で起きている形
+    server.post_hook(session.token(), "Stop", "{}").await;
+    common::wait_for_status(&session, SessionStatus::WaitingInput).await;
+    assert_eq!(session.meta().subagent_active, 0);
+
+    // 実機のカードから採った、フッタの一覧の行をそのまま画面へ出す。
+    // **打鍵のエコー側（`paint ` で始まる行）は判定に掛からない**
+    session
+        .send_instruction("paint ◯ fork  Verifying version path      13m 59s · ↓ 775.3k tokens")
+        .await
+        .expect("一覧の行を描かせる");
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+    server.manager.sweep_once();
     assert_eq!(
         session.status(),
         SessionStatus::WaitingSubagents,
-        "サブのツールコールで作業中へ戻ってはいけない"
+        "画面が待っていると言っているのだから、入力待ちではない"
+    );
+}
+
+/// **画面から一覧が消えれば、サブ待ちから戻る**（設計§14 読み替え）。
+///
+/// **この対照が無いと、「一度サブ待ちにしたら戻らない」実装でも上のテストは緑になる。**
+/// `SubagentStop` を出口から外した以上、**戻る道はここしかない。**
+#[tokio::test]
+async fn 画面から一覧が消えればサブ待ちから戻る() {
+    let server = common::TestServer::start().await;
+    let (session, mut watcher) = common::start_session(&server.manager).await;
+
+    server.post_hook(session.token(), "Stop", "{}").await;
+    common::wait_for_status(&session, SessionStatus::WaitingInput).await;
+
+    session
+        .send_instruction("paint ◯ fork  Verifying version path      13m 59s · ↓ 775.3k tokens")
+        .await
+        .expect("一覧の行を描かせる");
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    server.manager.sweep_once();
+    assert_eq!(session.status(), SessionStatus::WaitingSubagents);
+
+    // サブが終わって画面が流れた。**一覧を押し出すのに十分な量**を出す
+    session
+        .send_instruction("flood 8192")
+        .await
+        .expect("画面を流させる");
+    watcher
+        .wait_for(testkit::fake_claude::FLOOD_END_MARKER)
+        .await;
+
+    // **5秒より短い間隔では見に行かない**（間引きの検査を兼ねる）
+    for _ in 0..5 {
+        server.manager.sweep_once();
+    }
+    assert_eq!(
+        session.status(),
+        SessionStatus::WaitingSubagents,
+        "5秒より短い間隔では画面を見に行かない"
     );
 
-    // 最後の1本が終わって初めて入力待ちへ
-    common::fire_hook(&session, &mut watcher, "SubagentStop", "").await;
-    common::wait_for_status(&session, SessionStatus::WaitingInput).await;
-    assert_eq!(session.meta().subagent_active, 0);
+    tokio::time::sleep(std::time::Duration::from_millis(5100)).await;
+    server.manager.sweep_once();
+    assert_eq!(
+        session.status(),
+        SessionStatus::WaitingInput,
+        "一覧が消えたので入力待ちへ戻る"
+    );
 }

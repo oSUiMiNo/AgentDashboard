@@ -190,6 +190,11 @@ impl Changed {
 /// `WaitingSubagents` が `WaitingInput` より上にあるのは、**ターンが終わっていても仕事は
 /// 終わっていない**からである（設計§14）。どちらも指示は受け付けるので、優先されるのは
 /// 「まだ終わっていない」と読める側になる。
+///
+/// **ただしフックだけでは `WaitingSubagents` に入らない**（設計§14 読み替え）。この関数が
+/// 選ぶのは `WaitingInput` までで、そこからサブ待ちへ移す／戻すのは画面を読む
+/// [`sync_subagent_wait`] である。理由は `subagent_active` が当てにならないこと——
+/// `SubagentStop` は**サブが生きているうちに届く**（実機で確認）。
 pub fn apply(meta: &mut SessionMeta, input: &HookInput, now: Timestamp) -> Changed {
     let mut changed = Changed::default();
     // ここへ来る `Ended` は**プロセスが消えたことが確定したもの**だけになった
@@ -257,7 +262,8 @@ pub fn apply(meta: &mut SessionMeta, input: &HookInput, now: Timestamp) -> Chang
             // 見え続けていた（利用者が実機で踏んだ）。
             //
             // **サブ待ちから出る道は2つだけ**にする——人が指示を打つ
-            // （`UserPromptSubmit`）か、最後のサブが終わる（`SubagentStop`）か。
+            // （`UserPromptSubmit`）か、**端末のフッタから一覧が消える**
+            // （[`sync_subagent_wait`]）か。`SubagentStop` は出口ではない（設計§14 読み替え）。
             if meta.status != SessionStatus::WaitingSubagents {
                 set(meta, SessionStatus::Working, &mut changed);
             }
@@ -271,7 +277,7 @@ pub fn apply(meta: &mut SessionMeta, input: &HookInput, now: Timestamp) -> Chang
         }
 
         HookEvent::Stop => {
-            set_unless_permission(meta, turn_ended_status(meta), &mut changed);
+            set_unless_permission(meta, SessionStatus::WaitingInput, &mut changed);
             let message = input.last_assistant_message().map(str::to_string);
             if message.is_some() && meta.last_assistant_message != message {
                 meta.last_assistant_message = message;
@@ -288,29 +294,26 @@ pub fn apply(meta: &mut SessionMeta, input: &HookInput, now: Timestamp) -> Chang
         // エラーの種別（`rate_limit` ほか）で表示を変えないのは、それが新しい状態を作る
         // 話になるため（設計§6-2・§10-1）。エラーで終わったことは端末に出ている。
         HookEvent::StopFailure => {
-            set_unless_permission(meta, turn_ended_status(meta), &mut changed);
+            set_unless_permission(meta, SessionStatus::WaitingInput, &mut changed);
         }
 
-        // **数を動かし、手が空いているときだけ状態も動かす**（設計§14）。
+        // **数だけを動かし、状態は触らない**（設計§14 読み替え）。
         //
-        // メインが走っている（`Working`）間は状態を触らない——サブが増えても減っても、
-        // 動いているのはメインだからである。動かすのは「ターンが終わっている」と
-        // 分かっている2つの状態のあいだだけ。
+        // このフックの数は**当てにならないと実測で分かっている**——`SubagentStop` は
+        // サブがまだ生きているうちに届き、実機で `sub=1` のサブ待ちが2分後に `sub=0` へ
+        // 戻ったとき、サブはまだ走っていた。**数を根拠に状態を動かすと、いちばん長い
+        // 待ちのときに限って外す。**
+        //
+        // サブ待ちの出入りは、端末のフッタに出る**走っているサブの一覧**を根拠にする
+        // （[`sync_subagent_wait`]）。数はバッジの表示に残す。
         HookEvent::SubagentStart => {
             meta.subagent_active += 1;
             changed.status = true;
-            if meta.status == SessionStatus::WaitingInput {
-                set(meta, SessionStatus::WaitingSubagents, &mut changed);
-            }
         }
         HookEvent::SubagentStop => {
             // 取りこぼしや二重送信で 0 を下回らないようにする
             meta.subagent_active = meta.subagent_active.saturating_sub(1);
             changed.status = true;
-            // **最後の1本が終わったときだけ戻す。** 残っているなら待ち続ける
-            if meta.subagent_active == 0 && meta.status == SessionStatus::WaitingSubagents {
-                set(meta, SessionStatus::WaitingInput, &mut changed);
-            }
         }
 
         // **状態を動かさない。** フックは「会話が終わった」までしか言えない。
@@ -334,19 +337,47 @@ fn set(meta: &mut SessionMeta, next: SessionStatus, changed: &mut Changed) {
     }
 }
 
-/// ターンが終わったときに落ち着く先（設計§14）。
+/// 画面の申告で、サブ待ちへ入る／サブ待ちから出る（設計§14 読み替え）。
 ///
-/// **サブエージェントが1本でも残っていれば「サブ待ち」。** メインは手を止めたが、仕事は
-/// 終わっていない。0 本なら従来どおり「入力待ち」。
+/// `waiting` は「端末に『サブエージェントの終わりを待っている』行が出ているか」で、
+/// [`crate::session::activity::waits_for_subagents`] が画面から求める。停滞の
+/// [`sweep_stalled_idle`] と同じ形で、**判定そのものをここへ持ち込まない**——この module は
+/// 時刻も副作用も持たず、遷移表をそのまま表駆動テストに落とせることを要点にしている。
 ///
-/// **`Stop` と `StopFailure` の両方から呼ぶ。** どちらも「そのターンは終わった」を意味し、
-/// サブが残っているかどうかで行き先が変わる点も同じである。
-fn turn_ended_status(meta: &SessionMeta) -> SessionStatus {
-    if meta.subagent_active > 0 {
+/// # なぜ本数（`subagent_active`）だけでは足りないのか
+///
+/// **`SubagentStop` はサブがまだ生きているうちに届く。** 実機で、`sub=1` で立ったサブ待ちが
+/// 2分後に `sub=0` へ戻り、**そのときサブはまだ走っていた**。本数を根拠にすると、待ちが
+/// 長いときに限って「入力待ち」に見える——利用者が踏んだのはこの形である。
+///
+/// 数を捨てるのではなく、**入り口は数、出口は画面**にする。`Stop` の時点で数が立っていれば
+/// その場でサブ待ちにできる（[`turn_ended_status`]）ので速い。数が当てにならなかった場合の
+/// 取りこぼしと、解くときだけを画面が受け持つ。
+///
+/// # 動かすのは、ターンが終わっている2つの状態のあいだだけ
+///
+/// `WaitingInput` と `WaitingSubagents` は**同じ事実（ターンは終わった）の別の顔**で、
+/// 間を往復しても人がすべきことは変わらない。それ以外（`Working` ／ `WaitingPermission`
+/// ／ `Stalled` ／ `Ended` ／ `Starting`）へは入らないし、そこからも動かさない。
+///
+/// **この絞り込みは競合に対する防壁でもある。** 呼ぶ側（`Session::sweep`）は `meta` の
+/// ロックを一度離してから画面を読む。その隙間にフックが1件でも届いていれば [`apply`] が
+/// 状態を進めているので、そこへ書き戻すと**届いたばかりのフックを踏み潰す**。
+///
+/// # 画面読みは版で壊れる前提
+///
+/// 壊れたときに残るのは「サブ待ちのまま解けない」側で、**人が指示を打てば
+/// `UserPromptSubmit` で作業中へ戻る**（自分では直らないが、行き止まりにはならない）。
+pub fn sync_subagent_wait(meta: &mut SessionMeta, waiting: bool) -> bool {
+    let next = if waiting && meta.status == SessionStatus::WaitingInput {
         SessionStatus::WaitingSubagents
-    } else {
+    } else if !waiting && meta.status == SessionStatus::WaitingSubagents {
         SessionStatus::WaitingInput
-    }
+    } else {
+        return false;
+    };
+    meta.status = next;
+    true
 }
 
 /// 権限確認待ちのときだけは上書きしない（優先順位のガード）。
@@ -937,65 +968,108 @@ mod tests {
         }
     }
 
-    /// サブエージェントが残っているターンの終わり方（設計§14-2）。
+    /// **ターンの終わりは、本数に関わらず入力待ち**（設計§14 読み替え）。
     ///
-    /// **既存の遷移表には足せない。** あの表は `(開始状態, イベント, 期待状態)` の3つ組で、
-    /// `subagent_active` を条件にできない（`meta_with` は 0 で作る）。
+    /// サブ待ちへ移すのは画面を読む [`sync_subagent_wait`] だけである。`subagent_active`
+    /// を行き先の条件にしていた作りは、実測で**数が当てにならない**と分かって外した。
     #[test]
-    fn サブが残っていればターンの終わりはサブ待ちになる() {
+    fn ターンの終わりは本数に関わらず入力待ち() {
         for event in [HookEvent::Stop, HookEvent::StopFailure] {
-            let mut meta = meta_with(SessionStatus::Working);
-            meta.subagent_active = 2;
-            apply(&mut meta, &hook(event), NOW);
-            assert_eq!(
-                meta.status,
-                SessionStatus::WaitingSubagents,
-                "{} が届いたとき",
-                event.as_str()
-            );
-            // 数は触らない。あれはサブエージェント自身のフックが動かすもの
-            assert_eq!(meta.subagent_active, 2);
+            for count in [0, 2] {
+                let mut meta = meta_with(SessionStatus::Working);
+                meta.subagent_active = count;
+                apply(&mut meta, &hook(event), NOW);
+                assert_eq!(
+                    meta.status,
+                    SessionStatus::WaitingInput,
+                    "{} が届いたとき（サブ {count} 本）",
+                    event.as_str()
+                );
+                assert_eq!(meta.subagent_active, count, "数は触らない");
+            }
         }
     }
 
+    /// **サブのフックは数だけを動かす**（設計§14 読み替え）。
+    ///
+    /// 手が空いていても状態は変わらない。`SubagentStart` は届いたのに端末には一覧が
+    /// 出ない、という組み合わせがありうる（別の機械のサブなど）ためではなく、
+    /// **出入りの根拠を1つ（画面）に寄せる**ためである。2つあると、片方が外したときに
+    /// もう片方が打ち消して、どちらが効いているのか読めなくなる。
     #[test]
-    fn サブが居なければターンの終わりは今までどおり入力待ち() {
-        for event in [HookEvent::Stop, HookEvent::StopFailure] {
-            let mut meta = meta_with(SessionStatus::Working);
-            apply(&mut meta, &hook(event), NOW);
-            assert_eq!(
-                meta.status,
-                SessionStatus::WaitingInput,
-                "{} が届いたとき",
-                event.as_str()
-            );
-        }
-    }
-
-    #[test]
-    fn 手が空いている間にサブが立つとサブ待ちへ移る() {
+    fn サブのフックは数だけを動かす() {
         let mut meta = meta_with(SessionStatus::WaitingInput);
         apply(&mut meta, &hook(HookEvent::SubagentStart), NOW);
-        assert_eq!(meta.status, SessionStatus::WaitingSubagents);
         assert_eq!(meta.subagent_active, 1);
+        assert_eq!(meta.status, SessionStatus::WaitingInput, "状態は動かさない");
     }
 
+    /// **本数が0へ戻ってもサブ待ちは解かない**（設計§14 読み替え）。
+    ///
+    /// `SubagentStop` はサブがまだ生きているうちに届く。解くのは画面の側
+    /// （[`sync_subagent_wait`]）である。
     #[test]
-    fn 最後の1本が終わったときだけ入力待ちへ戻る() {
+    fn 本数が0へ戻ってもサブ待ちは解けない() {
         let mut meta = meta_with(SessionStatus::WaitingSubagents);
         meta.subagent_active = 2;
 
         apply(&mut meta, &hook(HookEvent::SubagentStop), NOW);
         assert_eq!(meta.subagent_active, 1);
+        assert_eq!(meta.status, SessionStatus::WaitingSubagents);
+
+        apply(&mut meta, &hook(HookEvent::SubagentStop), NOW);
+        assert_eq!(meta.subagent_active, 0, "数は今までどおり数える");
         assert_eq!(
             meta.status,
             SessionStatus::WaitingSubagents,
-            "1本残っているうちは戻らない"
+            "0 になっても状態は動かさない"
         );
+    }
 
-        apply(&mut meta, &hook(HookEvent::SubagentStop), NOW);
-        assert_eq!(meta.subagent_active, 0);
+    /// 画面の申告でサブ待ちへ入り、消えたら出る（設計§14 読み替え）。
+    #[test]
+    fn 画面の申告でサブ待ちへ入って出る() {
+        let mut meta = meta_with(SessionStatus::WaitingInput);
+        assert!(sync_subagent_wait(&mut meta, true));
+        assert_eq!(meta.status, SessionStatus::WaitingSubagents);
+
+        assert!(sync_subagent_wait(&mut meta, false));
         assert_eq!(meta.status, SessionStatus::WaitingInput);
+    }
+
+    /// 変化を返し続けると、配信が無駄に増える（[`sweep_stalled_idle`] と同じ作法）。
+    #[test]
+    fn 画面の申告が同じなら二度目は変化しない() {
+        let mut meta = meta_with(SessionStatus::WaitingInput);
+        assert!(!sync_subagent_wait(&mut meta, false));
+        assert!(sync_subagent_wait(&mut meta, true));
+        assert!(!sync_subagent_wait(&mut meta, true));
+    }
+
+    /// **ターンが終わっていない状態は、画面を見ても動かさない。**
+    ///
+    /// 呼ぶ側は `meta` のロックを一度離して画面を読むので、その隙間にフックが届いて
+    /// いれば状態はもう `Working` である。ここが競合に対する唯一の防壁になっている。
+    ///
+    /// **両方の入力で回すこと。** 片側だけだと、動かない理由が「入力のせい」なのか
+    /// 「状態の絞り込みのせい」なのか区別できない。
+    #[test]
+    fn ターンが終わっていない状態は画面を見ても動かない() {
+        for status in [
+            SessionStatus::Starting,
+            SessionStatus::Working,
+            SessionStatus::Stalled,
+            SessionStatus::WaitingPermission,
+            SessionStatus::Ended { ok: true },
+            SessionStatus::Ended { ok: false },
+            SessionStatus::Unknown,
+        ] {
+            for waiting in [true, false] {
+                let mut meta = meta_with(status);
+                assert!(!sync_subagent_wait(&mut meta, waiting), "{status:?}");
+                assert_eq!(meta.status, status, "{status:?}");
+            }
+        }
     }
 
     /// **メインが走っている間は、サブの増減で状態を動かさない**（設計§14-2）。
@@ -1011,9 +1085,9 @@ mod tests {
         }
     }
 
-    /// **権限確認待ちは、サブが残っていても上書きしない**（既存のガードに乗る）。
+    /// **権限確認待ちは、ターンが終わっても上書きしない**（既存のガードに乗る）。
     #[test]
-    fn 権限確認待ちはサブ待ちに上書きされない() {
+    fn 権限確認待ちはターンの終わりに上書きされない() {
         let mut meta = meta_with(SessionStatus::WaitingPermission);
         meta.subagent_active = 3;
         apply(&mut meta, &hook(HookEvent::Stop), NOW);

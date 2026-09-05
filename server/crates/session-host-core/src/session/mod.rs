@@ -48,7 +48,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicI64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -546,6 +546,20 @@ pub struct Session {
     /// 瞬間は、直前まで走っていたカードの最後のコマがまだ画面に残っていることがあり、
     /// **いちばん当てにならない瞬間**である（設計§13-7）。
     activity_checked_at: AtomicI64,
+    /// サブ待ちかどうかを画面へ見に行った時刻（設計§14 読み替え）。
+    ///
+    /// [`activity_checked_at`](Self::activity_checked_at) と**別に持つ**。あちらは停滞した
+    /// カード、こちらはターンが終わったカードで、**見に行く相手も条件も違う**。1つに
+    /// まとめると、片方の間引きがもう片方の間引きを黙って狂わせる。
+    waiting_checked_at: AtomicI64,
+    /// 前にサブ待ちを見に行ったときの、端末の累計バイト数（[`Session::scrollback_mark`]）。
+    ///
+    /// **端末が1バイトも動いていなければ、描き直しても答えは同じである。** 停滞と違って
+    /// こちらは**手が空いているカード全部**が対象なので、これが無いと、開いたまま放置した
+    /// カードの数だけ 64 KiB の描き直しが5秒おきに永久に走る。
+    ///
+    /// 待ちの行が出るときも消えるときも端末は必ず書き換わるので、取りこぼしはない。
+    waiting_checked_mark: AtomicU64,
     /// 添付の印を待つ上限（画像添付 設計§21 読み替え2）。
     ///
     /// **設定から取る**（`attachment_mark_wait_ms`）。定数のままにすると、
@@ -720,6 +734,29 @@ impl Session {
             "停滞したカードの画面を見た"
         );
         running
+    }
+
+    /// 端末のフッタに、走っているサブエージェントの一覧が出ているか（設計§14 読み替え）。
+    ///
+    /// [`Session::terminal_shows_activity`] と同じ作法で、**`ring` のロックの中では
+    /// 描かない**。見ている行が違うだけで、材料の集め方は1つにそろえてある。
+    fn terminal_waits_for_subagents(&self) -> bool {
+        let (cols, rows) = *self.terminal_size.lock().expect("ロックが壊れていない");
+        let tail = self.scrollback_tail_bytes(ACTIVITY_TAIL);
+        let screen = activity::render(&tail, cols, rows);
+        let waiting = activity::waits_for_subagents(&screen);
+        // **材料を並べる。** 画面読みは版で壊れる前提なので、外したときに桁行・読んだ量・
+        // 描けた量が無いと理由を絞れない（停滞側で証拠が無くて詰まった実例がある）
+        tracing::debug!(
+            card_id = %self.card_id,
+            waiting,
+            cols,
+            rows,
+            tail_bytes = tail.len(),
+            screen_chars = screen.chars().count(),
+            "サブエージェントの一覧が出ているか画面を見た"
+        );
+        waiting
     }
 
     /// いまの位置に目印を打つ。
@@ -1385,7 +1422,21 @@ impl Session {
             }
         }
         let mut meta = self.meta.lock().expect("ロックが壊れていない");
-        let changed = state::apply(&mut meta, input, now_ms());
+        let before = meta.status;
+        let now = now_ms();
+        let changed = state::apply(&mut meta, input, now);
+
+        // **ターンが動き出したら、画面読みの間引きを解く**（設計§14 読み替え）。
+        //
+        // サブ待ちの出入りは5秒に1回しか見に行かない。解かないと、**短いターンを続けて
+        // 打ったときに、ターンが終わってから数秒「入力待ち」が見えてしまう**——本当は
+        // サブが走っているのに、である。
+        //
+        // 走っている間は状態で弾かれる（見に行くのは入力待ちとサブ待ちのカードだけ）ので、
+        // ここを 0 に戻しても描き直しは増えない。
+        if before != SessionStatus::Working && meta.status == SessionStatus::Working {
+            self.waiting_checked_at.store(0, Ordering::Relaxed);
+        }
 
         // **ターンの終わりだけ、何をどう決めたかを残す**（設計§14）。
         //
@@ -1497,6 +1548,45 @@ impl Session {
                 woke
             };
 
+        // **サブ待ちの出入りは画面が決める**（設計§14 読み替え）。フックの本数
+        // （`subagent_active`）は、サブがまだ生きているうちに 0 へ戻ることが実機で
+        // 分かっている——だから「解く」側を数に任せられない。
+        //
+        // 対象はターンが終わっている2枚（入力待ち・サブ待ち）だけ。ロックの並びは上と
+        // 同じで、`meta` を離してから `ring` を握り、また `meta` を取る。この隙間に
+        // フックが届いていた場合は `sync_subagent_wait` の状態の絞り込みが弾く。
+        let subagent_moved =
+            matches!(
+                status,
+                SessionStatus::WaitingInput | SessionStatus::WaitingSubagents
+            ) && activity::due(self.waiting_checked_at.load(Ordering::Relaxed), now)
+                && {
+                    self.waiting_checked_at.store(now, Ordering::Relaxed);
+                    // **端末が動いていなければ描き直さない。** 手が空いたまま放置された
+                    // カードは何時間でもこの枝に居るので、ここを外すと 64 KiB の描き直しが
+                    // 5秒おきに永久に走る
+                    let mark = self.scrollback_mark();
+                    if self.waiting_checked_mark.swap(mark, Ordering::Relaxed) == mark {
+                        false
+                    } else {
+                        let waiting = self.terminal_waits_for_subagents();
+                        let mut meta = self.meta.lock().expect("ロックが壊れていない");
+                        let moved = state::sync_subagent_wait(&mut meta, waiting);
+                        if moved {
+                            // 画面読みで動かしたことは必ず残す。版が上がって行の形が変われば
+                            // ここが黙るので、**出ていた行が出なくなったこと**が手がかりになる
+                            tracing::info!(
+                                card_id = %self.card_id,
+                                waiting,
+                                subagent_active = meta.subagent_active,
+                                status = ?meta.status,
+                                "画面の申告でサブ待ちを切り替えた"
+                            );
+                        }
+                        moved
+                    }
+                };
+
         if silent {
             // `Starting → Unknown` の遷移そのものがラッチ。ここへ来るのは1本につき1回だけ
             self.report_hook_silence(input, now, created_at, true);
@@ -1508,7 +1598,7 @@ impl Session {
             // **`woke` を落とさないこと。** 落とすと状態は変わるのに配信が呼ばれず、
             // ブラウザは停滞のまま見続ける。テストは `session.status()` を直に見るので
             // **緑になってしまう**
-            status: stalled || silent || woke,
+            status: stalled || silent || woke || subagent_moved,
             meta: mode_changed,
         }
     }
@@ -2295,6 +2385,8 @@ impl SessionManager {
             hook_silence_noted: AtomicBool::new(false),
             terminal_size: Mutex::new((INITIAL_COLS, INITIAL_ROWS)),
             activity_checked_at: AtomicI64::new(0),
+            waiting_checked_at: AtomicI64::new(0),
+            waiting_checked_mark: AtomicU64::new(0),
             model_alias: Mutex::new(initial_alias),
             model_switching: AtomicBool::new(false),
             // 画面を作るかどうかは**報告先が決める**（設計§7-2・§22 読み替え2）
