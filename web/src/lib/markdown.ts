@@ -58,6 +58,7 @@ import type { Element, Root, RootContent } from 'hast'
 import type { Root as MdastRoot, RootContent as MdastContent } from 'mdast'
 import remarkGfm from 'remark-gfm'
 
+import { HISTORY_FOLD_LINES, machineShapeOf } from '@/lib/machineMessage'
 import { MACHINE_FOLD_LINES, bodyTextOf, isMachine } from '@/lib/messageOrigin'
 import type { Node } from '@/lib/protocol'
 
@@ -141,7 +142,7 @@ export const BODY_FOLD_LINES_BUBBLE = 50
  * 幅も同じなので、**しきい値も同じでなければならない**——ここで分けると、同じ文が
  * 読まれる前と後で違うところで畳まれ、**読まれた瞬間に行の高さが跳ねる**。
  */
-export type FoldKind = Node['kind'] | 'machine_message'
+export type FoldKind = Node['kind'] | 'machine_message' | 'machine_history'
 
 /**
  * その行を、どの畳み方の表で見るか
@@ -154,10 +155,19 @@ export type FoldKind = Node['kind'] | 'machine_message'
  * の作法をそのまま広げたもので、部品側に `if (機械)` を書かせないための形でもある。
  */
 export function foldKindOf(node: Node): FoldKind {
-  return isMachine(node) ? 'machine_message' : node.kind
+  if (!isMachine(node)) {
+    return node.kind
+  }
+  // **会話履歴の写しだけ、もっと強く畳む**（設計§12-2）。あれは画面の 76.3% を
+  // 占めており、しかも**機械が文脈のために入れた丸写し**なので普段読む必要が無い。
+  // `bodyTextOf` は写しを剥がさずそのまま返すので、剥がした後の字で見分けが付く。
+  return machineShapeOf(bodyTextOf(node)) === 'history' ? 'machine_history' : 'machine_message'
 }
 
 export function foldLinesFor(kind: FoldKind): number {
+  if (kind === 'machine_history') {
+    return HISTORY_FOLD_LINES
+  }
   if (kind === 'machine_message') {
     return MACHINE_FOLD_LINES
   }
@@ -237,7 +247,10 @@ export function foldDecision(text: string, kind: FoldKind): FoldDecision {
   // 猶予は「畳んでも縮まないなら畳まない」という**高さ**の話だが、こちらは
   // **人の発言と同じ面積を機械に与えない**という格の話で、目的が違う。
   // 結果として12行の通知も畳まれる（畳んでもほとんど縮まない）。
-  if (kind === 'machine_message') {
+  //
+  // **会話履歴の写しも同じ扱いである**（設計§12-2）。しきい値が3行しかないので、
+  // ここで猶予（5行）を当てると**8行まで畳まれない**——線を狭めた意味が消える。
+  if (kind === 'machine_message' || kind === 'machine_history') {
     return total > first ? { fold: true, lines: first } : { fold: false, lines: total }
   }
   if (total > BODY_FOLD_LINES_EXCESSIVE) {

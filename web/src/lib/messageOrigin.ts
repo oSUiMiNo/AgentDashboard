@@ -12,6 +12,7 @@
  * しきい値ではなく種別を渡す」としているのと同じ作法である。
  */
 
+import { formatMachineBody } from './machineMessage'
 import type { MessageOrigin, Node } from './protocol'
 
 /**
@@ -93,6 +94,15 @@ export function originLabel(origin: MessageOrigin): string {
  * ので、読む側の損は無い。
  *
  * **展開が無いほうが多数派**（実測67%。設計§3-4）なので、そのときは空になる。
+ *
+ * # 機械が入れたものは、包みを剥がしてから返す（設計§12）
+ *
+ * 剥がすのは [`formatMachineBody`] で、**ここが唯一の呼び口**である。畳む判断
+ * （`foldDecision`）も残り行数の勘定も描く部品も、みなこの関数を通るので、
+ * **剥がした後の字で揃う**——別々に剥がすと、畳む位置と見えている字がずれる。
+ *
+ * **人が打ったものには触らない。** 包みは機械が付けるものなので、人の側で
+ * 剥がす相手が出てくることは無い。
  */
 export function bodyTextOf(node: Node): string {
   if (node.kind !== 'user_message') {
@@ -101,5 +111,5 @@ export function bodyTextOf(node: Node): string {
   if (node.command) {
     return node.command.expansion ?? ''
   }
-  return node.text
+  return isMachine(node) ? formatMachineBody(node.text) : node.text
 }
