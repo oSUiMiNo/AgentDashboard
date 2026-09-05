@@ -1,6 +1,6 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { IBufferLine, Terminal } from '@xterm/xterm'
-import { TERMINAL_GRID, TERMINAL_OPTIONS, TerminalPane } from './TerminalPane'
+import { LONG_PRESS_MS, TERMINAL_GRID, TERMINAL_OPTIONS, TerminalPane } from './TerminalPane'
 import { KIND_PTY_OUTPUT, KIND_PTY_SNAPSHOT } from '@/lib/frame'
 import { hasKeyboard, openKeyboard } from '@/lib/terminalBridge'
 import { useWsStore } from '@/stores/ws'
@@ -30,6 +30,12 @@ vi.mock('@xterm/addon-webgl', () => ({
     // xterm 側から呼ばれる最低限の口
     activate() {}
   },
+}))
+
+/** 写す手のモック。**巻き上げられる `vi.mock` から見えるように `vi.hoisted` で持つ。** */
+const 写し = vi.hoisted(() => ({ 呼ばれた: vi.fn<(value: string) => Promise<boolean>>() }))
+vi.mock('@/lib/clipboard', () => ({
+  copyToClipboard: (value: string) => 写し.呼ばれた(value),
 }))
 
 const CARD = '11111111-2222-3333-4444-555555555555'
@@ -831,5 +837,381 @@ describe('TerminalPane のキーボード', () => {
     unmount()
 
     expect(hasKeyboard(CARD)).toBe(false)
+  })
+})
+
+/**
+ * 長押しで選んで、コピーする（ローカルイシュー「スマホでターミナルの文字をコピーできない」
+ * 設計§3・§4）。
+ *
+ * # ここが見張るのは「既定の経路に入らないこと」でもある
+ *
+ * 前のイシューで直した3点——枠のタップで開く／枠の外のタップで抜ける／本アプリの
+ * 入力欄から引き戻されない——は `TerminalPane の触った場所` と `TerminalPane の
+ * キーボード` が持っている。**あちらが1本も落ちないことが、この工事の合格条件**で
+ * あり、こちらはそれを壊しにいく経路（長押し）だけを足して見張る。
+ *
+ * # 実物のブラウザでは確かめられないもの
+ *
+ * **選択の色**はレンダラが描くので DOM に出ない。**写せたかどうか**もブラウザの
+ * 判断なので、ここで見られるのは「写す手へ何を渡したか」までである。
+ */
+describe('TerminalPane の長押し', () => {
+  /** 1行の高さ（px）。差し込む値で、実測値ではない。 */
+  const CELL = 15
+  /** 枠を 30〜32 行目に置いた画面。31行目が打つところ。 */
+  const 枠のある画面 = [
+    ...Array.from({ length: 30 }, (_, i) => `ログ${i}`),
+    '─'.repeat(60),
+    '❯ ',
+    '─'.repeat(60),
+  ]
+
+  function 行の高さ(row: number): number {
+    return row * CELL + CELL / 2
+  }
+
+  async function 端末と隠し欄(container: HTMLElement) {
+    const box = container.querySelector('[data-testid="terminal"]') as HTMLElement
+    const term = await 描かれた端末(box)
+    return { box, term, helper: term.textarea as HTMLTextAreaElement }
+  }
+
+  function 画面を(term: Terminal, rows: string[]) {
+    vi.spyOn(term.buffer.active, 'getLine').mockImplementation(
+      (y: number) =>
+        ({
+          translateToString: () => rows[y] ?? '',
+          isWrapped: false,
+        }) as unknown as IBufferLine,
+    )
+  }
+
+  function 寸法を(box: HTMLElement, term: Terminal) {
+    const screen = box.querySelector('.xterm-screen') as HTMLElement
+    Object.defineProperty(screen, 'clientHeight', {
+      value: CELL * term.rows,
+      configurable: true,
+    })
+    vi.spyOn(screen, 'getBoundingClientRect').mockReturnValue({ top: 0 } as DOMRect)
+  }
+
+  /** 画面と寸法を差し込んだ端末を1つ用意する。 */
+  async function 用意(rows: string[] = 枠のある画面) {
+    const view = render(<TerminalPane cardId={CARD} />)
+    const 一式 = await 端末と隠し欄(view.container)
+    画面を(一式.term, rows)
+    寸法を(一式.box, 一式.term)
+    return { ...一式, ...view }
+  }
+
+  /** 長押しが成立するまで時間を進める。 */
+  function 押し続ける() {
+    act(() => {
+      vi.advanceTimersByTime(LONG_PRESS_MS)
+    })
+  }
+
+  beforeEach(() => {
+    // `shouldAdvanceTime` を付けないと `waitFor` が進まず、端末を待てない
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    写し.呼ばれた.mockResolvedValue(true)
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('長押ししたら、その行を選ぶこと', async () => {
+    // **これが要件そのもの。** 長押しで文字を選べないのが出発点だった
+    const { box, term } = await 用意()
+    const 選ぶ = vi.spyOn(term, 'selectLines')
+
+    touch(box, 'touchstart', [{ x: 0, y: 行の高さ(10) }])
+    押し続ける()
+
+    expect(選ぶ).toHaveBeenCalledWith(10, 10)
+  })
+
+  it('遡っているぶんを足したバッファの行を選ぶこと', async () => {
+    // `selectLines` が受け取るのは**遡りも含めた通し番号**。可視領域の行をそのまま
+    // 渡す壊し方は、遡っていないときは当たるので**ここでだけ落ちる**
+    const { box, term } = await 用意()
+    vi.spyOn(term.buffer.active, 'viewportY', 'get').mockReturnValue(100)
+    const 選ぶ = vi.spyOn(term, 'selectLines')
+
+    touch(box, 'touchstart', [{ x: 0, y: 行の高さ(10) }])
+    押し続ける()
+
+    expect(選ぶ).toHaveBeenCalledWith(110, 110)
+  })
+
+  it('入力欄の枠の上では、長押ししても選ばないこと', async () => {
+    // **前のイシューの約束1を守るための線。** 計時を先に始めて後から場所を見る形に
+    // 壊すと、枠の上のゆっくりしたタップが選択に化けてキーボードが開かなくなる
+    const { box, term } = await 用意()
+    const 選ぶ = vi.spyOn(term, 'selectLines')
+
+    touch(box, 'touchstart', [{ x: 0, y: 行の高さ(31) }])
+    押し続ける()
+
+    expect(選ぶ).not.toHaveBeenCalled()
+  })
+
+  it('枠を長押しして離したら、これまでどおり入力可能になること', async () => {
+    // 上と対で置く。**選ばないだけで、開く道まで塞いでいないこと**を見る
+    const { box, term, helper } = await 用意()
+    const focus = vi.spyOn(helper, 'focus')
+    void term
+
+    touch(box, 'touchstart', [{ x: 0, y: 行の高さ(31) }])
+    押し続ける()
+    touch(box, 'touchend', [])
+
+    expect(helper.inputMode).toBe('text')
+    expect(focus).toHaveBeenCalled()
+  })
+
+  it('長押しが成立したら、焦点を外すこと', async () => {
+    // **前のイシューの約束2・3を、長押しの経路でも守る。** 枠の外を触ったのだから
+    // 焦点は残らない。ここを消す壊し方は、この1本でだけ落ちる
+    const { box, helper } = await 用意()
+    helper.focus()
+    helper.inputMode = 'text'
+    const blur = vi.spyOn(helper, 'blur')
+
+    touch(box, 'touchstart', [{ x: 0, y: 行の高さ(10) }])
+    押し続ける()
+
+    expect(blur).toHaveBeenCalled()
+    expect(helper.inputMode).toBe('none')
+  })
+
+  it('時間が経つ前に離したら、選ばないこと', async () => {
+    // ふつうのタップ。**常に選ぶ実装に壊すと、ここで落ちる**
+    const { box, term } = await 用意()
+    const 選ぶ = vi.spyOn(term, 'selectLines')
+
+    touch(box, 'touchstart', [{ x: 0, y: 行の高さ(10) }])
+    act(() => {
+      vi.advanceTimersByTime(LONG_PRESS_MS - 50)
+    })
+    touch(box, 'touchend', [])
+    押し続ける()
+
+    expect(選ぶ).not.toHaveBeenCalled()
+  })
+
+  it('指が動いたら、長押しをやめること', async () => {
+    // 遡ろうとなぞっている最中に選ばれると、**読むだけの操作が選択に化ける**
+    const { box, term } = await 用意()
+    const 選ぶ = vi.spyOn(term, 'selectLines')
+
+    touch(box, 'touchstart', [{ x: 0, y: 行の高さ(10) }])
+    touch(box, 'touchmove', [{ x: 0, y: 行の高さ(10) + 100 }])
+    押し続ける()
+
+    expect(選ぶ).not.toHaveBeenCalled()
+  })
+
+  it('成立したあとに指を動かすと、範囲が伸びること', async () => {
+    const { box, term } = await 用意()
+    touch(box, 'touchstart', [{ x: 0, y: 行の高さ(10) }])
+    押し続ける()
+    const 選ぶ = vi.spyOn(term, 'selectLines')
+
+    touch(box, 'touchmove', [{ x: 0, y: 行の高さ(15) }])
+
+    expect(選ぶ).toHaveBeenCalledWith(10, 15)
+  })
+
+  it('上へ伸ばしても、順序を入れ替えて渡すこと', async () => {
+    // `selectLines` は始点が終点より後ろだと何も選ばない。**上へなぞる操作**は
+    // 実際に起きるので、並べ替えを外す壊し方はここで落ちる
+    const { box, term } = await 用意()
+    touch(box, 'touchstart', [{ x: 0, y: 行の高さ(20) }])
+    押し続ける()
+    const 選ぶ = vi.spyOn(term, 'selectLines')
+
+    touch(box, 'touchmove', [{ x: 0, y: 行の高さ(12) }])
+
+    expect(選ぶ).toHaveBeenCalledWith(12, 20)
+  })
+
+  it('選び終えた指では、既定の動きを止めること', async () => {
+    // 止めないと `touchend` のあとに互換マウスイベントが来て、**`onPointerDown` が
+    // 焦点を渡す**——選んだだけでキーボードが出る形に戻る
+    const { box } = await 用意()
+    touch(box, 'touchstart', [{ x: 0, y: 行の高さ(10) }])
+    押し続ける()
+
+    const event = touch(box, 'touchend', [])
+
+    expect(event.defaultPrevented).toBe(true)
+  })
+
+  it('指を離せば、選び中の印は残らないこと', async () => {
+    // **消え残ると、次のタップが抜けなくなり元の症状に戻る。** ここが「モードを
+    // 作らない」ことの担保で、印を落とす行を消す壊し方はここで落ちる
+    const { box, helper } = await 用意()
+    touch(box, 'touchstart', [{ x: 0, y: 行の高さ(10) }])
+    押し続ける()
+    touch(box, 'touchend', [])
+    helper.focus()
+    helper.inputMode = 'text'
+    const blur = vi.spyOn(helper, 'blur')
+
+    // 次はふつうのタップ。抜けられなければ印が残っている
+    touch(box, 'touchstart', [{ x: 0, y: 行の高さ(10) }])
+    touch(box, 'touchend', [])
+
+    expect(blur).toHaveBeenCalled()
+    expect(helper.inputMode).toBe('none')
+  })
+
+  it('取りやめられても、選び中の印は残らないこと', async () => {
+    const { box, term } = await 用意()
+    touch(box, 'touchstart', [{ x: 0, y: 行の高さ(10) }])
+    押し続ける()
+    touch(box, 'touchcancel', [])
+    const 選ぶ = vi.spyOn(term, 'selectLines')
+
+    // 印が残っていれば、次の `touchmove` が範囲を伸ばしてしまう
+    touch(box, 'touchmove', [{ x: 0, y: 行の高さ(15) }])
+
+    expect(選ぶ).not.toHaveBeenCalled()
+  })
+
+  it('タップしたら、選んだものを捨てること', async () => {
+    // 残り続けると、**次に押したときに古い範囲が混ざる**
+    const { box, term } = await 用意()
+    touch(box, 'touchstart', [{ x: 0, y: 行の高さ(10) }])
+    押し続ける()
+    touch(box, 'touchend', [])
+    const 捨てる = vi.spyOn(term, 'clearSelection')
+
+    touch(box, 'touchstart', [{ x: 0, y: 行の高さ(12) }])
+    touch(box, 'touchend', [])
+
+    expect(捨てる).toHaveBeenCalled()
+  })
+
+  it('端末を捨てたら、選びにいかないこと', async () => {
+    // 計時の途中で消えることがある。止めないと**消えた端末を触る**
+    const { box, term, unmount } = await 用意()
+    const 選ぶ = vi.spyOn(term, 'selectLines')
+
+    touch(box, 'touchstart', [{ x: 0, y: 行の高さ(10) }])
+    unmount()
+    押し続ける()
+
+    expect(選ぶ).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * 選んだものを写す（コピー設計§5）。
+ *
+ * **写す手そのものは `lib/clipboard.ts` が持つ**ので、ここで見るのは
+ * 「出るか・何を渡すか・写せなかったとき逃げ道が出るか」の3つだけである。
+ */
+describe('TerminalPane のコピー', () => {
+  const CELL = 15
+
+  async function 選んだ端末() {
+    const view = render(<TerminalPane cardId={CARD} />)
+    const box = view.container.querySelector('[data-testid="terminal"]') as HTMLElement
+    const term = await 描かれた端末(box)
+    vi.spyOn(term.buffer.active, 'getLine').mockImplementation(
+      (y: number) => ({ translateToString: () => `ログ${y}`, isWrapped: false }) as unknown as IBufferLine,
+    )
+    const screen = box.querySelector('.xterm-screen') as HTMLElement
+    Object.defineProperty(screen, 'clientHeight', {
+      value: CELL * term.rows,
+      configurable: true,
+    })
+    vi.spyOn(screen, 'getBoundingClientRect').mockReturnValue({ top: 0 } as DOMRect)
+    vi.spyOn(term, 'getSelection').mockReturnValue('選んだ文字')
+    vi.spyOn(term, 'hasSelection').mockReturnValue(true)
+    return { ...view, box, term }
+  }
+
+  /** 長押しして選び、コピーの的を出す。 */
+  function 選ぶまで(box: HTMLElement) {
+    touch(box, 'touchstart', [{ x: 0, y: CELL * 10 + CELL / 2 }])
+    act(() => {
+      vi.advanceTimersByTime(LONG_PRESS_MS)
+    })
+    touch(box, 'touchend', [])
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    写し.呼ばれた.mockReset()
+    写し.呼ばれた.mockResolvedValue(true)
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('選ぶまでは、コピーの的を出さないこと', async () => {
+    // **常に出す実装に壊すと、ここで落ちる。** 押す機会の少ないものが端末へ
+    // 重なり続けると、読める量がそのぶん減る
+    await 選んだ端末()
+
+    expect(screen.queryByTestId('terminal-copy')).toBeNull()
+  })
+
+  it('選んだら、コピーの的を出すこと', async () => {
+    const { box } = await 選んだ端末()
+
+    選ぶまで(box)
+
+    expect(screen.getByTestId('terminal-copy')).toBeInTheDocument()
+  })
+
+  it('押したら、選んでいる文字を写す手へ渡すこと', async () => {
+    const { box } = await 選んだ端末()
+    選ぶまで(box)
+
+    fireEvent.click(screen.getByTestId('terminal-copy'))
+
+    await waitFor(() => expect(写し.呼ばれた).toHaveBeenCalledWith('選んだ文字'))
+  })
+
+  it('写せたら、そう伝えること', async () => {
+    const { box } = await 選んだ端末()
+    選ぶまで(box)
+
+    fireEvent.click(screen.getByTestId('terminal-copy'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('terminal-copy-result')).toHaveTextContent('写しました'),
+    )
+  })
+
+  it('写せなかったら、選べる入れ物へ出し直すこと', async () => {
+    // **逃げ道が無いと、消えた日に手詰まりへ戻る**（`lib/clipboard.ts` の約束）。
+    // 端末の文字は canvas に在って選べないので、素の `textarea` へ出し直す
+    写し.呼ばれた.mockResolvedValue(false)
+    const { box } = await 選んだ端末()
+    選ぶまで(box)
+
+    fireEvent.click(screen.getByTestId('terminal-copy'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('terminal-copy-fallback')).toHaveValue('選んだ文字'),
+    )
+  })
+
+  it('写せたときは、逃げ道を出さないこと', async () => {
+    const { box } = await 選んだ端末()
+    選ぶまで(box)
+
+    fireEvent.click(screen.getByTestId('terminal-copy'))
+
+    await waitFor(() => expect(screen.getByTestId('terminal-copy-result')).toBeInTheDocument())
+    expect(screen.queryByTestId('terminal-copy-fallback')).toBeNull()
   })
 })
