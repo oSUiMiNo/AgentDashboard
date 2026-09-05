@@ -204,8 +204,13 @@ describe('広げていないとき', () => {
     render(<LanAddressButton />)
 
     expect(screen.queryByTestId('lan-address-copy')).toBeNull()
-    expect(screen.getByTestId('lan-address-unreachable')).toHaveTextContent(
-      '待ち受けを広げる設定が要ります',
+    const 案内 = screen.getByTestId('lan-address-unreachable')
+    // **何を触ればよいか**が名指しされていること
+    expect(案内).toHaveTextContent('bind_addr')
+    // **どこを読めばよいか**（手順書への導線・設計§8-3）
+    expect(案内.querySelector('a')).toHaveAttribute(
+      'href',
+      expect.stringContaining('docs/setup/local.md'),
     )
   })
 })

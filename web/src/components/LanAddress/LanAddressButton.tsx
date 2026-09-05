@@ -76,8 +76,19 @@ export function LanAddressButton() {
         data-testid="lan-address-unreachable"
         className="text-muted-foreground text-xs"
       >
-        同じ Wi-Fi の端末から開くには、待ち受けを広げる設定が要ります（
-        <code className="font-mono">bind_addr</code>）
+        {/* **短く保つ。** 上部は3者で取り合っている場所なので、ここが伸びると
+            隣が折り返す。**何を触ればよいか**（`bind_addr`）と**どこを読めばよいか**
+            の2つが分かれば足りる */}
+        LAN から開くには <code className="font-mono">bind_addr</code> の設定が要ります（
+        <a
+          href="https://github.com/oSUiMiNo/AgentDashboard/blob/main/docs/setup/local.md"
+          target="_blank"
+          rel="noreferrer"
+          className="underline"
+        >
+          開き方
+        </a>
+        ）
       </span>
     )
   }
