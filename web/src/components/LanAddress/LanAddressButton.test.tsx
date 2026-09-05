@@ -167,39 +167,39 @@ describe('候補が複数のとき', () => {
     })
   }
 
-  it('他の候補を選べる', async () => {
-    useLanAddressStore.setState({ view: 二件(), loaded: true })
-    render(<LanAddressButton />)
+  /*
+    **選ばせるのをやめた**（2026-09-05・利用者の指定）。
 
-    await userEvent.click(screen.getByTestId('lan-address-more'))
+    かつては先頭だけ写し、残りを「他の候補」から1本ずつ選ばせていた。**確実な1本が
+    選べない**（現に繋がっている `self` はスマホでしか出ず、PC では推定しか残らない）
+    うえ、**どれが届くかは貼った先で開くまで分からない**——選ぶべきなのは押した人では
+    なく受け取る人である。だから全部を改行で繋いで渡す。
+  */
 
-    // **食い違っても両方出す**（設計§4-6）。どちらが正しいかは渡した先で開くまで分からない
-    const 選択肢 = await screen.findAllByTestId('lan-address-choice')
-    expect(選択肢).toHaveLength(2)
-    expect(選択肢[0]).toHaveTextContent('http://192.168.0.12:8787/')
-    expect(選択肢[1]).toHaveTextContent('http://10.106.135.80:8787/')
-  })
-
-  it('選んだ候補が写る', async () => {
+  it('押すと、候補が全部まとめて入る（改行区切り）', async () => {
     const writeText = 写せる()
     useLanAddressStore.setState({ view: 二件(), loaded: true })
     render(<LanAddressButton />)
 
-    await userEvent.click(screen.getByTestId('lan-address-more'))
-    const 選択肢 = await screen.findAllByTestId('lan-address-choice')
-    await userEvent.click(選択肢[1] as HTMLElement)
+    await userEvent.click(screen.getByTestId('lan-address-copy'))
 
     await waitFor(() =>
-      expect(writeText).toHaveBeenCalledWith('http://10.106.135.80:8787/'),
+      expect(writeText).toHaveBeenCalledWith(
+        'http://192.168.0.12:8787/\nhttp://10.106.135.80:8787/',
+      ),
     )
   })
 
-  it('写した行にだけ、写したことが出る', async () => {
-    // **上の1行は文が同じ**なので、2つ目を押しても変化が読めない。
-    // どれを写したかは、その行で言う
+  it('選ばせる面はもう出さない', async () => {
+    useLanAddressStore.setState({ view: 二件(), loaded: true })
+    render(<LanAddressButton />)
+
+    // **帯は3者で取り合う場所。** 要らなくなったものを残さない
+    expect(screen.queryByTestId('lan-address-more')).toBeNull()
+  })
+
+  it('何件入ったかが知らせに出る', async () => {
     写せる()
-    // **写したあとは取り直しが走る**（設計§2）。雛形を揃えておかないと、
-    // 取り直しで候補が1件へ戻って面ごと消える
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => 二件() }),
@@ -207,27 +207,22 @@ describe('候補が複数のとき', () => {
     useLanAddressStore.setState({ view: 二件(), loaded: true })
     render(<LanAddressButton />)
 
-    await userEvent.click(screen.getByTestId('lan-address-more'))
-    const 選択肢 = await screen.findAllByTestId('lan-address-choice')
-    await userEvent.click(選択肢[1] as HTMLElement)
+    await userEvent.click(screen.getByTestId('lan-address-copy'))
 
+    // **1本のつもりで貼らせない。** 何行入ったかを言う
     await waitFor(() =>
-      expect(
-        screen.getAllByTestId('lan-address-choice-copied'),
-      ).toHaveLength(1),
-    )
-    expect(選択肢[1]).toContainElement(
-      screen.getByTestId('lan-address-choice-copied'),
+      expect(screen.getByTestId('lan-address-state')).toHaveTextContent('2件'),
     )
   })
 
-  it('候補が1つなら「他の候補」を出さない', () => {
-    // 押しても空の面が開くだけのものを置かない
-    開いている('http://localhost:8787', 'localhost')
-    useLanAddressStore.setState({ view: view(), loaded: true })
+  it('押す前に、何が入るかが読める', () => {
+    useLanAddressStore.setState({ view: 二件(), loaded: true })
     render(<LanAddressButton />)
 
-    expect(screen.queryByTestId('lan-address-more')).toBeNull()
+    // 選ばせる面を無くしたぶん、**中身はボタンの説明で読めるようにしてある**
+    const 説明 = screen.getByTestId('lan-address-copy').getAttribute('title')
+    expect(説明).toContain('http://192.168.0.12:8787/')
+    expect(説明).toContain('http://10.106.135.80:8787/')
   })
 })
 

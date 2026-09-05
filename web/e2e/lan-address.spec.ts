@@ -104,3 +104,85 @@ test('ループバックで開いていると、いま開いているアドレ�
   const 入った = await page.evaluate(() => navigator.clipboard.readText())
   expect(入った).toBe('http://192.168.0.12:8787/')
 })
+
+test('狭い画面で押しても、知らせは帯の流れから外れている', async ({ page }) => {
+  /*
+    **利用者の実機（スマホ・PJT 専用画面）で出た壊れ方**（2026-09-05）。
+    知らせを帯の流れの中に置いていたため、狭い画面で幅を奪い合い、
+    **文が1文字ぶんの幅まで縮んで縦に1文字ずつ改行された。**
+
+    # 測るのは「幅」ではなく「流れの外に居るか」
+
+    **崩れ方そのものは、ここでは再現できない。** 実機が崩れたのは PJT 専用画面で、
+    帯に PJT 名やベルが並んで幅を奪い合っていたためである——E2E の帯はすいており、
+    **`absolute` を外しても3行・192px にしかならない**（実測。240px 幅でも同じ）。
+
+    **再現しない条件で「潰れないこと」を測っても、何も見張れない。**
+    そこで原因のほうを見る——**流れの中に居なければ、帯がどれだけ混んでも奪われない。**
+    これは CSS の仕組みそのものなので、混み具合に左右されない。
+
+    実機での見え方そのものは【要人間】が受け持つ（テスト計画フェーズ5）。
+  */
+  await 答えを差し替える(page, {
+    port: 8787,
+    bind_addr: '0.0.0.0',
+    reachable: true,
+    candidates: [
+      { addr: '192.168.0.12', label: 'Wi-Fi', source: 'windows' },
+      { addr: '10.0.0.5', label: 'イーサネット', source: 'windows' },
+    ],
+    note: null,
+  })
+  await page.setViewportSize({ width: 412, height: 915 })
+  await openDashboard(page)
+
+  const 帯 = page.locator('header').first()
+  const 押す前 = (await 帯.boundingBox())?.height ?? 0
+
+  await page.getByTestId('lan-address-copy').click()
+  await expect(page.getByTestId('lan-address-state')).toBeVisible()
+
+  // **流れの外に居る。** ここが `static` へ戻ったら、実機でまた縦一列になる
+  await expect(page.getByTestId('lan-address-result')).toHaveCSS(
+    'position',
+    'absolute',
+  )
+
+  // **帯を押し広げない。** 流れの外に居ることの、目に見える裏づけ
+  expect((await 帯.boundingBox())?.height ?? 0).toBe(押す前)
+})
+
+test('写せなかったときの逃げ道も、同じように浮いている', async ({ page }) => {
+  /*
+    **失敗の側こそ潰れてはいけない。** 値を選び取るための逃げ道なので、
+    幅が縮んで読めなくなると**取りようが無くなる**（設計§8-4）。
+  */
+  await 答えを差し替える(page, {
+    port: 8787,
+    bind_addr: '0.0.0.0',
+    reachable: true,
+    candidates: [{ addr: '192.168.0.12', label: 'Wi-Fi', source: 'windows' }],
+    note: null,
+  })
+  await page.setViewportSize({ width: 412, height: 915 })
+  await openDashboard(page)
+
+  // **写せない環境を作る。** 新しい口も古い口も断る
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, 'clipboard', { value: undefined })
+    document.execCommand = () => false
+  })
+
+  await page.getByTestId('lan-address-copy').click()
+
+  await expect(page.getByTestId('lan-address-fallback')).toBeVisible()
+  await expect(page.getByTestId('lan-address-result')).toHaveCSS(
+    'position',
+    'absolute',
+  )
+  // **値が最後まで読める。** 折り返しの指定が効いていること
+  await expect(page.getByTestId('lan-address-fallback')).toHaveCSS(
+    'word-break',
+    'break-all',
+  )
+})

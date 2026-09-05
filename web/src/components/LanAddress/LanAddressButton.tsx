@@ -22,7 +22,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { CopyGlyph } from '@/components/ui/glyphs'
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { copyToClipboard } from '@/lib/clipboard'
 import {
   useLanAddressStore,
@@ -36,8 +35,17 @@ interface Copied {
   state: 'done' | 'failed'
 }
 
-/** 開いた先で何が起きるかまで言う。**着いてから戸惑わせない。** */
-const 成功の文 = 'コピーしました。開いた先で合言葉を聞かれます'
+/**
+ * 開いた先で何が起きるかまで言う。**着いてから戸惑わせない。**
+ *
+ * **何本入ったかを言う。** 複数入っているのに1本のつもりで貼ると、
+ * 相手には見慣れない行が並んで見える。
+ */
+function 成功の文(件数: number): string {
+  const 頭 =
+    件数 > 1 ? `${件数}件ぜんぶコピーしました（改行区切り）` : 'コピーしました'
+  return `${頭}。開いた先で合言葉を聞かれます`
+}
 
 /**
  * 成功の知らせを畳むまで（ミリ秒）。
@@ -79,13 +87,28 @@ export function LanAddressButton() {
    * 動かなかったりする**。
    */
   const 写す = useCallback(
-    (候補: LanCandidate) => {
+    (候補たち: LanCandidate[]) => {
       // **前の知らせを先に畳む。** 残したまま次を出すと、二度目が出たのか
       // 消え損ねているのかが見分けられない
       畳むのをやめる()
       setCopied(null)
-      void copyToClipboard(候補.url).then((ok) => {
-        setCopied({ value: 候補.url, state: ok ? 'done' : 'failed' })
+      /*
+        **候補は全部まとめて写す**（2026-09-05・利用者の指定）。
+
+        かつては先頭だけを写し、残りは「他の候補」から1本ずつ選ばせていた。
+        やめた理由は2つある。
+
+        1. **確実な1本が選べない。** 現に繋がっている `self` はスマホでしか出ず、
+           PC で押すと推定しか残らない——そこを1本に絞ると**外れたときに手が無くなる**
+        2. **選ばせる相手を間違えていた。** どれが届くかは**貼った先で開くまで
+           分からない**ので、選ぶべきなのは押す人ではなく**受け取る人**である
+
+        改行で繋ぐと、貼った先では**各行がそれぞれリンクになる**ので、
+        受け取った側が上から試せる。
+      */
+      const 値 = 候補たち.map((候補) => 候補.url).join('\n')
+      void copyToClipboard(値).then((ok) => {
+        setCopied({ value: 値, state: ok ? 'done' : 'failed' })
         if (ok) {
           // **取り直しは押したあと**（設計§2）。番号が変わるのは Wi-Fi を移ったとき
           // であって、秒ごとではない
@@ -127,86 +150,37 @@ export function LanAddressButton() {
     )
   }
 
-  const 先頭 = 候補たち[0]
-  const 他 = 候補たち.slice(1)
-
   return (
-    <span className="flex items-center gap-1">
+    // **`relative` は位置を持つことにならない。** 浮かせる知らせの基準点であって、
+    // この部品が帯のどこに置かれるかは親が決めたまま（設計§8-1）
+    <span className="relative flex items-center gap-1">
       <Button
         variant="ghost"
         size="icon-sm"
         data-testid="lan-address-copy"
         // **押せるのに何も起きない、を作らない**（設計§8-2）
-        disabled={先頭 === undefined}
+        disabled={候補たち.length === 0}
         aria-label="LAN のアドレスをコピー"
+        // **何が入るかを、押す前に読めるようにする。** 複数あるなら全部並べる
         title={
-          先頭 === undefined
+          候補たち.length === 0
             ? '開けるアドレスがまだ分かりません'
-            : `${先頭.url} をコピー（${先頭.label}）`
+            : 候補たち.map((候補) => `${候補.url}（${候補.label}）`).join('\n')
         }
         onClick={() => {
-          if (先頭 !== undefined) {
-            写す(先頭)
+          if (候補たち.length > 0) {
+            写す(候補たち)
           }
         }}
       >
         <CopyGlyph />
       </Button>
 
-      {/* **候補が2つ以上のときだけ出す**（設計§4-5）。1本しか無いのに「他の候補」が
-          あると、押しても空の面が開く */}
-      {他.length > 0 && (
-        <Popover>
-          <PopoverTrigger asChild>
-            <Button
-              variant="ghost"
-              size="sm"
-              data-testid="lan-address-more"
-              className="text-muted-foreground text-xs"
-            >
-              他の候補 {他.length}
-            </Button>
-          </PopoverTrigger>
-          <PopoverContent className="w-auto max-w-xs space-y-1 p-2">
-            {/* **食い違っても消さない**（設計§4-6）。どちらが正しいかは、渡した先で
-                開いてみるまで分からない */}
-            {候補たち.map((候補) => {
-              // **どれを写したかを、その行で言う。** 上の1行は文が同じなので、
-              // 2つ目を押しても変化が読めない（2026-09-05・利用者の指摘）
-              const 写した = copied?.state === 'done' && copied.value === 候補.url
-              return (
-                <button
-                  key={`${候補.source}:${候補.addr}`}
-                  type="button"
-                  data-testid="lan-address-choice"
-                  className="hover:bg-muted/60 flex w-full items-start gap-2 rounded px-2 py-1 text-left text-xs"
-                  onClick={() => 写す(候補)}
-                >
-                  {/* **写せることを形でも示す。** 字だけだと読み物に見えて、
-                      押せると分からない（設計§8-5） */}
-                  <span aria-hidden className="mt-0.5 shrink-0">
-                    <CopyGlyph />
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="font-mono break-all">{候補.url}</span>
-                    <span className="text-muted-foreground block">
-                      {候補.label}
-                    </span>
-                  </span>
-                  {写した && (
-                    <span
-                      data-testid="lan-address-choice-copied"
-                      className="text-muted-foreground mt-0.5 shrink-0"
-                    >
-                      コピーしました
-                    </span>
-                  )}
-                </button>
-              )
-            })}
-          </PopoverContent>
-        </Popover>
-      )}
+      {/*
+        **「他の候補」は無くした**（2026-09-05・利用者の指定）。
+        全部まとめて写すので選ばせる相手が居ない——**帯は3者で取り合う場所**なので、
+        要らなくなったものは残さない。何が入るかはボタンの説明に出る。
+      */}
 
       {/* 候補が1つも無いなら、**なぜ無いのか**を出す（設計§4-5） */}
       {loaded && 候補たち.length === 0 && view?.note != null && (
@@ -218,28 +192,50 @@ export function LanAddressButton() {
         </span>
       )}
 
-      {copied?.state === 'done' && (
-        <span
-          data-testid="lan-address-state"
-          className="text-muted-foreground text-xs"
-        >
-          {成功の文}
-        </span>
-      )}
+      {/*
+        **押した結果は、帯の中に置かず浮かせる**（2026-09-05・利用者の実機で判明）。
 
-      {/* **写せなかったときの逃げ道**（設計§8-4）。`FolderBrowser` と同じ形——
-          文言と値を別の目印に分けてあるのは、確かめたいことが2つあるからである */}
-      {copied?.state === 'failed' && (
-        <span data-testid="lan-address-failed" className="text-xs text-amber-300">
-          コピーできません。この値を選んで取ってください：{' '}
-          <code
-            data-testid="lan-address-fallback"
-            /* **`break-all` で折り返す。** URL は途中で切れても文字列として成立して
-               見えるので、はみ出して切れると**短い別物を持っていったことに気づけない** */
-            className="bg-muted/60 rounded px-1 py-0.5 font-mono break-all select-all"
-          >
-            {copied.value}
-          </code>
+        ここは上部の帯で、狭い画面では3者が横幅を取り合う。流れの中に文を置くと
+        **押し出されて幅が1文字ぶんまで縮み、縦に1文字ずつ改行された**
+        （スマホの実機。文が読めないどころか、帯そのものが崩れた）。
+
+        `absolute` なら**幅を自分で決められる**——`w-max` で文の長さなり、
+        `max-w` で画面からはみ出さない。**帯のレイアウトには一切効かない。**
+
+        **トーストへは出さない。** あちらは琥珀の枠を持つ**警告の器**なので、
+        成功をあそこへ出すと「何か起きた」に見える。見た目は `PopoverContent` に揃える
+        ——同じ「押した先に浮くもの」なので、別の見た目を作らない。
+      */}
+      {copied !== null && (
+        <span
+          data-testid="lan-address-result"
+          className="bg-popover text-popover-foreground absolute top-full right-0 z-50 mt-1 w-max max-w-[min(22rem,90vw)] rounded-md border p-2 shadow-md"
+        >
+          {copied.state === 'done' ? (
+            <span
+              data-testid="lan-address-state"
+              className="text-muted-foreground text-xs"
+            >
+              {成功の文(候補たち.length)}
+            </span>
+          ) : (
+            /* **写せなかったときの逃げ道**（設計§8-4）。`FolderBrowser` と同じ形——
+               文言と値を別の目印に分けてあるのは、確かめたいことが2つあるからである */
+            <span
+              data-testid="lan-address-failed"
+              className="block text-xs text-amber-300"
+            >
+              コピーできません。この値を選んで取ってください：{' '}
+              <code
+                data-testid="lan-address-fallback"
+                /* **`break-all` で折り返す。** URL は途中で切れても文字列として成立して
+                   見えるので、はみ出して切れると**短い別物を持っていったことに気づけない** */
+                className="bg-muted/60 block rounded px-1 py-0.5 font-mono break-all whitespace-pre-line select-all"
+              >
+                {copied.value}
+              </code>
+            </span>
+          )}
         </span>
       )}
     </span>
