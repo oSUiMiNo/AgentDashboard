@@ -90,6 +90,11 @@ command = "host resources"
 
 [[entry]]
 kind = "rest"
+target = "GET /api/lan-address"
+command = "address"
+
+[[entry]]
+kind = "rest"
 target = "GET /api/me"
 skip = true
 reason = "「何を出すべきか」をブラウザが決めるための口。CLI は札を持っているかどうかを自分で知っている。モードの見分けに内部で読むが、コマンドとしては出さない（設計§3-4）"

@@ -86,6 +86,9 @@ pub fn routes(state: ws::AppState, auth: Arc<auth::AuthContext>) -> Router {
         )
         .route("/api/projects/order", put(projects::api_reorder))
         .route("/api/projects/{id}", delete(projects::api_remove))
+        // LAN の別端末から開ける番号（LANアドレス設計§5）。**鍵の内側**——
+        // 機械のアドレスは、外から誰でも読めてよいものではない
+        .route("/api/lan-address", get(lan_address::api_lan_address))
         // アプリ全体の知らせ（トーストとベル設計§6-1）。**鍵の内側**——
         // 誰の知らせかで中身が変わるので、素通しにしてよい理由が無い
         .route(

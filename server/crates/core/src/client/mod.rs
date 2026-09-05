@@ -509,6 +509,13 @@ pub async fn settings_raw(target: &Target) -> Result<String, ClientError> {
     http::fetch_ok(target, "/api/settings").await
 }
 
+/// `GET /api/lan-address`（LAN の別端末から開ける番号。LANアドレス設計§6）。
+pub async fn lan_address(
+    target: &Target,
+) -> Result<(server_core::lan_address::LanAddressView, String), ClientError> {
+    http::fetch_as(target, "/api/lan-address").await
+}
+
 /// `GET /api/versions`（版の一覧）。
 pub async fn versions(
     target: &Target,

@@ -311,13 +311,30 @@ pub fn parse_windows_json(raw: &str) -> Result<Vec<Nic>, String> {
 /// **出力の文字コードを明示している。** インターフェース名には日本語が入りうる
 /// （実測に `イーサネット` と `Bluetooth ネットワーク接続` があった）ので、
 /// 既定のままだと化けて名前で判定する規則5が効かなくなる。
+///
+/// # `Get-NetIPConfiguration` を使っていない
+///
+/// 設計§4-3 はあれを例に挙げているが、**この機械で 14.8 秒かかった**（実測）。
+/// 時間切れ（5秒）に収まらないので、毎回「聞けませんでした」になる。あれが遅いのは
+/// 1件ごとに DNS やゲートウェイを引き直して束ねるためで、こちらの用には重すぎる。
+///
+/// 代わりに**速い2つを繋いでいる**——`Get-NetIPAddress` で番号を並べ、
+/// `Get-NetRoute` の `0.0.0.0/0` から「既定のゲートウェイを持つインターフェース」の
+/// 番号を取って突き合わせる。**同じ 3.0 秒で、拾える顔ぶれはむしろ増えた**
+/// （`Get-NetIPConfiguration` は `Wi-Fi 3` と `Wi-Fi 4` を落としていた）。
+///
+/// 欲しいものは設計のとおり「**既定のゲートウェイを持っていて、動いている**
+/// インターフェースの IPv4 アドレス」で、そこは変えていない。
 const ASK_SCRIPT: &str = "\
 [Console]::OutputEncoding=[System.Text.Encoding]::UTF8; \
-Get-NetIPConfiguration | ForEach-Object { \
-  $gw = $null -ne $_.IPv4DefaultGateway; \
-  $alias = $_.InterfaceAlias; \
-  foreach ($a in $_.IPv4Address) { \
-    [PSCustomObject]@{ addr = $a.IPAddress; iface = $alias; gw = $gw; origin = [string]$a.PrefixOrigin } \
+$gw=@(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue \
+| Select-Object -ExpandProperty InterfaceIndex); \
+Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { \
+  [PSCustomObject]@{ \
+    addr = $_.IPAddress; \
+    iface = $_.InterfaceAlias; \
+    gw = ($gw -contains $_.InterfaceIndex); \
+    origin = [string]$_.PrefixOrigin \
   } \
 } | ConvertTo-Json -Compress";
 

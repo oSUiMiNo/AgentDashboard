@@ -170,6 +170,17 @@ enum Command {
     /// 叩くと「この構成にアカウントはありません」で断られる
     #[command(subcommand)]
     Account(AccountCmd),
+    /// 同じ Wi-Fi の別端末から開けるアドレスを出す（LANアドレス設計§6）
+    ///
+    /// 既定は先頭の候補を1行——**そのまま貼れば開ける形**（`http://<番号>:<ポート>/`）で
+    /// 出す。`--json` を付けると全候補と、待ち受けが広がっているかが出る。
+    ///
+    /// **候補が無いときは理由を出して、終了コードで失敗を伝える。** 番号を推測して
+    /// 出すことはしない——間違った番号を渡すより、出さないほうがよい。
+    Address {
+        #[command(flatten)]
+        out: OutputArgs,
+    },
 }
 
 /// `--json` の置き場所。読む系の全コマンドが同じ旗を持つ（CLI設計§10-2）。
@@ -616,6 +627,7 @@ impl Command {
                 | Self::Settings(_)
                 | Self::Version(_)
                 | Self::Account(_)
+                | Self::Address { .. }
         )
     }
 }
@@ -813,7 +825,8 @@ async fn run_async(cli: Cli, config: Config) -> anyhow::Result<()> {
         | Some(Command::Host(_))
         | Some(Command::Settings(_))
         | Some(Command::Version(_))
-        | Some(Command::Account(_)) => unreachable!(),
+        | Some(Command::Account(_))
+        | Some(Command::Address { .. }) => unreachable!(),
         None => {
             // **返り値を捨ててはいけない。** 非ブロッキング書き込みの見張り役なので、
             // 落とすと書き終わる前にプロセスが終わりうる（実測：200行のうち0行）。
@@ -878,6 +891,7 @@ async fn run_client(cli: Cli) -> anyhow::Result<()> {
         Command::Settings(cmd) => client_settings(cmd, &target).await,
         Command::Version(cmd) => client_version(cmd, &target).await,
         Command::Account(cmd) => client_account(cmd, &target).await,
+        Command::Address { out } => client_address(out, &target).await,
         _ => unreachable!("is_client で絞ってから来る"),
     };
     if let Err(err) = outcome {
@@ -1294,6 +1308,42 @@ async fn client_host(cmd: HostCmd, target: &client::Target) -> Result<(), client
             println!("{}", output::pick(out.json, &raw, &human));
         }
     }
+    Ok(())
+}
+
+/// `agentdashboard address` — 同じ Wi-Fi の別端末から開けるアドレス（設計§6）。
+///
+/// **人が読む側は URL を組み立てて出す。** 番号だけを出すと、貼った先がリンクとして
+/// 認識せず、そのままではタップできない（設計§3）。組み立てるのは画面と同じ形
+/// （`http://<番号>:<ポート>/`）である。
+///
+/// **`--json` はサーバの答えをそのまま流す**（CLI設計§12-1）——画面が足す `self`
+/// （いま開いているアドレス）はここには無いので、加工して見せかけない。
+async fn client_address(
+    out: OutputArgs,
+    target: &client::Target,
+) -> Result<(), client::ClientError> {
+    let (view, raw) = client::lan_address(target).await?;
+    if out.json {
+        println!("{raw}");
+        return Ok(());
+    }
+    // 待ち受けが広がっていないと、出せる番号があっても**そこへは繋がらない**
+    if !view.reachable {
+        return Err(client::ClientError::BadUrl(format!(
+            "待ち受けが {} なので、同じ Wi-Fi の端末からは開けません。\
+             config.toml の bind_addr を広げてください（合言葉の登録も要ります）",
+            view.bind_addr
+        )));
+    }
+    let Some(first) = view.candidates.first() else {
+        let why = view
+            .note
+            .unwrap_or_else(|| "候補が1つも見つかりませんでした".to_string());
+        return Err(client::ClientError::BadUrl(why));
+    };
+    // **標準出力は結果だけ**（CLI設計§10-4）。そのまま貼れる形で1行
+    println!("http://{}:{}/", first.addr, view.port);
     Ok(())
 }
 

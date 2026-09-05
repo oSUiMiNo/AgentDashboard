@@ -55,7 +55,9 @@ const WS_VARIANTS: usize = 15;
 // 2026-09-05：知らせ（ベル）で4口増やした（トーストとベル設計§6-1・§10-3）。
 // 一覧・既読・1件消し・全消し。**消す道の2口は §10-3 が要求している**——
 // ベルに溜めたものを消せないと、上限で流れるまで消えない
-const INSIDE_DOORS: usize = 31;
+// 2026-09-05：LAN の別端末から開ける番号で1口増やした（LANアドレス設計§5）。
+// **鍵の内側**——機械のアドレスは、外から誰でも読めてよいものではない
+const INSIDE_DOORS: usize = 32;
 const OUTSIDE_DOORS: usize = 5;
 
 /// tenancy.rs の総当たりの本数。口が増えないなら総当たりも増えない（§1-1）。
@@ -65,6 +67,8 @@ const TENANCY_TESTS: usize = 27;
 /// `command` に書ける群の先頭語。誤記（存在しない群）を機械で捕まえる。
 const 群: &[&str] = &[
     "session", "project", "notice", "host", "settings", "version", "account", "logs",
+    // 群を持たない単発のコマンド（LANアドレス設計§6）。**先頭語がそのままコマンド名**
+    "address",
 ];
 
 /// 理由として認めない逃げ文句（`swallowed.rs` と同じ一覧）。
