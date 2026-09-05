@@ -19,7 +19,7 @@
  * 駄目だったときに出す（設計§8-4）。
  */
 
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { CopyGlyph } from '@/components/ui/glyphs'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
@@ -39,12 +39,37 @@ interface Copied {
 /** 開いた先で何が起きるかまで言う。**着いてから戸惑わせない。** */
 const 成功の文 = 'コピーしました。開いた先で合言葉を聞かれます'
 
+/**
+ * 成功の知らせを畳むまで（ミリ秒）。
+ *
+ * **出しっぱなしにしない。** 消えないと「**もう一度写した**」が画面に出ず、
+ * 二度目を押しても何も起きていないように見える（2026-09-05・利用者の指摘）。
+ * 一度畳んでから出し直すので、**同じ文でも「いま押した」ことが伝わる。**
+ *
+ * 読み切れる長さは要る——文は2文あり、**開いた先で合言葉を聞かれる**という
+ * 予告がここにしか出ない。
+ */
+const 成功を畳むまで = 6000
+
 export function LanAddressButton() {
   const 候補たち = useLanCandidates()
   const view = useLanAddressStore((state) => state.view)
   const loaded = useLanAddressStore((state) => state.loaded)
   const 取り直す = useLanAddressStore((state) => state.load)
   const [copied, setCopied] = useState<Copied | null>(null)
+  /** 畳む予約。**張りっぱなしにしない**ので、次の押下と後始末の両方で外す */
+  const 畳む札 = useRef<number | null>(null)
+
+  const 畳むのをやめる = useCallback(() => {
+    if (畳む札.current !== null) {
+      window.clearTimeout(畳む札.current)
+      畳む札.current = null
+    }
+  }, [])
+
+  // **畳まれたあとに走らせない。** 予約を残したまま消えると、消えた部品へ
+  // 書き込もうとする（`useReorder` と同じ作法で、後始末は必ず書く）
+  useEffect(() => 畳むのをやめる, [畳むのをやめる])
 
   /**
    * **`await` を1つも挟まずに [`copyToClipboard`] を呼ぶ**（設計§2）。
@@ -55,17 +80,26 @@ export function LanAddressButton() {
    */
   const 写す = useCallback(
     (候補: LanCandidate) => {
+      // **前の知らせを先に畳む。** 残したまま次を出すと、二度目が出たのか
+      // 消え損ねているのかが見分けられない
+      畳むのをやめる()
       setCopied(null)
       void copyToClipboard(候補.url).then((ok) => {
         setCopied({ value: 候補.url, state: ok ? 'done' : 'failed' })
-        // **取り直しは押したあと**（設計§2）。番号が変わるのは Wi-Fi を移ったとき
-        // であって、秒ごとではない
         if (ok) {
+          // **取り直しは押したあと**（設計§2）。番号が変わるのは Wi-Fi を移ったとき
+          // であって、秒ごとではない
           void 取り直す()
+          // **成功だけ畳む。** 失敗の側は値を選んで取ってもらう逃げ道なので、
+          // 読んでいる最中に消すと**取りようが無くなる**（設計§8-4）
+          畳む札.current = window.setTimeout(() => {
+            畳む札.current = null
+            setCopied(null)
+          }, 成功を畳むまで)
         }
       })
     },
-    [取り直す],
+    [取り直す, 畳むのをやめる],
   )
 
   // **押しても死んだアドレスしか渡らないボタンを置かない**（設計§8-3）。
@@ -136,18 +170,40 @@ export function LanAddressButton() {
           <PopoverContent className="w-auto max-w-xs space-y-1 p-2">
             {/* **食い違っても消さない**（設計§4-6）。どちらが正しいかは、渡した先で
                 開いてみるまで分からない */}
-            {候補たち.map((候補) => (
-              <button
-                key={`${候補.source}:${候補.addr}`}
-                type="button"
-                data-testid="lan-address-choice"
-                className="hover:bg-muted/60 block w-full rounded px-2 py-1 text-left text-xs"
-                onClick={() => 写す(候補)}
-              >
-                <span className="font-mono break-all">{候補.url}</span>
-                <span className="text-muted-foreground block">{候補.label}</span>
-              </button>
-            ))}
+            {候補たち.map((候補) => {
+              // **どれを写したかを、その行で言う。** 上の1行は文が同じなので、
+              // 2つ目を押しても変化が読めない（2026-09-05・利用者の指摘）
+              const 写した = copied?.state === 'done' && copied.value === 候補.url
+              return (
+                <button
+                  key={`${候補.source}:${候補.addr}`}
+                  type="button"
+                  data-testid="lan-address-choice"
+                  className="hover:bg-muted/60 flex w-full items-start gap-2 rounded px-2 py-1 text-left text-xs"
+                  onClick={() => 写す(候補)}
+                >
+                  {/* **写せることを形でも示す。** 字だけだと読み物に見えて、
+                      押せると分からない（設計§8-5） */}
+                  <span aria-hidden className="mt-0.5 shrink-0">
+                    <CopyGlyph />
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="font-mono break-all">{候補.url}</span>
+                    <span className="text-muted-foreground block">
+                      {候補.label}
+                    </span>
+                  </span>
+                  {写した && (
+                    <span
+                      data-testid="lan-address-choice-copied"
+                      className="text-muted-foreground mt-0.5 shrink-0"
+                    >
+                      コピーしました
+                    </span>
+                  )}
+                </button>
+              )
+            })}
           </PopoverContent>
         </Popover>
       )}

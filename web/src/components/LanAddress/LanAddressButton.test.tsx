@@ -10,7 +10,7 @@
  * 写せた側を見たいときは `navigator.clipboard.writeText` を差し替える。
  */
 
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LanAddressButton } from './LanAddressButton'
@@ -21,7 +21,7 @@ function view(取り込み: Partial<LanAddressView> = {}): LanAddressView {
     port: 8787,
     bind_addr: '0.0.0.0',
     reachable: true,
-    candidates: [{ addr: '10.106.135.80', label: 'Wi-Fi', source: 'windows' }],
+    candidates: [{ addr: '192.168.0.12', label: 'Wi-Fi', source: 'windows' }],
     note: null,
     ...取り込み,
   }
@@ -157,8 +157,18 @@ describe('写せなかったとき（逃げ道）', () => {
 })
 
 describe('候補が複数のとき', () => {
+  /** サーバが2件返した形。**いま開いている番号＋もう1件**になる */
+  function 二件() {
+    return view({
+      candidates: [
+        { addr: '192.168.0.12', label: 'Wi-Fi', source: 'windows' },
+        { addr: '10.106.135.80', label: 'イーサネット', source: 'windows' },
+      ],
+    })
+  }
+
   it('他の候補を選べる', async () => {
-    useLanAddressStore.setState({ view: view(), loaded: true })
+    useLanAddressStore.setState({ view: 二件(), loaded: true })
     render(<LanAddressButton />)
 
     await userEvent.click(screen.getByTestId('lan-address-more'))
@@ -172,7 +182,7 @@ describe('候補が複数のとき', () => {
 
   it('選んだ候補が写る', async () => {
     const writeText = 写せる()
-    useLanAddressStore.setState({ view: view(), loaded: true })
+    useLanAddressStore.setState({ view: 二件(), loaded: true })
     render(<LanAddressButton />)
 
     await userEvent.click(screen.getByTestId('lan-address-more'))
@@ -184,6 +194,33 @@ describe('候補が複数のとき', () => {
     )
   })
 
+  it('写した行にだけ、写したことが出る', async () => {
+    // **上の1行は文が同じ**なので、2つ目を押しても変化が読めない。
+    // どれを写したかは、その行で言う
+    写せる()
+    // **写したあとは取り直しが走る**（設計§2）。雛形を揃えておかないと、
+    // 取り直しで候補が1件へ戻って面ごと消える
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => 二件() }),
+    )
+    useLanAddressStore.setState({ view: 二件(), loaded: true })
+    render(<LanAddressButton />)
+
+    await userEvent.click(screen.getByTestId('lan-address-more'))
+    const 選択肢 = await screen.findAllByTestId('lan-address-choice')
+    await userEvent.click(選択肢[1] as HTMLElement)
+
+    await waitFor(() =>
+      expect(
+        screen.getAllByTestId('lan-address-choice-copied'),
+      ).toHaveLength(1),
+    )
+    expect(選択肢[1]).toContainElement(
+      screen.getByTestId('lan-address-choice-copied'),
+    )
+  })
+
   it('候補が1つなら「他の候補」を出さない', () => {
     // 押しても空の面が開くだけのものを置かない
     開いている('http://localhost:8787', 'localhost')
@@ -191,6 +228,122 @@ describe('候補が複数のとき', () => {
     render(<LanAddressButton />)
 
     expect(screen.queryByTestId('lan-address-more')).toBeNull()
+  })
+})
+
+describe('二度目が押せる（成功の知らせを畳む）', () => {
+  /**
+   * **出しっぱなしにすると「もう一度写した」が読めない。**
+   *
+   * 利用者の指摘（2026-09-05）：「コピーボタンがいつまで経っても『コピーしました』
+   * 状態から戻らずに再コピーできない」。**入っていたかどうかではなく、
+   * 入ったことが読めるかどうか**の問題である。
+   */
+  it('しばらくすると、成功の知らせが畳まれる', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      写せる()
+      useLanAddressStore.setState({ view: view(), loaded: true })
+      render(<LanAddressButton />)
+
+      await userEvent.click(screen.getByTestId('lan-address-copy'))
+      await waitFor(() =>
+        expect(screen.getByTestId('lan-address-state')).toBeInTheDocument(),
+      )
+
+      await act(async () => {
+        vi.advanceTimersByTime(6000)
+      })
+
+      expect(screen.queryByTestId('lan-address-state')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('畳まれたあと、もう一度押すと知らせが出直す', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const writeText = 写せる()
+      useLanAddressStore.setState({ view: view(), loaded: true })
+      render(<LanAddressButton />)
+
+      await userEvent.click(screen.getByTestId('lan-address-copy'))
+      await waitFor(() =>
+        expect(screen.getByTestId('lan-address-state')).toBeInTheDocument(),
+      )
+      await act(async () => {
+        vi.advanceTimersByTime(6000)
+      })
+
+      await userEvent.click(screen.getByTestId('lan-address-copy'))
+
+      await waitFor(() =>
+        expect(screen.getByTestId('lan-address-state')).toBeInTheDocument(),
+      )
+      // **二度目もちゃんと写している**（知らせだけ戻っても意味が無い）
+      expect(writeText).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('押し直すと、畳むまでの時間も数え直す', async () => {
+    // **前の予約を外さないと、二度目の知らせが1秒で消える。**
+    // 一度目（t=0）の予約は t=6000 に効くので、t=5000 に押し直しても
+    // t=6000 で畳まれてしまう
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      写せる()
+      useLanAddressStore.setState({ view: view(), loaded: true })
+      render(<LanAddressButton />)
+
+      await userEvent.click(screen.getByTestId('lan-address-copy'))
+      await waitFor(() =>
+        expect(screen.getByTestId('lan-address-state')).toBeInTheDocument(),
+      )
+      await act(async () => {
+        vi.advanceTimersByTime(5000)
+      })
+
+      await userEvent.click(screen.getByTestId('lan-address-copy'))
+      await waitFor(() =>
+        expect(screen.getByTestId('lan-address-state')).toBeInTheDocument(),
+      )
+      await act(async () => {
+        vi.advanceTimersByTime(2000)
+      })
+
+      // 二度目から数えてまだ2秒。**残っていなければならない**
+      expect(screen.getByTestId('lan-address-state')).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('写せなかったときの逃げ道は畳まない（読んでいる最中に消さない）', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      // jsdom は `execCommand` を持たないので、既定で失敗の側へ落ちる
+      useLanAddressStore.setState({ view: view(), loaded: true })
+      render(<LanAddressButton />)
+
+      await userEvent.click(screen.getByTestId('lan-address-copy'))
+      await waitFor(() =>
+        expect(screen.getByTestId('lan-address-failed')).toBeInTheDocument(),
+      )
+
+      await act(async () => {
+        vi.advanceTimersByTime(60000)
+      })
+
+      // **値を選んで取ってもらう逃げ道なので、消すと取りようが無くなる**
+      expect(screen.getByTestId('lan-address-fallback')).toHaveTextContent(
+        'http://192.168.0.12:8787/',
+      )
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
