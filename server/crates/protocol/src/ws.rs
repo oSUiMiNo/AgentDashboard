@@ -484,6 +484,7 @@ impl ErrorKind {
             Self::SubPty => "sub_pty",
             Self::SubTranscript => "sub_transcript",
             Self::SendInput => "send_input",
+            Self::Branch => "branch",
             Self::NotFound => "not_found",
             Self::Other => "other",
         }
