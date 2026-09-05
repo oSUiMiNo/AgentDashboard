@@ -497,3 +497,36 @@ test('待っている指示が、リモート経路でも出て消える', async
   await showTranscript(page)
   await expect(待ち).toHaveCount(0, { timeout: 30_000 })
 })
+
+test('枝分かれは、リモート経路でも通って札が届く', async ({ page }) => {
+  // **ここでしか見られないのは「枝の印」である**（ブランチ設計§5-2）。
+  // `branched_from` は A2S を渡ってサーバでかぶせ直される欄で、**ローカルモードでは
+  // その経路を1バイトも通らない**。段取りそのもの（押す → `/branch` → IDの張り替え →
+  // 呼び戻し → 並べ替え）は `branch.spec.ts` が見ているので、こちらは**運ばれ方**を見る。
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  const cardId = await tile.getAttribute('data-card-id')
+
+  // **枠の宛先は一覧に居るうちに控える。** セッション専用画面には枠が描かれていない
+  const group = page.getByTestId('project-group').first()
+  const host = (await group.getAttribute('data-host')) ?? ''
+  const project = (await group.getAttribute('data-project')) ?? ''
+
+  // 入力待ちへ倒す。**1ターンも会話していない席は押せない**（ブランチ設計§3-4）
+  await openSession(page, tile)
+  await fireHook(page, 'Stop', '{"last_assistant_message":"はい"}')
+
+  await page.goto(`/p/${encodeURIComponent(host)}/${encodeURIComponent(project)}`)
+  const ボタン = page.getByTestId('branch-card')
+  await expect(ボタン).toBeEnabled({ timeout: 30_000 })
+  await ボタン.click()
+
+  // 段取りが終わると区画が2つになる（枝＋呼び戻した元）
+  await expect(page.getByTestId('session-view')).toHaveCount(2, { timeout: 60_000 })
+  const 並び = page.getByTestId('session-view')
+  await expect(並び.nth(0)).toHaveAttribute('data-card-id', cardId ?? '')
+
+  // **札が出れば、欄が A2S を渡って届いている。** 出なければ運び忘れである
+  await expect(並び.nth(0).getByTestId('branch-badge')).toBeVisible()
+  await expect(並び.nth(1).getByTestId('branch-badge')).toHaveCount(0)
+})
