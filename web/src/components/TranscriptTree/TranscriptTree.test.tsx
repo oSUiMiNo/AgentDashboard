@@ -899,7 +899,9 @@ describe('誰が入れたか', () => {
     expect(row.queryByTestId('body-toggle')).not.toBeInTheDocument()
   })
 
-  it('スラッシュコマンドは打った形で出て、開くと展開が見える', async () => {
+  it('打った形は、本文ではなく押せる部品として出る', async () => {
+    // **§6-8 を覆した**（設計§11-4）。行のどこを押しても本文が開く画面では、
+    // 本文の中の字を押させると押し分けが成り立たない
     const inner: Node = {
       kind: 'user_message',
       text: '/sample-skill-1 calc.py',
@@ -907,18 +909,17 @@ describe('誰が入れたか', () => {
       command: { typed: '/sample-skill-1 calc.py', expansion: '指定されたファイルを読め。' },
     }
     const row = await 出す(inner)
+    expect(row.getByTestId('slash-command').textContent).toContain('/sample-skill-1 calc.py')
+    // **本文には打った形が入らない**（同じ字が2つ並ばない）
     const body = row.getByTestId('row-body')
-    expect(body.textContent).toContain('/sample-skill-1 calc.py')
-    expect(body.textContent).not.toContain('指定されたファイルを読め。')
+    expect(body.textContent).not.toContain('/sample-skill-1 calc.py')
     // **生のタグが1文字も出ない**
     expect(body.textContent).not.toContain('command-name')
-
-    await userEvent.click(row.getByTestId('body-toggle'))
-    expect(row.getByTestId('row-body').textContent).toContain('指定されたファイルを読め。')
   })
 
-  it('展開が無いコマンドにはトグルが出ない', async () => {
-    // **展開が無いほうが多数派である**（実測66%。設計§3-4）
+  it('展開が無いコマンドでも、打った形は消えない', async () => {
+    // **展開が無いほうが多数派である**（実測67%。設計§3-4）。本文が空になるので、
+    // 打った形を部品にしていなければ**画面から消える**——ここがこの直しの要
     const inner: Node = {
       kind: 'user_message',
       text: '/clear',
@@ -926,7 +927,37 @@ describe('誰が入れたか', () => {
       command: { typed: '/clear', expansion: null },
     }
     const row = await 出す(inner)
-    expect(row.getByTestId('row-body').textContent).toContain('/clear')
+    expect(row.getByTestId('slash-command').textContent).toContain('/clear')
     expect(row.queryByTestId('body-toggle')).not.toBeInTheDocument()
+  })
+
+  it('押すまでカードは出ず、押すと出る', async () => {
+    // **押したときにだけ読みに行く**（設計§11）。履歴にはコマンドがいくつも並ぶので、
+    // 出しっぱなしにすると開いてもいないぶんまでディスクを読む
+    const inner: Node = {
+      kind: 'user_message',
+      text: '/clear',
+      origin: { kind: 'human' },
+      command: { typed: '/clear', expansion: null },
+    }
+    const row = await 出す(inner)
+    expect(row.queryByTestId('slash-command-card')).not.toBeInTheDocument()
+    expect(row.getByTestId('slash-command').getAttribute('data-open')).toBe('false')
+
+    await userEvent.click(row.getByTestId('slash-command'))
+    expect(row.getByTestId('slash-command-card')).toBeInTheDocument()
+    expect(row.getByTestId('slash-command').getAttribute('data-open')).toBe('true')
+
+    // もう一度押すと畳まる
+    await userEvent.click(row.getByTestId('slash-command'))
+    expect(row.queryByTestId('slash-command-card')).not.toBeInTheDocument()
+  })
+
+  it('コマンドでない発言には、押せる部品が出ない', async () => {
+    // **`command` が無い側を巻き込まない**
+    const inner: Node = { kind: 'user_message', text: 'ただの指示', origin: { kind: 'human' } }
+    const row = await 出す(inner)
+    expect(row.queryByTestId('slash-command')).not.toBeInTheDocument()
+    expect(row.getByTestId('row-body').textContent).toContain('ただの指示')
   })
 })

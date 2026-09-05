@@ -46,6 +46,15 @@ export interface NodeRow {
   foldable: boolean
   /** 本文を開いているか。[`foldable`] が偽なら意味を持たない */
   bodyOpen: boolean
+  /**
+   * 打ったスラッシュコマンドの中身（実ファイル）を開いているか
+   * （`人が打っていないものを、人の発言として出さない` 設計§11）。
+   *
+   * **[`bodyOpen`] と別に持つ。** あちらは「切ってある本文を全部読む」ことで、
+   * こちらは「**別の資源**（ディスクの上のファイル）を取りに行く」こと——同じ旗に
+   * すると、続きを読んだだけで毎回ファイルを読みに行くことになる。
+   */
+  commandOpen: boolean
 }
 
 /**
@@ -164,6 +173,13 @@ interface CardState {
    */
   bodyOpen: Set<string>
   /**
+   * 打ったスラッシュコマンドの中身を開いている行（鍵は実ノードのID）。
+   *
+   * **[`bodyOpen`] と同じ理由でここに置く**——仮想化で DOM が消えるので、
+   * コンポーネントの `useState` では遡って戻ったときに畳み直され、画面が跳ねる。
+   */
+  commandOpen: Set<string>
+  /**
    * 開いているまとめ行（鍵は [`ACTIVITY_ROW_PREFIX`] で始まる合成ID）。
    *
    * **[`CardState.expanded`] と混ぜない**（設計§2-5）。あちらの鍵は実ノードのIDで、
@@ -191,6 +207,7 @@ function stateOf(cardId: CardId): CardState {
       children: new Map(),
       expanded: new Set(),
       bodyOpen: new Set(),
+      commandOpen: new Set(),
       expandedActivity: new Set(),
       showRewound: false,
       flat: null,
@@ -572,6 +589,7 @@ function flatten(state: CardState): FlatRow[] {
       hasChildren,
       foldable,
       bodyOpen: state.bodyOpen.has(id),
+      commandOpen: state.commandOpen.has(id),
     })
     if (expanded && hasChildren) {
       walkFrom(id, depth + 1)
@@ -687,6 +705,25 @@ export function toggleBody(cardId: CardId, nodeId: NodeId) {
     state.bodyOpen.delete(nodeId)
   } else {
     state.bodyOpen.add(nodeId)
+  }
+  state.flat = null
+  notify(cardId)
+}
+
+/**
+ * 打ったスラッシュコマンドの中身（実ファイル）の開け閉めを切り替える
+ * （`人が打っていないものを、人の発言として出さない` 設計§11）。
+ *
+ * [`toggleBody`] とは**別の集合**を使う。あちらは既に届いている本文を全部出すことで、
+ * こちらは**まだ手元に無いファイルを取りに行く**こと——同じ旗にすると、続きを読んだ
+ * だけでディスクを読みに行く。
+ */
+export function toggleCommand(cardId: CardId, nodeId: NodeId) {
+  const state = stateOf(cardId)
+  if (state.commandOpen.has(nodeId)) {
+    state.commandOpen.delete(nodeId)
+  } else {
+    state.commandOpen.add(nodeId)
   }
   state.flat = null
   notify(cardId)

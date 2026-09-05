@@ -52,6 +52,8 @@ import {
 } from '@/lib/markdown'
 import { bodyTextOf, isMachine, originLabel, originOf } from '@/lib/messageOrigin'
 import type { ActivityRow, FlatRow, NodeRow, QueuedMoreRow, RewoundRow } from '@/stores/transcript'
+import { toggleCommand } from '@/stores/transcript'
+import { SlashCommandLine } from './SlashCommandLine'
 
 interface Props {
   cardId: CardId
@@ -454,6 +456,35 @@ function NodeRowView({
  * だから古い履歴を開くと 404 になる。これは壊れているのではなく**期限が来ただけ**
  * なので、そう言う（§10-5）。
  */
+/**
+ * 打ったスラッシュコマンドの行を、カードの情報に繋ぐ
+ * （`人が打っていないものを、人の発言として出さない` 設計§11）。
+ *
+ * **hook をここへ閉じる。** `RowBody` で `useSessionCard` を呼ぶと、
+ * スラッシュコマンドでない行まで購読することになる——見えている行の数だけ
+ * 無駄が増える。
+ */
+function SlashCommandHead({
+  cardId,
+  row,
+  typed,
+}: {
+  cardId: CardId
+  row: NodeRow
+  typed: string
+}) {
+  const session = useSessionCard(cardId)
+  return (
+    <SlashCommandLine
+      typed={typed}
+      open={row.commandOpen}
+      host={hostOf(session?.agent_id)}
+      project={session?.project}
+      onToggle={() => toggleCommand(cardId, row.id)}
+    />
+  )
+}
+
 function ImageBody({
   node,
   cardId,
@@ -572,13 +603,21 @@ function RowBody({
       // ためで、無いと帯がページの地へ直に透ける（要望③の実体）。**片方だけ直さないこと**
       return (
         <MarkdownBody
-          // **スラッシュコマンドは、打った形のうしろに展開を継いだものが本文**になる
-          // （設計§6-8）。継ぐ判断は `bodyTextOf` が持つ——ここで `if` を書かない
+          // **打った形は本文に入らない**（設計§11-4）。押せる部品として `head` が
+          // 別に描くので、本文へ混ぜると同じ字が2つ並ぶ。継ぐ判断は `bodyTextOf` が
+          // 持つ——ここで `if` を書かない
           text={bodyTextOf(node)}
           row={row}
           inset={false}
           shell={node.kind === 'assistant_text' ? 'panel' : 'bubble'}
           tone="text-foreground font-medium"
+          // **スラッシュコマンドのときだけ部品を作る。** 作らない行でも `useSessionCard`
+          // を呼ばずに済むよう、hook は [`SlashCommandHead`] の中に閉じてある
+          head={
+            node.kind === 'user_message' && node.command ? (
+              <SlashCommandHead cardId={cardId} row={row} typed={node.command.typed} />
+            ) : null
+          }
           onToggleBody={onToggleBody}
         />
       )
@@ -629,6 +668,7 @@ function MarkdownBody({
   inset,
   shell,
   tone,
+  head,
   onToggleBody,
 }: {
   text: string
@@ -645,6 +685,12 @@ function MarkdownBody({
   shell: 'bubble' | 'panel' | 'none'
   /** 主従を付けるウェイトと明度（設計§5-3） */
   tone: string
+  /**
+   * 本文の**手前**に置く部品（設計§11-4）。打ったスラッシュコマンドの行がここへ来る。
+   *
+   * **本文の外なので、畳みの行数には数えない**——`origin-label` と同じ扱いである。
+   */
+  head?: React.ReactNode
   onToggleBody: () => void
 }) {
   // 畳んでいる行だけを持つ。**種別を引くために行そのものが要る**——1段目は器ごとに
@@ -679,6 +725,7 @@ function MarkdownBody({
 
   const inner = (
     <>
+      {head}
       {/* 本文は**主役**なので、地の色で出す（`FileView` と同じ扱い）。
           要約を横に出していた頃の名残で薄い色にしていると、見出しも強調も
           本文と同じ灰色になって、整形した意味がほとんど消える（実物で確認） */}

@@ -65,25 +65,33 @@ describe('名乗り', () => {
 })
 
 describe('本文の組み立て', () => {
-  it('展開があれば、打った形のうしろに継ぐ', () => {
-    // こうすると「畳んだ頭＝打った形／開くと展開」が**既存の「続きを読む」に乗る**
+  it('打った形は本文に入らない——展開だけが本文になる', () => {
+    // **§6-8 を覆した**（設計§11-4）。打った形は押せる部品として別に描くので、
+    // 本文にも入れると同じ字が2つ並ぶ
     const node: Node = {
       kind: 'user_message',
       text: '/x 引数',
       origin: { kind: 'human' },
       command: { typed: '/x 引数', expansion: '中身' },
     }
-    expect(bodyTextOf(node)).toBe('/x 引数\n\n中身')
+    expect(bodyTextOf(node)).toBe('中身')
   })
 
-  it('展開が無ければ、打った形だけ', () => {
-    // **展開が無いほうが多数派である**（実測66%。設計§3-4）
+  it('展開が無ければ本文は空になる', () => {
+    // **展開が無いほうが多数派である**（実測67%。設計§3-4）。打った形は
+    // `SlashCommandLine` が描くので、本文が空でも画面から消えない
     const node: Node = {
       kind: 'user_message',
       text: '/clear',
       origin: { kind: 'human' },
       command: { typed: '/clear', expansion: null },
     }
-    expect(bodyTextOf(node)).toBe('/clear')
+    expect(bodyTextOf(node)).toBe('')
+  })
+
+  it('コマンドでない発言は、本文がそのまま出る', () => {
+    // **`command` が無い側を巻き込まない**（この直しで壊しやすいのはこちら）
+    const node: Node = { kind: 'user_message', text: 'ただの指示', origin: { kind: 'human' } }
+    expect(bodyTextOf(node)).toBe('ただの指示')
   })
 })
