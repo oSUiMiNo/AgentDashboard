@@ -9,7 +9,7 @@ mod common;
 
 use protocol::{
     CardId, ClaudeSessionId, Node, NodeId, ProjectId, SessionMeta, SessionStatus, TreeNode,
-    ws::ServerMessage,
+    ws::{ErrorKind, SelfhealPhase, ServerMessage},
 };
 use server_core::registry::{NoticeLimits, ReportOrigin, SessionRegistry};
 
@@ -1698,6 +1698,152 @@ async fn 名前を付けたものは件数で切られない() {
             "[{}] 名前の無いものが上限どおりに切られていない",
             backend.name
         );
+        backend.finish().await;
+    }
+}
+
+/// 記録に何件入ったかを、DB だけを見て数える。
+async fn 記録の件数(
+    backend: &common::Backend,
+) -> Vec<server_core::db::entity::notices::Model> {
+    let (rows, _) = server_core::db::notices::list_page(
+        &backend.db,
+        server_core::db::LOCAL_ACCOUNT_ID,
+        None,
+        100,
+    )
+    .await
+    .expect("知らせを引けること");
+    rows
+}
+
+#[tokio::test]
+async fn 名指し先の無いエラーは記録に残る() {
+    // **今回の設計の核心**（トーストとベル設計§4-2）。`apply()` を通った知らせだけが
+    // 記録に残る。ここが壊れると**画面には出るのに記録に残らない**——ベルが空のまま、
+    // 別の端末からも読めない、という形で静かに壊れる。
+    for backend in common::backends("notice-apply-error").await {
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+
+        registry
+            .apply(
+                &local(),
+                ServerMessage::Error {
+                    card_id: None,
+                    message: "起こせませんでした".to_string(),
+                    kind: ErrorKind::Revive,
+                },
+            )
+            .await;
+
+        let rows = 記録の件数(&backend).await;
+        assert_eq!(rows.len(), 1, "[{}] 記録に残っていない", backend.name);
+        assert_eq!(rows[0].message, "起こせませんでした", "[{}]", backend.name);
+        assert_eq!(rows[0].source, "error", "[{}] 出どころ", backend.name);
+        assert_eq!(rows[0].kind, "revive", "[{}] 種別", backend.name);
+        assert_eq!(
+            rows[0].account_id,
+            server_core::db::LOCAL_ACCOUNT_ID,
+            "[{}] 出どころのアカウントで書かれていない",
+            backend.name
+        );
+        assert!(
+            rows[0].read_at.is_none(),
+            "[{}] 未読で入らない",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 自己修復の段階は日本語で記録に残る() {
+    // **CLI は画面を通らない**ので、記録へ書く時点で日本語が確定していないと
+    // `agentdashboard notice ls` から読めない（設計§7-1）。`selfheal_label` の担保も兼ねる。
+    for backend in common::backends("notice-apply-selfheal").await {
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+
+        registry
+            .apply(
+                &local(),
+                ServerMessage::Selfheal {
+                    phase: SelfhealPhase::Cooldown,
+                    detail: None,
+                },
+            )
+            .await;
+        registry
+            .apply(
+                &local(),
+                ServerMessage::Selfheal {
+                    phase: SelfhealPhase::Swapped,
+                    detail: Some("2.1.259".to_string()),
+                },
+            )
+            .await;
+
+        let rows = 記録の件数(&backend).await;
+        assert_eq!(rows.len(), 2, "[{}] 2件とも残っていない", backend.name);
+
+        let 本文: Vec<&str> = rows.iter().map(|row| row.message.as_str()).collect();
+        assert!(
+            本文.contains(&"同じ版への再挑戦を控えています"),
+            "[{}] ラベルが日本語で入っていない。実際: {:?}",
+            backend.name,
+            本文
+        );
+        assert!(
+            本文.contains(&"パーサを差し替えました 2.1.259"),
+            "[{}] 詳細がラベルの後ろに付いていない。実際: {:?}",
+            backend.name,
+            本文
+        );
+        assert!(
+            rows.iter().all(|row| row.source == "selfheal"),
+            "[{}] 出どころが selfheal になっていない",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn カードを名指しするエラーは記録に残らない() {
+    // カード単位の断りは**別物**である（設計§4-2）。あちらはカードのベルが持ち、
+    // メモリだけで生きる。ここへ混ぜると、同じ出来事が2箇所に溜まる。
+    for backend in common::backends("notice-apply-card").await {
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+
+        registry
+            .apply(
+                &local(),
+                ServerMessage::Error {
+                    card_id: Some(CardId::new()),
+                    message: "このカードだけの断り".to_string(),
+                    kind: ErrorKind::SendInput,
+                },
+            )
+            .await;
+
+        let rows = 記録の件数(&backend).await;
+        assert!(
+            rows.is_empty(),
+            "[{}] カード名指しの断りが記録へ混ざっている。実際: {:?}",
+            backend.name,
+            rows.iter().map(|row| &row.message).collect::<Vec<_>>()
+        );
+
         backend.finish().await;
     }
 }
