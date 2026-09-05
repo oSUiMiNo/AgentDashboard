@@ -350,32 +350,58 @@ fn set(meta: &mut SessionMeta, next: SessionStatus, changed: &mut Changed) {
 /// 2分後に `sub=0` へ戻り、**そのときサブはまだ走っていた**。本数を根拠にすると、待ちが
 /// 長いときに限って「入力待ち」に見える——利用者が踏んだのはこの形である。
 ///
-/// 数を捨てるのではなく、**入り口は数、出口は画面**にする。`Stop` の時点で数が立っていれば
-/// その場でサブ待ちにできる（[`turn_ended_status`]）ので速い。数が当てにならなかった場合の
-/// 取りこぼしと、解くときだけを画面が受け持つ。
+/// **数は入り口にも使えない**（2026-09-05・読み替え2）。ターンが終わった時点でまだ
+/// `SubagentStart` が届いていないことがあるので、`Stop` の腕は本数を見ずに入力待ちへ倒し、
+/// **入り口も出口も画面が受け持つ**。
 ///
-/// # 動かすのは、ターンが終わっている2つの状態のあいだだけ
+/// # 作業中からも入る
 ///
-/// `WaitingInput` と `WaitingSubagents` は**同じ事実（ターンは終わった）の別の顔**で、
-/// 間を往復しても人がすべきことは変わらない。それ以外（`Working` ／ `WaitingPermission`
-/// ／ `Stalled` ／ `Ended` ／ `Starting`）へは入らないし、そこからも動かさない。
+/// **フックはツールを叩いたのがメインかサブかを区別できない。** サブのツールコールも
+/// `PreToolUse` を飛ばすので、ターンが終わって入力待ちになった直後にサブが一手打つと
+/// 作業中へ落ちる——そして次に画面を読むまでのあいだ、誰もキーボードの前に居ないのに
+/// 「作業中」に見える。実機ではこの形で、**120秒の無音で停滞へ落ちては画面判定で
+/// 入力待ちへ救出される、を14回**繰り返していた。
 ///
-/// **この絞り込みは競合に対する防壁でもある。** 呼ぶ側（`Session::sweep`）は `meta` の
-/// ロックを一度離してから画面を読む。その隙間にフックが1件でも届いていれば [`apply`] が
-/// 状態を進めているので、そこへ書き戻すと**届いたばかりのフックを踏み潰す**。
+/// **画面は区別できる。** メインが走っていればスピナーが出るので、`main_running` が偽で
+/// あることを条件にすれば、作業中から移しても取り違えない。
+///
+/// # 触らない状態
+///
+/// `WaitingPermission` ／ `Stalled` ／ `Ended` ／ `Starting` へは入らないし、そこからも
+/// 動かさない。**この絞り込みは競合に対する防壁でもある**——呼ぶ側（`Session::sweep`）は
+/// `meta` のロックを一度離してから画面を読むので、その隙間にフックが届いていれば
+/// [`apply`] が状態を進めている。そこへ無条件に書き戻すと**届いたばかりのフックを
+/// 踏み潰す**。
+///
+/// # 出るときの行き先も画面が決める
+///
+/// 一覧が消えたとき、スピナーが出ていれば作業中・出ていなければ入力待ちへ返す。
+/// **同じ1枚の画面から両方を取ること**——別々に読むと、あいだに1ターン挟まって
+/// 「走行中かつ一覧在り」が両立して見える。
 ///
 /// # 画面読みは版で壊れる前提
 ///
 /// 壊れたときに残るのは「サブ待ちのまま解けない」側で、**人が指示を打てば
 /// `UserPromptSubmit` で作業中へ戻る**（自分では直らないが、行き止まりにはならない）。
-pub fn sync_subagent_wait(meta: &mut SessionMeta, waiting: bool) -> bool {
-    let next = if waiting && meta.status == SessionStatus::WaitingInput {
+pub fn sync_subagent_wait(meta: &mut SessionMeta, waiting: bool, main_running: bool) -> bool {
+    let entering = matches!(
+        meta.status,
+        SessionStatus::WaitingInput | SessionStatus::Working
+    );
+    let next = if waiting && !main_running && entering {
         SessionStatus::WaitingSubagents
     } else if !waiting && meta.status == SessionStatus::WaitingSubagents {
-        SessionStatus::WaitingInput
+        if main_running {
+            SessionStatus::Working
+        } else {
+            SessionStatus::WaitingInput
+        }
     } else {
         return false;
     };
+    if meta.status == next {
+        return false;
+    }
     meta.status = next;
     true
 }
@@ -1030,10 +1056,46 @@ mod tests {
     #[test]
     fn 画面の申告でサブ待ちへ入って出る() {
         let mut meta = meta_with(SessionStatus::WaitingInput);
-        assert!(sync_subagent_wait(&mut meta, true));
+        assert!(sync_subagent_wait(&mut meta, true, false));
         assert_eq!(meta.status, SessionStatus::WaitingSubagents);
 
-        assert!(sync_subagent_wait(&mut meta, false));
+        assert!(sync_subagent_wait(&mut meta, false, false));
+        assert_eq!(meta.status, SessionStatus::WaitingInput);
+    }
+
+    /// **作業中からも入る**（設計§14 読み替え4）。
+    ///
+    /// サブのツールコールもメインと同じフックを飛ばすので、ターンが終わった直後に
+    /// サブが一手打つと作業中へ落ちる。ここを塞がないと、誰も居ないのに作業中のまま
+    /// 残る——実機で踏んだのはこの形である。
+    #[test]
+    fn 作業中でもスピナーが出ていなければサブ待ちへ移る() {
+        let mut meta = meta_with(SessionStatus::Working);
+        assert!(sync_subagent_wait(&mut meta, true, false));
+        assert_eq!(meta.status, SessionStatus::WaitingSubagents);
+    }
+
+    /// **メインが走っているうちは動かさない。** ここが「作業中からも入る」の唯一の歯止め
+    /// なので、外れると走っているカードがサブ待ちに見える。
+    #[test]
+    fn メインが走っていればサブ待ちへ移さない() {
+        for status in [SessionStatus::Working, SessionStatus::WaitingInput] {
+            let mut meta = meta_with(status);
+            assert!(!sync_subagent_wait(&mut meta, true, true), "{status:?}");
+            assert_eq!(meta.status, status, "{status:?}");
+        }
+    }
+
+    /// **出るときの行き先も画面が決める。** 一覧が消えた時点でメインが走っていれば、
+    /// 入力待ちへ返すと「動いているのに入力待ち」になる。
+    #[test]
+    fn 一覧が消えたときの行き先はスピナーで決まる() {
+        let mut meta = meta_with(SessionStatus::WaitingSubagents);
+        assert!(sync_subagent_wait(&mut meta, false, true));
+        assert_eq!(meta.status, SessionStatus::Working);
+
+        let mut meta = meta_with(SessionStatus::WaitingSubagents);
+        assert!(sync_subagent_wait(&mut meta, false, false));
         assert_eq!(meta.status, SessionStatus::WaitingInput);
     }
 
@@ -1041,23 +1103,24 @@ mod tests {
     #[test]
     fn 画面の申告が同じなら二度目は変化しない() {
         let mut meta = meta_with(SessionStatus::WaitingInput);
-        assert!(!sync_subagent_wait(&mut meta, false));
-        assert!(sync_subagent_wait(&mut meta, true));
-        assert!(!sync_subagent_wait(&mut meta, true));
+        assert!(!sync_subagent_wait(&mut meta, false, false));
+        assert!(sync_subagent_wait(&mut meta, true, false));
+        assert!(!sync_subagent_wait(&mut meta, true, false));
     }
 
-    /// **ターンが終わっていない状態は、画面を見ても動かさない。**
+    /// **触らないと決めた状態は、画面を見ても動かさない。**
     ///
     /// 呼ぶ側は `meta` のロックを一度離して画面を読むので、その隙間にフックが届いて
-    /// いれば状態はもう `Working` である。ここが競合に対する唯一の防壁になっている。
+    /// いれば状態はもう別のものである。ここが競合に対する唯一の防壁になっている。
+    /// **作業中はこの一覧から外れた**（読み替え4）——あそこはフックがメインとサブを
+    /// 取り違える唯一の場所なので、画面のほうが正しい。
     ///
-    /// **両方の入力で回すこと。** 片側だけだと、動かない理由が「入力のせい」なのか
-    /// 「状態の絞り込みのせい」なのか区別できない。
+    /// **入力の組み合わせを全部回すこと。** 片側だけだと、動かない理由が「入力のせい」
+    /// なのか「状態の絞り込みのせい」なのか区別できない。
     #[test]
-    fn ターンが終わっていない状態は画面を見ても動かない() {
+    fn 触らないと決めた状態は画面を見ても動かない() {
         for status in [
             SessionStatus::Starting,
-            SessionStatus::Working,
             SessionStatus::Stalled,
             SessionStatus::WaitingPermission,
             SessionStatus::Ended { ok: true },
@@ -1065,9 +1128,14 @@ mod tests {
             SessionStatus::Unknown,
         ] {
             for waiting in [true, false] {
-                let mut meta = meta_with(status);
-                assert!(!sync_subagent_wait(&mut meta, waiting), "{status:?}");
-                assert_eq!(meta.status, status, "{status:?}");
+                for main_running in [true, false] {
+                    let mut meta = meta_with(status);
+                    assert!(
+                        !sync_subagent_wait(&mut meta, waiting, main_running),
+                        "{status:?} waiting={waiting} running={main_running}"
+                    );
+                    assert_eq!(meta.status, status, "{status:?}");
+                }
             }
         }
     }

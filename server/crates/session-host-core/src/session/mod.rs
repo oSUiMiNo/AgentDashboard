@@ -736,27 +736,60 @@ impl Session {
         running
     }
 
-    /// 端末のフッタに、走っているサブエージェントの一覧が出ているか（設計§14 読み替え）。
+    /// 端末のフッタに走っているサブエージェントの一覧が出ているかと、**メインが走って
+    /// いるか**（設計§14 読み替え3）。
     ///
-    /// [`Session::terminal_shows_activity`] と同じ作法で、**`ring` のロックの中では
-    /// 描かない**。見ている行が違うだけで、材料の集め方は1つにそろえてある。
-    fn terminal_waits_for_subagents(&self) -> bool {
+    /// **1枚の画面から2つとも取る。** 別々に読むと、あいだに1ターン挟まったときに
+    /// 「走行中かつ一覧在り」が両立して見え、走っているメインをサブ待ちへ落とす。
+    ///
+    /// # 末尾だけでは、一覧は読めない（2026-09-05・実測で覆った）
+    ///
+    /// かつてはここも [`Session::terminal_shows_activity`] と同じく、リングバッファの
+    /// **末尾 64 KiB だけ**をまっさらな `vt100` へ流し直していた。**それでは一覧が
+    /// 見えない。** claude の TUI は**変わった行しか描き直さない**ので、手が空いた
+    /// カードの末尾にはスピナーや時計の更新しか入らない——**一覧はサブが立った瞬間に
+    /// 一度描かれたきり動かない**ものなので、窓の外へ落ちたまま二度と現れない。
+    ///
+    /// 実機での実測（カード1枚）：実物の画面が 1486 文字あるのに対し、末尾から組み立てた
+    /// 画面は 149〜259 文字。一覧が画面に実在するのに、**113 回続けて「出ていない」**と
+    /// 答えていた。
+    ///
+    /// **だからリング全体を描き直す。** これは新しい購読者へ配っている全画面
+    /// （[`Session::snapshot_frame`]）と同じ材料で、**ブラウザや CLI が正しい画面を
+    /// 描けているのはこれのおかげ**である。判定だけ別の（狭い）材料を使っていたのが
+    /// 今回の誤りだった。
+    ///
+    /// **配信用の端末エミュレータは使えない。** あれはセルフホストモードでしか作られず
+    /// （`EventSink::screens_enabled` の既定が偽）、利用者が実際に使うローカルモードには
+    /// 存在しない。
+    ///
+    /// # 費用
+    ///
+    /// リングの既定は 1 MiB で、描き直しは release で **7.4 ms**（実測）。5秒に1回まで
+    /// かつ**端末が1バイトも動いていなければ読まない**ので、止まっているカードは何枚
+    /// あってもここへ来ない。**停滞判定を末尾のままにしてあるのは、あちらが見ている
+    /// スピナーが毎フレーム描き直されるもので、64 KiB で足りて 15 倍安いからである。**
+    fn terminal_subagent_view(&self) -> (bool, bool) {
         let (cols, rows) = *self.terminal_size.lock().expect("ロックが壊れていない");
-        let tail = self.scrollback_tail_bytes(ACTIVITY_TAIL);
-        let screen = activity::render(&tail, cols, rows);
+        // **`ring` のロックの中で描かない**（[`Session::terminal_shows_activity`] と同じ作法）
+        let payload = self.ring.lock().expect("ロックが壊れていない").snapshot();
+        let screen = activity::render(&payload, cols, rows);
         let waiting = activity::waits_for_subagents(&screen);
-        // **材料を並べる。** 画面読みは版で壊れる前提なので、外したときに桁行・読んだ量・
-        // 描けた量が無いと理由を絞れない（停滞側で証拠が無くて詰まった実例がある）
+        let main_running = activity::is_running(&screen);
+        // **材料を並べる。** 画面読みは版で壊れる前提なので、外したときに読んだ量と
+        // 描けた量が無いと理由を絞れない。**今回の不具合は「判定関数ではなく食わせて
+        // いる画面が狭かった」形だった**ので、この2つが揃っていることに意味がある
         tracing::debug!(
             card_id = %self.card_id,
             waiting,
+            main_running,
             cols,
             rows,
-            tail_bytes = tail.len(),
+            replay_bytes = payload.len(),
             screen_chars = screen.chars().count(),
             "サブエージェントの一覧が出ているか画面を見た"
         );
-        waiting
+        (waiting, main_running)
     }
 
     /// いまの位置に目印を打つ。
@@ -1552,40 +1585,45 @@ impl Session {
         // （`subagent_active`）は、サブがまだ生きているうちに 0 へ戻ることが実機で
         // 分かっている——だから「解く」側を数に任せられない。
         //
-        // 対象はターンが終わっている2枚（入力待ち・サブ待ち）だけ。ロックの並びは上と
-        // 同じで、`meta` を離してから `ring` を握り、また `meta` を取る。この隙間に
-        // フックが届いていた場合は `sync_subagent_wait` の状態の絞り込みが弾く。
-        let subagent_moved =
-            matches!(
-                status,
-                SessionStatus::WaitingInput | SessionStatus::WaitingSubagents
-            ) && activity::due(self.waiting_checked_at.load(Ordering::Relaxed), now)
-                && {
-                    self.waiting_checked_at.store(now, Ordering::Relaxed);
-                    // **端末が動いていなければ描き直さない。** 手が空いたまま放置された
-                    // カードは何時間でもこの枝に居るので、ここを外すと 64 KiB の描き直しが
-                    // 5秒おきに永久に走る
-                    let mark = self.scrollback_mark();
-                    if self.waiting_checked_mark.swap(mark, Ordering::Relaxed) == mark {
-                        false
-                    } else {
-                        let waiting = self.terminal_waits_for_subagents();
-                        let mut meta = self.meta.lock().expect("ロックが壊れていない");
-                        let moved = state::sync_subagent_wait(&mut meta, waiting);
-                        if moved {
-                            // 画面読みで動かしたことは必ず残す。版が上がって行の形が変われば
-                            // ここが黙るので、**出ていた行が出なくなったこと**が手がかりになる
-                            tracing::info!(
-                                card_id = %self.card_id,
-                                waiting,
-                                subagent_active = meta.subagent_active,
-                                status = ?meta.status,
-                                "画面の申告でサブ待ちを切り替えた"
-                            );
-                        }
-                        moved
-                    }
-                };
+        // **作業中も対象に入れる**（読み替え4）。サブのツールコールもメインと同じフックを
+        // 飛ばすので、ターンが終わった直後にサブが一手打つと作業中へ落ちる——フックには
+        // 叩いたのがどちらか分からないが、**画面には分かる**（メインが走っていればスピナーが
+        // 出る）。実機ではこの形で、誰も居ないのに作業中に見え続けていた。
+        //
+        // ロックの並びは上と同じで、`meta` を離してから画面を読み、また `meta` を取る。
+        // この隙間にフックが届いていた場合は `sync_subagent_wait` の絞り込みが弾く。
+        let subagent_moved = matches!(
+            status,
+            SessionStatus::WaitingInput | SessionStatus::WaitingSubagents | SessionStatus::Working
+        ) && activity::due(
+            self.waiting_checked_at.load(Ordering::Relaxed),
+            now,
+        ) && {
+            self.waiting_checked_at.store(now, Ordering::Relaxed);
+            // **端末が1バイトも動いていなければ読まない。** 手が空いたまま放置された
+            // カードは何時間でもこの枝に居る。画面が変わっていなければ答えも変わらない
+            // ので、写し取る手間ごと省ける
+            let mark = self.scrollback_mark();
+            if self.waiting_checked_mark.swap(mark, Ordering::Relaxed) == mark {
+                false
+            } else {
+                let (waiting, main_running) = self.terminal_subagent_view();
+                let mut meta = self.meta.lock().expect("ロックが壊れていない");
+                let moved = state::sync_subagent_wait(&mut meta, waiting, main_running);
+                if moved {
+                    // 画面読みで動かしたことは必ず残す。版が上がって行の形が変われば
+                    // ここが黙るので、**出ていた行が出なくなったこと**が手がかりになる
+                    tracing::info!(
+                        card_id = %self.card_id,
+                        waiting,
+                        subagent_active = meta.subagent_active,
+                        status = ?meta.status,
+                        "画面の申告でサブ待ちを切り替えた"
+                    );
+                }
+                moved
+            }
+        };
 
         if silent {
             // `Starting → Unknown` の遷移そのものがラッチ。ここへ来るのは1本につき1回だけ
