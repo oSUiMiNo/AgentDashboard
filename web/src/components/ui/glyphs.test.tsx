@@ -2,11 +2,13 @@ import { render } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 
 import {
+  ArrowUpGlyph,
   BellGlyph,
   ChevronGlyph,
   CloseGlyph,
   CopyGlyph,
   GearGlyph,
+  KeyboardGlyph,
   PencilGlyph,
   PlusGlyph,
   PowerGlyph,
@@ -32,14 +34,34 @@ const 印 = {
   CopyGlyph: <CopyGlyph />,
   BellGlyph: <BellGlyph />,
   PlusGlyph: <PlusGlyph />,
+  KeyboardGlyph: <KeyboardGlyph />,
+  ArrowUpGlyph: <ArrowUpGlyph />,
+}
+
+/**
+ * 太さが 2 でない印と、その理由。
+ *
+ * **`DESIGN.md` §18.2 の下限は型で分かれている。** 外形が意味を持つ「面型」は塗り面積、
+ * **記号そのものが意味を持つ「記号型」は線の太さがグリッドの 1/8 以上**（24 なら 3px）。
+ * 矢印は記号型なので、**3 は破りではなく下限を満たしている側**である。
+ *
+ * **この表に無いものが 2 から外れたら落ちる。** 例外を1つ許した瞬間に、なし崩しで
+ * 太さがばらつくのを防ぐため、**外れてよいものを名指しで持つ**。
+ */
+const 太さの例外: Readonly<Record<string, string>> = {
+  ArrowUpGlyph: '3',
 }
 
 describe('印の作法', () => {
-  it('10 そろっている', () => {
-    // 既存4つ＋フェーズ1の5つ＋フェーズ2の `PlusGlyph`。**編集と上向き矢印は
-    // 足していない**——`PencilGlyph` と `ChevronGlyph({direction:'up'})` が既にある。
-    // `PlusGlyph` は `SessionAdd` に手描きで在ったものを、✕ と同じ理由で寄せた
-    expect(Object.keys(印)).toHaveLength(10)
+  it('12 そろっている', () => {
+    // 既存4つ＋フェーズ1の5つ＋`PlusGlyph`＋`KeyboardGlyph`＋`ArrowUpGlyph`。
+    // **`KeyboardGlyph` はここへ足し忘れられていた**（コミットはされていたが、
+    // 表に無いので作法の見張りから外れていた）。
+    //
+    // **`ArrowUpGlyph` は、フェーズ1の「上向き矢印は足さない」を覆したもの**——
+    // 山形は「前へ／後ろへ」の意味に取ってあり、**階層を1つ上がる**には足りず、
+    // 実物では細い `^` がパスの文字に紛れていた（2026-09-05 の指定）
+    expect(Object.keys(印)).toHaveLength(12)
   })
 
   it.each(Object.entries(印))('%s が作法どおりに描かれている', (_name, node) => {
@@ -51,8 +73,9 @@ describe('印の作法', () => {
     // 色は継承させる（塗らない）
     expect(svg?.getAttribute('fill')).toBe('none')
     expect(svg?.getAttribute('stroke')).toBe('currentColor')
-    // `DESIGN.md` §18.2 の下限。小さく置いても消えない太さ
-    expect(svg?.getAttribute('stroke-width')).toBe('2')
+    // `DESIGN.md` §18.2 の下限。小さく置いても消えない太さ。
+    // **例外は名指しで持つ**（上の `太さの例外`）
+    expect(svg?.getAttribute('stroke-width')).toBe(太さの例外[_name] ?? '2')
     expect(svg?.getAttribute('stroke-linecap')).toBe('round')
     expect(svg?.getAttribute('stroke-linejoin')).toBe('round')
     // 大きさは外から当てる。ここで固定すると器の中で泳ぐ

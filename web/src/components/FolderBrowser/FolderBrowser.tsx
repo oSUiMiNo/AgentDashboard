@@ -28,7 +28,7 @@ import {
   ContextMenuItem,
   ContextMenuTrigger,
 } from '@/components/ui/context-menu'
-import { ChevronGlyph, CopyGlyph } from '@/components/ui/glyphs'
+import { ArrowUpGlyph, CopyGlyph } from '@/components/ui/glyphs'
 import { copyToClipboard } from '@/lib/clipboard'
 import { fileIcon } from '@/lib/fileKind'
 import {
@@ -240,7 +240,12 @@ export function FolderBrowser({
         */}
         <Button
           type="button"
-          variant="ghost"
+          /*
+            **枠と地を持たせて、押せるものだと分かるようにする**（2026-09-05 の指定）。
+            `ghost` の細い山形は**パスの区切りや文字に紛れて、UI だと読めなかった**——
+            ここはパンくずという**文字が並ぶ場所**なので、他所より器の助けが要る。
+          */
+          variant="outline"
           size="icon-xs"
           data-testid="folder-up"
           aria-label="1つ上のフォルダへ"
@@ -257,7 +262,8 @@ export function FolderBrowser({
             }
           }}
         >
-          <ChevronGlyph direction="up" />
+          {/* 器（24px）に対して 14px。`icon-xs` の既定（12px）だと器の中で泳ぐ */}
+          <ArrowUpGlyph className="size-3.5" />
         </Button>
 
         {crumbs.map((crumb, at) => (

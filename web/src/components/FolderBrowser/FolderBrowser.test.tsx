@@ -281,9 +281,38 @@ describe("1つ上へ", () => {
     置く();
     await 行たち();
 
-    // **新しい絵を描いていない**——`ChevronGlyph` を向きだけ変えて使う（設計§8-2）
     expect(screen.getByTestId("folder-up").querySelector("svg")).not.toBeNull();
     expect(screen.getByTestId("folder-up").textContent).toBe("");
+  });
+
+  it("パスの文字に紛れない太さで、軸のある矢印になっている", async () => {
+    // **細い山形（`^`）は、パスの区切りや文字と見分けが付かなかった**（2026-09-05 の指定）。
+    // ここはパンくずという**文字が並ぶ場所**なので、印の側が文字より強くないと読めない。
+    //
+    // 太さ3は `DESIGN.md` §18.2 の**記号型の下限**（グリッドの 1/8＝24 なら 3px）。
+    置く();
+    await 行たち();
+
+    const svg = screen.getByTestId("folder-up").querySelector("svg");
+    expect(svg?.getAttribute("stroke-width")).toBe("3");
+    // **軸を必ず描く。** 矢じりだけにすると山形へ戻り、区別が消える
+    const 線 = [...(svg?.querySelectorAll("path") ?? [])].map((p) =>
+      p.getAttribute("d"),
+    );
+    expect(線).toHaveLength(2);
+    expect(線.some((d) => d?.includes("V"))).toBe(true);
+  });
+
+  it("枠を持っていて、押せるものだと分かる", async () => {
+    // 絵を強くするだけでは、**文字の隣に置いたときに「押せる」までは伝わらない**。
+    // 既存の `outline` を使う——自前で枠を書くと、他のボタンと反応が揃わなくなる
+    置く();
+    await 行たち();
+
+    // **`border` だけを見ないこと。** 基底が `border border-transparent` を持っているので、
+    // どの variant でも当たってしまう（実際にこれで空振りした）。
+    // `outline` だけが持つ `border-border` を見る
+    expect(screen.getByTestId("folder-up").className).toContain("border-border");
   });
 });
 
