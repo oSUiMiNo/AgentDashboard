@@ -32,6 +32,21 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+/// 記録の形の版。**ノードの形を変えて、古い行が新しい形で出せなくなったら上げる。**
+///
+/// 上げると、そのカードを次に監視するときに**一度だけ**頭から読み直す（[`OffsetStore::is_stale`]）。
+///
+/// # なぜ「パーサの版」ではないのか
+///
+/// 版を上げるたびに読み直すと、**中身が変わっていない版でも全カードを読み直す**ことになる。
+/// ここが数えているのは版ではなく**記録の形**で、形が変わったときだけ手で上げる。
+///
+/// | 版 | 何が変わったか |
+/// |---|---|
+/// | 0 | この仕組みより前に書かれた位置（`#[serde(default)]` でここへ落ちる） |
+/// | 1 | 発言に「誰が入れたか」の名乗りと、スラッシュコマンドの展開が付いた |
+pub const TRANSCRIPT_SHAPE: u32 = 1;
+
 /// 永続化する再開位置。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Offsets {
@@ -46,6 +61,12 @@ struct CardOffsets {
     /// **resume で別ファイルに変わったら、保存済みの位置は使わない**（先頭から読み直す）。
     path: String,
     files: BTreeMap<String, u64>,
+    /// この位置を書いた時点の[記録の形の版](TRANSCRIPT_SHAPE)。
+    ///
+    /// **`#[serde(default)]` は、この欄を知らない版が書いた `offsets.json` を読むため。**
+    /// 既定の `0` は「形が付く前に読んだ」を意味し、そのまま**読み直しの対象**になる。
+    #[serde(default)]
+    shape: u32,
 }
 
 /// 再開位置の読み書き。
@@ -95,6 +116,7 @@ impl OffsetStore {
                 .or_insert_with(|| CardOffsets {
                     path: transcript_path.to_string(),
                     files: BTreeMap::new(),
+                    shape: TRANSCRIPT_SHAPE,
                 });
             // **場所が変わったら、読み位置も捨てる。** `path` だけ差し替えて `files` を
             // 残すと、`resume()` が**前のセッションのファイルまで返す**——パーサは
@@ -108,8 +130,30 @@ impl OffsetStore {
             }
             entry.path = transcript_path.to_string();
             entry.files.insert(source.to_string(), next_offset);
+            // **読んだ結果を書くこの場所が、形の版を刻む唯一の場所である。** 監視を頼む側で
+            // 刻むと、読み直す前に「新しい形で読んだ」ことになり、一度も読み直されない
+            entry.shape = TRANSCRIPT_SHAPE;
         }
         self.save();
+    }
+
+    /// このカードの記録が**古い形のまま**か。真なら頭から読み直す価値がある。
+    ///
+    /// # 位置を持っていないカードは「古く」ない
+    ///
+    /// 保存された位置が無い（＝まだ一度も読んでいない／既に忘れた）なら、どのみち頭から
+    /// 読むので読み直す必要が無い。**パスが変わっているときも同じ**——[`Self::resume`] が
+    /// 空を返すので、放っておいても頭から読まれる。
+    ///
+    /// **ここで真を返すのは「古い形で最後まで読み終えている」カードだけ**である。
+    pub fn is_stale(&self, card_id: CardId, path: &str) -> bool {
+        self.state
+            .lock()
+            .expect("ロックが壊れていない")
+            .cards
+            .get(&card_id.to_string())
+            .filter(|saved| saved.path == path)
+            .is_some_and(|saved| saved.shape < TRANSCRIPT_SHAPE)
     }
 
     /// そのカードの位置を忘れる（巻き戻しと監視の取り止め）。
@@ -276,6 +320,131 @@ mod tests {
         store.commit(card_id, "/p/s.jsonl", "/p/s.jsonl", 0);
 
         assert!(store.resume(card_id, "/p/s.jsonl").is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// この版で読んだカードは、読み直しの対象にならない。
+    #[test]
+    fn いまの形で読んだ位置は読み直さない() {
+        let dir = temp_dir("shape-fresh");
+        let card_id = CardId::new();
+        let store = OffsetStore::open(dir.clone());
+
+        store.commit(card_id, "/p/s.jsonl", "/p/s.jsonl", 10);
+
+        assert!(!store.is_stale(card_id, "/p/s.jsonl"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// **この欄を知らない版が書いた `offsets.json` は、読み直しの対象になる。**
+    ///
+    /// 実機で起きるのはこの形だけである——欄が無い保存ファイルが既に置いてあり、
+    /// そこへ新しい版が繋がる。
+    #[test]
+    fn 形の欄が無い保存ファイルは読み直しの対象になる() {
+        let dir = temp_dir("shape-old");
+        let card_id = CardId::new();
+        std::fs::create_dir_all(&dir).expect("作れる");
+        // **欄を落とした古い形をそのまま書く。** 構造体から作ると、いまの版の既定が
+        // 入ってしまい「古い保存ファイル」を再現できない
+        std::fs::write(
+            dir.join("offsets.json"),
+            format!(
+                r#"{{"cards":{{"{card_id}":{{"path":"/p/s.jsonl","files":{{"/p/s.jsonl":10}}}}}}}}"#
+            ),
+        )
+        .expect("書ける");
+        let store = OffsetStore::open(dir.clone());
+
+        assert!(store.is_stale(card_id, "/p/s.jsonl"), "古い形は読み直す");
+        // 位置そのものは読める（読み直しを頼まない経路では、いままでどおり続きから読む）
+        assert_eq!(store.resume(card_id, "/p/s.jsonl")["/p/s.jsonl"], 10);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// **古い形の位置が残ったまま読み進めたら、形も新しくなる。**
+    ///
+    /// 位置を書けるということは**いまのパーサが読んだ**ということなので、形は追随しなければ
+    /// ならない。追随させないと、その入れ物は**永久に「古い」と言い続け**、監視を頼むたびに
+    /// 読み直しを試みる。
+    ///
+    /// [`OffsetStore::forget`] を経由する経路では入れ物ごと作り直されるので、ここを踏むのは
+    /// **捨てずに読み進めた**とき（元のファイルが無くて読み直しを見送った場合など）である。
+    #[test]
+    fn 古い形の位置を進めたら形も新しくなる() {
+        let dir = temp_dir("shape-follow");
+        let card_id = CardId::new();
+        std::fs::create_dir_all(&dir).expect("作れる");
+        std::fs::write(
+            dir.join("offsets.json"),
+            format!(
+                r#"{{"cards":{{"{card_id}":{{"path":"/p/s.jsonl","files":{{"/p/s.jsonl":10}}}}}}}}"#
+            ),
+        )
+        .expect("書ける");
+        let store = OffsetStore::open(dir.clone());
+        assert!(store.is_stale(card_id, "/p/s.jsonl"));
+
+        // **忘れずに**進める（入れ物は作り直されない）
+        store.commit(card_id, "/p/s.jsonl", "/p/s.jsonl", 20);
+
+        assert!(
+            !store.is_stale(card_id, "/p/s.jsonl"),
+            "読み進めたのに古いままだと、監視のたびに読み直そうとする"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// パスが違えば、放っておいても頭から読まれるので読み直しを頼まない。
+    #[test]
+    fn 場所が変わったカードは読み直しの対象にしない() {
+        let dir = temp_dir("shape-path");
+        let card_id = CardId::new();
+        std::fs::create_dir_all(&dir).expect("作れる");
+        std::fs::write(
+            dir.join("offsets.json"),
+            format!(
+                r#"{{"cards":{{"{card_id}":{{"path":"/p/old.jsonl","files":{{"/p/old.jsonl":10}}}}}}}}"#
+            ),
+        )
+        .expect("書ける");
+        let store = OffsetStore::open(dir.clone());
+
+        assert!(!store.is_stale(card_id, "/p/new.jsonl"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 位置を持っていないカードは、どのみち頭から読むので対象にしない。
+    #[test]
+    fn 位置を持たないカードは読み直しの対象にしない() {
+        let dir = temp_dir("shape-none");
+        let store = OffsetStore::open(dir.clone());
+
+        assert!(!store.is_stale(CardId::new(), "/p/s.jsonl"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 読み直したあとは、二度目が起きない。
+    #[test]
+    fn 読み直して位置を書けば二度目は起きない() {
+        let dir = temp_dir("shape-once");
+        let card_id = CardId::new();
+        std::fs::create_dir_all(&dir).expect("作れる");
+        std::fs::write(
+            dir.join("offsets.json"),
+            format!(
+                r#"{{"cards":{{"{card_id}":{{"path":"/p/s.jsonl","files":{{"/p/s.jsonl":10}}}}}}}}"#
+            ),
+        )
+        .expect("書ける");
+        let store = OffsetStore::open(dir.clone());
+        assert!(store.is_stale(card_id, "/p/s.jsonl"));
+
+        // 読み直しは「位置を忘れて、頭から読んで、また書く」形になる
+        store.forget(card_id);
+        store.commit(card_id, "/p/s.jsonl", "/p/s.jsonl", 10);
+
+        assert!(!store.is_stale(card_id, "/p/s.jsonl"), "二度目は起きない");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

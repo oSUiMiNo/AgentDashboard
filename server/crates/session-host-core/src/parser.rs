@@ -817,6 +817,7 @@ async fn pump(
             request = requests.recv() => match request {
                 Some(ParserRequest::Watch { card_id, path }) => {
                     watched.insert(card_id, path.clone());
+                    drop_stale_shape(supervisor, card_id, &path);
                     let command = watch_command(&supervisor.offsets, card_id, path);
                     if let Err(err) = write_command(&mut stdin, &command).await {
                         undelivered_to_child(child.id(), card_id, "監視の指示", &err);
@@ -954,6 +955,66 @@ async fn fold(
     supervisor.degrade(detail);
     if let Err(err) = child.kill().await {
         tracing::warn!(parser_pid = ?parser_pid, %err, "暴走したパーサを落とせません");
+    }
+}
+
+/// 記録が**古い形のまま**なら、木と読み位置を捨てて頭から読み直させる。
+///
+/// # なぜ監視を頼むときなのか
+///
+/// 起動時に全カードをまとめて読み直すこともできるが、**そのとき画面を見ていないカードまで
+/// 一斉に解析することになる**（実測で1万行規模の記録が積んである）。監視を頼む瞬間は
+/// **そのカードが実際に動き出した瞬間**なので、読み直す量が要る順に散らばる。
+///
+/// 代償は「**一度も動かさないカードは古い形のまま残る**」こと。止まったままのカードは
+/// フックが来ないので、ここを通らない。**読めるのに直らないより、読めないものを消さない
+/// ほうを選んだ**（下記）。
+///
+/// # 消してから読めない、を避ける
+///
+/// 木を捨ててから JSONL が読めないと、**そのカードの履歴が空になる**。古い形のまま
+/// 残るより悪いので、**元のファイルが在ることを確かめてから**捨てる。
+fn drop_stale_shape(supervisor: &ParserSupervisor, card_id: CardId, path: &str) {
+    let stale = supervisor.offsets.is_stale(card_id, path);
+    match stale_decision(stale, std::path::Path::new(path).is_file()) {
+        StaleDecision::Fresh => {}
+        StaleDecision::SourceGone => tracing::info!(
+            %card_id,
+            %path,
+            "記録は古い形ですが、元のファイルが無いので読み直しません（消すと履歴が空になります）"
+        ),
+        StaleDecision::Reparse => {
+            tracing::info!(
+                %card_id,
+                %path,
+                shape = crate::offsets::TRANSCRIPT_SHAPE,
+                "記録が古い形なので、木を捨てて頭から読み直します"
+            );
+            // **捨てる順は「木 → 位置」。** 位置を先に捨てると、木を捨てられなかったときに
+            // 同じノードが古い形のまま残ったうえで頭から積み直され、二重になる
+            supervisor.manager.report_transcript_reset(card_id);
+            supervisor.offsets.forget(card_id);
+        }
+    }
+}
+
+/// 古い形の記録をどう扱うか。
+#[derive(Debug, PartialEq, Eq)]
+enum StaleDecision {
+    /// いまの形なので何もしない。
+    Fresh,
+    /// 古い形だが、**元のファイルが無いので捨てない**。
+    SourceGone,
+    /// 木と位置を捨てて、頭から読み直す。
+    Reparse,
+}
+
+/// 読み直すかを決める。**副作用を持たないので、ここだけを単体で確かめられる。**
+fn stale_decision(stale: bool, source_exists: bool) -> StaleDecision {
+    match (stale, source_exists) {
+        (false, _) => StaleDecision::Fresh,
+        (true, false) => StaleDecision::SourceGone,
+        (true, true) => StaleDecision::Reparse,
     }
 }
 
@@ -1162,6 +1223,28 @@ mod tests {
     #![allow(non_snake_case)]
 
     use super::*;
+
+    /// 古い形でも、**元のファイルが無いなら捨てない**。
+    ///
+    /// **ここがこの工事でいちばん危ない分岐である。** 木を捨ててから読めないと、その
+    /// カードの履歴が**空になる**——古い形のまま残るより悪い。
+    #[test]
+    fn 元のファイルが無ければ古い形でも捨てない() {
+        assert_eq!(stale_decision(true, false), StaleDecision::SourceGone);
+    }
+
+    #[test]
+    fn 古い形で元のファイルが在れば読み直す() {
+        assert_eq!(stale_decision(true, true), StaleDecision::Reparse);
+    }
+
+    /// いまの形なら、ファイルの有無によらず何もしない。
+    #[test]
+    fn いまの形なら読み直さない() {
+        for exists in [true, false] {
+            assert_eq!(stale_decision(false, exists), StaleDecision::Fresh);
+        }
+    }
 
     #[test]
     fn 前置したpidを剥がして欄へ移せる() {
