@@ -20,6 +20,7 @@ pub mod db;
 pub mod embed;
 pub mod gateway;
 pub mod hosts;
+pub mod lan_address;
 pub mod notices;
 pub mod portable;
 pub mod projects;
