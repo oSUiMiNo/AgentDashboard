@@ -24,11 +24,12 @@ const ROW = 読む('components/TranscriptTree/TranscriptRow.tsx')
 
 describe('吹き出しの横幅（§5-1）', () => {
   it('下限があり、上限と同じ土俵で書いてある', () => {
-    // 素の `25em` だと狭い画面で**下限が上限を追い越して枠から出る**。
-    // `min()` で下限のほうを譲る
+    // 素の `20em` だと狭い画面で**下限が上限を追い越して枠から出る**。
+    // `min()` で下限のほうを譲る。**数字より、この形が守りたいもの**である
+    // （下限は 25 → 20 へ変わった。2026-09-05・利用者の指定）
     const 規則 = /\.speech-bubble \{([\s\S]*?)\n\}/.exec(INDEX)
     expect(規則, '.speech-bubble が見つからない').not.toBeNull()
-    expect(規則![1]).toMatch(/min-width:\s*min\(25em,\s*70%\)/)
+    expect(規則![1]).toMatch(/min-width:\s*min\(20em,\s*70%\)/)
   })
 
   it('上限は 70% のまま', () => {
