@@ -74,16 +74,31 @@ async fn 入力待ちのカード(
     // **ターンの終わりを待たない。** `hook Stop` は1件のフックを撃つだけで、
     // 「作業中 → 終わり」の移り変わりを作らない——待つと必ず時間切れになる。
     // 代わりに、記録の側が入力待ちになるのを見る
-    client::send_input(target, &card[..8], "hook Stop", false, 5)
-        .await
-        .expect("指示を送れること");
+    //
+    // **`last_assistant_message` を載せる。** 本物の CLI は**まだ1ターンも会話していない
+    // 席の `/branch` を断る**（`No conversation to branch`。2026-09-05 実測）ので、
+    // 段取り役も送る前に断る（§3-4）。ここを省くと、土台が「会話の無い席」になる
+    client::send_input(
+        target,
+        &card[..8],
+        r#"hook Stop {"last_assistant_message":"はい"}"#,
+        false,
+        5,
+    )
+    .await
+    .expect("指示を送れること");
 
     let 揃った = server
-        .wait_for_listed("入力待ちになり、CLI 側のIDが載る", |list| {
-            list.iter().any(|meta| {
-                meta.claude_session_id.is_some() && meta.status == SessionStatus::WaitingInput
-            })
-        })
+        .wait_for_listed(
+            "入力待ちになり、CLI 側のIDと直前の応答が載る",
+            |list| {
+                list.iter().any(|meta| {
+                    meta.claude_session_id.is_some()
+                        && meta.status == SessionStatus::WaitingInput
+                        && meta.last_assistant_message.is_some()
+                })
+            },
+        )
         .await;
     let 元の会話 = 揃った[0]
         .claude_session_id
@@ -230,6 +245,38 @@ async fn 起動直後は断る() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     let list = server.registry.list(server_core::db::LOCAL_ACCOUNT_ID);
     assert_eq!(list.len(), 1, "断ったのにカードが増えている");
+}
+
+#[tokio::test]
+async fn 会話が無い席は断る() {
+    // §3-4。**状態では見分けられない**——起こした直後の席も「入力待ち」になりうる。
+    // ここを通すと、CLI 側が `No conversation to branch` と断って待ちが空振りする
+    let server = TestServer::start().await;
+    let target = target_of(&server);
+    let cwd = work_dir("no-conversation");
+    client::spawn(&target, &cwd.to_string_lossy(), None, None)
+        .await
+        .expect("起こせること");
+    let 載った = server
+        .wait_for_listed("カードが1枚載る", |list| list.len() == 1)
+        .await;
+    let card = 載った[0].card_id.to_string();
+
+    // **応答を載せずに**入力待ちへ倒す（＝1ターンも会話していない席）
+    client::send_input(&target, &card[..8], "hook Stop", false, 5)
+        .await
+        .expect("指示を送れること");
+    server
+        .wait_for_listed("入力待ちになる", |list| {
+            list.iter()
+                .any(|meta| meta.status == SessionStatus::WaitingInput)
+        })
+        .await;
+
+    枝分かれを頼む(&target, 載った[0].card_id).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let list = server.registry.list(server_core::db::LOCAL_ACCOUNT_ID);
+    assert_eq!(list.len(), 1, "会話が無い席で枝分かれが走ってしまった");
 }
 
 #[tokio::test]

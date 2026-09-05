@@ -50,9 +50,11 @@ test('横並びから押すと、枝が元の左隣に並ぶ', async ({ page }) 
   const cardId = await tile.getAttribute('data-card-id')
   const 枠 = await 枠を控える(page)
 
-  // 入力待ちへ倒す。**起動直後は押せない**（§3-4）ので、ここを飛ばすと断られる
+  // 入力待ちへ倒す。**起動直後は押せない**（§3-4）ので、ここを飛ばすと断られる。
+  // **応答も載せる**——本物の CLI は1ターンも会話していない席の `/branch` を断るので、
+  // 段取り役も送る前に断る（`No conversation to branch`。2026-09-05 実測）
   await openSession(page, tile)
-  await fireHook(page, 'Stop')
+  await fireHook(page, 'Stop', '{"last_assistant_message":"はい"}')
 
   await PJT専用画面へ(page, 枠)
   const ボタン = page.getByTestId('branch-card')
@@ -77,7 +79,7 @@ test('セッション専用画面には出ない', async ({ page }) => {
   await openDashboard(page)
   const tile = await spawnSession(page)
   await openSession(page, tile)
-  await fireHook(page, 'Stop')
+  await fireHook(page, 'Stop', '{"last_assistant_message":"はい"}')
 
   await expect(page.getByTestId('session-view')).toBeVisible()
   await expect(page.getByTestId('branch-card')).toHaveCount(0)
@@ -94,7 +96,7 @@ test('起動直後は押せず、理由が読める', async ({ page }) => {
   const ボタン = page.getByTestId('branch-card')
   await expect(ボタン).toBeVisible()
   await expect(ボタン).toBeDisabled()
-  await expect(ボタン).toHaveAttribute('title', /起動中|作業中|状態が分からない/)
+  await expect(ボタン).toHaveAttribute('title', /起動中|作業中|状態が分からない|1ターンも会話/)
 })
 
 test('操作列は、枝分かれを足しても2行のまま', async ({ page }) => {

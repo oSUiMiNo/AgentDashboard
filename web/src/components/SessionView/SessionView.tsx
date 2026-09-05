@@ -56,7 +56,7 @@ import { useFilesPanel } from '@/lib/filesPanel'
 import { projectDisplayName } from '@/lib/path'
 import { backTargetFor, HOME, projectPath, sessionPath } from '@/lib/routes'
 import { hostOf } from '@/lib/reviveBudget'
-import type { CardId, SessionStatus } from '@/lib/protocol'
+import type { CardId, SessionMeta } from '@/lib/protocol'
 import { useNow } from '@/lib/sessions'
 import { useAuthStore } from '@/stores/auth'
 import {
@@ -162,7 +162,7 @@ export function SessionView({
   const reviveWhy = reviveReason(revivable)
   // **押せる条件はサーバが正**（ブランチ設計§3-4）だが、押せないものを押せる形で
   // 出さないために画面も同じ判定を持つ
-  const 枝分かれの可否 = 枝分かれできる理由(session.status)
+  const 枝分かれの可否 = 枝分かれできる理由(session)
   // **名前だけを出す**（設計§14-5）。同じ名前が複数あるときだけ番号が付く。
   // フルパスは `title` に残すので、確かめたいときは乗せれば読める
   const 名前 = projectDisplayName(session.project, projects)
@@ -766,8 +766,15 @@ function ScreenInterval({ remote, shown }: { remote: boolean; shown: boolean }) 
  *
  * 正はサーバ側（同設計§3-4）。ここで持つのは、押せないものを押せる形で出さないため。
  */
-function 枝分かれできる理由(status: SessionStatus): string | null {
-  switch (status.kind) {
+function 枝分かれできる理由(session: SessionMeta): string | null {
+  // **状態では見分けられない条件が1つある**（ブランチ設計§3-4）。まだ1ターンも会話して
+  // いない席は、CLI 自身が `No conversation to branch` と断る——起こした直後の席も
+  // 「入力待ち」なので、状態の手前でこちらを見る。
+  // **題（`session_title`）では見分けられない**（実測で `None` のままだった）
+  if (session.last_assistant_message === null) {
+    return 'まだ枝分かれできません（この席はまだ1ターンも会話していません）'
+  }
+  switch (session.status.kind) {
     case 'waiting_input':
     case 'waiting_subagents':
       return null

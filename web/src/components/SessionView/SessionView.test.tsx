@@ -524,18 +524,18 @@ describe('SessionView の操作列は、区画の真上', () => {
     無いべき側に無い）で対にして見る。
   */
   it('枝分かれは横並びにだけ出て、単独の画面には出ない', () => {
-    show(meta({ status: { kind: 'waiting_input' } }), true)
+    show(meta({ status: { kind: 'waiting_input' }, last_assistant_message: 'はい' }), true)
     const 横並び = screen.getByTestId('branch-card')
     expect(横並び.closest('[data-testid="session-ops"]')).not.toBeNull()
     cleanup()
 
-    show(meta({ status: { kind: 'waiting_input' } }))
+    show(meta({ status: { kind: 'waiting_input' }, last_assistant_message: 'はい' }))
     expect(screen.queryByTestId('branch-card')).toBeNull()
   })
 
   it('枝分かれを足しても、操作列は2行のまま', () => {
     // **罠2**（ブランチ設計§10-2）。段を折り返した瞬間に、行数を数えている4箇所が落ちる
-    show(meta({ status: { kind: 'waiting_input' } }), true)
+    show(meta({ status: { kind: 'waiting_input' }, last_assistant_message: 'はい' }), true)
     const ops = screen.getByTestId('session-ops')
     expect(ops.querySelectorAll('[data-row]')).toHaveLength(2)
     expect(screen.getByTestId('branch-card').closest('[data-row]')?.getAttribute('data-row')).toBe(
@@ -554,7 +554,7 @@ describe('SessionView の操作列は、区画の真上', () => {
       [{ kind: 'ended', ok: true }, '止まっている'],
     ]
     for (const [status, 一部] of 押せない) {
-      show(meta({ status }), true)
+      show(meta({ status, last_assistant_message: 'はい' }), true)
       const ボタン = screen.getByTestId('branch-card')
       expect(ボタン, `${status.kind} で押せてしまう`).toBeDisabled()
       expect(ボタン.getAttribute('title') ?? '').toContain(一部)
@@ -568,10 +568,19 @@ describe('SessionView の操作列は、区画の真上', () => {
       { kind: 'waiting_subagents' },
     ]
     for (const status of 押せる) {
-      show(meta({ status }), true)
+      show(meta({ status, last_assistant_message: 'はい' }), true)
       expect(screen.getByTestId('branch-card'), `${status.kind} で押せない`).toBeEnabled()
       cleanup()
     }
+  })
+
+  it('1ターンも会話していない席では押せず、理由が読める', () => {
+    // ブランチ設計§3-4。**状態では見分けられない**——起こした直後も「入力待ち」である。
+    // ここを通すと、CLI 側で `No conversation to branch` と断られて待ちが空振りする
+    show(meta({ status: { kind: 'waiting_input' }, last_assistant_message: null }), true)
+    const ボタン = screen.getByTestId('branch-card')
+    expect(ボタン).toBeDisabled()
+    expect(ボタン.getAttribute('title') ?? '').toContain('1ターンも会話していません')
   })
 
   it('枝であることは、名前ではなく札で分かる', () => {

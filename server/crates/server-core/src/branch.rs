@@ -39,14 +39,18 @@ use crate::session_host::{RecallRequest, SessionHost};
 
 /// 待ち①（`/branch` を撃ってから、席の CLI 側IDが張り替わるまで）の上限。
 ///
-/// **§3-4 で「指示を受け付けられる状態」に絞っている**ので、入力欄へ積まれて延びる
-/// ことは無い。ここを長く取ると、効かなかったときに黙って待ち続けることになる。
-const BRANCH_TIMEOUT: Duration = Duration::from_secs(60);
+/// **実測 387ms**（2026-09-05・本物の claude。設計§3-5）。`/branch` は指示ではなく
+/// 画面の操作として即座に効くので短い。**§3-4 で「指示を受け付けられる状態」に
+/// 絞っている**ので、入力欄へ積まれて延びることも無い。
+///
+/// 1回しか測っていないので、**実測の2桁上**に置いてある。ここを長く取りすぎると、
+/// 効かなかったときに黙って待ち続けることになる。
+const BRANCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 待ち②（呼び戻しを頼んでから、席が立って最初のフックが届くまで）の上限。
 ///
-/// **待ち①とは別の値にする。** こちらは claude の起動を含むので桁が違う。同じ値を
-/// 共有すると、どちらかが必ず不適切になる。
+/// **実測 20.3 秒**（同上）。claude の起動を含むので待ち①とは桁が違う——**同じ値を
+/// 共有すると、どちらかが必ず不適切になる**。実測の1桁上に置いてある。
 const RECALL_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// 記録層を直に確かめに行く間隔（取りこぼしの保険）。
@@ -132,6 +136,7 @@ impl Branch {
         })?;
 
         pushable(meta.status)?;
+        branchable(&meta)?;
 
         // **同じ会話を2つのプロセスに開かせない**（§4-1）。呼び戻す先が既に別の席で
         // 開いていると、1つの JSONL へ二重に書き込む形になる
@@ -300,6 +305,28 @@ impl Branch {
     }
 }
 
+/// 分かれる元の会話があるか（§3-4）。
+///
+/// **まだ1ターンも会話していない席は、CLI 自身が断る**——2026-09-05 に実機で確かめた。
+/// 画面には `Failed to branch conversation: No conversation to branch` と出て何も起きない。
+/// 起こした直後の席も「入力待ち」なので、**状態だけでは見分けられない**。
+///
+/// # なぜ `last_assistant_message` を見るのか
+///
+/// 同じ実測で、1ターン終えた席は `Some("はい")` を持ち、**`session_title` は `None` の
+/// ままだった**（CLI が題を付けるのはもっと後）。**題では見分けられない。**
+///
+/// # なぜ画面の文言を待たないのか
+///
+/// 断りの英文を読む形にすると、CLI の文言が変わった日に黙って壊れる。**送る前に、
+/// こちらの持っている記録で断る。**
+fn branchable(meta: &SessionMeta) -> Result<(), String> {
+    if meta.last_assistant_message.is_some() {
+        return Ok(());
+    }
+    Err("まだ枝分かれできません（この席はまだ1ターンも会話していません）".to_string())
+}
+
 /// 枝分かれを頼んでよい状態か（§3-4）。
 ///
 /// **`/branch` は指示として送られる**ので、claude が作業中なら入力欄に積まれ、
@@ -342,6 +369,43 @@ mod tests {
             let 断り = pushable(駄目).expect_err("断ること");
             assert!(!断り.is_empty(), "断る理由が空（{駄目:?}）");
         }
+    }
+
+    #[test]
+    fn 会話が無い席は断る() {
+        // §3-4。**状態では見分けられない**——起こした直後の席も「入力待ち」である
+        let mut meta = protocol::SessionMeta {
+            card_id: CardId::new(),
+            project: protocol::ProjectId("/p".to_string()),
+            claude_session_id: Some(ClaudeSessionId::new()),
+            permission_mode: None,
+            model: None,
+            model_label: None,
+            model_requested: None,
+            status: SessionStatus::WaitingInput,
+            subagent_active: 0,
+            last_activity_at: 0,
+            last_assistant_message: None,
+            created_at: 0,
+            hooks_seen: true,
+            agent_id: None,
+            agent_connected: true,
+            account: None,
+            toml_account: None,
+            session_title: None,
+            position: 0,
+            nickname: None,
+            branched_from: None,
+        };
+        let 断り = branchable(&meta).expect_err("会話が無ければ断ること");
+        assert!(断り.contains("会話"), "理由が読めない: {断り}");
+
+        // **題では見分けられない**（実測で `None` のままだった）ので、題を入れても断る
+        meta.session_title = Some("それらしい題".to_string());
+        assert!(branchable(&meta).is_err(), "題で通してはいけない");
+
+        meta.last_assistant_message = Some("はい".to_string());
+        branchable(&meta).expect("1ターン終えていれば通ること");
     }
 
     #[test]

@@ -3046,14 +3046,38 @@ async fn branchは席を枝にしてIDだけを張り替える() {
     let 元の履歴 = session.transcript_path();
     println!("【実測】元のID={元のID} 元のカード={元のカード}");
 
-    // **撃つ前に控える。** 段取り役も同じ順で控える（設計§3-2 の①）
-    watcher.drain_quiet_for(Duration::from_millis(500)).await;
-    let 撃った時刻 = Instant::now();
+    // **先に1ターン会話する。** 起こした直後の席は `/branch` を断られる——
+    // 本物の CLI が `Failed to branch conversation: No conversation to branch` と返す
+    // （2026-09-05 に実測）。枝分かれできるのは、分かれる元の会話がある席だけである
     session
-        .write_input(b"/branch\r")
-        .expect("端末へ書き込めること");
+        .send_instruction_with("「はい」とだけ答えて。他には何も書かないで。", &[])
+        .await
+        .expect("指示を送れること");
+    wait_for_status(&session, SessionStatus::Working).await;
+    wait_for_status(&session, SessionStatus::WaitingInput).await;
+    println!(
+        "【実測】1ターン終えた。直前の応答={:?} 題={:?}",
+        session.meta().last_assistant_message,
+        session.meta().session_title
+    );
 
-    // 待ち①：席の CLI 側IDが別物へ張り替わる
+    // **撃つ前に控える。** 段取り役も同じ順で控える（設計§3-2 の①）
+    watcher.drain_quiet_for(Duration::from_secs(2)).await;
+    let 撃った時刻 = Instant::now();
+    // **製品と同じ経路で撃つ。** 生の `write_input("/branch\r")` では届かない——
+    // 本物の TUI は1回の書き込みに入った末尾の CR を貼り付けごと飲み込み、
+    // **文字は入力欄に残り、エラーも出ないまま何も起きない**（`session/input.rs` の
+    // 実測。入力行を消す → bracketed paste で包む → 確定の CR は別の書き込み、の3段）。
+    // 段取り役が使うのも `SessionHost::send_input` ＝この道である
+    session
+        .send_instruction_with("/branch", &[])
+        .await
+        .expect("指示を送れること");
+
+    // 待ち①：席の CLI 側IDが別物へ張り替わる。
+    //
+    // **待ちながら端末も汲む。** 汲まないと `seen()` が送信前のまま止まり、落ちたときに
+    // 「`/branch` がそもそも実行されたのか」を見分けられない（1度これで空振りした）
     let deadline = Instant::now() + CLI_TIMEOUT;
     let 枝のID = loop {
         let now = session.meta().claude_session_id;
@@ -3062,14 +3086,23 @@ async fn branchは席を枝にしてIDだけを張り替える() {
         {
             break id;
         }
-        assert!(
-            Instant::now() < deadline,
-            "{CLI_TIMEOUT:?} 以内に CLI 側のIDが張り替わりませんでした。\
-             `/branch` が効いていないか、押した席が枝にならない作りに変わっています。\
-             画面に出ていたもの: {}",
-            watcher.seen()
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        if Instant::now() >= deadline {
+            let 画面 = watcher.seen();
+            let 末尾: String = 画面
+                .chars()
+                .rev()
+                .take(1500)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            panic!(
+                "{CLI_TIMEOUT:?} 以内に CLI 側のIDが張り替わりませんでした。\
+                 `/branch` が効いていないか、押した席が枝にならない作りに変わっています。\
+                 画面の末尾:\n{末尾}"
+            );
+        }
+        watcher.drain_quiet_for(Duration::from_millis(200)).await;
     };
     let 待ち1 = 撃った時刻.elapsed();
 
