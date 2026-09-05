@@ -306,7 +306,6 @@ enum SessionCmd {
         #[command(flatten)]
         out: OutputArgs,
     },
-    /// セッションを終了する（終了の知らせまで待つ）
     /// **会話を枝分かれさせ、元の会話を隣の席へ呼び戻す**（ブランチ設計§8-1）。
     ///
     /// 押した席がそのまま枝になり、元の会話は**新しい席**へ戻ってくる。
@@ -317,6 +316,7 @@ enum SessionCmd {
         #[command(flatten)]
         out: OutputArgs,
     },
+    /// セッションを終了する（終了の知らせまで待つ）
     Kill {
         /// カードID。先頭の数文字で足りる
         id: String,
