@@ -20,6 +20,7 @@ import { Button } from '@/components/ui/button'
 import { GearGlyph } from '@/components/ui/glyphs'
 import { ToastLayer } from '@/components/ToastLayer/ToastLayer'
 import { AppNoticeBell } from '@/components/AppNoticeBell/AppNoticeBell'
+import { LanAddressButton } from '@/components/LanAddress/LanAddressButton'
 import { loadServerNotices } from '@/lib/notices'
 import { AccountPage } from '@/components/Account/AccountPage'
 import { AuthGate } from '@/components/Auth/AuthGate'
@@ -36,6 +37,7 @@ import { projectDisplayName } from '@/lib/path'
 import { connectionDot } from '@/lib/protocol'
 import { ACCOUNT, HOME, LOCAL_HOST, SETTINGS } from '@/lib/routes'
 import { canEnter, useAuthStore } from '@/stores/auth'
+import { useLanAddressStore } from '@/stores/lanAddress'
 import { useProjects } from '@/stores/projects'
 import { useSessionCard } from '@/stores/sessions'
 import { useSettingsStore } from '@/stores/settings'
@@ -89,6 +91,7 @@ function Shell() {
   const busDetail = useWsStore((state) => state.busDetail)
   const connect = useWsStore((state) => state.connect)
   const loadSettings = useSettingsStore((state) => state.load)
+  const loadLanAddress = useLanAddressStore((state) => state.load)
   const auth = useAuthStore((state) => state.auth)
   const authLoading = useAuthStore((state) => state.loading)
   const loadAuth = useAuthStore((state) => state.load)
@@ -110,7 +113,12 @@ function Shell() {
     // **開いたときに全体を取り、以後は差分だけを見る**（トーストとベル設計§6-1）。
     // ここで取らないと、ベルは「このタブが開いてから起きたこと」しか持てない
     void loadServerNotices()
-  }, [entered, connect, loadSettings])
+    // **押される前に取り終えておく**（`LAN内端末から開くアドレス` 設計§2）。
+    // 押してから聞きに行くと通信が `await` を跨ぐので、平文 HTTP で開いている
+    // 端末では**クリップボードへ入らなくなる**。WSL では数秒かかるので、なおさら
+    // ここで取っておく
+    void loadLanAddress()
+  }, [entered, connect, loadSettings, loadLanAddress])
 
   return (
     <main
@@ -182,6 +190,14 @@ function Shell() {
                 （`DESIGN.md` §39.2「置き場所は効く相手で決まる」）。
               */}
               <AppNoticeBell />
+              {/*
+                LAN の別端末から開けるアドレス（`LAN内端末から開くアドレスを、押すだけで
+                手に入るようにする` 設計§8-1）。**歯車の左**——上のベルが予告していた席。
+
+                **この部品に幅も余白も与えない。** 置き場所を暫定と決めているので、
+                動かす日に触るのがこの1行と部品だけで済むようにしてある（設計§1）。
+              */}
+              <LanAddressButton />
               {/*
                 **歯車にする**（設計§9-2）。**絵文字（`⚙️`）は使わない**——
                 `DESIGN.md` §14.4 が禁止例に名指しで挙げている。隣の「アカウント」は

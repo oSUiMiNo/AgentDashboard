@@ -178,6 +178,29 @@ describe('App', () => {
     expect(点?.className).toMatch(/bg-(cyan|amber|rose)-400/)
   })
 
+  it('LAN のアドレスのボタンが、歯車の直前に出る', async () => {
+    /*
+      **置き場所は歯車の左**（`LAN内端末から開くアドレス` 設計§8-1）。並びは
+      `アカウント → ベル → LAN のアドレス → 歯車`。
+
+      **行番号ではなく並びで見張る。** ここは複数のセッションが同時に触る場所なので、
+      「何行目に書いてあるか」は着手する頃には動いている——**隣り合わせであることが
+      要件**なので、それをそのまま確かめる。
+    */
+    useAuthStore.setState({
+      auth: { ...useAuthStore.getState().auth, authenticated: true },
+      loading: false,
+    })
+    render(<App />)
+
+    const ボタン = await screen.findByTestId('lan-address-copy')
+    const 歯車 = await screen.findByTestId('settings-link')
+    // **同じ群（`ml-auto` の中）に居て、ボタンが先**であること
+    expect(
+      ボタン.compareDocumentPosition(歯車) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+  })
+
   it('自己修復の進行が段階つきでトーストに出る', () => {
     // 「勝手に直った」を黙って起こさないための表示（設計§9）。
     // **帯からトーストへ移った**（トーストとベル設計§2）——場所を押しのけずに出る
