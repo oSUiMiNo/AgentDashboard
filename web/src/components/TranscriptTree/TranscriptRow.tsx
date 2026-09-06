@@ -574,7 +574,15 @@ function ImageBody({
     <img
       src={url}
       alt={node.file_name ?? '添付した画像'}
-      className="mt-1 ml-6 max-h-96 max-w-full rounded border border-border object-contain"
+      // **`max-w-full` では 24px はみ出す。** `max-width: 100%` が測るのは
+      // **入れ物の幅**で、`ml-6` で右へずらしたぶんは引かれない——画素で確かめると、
+      // 幅は入れ物ちょうど（850px）なのに右端だけが 24px 外へ出て、
+      // **構造化ビューに横スクロールバーが立つ**（利用者の実機報告・2026-09-06）。
+      // 隣の `<p>` が平気なのは、あちらが block で「余った幅」に収まるため。
+      // **置いた寄せ幅と、引く幅は同じ 1.5rem。** 片方だけ変えると、また出る
+      // **`_` は空白になる。** `calc()` は `-` の前後に空白が要るので、
+      // 詰めて書くと **CSS ごと無効**になり、直したつもりで 24px のまま出る（実測）
+      className="mt-1 ml-6 max-h-96 max-w-[calc(100%_-_1.5rem)] rounded border border-border object-contain"
     />
   )
 }
