@@ -523,10 +523,11 @@ test('枝分かれは、リモート経路でも通って札が届く', async ({
 
   // 段取りが終わると区画が2つになる（枝＋呼び戻した元）
   await expect(page.getByTestId('session-view')).toHaveCount(2, { timeout: 60_000 })
+  // **元がその場に残り、枝がその1つ右隣**（§3-3）
   const 並び = page.getByTestId('session-view')
-  await expect(並び.nth(0)).toHaveAttribute('data-card-id', cardId ?? '')
+  await expect(並び.nth(1)).toHaveAttribute('data-card-id', cardId ?? '')
 
   // **札が出れば、欄が A2S を渡って届いている。** 出なければ運び忘れである
-  await expect(並び.nth(0).getByTestId('branch-badge')).toBeVisible()
-  await expect(並び.nth(1).getByTestId('branch-badge')).toHaveCount(0)
+  await expect(並び.nth(1).getByTestId('branch-badge')).toBeVisible()
+  await expect(並び.nth(0).getByTestId('branch-badge')).toHaveCount(0)
 })

@@ -13,7 +13,7 @@ import {
  * 枝分かれ（ブランチ設計§7。テスト計画フェーズ5）。
  *
  * **実物のブラウザでしか見られないものに絞る。** jsdom は配置も色の解決もしないので、
- * 「PJT 専用画面にだけ出る」「押している間は押せない」「枝が元の左隣に並ぶ」は
+ * 「PJT 専用画面にだけ出る」「押している間は押せない」「元がその場に残り枝が右隣へ入る」は
  * ここでしか通しで確かめられない。
  *
  * 相手は擬似 claude なので課金しない。**擬似は `/branch` を教えてある**（フェーズ1）
@@ -44,8 +44,15 @@ test.afterEach(async ({ page }) => {
   await archiveAll(page)
 })
 
-test('横並びから押すと、枝が元の左隣に並ぶ', async ({ page }) => {
+test('横並びから押すと、元はその場に残り枝が右隣へ入る', async ({ page }) => {
+  /*
+    **枠に2枚居る状態で確かめる。** 1枚しか無いと**どこへ置いても隣り合う**ので、
+    位置のずれが露出しない——実際、その形で緑のまま出したものが実機で外れた
+    （2026-09-06。2枚とも右端へ動き、左右も逆だった）。
+  */
   await openDashboard(page)
+  const 先客 = await spawnSession(page)
+  const 先客Id = await 先客.getAttribute('data-card-id')
   const tile = await spawnSession(page)
   const cardId = await tile.getAttribute('data-card-id')
   const 枠 = await 枠を控える(page)
@@ -57,25 +64,30 @@ test('横並びから押すと、枝が元の左隣に並ぶ', async ({ page }) 
   await fireHook(page, 'Stop', '{"last_assistant_message":"はい"}')
 
   await PJT専用画面へ(page, 枠)
-  const ボタン = page.getByTestId('branch-card')
+  const ボタン = page.getByTestId('branch-card').nth(1)
   await expect(ボタン).toBeVisible()
   await expect(ボタン).toBeEnabled({ timeout: 30_000 })
   await ボタン.click()
 
-  // 段取りが終わると区画が2つになる（枝＋呼び戻した元）
-  await expect(page.getByTestId('session-view')).toHaveCount(2, { timeout: 60_000 })
+  // 段取りが終わると区画が3つになる（先客＋枝＋呼び戻した元）
+  await expect(page.getByTestId('session-view')).toHaveCount(3, { timeout: 60_000 })
 
-  // **左が枝、右が元。** 並べ替えまで済んで初めてこの順になる（§3-3）
+  /*
+    **先客・元・枝の順。** 押した席はその場（先客の右）に残り、**枝はその1つ右隣**へ
+    入る（§3-3）。**呼び戻した席を基準にしない**——あれは新しいカードなので枠の末尾に
+    付き、そこを基準にすると2枚とも右端へ動く。
+  */
   const 並び = page.getByTestId('session-view')
-  await expect(並び.nth(0)).toHaveAttribute('data-card-id', cardId ?? '')
+  await expect(並び.nth(0)).toHaveAttribute('data-card-id', 先客Id ?? '')
+  await expect(並び.nth(2)).toHaveAttribute('data-card-id', cardId ?? '')
 
   // 枝の側にだけ札が出る（§7-5）
-  await expect(並び.nth(0).getByTestId('branch-badge')).toBeVisible()
+  await expect(並び.nth(2).getByTestId('branch-badge')).toBeVisible()
   await expect(並び.nth(1).getByTestId('branch-badge')).toHaveCount(0)
 })
 
 test('セッション専用画面には出ない', async ({ page }) => {
-  // §7-1。あちらには「左隣」が無いので、押しても置き先が無い
+  // §7-1。あちらには「右隣」が無いので、押しても置き先が無い
   await openDashboard(page)
   const tile = await spawnSession(page)
   await openSession(page, tile)

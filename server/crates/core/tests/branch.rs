@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! 押す → /branch が飛ぶ → 席の CLI 側IDが張り替わる（＝枝）
-//!      → 元の会話が別の席へ呼び戻る → 枝が元の左隣へ並ぶ
+//!      → 元の会話が別の席へ呼び戻る → 元がその場に残り、枝がその1つ右隣へ入る
 //! ```
 //!
 //! **通しの1本では競合が出ない**ので、断る側（§3-4・§4-1）は行ごとに1本ずつ当てる。
@@ -51,23 +51,48 @@ fn target_of(server: &TestServer) -> client::Target {
     client::Target::from_url(&format!("http://{}", server.addr)).expect("接続先を読めること")
 }
 
-/// 枝分かれを頼める状態のカードを1枚作り、`(カードID, 元の会話)` を返す。
+/// その枠へ1枚起こし、**増えたカード**のIDを返す。
 ///
-/// **`hook Stop` まで撃つ**。起こしただけでは `Starting` のままで、§3-4 の門に弾かれる。
-async fn 入力待ちのカード(
+/// **枚数を決め打ちしない。** 並びを確かめるテストは同じ枠へ複数枚起こすので、
+/// 「1枚載るまで待って `[0]` を取る」形にすると2枚目以降で前の札を掴む。
+async fn 席を1枚起こす(
     server: &TestServer,
     target: &client::Target,
-) -> (String, ClaudeSessionId) {
-    let cwd = work_dir("seed");
+    cwd: &std::path::Path,
+) -> String {
+    let 起こす前: std::collections::HashSet<String> = server
+        .registry
+        .list(server_core::db::LOCAL_ACCOUNT_ID)
+        .into_iter()
+        .map(|meta| meta.card_id.to_string())
+        .collect();
+
     client::spawn(target, &cwd.to_string_lossy(), None, None)
         .await
         .expect("起こせること");
 
     // 記録に載るまで待つ（載る前に前方一致で引くと「見つかりません」になる）
     let 載った = server
-        .wait_for_listed("カードが1枚載る", |list| list.len() == 1)
+        .wait_for_listed("カードが1枚増える", |list| {
+            list.len() == 起こす前.len() + 1
+        })
         .await;
-    let card = 載った[0].card_id.to_string();
+    載った
+        .iter()
+        .map(|meta| meta.card_id.to_string())
+        .find(|id| !起こす前.contains(id))
+        .expect("増えた1枚が見つかること")
+}
+
+/// 枝分かれを頼める状態のカードを1枚作り、`(カードID, 元の会話)` を返す。
+///
+/// **`hook Stop` まで撃つ**。起こしただけでは `Starting` のままで、§3-4 の門に弾かれる。
+async fn 入力待ちのカード(
+    server: &TestServer,
+    target: &client::Target,
+    cwd: &std::path::Path,
+) -> (String, ClaudeSessionId) {
+    let card = 席を1枚起こす(server, target, cwd).await;
 
     // 擬似 claude にフックを撃たせて入力待ちへ倒す。
     //
@@ -88,19 +113,26 @@ async fn 入力待ちのカード(
     .await
     .expect("指示を送れること");
 
+    // **見るのは「そのカード」**。同じ枠に他の席が居ると、`any` では隣の席の準備が
+    // 整っただけで通ってしまう
+    let 目当て = card.clone();
     let 揃った = server
         .wait_for_listed(
             "入力待ちになり、CLI 側のIDと直前の応答が載る",
-            |list| {
+            move |list| {
                 list.iter().any(|meta| {
-                    meta.claude_session_id.is_some()
+                    meta.card_id.to_string() == 目当て
+                        && meta.claude_session_id.is_some()
                         && meta.status == SessionStatus::WaitingInput
                         && meta.last_assistant_message.is_some()
                 })
             },
         )
         .await;
-    let 元の会話 = 揃った[0]
+    let 元の会話 = 揃った
+        .iter()
+        .find(|meta| meta.card_id.to_string() == card)
+        .expect("そのカードが記録に居ること")
         .claude_session_id
         .expect("CLI 側のIDが載っていること");
     (card, 元の会話)
@@ -130,17 +162,46 @@ fn 並び(list: &[SessionMeta]) -> Vec<protocol::CardId> {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn 押すと枝ができ元が左隣へ戻る() {
+async fn 押すと元はその場に残り枝が右隣へ入る() {
     let server = TestServer::start().await;
     let target = target_of(&server);
-    let (card, 元の会話) = 入力待ちのカード(&server, &target).await;
+    let cwd = work_dir("seed");
+
+    // **枠に2枚居る状態で確かめる。**
+    //
+    // 1枚しか無いと、**どこへ置いても2枚が隣り合う**ので位置のずれが露出しない。
+    // 実際、この形で緑のまま出したものが実機で外れた（2026-09-06）——呼び戻した席は
+    // 新しいカードなので枠の末尾に付き、そこを基準に並べていたため**2枚とも右端へ
+    // 移動し、しかも左右が逆**になっていた。
+    //
+    // **先に1枚起こして、枝分かれする席を先頭以外へ置く。** 先頭に置くと「いつも先頭へ
+    // 寄せる」実装でも通ってしまい、席を基準にしていることを確かめられない。
+    let 先客 = 席を1枚起こす(&server, &target, &cwd).await;
+    let (card, 元の会話) = 入力待ちのカード(&server, &target, &cwd).await;
 
     client::branch(&target, &card[..8])
         .await
         .expect("枝分かれできること");
 
+    // **枚数だけで待たない。**
+    //
+    // `client::branch` は「新しいカードが立った」時点で返る（`Goal::NewCard`）ので、
+    // **⑧の並べ替えはまだ走っていない**。枚数だけを見て並びを読むと、いつも
+    // 「並べ替える前の並び」を掴む——**それでも1枚構成では期待した並びと一致してしまう**
+    // ので、この土台では並びを1度も確かめていないのと同じだった（2026-09-06 に判明）。
+    let 先客文字 = 先客.clone();
+    let 押した文字 = card.clone();
     let list = server
-        .wait_for_listed("カードが2枚になる", |list| list.len() == 2)
+        .wait_for_listed(
+            "並べ替えまで済み、先客 → 元 → 枝 になる",
+            move |list| {
+                if list.len() != 3 {
+                    return false;
+                }
+                let 並 = 並び(list);
+                並[0].to_string() == 先客文字 && 並[2].to_string() == 押した文字
+            },
+        )
         .await;
 
     let 押した席 = list
@@ -149,7 +210,7 @@ async fn 押すと枝ができ元が左隣へ戻る() {
         .expect("押した席が残っていること");
     let 戻った席 = list
         .iter()
-        .find(|meta| meta.card_id.to_string() != card)
+        .find(|meta| meta.card_id.to_string() != card && meta.card_id.to_string() != 先客)
         .expect("呼び戻した席が増えていること");
 
     // 押した席は**枝になった**（IDが張り替わった）
@@ -175,11 +236,18 @@ async fn 押すと枝ができ元が左隣へ戻る() {
         "元の側に印が付いてしまっている"
     );
 
-    // **枝が元のすぐ左**（§3-3）
+    // **元がその場に残り、枝がその1つ右隣**（§3-3）。
+    //
+    // 先客は動かない——**枝を1枚差し込んだぶんだけ右へずれる**が、順番は変わらない
+    let 先客のID = list
+        .iter()
+        .find(|meta| meta.card_id.to_string() == 先客)
+        .expect("先客が残っていること")
+        .card_id;
     assert_eq!(
         並び(&list),
-        vec![押した席.card_id, 戻った席.card_id],
-        "枝が元の左隣に並んでいない"
+        vec![先客のID, 戻った席.card_id, 押した席.card_id],
+        "元がその場に残って枝が右隣、という並びになっていない"
     );
 }
 
@@ -188,7 +256,7 @@ async fn 枝の印は乗り換えても消えない() {
     // 印が付くのは**カードではなく会話**（§5-1）。記録を読み直しても残る
     let server = TestServer::start().await;
     let target = target_of(&server);
-    let (card, 元の会話) = 入力待ちのカード(&server, &target).await;
+    let (card, 元の会話) = 入力待ちのカード(&server, &target, &work_dir("seed")).await;
 
     client::branch(&target, &card[..8])
         .await
@@ -284,7 +352,7 @@ async fn 二度押しは断る() {
     // §4-1。1本目が走っている間に2本目を通すと、枝が2つできる
     let server = TestServer::start().await;
     let target = target_of(&server);
-    let (card, _) = 入力待ちのカード(&server, &target).await;
+    let (card, _) = 入力待ちのカード(&server, &target, &work_dir("seed")).await;
 
     let 押した = 引く(&server, &card).card_id;
     枝分かれを頼む(&target, 押した).await;
