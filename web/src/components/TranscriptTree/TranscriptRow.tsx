@@ -617,7 +617,7 @@ function RowBody({
           row={row}
           inset={false}
           shell={node.kind === 'assistant_text' ? 'panel' : 'bubble'}
-          // **エラーは赤い字にする**（利用者の指定。設計§13-2）。色は `DESIGN.md` §11.2 の
+          // **エラーは赤い字にする**（利用者の指定。設計§14-2）。色は `DESIGN.md` §11.2 の
           // Negative で、**この画面で既にエラーへ当てている `text-red-400` をそのまま使う**
           // （ツールコールの失敗・差分の削除行と同じ）。新しい色を増やさない
           tone={isApiError(node) ? 'text-red-400 font-medium' : 'text-foreground font-medium'}
@@ -698,7 +698,7 @@ function MarkdownBody({
   /** 主従を付けるウェイトと明度（設計§5-3） */
   tone: string
   /**
-   * API のエラーとして書かれた本文か（設計§13-2）。**器へ地を持たせるかを決める。**
+   * API のエラーとして書かれた本文か（設計§14-2）。**器へ地を持たせるかを決める。**
    *
    * **`tone` と別に渡すのは、字と器で効き先が違うから**である。字は `tone` が、
    * 器はこちらが決める——1つにまとめると、器を持たない `shell='none'` の行にも
@@ -736,7 +736,7 @@ function MarkdownBody({
   const queued = row?.node.kind === 'queued_message'
   const queuedClass = queued ? ' speech-bubble-queued' : ''
 
-  // 読まれる前に取り消された発言（設計§14）。**地は「待ち」と同じ**——どちらも
+  // 読まれる前に取り消された発言（設計§15）。**地は「待ち」と同じ**——どちらも
   // 「claude に読まれていない」の一言で説明できる状態なので、`DESIGN.md` §11.2 の
   // 判定に従って同じ色にする。**分けるのは形（打ち消し線）のほう**
   const cancelled = row != null && isCancelled(row.node)
@@ -870,7 +870,7 @@ function MarkdownBody({
     // アシスタントの器。**吹き出しより弱い地**にして、誰の発言かをシルエットで
     // 読み分ける仕掛け（設計§5-3）を壊さない
     //
-    // **エラーのときだけ地を持たせる**（設計§13-2）。この器は普段 `--shell-ground` が
+    // **エラーのときだけ地を持たせる**（設計§14-2）。この器は普段 `--shell-ground` が
     // 透明で、字だけが地の上に浮いている——**赤い字にするだけでは「もう少し目立たせて」に
     // 届かない**ので、器を1段だけ見えるようにする
     return (

@@ -757,7 +757,7 @@ pub enum Node {
         /// 「これはコマンドである」ことと展開の有無は、字面からではなくここで分かる。
         #[serde(default)]
         command: Option<SlashCommand>,
-        /// **読まれる前に取り消されたか**（設計§14）。
+        /// **読まれる前に取り消されたか**（設計§15）。
         ///
         /// 送ったが、アシスタントが返し始める前に人が止めた発言である。合図は
         /// **後続の中断マーカーが `interruptedMessageId` を持たないこと**——
@@ -774,7 +774,7 @@ pub enum Node {
     AssistantText {
         text: String,
         /// **この本文が API のエラーとして書かれたものか**
-        /// （`人が打っていないものを、人の発言として出さない` 設計§13）。
+        /// （`人が打っていないものを、人の発言として出さない` 設計§14）。
         ///
         /// **記録が自分で名乗った印（`isApiErrorMessage`）だけを立てる。** 字面で
         /// 見分けようとすると、`No response requested.` のような**エラーでない
@@ -1242,7 +1242,7 @@ mod tests {
         assert_eq!(text, "前の版で書いた発言");
     }
 
-    /// エラーの印を足す前の版が書いた `assistant_text` の行（設計§13-1）。
+    /// エラーの印を足す前の版が書いた `assistant_text` の行（設計§14-1）。
     const エラーの欄が無い古い行: &str = r#"{"kind":"assistant_text","text":"Request timed out"}"#;
 
     #[test]

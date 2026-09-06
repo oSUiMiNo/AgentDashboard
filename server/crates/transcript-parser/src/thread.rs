@@ -151,7 +151,7 @@ struct FileState {
     /// ——**存在しない `uuid` は参照できないので、展開が本体より先に来ることは原理的に無い。**
     /// `[本体1][展開1][本体2][展開2]` の並びも、枠1つで正しく捌ける。
     pending_command: Option<(String, TreeNode)>,
-    /// 直前に出した**人の発言**（設計§14）。読まれる前に取り消されたときだけ使う。
+    /// 直前に出した**人の発言**（設計§15）。読まれる前に取り消されたときだけ使う。
     ///
     /// # なぜ覚えるのか
     ///
@@ -400,7 +400,7 @@ impl SessionThreader {
         Some(node)
     }
 
-    /// 読まれる前に取り消された発言へ、印を付けて**同じ ID で送り直す**（設計§14）。
+    /// 読まれる前に取り消された発言へ、印を付けて**同じ ID で送り直す**（設計§15）。
     ///
     /// # 合図は3つ揃ったときだけ
     ///
@@ -447,7 +447,7 @@ impl SessionThreader {
         // 誰が入れたか（`人が打っていないものを、人の発言として出さない` 設計§1）。
         // **レコードにつき1回だけ決める**——1レコードの中の複数ブロックは同じ出どころ
         let origin = crate::origin::message_origin(record);
-        // API のエラーとして書かれたか（設計§13）。**こちらもレコードにつき1回**
+        // API のエラーとして書かれたか（設計§14）。**こちらもレコードにつき1回**
         // ——印はレコードに付くので、中のブロックが何本あっても答えは同じ
         let api_error = record.is_api_error();
         let uuid = record.uuid.clone().unwrap_or_else(|| self.synthetic_id());
@@ -513,7 +513,7 @@ impl SessionThreader {
                         continue;
                     }
                     // 読まれる前に取り消されたなら、**取り消された発言に印を付けて
-                    // 送り直す**（設計§14）。マーカー自身はこのあと普通に出す
+                    // 送り直す**（設計§15）。マーカー自身はこのあと普通に出す
                     // ——**記録は捨てない**（ガイドライン「「表示しない」と「捨てる」は別」）
                     if let Some(node) = self.mark_cancelled(source, record, &origin) {
                         emitted.push(node);
@@ -538,7 +538,7 @@ impl SessionThreader {
                         ts,
                         branch,
                     };
-                    // **人が打った発言だけを1枠覚える**（設計§14）。読まれる前に止められた
+                    // **人が打った発言だけを1枠覚える**（設計§15）。読まれる前に止められた
                     // ときに、この枠から取り出して**同じ ID で送り直す**
                     if origin == protocol::MessageOrigin::Human {
                         self.file(source).pending_human =
