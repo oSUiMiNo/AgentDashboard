@@ -56,6 +56,13 @@ const RECALL_TIMEOUT: Duration = Duration::from_secs(180);
 /// 記録層を直に確かめに行く間隔（取りこぼしの保険）。
 const POLL: Duration = Duration::from_millis(200);
 
+/// 呼び戻した席が**枠に載る**（帰属と並びが決まる）のを待つ上限。
+///
+/// 待ち②は配信の1通で明けるが、**枠へ載るのはその後になることがある**。載る前に
+/// 並べ替えると記録の側が「知らないカード」として断り、**席はあるのに並びだけが
+/// 直らない**——2026-09-06 に A2S 越しで踏んだ形がこれである。
+const FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// いま枝分かれの段取りが走っているカード（二度押しの門）。
 ///
 /// **状態を持つのはここだけ。** 段取りは接続に紐づかないので、接続ごとの入れ物には
@@ -263,7 +270,12 @@ impl Branch {
         }
     }
 
-    /// 枝を元の席のすぐ左へ置く。
+    /// 元をその席へ戻し、枝をその**1つ右隣**へ置く（§3-3）。
+    ///
+    /// **基準にするのは「押した席」であって、呼び戻した席ではない。**
+    /// 呼び戻した席は**新しいカードなので必ず枠の末尾に付く**——そちらを基準にすると、
+    /// **2枚とも右端へ移動してしまう**（2026-09-06 に実機で踏んだ）。押した席は
+    /// 動いていないので、そこが「元居た場所」である。
     ///
     /// **枠の全カードを渡す**（差分ではない）。渡さなかったカードは末尾へ回るので、
     /// 一部だけ渡すと関係のないカードの並びが崩れる。
@@ -273,23 +285,39 @@ impl Branch {
         let agent_id: Option<AgentId> = 枝のmeta.agent_id;
         let project = 枝のmeta.project.0.clone();
 
-        let mut 枠: Vec<SessionMeta> = self
-            .registry
-            .list(self.account_id)
-            .into_iter()
-            .filter(|meta| meta.agent_id == agent_id && meta.project.0 == project)
-            .collect();
+        // **呼び戻した席が枠に載るまで待つ**（`FRAME_TIMEOUT` の説明を参照）
+        let 期限 = tokio::time::Instant::now() + FRAME_TIMEOUT;
+        let mut 枠 = loop {
+            let 枠: Vec<SessionMeta> = self
+                .registry
+                .list(self.account_id)
+                .into_iter()
+                .filter(|meta| meta.agent_id == agent_id && meta.project.0 == project)
+                .collect();
+            if 枠.iter().any(|meta| meta.card_id == 元のカード) {
+                break 枠;
+            }
+            if tokio::time::Instant::now() >= 期限 {
+                return Err(
+                    "枝は作れましたが、並べ直せませんでした（呼び戻した席が枠に載りません）"
+                        .to_string(),
+                );
+            }
+            tokio::time::sleep(POLL).await;
+        };
         枠.sort_by_key(|meta| meta.position);
 
         let mut 並び: Vec<CardId> = 枠.iter().map(|meta| meta.card_id).collect();
-        並び.retain(|id| *id != self.card_id);
-        let 置く場所 = 並び
+        // 呼び戻した席をいったん外す（末尾に付いている）。**残った並びの中で押した席が
+        // 居る場所が、元の席**——枝はいまそこに座っている
+        並び.retain(|id| *id != 元のカード);
+        let 席 = 並び
             .iter()
-            .position(|id| *id == 元のカード)
-            .ok_or_else(|| {
-                "並べ直せませんでした（呼び戻した席が枠に見つかりません）".to_string()
-            })?;
-        並び.insert(置く場所, self.card_id);
+            .position(|id| *id == self.card_id)
+            .ok_or_else(|| "並べ直せませんでした（押した席が枠に見つかりません）".to_string())?;
+        // その席へ元を戻し、枝は1つ右隣へずらす
+        並び[席] = 元のカード;
+        並び.insert(席 + 1, self.card_id);
 
         match self
             .registry
