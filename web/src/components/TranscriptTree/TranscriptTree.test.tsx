@@ -961,3 +961,45 @@ describe('誰が入れたか', () => {
     expect(row.getByTestId('row-body').textContent).toContain('ただの指示')
   })
 })
+
+/**
+ * API のエラーを赤く出す（設計§13-2）。
+ *
+ * **この組でいちばん大事なのは2本目**——`No response requested.` は印を持たない
+ * ただの短い返事で、`Request timed out` と**画面上まったく同じ姿**で並ぶ。
+ * 本文の字面で判定する実装に変えると、ここだけが落ちる。
+ */
+describe('APIのエラーを赤く出す', () => {
+  async function 描く(inner: Node) {
+    appendNodes(CARD, [node('a1', null, inner)])
+    renderTree()
+    await waitForRows(1)
+    return rowByKind('assistant_text')
+  }
+
+  it('記録が名乗ったエラーは、赤い字と地で出る', async () => {
+    const row = await 描く({ kind: 'assistant_text', text: 'Request timed out', error: true })
+    // 字は赤（この画面が既にエラーへ当てている色）
+    expect(row.querySelector('.text-red-400')).not.toBeNull()
+    // **地も1枚持つ。** 赤い字だけでは「もう少し目立たせて」に届かない
+    expect(row.querySelector('.body-shell-error')).not.toBeNull()
+  })
+
+  it('印を持たない短い返事は、赤くならない', async () => {
+    // **落とせない1本。** `Request timed out` と見た目が同じで、違うのは欄だけである
+    const row = await 描く({
+      kind: 'assistant_text',
+      text: 'No response requested.',
+      error: false,
+    })
+    expect(row.querySelector('.text-red-400')).toBeNull()
+    expect(row.querySelector('.body-shell-error')).toBeNull()
+  })
+
+  it('エラーらしい字でも、印が無ければ赤くならない', async () => {
+    // 利用者が同じ字を引用しただけのものを赤くしない（設計§1-4 と同じ形）
+    const row = await 描く({ kind: 'assistant_text', text: 'API Error: 529 Overloaded' })
+    expect(row.querySelector('.text-red-400')).toBeNull()
+    expect(row.querySelector('.body-shell-error')).toBeNull()
+  })
+})
