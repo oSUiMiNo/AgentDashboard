@@ -232,6 +232,14 @@ impl SessionRecord {
         self.window.lock().expect("ロックが壊れていない").snapshot()
     }
 
+    /// 分かれる元の会話を持っているか（ブランチ設計§3-4）。
+    ///
+    /// **数えるだけで写しは作らない。** 判定に `transcript_snapshot` を使うと、
+    /// 窓いっぱい（既定 2000 ノード）を毎回複製することになる。
+    pub fn has_transcript(&self) -> bool {
+        !self.window.lock().expect("ロックが壊れていない").is_empty()
+    }
+
     /// 購読者が居るときだけ直列化して配る。
     ///
     /// 巨大な Edit の結果を JSON にする処理がコストの本体なので、誰も見ていないカードで

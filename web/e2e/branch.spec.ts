@@ -6,6 +6,7 @@ import {
   openDashboard,
   openSession,
   spawnSession,
+  typeLine,
   WORK_DIR,
 } from './helpers'
 
@@ -86,6 +87,37 @@ test('横並びから押すと、元はその場に残り枝が右隣へ入る',
   await expect(並び.nth(1).getByTestId('branch-badge')).toHaveCount(0)
 })
 
+test('呼び戻した元から、続けてもう1本ぶん枝を作れる', async ({ page }) => {
+  // **本命の使い方**（利用者のユースケース）：よく育った1本から何本も分け、各セッションが
+  // 毎回 PJT 把握にコストを割くのを抑える。
+  //
+  // **かつてはここで詰まっていた**（2026-09-06）。門が `last_assistant_message` だけを
+  // 見ており、**呼び戻した席はそれを持たない**ので、1本目を作ると2本目が作れなかった。
+  //
+  // **呼び戻した席へ `Stop` を撃たずに押す**のが要点である。撃つと直前の応答が載って
+  // しまい、古い門でも通ってしまう——それでは元の壊れ方を捕まえられない。
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  const 枠 = await 枠を控える(page)
+
+  // 会話を1つ書き残してから入力待ちへ倒す。**呼び戻した席が読むのはこの履歴**である
+  await openSession(page, tile)
+  await typeLine(page, 'said 把握しました')
+  await fireHook(page, 'Stop', '{"last_assistant_message":"把握しました"}')
+
+  await PJT専用画面へ(page, 枠)
+  await page.getByTestId('branch-card').first().click()
+  await expect(page.getByTestId('session-view')).toHaveCount(2, { timeout: 60_000 })
+
+  // 左が元（その場に残ったほう）。**そこから続けてもう1本**
+  const 元 = page.getByTestId('session-view').nth(0)
+  const 次の枝 = 元.getByTestId('branch-card')
+  await expect(次の枝).toBeEnabled({ timeout: 30_000 })
+  await 次の枝.click()
+
+  await expect(page.getByTestId('session-view')).toHaveCount(3, { timeout: 60_000 })
+})
+
 test('セッション専用画面には出ない', async ({ page }) => {
   // §7-1。あちらには「右隣」が無いので、押しても置き先が無い
   await openDashboard(page)
@@ -97,18 +129,26 @@ test('セッション専用画面には出ない', async ({ page }) => {
   await expect(page.getByTestId('branch-card')).toHaveCount(0)
 })
 
-test('起動直後は押せず、理由が読める', async ({ page }) => {
+test('作業中は押せず、理由が読める', async ({ page }) => {
   // §3-4。**`/branch` は指示として送られる**ので、受け付けられない状態で押すと
-  // 入力欄へ積まれ、しばらく後の別の地点で分かれてしまう
+  // 入力欄へ積まれ、**しばらく後の別の地点で分かれてしまう**——取り返しがつかない。
+  //
+  // **会話の有無ではもう殺さない**（2026-09-06 に外した）。あれは `Stop` が運んで
+  // きたときだけ書かれる欄を見ており、**呼び戻した席では必ず空**になるので、
+  // 1本目を作ると2本目が作れなかった。いま画面が見るのは**状態だけ**である。
   await openDashboard(page)
-  await spawnSession(page)
+  const tile = await spawnSession(page)
   const 枠 = await 枠を控える(page)
-  await PJT専用画面へ(page, 枠)
 
+  // 作業中へ倒す（指示を受け付けられない状態）
+  await openSession(page, tile)
+  await fireHook(page, 'UserPromptSubmit')
+
+  await PJT専用画面へ(page, 枠)
   const ボタン = page.getByTestId('branch-card')
   await expect(ボタン).toBeVisible()
   await expect(ボタン).toBeDisabled()
-  await expect(ボタン).toHaveAttribute('title', /起動中|作業中|状態が分からない|1ターンも会話/)
+  await expect(ボタン).toHaveAttribute('title', /作業中/)
 })
 
 test('操作列は、枝分かれを足しても2行のまま', async ({ page }) => {

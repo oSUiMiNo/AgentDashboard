@@ -574,13 +574,17 @@ describe('SessionView の操作列は、区画の真上', () => {
     }
   })
 
-  it('1ターンも会話していない席では押せず、理由が読める', () => {
-    // ブランチ設計§3-4。**状態では見分けられない**——起こした直後も「入力待ち」である。
-    // ここを通すと、CLI 側で `No conversation to branch` と断られて待ちが空振りする
+  it('会話の有無で、画面が先回りして殺さない', () => {
+    // ブランチ設計§3-4。**2026-09-06 に覆した。**
+    //
+    // かつては `last_assistant_message` が空なら押せなくしていたが、あの欄は `Stop` が
+    // 運んできたときにだけ書かれるので、**呼び戻した席では必ず空**になる。つまり
+    // **1本目の枝を作ると、2本目が作れなかった**（利用者が踏んだ形）。
+    //
+    // **画面は他のカードの履歴を持たない**ので、ここで判定すると必ず取りこぼす。
+    // 会話の有無はサーバが履歴を見て断る。
     show(meta({ status: { kind: 'waiting_input' }, last_assistant_message: null }), true)
-    const ボタン = screen.getByTestId('branch-card')
-    expect(ボタン).toBeDisabled()
-    expect(ボタン.getAttribute('title') ?? '').toContain('1ターンも会話していません')
+    expect(screen.getByTestId('branch-card')).toBeEnabled()
   })
 
   it('枝であることは、名前ではなく札で分かる', () => {

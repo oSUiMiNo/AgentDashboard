@@ -143,7 +143,7 @@ impl Branch {
         })?;
 
         pushable(meta.status)?;
-        branchable(&meta)?;
+        branchable(record.has_transcript() || meta.last_assistant_message.is_some())?;
 
         // **同じ会話を2つのプロセスに開かせない**（§4-1）。呼び戻す先が既に別の席で
         // 開いていると、1つの JSONL へ二重に書き込む形になる
@@ -208,7 +208,7 @@ impl Branch {
             .await
             .ok_or_else(|| "元の会話の席が立ちませんでした。もう一度呼び戻せます".to_string())?;
 
-        // ── ⑧ 枝を元の席のすぐ左へ並べ直す ───────────────────────────
+        // ── ⑧ 元をその席へ戻し、枝をその1つ右隣へ並べ直す ─────────────
         self.並べ直す(&meta, 元の席.card_id).await
     }
 
@@ -339,17 +339,29 @@ impl Branch {
 /// 画面には `Failed to branch conversation: No conversation to branch` と出て何も起きない。
 /// 起こした直後の席も「入力待ち」なので、**状態だけでは見分けられない**。
 ///
-/// # なぜ `last_assistant_message` を見るのか
+/// # 見るのは履歴である（2026-09-06 に入れ替えた）
 ///
-/// 同じ実測で、1ターン終えた席は `Some("はい")` を持ち、**`session_title` は `None` の
-/// ままだった**（CLI が題を付けるのはもっと後）。**題では見分けられない。**
+/// **かつては `last_assistant_message` を見ていた。それは誤りだった。**
+/// あの欄は `Stop` フックが運んできたときにだけ書かれるので、**運ばれなかった席では
+/// 永久に空**になる。実データでは、生きている14枚のうち8枚が画面に会話を写しながら
+/// この門で止まっていた。**とりわけ、枝を作った直後の「呼び戻した元」は必ず空**なので、
+/// **1本目を作ると2本目が作れない**——本命の使い方（よく育った1本から何本も分ける）が
+/// 丸ごと潰れていた。
+///
+/// **いまは2つを「会話がある証拠」として扱い、どちらか片方でも立てば通す。**
+/// 履歴（パーサが読んだ木）と、直前の応答（`Stop` が運んだ文）である。**片方だけを
+/// 権威にしない**——履歴は呼び戻した直後にパーサが追いつくまで空でありうるし、
+/// 直前の応答は運ばれなければ永久に空である。**どちらも「無いこと」は証拠にならない。**
+///
+/// **`session_title` も見ない。** 1ターン終えた席でも `None` のままだった（CLI が題を
+/// 付けるのはもっと後）という実測は、いまも有効である。
 ///
 /// # なぜ画面の文言を待たないのか
 ///
 /// 断りの英文を読む形にすると、CLI の文言が変わった日に黙って壊れる。**送る前に、
 /// こちらの持っている記録で断る。**
-fn branchable(meta: &SessionMeta) -> Result<(), String> {
-    if meta.last_assistant_message.is_some() {
+fn branchable(履歴がある: bool) -> Result<(), String> {
+    if 履歴がある {
         return Ok(());
     }
     Err("まだ枝分かれできません（この席はまだ1ターンも会話していません）".to_string())
@@ -401,39 +413,15 @@ mod tests {
 
     #[test]
     fn 会話が無い席は断る() {
-        // §3-4。**状態では見分けられない**——起こした直後の席も「入力待ち」である
-        let mut meta = protocol::SessionMeta {
-            card_id: CardId::new(),
-            project: protocol::ProjectId("/p".to_string()),
-            claude_session_id: Some(ClaudeSessionId::new()),
-            permission_mode: None,
-            model: None,
-            model_label: None,
-            model_requested: None,
-            status: SessionStatus::WaitingInput,
-            subagent_active: 0,
-            last_activity_at: 0,
-            last_assistant_message: None,
-            created_at: 0,
-            hooks_seen: true,
-            agent_id: None,
-            agent_connected: true,
-            account: None,
-            toml_account: None,
-            session_title: None,
-            position: 0,
-            nickname: None,
-            branched_from: None,
-        };
-        let 断り = branchable(&meta).expect_err("会話が無ければ断ること");
+        // §3-4。**状態では見分けられない**——起こした直後の席も「入力待ち」である。
+        //
+        // **見るのは履歴。** `last_assistant_message` を見ていた版は、**呼び戻した席で
+        // 必ず空になる**ため「1本目を作ると2本目が作れない」という形で壊れていた
+        // （2026-09-06 に入れ替えた。経緯は `branchable` の説明）。
+        let 断り = branchable(false).expect_err("履歴が無ければ断ること");
         assert!(断り.contains("会話"), "理由が読めない: {断り}");
 
-        // **題では見分けられない**（実測で `None` のままだった）ので、題を入れても断る
-        meta.session_title = Some("それらしい題".to_string());
-        assert!(branchable(&meta).is_err(), "題で通してはいけない");
-
-        meta.last_assistant_message = Some("はい".to_string());
-        branchable(&meta).expect("1ターン終えていれば通ること");
+        branchable(true).expect("履歴があれば通ること");
     }
 
     #[test]
