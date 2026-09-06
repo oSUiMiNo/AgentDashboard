@@ -15,8 +15,7 @@ import { useEffect, useRef, useState } from 'react'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { Terminal, type ITerminalInitOnlyOptions, type ITerminalOptions } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
-import { Button } from '@/components/ui/button'
-import { copyToClipboard } from '@/lib/clipboard'
+import { TextSheet } from '@/components/TerminalPane/TextSheet'
 import { createFlowController } from '@/lib/flow'
 import { KIND_PTY_SNAPSHOT } from '@/lib/frame'
 import {
@@ -26,7 +25,7 @@ import {
   sequenceFor,
   terminalKeyOverride,
 } from '@/lib/keys'
-import { visibleLines, visibleRows, visibleScreen } from '@/lib/screen'
+import { transcriptAt, visibleLines, visibleRows, visibleScreen } from '@/lib/screen'
 import {
   hasWatcher,
   registerKeyboard,
@@ -116,33 +115,12 @@ export function TerminalPane({ cardId }: Props) {
   // 実機からタッチの数字を読むための置き場所（`?touchdebug=1` のときだけ中身が入る）
   const debugRef = useRef<HTMLDivElement>(null)
   /**
-   * いま選んでいる文字があるか。**コピーの的を出すかどうかだけに使う。**
+   * 文字として開いた面の中身。**閉じているときは `null`。**
    *
-   * 選択そのものは xterm が持っており、これはその写しにすぎない——真偽が食い違っても
-   * 写す中身は `getSelection()` から取り直すので、古い値で違うものを写すことはない。
+   * 開いた瞬間の写しを持つ。**あとから端末へ取りに行かない**——読んでいる間も端末は
+   * 動き続けるので、取りに行く形にすると**読んでいる文が指の下で入れ替わる**。
    */
-  const [選択あり, set選択あり] = useState(false)
-  /** 押した結果。**押すまでは `null`。** */
-  const [写し, set写し] = useState<'ok' | 'ng' | null>(null)
-  /**
-   * 選んだものを取り出す手。**端末そのものは外へ出さない**——出すと `reset` や
-   * `dispose` を効果の外から呼べてしまい、遡り位置の復元とフロー制御の対が壊せる。
-   */
-  const 選択の手 = useRef<{ 取り出す: () => string; 捨てる: () => void } | null>(null)
-
-  /**
-   * 選んだものをクリップボードへ写す。**押した操作の中から、その場で呼ぶこと。**
-   *
-   * 中身は真偽を持っている `選択あり` からではなく、**そのつど `getSelection()` から
-   * 取り直す**。写しの真偽が古くなっても、写るものが食い違うことはない。
-   */
-  const 写す = async () => {
-    const 文字 = 選択の手.current?.取り出す() ?? ''
-    if (文字 === '') {
-      return
-    }
-    set写し((await copyToClipboard(文字)) ? 'ok' : 'ng')
-  }
+  const [文字の面, set文字の面] = useState<{ lines: string[]; at: number } | null>(null)
 
   useEffect(() => {
     const container = containerRef.current
@@ -545,18 +523,27 @@ export function TerminalPane({ cardId }: Props) {
      */
     const TAP_SLOP = DEFAULT_TUNING.threshold
 
-    // --- 長押しで選ぶ（コピーの設計§3・§4）--------------------------------
+    // --- 長押しで、文字として開く（コピーの設計§8）--------------------------
     //
-    // **ブラウザの文字選択は使えない。** WebGL レンダラは canvas に描くので DOM に
-    // 文字が1行も無く、`user-select` を戻しても選ぶ対象が存在しない（コピー設計§2）。
-    // 代わりに **xterm 自身の選択**を動かす——あれはモデル側に在るので、どちらの
-    // レンダラでも効く。
+    // **ブラウザの文字選択は端末の上では使えない。** WebGL レンダラは canvas に描くので
+    // DOM に文字が1行も無く、`user-select` を戻しても選ぶ対象が存在しない（設計§2）。
+    //
+    // 前の版は代わりに **xterm 自身の選択**（`selectLines`）を動かした。動いてはいたが、
+    // **1行に帯が付くだけで範囲は伸ばせず、OS のメニューも出ない**——利用者には壊れて
+    // 見えた（実機の観測・2026-09-06）。**見た目だけ選択に似ていて中身が無い**ものは、
+    // 無いより悪い。
+    //
+    // いまは**文字を本物の DOM へ出す**（[`TextSheet`]）。出した先では長押しも
+    // ハンドルも範囲選択もコピーのメニューも、いつもどおり全部効く。
     //
     // # 既定の経路には1行も入らない（コピー設計§4）
     //
     // 1. **枠の中では計時を始めない。** 枠の上のゆっくりしたタップが選択に化けない
     // 2. **発火したら焦点も外す。** 枠の外を触ったという約束は、長押しでも守られる
     // 3. **モードを作らない。** 残る状態は「発火したか」の1つで、指を離せば必ず落ちる
+    //
+    // 面そのものは状態を持つが、**端末の触り方は1つも変えない**——面が開いている間、
+    // 触れるのは面のほうであって端末ではない。
     //
     /** 計時中のタイマー。**発火・指の移動・離す・破棄のどれでも必ず止める。** */
     let 長押し: ReturnType<typeof setTimeout> | null = null
@@ -569,9 +556,7 @@ export function TerminalPane({ cardId }: Props) {
      * **落とし忘れを壊し方で見つけられなくなる**（フェーズ2の実測。壊しても1本も
      * 落ちなかった）。
      */
-    let 選んでいる = false
-    /** 長押しが始まった行（可視領域の 0 起点）。ここから指の居る行までを選ぶ。 */
-    let 起点 = 0
+    let 開いた = false
 
     const 計時をやめる = () => {
       if (長押し !== null) {
@@ -583,35 +568,21 @@ export function TerminalPane({ cardId }: Props) {
     /**
      * 可視領域の行を、バッファの行へ直す。
      *
-     * `selectLines` が受け取るのは**遡りも含めた通し番号**で、画面を読む側
-     * （[`visibleRows`]）が `viewportY` から数えているのと同じ起点である。
+     * 画面を読む側（[`visibleRows`]）が `viewportY` から数えているのと同じ起点で、
+     * 遡りも含めた通し番号になる。**面はバッファ全体を並べる**ので、こちらで数える。
      */
     const バッファの行 = (row: number) => term.buffer.active.viewportY + row
 
-    const 選ぶ = (from: number, to: number) => {
-      term.selectLines(バッファの行(Math.min(from, to)), バッファの行(Math.max(from, to)))
-      set選択あり(term.hasSelection())
-    }
-
-    const 選択を捨てる = () => {
-      term.clearSelection()
-      set選択あり(false)
-      set写し(null)
-    }
-
-    const 選び始める = (row: number) => {
+    const 文字で開く = (row: number) => {
       長押し = null
-      選んでいる = true
-      // **遡りは取りやめる。** 同じ指で範囲を伸ばすので、両方が動くと画面が滑る
+      開いた = true
+      // **遡りは取りやめる。** 面が出たあとに背後が滑っていると、閉じたとき別の場所に居る
       scroller.cancel()
       // 枠の外を触ったのだから、焦点は外す（コピー設計§4-2）。**ここを消すと、
       // 前のイシューで直した「枠の外なのに焦点が残る」が長押しの経路だけ戻る**
       入力可能を抜ける()
-      set写し(null)
-      選ぶ(row, row)
+      set文字の面(transcriptAt(term, バッファの行(row)))
     }
-
-    選択の手.current = { 取り出す: () => term.getSelection(), 捨てる: 選択を捨てる }
 
     const onTouchStart = (event: TouchEvent) => {
       const 指 = points(event)
@@ -624,8 +595,7 @@ export function TerminalPane({ cardId }: Props) {
       if (触れた) {
         const 行 = rowAt(触れた.y)
         if (行 !== null && !入力欄の行か(行)) {
-          起点 = 行
-          長押し = setTimeout(() => 選び始める(行), LONG_PRESS_MS)
+          長押し = setTimeout(() => 文字で開く(行), LONG_PRESS_MS)
         }
       }
       if (debugOn) {
@@ -640,18 +610,15 @@ export function TerminalPane({ cardId }: Props) {
       if (触れた && 指.length === 1) {
         離れた = Math.max(離れた, Math.hypot(指[0].x - 触れた.x, 指[0].y - 触れた.y))
       }
-      // **発火したあとの指は、なぞりではなく範囲を伸ばす操作**（コピー設計§6-1）
-      if (選んでいる) {
-        const 行 = 指.length === 1 ? rowAt(指[0].y) : null
-        if (行 !== null) {
-          選ぶ(起点, 行)
-        }
+      // **発火したあとの指は、背後の端末を動かさない**（コピー設計§8-3）。面が
+      // 覆っているので届かないはずだが、**開いた直後のひと動きはまだこちらへ来る**
+      if (開いた) {
         if (event.cancelable) {
           event.preventDefault()
         }
         if (debugOn) {
           tally.move += 1
-          showDebug('move 選択中')
+          showDebug('move 面')
         }
         return
       }
@@ -707,19 +674,19 @@ export function TerminalPane({ cardId }: Props) {
      */
     const onTouchEnd = (event: TouchEvent) => {
       計時をやめる()
-      // **選び終えた指は、行き先の判断へ入らない。** 焦点は発火のときに外してあり、
+      // **面を開いた指は、行き先の判断へ入らない。** 焦点は発火のときに外してあり、
       // ここで `入力可能を抜ける()` を呼び直す理由も、`開く()` へ着く理由も無い
-      if (選んでいる) {
-        選んでいる = false
+      if (開いた) {
+        開いた = false
         触れた = null
-        // 滑らせない。**選ぶために動かした指の勢いで画面が流れる**のは驚きになる
+        // 滑らせない。**面を出すために止めた指の勢いで背後が流れる**のは驚きになる
         scroller.cancel()
         if (event.cancelable) {
           event.preventDefault()
         }
         if (debugOn) {
           tally.end += 1
-          showDebug('end 選択')
+          showDebug('end 面')
         }
         return
       }
@@ -731,11 +698,6 @@ export function TerminalPane({ cardId }: Props) {
       const 入る = 行 !== null && 入力欄の行か(行)
       scroller.end()
       触れた = null
-      // **タップしたら選択は捨てる。** 残り続けると、次に押したときに古い範囲が
-      // 混ざる——「いま見えている選択」と「写るもの」が食い違う形を作らない
-      if (タップ) {
-        選択を捨てる()
-      }
       if (入る) {
         開く()
       } else {
@@ -753,7 +715,7 @@ export function TerminalPane({ cardId }: Props) {
     }
     const onTouchCancel = () => {
       計時をやめる()
-      選んでいる = false
+      開いた = false
       触れた = null
       scroller.cancel()
       if (debugOn) {
@@ -827,7 +789,8 @@ export function TerminalPane({ cardId }: Props) {
       container.removeEventListener('touchcancel', onTouchCancel)
       // 計時の途中で捨てられることがある。止めないと、消えた端末を選びにいく
       計時をやめる()
-      選択の手.current = null
+      // **面も畳む。** 端末が消えたのに文字だけ残ると、閉じる先が無くなる
+      set文字の面(null)
       // 滑っている最中に捨てられることがある。止めないと、消えた端末を触り続ける
       scroller.stop()
       parsed.dispose()
@@ -884,75 +847,22 @@ export function TerminalPane({ cardId }: Props) {
         （jsdom は CSS を読まないので、クラス名の一致では綴り違いも効き目も捕まえられない）。
       */}
       {/*
-        **選んだものを写す的**（コピー設計§3・§5）。
+        **文字として開いた面**（コピー設計§8）。
 
-        長押しで選んだあとにだけ現れる。**端末へ重ねる**——帯へ足すと、押す機会の
-        少ないものが常に1つぶんの幅を取り、狭い画面で入力欄が縮む。
+        端末の隅ではなく**画面いっぱい**に出す。前の版は的を端末の右上に固定していたが、
+        **端末は 120 桁あり、狭い画面では一文字が 6px にしかならない**——読むには必ず
+        拡大する。3倍に拡大すると見えている範囲は 130×281 まで狭まり、右上の的はその外へ
+        出る（実測）。**拡大しなければ読めない面の隅に操作を置くと、読んでいる人には
+        決して届かない。**
 
-        **置くのは右上。** 十字は右下に居るので、重ならない場所がここしか無い。
-        読みたい行は下端に集まるので、上を塞ぐほうが害が小さい。
-
-        # 写す手は書かない
-
-        `lib/clipboard.ts` を呼ぶだけにする。あちらは**素の HTTP で開いたスマホ**
-        （`navigator.clipboard` が居ない）を前提に書かれており、`await` を1つも
-        跨がずに古い方法へ着く。ここで書き直すと、その前提ごと落とすことになる。
-
-        # 写せなかったときの逃げ道を必ず持つ
-
-        あちらの注釈が「偽を返したときの逃げ道を呼ぶ側が必ず持つ」と定めている。
-        **端末の文字は canvas に在って選べない**ので、逃げ道は**選べる入れ物に
-        出し直すこと**になる——素の `textarea` なら、そこだけは指で選べる。
+        面の中身は開いた瞬間の写しで、**開いている間は端末を見に行かない**。
       */}
-      {選択あり && (
-        <div
-          data-testid="terminal-copy-bar"
-          className="absolute top-2 right-2 z-20 flex max-w-[80%] flex-col items-end gap-1"
-        >
-          <div className="flex items-center gap-2">
-            {写し !== null && (
-              <span
-                role="status"
-                aria-live="polite"
-                data-testid="terminal-copy-result"
-                className={
-                  写し === 'ok'
-                    ? 'bg-background/90 rounded-md px-2 py-1 text-xs'
-                    : 'bg-background/90 text-destructive rounded-md px-2 py-1 text-xs'
-                }
-              >
-                {写し === 'ok' ? '写しました' : '写せません'}
-              </span>
-            )}
-            <Button
-              type="button"
-              variant="secondary"
-              size="sm"
-              data-testid="terminal-copy"
-              aria-label="選んだ文字をコピー"
-              title="選んでいる行をコピーします"
-              /*
-                **端末から焦点を奪う操作にはしない。** 写す側が押す前の居場所を
-                覚えて返すので、ここで既定を止めると返す先が変わる
-              */
-              onClick={() => {
-                void 写す()
-              }}
-            >
-              コピー
-            </Button>
-          </div>
-          {写し === 'ng' && (
-            <textarea
-              readOnly
-              data-testid="terminal-copy-fallback"
-              aria-label="コピーできなかった文字"
-              className="bg-background w-full rounded-md border p-2 font-mono text-xs"
-              rows={4}
-              value={選択の手.current?.取り出す() ?? ''}
-            />
-          )}
-        </div>
+      {文字の面 !== null && (
+        <TextSheet
+          lines={文字の面.lines}
+          at={文字の面.at}
+          onClose={() => set文字の面(null)}
+        />
       )}
       <div
         ref={containerRef}
