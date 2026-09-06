@@ -107,10 +107,18 @@ pub fn start(branch: Branch) {
             branch.refuse("いま枝分かれの最中です。終わるまで待ってください");
             return;
         }
+        // **段取りは跡を残す。** 失敗したとき、画面に出るのは断りの1行だけで、どの段まで
+        // 進んでいたかが分からない。2026-09-07 の事故では、ログに migration の2行しか
+        // 無く、原因を追う足場が1つも無かった（PJT の作法は「コードより先にログを読む」）
+        tracing::info!(%card_id, "枝分かれを始めます");
         let outcome = branch.run().await;
         branching.end(card_id);
-        if let Err(message) = outcome {
-            branch.refuse(&message);
+        match outcome {
+            Ok(()) => tracing::info!(%card_id, "枝分かれが済みました"),
+            Err(message) => {
+                tracing::warn!(%card_id, "枝分かれを中断しました：{message}");
+                branch.refuse(&message);
+            }
         }
     });
 }
@@ -162,15 +170,35 @@ impl Branch {
 
         // ── ④ 待ち①：席の CLI 側IDが別物へ張り替わる ────────────────
         let card_id = self.card_id;
-        let 枝 = self
+        let 枝 = match self
             .wait_for(&mut events, BRANCH_TIMEOUT, move |meta| {
                 meta.card_id == card_id
                     && meta.claude_session_id.is_some_and(|id| id != 元の会話)
             })
             .await
-            .ok_or_else(|| {
-                "枝分かれが確かめられませんでした（元の会話はこの席のままです）".to_string()
-            })?;
+        {
+            Some(枝) => 枝,
+            // **待ちが明けた＝枝になっていない、とは限らない。** 記録を引き直して確かめる
+            None => match self.枝になっているか(元の会話) {
+                Some(枝) => {
+                    tracing::warn!(
+                        card_id = %self.card_id,
+                        "待ちは明けましたが、記録では枝になっていました。呼び戻しへ進みます"
+                    );
+                    枝
+                }
+                None => {
+                    // **本当に枝になっていない。** 居座っている `/branch` を消してから断る
+                    // ——残すと、諦めたあとに遅れて効いて**元の会話が席を失う**
+                    self.取り消す();
+                    tracing::warn!(card_id = %self.card_id, "枝分かれが確かめられませんでした");
+                    return Err(
+                        "枝分かれが確かめられませんでした（元の会話はこの席のままです）"
+                            .to_string(),
+                    );
+                }
+            },
+        };
         let 枝の会話 = 枝.claude_session_id.expect("待ちの条件で確かめている");
 
         // ── ⑤ 枝の印を記録する ───────────────────────────────────────
@@ -210,6 +238,31 @@ impl Branch {
 
         // ── ⑧ 元をその席へ戻し、枝をその1つ右隣へ並べ直す ─────────────
         self.並べ直す(&meta, 元の席.card_id).await
+    }
+
+    /// いま席が枝になっているか、**記録を引き直して**確かめる（§4-2）。
+    ///
+    /// 待ちが明けたことは「枝になっていない」ことの証拠にならない。**配信を取りこぼす**
+    /// ことも、**上限のすぐ外側で張り替わる**こともある。ここを決めつけたまま諦めると、
+    /// 呼び戻す者が居ないまま席が枝へ変わり、**元の会話が席を失う**。
+    fn 枝になっているか(&self, 元の会話: ClaudeSessionId) -> Option<SessionMeta> {
+        let meta = self.registry.owned(self.account_id, self.card_id)?.meta();
+        meta.claude_session_id
+            .is_some_and(|id| id != 元の会話)
+            .then_some(meta)
+    }
+
+    /// 送った `/branch` が入力欄に居座っているときに消す（§4-2）。
+    ///
+    /// **残すと、あとから遅れて効く。** そのとき段取りは既に諦めて終わっているので、
+    /// **呼び戻す者が居ない**——2026-09-07 の事故はこの形だった。
+    ///
+    /// 送るのは Ctrl+U（`0x15`）で、`input.rs` が本文の頭に置いている「行を消す」印と同じ。
+    /// **既に送られていれば入力欄は空なので、消しても何も起きない。**
+    fn 取り消す(&self) {
+        if let Err(reason) = self.agent.write_input(self.card_id, b"\x15") {
+            tracing::warn!(card_id = %self.card_id, "入力欄を消せませんでした：{reason}");
+        }
     }
 
     /// 元の会話を持つ生きたカードが、押された席以外にあるか。

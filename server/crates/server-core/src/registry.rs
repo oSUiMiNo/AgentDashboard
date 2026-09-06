@@ -573,6 +573,26 @@ impl SessionRegistry {
             .copied()
     }
 
+    /// **その会話から分かれた枝**を1つ返す（ブランチ設計§4-3）。分かれていなければ `None`。
+    ///
+    /// [`Self::branch_of`] の逆引きで、**席を失った元の会話を辿り直す**ために要る。
+    /// 印は「枝 → 分かれ元」の向きに持っているので、こちらは値のほうを探す。
+    ///
+    /// 同じ会話から何本も分かれていれば複数当たるが、**どれでもよい**——欲しいのは
+    /// 枠（作業ディレクトリ・PC・権限モード）で、枝はどれも元と同じ枠に居る。
+    fn branch_child_of(
+        &self,
+        account_id: Uuid,
+        branched_from: ClaudeSessionId,
+    ) -> Option<ClaudeSessionId> {
+        self.branches
+            .lock()
+            .expect("ロックが壊れていない")
+            .iter()
+            .find(|((owner, _), 元)| *owner == account_id && **元 == branched_from)
+            .map(|((_, 枝), _)| *枝)
+    }
+
     /// 枝分かれの印を残す（ブランチ設計§5-2）。
     ///
     /// # 印が付くのは枝の側
@@ -772,6 +792,37 @@ impl SessionRegistry {
     /// 一覧（[`Self::past_sessions`]）と違い、**実体があるかは見ない**。押した時点で
     /// 走っていたとしても、新しいカードで起こすこと自体は成立する。
     pub async fn past_session_of(
+        &self,
+        account_id: Uuid,
+        claude_session_id: ClaudeSessionId,
+    ) -> Result<Option<protocol::PastSession>, DbErr> {
+        if let Some(past) = self.past_row(account_id, claude_session_id).await? {
+            return Ok(Some(past));
+        }
+
+        // **枝がカードを乗っ取ると、元の会話は記録から引けなくなる**（ブランチ設計§4-3）。
+        // カードの行は枝のIDで上書きされるので、元のIDを持つ行が1つも残らない。
+        //
+        // **そのままだと、席を失った利用者に戻る道が無い**——断りの「もう一度呼び戻す」も
+        // `session recall` も「見つかりません」で終わる（2026-09-07 に実機で踏んだ）。
+        //
+        // **枝の印は「どの会話から分かれたか」を覚えている**ので、そこから枝を辿り、
+        // **枝の枠を借りて**元の会話を呼び戻せる形にする。枝は必ず元と同じ枠に居る。
+        let Some(枝の会話) = self.branch_child_of(account_id, claude_session_id) else {
+            return Ok(None);
+        };
+        let Some(mut past) = self.past_row(account_id, 枝の会話).await? else {
+            return Ok(None);
+        };
+        // 借りたのは枠だけ。**中身は元の会話のもの**へ差し替える
+        past.claude_session_id = claude_session_id;
+        past.nickname = self.nickname_of(account_id, claude_session_id);
+        past.session_title = None;
+        Ok(Some(past))
+    }
+
+    /// `sessions` の行から1件だけ組み立てる（[`Self::past_session_of`] の素）。
+    async fn past_row(
         &self,
         account_id: Uuid,
         claude_session_id: ClaudeSessionId,

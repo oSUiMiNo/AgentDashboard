@@ -373,3 +373,48 @@ async fn 二度押しは断る() {
         "二度押しで席が増えすぎている（1枚押して増えるのは1枚だけ）"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 席を失ったときの戻り道（§4-3）
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn 席を失った元の会話も枝の印から呼び戻せる() {
+    // **枝がカードを乗っ取ると、元の会話は `sessions` から消える**（枝のIDで上書き
+    // されるため）。呼び戻しが済んでいれば新しい席の行が残るが、**そこが失敗すると
+    // 元のIDを持つ行が1つも無くなる**——2026-09-07 に実機で踏んだ形である。
+    //
+    // そのとき断りの「もう一度呼び戻す」も `session recall` も「見つかりません」で
+    // 終わっていた。**印は「どの会話から分かれたか」を覚えている**ので、そこから
+    // 枝を辿って枠を借りれば、元の会話は呼び戻せる。
+    let server = TestServer::start().await;
+    let target = target_of(&server);
+    let cwd = work_dir("recover");
+    let (card, 枝の会話) = 入力待ちのカード(&server, &target, &cwd).await;
+    let 枠 = 引く(&server, &card).project;
+
+    // **呼び戻しに失敗した状態を作る。** 席が持っているのは枝の会話だけで、
+    // 元の会話（この場では架空）を持つ行はどこにも無い
+    let 元の会話 = ClaudeSessionId::new();
+    server
+        .registry
+        .mark_branch(server_core::db::LOCAL_ACCOUNT_ID, 枝の会話, 元の会話)
+        .await
+        .expect("枝の印を残せること");
+
+    let past = server
+        .registry
+        .past_session_of(server_core::db::LOCAL_ACCOUNT_ID, 元の会話)
+        .await
+        .expect("記録を引けること")
+        .expect("印から辿れること（辿れないと席を失った利用者に戻る道が無い）");
+
+    assert_eq!(
+        past.claude_session_id, 元の会話,
+        "呼び戻す先が元の会話になっていない"
+    );
+    assert_eq!(
+        past.project, 枠,
+        "枠を借りられていない（枝は必ず元と同じ枠に居る）"
+    );
+}
