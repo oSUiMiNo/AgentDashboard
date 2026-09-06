@@ -778,9 +778,7 @@ pub enum Node {
     ///
     /// 実データでは assistant の content ブロックの相当数を占めるため、受け皿が無いと
     /// 思考が丸ごと [`Node::Unknown`] に落ちる。表示は既定で折り畳む想定。
-    Thinking {
-        text: String,
-    },
+    Thinking { text: String },
     ToolCall {
         name: String,
         input: serde_json::Value,
