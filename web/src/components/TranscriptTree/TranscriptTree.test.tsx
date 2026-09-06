@@ -1003,3 +1003,31 @@ describe('APIのエラーを赤く出す', () => {
     expect(row.querySelector('.body-shell-error')).toBeNull()
   })
 })
+
+/** 読まれる前に取り消された発言の見た目（設計§14-2）。 */
+describe('読まれる前に取り消された発言', () => {
+  it('取り消された発言は、打ち消しの印が付く', async () => {
+    appendNodes(CARD, [
+      node('u1', null, {
+        kind: 'user_message',
+        text: 'やっぱりやめる',
+        origin: { kind: 'human' },
+        cancelled: true,
+      }),
+    ])
+    renderTree()
+    await waitForRows(1)
+    const bubble = within(rowByKind('user_message')).getByTestId('user-bubble')
+    expect(bubble.className).toContain('speech-bubble-cancelled')
+  })
+
+  it('取り消されていない発言には付かない', async () => {
+    appendNodes(CARD, [
+      node('u1', null, { kind: 'user_message', text: 'やって', origin: { kind: 'human' } }),
+    ])
+    renderTree()
+    await waitForRows(1)
+    const bubble = within(rowByKind('user_message')).getByTestId('user-bubble')
+    expect(bubble.className).not.toContain('speech-bubble-cancelled')
+  })
+})

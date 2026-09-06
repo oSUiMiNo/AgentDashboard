@@ -757,6 +757,19 @@ pub enum Node {
         /// 「これはコマンドである」ことと展開の有無は、字面からではなくここで分かる。
         #[serde(default)]
         command: Option<SlashCommand>,
+        /// **読まれる前に取り消されたか**（設計§14）。
+        ///
+        /// 送ったが、アシスタントが返し始める前に人が止めた発言である。合図は
+        /// **後続の中断マーカーが `interruptedMessageId` を持たないこと**——
+        /// あれはアシスタントのメッセージ ID なので、**持っていれば返し始めていた**。
+        ///
+        /// 実測で分離している（この PJT 全体）——**持たない4件は人の発言から中央値
+        /// 2.2秒**（最大9.8）で止まり、**持つ6件は中央値15.9秒**（最小10.4）だった。
+        /// **時間では判定しない**。記録が名乗っているものを使う（§1 と同じ）。
+        ///
+        /// 欄に `#[serde(default)]` を付ける理由は [`Node::AssistantText::error`] と同じ。
+        #[serde(default)]
+        cancelled: bool,
     },
     AssistantText {
         text: String,
@@ -1295,6 +1308,7 @@ mod tests {
                 name: "coordinator".to_string(),
             },
             command: None,
+            cancelled: false,
         };
         let text = serde_json::to_string(&node).expect("書けること");
         let back: Node = serde_json::from_str(&text).expect("読めること");
@@ -1567,6 +1581,7 @@ mod tests {
                 text: "テストを流して".to_string(),
                 origin: MessageOrigin::Human,
                 command: None,
+                cancelled: false,
             },
             // 名乗りとコマンドを持つ形も往復させる。**画面はこちらを読む**
             Node::UserMessage {
@@ -1578,6 +1593,7 @@ mod tests {
                     typed: "/pjt_read".to_string(),
                     expansion: Some("このPJTの仕様を把握せよ".to_string()),
                 }),
+                cancelled: false,
             },
             Node::AssistantText {
                 text: "了解しました".to_string(),

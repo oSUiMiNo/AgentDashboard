@@ -301,6 +301,12 @@ export type Node =
       origin?: MessageOrigin
       /** スラッシュコマンドとして打たれたときの、打った形と展開後の中身（設計§3） */
       command?: SlashCommand | null
+      /**
+       * **読まれる前に取り消されたか**（設計§14）。送ったが、アシスタントが返し始める
+       * 前に人が止めた発言である。**判定はパーサ側**——合図（`interruptedMessageId` の
+       * 有無）はレコードにしか無く、画面の木からは辿れない。
+       */
+      cancelled?: boolean
     }
   /**
    * アシスタントの本文。`error` は**記録が自分で名乗った印**（`isApiErrorMessage`）だけ

@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import type { Node } from '@/lib/protocol'
-import { bodyTextOf, isApiError, isMachine, originLabel, originOf } from '@/lib/messageOrigin'
+import {
+  bodyTextOf,
+  isApiError,
+  isCancelled,
+  isMachine,
+  originLabel,
+  originOf,
+} from '@/lib/messageOrigin'
 
 /**
  * 誰が入れたかの読み分け
@@ -131,5 +138,28 @@ describe('APIのエラーの見分け', () => {
     // 印は `assistant_text` にしか付かない（実測で `type` は全部 assistant）
     const node: Node = { kind: 'user_message', text: 'Request timed out', origin: { kind: 'human' } }
     expect(isApiError(node)).toBe(false)
+  })
+})
+
+/** 読まれる前の取り消し（設計§14）。判定はパーサ側で済んでおり、ここは印を読むだけ。 */
+describe('読まれる前の取り消し', () => {
+  it('印が立っていれば取り消しとして読む', () => {
+    const node: Node = {
+      kind: 'user_message',
+      text: 'やっぱりやめる',
+      origin: { kind: 'human' },
+      cancelled: true,
+    }
+    expect(isCancelled(node)).toBe(true)
+  })
+
+  it('印が無ければ取り消しではない', () => {
+    const node: Node = { kind: 'user_message', text: 'やって', origin: { kind: 'human' } }
+    expect(isCancelled(node)).toBe(false)
+  })
+
+  it('アシスタントの本文は取り消しにならない', () => {
+    const node: Node = { kind: 'assistant_text', text: 'やります' }
+    expect(isCancelled(node)).toBe(false)
   })
 })

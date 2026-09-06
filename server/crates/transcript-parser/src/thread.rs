@@ -151,6 +151,23 @@ struct FileState {
     /// ——**存在しない `uuid` は参照できないので、展開が本体より先に来ることは原理的に無い。**
     /// `[本体1][展開1][本体2][展開2]` の並びも、枠1つで正しく捌ける。
     pending_command: Option<(String, TreeNode)>,
+    /// 直前に出した**人の発言**（設計§14）。読まれる前に取り消されたときだけ使う。
+    ///
+    /// # なぜ覚えるのか
+    ///
+    /// 取り消しは**後から来る**（中断マーカー）。そのとき「どの発言が取り消されたか」は
+    /// マーカーの `parentUuid` が指しているが、**発言のノードはもう発行済み**なので、
+    /// 印を付け直すには手元に残っていないといけない。**同じ ID で送り直す**（ツールコールに
+    /// 結果が付くのと同じ形）。
+    ///
+    /// # 枠1つで足りる
+    ///
+    /// 中断マーカーの `parentUuid` は**直前の発言**を指す（実測で全件が隣接）。
+    /// [`FileState::pending_command`] と同じ理由で、**表にすると育つ**——取り消されない
+    /// 発言のほうが圧倒的に多いので、貯めると発言の数だけ居座る。
+    ///
+    /// **人の発言だけ入れる。** 機械が入れた文は人が取り消す相手ではない。
+    pending_human: Option<(String, TreeNode)>,
     /// まだ読まれていない追加メッセージ（設計§4）。`(ノードID, 本文)` を入った順に持つ。
     ///
     /// # 育たないことを、型ではなく数で言う
@@ -383,6 +400,47 @@ impl SessionThreader {
         Some(node)
     }
 
+    /// 読まれる前に取り消された発言へ、印を付けて**同じ ID で送り直す**（設計§14）。
+    ///
+    /// # 合図は3つ揃ったときだけ
+    ///
+    /// 1. **中断マーカーであること**（[`protocol::MessageOrigin::Interrupted`]）
+    /// 2. **`interruptedMessageId` を持たないこと**——持っていれば、それは
+    ///    **アシスタントが返し始めていた**ID である＝「読まれる前」ではない
+    /// 3. **その `parentUuid` が、直前に出した人の発言を指していること**
+    ///
+    /// # 時間では判定しない
+    ///
+    /// 実測では分離している（持たない側は人の発言から中央値2.2秒・最大9.8、持つ側は
+    /// 中央値15.9秒・最小10.4）が、**機械の速さに依存する境目を判定に使わない**——
+    /// 遅い日には逆転する。**記録が名乗っているものを使う**（§1 と同じ）。
+    fn mark_cancelled(
+        &mut self,
+        source: &str,
+        record: &Record,
+        origin: &protocol::MessageOrigin,
+    ) -> Option<TreeNode> {
+        if *origin != protocol::MessageOrigin::Interrupted {
+            return None;
+        }
+        if record.interrupted_message_id().is_some() {
+            return None;
+        }
+        let parent = record.parent_uuid.clone()?;
+        let file = self.file(source);
+        let (uuid, node) = file.pending_human.as_ref()?;
+        if *uuid != parent {
+            return None;
+        }
+        let mut node = node.clone();
+        if let Node::UserMessage { cancelled, .. } = &mut node.node {
+            *cancelled = true;
+        }
+        // 取り消しは発言1つにつき1回。**受け取ったら手放す**
+        file.pending_human = None;
+        Some(node)
+    }
+
     fn feed_message(&mut self, source: &str, record: &Record, ts: i64) -> Vec<TreeNode> {
         let root = self.files.get(source).and_then(|file| file.root.clone());
         let blocks = normalize::blocks(record);
@@ -435,6 +493,7 @@ impl SessionThreader {
                                 typed,
                                 expansion: None,
                             }),
+                            cancelled: false,
                         },
                         ts,
                         branch,
@@ -453,6 +512,12 @@ impl SessionThreader {
                         emitted.push(node);
                         continue;
                     }
+                    // 読まれる前に取り消されたなら、**取り消された発言に印を付けて
+                    // 送り直す**（設計§14）。マーカー自身はこのあと普通に出す
+                    // ——**記録は捨てない**（ガイドライン「「表示しない」と「捨てる」は別」）
+                    if let Some(node) = self.mark_cancelled(source, record, &origin) {
+                        emitted.push(node);
+                    }
                     // 新しい指示が来たらターンが変わる。以後のツールコールは
                     // 次のアシスタント本文にぶら下がる
                     self.file(source).turn_anchor = None;
@@ -461,17 +526,25 @@ impl SessionThreader {
                     // 先に書かれる場面があり、その間ずっと同じ本文が2つ並ぶ
                     let retired = self.retire_matching(source, &text, root.clone(), ts, branch);
                     emitted.extend(retired);
-                    emitted.push(TreeNode {
+                    let node = TreeNode {
                         id: node_id.clone(),
                         parent: root.clone(),
                         node: Node::UserMessage {
                             text,
                             origin: origin.clone(),
                             command: None,
+                            cancelled: false,
                         },
                         ts,
                         branch,
-                    });
+                    };
+                    // **人が打った発言だけを1枠覚える**（設計§14）。読まれる前に止められた
+                    // ときに、この枠から取り出して**同じ ID で送り直す**
+                    if origin == protocol::MessageOrigin::Human {
+                        self.file(source).pending_human =
+                            record.uuid.clone().map(|uuid| (uuid, node.clone()));
+                    }
+                    emitted.push(node);
                     last_emitted = Some(node_id);
                 }
                 Block::AssistantText(text) => {
@@ -2067,5 +2140,103 @@ mod エラーの名乗り {
     fn エラーらしい字でも印が無ければ赤くしない() {
         let node = 出た(&本文("", "API Error: 529 Overloaded"));
         assert!(matches!(node, Node::AssistantText { error: false, .. }));
+    }
+}
+
+#[cfg(test)]
+mod 読まれる前の取り消し {
+    #![allow(non_snake_case)]
+    use super::*;
+    use crate::parse::parse_line;
+
+    fn 人(uuid: &str, text: &str) -> String {
+        format!(
+            r#"{{"type":"user","uuid":"{uuid}","parentUuid":null,"origin":{{"kind":"human"}},"message":{{"role":"user","content":{}}}}}"#,
+            serde_json::to_string(text).unwrap()
+        )
+    }
+
+    /// 中断マーカー。`id` を渡すと `interruptedMessageId` を持つ（＝返し始めていた）。
+    fn 中断(uuid: &str, parent: &str, id: Option<&str>) -> String {
+        let 欄 = id
+            .map(|v| format!(r#","interruptedMessageId":"{v}""#))
+            .unwrap_or_default();
+        format!(
+            r#"{{"type":"user","uuid":"{uuid}","parentUuid":"{parent}"{欄},"message":{{"role":"user","content":"[Request interrupted by user]"}}}}"#
+        )
+    }
+
+    fn 流す(lines: &[String]) -> Vec<TreeNode> {
+        let mut threader = SessionThreader::new();
+        let mut out = Vec::new();
+        for line in lines {
+            out.extend(threader.feed_record("/p/s.jsonl", None, &parse_line(line)));
+        }
+        out
+    }
+
+    fn 取り消された(nodes: &[TreeNode], text: &str) -> bool {
+        nodes.iter().any(|n| {
+            matches!(
+                &n.node,
+                Node::UserMessage { text: t, cancelled: true, .. } if t == text
+            )
+        })
+    }
+
+    #[test]
+    fn 返し始める前に止めたら発言に印が立つ() {
+        let out = 流す(&[人("u1", "やっぱりやめる"), 中断("i1", "u1", None)]);
+        assert!(
+            取り消された(&out, "やっぱりやめる"),
+            "同じ ID で送り直され、印が立つこと"
+        );
+    }
+
+    /// **これは落とせない。** `interruptedMessageId` はアシスタントのメッセージ ID なので、
+    /// **持っていれば返し始めていた**＝「読まれる前」ではない。
+    #[test]
+    fn 返し始めたあとに止めても印は立たない() {
+        let out = 流す(&[人("u1", "やって"), 中断("i1", "u1", Some("msg_01"))]);
+        assert!(
+            !取り消された(&out, "やって"),
+            "読まれた後は取り消しにしない"
+        );
+    }
+
+    #[test]
+    fn 別の発言を指す中断では印が立たない() {
+        let out = 流す(&[
+            人("u1", "ひとつ目"),
+            人("u2", "ふたつ目"),
+            中断("i1", "u1", None),
+        ]);
+        // 枠は1つなので、直前（u2）しか覚えていない。**取り違えて u2 へ印を付けない**
+        assert!(!取り消された(&out, "ひとつ目"));
+        assert!(!取り消された(&out, "ふたつ目"));
+    }
+
+    #[test]
+    fn 機械が入れた文は取り消しの相手にならない() {
+        let 機械 = r#"{"type":"user","uuid":"m1","parentUuid":null,"origin":{"kind":"task-notification"},"message":{"role":"user","content":"報告"}}"#;
+        let out = 流す(&[機械.to_string(), 中断("i1", "m1", None)]);
+        assert!(!取り消された(&out, "報告"), "人の発言だけを枠に入れる");
+    }
+
+    /// **記録は捨てない**（ガイドライン「「表示しない」と「捨てる」は別」）。
+    /// 中断マーカー自身もノードとして出る——`uuid` を持ち、子がぶら下がりうる。
+    #[test]
+    fn 中断マーカー自身も残る() {
+        let out = 流す(&[人("u1", "やめる"), 中断("i1", "u1", None)]);
+        assert!(
+            out.iter().any(|n| matches!(
+                &n.node,
+                Node::UserMessage {
+                    origin: protocol::MessageOrigin::Interrupted,
+                    ..
+                }
+            )),
+            "中断の印そのものも出ること"
+        );
     }
 }

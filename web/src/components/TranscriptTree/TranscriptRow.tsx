@@ -50,7 +50,14 @@ import {
   foldMarkdownByLines,
   summarizeInput,
 } from '@/lib/markdown'
-import { bodyTextOf, isApiError, isMachine, originLabel, originOf } from '@/lib/messageOrigin'
+import {
+  bodyTextOf,
+  isApiError,
+  isCancelled,
+  isMachine,
+  originLabel,
+  originOf,
+} from '@/lib/messageOrigin'
 import type { ActivityRow, FlatRow, NodeRow, QueuedMoreRow, RewoundRow } from '@/stores/transcript'
 import { toggleCommand } from '@/stores/transcript'
 import { SlashCommandLine } from './SlashCommandLine'
@@ -729,6 +736,12 @@ function MarkdownBody({
   const queued = row?.node.kind === 'queued_message'
   const queuedClass = queued ? ' speech-bubble-queued' : ''
 
+  // 読まれる前に取り消された発言（設計§14）。**地は「待ち」と同じ**——どちらも
+  // 「claude に読まれていない」の一言で説明できる状態なので、`DESIGN.md` §11.2 の
+  // 判定に従って同じ色にする。**分けるのは形（打ち消し線）のほう**
+  const cancelled = row != null && isCancelled(row.node)
+  const cancelledClass = cancelled ? ' speech-bubble-cancelled' : ''
+
   // 人が打っていないものか（`人が打っていないものを、人の発言として出さない` 設計§6）。
   //
   // **判断は `messageOrigin.ts` の純関数が持つ。** ここで `?? 'unmarked'` を書かない
@@ -837,7 +850,7 @@ function MarkdownBody({
           // 当たらない**——それでも 77% なら 23% の余白が残るので、左に寄っていることは読める
           className={`speech-bubble row-shell mt-1 px-3 py-2 ${
             machine ? 'max-w-[77%]' : 'max-w-[70%]'
-          }${machine ? ' speech-bubble-machine' : ''}${queuedClass}${fadeClass}`}
+          }${machine ? ' speech-bubble-machine' : ''}${queuedClass}${cancelledClass}${fadeClass}`}
         >
           {/* **誰が入れたかを名乗らせる**（利用者の指定・設計§1-1）。開かないと
               出どころが分からない状態にしない。**この1行は本文の外**なので、

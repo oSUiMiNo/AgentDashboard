@@ -682,6 +682,7 @@ fn message_originのフィクスチャで人と機械が分かれる() {
                 text,
                 origin,
                 command,
+                ..
             } => Some((text.as_str(), origin.clone(), command.clone())),
             _ => None,
         })

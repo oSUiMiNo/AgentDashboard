@@ -176,6 +176,32 @@ describe('APIのエラーの地（§13-2）', () => {
   })
 })
 
+describe('読まれる前の取り消し（§14-2）', () => {
+  it('地は待ちと同じで、区別は打ち消し線という形で付ける', () => {
+    /*
+      **同じ言葉で説明できる状態は同じ色にする**（`DESIGN.md` §11.2）。待ちも取り消しも
+      「claude に読まれていない」の一言で説明できるので、地は同じ。**分けるのは形。**
+    */
+    const 地 = /\.speech-bubble\.speech-bubble-cancelled \{([\s\S]*?)\n\}/.exec(INDEX)
+    expect(地, '取り消しの地の規則が見つからない').not.toBeNull()
+    expect(地![1]).toContain('calc(c * 0.3)')
+    const 待ち = /\.speech-bubble\.speech-bubble-queued \{([\s\S]*?)\n\}/.exec(INDEX)
+    expect(地![1].trim(), '待ちと同じ地であること').toBe(待ち![1].trim())
+  })
+
+  it('打ち消し線は、クラスではなく data-testid の本文へ当てる', () => {
+    /*
+      **`row-body` はクラスではない。** `.row-body` と書くと**永久に当たらず**、型検査も
+      素通りする——実際に一度そう書いた（同じ空振りをスクロールバーで2度踏んでいる）。
+    */
+    const 線 = /\.speech-bubble-cancelled \[data-testid='row-body'\] \{([\s\S]*?)\n\}/.exec(INDEX)
+    expect(線, '打ち消し線の規則が見つからない（セレクタが当たっていない）').not.toBeNull()
+    expect(線![1]).toContain('line-through')
+    // **字は読めるまま。** 線で潰さない
+    expect(線![1]).toContain('text-decoration-color')
+  })
+})
+
 describe('「履歴」の帯（§5-2）', () => {
   it('帯が消えている', () => {
     // 件数以外に何も出していなかった（要件2）

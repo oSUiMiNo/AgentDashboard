@@ -132,3 +132,15 @@ export function bodyTextOf(node: Node): string {
 export function isApiError(node: Node): boolean {
   return node.kind === 'assistant_text' && node.error === true
 }
+
+/**
+ * **読まれる前に取り消された発言か**（設計§14）。
+ *
+ * 送ったが、アシスタントが返し始める前に人が止めたもの。**判定はパーサ側で済んでいる**
+ * ——合図（`interruptedMessageId` の有無）はレコードにしか無く、画面の木からは辿れない。
+ *
+ * **欄が来なければ「取り消されていない」へ倒す**（[`isApiError`] と同じ理由）。
+ */
+export function isCancelled(node: Node): boolean {
+  return node.kind === 'user_message' && node.cancelled === true
+}

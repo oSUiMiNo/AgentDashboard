@@ -202,6 +202,7 @@ mod tests {
                     text: "テストを流して".to_string(),
                     origin: crate::MessageOrigin::Human,
                     command: None,
+                    cancelled: false,
                 },
                 ts: 1_700_000_000_000,
                 branch: 0,
