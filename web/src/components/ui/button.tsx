@@ -32,9 +32,14 @@ const buttonVariants = cva(
         "icon-sm":
           "size-7 rounded-[min(var(--radius-md),12px)] in-data-[slot=button-group]:rounded-lg",
         "icon-lg": "size-9",
-        // 48px。`icon`（32/16）と器と絵の比を揃えてある——既定の `size-4` のままだと
-        // 器の中で絵が泳ぐ（細かい修正 設計§2-3）
-        "icon-xl": "size-12 [&_svg:not([class*='size-'])]:size-6",
+        // 40px。`icon`（32/16）と器と絵の比を揃えてある——既定の `size-4` のままだと
+        // 器の中で泳ぐ（細かい修正 設計§2-3）。
+        //
+        // **48px から縮めた**（2026-09-06・利用者の指定「1.5倍は大きすぎた。1.3倍くらい」）。
+        // 40px は等倍（32px）の 1.25倍で、**標準の段のまま**でもある——42px（1.31倍）は
+        // `size-[42px]` という任意値になり、24/28/32/36 と揃えてきた作法から外れる。
+        // 焼いて並べても 40 と 42 は見分けが付かなかったので、作法の側を採った。
+        "icon-xl": "size-10 [&_svg:not([class*='size-'])]:size-5",
       },
     },
     defaultVariants: {

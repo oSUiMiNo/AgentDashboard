@@ -22,12 +22,12 @@ describe('大きさの階段', () => {
     expect(段('icon-lg')).toContain('size-9')
   })
 
-  it('icon-xl が 48px で、中の絵が 24px', () => {
+  it('icon-xl が 40px で、中の絵が 20px', () => {
     // サイドバーの開閉ボタンを 1.5倍にするために足した段（要件8）。
     // **器と絵の比を `icon`（32/16）と揃える**——既定の `size-4` のままだと器の中で泳ぐ
     const xl = 段('icon-xl')
-    expect(xl).toContain('size-12')
-    expect(xl).toContain("[&_svg:not([class*='size-'])]:size-6")
+    expect(xl).toContain('size-10')
+    expect(xl).toContain("[&_svg:not([class*='size-'])]:size-5")
   })
 
   it('絵の大きさは、呼ぶ側が上書きできる', () => {

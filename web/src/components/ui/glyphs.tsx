@@ -241,7 +241,7 @@ export function CopyGlyph({ className }: { className?: string }) {
  *
  * 「アイコンに文字を入れる」を禁じているのは**ファイル一覧の Compact アイコン**についてで
  * （§16〜§19）、20px の器に種別を詰め込む話である。**操作アイコンは対象外**（§14.3・§15）で、
- * ここでは器が 48px あり、**1アイコン1メッセージ**（§20.6）がむしろ強まる。
+ * ここでは器が 40px あり、**1アイコン1メッセージ**（§20.6）がむしろ強まる。
  */
 export function LanAddressGlyph({ className }: { className?: string }) {
   return (

@@ -395,28 +395,31 @@ describe('置き場所を知らない（要件の完了条件8）', () => {
 
 describe('帯のボタンの大きさと見た目', () => {
   /*
-    **1.5倍にした**（2026-09-05・利用者の指定）。ベル・IP・設定の3つを揃えている。
+    **大きくした**（2026-09-05・利用者の指定）。ベル・IP・設定の3つを揃えている。
+    **一度 48px にしたが 40px へ戻した**（2026-09-06）——サイドバーの段と共有しており、
+    あちらが「大きすぎた」と指摘されたため。3つは同じ帯のアイコンボタンなので、
+    **片方だけ残すと段が2つに割れる**。
 
     見張り方は `FilesToggle.test.tsx` と同じ——**器だけを大きくすると絵が中で泳ぐ**ので、
-    `icon-xl`（器 48px・絵 24px）の段をそのまま使っていることを見る。個別の
+    `icon-xl`（器 40px・絵 20px）の段をそのまま使っていることを見る。個別の
     `className` で当て直すと、次に同じ大きさが要るときにまた書くことになる。
   */
-  it('器は 48px の段を使う（個別に上書きしていない）', () => {
+  it('器は 40px の段を使う（個別に上書きしていない）', () => {
     useLanAddressStore.setState({ view: view(), loaded: true })
     render(<LanAddressButton />)
 
     const 押す = screen.getByTestId('lan-address-copy')
-    // `size-12` = 48px。**28px の `size-7` に戻ると落ちる**
-    expect(押す.className).toContain('size-12')
+    // `size-10` = 40px。**28px の `size-7` に戻ると落ちる**
+    expect(押す.className).toContain('size-10')
     expect(押す.className).not.toContain('size-7')
   })
 
-  it('絵も一緒に 1.5倍になる（24px）', () => {
+  it('絵も一緒に大きくなる（20px）', () => {
     useLanAddressStore.setState({ view: view(), loaded: true })
     render(<LanAddressButton />)
 
     const 押す = screen.getByTestId('lan-address-copy')
-    expect(押す.className).toContain("[&_svg:not([class*='size-'])]:size-6")
+    expect(押す.className).toContain("[&_svg:not([class*='size-'])]:size-5")
     // 呼ぶ側が大きさを当てていないこと（当てると段が効かなくなる）
     expect(押す.querySelector('svg')?.getAttribute('class')).toBeNull()
   })
