@@ -11,23 +11,34 @@ import {
 } from './helpers'
 
 /**
- * 長押しで選んで、コピーする
- * （ローカルイシュー「スマホでターミナルの文字をコピーできない」テスト計画フェーズ3）。
+ * 長押しで、端末の文字を「普段どおり」選ぶ
+ * （イシュー「スマホでターミナルの文字をコピーできない」テスト計画フェーズ5）。
+ *
+ * # スマホの実寸で走らせる
+ *
+ * **既定の `Desktop Chrome`（1280×720）では、この工事が直した壊れ方が原理的に出ない。**
+ * 前の版のコピーボタンは端末の右上に固定されており、広い窓では確かに見えていた——
+ * `toBeVisible()` も通っていた。**Playwright の「見えている」は窓の中に居ることを
+ * 要求しない**ので、狭い画面で外へ出ていても緑になる。
+ *
+ * 実測はこうだった。390×844 では的は x=309・y=166 に出て覆われてもいない。だが
+ * **端末は 120 桁で、一文字が 6px にしかならない**（格子 720px を 366px の窓で覗く）。
+ * 読むには拡大が要り、**3倍に拡大すると見える範囲は 130×281 まで狭まって的は外へ出る**。
+ *
+ * **だからここは狭い窓で走らせる。** 広い窓で測ると、利用者が踏んだ道を1歩も歩かない。
  *
  * # ここでしか見られないもの
  *
- * **xterm の選択が実際に付くか。** jsdom には canvas も選択の描画も無いので、
- * 単体は `selectLines` を**呼んだこと**までしか見ていない。実物のブラウザなら
- * `getSelection()` が中身を返すところまで確かめられる。
- *
- * **時間の経過も実物である。** 単体は偽のタイマーを進めているので、「押しっぱなしに
- * している間にブラウザが別の解釈をしないか」は分からない。
+ * **文字が本当に DOM に在るか。** jsdom は差し込んだ値を返すだけなので、実物の
+ * ブラウザで `user-select` の計算値まで見て初めて「選べる形で出ている」と言える。
  *
  * # 見られないもの
  *
- * **写せたかどうか。** ここは `localhost` なので安全なオリジンにあたり、実機
- * （素の HTTP）とは通る枝が違う（`lib/clipboard.ts`）。**実機と同じ枝を踏めない**
- * ので、押した結果は実機で見る。
+ * **選択ハンドルとコピーのメニューそのもの。** あれを出すのは OS で、ここで走る
+ * chromium には無い。**その先は実機で見る**（テスト計画フェーズ6）。
+ *
+ * **写せたかどうか。** ここは `localhost` ＝安全なオリジンなので、実機（素の HTTP）
+ * とは通る枝が違う（`lib/clipboard.ts`）。
  *
  * # なぜファイルを分けるのか
  *
@@ -36,7 +47,7 @@ import {
  * なので、混ぜずに残す。
  */
 
-test.use({ hasTouch: true })
+test.use({ hasTouch: true, viewport: { width: 390, height: 844 } })
 
 test.afterEach(async ({ page }) => {
   await archiveAll(page)
@@ -89,11 +100,10 @@ async function settle(page: Page) {
  * **中身のある行**の座標。
  *
  * 端末の真ん中を押してはいけない。格子は 40 行あるのに擬似 claude が書くのは数行
- * なので、**真ん中はたいてい空行**である——空行を選んでも `getSelection()` は空を
- * 返すので、「選べていない」と見分けが付かない（実測で1本落とした）。
+ * なので、**真ん中はたいてい空行**である（実測で1本落とした）。
  *
- * **どの行に中身があるかは端末に聞く。** 入力欄の行は避ける——あそこは選ばない側の
- * 担保が持っている。
+ * **どの行に中身があるかは端末に聞く。** 判定を写して組み立てると、実装と同じ
+ * 思い込みを共有したまま緑になる。
  */
 async function textRowPoint(page: Page) {
   return page.evaluate(() => {
@@ -129,8 +139,7 @@ async function textRowPoint(page: Page) {
  * **いま入力欄になっている行**の座標。
  *
  * 擬似 claude は罫線の枠を描かないので、入力欄は**カーソルの居る行**になる
- * （キーボード設計§13-2 の落とし先）。`keyboard.spec.ts` と同じ引き方をする——
- * **判定を写して組み立てると、実装と同じ思い込みを共有したまま緑になる。**
+ * （キーボード設計§13-2 の落とし先）。`keyboard.spec.ts` と同じ引き方をする。
  */
 async function inputRowPoint(page: Page) {
   return page.evaluate(() => {
@@ -148,16 +157,6 @@ async function inputRowPoint(page: Page) {
     const cell = screen.clientHeight / term.rows
     const outer = box.getBoundingClientRect()
     return { x: outer.x + outer.width / 2, y: rect.top + (row + 0.5) * cell }
-  })
-}
-
-/** いま端末が選んでいる文字。 */
-function selection(page: Page) {
-  return page.evaluate(() => {
-    const box = document.querySelector('[data-testid="terminal"]') as
-      | (HTMLDivElement & { __terminal?: Terminal })
-      | null
-    return box?.__terminal?.getSelection() ?? ''
   })
 }
 
@@ -179,52 +178,81 @@ async function openTerminal(page: Page) {
   await settle(page)
 }
 
-test('ログのあたりを長押しすると、その行が選ばれる', async ({ page }) => {
-  // **これが要件そのもの。** 長押しで文字を選べないのが出発点だった
+test('長押ししたら、文字の面が出る', async ({ page }) => {
+  // **これが要件そのもの。** 長押しで何も起きないのが出発点だった
+  await openTerminal(page)
+  await expect(page.getByTestId('terminal-text-sheet')).toBeHidden()
+
+  await press(page, await textRowPoint(page))
+
+  await expect(page.getByTestId('terminal-text-sheet')).toBeVisible()
+})
+
+test('面の中身は、ブラウザが選べる本物の文字になっている', async ({ page }) => {
+  // **端末の上ではこれが成立しない**（canvas に絵として描くので DOM に文字が無い）。
+  // 面へ出して初めて、OS の選択ハンドルとコピーのメニューが出る先ができる
   await openTerminal(page)
 
   await press(page, await textRowPoint(page))
 
-  await expect.poll(() => selection(page)).not.toBe('')
+  const 本文 = page.getByTestId('terminal-text-body')
+  await expect(本文).toContainText('[fake-claude] received: こんにちは')
+  // **計算値で見る。** クラス名の一致では、綴り違いも打ち消しも捕まえられない
+  const 選べるか = await 本文.evaluate((el) => getComputedStyle(el).userSelect)
+  expect(選べるか).toBe('text')
 })
 
-test('短くタップしただけでは選ばれない', async ({ page }) => {
-  // 否定側と対で置く。**常に選ぶ実装でも、上の1本だけなら通る**
+test('狭い画面でも、面の操作が見えている範囲に入る', async ({ page }) => {
+  // **前の版が落ちたのはここ。** 端末の右上に固定した的は、広い窓では見えていたが
+  // 実機では届かなかった（読むには拡大が要り、拡大すると窓の外へ出る）。
+  // 面を画面いっぱいに出す形に変えた担保がこれで、**隅へ戻す壊し方はここで落ちる**
+  await openTerminal(page)
+
+  await press(page, await textRowPoint(page))
+
+  const 窓 = page.viewportSize()
+  if (!窓) {
+    throw new Error('窓の大きさが取れません')
+  }
+  for (const 名 of ['terminal-text-close', 'terminal-text-copy']) {
+    const box = await page.getByTestId(名).boundingBox()
+    if (!box) {
+      throw new Error(`${名} の位置が取れません`)
+    }
+    expect(box.x).toBeGreaterThanOrEqual(0)
+    expect(box.y).toBeGreaterThanOrEqual(0)
+    expect(box.x + box.width).toBeLessThanOrEqual(窓.width)
+    expect(box.y + box.height).toBeLessThanOrEqual(窓.height)
+  }
+})
+
+test('短くタップしただけでは、面は出ない', async ({ page }) => {
+  // 否定側と対で置く。**常に出す実装でも、上の3本だけなら通る**
   await openTerminal(page)
 
   await press(page, await textRowPoint(page), 50)
 
-  expect(await selection(page)).toBe('')
+  await expect(page.getByTestId('terminal-text-sheet')).toBeHidden()
 })
 
-test('長押ししたら、コピーの的が出る', async ({ page }) => {
-  await openTerminal(page)
-  await expect(page.getByTestId('terminal-copy')).toBeHidden()
-
-  await press(page, await textRowPoint(page))
-
-  await expect(page.getByTestId('terminal-copy')).toBeVisible()
-})
-
-test('選んだあとにタップすると、選択も的も消える', async ({ page }) => {
-  // 残り続けると、**次に押したときに古い範囲が混ざる**
+test('閉じたら、面は消える', async ({ page }) => {
+  // **閉じられない面は、読む以外に何もできない画面になる**
   await openTerminal(page)
   await press(page, await textRowPoint(page))
-  await expect(page.getByTestId('terminal-copy')).toBeVisible()
+  await expect(page.getByTestId('terminal-text-sheet')).toBeVisible()
 
-  await press(page, await textRowPoint(page), 50)
+  await page.getByTestId('terminal-text-close').click()
 
-  await expect.poll(() => selection(page)).toBe('')
-  await expect(page.getByTestId('terminal-copy')).toBeHidden()
+  await expect(page.getByTestId('terminal-text-sheet')).toBeHidden()
 })
 
-test('入力欄の行は、長押ししても選ばれず、キーボードが開く', async ({ page }) => {
+test('入力欄の行は、長押ししても面が出ず、キーボードが開く', async ({ page }) => {
   // **前のイシューの約束1が、長押しの経路でも守られること。** 計時を先に始めて
   // 後から場所を見る形に壊すと、ここでだけ落ちる
   await openTerminal(page)
 
   await press(page, await inputRowPoint(page))
 
-  expect(await selection(page)).toBe('')
+  await expect(page.getByTestId('terminal-text-sheet')).toBeHidden()
   await expect.poll(() => inputMode(page)).toBe('text')
 })
