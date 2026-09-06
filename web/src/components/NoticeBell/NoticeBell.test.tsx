@@ -16,6 +16,7 @@ function notice(over: Partial<Notice> = {}): Notice {
     createdAt: Date.parse('2026-09-05T01:23:45'),
     seq: 連番,
     expiresAt: null,
+    retired: false,
     ...over,
   }
 }
@@ -28,8 +29,8 @@ describe('ベル', () => {
     render(
       <NoticeBell
         notices={[
-          { kind: 'send_input', message: '送れません', createdAt: 同時, seq: 1, expiresAt: null },
-          { kind: 'send_input', message: '送れません', createdAt: 同時, seq: 2, expiresAt: null },
+          { kind: 'send_input', message: '送れません', createdAt: 同時, seq: 1, expiresAt: null, retired: false },
+          { kind: 'send_input', message: '送れません', createdAt: 同時, seq: 2, expiresAt: null, retired: false },
         ]}
       />,
     )

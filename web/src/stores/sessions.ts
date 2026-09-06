@@ -116,12 +116,24 @@ export interface Notice {
    */
   seq: number
   /**
-   * いつ消えるか（`null` なら時間では消えない）。
+   * **定位置の1行から下ろす時刻**（`null` なら時間では下りない）。
+   *
+   * **器から捨てる時刻ではない。** 下りたあともベルには残る（[`retired`]）——
+   * かつては器ごと捨てていたが、それだと「5秒で消える」と「溜まったらベルから読める」が
+   * 両立しなかった（2026-09-06・利用者の指摘）。
    *
    * **`kind` から引いた結果をここへ焼いておく。** 読むたびに引き直すと、寿命の表を
    * 変えたときに**既に溜まっているものの寿命まで遡って変わる**。
    */
   expiresAt: number | null
+  /**
+   * **定位置の1行から下ろしたか。** ベルには残る。
+   *
+   * 下ろしたことを**印として持つ**——読むたびに `Date.now()` と比べる形にすると、
+   * `useSyncExternalStore` に渡す値が**知らせずに変わる**ことになる（React は同じ
+   * 描画の中で2度読んで食い違えば警告を出す）。印なら、変わるのは掃いた瞬間だけである。
+   */
+  retired: boolean
   /**
    * **そのまま押せる復旧**（ブランチ設計§4-3）。`undefined` なら押すものは無い。
    *
@@ -172,24 +184,21 @@ const 溜める上限 = 20
 /** 時間で消える種別の寿命（ミリ秒）。 */
 const 寿命 = 5_000
 
-/**
- * 時間では消えない種別（細かい修正 設計§7-3）。
- *
- * | 種別 | なぜ消さないか |
- * |---|---|
- * | `revive` | **空きメモリ不足のような、解消を観測する手段が無いもの**が混ざる。5秒で消すと押した理由そのものが読めなくなる |
- * | `not_found` | 恒常的な制約に近い。カードが消えれば一緒に消える（既存の道） |
- * | `sub_pty` | 端末が開けない。同上 |
- * | `branch` | **途中で失敗すると元の会話が席を失う**。5秒で消すと、会話が消えたと読む |
- *
- * **ここに無いものは 5 秒で消える。** 種別を足したら、消えないほうに入れるかを必ず決めること。
- */
-const 消えない: ReadonlySet<ErrorKind> = new Set([
-  'revive',
-  'branch',
-  'not_found',
-  'sub_pty',
-])
+/*
+  **種別によって寿命を分けるのはやめた**（2026-09-06・利用者の指定。細かい修正 設計§7-3）。
+
+  かつては `revive` / `not_found` / `sub_pty` / `branch` の4種を「消えない」側に置いて
+  いた。理由は「**解消を観測する手段が無いものを5秒で消すと、押した理由そのものが
+  読めなくなる**」だったが、**その理由はベルができた時点で成り立たなくなっていた**——
+  下ろしてもベルに残るなら、読める。
+
+  **残っていたのは、消える側も同じく読めないことのほう**だった。当時は寿命が来ると
+  器ごと捨てていたので、5秒で消える種別は**ベルからも消えていた**。利用者から見ると
+  「消える種別は読めなくなり、読める種別は消えない」——**どちらも約束どおりでない**。
+
+  いまは**全種別が5秒で行から下り、ベルには残る**。器から出るのは、カードが消えたとき・
+  読み込み直し・上限を溢れたとき・**次に同じ操作が通ったとき**の4つだけである。
+*/
 
 /**
  * 実体が無いカード（＝起こし直しの候補。復旧設計§3-1）。**作成順・絞り込み後**。
@@ -639,9 +648,12 @@ let 掃除の時計: ReturnType<typeof setTimeout> | null = null
 let 掃除の予定 = Number.POSITIVE_INFINITY
 
 /**
- * 寿命の来た断りを落とす。
+ * 寿命の来た断りを、**定位置の行から下ろす**。
  *
- * **`Date.now()` で判定して、時計は「次に落ちるもの」まで1本だけ張る。** 断りごとに
+ * **捨てない。** 下ろしたものはベルに残る——ここで器から出すと「溜まったらベルから
+ * 読める」が成り立たなくなる（2026-09-06 に直した。上の `expiresAt` の理由）。
+ *
+ * **`Date.now()` で判定して、時計は「次に下ろすもの」まで1本だけ張る。** 断りごとに
  * `setTimeout` を持つと、カードが消えたときに取り消し忘れた時計が残る。
  */
 function 掃く() {
@@ -650,24 +662,24 @@ function 掃く() {
   const いま = Date.now()
   let 次 = Number.POSITIVE_INFINITY
   for (const [cardId, 溜まり] of [...cardNotices]) {
-    const 残り = 溜まり.filter((notice) => {
-      if (notice.expiresAt === null) {
-        return true
+    let 下ろした = false
+    const 残り = 溜まり.map((notice) => {
+      if (notice.retired || notice.expiresAt === null) {
+        return notice
       }
       if (notice.expiresAt <= いま) {
-        return false
+        下ろした = true
+        // **新しい実体へ差し替える。** その場で書き換えると、配列も要素も同じものの
+        // ままなので、購読している側から「変わった」ことが見えない
+        return { ...notice, retired: true }
       }
       次 = Math.min(次, notice.expiresAt)
-      return true
+      return notice
     })
-    if (残り.length === 溜まり.length) {
+    if (!下ろした) {
       continue
     }
-    if (残り.length === 0) {
-      cardNotices.delete(cardId)
-    } else {
-      cardNotices.set(cardId, 残り)
-    }
+    cardNotices.set(cardId, 残り)
     notifyCard(cardId)
   }
   張り直す(次)
@@ -713,7 +725,8 @@ export function pushCardNotice(cardId: CardId, message: string, kind: ErrorKind 
     message,
     createdAt: いま,
     seq: 積んだ数,
-    expiresAt: 消えない.has(kind) ? null : いま + 寿命,
+    expiresAt: いま + 寿命,
+    retired: false,
     ...(recover === undefined ? {} : { recover }),
   }
   // 溢れたら古いほうから捨てる
@@ -754,17 +767,34 @@ export function useCardNotices(cardId: CardId): readonly Notice[] {
 const 空の溜まり: readonly Notice[] = []
 
 /**
- * そのカードに出ている**いちばん新しい**断りの文言（無ければ `null`）。
+ * そのカードの定位置に出ている断りの文言（無ければ `null`）。
  *
- * 画面の定位置に出す1行がこれ。**溜まっている全部を読むのはベル**（[`useCardNotices`]）で、
- * ここは「いま何が起きたか」だけを出す。
+ * **まだ行から下りていないもののうち、いちばん新しい1件**。溜まっている全部を読むのは
+ * ベル（[`useCardNotices`]）で、ここは「いま何が起きたか」だけを出す。
+ *
+ * **下りたものを飛ばす。** 飛ばさないと、寿命が来ても行に残り続ける——「5秒で消える」が
+ * どの種別でも成り立っていなかったのが、まさにこの形である（2026-09-06）。
  */
 export function useCardError(cardId: CardId): string | null {
   return useSyncExternalStore(
     (listener) => subscribeCard(cardId, listener),
-    () => cardNotices.get(cardId)?.at(-1)?.message ?? null,
+    () => 行に出すもの(cardId)?.message ?? null,
     () => null,
   )
+}
+
+/** 定位置の行に出す1件（無ければ `undefined`）。 */
+function 行に出すもの(cardId: CardId): Notice | undefined {
+  const 溜まり = cardNotices.get(cardId)
+  if (溜まり === undefined) {
+    return undefined
+  }
+  for (let i = 溜まり.length - 1; i >= 0; i -= 1) {
+    if (!溜まり[i].retired) {
+      return 溜まり[i]
+    }
+  }
+  return undefined
 }
 
 /** 起こし直しの候補（購読しない読み取り。テスト用）。 */

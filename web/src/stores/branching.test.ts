@@ -107,14 +107,29 @@ describe('席を失ったときの復旧', () => {
     })
   })
 
-  it('枝分かれの断りは、時間では消えない', () => {
-    // 5秒で消すと、**会話が消えた**と読まれる（設計§4-3）
+  it('枝分かれの断りは行から下りても、押せる呼び戻しはベルに残る', () => {
+    /*
+      **かつては「時間では消えない」種別だった**（設計§4-3）。5秒で消すと会話が消えたと
+      読まれる、という理由である。
+
+      **2026-09-06 に一律5秒へ揃えたが、この理由は失われていない**——`recover` を出すのは
+      **元からベルだけ**で、定位置の行には出していない。行から下りてもベルに残るので、
+      呼び戻しへの道は1歩も遠くなっていない。
+
+      **ここが崩れると、押した会話へ戻る道が消える。**
+    */
     const { result } = renderHook(() => useCardNotices(押した席))
     act(() => markBranching(押した席, 元の会話))
     act(() => pushCardNotice(押した席, '呼び戻せませんでした', 'branch'))
+
     act(() => vi.advanceTimersByTime(30_000))
-    expect(result.current).toHaveLength(1)
-    expect(result.current[0]?.expiresAt).toBeNull()
+
+    expect(result.current, 'ベルには残っている').toHaveLength(1)
+    expect(result.current[0]?.retired, '行からは下りている').toBe(true)
+    expect(result.current[0]?.recover, '呼び戻しは付いたまま').toEqual({
+      label: 'もう一度呼び戻す',
+      claudeSessionId: 元の会話,
+    })
   })
 
   it('押していない断りには、押せる道を付けない', () => {

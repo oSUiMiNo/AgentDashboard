@@ -37,12 +37,12 @@ function tsの種別(): string[] {
   return [...本体![1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1])
 }
 
-/** 「時間では消えない」と決めた種別を拾う。 */
-function 消えない(): string[] {
+/** 断りを積むところ（寿命を焼いている場所）を拾う。 */
+function 積むところ(): string {
   const src = 読む('src', 'stores', 'sessions.ts')
-  const 本体 = /const 消えない: ReadonlySet<ErrorKind> = new Set\(\[([^\]]*)\]\)/.exec(src)
-  expect(本体, '寿命の表を拾えていない').not.toBeNull()
-  return [...本体![1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1])
+  const 本体 = /export function pushCardNotice\([\s\S]*?\n\}/.exec(src)
+  expect(本体, '断りを積むところを拾えていない').not.toBeNull()
+  return 本体![0]
 }
 
 describe('断りの種別', () => {
@@ -56,18 +56,24 @@ describe('断りの種別', () => {
     expect(rustの種別().length).toBeGreaterThan(5)
   })
 
-  it('消えないと決めた種別は、実在する種別だけ', () => {
-    // 綴りを間違えると**その1件が黙って5秒側へ落ちる**。エラーは出ない
-    for (const kind of 消えない()) {
-      expect(tsの種別(), `${kind} は種別に無い`).toContain(kind)
-    }
+  it('寿命から外れる種別は、1つも無い', () => {
+    /*
+      **種別で寿命を分けるのはやめた**（2026-09-06・利用者の指定。設計§7-3）。
+      かつては4種を「消えない」側に置いていたが、**行から下ろしてもベルに残る**ので
+      分ける理由が消えた。
+
+      ここで見るのは**種別による分岐が復活していないこと**。1件でも外すと、その断りが
+      行に出たまま居座り、「ここに出るものは全部おなじ仕組み」が崩れる。
+    */
+    const 積む = 積むところ()
+    expect(積む, '寿命を焼いていない').toMatch(/expiresAt:\s*いま \+ 寿命,/)
+    // 種別を見て寿命を変える形（三項・`Set.has`・`includes`）が入っていないこと
+    const 寿命の行 = /expiresAt:([^\n]*)/.exec(積む)![1]
+    expect(寿命の行, '種別で寿命を分けている').not.toMatch(/kind|has\(|includes\(|\?/)
   })
 
-  it('カードが見つからない・端末が開けない・復旧の失敗・枝分かれの失敗は消えない側にいる', () => {
-    // 設計§7-3 の表。**ここが崩れると、押した理由が読む前に消える**
-    //
-    // `branch` を足したのはブランチ設計§4-3。**途中で失敗すると元の会話が席を失う**ので、
-    // 5秒で消すと利用者は会話が消えたと読む——しかも断りには呼び戻しの道が付いている
-    expect(消えない().sort()).toEqual(['branch', 'not_found', 'revive', 'sub_pty'])
+  it('下ろす印を持っている（器から捨てていない）', () => {
+    // **下ろすことと捨てることは別**。捨てるとベルからも消えて、溜めた意味が無くなる
+    expect(積むところ()).toMatch(/retired:\s*false,/)
   })
 })

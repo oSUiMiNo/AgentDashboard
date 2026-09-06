@@ -267,7 +267,10 @@ export function SessionView({
         **どのカードの話なのか分からなくなる**
       */}
       {(cardError !== null || notices.length > 0) && (
-        <div className="flex items-center gap-2">
+        // **ベルは右端に留める**（`justify-end`）。文言が行から下りると `flex-1` の相手が
+        // 居なくなるので、そのままだとベルが右から左へ飛ぶ——**同じものが動いただけ**
+        // なのに、別の何かが出たように見える
+        <div className="flex items-center justify-end gap-2">
           {cardError !== null && (
             // **`aria-live` を付ける**（細かい修正 設計§7-4）。5秒で消える形にすると、
             // 見ていない人には存在しなかったのと同じになる。遮らないよう `polite`
@@ -767,13 +770,15 @@ function ScreenInterval({ remote, shown }: { remote: boolean; shown: boolean }) 
  * 正はサーバ側（同設計§3-4）。ここで持つのは、押せないものを押せる形で出さないため。
  */
 function 枝分かれできる理由(session: SessionMeta): string | null {
-  // **状態では見分けられない条件が1つある**（ブランチ設計§3-4）。まだ1ターンも会話して
-  // いない席は、CLI 自身が `No conversation to branch` と断る——起こした直後の席も
-  // 「入力待ち」なので、状態の手前でこちらを見る。
-  // **題（`session_title`）では見分けられない**（実測で `None` のままだった）
-  if (session.last_assistant_message === null) {
-    return 'まだ枝分かれできません（この席はまだ1ターンも会話していません）'
-  }
+  // **会話があるかは、ここでは見ない**（2026-09-06 に外した。ブランチ設計§3-4）。
+  //
+  // かつては `last_assistant_message` の有無で先回りして殺していたが、**あの欄は
+  // `Stop` フックが運んできたときにだけ書かれる**ので、運ばれなかった席では永久に空に
+  // なる。とりわけ**呼び戻した席は必ず空**なので、**1本目を作ると2本目が作れなかった**。
+  //
+  // **画面は他のカードの履歴を持たない**ので、ここで判定すると必ず取りこぼす。
+  // 会話の有無はサーバが履歴を見て断る（`branch.rs` の `branchable`）——**押せてしまって
+  // 即座に断られるほうが、押せるはずのものが押せないより害が小さい。**
   switch (session.status.kind) {
     case 'waiting_input':
     case 'waiting_subagents':

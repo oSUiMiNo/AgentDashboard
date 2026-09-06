@@ -15,8 +15,8 @@ import {
  *
  * 守るべき約束は3つ。
  * - **上書きではなく積む**（続けざまに断られたとき、新しいほうが前のものを消さない）
- * - **寿命は種別で割る**（読む前に消えてよいものと、そうでないものがある）
- * - **消えるのは「時間が来た」か「次に同じ操作が通った」ときだけ**
+ * - **寿命は「定位置の行から下ろす」であって「器から捨てる」ではない**（下ろしてもベルに残る）
+ * - **器から出るのは「次に同じ操作が通った」「カードが消えた」「溢れた」「読み込み直し」の4つだけ**
  */
 
 const A = 'aaaaaaaa-0000-0000-0000-000000000001'
@@ -111,86 +111,89 @@ describe('積む器', () => {
 })
 
 describe('寿命', () => {
-  it('モードの切替・モデルの切替・入力の送信は5秒で消える', () => {
-    const { result } = renderHook(() => useCardNotices(A))
-    act(() => {
-      pushCardNotice(A, 'モード', 'permission_mode')
-      pushCardNotice(A, 'モデル', 'model')
-      pushCardNotice(A, '送信', 'send_input')
-    })
-    expect(result.current).toHaveLength(3)
+  it('どの種別も、5秒で定位置の行から下りる', () => {
+    /*
+      **種別で分けるのはやめた**（2026-09-06・利用者の指定）。かつては復旧・見つからない・
+      端末が開けない・枝分かれの4種を「消えない」側に置いていたが、**下ろしてもベルに
+      残るなら読める**ので、分ける理由が無くなった。
+    */
+    const { result } = renderHook(() => useCardError(A))
+    for (const kind of [
+      'permission_mode',
+      'model',
+      'send_input',
+      'revive',
+      'not_found',
+      'sub_pty',
+      'branch',
+      'other',
+    ] as const) {
+      act(() => {
+        clearCardNotices(A)
+        pushCardNotice(A, `${kind} が断られました`, kind)
+      })
+      expect(result.current, kind).toBe(`${kind} が断られました`)
+
+      act(() => void vi.advanceTimersByTime(5_000))
+
+      expect(result.current, kind).toBeNull()
+    }
+  })
+
+  it('行から下りても、ベルには残る', () => {
+    /*
+      **ここが 2026-09-06 に直したところ。** かつては寿命が来ると器ごと捨てていたので、
+      「5秒で消える」種別は**ベルからも消えていた**——利用者から見ると「消える種別は
+      読めなくなり、読める種別は消えない」で、どちらも約束どおりでなかった。
+    */
+    const 行 = renderHook(() => useCardError(A))
+    const ベル = renderHook(() => useCardNotices(A))
+    act(() => pushCardNotice(A, '見つかりません', 'not_found'))
 
     act(() => void vi.advanceTimersByTime(5_000))
 
-    expect(result.current).toHaveLength(0)
+    expect(行.result.current, '行からは下りている').toBeNull()
+    expect(ベル.result.current, 'ベルには残っている').toHaveLength(1)
+    expect(ベル.result.current[0].message).toBe('見つかりません')
+    expect(ベル.result.current[0].retired).toBe(true)
   })
 
-  it('5秒より前には消えない', () => {
-    const { result } = renderHook(() => useCardNotices(A))
+  it('5秒より前には下りない', () => {
+    const { result } = renderHook(() => useCardError(A))
     act(() => pushCardNotice(A, 'モード', 'permission_mode'))
 
     act(() => void vi.advanceTimersByTime(4_900))
 
-    expect(result.current).toHaveLength(1)
+    expect(result.current).toBe('モード')
   })
 
-  it('復旧の失敗は消えない', () => {
-    /*
-      **空きメモリ不足のような、解消を観測する手段が無いもの**が混ざる。5秒で消すと、
-      押した理由そのものが読めなくなる（設計§7-3）。
-    */
-    const { result } = renderHook(() => useCardNotices(A))
-    act(() => pushCardNotice(A, '空きが足りません', 'revive'))
-
-    act(() => void vi.advanceTimersByTime(60_000))
-
-    expect(result.current).toHaveLength(1)
-  })
-
-  it('カードが見つからない・端末が開けない も消えない', () => {
-    const { result } = renderHook(() => useCardNotices(A))
-    act(() => {
-      pushCardNotice(A, '見つかりません', 'not_found')
-      pushCardNotice(A, '端末を開けません', 'sub_pty')
-    })
-
-    act(() => void vi.advanceTimersByTime(60_000))
-
-    expect(result.current).toHaveLength(2)
-  })
-
-  it('種別を持たない断りは、その他として5秒で消える', () => {
-    // 欄を持たない古いサーバから来たものがここに落ちる
-    const { result } = renderHook(() => useCardNotices(A))
-    act(() => pushCardNotice(A, '何かに失敗しました'))
-
-    act(() => void vi.advanceTimersByTime(5_000))
-
-    expect(result.current).toHaveLength(0)
-  })
-
-  it('消える時刻は積んだ瞬間に決まる（あとから寿命の表を変えても遡らない）', () => {
+  it('下ろす時刻は積んだ瞬間に決まる（あとから寿命の表を変えても遡らない）', () => {
     const { result } = renderHook(() => useCardNotices(A))
     act(() => pushCardNotice(A, 'モード', 'permission_mode'))
-    expect(result.current[0].expiresAt).not.toBeNull()
-    act(() => {
-      clearCardNotices(A)
-      pushCardNotice(A, '起こせません', 'revive')
-    })
-    expect(result.current[0].expiresAt).toBeNull()
-  })
-
-  it('寿命の違うものが混ざっていても、来たものから順に消える', () => {
-    const { result } = renderHook(() => useCardNotices(A))
-    act(() => {
-      pushCardNotice(A, 'モード', 'permission_mode')
-      pushCardNotice(A, '起こせません', 'revive')
-    })
+    const 焼いた時刻 = result.current[0].expiresAt
+    expect(焼いた時刻).not.toBeNull()
 
     act(() => void vi.advanceTimersByTime(5_000))
 
-    expect(result.current).toHaveLength(1)
-    expect(result.current[0].kind).toBe('revive')
+    // 下ろしたあとも、焼いた時刻はそのまま残る（読むたびに引き直していない証拠）
+    expect(result.current[0].expiresAt).toBe(焼いた時刻)
+  })
+
+  it('来たものから順に下り、行には次に新しいものが出る', () => {
+    const 行 = renderHook(() => useCardError(A))
+    act(() => pushCardNotice(A, '先', 'permission_mode'))
+    act(() => void vi.advanceTimersByTime(2_000))
+    act(() => pushCardNotice(A, '後', 'model'))
+    expect(行.result.current).toBe('後')
+
+    // 先のぶんだけ寿命が来る（後のぶんはあと2秒ある）
+    act(() => void vi.advanceTimersByTime(3_000))
+
+    expect(行.result.current, '後のぶんはまだ行に居る').toBe('後')
+
+    act(() => void vi.advanceTimersByTime(2_000))
+
+    expect(行.result.current).toBeNull()
   })
 })
 

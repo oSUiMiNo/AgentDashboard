@@ -124,15 +124,41 @@ test('巡回に入らないモードを選ぶと理由が画面に出る', async
   await expect(page.getByTestId('notice-item').first()).toContainText('切り替えられません')
   await page.keyboard.press('Escape')
 
+  await view.screenshot({ path: '/tmp/notice-出た直後.png' })
+  const ベルの右端 = async () => {
+    const box = await view.getByTestId('notice-bell').boundingBox()
+    expect(box, 'ベルの位置を測れていない').not.toBeNull()
+    return box!.x + box!.width
+  }
+  const 下りる前 = await ベルの右端()
+
   /*
-    **5秒で消える**（同 §7-3）。モードの切替は単発の操作結果なので流してよい——
+    **5秒で行から下りる**（同 §7-3）。モードの切替は単発の操作結果なので流してよい——
     要件が名指ししていた「ずっと出続けて邪魔」がこれである。
 
     **消えるところまで見る。** jsdom では時計を進めれば済むが、実際に消えるかは
     ここでしか分からない。
   */
   await expect(view.getByTestId('card-error')).toHaveCount(0, { timeout: 15_000 })
-  await expect(view.getByTestId('notice-bell')).toHaveCount(0)
+
+  /*
+    **ベルは残る**（2026-09-06 に直した。同 §7-3）。かつてここは `toHaveCount(0)` で、
+    **行から下りると同時にベルからも消える**ことを固定していた——それだと
+    「5秒で消える＋溜まったらベルから読める」の後半が成り立たない。
+
+    **下りたものも読めることまで見る。** 数字が残っているだけでは、中身が空かどうか
+    分からない。
+  */
+  await expect(view.getByTestId('notice-bell')).toBeVisible()
+  /*
+    **ベルは動かない。** 文言が下りると `flex-1` の相手が居なくなるので、留めておかないと
+    右から左へ飛ぶ——**同じものが動いただけ**なのに、別の何かが出たように見える。
+  */
+  expect(await ベルの右端(), 'ベルが横へ飛んでいる').toBeCloseTo(下りる前, 0)
+  await view.screenshot({ path: '/tmp/notice-下りたあと.png' })
+  await view.getByTestId('notice-bell').click()
+  await expect(page.getByTestId('notice-item').first()).toContainText('切り替えられません')
+  await page.keyboard.press('Escape')
 })
 
 test('片方を切り替えても、もう片方の表示は変わらない', async ({ page }) => {
