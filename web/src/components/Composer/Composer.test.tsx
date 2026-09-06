@@ -17,6 +17,7 @@ import { Composer } from './Composer'
 import { anyComposerBusy } from '@/lib/composerBusy'
 import type { CardId } from '@/lib/protocol'
 import * as hostfs from '@/lib/hostfs'
+import * as sessions from '@/stores/sessions'
 import { clearSessions, setCardError } from '@/stores/sessions'
 import { useWsStore } from '@/stores/ws'
 
@@ -305,6 +306,36 @@ describe('送る', () => {
     await waitFor(() =>
       expect(sendInput).toHaveBeenCalledWith(CARD, 'ふつうの指示', []),
     )
+  })
+
+  it('つながりが切れて送れないときは、断りを出して文を残す', async () => {
+    /*
+      **以前は黙って戻っていた**（2026-09-06）。線が閉じていると `sendInput` は
+      送らずに偽を返すが、そこで何も出さずに戻るので、押した人からは
+      **「押したのに何も起きない」**だけになり、**送れていないことが画面のどこにも
+      出なかった**。
+
+      **吹き出しは出ない**（発言が青くなるのは claude が記録へ書いてからなので、
+      送れていない文が読まれた顔で並ぶことはない）。だから足りないのは色ではなく
+      **断りそのもの**である。
+    */
+    sendInput.mockReturnValue(false)
+    const 断り = vi.spyOn(sessions, 'pushCardNotice')
+    置く()
+    fireEvent.change(screen.getByTestId('composer-input'), {
+      target: { value: '届かない指示' },
+    })
+    fireEvent.submit(screen.getByTestId('composer'))
+
+    await waitFor(() => expect(断り).toHaveBeenCalledTimes(1))
+    // 種別は `send_input`。省くと、送信前の地ならし（`clearCardNotices`）で消えない
+    expect(断り.mock.calls[0]?.[2]).toBe('send_input')
+    // **打った文が残ることを、断り文の中でも約束している**
+    expect(断り.mock.calls[0]?.[1]).toContain('残してある')
+    // 実際に残っている（`setText('')` の手前で戻っている）
+    expect(
+      (screen.getByTestId('composer-input') as HTMLTextAreaElement).value,
+    ).toBe('届かない指示')
   })
 
   it('運びに失敗したら送らず、添付も入力欄の中身も残す', async () => {

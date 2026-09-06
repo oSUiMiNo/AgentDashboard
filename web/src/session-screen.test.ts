@@ -91,21 +91,57 @@ describe('コードの見せ方（2026-09-06・参考へそっくり寄せた）
     expect(規則![0]).toContain('in srgb, var(--bubble-ground) 81%, white')
   })
 
-  it('横スクロールバーは細く、軌道は透明', () => {
+  it('横スクロールバーは参考どおりの寸法で、軌道は透明', () => {
     /*
-      **両方書く。** 片方だけだと、もう一方のブラウザで太い既定のまま残る
-      （利用者が見ていたのがこれ）。
+      **参考の実測どおりに当てる**（2026-09-06）。画面写しは2倍で撮られており、
+      つまみは純色10px・ぼけ込み14px ＝ **CSS で6px**。帯12px の中へ縁3pxぶん
+      透かして置くと、この見え方になる。
 
-      **`INDEX` 全体に対して探さないこと。** `scrollbar-width: thin` は `.slash-card`
-      にもあるので、**コードブロックから消しても文字列は残る**——実際それで壊し方が
-      空振りした（2026-09-06）。**規則の中身を取り出してから見る。**
+      **`INDEX` 全体に対して探さないこと。** 同じ字は `.slash-card` にもあるので、
+      **コードブロックから消しても文字列は残る**——実際それで壊し方が空振りした
+      （2026-09-06）。**規則の中身を取り出してから見る。**
     */
-    const 規則 = /\.prose-dashboard pre,\n\.prose-dashboard table \{([\s\S]*?)\n\}/.exec(INDEX)
-    expect(規則, 'コードブロックのスクロールバー規則が見つからない').not.toBeNull()
-    expect(規則![1]).toContain('scrollbar-width: thin')
-    expect(規則![1]).toContain('var(--code-thumb')
-    expect(INDEX).toMatch(/::-webkit-scrollbar\s*\{[\s\S]*?height:\s*8px/)
+    // **ここも規則の中身を取り出す。** `[\s\S]*?` で `{` の先を探すと、規則の外へ
+    // 滑って `.slash-card` 側の同じ字に当たる——**実際それで空振りした**（2026-09-06）
+    const 帯 =
+      /\.prose-dashboard pre::-webkit-scrollbar,\n\.prose-dashboard table::-webkit-scrollbar \{([\s\S]*?)\n\}/.exec(
+        INDEX,
+      )
+    expect(帯, 'コードブロックの帯の規則が見つからない').not.toBeNull()
+    expect(帯![1]).toContain('height: 12px')
+    const つまみ =
+      /\.prose-dashboard pre::-webkit-scrollbar-thumb,\n\.prose-dashboard table::-webkit-scrollbar-thumb \{([\s\S]*?)\n\}/.exec(
+        INDEX,
+      )
+    expect(つまみ, 'コードブロックのつまみの規則が見つからない').not.toBeNull()
+    expect(つまみ![1]).toContain('var(--code-thumb')
+    // 帯12px から見えるつまみ6px を作るのは、この2行の組（片方だけでは効かない）
+    expect(つまみ![1]).toContain('border: 3px solid transparent')
+    expect(つまみ![1]).toContain('background-clip: content-box')
     expect(INDEX).toMatch(/::-webkit-scrollbar-track[\s\S]*?background:\s*transparent/)
+  })
+
+  it('標準プロパティは、擬似要素を持たないブラウザにだけ渡す', () => {
+    /*
+      **これが「太さが足りない」の原因だった**（2026-09-06）。`scrollbar-width` /
+      `scrollbar-color` を初期値以外にすると、**Chromium は `::-webkit-scrollbar` を
+      丸ごと無視する**。前は両方を素で書いていたので `height` が1度も効かず、
+      Chromium が決めた `thin` の細さがそのまま出ていた。
+
+      **数えるのは「素で書かれた `scrollbar-width` が0個」。** 規則を1つ直しても
+      別の規則に残っていれば意味が無いので、**ファイル全体で数える**——ここだけは
+      全体を見るのが正しい（上の空振りとは向きが逆で、**残っていたら落とす**）。
+    */
+    const 素 = INDEX.replace(/\/\*[\s\S]*?\*\//g, '')
+    const 全部 = [...素.matchAll(/scrollbar-width:/g)]
+    expect(全部.length, 'scrollbar-width が1つも無い（較正が外れている）').toBeGreaterThan(0)
+    for (const 当たり of 全部) {
+      const 手前 = 素.slice(0, 当たり.index)
+      const 直前の門 = 手前.lastIndexOf('@supports not selector(::-webkit-scrollbar)')
+      expect(直前の門, `素で書かれた scrollbar-width がある（位置 ${当たり.index}）`).toBeGreaterThan(-1)
+      // その門の中に居ること——門より後に閉じ括弧だけの行が来ていたら外へ出ている
+      expect(手前.slice(直前の門)).not.toMatch(/\n\}\n\}/)
+    }
   })
 })
 

@@ -298,20 +298,36 @@
   overflow-x: auto;
 }
 /*
-  **細い横スクロールバー**（参考に合わせる）。**軌道は透明**にして、つまみだけを見せる。
+  **横スクロールバーは参考そのままを再現する**（利用者の指定・2026-09-06）。
+  **軌道は透明**にして、つまみだけを見せる。
 
-  `scrollbar-width` は Firefox 系、`::-webkit-scrollbar` は Chromium 系。**両方書く**——
-  片方だけだと、もう一方のブラウザで**太い既定のまま**になる（利用者が見ていたのがこれ）。
+  **目分量ではなく画素で測って当てた。** 参考の画面写しは2倍で撮られている
+  （箱の中のコードの行送りが 42px ＝ CSS 21px の2倍）。つまみは**純色で10px・
+  縁のぼけまで入れて14px**なので、CSS では**つまみ6px**にあたる。帯を12pxにして
+  つまみを縁3pxぶん透かすと、この見え方になる。
+
+  # `scrollbar-width` を Chromium へ書いてはいけない
+  標準プロパティ（`scrollbar-width` / `scrollbar-color`）を初期値以外にすると、
+  Chromium は**`::-webkit-scrollbar` を丸ごと無視する**。前はここに両方を書いて
+  いたので、**`height: 8px` は1度も効かず**、Chromium が決めた `thin` の細さが
+  そのまま出ていた——**利用者が「太さが足りない」と言っていたのはこれである。**
+
+  そこで**標準プロパティは `::-webkit-scrollbar` を持たないブラウザにだけ**渡す。
+  Firefox 系はそちら（`thin`）、Chromium 系は下の擬似要素で寸法まで決める。
+  **`@supports not selector(...)` で分ける**のは、ブラウザ名を書かずに
+  「その書き方が効くか」で分けるためである。
 */
-.prose-dashboard pre,
-.prose-dashboard table {
-  scrollbar-width: thin;
-  scrollbar-color: var(--code-thumb, rgb(255 255 255 / 22%)) transparent;
+@supports not selector(::-webkit-scrollbar) {
+  .prose-dashboard pre,
+  .prose-dashboard table {
+    scrollbar-width: thin;
+    scrollbar-color: var(--code-thumb, rgb(255 255 255 / 22%)) transparent;
+  }
 }
 .prose-dashboard pre::-webkit-scrollbar,
 .prose-dashboard table::-webkit-scrollbar {
-  height: 8px;
-  width: 8px;
+  height: 12px;
+  width: 12px;
 }
 .prose-dashboard pre::-webkit-scrollbar-track,
 .prose-dashboard table::-webkit-scrollbar-track {
@@ -321,6 +337,9 @@
 .prose-dashboard table::-webkit-scrollbar-thumb {
   background: var(--code-thumb, rgb(255 255 255 / 22%));
   border-radius: 99px;
+  /* 帯12px のうち、見えるつまみを6pxにする（参考の実測） */
+  border: 3px solid transparent;
+  background-clip: content-box;
 }
 .prose-dashboard pre code { background: none; padding: 0; }
 .prose-dashboard blockquote {
@@ -669,13 +688,21 @@
   /* 中の字は本文と同じ大きさに落とす。カードが本文より目立つと主従が逆転する */
   max-height: 32rem;
   overflow: auto;
-  /* スクロールバーはコードブロックと同じ細さに揃える（2026-09-06） */
-  scrollbar-width: thin;
-  scrollbar-color: var(--code-thumb, rgb(255 255 255 / 22%)) transparent;
+}
+/*
+  スクロールバーはコードブロックと**同じ寸法に揃える**（2026-09-06）。
+  分け方の理由は上の「参考そのままを再現する」に書いた——**ここで
+  `scrollbar-width` を Chromium へ書くと、下の寸法が効かなくなる。**
+*/
+@supports not selector(::-webkit-scrollbar) {
+  .slash-card {
+    scrollbar-width: thin;
+    scrollbar-color: var(--code-thumb, rgb(255 255 255 / 22%)) transparent;
+  }
 }
 .slash-card::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 12px;
+  height: 12px;
 }
 .slash-card::-webkit-scrollbar-track {
   background: transparent;
@@ -683,6 +710,8 @@
 .slash-card::-webkit-scrollbar-thumb {
   background: var(--code-thumb, rgb(255 255 255 / 22%));
   border-radius: 99px;
+  border: 3px solid transparent;
+  background-clip: content-box;
 }
 
 

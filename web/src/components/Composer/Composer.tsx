@@ -85,7 +85,7 @@ import { isComposerSubmit } from '@/lib/keys'
 import { isEnded, type SessionStatus } from '@/lib/protocol'
 import type { CardId } from '@/lib/protocol'
 import { useAuthStore } from '@/stores/auth'
-import { clearCardNotices, useCardError } from '@/stores/sessions'
+import { clearCardNotices, pushCardNotice, useCardError } from '@/stores/sessions'
 import { useWsStore } from '@/stores/ws'
 
 /**
@@ -303,6 +303,21 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
 
     // **送れたときだけ消す。** 送れていない文が消えるのが、いちばん困る形
     if (!sendInput(cardId, text, paths)) {
+      // **黙って戻らない**（2026-09-06）。線が閉じていると `sendInput` は送らずに
+      // 偽を返すが、ここは以前**何も出さずに戻っていた**——押した人から見ると
+      // 「押したのに何も起きない」だけで、**送れていないことが画面のどこにも出ない**。
+      //
+      // **吹き出しは出ない。** 発言が青い吹き出しになるのは、claude が記録へ書いて
+      // パーサがノードを出したときだけなので、**送れていない文が読まれた顔で並ぶ
+      // ことはない**。だから足りないのは色ではなく、**断りそのもの**である。
+      //
+      // **打った文はそのまま残る**（上の早期 return が `setText('')` の手前にある）
+      // ので、線が戻ったら押し直せばよい。そのことも書いて渡す。
+      pushCardNotice(
+        cardId,
+        '送れていません（つながりが切れています）。打った文はそのまま残してあるので、つながり直してから送り直してください',
+        'send_input',
+      )
       return
     }
 
