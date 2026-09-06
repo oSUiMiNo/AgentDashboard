@@ -199,12 +199,19 @@ describe('地の色は、青から作る（要件1-3）', () => {
   })
 
   it('器の中の面も、同じ派生に乗る', () => {
-    // 囲みコード・表・引用は `--bubble-ground` から作ってあるので、
-    // **派生元を差し替える形にしてある限り**待機中でも自動で付いてくる
-    expect(INDEX).toContain('.speech-bubble .prose-dashboard code')
+    /*
+      囲みコード・表・引用は `--bubble-ground` から作ってあるので、
+      **派生元を差し替える形にしてある限り**待機中でも自動で付いてくる。
+
+      **【2026-09-06】渡し方が「上書きの規則」から「変数」へ変わった。** 参考
+      （ChatGPT）へそっくり寄せるにあたり、インラインとブロックが同じ地を使う形に
+      なったので、**2つへ同じ値を配る変数**にしてある。**派生元が `--bubble-ground`
+      であることは変わっていない**ので、この節の狙いはそのまま満たされる。
+    */
     expect(INDEX).toMatch(
-      /\.speech-bubble \.prose-dashboard code \{\s*background: color-mix\(in oklch, var\(--bubble-ground\)/,
+      /\.speech-bubble \{\s*--code-ground: color-mix\(in srgb, var\(--bubble-ground\)/,
     )
+    expect(INDEX).toContain('--code-thumb: color-mix(in srgb, var(--bubble-ground)')
   })
 
   it('特異度で並ばず、2クラスで上書きしている', () => {

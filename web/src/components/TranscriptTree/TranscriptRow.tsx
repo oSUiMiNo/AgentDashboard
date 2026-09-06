@@ -313,7 +313,7 @@ function RewoundHeader({
         <span className="text-muted-foreground min-w-0 shrink truncate">
           {row.expanded ? '' : '（クリックで表示）'}
         </span>
-        <span aria-hidden className="text-muted-foreground shrink-0 text-xs">
+        <span aria-hidden className="chevron-mark text-muted-foreground shrink-0 text-xs">
           {chevron(row.expanded)}
         </span>
       </button>
@@ -357,7 +357,7 @@ function ActivityHeader({ row, onToggle }: { row: ActivityRow; onToggle: () => v
             <span className="text-red-400">-{row.diff.removed}</span>
           </span>
         )}
-        <span aria-hidden className="text-muted-foreground shrink-0 text-xs">
+        <span aria-hidden className="chevron-mark text-muted-foreground shrink-0 text-xs">
           {chevron(row.expanded)}
         </span>
       </button>
@@ -421,7 +421,7 @@ function NodeRowView({
           <span className="text-muted-foreground min-w-0 shrink truncate">{summary(row.node)}</span>
           {/* 記号は**テキストのすぐ後ろ**。右端へ寄せない（設計§5-2） */}
           {row.expandable && (
-            <span aria-hidden className="text-muted-foreground shrink-0 text-xs">
+            <span aria-hidden className="chevron-mark text-muted-foreground shrink-0 text-xs">
               {chevron(row.expanded)}
             </span>
           )}
@@ -816,9 +816,15 @@ function MarkdownBody({
           //
           // 角丸としっぽは `.speech-bubble` が持つ（設計§5-4）。**地の色もあちらが
           // 1箇所で持つ**ので、ここで `bg-*` を重ねないこと——2箇所になった時点でずれる
-          className={`speech-bubble row-shell mt-1 max-w-[70%] px-3 py-2${
-            machine ? ' speech-bubble-machine' : ''
-          }${queuedClass}${fadeClass}`}
+          // **上限は、人が 70%・機械が 77%**（2026-09-06・利用者の指定「人間以外の
+          // メッセージの吹き出しの横幅上限を1.1倍にして。人間の方は今のまま」）。
+          //
+          // **行の設計§5-3 の「幅いっぱいにしない」と矛盾しない。** あちらが 70% にした
+          // 理由は「**右寄せであることが読み取れなくなる**」ことで、**左寄せの機械には
+          // 当たらない**——それでも 77% なら 23% の余白が残るので、左に寄っていることは読める
+          className={`speech-bubble row-shell mt-1 px-3 py-2 ${
+            machine ? 'max-w-[77%]' : 'max-w-[70%]'
+          }${machine ? ' speech-bubble-machine' : ''}${queuedClass}${fadeClass}`}
         >
           {/* **誰が入れたかを名乗らせる**（利用者の指定・設計§1-1）。開かないと
               出どころが分からない状態にしない。**この1行は本文の外**なので、

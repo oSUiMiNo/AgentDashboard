@@ -32,8 +32,80 @@ describe('吹き出しの横幅（§5-1）', () => {
     expect(規則![1]).toMatch(/min-width:\s*min\(20em,\s*70%\)/)
   })
 
-  it('上限は 70% のまま', () => {
-    expect(ROW).toContain('max-w-[70%]')
+  it('上限は、人が 70%・機械が 77%', () => {
+    // **1.1倍は機械だけ**（2026-09-06・利用者の指定「人間の方は今のまま」）。
+    // 数は字で書く——実装の定数から組み立てると、一緒に動いて通ってしまう
+    expect(ROW).toContain("machine ? 'max-w-[77%]' : 'max-w-[70%]'")
+  })
+})
+
+describe('機械の吹き出しの地（2026-09-06・鮮やかにした）', () => {
+  const 規則 = /\.speech-bubble-machine \{([\s\S]*?)\n\}/.exec(INDEX)
+
+  it('濁っていた古い色は、どこにも残っていない', () => {
+    // 前は `#4a3410`＝C=0.060 で、人の青（C=0.106）の56%しか彩度が無かった
+    expect(INDEX).not.toContain('#4a3410')
+  })
+
+  it('採用した色になっている', () => {
+    expect(規則, '.speech-bubble-machine が見つからない').not.toBeNull()
+    expect(規則![1]).toContain('#714904')
+  })
+
+  it('地は1箇所でしか持たない', () => {
+    // 本体・しっぽ・中のコードが全部この1変数から引く（設計§6-4）。
+    // **2箇所になった時点でずれる**
+    expect((INDEX.match(/#714904/g) ?? []).length).toBe(1)
+  })
+})
+
+describe('コードの見せ方（2026-09-06・参考へそっくり寄せた）', () => {
+  it('インラインとブロックが同じ地を使う', () => {
+    /*
+      **参考（ChatGPT）は2つを同色にしている**——実測でどちらも `#2e5183` だった。
+      前はブロックだけ暗くしており（地＋黒12%）、**そこが最も食い違っていた**。
+    */
+    const code = /\.prose-dashboard code \{([\s\S]*?)\n\}/.exec(INDEX)
+    const pre = /\.prose-dashboard pre \{([\s\S]*?)\n\}/.exec(INDEX)
+    expect(code![1]).toContain('var(--code-ground')
+    expect(pre![1]).toContain('var(--code-ground')
+    // 暗くする書き方が残っていないこと
+    expect(INDEX).not.toContain('black 12%')
+  })
+
+  it('吹き出しの中では、地から実測どおりの割合で作る', () => {
+    /*
+      参考の実測を sRGB で解くと、**どちらも「地＋白」の単純な混色**だった。
+
+      ```
+      #173e76 + 白10% = #2e5183   （インライン／ブロック）
+      #173e76 + 白19% = #436390   （つまみ）
+      ```
+
+      **`in srgb` で書く。** 係数を sRGB のチャンネル値から解いたので、`in oklch` に
+      すると同じ数字でも別の色になる
+    */
+    const 規則 = /\.speech-bubble \{\n\s*--code-ground([\s\S]*?)\n\}/.exec(INDEX)
+    expect(規則, '--code-ground を定める規則が見つからない').not.toBeNull()
+    expect(規則![0]).toContain('in srgb, var(--bubble-ground) 90%, white')
+    expect(規則![0]).toContain('in srgb, var(--bubble-ground) 81%, white')
+  })
+
+  it('横スクロールバーは細く、軌道は透明', () => {
+    /*
+      **両方書く。** 片方だけだと、もう一方のブラウザで太い既定のまま残る
+      （利用者が見ていたのがこれ）。
+
+      **`INDEX` 全体に対して探さないこと。** `scrollbar-width: thin` は `.slash-card`
+      にもあるので、**コードブロックから消しても文字列は残る**——実際それで壊し方が
+      空振りした（2026-09-06）。**規則の中身を取り出してから見る。**
+    */
+    const 規則 = /\.prose-dashboard pre,\n\.prose-dashboard table \{([\s\S]*?)\n\}/.exec(INDEX)
+    expect(規則, 'コードブロックのスクロールバー規則が見つからない').not.toBeNull()
+    expect(規則![1]).toContain('scrollbar-width: thin')
+    expect(規則![1]).toContain('var(--code-thumb')
+    expect(INDEX).toMatch(/::-webkit-scrollbar\s*\{[\s\S]*?height:\s*8px/)
+    expect(INDEX).toMatch(/::-webkit-scrollbar-track[\s\S]*?background:\s*transparent/)
   })
 })
 
@@ -63,58 +135,57 @@ describe('「履歴」の帯（§5-2）', () => {
   })
 })
 
-describe('選択の印（§5-3）', () => {
-  const 規則 =
-    /\[data-testid='transcript-row'\]\[data-body-open='true'\] \.row-shell \{([\s\S]*?)\n\}/.exec(
-      INDEX,
-    )
+describe('選択の印（§5-3・2026-09-06 に器から記号へ移した）', () => {
+  it('器には、縦線も地の変化も残っていない', () => {
+    /*
+      **【2026-09-06】利用者の指定で、器の印を外した**（「畳み込みを展開した際に
+      吹き出しの色が変わる仕様は無しにしてほしい。あと左の水色の縦線もいらない」）。
 
-  it('印は行ではなく、中身の器に付いている', () => {
-    // **ださく見えた原因は線そのものではなく置き場所**だった——右寄せの吹き出しでは、
-    // 行の左端に引くと中身との間に画面3割ぶんの空白ができる
-    expect(規則, '器に当てる規則が見つからない').not.toBeNull()
-    // 行そのものへ当てる規則は残っていないこと
+      **2026-09-04 の「行から器へ移す」では足りなかった**ということである。移した先でも
+      「ださい」が残ったので、**器から降ろした**。
+    */
+    expect(INDEX).not.toMatch(/\[data-body-open='true'\] \.row-shell \{/)
+    expect(INDEX).not.toMatch(/\[data-expanded='true'\] \.row-shell \{/)
+    // 行そのものへ当てる規則も無いこと（こちらは 2026-09-04 に外したまま）
     expect(INDEX).not.toMatch(/\[data-body-open='true'\] \{/)
   })
 
-  it('本文を持つ種別は、どれも掛かりを持っている', () => {
+  it('Selected は、開いた行の記号が Primary Accent になることで残っている', () => {
     /*
-      **「3種類」は器の作り分け（吹き出し／`body-shell`／素）であって、行の種類ではない。**
-      ここを取り違えて `MarkdownBody` にだけ付けていたため、**ツールコールと未知の行は
-      開いても印が出なかった**——それらは `MarkdownBody` を通らない。
+      **消したのは置き場所であって Selected ではない。** §27.3 の候補のうち利用者が
+      却下したのは「背景 Tint」と「左側の Accent」の2つで、**「状態バッジ」は残っている**
+      ——記号（`›` / `⌄`）がそれにあたる。
+
+      これが無いと `DESIGN.md` §8 の床「目に見える反応3つ」が2つに落ちる。
+    */
+    const 規則 =
+      /\[data-testid='transcript-row'\]\[data-expanded='true'\] \.chevron-mark \{([\s\S]*?)\n\}/.exec(
+        INDEX,
+      )
+    expect(規則, '記号へ当てる規則が見つからない').not.toBeNull()
+    // 新しい色を増やしていない（`.slash-command` と同じシアン）
+    expect(規則![1]).toContain('#3dd9e6')
+  })
+
+  it('記号は3箇所すべてが印を持っている', () => {
+    // **1つでも付け忘れると、その種別だけ開いても印が出ない**——2026-09-04 に
+    // 器へ移したときも、同じ形で「ツールコールと未知の行だけ印が出ない」を踏んでいる
+    expect(ROW.match(/chevron-mark/g) ?? []).toHaveLength(3)
+  })
+
+  it('本文を持つ種別は、どれも器を持っている', () => {
+    /*
+      **印は器から降りたが、器そのものは残す。** ここは帯を敷く場所でもあるので、
+      外すと畳みの見た目が壊れる。
 
       内訳：`MarkdownBody` が4（吹き出し・`body-shell`・素を字下げの有無で2度）、
-      ツールコールが1、未知が1。**サブエージェントは本文を持たない**（子を出し入れする
-      だけ）ので対象外。
+      ツールコールが1、未知が1。**サブエージェントは本文を持たない**ので対象外。
     */
     expect(ROW.match(/row-shell/g) ?? []).toHaveLength(6)
     expect(ROW).toContain('speech-bubble row-shell')
     expect(ROW).toContain('body-shell row-shell')
-    // ツールコールと未知の器。**ここが落ちたら、その種別だけ印が消えている**
     expect(ROW).toContain('row-shell mt-1 ml-6 space-y-2')
     expect(ROW).toMatch(/row-shell[^"]*max-h-64/)
-  })
-
-  it('左辺の Accent と背景 Tint の2つを重ねている', () => {
-    // 1つだけだと §27.3 の言う「単なる 1px Border」に近づく
-    expect(規則![1]).toContain('inset 2px 0 0 var(--accent-edge)')
-    expect(規則![1]).toContain('var(--accent-face)')
-  })
-
-  it('行の高さを変えない（inset で描く）', () => {
-    expect(規則![1]).toMatch(/box-shadow:\s*\n?\s*inset/)
-    expect(規則![1]).not.toMatch(/\bborder(-\w+)?:/)
-  })
-
-  it('地は background-image で重ねる（吹き出しの地を上書きしない）', () => {
-    // `background` を書くと、地を1箇所で持つ約束（`--bubble-ground`）が壊れる
-    expect(規則![1]).toContain('background-image:')
-    expect(規則![1]).not.toMatch(/\n\s*background:/)
-  })
-
-  it('紫（--select）を使っていない', () => {
-    // あれは一覧のカード専用。構造化ビューはシアンのまま
-    expect(規則![1]).not.toContain('--select')
   })
 
   it('Hover と Pressed はそのまま残っている', () => {

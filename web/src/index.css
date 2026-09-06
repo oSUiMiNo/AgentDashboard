@@ -265,17 +265,62 @@
   `accent-color` の使用はコードベースでここが最初の1つ。
 */
 .prose-dashboard input[type='checkbox'] { margin-right: 0.45em; vertical-align: middle; accent-color: #3dd9e6; }
+/*
+  **コードの見せ方は、参考（ChatGPT）へほぼそっくりに寄せてある**（2026-09-06・利用者の
+  指定「一旦ほぼそっくりレベルに真似てほしい」）。
+
+  **参考の画素を実測して決めた。** 吹き出しの地が `#173e76` で、その上に載る
+  **インラインコードとコードブロックが同じ `#2e5183`**、スクロールバーのつまみが
+  `#436390`、**軌道は箱と同色＝実質透明**だった。
+
+  | 参考 | 実測 | 地との関係 |
+  |---|---|---|
+  | インラインコード | `#2e5183` | 地 ＋ 白10% |
+  | コードブロック | `#2e5183` | **同上（参考は2つを同色にしている）** |
+  | つまみ | `#436390` | 地 ＋ 白19% |
+
+  **前はブロックだけ暗くしていた**（地 ＋ 黒12%）。**そこが参考と最も食い違っていた**ので、
+  **同色へ揃えた**。インラインとブロックの区別は、地の明暗ではなく**大きさと角丸**が担う。
+
+  **なお `#173e76` は、もともとこの参考から採った青である**（`.speech-bubble` の
+  コメント「参考画像の画素を3,500点読んで確定した」）。だから実測で一致した。
+*/
 .prose-dashboard code {
-  background: var(--color-muted);
-  border-radius: 4px;
-  padding: 0.05em 0.35em;
+  background: var(--code-ground, var(--color-muted));
+  border-radius: 6px;
+  padding: 0.12em 0.4em;
   font-size: 0.9em;
 }
 .prose-dashboard pre {
-  background: var(--color-muted);
-  border-radius: 6px;
-  padding: 0.7em 0.9em;
+  background: var(--code-ground, var(--color-muted));
+  border-radius: 10px;
+  padding: 0.85em 1em;
   overflow-x: auto;
+}
+/*
+  **細い横スクロールバー**（参考に合わせる）。**軌道は透明**にして、つまみだけを見せる。
+
+  `scrollbar-width` は Firefox 系、`::-webkit-scrollbar` は Chromium 系。**両方書く**——
+  片方だけだと、もう一方のブラウザで**太い既定のまま**になる（利用者が見ていたのがこれ）。
+*/
+.prose-dashboard pre,
+.prose-dashboard table {
+  scrollbar-width: thin;
+  scrollbar-color: var(--code-thumb, rgb(255 255 255 / 22%)) transparent;
+}
+.prose-dashboard pre::-webkit-scrollbar,
+.prose-dashboard table::-webkit-scrollbar {
+  height: 8px;
+  width: 8px;
+}
+.prose-dashboard pre::-webkit-scrollbar-track,
+.prose-dashboard table::-webkit-scrollbar-track {
+  background: transparent;
+}
+.prose-dashboard pre::-webkit-scrollbar-thumb,
+.prose-dashboard table::-webkit-scrollbar-thumb {
+  background: var(--code-thumb, rgb(255 255 255 / 22%));
+  border-radius: 99px;
 }
 .prose-dashboard pre code { background: none; padding: 0; }
 .prose-dashboard blockquote {
@@ -479,11 +524,27 @@
   **`DESIGN.md` §11.2 の役割固定には当たらない。** これは種別の区別ではなく、
   **同じ器の中の面の階層**である。
 */
-.speech-bubble .prose-dashboard code {
-  background: color-mix(in oklch, var(--bubble-ground) 62%, white 8%);
-}
-.speech-bubble .prose-dashboard pre {
-  background: color-mix(in oklch, var(--bubble-ground) 70%, black 12%);
+/*
+  **【2026-09-06】参考（ChatGPT）の実測値へ寄せた。**
+
+  参考は吹き出しの地 `#173e76` の上で、**インラインもブロックも `#2e5183`**、
+  つまみが `#436390` だった。sRGB で解くと**どちらも「地 ＋ 白」の単純な混色**で、
+  白の割合はそれぞれ **10%** と **19%**（3チャンネルとも同じ係数で一致した）。
+
+  ```
+  #173e76 + 白10% = #2e5183   ← 参考のインライン／ブロックと完全一致
+  #173e76 + 白19% = #436390   ← 参考のつまみと完全一致
+  ```
+
+  **`in srgb` で書く。** 係数を sRGB のチャンネル値から解いたので、`in oklch` に
+  すると同じ数字でも別の色になる。
+
+  **変数で渡す。** 地の色を1箇所で持つ約束（設計§6-4）をそのまま使い、
+  **青にも琥珀にも同じ関係で効く**ようにしてある。
+*/
+.speech-bubble {
+  --code-ground: color-mix(in srgb, var(--bubble-ground) 90%, white);
+  --code-thumb: color-mix(in srgb, var(--bubble-ground) 81%, white);
 }
 .speech-bubble .prose-dashboard blockquote {
   border-left-color: color-mix(in oklch, var(--bubble-ground) 40%, white 25%);
@@ -529,8 +590,27 @@
   （設計§6-4「地の色は1箇所から取る」）。
 */
 .speech-bubble-machine {
-  /* 琥珀（§11.2 の Secondary Accent `#F5A623`）を、青と同じ暗さの地に落としたもの */
-  --bubble-ground: #4a3410;
+  /*
+    琥珀（§11.2 の Secondary Accent `#F5A623`）を地に落としたもの。**色相は琥珀のまま**
+    （H=73）で、動かしたのは明度と彩度だけなので**役割表は書き換えていない**。
+
+    **【2026-09-06】濁っていたので彩度を上げた**（利用者の指定「もう少し鮮やかに。
+    モダンでおしゃれな見た目にしたい」）。前は `#4a3410`＝**C=0.060 と、人の青
+    （`#173e76`・C=0.106）の56%しか彩度が無く**、琥珀ではなく濁った茶に見えていた。
+
+    **青と同じ暗さのままでは、青と同じ鮮やかさにできない。** 琥珀はもともと明るい色で、
+    L=0.369（青と同じ）で sRGB に収まる彩度は **C=0.079 が上限**である。**鮮やかさを取るなら
+    明度を上げるしかない**——ここが今回のトレードオフだった。
+
+    **3案を焼いて選んだ。**
+
+    | 案 | L / C | なぜ採らなかったか |
+    |---|---|---|
+    | A `#573804` | 0.369 / 0.076 | 青と同じ暗さを保てるが、**上限でも濁りが残る**（「もう少し鮮やか」に届かない） |
+    | B `#875804` | 0.500 / 0.105 | 青と同じ彩度に届くが、**青より明るく、機械が人より目立つ**。発言が主・機械が従という主従が逆転する。文字比も 5.23 と最も低い |
+    | **C `#714904`（採用）** | **0.440 / 0.092** | **濁りは取れ、青と対等な存在感に収まる。** 文字比 6.75 で床（4.5）に余裕がある |
+  */
+  --bubble-ground: #714904;
   /* 左上へしっぽを立てるので、角丸は右上へ戻す */
   border-top-right-radius: var(--bubble-radius);
   border-top-left-radius: 0;
@@ -589,6 +669,20 @@
   /* 中の字は本文と同じ大きさに落とす。カードが本文より目立つと主従が逆転する */
   max-height: 32rem;
   overflow: auto;
+  /* スクロールバーはコードブロックと同じ細さに揃える（2026-09-06） */
+  scrollbar-width: thin;
+  scrollbar-color: var(--code-thumb, rgb(255 255 255 / 22%)) transparent;
+}
+.slash-card::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.slash-card::-webkit-scrollbar-track {
+  background: transparent;
+}
+.slash-card::-webkit-scrollbar-thumb {
+  background: var(--code-thumb, rgb(255 255 255 / 22%));
+  border-radius: 99px;
 }
 
 
@@ -751,11 +845,35 @@
   **地は `background-image` で重ねる。** `background` を書くと、吹き出しの地
   （`--bubble-ground`）を1箇所で持つ約束を壊す。
 */
-[data-testid='transcript-row'][data-expandable='true'][data-expanded='true'] .row-shell,
-[data-testid='transcript-row'][data-body-open='true'] .row-shell {
-  /* **行の高さを変えない**（`inset` で描く） */
-  box-shadow: inset 2px 0 0 var(--accent-edge);
-  background-image: linear-gradient(var(--accent-face), var(--accent-face));
+/*
+  **【2026-09-06】器から印を外し、記号そのものへ移した**（利用者の指定
+  「畳み込みを展開した際に吹き出しの色が変わる仕様は無しにしてほしい。あと左の水色の
+  縦線もいらない」）。**上の【2026-09-04】は、移設では足りなかったということである。**
+
+  **「消すだけにしない」は守っている。** 消したのは**置き場所**であって Selected では
+  ない——**開閉の記号（`›` / `⌄`）が Primary Accent に変わる**ことで引き継いだ。
+  §27.3 の候補のうち利用者が却下したのは「背景 Tint」と「左側の Accent」の2つで、
+  **「状態バッジ」は残っている**。記号はまさにそれである。
+
+  **記号は前からあったが、色は付いていなかった**（`text-muted-foreground` のまま）。
+  **開いた行だけ色が変わる**ようにして初めて、記号が Selected を名乗れる。
+
+  **§11.2 の役割表に反していない。** Primary Accent の使い先は「現在地・**選択**・主要操作・
+  進行中」で、**選択がそのまま挙がっている**。新しい色も1つも増えていない（`.slash-command`
+  と同じ `#3dd9e6`）。
+
+  **床（§8「目に見える反応3つ」）はこう数える。**
+
+  | 反応 | どこ |
+  |---|---|
+  | Hover | 行のボタン（`hover:bg-muted/40`）と `.slash-command:hover` |
+  | **Selected** | **開いた行の記号が Primary Accent になる**（この規則） |
+  | Pressed | `[data-testid='transcript-row'] button:active` の縮み |
+
+  **器へ戻さないこと。** 戻すと利用者の指定に反する。
+*/
+[data-testid='transcript-row'][data-expanded='true'] .chevron-mark {
+  color: #3dd9e6;
 }
 
 /* §27.4 Pressed。行のトグルにも押した手応えを付ける（§8 の床「目に見える反応3つ」） */
