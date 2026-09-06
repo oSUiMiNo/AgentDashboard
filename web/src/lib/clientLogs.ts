@@ -64,6 +64,15 @@ export type ClientLogKind =
    * そのバッチが丸ごと 400 で拒まれ、同じ便を延々と送り直す**
    */
   | 'version_reload'
+  /**
+   * 構造化ビューが「末尾」と思っているのに、画面はまだ下に残している。
+   *
+   * **これも失敗ではない**（レベルは `INFO`）。利用者の「**一番下より少し上が
+   * 一番下と認識されている**」を、次に起きたときへ掴むための材料である。
+   * 綴りは `crates/protocol` の `ClientLogKind` と揃っていること——**あちらは
+   * 閉じた列挙なので、食い違うとそのバッチが丸ごと 400 で拒まれる**
+   */
+  | 'transcript_tail'
 
 export interface ClientLogEntry {
   ts: string

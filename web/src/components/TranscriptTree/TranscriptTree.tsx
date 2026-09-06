@@ -16,6 +16,7 @@
 
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
+import { report } from '@/lib/clientLogs'
 import type { CardId } from '@/lib/protocol'
 import type { FlatRow, NodeRow } from '@/stores/transcript'
 import { toggleActivity, toggleBody, toggleNode, toggleRewound, useTranscript } from '@/stores/transcript'
@@ -144,6 +145,8 @@ export function TranscriptTree({ cardId }: { cardId: CardId }) {
     落ち着くまでの数フレームは利用者が触る前なので、**上を読んでいる人を引き戻さない**
     という約束はここでは破れない（破れないことは E2E が見張っている）。
   */
+  // **1件の不具合でログを埋めないための印**（下の覗き口で使う）
+  const toldTail = useRef(false)
   const alignedToEnd = useRef(false)
   const lastHeight = useRef(-1)
   useLayoutEffect(() => {
@@ -172,7 +175,45 @@ export function TranscriptTree({ cardId }: { cardId: CardId }) {
       return
     }
     status.setAttribute('data-row-count', String(rows.length))
-    status.setAttribute('data-at-end', String(virtualizer.isAtEnd?.(END_THRESHOLD) ?? false))
+    const 末尾か = virtualizer.isAtEnd?.(END_THRESHOLD) ?? false
+    status.setAttribute('data-at-end', String(末尾か))
+
+    /*
+      **「末尾に着いた」と思っているのに、画面はまだ下を残していないか。**
+
+      利用者の報告（2026-09-06）——**「一番下より少し上の部分が一番下と認識されている」**。
+      再現できなかったので、**次に起きたときに掴めるようにする**（品質ガイドラインの
+      「原因を追うときは、コードを読む前にログを読む」が成り立つのは、記録が在るときだけで、
+      **この症状はどのログにも残っていなかった**）。
+
+      **疑っている筋も一緒に残す。** 仮想化が窓の高さを採るのは
+      `getBoundingClientRect()`＝**外枠**で、実際に中身が見えているのは `clientHeight`
+      である。**縁と、場所を取るスクロールバーのぶんだけ外枠のほうが高い**ので、
+      「末尾」の判定がその差だけ手前で立つ。**だから両方を残す**——差が効いているなら、
+      `外枠 - 見える高さ` と `残り` が揃って出る。
+
+      **数だけでなく材料を残すこと。** 結果（`at_end`）だけでは、材料が痩せているのが
+      原因のときに判定側をいくら読んでも矛盾が見つからない。
+    */
+    const box = scrollRef.current
+    if (!box || box.clientHeight === 0 || !末尾か) {
+      return
+    }
+    const 残り = box.scrollHeight - box.clientHeight - box.scrollTop
+    // **1回だけ言う。** 描画のたびに出すと、1件の不具合でログが埋まる
+    if (残り > END_THRESHOLD && !toldTail.current) {
+      toldTail.current = true
+      report(
+        'transcript_tail',
+        'INFO',
+        `末尾と判定したが、まだ下に ${Math.round(残り)}px 残っている` +
+          `（外枠 ${Math.round(box.getBoundingClientRect().height)} /` +
+          ` 見える高さ ${box.clientHeight} /` +
+          ` 位置 ${Math.round(box.scrollTop)} /` +
+          ` 総高 ${box.scrollHeight} / 行 ${rows.length}）`,
+        { cardId },
+      )
+    }
   })
 
   return (

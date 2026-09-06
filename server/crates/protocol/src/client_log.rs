@@ -226,6 +226,17 @@ pub enum ClientLogKind {
     /// 残すためのもので、レベルは `INFO` で来る。**分岐点が残らないと、読み直しが
     /// 不発だったときにログから原因を追えない**（実際に追えなかった）。
     VersionReload,
+    /// 構造化ビューが「末尾に着いた」と思っているのに、**画面はまだ下に残している**。
+    ///
+    /// **これも失敗ではない**（`VersionReload` と同じく `INFO` で来る）。利用者が
+    /// 「**一番下より少し上が一番下と認識されている**」と報告した症状を、次に起きたときへ
+    /// 掴めるようにするためのもの。**再現できなかったので、まず材料を残す**。
+    ///
+    /// **数だけでなく材料を載せる**（ガイドライン「画面判定のログには、結果だけでなく
+    /// 材料の量を残す」）——`scrollTop` / `scrollHeight` / `clientHeight` /
+    /// 場の外枠の高さ / 行数。**材料が痩せているのが原因のとき、判定側をいくら読んでも
+    /// 矛盾は見つからない。**
+    TranscriptTail,
 }
 
 impl ClientLogKind {
@@ -239,6 +250,7 @@ impl ClientLogKind {
             ClientLogKind::WsError => "ws_error",
             ClientLogKind::WsClose => "ws_close",
             ClientLogKind::VersionReload => "version_reload",
+            ClientLogKind::TranscriptTail => "transcript_tail",
         }
     }
 }
@@ -289,6 +301,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&ClientLogKind::VersionReload).unwrap(),
             r#""version_reload""#
+        );
+        assert_eq!(
+            serde_json::to_string(&ClientLogKind::TranscriptTail).unwrap(),
+            r#""transcript_tail""#
         );
         assert_eq!(ClientLogKind::VersionReload.as_str(), "version_reload");
     }
