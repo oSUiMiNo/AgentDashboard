@@ -856,7 +856,9 @@ function MarkdownBody({
               出どころが分からない状態にしない。**この1行は本文の外**なので、
               畳みの行数には数えない */}
           {label !== '' && (
-            <div data-testid="origin-label" className="mb-1 text-[11px] font-medium text-amber-200/80">
+            {/* **色はここに書かない。** 地が種別ごとに変わるので、琥珀を直に書くと
+                朱やオレンジの上で濁る。`index.css` が `--bubble-ground` から作る（設計§16-2） */}
+            <div data-testid="origin-label" className="mb-1 text-[11px] font-medium">
               {label}
             </div>
           )}

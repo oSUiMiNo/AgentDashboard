@@ -59,6 +59,56 @@ describe('機械の吹き出しの地（2026-09-06・鮮やかにした）', () 
   })
 })
 
+describe('種別ごとの地（2026-09-06・利用者の指定）', () => {
+  /*
+    **規則の中身を取り出して見る**（`DESIGN.md` §40.6）。`INDEX` 全体を探すと、
+    別の場所の同じ字に当たって**消しても落ちない**——同じ空振りを3度踏んでいる。
+  */
+  const 取り出す = (種別: string) =>
+    new RegExp(
+      `\\.speech-bubble\\.speech-bubble-machine\\[data-origin='${種別}'\\] \\{([\\s\\S]*?)\\n\\}`,
+    ).exec(INDEX)
+
+  it('サブエージェントの報告は、渡されたオレンジを暗くした地になる', () => {
+    // 数は字で書く。実装の定数から組み立てると、一緒に動いて通ってしまう
+    const 規則 = 取り出す('task_notification')
+    expect(規則, "[data-origin='task_notification'] が見つからない").not.toBeNull()
+    expect(規則![1]).toContain('#9e4c00')
+  })
+
+  it('他セッションからは、渡された朱を暗くした地になる', () => {
+    const 規則 = 取り出す('peer')
+    expect(規則, "[data-origin='peer'] が見つからない").not.toBeNull()
+    expect(規則![1]).toContain('#c9231a')
+  })
+
+  it('その他の機械は、琥珀のまま', () => {
+    // 利用者の指定は「**その他は今のままでOK**」。**種別ごとの規則は2つだけ**で、
+    // 3つ目が生えたら「その他は今のまま」が破れている
+    const 種別つき = INDEX.match(/\.speech-bubble-machine\[data-origin=/g) ?? []
+    expect(種別つき.length).toBe(2)
+  })
+
+  it('どの地も1箇所でしか持たない', () => {
+    expect((INDEX.match(/#9e4c00/g) ?? []).length).toBe(1)
+    expect((INDEX.match(/#c9231a/g) ?? []).length).toBe(1)
+  })
+
+  it('名乗りの行は、地から作る', () => {
+    /*
+      **琥珀を直に書くと、朱やオレンジの上で濁る。** 地が3色になった以上、
+      名乗りも地から引かないと1箇所主義が破れる（設計§16-2）。
+    */
+    const 規則 = /\.speech-bubble-machine \[data-testid='origin-label'\] \{([\s\S]*?)\n\}/.exec(
+      INDEX,
+    )
+    expect(規則, 'origin-label の規則が見つからない').not.toBeNull()
+    expect(規則![1]).toContain('var(--bubble-ground)')
+    // TSX 側に色が残っていると、CSS と2箇所になって必ずずれる
+    expect(ROW).not.toContain('text-amber-200/80')
+  })
+})
+
 describe('コードの見せ方（2026-09-06・参考へそっくり寄せた）', () => {
   it('インラインとブロックが同じ地を使う', () => {
     /*
