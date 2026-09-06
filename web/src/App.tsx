@@ -204,7 +204,7 @@ function Shell() {
                 文字のまま：要件が名指ししているのは「設定」だけで、**言われていない
                 ものを揃えるために変えない**。
               */}
-              <Button asChild variant="ghost" size="icon-sm">
+              <Button asChild variant="ghost" size="icon-xl">
                 <Link
                   to={SETTINGS}
                   data-testid="settings-link"

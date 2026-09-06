@@ -21,7 +21,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
-import { CopyGlyph } from '@/components/ui/glyphs'
+import { LanAddressGlyph } from '@/components/ui/glyphs'
 import { copyToClipboard } from '@/lib/clipboard'
 import {
   useLanAddressStore,
@@ -156,7 +156,7 @@ export function LanAddressButton() {
     <span className="relative flex items-center gap-1">
       <Button
         variant="ghost"
-        size="icon-sm"
+        size="icon-xl"
         data-testid="lan-address-copy"
         // **押せるのに何も起きない、を作らない**（設計§8-2）
         disabled={候補たち.length === 0}
@@ -173,7 +173,7 @@ export function LanAddressButton() {
           }
         }}
       >
-        <CopyGlyph />
+        <LanAddressGlyph />
       </Button>
 
       {/*

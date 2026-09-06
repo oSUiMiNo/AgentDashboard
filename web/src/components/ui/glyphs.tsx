@@ -228,6 +228,58 @@ export function CopyGlyph({ className }: { className?: string }) {
 }
 
 /**
+ * LAN のアドレスを写す印（LAN アドレス 設計§8-1）。
+ *
+ * **[`CopyGlyph`] と同じ形に「IP」を入れたもの。** 帯には写す操作が他にもあるので、
+ * 素のコピーの絵だと**何を写すのかが分からない**（利用者の指摘・2026-09-05）。
+ *
+ * # なぜ別の部品にしたか
+ *
+ * [`CopyGlyph`] はサイドバーのパスのコピーでも使っている。**あちらに「IP」が出ると嘘になる。**
+ *
+ * # 文字を入れてよい理由
+ *
+ * 「アイコンに文字を入れる」を禁じているのは**ファイル一覧の Compact アイコン**についてで
+ * （§16〜§19）、20px の器に種別を詰め込む話である。**操作アイコンは対象外**（§14.3・§15）で、
+ * ここでは器が 48px あり、**1アイコン1メッセージ**（§20.6）がむしろ強まる。
+ */
+export function LanAddressGlyph({ className }: { className?: string }) {
+  return (
+    <svg
+      aria-hidden
+      viewBox="0 0 24 24"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      {/* 手前の紙。**この中へ字を入れる**ので、他の線と重ならない大きさに保つ */}
+      <rect x="9" y="9" width="11" height="11" rx="2" />
+      {/* 奥の紙（左上へ覗く） */}
+      <path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1" />
+      {/*
+        **字は塗りで描く。** 線で描くと `strokeWidth={2}` が乗って、
+        11px の枠の中で潰れる。
+      */}
+      <text
+        x="14.5"
+        y="15"
+        fill="currentColor"
+        stroke="none"
+        fontSize="7.5"
+        fontWeight="700"
+        textAnchor="middle"
+        dominantBaseline="central"
+      >
+        IP
+      </text>
+    </svg>
+  )
+}
+
+/**
  * 「溜まっている知らせ」の印（細かい修正 設計§7-4）。**1件以上あるときだけ出す**——
  * 常に出すと、押す意味のない印が画面に居座る。
  */

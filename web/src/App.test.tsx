@@ -435,3 +435,32 @@ describe('通っていない間の見え方（セルフホスト化設計§8-2�
     expect(screen.queryByTestId('account-link')).toBeNull()
   })
 })
+
+describe('帯の押しボタンは3つとも同じ大きさ', () => {
+  /*
+    **ベル・IP・設定を 1.5倍に揃えた**（2026-09-05・利用者の指定）。
+
+    **1つずつ見張ると、揃っていないことに気づけない。** 3つまとめて数えるのは、
+    片方だけ戻されたときに落とすためである——**揃っていることが要件**であって、
+    それぞれが 48px であることは結果にすぎない。
+  */
+  it('ベル・IP・設定が同じ段（48px）を使っている', async () => {
+    render(<App />)
+    // **聞いてから描く。** 帯の中身はサーバの構成で決まる
+    await screen.findByTestId('project-add-open')
+
+    const 並び = ['notice-bell', 'lan-address-copy', 'settings-link']
+      .map((id) => screen.queryByTestId(id))
+      .filter((el): el is HTMLElement => el !== null)
+
+    // **3つとも居ることが前提。** 居ないなら見張れていない
+    expect(並び.length).toBeGreaterThanOrEqual(2)
+
+    for (const el of 並び) {
+      // `settings-link` は `<Link>` なので、器は親のボタン側にある
+      const 器 = el.className.includes('size-') ? el : (el.closest('a,button') ?? el)
+      const 全部 = `${器.className} ${器.parentElement?.className ?? ''}`
+      expect(全部).toContain('size-12')
+    }
+  })
+})

@@ -392,3 +392,45 @@ describe('置き場所を知らない（要件の完了条件8）', () => {
     expect(指定).not.toMatch(/\b(absolute|fixed|sticky)\b/)
   })
 })
+
+describe('帯のボタンの大きさと見た目', () => {
+  /*
+    **1.5倍にした**（2026-09-05・利用者の指定）。ベル・IP・設定の3つを揃えている。
+
+    見張り方は `FilesToggle.test.tsx` と同じ——**器だけを大きくすると絵が中で泳ぐ**ので、
+    `icon-xl`（器 48px・絵 24px）の段をそのまま使っていることを見る。個別の
+    `className` で当て直すと、次に同じ大きさが要るときにまた書くことになる。
+  */
+  it('器は 48px の段を使う（個別に上書きしていない）', () => {
+    useLanAddressStore.setState({ view: view(), loaded: true })
+    render(<LanAddressButton />)
+
+    const 押す = screen.getByTestId('lan-address-copy')
+    // `size-12` = 48px。**28px の `size-7` に戻ると落ちる**
+    expect(押す.className).toContain('size-12')
+    expect(押す.className).not.toContain('size-7')
+  })
+
+  it('絵も一緒に 1.5倍になる（24px）', () => {
+    useLanAddressStore.setState({ view: view(), loaded: true })
+    render(<LanAddressButton />)
+
+    const 押す = screen.getByTestId('lan-address-copy')
+    expect(押す.className).toContain("[&_svg:not([class*='size-'])]:size-6")
+    // 呼ぶ側が大きさを当てていないこと（当てると段が効かなくなる）
+    expect(押す.querySelector('svg')?.getAttribute('class')).toBeNull()
+  })
+
+  it('絵の中に「IP」が出る', () => {
+    /*
+      **素のコピーの絵だと、何を写すのか分からない**（利用者の指摘）。帯には写す操作が
+      他にもある。`CopyGlyph` をそのまま使わず専用の絵に分けてあるのは、
+      **サイドバーのパスのコピーに「IP」が出ると嘘になる**ためである。
+    */
+    useLanAddressStore.setState({ view: view(), loaded: true })
+    render(<LanAddressButton />)
+
+    const 絵 = screen.getByTestId('lan-address-copy').querySelector('svg')
+    expect(絵?.textContent).toContain('IP')
+  })
+})

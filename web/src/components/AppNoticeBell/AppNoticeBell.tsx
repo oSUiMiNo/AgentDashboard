@@ -87,7 +87,7 @@ export function AppNoticeBell() {
       <PopoverTrigger asChild>
         <Button
           variant="ghost"
-          size="icon-sm"
+          size="icon-xl"
           data-testid="app-notice-bell"
           aria-label={`アプリ全体の知らせ ${notices.length}件`}
           title={`アプリ全体の知らせ ${notices.length}件`}
