@@ -389,6 +389,9 @@ impl SessionThreader {
         // 誰が入れたか（`人が打っていないものを、人の発言として出さない` 設計§1）。
         // **レコードにつき1回だけ決める**——1レコードの中の複数ブロックは同じ出どころ
         let origin = crate::origin::message_origin(record);
+        // API のエラーとして書かれたか（設計§13）。**こちらもレコードにつき1回**
+        // ——印はレコードに付くので、中のブロックが何本あっても答えは同じ
+        let api_error = record.is_api_error();
         let uuid = record.uuid.clone().unwrap_or_else(|| self.synthetic_id());
         let mut emitted = Vec::new();
         let mut last_emitted: Option<NodeId> = None;
@@ -476,7 +479,10 @@ impl SessionThreader {
                     emitted.push(TreeNode {
                         id: node_id.clone(),
                         parent: root.clone(),
-                        node: Node::AssistantText { text },
+                        node: Node::AssistantText {
+                            text,
+                            error: api_error,
+                        },
                         ts,
                         branch,
                     });
@@ -1985,5 +1991,81 @@ mod コマンドが根になる場合 {
             threader.files["/p/s.jsonl"].roots_seen, 1,
             "コマンドも根として数える"
         );
+    }
+}
+
+#[cfg(test)]
+mod エラーの名乗り {
+    #![allow(non_snake_case)]
+    use super::*;
+    use crate::parse::parse_line;
+
+    /// アシスタントの本文を1行つくる。`extra` はトップレベルへ足す欄。
+    fn 本文(extra: &str, text: &str) -> String {
+        let head = if extra.is_empty() {
+            String::new()
+        } else {
+            format!("{extra},")
+        };
+        format!(
+            r#"{{"type":"assistant","uuid":"a1",{head}"message":{{"role":"assistant","content":[{{"type":"text","text":{}}}]}}}}"#,
+            serde_json::to_string(text).unwrap()
+        )
+    }
+
+    fn 出た(line: &str) -> Node {
+        let mut threader = SessionThreader::new();
+        let nodes = threader.feed_record("/p/s.jsonl", None, &parse_line(line));
+        nodes
+            .into_iter()
+            .map(|n| n.node)
+            .find(|n| matches!(n, Node::AssistantText { .. }))
+            .expect("アシスタントの本文が1つ出ること")
+    }
+
+    #[test]
+    fn 記録が名乗ったエラーは印が立つ() {
+        let node = 出た(&本文(r#""isApiErrorMessage":true"#, "Request timed out"));
+        assert_eq!(
+            node,
+            Node::AssistantText {
+                text: "Request timed out".to_string(),
+                error: true,
+            }
+        );
+    }
+
+    /// **これは落とせない。** `No response requested.` は印を持たない**ただの短い返事**で、
+    /// `Request timed out` と画面上まったく同じ姿で並ぶ。字面で見分けると必ず巻き込む。
+    #[test]
+    fn 印を持たない短い返事はエラーにしない() {
+        let node = 出た(&本文(
+            r#""isApiErrorMessage":false"#,
+            "No response requested.",
+        ));
+        assert_eq!(
+            node,
+            Node::AssistantText {
+                text: "No response requested.".to_string(),
+                error: false,
+            }
+        );
+    }
+
+    #[test]
+    fn 欄ごと無い古い記録はエラーにしない() {
+        let node = 出た(&本文("", "Request timed out"));
+        assert!(
+            matches!(node, Node::AssistantText { error: false, .. }),
+            "印が無ければエラーでない側へ倒れること（安全側）"
+        );
+    }
+
+    /// 本文が「エラーらしく」見えても、**印が無ければエラーにしない**。
+    /// 利用者が同じ字を引用しただけのものを赤くしないための門である（設計§1-4 と同じ形）。
+    #[test]
+    fn エラーらしい字でも印が無ければ赤くしない() {
+        let node = 出た(&本文("", "API Error: 529 Overloaded"));
+        assert!(matches!(node, Node::AssistantText { error: false, .. }));
     }
 }

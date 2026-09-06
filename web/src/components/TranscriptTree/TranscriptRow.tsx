@@ -50,7 +50,7 @@ import {
   foldMarkdownByLines,
   summarizeInput,
 } from '@/lib/markdown'
-import { bodyTextOf, isMachine, originLabel, originOf } from '@/lib/messageOrigin'
+import { bodyTextOf, isApiError, isMachine, originLabel, originOf } from '@/lib/messageOrigin'
 import type { ActivityRow, FlatRow, NodeRow, QueuedMoreRow, RewoundRow } from '@/stores/transcript'
 import { toggleCommand } from '@/stores/transcript'
 import { SlashCommandLine } from './SlashCommandLine'
@@ -610,7 +610,11 @@ function RowBody({
           row={row}
           inset={false}
           shell={node.kind === 'assistant_text' ? 'panel' : 'bubble'}
-          tone="text-foreground font-medium"
+          // **エラーは赤い字にする**（利用者の指定。設計§13-2）。色は `DESIGN.md` §11.2 の
+          // Negative で、**この画面で既にエラーへ当てている `text-red-400` をそのまま使う**
+          // （ツールコールの失敗・差分の削除行と同じ）。新しい色を増やさない
+          tone={isApiError(node) ? 'text-red-400 font-medium' : 'text-foreground font-medium'}
+          error={isApiError(node)}
           // **スラッシュコマンドのときだけ部品を作る。** 作らない行でも `useSessionCard`
           // を呼ばずに済むよう、hook は [`SlashCommandHead`] の中に閉じてある
           head={
@@ -668,6 +672,7 @@ function MarkdownBody({
   inset,
   shell,
   tone,
+  error = false,
   head,
   onToggleBody,
 }: {
@@ -685,6 +690,14 @@ function MarkdownBody({
   shell: 'bubble' | 'panel' | 'none'
   /** 主従を付けるウェイトと明度（設計§5-3） */
   tone: string
+  /**
+   * API のエラーとして書かれた本文か（設計§13-2）。**器へ地を持たせるかを決める。**
+   *
+   * **`tone` と別に渡すのは、字と器で効き先が違うから**である。字は `tone` が、
+   * 器はこちらが決める——1つにまとめると、器を持たない `shell='none'` の行にも
+   * 地の指定が付いてまわる。
+   */
+  error?: boolean
   /**
    * 本文の**手前**に置く部品（設計§11-4）。打ったスラッシュコマンドの行がここへ来る。
    *
@@ -843,7 +856,15 @@ function MarkdownBody({
   if (shell === 'panel') {
     // アシスタントの器。**吹き出しより弱い地**にして、誰の発言かをシルエットで
     // 読み分ける仕掛け（設計§5-3）を壊さない
-    return <div className={`body-shell row-shell mt-1${fadeClass}`}>{inner}</div>
+    //
+    // **エラーのときだけ地を持たせる**（設計§13-2）。この器は普段 `--shell-ground` が
+    // 透明で、字だけが地の上に浮いている——**赤い字にするだけでは「もう少し目立たせて」に
+    // 届かない**ので、器を1段だけ見えるようにする
+    return (
+      <div className={`body-shell row-shell mt-1${error ? ' body-shell-error' : ''}${fadeClass}`}>
+        {inner}
+      </div>
+    )
   }
 
   return <div className={inset ? 'row-shell mt-1 ml-6' : 'row-shell mt-1'}>{inner}</div>

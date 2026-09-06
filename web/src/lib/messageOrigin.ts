@@ -113,3 +113,22 @@ export function bodyTextOf(node: Node): string {
   }
   return isMachine(node) ? formatMachineBody(node.text) : node.text
 }
+
+/**
+ * この本文が **API のエラーとして書かれたものか**（設計§13）。
+ *
+ * # 字面で見分けない
+ *
+ * 実測で `Request timed out`（印あり）と `No response requested.`（印なし・ただの
+ * 短い返事）は、**画面上まったく同じ姿**で並ぶ。**違うのは欄だけ**なので、本文の
+ * 見た目で判定すると必ず後者を巻き込む。**記録が名乗った印だけを見る**——
+ * これは §1（誰が入れたか）と同じ考え方である。
+ *
+ * # 欄が無ければエラーでない側へ倒す
+ *
+ * この欄を知らない版のサーバへ繋ぐ形が実在する（版を戻したとき）。**倒し込みは
+ * ここ1か所に閉じ、部品の側で `??` を書かない**（§2-5 と同じ作法）。
+ */
+export function isApiError(node: Node): boolean {
+  return node.kind === 'assistant_text' && node.error === true
+}

@@ -713,6 +713,7 @@ mod tests {
                     parent: None,
                     node: Node::AssistantText {
                         text: "了解しました".to_string(),
+                        error: false,
                     },
                     ts: 1_700_000_000_000,
                     branch: 0,

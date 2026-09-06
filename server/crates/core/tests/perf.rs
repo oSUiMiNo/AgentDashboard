@@ -151,6 +151,7 @@ fn text_node(index: usize) -> TreeNode {
         parent: None,
         node: Node::AssistantText {
             text: format!("{index} 行目の応答"),
+            error: false,
         },
         ts: 1_700_000_000_000 + index as i64,
         branch: 0,

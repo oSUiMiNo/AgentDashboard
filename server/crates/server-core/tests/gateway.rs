@@ -339,6 +339,7 @@ async fn 履歴のバッチは書けてから_ack_が返る() {
                     parent: None,
                     node: protocol::Node::AssistantText {
                         text: "了解".to_string(),
+                        error: false,
                     },
                     ts: 1,
                     branch: 0,
@@ -712,6 +713,7 @@ async fn 指示が詰まっても_ack_は捨てられず先に出て線も切れ
                         parent: None,
                         node: protocol::Node::AssistantText {
                             text: format!("{n} 件目"),
+                            error: false,
                         },
                         ts: n as i64,
                         branch: 0,
@@ -819,6 +821,7 @@ async fn 指示が詰まっても_ack_は捨てられず先に出て線も切れ
                     parent: None,
                     node: protocol::Node::AssistantText {
                         text: "まだ生きている".to_string(),
+                        error: false,
                     },
                     ts: 99,
                     branch: 0,

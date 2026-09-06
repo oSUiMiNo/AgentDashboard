@@ -302,7 +302,15 @@ export type Node =
       /** スラッシュコマンドとして打たれたときの、打った形と展開後の中身（設計§3） */
       command?: SlashCommand | null
     }
-  | { kind: 'assistant_text'; text: string }
+  /**
+   * アシスタントの本文。`error` は**記録が自分で名乗った印**（`isApiErrorMessage`）だけ
+   * が立つ（設計§13）。**字面で見分けない**——`No response requested.` のような
+   * エラーでない短い返事が、画面上まったく同じ姿で並ぶ。
+   *
+   * **欄が来ないことがありうる**（この欄を知らない版のサーバに繋いだとき）。読むのは
+   * `lib/machineMessage.ts` の純関数1か所に閉じ、部品の側で `??` を書かない。
+   */
+  | { kind: 'assistant_text'; text: string; error?: boolean }
   | { kind: 'thinking'; text: string }
   | {
       kind: 'tool_call'

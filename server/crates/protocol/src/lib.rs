@@ -760,6 +760,19 @@ pub enum Node {
     },
     AssistantText {
         text: String,
+        /// **この本文が API のエラーとして書かれたものか**
+        /// （`人が打っていないものを、人の発言として出さない` 設計§13）。
+        ///
+        /// **記録が自分で名乗った印（`isApiErrorMessage`）だけを立てる。** 字面で
+        /// 見分けようとすると、`No response requested.` のような**エラーでない
+        /// 短い返事**を巻き込む——実測でこの2つは見た目が同じで、欄だけが違う。
+        /// 名乗りを使う考え方は §1 と同じである。
+        ///
+        /// 欄に `#[serde(default)]` を付けるのは、**古い記録を読み直すため**。
+        /// `transcript_nodes.payload` はこの型を丸ごと JSON で持つので、欄を必須に
+        /// すると**この欄を知らない版が書いた行が解けなくなる**。既定は「エラーでない」。
+        #[serde(default)]
+        error: bool,
     },
     /// アシスタントの思考（`thinking` ブロック）。
     ///
@@ -1218,6 +1231,24 @@ mod tests {
         assert_eq!(text, "前の版で書いた発言");
     }
 
+    /// エラーの印を足す前の版が書いた `assistant_text` の行（設計§13-1）。
+    const エラーの欄が無い古い行: &str = r#"{"kind":"assistant_text","text":"Request timed out"}"#;
+
+    #[test]
+    fn エラーの欄を持たない古い行は解けてエラーでない側へ倒れる() {
+        // **本文がエラーらしく見えても、印が無ければエラーにしない。** ここを
+        // 「字が `Request timed out` ならエラー」に変えると、**利用者が同じ字を
+        // 引用しただけのもの**まで赤くなる（設計§1-4 と同じ形の危険）
+        let node: Node = serde_json::from_str(エラーの欄が無い古い行).expect("古い行が解けること");
+        assert_eq!(
+            node,
+            Node::AssistantText {
+                text: "Request timed out".to_string(),
+                error: false,
+            }
+        );
+    }
+
     #[test]
     fn 名乗りの欄が無ければ名乗り無しとして受ける() {
         let node: Node = serde_json::from_str(名乗りの欄が無い古い行).expect("古い行が解けること");
@@ -1552,6 +1583,7 @@ mod tests {
             },
             Node::AssistantText {
                 text: "了解しました".to_string(),
+                error: false,
             },
             Node::Thinking {
                 text: "まず失敗しているテストを確認する".to_string(),
@@ -1638,6 +1670,7 @@ mod tests {
             parent: Some(NodeId("00000000-0000-0000-0000-000000000000".to_string())),
             node: Node::AssistantText {
                 text: "done".to_string(),
+                error: false,
             },
             ts: 1_700_000_000_123,
             branch: 1,

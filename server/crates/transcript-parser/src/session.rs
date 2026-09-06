@@ -506,6 +506,7 @@ mod tests {
                 parent: None,
                 node: protocol::Node::AssistantText {
                     text: String::new(),
+                    error: false,
                 },
                 ts: 0,
                 branch: 0,

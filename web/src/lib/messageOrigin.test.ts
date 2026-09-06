@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Node } from '@/lib/protocol'
-import { bodyTextOf, isMachine, originLabel, originOf } from '@/lib/messageOrigin'
+import { bodyTextOf, isApiError, isMachine, originLabel, originOf } from '@/lib/messageOrigin'
 
 /**
  * 誰が入れたかの読み分け
@@ -93,5 +93,43 @@ describe('本文の組み立て', () => {
     // **`command` が無い側を巻き込まない**（この直しで壊しやすいのはこちら）
     const node: Node = { kind: 'user_message', text: 'ただの指示', origin: { kind: 'human' } }
     expect(bodyTextOf(node)).toBe('ただの指示')
+  })
+})
+
+/**
+ * API のエラーの見分け（設計§13-1）。
+ *
+ * **この組でいちばん大事なのは2本目**——`No response requested.` は印を持たない
+ * ただの短い返事で、`Request timed out` と**画面上まったく同じ姿**で並ぶ。
+ * 字面で見分ける実装に変えると、ここだけが落ちる。
+ */
+describe('APIのエラーの見分け', () => {
+  it('記録が名乗ったものはエラーになる', () => {
+    const node: Node = { kind: 'assistant_text', text: 'Request timed out', error: true }
+    expect(isApiError(node)).toBe(true)
+  })
+
+  it('印を持たない短い返事はエラーにしない', () => {
+    // **落とせない1本。** 見た目が同じで、違うのは欄だけである
+    const node: Node = { kind: 'assistant_text', text: 'No response requested.', error: false }
+    expect(isApiError(node)).toBe(false)
+  })
+
+  it('エラーらしい字でも、印が無ければエラーにしない', () => {
+    // 利用者が同じ字を引用しただけのものを赤くしないための門（設計§1-4 と同じ形）
+    const node: Node = { kind: 'assistant_text', text: 'API Error: 529 Overloaded' }
+    expect(isApiError(node)).toBe(false)
+  })
+
+  it('欄が来ない古いサーバでもエラーでない側へ倒れる', () => {
+    // 版を戻すと、この欄を知らないサーバに新しい画面が繋がる（設計§2-5）
+    const node = { kind: 'assistant_text', text: 'Request timed out' } as Node
+    expect(isApiError(node)).toBe(false)
+  })
+
+  it('アシスタント以外の行はエラーにならない', () => {
+    // 印は `assistant_text` にしか付かない（実測で `type` は全部 assistant）
+    const node: Node = { kind: 'user_message', text: 'Request timed out', origin: { kind: 'human' } }
+    expect(isApiError(node)).toBe(false)
   })
 })

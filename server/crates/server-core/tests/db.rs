@@ -52,6 +52,7 @@ fn text_node(id: &str) -> TreeNode {
         parent: None,
         node: Node::AssistantText {
             text: id.to_string(),
+            error: false,
         },
         ts: 0,
         branch: 0,
@@ -170,6 +171,7 @@ async fn 上書きしても並びは動かない() {
         let mut updated = first.clone();
         updated.node = Node::AssistantText {
             text: "更新".to_string(),
+            error: false,
         };
         transcript::append(&backend.db, card_id, &[updated], &mut next)
             .await

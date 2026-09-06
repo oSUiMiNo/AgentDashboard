@@ -185,6 +185,20 @@ impl Record {
         self.flag("isCompactSummary")
     }
 
+    /// API のエラーとして書かれた行の印（`isApiErrorMessage`）。
+    ///
+    /// **ここへ置くのは、欄を1つ読むだけだからである。** [`crate::origin`] は
+    /// 「4つの欄と優先順位と倒れ方を持つ方針」を担う層で、こちらは1つの欄をそのまま
+    /// 返すだけなので、層の役割で言えばこちら側になる
+    /// （`人が打っていないものを、人の発言として出さない` 設計§13-1）。
+    ///
+    /// **字面で見分けようとしないこと。** 実測では `Request timed out`（この印あり）と
+    /// `No response requested.`（印なし・ただの短い返事）が**画面上まったく同じ姿**で
+    /// 並ぶ。**違うのは欄だけ**である。
+    pub fn is_api_error(&self) -> bool {
+        self.flag("isApiErrorMessage")
+    }
+
     /// CLI が付けたセッションの名前（`ai-title` の行が持つ `aiTitle`）。
     ///
     /// **中身が無いときは `None` を返す。** 欄ごと無い・文字列でない・空白しか無い、の

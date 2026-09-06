@@ -83,6 +83,7 @@ fn text_node(id: &str) -> TreeNode {
         parent: None,
         node: Node::AssistantText {
             text: id.to_string(),
+            error: false,
         },
         ts: 0,
         branch: 0,

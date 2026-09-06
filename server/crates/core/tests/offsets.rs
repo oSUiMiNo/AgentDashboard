@@ -95,6 +95,7 @@ fn report(card_id: CardId, id: &str, next_offset: u64) -> TranscriptReport {
             parent: None,
             node: Node::AssistantText {
                 text: id.to_string(),
+                error: false,
             },
             ts: 1,
             branch: 0,
