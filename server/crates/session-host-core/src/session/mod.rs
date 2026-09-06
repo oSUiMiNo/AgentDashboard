@@ -48,7 +48,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -209,6 +209,13 @@ const ATTACHMENT_TAIL: usize = 256 * 1024;
 /// 停滞したカードだけが**5秒に1回**複製する量なので、厚くしても負担は変わらない
 /// （`pty_ring_buffer` の既定は 1 MiB）。
 const ACTIVITY_TAIL: usize = 64 * 1024;
+
+/// 一覧が消えたと認めるまでに要る、続けて見えなかった回数（設計§14 読み替え5）。
+///
+/// **1回では認めない。** メインが走り出す瞬間、TUI は一覧を消してからスピナーを描くので、
+/// そのあいだの1回だけ「一覧も無い・スピナーも無い」に見える。実機のログでは、入力待ちへ
+/// 戻した9件のうち1件がこれで、**その6秒後にはスピナーが出ていた**（2026-09-06）。
+const WAITING_GONE_SETTLED: u32 = 2;
 
 /// 同時に起こし直せる本数（接続断のカードを復旧ボタンで戻す 設計§8-4）。
 ///
@@ -560,6 +567,16 @@ pub struct Session {
     ///
     /// 待ちの行が出るときも消えるときも端末は必ず書き換わるので、取りこぼしはない。
     waiting_checked_mark: AtomicU64,
+    /// 一覧が**続けて何回**見えなかったか（設計§14 読み替え5）。
+    ///
+    /// **一覧が消えたように見えても、描き直しの隙間かもしれない。** claude の TUI は
+    /// メインが走り出すときに一覧を消してからスピナーを描くので、**そのあいだの1回だけ
+    /// 「一覧も無い・スピナーも無い」に見える**。そこで入力待ちへ倒すと、**走っている
+    /// カードが「終わった」側に見える**——実機で踏んだ（2026-09-06）。
+    ///
+    /// 一覧が見えたら 0 へ戻す。**倒れる向きを軽いほうへ戻すためだけの仕掛け**で、
+    /// 代償はサブが終わってから入力待ちに戻るまでが1回ぶん遅れることである。
+    waiting_gone_streak: AtomicU32,
     /// 添付の印を待つ上限（画像添付 設計§21 読み替え2）。
     ///
     /// **設定から取る**（`attachment_mark_wait_ms`）。定数のままにすると、
@@ -1608,8 +1625,24 @@ impl Session {
                 false
             } else {
                 let (waiting, main_running) = self.terminal_subagent_view();
+                // **一覧が消えて見えた1回だけでは動かさない**（§14 読み替え5）。
+                // メインが走り出すとき、TUI は一覧を消してからスピナーを描くので、
+                // その隙間が「一覧も無い・スピナーも無い」に見える。そこで倒すと
+                // **走っているカードが入力待ちになる**——重いほうの外れ方である
+                let settled = if waiting {
+                    self.waiting_gone_streak.store(0, Ordering::Relaxed);
+                    true
+                } else {
+                    self.waiting_gone_streak
+                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |seen| {
+                            Some(seen.saturating_add(1).min(WAITING_GONE_SETTLED))
+                        })
+                        .unwrap_or(0)
+                        + 1
+                        >= WAITING_GONE_SETTLED
+                };
                 let mut meta = self.meta.lock().expect("ロックが壊れていない");
-                let moved = state::sync_subagent_wait(&mut meta, waiting, main_running);
+                let moved = settled && state::sync_subagent_wait(&mut meta, waiting, main_running);
                 if moved {
                     // 画面読みで動かしたことは必ず残す。版が上がって行の形が変われば
                     // ここが黙るので、**出ていた行が出なくなったこと**が手がかりになる
@@ -2425,6 +2458,7 @@ impl SessionManager {
             activity_checked_at: AtomicI64::new(0),
             waiting_checked_at: AtomicI64::new(0),
             waiting_checked_mark: AtomicU64::new(0),
+            waiting_gone_streak: AtomicU32::new(0),
             model_alias: Mutex::new(initial_alias),
             model_switching: AtomicBool::new(false),
             // 画面を作るかどうかは**報告先が決める**（設計§7-2・§22 読み替え2）

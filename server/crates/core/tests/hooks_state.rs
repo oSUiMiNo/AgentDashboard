@@ -1142,7 +1142,22 @@ async fn 画面から一覧が消えればサブ待ちから戻る() {
         "5秒より短い間隔では画面を見に行かない"
     );
 
+    // **1回消えて見えただけでは動かない**（設計§14 読み替え5）。描き直しの隙間かも
+    // しれないので、続けて2回見えないことを求める
     tokio::time::sleep(std::time::Duration::from_millis(5100)).await;
+    server.manager.sweep_once();
+    assert_eq!(
+        session.status(),
+        SessionStatus::WaitingSubagents,
+        "1回目は描き直しの隙間かもしれないので動かさない"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(5100)).await;
+    session
+        .send_instruction("paint ふたたび画面を動かす")
+        .await
+        .expect("端末の目印を進める");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     server.manager.sweep_once();
     assert_eq!(
         session.status(),
@@ -1197,6 +1212,64 @@ async fn 末尾に一覧が残っていなくてもサブ待ちへ移る() {
         session.status(),
         SessionStatus::WaitingSubagents,
         "端末の実物には一覧が出ている。末尾に残っていないだけである"
+    );
+}
+
+/// **描き直しの隙間で、走っているカードを入力待ちへ落とさないこと**（設計§14 読み替え5）。
+///
+/// claude の TUI は、メインが走り出すときに**一覧を消してからスピナーを描く**。その
+/// あいだの1回だけ「一覧も無い・スピナーも無い」に見えるので、そこで倒すと**走って
+/// いるカードが「終わった」側に見える**。実機のログでは、入力待ちへ戻した9件のうち
+/// 1件がこれで、その6秒後にはスピナーが出ていた（2026-09-06）。
+///
+/// **これは軽いほうへ倒す仕掛けが破れていた形である。** 入らないぶんには害が小さいが、
+/// 走っているのに終わったように見えるのは重い。
+#[tokio::test]
+async fn 一覧が一度消えて見えただけでは入力待ちへ落とさない() {
+    let server = common::TestServer::start().await;
+    let (session, _watcher) = common::start_session(&server.manager).await;
+
+    server.post_hook(session.token(), "Stop", "{}").await;
+    common::wait_for_status(&session, SessionStatus::WaitingInput).await;
+
+    session
+        .send_instruction(
+            "overdraw 0 ◯ fork  Verifying version path      13m 59s · ↓ 775.3k tokens",
+        )
+        .await
+        .expect("一覧を描かせる");
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    server.manager.sweep_once();
+    assert_eq!(session.status(), SessionStatus::WaitingSubagents);
+
+    // 一覧の下に1行出る＝いちばん下の塊が一覧でなくなる（描き直しの隙間と同じ形）
+    tokio::time::sleep(std::time::Duration::from_millis(5100)).await;
+    session
+        .send_instruction("paint 隙間")
+        .await
+        .expect("一覧を隠す");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    server.manager.sweep_once();
+    assert_eq!(
+        session.status(),
+        SessionStatus::WaitingSubagents,
+        "1回では動かさない"
+    );
+
+    // 隙間が埋まって一覧が戻れば、数え直しになる
+    tokio::time::sleep(std::time::Duration::from_millis(5100)).await;
+    session
+        .send_instruction(
+            "overdraw 0 ◯ fork  Verifying version path      13m 59s · ↓ 775.3k tokens",
+        )
+        .await
+        .expect("一覧を描き直させる");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    server.manager.sweep_once();
+    assert_eq!(
+        session.status(),
+        SessionStatus::WaitingSubagents,
+        "一覧が戻ったのだからサブ待ちのまま"
     );
 }
 
