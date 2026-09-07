@@ -11,6 +11,7 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use server_core::embed;
 use session_host_core::{hook_post, logging, model_post};
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use crate::client::{self, output};
@@ -22,6 +23,19 @@ use crate::{boot, config::Config, serve, serve_server};
 /// すると、「知らないサブコマンド」と「起動できない」と「将来の版が正当な理由で失敗した」
 /// を取り違える。末尾の数字は形が変わったときに上げる。
 pub const SCHEMA_NAMES_MARKER: &str = "schema-names 1";
+
+/// `state-dir` に添える断り。
+///
+/// **出すのは端末に向いているときだけ**（`Command::StateDir` の説明を見ること）。
+/// 定数へ出してあるのは、**中身をテストから読めるようにするため**——
+/// 出し分けそのものは端末が要るので機械では踏めないが、**何を言うか**は固定できる。
+const STATE_DIR_NOTE: [&str; 5] = [
+    "注意：これはいま居るディレクトリの設定を解決した値です。",
+    "　　　走っているインスタンスが別のツリーから起動されていれば、",
+    "　　　置き場所も別です。そのツリーへ入って叩き直してください。",
+    "　　　`agentdashboard config` にも出ますが、設定していないときは",
+    "　　　行ごと出てきません（既定値は見えません）。",
+];
 
 #[derive(Parser)]
 #[command(
@@ -790,14 +804,27 @@ async fn run_async(cli: Cli, config: Config) -> anyhow::Result<()> {
         Some(Command::StateDir) => {
             // **標準出力へは余計なものを書かない。** スクリプトが読むので、1行そのものが値になる
             println!("{}", config.agent().resolved_state_dir().display());
-            // **断りは stderr へ。** ここを stdout へ移すと消す道が壊れる（上の説明）。
-            // 素で叩くと「いま居るディレクトリの設定」しか見ないので、走っている
-            // インスタンスが別のツリーから起きていると、もっともらしい別の場所を答える
-            eprintln!("注意：これはいま居るディレクトリの設定を解決した値です。");
-            eprintln!("　　　走っているインスタンスが別のツリーから起動されていれば、");
-            eprintln!("　　　置き場所も別です。そのツリーへ入って叩き直してください。");
-            eprintln!("　　　`agentdashboard config` にも出ますが、設定していないときは");
-            eprintln!("　　　行ごと出てきません（既定値は見えません）。");
+            /*
+                **断りは stderr へ。かつ、人が見ているときだけ。**
+
+                stdout へ移すと消す道が壊れる（`uninstall.sh` が `head -1` で1行を値として
+                読む）。それは分かっていたが、**stderr へ出すだけでも足りなかった。**
+
+                `uninstall.ps1` は `$ErrorActionPreference = 'Stop'` を敷いたうえで
+                `(& $candidate state-dir 2>$null | ...)` を `try/catch { continue }` で
+                包んでいる。**Windows PowerShell 5.1 は、ネイティブコマンドが stderr へ
+                書くと、それを打ち切りエラーとして投げることがある**——そうなると
+                `catch` が実行ファイルを飛ばし、`$null` が返り、**黙って既定の置き場所を
+                消しに行く**。設定で場所を変えている人ほど深く踏む。
+
+                **端末に向いているときだけ出せば、この道は原理的に閉じる。** 人が手で
+                叩いたときには今までどおり出て、スクリプトが読むときには1行も増えない。
+            */
+            if std::io::stderr().is_terminal() {
+                for line in STATE_DIR_NOTE {
+                    eprintln!("{line}");
+                }
+            }
         }
         Some(Command::Embedded { get: None }) => {
             let paths = embed::list();
@@ -1558,6 +1585,26 @@ async fn client_account(
 
 #[cfg(test)]
 mod tests {
+    use super::STATE_DIR_NOTE;
+
+    /// 断りの中身。**出し分けは端末が要るので機械では踏めないが、何を言うかは固定できる。**
+    #[test]
+    fn state_dirの断りは何を見た値かとどうすればよいかを言う() {
+        let 文 = STATE_DIR_NOTE.join("\n");
+        assert!(
+            文.contains("いま居るディレクトリの設定"),
+            "何を見た値かが書かれていません:\n{文}"
+        );
+        assert!(
+            文.contains("そのツリーへ入って叩き直して"),
+            "どうすればよいかが書かれていません:\n{文}"
+        );
+        assert!(
+            文.contains("agentdashboard config"),
+            "解決後の値を見る道が書かれていません:\n{文}"
+        );
+    }
+
     use super::*;
 
     #[test]

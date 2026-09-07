@@ -243,10 +243,26 @@ fn 門が叩くサブコマンドは乗り換えない() {
 }
 
 #[test]
-fn state_dirは断りをstderrへ出し標準出力は1行のまま() {
-    // **素で叩くと「いま居るディレクトリの設定」しか見ない。** 走っているインスタンスが
-    // 別のツリーから起きていると、もっともらしい別の場所を答える。そこで断りを添えるが、
-    // **標準出力へ足すと消す道が壊れる**（`uninstall.sh` が `head -1` で1行を値として読む）
+fn state_dirは機械が読むとき1行だけを返し何も添えない() {
+    /*
+        **消す道の契約を、そのまま見張るテストである。**
+
+        `uninstall.sh` は `state-dir 2>/dev/null | head -1` で、`uninstall.ps1` は
+        `(& $candidate state-dir 2>$null | Select-Object -First 1)` で読む。
+        **標準出力に足すと「パス＋断り」が1つのパスとして読まれる**——ここまでは
+        分かっていた。
+
+        **stderr へ出すだけでも足りない。** `uninstall.ps1` は
+        `$ErrorActionPreference = 'Stop'` の下で `try/catch { continue }` に包んでおり、
+        **Windows PowerShell 5.1 はネイティブコマンドの stderr を打ち切りエラーとして
+        投げることがある**。そうなると実行ファイルが飛ばされ、**黙って既定の置き場所を
+        消しに行く**。だから断りは**端末に向いているときだけ**出す。
+
+        したがってここで見るのは「断りが出ること」ではなく、
+        **機械が読む形で叩いたときに、1行のほかは何も出ないこと**である。
+        （断りの中身は `cli.rs` の単体テストが見張る。出し分けそのものは端末が要るので
+        機械では踏めない——**踏めないものを踏めるふりで書かない**。）
+    */
     let fixture = Fixture::new("state-dir-note");
     let config = fixture.write_config("sqlite:///dev/null/dashboard.db", free_port());
 
@@ -266,16 +282,8 @@ fn state_dirは断りをstderrへ出し標準出力は1行のまま() {
 
     let noted = String::from_utf8_lossy(&out.stderr);
     assert!(
-        noted.contains("いま居るディレクトリの設定"),
-        "断りが出ていません:\n{noted}"
-    );
-    assert!(
-        noted.contains("そのツリーへ入って叩き直して"),
-        "どうすればよいかが出ていません:\n{noted}"
-    );
-    assert!(
-        noted.contains("agentdashboard config"),
-        "もう一方の口の案内が併記されていません:\n{noted}"
+        noted.trim().is_empty(),
+        "機械が読むときに stderr へ出しています（PowerShell の消す道が壊れます）:\n{noted}"
     );
 }
 
