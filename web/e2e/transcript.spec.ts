@@ -1590,40 +1590,63 @@ test('コマンドの展開は、開くと同じ吹き出しの中に出る', as
   await expect(コマンド行.getByText('指定されたファイルを読み')).toBeVisible(届くまで)
 })
 
+
 /*
   **この2本はいま赤い。`test.fixme` で留めてある**（細かい修正 項目10）。
 
-  症状は実物のブラウザで確かめた。末尾から 80px 以内で「続きを読む」を押すと、
-  **開くとき 7013 → 5230（1783px）**、**畳むとき 7176 → 5395（1781px）** 位置が飛ぶ。
-  フェーズ1が「実ブラウザでの再現はここで兼ねる」と預けた宿題は、これで果たしている。
+  経緯が入り組んでいるので、分かっていることを順に残す。
 
-  **設計の案B（押す直前の位置を控え、伸びたあとに戻す）は効かなかった。** 2フレーム後に
-  1回戻す形でも、12フレームのあいだ戻し続ける形でも、同じ 1783px が最後まで残る——
-  伸びた行の高さが `ResizeObserver` 越しに遅れて届き、**こちらが戻したあとで錨がもう一度
-  下端へ引き直す**ためである。錨（`anchorTo: 'end'`）を触らずに勝つ道が要る。
+  **(1) 最初の測り方は汚れていた。** `foldableRow()` は `.first()`＝いちばん上の畳める行を
+  返すが、**末尾へ送るとその行は画面の外（y = −1376）にある**。Playwright の `click()` は
+  押す前に要素を可視域へ運ぶので、**当初報告の 1783px はテスト自身が上へスクロールしたぶん**
+  だった。`click()` を呼んだ直後にはもう動いていた——押した結果ではない。
+
+  **(2) しかし症状そのものは実在する。** 下の `見えている畳める行()` で
+  **画面に見えている行**に押し替えて測り直しても、**位置は総高の増分ぶんそのまま動く**。
+
+  | | 総高 | 位置 | 末尾からの距離 |
+  |---|---|---|---|
+  | 押す前 | 7489 | 7013 | 0 |
+  | 押したあと | 10438 | **9962** | 0 |
+
+  **増分は 2949 で、総高の増分と1pxまで一致する。** 末尾に貼り付いたまま、
+  伸びたぶんだけ下へ引かれている——**錨（`anchorTo: 'end'`）が効いている姿そのもの**である。
+
+  **人から見た症状はこうなる。** 押した行の「畳む」印は画面のほぼ同じ高さに留まる
+  （624 → 633）が、それは印が本文の**下端**に浮いているためで、
+  **開いた本文の頭は画面のはるか上へ流れている。** 読もうとして押したのに、
+  **その文章の末尾に着く。**
+
+  **(3) 効かなかった手当てが2つある。** 案B（押す直前の位置を控えて戻す）は、
+  2フレーム後に1回戻しても、12フレームのあいだ戻し続けても残った——`resizeItem` は
+  `ResizeObserver` から何度も呼ばれ、**そのつどその瞬間の位置で条件を評価して書き換える**ため。
+  再設計（`scrollEndThreshold` を負にして条件を偽にする）も、
+  **汚れた測り方で「変わらない」と判定してしまった**ので、**まだ正しく試されていない。**
+
+  **次にやること**：`見えている畳める行()` を使ったこの2本を基準に、
+  `scrollEndThreshold` を負にする案をもう一度当てる。**測り方はもう汚れていないので、
+  今度は効いたかどうかが正しく出る。**
 
   **赤いまま消さずに残す。** 消すと、次に直す人が再現から始めることになる。
-*/
-/*
-  「続きを読む」を押しても、いま読んでいる位置が動かないこと（細かい修正 項目10）。
 
-  仮想化に **`anchorTo: 'end'`** が指定してあり、**変化の直前に末尾から
-  `END_THRESHOLD`（80px）以内に居ると、総高が増えたぶんだけスクロール位置をずらす**
-  （＝下端を固定する）。押すと本文が伸びるので、伸びた高さぶん画面が下へ引かれる。
+  **教訓：位置を測るテストで `.first()` を押してはいけない。**
+  `click()` が要素を可視域へ運ぶので、掴んだ相手が画面外なら、
+  **測っているのは自分が動かしたぶんになる。**
+  このファイルは `foldableRow()` を多くの箇所で使っているが、
+  **位置を測らない箇所では無害**である。位置を測る箇所だけ `見えている畳める行()` を使うこと。
 
-  **3本立てにしてある。** ①②だけだと**末尾追従を殺しても緑になる**ので、③で塞ぐ。
-  末尾追従は「新しい発言が届いたら末尾へ追いかける」ために在るもので、これを壊すのが
-  いちばん高くつく壊れ方である。
-
-  **末尾から 80px 以内で押すこと。** それより上では**元々動かない**ので、
-  直っていなくても緑になる。送った位置を測ってから押す。
+  **E2E で緑になっても、実機で起きない証明にはならない。**
+  このフィクスチャは畳める行が数本しか無く、実物の履歴はもっと長い。
+  実機での確認は `テスト計画.md` のフェーズ8（【要人間】）に置いてある。
 */
 async function 末尾の近くまで送る(page: Parameters<typeof openDashboard>[0]) {
   const box = page.getByTestId('transcript-tree').first()
   await box.evaluate((el) => {
     el.scrollTop = el.scrollHeight - el.clientHeight
   })
-  // 末尾に貼り付いた状態＝しきい値（80px）の内側であることを確かめてから押す
+  // 末尾に貼り付いた状態＝しきい値（80px）の内側であることを確かめてから押す。
+  // ここより上で押すと、錨（anchorTo: 'end'）が元々働かないので、
+  // 壊れていても緑になる
   const 末尾からの距離 = await box.evaluate(
     (el) => el.scrollHeight - el.clientHeight - el.scrollTop,
   )
@@ -1631,46 +1654,82 @@ async function 末尾の近くまで送る(page: Parameters<typeof openDashboard
   return box
 }
 
-test.fixme('「続きを読む」を押しても、読んでいる位置が動かない', async ({ page }) => {
+/**
+ * いま画面に見えている畳める行を返す。
+ *
+ * **位置を測るテストは、これを使うこと。** `foldableRow()`（`.first()`）を押すと、
+ * その行が画面外だったときに **Playwright 自身が可視域まで運ぶ**ので、
+ * 測った移動量が製品の振る舞いと混ざる（項目10で 1783px を読み違えた）。
+ */
+async function 見えている畳める行(page: Parameters<typeof openDashboard>[0]) {
+  const 枠 = page.getByTestId('transcript-tree').first()
+  const 枠の矩形 = await 枠.boundingBox()
+  expect(枠の矩形, 'スクロール容器が見つからない').not.toBeNull()
+
+  const 候補 = page.locator('[data-testid="transcript-row"][data-foldable="true"]')
+  const 数 = await 候補.count()
+  for (let i = 0; i < 数; i += 1) {
+    const 行 = 候補.nth(i)
+    const 印 = 行.getByTestId('body-toggle')
+    if ((await 印.count()) === 0) continue
+    const 矩形 = await 印.boundingBox()
+    if (!矩形 || !枠の矩形) continue
+    if (矩形.y >= 枠の矩形.y && 矩形.y + 矩形.height <= 枠の矩形.y + 枠の矩形.height) {
+      return 行
+    }
+  }
+  throw new Error('画面に見えている畳める行が無い（測り方を見直すこと）')
+}
+
+test.fixme('末尾に居るとき、見えている「続きを読む」を押しても読んでいる位置が動かない', async ({
+  page,
+}) => {
   await loadFoldLines(page)
-  const row = foldableRow(page)
-  await expect(row).toBeVisible(届くまで)
+  await expect(foldableRow(page)).toBeVisible(届くまで)
 
   const box = await 末尾の近くまで送る(page)
+  const row = await 見えている畳める行(page)
   const 押す前 = await box.evaluate((el) => el.scrollTop)
 
   await row.getByTestId('body-toggle').click()
   await expect(row).toHaveAttribute('data-body-open', 'true')
 
-  // **戻すのは2フレーム後**（React の描画 → 仮想化の再測定）なので、落ち着くまで待つ。
-  // 押した直後を読むと、まだ引かれたままの値を見ることになる
+  // 総高が増えたことを確かめてから位置を見る。増えていなければ、
+  // そもそも伸びていないので「動かない」ことに意味が無い
   await expect
-    .poll(async () => Math.abs((await box.evaluate((el) => el.scrollTop)) - 押す前), {
-      timeout: 5_000,
-    })
-    .toBeLessThan(2)
+    .poll(async () => box.evaluate((el) => el.scrollHeight), { timeout: 5_000 })
+    .toBeGreaterThan(押す前)
+
+  const 押したあと = await box.evaluate((el) => el.scrollTop)
+  expect(Math.abs(押したあと - 押す前), '開いても読んでいる位置は動かない').toBeLessThan(2)
 })
 
-test.fixme('「畳む」を押しても、読んでいる位置が動かない', async ({ page }) => {
-  // **開くときと畳むときで分岐を書かない**ので、同じ手当てが両方へ効くはず。
-  // 片方だけ直すと「畳むときだけ跳ねる」が残る
+test.fixme('末尾に居るとき、「畳む」を押しても末尾に留まる', async ({ page }) => {
+  // **開くときと畳むときで、製品側に分岐は無い。**
+  //
+  // ただし**畳むときは位置が動く**——末尾に貼り付いている人の下から中身が減るので、
+  // 縮んだあとの末尾へ切り詰められる。これは飛びではなく正しい振る舞いなので、
+  // 「動かないこと」ではなく**「末尾に留まること」**を見る
   await loadFoldLines(page)
-  const row = foldableRow(page)
-  await expect(row).toBeVisible(届くまで)
+  const 最初の行 = foldableRow(page)
+  await expect(最初の行).toBeVisible(届くまで)
 
-  await row.getByTestId('body-toggle').click()
-  await expect(row).toHaveAttribute('data-body-open', 'true')
+  await 末尾の近くまで送る(page)
+  const 開く行 = await 見えている畳める行(page)
+  await 開く行.getByTestId('body-toggle').click()
+  await expect(開く行).toHaveAttribute('data-body-open', 'true')
 
   const box = await 末尾の近くまで送る(page)
-  const 押す前 = await box.evaluate((el) => el.scrollTop)
-
-  await row.getByTestId('body-toggle').click()
-  await expect(row).toHaveAttribute('data-body-open', 'false')
+  const 畳む行 = await 見えている畳める行(page)
+  await 畳む行.getByTestId('body-toggle').click()
+  await expect(畳む行).toHaveAttribute('data-body-open', 'false')
 
   await expect
-    .poll(async () => Math.abs((await box.evaluate((el) => el.scrollTop)) - 押す前), {
-      timeout: 5_000,
-    })
-    .toBeLessThan(2)
+    .poll(
+      async () =>
+        box.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop),
+      { timeout: 5_000 },
+    )
+    .toBeLessThan(80)
 })
 
