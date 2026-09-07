@@ -176,11 +176,19 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
     }
   }
 
-  // 断りが届いたら、送ったものを戻す（設計§7-2）。**文言は出さない**——
-  // `SessionView` が `card-error` として既に出しているので、再掲すると2つ並ぶ
-  useEffect(() => {
+  /**
+   * 控えを画面へ戻す。
+   *
+   * **引き金は2つある**——断り（`cardError`）が届いたときと、送った直後に `↑` が
+   * 押されたとき（取り消し 設計§5）。**戻す中身は同じ**なので、片方だけ直る形を
+   * 作らないよう1本に寄せてある。
+   *
+   * **文も添付も同じ経路で戻る。** 添付の実体はサーバ側に残っている（掃除される
+   * のはセッションを畳むときで、送信では消えない）ので、戻したらそのまま送り直せる。
+   */
+  const 控えを戻す = () => {
     const held = 控え中.current
-    if (cardError === null || held === null) {
+    if (held === null) {
       return
     }
     控え中.current = null
@@ -194,6 +202,15 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
     }
     setText(held.text)
     setAttachments(held.attachments)
+  }
+
+  // 断りが届いたら、送ったものを戻す（設計§7-2）。**文言は出さない**——
+  // `SessionView` が `card-error` として既に出しているので、再掲すると2つ並ぶ
+  useEffect(() => {
+    if (cardError === null) {
+      return
+    }
+    控えを戻す()
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 断りが届いた瞬間だけ動かす
   }, [cardError])
 
