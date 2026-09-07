@@ -42,6 +42,10 @@ if [[ ! -d "${REPO_ROOT}/${CARGO_DIR}" ]]; then
     exit 1
 fi
 
+# docker そのものが届いているかを先に見る。ここを飛ばすと、下の検査が
+# 「イメージが無い」と「docker が呼べない」を同じ文言に潰す
+"${REPO_ROOT}/scripts/require-docker"
+
 # イメージが無ければ docker は Docker Hub を探しに行き、「見つからない」という
 # こちらの事情と無関係な理由で失敗する。先に見て、やることを名指しで伝える
 if ! docker image inspect "${IMAGE_TAG}" >/dev/null 2>&1; then

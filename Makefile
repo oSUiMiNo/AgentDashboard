@@ -29,6 +29,8 @@ help: ## このヘルプを表示する
 setup: setup-rust setup-web ## 開発に必要なものを一式そろえる
 
 setup-rust: ## Rust ツールチェーンの Docker イメージを作る
+	@# 段3の案内がここを名指ししている。案内先が同じ壁で止まっては意味が無い
+	@scripts/require-docker
 	docker build -f docker/Dockerfile.rust -t $(DOCKER_IMAGE) .
 
 setup-web: ## web の依存と Playwright の chromium を入れる

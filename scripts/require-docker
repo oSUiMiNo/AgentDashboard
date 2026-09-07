@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# docker そのものが届いているかを見る、ただ1つの入口。
+#
+# `scripts/cargo` と `make setup-rust` の両方がここを通る。**1つにまとめてあるのは、
+# 別々に書くと片方だけ直したときに静かにずれるため**である。
+#
+# なぜ要るのか：`docker image inspect` は2つの理由で失敗する。「イメージが無い」と
+# 「docker そのものが呼べない」で、**どちらも同じ終了コードで返る**。区別せずに
+# 「イメージがありません。make setup-rust を実行してください」と言うと、言われた
+# とおりに打った人が**あちらも docker を呼ぶので同じところで止まる**。
+# 2026-09-07 に実際に起きた（原因は docker-desktop ディストロの停止で、
+# **Docker Desktop の設定そのものは正しかった**）。
+#
+# **成功したときは1文字も出さない。** cargo を呼ぶたびに通る道である。
+set -euo pipefail
+
+# 案内は2段で共有する。文面が1つなら、片方だけ直して食い違うことがない
+print_guidance() {
+    cat >&2 <<'EOS'
+エラー: docker が呼べません。
+  Docker Desktop の設定 → Resources → WSL Integration で、このディストロを
+  有効にしてください。
+  設定が正しいのに直らないときは、docker-desktop ディストロが止まっている
+  ことがあります。Windows 側で次を確かめてください：
+      wsl -l -v
+EOS
+}
+
+# 段1：そもそも見つかるか。統合が切れているときはここで落ちる
+if ! command -v docker >/dev/null 2>&1; then
+    print_guidance
+    exit 1
+fi
+
+# 段2：応答するか。**docker 自身の言い分を捨てない。** 握り潰していたのがこの情報で、
+# 原因を名指しできる唯一の文である。stdout は捨てて stderr だけを取っておく
+#
+# **`wsl.exe` は呼ばない。** このスクリプトは WSL の中で走るので、確かめる手段そのものが
+# 同じ理由で落ちる。案内文として出すだけにしてある
+if ! docker_stderr="$(docker version 2>&1 >/dev/null)"; then
+    print_guidance
+    if [[ -n "${docker_stderr}" ]]; then
+        {
+            echo "  docker の言い分："
+            printf '%s\n' "${docker_stderr}" | sed 's/^/    /'
+        } >&2
+    fi
+    exit 1
+fi
