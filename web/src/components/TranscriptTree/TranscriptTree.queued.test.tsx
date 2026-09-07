@@ -402,4 +402,19 @@ describe('機械が積んだ待ち（設計§16）', () => {
     expect(吹き出し.classList.contains('speech-bubble-queued')).toBe(true)
     expect(吹き出し.parentElement?.className).toContain('justify-end')
   })
+  it('長い機械の待ちは、既にある「続きを読む」で畳まれる', async () => {
+    // **利用者が見つけた2例目（3,356字）がここ。** 新しい畳み方は作っていない
+    const 長い = `<task-notification>${Array.from({ length: 40 }, (_, i) => `${i}行目`).join('\n')}</task-notification>`
+    置く(待ち(長い))
+    await screen.findByTestId('user-bubble')
+    expect(await screen.findByTestId('body-toggle')).toBeInTheDocument()
+  })
+
+  it('人が積んだ待ちは、これまでどおりの畳み方のまま', async () => {
+    // 機械の10行ではなく、待ちの表で畳む（`foldKindOf` が種別を返す）
+    const 長い = Array.from({ length: 40 }, (_, i) => `${i}行目の指示`).join('\n')
+    置く(待ち(長い))
+    const 吹き出し = await screen.findByTestId('user-bubble')
+    expect(吹き出し.classList.contains('speech-bubble-machine')).toBe(false)
+  })
 })

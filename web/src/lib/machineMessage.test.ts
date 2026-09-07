@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { HISTORY_FOLD_LINES, formatMachineBody, machineShapeOf } from './machineMessage'
 import { foldDecision, foldKindOf, foldLinesFor } from './markdown'
+import { bodyTextOf } from './messageOrigin'
 import type { Node } from './protocol'
 
 /** 実物から採った、サブエージェントの報告の骨格。 */
@@ -213,5 +214,42 @@ describe('会話履歴の写しは、もっと強く畳む', () => {
 
   it('3行ちょうどなら畳まない', () => {
     expect(foldDecision('## 会話履歴\n1', 'machine_history')).toEqual({ fold: false, lines: 2 })
+  })
+})
+
+/**
+ * 待ちの行も、畳みの規則を分け合う（設計§17-3）。
+ *
+ * **利用者が見つけた2例目は 3,356字が畳まれずに全部出ていた。** 分類・包み剥がし・
+ * 畳みの3つを、待ちの行がまとめて迂回していたためである。**3つとも同時に直ること**を
+ * 別々に固定する——1つ直して他が残ると、見る側からは「直っていない」になる。
+ */
+describe('待ちの行の畳み方（設計§17-3）', () => {
+  const 待ち = (text: string): Node => ({ kind: 'queued_message', text, taken: false })
+  const 長い通知 = `<task-notification>${Array.from({ length: 40 }, (_, i) => `${i}行目`).join('\n')}</task-notification>`
+  const 長い写し = `## 会話履歴\n${Array.from({ length: 40 }, (_, i) => `[user] ${i}行目`).join('\n')}`
+
+  it('機械が積んだ待ちは、機械の表で畳む', () => {
+    // **新しい畳み方を作っていない。** `isMachine` が真になれば既にある表に乗る
+    expect(foldKindOf(待ち(長い通知))).toBe('machine_message')
+    expect(foldKindOf(待ち(長い写し))).toBe('machine_history')
+  })
+
+  it('人が積んだ待ちは、これまでどおり待ちの表で畳む', () => {
+    const 長い指示 = Array.from({ length: 40 }, (_, i) => `${i}行目の指示`).join('\n')
+    expect(foldKindOf(待ち(長い指示))).toBe('queued_message')
+  })
+
+  it('機械が積んだ長い待ちは、実際に畳まれる', () => {
+    // **2例目（3,356字）がここに当たる。** 畳みが効くかどうかで体感がいちばん変わる
+    const 決定 = foldDecision(bodyTextOf(待ち(長い通知)), foldKindOf(待ち(長い通知)))
+    expect(決定.fold).toBe(true)
+    expect(決定.lines).toBe(10)
+  })
+
+  it('写しの待ちは3行まで縮む', () => {
+    const 決定 = foldDecision(bodyTextOf(待ち(長い写し)), foldKindOf(待ち(長い写し)))
+    expect(決定.fold).toBe(true)
+    expect(決定.lines).toBe(3)
   })
 })
