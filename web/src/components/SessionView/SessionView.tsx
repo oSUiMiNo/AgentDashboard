@@ -266,11 +266,35 @@ export function SessionView({
         断りはそのカードに出す（設計§9-5）。画面全体の帯へ出すと、横並びのときに
         **どのカードの話なのか分からなくなる**
       */}
-      {(cardError !== null || notices.length > 0) && (
+      {(cardError !== null || notices.length > 0 || branching) && (
         // **ベルは右端に留める**（`justify-end`）。文言が行から下りると `flex-1` の相手が
         // 居なくなるので、そのままだとベルが右から左へ飛ぶ——**同じものが動いただけ**
         // なのに、別の何かが出たように見える
         <div className="flex items-center justify-end gap-2">
+          {branching && (
+            /*
+              **待っている間、待っていると分かるようにする**（ブランチ設計§7-4。
+              2026-09-07 の指定）。押したあと何も出ないまま数十秒が過ぎると、
+              **効かなかったのか待てばよいのかが区別できない。**
+
+              **段は増やさない。** ここは断りのために既に空けてある段で、
+              `DESIGN.md` §39.4 が「空の段を作らない」と決めている。
+
+              **いま何を待っているかは、カードの状態から導く。** サーバから段を
+              運ばせると共有境界が増えるが、**待っている理由は状態がそのまま語る**
+              ——作業中なら「ターンの終わり」、それ以外なら「枝ができるの」を待っている。
+            */
+            <p
+              data-testid="branch-progress"
+              aria-live="polite"
+              className="text-muted-foreground min-w-0 flex-1 text-xs"
+            >
+              {session.status.kind === 'working' ||
+              session.status.kind === 'stalled'
+                ? 'いまの作業が終わってから枝分かれします…'
+                : '枝分かれしています…（少し時間がかかります）'}
+            </p>
+          )}
           {cardError !== null && (
             // **`aria-live` を付ける**（細かい修正 設計§7-4）。5秒で消える形にすると、
             // 見ていない人には存在しなかったのと同じになる。遮らないよう `polite`
@@ -780,12 +804,17 @@ function 枝分かれできる理由(session: SessionMeta): string | null {
   // 会話の有無はサーバが履歴を見て断る（`branch.rs` の `branchable`）——**押せてしまって
   // 即座に断られるほうが、押せるはずのものが押せないより害が小さい。**
   switch (session.status.kind) {
+    // **作業中と停滞も押せる**（2026-09-07 に覆した。ブランチ設計§3-4）。
+    //
+    // かつては「いまのターンが終わってから分かれることになる」ことを理由に断って
+    // いたが、**サーバがターンの終わりを待ってから撃つ**ようになったので、分かれる
+    // 地点は「いまの作業が終わったところ」に定まる。**断っていたときは、割り込んで
+    // 走っている作業を中止させるか、押せないかの二択だった。**
     case 'waiting_input':
     case 'waiting_subagents':
-      return null
     case 'working':
     case 'stalled':
-      return '作業中は枝分かれできません（いまのターンが終わってから分かれることになります）'
+      return null
     case 'waiting_permission':
       return '権限確認に答えてから枝分かれしてください'
     case 'starting':
@@ -818,9 +847,11 @@ function BranchButton({
   why: string | null
   onPress: () => void
 }) {
+  // **「左隣」は古い**（2026-09-06 に覆った。設計§3-3）。元がその場に残り、
+  // 枝がその1つ右隣へ入る
   const 説明 = busy
     ? '枝分かれしています…'
-    : (why ?? '会話を枝分かれさせ、元の会話を左隣へ戻します')
+    : (why ?? '会話を枝分かれさせ、枝をこの右隣へ置きます')
   return (
     <Button
       type="button"

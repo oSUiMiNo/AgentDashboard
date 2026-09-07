@@ -39,13 +39,41 @@ use crate::session_host::{RecallRequest, SessionHost};
 
 /// 待ち①（`/branch` を撃ってから、席の CLI 側IDが張り替わるまで）の上限。
 ///
-/// **実測 387ms**（2026-09-05・本物の claude。設計§3-5）。`/branch` は指示ではなく
-/// 画面の操作として即座に効くので短い。**§3-4 で「指示を受け付けられる状態」に
-/// 絞っている**ので、入力欄へ積まれて延びることも無い。
+/// # 30秒では足りなかった（2026-09-07 に実機で判明）
 ///
-/// 1回しか測っていないので、**実測の2桁上**に置いてある。ここを長く取りすぎると、
-/// 効かなかったときに黙って待ち続けることになる。
-const BRANCH_TIMEOUT: Duration = Duration::from_secs(30);
+/// **`/branch` は即座に効かない。** 利用者の画面にはこう出ていた。
+///
+/// ```text
+/// > /branch
+/// · Cerebrating… (45s)
+/// ```
+///
+/// **45秒以上「考えて」から**枝になる。かかる時間は会話の重さで変わるとみられる。
+///
+/// **設計へ書いた「実測 387ms」は、1回きり・軽い条件で測った値だった。** それを2桁
+/// 上回る 30秒なら十分だと判断したが、**桁の見立てそのものが外れていた**——これが
+/// 2026-09-07 に元の会話が席を失った真因である。
+///
+/// # 伸ばすだけでは直らないので、諦め方も変えた
+///
+/// 上限をいくら伸ばしても超えるものは超える。**明けても記録を引き直して確かめる**
+/// （[`Branch::枝になっているか`]）ことと、**居座る入力を消しに行かない**ことを対で
+/// 入れてある。消しても既に送信済みの `/branch` は止まらず、**利用者がその間に打った
+/// 文字を巻き添えにする**だけだった。
+///
+/// 実測（45秒）の13倍に置く。**ここを長く取る代償は「効かなかったときに待たされる」
+/// ことだけ**で、短く取る代償（席を失う）とは重さが違う。
+const BRANCH_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// ターンが終わるのを待つ上限（§3-4）。
+///
+/// **作業中に押されたら、いまのターンが終わってから `/branch` を撃つ。** 走っている
+/// 作業へ割り込むと**その作業が中止される**ためで、2026-09-07 に利用者が踏んだ。
+///
+/// 長いターンは何十分も続くので、上限も長く取る。**ここで待っている間も、画面には
+/// 「いまの作業が終わるのを待っています」と出る**（`SessionView` が状態から導く）ので、
+/// 黙って止まっているようには見えない。
+const TURN_TIMEOUT: Duration = Duration::from_secs(1800);
 
 /// 待ち②（呼び戻しを頼んでから、席が立って最初のフックが届くまで）の上限。
 ///
@@ -162,6 +190,30 @@ impl Branch {
         // ── ② 撃つ前に購読を張る ─────────────────────────────────────
         let mut events = self.registry.subscribe_events();
 
+        // ── ②′ 作業中なら、いまのターンが終わるのを待つ（§3-4）─────────
+        // **割り込むと走っている作業が中止される。** かつてはここを「押せない」ことで
+        // 避けていたが、**押せないより待つほうが利用者の役に立つ**（2026-09-07 の指定）
+        if matches!(meta.status, SessionStatus::Working | SessionStatus::Stalled) {
+            tracing::info!(card_id = %self.card_id, "作業中なので、ターンの終わりを待ちます");
+            let card_id = self.card_id;
+            self.wait_for(&mut events, TURN_TIMEOUT, move |meta| {
+                meta.card_id == card_id
+                    && !matches!(meta.status, SessionStatus::Working | SessionStatus::Stalled)
+            })
+            .await
+            .ok_or_else(|| {
+                "作業が終わらないので枝分かれを見送りました（もう一度押せます）".to_string()
+            })?;
+            // 終わった先が「押してよい状態」とは限らない（権限確認で止まった等）
+            let いまの状態 = self
+                .registry
+                .owned(self.account_id, self.card_id)
+                .ok_or_else(|| "そのカードは見つかりません".to_string())?
+                .meta()
+                .status;
+            pushable(いまの状態)?;
+        }
+
         // ── ③ `/branch` を撃つ ────────────────────────────────────────
         self.agent
             .send_input(self.card_id, "/branch".to_string(), Vec::new())
@@ -188,14 +240,20 @@ impl Branch {
                     枝
                 }
                 None => {
-                    // **本当に枝になっていない。** 居座っている `/branch` を消してから断る
-                    // ——残すと、諦めたあとに遅れて効いて**元の会話が席を失う**
-                    self.取り消す();
-                    tracing::warn!(card_id = %self.card_id, "枝分かれが確かめられませんでした");
-                    return Err(
-                        "枝分かれが確かめられませんでした（元の会話はこの席のままです）"
-                            .to_string(),
+                    // **入力欄を消しに行かない**（2026-09-07 にやめた）。`/branch` は既に
+                    // 送信済みで、消しても止まらない——**利用者がその間に打った文字を
+                    // 巻き添えにする**だけだった。
+                    //
+                    // **「この席のままです」と言い切らない。** あとから枝になることが
+                    // 実際にある（`Cerebrating…` が長引く）。言い切ると、席を失っている
+                    // のに「何も起きていない」と読まれる。
+                    tracing::warn!(
+                        card_id = %self.card_id,
+                        "枝分かれを待ち切れませんでした（あとから効く可能性があります）"
                     );
+                    return Err("枝分かれに時間がかかりすぎました。\
+                         あとから枝になった場合は、この知らせから元の会話を呼び戻せます"
+                        .to_string());
                 }
             },
         };
@@ -250,19 +308,6 @@ impl Branch {
         meta.claude_session_id
             .is_some_and(|id| id != 元の会話)
             .then_some(meta)
-    }
-
-    /// 送った `/branch` が入力欄に居座っているときに消す（§4-2）。
-    ///
-    /// **残すと、あとから遅れて効く。** そのとき段取りは既に諦めて終わっているので、
-    /// **呼び戻す者が居ない**——2026-09-07 の事故はこの形だった。
-    ///
-    /// 送るのは Ctrl+U（`0x15`）で、`input.rs` が本文の頭に置いている「行を消す」印と同じ。
-    /// **既に送られていれば入力欄は空なので、消しても何も起きない。**
-    fn 取り消す(&self) {
-        if let Err(reason) = self.agent.write_input(self.card_id, b"\x15") {
-            tracing::warn!(card_id = %self.card_id, "入力欄を消せませんでした：{reason}");
-        }
     }
 
     /// 元の会話を持つ生きたカードが、押された席以外にあるか。
@@ -422,16 +467,25 @@ fn branchable(履歴がある: bool) -> Result<(), String> {
 
 /// 枝分かれを頼んでよい状態か（§3-4）。
 ///
-/// **`/branch` は指示として送られる**ので、claude が作業中なら入力欄に積まれ、
-/// いまのターンが終わってから効く。押した本人は「いま分かれた」と思っているのに、
-/// **実際にはしばらく後の別の地点で分かれる**——これは取り返しがつかない。
+/// # 作業中も通す（2026-09-07 に覆した）
+///
+/// **かつては作業中を断っていた。** 理由は「`/branch` は指示として積まれるので、
+/// 押した本人がいま分かれたと思っているのに、しばらく後の別の地点で分かれる」こと
+/// だった。**その理由は、待ってから撃つようにした時点で消えた**——[`TURN_TIMEOUT`]
+/// でターンの終わりを待つので、**分かれる地点は「いまの作業が終わったところ」に定まる。**
+///
+/// **むしろ断るほうが害があった。** 実機では、作業中に押すと `/branch` が割り込んで
+/// **走っている作業が中止された**（2026-09-07・利用者の報告）。押せなくするだけでは
+/// この事故は防げても、**利用者は「作業が終わったら枝を作る」ができないままだった。**
+///
+/// ここで断るのは、**待っても押せるようにならないもの**だけである。
 fn pushable(status: SessionStatus) -> Result<(), String> {
     match status {
-        SessionStatus::WaitingInput | SessionStatus::WaitingSubagents => Ok(()),
-        SessionStatus::Working | SessionStatus::Stalled => Err(
-            "作業中は枝分かれできません（いまのターンが終わってから分かれることになります）"
-                .to_string(),
-        ),
+        // 作業中・停滞は**ここでは通す**。撃つ前にターンの終わりを待つ（§3-4）
+        SessionStatus::WaitingInput
+        | SessionStatus::WaitingSubagents
+        | SessionStatus::Working
+        | SessionStatus::Stalled => Ok(()),
         SessionStatus::WaitingPermission => {
             Err("権限確認に答えてから枝分かれしてください".to_string())
         }
@@ -448,12 +502,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn 指示を受け付けられる状態だけ通す() {
-        assert!(pushable(SessionStatus::WaitingInput).is_ok());
-        assert!(pushable(SessionStatus::WaitingSubagents).is_ok());
-        for 駄目 in [
+    fn 待てば押せるようになるものは通す() {
+        // §3-4。**作業中と停滞も通す**（2026-09-07 に覆した）——撃つ前にターンの
+        // 終わりを待つので、分かれる地点は「いまの作業が終わったところ」に定まる。
+        // かつてここで断っていたが、**押せなくするだけでは「作業が終わったら枝を作る」
+        // ができないまま**だった。
+        for 通す in [
+            SessionStatus::WaitingInput,
+            SessionStatus::WaitingSubagents,
             SessionStatus::Working,
             SessionStatus::Stalled,
+        ] {
+            pushable(通す).unwrap_or_else(|断り| panic!("{通す:?} は通ること：{断り}"));
+        }
+        // **待っても押せるようにならないもの**だけを断る
+        for 駄目 in [
             SessionStatus::WaitingPermission,
             SessionStatus::Starting,
             SessionStatus::Ended { ok: true },

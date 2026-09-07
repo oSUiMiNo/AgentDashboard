@@ -831,6 +831,9 @@ export function clearSessions() {
   pending = []
   scheduled = false
   reviving.clear()
+  // **枝分かれの印も畳む。** `reviving` の隣に足し忘れていた（2026-09-07 に気づいた）
+  // ——残ると、次に同じカードを見たときにボタンが押せないまま居座る
+  branching.clear()
   cardNotices.clear()
   // **時計を取り消してから捨てる。** 変数だけ `null` にすると本体は生き残り、
   // 以後に張った時計を誰も取り消せなくなる（古いほうが発火して印を消すため）
