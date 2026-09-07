@@ -1,14 +1,6 @@
 import { Terminal } from '@xterm/xterm'
 import { isSelectionPrompt } from './keys'
-import {
-  dropTrailingBlank,
-  joinWrapped,
-  joinWrappedAt,
-  transcriptAt,
-  visibleRows,
-  visibleScreen,
-  type ScreenRow,
-} from './screen'
+import { joinWrapped, visibleRows, visibleScreen, type ScreenRow } from './screen'
 
 /**
  * 画面の取り出し（テスト計画フェーズ3・設計§5）。
@@ -191,90 +183,5 @@ describe('joinWrapped', () => {
     )
     expect(joinWrapped(折り返しだらけ)).toHaveLength(3)
     expect(isSelectionPrompt(joinWrapped(折り返しだらけ).join('\n'))).toBe(true)
-  })
-})
-
-/**
- * 文字として開く面へ渡す中身（コピー設計§8）。
- *
- * **ここだけがスクロールバックを混ぜてよい。** 判定へ渡す口（[`visibleScreen`]）とは
- * 用途が逆で、こちらは人が読んで選ぶために並べるだけ——読んだ結果が端末へ送られる
- * 経路が無い。
- */
-describe('joinWrappedAt', () => {
-  const 行 = (text: string, wrapped = false): ScreenRow => ({ text, wrapped })
-
-  it('繋いだあとの位置を返す', () => {
-    // 折り返しを繋ぐと**繋いだぶんだけ行が上へ詰まる**。繋ぐ前の番号をそのまま
-    // 使う壊し方は、折り返しが1つでもあるとここで落ちる
-    const rows = [行('あ'), 行('い'), 行('いのつづき', true), 行('う')]
-
-    expect(joinWrappedAt(rows, 3).at).toBe(2)
-  })
-
-  it('折り返した続きを指したら、繋いだ先の行を指す', () => {
-    const rows = [行('あ'), 行('い'), 行('いのつづき', true)]
-
-    const { lines, at } = joinWrappedAt(rows, 2)
-
-    expect(at).toBe(1)
-    expect(lines[at]).toBe('いいのつづき')
-  })
-
-  it('範囲の外を指したら先頭を返す（例外にしない）', () => {
-    // 呼ぶ側がやることは「先頭を見せる」で、それは失敗ではない
-    expect(joinWrappedAt([行('あ')], 99).at).toBe(0)
-  })
-
-  it('繋ぎ方そのものは joinWrapped と同じ', () => {
-    const rows = [行('あ'), 行('い'), 行('つづき', true)]
-
-    expect(joinWrappedAt(rows, -1).lines).toEqual(joinWrapped(rows))
-  })
-})
-
-describe('dropTrailingBlank', () => {
-  it('末尾の空行を落とす', () => {
-    expect(dropTrailingBlank(['あ', 'い', '', '  '], 0).lines).toEqual(['あ', 'い'])
-  })
-
-  it('途中の空行は残す', () => {
-    // 段落の切れ目なので、消すと**繋がって読めるものが読めなくなる**
-    expect(dropTrailingBlank(['あ', '', 'い'], 0).lines).toEqual(['あ', '', 'い'])
-  })
-
-  it('落とした先へ位置を寄せる', () => {
-    // 寄せないと、**空行を落としたぶんだけ範囲の外を指す**
-    expect(dropTrailingBlank(['あ', '', ''], 2).at).toBe(0)
-  })
-
-  it('全部空なら空にする', () => {
-    expect(dropTrailingBlank(['', ''], 1)).toEqual({ lines: [], at: 0 })
-  })
-})
-
-describe('transcriptAt', () => {
-  function write(term: Terminal, data: string): Promise<void> {
-    return new Promise((resolve) => term.write(data, resolve))
-  }
-
-  it('押し出された行も並べる', async () => {
-    // **欲しい行はたいてい上にある。** 見えているぶんだけ返す壊し方はここで落ちる
-    const term = new Terminal({ rows: 5, cols: 20, scrollback: 100 })
-    await write(term, Array.from({ length: 10 }, (_, i) => `行${i}`).join('\r\n'))
-
-    const { lines } = transcriptAt(term, 0)
-
-    expect(lines).toContain('行0')
-    expect(lines).toContain('行9')
-  })
-
-  it('渡したバッファの行が、そのまま位置になる', async () => {
-    const term = new Terminal({ rows: 5, cols: 20, scrollback: 100 })
-    await write(term, Array.from({ length: 10 }, (_, i) => `行${i}`).join('\r\n'))
-
-    const { lines, at } = transcriptAt(term, 3)
-
-    expect(lines[at]).toBe('行3')
   })
 })
