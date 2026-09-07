@@ -7,10 +7,11 @@
  * そのもので、スマホでは値を手に入れる手段が1つも残らなかった。
  */
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FolderBrowser } from "@/components/FolderBrowser/FolderBrowser";
+import { TOAST_LIFE_MS } from "@/stores/appNotices";
 
 const ROOT = "/home/me/dev/app";
 
@@ -74,6 +75,146 @@ function 答え(ボタン: HTMLElement): string | null {
     null
   );
 }
+
+/**
+ * 結果が出るまで進める。**描画を1つ挟むのが肝**（項目5-b）。
+ *
+ * `copy` は `then` の中でさらに `requestAnimationFrame` を1つ挟んでいる——
+ * **押し直しを目に見せるため**に、いったん消えた状態を1度描いてから出し直す。
+ * マイクロタスクだけ流しても、まだ答えは出ていない。
+ *
+ * **`requestAnimationFrame` は偽物にしない。** 下のテストが偽物にするのは
+ * `setTimeout` だけで、フレームは本物のまま待つ。
+ */
+async function 答えが出るまで() {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+    await new Promise<void>((done) => requestAnimationFrame(() => done()));
+  });
+}
+
+/**
+ * 出したものが引っ込むまで（項目5）。
+ *
+ * **`setTimeout` だけを偽物にする。** 一覧の読み込みは実タイマーで進むので、
+ * 行を掴むところまでは本物のまま済ませ、**押す直前に切り替える**。
+ */
+describe("出したものが引っ込む", () => {
+  it("成功は 7 秒で消える——長さは知らせの決まりから借りている", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn(async () => undefined) },
+    });
+    置く();
+    const 行 = await 行たち();
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      fireEvent.click(行[0]);
+      await 答えが出るまで();
+      expect(答え(行[0])).toBe("コピーしました");
+
+      act(() => vi.advanceTimersByTime(TOAST_LIFE_MS));
+      expect(答え(行[0])).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("失敗は時間では消えない——消えると逃げ道として使えない", async () => {
+    // 既定の stub は写せない（`navigator.clipboard` が居ない）
+    置く();
+    const 行 = await 行たち();
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      fireEvent.click(行[0]);
+      await 答えが出るまで();
+      expect(screen.getByTestId("folder-copy-failed")).toBeInTheDocument();
+
+      // 成功と同じだけ待っても、**まだ在る**
+      act(() => vi.advanceTimersByTime(TOAST_LIFE_MS * 3));
+      expect(screen.getByTestId("folder-copy-failed")).toBeInTheDocument();
+      expect(screen.getByTestId("folder-copy-fallback")).toBeInTheDocument();
+
+      // 消すのは人の手だけ
+      fireEvent.click(screen.getByTestId("folder-copy-failed-dismiss"));
+      expect(screen.queryByTestId("folder-copy-failed")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("同じ行を続けて押すと、いったん消えてから出直す", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn(async () => undefined) },
+    });
+    置く();
+    const 行 = await 行たち();
+
+    fireEvent.click(行[0]);
+    await 答えが出るまで();
+    expect(答え(行[0])).toBe("コピーしました");
+
+    // **押した瞬間に消える。** ここが消えないと、2回目が起きたことが目に見えない
+    fireEvent.click(行[0]);
+    expect(答え(行[0])).toBeNull();
+
+    // そして出直す
+    await 答えが出るまで();
+    expect(答え(行[0])).toBe("コピーしました");
+  });
+
+  it("別の行を押すと、前のタイマーは新しい表示を消しに来ない", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn(async () => undefined) },
+    });
+    置く();
+    const 行 = await 行たち();
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      fireEvent.click(行[0]);
+      await 答えが出るまで();
+
+      // 消える手前まで進めてから、別の行を押す
+      act(() => vi.advanceTimersByTime(TOAST_LIFE_MS - 1_000));
+      fireEvent.click(行[1]);
+      await 答えが出るまで();
+      expect(答え(行[1])).toBe("コピーしました");
+
+      // **前の行の期限を跨いでも、新しい表示は生きている**
+      act(() => vi.advanceTimersByTime(2_000));
+      expect(答え(行[1])).toBe("コピーしました");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("畳んでもタイマーは残らない", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn(async () => undefined) },
+    });
+    const 画面 = render(<FolderBrowser host="local" start={ROOT} root={ROOT} />);
+    const 行 = await screen.findAllByTestId("folder-copy");
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      fireEvent.click(行[0]);
+      await 答えが出るまで();
+      画面.unmount();
+
+      // **消えた画面へ向けて発火しない。** 落とし忘れるとここで警告か例外になる
+      expect(() => act(() => vi.advanceTimersByTime(TOAST_LIFE_MS * 2))).not.toThrow();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
 
 describe("写せなかったとき", () => {
   it("値がパネルの上に出て、そこから取れる", async () => {
