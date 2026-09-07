@@ -85,3 +85,97 @@ describe("Markdown の見出し", () => {
     ).toHaveLength(3);
   });
 });
+
+describe("構造化ビューの文字の大きさ（細かい修正 項目11・12）", () => {
+  const 読む = (rel: string) =>
+    readFileSync(resolve(process.cwd(), "src", rel), "utf8");
+
+  function 規則(セレクタ: string): string {
+    const 当たり = new RegExp(
+      `${セレクタ.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\{([^}]*)\\}`,
+    ).exec(素);
+    expect(当たり, `${セレクタ} の規則が見つからない`).not.toBeNull();
+    return 当たり![1];
+  }
+
+  it("器が大きさを持ち、機械の吹き出しだけ小さい", () => {
+    // 3種（既定・完了通知・他セッションの連絡）は器のクラスが共通なので、
+    // この1つの上書きで自動的に揃う
+    expect(規則(".speech-bubble,\n.body-shell")).toContain(
+      "--body-size: 0.9rem",
+    );
+    expect(規則(".speech-bubble.speech-bubble-machine")).toContain(
+      "--body-size: 0.6875rem",
+    );
+  });
+
+  it("機械の側を、2クラスの特異度で書いている", () => {
+    // 単クラスだと `.speech-bubble` と同じ (0,1,0) で、**記述順に頼る**形になる。
+    // 待ちの `.speech-bubble.speech-bubble-queued` が同じ理由で2クラス書きである
+    expect(素).toContain(".speech-bubble.speech-bubble-machine {");
+    expect(素).not.toMatch(/^\.speech-bubble-machine \{\s*--body-size/m);
+  });
+
+  it("大きさを rem で持ち、画素で直書きしていない", () => {
+    // 端数（14.4px・11px）を持つので、根の大きさから引ける形にしておく
+    const 大きさ = 素.match(/--body-size:\s*([^;]+);/g) ?? [];
+    expect(大きさ.length).toBeGreaterThanOrEqual(2);
+    for (const 行 of 大きさ) expect(行).not.toContain("px");
+  });
+
+  it("10.8px（0.9倍そのもの）を採っていない", () => {
+    // `DESIGN.md` の情報階層で Badge の帯（10〜12）へ落ち、**本文が札の大きさになる**。
+    // 11px なら Secondary Info に留まるので、階層の表を書き換えずに済む
+    expect(素).not.toContain("0.675rem");
+  });
+
+  it("本文が器から読み、器の外では 12px のままである", () => {
+    // フォールバックが元の値であることが、ファイルビュアが動かない担保そのもの
+    expect(規則(".prose-body")).toContain("font-size: var(--body-size, 0.75rem)");
+  });
+
+  it("直書きの text-xs が外れ、prose-body が付いている", () => {
+    /*
+      **このフェーズ最大の落とし穴。** 共用クラスは `font-size` を1つも持っておらず、
+      **同じ要素に直書きされた `text-xs` が全部決めていた**。器へトークンを足すだけでは
+      ユーティリティが勝つので、**見た目が1ミリも変わらないまま緑になる**。
+    */
+    for (const rel of [
+      "components/TranscriptTree/TranscriptRow.tsx",
+      "components/TranscriptTree/SlashCommandLine.tsx",
+    ]) {
+      expect(読む(rel), rel).not.toContain("prose-dashboard text-xs");
+      expect(読む(rel), rel).toContain("prose-dashboard prose-body");
+    }
+  });
+
+  it("ファイルビュアの text-sm は残っている", () => {
+    // 巻き添えを防ぐ。あちらは器を持たないので、外すと 12px へ落ちる
+    expect(読む("components/FileView/FileView.tsx")).toContain(
+      "prose-dashboard text-sm",
+    );
+  });
+});
+
+describe("構造化ビューの段落の空き（細かい修正 項目12）", () => {
+  it("器が 0.78em を持っている", () => {
+    // 利用者の選択＝**書いてある値（0.6em）の1.3倍**。いま見えている値の1.3倍だと、
+    // 項目11で文字が大きくなったぶんと相殺して +0.72px にしかならない
+    expect(素).toContain("--prose-gap: 0.78em");
+  });
+
+  it("段落と見出しの余白が、器から取る形になっている", () => {
+    expect(素).toContain("margin: var(--prose-gap, 0.6em) 0;");
+    expect(素).toContain(
+      "margin: var(--prose-head-top, 1.2em) 0 var(--prose-head-bottom, 0.5em);",
+    );
+  });
+
+  it("フォールバックが元の値なので、ファイルビュアは動かない", () => {
+    // `.prose-dashboard` の値そのものは1つも動かしていない。
+    // 動かしたのは「どこから取るか」だけである
+    expect(素).not.toContain("margin: 0.6em 0;");
+    expect(素).toContain("--prose-head-top: 1.56em");
+    expect(素).toContain("--prose-head-bottom: 0.65em");
+  });
+});

@@ -788,7 +788,7 @@ function MarkdownBody({
         // `row-body` を見るので、ここから動かすと「発言が強い」の検査が空振りする
         className={tone}
       >
-        <div className={`prose-dashboard text-xs leading-relaxed${fade ? ' body-fade-text' : ''}`}>
+        <div className={`prose-dashboard prose-body leading-relaxed${fade ? ' body-fade-text' : ''}`}>
           <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS}>
             {body}
           </ReactMarkdown>

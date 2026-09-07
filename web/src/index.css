@@ -233,10 +233,64 @@
 */
 .prose-dashboard > :first-child { margin-top: 0; }
 .prose-dashboard > :last-child { margin-bottom: 0; }
+/*
+  **器が大きさを持ち、本文がそれを読む**（細かい修正 設計§11・§12）。
+
+  **共用クラスに直接書かない。** `.prose-dashboard` はファイルビュアと共有しているので、
+  値そのものを動かすと**関係の無い画面まで一緒に動く**。ここで動かしたのは
+  「**どこから取るか**」だけで、**器の外ではフォールバックが効く**——だからファイル
+  ビュアは1ピクセルも変わらない。
+
+  **器へトークンを足すだけでは、見た目は1ミリも変わらない。** 本文は `.prose-body` を
+  付けて初めてこの値を読む。それまでは同じ要素に直書きされた `text-xs` が勝っていた
+  ——**要素へ直接効くユーティリティに、器の側の変数は勝てない**。直書きを外すところ
+  までが1組である。
+
+  **余白も同じ器から取る。** 大きさだけ割って余白を据え置くと、小さい器で行間だけが
+  相対的に広い、ちぐはぐな組版になる。`em` は文字に比例するので、**割った先でも同じ比で
+  付いてくる**のが1つの規則として正しい。
+*/
+.speech-bubble,
+.body-shell {
+  --body-size: 0.9rem;         /* 14.4px。青い吹き出しと平たい器 */
+  --prose-gap: 0.78em;         /* 段落の空き。利用者の選択＝書いてある値の1.3倍 */
+  --prose-head-top: 1.56em;    /* 1.2em × 1.3 */
+  --prose-head-bottom: 0.65em; /* 0.5em × 1.3 */
+}
+/*
+  **機械が差し込んだものは小さくする。**
+
+  **`.speech-bubble` と特異度で並ぶので、2クラスで書く。** 同じ (0,1,0) だと「あとに
+  書いたほうが勝つ」に頼ることになり、規則を並べ替えた人が黙って壊せる（待ちの
+  `.speech-bubble.speech-bubble-queued` が同じ理由で2クラス書きになっている）。
+
+  **0.9倍そのもの（10.8px）は採らない。** `DESIGN.md` の情報階層で **Badge の帯
+  （10〜12）へ落ち、本文が札の大きさになる**。11px なら Secondary Info に留まるので、
+  階層の表を書き換えずに済む。
+
+  **これで機械の発言（11px）が活動の行（14px）より小さくなる。** 実装のコメントは
+  「発言は主」と書いているが、**あれが指しているのは利用者とアシスタントの発言**である。
+  機械が差し込んだもの（フックの注入・完了通知・他セッションの連絡）は**既に「無条件に
+  畳む」決まりがあり、主として扱っていない**。主従はウェイトと色が引き続き担うので、
+  大きさだけが逆を向いていても読み分けは崩れない。
+
+  **3種（既定・完了通知・他セッションの連絡）は、このクラス1つで自動的に揃う。**
+  分かれているのは `data-origin` による地の色だけで、器のクラスは共通である。
+  **待ちと取り消しも自動で青い側に付く**——`queued` は機械でないときだけ足るので、
+  機械の待ちは `.speech-bubble-machine` のまま小さい。
+*/
+.speech-bubble.speech-bubble-machine {
+  --body-size: 0.6875rem; /* 11px */
+}
+/*
+  **本文が器の大きさを読む。** 器の外（ファイルビュアと、器を持たない思考の行）では
+  フォールバックの 0.75rem＝12px が効き、いままでと変わらない。
+*/
+.prose-body { font-size: var(--body-size, 0.75rem); }
 .prose-dashboard h1,
 .prose-dashboard h2,
 .prose-dashboard h3,
-.prose-dashboard h4 { font-weight: 600; line-height: 1.4; margin: 1.2em 0 0.5em; }
+.prose-dashboard h4 { font-weight: 600; line-height: 1.4; margin: var(--prose-head-top, 1.2em) 0 var(--prose-head-bottom, 0.5em); }
 /*
   **上ほど大きく開ける**（要件25・細かい修正 設計§8-5）。以前は3段の差が 0.25em しか
   なく、**階層が字の大きさから読めなかった**。
@@ -249,7 +303,7 @@
 .prose-dashboard h1 { font-size: 1.6em; }
 .prose-dashboard h2 { font-size: 1.35em; }
 .prose-dashboard h3 { font-size: 1.15em; }
-.prose-dashboard p, .prose-dashboard ul, .prose-dashboard ol { margin: 0.6em 0; }
+.prose-dashboard p, .prose-dashboard ul, .prose-dashboard ol { margin: var(--prose-gap, 0.6em) 0; }
 .prose-dashboard ul, .prose-dashboard ol { padding-left: 1.4em; }
 .prose-dashboard ul { list-style: disc; }
 .prose-dashboard ol { list-style: decimal; }
