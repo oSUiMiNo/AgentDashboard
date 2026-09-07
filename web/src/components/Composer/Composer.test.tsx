@@ -932,6 +932,30 @@ describe('スラッシュコマンドの候補（フェーズ2・設計§6・§7
       fireEvent.keyDown(入力欄(), { key: 'ArrowUp' })
       expect(回す).not.toHaveBeenCalled()
     })
+
+    // **0件のときは奪わない。** 一覧は「当たりません」を出したまま開いているので、
+    // `候補が出ている` だけで判断すると ↑↓ を握ったままになり、`/` で始まる
+    // 複数行を書いている最中に**行を上下へ移動できなくなる**
+    it('当たるものが0件のとき、↑↓ は入力欄へ通す', async () => {
+      置く()
+      fireEvent.change(入力欄(), { target: { value: '/当たらない語' } })
+      await 一覧が出るまで()
+      expect(screen.getByTestId('slash-menu-empty')).toBeInTheDocument()
+      // `fireEvent` は preventDefault が呼ばれると false を返す
+      expect(fireEvent.keyDown(入力欄(), { key: 'ArrowUp' })).toBe(true)
+      expect(fireEvent.keyDown(入力欄(), { key: 'ArrowDown' })).toBe(true)
+    })
+
+    // **Esc だけは0件でも奪う。** 畳む道が無くなると、当たらない一覧が出たまま残る
+    it('当たるものが0件でも、Esc は一覧を畳む', async () => {
+      置く()
+      fireEvent.change(入力欄(), { target: { value: '/当たらない語' } })
+      await 一覧が出るまで()
+      expect(fireEvent.keyDown(入力欄(), { key: 'Escape' })).toBe(false)
+      await waitFor(() =>
+        expect(screen.queryByTestId('slash-menu')).not.toBeInTheDocument(),
+      )
+    })
   })
 
   describe('集められなくても、入力欄は使える', () => {

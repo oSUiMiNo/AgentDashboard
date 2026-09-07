@@ -678,11 +678,16 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
               return
             }
             const 操作 = isCandidateMove(押し分けの材料, 候補が出ている)
-            if (操作 !== null) {
+            // **当たるものが0件のときは、↑↓ を奪わない。** 動かす行が1つも無いのに
+            // `preventDefault()` すると、`/` で始まる複数行を書いている最中に
+            // **行を上下へ移動できなくなる**——一覧は「当たりません」を出したまま
+            // 開いているので、`候補が出ている` だけを見ると奪ってしまう。
+            // **Esc は0件でも要る**（畳む道が無くなるため）ので、そちらは通す。
+            if (操作 === 'close' || (操作 !== null && 候補.length > 0)) {
               event.preventDefault()
               if (操作 === 'close') {
                 setDismissed(true)
-              } else if (候補.length > 0) {
+              } else {
                 // 端で止める。**巡回させない**——長い一覧で端まで送ったつもりが
                 // 反対の端へ飛ぶと、目で追っていた行を見失う
                 const 幅 = Math.min(候補.length, MAX_VISIBLE)
