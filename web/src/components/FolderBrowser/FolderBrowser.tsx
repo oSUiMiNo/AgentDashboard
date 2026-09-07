@@ -28,8 +28,9 @@ import {
   ContextMenuItem,
   ContextMenuTrigger,
 } from '@/components/ui/context-menu'
-import { ArrowUpGlyph, CopyGlyph } from '@/components/ui/glyphs'
+import { ArrowUpGlyph, CloseGlyph, CopyGlyph } from '@/components/ui/glyphs'
 import { copyToClipboard } from '@/lib/clipboard'
+import { TOAST_LIFE_MS } from '@/stores/appNotices'
 import { fileIcon } from '@/lib/fileKind'
 import {
   childOf,
@@ -123,23 +124,88 @@ export function FolderBrowser({
   } | null>(null)
 
   /**
+   * 出したものを引っ込めるための2つ（項目5）。
+   *
+   * **`戻す` は成功のときだけ張る**——失敗は時間で消さない（下の [`copy`] の但し書き）。
+   * **`出し直す` は次の描画を1回挟むためのもの**で、押し直しを目に見せる。
+   *
+   * **どちらも `useRef` で持ち、[`止める`] が両方を落とす。** 止め忘れると、
+   * **前のタイマーが新しい表示を消しに来る**。
+   */
+  const 戻す = useRef<number | null>(null)
+  const 出し直す = useRef<number | null>(null)
+
+  const 止める = useCallback(() => {
+    if (戻す.current !== null) {
+      window.clearTimeout(戻す.current)
+      戻す.current = null
+    }
+    if (出し直す.current !== null) {
+      cancelAnimationFrame(出し直す.current)
+      出し直す.current = null
+    }
+  }, [])
+
+  // 畳んだ・離れたときに必ず落とす。**ここが無いと、消えたはずの画面へ向けて
+  // タイマーが発火する**
+  useEffect(() => 止める, [止める])
+
+  /**
    * **`await` を1つも挟まずに [`copyToClipboard`] を呼ぶ**（設計§3）。ここに
    * 待ちを入れると、古い方法が要求する「押した合図」が切れることがある——
    * 切れるかどうかはブラウザ任せなので、**動いたり動かなかったりする**形になる。
    */
-  const copy = useCallback((at: string, value: string) => {
-    const mine = ++copyAsked.current
-    // 押した瞬間に前の答えを消す。**結果を待たない**——待つと、次の行を押しても
-    // 前の行の答えが残って見える
-    setCopied(null)
-    void copyToClipboard(value).then((ok) => {
-      // 割り込まれた古い答えは捨てる（`asked` と同じ理由）
-      if (mine !== copyAsked.current) {
-        return
-      }
-      setCopied({ path: at, value, state: ok ? "done" : "failed" })
-    })
-  }, [])
+  const copy = useCallback(
+    (at: string, value: string) => {
+      const mine = ++copyAsked.current
+      // 押した瞬間に前の答えを消す。**結果を待たない**——待つと、次の行を押しても
+      // 前の行の答えが残って見える
+      止める()
+      setCopied(null)
+      void copyToClipboard(value).then((ok) => {
+        // 割り込まれた古い答えは捨てる（`asked` と同じ理由）
+        if (mine !== copyAsked.current) {
+          return
+        }
+        /*
+          **次の描画を1回挟む**（項目5-b）。上で `null` にしても、`then` は
+          マイクロタスクなので **React が同じ描画へまとめてしまい、同じ行を続けて
+          押したときに目には何も起きない**。
+
+          `requestAnimationFrame` を選んだのは、**「消えた状態を1度描いてから出し直す」
+          という目的そのものが、描画の区切りを1つ挟むことだから**である。
+          `setTimeout(0)` でも描画は挟まるが、**挟まる保証が無い**（描画前に走りうる）。
+          `flushSync` は逆に描画を強制するが、**イベントの途中で呼ぶと React が警告する**。
+        */
+        出し直す.current = requestAnimationFrame(() => {
+          出し直す.current = null
+          if (mine !== copyAsked.current) {
+            return
+          }
+          setCopied({ path: at, value, state: ok ? "done" : "failed" })
+          /*
+            **成功だけ時間で消す**（項目5-c）。長さは `DESIGN.md`「知らせの出し方」が
+            **出来事**（起きた瞬間があり放っておいてよい）に定めた 7 秒を**借りる**——
+            ここで別の数字を作ると、**同じ形の知らせが画面ごとに違う速さで消える**。
+
+            **トーストにしたのではない。借りたのは寿命だけ**で、出し方は行の中の字のまま。
+            あちらが「7秒で消えてよいのは後から読める場所（ベル）があるから」と言うのに対し、
+            **ここは押し直せばいつでも出し直せる**ので、後から読める場所は要らない。
+
+            **失敗には張らない。** あれは値を選んで取るための逃げ道なので、
+            **消えると逃げ道として使えなくなる**。消すのは人の手（下の ✕）。
+          */
+          if (ok) {
+            戻す.current = window.setTimeout(() => {
+              戻す.current = null
+              setCopied(null)
+            }, TOAST_LIFE_MS)
+          }
+        })
+      })
+    },
+    [止める],
+  )
 
   const go = useCallback(
     async (next: string | undefined, 黙る = false): Promise<Arrival> => {
@@ -306,14 +372,37 @@ export function FolderBrowser({
           あちらの「パスをコピー」は要件24 で無くなったので、**逃げ道はここ1箇所だけ**に
           なった。揃える相手が居なくなっただけで、出す理由は変わっていない。 */}
       {copied?.state === "failed" && (
-        <p data-testid="folder-copy-failed" className="text-xs text-amber-300">
-          コピーできません。この値を選んで取ってください：{" "}
-          <code
-            data-testid="folder-copy-fallback"
-            className="bg-muted/60 rounded px-1 py-0.5 font-mono select-all"
+        <p
+          data-testid="folder-copy-failed"
+          className="flex items-start gap-1 text-xs text-amber-300"
+        >
+          <span className="min-w-0 flex-1">
+            コピーできません。この値を選んで取ってください：{" "}
+            <code
+              data-testid="folder-copy-fallback"
+              className="bg-muted/60 rounded px-1 py-0.5 font-mono select-all"
+            >
+              {copied.value}
+            </code>
+          </span>
+          {/* **消すのは人の手だけ**（項目5-c）。時間で消すと、値を選んで取る前に
+              逃げ道が消える。`DESIGN.md`「知らせの出し方」の**続いている状態**——
+              人が片付けるまで残すもの——に当たる */}
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            data-testid="folder-copy-failed-dismiss"
+            aria-label="閉じる"
+            title="閉じる"
+            className="shrink-0"
+            onClick={() => {
+              止める()
+              setCopied(null)
+            }}
           >
-            {copied.value}
-          </code>
+            <CloseGlyph />
+          </Button>
         </p>
       )}
 
