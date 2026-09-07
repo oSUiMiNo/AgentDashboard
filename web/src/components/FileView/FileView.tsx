@@ -39,7 +39,7 @@
 import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { Button } from '@/components/ui/button'
-import { CloseGlyph } from '@/components/ui/glyphs'
+import { CloseGlyph, ExternalLinkGlyph } from '@/components/ui/glyphs'
 import { fileKind, needsSandbox } from '@/lib/fileKind'
 import { REHYPE_PLUGINS, REMARK_PLUGINS } from '@/lib/markdown'
 import {
@@ -253,9 +253,13 @@ export function FileView({
           {relative}
         </code>
 
-        {/* **折り返しを許す。** 4つ目を足したので、狭い窓（セッション専用画面の幅）では
+        {/* **折り返しを許す。** 3つ並ぶので、狭い窓（セッション専用画面の幅）では
             1行に収まらない。`shrink-0` のまま折り返さないと、そのまま横へはみ出す
-            （`ファイルの中身に掛けた隔離を、script の1段だけ解く` 設計§6-4） */}
+            （`ファイルの中身に掛けた隔離を、script の1段だけ解く` 設計§6-4）。
+
+            **数は実態に合わせてある。** かつて「4つ目を足したので」と書いてあったが、
+            `パスをコピー` が `f085071` で外れたあとも数だけが残っていた。**理由（折り返しを
+            許す）は消えていないので、理由は残して数だけ直した** */}
         <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-1">
           {canShowSource && (
             <Button
@@ -277,14 +281,16 @@ export function FileView({
 
               **種別で出し分けない**（設計§6-6）。表に無いものも `text/plain` で字が出る
               ようになったので、押して意味の無い相手でも字か理由のどちらかは必ず出る */}
-          <Button asChild variant="ghost" size="sm">
+          <Button asChild variant="ghost" size="icon-sm">
             <a
               data-testid="file-open-tab"
               href={rawUrl(host, path)}
               target="_blank"
               rel="noopener"
+              aria-label="ブラウザで開く"
+              title="ブラウザで開く"
             >
-              ブラウザで開く
+              <ExternalLinkGlyph />
             </a>
           </Button>
           {onClose !== undefined && (

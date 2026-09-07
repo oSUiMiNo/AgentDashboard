@@ -148,6 +148,44 @@ export function CloseGlyph({ className }: { className?: string }) {
 }
 
 /**
+ * 「別の窓で開く」の印（細かい修正 設計・項目3）。**言葉は `aria-label` と `title` に残す。**
+ *
+ * # `Expand` と書き分ける
+ *
+ * `DESIGN.md` §14.3 の一覧には **`Expand`（画面の中で大きくする）** が既にあるが、これは
+ * **画面の外へ出す**——別物である。どちらも「広げる」に見えるので、書き分けが無いと
+ * 次に足す人が `Expand` を流用する。
+ *
+ * # 形は2つだけ
+ *
+ * **右上の角が開いた四角**と、**そこから外へ出ていく矢印**。§18.4 の門（他と見分けが
+ * 付くか・その意味に見えるか）に対し、**開いた角が「外へ通じている」ことを、絵の側で
+ * 言っている**——閉じた四角＋矢印だと、ただの「送信」に寄る。
+ *
+ * 矢印は**1本の `path` に折り返しの角と軸をまとめて**描く。別々の要素にすると、
+ * §18.2 の「要素は3つ以下」を矢印だけで使い切る。
+ */
+export function ExternalLinkGlyph({ className }: { className?: string }) {
+  return (
+    <svg
+      aria-hidden
+      viewBox="0 0 24 24"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      {/* 右上の角が開いた四角 */}
+      <path d="M19 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h6" />
+      {/* 外へ出ていく矢印（角と軸で1本） */}
+      <path d="M15 3h6v6M21 3l-9 9" />
+    </svg>
+  )
+}
+
+/**
  * 「設定」の印（細かい修正 設計§9-2）。**絵文字（`⚙️`）は使わない**（`DESIGN.md` §14.4 が
  * 禁止例に名指しで挙げている）。
  *

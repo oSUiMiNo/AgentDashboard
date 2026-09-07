@@ -7,8 +7,10 @@ import {
   ChevronGlyph,
   CloseGlyph,
   CopyGlyph,
+  ExternalLinkGlyph,
   GearGlyph,
   KeyboardGlyph,
+  LanAddressGlyph,
   PencilGlyph,
   PlusGlyph,
   PowerGlyph,
@@ -29,9 +31,11 @@ const 印 = {
   PencilGlyph: <PencilGlyph />,
   ChevronGlyph: <ChevronGlyph direction="up" />,
   CloseGlyph: <CloseGlyph />,
+  ExternalLinkGlyph: <ExternalLinkGlyph />,
   GearGlyph: <GearGlyph />,
   SendGlyph: <SendGlyph />,
   CopyGlyph: <CopyGlyph />,
+  LanAddressGlyph: <LanAddressGlyph />,
   BellGlyph: <BellGlyph />,
   PlusGlyph: <PlusGlyph />,
   KeyboardGlyph: <KeyboardGlyph />,
@@ -53,15 +57,17 @@ const 太さの例外: Readonly<Record<string, string>> = {
 }
 
 describe('印の作法', () => {
-  it('12 そろっている', () => {
-    // 既存4つ＋フェーズ1の5つ＋`PlusGlyph`＋`KeyboardGlyph`＋`ArrowUpGlyph`。
+  it('14 そろっている', () => {
+    // 既存4つ＋フェーズ1の5つ＋`PlusGlyph`＋`KeyboardGlyph`＋`ArrowUpGlyph`
+    // ＋`ExternalLinkGlyph`＋`LanAddressGlyph`。
     // **`KeyboardGlyph` はここへ足し忘れられていた**（コミットはされていたが、
-    // 表に無いので作法の見張りから外れていた）。
+    // 表に無いので作法の見張りから外れていた）。**`LanAddressGlyph` も同じ形で
+    // 漏れていた**ので、`ExternalLinkGlyph` を足すついでに拾った。
     //
     // **`ArrowUpGlyph` は、フェーズ1の「上向き矢印は足さない」を覆したもの**——
     // 山形は「前へ／後ろへ」の意味に取ってあり、**階層を1つ上がる**には足りず、
     // 実物では細い `^` がパスの文字に紛れていた（2026-09-05 の指定）
-    expect(Object.keys(印)).toHaveLength(12)
+    expect(Object.keys(印)).toHaveLength(14)
   })
 
   it.each(Object.entries(印))('%s が作法どおりに描かれている', (_name, node) => {

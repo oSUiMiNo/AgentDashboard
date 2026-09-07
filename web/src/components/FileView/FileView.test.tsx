@@ -302,6 +302,57 @@ describe("ブラウザで開く", () => {
     expect(開く).toHaveAttribute("rel", "noopener");
   });
 
+  /**
+   * 文字から記号へ移した（項目3）。**落とすのは見える字だけ。**
+   *
+   * 読み上げ用の名前とマウスを乗せたときの説明を一緒に落とすと、**何のボタンか
+   * 確かめる手段が画面から消える**。記号は意味を持たない絵なので、言葉の側が正になる。
+   */
+  it("記号になっても、リンクのままで名前が残る", async () => {
+    serve(content("# 計画"));
+    show();
+
+    const 開く = await screen.findByTestId("file-open-tab");
+    // **`<a>` のまま。** ボタンにすると中クリック・修飾キー・キーボード操作を作り直す
+    expect(開く.tagName).toBe("A");
+    // 言葉は両方に残す（読み上げと、マウスを乗せたとき）
+    expect(開く).toHaveAttribute("aria-label", "ブラウザで開く");
+    expect(開く).toHaveAttribute("title", "ブラウザで開く");
+    // **見える字は消えている。** 記号の `svg` は `aria-hidden` なので字を持たない
+    expect(開く.textContent?.trim()).toBe("");
+    expect(開く.querySelector("svg")).not.toBeNull();
+  });
+
+  it("記号は隣の閉じると同じ作りで描かれている", async () => {
+    // 帯の中で浮かないこと。**同じ器の大きさ・同じ線の太さ**で並ぶ
+    serve(content("# 計画"));
+    render(
+      <FileView
+        host="local"
+        root={ROOT}
+        path={`${ROOT}/計画.md`}
+        onClose={() => {}}
+      />,
+    );
+
+    const 開く = await screen.findByTestId("file-open-tab");
+    const 閉じる = screen.getByTestId("file-close");
+    const 開くの絵 = 開く.querySelector("svg");
+    const 閉じるの絵 = 閉じる.querySelector("svg");
+
+    // 24 のグリッドで、線の太さは 2 以上（`DESIGN.md` §18.2 の下限）
+    expect(開くの絵?.getAttribute("viewBox")).toBe("0 0 24 24");
+    expect(
+      Number(開くの絵?.getAttribute("stroke-width")),
+    ).toBeGreaterThanOrEqual(2);
+    // **要素は3つ以下**（§18.2）。四角と矢印の2つで描いてある
+    expect(開くの絵?.children.length).toBeLessThanOrEqual(3);
+    // 太さは隣と揃える
+    expect(開くの絵?.getAttribute("stroke-width")).toBe(
+      閉じるの絵?.getAttribute("stroke-width"),
+    );
+  });
+
   it("種別で出し分けない——どのファイルでも出る", async () => {
     // 要件が「ファイルによって表示するか判別する必要は今のところない」と明記している。
     // 口を広げたので、押して意味の無い相手でも**字か理由のどちらかは必ず出る**（設計§6-6）
