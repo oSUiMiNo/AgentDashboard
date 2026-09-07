@@ -796,6 +796,8 @@ async fn run_async(cli: Cli, config: Config) -> anyhow::Result<()> {
             eprintln!("注意：これはいま居るディレクトリの設定を解決した値です。");
             eprintln!("　　　走っているインスタンスが別のツリーから起動されていれば、");
             eprintln!("　　　置き場所も別です。そのツリーへ入って叩き直してください。");
+            eprintln!("　　　`agentdashboard config` にも出ますが、設定していないときは");
+            eprintln!("　　　行ごと出てきません（既定値は見えません）。");
         }
         Some(Command::Embedded { get: None }) => {
             let paths = embed::list();

@@ -394,4 +394,27 @@ describe('版のカード', () => {
       .filter((value) => value !== '')
     expect(並び).toEqual(['0.1.10', '0.1.9', '0.1.2'])
   })
+
+  it('一覧とドロップダウンの向きが揃っている', async () => {
+    // **同じ配列を読んでいるので、構造的に揃う。** ここが割れるのは、
+    // どちらかが自分で並べ替えたとき——それを見張る
+    show({
+      entries: [
+        entry({ version: '0.1.10', path: '/state/versions/0.1.10/agentdashboard' }),
+        entry({ version: '0.1.9', path: '/state/versions/0.1.9/agentdashboard' }),
+        entry({ version: '0.1.2', path: '/state/versions/0.1.2/agentdashboard' }),
+      ],
+    })
+
+    const picker = await screen.findByTestId('versions-picker')
+    const ドロップダウン = Array.from(picker.querySelectorAll('option'))
+      .map((option) => option.getAttribute('value'))
+      .filter((value) => value !== '')
+    const 一覧 = Array.from(
+      document.querySelectorAll('[data-testid="versions-entry"]'),
+    ).map((row) => row.getAttribute('data-version'))
+
+    expect(一覧.length).toBeGreaterThan(0)
+    expect(一覧).toEqual(ドロップダウン)
+  })
 })

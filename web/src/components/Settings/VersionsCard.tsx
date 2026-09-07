@@ -349,7 +349,12 @@ export function VersionsCard() {
       {versions.entries.length > 0 && (
         <ul data-testid="versions-stored" className="flex flex-col gap-1">
           {versions.entries.map((entry) => (
-            <li key={entry.path} className="flex items-center gap-2 text-xs">
+            <li
+              key={entry.path}
+              data-testid="versions-entry"
+              data-version={entry.version}
+              className="flex items-center gap-2 text-xs"
+            >
               <span className="shrink-0">{entry.version}</span>
               {entry.origin === 'installed' && (
                 <span

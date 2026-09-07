@@ -273,6 +273,10 @@ fn state_dirは断りをstderrへ出し標準出力は1行のまま() {
         noted.contains("そのツリーへ入って叩き直して"),
         "どうすればよいかが出ていません:\n{noted}"
     );
+    assert!(
+        noted.contains("agentdashboard config"),
+        "もう一方の口の案内が併記されていません:\n{noted}"
+    );
 }
 
 #[test]
