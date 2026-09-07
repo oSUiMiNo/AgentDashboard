@@ -796,6 +796,29 @@ describe('操作の群は、いま触っている1枚にだけ出る', () => {
     expect(既定.selector).not.toContain('hover: hover')
   })
 
+  it('出していないあいだは、触れもしない', () => {
+    /*
+      **`opacity` だけ 0 にすると、群は場所を占めたまま当たり判定が残る。**
+      指の画面では、選んでいないカードの右上を触っただけで**見えない電源に当たり、
+      走っている作業が黙って止まる**——電源は下で当たり判定を 44px へ広げてあるので、
+      なおさら当たりやすい。**見た目だけ消して危険を残す直しになっていないか**を見る。
+
+      **出す規則には必ず `auto` を戻すこと。** 戻し忘れると、こんどは
+      マウスのある機械で**見えているのに押せない**ボタンになる。だから
+      「既定が `none`」と「出す規則が `auto`」を対で見張る。
+    */
+    expect(規則('.tile-ops').body).toMatch(/pointer-events:\s*none\b/)
+
+    const 出す規則 = 全規則.filter(
+      (rule) =>
+        rule.selector.includes('.tile-ops') && /opacity:\s*1\b/.test(rule.body),
+    )
+    expect(出す規則.length).toBeGreaterThanOrEqual(2)
+    for (const rule of 出す規則) {
+      expect(rule.body, rule.selector).toMatch(/pointer-events:\s*auto\b/)
+    }
+  })
+
   it('選んだら出る——フォーカスも一緒に、媒体条件の外にある', () => {
     /*
       **選択だけを外へ出すと、指の画面に外付けキーボードを繋いだとき、

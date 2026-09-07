@@ -471,6 +471,19 @@
   gap: 6px;
   /* 既定は出さない（媒体によらず） */
   opacity: 0;
+  /*
+    **見えないものには触れさせない。** `opacity` だけ 0 にすると、群は場所を占めたまま
+    当たり判定が残る。指の画面では、選んでいないカードの右上を触っただけで
+    **見えない電源に当たり、走っている作業が黙って止まる**——しかも電源は
+    下の `.power::after` で当たり判定を 44px へ広げてあるので、当たりやすい。
+
+    **これを外すと、項目6は「見た目だけ消して危険は残す」直しになる。**
+    出す3つの規則で、そのつど `auto` へ戻すこと。
+
+    **キーボードは塞がらない。** `pointer-events` は指と鼠の当たり判定だけの話で、
+    Tab の移動と焦点には効かない。だから `:focus-within` は今までどおり発火する。
+  */
+  pointer-events: none;
   transition: opacity 120ms ease-out;
 }
 
@@ -479,6 +492,7 @@
 .tile-shell[data-selected='true'] .tile-ops,
 .tile-ops:where(:focus-within) {
   opacity: 1;
+  pointer-events: auto;
 }
 
 @media (hover: hover) and (pointer: fine) {
@@ -486,6 +500,7 @@
      外へ出すと触った瞬間に出て常時表示と同じになる */
   .tile-shell:where(:hover) .tile-ops {
     opacity: 1;
+    pointer-events: auto;
   }
 }
 
