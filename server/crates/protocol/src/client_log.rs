@@ -323,10 +323,7 @@ mod tests {
             r#""slash_candidates""#
         );
         assert_eq!(ClientLogKind::VersionReload.as_str(), "version_reload");
-        assert_eq!(
-            ClientLogKind::SlashCandidates.as_str(),
-            "slash_candidates"
-        );
+        assert_eq!(ClientLogKind::SlashCandidates.as_str(), "slash_candidates");
     }
 
     #[test]
