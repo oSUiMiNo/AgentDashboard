@@ -1583,8 +1583,11 @@ impl SessionRegistry {
         // 0 を名乗ってくる。素直に取り込むと、**報告が届くたびに並べ替えた結果が
         // 先頭へ戻る**——生まれた時刻や名前とまったく同じ性質である。
         //
-        // 記録がどこにも無いカード（本当に新しい1枚）だけ、**その枠の末尾**を振る。
-        // ここで決めた値を下の `write_session` がそのまま入れるので、採番は1回で済む
+        // 記録がどこにも無いカード（本当に新しい1枚）だけ、**その枠の先頭**を振る。
+        // ここで決めた値を下の `write_session` がそのまま入れるので、採番は1回で済む。
+        //
+        // **復旧はこの枝を通らない**（記録が残っているので `Some` 側へ行く）。
+        // だから起こし直しても位置は動かない
         meta.position = match 記録の並び {
             Some(並び) => 並び,
             None => {
@@ -1903,15 +1906,22 @@ impl SessionRegistry {
     }
 }
 
-/// その枠に振る、次のカードの並び順（並べ替え設計§2-4）。**末尾へ足す。**
+/// その枠に振る、次のカードの並び順（並べ替え設計§2-4）。**先頭へ足す。**
+///
+/// **起こしたばかりのセッションは、いちばん見たいもの**なので目の前に出す。末尾へ
+/// 足すと、枠が横に伸びるほど新しい1枚が画面の外へ出ていく。
 ///
 /// カードの `position` は**枠の中で閉じている**ので、絞りは枠の同一性
 /// `(account_id, agent_id, project)` と同じ3つで掛ける。**`agent_id` は
 /// ローカルモードで `NULL` になる**ので、`eq(None)` ではなく `is_null()` を使う——
 /// SQL の `= NULL` はどの行にも当たらず、ローカルのカードが毎回 0 から振り直される。
 ///
-/// 枠にカードが1枚も無ければ 0。**空きは詰め直さない**（並べ替えの口が丸ごと
-/// 受け取って 0 から振り直すので、穴はそこで消える）。
+/// 枠にカードが1枚も無ければ 0。**いちばん小さい値から1を引く**ので負になるが、
+/// 読み出しは昇順なので自然に先頭へ来る。**空きは詰め直さない**（並べ替えの口が
+/// 丸ごと受け取って 0 から振り直すので、穴はそこで消える）。
+///
+/// **`order_by_asc` と `saturating_sub` は対である。** 片方だけ直すと「いちばん
+/// 大きい値から1を引く」になり、2枚目以降が既にあるカードと同じ位置へ入る。
 async fn next_card_position(
     db: &DatabaseConnection,
     account_id: Uuid,
@@ -1925,11 +1935,11 @@ async fn next_card_position(
         Some(id) => found.filter(entity::sessions::Column::AgentId.eq(id)),
         None => found.filter(entity::sessions::Column::AgentId.is_null()),
     };
-    let last = found
-        .order_by_desc(entity::sessions::Column::Position)
+    let first = found
+        .order_by_asc(entity::sessions::Column::Position)
         .one(db)
         .await?;
-    Ok(last.map_or(0, |row| row.position.saturating_add(1)))
+    Ok(first.map_or(0, |row| row.position.saturating_sub(1)))
 }
 
 /// 利用者が付けた名前を DB からまとめて読む（名前付け設計§4-1）。

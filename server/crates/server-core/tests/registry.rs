@@ -781,11 +781,11 @@ async fn サーバを起こし直しても最初の空の報告で名前が消�
 }
 
 #[tokio::test]
-async fn 新しいカードは枠の末尾へ入り報告のたびに戻らない() {
-    // **末尾へ入る**のは §2-4 の決めごとで、既存の E2E の土台（`helpers.ts` の
-    // `nth(before)`）がこれに乗っている。あわせて、**報告が届くたびに並びが 0 へ
-    // 戻らない**ことを見る——セッションホストは並び順を知らないので 0 を名乗る。
-    // 記録の値で上書きしないと、並べ替えた結果がフックのたびに巻き戻る
+async fn 新しいカードは枠の先頭へ入り報告のたびに戻らない() {
+    // **先頭へ入る**（項目13）。起こしたばかりのセッションはいちばん見たいものなので
+    // 目の前に出す。あわせて、**報告が届くたびに並びが 0 へ戻らない**ことを見る——
+    // セッションホストは並び順を知らないので 0 を名乗る。記録の値で上書きしないと、
+    // 並べ替えた結果がフックのたびに巻き戻る
     for backend in common::backends("card-position").await {
         let registry =
             SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
@@ -800,11 +800,11 @@ async fn 新しいカードは枠の末尾へ入り報告のたびに戻らな�
         let listed = registry.list(server_core::db::LOCAL_ACCOUNT_ID);
         assert_eq!(
             listed.iter().map(|meta| meta.position).collect::<Vec<_>>(),
-            vec![0, 1],
-            "[{}] 末尾へ入っていない",
+            vec![-1, 0],
+            "[{}] 先頭へ入っていない",
             backend.name
         );
-        assert_eq!(listed[1].card_id, second, "[{}] 並びが違う", backend.name);
+        assert_eq!(listed[0].card_id, second, "[{}] 並びが違う", backend.name);
 
         // 2枚目の報告がもう一度届いても、番号は 0 へ戻らない
         registry.apply(&local(), upsert(second)).await;
@@ -814,8 +814,68 @@ async fn 新しいカードは枠の末尾へ入り報告のたびに戻らな�
             .find(|meta| meta.card_id == second)
             .expect("残っていること");
         assert_eq!(
-            again.position, 1,
-            "[{}] 報告のたびに並びが先頭へ戻っている",
+            again.position, -1,
+            "[{}] 報告のたびに並びが振り直されている",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 復旧したカードは元の位置へ戻る() {
+    // 項目13で「新しい1枚は先頭へ」に変えたので、**起こし直しまで先頭へ寄ってしまわ
+    // ないか**を見る。記録が残っているカードは `記録の並び` が `Some` になり、
+    // 採番の枝を通らない——ここが壊れると、復旧のたびに並びが崩れる。
+    //
+    // **端ではなく真ん中の1枚で見る。** 先頭や末尾で見ると「いつも先頭へ寄せる」
+    // 実装でも偶然通ってしまう
+    for backend in common::backends("card-revive-position").await {
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+
+        // 足した順に 0 → -1 → -2 が振られるので、並びは c, b, a になる
+        let a = CardId::new();
+        let b = CardId::new();
+        let c = CardId::new();
+        registry.apply(&local(), upsert(a)).await;
+        registry.apply(&local(), upsert(b)).await;
+        registry.apply(&local(), upsert(c)).await;
+
+        let listed = registry.list(server_core::db::LOCAL_ACCOUNT_ID);
+        assert_eq!(
+            listed.iter().map(|meta| meta.card_id).collect::<Vec<_>>(),
+            vec![c, b, a],
+            "[{}] 新しいものから先頭に並んでいない",
+            backend.name
+        );
+        assert_eq!(
+            listed.iter().map(|meta| meta.position).collect::<Vec<_>>(),
+            vec![-2, -1, 0],
+            "[{}] 採番が違う",
+            backend.name
+        );
+
+        // **真ん中の b** をもう一度報告する（＝復旧。セッションホストは 0 を名乗る）
+        registry.apply(&local(), upsert(b)).await;
+
+        let listed = registry.list(server_core::db::LOCAL_ACCOUNT_ID);
+        assert_eq!(
+            listed.iter().map(|meta| meta.card_id).collect::<Vec<_>>(),
+            vec![c, b, a],
+            "[{}] 復旧で並びが動いた",
+            backend.name
+        );
+        let revived = listed
+            .iter()
+            .find(|meta| meta.card_id == b)
+            .expect("残っていること");
+        assert_eq!(
+            revived.position, -1,
+            "[{}] 復旧したカードが元の位置に戻っていない",
             backend.name
         );
 
