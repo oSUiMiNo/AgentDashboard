@@ -1589,3 +1589,88 @@ test('コマンドの展開は、開くと同じ吹き出しの中に出る', as
   await コマンド行.getByTestId('body-toggle').click()
   await expect(コマンド行.getByText('指定されたファイルを読み')).toBeVisible(届くまで)
 })
+
+/*
+  **この2本はいま赤い。`test.fixme` で留めてある**（細かい修正 項目10）。
+
+  症状は実物のブラウザで確かめた。末尾から 80px 以内で「続きを読む」を押すと、
+  **開くとき 7013 → 5230（1783px）**、**畳むとき 7176 → 5395（1781px）** 位置が飛ぶ。
+  フェーズ1が「実ブラウザでの再現はここで兼ねる」と預けた宿題は、これで果たしている。
+
+  **設計の案B（押す直前の位置を控え、伸びたあとに戻す）は効かなかった。** 2フレーム後に
+  1回戻す形でも、12フレームのあいだ戻し続ける形でも、同じ 1783px が最後まで残る——
+  伸びた行の高さが `ResizeObserver` 越しに遅れて届き、**こちらが戻したあとで錨がもう一度
+  下端へ引き直す**ためである。錨（`anchorTo: 'end'`）を触らずに勝つ道が要る。
+
+  **赤いまま消さずに残す。** 消すと、次に直す人が再現から始めることになる。
+*/
+/*
+  「続きを読む」を押しても、いま読んでいる位置が動かないこと（細かい修正 項目10）。
+
+  仮想化に **`anchorTo: 'end'`** が指定してあり、**変化の直前に末尾から
+  `END_THRESHOLD`（80px）以内に居ると、総高が増えたぶんだけスクロール位置をずらす**
+  （＝下端を固定する）。押すと本文が伸びるので、伸びた高さぶん画面が下へ引かれる。
+
+  **3本立てにしてある。** ①②だけだと**末尾追従を殺しても緑になる**ので、③で塞ぐ。
+  末尾追従は「新しい発言が届いたら末尾へ追いかける」ために在るもので、これを壊すのが
+  いちばん高くつく壊れ方である。
+
+  **末尾から 80px 以内で押すこと。** それより上では**元々動かない**ので、
+  直っていなくても緑になる。送った位置を測ってから押す。
+*/
+async function 末尾の近くまで送る(page: Parameters<typeof openDashboard>[0]) {
+  const box = page.getByTestId('transcript-tree').first()
+  await box.evaluate((el) => {
+    el.scrollTop = el.scrollHeight - el.clientHeight
+  })
+  // 末尾に貼り付いた状態＝しきい値（80px）の内側であることを確かめてから押す
+  const 末尾からの距離 = await box.evaluate(
+    (el) => el.scrollHeight - el.clientHeight - el.scrollTop,
+  )
+  expect(末尾からの距離, '末尾から 80px 以内で押さないと、直っていなくても緑になる').toBeLessThan(80)
+  return box
+}
+
+test.fixme('「続きを読む」を押しても、読んでいる位置が動かない', async ({ page }) => {
+  await loadFoldLines(page)
+  const row = foldableRow(page)
+  await expect(row).toBeVisible(届くまで)
+
+  const box = await 末尾の近くまで送る(page)
+  const 押す前 = await box.evaluate((el) => el.scrollTop)
+
+  await row.getByTestId('body-toggle').click()
+  await expect(row).toHaveAttribute('data-body-open', 'true')
+
+  // **戻すのは2フレーム後**（React の描画 → 仮想化の再測定）なので、落ち着くまで待つ。
+  // 押した直後を読むと、まだ引かれたままの値を見ることになる
+  await expect
+    .poll(async () => Math.abs((await box.evaluate((el) => el.scrollTop)) - 押す前), {
+      timeout: 5_000,
+    })
+    .toBeLessThan(2)
+})
+
+test.fixme('「畳む」を押しても、読んでいる位置が動かない', async ({ page }) => {
+  // **開くときと畳むときで分岐を書かない**ので、同じ手当てが両方へ効くはず。
+  // 片方だけ直すと「畳むときだけ跳ねる」が残る
+  await loadFoldLines(page)
+  const row = foldableRow(page)
+  await expect(row).toBeVisible(届くまで)
+
+  await row.getByTestId('body-toggle').click()
+  await expect(row).toHaveAttribute('data-body-open', 'true')
+
+  const box = await 末尾の近くまで送る(page)
+  const 押す前 = await box.evaluate((el) => el.scrollTop)
+
+  await row.getByTestId('body-toggle').click()
+  await expect(row).toHaveAttribute('data-body-open', 'false')
+
+  await expect
+    .poll(async () => Math.abs((await box.evaluate((el) => el.scrollTop)) - 押す前), {
+      timeout: 5_000,
+    })
+    .toBeLessThan(2)
+})
+

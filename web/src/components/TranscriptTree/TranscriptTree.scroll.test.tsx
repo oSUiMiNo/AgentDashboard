@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { render, screen, waitFor } from '@testing-library/react'
 import type { Node, TreeNode } from '@/lib/protocol'
 import { appendNodes, clearAllTranscripts } from '@/stores/transcript'
@@ -134,6 +136,28 @@ describe('開いたら末尾から見せる', () => {
     // セッションでも壊れないこと」）
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(記録.寄せた).toHaveLength(0)
+  })
+
+  /*
+    **末尾追従を殺していないこと**（細かい修正 項目10）。
+
+    「押しても動かない」は、追従そのものを止めれば簡単に達成できる。だがそれは
+    **新しい発言が届いても追いかけなくなる**という、いちばん高くつく壊れ方である。
+    採った案Bは `onToggleBody` の中だけで閉じ、下の3つを1文字も触らない。
+
+    **実物のブラウザで「追記したら末尾へ寄る」を測る形にはできなかった。** 追記の口は
+    どれも端末へ打ち込む helper を通り、端末へ切り替えた時点で構造化ビューが
+    「開いたら最新から見せる」で寄り直すので、検査が空振りする。そこで**設定が
+    残っていること**を字面で見張る形にしてある。
+  */
+  it('末尾追従の設定を、押しても動かない手当てで壊していない', () => {
+    const 実装 = readFileSync(
+      resolve(process.cwd(), 'src', 'components', 'TranscriptTree', 'TranscriptTree.tsx'),
+      'utf8',
+    )
+    expect(実装).toContain("anchorTo: 'end'")
+    expect(実装).toContain('followOnAppend: true')
+    expect(実装).toContain('scrollEndThreshold: END_THRESHOLD')
   })
 
 })
