@@ -508,14 +508,24 @@ test('状態は右下のタグに出て、①行は最終活動と接続断が�
   expect(実測.タグが右下).toBe(true)
 
   // ①行に状態のラベルが残っていないこと（①行へ戻すとここが落ちる）
-  const 行のテキスト = await page.evaluate((id) => {
+  const 読み = await page.evaluate((id) => {
     const shell = document.querySelector(
       `[data-testid="tile-shell"][data-card-id="${id}"]`,
     )
-    const 行 = shell?.querySelector('[data-testid="elapsed"]')?.parentElement
-    return 行?.textContent ?? ''
+    const 印 = shell?.querySelector('[data-testid="elapsed"]')
+    return {
+      行のテキスト: 印?.parentElement?.textContent ?? '',
+      説明: 印?.getAttribute('title') ?? '',
+    }
   }, cardId)
-  expect(行のテキスト).toContain('最終活動')
+  const 行のテキスト = 読み.行のテキスト
+  /*
+    **「最終活動」は説明（`title`）にある。** 画面から語を消したのは場所を空けるため
+    だが、**語ごと消すと何の時刻なのか読めなくなる**ので説明には残してある
+    （要件22・設計§4-4）。**ここを表示テキストで見ていたため、語が移った時点で
+    落ちたまま残っていた。**
+  */
+  expect(読み.説明).toContain('最終活動')
   // ①行に状態のラベルが残っていない（戻すとここが落ちる）
   for (const ラベル of ['作業中', '入力待ち', '停滞', '権限確認待ち']) {
     expect(行のテキスト).not.toContain(ラベル)

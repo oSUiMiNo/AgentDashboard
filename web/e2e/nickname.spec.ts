@@ -135,9 +135,13 @@ test('カードから名前を付けると、読み込み直しても残る', as
   // `(hover: hover)` と `(pointer: fine)` になる）。乗る前に見えていないこと・
   // 乗ったら見えることの両方を見ないと、`opacity` を消し忘れても気づけない
   const pencil = shell.getByTestId('nickname-edit')
-  await expect(pencil).toHaveCSS('opacity', '0')
+  // **透明度を持つのは群（`.tile-ops`）で、鉛筆自身ではない。** 鉛筆の計算値を読むと
+  // 親がいくら透明でも `1` が返るので、**乗る前でも通ってしまう**（2026-09-04 に
+  // 持ち主が移ったとき、この spec が直されずに残っていた）
+  const 群 = shell.getByTestId('tile-ops')
+  await expect(群).toHaveCSS('opacity', '0')
   await shell.hover()
-  await expect(pencil).toHaveCSS('opacity', '1')
+  await expect(群).toHaveCSS('opacity', '1')
   await pencil.click()
   await page.getByTestId('nickname-input').fill('あとで直すやつ')
   await page.getByTestId('nickname-input').press('Enter')
@@ -166,14 +170,18 @@ test.describe('指で触る端末', () => {
     const cardId = (await tile.getAttribute('data-card-id'))!
     const shell = page.locator(`[data-testid="tile-shell"][data-card-id="${cardId}"]`)
     const pencil = shell.getByTestId('nickname-edit')
+    // 透明度を持つのは群のほう（上の同じ注釈を参照）
+    const 群 = shell.getByTestId('tile-ops')
 
-    // 長押しの前は見えていない（`opacity: 0`）
-    await expect(pencil).toHaveCSS('opacity', '0')
+    // **長押しの前は見えていない。** ここは項目6（2026-09-08）で初めて成り立つ——
+    // それまで指の画面では `.tile-ops` が常に `opacity: 1` だったので、
+    // **この行は原理的に通らなかった**
+    await expect(群).toHaveCSS('opacity', '0')
 
     // `touchscreen.tap()` では長押しにならないので CDP で合成する
     await holdTouch(page, tile, { holdMs: 600 })
     await expect(shell).toHaveAttribute('data-selected', 'true')
-    await expect(pencil).toHaveCSS('opacity', '1')
+    await expect(群).toHaveCSS('opacity', '1')
 
     await pencil.tap()
     await page.getByTestId('nickname-input').fill('指で付けた名前')
