@@ -60,6 +60,23 @@ export async function copyToClipboard(value: string): Promise<boolean> {
 /**
  * 古い方法。**非 async のまま保つ**——`await` が1つも入らないことを、注釈ではなく
  * 関数の形で示すため（入れた瞬間に型が変わるので、レビューで見落とせない）。
+ *
+ * # 焦点を当てにしない（2026-09-07・利用者の報告から）
+ *
+ * **かつては隠した `textarea` を `focus()` して `select()` していた。** あれは
+ * **焦点を持てる場所から呼ばれることを前提**にしており、**右クリックのメニューの中から
+ * 呼ぶと成立しない**——`radix-ui` のメニューは焦点の檻を張っていて、こちらが当てた焦点を
+ * **その場で奪い返す**。結果、選択が空のまま `execCommand` へ入っていた。
+ *
+ * **選択は焦点と別物**なので、`Range` で文書の選択そのものを作れば檻をくぐらずに済む。
+ * ついでに `textarea` を焦点する必要が消えたので、スマホでキーボードが立つ心配も無くなった。
+ *
+ * # 戻り値を信じない
+ *
+ * **`execCommand('copy')` は、何も選ばれていなくても `true` を返す**（実測）。
+ * これを信じたせいで、**写っていないのに「コピーしました」と出る**状態になっていた——
+ * 呼ぶ側の逃げ道は「偽が返ったとき」に出る作りなので、**嘘の真は逃げ道ごと潰す**。
+ * だから**自分で選べた文字数を数え、0なら偽を返す。**
  */
 function copyWithExecCommand(value: string): boolean {
   // **jsdom はこれを持っていない。** 確かめる形にしておけば、無い環境は
@@ -69,34 +86,52 @@ function copyWithExecCommand(value: string): boolean {
     return false
   }
 
-  // 選ぶためにフォーカスを奪うので、押す前に居た場所を覚えておく
-  const before = document.activeElement
-  const box = document.createElement('textarea')
-  box.value = value
-  // **`readOnly` を付ける。** 付けないとスマホでキーボードが立ち上がる——
-  // 写すだけなのに画面が跳ねる
-  box.readOnly = true
+  const selection = window.getSelection()
+  if (selection === null) {
+    return false
+  }
+
+  // 押す前に選んでいたものを覚えておく。写し終えたら返す
+  const 元の選択: Range[] = []
+  for (let i = 0; i < selection.rangeCount; i += 1) {
+    元の選択.push(selection.getRangeAt(i))
+  }
+
+  const box = document.createElement('span')
+  box.textContent = value
   // **`display:none` にしない。** 隠れた要素は選べず、古い方法は「選ばれている
   // もの」を写す口なので、**黙って写せなくなる**。視界の外へ出すだけにとどめる
   box.style.position = 'fixed'
   box.style.top = '0'
   box.style.left = '-9999px'
+  // 改行や続く空白をそのまま写す
+  box.style.whiteSpace = 'pre'
+  // 上の階層が選択を禁じていても、ここだけは選べるようにする
+  box.style.userSelect = 'text'
   document.body.appendChild(box)
 
   try {
-    box.focus()
-    box.select()
-    box.setSelectionRange(0, value.length)
+    const range = document.createRange()
+    range.selectNodeContents(box)
+    selection.removeAllRanges()
+    selection.addRange(range)
+    // **選べていなければ写らない。** 戻り値は当てにならないので、ここで自分で見る
+    if (selection.toString().length === 0) {
+      return false
+    }
     return document.execCommand('copy')
   } catch {
     return false
   } finally {
     // **失敗した経路でも必ず外す。** 残ると押すたびに増える
+    selection.removeAllRanges()
     box.remove()
-    if (before instanceof HTMLElement) {
-      // 押す前に触っていた場所へ返す。返さないと、キーボードで操作していた人の
-      // 居場所が消える
-      before.focus()
+    for (const range of 元の選択) {
+      try {
+        selection.addRange(range)
+      } catch {
+        // 戻せなければ諦める。写せたかどうかの答えは、ここで変えない
+      }
     }
   }
 }

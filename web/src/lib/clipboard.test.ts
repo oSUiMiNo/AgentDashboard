@@ -85,16 +85,47 @@ describe('クリップボードへ写す手', () => {
   })
 
   it('写す値がそのまま渡る（フォルダの末尾の `/` を落とさない）', async () => {
-    // **写す瞬間に、選ばれている要素へ何が入っているか**を見る
+    /*
+      **写す瞬間に「何が選ばれているか」を見る。** 古い方法が写すのは文書の選択なので、
+      ここが値と一致していなければ写らない。
+
+      **器の種類（かつては `textarea`）で見ない。** 器を変えたときに、
+      **主張は生きているのに落ちる**——確かめたいのは器ではなく、写る中身である。
+    */
     const 写した: string[] = []
     古い方法(() => {
-      写した.push(document.querySelector('textarea')?.value ?? '')
+      写した.push(window.getSelection()?.toString() ?? '')
       return true
     })
 
     await copyToClipboard('MyDocs/server/')
 
     expect(写した).toEqual(['MyDocs/server/'])
+  })
+
+  it('何も選べていなければ、真が返っても「写せなかった」と答える', async () => {
+    /*
+      **`execCommand('copy')` は、何も選ばれていなくても真を返す**（実測。2026-09-07）。
+      信じたせいで、**写っていないのに「コピーしました」と出る**状態が配られた——
+      呼ぶ側の逃げ道は偽のときに出るので、**嘘の真は逃げ道ごと潰す。**
+    */
+    const spy = 古い方法(() => true)
+    const 元 = window.getSelection
+    window.getSelection = () =>
+      ({
+        rangeCount: 0,
+        toString: () => '',
+        removeAllRanges: () => {},
+        addRange: () => {},
+      }) as unknown as Selection
+
+    try {
+      expect(await copyToClipboard('MyDocs/')).toBe(false)
+      // **呼ぶところまで行かない。** 呼んでから真を捨てるのではなく、手前で止める
+      expect(spy).not.toHaveBeenCalled()
+    } finally {
+      window.getSelection = 元
+    }
   })
 
   describe('後片付け', () => {
@@ -113,16 +144,22 @@ describe('クリップボードへ写す手', () => {
 
       await copyToClipboard('MyDocs/')
 
-      expect(document.querySelectorAll('textarea')).toHaveLength(0)
+      // **器の種類で見ない**（上と同じ理由）。値ごと消えていることを見る
+      expect(document.body.textContent ?? '').not.toContain('MyDocs/')
     })
 
     it('古い方法そのものが無い環境では、要素を作りもしない', async () => {
       await copyToClipboard('MyDocs/')
 
-      expect(document.querySelectorAll('textarea')).toHaveLength(0)
+      expect(document.body.textContent ?? '').not.toContain('MyDocs/')
     })
 
-    it('押す前に触っていた場所へ、フォーカスを返す', async () => {
+    it('押した相手から、フォーカスを奪わない', async () => {
+      /*
+        **かつては「奪ってから返す」だった**が、いまは奪わない（2026-09-07）。
+        焦点の檻を張る面（右クリックのメニュー）から呼ばれると**檻が奪い返して
+        選択が消える**ため、選択だけを作る形へ改めた。奪わなければ返す必要も無い。
+      */
       古い方法(() => true)
       const 押した相手 = document.createElement('button')
       document.body.appendChild(押した相手)

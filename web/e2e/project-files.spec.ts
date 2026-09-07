@@ -348,6 +348,79 @@ test("新しい口が無いとき、古い方法が実物のブラウザで写�
  * ことをここで押さえる。直す前の一覧は値が `title` の中にしか無く、
  * **`title` を読む操作が無いスマホでは取る手段が1つも残らなかった**。
  */
+/**
+ * **写す口が `execCommand` しか無い環境で、右クリック経由でも本当に写ること**
+ * （2026-09-07・利用者の報告から）。
+ *
+ * # なぜ「どちらの口も無い」テストでは捕まらなかったのか
+ *
+ * あちらは `navigator.clipboard` と `document.execCommand` を**両方**消しており、
+ * `copyToClipboard` は**選択を作る前に偽を返して帰る**。つまり**古い方法の中身を
+ * 1行も通っていない**。
+ *
+ * **スマホや LAN から素の HTTP で開いた実際の姿は「`navigator.clipboard` は無いが
+ * `execCommand` は在る」**で、この組み合わせだけが古い方法の中身を通る。そこが
+ * 抜けていたため、**メニューの焦点の檻に選択を奪われて何も写らない**のに
+ * 「コピーしました」と出る状態が、単体でも通しでも緑のまま配られた。
+ *
+ * # 画面の表示では足りない
+ *
+ * 壊れていたときも画面は「コピーしました」と言っていた。**クリップボードの中身
+ * そのものを読む**まで、写せたことにしない。
+ */
+test("写す口が古い方法だけでも、右クリックから本当に写る", async ({ page }) => {
+  await page.addInitScript(() => {
+    // 本物は隠し持ち、画面からは「無い」ように見せる（＝素の HTTP と同じ姿）。
+    // **`execCommand` は消さない**——ここを消すと古い方法の中身を通らない
+    const real = navigator.clipboard;
+    Object.defineProperty(window, "__realClipboard", { value: real });
+    Object.defineProperty(window.navigator, "clipboard", {
+      configurable: true,
+      value: undefined,
+    });
+  });
+
+  // クリップボードの中身を読むために要る。**画面から見える口は上で消してある**ので、
+  // これは検査する側の道であって、試験対象の環境を緩めるものではない
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+
+  await openDashboard(page);
+  const group = await addProject(page, PROJECT_DIR);
+  await group.dblclick({ position: { x: 5, y: 5 } });
+  await page.getByTestId("project-files-toggle").click();
+  const panel = page.getByTestId("project-files-panel");
+  await expect(panel).toBeVisible();
+
+  const 読む = () =>
+    page.evaluate(() =>
+      (window as unknown as { __realClipboard: Clipboard }).__realClipboard.readText(),
+    );
+  const 置く = (v: string) =>
+    page.evaluate(
+      (x) =>
+        (window as unknown as { __realClipboard: Clipboard }).__realClipboard.writeText(x),
+      v,
+    );
+
+  // ① 行のボタン——ここは元から通っていた道。**直したことで壊していない**ことを見る
+  await 置く("まだ写していない①");
+  await panel.getByTestId("folder-copy").first().click();
+  await expect(panel.getByTestId("folder-copy-state").first()).toHaveText(
+    "コピーしました",
+  );
+  expect(await 読む()).toBe("MyDocs/");
+
+  // ② 右クリック——**ここが壊れていた**。メニューが焦点を奪い返し、選択が空のまま
+  //    `execCommand` へ入って、何も写らないのに真が返っていた
+  await 置く("まだ写していない②");
+  await panel.getByTestId("folder-entry").first().click({ button: "right" });
+  await page.getByTestId("folder-menu-copy-abs").click();
+  await expect(panel.getByTestId("folder-copy-state").first()).toHaveText(
+    "コピーしました",
+  );
+  expect(await 読む()).toBe(`${PROJECT_DIR}/MyDocs`);
+});
+
 test("どちらの口も無いとき、一覧とファイルの両方で値を選べる形が出る", async ({
   page,
 }) => {
