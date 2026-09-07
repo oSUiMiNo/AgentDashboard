@@ -129,26 +129,32 @@ test('セッション専用画面には出ない', async ({ page }) => {
   await expect(page.getByTestId('branch-card')).toHaveCount(0)
 })
 
-test('作業中は押せず、理由が読める', async ({ page }) => {
-  // §3-4。**`/branch` は指示として送られる**ので、受け付けられない状態で押すと
-  // 入力欄へ積まれ、**しばらく後の別の地点で分かれてしまう**——取り返しがつかない。
+test('作業中でも押せて、待っていると分かる', async ({ page }) => {
+  // §3-4（2026-09-07 に覆した）。**割り込んで走っている作業を中止させない**ために、
+  // かつては作業中を断っていた。いまは押せて、**サーバがターンの終わりを待ってから撃つ**。
   //
-  // **会話の有無ではもう殺さない**（2026-09-06 に外した）。あれは `Stop` が運んで
-  // きたときだけ書かれる欄を見ており、**呼び戻した席では必ず空**になるので、
-  // 1本目を作ると2本目が作れなかった。いま画面が見るのは**状態だけ**である。
+  // 断っていた間は「作業を中止させる」か「押せない」かの二択で、**「いまの作業が
+  // 終わったら枝を作る」ができなかった**（利用者の指定）。
   await openDashboard(page)
   const tile = await spawnSession(page)
   const 枠 = await 枠を控える(page)
 
-  // 作業中へ倒す（指示を受け付けられない状態）
+  // 会話のある席にしてから作業中へ倒す
   await openSession(page, tile)
+  await fireHook(page, 'Stop', '{"last_assistant_message":"はい"}')
   await fireHook(page, 'UserPromptSubmit')
 
   await PJT専用画面へ(page, 枠)
   const ボタン = page.getByTestId('branch-card')
   await expect(ボタン).toBeVisible()
-  await expect(ボタン).toBeDisabled()
-  await expect(ボタン).toHaveAttribute('title', /作業中/)
+  await expect(ボタン).toBeEnabled({ timeout: 30_000 })
+  await ボタン.click()
+
+  // **待っていることが読める**（押したあと何も出ないと、効かなかったのか
+  // 待てばよいのかが区別できない）
+  const 進行 = page.getByTestId('branch-progress')
+  await expect(進行).toBeVisible()
+  await expect(進行).toContainText('作業が終わって')
 })
 
 test('操作列は、枝分かれを足しても2行のまま', async ({ page }) => {

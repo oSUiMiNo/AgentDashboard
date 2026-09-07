@@ -15,6 +15,7 @@ import type { SessionMeta } from '@/lib/protocol'
 import {
   applySessionSnapshot,
   clearSessions,
+  markBranching,
   markReviving,
   setCardError,
 } from '@/stores/sessions'
@@ -543,12 +544,10 @@ describe('SessionView の操作列は、区画の真上', () => {
     )
   })
 
-  it('指示を受け付けられない状態では押せず、理由が読める', () => {
-    // ブランチ設計§3-4。**`/branch` は指示として送られる**ので、作業中に押すと
-    // 入力欄へ積まれ、**しばらく後の別の地点で分かれる**——取り返しがつかない
+  it('待っても押せるようにならない状態でだけ押せず、理由が読める', () => {
+    // ブランチ設計§3-4。**断るのは「待っても押せるようにならないもの」だけ**。
+    // 作業中と停滞は 2026-09-07 に押せる側へ移した（下のテスト）
     const 押せない: readonly (readonly [SessionMeta['status'], string])[] = [
-      [{ kind: 'working' }, '作業中'],
-      [{ kind: 'stalled' }, '作業中'],
       [{ kind: 'waiting_permission' }, '権限確認'],
       [{ kind: 'starting' }, '起動中'],
       [{ kind: 'ended', ok: true }, '止まっている'],
@@ -560,6 +559,49 @@ describe('SessionView の操作列は、区画の真上', () => {
       expect(ボタン.getAttribute('title') ?? '').toContain(一部)
       cleanup()
     }
+  })
+
+  it('作業中でも押せる（ターンの終わりはサーバが待つ）', () => {
+    // **2026-09-07 に覆した。** かつては「しばらく後の別の地点で分かれる」ことを
+    // 理由に断っていたが、**サーバがターンの終わりを待ってから撃つ**ようになり、
+    // 分かれる地点が「いまの作業が終わったところ」に定まったので理由が消えた。
+    //
+    // 断っていた間は、**割り込んで走っている作業を中止させるか、押せないかの二択**
+    // だった（実機で前者を踏んだ）
+    for (const status of [{ kind: 'working' }, { kind: 'stalled' }] as const) {
+      show(meta({ status, last_assistant_message: 'はい' }), true)
+      expect(screen.getByTestId('branch-card'), `${status.kind} で押せない`).toBeEnabled()
+      cleanup()
+    }
+  })
+
+  it('待っている間、待っていると分かる文が出る', () => {
+    // ブランチ設計§7-4（2026-09-07 の指定）。押したあと**何も出ないまま数十秒が過ぎる**
+    // と、効かなかったのか待てばよいのかが区別できない。
+    //
+    // **いま何を待っているかは状態から導く**ので、サーバから段を運ばせていない
+    const 席 = meta({ status: { kind: 'working' }, last_assistant_message: 'はい' })
+    show(席, true)
+    // 押す前は出ない（押していないのに待っているように見せない）
+    expect(screen.queryByTestId('branch-progress')).toBeNull()
+
+    act(() => {
+      markBranching(席.card_id, 席.claude_session_id)
+    })
+    // 作業中は「ターンの終わりを待っている」と読める
+    expect(screen.getByTestId('branch-progress').textContent ?? '').toContain('作業が終わって')
+
+    cleanup()
+    // 入力待ちなら「枝分かれを待っている」と読める
+    const 待ち = meta({
+      status: { kind: 'waiting_input' },
+      last_assistant_message: 'はい',
+    })
+    show(待ち, true)
+    act(() => {
+      markBranching(待ち.card_id, 待ち.claude_session_id)
+    })
+    expect(screen.getByTestId('branch-progress').textContent ?? '').toContain('枝分かれしています')
   })
 
   it('入力待ちとサブ待ちでは押せる', () => {

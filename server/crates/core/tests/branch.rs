@@ -418,3 +418,76 @@ async fn 席を失った元の会話も枝の印から呼び戻せる() {
         "枠を借りられていない（枝は必ず元と同じ枠に居る）"
     );
 }
+
+#[tokio::test]
+async fn 作業中に押すとターンが終わってから枝になる() {
+    // §3-4（2026-09-07 に覆した）。**割り込んで走っている作業を中止させない。**
+    //
+    // かつては作業中を「押せない」で避けていたが、それでは**「いまの作業が終わったら
+    // 枝を作る」ができない**。いまは押せて、撃つのをターンの終わりまで遅らせる。
+    //
+    // **ここが本体は「撃っていないこと」の確認である。** 枝になったかだけを見ると、
+    // 割り込んで撃っていても最後には枝になるので通ってしまう
+    let server = TestServer::start().await;
+    let target = target_of(&server);
+    let (card, 元の会話) = 入力待ちのカード(&server, &target, &work_dir("turn")).await;
+
+    // 作業中へ倒す（人が指示を打った、という合図）
+    client::send_input(&target, &card[..8], "hook UserPromptSubmit", false, 5)
+        .await
+        .expect("指示を送れること");
+    let 目当て = card.clone();
+    server
+        .wait_for_listed("作業中になる", move |list| {
+            list.iter().any(|meta| {
+                meta.card_id.to_string() == 目当て && meta.status == SessionStatus::Working
+            })
+        })
+        .await;
+
+    枝分かれを頼む(&target, 引く(&server, &card).card_id).await;
+
+    // **撃たれていないことを確かめる。** 撃たれていれば擬似 claude が名乗るIDを
+    // 張り替えるので、ここで元の会話のままなら「待っている」と言える
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let 待機中 = server.registry.list(server_core::db::LOCAL_ACCOUNT_ID);
+    let 押した席 = 待機中
+        .iter()
+        .find(|meta| meta.card_id.to_string() == card)
+        .expect("押した席が残っていること");
+    assert_eq!(
+        押した席.claude_session_id,
+        Some(元の会話),
+        "作業中なのに `/branch` が撃たれている（走っている作業を中止させる）"
+    );
+    assert_eq!(待機中.len(), 1, "作業中なのに呼び戻しまで進んでいる");
+
+    // ターンを終える。ここから段取りが動き出す
+    client::send_input(
+        &target,
+        &card[..8],
+        r#"hook Stop {"last_assistant_message":"終わりました"}"#,
+        false,
+        5,
+    )
+    .await
+    .expect("指示を送れること");
+
+    let 揃った = server
+        .wait_for_listed("枝と元の2枚になる", |list| list.len() == 2)
+        .await;
+    let 押した席 = 揃った
+        .iter()
+        .find(|meta| meta.card_id.to_string() == card)
+        .expect("押した席が残っていること");
+    assert!(
+        押した席.claude_session_id.is_some_and(|id| id != 元の会話),
+        "ターンが終わっても枝になっていない"
+    );
+    assert!(
+        揃った
+            .iter()
+            .any(|meta| meta.claude_session_id == Some(元の会話)),
+        "元の会話が席を持って戻っていない"
+    );
+}
