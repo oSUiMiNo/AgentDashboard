@@ -229,3 +229,48 @@ describe('待ちの行の名乗り', () => {
     expect(isMachine(待ち(''))).toBe(false)
   })
 })
+
+/**
+ * 切り詰められた待ちが、どちらへ倒れるか（設計§17-5）。
+ *
+ * **「安全側へ倒れる」と書くなら、実物で通す。** 前提が崩れると主張ごと黙って裏返り、
+ * **設計に「安全」と書いてあるぶん次の人はそこを疑わない**（PJT ガイドライン）。
+ *
+ * パーサは待ちの本文を **64 KiB** で切り詰め、末尾に `…（Nバイトを省略）` を足す
+ * （`transcript-parser` の `truncate_text`）。**閉じタグを見る型は、ここで閉じタグを失う。**
+ */
+describe('切り詰められた待ちの倒れ方（設計§17-5）', () => {
+  const 待ち = (text: string): Node => ({ kind: 'queued_message', text, taken: false })
+  /** パーサと同じ形に切る——**末尾の付け足しまで真似る**（そこが判定に効く） */
+  const 切る = (text: string, max = 64 * 1024): string =>
+    text.length <= max ? text : `${text.slice(0, max)}…（${text.length - max}バイトを省略）`
+
+  const 長い通知 = `<task-notification><result>${'あ'.repeat(70 * 1024)}</result></task-notification>`
+
+  it('切る前は機械と読む', () => {
+    expect(isMachine(待ち(長い通知))).toBe(true)
+  })
+
+  it('切ると閉じタグが落ち、人の側へ倒れる', () => {
+    const 切れた = 切る(長い通知)
+    expect(切れた.length, '実際に切れていること').toBeLessThan(長い通知.length)
+    expect(切れた.endsWith('</task-notification>'), '閉じタグが落ちていること').toBe(false)
+    // **ここが「安全側」の実体**——機械が人に見えるだけで、人が機械側へ落ちはしない
+    expect(isMachine(待ち(切れた))).toBe(false)
+    expect(originOf(待ち(切れた))).toEqual({ kind: 'unmarked' })
+  })
+
+  it('切られても本文には触らない（剥がしそこねて中身が消えたりしない）', () => {
+    const 切れた = 切る(長い通知)
+    expect(bodyTextOf(待ち(切れた))).toBe(切れた)
+  })
+
+  it('写しは切られても機械のまま（先頭だけで見分けるため）', () => {
+    // **同じ切り詰めでも、型によって効き方が違う**。写しは末尾を見ていない
+    const 長い写し = `## 会話履歴\n${'[user] 行\n'.repeat(9000)}`
+    const 切れた = 切る(長い写し)
+    expect(切れた.length).toBeLessThan(長い写し.length)
+    expect(isMachine(待ち(切れた))).toBe(true)
+    expect(originOf(待ち(切れた))).toEqual({ kind: 'injected' })
+  })
+})
