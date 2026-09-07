@@ -1048,9 +1048,9 @@ async fn 枠は持ち主で絞って読み書きされる() {
 }
 
 #[tokio::test]
-async fn 枠は足した順に末尾へ並ぶ() {
-    // **並びの正は `position`**（並べ替え設計§2-3・§2-4）。足したものは末尾へ入るので、
-    // 並びは `add` を呼んだ順そのものになる。
+async fn 枠は足した順に先頭へ並ぶ() {
+    // **並びの正は `position`**（並べ替え設計§2-3・§2-4）。足したものは先頭へ入るので、
+    // 並びは `add` を呼んだ順の**逆**になる（項目14）。
     //
     // **時刻はもう並びを決めない。** ここで渡している時刻はわざと逆順にしてあり、
     // `created_at` で並べていた頃なら `/a → /b → /c` になった。値としては守り続けるが、
@@ -1067,15 +1067,15 @@ async fn 枠は足した順に末尾へ並ぶ() {
         let paths: Vec<&str> = rows.iter().map(|row| row.path.as_str()).collect();
         assert_eq!(
             paths,
-            vec!["/c", "/a", "/b"],
-            "[{}] 足した順に末尾へ並んでいない",
+            vec!["/b", "/a", "/c"],
+            "[{}] 足した順に先頭へ並んでいない",
             backend.name
         );
         let positions: Vec<i32> = rows.iter().map(|row| row.position).collect();
         assert_eq!(
             positions,
-            vec![0, 1, 2],
-            "[{}] 0 から詰めて振られていない",
+            vec![-2, -1, 0],
+            "[{}] 1つずつ小さい値が振られていない",
             backend.name
         );
         backend.finish().await;
@@ -1342,6 +1342,89 @@ async fn カードの並びは枠の中で閉じ外したカードにも番号�
         );
 
         let _ = sea_orm::DatabaseConnection::close(again).await;
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 振り直しは相対順序を保ち足した枠は先頭へ入り続ける() {
+    // 項目14で採番を負の向きへ変えたので、**0起点へ丸められても順が壊れないか**を見る。
+    // `reorder` は渡された並びに 0.. を振り直すため、負の値は次の並べ替えで消える——
+    // **消えてよいのは値だけで、順序は保たれなければならない。**
+    //
+    // あわせて、**丸められたあとに足した枠もちゃんと先頭へ入る**ことを見る。ここが
+    // 抜けると「一度並べ替えたら、以後は末尾へ戻る」という壊れ方が素通りする
+    for backend in common::backends("proj-renumber").await {
+        let mut ids = Vec::new();
+        for (path, at) in [("/a", 10), ("/b", 20), ("/c", 30)] {
+            let row = db::projects::add(&backend.db, db::LOCAL_ACCOUNT_ID, None, path, at)
+                .await
+                .expect("足せること");
+            ids.push(row.id);
+        }
+
+        // 足した順の逆＝ /c, /b, /a が並びになっている
+        let 前 = db::projects::list(&backend.db, db::LOCAL_ACCOUNT_ID)
+            .await
+            .expect("読めること");
+        assert_eq!(
+            前.iter().map(|row| row.path.as_str()).collect::<Vec<_>>(),
+            vec!["/c", "/b", "/a"],
+            "[{}] 先頭へ入っていない",
+            backend.name
+        );
+        assert_eq!(
+            前.iter().map(|row| row.position).collect::<Vec<_>>(),
+            vec![-2, -1, 0],
+            "[{}] 負の値が振られていない",
+            backend.name
+        );
+
+        // **いまの並びのまま**振り直す。順は変わらず、値だけ 0 から詰まる
+        let そのまま: Vec<uuid::Uuid> = 前.iter().map(|row| row.id).collect();
+        db::projects::reorder(&backend.db, db::LOCAL_ACCOUNT_ID, &そのまま)
+            .await
+            .expect("読み書きできること")
+            .expect("通ること");
+        let 後 = db::projects::list(&backend.db, db::LOCAL_ACCOUNT_ID)
+            .await
+            .expect("読めること");
+        assert_eq!(
+            後.iter().map(|row| row.path.as_str()).collect::<Vec<_>>(),
+            vec!["/c", "/b", "/a"],
+            "[{}] 振り直しで順が変わった",
+            backend.name
+        );
+        assert_eq!(
+            後.iter().map(|row| row.position).collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "[{}] 0 から詰め直していない",
+            backend.name
+        );
+
+        // 丸めたあとに足しても、やはり先頭へ入る
+        db::projects::add(&backend.db, db::LOCAL_ACCOUNT_ID, None, "/d", 40)
+            .await
+            .expect("足せること");
+        let 足した後 = db::projects::list(&backend.db, db::LOCAL_ACCOUNT_ID)
+            .await
+            .expect("読めること");
+        assert_eq!(
+            足した後
+                .iter()
+                .map(|row| row.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/d", "/c", "/b", "/a"],
+            "[{}] 振り直したあとに足した枠が先頭へ来ていない",
+            backend.name
+        );
+        assert_eq!(
+            足した後.iter().map(|row| row.position).collect::<Vec<_>>(),
+            vec![-1, 0, 1, 2],
+            "[{}] 振り直したあとの採番が違う",
+            backend.name
+        );
+
         backend.finish().await;
     }
 }

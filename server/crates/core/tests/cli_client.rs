@@ -294,7 +294,7 @@ async fn 並べ替えは画面と同じことがCLIからできる() {
     let server = TestServer::start().await;
     let target = target_of(&server);
 
-    // 枠を3つ足す。**足した順に末尾へ入る**ので、この順が出発点になる
+    // 枠を3つ足す。**足した順に先頭へ入る**（項目14）ので、並びは逆順が出発点になる
     for name in ["a", "b", "c"] {
         let path = dir.join(name);
         let body = format!(r#"{{"host":"local","path":"{}"}}"#, path.to_string_lossy());
@@ -314,8 +314,8 @@ async fn 並べ替えは画面と同じことがCLIからできる() {
     };
     assert_eq!(
         名前(&projects),
-        vec!["a", "b", "c"],
-        "足した順に並んでいること"
+        vec!["c", "b", "a"],
+        "足した順の逆に並んでいること"
     );
 
     // **ID の前方一致で解決できること。** 画面は ID を全部持っているが、CLI は
@@ -333,7 +333,7 @@ async fn 並べ替えは画面と同じことがCLIからできる() {
     let (projects, _) = client::projects(&target).await.expect("枠を引けること");
     assert_eq!(
         名前(&projects),
-        vec!["c", "b", "a"],
+        vec!["a", "b", "c"],
         "CLI から渡した順になっていること"
     );
 

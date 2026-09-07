@@ -119,23 +119,30 @@ pub async fn add(
         .ok_or_else(|| DbErr::Custom("枠を足したのに読み戻せません".to_string()))
 }
 
-/// そのアカウントの枠に振る、次の並び順（並べ替え設計§2-4）。**末尾へ足す。**
+/// そのアカウントの枠に振る、次の並び順（並べ替え設計§2-4）。**先頭へ足す。**
 ///
-/// 末尾にする理由は2つある。1つは「増えたものが目の前に割り込まない」こと。もう1つは
-/// **既存の E2E の土台がこれに乗っている**ことで、`web/e2e/helpers.ts` の `spawnSession` は
-/// 「起こす前の枚数を数え、`nth(その数)` で新しいカードを掴む」作りになっている。
-/// ここを変えると、並べ替えと関係のない spec まで一斉に落ちる。
+/// **足したばかりの枠は、いちばん見たいもの**なので目の前に出す。末尾へ足すと、
+/// 枠が増えるほど新しいものが下へ流れて、追加した本人がスクロールして探すことになる。
 ///
-/// 枠が1つも無ければ 0。**空きがあっても詰め直さない**——並べ替えの口
+/// **かつては末尾だった。** 理由の1つは「既存の E2E の土台がこれに乗っている」ことで、
+/// `web/e2e/helpers.ts` の `spawnSession` が「起こす前の枚数を数え、`nth(その数)` で
+/// 新しいカードを掴む」作りだった。**その土台は識別子（`data-card-id`）で掴む形へ
+/// 直した**ので、並びに依存しなくなっている。
+///
+/// 枠が1つも無ければ 0。**いちばん小さい値から1を引く**ので負になるが、読み出しは
+/// 昇順（`list`）なので自然に先頭へ来る。**空きがあっても詰め直さない**——並べ替えの口
 /// （`PUT /api/projects/order`）が丸ごと受け取って 0 から振り直すので、
-/// 穴はそこで消える。
+/// 穴はそこで消える。**振り直されても相対順序は変わらない。**
+///
+/// **`order_by_asc` と `saturating_sub` は対である。** 片方だけ直すと「いちばん
+/// 大きい値から1を引く」になり、2つ目以降が既にある枠と同じ位置へ入る。
 async fn next_position(db: &DatabaseConnection, account_id: Uuid) -> Result<i32, DbErr> {
-    let last = projects::Entity::find()
+    let first = projects::Entity::find()
         .filter(projects::Column::AccountId.eq(account_id))
-        .order_by_desc(projects::Column::Position)
+        .order_by_asc(projects::Column::Position)
         .one(db)
         .await?;
-    Ok(last.map_or(0, |row| row.position.saturating_add(1)))
+    Ok(first.map_or(0, |row| row.position.saturating_sub(1)))
 }
 
 /// 並べ替えを断る理由（並べ替え設計§9-1）。
