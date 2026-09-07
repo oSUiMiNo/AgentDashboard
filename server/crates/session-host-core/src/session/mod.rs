@@ -577,6 +577,12 @@ pub struct Session {
     /// 一覧が見えたら 0 へ戻す。**倒れる向きを軽いほうへ戻すためだけの仕掛け**で、
     /// 代償はサブが終わってから入力待ちに戻るまでが1回ぶん遅れることである。
     waiting_gone_streak: AtomicU32,
+    /// 前に写し取った**エージェントの一覧**（設計§14-13）。
+    ///
+    /// **終わったサブも一覧に残る**ので、在ることでは判定できない。走っているものだけが
+    /// 時計を進めるから、**前回と違っていれば走っている**。1枚では決まらないので、
+    /// ここに持って見比べる。
+    waiting_tree: Mutex<Option<String>>,
     /// 添付の印を待つ上限（画像添付 設計§21 読み替え2）。
     ///
     /// **設定から取る**（`attachment_mark_wait_ms`）。定数のままにすると、
@@ -791,8 +797,19 @@ impl Session {
         // **`ring` のロックの中で描かない**（[`Session::terminal_shows_activity`] と同じ作法）
         let payload = self.ring.lock().expect("ロックが壊れていない").snapshot();
         let screen = activity::render(&payload, cols, rows);
-        let waiting = activity::waits_for_subagents(&screen);
+        let tree = activity::agent_tree(&screen);
         let main_running = activity::is_running(&screen);
+        // **一覧が「在るか」ではなく「動いたか」を見る**（設計§14-13）。**終わったサブも
+        // 一覧に残る**ので、在ることは走っていることを意味しない。走っているものだけが
+        // 時計を進めるので、**前に写し取ったものと違っていれば走っている。**
+        let (waiting, lines) = {
+            let mut last = self.waiting_tree.lock().expect("ロックが壊れていない");
+            // 比べる相手が無い初回は「待っていない」に倒す。次の回で決まる
+            let waiting = matches!((last.as_ref(), tree.as_ref()), (Some(before), Some(now)) if before != now);
+            let lines = tree.as_ref().map_or(0, |tree| tree.lines().count());
+            *last = tree;
+            (waiting, lines)
+        };
         // **材料を並べる。** 画面読みは版で壊れる前提なので、外したときに読んだ量と
         // 描けた量が無いと理由を絞れない。**今回の不具合は「判定関数ではなく食わせて
         // いる画面が狭かった」形だった**ので、この2つが揃っていることに意味がある
@@ -802,6 +819,7 @@ impl Session {
             main_running,
             cols,
             rows,
+            tree_lines = lines,
             replay_bytes = payload.len(),
             screen_chars = screen.chars().count(),
             "サブエージェントの一覧が出ているか画面を見た"
@@ -1621,10 +1639,19 @@ impl Session {
             // カードは何時間でもこの枝に居る。画面が変わっていなければ答えも変わらない
             // ので、写し取る手間ごと省ける
             let mark = self.scrollback_mark();
-            if self.waiting_checked_mark.swap(mark, Ordering::Relaxed) == mark {
-                false
-            } else {
-                let (waiting, main_running) = self.terminal_subagent_view();
+            let quiet = self.waiting_checked_mark.swap(mark, Ordering::Relaxed) == mark;
+            {
+                // **端末が1バイトも動いていなければ、走っているサブは1本も居ない**
+                // （設計§14-13）。走っているものは一覧の時計を毎秒進めるので、必ず
+                // バイトが出る。だから読まずに「待っていない」と決められる。
+                //
+                // **ここで読み飛ばしてはいけない。** 終わった一覧が残ったまま端末が
+                // 黙ると、**サブ待ちのまま二度と解けなくなる**（利用者が実機で踏んだ）。
+                let (waiting, main_running) = if quiet {
+                    (false, false)
+                } else {
+                    self.terminal_subagent_view()
+                };
                 // **一覧が消えて見えた1回だけでは動かさない**（§14 読み替え5）。
                 // メインが走り出すとき、TUI は一覧を消してからスピナーを描くので、
                 // その隙間が「一覧も無い・スピナーも無い」に見える。そこで倒すと
@@ -2459,6 +2486,7 @@ impl SessionManager {
             waiting_checked_at: AtomicI64::new(0),
             waiting_checked_mark: AtomicU64::new(0),
             waiting_gone_streak: AtomicU32::new(0),
+            waiting_tree: Mutex::new(None),
             model_alias: Mutex::new(initial_alias),
             model_switching: AtomicBool::new(false),
             // 画面を作るかどうかは**報告先が決める**（設計§7-2・§22 読み替え2）

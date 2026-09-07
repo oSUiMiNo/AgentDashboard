@@ -136,29 +136,41 @@ pub fn is_running_line(line: &str) -> bool {
         && (after.is_empty() || after.starts_with(" ("))
 }
 
-/// **走っているサブエージェントの一覧**（`◯`）が画面のいちばん下に出ているか
-/// （設計§14 読み替え）。
+/// 画面のいちばん下に出ている**エージェントの一覧**を写し取る（設計§14-13）。
 ///
-/// # なぜ `subagent_active` を当てにしないのか
+/// 返すのは一覧の行を上から順に並べた文字列で、**連れているものが1つも無ければ
+/// `None`**。これ単体では「サブが走っているか」を答えない——**答えは2回ぶんを
+/// 見比べて初めて出る**（[`crate::session::Session`] が持つ）。
 ///
-/// **あの数は、サブエージェントが生きているうちに 0 へ戻る**（実機のログで確認）。
-/// フォークが走り続けている最中に `Stop` が届き、そこでは既に 0 だったため、
-/// **サブ待ちにならず入力待ちになっていた。**
+/// # 記号は走行中を意味しない（2026-09-07・実機で覆った）
+///
+/// かつては `◯` を「走っているサブ」、`●` を「根」と読んでいた。**どちらも誤り**である。
+/// 実機の2枚を並べると、記号が逆に付く。
 ///
 /// ```text
-/// 13:29:01 sub=1 status=WaitingSubagents   ← 立った
-/// 13:31:18 sub=0 status=WaitingInput       ← まだ走っているのに 0 へ戻った
+///   ● main                      ◯ main
+///   ◯ fork  …            と     ● fork                   …
+///                               ◯ self-knowledge_update  …
 /// ```
 ///
-/// # `Waiting for N background agents to finish` は使えない
+/// `●` が付くのは**いま見ているもの**で、根か子かとは関係がない。したがって `◯ main`
+/// という行が普通に出る——**記号で子を選ぶと、メインの行だけで「サブが居る」と
+/// 答えてしまう。**
 ///
-/// CLI は確かにこの文を書く。**しかしこれは会話の履歴として流れる本文で、待ちが
-/// 終わっても画面から消えない。** 実物のカード1枚に**2回**残っていた（別々のターンで
-/// 書かれたもの）。これを根拠に解くと、**サブが終わってもサブ待ちのまま**になる——
-/// 直そうとした間違い（終わったのに入力待ち）の裏返しを作ることになる。
+/// # 終わったものも消えない（同上）
 ///
-/// **消えるものだけを根拠にする。** フッタの一覧は毎フレーム描き直されるので、
-/// サブが終われば消える（実測：一覧が出ていたカードが、フォークの終了後に消えた）。
+/// 一覧は**終わったサブエージェントを残したまま**である。利用者が実機で踏んだのはこの形で、
+/// セッション自身が「フォークは2体とも完了した」と言っている画面に、一覧は2行とも
+/// 残っていた。**在ることは、走っていることを意味しない。**
+///
+/// **走っている証拠は、時計が進むことだけである。** 実測（24秒・3回）：
+///
+/// ```text
+///   走っている   ◯ fork  …   38s → 50s → 1m 2s
+///   終わっている ● fork  …   1h 1m 20s のまま
+/// ```
+///
+/// 生バイトで並べても、終わった行と走っている行に差は無い。**だから1枚では決まらない。**
 ///
 /// # 拾うのは画面のいちばん下の塊だけ
 ///
@@ -171,25 +183,45 @@ pub fn is_running_line(line: &str) -> bool {
 ///   ◯ fork  Verifying version path in /api/versions      13m 59s · ↓ 775.3k tokens
 /// ```
 ///
-/// 画面の全体から `◯` を探さないのは、**会話の本文にも記号が出るから**である。実物の
-/// カード30枚では `◯` は一覧にしか出ていなかったが、`●` は本文の行頭に普通に出る。
-/// 同じ理由で塊の終わりは `●`／`◯` 以外の行とし、**`● main` の綴りは求めない**——
-/// 根の名前が変わっただけで黙って効かなくなる作りにしないため。
+/// 画面の全体から記号を探さないのは、**会話の本文にも記号が出るから**である。実物のカード
+/// 30枚では `◯` は一覧にしか出ていなかったが、`●` は本文の行頭に普通に出る。
 ///
 /// # 壊れたときにどちらへ倒れるか
 ///
-/// 画面読みは版で壊れる前提である（設計§8-2）。ここが読めなくなると**サブ待ちに
-/// 入らなくなる**＝いままでどおり入力待ちになる。**サブ待ちのまま張り付く側へは
-/// 倒れない**ので、壊れ方としては軽いほうを選んである。
-pub fn waits_for_subagents(screen: &str) -> bool {
-    agent_tree_block(screen).any(is_agent_line)
+/// 根の名前（`main`）が変われば、その行も子として数える。**時計を持たない行なので一覧は
+/// 変化せず、サブ待ちに入らなくなる**——いままでどおり入力待ちになる側で、**張り付く側へは
+/// 倒れない**。
+pub fn agent_tree(screen: &str) -> Option<String> {
+    let mut lines: Vec<String> = agent_tree_block(screen)
+        .filter(|line| !is_root_line(line))
+        .map(strip_mark)
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    lines.reverse();
+    Some(lines.join("\n"))
 }
 
-/// 一覧の行の記号。走っているサブエージェント1本につき1行。
-const TREE_RUNNING: char = '◯';
+/// 行から**記号を落とす**。
+///
+/// **`●` と `◯` は「いま見ているものかどうか」でしか変わらない**（設計§14-13）。
+/// 見ている先を切り替えただけで文字列が変わると、**動いていないのに「動いた」と読む**。
+fn strip_mark(line: &str) -> String {
+    let head = line.trim_start();
+    head.strip_prefix(TREE_FOCUSED)
+        .or_else(|| head.strip_prefix(TREE_UNFOCUSED))
+        .unwrap_or(head)
+        .trim()
+        .to_string()
+}
 
-/// 一覧の根（`● main`）。**塊の終わりを見分けるためだけに使う。**
-const TREE_ROOT: char = '●';
+/// 一覧の行に付く記号。**いま見ているものが `●`、それ以外が `◯`** で、**根か子かとは
+/// 関係がない**（上の実測）。塊の終わりを見分けるためだけに使う。
+const TREE_FOCUSED: char = '●';
+
+/// 同上。
+const TREE_UNFOCUSED: char = '◯';
 
 /// 画面のいちばん下にある一覧の塊を、**下から順に**返す。
 ///
@@ -202,21 +234,24 @@ fn agent_tree_block(screen: &str) -> impl Iterator<Item = &str> {
         .skip_while(|line| line.trim().is_empty())
         .take_while(|line| {
             let head = line.trim_start();
-            head.starts_with(TREE_RUNNING) || head.starts_with(TREE_ROOT)
+            head.starts_with(TREE_FOCUSED) || head.starts_with(TREE_UNFOCUSED)
         })
 }
 
-/// 1行が「走っているサブエージェント」の行か。
+/// 一覧の**根**（`main`）の行か。
 ///
 /// 公開しているのは、テストが**本物の判定を絞り込む形で**変異体を作れるようにするため
 /// （[`is_running_line`] と同じ理由）。
-pub fn is_agent_line(line: &str) -> bool {
-    let Some(rest) = line.trim_start().strip_prefix(TREE_RUNNING) else {
+pub fn is_root_line(line: &str) -> bool {
+    let head = line.trim_start();
+    let Some(rest) = head
+        .strip_prefix(TREE_FOCUSED)
+        .or_else(|| head.strip_prefix(TREE_UNFOCUSED))
+    else {
         return false;
     };
-    // 記号のあとは空白で区切られ、中身がある。`◯` だけの行や、記号に文字が続く行
-    // （`◯◯` のような飾り）は一覧ではない
-    rest.starts_with(char::is_whitespace) && !rest.trim().is_empty()
+    // 記号のあとは空白で区切られる。`●` だけの行や `●●` のような飾りは一覧ではない
+    rest.starts_with(char::is_whitespace) && rest.trim() == "main"
 }
 
 #[cfg(test)]
@@ -486,18 +521,49 @@ mod tests {
 ";
 
     #[test]
-    fn 実機で採った一覧つきの画面を読み取れる() {
-        assert!(waits_for_subagents(TREE_SCREEN));
+    fn 実機で採った一覧つきの画面を写し取れる() {
+        let tree = agent_tree(TREE_SCREEN).expect("一覧が出ている");
+        assert!(tree.contains("fork"), "{tree}");
+        assert_eq!(tree.lines().count(), 1, "根は数えない：{tree}");
+        assert!(!tree.starts_with('◯'), "記号は落とす：{tree}");
     }
 
-    /// **一覧が消えれば偽に戻ること。** ここが戻らないと、サブが終わってもカードが
-    /// サブ待ちのまま張り付く（直そうとした間違いの裏返し）。
+    /// **一覧が消えれば写し取るものが無いこと。** ここが戻らないと、サブが終わっても
+    /// カードがサブ待ちのまま張り付く（直そうとした間違いの裏返し）。
     #[test]
-    fn 一覧が消えれば待ちではなくなる() {
-        assert!(!waits_for_subagents(TREE_GONE));
+    fn 一覧が消えれば写し取るものが無い() {
+        assert!(agent_tree(TREE_GONE).is_none());
         // 末尾に空行が続いても同じ（描き直しの途中で行が空くことがある）
-        assert!(!waits_for_subagents(&format!("{TREE_GONE}\n\n   \n")));
-        assert!(waits_for_subagents(&format!("{TREE_SCREEN}\n\n   \n")));
+        assert!(agent_tree(&format!("{TREE_GONE}\n\n   \n")).is_none());
+        assert!(agent_tree(&format!("{TREE_SCREEN}\n\n   \n")).is_some());
+    }
+
+    /// **記号は根と子を区別しない**（設計§14-13・2026-09-07 の実測）。
+    ///
+    /// 実機では `◯ main` ／ `● fork` という並びが出る。**記号で子を選ぶと、メインの行
+    /// だけで「サブが居る」と答えてしまう**ので、根は綴りで外す。
+    #[test]
+    fn 記号が逆に付いていても写し取れる() {
+        let screen = "\
+  Opus 5
+  ⏵⏵ bypass permissions on · 4 shells · ← 1 agent
+
+  ◯ main
+  ● fork                   Checking SUBAGENT_MODEL vars                1h 1m 20s · ↓ 263.3k tokens
+  ◯ self-knowledge_update  Correcting ListAgents premise               1h 0m 50s · ↓ 376.6k tokens
+";
+        let tree = agent_tree(screen).expect("子が2本ある");
+        assert_eq!(tree.lines().count(), 2, "根を除いて2行：{tree}");
+
+        // **見ている先を切り替えただけでは変わらない。** 記号が入れ替わっても同じ
+        let 切り替えた = screen
+            .replace("● fork", "◯ fork")
+            .replace("◯ self", "● self");
+        assert_eq!(
+            agent_tree(&切り替えた),
+            agent_tree(screen),
+            "記号は雑音なので落としてある"
+        );
     }
 
     /// **履歴に残った文は根拠にしない**（設計§14 読み替え）。
@@ -507,9 +573,10 @@ mod tests {
     #[test]
     fn 本文に残った待ちの文は拾わない() {
         assert!(
-            !waits_for_subagents(
+            agent_tree(
                 "✻ Waiting for 1 background agent to finish\nなにか\n✻ Waiting for 2 background agents to finish"
-            ),
+            )
+            .is_none(),
             "本文の文だけでは立たない"
         );
     }
@@ -518,33 +585,35 @@ mod tests {
     #[test]
     fn 本文の途中の記号は拾わない() {
         let screen = format!("◯ 本文に出てきた記号\nなにか\n{TREE_GONE}");
-        assert!(!waits_for_subagents(&screen));
+        assert!(agent_tree(&screen).is_none());
     }
 
-    /// 根だけの一覧（走っているサブが1本も無い）では立たない。
+    /// 根だけの一覧（連れているものが1つも無い）では立たない。
     #[test]
     fn 根だけの一覧では立たない() {
-        assert!(!waits_for_subagents("なにか\n\n  ● main\n"));
+        assert!(agent_tree("なにか\n\n  ● main\n").is_none());
+        assert!(agent_tree("なにか\n\n  ◯ main\n").is_none());
     }
 
     #[test]
-    fn 一覧の行かどうかを見分ける() {
-        assert!(is_agent_line("  ◯ fork  なにか  13m 59s"));
-        // 字下げが無い形も受ける（描き直しで欠けることがある）
-        assert!(is_agent_line("◯ general-purpose  調べもの"));
+    fn 根の行かどうかを見分ける() {
+        assert!(is_root_line("  ● main"));
+        // 記号は逆でも根は根（実機で両方出る）
+        assert!(is_root_line("◯ main "));
         for line in [
             // 記号だけ
-            "◯",
+            "●",
             "  ◯   ",
             // 記号に文字が続く（飾り）
-            "◯◯ なにか",
-            // 根の側
-            "  ● main",
+            "●● main",
+            // 子の側
+            "  ◯ fork  なにか  13m 59s",
+            "  ● self-knowledge_update  なにか",
             // 走っている印
             "✽ Ebbing… (2m 10s · ↓ 543 tokens · thinking)",
             "",
         ] {
-            assert!(!is_agent_line(line), "{line}");
+            assert!(!is_root_line(line), "{line}");
         }
     }
 
@@ -557,9 +626,22 @@ mod tests {
             "一覧の行を走行中と読まない"
         );
         assert!(
-            !is_agent_line("✽ Ebbing… (2m 10s · ↓ 543 tokens · thinking)"),
+            agent_tree("✽ Ebbing… (2m 10s · ↓ 543 tokens · thinking)").is_none(),
             "スピナーを一覧と読まない"
         );
+    }
+
+    /// **在ることは走っていることを意味しない**（設計§14-13）。
+    ///
+    /// 終わったサブも一覧に残るので、**同じ一覧なら同じ文字列が返る**——見比べる側が
+    /// 「動いていない」と判断できる形になっていること。時計が進めば違う文字列になる。
+    #[test]
+    fn 時計が進んだかどうかが文字列に出る() {
+        let 止まっている = agent_tree(TREE_SCREEN);
+        assert_eq!(止まっている, agent_tree(TREE_SCREEN), "同じ画面なら同じ");
+        let 進んだ = agent_tree(&TREE_SCREEN.replace("13m 59s", "14m 04s"));
+        assert!(進んだ.is_some());
+        assert_ne!(止まっている, 進んだ, "時計が進めば違う");
     }
 
     /// 実物20枚のどれにも一覧は出ていない（誤爆しないことの確認）。
@@ -567,7 +649,7 @@ mod tests {
     fn 実物20枚には一覧が無い() {
         let 拾った: Vec<&str> = SAMPLES
             .iter()
-            .filter(|(_, screen, _)| waits_for_subagents(screen))
+            .filter(|(_, screen, _)| agent_tree(screen).is_some())
             .map(|(name, _, _)| *name)
             .collect();
         assert_eq!(拾った, Vec::<&str>::new());
