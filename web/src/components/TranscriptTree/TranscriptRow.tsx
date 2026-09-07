@@ -752,7 +752,7 @@ function MarkdownBody({
   const machine = row != null && isMachine(row.node)
   const label = row != null && machine ? originLabel(originOf(row.node)) : ''
 
-  // **待ちの灰色は、人の行にだけ当てる**（設計§16-3）。
+  // **待ちの灰色は、人の行にだけ当てる**（設計§17-4）。
   //
   // あれは**青から作った色**で（`index.css` の「青を動かせば待機中も付いてくる」）、
   // 機械の地を上書きすると**種別ごとの色が消えて灰色に戻る**。特異度でも

@@ -26,7 +26,7 @@ export const MACHINE_FOLD_LINES = 10
 /**
  * その発言の名乗り。**欄が無ければ「名乗り無し」**（設計§2-2）。
  *
- * # 待ちの行は、本文から名乗りを起こす（設計§16）
+ * # 待ちの行は、本文から名乗りを起こす（設計§17）
  *
  * **設計§2-4 は「待ちの記録には名乗る材料が無い」として欄を足さなかった。**
  * 欄については正しい——`queue-operation` のレコードが持つのは `content` /
@@ -141,7 +141,7 @@ export function originLabel(origin: MessageOrigin): string {
  * 剥がす相手が出てくることは無い。
  */
 export function bodyTextOf(node: Node): string {
-  // **待ちも同じ道を通す**（設計§16）。機械が積んだものは包みを剥がしてから返す
+  // **待ちも同じ道を通す**（設計§17）。機械が積んだものは包みを剥がしてから返す
   if (node.kind !== 'user_message' && node.kind !== 'queued_message') {
     return 'text' in node ? node.text : ''
   }
