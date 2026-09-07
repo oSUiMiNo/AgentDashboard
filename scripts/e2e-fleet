@@ -99,13 +99,30 @@ if ! curl -sf -X POST "${BASE_URL}/api/setup" \
     exit 1
 fi
 
-# 4. エージェントを台数ぶん起こす。**台ごとに違うのは3つだけ**で、どれも
+# 4. 台ごとの**偽のホーム**に、その台だけのコマンドを置く。
+#
+#    **これが無いと「混ざらない」を確かめられない。** 打てるものは `HOME` の下
+#    （`~/.claude/commands`）から集めるので、3台が同じホームを見ていると
+#    **全台が同じ一覧を返し、混線していても気づけない**。開発機の本物のホームを
+#    見に行っている間は、結果が機械ごとに変わりもする。
+for index in $(seq 1 "${AGENT_COUNT}"); do
+    mkdir -p "${STATE}/agent-${index}/home/.claude/commands"
+    printf -- '---\ndescription: 検証PC-%s だけのコマンド\n---\n\n本文\n' \
+        "${index}" > "${STATE}/agent-${index}/home/.claude/commands/pc${index}-only.md"
+done
+
+# 5. エージェントを台数ぶん起こす。**台ごとに違うのは4つだけ**で、どれも
 #    環境変数で上書きする（設定ファイルは1枚）。
 #
 #    置き場所を分けるのが要点——同じ場所を指すと、再開位置を3プロセスで
-#    取り合うことになる
+#    取り合うことになる。
+#
+#    **`HOME` を変えても他は壊れない。** ここが効くのは打てるものを集める起点
+#    （`session-host-core/src/hostfs.rs` の `listDir` の既定）だけで、履歴の走査元・
+#    `state_dir`・設定・版の退避先は**どれも上の環境変数が先に見られる**（実測）。
 for index in $(seq 1 "${AGENT_COUNT}"); do
-    AGENTDASHBOARD_CLAUDE_BIN="${FAKE_CLAUDE}" \
+    HOME="${STATE}/agent-${index}/home" \
+        AGENTDASHBOARD_CLAUDE_BIN="${FAKE_CLAUDE}" \
         AGENTDASHBOARD_PAIRING_TOKEN="${tokens[index - 1]}" \
         AGENTDASHBOARD_AGENT_NAME="検証PC-${index}" \
         AGENTDASHBOARD_STATE_DIR="${STATE}/agent-${index}" \

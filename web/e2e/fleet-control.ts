@@ -80,6 +80,12 @@ export function startAgent(
     cwd: config.repoRoot,
     env: {
       ...process.env,
+      // **台ごとの偽のホーム**（`scripts/e2e-fleet` が中身を置く）。
+      //
+      // **ここを落とすと、起こし直した台だけが開発機の本物のホームを見る。**
+      // 打てるものは `HOME` の下から集めるので、混ざらないことを見ているテストが
+      // 「落ちる」のではなく**その台だけ別の一覧を返す**形で狂う
+      HOME: path.join(config.stateDir, `agent-${index}`, 'home'),
       AGENTDASHBOARD_CLAUDE_BIN: config.fakeClaude,
       AGENTDASHBOARD_PAIRING_TOKEN: config.tokens[index - 1],
       AGENTDASHBOARD_AGENT_NAME: agentName(index),

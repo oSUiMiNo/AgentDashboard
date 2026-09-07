@@ -156,3 +156,37 @@ test('アカウント画面に3台が並ぶ', async ({ page }) => {
     await expect(rows.filter({ hasText: agentName(index) })).toHaveCount(1)
   }
 })
+
+test('候補はその PC のものだけで、他の PC のものが混ざらない', async ({ page }) => {
+  // **打てるものは PC のディスクから集める**（設計§2）ので、3台つないだこの構成では
+  // 「どの台に聞いたか」で答えが変わらなければならない。**1台構成では作れない検査**で、
+  // しかも混ざっていても**画面は普通に出る**ので、名指しで数えるしかない。
+  //
+  // 題材は `scripts/e2e-fleet` が台ごとの偽のホームへ置く `pcN-only`。
+  // **開発機に実在するコマンド名を埋め込まない**——その名前が無い機械では
+  // 「出ないこと」が自動的に真になり、**分離が壊れていても緑になる**
+  // （設計§12「無いことを見るテストの落とし穴」）。`pcN-only` は3台ぶん必ず在るので、
+  // **出ないことが分離の証拠になる**。
+  await openDashboard(page)
+
+  for (const 台 of [1, 2, 3]) {
+    const tile = await spawnSession(page, '/tmp', agentName(台))
+    await openSession(page, tile)
+
+    await page.getByTestId('composer-input').fill('/pc')
+    await expect(page.getByTestId('slash-menu')).toBeVisible()
+
+    const 行 = page.locator('[data-testid="slash-menu"] [role="option"]')
+    // その台のものは出る
+    await expect(行.filter({ hasText: `/pc${台}-only` })).toHaveCount(1)
+    // **他の台のものは出ない。** ここが本番——`HOME` の分離を外すと、3台とも
+    // 開発機の同じホームを見るので `pcN-only` が1つも出ず、上の行で落ちる
+    for (const 他 of [1, 2, 3].filter((n) => n !== 台)) {
+      await expect(行.filter({ hasText: `/pc${他}-only` })).toHaveCount(0)
+    }
+
+    // 一覧へ戻る。**`goto` を使う**のが既存の作法（`model.spec.ts` ほか）——
+    // 帯の ✕ は画面ごとに位置が違い、3台ぶん回すここでは当てにしにくい
+    await page.goto('/')
+  }
+})
