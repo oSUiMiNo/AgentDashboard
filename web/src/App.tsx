@@ -14,8 +14,15 @@
  */
 
 import { MotionConfig } from 'motion/react'
-import { useEffect } from 'react'
-import { BrowserRouter, Link, Route, Routes, useParams } from 'react-router'
+import { useEffect, useRef, useState } from 'react'
+import {
+  BrowserRouter,
+  Link,
+  Route,
+  Routes,
+  useNavigate,
+  useParams,
+} from 'react-router'
 import { Button } from '@/components/ui/button'
 import { GearGlyph } from '@/components/ui/glyphs'
 import { ToastLayer } from '@/components/ToastLayer/ToastLayer'
@@ -35,11 +42,12 @@ import { composerBusyCount } from '@/lib/composerBusy'
 import { useDocumentTitle } from '@/lib/documentTitle'
 import { projectDisplayName } from '@/lib/path'
 import { connectionDot } from '@/lib/protocol'
-import { ACCOUNT, HOME, LOCAL_HOST, SETTINGS } from '@/lib/routes'
+import type { SessionMeta } from '@/lib/protocol'
+import { ACCOUNT, HOME, LOCAL_HOST, SETTINGS, sessionPath } from '@/lib/routes'
 import { canEnter, useAuthStore } from '@/stores/auth'
 import { useLanAddressStore } from '@/stores/lanAddress'
 import { useProjects } from '@/stores/projects'
-import { useSessionCard } from '@/stores/sessions'
+import { getSessions, useSessionCard } from '@/stores/sessions'
 import { useSettingsStore } from '@/stores/settings'
 import { useWsStore } from '@/stores/ws'
 
@@ -63,6 +71,17 @@ const CONNECTION_LABEL: Record<string, string> = {
  * **待っている間に押せる。** バナーのボタンは残してあるので、待てない人はそちらへ行ける。
  */
 export const 読み直すまでの間 = 1200
+
+/**
+ * 移った会話の席を探し続ける上限（ミリ秒。ブランチ設計§7-6）。
+ *
+ * **呼び戻しの待ち②（180 秒）より長く取る。** 席が立つのは呼び戻しが終わってからで、
+ * そこには claude の起動が含まれる。**先に諦めると、あと少しで現れる席を取り逃がす。**
+ */
+const 追う上限 = 240_000
+
+/** 席を探す間隔（ミリ秒）。手元の写しを見るだけなので軽い。 */
+const 探す間隔 = 300
 
 
 function App() {
@@ -469,13 +488,169 @@ function SessionPage() {
     カードの ID がタブに並んでいまより読みにくくなる。
   */
   useDocumentTitle(session && projectDisplayName(session.project, projects))
+  // **早期 return より前**（フックの規則）。見つからない間は何もしない
+  const 追跡 = useFollowConversation(session)
 
   if (!session) {
     return (
       <NotFound message="このセッションは見つかりません（削除されたか、まだ届いていません）" />
     )
   }
-  return <SessionView cardId={session.card_id} />
+  return (
+    <>
+      {追跡 && <ConversationMovedBanner state={追跡} />}
+      <SessionView cardId={session.card_id} />
+    </>
+  )
+}
+
+/** 見ていた会話が別の席へ移ったときの、いまの状況。 */
+type 追跡の状況 =
+  | { kind: 'searching' }
+  | { kind: 'found'; card: string }
+  | { kind: 'lost' }
+
+/**
+ * 見ていた会話が別の席へ移ったら、そちらへ付いて行く（ブランチ設計§7-6）。
+ *
+ * # なぜ要るのか
+ *
+ * **セッション専用画面は席（カード）を見ているが、枝分かれは席の中身を入れ替える。**
+ * `/branch` は押した席をそのまま枝にするので、**元の会話は新しい席へ移る**——
+ * カードを見ているだけの画面は置いていかれ、**見ていた会話が枝にすり替わる**。
+ * 2026-09-07 に利用者が踏んだ形で、**押した本人と見ていた人が別の端末**だった。
+ *
+ * # 枝分かれに限る
+ *
+ * 席の中身が入れ替わる道は他にもある（端末で `/resume` を打つなど）が、**そちらは
+ * 元の会話を持つ席がどこにも無い**ので、移る先が存在しない。**行き先があるときだけ
+ * 追う**——無い場合まで拾おうとすると、追えない場面で黙って迷子になる。
+ *
+ * 手がかりは `branched_from`（枝の側に付く印）で、**「いま見ている席が、私が見ていた
+ * 会話から分かれた」ことがこの1つで言える。**
+ *
+ * # 既に枝だった席を開いたときは動かない
+ *
+ * 覚えるのは**この画面で見ていた会話**だけ。枝になった瞬間を目撃していなければ
+ * 追わない——利用者が自分で開いた枝を、勝手に別の席へ飛ばさないためである。
+ */
+function useFollowConversation(session: SessionMeta | undefined): 追跡の状況 | null {
+  const navigate = useNavigate()
+  const 見ていた会話 = useRef<string | null>(null)
+  const [状況, set状況] = useState<追跡の状況 | null>(null)
+
+  const 会話 = session?.claude_session_id ?? null
+  const 枝の元 = session?.branched_from ?? null
+  const いまの席 = session?.card_id ?? null
+  /*
+    **描画の時点で見る**（`useRef` は効果より後に更新されるので、ここではまだ
+    「入れ替わる前の会話」が入っている）。この1行が「私が見ていた会話が、この席で
+    枝に置き換わった」の判定そのものである。
+  */
+  const すり替わった =
+    枝の元 !== null && 見ていた会話.current !== null && 枝の元 === 見ていた会話.current
+
+  useEffect(() => {
+    if (会話 === null || すり替わった) {
+      // すり替わった直後は覚え直さない。**覚え直すと、追う相手を見失う**
+      return
+    }
+    見ていた会話.current = 会話
+    set状況(null)
+  }, [会話, すり替わった])
+
+  useEffect(() => {
+    if (!すり替わった || いまの席 === null) {
+      return
+    }
+    const 追う先 = 見ていた会話.current
+    /*
+      **見つかるまで探し続ける。** 元の会話が席を持つのは呼び戻しが終わってからで、
+      そこまでに claude の起動を含む時間がかかる（設計§3-5 の待ち②は 180 秒）。
+
+      **配信の購読では拾いきれない。** 席の `claude_session_id` が決まるのは
+      「カードが増えた」のではなく「そのカードの属性が変わった」ときなので、
+      構造の通知（`useProjectGroups` など）には乗らない（`stores/sessions.ts` の
+      `structureChanged` は新設・枠の移動・並びの変化でしか立たない）。**その1点の
+      ために店の通知を増やすより、探す側が数えるほうが波及が小さい。**
+    */
+    const 探す = () =>
+      getSessions().find(
+        (meta) =>
+          meta.card_id !== いまの席 && meta.claude_session_id === 追う先,
+      )
+    const 当たり = 探す()
+    if (当たり) {
+      set状況({ kind: 'found', card: 当たり.card_id })
+      return
+    }
+    set状況({ kind: 'searching' })
+    const 期限 = Date.now() + 追う上限
+    const 時計 = setInterval(() => {
+      const 見つけた = 探す()
+      if (見つけた) {
+        clearInterval(時計)
+        set状況({ kind: 'found', card: 見つけた.card_id })
+        return
+      }
+      if (Date.now() > 期限) {
+        // **諦めても飛ばさない。** 行き先が無いまま動かすと、どこへ行ったか分からなくなる
+        clearInterval(時計)
+        set状況({ kind: 'lost' })
+      }
+    }, 探す間隔)
+    return () => clearInterval(時計)
+  }, [すり替わった, いまの席])
+
+  useEffect(() => {
+    if (状況?.kind !== 'found') {
+      return
+    }
+    /*
+      **一言出してから移る**（`ServerChangedBanner` と同じ作法・設計§18）。無言で
+      画面が入れ替わると、押していない人には故障に見える。**承認は求めない**——
+      待つのは読ませるためだけである。
+    */
+    const 時計 = setTimeout(
+      () => navigate(sessionPath(状況.card)),
+      読み直すまでの間,
+    )
+    return () => clearTimeout(時計)
+  }, [状況, navigate])
+
+  return 状況
+}
+
+/** 見ていた会話が移ったことを知らせる帯。 */
+function ConversationMovedBanner({ state }: { state: 追跡の状況 }) {
+  const navigate = useNavigate()
+  return (
+    <div
+      data-testid="conversation-moved-banner"
+      data-state={state.kind}
+      className="flex items-center justify-between gap-4 rounded-md border border-sky-500/40 bg-sky-500/10 px-3 py-2 text-sm"
+    >
+      <span>
+        この席は枝分かれしました。
+        <span className="text-muted-foreground ml-2 text-xs">
+          {/*
+            **「してください」と言わない。** 頼んでいないのに勝手に移るので、
+            指示の形にすると嘘になる（`ServerChangedBanner` と同じ理由）
+          */}
+          {state.kind === 'found'
+            ? '見ていた会話の席へ移ります'
+            : state.kind === 'searching'
+              ? '見ていた会話が別の席で立つのを待っています'
+              : '見ていた会話の席が見つかりません（この席は枝のほうです）'}
+        </span>
+      </span>
+      {state.kind === 'found' && (
+        <Button size="sm" onClick={() => navigate(sessionPath(state.card))}>
+          いま移る
+        </Button>
+      )}
+    </div>
+  )
 }
 
 function NotFoundPage() {
