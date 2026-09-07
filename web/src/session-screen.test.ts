@@ -73,13 +73,13 @@ describe('種別ごとの地（2026-09-06・利用者の指定）', () => {
     // 数は字で書く。実装の定数から組み立てると、一緒に動いて通ってしまう
     const 規則 = 取り出す('task_notification')
     expect(規則, "[data-origin='task_notification'] が見つからない").not.toBeNull()
-    expect(規則![1]).toContain('#93520b')
+    expect(規則![1]).toContain('#9f5000')
   })
 
   it('他セッションからは、渡された朱を暗くした地になる', () => {
     const 規則 = 取り出す('peer')
     expect(規則, "[data-origin='peer'] が見つからない").not.toBeNull()
-    expect(規則![1]).toContain('#ba3520')
+    expect(規則![1]).toContain('#bb3924')
   })
 
   it('その他の機械は、琥珀のまま', () => {
@@ -90,8 +90,8 @@ describe('種別ごとの地（2026-09-06・利用者の指定）', () => {
   })
 
   it('どの地も1箇所でしか持たない', () => {
-    expect((INDEX.match(/#93520b/g) ?? []).length).toBe(1)
-    expect((INDEX.match(/#ba3520/g) ?? []).length).toBe(1)
+    expect((INDEX.match(/#9f5000/g) ?? []).length).toBe(1)
+    expect((INDEX.match(/#bb3924/g) ?? []).length).toBe(1)
   })
 
   it('名乗りの行は、地から作る', () => {
