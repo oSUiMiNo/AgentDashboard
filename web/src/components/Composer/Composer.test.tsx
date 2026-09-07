@@ -18,6 +18,8 @@ import { anyComposerBusy } from '@/lib/composerBusy'
 import type { CardId } from '@/lib/protocol'
 import * as hostfs from '@/lib/hostfs'
 import * as terminalBridge from '@/lib/terminalBridge'
+import { appendNodes, clearAllTranscripts } from '@/stores/transcript'
+import type { NodeId, TreeNode } from '@/lib/protocol'
 import * as sessions from '@/stores/sessions'
 import { clearSessions, setCardError } from '@/stores/sessions'
 import { useWsStore } from '@/stores/ws'
@@ -33,6 +35,11 @@ function 画像(name = 'a.png', type = 'image/png'): File {
 let sendInput: ReturnType<typeof vi.fn>
 
 beforeEach(() => {
+  // 記録のストアは rAF でまとめてから反映するので、テストでは即座に流す
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+    callback(0)
+    return 0
+  })
   sendInput = vi.fn(() => true)
   useWsStore.setState({ sendInput } as never)
   vi.stubGlobal('URL', {
@@ -44,9 +51,24 @@ beforeEach(() => {
 
 afterEach(() => {
   clearSessions()
+  clearAllTranscripts()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
 })
+
+/** 記録に「読まれた」印が付いたことにする（取り消し 設計§4）。 */
+function 読まれたことにする(text: string, id = 'u1') {
+  const node: TreeNode = {
+    id: id as NodeId,
+    parent: null,
+    node: { kind: 'user_message', text },
+    ts: 0,
+    branch: 0,
+  }
+  act(() => {
+    appendNodes(CARD, [node])
+  })
+}
 
 /** 置き終わったことにする（運びは別のところで見ている）。 */
 function 置けたことにする() {
@@ -542,7 +564,9 @@ describe('断られたら戻す', () => {
  * 複数行を書いている人が行を上へ移動できなくなる。
  */
 describe('送った直後の ↑', () => {
-  let 端末へ: ReturnType<typeof vi.fn>
+  // **型は本物から採る。** 素の `vi.fn()` だと引数の形が緩くなり、
+  // 「どう呼ばれたか」を見張れなくなる
+  let 端末へ: ReturnType<typeof vi.fn<typeof terminalBridge.sendTerminalKey>>
 
   beforeEach(() => {
     端末へ = vi.fn()
@@ -639,6 +663,55 @@ describe('送った直後の ↑', () => {
     // 選び直さずに送れること
     fireEvent.submit(screen.getByTestId('composer'))
     await waitFor(() => expect(sendInput).toHaveBeenCalledTimes(2))
+  })
+
+  it('読まれたあとの ↑ は、端末へも回さず控えも戻さない', async () => {
+    // **これが通らないと画面が嘘をつく。** 取り消しは起きていないのに文が戻り、
+    // 利用者は取り消せたと誤解する
+    await 送る('もう読まれた')
+    読まれたことにする('もう読まれた')
+    expect(上を押す()).toBe(true)
+    expect(端末へ).not.toHaveBeenCalled()
+    expect(
+      (screen.getByTestId('composer-input') as HTMLTextAreaElement).value,
+    ).toBe('')
+  })
+
+  it('同じ文を二度送っても、前のぶんで窓が閉じない', async () => {
+    // 短い相槌ほど同じ文を繰り返す。**見張り始めた時点で在るものを数えると**、
+    // 2回目の送信で即座に閉じてこの機能が効かなくなる
+    await 送る('はい')
+    読まれたことにする('はい', 'u1')
+    fireEvent.change(screen.getByTestId('composer-input'), {
+      target: { value: 'はい' },
+    })
+    fireEvent.submit(screen.getByTestId('composer'))
+    await waitFor(() => expect(sendInput).toHaveBeenCalledTimes(2))
+    expect(上を押す()).toBe(false)
+    expect(端末へ).toHaveBeenCalledWith(CARD, 'up')
+  })
+
+  it('時間の窓を過ぎたら、↑ でも戻らない', async () => {
+    // **`waitFor` を使わない。** 偽の時計を入れたまま待つと、待つ側も時計で回るので
+    // 止まる（既存の窓の試験と同じ書き方に揃えてある）
+    vi.useFakeTimers()
+    try {
+      置く()
+      fireEvent.change(screen.getByTestId('composer-input'), {
+        target: { value: '古くなる' },
+      })
+      fireEvent.submit(screen.getByTestId('composer'))
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(20_000)
+      })
+      expect(上を押す()).toBe(true)
+      expect(端末へ).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('戻った添付は、抱えている台帳へ登録し直される', async () => {

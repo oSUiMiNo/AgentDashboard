@@ -808,3 +808,61 @@ export function useTranscript(cardId: CardId): FlatRow[] {
 export function getNode(cardId: CardId, nodeId: NodeId): TreeNode | undefined {
   return cards.get(cardId)?.byId.get(nodeId)
 }
+
+/**
+ * 送った文が**読まれる**まで見張る（取り消し 設計§4）。
+ *
+ * **「読まれた」＝その文の `user_message` が記録に現れたこと**である。ノードが出るのは
+ * claude が読んで JSONL へ書いたときだけなので、これが「**もう取り消せない**」の合図に
+ * なる。現れたら [`onSeen`] を1度だけ呼び、自分で外れる。返り値を呼べば途中で外せる。
+ *
+ * **時間で決めない。** CLI の取り消しが効くのは読み込まれる前だけで、その締切は
+ * 機械の速さで動く。時間だけで区切ると、**締切を過ぎたのに窓が開いたまま**になり、
+ * 取り消していないのに文が戻る——**画面が嘘をつく**。
+ *
+ * **見張り始めた時点で在るものは数えない。** 同じ文を二度送ることは普通にあり
+ * （短い相槌ほど起きる）、数えると**前のぶんで即座に閉じて**この機能が効かなくなる。
+ */
+export function watchUserMessage(
+  cardId: CardId,
+  text: string,
+  onSeen: () => void,
+): () => void {
+  const 見張る前から在る = new Set<NodeId>()
+  const state = cards.get(cardId)
+  if (state) {
+    for (const one of state.byId.values()) {
+      if (one.node.kind === 'user_message' && one.node.text === text) {
+        見張る前から在る.add(one.id)
+      }
+    }
+  }
+
+  let 止める: (() => void) | null = null
+  const 外す = () => {
+    止める?.()
+    止める = null
+  }
+  const 見る = () => {
+    if (止める === null) {
+      return
+    }
+    const now = cards.get(cardId)
+    if (!now) {
+      return
+    }
+    for (const one of now.byId.values()) {
+      if (
+        one.node.kind === 'user_message' &&
+        one.node.text === text &&
+        !見張る前から在る.has(one.id)
+      ) {
+        外す()
+        onSeen()
+        return
+      }
+    }
+  }
+  止める = subscribe(cardId, 見る)
+  return 外す
+}

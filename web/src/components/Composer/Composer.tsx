@@ -87,6 +87,7 @@ import type { CardId } from '@/lib/protocol'
 import { sendTerminalKey } from '@/lib/terminalBridge'
 import { useAuthStore } from '@/stores/auth'
 import { clearCardNotices, pushCardNotice, useCardError } from '@/stores/sessions'
+import { watchUserMessage } from '@/stores/transcript'
 import { useWsStore } from '@/stores/ws'
 
 /**
@@ -107,6 +108,13 @@ interface 控え {
   attachments: Attachment[]
   /** 窓を閉じるための時計。差し替え・解決・畳みのときに止める */
   timer: ReturnType<typeof setTimeout>
+  /**
+   * 記録の見張りを外す（取り消し 設計§4）。
+   *
+   * **時計とは別に要る。** 時計は「届かなかったとき」の保険で、こちらは
+   * 「**読まれたから、もう取り消せない**」を知る本筋である。
+   */
+  見張りを外す: () => void
 }
 
 interface Props {
@@ -172,6 +180,7 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
     }
     控え中.current = null
     clearTimeout(held.timer)
+    held.見張りを外す()
     for (const one of held.attachments) {
       releasePreview(one)
     }
@@ -194,6 +203,7 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
     }
     控え中.current = null
     clearTimeout(held.timer)
+    held.見張りを外す()
     // **打ち直しの途中なら邪魔しない。** 押したあとに書き始めた文のほうが新しい
     if (text !== '' || attachments.length > 0) {
       for (const one of held.attachments) {
@@ -342,11 +352,18 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
     // **控えを取る。絵はまだ捨てない**（設計§7-2——断られたらそのまま戻せること）。
     // 前の控えが残っていれば、そちらはもう戻す相手が居ないので畳む
     控えを捨てる()
-    控え中.current = {
+    // **控えを先に置いてから見張りを付ける。** 逆にすると、見張りが即座に当たった
+    // ときに畳む相手（`控え中.current`）がまだ居ない
+    const held: 控え = {
       text,
       attachments,
       timer: setTimeout(控えを捨てる, RESTORE_WINDOW_MS),
+      見張りを外す: () => {},
     }
+    控え中.current = held
+    // 読まれたら畳む（取り消し 設計§4）。**時間の窓は保険として残す**——
+    // 記録が届かない経路（線が切れた等）で永久に開いたままにしないため
+    held.見張りを外す = watchUserMessage(cardId, text, 控えを捨てる)
 
     setText('')
     set拡大中(null)
