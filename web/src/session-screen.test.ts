@@ -69,11 +69,16 @@ describe('種別ごとの地（2026-09-06・利用者の指定）', () => {
       `\\.speech-bubble\\.speech-bubble-machine\\[data-origin='${種別}'\\] \\{([\\s\\S]*?)\\n\\}`,
     ).exec(INDEX)
 
-  it('サブエージェントの報告は、渡されたオレンジを暗くした地になる', () => {
+  it('サブエージェントの報告は、利用者が名指しした地になる', () => {
     // 数は字で書く。実装の定数から組み立てると、一緒に動いて通ってしまう
+    //
+    // **この色だけ、コントラストの床を満たしていない**（地 3.09／コード地 2.74）。
+    // 利用者が「コントラストは若干妥協」と明示したうえで値を名指しした結果である
+    // （`DESIGN.md` §45.6）。**満たしていないことを承知で置いている**ので、
+    // 「床を満たすように直す」と読んで勝手に暗くしないこと
     const 規則 = 取り出す('task_notification')
     expect(規則, "[data-origin='task_notification'] が見つからない").not.toBeNull()
-    expect(規則![1]).toContain('#9f5000')
+    expect(規則![1]).toContain('#d17a0f')
   })
 
   it('他セッションからは、渡された朱を暗くした地になる', () => {
@@ -90,7 +95,7 @@ describe('種別ごとの地（2026-09-06・利用者の指定）', () => {
   })
 
   it('どの地も1箇所でしか持たない', () => {
-    expect((INDEX.match(/#9f5000/g) ?? []).length).toBe(1)
+    expect((INDEX.match(/#d17a0f/g) ?? []).length).toBe(1)
     expect((INDEX.match(/#bb3924/g) ?? []).length).toBe(1)
   })
 
