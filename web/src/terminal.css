@@ -1,0 +1,27 @@
+/*
+  端末の文字を、指で選べるようにする（コピー設計§9）。
+
+  xterm は既定で `.xterm { user-select: none }` を当てている。自前のマウス選択と
+  ブラウザの選択が二重に走らないようにするためで、**PC ではこれが正しい**。
+
+  指で触る端末には、その自前の選択が無い。**マウスが無いので一度も始まらない**ので、
+  塞いだままだと選ぶ手立てが1つも残らない。そこで**触る端末のときだけ**解いて、
+  OS の長押し選択に任せる。
+
+  # なぜ `.xterm` だけでなく中まで書くのか
+
+  `user-select` は受け継がれる指定だが、**xterm が中の要素へ直接当てている**ので、
+  親を書き換えるだけでは届かない。行の入れ物（`.xterm-rows`）まで指しておく。
+
+  # 付ける相手は入れ物
+
+  クラスを当てるのは端末の入れ物で、[`TerminalPane`] が触り方を見て決める。
+  **DOM レンダラで描いているときにしか意味が無い**——WebGL は文字を canvas へ
+  絵として描くので、解いても選ぶ対象が存在しない（設計§2）。
+*/
+.terminal-selectable .xterm,
+.terminal-selectable .xterm .xterm-screen,
+.terminal-selectable .xterm .xterm-rows {
+  user-select: text;
+  -webkit-user-select: text;
+}

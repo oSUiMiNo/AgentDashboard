@@ -166,3 +166,14 @@ export function useCoarsePointer(): boolean {
 export function useLandscape(): boolean {
   return useMediaQuery(LANDSCAPE)
 }
+
+/**
+ * 指で触る端末か。**フックではなく、その場で1回だけ答える。**
+ *
+ * 購読が要らない場面のための口である。端末の描き方（WebGL か DOM か）のように
+ * **作るときに一度だけ決まり、あとから切り替えられないもの**は、変化を追っても
+ * 使い道が無い——追うなら端末ごと作り直すことになり、画面が消えて出直す。
+ */
+export function isCoarsePointer(): boolean {
+  return read(COARSE)
+}

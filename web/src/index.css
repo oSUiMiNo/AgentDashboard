@@ -16,6 +16,8 @@
 @import './reorder.css';
 /* 最前面のトースト。位置の理由は上と同じ（トーストとベル設計§8） */
 @import './toast.css';
+/* 端末の文字を指で選べるようにする。位置の理由は上と同じ（コピー設計§9） */
+@import './terminal.css';
 
 @custom-variant dark (&:is(.dark *));
 

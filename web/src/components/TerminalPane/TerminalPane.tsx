@@ -11,11 +11,10 @@
  * しきい値をサーバから受け取っているのは、`config.toml` の設定を実際に効かせるため。
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef } from 'react'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { Terminal, type ITerminalInitOnlyOptions, type ITerminalOptions } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
-import { TextSheet } from '@/components/TerminalPane/TextSheet'
 import { createFlowController } from '@/lib/flow'
 import { KIND_PTY_SNAPSHOT } from '@/lib/frame'
 import {
@@ -25,7 +24,8 @@ import {
   sequenceFor,
   terminalKeyOverride,
 } from '@/lib/keys'
-import { transcriptAt, visibleLines, visibleRows, visibleScreen } from '@/lib/screen'
+import { isCoarsePointer } from '@/lib/pointer'
+import { visibleLines, visibleRows, visibleScreen } from '@/lib/screen'
 import {
   hasWatcher,
   registerKeyboard,
@@ -99,28 +99,12 @@ export const TERMINAL_OPTIONS: ITerminalOptions = {
  */
 export const TERMINAL_GRID: ITerminalInitOnlyOptions = { cols: 120, rows: 40 }
 
-/**
- * 長押しと呼ぶまでの時間（ms）。**コピーのイシュー設計§3。**
- *
- * スマホの文字選択が出る間合いに合わせてある。短くすると、ゆっくりしたタップが
- * 選択に化ける——**入力欄の枠の上では計時そのものをしない**ので実害は枠の外に
- * 限られるが、それでも「押しただけで選ばれた」は驚きになる。
- */
-export const LONG_PRESS_MS = 500
-
 export function TerminalPane({ cardId }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   // E2E から観測するための値。React の再レンダリングとは無関係に更新する
   const statusRef = useRef<HTMLDivElement>(null)
   // 実機からタッチの数字を読むための置き場所（`?touchdebug=1` のときだけ中身が入る）
   const debugRef = useRef<HTMLDivElement>(null)
-  /**
-   * 文字として開いた面の中身。**閉じているときは `null`。**
-   *
-   * 開いた瞬間の写しを持つ。**あとから端末へ取りに行かない**——読んでいる間も端末は
-   * 動き続けるので、取りに行く形にすると**読んでいる文が指の下で入れ替わる**。
-   */
-  const [文字の面, set文字の面] = useState<{ lines: string[]; at: number } | null>(null)
 
   useEffect(() => {
     const container = containerRef.current
@@ -231,21 +215,37 @@ export function TerminalPane({ cardId }: Props) {
 
     // WebGL は環境によっては使えない（ヘッドレスや古いGPU）。使えなければ既定の
     // DOM レンダラのまま動くので、失敗しても止めない
+    //
+    // **触る端末では、使えても載せない**（設計§9）。WebGL は文字を canvas へ絵として
+    // 描くので **DOM に文字が1つも残らず、OS の長押し選択が付く先が無い**。DOM レンダラ
+    // なら文字は本物の要素として並ぶので、**その場で普段どおり選べる**。
+    //
+    // 速さと引き換えである。**指で触る端末では選べることのほうが要る**——PC には
+    // xterm 自身のマウス選択があるが、指にはそれが無く、代わりが1つも無かった。
     let webgl: WebglAddon | null = null
-    try {
-      const addon = new WebglAddon()
-      addon.onContextLoss(() => {
-        // コンテキストを失ったまま放置すると描画が止まる。捨てて DOM レンダラへ戻す
-        addon.dispose()
+    if (isCoarsePointer()) {
+      setRendererLabel('dom')
+      // **解くのはここ1箇所。** レンダラを選ぶのと `user-select` を解くのは
+      // **同じ1つの判断**である（canvas に描くなら解いても選ぶ対象が無い）。
+      // 2箇所に分けて書くと、片方だけ直したときに**塞がったまま DOM で描く**という、
+      // 遅いだけで選べない組み合わせが生まれる
+      container.classList.add('terminal-selectable')
+    } else {
+      try {
+        const addon = new WebglAddon()
+        addon.onContextLoss(() => {
+          // コンテキストを失ったまま放置すると描画が止まる。捨てて DOM レンダラへ戻す
+          addon.dispose()
+          webgl = null
+          setRendererLabel('dom')
+        })
+        term.loadAddon(addon)
+        webgl = addon
+        setRendererLabel('webgl')
+      } catch {
         webgl = null
         setRendererLabel('dom')
-      })
-      term.loadAddon(addon)
-      webgl = addon
-      setRendererLabel('webgl')
-    } catch {
-      webgl = null
-      setRendererLabel('dom')
+      }
     }
 
     // --- フロー制御 -------------------------------------------------------
@@ -523,81 +523,67 @@ export function TerminalPane({ cardId }: Props) {
      */
     const TAP_SLOP = DEFAULT_TUNING.threshold
 
-    // --- 長押しで、文字として開く（コピーの設計§8）--------------------------
+    // --- 文字は、その場で選ぶ（コピーの設計§9）------------------------------
     //
-    // **ブラウザの文字選択は端末の上では使えない。** WebGL レンダラは canvas に描くので
-    // DOM に文字が1行も無く、`user-select` を戻しても選ぶ対象が存在しない（設計§2）。
+    // **ここには選択のコードが1行も無い。それが正解である。**
     //
-    // 前の版は代わりに **xterm 自身の選択**（`selectLines`）を動かした。動いてはいたが、
-    // **1行に帯が付くだけで範囲は伸ばせず、OS のメニューも出ない**——利用者には壊れて
-    // 見えた（実機の観測・2026-09-06）。**見た目だけ選択に似ていて中身が無い**ものは、
-    // 無いより悪い。
+    // 触る端末では WebGL を載せず DOM レンダラで描き（上）、`user-select` を解いて
+    // ある（`terminal.css`）。**文字は本物の要素として画面に並んでいる**ので、長押しも
+    // ハンドルも範囲選択も OS のコピーのメニューも、**ブラウザが勝手にやってくれる**。
     //
-    // いまは**文字を本物の DOM へ出す**（[`TextSheet`]）。出した先では長押しも
-    // ハンドルも範囲選択もコピーのメニューも、いつもどおり全部効く。
+    // # 2度作って、2度捨てた
     //
-    // # 既定の経路には1行も入らない（コピー設計§4）
+    // | 版 | 何を作ったか | なぜ捨てたか（どちらも実機での観測） |
+    // |---|---|---|
+    // | 1 | xterm 自身の選択を長押しで動かす | 1行に帯が付くだけで範囲は伸ばせず、OS のメニューも出ない。**見た目だけ選択に似ていて中身が無い** |
+    // | 2 | 文字を並べた面へ移る（`TextSheet`） | **面へ飛ばされること自体が嫌われた。**「その場で選べないなら、いっそ選べないほうがよい」 |
     //
-    // 1. **枠の中では計時を始めない。** 枠の上のゆっくりしたタップが選択に化けない
-    // 2. **発火したら焦点も外す。** 枠の外を触ったという約束は、長押しでも守られる
-    // 3. **モードを作らない。** 残る状態は「発火したか」の1つで、指を離せば必ず落ちる
+    // **どちらもテストは緑だった。** 緑であることは、利用者が使えることを何ひとつ
+    // 保証しない。
     //
-    // 面そのものは状態を持つが、**端末の触り方は1つも変えない**——面が開いている間、
-    // 触れるのは面のほうであって端末ではない。
+    // # 邪魔をしないために、こちらが守ること
     //
-    /** 計時中のタイマー。**発火・指の移動・離す・破棄のどれでも必ず止める。** */
-    let 長押し: ReturnType<typeof setTimeout> | null = null
-    /**
-     * 長押しが発火したか。**指を離せば必ず偽へ戻る**ので、消え残る状態が無い。
-     *
-     * **落とすのは `touchend` と `touchcancel` の2箇所だけ**——「指が離れた」という
-     * 1つの意味を2つの入口で書いているので、これで1箇所と数える。**`touchstart` でも
-     * 落としてはいけない。** 落とすと、離すときに落とし忘れても次の指が拾ってしまい、
-     * **落とし忘れを壊し方で見つけられなくなる**（フェーズ2の実測。壊しても1本も
-     * 落ちなかった）。
-     */
-    let 開いた = false
+    // ブラウザに任せる以上、**こちらの仕事は「邪魔をしない」ことだけ**になる。
+    //
+    // 1. **静止した指では `preventDefault()` を呼ばない。** 呼ぶと長押しの選択ごと
+    //    消える。`lib/touch.ts` は**1ピクセルも動いていない間は握らない**ので、
+    //    ここは既に満たされている——**壊さないこと**が仕事である
+    // 2. **選んでいる最中のタップで、選択を捨てない**（下の `onTouchEnd`）
 
-    const 計時をやめる = () => {
-      if (長押し !== null) {
-        clearTimeout(長押し)
-        長押し = null
+    /**
+     * いま**この端末の中に**選ばれている文字。無ければ空文字。
+     *
+     * 画面のどこかが選ばれていることではなく、**選択の端がこの入れ物の中にあること**を
+     * 見る。別の場所（トランスクリプトなど）で選んだものを、端末を触ったときに
+     * 「選択中だから触らない」と読み違えないため。
+     *
+     * **端を両方とも見る。** 上から下へ選ぶか下から上へ選ぶかで、どちらが入れ物の中に
+     * 残るかが変わる——片方だけ見ると、**向きによって答えが変わる判定**になる。
+     *
+     * 真偽ではなく**中身**を返すのは、「いま選ばれた」のか「選ばれたまま触られた」のかを
+     * 触る前後の比較で見分けるためである（下の `onTouchEnd`）。
+     */
+    const 選ばれている文字 = () => {
+      const 選択 = document.getSelection()
+      if (!選択 || 選択.isCollapsed || 選択.rangeCount === 0) {
+        return ''
       }
+      const 端 = [選択.anchorNode, 選択.focusNode]
+      if (!端.some((節) => 節 !== null && container.contains(節))) {
+        return ''
+      }
+      return 選択.toString()
     }
 
-    /**
-     * 可視領域の行を、バッファの行へ直す。
-     *
-     * 画面を読む側（[`visibleRows`]）が `viewportY` から数えているのと同じ起点で、
-     * 遡りも含めた通し番号になる。**面はバッファ全体を並べる**ので、こちらで数える。
-     */
-    const バッファの行 = (row: number) => term.buffer.active.viewportY + row
-
-    const 文字で開く = (row: number) => {
-      長押し = null
-      開いた = true
-      // **遡りは取りやめる。** 面が出たあとに背後が滑っていると、閉じたとき別の場所に居る
-      scroller.cancel()
-      // 枠の外を触ったのだから、焦点は外す（コピー設計§4-2）。**ここを消すと、
-      // 前のイシューで直した「枠の外なのに焦点が残る」が長押しの経路だけ戻る**
-      入力可能を抜ける()
-      set文字の面(transcriptAt(term, バッファの行(row)))
-    }
+    /** 指を置いた時点で選ばれていた文字。**離すときの比較の相手。** */
+    let 触れる前の選択 = ''
 
     const onTouchStart = (event: TouchEvent) => {
       const 指 = points(event)
       触れた = 指.length === 1 ? 指[0] : null
       離れた = 0
-      計時をやめる()
+      触れる前の選択 = 選ばれている文字()
       scroller.start(指)
-      // **枠の中では計時を始めない**（コピー設計§4-1）。始めてから場所を見る形に
-      // すると、**枠の上のゆっくりしたタップが選択に化けてキーボードが開かなくなる**
-      if (触れた) {
-        const 行 = rowAt(触れた.y)
-        if (行 !== null && !入力欄の行か(行)) {
-          長押し = setTimeout(() => 文字で開く(行), LONG_PRESS_MS)
-        }
-      }
       if (debugOn) {
         tally.start += 1
         showDebug('start')
@@ -609,22 +595,6 @@ export function TerminalPane({ cardId }: Props) {
       const 指 = points(event)
       if (触れた && 指.length === 1) {
         離れた = Math.max(離れた, Math.hypot(指[0].x - 触れた.x, 指[0].y - 触れた.y))
-      }
-      // **発火したあとの指は、背後の端末を動かさない**（コピー設計§8-3）。面が
-      // 覆っているので届かないはずだが、**開いた直後のひと動きはまだこちらへ来る**
-      if (開いた) {
-        if (event.cancelable) {
-          event.preventDefault()
-        }
-        if (debugOn) {
-          tally.move += 1
-          showDebug('move 面')
-        }
-        return
-      }
-      // **動いたら長押しではない。** タップと呼べる幅を超えた時点で計時をやめる
-      if (離れた > TAP_SLOP) {
-        計時をやめる()
       }
       const grabbed = scroller.move(指)
       if (grabbed && event.cancelable) {
@@ -673,22 +643,38 @@ export function TerminalPane({ cardId }: Props) {
      * 文から焦点を奪う話ではない。
      */
     const onTouchEnd = (event: TouchEvent) => {
-      計時をやめる()
-      // **面を開いた指は、行き先の判断へ入らない。** 焦点は発火のときに外してあり、
-      // ここで `入力可能を抜ける()` を呼び直す理由も、`開く()` へ着く理由も無い
-      if (開いた) {
-        開いた = false
+      // **いま選ばれたのなら、行き先の判断へ入らない**（コピー設計§9-3）。
+      //
+      // 長押しで選ぶと、指を離した瞬間にもここへ来る。**そのまま進むと
+      // `入力可能を抜ける()` が焦点を外し、選んだそばから選択が消える。**
+      //
+      // ただし `preventDefault()` は呼ぶ。**互換マウスイベントを止めるため**で、
+      // 止めないと `touchend` のあとに `pointerdown`（`pointerType: 'mouse'`）が来て
+      // 下の [`onPointerDown`] が焦点を渡し、**選んだ文字の上にカーソルが出る**。
+      const いまの選択 = 選ばれている文字()
+      if (いまの選択 !== '' && いまの選択 !== 触れる前の選択) {
         触れた = null
-        // 滑らせない。**面を出すために止めた指の勢いで背後が流れる**のは驚きになる
         scroller.cancel()
         if (event.cancelable) {
           event.preventDefault()
         }
         if (debugOn) {
           tally.end += 1
-          showDebug('end 面')
+          showDebug('end 選ばれた')
         }
         return
+      }
+      // **選ばれたまま触られたのなら、こちらでしまう。**
+      //
+      // ここを「選択があるなら常に触らない」で書くと、**端末が触れないまま固まる**——
+      // 選択をしまうのは普通ブラウザの仕事だが、そのきっかけ（タップ）を上の
+      // `preventDefault()` で毎回止めているので、**誰もしまえなくなる**。
+      // 遷移を1本足したときに、既存の遷移と繋がってできた道である。
+      //
+      // **「触る前と同じ文字が選ばれたまま」を合図にする。** 選び直した場合は中身が
+      // 変わるので上の枝へ行き、しまわれない。
+      if (いまの選択 !== '') {
+        document.getSelection()?.removeAllRanges()
       }
       // **決めるのは `scroller.end()` より先。** あちらは勢いが残っていれば滑り始め、
       // 滑れば `viewportY` が動く＝行の対応が変わる
@@ -714,8 +700,6 @@ export function TerminalPane({ cardId }: Props) {
       }
     }
     const onTouchCancel = () => {
-      計時をやめる()
-      開いた = false
       触れた = null
       scroller.cancel()
       if (debugOn) {
@@ -787,10 +771,6 @@ export function TerminalPane({ cardId }: Props) {
       container.removeEventListener('touchmove', onTouchMove)
       container.removeEventListener('touchend', onTouchEnd)
       container.removeEventListener('touchcancel', onTouchCancel)
-      // 計時の途中で捨てられることがある。止めないと、消えた端末を選びにいく
-      計時をやめる()
-      // **面も畳む。** 端末が消えたのに文字だけ残ると、閉じる先が無くなる
-      set文字の面(null)
       // 滑っている最中に捨てられることがある。止めないと、消えた端末を触り続ける
       scroller.stop()
       parsed.dispose()
@@ -846,24 +826,6 @@ export function TerminalPane({ cardId }: Props) {
         黙って効かなくなる指定だからで、こうしておけば単体テストから実際の値を読める
         （jsdom は CSS を読まないので、クラス名の一致では綴り違いも効き目も捕まえられない）。
       */}
-      {/*
-        **文字として開いた面**（コピー設計§8）。
-
-        端末の隅ではなく**画面いっぱい**に出す。前の版は的を端末の右上に固定していたが、
-        **端末は 120 桁あり、狭い画面では一文字が 6px にしかならない**——読むには必ず
-        拡大する。3倍に拡大すると見えている範囲は 130×281 まで狭まり、右上の的はその外へ
-        出る（実測）。**拡大しなければ読めない面の隅に操作を置くと、読んでいる人には
-        決して届かない。**
-
-        面の中身は開いた瞬間の写しで、**開いている間は端末を見に行かない**。
-      */}
-      {文字の面 !== null && (
-        <TextSheet
-          lines={文字の面.lines}
-          at={文字の面.at}
-          onClose={() => set文字の面(null)}
-        />
-      )}
       <div
         ref={containerRef}
         data-testid="terminal"
