@@ -776,36 +776,53 @@ describe('復旧ボタンは指で押せる', () => {
  * 無い**ので、選択の側が無いとスマホから永久に届かない。
  */
 describe('操作の群は、いま触っている1枚にだけ出る', () => {
-  it('指で触る画面では常に出る（既定が「出る」）', () => {
+  /*
+    **ここは「規則が在るか」ではなく「どこに在るか」を見る**（項目6）。
+
+    置き場所を見ないと、3本ともメディアクエリの中へ戻しても緑のままになる——
+    **指の画面から永久に届かない形が、テストを通り抜ける。**
+  */
+
+  it('選んでいないと出ない——既定は媒体によらず「出さない」', () => {
     /*
-      **隠すほうをメディアクエリの中だけに置く**（細かい修正 設計§4-1）。
-      既定を「出る」にしておけば、**hover を持たない端末から永久に届かない、という形が
-      構造的に作れない**——鉛筆1つだったころは既定が `opacity: 0` で、選択の側を
-      足して届かせていた。
+      **かつてここは「既定が出る」だった。それを覆している。**
+      当時の理由（hover を持たない端末から永久に届かない形を構造的に作れない）は
+      真っ当だったが、**カードの右上の電源は稼働中に押すと claude を止める**ので、
+      指が触れただけで走っている作業が落ちうる。**到達不能はこのファイルが見張る。**
     */
-    expect(規則('.tile-ops').body).toMatch(/opacity:\s*1\b/)
+    const 既定 = 規則('.tile-ops')
+    expect(既定.body).toMatch(/opacity:\s*0\b/)
+    // **媒体条件の中に無いこと。** 中にあると、指の画面では既定が効かない
+    expect(既定.selector).not.toContain('hover: hover')
   })
 
-  it('マウスのある機械でだけ、乗るまで隠す', () => {
-    // 素の `:hover` は指の端末でも「触れたまま」で成立し、常時表示と二重になる
-    const 隠す = 当たる('.tile-ops').filter((rule) => /opacity:\s*0\b/.test(rule.body))
-    expect(隠す).toHaveLength(1)
-    expect(隠す[0].selector).toContain('hover: hover')
-    expect(隠す[0].selector).toContain('pointer: fine')
-  })
-
-  it('乗っている・選ばれている・中に居るの3つで出る', () => {
-    // キーボードで辿り着いたときも出す——見えないボタンに焦点が当たると、
-    // どこに居るのか分からなくなる
+  it('選んだら出る——フォーカスも一緒に、媒体条件の外にある', () => {
+    /*
+      **選択だけを外へ出すと、指の画面に外付けキーボードを繋いだとき、
+      Tab で移動しても何も見えない。** 出す道は数え落とさずに全部運ぶ。
+    */
     for (const selector of [
-      '.tile-shell:where(:hover) .tile-ops',
       ".tile-shell[data-selected='true'] .tile-ops",
       '.tile-ops:where(:focus-within)',
     ]) {
-      const 出す = 当たる(selector)
+      const 出す = 当たる(selector).filter((rule) => /opacity:\s*1\b/.test(rule.body))
       expect(出す.length, selector).toBeGreaterThanOrEqual(1)
-      expect(出す.some((rule) => /opacity:\s*1\b/.test(rule.body)), selector).toBe(true)
+      // **1つも媒体条件の中に居ないこと**
+      for (const rule of 出す) {
+        expect(rule.selector, selector).not.toContain('hover: hover')
+      }
     }
+  })
+
+  it('乗って出るのは、マウスのある機械だけ', () => {
+    // 素の `:hover` は指の端末でも「触れたまま」で成立するので、外へ出すと
+    // **触った瞬間に出て、常時表示と実質同じ**になる
+    const 出す = 当たる('.tile-shell:where(:hover) .tile-ops').filter((rule) =>
+      /opacity:\s*1\b/.test(rule.body),
+    )
+    expect(出す).toHaveLength(1)
+    expect(出す[0].selector).toContain('hover: hover')
+    expect(出す[0].selector).toContain('pointer: fine')
   })
 
   it('右上に1つの群として、横一列に並ぶ', () => {
