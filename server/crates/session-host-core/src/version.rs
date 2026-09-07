@@ -785,7 +785,9 @@ pub fn list_versions(state_dir: &Path, source: Option<&Path>) -> Vec<protocol::V
         }
     }
 
-    // 3つ組の順に並べる。同じ版名の行が複数並ぶので、出どころとパスで決着させる
+    // 3つ組の**新しい順**に並べる。人が選びたいのはたいてい最新なので、探させずに
+    // 上へ出す。**版だけを逆順にし、同着の決着は昇順のまま残す**——ここまで裏返すと、
+    // 同じ版名の行が複数並ぶときの見え方が変わる
     entries.sort_by(|left, right| {
         let key = |entry: &protocol::VersionEntry| {
             (
@@ -795,6 +797,7 @@ pub fn list_versions(state_dir: &Path, source: Option<&Path>) -> Vec<protocol::V
         };
         left.version
             .cmp(&right.version)
+            .reverse()
             .then_with(|| key(left).cmp(&key(right)))
     });
     entries
@@ -1347,18 +1350,41 @@ mod tests {
         let entries = list_versions(&dir, Some(&installed));
 
         assert_eq!(entries.len(), 2, "2行並ぶ: {entries:?}");
-        // 3つ組の順（0.1.0 → 0.1.1）。文字列順ではない
-        assert_eq!(entries[0].version, VersionId::new("0.1.0"));
-        assert_eq!(entries[0].origin, protocol::VersionOrigin::Installed);
-        assert!(entries[0].usable, "3本とも同じ版なら選べる");
-        assert!(!entries[0].selected);
-        assert!(entries[0].size_bytes > 0, "溜まる量が黙って隠れない");
+        // 3つ組の**新しい順**（0.1.1 → 0.1.0）。文字列順ではない
+        assert_eq!(entries[0].version, VersionId::new("0.1.1"));
+        assert_eq!(entries[0].origin, protocol::VersionOrigin::Stored);
+        assert!(entries[0].selected, "ポインタが指している行に印が付く");
 
-        assert_eq!(entries[1].version, VersionId::new("0.1.1"));
-        assert_eq!(entries[1].origin, protocol::VersionOrigin::Stored);
-        assert!(entries[1].selected, "ポインタが指している行に印が付く");
+        assert_eq!(entries[1].version, VersionId::new("0.1.0"));
+        assert_eq!(entries[1].origin, protocol::VersionOrigin::Installed);
+        assert!(entries[1].usable, "3本とも同じ版なら選べる");
+        assert!(!entries[1].selected);
+        assert!(entries[1].size_bytes > 0, "溜まる量が黙って隠れない");
         // いま走っているのはテストの実行ファイルなので、どの行も走ってはいない
         assert!(entries.iter().all(|entry| !entry.running));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 一覧は新しい版から並ぶ() {
+        // **人が選びたいのはたいてい最新**なので、探させずに上へ出す。
+        // 3つ組で比べるので 0.1.9 と 0.1.10 も取り違えない（文字列順ではない）
+        let dir = temp_dir("list-desc");
+        for name in ["0.1.2", "0.1.10", "0.1.9"] {
+            write_fake_install(&versions_dir(&dir).join(name), name);
+        }
+
+        let entries = list_versions(&dir, None);
+
+        let 並び: Vec<String> = entries
+            .iter()
+            .map(|entry| entry.version.to_string())
+            .collect();
+        assert_eq!(
+            並び,
+            vec!["0.1.10", "0.1.9", "0.1.2"],
+            "新しい順に並ぶ: {並び:?}"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -333,4 +333,65 @@ describe('版のカード', () => {
 
     expect(select).toHaveBeenCalledWith('0.2.0')
   })
+
+  it('選択肢に何が並ぶのかを添える', async () => {
+    // **上限があるのではなく、取ってきた版しか無い。** 一覧が短いのを
+    // 「途中で切れている」と読まれると、無い版を探しに行かせてしまう
+    show({ entries: [entry({ version: '0.2.0' })] })
+
+    const note = await screen.findByTestId('versions-picker-note')
+    expect(note).toHaveTextContent('保管庫にある版だけ')
+    expect(note).toHaveTextContent('新しい版を取ってくる')
+  })
+
+  it('走っている実体が一覧のどの行でもなければ、保管庫の外だと断る', async () => {
+    // ソースから建てた版はここに来る。**断らないと「一覧に無い＝壊れている」に見える**
+    show({
+      running: '0.1.44',
+      running_path: '/home/例/AgentDashboard/server/target/release/agentdashboard',
+      entries: [entry({ version: '0.1.1', path: '/state/versions/0.1.1/agentdashboard' })],
+    })
+
+    expect(await screen.findByTestId('versions-running-outside')).toHaveTextContent(
+      '保管庫の外',
+    )
+  })
+
+  it('走っている実体が一覧の行と同じなら、余計な断りを出さない', async () => {
+    show({
+      running: '0.1.1',
+      running_path: '/bin/agentdashboard',
+      entries: [
+        entry({ version: '0.1.1', origin: 'installed', path: '/bin/agentdashboard' }),
+      ],
+    })
+
+    await screen.findByTestId('versions-running')
+    expect(screen.queryByTestId('versions-running-outside')).toBeNull()
+  })
+
+  it('走っている版が答えられていなければ、外だとも言わない', async () => {
+    // 「不明」と「保管庫の外」を同時に出すと、どちらが本当か読めなくなる
+    show({ running: '', running_path: null, entries: [entry({ version: '0.1.1' })] })
+
+    await screen.findByTestId('versions-running')
+    expect(screen.queryByTestId('versions-running-outside')).toBeNull()
+  })
+
+  it('ドロップダウンは、サーバが返した並びをそのまま出す', async () => {
+    // **画面で並べ替えない。** ここで sort すると、下の一覧と向きが食い違う
+    show({
+      entries: [
+        entry({ version: '0.1.10', path: '/state/versions/0.1.10/agentdashboard' }),
+        entry({ version: '0.1.9', path: '/state/versions/0.1.9/agentdashboard' }),
+        entry({ version: '0.1.2', path: '/state/versions/0.1.2/agentdashboard' }),
+      ],
+    })
+
+    const picker = await screen.findByTestId('versions-picker')
+    const 並び = Array.from(picker.querySelectorAll('option'))
+      .map((option) => option.getAttribute('value'))
+      .filter((value) => value !== '')
+    expect(並び).toEqual(['0.1.10', '0.1.9', '0.1.2'])
+  })
 })

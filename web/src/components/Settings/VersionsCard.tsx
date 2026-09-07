@@ -72,6 +72,17 @@ export function VersionsCard() {
   // ソースビルドの機械に要るのはこちらだけ——取ってくる相手が居ないため
   const diskUpdate = versions.next_differs === true
 
+  // **走っている実体が、下の一覧のどの行でもないとき**に断りを出す。
+  //
+  // 版名で探してはいけない——保管庫に同じ版名の行があっても、**走っている実体は
+  // 別物でありうる**。パスで見る。ただしソースビルドでは走ってきた実体が
+  // `make build` に消えていて `running_path` が空のこともあるので、**空のときも出す**。
+  // どちらも「一覧から選んで動いているのではない」という同じことを指している
+  const runningOutsideStore =
+    running !== '' &&
+    (runningPath === null ||
+      !versions.entries.some((entry) => entry.path === runningPath))
+
   // **押す一式は1つにまとめる。** 予約から出るときと手元から出るときで文言が
   // 食い違うと、同じ操作が別物に見える
   const restartControls = (
@@ -155,6 +166,16 @@ export function VersionsCard() {
         )}
       </p>
 
+      {runningOutsideStore && (
+        <p
+          data-testid="versions-running-outside"
+          className="text-muted-foreground text-xs"
+        >
+          いま動いているのは保管庫の外にある版です（ソースから建てた版など）。
+          下の一覧には出てきません。
+        </p>
+      )}
+
       <label className="flex items-center gap-2 text-xs">
         <span className="text-muted-foreground shrink-0">次に起こす版</span>
         <select
@@ -186,6 +207,12 @@ export function VersionsCard() {
           ))}
         </select>
       </label>
+
+      {/* **上限があるのではなく、そもそも取ってきた版しか無い。** 一覧が短いのを
+          「途中で切れている」と読まれると、無い版を探しに行かせてしまう */}
+      <p data-testid="versions-picker-note" className="text-muted-foreground text-xs">
+        並ぶのは保管庫にある版だけです。「新しい版を取ってくる」を押さない限り増えません。
+      </p>
 
       {/*
         **「効かせる」を予約から切り離した**（設計§6）。
