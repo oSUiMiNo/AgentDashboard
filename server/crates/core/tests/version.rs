@@ -243,6 +243,39 @@ fn 門が叩くサブコマンドは乗り換えない() {
 }
 
 #[test]
+fn state_dirは断りをstderrへ出し標準出力は1行のまま() {
+    // **素で叩くと「いま居るディレクトリの設定」しか見ない。** 走っているインスタンスが
+    // 別のツリーから起きていると、もっともらしい別の場所を答える。そこで断りを添えるが、
+    // **標準出力へ足すと消す道が壊れる**（`uninstall.sh` が `head -1` で1行を値として読む）
+    let fixture = Fixture::new("state-dir-note");
+    let config = fixture.write_config("sqlite:///dev/null/dashboard.db", free_port());
+
+    let out = fixture.run_with_config(&config, &["state-dir"]);
+
+    let printed = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        printed.lines().count(),
+        1,
+        "標準出力は1行のまま:\n{printed}"
+    );
+    assert_eq!(
+        printed.trim(),
+        fixture.state_dir().display().to_string(),
+        "標準出力に断りが混ざっています"
+    );
+
+    let noted = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        noted.contains("いま居るディレクトリの設定"),
+        "断りが出ていません:\n{noted}"
+    );
+    assert!(
+        noted.contains("そのツリーへ入って叩き直して"),
+        "どうすればよいかが出ていません:\n{noted}"
+    );
+}
+
+#[test]
 fn 形の名前は目印つきで一行ずつ出る() {
     // 門は**目印の形が読めるかどうか**で「聞けた」を判定する（設計§9）。
     // 終了コードで見分けようとすると、知らないサブコマンド・起動できない・
