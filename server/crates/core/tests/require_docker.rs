@@ -76,6 +76,20 @@ fn bash() -> PathBuf {
 ///
 /// **箱の中には docker が無いので、実際にはたいてい素通りする。** それでも落として
 /// いるのは、**ホストで直に走らせたときに本物の docker を掴まないため**である。
+///
+/// # ただしホストでは、これ自体が別の壊れ方をする
+///
+/// **Docker Desktop の WSL 統合が `/usr/bin/docker` を置いている機械では、
+/// `/usr/bin` ごと落ちる。** そこには `dirname` も居るので、
+/// `scripts/cargo:24` の `REPO_ROOT="$(cd "$(dirname ...)/.." && pwd)"` が
+/// `dirname: command not found` で死に、**見たいものと関係のない失敗**になる。
+///
+/// **黙って緑になるのではなく、はっきり落ちる**（期待する文言が出ないため）ので
+/// 誤った合格にはならないが、**「ホストで直に走らせても壊れない」とまでは言えない**。
+///
+/// 直すなら、PATH から消すのではなく `scripts/cargo` の `dirname` 依存を外すのが筋
+/// （`${BASH_SOURCE[0]%/*}` で足りる）。**ここでは触らない**——あれは
+/// このリポジトリで cargo を呼ぶ唯一の入口で、壊すと全部が止まる。
 fn path_without_docker() -> String {
     std::env::var("PATH")
         .unwrap_or_default()
