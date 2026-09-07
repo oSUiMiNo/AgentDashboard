@@ -97,4 +97,52 @@ describe('このダッシュボードについて', () => {
     expect(screen.getByTestId('about-binary-at')).toHaveTextContent('2026')
     expect(screen.getByTestId('about-unsupported')).toBeInTheDocument()
   })
+
+  it('比べた相手を名乗る', () => {
+    // 見ているのはリリースの一覧だけ。名乗らないと、ディスクに新しい版がある
+    // ときに「何と比べて最新なのか」が読めない
+    show({
+      latest: {
+        version: '0.1.5',
+        prerelease: false,
+        has_artifact: true,
+        checked_at: 1_785_891_600_000,
+      },
+    })
+
+    expect(screen.getByTestId('about-uptodate')).toHaveTextContent(
+      'リリースの中では最新です',
+    )
+  })
+
+  it('ディスクに新しい版があるときは「最新です」と言い張らない', () => {
+    // **同じ1枚の中で上と下が逆のことを言うほうが、黙るより悪い。**
+    // 下の版のカードは同じ next_differs を読んで「ディスクに新しい版があります」と出す
+    show({
+      latest: {
+        version: '0.1.5',
+        prerelease: false,
+        has_artifact: true,
+        checked_at: 1_785_891_600_000,
+      },
+      next_differs: true,
+    })
+
+    expect(screen.queryByTestId('about-uptodate')).toBeNull()
+    expect(screen.queryByTestId('about-behind')).toBeNull()
+  })
+
+  it('最新の合図は役割表の Positive を使う', () => {
+    // `emerald` は役割表（DESIGN.md §11.2）に無い色。同じ理由で別の画面が既に寄せている
+    show({
+      latest: {
+        version: '0.1.5',
+        prerelease: false,
+        has_artifact: true,
+        checked_at: 1_785_891_600_000,
+      },
+    })
+
+    expect(screen.getByTestId('about-uptodate')).toHaveClass('text-lime-300')
+  })
 })

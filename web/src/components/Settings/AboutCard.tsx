@@ -45,6 +45,10 @@ export function AboutCard() {
     latest && latest.has_artifact && running && isNewer(latest.version, running)
       ? latest
       : null
+  // **こちらは「手元が新しい」**（`VersionsCard` と同じストアの同じ値を読む）。
+  // 同じ1枚の中で上と下が食い違わないのは、**同じ値を見ているから**であって、
+  // 気をつけているからではない
+  const diskUpdate = versions.next_differs === true
 
   return (
     <div
@@ -63,9 +67,19 @@ export function AboutCard() {
               新しい版があります（v{behind.version}）
             </span>
           ) : (
-            latest && (
-              <span data-testid="about-uptodate" className="text-emerald-400">
-                最新です
+            /* **比べた相手を名乗る。** ここが見ているのはリリースの一覧だけで、
+               ディスクに建った版は見ていない。名乗らないと、下のカードが
+               「ディスクに新しい版があります」と言っているのに、上が
+               「最新です」と言い張る形になる。
+               **ディスクが新しいときは、そもそも出さない**——同じ1枚の中で
+               上と下が逆のことを言うほうが、黙るより悪い。
+               色は役割表の Positive（`DESIGN.md` §11.2 ／ `STATUS_TONES.positive`）。
+               `emerald` は役割表に無い色で、この PJT では既に別の画面が
+               同じ理由で寄せている */
+            latest &&
+            !diskUpdate && (
+              <span data-testid="about-uptodate" className="text-lime-300">
+                リリースの中では最新です
               </span>
             )
           )}
