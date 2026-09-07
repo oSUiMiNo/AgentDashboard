@@ -317,7 +317,7 @@ function RewoundHeader({
         <span className="shrink-0 font-medium text-slate-400">
           巻き戻し前のやりとり {row.count}件
         </span>
-        <span className="text-muted-foreground min-w-0 shrink truncate">
+        <span className="text-fold-muted min-w-0 shrink truncate">
           {row.expanded ? '' : '（クリックで表示）'}
         </span>
         <span aria-hidden className="chevron-mark text-muted-foreground shrink-0 text-xs">
@@ -355,7 +355,7 @@ function ActivityHeader({ row, onToggle }: { row: ActivityRow; onToggle: () => v
         onClick={onToggle}
         className="hover:bg-muted/40 flex w-full items-start gap-2 rounded px-1 text-left"
       >
-        <span className="text-muted-foreground min-w-0 shrink truncate">
+        <span className="text-fold-muted min-w-0 shrink truncate">
           {activitySummary(row.counts)}
         </span>
         {row.diff && (
@@ -425,7 +425,7 @@ function NodeRowView({
               {mark}
             </span>
           )}
-          <span className="text-muted-foreground min-w-0 shrink truncate">{summary(row.node)}</span>
+          <span className="text-fold-muted min-w-0 shrink truncate">{summary(row.node)}</span>
           {/* 記号は**テキストのすぐ後ろ**。右端へ寄せない（設計§5-2） */}
           {row.expandable && (
             <span aria-hidden className="chevron-mark text-muted-foreground shrink-0 text-xs">

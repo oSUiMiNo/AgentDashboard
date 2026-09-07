@@ -622,9 +622,13 @@ describe('見出しと記号', () => {
     expect(発言).toContain('font-medium')
     expect(発言).toContain('text-foreground')
     expect(活動).toBeTruthy()
+    // **畳まれた行の要約は専用のトークンで沈める**（細かい修正 項目8）。
+    // `--muted-foreground` から `--fold-muted` へ移したのは、あちらが30ファイル・
+    // 117箇所で使われており、動かすと画面中が同じだけ沈むため。
+    // **この行が見ているのは「発言より弱いこと」**で、そこは変わっていない
     expect(
       within(rowByKind('activity')).getByRole('button').firstElementChild?.className,
-    ).toContain('text-muted-foreground')
+    ).toContain('text-fold-muted')
   })
 })
 

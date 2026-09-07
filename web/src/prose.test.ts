@@ -179,3 +179,65 @@ describe("構造化ビューの段落の空き（細かい修正 項目12）", (
     expect(素).toContain("--prose-head-bottom: 0.65em");
   });
 });
+
+describe("畳まれた行の要約を沈める（細かい修正 項目8）", () => {
+  const 読む = (rel: string) =>
+    readFileSync(resolve(process.cwd(), "src", rel), "utf8");
+  const ROW = 読む("components/TranscriptTree/TranscriptRow.tsx");
+
+  it("専用のトークンを持ち、地に対して床を越えている", () => {
+    // 0.62 は地（oklch(0.145 0 0)）に対して 5.44:1。
+    // **下限ぎりぎり（0.5736＝4.5 ちょうど）は採らない**——地が動いたときに一発で割る
+    expect(素).toContain("--fold-muted: oklch(0.62 0 0)");
+    expect(素).toContain("--color-fold-muted: var(--fold-muted)");
+  });
+
+  it("既存の muted-foreground は動かしていない", () => {
+    // 30ファイル・117箇所で使われている。動かすと**画面中が同じだけ沈む**
+    expect(素).toContain("--muted-foreground: oklch(0.708 0 0)");
+  });
+
+  it("3種の折りたたみ行が、そろって同じトークンを読む", () => {
+    // 1つだけ沈めると、隣り合う行で濃さが食い違う
+    const 要約 = ROW.match(/className="text-fold-muted min-w-0 shrink truncate"/g) ?? [];
+    expect(要約).toHaveLength(3);
+  });
+
+  it("記号は据え置く", () => {
+    // `›` は「押せる場所」の手がかりなので、一緒に沈めると弱くなる
+    const 記号 = ROW.match(/chevron-mark text-muted-foreground/g) ?? [];
+    expect(記号).toHaveLength(3);
+    expect(ROW).not.toContain("chevron-mark text-fold-muted");
+  });
+
+  it("要約以外へ広げていない", () => {
+    // ツールの状態ラベル・思考の行・入力/結果の pre は本文であって要約ではない
+    expect((ROW.match(/text-fold-muted/g) ?? []).length).toBe(3);
+  });
+});
+
+describe("コントラストの床が DESIGN.md に書いてある（細かい修正 項目8）", () => {
+  const DESIGN = readFileSync(
+    resolve(process.cwd(), "..", "DESIGN.md"),
+    "utf8",
+  );
+
+  it("小さい字 4.5 と大きい字 3.0 が、数として書いてある", () => {
+    // これまで**基準そのものはどこにも書かれておらず**、「もう少しだけ暗く」を
+    // 止める仕掛けが決まりの中に無かった
+    const 節 = /### コントラストの床([\s\S]*?)\n---/.exec(DESIGN);
+    expect(節, "コントラストの床の節が見つからない").not.toBeNull();
+    expect(節![1]).toContain("4.5:1");
+    expect(節![1]).toContain("3.0:1");
+  });
+
+  it("承知のうえで割っている色があることを、1行添えてある", () => {
+    /*
+      **書かないと、明文化した床が既存の記録を「違反」として消しに行く。**
+      機械の吹き出しの地は「見た目を取って読みやすさを下げた取引」として
+      数字ごと残されている。
+    */
+    const 節 = /### コントラストの床([\s\S]*?)\n---/.exec(DESIGN);
+    expect(節![1]).toContain("承知のうえで床を割っている");
+  });
+});
