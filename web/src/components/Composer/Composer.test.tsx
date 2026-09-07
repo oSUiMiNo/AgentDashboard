@@ -607,6 +607,54 @@ describe('送った直後の ↑', () => {
     expect(上を押す({ shiftKey: true })).toBe(true)
     expect(端末へ).not.toHaveBeenCalled()
   })
+
+  it('送った文が入力欄へ戻る', async () => {
+    await 送る('戻ってきてほしい')
+    上を押す()
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId('composer-input') as HTMLTextAreaElement).value,
+      ).toBe('戻ってきてほしい'),
+    )
+  })
+
+  it('添付も戻り、そのまま送り直せる', async () => {
+    // **ここがいちばん落ちやすい。** 文だけ戻して添付を落とす実装は、上の試験だけ
+    // 見ていると緑になる——利用者から見れば「送ったつもりのものが黙って欠ける」で、
+    // 文が戻らないことより悪い
+    置けたことにする()
+    置く()
+    fireEvent.change(screen.getByTestId('composer-input'), {
+      target: { value: '絵つき' },
+    })
+    await 選ぶ([画像()])
+    fireEvent.submit(screen.getByTestId('composer'))
+    await waitFor(() =>
+      expect(screen.queryByTestId('composer-attachments')).toBeNull(),
+    )
+    上を押す()
+    await waitFor(() =>
+      expect(screen.getAllByTestId('composer-attachment-remove')).toHaveLength(1),
+    )
+    // 選び直さずに送れること
+    fireEvent.submit(screen.getByTestId('composer'))
+    await waitFor(() => expect(sendInput).toHaveBeenCalledTimes(2))
+  })
+
+  it('戻った添付は、抱えている台帳へ登録し直される', async () => {
+    // **これが偽だと、版が切り替わった瞬間に戻ってきた添付が黙って消える。**
+    // 門はまさにそれを防ぐために在る（`lib/composerBusy.ts`）
+    置けたことにする()
+    置く()
+    fireEvent.change(screen.getByTestId('composer-input'), {
+      target: { value: '絵つき' },
+    })
+    await 選ぶ([画像()])
+    fireEvent.submit(screen.getByTestId('composer'))
+    await waitFor(() => expect(anyComposerBusy()).toBe(false))
+    上を押す()
+    await waitFor(() => expect(anyComposerBusy()).toBe(true))
+  })
 })
 
 /**

@@ -544,6 +544,9 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
               // 端末の受け口が無いカードでは、`sendTerminalKey` が黙って捨てる。
               // **こちらで受け口の有無を見ない**——判定を2箇所に持つと必ず食い違う
               sendTerminalKey(cardId, 'up')
+              // **先に端末へ回してから戻す。** 取り消しには締切があるので、
+              // こちらの描画を待たせない
+              控えを戻す()
               return
             }
             // 送信でないキーは何もせず通す。素の Enter は textarea の既定が改行にする
