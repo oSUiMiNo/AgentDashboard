@@ -1101,7 +1101,7 @@ async fn 間引きを越える() {
 #[tokio::test]
 async fn 一覧の時計が進めば入力待ちからサブ待ちへ移る() {
     let server = common::TestServer::start().await;
-    let (session, mut watcher) = common::start_session(&server.manager).await;
+    let (session, _watcher) = common::start_session(&server.manager).await;
 
     server.post_hook(session.token(), "Stop", "{}").await;
     common::wait_for_status(&session, SessionStatus::WaitingInput).await;
@@ -1133,7 +1133,7 @@ async fn 一覧の時計が進めば入力待ちからサブ待ちへ移る() {
 #[tokio::test]
 async fn 終わった一覧が残っていてもサブ待ちにしない() {
     let server = common::TestServer::start().await;
-    let (session, mut watcher) = common::start_session(&server.manager).await;
+    let (session, _watcher) = common::start_session(&server.manager).await;
 
     server.post_hook(session.token(), "Stop", "{}").await;
     common::wait_for_status(&session, SessionStatus::WaitingInput).await;
@@ -1157,7 +1157,7 @@ async fn 終わった一覧が残っていてもサブ待ちにしない() {
 #[tokio::test]
 async fn 記号が逆に付いていても読み違えない() {
     let server = common::TestServer::start().await;
-    let (session, mut watcher) = common::start_session(&server.manager).await;
+    let (session, _watcher) = common::start_session(&server.manager).await;
 
     server.post_hook(session.token(), "Stop", "{}").await;
     common::wait_for_status(&session, SessionStatus::WaitingInput).await;
@@ -1179,7 +1179,7 @@ async fn 記号が逆に付いていても読み違えない() {
 #[tokio::test]
 async fn 根の行だけではサブ待ちにならない() {
     let server = common::TestServer::start().await;
-    let (session, mut watcher) = common::start_session(&server.manager).await;
+    let (session, _watcher) = common::start_session(&server.manager).await;
 
     server.post_hook(session.token(), "Stop", "{}").await;
     common::wait_for_status(&session, SessionStatus::WaitingInput).await;
@@ -1200,7 +1200,7 @@ async fn 根の行だけではサブ待ちにならない() {
 #[tokio::test]
 async fn 画面から一覧が消えればサブ待ちから戻る() {
     let server = common::TestServer::start().await;
-    let (session, mut watcher) = common::start_session(&server.manager).await;
+    let (session, _watcher) = common::start_session(&server.manager).await;
 
     server.post_hook(session.token(), "Stop", "{}").await;
     common::wait_for_status(&session, SessionStatus::WaitingInput).await;
@@ -1236,7 +1236,7 @@ async fn 画面から一覧が消えればサブ待ちから戻る() {
 #[tokio::test]
 async fn 端末が黙ればサブ待ちから戻る() {
     let server = common::TestServer::start().await;
-    let (session, mut watcher) = common::start_session(&server.manager).await;
+    let (session, _watcher) = common::start_session(&server.manager).await;
 
     server.post_hook(session.token(), "Stop", "{}").await;
     common::wait_for_status(&session, SessionStatus::WaitingInput).await;
@@ -1311,7 +1311,7 @@ async fn 末尾に一覧が残っていなくてもサブ待ちへ移る() {
 #[tokio::test]
 async fn 作業中でもスピナーが無ければサブ待ちへ移る() {
     let server = common::TestServer::start().await;
-    let (session, mut watcher) = common::start_session(&server.manager).await;
+    let (session, _watcher) = common::start_session(&server.manager).await;
 
     server.post_hook(session.token(), "PreToolUse", "{}").await;
     common::wait_for_status(&session, SessionStatus::Working).await;
@@ -1333,7 +1333,7 @@ async fn 作業中でもスピナーが無ければサブ待ちへ移る() {
 #[tokio::test]
 async fn メインが走っていれば作業中のまま動かない() {
     let server = common::TestServer::start().await;
-    let (session, mut watcher) = common::start_session(&server.manager).await;
+    let (session, _watcher) = common::start_session(&server.manager).await;
 
     server.post_hook(session.token(), "PreToolUse", "{}").await;
     common::wait_for_status(&session, SessionStatus::Working).await;
