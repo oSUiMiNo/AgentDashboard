@@ -15,8 +15,9 @@
  */
 
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { report } from '@/lib/clientLogs'
+import { SETTLE_FRAME_LIMIT, resolveEndThreshold, settled } from '@/lib/tailAnchor'
 import type { CardId } from '@/lib/protocol'
 import type { FlatRow, NodeRow } from '@/stores/transcript'
 import { toggleActivity, toggleBody, toggleNode, toggleRewound, useTranscript } from '@/stores/transcript'
@@ -79,8 +80,23 @@ export function TranscriptTree({ cardId }: { cardId: CardId }) {
     },
     [cardId],
   )
+  /*
+    **開け閉めの間だけ、末尾の錨を黙らせる**（細かい修正 項目10）。
+
+    末尾に貼り付いたまま「続きを読む」を押すと、仮想化が**伸びたぶんだけ位置を下へ動かす**。
+    実測（末尾から0px で押す）では**総高 +2949 に対し位置も +2949**——読もうとして押した
+    のに、開いた本文の頭が画面のはるか上へ流れ、**その文章の末尾に着く**。
+
+    止め方と、なぜこの形なのかは [`resolveEndThreshold`] の説明に書いてある。
+    **開くときと畳むときで分岐を書かないこと**——ここは1本の口なので、分岐すると
+    「畳むときだけ跳ねる」が残る。
+  */
+  const [anchorSuppressed, setAnchorSuppressed] = useState(false)
   const onToggleBody = useCallback(
-    (target: NodeRow) => toggleBody(cardId, target.id),
+    (target: NodeRow) => {
+      setAnchorSuppressed(true)
+      toggleBody(cardId, target.id)
+    },
     [cardId],
   )
 
@@ -93,9 +109,43 @@ export function TranscriptTree({ cardId }: { cardId: CardId }) {
     getItemKey: (index) => rows[index]?.id ?? index,
     anchorTo: 'end',
     followOnAppend: true,
-    scrollEndThreshold: END_THRESHOLD,
+    // 開け閉めの間だけ負にして、末尾へ引き直す枝を黙らせる（`lib/tailAnchor.ts`）
+    scrollEndThreshold: resolveEndThreshold(anchorSuppressed, END_THRESHOLD),
     overscan: 8,
   })
+
+  /*
+    **抑制を下ろす。** 総高が2フレーム続けて同じになったら落ち着いたとみなす。
+
+    **上限フレームは保険ではなく必須**——落ち着かない本文で下りないまま残ると、
+    そこから先の追記を追わなくなる。上限で必ず下ろすので、最悪でも
+    「抑制が短すぎて跳ねが残る」＝**直す前と同じ**にしかならない。
+
+    測るのは `scrollHeight` だけにする。ここで `getTotalSize()` を呼ぶと仮想化の
+    再計算が走って描き直しを呼び、**輪になる**（上の初期位置合わせが同じ罠を踏んでいる）。
+  */
+  useEffect(() => {
+    if (!anchorSuppressed) {
+      return
+    }
+    let frame = 0
+    let 前の高さ = -1
+    let id = 0
+    const 見る = () => {
+      const container = scrollRef.current
+      const 高さ = container?.scrollHeight ?? -1
+      if (settled(前の高さ, 高さ, frame, SETTLE_FRAME_LIMIT)) {
+        setAnchorSuppressed(false)
+        return
+      }
+      前の高さ = 高さ
+      frame += 1
+      id = requestAnimationFrame(見る)
+    }
+    id = requestAnimationFrame(見る)
+    return () => cancelAnimationFrame(id)
+    // カードを切り替えたら、前の回のフレームを残さず張り直す
+  }, [anchorSuppressed, cardId])
 
   /*
     開いたら、いちばん下（最新）から見せる（設計§3）。

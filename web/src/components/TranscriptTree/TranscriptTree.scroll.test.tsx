@@ -157,7 +157,20 @@ describe('開いたら末尾から見せる', () => {
     )
     expect(実装).toContain("anchorTo: 'end'")
     expect(実装).toContain('followOnAppend: true')
-    expect(実装).toContain('scrollEndThreshold: END_THRESHOLD')
+
+    /*
+      **閾値は定数の直書きから、抑制の有無で算出する形へ変わった**（項目10の手当て）。
+      押している間だけ負にして錨を黙らせるためで、**追従そのものは殺していない**。
+
+      ここで見るのは2つ。**`END_THRESHOLD` を土台にしていること**（別の値へ
+      すり替えられていない）と、**算出を `lib/tailAnchor.ts` に任せていること**
+      （抑制が下りれば必ず元へ戻る、を純関数側のテストが見張れる形になっている）。
+
+      **直書きへ戻すと、押したときの飛びが再発する。** その番人は
+      `e2e/transcript.spec.ts` の2本（実装を外すと 7013 → 9962 で赤くなる）。
+    */
+    expect(実装).toContain('resolveEndThreshold(anchorSuppressed, END_THRESHOLD)')
+    expect(実装).toContain("from '@/lib/tailAnchor'")
   })
 
 })
