@@ -1062,51 +1062,141 @@ async fn サブのフックは数だけを動かす() {
     assert_eq!(session.meta().subagent_active, 0);
     assert_eq!(session.status(), SessionStatus::WaitingInput);
 }
+/// 一覧を1回描いて、間引きを越えたところで1回だけ見張らせる。
+///
+/// **`tree` はその場で上書きする**ので、同じ文字列を渡せば画面は変わらない——本物の
+/// TUI と同じ形で「時計が進んだか」を作り分けられる（`paint` は積むので使えない）。
+macro_rules! 一覧を描いて見張る {
+    ($server:expr, $session:expr, $spec:expr) => {{
+        $session
+            .send_instruction(concat!("tree ", $spec))
+            .await
+            .expect("一覧を描かせる");
+        // **印を待たない。** 同じ印が何度も出るので、`wait_for` は前の回のものに当たって
+        // **描き終える前に先へ進む**（実測：2枚目が画面に載る前に見張ってしまった）
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        $server.manager.sweep_once();
+    }};
+}
 
-/// **画面のフッタにサブエージェントの一覧が出ていれば、入力待ちからサブ待ちへ移る**
-/// （設計§14 読み替え）。
+/// 見張りの間引き（5秒）を越える。
+async fn 間引きを越える() {
+    tokio::time::sleep(std::time::Duration::from_millis(5100)).await;
+}
+
+/// **一覧の時計が進んでいれば、入力待ちからサブ待ちへ移る**（設計§14-13）。
 ///
-/// # なぜフックの本数では足りないのか
+/// # なぜ「一覧が出ているか」では足りないのか
 ///
-/// `subagent_active` は**サブが生きているうちに 0 へ戻る**。実機のログで、`sub=1` で
-/// 立ったサブ待ちが2分後に `sub=0` へ戻り、そのときサブはまだ走っていた。数だけを
-/// 根拠にすると、**待ちが長いときに限って「入力待ち」に見える**——利用者が踏んだのは
-/// この形である。
+/// **終わったサブエージェントも一覧に残る。** 利用者が実機で踏んだのはこの形で、
+/// セッション自身が「フォークは2体とも完了した」と言っている画面に、一覧は2行とも
+/// 残っていた。在ることを根拠にすると、**サブ待ちのまま二度と解けない。**
 ///
-/// そこで**停滞判定と同じ画面読みの土台**（`session::activity`）を使い、CLI がフッタへ
-/// 描く**走っているサブエージェントの一覧**を材料にする。ここで確かめるのは、
-/// リング → 描画 → 判定 → 状態 → 配信という一式が繋がっていること。
-/// **行の形そのものは単体テストが持っている。**
+/// 実測（2026-09-07・24秒を3回）：走っている行の経過時間は `38s → 50s → 1m 2s` と
+/// 進み、終わっている行は `1h 1m 20s` のまま動かなかった。**生バイトで並べても、
+/// 終わった行と走っている行に差は無い。**
+///
+/// フックの本数（`subagent_active`）も当てにできない——**サブが生きているうちに 0 へ
+/// 戻る**（設計§14-7）。だから画面を見るのだが、**画面も1枚では決まらない。**
 #[tokio::test]
-async fn 画面にサブの一覧が出ていれば入力待ちからサブ待ちへ移る() {
+async fn 一覧の時計が進めば入力待ちからサブ待ちへ移る() {
     let server = common::TestServer::start().await;
-    let (session, _watcher) = common::start_session(&server.manager).await;
+    let (session, mut watcher) = common::start_session(&server.manager).await;
 
-    // 数は 0 のままターンが終わる＝いまの実機で起きている形
     server.post_hook(session.token(), "Stop", "{}").await;
     common::wait_for_status(&session, SessionStatus::WaitingInput).await;
-    assert_eq!(session.meta().subagent_active, 0);
+    assert_eq!(session.meta().subagent_active, 0, "数は 0 のまま");
 
-    // 実機のカードから採った、フッタの一覧の行をそのまま画面へ出す。
-    // **打鍵のエコー側（`paint ` で始まる行）は判定に掛からない**
-    session
-        .send_instruction("paint ◯ fork  Verifying version path      13m 59s · ↓ 775.3k tokens")
-        .await
-        .expect("一覧の行を描かせる");
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    // 1枚目。比べる相手が無いので、ここではまだ動かない
+    一覧を描いて見張る!(server, session, "● main|◯ fork  調べもの      1s");
+    assert_eq!(
+        session.status(),
+        SessionStatus::WaitingInput,
+        "1枚目では、止まっているのか走っているのか分からない"
+    );
 
-    server.manager.sweep_once();
+    // 2枚目。時計が進んだので走っている
+    間引きを越える().await;
+    一覧を描いて見張る!(server, session, "● main|◯ fork  調べもの      6s");
     assert_eq!(
         session.status(),
         SessionStatus::WaitingSubagents,
-        "画面が待っていると言っているのだから、入力待ちではない"
+        "時計が進んだのだから走っている"
+    );
+}
+
+/// **終わった一覧が残っていても、サブ待ちにしない**（設計§14-13・今回の不具合）。
+///
+/// **この対照が無いと、「一覧が在れば待ち」と読む実装でも上のテストは緑になる。**
+/// 利用者が踏んだのはまさにこれで、完了済みのフォーク2体が一覧に残ったまま、カードが
+/// サブ待ちで張り付いていた。
+#[tokio::test]
+async fn 終わった一覧が残っていてもサブ待ちにしない() {
+    let server = common::TestServer::start().await;
+    let (session, mut watcher) = common::start_session(&server.manager).await;
+
+    server.post_hook(session.token(), "Stop", "{}").await;
+    common::wait_for_status(&session, SessionStatus::WaitingInput).await;
+
+    // まったく同じ一覧を描き直す＝時計が止まっている
+    for _ in 0..3 {
+        一覧を描いて見張る!(server, session, "● main|◯ fork  終わった仕事  1h 1m 20s");
+        assert_eq!(
+            session.status(),
+            SessionStatus::WaitingInput,
+            "時計が止まっているのだから走っていない"
+        );
+        間引きを越える().await;
+    }
+}
+
+/// **記号は根と子を区別しない**（設計§14-13・実機で覆った）。
+///
+/// 実機では `◯ main` ／ `● fork` という並びが出る。`◯` を子の印だと読むと、
+/// **メインの行だけで「サブが居る」と答えてしまう。**
+#[tokio::test]
+async fn 記号が逆に付いていても読み違えない() {
+    let server = common::TestServer::start().await;
+    let (session, mut watcher) = common::start_session(&server.manager).await;
+
+    server.post_hook(session.token(), "Stop", "{}").await;
+    common::wait_for_status(&session, SessionStatus::WaitingInput).await;
+
+    // 根が `◯`、子が `●`。時計が進むので、これは走っている
+    一覧を描いて見張る!(server, session, "◯ main|● fork  調べもの      1s");
+    間引きを越える().await;
+    一覧を描いて見張る!(server, session, "◯ main|● fork  調べもの      6s");
+    assert_eq!(
+        session.status(),
+        SessionStatus::WaitingSubagents,
+        "記号が逆でも、子は子である"
+    );
+}
+
+/// **根の行しか無ければ、何度描いてもサブ待ちにならない。**
+///
+/// `◯ main` は `◯` で始まるので、記号だけで選ぶと拾ってしまう。
+#[tokio::test]
+async fn 根の行だけではサブ待ちにならない() {
+    let server = common::TestServer::start().await;
+    let (session, mut watcher) = common::start_session(&server.manager).await;
+
+    server.post_hook(session.token(), "Stop", "{}").await;
+    common::wait_for_status(&session, SessionStatus::WaitingInput).await;
+
+    一覧を描いて見張る!(server, session, "◯ main");
+    間引きを越える().await;
+    一覧を描いて見張る!(server, session, "● main");
+    assert_eq!(
+        session.status(),
+        SessionStatus::WaitingInput,
+        "連れているものが1つも無い"
     );
 }
 
 /// **画面から一覧が消えれば、サブ待ちから戻る**（設計§14 読み替え）。
 ///
 /// **この対照が無いと、「一度サブ待ちにしたら戻らない」実装でも上のテストは緑になる。**
-/// `SubagentStop` を出口から外した以上、**戻る道はここしかない。**
 #[tokio::test]
 async fn 画面から一覧が消えればサブ待ちから戻る() {
     let server = common::TestServer::start().await;
@@ -1115,68 +1205,65 @@ async fn 画面から一覧が消えればサブ待ちから戻る() {
     server.post_hook(session.token(), "Stop", "{}").await;
     common::wait_for_status(&session, SessionStatus::WaitingInput).await;
 
-    session
-        .send_instruction("paint ◯ fork  Verifying version path      13m 59s · ↓ 775.3k tokens")
-        .await
-        .expect("一覧の行を描かせる");
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
-    server.manager.sweep_once();
+    一覧を描いて見張る!(server, session, "● main|◯ fork  調べもの      1s");
+    間引きを越える().await;
+    一覧を描いて見張る!(server, session, "● main|◯ fork  調べもの      6s");
     assert_eq!(session.status(), SessionStatus::WaitingSubagents);
 
-    // サブが終わって画面が流れた。**一覧を押し出すのに十分な量**を出す
-    session
-        .send_instruction("flood 8192")
-        .await
-        .expect("画面を流させる");
-    watcher
-        .wait_for(testkit::fake_claude::FLOOD_END_MARKER)
-        .await;
-
-    // **5秒より短い間隔では見に行かない**（間引きの検査を兼ねる）
-    for _ in 0..5 {
-        server.manager.sweep_once();
-    }
+    // 一覧が消えた。**1回消えて見えただけでは動かさない**（設計§14-12）
+    間引きを越える().await;
+    一覧を描いて見張る!(server, session, "なにも無い");
     assert_eq!(
         session.status(),
         SessionStatus::WaitingSubagents,
-        "5秒より短い間隔では画面を見に行かない"
+        "1回目は描き直しの隙間かもしれない"
     );
 
-    // **1回消えて見えただけでは動かない**（設計§14 読み替え5）。描き直しの隙間かも
-    // しれないので、続けて2回見えないことを求める
-    tokio::time::sleep(std::time::Duration::from_millis(5100)).await;
+    間引きを越える().await;
+    一覧を描いて見張る!(server, session, "まだ何も無い");
+    assert_eq!(
+        session.status(),
+        SessionStatus::WaitingInput,
+        "続けて2回消えたので入力待ちへ戻る"
+    );
+}
+
+/// **端末が黙ったら、サブ待ちから戻る**（設計§14-13）。
+///
+/// 走っているサブは一覧の時計を毎秒進めるので、**1バイトも出ないなら1本も走っていない**。
+/// ここを「読み飛ばす」で済ませていたため、**終わった一覧が残ったまま端末が黙ると
+/// サブ待ちのまま二度と解けなかった**（利用者が実機で踏んだ）。
+#[tokio::test]
+async fn 端末が黙ればサブ待ちから戻る() {
+    let server = common::TestServer::start().await;
+    let (session, mut watcher) = common::start_session(&server.manager).await;
+
+    server.post_hook(session.token(), "Stop", "{}").await;
+    common::wait_for_status(&session, SessionStatus::WaitingInput).await;
+
+    一覧を描いて見張る!(server, session, "● main|◯ fork  調べもの      1s");
+    間引きを越える().await;
+    一覧を描いて見張る!(server, session, "● main|◯ fork  調べもの      6s");
+    assert_eq!(session.status(), SessionStatus::WaitingSubagents);
+
+    // 以後、端末へ1バイトも出さない
+    間引きを越える().await;
     server.manager.sweep_once();
-    assert_eq!(
-        session.status(),
-        SessionStatus::WaitingSubagents,
-        "1回目は描き直しの隙間かもしれないので動かさない"
-    );
-
-    tokio::time::sleep(std::time::Duration::from_millis(5100)).await;
-    session
-        .send_instruction("paint ふたたび画面を動かす")
-        .await
-        .expect("端末の目印を進める");
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    間引きを越える().await;
     server.manager.sweep_once();
     assert_eq!(
         session.status(),
         SessionStatus::WaitingInput,
-        "一覧が消えたので入力待ちへ戻る"
+        "時計が進んでいないのだから、走っているサブは居ない"
     );
 }
 
-/// **末尾に一覧が入らなくなっても、サブ待ちへ移れること**（設計§14 読み替え3）。
+/// **末尾に一覧が残っていなくても読めること**（設計§14-10）。
 ///
-/// これが今回の不具合そのものである。判定していた画面は、リングバッファの末尾 64 KiB を
-/// まっさらな端末エミュレータへ流し直して組み立てたものだった。**claude の TUI は変わった
-/// 行しか描き直さない**ので、待ちが長引くと末尾にはスピナーの更新しか入らなくなる——
-/// **一覧はサブが立った瞬間に一度描かれたきり動かない**ものなので、窓の外へ落ちたまま
-/// 二度と現れない。実機では、一覧が画面に実在するのに **113 回続けて「出ていない」**と
-/// 答えていた（実物 1486 文字に対し、末尾から組み立てた画面は 149〜259 文字）。
-///
-/// **リングが小さいテストでは踏めない。** 末尾にも一覧が入ってしまうので、末尾から読む
-/// 実装のままでも緑になる。だから `overdraw` で**行を流さずに**末尾を埋める。
+/// 判定に食わせる画面は、リングバッファの**末尾だけ**を流し直して組み立てていた時期が
+/// ある。claude の TUI は変わった行しか描き直さないので、**一覧は窓の外へ落ちたまま
+/// 二度と現れない**。実機では、実物の画面が 1486 文字なのに末尾から組み立てた画面は
+/// 149〜259 文字で、113 回続けて外していた。
 #[tokio::test]
 async fn 末尾に一覧が残っていなくてもサブ待ちへ移る() {
     let server = common::TestServer::start().await;
@@ -1185,28 +1272,29 @@ async fn 末尾に一覧が残っていなくてもサブ待ちへ移る() {
     server.post_hook(session.token(), "Stop", "{}").await;
     common::wait_for_status(&session, SessionStatus::WaitingInput).await;
 
-    // 画面を埋めてから描く。**一覧を最下行へ置く**ためで、上書きの当たる行と離す
-    session
-        .send_instruction("flood 4096")
-        .await
-        .expect("画面を埋めさせる");
-    watcher
-        .wait_for(testkit::fake_claude::FLOOD_END_MARKER)
-        .await;
-    // **描くところまで1つの指示でやる。** 描いたあとに指示を送ると打鍵のエコーが
-    // 一覧の下に載り、画面のいちばん下の塊が一覧でなくなる。そのあと、一覧を
-    // 描き直さない更新だけで末尾を埋める——ここを通ったあと、末尾 64 KiB に一覧は
+    一覧を描いて見張る!(server, session, "● main|◯ fork  調べもの      1s");
+
+    // **一覧を描いたあとで末尾を埋める。** ここを通ったあと、末尾 64 KiB に一覧は
     // 1バイトも入っていない
     session
-        .send_instruction(
-            "overdraw 131072 ◯ fork  Verifying version path      13m 59s · ↓ 775.3k tokens",
-        )
+        .send_instruction("overdraw 131072")
         .await
-        .expect("一覧を描かせてから、フッタを残したまま画面を流させる");
+        .expect("一覧を残したまま画面を流させる");
     watcher
         .wait_for(testkit::fake_claude::OVERDRAW_END_MARKER)
         .await;
 
+    間引きを越える().await;
+    一覧を描いて見張る!(server, session, "● main|◯ fork  調べもの      6s");
+    session
+        .send_instruction("overdraw 131072")
+        .await
+        .expect("もう一度、末尾から追い出す");
+    watcher
+        .wait_for(testkit::fake_claude::OVERDRAW_END_MARKER)
+        .await;
+
+    間引きを越える().await;
     server.manager.sweep_once();
     assert_eq!(
         session.status(),
@@ -1215,102 +1303,37 @@ async fn 末尾に一覧が残っていなくてもサブ待ちへ移る() {
     );
 }
 
-/// **描き直しの隙間で、走っているカードを入力待ちへ落とさないこと**（設計§14 読み替え5）。
-///
-/// claude の TUI は、メインが走り出すときに**一覧を消してからスピナーを描く**。その
-/// あいだの1回だけ「一覧も無い・スピナーも無い」に見えるので、そこで倒すと**走って
-/// いるカードが「終わった」側に見える**。実機のログでは、入力待ちへ戻した9件のうち
-/// 1件がこれで、その6秒後にはスピナーが出ていた（2026-09-06）。
-///
-/// **これは軽いほうへ倒す仕掛けが破れていた形である。** 入らないぶんには害が小さいが、
-/// 走っているのに終わったように見えるのは重い。
-#[tokio::test]
-async fn 一覧が一度消えて見えただけでは入力待ちへ落とさない() {
-    let server = common::TestServer::start().await;
-    let (session, _watcher) = common::start_session(&server.manager).await;
-
-    server.post_hook(session.token(), "Stop", "{}").await;
-    common::wait_for_status(&session, SessionStatus::WaitingInput).await;
-
-    session
-        .send_instruction(
-            "overdraw 0 ◯ fork  Verifying version path      13m 59s · ↓ 775.3k tokens",
-        )
-        .await
-        .expect("一覧を描かせる");
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
-    server.manager.sweep_once();
-    assert_eq!(session.status(), SessionStatus::WaitingSubagents);
-
-    // 一覧の下に1行出る＝いちばん下の塊が一覧でなくなる（描き直しの隙間と同じ形）
-    tokio::time::sleep(std::time::Duration::from_millis(5100)).await;
-    session
-        .send_instruction("paint 隙間")
-        .await
-        .expect("一覧を隠す");
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    server.manager.sweep_once();
-    assert_eq!(
-        session.status(),
-        SessionStatus::WaitingSubagents,
-        "1回では動かさない"
-    );
-
-    // 隙間が埋まって一覧が戻れば、数え直しになる
-    tokio::time::sleep(std::time::Duration::from_millis(5100)).await;
-    session
-        .send_instruction(
-            "overdraw 0 ◯ fork  Verifying version path      13m 59s · ↓ 775.3k tokens",
-        )
-        .await
-        .expect("一覧を描き直させる");
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    server.manager.sweep_once();
-    assert_eq!(
-        session.status(),
-        SessionStatus::WaitingSubagents,
-        "一覧が戻ったのだからサブ待ちのまま"
-    );
-}
-
-/// **作業中からもサブ待ちへ移れること**（設計§14 読み替え4）。
+/// **作業中からもサブ待ちへ移れること**（設計§14-11）。
 ///
 /// サブのツールコールもメインと同じフックを飛ばすので、ターンが終わった直後にサブが
 /// 一手打つと作業中へ落ちる。**フックには叩いたのがどちらか分からない**が、画面には
-/// 分かる——メインが走っていればスピナーが出る。実機ではこの形で、誰もキーボードの前に
-/// 居ないのに「作業中」に見え続けていた（120秒の無音で停滞へ落ちては画面判定で
-/// 入力待ちへ救出される、を14回繰り返していた）。
+/// 分かる——メインが走っていればスピナーが出る。
 #[tokio::test]
 async fn 作業中でもスピナーが無ければサブ待ちへ移る() {
     let server = common::TestServer::start().await;
-    let (session, _watcher) = common::start_session(&server.manager).await;
+    let (session, mut watcher) = common::start_session(&server.manager).await;
 
-    // サブがツールを叩いた形。フックはメインと見分けが付かない
     server.post_hook(session.token(), "PreToolUse", "{}").await;
     common::wait_for_status(&session, SessionStatus::Working).await;
 
-    session
-        .send_instruction("paint ◯ fork  Verifying version path      13m 59s · ↓ 775.3k tokens")
-        .await
-        .expect("一覧の行を描かせる");
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
-
-    server.manager.sweep_once();
+    一覧を描いて見張る!(server, session, "● main|◯ fork  調べもの      1s");
+    間引きを越える().await;
+    一覧を描いて見張る!(server, session, "● main|◯ fork  調べもの      6s");
     assert_eq!(
         session.status(),
         SessionStatus::WaitingSubagents,
-        "手が空いていて一覧が出ているのだから、作業中ではない"
+        "手が空いていて一覧が動いているのだから、作業中ではない"
     );
 }
 
 /// **メインが走っているうちは動かさないこと。**
 ///
 /// 「作業中からも入る」の唯一の歯止めなので、これが外れると走っているカードが
-/// サブ待ちに見える。**この対照が無いと、無条件に移す実装でも上のテストは緑になる。**
+/// サブ待ちに見える。
 #[tokio::test]
 async fn メインが走っていれば作業中のまま動かない() {
     let server = common::TestServer::start().await;
-    let (session, _watcher) = common::start_session(&server.manager).await;
+    let (session, mut watcher) = common::start_session(&server.manager).await;
 
     server.post_hook(session.token(), "PreToolUse", "{}").await;
     common::wait_for_status(&session, SessionStatus::Working).await;
@@ -1320,16 +1343,9 @@ async fn メインが走っていれば作業中のまま動かない() {
         .send_instruction("paint ✽ Ebbing… (2m 10s · ↓ 543 tokens · thinking)")
         .await
         .expect("走っている印を描かせる");
-    // 一覧は**いちばん下**に要るので、打鍵のエコーが下に載らない口で描く
-    session
-        .send_instruction(
-            "overdraw 0 ◯ fork  Verifying version path      13m 59s · ↓ 775.3k tokens",
-        )
-        .await
-        .expect("一覧の行を描かせる");
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
-
-    server.manager.sweep_once();
+    一覧を描いて見張る!(server, session, "● main|◯ fork  調べもの      1s");
+    間引きを越える().await;
+    一覧を描いて見張る!(server, session, "● main|◯ fork  調べもの      6s");
     assert_eq!(
         session.status(),
         SessionStatus::Working,

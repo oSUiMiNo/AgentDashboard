@@ -24,6 +24,11 @@ pub const FLOOD_END_MARKER: &str = "[fake-claude] flood-end";
 /// **行を流さずに置く**ので、画面の下に出ている一覧は押し出されない。読み手は生の
 /// バイト列を走査するだけなので、位置決めして書いても見つけられる。
 pub const OVERDRAW_END_MARKER: &str = "[fake-claude] overdraw-end";
+
+/// [`tree_block`] が描き終えた印。
+///
+/// **行を流さずに置く**ので、いちばん下に描いた一覧は押し出されない。
+pub const TREE_END_MARKER: &str = "[fake-claude] tree-end";
 /// `hook` がフックコマンドを実行し終えたことを示す行頭。
 ///
 /// 実行が終わってから出すので、テストはこれを待てば「ダッシュボード側が受け取り終えた」と

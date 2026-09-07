@@ -50,7 +50,7 @@ use testkit::fake_claude::{
     HOOK_SENT_PREFIX, JSONL_APPENDED_PREFIX, JSONL_FAILED_PREFIX, MODEL_SET_PREFIX,
     MODEL_SWITCH_NOTICE, MODEL_SWITCH_OPTIONS, OVERDRAW_END_MARKER, QUEUED_PREFIX, READY_MARKER,
     RECEIVED_PREFIX, REPLIED_PREFIX, RESIZED_PREFIX, SAID_PREFIX, STATUS_LINE_SENT_PREFIX,
-    footer_for, physical_lines, render_dialog, resolve_model,
+    TREE_END_MARKER, footer_for, physical_lines, render_dialog, resolve_model,
 };
 
 /// 起動時に受け取った、フック実行に必要な情報。
@@ -489,6 +489,11 @@ fn main() {
 
         if let Some(size) = line.strip_prefix("flood ") {
             flood(&mut out, size.trim().parse::<usize>().unwrap_or(0));
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix("tree ") {
+            tree_block(&mut out, rest.trim_end());
             continue;
         }
 
@@ -1057,6 +1062,34 @@ fn dump(out: &mut impl Write) {
 }
 
 /// 指定バイト数をまとめて吐く。フロー制御と大量出力の検証用。
+/// **画面のいちばん下へ、その場で一覧を描き直す**（設計§14-13 の再現）。
+///
+/// 本物の TUI はフッタを**同じ場所に上書きする**ので、行が増えない。`paint` のように
+/// 積んでいくと、**同じ一覧をもう一度描いただけで画面が変わってしまう**——「時計が
+/// 進んだか」を見る判定は、それでは確かめられない。
+///
+/// 行は `|` で区切る。**改行は行間にしか出さない**ので、いちばん下の行を書いても
+/// 画面は流れない。
+fn tree_block(out: &mut impl Write, spec: &str) {
+    let lines: Vec<&str> = spec.split('|').map(str::trim_end).collect();
+    let mut buf = String::from("\x1b7\x1b[999;1H");
+    if lines.len() > 1 {
+        buf.push_str(&format!("\x1b[{}A", lines.len() - 1));
+    }
+    buf.push_str("\x1b[J");
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            buf.push_str("\r\n");
+        }
+        buf.push_str(line);
+    }
+    buf.push_str("\x1b8");
+    let _ = out.write_all(buf.as_bytes());
+    // 印も位置を決めて置く（改行を出すと一覧が流れてしまう）
+    let _ = write!(out, "\x1b7\x1b[2;1H{TREE_END_MARKER}\x1b8");
+    let _ = out.flush();
+}
+
 /// **フッタを描き直さずに画面だけを動かす**（設計§14 読み替え3 の再現）。
 ///
 /// 本物の TUI は**変わった行しか描き直さない**ので、待ちが長引くほど端末の末尾には
