@@ -17,6 +17,7 @@ import { Composer } from './Composer'
 import { anyComposerBusy } from '@/lib/composerBusy'
 import type { CardId } from '@/lib/protocol'
 import * as hostfs from '@/lib/hostfs'
+import * as terminalBridge from '@/lib/terminalBridge'
 import * as sessions from '@/stores/sessions'
 import { clearSessions, setCardError } from '@/stores/sessions'
 import { useWsStore } from '@/stores/ws'
@@ -530,5 +531,101 @@ describe('断られたら戻す', () => {
       ).toBe('消えないこと'),
     )
     expect(screen.queryByTestId('composer-trouble')).toBeNull()
+  })
+})
+
+/**
+ * 送った直後の `↑`（取り消し 設計§3）。
+ *
+ * ここで見るのは**行き先の切り分け**である——「端末へ回す」と「入力欄の行移動に任せる」の
+ * どちらになるか。**壊し方を先に置いてある**（`T-1-c` と `T-1-d`）——ここが通らないと、
+ * 複数行を書いている人が行を上へ移動できなくなる。
+ */
+describe('送った直後の ↑', () => {
+  let 端末へ: ReturnType<typeof vi.fn>
+
+  beforeEach(() => {
+    端末へ = vi.fn()
+    vi.spyOn(terminalBridge, 'sendTerminalKey').mockImplementation(端末へ)
+  })
+
+  async function 送る(text = 'とりけしたい') {
+    置く()
+    fireEvent.change(screen.getByTestId('composer-input'), {
+      target: { value: text },
+    })
+    fireEvent.submit(screen.getByTestId('composer'))
+    await waitFor(() => expect(sendInput).toHaveBeenCalled())
+  }
+
+  /** `fireEvent` は既定が止められると偽を返す。**それが `preventDefault` の観測点**である */
+  function 上を押す(init: Record<string, unknown> = {}) {
+    return fireEvent.keyDown(screen.getByTestId('composer-input'), {
+      key: 'ArrowUp',
+      ...init,
+    })
+  }
+
+  it('控えが生きていて入力欄が空なら、端末へ回して既定を止める', async () => {
+    await 送る()
+    expect(上を押す()).toBe(false)
+    expect(端末へ).toHaveBeenCalledWith(CARD, 'up')
+  })
+
+  it('まだ何も送っていなければ、端末へ回さない', () => {
+    置く()
+    expect(上を押す()).toBe(true)
+    expect(端末へ).not.toHaveBeenCalled()
+  })
+
+  it('入力欄に字があれば、端末へ回さない（行移動を優先）', async () => {
+    await 送る()
+    fireEvent.change(screen.getByTestId('composer-input'), {
+      target: { value: '打ち直している途中' },
+    })
+    expect(上を押す()).toBe(true)
+    expect(端末へ).not.toHaveBeenCalled()
+  })
+
+  it('添付が付いていれば、端末へ回さない（同上）', async () => {
+    置けたことにする()
+    await 送る()
+    await 選ぶ([画像()])
+    expect(上を押す()).toBe(true)
+    expect(端末へ).not.toHaveBeenCalled()
+  })
+
+  it('変換中の ↑ は奪わない', async () => {
+    await 送る()
+    // IME の候補を上下で選んでいる最中に奪うと、変換そのものができなくなる
+    expect(上を押す({ isComposing: true })).toBe(true)
+    expect(端末へ).not.toHaveBeenCalled()
+  })
+
+  it('修飾キーが付いた ↑ は奪わない', async () => {
+    await 送る()
+    expect(上を押す({ shiftKey: true })).toBe(true)
+    expect(端末へ).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * 端末の受け口が無いカードで壊れないこと（テスト計画 T-2）。
+ *
+ * **本物の `sendTerminalKey` を通す。** 受け口の無いカードへの依頼を捨てるのは
+ * あちらの性質なので、こちらで受け口の有無を見ないという判断が正しいかは、
+ * **模型を差し込まずに通して初めて確かめられる**。
+ */
+describe('端末が居なくても壊れない', () => {
+  it('受け口の無いカードで ↑ を押しても、例外を出さずに黙って何もしない', async () => {
+    置く()
+    fireEvent.change(screen.getByTestId('composer-input'), {
+      target: { value: 'あ' },
+    })
+    fireEvent.submit(screen.getByTestId('composer'))
+    await waitFor(() => expect(sendInput).toHaveBeenCalled())
+    expect(() =>
+      fireEvent.keyDown(screen.getByTestId('composer-input'), { key: 'ArrowUp' }),
+    ).not.toThrow()
   })
 })

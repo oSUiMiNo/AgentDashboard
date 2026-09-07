@@ -84,6 +84,7 @@ import { uploadAttachment } from '@/lib/hostfs'
 import { isComposerSubmit } from '@/lib/keys'
 import { isEnded, type SessionStatus } from '@/lib/protocol'
 import type { CardId } from '@/lib/protocol'
+import { sendTerminalKey } from '@/lib/terminalBridge'
 import { useAuthStore } from '@/stores/auth'
 import { clearCardNotices, pushCardNotice, useCardError } from '@/stores/sessions'
 import { useWsStore } from '@/stores/ws'
@@ -516,6 +517,35 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
             受け取る(files)
           }}
           onKeyDown={(event) => {
+            // 送った直後の取り消し。**焦点を移さずに端末へ `↑` を回す**（取り消し 設計§3）。
+            // これが無いと、ターミナルを一度クリックしてからでないと取り消せない——
+            // 文を書いている時点で焦点はこの入力欄に在るので、毎回その手間が挟まる。
+            //
+            // **常時は回さない。** 回すと、複数行を書いているときに行を上へ移動できなくなる。
+            // 回すのは次が揃ったときだけ：
+            //   - **控えが生きている**……戻す中身が無いなら、取り消しても何も戻らない
+            //   - **入力欄が空**……打ち直しを始めているなら、そちらのほうが新しい
+            // 2つ目は断りによる復元と同じ判断で、**新しい規則は増やしていない**。
+            //
+            // **変換中は触らない。** IME の候補を上下で選んでいる最中に奪うと、
+            // 変換そのものができなくなる。**修飾キー付きも通す**——素の `↑` だけを見る。
+            if (
+              event.key === 'ArrowUp' &&
+              !event.ctrlKey &&
+              !event.altKey &&
+              !event.metaKey &&
+              !event.shiftKey &&
+              !event.nativeEvent.isComposing &&
+              控え中.current !== null &&
+              text === '' &&
+              attachments.length === 0
+            ) {
+              event.preventDefault()
+              // 端末の受け口が無いカードでは、`sendTerminalKey` が黙って捨てる。
+              // **こちらで受け口の有無を見ない**——判定を2箇所に持つと必ず食い違う
+              sendTerminalKey(cardId, 'up')
+              return
+            }
             // 送信でないキーは何もせず通す。素の Enter は textarea の既定が改行にする
             // （`<form>` の中でも textarea の Enter は submit を起こさない）
             if (
