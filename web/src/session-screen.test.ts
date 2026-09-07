@@ -21,6 +21,8 @@ const SESSION = 読む('components/SessionView/SessionView.tsx')
 const TERMINAL = 読む('components/TerminalPane/TerminalPane.tsx')
 const TREE = 読む('components/TranscriptTree/TranscriptTree.tsx')
 const ROW = 読む('components/TranscriptTree/TranscriptRow.tsx')
+/** `DESIGN.md` はリポジトリの根に在る（`web/` からは1つ上） */
+const DESIGN = readFileSync(resolve(process.cwd(), '..', 'DESIGN.md'), 'utf8')
 
 describe('吹き出しの横幅（§5-1）', () => {
   it('下限があり、上限と同じ土俵で書いてある', () => {
@@ -401,5 +403,95 @@ describe('操作列（§5-5）', () => {
 
   it('電源を大きくしていない', () => {
     expect(CONTROLS).toContain('inline-size: 1.75rem')
+  })
+})
+
+describe('区画のあいだの仕切り線（項目4・`DESIGN.md`「区画のあいだの仕切り線」）', () => {
+  /** 線を引く規則の中身。**素**（コメントを落としたもの）から採る */
+  const 線の規則 = () => {
+    const m =
+      /section\[data-reorder-kind='section'\] ~ section\[data-reorder-kind='section'\]::before \{([\s\S]*?)\n\}/.exec(
+        INDEX,
+      )
+    expect(m, '仕切り線の規則が見つからない').not.toBeNull()
+    return m![1]
+  }
+
+  it('平らな区間の濃さが、床（既存の中立の境界色）を下回っていない', () => {
+    // **起点をそのまま床にする**ので、ゼロへ落ちる形が構造的に作れない。
+    // 台形の「平らな区間」＝グラデーションの中間2つの停止点である
+    const 中身 = 線の規則()
+    expect(中身).toMatch(/var\(--border\)\s+var\(--rail-divider-fade\)/)
+    expect(中身).toMatch(/var\(--border\)\s+calc\(100% - var\(--rail-divider-fade\)\)/)
+  })
+
+  it('平らな区間の濃さが、天井を上回っていない', () => {
+    // **床だけを見張ると、濃くなりすぎる向きの壊れ方が素通りする。**
+    // 色を直書きせず `--border` だけを使っていれば、天井（白の15%）は自動的に満たされる
+    const 中身 = 線の規則()
+    expect(中身, '色を直書きしている').not.toMatch(/oklch\(|rgba?\(|#[0-9a-fA-F]{3,8}\b/)
+  })
+
+  it('先頭の判定が `:not(:first-child)` で書かれていない', () => {
+    // レールには**区画以外の兄弟**（ファイルの列・並べ替え失敗の知らせ・
+    // 「セッションはありません」の1行）が混ざる。素朴に「最初の子でなければ出す」と
+    // 書くと、**区画が1本しか無いのに線が出る**
+    // **セレクタそのものを見る。** 「見つからなければ素通り」という書き方にすると、
+    // 実装が `:not(:first-child)` へ変わったときに**当たりが消えて緑のまま**になる
+    expect(INDEX, '区画の選び方に :first-child が混ざっている').not.toMatch(
+      /data-reorder-kind='section'[^{]*:first-child/,
+    )
+  })
+
+  it('アクセント色を使っていない', () => {
+    // 「必達要素と最低数（Floor）」が「アクセント色が**細い線**と小バッジにしか
+    // 出ていない」を**不合格例として名指ししている**
+    const 中身 = 線の規則()
+    expect(中身).not.toMatch(/cyan|--primary|--accent/)
+  })
+
+  it('先頭の区画には線が出ない（区画そのものを名指しした一般兄弟結合子）', () => {
+    // 「**前に区画がある区画**」だけを選ぶ。前に何本の非区画があっても関係しない。
+    // **1本のときも0本のときも自動で満たされる**
+    expect(INDEX).toContain(
+      "section[data-reorder-kind='section'] ~ section[data-reorder-kind='section']::before",
+    )
+  })
+
+  it('線が隙間の中央に立つ（区画の縁に貼り付いていない）', () => {
+    // 隙間は 16px（レールの `gap-4`）。中央は区画の左端から 8px 左なので、
+    // **`0` や `-1px` なら縁に貼り付いている**
+    const 中身 = 線の規則()
+    const left = /left:\s*(-?[\d.]+)px/.exec(中身)
+    expect(left, '`left` が px で書かれていない').not.toBeNull()
+    expect(Number(left![1])).toBeLessThan(-6)
+    expect(Number(left![1])).toBeGreaterThan(-10)
+  })
+
+  it('掴んでいる区画の線が消える', () => {
+    // 掴んだ区画は縮んで傾くので、線が付いていくと**境目ではなく装飾に見える**
+    const m =
+      /section\[data-reorder-kind='section'\]\[data-dragging='true'\]::before \{([\s\S]*?)\n\}/.exec(
+        INDEX,
+      )
+    expect(m, '掴んでいるときの規則が見つからない').not.toBeNull()
+    expect(m![1]).toMatch(/opacity:\s*0/)
+  })
+
+  it('溶ける区間が固定長で書かれている', () => {
+    // **割合だと区画の高さで平らな区間が動き、上の床の検査ができなくなる**
+    const m = /--rail-divider-fade:\s*([^;]+);/.exec(INDEX)
+    expect(m, '`--rail-divider-fade` が見つからない').not.toBeNull()
+    expect(m![1].trim()).toMatch(/^\d+(\.\d+)?px$/)
+  })
+
+  it('`DESIGN.md` に天井と床の両方が書かれている', () => {
+    // **抑制だけ書くと実装はゼロへ落ちる**（色が丸ごと抜けた前例がある）。
+    // 節は**見出し文**で探す——`## 40` の中に `40.x` と `42.x` が同居しており、
+    // 番号で指すと別の節に当たる
+    const 節 = /#### 40\.7 区画のあいだの仕切り線[\s\S]*?\n---\n/.exec(DESIGN)
+    expect(節, '仕切り線の節が見つからない').not.toBeNull()
+    expect(節![0], '床（白の10%）が書かれていない').toContain('10%')
+    expect(節![0], '天井（白の15%）が書かれていない').toContain('15%')
   })
 })
