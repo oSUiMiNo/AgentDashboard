@@ -89,6 +89,69 @@ export function machineShapeOf(text: string): MachineShape {
 }
 
 /**
+ * その本文が**丸ごと包みで構成されているか**。丸ごとなら型を、違えば `null`。
+ *
+ * # なぜ [`machineShapeOf`] と別に要るのか
+ *
+ * あちらは**既に機械と分かっている行**にしか当たらない——名乗りの欄で判定を済ませて
+ * から呼ぶので、`includes` で探して差し支えない。
+ *
+ * **待ち行列の行には、その欄が無い**（`queue-operation` のレコードが持つのは
+ * `content` / `operation` / `type` だけ）。本文で判定するしかないので、
+ * **人が包みを引用しただけの文を巻き込まない線**がここに要る。
+ *
+ * # 「丸ごと」で切る
+ *
+ * 全 PJT の `enqueue` 36,619件を数えた結果、**包みが文の途中に埋まっている例は0件**
+ * だった（丸ごと 36,621／混在 0／包み無しの素の文 1,598）。**機械が積むものは常に
+ * 包みだけ、人が打つものは常に包みを含まない**という形がはっきり出ている。
+ *
+ * したがって**前後に別の字が1文字でもあれば人の側へ倒す**。人が引用したものは
+ * 前後に必ず地の文が付くので、この線を越えられない。**これは設計§4（スラッシュ
+ * コマンドを、3つのタグだけで構成されているときにだけ解く）と同じ規律である。**
+ */
+export function wholeMachineShapeOf(text: string): MachineShape | null {
+  const trimmed = text.trim()
+  if (trimmed === '') {
+    return null
+  }
+  // 写しと断り書きは**閉じタグを持たない**（地の文の塊なので、先頭だけで決まる）
+  if (HISTORY_HEADS.some((head) => trimmed.startsWith(head))) {
+    return 'history'
+  }
+  if (trimmed.startsWith(STOP_HOOK_HEAD)) {
+    return 'stop_hook'
+  }
+  if (trimmed.startsWith('<local-command-caveat>')) {
+    return 'local_command_caveat'
+  }
+  // タグで囲まれるものは、**開いた本人で閉じていること**まで見る
+  if (wrapsWhole(trimmed, 'task-notification')) {
+    return 'task_notification'
+  }
+  if (wrapsWhole(trimmed, 'cross-session-message') || wrapsWhole(trimmed, 'agent-message')) {
+    return 'cross_session'
+  }
+  return null
+}
+
+/** その字が `<tag …>` で始まり `</tag>` で終わっているか。 */
+function wrapsWhole(trimmed: string, tag: string): boolean {
+  return new RegExp(`^<${tag}(?:\\s[^>]*)?>[\\s\\S]*</${tag}>$`).test(trimmed)
+}
+
+/**
+ * 他セッションからの連絡に書かれている**送り主の名前**。無ければ `null`。
+ *
+ * 名乗りの行に出す値で、**欄ではなく本文から取る**のは待ちの行に欄が無いためである。
+ */
+export function peerNameOf(text: string): string | null {
+  const found = /from-name="([^"]*)"/.exec(text)
+  const name = found?.[1]?.trim()
+  return name ? name : null
+}
+
+/**
  * 包みを剥がして、読める本文にする。
  *
  * **元の字を返す道を必ず残す**——型が見分けられなかった場合も、剥がした結果が

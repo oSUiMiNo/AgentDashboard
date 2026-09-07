@@ -742,20 +742,32 @@ function MarkdownBody({
   // ——`--bubble-ground` を1箇所で持つ約束（`index.css` の `.speech-bubble`）が、
   // 本体としっぽと中の面の全部を同時に動かす仕掛けである
   const queued = row?.node.kind === 'queued_message'
-  const queuedClass = queued ? ' speech-bubble-queued' : ''
+
+  // 人が打っていないものか（`人が打っていないものを、人の発言として出さない` 設計§6）。
+  //
+  // **判断は `messageOrigin.ts` の純関数が持つ。** ここで `?? 'unmarked'` を書かない
+  // ——既定への倒し込みが2箇所になる（設計§2-5）
+  //
+  // **待ちより先に決める。** 待ちの灰色は機械の地を上書きしうるので、順序が要る（下記）
+  const machine = row != null && isMachine(row.node)
+  const label = row != null && machine ? originLabel(originOf(row.node)) : ''
+
+  // **待ちの灰色は、人の行にだけ当てる**（設計§16-3）。
+  //
+  // あれは**青から作った色**で（`index.css` の「青を動かせば待機中も付いてくる」）、
+  // 機械の地を上書きすると**種別ごとの色が消えて灰色に戻る**。特異度でも
+  // `.speech-bubble.speech-bubble-queued` (0,2,0) が `.speech-bubble-machine` (0,1,0)
+  // に勝つので、**待ちの多数派である「差し込まれた文」が丸ごと灰色になっていた**。
+  //
+  // **機械の行から失うものは無い。** 待ちであることは名乗りの行が既に言っており、
+  // 灰色は「人が送ったがまだ読まれていない」を表すために作った色である
+  const queuedClass = queued && !machine ? ' speech-bubble-queued' : ''
 
   // 読まれる前に取り消された発言（設計§15）。**地は「待ち」と同じ**——どちらも
   // 「claude に読まれていない」の一言で説明できる状態なので、`DESIGN.md` §11.2 の
   // 判定に従って同じ色にする。**分けるのは形（打ち消し線）のほう**
   const cancelled = row != null && isCancelled(row.node)
   const cancelledClass = cancelled ? ' speech-bubble-cancelled' : ''
-
-  // 人が打っていないものか（`人が打っていないものを、人の発言として出さない` 設計§6）。
-  //
-  // **判断は `messageOrigin.ts` の純関数が持つ。** ここで `?? 'unmarked'` を書かない
-  // ——既定への倒し込みが2箇所になる（設計§2-5）
-  const machine = row != null && isMachine(row.node)
-  const label = row != null && machine ? originLabel(originOf(row.node)) : ''
 
   const inner = (
     <>

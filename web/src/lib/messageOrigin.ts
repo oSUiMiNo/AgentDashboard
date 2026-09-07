@@ -12,7 +12,7 @@
  * しきい値ではなく種別を渡す」としているのと同じ作法である。
  */
 
-import { formatMachineBody } from './machineMessage'
+import { formatMachineBody, peerNameOf, wholeMachineShapeOf } from './machineMessage'
 import type { MessageOrigin, Node } from './protocol'
 
 /**
@@ -26,13 +26,49 @@ export const MACHINE_FOLD_LINES = 10
 /**
  * その発言の名乗り。**欄が無ければ「名乗り無し」**（設計§2-2）。
  *
- * `user_message` 以外は名乗りを持たないので、いつも「名乗り無し」を返す。
+ * # 待ちの行は、本文から名乗りを起こす（設計§16）
+ *
+ * **設計§2-4 は「待ちの記録には名乗る材料が無い」として欄を足さなかった。**
+ * 欄については正しい——`queue-operation` のレコードが持つのは `content` /
+ * `operation` / `type` だけで、`origin` も `promptSource` も `isMeta` も無い。
+ *
+ * **だが本文そのものが名乗っていた。** 機械が積むものは常に包みだけで構成され、
+ * 人が打つものは包みを含まない（実測：混在0件）。だから[丸ごと包みか]
+ * (`wholeMachineShapeOf`)で切れる。
+ *
+ * **ここを直すと、左寄せ・色・畳み・包み剥がしが全部ついてくる**——下流はどれも
+ * [`isMachine`] を見ているので、**待ちだけ別の道を作らずに済む**。
  */
 export function originOf(node: Node): MessageOrigin {
+  if (node.kind === 'queued_message') {
+    return queuedOrigin(node.text)
+  }
   if (node.kind !== 'user_message') {
     return { kind: 'unmarked' }
   }
   return node.origin ?? { kind: 'unmarked' }
+}
+
+/**
+ * 待ちの行の名乗りを、本文の包みから起こす。
+ *
+ * **包みで構成されていなければ「名乗り無し」＝人の側へ倒す**（要件の最優先事項）。
+ * 人が待ち行列へ積んだ文は包みを持たないので、必ずこちらへ落ちる。
+ */
+function queuedOrigin(text: string): MessageOrigin {
+  switch (wholeMachineShapeOf(text)) {
+    case 'task_notification':
+      return { kind: 'task_notification' }
+    case 'cross_session':
+      return { kind: 'peer', name: peerNameOf(text) }
+    // 写し・フックの通知・断り書きは、どれも**機械が文脈のために差し込んだもの**
+    case 'history':
+    case 'stop_hook':
+    case 'local_command_caveat':
+      return { kind: 'injected' }
+    default:
+      return { kind: 'unmarked' }
+  }
 }
 
 /**
@@ -105,10 +141,11 @@ export function originLabel(origin: MessageOrigin): string {
  * 剥がす相手が出てくることは無い。
  */
 export function bodyTextOf(node: Node): string {
-  if (node.kind !== 'user_message') {
+  // **待ちも同じ道を通す**（設計§16）。機械が積んだものは包みを剥がしてから返す
+  if (node.kind !== 'user_message' && node.kind !== 'queued_message') {
     return 'text' in node ? node.text : ''
   }
-  if (node.command) {
+  if (node.kind === 'user_message' && node.command) {
     return node.command.expansion ?? ''
   }
   return isMachine(node) ? formatMachineBody(node.text) : node.text

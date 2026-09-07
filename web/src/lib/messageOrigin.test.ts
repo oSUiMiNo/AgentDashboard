@@ -163,3 +163,69 @@ describe('読まれる前の取り消し', () => {
     expect(isCancelled(node)).toBe(false)
   })
 })
+
+/**
+ * 待ち行列の行の読み分け（設計§16）。
+ *
+ * **待ちのレコードには名乗る欄が1つも無い**（`content` / `operation` / `type` だけ）。
+ * それでも**本文そのものが名乗っている**——機械が積むものは常に包みだけで構成され、
+ * 人が打つものは包みを含まない。全 PJT の `enqueue` 36,619件で**混在は0件**だった。
+ */
+describe('待ちの行の名乗り', () => {
+  const 待ち = (text: string): Node => ({ kind: 'queued_message', text, taken: false })
+
+  it('【落とせない】人が積んだ素の文は、人の側に残る', () => {
+    // **要件の最優先事項**。ここが反転すると、作業中に送った指示が機械の色になる
+    const node = 待ち('notes.md を Read で読み、Edit ツールで1行書き換えてください。')
+    expect(originOf(node)).toEqual({ kind: 'unmarked' })
+    expect(isMachine(node)).toBe(false)
+  })
+
+  it('【落とせない】包みを引用しただけの文は、人の側に残る', () => {
+    // 前後に地の文が付くので「丸ごと包み」の線を越えない（設計§4 と同じ規律）
+    const node = 待ち(
+      'これって何？ <task-notification><status>completed</status></task-notification> と出ています',
+    )
+    expect(isMachine(node)).toBe(false)
+  })
+
+  it('丸ごと包みなら、その種別で名乗る', () => {
+    expect(
+      originOf(待ち('<task-notification><status>completed</status></task-notification>')),
+    ).toEqual({ kind: 'task_notification' })
+    expect(originOf(待ち('## 直近の会話履歴（文脈把握用）\n[assistant] やります'))).toEqual({
+      kind: 'injected',
+    })
+    expect(originOf(待ち('Stop hook feedback:\n後処理を行ってください。'))).toEqual({
+      kind: 'injected',
+    })
+  })
+
+  it('他セッションからの連絡は、送り主の名前まで取る', () => {
+    const node = 待ち(
+      '<cross-session-message from="uds:/tmp/x.sock" from-name="a-54" from-mode="bypass">連絡です</cross-session-message>',
+    )
+    expect(originOf(node)).toEqual({ kind: 'peer', name: 'a-54' })
+    expect(originLabel(originOf(node))).toBe('他セッションから（a-54）')
+  })
+
+  it('閉じていない包みは、人の側へ倒れる', () => {
+    // **開いた本人で閉じていること**まで見る。壊れた字で機械側へ落とさない
+    expect(isMachine(待ち('<task-notification><status>completed</status>'))).toBe(false)
+  })
+
+  it('機械と読んだ待ちは、包みを剥がしてから本文にする', () => {
+    // **下流は `bodyTextOf` を通る**ので、畳む位置と見えている字がここで揃う
+    const node = 待ち('<task-notification><status>completed</status></task-notification>')
+    expect(bodyTextOf(node)).not.toContain('<task-notification>')
+  })
+
+  it('人と読んだ待ちの本文には、1文字も触らない', () => {
+    const 原文 = 'notes.md を読んでください。'
+    expect(bodyTextOf(待ち(原文))).toBe(原文)
+  })
+
+  it('空の待ちは人の側（判定の材料が無い）', () => {
+    expect(isMachine(待ち(''))).toBe(false)
+  })
+})

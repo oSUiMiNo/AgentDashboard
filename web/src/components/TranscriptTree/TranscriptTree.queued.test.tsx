@@ -354,3 +354,52 @@ describe('続いたときは数で言う（要件1-7）', () => {
     expect(document.querySelector('[data-kind="queued-more"]')).toBeNull()
   })
 })
+
+/**
+ * 機械が積んだ待ちの見え方（設計§16）。
+ *
+ * # なぜ画面まで通すのか
+ *
+ * 判定を直すだけでは足りない。**待ちの灰色は青から作った色**で、特異度でも
+ * `.speech-bubble.speech-bubble-queued` (0,2,0) が `.speech-bubble-machine` (0,1,0)
+ * に勝つので、**クラスが両方付くと種別ごとの色が灰色へ戻る**。
+ * 純関数だけ見ていると、そこが緑のまま抜ける。
+ */
+describe('機械が積んだ待ち（設計§16）', () => {
+  const 通知 = '<task-notification><status>completed</status></task-notification>'
+
+  it('左から出て、機械の器になる', async () => {
+    置く(待ち(通知))
+    const 吹き出し = await screen.findByTestId('user-bubble')
+    expect(吹き出し.classList.contains('speech-bubble-machine')).toBe(true)
+    // **右寄せの包みに入っていない**——ここが「ユーザーメッセージ以外は左」の実体
+    expect(吹き出し.parentElement?.className).toContain('justify-start')
+    expect(吹き出し.parentElement?.className).not.toContain('justify-end')
+  })
+
+  it('待ちの灰色は付かない（機械の地を上書きするため）', async () => {
+    置く(待ち(通知))
+    const 吹き出し = await screen.findByTestId('user-bubble')
+    expect(吹き出し.classList.contains('speech-bubble-queued')).toBe(false)
+  })
+
+  it('種別ごとの色が引けるよう、名乗りを属性に出す', async () => {
+    置く(待ち(通知))
+    const 吹き出し = await screen.findByTestId('user-bubble')
+    expect(吹き出し.getAttribute('data-origin')).toBe('task_notification')
+  })
+
+  it('生のタグが画面に1文字も出ない', async () => {
+    置く(待ち(通知))
+    await screen.findByTestId('user-bubble')
+    expect(待ちの行()[0].textContent).not.toContain('<task-notification>')
+  })
+
+  it('【落とせない】人が積んだ待ちは、右のまま・灰色のまま', async () => {
+    置く(待ち('作業中に送った追加の指示です'))
+    const 吹き出し = await screen.findByTestId('user-bubble')
+    expect(吹き出し.classList.contains('speech-bubble-machine')).toBe(false)
+    expect(吹き出し.classList.contains('speech-bubble-queued')).toBe(true)
+    expect(吹き出し.parentElement?.className).toContain('justify-end')
+  })
+})
