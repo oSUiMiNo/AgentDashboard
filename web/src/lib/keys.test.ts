@@ -7,6 +7,8 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   inputBoxRows,
+  isCandidateAccept,
+  isCandidateMove,
   isComposerSubmit,
   isSelectionPrompt,
   looksSelecting,
@@ -15,6 +17,7 @@ import {
   sequenceFor,
   SUBMIT,
   terminalKeyOverride,
+  type CandidateKeyState,
   type EnterKeyState,
   type TerminalKey,
 } from './keys'
@@ -801,5 +804,154 @@ describe('送りの案内（実機の /rewind）', () => {
   it('普通の会話では出さない', () => {
     expect(looksSelecting(会話の画面('  33 more とは何ですか'))).toBe(false)
     expect(looksSelecting(会話の画面('  ↑ 上を見て'))).toBe(false)
+  })
+})
+
+describe('候補の一覧が出ているときの押し分け（設計§7）', () => {
+  /** 押したキーの形を組み立てる。既定は素押し。 */
+  function 押す(
+    key: string,
+    modifiers: Partial<CandidateKeyState> = {},
+  ): CandidateKeyState {
+    return {
+      key,
+      ctrlKey: false,
+      altKey: false,
+      metaKey: false,
+      shiftKey: false,
+      isComposing: false,
+      ...modifiers,
+    }
+  }
+
+  describe('閉じているとき、この口は何も奪わない', () => {
+    // **ここがいちばん重い回帰。** 崩れると、候補と関係なく Enter が改行でなくなる
+    it.each(['Enter', 'Tab', 'ArrowUp', 'ArrowDown', 'Escape'])(
+      '%s を押しても、確定にも操作にもならない',
+      (key) => {
+        expect(isCandidateAccept(押す(key), false), '確定にしない').toBe(false)
+        expect(isCandidateMove(押す(key), false), '操作にもしない').toBe(null)
+      },
+    )
+
+    it('閉じているときの素の Enter は、既存の口から見ても送信ではない', () => {
+      // 送信でないなら呼ぶ側は `preventDefault()` を呼ばず、textarea の既定が改行になる
+      expect(isComposerSubmit(押す('Enter'))).toBe(false)
+    })
+  })
+
+  describe('出ているとき', () => {
+    it('Enter は確定', () => {
+      expect(isCandidateAccept(押す('Enter'), true)).toBe(true)
+    })
+
+    it('Tab も確定', () => {
+      expect(isCandidateAccept(押す('Tab'), true)).toBe(true)
+    })
+
+    it('Shift+Enter は確定にしない（改行のまま）', () => {
+      expect(isCandidateAccept(押す('Enter', { shiftKey: true }), true)).toBe(
+        false,
+      )
+    })
+
+    it('Shift+Tab は確定にしない（逆順の移動を奪わない）', () => {
+      expect(isCandidateAccept(押す('Tab', { shiftKey: true }), true)).toBe(
+        false,
+      )
+    })
+
+    it('↑ ↓ は選ぶ、Esc は閉じる', () => {
+      expect(isCandidateMove(押す('ArrowUp'), true)).toBe('up')
+      expect(isCandidateMove(押す('ArrowDown'), true)).toBe('down')
+      expect(isCandidateMove(押す('Escape'), true)).toBe('close')
+    })
+
+    it('関係ないキーは操作にしない', () => {
+      expect(isCandidateMove(押す('a'), true)).toBe(null)
+      expect(isCandidateMove(押す('Enter'), true)).toBe(null)
+    })
+  })
+
+  describe('Ctrl+Enter は状態によらず送信のまま', () => {
+    // ここが変わると、同じ画面にある2つの入力口で意味が食い違う
+    it.each([true, false])('候補が出ている＝%s でも、確定として奪わない', (open) => {
+      expect(isCandidateAccept(押す('Enter', { ctrlKey: true }), open)).toBe(
+        false,
+      )
+    })
+
+    it('既存の口は、候補の有無を知らないまま送信と答える', () => {
+      expect(isComposerSubmit(押す('Enter', { ctrlKey: true }))).toBe(true)
+    })
+  })
+
+  describe('修飾キーが付いていたら渡さない', () => {
+    it.each(['altKey', 'metaKey'] as const)('%s 付きの Enter は確定にしない', (mod) => {
+      expect(isCandidateAccept(押す('Enter', { [mod]: true }), true)).toBe(false)
+    })
+
+    it.each(['ctrlKey', 'altKey', 'metaKey', 'shiftKey'] as const)(
+      '%s 付きの ↑ は操作にしない',
+      (mod) => {
+        expect(isCandidateMove(押す('ArrowUp', { [mod]: true }), true)).toBe(null)
+      },
+    )
+  })
+
+  describe('変換中は奪わない', () => {
+    // 奪うと日本語の変換そのものができなくなる
+    it('変換確定の Enter を確定にしない', () => {
+      expect(isCandidateAccept(押す('Enter', { isComposing: true }), true)).toBe(
+        false,
+      )
+    })
+
+    it('変換中の ↑ を操作にしない（候補を上下で選んでいる最中）', () => {
+      expect(isCandidateMove(押す('ArrowUp', { isComposing: true }), true)).toBe(
+        null,
+      )
+    })
+  })
+
+  it('判断はこのファイルに在り、`onKeyDown` に条件が散っていない', () => {
+    // **散らすと、片方だけ直したときに食い違う。** `Composer.tsx` が持ってよいのは
+    // 「述語を呼ぶ」ことだけで、キーの名前で直に分岐してはいけない
+    const ここ = dirname(fileURLToPath(import.meta.url))
+    const src = readFileSync(
+      resolve(ここ, '../components/Composer/Composer.tsx'),
+      'utf8',
+    )
+    const onKeyDown = src.slice(
+      src.indexOf('onKeyDown={'),
+      src.indexOf('className="min-h-0 flex-1 resize-none"'),
+    )
+    expect(onKeyDown, '切り出せている').not.toBe('')
+    // コメントを除いたコードの側だけを見る
+    const コード = onKeyDown
+      .split('\n')
+      .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
+      .join('\n')
+    for (const 奪ってはいけない of ["'Enter'", "'Tab'", "'Escape'", "'ArrowDown'"]) {
+      expect(コード, `${奪ってはいけない} を直に見ていない`).not.toContain(
+        奪ってはいけない,
+      )
+    }
+    // **`ArrowUp` だけは例外。** 送信の取り消し（候補とは無関係の既存の割り当て）が
+    // ここで素の ↑ を見ている。**候補まわりの判断が散っていないこと**が要件なので、
+    // こちらは残っていてよい
+    expect(コード, '取り消しの ↑ は従来どおりここに在る').toContain("'ArrowUp'")
+  })
+
+  it('端末側の読み替えは1バイトも変わっていない', () => {
+    // 候補は入力欄の話で、端末には本物の CLI が自分で候補を出している
+    const 端末で押す = (init: Partial<KeyboardEvent>) =>
+      terminalKeyOverride(
+        { type: 'keydown', key: 'Enter', ctrlKey: false, altKey: false,
+          metaKey: false, isComposing: false, ...init } as KeyboardEvent,
+        () => '',
+      )
+    expect(端末で押す({}), '素の Enter は改行のまま').toBe(NEWLINE)
+    expect(端末で押す({ ctrlKey: true }), 'Ctrl+Enter は送信のまま').toBe(SUBMIT)
   })
 })

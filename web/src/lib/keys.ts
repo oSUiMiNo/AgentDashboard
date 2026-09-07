@@ -467,6 +467,98 @@ export function isComposerSubmit(event: EnterKeyState): boolean {
 }
 
 /**
+ * 候補の一覧が出ている間だけ効く押し分けの、判断材料。
+ *
+ * **[`EnterKeyState`] に `shiftKey` を足すのではなく、こちらへ広げる。** あちらに足すと
+ * [`isComposerSubmit`] の判断材料が増え、「Shift の扱いを間違える余地そのものが無い」と
+ * いう性質が壊れる。**Shift を見る必要があるのは候補が出ているときだけ**である
+ * （Shift+Enter は候補が出ていても改行のまま）。
+ */
+export interface CandidateKeyState extends EnterKeyState {
+  shiftKey: boolean
+}
+
+/**
+ * 候補の一覧が出ているとき、そのキーを「選んでいるものに決める」と解釈するか。
+ *
+ * | キー | 出ているとき | 閉じているとき |
+ * |---|---|---|
+ * | Enter | **確定** | 改行（既定のまま） |
+ * | Tab | **確定** | 既定のまま |
+ * | Shift+Enter | 改行 | 改行 |
+ * | Ctrl+Enter | **送信**（[`isComposerSubmit`] の担当） | 送信 |
+ *
+ * # `open` が偽なら必ず偽を返す
+ *
+ * **これがこの関数のいちばん大事な性質である。** 候補が閉じている間は、この口が
+ * 何も奪わない——呼ぶ側は素通りして既存の経路へ落ち、素の Enter は textarea の既定
+ * どおり改行になる。**ここが崩れると、候補と関係なく Enter が改行でなくなる**という、
+ * このイシューでいちばん重い回帰になる。
+ *
+ * # Ctrl / Alt / Meta が付いていたら渡さない
+ *
+ * **Ctrl+Enter＝送信は状態によらず不変**（ガイドライン「Enter の割り当ては、端末と
+ * 入力欄で必ず揃える」）。ここで奪うと、同じ画面にある2つの入力口で Ctrl+Enter の
+ * 意味が変わってしまう。Alt / Meta も端末側（[`terminalKeyOverride`]）が読み替えを
+ * 避ける組み合わせなので、揃えて外す。
+ *
+ * # 変換中は渡さない
+ *
+ * 日本語の変換確定の Enter を奪うと**変換そのものができなくなる**。既存の2つの口が
+ * 同じ配慮をしているので、同じ形で書く。
+ */
+export function isCandidateAccept(
+  event: CandidateKeyState,
+  open: boolean,
+): boolean {
+  if (!open || event.isComposing) {
+    return false
+  }
+  if (event.ctrlKey || event.altKey || event.metaKey) {
+    return false
+  }
+  if (event.key === 'Tab') {
+    return !event.shiftKey
+  }
+  // Shift+Enter は候補が出ていても改行のまま
+  return event.key === 'Enter' && !event.shiftKey
+}
+
+/** 候補の一覧に対する、確定以外の操作。 */
+export type CandidateMove = 'up' | 'down' | 'close'
+
+/**
+ * 候補の一覧が出ているとき、そのキーを一覧の操作として解釈するか。要らなければ `null`。
+ *
+ * | キー | 意味 |
+ * |---|---|
+ * | ↑ | 1つ上を選ぶ |
+ * | ↓ | 1つ下を選ぶ |
+ * | Esc | 閉じる |
+ *
+ * [`isCandidateAccept`] と同じく、**`open` が偽なら必ず `null`**——閉じている間は
+ * ↑ も Esc も奪わない。とくに ↑ は、**入力欄が空のときに送信を取り消す**という
+ * 既存の割り当てを持っている（`Composer` の `ArrowUp` の枝）。奪うと取り消せなくなる。
+ *
+ * **修飾キーが付いていたら渡さない。** 素の ↑ ↓ Esc だけを見る。
+ */
+export function isCandidateMove(
+  event: CandidateKeyState,
+  open: boolean,
+): CandidateMove | null {
+  if (!open || event.isComposing) {
+    return null
+  }
+  if (event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) {
+    return null
+  }
+  if (event.key === 'ArrowUp') return 'up'
+  if (event.key === 'ArrowDown') return 'down'
+  if (event.key === 'Escape') return 'close'
+  return null
+}
+
+/**
  * 端末へ頼めるキー。**意味であって、バイト列ではない**（設計§5）。
  *
  * 十字ボタンは `'up'` と頼むだけで、何バイト送られるかを知らない。押す側が独自に

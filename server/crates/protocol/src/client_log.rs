@@ -237,6 +237,17 @@ pub enum ClientLogKind {
     /// 場の外枠の高さ / 行数。**材料が痩せているのが原因のとき、判定側をいくら読んでも
     /// 矛盾は見つからない。**
     TranscriptTail,
+    /// 入力欄のスラッシュコマンド候補を、その PC のディスクから数え上げ終えたとき。
+    ///
+    /// **これも失敗ではない**（`VersionReload` と同じく `INFO` で来る）。集める側は
+    /// **1件読めなくても一覧を諦めない**ので、落としたぶんは画面から消える——
+    /// 出るのは残った候補だけである。「自分のコマンドが出てこない」と言われたときに、
+    /// **読めなかったのか・隠されていたのか・そもそも0件だったのか**を分けるには、
+    /// ここに数が残っているしかない。
+    ///
+    /// **1ファイルごとには出さない**（設計§11）。実測でこの機械には106件あるので、
+    /// 1件ずつ出すと打鍵のたびに三桁の行が積まれる。**集め終わりに1行だけ。**
+    SlashCandidates,
 }
 
 impl ClientLogKind {
@@ -251,6 +262,7 @@ impl ClientLogKind {
             ClientLogKind::WsClose => "ws_close",
             ClientLogKind::VersionReload => "version_reload",
             ClientLogKind::TranscriptTail => "transcript_tail",
+            ClientLogKind::SlashCandidates => "slash_candidates",
         }
     }
 }
@@ -306,7 +318,15 @@ mod tests {
             serde_json::to_string(&ClientLogKind::TranscriptTail).unwrap(),
             r#""transcript_tail""#
         );
+        assert_eq!(
+            serde_json::to_string(&ClientLogKind::SlashCandidates).unwrap(),
+            r#""slash_candidates""#
+        );
         assert_eq!(ClientLogKind::VersionReload.as_str(), "version_reload");
+        assert_eq!(
+            ClientLogKind::SlashCandidates.as_str(),
+            "slash_candidates"
+        );
     }
 
     #[test]

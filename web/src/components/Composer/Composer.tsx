@@ -78,17 +78,30 @@ import {
   releasePreview,
   type Attachment,
 } from '@/lib/attachments'
+import { report } from '@/lib/clientLogs'
 import { markComposerBusy } from '@/lib/composerBusy'
 import { useDraft } from '@/lib/drafts'
-import { uploadAttachment } from '@/lib/hostfs'
-import { isComposerSubmit } from '@/lib/keys'
+import { listDir, readFile, uploadAttachment } from '@/lib/hostfs'
+import { isCandidateAccept, isCandidateMove, isComposerSubmit } from '@/lib/keys'
 import { isEnded, type SessionStatus } from '@/lib/protocol'
 import type { CardId } from '@/lib/protocol'
+import {
+  filterCandidates,
+  harvestCandidates,
+  type CandidateHarvest,
+  type SlashCandidate,
+} from '@/lib/slashCandidates'
 import { sendTerminalKey } from '@/lib/terminalBridge'
 import { useAuthStore } from '@/stores/auth'
-import { clearCardNotices, pushCardNotice, useCardError } from '@/stores/sessions'
+import {
+  clearCardNotices,
+  pushCardNotice,
+  useCardError,
+  useSessionCard,
+} from '@/stores/sessions'
 import { watchUserMessage } from '@/stores/transcript'
 import { useWsStore } from '@/stores/ws'
+import { MAX_VISIBLE, SlashMenu } from './SlashMenu'
 
 /**
  * 送ったものを控えておく長さ（ミリ秒）。
@@ -168,6 +181,15 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
   const 控え中 = useRef<控え | null>(null)
   const cardError = useCardError(cardId)
   const ended = isEnded(status)
+  // 打てるものの一覧。**集めるのは1回だけ**——打鍵のたびにディスクを舐めると、
+  // この機械では106件ぶんの読み取りが毎回走る
+  const [harvest, setHarvest] = useState<CandidateHarvest | null>(null)
+  // 一覧の中で選ばれている番号。**打ち直すたびに先頭へ戻す**
+  const [selected, setSelected] = useState(0)
+  // Esc で閉じたか。**打ち直せばまた開く**——閉じたまま戻らないと、打ち間違いを
+  // 直すたびに一覧を諦めることになる
+  const [dismissed, setDismissed] = useState(false)
+  const project = useSessionCard(cardId)?.project
   // 添付の口を出すかどうかは**終わっているか**だけで決まる。`host` は必ず在るので
   // 「宛先が分からない」という枝は作らない（作っても一度も通らない）
   const 添付できる = !ended
@@ -263,6 +285,80 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
   // 数えると「送信直後の20秒はどのタブも読み直さない」という、誰も得しない停止になる。
   const 抱えている = attachments.length > 0
   useEffect(() => (抱えている ? markComposerBusy() : undefined), [抱えている])
+
+  // 打てるものを、その PC のディスクから数え上げる（設計§2）。
+  //
+  // **`/` を打った時点ではなく、開いた時点で集める。** 打ってから読みに行くと、
+  // 1文字目と一覧が出るまでに待ちが挟まる——この機械では106件あり、フォルダを
+  // 何枚も舐めるので体感に出る。
+  //
+  // **終わったセッションでは集めない。** 打てないので一覧も要らない。
+  useEffect(() => {
+    if (ended) {
+      return
+    }
+    let 生きている = true
+    void (async () => {
+      const fs = {
+        listDir: (path?: string) => listDir(host, path),
+        readFile: (path: string) => readFile(host, path),
+      }
+      try {
+        const got = await harvestCandidates(fs, project)
+        if (!生きている) {
+          return
+        }
+        setHarvest(got)
+        // **集め終わりに1行だけ**（設計§11）。1件ごとには出さない——
+        // 打鍵のたびに三桁の行が積まれる。
+        //
+        // **落としたぶんは画面から消える**ので、ここに数が残っていないと
+        // 「自分のコマンドが出てこない」を切り分けられない
+        report(
+          'slash_candidates',
+          'INFO',
+          `候補 ${got.candidates.length} 件（隠し ${got.hidden}・読めず ${got.unreadable}・打ち切り ${got.truncated}）`,
+          { cardId },
+        )
+      } catch (error) {
+        if (!生きている) {
+          return
+        }
+        // **集められなくても入力欄は使える。** 一覧が出ないだけで、打って送る道は残る
+        setHarvest({
+          candidates: [],
+          hidden: 0,
+          unreadable: 1,
+          truncated: false,
+        })
+        report(
+          'slash_candidates',
+          'INFO',
+          `候補を集められなかった：${String(error)}`,
+          { cardId },
+        )
+      }
+    })()
+    return () => {
+      生きている = false
+    }
+  }, [cardId, host, project, ended])
+
+  // 打った文字で狭める。**並びは入れ替えない**（押そうとした的が逃げる）
+  const 候補 = filterCandidates(harvest?.candidates ?? [], text)
+  // 一覧を出すか。**`/` で始まらなければ `filterCandidates` が空を返す**ので、
+  // 普通の指示を打っている最中には出ない
+  const 候補が出ている =
+    !ended && !dismissed && text.startsWith('/') && harvest !== null
+
+  /** 選んでいるものを入力欄へ入れる。**`setText` を通す**ので書きかけが追随する */
+  const 確定する = (candidate: SlashCandidate) => {
+    // 引数まで打っていたら残す。`/cmd 引数` の `cmd` だけを差し替える
+    const 残り = text.slice(1).split(/(\s)/).slice(1).join('')
+    setText(`/${candidate.name}${残り}`)
+    setDismissed(true)
+    inputRef.current?.focus()
+  }
 
   /** 3経路の共通の入口。**判定は `pickImages` の1つを通る**（設計§9） */
   const 受け取る = async (files: readonly File[]) => {
@@ -377,7 +473,9 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
       data-testid="composer"
       // 縦に積む。**添付は入力欄の「上」**（§9-1）——下に置くと、送信ボタンとの間に
       // 押し間違えやすい列ができる
-      className={`flex flex-col gap-1 ${className}`}
+      // **`relative` は候補の一覧の寄せ先**（設計§6）。一覧は `absolute` で器の外へ
+      // 重ねるので、この指定が無いと画面のどこか遠くへ飛ぶ
+      className={`relative flex flex-col gap-1 ${className}`}
       onSubmit={(event) => {
         event.preventDefault()
         void submit()
@@ -397,6 +495,21 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
         受け取る([...event.dataTransfer.files])
       }}
     >
+      {/*
+        候補の一覧。**器の外へ重ねる**ので、ここに置いても入力欄の高さは動かない。
+        0件でも出す——何に当たらなかったのかと、**そのまま送れる**ことを言うため（設計§6-4）
+      */}
+      {候補が出ている && (
+        <SlashMenu
+          candidates={候補}
+          selected={Math.min(selected, Math.max(0, 候補.length - 1))}
+          unreadable={harvest?.unreadable ?? 0}
+          truncated={harvest?.truncated ?? false}
+          text={text}
+          onPick={確定する}
+          onHover={setSelected}
+        />
+      )}
       {attachments.length > 0 && (
         <ul
           data-testid="composer-attachments"
@@ -522,7 +635,13 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
               ? 'このセッションは終了しています'
               : '指示やスラッシュコマンドを入力（Ctrl+Enter で送信 / Enter で改行）'
           }
-          onChange={(event) => setText(event.target.value)}
+          onChange={(event) => {
+            setText(event.target.value)
+            // 打ち直したら、選び直しも一覧の開き直しもする。**閉じたまま戻らないと、
+            // 打ち間違いを直すたびに一覧を諦めることになる**
+            setSelected(0)
+            setDismissed(false)
+          }}
           // 貼り付け。**PC の Ctrl+V もスマホの長押し貼り付けも、ここへ来る**（§9）
           onPaste={(event) => {
             const files = [...event.clipboardData.files]
@@ -534,6 +653,47 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
             受け取る(files)
           }}
           onKeyDown={(event) => {
+            // 候補の一覧が出ている間だけの押し分け（設計§7）。**必ず最初に見る。**
+            //
+            // **`候補が出ている` が偽なら、この枝は何も奪わずに下へ素通りする**——
+            // 素の Enter は既存の経路のまま textarea の既定で改行になる。ここが
+            // 崩れると、候補と関係なく Enter が改行でなくなるという、いちばん重い
+            // 回帰になる（判定そのものは `lib/keys.ts` が持ち、ここには条件を散らさない）。
+            //
+            // **下の `ArrowUp`（送信の取り消し）とは同時に成立しない。** あちらは
+            // 「入力欄が空」を要求し、こちらは `/` で始まっていることを要求するので、
+            // 両方が真になる文字列が無い。**それでも順序を決めてある**のは、
+            // 将来どちらかの条件が緩んだときに、どちらが勝つのかを読めるようにするため。
+            const 押し分けの材料 = {
+              key: event.key,
+              ctrlKey: event.ctrlKey,
+              altKey: event.altKey,
+              metaKey: event.metaKey,
+              shiftKey: event.shiftKey,
+              isComposing: event.nativeEvent.isComposing,
+            }
+            if (isCandidateAccept(押し分けの材料, 候補が出ている && 候補.length > 0)) {
+              event.preventDefault()
+              確定する(候補[Math.min(selected, 候補.length - 1)])
+              return
+            }
+            const 操作 = isCandidateMove(押し分けの材料, 候補が出ている)
+            if (操作 !== null) {
+              event.preventDefault()
+              if (操作 === 'close') {
+                setDismissed(true)
+              } else if (候補.length > 0) {
+                // 端で止める。**巡回させない**——長い一覧で端まで送ったつもりが
+                // 反対の端へ飛ぶと、目で追っていた行を見失う
+                const 幅 = Math.min(候補.length, MAX_VISIBLE)
+                setSelected((now) =>
+                  操作 === 'up'
+                    ? Math.max(0, Math.min(now, 幅 - 1) - 1)
+                    : Math.min(幅 - 1, now + 1),
+                )
+              }
+              return
+            }
             // 送った直後の取り消し。**焦点を移さずに端末へ `↑` を回す**（取り消し 設計§3）。
             // これが無いと、ターミナルを一度クリックしてからでないと取り消せない——
             // 文を書いている時点で焦点はこの入力欄に在るので、毎回その手間が挟まる。

@@ -21,6 +21,7 @@ import * as terminalBridge from '@/lib/terminalBridge'
 import { appendNodes, clearAllTranscripts } from '@/stores/transcript'
 import type { NodeId, TreeNode } from '@/lib/protocol'
 import * as sessions from '@/stores/sessions'
+import * as slashCandidates from '@/lib/slashCandidates'
 import { clearSessions, setCardError } from '@/stores/sessions'
 import { useWsStore } from '@/stores/ws'
 
@@ -748,5 +749,227 @@ describe('端末が居なくても壊れない', () => {
     expect(() =>
       fireEvent.keyDown(screen.getByTestId('composer-input'), { key: 'ArrowUp' }),
     ).not.toThrow()
+  })
+})
+
+describe('スラッシュコマンドの候補（フェーズ2・設計§6・§7）', () => {
+  /**
+   * 候補を集める口を差し替える。**実物のディスクは見ない。**
+   *
+   * `harvestCandidates` はフェーズ1の純関数で、そこは
+   * `lib/slashCandidates.test.ts` が見ている。ここで見るのは**継ぎ目**である。
+   */
+  function 集まることにする(names: string[]) {
+    return vi
+      .spyOn(slashCandidates, 'harvestCandidates')
+      .mockResolvedValue({
+        candidates: names.map((name) => ({
+          name,
+          description: '',
+          source: 'user-command' as const,
+        })),
+        hidden: 0,
+        unreadable: 0,
+        truncated: false,
+      })
+  }
+
+  /** 一覧が出るまで待つ。集めるのは非同期なので、置いた直後には無い */
+  async function 一覧が出るまで() {
+    await waitFor(() => expect(screen.getByTestId('slash-menu')).toBeTruthy())
+  }
+
+  const 入力欄 = () => screen.getByTestId('composer-input')
+
+  beforeEach(() => {
+    集まることにする(['rewind', 'clear', 'model'])
+  })
+
+  describe('出る条件', () => {
+    it('`/` で始めると出る', async () => {
+      置く()
+      fireEvent.change(入力欄(), { target: { value: '/r' } })
+      await 一覧が出るまで()
+      expect(screen.getByText('/rewind')).toBeInTheDocument()
+    })
+
+    it('普通の指示を打っている間は出ない', async () => {
+      置く()
+      fireEvent.change(入力欄(), { target: { value: 'ファイルを直して' } })
+      await waitFor(() => expect(screen.queryByTestId('slash-menu')).toBeNull())
+    })
+
+    it('Esc で閉じる', async () => {
+      置く()
+      fireEvent.change(入力欄(), { target: { value: '/r' } })
+      await 一覧が出るまで()
+      fireEvent.keyDown(入力欄(), { key: 'Escape' })
+      expect(screen.queryByTestId('slash-menu')).toBeNull()
+    })
+
+    it('閉じたあとでも、打ち直せばまた出る', async () => {
+      // 閉じたまま戻らないと、打ち間違いを直すたびに一覧を諦めることになる
+      置く()
+      fireEvent.change(入力欄(), { target: { value: '/r' } })
+      await 一覧が出るまで()
+      fireEvent.keyDown(入力欄(), { key: 'Escape' })
+      expect(screen.queryByTestId('slash-menu')).toBeNull()
+      fireEvent.change(入力欄(), { target: { value: '/re' } })
+      await 一覧が出るまで()
+    })
+  })
+
+  describe('回帰：候補が閉じているときの Enter は改行のまま', () => {
+    // **このフェーズでいちばん重い回帰。** 素の Enter で `preventDefault()` を
+    // 呼んでしまうと、textarea の既定が働かず改行が入らなくなる
+    it('普通の指示を打っている最中の Enter は、既定を止めない', () => {
+      置く()
+      fireEvent.change(入力欄(), { target: { value: 'ふつうの指示' } })
+      const 止まらなかった = fireEvent.keyDown(入力欄(), { key: 'Enter' })
+      expect(止まらなかった, '既定が生きている＝改行になる').toBe(true)
+    })
+
+    it('入力欄が空のときの Enter も、既定を止めない', () => {
+      置く()
+      const 止まらなかった = fireEvent.keyDown(入力欄(), { key: 'Enter' })
+      expect(止まらなかった).toBe(true)
+    })
+
+    it('一覧を Esc で閉じたあとの Enter は、既定を止めない', async () => {
+      置く()
+      fireEvent.change(入力欄(), { target: { value: '/r' } })
+      await 一覧が出るまで()
+      fireEvent.keyDown(入力欄(), { key: 'Escape' })
+      const 止まらなかった = fireEvent.keyDown(入力欄(), { key: 'Enter' })
+      expect(止まらなかった).toBe(true)
+    })
+
+    it('閉じているときの Enter では送信もしない', () => {
+      置く()
+      fireEvent.change(入力欄(), { target: { value: 'ふつうの指示' } })
+      fireEvent.keyDown(入力欄(), { key: 'Enter' })
+      expect(sendInput).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('Ctrl+Enter は状態によらず送信', () => {
+    it('一覧が出ていても送信になる', async () => {
+      置く()
+      fireEvent.change(入力欄(), { target: { value: '/rewind' } })
+      await 一覧が出るまで()
+      fireEvent.keyDown(入力欄(), { key: 'Enter', ctrlKey: true })
+      await waitFor(() => expect(sendInput).toHaveBeenCalled())
+    })
+  })
+
+  describe('選んで決める', () => {
+    it('Enter で、選んでいるものが入力欄へ入る', async () => {
+      置く()
+      fireEvent.change(入力欄(), { target: { value: '/r' } })
+      await 一覧が出るまで()
+      fireEvent.keyDown(入力欄(), { key: 'Enter' })
+      expect(入力欄()).toHaveValue('/rewind')
+    })
+
+    it('Tab でも決まる', async () => {
+      置く()
+      fireEvent.change(入力欄(), { target: { value: '/r' } })
+      await 一覧が出るまで()
+      fireEvent.keyDown(入力欄(), { key: 'Tab' })
+      expect(入力欄()).toHaveValue('/rewind')
+    })
+
+    it('↓ で1つ下を選んでから決める', async () => {
+      置く()
+      fireEvent.change(入力欄(), { target: { value: '/' } })
+      await 一覧が出るまで()
+      fireEvent.keyDown(入力欄(), { key: 'ArrowDown' })
+      fireEvent.keyDown(入力欄(), { key: 'Enter' })
+      expect(入力欄()).toHaveValue('/clear')
+    })
+
+    it('端で止まる（巡回しない）', async () => {
+      // 長い一覧で端まで送ったつもりが反対の端へ飛ぶと、目で追っていた行を見失う
+      置く()
+      fireEvent.change(入力欄(), { target: { value: '/' } })
+      await 一覧が出るまで()
+      fireEvent.keyDown(入力欄(), { key: 'ArrowUp' })
+      fireEvent.keyDown(入力欄(), { key: 'Enter' })
+      expect(入力欄(), '先頭より上へ行かない').toHaveValue('/rewind')
+    })
+
+    it('決めたあと、一覧は閉じる', async () => {
+      置く()
+      fireEvent.change(入力欄(), { target: { value: '/r' } })
+      await 一覧が出るまで()
+      fireEvent.keyDown(入力欄(), { key: 'Enter' })
+      expect(screen.queryByTestId('slash-menu')).toBeNull()
+    })
+
+    it('引数まで打っていたら、名前だけを差し替える', async () => {
+      置く()
+      fireEvent.change(入力欄(), { target: { value: '/r あとの引数' } })
+      await 一覧が出るまで()
+      fireEvent.keyDown(入力欄(), { key: 'Enter' })
+      expect(入力欄()).toHaveValue('/rewind あとの引数')
+    })
+
+    it('押しても決まる', async () => {
+      置く()
+      fireEvent.change(入力欄(), { target: { value: '/' } })
+      await 一覧が出るまで()
+      fireEvent.mouseDown(screen.getAllByRole('option')[2])
+      expect(入力欄()).toHaveValue('/model')
+    })
+  })
+
+  describe('↑ の取り合い（送信の取り消しと同時に成立しない）', () => {
+    it('一覧が出ているとき、↑ は端末へ回らない', async () => {
+      const 回す = vi.spyOn(terminalBridge, 'sendTerminalKey')
+      置く()
+      fireEvent.change(入力欄(), { target: { value: '/r' } })
+      await 一覧が出るまで()
+      fireEvent.keyDown(入力欄(), { key: 'ArrowUp' })
+      expect(回す).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('集められなくても、入力欄は使える', () => {
+    it('読めなかったことを言う', async () => {
+      vi.spyOn(slashCandidates, 'harvestCandidates').mockRejectedValue(
+        new Error('読めない'),
+      )
+      置く()
+      fireEvent.change(入力欄(), { target: { value: '/r' } })
+      await 一覧が出るまで()
+      expect(screen.getByTestId('slash-menu-empty')).toHaveTextContent(
+        '読めませんでした',
+      )
+    })
+
+    it('それでも Ctrl+Enter で送れる', async () => {
+      vi.spyOn(slashCandidates, 'harvestCandidates').mockRejectedValue(
+        new Error('読めない'),
+      )
+      置く()
+      fireEvent.change(入力欄(), { target: { value: '/なにか' } })
+      await 一覧が出るまで()
+      fireEvent.keyDown(入力欄(), { key: 'Enter', ctrlKey: true })
+      await waitFor(() => expect(sendInput).toHaveBeenCalled())
+    })
+  })
+
+  describe('終わったセッションでは集めない', () => {
+    it('打てないので一覧も要らない', async () => {
+      const 集める = 集まることにする(['rewind'])
+      render(
+        <Composer
+          cardId={CARD}
+          status={{ kind: 'ended', ok: true }}
+          host={HOST}
+        />,
+      )
+      await waitFor(() => expect(集める).not.toHaveBeenCalled())
+    })
   })
 })
