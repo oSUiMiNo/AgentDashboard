@@ -263,3 +263,45 @@ describe("大きさを持つ隣の部品は据え置く（細かい修正 項目
     expect((ROW.match(/prose-body/g) ?? []).length).toBe(1);
   });
 });
+
+describe("畳んだ末尾の色をやめる（細かい修正 項目9）", () => {
+  /**
+   * 消してよいのは**トークンと、それを塗っていた擬似要素の2つだけ**である。
+   * 同じ名前を読む4箇所と、包み箱の役目は残る。**消すと押す面と「続きを読む」が
+   * 親の外へ飛ぶ**ので、残っていることを1件ずつ見張る。
+   */
+  it("色のトークンが消えている", () => {
+    expect(素).not.toContain("--fade-tint");
+  });
+
+  it("ティントを塗っていた擬似要素が消えている", () => {
+    expect(/\.body-fade::before\s*\{/.test(素)).toBe(false);
+  });
+
+  it("帯の高さの変数は残り、読む側が4箇所ある", () => {
+    // 定義（`.body-fade`）＋差し替え2つ（浅い・深い）で3件、読む側が
+    // マスク2行・押す判定・帯の位置で4件。**どちらが欠けても壊れる**
+    expect(/--fade-band:\s*calc\(2 \* var\(--fade-line\)\)/.test(素)).toBe(true);
+    expect(素.match(/var\(--fade-band\)/g) ?? []).toHaveLength(4);
+  });
+
+  it("器の位置指定が残っている（押す面と「続きを読む」の包み箱）", () => {
+    const 規則 = /\.body-fade\s*\{([^}]*)\}/.exec(素);
+    expect(規則, ".body-fade の規則が見つからない").not.toBeNull();
+    expect(規則![1]).toContain("position: relative");
+  });
+
+  it("文字のマスクが残っている（字が薄れること自体はこちらの仕事）", () => {
+    const 規則 = /\.body-fade-text\s*\{([^}]*)\}/.exec(素);
+    expect(規則, ".body-fade-text の規則が見つからない").not.toBeNull();
+    expect(規則![1]).toContain("mask-image:");
+  });
+
+  it("出典が、消えた名前を指していない", () => {
+    // **コメントを落とす前の生の字面で見る。** 引用はコメントの中に在るので、
+    // `素` を見ると検査が素通りする
+    const TILE = readFileSync(resolve(process.cwd(), "src", "tile.css"), "utf8");
+    expect(CSS).not.toContain("--fade-tint");
+    expect(TILE).not.toContain("--fade-tint");
+  });
+});

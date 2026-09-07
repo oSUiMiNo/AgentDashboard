@@ -310,64 +310,38 @@ test('残りの量で段が変わり、変わるのはかかり始める位置�
   expect(await 濃さと色('shallow')).toEqual(await 濃さと色('deep'))
 })
 
-test('フェードは色を持ち、地を配らずにどの地の上でも成り立つ', async ({ page }) => {
-  // **この検査が守っているのは「`::after` が無いこと」ではない**（設計§6-6-5）。
-  // 守っているのは**「地の色を決め打って、それに溶けようとしていないこと」**である。
-  // 色を持たせた結果 `::after` は戻ったが、性質は変わっていないので、そちらを見る。
+test('フェードは色を持たず、文字のマスクだけで薄れる', async ({ page }) => {
+  // **色をやめた**（細かい修正_2026-0905 項目9）。もとは器の `::before` に半透明の膜を
+  // 敷いてシアンで色づけていたが、**機械の吹き出しを鮮やかな茶にしたときに異物として
+  // 浮いた**。利用者の指定は「色をやめ、『続きを読む』の帯そのものに任せる」。
   //
-  // 半透明の膜は**どんな地の上でもその地を色づけるだけ**なので、地を配る必要が無い。
-  // 不透明で塗り潰すと下の地を隠し、コードブロックの上で矩形が浮く（フェーズ7 の失敗）。
+  // **この検査が守っているのは、いまも「地の色を決め打って、それに溶けようとして
+  // いないこと」である。** 色を1つも塗らなくなった以上それは自明に満たされるので、
+  // **膜が無いこと**と、**薄れさせる仕事がマスクに残っていること**の2つを見る。
   await loadFoldLines(page)
   await expect(foldableRow(page)).toBeVisible()
 
   const body = page.locator('[data-testid="row-body"][data-fade]').first()
-  // **帯は器そのものに敷く**（フェーズ11・設計§6-7-2）。本文の箱に敷くと、吹き出しの
-  // 内側余白のぶんだけ左右と下が届かず「中に貼った紙」に見える。
-  // **`::before` で読む**——しっぽが `::after` を使っているので、同じ器では衝突する
   const 帯 = await body.evaluate((el) => {
     const shell = el.parentElement
     if (!shell) {
       throw new Error('帯の器が見つからない')
     }
-    const band = getComputedStyle(shell, '::before')
     return {
-      image: band.backgroundImage,
-      events: band.pointerEvents,
+      image: getComputedStyle(shell, '::before').backgroundImage,
       器にある: shell.classList.contains('body-fade'),
       本文の箱にない: !el.classList.contains('body-fade'),
     }
   })
+  // 器と本文の役割分担は変えていない（マスクは本文、帯の高さは器が持つ）
   expect(帯.器にある).toBe(true)
   expect(帯.本文の箱にない).toBe(true)
+  // **膜が無いこと。** ここが `none` でなくなったら、色が戻っている
+  expect(帯.image).toBe('none')
 
-  // 色が乗っていること。**畳まれていることを、色で見分けられる**
-  expect(帯.image).not.toBe('none')
-  // **見た目のためだけに重ねるものは、押す判定を素通しさせる**
-  expect(帯.events).toBe('none')
-
-  // **行き先が地の色ではないこと。** 塗った結果の色で見る（変数の字面ではない）
-  const 塗った色 = await body.evaluate((el) => {
-    const probe = document.createElement('div')
-    el.append(probe)
-    const read = (value: string) => {
-      probe.style.background = value
-      return getComputedStyle(probe).backgroundColor
-    }
-    const tint = read('var(--fade-tint)')
-    const background = read('var(--color-background)')
-    const muted = read('var(--color-muted)')
-    // **書式に依存しない取り方をする。** `color-mix` の計算値は `rgba(…)` ではなく
-    // `oklch(… / 0.16)` の形で返ることがあり、`rgba` 前提で読むと**不透明と誤読する**
-    const alpha = Number(/[/,]\s*([\d.]+)\s*\)\s*$/.exec(tint)?.[1] ?? '1')
-    probe.remove()
-    return { tint, background, muted, alpha }
-  })
-  expect(塗った色.tint).not.toBe(塗った色.background)
-  expect(塗った色.tint).not.toBe(塗った色.muted)
-  // **半透明であること。** 不透明だと、下に何があっても同じ矩形になる
-  expect(塗った色.alpha).toBeLessThan(1)
-
-  // 文字を消すのは内側の層である（マスクは擬似要素も消すので、同じ要素に置けない）
+  // 文字を消すのは内側の層である（マスクは擬似要素も消すので、同じ要素に置けない）。
+  // **色をやめても、字が薄れること自体はこちらの仕事なので変わらない**——
+  // 「畳まれているのか、ただの余白なのか」を見分けられるのはこれが在るからである。
   const 内側にマスク = await body.evaluate((el) => {
     const inner = el.querySelector('.body-fade-text')
     if (!inner) {
@@ -813,7 +787,25 @@ test('帯の上1割を押しても開かない', async ({ page }) => {
   const 点 = await row.locator('[data-testid="body-hitbox"]').evaluate((el) => {
     const 器 = el.parentElement as HTMLElement
     const 器の箱 = 器.getBoundingClientRect()
-    const 帯の高さ = parseFloat(getComputedStyle(器, '::before').height) || 20
+    // **帯の高さは値の持ち主（`--fade-band`）から読む。** 以前は `::before` の高さを
+    // 読んで `|| 20` で受けていたが、**擬似要素を消したら `NaN` から 20 へ落ちて、
+    // 通ったまま実際の高さを1つも見ない状態になった**（項目9）。読めなければ落ちるべき。
+    //
+    // **`getPropertyValue` は使わない。** 変数の計算値は `calc(…)` の字面のまま返る
+    // ことがあり、`parseFloat` が `NaN` になる。**長さとして解決させてから測る。**
+    const 帯の高さ = (() => {
+      const probe = document.createElement('div')
+      probe.style.height = 'var(--fade-band)'
+      probe.style.position = 'absolute'
+      probe.style.visibility = 'hidden'
+      器.append(probe)
+      const 値 = probe.getBoundingClientRect().height
+      probe.remove()
+      return 値
+    })()
+    if (!Number.isFinite(帯の高さ) || 帯の高さ <= 0) {
+      throw new Error(`帯の高さが読めない: ${帯の高さ}`)
+    }
     const 帯の上端 = 器の箱.bottom - 帯の高さ
     const 文字の箱 = (
       器.querySelector('[data-testid="body-toggle"]') as HTMLElement
@@ -864,7 +856,22 @@ test('「続きを読む」はただの文字で、中央のやや下に居る',
     const s = getComputedStyle(el)
     const 文字 = el.getBoundingClientRect()
     const 器 = (el.parentElement as HTMLElement).getBoundingClientRect()
-    const 帯 = parseFloat(getComputedStyle(el.parentElement as HTMLElement, '::before').height) || 20
+    // **帯の高さは値の持ち主（`--fade-band`）から読む。** `::before` の高さを `|| 20` で
+    // 受ける形は、擬似要素を消したときに**通ったまま何も測らなくなる**（項目9）。
+    // **長さとして解決させてから測る**——変数の計算値は `calc(…)` の字面で返りうる
+    const 帯 = (() => {
+      const probe = document.createElement('div')
+      probe.style.height = 'var(--fade-band)'
+      probe.style.position = 'absolute'
+      probe.style.visibility = 'hidden'
+      ;(el.parentElement as HTMLElement).append(probe)
+      const 値 = probe.getBoundingClientRect().height
+      probe.remove()
+      return 値
+    })()
+    if (!Number.isFinite(帯) || 帯 <= 0) {
+      throw new Error('帯の高さが読めない')
+    }
     return {
       地: s.backgroundColor,
       枠: s.borderTopWidth,
