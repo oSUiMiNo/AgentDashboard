@@ -241,3 +241,25 @@ describe("コントラストの床が DESIGN.md に書いてある（細かい�
     expect(節![1]).toContain("承知のうえで床を割っている");
   });
 });
+
+describe("大きさを持つ隣の部品は据え置く（細かい修正 項目11-f）", () => {
+  const ROW = readFileSync(
+    resolve(process.cwd(), "src", "components/TranscriptTree/TranscriptRow.tsx"),
+    "utf8",
+  );
+
+  it("「続きを読む／畳む」の帯は 14px のままである", () => {
+    /*
+      **あれは本文ではなく操作である。** しかも「地を持たないぶんをコントラストで
+      読ませる」形へ既に直されているので、本文と一緒に縮めると**そのとき直した問題へ戻る**。
+    */
+    expect(ROW).toContain("body-toggle text-sm");
+    expect(ROW).not.toContain("body-toggle prose-body");
+  });
+
+  it("注記や入力/結果の pre は、本文と一緒に上げていない", () => {
+    // 本文だけを割る話なので、器の中の注記まで巻き込まない。
+    // **`prose-body` が付くのは本文の1箇所だけ**である
+    expect((ROW.match(/prose-body/g) ?? []).length).toBe(1);
+  });
+});
