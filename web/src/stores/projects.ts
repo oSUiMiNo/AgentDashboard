@@ -46,7 +46,9 @@ export function applyProjectSnapshot(list: ProjectView[]) {
  * （実際に E2E がこれで落ちた）。
  *
  * **狙いは変わっていない。** 押した拍子に動かないことは `position` が保証する
- * ——新しい枠は `position = 最大値 + 1` で末尾へ入り、状態が変わっても番号は動かない。
+ * ——新しい枠は `position = 最小値 − 1` で**先頭**へ入り（項目14）、状態が変わっても
+ * 番号は動かない。**番号が負になることがある**が、並べ替えの口が 0 から振り直すので
+ * 値は自然に詰まる。ここは値の大小しか見ないので、符号を気にしなくてよい。
  */
 export function upsertProject(project: ProjectView) {
   const at = projects.findIndex((entry) => entry.id === project.id)

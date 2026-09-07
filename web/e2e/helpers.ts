@@ -378,16 +378,18 @@ export async function spawnSession(
    */
   agentName?: string,
 ): Promise<Locator> {
-  // **数える前に、描き終わるのを待つ。** 一覧へ移った直後は小窓がまだ1本も
-  // 描かれておらず、そこで数えると 0 が返る。すると起こしたセッションを
-  // `.nth(0)` で拾うことになり、**前からあったカードを掴む**。
+  // **掴むのは添字ではなく識別子。** かつては「起こす前の枚数」を添字にしていたが、
+  // それは**新しいカードが末尾へ入る**前提に乗っていた。項目13で先頭へ入るように
+  // 変えたので、添字で掴むと**前からあったカードが返る**。
   //
-  // 症状は「起こしたばかりのセッションが、なぜか前の値を持っている」で、
-  // 原因までまず辿れない。しかも実行環境の速さ次第で出たり出なかったりする
-  // （E2E の土台を1つ増やしたら出た）。真実は常にサーバ側にあるので、
-  // そちらの枚数に追いつくまで待ってから数える（`archiveAll` と同じ理由）
-  const before = (await serverCardIds(page)).length
-  await expect(page.getByTestId('session-tile')).toHaveCount(before)
+  // 識別子で掴めば、先頭でも末尾でも途中へ割り込んでも正しい1枚が取れる。
+  // 元の実装が抱えていた「実行環境の速さ次第で前のカードを掴む」危うさも、
+  // これで一緒に消える。
+  //
+  // **数える前に、描き終わるのを待つ**のは変わらない。真実は常にサーバ側にあるので、
+  // そちらの枚数に追いつくまで待つ（`archiveAll` と同じ理由）
+  const beforeIds = await serverCardIds(page)
+  await expect(page.getByTestId('session-tile')).toHaveCount(beforeIds.length)
 
   const group = await addProject(page, cwd, agentName)
 
@@ -395,8 +397,18 @@ export async function spawnSession(
   await group.getByTestId('spawn-open').click()
   await group.getByTestId('spawn-mode').selectOption('')
   await group.getByTestId('spawn-button').click()
-  await expect(page.getByTestId('session-tile')).toHaveCount(before + 1)
-  return page.getByTestId('session-tile').nth(before)
+  await expect(page.getByTestId('session-tile')).toHaveCount(beforeIds.length + 1)
+
+  const afterIds = await serverCardIds(page)
+  const spawned = afterIds.find((id) => !beforeIds.includes(id))
+  // **見つからなければ落とす。** 黙って前のカードを返すと、症状が
+  // 「起こしたばかりのセッションが、なぜか前の値を持っている」になって原因まで辿れない
+  if (!spawned) {
+    throw new Error(
+      `起こしたカードを見分けられません（前: ${beforeIds.length}枚 / 後: ${afterIds.length}枚）`,
+    )
+  }
+  return page.locator(`[data-testid="session-tile"][data-card-id="${spawned}"]`)
 }
 
 /**

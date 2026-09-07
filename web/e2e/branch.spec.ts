@@ -52,10 +52,13 @@ test('横並びから押すと、元はその場に残り枝が右隣へ入る',
     （2026-09-06。2枚とも右端へ動き、左右も逆だった）。
   */
   await openDashboard(page)
-  const 先客 = await spawnSession(page)
-  const 先客Id = await 先客.getAttribute('data-card-id')
+  // **枝分かれする席を先に起こす。** 新しいカードは枠の先頭へ入る（項目13）ので、
+  // あとから起こした先客がその左へ回る。**枝分かれする席が先頭だと**「いつも先頭へ
+  // 寄せる」実装でも通ってしまい、席を基準にしていることを確かめられない
   const tile = await spawnSession(page)
   const cardId = await tile.getAttribute('data-card-id')
+  const 先客 = await spawnSession(page)
+  const 先客Id = await 先客.getAttribute('data-card-id')
   const 枠 = await 枠を控える(page)
 
   // 入力待ちへ倒す。**起動直後は押せない**（§3-4）ので、ここを飛ばすと断られる。
@@ -65,7 +68,11 @@ test('横並びから押すと、元はその場に残り枝が右隣へ入る',
   await fireHook(page, 'Stop', '{"last_assistant_message":"はい"}')
 
   await PJT専用画面へ(page, 枠)
-  const ボタン = page.getByTestId('branch-card').nth(1)
+  // **添字ではなく card-id で掴む。** 添字は並び順の変更で静かにずれ、しかも
+  // 「押せない別のカードを掴んでいる」という分かりにくい形で落ちる
+  const ボタン = page
+    .locator(`[data-testid="session-view"][data-card-id="${cardId}"]`)
+    .getByTestId('branch-card')
   await expect(ボタン).toBeVisible()
   await expect(ボタン).toBeEnabled({ timeout: 30_000 })
   await ボタン.click()

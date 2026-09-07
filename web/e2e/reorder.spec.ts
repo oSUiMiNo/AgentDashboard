@@ -120,7 +120,11 @@ async function 指で運ぶ(
 }
 
 /**
- * 2つの枠を作る。戻り値は（先, 後）のパス。
+ * 2つの枠を作る。戻り値は**並び順**で（先, 後）のパス。
+ *
+ * **足す順は並び順の逆である。** 新しい枠は一覧の先頭へ入る（項目14）ので、
+ * 後ろに置きたいほうを先に足す。**戻り値が並び順であることが、呼ぶ側の前提**
+ * ——ここを足した順のまま返すと、3本のテストが揃って「前提のほうが崩れた」形で落ちる。
  *
  * **テストごとに別の名前を使う。** 同じサーバを共有しているので、前のテストが
  * 並べ替えた結果がそのまま残る——同じ枠を使い回すと、2本目は「もう並んでいる」
@@ -129,8 +133,8 @@ async function 指で運ぶ(
 async function 枠を2つ(page: Page, 印: string): Promise<[string, string]> {
   const 先 = path.join(WORK_DIR, `reorder-${印}-a`)
   const 後 = path.join(WORK_DIR, `reorder-${印}-b`)
-  await addProject(page, 先)
   await addProject(page, 後)
+  await addProject(page, 先)
   return [先, 後]
 }
 
