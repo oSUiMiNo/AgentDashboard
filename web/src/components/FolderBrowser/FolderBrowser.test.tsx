@@ -1147,6 +1147,14 @@ describe("引き直しと、人の操作がぶつかったとき", () => {
         await Promise.resolve();
       });
 
+      /*
+        **時報は引きを始めない。** 人の操作が飛んでいる間に始めると、引き直しが
+        「上がったあとの番号」を覚えてしまい、**遅れて返った古い階層の一覧が
+        「新しい」と判定されて押した先を上書きする**。ここが 2 のままであることが、
+        その順序を作らせない唯一の担保である。
+      */
+      expect(解く.length).toBe(2);
+
       // 押した先が返る
       一覧を返す(解く[1], `${ROOT}/MyDocs`, ["奥.md"]);
       await 流す();
@@ -1206,6 +1214,91 @@ describe("断り文が出ている間", () => {
       expect(screen.queryByText("計画.md")).toBeNull();
       // 引き直しそのものが飛んでいない（fetch は初回の1回きり）
       expect(回数).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+/**
+ * **押した先が、古い階層で上書きされない**（レビュー指摘・実害）。
+ *
+ * 番号を「始めた時点のもの」にするだけでは足りない順序がある。**人が押して
+ * `go` が番号を上げた直後**に時報が来ると、引き直しは上がったあとの番号を
+ * 覚えてしまう。押した先が先に返って画面が変わり、**遅れて返った古い階層の
+ * 一覧が「新しい」と判定されて上書きする**——行の中身とパンくずが食い違い、
+ * 行を押すと別の階層へ飛ぶ。
+ *
+ * 塞ぎ方は「人の操作が飛んでいる間は、そもそも引き始めない」。
+ */
+describe("押した先が、古い階層で上書きされない", () => {
+  it("navigation の飛行中に時報が来ても、引きが始まらない", async () => {
+    const 解く: Array<(r: Response) => void> = [];
+    const 問うた: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (url: string) =>
+          new Promise<Response>((resolve) => {
+            問うた.push(url);
+            解く.push(resolve);
+          }),
+      ),
+    );
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      置く();
+      解く[0](
+        new Response(JSON.stringify(listing(ROOT, ["MyDocs"])), { status: 200 }),
+      );
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(screen.getByText("MyDocs")).toBeTruthy();
+
+      // 人が押す（まだ返さない＝飛行中）
+      await act(async () => {
+        fireEvent.click(screen.getAllByTestId("folder-entry")[0]);
+        await Promise.resolve();
+      });
+      expect(解く.length).toBe(2);
+
+      // **その最中に時報。** 引きが始まってはいけない
+      await act(async () => {
+        vi.advanceTimersByTime(一覧を引き直す間隔);
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(解く.length).toBe(2);
+
+      // 押した先が返る
+      解く[1](
+        new Response(
+          JSON.stringify(listing(`${ROOT}/MyDocs`, ["奥.md"])),
+          { status: 200 },
+        ),
+      );
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      /*
+        **押した先が、そのまま残っている。**
+
+        見るのは**行**であって字ではない——`MyDocs` はパンくずとして正しく残る
+        （そこへ入ったのだから）。上書きされていれば、行のほうに親の中身
+        （`MyDocs`）が並ぶ。
+      */
+      const 行たち = screen
+        .getAllByTestId("folder-entry")
+        .map((e) => e.textContent ?? "");
+      expect(行たち.some((t) => t.includes("奥.md"))).toBe(true);
+      expect(行たち.some((t) => t.includes("MyDocs"))).toBe(false);
     } finally {
       vi.useRealTimers();
     }

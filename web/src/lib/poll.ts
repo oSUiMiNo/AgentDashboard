@@ -34,6 +34,18 @@
  * **畳んだときに止めるぶんは、ここでは面倒を見ない。** サイドバーは畳むと
  * 木から消える（`useFilesParts.tsx` の `{open && <Sidebar/>}`）ので、
  * [`usePoll`] の後片付けがそのまま効く。
+ *
+ * # `lib/repeat.ts` と骨格が似ている
+ *
+ * `handle` / `schedule` / `tick` / `stop` と自己再帰の `setTimeout`、`hidden()` を
+ * 見る形は、あちらとほぼ同じである。**それでも芯を共有していない**のは、
+ * **待つかどうかが根本的に違う**ため——あちらの `fire` は同期で、こちらの `run` は
+ * 待つ。待つ側には「飛行中か」「止めたあとに古い続きが積み直さないか」という
+ * 別の問題が生じ、あちらには要らない世代の管理が要る。
+ *
+ * **芯を1つにするなら、この差を外から与える形にできる。** ただし `repeat.ts` は
+ * 別の機能（押しっぱなしの連射）が使っているので、**そちらを巻き込む工事になる**。
+ * いまは分けたまま置き、片方だけ直る差が実害になった時点でまとめる。
  */
 
 import { useEffect, useRef } from 'react'
@@ -56,8 +68,9 @@ export interface Poller {
   start: () => void
   /** 止める。何度呼んでもよい */
   stop: () => void
-  /** 表へ戻った。**すぐ1回引いて、そこから測り直す** */
+  /** 表へ戻った。**間隔を空けていれば**すぐ引いて、そこから測り直す */
   wake: () => void
+  /** 生きているか。**引いている最中も生きている**と答える */
   running: () => boolean
 }
 
@@ -69,6 +82,8 @@ export interface PollerOptions {
   clearTimer: (handle: number) => void
   /** 隠れているか。**引く直前に見る**——測っている間に裏へ回ることがある */
   hidden: () => boolean
+  /** いまの時刻。[`Poller.wake`] の下限を測るために要る */
+  now: () => number
 }
 
 export function createPoller({
@@ -77,12 +92,15 @@ export function createPoller({
   setTimer,
   clearTimer,
   hidden,
+  now,
 }: PollerOptions): Poller {
   let handle: number | null = null
   /** いま引いている最中か。**重ねて引かない**——[`wake`] と時報が同時に来うる */
   let 引いている = false
-  /** 止めたあとに古い `run` の続きが次を measure しないための世代 */
+  /** 止めたあとに古い `run` の続きが積み直さないための世代 */
   let 世代 = 0
+  /** 最後に引き終わった時刻。[`wake`] の下限に使う */
+  let 最後に引いた = Number.NEGATIVE_INFINITY
 
   function stop(): void {
     世代 += 1
@@ -90,6 +108,13 @@ export function createPoller({
       clearTimer(handle)
       handle = null
     }
+    /*
+      **飛行中の印も落とす。** 落とさないと、`run` が飛んでいる最中に
+      `stop()` → `start()` とした poller が**二度と始まらない**——`start` の
+      門で弾かれ、飛行中だった `run` が解けても世代が違うので誰も積み直さない。
+      止めた時点でその `run` の結果は捨てる約束なので、印を残す意味も無い。
+    */
+    引いている = false
   }
 
   function schedule(この世代: number): void {
@@ -102,26 +127,56 @@ export function createPoller({
     }, intervalMs)
   }
 
+  /**
+   * 1回引く。**投げても呑む。**
+   *
+   * 呑まないと、`run` が投げた瞬間に [`tick`] が中断して**次の時報が二度と
+   * 積まれない**（巡回が静かに死ぬ）うえ、呼び出しが `void` なので
+   * **どこにも捕まらない拒否**になる。巡回は「遅れても次で追いつく」ものなので、
+   * 1回の失敗で止めてはいけない。
+   */
+  async function 引く(): Promise<void> {
+    引いている = true
+    try {
+      await run()
+    } catch {
+      // 呑む（上記）。理由を出すかどうかは `run` の側の仕事
+    } finally {
+      引いている = false
+      最後に引いた = now()
+    }
+  }
+
   async function tick(この世代: number): Promise<void> {
     if (この世代 !== 世代) {
       return
     }
-    // **隠れている間は引かない。** 測るのは続ける——表へ戻ったときに
-    // [`wake`] が来ない経路（`visibilitychange` を張り損ねた等）でも、
-    // 次の時報で追いつけるようにしておく
-    if (!hidden() && !引いている) {
-      引いている = true
-      try {
-        await run()
-      } finally {
-        引いている = false
+    try {
+      // **隠れている間は引かない。** 測るのは続ける——表へ戻ったときに
+      // [`wake`] が来ない経路でも、次の時報で追いつけるようにしておく
+      if (!hidden() && !引いている) {
+        await 引く()
       }
+    } finally {
+      // **必ず積む。** ここを `try` の外に置くと、途中で投げた回だけ
+      // 巡回が止まる
+      schedule(この世代)
     }
-    schedule(この世代)
   }
 
   async function wake(): Promise<void> {
     if (hidden() || 引いている) {
+      return
+    }
+    /*
+      **間隔より短い往復では引かない。** タブを数秒おきに行き来されると、
+      戻るたびに問い合わせが飛ぶ——`引いている` は同時実行しか防がないので、
+      連続実行は素通りする。寝ている PC 相手は1回に最大5秒かかるので、
+      10秒に1回という設計値を素で踏み越える。
+
+      **見送っても困らない。** 3秒しか離れていなければ、中身も3秒しか古くない。
+    */
+    if (now() - 最後に引いた < intervalMs) {
       return
     }
     // 測り直す。**古い時報を残すと、戻った直後に2回引く**
@@ -130,13 +185,11 @@ export function createPoller({
       handle = null
     }
     const この世代 = 世代
-    引いている = true
     try {
-      await run()
+      await 引く()
     } finally {
-      引いている = false
+      schedule(この世代)
     }
-    schedule(この世代)
   }
 
   return {
@@ -150,7 +203,10 @@ export function createPoller({
     },
     stop,
     wake: () => void wake(),
-    running: () => handle !== null,
+    // **飛行中も「生きている」と答える。** `tick` が入り口で `handle` を
+    // 空けるので、`handle` だけを見るといちばん動いている瞬間に「止まっている」
+    // と答えることになる
+    running: () => handle !== null || 引いている,
   }
 }
 
@@ -162,6 +218,10 @@ export function createPoller({
  * （「渡すたびに新しい関数だと、効果が走る → 状態が変わる → また新しい関数、と
  * **問い合わせが回り続ける**」）が、巡回では10秒おきどころでは済まなくなるため。
  *
+ * **写すのは効果の中で行う。** 描画の最中に `ref` へ書くと、**コミットされずに
+ * 捨てられた描画の `run` が残りうる**（React が禁じている書き方）。残ると、
+ * 画面に出ていない場所を引いて、その結果で画面を書き換えることになる。
+ *
  * **消えたら止まる。** サイドバーは畳むと木から消えるので、これが
  * 「畳んでいる間は問い合わせない」を兼ねる。
  */
@@ -170,7 +230,11 @@ export function usePoll(
   intervalMs: number,
 ): void {
   const 最新 = useRef(run)
-  最新.current = run
+  // **描画中には書かない**（上記）。効果は下の効果より先に宣言してあるので、
+  // 初回の時報が鳴る前に必ず入る
+  useEffect(() => {
+    最新.current = run
+  })
 
   useEffect(() => {
     const poller = createPoller({
@@ -179,6 +243,7 @@ export function usePoll(
       setTimer: (callback, ms) => window.setTimeout(callback, ms),
       clearTimer: (handle) => window.clearTimeout(handle),
       hidden: () => document.visibilityState !== 'visible',
+      now: () => Date.now(),
     })
     const 起きた = () => {
       if (document.visibilityState === 'visible') {
