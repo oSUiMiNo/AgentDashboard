@@ -124,13 +124,20 @@ export function usePress({
       if (event.target !== event.currentTarget) {
         return
       }
+      // **キーボードは、指が残した印と関係が無い。** 掴んで運んだあと（`click` が
+      // 握り潰されて印が残っている状態）に Tab で来て Enter を押しても開くように、
+      // ここで捨てる
+      長押し.current = null
       if (event.key === ' ') {
         // 器が `<section>` のときページが流れるのを止める
         event.preventDefault()
         if (!selectable) {
           return
         }
-        // キーボードは押すたびに入れ替える（PC のシングルと同じ）
+        // **キーボードは PC の規則に従う**（押すたびに入れ替える）。触る画面でも同じで、
+        // ここに「別の種類なら解くだけ」は持ち込まない——Space は名指しで「これを選ぶ」と
+        // 言う操作なので、押し間違いの話が当てはまらない。持ち込むと、キーボードでは
+        // 種類を選び直せなくなる
         空白で選んだ.current = true
         toggleSelect(kind, id)
         return
@@ -151,14 +158,22 @@ export function usePress({
 
   const onPointerDown = useCallback(
     (event: ReactPointerEvent) => {
-      if (
-        !mapping.longPressSelects ||
-        !selectable ||
-        event.pointerType === 'mouse'
-      ) {
+      /*
+        **前の押しの印を、まず捨てる。**
+
+        長押しで掴んで運ぶと、`useGrip` が `onClickCapture` で `click` を握り潰すので
+        **`onClick` が走らない**——印を降ろすのはそこだけなので、`成立: true` が残ったまま
+        次の押しへ持ち越される。持ち越すと、次に同じカードを押しても「長押しの直後の
+        `click`」と誤って捨てられ、**開かなくなる**。
+
+        ここは早い戻りより手前に置く。マウスや選べない箱は下で戻ってしまうので、
+        戻る前に捨てないと**マウスで押しても開かない**形が残る。
+      */
+      やめる()
+      長押し.current = null
+      if (!mapping.longPressSelects || event.pointerType === 'mouse') {
         return
       }
-      やめる()
       const origin = { x: event.clientX, y: event.clientY }
       長押し.current = {
         origin,
@@ -176,7 +191,7 @@ export function usePress({
         }, LONG_PRESS_MS),
       }
     },
-    [mapping.longPressSelects, selectable, kind, id, onLongPress, やめる],
+    [mapping.longPressSelects, kind, id, onLongPress, やめる],
   )
 
   const onPointerMove = useCallback(
@@ -222,6 +237,10 @@ export function usePress({
         **開く道を残すほうを採る**。選ぶほうは Space の `keydown` が持つ（上）。
 
         マウスの `click` は `detail` が1以上なので、ここを通らない。
+
+        **支援技術からの起動もここを通る**（読み上げソフトが出す `click` も `detail` は 0）。
+        **それでよい**——指で押し間違えたのではなく、その要素を名指しで起動しているので、
+        「開く」が意図に合う。解きたいときは `Esc` がある。
       */
       if (event.detail === 0) {
         if (空白で選んだ.current) {
@@ -278,7 +297,7 @@ export function usePress({
       */
       onOpen()
     },
-    [mapping.doubleOpens, mapping.single, kind, id, onOpen],
+    [mapping.doubleOpens, onOpen],
   )
 
   return {
