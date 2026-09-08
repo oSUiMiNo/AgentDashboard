@@ -1575,3 +1575,100 @@ describe('SessionTile の名前（利用者が付けたもの）', () => {
     expect(screen.queryByTestId('nickname-input')).toBeNull()
   })
 })
+
+/**
+ * 中クリック／Ctrl＋クリックで新しいタブに開く
+ * （イシュー `カードと枠を、中クリックで新しいタブに開く` テスト計画フェーズ2）。
+ *
+ * **足すだけの工事なので、いちばん見たいのは「壊していないこと」。** 開くこと自体より、
+ * **選択が動かない・画面が遷移しない・器の中の操作が巻き込まれない**を名指しで見張る。
+ */
+describe('SessionTile の中クリック', () => {
+  /**
+   * 中クリックを撃つ。**`fireEvent.auxClick` は無い**ので素の `MouseEvent` を投げる
+   * （`fireEvent(element, event)` は testing-library が公開している呼び方）。
+   */
+  // **`window.open` の差し替えを、テストごとに戻す。** 戻さないと同じスパイに
+  // 呼び出しが積み上がり、「呼ばれていない」を確かめる回が必ず落ちる
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  function 中クリック(element: Element, button = 1): boolean {
+    return fireEvent(
+      element,
+      new MouseEvent('auxclick', { bubbles: true, cancelable: true, button }),
+    )
+  }
+
+  it('カード本体を中クリックすると、専用画面を新しいタブに開く', () => {
+    const open = vi.spyOn(window, 'open').mockReturnValue(null)
+    renderTile(meta())
+
+    中クリック(screen.getByTestId('session-tile'))
+
+    expect(open).toHaveBeenCalledWith(`/s/${CARD}`, '_blank', 'noopener')
+  })
+
+  it('Ctrl＋左クリックでも、同じ行き先を新しいタブに開く', () => {
+    const open = vi.spyOn(window, 'open').mockReturnValue(null)
+    renderTile(meta())
+
+    fireEvent.click(screen.getByTestId('session-tile'), { button: 0, ctrlKey: true })
+
+    expect(open).toHaveBeenCalledWith(`/s/${CARD}`, '_blank', 'noopener')
+  })
+
+  it('**器の中の操作（鉛筆・ゴミ箱・電源）を中クリックしても開かない**——あれは別の意味を持つ', () => {
+    const open = vi.spyOn(window, 'open').mockReturnValue(null)
+    renderTile(meta())
+
+    中クリック(screen.getByTestId('tile-ops'))
+
+    expect(open).not.toHaveBeenCalled()
+  })
+
+  it('**中クリックしても、いまのタブは遷移しない**', () => {
+    vi.spyOn(window, 'open').mockReturnValue(null)
+    renderTile(meta())
+
+    中クリック(screen.getByTestId('session-tile'))
+
+    expect(screen.queryByText('専用画面')).toBeNull()
+  })
+
+  it('**中クリックしても、選択が変わらない**', () => {
+    vi.spyOn(window, 'open').mockReturnValue(null)
+    renderTile(meta())
+
+    中クリック(screen.getByTestId('session-tile'))
+
+    expect(getSelection().ids).toEqual([])
+  })
+
+  it('**Ctrl＋左クリックでも、選択が変わらない**——開いたうえに選ばれるのを防ぐ', () => {
+    vi.spyOn(window, 'open').mockReturnValue(null)
+    renderTile(meta())
+
+    fireEvent.click(screen.getByTestId('session-tile'), { button: 0, ctrlKey: true })
+
+    expect(getSelection().ids).toEqual([])
+  })
+
+  it('中ボタンの mousedown で、ブラウザの自動スクロールを止める', () => {
+    renderTile(meta())
+
+    expect(fireEvent.mouseDown(screen.getByTestId('session-tile'), { button: 1 })).toBe(
+      false,
+    )
+  })
+
+  it('右ボタンの auxclick では開かない', () => {
+    const open = vi.spyOn(window, 'open').mockReturnValue(null)
+    renderTile(meta())
+
+    中クリック(screen.getByTestId('session-tile'), 2)
+
+    expect(open).not.toHaveBeenCalled()
+  })
+})

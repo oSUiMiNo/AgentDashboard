@@ -29,6 +29,7 @@ import { useCallback, useState } from 'react'
 
 import { useReorder, type Bound, type Scroller } from '@/lib/useReorder'
 import { useGrip } from '@/lib/useGrip'
+import { useOpenInNewTab, 受けたら止める } from '@/lib/openInNewTab'
 import { 重ねる } from '@/lib/handlers'
 import { usePress } from '@/lib/usePress'
 import { useSettingsStore } from '@/stores/settings'
@@ -120,6 +121,17 @@ export function ProjectGroup({
     // **コメントだけでは実装にならない。** 空文字の ID でも選べてしまっていた
     selectable: projectId !== undefined,
   })
+  /*
+    **中クリック／Ctrl＋クリックで、同じ行き先を新しいタブに開く。**
+
+    **枠はリンクにできない**——`<section>` の中にカード・＋・× という押せるものが
+    入っており、押せるものを入れ子にしたリンクは支援技術から中身が消える。だから
+    カードと同じく自前で受ける（`lib/openInNewTab.ts` の冒頭）。
+
+    **記録を持たない枠でも開く。** 選べないのは「消す相手が居ない」からであって、
+    行き先が無いわけではない。
+  */
+  const 新しいタブ = useOpenInNewTab(projectPath(host, project))
 
   /*
     箱の中のカードの並べ替え（並べ替え設計§3）。**枠の中で閉じている**ので、
@@ -177,7 +189,20 @@ export function ProjectGroup({
         **押し分けは1箇所で決める**（設計§4-1）。枠の余白も、カードと同じ規則で
         「選ぶ／開く」が入れ替わる
       */
-      onClick={押し方.onClick}
+      /*
+        **Ctrl／Cmd＋左クリックは新しいタブ**（`lib/openInNewTab.ts`）。**受けたら
+        押し分けを走らせない**——同じ要素に付いた兄弟は `stopPropagation()` では
+        止まらないので、素朴に重ねると**開いたうえに枠が選ばれる**
+      */
+      onClick={受けたら止める(新しいタブ.onClick, 押し方.onClick)}
+      /*
+        **中クリックも新しいタブ。** 中のカードは自分で受けて泡立ちを止めるので、
+        ここへ届くのは**枠の余白を押したとき**だけ。＋ と × は `data-no-grab` を
+        持っているので、判定の側が弾く
+      */
+      onAuxClick={新しいタブ.onAuxClick}
+      // **ブラウザの自動スクロール（丸いアイコン）を止める。** 道はここしか無い
+      onMouseDown={新しいタブ.onMouseDown}
       onDoubleClick={押し方.onDoubleClick}
       /*
         **キーボードで到達できるようにする**（並べ替え設計§15-6・WCAG 2.2 SC 2.5.7）。

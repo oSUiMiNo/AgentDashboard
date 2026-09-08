@@ -398,3 +398,111 @@ describe('ProjectGroup', () => {
     expect(screen.getByText(/「\+」で起こせます/)).toBeInTheDocument()
   })
 })
+
+/**
+ * 中クリック／Ctrl＋クリックで新しいタブに開く
+ * （イシュー `カードと枠を、中クリックで新しいタブに開く` テスト計画フェーズ3）。
+ *
+ * **枠はリンクにできない**——`<section>` の中にカード・＋・× という押せるものが入って
+ * いるため。だからカードと同じく自前で受ける。ここで見たいのは
+ * **カードを押したときに枠まで開かないこと**である。
+ */
+describe('ProjectGroup の中クリック', () => {
+  // **`window.open` の差し替えを、テストごとに戻す**（積み上がると「呼ばれていない」が落ちる）
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  /** 中クリックを撃つ。`fireEvent.auxClick` は無いので素の `MouseEvent` を投げる */
+  function 中クリック(element: Element, button = 1): boolean {
+    return fireEvent(
+      element,
+      new MouseEvent('auxclick', { bubbles: true, cancelable: true, button }),
+    )
+  }
+
+  it('枠の余白を中クリックすると、PJT 専用画面を新しいタブに開く', () => {
+    const open = vi.spyOn(window, 'open').mockReturnValue(null)
+    renderGroup([meta('a')], 'pid-1')
+
+    中クリック(screen.getByTestId('project-group'))
+
+    expect(open).toHaveBeenCalledWith(
+      `/p/local/${encodeURIComponent(PROJECT)}`,
+      '_blank',
+      'noopener',
+    )
+  })
+
+  it('Ctrl＋左クリックでも、同じ行き先を新しいタブに開く', () => {
+    const open = vi.spyOn(window, 'open').mockReturnValue(null)
+    renderGroup([meta('a')], 'pid-1')
+
+    fireEvent.click(screen.getByTestId('project-group'), { button: 0, ctrlKey: true })
+
+    expect(open).toHaveBeenCalledWith(
+      `/p/local/${encodeURIComponent(PROJECT)}`,
+      '_blank',
+      'noopener',
+    )
+  })
+
+  it('**枠の中のカードを中クリックすると、カードの行き先だけが開く**——枠は開かない', () => {
+    const open = vi.spyOn(window, 'open').mockReturnValue(null)
+    renderGroup([meta('a')], 'pid-1')
+
+    中クリック(screen.getByTestId('session-tile'))
+
+    expect(open).toHaveBeenCalledTimes(1)
+    expect(open).toHaveBeenCalledWith('/s/a', '_blank', 'noopener')
+  })
+
+  it('**「×」を中クリックしても開かない**——あれは別の意味を持つ', () => {
+    const open = vi.spyOn(window, 'open').mockReturnValue(null)
+    renderGroup([], 'pid-1')
+
+    中クリック(screen.getByTestId('project-remove'))
+
+    expect(open).not.toHaveBeenCalled()
+  })
+
+  it('**記録を持たない枠でも開く**——選べないだけで、行き先は在る', () => {
+    const open = vi.spyOn(window, 'open').mockReturnValue(null)
+    renderGroup([meta('a')])
+
+    中クリック(screen.getByTestId('project-group'))
+
+    expect(open).toHaveBeenCalledWith(
+      `/p/local/${encodeURIComponent(PROJECT)}`,
+      '_blank',
+      'noopener',
+    )
+  })
+
+  it('**中クリックしても、いまのタブは遷移しない**', () => {
+    vi.spyOn(window, 'open').mockReturnValue(null)
+    renderGroup([meta('a')], 'pid-1')
+
+    中クリック(screen.getByTestId('project-group'))
+
+    expect(screen.getByTestId('current-path')).toHaveTextContent('/')
+    expect(screen.getByTestId('current-path')).not.toHaveTextContent('/p/')
+  })
+
+  it('**中クリックしても、選択が変わらない**', () => {
+    vi.spyOn(window, 'open').mockReturnValue(null)
+    renderGroup([meta('a')], 'pid-1')
+
+    中クリック(screen.getByTestId('project-group'))
+
+    expect(getSelection().ids).toEqual([])
+  })
+
+  it('中ボタンの mousedown で、ブラウザの自動スクロールを止める', () => {
+    renderGroup([meta('a')], 'pid-1')
+
+    expect(fireEvent.mouseDown(screen.getByTestId('project-group'), { button: 1 })).toBe(
+      false,
+    )
+  })
+})

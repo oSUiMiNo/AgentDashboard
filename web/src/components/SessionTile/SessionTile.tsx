@@ -44,6 +44,7 @@
 import { modelLabel } from '@/lib/models'
 import { usePress } from '@/lib/usePress'
 import { useGrip } from '@/lib/useGrip'
+import { useOpenInNewTab, 受けたら止める } from '@/lib/openInNewTab'
 import { 重ねる } from '@/lib/handlers'
 import type { Bound } from '@/lib/useReorder'
 import { motion } from 'motion/react'
@@ -282,6 +283,12 @@ export function SessionTile({
     onLongPress: 掴み.arm,
     onOpen: () => navigate(sessionPath(cardId)),
   })
+  /*
+    **中クリック／Ctrl＋クリックで、同じ行き先を新しいタブに開く。** 行き先の組み立ては
+    上と同じ `sessionPath` を使う——ここで文字列を組むと、片方だけ直したときに
+    「リンクは作れるのに開けない」が起きる（`lib/routes.ts` の冒頭）
+  */
+  const 新しいタブ = useOpenInNewTab(sessionPath(cardId))
   const reviving = useReviving(cardId)
   const cardError = useCardError(cardId)
   const notices = useCardNotices(cardId)
@@ -555,7 +562,20 @@ export function SessionTile({
             止めているのは、親（グループの余白）へ伝わると常に全員の横並びが
             開いてしまうため（仕様§10 の作り分け）
           */
-          onClick={押し方.onClick}
+          /*
+            **Ctrl／Cmd＋左クリックは新しいタブ**（`lib/openInNewTab.ts`）。**受けたら
+            押し分けを走らせない**——同じ要素に付いた兄弟は `stopPropagation()` では
+            止まらないので、素朴に重ねると**開いたうえにカードが選ばれる**
+          */
+          onClick={受けたら止める(新しいタブ.onClick, 押し方.onClick)}
+          /*
+            **中クリックも新しいタブ。** 器（`tile-shell`）ではなく本体へ付ける——
+            操作の群（鉛筆・ゴミ箱・電源）は器の直下にあるので、器へ付けると
+            **操作を中クリックしただけで開く**
+          */
+          onAuxClick={新しいタブ.onAuxClick}
+          // **ブラウザの自動スクロール（丸いアイコン）を止める。** 道はここしか無い
+          onMouseDown={新しいタブ.onMouseDown}
           // **Space で選び、Enter で開く**（並べ替え設計§15-6）。キーボードで帯へ辿り着くため
           onKeyDown={押し方.onKeyDown}
           onDoubleClick={押し方.onDoubleClick}
