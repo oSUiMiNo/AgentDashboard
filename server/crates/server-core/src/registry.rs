@@ -622,7 +622,9 @@ impl SessionRegistry {
         // - その会話が**枝である**：分かれ元の履歴を丸ごと引き継いでいる
         // - その会話から**枝が分かれている**：分かれられたのだから中身があった
         if self.branch_of(account_id, claude_session_id).is_some()
-            || self.branch_child_of(account_id, claude_session_id).is_some()
+            || self
+                .branch_child_of(account_id, claude_session_id)
+                .is_some()
         {
             return true;
         }

@@ -261,7 +261,11 @@ async fn 押すと元はその場に残り枝が右隣へ入る() {
 ///
 /// これで実機と同じ条件が揃う——**席は空（履歴の窓も直前の応答も無い）だが、会話には
 /// 中身がある**。
-async fn 応答を載せずに入力待ちへ(server: &TestServer, target: &client::Target, card: &str) {
+async fn 応答を載せずに入力待ちへ(
+    server: &TestServer,
+    target: &client::Target,
+    card: &str,
+) {
     client::send_input(target, &card[..8], "hook Stop", false, 5)
         .await
         .expect("フックを撃てること");
@@ -320,13 +324,16 @@ async fn 同じ親から続けて枝を作れる() {
     let 二本目の親文字 = 二本目の親.clone();
     let 親文字2 = 親.clone();
     let list = server
-        .wait_for_listed("元の会話がさらに新しい席へ移る", move |list| {
-            list.iter().any(|meta| {
-                meta.claude_session_id == Some(元の会話)
-                    && meta.card_id.to_string() != 親文字2
-                    && meta.card_id.to_string() != 二本目の親文字
-            })
-        })
+        .wait_for_listed(
+            "元の会話がさらに新しい席へ移る",
+            move |list| {
+                list.iter().any(|meta| {
+                    meta.claude_session_id == Some(元の会話)
+                        && meta.card_id.to_string() != 親文字2
+                        && meta.card_id.to_string() != 二本目の親文字
+                })
+            },
+        )
         .await;
     let 三本目の親 = list
         .iter()
@@ -349,7 +356,10 @@ async fn 同じ親から続けて枝を作れる() {
     let list = server
         .wait_for_listed("枝が3本になる", |list| list.len() == 4)
         .await;
-    let 枝の数 = list.iter().filter(|meta| meta.branched_from == Some(元の会話)).count();
+    let 枝の数 = list
+        .iter()
+        .filter(|meta| meta.branched_from == Some(元の会話))
+        .count();
     assert_eq!(枝の数, 3, "同じ親から3本の枝が生えていない");
     let 元を持つ席 = list
         .iter()
