@@ -37,15 +37,46 @@
  * 代金が軽い——重い相手なら「焦点だけ動かして Enter で決める」ほうが正しいが、
  * ここは**押した瞬間に中身が変わるほうが速い。**
  *
+ * # 並べ替えは、指とキーボードの両方で
+ *
+ * **要件では「採らない」と決めていたものを、利用者が覆した**（2026-09-08）。
+ * 断った理由は3つあったが、**消えたのは2つだけ**である。
+ *
+ * | 断った理由 | いま |
+ * |---|---|
+ * | 要望に含まれていない | **含まれた** |
+ * | `lib/reorder.ts` は2次元用で1次元の帯に合わない | **流用していない。** 1本の帯に合う形を素直に書いた |
+ * | **WCAG 2.5.7（ポインタ以外の手段）が要る** | **消えていない。** だから ← → だけでなく、**Ctrl+Shift+← → でタブそのものを動かせる** |
+ *
+ * **ドラッグだけで入れると、キーボードで並べ替えられないものが1つ増える。**
+ * この帯については満たす、というのが利用者との約束である。
+ *
+ * # 掴むのはマウスの主ボタンだけ
+ *
+ * 中ボタンと右ボタンで掴めると、**中クリックで新しいタブに開こうとしただけで並びが
+ * 変わる**（隣の工事が同じ穴を踏んで直している）。指とペンは今までどおり。
+ *
+ * # 少し動くまでは掴まない
+ *
+ * 押した指がわずかに動くのは普通なので、**閾値を越えるまではただの押下として扱う**。
+ * 越えなければ「選ぶ」、越えたら「並べ替え」——`README.md` が「開く操作と選ぶ操作は、
+ * 押し方で分けてある」と書いているのと同じ理由で、**並べ替えが押下を食わない**。
+ *
  * # 「タブ」はアプリの中の話である
  *
  * この帯の隣には**ブラウザのタブ**を開くボタン（`file-open-tab`）が既に住んでいる。
  * **同じ帯に2つの意味の「タブ」が並ぶ**ので、コードでも文書でもどちらの話かを書く。
  */
 
-import { useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import {
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from 'react'
 import { CloseGlyph } from '@/components/ui/glyphs'
-import { stripScrollFor, tabLabels } from '@/lib/fileTabs'
+import { dropIndexFor, stripScrollFor, tabLabels } from '@/lib/fileTabs'
 
 interface Props {
   /** 開いているタブの絶対パス（左から右の順） */
@@ -56,11 +87,26 @@ interface Props {
   root: string
   onSelect: (path: string) => void
   onClose: (path: string) => void
+  /** 並べ替え。**抜いて差す**（`lib/fileTabs.ts` の `moveTab`） */
+  onReorder: (from: number, to: number) => void
 }
 
-export function FileTabs({ tabs, current, root, onSelect, onClose }: Props) {
+export function FileTabs({
+  tabs,
+  current,
+  root,
+  onSelect,
+  onClose,
+  onReorder,
+}: Props) {
   const labels = tabLabels(tabs)
   const stripRef = useRef<HTMLDivElement>(null)
+  /** 掴んでいるもの。**閾値を越えるまでは「押下かもしれない」ままにしておく** */
+  const 掴み = useRef<{ path: string; x: number; 越えた: boolean } | null>(null)
+  /** 直前の押下が並べ替えだったか。**そのあとの `click` を食わせないため** */
+  const 運んだ = useRef(false)
+  /** 運んでいる1枚。**見た目に出すためだけ**（判断は `掴み` が持つ） */
+  const [運び中, set運び中] = useState<string | null>(null)
 
   /*
     **選ばれているタブを、見えるところまで送る**（`stripScrollFor`）。
@@ -106,6 +152,30 @@ export function FileTabs({ tabs, current, root, onSelect, onClose }: Props) {
     if (今 < 0 || tabs.length === 0) {
       return
     }
+    /*
+      **Ctrl+Shift+← → は、選択ではなくタブそのものを動かす**（WCAG 2.5.7）。
+      **端では回さない**——移る（← →）は端で回すのが自然だが、**運ぶのは端で
+      止まるほうが自然**である。回すと、右端で1回押しただけで左端へ飛ぶ。
+    */
+    if (event.ctrlKey && event.shiftKey) {
+      const 行き先 =
+        event.key === 'ArrowLeft'
+          ? 今 - 1
+          : event.key === 'ArrowRight'
+            ? 今 + 1
+            : -1
+      if (行き先 < 0 || 行き先 >= tabs.length) {
+        return
+      }
+      event.preventDefault()
+      onReorder(今, 行き先)
+      // 運んだ先で押し続けられるように、焦点を連れていく
+      requestAnimationFrame(() => 焦点を移す(current))
+      return
+    }
+    if (event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) {
+      return
+    }
     const 先 =
       event.key === 'ArrowLeft'
         ? (今 - 1 + tabs.length) % tabs.length
@@ -127,9 +197,71 @@ export function FileTabs({ tabs, current, root, onSelect, onClose }: Props) {
     }
     onSelect(path)
     // 焦点も連れていく。**選択だけ動かすと、次の ← → が古い位置から始まる**
-    event.currentTarget
-      .querySelector<HTMLElement>(`[data-testid="file-tab"][data-path="${CSS.escape(path)}"]`)
+    焦点を移す(path)
+  }
+
+  /** そのタブへ焦点を移す。**運んだあとも押し続けられるように要る** */
+  function 焦点を移す(path: string) {
+    stripRef.current
+      ?.querySelector<HTMLElement>(
+        `[data-testid="file-tab"][data-path="${CSS.escape(path)}"]`,
+      )
       ?.focus()
+  }
+
+  /** 帯の中の、各タブの中心の x（並び順） */
+  function 中心を測る(): number[] {
+    const 帯 = stripRef.current
+    if (帯 === null) {
+      return []
+    }
+    return tabs.map((path) => {
+      const el = 帯.querySelector<HTMLElement>(
+        `[data-testid="file-tab"][data-path="${CSS.escape(path)}"]`,
+      )
+      if (el === null) {
+        return Number.POSITIVE_INFINITY
+      }
+      const r = el.getBoundingClientRect()
+      return r.left + r.width / 2
+    })
+  }
+
+  const 押した = (event: ReactPointerEvent<HTMLElement>, path: string) => {
+    // **掴むのはマウスの主ボタンだけ。** 指とペンは今までどおり
+    if (event.pointerType === 'mouse' && event.button !== 0) {
+      return
+    }
+    掴み.current = { path, x: event.clientX, 越えた: false }
+  }
+
+  const 動かした = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const g = 掴み.current
+    if (g === null) {
+      return
+    }
+    // **少し動くまでは掴まない。** 押した指はわずかに動くのが普通
+    if (!g.越えた && Math.abs(event.clientX - g.x) < 4) {
+      return
+    }
+    if (!g.越えた) {
+      g.越えた = true
+      set運び中(g.path)
+      event.currentTarget.setPointerCapture(event.pointerId)
+    }
+    const from = tabs.indexOf(g.path)
+    const to = dropIndexFor(中心を測る(), event.clientX)
+    if (from >= 0 && to >= 0 && to !== from) {
+      onReorder(from, to)
+    }
+  }
+
+  const 離した = () => {
+    // **運んだ直後の `click` を食わせない。** 押した場所と離した場所が違うので、
+    // そのまま通すと「運んだ先のタブを選んだ」ことになる
+    運んだ.current = 掴み.current?.越えた === true
+    掴み.current = null
+    set運び中(null)
   }
 
   return (
@@ -139,6 +271,9 @@ export function FileTabs({ tabs, current, root, onSelect, onClose }: Props) {
       role="tablist"
       aria-label="開いているファイル"
       onKeyDown={矢印}
+      onPointerMove={動かした}
+      onPointerUp={離した}
+      onPointerCancel={離した}
       /*
         **`min-w-0` が要る。** flex の子は既定で中身より小さくならないので、これが無いと
         タブ帯が縮まず、右のボタン群を画面の外へ押し出す。
@@ -165,7 +300,8 @@ export function FileTabs({ tabs, current, root, onSelect, onClose }: Props) {
               タブの hover は**薄くするのではなく、別の不透明な地へ移す**——薄くすると
               裏の地が透け、しかも「裏に何が来るか」で見え方が変わる。
             */
-            className={`flex h-7 shrink-0 items-center rounded-md transition-colors ${
+            data-dragging={path === 運び中 ? 'true' : undefined}
+            className={`flex h-7 shrink-0 items-center rounded-md transition-colors data-[dragging=true]:shadow-lg data-[dragging=true]:ring-2 data-[dragging=true]:ring-ring/60 ${
               selected
                 ? 'bg-primary text-primary-foreground'
                 : 'bg-muted text-muted-foreground hover:bg-secondary hover:text-foreground'
@@ -178,8 +314,18 @@ export function FileTabs({ tabs, current, root, onSelect, onClose }: Props) {
               data-testid="file-tab"
               data-path={path}
               // **基準は画面に出さず `title` へ**（もとの chip から引き継ぐ）
-              title={`${path}（${root} からの相対パス）`}
-              onClick={() => onSelect(path)}
+              /* **ポインタ以外の道を、押す本人が見つけられるようにする**（WCAG 2.5.7）。
+                 並べ替えは掴んで運べるが、それだけだとキーボードの人に道が無い */
+              title={`${path}（${root} からの相対パス）\n並べ替え：Ctrl+Shift+← →`}
+              onPointerDown={(event) => 押した(event, path)}
+              onClick={() => {
+                // **運んだあとの押下は、選び直しではない**
+                if (運んだ.current) {
+                  運んだ.current = false
+                  return
+                }
+                onSelect(path)
+              }}
               className="h-full max-w-[12rem] cursor-pointer truncate rounded-l-md pr-1 pl-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
             >
               {label}

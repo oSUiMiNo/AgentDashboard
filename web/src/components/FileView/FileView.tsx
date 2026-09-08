@@ -36,7 +36,7 @@
  * SVG にも同じ理由が当てはまるので、そちらにも出す（設計§7-4）。
  */
 
-import { useEffect, useRef, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { FileFind } from '@/components/FileView/FileFind'
 import { FileTabs } from '@/components/FileView/FileTabs'
@@ -117,6 +117,8 @@ interface Props {
   onSelectTab: (path: string) => void
   /** タブの ✕。**1枚だけ閉じる**（下の `onClose` は列ごと） */
   onCloseTab: (path: string) => void
+  /** タブを並べ替えた（掴んで運ぶ／Ctrl+Shift+← →） */
+  onReorderTab: (from: number, to: number) => void
   /**
    * **列ごと**閉じる。省略すると閉じる操作を出さない。
    *
@@ -151,6 +153,7 @@ export function FileView({
   tabs,
   onSelectTab,
   onCloseTab,
+  onReorderTab,
   onClose,
   onUnreadable,
 }: Props) {
@@ -172,12 +175,17 @@ export function FileView({
   /** 探す窓が開いているか（`ファイルビュアの中を Ctrl+F で探せるようにする` 設計） */
   const [find, setFind] = useState(false)
   /**
-   * 箱で描いている HTML ／ SVG で Ctrl+F が押されたか。
+   * 探すために、プレビューから生テキストへこちらが切り替えたか。
    *
-   * **押されるまで出さない。** HTML を開くたびに「探せません」と書いてあると、
-   * 探すつもりの無い人にとってはただの雑音になる。
+   * **黙って見せ方を変えない。** 押した人から見ると画面が別物になるので、
+   * **なぜ変わったのかを1行で言う**。押されるまでは出さない。
    */
-  const [逃げ道, set逃げ道] = useState(false)
+  const [切替えた, set切替えた] = useState(false)
+  /**
+   * 探す合図の回数。**窓が既に開いているときに、もう一度押された**ことを
+   * 窓へ伝えるために要る（入力を選び直して打ち直せる状態にする）。
+   */
+  const [探す合図, set探す合図] = useState(0)
   /** 遡る箱。**探す相手であり、送る相手でもある** */
   const bodyRef = useRef<HTMLDivElement>(null)
   const [zoom, 大きさ] = useFileZoom()
@@ -192,7 +200,7 @@ export function FileView({
     // **ファイルを切り替えたら探す窓を畳む。** 前のファイルで打った語がそのまま
     // 残ると、当たりの数だけが別の文書のものに見える
     setFind(false)
-    set逃げ道(false)
+    set切替えた(false)
     setBroken(false)
     setContent(null)
     setPicture(null)
@@ -273,24 +281,56 @@ export function FileView({
    *   ——外から中身に触れないのは**隔離が効いている証拠**であって、直すべき不具合ではない
    */
   const 探せる = !loading && content !== null && !箱で描いている
+  /**
+   * 探す入口を出すか。**プレビューでも出す**（利用者の指摘・2026-09-08）。
+   *
+   * # 箱の中は探せない。だから、探せる見せ方へ連れていく
+   *
+   * `iframe` は別の出自を名乗るので、**外から中身に触れない**——これは隔離が効いて
+   * いる証拠であって、直せる不具合ではない。**入口を出さない**という前の答えは、
+   * 「押せるのに何も起きないボタンを出さない」という理由では正しかったが、
+   * **利用者から見ると「探せない道具」に見えていた**。
+   *
+   * **押したら生テキストへ切り替えて、そこで探す。** 同じ中身の別の見せ方であり、
+   * 元から用意してある逃げ道でもある。**何も起きないボタンにはならず、黙って
+   * 画面を変えることもしない**（切り替えたことは1行で言う）。
+   *
+   * **画像にだけは出さない。** あちらは文字を持たないので、連れていく先が無い。
+   */
+  const 探す入口 = !loading && content !== null
+
+  /**
+   * 探し始める。**プレビューなら、生テキストへ連れていってから開く。**
+   *
+   * 既に開いているときも合図だけ増やす——**もう一度押したら打ち直せる**のが
+   * 探す窓の作法である。
+   */
+  const 探し始める = useCallback(() => {
+    if (箱で描いている) {
+      setRaw(true)
+      set切替えた(true)
+    }
+    setFind(true)
+    set探す合図((n) => n + 1)
+  }, [箱で描いている])
 
   /*
-    **Ctrl+F を奪うのは、探せるときだけ。**
+    **Ctrl+F ／ Ctrl+G を奪うのは、探す入口があるときだけ。**
 
     ブラウザの探索は画面全体が対象なので、「開いているファイルの中だけ」という目的を
     ブラウザ側の機能では満たせない。一方**常に奪うのは行き過ぎ**で、ファイルビュアを
     開いていない画面でまで奪うと、ブラウザ本来の探索を取り上げることになる。
 
-    **箱で描いているときは奪わない。** ただし黙って何もしないと「探せない道具だ」と
-    読まれるので、**逃げ道（生テキストで見れば探せる）だけを画面に出す**——
-    ブラウザ本来の探索はそのまま開く。
+    **プレビューでも奪うようになった。** 奪ったうえで生テキストへ連れていくので、
+    **押した結果が必ず在る**——奪っておいて何もしないのが、いちばん悪い形である。
 
     **焦点の位置で結果を変えない**（`lib/keys.ts` の作法）。この画面には入力口が2つ
     常設されているが、Ctrl+F はどちらでも文字を打つ操作ではないので、奪っても
-    打鍵の邪魔にならない。**窓の中の Ctrl+F は窓自身が先に食う**ので、ここへは来ない。
+    打鍵の邪魔にならない。**窓の中の Ctrl+G は窓自身が先に食う**（あちらでは「次へ」）
+    ので、ここへは来ない。
   */
   useEffect(() => {
-    if (loading || content === null) {
+    if (!探す入口) {
       return
     }
     const 押した = (event: KeyboardEvent) => {
@@ -306,17 +346,12 @@ export function FileView({
       ) {
         return
       }
-      if (箱で描いている) {
-        // **奪わない。** ブラウザ本来の探索を開かせたうえで、逃げ道だけを言う
-        set逃げ道(true)
-        return
-      }
       event.preventDefault()
-      setFind(true)
+      探し始める()
     }
     globalThis.addEventListener('keydown', 押した)
     return () => globalThis.removeEventListener('keydown', 押した)
-  }, [loading, content, 箱で描いている])
+  }, [探す入口, 探し始める])
 
   return (
     <section
@@ -363,19 +398,24 @@ export function FileView({
           root={root}
           onSelect={onSelectTab}
           onClose={onCloseTab}
+          onReorder={onReorderTab}
         />
 
         <div className="ml-auto flex shrink-0 items-center gap-1">
-          {探せる && (
+          {探す入口 && (
             <Button
               type="button"
               variant="ghost"
               size="icon-sm"
               data-testid="file-find-open"
               aria-label="このファイルの中を探す"
-              title="このファイルの中を探す（Ctrl+F）"
+              title={
+                箱で描いている
+                  ? 'このファイルの中を探す（Ctrl+F ／ Ctrl+G）。生テキストに切り替わります'
+                  : 'このファイルの中を探す（Ctrl+F ／ Ctrl+G）'
+              }
               aria-pressed={find}
-              onClick={() => setFind(true)}
+              onClick={探し始める}
             >
               <SearchGlyph />
             </Button>
@@ -446,9 +486,9 @@ export function FileView({
               title={raw ? '整形して見る' : '生テキストで見る'}
               onClick={() => {
                 setRaw((now) => !now)
-                // **見せ方を変えたら逃げ道の案内は消す。** 生テキストへ移れば探せる
-                // ようになるし、箱へ戻したときにまた出すのは押されてからでよい
-                set逃げ道(false)
+                // **人が自分で見せ方を変えたら、こちらの断りは消す。** そこから先は
+                // 押した人が選んだ見せ方であって、こちらが切り替えた結果ではない
+                set切替えた(false)
               }}
             >
               {/* **狭い窓では印だけ**（§39.6）。言葉は `aria-label` と `title` に残る */}
@@ -505,13 +545,13 @@ export function FileView({
         </p>
       )}
 
-      {/* **箱の中は探せない。逃げ道だけを言う**（`ファイルビュアの中を Ctrl+F で
-          探せるようにする` 要件）。黙って消えると「探せない道具だ」と読まれる。
-          **押されるまで出さない**——探すつもりの無い人には雑音でしかない */}
-      {逃げ道 && 箱で描いている && (
-        <p data-testid="file-find-hint" className="text-xs text-amber-300">
-          この見せ方では中を探せません。「生テキストで見る」に切り替えると Ctrl+F で
-          探せます。
+      {/* **黙って見せ方を変えない。** 箱の中は外から触れないので、探すには生テキストへ
+          移るしかない——**移ったこと自体は正しいが、理由を言わないと画面が壊れたように
+          見える**。「整形して見る」で戻れることまで書く */}
+      {切替えた && raw && (
+        <p data-testid="file-find-switched" className="text-xs text-amber-300">
+          中を探すために、生テキストに切り替えました（プレビューのままでは中に触れません）。
+          「整形して見る」で戻せます。
         </p>
       )}
 
@@ -583,6 +623,7 @@ export function FileView({
             <FileFind
               /* **整形と生テキストでは木の形が違う**ので、切り替えたら探し直す */
               contentKey={`${path}:${String(raw)}`}
+              合図={探す合図}
               bodyRef={bodyRef}
               onClose={() => setFind(false)}
             />
@@ -619,13 +660,18 @@ export function FileView({
                それは**断りの理由と生テキストの中身が1回で揃う**という上の作法を
                手放すことになる。**上限の話とは別の判断**なので、ここでは事実だけ
                残す */
-            <iframe
-              data-testid="file-frame"
-              title={relative}
-              sandbox="allow-scripts"
-              src={rawUrl(host, path)}
-              className="h-full w-full border-0 bg-white"
-            />
+            /* **箱ごと拡大縮小する**（`index.css` の `.file-frame`）。中へ触れないので、
+               `iframe` そのものを `transform` で拡大し、寸法を逆数で伸ばして打ち消す。
+               外側の `file-frame-box` は**はみ出しを隠すため**に要る */
+            <div className="file-frame-box">
+              <iframe
+                data-testid="file-frame"
+                title={relative}
+                sandbox="allow-scripts"
+                src={rawUrl(host, path)}
+                className="file-frame border-0 bg-white"
+              />
+            </div>
           ) : markdown && !raw ? (
             <div
               data-testid="file-markdown"

@@ -1257,6 +1257,60 @@ describe('タブ', () => {
     expect(タブの並び()).toEqual([`${ROOT}/計画.md`])
   })
 
+  it('並べ替えると、順序が覚えに残る', async () => {
+    // **読み込み直しても並びが戻る**ところまでが1組（利用者の指定・2026-09-08）
+    覚えさせる({
+      picks: [`${ROOT}/a.md`, `${ROOT}/b.md`, `${ROOT}/c.md`],
+      pick: `${ROOT}/a.md`,
+    })
+    置く()
+    await screen.findByTestId('file-view')
+
+    screen.getAllByTestId('file-tab')[0]!.focus()
+    await userEvent.keyboard('{Control>}{Shift>}{ArrowRight}{/Shift}{/Control}')
+
+    expect(タブの並び()).toEqual([
+      `${ROOT}/b.md`,
+      `${ROOT}/a.md`,
+      `${ROOT}/c.md`,
+    ])
+    expect(覚えている().picks).toEqual([
+      `${ROOT}/b.md`,
+      `${ROOT}/a.md`,
+      `${ROOT}/c.md`,
+    ])
+    // **選択は動かさない。** 動かしたのは並びであって、見ているものではない
+    expect(選ばれている()).toBe(`${ROOT}/a.md`)
+  })
+
+  it('畳んだタブは、並べ替えても居場所が変わらない', async () => {
+    /*
+      **位置は「帯に見えている並び」で来る。** 畳んだタブ（読めなくて隠しているもの）を
+      そのまま全体の並びへ当てると1つずれ、**起きたときに戻る並びが押した覚えの無い形**
+      になる。
+    */
+    失敗 = { [`${ROOT}/眠い.md`]: 503 }
+    覚えさせる({
+      picks: [`${ROOT}/眠い.md`, `${ROOT}/a.md`, `${ROOT}/b.md`],
+      pick: `${ROOT}/眠い.md`,
+    })
+    置く()
+    await waitFor(() => {
+      expect(タブの並び()).toEqual([`${ROOT}/a.md`, `${ROOT}/b.md`])
+    })
+
+    screen.getAllByTestId('file-tab')[0]!.focus()
+    await userEvent.keyboard('{Control>}{Shift>}{ArrowRight}{/Shift}{/Control}')
+
+    expect(タブの並び()).toEqual([`${ROOT}/b.md`, `${ROOT}/a.md`])
+    // 畳んだ1枚は先頭のまま
+    expect(覚えている().picks).toEqual([
+      `${ROOT}/眠い.md`,
+      `${ROOT}/b.md`,
+      `${ROOT}/a.md`,
+    ])
+  })
+
   it('相手が変わると、並びが作り直される', async () => {
     // **前の PJT のファイルを読みに行かない**（描画中に直す）
     /*

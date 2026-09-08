@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { stripScrollFor, tabLabels } from '@/lib/fileTabs'
+import { dropIndexFor, moveTab, stripScrollFor, tabLabels } from '@/lib/fileTabs'
 
 /**
  * タブに出す名前（`サイドバーで開いたファイルを、タブで並べて切り替える` 要件）。
@@ -88,5 +88,46 @@ describe('lib/fileTabs stripScrollFor', () => {
     expect(
       stripScrollFor({ 幅: 300, いまの位置: 0 }, { 左: 0, 幅: 1000 }),
     ).toBeGreaterThanOrEqual(0)
+  })
+})
+
+/**
+ * タブの並べ替え（利用者の指定・2026-09-08）。
+ *
+ * **要件では「採らない」と決めていたものを、利用者が覆した。** 断った理由のうち
+ * WCAG 2.5.7（ポインタ以外の手段）は消えていないので、**キーボードでも動かせる**
+ * ことまでを1組として入れてある。
+ */
+describe('lib/fileTabs 並べ替え', () => {
+  it('抜いて差す', () => {
+    expect(moveTab(['a', 'b', 'c'], 0, 2)).toEqual(['b', 'c', 'a'])
+    expect(moveTab(['a', 'b', 'c'], 2, 0)).toEqual(['c', 'a', 'b'])
+    expect(moveTab(['a', 'b', 'c'], 0, 1)).toEqual(['b', 'a', 'c'])
+  })
+
+  it('同じところへ落としたら何も変わらない', () => {
+    const 元 = ['a', 'b', 'c']
+    expect(moveTab(元, 1, 1)).toBe(元)
+  })
+
+  it('範囲の外は何もしない', () => {
+    // **呼ぶ側が端で止める判断を持たなくて済む**（左端でさらに左へ、を毎回書かない）
+    const 元 = ['a', 'b', 'c']
+    expect(moveTab(元, 0, -1)).toBe(元)
+    expect(moveTab(元, 2, 3)).toBe(元)
+    expect(moveTab(元, -1, 0)).toBe(元)
+  })
+
+  it('落とし先は、中心がいちばん近いもの', () => {
+    // タブは幅がばらばらなので、**半分だけ重なった時点で入れ替わる**のが自然
+    const centers = [50, 150, 250]
+    expect(dropIndexFor(centers, 40)).toBe(0)
+    expect(dropIndexFor(centers, 99)).toBe(0)
+    expect(dropIndexFor(centers, 101)).toBe(1)
+    expect(dropIndexFor(centers, 999)).toBe(2)
+  })
+
+  it('タブが無ければ落とし先も無い', () => {
+    expect(dropIndexFor([], 10)).toBe(-1)
   })
 })

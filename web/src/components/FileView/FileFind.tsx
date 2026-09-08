@@ -45,10 +45,17 @@ interface Props {
    * 同じファイルでも当たりの位置が変わる。
    */
   contentKey: string
+  /**
+   * 探す合図の回数。**増えたら、入力を選び直して打ち直せる状態にする。**
+   *
+   * 窓が既に開いているときにもう一度 Ctrl+F を押したら打ち直せる、という探す窓の
+   * 作法（要件の表）。**開いた回数ではなく合図の回数**なので、開いたままでも効く。
+   */
+  合図: number
   onClose: () => void
 }
 
-export function FileFind({ bodyRef, contentKey, onClose }: Props) {
+export function FileFind({ bodyRef, contentKey, 合図, onClose }: Props) {
   const [query, setQuery] = useState('')
   /** 待ってから写した語。**探すのはこちら** */
   const [探す語, set探す語] = useState('')
@@ -56,10 +63,12 @@ export function FileFind({ bodyRef, contentKey, onClose }: Props) {
   const [index, setIndex] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  // 開いたら、すぐ打てる状態にする
+  // 開いたときと、もう一度押されたとき。**選び直して打ち直せる状態にする**
   useEffect(() => {
-    inputRef.current?.focus()
-  }, [])
+    const 入力 = inputRef.current
+    入力?.focus()
+    入力?.select()
+  }, [合図])
 
   // 打鍵から少し待って写す（上の「打鍵ごとには探さない」）
   useEffect(() => {

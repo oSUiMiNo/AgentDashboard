@@ -1044,9 +1044,21 @@ describe('探す窓を開く', () => {
     expect(isFindOpen(探すキー({ ctrlKey: true, metaKey: true }))).toBe(false)
   })
 
+  it('Ctrl+G でも開く（利用者の指定・2026-09-08）', () => {
+    /*
+      **要件は慣例どおり「Ctrl+F が開く、Ctrl+G が次へ」と決めていた**が、利用者の
+      指定で広げた。**窓が閉じている間の「次へ」には送る先が無い**ので、広げても
+      失うものが無い——**開いている間の Ctrl+G は、いままでどおり「次へ」**である
+      （そちらは `findKeyAction` が先に食う）。
+    */
+    expect(isFindOpen(探すキー({ ctrlKey: true, key: 'g' }))).toBe(true)
+    expect(isFindOpen(探すキー({ ctrlKey: true, key: 'G' }))).toBe(true)
+    expect(findKeyAction(探すキー({ ctrlKey: true, key: 'g' }))).toBe('next')
+  })
+
   it('関係の無いキーは開かない', () => {
-    expect(isFindOpen(探すキー({ ctrlKey: true, key: 'g' }))).toBe(false)
     expect(isFindOpen(探すキー({ ctrlKey: true, key: 'Enter' }))).toBe(false)
+    expect(isFindOpen(探すキー({ ctrlKey: true, key: 'h' }))).toBe(false)
   })
 })
 

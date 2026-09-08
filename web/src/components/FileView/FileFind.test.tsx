@@ -20,7 +20,7 @@ function 置く(本文 = '<p>あか あお あか みどり あか</p>', onClose
           data-testid="body"
           dangerouslySetInnerHTML={{ __html: 本文 }}
         />
-        <FileFind bodyRef={bodyRef} contentKey="x" onClose={onClose} />
+        <FileFind bodyRef={bodyRef} contentKey="x" 合図={1} onClose={onClose} />
       </div>
     )
   }

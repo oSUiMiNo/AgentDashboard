@@ -15,11 +15,9 @@ import { rawUrl } from "@/lib/hostfs";
 const ROOT = "/home/me/dev/app";
 
 type FileViewProps = ComponentProps<typeof FileView>;
-type ViewerProps = Omit<
-  FileViewProps,
-  "tabs" | "onSelectTab" | "onCloseTab"
-> &
-  Partial<Pick<FileViewProps, "tabs" | "onSelectTab" | "onCloseTab">>;
+type 埋める = "tabs" | "onSelectTab" | "onCloseTab" | "onReorderTab";
+type ViewerProps = Omit<FileViewProps, 埋める> &
+  Partial<Pick<FileViewProps, 埋める>>;
 
 /**
  * タブの受け口を既定で埋める包み。
@@ -28,13 +26,20 @@ type ViewerProps = Omit<
  * そのパス1枚にする。**タブそのものの振る舞いは `FileTabs.test.tsx` と、この下の
  * 「タブ帯」で見る。**
  */
-function Viewer({ tabs, onSelectTab, onCloseTab, ...rest }: ViewerProps) {
+function Viewer({
+  tabs,
+  onSelectTab,
+  onCloseTab,
+  onReorderTab,
+  ...rest
+}: ViewerProps) {
   return (
     <FileView
       {...rest}
       tabs={tabs ?? [rest.path]}
       onSelectTab={onSelectTab ?? (() => {})}
       onCloseTab={onCloseTab ?? (() => {})}
+      onReorderTab={onReorderTab ?? (() => {})}
     />
   );
 }
@@ -98,10 +103,11 @@ describe("ファイルの見せ方", () => {
     expect(タブ).toHaveTextContent("計画.md");
     expect(screen.queryByTestId("file-relative-path")).toBeNull();
     expect(screen.queryByTestId("file-relative-base")).toBeNull();
-    expect(タブ).toHaveAttribute(
-      "title",
-      `${ROOT}/MyDocs/計画.md（${ROOT} からの相対パス）`,
-    );
+    // **丸ごと一致では見ない。** 並べ替えの道（WCAG 2.5.7）も同じ `title` に
+    // 書いてあるので、**足すたびに落ちる検査**になってしまう
+    const title = タブ.getAttribute("title") ?? "";
+    expect(title).toContain(`${ROOT}/MyDocs/計画.md`);
+    expect(title).toContain(`${ROOT} からの相対パス`);
   });
 
   it("「パスをコピー」は無くなり、写す道はサイドバーだけになった", async () => {
@@ -722,11 +728,41 @@ describe("中を探す", () => {
     });
   });
 
-  it("HTML を箱で描いているときは出ない", async () => {
+  it("プレビュー（HTML）でも入口は出る", async () => {
+    /*
+      **2026-09-08 に覆った。** 箱の中は外から触れないので入口を出していなかったが、
+      **利用者から見ると「探せない道具」に見えていた**。いまは**押したら生テキストへ
+      連れていく**——同じ中身の別の見せ方であり、元から用意してある逃げ道でもある。
+    */
     serve(content("<p>あ</p>"));
     show(`${ROOT}/理解.html`);
     await screen.findByTestId("file-frame");
-    expect(screen.queryByTestId("file-find-open")).toBeNull();
+    expect(screen.getByTestId("file-find-open")).toBeInTheDocument();
+  });
+
+  it("プレビューで探すと、生テキストへ切り替わって理由が出る", async () => {
+    // **黙って見せ方を変えない。** 押した人から見ると画面が別物になる
+    serve(content("<p>あか</p>"));
+    show(`${ROOT}/理解.html`);
+    await userEvent.click(await screen.findByTestId("file-find-open"));
+
+    expect(await screen.findByTestId("file-raw")).toBeInTheDocument();
+    expect(screen.queryByTestId("file-frame")).toBeNull();
+    expect(screen.getByTestId("file-find")).toBeInTheDocument();
+    expect(screen.getByTestId("file-find-switched")).toHaveTextContent(
+      "生テキストに切り替えました",
+    );
+  });
+
+  it("自分で見せ方を戻したら、切り替えの断りは消える", async () => {
+    // そこから先は押した人が選んだ見せ方であって、こちらが切り替えた結果ではない
+    serve(content("<p>あか</p>"));
+    show(`${ROOT}/理解.html`);
+    await userEvent.click(await screen.findByTestId("file-find-open"));
+    expect(screen.getByTestId("file-find-switched")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByTestId("file-toggle-raw"));
+    expect(screen.queryByTestId("file-find-switched")).toBeNull();
   });
 
   it("入口を押すと窓が出て、すぐ打てる", async () => {
@@ -751,28 +787,53 @@ describe("中を探す", () => {
     expect(await screen.findByTestId("file-find")).toBeInTheDocument();
   });
 
-  it("箱で描いているときの Ctrl+F は奪わず、逃げ道だけを言う", async () => {
+  it("プレビューでも Ctrl+F を奪い、生テキストへ連れていく", async () => {
     /*
-      **黙って消えると「探せない道具だ」と読まれる**（要件）。ブラウザ本来の探索は
-      そのまま開かせたうえで、「生テキストで見れば探せる」ことだけを画面に出す。
+      **奪っておいて何もしないのが、いちばん悪い形である。** 前は奪わずに逃げ道だけを
+      言っていたが、**押した結果が画面に出ない**ので「効かない」と読まれていた。
     */
-    serve(content("<p>あ</p>"));
+    serve(content("<p>あか</p>"));
     show(`${ROOT}/理解.html`);
     await screen.findByTestId("file-frame");
 
-    expect(CtrlF()).toBe(false);
-    expect(await screen.findByTestId("file-find-hint")).toHaveTextContent(
-      "生テキストで見る",
-    );
-    expect(screen.queryByTestId("file-find")).toBeNull();
+    expect(CtrlF()).toBe(true);
+    expect(await screen.findByTestId("file-find")).toBeInTheDocument();
+    expect(screen.getByTestId("file-raw")).toBeInTheDocument();
   });
 
-  it("逃げ道は、押されるまで出さない", async () => {
-    // HTML を開くたびに「探せません」と書いてあると、探すつもりの無い人には雑音
+  it("切り替えの断りは、押されるまで出さない", async () => {
+    // HTML を開くたびに書いてあると、探すつもりの無い人には雑音でしかない
     serve(content("<p>あ</p>"));
     show(`${ROOT}/理解.html`);
     await screen.findByTestId("file-frame");
-    expect(screen.queryByTestId("file-find-hint")).toBeNull();
+    expect(screen.queryByTestId("file-find-switched")).toBeNull();
+  });
+
+  it("Ctrl+G でも開く", async () => {
+    serve(content("# 計画"));
+    show();
+    await screen.findByTestId("file-find-open");
+
+    const event = new KeyboardEvent("keydown", {
+      key: "g",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    globalThis.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(await screen.findByTestId("file-find")).toBeInTheDocument();
+  });
+
+  it("画像のときは Ctrl+F を奪わない", async () => {
+    // **連れていく先が無い。** 文字を持たないので、生テキストにしても読めない
+    serve(content("なにか"));
+    show(`${ROOT}/撮った.png`);
+    await waitFor(() => {
+      expect(screen.queryByTestId("file-find-open")).toBeNull();
+    });
+    expect(CtrlF()).toBe(false);
   });
 
   it("探す窓は、遡る箱の中に入っていない", async () => {
@@ -885,6 +946,19 @@ describe("文字の大きさ", () => {
     const 素 = screen.getByTestId("file-raw");
     expect(素.className).toContain("file-raw");
     expect(素.className).not.toContain("text-xs");
+  });
+
+  it("プレビューの箱が、倍率を読むクラスを持っている", async () => {
+    // **jsdom は CSS を当てない。** 実際に何倍で出るかは実機で見る（フェーズ5）
+    serve(content("<p>あ</p>"));
+    show(`${ROOT}/理解.html`);
+    const 箱 = await screen.findByTestId("file-frame");
+    expect(箱.className).toContain("file-frame");
+    expect(箱.parentElement?.className).toContain("file-frame-box");
+    // 倍率は器（`file-view`）が持ち、箱がそれを読む
+    expect(screen.getByTestId("file-view").getAttribute("style")).toContain(
+      "--file-zoom",
+    );
   });
 
   it("画像や箱を開いていても、大きさの操作は消えない", async () => {

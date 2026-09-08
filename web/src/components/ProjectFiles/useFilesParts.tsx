@@ -36,6 +36,7 @@ import { useCallback, useRef, useState, type ReactNode } from 'react'
 import { FileColumn } from '@/components/ProjectFiles/FileColumn'
 import { Sidebar } from '@/components/ProjectFiles/Sidebar'
 import { usePanelWidths } from '@/lib/filesPanel'
+import { moveTab } from '@/lib/fileTabs'
 import { putDir, putPicks, readPlace } from '@/lib/filesPlace'
 
 /**
@@ -303,6 +304,46 @@ export function useFilesParts({
     [覚える],
   )
 
+  /**
+   * タブを並べ替えた（利用者の指定・2026-09-08）。
+   *
+   * **位置は「帯に見えている並び」で来る。** 畳んだタブ（読めなくて隠しているもの）は
+   * 帯に出ていないので、**そのまま全体の並びへ当てると1つずれる**。見えているぶんを
+   * 動かしてから、畳んだものを元の位置へ戻す形で組み直す。
+   *
+   * **選択は動かさない。** 動かしたのは並びであって、見ているものではない。
+   */
+  const タブを並べ替える = useCallback(
+    (from: number, to: number) => {
+      const now = 最新.current
+      const 見える = now.tabs.filter((tab) => tab.隠す !== true)
+      const 元の並び = 見える.map((tab) => tab.path)
+      const 並べ替えた = moveTab(元の並び, from, to)
+      if (並べ替えた === 元の並び) {
+        return
+      }
+      /*
+        **畳んだものは、いまの位置に居させる。** 帯に出ていないものが勝手に動くと、
+        起きたときに戻る並びが押した覚えの無い形になる。
+
+        **`find` の述語の中で添字を進めないこと。** 述語は要素ごとに呼ばれるので、
+        1回の取り出しで添字がいくつも進んで並びが壊れる（実際に踏んだ）。
+      */
+      let 次 = 0
+      const tabs = now.tabs.map((tab) => {
+        if (tab.隠す === true) {
+          return tab
+        }
+        const path = 並べ替えた[次]
+        次 += 1
+        return 見える.find((t) => t.path === path) ?? tab
+      })
+      set開いている({ tabs, 選択: now.選択 })
+      覚える(tabs, now.選択)
+    },
+    [覚える],
+  )
+
   /** ヘッダの「ファイルの列を閉じる」。**タブの ✕ と違い、全部畳む。** */
   const 列を閉じる = useCallback(() => {
     set開いている({ tabs: [], 選択: null })
@@ -392,6 +433,7 @@ export function useFilesParts({
           tabs={見えている.map((tab) => tab.path)}
           onSelectTab={タブを選ぶ}
           onCloseTab={タブを閉じる}
+          onReorderTab={タブを並べ替える}
           width={widths.file}
           onClose={列を閉じる}
           /*

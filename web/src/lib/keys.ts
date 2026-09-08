@@ -635,13 +635,20 @@ export interface FindKeyState extends EnterKeyState {
 }
 
 /**
- * そのキーを「探す窓を開く」と解釈するか。**Ctrl+F だけ。**
+ * そのキーを「探す窓を開く」と解釈するか。**Ctrl+F と Ctrl+G。**
  *
  * # なぜブラウザから奪うのか
  *
  * ブラウザの探索は**画面全体**が対象で、この画面にはセッションの区画・履歴・入力欄・
  * サイドバーのファイル名が同居している。**本文の外の当たりに混ざる**ので、件数も送りも
  * 当てにならない。「開いているファイルの中だけ」はブラウザ側の機能では満たせない。
+ *
+ * # Ctrl+G を「次へ」から広げた（2026-09-08）
+ *
+ * **要件は「Ctrl+F が開く、Ctrl+G が次へ」と慣例どおりに決めていた**が、利用者の指定で
+ * **どちらでも開く**へ広げた。**窓が閉じている間の「次へ」には送る先が無い**ので、
+ * 広げても失うものが無い——**窓が開いている間の Ctrl+G は、いままでどおり「次へ」**
+ * である（そちらは [`findKeyAction`] が先に食う。窓の中の keydown は外へ渡さない）。
  *
  * # ただし奪うのは、探せるときだけ
  *
@@ -664,7 +671,12 @@ export function isFindOpen(event: FindKeyState): boolean {
   if (event.isComposing || event.altKey || event.metaKey) {
     return false
   }
-  return event.ctrlKey && (event.key === 'f' || event.key === 'F')
+  if (!event.ctrlKey) {
+    return false
+  }
+  const key = event.key.toLowerCase()
+  // **Ctrl+G も開く**（利用者の指定・2026-09-08）
+  return key === 'f' || key === 'g'
 }
 
 /** 探す窓が開いている間の操作。 */

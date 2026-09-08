@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { FileTabs } from '@/components/FileView/FileTabs'
@@ -15,10 +15,15 @@ const ROOT = '/home/me/dev/app'
 function 置く(
   tabs: string[],
   current = tabs[0] ?? '',
-  手: { onSelect?: (p: string) => void; onClose?: (p: string) => void } = {},
+  手: {
+    onSelect?: (p: string) => void
+    onClose?: (p: string) => void
+    onReorder?: (from: number, to: number) => void
+  } = {},
 ) {
   const onSelect = vi.fn(手.onSelect)
   const onClose = vi.fn(手.onClose)
+  const onReorder = vi.fn(手.onReorder)
   render(
     <FileTabs
       tabs={tabs}
@@ -26,9 +31,10 @@ function 置く(
       root={ROOT}
       onSelect={onSelect}
       onClose={onClose}
+      onReorder={onReorder}
     />,
   )
-  return { onSelect, onClose }
+  return { onSelect, onClose, onReorder }
 }
 
 describe('タブ帯', () => {
@@ -80,9 +86,19 @@ describe('タブ帯', () => {
   it('タブに絶対パスと基準が title で残る', () => {
     // もとの相対パスの chip から引き継いだもの（要件26・設計§8-6）
     置く([`${ROOT}/MyDocs/計画.md`])
-    expect(screen.getByTestId('file-tab')).toHaveAttribute(
-      'title',
-      `${ROOT}/MyDocs/計画.md（${ROOT} からの相対パス）`,
+    const title = screen.getByTestId('file-tab').getAttribute('title') ?? ''
+    expect(title).toContain(`${ROOT}/MyDocs/計画.md`)
+    expect(title).toContain(`${ROOT} からの相対パス`)
+  })
+
+  it('ポインタ以外の道が、押す本人から見える', () => {
+    /*
+      **WCAG 2.5.7。** 並べ替えを掴んで運べるようにしたので、**キーボードだけの人にも
+      道が要る**。道が在るだけでは足りず、**見つけられる**必要がある。
+    */
+    置く([`${ROOT}/a.md`])
+    expect(screen.getByTestId('file-tab').getAttribute('title')).toContain(
+      'Ctrl+Shift+← →',
     )
   })
 
@@ -165,5 +181,137 @@ describe('タブ帯', () => {
       'aria-label',
       '開いているファイル',
     )
+  })
+})
+
+/**
+ * 並べ替え（利用者の指定・2026-09-08）。
+ *
+ * **落とし先そのものは `lib/fileTabs.ts` の `dropIndexFor` が数値で確かめている。**
+ * jsdom は矩形を固定で返すので、**ここで見るのは配線と押し分け**——閾値・主ボタン・
+ * 運んだあとの押下を食わないこと・キーボードの道である。
+ */
+describe('タブの並べ替え', () => {
+  const 三枚 = [`${ROOT}/a.md`, `${ROOT}/b.md`, `${ROOT}/c.md`]
+
+  it('Ctrl+Shift+→ でタブそのものが動く', async () => {
+    // **WCAG 2.5.7。** 掴んで運ぶ道だけだと、キーボードの人に道が無い
+    const { onReorder } = 置く(三枚, `${ROOT}/a.md`)
+    screen.getAllByTestId('file-tab')[0]!.focus()
+
+    await userEvent.keyboard('{Control>}{Shift>}{ArrowRight}{/Shift}{/Control}')
+
+    expect(onReorder).toHaveBeenCalledWith(0, 1)
+  })
+
+  it('Ctrl+Shift+← でも動く', async () => {
+    const { onReorder } = 置く(三枚, `${ROOT}/c.md`)
+    screen.getAllByTestId('file-tab')[2]!.focus()
+
+    await userEvent.keyboard('{Control>}{Shift>}{ArrowLeft}{/Shift}{/Control}')
+
+    expect(onReorder).toHaveBeenCalledWith(2, 1)
+  })
+
+  it('運ぶのは端で止まる（移るのと違って回らない）', async () => {
+    // **回すと、右端で1回押しただけで左端へ飛ぶ**
+    const { onReorder } = 置く(三枚, `${ROOT}/c.md`)
+    screen.getAllByTestId('file-tab')[2]!.focus()
+
+    await userEvent.keyboard('{Control>}{Shift>}{ArrowRight}{/Shift}{/Control}')
+
+    expect(onReorder).not.toHaveBeenCalled()
+  })
+
+  it('Ctrl+Shift+→ は、選び直しにはならない', async () => {
+    const { onReorder, onSelect } = 置く(三枚, `${ROOT}/a.md`)
+    screen.getAllByTestId('file-tab')[0]!.focus()
+
+    await userEvent.keyboard('{Control>}{Shift>}{ArrowRight}{/Shift}{/Control}')
+
+    expect(onReorder).toHaveBeenCalled()
+    expect(onSelect).not.toHaveBeenCalled()
+  })
+
+  it('掴んで運ぶと並びが変わる', () => {
+    const { onReorder } = 置く(三枚, `${ROOT}/c.md`)
+    const タブ = screen.getAllByTestId('file-tab')[2]!
+    const 帯 = screen.getByTestId('file-tabs')
+
+    fireEvent.pointerDown(タブ, { pointerType: 'mouse', button: 0, clientX: 300 })
+    fireEvent.pointerMove(帯, { pointerType: 'mouse', clientX: 100 })
+
+    expect(onReorder).toHaveBeenCalled()
+  })
+
+  it('少し動いただけでは掴まない', () => {
+    // **押した指はわずかに動くのが普通。** 越えなければ「選ぶ」のまま
+    const { onReorder } = 置く(三枚, `${ROOT}/a.md`)
+    const タブ = screen.getAllByTestId('file-tab')[0]!
+    const 帯 = screen.getByTestId('file-tabs')
+
+    fireEvent.pointerDown(タブ, { pointerType: 'mouse', button: 0, clientX: 100 })
+    fireEvent.pointerMove(帯, { pointerType: 'mouse', clientX: 102 })
+
+    expect(onReorder).not.toHaveBeenCalled()
+  })
+
+  it('運んだあとの押下は、選び直しにならない', () => {
+    /*
+      **押した場所と離した場所が違う。** そのまま通すと「運んだ先のタブを選んだ」
+      ことになる。
+    */
+    const { onReorder, onSelect } = 置く(三枚, `${ROOT}/c.md`)
+    const タブ = screen.getAllByTestId('file-tab')[2]!
+    const 帯 = screen.getByTestId('file-tabs')
+
+    fireEvent.pointerDown(タブ, { pointerType: 'mouse', button: 0, clientX: 300 })
+    fireEvent.pointerMove(帯, { pointerType: 'mouse', clientX: 100 })
+    fireEvent.pointerUp(帯, { pointerType: 'mouse', clientX: 100 })
+    fireEvent.click(タブ)
+
+    expect(onReorder).toHaveBeenCalled()
+    expect(onSelect).not.toHaveBeenCalled()
+  })
+
+  it('掴まずに押したら、いままでどおり選ぶ', () => {
+    const { onSelect } = 置く(三枚, `${ROOT}/a.md`)
+    const タブ = screen.getAllByTestId('file-tab')[1]!
+
+    fireEvent.pointerDown(タブ, { pointerType: 'mouse', button: 0, clientX: 100 })
+    fireEvent.pointerUp(screen.getByTestId('file-tabs'), {
+      pointerType: 'mouse',
+      clientX: 100,
+    })
+    fireEvent.click(タブ)
+
+    expect(onSelect).toHaveBeenCalledWith(`${ROOT}/b.md`)
+  })
+
+  it('マウスの主ボタン以外では掴まない', () => {
+    /*
+      **中クリックで新しいタブに開こうとしただけで並びが変わる**のを防ぐ
+      （隣の工事が同じ穴を踏んで直している）。
+    */
+    const { onReorder } = 置く(三枚, `${ROOT}/c.md`)
+    const タブ = screen.getAllByTestId('file-tab')[2]!
+    const 帯 = screen.getByTestId('file-tabs')
+
+    fireEvent.pointerDown(タブ, { pointerType: 'mouse', button: 1, clientX: 300 })
+    fireEvent.pointerMove(帯, { pointerType: 'mouse', clientX: 100 })
+
+    expect(onReorder).not.toHaveBeenCalled()
+  })
+
+  it('指では、どの押し方でも掴める', () => {
+    // `button` はマウスの話。指とペンは今までどおり
+    const { onReorder } = 置く(三枚, `${ROOT}/c.md`)
+    const タブ = screen.getAllByTestId('file-tab')[2]!
+    const 帯 = screen.getByTestId('file-tabs')
+
+    fireEvent.pointerDown(タブ, { pointerType: 'touch', button: 0, clientX: 300 })
+    fireEvent.pointerMove(帯, { pointerType: 'touch', clientX: 100 })
+
+    expect(onReorder).toHaveBeenCalled()
   })
 })

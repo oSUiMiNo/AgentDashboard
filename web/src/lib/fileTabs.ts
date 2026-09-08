@@ -127,3 +127,59 @@ export function stripScrollFor(
     タブ.左 < 左端 ? タブ.左 : タブ.左 + タブ.幅 - 帯.幅
   return Math.max(0, 先)
 }
+
+/**
+ * タブを1枚動かした並び（`from` を抜いて `to` へ差す）。
+ *
+ * **範囲の外は何もしない。** 呼ぶ側が端で止める判断を持たなくて済むので、
+ * 「左端でさらに左へ」を毎回書かずに済む。
+ */
+export function moveTab(paths: string[], from: number, to: number): string[] {
+  if (
+    from === to ||
+    from < 0 ||
+    to < 0 ||
+    from >= paths.length ||
+    to >= paths.length
+  ) {
+    return paths
+  }
+  const out = [...paths]
+  const [運ぶもの] = out.splice(from, 1)
+  if (運ぶもの === undefined) {
+    return paths
+  }
+  out.splice(to, 0, 運ぶもの)
+  return out
+}
+
+/**
+ * 指がここに居るとき、どの位置へ落とすか。**中心がいちばん近いものを選ぶ。**
+ *
+ * # なぜ「またいだ矩形」ではなく「近い中心」なのか
+ *
+ * タブは**幅がばらばら**である（名前の長さで決まる。衝突すると親フォルダが付いて
+ * さらに伸びる）。矩形の中に入ったかどうかで決めると、**細いタブの上を素通りできて
+ * しまい、幅で入れ替えやすさが変わる**。中心までの距離なら、どの幅でも
+ * **半分だけ重なった時点で入れ替わる**——`lib/reorder.ts` が2次元で「矩形までの距離」を
+ * 使っているのと同じ考え方を、1次元へ落としたものである。
+ *
+ * **`reorder.ts` をそのまま流用しない**（要件で「合わない」と書いたとおり）。
+ * あちらは落とし先を「行 → 矩形までの距離 → 1歩 → 封印」の4段で決めており、
+ * **行の概念が要る**。1本の帯には行が無いので、段が丸ごと余る。
+ *
+ * @param centers 各タブの中心の x（帯の並び順）
+ * @param x いま指が居る x
+ */
+export function dropIndexFor(centers: number[], x: number): number {
+  let 当たり = -1
+  let 近さ = Number.POSITIVE_INFINITY
+  centers.forEach((center, i) => {
+    const 差 = Math.abs(center - x)
+    if (差 < 近さ) {
+      近さ = 差
+      当たり = i
+    }
+  })
+  return 当たり
+}
