@@ -24,7 +24,13 @@
 import { useCallback, useEffect, useRef, type PointerEvent as ReactPointerEvent } from 'react'
 import { useCoarsePointer } from './pointer'
 import { LONG_PRESS_MS, movedTooFar, pressMapping } from './press'
-import { select, toggleSelect, useSelection, type SelectionKind } from '@/stores/selection'
+import {
+  clearSelection,
+  select,
+  toggleSelect,
+  useSelection,
+  type SelectionKind,
+} from '@/stores/selection'
 
 interface Options {
   kind: SelectionKind
@@ -77,13 +83,17 @@ export function usePress({
   const coarse = useCoarsePointer()
   const selection = useSelection()
   /*
-    **選択モードの単位は「同格の集合」**（並べ替え設計§15-5）。同じ種類を選んでいるときだけ
-    シングルが「選ぶ」になる。**記録を持たない箱は同格の集合に属さない**——その箱から
-    見れば常に「1つも選んでいない」ので、選択モード中でもタップで開く（死んだ領域を
-    作らない）。PC は `selecting` に依らないので変わらず、下の `!selectable → return` が
-    「シングルは何もしない」を保つ。
+    **選ばれている種類を、そのまま渡す**（`press.ts` が3通りへ振り分ける）。以前はここで
+    「選べない箱には `null` を渡す」という細工をしていた——その箱から見れば常に「1つも
+    選んでいない」ことになり、選択モード中でもタップで開いた。**いまは細工しない。**
+    選べないことは `selectable` として渡し、**選択中は種類によらず「解くだけ」**に倒す
+    （2026-09-07・利用者の指定）。細工を残すと、選べない箱だけが遷移して**同じに見える
+    ものが、あるときは飛び、あるときは飛ばない**。
+
+    PC は `selecting` にも `selectable` にも依らないので変わらず、下の
+    `!selectable → return` が「シングルは何もしない」を保つ。
   */
-  const mapping = pressMapping(coarse, selectable ? selection.kind : null, kind)
+  const mapping = pressMapping(coarse, selection.kind, kind, selectable)
   const selected = selection.kind === kind && selection.ids.includes(id)
 
   // 長押しの計測。**押した場所からどれだけ動いたか**を見て、動いたらやめる
@@ -224,6 +234,16 @@ export function usePress({
       }
       if (mapping.single === 'open') {
         onOpen()
+        return
+      }
+      /*
+        **何か選んでいる間に、同格でないものを押した。** 選択を解くだけで、押した相手は
+        選ばない——**遷移させないことが目的**なので、ここで `onOpen()` を呼ばない
+        （並べ替え設計 読み替え7）。開きたければもう一度押す（そのときは「1つも選んで
+        いない」ので `'open'` になる）。
+      */
+      if (mapping.single === 'clear') {
+        clearSelection()
         return
       }
       /*
