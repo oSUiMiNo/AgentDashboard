@@ -23,6 +23,12 @@
  * したがって**網羅を狙わない。** 全部載せようとすると、載せ損ねたものと消えた
  * ものの区別が付かなくなるうえ、版ずれの被害だけが増える。**打つ頻度が高く、
  * 名前が安定しているものだけ**を選んである。
+ *
+ * ## 「組み込みか、同梱スキルか」は問わない
+ * 公式には `/doctor` のような**同梱スキル**と `/help` のような**組み込み**が
+ * 区別されるが、**打つ人から見れば同じ**である。どちらも実行ファイルの中にあって
+ * ディスクから数えられない——**ここに書くかどうかの基準は、その区別ではなく、
+ * 上の「打つ頻度が高く、名前が安定しているか」だけ**である。
  */
 
 /** 組み込みコマンド1つ。 */
@@ -34,27 +40,40 @@ export interface BuiltinCommand {
 }
 
 /**
- * 手で書いた表（2026-09-07 時点の Claude Code v2.1.x）。
+ * 手で書いた表（2026-09-08 時点。Claude Code v2.1.263 の実物と公式の
+ * コマンド一覧の両方で、名前の実在を1つずつ確かめてある）。
  *
  * **`claude --help` から引いていない。** 引くと「いま繋がっている CLI が答えた
  * もの」になり、ブラウザから見ているセッションの CLI とは限らない——それに、
  * 引ける道があるなら表そのものが要らない。**ここは意図的に静的な表である。**
+ *
+ * **推測で足さないこと。** 名前を1つ間違えると、打っても動かない候補が
+ * 出続ける。**消えたコマンドを載せたままにするのと同じくらい悪い**ので、
+ * 足すときは必ず実物と公式の両方で裏を取る。
  */
 export const BUILTIN_COMMANDS: readonly BuiltinCommand[] = [
   { name: 'clear', description: '会話の履歴を消して、最初からやり直す' },
   { name: 'compact', description: '会話を要約して、コンテキストの空きを作る' },
+  { name: 'config', description: '設定の画面を開く' },
   { name: 'context', description: 'いまコンテキストを何が占めているかを出す' },
   { name: 'cost', description: 'このセッションで使ったトークンと費用を出す' },
   { name: 'diff', description: '会話の横に、未コミットの差分を映す' },
+  { name: 'doctor', description: '入れ方や設定の不調を調べて、直す' },
   { name: 'effort', description: 'モデルがどれだけ考えるか（努力レベル）を切り替える' },
   { name: 'exit', description: 'セッションを終える' },
   { name: 'help', description: '使い方と、打てるコマンドの一覧を出す' },
+  { name: 'hooks', description: 'フックの設定を見る' },
   { name: 'init', description: 'このリポジトリの CLAUDE.md を作る' },
+  { name: 'login', description: 'Anthropic のアカウントに入る・切り替える' },
+  { name: 'logout', description: 'Anthropic のアカウントから出る' },
+  { name: 'mcp', description: 'MCP サーバの繋がりを見る・繋ぎ直す' },
   { name: 'memory', description: '覚えていることを見る・直す' },
   { name: 'model', description: 'このセッションのモデルを切り替える' },
   { name: 'permissions', description: '許可と拒否の規則を見る・直す' },
+  { name: 'plan', description: 'プランモードに入る' },
   { name: 'resume', description: '前の会話を選んで続きから始める' },
   { name: 'rewind', description: '会話を巻き戻す（ファイルの変更も戻せる）' },
+  { name: 'skills', description: '使えるスキルの一覧を出す' },
   { name: 'status', description: 'いまの版・モデル・繋がっている先を出す' },
   { name: 'usage', description: '利用量と上限までの残りを出す' },
 ]

@@ -465,6 +465,32 @@ describe('組み込みの表', () => {
     expect(candidates.length).toBe(BUILTIN_COMMANDS.length)
     expect(unreadable).toBe(1)
   })
+
+  it('表に載せた名前は、打てば必ず当たる', async () => {
+    // **載っているのに出てこない、が今回の壊れ方だった**（`/login` を打っても
+    // 候補が1件も出なかった）。絞り込みは名前の前方一致1行なので、**表に無い
+    // 名前は当たりようがない**——逆に、載せたのに当たらなくなったら綴りが
+    // ずれている。表を増やしたぶんだけ、この検査も自動で広がる。
+    const fs = fakeFs({ '/home/tester': [] })
+    const { candidates } = await harvestCandidates(fs)
+    for (const builtin of BUILTIN_COMMANDS) {
+      expect(names(filterCandidates(candidates, `/${builtin.name}`))).toContain(builtin.name)
+    }
+  })
+
+  it('よく打つものが抜けていない', async () => {
+    // **少なすぎることは、出ないことと同じ**。ここに挙げた名前は Claude Code
+    // v2.1.263 の実物と公式のコマンド一覧の両方で実在を確かめてある。
+    //
+    // **この検査は「減らすな」ではなく「確かめてから減らせ」である。** CLI から
+    // 消えたなら表からも落とすのが正しい（`/vim` や `/agents` はそうやって
+    // 落とした）。落とすときは、ここも一緒に直すこと。
+    const fs = fakeFs({ '/home/tester': [] })
+    const { candidates } = await harvestCandidates(fs)
+    for (const name of ['login', 'logout', 'config', 'mcp', 'doctor', 'hooks', 'plan', 'skills']) {
+      expect(names(candidates)).toContain(name)
+    }
+  })
 })
 
 // ---------------------------------------------------------------------------
