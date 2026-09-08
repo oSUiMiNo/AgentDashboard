@@ -14,6 +14,7 @@ import {
   FolderBrowser,
   コピー表示を畳むまで,
 } from "@/components/FolderBrowser/FolderBrowser";
+import { 一覧を引き直す間隔 } from "@/lib/poll";
 import { TOAST_LIFE_MS } from "@/stores/appNotices";
 
 const ROOT = "/home/me/dev/app";
@@ -928,5 +929,285 @@ describe("ファイルの行は、ブラウザの新しいタブへ開けるリ�
       expect(的.tagName).toBe("BUTTON");
       expect(的).not.toHaveAttribute("href");
     });
+  });
+});
+
+/**
+ * リロードせずに新しくする（`サイドバーの一覧を、リロードせずに新しくする`）。
+ *
+ * **この一覧は「動くもの」を映している。** 渡す相手は claude で、こちらが見て
+ * いる間にファイルを作り、名前を変え、消す。ところが作りは「開いた瞬間に1回
+ * 引いて、あとは触らない」だったので、**いちばん変わってほしい場面で、いちばん
+ * 古い**状態だった。
+ */
+describe("リロードせずに新しくする", () => {
+  /** 呼ばれるたびに違う一覧を返す fetch。**外でファイルが増えた**を作る */
+  function 順に返す(...並びたち: string[][]) {
+    let 回数 = 0;
+    const 呼ばれた = { count: 0 };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        const 今回 = 並びたち[Math.min(回数, 並びたち.length - 1)];
+        回数 += 1;
+        呼ばれた.count = 回数;
+        return new Response(JSON.stringify(listing(ROOT, 今回)), {
+          status: 200,
+        });
+      }),
+    );
+    return 呼ばれた;
+  }
+
+  /** 初回の引きを流し切る。**`act` で包む**——包まないと React が警告を出す */
+  async function 落ち着かせる() {
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  }
+
+  async function 十秒進める() {
+    await act(async () => {
+      vi.advanceTimersByTime(一覧を引き直す間隔);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  }
+
+  it("外で増えたファイルが、リロードせずに並ぶ", async () => {
+    順に返す(["MyDocs", "計画.md"], ["MyDocs", "計画.md", "新しい.md"]);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      置く();
+      await 落ち着かせる();
+      expect(screen.getByText("計画.md")).toBeTruthy();
+      expect(screen.queryByText("新しい.md")).toBeNull();
+
+      await 十秒進める();
+
+      expect(screen.getByText("新しい.md")).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("引き直しの間、一覧が「読み込み中…」へ落ちない", async () => {
+    順に返す(["MyDocs", "計画.md"]);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      置く();
+      await 落ち着かせる();
+      expect(screen.getByText("計画.md")).toBeTruthy();
+
+      await 十秒進める();
+
+      // **10秒おきに点滅させない。** 一覧は出たまま
+      expect(screen.queryByText("読み込み中…")).toBeNull();
+      expect(screen.getByText("計画.md")).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("引き直しが失敗しても、前の一覧が残り、断り文も出ない", async () => {
+    let 回数 = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        回数 += 1;
+        if (回数 === 1) {
+          return new Response(
+            JSON.stringify(listing(ROOT, ["MyDocs", "計画.md"])),
+            { status: 200 },
+          );
+        }
+        // 2回目以降は PC が寝た
+        return new Response("PC が応じません", { status: 504 });
+      }),
+    );
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      置く();
+      await 落ち着かせる();
+      expect(screen.getByText("計画.md")).toBeTruthy();
+
+      await 十秒進める();
+
+      // **いま読めていたものまで失わない**（要件4）
+      expect(screen.getByText("計画.md")).toBeTruthy();
+      // **押した操作ではないので、押したときと同じ強さで理由を出さない**（要件5）
+      expect(screen.queryByText("PC が応じません")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+/**
+ * **引き直しが、利用者の操作を追い越さない**（`サイドバーの一覧を、リロードせずに
+ * 新しくする` 要件6）。
+ *
+ * ここがこの工事でいちばん危ない。既存の `go` は問いのたびに `asked` を増やし、
+ * **最後に投げたものの答えだけを採る**。引き直しも同じように増やすと、**押した
+ * 直後に時報が来たとき、時報が番号を進めて押した先の答えを捨てる**——
+ * **押しても開かない**、という壊れ方になる。
+ *
+ * だから引き直しは番号を増やさず、**始めた時点の番号を覚えて、返ったときに
+ * 変わっていなければ採る**。両方向を1本ずつ固定する。
+ */
+describe("引き直しと、人の操作がぶつかったとき", () => {
+  /** 返す時機をこちらで決める fetch。**順番を作るために手で解く** */
+  function 手で解く() {
+    const 解く: Array<(r: Response) => void> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            解く.push(resolve);
+          }),
+      ),
+    );
+    return 解く;
+  }
+
+  function 一覧を返す(解く: (r: Response) => void, path: string, names: string[]) {
+    解く(new Response(JSON.stringify(listing(path, names)), { status: 200 }));
+  }
+
+  async function 流す() {
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  }
+
+  it("引き直しの最中に人が動いたら、押した先が勝つ", async () => {
+    const 解く = 手で解く();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      置く();
+      一覧を返す(解く[0], ROOT, ["MyDocs"]);
+      await 流す();
+      expect(screen.getByText("MyDocs")).toBeTruthy();
+
+      // 時報。**引き直しが始まるが、まだ返さない**
+      await act(async () => {
+        vi.advanceTimersByTime(一覧を引き直す間隔);
+        await Promise.resolve();
+      });
+      expect(解く.length).toBe(2);
+
+      // その最中に、人がフォルダへ入る
+      // **同期で取る。** 偽タイマーの下では `findAllBy*` が進まず止まる
+      const 行 = screen.getAllByTestId("folder-entry")[0];
+      await act(async () => {
+        fireEvent.click(行);
+        await Promise.resolve();
+      });
+      一覧を返す(解く[2], `${ROOT}/MyDocs`, ["奥.md"]);
+      await 流す();
+      expect(screen.getByText("奥.md")).toBeTruthy();
+
+      // **遅れて引き直しが返る。** 中身は「押す前の場所」のもの
+      一覧を返す(解く[1], ROOT, ["MyDocs", "後から.md"]);
+      await 流す();
+
+      // **押した先が残っている。** 古い引き直しに上書きされない
+      expect(screen.getByText("奥.md")).toBeTruthy();
+      expect(screen.queryByText("後から.md")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("人の操作の最中に時報が来ても、押した先の答えは捨てられない", async () => {
+    const 解く = 手で解く();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      置く();
+      一覧を返す(解く[0], ROOT, ["MyDocs"]);
+      await 流す();
+
+      // 人がフォルダへ入る（まだ返さない）
+      // **同期で取る。** 偽タイマーの下では `findAllBy*` が進まず止まる
+      const 行 = screen.getAllByTestId("folder-entry")[0];
+      await act(async () => {
+        fireEvent.click(行);
+        await Promise.resolve();
+      });
+      expect(解く.length).toBe(2);
+
+      // **その最中に時報。** ここで番号を進めると、下の答えが捨てられる
+      await act(async () => {
+        vi.advanceTimersByTime(一覧を引き直す間隔);
+        await Promise.resolve();
+      });
+
+      // 押した先が返る
+      一覧を返す(解く[1], `${ROOT}/MyDocs`, ["奥.md"]);
+      await 流す();
+
+      // **押した先が出ている**（時報に追い越されていない）
+      expect(screen.getByText("奥.md")).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+/**
+ * **断り文が出ている間は、引き直しが割り込まない**（自己レビューで見つけた穴）。
+ *
+ * `go` は失敗すると理由を出して一覧を空にする。そこへ時報が成功を持ち込むと
+ * **断り文の下に一覧が生える**——押した操作の失敗が画面に残ったまま中身だけが
+ * 埋まる、という読めない状態になる。
+ */
+describe("断り文が出ている間", () => {
+  it("引き直しが割り込まず、断り文の下に一覧が生えない", async () => {
+    let 回数 = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        回数 += 1;
+        if (回数 === 1) {
+          // 最初の1回だけ失敗させる（起点が読めない）
+          return new Response("権限がありません", { status: 403 });
+        }
+        return new Response(
+          JSON.stringify(listing(ROOT, ["MyDocs", "計画.md"])),
+          { status: 200 },
+        );
+      }),
+    );
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      置く();
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(screen.getByTestId("folder-error").textContent).toContain(
+        "権限がありません",
+      );
+
+      await act(async () => {
+        vi.advanceTimersByTime(一覧を引き直す間隔);
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      // **断り文は残り、下に一覧は生えない**
+      expect(screen.getByTestId("folder-error")).toBeTruthy();
+      expect(screen.queryByText("計画.md")).toBeNull();
+      // 引き直しそのものが飛んでいない（fetch は初回の1回きり）
+      expect(回数).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

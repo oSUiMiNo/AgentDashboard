@@ -31,6 +31,39 @@ export interface DirListing {
 }
 
 /**
+ * 2つの一覧が同じ中身か。
+ *
+ * **引き直しで、変わっていないものを差し替えないため**（`サイドバーの一覧を、
+ * リロードせずに新しくする` 要件1）。行の同一性は `key={entry.name}` が保って
+ * いるので DOM は作り直されないが、**10秒おきに全行を描き直す理由も無い。**
+ *
+ * **並び順まで見る。** 名前の集合が同じでも順が入れ替われば、**押そうとした的が
+ * 逃げる**——それを見逃さないために、集合ではなく列として比べる。
+ */
+export function sameListing(
+  a: DirListing | null,
+  b: DirListing,
+): boolean {
+  if (a === null) {
+    return false
+  }
+  if (a.path !== b.path || a.truncated !== b.truncated) {
+    return false
+  }
+  if (a.entries.length !== b.entries.length) {
+    return false
+  }
+  return a.entries.every((each, i) => {
+    const 相手 = b.entries[i]
+    return (
+      each.name === 相手.name &&
+      each.kind === 相手.kind &&
+      each.is_project === 相手.is_project
+    )
+  })
+}
+
+/**
  * ファイル1つの中身。Rust 側の `protocol::fs::FileContent` と同じ綴り。
  *
  * 読めるのは**テキストだけ**で、上限を超えたものは中身ごと断られる（設計§9）。

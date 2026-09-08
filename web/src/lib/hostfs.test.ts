@@ -13,6 +13,7 @@ import {
   isUnder,
   readBlob,
   relativeOf,
+  sameListing,
   uploadAttachment,
 } from '@/lib/hostfs'
 
@@ -160,5 +161,50 @@ describe('応答が1つも返らなかったとき', () => {
     await expect(
       uploadAttachment('local', 'card', new Blob([new Uint8Array(4)])),
     ).rejects.toThrow('画像が大きすぎます')
+  })
+})
+
+describe('sameListing', () => {
+  function 並び(names: string[], path = '/home/me') {
+    return {
+      path,
+      entries: names.map((name) => ({
+        name,
+        kind: 'file' as const,
+        is_project: false,
+      })),
+      truncated: false,
+    }
+  }
+
+  it('中身が同じなら同じと言う', () => {
+    expect(sameListing(並び(['a.md', 'b.md']), 並び(['a.md', 'b.md']))).toBe(true)
+  })
+
+  it('まだ何も無いときは、必ず違う（初回は必ず入れる）', () => {
+    expect(sameListing(null, 並び(['a.md']))).toBe(false)
+  })
+
+  it('増えた・減ったを見分ける', () => {
+    expect(sameListing(並び(['a.md']), 並び(['a.md', 'b.md']))).toBe(false)
+    expect(sameListing(並び(['a.md', 'b.md']), 並び(['a.md']))).toBe(false)
+  })
+
+  it('**並び順が変わったら違う**（押そうとした的が逃げるため）', () => {
+    expect(sameListing(並び(['a.md', 'b.md']), 並び(['b.md', 'a.md']))).toBe(false)
+  })
+
+  it('名前が同じでも、種別が変わったら違う', () => {
+    const 前 = 並び(['x'])
+    const 後 = { ...並び(['x']), entries: [{ name: 'x', kind: 'dir' as const, is_project: false }] }
+    expect(sameListing(前, 後)).toBe(false)
+  })
+
+  it('場所そのものが変わったら違う', () => {
+    expect(sameListing(並び(['a.md'], '/home/me'), 並び(['a.md'], '/home/you'))).toBe(false)
+  })
+
+  it('打ち切りの有無が変わったら違う（隠さない）', () => {
+    expect(sameListing(並び(['a.md']), { ...並び(['a.md']), truncated: true })).toBe(false)
   })
 })
