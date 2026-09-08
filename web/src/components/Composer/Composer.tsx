@@ -67,7 +67,7 @@
  * 再掲すると同じ文が上下に2つ並ぶ。
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { CloseGlyph, PlusGlyph, SendGlyph } from '@/components/ui/glyphs'
 import { Textarea } from '@/components/ui/textarea'
@@ -88,6 +88,7 @@ import type { CardId } from '@/lib/protocol'
 import {
   filterCandidates,
   harvestCandidates,
+  slashQueryAt,
   type CandidateHarvest,
   type SlashCandidate,
 } from '@/lib/slashCandidates'
@@ -189,6 +190,12 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
   // Esc で閉じたか。**打ち直せばまた開く**——閉じたまま戻らないと、打ち間違いを
   // 直すたびに一覧を諦めることになる
   const [dismissed, setDismissed] = useState(false)
+  // いま入力欄のどこに居るか。**一覧を出すかは、先頭ではなくここで決まる**——
+  // 文の途中に打った `/` でも名前を思い出せるように（2026-09-08）
+  const [caret, setCaret] = useState(0)
+  // 確定したあとに置きたい位置。**入力欄は `text` で操られている**ので、放っておくと
+  // 差し替えた瞬間に末尾へ飛び、続きを打つと文の最後へ入る
+  const 置き直す位置 = useRef<number | null>(null)
   const project = useSessionCard(cardId)?.project
   // 添付の口を出すかどうかは**終わっているか**だけで決まる。`host` は必ず在るので
   // 「宛先が分からない」という枝は作らない（作っても一度も通らない）
@@ -344,21 +351,37 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
     }
   }, [cardId, host, project, ended])
 
-  // 打った文字で狭める。**並びは入れ替えない**（押そうとした的が逃げる）
-  const 候補 = filterCandidates(harvest?.candidates ?? [], text)
-  // 一覧を出すか。**`/` で始まらなければ `filterCandidates` が空を返す**ので、
-  // 普通の指示を打っている最中には出ない
+  // いま居る語が `/` で始まっているか。**入力の先頭とは限らない**（設計§5-2）
+  const 問い合わせ = slashQueryAt(text, caret)
+  // 打った文字で狭める。**並びは入れ替えない**（押そうとした的が逃げる）。
+  // 渡すのは**入力欄の全文ではなく語のほう**——全文だと、文の途中の `/` が
+  // `filterCandidates` の「`/` で始まるか」に落ちる
+  const 候補 = filterCandidates(harvest?.candidates ?? [], 問い合わせ?.token ?? '')
+  // 一覧を出すか。**`/` の語の中に居なければ出さない**ので、普通の指示を
+  // 打っている最中にも、引数を打っている最中にも被さらない
   const 候補が出ている =
-    !ended && !dismissed && text.startsWith('/') && harvest !== null
+    !ended && !dismissed && 問い合わせ !== null && harvest !== null
 
   /** 選んでいるものを入力欄へ入れる。**`setText` を通す**ので書きかけが追随する */
   const 確定する = (candidate: SlashCandidate) => {
-    // 引数まで打っていたら残す。`/cmd 引数` の `cmd` だけを差し替える
-    const 残り = text.slice(1).split(/(\s)/).slice(1).join('')
-    setText(`/${candidate.name}${残り}`)
+    const 場所 = 問い合わせ
+    if (場所 === null) return
+    // **語のぶんだけを差し替える。** 先頭から置き換えると、文の途中で選んだ瞬間に
+    // 前の文が丸ごと消える
+    setText(`${text.slice(0, 場所.start)}/${candidate.name}${text.slice(場所.end)}`)
+    置き直す位置.current = 場所.start + 1 + candidate.name.length
     setDismissed(true)
     inputRef.current?.focus()
   }
+
+  // 差し替えたあと、名前の直後へ戻す。**`text` が変わったあとでないと効かない**
+  useLayoutEffect(() => {
+    const 位置 = 置き直す位置.current
+    if (位置 === null) return
+    置き直す位置.current = null
+    inputRef.current?.setSelectionRange(位置, 位置)
+    setCaret(位置)
+  }, [text])
 
   /** 3経路の共通の入口。**判定は `pickImages` の1つを通る**（設計§9） */
   const 受け取る = async (files: readonly File[]) => {
@@ -505,7 +528,7 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
           selected={Math.min(selected, Math.max(0, 候補.length - 1))}
           unreadable={harvest?.unreadable ?? 0}
           truncated={harvest?.truncated ?? false}
-          text={text}
+          text={問い合わせ?.token ?? text}
           onPick={確定する}
           onHover={setSelected}
         />
@@ -637,10 +660,16 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
           }
           onChange={(event) => {
             setText(event.target.value)
+            setCaret(event.target.selectionStart ?? event.target.value.length)
             // 打ち直したら、選び直しも一覧の開き直しもする。**閉じたまま戻らないと、
             // 打ち間違いを直すたびに一覧を諦めることになる**
             setSelected(0)
             setDismissed(false)
+          }}
+          // **矢印やクリックで動いただけでも追う。** 打っていないのに居場所が変わる
+          // 道はここしか無く、拾わないと `/` の語へ戻っても一覧が出ない
+          onSelect={(event) => {
+            setCaret(event.currentTarget.selectionStart ?? 0)
           }}
           // 貼り付け。**PC の Ctrl+V もスマホの長押し貼り付けも、ここへ来る**（§9）
           onPaste={(event) => {

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   filterCandidates,
   harvestCandidates,
+  slashQueryAt,
   type FsPort,
   type SlashCandidate,
 } from './slashCandidates'
@@ -587,5 +588,94 @@ describe('打った文字で絞る', () => {
     const before = names(filterCandidates(sample, '/'))
     const after = names(filterCandidates(sample, '/p'))
     expect(after).toEqual(before.filter((n) => n.startsWith('p')))
+  })
+})
+
+describe('候補を出す `/` を、位置から見つける', () => {
+  /** `|` を打った位置と読んで呼ぶ。テストの側で数を数えないため */
+  const 見る = (印付き: string) => {
+    const caret = 印付き.indexOf('|')
+    expect(caret).toBeGreaterThanOrEqual(0)
+    return slashQueryAt(印付き.replace('|', ''), caret)
+  }
+
+  describe('語の頭の `/` なら出す', () => {
+    it('入力の先頭', () => {
+      expect(見る('/re|')).toEqual({ start: 0, end: 3, token: '/re' })
+    })
+
+    it('空白のあと', () => {
+      expect(見る('手順のあと /re|')).toEqual({
+        start: 6,
+        end: 9,
+        token: '/re',
+      })
+    })
+
+    it('改行のあと', () => {
+      expect(見る('前の行\n/re|')).toEqual({ start: 4, end: 7, token: '/re' })
+    })
+
+    it('`/` だけでも出す（全部の候補を見るため）', () => {
+      expect(見る('あとで /|')).toEqual({ start: 4, end: 5, token: '/' })
+    })
+
+    it('語の途中に居ても、語の終わりまでを取る', () => {
+      // `/re|wind` で確定したときに `wind` が残ってはいけない
+      expect(見る('/re|wind')).toEqual({ start: 0, end: 7, token: '/rewind' })
+    })
+
+    it('`/` の直後（打ち始めた瞬間）でも出す', () => {
+      expect(見る('前 /|rewind')).toEqual({ start: 2, end: 9, token: '/rewind' })
+    })
+  })
+
+  describe('語の途中の `/` では出さない', () => {
+    it('URL', () => {
+      expect(見る('https://example.com/r|')).toBeNull()
+    })
+
+    it('and/or のような区切り', () => {
+      expect(見る('a/b|')).toBeNull()
+    })
+
+    it('括弧のすぐあと（空白でない直前は語の頭でない）', () => {
+      expect(見る('(/re|')).toBeNull()
+    })
+  })
+
+  describe('語の外なら出さない', () => {
+    it('普通の指示', () => {
+      expect(見る('ファイルを直して|')).toBeNull()
+    })
+
+    it('空っぽ', () => {
+      expect(見る('|')).toBeNull()
+    })
+
+    it('引数を打っている間（名前はもう決まっている）', () => {
+      expect(見る('/rewind いますぐ|')).toBeNull()
+    })
+
+    it('`/` の語より前に居るとき', () => {
+      expect(見る('|前 /rewind')).toBeNull()
+    })
+  })
+
+  it('位置が範囲の外でも落ちない', () => {
+    expect(slashQueryAt('/re', 99)).toEqual({ start: 0, end: 3, token: '/re' })
+    expect(slashQueryAt('/re', -5)).toEqual({ start: 0, end: 3, token: '/re' })
+  })
+
+  it('取れた語は、そのまま `filterCandidates` へ渡せる', () => {
+    const 手持ち: SlashCandidate[] = [
+      { name: 'rewind', description: '', source: 'builtin' },
+      { name: 'clear', description: '', source: 'builtin' },
+    ]
+    const 場所 = 見る('手順のあと /re|')
+    expect(場所).not.toBeNull()
+    expect(
+      filterCandidates(手持ち, 場所?.token ?? '').map((one) => one.name),
+    ).toEqual(['rewind'])
   })
 })

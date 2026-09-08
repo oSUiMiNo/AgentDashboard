@@ -79,6 +79,33 @@ test('押して選ぶと入力欄に入り、そのまま送れて PTY まで届
   await expectTerminalToContain(page, '[fake-claude] received: /rewind')
 })
 
+test('文の途中で `/` を打っても出て、決めても前の文が消えない', async ({
+  page,
+}) => {
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  await openSession(page, tile)
+
+  const input = page.getByTestId('composer-input')
+  // **一行目の頭に限らない**（2026-09-08 の修整）。名前を思い出す道具として要る
+  await input.fill('手順を踏んでから /rew')
+  await expect(page.getByTestId('slash-menu')).toBeVisible()
+
+  await page.locator(`${候補の行}[data-value="rewind"]`).click()
+  // **語のぶんだけを差し替える。** 先頭から置き換えると前の文が丸ごと消える
+  await expect(input).toHaveValue('手順を踏んでから /rewind')
+})
+
+test('URL を貼っている間は候補が出ない', async ({ page }) => {
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  await openSession(page, tile)
+
+  // 語の頭の `/` だけを見る。どこでも出すと、URL を貼るたびに一覧が被さる
+  await page.getByTestId('composer-input').fill('参照：https://example.com/rewind')
+  await expect(page.getByTestId('slash-menu')).toBeHidden()
+})
+
 test('候補が出ても、入力欄の器の高さが変わらない', async ({ page }) => {
   await openDashboard(page)
   const tile = await spawnSession(page)

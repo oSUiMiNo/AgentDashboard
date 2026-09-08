@@ -427,3 +427,46 @@ export function filterCandidates(
   const needle = typed.toLowerCase()
   return candidates.filter((candidate) => candidate.name.toLowerCase().startsWith(needle))
 }
+
+/** 候補を出すべき `/` の場所（[`slashQueryAt`]）。 */
+export interface SlashQuery {
+  /** `/` そのものの位置。**確定はここから置き換える** */
+  start: number
+  /** 語の終わり（次の空白の手前）。**確定はここまでを置き換える** */
+  end: number
+  /** `/` を含めた語。そのまま [`filterCandidates`] へ渡せる */
+  token: string
+}
+
+/**
+ * いま居る場所が、候補を出すべき `/` の語の中かを見る（設計§5-2）。
+ *
+ * **先頭とは限らない。** `いつもの手順を踏んでから /rewind` のように文の途中で
+ * 打っても出す——**名前を思い出す道具**として要る、というのが足した理由である
+ * （2026-09-08）。
+ *
+ * **語の頭の `/` だけを見る。** 直前が「入力の先頭・空白・改行」のいずれかである
+ * ことを求めるので、`http://` や `and/or` では出ない——どこでも出すと、URL を
+ * 貼るたびに一覧が被さって、便利どころか邪魔になる。
+ *
+ * **語から出たら閉じる。** `/cmd 引数` の引数側に居る間は `null` を返す。名前は
+ * もう決まっているのに開いたままだと、**素の Enter が改行でなく確定になる**時間が
+ * 文の最後まで伸びる（設計§7 の押し分けは「一覧が出ているか」で切り替わる）。
+ *
+ * @param text 入力欄の中身そのまま
+ * @param caret いまの位置（`selectionStart`）。範囲外は端へ丸める
+ * @returns 出すべきなら場所、出さないなら `null`
+ */
+export function slashQueryAt(text: string, caret: number): SlashQuery | null {
+  const 位置 = Math.max(0, Math.min(caret, text.length))
+  const 空白 = (index: number) => /\s/.test(text[index] ?? '')
+  // 位置から左へ、空白に当たるまで戻る。止まったところが語の頭
+  let start = 位置
+  while (start > 0 && !空白(start - 1)) start -= 1
+  if (text[start] !== '/') return null
+  // 右へ、空白に当たるまで進む。**位置より右も語のうち**——`/re|wind` で確定したら
+  // `wind` が残ってはいけない
+  let end = 位置
+  while (end < text.length && !空白(end)) end += 1
+  return { start, end, token: text.slice(start, end) }
+}

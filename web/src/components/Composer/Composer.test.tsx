@@ -781,6 +781,16 @@ describe('スラッシュコマンドの候補（フェーズ2・設計§6・§7
 
   const 入力欄 = () => screen.getByTestId('composer-input')
 
+  /**
+   * 打った位置を動かす。**jsdom は `value` を入れると末尾へ飛ばす**ので、
+   * 語の中に居るところを見たいテストは自分で戻す（実機では矢印やクリックが同じ道）。
+   */
+  function 位置を(index: number) {
+    const 欄 = 入力欄() as HTMLTextAreaElement
+    欄.setSelectionRange(index, index)
+    fireEvent.select(欄)
+  }
+
   beforeEach(() => {
     集まることにする(['rewind', 'clear', 'model'])
   })
@@ -909,9 +919,64 @@ describe('スラッシュコマンドの候補（フェーズ2・設計§6・§7
     it('引数まで打っていたら、名前だけを差し替える', async () => {
       置く()
       fireEvent.change(入力欄(), { target: { value: '/r あとの引数' } })
+      // **名前の側へ戻ってから選ぶ。** 引数を打っている間は語の外なので出ない（下記）
+      位置を(2)
       await 一覧が出るまで()
       fireEvent.keyDown(入力欄(), { key: 'Enter' })
       expect(入力欄()).toHaveValue('/rewind あとの引数')
+    })
+
+    it('引数を打ち始めると、一覧は閉じる', async () => {
+      置く()
+      fireEvent.change(入力欄(), { target: { value: '/r' } })
+      await 一覧が出るまで()
+      fireEvent.change(入力欄(), { target: { value: '/rewind いますぐ' } })
+      await waitFor(() => expect(screen.queryByTestId('slash-menu')).toBeNull())
+    })
+
+    it('文の途中で `/` を打っても出る', async () => {
+      置く()
+      fireEvent.change(入力欄(), { target: { value: '手順を踏んでから /r' } })
+      await 一覧が出るまで()
+      expect(screen.getByText('/rewind')).toBeInTheDocument()
+    })
+
+    it('改行のあとで `/` を打っても出る', async () => {
+      置く()
+      fireEvent.change(入力欄(), { target: { value: '前の行\n/r' } })
+      await 一覧が出るまで()
+      expect(screen.getByText('/rewind')).toBeInTheDocument()
+    })
+
+    it('URL の中の `/` では出ない', async () => {
+      置く()
+      fireEvent.change(入力欄(), { target: { value: 'https://example.com/r' } })
+      await waitFor(() => expect(screen.queryByTestId('slash-menu')).toBeNull())
+    })
+
+    it('語の途中の `/` では出ない', async () => {
+      置く()
+      fireEvent.change(入力欄(), { target: { value: 'a/r' } })
+      await waitFor(() => expect(screen.queryByTestId('slash-menu')).toBeNull())
+    })
+
+    it('文の途中で決めても、前の文が消えない', async () => {
+      置く()
+      fireEvent.change(入力欄(), { target: { value: '手順を踏んでから /r' } })
+      await 一覧が出るまで()
+      fireEvent.keyDown(入力欄(), { key: 'Enter' })
+      expect(入力欄()).toHaveValue('手順を踏んでから /rewind')
+    })
+
+    it('文の途中で決めたら、続きは名前の直後から打てる', async () => {
+      置く()
+      fireEvent.change(入力欄(), { target: { value: '前 /r うしろ' } })
+      位置を(4)
+      await 一覧が出るまで()
+      fireEvent.keyDown(入力欄(), { key: 'Enter' })
+      expect(入力欄()).toHaveValue('前 /rewind うしろ')
+      // `前 /rewind` の直後。**末尾へ飛ぶと、続きが文の最後へ入る**
+      expect((入力欄() as HTMLTextAreaElement).selectionStart).toBe(9)
     })
 
     it('押しても決まる', async () => {
