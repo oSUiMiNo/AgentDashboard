@@ -1555,6 +1555,7 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
         card_id: CardId,
         text: String,
         attachments: Vec<String>,
+        confirm: bool,
     ) -> Result<(), String> {
         self.relay(
             card_id,
@@ -1562,6 +1563,7 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
                 card_id,
                 text,
                 attachments,
+                confirm,
             },
         )
     }
@@ -2471,6 +2473,7 @@ mod envelope_tests {
             card_id: CardId::new(),
             text: "こんにちは".to_string(),
             attachments: Vec::new(),
+            confirm: false,
         }));
         let bytes = bus::encode_json(Uuid::new_v4(), &command);
         let (_, back) = bus::decode_json::<SessionHostCommand>(&bytes).expect("読めること");

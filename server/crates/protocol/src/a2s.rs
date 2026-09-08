@@ -444,6 +444,17 @@ pub enum ServerToAgent {
         /// 隠す側へ寄せるなら `SessionMeta` に能力の欄を足す配線が要る（利用者の判断待ち）。
         #[serde(default)]
         attachments: Vec<String>,
+        /// **届いたことを確かめてから確定するか**（ブランチ設計§3-7）。
+        ///
+        /// 人が押した送信は偽でよい——**届かなければ画面を見ている本人が気づく**。
+        /// 真にするのは**段取りが撃つとき**だけで、あちらは誰も見ていないので、
+        /// 消えたことに気づけないまま待ち続ける。
+        ///
+        /// `#[serde(default)]` は `attachments` と同じ理由——**`A2S_VERSION` を上げない**
+        /// ため。古いセッションホストはこの欄を無視して従来どおり撃ちっぱなしにするので、
+        /// **確かめが効かないだけで壊れはしない**。
+        #[serde(default)]
+        confirm: bool,
     },
     SetPermissionMode {
         card_id: CardId,
@@ -746,11 +757,15 @@ mod tests {
                 card_id,
                 text: "/rewind".to_string(),
                 attachments: Vec::new(),
+                // 段取りが撃つ側。**届いたことを確かめる**（ブランチ設計§3-7）
+                confirm: true,
             },
             ServerToAgent::SendInput {
                 card_id,
                 text: "これを見て".to_string(),
                 attachments: vec!["/state/attachments/x/20260902-010203-a1b2c3d4.png".to_string()],
+                // 人が押した送信。確かめない
+                confirm: false,
             },
             ServerToAgent::SetPermissionMode {
                 card_id,
