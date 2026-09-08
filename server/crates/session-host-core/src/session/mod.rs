@@ -3545,6 +3545,10 @@ mod tests {
             "self.write_input(CYCLE_KEY)",                 // switch_permission_mode
             "self.write_input(&body)?;",                   // send_instruction
             "self.write_input(&submit)",                   // send_instruction
+            // 確かめてから送る口（ブランチ設計§3-7）。**失敗は残る**——`?` で
+            // 呼び手へ返り、`local.rs` / `link.rs` が `ServerMessage::Error` へ
+            // 移して画面まで運ぶ（`send_instruction_with` と同じ道）
+            "self.write_input(&submit)?;", // send_command_confirmed
         ];
 
         // **試験の側は数えない。** この検査自身が許した綴りを並べているので、

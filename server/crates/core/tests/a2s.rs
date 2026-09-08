@@ -2565,7 +2565,12 @@ async fn 約束を積めないときは理由が残って畳まれる() {
     // --- 書き手を詰まらせる ------------------------------------------------
     sniffer.hold();
     a2s.browser
-        .send_input(session.card_id, "x".repeat(4 * 1024 * 1024), Vec::new(), false)
+        .send_input(
+            session.card_id,
+            "x".repeat(4 * 1024 * 1024),
+            Vec::new(),
+            false,
+        )
         .await
         .expect("宛先が引けること");
     a2s.wait_until("書き手が大きな指示を掴む", || {
@@ -2666,7 +2671,12 @@ async fn 生存確認を積めないときも理由が残る() {
 
     sniffer.hold();
     a2s.browser
-        .send_input(session.card_id, "x".repeat(4 * 1024 * 1024), Vec::new(), false)
+        .send_input(
+            session.card_id,
+            "x".repeat(4 * 1024 * 1024),
+            Vec::new(),
+            false,
+        )
         .await
         .expect("宛先が引けること");
     a2s.wait_until("書き手が大きな指示を掴む", || {
