@@ -198,3 +198,75 @@ describe('運んだ直後の `click` を捨てる', () => {
     expect(fireEvent.click(本体)).toBe(true)
   })
 })
+
+/**
+ * **マウスは主ボタンでしか掴まない**
+ * （イシュー `カードと枠を、中クリックで新しいタブに開く` テスト計画フェーズ4）。
+ *
+ * ここは長いあいだ `button` を1度も見ていなかった。**中ボタンでも右ボタンでも掴みの
+ * 候補になり、そのまま動かせば並べ替えが始まっていた。**
+ */
+describe('マウスは主ボタンでしか掴まない', () => {
+  /** ボタンと種類を指定して運ぶ */
+  function ボタンで運ぶ(本体: HTMLElement, button: number, pointerType = 'mouse') {
+    fireEvent.pointerDown(本体, {
+      pointerId: 1,
+      clientX: 100,
+      clientY: 100,
+      button,
+      pointerType,
+    })
+    fireEvent.pointerMove(本体, { pointerId: 1, clientX: 140, clientY: 100 })
+    fireEvent.pointerUp(本体, { pointerId: 1 })
+  }
+
+  it('**中ボタンで押して動かしても掴まない**——中クリックは「新しいタブで開く」に取ってある', () => {
+    const { 記録, 本体 } = 置く('move')
+    ボタンで運ぶ(本体, 1)
+
+    expect(記録.grabs).toBe(0)
+    expect(記録.moves).toEqual([])
+  })
+
+  it('**右ボタンでも掴まない**——メニューを出そうとして並びが変わるのは誰も頼んでいない', () => {
+    const { 記録, 本体 } = 置く('move')
+    ボタンで運ぶ(本体, 2)
+
+    expect(記録.grabs).toBe(0)
+  })
+
+  it('主ボタンは今までどおり掴む', () => {
+    const { 記録, 本体 } = 置く('move')
+    ボタンで運ぶ(本体, 0)
+
+    expect(記録.grabs).toBe(1)
+    expect(記録.moves).toEqual([{ x: 140, y: 100 }])
+  })
+
+  it('**指は今までどおり。** 条件をマウスに限っているか', () => {
+    const { 記録, 本体, arm } = 置く('hold')
+    fireEvent.pointerDown(本体, {
+      pointerId: 1,
+      clientX: 100,
+      clientY: 100,
+      button: 1,
+      pointerType: 'touch',
+    })
+    arm()
+
+    expect(記録.grabs).toBe(1)
+  })
+
+  it('掴み手（`press`）も、マウスの中ボタンでは掴まない', () => {
+    const { 記録, 本体 } = 置く('press')
+    fireEvent.pointerDown(本体, {
+      pointerId: 1,
+      clientX: 100,
+      clientY: 100,
+      button: 1,
+      pointerType: 'mouse',
+    })
+
+    expect(記録.grabs).toBe(0)
+  })
+})
