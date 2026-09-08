@@ -37,6 +37,7 @@ import {
   HostFsError,
   isUnder,
   listDir,
+  rawUrl,
   relativeOf,
   type DirEntry,
   type DirListing,
@@ -438,6 +439,7 @@ export function FolderBrowser({
                 key={entry.name}
                 entry={entry}
                 full={full}
+                host={host}
                 root={root}
                 onOpen={() => void go(full)}
                 onPickFile={
@@ -455,6 +457,32 @@ export function FolderBrowser({
 }
 
 /**
+ * 素の左クリックか。**ここだけが、ブラウザから押し方を奪う。**
+ *
+ * `react-router` の `<Link>` が中でやっているのと同じ判定である（左ボタン＋修飾キーが
+ * どれも立っていない）。**発明しない**——独自の形にすると、`Cmd` で背面のタブ・`Shift`
+ * で新しい窓・`Alt` で保存という、押す人が既に知っている作法が場所ごとに変わる。
+ *
+ * **中クリックはここへ来ない**（`auxclick` になる）ので、本来は要らない。それでも
+ * `button === 0` を見るのは、**`click` として中ボタンが届く環境への保険**である。
+ */
+function 素の左クリックか(event: {
+  button: number
+  ctrlKey: boolean
+  metaKey: boolean
+  shiftKey: boolean
+  altKey: boolean
+}): boolean {
+  return (
+    event.button === 0 &&
+    !event.ctrlKey &&
+    !event.metaKey &&
+    !event.shiftKey &&
+    !event.altKey
+  )
+}
+
+/**
  * 1行。**開く的とコピーの的を分ける**（設計§13）。
  *
  * 行全体を1つのボタンにすると、狭い画面では的が大きくて押しやすい代わりに、
@@ -463,10 +491,50 @@ export function FolderBrowser({
  * 的を2つに割って両方を成立させる。
  *
  * リンクは辿らない（設計§8）ので、押しても入らない。在ることだけを示す。
+ *
+ * # ファイルの行だけ、本物のリンクにする
+ *
+ * **中クリックと Ctrl／Cmd＋左クリックで、ブラウザの新しいタブに開くため。**
+ * `<button>` にはその道がブラウザ側に用意されていないので、いくら押しても何も起きない。
+ *
+ * **中クリックのためのコードは1行も書いていない。** リンクにすれば、中クリックも修飾
+ * キーもキーボード操作もブラウザが最初から持っている——`lib/openInNewTab.ts` が
+ * 「**`<a>` にできるものは `<a>` に任せる**」と決めた規則そのままである。だから
+ * あの補助はここでは使わない。書くのは**素の左クリックを奪う1箇所**だけで、これは
+ * `react-router` の `<Link>` が中でやっているのと同じ形。
+ *
+ * 行き先は `rawUrl`（`lib/hostfs.ts`）で、**ファイルビュアの「ブラウザで開く」と同じ
+ * ものを使う**（`v0.1.82`）。画面で URL を継ぎ足さない。
+ *
+ * ## `target="_blank"` を付けない
+ *
+ * 付けると**素の左クリックまで新しいタブになり**、「押したらアプリの中で開く」という
+ * いまの意味が変わる。ファイルビュアの「ブラウザで開く」に付いているのは、**あれが
+ * 押したら必ず外へ出るもの**だからで、事情が違う。
+ *
+ * ## `Space` が効かなくなる（承知のうえ）
+ *
+ * **リンクはキーボードでは `Enter` だけ**で、`Space` では開かない。役割が `button` から
+ * `link` へ変わるので、支援技術の案内もそちらへ揃う。**独自に `Space` を足さない**
+ * ——役割がリンクなのに `Space` で動く要素は、案内と実際の操作が食い違う。
+ *
+ * 代わりに、**同じ一覧の中に `Space` が効く行（フォルダ）と効かない行（ファイル）が
+ * 混ざる**。望ましくはないが、`Enter` はどちらでも効くので行き止まりにはならず、
+ * フォルダをリンクにする道は無い（**行き先の URL が無い**）ので揃えようもない。
+ * **覆すなら、覆した理由を要件へ書き足すこと。**
+ *
+ * ## ボタンのまま据え置くもの
+ *
+ * | 何 | なぜ |
+ * |---|---|
+ * | **フォルダ** | 押すのは**この中で辿る**動きで、外に行き先が無い |
+ * | **`symlink`** | 設計§8 で「辿らない」と決めてあり、いまも押せない |
+ * | **`onPickFile` が渡らない場面**（PJT の追加シート） | あの画面はファイルを見るためのものではない |
  */
 function Row({
   entry,
   full,
+  host,
   root,
   onOpen,
   onPickFile,
@@ -476,6 +544,8 @@ function Row({
   entry: DirEntry
   /** この行が指す絶対パス */
   full: string
+  /** `agent_id` かローカルを表す `'local'`。**リンクの行き先を組み立てるのに要る** */
+  host: string
   /** 相対パスの基準。無ければ絶対パスをコピーする */
   root?: string
   onOpen: () => void
@@ -485,8 +555,39 @@ function Row({
   onCopy: (value: string) => void
 }) {
   const openable = entry.kind === "dir"
-  const pressable =
-    openable || (entry.kind === "file" && onPickFile !== undefined)
+  // **`file` に限る。** `symlink` を混ぜると、いままで押せなかった行が押せるようになる
+  const linkable = entry.kind === "file" && onPickFile !== undefined
+  const pressable = openable || linkable
+
+  // 的はできるだけ大きく取る。高さも狭い画面で押しやすい値にしてある
+  const 行のクラス =
+    "h-auto min-w-0 flex-1 justify-start gap-2 px-2 py-2 text-left font-normal"
+
+  const 中身 = (
+    <>
+      {/* **開く前に、何が起きるかが分かる印。** 画像とテキストが同じ印だと、
+          押してみるまで箱が出るのか字が出るのか分からない（種別ごとに見せ方が
+          違うと決めてあるので、印もそこへ合わせる） */}
+      <span aria-hidden data-testid="folder-entry-icon" className="shrink-0">
+        {entry.kind === "dir"
+          ? "📁"
+          : entry.kind === "symlink"
+            ? "🔗"
+            : fileIcon(entry.name)}
+      </span>
+      <span className="min-w-0 truncate">{entry.name}</span>
+      {entry.is_project && (
+        // 深い階層で「どれが目的地か」を1階層ぶん先に教える（設計§8）
+        <span
+          data-testid="folder-project-mark"
+          title="このフォルダは .git を持っています"
+          className="border-primary/40 text-primary ml-auto shrink-0 rounded border px-1 text-[10px]"
+        >
+          PJT
+        </span>
+      )}
+    </>
+  )
 
   return (
     /*
@@ -496,47 +597,47 @@ function Row({
 
       **押した結果は行のコピーと同じ道を通す。** 別の道を作ると、写せない環境の逃げ道
       （`folder-copy-fallback`）が右クリック経由のときだけ出なくなる。
+
+      **リンクにしても右クリックはここが取る。** つまり「新しいタブで開く」はメニューに
+      現れず、道は**中クリックと Ctrl／Cmd＋左クリックの2つ**になる（要件どおり）。
     */
     <ContextMenu>
       <ContextMenuTrigger asChild>
         <li className="flex items-center gap-1">
-          <Button
-            type="button"
-            variant="ghost"
-            data-testid="folder-entry"
-            data-kind={entry.kind}
-            data-name={entry.name}
-            disabled={!pressable}
-            onClick={openable ? onOpen : onPickFile}
-            // 的はできるだけ大きく取る。高さも狭い画面で押しやすい値にしてある
-            className="h-auto min-w-0 flex-1 justify-start gap-2 px-2 py-2 text-left font-normal"
-          >
-            {/* **開く前に、何が起きるかが分かる印。** 画像とテキストが同じ印だと、
-            押してみるまで箱が出るのか字が出るのか分からない（種別ごとに見せ方が
-            違うと決めてあるので、印もそこへ合わせる） */}
-            <span
-              aria-hidden
-              data-testid="folder-entry-icon"
-              className="shrink-0"
-            >
-              {entry.kind === "dir"
-                ? "📁"
-                : entry.kind === "symlink"
-                  ? "🔗"
-                  : fileIcon(entry.name)}
-            </span>
-            <span className="min-w-0 truncate">{entry.name}</span>
-            {entry.is_project && (
-              // 深い階層で「どれが目的地か」を1階層ぶん先に教える（設計§8）
-              <span
-                data-testid="folder-project-mark"
-                title="このフォルダは .git を持っています"
-                className="border-primary/40 text-primary ml-auto shrink-0 rounded border px-1 text-[10px]"
+          {linkable ? (
+            <Button asChild variant="ghost" className={行のクラス}>
+              <a
+                data-testid="folder-entry"
+                data-kind={entry.kind}
+                data-name={entry.name}
+                href={rawUrl(host, full)}
+                // **開いた先から元の窓を触らせない。** `FileView` と揃える
+                rel="noopener"
+                onClick={(event) => {
+                  // **修飾キー付きと中ボタンは、止めずにブラウザへ渡す。**
+                  // ここで `preventDefault` を呼ばないことが、新しいタブが開く条件
+                  if (!素の左クリックか(event)) return
+                  event.preventDefault()
+                  onPickFile()
+                }}
               >
-                PJT
-              </span>
-            )}
-          </Button>
+                {中身}
+              </a>
+            </Button>
+          ) : (
+            <Button
+              type="button"
+              variant="ghost"
+              data-testid="folder-entry"
+              data-kind={entry.kind}
+              data-name={entry.name}
+              disabled={!pressable}
+              onClick={openable ? onOpen : undefined}
+              className={行のクラス}
+            >
+              {中身}
+            </Button>
+          )}
           <CopyPath
             full={full}
             root={root}
