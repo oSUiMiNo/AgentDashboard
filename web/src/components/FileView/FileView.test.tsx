@@ -15,7 +15,12 @@ import { rawUrl } from "@/lib/hostfs";
 const ROOT = "/home/me/dev/app";
 
 type FileViewProps = ComponentProps<typeof FileView>;
-type 埋める = "tabs" | "onSelectTab" | "onCloseTab" | "onReorderTab";
+type 埋める =
+  | "tabs"
+  | "onSelectTab"
+  | "onCloseTab"
+  | "onReorderTab"
+  | "onReorderTabCommit";
 type ViewerProps = Omit<FileViewProps, 埋める> &
   Partial<Pick<FileViewProps, 埋める>>;
 
@@ -31,6 +36,7 @@ function Viewer({
   onSelectTab,
   onCloseTab,
   onReorderTab,
+  onReorderTabCommit,
   ...rest
 }: ViewerProps) {
   return (
@@ -40,6 +46,7 @@ function Viewer({
       onSelectTab={onSelectTab ?? (() => {})}
       onCloseTab={onCloseTab ?? (() => {})}
       onReorderTab={onReorderTab ?? (() => {})}
+      onReorderTabCommit={onReorderTabCommit ?? (() => {})}
     />
   );
 }
@@ -799,6 +806,25 @@ describe("中を探す", () => {
     expect(CtrlF()).toBe(true);
     expect(await screen.findByTestId("file-find")).toBeInTheDocument();
     expect(screen.getByTestId("file-raw")).toBeInTheDocument();
+  });
+
+  it("大きいプレビューでは、探すための切り替えを自動でしない", async () => {
+    /*
+      **切り替えは安い操作ではない。** 生テキストは `<pre>` なので、上限いっぱいの
+      中身がそのまま描画へ流れる（`FORMAT_DEFAULT_LIMIT` の分岐は Markdown だけ）。
+      **反射で押した Ctrl+F が、それを起こしてはいけない。**
+    */
+    const 大きい = "<p>あ</p>".padEnd(300 * 1024, "あ");
+    serve(content(大きい));
+    show(`${ROOT}/理解.html`);
+    await screen.findByTestId("file-frame");
+
+    await userEvent.click(screen.getByTestId("file-find-open"));
+
+    expect(screen.getByTestId("file-find-too-big")).toBeInTheDocument();
+    // 切り替わっていない（箱のまま）し、窓も開いていない
+    expect(screen.getByTestId("file-frame")).toBeInTheDocument();
+    expect(screen.queryByTestId("file-find")).toBeNull();
   });
 
   it("切り替えの断りは、押されるまで出さない", async () => {

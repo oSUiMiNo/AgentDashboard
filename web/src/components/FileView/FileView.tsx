@@ -117,8 +117,10 @@ interface Props {
   onSelectTab: (path: string) => void
   /** タブの ✕。**1枚だけ閉じる**（下の `onClose` は列ごと） */
   onCloseTab: (path: string) => void
-  /** タブを並べ替えた（掴んで運ぶ／Ctrl+Shift+← →） */
-  onReorderTab: (from: number, to: number) => void
+  /** タブを並べ替えた（掴んで運ぶ／Ctrl+Shift+← →）。**動かすものはパスで渡す** */
+  onReorderTab: (path: string, to: number) => void
+  /** 並べ替えが確定した。**覚えるのはここだけ** */
+  onReorderTabCommit: () => void
   /**
    * **列ごと**閉じる。省略すると閉じる操作を出さない。
    *
@@ -154,6 +156,7 @@ export function FileView({
   onSelectTab,
   onCloseTab,
   onReorderTab,
+  onReorderTabCommit,
   onClose,
   onUnreadable,
 }: Props) {
@@ -182,6 +185,17 @@ export function FileView({
    */
   const [切替えた, set切替えた] = useState(false)
   /**
+   * 大きすぎて、探すために自動では切り替えなかった。
+   *
+   * **切り替えは安い操作ではない。** プレビューは `iframe`（ブラウザ自身が描く）だが、
+   * 生テキストは `<pre>` なので、**上限いっぱい（3 MiB）の中身がそのまま描画へ流れる**
+   * ——`FORMAT_DEFAULT_LIMIT` の分岐は Markdown にしか掛かっていない。
+   *
+   * **反射で押した Ctrl+F が、それを起こしてはいけない。** 同じ取り違えで
+   * 2 MB の HTML が `<pre>` へ落ちた実害が、このファイルに記録されている。
+   */
+  const [大きすぎ, set大きすぎ] = useState(false)
+  /**
    * 探す合図の回数。**窓が既に開いているときに、もう一度押された**ことを
    * 窓へ伝えるために要る（入力を選び直して打ち直せる状態にする）。
    */
@@ -201,6 +215,7 @@ export function FileView({
     // 残ると、当たりの数だけが別の文書のものに見える
     setFind(false)
     set切替えた(false)
+    set大きすぎ(false)
     setBroken(false)
     setContent(null)
     setPicture(null)
@@ -307,12 +322,21 @@ export function FileView({
    */
   const 探し始める = useCallback(() => {
     if (箱で描いている) {
+      /*
+        **大きいときは、こちらの都合で切り替えない。** 押した人が「生テキストで見る」を
+        自分で押すのは今までどおり通すが、**探すために黙って重い描画を始めない**
+        （`file-heavy` と同じ考え方——時間がかかることを先に言い、決めるのは利用者）。
+      */
+      if (content !== null && content.bytes > FORMAT_DEFAULT_LIMIT) {
+        set大きすぎ(true)
+        return
+      }
       setRaw(true)
       set切替えた(true)
     }
     setFind(true)
     set探す合図((n) => n + 1)
-  }, [箱で描いている])
+  }, [箱で描いている, content])
 
   /*
     **Ctrl+F ／ Ctrl+G を奪うのは、探す入口があるときだけ。**
@@ -399,6 +423,7 @@ export function FileView({
           onSelect={onSelectTab}
           onClose={onCloseTab}
           onReorder={onReorderTab}
+          onReorderCommit={onReorderTabCommit}
         />
 
         <div className="ml-auto flex shrink-0 items-center gap-1">
@@ -548,6 +573,15 @@ export function FileView({
       {/* **黙って見せ方を変えない。** 箱の中は外から触れないので、探すには生テキストへ
           移るしかない——**移ったこと自体は正しいが、理由を言わないと画面が壊れたように
           見える**。「整形して見る」で戻れることまで書く */}
+      {/* **大きいので自動では切り替えなかった**（上の `大きすぎ`）。理由と大きさを言い、
+          押すかどうかは利用者が決める */}
+      {大きすぎ && 箱で描いている && content !== null && (
+        <p data-testid="file-find-too-big" className="text-xs text-amber-300">
+          大きいので、探すための切り替えは自動では行いません（{content.bytes} バイト）。
+          「生テキストで見る」を押すと探せますが、表示に時間がかかります。
+        </p>
+      )}
+
       {切替えた && raw && (
         <p data-testid="file-find-switched" className="text-xs text-amber-300">
           中を探すために、生テキストに切り替えました（プレビューのままでは中に触れません）。

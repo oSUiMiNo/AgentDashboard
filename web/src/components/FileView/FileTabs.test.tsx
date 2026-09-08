@@ -18,12 +18,14 @@ function 置く(
   手: {
     onSelect?: (p: string) => void
     onClose?: (p: string) => void
-    onReorder?: (from: number, to: number) => void
+    onReorder?: (path: string, to: number) => void
+    onReorderCommit?: () => void
   } = {},
 ) {
   const onSelect = vi.fn(手.onSelect)
   const onClose = vi.fn(手.onClose)
   const onReorder = vi.fn(手.onReorder)
+  const onReorderCommit = vi.fn(手.onReorderCommit)
   render(
     <FileTabs
       tabs={tabs}
@@ -32,9 +34,10 @@ function 置く(
       onSelect={onSelect}
       onClose={onClose}
       onReorder={onReorder}
+      onReorderCommit={onReorderCommit}
     />,
   )
-  return { onSelect, onClose, onReorder }
+  return { onSelect, onClose, onReorder, onReorderCommit }
 }
 
 describe('タブ帯', () => {
@@ -201,7 +204,7 @@ describe('タブの並べ替え', () => {
 
     await userEvent.keyboard('{Control>}{Shift>}{ArrowRight}{/Shift}{/Control}')
 
-    expect(onReorder).toHaveBeenCalledWith(0, 1)
+    expect(onReorder).toHaveBeenCalledWith(`${ROOT}/a.md`, 1)
   })
 
   it('Ctrl+Shift+← でも動く', async () => {
@@ -210,7 +213,7 @@ describe('タブの並べ替え', () => {
 
     await userEvent.keyboard('{Control>}{Shift>}{ArrowLeft}{/Shift}{/Control}')
 
-    expect(onReorder).toHaveBeenCalledWith(2, 1)
+    expect(onReorder).toHaveBeenCalledWith(`${ROOT}/c.md`, 1)
   })
 
   it('運ぶのは端で止まる（移るのと違って回らない）', async () => {
@@ -239,7 +242,7 @@ describe('タブの並べ替え', () => {
     const 帯 = screen.getByTestId('file-tabs')
 
     fireEvent.pointerDown(タブ, { pointerType: 'mouse', button: 0, clientX: 300 })
-    fireEvent.pointerMove(帯, { pointerType: 'mouse', clientX: 100 })
+    fireEvent.pointerMove(帯, { pointerType: 'mouse', buttons: 1, clientX: 100 })
 
     expect(onReorder).toHaveBeenCalled()
   })
@@ -251,7 +254,7 @@ describe('タブの並べ替え', () => {
     const 帯 = screen.getByTestId('file-tabs')
 
     fireEvent.pointerDown(タブ, { pointerType: 'mouse', button: 0, clientX: 100 })
-    fireEvent.pointerMove(帯, { pointerType: 'mouse', clientX: 102 })
+    fireEvent.pointerMove(帯, { pointerType: 'mouse', buttons: 1, clientX: 102 })
 
     expect(onReorder).not.toHaveBeenCalled()
   })
@@ -266,7 +269,7 @@ describe('タブの並べ替え', () => {
     const 帯 = screen.getByTestId('file-tabs')
 
     fireEvent.pointerDown(タブ, { pointerType: 'mouse', button: 0, clientX: 300 })
-    fireEvent.pointerMove(帯, { pointerType: 'mouse', clientX: 100 })
+    fireEvent.pointerMove(帯, { pointerType: 'mouse', buttons: 1, clientX: 100 })
     fireEvent.pointerUp(帯, { pointerType: 'mouse', clientX: 100 })
     fireEvent.click(タブ)
 
@@ -288,6 +291,87 @@ describe('タブの並べ替え', () => {
     expect(onSelect).toHaveBeenCalledWith(`${ROOT}/b.md`)
   })
 
+  it('ボタンを離したあと、ただ帯の上を通っただけでは並べ替わらない', () => {
+    /*
+      **レビューで見つかった穴**（2026-09-08）。閾値を越える前に帯の外で離すと、
+      キャプチャを取っていないので帯の `pointerup` が来ない——**掴みが残ったまま、
+      あとで帯の上を通っただけで並びが変わっていた**。帯は薄い（h-7）ので、
+      押してすぐ下へ抜けるのは普通に起きる。
+    */
+    const { onReorder } = 置く(三枚, `${ROOT}/c.md`)
+    const タブ = screen.getAllByTestId('file-tab')[2]!
+    const 帯 = screen.getByTestId('file-tabs')
+
+    fireEvent.pointerDown(タブ, { pointerType: 'mouse', button: 0, clientX: 300 })
+    // 帯の外で離した（帯には pointerup が来ない）ので、掴みは残っている
+    // そのあと、押していない状態で帯の上を通る
+    fireEvent.pointerMove(帯, { pointerType: 'mouse', buttons: 0, clientX: 100 })
+
+    expect(onReorder).not.toHaveBeenCalled()
+  })
+
+  it('運んだ印は、帯で押しても落ちる', () => {
+    /*
+      実ブラウザでは、運んだあとの `click` は**押した相手（タブ）ではなく共通の親
+      （帯）へ届く**。タブ側だけで落としていると印が残り、**次にキーボードで選ぼうと
+      した1回目が黙って無視される。**
+    */
+    const { onSelect } = 置く(三枚, `${ROOT}/c.md`)
+    const タブ = screen.getAllByTestId('file-tab')[2]!
+    const 帯 = screen.getByTestId('file-tabs')
+
+    fireEvent.pointerDown(タブ, { pointerType: 'mouse', button: 0, clientX: 300 })
+    fireEvent.pointerMove(帯, { pointerType: 'mouse', buttons: 1, clientX: 100 })
+    fireEvent.pointerUp(帯, { pointerType: 'mouse', clientX: 100 })
+    // 実ブラウザと同じく、click は帯へ届く
+    fireEvent.click(帯)
+    // そのあとのタブの押下は、いままでどおり選ぶ
+    fireEvent.click(タブ)
+
+    expect(onSelect).toHaveBeenCalledWith(`${ROOT}/c.md`)
+  })
+
+  it('Ctrl+Shift+→ が動かすのは、焦点のあるタブ', () => {
+    // **選ばれているタブではない。** 運んだあとは焦点と選択がずれていることがある
+    const { onReorder } = 置く(三枚, `${ROOT}/a.md`)
+    screen.getAllByTestId('file-tab')[1]!.focus()
+
+    // **焦点のあるタブから撃つ**（帯へは上がってくる）。帯に直接撃つと
+    // `event.target` が帯になり、この検査が意味を失う
+    fireEvent.keyDown(screen.getAllByTestId('file-tab')[1]!, {
+      key: 'ArrowRight',
+      ctrlKey: true,
+      shiftKey: true,
+    })
+
+    expect(onReorder).toHaveBeenCalledWith(`${ROOT}/b.md`, 2)
+  })
+
+  it('確定は、運び終わったときだけ知らせる', () => {
+    // **運んでいる最中に覚えると、動くたびに `localStorage` を同期で読み書きする**
+    const { onReorderCommit } = 置く(三枚, `${ROOT}/c.md`)
+    const タブ = screen.getAllByTestId('file-tab')[2]!
+    const 帯 = screen.getByTestId('file-tabs')
+
+    fireEvent.pointerDown(タブ, { pointerType: 'mouse', button: 0, clientX: 300 })
+    fireEvent.pointerMove(帯, { pointerType: 'mouse', buttons: 1, clientX: 100 })
+    expect(onReorderCommit).not.toHaveBeenCalled()
+
+    fireEvent.pointerUp(帯, { pointerType: 'mouse', clientX: 100 })
+    expect(onReorderCommit).toHaveBeenCalledTimes(1)
+  })
+
+  it('掴まずに離しただけでは、確定を知らせない', () => {
+    const { onReorderCommit } = 置く(三枚, `${ROOT}/a.md`)
+    const タブ = screen.getAllByTestId('file-tab')[0]!
+    const 帯 = screen.getByTestId('file-tabs')
+
+    fireEvent.pointerDown(タブ, { pointerType: 'mouse', button: 0, clientX: 100 })
+    fireEvent.pointerUp(帯, { pointerType: 'mouse', clientX: 100 })
+
+    expect(onReorderCommit).not.toHaveBeenCalled()
+  })
+
   it('マウスの主ボタン以外では掴まない', () => {
     /*
       **中クリックで新しいタブに開こうとしただけで並びが変わる**のを防ぐ
@@ -298,7 +382,7 @@ describe('タブの並べ替え', () => {
     const 帯 = screen.getByTestId('file-tabs')
 
     fireEvent.pointerDown(タブ, { pointerType: 'mouse', button: 1, clientX: 300 })
-    fireEvent.pointerMove(帯, { pointerType: 'mouse', clientX: 100 })
+    fireEvent.pointerMove(帯, { pointerType: 'mouse', buttons: 1, clientX: 100 })
 
     expect(onReorder).not.toHaveBeenCalled()
   })
@@ -310,7 +394,7 @@ describe('タブの並べ替え', () => {
     const 帯 = screen.getByTestId('file-tabs')
 
     fireEvent.pointerDown(タブ, { pointerType: 'touch', button: 0, clientX: 300 })
-    fireEvent.pointerMove(帯, { pointerType: 'touch', clientX: 100 })
+    fireEvent.pointerMove(帯, { pointerType: 'touch', buttons: 1, clientX: 100 })
 
     expect(onReorder).toHaveBeenCalled()
   })

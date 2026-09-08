@@ -87,8 +87,22 @@ interface Props {
   root: string
   onSelect: (path: string) => void
   onClose: (path: string) => void
-  /** 並べ替え。**抜いて差す**（`lib/fileTabs.ts` の `moveTab`） */
-  onReorder: (from: number, to: number) => void
+  /**
+   * 並べ替え。**動かすものは位置ではなくパスで渡す。**
+   *
+   * 位置で渡すと、**こちらが見ている並び（前の描画）と、親が持っている最新の並びが
+   * ずれる**——ポインタの動きは束ねて届くので、1回のコミットの前に2発来ると
+   * **同じ位置の指定が最新の並びへ2回当たって、タブが2つ飛ぶ**。パスで渡せば
+   * 親が自分の最新から位置を引き直すので、**同じ指定を何回当てても同じ結果**になる。
+   */
+  onReorder: (path: string, to: number) => void
+  /**
+   * 並べ替えを確定した（指を離した・キーで1回動かした）。**ここでだけ覚える。**
+   *
+   * 運んでいる最中に覚えると、**ポインタが動くたびに `localStorage` を同期で
+   * 読み書きする**ことになり、タブが多いほど運びがカクつく。
+   */
+  onReorderCommit: () => void
 }
 
 export function FileTabs({
@@ -98,6 +112,7 @@ export function FileTabs({
   onSelect,
   onClose,
   onReorder,
+  onReorderCommit,
 }: Props) {
   const labels = tabLabels(tabs)
   const stripRef = useRef<HTMLDivElement>(null)
@@ -121,7 +136,12 @@ export function FileTabs({
   */
   useEffect(() => {
     const 帯 = stripRef.current
-    if (帯 === null) {
+    /*
+      **運んでいる間は動かさない。** 帯が横に流れると全タブの位置が変わり、
+      **次のポインタの動きが別の場所を落とし先と判定する**——しかも帯が流れるほど
+      枚数がある状況は、まさに並べ替えたい状況そのものである。
+    */
+    if (帯 === null || 運び中 !== null) {
       return
     }
     const タブ = 帯.querySelector<HTMLElement>(
@@ -139,7 +159,7 @@ export function FileTabs({
         幅: タブの矩形.width,
       },
     )
-  }, [current, tabs])
+  }, [current, tabs, 運び中])
 
   /**
    * ← → Home End で移る。**選択と焦点を一緒に動かす。**
@@ -158,19 +178,30 @@ export function FileTabs({
       止まるほうが自然**である。回すと、右端で1回押しただけで左端へ飛ぶ。
     */
     if (event.ctrlKey && event.shiftKey) {
+      /*
+        **動かすのは「焦点のあるタブ」であって、選ばれているタブではない。**
+        運んだあとは焦点と選択がずれていることがあるので、`current` を使うと
+        **見た目に焦点のあるタブではない別のタブが動く**。
+      */
+      const 的 = (event.target as HTMLElement | null)?.closest<HTMLElement>(
+        '[data-path]',
+      )
+      const 動かすもの = 的?.dataset.path ?? current
+      const 元 = tabs.indexOf(動かすもの)
       const 行き先 =
         event.key === 'ArrowLeft'
-          ? 今 - 1
+          ? 元 - 1
           : event.key === 'ArrowRight'
-            ? 今 + 1
+            ? 元 + 1
             : -1
-      if (行き先 < 0 || 行き先 >= tabs.length) {
+      if (元 < 0 || 行き先 < 0 || 行き先 >= tabs.length) {
         return
       }
       event.preventDefault()
-      onReorder(今, 行き先)
+      onReorder(動かすもの, 行き先)
+      onReorderCommit()
       // 運んだ先で押し続けられるように、焦点を連れていく
-      requestAnimationFrame(() => 焦点を移す(current))
+      requestAnimationFrame(() => 焦点を移す(動かすもの))
       return
     }
     if (event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) {
@@ -209,7 +240,13 @@ export function FileTabs({
       ?.focus()
   }
 
-  /** 帯の中の、各タブの中心の x（並び順） */
+  /**
+   * 帯の中の、各タブの中心の x（並び順）。
+   *
+   * **測るのは器（✕ を含む1枚ぶん）であって、名前のボタンだけではない。**
+   * 名前だけを測ると ✕（24px）が矩形から外れ、**入れ替わる点が左へ 12px ほどずれる**
+   * ——`dropIndexFor` の「半分だけ重なった時点で入れ替わる」が成り立たなくなる。
+   */
   function 中心を測る(): number[] {
     const 帯 = stripRef.current
     if (帯 === null) {
@@ -217,7 +254,7 @@ export function FileTabs({
     }
     return tabs.map((path) => {
       const el = 帯.querySelector<HTMLElement>(
-        `[data-testid="file-tab"][data-path="${CSS.escape(path)}"]`,
+        `[data-tab-slot][data-path="${CSS.escape(path)}"]`,
       )
       if (el === null) {
         return Number.POSITIVE_INFINITY
@@ -233,11 +270,28 @@ export function FileTabs({
       return
     }
     掴み.current = { path, x: event.clientX, 越えた: false }
+    /*
+      **文字選択を始めさせない。** 掴んで横へ運ぶと、通り過ぎたタブの名前が
+      軒並みハイライトされて、運搬の見た目と混ざる。
+    */
+    event.preventDefault()
   }
 
   const 動かした = (event: ReactPointerEvent<HTMLDivElement>) => {
     const g = 掴み.current
     if (g === null) {
+      return
+    }
+    /*
+      **押していないなら掴みを捨てる。**
+
+      閾値を越える前に帯の外で離すと、キャプチャを取っていないので帯の `pointerup` が
+      来ない——`掴み` が残ったまま、**あとで帯の上をただ通っただけで並びが変わる**。
+      薄い帯（h-7）なので、押してすぐ下へ抜けるのは普通に起きる。
+    */
+    if (event.buttons === 0) {
+      掴み.current = null
+      set運び中(null)
       return
     }
     // **少し動くまでは掴まない。** 押した指はわずかに動くのが普通
@@ -249,19 +303,25 @@ export function FileTabs({
       set運び中(g.path)
       event.currentTarget.setPointerCapture(event.pointerId)
     }
-    const from = tabs.indexOf(g.path)
     const to = dropIndexFor(中心を測る(), event.clientX)
-    if (from >= 0 && to >= 0 && to !== from) {
-      onReorder(from, to)
+    if (to >= 0 && tabs[to] !== g.path) {
+      // **パスで渡す。** 同じ指定が何回当たっても同じ結果になる（`onReorder` の説明）
+      onReorder(g.path, to)
     }
   }
 
   const 離した = () => {
     // **運んだ直後の `click` を食わせない。** 押した場所と離した場所が違うので、
     // そのまま通すと「運んだ先のタブを選んだ」ことになる
-    運んだ.current = 掴み.current?.越えた === true
+    const 運んでいた = 掴み.current?.越えた === true
+    運んだ.current = 運んでいた
     掴み.current = null
     set運び中(null)
+    if (運んでいた) {
+      // **覚えるのはここだけ。** 運んでいる最中に覚えると、動くたびに
+      // `localStorage` を同期で読み書きすることになる
+      onReorderCommit()
+    }
   }
 
   return (
@@ -275,6 +335,17 @@ export function FileTabs({
       onPointerUp={離した}
       onPointerCancel={離した}
       /*
+        **運んだ印を、ここで落とす。**
+
+        実ブラウザでは、運んだあとの `click` は**押した相手（タブ）ではなく共通の親
+        （この帯）へ届く**——キャプチャ先が帯だからである。タブ側だけで落としていると
+        印が残り、**次にキーボードで選ぼうとした1回目が黙って無視される。**
+        タブの `onClick` は先に走る（内側から外側へ上がる）ので、ここで落として安全。
+      */
+      onClick={() => {
+        運んだ.current = false
+      }}
+      /*
         **`min-w-0` が要る。** flex の子は既定で中身より小さくならないので、これが無いと
         タブ帯が縮まず、右のボタン群を画面の外へ押し出す。
 
@@ -283,7 +354,8 @@ export function FileTabs({
         入れ子の内側が先に消費し、端まで行ったら外へ渡るのが既定の振る舞いで、
         ここでは正しい。
       */
-      className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overscroll-x-contain"
+      /* **`select-none`。** 掴んで運ぶ間、名前が選択されるのを止める */
+      className="flex min-w-0 flex-1 select-none items-center gap-1 overflow-x-auto overscroll-x-contain"
     >
       {tabs.map((path, i) => {
         const selected = path === current
@@ -300,6 +372,8 @@ export function FileTabs({
               タブの hover は**薄くするのではなく、別の不透明な地へ移す**——薄くすると
               裏の地が透け、しかも「裏に何が来るか」で見え方が変わる。
             */
+            data-tab-slot=""
+            data-path={path}
             data-dragging={path === 運び中 ? 'true' : undefined}
             className={`flex h-7 shrink-0 items-center rounded-md transition-colors data-[dragging=true]:shadow-lg data-[dragging=true]:ring-2 data-[dragging=true]:ring-ring/60 ${
               selected

@@ -314,10 +314,17 @@ export function useFilesParts({
    * **選択は動かさない。** 動かしたのは並びであって、見ているものではない。
    */
   const タブを並べ替える = useCallback(
-    (from: number, to: number) => {
+    (path: string, to: number) => {
       const now = 最新.current
       const 見える = now.tabs.filter((tab) => tab.隠す !== true)
       const 元の並び = 見える.map((tab) => tab.path)
+      /*
+        **位置ではなくパスで受け取り、こちらの最新から引き直す。**
+        呼ぶ側が見ている並びは1つ前の描画なので、位置をそのまま当てると
+        **同じ指定が2回届いたときにタブが2つ飛ぶ**。パスから引き直せば、
+        同じ指定を何回当てても同じ結果になる。
+      */
+      const from = 元の並び.indexOf(path)
       const 並べ替えた = moveTab(元の並び, from, to)
       if (並べ替えた === 元の並び) {
         return
@@ -338,11 +345,27 @@ export function useFilesParts({
         次 += 1
         return 見える.find((t) => t.path === path) ?? tab
       })
-      set開いている({ tabs, 選択: now.選択 })
-      覚える(tabs, now.選択)
+      /*
+        **ここでは覚えない。** 運んでいる最中は毎フレーム呼ばれるので、そのたびに
+        `localStorage` を同期で読み書きすると運びがカクつく。**覚えるのは確定のとき
+        だけ**（下の `並べ替えを確定する`）。
+
+        **控えは、その場で進める。** 再描画を待つと、直後に呼ばれる確定が**1つ前の
+        並びを覚えてしまう**（キーで1回動かしたときは、動かした直後に確定が来る）。
+        次の一手も同じ控えから引くので、**運んでいる最中の連打でもずれない。**
+      */
+      const 次の状態 = { tabs, 選択: now.選択 }
+      最新.current = 次の状態
+      set開いている(次の状態)
     },
-    [覚える],
+    [],
   )
+
+  /** 並べ替えが確定した（指を離した・キーで1回動かした）。**ここでだけ覚える。** */
+  const 並べ替えを確定する = useCallback(() => {
+    const now = 最新.current
+    覚える(now.tabs, now.選択)
+  }, [覚える])
 
   /** ヘッダの「ファイルの列を閉じる」。**タブの ✕ と違い、全部畳む。** */
   const 列を閉じる = useCallback(() => {
@@ -435,6 +458,7 @@ export function useFilesParts({
           onSelectTab={タブを選ぶ}
           onCloseTab={タブを閉じる}
           onReorderTab={タブを並べ替える}
+          onReorderTabCommit={並べ替えを確定する}
           width={widths.file}
           onClose={列を閉じる}
           /*

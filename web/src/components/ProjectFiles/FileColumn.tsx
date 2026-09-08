@@ -63,7 +63,8 @@ interface Props {
   tabs: string[]
   onSelectTab: (path: string) => void
   onCloseTab: (path: string) => void
-  onReorderTab: (from: number, to: number) => void
+  onReorderTab: (path: string, to: number) => void
+  onReorderTabCommit: () => void
   width: number
   /**
    * **列ごと**閉じる（設計§2）。セッションが左へ寄る。
@@ -90,6 +91,7 @@ export function FileColumn({
   onSelectTab,
   onCloseTab,
   onReorderTab,
+  onReorderTabCommit,
   width,
   onClose,
   onUnreadable,
@@ -139,6 +141,7 @@ export function FileColumn({
           onSelectTab={onSelectTab}
           onCloseTab={onCloseTab}
           onReorderTab={onReorderTab}
+          onReorderTabCommit={onReorderTabCommit}
           onClose={onClose}
           onUnreadable={onUnreadable}
         />
