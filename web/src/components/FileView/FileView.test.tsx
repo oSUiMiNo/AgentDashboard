@@ -10,7 +10,7 @@ import userEvent from "@testing-library/user-event";
 import { type ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FileView } from "@/components/FileView/FileView";
-import { rawUrl } from "@/lib/hostfs";
+import { previewUrl, rawUrl } from "@/lib/hostfs";
 
 const ROOT = "/home/me/dev/app";
 
@@ -572,13 +572,15 @@ describe("画像と HTML", () => {
     // **鍵の片方。** 許すのは script の1段だけで、**`allow-same-origin` は書かない**
     // （`ファイルの中身に掛けた隔離を、script の1段だけ解く` 設計§4-2）
     expect(frame).toHaveAttribute("sandbox", "allow-scripts");
-    expect(frame.getAttribute("src")).toContain("as=raw");
+    // **宛先は `as=preview`**（2026-09-08）。中を探す係が足された姿で返る——
+    // 「ブラウザで開く」の `as=raw` には1バイトも足さない
+    expect(frame.getAttribute("src")).toContain("as=preview");
     expect(frame.getAttribute("src")).toContain(
       encodeURIComponent(`${ROOT}/理解.html`),
     );
-    // 先に叩くのはテキストの口（`as=raw` を含まない）
+    // 先に叩くのはテキストの口（`as=` を含まない）
     expect(calls).toHaveLength(1);
-    expect(calls[0]).not.toContain("as=raw");
+    expect(calls[0]).not.toContain("as=");
   });
 
   it("大きい HTML も箱に入る（整形を止める線を持ち込まない）", async () => {
@@ -747,31 +749,92 @@ describe("中を探す", () => {
     expect(screen.getByTestId("file-find-open")).toBeInTheDocument();
   });
 
-  it("プレビューで探すと、生テキストへ切り替わって理由が出る", async () => {
-    // **黙って見せ方を変えない。** 押した人から見ると画面が別物になる
+  it("プレビュー（HTML）は、見ている姿のまま探せる", async () => {
+    /*
+      **2026-09-08 に覆った。** 前は「押したら生テキストへ切り替えて、そこで探す」に
+      していたが、**求められていたのは回避ではなく本体だった**——プレビューで読んで
+      いるのは**整形された姿**なので、生テキストへ変わった瞬間に**探す目的そのものが
+      半分消える**。
+
+      **隔離は1段も緩めていない。** 親から中へ手を伸ばす（`allow-same-origin`）のでは
+      なく、**中に置いた係へ便りで頼む**（サーバの `FINDER_JS`）。
+    */
     serve(content("<p>あか</p>"));
     show(`${ROOT}/理解.html`);
     await userEvent.click(await screen.findByTestId("file-find-open"));
 
-    expect(await screen.findByTestId("file-raw")).toBeInTheDocument();
-    expect(screen.queryByTestId("file-frame")).toBeNull();
+    // **箱のまま**。生テキストへは変わっていない
+    expect(screen.getByTestId("file-frame")).toBeInTheDocument();
+    expect(screen.queryByTestId("file-raw")).toBeNull();
     expect(screen.getByTestId("file-find")).toBeInTheDocument();
-    expect(screen.getByTestId("file-find-switched")).toHaveTextContent(
-      "生テキストに切り替えました",
-    );
+    expect(screen.queryByTestId("file-find-switched")).toBeNull();
+    expect(screen.queryByTestId("file-find-confirm")).toBeNull();
   });
 
+  it("プレビューの宛先には、探す係が足された姿を頼む", async () => {
+    // **「ブラウザで開く」には1バイトも足さない。** あちらは `as=raw` のまま
+    serve(content("<p>あ</p>"));
+    show(`${ROOT}/理解.html`);
+
+    const 箱 = await screen.findByTestId("file-frame");
+    expect(箱).toHaveAttribute("src", previewUrl("local", `${ROOT}/理解.html`));
+    expect(screen.getByTestId("file-open-tab")).toHaveAttribute(
+      "href",
+      rawUrl("local", `${ROOT}/理解.html`),
+    );
+    // 隔離は緩めていない（`allow-same-origin` を書かない）
+    expect(箱).toHaveAttribute("sandbox", "allow-scripts");
+  });
+
+  it("SVG では、切り替えてよいかを先に尋ねる", async () => {
+    /*
+      **`</svg>` の外に要素を置けない**ので、SVG には係を足せない。探すには生テキストへ
+      移るしかないが、**黙って移らない**——押した結果、読んでいたものが消えるのが
+      いちばん効く。
+    */
+    serve(content("<svg><text>あか</text></svg>"));
+    show(`${ROOT}/図.svg`);
+    await userEvent.click(await screen.findByTestId("file-find-open"));
+
+    expect(screen.getByTestId("file-find-confirm")).toBeInTheDocument();
+    expect(screen.getByTestId("file-frame")).toBeInTheDocument();
+    expect(screen.queryByTestId("file-find")).toBeNull();
+  });
+
+  it("SVG で「切り替えて探す」を押すと、そこで初めて切り替わる", async () => {
+    serve(content("<svg><text>あか</text></svg>"));
+    show(`${ROOT}/図.svg`);
+    await userEvent.click(await screen.findByTestId("file-find-open"));
+
+    await userEvent.click(screen.getByTestId("file-find-confirm-go"));
+
+    expect(await screen.findByTestId("file-raw")).toBeInTheDocument();
+    expect(screen.getByTestId("file-find")).toBeInTheDocument();
+    expect(screen.getByTestId("file-find-switched")).toBeInTheDocument();
+  });
+
+  it("SVG で「やめる」を押すと、何も変わらない", async () => {
+    serve(content("<svg><text>あか</text></svg>"));
+    show(`${ROOT}/図.svg`);
+    await userEvent.click(await screen.findByTestId("file-find-open"));
+
+    await userEvent.click(screen.getByTestId("file-find-confirm-cancel"));
+
+    expect(screen.queryByTestId("file-find-confirm")).toBeNull();
+    expect(screen.getByTestId("file-frame")).toBeInTheDocument();
+    expect(screen.queryByTestId("file-find")).toBeNull();
+  });
   it("自分で見せ方を戻したら、切り替えの断りは消える", async () => {
     // そこから先は押した人が選んだ見せ方であって、こちらが切り替えた結果ではない
-    serve(content("<p>あか</p>"));
-    show(`${ROOT}/理解.html`);
+    serve(content("<svg><text>あか</text></svg>"));
+    show(`${ROOT}/図.svg`);
     await userEvent.click(await screen.findByTestId("file-find-open"));
+    await userEvent.click(screen.getByTestId("file-find-confirm-go"));
     expect(screen.getByTestId("file-find-switched")).toBeInTheDocument();
 
     await userEvent.click(screen.getByTestId("file-toggle-raw"));
     expect(screen.queryByTestId("file-find-switched")).toBeNull();
   });
-
   it("入口を押すと窓が出て、すぐ打てる", async () => {
     serve(content("# 計画"));
     show();
@@ -794,47 +857,39 @@ describe("中を探す", () => {
     expect(await screen.findByTestId("file-find")).toBeInTheDocument();
   });
 
-  it("プレビューでも Ctrl+F を奪い、生テキストへ連れていく", async () => {
-    /*
-      **奪っておいて何もしないのが、いちばん悪い形である。** 前は奪わずに逃げ道だけを
-      言っていたが、**押した結果が画面に出ない**ので「効かない」と読まれていた。
-    */
+  it("プレビューでも Ctrl+F を奪い、その場で探し始める", async () => {
+    // **奪っておいて何もしないのが、いちばん悪い形。** 奪ったうえで、その場で探す
     serve(content("<p>あか</p>"));
     show(`${ROOT}/理解.html`);
     await screen.findByTestId("file-frame");
 
     expect(CtrlF()).toBe(true);
     expect(await screen.findByTestId("file-find")).toBeInTheDocument();
-    expect(screen.getByTestId("file-raw")).toBeInTheDocument();
-  });
-
-  it("大きいプレビューでは、探すための切り替えを自動でしない", async () => {
-    /*
-      **切り替えは安い操作ではない。** 生テキストは `<pre>` なので、上限いっぱいの
-      中身がそのまま描画へ流れる（`FORMAT_DEFAULT_LIMIT` の分岐は Markdown だけ）。
-      **反射で押した Ctrl+F が、それを起こしてはいけない。**
-    */
-    const 大きい = "<p>あ</p>".padEnd(300 * 1024, "あ");
-    serve(content(大きい));
-    show(`${ROOT}/理解.html`);
-    await screen.findByTestId("file-frame");
-
-    await userEvent.click(screen.getByTestId("file-find-open"));
-
-    expect(screen.getByTestId("file-find-too-big")).toBeInTheDocument();
-    // 切り替わっていない（箱のまま）し、窓も開いていない
+    // **見ている姿は変わらない**
     expect(screen.getByTestId("file-frame")).toBeInTheDocument();
-    expect(screen.queryByTestId("file-find")).toBeNull();
   });
+  it("大きい SVG では、切り替えに時間がかかることも断りに出る", async () => {
+    /*
+      生テキストは `<pre>` なので、上限いっぱいの中身がそのまま描画へ流れる
+      （重さの分岐は Markdown だけ）。**押すかどうかを決められるように、大きさを言う。**
+    */
+    const 大きい = "<svg><text>あ</text></svg>".padEnd(300 * 1024, "あ");
+    serve(content(大きい));
+    show(`${ROOT}/図.svg`);
+    await userEvent.click(await screen.findByTestId("file-find-open"));
 
+    expect(screen.getByTestId("file-find-confirm")).toHaveTextContent(
+      "大きいので時間がかかります",
+    );
+  });
   it("切り替えの断りは、押されるまで出さない", async () => {
-    // HTML を開くたびに書いてあると、探すつもりの無い人には雑音でしかない
-    serve(content("<p>あ</p>"));
-    show(`${ROOT}/理解.html`);
+    // 開くたびに書いてあると、探すつもりの無い人には雑音でしかない
+    serve(content("<svg><text>あ</text></svg>"));
+    show(`${ROOT}/図.svg`);
     await screen.findByTestId("file-frame");
+    expect(screen.queryByTestId("file-find-confirm")).toBeNull();
     expect(screen.queryByTestId("file-find-switched")).toBeNull();
   });
-
   it("Ctrl+G でも開く", async () => {
     serve(content("# 計画"));
     show();

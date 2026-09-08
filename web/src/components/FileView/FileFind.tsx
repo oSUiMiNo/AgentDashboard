@@ -39,6 +39,18 @@ interface Props {
   /** 遡る箱（`file-body`）。**探す相手であり、送る相手でもある** */
   bodyRef: RefObject<HTMLDivElement | null>
   /**
+   * プレビューの箱。**渡されたときは、こちらが探すのではなく箱の中の係へ頼む。**
+   *
+   * # なぜ2通りあるのか
+   *
+   * 箱（`iframe`）は `allow-same-origin` を持たないので**別の出自を名乗る**——
+   * 親からは中の文書に1バイトも触れない。**これは隔離が効いている証拠**であって、
+   * 直すべき不具合ではない。だから**中に置いた係へ便りで頼み、数だけ受け取る**。
+   *
+   * 整形 Markdown と生テキストは同じ画面の中なので、いままでどおり直に探す。
+   */
+  frameRef?: RefObject<HTMLIFrameElement | null>
+  /**
    * 中身が変わったことを示す字。**変わったら探し直す。**
    *
    * パスと「生テキストかどうか」を混ぜたもの。整形と生テキストでは木の形が違うので、
@@ -55,7 +67,15 @@ interface Props {
   onClose: () => void
 }
 
-export function FileFind({ bodyRef, contentKey, 合図, onClose }: Props) {
+export function FileFind({
+  bodyRef,
+  frameRef,
+  contentKey,
+  合図,
+  onClose,
+}: Props) {
+  /** 箱の中の係へ頼む形か。**渡された時点で決まる** */
+  const 箱に頼む = frameRef !== undefined
   const [query, setQuery] = useState('')
   /** 待ってから写した語。**探すのはこちら** */
   const [探す語, set探す語] = useState('')
@@ -76,15 +96,87 @@ export function FileFind({ bodyRef, contentKey, 合図, onClose }: Props) {
     return () => clearTimeout(id)
   }, [query])
 
+  /** 箱の中の係が答えた当たりの数。**箱に頼む形のときだけ意味を持つ** */
+  const [箱の総数, set箱の総数] = useState(0)
+  /**
+   * 最後に頼んだ内容。**係が起きたと言ってきたら、これをもう一度撃つ。**
+   *
+   * **撃ちっぱなしにできない。** 箱は作り直されることがあり（生テキストと行き来した
+   * とき）、**係が起きる前に撃った便りはどこにも届かず消える**——以後は答えが来ない
+   * ので、語が確実に在る文書でも「見つかりません」が出続ける。
+   */
+  const 最後の依頼 = useRef<{ query: string; index: number }>({
+    query: '',
+    index: 0,
+  })
+
+  /** 箱の中の係へ頼む。**答えは便りで返る** */
+  const 箱へ頼む = (query: string, index: number) => {
+    最後の依頼.current = { query, index }
+    frameRef?.current?.contentWindow?.postMessage(
+      { __fileFind: 'search', query, index },
+      '*',
+    )
+  }
+
+  /*
+    **箱からの便りを受ける。**
+
+    **窓の中の文書は利用者の手元の任意の HTML** なので、そこの script も同じ窓から
+    便りを送れる。**こちらは数しか読まない**（当たりの数と何番目か）ので、嘘の便りで
+    起こせるのは「件数の表示が狂う」までである——**中身を実行する道は1つも開けていない。**
+  */
+  useEffect(() => {
+    if (!箱に頼む) {
+      return
+    }
+    const 受ける = (event: MessageEvent) => {
+      if (event.source !== frameRef?.current?.contentWindow) {
+        return
+      }
+      const 便り: unknown = event.data
+      if (便り === null || typeof 便り !== 'object') {
+        return
+      }
+      const 種 = (便り as { __fileFind?: unknown }).__fileFind
+      if (種 === 'ready') {
+        // **係が起きた。** 起きる前に撃ったぶんが消えているので、撃ち直す
+        const 依頼 = 最後の依頼.current
+        if (依頼.query !== '') {
+          箱へ頼む(依頼.query, 依頼.index)
+        }
+        return
+      }
+      if (種 !== 'result') {
+        return
+      }
+      const 数 = (便り as { total?: unknown }).total
+      const 何番目 = (便り as { index?: unknown }).index
+      set箱の総数(typeof 数 === 'number' && Number.isFinite(数) ? Math.max(0, 数) : 0)
+      if (typeof 何番目 === 'number' && Number.isFinite(何番目)) {
+        setIndex(Math.max(0, 何番目))
+      }
+    }
+    globalThis.addEventListener('message', 受ける)
+    return () => globalThis.removeEventListener('message', 受ける)
+  }, [箱に頼む, frameRef])
+
   // 探す。**中身が変わったときも探し直す**
   useEffect(() => {
+    if (箱に頼む) {
+      箱へ頼む(探す語, 0)
+      return
+    }
     const box = bodyRef.current
     setMatches(box === null ? [] : findMatches(box, 探す語))
     setIndex(0)
-  }, [bodyRef, 探す語, contentKey])
+  }, [箱に頼む, frameRef, bodyRef, 探す語, contentKey])
 
-  // 印を塗り、いま見ている当たりまで箱を送る
+  // 印を塗り、いま見ている当たりまで箱を送る。**箱に頼む形では係がやる**
   useEffect(() => {
+    if (箱に頼む) {
+      return
+    }
     paintMatches(matches, index)
     const box = bodyRef.current
     const range = matches[index]
@@ -98,20 +190,43 @@ export function FileFind({ bodyRef, contentKey, 合図, onClose }: Props) {
       { top: 当たり.top, height: 当たり.height },
       box.scrollTop,
     )
-  }, [bodyRef, matches, index])
+  }, [箱に頼む, bodyRef, matches, index])
 
-  // **閉じたら必ず消す。** 残すと、次に開いたファイルへ古い印が乗ったままになる
-  useEffect(() => clearMatches, [])
+  /*
+    **閉じたら必ず消す。** 残すと、次に開いたファイルへ古い印が乗ったままになる。
+
+    **箱に頼む形では、印を持っているのは箱の中の係である**——こちら側だけを消すと、
+    窓を閉じてもプレビューに印が乗ったままになる。**空の語を1通送って消させる。**
+  */
+  useEffect(
+    () => () => {
+      clearMatches()
+      frameRef?.current?.contentWindow?.postMessage(
+        { __fileFind: 'search', query: '', index: 0 },
+        '*',
+      )
+    },
+    [frameRef],
+  )
+
+  /** いま何件当たっているか。**どちらの形でも同じ言い方にする** */
+  const 総数 = 箱に頼む ? 箱の総数 : matches.length
 
   const 送る = (向き: 1 | -1) => {
-    if (matches.length === 0) {
+    if (総数 === 0) {
       return
     }
     // **端で止めずに回す。** 探す操作の慣例どおり、末尾の次は先頭
-    setIndex((now) => (now + 向き + matches.length) % matches.length)
+    const 先 = (index + 向き + 総数) % 総数
+    if (箱に頼む) {
+      // **番号はこちらが決め、塗るのは係。** 答えの便りで `index` が確定する
+      箱へ頼む(探す語, 先)
+      return
+    }
+    setIndex(先)
   }
 
-  const 見つからない = 探す語 !== '' && matches.length === 0
+  const 見つからない = 探す語 !== '' && 総数 === 0
 
   return (
     <div
@@ -171,9 +286,9 @@ export function FileFind({ bodyRef, contentKey, 合図, onClose }: Props) {
       >
         {見つからない
           ? '見つかりません'
-          : matches.length === 0
+          : 総数 === 0
             ? ''
-            : `${index + 1} / ${matches.length}`}
+            : `${index + 1} / ${総数}`}
       </span>
       <Button
         type="button"
@@ -182,7 +297,7 @@ export function FileFind({ bodyRef, contentKey, 合図, onClose }: Props) {
         data-testid="file-find-prev"
         aria-label="前の当たりへ"
         title="前の当たりへ（Shift+Enter）"
-        disabled={matches.length === 0}
+        disabled={総数 === 0}
         onClick={() => 送る(-1)}
       >
         <ChevronGlyph direction="up" />
@@ -194,7 +309,7 @@ export function FileFind({ bodyRef, contentKey, 合図, onClose }: Props) {
         data-testid="file-find-next"
         aria-label="次の当たりへ"
         title="次の当たりへ（Enter）"
-        disabled={matches.length === 0}
+        disabled={総数 === 0}
         onClick={() => 送る(1)}
       >
         <ChevronGlyph direction="down" />

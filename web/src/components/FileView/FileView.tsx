@@ -55,6 +55,7 @@ import { isFindOpen } from '@/lib/keys'
 import { REHYPE_PLUGINS, REMARK_PLUGINS } from '@/lib/markdown'
 import {
   HostFsError,
+  previewUrl,
   rawUrl,
   readBlob,
   readFile,
@@ -185,16 +186,12 @@ export function FileView({
    */
   const [切替えた, set切替えた] = useState(false)
   /**
-   * 大きすぎて、探すために自動では切り替えなかった。
+   * 「切り替えてよいか」を尋ねている最中か。
    *
-   * **切り替えは安い操作ではない。** プレビューは `iframe`（ブラウザ自身が描く）だが、
-   * 生テキストは `<pre>` なので、**上限いっぱい（3 MiB）の中身がそのまま描画へ流れる**
-   * ——`FORMAT_DEFAULT_LIMIT` の分岐は Markdown にしか掛かっていない。
-   *
-   * **反射で押した Ctrl+F が、それを起こしてはいけない。** 同じ取り違えで
-   * 2 MB の HTML が `<pre>` へ落ちた実害が、このファイルに記録されている。
+   * **押した瞬間に勝手に切り替えない**（利用者の指定）。押した結果、読んでいたものが
+   * 消えるのがいちばん効くので、**先に断って選ばせる**。
    */
-  const [大きすぎ, set大きすぎ] = useState(false)
+  const [切り替えるか, set切り替えるか] = useState(false)
   /**
    * 探す合図の回数。**窓が既に開いているときに、もう一度押された**ことを
    * 窓へ伝えるために要る（入力を選び直して打ち直せる状態にする）。
@@ -202,6 +199,8 @@ export function FileView({
   const [探す合図, set探す合図] = useState(0)
   /** 遡る箱。**探す相手であり、送る相手でもある** */
   const bodyRef = useRef<HTMLDivElement>(null)
+  /** プレビューの箱。**中を探すときは、ここへ便りを送る** */
+  const frameRef = useRef<HTMLIFrameElement>(null)
   const [zoom, 大きさ] = useFileZoom()
   // `CopyPath`（`FolderBrowser`）と同じ3つの状態。**片方だけ黙る作りにしない**
 
@@ -215,7 +214,7 @@ export function FileView({
     // 残ると、当たりの数だけが別の文書のものに見える
     setFind(false)
     set切替えた(false)
-    set大きすぎ(false)
+    set切り替えるか(false)
     setBroken(false)
     setContent(null)
     setPicture(null)
@@ -312,6 +311,32 @@ export function FileView({
    *
    * **画像にだけは出さない。** あちらは文字を持たないので、連れていく先が無い。
    */
+  /**
+   * **箱の中をそのまま探せるか。**
+   *
+   * # 見ている姿を壊さずに探す（利用者の指定・2026-09-08）
+   *
+   * 前は「押したら生テキストへ切り替えて、そこで探す」にしていた。**筋は通っていたが、
+   * 求められていたのは回避ではなく本体だった**——プレビューで読んでいるのは**整形された
+   * 姿**なので、生テキストへ変わった瞬間に**探す目的そのものが半分消える**。
+   *
+   * # 隔離は1段も緩めていない
+   *
+   * 親から中へ手を伸ばす道（`allow-same-origin` を足す）は**採らなかった**。あれは
+   * `allow-scripts` と並ぶと、**箱がダッシュボードと同じ出自を名乗れて script が自分で
+   * `sandbox` を外せる**——利用者の手元の任意の HTML に、ダッシュボードの鍵を渡すのと
+   * 同じになる。
+   *
+   * **代わりに、中へ探す係を置いて指示だけを渡す**（サーバの `FINDER_JS`。宛先は
+   * [`previewUrl`]）。`postMessage` は隔離された箱にも元から許されているので、
+   * **できることは1つも増えていない。**
+   *
+   * # SVG には足していない
+   *
+   * `</svg>` の外に要素を置けないので、同じ手が使えない。あちらは下の断りを通して
+   * 生テキストへ切り替える道が残る。
+   */
+  const 箱の中で探せる = 箱で描いている && kind === 'html'
   const 探す入口 = !loading && content !== null
 
   /**
@@ -321,22 +346,28 @@ export function FileView({
    * 探す窓の作法である。
    */
   const 探し始める = useCallback(() => {
-    if (箱で描いている) {
-      /*
-        **大きいときは、こちらの都合で切り替えない。** 押した人が「生テキストで見る」を
-        自分で押すのは今までどおり通すが、**探すために黙って重い描画を始めない**
-        （`file-heavy` と同じ考え方——時間がかかることを先に言い、決めるのは利用者）。
-      */
-      if (content !== null && content.bytes > FORMAT_DEFAULT_LIMIT) {
-        set大きすぎ(true)
-        return
-      }
-      setRaw(true)
-      set切替えた(true)
+    /*
+      **見ている姿を壊さない。** HTML のプレビューは、箱の中の係へ頼めばそのまま探せる。
+
+      SVG だけは係を置けないので、**切り替えるしかない**——ただし**黙って切り替えない**。
+      押した結果、見ていたものが消えるのがいちばん効くので、**先に断って選ばせる**。
+    */
+    if (箱で描いている && !箱の中で探せる) {
+      set切り替えるか(true)
+      return
     }
     setFind(true)
     set探す合図((n) => n + 1)
-  }, [箱で描いている, content])
+  }, [箱で描いている, 箱の中で探せる])
+
+  /** 断りを受けて、生テキストへ切り替えてから探す（SVG だけが通る道） */
+  const 切り替えて探す = useCallback(() => {
+    set切り替えるか(false)
+    setRaw(true)
+    set切替えた(true)
+    setFind(true)
+    set探す合図((n) => n + 1)
+  }, [])
 
   /*
     **Ctrl+F ／ Ctrl+G を奪うのは、探す入口があるときだけ。**
@@ -514,6 +545,7 @@ export function FileView({
                 // **人が自分で見せ方を変えたら、こちらの断りは消す。** そこから先は
                 // 押した人が選んだ見せ方であって、こちらが切り替えた結果ではない
                 set切替えた(false)
+                set切り替えるか(false)
               }}
             >
               {/* **狭い窓では印だけ**（§39.6）。言葉は `aria-label` と `title` に残る */}
@@ -573,12 +605,39 @@ export function FileView({
       {/* **黙って見せ方を変えない。** 箱の中は外から触れないので、探すには生テキストへ
           移るしかない——**移ったこと自体は正しいが、理由を言わないと画面が壊れたように
           見える**。「整形して見る」で戻れることまで書く */}
-      {/* **大きいので自動では切り替えなかった**（上の `大きすぎ`）。理由と大きさを言い、
-          押すかどうかは利用者が決める */}
-      {大きすぎ && 箱で描いている && content !== null && (
-        <p data-testid="file-find-too-big" className="text-xs text-amber-300">
-          大きいので、探すための切り替えは自動では行いません（{content.bytes} バイト）。
-          「生テキストで見る」を押すと探せますが、表示に時間がかかります。
+      {/* **黙って切り替えない**（利用者の指定・2026-09-08）。SVG は箱の中に係を置けない
+          ので、探すには生テキストへ移るしかない——**移るかどうかは押した人が決める** */}
+      {切り替えるか && 箱で描いている && (
+        <p
+          data-testid="file-find-confirm"
+          className="flex flex-wrap items-center gap-2 text-xs text-amber-300"
+        >
+          <span>
+            この見せ方のままでは中を探せません。生テキストに切り替えて探しますか（表示が
+            変わります
+            {content !== null && content.bytes > FORMAT_DEFAULT_LIMIT
+              ? `。大きいので時間がかかります：${content.bytes} バイト`
+              : ''}
+            ）。
+          </span>
+          <Button
+            type="button"
+            variant="outline"
+            size="xs"
+            data-testid="file-find-confirm-go"
+            onClick={切り替えて探す}
+          >
+            切り替えて探す
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            data-testid="file-find-confirm-cancel"
+            onClick={() => set切り替えるか(false)}
+          >
+            やめる
+          </Button>
         </p>
       )}
 
@@ -653,12 +712,14 @@ export function FileView({
             この段は `flex-1` を受け取って高さを解決するだけで、**見た目は1ピクセルも
             足していない**（§39.4 の言う「段」＝余白を持つ帯ではない）。
           */}
-          {find && 探せる && (
+          {find && (探せる || 箱の中で探せる) && (
             <FileFind
               /* **整形と生テキストでは木の形が違う**ので、切り替えたら探し直す */
               contentKey={`${path}:${String(raw)}`}
               合図={探す合図}
               bodyRef={bodyRef}
+              /* **箱を見ているときは、中の係へ頼む**（親からは中に触れない） */
+              {...(箱の中で探せる ? { frameRef } : {})}
               onClose={() => setFind(false)}
             />
           )}
@@ -699,10 +760,13 @@ export function FileView({
                外側の `file-frame-box` は**はみ出しを隠すため**に要る */
             <div className="file-frame-box">
               <iframe
+                ref={frameRef}
                 data-testid="file-frame"
                 title={relative}
                 sandbox="allow-scripts"
-                src={rawUrl(host, path)}
+                /* **`as=preview`。** 中を探すための係が末尾に足された姿で返る
+                   （「ブラウザで開く」の `as=raw` には1バイトも足さない） */
+                src={previewUrl(host, path)}
                 className="file-frame border-0 bg-white"
               />
             </div>

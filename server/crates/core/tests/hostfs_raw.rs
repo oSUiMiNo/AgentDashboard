@@ -150,6 +150,79 @@ async fn htmlはテキストの道から作られて同じヘッダが付く() {
 }
 
 #[tokio::test]
+async fn プレビューにだけ探す係が足される() {
+    // **プレビューの中をそのまま探せるようにするための係**（利用者の指定・2026-09-08）。
+    //
+    // 箱は `allow-same-origin` を持たないので、**親の画面からは中に1バイトも触れない**。
+    // 探すには**中へ係を置いて指示だけを渡す**しかない——`postMessage` は隔離された箱にも
+    // 元から許されているので、**隔離は1段も緩めていない。**
+    let sandbox = Sandbox::new("preview");
+    let body = "<!doctype html><p>理解</p>";
+    let path = sandbox.file("理解.html", body.as_bytes());
+    let server = common::TestServer::start_with(config_for("preview")).await;
+
+    let 素 = server
+        .get_raw(&format!(
+            "/api/hosts/local/file?path={}&as=raw",
+            escape(&path)
+        ))
+        .await;
+    let 係つき = server
+        .get_raw(&format!(
+            "/api/hosts/local/file?path={}&as=preview",
+            escape(&path)
+        ))
+        .await;
+
+    assert_eq!(素.status, 200);
+    assert_eq!(係つき.status, 200);
+
+    // **「ブラウザで開く」（`as=raw`）には1バイトも足さない**
+    assert_eq!(String::from_utf8_lossy(&素.body), body);
+
+    let 中身 = String::from_utf8_lossy(&係つき.body).to_string();
+    // **先頭には触らない。** `DOCTYPE` の前に何かを差すと互換モードへ落ち、
+    // 描き方そのものが変わる——プレビューは見た目を写す面なので、そこを動かさない
+    assert!(中身.starts_with(body), "本文はそのまま先頭に残ること");
+    assert!(中身.contains("__fileFind"), "探す係が足されていること");
+    assert!(中身.contains("<script>"), "係は本文の末尾へ継ぐこと");
+
+    // 鍵は `as=raw` と同じものが付く（緩めていないことの担保）
+    for r in [&素, &係つき] {
+        assert!(
+            r.header("content-security-policy")
+                .is_some_and(|value| value.contains("sandbox allow-scripts")),
+            "sandbox 指令が付くこと"
+        );
+        assert!(
+            r.header("content-security-policy")
+                .is_some_and(|value| !value.contains("allow-same-origin")),
+            "`allow-same-origin` は決して足さない"
+        );
+    }
+}
+
+#[tokio::test]
+async fn svgには係を足さない() {
+    // **`</svg>` の外に要素を置けない**ので、同じ手が使えない。無理に中へ差すと、
+    // 文書の構造をこちらが書き換えることになる
+    let sandbox = Sandbox::new("preview-svg");
+    let body = r#"<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>"#;
+    let path = sandbox.file("図.svg", body.as_bytes());
+    let server = common::TestServer::start_with(config_for("preview-svg")).await;
+
+    let response = server
+        .get_raw(&format!(
+            "/api/hosts/local/file?path={}&as=preview",
+            escape(&path)
+        ))
+        .await;
+
+    assert_eq!(response.status, 200);
+    assert_eq!(String::from_utf8_lossy(&response.body), body);
+}
+
+#[tokio::test]
 async fn svgも同じ道を通る() {
     let sandbox = Sandbox::new("svg");
     let body = r#"<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>"#;

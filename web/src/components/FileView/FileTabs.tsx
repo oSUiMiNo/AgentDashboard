@@ -56,6 +56,24 @@
  * 中ボタンと右ボタンで掴めると、**中クリックで新しいタブに開こうとしただけで並びが
  * 変わる**（隣の工事が同じ穴を踏んで直している）。指とペンは今までどおり。
  *
+ * # 動きは `reorder.css` が持つ。ここは動かす量だけを渡す
+ *
+ * **カードと同じ手触りにする**（利用者の指摘・2026-09-08）。瞬間で入れ替わると、
+ * 何が起きたのか目で追えない。
+ *
+ * **落とし先を決める側は流用していないが、動き方は流用する。** `reorder.css` は
+ * `data-reorder-item` と CSS 変数だけで書かれていて**次元を持たない**ので、1本の帯にも
+ * そのまま効く——**別々の動きが2つ生まれるのを防げる**（時間・曲線・止める段が1箇所）。
+ *
+ * # 運んでいる間は並びを変えない
+ *
+ * **既存の作法**（並べ替え設計§15-11）。React に並べ替えさせると**掴んでいる本人の
+ * ノードが差し直され、掴みが解ける**。矩形は掴んだ瞬間の1回だけ測り、見た目は
+ * `translate` で作る。
+ *
+ * **離した瞬間に飛ばないのは、この作りの副産物である**——運んでいる間の見た目が
+ * 既に「並べ替えたあとの姿」なので、本当に並べ替えて `translate` を外すと差し引き 0 になる。
+ *
  * # 少し動くまでは掴まない
  *
  * 押した指がわずかに動くのは普通なので、**閾値を越えるまではただの押下として扱う**。
@@ -68,6 +86,7 @@
  * **同じ帯に2つの意味の「タブ」が並ぶ**ので、コードでも文書でもどちらの話かを書く。
  */
 
+import type { CSSProperties } from 'react'
 import {
   useEffect,
   useRef,
@@ -76,7 +95,16 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from 'react'
 import { CloseGlyph } from '@/components/ui/glyphs'
-import { dropIndexFor, stripScrollFor, tabLabels } from '@/lib/fileTabs'
+import { dropIndexFor, moveTab, stripScrollFor, tabLabels } from '@/lib/fileTabs'
+import { useSettingsStore } from '@/stores/settings'
+
+/**
+ * 滑り終わるのを待つ時間。**`reorder.css` の `--reorder-ms` と同じ 200ms。**
+ *
+ * 値を2箇所に持つのは避けたいが、**CSS の変数は JavaScript から読むと解決済みの
+ * 文字列になり、掴んでいない間は `0ms`** なので、待つ側からは使えない。
+ */
+const 滑り = 200
 
 interface Props {
   /** 開いているタブの絶対パス（左から右の順） */
@@ -116,12 +144,43 @@ export function FileTabs({
 }: Props) {
   const labels = tabLabels(tabs)
   const stripRef = useRef<HTMLDivElement>(null)
-  /** 掴んでいるもの。**閾値を越えるまでは「押下かもしれない」ままにしておく** */
-  const 掴み = useRef<{ path: string; x: number; 越えた: boolean } | null>(null)
+  /**
+   * 掴んでいるもの。**閾値を越えるまでは「押下かもしれない」ままにしておく。**
+   *
+   * `枠` は**掴んだ瞬間に1回だけ測った矩形**（設計§15-11）。運んでいる間は並びを
+   * 変えないので、これが動くことはない。
+   */
+  const 掴み = useRef<{
+    path: string
+    x: number
+     越えた: boolean
+    枠: { path: string; left: number; width: number }[]
+    間: number
+    仮: number
+  } | null>(null)
   /** 直前の押下が並べ替えだったか。**そのあとの `click` を食わせないため** */
   const 運んだ = useRef(false)
-  /** 運んでいる1枚。**見た目に出すためだけ**（判断は `掴み` が持つ） */
-  const [運び中, set運び中] = useState<string | null>(null)
+  /**
+   * 運んでいる最中の見た目。**動かす量（`--reorder-dx`）を各タブへ渡すためだけ**で、
+   * 判断は `掴み` が持つ。
+   */
+  const [運び, set運び] = useState<{
+    /** 掴んでいる1枚。**離して滑らせている間は `null`**（浮きを落とすため） */
+    path: string | null
+    dx: Record<string, number>
+  } | null>(null)
+  const 運び中 = 運び?.path ?? null
+  /** 滑り終わるのを待っている印。**外れたら止める**（`setTimeout` を残さない） */
+  const 落ち着き待ち = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(
+    () => () => {
+      if (落ち着き待ち.current !== null) {
+        globalThis.clearTimeout(落ち着き待ち.current)
+      }
+    },
+    [],
+  )
+  const quiet = useSettingsStore((state) => state.settings.motion_quiet)
 
   /*
     **選ばれているタブを、見えるところまで送る**（`stripScrollFor`）。
@@ -240,14 +299,8 @@ export function FileTabs({
       ?.focus()
   }
 
-  /**
-   * 帯の中の、各タブの中心の x（並び順）。
-   *
-   * **測るのは器（✕ を含む1枚ぶん）であって、名前のボタンだけではない。**
-   * 名前だけを測ると ✕（24px）が矩形から外れ、**入れ替わる点が左へ 12px ほどずれる**
-   * ——`dropIndexFor` の「半分だけ重なった時点で入れ替わる」が成り立たなくなる。
-   */
-  function 中心を測る(): number[] {
+  /** 掴んだ瞬間の矩形。**運んでいる間はこれしか見ない**（並びを変えないので動かない） */
+  function 枠を測る(): { path: string; left: number; width: number }[] {
     const 帯 = stripRef.current
     if (帯 === null) {
       return []
@@ -256,12 +309,52 @@ export function FileTabs({
       const el = 帯.querySelector<HTMLElement>(
         `[data-tab-slot][data-path="${CSS.escape(path)}"]`,
       )
-      if (el === null) {
-        return Number.POSITIVE_INFINITY
-      }
-      const r = el.getBoundingClientRect()
-      return r.left + r.width / 2
+      const r = el?.getBoundingClientRect()
+      /*
+        **引けなかったものは、落とし先に選ばれない値にする。** 0 にすると
+        「画面のいちばん左に居るタブ」として選ばれうる——`dropIndexFor` は
+        中心までの距離で決めるので、0 は強い候補になってしまう。
+      */
+      return r === undefined
+        ? { path, left: Number.POSITIVE_INFINITY, width: 0 }
+        : { path, left: r.left, width: r.width }
     })
+  }
+
+  /**
+   * 仮の並びに置いたときの、各タブの動かす量。
+   *
+   * **本人は指に 1:1 で追従する**ので別に渡す（`reorder.css` は本人の `translate` に
+   * `transition` を掛けない）。押しのけられる側だけが滑る。
+   */
+  function ずれを出す(
+    枠: { path: string; left: number; width: number }[],
+    間: number,
+    元: number,
+    仮: number,
+    指: number,
+  ): Record<string, number> {
+    const 並び = moveTab(
+      枠.map((w) => w.path),
+      元,
+      仮,
+    )
+    const 行き先: Record<string, number> = {}
+    let x = 枠[0]?.left ?? 0
+    for (const path of 並び) {
+      const w = 枠.find((v) => v.path === path)
+      if (w === undefined) {
+        continue
+      }
+      行き先[path] = x - w.left
+      x += w.width + 間
+    }
+    // **本人だけは指に付いていく**（仮の位置ではなく、動かした距離そのもの）
+    const 本人 = 枠[元]?.path
+    if (本人 !== undefined) {
+      行き先[本人] = 指
+    }
+    return 行き先
   }
 
   const 押した = (event: ReactPointerEvent<HTMLElement>, path: string) => {
@@ -269,7 +362,19 @@ export function FileTabs({
     if (event.pointerType === 'mouse' && event.button !== 0) {
       return
     }
-    掴み.current = { path, x: event.clientX, 越えた: false }
+    const 枠 = 枠を測る()
+    const 間 =
+      枠.length > 1
+        ? Math.max(0, (枠[1]?.left ?? 0) - ((枠[0]?.left ?? 0) + (枠[0]?.width ?? 0)))
+        : 0
+    掴み.current = {
+      path,
+      x: event.clientX,
+      越えた: false,
+      枠,
+      間,
+      仮: tabs.indexOf(path),
+    }
     /*
       **文字選択を始めさせない。** 掴んで横へ運ぶと、通り過ぎたタブの名前が
       軒並みハイライトされて、運搬の見た目と混ざる。
@@ -291,7 +396,7 @@ export function FileTabs({
     */
     if (event.buttons === 0) {
       掴み.current = null
-      set運び中(null)
+      set運び(null)
       return
     }
     // **少し動くまでは掴まない。** 押した指はわずかに動くのが普通
@@ -300,28 +405,76 @@ export function FileTabs({
     }
     if (!g.越えた) {
       g.越えた = true
-      set運び中(g.path)
       event.currentTarget.setPointerCapture(event.pointerId)
     }
-    const to = dropIndexFor(中心を測る(), event.clientX)
-    if (to >= 0 && tabs[to] !== g.path) {
-      // **パスで渡す。** 同じ指定が何回当たっても同じ結果になる（`onReorder` の説明）
-      onReorder(g.path, to)
+    /*
+      **並びは変えない**（設計§15-11）。掴んだ瞬間の矩形から仮の位置を決め、
+      **動かす量だけ**を各タブへ渡す——動き方（時間・曲線・止める段）は `reorder.css`。
+    */
+    const 元 = g.枠.findIndex((w) => w.path === g.path)
+    const 中心 = g.枠.map((w) => w.left + w.width / 2)
+    const 仮 = dropIndexFor(中心, event.clientX)
+    if (仮 >= 0) {
+      g.仮 = 仮
     }
+    set運び({
+      path: g.path,
+      dx: ずれを出す(g.枠, g.間, 元, g.仮, event.clientX - g.x),
+    })
   }
 
   const 離した = () => {
+    const g = 掴み.current
     // **運んだ直後の `click` を食わせない。** 押した場所と離した場所が違うので、
     // そのまま通すと「運んだ先のタブを選んだ」ことになる
-    const 運んでいた = 掴み.current?.越えた === true
+    const 運んでいた = g?.越えた === true
     運んだ.current = 運んでいた
     掴み.current = null
-    set運び中(null)
-    if (運んでいた) {
-      // **覚えるのはここだけ。** 運んでいる最中に覚えると、動くたびに
-      // `localStorage` を同期で読み書きすることになる
+    if (g === null || !運んでいた) {
+      set運び(null)
+      return
+    }
+
+    /*
+      **本人だけは、指の位置から落とし先へ滑らせてから確定する。**
+
+      押しのけられる側は運んでいる間から既に「並べ替えたあとの位置」に居るので、
+      本当に並べ替えて `translate` を外すと差し引き 0 になる。**本人だけは違う**
+      ——あちらは指に 1:1 で追従しているので、離した時点の見た目は「指の位置」、
+      並べ替えたあとの位置は「落とし先」で、**最大でタブ半分ぶん飛ぶ**。
+
+      `data-dragging` を落とすと `reorder.css` の基の規則（`translate` に 200ms の
+      滑り）が効くので、**落とし先へ滑ってから**入れ替える。
+    */
+    const 元 = g.枠.findIndex((w) => w.path === g.path)
+    const 落ち着き = ずれを出す(g.枠, g.間, 元, g.仮, 0)
+    const 仮 = g.仮
+    const path = g.path
+    落ち着き[path] =
+      (g.枠.find((w) => w.path === g.枠[仮]?.path)?.left ?? 0) -
+      (g.枠[元]?.left ?? 0)
+    // **持ち上げは落とす**（`data-dragging` を外す）ので、滑りの規則が効く
+    set運び({ path: null, dx: 落ち着き })
+
+    const 確定する = () => {
+      /*
+        **ここで初めて並びを変える。** 滑り終わった見た目が「並べ替えたあとの姿」
+        なので、入れ替えて `translate` を外すと差し引き 0——飛ばない。
+
+        **覚えるのもここだけ。** 運んでいる最中に覚えると、動くたびに `localStorage`
+        を同期で読み書きすることになる。
+      */
+      落ち着き待ち.current = null
+      set運び(null)
+      onReorder(path, 仮)
       onReorderCommit()
     }
+    // **「静止」なら待たない。** 滑らない設定で待つと、ただ遅れるだけになる
+    if (quiet === 'still') {
+      確定する()
+      return
+    }
+    落ち着き待ち.current = globalThis.setTimeout(確定する, 滑り)
   }
 
   return (
@@ -374,7 +527,22 @@ export function FileTabs({
             */
             data-tab-slot=""
             data-path={path}
+            /*
+              動きは `reorder.css` が持つ。印は2つ要る——**並び全員が滑る**
+              （`data-reorder-item` ＋ `data-reordering`）のと、**持っているものだけが
+              浮く**（`data-dragging`）。
+            */
+            data-reorder-item=""
+            data-reorder-kind="tab"
+            data-reordering={運び !== null ? 'true' : 'false'}
             data-dragging={path === 運び中 ? 'true' : undefined}
+            // **賑やかのときは属性ごと出さない。**「静止」なら滑らせない
+            data-quiet={quiet === 'lively' ? undefined : quiet}
+            style={
+              運び === null
+                ? undefined
+                : ({ '--reorder-dx': `${運び.dx[path] ?? 0}px` } as CSSProperties)
+            }
             className={`flex h-7 shrink-0 items-center rounded-md transition-colors data-[dragging=true]:shadow-lg data-[dragging=true]:ring-2 data-[dragging=true]:ring-ring/60 ${
               selected
                 ? 'bg-primary text-primary-foreground'

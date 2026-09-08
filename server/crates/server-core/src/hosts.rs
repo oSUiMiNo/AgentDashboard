@@ -77,6 +77,25 @@ pub struct CardQuery {
 /// 緩めるときは**1つずつ**足して、理由を設計§3 へ書く。
 pub const RAW_CSP: &str = "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; img-src data:; style-src 'unsafe-inline'; font-src data:";
 
+/// プレビューの中を探すための、箱へ入れる係（`finder.js`）。
+///
+/// # なぜ中へ入れるのか
+///
+/// 箱は `allow-same-origin` を持たないので**別の出自を名乗る**——親の画面からは中の
+/// 文書に1バイトも触れない。これは隔離が効いている証拠であって、直すべき不具合では
+/// ない。**だから親が中を探すのではなく、中に探す係を置いて指示だけを渡す。**
+///
+/// **隔離は1段も緩めていない。** 増えたのは「親と便りをやり取りする」道だけで、
+/// `postMessage` は隔離された箱にも元から許されている。**`allow-same-origin` を
+/// 足す案は採らなかった**——あれは `allow-scripts` と並ぶと、箱がダッシュボードと
+/// 同じ出自を名乗れて script が自分で `sandbox` を外せる（下記 [`RAW_CSP`]）。
+///
+/// # 足すのは `as=preview` のときだけ
+///
+/// **「ブラウザで開く」（`as=raw`）には1バイトも足さない。** あちらは利用者が
+/// ファイルそのものを見に行く道なので、こちらの都合で中身を変えない。
+const FINDER_JS: &str = include_str!("finder.js");
+
 /// `GET /api/hosts/{host}/dir?path=…`
 pub async fn api_dir(
     State(state): State<AppState>,
@@ -110,7 +129,11 @@ pub async fn api_dir(
 /// | `as` | 返すもの |
 /// |---|---|
 /// | 省略 | JSON の [`protocol::fs::FileContent`]（**いままでどおり**） |
-/// | `raw` | 生のバイト列 ＋ 4つのヘッダ。`<img>` と `<iframe>` の宛先になる |
+/// | `raw` | 生のバイト列 ＋ 4つのヘッダ。`<img>` と**「ブラウザで開く」**の宛先になる |
+/// | `preview` | `raw` と同じ。**ただし HTML には探す係（[`FINDER_JS`]）を末尾へ足す** |
+///
+/// **`preview` を分けたのは、足す相手を1つに絞るためである。** 「ブラウザで開く」は
+/// 利用者がファイルそのものを見に行く道なので、こちらの都合で中身を変えない。
 pub async fn api_file(
     State(state): State<AppState>,
     axum::Extension(identity): axum::Extension<Identity>,
@@ -132,9 +155,10 @@ pub async fn api_file(
                 .map_err(refuse)?;
             Ok(Json(content).into_response())
         }
-        Some("raw") => raw_file(&state, ask(), &query.path).await,
+        Some("raw") => raw_file(&state, ask(), &query.path, false).await,
+        Some("preview") => raw_file(&state, ask(), &query.path, true).await,
         Some(other) => Err(refuse(HostAskError::BadRequest(format!(
-            "`as` を読めません：{other}\n合うのは raw です。"
+            "`as` を読めません：{other}\n合うのは raw と preview です。"
         )))),
     }
 }
@@ -207,6 +231,7 @@ async fn raw_file(
     state: &AppState,
     ask: HostAskRequest,
     path: &str,
+    探せるように: bool,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
     let media_type = protocol::fs::media_type_of(path);
 
@@ -222,6 +247,26 @@ async fn raw_file(
             .map_err(refuse)?
             .text
             .into_bytes()
+    };
+
+    /*
+        **探す係を足すのは HTML のときだけ。**
+
+        `<script>` を本文の末尾へ継ぐので、**先頭には1バイトも触らない**——`DOCTYPE` の
+        前に何かを差すと、ブラウザが互換モードへ落ちて**描き方そのものが変わる**。
+        プレビューは見た目を写す面なので、そこを動かしてはいけない。
+
+        **SVG には足さない。** あちらは `</svg>` の外に要素を置けないので、同じ手が
+        使えない（無理に中へ差すと、文書の構造をこちらが書き換えることになる）。
+    */
+    let body = if 探せるように && protocol::fs::kind_of(path) == protocol::fs::FileKind::Html {
+        let mut 継いだ = body;
+        継いだ.extend_from_slice(b"\n<script>");
+        継いだ.extend_from_slice(FINDER_JS.as_bytes());
+        継いだ.extend_from_slice(b"</script>\n");
+        継いだ
+    } else {
+        body
     };
 
     Ok((

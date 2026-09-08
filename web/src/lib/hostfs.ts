@@ -144,6 +144,22 @@ export function rawUrl(host: string, path: string): string {
 }
 
 /**
+ * プレビュー（隔離した箱）の宛先。**`as=raw` と同じ中身に、探す係が足してある。**
+ *
+ * # なぜ「ブラウザで開く」と分けるのか
+ *
+ * 箱は `allow-same-origin` を持たないので、**親の画面からは中の文書に1バイトも
+ * 触れない**——探すには**中に係を置いて指示だけを渡す**しかない（サーバ側の
+ * `FINDER_JS`）。その係は、**プレビューのときだけ**足す。
+ *
+ * **「ブラウザで開く」（[`rawUrl`]）には1バイトも足さない。** あちらは利用者が
+ * ファイルそのものを見に行く道なので、こちらの都合で中身を変えない。
+ */
+export function previewUrl(host: string, path: string): string {
+  return `/api/hosts/${encodeURIComponent(host)}/file?path=${encodeURIComponent(path)}&as=preview`
+}
+
+/**
  * 画像を取ってくる（設計§7-2）。
  *
  * **`<img src>` に直に URL を渡さない。** `<img>` の失敗は理由を運べないので、

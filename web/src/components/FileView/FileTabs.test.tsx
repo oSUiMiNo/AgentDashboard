@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { FileTabs } from '@/components/FileView/FileTabs'
@@ -236,15 +236,66 @@ describe('タブの並べ替え', () => {
     expect(onSelect).not.toHaveBeenCalled()
   })
 
-  it('掴んで運ぶと並びが変わる', () => {
+  it('掴んで運び、滑り終わったところで並びが変わる', async () => {
+    /*
+      **運んでいる間は並びを変えない**（並べ替え設計§15-11）。React に並べ替えさせると
+      **掴んでいる本人のノードが差し直され、掴みが解ける**。見た目は `translate` で作り、
+      **離した瞬間に本当に並べ替える**——そのとき見た目は既に並べ替えたあとの姿なので、
+      差し引き 0 で飛ばない。
+    */
     const { onReorder } = 置く(三枚, `${ROOT}/c.md`)
     const タブ = screen.getAllByTestId('file-tab')[2]!
     const 帯 = screen.getByTestId('file-tabs')
 
     fireEvent.pointerDown(タブ, { pointerType: 'mouse', button: 0, clientX: 300 })
     fireEvent.pointerMove(帯, { pointerType: 'mouse', buttons: 1, clientX: 100 })
+    // 運んでいる最中は、まだ変えない
+    expect(onReorder).not.toHaveBeenCalled()
 
-    expect(onReorder).toHaveBeenCalled()
+    /*
+      **離してすぐには変えない。** 本人は指に 1:1 で追従しているので、離した時点の
+      見た目は「指の位置」——落とし先へ**滑らせてから**入れ替える（`reorder.css` の
+      200ms）。入れ替えたときには見た目が既に一致しているので、飛ばない。
+    */
+    fireEvent.pointerUp(帯, { pointerType: 'mouse', clientX: 100 })
+    await waitFor(() => {
+      expect(onReorder).toHaveBeenCalled()
+    })
+  })
+
+  it('運んでいる間は、動きの印と量が付く', async () => {
+    /*
+      **動き方は `reorder.css` が持つ**（時間・曲線・止める段）。ここが渡すのは
+      **動かす量だけ**——落とし先を決める側は流用していないが、**動き方は流用する**。
+      別々の動きが2つ生まれるのを防ぐため。
+    */
+    置く(三枚, `${ROOT}/c.md`)
+    const タブ = screen.getAllByTestId('file-tab')[2]!
+    const 器 = タブ.parentElement!
+    const 帯 = screen.getByTestId('file-tabs')
+
+    expect(器).toHaveAttribute('data-reorder-item')
+    expect(器).toHaveAttribute('data-reordering', 'false')
+
+    fireEvent.pointerDown(タブ, { pointerType: 'mouse', button: 0, clientX: 300 })
+    fireEvent.pointerMove(帯, { pointerType: 'mouse', buttons: 1, clientX: 100 })
+
+    // **並び全員が滑る**印と、**持っているものだけが浮く**印の2つ
+    expect(器).toHaveAttribute('data-reordering', 'true')
+    expect(器).toHaveAttribute('data-dragging', 'true')
+    expect(器.getAttribute('style')).toContain('--reorder-dx')
+
+    /*
+      離すと**まず浮きだけが落ちる**（`data-dragging` が外れ、`reorder.css` の
+      滑りの規則が本人にも効く）。滑り終わってから並びが変わり、印も落ちる。
+    */
+    fireEvent.pointerUp(帯, { pointerType: 'mouse', clientX: 100 })
+    expect(器).not.toHaveAttribute('data-dragging')
+    expect(器).toHaveAttribute('data-reordering', 'true')
+
+    await waitFor(() => {
+      expect(器).toHaveAttribute('data-reordering', 'false')
+    })
   })
 
   it('少し動いただけでは掴まない', () => {
@@ -259,7 +310,7 @@ describe('タブの並べ替え', () => {
     expect(onReorder).not.toHaveBeenCalled()
   })
 
-  it('運んだあとの押下は、選び直しにならない', () => {
+  it('運んだあとの押下は、選び直しにならない', async () => {
     /*
       **押した場所と離した場所が違う。** そのまま通すと「運んだ先のタブを選んだ」
       ことになる。
@@ -273,7 +324,9 @@ describe('タブの並べ替え', () => {
     fireEvent.pointerUp(帯, { pointerType: 'mouse', clientX: 100 })
     fireEvent.click(タブ)
 
-    expect(onReorder).toHaveBeenCalled()
+    await waitFor(() => {
+      expect(onReorder).toHaveBeenCalled()
+    })
     expect(onSelect).not.toHaveBeenCalled()
   })
 
@@ -310,7 +363,7 @@ describe('タブの並べ替え', () => {
     expect(onReorder).not.toHaveBeenCalled()
   })
 
-  it('運んだ印は、帯で押しても落ちる', () => {
+  it('運んだ印は、帯で押しても落ちる', async () => {
     /*
       実ブラウザでは、運んだあとの `click` は**押した相手（タブ）ではなく共通の親
       （帯）へ届く**。タブ側だけで落としていると印が残り、**次にキーボードで選ぼうと
@@ -328,7 +381,9 @@ describe('タブの並べ替え', () => {
     // そのあとのタブの押下は、いままでどおり選ぶ
     fireEvent.click(タブ)
 
-    expect(onSelect).toHaveBeenCalledWith(`${ROOT}/c.md`)
+    await waitFor(() => {
+      expect(onSelect).toHaveBeenCalledWith(`${ROOT}/c.md`)
+    })
   })
 
   it('Ctrl+Shift+→ が動かすのは、焦点のあるタブ', () => {
@@ -347,7 +402,7 @@ describe('タブの並べ替え', () => {
     expect(onReorder).toHaveBeenCalledWith(`${ROOT}/b.md`, 2)
   })
 
-  it('確定は、運び終わったときだけ知らせる', () => {
+  it('確定は、運び終わったときだけ知らせる', async () => {
     // **運んでいる最中に覚えると、動くたびに `localStorage` を同期で読み書きする**
     const { onReorderCommit } = 置く(三枚, `${ROOT}/c.md`)
     const タブ = screen.getAllByTestId('file-tab')[2]!
@@ -358,7 +413,9 @@ describe('タブの並べ替え', () => {
     expect(onReorderCommit).not.toHaveBeenCalled()
 
     fireEvent.pointerUp(帯, { pointerType: 'mouse', clientX: 100 })
-    expect(onReorderCommit).toHaveBeenCalledTimes(1)
+    await waitFor(() => {
+      expect(onReorderCommit).toHaveBeenCalledTimes(1)
+    })
   })
 
   it('掴まずに離しただけでは、確定を知らせない', () => {
@@ -383,11 +440,12 @@ describe('タブの並べ替え', () => {
 
     fireEvent.pointerDown(タブ, { pointerType: 'mouse', button: 1, clientX: 300 })
     fireEvent.pointerMove(帯, { pointerType: 'mouse', buttons: 1, clientX: 100 })
+    fireEvent.pointerUp(帯, { pointerType: 'mouse', clientX: 100 })
 
     expect(onReorder).not.toHaveBeenCalled()
   })
 
-  it('指では、どの押し方でも掴める', () => {
+  it('指では、どの押し方でも掴める', async () => {
     // `button` はマウスの話。指とペンは今までどおり
     const { onReorder } = 置く(三枚, `${ROOT}/c.md`)
     const タブ = screen.getAllByTestId('file-tab')[2]!
@@ -395,7 +453,10 @@ describe('タブの並べ替え', () => {
 
     fireEvent.pointerDown(タブ, { pointerType: 'touch', button: 0, clientX: 300 })
     fireEvent.pointerMove(帯, { pointerType: 'touch', buttons: 1, clientX: 100 })
+    fireEvent.pointerUp(帯, { pointerType: 'touch', clientX: 100 })
 
-    expect(onReorder).toHaveBeenCalled()
+    await waitFor(() => {
+      expect(onReorder).toHaveBeenCalled()
+    })
   })
 })
