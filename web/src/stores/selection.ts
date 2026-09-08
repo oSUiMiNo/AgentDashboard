@@ -11,19 +11,19 @@
  * 先に選んだ種類で決まる（設計§5-1）。混ぜられると、まとめて操作の帯に出すボタンが
  * 選択の中身で出たり消えたりする——電源マークはカードにしか意味を持たない。
  *
- * # 違う種類を押しても、乗り換えない（2026-09-08・利用者の指定。**前の決定を覆している**）
+ * # ここは policy を持たない（**入れかけて戻した**・2026-09-08）
  *
- * **以前は「違う種類を押したら、そちらへ選び直す」だった。** やめた理由は、**1回の押しで
- * 2つのことが起きる**こと——もとの選択が消えるのと、押した相手が選ばれるのが同時に走り、
- * **どちらを頼んだのかが画面から読めない**。しかも帯の中身が入れ替わるので、
- * **押そうとしていたボタンが別のボタンになる**（§5-1 が禁じた事象そのもの）。
+ * 「何か選んでいる間に別の種類を押したら**解くだけ**」という規則が入ったとき、いったん
+ * この `toggleSelect` を「違う種類なら解く」へ書き換えた。**戻した。**
  *
- * いまは**解くだけ**にして、選び直したい人には2回押してもらう。**判定の正は
- * `lib/press.ts`**（そちらが「開く／選ぶ／解く」を決める）で、ここはどの入口から来ても
- * 同じ結果になるようにしている——**Space は `pressMapping` を通らずにここへ来る**ので、
- * ここを直さないと同じ PC でマウスとキーボードの結果が食い違う。
+ * **判定の正は `lib/press.ts` の `pressMapping` ただ1つ**（設計§4-1「判定は1箇所に集める」）。
+ * ここへ同じ規則を置くと、**押し方を通らない呼び出し元まで巻き添えになる**——実際、
+ * `GroupView` の掴み手のタップ（`onTap`。掴まずに離したら選ぶ、という §4-4 の保険）が
+ * **選ぶのをやめて解くようになっていた**。あちらは名指しで「これを選ぶ」と言う操作なので、
+ * 押し間違いの話が当てはまらない。
  *
- * **`select()` は乗り換えたまま**（下記）。あちらは「これを選ぶ」と名指しする道である。
+ * したがってここは**素直な入れ物**のままにする。「解くだけ」を実行するのは、
+ * `pressMapping` の答えを受け取る `usePress` である。
  */
 
 import { useSyncExternalStore } from 'react'
@@ -68,17 +68,15 @@ export function isSelecting(): boolean {
  * 1つ選ぶ／外す。
  *
  * **押すたびに増え、もう一度押すと外れる**（修飾キーは要らない。設計§4-1）。
- * **違う種類を押したら、選択を解くだけ**——乗り換えない（2026-09-08。上の段）。
+ * **違う種類を押したら、そちらへ選び直す**——混ぜない（§5-1）。
+ *
+ * **「解くだけ」はここではやらない**（上の段）。一覧の押し方としては解くのが正だが、
+ * それを決めるのは `pressMapping` で、ここまで来る前に振り分けられている。
  */
 export function toggleSelect(kind: SelectionKind, id: string): void {
-  if (selection.kind === null) {
+  if (selection.kind !== kind) {
     selection = { kind, ids: [id] }
     notify()
-    return
-  }
-  if (selection.kind !== kind) {
-    // **押した相手は選ばない。** 選び直したいなら、もう一度押す
-    clearSelection()
     return
   }
   const ids = selection.ids.includes(id)
@@ -96,9 +94,9 @@ export function toggleSelect(kind: SelectionKind, id: string): void {
  * `toggleSelect` だと、**既に選ばれているものを長押しして掴んだ瞬間に選択が外れる**
  * （「色が消えた的を運ぶ」）。既に選んでいれば何もしない（通知もしない）。
  *
- * **違う種類なら乗り換える。こちらは変えていない**（`toggleSelect` は 2026-09-08 に
- * 乗り換えをやめた）。長押しは「**これを選ぶ**」と名指しする操作なので、押し間違いの
- * 話が当てはまらない——**触る画面では、これが1動作で種類を選び直す唯一の道**である。
+ * **違う種類なら選び直す**（§5-1）。長押しは「**これを選ぶ**」と名指しする操作なので、
+ * 押し間違いの話が当てはまらない——**触る画面では、これが1動作で種類を選び直す道**である
+ * （タップは「解くだけ」なので2回要る）。
  */
 export function select(kind: SelectionKind, id: string): void {
   if (selection.kind !== kind) {
@@ -115,11 +113,40 @@ export function select(kind: SelectionKind, id: string): void {
 
 /** 全部外す。**選択モードから抜ける道**（設計§4-2）。 */
 export function clearSelection(): void {
-  if (selection.ids.length === 0) {
+  if (selection === 空) {
     // 同じ中身なら通知しない（`useSyncExternalStore` が無駄に回らないように）
     return
   }
+  /*
+    **種類も必ず捨てる。** 以前は「`ids` が空なら何もしない」で早く戻っていたが、
+    **`kind` が残って `ids` だけ空**という形になったとき、そこから二度と出られない
+    ——`pressMapping` は `kind` を見て「選択中」と判断するので**全部の押しが
+    「解くだけ」へ倒れ、その解くが早い戻りで何もしない**。いまはそういう形を作って
+    いないが、作った瞬間に画面が読み込み直すまで固まる。
+  */
   selection = 空
+  notify()
+}
+
+/**
+ * 押す前の選択へ戻す。**ダブルクリックのためだけにある。**
+ *
+ * ブラウザは `click` → `click` → `dblclick` の順に出すので、**ダブルクリックの間に
+ * シングルの処理が2回走る**。以前は「選ぶ」が2回で打ち消し合って元へ戻っていたが、
+ * **「解くだけ」が入って打ち消し合わなくなった**——1打目で解け、2打目で押した相手が
+ * 選ばれる。開いた先へ**頼んでいない選択を持ち込む**ことになるので、ここで戻す。
+ *
+ * **中身が同じなら通知しない**（開くたびに画面が余計に描き直らないように）。
+ */
+export function restoreSelection(snapshot: Selection): void {
+  if (
+    selection.kind === snapshot.kind &&
+    selection.ids.length === snapshot.ids.length &&
+    selection.ids.every((id, i) => id === snapshot.ids[i])
+  ) {
+    return
+  }
+  selection = snapshot.ids.length === 0 ? 空 : { kind: snapshot.kind, ids: [...snapshot.ids] }
   notify()
 }
 
@@ -132,8 +159,14 @@ export function useSelection(): Selection {
   return useSyncExternalStore(subscribe, getSelection, getSelection)
 }
 
-/** テストのための巻き戻し。 */
+/**
+ * テストのための巻き戻し。
+ *
+ * **購読者は落とさない**（2026-09-08）。落とすと、**まだ画面に居る部品が黙って更新を
+ * 受け取らなくなる**——`useSyncExternalStore` は外されたことを知らないので、
+ * 「選んだのに色が変わらない」という**別の症状**でテストが落ちて、本当の原因が隠れる。
+ * 部品は外れるときに自分で購読を外すので、ここで畳む必要は無い。
+ */
 export function clearSelectionStore(): void {
   selection = 空
-  listeners.clear()
 }

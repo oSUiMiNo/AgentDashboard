@@ -26,9 +26,12 @@ import { useCoarsePointer } from './pointer'
 import { LONG_PRESS_MS, movedTooFar, pressMapping } from './press'
 import {
   clearSelection,
+  getSelection,
+  restoreSelection,
   select,
   toggleSelect,
   useSelection,
+  type Selection,
   type SelectionKind,
 } from '@/stores/selection'
 
@@ -112,6 +115,13 @@ export function usePress({
   /** Space で選んだ直後の `click`（`detail === 0`）を捨てるための印 */
   const 空白で選んだ = useRef(false)
 
+  /**
+   * **1打目を押す前の選択。** ダブルクリックが成立したら、ここへ戻す。
+   *
+   * `click` は1打目が `detail === 1`、2打目が `2` で来るので、**1打目でだけ覚える**。
+   */
+  const 押す前の選択 = useRef<Selection>(getSelection())
+
   const onKeyDown = useCallback(
     (event: {
       key: string
@@ -126,7 +136,9 @@ export function usePress({
       }
       // **キーボードは、指が残した印と関係が無い。** 掴んで運んだあと（`click` が
       // 握り潰されて印が残っている状態）に Tab で来て Enter を押しても開くように、
-      // ここで捨てる
+      // ここで捨てる。**計測も必ず止める**——止めずに捨てると、待っているタイマーが
+      // 次の押しに乗って**押していない時間で長押しが成立する**
+      やめる()
       長押し.current = null
       if (event.key === ' ') {
         // 器が `<section>` のときページが流れるのを止める
@@ -134,11 +146,19 @@ export function usePress({
         if (!selectable) {
           return
         }
-        // **キーボードは PC の規則に従う**（押すたびに入れ替える）。触る画面でも同じで、
-        // ここに「別の種類なら解くだけ」は持ち込まない——Space は名指しで「これを選ぶ」と
-        // 言う操作なので、押し間違いの話が当てはまらない。持ち込むと、キーボードでは
-        // 種類を選び直せなくなる
+        // `preventDefault` で `click` が来ないこともあるが、来たときは捨てる
         空白で選んだ.current = true
+        /*
+          **Space はシングルクリックと同じ答えに従う**（`pressMapping` の `'clear'`）。
+
+          ここだけ「別の種類も選ぶ」を続けると、**同じ PC でマウスとキーボードの結果が
+          食い違う**。しかも帯は Tab の通り道なので、**向かっていたボタンが別のボタンに
+          なる**のはむしろキーボードのほうが当たりやすい。
+        */
+        if (mapping.single === 'clear') {
+          clearSelection()
+          return
+        }
         toggleSelect(kind, id)
         return
       }
@@ -150,7 +170,7 @@ export function usePress({
         onOpen()
       }
     },
-    [selectable, kind, id, onOpen],
+    [mapping.single, selectable, kind, id, onOpen, やめる],
   )
 
   // 外れるときに計測を残さない（押したまま画面が消えることがある）
@@ -171,6 +191,9 @@ export function usePress({
       */
       やめる()
       長押し.current = null
+      // **Space の印も捨てる。** `preventDefault` で `click` が来なかった回の印が
+      // 残っていると、次の押しが「Space の直後」と誤って捨てられる
+      空白で選んだ.current = false
       if (!mapping.longPressSelects || event.pointerType === 'mouse') {
         return
       }
@@ -222,6 +245,10 @@ export function usePress({
   const onClick = useCallback(
     (event: { stopPropagation: () => void; detail?: number }) => {
       event.stopPropagation()
+      // **1打目だけ覚える**（2打目は `detail === 2`）。ダブルクリックが成立したときに戻す
+      if ((event.detail ?? 1) === 1) {
+        押す前の選択.current = getSelection()
+      }
       const 長押しで選んだ = 長押し.current?.成立 === true
       長押し.current = null
       if (長押しで選んだ) {
@@ -285,16 +312,18 @@ export function usePress({
         return
       }
       /*
-        **ここで選択を戻さない。**
+        **押す前の選択へ戻してから開く**（設計§4-1「1打目の選択変更を取り消す」）。
 
-        設計§4-1 は「ダブルクリックが成立したら1打目の選択変更を取り消す」と書いて
-        いるが、**ブラウザは `dblclick` の前に `click` を2回発火する**（`click` →
-        `click` → `dblclick`）。シングルが「選ぶ」なら**2回で打ち消し合って元へ戻る**
-        ので、ここで更に戻すと**選んだ状態で開く**ことになる。
+        ブラウザは `dblclick` の前に `click` を2回発火する（`click` → `click` →
+        `dblclick`）。**シングルが「選ぶ」だけだった頃は、2回で打ち消し合って元へ
+        戻っていた**ので、ここでは何もしなくてよかった。
 
-        実装して初めて分かった（1本目のテストが「選ばれている」で落ちた）。
-        設計側には読み替えを積んである。
+        **「解くだけ」が入って打ち消し合わなくなった**——別の種類を選んでいるときは、
+        1打目で解け、2打目で**押した相手が選ばれる**。開いた先へ頼んでいない選択を
+        持ち込むうえ、一覧へ戻ると身に覚えのない帯が出ている。**まとめて選んでいた
+        ものも失う**ので、覚えておいて戻す。
       */
+      restoreSelection(押す前の選択.current)
       onOpen()
     },
     [mapping.doubleOpens, onOpen],
