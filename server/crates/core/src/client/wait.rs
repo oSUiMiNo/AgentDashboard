@@ -56,7 +56,19 @@ pub enum Step {
 pub enum Goal {
     /// `spawn`：**送る前に控えた集合に無い**カードの `SessionUpsert`（§8-3）。
     /// `cwd` の一致で待つと、同じフォルダで既に走っているカードの更新を掴む
-    NewCard { known: HashSet<String> },
+    ///
+    /// # `origin` は「頼んだ相手の席」（ブランチ設計§8-4）
+    ///
+    /// `spawn` と `recall` は**頼む時点で席が無い**ので `None`。**枝分かれだけは
+    /// 押した席がある**ので、そこを入れる。
+    ///
+    /// 入れないと、**その席宛ての断りが「別のカードの知らせ」として流され、待ちは
+    /// 時間切れまで続く**——表に出るのは「終わりませんでした」だけになり、**症状は
+    /// 見えるが理由は見えない**（2026-09-08 に実運用で踏んだ）。
+    NewCard {
+        known: HashSet<String>,
+        origin: Option<CardId>,
+    },
     /// `send --wait`：status が `WaitingInput` へ**戻る**。二段で見る——接続直後に
     /// 流れてくる写し（送る前の `WaitingInput`）を掴まないため、**忙しい状態
     /// （Working／WaitingPermission／Stalled）を一度見てからでないと満ちない**。
@@ -127,7 +139,7 @@ impl Goal {
             };
         }
         match self {
-            Self::NewCard { known } => {
+            Self::NewCard { known, .. } => {
                 if let ServerMessage::SessionUpsert { session } = message {
                     let id = session.card_id.to_string();
                     if !known.contains(&id) {
@@ -257,10 +269,13 @@ impl Goal {
         }
     }
 
-    /// この Goal が見ているカード。`NewCard` はまだ持っていない。
+    /// この Goal が見ているカード。
+    ///
+    /// `NewCard` は**頼んだ相手の席があるときだけ**持つ（枝分かれ）。`spawn` と
+    /// `recall` は頼む時点で席が無いので `None` のまま。
     fn card(&self) -> Option<&CardId> {
         match self {
-            Self::NewCard { .. } => None,
+            Self::NewCard { origin, .. } => origin.as_ref(),
             Self::TurnEnded { card, .. }
             | Self::Ended { card }
             | Self::Removed { card }
@@ -369,6 +384,7 @@ mod tests {
         let old = CardId::new();
         let new = CardId::new();
         let mut goal = Goal::NewCard {
+            origin: None,
             known: HashSet::from([old.to_string()]),
         };
         // 控えにあるカードの知らせ（接続直後の写しと同じ形）では満ちない
@@ -472,6 +488,7 @@ mod tests {
         // 宛先なし（Spawn の失敗・解釈不能）はどの Goal でも打ち切り
         let mut spawn_goal = Goal::NewCard {
             known: HashSet::new(),
+            origin: None,
         };
         assert!(matches!(
             spawn_goal.observe(&ServerMessage::Error {
@@ -481,6 +498,54 @@ mod tests {
             }),
             Step::Fail(_)
         ));
+    }
+
+    #[test]
+    fn 枝分かれは押した席の断りでその場で落ちる() {
+        // **時間切れは症状であって理由ではない**（ブランチ設計§8-4）。
+        //
+        // `origin` を渡さないと、押した席宛ての断りが「別のカードの知らせ」として
+        // 流され、**待ちは上限まで続く**。表に出るのは「終わりませんでした」だけになり、
+        // **本当の理由は先に流れて見えなくなる**（2026-09-08 に実運用で踏んだ）。
+        let 押した席 = CardId::new();
+        let mut goal = Goal::NewCard {
+            known: HashSet::new(),
+            origin: Some(押した席),
+        };
+        let step = goal.observe(&ServerMessage::Error {
+            card_id: Some(押した席),
+            message: "まだ枝分かれできません".to_string(),
+            kind: ErrorKind::Branch,
+        });
+        match step {
+            Step::Fail(理由) => assert!(
+                理由.contains("まだ枝分かれできません"),
+                "断りの理由がそのまま出ていない: {理由}"
+            ),
+            _ => panic!("押した席の断りで落ちていない"),
+        }
+    }
+
+    #[test]
+    fn 起動と呼び戻しは席を持たないので断りで落ちない() {
+        // **`origin` を入れてよいのは枝分かれだけ**。`spawn` と `recall` は頼む時点で
+        // 席が無く、**無関係なカードの断りで落ちてはいけない**
+        let 無関係 = CardId::new();
+        let mut goal = Goal::NewCard {
+            known: HashSet::new(),
+            origin: None,
+        };
+        assert!(
+            matches!(
+                goal.observe(&ServerMessage::Error {
+                    card_id: Some(無関係),
+                    message: "別件".to_string(),
+                    kind: ErrorKind::Other,
+                }),
+                Step::Note(_)
+            ),
+            "席を持たない待ちが、無関係な断りで落ちている"
+        );
     }
 
     #[test]

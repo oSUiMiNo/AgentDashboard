@@ -593,6 +593,79 @@ impl SessionRegistry {
             .map(|((_, 枝), _)| *枝)
     }
 
+    /// **その会話に中身があるか**（ブランチ設計§3-8）。
+    ///
+    /// # なぜ席ではなく会話で問うのか
+    ///
+    /// 枝分かれの可否は「分かれる元の会話があるか」で決まる。ところが判定の材料を
+    /// **席（カード）**から取ると、**呼び戻した直後の席では必ず空になる**——履歴の窓も
+    /// 直前の応答もカードに紐づくので、新しい席は生まれたてで何も持たない。
+    ///
+    /// **枝分かれのたびに元の会話は新しい席へ移る**ので、これは「同じ親から2本目を
+    /// 作れない」という形で出る（2026-09-08 に実運用で踏んだ）。**席が新しいだけで、
+    /// 会話は空ではない。**
+    ///
+    /// # 迷ったら通す側へ倒す
+    ///
+    /// 誤って断ると**機能そのものが使えなくなる**（親を1つ用意して枝を何本も生やす、
+    /// という本来の使い方が成立しない）。誤って通したときの代償は**試行が1回無駄になり、
+    /// CLI が断る**だけである。**重さが違うので、分からないときは通す。**
+    pub async fn conversation_has_content(
+        &self,
+        account_id: Uuid,
+        claude_session_id: ClaudeSessionId,
+    ) -> bool {
+        // **枝の台帳は会話を鍵に持っており、同期で引ける**（ブランチ設計§5-2）。
+        // しかも印は**呼び戻しより前**に書かれる（段取りの⑤が⑥より先）ので、
+        // 2本目を作るときには必ず立っている——**時間に依らない。**
+        //
+        // - その会話が**枝である**：分かれ元の履歴を丸ごと引き継いでいる
+        // - その会話から**枝が分かれている**：分かれられたのだから中身があった
+        if self.branch_of(account_id, claude_session_id).is_some()
+            || self.branch_child_of(account_id, claude_session_id).is_some()
+        {
+            return true;
+        }
+
+        // 手元の記録。**その会話を指しているカードのどれか**が中身を持っていればよい
+        // （乗り換えの履歴で複数のカードが同じ会話を指す）
+        let 指しているカード: Vec<Arc<SessionRecord>> = self
+            .records
+            .lock()
+            .expect("ロックが壊れていない")
+            .values()
+            .filter(|record| record.account_id == account_id)
+            .filter(|record| record.meta().claude_session_id == Some(claude_session_id))
+            .cloned()
+            .collect();
+        for record in &指しているカード {
+            if record.has_transcript() || record.meta().last_assistant_message.is_some() {
+                return true;
+            }
+        }
+
+        // **記録（DB）まで見る。** 手元に写しが無いカード（起こし直す前の履歴）でも、
+        // 履歴の行が残っていれば会話には中身がある
+        let rows = entity::sessions::Entity::find()
+            .filter(entity::sessions::Column::AccountId.eq(account_id))
+            .filter(entity::sessions::Column::ClaudeSessionId.eq(claude_session_id.0))
+            .all(&self.db)
+            .await
+            .unwrap_or_default();
+        for row in rows {
+            if row.last_assistant_message.is_some() {
+                return true;
+            }
+            if db_transcript::next_seq(&self.db, CardId(row.card_id))
+                .await
+                .is_ok_and(|seq| seq > 0)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     /// 枝分かれの印を残す（ブランチ設計§5-2）。
     ///
     /// # 印が付くのは枝の側

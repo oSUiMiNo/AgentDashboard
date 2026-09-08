@@ -711,7 +711,10 @@ pub async fn spawn(
     .await?;
     let outcome = wait::run(
         &mut ws,
-        Goal::NewCard { known },
+        Goal::NewCard {
+            known,
+            origin: None,
+        },
         "セッションの起動",
         wait::SPAWN_CAP,
     )
@@ -800,7 +803,12 @@ pub async fn branch(target: &Target, prefix: &str) -> Result<Outcome, ClientErro
         .await?;
     let outcome = wait::run(
         &mut ws,
-        Goal::NewCard { known },
+        // **押した席を渡す**（ブランチ設計§8-4）。渡さないと、その席宛ての断りが
+        // 「別のカードの知らせ」として流され、**時間切れの1行しか表に出ない**
+        Goal::NewCard {
+            known,
+            origin: Some(card),
+        },
         "枝分かれ",
         wait::SPAWN_CAP,
     )
@@ -861,7 +869,10 @@ pub async fn recall(
     .await?;
     let outcome = wait::run(
         &mut ws,
-        Goal::NewCard { known },
+        Goal::NewCard {
+            known,
+            origin: None,
+        },
         "過去のセッションの起動",
         wait::SPAWN_CAP,
     )
