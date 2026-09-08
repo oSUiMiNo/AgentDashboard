@@ -893,7 +893,11 @@ async fn handle_request(
             text,
             attachments,
         } => {
-            if let Err(message) = state.agent.send_input(card_id, text, attachments).await {
+            if let Err(message) = state
+                .agent
+                .send_input(card_id, text, attachments, false)
+                .await
+            {
                 send_error(outbound, Some(card_id), message, ErrorKind::SendInput).await;
             }
         }

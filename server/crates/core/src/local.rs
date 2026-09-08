@@ -240,12 +240,17 @@ impl SessionHost for LocalSessionHost {
         card_id: CardId,
         text: String,
         attachments: Vec<String>,
+        confirm: bool,
     ) -> Result<(), String> {
         let session = self.manager.get(card_id).ok_or(NOT_FOUND)?;
-        session
-            .send_instruction_with(&text, &attachments)
-            .await
-            .map_err(|err| format!("指示を送れませんでした: {err:#}"))
+        // **確かめる送信は添付を運ばない。** 段取りが撃つのはスラッシュコマンドだけで、
+        // 添付の印を待つ処理と二重に画面を覗く意味が無い（ブランチ設計§3-7）
+        let outcome = if confirm {
+            session.send_command_confirmed(&text).await
+        } else {
+            session.send_instruction_with(&text, &attachments).await
+        };
+        outcome.map_err(|err| format!("指示を送れませんでした: {err:#}"))
     }
 
     async fn set_permission_mode(

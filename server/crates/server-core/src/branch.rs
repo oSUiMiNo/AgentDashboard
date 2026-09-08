@@ -274,11 +274,15 @@ impl Branch {
             pushable(いまの状態)?;
         }
 
-        // ── ③ `/branch` を撃つ ────────────────────────────────────────
+        // ── ③ `/branch` を撃つ（**届いたことを確かめる**。§3-7）────────
+        // **撃ちっぱなしにしない。** 2026-09-08 に、呼び戻した直後の席へ撃った
+        // `/branch` がエラーも出ないまま消え、7分待って初めて気づいた
+        tracing::info!(card_id = %self.card_id, "/branch を撃ちます");
         self.agent
-            .send_input(self.card_id, "/branch".to_string(), Vec::new())
+            .send_input(self.card_id, "/branch".to_string(), Vec::new(), true)
             .await
             .map_err(|reason| format!("枝分かれを頼めませんでした：{reason}"))?;
+        tracing::info!(card_id = %self.card_id, "/branch が届きました。枝になるのを待ちます");
 
         // ── ④ 待ち①：席の CLI 側IDが別物へ張り替わる ────────────────
         let card_id = self.card_id;
@@ -319,6 +323,8 @@ impl Branch {
         };
         let 枝の会話 = 枝.claude_session_id.expect("待ちの条件で確かめている");
 
+        tracing::info!(card_id = %self.card_id, 枝の会話 = %枝の会話, "枝になりました");
+
         // ── ⑤ 枝の印を記録する ───────────────────────────────────────
         // **配るのは記録層が行う。** ここで失敗しても段取りは続ける——印が無いのは
         // 「どちらが枝か分かりにくい」だけで、席を失うのに比べれば軽い
@@ -331,6 +337,7 @@ impl Branch {
         }
 
         // ── ⑥ 元を呼び戻す ───────────────────────────────────────────
+        tracing::info!(card_id = %self.card_id, "元の会話を呼び戻します");
         // **作業ディレクトリと宛先は控えた `meta` から取る。** 記録を引き直すと、
         // 張り替えの後なので枝の側を指してしまう
         self.agent
@@ -353,6 +360,11 @@ impl Branch {
             })
             .await
             .ok_or_else(|| "元の会話の席が立ちませんでした。もう一度呼び戻せます".to_string())?;
+        tracing::info!(
+            card_id = %self.card_id,
+            元の席 = %元の席.card_id,
+            "元の会話の席が立ちました。並べ直します"
+        );
 
         // ── ⑧ 元をその席へ戻し、枝をその1つ右隣へ並べ直す ─────────────
         let 並べ替えの結果 = self.並べ直す(&meta, 元の席.card_id).await;

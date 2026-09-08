@@ -1414,6 +1414,7 @@ fn apply_command(
             card_id,
             text,
             attachments,
+            confirm,
         } => {
             let manager = Arc::clone(manager);
             tokio::spawn(async move {
@@ -1426,7 +1427,12 @@ fn apply_command(
                     );
                     return;
                 };
-                if let Err(err) = session.send_instruction_with(&text, &attachments).await {
+                let 送った = if confirm {
+                    session.send_command_confirmed(&text).await
+                } else {
+                    session.send_instruction_with(&text, &attachments).await
+                };
+                if let Err(err) = 送った {
                     report_error(
                         &manager,
                         card_id,

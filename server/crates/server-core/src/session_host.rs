@@ -194,11 +194,17 @@ pub trait SessionHost: Send + Sync + 'static {
     /// `attachments` は添付の置き場所（画像添付 設計§6）。**サーバは中身を持たない**——
     /// 画像は先に [`SessionHost::write_blob`] で向こうへ置いてあり、ここを通るのは
     /// その返事に入っていた絶対パスだけ。
+    /// 指示を送る。
+    ///
+    /// `confirm` が真なら、**本文が入力欄へ届いたことを確かめてから確定する**
+    /// （ブランチ設計§3-7）。人が押した送信は偽でよい——届かなければ画面を見ている
+    /// 本人が気づく。**真にするのは段取りが撃つときだけ**で、あちらは誰も見ていない。
     async fn send_input(
         &self,
         card_id: CardId,
         text: String,
         attachments: Vec<String>,
+        confirm: bool,
     ) -> Result<(), String>;
 
     /// 権限モードの切替（TUI へのキー送出なので時間がかかる）。

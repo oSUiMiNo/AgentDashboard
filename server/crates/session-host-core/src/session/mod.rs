@@ -85,6 +85,36 @@ const STALLED_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 /// CR まで飲み込む。人の打鍵より十分速く、TUI の取りこぼしより十分遅い値にする。
 const INSTRUCTION_SETTLE: Duration = Duration::from_millis(30);
 
+/// 端末が「静かになった」と見なすまでの無出力の長さ（ブランチ設計§3-7）。
+///
+/// # 状態では「撃てる」と言えない
+///
+/// 2026-09-08 に実機で踏んだ。**呼び戻した席はフックが1本届いた時点で「入力待ち」に
+/// なる**が、そのとき TUI はまだ後処理（`running stop hooks…`）を走らせており、
+/// **そこへ書いた `/branch` はエラーも出ないまま消えた**。
+///
+/// **文字を読まずに言える。** 端末が何か描いている間は出力のバイト数が進み続け、
+/// 落ち着けば止まる。**目盛りが動かなくなったこと**を待てばよい（`scrollback_mark`）。
+const PTY_QUIET: Duration = Duration::from_millis(400);
+
+/// 端末が静かになるのを待つ上限（同§3-7）。
+///
+/// 明けても**撃たない**。撃てば消えるだけなので、**待ちきれなかったことを断りにする**
+/// ほうが利用者は次の手を選べる。
+const PTY_QUIET_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// 書いた本文が入力欄に現れるのを待つ上限（同§3-7）。
+const ECHO_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// 静けさと echo を確かめる刻み。
+const CONFIRM_STEP: Duration = Duration::from_millis(100);
+
+/// 届かなかったときに撃ち直す回数（同§3-7）。
+///
+/// **1回で諦めない。** 消える原因（TUI の起動途中・後処理・パネル）はどれも
+/// **時間が解決する**ので、畳んでから撃ち直せば通ることが多い。
+const CONFIRM_TRIES: usize = 3;
+
 /// フッタを探すときに読むスクロールバックの末尾の長さ（バイト）。
 ///
 /// フッタは画面が更新されるたびに書き直されるので、末尾さえ見れば足りる。全体
@@ -1244,6 +1274,109 @@ impl Session {
             }
         }
         self.write_input(&submit)
+    }
+
+    /// 本文が**入力欄へ届いたことを確かめてから**確定する（ブランチ設計§3-7）。
+    ///
+    /// # なぜ普通の送信と分けるのか
+    ///
+    /// 普通の送信（[`Session::send_instruction_with`]）は**書いて終わり**である。人が
+    /// 打つ場面ではそれで足りる——**届かなければ画面を見ている本人が気づく**からだ。
+    ///
+    /// **段取りが撃つ場合は誰も見ていない。** 消えても分からないまま、待ち続けることに
+    /// なる（2026-09-08 に実機で7分待って気づいた）。**見ている人が居ない送信だけ、
+    /// 届いたことを機械が確かめる。**
+    ///
+    /// # 3段構え
+    ///
+    /// 1. **端末が静かになるまで待つ**（[`PTY_QUIET`]）——描いている最中に書くと消える
+    /// 2. 書いて、**本文が画面に現れるのを待つ**（[`ECHO_TIMEOUT`]）
+    /// 3. 現れなければ**入力欄を畳んで撃ち直す**（[`CONFIRM_TRIES`] 回まで）
+    ///
+    /// **確かめられないまま確定しない。** 確定だけが通ると、**本文の無い空の送信**に
+    /// なって相手のターンを1つ消費する（`await_image_marks` が確定を送らないのと同じ筋）。
+    pub async fn send_command_confirmed(&self, text: &str) -> anyhow::Result<()> {
+        let (body, submit) = input::encode_parts(text);
+        // 探す相手は**送る文そのもの**。TUI は入力欄を描き直すので、書いた直後の
+        // 目盛りより後ろに必ず現れる
+        let needle = text.trim();
+
+        for 回 in 1..=CONFIRM_TRIES {
+            self.await_pty_quiet().await?;
+
+            let since = self.scrollback_mark();
+            self.write_input(&body)?;
+
+            if self.await_echo(since, needle).await {
+                tokio::time::sleep(INSTRUCTION_SETTLE).await;
+                self.write_input(&submit)?;
+                tracing::info!(card_id = %self.card_id, 回, "指示が届いたので確定しました");
+                return Ok(());
+            }
+
+            // **確定は送らない。** 畳んでから撃ち直す
+            let 畳めた = self.fold_input().await;
+            tracing::warn!(
+                card_id = %self.card_id,
+                回,
+                畳めた,
+                "指示が入力欄に現れませんでした。撃ち直します"
+            );
+        }
+
+        Err(anyhow::anyhow!(
+            "指示が入力欄に届きませんでした（{CONFIRM_TRIES}回試しました）。確定は送っていません"
+        ))
+    }
+
+    /// 端末が [`PTY_QUIET`] のあいだ何も描かなくなるまで待つ（ブランチ設計§3-7）。
+    ///
+    /// **見るのは文字ではなく、書き出したバイト数の目盛り**（`scrollback_mark`）。
+    /// 進んでいる＝まだ描いている、止まった＝落ち着いた。画面の文言に依らないので、
+    /// CLI の表示が変わっても壊れない。
+    async fn await_pty_quiet(&self) -> anyhow::Result<()> {
+        let 期限 = tokio::time::Instant::now() + PTY_QUIET_TIMEOUT;
+        let mut 前 = self.scrollback_mark();
+        let mut 静けさ = Duration::ZERO;
+
+        while tokio::time::Instant::now() < 期限 {
+            tokio::time::sleep(CONFIRM_STEP).await;
+            let いま = self.scrollback_mark();
+            if いま == 前 {
+                静けさ += CONFIRM_STEP;
+                if 静けさ >= PTY_QUIET {
+                    return Ok(());
+                }
+            } else {
+                前 = いま;
+                静けさ = Duration::ZERO;
+            }
+        }
+
+        // **明けても撃たない。** 描き続けている端末へ書いても消えるだけで、
+        // 「送ったのに何も起きない」という最も分かりにくい形になる
+        tracing::warn!(card_id = %self.card_id, "端末が静かになりませんでした");
+        Err(anyhow::anyhow!(
+            "端末が動き続けているので送れませんでした（少し待ってからもう一度どうぞ）"
+        ))
+    }
+
+    /// 書いた本文が画面に現れるのを待つ（ブランチ設計§3-7）。
+    ///
+    /// **目印より後ろだけを見る。** 末尾から探すと、**前に同じ文を送った跡**に当たって
+    /// 「もう出ている」と誤って進む（`await_image_marks` が同じ理由で目印を使っている）。
+    async fn await_echo(&self, since: u64, needle: &str) -> bool {
+        let 期限 = tokio::time::Instant::now() + ECHO_TIMEOUT;
+        while tokio::time::Instant::now() < 期限 {
+            tokio::time::sleep(CONFIRM_STEP).await;
+            if self
+                .scrollback_since(since, ATTACHMENT_TAIL)
+                .contains(needle)
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// 画面に添付の印が `want` 個出るまで待つ（設計§7-1）。
