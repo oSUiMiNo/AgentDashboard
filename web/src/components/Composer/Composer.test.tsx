@@ -1061,4 +1061,146 @@ describe('スラッシュコマンドの候補（フェーズ2・設計§6・§7
       await waitFor(() => expect(集める).not.toHaveBeenCalled())
     })
   })
+
+  describe('打ち間違いを許して当てる（フェーズ7・設計§20）', () => {
+    it('綴りがずれていても候補が出る', async () => {
+      置く()
+      fireEvent.change(入力欄(), { target: { value: '/rewnd' } })
+      await 一覧が出るまで()
+      expect(screen.getByText('/rewind')).toBeInTheDocument()
+    })
+
+    it('あいまいのときだけ「近いものを出しています」が出る', async () => {
+      置く()
+      fireEvent.change(入力欄(), { target: { value: '/rewnd' } })
+      await 一覧が出るまで()
+      expect(screen.getByTestId('slash-menu-fuzzy')).toBeInTheDocument()
+    })
+
+    it('前方一致で当たったときは、その一言を出さない', async () => {
+      // **今日と1文字も変えない**
+      置く()
+      fireEvent.change(入力欄(), { target: { value: '/r' } })
+      await 一覧が出るまで()
+      expect(screen.queryByTestId('slash-menu-fuzzy')).toBeNull()
+    })
+
+    describe('回帰：あいまいの層でも、選んでいない Enter は改行のまま', () => {
+      // **このイシュー最大の回帰。** 当たりを緩めるということは、今日0件だった入力が
+      // 1件以上になるということで、放っておくと**本文の途中に `/なにか` と書いて
+      // 改行しようとした瞬間に補完される**
+
+      it('あいまいで開いた直後の Enter は、既定を止めない', async () => {
+        置く()
+        fireEvent.change(入力欄(), { target: { value: '/rewnd' } })
+        await 一覧が出るまで()
+        const 止まらなかった = fireEvent.keyDown(入力欄(), { key: 'Enter' })
+        expect(止まらなかった, '既定が生きている＝改行になる').toBe(true)
+      })
+
+      it('あいまいで開いた直後の Enter では、入力欄が書き換わらない', async () => {
+        置く()
+        fireEvent.change(入力欄(), { target: { value: '/rewnd' } })
+        await 一覧が出るまで()
+        fireEvent.keyDown(入力欄(), { key: 'Enter' })
+        expect(入力欄(), '確定していない').toHaveValue('/rewnd')
+      })
+
+      it('文の途中に打ったあいまいな `/語` でも、Enter は改行のまま', async () => {
+        // 実際に踏むのはこの形である
+        置く()
+        fireEvent.change(入力欄(), { target: { value: '手順のあと /rewnd' } })
+        await 一覧が出るまで()
+        expect(fireEvent.keyDown(入力欄(), { key: 'Enter' })).toBe(true)
+        expect(入力欄()).toHaveValue('手順のあと /rewnd')
+      })
+
+      it('厳密な一致では、今日どおり Enter で確定する', async () => {
+        置く()
+        fireEvent.change(入力欄(), { target: { value: '/r' } })
+        await 一覧が出るまで()
+        expect(fireEvent.keyDown(入力欄(), { key: 'Enter' })).toBe(false)
+        expect(入力欄()).toHaveValue('/rewind')
+      })
+    })
+
+    describe('選ぶ道は塞がない', () => {
+      it('Tab は、選んでいなくても先頭を確定する', async () => {
+        // 明示的に補完を求める操作なので奪ってよい
+        置く()
+        fireEvent.change(入力欄(), { target: { value: '/rewnd' } })
+        await 一覧が出るまで()
+        fireEvent.keyDown(入力欄(), { key: 'Tab' })
+        expect(入力欄()).toHaveValue('/rewind')
+      })
+
+      it('↓ で選んだ後は、あいまいでも Enter で確定する', async () => {
+        // **「あいまいでは Enter を一切使わせない」にはしない。** 明示的に選んだ後まで
+        // 塞ぐと、**選んでから送る道が無くなる**
+        置く()
+        fireEvent.change(入力欄(), { target: { value: '/rewnd' } })
+        await 一覧が出るまで()
+        fireEvent.keyDown(入力欄(), { key: 'ArrowDown' })
+        fireEvent.keyDown(入力欄(), { key: 'Enter' })
+        expect(入力欄()).toHaveValue('/rewind')
+      })
+
+      it('あいまいの1回目の ↓ は、先頭を選ぶ（飛ばさない）', async () => {
+        // どれも選ばれていないところから動かすので、**1つ目が選ばれる**。
+        // ここで2つ目へ飛ぶと、いちばん出したかったものが飛ばされる
+        集まることにする(['rewind', 'rewinder'])
+        置く()
+        fireEvent.change(入力欄(), { target: { value: '/rewnd' } })
+        await 一覧が出るまで()
+        fireEvent.keyDown(入力欄(), { key: 'ArrowDown' })
+        fireEvent.keyDown(入力欄(), { key: 'Enter' })
+        expect(入力欄()).toHaveValue('/rewind')
+      })
+
+      it('厳密な一致の1回目の ↓ は、今日どおり2つ目を選ぶ', async () => {
+        // 先頭が既に選ばれて見えているので、**そこから1つ下**でなければならない
+        置く()
+        fireEvent.change(入力欄(), { target: { value: '/' } })
+        await 一覧が出るまで()
+        fireEvent.keyDown(入力欄(), { key: 'ArrowDown' })
+        fireEvent.keyDown(入力欄(), { key: 'Enter' })
+        expect(入力欄()).toHaveValue('/clear')
+      })
+    })
+
+    it('当たらなかったときは、読めなかったぶんが在っても当たらなかったほうを言う', async () => {
+      // **絞って0件になっただけの状態を「1件も集まらなかった」と取り違えない**
+      // （設計§20-6・調査レポート08）。読めなかった数が1以上あるこの機械では、
+      // **当たらないたびに毎回「読めませんでした」が出ていた**
+      vi.spyOn(slashCandidates, 'harvestCandidates').mockResolvedValue({
+        candidates: [
+          { name: 'rewind', description: '', source: 'user-command' as const },
+        ],
+        hidden: 0,
+        unreadable: 1,
+        truncated: false,
+      })
+      置く()
+      fireEvent.change(入力欄(), { target: { value: '/当たらない語' } })
+      await 一覧が出るまで()
+      const 断り = screen.getByTestId('slash-menu-empty')
+      expect(断り).toHaveTextContent('当たるものはありません')
+      expect(断り).not.toHaveTextContent('読めませんでした')
+      // **読めなかった数は下端へ回る**（消さない）
+      expect(screen.getByTestId('slash-menu-unreadable')).toHaveTextContent('1 件')
+    })
+
+    it('完全に打ったものが、前方一致で先に来るものに負けない', async () => {
+      // **今日ある不具合**（設計§20-7）。探索順では `issue_exe-phase` が先に来るので、
+      // `/issue_exe` と完全に打って Enter を押すと**違うコマンドが入る**。
+      // あいまい一致とは独立した壊れ方なので、独立した検査を置く
+      集まることにする(['issue_exe-phase', 'issue_exe'])
+      置く()
+      fireEvent.change(入力欄(), { target: { value: '/issue_exe' } })
+      await 一覧が出るまで()
+      fireEvent.keyDown(入力欄(), { key: 'Enter' })
+      expect(入力欄()).toHaveValue('/issue_exe')
+    })
+  })
+
 })

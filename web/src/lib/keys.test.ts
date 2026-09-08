@@ -840,6 +840,49 @@ describe('候補の一覧が出ているときの押し分け（設計§7）', (
     })
   })
 
+  describe('選んでいないとき（あいまいの層・設計§20-5）', () => {
+    // **当たりを緩めるということは、今日0件だった入力が1件以上になるということ。**
+    // 放っておくと**本文の途中に `/なにか` と書いて改行しようとした瞬間に補完される**
+
+    it('素の Enter は確定にならない（＝改行のまま）', () => {
+      expect(isCandidateAccept(押す('Enter'), true, false)).toBe(false)
+    })
+
+    it('Tab は、選んでいなくても確定する', () => {
+      // 明示的に補完を求める操作なので奪ってよい
+      expect(isCandidateAccept(押す('Tab'), true, false)).toBe(true)
+    })
+
+    it('選んだ後は、Enter でも確定する', () => {
+      // **「あいまいでは Enter を一切使わせない」にはしない。** 明示的に選んだ後まで
+      // 塞ぐと、**選んでから送る道が無くなる**
+      expect(isCandidateAccept(押す('Enter'), true, true)).toBe(true)
+    })
+
+    it('Shift+Enter は、選んでいてもいなくても改行のまま', () => {
+      expect(isCandidateAccept(押す('Enter', { shiftKey: true }), true, false)).toBe(
+        false,
+      )
+      expect(isCandidateAccept(押す('Enter', { shiftKey: true }), true, true)).toBe(
+        false,
+      )
+    })
+
+    it('変換中は、選んでいてもいなくても奪わない', () => {
+      expect(
+        isCandidateAccept(押す('Enter', { isComposing: true }), true, true),
+      ).toBe(false)
+      expect(
+        isCandidateAccept(押す('Enter', { isComposing: true }), true, false),
+      ).toBe(false)
+    })
+
+    it('閉じていれば、選んでいてもいなくても何も奪わない', () => {
+      expect(isCandidateAccept(押す('Enter'), false, true)).toBe(false)
+      expect(isCandidateAccept(押す('Tab'), false, false)).toBe(false)
+    })
+  })
+
   describe('出ているとき', () => {
     it('Enter は確定', () => {
       expect(isCandidateAccept(押す('Enter'), true)).toBe(true)

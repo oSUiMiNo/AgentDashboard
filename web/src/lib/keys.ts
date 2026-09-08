@@ -483,10 +483,23 @@ export interface CandidateKeyState extends EnterKeyState {
  *
  * | キー | 出ているとき | 閉じているとき |
  * |---|---|---|
- * | Enter | **確定** | 改行（既定のまま） |
+ * | Enter | **確定**（ただし下記の「選んでいないとき」を除く） | 改行（既定のまま） |
  * | Tab | **確定** | 既定のまま |
  * | Shift+Enter | 改行 | 改行 |
  * | Ctrl+Enter | **送信**（[`isComposerSubmit`] の担当） | 送信 |
+ *
+ * # 選んでいないときの Enter は奪わない（設計§20-5）
+ *
+ * あいまい一致の層は**どれも選ばれていない状態で開く**。当たりを緩めるということは
+ * **今日0件だった入力が1件以上になる**ということなので、そのまま「候補が出ていれば
+ * Enter は確定」を続けると、**本文の途中に `/なにか` と書いて改行しようとした瞬間に
+ * 補完される**。`選んでいる` に偽を渡すと、Enter だけが素通りする。
+ *
+ * **Tab は選んでいなくても確定する。** 明示的に補完を求める操作なので奪ってよい——
+ * 逆に ↑↓ で選んだ後は Enter も確定する（`選んでいる` が真になる）。**「あいまいでは
+ * Enter を一切使わせない」にはしない**。選んでから送る道が消えるためで、
+ * 本家も v2.1.236 で同じ向きへ戻している（あいまい一致だけでの Enter 実行をやめ、
+ * 前方一致とエイリアスは従来どおり即実行）。
  *
  * # `open` が偽なら必ず偽を返す
  *
@@ -510,6 +523,7 @@ export interface CandidateKeyState extends EnterKeyState {
 export function isCandidateAccept(
   event: CandidateKeyState,
   open: boolean,
+  選んでいる = true,
 ): boolean {
   if (!open || event.isComposing) {
     return false
@@ -518,10 +532,12 @@ export function isCandidateAccept(
     return false
   }
   if (event.key === 'Tab') {
+    // **選んでいなくても確定する。** 明示的に補完を求める操作なので奪ってよい
     return !event.shiftKey
   }
-  // Shift+Enter は候補が出ていても改行のまま
-  return event.key === 'Enter' && !event.shiftKey
+  // Shift+Enter は候補が出ていても改行のまま。
+  // **選んでいない Enter も改行のまま**（設計§20-5）
+  return event.key === 'Enter' && !event.shiftKey && 選んでいる
 }
 
 /** 候補の一覧に対する、確定以外の操作。 */

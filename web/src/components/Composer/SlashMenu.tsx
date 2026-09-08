@@ -51,8 +51,25 @@ const SOURCE_LABEL: Record<SlashCandidate['source'], string> = {
 interface Props {
   /** 絞り込み済みの候補。**切るのはこの部品**なので、全部渡してよい */
   candidates: readonly SlashCandidate[]
-  /** いま選ばれている番号（`candidates` の添字） */
-  selected: number
+  /**
+   * いま選ばれている番号（`candidates` の添字）。**`null` は「どれも選ばれていない」**
+   * ——あいまい一致の層はこの状態で開く（設計§20-5）。
+   */
+  selected: number | null
+  /**
+   * あいまい一致で当たったか（設計§20-6）。真のときだけ一言添える。
+   *
+   * **厳密な一致では出さない。** 今日と1文字も変えないため
+   */
+  fuzzy?: boolean
+  /**
+   * **集めた総数**（絞る前）。0件の文面をどちらにするかがこれで決まる（設計§20-6）。
+   *
+   * 渡さなければ「見えているものが全部だった」と読む——**`candidates` から数えると、
+   * 絞って0件になっただけの状態を「1件も集まらなかった」と取り違える**。実際、
+   * 読めなかったぶんが1件でもある機械では、当たらないたびに毎回そちらへ落ちていた。
+   */
+  collected?: number
   /** 読めずに落ちたぶん。0 なら出さない */
   unreadable: number
   /** 上限で打ち切られたフォルダがあったか */
@@ -68,6 +85,8 @@ interface Props {
 export function SlashMenu({
   candidates,
   selected,
+  fuzzy = false,
+  collected,
   unreadable,
   truncated,
   text,
@@ -76,6 +95,11 @@ export function SlashMenu({
 }: Props) {
   const 見せる = candidates.slice(0, MAX_VISIBLE)
   const 溢れ = candidates.length - 見せる.length
+  // **「読めませんでした」を主文にしてよいのは、1件も集まらなかったときだけ。**
+  // 絞って0件になっただけの状態と取り違えると、**当たらないたびに毎回
+  // 「読めませんでした」が出る**（実際にそうなっていた）
+  const 読めなかったを主文にする =
+    見せる.length === 0 && (collected ?? candidates.length) === 0 && unreadable > 0
 
   return (
     <div
@@ -85,6 +109,21 @@ export function SlashMenu({
       // 地は不透明に塗る。**`opacity` は使わない**——裏の文字が透ける（設計§6-2）
       style={{ background: 'var(--color-popover)' }}
     >
+      {/*
+        **あいまいで当たったときだけ、一言添える**（設計§20-6）。理由は2つ——
+        ①`coten` と打って `context` が出てくる理由が分からないと**候補が壊れて見える**
+        ②**どれも選ばれていない状態で開くこと**が、押しても確定しない故障ではなく
+        意図した状態だと伝わる。**厳密な一致では出さない**（今日と1文字も変えない）
+      */}
+      {fuzzy && 見せる.length > 0 && (
+        <p
+          data-testid="slash-menu-fuzzy"
+          className="text-muted-foreground border-b px-2 py-1 text-[0.65rem] leading-tight"
+        >
+          近いものを出しています。選ぶと確定します
+        </p>
+      )}
+
       {見せる.length > 0 && (
         <ul role="listbox" aria-label="スラッシュコマンドの候補" className="p-1">
           {見せる.map((candidate, index) => {
@@ -152,7 +191,7 @@ export function SlashMenu({
           data-testid="slash-menu-empty"
           className="text-muted-foreground px-2 py-1.5 text-xs"
         >
-          {unreadable > 0 && candidates.length === 0
+          {読めなかったを主文にする
             ? `この PC のコマンドを読めませんでした（${unreadable} 件）。そのまま送れます`
             : `${text.split(/\s/, 1)[0]} に当たるものはありません。そのまま送れます`}
         </p>
@@ -169,7 +208,12 @@ export function SlashMenu({
             多すぎるフォルダがあり、途中で打ち切っています
           </p>
         )}
-        {unreadable > 0 && 見せる.length > 0 && (
+        {/*
+          **主文にしていないぶんは、必ず下端へ回す**（設計§20-6）。集まってはいるが
+          読めなかったぶんもあり、かつ当たらなかった、という状態が実際にある——
+          そこで数を落とすと、**自分のコマンドが出てこない理由が画面から消える**
+        */}
+        {unreadable > 0 && !読めなかったを主文にする && (
           <p data-testid="slash-menu-unreadable">
             {unreadable} 件は読めませんでした
           </p>

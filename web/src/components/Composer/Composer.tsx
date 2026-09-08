@@ -86,8 +86,8 @@ import { isCandidateAccept, isCandidateMove, isComposerSubmit } from '@/lib/keys
 import { isEnded, type SessionStatus } from '@/lib/protocol'
 import type { CardId } from '@/lib/protocol'
 import {
-  filterCandidates,
   harvestCandidates,
+  matchCandidates,
   slashQueryAt,
   type CandidateHarvest,
   type SlashCandidate,
@@ -185,8 +185,10 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
   // 打てるものの一覧。**集めるのは1回だけ**——打鍵のたびにディスクを舐めると、
   // この機械では106件ぶんの読み取りが毎回走る
   const [harvest, setHarvest] = useState<CandidateHarvest | null>(null)
-  // 一覧の中で選ばれている番号。**打ち直すたびに先頭へ戻す**
-  const [selected, setSelected] = useState(0)
+  // 一覧の中で選ばれている番号。**打ち直すたびに選び直しへ戻す**。
+  // **`null` は「まだ人が選んでいない」**——厳密な一致では先頭が選ばれたものとして
+  // 扱い（今日どおり）、あいまいな一致では**どれも選ばれていないまま**開く（設計§20-5）
+  const [selected, setSelected] = useState<number | null>(null)
   // Esc で閉じたか。**打ち直せばまた開く**——閉じたまま戻らないと、打ち間違いを
   // 直すたびに一覧を諦めることになる
   const [dismissed, setDismissed] = useState(false)
@@ -356,11 +358,24 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
   // 打った文字で狭める。**並びは入れ替えない**（押そうとした的が逃げる）。
   // 渡すのは**入力欄の全文ではなく語のほう**——全文だと、文の途中の `/` が
   // `filterCandidates` の「`/` で始まるか」に落ちる
-  const 候補 = filterCandidates(harvest?.candidates ?? [], 問い合わせ?.token ?? '')
+  const 当たり = matchCandidates(harvest?.candidates ?? [], 問い合わせ?.token ?? '')
+  const 候補 = 当たり.candidates
+  // あいまいな一致で拾えたか（設計§20-5・§20-6）。**確定キーの扱いと、添える一言が
+  // これで変わる**——当たりを緩めた結果、今日0件だった入力が1件以上になるので、
+  // 放っておくと**本文の途中の `/なにか` で Enter が改行でなくなる**
+  const あいまい = 当たり.tier === 'words' || 当たり.tier === 'distance'
   // 一覧を出すか。**`/` の語の中に居なければ出さない**ので、普通の指示を
   // 打っている最中にも、引数を打っている最中にも被さらない
   const 候補が出ている =
     !ended && !dismissed && 問い合わせ !== null && harvest !== null
+
+  // いま実際に選ばれている番号。**厳密なら先頭、あいまいなら「なし」から始まる**
+  const 選んでいる番号 =
+    selected === null
+      ? あいまい
+        ? null
+        : 0
+      : Math.min(selected, Math.max(0, 候補.length - 1))
 
   /** 選んでいるものを入力欄へ入れる。**`setText` を通す**ので書きかけが追随する */
   const 確定する = (candidate: SlashCandidate) => {
@@ -525,7 +540,9 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
       {候補が出ている && (
         <SlashMenu
           candidates={候補}
-          selected={Math.min(selected, Math.max(0, 候補.length - 1))}
+          selected={選んでいる番号}
+          fuzzy={あいまい}
+          collected={harvest?.candidates.length ?? 0}
           unreadable={harvest?.unreadable ?? 0}
           truncated={harvest?.truncated ?? false}
           text={問い合わせ?.token ?? text}
@@ -663,7 +680,7 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
             setCaret(event.target.selectionStart ?? event.target.value.length)
             // 打ち直したら、選び直しも一覧の開き直しもする。**閉じたまま戻らないと、
             // 打ち間違いを直すたびに一覧を諦めることになる**
-            setSelected(0)
+            setSelected(null)
             setDismissed(false)
           }}
           // **矢印やクリックで動いただけでも追う。** 打っていないのに居場所が変わる
@@ -701,9 +718,19 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
               shiftKey: event.shiftKey,
               isComposing: event.nativeEvent.isComposing,
             }
-            if (isCandidateAccept(押し分けの材料, 候補が出ている && 候補.length > 0)) {
+            //
+            // **選んでいない Enter は奪わない**（設計§20-5）。あいまいの層は「どれも
+            // 選ばれていない」状態で開くので、素の Enter は今日と同じく改行になる。
+            // **Tab は選んでいなくても確定する**ので、そのときは先頭を採る
+            if (
+              isCandidateAccept(
+                押し分けの材料,
+                候補が出ている && 候補.length > 0,
+                選んでいる番号 !== null,
+              )
+            ) {
               event.preventDefault()
-              確定する(候補[Math.min(selected, 候補.length - 1)])
+              確定する(候補[Math.min(選んでいる番号 ?? 0, 候補.length - 1)])
               return
             }
             const 操作 = isCandidateMove(押し分けの材料, 候補が出ている)
@@ -716,14 +743,21 @@ export function Composer({ cardId, status, host, className = '' }: Props) {
               event.preventDefault()
               if (操作 === 'close') {
                 setDismissed(true)
+              } else if (選んでいる番号 === null) {
+                // **どれも選ばれていないところから動かしたら、先頭が選ばれる**
+                // （設計§20-5）。ここから先の Enter は確定してよい——
+                // **人が明示的に選んだ**ので、選んでから送る道を塞ぐ理由が無い
+                setSelected(0)
               } else {
                 // 端で止める。**巡回させない**——長い一覧で端まで送ったつもりが
-                // 反対の端へ飛ぶと、目で追っていた行を見失う
+                // 反対の端へ飛ぶと、目で追っていた行を見失う。
+                // **数えるのは「いま選ばれている番号」**——厳密な一致では `selected`
+                // が `null` のまま先頭を指しているので、生の値で数えると1つずれる
                 const 幅 = Math.min(候補.length, MAX_VISIBLE)
-                setSelected((now) =>
+                setSelected(
                   操作 === 'up'
-                    ? Math.max(0, Math.min(now, 幅 - 1) - 1)
-                    : Math.min(幅 - 1, now + 1),
+                    ? Math.max(0, Math.min(選んでいる番号, 幅 - 1) - 1)
+                    : Math.min(幅 - 1, 選んでいる番号 + 1),
                 )
               }
               return

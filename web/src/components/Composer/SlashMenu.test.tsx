@@ -255,3 +255,90 @@ describe('入力欄の器の高さを変えない（設計§6・TUI 再描画の
     expect(器.className, '器の上へ出す').toMatch(/\bbottom-full\b/)
   })
 })
+
+describe('あいまいで当たったときだけ、一言添える（設計§20-6）', () => {
+  it('あいまいなら「近いものを出しています」が出る', () => {
+    // ①`coten` で `context` が出る理由が分からないと**候補が壊れて見える**
+    // ②**どれも選ばれていない状態で開くこと**が、押しても確定しない故障ではなく
+    //   意図した状態だと伝わる
+    描く({ fuzzy: true })
+    expect(screen.getByTestId('slash-menu-fuzzy')).toHaveTextContent(
+      '近いものを出しています',
+    )
+  })
+
+  it('厳密な一致では出さない（今日と1文字も変えない）', () => {
+    描く({ fuzzy: false })
+    expect(screen.queryByTestId('slash-menu-fuzzy')).toBeNull()
+    描く()
+    expect(screen.queryByTestId('slash-menu-fuzzy')).toBeNull()
+  })
+
+  it('当たるものが0件なら、あいまいでも添えない', () => {
+    // 添える相手が1行も無い
+    描く({ fuzzy: true, candidates: [], text: '/zzz' })
+    expect(screen.queryByTestId('slash-menu-fuzzy')).toBeNull()
+  })
+})
+
+describe('どれも選ばれていない状態で開ける（設計§20-5）', () => {
+  it('`selected` が `null` なら、どの行も選ばれていない', () => {
+    描く({ selected: null })
+    for (const 行 of 行たち()) {
+      expect(行).toHaveAttribute('aria-selected', 'false')
+      expect(行.getAttribute('data-selected')).toBeNull()
+    }
+  })
+
+  it('番号を渡せば、今日どおりその行が選ばれる', () => {
+    描く({ selected: 1 })
+    expect(行たち()[1]).toHaveAttribute('aria-selected', 'true')
+    expect(行たち()[0]).toHaveAttribute('aria-selected', 'false')
+  })
+})
+
+describe('0件の文面を取り違えない（設計§20-6・調査レポート08）', () => {
+  it('集まってはいるが当たらなかったときは、当たらなかったほうを言う', () => {
+    // **読めなかったぶんが1件でもある機械では、当たらないたびに毎回
+    // 「読めませんでした」へ落ちていた**。判定は「絞った後が0件か」ではなく
+    // **「集めたものが0件か」**でなければならない
+    描く({ candidates: [], collected: 108, unreadable: 1, text: '/zzz' })
+    const 断り = screen.getByTestId('slash-menu-empty')
+    expect(断り).toHaveTextContent('/zzz')
+    expect(断り).not.toHaveTextContent('読めませんでした')
+  })
+
+  it('1件も集まらなかったときだけ、読めなかったほうを言う', () => {
+    描く({ candidates: [], collected: 0, unreadable: 5, text: '/zzz' })
+    expect(screen.getByTestId('slash-menu-empty')).toHaveTextContent(
+      '読めませんでした',
+    )
+  })
+
+  it('両方が同時に起きるとき、両方残る', () => {
+    // 集まってはいるが読めなかったぶんもあり、かつ当たらなかった、という状態。
+    // **主文は「当たるものはありません」、読めなかった数は下端へ回す**——
+    // ここで数を落とすと、**自分のコマンドが出てこない理由が画面から消える**
+    描く({ candidates: [], collected: 108, unreadable: 2, text: '/zzz' })
+    expect(screen.getByTestId('slash-menu-empty')).toHaveTextContent(
+      '当たるものはありません',
+    )
+    expect(screen.getByTestId('slash-menu-unreadable')).toHaveTextContent('2 件')
+  })
+})
+
+describe('据え置いたもの（設計§20-6）', () => {
+  it('一度に出す行数の上限は 8 のまま', () => {
+    // あいまいの層の実測は最大3件。**いま動かす理由が無い**
+    expect(MAX_VISIBLE).toBe(8)
+  })
+
+  it('一致した箇所の強調表示を入れていない', () => {
+    // 入れるなら**層によって文字単位と語単位を使い分ける**話になるので、別途（§20-6）。
+    // 名前は素の `<span>` 1つのまま
+    描く()
+    const 名前 = 行たち()[0].querySelector('span > span')
+    expect(名前?.textContent).toBe('/rewind')
+    expect(名前?.querySelector('mark, b, strong')).toBeNull()
+  })
+})
