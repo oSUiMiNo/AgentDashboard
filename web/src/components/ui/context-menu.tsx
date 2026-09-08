@@ -51,6 +51,53 @@ export function ContextMenuContent({
   )
 }
 
+/**
+ * メニューの見出し。**押せない。**
+ *
+ * # なぜ `ContextMenuItem` を流用しないのか
+ *
+ * **押せるものの中に押せないものが混ざる。** `Item` は押せる見た目（当たったら色が
+ * 変わる）を持っているので、それで見出しを出すと、**押してみるまで押せないと
+ * 分からない**。見出しは見出しの部品で出す。
+ *
+ * # 長いものが来る前提で作る
+ *
+ * 呼ぶ側は**ファイル名をそのまま**渡してくる。深い階層の長い名前でメニューが横へ
+ * 伸びると、狭い画面では画面の外へ出る。**折り返して、伸びるのは縦だけにする。**
+ */
+export function ContextMenuLabel({
+  className,
+  children,
+  ...props
+}: React.ComponentProps<typeof Primitive.Label>) {
+  return (
+    <Primitive.Label
+      className={cn(
+        'text-muted-foreground px-2 py-1.5 text-xs font-medium',
+        // **長い名前で横へ伸びない。** 器の上限までで折り返す
+        'max-w-64 break-all',
+        className,
+      )}
+      {...props}
+    >
+      {children}
+    </Primitive.Label>
+  )
+}
+
+/** 区切り線。**見出しと選択肢の間を分ける。** */
+export function ContextMenuSeparator({
+  className,
+  ...props
+}: React.ComponentProps<typeof Primitive.Separator>) {
+  return (
+    <Primitive.Separator
+      className={cn('bg-border -mx-1 my-1 h-px', className)}
+      {...props}
+    />
+  )
+}
+
 /** 選択肢1件。**目印は呼ぶ側から渡させる。** */
 export function ContextMenuItem({
   className,

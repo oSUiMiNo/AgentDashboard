@@ -552,6 +552,107 @@ describe("右クリックのメニュー", () => {
 });
 
 /**
+/**
+ * 名前が見切れたときに、全体を読む道（イシュー「ファイル一覧で名前に
+ * マウスオーバーしたら全体を出す」）。
+ *
+ * # 道が2本あるのは、片方が指では効かないから
+ *
+ * 乗せたら出す指定はマウスのある環境でしか効かない。ところが**幅が狭くていちばん
+ * 見切れるのはスマホ**なので、それだけだと**困っている側が救われない**。
+ * だから**同じ名前を、長押しで開くメニューの見出しにも出している**。
+ *
+ * **ここで確かめられないこと**：乗せたときに実際に吹き出しが出るのはブラウザの既定の
+ * 動作で、jsdom には無い。見張れるのは**指定が付いていて中身が正しいこと**まで。
+ * 本物は実機で踏む（テスト計画フェーズ2）。
+ */
+describe("名前の全体を読む道", () => {
+  it("名前に、全体が読める指定が付く", async () => {
+    置く();
+    const 行たち = await screen.findAllByTestId("folder-entry");
+
+    // フォルダもファイルも。**見切れるのは種別を問わない**
+    expect(行たち[0].querySelector('[title="MyDocs"]')).not.toBeNull();
+    expect(行たち[1].querySelector('[title="計画.md"]')).not.toBeNull();
+  });
+
+  it("出すのは名前だけで、パスではない", async () => {
+    // フルパスは同じ行のコピーが担っているので、役割を重ねない
+    置く();
+    const 行 = (await screen.findAllByTestId("folder-entry"))[0];
+    const 名前 = 行.querySelector('[title="MyDocs"]');
+
+    expect(名前).toHaveTextContent("MyDocs");
+    expect(名前?.getAttribute("title")).not.toContain(ROOT);
+  });
+
+  it("長押し（右クリック）のメニューに、名前の全体が見出しとして出る", async () => {
+    置く();
+    const 行 = (await screen.findAllByTestId("folder-entry"))[0];
+
+    await userEvent.pointer({ keys: "[MouseRight]", target: 行 });
+
+    expect(await screen.findByTestId("folder-name-full")).toHaveTextContent(
+      "MyDocs",
+    );
+  });
+
+  it("見出しはファイルの行にも出る", async () => {
+    // 「新しいタブで開く」はファイルだけだが、**名前は種別を問わず出す**。
+    // **`onPickFile` を渡さないとファイルの行は据え置き**なので、ここでは渡す
+    render(
+      <FolderBrowser
+        host="local"
+        start={ROOT}
+        root={ROOT}
+        onPickFile={vi.fn()}
+      />,
+    );
+    const 行 = (await screen.findAllByTestId("folder-entry"))[1];
+
+    await userEvent.pointer({ keys: "[MouseRight]", target: 行 });
+
+    expect(await screen.findByTestId("folder-name-full")).toHaveTextContent(
+      "計画.md",
+    );
+  });
+
+  it("見出しは押せない（選択肢に混ざっていない）", async () => {
+    置く();
+    await userEvent.pointer({
+      keys: "[MouseRight]",
+      target: (await screen.findAllByTestId("folder-entry"))[0],
+    });
+
+    const 見出し = await screen.findByTestId("folder-name-full");
+    const 中身 = await screen.findByTestId("folder-menu");
+    const 押せるもの = Array.from(中身.querySelectorAll('[role="menuitem"]'));
+
+    // **見出しが押せるものの中に居ないこと**を、実際の並びで見る。
+    // `role` を直接見るだけだと、空のときも通ってしまい何も見張れない
+    expect(押せるもの).not.toContain(見出し);
+    // フォルダの行なので、押せるのは「絶対パスをコピー」の1つだけ。
+    // `Label` を `Item` に取り替えると、ここが2つになって落ちる
+    expect(押せるもの).toHaveLength(1);
+  });
+
+  it("見出しを足しても、コピーの道は今までどおり効く", async () => {
+    置く();
+    await userEvent.pointer({
+      keys: "[MouseRight]",
+      target: (await screen.findAllByTestId("folder-entry"))[0],
+    });
+
+    await userEvent.click(await screen.findByTestId("folder-menu-copy-abs"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("folder-copy-fallback")).toHaveTextContent(
+        `${ROOT}/MyDocs`,
+      ),
+    );
+  });
+});
+
  * ファイルの行を、ブラウザの新しいタブへ開けるようにした（イシュー
  * 「サイドバーのファイルを、中クリックでブラウザの新しいタブに開く」）。
  *
