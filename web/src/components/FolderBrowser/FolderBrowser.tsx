@@ -577,23 +577,7 @@ function Row({
             ? "🔗"
             : fileIcon(entry.name)}
       </span>
-      {/*
-          **切った先を、乗せれば読める。** 幅が狭いと末尾が見切れるが、切ること自体は
-          変えない（要件の指定）。読む手立てだけを足す。
 
-          **出すのは名前だけ。** フルパスは同じ行のコピーの押しボタンが担っており、
-          役割が重ならない。
-
-          **切れていないときも出る。** 出し分けるには描いたあとに幅を測ることになり、
-          純粋な描画から外れる。既にある6箇所の前例もすべて常に出す形なので揃える。
-
-          **これは指では効かない。** 乗せる操作がスマホに無いので、**同じ名前を
-          右クリック（長押し）のメニューにも見出しとして出している**（下記）。
-          幅が狭くていちばん見切れるのがスマホなので、片方だけでは主戦場が救われない。
-      */}
-      <span title={entry.name} className="min-w-0 truncate">
-        {entry.name}
-      </span>
       {entry.is_project && (
         // 深い階層で「どれが目的地か」を1階層ぶん先に教える（設計§8）
         <span
@@ -666,6 +650,21 @@ function Row({
         </li>
       </ContextMenuTrigger>
       <ContextMenuContent data-testid="folder-menu">
+        {/*
+          **指で触る画面では、名前の全体を読む唯一の道である。** 乗せたら出す指定は
+          マウスのある環境でしか効かず、**幅が狭くていちばん見切れるのはスマホ**——
+          つまり困っている側だけが救われない形になる。ここに置いて裏返す。
+
+          **フォルダにもファイルにも出す。** 見切れるのは種別を問わないので、
+          下の「新しいタブで開く」（ファイルだけ）とは分け方が違う。
+
+          **押せない部品で出す。** 押せる選択肢に混ぜると、押してみるまで押せないと
+          分からない。
+        */}
+        <ContextMenuLabel data-testid="folder-name-full">
+          {entry.name}
+        </ContextMenuLabel>
+        <ContextMenuSeparator />
         <ContextMenuItem
           data-testid="folder-menu-copy-abs"
           onSelect={() => onCopy(full)}
@@ -720,21 +719,6 @@ function CopyPath({
       type="button"
       variant="ghost"
       size="sm"
-        {/*
-          **指で触る画面では、名前の全体を読む唯一の道である。** 乗せたら出す指定は
-          マウスのある環境でしか効かず、**幅が狭くていちばん見切れるのはスマホ**——
-          つまり困っている側だけが救われない形になる。ここに置いて裏返す。
-
-          **フォルダにもファイルにも出す。** 見切れるのは種別を問わないので、
-          下の「新しいタブで開く」（ファイルだけ）とは分け方が違う。
-
-          **押せない部品で出す。** 押せる選択肢に混ぜると、押してみるまで押せないと
-          分からない。
-        */}
-        <ContextMenuLabel data-testid="folder-name-full">
-          {entry.name}
-        </ContextMenuLabel>
-        <ContextMenuSeparator />
       data-testid="folder-copy"
       data-value={value}
       title={
