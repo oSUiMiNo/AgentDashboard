@@ -85,8 +85,17 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  /*
+    **偽の時計は、必ずここで戻す。** テストの本文で戻していると、途中で落ちた回に
+    偽のまま次のテストへ持ち越され、**あとのテストが無関係な症状（固まる・時間切れ）で
+    落ちて**本当の失敗が隠れる。
+
+    **選択の巻き戻しはここでやらない。** `clearSelectionStore()` は購読者の一覧ごと
+    捨てるので、まだ外れていない部品が黙って更新を受け取らなくなる。巻き戻しは
+    `beforeEach` の1回で足りる。
+  */
+  vi.useRealTimers()
   vi.unstubAllGlobals()
-  clearSelectionStore()
 })
 
 describe('キーボード', () => {
@@ -243,6 +252,49 @@ describe('触る画面で、選択中に別のものを押す', () => {
 
     expect(開いた()).toBe(0)
     expect(getSelection()).toEqual({ kind: 'card', ids: ['a'] })
-    vi.useRealTimers()
+  })
+})
+
+describe('掴んで運んだあと、印を持ち越さない', () => {
+  /*
+    **長押しが成立した印を降ろすのは `onClick` だけだった。** ところが掴んで運ぶと
+    `useGrip` が `onClickCapture` で `click` を握り潰すので `onClick` が走らず、
+    印が次の押しへ持ち越される。持ち越されたぶん、**次の起動が「長押しの直後」と
+    誤って捨てられて開かなくなる**。
+  */
+  function 長押しして運ぶ(的: HTMLElement) {
+    fireEvent.pointerDown(的, { pointerType: 'touch', clientX: 10, clientY: 10 })
+    act(() => {
+      vi.advanceTimersByTime(500)
+    })
+    // 掴んだあとの `click` は `useGrip` が握り潰す＝ここでは発火させない
+    fireEvent.pointerUp(的)
+  }
+
+  it('運んだあとでも、キーボードの Enter で開く', () => {
+    指の画面にする()
+    vi.useFakeTimers()
+    const { 的, 開いた } = 置く({ kind: 'card' })
+
+    長押しして運ぶ(的)
+    fireEvent.keyDown(的, { key: 'Enter' })
+    fireEvent.click(的, { detail: 0 })
+
+    expect(開いた()).toBe(1)
+  })
+
+  it('運んだあとでも、マウスの押しは捨てられない', () => {
+    指の画面にする()
+    vi.useFakeTimers()
+    const { 的 } = 置く({ kind: 'card' })
+
+    長押しして運ぶ(的)
+    // マウスは長押しの計測に入らないが、**印は捨てる**（捨てないと次の click が死ぬ）
+    fireEvent.pointerDown(的, { pointerType: 'mouse', clientX: 10, clientY: 10 })
+    fireEvent.pointerUp(的)
+    fireEvent.click(的, { detail: 1 })
+
+    // カードは既に選ばれているので、もう一度押すと外れる（＝`click` が届いている）
+    expect(getSelection()).toEqual({ kind: null, ids: [] })
   })
 })

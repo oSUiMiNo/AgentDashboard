@@ -304,6 +304,21 @@ describe('ProjectGroup', () => {
     expect(screen.getByTestId('current-path')).toHaveTextContent('/p/')
   })
 
+  it('記録を持たない枠も、何も選んでいなければタップで開く', async () => {
+    /*
+      **開く道が残っていることを、解ける道と対で見る。** `usePress.onClick` は
+      `single === 'open'` の分岐が `!selectable → return` より**上**にあるおかげで
+      ここへ届いている。順序が入れ替わると記録を持たない枠が丸ごと死んだ領域に
+      なるが、純関数のテストも「選択中は解ける」テストもそれを捕まえない。
+    */
+    指の画面にする()
+    renderGroup([meta('a')])
+
+    await userEvent.click(screen.getByTestId('project-group'))
+
+    expect(screen.getByTestId('current-path')).toHaveTextContent('/p/')
+  })
+
   it('記録を持たない枠も、選択中は解けるだけ', async () => {
     /*
       **選べる枠と選べない枠は、画面上で見分けが付かない。** 以前はこちらだけ

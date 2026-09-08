@@ -86,8 +86,26 @@ describe('触る画面', () => {
   })
 
   it('ダブルは使わない（端末の拡大と取り合う）', () => {
+    // **「解くだけ」の状態も含めて、どの組み合わせでも使わない。** ここが緩むと
+    // 端末の拡大と取り合いが復活する
     expect(pressMapping(true, null, 'card').doubleOpens).toBe(false)
     expect(pressMapping(true, 'card', 'card').doubleOpens).toBe(false)
+    expect(pressMapping(true, 'card', 'project').doubleOpens).toBe(false)
+    expect(pressMapping(true, 'project', 'project', false).doubleOpens).toBe(false)
+  })
+
+  it('選べる箱なら、どの状態でも長押しで選べる', () => {
+    // **種類をまたいでも長押しは死なない**——掴んで運ぶ道がここに乗っている
+    for (const selecting of ['card', 'project', null] as const) {
+      expect(pressMapping(true, selecting, 'card').longPressSelects).toBe(true)
+    }
+  })
+
+  it('選べない箱は、長押しでも選べない', () => {
+    // **規則をここ1箇所に持たせた**（以前は `usePress` 側の分岐だけが持っていた）
+    for (const selecting of ['card', 'project', null] as const) {
+      expect(pressMapping(true, selecting, 'project', false).longPressSelects).toBe(false)
+    }
   })
 })
 
