@@ -189,7 +189,13 @@ impl Branch {
         })?;
 
         pushable(meta.status)?;
-        branchable(record.has_transcript() || meta.last_assistant_message.is_some())?;
+        // **席ではなく会話に問う**（§3-8）。呼び戻した直後の席は履歴の窓も直前の応答も
+        // 空なので、席で問うと**同じ親から2本目を作れない**
+        branchable(
+            self.registry
+                .conversation_has_content(self.account_id, 元の会話)
+                .await,
+        )?;
 
         // **同じ会話を2つのプロセスに開かせない**（§4-1）。呼び戻す先が既に別の席で
         // 開いていると、1つの JSONL へ二重に書き込む形になる
@@ -555,11 +561,13 @@ impl Branch {
 ///
 /// 断りの英文を読む形にすると、CLI の文言が変わった日に黙って壊れる。**送る前に、
 /// こちらの持っている記録で断る。**
-fn branchable(履歴がある: bool) -> Result<(), String> {
-    if 履歴がある {
+fn branchable(会話に中身がある: bool) -> Result<(), String> {
+    if 会話に中身がある {
         return Ok(());
     }
-    Err("まだ枝分かれできません（この席はまだ1ターンも会話していません）".to_string())
+    // **「この席は」と言わない。** 判定の対象は会話であって席ではない（§3-8）——
+    // 席で言うと、呼び戻した直後の席を「喋っていない」と誤って名指しすることになる
+    Err("まだ枝分かれできません（この会話はまだ1ターンも交わされていません）".to_string())
 }
 
 /// 枝分かれを頼んでよい状態か（§3-4）。

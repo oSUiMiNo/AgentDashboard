@@ -254,6 +254,110 @@ async fn 押すと元はその場に残り枝が右隣へ入る() {
     );
 }
 
+/// 呼び戻した席を、**直前の応答を載せずに**入力待ちへ倒す。
+///
+/// **`last_assistant_message` を載せてはいけない。** 載せると、判定が席を見ていても
+/// 通ってしまい、**壊れ方を捕まえられない試験**になる（回避策そのものを試験にしない）。
+///
+/// これで実機と同じ条件が揃う——**席は空（履歴の窓も直前の応答も無い）だが、会話には
+/// 中身がある**。
+async fn 応答を載せずに入力待ちへ(server: &TestServer, target: &client::Target, card: &str) {
+    client::send_input(target, &card[..8], "hook Stop", false, 5)
+        .await
+        .expect("フックを撃てること");
+    let 目当て = card.to_string();
+    server
+        .wait_for_listed("呼び戻した席が入力待ちになる", move |list| {
+            list.iter().any(|meta| {
+                meta.card_id.to_string() == 目当て && meta.status == SessionStatus::WaitingInput
+            })
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn 同じ親から続けて枝を作れる() {
+    // **利用者が最初に挙げた使い方がこれである**——親を1つ用意して枝を何本も生やし、
+    // それぞれに別の仕事をさせる。**2本目が作れないと、機能の値打ちがほぼ消える。**
+    //
+    // 2026-09-08 に実運用で踏んだ。**枝分かれのたびに元の会話は新しい席へ移る**ので、
+    // 判定を席で行うと**移った先はいつも「まだ1ターンも会話していない」**に見える。
+    let server = TestServer::start().await;
+    let target = target_of(&server);
+    let cwd = work_dir("multi");
+
+    let (親, 元の会話) = 入力待ちのカード(&server, &target, &cwd).await;
+
+    client::branch(&target, &親[..8])
+        .await
+        .expect("1本目が作れること");
+
+    // 元の会話が移った先の席を掴む。**ここが2本目の親になる**
+    let 親文字 = 親.clone();
+    let list = server
+        .wait_for_listed("元の会話が新しい席へ移る", move |list| {
+            list.iter().any(|meta| {
+                meta.claude_session_id == Some(元の会話) && meta.card_id.to_string() != 親文字
+            })
+        })
+        .await;
+    let 二本目の親 = list
+        .iter()
+        .find(|meta| meta.claude_session_id == Some(元の会話) && meta.card_id.to_string() != 親)
+        .expect("元の会話を持つ席があること")
+        .card_id
+        .to_string();
+
+    // **間に1ターンも喋らせない。** 撃つのは状態を倒すフックだけで、直前の応答は
+    // 載せない——**席は空のまま、会話には中身がある**という実機と同じ形にする
+    応答を載せずに入力待ちへ(&server, &target, &二本目の親).await;
+
+    client::branch(&target, &二本目の親[..8])
+        .await
+        .expect("2本目が作れること");
+
+    // 3本目も同じ形で作れる——**移り先が変わっても成り立つ**ことを見る
+    let 二本目の親文字 = 二本目の親.clone();
+    let 親文字2 = 親.clone();
+    let list = server
+        .wait_for_listed("元の会話がさらに新しい席へ移る", move |list| {
+            list.iter().any(|meta| {
+                meta.claude_session_id == Some(元の会話)
+                    && meta.card_id.to_string() != 親文字2
+                    && meta.card_id.to_string() != 二本目の親文字
+            })
+        })
+        .await;
+    let 三本目の親 = list
+        .iter()
+        .find(|meta| {
+            meta.claude_session_id == Some(元の会話)
+                && meta.card_id.to_string() != 親
+                && meta.card_id.to_string() != 二本目の親
+        })
+        .expect("元の会話を持つ席があること")
+        .card_id
+        .to_string();
+
+    応答を載せずに入力待ちへ(&server, &target, &三本目の親).await;
+
+    client::branch(&target, &三本目の親[..8])
+        .await
+        .expect("3本目が作れること");
+
+    // **枝が3本、元が1席**。元の会話を持つ席は常に1つだけである
+    let list = server
+        .wait_for_listed("枝が3本になる", |list| list.len() == 4)
+        .await;
+    let 枝の数 = list.iter().filter(|meta| meta.branched_from == Some(元の会話)).count();
+    assert_eq!(枝の数, 3, "同じ親から3本の枝が生えていない");
+    let 元を持つ席 = list
+        .iter()
+        .filter(|meta| meta.claude_session_id == Some(元の会話))
+        .count();
+    assert_eq!(元を持つ席, 1, "元の会話を持つ席が1つでない（{元を持つ席}）");
+}
+
 #[tokio::test]
 async fn 枝の印は乗り換えても消えない() {
     // 印が付くのは**カードではなく会話**（§5-1）。記録を読み直しても残る
