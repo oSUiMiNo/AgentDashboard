@@ -133,8 +133,13 @@ test.describe('指で触る画面', () => {
       context.waitForEvent('page'),
       page.getByTestId('folder-menu-open-tab').click(),
     ])
-    await 新しいタブ.waitForLoadState()
-    expect(await 新しいタブ.locator('body').innerText()).toContain('済んだこと')
+    /*
+      **`innerText()` を一発で読まない。** `waitForEvent('page')` は新しいタブがまだ
+      `about:blank` の段でも解決しうる。そこで読むと空文字を掴んで落ちる——しかも
+      **たまにしか落ちない**ので、原因からいちばん遠いところに出る。
+      再試行を持つ `toContainText` で待つ（`project-files.spec.ts` と同じ形）。
+    */
+    await expect(新しいタブ.locator('body')).toContainText('済んだこと')
     await 新しいタブ.close()
     // **元のタブへ戻す。** 戻さないと、次のテストの長押しが届かないことがある
     await page.bringToFront()
