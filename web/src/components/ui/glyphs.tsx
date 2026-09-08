@@ -367,6 +367,86 @@ export function PlusGlyph({ className }: { className?: string }) {
 }
 
 /**
+ * 「文字を小さく」の印（`ファイルビュアの文字を小さめに始め…` 設計）。
+ *
+ * **`PlusGlyph` と対で使う。** 全角の `−` という文字ではなく線で描くのは、
+ * あちらと同じ理由（`DESIGN.md` §14.4）——**字形が機械ごとに変わると、線の太さが
+ * 隣の印と揃わない。**
+ */
+export function MinusGlyph({ className }: { className?: string }) {
+  return (
+    <svg
+      aria-hidden
+      viewBox="0 0 24 24"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M5 12h14" />
+    </svg>
+  )
+}
+
+/**
+ * 「探す」の印（`ファイルビュアの中を Ctrl+F で探せるようにする` 設計）。
+ *
+ * **輪と柄の2要素だけ**（`DESIGN.md` §18.2 の「1アイコンの要素数は3つ以下」）。
+ * 輪は `r=7` で、24px の格子に対して外接 14px——§18.2 の下限（格子の70%＝約17px）は
+ * **柄まで含めた外接**で満たす。
+ *
+ * **絵文字（🔍）は使わない**（§14.4 が名指しで禁じている）。
+ */
+export function SearchGlyph({ className }: { className?: string }) {
+  return (
+    <svg
+      aria-hidden
+      viewBox="0 0 24 24"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <circle cx="10.5" cy="10.5" r="7" />
+      <path d="M15.6 15.6 21 21" />
+    </svg>
+  )
+}
+
+/**
+ * 「生テキストで見る／整形して見る」の印。
+ *
+ * **狭い窓で文字を落とすために要る**（`DESIGN.md` §39.6 のターミナルトグルと同じ手）。
+ * この帯には3つの工事が同時に入り、**折り返しを禁じたぶん、いちばん広い部品が
+ * 入らなくなった**——約120px の文字を印1つ（28px）に替えて場所を作る。
+ *
+ * `<>` は**記号型**なので、塗り面積ではなく線の太さで §18.2 の下限を満たす
+ * （24px の格子に対して 2px。記号型の下限は 1/8＝3px だが、ここは他の印と同じ
+ * `strokeWidth={2}` に揃える——**帯の中で線の太さが1つだけ違うほうが目立つ**）。
+ */
+export function CodeGlyph({ className }: { className?: string }) {
+  return (
+    <svg
+      aria-hidden
+      viewBox="0 0 24 24"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="m9 7-6 5 6 5" />
+      <path d="m15 7 6 5-6 5" />
+    </svg>
+  )
+}
+
+/**
  * キーボードの印（設計§12）。**言葉は `aria-label` と `title` に残す。**
  *
  * 端末へ文字を打つ唯一の入口に付ける。**絵文字（⌨）は使わない**——`DESIGN.md` §35.1 の
