@@ -547,10 +547,11 @@ describe('SessionView の操作列は、区画の真上', () => {
   it('待っても押せるようにならない状態でだけ押せず、理由が読める', () => {
     // ブランチ設計§3-4。**断るのは「待っても押せるようにならないもの」だけ**。
     // 作業中と停滞は 2026-09-07 に押せる側へ移した（下のテスト）
+    // **2026-09-08 に起動中とスリープが押せる側へ移った**（§3-4-2。下のテスト）。
+    // 残るのは「人が答えるまで動かない」と「動いたことすら分からない」の2つだけ
     const 押せない: readonly (readonly [SessionMeta['status'], string])[] = [
       [{ kind: 'waiting_permission' }, '権限確認'],
-      [{ kind: 'starting' }, '起動中'],
-      [{ kind: 'ended', ok: true }, '止まっている'],
+      [{ kind: 'unknown' }, '分からない'],
     ]
     for (const [status, 一部] of 押せない) {
       show(meta({ status, last_assistant_message: 'はい' }), true)
@@ -569,6 +570,27 @@ describe('SessionView の操作列は、区画の真上', () => {
     // 断っていた間は、**割り込んで走っている作業を中止させるか、押せないかの二択**
     // だった（実機で前者を踏んだ）
     for (const status of [{ kind: 'working' }, { kind: 'stalled' }] as const) {
+      show(meta({ status, last_assistant_message: 'はい' }), true)
+      expect(screen.getByTestId('branch-card'), `${status.kind} で押せない`).toBeEnabled()
+      cleanup()
+    }
+  })
+
+  it('スリープと起動中でも押せる（サーバが起こしてから撃つ）', () => {
+    // **2026-09-08 に覆した**（ブランチ設計§3-4-2。利用者の指定）。
+    //
+    // `/branch` は生きた claude にしか撃てないが、**そこから導くべきは「押せなく
+    // する」ではなく「整えてから撃つ」**だった。サーバが寝ていたら起こし、枝を作り、
+    // **最後に寝かせ直す**ので、押した人から見れば「元は寝たまま、枝だけ起きた」になる。
+    //
+    // **異常終了も同じ**——起こしてまた落ちるなら起こす段で断られるので、先回りして
+    // 分けない（§3-6）
+    const 押せる: readonly SessionMeta['status'][] = [
+      { kind: 'ended', ok: true },
+      { kind: 'ended', ok: false },
+      { kind: 'starting' },
+    ]
+    for (const status of 押せる) {
       show(meta({ status, last_assistant_message: 'はい' }), true)
       expect(screen.getByTestId('branch-card'), `${status.kind} で押せない`).toBeEnabled()
       cleanup()
@@ -602,6 +624,19 @@ describe('SessionView の操作列は、区画の真上', () => {
       markBranching(待ち.card_id, 待ち.claude_session_id)
     })
     expect(screen.getByTestId('branch-progress').textContent ?? '').toContain('枝分かれしています')
+
+    cleanup()
+    // **寝ている親では「起こしている」と読める**（§3-4-2）。段が長い（起こす → 枝 →
+    // 呼び戻し → 寝かせ直す）ので、**どこまで進んだかが読めること**が要る
+    const 寝ている = meta({
+      status: { kind: 'ended', ok: true },
+      last_assistant_message: 'はい',
+    })
+    show(寝ている, true)
+    act(() => {
+      markBranching(寝ている.card_id, 寝ている.claude_session_id)
+    })
+    expect(screen.getByTestId('branch-progress').textContent ?? '').toContain('起こしています')
   })
 
   it('入力待ちとサブ待ちでは押せる', () => {

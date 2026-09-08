@@ -289,10 +289,7 @@ export function SessionView({
               aria-live="polite"
               className="text-muted-foreground min-w-0 flex-1 text-xs"
             >
-              {session.status.kind === 'working' ||
-              session.status.kind === 'stalled'
-                ? 'いまの作業が終わってから枝分かれします…'
-                : '枝分かれしています…（少し時間がかかります）'}
+              {枝分かれの途中経過(session.status.kind)}
             </p>
           )}
           {cardError !== null && (
@@ -793,6 +790,31 @@ function ScreenInterval({ remote, shown }: { remote: boolean; shown: boolean }) 
  *
  * 正はサーバ側（同設計§3-4）。ここで持つのは、押せないものを押せる形で出さないため。
  */
+/**
+ * 枝分かれの途中で、いま何を待っているかを言葉にする（ブランチ設計§7-4）。
+ *
+ * **段取り役は段を申告しない。** サーバから運ばせると共有境界が増えるが、**待っている
+ * 理由は状態がそのまま語る**ので、その必要が無い——寝ていれば起こしている最中だし、
+ * 作業中ならターンの終わりを待っている。
+ *
+ * **寝ている親の段は長い**（起こす → 枝 → 呼び戻し → 寝かせ直す）ので、**どこまで進んだかが
+ * 読めること**が要る。状態が進むにつれてこの言葉が移り変わるので、**申告が無くても
+ * 進んで見える**（§3-4-2）。
+ */
+function 枝分かれの途中経過(kind: SessionMeta['status']['kind']): string {
+  switch (kind) {
+    case 'working':
+    case 'stalled':
+      return 'いまの作業が終わってから枝分かれします…'
+    // 押した時点で寝ていた／起動中だった席。サーバが起こすのを待っている
+    case 'ended':
+    case 'starting':
+      return '元のセッションを起こしています…'
+    default:
+      return '枝分かれしています…（少し時間がかかります）'
+  }
+}
+
 function 枝分かれできる理由(session: SessionMeta): string | null {
   // **会話があるかは、ここでは見ない**（2026-09-06 に外した。ブランチ設計§3-4）。
   //
@@ -815,12 +837,19 @@ function 枝分かれできる理由(session: SessionMeta): string | null {
     case 'working':
     case 'stalled':
       return null
+    // **スリープと起動中も押せる**（2026-09-08 に覆した。ブランチ設計§3-4-2）。
+    //
+    // `/branch` は生きた claude にしか撃てないが、**そこから導くべきは「押せなく
+    // する」ではなく「整えてから撃つ」**だった。サーバが**寝ていたら起こし、枝を
+    // 作り、最後に寝かせ直す**ので、押した人から見れば「元は寝たまま、枝だけ起きた」
+    // という結果になる。起動中は、押せる状態になるまで待ってから撃つ。
+    case 'starting':
+    case 'ended':
+      return null
     case 'waiting_permission':
       return '権限確認に答えてから枝分かれしてください'
-    case 'starting':
-      return '起動中です。少し待ってください'
-    case 'ended':
-      return '止まっているセッションからは枝分かれできません'
+    // **断るのは「待っても押せるようにならないもの」だけ**（§3-4）。権限確認待ちは
+    // 人が答えるまで動かず、不明は動いたことすら分からない
     default:
       return 'いまの状態が分からないので枝分かれできません'
   }

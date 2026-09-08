@@ -35,7 +35,7 @@ use protocol::{
 };
 
 use crate::registry::SessionRegistry;
-use crate::session_host::{RecallRequest, SessionHost};
+use crate::session_host::{RecallRequest, ReviveRequest, SessionHost};
 
 /// 待ち①（`/branch` を撃ってから、席の CLI 側IDが張り替わるまで）の上限。
 ///
@@ -80,6 +80,16 @@ const TURN_TIMEOUT: Duration = Duration::from_secs(1800);
 /// **実測 20.3 秒**（同上）。claude の起動を含むので待ち①とは桁が違う——**同じ値を
 /// 共有すると、どちらかが必ず不適切になる**。実測の1桁上に置いてある。
 const RECALL_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// 寝ていた元を起こしてから、`/branch` を撃てる状態になるまでの上限（§3-4-2）。
+///
+/// **中身は claude の起動**なので、待ち②（呼び戻し）と同じ桁に置く。起動中の席を
+/// 待つ場合もここを使う——**待っているものが同じ**（最初のフックが届いて入力待ちに
+/// なること）だからである。
+///
+/// **明けても元の会話は失われない。** 起きたまま残るだけで、人が寝かせられる。
+/// **迷ったら起きている側へ倒す**という §3-6 の方針がここにも当たる。
+const WAKE_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// 記録層を直に確かめに行く間隔（取りこぼしの保険）。
 const POLL: Duration = Duration::from_millis(200);
@@ -187,13 +197,63 @@ impl Branch {
             return Err("その会話は既に別の席で開いています".to_string());
         }
 
+        // **寝ていたかを、押した瞬間の状態で凍らせる**（§3-4-2）。段取りの途中で見ると、
+        // 自分で起こした結果を「起きていた」と読んでしまう
+        let もともと寝ていた = matches!(meta.status, SessionStatus::Ended { .. });
+
         // ── ② 撃つ前に購読を張る ─────────────────────────────────────
         let mut events = self.registry.subscribe_events();
+
+        // ── ①′ 寝ていたら起こし、起動中なら整うのを待つ（§3-4-2）───────
+        // **`/branch` は生きた claude にしか撃てない。** だからといって押せなくするのでは
+        // なく、**居る状態にしてから撃つ**
+        if もともと寝ていた || matches!(meta.status, SessionStatus::Starting) {
+            if もともと寝ていた {
+                tracing::info!(card_id = %self.card_id, "寝ているので、起こしてから枝分かれします");
+                // **断られても続ける。** 人が先に起こしていた場合がこれで、目的
+                // （撃てる状態にすること）は既に達成されている（§3-6）
+                if let Err(reason) = self
+                    .agent
+                    .revive(ReviveRequest {
+                        account_id: self.account_id,
+                        card_id: self.card_id,
+                    })
+                    .await
+                {
+                    tracing::info!(
+                        card_id = %self.card_id,
+                        "起こす頼みは通りませんでした（既に起きている可能性があります）: {reason}"
+                    );
+                }
+            }
+            let card_id = self.card_id;
+            self.wait_for(&mut events, WAKE_TIMEOUT, move |meta| {
+                meta.card_id == card_id && 整った(meta.status)
+            })
+            .await
+            .ok_or_else(|| {
+                // **元の会話は失われていない。** 起きたまま残るだけで、人が寝かせられる
+                "元のセッションが起きてきませんでした（会話は残っています）".to_string()
+            })?;
+        }
 
         // ── ②′ 作業中なら、いまのターンが終わるのを待つ（§3-4）─────────
         // **割り込むと走っている作業が中止される。** かつてはここを「押せない」ことで
         // 避けていたが、**押せないより待つほうが利用者の役に立つ**（2026-09-07 の指定）
-        if matches!(meta.status, SessionStatus::Working | SessionStatus::Stalled) {
+        //
+        // **見るのは①′を抜けた後の状態である。** 控えた `meta` は押した瞬間のもので、
+        // 起こした後は古い——寝ていた席を「作業中ではない」と読んで素通りするのは
+        // たまたま正しいだけで、根拠になっていない
+        let 整えた後の状態 = self
+            .registry
+            .owned(self.account_id, self.card_id)
+            .ok_or_else(|| "そのカードは見つかりません".to_string())?
+            .meta()
+            .status;
+        if matches!(
+            整えた後の状態,
+            SessionStatus::Working | SessionStatus::Stalled
+        ) {
             tracing::info!(card_id = %self.card_id, "作業中なので、ターンの終わりを待ちます");
             let card_id = self.card_id;
             self.wait_for(&mut events, TURN_TIMEOUT, move |meta| {
@@ -295,7 +355,28 @@ impl Branch {
             .ok_or_else(|| "元の会話の席が立ちませんでした。もう一度呼び戻せます".to_string())?;
 
         // ── ⑧ 元をその席へ戻し、枝をその1つ右隣へ並べ直す ─────────────
-        self.並べ直す(&meta, 元の席.card_id).await
+        let 並べ替えの結果 = self.並べ直す(&meta, 元の席.card_id).await;
+
+        // ── ⑨′ もともと寝ていたなら、元を寝かせ直す（§3-4-2）───────────
+        // **寝かせるのは呼び戻した新しい席であって、押した席ではない。** 押した席は
+        // 既に枝になっており、**利用者が見たいのはそちら**なので起きたままにする。
+        //
+        // **並べ替えが失敗していても寝かせる。** 席は2つとも在るので、寝かせて困ることが
+        // 無い——並びが崩れているだけである（§4-2）。
+        if もともと寝ていた {
+            if let Err(reason) = self.agent.kill(元の席.card_id) {
+                // **段取りは成功として終える。** 寝かせ直せなくても**席も会話も無事**で、
+                // 人が寝かせられる（§3-6「迷ったら起きている側へ倒す」）
+                tracing::warn!(
+                    card_id = %元の席.card_id,
+                    "元を寝かせ直せませんでした（起きたまま残ります）: {reason}"
+                );
+            } else {
+                tracing::info!(card_id = %元の席.card_id, "元を寝かせ直しました");
+            }
+        }
+
+        並べ替えの結果
     }
 
     /// いま席が枝になっているか、**記録を引き直して**確かめる（§4-2）。
@@ -483,6 +564,25 @@ fn branchable(履歴がある: bool) -> Result<(), String> {
 /// この事故は防げても、**利用者は「作業が終わったら枝を作る」ができないままだった。**
 ///
 /// ここで断るのは、**待っても押せるようにならないもの**だけである。
+/// 整え終わって、`/branch` を撃てる状態になったか（§3-4-2）。
+///
+/// **`pushable` を流用してはいけない。** あちらが答えるのは「**押してよいか**」で、
+/// スリープと起動中も通す——**整えてから撃つ**ことにしたからである。ここで要るのは
+/// 「**整い終わったか**」で、まったく別の問いになる。
+///
+/// **一度これを取り違えて踏んだ。** 起こす待ちの条件に `pushable` を使ったところ、
+/// **寝ている状態のまま条件を満たして**先へ進み、死んだ席へ `/branch` を撃っていた。
+/// **同じ形をした2つの問いは、名前を分けておかないと必ず混ざる。**
+fn 整った(status: SessionStatus) -> bool {
+    matches!(
+        status,
+        SessionStatus::WaitingInput
+            | SessionStatus::WaitingSubagents
+            | SessionStatus::Working
+            | SessionStatus::Stalled
+    )
+}
+
 fn pushable(status: SessionStatus) -> Result<(), String> {
     match status {
         // 作業中・停滞は**ここでは通す**。撃つ前にターンの終わりを待つ（§3-4）
@@ -490,13 +590,14 @@ fn pushable(status: SessionStatus) -> Result<(), String> {
         | SessionStatus::WaitingSubagents
         | SessionStatus::Working
         | SessionStatus::Stalled => Ok(()),
+        // 起動中・スリープも**ここでは通す**。撃つ前に整える（§3-4-2）——起動中は
+        // 押せる状態になるまで待ち、スリープは起こしてから撃って最後に寝かせ直す
+        SessionStatus::Starting | SessionStatus::Ended { .. } => Ok(()),
         SessionStatus::WaitingPermission => {
             Err("権限確認に答えてから枝分かれしてください".to_string())
         }
-        SessionStatus::Starting => Err("起動中です。少し待ってください".to_string()),
-        SessionStatus::Ended { .. } => {
-            Err("止まっているセッションからは枝分かれできません".to_string())
-        }
+        // **断る2つに共通するのは「待っても押せるようにならない」こと**（§3-4）。
+        // 権限確認待ちは人が答えるまで動かず、不明は動いたことすら分からない
         SessionStatus::Unknown => Err("いまの状態が分からないので枝分かれできません".to_string()),
     }
 }
@@ -511,23 +612,55 @@ mod tests {
         // 終わりを待つので、分かれる地点は「いまの作業が終わったところ」に定まる。
         // かつてここで断っていたが、**押せなくするだけでは「作業が終わったら枝を作る」
         // ができないまま**だった。
+        //
+        // **起動中とスリープも通す**（2026-09-08 に覆した。§3-4-2）——寝ていたら
+        // 起こしてから撃ち、最後に寝かせ直す。**撃つ相手が居ないなら、居る状態に
+        // すればよい**のであって、押せなくする理由にはならなかった。
         for 通す in [
             SessionStatus::WaitingInput,
             SessionStatus::WaitingSubagents,
             SessionStatus::Working,
             SessionStatus::Stalled,
+            SessionStatus::Starting,
+            SessionStatus::Ended { ok: true },
+            SessionStatus::Ended { ok: false },
         ] {
             pushable(通す).unwrap_or_else(|断り| panic!("{通す:?} は通ること：{断り}"));
         }
-        // **待っても押せるようにならないもの**だけを断る
-        for 駄目 in [
-            SessionStatus::WaitingPermission,
-            SessionStatus::Starting,
-            SessionStatus::Ended { ok: true },
-            SessionStatus::Unknown,
-        ] {
+        // **待っても押せるようにならないもの**だけを断る。権限確認待ちは人が答える
+        // まで動かず、不明は動いたことすら分からない
+        for 駄目 in [SessionStatus::WaitingPermission, SessionStatus::Unknown] {
             let 断り = pushable(駄目).expect_err("断ること");
             assert!(!断り.is_empty(), "断る理由が空（{駄目:?}）");
+        }
+    }
+
+    #[test]
+    fn 整ったかは押してよいかとは別の問い() {
+        // **一度取り違えて踏んだ。** 起こす待ちの条件に `pushable` を使ったところ、
+        // **寝ている状態のまま条件を満たして**先へ進み、死んだ席へ `/branch` を
+        // 撃っていた（§3-4-2）。
+        //
+        // `pushable` は「押してよいか」、`整った` は「整い終わったか」——**同じ形を
+        // した2つの問いは、名前を分けておかないと必ず混ざる。**
+        for まだ in [
+            SessionStatus::Starting,
+            SessionStatus::Ended { ok: true },
+            SessionStatus::Ended { ok: false },
+        ] {
+            assert!(
+                pushable(まだ).is_ok(),
+                "押してよい側では通ること（{まだ:?}）"
+            );
+            assert!(!整った(まだ), "整ったことにしてはいけない（{まだ:?}）");
+        }
+        for 整い in [
+            SessionStatus::WaitingInput,
+            SessionStatus::WaitingSubagents,
+            SessionStatus::Working,
+            SessionStatus::Stalled,
+        ] {
+            assert!(整った(整い), "整っていること（{整い:?}）");
         }
     }
 

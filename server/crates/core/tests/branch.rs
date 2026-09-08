@@ -298,8 +298,15 @@ async fn 枝の印は乗り換えても消えない() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn 起動直後は断る() {
-    // §3-4。`Starting` は「まだ指示を受け付けられない」
+async fn 起動直後は会話が無いので断る() {
+    // §3-4-2。**断る理由が 2026-09-08 に変わった。**
+    //
+    // かつては `Starting`（まだ指示を受け付けられない）で断っていたが、**起動中は
+    // 待てば入力待ちになる**ので、状態そのものは断る理由でなくなった。**それでも
+    // 起動直後は断られる**——1ターンも会話しておらず、`branchable` が弾くためである。
+    //
+    // **順序が効いている。** 会話の有無は**起こす段より前**に見る（§3-6）。後ろに置くと、
+    // 起こして寝かせ直すだけの往復が起きる
     let server = TestServer::start().await;
     let target = target_of(&server);
     let cwd = work_dir("starting");
@@ -492,5 +499,157 @@ async fn 作業中に押すとターンが終わってから枝になる() {
             .iter()
             .any(|meta| meta.claude_session_id == Some(元の会話)),
         "元の会話が席を持って戻っていない"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 寝ている元から枝を作る（§3-4-2）
+// ---------------------------------------------------------------------------
+
+/// 記録に載っている `CardId` を、前方一致ではなく完全一致で引く。
+fn 載っているカードID(server: &TestServer, card: &str) -> CardId {
+    server
+        .registry
+        .list(server_core::db::LOCAL_ACCOUNT_ID)
+        .into_iter()
+        .find(|meta| meta.card_id.to_string() == card)
+        .expect("そのカードが記録に居ること")
+        .card_id
+}
+
+/// そのカードが寝るまで待つ。
+async fn 寝るまで待つ(server: &TestServer, card: &str) {
+    let 目当て = card.to_string();
+    server
+        .wait_for_listed("そのカードが寝る", move |list| {
+            list.iter().any(|meta| {
+                meta.card_id.to_string() == 目当て
+                    && matches!(meta.status, SessionStatus::Ended { .. })
+            })
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn 寝ている元から枝を作ると元は寝たまま枝だけ起きる() {
+    // §3-4-2。**利用者が求めた最終形はこれ**——「元セッションは寝たままの状態で、
+    // ブランチ側のみ起きている」（2026-09-08 の指定）。
+    //
+    // **枝になるのは押した席**なので、寝かせ直す相手は**呼び戻した新しい席**である。
+    // ここを取り違えると、枝を寝かせて元を起こしたままにしてしまう
+    let server = TestServer::start().await;
+    let target = target_of(&server);
+    let cwd = work_dir("asleep-branch");
+    let (card, 元の会話) = 入力待ちのカード(&server, &target, &cwd).await;
+
+    client::kill(&target, &card[..8])
+        .await
+        .expect("寝かせられること");
+    寝るまで待つ(&server, &card).await;
+
+    // **寝ていても押せる。** かつてはここで「止まっているセッションからは枝分かれ
+    // できません」と断っていた。
+    //
+    // **待たずに撃つ。** 段取り役が「起こして、整うのを待つ」段に入るので、その間に
+    // 擬似 claude を入力待ちへ倒してやる必要がある——`client::branch` で待つと、
+    // 倒す前に上限へ達する
+    枝分かれを頼む(&target, 載っているカードID(&server, &card)).await;
+
+    // **擬似 claude は起こしても自分では入力待ちにならない。**
+    // 本物は起動が済むと `SessionStart` フックを撃ち、それが入力待ちへ倒す
+    // （`state.rs`）。擬似はフックを自分から撃たないので、ここで代わりに撃つ。
+    // **これは土台の都合であって、製品の段取りに手を入れているわけではない**
+    let 目当て = card.clone();
+    server
+        .wait_for_listed("寝ていた席が起きてくる", move |list| {
+            list.iter().any(|meta| {
+                meta.card_id.to_string() == 目当て
+                    && !matches!(meta.status, SessionStatus::Ended { .. })
+            })
+        })
+        .await;
+    client::send_input(
+        &target,
+        &card[..8],
+        r#"hook Stop {"last_assistant_message":"はい"}"#,
+        false,
+        5,
+    )
+    .await
+    .expect("起きた席へ指示を送れること");
+
+    let list = server
+        .wait_for_listed("カードが2枚になる", |list| list.len() == 2)
+        .await;
+
+    let 押した席 = list
+        .iter()
+        .find(|meta| meta.card_id.to_string() == card)
+        .expect("押した席が残っていること");
+    let 戻った席 = list
+        .iter()
+        .find(|meta| meta.card_id.to_string() != card)
+        .expect("呼び戻した席が増えていること");
+
+    // 押した席は**枝**になり、**起きている**
+    assert_eq!(
+        押した席.branched_from,
+        Some(元の会話),
+        "押した席が枝になっていない"
+    );
+    assert!(
+        !matches!(押した席.status, SessionStatus::Ended { .. }),
+        "枝まで寝かせてしまっている（利用者が見たいのは枝である）"
+    );
+
+    // 呼び戻した席は**元の会話**を持ち、**寝ている**
+    assert_eq!(
+        戻った席.claude_session_id,
+        Some(元の会話),
+        "呼び戻した席が元の会話を名乗っていない"
+    );
+    寝るまで待つ(&server, &戻った席.card_id.to_string()).await;
+
+    // 並びは変わらない——**元がその場、枝が1つ右隣**（§3-3）
+    assert_eq!(
+        並び(&server.registry.list(server_core::db::LOCAL_ACCOUNT_ID)),
+        vec![戻った席.card_id, 押した席.card_id],
+        "元がその場に戻り、枝がその右隣に来ていない"
+    );
+}
+
+#[tokio::test]
+async fn 起きていた元は枝を作っても寝かされない() {
+    // §3-4-2。**寝かせ直すのは、押した時点で寝ていたときだけ。** 判断を段取りの途中の
+    // 状態で行うと、**自分で起こした結果を「起きていた」と読む**——その裏返しとして、
+    // ここを間違えると**起きていた親を勝手に寝かせる**
+    let server = TestServer::start().await;
+    let target = target_of(&server);
+    let cwd = work_dir("awake-branch");
+    let (card, 元の会話) = 入力待ちのカード(&server, &target, &cwd).await;
+
+    client::branch(&target, &card[..8])
+        .await
+        .expect("枝を作れること");
+
+    let list = server
+        .wait_for_listed("カードが2枚になる", |list| list.len() == 2)
+        .await;
+    let 戻った席 = list
+        .iter()
+        .find(|meta| meta.card_id.to_string() != card)
+        .expect("呼び戻した席が増えていること");
+    assert_eq!(戻った席.claude_session_id, Some(元の会話));
+
+    // **寝かせ直しは走らないので、しばらく置いても起きたまま**である
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let 引き直し = server.registry.list(server_core::db::LOCAL_ACCOUNT_ID);
+    let 元 = 引き直し
+        .iter()
+        .find(|meta| meta.card_id == 戻った席.card_id)
+        .expect("呼び戻した席が残っていること");
+    assert!(
+        !matches!(元.status, SessionStatus::Ended { .. }),
+        "起きていた元を勝手に寝かせている"
     );
 }
