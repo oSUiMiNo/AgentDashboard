@@ -229,6 +229,48 @@ describe("構造化ビューの段落の空き（細かい修正 項目12）", (
   });
 });
 
+describe("箇条書きの項目間と点の大きさ（利用者の指摘・2026-09-08）", () => {
+  it("項目と項目のあいだに余白が入っている", () => {
+    // それまで `li` に余白が**1つも無く**、項目の切れ目が1行の送りそのものだった。
+    // 左から出る吹き出しは行間を 1.3 まで詰めているので、そこでは
+    // **切れ目のほうが、折り返した行の間より狭く見える**
+    expect(素).toContain(
+      ".prose-dashboard li + li { margin-top: calc(var(--prose-gap, 0.6em) / 2); }",
+    );
+  });
+
+  it("値は段落の空きから割って出すので、行 < 項目間 < 段落間 の順が崩れない", () => {
+    // 数字を直に書くと、器ごとに割った先（吹き出しは 0.78em）で順序が入れ替わる。
+    // `DESIGN.md`「余白の規則」の**内側の余白は外側の半分以下**をそのまま当てた形
+    const 規則 = /\.prose-dashboard li \+ li \{([^}]*)\}/.exec(素);
+    expect(規則?.[1]).toContain("var(--prose-gap");
+    expect(規則?.[1]).not.toMatch(/margin-top:\s*[\d.]+r?em/);
+  });
+
+  it("ファイルビュアにも同じ規則が波及する（整形は1つしかない）", () => {
+    // 器を持たない場所ではフォールバックの 0.6em が効いて **0.3em** になる。
+    // 見出しの大きさと同じで、**片方だけ動かすと**
+    // 「同じ字を貼れば同じ見え方になる」（`README.md`）が崩れる
+    expect(素).toContain("var(--prose-gap, 0.6em) / 2");
+    expect(素).not.toContain(".speech-bubble .prose-dashboard li + li");
+  });
+
+  it("点だけが 1.2 倍で、番号は据え置き", () => {
+    // 指定は「箇条書きの**点のサイズだけ**」。`ol` の番号は対象外
+    expect(素).toContain(
+      ".prose-dashboard ul > li::marker { font-size: 1.2em; }",
+    );
+    expect(素).not.toContain("ol > li::marker");
+  });
+
+  it("大きくするのは印だけで、本文の字は動かさない", () => {
+    // `li` そのものへ当てると**中の字も行の送りも一緒に太る**。効かせる先は `::marker` だけ
+    const 当てた先 = [...素.matchAll(/([^{}]*)\{[^{}]*font-size: 1\.2em[^{}]*\}/g)];
+    expect(当てた先).toHaveLength(1);
+    expect(当てた先[0][1]).toContain("::marker");
+  });
+});
+
 describe("畳まれた行の要約を沈める（細かい修正 項目8）", () => {
   const 読む = (rel: string) =>
     readFileSync(resolve(process.cwd(), "src", rel), "utf8");
