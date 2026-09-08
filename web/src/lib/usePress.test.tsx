@@ -1,13 +1,20 @@
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { usePress } from './usePress'
-import { clearSelectionStore, getSelection, toggleSelect } from '@/stores/selection'
+import {
+  clearSelectionStore,
+  getSelection,
+  toggleSelect,
+  type SelectionKind,
+} from '@/stores/selection'
 
 /**
  * 押し分けの配線（並べ替え設計§4・§15-6）。
  *
  * 押し方の割り当てそのものは `press.test.ts`（純関数）が見る。ここで見るのは
- * **キーボード**——Space で選び、Enter で開き、Space の直後の `click` を捨てること。
+ * **キーボード**——Space で選び、Enter で開き、Space の直後の `click` を捨てること——と、
+ * **`'clear'` が実際に選択を解くところまで繋がっているか**。組み合わせの総当たりは
+ * 純関数の側に置く（両方で同じ表を作ると、片方が黙って古くなる）。
  */
 
 /*
@@ -17,13 +24,15 @@ import { clearSelectionStore, getSelection, toggleSelect } from '@/stores/select
 function Harness({
   as = 'button',
   selectable = true,
+  kind = 'card',
   onOpen,
 }: {
   as?: 'button' | 'section'
   selectable?: boolean
+  kind?: SelectionKind
   onOpen: () => void
 }) {
-  const 押し方 = usePress({ kind: 'card', id: 'a', onOpen, selectable })
+  const 押し方 = usePress({ kind, id: 'a', onOpen, selectable })
   const props = {
     'data-testid': 'target',
     'aria-pressed': 押し方.selected,
@@ -45,13 +54,38 @@ function Harness({
   return <button type="button" {...props} />
 }
 
-function 置く(options: { as?: 'button' | 'section'; selectable?: boolean } = {}) {
+function 置く(
+  options: { as?: 'button' | 'section'; selectable?: boolean; kind?: SelectionKind } = {},
+) {
   let 開いた = 0
   render(<Harness {...options} onOpen={() => (開いた += 1)} />)
   return { 的: screen.getByTestId('target'), 開いた: () => 開いた }
 }
 
+/** 指で触る端末の見分け方（`lib/pointer.ts` と同じ文字列）。 */
+const COARSE = '(pointer: coarse) and (hover: none)'
+
+/**
+ * 指の画面を作る。**`matches` は getter にする**——プロパティで持たせると
+ * `matchMedia()` を呼んだ瞬間の値で固まる。
+ */
+function 指の画面にする() {
+  vi.stubGlobal('matchMedia', (query: string) => ({
+    get matches() {
+      return query === COARSE
+    },
+    media: query,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }))
+}
+
 beforeEach(() => {
+  clearSelectionStore()
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
   clearSelectionStore()
 })
 
@@ -117,5 +151,98 @@ describe('キーボード', () => {
     fireEvent.keyDown(inner, { key: 'Enter' })
     expect(getSelection()).toEqual({ kind: 'card', ids: ['a'] })
     expect(開いた()).toBe(0)
+  })
+})
+
+describe('触る画面で、選択中に別のものを押す', () => {
+  it('枠を選んだ状態でカードを押すと、遷移せず選択だけが解ける', async () => {
+    /*
+      **直す前はここで `onOpen()` が走り、セッション専用画面へ飛んでいた。**
+      選択を解こうとして押した場所が遷移の的になっていた（2026-09-07・利用者の申告）。
+    */
+    指の画面にする()
+    const { 的, 開いた } = 置く({ kind: 'card' })
+    act(() => toggleSelect('project', 'p1'))
+
+    await userEvent.click(的)
+
+    expect(開いた()).toBe(0)
+    expect(getSelection()).toEqual({ kind: null, ids: [] })
+  })
+
+  it('カードを選んだ状態で、記録を持たない箱を押しても解けるだけ', async () => {
+    // 選べる箱と選べない箱は見分けが付かないので、振る舞いを揃える（決めたこと1）
+    指の画面にする()
+    const { 的, 開いた } = 置く({ kind: 'project', selectable: false })
+    act(() => toggleSelect('card', 'a'))
+
+    await userEvent.click(的)
+
+    expect(開いた()).toBe(0)
+    expect(getSelection()).toEqual({ kind: null, ids: [] })
+  })
+
+  it('解いた次のタップでは開く（猶予を置かない）', async () => {
+    指の画面にする()
+    const { 的, 開いた } = 置く({ kind: 'card' })
+    act(() => toggleSelect('project', 'p1'))
+
+    await userEvent.click(的)
+    await userEvent.click(的)
+
+    expect(開いた()).toBe(1)
+  })
+
+  it('1つも選んでいなければ、いままでどおり開く', async () => {
+    指の画面にする()
+    const { 的, 開いた } = 置く({ kind: 'card' })
+
+    await userEvent.click(的)
+
+    expect(開いた()).toBe(1)
+  })
+
+  it('同じ種類を選んでいれば、いままでどおり選ぶ', async () => {
+    指の画面にする()
+    const { 的 } = 置く({ kind: 'card' })
+    act(() => toggleSelect('card', 'b'))
+
+    await userEvent.click(的)
+
+    expect(getSelection()).toEqual({ kind: 'card', ids: ['b', 'a'] })
+  })
+
+  it('選択中でも、キーボードの Enter は開く', async () => {
+    /*
+      **キーボードに「解くだけ」を持ち込まない。** 抜ける道は Esc が既に持っており、
+      ここまで解くにすると**キーボードでは二度と開けなくなる**（`detail === 0` は
+      Space と Enter を区別できない）。
+    */
+    指の画面にする()
+    const { 開いた } = 置く({ kind: 'card' })
+    act(() => toggleSelect('project', 'p1'))
+
+    await userEvent.tab()
+    await userEvent.keyboard('{Enter}')
+
+    expect(開いた()).toBe(1)
+  })
+
+  it('長押しで選んだ直後の click では、解けも開きもしない', () => {
+    // 長押しで選ぶ道が壊れていないことの担保（完了条件8）
+    指の画面にする()
+    vi.useFakeTimers()
+    const { 的, 開いた } = 置く({ kind: 'card' })
+
+    fireEvent.pointerDown(的, { pointerType: 'touch', clientX: 10, clientY: 10 })
+    act(() => {
+      vi.advanceTimersByTime(500)
+    })
+    fireEvent.pointerUp(的)
+    fireEvent.click(的, { detail: 1 })
+
+    expect(開いた()).toBe(0)
+    expect(getSelection()).toEqual({ kind: 'card', ids: ['a'] })
+    vi.useRealTimers()
   })
 })

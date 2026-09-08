@@ -260,12 +260,27 @@ describe('ProjectGroup', () => {
     expect(getSelection()).toEqual({ kind: 'card', ids: ['a'] })
   })
 
-  it('カードを選んでいても、枠のタップは「開く」のまま', async () => {
+  it('何も選んでいなければ、枠のタップで開く', async () => {
+    // **遷移が消えるのは選択中だけ。** ここが緩むと、直したつもりで枠を開けなくしてしまう
+    指の画面にする()
+    renderGroup([meta('a')], 'p1')
+
+    await userEvent.click(screen.getByTestId('project-group'))
+
+    expect(screen.getByTestId('current-path')).toHaveTextContent('/p/')
+  })
+
+  it('カードを選んでいる間は、枠をタップしても遷移せず選択だけが解ける', async () => {
     /*
-      **選択モードの単位は「同格の集合」**（並べ替え設計§15-5・要件の指摘「カードで選択
-      モードが発火すると枠も選べる」）。直す前は、カードを1枚選んだ瞬間に枠のシングルが
-      「選ぶ」へ変わり、余白をタップすると**カードの選択が消えて枠が選ばれ、PJT 専用画面は
-      開かなかった**。
+      **利用者の申告そのもの**（2026-09-07）——「選択解除しようと思ってカード以外の
+      ところをタップしたら、そこが PJT 枠だったので PJT 画面へ遷移してしまう」。
+
+      `README.md` は抜ける道を「一覧の地を押すか Esc」と書いているが、**一覧の大半は
+      枠で埋まっている**ので狙って外すのが難しい。**外し損ねたときの代償**（画面ごと
+      失う）のほうが、外れたときの代償（選択が解ける）より大きいので、こちらへ倒した。
+
+      **却下された「別の種類も選ぶ」案とは別物。** あちらは枠が選ばれてしまうが、
+      ここでは何も選ばれない。
     */
     指の画面にする()
     renderGroup([meta('a')], 'p1')
@@ -273,19 +288,37 @@ describe('ProjectGroup', () => {
 
     await userEvent.click(screen.getByTestId('project-group'))
 
-    expect(screen.getByTestId('current-path')).toHaveTextContent('/p/')
-    expect(getSelection()).toEqual({ kind: 'card', ids: ['a'] })
+    expect(screen.getByTestId('current-path')).not.toHaveTextContent('/p/')
+    expect(getSelection()).toEqual({ kind: null, ids: [] })
   })
 
-  it('記録を持たない枠は、選択モード中でもタップで開く', async () => {
-    // 直す前は「選ぶ道も開く道も無い」死んだ領域だった（設計§15-5）
+  it('解いたあと、もう一度タップすれば開く', async () => {
+    // 猶予は置かない（決めたこと3）。置くと今度は「押したのに開かない」が生まれる
+    指の画面にする()
+    renderGroup([meta('a')], 'p1')
+    act(() => toggleSelect('card', 'a'))
+
+    await userEvent.click(screen.getByTestId('project-group'))
+    await userEvent.click(screen.getByTestId('project-group'))
+
+    expect(screen.getByTestId('current-path')).toHaveTextContent('/p/')
+  })
+
+  it('記録を持たない枠も、選択中は解けるだけ', async () => {
+    /*
+      **選べる枠と選べない枠は、画面上で見分けが付かない。** 以前はこちらだけ
+      「選択モード中でもタップで開く」にしていた（死んだ領域を作らないため）が、
+      **同じに見えるものがあるときは飛び、あるときは飛ばない**ほうが悪い。
+      「解くだけ」は死んだ領域ではない——帯が消え、もう一度押せば開く（決めたこと1）。
+    */
     指の画面にする()
     renderGroup([meta('a')])
     act(() => toggleSelect('card', 'a'))
 
     await userEvent.click(screen.getByTestId('project-group'))
 
-    expect(screen.getByTestId('current-path')).toHaveTextContent('/p/')
+    expect(screen.getByTestId('current-path')).not.toHaveTextContent('/p/')
+    expect(getSelection()).toEqual({ kind: null, ids: [] })
   })
 
   it('選ばれているカードを長押しして掴んでも、選択は外れない', () => {
