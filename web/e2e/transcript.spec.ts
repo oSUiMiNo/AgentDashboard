@@ -1632,6 +1632,19 @@ test('コマンドの展開は、開くと同じ吹き出しの中に出る', as
   このファイルは `foldableRow()` を多くの箇所で使っているが、
   **位置を測らない箇所では無害**である。位置を測る箇所だけ `見えている畳める行()` を使うこと。
 
+  **(5) 直したら、今度は「畳むと迷子になる」が見えるようになった**（2026-09-08・利用者の指摘）。
+  跳ねが消えたぶん、**開く前の位置に留まったまま本文だけが消える**——読み終えて畳むと、
+  下の行が迫り上がってくるので、**さっきまで読んでいた行が画面のどこにも無い。**
+  手当ては `lib/tailAnchor.ts` の `planBodyToggle`——**開くときに位置を控え、畳むときにそこへ戻す。**
+  (3) で効かなかった「あとから戻す」がここでは効く。抑制が効いているあいだは
+  位置を書き換えてくる相手が1つも居ないからで、**止める代わりではなく、止めた上に乗せている。**
+
+  **末尾で測っても、この違いは出ない。** 末尾では「控えた位置へ戻す」と
+  「縮んだ末尾へ切り詰める」が同じ数字になるので、戻す実装を外しても緑のままである
+  ——下の『「畳む」を押しても末尾に留まる』がまさにそれで、あれは戻しを見張っていない。
+  **見張るのは3本目**で、条件は2つ。**末尾から遠い行**で開くこと（近いと切り詰めに紛れる）と、
+  **開いた本文の中へ読み進んでから**畳むこと（動かずに畳めば、戻す先といまの位置が同じになる）。
+
   **E2E で緑になっても、実機で起きない証明にはならない。**
   このフィクスチャは畳める行が数本しか無く、実物の履歴はもっと長い。
   実機での確認は `テスト計画.md` のフェーズ8（【要人間】）に置いてある。
@@ -1730,3 +1743,52 @@ test('末尾に居るとき、「畳む」を押しても末尾に留まる', as
     .toBeLessThan(80)
 })
 
+test('本文の中へ読み進んでから畳むと、開く前に居た位置へ戻る', async ({ page }) => {
+  // **末尾では測れない。** 末尾で畳むと、戻していなくても
+  // ブラウザが縮んだ末尾へ切り詰めるので同じ数字になる（上の2本目がそれ）。
+  // ここは**先頭の畳める行**＝末尾から遠いところで測る
+  await loadFoldLines(page)
+  const 行 = foldableRow(page)
+  await expect(行).toBeVisible(届くまで)
+
+  const box = page.getByTestId('transcript-tree').first()
+  const 印 = 行.getByTestId('body-toggle')
+  await 印.scrollIntoViewIfNeeded()
+
+  const 開く前 = await box.evaluate((el) => el.scrollTop)
+  const 畳んだ総高 = await box.evaluate((el) => el.scrollHeight)
+  const 窓 = await box.evaluate((el) => el.clientHeight)
+  expect(
+    畳んだ総高 - 窓 - 開く前,
+    '末尾に近いところで測ると、戻していなくても緑になる',
+  ).toBeGreaterThan(1_000)
+
+  await 印.click()
+  await expect(行).toHaveAttribute('data-body-open', 'true')
+  await expect
+    .poll(async () => box.evaluate((el) => el.scrollHeight), { timeout: 5_000 })
+    .toBeGreaterThan(畳んだ総高)
+
+  // 開いた本文の中へ読み進む。**ここで動かないと、戻す先といまの位置が同じになり、
+  // 戻していなくても緑になる**
+  const 読み進んだ = 開く前 + 400
+  await box.evaluate((el, 先) => {
+    el.scrollTop = 先
+  }, 読み進んだ)
+  expect(await box.evaluate((el) => el.scrollTop)).toBe(読み進んだ)
+
+  // **`click()` で押さない。** 「畳む」印は開いた本文の下端に浮いていて
+  // いま画面の外にあるので、`click()` を呼ぶと Playwright 自身がそこまで運び、
+  // 測っている位置が動く（上の (1) で読み違えたのと同じ罠）
+  const 開いた行 = page.locator('[data-testid="transcript-row"][data-body-open="true"]')
+  await expect(開いた行).toHaveCount(1)
+  await 開いた行.getByTestId('body-toggle').dispatchEvent('click')
+  await expect(開いた行).toHaveCount(0)
+
+  await expect
+    .poll(
+      async () => box.evaluate((el, 先) => Math.abs(el.scrollTop - 先), 開く前),
+      { timeout: 5_000 },
+    )
+    .toBeLessThan(2)
+})

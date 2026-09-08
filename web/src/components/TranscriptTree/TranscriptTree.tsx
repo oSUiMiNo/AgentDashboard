@@ -17,7 +17,12 @@
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { report } from '@/lib/clientLogs'
-import { SETTLE_FRAME_LIMIT, resolveEndThreshold, settled } from '@/lib/tailAnchor'
+import {
+  SETTLE_FRAME_LIMIT,
+  planBodyToggle,
+  resolveEndThreshold,
+  settled,
+} from '@/lib/tailAnchor'
 import type { CardId } from '@/lib/protocol'
 import type { FlatRow, NodeRow } from '@/stores/transcript'
 import { toggleActivity, toggleBody, toggleNode, toggleRewound, useTranscript } from '@/stores/transcript'
@@ -88,17 +93,47 @@ export function TranscriptTree({ cardId }: { cardId: CardId }) {
     のに、開いた本文の頭が画面のはるか上へ流れ、**その文章の末尾に着く**。
 
     止め方と、なぜこの形なのかは [`resolveEndThreshold`] の説明に書いてある。
-    **開くときと畳むときで分岐を書かないこと**——ここは1本の口なので、分岐すると
-    「畳むときだけ跳ねる」が残る。
+    **黙らせる側に分岐を書かないこと**——開くときも畳むときも同じように黙らせる。
+    片方だけにすると「畳むときだけ跳ねる」が残る。
+
+    **戻す側は畳むときだけである**（2026-09-08・利用者の指摘）。跳ねが消えたことで、
+    今度は**畳んだあとに迷子になる**のが見えるようになった——本文が消えたぶん下の行が
+    迫り上がってくるので、位置は同じでも**読んでいた行が画面のどこにも無い**。
+    控えるのは「開く前に居た場所」で、決めているのは [`planBodyToggle`]。
   */
   const [anchorSuppressed, setAnchorSuppressed] = useState(false)
+  /** 行ごとに「開く前に居た位置」を控える。戻したら消す（[`planBodyToggle`]） */
+  const 控え = useRef(new Map<string, number>())
+  /** 落ち着くまでのあいだ、毎フレーム書き戻す先。`null` なら動かさない */
+  const 戻す先 = useRef<number | null>(null)
   const onToggleBody = useCallback(
     (target: NodeRow) => {
+      // `target` は押す**前**の姿。`bodyOpen` は切り替わる前の値である
+      const 手 = planBodyToggle(
+        target.bodyOpen,
+        scrollRef.current?.scrollTop ?? 0,
+        控え.current.get(target.id),
+      )
+      if (手.覚える === null) {
+        控え.current.delete(target.id)
+      } else {
+        控え.current.set(target.id, 手.覚える)
+      }
+      戻す先.current = 手.戻す
       setAnchorSuppressed(true)
       toggleBody(cardId, target.id)
     },
     [cardId],
   )
+
+  // カードを切り替えたら控えは捨てる。別の会話の位置へ戻ってはいけない
+  useEffect(() => {
+    const 箱 = 控え.current
+    return () => {
+      箱.clear()
+      戻す先.current = null
+    }
+  }, [cardId])
 
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -134,7 +169,19 @@ export function TranscriptTree({ cardId }: { cardId: CardId }) {
     const 見る = () => {
       const container = scrollRef.current
       const 高さ = container?.scrollHeight ?? -1
+      /*
+        **畳んだときだけ、控えた位置へ戻す。** 毎フレーム書くのは、縮み終わるまで
+        ブラウザが**文書の末尾より下は詰めてくる**ため——1回だけ書くと、そのあとの
+        縮みで押し戻される。
+
+        **ここで殴り合いにならないのは、抑制が効いているからである**（`tailAnchor.ts`）。
+        仮想化は位置を書き換えてこないので、書いた値がそのまま残る。
+      */
+      if (container && 戻す先.current !== null) {
+        container.scrollTop = 戻す先.current
+      }
       if (settled(前の高さ, 高さ, frame, SETTLE_FRAME_LIMIT)) {
+        戻す先.current = null
         setAnchorSuppressed(false)
         return
       }
