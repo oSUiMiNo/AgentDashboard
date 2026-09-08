@@ -259,7 +259,8 @@ async fn raw_file(
         **SVG には足さない。** あちらは `</svg>` の外に要素を置けないので、同じ手が
         使えない（無理に中へ差すと、文書の構造をこちらが書き換えることになる）。
     */
-    let body = if 探せるように && protocol::fs::kind_of(path) == protocol::fs::FileKind::Html {
+    let body = if 探せるように && protocol::fs::kind_of(path) == protocol::fs::FileKind::Html
+    {
         let mut 継いだ = body;
         継いだ.extend_from_slice(b"\n<script>");
         継いだ.extend_from_slice(FINDER_JS.as_bytes());
