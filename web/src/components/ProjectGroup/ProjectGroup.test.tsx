@@ -498,6 +498,53 @@ describe('ProjectGroup の中クリック', () => {
     expect(getSelection().ids).toEqual([])
   })
 
+  it('**カードの中の操作（鉛筆・ゴミ箱・電源）を中クリックしても、何も開かない**', () => {
+    /*
+      **ここが本物の受け皿。** 操作の群はカード本体の兄弟なので、カード単独では
+      合図がどのハンドラにも届かず、テストが素通りする。枠の中に置いて初めて
+      「枠まで泡立って PJT が開く」を止めているかを確かめられる。
+    */
+    const open = vi.spyOn(window, 'open').mockReturnValue(null)
+    renderGroup([meta('a')], 'pid-1')
+
+    中クリック(screen.getByTestId('tile-ops'))
+
+    expect(open).not.toHaveBeenCalled()
+  })
+
+  it('**名前の編集欄では、中クリックの既定を止めない**——Linux の貼り付けを殺さないため', () => {
+    renderGroup([meta('a')], 'pid-1')
+    fireEvent.click(screen.getByTestId('nickname-edit'))
+    const 欄 = screen.getByTestId('nickname-input')
+
+    // 既定が残っている（＝`preventDefault()` していない）
+    expect(fireEvent.mouseDown(欄, { button: 1 })).toBe(true)
+  })
+
+  it('**Ctrl＋Enter で枠を新しいタブに開く。** カードと同じキーで同じ結果になる', () => {
+    const open = vi.spyOn(window, 'open').mockReturnValue(null)
+    renderGroup([meta('a')], 'pid-1')
+
+    fireEvent.keyDown(screen.getByTestId('project-group'), { key: 'Enter', ctrlKey: true })
+
+    expect(open).toHaveBeenCalledWith(
+      `/p/local/${encodeURIComponent(PROJECT)}`,
+      '_blank',
+      'noopener',
+    )
+    expect(screen.getByTestId('current-path')).toHaveTextContent('/')
+  })
+
+  it('素の Enter は今までどおり、いまのタブで開く', () => {
+    const open = vi.spyOn(window, 'open').mockReturnValue(null)
+    renderGroup([meta('a')], 'pid-1')
+
+    fireEvent.keyDown(screen.getByTestId('project-group'), { key: 'Enter' })
+
+    expect(open).not.toHaveBeenCalled()
+    expect(screen.getByTestId('current-path')).toHaveTextContent('/p/')
+  })
+
   it('中ボタンの mousedown で、ブラウザの自動スクロールを止める', () => {
     renderGroup([meta('a')], 'pid-1')
 

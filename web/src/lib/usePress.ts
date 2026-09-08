@@ -13,6 +13,17 @@
  * 先に捌いて選び、続く `click` は捨てる。Enter は `<button>` なら `click` に任せ、
  * `<section>`（枠）は自分で開く。
  *
+ * # 「新しいタブで開く」もここが持つ（イシュー `カードと枠を、中クリックで新しいタブに開く`）
+ *
+ * 規則そのものは `lib/openInNewTab.ts` の純関数にあるが、**配線はここ1箇所**である。
+ * 最初は別のフックに分けていたが、**同じ要素に付いた兄弟のハンドラは
+ * `stopPropagation()` では止まらない**ので、`click` だけを重ねる形になり——
+ * `dblclick`・`keydown`・「押す前の選択」の3つが**手で思い出すしかない穴**になった
+ * （レビューで3件とも実害として挙がった）。設計§4-1 が「押し分けは1箇所で決める」と
+ * 言っているのは、まさにこの形を避けるためである。
+ *
+ * 行き先（`newTabPath`）を渡されたときだけ効く。渡されなければ何も足さない。
+ *
  * # ダブルクリックの1打目を打ち消す
  *
  * **`dblclick` は `click` を打ち消さない。** 素朴に作ると、ダブルクリックのたびに
@@ -23,6 +34,15 @@
 
 import { useCallback, useEffect, useRef, type PointerEvent as ReactPointerEvent } from 'react'
 import { useCoarsePointer } from './pointer'
+import {
+  fromInnerControl,
+  isTextEntry,
+  openNewTab,
+  suppressesAutoscroll,
+  wantsNewTab,
+  wantsNewTabByKey,
+  type PressLike,
+} from './openInNewTab'
 import { LONG_PRESS_MS, movedTooFar, pressMapping } from './press'
 import {
   clearSelection,
@@ -57,21 +77,62 @@ interface Options {
    * **依存は一方向**——`usePress` は掴みのことを何も知らない。
    */
   onLongPress?: () => void
+  /**
+   * **新しいタブで開くときの行き先。**
+   *
+   * 渡すと、中クリック・Ctrl／Cmd＋クリック・Ctrl／Cmd＋Enter が「新しいタブ」に
+   * なる。**渡さなければ何も起きない**——押し分けは今までどおり。
+   *
+   * 組み立ては呼び元（`lib/routes.ts`）。**ここで文字列を組まない。**
+   */
+  newTabPath?: string
+}
+
+/** 押したときに来るもの。**`PressLike` に、DOM を触るぶんを足しただけ** */
+interface ClickLike extends PressLike {
+  detail?: number
+  target: EventTarget | null
+  preventDefault: () => void
+  stopPropagation: () => void
+}
+
+interface KeyLike {
+  key: string
+  ctrlKey: boolean
+  metaKey: boolean
+  target: EventTarget | null
+  currentTarget: EventTarget | null
+  preventDefault: () => void
 }
 
 export interface PressBinding {
-  onClick: (event: { stopPropagation: () => void; detail?: number }) => void
-  onKeyDown: (event: {
-    key: string
-    target: EventTarget | null
-    currentTarget: EventTarget | null
-    preventDefault: () => void
-  }) => void
-  onDoubleClick: (event: { stopPropagation: () => void }) => void
+  onClick: (event: ClickLike) => void
+  onKeyDown: (event: KeyLike) => void
+  onDoubleClick: (event: ClickLike) => void
+  /** 中クリック。**新しいタブで開く** */
+  onAuxClick: (event: ClickLike) => void
+  /** ブラウザの自動スクロール（丸いアイコン）を止める */
+  onMouseDown: (event: ClickLike) => void
   onPointerDown: (event: ReactPointerEvent) => void
   onPointerMove: (event: ReactPointerEvent) => void
   onPointerUp: () => void
   onPointerCancel: () => void
+  /**
+   * **見えている面のうち、押し分けの器そのものではないところ**へ付ける一式。
+   *
+   * カードの押し分けは `<button>`（`tile-body`）が持つが、**見えているカードは
+   * その 5px 外側の枠（`tile-frame`）まで**である。その帯を押しても `<button>` には
+   * 届かず、**枠（PJT）まで泡立って「PJT を新しいタブで開く」になってしまう**
+   * ——カードを狙って PJT が開く。
+   *
+   * ここが受けるのは**新しいタブの3つだけ**で、素の押しは今までどおり泡立たせる
+   * （帯を押したときの既存の振る舞いを変えない）。
+   */
+  skin: {
+    onClick: (event: ClickLike) => void
+    onAuxClick: (event: ClickLike) => void
+    onMouseDown: (event: ClickLike) => void
+  }
   /** 選ばれているか。見た目に使う */
   selected: boolean
 }
@@ -82,6 +143,7 @@ export function usePress({
   onOpen,
   selectable = true,
   onLongPress,
+  newTabPath,
 }: Options): PressBinding {
   const coarse = useCoarsePointer()
   const selection = useSelection()
@@ -122,13 +184,71 @@ export function usePress({
    */
   const 押す前の選択 = useRef<Selection>(getSelection())
 
+  /**
+   * **新しいタブで開いたか。** 開いたら真——呼び元はそこで打ち切る。
+   *
+   * 器の中の押せるもの（鉛筆・ゴミ箱・電源・＋・×）から出た合図は受けない。
+   * あれは別の意味を持つ。
+   */
+  const 新しいタブで開いた = useCallback(
+    (event: ClickLike): boolean => {
+      if (newTabPath === undefined || fromInnerControl(event.target)) {
+        return false
+      }
+      if (!wantsNewTab(event)) {
+        return false
+      }
+      openNewTab(newTabPath)
+      /*
+        **開いたときだけ止める。** 枠の中のカードを中クリックしたとき、枠まで泡立つと
+        **カードと PJT の2枚が開く**。既定の動作も止める——中クリックには
+        ブラウザ側の意味（貼り付け）が残っている。
+      */
+      event.preventDefault()
+      event.stopPropagation()
+      return true
+    },
+    [newTabPath],
+  )
+
+  const onAuxClick = useCallback(
+    (event: ClickLike) => {
+      新しいタブで開いた(event)
+    },
+    [新しいタブで開いた],
+  )
+
+  const onMouseDown = useCallback((event: ClickLike) => {
+    if (!suppressesAutoscroll(event)) {
+      return
+    }
+    /*
+      **字を打ち込むところでは止めない。** Linux（X11）では中クリックが
+      「選んだ文字の貼り付け」という OS の作法なので、そこを止めると
+      **このアプリの中でだけ貼り付けが効かない**という形になる。
+    */
+    if (isTextEntry(event.target)) {
+      return
+    }
+    // **丸いアイコン（自動スクロール）を出させない。** 止める道はここしか無い
+    event.preventDefault()
+  }, [])
+
+  /**
+   * 見えている面の外側（カードの 5px の帯）用。**新しいタブの3つだけを受ける。**
+   *
+   * 素の押しは何もしない——**泡立たせる**ので、帯を押したときの既存の振る舞いが変わらない。
+   */
+  const skin = {
+    onClick: (event: ClickLike) => {
+      新しいタブで開いた(event)
+    },
+    onAuxClick,
+    onMouseDown,
+  }
+
   const onKeyDown = useCallback(
-    (event: {
-      key: string
-      target: EventTarget | null
-      currentTarget: EventTarget | null
-      preventDefault: () => void
-    }) => {
+    (event: KeyLike) => {
       // **内側の部品（＋・×・カードのボタン・入力欄）から泡立ってきたキーは、この器のものではない。**
       // `stopPropagation` は使わない——`TileGrid` の Esc は `globalThis` で受けている
       if (event.target !== event.currentTarget) {
@@ -140,6 +260,22 @@ export function usePress({
       // 次の押しに乗って**押していない時間で長押しが成立する**
       やめる()
       長押し.current = null
+      /*
+        **Ctrl／Cmd＋Enter は新しいタブ**（ブラウザがリンクに対してそうしているのに揃える）。
+
+        **`<button>` だけなら、ここは要らない**——`click`（`ctrlKey` 付き）が出るので
+        下の `onClick` が拾う。**要るのは `<section>`（枠）のため**で、あちらは `click` を
+        出さないので、ここが無いと**同じキーでカードは新しいタブ・枠はいまのタブ**という
+        食い違いが残る（レビューで実害として挙がった）。
+
+        `<button>` でも先にここで捌いて `preventDefault()` する。**`click` が出なくなる**
+        ので、2枚開くことはない。
+      */
+      if (newTabPath !== undefined && wantsNewTabByKey(event)) {
+        event.preventDefault()
+        openNewTab(newTabPath)
+        return
+      }
       if (event.key === ' ') {
         // 器が `<section>` のときページが流れるのを止める
         event.preventDefault()
@@ -170,7 +306,7 @@ export function usePress({
         onOpen()
       }
     },
-    [mapping.single, selectable, kind, id, onOpen, やめる],
+    [mapping.single, selectable, kind, id, onOpen, やめる, newTabPath],
   )
 
   // 外れるときに計測を残さない（押したまま画面が消えることがある）
@@ -243,7 +379,15 @@ export function usePress({
   }, [やめる])
 
   const onClick = useCallback(
-    (event: { stopPropagation: () => void; detail?: number }) => {
+    (event: ClickLike) => {
+      /*
+        **新しいタブが先。** ここで止めないと、開いたうえに押し分けが走って
+        **カードが選ばれる**（同じ要素に付いた兄弟は `stopPropagation()` では
+        止まらないので、外から重ねる形では防げなかった）。
+      */
+      if (新しいタブで開いた(event)) {
+        return
+      }
       event.stopPropagation()
       // **1打目だけ覚える**（2打目は `detail === 2`）。ダブルクリックが成立したときに戻す
       if ((event.detail ?? 1) === 1) {
@@ -302,12 +446,27 @@ export function usePress({
       }
       toggleSelect(kind, id)
     },
-    [mapping.single, selectable, kind, id, onOpen],
+    [mapping.single, selectable, kind, id, onOpen, 新しいタブで開いた],
   )
 
   const onDoubleClick = useCallback(
-    (event: { stopPropagation: () => void }) => {
+    (event: ClickLike) => {
       event.stopPropagation()
+      /*
+        **Ctrl／Cmd を押したままの2打は、いまのタブを動かさない。**
+
+        1打ずつが既に新しいタブを開いているので、`dblclick` まで「開く」に通すと
+        **タブが2枚増えたうえ、いま見ている一覧まで飛ぶ**。README が「いま見ている
+        画面も動かない」と約束しているのはこの押し方なので、ここで打ち切る。
+
+        **`押す前の選択` へ戻す処理も飛ばす。** Ctrl＋クリックは `onClick` の頭で
+        打ち切られており**控えを取り直していない**ので、ここで戻すと
+        **とっくに解いたはずの選択が蘇る**（レビューで実害として挙がった）。
+      */
+      if (newTabPath !== undefined && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault()
+        return
+      }
       if (!mapping.doubleOpens) {
         return
       }
@@ -326,13 +485,16 @@ export function usePress({
       restoreSelection(押す前の選択.current)
       onOpen()
     },
-    [mapping.doubleOpens, onOpen],
+    [mapping.doubleOpens, onOpen, newTabPath],
   )
 
   return {
     onClick,
     onKeyDown,
     onDoubleClick,
+    onAuxClick,
+    onMouseDown,
+    skin,
     onPointerDown,
     onPointerMove,
     onPointerUp: 離す,

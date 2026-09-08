@@ -1619,13 +1619,86 @@ describe('SessionTile の中クリック', () => {
     expect(open).toHaveBeenCalledWith(`/s/${CARD}`, '_blank', 'noopener')
   })
 
-  it('**器の中の操作（鉛筆・ゴミ箱・電源）を中クリックしても開かない**——あれは別の意味を持つ', () => {
+  /*
+    **「器の中の操作を中クリックしても開かない」は、ここでは確かめられない。**
+
+    操作の群（`tile-ops`）は本体（`tile-body`）の**兄弟**なので、単独で描いた
+    カードでは合図がどのハンドラにも届かない——`data-no-grab` を剥がしても通る、
+    中身の無いテストになる。実際に効いているのは**枠の中に置いたとき**なので、
+    そちらは `ProjectGroup.test.tsx` が見ている。
+  */
+
+  it('**見えているカードの縁（5px の帯）を中クリックしても、セッションが開く**', () => {
+    /*
+      本体は枠より 5px 内側にある。帯を押しても `<button>` には届かないので、
+      受け皿を置いていないと**枠まで泡立って PJT が開く**——カードを狙って
+      別の画面が出る（レビューで実害として挙がった）。
+    */
+    const open = vi.spyOn(window, 'open').mockReturnValue(null)
+    const { container } = renderTile(meta())
+    const 帯 = container.querySelector('.tile-frame')
+    expect(帯).not.toBeNull()
+
+    中クリック(帯 as Element)
+
+    expect(open).toHaveBeenCalledWith(`/s/${CARD}`, '_blank', 'noopener')
+  })
+
+  it('**Ctrl＋ダブルクリックでも、いまのタブは遷移しない**', () => {
+    /*
+      1打ずつが既に新しいタブを開いているので、`dblclick` まで「開く」に通すと
+      **タブが2枚増えたうえ、いま見ている一覧まで飛ぶ**。
+    */
+    vi.spyOn(window, 'open').mockReturnValue(null)
+    renderTile(meta())
+    const tile = screen.getByTestId('session-tile')
+
+    fireEvent.click(tile, { button: 0, ctrlKey: true, detail: 1 })
+    fireEvent.click(tile, { button: 0, ctrlKey: true, detail: 2 })
+    fireEvent.doubleClick(tile, { button: 0, ctrlKey: true })
+
+    expect(screen.queryByText('専用画面')).toBeNull()
+  })
+
+  it('**Ctrl＋ダブルクリックで、解いたはずの選択が蘇らない**', () => {
+    /*
+      Ctrl＋クリックは `onClick` の頭で打ち切られるので「押す前の選択」の控えを
+      取り直していない。`dblclick` でそれを戻すと、**とっくに解いた選択が蘇る**。
+    */
+    vi.spyOn(window, 'open').mockReturnValue(null)
+    renderTile(meta())
+    const tile = screen.getByTestId('session-tile')
+
+    // いったん選んでから、解く
+    fireEvent.click(tile, { button: 0, detail: 1 })
+    expect(getSelection().ids).toEqual([CARD])
+    clearSelection()
+
+    fireEvent.click(tile, { button: 0, ctrlKey: true, detail: 1 })
+    fireEvent.click(tile, { button: 0, ctrlKey: true, detail: 2 })
+    fireEvent.doubleClick(tile, { button: 0, ctrlKey: true })
+
+    expect(getSelection().ids).toEqual([])
+  })
+
+  it('**Ctrl＋Enter でも新しいタブに開き、いまのタブは遷移しない**', () => {
     const open = vi.spyOn(window, 'open').mockReturnValue(null)
     renderTile(meta())
 
-    中クリック(screen.getByTestId('tile-ops'))
+    fireEvent.keyDown(screen.getByTestId('session-tile'), { key: 'Enter', ctrlKey: true })
+
+    expect(open).toHaveBeenCalledWith(`/s/${CARD}`, '_blank', 'noopener')
+    expect(screen.queryByText('専用画面')).toBeNull()
+  })
+
+  it('素の Enter は今までどおり、いまのタブで開く', () => {
+    const open = vi.spyOn(window, 'open').mockReturnValue(null)
+    renderTile(meta())
+
+    fireEvent.click(screen.getByTestId('session-tile'), { detail: 0 })
 
     expect(open).not.toHaveBeenCalled()
+    expect(screen.getByText('専用画面')).toBeInTheDocument()
   })
 
   it('**中クリックしても、いまのタブは遷移しない**', () => {
