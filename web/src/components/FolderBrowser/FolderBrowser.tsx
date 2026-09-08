@@ -30,7 +30,6 @@ import {
 } from '@/components/ui/context-menu'
 import { ArrowUpGlyph, CloseGlyph, CopyGlyph } from '@/components/ui/glyphs'
 import { copyToClipboard } from '@/lib/clipboard'
-import { TOAST_LIFE_MS } from '@/stores/appNotices'
 import { fileIcon } from '@/lib/fileKind'
 import {
   childOf,
@@ -42,6 +41,26 @@ import {
   type DirEntry,
   type DirListing,
 } from '@/lib/hostfs'
+
+/**
+ * コピーの答えを畳むまで（ミリ秒）。
+ *
+ * **4秒**（利用者の指定・2026-09-08）。**これはトーストではない**ので、
+ * `DESIGN.md`「知らせの出し方」がトーストに定めた7秒は当たらない——あちらが
+ * 7秒を許すのは**後から読める場所（ベル）がある**からで、ここには無い代わりに
+ * **押し直せばいつでも出し直せる**。
+ *
+ * **長さは「読み切るのにどれだけ要るか」で決める。** ここに出るのは6文字で、
+ * しかも**押した本人が見ている最中**に出る——読み終わってなお3秒残ると、
+ * 「**まだ写せていないのか**」と読める側に倒れる。
+ *
+ * **画面ごとに数字が違ってよい。** LAN の住所（`LanAddressButton`）が6秒なのは、
+ * あちらの文が2文あり、**開いた先で合言葉を聞かれるという予告がそこにしか
+ * 出ない**からである。**揃えるべきは数字ではなく、決め方のほう。**
+ *
+ * **失敗には張らない**（下記）。
+ */
+export const コピー表示を畳むまで = 4000
 
 interface Props {
   /** `agent_id` かローカルを表す `'local'` */
@@ -184,13 +203,7 @@ export function FolderBrowser({
           }
           setCopied({ path: at, value, state: ok ? "done" : "failed" })
           /*
-            **成功だけ時間で消す**（項目5-c）。長さは `DESIGN.md`「知らせの出し方」が
-            **出来事**（起きた瞬間があり放っておいてよい）に定めた 7 秒を**借りる**——
-            ここで別の数字を作ると、**同じ形の知らせが画面ごとに違う速さで消える**。
-
-            **トーストにしたのではない。借りたのは寿命だけ**で、出し方は行の中の字のまま。
-            あちらが「7秒で消えてよいのは後から読める場所（ベル）があるから」と言うのに対し、
-            **ここは押し直せばいつでも出し直せる**ので、後から読める場所は要らない。
+            **成功だけ時間で消す**（項目5-c）。長さは [`コピー表示を畳むまで`]。
 
             **失敗には張らない。** あれは値を選んで取るための逃げ道なので、
             **消えると逃げ道として使えなくなる**。消すのは人の手（下の ✕）。
@@ -199,7 +212,7 @@ export function FolderBrowser({
             戻す.current = window.setTimeout(() => {
               戻す.current = null
               setCopied(null)
-            }, TOAST_LIFE_MS)
+            }, コピー表示を畳むまで)
           }
         })
       })

@@ -10,7 +10,10 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { FolderBrowser } from "@/components/FolderBrowser/FolderBrowser";
+import {
+  FolderBrowser,
+  コピー表示を畳むまで,
+} from "@/components/FolderBrowser/FolderBrowser";
 import { TOAST_LIFE_MS } from "@/stores/appNotices";
 
 const ROOT = "/home/me/dev/app";
@@ -101,7 +104,7 @@ async function 答えが出るまで() {
  * 行を掴むところまでは本物のまま済ませ、**押す直前に切り替える**。
  */
 describe("出したものが引っ込む", () => {
-  it("成功は 7 秒で消える——長さは知らせの決まりから借りている", async () => {
+  it("成功は 4 秒で消える。その手前では、まだ出ている", async () => {
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
       value: { writeText: vi.fn(async () => undefined) },
@@ -115,11 +118,31 @@ describe("出したものが引っ込む", () => {
       await 答えが出るまで();
       expect(答え(行[0])).toBe("コピーしました");
 
-      act(() => vi.advanceTimersByTime(TOAST_LIFE_MS));
+      /*
+        **手前と当日の両方を見る**（2026-09-08）。ここまで上（消えること）しか見て
+        いなかったので、**うっかり 100ms にしても緑のまま**だった——短すぎる側は
+        「押したのに何も出ない」に見えるので、症状としてはむしろ重い。
+      */
+      act(() => vi.advanceTimersByTime(コピー表示を畳むまで - 1));
+      expect(答え(行[0])).toBe("コピーしました");
+
+      act(() => vi.advanceTimersByTime(1));
       expect(答え(行[0])).toBeNull();
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  /**
+   * **値そのものを見る。** 他のテストは定数を import して期待値に使うので、
+   * **定数を書き換えると期待値ごと動いて緑のまま通る**。ここだけが数字を留める。
+   *
+   * トーストの7秒とは別物であることも同時に留める——揃えようとして戻されると、
+   * 利用者の指定（4秒・2026-09-08）が黙って消える。
+   */
+  it("長さは 4 秒で、トーストの寿命とは別物である", () => {
+    expect(コピー表示を畳むまで).toBe(4000);
+    expect(コピー表示を畳むまで).toBeLessThan(TOAST_LIFE_MS);
   });
 
   it("失敗は時間では消えない——消えると逃げ道として使えない", async () => {
@@ -134,7 +157,7 @@ describe("出したものが引っ込む", () => {
       expect(screen.getByTestId("folder-copy-failed")).toBeInTheDocument();
 
       // 成功と同じだけ待っても、**まだ在る**
-      act(() => vi.advanceTimersByTime(TOAST_LIFE_MS * 3));
+      act(() => vi.advanceTimersByTime(コピー表示を畳むまで * 3));
       expect(screen.getByTestId("folder-copy-failed")).toBeInTheDocument();
       expect(screen.getByTestId("folder-copy-fallback")).toBeInTheDocument();
 
@@ -181,7 +204,7 @@ describe("出したものが引っ込む", () => {
       await 答えが出るまで();
 
       // 消える手前まで進めてから、別の行を押す
-      act(() => vi.advanceTimersByTime(TOAST_LIFE_MS - 1_000));
+      act(() => vi.advanceTimersByTime(コピー表示を畳むまで - 1_000));
       fireEvent.click(行[1]);
       await 答えが出るまで();
       expect(答え(行[1])).toBe("コピーしました");
@@ -209,7 +232,7 @@ describe("出したものが引っ込む", () => {
       画面.unmount();
 
       // **消えた画面へ向けて発火しない。** 落とし忘れるとここで警告か例外になる
-      expect(() => act(() => vi.advanceTimersByTime(TOAST_LIFE_MS * 2))).not.toThrow();
+      expect(() => act(() => vi.advanceTimersByTime(コピー表示を畳むまで * 2))).not.toThrow();
     } finally {
       vi.useRealTimers();
     }
