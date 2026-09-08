@@ -7,9 +7,10 @@ import { LONG_PRESS_MS, LONG_PRESS_SLOP_PX, movedTooFar, pressMapping } from './
  * **判定を1箇所に集めたことの担保。** ここが正しければ、コンポーネント側は
  * `if (coarse)` を1つも書かずに済む。
  *
- * 触る画面の答えは**3通り**——何も選んでいなければ `'open'`、同格なら `'select'`、
- * それ以外は `'clear'`（選択を解くだけ。遷移しない）。**組み合わせを潰すのはここ**で、
- * DOM を通す側（`usePress.test.tsx`）は配線だけを見る。
+ * 答えは**3通り**——同格なら `'select'`、何か選んでいて同格でなければ `'clear'`
+ * （選択を解くだけ）、1つも選んでいなければ触る画面は `'open'`・PC は `'select'`。
+ * **「解くだけ」の条件は PC と触る画面で同じ**（2026-09-08 に揃えた）。
+ * **組み合わせを潰すのはここ**で、DOM を通す側（`usePress.test.tsx`）は配線だけを見る。
  */
 
 describe('PC', () => {
@@ -21,21 +22,42 @@ describe('PC', () => {
     })
   })
 
-  it('選択の有無でも種類でも、選べるかどうかでも変わらない', () => {
-    // **PC に選択モードという概念は無い**——修飾キー無しでシングルが「選ぶ」。
-    // 触る画面だけを直したので、**ここが動いていないことが完了条件4**
+  it('同じ種類を選んでいる間も、いままでどおり「選ぶ」', () => {
+    expect(pressMapping(false, 'card', 'card').single).toBe('select')
+    expect(pressMapping(false, 'project', 'project').single).toBe('select')
+  })
+
+  it('別の種類を選んでいる間は、解くだけ', () => {
+    /*
+      **2026-09-08 に、前の決定を覆した。** それまでは PC を変えないと決めていた
+      ——「PC は遷移しないので事故が起きない」というのが理由だった。**遷移だけが
+      事故ではない**：押した瞬間に帯の中身が入れ替わり、**押そうとしていたボタンが
+      別のボタンになる**（§5-1 が禁じた事象そのもの）。
+
+      **1回で2つのことが起きるほうが損**——解除と選択が同時に走ると、どちらを
+      頼んだのか画面から読めない。
+    */
+    expect(pressMapping(false, 'card', 'project').single).toBe('clear')
+    expect(pressMapping(false, 'project', 'card').single).toBe('clear')
+  })
+
+  it('選べない箱も、選択中は解くだけ', () => {
+    expect(pressMapping(false, 'card', 'card', false).single).toBe('clear')
+    expect(pressMapping(false, 'project', 'project', false).single).toBe('clear')
+  })
+
+  it('1つも選んでいなければ、選べない箱でも「選ぶ」', () => {
+    // 実際に選ぶのは `usePress` 側が止める。**割り当てとしては変わらない**
+    expect(pressMapping(false, null, 'project', false).single).toBe('select')
+  })
+
+  it('ダブルで開く道と、長押しを使わないことは、どの状態でも変わらない', () => {
+    // **直したのはシングルだけ。** ここが動くと「ダブルで開く」が崩れる
     for (const selecting of ['card', 'project', null] as const) {
       for (const selectable of [true, false]) {
-        expect(pressMapping(false, selecting, 'card', selectable)).toEqual({
-          single: 'select',
-          doubleOpens: true,
-          longPressSelects: false,
-        })
-        expect(pressMapping(false, selecting, 'project', selectable)).toEqual({
-          single: 'select',
-          doubleOpens: true,
-          longPressSelects: false,
-        })
+        const mapping = pressMapping(false, selecting, 'card', selectable)
+        expect(mapping.doubleOpens).toBe(true)
+        expect(mapping.longPressSelects).toBe(false)
       }
     }
   })

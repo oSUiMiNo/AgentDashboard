@@ -298,3 +298,81 @@ describe('掴んで運んだあと、印を持ち越さない', () => {
     expect(getSelection()).toEqual({ kind: null, ids: [] })
   })
 })
+
+describe('PC で、選択中に別の種類を押す', () => {
+  /*
+    **2026-09-08 に、前の決定を覆した。** それまで PC はスコープ外で、「PC の振る舞いが
+    変わっていない」ことが完了条件だった。**遷移しないぶん見えにくいだけで、押した相手が
+    選ばれるという同じ事故が残っていた**——帯の中身が入れ替わり、押そうとしていた
+    ボタンが別のボタンになる。
+
+    ここは指の画面を作らない（`matchMedia` を差し替えない）ので PC として走る。
+  */
+
+  it('枠を選んだ状態でカードをクリックすると、選ばれず選択だけが解ける', async () => {
+    const { 的, 開いた } = 置く({ kind: 'card' })
+    act(() => toggleSelect('project', 'p1'))
+
+    await userEvent.click(的)
+
+    expect(getSelection()).toEqual({ kind: null, ids: [] })
+    expect(開いた()).toBe(0)
+  })
+
+  it('解けたあと、もう一度クリックすれば選べる', async () => {
+    // **選び直したい人は2回押す。** 修飾キーでの近道は作らない
+    const { 的 } = 置く({ kind: 'card' })
+    act(() => toggleSelect('project', 'p1'))
+
+    await userEvent.click(的)
+    await userEvent.click(的)
+
+    expect(getSelection()).toEqual({ kind: 'card', ids: ['a'] })
+  })
+
+  it('1つも選んでいなければ、いままでどおり選ばれる', async () => {
+    const { 的, 開いた } = 置く({ kind: 'card' })
+
+    await userEvent.click(的)
+
+    expect(getSelection()).toEqual({ kind: 'card', ids: ['a'] })
+    expect(開いた()).toBe(0)
+  })
+
+  it('同じ種類なら、いままでどおり増える', async () => {
+    const { 的 } = 置く({ kind: 'card' })
+    act(() => toggleSelect('card', 'b'))
+
+    await userEvent.click(的)
+
+    expect(getSelection()).toEqual({ kind: 'card', ids: ['b', 'a'] })
+  })
+
+  it('キーボードの Space も同じ（マウスと食い違わない）', async () => {
+    /*
+      **Space は `pressMapping` を通らず `toggleSelect` を直に呼ぶ。** store 側を
+      直していないと、同じ PC でマウスとキーボードの結果が食い違う。帯は Tab の
+      通り道でもあるので、**向かっていたボタンが別のボタンになる**のはむしろ
+      キーボードのほうが当たりやすい。
+    */
+    const { 的, 開いた } = 置く({ kind: 'card' })
+    act(() => toggleSelect('project', 'p1'))
+
+    await userEvent.tab()
+    expect(的).toHaveFocus()
+    await userEvent.keyboard(' ')
+
+    expect(getSelection()).toEqual({ kind: null, ids: [] })
+    expect(開いた()).toBe(0)
+  })
+
+  it('ダブルクリックは、いままでどおり開く', async () => {
+    // **直したのはシングルだけ。** 開く道は変えていない
+    const { 的, 開いた } = 置く({ kind: 'card' })
+    act(() => toggleSelect('project', 'p1'))
+
+    await userEvent.dblClick(的)
+
+    expect(開いた()).toBe(1)
+  })
+})

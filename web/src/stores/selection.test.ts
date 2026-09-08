@@ -42,14 +42,29 @@ describe('押すたびに増え、もう一度押すと外れる', () => {
 })
 
 describe('枠とカードを混ぜない', () => {
-  it('違う種類を押すと、そちらへ選び直す', () => {
-    // 混ぜられると、まとめて操作の帯に出すボタンが選択の中身で出たり消えたりする
-    // ——電源マークはカードにしか意味を持たない
+  it('違う種類を押すと、乗り換えずに解けるだけ', () => {
+    /*
+      **2026-09-08 に、乗り換えをやめた**（それまでは「そちらへ選び直す」だった）。
+      1回の押しで**もとの選択が消えるのと、押した相手が選ばれるのが同時に走る**ので、
+      どちらを頼んだのか画面から読めない。しかも帯の中身が入れ替わって、
+      **押そうとしていたボタンが別のボタンになる**。
+
+      混ぜない、という決まりそのものは変わっていない——電源マークはカードにしか
+      意味を持たないので、帯が選択の中身で出たり消えたりしてはいけない。
+    */
     toggleSelect('card', 'a')
     toggleSelect('card', 'b')
     toggleSelect('project', 'p1')
+    expect(getSelection()).toEqual({ kind: null, ids: [] })
+    expect(isSelected('project', 'p1')).toBe(false)
+  })
+
+  it('解けたあと、もう一度押せば選べる', () => {
+    // **選び直したい人は2回押す。** 近道は作らない
+    toggleSelect('card', 'a')
+    toggleSelect('project', 'p1')
+    toggleSelect('project', 'p1')
     expect(getSelection()).toEqual({ kind: 'project', ids: ['p1'] })
-    expect(isSelected('card', 'a')).toBe(false)
   })
 })
 
@@ -76,6 +91,11 @@ describe('必ず選ぶ', () => {
   })
 
   it('違う種類なら選び直す', () => {
+    /*
+      **こちらは乗り換えたまま**（`toggleSelect` は 2026-09-08 に乗り換えをやめた）。
+      長押しは「これを選ぶ」と名指しする操作なので押し間違いの話が当てはまらず、
+      **触る画面では、これが1動作で種類を選び直す唯一の道**である。
+    */
     toggleSelect('card', 'a')
     select('project', 'p1')
     expect(getSelection()).toEqual({ kind: 'project', ids: ['p1'] })
