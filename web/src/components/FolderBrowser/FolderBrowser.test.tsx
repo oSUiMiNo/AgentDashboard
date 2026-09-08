@@ -846,6 +846,81 @@ describe("ファイルの行は、ブラウザの新しいタブへ開けるリ�
       expect(await screen.findByTestId("folder-menu")).toBeInTheDocument();
     });
 
+    /**
+     * **右クリックのメニューから、ブラウザの新しいタブへ開ける**
+     * （イシューのスコープ外に置いていたものを、2026-09-08 に取り込んだ）。
+     *
+     * **指で触る画面ではこれが唯一の道である。** 中クリックも Ctrl＋クリックも
+     * スマホには無く、右クリックの既定メニューはこのメニュー自身が奪っている。
+     */
+    it("ファイルのメニューに『ブラウザの新しいタブで開く』が出る", async () => {
+      置く押せる形();
+      const 行 = await ファイルの行();
+
+      await userEvent.pointer({ keys: "[MouseRight]", target: 行 });
+      const 項目 = await screen.findByTestId("folder-menu-open-tab");
+
+      // **項目そのものがリンク。** `window.open` はスマホで抑止されうる
+      expect(項目.tagName).toBe("A");
+      expect(項目).toHaveAttribute("href", RAW);
+      // **こちらは押したら必ず外へ出るので、行とは逆に `target` を付ける**
+      expect(項目).toHaveAttribute("target", "_blank");
+      expect(項目).toHaveAttribute("rel", "noopener");
+      expect(項目).toHaveTextContent("ブラウザの新しいタブで開く");
+    });
+
+    it("開くほうが、コピーより先に並ぶ", async () => {
+      置く押せる形();
+      await userEvent.pointer({ keys: "[MouseRight]", target: await ファイルの行() });
+
+      const 中身 = await screen.findByTestId("folder-menu");
+      const 並び = Array.from(
+        中身.querySelectorAll("[data-testid^='folder-menu-']"),
+      ).map((e) => e.getAttribute("data-testid"));
+
+      expect(並び).toEqual(["folder-menu-open-tab", "folder-menu-copy-abs"]);
+    });
+
+    it("フォルダのメニューには出さない（行き先の URL が無い）", async () => {
+      置く押せる形();
+      await userEvent.pointer({ keys: "[MouseRight]", target: await フォルダの行() });
+
+      await screen.findByTestId("folder-menu-copy-abs");
+      expect(screen.queryByTestId("folder-menu-open-tab")).toBeNull();
+    });
+
+    it("onPickFile が渡らない場面では出さない（ファイルを見る画面ではない）", async () => {
+      置く();
+      /*
+        **狙うのはボタンではなく行そのもの。** `onPickFile` が無いファイルの行は
+        `disabled` で `pointer-events: none` なので、ボタンを狙っても合図が1つも
+        届かない（**メニューが開かず、何も確かめないまま通る**）。メニューを
+        掛けてあるのは `li` のほうで、利用者が押す相手もそちらである。
+      */
+      const 行 = (await screen.findAllByTestId("folder-entry"))[1];
+      const 器 = 行.closest("li");
+      expect(器).not.toBeNull();
+
+      await userEvent.pointer({ keys: "[MouseRight]", target: 器! });
+
+      await screen.findByTestId("folder-menu-copy-abs");
+      expect(screen.queryByTestId("folder-menu-open-tab")).toBeNull();
+    });
+
+    it("『絶対パスをコピー』は、項目が増えても今までどおり効く", async () => {
+      const 写した: string[] = [];
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: { writeText: vi.fn(async (v: string) => void 写した.push(v)) },
+      });
+      置く押せる形();
+
+      await userEvent.pointer({ keys: "[MouseRight]", target: await ファイルの行() });
+      await userEvent.click(await screen.findByTestId("folder-menu-copy-abs"));
+
+      await waitFor(() => expect(写した).toEqual([FILE]));
+    });
+
     it("コピーの的はボタンのまま（中クリックで新しいタブが開かない）", async () => {
       置く押せる形();
       const 的 = (await screen.findAllByTestId("folder-copy"))[1];

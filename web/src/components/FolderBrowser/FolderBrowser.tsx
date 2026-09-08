@@ -681,6 +681,33 @@ function Row({
           {entry.name}
         </ContextMenuLabel>
         <ContextMenuSeparator />
+        {/*
+          **指で触る画面では、これが唯一の道である。** 中クリックも Ctrl＋クリックも
+          スマホには無いので、ここに置かないと**ブラウザの新しいタブへ出る道が1本も
+          残らない**（右クリックの既定メニューは、このメニュー自身が奪っている）。
+
+          **開くほうを先に置く。** ブラウザの右クリックメニューが「新しいタブで開く」
+          →「リンクのアドレスをコピー」の順なので、**押す人が既に持っている並びに
+          合わせる**。
+
+          **項目もリンクにする**（`ContextMenuItem asChild`）。`window.open` は
+          スマホで抑止されることがあるが、**リンクの既定動作は抑止されない**。
+          行のほうと同じ判断（`lib/openInNewTab.ts` の規則4）でもある。
+
+          **ここでは `target="_blank"` を付ける。** 行に付けないのは素の左クリックの
+          意味が変わるからで、**こちらは押したら必ず外へ出るもの**だから事情が違う
+          （ファイルビュアの「ブラウザで開く」と同じ）。
+
+          **フォルダには出さない。** 行き先の URL が無く、出しても押せないものが
+          並ぶだけになる（`linkable` はファイルの行だけで真になる）。
+        */}
+        {linkable && (
+          <ContextMenuItem asChild data-testid="folder-menu-open-tab">
+            <a href={rawUrl(host, full)} target="_blank" rel="noopener">
+              ブラウザの新しいタブで開く
+            </a>
+          </ContextMenuItem>
+        )}
         <ContextMenuItem
           data-testid="folder-menu-copy-abs"
           onSelect={() => onCopy(full)}
