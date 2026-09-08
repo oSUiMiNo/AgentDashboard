@@ -41,6 +41,10 @@ const INTERRUPTION_MARKERS: &[&str] = &[
     "[Request interrupted by user for tool use]",
 ];
 
+/// CLI が**自分の出力を人の発言の器に載せて**差し戻すときの包み（`/login` など）。
+const LOCAL_COMMAND_STDOUT_OPEN: &str = "<local-command-stdout>";
+const LOCAL_COMMAND_STDOUT_CLOSE: &str = "</local-command-stdout>";
+
 /// この発言を誰が入れたか（設計§1-1）。
 ///
 /// **上から順に見て、最初に当たったところで決まる。** 人の印がいちばん上にあるのが
@@ -88,9 +92,12 @@ pub fn message_origin(record: &Record) -> MessageOrigin {
         return MessageOrigin::SubagentPrompt;
     }
 
-    // #11：欄を1つも持たないので、本文の定型文で見分けるしかない
+    // #11：欄を1つも持たないので、本文の形で見分けるしかない
     if is_interruption(record) {
         return MessageOrigin::Interrupted;
+    }
+    if is_local_command_output(record) {
+        return MessageOrigin::Injected;
     }
 
     // #12：どれにも当たらない。**人として出す**（安全側）
@@ -106,6 +113,27 @@ fn is_interruption(record: &Record) -> bool {
         return false;
     };
     INTERRUPTION_MARKERS.contains(&text)
+}
+
+/// 本文が**丸ごと** `<local-command-stdout>…</local-command-stdout>` か。
+///
+/// `/login` などの組み込みコマンドは、実行結果をこの包みで包み、**人の発言と同じ器**
+/// （`type: "user"`）に載せて差し戻してくる。**欄は1つも付かない**——実測73件すべてが
+/// `origin` も `promptSource` も `isMeta` も持たないので、#12 まで落ちて**人の吹き出し
+/// に出ていた**。
+///
+/// # 丸ごとのときしか当てない
+///
+/// [`is_interruption`] が完全一致でしか見ないのと同じ理由である。**人がこのタグを
+/// 引用しただけで機械側へ落ちてはならない。** 引用には必ず前後の地の文が付くので、
+/// 「本文が丸ごと包み」は人には踏めない線になる（実測：全 PJT で混在0件）。
+/// **綴りが変わったら人の側へ倒れる**——安全側である。
+fn is_local_command_output(record: &Record) -> bool {
+    let Some(text) = sole_text(record) else {
+        return false;
+    };
+    let text = text.trim();
+    text.starts_with(LOCAL_COMMAND_STDOUT_OPEN) && text.ends_with(LOCAL_COMMAND_STDOUT_CLOSE)
 }
 
 /// `message.content` が**ただ1つの文**であるとき、その中身。
@@ -252,6 +280,34 @@ mod tests {
         // 配列の形でも同じ
         let line = r#"{"type":"user","uuid":"u1","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#;
         assert_eq!(判定(line), MessageOrigin::Interrupted);
+    }
+
+    #[test]
+    fn コマンドの出力は機械() {
+        // `/login` の実行結果。**欄を1つも持たない**ので、本文の形でしか見分けられない
+        let line = 発言(
+            "",
+            "<local-command-stdout>Login successful</local-command-stdout>",
+        );
+        assert_eq!(判定(&line), MessageOrigin::Injected);
+        assert!(!判定(&line).is_human());
+
+        // 配列の形でも同じ
+        let line = r#"{"type":"user","uuid":"u1","message":{"role":"user","content":[{"type":"text","text":"<local-command-stdout>ok</local-command-stdout>"}]}}"#;
+        assert_eq!(判定(line), MessageOrigin::Injected);
+    }
+
+    #[test]
+    fn コマンドの出力を引用した人は人のまま() {
+        // **安全側の門。** 丸ごと包みでなければ当てない——引用には地の文が付く
+        for text in [
+            "<local-command-stdout>ok</local-command-stdout> って出たんだけど",
+            "これ見て：<local-command-stdout>ok</local-command-stdout>",
+            "<local-command-stdout>閉じてない",
+            "</local-command-stdout>",
+        ] {
+            assert_eq!(判定(&発言("", text)), MessageOrigin::Unmarked, "{text}");
+        }
     }
 
     #[test]

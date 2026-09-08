@@ -65,6 +65,7 @@ function queuedOrigin(text: string): MessageOrigin {
     case 'history':
     case 'stop_hook':
     case 'local_command_caveat':
+    case 'local_command_stdout':
       return { kind: 'injected' }
     default:
       return { kind: 'unmarked' }

@@ -199,6 +199,10 @@ describe('待ちの行の名乗り', () => {
     expect(originOf(待ち('Stop hook feedback:\n後処理を行ってください。'))).toEqual({
       kind: 'injected',
     })
+    // コマンドの実行結果（`/login` など）。**待ちの器でも同じ側へ落ちる**（設計§18-2）
+    expect(
+      originOf(待ち('<local-command-stdout>Login successful</local-command-stdout>')),
+    ).toEqual({ kind: 'injected' })
   })
 
   it('他セッションからの連絡は、送り主の名前まで取る', () => {

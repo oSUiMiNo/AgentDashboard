@@ -44,6 +44,12 @@ describe('包みの型を見分ける', () => {
     )
   })
 
+  it('ローカルコマンドの実行結果が分かる', () => {
+    expect(
+      machineShapeOf('<local-command-stdout>Login successful</local-command-stdout>'),
+    ).toBe('local_command_stdout')
+  })
+
   it('どれでもないものは plain', () => {
     expect(machineShapeOf('ただの文')).toBe('plain')
   })
@@ -145,6 +151,25 @@ describe('包みを剥がす', () => {
   // 倒れ方の保険が働くと**1文字も変わらない**（レポート§5-4「出さない」に反する）
   it('断り書きしか無ければ、空になる', () => {
     expect(formatMachineBody('<local-command-caveat>Caveat: …</local-command-caveat>')).toBe('')
+  })
+
+  // **報告された不具合そのもの。** `/login` の結果が生のタグのまま出ていた
+  it('ローカルコマンドの実行結果は、包みだけ剥がして中身を残す', () => {
+    expect(
+      formatMachineBody('<local-command-stdout>Login successful</local-command-stdout>'),
+    ).toBe('Login successful')
+  })
+
+  // 断り書きと同じ理由で、**ここで元へ戻すと生のタグが画面に出る**
+  it('出力が空でも、生のタグへは戻らない', () => {
+    expect(formatMachineBody('<local-command-stdout></local-command-stdout>')).toBe('')
+  })
+
+  // 包みとして読めないときだけ、元の字を返す（倒れ方）
+  it('閉じていなければ、元の字のまま', () => {
+    expect(formatMachineBody('<local-command-stdout>閉じてない')).toBe(
+      '<local-command-stdout>閉じてない',
+    )
   })
 
   // **実物に当てて分かった穴。** 包みの後ろにハーネスの定型文が付き、

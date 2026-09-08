@@ -37,6 +37,7 @@ export type MachineShape =
   | 'cross_session'
   | 'stop_hook'
   | 'local_command_caveat'
+  | 'local_command_stdout'
   | 'plain'
 
 /**
@@ -85,6 +86,9 @@ export function machineShapeOf(text: string): MachineShape {
   if (text.includes('<local-command-caveat>')) {
     return 'local_command_caveat'
   }
+  if (text.includes('<local-command-stdout>')) {
+    return 'local_command_stdout'
+  }
   return 'plain'
 }
 
@@ -132,6 +136,9 @@ export function wholeMachineShapeOf(text: string): MachineShape | null {
   if (wrapsWhole(trimmed, 'cross-session-message') || wrapsWhole(trimmed, 'agent-message')) {
     return 'cross_session'
   }
+  if (wrapsWhole(trimmed, 'local-command-stdout')) {
+    return 'local_command_stdout'
+  }
   return null
 }
 
@@ -174,6 +181,10 @@ export function formatMachineBody(text: string): string {
       // **何の行なのかは読める**。空の本文は既にある形でもある（展開の無い
       // スラッシュコマンドが実測67%）
       return formatLocalCommandCaveat(text)
+    case 'local_command_stdout':
+      // **中身は残す。** 断り書きと違い、ここに入っているのは利用者が見たい実行結果
+      // そのものである（例：`Login successful`）。剥がすのは包みだけ
+      return formatLocalCommandStdout(text)
     default:
       return text
   }
@@ -313,4 +324,24 @@ function formatStopHook(text: string): string {
  */
 function formatLocalCommandCaveat(text: string): string {
   return tidy(dropTag(text, 'local-command-caveat'))
+}
+
+/**
+ * ローカルコマンドの実行結果。
+ *
+ * **断り書きの兄弟だが、扱いは逆である。** あちらは中身が定型文なので丸ごと落とすが、
+ * こちらの中身は**利用者が見たい結果そのもの**なので、包みだけを剥がして残す。
+ *
+ * # 空でも元へ戻さない
+ *
+ * 出力を1文字も出さないコマンドが実在するので、**剥がした結果が空になるのは正しい姿**
+ * である（[`formatLocalCommandCaveat`] と同じ理由）。ここで元へ戻すと、**生のタグが
+ * 画面に出る**——それが直そうとしている不具合そのものである。名乗りの行は残るので、
+ * 何の行なのかは読める。
+ *
+ * **包みとして読めなかったときだけ元の字を返す**（[`inner`] が `null` を返す場合）。
+ */
+function formatLocalCommandStdout(text: string): string {
+  const body = inner(text, 'local-command-stdout')
+  return body === null ? text : tidy(body)
 }
