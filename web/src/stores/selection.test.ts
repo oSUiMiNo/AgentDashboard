@@ -5,6 +5,7 @@ import {
   getSelection,
   isSelected,
   isSelecting,
+  restoreSelection,
   select,
   toggleSelect,
 } from './selection'
@@ -42,29 +43,47 @@ describe('押すたびに増え、もう一度押すと外れる', () => {
 })
 
 describe('枠とカードを混ぜない', () => {
-  it('違う種類を押すと、乗り換えずに解けるだけ', () => {
+  it('違う種類を押すと、そちらへ選び直す', () => {
     /*
-      **2026-09-08 に、乗り換えをやめた**（それまでは「そちらへ選び直す」だった）。
-      1回の押しで**もとの選択が消えるのと、押した相手が選ばれるのが同時に走る**ので、
-      どちらを頼んだのか画面から読めない。しかも帯の中身が入れ替わって、
-      **押そうとしていたボタンが別のボタンになる**。
+      **ここは policy を持たない。** 一覧の押し方としては「別の種類なら解くだけ」が
+      正だが、それを決めるのは `lib/press.ts` の `pressMapping` で、**ここまで来る前に
+      振り分けられている**。
 
-      混ぜない、という決まりそのものは変わっていない——電源マークはカードにしか
-      意味を持たないので、帯が選択の中身で出たり消えたりしてはいけない。
+      いったんこの関数を「違う種類なら解く」へ書き換えたが、戻した——**押し方を通らない
+      呼び出し元まで巻き添えになる**（`GroupView` の掴み手のタップが、選ぶのをやめて
+      解くようになっていた）。
+
+      混ぜない、という決まりそのものは変わらない。電源マークはカードにしか意味を
+      持たないので、帯が選択の中身で出たり消えたりしてはいけない。
     */
     toggleSelect('card', 'a')
     toggleSelect('card', 'b')
     toggleSelect('project', 'p1')
-    expect(getSelection()).toEqual({ kind: null, ids: [] })
-    expect(isSelected('project', 'p1')).toBe(false)
+    expect(getSelection()).toEqual({ kind: 'project', ids: ['p1'] })
+    expect(isSelected('card', 'a')).toBe(false)
+  })
+})
+
+describe('押す前へ戻す', () => {
+  it('中身が同じなら、何も起きない', () => {
+    toggleSelect('card', 'a')
+    const 前 = getSelection()
+    restoreSelection({ kind: 'card', ids: ['a'] })
+    // 同じ中身なら作り直さない（描き直しを増やさない）
+    expect(getSelection()).toBe(前)
   })
 
-  it('解けたあと、もう一度押せば選べる', () => {
-    // **選び直したい人は2回押す。** 近道は作らない
+  it('別の種類の選択へも戻せる', () => {
     toggleSelect('card', 'a')
-    toggleSelect('project', 'p1')
-    toggleSelect('project', 'p1')
-    expect(getSelection()).toEqual({ kind: 'project', ids: ['p1'] })
+    restoreSelection({ kind: 'project', ids: ['p1', 'p2'] })
+    expect(getSelection()).toEqual({ kind: 'project', ids: ['p1', 'p2'] })
+  })
+
+  it('空へ戻すと、種類ごと捨てる', () => {
+    toggleSelect('card', 'a')
+    restoreSelection({ kind: null, ids: [] })
+    expect(getSelection()).toEqual({ kind: null, ids: [] })
+    expect(isSelecting()).toBe(false)
   })
 })
 
@@ -92,9 +111,9 @@ describe('必ず選ぶ', () => {
 
   it('違う種類なら選び直す', () => {
     /*
-      **こちらは乗り換えたまま**（`toggleSelect` は 2026-09-08 に乗り換えをやめた）。
-      長押しは「これを選ぶ」と名指しする操作なので押し間違いの話が当てはまらず、
-      **触る画面では、これが1動作で種類を選び直す唯一の道**である。
+      長押しは「これを選ぶ」と名指しする操作なので、押し間違いの話が当てはまらない
+      ——**触る画面では、これが1動作で種類を選び直す道**である（タップは「解くだけ」
+      なので2回要る）。
     */
     toggleSelect('card', 'a')
     select('project', 'p1')

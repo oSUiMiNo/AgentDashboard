@@ -47,7 +47,12 @@ describe('PC', () => {
   })
 
   it('1つも選んでいなければ、選べない箱でも「選ぶ」', () => {
-    // 実際に選ぶのは `usePress` 側が止める。**割り当てとしては変わらない**
+    /*
+      実際に選ぶのは `usePress` 側が止めるので、**PC のシングルでは何も起きない**。
+      **これは死んだ領域ではない**——PC で開くのはダブルなので、押す道は残っている。
+      触る画面が「解くだけ」まで用意しているのは、あちらはシングルが唯一の押し方で、
+      何も起きないと**壊れているのと見分けが付かない**ためである。
+    */
     expect(pressMapping(false, null, 'project', false).single).toBe('select')
   })
 
@@ -116,11 +121,19 @@ describe('触る画面', () => {
     expect(pressMapping(true, 'project', 'project', false).doubleOpens).toBe(false)
   })
 
-  it('選べる箱なら、どの状態でも長押しで選べる', () => {
-    // **種類をまたいでも長押しは死なない**——掴んで運ぶ道がここに乗っている
+  it('「解くだけ」の状態でも、長押しは選べる（これが1動作の選び直し）', () => {
+    /*
+      **タップは「解くだけ」でも、長押しは選び直す。** 素通りしているのではなく、
+      **別の操作として意図してそうしている**——長押しは「これを選ぶ」と名指しする
+      操作なので、押し間違いの話が当てはまらない。**触る画面で1動作の選び直しが
+      できるのはこの道だけ**で、掴んで運ぶ道もここに乗っている。
+    */
     for (const selecting of ['card', 'project', null] as const) {
       expect(pressMapping(true, selecting, 'card').longPressSelects).toBe(true)
     }
+    // 「解くだけ」を返す組み合わせでも生きている
+    expect(pressMapping(true, 'project', 'card').single).toBe('clear')
+    expect(pressMapping(true, 'project', 'card').longPressSelects).toBe(true)
   })
 
   it('選べない箱は、長押しでも選べない', () => {

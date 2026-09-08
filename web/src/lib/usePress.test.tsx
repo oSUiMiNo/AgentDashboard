@@ -350,10 +350,9 @@ describe('PC で、選択中に別の種類を押す', () => {
 
   it('キーボードの Space も同じ（マウスと食い違わない）', async () => {
     /*
-      **Space は `pressMapping` を通らず `toggleSelect` を直に呼ぶ。** store 側を
-      直していないと、同じ PC でマウスとキーボードの結果が食い違う。帯は Tab の
-      通り道でもあるので、**向かっていたボタンが別のボタンになる**のはむしろ
-      キーボードのほうが当たりやすい。
+      **Space は `pressMapping` の答えに従う。** ここだけ「別の種類も選ぶ」を続けると、
+      同じ PC でマウスとキーボードの結果が食い違う。帯は Tab の通り道でもあるので、
+      **向かっていたボタンが別のボタンになる**のはむしろキーボードのほうが当たりやすい。
     */
     const { 的, 開いた } = 置く({ kind: 'card' })
     act(() => toggleSelect('project', 'p1'))
@@ -366,13 +365,94 @@ describe('PC で、選択中に別の種類を押す', () => {
     expect(開いた()).toBe(0)
   })
 
-  it('ダブルクリックは、いままでどおり開く', async () => {
-    // **直したのはシングルだけ。** 開く道は変えていない
+  it('同じ種類なら、Space はいままでどおり増やす', async () => {
+    const { 的 } = 置く({ kind: 'card' })
+    act(() => toggleSelect('card', 'b'))
+
+    await userEvent.tab()
+    expect(的).toHaveFocus()
+    await userEvent.keyboard(' ')
+
+    expect(getSelection()).toEqual({ kind: 'card', ids: ['b', 'a'] })
+  })
+
+  it('ダブルクリックは開くだけで、選択を持ち込まない', async () => {
+    /*
+      **`click` → `click` → `dblclick` の間にシングルが2回走る。** 「選ぶ」だけだった
+      頃は2回で打ち消し合って元へ戻っていたが、**「解くだけ」が入って打ち消し合わなく
+      なった**——1打目で解け、2打目で押した相手が選ばれる。開いた先へ頼んでいない
+      選択を持ち込むので、押す前へ戻してから開く。
+    */
     const { 的, 開いた } = 置く({ kind: 'card' })
     act(() => toggleSelect('project', 'p1'))
 
     await userEvent.dblClick(的)
 
     expect(開いた()).toBe(1)
+    expect(getSelection()).toEqual({ kind: 'project', ids: ['p1'] })
+  })
+
+  it('まとめて選んでいたものも、ダブルクリックで失わない', async () => {
+    const { 的 } = 置く({ kind: 'card' })
+    act(() => {
+      toggleSelect('project', 'p1')
+      toggleSelect('project', 'p2')
+    })
+
+    await userEvent.dblClick(的)
+
+    expect(getSelection()).toEqual({ kind: 'project', ids: ['p1', 'p2'] })
+  })
+
+  it('何も選んでいなければ、ダブルクリックのあとも空のまま', async () => {
+    const { 的, 開いた } = 置く({ kind: 'card' })
+
+    await userEvent.dblClick(的)
+
+    expect(開いた()).toBe(1)
+    expect(getSelection()).toEqual({ kind: null, ids: [] })
+  })
+})
+
+describe('キーボードとポインタが混ざっても、印を持ち越さない', () => {
+  it('Space のあとに指で押しても、その押しは捨てられない', () => {
+    /*
+      **`preventDefault()` で `click` が来ない回がある。** その回の印（「Space で
+      選んだ」）が残っていると、**次の押しが「Space の直後」と誤って捨てられる**。
+    */
+    指の画面にする()
+    const { 的, 開いた } = 置く({ kind: 'card' })
+
+    fireEvent.keyDown(的, { key: ' ' })
+    expect(getSelection()).toEqual({ kind: 'card', ids: ['a'] })
+
+    fireEvent.pointerDown(的, { pointerType: 'touch', clientX: 10, clientY: 10 })
+    fireEvent.pointerUp(的)
+    fireEvent.click(的, { detail: 1 })
+
+    // 同じ種類を選んでいるので、押せば外れる（＝`click` が届いている）
+    expect(getSelection()).toEqual({ kind: null, ids: [] })
+    expect(開いた()).toBe(0)
+  })
+
+  it('キーを押しても、待っている長押しの計測は止まる', () => {
+    /*
+      **印を捨てるだけで計測を止めないと、待っているタイマーが次の押しに乗る**
+      ——押していない時間で長押しが成立し、掴みまで始まる。
+    */
+    指の画面にする()
+    vi.useFakeTimers()
+    const { 的 } = 置く({ kind: 'card' })
+
+    fireEvent.pointerDown(的, { pointerType: 'touch', clientX: 10, clientY: 10 })
+    act(() => {
+      vi.advanceTimersByTime(100)
+    })
+    fireEvent.keyDown(的, { key: 'Escape' })
+    act(() => {
+      vi.advanceTimersByTime(1000)
+    })
+
+    expect(getSelection()).toEqual({ kind: null, ids: [] })
   })
 })
