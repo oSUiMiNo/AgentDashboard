@@ -382,7 +382,8 @@ export function useFilesParts({
       set開いている({ tabs, 選択 })
       覚える(tabs, 選択)
     },
-    [host, project],
+    // **書く口は `覚える` に畳んだ**ので、`host` と `project` は直接は要らない
+    [覚える],
   )
 
   /*
