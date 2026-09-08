@@ -286,6 +286,7 @@ agentdashboard version restart      # 生きたカードがあればここで止
 | `server/crates/server-core/src/db/` | 記録の置き場所（設計§3）。**DB を持つのはここだけ**。表を増やしたら migration にも足す |
 | `server/crates/server-core/src/registry.rs` | カードの記録。エージェントの報告を**DB へ書いてからブラウザへ配る**（設計§9-1）。**アカウントの絞り込みはここの入口に集約**（§8-6） |
 | `server/crates/server-core/src/auth.rs` | 入口の鍵（設計§8-1〜§8-3）。**3通りのかけ方を1つの型で表す**。判定を通らずに答えを出す道を作らないこと |
+| `server/crates/server-core/src/branch.rs` | 枝分かれの段取り（ブランチ設計§3・§4）。**ここに置くのは、待ちがブラウザにも CLI にも要るから**——片方へ置くと同じ手順を TypeScript と Rust で二重に持つ。**撃つ前に購読を張る**・**届いたことを確かめてから確定する**・**押してよいか（`pushable`）と整い終わったか（`整った`）は別の問い**の3つは、どれも実機で踏んで入れたもの。外すと同じ壊れ方が戻る |
 | `server/crates/server-core/src/account.rs` | ペアリングトークンの発行・失効と PC の一覧（§8-4・§11-1） |
 | `server/crates/server-core/tests/tenancy.rs` | アカウント分離の総当たり（§8-6 の表の全行）。**enforcement を足したらここへ足す** |
 | `server/crates/server-core/src/gateway.rs` | エージェントの受け口（`/agent/ws`）。版交渉・トークン照合・帰属の決定。ブラウザ向けの指示を A2S へ中継する `RemoteSessionHost` もここ |
