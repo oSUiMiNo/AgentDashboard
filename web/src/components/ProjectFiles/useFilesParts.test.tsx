@@ -27,8 +27,16 @@ let slow: Record<string, number> = {}
  */
 let 失敗: Record<string, number> = {}
 
-/** 覚えている場所を、テスト側から直に置く。綴りは実装から import しない */
-function 覚えさせる(place: { dir?: string; pick?: string }, project = ROOT) {
+/**
+ * 覚えている場所を、テスト側から直に置く。綴りは実装から import しない。
+ *
+ * **`picks`（タブの並び）も置ける。** 前の版が書いた行（`pick` だけ）を作りたい
+ * ときは `pick` だけ渡す——**そこが前方互換の検査そのもの**になる。
+ */
+function 覚えさせる(
+  place: { dir?: string; pick?: string; picks?: string[] },
+  project = ROOT,
+) {
   globalThis.localStorage.setItem(
     'agentdashboard.project-files-place',
     JSON.stringify({ [JSON.stringify(['local', project])]: place }),
@@ -36,7 +44,11 @@ function 覚えさせる(place: { dir?: string; pick?: string }, project = ROOT)
 }
 
 /** 覚えている中身を読み戻す。**忘れたかどうか**を見るのに要る */
-function 覚えている(project = ROOT): { dir?: unknown; pick?: unknown } {
+function 覚えている(project = ROOT): {
+  dir?: unknown
+  pick?: unknown
+  picks?: unknown
+} {
   const raw = globalThis.localStorage.getItem(
     'agentdashboard.project-files-place',
   )
@@ -63,14 +75,27 @@ function Placement({
   open: boolean
   onToggle: () => void
 }) {
-  const { sidebar, column } = useFilesParts({ host, project, open, onToggle })
+  const { sidebar, column, 選んだ回数 } = useFilesParts({
+    host,
+    project,
+    open,
+    onToggle,
+  })
   return (
-    <div className="relative flex min-h-0 flex-1 gap-4">
-      {sidebar}
-      <div data-testid="group-rail" className="flex min-h-0 min-w-0 flex-1 gap-4">
-        {column}
+    <>
+      <div className="relative flex min-h-0 flex-1 gap-4">
+        {sidebar}
+        <div data-testid="group-rail" className="flex min-h-0 min-w-0 flex-1 gap-4">
+          {column}
+        </div>
       </div>
-    </div>
+      {/*
+        **`選んだ回数` は画面には出ないが、ここでだけ覗く。**
+        実物では `useSnapToFile` が受け取ってレールを寄せる（設計§5）——
+        **寄ったかどうかは jsdom では言えない**ので、渡している数のほうを見る
+      */}
+      <span data-testid="picked-count">{選んだ回数}</span>
+    </>
   )
 }
 
@@ -297,9 +322,11 @@ describe('ファイルの中身の列', () => {
     expect(view).toHaveAttribute('data-path', `${ROOT}/計画.md`)
     expect(screen.getByTestId('file-column')).toBeInTheDocument()
     // 基準は枠のパス。パネルの起点と同じものであることが要る
-    // **基準は画面から `title` へ移った**（要件26・設計§8-6）。注記そのものは消えている
+    // **基準は画面から `title` へ移り**（要件26・設計§8-6）、**その `title` は
+    // 相対パスの chip からタブ帯へ引き継がれた**（タブの要件）
     expect(screen.queryByTestId('file-relative-base')).toBeNull()
-    expect(screen.getByTestId('file-relative-path')).toHaveAttribute(
+    expect(screen.queryByTestId('file-relative-path')).toBeNull()
+    expect(screen.getByTestId('file-tab')).toHaveAttribute(
       'title',
       expect.stringContaining(ROOT),
     )
@@ -924,5 +951,361 @@ describe('器が1つであること', () => {
         'className="relative flex min-h-0 flex-1 gap-4"',
       )
     }
+  })
+})
+
+/**
+ * タブの並び（`サイドバーで開いたファイルを、タブで並べて切り替える` テスト計画
+ * フェーズ2）。
+ *
+ * **この工事は「1枚しか持てない」を「並びを持つ」へ広げるものなので、落ちるのは境目
+ * である。** 0枚・1枚・最後の1枚・既に開いているものをもう一度、の4つを厚く見る。
+ */
+describe('タブ', () => {
+  /** サイドバーからファイルを開く。**中クリックの道は別イシューの担当** */
+  async function 開く(name: string) {
+    await userEvent.click(await screen.findByRole('link', { name }))
+  }
+
+  function タブの並び(): string[] {
+    return screen
+      .queryAllByTestId('file-tab')
+      .map((el) => el.getAttribute('data-path') ?? '')
+  }
+
+  function 選ばれている(): string | null {
+    const 当たり = screen
+      .queryAllByTestId('file-tab')
+      .find((el) => el.getAttribute('aria-selected') === 'true')
+    return 当たり?.getAttribute('data-path') ?? null
+  }
+
+  function 回数(): number {
+    return Number(screen.getByTestId('picked-count').textContent)
+  }
+
+  it('1枚選ぶとタブが1枚になり、列が出る', async () => {
+    置く()
+    await 開く('計画.md')
+
+    await screen.findByTestId('file-view')
+    expect(タブの並び()).toEqual([`${ROOT}/計画.md`])
+    expect(選ばれている()).toBe(`${ROOT}/計画.md`)
+  })
+
+  it('続けて別のファイルを選ぶと2枚になり、前のものが残る', async () => {
+    /*
+      **この工事の本体。** これまでは前に見ていたものが黙って消えていた——
+      `要件.md` と `計画.md` を見比べる、という**この道具の使われ方そのもの**が
+      成立していなかった。
+    */
+    覚えさせる({ picks: [`${ROOT}/先.md`], pick: `${ROOT}/先.md` })
+    置く()
+    await screen.findByTestId('file-view')
+
+    await 開く('計画.md')
+
+    expect(タブの並び()).toEqual([`${ROOT}/先.md`, `${ROOT}/計画.md`])
+    expect(選ばれている()).toBe(`${ROOT}/計画.md`)
+  })
+
+  it('既に開いているファイルを選ぶと、枚数は増えない', async () => {
+    置く()
+    await 開く('計画.md')
+    await screen.findByTestId('file-view')
+
+    await 開く('計画.md')
+
+    expect(タブの並び()).toEqual([`${ROOT}/計画.md`])
+  })
+
+  it('既に開いているファイルを選んでも「選んだ回数」は増える', async () => {
+    /*
+      **ここが最も落ちやすい**（要件の完了条件2）。タブを入れると「同じファイルを
+      押しても何も起きない」にしたくなるが、**枚数が増えるかどうかと、レールを寄せる
+      かどうかは別の話である。**
+
+      押すのは「そのファイルを見たい」という意思表示なので、いま開いているものと
+      同じかどうかは関係ない——**セッション側へ払ったまま同じファイルを押した人が、
+      何も起きないのを見ることになる**（`lib/snapToFile.ts`）。
+    */
+    置く()
+    await 開く('計画.md')
+    await screen.findByTestId('file-view')
+    const 前 = 回数()
+
+    await 開く('計画.md')
+
+    expect(回数()).toBe(前 + 1)
+  })
+
+  it('復元で戻したときは「選んだ回数」が増えない', async () => {
+    // **人が押した瞬間ではない**（設計§5）
+    覚えさせる({ picks: [`${ROOT}/計画.md`], pick: `${ROOT}/計画.md` })
+    置く()
+    await screen.findByTestId('file-view')
+
+    expect(回数()).toBe(0)
+  })
+
+  it('閉じたときも「選んだ回数」が増えない', async () => {
+    置く()
+    await 開く('計画.md')
+    await screen.findByTestId('file-view')
+    const 前 = 回数()
+
+    await userEvent.click(screen.getByTestId('file-close'))
+
+    expect(回数()).toBe(前)
+  })
+
+  it('選ばれているタブを閉じると、右隣へ移る', async () => {
+    覚えさせる({
+      picks: [`${ROOT}/a.md`, `${ROOT}/b.md`, `${ROOT}/c.md`],
+      pick: `${ROOT}/b.md`,
+    })
+    置く()
+    await screen.findByTestId('file-view')
+
+    await userEvent.click(
+      screen.getAllByTestId('file-tab-close').find(
+        (el) => el.getAttribute('data-path') === `${ROOT}/b.md`,
+      )!,
+    )
+
+    expect(タブの並び()).toEqual([`${ROOT}/a.md`, `${ROOT}/c.md`])
+    expect(選ばれている()).toBe(`${ROOT}/c.md`)
+  })
+
+  it('いちばん右のタブを閉じると、左隣へ移る', async () => {
+    覚えさせる({
+      picks: [`${ROOT}/a.md`, `${ROOT}/b.md`],
+      pick: `${ROOT}/b.md`,
+    })
+    置く()
+    await screen.findByTestId('file-view')
+
+    await userEvent.click(
+      screen.getAllByTestId('file-tab-close').find(
+        (el) => el.getAttribute('data-path') === `${ROOT}/b.md`,
+      )!,
+    )
+
+    expect(選ばれている()).toBe(`${ROOT}/a.md`)
+  })
+
+  it('選ばれていないタブを閉じても、選択は動かない', async () => {
+    覚えさせる({
+      picks: [`${ROOT}/a.md`, `${ROOT}/b.md`],
+      pick: `${ROOT}/b.md`,
+    })
+    置く()
+    await screen.findByTestId('file-view')
+
+    await userEvent.click(
+      screen.getAllByTestId('file-tab-close').find(
+        (el) => el.getAttribute('data-path') === `${ROOT}/a.md`,
+      )!,
+    )
+
+    expect(選ばれている()).toBe(`${ROOT}/b.md`)
+  })
+
+  it('最後の1枚を閉じると、列ごと消える', async () => {
+    // **空のタブ帯だけが残らない**（要件の完了条件4）
+    置く()
+    await 開く('計画.md')
+    await screen.findByTestId('file-view')
+
+    await userEvent.click(screen.getByTestId('file-tab-close'))
+
+    expect(screen.queryByTestId('file-column')).toBeNull()
+    expect(screen.getByTestId('folder-browser')).toBeInTheDocument()
+  })
+
+  it('「ファイルの列を閉じる」は、タブが何枚あっても全部畳む', async () => {
+    // **タブの ✕ とは別物。** 10枚あるときに1枚ずつ閉じるのが苦行だから残してある
+    覚えさせる({
+      picks: [`${ROOT}/a.md`, `${ROOT}/b.md`, `${ROOT}/c.md`],
+      pick: `${ROOT}/a.md`,
+    })
+    置く()
+    await screen.findByTestId('file-view')
+
+    await userEvent.click(screen.getByTestId('file-close'))
+
+    expect(screen.queryByTestId('file-column')).toBeNull()
+  })
+
+  it('タブを押すと、そのタブへ移る', async () => {
+    覚えさせる({
+      picks: [`${ROOT}/a.md`, `${ROOT}/b.md`],
+      pick: `${ROOT}/a.md`,
+    })
+    置く()
+    await screen.findByTestId('file-view')
+
+    await userEvent.click(
+      screen
+        .getAllByTestId('file-tab')
+        .find((el) => el.getAttribute('data-path') === `${ROOT}/b.md`)!,
+    )
+
+    expect(選ばれている()).toBe(`${ROOT}/b.md`)
+    expect(screen.getByTestId('file-view')).toHaveAttribute(
+      'data-path',
+      `${ROOT}/b.md`,
+    )
+  })
+
+  it('復元したタブが読めなければ、そのタブだけ消える', async () => {
+    // **他のタブは読めているので、巻き添えにしない**
+    失敗 = { [`${ROOT}/壊.md`]: 500 }
+    覚えさせる({
+      picks: [`${ROOT}/壊.md`, `${ROOT}/生.md`],
+      pick: `${ROOT}/壊.md`,
+    })
+    置く()
+
+    await waitFor(() => {
+      expect(タブの並び()).toEqual([`${ROOT}/生.md`])
+    })
+    expect(選ばれている()).toBe(`${ROOT}/生.md`)
+  })
+
+  it('人が押したタブが読めなくても、タブは残って理由が出る', async () => {
+    // **押した人には理由を見せる**（設計§6-5）。畳むと何が起きたか分からない
+    失敗 = { [`${ROOT}/計画.md`]: 500 }
+    置く()
+    await 開く('計画.md')
+
+    expect(await screen.findByTestId('file-error')).toBeInTheDocument()
+    expect(タブの並び()).toEqual([`${ROOT}/計画.md`])
+  })
+
+  it('復元したタブが「無い」ときだけ、覚えからも落ちる', async () => {
+    // 寝ている PC で忘れると、起きたときに戻れなくなる（設計§6-5）
+    失敗 = { [`${ROOT}/無い.md`]: 404 }
+    覚えさせる({
+      picks: [`${ROOT}/無い.md`, `${ROOT}/生.md`],
+      pick: `${ROOT}/無い.md`,
+    })
+    置く()
+
+    await waitFor(() => {
+      expect(タブの並び()).toEqual([`${ROOT}/生.md`])
+    })
+    expect(覚えている().picks).toEqual([`${ROOT}/生.md`])
+  })
+
+  it('復元したタブが「読めない」だけなら、覚えには残る', async () => {
+    失敗 = { [`${ROOT}/読めない.md`]: 503 }
+    覚えさせる({
+      picks: [`${ROOT}/読めない.md`, `${ROOT}/生.md`],
+      pick: `${ROOT}/読めない.md`,
+    })
+    置く()
+
+    await waitFor(() => {
+      expect(タブの並び()).toEqual([`${ROOT}/生.md`])
+    })
+    expect(覚えている().picks).toEqual([
+      `${ROOT}/読めない.md`,
+      `${ROOT}/生.md`,
+    ])
+  })
+
+  it('「読めない」で畳んだあと、別のタブを押しても覚えから消えない', async () => {
+    /*
+      **レビューで見つかった穴**（2026-09-08）。畳んだタブを状態から丸ごと外していた
+      ので、**次に何か押した瞬間に、そのとき生きている並びで上書きされて消えていた**
+      ——「寝ている PC で忘れると、起きたときに戻る先が消える」（設計§6-5）という
+      保証が、**次の1クリックまでしか持たなかった。**
+
+      いまは畳んだタブを**印つきで並びに残す**ので、どの手が書いても一緒に運ばれる。
+    */
+    失敗 = { [`${ROOT}/眠い.md`]: 503 }
+    覚えさせる({
+      picks: [`${ROOT}/眠い.md`, `${ROOT}/生.md`],
+      pick: `${ROOT}/眠い.md`,
+    })
+    置く()
+
+    await waitFor(() => {
+      expect(タブの並び()).toEqual([`${ROOT}/生.md`])
+    })
+
+    // ここで1回押す。**これで消えていた**
+    await userEvent.click(screen.getByTestId('file-tab'))
+
+    expect(覚えている().picks).toEqual([`${ROOT}/眠い.md`, `${ROOT}/生.md`])
+  })
+
+  it('畳んだタブは帯に出ないが、押し直せば表へ戻る', async () => {
+    // **人が「見たい」と言っているので、読めなかった過去より新しい意思表示が強い**
+    失敗 = { [`${ROOT}/計画.md`]: 503 }
+    覚えさせる({ picks: [`${ROOT}/計画.md`], pick: `${ROOT}/計画.md` })
+    置く()
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('file-column')).toBeNull()
+    })
+
+    失敗 = {}
+    await 開く('計画.md')
+
+    expect(タブの並び()).toEqual([`${ROOT}/計画.md`])
+  })
+
+  it('相手が変わると、並びが作り直される', async () => {
+    // **前の PJT のファイルを読みに行かない**（描画中に直す）
+    /*
+      **2行を一度に置く。** `覚えさせる` は表ごと書き換えるので、2回呼ぶと
+      1つ目の行が消える（実際に踏んだ）。
+    */
+    globalThis.localStorage.setItem(
+      'agentdashboard.project-files-place',
+      JSON.stringify({
+        [JSON.stringify(['local', ROOT])]: {
+          picks: [`${ROOT}/a.md`],
+          pick: `${ROOT}/a.md`,
+        },
+        [JSON.stringify(['local', '/home/me/dev/別'])]: {
+          picks: ['/home/me/dev/別/b.md'],
+          pick: '/home/me/dev/別/b.md',
+        },
+      }),
+    )
+
+    const { view } = 置く()
+    await screen.findByTestId('file-view')
+    expect(タブの並び()).toEqual([`${ROOT}/a.md`])
+
+    view.rerender(
+      <Placement
+        host="local"
+        project="/home/me/dev/別"
+        open
+        onToggle={() => {}}
+      />,
+    )
+
+    await waitFor(() => {
+      expect(タブの並び()).toEqual(['/home/me/dev/別/b.md'])
+    })
+  })
+
+  it('読み込み直すと、開いていたタブが順序ごと戻る', async () => {
+    // **`localStorage` に残るので、タブを開き直しても同じところから続けられる**
+    置く()
+    await 開く('計画.md')
+    await screen.findByTestId('file-view')
+    // **フォルダは押す的が違う**（リンクになるのはファイルだけ）
+    await userEvent.click(await screen.findByRole('button', { name: 'MyDocs' }))
+    await 開く('計画.md')
+
+    const 覚え = 覚えている()
+    expect(覚え.picks).toHaveLength(2)
+    expect(覚え.pick).toBe(`${ROOT}/MyDocs/計画.md`)
   })
 })

@@ -263,13 +263,18 @@ test("左パネルを開き、ファイルを読み、相対パスをコピー�
   await expect(boxes.first()).toBeChecked();
   await expect(boxes.last()).not.toBeChecked();
 
-  // 相対パスと、その基準が出ている
-  await expect(view.getByTestId("file-relative-path")).toHaveText(
-    `MyDocs/${PLAN}`,
-  );
-  // **基準は画面から `title` へ移った**（要件26）。要求そのものは消えていない
+  /*
+    **タブに名前が出て、基準は `title` に残る。**
+
+    相対パスの chip は**タブ帯が置き換えた**（`サイドバーで開いたファイルを、タブで
+    並べて切り替える`）。役目が同じ（いま何を見ているか）なので置き換えられるが、
+    **`title` は引き継ぐ**——要件26 の「基準の分からない相対パスは貼られた側で
+    解釈できない」は消えていない要求である。
+  */
+  await expect(view.getByTestId("file-tab")).toHaveText(PLAN);
+  await expect(view.getByTestId("file-relative-path")).toHaveCount(0);
   await expect(view.getByTestId("file-relative-base")).toHaveCount(0);
-  await expect(view.getByTestId("file-relative-path")).toHaveAttribute(
+  await expect(view.getByTestId("file-tab")).toHaveAttribute(
     "title",
     new RegExp(`${PROJECT_DIR} からの相対パス`),
   );
@@ -1099,8 +1104,17 @@ test("狭い窓でも、操作の列が横へはみ出さない", async ({ page 
     "操作の列が入れ物からはみ出していないこと",
   ).toBeLessThanOrEqual(1);
 
-  // 4つとも押せること（隠れていないこと）
-  for (const id of ["file-toggle-raw", "file-open-tab", "file-close"]) {
+  // どれも押せること（隠れていないこと）。**3つの工事で部品が増えた**——
+  // 探す・文字の大きさが同じ帯に入っている
+  for (const id of [
+    "file-find-open",
+    "file-zoom-out",
+    "file-zoom-reset",
+    "file-zoom-in",
+    "file-toggle-raw",
+    "file-open-tab",
+    "file-close",
+  ]) {
     const 的 = page.getByTestId(id);
     if ((await 的.count()) === 0) {
       continue;

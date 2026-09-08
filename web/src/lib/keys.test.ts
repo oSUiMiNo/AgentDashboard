@@ -7,9 +7,11 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   inputBoxRows,
+  findKeyAction,
   isCandidateAccept,
   isCandidateMove,
   isComposerSubmit,
+  isFindOpen,
   isSelectionPrompt,
   looksSelecting,
   NEWLINE,
@@ -19,6 +21,7 @@ import {
   terminalKeyOverride,
   type CandidateKeyState,
   type EnterKeyState,
+  type FindKeyState,
   type TerminalKey,
 } from './keys'
 
@@ -996,5 +999,96 @@ describe('候補の一覧が出ているときの押し分け（設計§7）', (
       )
     expect(端末で押す({}), '素の Enter は改行のまま').toBe(NEWLINE)
     expect(端末で押す({ ctrlKey: true }), 'Ctrl+Enter は送信のまま').toBe(SUBMIT)
+  })
+})
+
+/**
+ * 探す窓のキー（`ファイルビュアの中を Ctrl+F で探せるようにする` 要件）。
+ *
+ * **慣例に倣う。** Chrome も Firefox も Ctrl+F が「開く」、Ctrl+G が「次へ」である。
+ * 探す操作は利用者が他のあらゆるソフトで毎日使っているので、**ここだけ違うと覚え直しが
+ * 要る。**
+ */
+function 探すキー(overrides: Partial<FindKeyState> = {}): FindKeyState {
+  return {
+    key: 'f',
+    ctrlKey: false,
+    altKey: false,
+    metaKey: false,
+    shiftKey: false,
+    isComposing: false,
+    ...overrides,
+  }
+}
+
+describe('探す窓を開く', () => {
+  it('Ctrl+F で開く', () => {
+    expect(isFindOpen(探すキー({ ctrlKey: true }))).toBe(true)
+    // 大文字（Shift を押しながら）でも同じ
+    expect(isFindOpen(探すキー({ ctrlKey: true, key: 'F' }))).toBe(true)
+  })
+
+  it('素の F は奪わない', () => {
+    // **奪うと、本文に f が打てなくなる**わけではないが、Ctrl の意図が要る
+    expect(isFindOpen(探すキー())).toBe(false)
+  })
+
+  it('IME の変換中は何もしない', () => {
+    // 既存の3つの口（送信・候補の確定・候補の移動）と同じ配慮
+    expect(isFindOpen(探すキー({ ctrlKey: true, isComposing: true }))).toBe(false)
+  })
+
+  it('Alt / Meta が付いていたら渡さない', () => {
+    // 端末側（`terminalKeyOverride`）が読み替えを避ける組み合わせに揃える
+    expect(isFindOpen(探すキー({ ctrlKey: true, altKey: true }))).toBe(false)
+    expect(isFindOpen(探すキー({ ctrlKey: true, metaKey: true }))).toBe(false)
+  })
+
+  it('関係の無いキーは開かない', () => {
+    expect(isFindOpen(探すキー({ ctrlKey: true, key: 'g' }))).toBe(false)
+    expect(isFindOpen(探すキー({ ctrlKey: true, key: 'Enter' }))).toBe(false)
+  })
+})
+
+describe('探す窓が開いている間', () => {
+  it('Enter と Ctrl+G が「次へ」', () => {
+    expect(findKeyAction(探すキー({ key: 'Enter' }))).toBe('next')
+    expect(findKeyAction(探すキー({ key: 'g', ctrlKey: true }))).toBe('next')
+    expect(findKeyAction(探すキー({ key: 'G', ctrlKey: true }))).toBe('next')
+  })
+
+  it('Shift 付きは「前へ」', () => {
+    expect(findKeyAction(探すキー({ key: 'Enter', shiftKey: true }))).toBe('prev')
+    expect(
+      findKeyAction(探すキー({ key: 'G', ctrlKey: true, shiftKey: true })),
+    ).toBe('prev')
+  })
+
+  it('Esc は「閉じる」', () => {
+    expect(findKeyAction(探すキー({ key: 'Escape' }))).toBe('close')
+  })
+
+  it('修飾付きの Esc は渡さない', () => {
+    // **窓の外の割り当てへ渡す。** ここで食うと、他の Esc が効かなくなる
+    expect(findKeyAction(探すキー({ key: 'Escape', ctrlKey: true }))).toBeNull()
+  })
+
+  it('Ctrl+Enter は奪わない', () => {
+    /*
+      **Ctrl+Enter＝送信は状態によらず不変**（ガイドライン「Enter の割り当ては、端末と
+      入力欄で必ず揃える」）。窓の中で奪うと、同じ画面の2つの入力口で意味が変わる。
+    */
+    expect(findKeyAction(探すキー({ key: 'Enter', ctrlKey: true }))).toBeNull()
+  })
+
+  it('IME の変換中は何もしない', () => {
+    expect(
+      findKeyAction(探すキー({ key: 'Enter', isComposing: true })),
+    ).toBeNull()
+  })
+
+  it('関係の無いキーは null', () => {
+    expect(findKeyAction(探すキー({ key: 'a' }))).toBeNull()
+    expect(findKeyAction(探すキー({ key: 'ArrowDown' }))).toBeNull()
   })
 })

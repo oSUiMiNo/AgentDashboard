@@ -7,11 +7,37 @@
 
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { type ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FileView } from "@/components/FileView/FileView";
 import { rawUrl } from "@/lib/hostfs";
 
 const ROOT = "/home/me/dev/app";
+
+type FileViewProps = ComponentProps<typeof FileView>;
+type ViewerProps = Omit<
+  FileViewProps,
+  "tabs" | "onSelectTab" | "onCloseTab"
+> &
+  Partial<Pick<FileViewProps, "tabs" | "onSelectTab" | "onCloseTab">>;
+
+/**
+ * タブの受け口を既定で埋める包み。
+ *
+ * ここの検査のほとんどは**1枚だけ開いている状態**を見ているので、`tabs` は既定で
+ * そのパス1枚にする。**タブそのものの振る舞いは `FileTabs.test.tsx` と、この下の
+ * 「タブ帯」で見る。**
+ */
+function Viewer({ tabs, onSelectTab, onCloseTab, ...rest }: ViewerProps) {
+  return (
+    <FileView
+      {...rest}
+      tabs={tabs ?? [rest.path]}
+      onSelectTab={onSelectTab ?? (() => {})}
+      onCloseTab={onCloseTab ?? (() => {})}
+    />
+  );
+}
 
 /** `/api/hosts/{host}/file` の応答。 */
 function content(text: string, truncated = false) {
@@ -52,27 +78,27 @@ afterEach(() => {
 });
 
 function show(path = `${ROOT}/計画.md`) {
-  render(<FileView host="local" root={ROOT} path={path} />);
+  render(<Viewer host="local" root={ROOT} path={path} />);
 }
 
 describe("ファイルの見せ方", () => {
-  it("相対パスが出て、基準は title に残る", async () => {
+  it("タブに名前が出て、絶対パスと基準は title に残る", async () => {
+    /*
+      **相対パスの chip をタブ帯が置き換えた**（`サイドバーで開いたファイルを、タブで
+      並べて切り替える` 要件）。役目が同じ（いま何を見ているか）なので置き換えられる。
+
+      **`title` は引き継ぐ。** `ファイル設計§15`「基準の分からない相対パスは貼られた
+      側で解釈できない」は**消えていない要求**で、要件26・細かい修正 設計§8-6 が
+      「画面の面積を使わずに満たす」形へ移しただけである——ここを落とすと要求ごと落ちる。
+    */
     serve(content("# 計画"));
     show(`${ROOT}/MyDocs/計画.md`);
 
-    expect(await screen.findByTestId("file-relative-path")).toHaveTextContent(
-      "MyDocs/計画.md",
-    );
-
-    /*
-      **注記は画面から落とし、`title` へ移した**（要件26・細かい修正 設計§8-6）。
-
-      `ファイル設計§15`「基準の分からない相対パスは貼られた側で解釈できない」は
-      **消えていない要求**なので、出し方を変えて満たしている——ここを消すだけの
-      変更にすると、その要求ごと落ちる。
-    */
+    const タブ = await screen.findByTestId("file-tab");
+    expect(タブ).toHaveTextContent("計画.md");
+    expect(screen.queryByTestId("file-relative-path")).toBeNull();
     expect(screen.queryByTestId("file-relative-base")).toBeNull();
-    expect(screen.getByTestId("file-relative-path")).toHaveAttribute(
+    expect(タブ).toHaveAttribute(
       "title",
       `${ROOT}/MyDocs/計画.md（${ROOT} からの相対パス）`,
     );
@@ -87,7 +113,7 @@ describe("ファイルの見せ方", () => {
     serve(content("# 計画"));
     show(`${ROOT}/MyDocs/計画.md`);
 
-    await screen.findByTestId("file-relative-path");
+    await screen.findByTestId("file-tab");
     expect(screen.queryByTestId("file-copy")).toBeNull();
     expect(screen.queryByTestId("file-copied")).toBeNull();
     expect(screen.queryByTestId("file-copy-fallback")).toBeNull();
@@ -113,7 +139,7 @@ describe("ファイルの見せ方", () => {
       ),
     );
     const { container } = render(
-      <FileView host="local" root={ROOT} path={`${ROOT}/計画.md`} />,
+      <Viewer host="local" root={ROOT} path={`${ROOT}/計画.md`} />,
     );
     await screen.findByTestId("file-markdown");
 
@@ -142,7 +168,7 @@ describe("ファイルの見せ方", () => {
     // 反映されない` 設計§5）。同じ字を貼れば同じ見え方になる
     serve(content("あいう\nかきく\n"));
     const { container } = render(
-      <FileView host="local" root={ROOT} path={`${ROOT}/計画.md`} />,
+      <Viewer host="local" root={ROOT} path={`${ROOT}/計画.md`} />,
     );
     await screen.findByTestId("file-markdown");
 
@@ -155,7 +181,7 @@ describe("ファイルの見せ方", () => {
     // 節の区切りに `<br/>` を2行置く作法なので、**意図した行間がここで戻る**
     serve(content("# 見出し\n\n---\n<br/>\n<br/>\n\n本文\n"));
     const { container } = render(
-      <FileView host="local" root={ROOT} path={`${ROOT}/計画.md`} />,
+      <Viewer host="local" root={ROOT} path={`${ROOT}/計画.md`} />,
     );
     await screen.findByTestId("file-markdown");
 
@@ -169,7 +195,7 @@ describe("ファイルの見せ方", () => {
   it("囲みコードの中の改行は、二重にならない", async () => {
     serve(content("```\n1行目\n2行目\n```\n"));
     const { container } = render(
-      <FileView host="local" root={ROOT} path={`${ROOT}/計画.md`} />,
+      <Viewer host="local" root={ROOT} path={`${ROOT}/計画.md`} />,
     );
     await screen.findByTestId("file-markdown");
 
@@ -327,7 +353,7 @@ describe("ブラウザで開く", () => {
     // 帯の中で浮かないこと。**同じ器の大きさ・同じ線の太さ**で並ぶ
     serve(content("# 計画"));
     render(
-      <FileView
+      <Viewer
         host="local"
         root={ROOT}
         path={`${ROOT}/計画.md`}
@@ -359,7 +385,7 @@ describe("ブラウザで開く", () => {
     for (const name of ["計画.md", "メモ.txt", "組み込み.js"]) {
       serve(content("中身"));
       const { unmount } = render(
-        <FileView host="local" root={ROOT} path={`${ROOT}/${name}`} />,
+        <Viewer host="local" root={ROOT} path={`${ROOT}/${name}`} />,
       );
       expect(await screen.findByTestId("file-open-tab")).toBeInTheDocument();
       unmount();
@@ -370,7 +396,7 @@ describe("ブラウザで開く", () => {
     // いちばん結果の重い操作が、押し間違いで動かない位置に居ること（設計§6-1）
     serve(content("# 計画"));
     render(
-      <FileView
+      <Viewer
         host="local"
         root={ROOT}
         path={`${ROOT}/計画.md`}
@@ -379,9 +405,17 @@ describe("ブラウザで開く", () => {
     );
 
     await screen.findByTestId("file-open-tab");
-    const 並び = ["file-toggle-raw", "file-open-tab", "file-close"].map((id) =>
-      screen.getByTestId(id),
-    );
+    /*
+      **3つの工事が同じ帯へ入ったので、間に部品が増えている**（探す・文字の大きさ）。
+      それでも見ているのは「いちばん結果の重い操作が右端に居ること」で、意味は変わらない。
+    */
+    const 並び = [
+      "file-find-open",
+      "file-zoom",
+      "file-toggle-raw",
+      "file-open-tab",
+      "file-close",
+    ].map((id) => screen.getByTestId(id));
     for (let at = 0; at + 1 < 並び.length; at += 1) {
       expect(
         並び[at].compareDocumentPosition(並び[at + 1]) &
@@ -438,7 +472,7 @@ describe("画像と HTML", () => {
           },
         ),
     );
-    render(<FileView host="local" root={ROOT} path={`${ROOT}/撮った.png`} />);
+    render(<Viewer host="local" root={ROOT} path={`${ROOT}/撮った.png`} />);
 
     const image = await screen.findByTestId("file-image");
     expect(image).toHaveAttribute("src", "blob:偽物/0");
@@ -454,7 +488,7 @@ describe("画像と HTML", () => {
     record(
       () => new Response("大きすぎます（9000000 バイト）", { status: 413 }),
     );
-    render(<FileView host="local" root={ROOT} path={`${ROOT}/大きい.png`} />);
+    render(<Viewer host="local" root={ROOT} path={`${ROOT}/大きい.png`} />);
 
     expect(await screen.findByTestId("file-error")).toHaveTextContent(
       "大きすぎます（9000000 バイト）",
@@ -474,7 +508,7 @@ describe("画像と HTML", () => {
           },
         ),
     );
-    render(<FileView host="local" root={ROOT} path={`${ROOT}/嘘.png`} />);
+    render(<Viewer host="local" root={ROOT} path={`${ROOT}/嘘.png`} />);
 
     const image = await screen.findByTestId("file-image");
     // jsdom は画像を解こうとしないので、`onError` を自分で起こす
@@ -495,13 +529,13 @@ describe("画像と HTML", () => {
         }),
     );
     const view = render(
-      <FileView host="local" root={ROOT} path={`${ROOT}/一枚目.png`} />,
+      <Viewer host="local" root={ROOT} path={`${ROOT}/一枚目.png`} />,
     );
     await screen.findByTestId("file-image");
     expect(revoked).toHaveLength(0);
 
     view.rerender(
-      <FileView host="local" root={ROOT} path={`${ROOT}/二枚目.png`} />,
+      <Viewer host="local" root={ROOT} path={`${ROOT}/二枚目.png`} />,
     );
     await waitFor(() => expect(revoked).toContain("blob:偽物/0"));
   });
@@ -519,7 +553,7 @@ describe("画像と HTML", () => {
           { status: 200 },
         ),
     );
-    render(<FileView host="local" root={ROOT} path={`${ROOT}/理解.html`} />);
+    render(<Viewer host="local" root={ROOT} path={`${ROOT}/理解.html`} />);
 
     const frame = await screen.findByTestId("file-frame");
     // **鍵の片方。** 許すのは script の1段だけで、**`allow-same-origin` は書かない**
@@ -550,7 +584,7 @@ describe("画像と HTML", () => {
           { status: 200 },
         ),
     );
-    render(<FileView host="local" root={ROOT} path={`${ROOT}/理解.html`} />);
+    render(<Viewer host="local" root={ROOT} path={`${ROOT}/理解.html`} />);
 
     expect(await screen.findByTestId("file-frame")).toBeInTheDocument();
     expect(screen.queryByTestId("file-raw")).toBeNull();
@@ -560,7 +594,7 @@ describe("画像と HTML", () => {
 
   it("HTML が読めなかったら、箱を出さずに理由だけを出す", async () => {
     record(() => new Response("その場所は見つかりません", { status: 404 }));
-    render(<FileView host="local" root={ROOT} path={`${ROOT}/無い.html`} />);
+    render(<Viewer host="local" root={ROOT} path={`${ROOT}/無い.html`} />);
 
     expect(await screen.findByTestId("file-error")).toHaveTextContent(
       "その場所は見つかりません",
@@ -581,7 +615,7 @@ describe("画像と HTML", () => {
           { status: 200 },
         ),
     );
-    render(<FileView host="local" root={ROOT} path={`${ROOT}/図.svg`} />);
+    render(<Viewer host="local" root={ROOT} path={`${ROOT}/図.svg`} />);
 
     expect(await screen.findByTestId("file-frame")).toHaveAttribute(
       "sandbox",
@@ -603,7 +637,7 @@ describe("画像と HTML", () => {
           { status: 200 },
         ),
     );
-    render(<FileView host="local" root={ROOT} path={`${ROOT}/理解.html`} />);
+    render(<Viewer host="local" root={ROOT} path={`${ROOT}/理解.html`} />);
 
     // **両方付くと隔離が実質消える。** 箱がダッシュボードと同じ出自を名乗れて、
     // script が自分で `sandbox` を外せる（設計§4-2）。**ここが崩れても画面は普通に
@@ -636,12 +670,276 @@ describe("画像と HTML", () => {
           { status: 200 },
         ),
     );
-    render(<FileView host="local" root={ROOT} path={`${ROOT}/理解.html`} />);
+    render(<Viewer host="local" root={ROOT} path={`${ROOT}/理解.html`} />);
     await screen.findByTestId("file-frame");
 
     await userEvent.click(screen.getByTestId("file-toggle-raw"));
 
     expect(screen.getByTestId("file-raw")).toHaveTextContent("<p>理解</p>");
     expect(screen.queryByTestId("file-frame")).toBeNull();
+  });
+});
+
+/** Ctrl+F を画面全体へ撃つ。**奪ったかどうかは `defaultPrevented` で言える** */
+function CtrlF(): boolean {
+  const event = new KeyboardEvent("keydown", {
+    key: "f",
+    ctrlKey: true,
+    bubbles: true,
+    cancelable: true,
+  });
+  globalThis.dispatchEvent(event);
+  return event.defaultPrevented;
+}
+
+/**
+ * 中を探す（`ファイルビュアの中を Ctrl+F で探せるようにする` テスト計画フェーズ3）。
+ *
+ * **探せるのはテキストとして出している2つだけで、これは選択ではなく制約である。**
+ * 画像は文字を持たず、HTML ／ SVG の箱は外から中身に触れない——**触れないのは隔離が
+ * 効いている証拠**であって、直すべき不具合ではない。
+ */
+describe("中を探す", () => {
+  it("整形した Markdown では入口が出る", async () => {
+    serve(content("# 計画"));
+    show();
+    expect(await screen.findByTestId("file-find-open")).toBeInTheDocument();
+  });
+
+  it("生テキストで見ているときも出る", async () => {
+    serve(content("# 計画"));
+    show();
+    await userEvent.click(await screen.findByTestId("file-toggle-raw"));
+    expect(screen.getByTestId("file-find-open")).toBeInTheDocument();
+  });
+
+  it("画像のときは出ない", async () => {
+    // **押せるのに何も起きないものは、壊れているのと見分けが付かない**
+    serve(content("なにか"));
+    show(`${ROOT}/撮った.png`);
+    await waitFor(() => {
+      expect(screen.queryByTestId("file-find-open")).toBeNull();
+    });
+  });
+
+  it("HTML を箱で描いているときは出ない", async () => {
+    serve(content("<p>あ</p>"));
+    show(`${ROOT}/理解.html`);
+    await screen.findByTestId("file-frame");
+    expect(screen.queryByTestId("file-find-open")).toBeNull();
+  });
+
+  it("入口を押すと窓が出て、すぐ打てる", async () => {
+    serve(content("# 計画"));
+    show();
+    await userEvent.click(await screen.findByTestId("file-find-open"));
+    expect(screen.getByTestId("file-find")).toBeInTheDocument();
+    expect(screen.getByTestId("file-find-input")).toHaveFocus();
+  });
+
+  it("探せるときの Ctrl+F は、ブラウザから奪う", async () => {
+    /*
+      **奪わないと成立しない。** ブラウザの探索は画面全体が対象で、この画面には
+      セッションの区画・履歴・入力欄・サイドバーのファイル名が同居している。
+    */
+    serve(content("# 計画"));
+    show();
+    await screen.findByTestId("file-find-open");
+
+    expect(CtrlF()).toBe(true);
+    // **画面の外から撃った合図なので、反映を待つ**（React の更新は同期しない）
+    expect(await screen.findByTestId("file-find")).toBeInTheDocument();
+  });
+
+  it("箱で描いているときの Ctrl+F は奪わず、逃げ道だけを言う", async () => {
+    /*
+      **黙って消えると「探せない道具だ」と読まれる**（要件）。ブラウザ本来の探索は
+      そのまま開かせたうえで、「生テキストで見れば探せる」ことだけを画面に出す。
+    */
+    serve(content("<p>あ</p>"));
+    show(`${ROOT}/理解.html`);
+    await screen.findByTestId("file-frame");
+
+    expect(CtrlF()).toBe(false);
+    expect(await screen.findByTestId("file-find-hint")).toHaveTextContent(
+      "生テキストで見る",
+    );
+    expect(screen.queryByTestId("file-find")).toBeNull();
+  });
+
+  it("逃げ道は、押されるまで出さない", async () => {
+    // HTML を開くたびに「探せません」と書いてあると、探すつもりの無い人には雑音
+    serve(content("<p>あ</p>"));
+    show(`${ROOT}/理解.html`);
+    await screen.findByTestId("file-frame");
+    expect(screen.queryByTestId("file-find-hint")).toBeNull();
+  });
+
+  it("探す窓は、遡る箱の中に入っていない", async () => {
+    /*
+      **`position: absolute` の子は、スクロールする箱の中に置くと中身と一緒に流れる。**
+      少し送っただけで窓が画面の外へ消えるので、基準は**箱を包む流れない段**でなければ
+      ならない。**中に入れ直すとこの1本だけが落ちる。**
+    */
+    serve(content("# 計画"));
+    show();
+    await userEvent.click(await screen.findByTestId("file-find-open"));
+
+    const 窓 = screen.getByTestId("file-find");
+    const 箱 = screen.getByTestId("file-body");
+    expect(箱.contains(窓)).toBe(false);
+    // それでも同じ段に居る（浮かせる基準が共通の親であること）
+    expect(窓.parentElement).toBe(箱.parentElement);
+    expect(窓.parentElement?.className).toContain("relative");
+  });
+
+  it("ファイルを切り替えると、窓は畳まれる", async () => {
+    // 前のファイルで打った語が残ると、当たりの数だけが別の文書のものに見える
+    serve(content("# 計画"));
+    const { rerender } = render(
+      <Viewer host="local" root={ROOT} path={`${ROOT}/a.md`} />,
+    );
+    await userEvent.click(await screen.findByTestId("file-find-open"));
+    expect(screen.getByTestId("file-find")).toBeInTheDocument();
+
+    rerender(<Viewer host="local" root={ROOT} path={`${ROOT}/b.md`} />);
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("file-find")).toBeNull();
+    });
+  });
+});
+
+/**
+ * 文字の大きさ（`ファイルビュアの文字を小さめに始め…` テスト計画フェーズ2・3）。
+ *
+ * **jsdom は CSS を当てないので、実際に何ピクセルで出るかは見られない。** ここで
+ * 確かめるのは**器が倍率を持ち、本文が直書きを持たないこと**まで。
+ */
+describe("文字の大きさ", () => {
+  it("帯に「−」「＋」と倍率が出る", async () => {
+    serve(content("# 計画"));
+    show();
+    await screen.findByTestId("file-zoom");
+    expect(screen.getByTestId("file-zoom-out")).toBeInTheDocument();
+    expect(screen.getByTestId("file-zoom-in")).toBeInTheDocument();
+    expect(screen.getByTestId("file-zoom-reset")).toHaveTextContent("100%");
+  });
+
+  it("押すと段で動く", async () => {
+    serve(content("# 計画"));
+    show();
+    await userEvent.click(await screen.findByTestId("file-zoom-in"));
+    expect(screen.getByTestId("file-zoom-reset")).toHaveTextContent("110%");
+    await userEvent.click(screen.getByTestId("file-zoom-out"));
+    expect(screen.getByTestId("file-zoom-reset")).toHaveTextContent("100%");
+  });
+
+  it("倍率を押すと既定へ戻る", async () => {
+    // **ボタンを1つ増やさずに済み、いまどの段に居るかが常に見える**
+    serve(content("# 計画"));
+    show();
+    await userEvent.click(await screen.findByTestId("file-zoom-in"));
+    await userEvent.click(screen.getByTestId("file-zoom-in"));
+    expect(screen.getByTestId("file-zoom-reset")).toHaveTextContent("125%");
+
+    await userEvent.click(screen.getByTestId("file-zoom-reset"));
+    expect(screen.getByTestId("file-zoom-reset")).toHaveTextContent("100%");
+  });
+
+  it("上限・下限では押せない", async () => {
+    // **押せるのに何も起きないものは、壊れているのと見分けが付かない**
+    globalThis.localStorage.setItem("agentdashboard.file-zoom", "200");
+    serve(content("# 計画"));
+    show();
+    await screen.findByTestId("file-zoom");
+    expect(screen.getByTestId("file-zoom-in")).toBeDisabled();
+    expect(screen.getByTestId("file-zoom-out")).not.toBeDisabled();
+
+    globalThis.localStorage.setItem("agentdashboard.file-zoom", "80");
+  });
+
+  it("器が倍率を持ち、本文は直書きを持たない", async () => {
+    /*
+      **要素へ直接効くユーティリティに、器の側の変数は勝てない。** 直書きを外す
+      ところまでが1組である（`index.css` の `.prose-body` が同じ理由で同じ形）。
+    */
+    globalThis.localStorage.setItem("agentdashboard.file-zoom", "100");
+    serve(content("# 計画"));
+    show();
+
+    const 器 = await screen.findByTestId("file-view");
+    expect(器.className).toContain("file-zoom");
+    expect(器.getAttribute("style")).toContain("--file-zoom: 1");
+
+    const 本文 = screen.getByTestId("file-markdown");
+    expect(本文.className).toContain("file-prose");
+    expect(本文.className).not.toContain("text-sm");
+    expect(本文.className).not.toContain("leading-relaxed");
+  });
+
+  it("生テキストにも直書きが残っていない", async () => {
+    serve(content("# 計画"));
+    show();
+    await userEvent.click(await screen.findByTestId("file-toggle-raw"));
+    const 素 = screen.getByTestId("file-raw");
+    expect(素.className).toContain("file-raw");
+    expect(素.className).not.toContain("text-xs");
+  });
+
+  it("画像や箱を開いていても、大きさの操作は消えない", async () => {
+    // **中身が変わらないだけで、操作は消えない**（帯の並びが窓の中身で動かない）
+    serve(content("<p>あ</p>"));
+    show(`${ROOT}/理解.html`);
+    await screen.findByTestId("file-frame");
+    expect(screen.getByTestId("file-zoom")).toBeInTheDocument();
+  });
+});
+
+/**
+ * ヘッダが1行に収まること（3つの要件がどれも完了条件に挙げている）。
+ *
+ * **実際に折り返すかは実機でしか言えない**（jsdom に幅が無い）。ここで固定するのは
+ * **折り返さない綴りであること**と、**右の群が縮まないこと**まで。
+ */
+describe("ヘッダは1行", () => {
+  it("折り返しを許さない", async () => {
+    serve(content("# 計画"));
+    show();
+    await screen.findByTestId("file-tabs");
+    const 帯 = screen.getByTestId("file-view").querySelector("header");
+    expect(帯?.className).not.toContain("flex-wrap");
+  });
+
+  it("右の群は縮まない", async () => {
+    // **`file-close` は閉じる手を渡したときだけ出る**（列を持たない場面では出さない）
+    serve(content("# 計画"));
+    render(
+      <Viewer
+        host="local"
+        root={ROOT}
+        path={`${ROOT}/計画.md`}
+        onClose={() => {}}
+      />,
+    );
+    const 群 = (await screen.findByTestId("file-close")).parentElement;
+    expect(群?.className).toContain("shrink-0");
+  });
+
+  it("狭い窓では「生テキストで見る」が印だけになる", async () => {
+    /*
+      **折り返しを禁じたぶん、いちばん広い部品が入らなくなる**（約120px）。
+      `DESIGN.md` §39.6 のターミナルトグルが同じことをしている。
+      **言葉は `aria-label` と `title` に残る。**
+    */
+    serve(content("# 計画"));
+    show();
+    const 切替 = await screen.findByTestId("file-toggle-raw");
+    expect(切替).toHaveAttribute("aria-label", "生テキストで見る");
+    expect(切替.querySelector("svg")?.getAttribute("class")).toContain(
+      "md:hidden",
+    );
+    expect(切替.querySelector("span")?.className).toContain("hidden");
+    expect(切替.querySelector("span")?.className).toContain("md:inline");
   });
 });

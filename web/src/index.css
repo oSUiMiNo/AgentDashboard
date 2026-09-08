@@ -318,6 +318,68 @@
   font-size: var(--body-size, 0.75rem);
   line-height: var(--body-line, 1.625);
 }
+/*
+  ファイルビュアの中身の大きさ（`ファイルビュアの文字を小さめに始め、その場で大きさを
+  変えられるようにする` 設計）。**器が倍率を持ち、本文がそれを読む**——上の
+  `.prose-body` と同じ流儀である。
+
+  **`.prose-dashboard` へ直接書かない。** あちらは構造化ビュー（履歴）と共用しているので、
+  値そのものを動かすと関係の無い画面まで一緒に動く。
+
+  # 既定は「いままでの 0.85 倍」（利用者の指定）
+
+  | 面 | いままで | 既定（`--file-zoom: 1`） |
+  |---|---|---|
+  | 整形 Markdown | 0.875rem（14px） | **0.74375rem（11.9px）** |
+  | 生テキスト | 0.75rem（12px） | **0.6375rem（10.2px）** |
+
+  **`0.85` を書くのはここ1箇所だけ**（`--file-shrink`）。2箇所に書くと、片方だけ直った
+  ときに整形と生テキストの差が黙って変わる。
+
+  **`DESIGN.md` §13.2 の目安を下回る。** 承知のうえで入れてあり、§13.2 に但し書きを
+  足してある——**この面だけは読み手が倍率を持っている**（押せば大きくなる）ので、
+  与えられた大きさで読むしかない他の面とは事情が違う。
+
+  # 余白も同じ器から取る
+
+  `.prose-dashboard` の見出し・コード・段落は `em` 指定なので、**入れ物の文字サイズを
+  1つ与えれば木ごと拡縮する**。行間だけを据え置くと、小さい器で行間だけが相対的に
+  広い、ちぐはぐな組版になる。
+*/
+.file-zoom {
+  --file-shrink: 0.85;
+  --file-prose-size: calc(0.875rem * var(--file-shrink) * var(--file-zoom, 1));
+  --file-raw-size: calc(0.75rem * var(--file-shrink) * var(--file-zoom, 1));
+}
+.file-zoom .file-prose {
+  font-size: var(--file-prose-size);
+  line-height: 1.625;
+}
+.file-zoom .file-raw {
+  font-size: var(--file-raw-size);
+}
+
+/*
+  探した語の印（`ファイルビュアの中を Ctrl+F で探せるようにする` 設計）。
+
+  **`<mark>` を差し込まず、`Range` へ名前を付けて塗る**（CSS Custom Highlight API）。
+  DOM を1つも書き換えないので、`react-markdown` の整形と取り合わない。
+
+  **色は Primary Accent（シアン系）。** `DESIGN.md` §8 の表が「Primary Accent は
+  **選択・現在地**・主要操作のいずれかに面で出す」と定めており、**いま見ている当たりは
+  まさに現在地**である。琥珀にしないのは、あちらが §11.2 で「保留・注意」に固定されて
+  いるため——警報以外へ広げると警報が効かなくなる。
+
+  **全部の当たりは薄く、いま見ている1つだけ濃く。** 濃いほうは面で出るので、
+  地と字のコントラストを保つために字の色ごと入れ替える。
+*/
+::highlight(file-find) {
+  background-color: color-mix(in oklch, var(--primary) 30%, transparent);
+}
+::highlight(file-find-current) {
+  background-color: var(--primary);
+  color: var(--primary-foreground);
+}
 .prose-dashboard h1,
 .prose-dashboard h2,
 .prose-dashboard h3,

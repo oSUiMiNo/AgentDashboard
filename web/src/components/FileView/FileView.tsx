@@ -36,11 +36,22 @@
  * SVG にも同じ理由が当てはまるので、そちらにも出す（設計§7-4）。
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import ReactMarkdown from 'react-markdown'
+import { FileFind } from '@/components/FileView/FileFind'
+import { FileTabs } from '@/components/FileView/FileTabs'
 import { Button } from '@/components/ui/button'
-import { CloseGlyph, ExternalLinkGlyph } from '@/components/ui/glyphs'
+import {
+  CloseGlyph,
+  CodeGlyph,
+  ExternalLinkGlyph,
+  MinusGlyph,
+  PlusGlyph,
+  SearchGlyph,
+} from '@/components/ui/glyphs'
 import { fileKind, needsSandbox } from '@/lib/fileKind'
+import { useFileZoom, ZOOM_STEPS } from '@/lib/fileZoom'
+import { isFindOpen } from '@/lib/keys'
 import { REHYPE_PLUGINS, REMARK_PLUGINS } from '@/lib/markdown'
 import {
   HostFsError,
@@ -98,9 +109,20 @@ interface Props {
   host: string
   /** 相対パスの基準（その枠のパス）。**画面にも出す** */
   root: string
-  /** 読むファイルの絶対パス */
+  /** 読むファイルの絶対パス。**開いているタブのうち、いま見ている1枚** */
   path: string
-  /** 閉じる。省略すると閉じる操作を出さない */
+  /** 開いているタブの絶対パス（左から右の順） */
+  tabs: string[]
+  /** タブを押した。**並びは動かさず、選び直すだけ** */
+  onSelectTab: (path: string) => void
+  /** タブの ✕。**1枚だけ閉じる**（下の `onClose` は列ごと） */
+  onCloseTab: (path: string) => void
+  /**
+   * **列ごと**閉じる。省略すると閉じる操作を出さない。
+   *
+   * **タブの ✕ とは別物なので、ラベルを書き分ける**（要件の完了条件5）。残してある
+   * のは、タブが10枚あるときに1枚ずつ閉じるのが苦行だからである。
+   */
   onClose?: () => void
   /**
    * 読めなかったことを親へ知らせる（`イシューグループ_2026-0813-1804` 設計§6-5）。
@@ -126,6 +148,9 @@ export function FileView({
   host,
   root,
   path,
+  tabs,
+  onSelectTab,
+  onCloseTab,
   onClose,
   onUnreadable,
 }: Props) {
@@ -144,6 +169,18 @@ export function FileView({
   const [loading, setLoading] = useState(true)
   // 整形できる相手のときだけ意味を持つ。既定は整形（進捗を読むのが目的のため）
   const [raw, setRaw] = useState(false)
+  /** 探す窓が開いているか（`ファイルビュアの中を Ctrl+F で探せるようにする` 設計） */
+  const [find, setFind] = useState(false)
+  /**
+   * 箱で描いている HTML ／ SVG で Ctrl+F が押されたか。
+   *
+   * **押されるまで出さない。** HTML を開くたびに「探せません」と書いてあると、
+   * 探すつもりの無い人にとってはただの雑音になる。
+   */
+  const [逃げ道, set逃げ道] = useState(false)
+  /** 遡る箱。**探す相手であり、送る相手でもある** */
+  const bodyRef = useRef<HTMLDivElement>(null)
+  const [zoom, 大きさ] = useFileZoom()
   // `CopyPath`（`FolderBrowser`）と同じ3つの状態。**片方だけ黙る作りにしない**
 
   useEffect(() => {
@@ -152,6 +189,10 @@ export function FileView({
     setLoading(true)
     setError(null)
     setRaw(false)
+    // **ファイルを切り替えたら探す窓を畳む。** 前のファイルで打った語がそのまま
+    // 残ると、当たりの数だけが別の文書のものに見える
+    setFind(false)
+    set逃げ道(false)
     setBroken(false)
     setContent(null)
     setPicture(null)
@@ -221,46 +262,179 @@ export function FileView({
   // 整形の逃げ道を出す相手（設計§7-4）。**画像には出さない**——テキストではないので、
   // 出しても読めない。代わりに大きさと種別を出す
   const canShowSource = markdown || boxed
+  /** いま箱（`iframe`）で描いているか。**箱の中へは外から触れない** */
+  const 箱で描いている = boxed && !raw
+  /**
+   * いま中を探せるか。**探せるのはテキストとして出している2つだけで、これは選択では
+   * なく制約である**（`ファイルビュアの中を Ctrl+F で探せるようにする` 要件）。
+   *
+   * - 画像は**文字を持たない**
+   * - HTML ／ SVG の箱は `allow-same-origin` を書いていないので**別の出自を名乗る**
+   *   ——外から中身に触れないのは**隔離が効いている証拠**であって、直すべき不具合ではない
+   */
+  const 探せる = !loading && content !== null && !箱で描いている
+
+  /*
+    **Ctrl+F を奪うのは、探せるときだけ。**
+
+    ブラウザの探索は画面全体が対象なので、「開いているファイルの中だけ」という目的を
+    ブラウザ側の機能では満たせない。一方**常に奪うのは行き過ぎ**で、ファイルビュアを
+    開いていない画面でまで奪うと、ブラウザ本来の探索を取り上げることになる。
+
+    **箱で描いているときは奪わない。** ただし黙って何もしないと「探せない道具だ」と
+    読まれるので、**逃げ道（生テキストで見れば探せる）だけを画面に出す**——
+    ブラウザ本来の探索はそのまま開く。
+
+    **焦点の位置で結果を変えない**（`lib/keys.ts` の作法）。この画面には入力口が2つ
+    常設されているが、Ctrl+F はどちらでも文字を打つ操作ではないので、奪っても
+    打鍵の邪魔にならない。**窓の中の Ctrl+F は窓自身が先に食う**ので、ここへは来ない。
+  */
+  useEffect(() => {
+    if (loading || content === null) {
+      return
+    }
+    const 押した = (event: KeyboardEvent) => {
+      if (
+        !isFindOpen({
+          key: event.key,
+          ctrlKey: event.ctrlKey,
+          altKey: event.altKey,
+          metaKey: event.metaKey,
+          shiftKey: event.shiftKey,
+          isComposing: event.isComposing,
+        })
+      ) {
+        return
+      }
+      if (箱で描いている) {
+        // **奪わない。** ブラウザ本来の探索を開かせたうえで、逃げ道だけを言う
+        set逃げ道(true)
+        return
+      }
+      event.preventDefault()
+      setFind(true)
+    }
+    globalThis.addEventListener('keydown', 押した)
+    return () => globalThis.removeEventListener('keydown', 押した)
+  }, [loading, content, 箱で描いている])
 
   return (
     <section
       data-testid="file-view"
       data-path={path}
       data-kind={kind}
+      /*
+        **器が大きさを持ち、本文がそれを読む**（`index.css` の `.file-zoom`）。
+
+        **`.prose-dashboard` へ直接書かない。** あちらは構造化ビューと共用しているので、
+        値そのものを動かすと**関係の無い画面（履歴）まで一緒に動く**。ここで渡すのは
+        「どこから取るか」だけで、器の外ではフォールバックが効く。
+      */
+      style={{ '--file-zoom': zoom / 100 } as CSSProperties}
       // **入れ物の高さいっぱいに広がる。** これが無いと中身が伸び放題になり、
       // 下の `overflow-auto` が効かずに親ごとはみ出す（兄弟の `FolderBrowser` と同じ理由）。
       // `overflow-auto` が言うのは「はみ出したら遡らせる」だけで、**どこまでがはみ出しかは
       // 別に決まっている必要がある**。高さが `auto` のままだと箱も中身と一緒に伸びるので、
       // はみ出しが永久に発生しない——遡れないのに、画面には「短い文書」に見える
-      className="border-border flex h-full min-h-0 flex-col gap-2 border-t pt-2"
+      className="file-zoom border-border flex h-full min-h-0 flex-col gap-2 border-t pt-2"
     >
-      <header className="flex flex-wrap items-center gap-1.5">
+      {/*
+        **1行に保つ**（`flex-nowrap`）。3つの工事（タブ・探す・文字の大きさ）が同じ帯へ
+        入り、どれも「狭い窓で2行にならない」を完了条件に挙げている。折り返しを許すと、
+        部品が増えるたびにヘッダが伸びて中身が下へ押し出される。
+
+        **折り返しを禁じたぶん、いちばん広い部品が入らなくなる。** `生テキストで見る`
+        （約120px）だけは狭い窓で印にする——**`DESIGN.md` §39.6 のターミナルトグルが
+        同じことをしている**。
+
+        並びは**左から、効く相手が近いものから遠いものへ**。
+        「どのファイルか（タブ）」→「中身をどう読むか（探す・大きさ・整形／生）」→
+        「外へ出す」→「閉じる」。
+      */}
+      <header className="flex items-center gap-1.5">
         {/*
-          **基準は画面から落とし、`title` へ移した**（要件26・設計§8-6）。
-
-          `ファイル設計§15` は「基準の分からない相対パスは貼られた側で解釈できない」
-          として画面に出すことを決めていた。**その要求は消えていない**ので、
-          出し方だけを変えてある——**画面の面積を使わずに基準を残せる**。
-
-          **絶対パスも同じ `title` に残す。** 落としたのは注記であって、
-          「これがどこのファイルか」を確かめる道ではない。
+          **タブ帯が、もとの相対パスの chip を置き換える**（`FileTabs`）。
+          役目が同じ（いま何を見ているか）で、`title` も引き継いでいるので、
+          置き換えても失われる情報が無い。
         */}
-        <code
-          data-testid="file-relative-path"
-          className="bg-muted min-w-0 truncate rounded px-1.5 py-0.5 text-xs"
-          title={`${path}（${root} からの相対パス）`}
-        >
-          {relative}
-        </code>
+        <FileTabs
+          tabs={tabs}
+          current={path}
+          root={root}
+          onSelect={onSelectTab}
+          onClose={onCloseTab}
+        />
 
-        {/* **折り返しを許す。** 3つ並ぶので、狭い窓（セッション専用画面の幅）では
-            1行に収まらない。`shrink-0` のまま折り返さないと、そのまま横へはみ出す
-            （`ファイルの中身に掛けた隔離を、script の1段だけ解く` 設計§6-4）。
+        <div className="ml-auto flex shrink-0 items-center gap-1">
+          {探せる && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              data-testid="file-find-open"
+              aria-label="このファイルの中を探す"
+              title="このファイルの中を探す（Ctrl+F）"
+              aria-pressed={find}
+              onClick={() => setFind(true)}
+            >
+              <SearchGlyph />
+            </Button>
+          )}
 
-            **数は実態に合わせてある。** かつて「4つ目を足したので」と書いてあったが、
-            `パスをコピー` が `f085071` で外れたあとも数だけが残っていた。**理由（折り返しを
-            許す）は消えていないので、理由は残して数だけ直した** */}
-        <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-1">
+          {/*
+            **文字の大きさ**（`ファイルビュアの文字を小さめに始め…` 設計）。
+
+            **3つで1つのまとまりに見せる。** 間を詰め、囲みを共有する——別々の
+            ボタンに見えると、真ん中の数字が押せることが読めない。
+
+            **端では押せなくする。** 押せるのに何も起きないものは、壊れているのと
+            見分けが付かない。
+
+            **「拡大／縮小」と呼ばない**（`DESIGN.md` §39.5）。その語は画面の行き来に
+            取ってある。ここは「文字を大きく／小さく」。
+          */}
+          <div
+            data-testid="file-zoom"
+            className="border-border flex shrink-0 items-center rounded-md border"
+          >
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              data-testid="file-zoom-out"
+              aria-label="文字を小さく"
+              title="文字を小さく"
+              disabled={zoom <= ZOOM_STEPS[0]}
+              onClick={大きさ.小さく}
+            >
+              <MinusGlyph />
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              data-testid="file-zoom-reset"
+              aria-label={`文字の大きさ ${zoom}%。押すと既定へ戻す`}
+              title="押すと既定の大きさへ戻す"
+              className="min-w-11 px-1 text-[11px] tabular-nums"
+              onClick={大きさ.戻す}
+            >
+              {zoom}%
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              data-testid="file-zoom-in"
+              aria-label="文字を大きく"
+              title="文字を大きく"
+              disabled={zoom >= ZOOM_STEPS[ZOOM_STEPS.length - 1]}
+              onClick={大きさ.大きく}
+            >
+              <PlusGlyph />
+            </Button>
+          </div>
+
           {canShowSource && (
             <Button
               type="button"
@@ -268,9 +442,20 @@ export function FileView({
               size="sm"
               data-testid="file-toggle-raw"
               aria-pressed={raw}
-              onClick={() => setRaw((now) => !now)}
+              aria-label={raw ? '整形して見る' : '生テキストで見る'}
+              title={raw ? '整形して見る' : '生テキストで見る'}
+              onClick={() => {
+                setRaw((now) => !now)
+                // **見せ方を変えたら逃げ道の案内は消す。** 生テキストへ移れば探せる
+                // ようになるし、箱へ戻したときにまた出すのは押されてからでよい
+                set逃げ道(false)
+              }}
             >
-              {raw ? '整形して見る' : '生テキストで見る'}
+              {/* **狭い窓では印だけ**（§39.6）。言葉は `aria-label` と `title` に残る */}
+              <CodeGlyph className="md:hidden" />
+              <span className="hidden md:inline">
+                {raw ? '整形して見る' : '生テキストで見る'}
+              </span>
             </Button>
           )}
           {/* **押す道はリンクにする**（設計§6-2）。`window.open` を呼ぶボタンにすると、
@@ -280,7 +465,10 @@ export function FileView({
               **宛先は `rawUrl` そのまま**（設計§6-3）——画面で文字列を継ぎ足さない。
 
               **種別で出し分けない**（設計§6-6）。表に無いものも `text/plain` で字が出る
-              ようになったので、押して意味の無い相手でも字か理由のどちらかは必ず出る */}
+              ようになったので、押して意味の無い相手でも字か理由のどちらかは必ず出る。
+
+              **ここでいう「タブ」はブラウザのタブである**——左のタブ帯（アプリの中の
+              タブ）とは別物なので、同じ帯に2つの意味の「タブ」が並ぶ */}
           <Button asChild variant="ghost" size="icon-sm">
             <a
               data-testid="file-open-tab"
@@ -299,8 +487,10 @@ export function FileView({
               variant="ghost"
               size="icon-sm"
               data-testid="file-close"
-              aria-label="閉じる"
-              title="閉じる"
+              /* **タブの ✕ は1枚だけ、こちらは列ごと。** 2つの「閉じる」が同じ帯に
+                 並ぶので、ラベルで書き分ける（要件の完了条件5） */
+              aria-label="ファイルの列を閉じる"
+              title="ファイルの列を閉じる"
               onClick={onClose}
             >
               <CloseGlyph />
@@ -312,6 +502,16 @@ export function FileView({
       {error !== null && (
         <p data-testid="file-error" className="text-xs text-red-400">
           {error}
+        </p>
+      )}
+
+      {/* **箱の中は探せない。逃げ道だけを言う**（`ファイルビュアの中を Ctrl+F で
+          探せるようにする` 要件）。黙って消えると「探せない道具だ」と読まれる。
+          **押されるまで出さない**——探すつもりの無い人には雑音でしかない */}
+      {逃げ道 && 箱で描いている && (
+        <p data-testid="file-find-hint" className="text-xs text-amber-300">
+          この見せ方では中を探せません。「生テキストで見る」に切り替えると Ctrl+F で
+          探せます。
         </p>
       )}
 
@@ -363,8 +563,35 @@ export function FileView({
       {!loading && content !== null && (
         /* 遡る箱。**印を持っているのは、遡れることが実測でしか言えないため**——
            `file-markdown` と `file-raw` は中身の出し方を指しているので、どちらへ
-           切り替えても同じこの箱を掴めるようにしておく（設計§6） */
-        <div data-testid="file-body" className="min-h-0 flex-1 overflow-auto">
+           切り替えても同じこの箱を掴めるようにしておく（設計§6）。
+
+           **`relative` は探す窓の基準**（`FileFind` を右上へ浮かせる）。位置は
+           指定していないので、**見た目は `static` と1ピクセルも変わらない**。
+           段を足さずに窓を出すために、ここが基準になっている必要がある */
+        <div className="relative flex min-h-0 flex-1 flex-col">
+          {/*
+            **探す窓は、遡る箱の「外側」へ置く。**
+
+            `position: absolute` の子は、**スクロールする箱の中に置くと中身と一緒に
+            流れる**——少し送っただけで窓が画面の外へ消える。基準は箱そのものではなく、
+            **箱を包む流れない段**でなければならない。
+
+            この段は `flex-1` を受け取って高さを解決するだけで、**見た目は1ピクセルも
+            足していない**（§39.4 の言う「段」＝余白を持つ帯ではない）。
+          */}
+          {find && 探せる && (
+            <FileFind
+              /* **整形と生テキストでは木の形が違う**ので、切り替えたら探し直す */
+              contentKey={`${path}:${String(raw)}`}
+              bodyRef={bodyRef}
+              onClose={() => setFind(false)}
+            />
+          )}
+          <div
+            ref={bodyRef}
+            data-testid="file-body"
+            className="min-h-0 flex-1 overflow-auto"
+          >
           {boxed && !raw ? (
             /* **隔離した箱**（設計§6-1）。鍵は二重で、ここに書く `sandbox` 属性と、
                応答に付く CSP の `sandbox` 指令。後者は**URL を直接開かれたときにも
@@ -402,7 +629,11 @@ export function FileView({
           ) : markdown && !raw ? (
             <div
               data-testid="file-markdown"
-              className="prose-dashboard text-sm leading-relaxed"
+              /* **大きさを直書きしない**（もとは `text-sm leading-relaxed`）。
+                 要素へ直接効くユーティリティに、器の側の変数は勝てない——
+                 直書きを外すところまでが1組である（`index.css` の `.prose-body` が
+                 同じ理由で同じ形になっている） */
+              className="prose-dashboard file-prose"
             >
               {/* 生の HTML は通さない。`rehype-raw` を入れていないことが、
                   そのまま「通さない」の実体になっている（設計§15）。
@@ -423,11 +654,13 @@ export function FileView({
           ) : (
             <pre
               data-testid="file-raw"
-              className="text-muted-foreground overflow-x-auto text-xs whitespace-pre-wrap"
+              /* **同上。** `text-xs` を外して器から取る */
+              className="text-muted-foreground file-raw overflow-x-auto whitespace-pre-wrap"
             >
               {content.text}
-            </pre>
-          )}
+              </pre>
+            )}
+          </div>
         </div>
       )}
     </section>

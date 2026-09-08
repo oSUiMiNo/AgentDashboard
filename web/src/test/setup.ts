@@ -111,3 +111,31 @@ for (const name of [
     })
   }
 }
+
+/*
+  **`Range` にも矩形が無い。** ファイルビュアの「探す」は当たりの `Range` を測って
+  遡る箱を送るので（`lib/fileSearch.ts`）、無いと**効果の中で例外になり、件数の表示
+  ごと落ちる**。
+
+  返すのは**すべて 0 の矩形**である。jsdom はレイアウトを持たないので、それ以外の値は
+  作り話にしかならない——**送り先の位置そのものは `scrollOffsetFor` の単体テストが
+  数値で確かめている**（測る側と決める側を分けてあるのはこのため）。
+*/
+if (typeof Range.prototype.getBoundingClientRect !== 'function') {
+  Object.defineProperty(Range.prototype, 'getBoundingClientRect', {
+    configurable: true,
+    value(): DOMRect {
+      const rect = {
+        x: 0,
+        y: 0,
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        width: 0,
+        height: 0,
+      }
+      return { ...rect, toJSON: () => rect } as DOMRect
+    },
+  })
+}

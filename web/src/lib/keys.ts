@@ -620,3 +620,85 @@ export function sequenceFor(
   const prefix = applicationCursorKeys === true ? '\x1bO' : '\x1b['
   return prefix + CURSOR_FINAL[key]
 }
+
+/**
+ * 探す窓の押し分けに使う分だけを取り出した形
+ * （`ファイルビュアの中を Ctrl+F で探せるようにする` 要件）。
+ *
+ * **[`EnterKeyState`] に `shiftKey` を足すのではなく、こちらへ広げる。**
+ * [`CandidateKeyState`] が同じ理由で分かれている——あちらに足すと
+ * [`isComposerSubmit`] の判断材料が増え、「Shift の扱いを間違える余地そのものが無い」
+ * という性質が壊れる。
+ */
+export interface FindKeyState extends EnterKeyState {
+  shiftKey: boolean
+}
+
+/**
+ * そのキーを「探す窓を開く」と解釈するか。**Ctrl+F だけ。**
+ *
+ * # なぜブラウザから奪うのか
+ *
+ * ブラウザの探索は**画面全体**が対象で、この画面にはセッションの区画・履歴・入力欄・
+ * サイドバーのファイル名が同居している。**本文の外の当たりに混ざる**ので、件数も送りも
+ * 当てにならない。「開いているファイルの中だけ」はブラウザ側の機能では満たせない。
+ *
+ * # ただし奪うのは、探せるときだけ
+ *
+ * **この関数はキーの形しか見ない。** 「いま探せるか」は呼ぶ側が持っており、
+ * 探せないときは `preventDefault` を呼ばずにブラウザへそのまま渡す——ファイルビュアを
+ * 開いていない画面でまで奪うと、ブラウザ本来の探索を取り上げることになる。
+ *
+ * # 変換中は渡さない
+ *
+ * 既存の3つの口（[`isComposerSubmit`]・[`isCandidateAccept`]・[`candidateMove`]）と
+ * 同じ配慮。
+ *
+ * # Meta は見ない
+ *
+ * 利用者が名指ししたのは Ctrl+F で、動かす機械は WSL と Android である。
+ * **Alt / Meta が付いていたら渡さない**のは、端末側（[`terminalKeyOverride`]）が
+ * 読み替えを避ける組み合わせに揃えるため。
+ */
+export function isFindOpen(event: FindKeyState): boolean {
+  if (event.isComposing || event.altKey || event.metaKey) {
+    return false
+  }
+  return event.ctrlKey && (event.key === 'f' || event.key === 'F')
+}
+
+/** 探す窓が開いている間の操作。 */
+export type FindMove = 'next' | 'prev' | 'close'
+
+/**
+ * 探す窓が開いているとき、そのキーを送り／閉じと解釈するか。要らなければ `null`。
+ *
+ * | キー | 意味 |
+ * |---|---|
+ * | Enter ／ Ctrl+G | 次の当たりへ |
+ * | Shift+Enter ／ Ctrl+Shift+G | 前の当たりへ |
+ * | Esc | 閉じる |
+ *
+ * **慣例に倣う**（要件）。Chrome も Firefox も Ctrl+F が「開く」、Ctrl+G が「次へ」で
+ * ある。探す操作は利用者が他のあらゆるソフトで毎日使っているので、**ここだけ違うと
+ * 覚え直しが要る。**
+ *
+ * **窓の入力欄での Enter は「次へ」であって、指示の送信ではない。** 呼ぶ側が窓の中で
+ * この口を先に通し、当たったら他へ渡さない。
+ */
+export function findKeyAction(event: FindKeyState): FindMove | null {
+  if (event.isComposing || event.altKey || event.metaKey) {
+    return null
+  }
+  if (event.key === 'Escape') {
+    // **Esc は素のときだけ。** 修飾付きは窓の外の割り当てへ渡す
+    return event.ctrlKey || event.shiftKey ? null : 'close'
+  }
+  if (event.key === 'Enter') {
+    return event.ctrlKey ? null : event.shiftKey ? 'prev' : 'next'
+  }
+  if (event.ctrlKey && (event.key === 'g' || event.key === 'G')) {
+    return event.shiftKey ? 'prev' : 'next'
+  }
+  return null
+}

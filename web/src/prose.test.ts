@@ -149,11 +149,52 @@ describe("構造化ビューの文字の大きさ（細かい修正 項目11・1
     }
   });
 
-  it("ファイルビュアの text-sm は残っている", () => {
-    // 巻き添えを防ぐ。あちらは器を持たないので、外すと 12px へ落ちる
-    expect(読む("components/FileView/FileView.tsx")).toContain(
-      "prose-dashboard text-sm",
+  /*
+    **ここは 2026-09-08 に意味が変わった。**
+
+    かつては「ファイルビュアの `text-sm` は残っている」だった——あちらが器を持たない
+    ので、外すと構造化ビューと同じ 12px へ巻き添えで落ちるためである。
+
+    `ファイルビュアの文字を小さめに始め、その場で大きさを変えられるようにする` で
+    **ファイルビュアも自分の器を持った**ので、前提のほうが消えた。**守りたかったこと
+    （巻き添えを防ぐ）は変わっていない**ので、見る先を「別の器を持っていること」へ
+    移してある。
+  */
+  it("ファイルビュアは自分の器から大きさを読む", () => {
+    const src = 読む("components/FileView/FileView.tsx");
+    // **直書きが残っていると、器の変数は勝てない**（このファイルの他の節と同じ落とし穴）
+    expect(src).not.toContain("prose-dashboard text-sm");
+    expect(src).toContain("prose-dashboard file-prose");
+    expect(src).not.toContain('data-testid="file-raw"\n              className="text-muted-foreground overflow-x-auto text-xs');
+    expect(src).toContain("file-raw overflow-x-auto whitespace-pre-wrap");
+  });
+
+  it("ファイルビュアの器は、構造化ビューのトークンを読まない", () => {
+    // **巻き添えを防ぐのがこの節の本体。** `--body-size` を読むと、機械の吹き出しを
+    // 小さくした指定がファイルビュアまで効く
+    expect(規則(".file-zoom")).not.toContain("--body-size");
+    expect(規則(".file-zoom .file-prose")).toContain(
+      "font-size: var(--file-prose-size)",
     );
+    expect(規則(".file-zoom .file-raw")).toContain(
+      "font-size: var(--file-raw-size)",
+    );
+  });
+
+  it("既定の 0.85 倍を書いているのは1箇所だけ", () => {
+    /*
+      **2箇所に書くと、片方だけ直ったときに整形と生テキストの差が黙って変わる。**
+      整形（14px）と生テキスト（12px）は元の値が違うので、同じ係数を掛けて初めて
+      「整形のほうが大きい」が保たれる。
+    */
+    const 器 = 規則(".file-zoom");
+    expect(器).toContain("--file-shrink: 0.85");
+    // **係数そのものを数える。** 素の `0.85` を数えると、無関係な余白
+    // （`padding: 0.85em`）まで拾って、書き方の違いだけで落ちる
+    expect(素.match(/--file-shrink:/g) ?? []).toHaveLength(1);
+    // 2つの大きさは、どちらも係数を**変数として**掛けている（直書きしていない）
+    expect(器).toContain("var(--file-shrink)");
+    expect(器.match(/0\.85/g) ?? []).toHaveLength(1);
   });
 
   /*

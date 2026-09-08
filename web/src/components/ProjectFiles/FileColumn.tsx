@@ -57,10 +57,19 @@ interface Props {
   host: string
   /** 相対パスの基準（その枠のパス） */
   project: string
-  /** 読むファイルの絶対パス */
+  /** 読むファイルの絶対パス。**開いているタブのうち、いま見ている1枚** */
   path: string
+  /** 開いているタブの絶対パス（左から右の順）。**素通しするだけ** */
+  tabs: string[]
+  onSelectTab: (path: string) => void
+  onCloseTab: (path: string) => void
   width: number
-  /** 閉じる。**列ごと消え、セッションが左へ寄る**（設計§2） */
+  /**
+   * **列ごと**閉じる（設計§2）。セッションが左へ寄る。
+   *
+   * **タブの ✕（1枚だけ閉じる）とは別物。** 同じ帯に2つの「閉じる」が並ぶので、
+   * `FileView` 側でラベルを書き分けている。
+   */
   onClose: () => void
   /**
    * 読めなかったことを親へ知らせる（`イシューグループ_2026-0813-1804` 設計§6-5）。
@@ -76,6 +85,9 @@ export function FileColumn({
   host,
   project,
   path,
+  tabs,
+  onSelectTab,
+  onCloseTab,
   width,
   onClose,
   onUnreadable,
@@ -113,10 +125,17 @@ export function FileColumn({
         縦に積むのをやめたので、配分そのものが消える
       */}
       <div className="min-h-0 flex-1 overflow-hidden">
+        {/*
+          **タブ帯は `FileView` のヘッダの中に描く。** ここで描くと段が1つ増え、
+          `DESIGN.md` §39.4「空の段を作らない」に反する。ここは素通しするだけ
+        */}
         <FileView
           host={host}
           root={project}
           path={path}
+          tabs={tabs}
+          onSelectTab={onSelectTab}
+          onCloseTab={onCloseTab}
           onClose={onClose}
           onUnreadable={onUnreadable}
         />

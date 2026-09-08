@@ -32,24 +32,75 @@
  */
 
 import { AnimatePresence } from 'motion/react'
-import { useCallback, useState, type ReactNode } from 'react'
+import { useCallback, useRef, useState, type ReactNode } from 'react'
 import { FileColumn } from '@/components/ProjectFiles/FileColumn'
 import { Sidebar } from '@/components/ProjectFiles/Sidebar'
 import { usePanelWidths } from '@/lib/filesPanel'
-import { putDir, putPick, readPlace } from '@/lib/filesPlace'
+import { putDir, putPicks, readPlace } from '@/lib/filesPlace'
 
 /**
- * いま出しているファイル。**押した1枚と、覚えていて戻した1枚を1つの状態で持つ。**
+ * 開いているタブ1枚。**押した1枚と、覚えていて戻した1枚を1つの型で持つ。**
  *
  * 2つに分けない——分けると「どちらが正か」を読む側が毎回決めることになる。
  * `復元` が立っているときだけ、読めなかったら黙って畳む（設計§6-5）。
+ * **印はタブごとに持つ**——復元した1枚と、そのあと人が押した1枚が同時に並ぶため。
  */
-type Picked = { path: string; 復元: boolean } | null
+interface Tab {
+  path: string
+  復元: boolean
+  /**
+   * **畳んだが、覚えには残す**（設計§6-5）。
+   *
+   * 復元したタブが「読めない」（`404` 以外）で落ちたときに立つ。**帯には出さないが、
+   * 覚えの並びからは外さない**——外すと、寝ている PC が起きたときに戻る先が消える。
+   *
+   * **印として持つ理由。** 状態から消して「書くときだけ足す」形にすると、**次に何か
+   * 押した瞬間に、そのとき生きている並びで上書きされて消える**（実際にその作りにして
+   * いた）。並びに残しておけば、どの手が書いても一緒に運ばれる。
+   */
+  隠す?: boolean
+}
 
-/** 覚えていたファイルを、復元の印つきで取り出す。覚えが無ければ出さない */
-function 覚えた一枚(host: string, project: string): Picked {
-  const pick = readPlace(host, project).pick
-  return pick === null ? null : { path: pick, 復元: true }
+/**
+ * 開いているタブの並びと、いま見ている1枚。
+ *
+ * **2つの状態に分けない。** 分けると「並びに無いものが選ばれている」という、
+ * どちらを直せばよいか決まらない形が作れてしまう。**1つの塊で置き換える。**
+ */
+interface 開いているもの {
+  tabs: Tab[]
+  選択: string | null
+}
+
+/** 覚えていた並びを、復元の印つきで取り出す。覚えが無ければ空 */
+function 覚えた並び(host: string, project: string): 開いているもの {
+  const place = readPlace(host, project)
+  return {
+    tabs: place.picks.map((path) => ({ path, 復元: true })),
+    選択: place.pick,
+  }
+}
+
+/** 帯に出るタブだけ。**畳んだものは覚えにだけ残る** */
+function 見えているもの(tabs: Tab[]): Tab[] {
+  return tabs.filter((tab) => tab.隠す !== true)
+}
+
+/**
+ * 1枚外したあと、どれを選ぶか。**右隣。無ければ左隣。**（要件の完了条件3）
+ *
+ * **畳んだものは飛ばす。** 選ぶと、帯に出ていないタブの中身が出ることになる。
+ *
+ * @param 残り 外したあとの並び（畳んだものを含む）
+ * @param 外した位置 外す前の並びでの位置
+ */
+function 次に選ぶ(残り: Tab[], 外した位置: number): string | null {
+  const 右 = 残り.slice(外した位置).find((tab) => tab.隠す !== true)
+  if (右 !== undefined) {
+    return 右.path
+  }
+  const 左 = 残り.slice(0, 外した位置).findLast((tab) => tab.隠す !== true)
+  return 左?.path ?? null
 }
 
 interface Args {
@@ -112,7 +163,9 @@ export function useFilesParts({
     ここに持つことで、**サイドバーを畳んでも中身の列が残る**
     （`イシューグループ_2026-0826-1146` 設計§2）
   */
-  const [picked, setPicked] = useState<Picked>(() => 覚えた一枚(host, project))
+  const [開いている, set開いている] = useState<開いているもの>(() =>
+    覚えた並び(host, project),
+  )
   // **人が押した回数**（設計§5）。復元と閉じるでは増やさない
   const [選んだ回数, set選んだ回数] = useState(0)
   const [起点, set起点] = useState(() => readPlace(host, project).dir ?? project)
@@ -129,9 +182,35 @@ export function useFilesParts({
   const [前の相手, set前の相手] = useState(相手)
   if (前の相手 !== 相手) {
     set前の相手(相手)
-    setPicked(覚えた一枚(host, project))
+    set開いている(覚えた並び(host, project))
     set起点(readPlace(host, project).dir ?? project)
   }
+
+  /*
+    **書くときに要る「いまの並び」を控える。**
+
+    `useState` の更新関数の中で `localStorage` を書かない——更新関数は純粋であることが
+    求められており、開発時の二重呼び出しでそのまま二重に書くことになる。控えを1つ置いて
+    **決めるのを外側で済ませる**（`usePanelWidths` の `latest` と同じ作り）。
+  */
+  const 最新 = useRef(開いている)
+  最新.current = 開いている
+
+  /**
+   * 並びと選択を覚える。**書く口をここ1つにする。**
+   *
+   * **`pick` は、選んでいるものが無くても覚えの1枚を指す。** 畳んだタブ
+   * （`404` 以外で読めなかったもの）しか残っていない場面がこれにあたる——
+   * `null` を書くと、**`picks` を知らない古い版へ戻したときに戻る先が消える**。
+   * 覚えているのに指していない、という形を外へ出さない。
+   */
+  const 覚える = useCallback(
+    (tabs: Tab[], 選択: string | null) => {
+      const paths = tabs.map((tab) => tab.path)
+      putPicks(host, project, paths, 選択 ?? paths[0] ?? null)
+    },
+    [host, project],
+  )
 
   /*
     **畳んだサイドバーを開き直したときも読み直す。**
@@ -162,22 +241,73 @@ export function useFilesParts({
     [host, project],
   )
 
+  /**
+   * サイドバーで押された。**既に開いていれば増やさず、そのタブへ移る。**
+   *
+   * **枚数が増えるかどうかと、レールを寄せるかどうかは別の話である。** 同じ1枚を
+   * 押し直したときもレールは寄せる——押すのは「見たい」という意思表示で、いま開いて
+   * いるものと同じかどうかは関係ない（設計§5）。**ここを「増えないなら何もしない」に
+   * すると、セッション側へ払ったまま押した人が、何も起きないのを見る。**
+   */
   const ファイルを選ぶ = useCallback(
     (path: string) => {
-      // **押した1枚は「復元ではない」。** 読めなかったときに畳まず、理由を見せる
-      setPicked({ path, 復元: false })
-      // **同じ1枚を押し直したときも増やす。** 押すのは「見たい」という意思表示で、
-      // いま開いているものと同じかどうかは関係ない（設計§5）
+      const now = 最新.current
+      const ある = now.tabs.some((tab) => tab.path === path)
+      // **押した1枚は「復元ではない」。** 読めなかったときに畳まず、理由を見せる。
+      // 復元で戻したタブを人が押した場合も、この時点で押した1枚に変わる
+      // **畳んでいたものを押したら、表へ戻す。** 人が「見たい」と言っているので、
+      // 読めなかった過去より新しい意思表示のほうが強い
+      const tabs = ある
+        ? now.tabs.map((tab) =>
+            tab.path === path ? { path, 復元: false } : tab,
+          )
+        : [...now.tabs, { path, 復元: false }]
+      set開いている({ tabs, 選択: path })
       set選んだ回数((n) => n + 1)
-      putPick(host, project, path)
+      覚える(tabs, path)
     },
-    [host, project],
+    [覚える],
   )
 
+  /** タブを押した。**並びは動かさず、選び直すだけ。** */
+  const タブを選ぶ = useCallback(
+    (path: string) => {
+      const now = 最新.current
+      if (!now.tabs.some((tab) => tab.path === path)) {
+        return
+      }
+      set開いている({ tabs: now.tabs, 選択: path })
+      覚える(now.tabs, path)
+    },
+    /*
+      **レールを寄せない。** タブが押せているということは、既にファイルの面を見て
+      いるということである。ここで寄せると、**押した本人の目の前で面が動く。**
+    */
+    [覚える],
+  )
+
+  /** ✕ で1枚だけ閉じる。**最後の1枚を閉じたら並びが空になり、列ごと消える。** */
+  const タブを閉じる = useCallback(
+    (path: string) => {
+      const now = 最新.current
+      const 位置 = now.tabs.findIndex((tab) => tab.path === path)
+      if (位置 < 0) {
+        return
+      }
+      const tabs = now.tabs.filter((tab) => tab.path !== path)
+      // **選ばれていないタブを閉じても、選択は動かさない**
+      const 選択 = now.選択 === path ? 次に選ぶ(tabs, 位置) : now.選択
+      set開いている({ tabs, 選択 })
+      覚える(tabs, 選択)
+    },
+    [覚える],
+  )
+
+  /** ヘッダの「ファイルの列を閉じる」。**タブの ✕ と違い、全部畳む。** */
   const 列を閉じる = useCallback(() => {
-    setPicked(null)
-    putPick(host, project, null)
-  }, [host, project])
+    set開いている({ tabs: [], 選択: null })
+    覚える([], null)
+  }, [覚える])
 
   /*
     **畳むのは全部の失敗で、忘れるのは「無い」ときだけ**（設計§6-5）。
@@ -187,13 +317,43 @@ export function useFilesParts({
   */
   const 読めなかった = useCallback(
     (status: number | null) => {
-      setPicked(null)
-      if (status === 404) {
-        putPick(host, project, null)
+      const now = 最新.current
+      const path = now.選択
+      if (path === null) {
+        return
       }
+      const 位置 = now.tabs.findIndex((tab) => tab.path === path)
+      /*
+        **そのタブだけ畳む。** 他のタブは読めているので巻き添えにしない。
+
+        **「無い」（404）のときだけ並びから外し、それ以外は畳んで残す**（設計§6-5）。
+        残す先を状態の外（書くときだけ足す控え）にすると、**次に何か押した瞬間に、
+        そのとき生きている並びで上書きされて消える**——寝ている PC が起きたときに
+        戻る先が消えるので、`404` 以外を残す意味が無くなる。
+      */
+      const tabs =
+        status === 404
+          ? now.tabs.filter((tab) => tab.path !== path)
+          : now.tabs.map((tab) =>
+              tab.path === path ? { ...tab, 隠す: true } : tab,
+            )
+      const 選択 = 次に選ぶ(tabs, 位置)
+      set開いている({ tabs, 選択 })
+      覚える(tabs, 選択)
     },
     [host, project],
   )
+
+  /*
+    いま見ている1枚。**並びと選択から引く**——選択が並びの外を指すことは
+    `readPlace` と上の手が両方で塞いでいるが、**引けなかったら列を出さない**の
+    ほうが、存在しないパスを読みに行くより安全である。
+  */
+  const 現在 = 開いている.tabs.find(
+    (tab) => tab.path === 開いている.選択 && tab.隠す !== true,
+  )
+  /** 帯に出すぶん。**畳んだものは覚えにだけ残る** */
+  const 見えている = 見えているもの(開いている.tabs)
 
   return {
     sidebar: (
@@ -224,18 +384,22 @@ export function useFilesParts({
       </AnimatePresence>
     ),
     column:
-      picked === null ? null : (
+      現在 === undefined ? null : (
         <FileColumn
           host={host}
           project={project}
-          path={picked.path}
+          path={現在.path}
+          tabs={見えている.map((tab) => tab.path)}
+          onSelectTab={タブを選ぶ}
+          onCloseTab={タブを閉じる}
           width={widths.file}
           onClose={列を閉じる}
           /*
             **押した1枚には渡さない。** 渡さないことがそのまま「押した人には理由を
-            見せる」の実体になる（設計§6-5）
+            見せる」の実体になる（設計§6-5）。**判断はタブごと**——復元した1枚と、
+            人が押した1枚が同じ並びに同居する
           */
-          onUnreadable={picked.復元 ? 読めなかった : undefined}
+          onUnreadable={現在.復元 ? 読めなかった : undefined}
           {...grip}
         />
       ),

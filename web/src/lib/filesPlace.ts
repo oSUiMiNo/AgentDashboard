@@ -66,16 +66,29 @@ export const MAX_PLACES = 20
 export interface Place {
   /** 掘っていたフォルダの絶対パス */
   dir: string | null
-  /** 開いていたファイルの絶対パス */
+  /**
+   * **いま見ていた1枚**の絶対パス。**必ず [`Place.picks`] の中の1つ**（並びの外を
+   * 指していたら先頭へ落とす）。並びが空なら `null`。
+   */
   pick: string | null
+  /**
+   * **開いていたタブの並び**（絶対パス・左から右の順）。
+   *
+   * # 前の版が書いた行も読める
+   *
+   * `picks` が無い行は、**`pick` を1件の配列として**読む。**この PJT は版の切り替えを
+   * 日常的に行う**ので、新しい版が書いた行を古い版が読む場面が実際に起きる——だから
+   * `pick` を捨てずに残し、**両方を書く**。古い版へ戻しても1枚は復元できる。
+   */
+  picks: string[]
 }
 
 /** 行の中身。読むときに1件ずつ確かめるので、置くときは緩く持つ */
-type Row = { dir?: unknown; pick?: unknown }
+type Row = { dir?: unknown; pick?: unknown; picks?: unknown }
 type Table = Record<string, Row>
 
 function 既定(): Place {
-  return { dir: null, pick: null }
+  return { dir: null, pick: null, picks: [] }
 }
 
 function 行の鍵(host: string, project: string): string {
@@ -161,14 +174,60 @@ function 通す(project: string, value: unknown): string | null {
   return value
 }
 
-/** その PJT について覚えていること。**確かめてから返す**ので、そのまま使ってよい。 */
+/**
+ * タブの並びを読む。**通らなかった要素だけ落とし、行ごと捨てない**（`通す` と同じ考え方）。
+ *
+ * `picks` が配列でなければ**前の版が書いた行**とみなし、`pick` の1件を並びにする。
+ * 同じパスが二重に入っていたら**先に出たほうを残す**——タブは1枚のファイルに1つなので、
+ * 重複はそのまま描くと `key` が衝突する。
+ */
+function 並びを読む(project: string, value: unknown, pick: string | null): string[] {
+  if (!Array.isArray(value)) {
+    // **前の版が書いた行**（`picks` を知らない版）。1枚のタブとして復元する
+    return pick === null ? [] : [pick]
+  }
+  const out: string[] = []
+  for (const item of value) {
+    const path = 通す(project, item)
+    if (path !== null && !out.includes(path)) {
+      out.push(path)
+    }
+  }
+  return out
+}
+
+/**
+ * その PJT について覚えていること。**確かめてから返す**ので、そのまま使ってよい。
+ *
+ * **「選ばれているのに開いていない」状態を外へ出さない。** 選択が並びの外を指して
+ * いたら、**その1枚を並びの末尾へ足して選ぶ。**
+ *
+ * # なぜ捨てずに足すのか
+ *
+ * **この形は、版を戻したときに実際に作られる**（`picks` を知らない版は `pick` だけを
+ * 書き換え、`picks` は前のまま残る）。捨てて先頭を選ぶと、**戻していた間に開いた
+ * ファイルが黙って消え、代わりに古い1枚が開く**——**利用者から見ると「開いていた
+ * ものが勝手に別のものに変わった」**になる。
+ *
+ * 足すほうを選んだのは、**どちらの版で開いたものも1枚も失わない**からである。
+ * 書く側は必ず `pick` を `picks` の中から選ぶので（`putPicks` の呼び元）、
+ * **この道を通るのは版をまたいだ行だけ**である。
+ */
 export function readPlace(host: string, project: string): Place {
   const row = readTable()[行の鍵(host, project)]
   if (row === undefined) {
     return 既定()
   }
   // **1件ずつ確かめる。** 片方が壊れていても、もう片方は生かす
-  return { dir: 通す(project, row.dir), pick: 通す(project, row.pick) }
+  const pick = 通す(project, row.pick)
+  const 並び = 並びを読む(project, row.picks, pick)
+  const picks =
+    pick !== null && !並び.includes(pick) ? [...並び, pick] : 並び
+  return {
+    dir: 通す(project, row.dir),
+    pick: pick ?? picks[0] ?? null,
+    picks,
+  }
 }
 
 /**
@@ -197,11 +256,18 @@ export function putDir(host: string, project: string, dir: string | null): void 
   書き換える(host, project, { dir })
 }
 
-/** 開いていたファイルを覚える。**`null` を渡したら忘れる**（列を閉じたときがこれ）。 */
-export function putPick(
+/**
+ * 開いているタブの並びと、いま見ている1枚を覚える。**空の並びを渡したら忘れる**
+ * （列を閉じたときがこれ）。
+ *
+ * **`pick` も一緒に書く。** 並びを知らない版へ戻したときに、**1枚だけは復元できる**
+ * ——版の切り替えを日常的に行う PJT なので、前方互換は読む側だけでは足りない。
+ */
+export function putPicks(
   host: string,
   project: string,
+  picks: string[],
   pick: string | null,
 ): void {
-  書き換える(host, project, { pick })
+  書き換える(host, project, { picks, pick })
 }
