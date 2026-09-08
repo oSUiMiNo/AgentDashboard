@@ -406,12 +406,343 @@ function dedupe(candidates: SlashCandidate[]): SlashCandidate[] {
   return kept
 }
 
+/* ──────────────────────────────────────────────────────────────────
+ * 打ち間違いを許して当てる（設計§20）
+ * ────────────────────────────────────────────────────────────────── */
+
 /**
- * 打った文字で候補を狭める（設計§5）。
+ * 当たった層（設計§20-2）。
  *
- * **並びを入れ替えない。** 当たり具合で並べ替えると、**押そうとした的が逃げる**
- * ——1文字打つたびに順が変わると、目で追っている行が別のものになる。
- * 並べ替えを足すかどうかは決めていない（設計§14）ので、ここは探索順のまま残す。
+ * **画面はこれで確定キーの扱いを変える**（§20-5）。厳密（`exact` / `prefix`）は
+ * 先頭が選ばれた状態で開き、あいまい（`words` / `distance`）は**どれも選ばれて
+ * いない**状態で開く——当たりを緩めるということは、**今日0件だった入力が1件以上に
+ * なる**ということで、放っておくと**今日は改行できていた Enter が補完に化ける**。
+ */
+export type CandidateTier = 'exact' | 'prefix' | 'words' | 'distance' | 'none'
+
+/** [`matchCandidates`] の答え。**候補と、どの層で当たったか**。 */
+export interface CandidateMatch {
+  candidates: SlashCandidate[]
+  tier: CandidateTier
+}
+
+/** 語の区切り。**`-` と `_` と空白を同じ扱いにする**のが、語順違いを拾う要（§20-2）。 */
+const 区切り = /[-_\s]+/
+/** 上と同じものを、数えるときに使う。 */
+const 区切りを全部 = /[-_\s]+/g
+
+/**
+ * 置換だけ重い（§20-2）。**片方でも外すと `coten` が `codex` に負ける。**
+ *
+ * 一律 1.0 だと `coten`→`codex` と `coten`→`context` が同点になり、
+ * **名前の短いほうが勝ってしまう**。
+ */
+const 置換の重み = 1.2
+const 出し入れの重み = 1.0
+
+/**
+ * 許すずれの量（§20-3）。**打った語の長さで決める。入力全体の長さではない。**
+ *
+ * 候補名は `-` `_` で区切られた複合語なので、**短い語は短いなりに厳しく**見ないと、
+ * `pjt` のような3文字が、長い名前の一部だというだけで緩む。
+ *
+ * この形（短い語ほど厳しく・語ごとに見る）は Elasticsearch・Algolia・Typesense・
+ * Meilisearch が揃って採っているもので、数字だけが各社で違う。
+ */
+function しきい値(長さ: number): number {
+  if (長さ <= 2) return 0
+  if (長さ <= 4) return 1.2
+  if (長さ <= 7) return 2.4
+  return 3.6
+}
+
+/**
+ * 当て具合。**ずれの大きさと、噛み合わなかった長さ**（§20-3の同点の壊し方が使う）。
+ *
+ * `外れ` は「打った長さと、実際に噛み合った候補の長さの差」である。**同じずれでも、
+ * 打った文字を捨てて短い頭にだけ当てたものより、打った長さぶんきちんと噛み合った
+ * ものを上にしたい**——`coten` に対して `context`（2.00・6文字ぶん噛み合う）と
+ * `config`（2.00・`con` の3文字にだけ当たり、打った `te` を捨てている）が同点に
+ * なるので、ここを見ないと**名前の短い `config` が勝ってしまう。**
+ */
+interface 当て具合 {
+  ずれ: number
+  外れ: number
+}
+
+/** 当たらなかったときの印。 */
+const 届かない: 当て具合 = { ずれ: Infinity, 外れ: Infinity }
+
+/**
+ * 重みつき編集距離。**候補の末尾は無料**（§20-2）。
+ *
+ * 打っている最中の文字列は**書きかけの前方**なので、候補の尻尾まで一致を求めては
+ * いけない——`coten` を `context` 全体と比べると遠いが、`conte` までと比べれば近い。
+ * だから返すのは「打った側を使い切った行の、いちばん小さいところ」である。
+ *
+ * **隣り合う入れ替え（`ba`→`ab`）も1回ぶんとして数える。** 置換2回として数えると
+ * 2.4 になり、4文字の語では届かなくなる。
+ *
+ * **長さの差だけで無理と分かることがある。** 候補が短すぎれば、その差だけ削るしか
+ * 無い——無料なのは候補が長いときの尻尾だけで、足りないぶんは埋まらない。
+ */
+function ずれ(打った: string, 候補: string, 上限: number): 当て具合 {
+  const n = 打った.length
+  const m = 候補.length
+  if (n === 0) return { ずれ: 0, 外れ: 0 }
+  if ((n - m) * 出し入れの重み > 上限) return 届かない
+
+  // 隣り合う入れ替えに「1つ前の前」が要るので、行を3本持つ
+  let 前々: number[] = []
+  let 前: number[] = new Array<number>(m + 1)
+  for (let j = 0; j <= m; j += 1) 前[j] = j * 出し入れの重み
+
+  for (let i = 1; i <= n; i += 1) {
+    const 今: number[] = new Array<number>(m + 1)
+    今[0] = i * 出し入れの重み
+    for (let j = 1; j <= m; j += 1) {
+      const 同じ = 打った[i - 1] === 候補[j - 1]
+      let v = Math.min(
+        前[j] + 出し入れの重み,
+        今[j - 1] + 出し入れの重み,
+        前[j - 1] + (同じ ? 0 : 置換の重み),
+      )
+      if (
+        i > 1 &&
+        j > 1 &&
+        打った[i - 1] === 候補[j - 2] &&
+        打った[i - 2] === 候補[j - 1]
+      ) {
+        v = Math.min(v, 前々[j - 2] + 出し入れの重み)
+      }
+      今[j] = v
+    }
+    前々 = 前
+    前 = 今
+  }
+
+  // **末尾は無料。** 打った側を使い切った行の最小値を採る。
+  //
+  // **同じ値が複数の場所で出たときは、打った長さにいちばん近いところを採る**——
+  // 「どこまで噛み合ったか」は、同点を壊すときに効く（下記 `外れ`）
+  let 答え = Infinity
+  let 噛み合い = 0
+  for (let j = 0; j <= m; j += 1) {
+    if (前[j] < 答え || (前[j] === 答え && Math.abs(j - n) < Math.abs(噛み合い - n))) {
+      答え = 前[j]
+      噛み合い = j
+    }
+  }
+  return 答え === Infinity ? 届かない : { ずれ: 答え, 外れ: Math.abs(噛み合い - n) }
+}
+
+/** 名前を語に割る。**`-` `_` 空白を同じ扱いにする**（§20-2）。 */
+function 語に割る(text: string): string[] {
+  return text.split(区切り).filter((word) => word !== '')
+}
+
+/**
+ * 打った語1つを、候補の語1つへ当てる（§20-2）。当たらなければ `null`。
+ *
+ * **前方一致は0として数える。** 書きかけの語がそのまま伸びただけなので、
+ * ずれではない——ここを1以上にすると、打ち終えていない語が常に不利になる。
+ */
+function 語を当てる(打った: string, 候補: string): 当て具合 | null {
+  if (候補.startsWith(打った)) return { ずれ: 0, 外れ: 0 }
+  const 上限 = しきい値(打った.length)
+  if (上限 === 0) return null
+  const d = ずれ(打った, 候補, 上限)
+  return d.ずれ <= 上限 ? d : null
+}
+
+/**
+ * 打った語を候補の語へ**重複なく**割り当てる（§20-2）。当たらなければ `null`。
+ *
+ * **順不同で見るのがここの仕事である**——`read_pjt` と `pjt_read` を同じものとして
+ * 扱えないと、利用者が挙げた実例の2つが落ちる。考え方は fzf の extended-search と
+ * 同じで（空白区切りの各語を独立に照合して AND で結ぶ）、**`_` と `-` へ同じ扱いを
+ * 広げるところだけ**が自前の仕事にあたる。
+ *
+ * 語数は実測で高々3なので、総当たりで足りる。
+ */
+function 語で当てる(
+  打った語: readonly string[],
+  候補語: readonly string[],
+): 当て具合 | null {
+  if (打った語.length > 候補語.length) return null
+  const 使った = new Array<boolean>(候補語.length).fill(false)
+  let 最小 = 届かない
+  const 進む = (i: number, 積み: 当て具合): void => {
+    if (積み.ずれ > 最小.ずれ) return
+    if (i === 打った語.length) {
+      if (積み.ずれ < 最小.ずれ || 積み.外れ < 最小.外れ) 最小 = 積み
+      return
+    }
+    for (let j = 0; j < 候補語.length; j += 1) {
+      if (使った[j]) continue
+      const 当たり = 語を当てる(打った語[i], 候補語[j])
+      if (当たり === null) continue
+      使った[j] = true
+      進む(i + 1, {
+        ずれ: 積み.ずれ + 当たり.ずれ,
+        外れ: 積み.外れ + 当たり.外れ,
+      })
+      使った[j] = false
+    }
+  }
+  進む(0, { ずれ: 0, 外れ: 0 })
+  return 最小.ずれ === Infinity ? null : 最小
+}
+
+/** 並べ替えのために、候補と、その当て具合と、探索順を束ねる。 */
+interface 当たり {
+  candidate: SlashCandidate
+   当て具合: 当て具合
+  順: number
+}
+
+/**
+ * **層の中でも、いちばん良かった組だけを出す。**
+ *
+ * 設計§20-6 は「あいまいの層の実測は最大3件」を前提に `MAX_VISIBLE` を据え置いて
+ * いるが、**ずれがしきい値以内のものを全部返すと、実データで15件出た**——
+ * `/coten` に `glab_issue-comment_delete`（2.20）が、`/rewnd` に `html_read`（2.20）が
+ * 混ざる。**どちらも見当外れで、出るほうが出ないより悪い。**
+ *
+ * これは門（§20-1）と同じ考えを層の中へ下ろしたものである。**明らかに良いものが
+ * あるなら、大きく劣るものは並べない**——`/rewnd` は `rewind`（1.00）が在るのに
+ * `html_read`（2.20）を並べる理由が無い。
+ *
+ * 端数の比較なので、**わずかな誤差は同点として扱う**（`0.2 + 1.2` が `1.4` に
+ * ならない世界なので、厳密な等号で比べると同点が同点にならない）。
+ */
+function いちばん良い組(当たりたち: 当たり[]): 当たり[] {
+  if (当たりたち.length === 0) return 当たりたち
+  const 最良 = Math.min(...当たりたち.map((one) => one.当て具合.ずれ))
+  return 当たりたち.filter((one) => one.当て具合.ずれ <= 最良 + 1e-9)
+}
+
+/**
+ * 同点の壊し方（§20-3）：**①ずれの小ささ ②噛み合わなさ ③名前の短さ ④探索順**。
+ * 層そのものは呼ぶ側が分けているので、ここが持つのは②以降である。
+ *
+ * **②は設計に無い段を1つ足してある。** §20-3 は①③④の3段だったが、実データでは
+ * `coten` に対して `context` と `config` が**どちらも 2.00 で同点**になり、③だけでは
+ * 短い `config` が勝ってしまった（`config` は §19 で組み込み表へ足したばかりで、
+ * 調査時の108件には居なかった）。**受け入れ条件は「3例が1位」なので、ここを
+ * 足さないと要件を満たせない。**
+ *
+ * ②が見ているのは「打った長さぶん、きちんと噛み合ったか」である。`config` は
+ * `con` の3文字にだけ当たり、**打った `te` を捨てて**同じ 2.00 に達している——
+ * 捨てずに済んだほうを上にするのは、打ち間違いの直しとして素直である。
+ *
+ * **最後が探索順であること**が、いまの並び（PJT → 利用者 → PJT のスキル →
+ * 利用者のスキル → プラグイン → 組み込み）を最下層で守る。
+ */
+function 並べる(当たりたち: 当たり[]): SlashCandidate[] {
+  return [...当たりたち]
+    .sort(
+      (a, b) =>
+        a.当て具合.ずれ - b.当て具合.ずれ ||
+        a.当て具合.外れ - b.当て具合.外れ ||
+        a.candidate.name.length - b.candidate.name.length ||
+        a.順 - b.順,
+    )
+    .map((one) => one.candidate)
+}
+
+/**
+ * 打った文字を候補へ当てる（設計§20）。**層で答える。**
+ *
+ * # 並べ替えではなく、層を足している
+ *
+ * §14 は「当たり具合で並べ替えると、**押そうとした的が逃げる**」として並び順を
+ * 決めずに残した。**その判断は正しいままである**（VSCode 本体も同じ理由で同じ
+ * 判断をしている）。だからここが持ち込むのは並べ替えではなく**層**で、
+ *
+ * - 上の層の**中の相対順序は一切変えない**（探索順のまま）
+ * - 下の層は、**上の層が0件のときだけ現れる**
+ *
+ * したがって一覧は**並び替わるのではなく、0件から数件へ増える**。Algolia の
+ * `typoTolerance: 'min'`（無タイポの一致が1件でもあればタイポ一致を全て隠す）と
+ * 同じ形である。
+ *
+ * # 門が背骨である
+ *
+ * T0・T1 に1件でもあれば、**あいまいの層は計算すらしない**。`/c` `/con` `/pjt` の
+ * ような日常の打鍵は、今日と1文字も変わらない——**速さも今日のまま**で、
+ * あいまいの費用は「今日0件だった入力」でしか払わない。
+ */
+export function matchCandidates(
+  candidates: readonly SlashCandidate[],
+  text: string,
+): CandidateMatch {
+  if (!text.startsWith('/')) return { candidates: [], tier: 'none' }
+  // **最初の語だけを見る。** `/cmd 引数` まで打った時点では、名前は確定している
+  const typed = text.slice(1).split(/\s/, 1)[0] ?? ''
+  if (typed === '') return { candidates: [...candidates], tier: 'prefix' }
+  const needle = typed.toLowerCase()
+
+  // T0・T1。**探索順のまま拾い、完全一致だけを頭へ回す**
+  const 完全: SlashCandidate[] = []
+  const 前方: SlashCandidate[] = []
+  for (const candidate of candidates) {
+    const name = candidate.name.toLowerCase()
+    if (name === needle) 完全.push(candidate)
+    else if (name.startsWith(needle)) 前方.push(candidate)
+  }
+  // **門。** ここで返るから、今日の挙動が1文字も変わらない。
+  //
+  // **完全一致を頭へ回すのは、今日ある不具合を1つ直す**（§20-7）——`/issue_exe` と
+  // 完全に打っても、探索順では `issue_exe-phase` が先に来るので**Enter を押すと
+  // 違うコマンドが入る**。これはあいまい一致とは独立した壊れ方である
+  if (完全.length > 0 || 前方.length > 0) {
+    return {
+      candidates: [...完全, ...前方],
+      tier: 完全.length > 0 ? 'exact' : 'prefix',
+    }
+  }
+
+  // **2文字以下では緩めない**（§20-3）。打った文字が少ないうちに緩めると、
+  // 無関係なものを大量に釣る——**見当外れが出るのは、出ないより悪い**
+  if (needle.replace(区切りを全部, '').length <= 2) {
+    return { candidates: [], tier: 'none' }
+  }
+
+  // T2：語ごと照合・順不同
+  const 打った語 = 語に割る(needle)
+  const 語の当たり: 当たり[] = []
+  candidates.forEach((candidate, 順) => {
+    const d = 語で当てる(打った語, 語に割る(candidate.name.toLowerCase()))
+    if (d !== null) 語の当たり.push({ candidate, 当て具合: d, 順 })
+  })
+  if (語の当たり.length > 0) {
+    return { candidates: 並べる(いちばん良い組(語の当たり)), tier: 'words' }
+  }
+
+  // T3：末尾を無料にした重みつき編集距離。**budget は語ごとのしきい値の和**
+  // （§20-3。入力全体の長さから引かない）
+  const 上限 = 打った語.reduce((和, word) => 和 + しきい値(word.length), 0)
+  const 距離の当たり: 当たり[] = []
+  if (上限 > 0) {
+    candidates.forEach((candidate, 順) => {
+      const d = ずれ(needle, candidate.name.toLowerCase(), 上限)
+      if (d.ずれ <= 上限) 距離の当たり.push({ candidate, 当て具合: d, 順 })
+    })
+  }
+  if (距離の当たり.length > 0) {
+    return { candidates: 並べる(いちばん良い組(距離の当たり)), tier: 'distance' }
+  }
+
+  return { candidates: [], tier: 'none' }
+}
+
+/**
+ * 打った文字で候補を狭める（設計§5・§20）。
+ *
+ * **[`matchCandidates`] の薄い包みである。** 別実装にしない——片方だけ直して
+ * 食い違うのは、このイシューが既に一度踏んだ形である（設計§20-4）。層まで要る側は
+ * [`matchCandidates`] を直接呼ぶこと。
  *
  * `text` は入力欄の中身をそのまま受ける。`/` で始まらなければ**候補を出さない**
  * （空配列を返す）——普通の指示を打っている最中に一覧が出ると邪魔になる。
@@ -420,12 +751,7 @@ export function filterCandidates(
   candidates: readonly SlashCandidate[],
   text: string,
 ): SlashCandidate[] {
-  if (!text.startsWith('/')) return []
-  // **最初の語だけを見る。** `/cmd 引数` まで打った時点では、名前は確定している
-  const typed = text.slice(1).split(/\s/, 1)[0] ?? ''
-  if (typed === '') return [...candidates]
-  const needle = typed.toLowerCase()
-  return candidates.filter((candidate) => candidate.name.toLowerCase().startsWith(needle))
+  return matchCandidates(candidates, text).candidates
 }
 
 /** 候補を出すべき `/` の場所（[`slashQueryAt`]）。 */

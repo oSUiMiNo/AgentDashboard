@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   filterCandidates,
   harvestCandidates,
+  matchCandidates,
   slashQueryAt,
   type FsPort,
   type SlashCandidate,
@@ -703,5 +707,208 @@ describe('候補を出す `/` を、位置から見つける', () => {
     expect(
       filterCandidates(手持ち, 場所?.token ?? '').map((one) => one.name),
     ).toEqual(['rewind'])
+  })
+})
+
+/* ──────────────────────────────────────────────────────────────────
+ * 打ち間違いを許して当てる（設計§20・テスト計画フェーズ17）
+ * ────────────────────────────────────────────────────────────────── */
+
+/**
+ * 層を見るための題材。**実データの形をなぞってある**——
+ * 語順違い（`pjt_read`）・完全一致と前方一致の衝突（`issue_exe` と `issue_exe-phase`）・
+ * 同じ頭を持つ紛らわしい相手（`context` / `config` / `codex`）が要る。
+ *
+ * **並びは探索順そのもの。** ここを並べ替えると、④の同点崩しが見えなくなる。
+ */
+const 題材: SlashCandidate[] = [
+  { name: 'issue_exe-phase', description: '', source: 'user-command' },
+  { name: 'issue_exe', description: '', source: 'user-command' },
+  { name: 'pjt_read', description: '', source: 'user-command' },
+  { name: 'rewind', description: '', source: 'builtin' },
+  { name: 'model', description: '', source: 'builtin' },
+  { name: 'clear', description: '', source: 'builtin' },
+  { name: 'context', description: '', source: 'builtin' },
+  { name: 'config', description: '', source: 'builtin' },
+  { name: 'codex', description: '', source: 'user-command' },
+]
+
+/** 打った文字に対する候補の名前。 */
+const 当てる = (text: string) =>
+  matchCandidates(題材, text).candidates.map((one) => one.name)
+
+/** 当たった層。 */
+const 層 = (text: string) => matchCandidates(題材, text).tier
+
+describe('層が組めている（設計§20-2）', () => {
+  it('T0：完全一致がいちばん上に来る', () => {
+    // **これは今日ある不具合を1つ直す**（§20-7）。`issue_exe` と完全に打っても、
+    // 探索順では `issue_exe-phase` が先に来るので、**Enter を押すと違うコマンドが
+    // 入る**。あいまい一致とは独立した壊れ方なので、**あいまいの層を後で外しても
+    // この検査は残らなければならない**
+    expect(当てる('/issue_exe')[0]).toBe('issue_exe')
+    expect(層('/issue_exe')).toBe('exact')
+  })
+
+  it('T1：前方一致は今日の規則そのまま（大小無視・探索順）', () => {
+    expect(当てる('/issue')).toEqual(['issue_exe-phase', 'issue_exe'])
+    expect(当てる('/ISSUE')).toEqual(['issue_exe-phase', 'issue_exe'])
+    expect(層('/issue')).toBe('prefix')
+  })
+
+  it('門：前方一致が1件でもあれば、あいまいの候補は1件も混ざらない', () => {
+    // **これが背骨である**（§20-1）。門があるから、一覧は「並び替わる」のではなく
+    // **0件から数件へ増える**だけになり、§14 の「押そうとした的が逃げる」を
+    // 踏まずに済む
+    expect(当てる('/con')).toEqual(['context', 'config'])
+    expect(層('/con')).toBe('prefix')
+    // `codex` は `coten` に近いが、**前方一致が在るので出てこない**
+    expect(当てる('/con')).not.toContain('codex')
+  })
+
+  it('T2：語順が逆でも当たる', () => {
+    expect(当てる('/read_pjt')).toEqual(['pjt_read'])
+    expect(層('/read_pjt')).toBe('words')
+  })
+
+  it('T2：区切りが `-` と `_` で違っても当たる', () => {
+    // 語順が逆 ＋ `l`↔`r` の取り違え ＋ 区切り違い、の3つが同時に起きている
+    expect(当てる('/lead-pjt')).toEqual(['pjt_read'])
+  })
+
+  it('T3：語に割っても当たらないものを、字の並びで拾う', () => {
+    // 区切りごと打ち損ねた形。**語に割ると `pjtread` は1語なので T2 では当たらない**
+    expect(当てる('/pjtread')).toEqual(['pjt_read'])
+    expect(層('/pjtread')).toBe('distance')
+  })
+
+  it('`matchCandidates` が当たった層を返す', () => {
+    expect(層('/issue_exe')).toBe('exact')
+    expect(層('/pjt')).toBe('prefix')
+    expect(層('/read_pjt')).toBe('words')
+    expect(層('/pjtread')).toBe('distance')
+    expect(層('/zzzz')).toBe('none')
+  })
+
+  it('`/` で始まらなければ、層は `none` で候補も空', () => {
+    expect(matchCandidates(題材, 'ただの指示')).toEqual({
+      candidates: [],
+      tier: 'none',
+    })
+  })
+
+  it('`filterCandidates` は `matchCandidates` の候補と必ず一致する', () => {
+    // **包みが別実装になっていないことを機械で見る**（設計§20-4）。
+    // 片方だけ直して食い違うのは、このイシューが既に一度踏んだ形である
+    for (const text of [
+      '/',
+      '/issue_exe',
+      '/con',
+      '/read_pjt',
+      '/pjtread',
+      '/zzzz',
+      'ただの指示',
+      '/clear いますぐ',
+    ]) {
+      expect(filterCandidates(題材, text), text).toEqual(
+        matchCandidates(題材, text).candidates,
+      )
+    }
+  })
+})
+
+describe('順位（出るだけでは足りない・設計§20-3）', () => {
+  /** 期待するものが何番目に出たか（1始まり。出なければ 0）。 */
+  const 順位 = (text: string, 期待: string) => 当てる(text).indexOf(期待) + 1
+
+  it('利用者が挙げた3例が、どれも1位で出る', () => {
+    expect(順位('/coten', 'context'), '/coten').toBe(1)
+    expect(順位('/read_pjt', 'pjt_read'), '/read_pjt').toBe(1)
+    expect(順位('/lead-pjt', 'pjt_read'), '/lead-pjt').toBe(1)
+  })
+
+  it('おまけの誤字6件も1位で出る', () => {
+    expect(順位('/rewnd', 'rewind'), '/rewnd').toBe(1)
+    expect(順位('/moddel', 'model'), '/moddel').toBe(1)
+    expect(順位('/cler', 'clear'), '/cler').toBe(1)
+    expect(順位('/contxt', 'context'), '/contxt').toBe(1)
+    expect(順位('/pjtread', 'pjt_read'), '/pjtread').toBe(1)
+    expect(順位('/reed_pjt', 'pjt_read'), '/reed_pjt').toBe(1)
+  })
+
+  it('`coten` で `codex` に負けない（重みと末尾無料が両方効いている）', () => {
+    // **置換だけ 1.2 にしないと `codex` が `context` と同点になる**（§20-2）。
+    // **末尾を無料にしないと `coten` が `context` 全体と比べられて遠くなる**。
+    // 片方でも外すとここが落ちる。
+    //
+    // 負けないどころか**一覧にも出てこない**——同点なら「いちばん良かった組」に
+    // 残るので、**消えていること自体が、ずれが厳密に大きいことの証拠**である
+    const 並び = 当てる('/coten')
+    expect(並び[0]).toBe('context')
+    expect(並び, '同点なら残ってしまう').not.toContain('codex')
+  })
+
+  it('同点は、噛み合わなさ → 名前の短さ → 探索順 の順で壊す', () => {
+    // **題材は「壊し方を変えたら順が変わる」ものでなければならない。** `context` と
+    // `config` は `coten` に対して**ずれがどちらも同じ**で、しかも
+    // **名前は `config` のほうが短い**。噛み合わなさを見ないと `config` が勝つ
+    const 並び = 当てる('/coten')
+    expect(並び).toContain('config')
+    expect(並び.indexOf('context')).toBeLessThan(並び.indexOf('config'))
+  })
+
+  it('見当外れは並べない——いちばん良かった組だけを出す', () => {
+    // `rewind`（ぴったり近い）が在るのに、`pjt_read` の `read` まで並べない。
+    // **出るほうが出ないより悪い**ものを、門と同じ考えで層の中から落とす
+    expect(当てる('/rewnd')).toEqual(['rewind'])
+  })
+})
+
+describe('しきい値（設計§20-3）', () => {
+  it('2文字以下では、あいまいが起動しない', () => {
+    expect(当てる('/zz')).toEqual([])
+    expect(層('/zz')).toBe('none')
+    // 前方一致が在る2文字は、**今日どおり厳密のまま**
+    expect(層('/co')).toBe('prefix')
+  })
+
+  it('遠すぎるものは0件のまま', () => {
+    // **見当外れを出すくらいなら0件のほうがマシ。** 緩めて当てにいかない
+    expect(当てる('/zzzz')).toEqual([])
+    expect(当てる('/読み合わせ')).toEqual([])
+  })
+
+  it('複合語の短い語は、短いなりに厳しいまま', () => {
+    // `pjt` は3文字なのでしきい値 1.2。**`xyz` は3文字とも違うので当たらない**——
+    // 入力全体の長さ（8文字ぶん）で緩めていたら、ここが当たってしまう
+    expect(当てる('/read_xyz')).toEqual([])
+    // 語ごとに見ているので、**片方が合っていても、もう片方が遠ければ落ちる**
+    expect(当てる('/read_pjt')).toEqual(['pjt_read'])
+  })
+})
+
+describe('増やしていない（設計§20-2・§20-9）', () => {
+  const ここ = dirname(fileURLToPath(import.meta.url))
+
+  it('あいまい一致のために、新しい依存を1つも入れていない', () => {
+    // **唯一の対抗馬でも「どこで切るか・いつ何も出さないか」は決めてくれない**ので、
+    // 残る仕事がほとんど減らない。入れないと決めた（§20-2）
+    const pkg = JSON.parse(
+      readFileSync(resolve(ここ, '../../package.json'), 'utf8'),
+    ) as { dependencies?: Record<string, string> }
+    const 名前 = Object.keys(pkg.dependencies ?? {}).join(' ')
+    expect(名前).not.toMatch(/fuse|fuzzysort|ufuzzy|match-sorter|leven|jaro|fuzzball/i)
+  })
+
+  it('`window` も `document` も読まない（このファイルの作法）', () => {
+    // **測る側と混ざると、jsdom が矩形を固定で返すせいで何も確かめないまま緑になる。**
+    // あいまい一致は文字列だけを見る計算なので、この作法と何も衝突しない
+    const src = readFileSync(resolve(ここ, 'slashCandidates.ts'), 'utf8')
+    const コード = src
+      .split('\n')
+      .filter((line) => !/^\s*(\*|\/\/|\/\*)/.test(line))
+      .join('\n')
+    expect(コード).not.toMatch(/\bwindow\b/)
+    expect(コード).not.toMatch(/\bdocument\b/)
   })
 })
