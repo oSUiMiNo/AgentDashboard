@@ -133,7 +133,7 @@ function SlashCommandCard({
               ))}
             </dl>
           )}
-          <div className="prose-dashboard prose-body leading-relaxed">
+          <div className="prose-dashboard prose-body">
             <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS}>
               {file.body}
             </ReactMarkdown>

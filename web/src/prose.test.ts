@@ -155,6 +155,55 @@ describe("構造化ビューの文字の大きさ（細かい修正 項目11・1
       "prose-dashboard text-sm",
     );
   });
+
+  /*
+    **行間も同じ作りで器から取る**（利用者の指定・2026-09-08）。
+    大きさのときと同じ落とし穴——直書きの `leading-relaxed` が残っていると、
+    器へトークンを足しても**見た目が1ミリも変わらないまま緑になる**。
+  */
+  it("左から出る機械の吹き出しだけ、行間のトークンを持つ", () => {
+    expect(規則(".speech-bubble.speech-bubble-machine")).toContain(
+      "--body-line: 1.3",
+    );
+    // 利用者の青い吹き出しと平たい器は巻き込まない。持たなければフォールバックが効く
+    expect(規則(".speech-bubble,\n.body-shell")).not.toContain("--body-line");
+  });
+
+  it("本文が行間を器から読み、器の外では leading-relaxed のままである", () => {
+    // フォールバックの 1.625 は Tailwind の `leading-relaxed` そのもの
+    expect(規則(".prose-body")).toContain("line-height: var(--body-line, 1.625)");
+  });
+
+  it("1.3 が、もとの 1.625 のちょうど 0.8 倍である", () => {
+    // 片方だけ動かすと比が崩れる。**数の関係そのもの**を見張る
+    const 元 = Number(
+      /line-height:\s*var\(--body-line,\s*([\d.]+)\)/.exec(素)![1],
+    );
+    const 機械 = Number(/--body-line:\s*([\d.]+);/.exec(素)![1]);
+    expect(機械 / 元).toBeCloseTo(0.8, 5);
+  });
+
+  it("直書きの leading-relaxed が外れている", () => {
+    for (const rel of [
+      "components/TranscriptTree/TranscriptRow.tsx",
+      "components/TranscriptTree/SlashCommandLine.tsx",
+    ]) {
+      expect(読む(rel), rel).not.toContain("prose-body leading-relaxed");
+    }
+    // ファイルビュアは器の外なので、こちらは残す（外すと行間まで巻き添えで変わる）
+    expect(読む("components/FileView/FileView.tsx")).toContain(
+      "text-sm leading-relaxed",
+    );
+  });
+
+  it("フェードの1行ぶんは、器のトークンから導かない", () => {
+    // **行間を変えても、畳む仕掛けの帯は動かさない。** 器のトークンから導くと
+    // 既定の器で 19.5px → 23.4px へ育ち、設計が言う「帯 ÷ 行 = 約2行」が
+    // 1.17倍にずれる（`e2e/transcript.spec.ts` の「畳む仕掛けの高さ」が捕まえる）。
+    // 器ごとに追従させるかどうかは、見た目を決め直す別の話
+    expect(素).toContain("--fade-line: calc(0.75rem * 1.625)");
+    expect(素).not.toContain("--fade-line: calc(var(");
+  });
 });
 
 describe("構造化ビューの段落の空き（細かい修正 項目12）", () => {
