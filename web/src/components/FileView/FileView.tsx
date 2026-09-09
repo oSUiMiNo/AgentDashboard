@@ -193,6 +193,19 @@ export function FileView({
    */
   const [切り替えるか, set切り替えるか] = useState(false)
   /**
+   * 画像を**原寸を基準に**出すか（既定は「器に収める」）。
+   *
+   * **倍率だけでは 1:1 に届かない。** 上限は 200% なので、器の 2倍までしか伸びない
+   * ——大きな画像を細い列で見ているときは、200% でもまだ原寸の半分以下である。
+   * **基を原寸へ切り替えると、100% がちょうど 1:1 になる。**
+   *
+   * **ファイルを切り替えたら戻す。** 前の画像で切り替えた基準が、次の画像へ持ち越すと
+   * 「開いた瞬間に巨大な画像が出る」ことになる。
+   */
+  const [原寸, set原寸] = useState(false)
+  /** 読み込んだ画像の原寸の幅（px）。**無いうちは器に収まる**（CSS のフォールバック） */
+  const [画像の幅, set画像の幅] = useState<number | null>(null)
+  /**
    * 探す合図の回数。**窓が既に開いているときに、もう一度押された**ことを
    * 窓へ伝えるために要る（入力を選び直して打ち直せる状態にする）。
    */
@@ -215,6 +228,8 @@ export function FileView({
     setFind(false)
     set切替えた(false)
     set切り替えるか(false)
+    set原寸(false)
+    set画像の幅(null)
     setBroken(false)
     setContent(null)
     setPicture(null)
@@ -678,17 +693,68 @@ export function FileView({
 
       {!loading && picture !== null && (
         <div data-testid="file-body" className="min-h-0 flex-1 overflow-auto">
-          {/* **入れ物の幅まで縮める**（設計§8）。原寸で出すと横スクロールが二重になる */}
+          {/*
+            **既定は入れ物の幅まで縮める**（設計§8）。原寸で出すと横スクロールが二重に
+            なる——ただし**倍率と原寸の切り替えでそこを越えられる**（`index.css` の
+            `.file-image`）。はみ出した先へは、この箱をそのまま遡って行く。
+
+            **大きさの直書き（`h-auto max-w-full`）は外した。** 要素へ直接効く
+            ユーティリティに、器の側の変数は勝てない——**画像だけ拡大縮小が効かなかった
+            のは、ここが器の道に繋がっていなかったからである**（利用者の指摘・2026-09-08）。
+          */}
           <img
             data-testid="file-image"
+            className="file-image"
+            data-fit={原寸 ? 'natural' : 'contain'}
+            /* **原寸が分かってから当てる**（`index.css`）。分かる前に当てると、
+               小さい絵が一瞬だけ列幅いっぱいに広がってから縮む */
+            data-measured={画像の幅 === null ? undefined : 'true'}
+            style={
+              画像の幅 === null
+                ? undefined
+                : ({ '--file-image-natural': `${画像の幅}px` } as CSSProperties)
+            }
             src={picture.url}
             alt={relative}
-            className="h-auto max-w-full"
+            onLoad={(event) => set画像の幅(event.currentTarget.naturalWidth)}
             onError={() => setBroken(true)}
           />
-          {/* 画像には生テキストが無いので、代わりに素性を出す（設計§7-4） */}
-          <p data-testid="file-meta" className="text-muted-foreground mt-1 text-[11px]">
-            {picture.mediaType} ／ {picture.bytes} バイト
+          {/* 画像には生テキストが無いので、代わりに素性を出す（設計§7-4）。
+              **原寸への切り替えもここが持つ**——帯に押しボタンを増やさない（§48.2） */}
+          <p
+            data-testid="file-meta"
+            className="file-meta text-muted-foreground mt-1 flex flex-wrap items-center gap-2 text-[11px]"
+          >
+            <span>
+              {picture.mediaType} ／ {picture.bytes} バイト
+            </span>
+            <Button
+              type="button"
+              variant="ghost"
+              size="xs"
+              data-testid="file-image-fit"
+              /*
+                **原寸がまだ分からないうちは押せない。** 押せると
+                `calc(100% * 倍率)` に落ちて**器の幅いっぱいまで引き伸ばされる**
+                ——「原寸＝1:1」と言っているのに 1:1 でない絵が出る。
+                読めなかった絵（`broken`）も、幅が永久に分からないのでここで止まる。
+              */
+              disabled={画像の幅 === null}
+              /*
+                **`aria-pressed` は付けない。** 字が状態で変わる（「原寸で見る」↔
+                「収めて見る」）ので、**字は「これから起きること」を言っている**。
+                そこへ押下状態を重ねると、読み上げでは**逆の意味**になる
+                （原寸のときに「収めて見る、がオン」と読まれる）。
+              */
+              title={
+                原寸
+                  ? '入れ物の幅に収めて見る'
+                  : '原寸を基準にする（倍率 100% がそのままの大きさ）'
+              }
+              onClick={() => set原寸((now) => !now)}
+            >
+              {原寸 ? '収めて見る' : '原寸で見る'}
+            </Button>
           </p>
         </div>
       )}

@@ -390,6 +390,68 @@
   block-size: 100%;
   inline-size: 100%;
 }
+/*
+  **画像の拡大縮小**（利用者の指摘・2026-09-08）。
+
+  # 文字とは意味が違う
+
+  文字は字の大きさが変わればよく、幅は器に収まったままである。**画像は器からはみ出す**
+  ので、**はみ出した先へ行く道**が要る——遡る箱（`file-body`）が縦横とも遡れるので、
+  そこで足りる（指では、そのままなぞって動かせる）。
+
+  # 既定は「器に収める」
+
+  **`--file-shrink` を掛けない。** 文字の 0.85 倍は「一度に読める量を増やす」ための
+  ものだが、画像を既定で 85% にすると**ただ小さく写るだけ**で、得るものが無い。
+  **`--file-zoom` が 1 のときは、いままでどおり「器に収める」**（原寸より大きくは
+  しない）——大きい画像がそのまま原寸で出ると、何が写っているか分からない。
+
+  # 原寸へ行く道
+
+  **倍率だけでは 1:1 に届かない。** 上限は 200% なので、器の 2倍までしか伸びない——
+  2560px の画像を 600px の列で見ているなら、200% でもまだ半分以下である。
+  **`data-fit="natural"` で基を原寸へ切り替える**と、そこからの倍率になるので
+  **100% がちょうど 1:1** になる。切り替えは画像の下の素性の行が担う（帯に押しボタンを
+  増やさない。§48.2 で1行に保つと決めたため）。
+
+  `--file-image-natural` は画像が読み込まれたときに JavaScript が書く（原寸の幅）。
+  **無いときは 100%** に落ちるので、読み込み前でも今までどおり収まる。
+*/
+.file-zoom .file-image {
+  /* **直書きの `max-w-full` は外した。** 要素へ直接効くユーティリティに、器の側の
+     変数は勝てない（`.prose-body` と同じ落とし穴）。ここは規則として持つ */
+  max-inline-size: 100%;
+  block-size: auto;
+}
+/*
+  **原寸が分かってから当てる。**
+
+  分かる前に `min(100%, var(--file-image-natural, 100%))` を当てると、既定が 100% に
+  落ちるので**小さい絵が一瞬だけ列幅いっぱいに広がってから縮む**（元の `max-w-full` は
+  決して拡大しなかったので、これは新しい壊れ方だった）。読めない絵では、代替テキストの
+  箱が列幅いっぱいのまま残る。
+*/
+.file-zoom .file-image[data-measured='true'] {
+  max-inline-size: none;
+  inline-size: calc(min(100%, var(--file-image-natural)) * var(--file-zoom, 1));
+}
+.file-zoom .file-image[data-measured='true'][data-fit='natural'] {
+  inline-size: calc(var(--file-image-natural) * var(--file-zoom, 1));
+}
+/*
+  **素性の行は、遡っても付いてくる。**
+
+  原寸へ切り替える道はここにしかないので、**縦に長い絵で押した瞬間に視界の外へ落ちると、
+  戻す手段が画面から消える**（帯の倍率では原寸モードから抜けられない）。左端にも
+  貼り付けて、横へ遡っても残るようにする。
+*/
+.file-zoom .file-meta {
+  position: sticky;
+  inset-block-end: 0;
+  inset-inline-start: 0;
+  background: var(--background);
+}
+
 .file-zoom .file-frame {
   --file-scale: calc(var(--file-zoom, 1) * var(--file-shrink));
   transform: scale(var(--file-scale));

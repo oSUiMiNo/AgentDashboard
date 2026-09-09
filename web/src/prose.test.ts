@@ -206,6 +206,37 @@ describe("構造化ビューの文字の大きさ（細かい修正 項目11・1
     );
   });
 
+  it("画像も、器から大きさを取る", () => {
+    /*
+      **ここが無いと、規則を消しても両方の検査が緑のまま**画像だけ制約なしで描かれる
+      （利用者の指摘で1度そうなっていた）。**総当たりの表（`FileView.matrix.test.tsx`）は
+      「印が付いているか」しか見ないので、印の行き先はこちらが見る。**
+    */
+    expect(規則(".file-zoom .file-image[data-measured='true']")).toContain(
+      "min(100%, var(--file-image-natural))",
+    );
+    // **既定は器に収める。** `--file-shrink` は掛けない（画像を小さくしても得が無い）
+    expect(規則(".file-zoom .file-image[data-measured='true']")).not.toContain(
+      "--file-shrink",
+    );
+    // **原寸を基準にすると、100% がちょうど 1:1 になる**
+    expect(
+      規則(
+        ".file-zoom .file-image[data-measured='true'][data-fit='natural']",
+      ),
+    ).toContain("var(--file-image-natural) * var(--file-zoom, 1)");
+  });
+
+  it("原寸が分かるまでは、器に収めるだけにする", () => {
+    // 分かる前に当てると、**小さい絵が一瞬だけ列幅いっぱいに広がってから縮む**
+    expect(規則(".file-zoom .file-image")).toContain("max-inline-size: 100%");
+  });
+
+  it("画像の素性の行は、遡っても付いてくる", () => {
+    // **原寸へ切り替える道はここにしかない。** 視界の外へ落ちると戻せなくなる
+    expect(規則(".file-zoom .file-meta")).toContain("position: sticky");
+  });
+
   it("拡大した箱は、外へはみ出さない", () => {
     // 倍率が 1 未満のとき寸法は入れ物より大きくなる。**`transform` は場所取りを
     // 変えない**ので、隠さないと横に遡る棒が出る
