@@ -1,5 +1,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { FileTabs } from '@/components/FileView/FileTabs'
 
@@ -123,6 +125,69 @@ describe('タブ帯', () => {
     expect(帯.className).toContain('overflow-x-auto')
     // 縮めるために要る。無いとタブ帯が右のボタン群を画面の外へ押し出す
     expect(帯.className).toContain('min-w-0')
+  })
+
+  it('掴んだ1枚が入るだけの余地を内側に持ち、外形は高くならない', () => {
+    /*
+      **`overflow-x` を非 `visible` にすると `overflow-y` も切る**ので、帯とタブの
+      高さが同じだと、掴んだときの `ring-2` と傾いた角が 1px も入らない（§48.18）。
+
+      **2つで1組**——余白だけだと帯が高くなり、負の余白だけだと余地が無い。片方を
+      落とすと黙って元へ戻るので、両方を数える。
+
+      **`className.includes` で数えない。** `gap-1` は文字列として `p-1` を含むので、
+      綴りの一部にたまたま当たって**空の検査**になる（実際に一度そう書いた）。
+    */
+    置く([`${ROOT}/a.md`])
+    const 帯 = screen.getByTestId('file-tabs')
+    expect([...帯.classList]).toContain('py-1.5')
+    expect([...帯.classList]).toContain('-my-1.5')
+  })
+
+  it('余地の広さは、reorder.css の持ち上げと傾きから逆算した量を満たす', () => {
+    /*
+      **数字だけ置くと、元にした3つのどれかが動いたときに黙って切られ始める。**
+      持ち上げと傾きは `reorder.css`（カードと共通）に、印と幅の上限は実装にある。
+      **ここで読み直して数え直す**ので、あちらを触った人の手元でここが落ちる。
+    */
+    const css = readFileSync(resolve(process.cwd(), 'src/reorder.css'), 'utf8')
+    const 掴んでいる規則 =
+      /\[data-reorder-item\]\[data-reordering='true'\]\[data-dragging='true'\]\s*\{([^}]*)\}/.exec(
+        css,
+      )
+    expect(掴んでいる規則, '掴んでいる規則が reorder.css に無い').not.toBeNull()
+    const 持ち上げ = Number(
+      /--reorder-lift:\s*([\d.]+)/.exec(掴んでいる規則![1]!)?.[1],
+    )
+    const 傾き = Number(
+      /--reorder-tilt:\s*([\d.]+)deg/.exec(掴んでいる規則![1]!)?.[1],
+    )
+    expect(Number.isFinite(持ち上げ) && Number.isFinite(傾き)).toBe(true)
+
+    置く([`${ROOT}/a.md`])
+    const 帯 = screen.getByTestId('file-tabs')
+    const タブ = screen.getByTestId('file-tab')
+
+    /*
+      **前提が動いたら、ここも落とす。** 逆算はこの4つを使っているので、綴りが
+      変わったのに数字が据え置かれる、という壊れ方をさせない。
+    */
+    expect([...タブ.parentElement!.classList]).toContain('h-7')
+    expect(タブ.parentElement!.className).toContain('ring-2')
+    expect([...タブ.classList]).toContain('max-w-[12rem]')
+
+    const 高さ = 28 // h-7
+    const 印 = 2 // ring-2（等倍・傾き 0 でも外へ出る）
+    const 幅 = 192 + 24 + 2 // max-w-[12rem] ＋ ✕（size-6）＋ mr-0.5
+    const w = (幅 + 印 * 2) * 持ち上げ
+    const h = (高さ + 印 * 2) * 持ち上げ
+    const ラジアン = (傾き * Math.PI) / 180
+    const 要る =
+      (w / 2) * Math.sin(ラジアン) + (h / 2) * Math.cos(ラジアン) - 高さ / 2
+
+    const 余地 =
+      Number(/(?:^|\s)py-([\d.]+)(?:\s|$)/.exec(帯.className)?.[1]) * 4
+    expect(余地).toBeGreaterThanOrEqual(要る)
   })
 
   it('1枚ずつは縮まない（字が潰れない）', () => {

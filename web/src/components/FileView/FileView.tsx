@@ -441,6 +441,12 @@ export function FileView({
       // `overflow-auto` が言うのは「はみ出したら遡らせる」だけで、**どこまでがはみ出しかは
       // 別に決まっている必要がある**。高さが `auto` のままだと箱も中身と一緒に伸びるので、
       // はみ出しが永久に発生しない——遡れないのに、画面には「短い文書」に見える
+      /*
+        **`pt-2` と `gap-2`（どちらも 8px）は、タブ帯が当てにしている。** 帯は掴んだ
+        1枚のために上下へ 6px はみ出す箱を持ち、`-my-1.5` で外形だけ戻している
+        （`FileTabs.tsx`・`DESIGN.md` §48.18）。**ここを詰めると、はみ出した箱が
+        下の本文へ被さる**——帯は `onPointerMove` を持つので、当たり判定も一緒に降りる。
+      */
       className="file-zoom border-border flex h-full min-h-0 flex-col gap-2 border-t pt-2"
     >
       {/*
@@ -455,6 +461,10 @@ export function FileView({
         並びは**左から、効く相手が近いものから遠いものへ**。
         「どのファイルか（タブ）」→「中身をどう読むか（探す・大きさ・整形／生）」→
         「外へ出す」→「閉じる」。
+      */}
+      {/*
+        **`items-center` を外さないこと。** 伸ばす（既定の `items-stretch`）に変えると、
+        タブ帯の負の余白が「外形を戻す」意味を失い、帯だけが段から溢れる（§48.18）。
       */}
       <header className="flex items-center gap-1.5">
         {/*

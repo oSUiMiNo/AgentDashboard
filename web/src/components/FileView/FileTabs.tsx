@@ -200,7 +200,13 @@ export function FileTabs({
       **次のポインタの動きが別の場所を落とし先と判定する**——しかも帯が流れるほど
       枚数がある状況は、まさに並べ替えたい状況そのものである。
     */
-    if (帯 === null || 運び中 !== null) {
+    /*
+      **落ち着いている最中も動かさない。** 離した瞬間に `運び中` は null になるが、
+      **`translate` はまだ乗ったまま**滑っている——`getBoundingClientRect` は変形後を
+      返すので、ここで測ると**通り過ぎの位置**で送り先を決めることになる。
+      確定すると `tabs` が変わって、この効果はもう一度ちゃんと走る。
+    */
+    if (帯 === null || 運び中 !== null || 落ち着き待ち.current !== null) {
       return
     }
     const タブ = 帯.querySelector<HTMLElement>(
@@ -508,7 +514,31 @@ export function FileTabs({
         ここでは正しい。
       */
       /* **`select-none`。** 掴んで運ぶ間、名前が選択されるのを止める */
-      className="flex min-w-0 flex-1 select-none items-center gap-1 overflow-x-auto overscroll-x-contain"
+      /*
+        **切る器の内側に、掴んだ1枚が入るだけの余地を作る**（`DESIGN.md` §48.18）。
+
+        `overflow-x` を非 `visible` にすると **`overflow-y` も `auto` へ計算される**ので、
+        この帯は**上下も切る**。中のタブと帯の高さはどちらも 28px なので、**箱の外へ
+        描くもの（`ring-2`・傾いた角）は 1px も入らない**——掴むと角が平らに落ち、
+        ring が消える。
+
+        **縮めても直らない。** 切っているのは倍率ではなく帯の高さで、`ring-2` は
+        等倍・傾き 0 でも 2px 外へ出る。**動き（`reorder.css`）はカードと共通なので、
+        あちらを触ると一覧の手触りまで変わる**——直すのは器の側だけにする。
+
+        **6px は逆算した値**（`FileTabs.test.tsx` が同じ式で数え直す）。いちばん広い
+        スロット（ラベル 192 ＋ ✕ 24 ＋ 2）に `ring-2` を足して `--reorder-lift` 倍し、
+        `--reorder-tilt` だけ傾けると、片側へ **4.29px** はみ出す。
+
+        **`-my-1.5` で外形は 28px のまま。** 上下の 6px は `FileView` の `pt-2` と
+        `gap-2`（どちらも 8px）へ逃げるので、**帯は 1px も高くならない**。
+
+        **横には作らない。** 傾きが動かすのは縦で、横は倍率ぶんしか出ない。しかも
+        **横の余地は端のタブにしか効かない**のに、代償として**帯だけが 4px 内側から
+        始まる**（下の本文は端に届いている）。端のタブを運ぶ向きは必ず内側なので、
+        指を動かした最初の数 px で切られなくなる——**永続する食い違いのほうが高くつく。**
+      */
+      className="flex min-w-0 flex-1 select-none items-center gap-1 overflow-x-auto overscroll-x-contain py-1.5 -my-1.5"
     >
       {tabs.map((path, i) => {
         const selected = path === current
@@ -543,7 +573,7 @@ export function FileTabs({
                 ? undefined
                 : ({ '--reorder-dx': `${運び.dx[path] ?? 0}px` } as CSSProperties)
             }
-            className={`flex h-7 shrink-0 items-center rounded-md transition-colors data-[dragging=true]:shadow-lg data-[dragging=true]:ring-2 data-[dragging=true]:ring-ring/60 ${
+            className={`flex h-7 shrink-0 items-center rounded-md transition-colors data-[dragging=true]:ring-2 data-[dragging=true]:ring-ring/60 ${
               selected
                 ? 'bg-primary text-primary-foreground'
                 : 'bg-muted text-muted-foreground hover:bg-secondary hover:text-foreground'
