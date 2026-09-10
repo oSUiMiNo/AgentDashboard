@@ -76,9 +76,18 @@ export function SessionAdd({ host, project, compact = false }: Props) {
   const spawn = useWsStore((state) => state.spawn)
   const recall = useWsStore((state) => state.recall)
   const status = useWsStore((state) => state.status)
-  // 過去のセッション（名前付け設計§9-4）。**開いたときに1回だけ引く**——
-  // 実在を確かめるのに PC へ問い合わせが出るので、開くたびに何度も引かない
-  const [past, setPast] = useState<PastSession[] | null>(null)
+  // 過去のセッション（名前付け設計§9-4）。**開くたびに引き直す**（2026-09-10 に変えた）。
+  //
+  // かつては「開いたときに1回だけ引き、閉じても捨てない」だった。理由は問い合わせを
+  // 減らすことだったが、**そのタブで一度開いたあとに寝かせたセッションが、
+  // リロードするまで一覧に出ない**という形で効いていた——**利用者からは「見失った」
+  // としか見えない。** 実在確認は1回の走査で全件を判定する作りなので（実測 24.5ms）、
+  // 開くたびに引いても重くない。
+  //
+  // **`null` は「まだ引いていない」、`'失敗'` は「引けなかった」、配列は結果。**
+  // 空配列と失敗を同じ値で表すと、**引けなかったことが「1本も無い」に化ける**
+  // （それが実際に起きていた）。
+  const [past, setPast] = useState<PastSession[] | '失敗' | null>(null)
   const [pickedSession, setPickedSession] = useState<string>(FRESH)
   const alwaysBypass = useSettingsStore(
     (state) => state.settings.always_bypass_permissions,
@@ -86,29 +95,35 @@ export function SessionAdd({ host, project, compact = false }: Props) {
   // `undefined` は「まだ選んでいない」＝既定に従う（上のドキュメント参照）
   const [picked, setPicked] = useState<string | undefined>(undefined)
 
-  // 開いた瞬間に1回だけ引く。閉じても捨てない（開き直しても再取得しないため）
+  // **開くたびに引き直す。** 閉じている間は引かない
   useEffect(() => {
-    if (!open || past !== null) return
+    if (!open) return
     let alive = true
     // **枠はサーバへ渡す。手元では絞らない。** 「どの枠か」の規則が2箇所に在ると
     // 片方だけ直したときに食い違う。実際に食い違っていた——件数の上限がサーバ側で
     // 枠を跨いで先に効き、そのあと画面が絞るので、枠あたり数件しか残らなかった
     const 問い = new URLSearchParams({ host, project })
     void fetch(`/api/sessions/past?${問い.toString()}`)
-      .then((response) => (response.ok ? response.json() : []))
+      // **`ok` でない応答は失敗である。** ここで空配列へ倒していたので、
+      // サーバが 500 を返しても画面には「1本も無い」と出ていた
+      .then((response) => {
+        if (!response.ok) throw new Error(`past ${response.status}`)
+        return response.json()
+      })
       .then((rows: PastSession[]) => {
         if (!alive) return
         setPast(rows)
       })
       .catch(() => {
         // **引けなかったことを「無い」にしない。** 空配列を置くと「過去のセッションは
-        // ありません」と出てしまう
-        if (alive) setPast([])
+        // ありません」と出てしまう——**コメントは元からこう書いてあったのに、
+        // 実装が空配列を置いていた。** 失敗は失敗として持つ
+        if (alive) setPast('失敗')
       })
     return () => {
       alive = false
     }
-  }, [open, past, project, host])
+  }, [open, project, host])
 
   const value = picked ?? (alwaysBypass ? BYPASS_VALUE : '')
   const mode: PermissionMode | null = value === '' ? null : value
@@ -185,7 +200,14 @@ export function SessionAdd({ host, project, compact = false }: Props) {
           ))}
         </select>
       </label>
-      {past !== null && past.length > 0 && (
+      {past === '失敗' && (
+        // **引けなかったことを、無いことにしない。** ここが無いと「1本も無い」と
+        // 同じ見た目になり、利用者は探し続けることになる
+        <span data-testid="spawn-past-failed" className="text-xs text-muted-foreground">
+          過去のセッションを読めませんでした
+        </span>
+      )}
+      {past !== null && past !== '失敗' && past.length > 0 && (
         <label className="flex items-center gap-1.5 text-xs">
           <span className="text-muted-foreground">どれを</span>
           <select
@@ -196,20 +218,36 @@ export function SessionAdd({ host, project, compact = false }: Props) {
             className="max-w-56 rounded border px-1.5 py-1 text-xs"
           >
             <option value={FRESH}>新しく起こす</option>
-            {past.map((row) => (
-              <option
-                key={row.claude_session_id}
-                value={row.claude_session_id}
-                // **確かめていないものも選べる**（設計§8-5）。PC が寝ているだけで
-                // 無いとは限らないので、印を添えて残す
-                title={
-                  row.exists === null
-                    ? 'この PC が繋がっていないので、まだ実在を確かめていません'
-                    : undefined
-                }
-              >
-                {pastLabel(row)}
-              </option>
+            {/*
+              **枠（PJT）ごとに畳む。** 上限を外して一覧が伸びたので、
+              平らに並べると探せない。**件数で捨てるのをやめた代わりの手当て**である
+              （サーバ側が名前付きを先に並べ、ここが枠でまとめる）
+            */}
+            {枠ごとに畳む(past).map(([枠, 行]) => (
+              <optgroup key={枠} label={枠}>
+                {行.map((row) => (
+                  <option
+                    key={row.claude_session_id}
+                    value={row.claude_session_id}
+                    // **確かめて「無かった」ものは押させない**（設計§8-2）。
+                    // 消えたIDへの `--resume` は製品の中では「正常終了」に見えるので、
+                    // 押せると**静かに終わったカードが1枚増えるだけ**になる。
+                    // 出すのは「戻せない」と分かるようにするためで、押させるためではない
+                    disabled={row.exists === false}
+                    // **確かめていないものは選べる**（設計§8-5）。PC が寝ているだけで
+                    // 無いとは限らないので、印を添えて残す
+                    title={
+                      row.exists === false
+                        ? '履歴が消えているため呼び戻せません'
+                        : row.exists === null
+                          ? 'この PC が繋がっていないので、まだ実在を確かめていません'
+                          : undefined
+                    }
+                  >
+                    {pastLabel(row)}
+                  </option>
+                ))}
+              </optgroup>
             ))}
           </select>
         </label>
@@ -249,5 +287,28 @@ export function SessionAdd({ host, project, compact = false }: Props) {
 function pastLabel(row: PastSession): string {
   const name =
     row.nickname ?? row.session_title ?? `${row.claude_session_id.slice(0, 8)}…`
-  return row.exists === null ? `${name}（未確認）` : name
+  // **札で状態を添える**（`DESIGN.md` §42.3）。どちらも「続いている状態」なので
+  // トーストではなく行に付ける。**`（未確認）` と `（履歴が消えています）` は別物**
+  // ——前者は聞けなかっただけで選べる、後者は確かめて無かったので選べない
+  if (row.exists === false) return `${name}（履歴が消えています）`
+  if (row.exists === null) return `${name}（未確認）`
+  return name
+}
+
+/**
+ * 枠（PJT）ごとにまとめる。**並びは崩さない**——サーバが名前付きを先に並べているので、
+ * 枠の中でも、枠そのものの順でも、最初に出てきた順を保つ。
+ *
+ * 上限を外して一覧が伸びた（実測で45件→最大160件近く）ぶんの手当てである。
+ * **件数で捨てるのをやめたので、探し方のほうを用意する必要がある。**
+ */
+function 枠ごとに畳む(rows: PastSession[]): [string, PastSession[]][] {
+  const 束 = new Map<string, PastSession[]>()
+  for (const row of rows) {
+    const 枠 = row.project.split('/').pop() || row.project
+    const 既存 = 束.get(枠)
+    if (既存) 既存.push(row)
+    else 束.set(枠, [row])
+  }
+  return [...束]
 }

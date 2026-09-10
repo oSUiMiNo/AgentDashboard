@@ -175,18 +175,55 @@ function 過去を返す(rows: PastSession[]) {
 }
 
 describe('過去のセッションから起こす', () => {
-  it('開いたときに1回だけ引く', async () => {
+  it('開くたびに引き直す', async () => {
+    // **2026-09-10 に「1回だけ引く」から変えた。** 引き直さないと、そのタブで
+    // 一度開いたあとに寝かせたセッションが**リロードするまで一覧に出ない**——
+    // 利用者からは「見失った」としか見えない。実在確認は1回の走査で全件を
+    // 判定する作りなので（実測 24.5ms）、開くたびに引いても重くない
     const calls = 過去を返す([過去()])
     render(<SessionAdd host="local" project={PROJECT} />)
     await userEvent.click(screen.getByTestId('spawn-open'))
     await screen.findByTestId('spawn-past')
 
-    // 閉じて開き直しても引き直さない（問い合わせを積み上げない）
     await userEvent.click(screen.getByTestId('spawn-cancel'))
     await userEvent.click(screen.getByTestId('spawn-open'))
     await screen.findByTestId('spawn-past')
 
-    expect(calls.count).toBe(1)
+    expect(calls.count).toBe(2)
+  })
+
+  it('引けなかったことを「1本も無い」にしない', async () => {
+    // **失敗と空を同じ見た目にしない。** かつては `catch` も `ok` でない応答も
+    // 空配列を置いていたので、**サーバが 500 を返しても「過去のセッションは
+    // ありません」と同じ**に見えた（選択欄ごと消えるため）
+    vi.stubGlobal('fetch', (path: string) => {
+      if (path.startsWith('/api/sessions/past')) {
+        return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve([]) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve([]) })
+    })
+    render(<SessionAdd host="local" project={PROJECT} />)
+    await userEvent.click(screen.getByTestId('spawn-open'))
+
+    await screen.findByTestId('spawn-past-failed')
+    expect(screen.queryByTestId('spawn-past')).toBeNull()
+  })
+
+  it('履歴が消えたものは出るが押せない', async () => {
+    // **出すのは「戻せない」と分かるようにするためで、押させるためではない**
+    // （設計§8-2——消えたIDへの `--resume` は製品の中では「正常終了」に見えるので、
+    // 押せると静かに終わったカードが1枚増えるだけになる）
+    過去を返す([
+      過去({ claude_session_id: 'aaaaaaaa-0000-0000-0000-000000000000', nickname: '消えたやつ', exists: false }),
+      過去({ claude_session_id: 'bbbbbbbb-0000-0000-0000-000000000000', nickname: '生きてるやつ', exists: true }),
+    ])
+    render(<SessionAdd host="local" project={PROJECT} />)
+    await userEvent.click(screen.getByTestId('spawn-open'))
+    await screen.findByTestId('spawn-past')
+
+    const 消えた = screen.getByRole('option', { name: /消えたやつ（履歴が消えています）/ })
+    expect(消えた).toBeDisabled()
+    expect(screen.getByRole('option', { name: '生きてるやつ' })).not.toBeDisabled()
   })
 
   it('名前があればそれ、無ければ CLI の名前が出る', async () => {
