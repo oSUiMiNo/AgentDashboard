@@ -29,6 +29,7 @@ fn meta(card_id: CardId) -> SessionMeta {
         card_id,
         project: ProjectId("/tmp/project".to_string()),
         claude_session_id: None,
+        resumed_from: None,
         permission_mode: None,
         model: None,
         model_label: None,
@@ -1517,6 +1518,107 @@ async fn 外したカード(
 }
 
 #[tokio::test]
+async fn 張り替えが起きても元の会話は一覧に残る() {
+    // **このイシューの本命。**
+    //
+    // 呼び戻しは元の会話のIDをカードに先に入れて起こすが、`--resume` した claude が
+    // 別のIDを名乗るとカードはそちらへ張り替わる。**張り替えたあと頼んだIDが
+    // どこにも残らないと、元の会話は一覧から消えて二度と戻せない。**
+    //
+    // 実測（2026-09-10）：`sessions` 194行のうち 22行（11%）がこの形で壊れていた。
+    for backend in common::backends("past_resumed_from").await {
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+
+        let 頼んだ会話 = ClaudeSessionId::new();
+        let 名乗られた会話 = ClaudeSessionId::new();
+        let card = CardId::new();
+        let mut meta = meta_with_session(card, 名乗られた会話);
+        // 頼んだのは別の会話だった、という状態を作る
+        meta.resumed_from = Some(頼んだ会話);
+        meta.last_activity_at = 100;
+        registry
+            .apply(
+                &local(),
+                ServerMessage::SessionUpsert {
+                    session: Box::new(meta),
+                },
+            )
+            .await;
+        registry
+            .archive_owned(local().account_id, card)
+            .await
+            .expect("外せること");
+
+        let past = registry
+            .past_sessions(local().account_id, None)
+            .await
+            .expect("引けること");
+        let ids: Vec<ClaudeSessionId> = past.iter().map(|row| row.claude_session_id).collect();
+        assert!(
+            ids.contains(&頼んだ会話),
+            "[{}] 張り替えで元の会話が一覧から消えた",
+            backend.name
+        );
+        assert!(
+            ids.contains(&名乗られた会話),
+            "[{}] いま動いている会話まで消えた",
+            backend.name
+        );
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 行を失った枝の親も一覧に出る() {
+    // **`resumed_from` を足す前に壊れたものを救う側。**
+    //
+    // あの欄は**これから起こすものにしか入らない**ので、既に行を失った会話は
+    // 救えない。**枝の印だけが「枝 → 分かれ元」を覚えている**ので、そこから辿る。
+    //
+    // 組み立ては `past_session_of` をそのまま呼んでいる——**同じ迂回を2箇所に書くと、
+    // 片方だけ直したときに「一覧には出るのに呼び戻せない」が起きる。**
+    for backend in common::backends("past_branch_rescue").await {
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+
+        // 枝だけが行を持ち、親は1行も持たない——枝がカードを乗っ取った状態
+        let 親 = ClaudeSessionId::new();
+        let 枝 = ClaudeSessionId::new();
+        外したカード(&registry, 枝, 200).await;
+        registry
+            .mark_branch(local().account_id, 枝, 親)
+            .await
+            .expect("枝の印を付けられること");
+
+        let past = registry
+            .past_sessions(local().account_id, None)
+            .await
+            .expect("引けること");
+        let 拾えた = past.iter().find(|row| row.claude_session_id == 親);
+        assert!(
+            拾えた.is_some(),
+            "[{}] 行を失った枝の親が一覧に出てこない",
+            backend.name
+        );
+        // 枠は枝から借りる。**元の会話は必ず同じ枠に居る**
+        assert_eq!(
+            拾えた.map(|row| row.project.0.as_str()),
+            past.iter()
+                .find(|row| row.claude_session_id == 枝)
+                .map(|row| row.project.0.as_str()),
+            "[{}] 枝の枠を借りていない",
+            backend.name
+        );
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
 async fn 過去の一覧は外したカードも返す() {
     // `GET /api/sessions` は外したカードを返さない（読み込みから除かれている）。
     // **この口が無いと、過去のセッションを引く道が1つも無い**（設計§6-1）
@@ -1703,9 +1805,12 @@ async fn 枠を指定するとその枠のぶんだけ返る() {
 }
 
 #[tokio::test]
-async fn 名前を付けたものは件数で切られない() {
-    // **付けた行為そのものが「また使う」の意思表示**（設計§6-3）。件数で切ると、
-    // 大事に取っておいたものが新しいものに押し出されて消える
+async fn 無名は件数で切られず名前付きが先に来る() {
+    // **2026-09-10 に上限（`cap_unnamed`）を外した。** 上限は黙って落とすので、
+    // 利用者からは見失ったのと区別が付かなかった。
+    //
+    // **「付けた行為が『また使う』の意思表示」（設計§6-3）という判断は正しかったので、
+    // それを件数ではなく順序で表す**——名前付きを先に並べ、無名は捨てない。
     for backend in common::backends("past_limit").await {
         let registry =
             SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
@@ -1740,24 +1845,29 @@ async fn 名前を付けたものは件数で切られない() {
             外したカード(&registry, ClaudeSessionId::new(), 100 + n).await;
         }
 
-        // 上限2で切る——名前の無いものは2本に切られ、名前付きは残る。
-        // **切るのは引くのと別の関数**（`cap_unnamed`）である。実在を確かめたあとで
-        // なければ、落ちたぶんが補充されず必ず上限より少なくなるため
-        let mut past = registry
+        let past = registry
             .past_sessions(local().account_id, None)
             .await
             .expect("引けること");
-        SessionRegistry::cap_unnamed(&mut past, 2);
         let ids: Vec<ClaudeSessionId> = past.iter().map(|row| row.claude_session_id).collect();
         assert!(
             ids.contains(&名付き),
-            "[{}] 名前を付けたものが件数で切られた",
+            "[{}] 名前を付けたものが一覧から消えた",
             backend.name
         );
+        // **6本とも出る。** かつては無名が上限で切られていた
         assert_eq!(
             past.len(),
-            3,
-            "[{}] 名前の無いものが上限どおりに切られていない",
+            6,
+            "[{}] 無名が件数で切られている（上限は外したはず）",
+            backend.name
+        );
+        // **名前付きが先頭。** いちばん古いのに先へ来る——順序が「また使う」の
+        // 意思表示を表している。ここが崩れると、上限を外した代償を払っただけになる
+        assert_eq!(
+            past.first().map(|row| row.claude_session_id),
+            Some(名付き),
+            "[{}] 名前付きが先頭に来ていない",
             backend.name
         );
         backend.finish().await;

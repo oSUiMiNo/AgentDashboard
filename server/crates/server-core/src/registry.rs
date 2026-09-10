@@ -806,23 +806,99 @@ impl SessionRegistry {
         let mut 畳んだ: Vec<protocol::PastSession> = Vec::new();
         let mut 見た = std::collections::HashSet::new();
         for row in rows {
-            let Some(session) = row.claude_session_id.map(ClaudeSessionId) else {
-                continue;
-            };
-            if 生きている.contains(&session) || !見た.insert(session) {
+            // **1行から最大2つの会話が出る。**
+            //
+            // | どちら | 何 |
+            // |---|---|
+            // | `claude_session_id` | **いま動いている会話。** フックの名乗りで張り替わる |
+            // | `resumed_from` | **`--resume` で頼んだ会話。** 起こしたときのまま変わらない |
+            //
+            // **両方を並べないと、張り替えが起きた会話が一覧から消える**——カードは
+            // 新しいIDを指しているので、元のIDを持つ行がどこにも無くなる。
+            // とくに `revive` は同じカードを使い回すため、上書きされるのが
+            // **その会話が持つ唯一の行**になる。
+            //
+            // 張り替えが起きていなければ2つは同じ値で、下の重複排除が1つに畳む。
+            for (session, 頼んだほう) in [(row.claude_session_id, false), (row.resumed_from, true)]
+                .into_iter()
+                .filter_map(|(id, 頼んだほう)| id.map(|id| (ClaudeSessionId(id), 頼んだほう)))
+            {
+                if 生きている.contains(&session) || !見た.insert(session) {
+                    continue;
+                }
+                畳んだ.push(protocol::PastSession {
+                    claude_session_id: session,
+                    nickname: nicknames.get(&(account_id, session)).cloned(),
+                    // **頼んだほうには題を付けない。** 題は CLI がいまの会話に付けた
+                    // ものなので、元の会話に貼ると別の会話の題を名乗ることになる
+                    // （`past_session_of` の枝の迂回が同じ理由で `None` を置いている）
+                    session_title: if 頼んだほう {
+                        None
+                    } else {
+                        row.session_title.clone()
+                    },
+                    // 枠（PC・作業ディレクトリ・権限モード）は借りる。**元の会話は
+                    // 必ず同じ枠に居る**——同じカードが `--resume` したのだから
+                    project: ProjectId(row.project.clone()),
+                    agent_id: row.agent_id.map(protocol::AgentId),
+                    permission_mode: row.permission_mode.clone().map(PermissionMode::new),
+                    last_activity_at: row.last_activity_at,
+                    exists: None,
+                });
+            }
+        }
+
+        // **`resumed_from` が入る前に壊れた行を、枝の印から救う。**
+        //
+        // 上の `resumed_from` は**これから起こすものにしか入らない**ので、欄を足す前に
+        // 張り替えで行を失った会話は救えない（実測で1本。`ブランチの親_2026-0908`）。
+        // **枝の印だけは「枝 → 分かれ元」を覚えている**ので、そこから辿り直せる。
+        //
+        // # 規則を二重に持たない
+        //
+        // 組み立ては [`Self::past_session_of`] をそのまま呼ぶ。**同じ迂回を2箇所に
+        // 書くと、片方だけ直したときに「一覧には出るのに呼び戻せない」（またはその逆）
+        // が起きる。**
+        //
+        // # これは再発を防ぐ手ではない
+        //
+        // 枝の台帳に載らない経路（`revive` など）は救えない。**再発を止めるのは
+        // `resumed_from` の側**で、こちらは既に失われたものを拾うだけである。
+        let 行を失った親: Vec<ClaudeSessionId> = {
+            let branches = self.branches.lock().expect("ロックが壊れていない");
+            branches
+                .iter()
+                .filter(|((owner, _), _)| *owner == account_id)
+                .map(|((_, _), 元)| *元)
+                .filter(|元| !生きている.contains(元) && !見た.contains(元))
+                .collect()
+        };
+        for 親 in 行を失った親 {
+            // 同じ親から枝が何本も出ていることがあるので、ここでも重複を弾く
+            if !見た.insert(親) {
                 continue;
             }
-            畳んだ.push(protocol::PastSession {
-                claude_session_id: session,
-                nickname: nicknames.get(&(account_id, session)).cloned(),
-                session_title: row.session_title,
-                project: ProjectId(row.project),
-                agent_id: row.agent_id.map(protocol::AgentId),
-                permission_mode: row.permission_mode.map(PermissionMode::new),
-                last_activity_at: row.last_activity_at,
-                exists: None,
-            });
+            if let Some(past) = self.past_session_of(account_id, 親).await? {
+                畳んだ.push(past);
+            }
         }
+
+        // **名前付きを先に、その中で最終活動の新しい順に整える。**
+        //
+        // 上の2つ（頼んだ会話・枝から救った親）は行の並びに乗らないので、足したままだと
+        // 末尾に固まる。並べ直しはそのためにも要る。
+        //
+        // # 名前付きを先にするのは、上限を外した代わりである
+        //
+        // かつては無名を20件で切っていた（`cap_unnamed`）。**「付けた行為が『また使う』の
+        // 意思表示だから名前付きは切らない」という判断は正しかったので、それを件数では
+        // なく順序で表す。** 捨てずに、探しやすいところへ置く。
+        畳んだ.sort_by(|a, b| {
+            b.nickname
+                .is_some()
+                .cmp(&a.nickname.is_some())
+                .then(b.last_activity_at.cmp(&a.last_activity_at))
+        });
 
         // 枠を指定されたら、その枠のぶんだけ残す。**畳んだあとに絞る**——先に絞ると、
         // 同じセッションを指す別の枠のカードのほうが新しいときに取り違える
@@ -832,30 +908,15 @@ impl SessionRegistry {
         Ok(畳んだ)
     }
 
-    /// 名前の無いものを**最近の N 件**へ切り詰める（名前付け設計§6-3）。
-    ///
-    /// # 名前を付けたものは切らない
-    ///
-    /// 付けた行為そのものが「また使う」の意思表示なので、件数で切ると**大事に取って
-    /// おいたものが新しいものに押し出されて消える**。
-    ///
-    /// # なぜ [`SessionRegistry::past_sessions`] の中でやらないのか
-    ///
-    /// **実在を確かめたあとでなければ、上限より必ず少なくなる**から。先に20件へ
-    /// 切ってから「無いもの」を落とすと、落ちたぶんは補充されない——実測で20件の
-    /// 枠から5件が消え、15件しか出ていなかった。
-    ///
-    /// 並びは呼ぶ側が整えたまま（最終活動の新しい順）で渡すこと。
-    pub fn cap_unnamed(past: &mut Vec<protocol::PastSession>, unnamed_limit: usize) {
-        let mut 無名 = 0usize;
-        past.retain(|past| {
-            if past.nickname.is_some() {
-                return true;
-            }
-            無名 += 1;
-            無名 <= unnamed_limit
-        });
-    }
+    // **`cap_unnamed`（無名を最近20件へ切り詰める関数）は 2026-09-10 に消した。**
+    //
+    // 「名前を付けたものは切らない」という判断そのものは正しかった——付けた行為が
+    // 「また使う」の意思表示だからである。**その判断は並びのほうへ移した**
+    // （[`Self::past_sessions`] が名前付きを先に並べる）。**件数で捨てるのをやめ、
+    // 順序で表す形にした。**
+    //
+    // 消した理由は `ws.rs` の該当箇所に書いてある（黙って落ちるので、利用者からは
+    // 見失ったのと区別が付かない）。
 
     /// 過去のセッションを**1本だけ**引く（名前付け設計§7・§11-4）。
     ///
@@ -1593,6 +1654,7 @@ impl SessionRegistry {
         let mut 記録の生まれた時刻 = None;
         let mut 記録の名前 = None;
         let mut 記録の並び = None;
+        let mut 記録の頼んだ会話 = None;
         match self.get(meta.card_id) {
             Some(record) => {
                 if self.refuse_crossing(&origin.account_id, record.account_id, meta.card_id) {
@@ -1601,6 +1663,7 @@ impl SessionRegistry {
                 記録の生まれた時刻 = Some(record.meta().created_at);
                 記録の名前 = record.meta().session_title;
                 記録の並び = Some(record.meta().position);
+                記録の頼んだ会話 = record.meta().resumed_from;
             }
             None => match self.stored(meta.card_id).await? {
                 Some((owner, _, _))
@@ -1653,6 +1716,23 @@ impl SessionRegistry {
             && let Some(名前) = 記録の名前
         {
             meta.session_title = Some(名前);
+        }
+        // **空の報告で「頼んだ会話」を消さない。** 名前とまったく同じ性質である。
+        //
+        // 消えると困る度合いはこちらのほうが重い——名前は付け直せるが、**何を
+        // `--resume` したかは起こした時点にしか存在しない情報**で、失うと二度と
+        // 復元できない。そして失った瞬間に、その会話は呼び戻しの一覧から消える。
+        //
+        // **空が届く道が2つある。** ①`resumed_from` を持たない古い版の PC（欄が
+        // 無いので `None` として受かる）②新規セッションとして起こされたカード。
+        // ①で消してはいけないので、**空は常に記録の値で埋め直す**。
+        //
+        // 逆向き（空でない報告）は素通しでよい。**同じカードを別の会話で起こし直す
+        // （`revive`）と新しい値が届く**ので、空を無視しても更新は届く。
+        if meta.resumed_from.is_none()
+            && let Some(頼んだ会話) = 記録の頼んだ会話
+        {
+            meta.resumed_from = Some(頼んだ会話);
         }
         // **並びも記録の側が正**（設計§9-2）。セッションホストは並び順を知らないので
         // 0 を名乗ってくる。素直に取り込むと、**報告が届くたびに並べ替えた結果が
@@ -1878,6 +1958,7 @@ impl SessionRegistry {
             account_id: Set(origin.account_id),
             project: Set(meta.project.0.clone()),
             claude_session_id: Set(meta.claude_session_id.map(|id| id.0)),
+            resumed_from: Set(meta.resumed_from.map(|id| id.0)),
             permission_mode: Set(meta
                 .permission_mode
                 .as_ref()
@@ -1923,6 +2004,12 @@ impl SessionRegistry {
                         // （空の報告は `upsert` が記録の名前で埋め直す。§6-1）、
                         // ここで例外を作らない
                         entity::sessions::Column::SessionTitle,
+                        // `ResumedFrom` も更新する。**外すと復旧が書けない**——
+                        // `revive` は新しいカードを採番せず**既にあるカードを使い回す**
+                        // ので、行は必ず既にある。更新列から外すと、復旧で頼んだIDが
+                        // 永久に書かれない。空の報告で消さない扱いは `SessionTitle` と
+                        // 同じく `upsert` 側で行う
+                        entity::sessions::Column::ResumedFrom,
                         // `Archived` は**更新しない**。外したことは後から届く報告で
                         // 取り消されてはいけない（上の `upsert` の門と対になっている）。
                         // `AccountId` も**更新しない**。帰属は最初の報告で決まり、
@@ -2078,6 +2165,7 @@ fn placeholder_meta(card_id: CardId) -> SessionMeta {
         card_id,
         project: ProjectId(String::new()),
         claude_session_id: None,
+        resumed_from: None,
         permission_mode: None,
         model: None,
         model_label: None,
@@ -2104,6 +2192,7 @@ fn meta_from_row(row: entity::sessions::Model) -> SessionMeta {
         card_id: CardId(row.card_id),
         project: ProjectId(row.project),
         claude_session_id: row.claude_session_id.map(ClaudeSessionId),
+        resumed_from: row.resumed_from.map(ClaudeSessionId),
         permission_mode: row.permission_mode.map(PermissionMode::new),
         model: row.model.map(ModelId::new),
         model_label: row.model_label,

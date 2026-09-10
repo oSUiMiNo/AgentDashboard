@@ -356,6 +356,7 @@ pub fn meta(card_id: CardId) -> SessionMeta {
         card_id,
         project: ProjectId("/tmp/project".to_string()),
         claude_session_id: None,
+        resumed_from: None,
         permission_mode: None,
         model: None,
         model_label: None,
