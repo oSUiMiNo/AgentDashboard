@@ -33,7 +33,8 @@ use protocol::{
 };
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
-    ActiveValue::Set, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder,
+    ActiveValue::Set, ColumnTrait, Condition, DatabaseConnection, DbErr, EntityTrait, QueryFilter,
+    QueryOrder,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -763,8 +764,9 @@ impl SessionRegistry {
     ///
     /// # 件数は切らない
     ///
-    /// 上限を掛けるのは [`cap_unnamed`] で、**実在を確かめたあと**である。ここで先に
-    /// 切ると、そのあと実在の確認で落ちたぶんだけ**必ず上限より少なくなる**。
+    /// **上限は 2026-09-10 に外した**（かつては `cap_unnamed` が無名を20件へ切っていた）。
+    /// 黙って落ちるので、利用者からは見失ったのと区別が付かなかった。上限が守っていた
+    /// 「選べること」は**並び**で満たす——名前付きを先に出す。
     ///
     /// `exists` はここでは埋めない（PC に聞くのは呼ぶ側の仕事）。
     pub async fn past_sessions(
@@ -774,25 +776,42 @@ impl SessionRegistry {
     ) -> Result<Vec<protocol::PastSession>, DbErr> {
         // いま実体があるカードが指しているセッションは外す。**手元の記録から数える**
         // ——DB には「繋がっているか」が無い（読み出し時にかぶせる値）
+        //
+        // **`resumed_from` の側も数える。** 生きたカードが `--resume` した元の会話を
+        // 一覧へ出すと、**同じ会話を2つのプロセスに開かせる**ことになる（§6-4）。
+        // 出す側が2つの欄を見るようになったので、外す側も揃えないと片側だけ漏れる。
         let 生きている: std::collections::HashSet<ClaudeSessionId> = self
             .records
             .lock()
             .expect("ロックが壊れていない")
             .values()
             .filter(|record| record.account_id == account_id)
-            .filter_map(|record| {
+            .flat_map(|record| {
                 let meta = record.meta();
                 // 「実体がある」の裏は `revivable`（実体が無く戻す先がある）。
                 // **同じ規則を二度書かない**
-                (!meta.revivable())
-                    .then_some(meta.claude_session_id)
+                if meta.revivable() {
+                    return Vec::new();
+                }
+                [meta.claude_session_id, meta.resumed_from]
+                    .into_iter()
                     .flatten()
+                    .collect::<Vec<_>>()
             })
             .collect();
 
         let rows = entity::sessions::Entity::find()
             .filter(entity::sessions::Column::AccountId.eq(account_id))
-            .filter(entity::sessions::Column::ClaudeSessionId.is_not_null())
+            // **どちらか片方でも入っていれば拾う。** `claude_session_id` だけで絞ると、
+            // 素の引き継ぎ（`resume`）で起こして**フックが1件も来ないまま終わったカード**が
+            // 落ちる——`claude_session_id` は最初のフックが確定させるので空のままだが、
+            // `resumed_from` には頼んだ会話が入っている。**履歴が消えていたときに
+            // まさにこの形になる**ので、いちばん拾いたい行が落ちていた
+            .filter(
+                Condition::any()
+                    .add(entity::sessions::Column::ClaudeSessionId.is_not_null())
+                    .add(entity::sessions::Column::ResumedFrom.is_not_null()),
+            )
             .order_by_desc(entity::sessions::Column::LastActivityAt)
             .all(&self.db)
             .await?;
@@ -805,47 +824,67 @@ impl SessionRegistry {
         // 並びが降順なので、最初に見たものが最新
         let mut 畳んだ: Vec<protocol::PastSession> = Vec::new();
         let mut 見た = std::collections::HashSet::new();
-        for row in rows {
-            // **1行から最大2つの会話が出る。**
-            //
-            // | どちら | 何 |
-            // |---|---|
-            // | `claude_session_id` | **いま動いている会話。** フックの名乗りで張り替わる |
-            // | `resumed_from` | **`--resume` で頼んだ会話。** 起こしたときのまま変わらない |
-            //
-            // **両方を並べないと、張り替えが起きた会話が一覧から消える**——カードは
-            // 新しいIDを指しているので、元のIDを持つ行がどこにも無くなる。
-            // とくに `revive` は同じカードを使い回すため、上書きされるのが
-            // **その会話が持つ唯一の行**になる。
-            //
-            // 張り替えが起きていなければ2つは同じ値で、下の重複排除が1つに畳む。
-            for (session, 頼んだほう) in [(row.claude_session_id, false), (row.resumed_from, true)]
-                .into_iter()
-                .filter_map(|(id, 頼んだほう)| id.map(|id| (ClaudeSessionId(id), 頼んだほう)))
-            {
-                if 生きている.contains(&session) || !見た.insert(session) {
-                    continue;
-                }
-                畳んだ.push(protocol::PastSession {
-                    claude_session_id: session,
-                    nickname: nicknames.get(&(account_id, session)).cloned(),
-                    // **頼んだほうには題を付けない。** 題は CLI がいまの会話に付けた
-                    // ものなので、元の会話に貼ると別の会話の題を名乗ることになる
-                    // （`past_session_of` の枝の迂回が同じ理由で `None` を置いている）
-                    session_title: if 頼んだほう {
-                        None
-                    } else {
-                        row.session_title.clone()
-                    },
-                    // 枠（PC・作業ディレクトリ・権限モード）は借りる。**元の会話は
-                    // 必ず同じ枠に居る**——同じカードが `--resume` したのだから
-                    project: ProjectId(row.project.clone()),
-                    agent_id: row.agent_id.map(protocol::AgentId),
-                    permission_mode: row.permission_mode.clone().map(PermissionMode::new),
-                    last_activity_at: row.last_activity_at,
-                    exists: None,
-                });
+        // **id を本当に持つ行を先に通し、借用はそのあと。**
+        //
+        // | 段 | 何を出すか |
+        // |---|---|
+        // | 1段目 | 行の `claude_session_id`。**その会話の本当の持ち主**（題も活動時刻も本物） |
+        // | 2段目 | 行の `resumed_from`。**持ち主が居ないときだけ**、枠を借りて出す |
+        //
+        // **順序が要る理由。** 並びは最終活動の新しい順なので、素直に1行ずつ2つ出すと
+        // **`--resume` した新しいカードのほうが先に来て、借り物の項目が本物を押しのける**
+        // ——元の会話が自分の題を失い、`aabbccdd…` と出る。実際に呼び戻せはするが、
+        // **何を呼び戻すのか読めなくなる。**
+        for row in &rows {
+            let Some(session) = row.claude_session_id.map(ClaudeSessionId) else {
+                continue;
+            };
+            if 生きている.contains(&session) || !見た.insert(session) {
+                continue;
             }
+            畳んだ.push(protocol::PastSession {
+                claude_session_id: session,
+                nickname: nicknames.get(&(account_id, session)).cloned(),
+                session_title: row.session_title.clone(),
+                project: ProjectId(row.project.clone()),
+                agent_id: row.agent_id.map(protocol::AgentId),
+                permission_mode: row.permission_mode.clone().map(PermissionMode::new),
+                last_activity_at: row.last_activity_at,
+                exists: None,
+            });
+        }
+        // 2段目：**張り替えで持ち主を失った会話**を、頼んだ側の記録から出す。
+        //
+        // ここへ来るのは「`--resume` で頼んだのに、そのIDを持つ行がどこにも無い」
+        // ものだけである——`--resume` した claude が別のIDを名乗った、まさにその形。
+        // とくに `revive` は同じカードを使い回すため、上書きされるのが
+        // **その会話が持つ唯一の行**になる。
+        for row in &rows {
+            let Some(頼んだ会話) = row.resumed_from.map(ClaudeSessionId) else {
+                continue;
+            };
+            if 生きている.contains(&頼んだ会話) || !見た.insert(頼んだ会話) {
+                continue;
+            }
+            畳んだ.push(protocol::PastSession {
+                claude_session_id: 頼んだ会話,
+                nickname: nicknames.get(&(account_id, 頼んだ会話)).cloned(),
+                // **題は貼らない。** 題は CLI が**いまの会話**に付けたものなので、
+                // 元の会話に貼ると別の会話の題を名乗ることになる
+                // （`past_session_of` の枝の迂回が同じ理由で `None` を置いている）
+                session_title: None,
+                // 枠（PC・作業ディレクトリ・権限モード）は借りる。**元の会話は
+                // 必ず同じ枠に居る**——同じカードが `--resume` したのだから
+                project: ProjectId(row.project.clone()),
+                agent_id: row.agent_id.map(protocol::AgentId),
+                permission_mode: row.permission_mode.clone().map(PermissionMode::new),
+                // **活動時刻も借り物である。** 元の会話の本当の最終活動は、行が
+                // 無い以上どこにも残っていない。借りているのは「その会話が最後に
+                // 呼び戻された時刻」で、**本人が最後に喋った時刻ではない**——
+                // 並びがこれで決まるので、借り物だと分かるように書いておく
+                last_activity_at: row.last_activity_at,
+                exists: None,
+            });
         }
 
         // **`resumed_from` が入る前に壊れた行を、枝の印から救う。**
@@ -864,13 +903,28 @@ impl SessionRegistry {
         //
         // 枝の台帳に載らない経路（`revive` など）は救えない。**再発を止めるのは
         // `resumed_from` の側**で、こちらは既に失われたものを拾うだけである。
+        //
+        // # 問い合わせる前に、手元で削る
+        //
+        // 組み立ては1件ずつ DB を引く（`past_session_of` → `past_row`）。**一覧は
+        // 画面を開くたびに引かれる**ので、枝の本数だけ問い合わせが増えると効いてくる。
+        //
+        // **手元にある `rows` で先に落とせる**——行を持っている親はそもそも救う必要が
+        // 無いので、問い合わせに行くのは「本当にどこにも行が無いもの」だけになる。
+        // 実測（2026-09-10）：枝の親7本のうち、ここへ残るのは1本。
+        let 行がある: std::collections::HashSet<ClaudeSessionId> = rows
+            .iter()
+            .filter_map(|row| row.claude_session_id.map(ClaudeSessionId))
+            .collect();
         let 行を失った親: Vec<ClaudeSessionId> = {
             let branches = self.branches.lock().expect("ロックが壊れていない");
             branches
                 .iter()
                 .filter(|((owner, _), _)| *owner == account_id)
                 .map(|((_, _), 元)| *元)
-                .filter(|元| !生きている.contains(元) && !見た.contains(元))
+                .filter(|元| {
+                    !生きている.contains(元) && !見た.contains(元) && !行がある.contains(元)
+                })
                 .collect()
         };
         for 親 in 行を失った親 {
@@ -1274,7 +1328,7 @@ impl SessionRegistry {
                 // 一覧へ戻ってくる。しかも `list` はメモリの記録を見るので、
                 // **DB では外れているのに画面には出続ける**という食い違いになる
                 if self.get(card_id).is_none()
-                    && matches!(self.stored(card_id).await, Ok(Some((_, true, _))))
+                    && matches!(self.stored(card_id).await, Ok(Some((_, true, _, _))))
                 {
                     return;
                 }
@@ -1666,15 +1720,24 @@ impl SessionRegistry {
                 記録の頼んだ会話 = record.meta().resumed_from;
             }
             None => match self.stored(meta.card_id).await? {
-                Some((owner, _, _))
+                Some((owner, _, _, _))
                     if self.refuse_crossing(&origin.account_id, owner, meta.card_id) =>
                 {
                     return Ok(());
                 }
-                Some((_, true, _)) => return Ok(()),
+                Some((_, true, _, _)) => return Ok(()),
                 // 記録にはあるが手元に無い（起こし直しの直後・他インスタンス経由）。
-                // **並びは記録の側が正**なので、そちらを持ち帰る
-                Some((_, false, 並び)) => 記録の並び = Some(並び),
+                // **並びは記録の側が正**なので、そちらを持ち帰る。
+                //
+                // **頼んだ会話もここで持ち帰る。** 持ち帰らないと、下の埋め直しが
+                // 素通しになり、**空の報告が保存済みの値を NULL で上書きする**
+                // ——`ResumedFrom` は更新列に入っているので、そのまま消える。
+                // **この変更が防ごうとしているデータ喪失そのもの**が、
+                // 「記録が手元に無い」という日常的な経路から起きていた
+                Some((_, false, 並び, 頼んだ会話)) => {
+                    記録の並び = Some(並び);
+                    記録の頼んだ会話 = 頼んだ会話;
+                }
                 None => {}
             },
         }
@@ -2026,11 +2089,21 @@ impl SessionRegistry {
     ///
     /// 記録が手元に無いときだけ引く。**持ち主と外した印を一度に取る**のは、
     /// 別々に引くと2回問い合わせることになり、しかも間に状態が変わりうるため。
-    async fn stored(&self, card_id: CardId) -> Result<Option<(Uuid, bool, i32)>, DbErr> {
+    async fn stored(
+        &self,
+        card_id: CardId,
+    ) -> Result<Option<(Uuid, bool, i32, Option<ClaudeSessionId>)>, DbErr> {
         Ok(entity::sessions::Entity::find_by_id(card_id.0)
             .one(&self.db)
             .await?
-            .map(|row| (row.account_id, row.archived, row.position)))
+            .map(|row| {
+                (
+                    row.account_id,
+                    row.archived,
+                    row.position,
+                    row.resumed_from.map(ClaudeSessionId),
+                )
+            }))
     }
 
     /// そのカードの記録を取り出す。無ければ作る。

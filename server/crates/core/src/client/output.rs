@@ -185,7 +185,8 @@ pub fn render_past_sessions(past: &[PastSession], now_ms: i64, home: Option<&str
             short_id(&row.claude_session_id.to_string()),
             match row.exists {
                 Some(true) => "あり",
-                // 確かめて無かったものは一覧に載らないので、ここへは来ない
+                // **2026-09-10 から、確かめて無かったものも一覧に載る。** 黙って
+                // 落とすと見失ったのと区別が付かないため。呼び戻しはサーバが断る
                 Some(false) => "なし",
                 None => "未確認",
             },

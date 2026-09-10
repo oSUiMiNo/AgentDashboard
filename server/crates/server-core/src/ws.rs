@@ -174,11 +174,13 @@ pub struct PastQuery {
 ///
 /// 省略すると全部返す（CLI から枠を指定せずに眺める道を塞がない）。
 ///
-/// # 順序が決まっている
+/// # 落とさない・切らない
 ///
-/// **枠で絞る → 実在を確かめる → 件数を切る。** この順でないと数が合わない。
-/// 先に切ってから実在を確かめると、落ちたぶんが補充されず**必ず上限より少なくなる**
-/// ——実測で、20件の枠から5件が消えて15件しか出ていなかった。
+/// **枠で絞る → 実在を確かめる。それだけである**（2026-09-10 から）。
+///
+/// かつては最後に「件数を切る」段があり、その順序が守られているかがここの要点だった。
+/// **上限も、実在しないものを落とす段も、両方やめた**——どちらも黙って落とすので、
+/// 利用者からは見失ったのと区別が付かなかった。**いまは全部返し、印を付けて渡す。**
 ///
 /// **`exists` を埋めるのは実在を確かめたところだけ。** 答えが返らないこと（PC が居ない・
 /// 版が古い・時間切れ）と「無い」ことは**別物**である（設計§8-5）。ここで勝手に「無い」と
@@ -684,21 +686,60 @@ async fn handle_request(
                     // 宛先はブラウザの指定より**記録の値**を優先する。記録が PC を
                     // 知っているのに別の PC を指定されたら、そこには履歴が無い
                     let target = past.agent_id.or(agent_id);
-                    if let Err(message) = state
+                    // **確かめて「無かった」ときだけ断る**（設計§8-2）。
+                    //
+                    // 一覧が `exists == false` の行を落とすのをやめたので、**押せる道が
+                    // 増えた**。画面は選べない項目として描くが、**CLI（`session recall`）は
+                    // 画面を通らない**——ここで断らないと、このリポジトリが持っている
+                    // 「画面から押せるものは CLI からも押せる」の裏返し、
+                    // **「画面が断るものは CLI も断る」が成り立たなくなる。**
+                    //
+                    // 消えたIDへの `--resume` は製品の中では「正常終了」に見えるので、
+                    // 通すと**静かに終わったカードが1枚増えるだけ**になる。
+                    //
+                    // **聞けなかったときは通す。** 「確かめていない」と「無い」は別物で
+                    // （§8-5）、PC が寝ている間だけ呼び戻せなくなるほうが害が大きい。
+                    let 実在 = state
                         .agent
-                        .recall(crate::session_host::RecallRequest {
-                            account_id: identity.account_id,
-                            target,
-                            cwd: past.project.0.clone(),
-                            // 記録のモードは**既定**でしかない。選び直せる（設計§9-4）
-                            permission_mode: permission_mode.or(past.permission_mode),
-                            claude_session_id,
-                        })
-                        .await
-                    {
-                        // **カードを名指ししない**（`Spawn` と同じ）。採番は PC 側なので、
-                        // 失敗した時点ではまだIDが無い
-                        send_error(outbound, None, message, ErrorKind::Other).await;
+                        .sessions_exist(
+                            crate::session_host::HostAskRequest {
+                                account_id: identity.account_id,
+                                target,
+                            },
+                            std::slice::from_ref(&claude_session_id),
+                        )
+                        .await;
+                    let 確かめて無かった =
+                        matches!(&実在, Ok(found) if !found.contains(&claude_session_id));
+                    if 確かめて無かった {
+                        send_error(
+                            outbound,
+                            None,
+                            "履歴が消えているため呼び戻せません".to_string(),
+                            ErrorKind::Other,
+                        )
+                        .await;
+                    } else {
+                        if let Err(err) = &実在 {
+                            // 聞けなかったこと自体は残す。**通した判断の根拠**になる
+                            tracing::info!("呼び戻し前に実在を確かめられませんでした: {err:?}");
+                        }
+                        if let Err(message) = state
+                            .agent
+                            .recall(crate::session_host::RecallRequest {
+                                account_id: identity.account_id,
+                                target,
+                                cwd: past.project.0.clone(),
+                                // 記録のモードは**既定**でしかない。選び直せる（設計§9-4）
+                                permission_mode: permission_mode.or(past.permission_mode),
+                                claude_session_id,
+                            })
+                            .await
+                        {
+                            // **カードを名指ししない**（`Spawn` と同じ）。採番は PC 側なので、
+                            // 失敗した時点ではまだIDが無い
+                            send_error(outbound, None, message, ErrorKind::Other).await;
+                        }
                     }
                 }
                 // **他人のセッションでも知らないセッションでも同じ言葉**（設計§11-4）
