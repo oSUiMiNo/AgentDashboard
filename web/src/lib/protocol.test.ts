@@ -637,6 +637,7 @@ describe('状態のラベル', () => {
       card_id: CARD_ID,
       project: '/dev/app',
       claude_session_id: null,
+      resumed_from: null,
       permission_mode: null,
       model: null,
       model_label: null,
@@ -836,6 +837,7 @@ describe('戻せるかの判定', () => {
       // 戻す先。**製品の経路では必ず埋まる**（起動時に採番して渡すため）が、
       // 記録の形の上では NULL を取りうる
       claude_session_id: '22222222-2222-2222-2222-222222222222',
+      resumed_from: null,
       permission_mode: 'bypassPermissions',
       model: null,
       model_label: null,

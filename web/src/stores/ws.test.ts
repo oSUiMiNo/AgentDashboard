@@ -452,6 +452,7 @@ describe('起こし直しと購読', () => {
         card_id: CARD,
         project: '/tmp/x',
         claude_session_id: null,
+        resumed_from: null,
         permission_mode: null,
         model: null,
         model_label: null,

@@ -44,6 +44,7 @@ function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
     card_id: CARD,
     project: '/home/example/dev/app',
     claude_session_id: null,
+    resumed_from: null,
     permission_mode: 'default',
     model: null,
     model_label: null,

@@ -30,6 +30,7 @@ function card(id: string, project: string, agent: string | null = null): Session
     card_id: id,
     project,
     claude_session_id: null,
+    resumed_from: null,
     permission_mode: null,
     model: null,
     model_label: null,

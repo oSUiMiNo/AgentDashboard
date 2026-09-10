@@ -56,6 +56,7 @@ function meta(cardId: string): SessionMeta {
     card_id: cardId,
     project: PROJECT,
     claude_session_id: null,
+    resumed_from: null,
     permission_mode: null,
     model: null,
     model_label: null,

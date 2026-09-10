@@ -68,6 +68,7 @@ function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
     card_id: 見ている席,
     project: WORK_DIR,
     claude_session_id: 会話A,
+    resumed_from: null,
     permission_mode: 'default',
     model: null,
     model_label: null,
@@ -221,6 +222,7 @@ describe('見ていた会話が移ったら、付いて行く', () => {
       meta({
         card_id: 戻った席,
         claude_session_id: 枝の会話,
+        resumed_from: null,
         branched_from: 'cccccccc-1111-2222-3333-444444444444',
         position: 1,
       }),

@@ -29,6 +29,7 @@ function meta(cardId: string, overrides: Partial<SessionMeta> = {}): SessionMeta
     card_id: cardId,
     project: `/dev/${cardId}`,
     claude_session_id: null,
+    resumed_from: null,
     permission_mode: null,
     model: null,
     model_label: null,
