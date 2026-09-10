@@ -1228,13 +1228,17 @@ async fn 画面から一覧が消えればサブ待ちから戻る() {
     );
 }
 
-/// **端末が黙ったら、サブ待ちから戻る**（設計§14-13）。
+/// **端末が黙っても、サブ待ちから外れないこと**（設計§14-14・2026-09-10 に覆った）。
 ///
-/// 走っているサブは一覧の時計を毎秒進めるので、**1バイトも出ないなら1本も走っていない**。
-/// ここを「読み飛ばす」で済ませていたため、**終わった一覧が残ったまま端末が黙ると
-/// サブ待ちのまま二度と解けなかった**（利用者が実機で踏んだ）。
+/// ~~走っているサブは一覧の時計を毎秒進めるので、1バイトも出ないなら1本も走っていない~~
+/// **<- 実機で成り立っていなかった。** 一覧の時計が進むのは**端末が描き直されたときだけ**で、
+/// **メインが手を止めているあいだは描き直しが止まる**——それはまさにサブ待ちの場面である。
+/// ここで倒していたため、状態が作業中とサブ待ちと入力待ちを**行き来していた**（利用者が
+/// 実機で観測）。
+///
+/// **これが今回の不具合そのものである。**
 #[tokio::test]
-async fn 端末が黙ればサブ待ちから戻る() {
+async fn 端末が黙ってもサブ待ちから外れない() {
     let server = common::TestServer::start().await;
     let (session, _watcher) = common::start_session(&server.manager).await;
 
@@ -1246,15 +1250,43 @@ async fn 端末が黙ればサブ待ちから戻る() {
     一覧を描いて見張る!(server, session, "● main|◯ fork  調べもの      6s");
     assert_eq!(session.status(), SessionStatus::WaitingSubagents);
 
-    // 以後、端末へ1バイトも出さない
-    間引きを越える().await;
-    server.manager.sweep_once();
-    間引きを越える().await;
-    server.manager.sweep_once();
+    // 以後、端末へ1バイトも出さない。**メインが手を止めていれば普通に起きる**
+    for _ in 0..4 {
+        間引きを越える().await;
+        server.manager.sweep_once();
+    }
     assert_eq!(
         session.status(),
-        SessionStatus::WaitingInput,
-        "時計が進んでいないのだから、走っているサブは居ない"
+        SessionStatus::WaitingSubagents,
+        "黙っているだけでは、止まった証拠にならない"
+    );
+}
+
+/// **一覧の下に何か描かれても、見失わないこと**（設計§14-14）。
+///
+/// 実機のログでは、前後の周で2行あった一覧が**30秒にわたり0行に見えた**。いちばん下の塊
+/// しか見ない作りだと、1行でも下に出た瞬間に一覧を見失い、**走っているカードがサブ待ちから
+/// 外れる**。
+#[tokio::test]
+async fn 一覧の下に行が出ても見失わない() {
+    let server = common::TestServer::start().await;
+    let (session, _watcher) = common::start_session(&server.manager).await;
+
+    server.post_hook(session.token(), "Stop", "{}").await;
+    common::wait_for_status(&session, SessionStatus::WaitingInput).await;
+
+    一覧を描いて見張る!(server, session, "● main|◯ fork  調べもの      1s");
+    間引きを越える().await;
+    // 一覧を描き直したうえで、その下に1行出す
+    一覧を描いて見張る!(
+        server,
+        session,
+        "● main|◯ fork  調べもの      6s|✗ Auto-update failed"
+    );
+    assert_eq!(
+        session.status(),
+        SessionStatus::WaitingSubagents,
+        "下に1行出ただけで一覧を見失ってはいけない"
     );
 }
 
