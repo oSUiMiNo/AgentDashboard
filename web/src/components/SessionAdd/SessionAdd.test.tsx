@@ -192,6 +192,24 @@ describe('過去のセッションから起こす', () => {
     expect(calls.count).toBe(2)
   })
 
+  it('やめると選んだ会話も捨てる', async () => {
+    // **選択を残すと、次に開いたときに一覧が入れ替わっていても前の選択が生きたまま
+    // になる**——その会話の履歴が消えていれば、選べない項目にしたはずのものを
+    // 「呼び戻す」で送れてしまう（設計§8-2 の事故がそのまま戻る）
+    過去を返す([過去({ nickname: '前に選んだやつ' })])
+    render(<SessionAdd host="local" project={PROJECT} />)
+    await userEvent.click(screen.getByTestId('spawn-open'))
+    const 選択 = await screen.findByTestId('spawn-past')
+    await userEvent.selectOptions(選択, 過去().claude_session_id)
+    expect(screen.getByTestId('spawn-button')).toHaveTextContent('呼び戻す')
+
+    await userEvent.click(screen.getByTestId('spawn-cancel'))
+    await userEvent.click(screen.getByTestId('spawn-open'))
+    await screen.findByTestId('spawn-past')
+
+    expect(screen.getByTestId('spawn-button')).toHaveTextContent('セッションを起動')
+  })
+
   it('引けなかったことを「1本も無い」にしない', async () => {
     // **失敗と空を同じ見た目にしない。** かつては `catch` も `ok` でない応答も
     // 空配列を置いていたので、**サーバが 500 を返しても「過去のセッションは

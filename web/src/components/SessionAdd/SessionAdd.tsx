@@ -136,6 +136,22 @@ export function SessionAdd({ host, project, compact = false }: Props) {
       // 宛先は枠が持っている。**ローカルは指名しない**（サーバが選ぶ余地の無いときだけ通す）
       spawn(project, mode, target)
     } else {
+      // **いまの一覧に、選べる形で載っていることを確かめてから送る。**
+      //
+      // `disabled` は描くときの門でしかない。選んだあとに一覧が入れ替わると
+      // （開くたびに引き直すので起こる）、**選択だけが古いまま残る**——
+      // 履歴が消えた会話や、一覧から居なくなった会話を送れてしまう。
+      // 一覧を引けなかったとき（`'失敗'`）も、確かめようが無いので送らない。
+      const 選んだ行 =
+        past === null || past === '失敗'
+          ? undefined
+          : past.find((row) => row.claude_session_id === pickedSession)
+      if (!選んだ行 || 選んだ行.exists === false) {
+        // 押しても何も起きないのは不親切だが、**静かに終わったカードが1枚増える**より
+        // ましである（設計§8-2）。選び直せるよう、開いたままにする
+        setPickedSession(FRESH)
+        return
+      }
       // 作業ディレクトリは運ばない。**サーバの記録が持っている**（設計§7-1）。
       // 権限モードはここで選び直せる（記録の値は既定でしかない）
       recall(pickedSession, mode, target)
@@ -219,35 +235,32 @@ export function SessionAdd({ host, project, compact = false }: Props) {
           >
             <option value={FRESH}>新しく起こす</option>
             {/*
-              **枠（PJT）ごとに畳む。** 上限を外して一覧が伸びたので、
-              平らに並べると探せない。**件数で捨てるのをやめた代わりの手当て**である
-              （サーバ側が名前付きを先に並べ、ここが枠でまとめる）
+              **枠でまとめない。** この一覧は既に1つの枠のぶんしか無い——上の `fetch` が
+              `host` と `project` を渡し、サーバがその枠へ絞って返すためである。
+              まとめても `<optgroup>` が1つできるだけで、利用者には何も変わらない。
+              **上限を外した代わりに効いているのは、サーバ側の並び**（名前付きが先）である
             */}
-            {枠ごとに畳む(past).map(([枠, 行]) => (
-              <optgroup key={枠} label={枠}>
-                {行.map((row) => (
-                  <option
-                    key={row.claude_session_id}
-                    value={row.claude_session_id}
-                    // **確かめて「無かった」ものは押させない**（設計§8-2）。
-                    // 消えたIDへの `--resume` は製品の中では「正常終了」に見えるので、
-                    // 押せると**静かに終わったカードが1枚増えるだけ**になる。
-                    // 出すのは「戻せない」と分かるようにするためで、押させるためではない
-                    disabled={row.exists === false}
-                    // **確かめていないものは選べる**（設計§8-5）。PC が寝ているだけで
-                    // 無いとは限らないので、印を添えて残す
-                    title={
-                      row.exists === false
-                        ? '履歴が消えているため呼び戻せません'
-                        : row.exists === null
-                          ? 'この PC が繋がっていないので、まだ実在を確かめていません'
-                          : undefined
-                    }
-                  >
-                    {pastLabel(row)}
-                  </option>
-                ))}
-              </optgroup>
+            {past.map((row) => (
+              <option
+                key={row.claude_session_id}
+                value={row.claude_session_id}
+                // **確かめて「無かった」ものは押させない**（設計§8-2）。
+                // 消えたIDへの `--resume` は製品の中では「正常終了」に見えるので、
+                // 押せると**静かに終わったカードが1枚増えるだけ**になる。
+                // 出すのは「戻せない」と分かるようにするためで、押させるためではない
+                disabled={row.exists === false}
+                // **確かめていないものは選べる**（設計§8-5）。PC が寝ているだけで
+                // 無いとは限らないので、印を添えて残す
+                title={
+                  row.exists === false
+                    ? '履歴が消えているため呼び戻せません'
+                    : row.exists === null
+                      ? 'この PC が繋がっていないので、まだ実在を確かめていません'
+                      : undefined
+                }
+              >
+                {pastLabel(row)}
+              </option>
             ))}
           </select>
         </label>
@@ -269,6 +282,10 @@ export function SessionAdd({ host, project, compact = false }: Props) {
         className="px-2 py-0.5 text-xs"
         onClick={() => {
           setPicked(undefined)
+          // **選んだ会話も捨てる。** 残すと、次に開いたときに一覧が入れ替わっていても
+          // 前の選択が生きたままになる——その会話の履歴が消えていれば、選べない項目に
+          // したはずのものを「呼び戻す」で送れてしまう
+          setPickedSession(FRESH)
           setOpen(false)
         }}
       >
@@ -295,20 +312,3 @@ function pastLabel(row: PastSession): string {
   return name
 }
 
-/**
- * 枠（PJT）ごとにまとめる。**並びは崩さない**——サーバが名前付きを先に並べているので、
- * 枠の中でも、枠そのものの順でも、最初に出てきた順を保つ。
- *
- * 上限を外して一覧が伸びた（実測で45件→最大160件近く）ぶんの手当てである。
- * **件数で捨てるのをやめたので、探し方のほうを用意する必要がある。**
- */
-function 枠ごとに畳む(rows: PastSession[]): [string, PastSession[]][] {
-  const 束 = new Map<string, PastSession[]>()
-  for (const row of rows) {
-    const 枠 = row.project.split('/').pop() || row.project
-    const 既存 = 束.get(枠)
-    if (既存) 既存.push(row)
-    else 束.set(枠, [row])
-  }
-  return [...束]
-}
