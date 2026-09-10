@@ -734,3 +734,74 @@ fn message_originのフィクスチャで人と機械が分かれる() {
     assert_eq!(印無し.1, protocol::MessageOrigin::Unmarked);
     assert!(印無し.1.is_human(), "印が無いものは人として出す");
 }
+
+#[test]
+fn 枝が引き継いだ履歴は印があれば出ない() {
+    // 枝分かれの子は親の会話を丸ごと引き継いで始まり、claude は 0 行目の
+    // `history-suppression`（`cause: fork_inherit`）で「伏せろ」と伝える。
+    // **ターミナルは伏せているので、ここで出すと同じカードの同じ瞬間に
+    // 2つの画面が別の量の会話を見せることになる。**
+    let parsed = Parsed::of(fixture("synthetic/forked-suppressed/session.jsonl"));
+
+    // 引き継ぎ（`forkedFrom` つき）は4件、枝分かれ後は3件で作ってある
+    assert_eq!(
+        parsed.count("user") + parsed.count("user-machine"),
+        2,
+        "枝分かれ後のユーザ発言2件だけが出る（引き継ぎ2件は出ない）"
+    );
+    assert_eq!(
+        parsed.count("assistant"),
+        1,
+        "枝分かれ後のアシスタント本文1件だけが出る（引き継ぎ2件は出ない）"
+    );
+
+    // **印そのものは会話ではないので、未知の種別として画面へ出さない**
+    assert!(
+        !parsed.unknown_types().contains_key("history-suppression"),
+        "印が未知の種別として残っている: {:?}",
+        parsed.unknown_types()
+    );
+
+    // **孤児にならないことはここでは確かめられない。** `Parsed::orphans()` は Stats
+    // イベントが出ていないと 0 を返すので、この大きさのフィクスチャでは常に 0 になる
+    // （＝何も見ていない）。鎖の維持は単体テスト
+    // `伏せた行を親に指す後続は孤児にならない` が `Stats` を直に読んで守っている
+}
+
+#[test]
+fn 引き継ぎ以外の履歴抑制では伏せない() {
+    // 同じ型は `migration` でも飛んでくる（実測で1ファイル68件のうち67件がそちら）。
+    // **`cause` を見ずに引き金にすると、引き継ぎでない履歴まで消える。**
+    //
+    // このフィクスチャは `forked-suppressed` の印の `cause` だけを差し替えた同じ形なので、
+    // **`cause` の判定を外した実装では、引き継ぎ4行が消えてここが落ちる。**
+    let parsed = Parsed::of(fixture("synthetic/forked-wrong-cause/session.jsonl"));
+
+    assert_eq!(
+        parsed.count("user") + parsed.count("user-machine"),
+        4,
+        "migration では伏せないので引き継ぎ2件＋枝分かれ後2件が出る"
+    );
+    assert_eq!(parsed.count("assistant"), 3);
+}
+
+#[test]
+fn 印が無ければ引き継いだ履歴も出す() {
+    // **印を書かない版の claude がある**（実測：枝の子16件のうち6件、`2.1.266` は3件とも）。
+    // そのときはターミナルも伏せないので、ここで消すと**逆向きの食い違い**になる。
+    //
+    // このフィクスチャは `forked-suppressed` から印だけを抜いた同じ形なので、
+    // **`forkedFrom` だけを見て切る実装に退化したら、ここが落ちる。**
+    let parsed = Parsed::of(fixture("synthetic/forked-visible/session.jsonl"));
+
+    assert_eq!(
+        parsed.count("user") + parsed.count("user-machine"),
+        4,
+        "引き継ぎ2件＋枝分かれ後2件が全部出る"
+    );
+    assert_eq!(
+        parsed.count("assistant"),
+        3,
+        "引き継ぎ2件＋枝分かれ後1件が全部出る"
+    );
+}
