@@ -247,6 +247,19 @@ const ACTIVITY_TAIL: usize = 64 * 1024;
 /// 戻した9件のうち1件がこれで、**その6秒後にはスピナーが出ていた**（2026-09-06）。
 const WAITING_GONE_SETTLED: u32 = 2;
 
+/// 一覧が動かなくなってから、走っていると見なし続ける長さ（設計§14-14）。
+///
+/// **動いた＝走っている**は実測で確かめた（走っているフォークの行は毎秒変わる。60秒で
+/// 58回／58サンプル）。**動かない＝止まっている**は成り立たない——同じカードのログに、
+/// 一覧が出たまま**2分19秒**動かない区間と、毎周動く区間が交互に現れる。
+///
+/// **したがって、動かないことでは抜けない。** 抜けるのは**一覧が消えたとき**か、ここで
+/// 決めた長さを過ぎたときだけである。長さは観測した無音区間へ余裕を掛けて置いた。
+///
+/// **代償は、サブが終わってから入力待ちへ戻るまでこの長さだけ遅れること。** 終わった
+/// 一覧は二度と動かないので、必ずここで抜ける（張り付きは残らない）。
+const SUBAGENT_IDLE_DECAY_MS: i64 = 5 * 60 * 1000;
+
 /// 同時に起こし直せる本数（接続断のカードを復旧ボタンで戻す 設計§8-4）。
 ///
 /// 1本あたり実測 **1190MB・14プロセス**（ローカルイシュー
@@ -607,6 +620,15 @@ pub struct Session {
     /// 一覧が見えたら 0 へ戻す。**倒れる向きを軽いほうへ戻すためだけの仕掛け**で、
     /// 代償はサブが終わってから入力待ちに戻るまでが1回ぶん遅れることである。
     waiting_gone_streak: AtomicU32,
+    /// 一覧が**最後に動いた**時刻（設計§14-14）。
+    ///
+    /// **動かないことは、止まっていることを意味しない。** 一覧の時計が進むのは端末が
+    /// 描き直されたときだけで、**メインが手を止めているあいだ（＝まさにサブ待ちの場面）は
+    /// 描き直しが止まる**。実機のログでは、同じカードで「2分以上動かない」と「毎周動く」が
+    /// 交互に現れ、状態が作業中とサブ待ちと入力待ちを行き来した。
+    ///
+    /// そこで**動いた時刻を覚えておき、そこから一定のあいだは走っていると見なす**。
+    waiting_moved_at: AtomicI64,
     /// 前に写し取った**エージェントの一覧**（設計§14-13）。
     ///
     /// **終わったサブも一覧に残る**ので、在ることでは判定できない。走っているものだけが
@@ -822,7 +844,7 @@ impl Session {
     /// かつ**端末が1バイトも動いていなければ読まない**ので、止まっているカードは何枚
     /// あってもここへ来ない。**停滞判定を末尾のままにしてあるのは、あちらが見ている
     /// スピナーが毎フレーム描き直されるもので、64 KiB で足りて 15 倍安いからである。**
-    fn terminal_subagent_view(&self) -> (bool, bool) {
+    fn terminal_subagent_view(&self) -> (bool, bool, bool) {
         let (cols, rows) = *self.terminal_size.lock().expect("ロックが壊れていない");
         // **`ring` のロックの中で描かない**（[`Session::terminal_shows_activity`] と同じ作法）
         let payload = self.ring.lock().expect("ロックが壊れていない").snapshot();
@@ -832,20 +854,22 @@ impl Session {
         // **一覧が「在るか」ではなく「動いたか」を見る**（設計§14-13）。**終わったサブも
         // 一覧に残る**ので、在ることは走っていることを意味しない。走っているものだけが
         // 時計を進めるので、**前に写し取ったものと違っていれば走っている。**
-        let (waiting, lines) = {
+        let (moved, present, lines) = {
             let mut last = self.waiting_tree.lock().expect("ロックが壊れていない");
-            // 比べる相手が無い初回は「待っていない」に倒す。次の回で決まる
-            let waiting = matches!((last.as_ref(), tree.as_ref()), (Some(before), Some(now)) if before != now);
+            // 比べる相手が無い初回は「動いていない」に倒す。次の回で決まる
+            let moved = matches!((last.as_ref(), tree.as_ref()), (Some(before), Some(now)) if before != now);
+            let present = tree.is_some();
             let lines = tree.as_ref().map_or(0, |tree| tree.lines().count());
             *last = tree;
-            (waiting, lines)
+            (moved, present, lines)
         };
         // **材料を並べる。** 画面読みは版で壊れる前提なので、外したときに読んだ量と
         // 描けた量が無いと理由を絞れない。**今回の不具合は「判定関数ではなく食わせて
         // いる画面が狭かった」形だった**ので、この2つが揃っていることに意味がある
         tracing::debug!(
             card_id = %self.card_id,
-            waiting,
+            moved,
+            present,
             main_running,
             cols,
             rows,
@@ -854,7 +878,7 @@ impl Session {
             screen_chars = screen.chars().count(),
             "サブエージェントの一覧が出ているか画面を見た"
         );
-        (waiting, main_running)
+        (moved, present, main_running)
     }
 
     /// いまの位置に目印を打つ。
@@ -1780,10 +1804,29 @@ impl Session {
                 //
                 // **ここで読み飛ばしてはいけない。** 終わった一覧が残ったまま端末が
                 // 黙ると、**サブ待ちのまま二度と解けなくなる**（利用者が実機で踏んだ）。
+                //
+                // ~~端末が1バイトも動いていなければ、走っているサブは1本も居ない~~
+                // **<- 覆った（2026-09-10・§14-14）。** 一覧の時計が進むのは**端末が
+                // 描き直されたときだけ**で、**メインが手を止めているあいだは描き直しが
+                // 止まる**——それはまさにサブ待ちの場面である。ここで「待っていない」へ
+                // 倒していたため、状態が作業中とサブ待ちと入力待ちを**行き来していた。**
+                //
+                // **だから黙っている周でも、最後に動いた時刻から測る。** 読むのは省いて
+                // よい（画面が変わっていなければ答えも変わらない）が、**答えまで
+                // 「待っていない」にしてはいけない。**
+                let last_moved = self.waiting_moved_at.load(Ordering::Relaxed);
+                let fresh = |at: i64| now.saturating_sub(at) < SUBAGENT_IDLE_DECAY_MS;
                 let (waiting, main_running) = if quiet {
-                    (false, false)
+                    (fresh(last_moved), false)
                 } else {
-                    self.terminal_subagent_view()
+                    let (moved, present, running) = self.terminal_subagent_view();
+                    if moved {
+                        self.waiting_moved_at.store(now, Ordering::Relaxed);
+                    }
+                    // **動いたら走っている。動かないだけでは抜けない**——一覧が消えるか、
+                    // 最後に動いてから十分に経つまでは走っていると見なす
+                    let recent = if moved { true } else { fresh(last_moved) };
+                    (present && recent, running)
                 };
                 // **一覧が消えて見えた1回だけでは動かさない**（§14 読み替え5）。
                 // メインが走り出すとき、TUI は一覧を消してからスピナーを描くので、
@@ -2619,6 +2662,7 @@ impl SessionManager {
             waiting_checked_at: AtomicI64::new(0),
             waiting_checked_mark: AtomicU64::new(0),
             waiting_gone_streak: AtomicU32::new(0),
+            waiting_moved_at: AtomicI64::new(0),
             waiting_tree: Mutex::new(None),
             model_alias: Mutex::new(initial_alias),
             model_switching: AtomicBool::new(false),

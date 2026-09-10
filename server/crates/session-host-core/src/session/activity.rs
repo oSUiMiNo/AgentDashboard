@@ -228,15 +228,39 @@ const TREE_UNFOCUSED: char = '◯';
 /// 末尾の空行を飛ばし、記号で始まる行が続くあいだだけを取る。フッタとその上の本文は
 /// 空行で隔てられているので、ここで止まる。
 fn agent_tree_block(screen: &str) -> impl Iterator<Item = &str> {
+    let mut skipped = 0usize;
     screen
         .lines()
         .rev()
-        .skip_while(|line| line.trim().is_empty())
-        .take_while(|line| {
+        .skip_while(move |line| {
             let head = line.trim_start();
-            head.starts_with(TREE_FOCUSED) || head.starts_with(TREE_UNFOCUSED)
+            if head.is_empty() {
+                return true;
+            }
+            // **一覧の下に何か描かれることがある**（設計§14-14）。実機のログでは、前後の
+            // 周で2行あった一覧が**30秒にわたり0行に見えた**。いちばん下の塊しか見ない作りだと、
+            // 1行でも下に出た瞬間に一覧を見失い、**走っているカードがサブ待ちから外れる。**
+            //
+            // **数える上限を置くのは、本文まで遡らないため。** 会話の本文にも記号は出るので、
+            // 際限なく上へ探すと本文の行を一覧と読む。
+            if is_tree_line(head) || skipped >= TREE_BELOW_TOLERANCE {
+                return false;
+            }
+            skipped += 1;
+            true
         })
+        .take_while(|line| is_tree_line(line.trim_start()))
 }
+
+/// 一覧の行の形か（記号で始まるか）。
+fn is_tree_line(head: &str) -> bool {
+    head.starts_with(TREE_FOCUSED) || head.starts_with(TREE_UNFOCUSED)
+}
+
+/// 一覧の下に何行まで別のものが描かれても見失わないか（設計§14-14）。
+///
+/// **際限なくは遡らない。** 本文にも記号が出るので、遠くまで探すと本文を一覧と読む。
+const TREE_BELOW_TOLERANCE: usize = 3;
 
 /// 一覧の**根**（`main`）の行か。
 ///
