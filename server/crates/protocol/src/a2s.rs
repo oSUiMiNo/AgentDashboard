@@ -575,6 +575,7 @@ mod tests {
             card_id: CardId::new(),
             project: ProjectId("/home/example/dev/app".to_string()),
             claude_session_id: None,
+            resumed_from: None,
             permission_mode: Some(PermissionMode::new("acceptEdits")),
             model: Some(ModelId::new("claude-opus-5")),
             model_label: Some("Opus 5".to_string()),

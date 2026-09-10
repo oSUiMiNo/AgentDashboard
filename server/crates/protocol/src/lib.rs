@@ -363,6 +363,51 @@ pub struct SessionMeta {
     pub card_id: CardId,
     pub project: ProjectId,
     pub claude_session_id: Option<ClaudeSessionId>,
+    /// **`--resume` で頼んだ会話のID。** 起こすときに入れ、**二度と変えない**。
+    ///
+    /// # なぜ [`SessionMeta::claude_session_id`] と別に持つのか
+    ///
+    /// あちらは**いま動いている会話**で、フックが名乗るたびに張り替わる
+    /// （`session_host_core::state` の張り替え）。**張り替え自体は正しい**——
+    /// 動いている会話が変わったのだから、そう書くのが本当である。
+    ///
+    /// **間違っていたのは、張り替えた結果、頼んだIDがどこにも残らなくなることだった。**
+    /// `--resume` した claude が別のIDを名乗ると、**元の会話のIDを持つ行が1つも
+    /// 残らなくなり、呼び戻しの一覧から消える**（実測：記録の11%がこの形で壊れていた）。
+    ///
+    /// **とくに復旧（`revive`）で悪い。** あちらは新しいカードを採番せず**既にある
+    /// カードを使い回す**ので、上書きされるのが**その会話が持つ唯一の行**になる。
+    /// つまり「**復旧ボタンを押した結果、復旧しようとしていた会話が一覧から消える**」。
+    ///
+    /// # 誰が書くか
+    ///
+    /// **起こす側だけ**（`SessionStart::Resume` のときに1回）。フックでは**触らない**——
+    /// 触ると、この欄を置いた意味がそのまま消える。
+    ///
+    /// # 履歴の乗り換え検出とは別物
+    ///
+    /// 同じ瞬間に `report_transcript_reset` も走るが、あちらが見ているのは
+    /// **フックの `transcript_path`**（履歴ファイルの移動）で、こちらの元は
+    /// **`--resume` に渡した引数**である。共起するだけで材料が違うので、
+    /// 片方から他方を導けない。
+    ///
+    /// # [`SessionMeta::branched_from`] とも別物
+    ///
+    /// | | 何の性質か | 誰が知っているか |
+    /// |---|---|---|
+    /// | `branched_from` | **会話**の性質（あの会話から分かれた） | **サーバ**が記録からかぶせる |
+    /// | `resumed_from` | **カードの起こし方**の性質（このIDで `--resume` した） | **セッションホスト**だけが知る |
+    ///
+    /// 枝分かれは `recall` を伴うので**両方が同時に付くことがある**が、
+    /// **枝を作らない呼び戻しでも `resumed_from` は付く**。混同しないこと。
+    ///
+    /// # なぜ `#[serde(default)]` を書くのか
+    ///
+    /// **欄を持たない古い版の名乗りを `None` として受けるため。** これがあるので
+    /// **版（`A2S_VERSION`）を上げなくてよい**——配ってある PC はそのまま繋がり、
+    /// 新しい PC からだけこの欄が届く。
+    #[serde(default)]
+    pub resumed_from: Option<ClaudeSessionId>,
     /// いまの権限モード。
     ///
     /// `None` は「まだ分からない」— 起動時に指定せず、フックも端末フッタも
@@ -923,6 +968,7 @@ mod tests {
             card_id: CardId::new(),
             project: ProjectId("/home/example/dev/app".to_string()),
             claude_session_id: Some(ClaudeSessionId::new()),
+            resumed_from: None,
             permission_mode: None,
             model: None,
             model_label: None,
@@ -1001,6 +1047,7 @@ mod tests {
             card_id: CardId::new(),
             project: ProjectId("/home/example/dev/app".to_string()),
             claude_session_id: Some(ClaudeSessionId::new()),
+            resumed_from: None,
             permission_mode: Some(PermissionMode::new("acceptEdits")),
             model: Some(ModelId::new("claude-opus-5")),
             model_label: Some("Opus 5".to_string()),
@@ -1032,6 +1079,7 @@ mod tests {
             card_id: CardId(uuid::uuid!("00000000-0000-0000-0000-000000000001")),
             project: ProjectId("/p".to_string()),
             claude_session_id: None,
+            resumed_from: None,
             permission_mode: None,
             model: None,
             model_label: None,
@@ -1359,6 +1407,7 @@ mod tests {
                 card_id: CardId::new(),
                 project: ProjectId("/p".to_string()),
                 claude_session_id: None,
+                resumed_from: None,
                 permission_mode: None,
                 model: None,
                 model_label: None,
@@ -1417,6 +1466,7 @@ mod tests {
             card_id: CardId::new(),
             project: ProjectId("/home/example/dev/app".to_string()),
             claude_session_id: None,
+            resumed_from: None,
             permission_mode: None,
             model: Some(ModelId::new("claude-haiku-4-5")),
             model_label: Some("Haiku 4.5".to_string()),
@@ -1453,6 +1503,7 @@ mod tests {
             card_id: CardId::new(),
             project: ProjectId("/tmp".to_string()),
             claude_session_id: None,
+            resumed_from: None,
             permission_mode: None,
             model: None,
             model_label: None,

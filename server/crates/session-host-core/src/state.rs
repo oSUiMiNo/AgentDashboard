@@ -223,7 +223,18 @@ pub fn apply(meta: &mut SessionMeta, input: &HookInput, now: Timestamp) -> Chang
         changed.status = true;
     }
 
-    // resume などで CLI 側のIDが変わっても、CardId は変えずに属性だけ張り替える
+    // resume などで CLI 側のIDが変わっても、CardId は変えずに属性だけ張り替える。
+    //
+    // **`resumed_from` はここで触らない。触らないことが、この欄の全部である。**
+    //
+    // 触らない、と明示しておくのは、**触らないコードは目に見えないから**である。
+    // ここに何も書かないと、次に読む人は「書き忘れ」と読んで足しにくる。
+    //
+    // 張り替え自体は正しい——動いている会話が変わったのだから、そう書くのが本当である。
+    // **間違っていたのは、張り替えた結果、`--resume` で頼んだIDがどこにも残らなく
+    // なることだった。** 呼び戻しの一覧は行の `claude_session_id` を引くので、
+    // そのIDを持つ行が1つも無くなると、元の会話は一覧から消えて二度と戻せない
+    // （実測：記録の11%がこの形で壊れていた）。
     if let Some(session_id) = input.session_id()
         && meta.claude_session_id != Some(session_id)
     {
@@ -523,6 +534,7 @@ mod tests {
             card_id: CardId::new(),
             project: ProjectId("/home/example/dev/app".to_string()),
             claude_session_id: None,
+            resumed_from: None,
             permission_mode: None,
             model: None,
             model_label: None,
@@ -870,6 +882,47 @@ mod tests {
             assert!(changed.meta);
         }
         assert_eq!(meta.card_id, card_id, "CardId は変わらない");
+    }
+
+    #[test]
+    fn 頼んだ会話は張り替えられない() {
+        // **この検査が、この欄の全部である。**
+        //
+        // `--resume` した claude が別のIDを名乗ると、`claude_session_id` は張り替わる
+        // （それは正しい）。**そのとき頼んだIDまで失うと、元の会話は呼び戻しの一覧から
+        // 消えて二度と戻せない**——一覧は行の `claude_session_id` を引くので、
+        // そのIDを持つ行が1つも無くなるためである。
+        //
+        // とくに `revive` は既にあるカードを使い回すので、失われるのは
+        // **その会話が持つ唯一の行**になる（＝復旧ボタンを押した結果、
+        // 復旧しようとしていた会話が一覧から消える）。
+        let 頼んだ = ClaudeSessionId::new();
+        let mut meta = meta_with(SessionStatus::Starting);
+        meta.claude_session_id = Some(頼んだ);
+        meta.resumed_from = Some(頼んだ);
+
+        // CLI が別のIDを2回名乗る
+        for _ in 0..2 {
+            let 名乗り = ClaudeSessionId::new();
+            apply(
+                &mut meta,
+                &HookInput::new(
+                    HookEvent::PreToolUse,
+                    json!({ "session_id": 名乗り.to_string() }),
+                ),
+                NOW,
+            );
+            assert_eq!(
+                meta.claude_session_id,
+                Some(名乗り),
+                "いま動いている会話は名乗りに追随する"
+            );
+            assert_eq!(
+                meta.resumed_from,
+                Some(頼んだ),
+                "頼んだ会話が張り替えで失われた（この欄を置いた意味が消える）"
+            );
+        }
     }
 
     #[test]

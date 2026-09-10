@@ -48,6 +48,14 @@ async fn 起こしたカードは最初から呼び戻し先を持っている()
         "呼び戻し先が最初から入っていない"
     );
 
+    // **頼んだ会話も同時に入る。** こちらはフックの張り替えで失われない側で、
+    // **claude が別のIDを名乗っても元の会話を呼び戻しの一覧に残すためのもの**である
+    assert_eq!(
+        recalled.meta().resumed_from,
+        Some(session),
+        "頼んだ会話が入っていない（張り替えで元の会話を失う）"
+    );
+
     // 比較のため、素の `resume` は空のまま
     let resumed = manager.resume(&cwd, session).expect("起こせること");
     assert_eq!(

@@ -2607,6 +2607,21 @@ impl SessionManager {
                 // 呼び出し側が「どの CLI セッションで始まるか」を知っているときだけ
                 // 埋まる（設計§7-3）。素の引き継ぎでは空のままで、最初のフックが確定させる
                 claude_session_id: initial_session_id,
+                // **`--resume` で頼んだ会話。ここで入れて、二度と変えない。**
+                //
+                // 上の `claude_session_id` はフックの名乗りで張り替わるが、こちらは
+                // 張り替えない（`crate::state::apply` は触らない）。**張り替えたあと
+                // 頼んだIDがどこにも残らないと、元の会話が呼び戻しの一覧から消える**
+                // ——実測で記録の11%がこの形で壊れていた。
+                //
+                // `recall` も `revive` もここを通るので、**1箇所で両方に効く**。
+                // とくに `revive` は既にあるカードを使い回すため、張り替えで
+                // **その会話が持つ唯一の行**が失われる（＝復旧ボタンを押した結果、
+                // 復旧しようとしていた会話が一覧から消える）。
+                resumed_from: match start {
+                    lifecycle::SessionStart::Resume(id) => Some(id),
+                    lifecycle::SessionStart::Fresh(_) => None,
+                },
                 // 起動時に指定した値は初期値でしかない（設計§11）。フックとフッタが
                 // 実態へ訂正するまでの間、画面を空にしないために持つ
                 permission_mode: initial_mode.clone(),
