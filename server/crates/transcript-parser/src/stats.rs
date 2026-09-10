@@ -16,6 +16,19 @@ pub struct Stats {
     pub unknown_types: BTreeMap<String, u64>,
     /// 親を指しているのに親が見つからなかったレコードの数
     pub orphans: u64,
+    /// **枝が親から引き継いだぶんとして伏せた行の数。**
+    ///
+    /// # いまはこのクレートの外から読めない
+    ///
+    /// [`crate::session`] の `stats_event` が組み立てる `ParserEvent::Stats` に欄が無く、
+    /// **パーサは別プロセスなので、いまこの数を読めるのはここのテストだけ**である。
+    ///
+    /// **外へ出す道は2つとも塞がっている。** ログは使えず（このクレートは `tracing` を
+    /// 禁じられている——stdout が IPC なので、1行混ざると「繋がっているのに何も届かない」
+    /// 沈黙になる）、欄を足すには共有境界の `protocol` を変えることになる。
+    /// **どちらへ進むかは別途決める**——`枝分かれで差し替わったカードの履歴が、
+    /// 画面に古いまま残る` の実行レポートに申し送りとして残してある。
+    pub inherited_suppressed: u64,
     /// 観測した `version` の集合。
     ///
     /// 1ファイル内に複数バージョンが混在しうる（compact / resume を跨ぐため）ので、
@@ -41,6 +54,10 @@ impl Stats {
 
     pub fn orphan(&mut self) {
         self.orphans += 1;
+    }
+
+    pub fn inherited_suppressed(&mut self) {
+        self.inherited_suppressed += 1;
     }
 
     pub fn version(&mut self, version: &str) {

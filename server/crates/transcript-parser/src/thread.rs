@@ -106,6 +106,21 @@ struct FileState {
     branch: u32,
     /// 本体ファイルで観測した「根になるユーザ発言」の数。2件目以降が巻き戻しの跡
     roots_seen: u32,
+    /// **枝が親から引き継いだ履歴を伏せるか**（`枝分かれで差し替わったカードの履歴が、画面に古いまま残る`）。
+    ///
+    /// 枝分かれの子は親の会話を丸ごと引き継いで始まる。claude はそれを
+    /// **`history-suppression` の `cause: fork_inherit`**（0行目）で「伏せろ」と伝え、
+    /// **引き継いだ行だけが `forkedFrom` を持つ**。ターミナルは伏せているので、
+    /// ここで伏せないと**同じカードの同じ瞬間に2つの画面が別の量の会話を見せる**。
+    ///
+    /// # 印が要る。`forkedFrom` だけで切ってはいけない
+    ///
+    /// **印を書かない版の claude がある**（実測：枝の子16件のうち6件に印が無く、
+    /// `2.1.266` の3件はすべて印なし）。**印が無いときはターミナルも伏せない**ので、
+    /// `forkedFrom` だけで切ると**逆向きの食い違い**——出ているものを消す——を作る。
+    ///
+    /// 印は「伏せろ」、`forkedFrom` は「どこまでが引き継ぎか」。役割が違う。
+    suppress_inherited: bool,
     /// 画像を出したが**置き場所がまだ届いていない**ノード（画像添付 設計§21 読み替え1）。
     ///
     /// claude は本体レコード（`image` ブロック）を先に書き、置き場所は
@@ -186,6 +201,34 @@ struct FileState {
     /// 番号がずれる**。こちらはファイル内に閉じており、読む経路3つ（通常の追尾・再開時の
     /// `catch_up`・`read_range`）が**すべて先頭から食わせる**ので、読み直しても同じ ID になる。
     queue_seq: u64,
+}
+
+/// `history-suppression` のうち、**枝が親から引き継いだ履歴**を指す `cause`。
+///
+/// 同じ型は `migration` でも飛んでくるので、**この値だけを引き金にする**。
+///
+/// **公式ドキュメントにも Claude Code のナレッジにも載っていない未文書の記録型である。**
+/// 仕様に頼れないので、切り方は実測に基づく——根拠は
+/// `MyDocs/イシュー/枝分かれで差し替わったカードの履歴が、画面に古いまま残る/` に置いてある。
+/// **形が変わったらフィクスチャの検査が落ちるようにしてある。**
+const FORK_INHERIT: &str = "fork_inherit";
+
+/// **その行が「親から引き継いだぶん」か**（`forkedFrom` を持つか）。
+///
+/// # 中身の型を仮定しない
+///
+/// 実物は **`{"sessionId": …, "messageUuid": …}` のオブジェクト**である（分岐元の会話と、
+/// どの発言から分かれたかを名指しする）。**`as_str()` で取り出す書き方にしてはいけない**
+/// ——オブジェクトでは `None` になり、**伏せる処理ごと黙って効かなくなる**。
+///
+/// # `null` は「持っていない」と読む
+///
+/// 鍵の有無だけで見ると、`"forkedFrom": null` を引き継ぎと判定してしまう。同じ JSONL は
+/// `"parentUuid": null` を明示的に書く形式なので、**`forkedFrom` を `null` で書く版が
+/// 現れたら、枝分かれ後の会話が丸ごと消える**——この直しが防ごうとしている食い違いの、
+/// ちょうど逆向きになる。
+fn is_forked(record: &Record) -> bool {
+    matches!(record.raw.get("forkedFrom"), Some(value) if !value.is_null())
 }
 
 /// 待ち行列に同時に並べる上限（設計§4-2）。
@@ -283,6 +326,32 @@ impl SessionThreader {
         let ts = record.ts.unwrap_or(self.last_ts);
         self.last_ts = ts;
 
+        // **引き継ぎを伏せる指示**（0行目に来る）。ノードは作らない——会話ではなく印である
+        if record.record_type == "history-suppression" {
+            // **`cause` を見る。** 同じ型は `migration` でも飛んでくる（実測で1ファイル68件
+            // のうち67件がそちら）。全部を引き金にすると、引き継ぎでない履歴まで消える
+            if record.raw.get("cause").and_then(Value::as_str) == Some(FORK_INHERIT) {
+                self.file(source).suppress_inherited = true;
+            }
+            // **鎖は繋いでおく**（`Kind::Transparent` と同じ）。ここで切ると、この行を
+            // 親に指す後続レコードが親を見失って根へ散る
+            self.keep_chain(source, record);
+            return Vec::new();
+        }
+        // **伏せる範囲は `forkedFrom` を持つ行**。先頭から連続した塊になっている
+        // （実測：印のある10件すべてで、0行目から途切れずに続く）ので、先読みは要らない。
+        //
+        // **読み直しが引き継ぎの塊の途中から始まると、印を見ないまま出してしまう。**
+        // 塊を過ぎた位置から再開する場合は出す行が無いので実害は無く、
+        // 内側から再開した場合も次の全読み直しで消える。ここでは塞がない
+        if self.file(source).suppress_inherited && is_forked(record) {
+            self.stats.inherited_suppressed();
+            // 伏せた行も鎖には残す。**引き継ぎの最後を親に指す「枝分かれ後の最初の行」**が
+            // 孤児にならないため——数えられて自己修復の判定材料を汚す
+            self.keep_chain(source, record);
+            return Vec::new();
+        }
+
         // サブエージェントのファイルは、そのエージェントのルートの下に生える。
         // 一度 None で覚えてしまわないよう、根が判明した時点で必ず書き直す
         let agent_id = agent_id.or(record.agent_id.as_deref());
@@ -336,6 +405,26 @@ impl SessionThreader {
 
     fn file(&mut self, source: &str) -> &mut FileState {
         self.files.entry(source.to_string()).or_default()
+    }
+
+    /// **ノードは作らないが、鎖は繋いでおく**（`Kind::Transparent` と同じ手当て）。
+    ///
+    /// 出さない行を鎖から外すと、**その行を親に指す後続レコードが親を見失って根へ散る**。
+    ///
+    /// # いまの実データでは差が出ない
+    ///
+    /// 実物（3,597行・引き継ぎ2,162行）で**付けても外しても孤児は0件**だった。根になる
+    /// レコードは親を解決しないので、伏せた行を親に指す形が現れなかったためである。
+    /// **したがってこれは守りであって、いま何かを直しているわけではない。**
+    ///
+    /// それでも置くのは、`Kind::Transparent` が同じ理由で同じことをしており、
+    /// **「出さない行は鎖に残す」を例外なく守るほうが、次に形が変わったときに強いから**である。
+    /// **壊しても落ちる検査は無い**——実データに現れない以上、作れない。
+    fn keep_chain(&mut self, source: &str, record: &Record) {
+        let parent = self.resolve(source, record.parent_uuid.as_deref());
+        if let Some(uuid) = &record.uuid {
+            self.file(source).resolved.insert(uuid.clone(), parent);
+        }
     }
 
     /// そのファイルのノードが属する会話の枝。
@@ -1018,6 +1107,89 @@ mod tests {
                 Node::Unknown { .. } => "unknown",
             })
             .collect()
+    }
+
+    /// 引き継ぎの行（`forkedFrom` を持つ）を1本作る。
+    fn 引き継ぎ(uuid: &str, text: &str) -> String {
+        format!(
+            r#"{{"type":"user","uuid":"{uuid}","message":{{"content":"{text}"}},"forkedFrom":"00000000-0000-4000-8000-0000000000ff"}}"#
+        )
+    }
+
+    /// 枝分かれ後の行（`forkedFrom` を持たない）を1本作る。
+    fn 枝の後(uuid: &str, text: &str) -> String {
+        format!(r#"{{"type":"user","uuid":"{uuid}","message":{{"content":"{text}"}}}}"#)
+    }
+
+    const 伏せる印: &str =
+        r#"{"type":"history-suppression","cause":"fork_inherit","ts":"2026-09-08T11:04:08.162Z"}"#;
+
+    #[test]
+    fn 印があれば引き継いだ履歴を伏せる() {
+        // 枝の子は親の会話を丸ごと引き継いで始まる。ターミナルは印に従って伏せるので、
+        // ここで伏せないと**同じカードの同じ瞬間に2つの画面が別の量の会話を見せる**
+        let mut threader = SessionThreader::new();
+        feed(&mut threader, 伏せる印);
+        let 引き継ぎ分 = feed(&mut threader, &引き継ぎ("u1", "枝分かれ前のやりとり"));
+        let 新しい分 = feed(&mut threader, &枝の後("u2", "枝分かれ後のやりとり"));
+
+        assert!(引き継ぎ分.is_empty(), "引き継いだ行はノードにしない");
+        assert_eq!(kinds(&新しい分), ["user"], "枝分かれ後はそのまま出す");
+        assert_eq!(threader.stats().inherited_suppressed, 1, "伏せた数を数える");
+    }
+
+    #[test]
+    fn 印が無ければ引き継いだ履歴も出す() {
+        // **印を書かない版の claude がある**（実測：枝の子16件のうち6件、`2.1.266` は3件とも）。
+        // そのときはターミナルも伏せないので、ここで消すと**逆向きの食い違い**になる。
+        // `forkedFrom` だけを見て切る実装に退化したら、この検査が落ちる
+        let mut threader = SessionThreader::new();
+        let 引き継ぎ分 = feed(&mut threader, &引き継ぎ("u1", "枝分かれ前のやりとり"));
+
+        assert_eq!(kinds(&引き継ぎ分), ["user"], "印が無いなら出す");
+        assert_eq!(threader.stats().inherited_suppressed, 0);
+    }
+
+    #[test]
+    fn 引き継ぎ以外の履歴抑制では伏せない() {
+        // 同じ型は `migration` でも飛んでくる（実測で1ファイル68件のうち67件がそちら）。
+        // `cause` を見ずに引き金にすると、引き継ぎでない履歴まで消える
+        let mut threader = SessionThreader::new();
+        feed(
+            &mut threader,
+            r#"{"type":"history-suppression","cause":"migration","ts":"2026-09-08T11:04:08.162Z"}"#,
+        );
+        let 引き継ぎ分 = feed(&mut threader, &引き継ぎ("u1", "消してはいけない"));
+
+        assert_eq!(kinds(&引き継ぎ分), ["user"], "migration では伏せない");
+    }
+
+    #[test]
+    fn 履歴抑制の印そのものはノードにしない() {
+        // 会話ではなく印なので、画面に「未知のレコード」として出さない
+        let mut threader = SessionThreader::new();
+        assert!(feed(&mut threader, 伏せる印).is_empty());
+        assert!(
+            !threader
+                .stats()
+                .unknown_types
+                .contains_key("history-suppression"),
+            "未知の種別として数えない"
+        );
+    }
+
+    #[test]
+    fn 伏せるのは印を見たファイルだけ() {
+        // 1つの `SessionThreader` が複数のファイルを見る（本体とサブエージェント）。
+        // 印はファイルごとに持たないと、隣のファイルの履歴まで巻き添えで消える
+        let mut threader = SessionThreader::new();
+        let record = parse_line(伏せる印);
+        threader.feed_record(MAIN, None, &record);
+
+        let 別のファイル = parse_line(&引き継ぎ("u1", "別ファイルの引き継ぎ"));
+        let 出た = threader.feed_record("/p/other.jsonl", None, &別のファイル);
+
+        assert_eq!(kinds(&出た), ["user"], "印を見ていないファイルは伏せない");
     }
 
     #[test]
