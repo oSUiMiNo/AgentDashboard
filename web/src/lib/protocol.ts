@@ -59,6 +59,17 @@ export interface SessionMeta {
   project: string
   claude_session_id: string | null
   /**
+   * **`--resume` で頼んだ会話のID。** 起こすときに入り、二度と変わらない。
+   *
+   * 上の `claude_session_id` は**いま動いている会話**で、CLI が名乗るたびに
+   * 張り替わる。**張り替えたあと頼んだIDがどこにも残らないと、元の会話が
+   * 呼び戻しの一覧から消える**——記録の1割がこの形で壊れていた。
+   *
+   * `null` は「引き継ぎで始めていない」。画面はいま直接使わないが、
+   * **線を渡る形を Rust 側と揃えておく**（片方だけ直すと静かにずれる）。
+   */
+  resumed_from: string | null
+  /**
    * いまの権限モード。`null` は「まだ分からない」。
    *
    * 空欄にせず「不明」と出せるようにするための `null`（`hooks_seen` と同じ理由）。
