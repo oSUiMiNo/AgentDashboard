@@ -34,6 +34,17 @@ pub struct Model {
     pub account_id: Uuid,
     pub project: String,
     pub claude_session_id: Option<Uuid>,
+    /// **`--resume` で頼んだ会話のID**（`protocol::SessionMeta::resumed_from`）。
+    ///
+    /// 上の `claude_session_id` は**いま動いている会話**で、フックの名乗りで張り替わる。
+    /// **張り替えたあと頼んだIDがどこにも残らないと、元の会話が呼び戻しの一覧から
+    /// 消える**——一覧は行の `claude_session_id` を引くので、そのIDを持つ行が
+    /// 1つも無くなるためである（実測：記録の11%がこの形で壊れていた）。
+    ///
+    /// **保存しないと往復しない。** 起こし直しのたびに失われては、置いた意味が無い。
+    ///
+    /// `NULL` は「引き継ぎで始めていない」。新規セッションは必ずここから始まる。
+    pub resumed_from: Option<Uuid>,
     pub permission_mode: Option<String>,
     pub model: Option<String>,
     pub model_label: Option<String>,
