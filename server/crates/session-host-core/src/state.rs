@@ -472,6 +472,60 @@ pub fn sweep_stalled_idle(meta: &mut SessionMeta, running: bool) -> bool {
     true
 }
 
+/// 入力待ちのまま置かれたカードを、**自動でスリープしてよいか**を答える。
+///
+/// # 答えるだけで、状態は動かさない
+///
+/// **動かす人が別に居る。** 呼ぶ側が `Session::kill` を撃ち、擬似ターミナルが終わると
+/// `on_exit` が `Ended { ok: true }` を立てる——**画面ではこれが「スリープ」**である。
+/// ここで先に状態を書くと、本物の終了と二重になる。
+///
+/// この module が時刻も副作用も持たない約束にも合っている（判定だけを表駆動で試せる）。
+///
+/// # `WaitingInput` だけを見る
+///
+/// 要望は「**作業完了して**入力待ちの状態が続いたら」である。似た状態を巻き込むと
+/// 取り返しがつかない——とくに [`SessionStatus::WaitingPermission`] は**人の答えを
+/// 待っている**ので、寝かせると**問いごと消える。**
+///
+/// **`Stalled` も対象にしない。** 停滞したカードは、端末に走っている印が無ければ
+/// [`sweep_stalled_idle`] が `WaitingInput` へ戻す。**印が残っているなら本当に
+/// 走っている**ので、寝かせてはいけない。
+///
+/// # 降格しても、時計は起き直らない
+///
+/// **ここは素直な読みとずれるので、はっきり書いておく。** [`sweep_stalled_idle`] は
+/// `last_activity_at` を**進めない**（あちらの項に理由がある——進めると小窓の経過時間が
+/// 嘘になる）。したがって停滞から降格してきたカードは**古い時刻を抱えたまま**で、
+/// 既にしきい値を越えていれば**降格したその周で寝る。**
+///
+/// **「入力待ちが2時間続いた」の字面とは合っていない**が、降格そのものが
+/// 「端末に走っている印が無い」ことを確かめた結果なので、寝かせる根拠としては足りている。
+///
+/// **重くなった一点だけ書いておく。** 印を見落としていた場合（設計§8-2 が想定する
+/// 失敗）、この機能が入る前は**表示が間違うだけ**だった。いまは走っている claude を
+/// 殺しうる。**直すなら「いつ入力待ちになったか」を別に持つ必要がある**——
+/// `last_activity_at` を降格で進める形にすると、停滞の側の判断を壊す。
+///
+/// # 起点は `last_activity_at`
+///
+/// 停滞の判定（[`sweep_stalled`]）と同じ材料である。**画面を見ているだけの時間は
+/// 入らない**——見ていることの印は台帳側の貸し出しで、`meta` を動かさない。
+/// したがって「読んでいる最中に寝る」は起こりうる。**起こし直せるので失うのは
+/// 端末の巻き戻しだけ**だが、限界として知っておくこと。
+///
+/// # `0` は機能ごと止める
+///
+/// **勝手に人のセッションを落とす機能なので、切れる口を残す。** 他のしきい値と違い、
+/// ここでは `0` が「止める」の意味を持つ（だから設定の検証でも弾かない）。
+pub fn due_for_auto_sleep(meta: &SessionMeta, now: Timestamp, idle_secs: u64) -> bool {
+    if idle_secs == 0 || meta.status != SessionStatus::WaitingInput {
+        return false;
+    }
+    let elapsed_ms = now.saturating_sub(meta.last_activity_at);
+    elapsed_ms >= (idle_secs as i64).saturating_mul(1000)
+}
+
 /// フックが1件も届かないまま動いているセッションを「判断できない」に落とす（設計§11）。
 ///
 /// **PTY からは出力があるのにフックが0件**という組み合わせは、CLI は動いているのに
@@ -923,6 +977,73 @@ mod tests {
                 "頼んだ会話が張り替えで失われた（この欄を置いた意味が消える）"
             );
         }
+    }
+
+    /// 自動スリープの対象を、状態ごとに1枚の表で押さえる。
+    ///
+    /// **巻き込んではいけないものが混ざると取り返しがつかない**ので、
+    /// 「寝かせてよい」より「寝かせてはいけない」のほうを厚く並べてある。
+    #[test]
+    fn 自動スリープは入力待ちだけを対象にする() {
+        let 十分に過ぎた = 3 * 60 * 60; // 3時間ぶん経っている
+        for (status, 寝かせてよいか, なぜ) in [
+            (SessionStatus::WaitingInput, true, "要望そのもの"),
+            (
+                SessionStatus::WaitingPermission,
+                false,
+                "人の答えを待っている。寝かせると問いごと消える",
+            ),
+            (
+                SessionStatus::WaitingSubagents,
+                false,
+                "作業が完了していない",
+            ),
+            (SessionStatus::Working, false, "作業中"),
+            (SessionStatus::Starting, false, "起動中"),
+            (
+                SessionStatus::Stalled,
+                false,
+                "既存の降格が先に働く。印が残っているなら本当に走っている",
+            ),
+            (SessionStatus::Unknown, false, "判断できない"),
+            (SessionStatus::Ended { ok: true }, false, "もう寝ている"),
+        ] {
+            let mut meta = meta_with(status);
+            meta.last_activity_at = NOW - (十分に過ぎた * 1000);
+            assert_eq!(
+                due_for_auto_sleep(&meta, NOW, 7200),
+                寝かせてよいか,
+                "{status:?} の扱いが違う（{なぜ}）"
+            );
+            // **状態は動かさない。** 動かすのは呼ぶ側（kill → on_exit）
+            assert_eq!(meta.status, status, "{status:?} で状態を動かしている");
+        }
+    }
+
+    #[test]
+    fn 自動スリープは時間が来るまで寝かせない() {
+        let mut meta = meta_with(SessionStatus::WaitingInput);
+        // 境界のちょうど手前
+        meta.last_activity_at = NOW - (7200 * 1000) + 1;
+        assert!(
+            !due_for_auto_sleep(&meta, NOW, 7200),
+            "時間内なのに寝かせた"
+        );
+        // 境界ちょうど。**`>=` で見ていること**——`>` だと1ミリ秒ぶん遅れる
+        meta.last_activity_at = NOW - (7200 * 1000);
+        assert!(due_for_auto_sleep(&meta, NOW, 7200), "境界ちょうどで寝ない");
+    }
+
+    #[test]
+    fn 自動スリープはゼロで機能ごと止まる() {
+        // **勝手に人のセッションを落とす機能なので、切れる口を残してある。**
+        // 他のしきい値と違い、ここでは 0 が「止める」の意味を持つ
+        let mut meta = meta_with(SessionStatus::WaitingInput);
+        meta.last_activity_at = 0; // どれだけでも経っている
+        assert!(
+            !due_for_auto_sleep(&meta, NOW, 0),
+            "0 なのに寝かせた（止める口が塞がっている）"
+        );
     }
 
     #[test]

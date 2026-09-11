@@ -78,6 +78,14 @@ const INITIAL_ROWS: u16 = 24;
 /// 判定そのもののしきい値は `config.stalled_threshold_secs`（既定120秒）で、こちらは
 /// 「何秒おきに見に行くか」。小窓の経過時間表示は1秒刻みなので、同じ粒度にしてある。
 const STALLED_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+/// 自動スリープで、**1周に落としてよい枚数の上限**。
+///
+/// しきい値を超えるカードは**同時に何枚も現れる**（夜のあいだに溜まる）。一斉に落とすと
+/// その瞬間に大量のプロセスが死ぬので、1周ぶんを絞って次の周へ回す。
+///
+/// **ずらすための仕掛けを別に作らずに済む**——見張りは1秒ごとなので、2枚なら30枚でも
+/// 15秒かけて順に落ちる。
+const AUTO_SLEEP_MAX_PER_SWEEP: usize = 2;
 
 /// 指示の本文を書いてから、確定の CR を書くまでの間（設計§18）。
 ///
@@ -602,6 +610,20 @@ pub struct Session {
     /// カード、こちらはターンが終わったカードで、**見に行く相手も条件も違う**。1つに
     /// まとめると、片方の間引きがもう片方の間引きを黙って狂わせる。
     waiting_checked_at: AtomicI64,
+    /// 端末へ最後に**何かを書き込んだ**時刻（自動スリープ用）。
+    ///
+    /// # なぜ `last_activity_at` と別に持つのか
+    ///
+    /// あちらを動かすのは**フックだけ**（`crate::state::apply`）で、**送信していない
+    /// 打鍵では1ミリ秒も進まない**——打っている最中はフックが飛ばないからである。
+    ///
+    /// そのままだと「**1時間58分置いたカードを開き、送らずに長い指示を打っている
+    /// 最中にしきい値を越えて殺される**」が起きる。**打ちかけの入力は端末の中にしか
+    /// 無いので、消えると戻らない。**
+    ///
+    /// **`last_activity_at` のほうを打鍵で進めてはいけない。** あちらは停滞の判定にも
+    /// 使われていて、進めると「作業中なのに黙っている」を見落とす。だから別に持つ。
+    last_input_at: AtomicI64,
     /// 前にサブ待ちを見に行ったときの、端末の累計バイト数（[`Session::scrollback_mark`]）。
     ///
     /// **端末が1バイトも動いていなければ、描き直しても答えは同じである。** 停滞と違って
@@ -1248,6 +1270,9 @@ impl Session {
         if let Some(screen) = &self.screen {
             screen.note_input();
         }
+        // **触っている相手を寝かせない**（自動スリープ）。ここは端末への書き込みが
+        // 必ず通る1本道なので、打鍵も指示送信もモード切替もまとめて拾える
+        self.last_input_at.store(now_ms(), Ordering::Relaxed);
         self.process.write_input(bytes)
     }
 
@@ -2675,6 +2700,7 @@ impl SessionManager {
             terminal_size: Mutex::new((INITIAL_COLS, INITIAL_ROWS)),
             activity_checked_at: AtomicI64::new(0),
             waiting_checked_at: AtomicI64::new(0),
+            last_input_at: AtomicI64::new(0),
             waiting_checked_mark: AtomicU64::new(0),
             waiting_gone_streak: AtomicU32::new(0),
             waiting_moved_at: AtomicI64::new(0),
@@ -3342,11 +3368,90 @@ impl SessionManager {
             hook_port: self.config.hook_port,
             hook_bin: &self.hook_program,
         };
-        for session in sessions {
+        for session in &sessions {
             let changed = session.sweep(&input);
             if changed.any() {
-                self.publish(&session, changed);
+                self.publish(session, changed);
             }
+        }
+        self.sweep_auto_sleep(&sessions);
+    }
+
+    /// 入力待ちのまま置かれたカードを寝かせる（自動スリープ）。
+    ///
+    /// # 新しいタイマーを作らない
+    ///
+    /// 根拠が停滞と同じ「**一定時間なにも起きていないこと**」なので、見て回る場所を
+    /// 増やさない。増やすと同じ性質の判定が2箇所に散り、片方だけ直したときに食い違う。
+    ///
+    /// # 寝かせ方は `kill` である
+    ///
+    /// 擬似ターミナルが終わると [`SessionManager::on_exit`] が `Ended { ok: true }` を
+    /// 立てる——**画面ではこれが「スリープ」**で、人が押したときとまったく同じ形になる。
+    /// **記録には触らない**ので、あとから起こし直せる。
+    ///
+    /// # 寝かせた枚数を残す
+    ///
+    /// **この工事は実質「起こし直しを増やす工事」である。** 起こし直しの側は
+    /// [`SessionManager::revive`] が1行残しているので、こちらも残して初めて
+    /// **比が取れる**——片方だけでは「増えた」としか言えず、効きすぎているのか
+    /// 足りないのかを判断できない。
+    fn sweep_auto_sleep(&self, sessions: &[Arc<Session>]) {
+        let idle_secs = self.config.auto_sleep_idle_secs;
+        if idle_secs == 0 {
+            return;
+        }
+        let now = now_ms();
+        let mut 寝かせた = 0usize;
+        for session in sessions {
+            if 寝かせた >= AUTO_SLEEP_MAX_PER_SWEEP {
+                break;
+            }
+            // **撃ったばかりの相手を、もう一度数えない。**
+            //
+            // `kill` は擬似ターミナルへ signal を送るだけで、状態が `Ended` に変わるのは
+            // [`SessionManager::on_exit`] が届いてからである。その隙間は数百ミリ秒あり、
+            // 見張りは1秒ごとに回る——**同じカードが次の周でもまだ `WaitingInput` に
+            // 見える。**
+            //
+            // 素通しにすると、**1周の枠を撃ち終えた相手で埋めてしまい**、後ろに並んでいる
+            // カードがいつまでも寝ない（枚数が多いほど効く）。二重に撃つこと自体は害が
+            // 無いが、**枠を食う**のが問題である。
+            if session.expected_exit.load(Ordering::SeqCst) {
+                continue;
+            }
+            // **判定はロックの中で完結させる。** 借りるのは `meta` だけで、
+            // 状態は動かさない（動かすのは下の `kill` → `on_exit`）
+            let (due, elapsed_ms) = {
+                let meta = session.meta.lock().expect("ロックが壊れていない");
+                (
+                    state::due_for_auto_sleep(&meta, now, idle_secs),
+                    now.saturating_sub(meta.last_activity_at),
+                )
+            };
+            if !due {
+                continue;
+            }
+            // **触っている相手は寝かせない。**
+            //
+            // 上の判定が見ている `last_activity_at` はフックが動かすので、
+            // **送らずに打っているあいだは進まない**。長い指示を書いている最中に
+            // しきい値を越えると、**打ちかけの入力ごと**殺される——端末の中にしか
+            // 無いので戻らない。
+            let 最後の打鍵 = session.last_input_at.load(Ordering::Relaxed);
+            if 最後の打鍵 > 0
+                && now.saturating_sub(最後の打鍵) < (idle_secs as i64).saturating_mul(1000)
+            {
+                continue;
+            }
+            tracing::info!(
+                card_id = %session.card_id,
+                elapsed_ms,
+                idle_secs,
+                "入力待ちが続いたので自動でスリープします"
+            );
+            session.kill();
+            寝かせた += 1;
         }
     }
 
