@@ -50,6 +50,8 @@ pub struct Config {
     pub port: u16,
     pub bind_addr: String,
     pub stalled_threshold_secs: u64,
+    /// 入力待ちのままこの秒数が過ぎたカードを自動でスリープする。`0` で止める。
+    pub auto_sleep_idle_secs: u64,
     pub coalesce_ms: u64,
     pub pty_ring_buffer: usize,
     pub flow_high: usize,
@@ -100,6 +102,7 @@ impl Default for Config {
             port: server.port,
             bind_addr: server.bind_addr,
             stalled_threshold_secs: agent.stalled_threshold_secs,
+            auto_sleep_idle_secs: agent.auto_sleep_idle_secs,
             coalesce_ms: agent.coalesce_ms,
             pty_ring_buffer: agent.pty_ring_buffer,
             flow_high: server.flow_high,
@@ -236,6 +239,7 @@ impl Config {
     pub fn agent(&self) -> SessionHostConfig {
         SessionHostConfig {
             stalled_threshold_secs: self.stalled_threshold_secs,
+            auto_sleep_idle_secs: self.auto_sleep_idle_secs,
             coalesce_ms: self.coalesce_ms,
             pty_ring_buffer: self.pty_ring_buffer,
             always_bypass_permissions: self.always_bypass_permissions,

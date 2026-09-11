@@ -106,6 +106,11 @@ pub mod env {
 }
 
 const DEFAULT_STALLED_THRESHOLD_SECS: u64 = 120;
+/// 入力待ちのまま置かれたカードを寝かせるまで（秒）。既定は2時間。
+///
+/// 利用者の指定そのもの（2026-09-09）。**設定キーにしてあるので、合わなければ
+/// 配り直さずに伸ばせる。** `0` で機能ごと止まる。
+const DEFAULT_AUTO_SLEEP_IDLE_SECS: u64 = 7200;
 const DEFAULT_COALESCE_MS: u64 = 8;
 const DEFAULT_PTY_RING_BUFFER: usize = 1024 * 1024;
 const DEFAULT_CANARY_MODEL: &str = "haiku";
@@ -199,6 +204,14 @@ fn non_empty_env(key: &str) -> Option<String> {
 pub struct SessionHostConfig {
     /// Working のままこの秒数イベントが途絶したら Stalled とみなす
     pub stalled_threshold_secs: u64,
+    /// **入力待ちのまま**この秒数が過ぎたカードを、自動でスリープする。`0` で止める。
+    ///
+    /// 寝かせるのは `WaitingInput` だけで、**人の答えを待っている
+    /// `WaitingPermission` は巻き込まない**（判定は `crate::state::due_for_auto_sleep`）。
+    ///
+    /// **勝手に人のセッションを落とす機能なので、`0` で切れるようにしてある。**
+    /// 他のしきい値と違い、ここでは `0` が「止める」の意味を持つ。
+    pub auto_sleep_idle_secs: u64,
     /// PTY 出力をまとめてから送るまでの窓（ミリ秒）
     pub coalesce_ms: u64,
     /// セッションごとの scrollback リングバッファ（バイト）
@@ -343,6 +356,7 @@ impl Default for SessionHostConfig {
     fn default() -> Self {
         Self {
             stalled_threshold_secs: DEFAULT_STALLED_THRESHOLD_SECS,
+            auto_sleep_idle_secs: DEFAULT_AUTO_SLEEP_IDLE_SECS,
             coalesce_ms: DEFAULT_COALESCE_MS,
             pty_ring_buffer: DEFAULT_PTY_RING_BUFFER,
             always_bypass_permissions: false,
