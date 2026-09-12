@@ -459,6 +459,52 @@ else:
             print(f"      {key:<22}: dict {sorted(value)}")
         else:
             print(f"      {key:<22}: {type(value).__name__} = {value!r}")
+
+# **ここから下は「statusコマンド相当」のイシューが要る欄**。
+# 上の context_window は1件目（コンテキスト残量）が使う。**消さないこと**——
+# 情報が減ると、次に payload を採った人が同じ採取をやり直すことになる。
+#
+# **窓の本数と名前を出すのが目的である。** 公式ドキュメントは five_hour /
+# seven_day / spend_limit の3種を挙げているが、`/status` の画面には4本目
+# （Fable の週次）が写っている。**画面に在ることと payload に届くことは別**
+# なので、ここで数える。
+rl = payload.get("rate_limits")
+print()
+if rl is None:
+    print("    rate_limits が無いので、使用上限は**欄ごと存在しない**")
+elif not isinstance(rl, dict):
+    print(f"    rate_limits が dict ではない: {type(rl).__name__} = {rl!r}")
+else:
+    print(f"    rate_limits の窓: {sorted(rl)}  （{len(rl)} 本）")
+    for name in sorted(rl):
+        window = rl[name]
+        if not isinstance(window, dict):
+            print(f"      {name:<22}: {type(window).__name__} = {window!r}")
+            continue
+        print(f"      {name}: キー {sorted(window)}")
+        for key in sorted(window):
+            value = window[key]
+            if isinstance(value, dict):
+                print(f"        {key:<20}: dict {sorted(value)}")
+            else:
+                print(f"        {key:<20}: {type(value).__name__} = {value!r}")
+
+# **cost はセッションごとの値**（使用上限はPCごと）。出す場所が違うので、
+# 型を分けて記録できるようにここでも展開する。
+co = payload.get("cost")
+print()
+if co is None:
+    print("    cost が無いので、費用と所要時間は**欄ごと存在しない**")
+elif not isinstance(co, dict):
+    print(f"    cost が dict ではない: {type(co).__name__} = {co!r}")
+else:
+    print(f"    cost のキー: {sorted(co)}")
+    for key in sorted(co):
+        value = co[key]
+        if isinstance(value, dict):
+            print(f"      {key:<24}: dict {sorted(value)}")
+        else:
+            print(f"      {key:<24}: {type(value).__name__} = {value!r}")
 PY
     quit
     echo
