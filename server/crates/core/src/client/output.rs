@@ -333,6 +333,41 @@ pub fn render_notices(page: &server_core::notices::NoticePage) -> String {
     out
 }
 
+/// `memo ls` の一覧（メモ設計§7-1）。
+///
+/// **並べ直さない。** 受け取った順がそのまま画面と同じ順である（上段＝チェック済みを
+/// チェックした時刻順、下段＝未チェックをメモの時刻順）——ここで並べ替えると、
+/// **並びを決める場所が画面と CLI の2つに割れる。**
+///
+/// チェック済みには印を付ける。**印は1つだけ**にする（`render_notices` と同じ理由——
+/// 記号を増やすと、読む前に凡例を探すことになる）。
+pub fn render_memos(memos: &[protocol::ws::MemoView]) -> String {
+    if memos.is_empty() {
+        return "メモはありません".to_string();
+    }
+    let mut out = String::new();
+    for memo in memos {
+        let id = memo.id.to_string();
+        // 片付け済みは `x`、まだのものは空白
+        let mark = if memo.checked_at.is_some() { "x" } else { " " };
+        // **本文の形は画面側が決める**（ブロックエディタの中身）。CLI はそこへ
+        // 踏み込まず、素直な文字列だけを取り出して、それ以外は JSON のまま出す——
+        // 読めない形を勝手に畳むと、**何が入っているのか分からなくなる**
+        let body = match memo.body.get("text").and_then(serde_json::Value::as_str) {
+            Some(text) => text.replace('\n', " "),
+            None => memo.body.to_string(),
+        };
+        out.push_str(&format!(
+            "{mark} {:<9} {}  {}\n",
+            short_id(&id),
+            format_epoch_ms(memo.noted_at),
+            body,
+        ));
+    }
+    out.pop();
+    out
+}
+
 /// epoch ミリ秒を、人が読める日時へ。
 ///
 /// **依存を増やさないために自前で割っている。** 秒までで足り、`chrono` を入れる

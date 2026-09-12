@@ -172,6 +172,15 @@ enum Command {
     /// アプリ全体の知らせ（ベルに溜まっているもの）
     #[command(subcommand)]
     Notice(NoticeCmd),
+    /// **自分用のメモ**（メモ設計§12-2）
+    ///
+    /// 宛先は2つ。既定は**全体メモ**（ダッシュボードに1つ・どこにも紐づかない）で、
+    /// `--session <ID>` を付けるとそのセッションのメモになる。
+    ///
+    /// **`session memo` にしていない。** 全体メモがセッションの下に来てしまうため——
+    /// 宛先は引数であって、別の口ではない
+    #[command(subcommand)]
+    Memo(MemoCmd),
     /// 繋がっている PC のフォルダやファイルを覗く
     ///
     /// **ログを引く口はここには無い。** 別 PC のログは既存の `logs --host <ID>` を使う
@@ -464,6 +473,70 @@ enum NoticeCmd {
     },
 }
 
+/// メモの宛先（メモ設計§12-1）。**宛先は引数であって、別の口ではない。**
+///
+/// 5つの口すべてが同じ形で宛先を受ける——全体用とセッション用のコマンドを分けると、
+/// 要件9（2つのメモを同じ部品・同じ口・同じ記録で作る／利用者の指定）が破れる。
+#[derive(clap::Args, Clone)]
+struct MemoTargetArgs {
+    /// このセッションのメモにする（省くと**全体メモ**）。CLI セッションのID
+    #[arg(long, value_name = "CLAUDE_SESSION_ID")]
+    session: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum MemoCmd {
+    /// 宛先ぶんのメモを、画面に出るのと同じ順で出す
+    ///
+    /// 並びは2段。**上がチェック済み**（チェックした時刻順）、**下が未チェック**
+    /// （メモの時刻順）で、どちらも新しいものが下
+    Ls {
+        #[command(flatten)]
+        target: MemoTargetArgs,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// メモを1行積む
+    Add {
+        /// 本文
+        text: String,
+        #[command(flatten)]
+        target: MemoTargetArgs,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// メモの本文を書き換える
+    ///
+    /// **内容が変わったときだけ時刻が動く**ので、変えずに確定しても並びは動かない
+    Edit {
+        /// メモのID。先頭の数文字で足りる（一覧は `memo ls --json`）
+        id: String,
+        /// 新しい本文
+        text: String,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// チェックを付ける（`--off` で外す）
+    ///
+    /// チェックは**片付ける**ことであって、消すことではない。消すなら `memo rm`
+    Check {
+        /// メモのID。先頭の数文字で足りる
+        id: String,
+        /// チェックを外す
+        #[arg(long)]
+        off: bool,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// メモを1件消す
+    Rm {
+        /// メモのID。先頭の数文字で足りる
+        id: String,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+}
+
 #[derive(Subcommand)]
 enum ProjectCmd {
     /// PJT 枠の一覧
@@ -653,6 +726,7 @@ impl Command {
             Self::Session(_)
                 | Self::Project(_)
                 | Self::Notice(_)
+                | Self::Memo(_)
                 | Self::Host(_)
                 | Self::Settings(_)
                 | Self::Version(_)
@@ -873,6 +947,7 @@ async fn run_async(cli: Cli, config: Config) -> anyhow::Result<()> {
         | Some(Command::Session(_))
         | Some(Command::Project(_))
         | Some(Command::Notice(_))
+        | Some(Command::Memo(_))
         | Some(Command::Host(_))
         | Some(Command::Settings(_))
         | Some(Command::Version(_))
@@ -938,6 +1013,7 @@ async fn run_client(cli: Cli) -> anyhow::Result<()> {
         Command::Session(cmd) => client_session(cmd, &target).await,
         Command::Project(cmd) => client_project(cmd, &target).await,
         Command::Notice(cmd) => client_notice(cmd, &target).await,
+        Command::Memo(cmd) => client_memo(cmd, &target).await,
         Command::Host(cmd) => client_host(cmd, &target).await,
         Command::Settings(cmd) => client_settings(cmd, &target).await,
         Command::Version(cmd) => client_version(cmd, &target).await,
@@ -1217,6 +1293,39 @@ async fn follow_transcript(
         }
     }
     stream.close().await;
+    Ok(())
+}
+
+async fn client_memo(cmd: MemoCmd, target: &client::Target) -> Result<(), client::ClientError> {
+    match cmd {
+        MemoCmd::Ls { target: dest, out } => {
+            let (memos, raw) = client::memos(target, dest.session.as_deref()).await?;
+            let human = output::render_memos(&memos);
+            println!("{}", output::pick(out.json, &raw, &human));
+        }
+        MemoCmd::Add {
+            text,
+            target: dest,
+            out,
+        } => {
+            let outcome = client::memo_add(target, dest.session.as_deref(), text).await?;
+            println!("{}", output::pick(out.json, &outcome.raw, &outcome.human));
+        }
+        MemoCmd::Edit { id, text, out } => {
+            // **宛先は先頭一致を解くためだけに要る。** 口そのものは宛先を運ばない
+            // （サーバが行から引く）ので、ここで渡す宛先は探す範囲でしかない
+            let outcome = client::memo_edit(target, None, &id, text).await?;
+            println!("{}", output::pick(out.json, &outcome.raw, &outcome.human));
+        }
+        MemoCmd::Check { id, off, out } => {
+            let outcome = client::memo_check(target, None, &id, !off).await?;
+            println!("{}", output::pick(out.json, &outcome.raw, &outcome.human));
+        }
+        MemoCmd::Rm { id, out } => {
+            let outcome = client::memo_remove(target, None, &id).await?;
+            println!("{}", output::pick(out.json, &outcome.raw, &outcome.human));
+        }
+    }
     Ok(())
 }
 

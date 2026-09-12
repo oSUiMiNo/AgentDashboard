@@ -914,6 +914,181 @@ pub async fn set_nickname(
     outcome
 }
 
+// ── メモ（メモ設計§12-2）───────────────────────────────
+//
+// **宛先は引数であって、別の口ではない。** 5つとも同じ形で宛先を受ける——
+// 全体用とセッション用を分けると、要件9（利用者の指定）が破れる。
+
+/// 宛先を組み立てる。**省略時は全体メモ。**
+fn memo_target(session: Option<&str>) -> Result<protocol::AnnotationTarget, ClientError> {
+    match session {
+        None => Ok(protocol::AnnotationTarget::Global),
+        Some(raw) => {
+            // **`uuid` を依存に足さない**（`agentdashboard-core` は持っていない）。
+            // ID の組み立ては、一覧から取った値を serde で読み戻す既存の作法に倣う
+            let claude_session_id = serde_json::from_value(serde_json::Value::String(
+                raw.to_string(),
+            ))
+            .map_err(|_| ClientError::Refused {
+                status: 400,
+                message: format!("セッションIDとして読めません：{raw}"),
+            })?;
+            Ok(protocol::AnnotationTarget::Session { claude_session_id })
+        }
+    }
+}
+
+/// 宛先ぶんを引く。一覧そのものと、`--json` 用の生の1通を返す。
+pub async fn memos(
+    target: &Target,
+    session: Option<&str>,
+) -> Result<(Vec<protocol::ws::MemoView>, String), ClientError> {
+    let annotation = memo_target(session)?;
+    let mut ws = ws::Ws::connect(target).await?;
+    ws.send(&ClientMessage::MemoList {
+        target: annotation.clone(),
+    })
+    .await?;
+    let outcome = wait::run(
+        &mut ws,
+        Goal::MemosSeen {
+            target: Some(annotation),
+        },
+        "メモの一覧",
+        wait::MEMO_CAP,
+    )
+    .await;
+    ws.close().await;
+    let outcome = outcome?;
+    let parsed: protocol::ws::ServerMessage =
+        serde_json::from_str(&outcome.raw).map_err(|err| ClientError::Refused {
+            status: 500,
+            message: format!("一覧を読めませんでした：{err}"),
+        })?;
+    let protocol::ws::ServerMessage::Memos { memos, .. } = parsed else {
+        return Err(ClientError::Refused {
+            status: 500,
+            message: "一覧が返りませんでした".to_string(),
+        });
+    };
+    Ok((memos, outcome.raw))
+}
+
+/// 先頭の数文字から1件を選ぶ。**宛先ぶんの中だけで探す。**
+///
+/// メモのIDは口に載せる前に確定していなければならない（編集・チェック・削除は
+/// 宛先を運ばず、IDだけで1件を指す）。**ここで曖昧なら、送る前に断る**——
+/// 送ってから断られると、どれを指したつもりだったのかが分からなくなる。
+async fn resolve_memo_id(
+    target: &Target,
+    session: Option<&str>,
+    prefix: &str,
+) -> Result<protocol::MemoId, ClientError> {
+    let (memos, _) = memos(target, session).await?;
+    let hits: Vec<_> = memos
+        .iter()
+        .filter(|memo| memo.id.to_string().starts_with(prefix))
+        .collect();
+    match hits.as_slice() {
+        [only] => Ok(only.id),
+        [] => Err(ClientError::Refused {
+            status: 404,
+            message: format!("そのメモは見つかりません：{prefix}"),
+        }),
+        many => Err(ClientError::Refused {
+            status: 400,
+            message: format!(
+                "{prefix} で始まるメモが {} 件あります。もう少し長く指定してください",
+                many.len()
+            ),
+        }),
+    }
+}
+
+/// 書いたあとに配られる一覧を待つ。**5つの口すべてがこの形で確定する。**
+async fn memo_apply(
+    target: &Target,
+    message: ClientMessage,
+    what: &str,
+) -> Result<Outcome, ClientError> {
+    let mut ws = ws::Ws::connect(target).await?;
+    ws.send(&message).await?;
+    // 宛先は指定しない——編集・チェック・削除は**サーバが行から引く**ので、
+    // こちらは何が返るか知らない
+    let outcome = wait::run(
+        &mut ws,
+        Goal::MemosSeen { target: None },
+        what,
+        wait::MEMO_CAP,
+    )
+    .await;
+    ws.close().await;
+    outcome
+}
+
+/// `memo add`。
+pub async fn memo_add(
+    target: &Target,
+    session: Option<&str>,
+    text: String,
+) -> Result<Outcome, ClientError> {
+    let annotation = memo_target(session)?;
+    memo_apply(
+        target,
+        ClientMessage::MemoAdd {
+            target: annotation,
+            body: serde_json::json!({ "text": text }),
+        },
+        "メモの追加",
+    )
+    .await
+}
+
+/// `memo edit`。
+pub async fn memo_edit(
+    target: &Target,
+    session: Option<&str>,
+    prefix: &str,
+    text: String,
+) -> Result<Outcome, ClientError> {
+    let id = resolve_memo_id(target, session, prefix).await?;
+    memo_apply(
+        target,
+        ClientMessage::MemoEdit {
+            id,
+            body: serde_json::json!({ "text": text }),
+        },
+        "メモの書き換え",
+    )
+    .await
+}
+
+/// `memo check`。
+pub async fn memo_check(
+    target: &Target,
+    session: Option<&str>,
+    prefix: &str,
+    checked: bool,
+) -> Result<Outcome, ClientError> {
+    let id = resolve_memo_id(target, session, prefix).await?;
+    memo_apply(
+        target,
+        ClientMessage::MemoCheck { id, checked },
+        "メモのチェック",
+    )
+    .await
+}
+
+/// `memo rm`。
+pub async fn memo_remove(
+    target: &Target,
+    session: Option<&str>,
+    prefix: &str,
+) -> Result<Outcome, ClientError> {
+    let id = resolve_memo_id(target, session, prefix).await?;
+    memo_apply(target, ClientMessage::MemoRemove { id }, "メモの削除").await
+}
+
 /// `session revive`。抜け殻のカードを元の CLI セッションで起こし直し、起動を待つ
 /// （接続断のカードを復旧ボタンで戻す 設計§10-1）。
 pub async fn revive(target: &Target, prefix: &str) -> Result<Outcome, ClientError> {

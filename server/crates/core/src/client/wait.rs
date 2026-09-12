@@ -29,6 +29,8 @@ pub const MODEL_CAP: Duration = Duration::from_secs(60);
 pub const MODE_CAP: Duration = Duration::from_secs(60);
 /// 名前を付ける（名前付け設計§11-2）。**記録へ書くだけ**なので PTY を待たない
 pub const NICKNAME_CAP: Duration = Duration::from_secs(30);
+/// メモの反映。**記録へ書いてから配られる**（設計§9-1）ので、待つのは1往復ぶん。
+pub const MEMO_CAP: Duration = Duration::from_secs(30);
 /// `send --wait` の既定。`--timeout` で変えられる唯一の枠（他は固定でよい——
 /// 変えたくなる長さを持つのは「本物のターンの終わり」を待つ send だけ）
 pub const SEND_DEFAULT_CAP_SECS: u64 = 600;
@@ -93,6 +95,14 @@ pub enum Goal {
     },
     /// `rm`：`SessionRemoved` が来る
     Removed { card: CardId },
+    /// `memo …`：宛先ぶんの一覧（`Memos`）が来る。
+    ///
+    /// **書いたあとは必ず一覧が配られる**（記録へ書いてから配る・設計§9-1）ので、
+    /// 5つの口すべてがこれで満ちる。**宛先を指定しないのは編集・チェック・削除**——
+    /// あちらは宛先を運ばず、**サーバが行から引く**ので、こちらは知らない。
+    MemosSeen {
+        target: Option<protocol::AnnotationTarget>,
+    },
     /// `revive`：**接続直後の写しを1枚見送ってから**、`SessionUpsert` で `Starting` かつ
     /// 「繋がっている」（接続断のカードを復旧ボタンで戻す 設計§10-2）。
     ///
@@ -206,6 +216,16 @@ impl Goal {
                 }
                 _ => Step::Continue,
             },
+            Self::MemosSeen { target } => match message {
+                // 宛先を指定しているとき（一覧・追加）は突き合わせる。指定していない
+                // とき（編集・チェック・削除）は、来た一覧をそのまま結果とする
+                ServerMessage::Memos { target: got, memos }
+                    if target.as_ref().is_none_or(|want| want == got) =>
+                {
+                    done(format!("メモ {} 件", memos.len()), message)
+                }
+                _ => Step::Continue,
+            },
             Self::Revived {
                 card,
                 seen_snapshot,
@@ -283,6 +303,8 @@ impl Goal {
             | Self::Revived { card, .. }
             | Self::ModelApplied { card, .. }
             | Self::ModeApplied { card, .. } => Some(card),
+            // **メモはカードに紐づかない**（宛先はアカウントか CLI セッション）
+            Self::MemosSeen { .. } => None,
         }
     }
 }
