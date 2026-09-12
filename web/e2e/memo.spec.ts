@@ -86,11 +86,17 @@ async function 書いて送る(page: Page, 面: Locator, text: string) {
  */
 async function 打ち直す(面: Locator, 新しい字: string) {
   const 編集欄 = 面.getByTestId('memo-editing').locator('[contenteditable="true"]').first()
-  await 編集欄.click()
-  await expect(編集欄).toBeFocused()
-  await 編集欄.press('Control+a')
-  await 編集欄.press('Backspace')
-  await expect(編集欄).toHaveText('')
+  /*
+    **消えるまでやり直す。** 焦点が入っていても `Control+a` が空振りすることがある
+    （実測：単独では通り、通しでだけ `ぜんたい一つ目` が残った）。**1回投げて先へ進むと、
+    元の字に継ぎ足される。**
+  */
+  await expect(async () => {
+    await 編集欄.click()
+    await 編集欄.press('Control+a')
+    await 編集欄.press('Backspace')
+    await expect(編集欄).toHaveText('')
+  }).toPass({ timeout: 20_000 })
   await 編集欄.pressSequentially(新しい字)
   await 編集欄.press('Control+Enter')
 }
