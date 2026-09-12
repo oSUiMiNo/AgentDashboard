@@ -99,7 +99,15 @@ test('設定を書き出して読み戻すと、元の状態へ戻る', async ({
 
   // 読み戻す
   await page.getByTestId('portable-file').setInputFiles(saved)
-  await expect(page.getByTestId('portable-outcome')).toContainText('6件')
+  /*
+    **件数は `ACCOUNT_KEYS` の数と連動する。** メモの保持期間と容量を足したので
+    6 → 8 になった（【実測 2026-09-13】）。
+
+    **ここは `make ci` では出ない。** 設定キーの連動先はフェーズ2 で8箇所まで数えたが、
+    **9箇所目がここ（E2E）にあった**——`make ci` に e2e が入っていないので、
+    キーを足した回では気づけなかった。
+  */
+  await expect(page.getByTestId('portable-outcome')).toContainText('8件')
 
   await expect(sync).toHaveValue('5')
   await expect(toggle).toBeChecked()
