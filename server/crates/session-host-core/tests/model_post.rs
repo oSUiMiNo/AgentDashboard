@@ -20,13 +20,23 @@ use std::{
 };
 use testkit::MockHookServer;
 
-/// 実測した payload の形（設計§11 前提1）。使うのは3キーだけだが、実物に寄せてある。
+/// 実測した payload の形（フェーズ0 で v2.1.269 を採り直した。記録は設計§11 前提1）。
+///
+/// 実物のトップレベルは14キーある。**転送役はどれも読まない**ので全部は並べないが、
+/// **`context_window` は載せてある**——受け口が読む欄が増えたときに、
+/// **転送役は何も変えなくてよい**ことをここで確かめるため。
 const PAYLOAD: &str = r#"{
   "cwd": "/home/example/dev/app",
   "session_id": "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
   "transcript_path": "/home/example/.claude/projects/app/session.jsonl",
   "model": { "id": "claude-opus-5", "display_name": "Opus 5" },
-  "version": "2.1.220"
+  "context_window": {
+    "used_percentage": 24,
+    "remaining_percentage": 76,
+    "total_input_tokens": 241500,
+    "context_window_size": 1000000
+  },
+  "version": "2.1.269"
 }"#;
 
 fn run_model_post(url: &str, payload: &str) -> std::process::Output {
@@ -122,4 +132,45 @@ async fn 想定外のjsonでも落ちず余計なものを出さない() {
             "読めない payload で何かを出してはいけない: {payload:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn 読む欄が増えても転送役は加工しない() {
+    // **この配管の前提。** 受け口が `context_window` を読むようになっても、転送役は
+    // 何も知らなくてよい——payload を丸ごと送っているからである。ここが加工を始めると、
+    // 「CLI がキーを増減しても壊れない」という受け口側の約束が意味を失う
+    let server = MockHookServer::start()
+        .await
+        .expect("受信サーバを起動できること");
+    let url = server.hook_url("とーくん", "dummy");
+
+    let output = tokio::task::spawn_blocking({
+        let url = url.clone();
+        move || run_model_post(&url, PAYLOAD)
+    })
+    .await
+    .expect("実行できること");
+    assert!(output.status.success(), "終了コードが 0 でない: {output:?}");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while server.received_count() == 0 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let received = server.received();
+    assert_eq!(received.len(), 1, "1件だけ届くこと");
+
+    // **丸ごと届いていること。** 転送役が読む3キー以外も落とさない
+    let window = &received[0].payload["context_window"];
+    assert_eq!(window["used_percentage"], 24, "使用率が落ちていないこと");
+    assert_eq!(
+        window["context_window_size"], 1_000_000,
+        "分母が落ちていないこと（これが自前の表を持たずに済む理由）"
+    );
+    assert_eq!(
+        window["remaining_percentage"], 76,
+        "受け口が読まない欄も、転送役は落とさないこと"
+    );
+
+    // stdout の約束は変わらない（端末に出るのは表示名だけ）
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "Opus 5");
 }

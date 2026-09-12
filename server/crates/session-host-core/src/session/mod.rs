@@ -35,8 +35,8 @@ use crate::{
 use bytes::Bytes;
 use hooks_settings::HookSettings;
 use protocol::{
-    CardId, ClaudeSessionId, ModelId, PermissionMode, ProjectId, SessionMeta, SessionStatus,
-    Timestamp,
+    CardId, ClaudeSessionId, ContextUsage, ModelId, PermissionMode, ProjectId, SessionMeta,
+    SessionStatus, Timestamp,
     frame::{self, FrameKind},
     ipc::ParsedNode,
     ws::ServerMessage,
@@ -318,6 +318,44 @@ pub fn now_ms() -> Timestamp {
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as Timestamp)
         .unwrap_or_default()
+}
+
+/// **画面に出る形が動いたか。** 関門（量子化）の判定そのもの。
+///
+/// 3秒ごとに届く報告のうち、**画面が変わらないもの**をここで落とす。落とさないと、
+/// 値が動くたびに記録の書き直しとブラウザへの配信が走る。
+///
+/// # 値ごとに粒度を変えられるようにしてある
+///
+/// 鍵の作り方（`表示形`）だけを差し替えれば、別の値に別の粒度を当てられる。
+/// 1つの判定関数に全部を詰め込むと、後から足す値に別の粒度を当てられない。
+///
+/// | 値 | 表示形（鍵） |
+/// |---|---|
+/// | コンテキスト使用率 | 整数パーセント |
+/// | 費用（相乗り側が足す） | **毎ターン動く小数なので、そのままでは鍵にできない**。丸めた形にする |
+///
+/// # 「まだ分からない」との行き来も動きとして数える
+///
+/// `None` ↔ `Some` は画面が変わる（「まだ分からない」とゲージの往復）ので `true` を返す。
+/// `/compact` の直後に一度 `None` へ戻るのは正常な経路で、そこも配る必要がある。
+fn display_form_moved<T, K: PartialEq>(
+    前: Option<&T>,
+    今: Option<&T>,
+    表示形: impl Fn(&T) -> K,
+) -> bool {
+    前.map(&表示形) != 今.map(&表示形)
+}
+
+/// コンテキスト使用率の表示形（関門の鍵）。**整数パーセント1つだけ。**
+///
+/// **実数（分子・分母）を混ぜてはいけない。** 表示粒度が 0.1k なので、混ぜると
+/// 100 トークン動くたびに鍵が変わり、[`display_form_moved`] の関門が効かなくなる。
+///
+/// **関門のテストはこの関数を通して書く。** テスト側に同じ形の鍵を書き写すと、
+/// ここを変えてもテストが落ちない——**守っているつもりの検査が空になる**。
+fn context_display_form(usage: &ContextUsage) -> u8 {
+    usage.used_percentage
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1162,6 +1200,40 @@ impl Session {
         meta.model = Some(id);
         meta.model_label = label;
         meta.model_requested = None;
+        true
+    }
+
+    /// `statusLine` が寄越した使用率を控える。**画面に出る形が変わったときだけ `true`。**
+    ///
+    /// # これが書き込み回数を止める唯一の歯止めである
+    ///
+    /// モデル名の報告が3秒ごとの洪水になっていないのは、**モデル名がめったに
+    /// 変わらない**ので [`Session::store_model`] が早期に戻るからである。
+    /// **使用率は会話が進むたびに動く**ので、同じ形の関門を自分で置かないと、
+    /// セッション数 × 3秒ごとに記録の書き直しが走る。
+    ///
+    /// **記録の列を足さないこととは別の話である。** 記録を書く側は呼ばれれば行ごと
+    /// 書き直すので、**列の有無は書き込み量に効かない**。回数を減らせるのはここだけ。
+    ///
+    /// # 比べるのは画面に出る形であって、生の数値ではない
+    ///
+    /// 鍵は**整数パーセント**1つ。トークン数で比べると、**表示が同じままでも報告が
+    /// 走る**——実数の表示粒度は 0.1k なので、100 トークン動くたびに鍵が変わり、
+    /// 関門がほとんど効かなくなる。
+    ///
+    /// **だから実数は鍵に入れず、パーセントが動いたときに一緒に運ぶ。** 代償として
+    /// 実数は最大1%ぶん古くなるが、利用者が突き合わせるのは `/context` の見出しの
+    /// パーセントなので、合否はそちらで決まる。
+    pub fn store_context_usage(&self, usage: Option<ContextUsage>) -> bool {
+        let mut meta = self.meta.lock().expect("ロックが壊れていない");
+        if !display_form_moved(
+            meta.context_usage.as_ref(),
+            usage.as_ref(),
+            context_display_form,
+        ) {
+            return false;
+        }
+        meta.context_usage = usage;
         true
     }
 
@@ -3237,6 +3309,32 @@ impl SessionManager {
         Ok(())
     }
 
+    /// `statusLine` が知らせてきたコンテキスト使用率を取り込む（コンテキスト残量設計§1）。
+    ///
+    /// # なぜモデル名の取り込みと兄弟にするのか
+    ///
+    /// **同じ payload から来るが、事情が別だから。** 受け口はモデルのIDが読めないと
+    /// そこで戻るので、[`SessionManager::apply_model_report`] の中や下へ入れると
+    /// **モデル名が欠けた payload では使用率も一緒に落ちる**。
+    ///
+    /// あちらの中へ入れる形も採らない。あの関数はIDを**必須で受け**、本体全部が
+    /// 「IDがある」前提で書かれている（名乗りの説明・別名の学習）ので、`Option` へ
+    /// 変えると**今回と関係のないモデル切替の判定に手を入れる**ことになる。
+    ///
+    /// # 関門を通らなかった報告は、ここで止まる
+    ///
+    /// 画面に出る形が変わっていなければ何も起きない（[`Session::store_context_usage`]）。
+    /// 3秒ごとに届くものをそのまま先へ流すと、セッション数ぶんの無駄が積み上がる。
+    ///
+    /// # 返り値は「配る必要があるか」である
+    ///
+    /// **ここで控えた値が正本になる**（コンテキスト残量設計§2）。専用の軽い便ですぐ
+    /// 配る配線はまだ無いので、いまは**次に全体の報告が飛ぶときに一緒に運ばれる**。
+    /// 正本をこちらに置いてあるので、軽い便を足したあとも**無関係な報告で値が消えない**。
+    pub fn apply_context_usage(&self, session: &Arc<Session>, usage: Option<ContextUsage>) -> bool {
+        session.store_context_usage(usage)
+    }
+
     /// `statusLine` が知らせてきたモデルを取り込む（設計§4）。
     ///
     /// **ここが「いま何で動いているか」の唯一の入り口**。値が動いたときだけ配信する
@@ -3993,6 +4091,133 @@ mod tests {
         assert!(
             cell.take_older_than(9_999, 1).is_none(),
             "下ろしたあとは空であること"
+        );
+    }
+
+    // ---- 量子化の関門（コンテキスト残量設計§3）------------------------------
+    //
+    // **外すと洪水が戻る唯一の歯止め**なので、判定そのものを落とす。
+    // `Session` を組み立てずに済むよう、判定は純関数に分けてある。
+
+    fn 使用率(percentage: u8, tokens: u64) -> ContextUsage {
+        ContextUsage {
+            used_percentage: percentage,
+            total_input_tokens: tokens,
+            context_window_size: 1_000_000,
+        }
+    }
+
+    /// 3秒ごとに届いても、画面が変わらないなら先へ進めないこと。
+    ///
+    /// **ここが書き込み回数を止める唯一の歯止めである。** モデル名の報告が洪水に
+    /// ならないのは値がめったに動かないからで、使用率は会話のたびに動く。
+    #[test]
+    fn 整数パーセントが同じなら報告しない() {
+        let 前 = 使用率(24, 241_500);
+        let 今 = 使用率(24, 241_500);
+
+        assert!(
+            !display_form_moved(Some(&前), Some(&今), context_display_form),
+            "同じ表示なら先へ進めないこと"
+        );
+    }
+
+    /// 表示が変わったなら、必ず先へ進むこと。
+    #[test]
+    fn 整数パーセントが変わったら報告する() {
+        let 前 = 使用率(24, 241_500);
+        let 今 = 使用率(25, 250_000);
+
+        assert!(
+            display_form_moved(Some(&前), Some(&今), context_display_form),
+            "表示が変わったら先へ進むこと"
+        );
+    }
+
+    /// **鍵に実数が入っていないことの証拠。**
+    ///
+    /// 実数の表示粒度は 0.1k なので、鍵へ入れると 100 トークン動くたびに報告が走り、
+    /// 関門がほとんど効かなくなる。**トークン数だけが動いた報告は落とす。**
+    ///
+    /// この検査は、鍵を `(used_percentage, total_input_tokens)` にした版で
+    /// **落ちることを確かめてある**（設計§13「足した検査はわざと壊して確かめる」）。
+    #[test]
+    fn トークン数だけ動いても報告しない() {
+        let 前 = 使用率(24, 241_500);
+        // 同じ 24% のまま、トークンだけ 8,000 増えた。画面の主役は変わらない
+        let 今 = 使用率(24, 249_500);
+
+        assert!(
+            !display_form_moved(Some(&前), Some(&今), context_display_form),
+            "トークン数は鍵に入れない（入れると関門が効かなくなる）"
+        );
+    }
+
+    /// 「まだ分からない」との行き来は、画面が変わるので報告すること。
+    ///
+    /// `/compact` の直後に一度 `None` へ戻るのは正常な経路で、そこも配る必要がある。
+    #[test]
+    fn まだ分からないとの行き来は報告する() {
+        let ある = 使用率(24, 241_500);
+
+        assert!(
+            display_form_moved(None, Some(&ある), context_display_form),
+            "最初の値が届いたら報告すること"
+        );
+        assert!(
+            display_form_moved(Some(&ある), None, context_display_form),
+            "compact で分からなくなったら報告すること"
+        );
+        assert!(
+            !display_form_moved::<ContextUsage, u8>(None, None, context_display_form),
+            "分からないままなら報告しないこと"
+        );
+    }
+
+    /// **関門が値ごとに置ける形になっていること**（設計§12）。
+    ///
+    /// 相乗り側は費用を足すが、あちらは**毎ターン動く小数**なのでそのままでは鍵に
+    /// できない。鍵の作り方だけを差し替えれば別の粒度を当てられる、という形を守る。
+    #[test]
+    fn 鍵の作り方を差し替えれば別の粒度を当てられる() {
+        // 例：小数第2位までに丸めた費用を鍵にする（相乗り側が使う形）
+        let 費用の表示形 = |cost: &f64| (cost * 100.0).round() as i64;
+
+        let 前 = 0.123_4_f64;
+        let 今 = 0.123_9_f64;
+        assert!(
+            !display_form_moved(Some(&前), Some(&今), 費用の表示形),
+            "丸めた表示が同じなら先へ進めないこと"
+        );
+
+        let 動いた = 0.128_f64;
+        assert!(
+            display_form_moved(Some(&前), Some(&動いた), 費用の表示形),
+            "丸めた表示が変われば先へ進むこと"
+        );
+    }
+
+    /// **パーセントを自分で計算し直していないこと**（設計§3）。
+    ///
+    /// 分子と分母は両方届くので割ろうと思えば割れるが、割ると**丸めが二重になり**
+    /// `/context` の表示と1ずれる。要件の完了条件が「`/context` の見出しと一致する」
+    /// なので、ここがそのまま合否になる。
+    ///
+    /// 割り算の結果（`241500 / 1000000` = 24%）と**わざと違う割合**を渡し、
+    /// **渡した側が残る**ことを見る。
+    #[test]
+    fn 割合はCLIが寄越した値をそのまま使う() {
+        let 届いた = ContextUsage {
+            // 分子・分母から割れば 24% になるが、CLI は 31% と言っている
+            used_percentage: 31,
+            total_input_tokens: 241_500,
+            context_window_size: 1_000_000,
+        };
+
+        assert_eq!(
+            context_display_form(&届いた),
+            31,
+            "自分で割り直さず、CLI が寄越した値をそのまま使うこと"
         );
     }
 }
