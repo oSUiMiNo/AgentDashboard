@@ -2117,6 +2117,63 @@ async fn 残量は消える向きも運ばれる() {
 /// 助っ人 `meta()` は `context_usage: None` を入れて組み立てるので、**`None` だけを
 /// 確かめると実装が値を1度も扱わなくても通る**。途中で見えていることを挟んで、
 /// 空振りを防ぐ。
+/// **軽い便を受けても、記録の行を1つも書き換えないこと**（レビュー対応 対応10）。
+///
+/// # これまでの検査は無条件に通っていた
+///
+/// `残量は起こし直すと消えている` は `meta_from_row` が `context_usage: None` を
+/// 固定しているので、**記録を触ったかどうかと関係なく緑になる**（列が無いのは
+/// 当たり前なので、いつでも通る）。
+///
+/// **したがって、誰かが軽い便を `status()` と同じ `update_many` の道へ通しても**
+/// （「鮮度のために `last_activity_at` も」など）、**3秒×セッション数の書き込みが
+/// 戻るのに全部緑のまま**だった。
+///
+/// # 行を丸ごと突き合わせる
+///
+/// この表に更新時刻の列は無いので、**行そのもの**を前後で比べる。列を1つ足す
+/// 変更が入っても、この検査は勝手に広がる。
+#[tokio::test]
+async fn 軽い便は記録の行を書き換えない() {
+    use sea_orm::EntityTrait;
+
+    for backend in common::backends("ctx_no_write").await {
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+        let card_id = CardId::new();
+        registry.apply(&local(), upsert(card_id)).await;
+
+        let 前 = server_core::db::entity::sessions::Entity::find_by_id(card_id.0)
+            .one(&backend.db)
+            .await
+            .expect("行を読めること")
+            .expect("カード行が在ること");
+
+        // **値が動く便を3回。** 関門を通る形（毎回違う割合）で送る
+        for 割合 in [10u8, 20, 30] {
+            registry
+                .apply(&local(), context_usage(card_id, Some(割合)))
+                .await;
+        }
+        // 消える向きも
+        registry.apply(&local(), context_usage(card_id, None)).await;
+
+        let あと = server_core::db::entity::sessions::Entity::find_by_id(card_id.0)
+            .one(&backend.db)
+            .await
+            .expect("行を読めること")
+            .expect("カード行が在ること");
+
+        assert_eq!(
+            前, あと,
+            "[{}] 軽い便で記録の行が書き換わっている（DB を触らない決定が破れている）",
+            backend.name
+        );
+    }
+}
+
 /// **読み直しても、控えた使い具合が消えないこと**（レビュー対応 対応4）。
 ///
 /// `reload_account` は `meta_from_row` で meta を組み直して手元を上書きする。

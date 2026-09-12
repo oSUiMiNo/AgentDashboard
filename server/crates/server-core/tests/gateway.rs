@@ -310,6 +310,73 @@ async fn 報告は記録層へ入り帰属は接続が決める() {
     }
 }
 
+/// **軽い便が A2S を通って記録層まで届くこと**（レビュー対応 対応10）。
+///
+/// `gateway.rs` の `AgentMessage::ContextUsage` の腕には**テストが1本も無かった**。
+/// 腕を空へ戻しても `make ci` は通り、**セルフホストの利用者だけが「出ない」と言う**
+/// 状態だった——ローカルモードはこの経路を通らないので、開発中は気づけない。
+#[tokio::test]
+async fn 残量の軽い便はサーバまで届く() {
+    for backend in common::backends("gw-ctx").await {
+        let gateway = TestGateway::start(backend.db.clone()).await;
+        let (token, account_id) = issue(&backend.db, "みんとぶるー").await;
+        let mut socket = gateway.connect_as(&token, "仕事用ノート").await;
+        socket
+            .wait_for("名乗りの応答", |message| {
+                matches!(message, ServerToAgent::Hello { .. })
+            })
+            .await;
+
+        let card_id = CardId::new();
+        socket
+            .send(&AgentMessage::SessionUpsert {
+                session: Box::new(meta(card_id)),
+            })
+            .await;
+        wait_for_listed(&gateway.registry, account_id, "1枚出る", |listed| {
+            listed.len() == 1
+        })
+        .await;
+
+        socket
+            .send(&AgentMessage::ContextUsage {
+                card_id,
+                usage: Some(protocol::ContextUsage {
+                    used_percentage: 42,
+                    total_input_tokens: 420_000,
+                    context_window_size: 1_000_000,
+                }),
+            })
+            .await;
+
+        let listed = wait_for_listed(&gateway.registry, account_id, "残量が載る", |listed| {
+            listed.first().is_some_and(|m| m.context_usage.is_some())
+        })
+        .await;
+        assert_eq!(
+            listed[0].context_usage.map(|u| u.used_percentage),
+            Some(42),
+            "[{}] 軽い便が記録層まで届いていない（腕が空）",
+            backend.name
+        );
+
+        // **消える向きも通ること。** `/compact` の経路
+        socket
+            .send(&AgentMessage::ContextUsage {
+                card_id,
+                usage: None,
+            })
+            .await;
+        let listed = wait_for_listed(&gateway.registry, account_id, "残量が消える", |listed| {
+            listed.first().is_some_and(|m| m.context_usage.is_none())
+        })
+        .await;
+        assert_eq!(listed[0].context_usage, None, "[{}]", backend.name);
+
+        backend.finish().await;
+    }
+}
+
 #[tokio::test]
 async fn 知らない種別が来ても線は切れない() {
     // **新しい PC ＋ 古いサーバ**の噛み合わせ（コンテキスト残量設計§2）。

@@ -52,6 +52,36 @@ function 宣言(selector: string, prop: string): string {
   return (当たり?.[1] ?? '').trim()
 }
 
+/**
+ * `@media (prefers-reduced-motion: reduce)` の中から、1つの規則の中身を取り出す。
+ *
+ * **字面の一致では守れない**（レビュー対応 対応11）。「メディアクエリより後ろの
+ * どこかに字がある」だけを見ると、**中の宣言を書き換えても、規則を消して別の用途で
+ * 同じ名前を後ろへ足しても通る**。
+ */
+function OSの設定の中の規則(selector: string): string {
+  const at = 位置('@media (prefers-reduced-motion: reduce)')
+  const 開き = 素.indexOf('{', at)
+  // メディアクエリのブロックは入れ子なので、深さを数えて閉じを見つける
+  let 深さ = 0
+  let 閉じ = 開き
+  for (let i = 開き; i < 素.length; i += 1) {
+    if (素[i] === '{') 深さ += 1
+    if (素[i] === '}') {
+      深さ -= 1
+      if (深さ === 0) {
+        閉じ = i
+        break
+      }
+    }
+  }
+  const ブロック = 素.slice(開き + 1, 閉じ)
+  const 規則の頭 = ブロック.indexOf(`${selector} {`)
+  expect(規則の頭, `OS の設定の中に ${selector} が無い`).toBeGreaterThan(-1)
+  const 本体の開き = ブロック.indexOf('{', 規則の頭)
+  return ブロック.slice(本体の開き + 1, ブロック.indexOf('}', 本体の開き))
+}
+
 /** `1.75rem` のような値を数に開く */
 function rem(値: string): number {
   const 当たり = /^(-?[\d.]+)rem$/.exec(値)
@@ -344,7 +374,18 @@ describe('コンテキストの使い具合の帯（コンテキスト残量設�
   it('静けさと OS の設定で、伸び縮みが止まる', () => {
     expect(素.indexOf(静けさ)).toBeGreaterThan(-1)
     expect(素).toContain("[data-quiet='still'] .ctxgauge-fill")
-    expect(素).toMatch(/prefers-reduced-motion[\s\S]*ctxgauge-fill/)
+
+    /*
+      **字面の一致で止めない**（レビュー対応 対応11）。
+      `toMatch(/prefers-reduced-motion[\s\S]*ctxgauge-fill/)` は「メディアクエリより
+      後ろのどこかに字がある」だけを見ており、**中の宣言を確かめていなかった**——
+      ブロックを `transition: inline-size 2s` に書き換えても、規則を消して別の用途で
+      `.ctxgauge-fill` を後ろへ足しても、緑のまま通る。
+
+      **calm 側は最初から規則を切り出して中身まで見ている。** そちらへ揃える。
+    */
+    const 中身 = OSの設定の中の規則('.ctxgauge-fill')
+    expect(中身, 'OS の設定で帯の動きが止まっていない').toContain('transition: none')
   })
 
   it('打ち消しが、打ち消される規則より後ろに在る', () => {
