@@ -58,6 +58,18 @@ fn upsert(card_id: CardId) -> ServerMessage {
     }
 }
 
+/// 残量の軽い便。`None` は「まだ分からない」（0% ではない）。
+fn context_usage(card_id: CardId, percentage: Option<u8>) -> ServerMessage {
+    ServerMessage::ContextUsage {
+        card_id,
+        usage: percentage.map(|used_percentage| protocol::ContextUsage {
+            used_percentage,
+            total_input_tokens: u64::from(used_percentage) * 10_000,
+            context_window_size: 1_000_000,
+        }),
+    }
+}
+
 fn text_node(id: &str) -> TreeNode {
     TreeNode {
         id: NodeId(id.to_string()),
@@ -2017,6 +2029,248 @@ async fn カードを名指しするエラーは記録に残らない() {
             rows.iter().map(|row| &row.message).collect::<Vec<_>>()
         );
 
+        backend.finish().await;
+    }
+}
+
+/// 残量の軽い便が、手元の記録と鮮度の印を更新すること（コンテキスト残量設計§4）。
+///
+/// **素通しの腕へ落ちていると、配信だけが起きてここが更新されない。** 包括の腕が
+/// あるのでコンパイラは拾わず、腕を足し忘れても他のテストは1本も落ちない——
+/// だからこの1本が要る。
+#[tokio::test]
+async fn 残量の便で手元の記録と鮮度の印が更新される() {
+    for backend in common::backends("ctx_apply").await {
+        let card_id = CardId::new();
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+        registry.apply(&local(), upsert(card_id)).await;
+
+        registry
+            .apply(&local(), context_usage(card_id, Some(24)))
+            .await;
+
+        let listed = registry.list(server_core::db::LOCAL_ACCOUNT_ID);
+        let usage = listed[0]
+            .context_usage
+            .expect("[{}] 便のあと値が見えること");
+        assert_eq!(usage.used_percentage, 24, "[{}] 使用率", backend.name);
+        assert_eq!(
+            usage.context_window_size, 1_000_000,
+            "[{}] 分母も一緒に運ばれる",
+            backend.name
+        );
+        backend.finish().await;
+    }
+}
+
+/// **「まだ分からない」へ戻る向きも運ぶこと**（`/compact` の直後）。
+///
+/// 古い値がゲージに残り続けると、畳んだのに満杯のまま見える。
+#[tokio::test]
+async fn 残量は消える向きも運ばれる() {
+    for backend in common::backends("ctx_clear").await {
+        let card_id = CardId::new();
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+        registry.apply(&local(), upsert(card_id)).await;
+        registry
+            .apply(&local(), context_usage(card_id, Some(24)))
+            .await;
+
+        // **2拍目。これが無いと空振りする**——助っ人が `None` を入れて組み立てるので、
+        // 実装が値を1度も扱わなくても下の `None` は通ってしまう
+        assert!(
+            registry.list(server_core::db::LOCAL_ACCOUNT_ID)[0]
+                .context_usage
+                .is_some(),
+            "[{}] 消す前に値が乗っていること",
+            backend.name
+        );
+
+        registry.apply(&local(), context_usage(card_id, None)).await;
+
+        assert_eq!(
+            registry.list(server_core::db::LOCAL_ACCOUNT_ID)[0].context_usage,
+            None,
+            "[{}] 畳んだあとは「まだ分からない」へ戻る",
+            backend.name
+        );
+        backend.finish().await;
+    }
+}
+
+/// **起こし直した直後に値が無いこと**——保存していないことの証明（設計§13）。
+///
+/// # 列の有無を見ないこと
+///
+/// 「DB を触っていない」を列名で確かめると、**実装の形を変えた瞬間に意味を失う**
+/// （列が無いのは当たり前なので、いつでも通る）。確かめるのは振る舞いのほうである。
+///
+/// # 「入れて・見えて・消える」の3拍子で書く
+///
+/// 助っ人 `meta()` は `context_usage: None` を入れて組み立てるので、**`None` だけを
+/// 確かめると実装が値を1度も扱わなくても通る**。途中で見えていることを挟んで、
+/// 空振りを防ぐ。
+#[tokio::test]
+async fn 残量は起こし直すと消えている() {
+    for backend in common::backends("ctx_restart").await {
+        let card_id = CardId::new();
+        {
+            let registry =
+                SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                    .await
+                    .expect("記録層を立てられること");
+            registry.apply(&local(), upsert(card_id)).await;
+            registry
+                .apply(&local(), context_usage(card_id, Some(24)))
+                .await;
+
+            // 2拍目。ここが無いと、実装が何もしなくても下の `None` は通る
+            assert!(
+                registry.list(server_core::db::LOCAL_ACCOUNT_ID)[0]
+                    .context_usage
+                    .is_some(),
+                "[{}] 落とす前に値が乗っていること",
+                backend.name
+            );
+        }
+
+        let restored =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("立て直せること");
+
+        assert_eq!(
+            restored.list(server_core::db::LOCAL_ACCOUNT_ID)[0].context_usage,
+            None,
+            "[{}] 保存していないので、起こし直した直後は「まだ分からない」",
+            backend.name
+        );
+        backend.finish().await;
+    }
+}
+
+/// **後から繋いだブラウザの初期スナップショットに値が乗ること。**
+///
+/// 便は「いま繋がっている人」へ配られるだけなので、手元の記録が更新されていないと
+/// **後から開いた画面が空のまま**になる。しかも軽い便は使用率が動いたときだけ飛ぶので、
+/// 会話が止まっていれば何分でも埋まらない。
+#[tokio::test]
+async fn 後から読み出しても残量が乗っている() {
+    for backend in common::backends("ctx_snapshot").await {
+        let card_id = CardId::new();
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+        registry.apply(&local(), upsert(card_id)).await;
+        registry
+            .apply(&local(), context_usage(card_id, Some(24)))
+            .await;
+
+        // 配信ではなく、あとから記録を読む道（新しいブラウザが繋いだときと同じ）
+        let snapshot = registry.list(server_core::db::LOCAL_ACCOUNT_ID);
+        assert_eq!(
+            snapshot[0]
+                .context_usage
+                .expect("初期スナップショットに乗っていること")
+                .used_percentage,
+            24,
+            "[{}] 後から繋いだ画面にも値が出る",
+            backend.name
+        );
+        backend.finish().await;
+    }
+}
+
+/// 全体の報告（`SessionUpsert`）が飛んでも、軽い便で入れた値が消えないこと（設計§2）。
+///
+/// 正本はセッションホストの `SessionMeta` なので、報告には値が同乗している。
+/// **同乗していない古い報告で上書きされると、ゲージが「まだ分からない」へ戻る。**
+#[tokio::test]
+async fn 全体の報告は残量を消さない() {
+    for backend in common::backends("ctx_upsert").await {
+        let card_id = CardId::new();
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+        registry.apply(&local(), upsert(card_id)).await;
+        registry
+            .apply(&local(), context_usage(card_id, Some(24)))
+            .await;
+
+        // 正本を持った報告が飛ぶ（値が同乗している形）
+        let mut carried = meta(card_id);
+        carried.context_usage = Some(protocol::ContextUsage {
+            used_percentage: 31,
+            total_input_tokens: 310_000,
+            context_window_size: 1_000_000,
+        });
+        registry
+            .apply(
+                &local(),
+                ServerMessage::SessionUpsert {
+                    session: Box::new(carried),
+                },
+            )
+            .await;
+
+        assert_eq!(
+            registry.list(server_core::db::LOCAL_ACCOUNT_ID)[0]
+                .context_usage
+                .expect("報告のあとも値が残る")
+                .used_percentage,
+            31,
+            "[{}] 正本を持った報告で上書きされる",
+            backend.name
+        );
+        backend.finish().await;
+    }
+}
+
+/// **バス経由（サーバ2台以上）でも、残量が手元の記録へ入ること。**
+///
+/// # なぜ別に要るのか
+///
+/// `adopt` は `apply` とは別の match で、こちらにも包括の腕がある。**片方だけ埋めると、
+/// PC を抱えていないインスタンスに繋いだブラウザだけが値を得られない**——本番で
+/// サーバを2台並べたときにしか出ないので、気づくのが遅れる。
+///
+/// 実運用でこの道を踏むのは `make e2e-compose`（サーバ2台＋Valkey）だが、
+/// **`adopt` は公開されているので単体で直に叩ける。**
+#[tokio::test]
+async fn バス経由の残量も手元の記録へ入る() {
+    for backend in common::backends("ctx_adopt").await {
+        let card_id = CardId::new();
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+        registry.apply(&local(), upsert(card_id)).await;
+
+        // 他インスタンスから連絡係（バス）を通って届いた形
+        registry
+            .adopt(
+                server_core::db::LOCAL_ACCOUNT_ID,
+                context_usage(card_id, Some(42)),
+            )
+            .await;
+
+        assert_eq!(
+            registry.list(server_core::db::LOCAL_ACCOUNT_ID)[0]
+                .context_usage
+                .expect("バス経由でも値が乗ること")
+                .used_percentage,
+            42,
+            "[{}] 2台構成でも初期スナップショットに出る",
+            backend.name
+        );
         backend.finish().await;
     }
 }

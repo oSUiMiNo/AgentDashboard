@@ -27,8 +27,8 @@ use crate::{
     transcript::TranscriptWindow,
 };
 use protocol::{
-    AgentId, CardId, ClaudeSessionId, ModelId, NodeId, PermissionMode, ProjectId, SessionMeta,
-    SessionStatus, TreeNode,
+    AgentId, CardId, ClaudeSessionId, ContextUsage, ModelId, NodeId, PermissionMode, ProjectId,
+    SessionMeta, SessionStatus, TreeNode,
     ws::{ErrorKind, NoticeView, ServerMessage},
 };
 use sea_orm::sea_query::OnConflict;
@@ -1417,6 +1417,21 @@ impl SessionRegistry {
                 record.fanout(&ServerMessage::TranscriptReset { card_id });
             }
 
+            // **こちらにも明示の腕が要る。** バスから来た残量を素通しにすると、
+            // **PC を抱えていないインスタンスに繋いだブラウザ**が初期スナップショットで
+            // 値を得られない（サーバを2台以上並べたときだけ出る欠落）
+            ServerMessage::ContextUsage { card_id, usage } => {
+                let Some(record) = self.owned(account_id, card_id) else {
+                    return;
+                };
+                {
+                    let mut meta = record.meta.lock().expect("ロックが壊れていない");
+                    meta.context_usage = usage;
+                }
+                record.live.store(true, Ordering::Relaxed);
+                self.publish_local(account_id, ServerMessage::ContextUsage { card_id, usage });
+            }
+
             // 揮発の知らせはそのまま流す
             other => self.publish_local(account_id, other),
         }
@@ -1640,6 +1655,13 @@ impl SessionRegistry {
                 self.append(origin, card_id, nodes).await
             }
             ServerMessage::TranscriptReset { card_id } => self.reset(origin, card_id).await,
+            // **素通しの腕へ落とさない。** 落とすと配信だけが起きて手元の記録が
+            // 更新されず、**後から繋いだブラウザの初期スナップショットに値が乗らない**
+            // （しかも持ち主の検査も抜ける）。包括の腕があるのでコンパイラは拾わない
+            ServerMessage::ContextUsage { card_id, usage } => {
+                self.context_usage(origin, card_id, usage);
+                Ok(())
+            }
             // **アプリ全体の知らせは記録に残す**（トーストとベル設計§4-2）。
             // 7秒で消えるトーストの代わりに、ベルから後で読めるようにするため
             ServerMessage::Error {
@@ -1968,6 +1990,42 @@ impl SessionRegistry {
             },
         );
         Ok(())
+    }
+
+    /// コンテキスト残量の軽い便。**記録（DB）を触らない**（コンテキスト残量設計§4）。
+    ///
+    /// # なぜ `async` でも `Result` でもないのか
+    ///
+    /// **DB を触らないから待つものも失敗するものも無い**、というだけではない。
+    /// **この署名が「触らない」という決定を守る仕掛けである**——戻り値を `Result` に
+    /// しておくと、後から `UPDATE` を1行足しても署名が変わらず、**レビューで気づけない**。
+    /// 同期・戻り値なしにしてあれば、書こうとした瞬間に署名を変える必要が生じ、
+    /// **そこが目に入る**。
+    ///
+    /// # 保存しない理由
+    ///
+    /// 値は会話が進むたびに動く。保存すると**落ちた瞬間の値が残り**、起こし直した
+    /// 直後の空のセッションに前回の使用率が出る。「まだ分からない」と 0% を区別せよ、
+    /// という要件と正面からぶつかる（`agent_connected` と同じ性質）。
+    ///
+    /// 書き込みの**回数**を抑えるのは送る側の関門（`store_context_usage`）の仕事で、
+    /// **こちらとは別の理由による**。混ぜて読むと、片方を外してよいと誤解する。
+    fn context_usage(&self, origin: &ReportOrigin, card_id: CardId, usage: Option<ContextUsage>) {
+        // **持ち主の検査をここで通す**（設計§8-6「絞り込みは記録層の入口1箇所」）。
+        // 素通しの腕へ落とすとこの門だけが抜ける
+        let Some(record) = self.owned(origin.account_id, card_id) else {
+            return;
+        };
+        {
+            let mut meta = record.meta.lock().expect("ロックが壊れていない");
+            meta.context_usage = usage;
+        }
+        // 残量が届くということは、報告が続いている
+        record.live.store(true, Ordering::Relaxed);
+        self.publish(
+            record.account_id,
+            ServerMessage::ContextUsage { card_id, usage },
+        );
     }
 
     async fn append(
