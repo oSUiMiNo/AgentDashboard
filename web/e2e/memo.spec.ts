@@ -73,6 +73,28 @@ async function 書いて送る(page: Page, 面: Locator, text: string) {
   await page.keyboard.press('Control+Enter')
 }
 
+/**
+ * 開いている編集欄の中身を、丸ごと打ち直す。
+ *
+ * **消えたことを確かめてから打つ。** `Control+a` → `Backspace` を投げただけで先へ進むと、
+ * **編集欄へ焦点が入る前にキーが飛んで空振りし**、元の字に継ぎ足される
+ * （実測：`一番目（直した）` のつもりが `一番目一番目（直した）` になった）。
+ *
+ * **選んだまま直接打ってもいけない。** 編集欄には BlockNote の末尾ウィジェット
+ * （`contenteditable="false"`）が居て `Control+a` はそこまで選ぶので、
+ * 選択したまま1文字目を打つと**境界でブロックが分かれる**。
+ */
+async function 打ち直す(面: Locator, 新しい字: string) {
+  const 編集欄 = 面.getByTestId('memo-editing').locator('[contenteditable="true"]').first()
+  await 編集欄.click()
+  await expect(編集欄).toBeFocused()
+  await 編集欄.press('Control+a')
+  await 編集欄.press('Backspace')
+  await expect(編集欄).toHaveText('')
+  await 編集欄.pressSequentially(新しい字)
+  await 編集欄.press('Control+Enter')
+}
+
 /** セッションのメモを開く（両画面共通）。**区画で絞れるよう `scope` を取る。** */
 async function セッションのメモを開く(scope: Page | Locator) {
   await scope.getByTestId('memo-toggle').click()
@@ -189,25 +211,14 @@ test('直して確定すると時刻が更新されて一番下へ移る。変�
   // 同じ時刻になって並べ替えの検査が空振りする（フェーズ4 の実測）
   await 書いて送る(page, 面, '二番目')
   await expect(面.getByTestId('memo-bubble')).toHaveCount(2, { timeout: 30_000 })
-  expect(await 本文たち(面)).toEqual(['一番目', '二番目'])
+  // **待って確かめる。** 通しで流すと1台のサーバを全テストで共有するので、
+  // 待たない検査は**単独では通り通しでだけ落ちる**（実測）
+  await expect.poll(async () => await 本文たち(面), { timeout: 30_000 }).toEqual(['一番目', '二番目'])
 
   // 「一番目」を直す → 一番下へ移る
   const 一番目 = 面.getByTestId('memo-bubble').filter({ hasText: '一番目' })
   await 一番目.getByTestId('memo-edit').click()
-  const 編集欄 = 面.getByTestId('memo-editing').locator('[contenteditable="true"]').first()
-  await 編集欄.click()
-  /*
-    **選んで消してから打つ。** 選んだまま直接打つと段落が割れる。
-
-    【実測】編集欄には本文のブロックのほかに **BlockNote の末尾ウィジェット**
-    （`bn-trailing-block`・`contenteditable="false"`）が居る。`Control+a` はそこまで
-    選ぶので、選択したまま1文字目を打つと**境界でブロックが分かれ**、`一番目（直した）`
-    のつもりが `一番目` ＋ `番目（直した）` の2ブロックになった。
-  */
-  await page.keyboard.press('Control+a')
-  await page.keyboard.press('Backspace')
-  await page.keyboard.type('一番目（直した）')
-  await page.keyboard.press('Control+Enter')
+  await 打ち直す(面, '一番目（直した）')
 
   await expect
     .poll(async () => await 本文たち(面), { timeout: 30_000 })
@@ -360,7 +371,9 @@ test('全体メモも、セッションメモと同じ筋がそのまま通る',
   await expect(面.getByTestId('memo-bubble')).toHaveCount(1, { timeout: 30_000 })
   await 書いて送る(page, 面, 'ぜんたい二つ目')
   await expect(面.getByTestId('memo-bubble')).toHaveCount(2, { timeout: 30_000 })
-  expect(await 本文たち(面)).toEqual(['ぜんたい一つ目', 'ぜんたい二つ目'])
+  await expect
+    .poll(async () => await 本文たち(面), { timeout: 30_000 })
+    .toEqual(['ぜんたい一つ目', 'ぜんたい二つ目'])
 
   // リロードで残る
   await page.reload()
@@ -375,11 +388,7 @@ test('全体メモも、セッションメモと同じ筋がそのまま通る',
     .filter({ hasText: 'ぜんたい一つ目' })
     .getByTestId('memo-edit')
     .click()
-  await 開き直した.getByTestId('memo-editing').locator('[contenteditable="true"]').first().click()
-  await page.keyboard.press('Control+a')
-  await page.keyboard.press('Backspace')
-  await page.keyboard.type('ぜんたい一つ目（直した）')
-  await page.keyboard.press('Control+Enter')
+  await 打ち直す(開き直した, 'ぜんたい一つ目（直した）')
   await expect
     .poll(async () => await 本文たち(開き直した), { timeout: 30_000 })
     .toEqual(['ぜんたい二つ目', 'ぜんたい一つ目（直した）'])
@@ -402,13 +411,20 @@ test('全体メモも、セッションメモと同じ筋がそのまま通る',
     'ぜんたい二つ目',
   )
   await 開き直した.getByTestId('memo-checked').getByTestId('memo-check').click()
+  /*
+    **戻る先は「メモの時刻の位置」であって、末尾ではない**（設計§7-5）。
+
+    ここは私の期待値が間違っていた。`ぜんたい一つ目` は途中で**直した**ので時刻が
+    更新されており、`ぜんたい二つ目` より新しい。したがって外したほうは**上に戻る**。
+    実装が正しく、テストが誤っていた側である。
+  */
   await expect
     .poll(
       async () =>
         await 開き直した.getByTestId('memo-list').getByTestId('memo-body').allInnerTexts(),
       { timeout: 30_000 },
     )
-    .toEqual(['ぜんたい一つ目（直した）', 'ぜんたい二つ目'])
+    .toEqual(['ぜんたい二つ目', 'ぜんたい一つ目（直した）'])
 
   // **後始末。** 全体メモはカードに紐づかないので `archiveAll` では消えない
   for (const 本文 of ['ぜんたい一つ目（直した）', 'ぜんたい二つ目']) {
@@ -578,36 +594,42 @@ test('全体メモは4つの画面のどこからでも開けて、同じ中身�
   const project = (await 枠.getAttribute('data-project'))!
   const { tile } = await メモを書けるセッション(page)
 
+  /*
+    **自分の吹き出しだけを見る。** 全体メモはカードに紐づかないので `archiveAll` では
+    消えず、**前のテストが残したものが混ざりうる**（実測：筋の本が途中で落ちて後片付けまで
+    届かなかったとき、この本が巻き添えで落ちた）。**テストは連鎖させない。**
+  */
+  const 自分のだけ = (面: Locator) =>
+    面.getByTestId('memo-bubble').filter({ hasText: 'どこからでも読める' })
+
   // ①一覧で書く
   const 一覧の面 = await 全体メモを開く(page)
   await 書いて送る(page, 一覧の面, 'どこからでも読める')
-  await expect(一覧の面.getByTestId('memo-bubble')).toHaveCount(1, { timeout: 30_000 })
+  await expect(自分のだけ(一覧の面)).toHaveCount(1, { timeout: 30_000 })
   await page.keyboard.press('Escape')
 
   // ②PJT 専用画面
   await page.goto(`/p/${encodeURIComponent(host)}/${encodeURIComponent(project)}`)
-  await expect((await 全体メモを開く(page)).getByTestId('memo-body')).toHaveText(
-    'どこからでも読める',
-    { timeout: 30_000 },
-  )
+  await expect(自分のだけ(await 全体メモを開く(page))).toHaveCount(1, { timeout: 30_000 })
   await page.keyboard.press('Escape')
 
   // ③セッション専用画面
   await openDashboard(page)
   await openSession(page, page.locator(`[data-testid="session-tile"]`).first())
-  await expect((await 全体メモを開く(page)).getByTestId('memo-body')).toHaveText(
-    'どこからでも読める',
-    { timeout: 30_000 },
-  )
+  await expect(自分のだけ(await 全体メモを開く(page))).toHaveCount(1, { timeout: 30_000 })
   await page.keyboard.press('Escape')
 
   // ④設定画面
   await page.getByTestId('settings-link').click()
-  await expect((await 全体メモを開く(page)).getByTestId('memo-body')).toHaveText(
-    'どこからでも読める',
-    { timeout: 30_000 },
-  )
+  const 設定で見えた = await 全体メモを開く(page)
+  await expect(自分のだけ(設定で見えた)).toHaveCount(1, { timeout: 30_000 })
   expect(tile).toBeTruthy()
+
+  // **後始末。** 全体メモはカードに紐づかないので、放っておくと次のテストへ残る
+  await 自分のだけ(設定で見えた).getByTestId('memo-edit').click()
+  await 設定で見えた.getByTestId('memo-remove').click()
+  await 設定で見えた.getByTestId('memo-remove-confirm').click()
+  await expect(自分のだけ(設定で見えた)).toHaveCount(0, { timeout: 30_000 })
 })
 
 test('一覧で書きかけたものが、別の画面で開いたときに残っている', async ({ page }) => {
