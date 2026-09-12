@@ -8,7 +8,8 @@
 mod common;
 
 use protocol::{
-    CardId, ClaudeSessionId, Node, NodeId, ProjectId, SessionMeta, SessionStatus, TreeNode,
+    AnnotationTarget, CardId, ClaudeSessionId, Node, NodeId, ProjectId, SessionMeta, SessionStatus,
+    TreeNode,
     ws::{ErrorKind, SelfhealPhase, ServerMessage},
 };
 use server_core::registry::{NoticeLimits, ReportOrigin, SessionRegistry};
@@ -2271,6 +2272,58 @@ async fn バス経由の残量も手元の記録へ入る() {
             "[{}] 2台構成でも初期スナップショットに出る",
             backend.name
         );
+        backend.finish().await;
+    }
+}
+
+/// **セッションホストが送ってきたメモの便は捨てる**（メモ設計§1-2・§12-3）。
+///
+/// メモはサーバの記録だけで完結し、A2S にも載せていない。だから `apply` に来ること
+/// 自体が異常である。
+///
+/// # なぜこのテストが要るのか
+///
+/// `apply` の末尾には**素通しの腕**があり、知らない種別は `publish` へ流れる——
+/// **手元とバスの両方へ配られる。** つまり明示の腕を外すと、**記録に1行も無いメモが
+/// 全端末の画面に出る。** しかも包括の腕があるのでコンパイラは何も言わず、
+/// 既存のテストも1本も落ちない。
+///
+/// **帰属の総当たり（`tenancy.rs`）ではここを捕まえられない。** あちらが見ているのは
+/// 「受け口が断ること」であって、「配る側が何を流すか」ではない。
+#[tokio::test]
+async fn セッションホストが送ってきたメモの便は捨てる() {
+    for backend in common::backends("memo_apply_drop").await {
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+        let mut events = registry.subscribe_events();
+
+        registry
+            .apply(
+                &local(),
+                ServerMessage::Memos {
+                    target: AnnotationTarget::Global,
+                    memos: vec![protocol::ws::MemoView {
+                        id: protocol::MemoId::new(),
+                        body: serde_json::json!({"blocks": [{"text": "偽のメモ"}]}),
+                        noted_at: 1_700_000_000_000,
+                        checked_at: None,
+                    }],
+                },
+            )
+            .await;
+
+        // **配信が1つも起きないこと。** 素通しの腕へ落ちていると、ここに `Memos` が来る
+        let leaked =
+            tokio::time::timeout(std::time::Duration::from_millis(200), events.recv()).await;
+        assert!(
+            leaked.is_err(),
+            "[{}] セッションホストから来たメモが配られている（記録に無いものが画面へ出る）: {:?}",
+            backend.name,
+            leaked.map(|event| event.map(|e| e.message))
+        );
+
         backend.finish().await;
     }
 }

@@ -189,6 +189,23 @@ pub async fn check(
     Ok(Some(updated))
 }
 
+/// 1件を引く。**他人のものは引けない。**
+///
+/// 消す前に**宛先を知る**ために要る——消してからでは、どの宛先を配り直せばよいか
+/// が分からなくなる。見つからなければ `Ok(None)` で、**他人の行を指したときも
+/// 同じ答えになる**（存在を当てさせない）。
+pub async fn find(
+    db: &DatabaseConnection,
+    account_id: Uuid,
+    id: Uuid,
+) -> Result<Option<memos::Model>, DbErr> {
+    memos::Entity::find()
+        .filter(memos::Column::Id.eq(id))
+        .filter(memos::Column::AccountId.eq(account_id))
+        .one(db)
+        .await
+}
+
 /// 1件消す（設計§7-8 の「消す道」）。**他人のものは消せない。**
 pub async fn remove(db: &DatabaseConnection, account_id: Uuid, id: Uuid) -> Result<u64, DbErr> {
     let result = memos::Entity::delete_many()

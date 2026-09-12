@@ -517,6 +517,23 @@ export type ClientMessage =
    * 省いてよい（Rust 側が `#[serde(default)]` で受ける）。
    */
   | { t: 'send_input'; card_id: CardId; text: string; attachments?: string[] }
+  /**
+   * メモ（メモ設計§12-1）。**宛先は引数であって、別の口ではない。**
+   *
+   * 全体宛てとセッション宛てで口を分けると、要件9（2つのメモを同じ部品・同じ口・
+   * 同じ記録で作る／利用者の指定）が破れる。台帳に宛先ごとの口が並んでいないことが、
+   * その検査そのものになっている。
+   *
+   * **カードIDを運ばない**ので、カード単位の門は効かない。絞り込みはサーバの記録層が
+   * `account_id` で守る。
+   */
+  | { t: 'memo_list'; target: AnnotationTarget }
+  | { t: 'memo_add'; target: AnnotationTarget; body: unknown }
+  /** 宛先を運ばない——`id` が1件を指す。他人の `id` はサーバが弾く。 */
+  | { t: 'memo_edit'; id: string; body: unknown }
+  | { t: 'memo_check'; id: string; checked: boolean }
+  /** チェックは「片付ける」であって「消す」ではないので、別の口にしてある。 */
+  | { t: 'memo_remove'; id: string }
 
 /** サーバ → ブラウザ。 */
 export type ServerMessage =
@@ -552,6 +569,13 @@ export type ServerMessage =
   | { t: 'project_removed'; project_id: string }
   | { t: 'notice_created'; notice: NoticeView; unread_count: number }
   | { t: 'notice_read'; read_at: number; unread_count: number }
+  /**
+   * 宛先ぶんのメモを、画面に出る順で丸ごと（メモ設計§7-1）。
+   *
+   * **1件ずつではない。** 1件の編集でその1件が段をまたいで動くので、差分にすると
+   * 受け手が並べ直すことになり、並びを決める場所が2つに割れる。
+   */
+  | { t: 'memos'; target: AnnotationTarget; memos: MemoView[] }
 
 /**
  * アプリ全体の知らせ1件（トーストとベル設計§4-1・§6-1）。
@@ -575,6 +599,39 @@ export interface NoticeView {
   created_at: number
   /** **付いていなければ未読。** */
   read_at?: number
+}
+
+/**
+ * メモの宛先（メモ設計§3-1・分かれ道1）。
+ *
+ * **Rust の `AnnotationTarget` の手書きの写しである。** タグ付き列挙なので `t` の綴りと
+ * 欄の名前を1文字も違えられない。**この欄の形には機械の見張りが無い**——
+ * `cli_surface` が見るのは口の種別（`t: '<snake_case>'`）の在否だけで、中身は見ない。
+ * ズレを捕まえるのは `protocol.test.ts` の往復だけなので、**ここを直したら必ずあちらも直す**。
+ *
+ * # なぜセッションIDなのか、カードIDではないのか
+ *
+ * **乗り換えてもメモは付いてきてはいけない。** カードは `--resume` で別のセッションへ
+ * 移れるので、カードに紐づけると別のセッションに前のメモが残る。
+ */
+export type AnnotationTarget =
+  | { t: 'global' }
+  | { t: 'session'; claude_session_id: string }
+
+/**
+ * メモ1件（メモ設計§3-2・§7-1）。
+ *
+ * **並びはサーバが決めている。** 受け取った順がそのまま画面の順で、
+ * **ブラウザで並べ直さない**——端末ごとに時計が違うと並びが端末ごとに変わる。
+ */
+export interface MemoView {
+  id: string
+  /** 本文。ブロックエディタの中身をそのまま持つ。 */
+  body: unknown
+  /** メモの時刻。**内容が変わった編集で動く**。 */
+  noted_at: number
+  /** **付いていなければ未チェック。** 入っていればチェックした時刻。 */
+  checked_at?: number
 }
 
 /**

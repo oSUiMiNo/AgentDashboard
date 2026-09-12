@@ -778,6 +778,49 @@ async fn handle_request(
             }
         }
 
+        // メモ（メモ設計§12-1）。**宛先は引数であって、別の口ではない。**
+        //
+        // 5つとも `registry` の同じ入口を通る——`registry` が「書いてから配る」を
+        // 引き受けているので、ここは**アカウントを渡して断りを返すだけ**である。
+        // 記録へ直に触る道をここへ作らないこと（書かずに配れてしまう）。
+        ClientMessage::MemoList { target } => {
+            if let Err(message) = state.registry.memo_list(identity.account_id, target).await {
+                send_error(outbound, None, message, ErrorKind::Other).await;
+            }
+        }
+        ClientMessage::MemoAdd { target, body } => {
+            if let Err(message) = state
+                .registry
+                .memo_add(identity.account_id, target, body)
+                .await
+            {
+                send_error(outbound, None, message, ErrorKind::Other).await;
+            }
+        }
+        ClientMessage::MemoEdit { id, body } => {
+            if let Err(message) = state
+                .registry
+                .memo_edit(identity.account_id, id, body)
+                .await
+            {
+                send_error(outbound, None, message, ErrorKind::Other).await;
+            }
+        }
+        ClientMessage::MemoCheck { id, checked } => {
+            if let Err(message) = state
+                .registry
+                .memo_check(identity.account_id, id, checked)
+                .await
+            {
+                send_error(outbound, None, message, ErrorKind::Other).await;
+            }
+        }
+        ClientMessage::MemoRemove { id } => {
+            if let Err(message) = state.registry.memo_remove(identity.account_id, id).await {
+                send_error(outbound, None, message, ErrorKind::Other).await;
+            }
+        }
+
         ClientMessage::BranchSession { card_id } => {
             // **待たない。** 段取りには2回の待ちがあり、この受け口で待つと同じ接続の
             // 他の操作が止まる。結果も断りも配信で届く（ブランチ設計§3-1）
@@ -995,6 +1038,16 @@ fn target_card(request: &ClientMessage) -> Option<CardId> {
         // `account_id` を条件に入れる**（名前付け設計§11-4）。カードIDを運ばないので
         // `target_card` では守れない——今回いちばん抜けやすいところである
         ClientMessage::Spawn { .. } | ClientMessage::RecallSession { .. } => None,
+        // **メモはカードに紐づかない**（宛先はアカウントか CLI セッション）。
+        //
+        // したがって `RecallSession` と同じく**この門は効かない**。絞り込みは記録層が
+        // `account_id` を必ず条件に入れることで守る（`db::memos` の全関数）——
+        // ここで守られていると思い込むと、記録層の絞りを外したときに誰も気づかない
+        ClientMessage::MemoList { .. }
+        | ClientMessage::MemoAdd { .. }
+        | ClientMessage::MemoEdit { .. }
+        | ClientMessage::MemoCheck { .. }
+        | ClientMessage::MemoRemove { .. } => None,
     }
 }
 

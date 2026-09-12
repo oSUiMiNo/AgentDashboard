@@ -13,7 +13,8 @@
 //! 検出できるようにするため。ハンドラの実装は該当フェーズで足していく。
 
 use crate::{
-    CardId, ContextUsage, ModelId, PermissionMode, SessionMeta, SessionStatus, Timestamp, TreeNode,
+    AnnotationTarget, CardId, ContextUsage, MemoId, ModelId, PermissionMode, SessionMeta,
+    SessionStatus, Timestamp, TreeNode,
 };
 use serde::{Deserialize, Serialize};
 
@@ -295,6 +296,43 @@ pub enum ClientMessage {
     Archive {
         card_id: CardId,
     },
+
+    // ── メモ（メモ設計§12-1）─────────────────────────────
+    //
+    // **宛先は引数であって、別の口ではない。** 全体宛てとセッション宛てで口を分けると
+    // 要件9（2つのメモを同じ部品・同じ口・同じ記録で作る／利用者の指定）が破れる。
+    // 台帳に宛先ごとの口が並んでいないことが、その検査そのものになっている。
+    //
+    // **カードIDを運ばない。** したがって `target_card` の門は効かず、絞り込みは
+    // 記録層（`db::memos`）が `account_id` を必ず条件に入れることで守る。
+    // `RecallSession` と同じ立場である。
+    /// 宛先ぶんのメモを、画面に出る順で返してもらう。
+    MemoList {
+        target: AnnotationTarget,
+    },
+    /// 宛先へ1行積む。**時刻はサーバが打つ**（§7-2）。
+    MemoAdd {
+        target: AnnotationTarget,
+        body: serde_json::Value,
+    },
+    /// 1件の本文を書き換える。**内容が変わったときだけ時刻が動く**（§7-3）。
+    ///
+    /// 宛先を運ばないのは、`id` が宛先を含めて1件を指すためである。**他人の `id` を
+    /// 渡しても、記録層が `account_id` で弾く。**
+    MemoEdit {
+        id: MemoId,
+        body: serde_json::Value,
+    },
+    /// チェックを付ける／外す（§7-5）。
+    MemoCheck {
+        id: MemoId,
+        checked: bool,
+    },
+    /// 1件消す（§7-8）。**チェックは「片付ける」であって「消す」ではない**ので、
+    /// 別の口にしてある。
+    MemoRemove {
+        id: MemoId,
+    },
 }
 
 /// 追加した PJT 枠1枚（イシューグループ_2026_0805_0514 設計§11）。
@@ -459,6 +497,24 @@ pub enum ServerMessage {
         read_at: Timestamp,
         unread_count: u32,
     },
+
+    /// 宛先ぶんのメモを、画面に出る順で丸ごと配る（メモ設計§7-1）。
+    ///
+    /// # 1件ずつではなく、丸ごと送る
+    ///
+    /// 並びは**2段**（上段＝チェック済みを `checked_at` 順、下段＝未チェックを
+    /// `noted_at` 順）で、1件の編集で**その1件が段をまたいで動く**。差分で送ると
+    /// 受け手が並べ直すことになり、**並びを決める場所が2つに割れる**。
+    ///
+    /// # セッションホストからは来ない
+    ///
+    /// メモはサーバの記録だけで完結する（§1-2）。`registry::apply` は
+    /// **この便をセッションホストから受け取ったら捨てる**——通すと、記録に無いメモが
+    /// 画面へ出る道になる。
+    Memos {
+        target: AnnotationTarget,
+        memos: Vec<MemoView>,
+    },
 }
 
 /// アプリ全体の知らせ1件（トーストとベル設計§4-1・§6-1）。
@@ -486,6 +542,28 @@ pub struct NoticeView {
     /// **空なら未読。**
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_at: Option<Timestamp>,
+}
+
+/// メモ1件（メモ設計§3-2・§7-1）。
+///
+/// **`account_id` は載せない。** 誰のものかは接続の身元で決まっており、線に流す理由が
+/// 無い——載せると、画面が持っている値で宛先を差し替える経路ができる。
+///
+/// # 並びはサーバが決めている
+///
+/// 受け取った順がそのまま画面の順である（上段＝チェック済みを `checked_at` 順、
+/// 下段＝未チェックを `noted_at` 順）。**ブラウザで並べ直さない**——端末ごとに
+/// 時計が違うと並びが端末ごとに変わる。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemoView {
+    pub id: MemoId,
+    /// 本文。ブロックエディタの中身をそのまま持つ（形は画面側が決める）。
+    pub body: serde_json::Value,
+    /// メモの時刻。**内容が変わった編集で動く**（§7-3）。
+    pub noted_at: Timestamp,
+    /// **空ならチェックされていない。** 入っていればチェックした時刻で、上段の並びを決める。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checked_at: Option<Timestamp>,
 }
 
 impl ErrorKind {
@@ -674,6 +752,40 @@ mod tests {
             },
             ClientMessage::Kill { card_id },
             ClientMessage::Archive { card_id },
+            // **宛先2つとも往復させる。** `AnnotationTarget` の欄の形には見張りが
+            // 無く（`cli_surface` が見るのは種別の綴りだけ）、ここと
+            // `web/src/lib/protocol.test.ts` が唯一のズレ検出手段である
+            ClientMessage::MemoList {
+                target: AnnotationTarget::Global,
+            },
+            ClientMessage::MemoList {
+                target: AnnotationTarget::Session {
+                    claude_session_id: ClaudeSessionId::new(),
+                },
+            },
+            ClientMessage::MemoAdd {
+                target: AnnotationTarget::Global,
+                body: serde_json::json!({"blocks": [{"type": "paragraph", "text": "あとで読む"}]}),
+            },
+            ClientMessage::MemoAdd {
+                target: AnnotationTarget::Session {
+                    claude_session_id: ClaudeSessionId::new(),
+                },
+                body: serde_json::json!({"blocks": []}),
+            },
+            ClientMessage::MemoEdit {
+                id: MemoId::new(),
+                body: serde_json::json!({"blocks": [{"type": "heading", "text": "見出し"}]}),
+            },
+            ClientMessage::MemoCheck {
+                id: MemoId::new(),
+                checked: true,
+            },
+            ClientMessage::MemoCheck {
+                id: MemoId::new(),
+                checked: false,
+            },
+            ClientMessage::MemoRemove { id: MemoId::new() },
         ];
         for message in &all {
             assert_eq!(&roundtrip(message), message);
@@ -790,6 +902,31 @@ mod tests {
             ServerMessage::ProjectRemoved {
                 project_id: uuid::Uuid::new_v4(),
             },
+            // 空の一覧も往復させる——**宛先はあるがメモが0件**という状態は、
+            // 画面を初めて開いたときに必ず通る
+            ServerMessage::Memos {
+                target: AnnotationTarget::Global,
+                memos: vec![],
+            },
+            ServerMessage::Memos {
+                target: AnnotationTarget::Session {
+                    claude_session_id: ClaudeSessionId::new(),
+                },
+                memos: vec![
+                    MemoView {
+                        id: MemoId::new(),
+                        body: serde_json::json!({"blocks": []}),
+                        noted_at: 1_700_000_000_000,
+                        checked_at: None,
+                    },
+                    MemoView {
+                        id: MemoId::new(),
+                        body: serde_json::json!({"blocks": []}),
+                        noted_at: 1_700_000_000_000,
+                        checked_at: Some(1_700_000_001_000),
+                    },
+                ],
+            },
         ];
         for message in &all {
             assert_eq!(&roundtrip(message), message);
@@ -834,6 +971,55 @@ mod tests {
     /// `ClientMessage` だけなので、`ServerMessage` に種別を足しても1つも落ちない
     /// ——綴りを間違えても欄の形がずれても、誰も気づかない。**その穴を埋めるのが
     /// この検査**で、`web/src/lib/protocol.test.ts` に同じ JSON を置いた対がある。
+    #[test]
+    fn メモの便は決まった綴りで線に乗る() {
+        // **`AnnotationTarget` の欄の形には見張りが無い。** `cli_surface` が突き合わせて
+        // いるのは口の種別（`t` の綴り）の在否だけで、中身の欄までは見ない。
+        // ここと `web/src/lib/protocol.test.ts` の対が、唯一のズレ検出手段である。
+        let session = crate::ClaudeSessionId::new();
+
+        // 宛先：全体。**欄を持たない**ので `{"t":"global"}` だけになる
+        let text = serde_json::to_string(&ClientMessage::MemoList {
+            target: AnnotationTarget::Global,
+        })
+        .unwrap();
+        assert_eq!(text, r#"{"t":"memo_list","target":{"t":"global"}}"#);
+
+        // 宛先：セッション。**`claude_session_id` の綴りまで固定する**
+        let text = serde_json::to_string(&ClientMessage::MemoList {
+            target: AnnotationTarget::Session {
+                claude_session_id: session,
+            },
+        })
+        .unwrap();
+        assert_eq!(
+            text,
+            format!(
+                r#"{{"t":"memo_list","target":{{"t":"session","claude_session_id":"{session}"}}}}"#
+            )
+        );
+
+        // 配る便。**`checked_at` は空なら欄ごと消える**（`skip_serializing_if`）——
+        // 「未チェック」と「チェック時刻が 0」を混ぜないため
+        let id = MemoId::new();
+        let text = serde_json::to_string(&ServerMessage::Memos {
+            target: AnnotationTarget::Global,
+            memos: vec![MemoView {
+                id,
+                body: serde_json::json!({"blocks": []}),
+                noted_at: 1_700_000_000_000,
+                checked_at: None,
+            }],
+        })
+        .unwrap();
+        assert_eq!(
+            text,
+            format!(
+                r#"{{"t":"memos","target":{{"t":"global"}},"memos":[{{"id":"{id}","body":{{"blocks":[]}},"noted_at":1700000000000}}]}}"#
+            )
+        );
+    }
+
     #[test]
     fn コンテキスト残量の便は決まった綴りで線に乗る() {
         let card_id = CardId::new();

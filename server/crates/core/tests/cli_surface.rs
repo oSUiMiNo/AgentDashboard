@@ -53,7 +53,7 @@ const TENANCY_SOURCE: &str = "crates/server-core/tests/tenancy.rs";
 /// だけ**、意識してこの数字を上げる。
 // 2026-09-05：枝分かれで1口増やした（ブランチ設計§2-1）。**段取りはサーバが持つ**ので、
 // ブラウザと CLI は同じ1通を送るだけで済む
-const WS_VARIANTS: usize = 16;
+const WS_VARIANTS: usize = 21;
 // 2026-09-05：知らせ（ベル）で4口増やした（トーストとベル設計§6-1・§10-3）。
 // 一覧・既読・1件消し・全消し。**消す道の2口は §10-3 が要求している**——
 // ベルに溜めたものを消せないと、上限で流れるまで消えない
@@ -64,11 +64,15 @@ const OUTSIDE_DOORS: usize = 5;
 
 /// tenancy.rs の総当たりの本数。口が増えないなら総当たりも増えない（§1-1）。
 /// enforcement を足したときだけ意識して上げる。
-const TENANCY_TESTS: usize = 27;
+const TENANCY_TESTS: usize = 28;
 
 /// `command` に書ける群の先頭語。誤記（存在しない群）を機械で捕まえる。
 const 群: &[&str] = &[
     "session", "project", "notice", "host", "settings", "version", "account", "logs",
+    // メモは**セッションの下に置かない**（メモ設計§12-2）。`session memo` にすると
+    // 全体メモがセッションの下に来てしまう——宛先が引数であるという形を、
+    // コマンド名の側でも通す
+    "memo",
     // 群を持たない単発のコマンド（LANアドレス設計§6）。**先頭語がそのままコマンド名**
     "address",
 ];
@@ -659,7 +663,7 @@ fn 口の数が設計から動いていない() {
 }
 
 #[test]
-fn wsの15種はブラウザ側の型にも全部ある() {
+fn wsの21種はブラウザ側の型にも全部ある() {
     let path = repo_root().join("web/src/lib/protocol.ts");
     let ts = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("{} を読めること: {e}", path.display()));

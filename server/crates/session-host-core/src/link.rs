@@ -363,6 +363,12 @@ fn to_agent_message(event: &ServerMessage) -> Option<AgentMessage> {
         // アプリ全体の知らせ（`NoticeCreated` / `NoticeRead`）も**サーバの記録**である
         // （トーストとベル設計§4-2）。PC が報告した `Error` / `Selfheal` を受けて
         // **サーバ側が組み立てる**ものなので、PC へ運ぶと元の報告と二重になる
+        //
+        // メモ（`Memos`）も**サーバの記録**である（メモ設計§1-2）。PC は書きも読みも
+        // しないので運ぶ意味が無い。**そして運んではいけない**——A2S へ載せると、
+        // 版（`A2S_VERSION`）を上げる理由が無いのに線の顔ぶれが変わり、
+        // **セッションホストがメモを送り返せる道**ができる（サーバ側は
+        // `registry::apply` で捨てるが、そもそも通さないほうが安い）
         ServerMessage::Hello { .. }
         | ServerMessage::TranscriptAppend { .. }
         | ServerMessage::TranscriptReset { .. }
@@ -370,7 +376,8 @@ fn to_agent_message(event: &ServerMessage) -> Option<AgentMessage> {
         | ServerMessage::ProjectUpsert { .. }
         | ServerMessage::ProjectRemoved { .. }
         | ServerMessage::NoticeCreated { .. }
-        | ServerMessage::NoticeRead { .. } => return None,
+        | ServerMessage::NoticeRead { .. }
+        | ServerMessage::Memos { .. } => return None,
     })
 }
 

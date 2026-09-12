@@ -32,7 +32,7 @@ mod common;
 
 use futures_util::{SinkExt as _, StreamExt as _};
 use protocol::{
-    CardId, SessionMeta, SessionStatus,
+    AnnotationTarget, CardId, SessionMeta, SessionStatus,
     a2s::AgentMessage,
     ws::{ClientMessage, ServerMessage},
 };
@@ -2048,6 +2048,121 @@ async fn 他人の知らせは一覧にも未読にも出ない() {
         assert!(
             body.contains("\"unread_count\":0"),
             "[{}] 未読の数に他人のぶんが入っている：{body}",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+/// **他人のメモは、宛先を知っていても出てこない**（メモ設計§12-3・要件14）。
+///
+/// # なぜ `crossings` に乗らないのか
+///
+/// 設計§12-3 は「セッション宛ては `crossings` に乗る」と書いているが、**乗らない。**
+/// `crossings` は `expect_refused`——**断られること**を見る形で、断りの文言まで
+/// 突き合わせている。ところがメモの口は**カードIDを運ばない**ので `target_card` の
+/// 門が効かず、サーバは断らない。**空の一覧を返す。**
+///
+/// これは抜けではなく、**メモが「断る」ではなく「絞り込む」で守られている**という
+/// ことである。他人の `ClaudeSessionId` を宛先にしてメモを書くこと自体は害が無い
+/// ——書けるのは**自分のアカウントの記録**で、相手からは1行も見えない。
+/// 確かめるべきは**絞り込みが効いていること**なので、知らせと同じ形になる。
+///
+/// **宛先2つとも見る。** 全体宛てだけ、あるいはセッション宛てだけ絞れていても
+/// 分離は成立しない。
+#[tokio::test]
+async fn 他人のメモは宛先を知っていても出てこない() {
+    for backend in common::backends("tenancy-memos").await {
+        let arena = Arena::start(backend.db.clone()).await;
+        let (mine, _mine_agent) = arena.tenant("わたし").await;
+        let (theirs, _their_agent) = arena.tenant("よそのひと").await;
+
+        // **相手の宛先を、こちらが知っている**という前提を作る。ID を知られること
+        // 自体は防げないので、知られても漏れないことを見る
+        let their_session = protocol::ClaudeSessionId::new();
+
+        // 相手側にだけ2件積む。**記録へ直に積む**——口を通すと、この総当たりの
+        // 主題（絞り込み）が段取りの成否でぼやける
+        for (kind, session, body) in [
+            (
+                server_core::db::memos::TARGET_GLOBAL,
+                None,
+                "よそのひとの全体メモ",
+            ),
+            (
+                server_core::db::memos::TARGET_SESSION,
+                Some(their_session.0),
+                "よそのひとのセッションメモ",
+            ),
+        ] {
+            server_core::db::memos::add(
+                &backend.db,
+                theirs.account_id,
+                kind,
+                session,
+                serde_json::json!({ "text": body }),
+            )
+            .await
+            .expect("積めること");
+        }
+
+        let mut browser = arena.browser(&mine).await;
+
+        // 宛先2つとも、こちらから引くと**空**であること
+        for (what, target) in [
+            ("全体宛て", AnnotationTarget::Global),
+            (
+                "セッション宛て",
+                AnnotationTarget::Session {
+                    claude_session_id: their_session,
+                },
+            ),
+        ] {
+            browser
+                .send(&ClientMessage::MemoList {
+                    target: target.clone(),
+                })
+                .await;
+            let received = browser
+                .wait_for(what, |message| {
+                    matches!(message, ServerMessage::Memos { .. })
+                })
+                .await;
+            let ServerMessage::Memos { memos, .. } = received else {
+                unreachable!()
+            };
+            assert!(
+                memos.is_empty(),
+                "[{}] {what}：他人のメモが出ている（{} 件）",
+                backend.name,
+                memos.len()
+            );
+        }
+
+        // **こちらが同じ宛先へ書いても、相手のものは混ざらない。**
+        // 2列（`target_kind` と `target_session_id`）の組で絞れていないと、
+        // ここで相手のぶんが釣れる
+        browser
+            .send(&ClientMessage::MemoAdd {
+                target: AnnotationTarget::Session {
+                    claude_session_id: their_session,
+                },
+                body: serde_json::json!({ "text": "わたしのメモ" }),
+            })
+            .await;
+        let received = browser
+            .wait_for("書いたあと", |message| {
+                matches!(message, ServerMessage::Memos { .. })
+            })
+            .await;
+        let ServerMessage::Memos { memos, .. } = received else {
+            unreachable!()
+        };
+        assert_eq!(
+            memos.len(),
+            1,
+            "[{}] 自分のぶんだけが見えるはず（実際: {memos:?}）",
             backend.name
         );
 

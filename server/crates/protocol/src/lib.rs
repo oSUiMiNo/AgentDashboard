@@ -60,6 +60,33 @@ impl ClaudeSessionId {
     }
 }
 
+/// メモ1件のID（メモ設計§3-2）。
+///
+/// **この道具のIDはすべて newtype にしてある。** 素の `Uuid` を線に出すと、
+/// カードID・セッションID・メモIDが**型の上で同じもの**になり、取り違えても
+/// コンパイラが何も言わない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MemoId(pub Uuid);
+
+impl MemoId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl Default for MemoId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for MemoId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 impl Default for ClaudeSessionId {
     fn default() -> Self {
         Self::new()

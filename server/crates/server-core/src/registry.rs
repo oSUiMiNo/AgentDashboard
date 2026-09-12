@@ -27,9 +27,9 @@ use crate::{
     transcript::TranscriptWindow,
 };
 use protocol::{
-    AgentId, CardId, ClaudeSessionId, ContextUsage, ModelId, NodeId, PermissionMode, ProjectId,
-    SessionMeta, SessionStatus, TreeNode,
-    ws::{ErrorKind, NoticeView, ServerMessage},
+    AgentId, AnnotationTarget, CardId, ClaudeSessionId, ContextUsage, MemoId, ModelId, NodeId,
+    PermissionMode, ProjectId, SessionMeta, SessionStatus, TreeNode,
+    ws::{ErrorKind, MemoView, NoticeView, ServerMessage},
 };
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
@@ -264,6 +264,10 @@ impl SessionRecord {
 /// 記録層に置いてあるのは、**絞り込みの入口がここだから**（設計§8-6 の読み替え2）。
 /// 断る場所と断り文言が別の層にあると、片方だけ直したときに言葉がずれる。
 pub(crate) const NOT_FOUND: &str = "セッションが見つかりません";
+
+/// メモが見つからないときの言い分。**他人のものを指したときも同じ答えになる**——
+/// 言い分けると、IDの総当たりで他人のメモの存在を調べられる（`NOT_FOUND` と同じ理由）。
+pub(crate) const MEMO_NOT_FOUND: &str = "そのメモは見つかりません";
 
 /// 全カードの記録と、その配信。
 pub struct SessionRegistry {
@@ -1039,6 +1043,136 @@ impl SessionRegistry {
         }))
     }
 
+    // ── メモ（メモ設計§9-1「書いてから配る」）─────────────────
+    //
+    // **SQL は持たない。** 読み書きの本体は `db::memos` にあり、ここがやるのは
+    // 「書いて、宛先ぶんを引き直して、配る」の3つだけである。
+    //
+    // **なぜ受け口（`ws.rs`）から直に `db::memos` を呼ばないのか**——`db` も
+    // `publish` も記録層の私有で、外へ出すと「書かずに配る」経路が作れてしまう。
+    // 書いてから配ることを型で守るため、入口をここ1つに絞ってある。
+
+    /// 宛先を記録の2列へ開く。**全体は「セッションIDが空」まで含めて宛先である。**
+    fn memo_target(target: &AnnotationTarget) -> (&'static str, Option<Uuid>) {
+        match target {
+            AnnotationTarget::Global => (db::memos::TARGET_GLOBAL, None),
+            AnnotationTarget::Session { claude_session_id } => {
+                (db::memos::TARGET_SESSION, Some(claude_session_id.0))
+            }
+        }
+    }
+
+    fn memo_view(row: &db::entity::memos::Model) -> MemoView {
+        MemoView {
+            id: MemoId(row.id),
+            body: row.body.clone(),
+            noted_at: row.noted_at,
+            checked_at: row.checked_at,
+        }
+    }
+
+    /// 宛先ぶんを引き直して配る。**書いたあとは必ずここを通る。**
+    ///
+    /// 1件ずつ差分で配らないのは、**1件の編集でその1件が段をまたいで動く**ため
+    /// （§7-1）。差分にすると受け手が並べ直すことになり、並びを決める場所が2つに割れる。
+    async fn memo_fanout(&self, account_id: Uuid, target: AnnotationTarget) -> Result<(), String> {
+        let (kind, session) = Self::memo_target(&target);
+        let rows = db::memos::list(&self.db, account_id, kind, session)
+            .await
+            .map_err(|err| format!("メモを読めませんでした：{err}"))?;
+        let memos = rows.iter().map(Self::memo_view).collect();
+        self.publish(account_id, ServerMessage::Memos { target, memos });
+        Ok(())
+    }
+
+    /// 宛先ぶんを配る（読むだけ）。
+    pub async fn memo_list(
+        &self,
+        account_id: Uuid,
+        target: AnnotationTarget,
+    ) -> Result<(), String> {
+        self.memo_fanout(account_id, target).await
+    }
+
+    /// 1行積んで配る。**時刻は記録層が打つ**（端末から受け取らない・§7-2）。
+    pub async fn memo_add(
+        &self,
+        account_id: Uuid,
+        target: AnnotationTarget,
+        body: serde_json::Value,
+    ) -> Result<(), String> {
+        let (kind, session) = Self::memo_target(&target);
+        db::memos::add(&self.db, account_id, kind, session, body)
+            .await
+            .map_err(|err| format!("メモを保存できませんでした：{err}"))?;
+        self.memo_fanout(account_id, target).await
+    }
+
+    /// 本文を書き換えて配る。**内容が変わったときだけ時刻が動く**（§7-3）。
+    ///
+    /// 宛先は**書き換えた行から引く**——引数で受けると、画面が抱えている古い写しで
+    /// 別の宛先へ配れてしまう。
+    pub async fn memo_edit(
+        &self,
+        account_id: Uuid,
+        id: MemoId,
+        body: serde_json::Value,
+    ) -> Result<(), String> {
+        let updated = db::memos::edit(&self.db, account_id, id.0, body)
+            .await
+            .map_err(|err| format!("メモを保存できませんでした：{err}"))?;
+        // 見つからないのと他人のものを指したのは**同じ答え**になる（存在を当てさせない）
+        let Some(row) = updated else {
+            return Err(MEMO_NOT_FOUND.to_string());
+        };
+        self.memo_fanout(account_id, Self::memo_annotation(&row))
+            .await
+    }
+
+    /// チェックを付ける／外して配る（§7-5）。
+    pub async fn memo_check(
+        &self,
+        account_id: Uuid,
+        id: MemoId,
+        checked: bool,
+    ) -> Result<(), String> {
+        let updated = db::memos::check(&self.db, account_id, id.0, checked)
+            .await
+            .map_err(|err| format!("メモを保存できませんでした：{err}"))?;
+        let Some(row) = updated else {
+            return Err(MEMO_NOT_FOUND.to_string());
+        };
+        self.memo_fanout(account_id, Self::memo_annotation(&row))
+            .await
+    }
+
+    /// 1件消して配る（§7-8）。
+    ///
+    /// **消す前に宛先を引く。** 消してからでは、どの宛先を配り直せばよいか分からない。
+    pub async fn memo_remove(&self, account_id: Uuid, id: MemoId) -> Result<(), String> {
+        let found = db::memos::find(&self.db, account_id, id.0)
+            .await
+            .map_err(|err| format!("メモを読めませんでした：{err}"))?;
+        let Some(row) = found else {
+            return Err(MEMO_NOT_FOUND.to_string());
+        };
+        let target = Self::memo_annotation(&row);
+        db::memos::remove(&self.db, account_id, id.0)
+            .await
+            .map_err(|err| format!("メモを消せませんでした：{err}"))?;
+        self.memo_fanout(account_id, target).await
+    }
+
+    /// 記録の2列から宛先へ畳み直す。
+    fn memo_annotation(row: &db::entity::memos::Model) -> AnnotationTarget {
+        match row.target_session_id {
+            Some(id) => AnnotationTarget::Session {
+                claude_session_id: ClaudeSessionId(id),
+            },
+            None => AnnotationTarget::Global,
+        }
+    }
+
     /// カードに付いている CLI セッションへ、利用者の名前を付ける（名前付け設計§5）。
     ///
     /// # 宛先はカードから引く
@@ -1432,6 +1566,17 @@ impl SessionRegistry {
                 self.publish_local(account_id, ServerMessage::ContextUsage { card_id, usage });
             }
 
+            // **明示の腕にする。** 素通しの腕（下）へ落としても振る舞いは同じだが、
+            // 落としたままにすると**次に誰かが宛先の扱いを変えたとき、コンパイラが
+            // 何も言わない**。メモは宛先が2つ（全体・セッション）あり、取り違えると
+            // 別の宛先の一覧を上書きする——気づけない壊れ方なので、腕を据えておく。
+            //
+            // 配る先は `account_id` の手元だけでよい（バス経由で来たものなので、
+            // 跨いで配り直すと輪になる）。
+            ServerMessage::Memos { target, memos } => {
+                self.publish_local(account_id, ServerMessage::Memos { target, memos });
+            }
+
             // 揮発の知らせはそのまま流す
             other => self.publish_local(account_id, other),
         }
@@ -1660,6 +1805,19 @@ impl SessionRegistry {
             // （しかも持ち主の検査も抜ける）。包括の腕があるのでコンパイラは拾わない
             ServerMessage::ContextUsage { card_id, usage } => {
                 self.context_usage(origin, card_id, usage);
+                Ok(())
+            }
+            // **セッションホストからメモは来ない**（メモ設計§1-2。記録はサーバだけで
+            // 完結し、A2S にも載せていない）。だからここへ来ること自体が異常である。
+            //
+            // **素通しの腕へ落とすと、そこは `publish` なので手元とバスの両方へ流れる**
+            // ——記録に1行も無いメモが、全端末の画面に出る道になる。
+            // 捨てて記録に残す。**黙って捨てると、原因を追える手掛かりが消える。**
+            ServerMessage::Memos { .. } => {
+                tracing::warn!(
+                    agent_id = ?origin.agent_id,
+                    "セッションホストからメモの便が来ました。捨てます（メモはサーバの記録だけで完結します）"
+                );
                 Ok(())
             }
             // **アプリ全体の知らせは記録に残す**（トーストとベル設計§4-2）。

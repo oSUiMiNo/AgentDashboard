@@ -18,7 +18,9 @@ import {
   statusTone,
 } from './protocol'
 import type {
+  AnnotationTarget,
   ClientMessage,
+  MemoView,
   Node,
   ServerMessage,
   SessionMeta,
@@ -27,6 +29,8 @@ import type {
 } from './protocol'
 
 const CARD_ID = '11111111-2222-3333-4444-555555555555'
+const SESSION_ID = '66666666-7777-8888-9999-aaaaaaaaaaaa'
+const MEMO_ID = 'bbbbbbbb-cccc-dddd-eeee-ffffffffffff'
 
 /**
  * Rust 側（`crates/protocol/src/ws.rs` の
@@ -515,6 +519,69 @@ describe('サーバと同じ JSON になること', () => {
       '"agent_id":null,"agent_connected":true,"account":null,"toml_account":null}'
     expect((JSON.parse(名前の欄が無い) as SessionMeta).nickname).toBeUndefined()
   })
+
+  it('メモの宛先が Rust と同じ綴りで往復する', () => {
+    // Rust 側 `メモの便は決まった綴りで線に乗る` と対になる。
+    //
+    // **AnnotationTarget の欄の形には見張りが無い。** 台帳（cli_surface）が
+    // 突き合わせているのは口の種別（`t` の綴り）の在否だけで、中身の欄は見ない。
+    // この対だけがズレを捕まえる
+    const 全体 = '{"t":"memo_list","target":{"t":"global"}}'
+    const message = JSON.parse(全体) as ClientMessage
+    expect(message.t).toBe('memo_list')
+    if (message.t === 'memo_list') {
+      expect(message.target.t).toBe('global')
+    }
+
+    // **セッション宛ては欄を1つ持つ。** 綴りを違えるとサーバが宛先を解釈できない
+    const セッション =
+      '{"t":"memo_list","target":{"t":"session","claude_session_id":"' +
+      SESSION_ID +
+      '"}}'
+    const 宛先 = (JSON.parse(セッション) as ClientMessage & { t: 'memo_list' })
+      .target
+    expect(宛先.t).toBe('session')
+    if (宛先.t === 'session') {
+      expect(宛先.claude_session_id).toBe(SESSION_ID)
+    }
+
+    // 組み立てた側も同じ綴りになること（受けるだけでなく送る側も見る）
+    const 送る: AnnotationTarget = { t: 'session', claude_session_id: SESSION_ID }
+    expect(JSON.stringify({ t: 'memo_list', target: 送る })).toBe(セッション)
+  })
+
+  it('メモの一覧が Rust と同じ綴りで届く', () => {
+    // **checked_at は空だと欄ごと消える**（Rust 側の skip_serializing_if）。
+    // null で来るのではないので、`=== null` で見ると未チェックを取り落とす
+    const raw =
+      '{"t":"memos","target":{"t":"global"},"memos":[{"id":"' +
+      MEMO_ID +
+      '","body":{"blocks":[]},"noted_at":1700000000000}]}'
+    const message = JSON.parse(raw) as ServerMessage
+    expect(message.t).toBe('memos')
+    if (message.t === 'memos') {
+      expect(message.target.t).toBe('global')
+      expect(message.memos).toHaveLength(1)
+      const memo: MemoView = message.memos[0]
+      expect(memo.id).toBe(MEMO_ID)
+      expect(memo.noted_at).toBe(1700000000000)
+      // **欄が無い**ことを見る。null ではない
+      expect('checked_at' in memo).toBe(false)
+      expect(memo.checked_at).toBeUndefined()
+    }
+  })
+
+  it('チェック済みは checked_at を持って届く', () => {
+    const raw =
+      '{"t":"memos","target":{"t":"global"},"memos":[{"id":"' +
+      MEMO_ID +
+      '","body":{"blocks":[]},"noted_at":1700000000000,"checked_at":1700000001000}]}'
+    const message = JSON.parse(raw) as ServerMessage
+    if (message.t === 'memos') {
+      expect(message.memos[0].checked_at).toBe(1700000001000)
+    }
+  })
+
 })
 
 /**
