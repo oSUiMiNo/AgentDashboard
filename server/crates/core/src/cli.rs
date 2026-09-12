@@ -544,7 +544,7 @@ enum SettingsCmd {
     Set {
         /// キー（always_bypass_permissions / project_autostart_session /
         /// sync_interval_secs / screen_interval_ms / scrollback_lines /
-        /// motion_quiet / lan_password）
+        /// motion_quiet / memo_retention_days / memo_max_bytes / lan_password）
         key: String,
         /// 値（トグルは true・false、間隔は数値、静けさは lively・calm・still）
         value: String,
