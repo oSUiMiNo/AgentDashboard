@@ -52,6 +52,17 @@ OUT_DIR="${1:-${TMPDIR:-/tmp}/agentdashboard-model-probe}"
 # 前提3（グローバル設定が書き換わるか）だけを測り直せるようにしてある。ここは設計§6 の
 # 二段構えの根拠そのものなので、疑わしくなったら単独で回せることが要る
 SCENARIO="${2:-all}"
+# **知らない名前を黙って `all` として通さない。**
+# 通すと「絞ったつもり」でトークンを使うターンまで走り切る。実際、この検証が無い版では
+# `statusline` がどの分岐にも当たらず素通りしていた
+case "${SCENARIO}" in
+    all|statusline|global-write) ;;
+    *)
+        echo "知らないシナリオです: ${SCENARIO}" >&2
+        echo "使えるのは all / statusline / global-write のどれかです" >&2
+        exit 1
+        ;;
+esac
 SESSION_NAME="model-probe"
 
 # 注入する側のモデル（＝ダッシュボードが `--settings` で指定する想定の値）
@@ -268,10 +279,23 @@ EOF
     capture "${label}-00-boot"
 
     if screen | grep -q "I trust this folder"; then
-        echo "    （フォルダ信頼の確認に応答しました）"
+        # **既定の選択は「No, exit」である。** そのまま Enter を送ると claude が即座に
+        # 終了し、statusLine が1件も届かないまま「動かなかった」に見える（実際に踏んだ）。
+        # 信頼する側へ選択を動かしてから確定する
+        send_key Down
+        sleep 1
+        if screen | grep -q "❯ Yes, I trust this folder"; then
+            echo "    （フォルダ信頼の確認に「信頼する」で応答しました）"
+        else
+            echo "    ★ 信頼の選択肢へ移れませんでした。画面を確認してください" >&2
+        fi
         send_key Enter
         sleep 6
         capture "${label}-01-trusted"
+        if ! tmux has-session -t "${SESSION_NAME}" 2>/dev/null; then
+            echo "    ★ 信頼の確認のあとセッションが消えました（「終了」を選んだ可能性）" >&2
+            exit 1
+        fi
     fi
 }
 
@@ -382,6 +406,65 @@ S1_MODEL="$(last_model)"
 echo "    statusLine の起動回数（約22秒間）: ${S1_COUNT}"
 echo "    最後に届いたモデル              : ${S1_MODEL}"
 cp "${STATUS_FILE}" "${OUT_DIR}/statusline-S1.jsonl" 2>/dev/null || true
+
+if [[ "${SCENARIO}" == "statusline" ]]; then
+    # **ここで切るのは、この先にトークンを使うターンがあるから**（下の「★ここだけトークンを使う」）。
+    # boot() は `--session-id` で起こすだけで API を叩かないので、ここまでの payload は
+    # **まだ1回も測っていない状態**そのものである。起動直後の見え方を知りたいときは
+    # これで足りる
+    echo
+    echo "==> 起動直後の payload を読む（ターンを回す前）"
+    python3 - "${OUT_DIR}/statusline-S1.jsonl" <<'PY'
+import json, pathlib, sys
+
+src = pathlib.Path(sys.argv[1])
+if not src.exists():
+    print("    ★ payload の記録自体が作られていません（statusLine が1度も動いていない）")
+    raise SystemExit(0)
+
+rows = []
+for line in src.read_text(encoding="utf-8").splitlines():
+    if "\t" not in line:
+        continue
+    try:
+        rows.append(json.loads(line.split("\t", 1)[1]))
+    except json.JSONDecodeError:
+        continue
+
+if not rows:
+    print("    ★ payload が1行も届いていません")
+    raise SystemExit(0)
+
+payload = rows[-1]
+print(f"    届いた回数: {len(rows)}")
+print(f"    トップレベルのキー: {sorted(payload)}")
+
+# 相乗り側（費用・利用上限・キャッシュ統計）が当てにする欄の実在も、ここで数える
+for key in ("context_window", "cost", "rate_limits", "prompt_cache"):
+    print(f"      {key:<16}: {'あり' if key in payload else '★無し'}")
+
+cw = payload.get("context_window")
+print()
+if cw is None:
+    print("    context_window が無いので、使用率は**欄ごと存在しない**")
+else:
+    print(f"    context_window のキー: {sorted(cw)}")
+    for key in ("used_percentage", "remaining_percentage", "context_window_size",
+                "total_input_tokens", "current_usage"):
+        if key not in cw:
+            print(f"      {key:<22}: ★欄ごと無い")
+            continue
+        value = cw[key]
+        if isinstance(value, dict):
+            print(f"      {key:<22}: dict {sorted(value)}")
+        else:
+            print(f"      {key:<22}: {type(value).__name__} = {value!r}")
+PY
+    quit
+    echo
+    echo "記録は ${OUT_DIR} に残しました"
+    exit 0
+fi
 
 echo
 echo "==> 前提2（会話なし）・3・7: /model を送る"
