@@ -42,6 +42,7 @@ import { create } from 'zustand'
 import { report } from '@/lib/clientLogs'
 import { KIND_PTY_INPUT, decodeFrame, encodeFrame } from '@/lib/frame'
 import type {
+  AnnotationTarget,
   CardId,
   ClientMessage,
   FlowState,
@@ -70,6 +71,7 @@ import {
   pushSelfhealNotice,
   pushServerNotice,
 } from '@/stores/appNotices'
+import { replaceMemos } from '@/stores/memos'
 import { appendNodes, resetTranscript } from '@/stores/transcript'
 
 export type ConnectionStatus = 'connecting' | 'open' | 'closed'
@@ -105,6 +107,17 @@ interface WsState {
 
   connect: () => Promise<void>
   disconnect: () => void
+  /**
+   * メモ（メモ設計§12-1）。**宛先は引数であって、別の口ではない。**
+   *
+   * 一覧を引くのと足すのだけが宛先を運ぶ。直す・片付ける・消すは `id` が1件を指すので、
+   * **宛先を知らなくてよい**——面の中が宛先を1度も見ないのはこのためである。
+   */
+  memoList: (target: AnnotationTarget) => void
+  memoAdd: (target: AnnotationTarget, body: unknown) => void
+  memoEdit: (id: string, body: unknown) => void
+  memoCheck: (id: string, checked: boolean) => void
+  memoRemove: (id: string) => void
   /**
    * セッションを起動する。
    *
@@ -460,6 +473,12 @@ export const useWsStore = create<WsState>((set) => ({
   kill: (cardId) => send({ t: 'kill', card_id: cardId }),
   archive: (cardId) => send({ t: 'archive', card_id: cardId }),
 
+  memoList: (target) => send({ t: 'memo_list', target }),
+  memoAdd: (target, body) => send({ t: 'memo_add', target, body }),
+  memoEdit: (id, body) => send({ t: 'memo_edit', id, body }),
+  memoCheck: (id, checked) => send({ t: 'memo_check', id, checked }),
+  memoRemove: (id) => send({ t: 'memo_remove', id }),
+
   revive: (cardId) => {
     if (!send({ t: 'revive_session', card_id: cardId })) {
       // 繋がっていないのに印を立てると、届いていない頼みを待ち続けることになる
@@ -608,6 +627,11 @@ function handleJson(raw: string, set: SetState) {
     case 'notice_read':
       // 別のタブや端末で既読にされた。**バッジを揃える**
       markAllRead(message.read_at)
+      break
+    case 'memos':
+      // **宛先ぶんを丸ごと置き換える**（メモ設計§7-1）。差分ではないので、
+      // 受け取った順がそのまま画面の順になる
+      replaceMemos(message.target, message.memos)
       break
     case 'error':
       // **行き先を決めるのは種別ではなく名指しの有無**（復旧設計§9-5）。こうしておけば、

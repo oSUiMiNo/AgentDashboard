@@ -1,6 +1,7 @@
 import type { ClientMessage, ServerMessage } from '@/lib/protocol'
 import { clearSessions, isReviving } from './sessions'
 import { clearAppNotices, getAppNotices, unreadCount } from './appNotices'
+import { clearMemos, memosFor } from './memos'
 import { useWsStore } from './ws'
 
 /**
@@ -109,6 +110,7 @@ afterEach(() => {
   vi.useRealTimers()
   vi.unstubAllGlobals()
   clearSessions()
+  clearMemos()
 })
 
 /** 直近のソケット。 */
@@ -498,5 +500,79 @@ describe('起こし直しと購読', () => {
     status('working')
 
     expect(購読を出し直したか()).toEqual([])
+  })
+})
+
+/*
+  **サーバが配っているものを、ブラウザが受け取れているか。**
+
+  フェーズ3 が `ServerMessage::memos` を足したが、**`handleJson` の `switch` には
+  `default:` も網羅検査も無い**。つまり腕を書き忘れても・後から消しても、
+  **コンパイラも既存のテストも1本も落ちない**——メモは黙って捨てられ、画面には
+  「1件も無い」と出る。実際にフェーズ3 の時点ではその状態だった。
+
+  **これが「誰も捕まえない連動先」の実例そのものである。** だから腕の隣に、
+  腕が在ることを見るテストを置く。
+*/
+describe('メモの受け取り', () => {
+  it('宛先ぶんが丸ごと届き、手元へ入る', async () => {
+    await useWsStore.getState().connect()
+    latest().accept()
+
+    latest().deliver({
+      t: 'memos',
+      target: { t: 'global' },
+      memos: [
+        { id: 'm1', body: { text: 'あとで見る' }, noted_at: 1000 },
+        { id: 'm2', body: { text: '片付けた' }, noted_at: 900, checked_at: 1100 },
+      ],
+    })
+
+    const 手元 = memosFor({ t: 'global' })
+    expect(手元).toHaveLength(2)
+    // **サーバの順のまま。** 手元で並べ直していないことを、時刻の逆順で確かめる
+    expect(手元.map((memo) => memo.id)).toEqual(['m1', 'm2'])
+  })
+
+  it('宛先ごとに別の箱へ入る', async () => {
+    await useWsStore.getState().connect()
+    latest().accept()
+
+    latest().deliver({
+      t: 'memos',
+      target: { t: 'global' },
+      memos: [{ id: 'g1', body: {}, noted_at: 1 }],
+    })
+    latest().deliver({
+      t: 'memos',
+      target: { t: 'session', claude_session_id: 's-1' },
+      memos: [{ id: 's1', body: {}, noted_at: 1 }],
+    })
+
+    expect(memosFor({ t: 'global' }).map((m) => m.id)).toEqual(['g1'])
+    expect(
+      memosFor({ t: 'session', claude_session_id: 's-1' }).map((m) => m.id),
+    ).toEqual(['s1'])
+    // **別のセッションには出ない**（要件の確かめ方）
+    expect(memosFor({ t: 'session', claude_session_id: 's-2' })).toHaveLength(0)
+  })
+
+  it('あとから届いたぶんで置き換える（足し込まない）', async () => {
+    await useWsStore.getState().connect()
+    latest().accept()
+
+    latest().deliver({
+      t: 'memos',
+      target: { t: 'global' },
+      memos: [{ id: 'a', body: {}, noted_at: 1 }],
+    })
+    latest().deliver({
+      t: 'memos',
+      target: { t: 'global' },
+      memos: [{ id: 'b', body: {}, noted_at: 2 }],
+    })
+
+    // 丸ごとの配信なので、**前のぶんは残らない**
+    expect(memosFor({ t: 'global' }).map((m) => m.id)).toEqual(['b'])
   })
 })
