@@ -1,5 +1,5 @@
 import type { ClientMessage, ServerMessage } from '@/lib/protocol'
-import { clearSessions, isReviving } from './sessions'
+import { clearSessions, getSession, getSessions, isReviving } from './sessions'
 import { clearAppNotices, getAppNotices, unreadCount } from './appNotices'
 import { clearMemos, memosFor } from './memos'
 import { useWsStore } from './ws'
@@ -574,5 +574,114 @@ describe('メモの受け取り', () => {
 
     // 丸ごとの配信なので、**前のぶんは残らない**
     expect(memosFor({ t: 'global' }).map((m) => m.id)).toEqual(['b'])
+  })
+})
+
+/**
+ * 軽い便が、ブラウザで当たること（レビュー対応 対応1）。
+ *
+ * **ここが切れていた。** セッションホストは便を出し、サーバは中継し、ブラウザは
+ * 受け取り、そして**捨てていた**——`handleJson` の `switch` に腕が無く、`default` も
+ * 無いので黙って落ちる。型も単体テストも結合テストも台帳も緑のまま、
+ * **画面にだけ何も届いていなかった。**
+ *
+ * したがってここで見るのは「**配達経路が生きているか**」である。ストアへ直接
+ * 値を入れて描くテストは、この経路を1度も通らない。
+ */
+describe('コンテキストの使い具合が、軽い便で届く', () => {
+  /** カードを1枚立ててから、軽い便を流せる状態にする。 */
+  async function カードを1枚立てる(cardId = CARD) {
+    await useWsStore.getState().connect()
+    latest().accept()
+    latest().deliver({
+      t: 'session_upsert',
+      session: {
+        card_id: cardId,
+        project: '/tmp/x',
+        claude_session_id: null,
+        resumed_from: null,
+        permission_mode: null,
+        model: null,
+        model_label: null,
+        model_requested: null,
+        status: { kind: 'waiting_input' },
+        subagent_active: 0,
+        last_activity_at: 0,
+        last_assistant_message: null,
+        created_at: 0,
+        hooks_seen: false,
+        agent_id: null,
+        agent_connected: true,
+        account: null,
+        toml_account: null,
+        session_title: null,
+        position: 0,
+        nickname: null,
+        branched_from: null,
+        context_usage: null,
+      },
+    })
+  }
+
+  const 使い具合 = {
+    used_percentage: 24,
+    total_input_tokens: 241_479,
+    context_window_size: 1_000_000,
+  }
+
+  it('軽い便を流すと、そのカードの使い具合が変わる', async () => {
+    await カードを1枚立てる()
+    expect(getSession(CARD)?.context_usage).toBeNull()
+
+    latest().deliver({ t: 'context_usage', card_id: CARD, usage: 使い具合 })
+
+    expect(getSession(CARD)?.context_usage).toEqual(使い具合)
+  })
+
+  it('usage が null の便で「まだ分からない」へ戻る（/compact 直後の経路）', async () => {
+    await カードを1枚立てる()
+    latest().deliver({ t: 'context_usage', card_id: CARD, usage: 使い具合 })
+    expect(getSession(CARD)?.context_usage).toEqual(使い具合)
+
+    latest().deliver({ t: 'context_usage', card_id: CARD, usage: null })
+
+    // **0% ではなく「無い」に戻る。** 空と不明は別物（設計§5）
+    expect(getSession(CARD)?.context_usage).toBeNull()
+  })
+
+  it('その欄だけを当てる（他の欄を巻き戻さない）', async () => {
+    await カードを1枚立てる()
+    // 状態が進んだあとに軽い便が来る、という順序を作る
+    latest().deliver({
+      t: 'status',
+      card_id: CARD,
+      status: { kind: 'working' },
+      subagent_active: 2,
+      last_activity_at: 99,
+    })
+
+    latest().deliver({ t: 'context_usage', card_id: CARD, usage: 使い具合 })
+
+    const 手元 = getSession(CARD)
+    expect(手元?.context_usage).toEqual(使い具合)
+    // **meta 全体を置き換えると、ここが巻き戻る**
+    expect(手元?.status).toEqual({ kind: 'working' })
+    expect(手元?.subagent_active).toBe(2)
+    expect(手元?.last_activity_at).toBe(99)
+  })
+
+  it('知らないカードIDの便が来ても、他のカードが壊れない', async () => {
+    await カードを1枚立てる()
+    latest().deliver({ t: 'context_usage', card_id: CARD, usage: 使い具合 })
+
+    latest().deliver({
+      t: 'context_usage',
+      card_id: 'ffffffff-0000-0000-0000-00000000ffff',
+      usage: { used_percentage: 99, total_input_tokens: 1, context_window_size: 2 },
+    })
+
+    // 知らないカードは捨てる（`session_upsert` が後から来る）。既にあるカードは無傷
+    expect(getSessions()).toHaveLength(1)
+    expect(getSession(CARD)?.context_usage).toEqual(使い具合)
   })
 })

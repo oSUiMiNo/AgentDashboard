@@ -76,6 +76,16 @@ struct Injected {
     model: Arc<Mutex<String>>,
     /// 最後に statusLine を走らせた時刻。デバウンスの判定に使う
     last_status_line: Option<std::time::Instant>,
+    /// `statusLine` が寄越すコンテキストの使い具合（整数パーセント）。
+    ///
+    /// **`None` は「割合が `null` で届く」形**——本物は起動直後と `/compact` 直後に
+    /// そうなる（フェーズ0 で実測）。`context <N>` ／ `context none` で動かせる。
+    ///
+    /// **`model` と同じく共有して持つ。** `refreshInterval` の周期実行が別スレッドで
+    /// 走るので、本体が書き換えるのと同時に読まれる。**固定値のままだと、値が動く形と
+    /// 消える形が端から端まで1度も流れない**——便を出す関門が効いているかを、
+    /// 結合テストの水準で確かめられなかった（レビュー対応 対応2）。
+    context_percentage: Arc<Mutex<Option<u64>>>,
 }
 
 /// statusLine のデバウンス幅。
@@ -228,6 +238,9 @@ fn main() {
         launched_bypass,
         model: Arc::new(Mutex::new(initial_model)),
         last_status_line: None,
+        // 既定は 24%。**これまでの振る舞いを変えない**ための初期値で、
+        // 240,000 / 1,000,000 と釣り合っている
+        context_percentage: Arc::new(Mutex::new(Some(24))),
     };
 
     // 行編集を切る。Shift+Tab は改行を伴わないので、これが無いと切替のキーが届かない。
@@ -460,6 +473,35 @@ fn main() {
             let _ = writeln!(out, "{BRANCHED_PREFIX}{枝}");
             let _ = out.flush();
             hook(&mut out, &injected, "SessionStart");
+            continue;
+        }
+
+        // コンテキストの使い具合を動かす。**本物には無い口**で、擬似だけの仕掛けである。
+        //
+        // 本物は会話が進むと勝手に動くが、擬似は固定値だった。**固定のままだと、
+        // 値が動く形と消える形が端から端まで1度も流れない**——「割合が動いたら便が
+        // 出る」「動かなければ出ない」を結合テストの水準で区別できなかった
+        // （レビュー対応 対応2）。
+        //
+        // `context none` は**割合が `null` で届く形**（起動直後と `/compact` 直後）。
+        if let Some(rest) = line.strip_prefix("context ") {
+            let rest = rest.trim();
+            let 次 = if rest == "none" {
+                None
+            } else if let Ok(p) = rest.parse::<u64>() {
+                Some(p)
+            } else {
+                let _ = writeln!(out, "[fake-claude] context: 読めない値 {rest}");
+                let _ = out.flush();
+                continue;
+            };
+            *injected
+                .context_percentage
+                .lock()
+                .expect("ロックが壊れていない") = 次;
+            // **その場で1回送る。** 周期を待たせるとテストが `refreshInterval` 秒ぶん
+            // 遅くなり、待ち時間で緑になったのか値が届いたのかが区別できない
+            send_status_line(&mut out, &mut injected, false);
             continue;
         }
 
@@ -724,7 +766,17 @@ fn status_line_payload(
     transcript: &str,
     id: &str,
     display_name: &str,
+    percentage: Option<u64>,
 ) -> serde_json::Value {
+    // **割合と実数を釣り合わせる。** ずれていると、画面の帯と実数表示が食い違う形を
+    // テストが見逃す。分母は 1,000,000 で固定なので、実数は割合から作れる
+    let 上限: u64 = 1_000_000;
+    let (割合, 実数) = match percentage {
+        Some(p) => (serde_json::json!(p), serde_json::json!(上限 / 100 * p)),
+        // **本物と同じ形。** 起動直後と `/compact` 直後は割合が `null` で、
+        // 実数だけが `0` で届く（フェーズ0 の実測）
+        None => (serde_json::Value::Null, serde_json::json!(0)),
+    };
     serde_json::json!({
         "session_id": session_id,
         "transcript_path": transcript,
@@ -732,9 +784,9 @@ fn status_line_payload(
         "model": { "id": id, "display_name": display_name },
         "version": "2.1.220",
         "context_window": {
-            "used_percentage": 24,
-            "total_input_tokens": 240_000,
-            "context_window_size": 1_000_000,
+            "used_percentage": 割合,
+            "total_input_tokens": 実数,
+            "context_window_size": 上限,
         },
     })
 }
@@ -759,7 +811,11 @@ fn send_status_line(out: &mut impl Write, injected: &mut Injected, announce: boo
     let (id, display_name) = resolve_model(&alias);
     let session_id = injected.session_id();
     let transcript = transcript_path(injected);
-    let payload = status_line_payload(&session_id, &transcript, &id, &display_name);
+    let 割合 = *injected
+        .context_percentage
+        .lock()
+        .expect("ロックが壊れていない");
+    let payload = status_line_payload(&session_id, &transcript, &id, &display_name, 割合);
 
     let result = run_hook(&command, &payload.to_string());
     if announce {
@@ -791,6 +847,9 @@ fn start_refresh_ticker(injected: &Injected) {
     // 古いIDを送り続け、ダッシュボードのカードが枝から元へ引き戻される
     let session_id = Arc::clone(&injected.session_id);
     let model = Arc::clone(&injected.model);
+    // **割合も共有して持つ。** 複製すると `context <N>` で動かしても周期側が古い値を
+    // 送り続け、「値が動いたら便が出る」を端から端まで確かめられない
+    let context_percentage = Arc::clone(&injected.context_percentage);
     // 書き出し先はIDから決まるので、こちらも都度引き直す（`--transcript` 指定時は固定）
     let transcript_override = injected.transcript.clone();
 
@@ -803,7 +862,8 @@ fn start_refresh_ticker(injected: &Injected) {
                 .clone()
                 .unwrap_or_else(|| default_transcript_path(&id_now));
             let (id, display_name) = resolve_model(&alias);
-            let payload = status_line_payload(&id_now, &transcript, &id, &display_name);
+            let 割合 = *context_percentage.lock().expect("ロックが壊れていない");
+            let payload = status_line_payload(&id_now, &transcript, &id, &display_name, 割合);
             let _ = run_hook(&command, &payload.to_string());
         }
     });

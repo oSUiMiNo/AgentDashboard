@@ -806,3 +806,113 @@ async fn 特定のモデルを指さない別名は覚えない() {
         manager.aliases().all()
     );
 }
+
+/// 便が出ていくところを観測する（レビュー対応 対応2）。
+///
+/// # なぜ「控えたか」ではなく「出したか」を見るのか
+///
+/// 上の2本は `session.meta()` を読んでいる。**あれは控えた値しか見ていない**ので、
+/// `apply_context_usage` の `emit` を丸ごと削っても緑のまま通る——**便の経路が
+/// 死んでいる状態と生きている状態が、結合テストの水準で区別できなかった。**
+/// 実際にブラウザ側の腕が無く、画面には何も届いていなかった（対応1）。
+///
+/// # 擬似 claude が値を動かせるようになった
+///
+/// 以前は常に 24% を返していたので、**値が動く形と消える形が端から端まで1度も
+/// 流れなかった**。`context <N>` ／ `context none` で動かせる。
+mod 便が出ていくこと {
+    use super::*;
+    use protocol::ws::ServerMessage;
+
+    /// そのカードの `ContextUsage` の便だけを拾う。
+    fn 使い具合の便(message: &ServerMessage, card: protocol::CardId) -> Option<Option<u8>> {
+        match message {
+            ServerMessage::ContextUsage { card_id, usage } if *card_id == card => {
+                Some(usage.map(|u| u.used_percentage))
+            }
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn 割合が動くと便が出ていく() {
+        let (_path, server) =
+            common::server_with_fake_global("ctx-emit", GLOBAL, refresh_config()).await;
+        let (session, _watcher) = common::start_session(&server.manager).await;
+
+        // 既定の 24% が届き切ってから観測を始める。**始める前に届いたぶんを
+        // 拾ってしまうと、動かしたから出たのか元から出ていたのかが区別できない**
+        wait_for_context_usage(&session).await;
+        let mut events = common::EventWatcher::attach(&server.manager);
+
+        common::send_line(&session, "context 50");
+
+        let message = events
+            .wait_for("使い具合の便", |m| {
+                matches!(m, ServerMessage::ContextUsage { .. })
+            })
+            .await;
+        assert_eq!(
+            使い具合の便(&message, session.card_id),
+            Some(Some(50)),
+            "動かした値がそのまま便で出ること"
+        );
+    }
+
+    #[tokio::test]
+    async fn 割合が動かなければ便は出ない() {
+        let (_path, server) =
+            common::server_with_fake_global("ctx-gate", GLOBAL, refresh_config()).await;
+        let (session, _watcher) = common::start_session(&server.manager).await;
+
+        wait_for_context_usage(&session).await;
+        let mut receiver = server.manager.subscribe_events();
+        // 観測を張る前に溜まっていたぶんを捨てる
+        while receiver.try_recv().is_ok() {}
+
+        // **同じ値を送り直す。** 3秒ごとに届くものをそのまま流すと、セッション数ぶんの
+        // 無駄が積み上がる——関門が効いていることを、ここで固定する
+        common::send_line(&session, "context 24");
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+        let mut 出た便 = Vec::new();
+        while let Ok(message) = receiver.try_recv() {
+            if let Some(割合) = 使い具合の便(&message, session.card_id) {
+                出た便.push(割合);
+            }
+        }
+        assert!(
+            出た便.is_empty(),
+            "同じ割合では便が出ないこと。出たもの: {出た便:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn 消えたときも便が出る() {
+        let (_path, server) =
+            common::server_with_fake_global("ctx-none", GLOBAL, refresh_config()).await;
+        let (session, _watcher) = common::start_session(&server.manager).await;
+
+        wait_for_context_usage(&session).await;
+        let mut events = common::EventWatcher::attach(&server.manager);
+
+        // `/compact` の直後は割合が `null` で届く（フェーズ0 の実測）
+        common::send_line(&session, "context none");
+
+        let message = events
+            .wait_for("消えた便", |m| {
+                matches!(m, ServerMessage::ContextUsage { usage: None, .. })
+            })
+            .await;
+        assert_eq!(
+            使い具合の便(&message, session.card_id),
+            Some(None),
+            "「まだ分からない」へ戻る便が出ること。0% ではない"
+        );
+        assert_eq!(
+            session.meta().context_usage,
+            None,
+            "控えたほうも消えていること"
+        );
+    }
+}

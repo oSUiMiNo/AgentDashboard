@@ -26,7 +26,7 @@
  */
 
 import { useSyncExternalStore } from 'react'
-import type { CardId, ErrorKind, SessionMeta, SessionStatus } from '@/lib/protocol'
+import type { CardId, ContextUsage, ErrorKind, SessionMeta, SessionStatus } from '@/lib/protocol'
 import { LOCAL_HOST } from '@/lib/routes'
 import { getProjects, subscribeProjects } from '@/stores/projects'
 
@@ -65,6 +65,7 @@ type Op =
   | { kind: 'upsert'; meta: SessionMeta }
   | { kind: 'remove'; cardId: CardId }
   | { kind: 'status'; patch: StatusPatch }
+  | { kind: 'context_usage'; cardId: CardId; usage: ContextUsage | null }
 
 /** 確定済みの状態。読むのは購読者だけで、書き換えるのは [`flush`] だけ。 */
 const metas = new Map<CardId, SessionMeta>()
@@ -420,6 +421,18 @@ function flush() {
         touched.add(op.patch.card_id)
         break
       }
+      case 'context_usage': {
+        const known = metas.get(op.cardId)
+        if (!known) {
+          // `status` と同じ。`session_upsert` が後から来るので捨ててよい
+          break
+        }
+        // **その欄だけを当てる。** `upsert` のように meta 全体を置き換えると、
+        // 軽い便が運んでこない欄（状態・題・並び）が古い値へ巻き戻る
+        metas.set(op.cardId, { ...known, context_usage: op.usage })
+        touched.add(op.cardId)
+        break
+      }
     }
   }
 
@@ -536,6 +549,17 @@ export function removeSession(cardId: CardId) {
 /** `status`（状態だけの差分）を取り込む。 */
 export function patchSessionStatus(patch: StatusPatch) {
   enqueue({ kind: 'status', patch })
+}
+
+/**
+ * コンテキストの使い具合だけを当てる（コンテキスト残量設計§2）。
+ *
+ * **正本はセッションホストの `SessionMeta` で、これは一部だけ更新する近道である。**
+ * 軽い便は整数パーセントが動いたときだけ飛ぶので、`session_upsert` を待つと
+ * **会話中はずっと古い値のまま止まる**（リロードすると直る、という形になる）。
+ */
+export function patchSessionContextUsage(cardId: CardId, usage: ContextUsage | null) {
+  enqueue({ kind: 'context_usage', cardId, usage })
 }
 
 /**

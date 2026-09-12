@@ -40,6 +40,7 @@
 
 import { create } from 'zustand'
 import { report } from '@/lib/clientLogs'
+import { assertNever } from '@/lib/never'
 import { KIND_PTY_INPUT, decodeFrame, encodeFrame } from '@/lib/frame'
 import type {
   AnnotationTarget,
@@ -58,6 +59,7 @@ import {
   applySessionSnapshot,
   markBranching,
   markReviving,
+  patchSessionContextUsage,
   patchSessionStatus,
   removeSession,
   setCardError,
@@ -594,6 +596,11 @@ function handleJson(raw: string, set: SetState) {
       patchSessionStatus(message)
       noteLiveness(message.card_id, message.status)
       break
+    case 'context_usage':
+      // **一部だけを当てる近道**（コンテキスト残量設計§2）。整数パーセントが
+      // 動いたときだけ飛ぶので、`session_upsert` を待つと会話中は古い値で止まる
+      patchSessionContextUsage(message.card_id, message.usage)
+      break
     case 'transcript_append':
       appendNodes(message.card_id, message.nodes)
       break
@@ -646,6 +653,16 @@ function handleJson(raw: string, set: SetState) {
         // 5秒で消える側に落ちる（細かい修正 設計§7-2）
         setCardError(message.card_id, message.message, message.kind ?? 'other')
       }
+      break
+    default:
+      // **`ServerMessage` を足して腕を書き忘れると、ここで `tsc` が落ちる。**
+      // 実際に踏んだ——`context_usage` の腕が無いまま型も単体テストも結合テストも
+      // 台帳も緑で、**画面にだけ何も届いていなかった**（レビュー対応 対応1）。
+      //
+      // **倒れ方は変えない。** 知らない種別を黙って無視するのは正しい作りで
+      // （古いブラウザが新しいサーバへ繋いだときに落ちてはいけない）、
+      // `assertNever` が `void` を返すのはそのためである
+      assertNever(message)
       break
   }
 }
