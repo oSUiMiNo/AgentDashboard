@@ -491,7 +491,9 @@ describe('SessionView の操作列は、区画の真上', () => {
       横並びはサイドバーが無いぶん**たまたま**区画の真上に来ていただけである。
     */
     for (const compact of [false, true]) {
-      show(meta({ agent_connected: true }), compact)
+      // **元の会話のIDを持たせる。** メモは `ClaudeSessionId` に紐づくので、
+      // 名乗る前のセッションには入口が出ない（紐づけ先が無い）
+      show(meta({ agent_connected: true, claude_session_id: 'sess-1' }), compact)
       for (const 目印 of [
         'elapsed',
         'model-picker',
@@ -503,6 +505,11 @@ describe('SessionView の操作列は、区画の真上', () => {
         // コンテキストの使い具合も**セッションに効くもの**（コンテキスト残量設計§6）。
         // `compact` で分岐していないので、1箇所置けば両方に出る
         'ctx-gauge',
+        // **メモも両方の画面に出る**（メモ設計§6-2）。**枝分かれと同じ扱いにしない**——
+        // あちらが未登録なのは「片側にしか出さないから」であって、メモには
+        // 当てはまらない。ここを省くと、**要件11（片方だけに作って「入れた」と
+        // 言わない）が守られていないまま緑になる**
+        'memo-toggle',
       ]) {
         expect(列の中(目印), `${目印} が操作列の外に居る（compact=${compact}）`).toBe(true)
       }
@@ -547,6 +554,29 @@ describe('SessionView の操作列は、区画の真上', () => {
     expect(screen.getByTestId('branch-card').closest('[data-row]')?.getAttribute('data-row')).toBe(
       '1',
     )
+  })
+
+  it('メモを足しても、操作列は2行のまま', () => {
+    // 枝分かれと同じ罠（メモ設計§6-2）。**折り返した瞬間に、行数を数えている
+    // 5箇所が落ちる**。メモは名前と同じ「人がカードへ付けたもの」なので、
+    // **鉛筆の隣＝1行目**に居る
+    show(meta({ agent_connected: true, claude_session_id: 'sess-1' }))
+    const ops = screen.getByTestId('session-ops')
+    expect(ops.querySelectorAll('[data-row]')).toHaveLength(2)
+    expect(
+      screen.getByTestId('memo-toggle').closest('[data-row]')?.getAttribute('data-row'),
+    ).toBe('1')
+    // **鉛筆の隣であること。** 操作の群（2行目）へ紛れ込んでいない
+    const 鉛筆 = screen.getByTestId('nickname-edit')
+    const メモ = screen.getByTestId('memo-toggle')
+    expect(鉛筆.nextElementSibling).toBe(メモ)
+  })
+
+  it('元の会話のIDが無いうちは、メモの入口を出さない', () => {
+    // 紐づけ先が無いので書く場所が無い（設計 分かれ道1）。起こした直後、
+    // CLI が名乗る前がこれに当たる
+    show(meta({ agent_connected: true, claude_session_id: null }))
+    expect(screen.queryByTestId('memo-toggle')).toBeNull()
   })
 
   it('待っても押せるようにならない状態でだけ押せず、理由が読める', () => {

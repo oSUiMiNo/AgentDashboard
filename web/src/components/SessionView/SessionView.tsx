@@ -24,12 +24,14 @@ import {
   type RefObject,
 } from 'react'
 import { useLocation, useNavigate } from 'react-router'
+import { sessionTarget } from '@/lib/annotationTarget'
 import { Button } from '@/components/ui/button'
 import { CloseGlyph, PencilGlyph, TrashGlyph } from '@/components/ui/glyphs'
 import { NoticeBell } from '@/components/NoticeBell/NoticeBell'
 import { PowerButton } from '@/components/ui/power-button'
 import { NicknameInput } from '@/components/SessionNickname/NicknameInput'
 import { InputDock } from '@/components/InputDock/InputDock'
+import { MemoPane } from '@/components/MemoPane/MemoPane'
 import { ModelPicker } from '@/components/ModelPicker/ModelPicker'
 import { PermissionModePicker } from '@/components/PermissionModePicker/PermissionModePicker'
 import { TerminalPane } from '@/components/TerminalPane/TerminalPane'
@@ -131,6 +133,8 @@ export function SessionView({
     確定してもサーバの `session_upsert` が戻るまで名前は変わらない。
   */
   const [draft, setDraft] = useState<string | null>(null)
+  /** メモの面を開いているか（メモ設計§6-5）。**両方の画面で同じように効く。** */
+  const [メモを開いている, setメモを開いている] = useState(false)
   // 単独で開いたときは履歴が主役。横並びのときは一望して即操作したいのでターミナル
   const [view, setView] = useState<View>(compact ? 'terminal' : 'transcript')
   // PJT 専用画面と**同じ部品・同じ経路**（設計§28）。開閉の記憶も共有する
@@ -474,6 +478,36 @@ export function SessionView({
               </button>
             )}
             {/*
+              **メモ**（メモ設計§6-2）。**鉛筆の隣に置く**——名前とメモはどちらも
+              「人がカードへ付けたもの」で、宛先も同じ `AnnotationTarget` を使う。
+              **操作の群には入れない**：あそこは「見せ方を変える／始末する」に分かれて
+              いて、メモはどちらでもない。
+
+              **行は増やさない**（`[data-row]` が2のままであることを5箇所が見ている）。
+            */}
+            {/*
+              **元の会話のIDが無いうちは出さない。** メモは `ClaudeSessionId` に
+              紐づくので（設計 分かれ道1）、**紐づけ先が無いうちは書く場所が無い**——
+              起こした直後、CLI が名乗る前がこれに当たる。
+            */}
+            {session.claude_session_id !== null && (
+            <button
+              type="button"
+              data-testid="memo-toggle"
+              title="このセッションのメモ"
+              aria-label="このセッションのメモ"
+              aria-expanded={メモを開いている}
+              onClick={() => setメモを開いている((前) => !前)}
+              className={`shrink-0 text-xs transition-colors ${
+                メモを開いている
+                  ? 'text-foreground'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              メモ
+            </button>
+            )}
+            {/*
               **この行で唯一、放っておくだけで文字数が変わる要素。** 1秒ごとに数え直すので、
               行の中で折り返す作りだと**画面を見ているだけで行数が入れ替わる**（設計§2）
             */}
@@ -668,6 +702,23 @@ export function SessionView({
         >
           <TerminalPane key={session.card_id} cardId={session.card_id} />
         </div>
+
+        {/*
+          **入力欄まわりに重ねる**（メモ設計§6-5）。セッションメモは `DESIGN.md` 47 の
+          管轄内——「入力の上に重ねて出し、打つか押すかで消える面」に当たる。
+
+          **抜け殻・終了したカードでは読めるが書けない**（設計§6-9）。書く相手が
+          居ないうえ、読むためだけに開いた面で誤って書けると事故になる。
+        */}
+        {メモを開いている && session.claude_session_id !== null && (
+          <div className="shrink-0 rounded border p-2">
+            <MemoPane
+              target={sessionTarget(session.claude_session_id)}
+              readOnly={isEnded(session.status)}
+              label="このセッションのメモ"
+            />
+          </div>
+        )}
 
         <InputDock
           cardId={session.card_id}
