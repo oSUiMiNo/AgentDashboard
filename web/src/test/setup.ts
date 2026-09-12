@@ -139,3 +139,56 @@ if (typeof Range.prototype.getBoundingClientRect !== 'function') {
     },
   })
 }
+
+/*
+  **ブロックエディタ（ProseMirror）が呼ぶものを補う**（メモ フェーズ1 の実測）。
+
+  入れないと、**assertion が全部通っても run の終了コードが 1 になる**——
+  `scrollToSelection` が矩形を引きに行き、jsdom に無い口で例外になる。
+  assertion は通っているので、**テストの側からは何が悪いのか見えない。**
+
+  上の `getBoundingClientRect` は `HTMLElement.prototype` に置いてあり、あちらは
+  仮想化のために**実際の大きさ**を返している。ここで `Element.prototype` へ 0 の矩形を
+  置いても、**HTML の要素には効かない**（より近い `HTMLElement` 側が勝つ）ので、
+  あちらの値は壊れない。
+
+  `Range` の矩形は上で既に補ってあるので、ここでは**足りていない `getClientRects` と
+  座標からの引き当てだけ**を足す。
+*/
+const 空の矩形 = () => {
+  const rect = {
+    x: 0,
+    y: 0,
+    top: 0,
+    bottom: 0,
+    left: 0,
+    right: 0,
+    width: 0,
+    height: 0,
+  }
+  return { ...rect, toJSON: () => rect } as DOMRect
+}
+
+for (const proto of [Range.prototype, Element.prototype]) {
+  if (typeof (proto as { getClientRects?: unknown }).getClientRects !== 'function') {
+    Object.defineProperty(proto, 'getClientRects', {
+      configurable: true,
+      value: () => Object.assign([空の矩形()], { item: () => 空の矩形() }),
+    })
+  }
+}
+
+// **座標から要素を引く口。** `prosemirror-view` が選択の位置合わせで呼ぶ
+const shadowRoot = (globalThis as { ShadowRoot?: { prototype: object } }).ShadowRoot
+for (const proto of [Document.prototype, shadowRoot?.prototype].filter(
+  (value): value is object => value !== undefined,
+)) {
+  for (const [name, value] of [
+    ['elementFromPoint', () => null],
+    ['elementsFromPoint', () => []],
+  ] as const) {
+    if (typeof (proto as Record<string, unknown>)[name] !== 'function') {
+      Object.defineProperty(proto, name, { configurable: true, value })
+    }
+  }
+}
