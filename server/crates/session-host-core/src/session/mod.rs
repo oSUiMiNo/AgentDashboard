@@ -358,6 +358,28 @@ fn context_display_form(usage: &ContextUsage) -> u8 {
     usage.used_percentage
 }
 
+/// 関門の本体。**画面に出る形が動いていれば控えて `true`、動いていなければ何もせず `false`。**
+///
+/// `Session` を組み立てずに落とせるよう、`state::apply` と同じく
+/// **`&mut SessionMeta` を受ける純関数**にしてある。
+///
+/// # 実数は鍵に入れないが、控えるときは一緒に持っていく
+///
+/// 鍵はパーセントだけ（[`context_display_form`]）なので、**トークン数だけが動いた報告は
+/// 落ちる**。逆に**パーセントが動いたときは、そのときの実数ごと入れ替える**——実数は
+/// 「最後にパーセントが動いた時点の値」になり、最大1%ぶん古い。**パーセントは常に正しい。**
+fn store_context_usage_into(meta: &mut SessionMeta, usage: Option<ContextUsage>) -> bool {
+    if !display_form_moved(
+        meta.context_usage.as_ref(),
+        usage.as_ref(),
+        context_display_form,
+    ) {
+        return false;
+    }
+    meta.context_usage = usage;
+    true
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
     #[error("作業ディレクトリが存在しません: {0}")]
@@ -1226,15 +1248,7 @@ impl Session {
     /// パーセントなので、合否はそちらで決まる。
     pub fn store_context_usage(&self, usage: Option<ContextUsage>) -> bool {
         let mut meta = self.meta.lock().expect("ロックが壊れていない");
-        if !display_form_moved(
-            meta.context_usage.as_ref(),
-            usage.as_ref(),
-            context_display_form,
-        ) {
-            return false;
-        }
-        meta.context_usage = usage;
-        true
+        store_context_usage_into(&mut meta, usage)
     }
 
     /// 切替の要求値を立てる／落とす。
@@ -4099,6 +4113,35 @@ mod tests {
     // **外すと洪水が戻る唯一の歯止め**なので、判定そのものを落とす。
     // `Session` を組み立てずに済むよう、判定は純関数に分けてある。
 
+    /// まだ何も届いていないカード1枚。
+    fn 空のカード() -> SessionMeta {
+        SessionMeta {
+            card_id: CardId::new(),
+            project: ProjectId("/p".to_string()),
+            claude_session_id: None,
+            resumed_from: None,
+            permission_mode: None,
+            model: None,
+            model_label: None,
+            model_requested: None,
+            status: SessionStatus::Working,
+            subagent_active: 0,
+            last_activity_at: 1,
+            last_assistant_message: None,
+            created_at: 1,
+            hooks_seen: false,
+            agent_id: None,
+            agent_connected: true,
+            account: None,
+            toml_account: None,
+            session_title: None,
+            position: 0,
+            nickname: None,
+            branched_from: None,
+            context_usage: None,
+        }
+    }
+
     fn 使用率(percentage: u8, tokens: u64) -> ContextUsage {
         ContextUsage {
             used_percentage: percentage,
@@ -4194,6 +4237,68 @@ mod tests {
         assert!(
             display_form_moved(Some(&前), Some(&動いた), 費用の表示形),
             "丸めた表示が変われば先へ進むこと"
+        );
+    }
+
+    /// **実数は、パーセントが動いたときに一緒に運ばれること**（設計§3）。
+    ///
+    /// 鍵に入れないので**実数だけが動いた報告は落ちる**が、落とすのと**持っていかない**
+    /// のは別である。パーセントが動いたときは、**そのときの実数ごと**入れ替わること。
+    ///
+    /// ここは `Session` を組み立てずに落とせるよう、`state::apply` と同じく
+    /// `&mut SessionMeta` を受ける純関数（`store_context_usage_into`）を直に呼ぶ。
+    #[test]
+    fn 実数はパーセントが動いたときに一緒に運ばれる() {
+        let mut meta = 空のカード();
+        assert!(
+            store_context_usage_into(&mut meta, Some(使用率(24, 241_500))),
+            "最初の値は控えること"
+        );
+        assert_eq!(
+            meta.context_usage.map(|u| u.total_input_tokens),
+            Some(241_500)
+        );
+
+        // 実数だけ動いた報告は落ちる。**控えている値も動かない**
+        assert!(!store_context_usage_into(
+            &mut meta,
+            Some(使用率(24, 249_500))
+        ));
+        assert_eq!(
+            meta.context_usage.map(|u| u.total_input_tokens),
+            Some(241_500),
+            "落とした報告の実数を控えてはいけない（画面は動いていないため）"
+        );
+
+        // パーセントが動いたら、そのときの実数ごと入れ替わる
+        assert!(store_context_usage_into(
+            &mut meta,
+            Some(使用率(25, 250_000))
+        ));
+        assert_eq!(
+            meta.context_usage
+                .map(|u| (u.used_percentage, u.total_input_tokens)),
+            Some((25, 250_000)),
+            "パーセントが動いたら実数も一緒に新しくなること"
+        );
+    }
+
+    /// 「まだ分からない」へ戻ると、控えていた値も消えること（`/compact` の直後）。
+    #[test]
+    fn compactで分からなくなったら控えも消える() {
+        let mut meta = 空のカード();
+        assert!(store_context_usage_into(
+            &mut meta,
+            Some(使用率(24, 241_500))
+        ));
+
+        assert!(
+            store_context_usage_into(&mut meta, None),
+            "分からなくなったことも画面が変わるので報告すること"
+        );
+        assert_eq!(
+            meta.context_usage, None,
+            "古い値を残すと、畳んだ直後に前の使用率が出てしまう"
         );
     }
 
