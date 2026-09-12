@@ -175,6 +175,10 @@ async fn 書き出しにはアカウントの設定しか入らない() {
         keys,
         [
             "always_bypass_permissions",
+            // メモの保持は利用体験の設定なので、持ち出しに乗る（メモ設計§11-2）。
+            // **秘密ではない**ので、ここへ足してよい
+            "memo_max_bytes",
+            "memo_retention_days",
             "motion_quiet",
             "project_autostart_session",
             "screen_interval_ms",
