@@ -81,9 +81,15 @@ async fn 宛先が違うメモは互いの一覧に出ない() {
         let session = Uuid::new_v4();
         let 別のセッション = Uuid::new_v4();
 
-        memos::add(&backend.db, account, memos::TARGET_GLOBAL, None, body("ぜんたい"))
-            .await
-            .expect("積めること");
+        memos::add(
+            &backend.db,
+            account,
+            memos::TARGET_GLOBAL,
+            None,
+            body("ぜんたい"),
+        )
+        .await
+        .expect("積めること");
         memos::add(
             &backend.db,
             account,
@@ -121,9 +127,10 @@ async fn 宛先が違うメモは互いの一覧に出ない() {
             backend.name
         );
 
-        let このセッション = memos::list(&backend.db, account, memos::TARGET_SESSION, Some(session))
-            .await
-            .expect("読めること");
+        let このセッション =
+            memos::list(&backend.db, account, memos::TARGET_SESSION, Some(session))
+                .await
+                .expect("読めること");
         assert_eq!(
             このセッション.iter().map(text_of).collect::<Vec<_>>(),
             vec!["このセッション"],
@@ -140,9 +147,33 @@ async fn 並びは2段でどちらも新しいものが下() {
         let account = account(&backend.db, "みほん").await;
         let now = db::now_ms();
 
-        let 古い = add_at(&backend.db, account, memos::TARGET_GLOBAL, None, "ふるい", now - 3000).await;
-        add_at(&backend.db, account, memos::TARGET_GLOBAL, None, "まんなか", now - 2000).await;
-        let 新しい = add_at(&backend.db, account, memos::TARGET_GLOBAL, None, "あたらしい", now - 1000).await;
+        let 古い = add_at(
+            &backend.db,
+            account,
+            memos::TARGET_GLOBAL,
+            None,
+            "ふるい",
+            now - 3000,
+        )
+        .await;
+        add_at(
+            &backend.db,
+            account,
+            memos::TARGET_GLOBAL,
+            None,
+            "まんなか",
+            now - 2000,
+        )
+        .await;
+        let 新しい = add_at(
+            &backend.db,
+            account,
+            memos::TARGET_GLOBAL,
+            None,
+            "あたらしい",
+            now - 1000,
+        )
+        .await;
 
         // **先に「あたらしい」を、あとから「ふるい」をチェックする。**
         // 上段の並びはメモの時刻ではなく**チェックした時刻**で決まる
@@ -172,9 +203,33 @@ async fn チェックを外すとメモの時刻の位置へ戻る() {
     for backend in common::backends("memos_uncheck").await {
         let account = account(&backend.db, "みほん").await;
         let now = db::now_ms();
-        add_at(&backend.db, account, memos::TARGET_GLOBAL, None, "1ばん", now - 3000).await;
-        let 真ん中 = add_at(&backend.db, account, memos::TARGET_GLOBAL, None, "2ばん", now - 2000).await;
-        add_at(&backend.db, account, memos::TARGET_GLOBAL, None, "3ばん", now - 1000).await;
+        add_at(
+            &backend.db,
+            account,
+            memos::TARGET_GLOBAL,
+            None,
+            "1ばん",
+            now - 3000,
+        )
+        .await;
+        let 真ん中 = add_at(
+            &backend.db,
+            account,
+            memos::TARGET_GLOBAL,
+            None,
+            "2ばん",
+            now - 2000,
+        )
+        .await;
+        add_at(
+            &backend.db,
+            account,
+            memos::TARGET_GLOBAL,
+            None,
+            "3ばん",
+            now - 1000,
+        )
+        .await;
 
         memos::check(&backend.db, account, 真ん中, true)
             .await
@@ -201,9 +256,15 @@ async fn 時刻は端末から受け取らずサーバが打つ() {
     for backend in common::backends("memos_server_clock").await {
         let account = account(&backend.db, "みほん").await;
         let 直前 = db::now_ms();
-        let row = memos::add(&backend.db, account, memos::TARGET_GLOBAL, None, body("いま"))
-            .await
-            .expect("積めること");
+        let row = memos::add(
+            &backend.db,
+            account,
+            memos::TARGET_GLOBAL,
+            None,
+            body("いま"),
+        )
+        .await
+        .expect("積めること");
         let 直後 = db::now_ms();
 
         // **`add` は時刻を引数に取らない**（取れないことがこの検査の本体である）。
@@ -216,7 +277,11 @@ async fn 時刻は端末から受け取らずサーバが打つ() {
             直前,
             直後
         );
-        assert!(row.checked_at.is_none(), "{}：積んだ直後にチェックが立っている", backend.name);
+        assert!(
+            row.checked_at.is_none(),
+            "{}：積んだ直後にチェックが立っている",
+            backend.name
+        );
         backend.finish().await;
     }
 }
@@ -226,7 +291,15 @@ async fn 内容が変わったときだけ時刻が動く() {
     for backend in common::backends("memos_edit_clock").await {
         let account = account(&backend.db, "みほん").await;
         let now = db::now_ms();
-        let id = add_at(&backend.db, account, memos::TARGET_GLOBAL, None, "もと", now - DAY_MS).await;
+        let id = add_at(
+            &backend.db,
+            account,
+            memos::TARGET_GLOBAL,
+            None,
+            "もと",
+            now - DAY_MS,
+        )
+        .await;
         let 元の時刻 = now - DAY_MS;
 
         // 同じ本文で確定した場合は据え置き
@@ -259,10 +332,16 @@ async fn 他人のメモは読めず書き換えられず消せない() {
     for backend in common::backends("memos_tenancy").await {
         let 自分 = account(&backend.db, "じぶん").await;
         let 他人 = account(&backend.db, "たにん").await;
-        let 他人のメモ = memos::add(&backend.db, 他人, memos::TARGET_GLOBAL, None, body("ひみつ"))
-            .await
-            .expect("積めること")
-            .id;
+        let 他人のメモ = memos::add(
+            &backend.db,
+            他人,
+            memos::TARGET_GLOBAL,
+            None,
+            body("ひみつ"),
+        )
+        .await
+        .expect("積めること")
+        .id;
 
         let 一覧 = memos::list(&backend.db, 自分, memos::TARGET_GLOBAL, None)
             .await
@@ -301,9 +380,15 @@ async fn 他人のメモは読めず書き換えられず消せない() {
 async fn アカウントを消すとメモも消える() {
     for backend in common::backends("memos_cascade").await {
         let account = account(&backend.db, "みほん").await;
-        memos::add(&backend.db, account, memos::TARGET_GLOBAL, None, body("きえる"))
-            .await
-            .expect("積めること");
+        memos::add(
+            &backend.db,
+            account,
+            memos::TARGET_GLOBAL,
+            None,
+            body("きえる"),
+        )
+        .await
+        .expect("積めること");
 
         db::entity::accounts::Entity::delete_by_id(account)
             .exec(&backend.db)
@@ -338,9 +423,14 @@ async fn セッションの行が無くてもメモは積めて読める() {
         .await
         .expect("カードが無くても積めること");
 
-        let rows = memos::list(&backend.db, account, memos::TARGET_SESSION, Some(消えたセッション))
-            .await
-            .expect("読めること");
+        let rows = memos::list(
+            &backend.db,
+            account,
+            memos::TARGET_SESSION,
+            Some(消えたセッション),
+        )
+        .await
+        .expect("読めること");
         assert_eq!(
             rows.iter().map(text_of).collect::<Vec<_>>(),
             vec!["カードはもう無い"],
@@ -356,8 +446,24 @@ async fn 掃除は期限切れだけを落とす() {
     for backend in common::backends("memos_sweep").await {
         let account = account(&backend.db, "みほん").await;
         let now = db::now_ms();
-        add_at(&backend.db, account, memos::TARGET_GLOBAL, None, "きのう", now - DAY_MS).await;
-        add_at(&backend.db, account, memos::TARGET_GLOBAL, None, "100日前", now - 100 * DAY_MS).await;
+        add_at(
+            &backend.db,
+            account,
+            memos::TARGET_GLOBAL,
+            None,
+            "きのう",
+            now - DAY_MS,
+        )
+        .await;
+        add_at(
+            &backend.db,
+            account,
+            memos::TARGET_GLOBAL,
+            None,
+            "100日前",
+            now - 100 * DAY_MS,
+        )
+        .await;
 
         let removed = memos::sweep(&backend.db, now, settings::DEFAULT_MEMO_RETENTION_DAYS)
             .await
@@ -383,8 +489,24 @@ async fn 掃除の日数はアカウントごとの設定で決まる() {
         let 短い = account(&backend.db, "みじかい").await;
         let 既定 = account(&backend.db, "きてい").await;
         let now = db::now_ms();
-        add_at(&backend.db, 短い, memos::TARGET_GLOBAL, None, "10日前", now - 10 * DAY_MS).await;
-        add_at(&backend.db, 既定, memos::TARGET_GLOBAL, None, "10日前", now - 10 * DAY_MS).await;
+        add_at(
+            &backend.db,
+            短い,
+            memos::TARGET_GLOBAL,
+            None,
+            "10日前",
+            now - 10 * DAY_MS,
+        )
+        .await;
+        add_at(
+            &backend.db,
+            既定,
+            memos::TARGET_GLOBAL,
+            None,
+            "10日前",
+            now - 10 * DAY_MS,
+        )
+        .await;
 
         // 片方だけ「7日で消す」にする
         settings::put_memo_limits(
@@ -429,16 +551,43 @@ async fn 保持の設定は上限を超える値と無期限を断る() {
     // **記録を要さない検査**なので、バックエンドを起こさずに済む
     let 通る = |key: &str, value: serde_json::Value| settings::check(key, &value).is_ok();
 
-    assert!(通る(settings::MEMO_RETENTION_DAYS, serde_json::json!(365)), "12か月は通ること");
-    assert!(通る(settings::MEMO_MAX_BYTES, serde_json::json!(20u64 * 1024 * 1024 * 1024)), "20GB は通ること");
+    assert!(
+        通る(settings::MEMO_RETENTION_DAYS, serde_json::json!(365)),
+        "12か月は通ること"
+    );
+    assert!(
+        通る(
+            settings::MEMO_MAX_BYTES,
+            serde_json::json!(20u64 * 1024 * 1024 * 1024)
+        ),
+        "20GB は通ること"
+    );
 
     // **「無期限」「無制限」に当たる値を作らせない**（要件10）
-    assert!(!通る(settings::MEMO_RETENTION_DAYS, serde_json::json!(0)), "0 日は断ること");
-    assert!(!通る(settings::MEMO_MAX_BYTES, serde_json::json!(0)), "0 バイトは断ること");
-    assert!(!通る(settings::MEMO_RETENTION_DAYS, serde_json::json!(366)), "12か月を超えたら断ること");
     assert!(
-        !通る(settings::MEMO_MAX_BYTES, serde_json::json!(20u64 * 1024 * 1024 * 1024 + 1)),
+        !通る(settings::MEMO_RETENTION_DAYS, serde_json::json!(0)),
+        "0 日は断ること"
+    );
+    assert!(
+        !通る(settings::MEMO_MAX_BYTES, serde_json::json!(0)),
+        "0 バイトは断ること"
+    );
+    assert!(
+        !通る(settings::MEMO_RETENTION_DAYS, serde_json::json!(366)),
+        "12か月を超えたら断ること"
+    );
+    assert!(
+        !通る(
+            settings::MEMO_MAX_BYTES,
+            serde_json::json!(20u64 * 1024 * 1024 * 1024 + 1)
+        ),
         "20GB を超えたら断ること"
     );
-    assert!(!通る(settings::MEMO_RETENTION_DAYS, serde_json::json!("unlimited")), "文字列は断ること");
+    assert!(
+        !通る(
+            settings::MEMO_RETENTION_DAYS,
+            serde_json::json!("unlimited")
+        ),
+        "文字列は断ること"
+    );
 }

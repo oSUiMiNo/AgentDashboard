@@ -45,8 +45,7 @@ pub const TARGET_SESSION: &str = "session";
 /// 全体メモは `target_session_id` が空であることまで見る——見ないと、
 /// **`target_kind` だけ一致する行が全部混ざる**。
 fn target_filter(target_kind: &str, target_session_id: Option<Uuid>) -> Condition {
-    let mut condition =
-        Condition::all().add(memos::Column::TargetKind.eq(target_kind.to_owned()));
+    let mut condition = Condition::all().add(memos::Column::TargetKind.eq(target_kind.to_owned()));
     condition = match target_session_id {
         Some(id) => condition.add(memos::Column::TargetSessionId.eq(id)),
         None => condition.add(memos::Column::TargetSessionId.is_null()),
@@ -207,11 +206,7 @@ pub async fn remove(db: &DatabaseConnection, account_id: Uuid, id: Uuid) -> Resu
 ///
 /// 数えるのは `noted_at`。**編集すると延命する**が、それでよい——「最終更新から
 /// 3か月」が要件10 の言い方である。
-pub async fn sweep(
-    db: &DatabaseConnection,
-    now_ms: i64,
-    fallback_days: u64,
-) -> Result<u64, DbErr> {
+pub async fn sweep(db: &DatabaseConnection, now_ms: i64, fallback_days: u64) -> Result<u64, DbErr> {
     let mut removed = 0;
     for account_id in accounts_with_memos(db).await? {
         let days = super::settings::memo_retention_days_or(db, account_id, fallback_days).await;

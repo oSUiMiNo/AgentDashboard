@@ -18,8 +18,8 @@
 //! 含める」という絞り込みに「NULL は誰のものでもない」という抜け道ができるため。
 
 pub mod entity;
-mod migration;
 pub mod memos;
+mod migration;
 pub mod notices;
 pub mod pairing;
 pub mod projects;

@@ -345,11 +345,7 @@ pub async fn put_memo_limits(
 ///
 /// **掃除タスクが1時間ごとに呼ぶ**ので、失敗を返して止めない（`always_bypass_or` と
 /// 同じ作法）。記録が読めない事故と「まだ選んでいない」で落とし先が同じである。
-pub async fn memo_retention_days_or(
-    db: &DatabaseConnection,
-    account: Uuid,
-    fallback: u64,
-) -> u64 {
+pub async fn memo_retention_days_or(db: &DatabaseConnection, account: Uuid, fallback: u64) -> u64 {
     match memo_limits(db, account).await {
         Ok(limits) => limits.retention_days,
         Err(err) => {
