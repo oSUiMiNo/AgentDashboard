@@ -367,9 +367,12 @@ async fn 残量の軽い便はサーバまで届く() {
                 usage: None,
             })
             .await;
-        let listed = wait_for_listed(&gateway.registry, account_id, "残量が消える", |listed| {
-            listed.first().is_some_and(|m| m.context_usage.is_none())
-        })
+        let listed = wait_for_listed(
+            &gateway.registry,
+            account_id,
+            "残量が消える",
+            |listed| listed.first().is_some_and(|m| m.context_usage.is_none()),
+        )
         .await;
         assert_eq!(listed[0].context_usage, None, "[{}]", backend.name);
 
