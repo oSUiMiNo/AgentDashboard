@@ -22,14 +22,16 @@
  * 「片付ける」が達成感にならない。
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 
 import { targetKey } from '@/lib/annotationTarget'
 import { copyToClipboard } from '@/lib/clipboard'
+import { markComposerBusy } from '@/lib/composerBusy'
 import { useDraft } from '@/lib/drafts'
 import { REHYPE_PLUGINS, REMARK_PLUGINS } from '@/lib/markdown'
 import { readMemoBody, sameMemoBody } from '@/lib/memoBody'
+import { 画像を運ぶ as 一枚運ぶ, type 画像の置き場所 } from '@/lib/memoImage'
 import type { AnnotationTarget, MemoView } from '@/lib/protocol'
 import { useAuthStore } from '@/stores/auth'
 import { splitMemos, useMemos } from '@/stores/memos'
@@ -50,9 +52,23 @@ interface Props {
   readOnly?: boolean
   /** 読み上げ用の名。**全体とセッションで文言を分ける**（設計§6-4）。 */
   label: string
+  /**
+   * 画像の置き場所（設計§10-1）。**渡さなければ画像を貼れない。**
+   *
+   * # なぜ宛先から引けないのか
+   *
+   * **添付は PC のディスクへ置く**（`<state_dir>/attachments/<カードID>/`）ので、
+   * 宛先のほかに**どの PC か**と**どのカードか**が要る。宛先（`AnnotationTarget`）が
+   * 持っているのは `claude_session_id` だけで、**そこから PC もカードも引けない**
+   * ——カードは呼ぶ側が知っているので、呼ぶ側が渡す。
+   *
+   * **全体メモには渡せない**（カードが無く、どの PC かも決まらない）。
+   * 設計§10-1 の【未解決】がここに出ている。
+   */
+  保存先?: 画像の置き場所
 }
 
-export function MemoPane({ target, readOnly = false, label }: Props) {
+export function MemoPane({ target, readOnly = false, label, 保存先 }: Props) {
   const memos = useMemos(target)
   const { memoList, memoAdd } = useWsStore()
 
@@ -86,6 +102,42 @@ export function MemoPane({ target, readOnly = false, label }: Props) {
   const account = useAuthStore((state) => state.auth.account)
   const [書きかけ, set書きかけ] = useDraft(key, account)
 
+  /*
+    **画像を運ぶ道**（設計§10-1）。保存先を渡されたときだけ組み立てる。
+
+    **中身は `lib/memoImage.ts` に在る**——ふるいと置き場所の決め方を面から出して
+    おかないと、**エディタを立てないと確かめられない**（jsdom では画像を貼る操作を
+    再現できないので、貼る道が1本も守られないまま緑になる）。
+  */
+  const 画像を運ぶ = useCallback(
+    async (file: File): Promise<string> => {
+      if (保存先 === undefined) {
+        throw new Error('画像の置き場所が決まっていません')
+      }
+      return 一枚運ぶ(保存先, file)
+    },
+    [保存先],
+  )
+
+  /*
+    **運んでいる間は版切替の門に札を上げる**（設計§8-2）。
+
+    札は**オブジェクト**なので、登録ごとに別物であり解除に本人確認が要らない。
+    **面が画面外にありうる**ことに注意——PJT 専用画面はセッション全数を仮想化なしに
+    描くので、横スクロールの外にあるメモの面が読み直しを止めうる。
+  */
+  const 札を下ろす = useRef<(() => void) | null>(null)
+  const 抱える = useCallback((抱えている: boolean) => {
+    if (抱えている) {
+      札を下ろす.current ??= markComposerBusy()
+      return
+    }
+    札を下ろす.current?.()
+    札を下ろす.current = null
+  }, [])
+  // 面ごと消えるときに札を残さない。**残すと、以後どの版切替も止まる**
+  useEffect(() => () => 抱える(false), [抱える])
+
   const 隠れている数 = Math.max(0, unchecked.length - 下段に出す数)
   const 出す下段 = 下段を全部 ? unchecked : unchecked.slice(隠れている数)
 
@@ -106,7 +158,13 @@ export function MemoPane({ target, readOnly = false, label }: Props) {
           {!畳んだ上段 && (
             <div data-testid="memo-checked" className="mt-1 flex flex-col gap-1">
               {checked.map((memo) => (
-                <MemoBubble key={memo.id} memo={memo} readOnly={readOnly} />
+                <MemoBubble
+                  key={memo.id}
+                  memo={memo}
+                  readOnly={readOnly}
+                  画像を運ぶ={保存先 === undefined ? undefined : 画像を運ぶ}
+                  抱える={抱える}
+                />
               ))}
             </div>
           )}
@@ -126,7 +184,13 @@ export function MemoPane({ target, readOnly = false, label }: Props) {
           </button>
         )}
         {出す下段.map((memo) => (
-          <MemoBubble key={memo.id} memo={memo} readOnly={readOnly} />
+          <MemoBubble
+                  key={memo.id}
+                  memo={memo}
+                  readOnly={readOnly}
+                  画像を運ぶ={保存先 === undefined ? undefined : 画像を運ぶ}
+                  抱える={抱える}
+                />
         ))}
         {memos.length === 0 && (
           <p className="text-muted-foreground text-xs">まだ何も書かれていません。</p>
@@ -146,6 +210,8 @@ export function MemoPane({ target, readOnly = false, label }: Props) {
             initial={{ blocks: [], markdown: 書きかけ }}
             label={`${label}に書く`}
             onChange={set書きかけ}
+            onUploadImage={保存先 === undefined ? undefined : 画像を運ぶ}
+            on抱える={抱える}
             onSubmit={(body) => {
               if (body.markdown.trim() === '') {
                 return
@@ -176,7 +242,18 @@ export function MemoPane({ target, readOnly = false, label }: Props) {
  * **独立した面（全体メモ）でも同じ押し方にする。** 焦点が外れて閉じる作りでなくても、
  * **押し方が違うと片方だけ直す変更ができてしまう**（要件9）。
  */
-function MemoBubble({ memo, readOnly }: { memo: MemoView; readOnly: boolean }) {
+function MemoBubble({
+  memo,
+  readOnly,
+  画像を運ぶ,
+  抱える,
+}: {
+  memo: MemoView
+  readOnly: boolean
+  /** 直すときにも画像を貼れる（要件2）。**渡されなければ貼れない。** */
+  画像を運ぶ?: (file: File) => Promise<string>
+  抱える: (抱えている: boolean) => void
+}) {
   const { memoEdit, memoCheck, memoRemove } = useWsStore()
   const [直している, set直している] = useState(false)
   const [写せなかった値, set写せなかった値] = useState<string | null>(null)
@@ -198,6 +275,8 @@ function MemoBubble({ memo, readOnly }: { memo: MemoView; readOnly: boolean }) {
         <MemoEditor
           initial={body}
           label="メモを直す"
+          onUploadImage={画像を運ぶ}
+          on抱える={抱える}
           onSubmit={(次) => {
             // 中身が同じなら送らない。**時刻を動かすかどうかの判定はサーバがする**
             // （設計§7-3）が、線を1往復無駄にする必要も無い

@@ -20,6 +20,20 @@
  * **`isComposerSubmit` の型には手を入れていない**（設計§9-1）。判断材料を増やすと
  * 「Shift の扱いを間違える余地そのものが無い」という性質が壊れるので、**そのまま
  * import して使う**。
+ *
+ * # 画像（設計§10）
+ *
+ * **貼る道はエディタが持っている。** 落とす・貼り付ける・選ぶのどれでも
+ * `uploadFile` が呼ばれるので、**こちらが3経路を書き分ける必要は無い**
+ * （`Composer` が3経路を1つの入口へ寄せているのと、結果は同じ形になる）。
+ *
+ * **ふるいは `pickImages` を通す。** 種別と大きさの線を入力欄と揃えるためで、
+ * ここで独自に判定すると **svg が片方だけ通る**ような食い違いが生まれる。
+ *
+ * **保存先を渡されなければ、画像は貼れない。** 全体メモにはカードが無く、
+ * **どの PC のディスクへ置くかが決まらない**（設計§10-1 の【未解決】）。
+ * 決まっていないものを黙って既定の PC へ置くと、**別の機械から読めない画像**が
+ * 残る。だから**渡されるまで口を開けない**。
  */
 
 import { BlockNoteView } from '@blocknote/shadcn'
@@ -41,6 +55,19 @@ interface Props {
   onChange?: (markdown: string) => void
   /** 読み上げ用。全体メモとセッションメモで**文言を分ける**（設計§6-4）。 */
   label: string
+  /**
+   * 画像を置く道。**渡さなければ画像を貼れない**（上の doc）。
+   *
+   * 返すのは**画面から読める URL** で、そのまま本文の Markdown へ入る。
+   */
+  onUploadImage?: (file: File) => Promise<string>
+  /**
+   * 画像を抱えているかが変わったとき（設計§8-2）。
+   *
+   * **抱えている間は版切替の門に札を上げる**——上げないと、版が切り替わった
+   * ときにタブが自分で読み直して**運んでいる最中の画像が黙って消える**。
+   */
+  on抱える?: (抱えている: boolean) => void
   'data-testid'?: string
 }
 
@@ -49,10 +76,43 @@ export function MemoEditor({
   onSubmit,
   onChange,
   label,
+  onUploadImage,
+  on抱える,
   'data-testid': testId,
 }: Props) {
+  /** 最新の運び手を持つ。**エディタは作り直さない**ので参照で渡す */
+  const uploadRef = useRef(onUploadImage)
+  uploadRef.current = onUploadImage
+  const 抱えるRef = useRef(on抱える)
+  抱えるRef.current = on抱える
+
+  /** 運んでいる最中の枚数。**0 でなければ抱えている** */
+  const 運び中 = useRef(0)
+
   const editor = useCreateBlockNote({
     initialContent: initial.blocks.length > 0 ? (initial.blocks as never) : undefined,
+    /*
+      **渡されたときだけ口を開ける。** `undefined` にすると、エディタは画像の
+      ブロックを作らせない——「貼れないこと」が押す前に分かる形になる。
+
+      **運んでいる間は札を上げる**（設計§8-2）。8 MiB を運ぶ最中に版が切り替わると、
+      読み直しで**運んでいる最中のものが消える**。
+    */
+    uploadFile:
+      onUploadImage === undefined
+        ? undefined
+        : async (file: File) => {
+            運び中.current += 1
+            抱えるRef.current?.(true)
+            try {
+              return await uploadRef.current!(file)
+            } finally {
+              運び中.current -= 1
+              if (運び中.current === 0) {
+                抱えるRef.current?.(false)
+              }
+            }
+          },
   })
 
   /** 開いた時点の中身。**戻すのは1度だけ**なので参照で持つ（毎回の再描画で走らせない） */

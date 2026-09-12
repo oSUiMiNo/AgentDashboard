@@ -738,6 +738,12 @@ export function SessionView({
               target={sessionTarget(session.claude_session_id)}
               readOnly={isEnded(session.status)}
               label="このセッションのメモ"
+              /*
+                **画像の置き場所**（メモ設計§10-1）。カードの PC とカードIDを渡す。
+                宛先（`AnnotationTarget`）からは引けない——あちらが持っているのは
+                `claude_session_id` だけである。
+              */
+              保存先={{ host, cardId }}
             />
           </div>
         )}
