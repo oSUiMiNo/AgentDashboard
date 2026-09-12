@@ -48,7 +48,7 @@
 set -euo pipefail
 
 OUT_DIR="${1:-${TMPDIR:-/tmp}/agentdashboard-model-probe}"
-# 測る対象を絞る。all / statusline / global-write
+# 測る対象を絞る。all / statusline / statusline-turn / global-write
 # 前提3（グローバル設定が書き換わるか）だけを測り直せるようにしてある。ここは設計§6 の
 # 二段構えの根拠そのものなので、疑わしくなったら単独で回せることが要る
 SCENARIO="${2:-all}"
@@ -56,10 +56,10 @@ SCENARIO="${2:-all}"
 # 通すと「絞ったつもり」でトークンを使うターンまで走り切る。実際、この検証が無い版では
 # `statusline` がどの分岐にも当たらず素通りしていた
 case "${SCENARIO}" in
-    all|statusline|global-write) ;;
+    all|statusline|statusline-turn|global-write) ;;
     *)
         echo "知らないシナリオです: ${SCENARIO}" >&2
-        echo "使えるのは all / statusline / global-write のどれかです" >&2
+        echo "使えるのは all / statusline / statusline-turn / global-write のどれかです" >&2
         exit 1
         ;;
 esac
@@ -459,6 +459,114 @@ else:
             print(f"      {key:<22}: dict {sorted(value)}")
         else:
             print(f"      {key:<22}: {type(value).__name__} = {value!r}")
+PY
+    quit
+    echo
+    echo "記録は ${OUT_DIR} に残しました"
+    exit 0
+fi
+
+if [[ "${SCENARIO}" == "statusline-turn" ]]; then
+    # **値が入った形を見るための道**（起動直後の形は `statusline` で採れる）。
+    #
+    # **トークンを使うのはここだけ**で、安いモデル（${INJECTED_MODEL}）に固定した
+    # 1ターンと、その直後の `/compact` に収めてある。`/compact` も要約のため API を
+    # 1回叩くが、2往復ぶんしかない会話を畳むだけなので消費は最小である。
+    #
+    # `/compact` を含めているのは、**畳んだ直後に割合が空へ戻るか**が
+    # 「値が無い時間帯」の見せ方を決めるからで、ここを測らないと
+    # 公式ドキュメントの記述を確かめないまま実装することになる
+    echo
+    echo "==> 1ターン回す（★ここでトークンを使う）"
+    send_text "OK とだけ返してください。"
+    wait_idle
+    capture "S1-T1-after-turn"
+    # statusLine が回り直すのを待つ（refreshInterval は3秒）
+    sleep 8
+    cp "${STATUS_FILE}" "${OUT_DIR}/statusline-turn-after.jsonl" 2>/dev/null || true
+
+    echo
+    echo "==> /compact を送る（★要約のためもう1回だけ叩く）"
+    send_text "/compact"
+    wait_idle
+    sleep 10
+    capture "S1-T2-after-compact"
+    cp "${STATUS_FILE}" "${OUT_DIR}/statusline-turn-compact.jsonl" 2>/dev/null || true
+
+    echo
+    echo "==> 値が入った payload を読む"
+    python3 - "${OUT_DIR}/statusline-turn-after.jsonl" "${OUT_DIR}/statusline-turn-compact.jsonl" <<'PY'
+import json, pathlib, sys
+
+
+def rows(path):
+    src = pathlib.Path(path)
+    if not src.exists():
+        return []
+    out = []
+    for line in src.read_text(encoding="utf-8").splitlines():
+        if "\t" not in line:
+            continue
+        try:
+            out.append(json.loads(line.split("\t", 1)[1]))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def shape(value):
+    """型と、値そのものを短く出す。**数と null の区別が要る**ので値も出す"""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return f"bool = {value}"
+    if isinstance(value, dict):
+        inner = ", ".join(f"{k}={shape(v)}" for k, v in sorted(value.items()))
+        return f"dict {{{inner}}}"
+    return f"{type(value).__name__} = {value!r}"
+
+
+def dump(label, path):
+    data = rows(path)
+    print(f"  [{label}] 届いた回数: {len(data)}")
+    if not data:
+        print("    ★ payload が1行も届いていません")
+        return None
+    payload = data[-1]
+    cw = payload.get("context_window")
+    if cw is None:
+        print("    ★ context_window が無い")
+    else:
+        for key in ("used_percentage", "remaining_percentage", "context_window_size",
+                    "total_input_tokens", "total_output_tokens", "current_usage"):
+            if key not in cw:
+                print(f"      {key:<22}: ★欄ごと無い")
+            else:
+                print(f"      {key:<22}: {shape(cw[key])}")
+    cost = payload.get("cost")
+    if cost is None:
+        print("      cost                  : ★無し")
+    else:
+        print(f"      cost                  : {shape(cost)}")
+    print()
+    return payload
+
+
+after = dump("1ターン後", sys.argv[1])
+compact = dump("/compact 後", sys.argv[2])
+
+# **要件の完了条件に直結する判定**：畳んだ直後に空へ戻るか
+print("=== /compact 直後の判定 ===")
+if after is None or compact is None:
+    print("  判定不能（payload が採れていない）")
+else:
+    a = (after.get("context_window") or {}).get("used_percentage")
+    c = (compact.get("context_window") or {}).get("used_percentage")
+    print(f"  used_percentage: 1ターン後 = {a!r} → /compact 後 = {c!r}")
+    if c is None:
+        print("  → **空へ戻る。** 起動直後と同じ扱いでよい")
+    else:
+        print("  → 空へ戻らない。畳んだ直後も値が残る")
 PY
     quit
     echo
