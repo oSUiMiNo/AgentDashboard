@@ -26,7 +26,7 @@ import {
 import { useLocation, useNavigate } from 'react-router'
 import { sessionTarget } from '@/lib/annotationTarget'
 import { Button } from '@/components/ui/button'
-import { CloseGlyph, PencilGlyph, TrashGlyph } from '@/components/ui/glyphs'
+import { CloseGlyph, NoteGlyph, PencilGlyph, TrashGlyph } from '@/components/ui/glyphs'
 import { NoticeBell } from '@/components/NoticeBell/NoticeBell'
 import { PowerButton } from '@/components/ui/power-button'
 import { NicknameInput } from '@/components/SessionNickname/NicknameInput'
@@ -498,13 +498,25 @@ export function SessionView({
               aria-label="このセッションのメモ"
               aria-expanded={メモを開いている}
               onClick={() => setメモを開いている((前) => !前)}
-              className={`shrink-0 text-xs transition-colors ${
+              className={`shrink-0 transition-colors ${
                 メモを開いている
                   ? 'text-foreground'
                   : 'text-muted-foreground hover:text-foreground'
               }`}
             >
-              メモ
+              {/*
+                **隣の鉛筆に合わせて印にする。** ここだけ文字（「メモ」）にしていたら、
+                **狭い窓で行が横へはみ出した**——390px の窓で `dashboard.spec.ts` の
+                「帯の高さは、最終活動の表記が変わっても変わらない」が
+                `scrollWidth > clientWidth` で落ちた（【実測 2026-09-13】）。
+
+                行は折り返さない作りなので、**縮められない要素を1つ足すとそのまま
+                外へ出る**。名前は `truncate` で縮むが、限界がある。
+
+                カードの `memo-tile` も同じ印を使っているので、**3つの入口で見た目が
+                揃う**（要件9 の「同じ部品」を、見た目の側でも崩さない）。
+              */}
+              <NoteGlyph className="size-3.5" />
             </button>
             )}
             {/*
