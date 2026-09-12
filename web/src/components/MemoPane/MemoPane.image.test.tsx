@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { GLOBAL_TARGET, sessionTarget } from '@/lib/annotationTarget'
@@ -78,6 +78,35 @@ describe('画像の口を開ける条件', () => {
     )
 
     expect(screen.queryByTestId('memo-compose')).toBeNull()
+  })
+})
+
+describe('直すときにも貼れる（要件2）', () => {
+  it('鉛筆から開いたエディタにも、同じ口が渡る', async () => {
+    const { replaceMemos } = await import('@/stores/memos')
+    const target = sessionTarget('s-1')
+    replaceMemos(target, [
+      { id: 'm-1', body: { blocks: [], markdown: 'あ' }, noted_at: 1_700_000_000_000 },
+    ])
+
+    render(
+      <MemoPane
+        target={target}
+        label="このセッションのメモ"
+        保存先={{ host: 'local', cardId: 'card-1' }}
+      />,
+    )
+    渡ってきた.length = 0
+    fireEvent.mouseDown(screen.getByTestId('memo-edit'))
+
+    /*
+      **要件2 は「後から編集する際に添付画像の追加と削除も可能」と書いている。**
+      書くときだけ口を開けて直すときに閉じると、**貼った絵を剥がせないメモ**ができる。
+
+      口はエディタが持っているので、**渡し忘れても画面は動く**——だから
+      機械が捕まえない側であり、ここで固定する。
+    */
+    expect(渡ってきた[0]?.onUploadImage).toBeTypeOf('function')
   })
 })
 
