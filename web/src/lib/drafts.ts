@@ -109,6 +109,27 @@ function writeTable(account: string | null, table: Table): void {
   }
 }
 
+/**
+ * メモの書きかけを置く鍵（メモ設計§8-1）。
+ *
+ * **表の内側へ予約鍵を1つ足すだけ**で済む。外側の鍵（アカウント単位）の形は変えない。
+ *
+ * 綴りは `lib/annotationTarget.ts` の `targetKey()` が決める（`global` ／
+ * `session:<id>`）。**既存の内側の鍵はカードのID（UUID）なので衝突しない。**
+ *
+ * # ここは型では守れない
+ *
+ * **`CardId` は `string` の素の別名**（branded ではない）ので、`readDraft('global', …)`
+ * は**型が通ってしまう**。宛先の union に `assertNever` を置いても、**この入口には
+ * 効かない**——`targetKey()` を通さず綴りを直接書いても `tsc` は何も言わない。
+ *
+ * **だからここはテストで守る**（`drafts.test.ts`）。守っているのは2つ：
+ * **予約鍵がカードのID と衝突しないこと**と、**押し出しで消えないこと**。
+ */
+export function isMemoDraftKey(key: string): boolean {
+  return key === 'global' || key.startsWith('session:')
+}
+
 /** そのカードの書きかけ。無ければ空。 */
 export function readDraft(cardId: CardId, account: string | null): string {
   return readTable(account)[cardId] ?? ''
@@ -128,7 +149,14 @@ export function putDraft(
   if (text !== '') {
     table[cardId] = text
   }
-  const cards = Object.keys(table)
+  /*
+    **押し出しの対象はカードの書きかけだけ**（メモ設計§8-1）。
+
+    メモの予約鍵を押し出すと、**カードを20枚開いただけで全体メモの書きかけが消える**——
+    あちらは「どの画面からでも開く1つ」なので、カードの枚数と寿命が連動する理由が無い。
+    上限はカードの側にだけ効かせる。
+  */
+  const cards = Object.keys(table).filter((key) => !isMemoDraftKey(key))
   for (const old of cards.slice(0, Math.max(0, cards.length - MAX_DRAFTS))) {
     delete table[old]
   }

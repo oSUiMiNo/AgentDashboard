@@ -228,3 +228,50 @@ describe('読み書きの回数', () => {
     expect(readDraft('card-9' as CardId, 'alice')).toBe('あと')
   })
 })
+
+/*
+  **メモの予約鍵**（メモ設計§8-1）。
+
+  ここは**型では守れない**。`CardId` は `string` の素の別名なので
+  `readDraft('global', …)` は型が通り、宛先の union に `assertNever` を置いても
+  この入口には効かない。**守っているのはこの2本だけ**である。
+*/
+describe('メモの予約鍵', () => {
+  beforeEach(() => {
+    globalThis.localStorage?.clear()
+  })
+
+  it('全体メモの鍵は、カードのID と衝突しない', () => {
+    const card = '11111111-2222-3333-4444-555555555555'
+    putDraft(card, null, 'カードの書きかけ')
+    putDraft('global', null, '全体メモの書きかけ')
+
+    // **別々の箱に入る。** 片方がもう片方を上書きしない
+    expect(readDraft(card, null)).toBe('カードの書きかけ')
+    expect(readDraft('global', null)).toBe('全体メモの書きかけ')
+  })
+
+  it('カードを上限より多く開いても、全体メモの書きかけは消えない', () => {
+    /*
+      **押し出しの対象はカードだけ**。全体メモは「どの画面からでも開く1つ」なので、
+      **カードの枚数と寿命が連動する理由が無い**。ここが守られていないと、
+      カードを20枚開いただけで書きかけが黙って消える。
+    */
+    putDraft('global', null, '消えては困る')
+    for (let i = 0; i < MAX_DRAFTS + 5; i += 1) {
+      putDraft(`card-${i}`, null, `${i}`)
+    }
+
+    expect(readDraft('global', null)).toBe('消えては困る')
+    // カードの側はちゃんと押し出されている（上限が効かなくなったわけではない）
+    expect(readDraft('card-0', null)).toBe('')
+  })
+
+  it('セッション宛ての鍵も押し出されない', () => {
+    putDraft('session:s-1', null, 'セッションのメモ')
+    for (let i = 0; i < MAX_DRAFTS + 5; i += 1) {
+      putDraft(`card-${i}`, null, `${i}`)
+    }
+    expect(readDraft('session:s-1', null)).toBe('セッションのメモ')
+  })
+})

@@ -471,7 +471,7 @@ describe('全体メモの入口', () => {
   it('隣の3つと同じ段（40px）を使っている', async () => {
     render(<App />)
     const メモ = await screen.findByTestId('global-memo-toggle')
-    // **揃っていることが要件**（帯の押しボタンは同じ大きさ）。5つ目もそれに乗る
+    // **揃っていることが要件**（帯の押しボタンは同じ大きさ）。この帯の5つ目もそれに乗る
     expect(メモ.className).toContain('size-10')
   })
 })
