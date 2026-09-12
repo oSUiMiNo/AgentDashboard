@@ -1547,12 +1547,17 @@ pub async fn session_reorder(
 /// 知らないキー・読めない値は、受け付ける形の一覧を添えて断る（引数の誤り＝exit 2 の族）。
 pub fn settings_update_body(key: &str, value: &str) -> Result<String, String> {
     const BOOL_KEYS: [&str; 2] = ["always_bypass_permissions", "project_autostart_session"];
-    const NUMBER_KEYS: [&str; 3] = [
+    // **メモの2つは綴りを直書きせず定数で指す。** 上の3つは古くからの直書きだが、
+    // ここを増やすたびに綴りが2箇所へ散る——`ACCOUNT_KEYS` 側と食い違っても
+    // コンパイルは通ってしまう
+    const NUMBER_KEYS: [&str; 5] = [
         "sync_interval_secs",
         "screen_interval_ms",
         "scrollback_lines",
+        server_core::db::settings::MEMO_RETENTION_DAYS,
+        server_core::db::settings::MEMO_MAX_BYTES,
     ];
-    let listing = "受け付けるキー：always_bypass_permissions / project_autostart_session（true・false）、sync_interval_secs / screen_interval_ms / scrollback_lines（数値）、motion_quiet（lively・calm・still）、lan_password（文字列）";
+    let listing = "受け付けるキー：always_bypass_permissions / project_autostart_session（true・false）、sync_interval_secs / screen_interval_ms / scrollback_lines / memo_retention_days / memo_max_bytes（数値）、motion_quiet（lively・calm・still）、lan_password（文字列）";
     let json_value = if BOOL_KEYS.contains(&key) {
         match value {
             "true" => serde_json::Value::Bool(true),
@@ -1982,6 +1987,8 @@ mod tests {
             match key {
                 settings::ALWAYS_BYPASS_PERMISSIONS | settings::PROJECT_AUTOSTART_SESSION => "true",
                 settings::MOTION_QUIET => settings::DEFAULT_MOTION_QUIET,
+                // 容量は下限が 1MiB なので "20" では通らない。**桁の違う値が要る**
+                settings::MEMO_MAX_BYTES => "1073741824",
                 _ => "20",
             }
         };

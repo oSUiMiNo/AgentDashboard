@@ -19,6 +19,7 @@
 
 pub mod entity;
 mod migration;
+pub mod memos;
 pub mod notices;
 pub mod pairing;
 pub mod projects;

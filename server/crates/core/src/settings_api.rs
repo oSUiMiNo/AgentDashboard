@@ -515,8 +515,12 @@ async fn api_export(
             .is_some_and(|store| store.always_bypass_permissions()),
     )
     .await;
+    let memo_limits = db::settings::memo_limits(state.auth.db(), identity.account_id)
+        .await
+        .unwrap_or_default();
     download(server_core::portable::exported(
         intervals,
+        memo_limits,
         always_bypass,
         db::settings::project_autostart_session(state.auth.db(), identity.account_id).await,
         &db::settings::motion_quiet(state.auth.db(), identity.account_id).await,
@@ -577,8 +581,12 @@ async fn api_server_export(
         .await
         .unwrap_or_default();
     let always_bypass = db::settings::always_bypass_or(hub.db(), identity.account_id, false).await;
+    let memo_limits = db::settings::memo_limits(hub.db(), identity.account_id)
+        .await
+        .unwrap_or_default();
     download(server_core::portable::exported(
         intervals,
+        memo_limits,
         always_bypass,
         db::settings::project_autostart_session(hub.db(), identity.account_id).await,
         &db::settings::motion_quiet(hub.db(), identity.account_id).await,

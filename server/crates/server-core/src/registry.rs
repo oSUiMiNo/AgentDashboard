@@ -390,6 +390,10 @@ impl SessionRegistry {
             notice_limits.max_rows,
         );
 
+        // **メモの掃除も同じ場所で起こす。** 呼び出し側に任せると忘れる（メモ設計§11）。
+        // 保持日数はアカウントごとの設定なので、ここで渡すのは**行が無いときの初期値**
+        db::memos::start_sweeper(db.clone(), db::settings::DEFAULT_MEMO_RETENTION_DAYS);
+
         Ok(Arc::new(Self {
             db,
             records: Mutex::new(records),

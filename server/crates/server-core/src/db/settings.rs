@@ -93,18 +93,35 @@ pub const LAN_PASSWORD_HASH: &str = "lan_password_hash";
 pub const UPDATE_CHECK_ENABLED: &str = "update_check_enabled";
 pub const DEFAULT_UPDATE_CHECK_ENABLED: bool = true;
 
+/// メモを残しておく日数（メモ設計§11-2）。**行が無ければ既定。**
+///
+/// **既定はファイル側（`config.rs` の添付の保持日数）と同じ 90 日**にしてある。
+/// 添付はファイルなので PC 側、メモは記録なのでサーバ側——**置き場所は別だが、
+/// 利用者から見れば同じ「3か月で消える」なので、数字を揃えないと嘘になる。**
+pub const MEMO_RETENTION_DAYS: &str = "memo_retention_days";
+pub const DEFAULT_MEMO_RETENTION_DAYS: u64 = 90;
+
+/// メモが抱える画像の合計の上限（メモ設計§11-2）。**使うのは画像のフェーズから。**
+///
+/// 先に置いてあるのは、**要件10 が期間と容量を1組で「設定で調整可能」と定めている**
+/// ため。片方だけ設定画面に出ると、もう片方は変えられない値に見える。
+pub const MEMO_MAX_BYTES: &str = "memo_max_bytes";
+pub const DEFAULT_MEMO_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+
 /// アカウントに属する設定のキー（持ち出し設計§7）。**書き出す対象はこれで決まる。**
 ///
 /// サーバ全体スコープのもの（LAN パスワード・更新確認）はここに入らないので、
 /// **秘密が持ち出しへ混ざる余地が構造的に無い**。裏返すと、**アカウントスコープへ
 /// 秘密を置いてはいけない**——ここが持ち出しの対象そのものになる。
-pub const ACCOUNT_KEYS: [&str; 6] = [
+pub const ACCOUNT_KEYS: [&str; 8] = [
     ALWAYS_BYPASS_PERMISSIONS,
     PROJECT_AUTOSTART_SESSION,
     SYNC_INTERVAL_SECS,
     SCREEN_INTERVAL_MS,
     SCROLLBACK_LINES,
     MOTION_QUIET,
+    MEMO_RETENTION_DAYS,
+    MEMO_MAX_BYTES,
 ];
 
 /// 入れてよい間隔の範囲。画面の選択肢を含む、余裕のある幅にしてある。
@@ -114,6 +131,16 @@ pub const ACCOUNT_KEYS: [&str; 6] = [
 pub const SYNC_INTERVAL_SECS_RANGE: std::ops::RangeInclusive<u64> = 1..=86_400;
 pub const SCREEN_INTERVAL_MS_RANGE: std::ops::RangeInclusive<u64> = 10..=600_000;
 pub const SCROLLBACK_LINES_RANGE: std::ops::RangeInclusive<u64> = 1..=1_000_000;
+
+/// メモの保持と容量に入れてよい範囲（要件10）。
+///
+/// **上限は期間12か月・容量 20GB。** 下限で 0 を弾いているのは、**「無期限」「無制限」に
+/// あたる値を作らせないため**——要件が「これはあくまで作業のための一時的なメモ機能なので
+/// 無期限と無制限は必要無い」と明記している。容量の下限を 1MiB にしているのは、
+/// **書いた先から消える設定を作れてしまうと、壊れているのと見分けが付かない**ため。
+pub const MEMO_RETENTION_DAYS_RANGE: std::ops::RangeInclusive<u64> = 1..=365;
+pub const MEMO_MAX_BYTES_RANGE: std::ops::RangeInclusive<u64> =
+    1024 * 1024..=20 * 1024 * 1024 * 1024;
 
 /// その値を入れてよいか。**入口が違っても同じ答えになる**ように、検査はここ1か所に置く
 /// （持ち出し設計§9）。
@@ -142,6 +169,8 @@ pub fn check(key: &str, value: &serde_json::Value) -> Result<(), String> {
         SYNC_INTERVAL_SECS => number(&SYNC_INTERVAL_SECS_RANGE),
         SCREEN_INTERVAL_MS => number(&SCREEN_INTERVAL_MS_RANGE),
         SCROLLBACK_LINES => number(&SCROLLBACK_LINES_RANGE),
+        MEMO_RETENTION_DAYS => number(&MEMO_RETENTION_DAYS_RANGE),
+        MEMO_MAX_BYTES => number(&MEMO_MAX_BYTES_RANGE),
         // 3段のうちどれか。**受けたふりをしない**——知らない綴りを黙って入れると、
         // 画面は既定へ落として描くので「設定したのに効かない」だけに見える
         MOTION_QUIET => match value.as_str() {
@@ -256,6 +285,78 @@ pub async fn put_intervals(
         put(db, account, key, serde_json::json!(value)).await?;
     }
     Ok(())
+}
+
+/// メモの保持の一式（メモ設計§11-2）。**期間と容量を1組で扱う。**
+///
+/// `Intervals` と同じ形にしてあるのは、**片方だけ書き換える呼び出しを作らせない**ため。
+/// 要件10 が期間と容量を1組で「設定で調整可能」と定めており、画面にも並んで出る。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoLimits {
+    pub retention_days: u64,
+    pub max_bytes: u64,
+}
+
+impl Default for MemoLimits {
+    fn default() -> Self {
+        Self {
+            retention_days: DEFAULT_MEMO_RETENTION_DAYS,
+            max_bytes: DEFAULT_MEMO_MAX_BYTES,
+        }
+    }
+}
+
+/// メモの保持を読む。**行が無ければ既定で埋めて返す。**
+///
+/// `intervals` と同じく、**型が合わない値が入っていたら既定のままにする**——壊れた1つが
+/// 他まで巻き添えにすると、利用者からは「設定画面が開かない」に見える。
+pub async fn memo_limits(db: &DatabaseConnection, account: Uuid) -> Result<MemoLimits, DbErr> {
+    let mut limits = MemoLimits::default();
+    for (key, slot) in [
+        (MEMO_RETENTION_DAYS, &mut limits.retention_days),
+        (MEMO_MAX_BYTES, &mut limits.max_bytes),
+    ] {
+        if let Some(value) = get(db, account, key).await?
+            && let Some(number) = value.as_u64()
+        {
+            *slot = number;
+        }
+    }
+    Ok(limits)
+}
+
+/// メモの保持を2つまとめて書く。**1つずつ書く形を呼び出し側に持たせない**
+/// （`put_intervals` と同じ理由——書く順序とキー名がそこへ散る）。
+pub async fn put_memo_limits(
+    db: &DatabaseConnection,
+    account: Uuid,
+    limits: MemoLimits,
+) -> Result<(), DbErr> {
+    for (key, value) in [
+        (MEMO_RETENTION_DAYS, limits.retention_days),
+        (MEMO_MAX_BYTES, limits.max_bytes),
+    ] {
+        put(db, account, key, serde_json::json!(value)).await?;
+    }
+    Ok(())
+}
+
+/// メモの保持日数だけを、読めなければ `fallback` で埋めて返す。
+///
+/// **掃除タスクが1時間ごとに呼ぶ**ので、失敗を返して止めない（`always_bypass_or` と
+/// 同じ作法）。記録が読めない事故と「まだ選んでいない」で落とし先が同じである。
+pub async fn memo_retention_days_or(
+    db: &DatabaseConnection,
+    account: Uuid,
+    fallback: u64,
+) -> u64 {
+    match memo_limits(db, account).await {
+        Ok(limits) => limits.retention_days,
+        Err(err) => {
+            tracing::warn!("メモの保持日数を読めません: {err}");
+            fallback
+        }
+    }
 }
 
 /// 権限確認スキップの既定。**選んでいなければ `None`**。
@@ -438,8 +539,8 @@ mod tests {
     /// **持ち出しの対象はこの並びで決まる。** キーを足したらこの数も動く——
     /// 書き換え忘れると、足したキーが書き出されないまま「揃っている」ことになる。
     #[test]
-    fn アカウントの設定は6つ() {
-        assert_eq!(ACCOUNT_KEYS.len(), 6);
+    fn アカウントの設定は8つ() {
+        assert_eq!(ACCOUNT_KEYS.len(), 8);
         assert!(ACCOUNT_KEYS.contains(&PROJECT_AUTOSTART_SESSION));
         assert!(ACCOUNT_KEYS.contains(&MOTION_QUIET));
         // サーバ全体スコープのものが混ざっていないこと（混ざると秘密が持ち出しへ乗る）
@@ -451,7 +552,10 @@ mod tests {
             assert!(
                 check(key, &serde_json::json!(true)).is_ok()
                     || check(key, &serde_json::json!(20)).is_ok()
-                    || check(key, &serde_json::json!(DEFAULT_MOTION_QUIET)).is_ok(),
+                    || check(key, &serde_json::json!(DEFAULT_MOTION_QUIET)).is_ok()
+                    // 容量は下限が 1MiB なので、20 では通らない。**桁の違う値が
+                    // 要る**——ここを足さないと「check() が知らない」と読める
+                    || check(key, &serde_json::json!(DEFAULT_MEMO_MAX_BYTES)).is_ok(),
                 "{key} は check() が知らない"
             );
         }

@@ -47,6 +47,7 @@ pub struct Exported {
 /// 別のアカウントで読み込んだときに向こうの既存の値が残り、画面が一致しない。
 pub fn exported(
     intervals: Intervals,
+    memo_limits: settings::MemoLimits,
     always_bypass: bool,
     project_autostart: bool,
     motion_quiet: &str,
@@ -80,6 +81,14 @@ pub fn exported(
             (
                 settings::MOTION_QUIET.to_string(),
                 serde_json::json!(motion_quiet),
+            ),
+            (
+                settings::MEMO_RETENTION_DAYS.to_string(),
+                serde_json::json!(memo_limits.retention_days),
+            ),
+            (
+                settings::MEMO_MAX_BYTES.to_string(),
+                serde_json::json!(memo_limits.max_bytes),
             ),
         ]),
     }
@@ -230,7 +239,14 @@ mod tests {
     use super::*;
 
     fn 書き出し() -> String {
-        let exported = exported(Intervals::default(), true, true, "calm", "0.0.0-test");
+        let exported = exported(
+            Intervals::default(),
+            settings::MemoLimits::default(),
+            true,
+            true,
+            "calm",
+            "0.0.0-test",
+        );
         serde_json::to_string_pretty(&exported).expect("書き出せること")
     }
 
