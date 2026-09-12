@@ -77,6 +77,8 @@ describe('取り込みと較正', () => {
       ".power[data-busy='true']",
       '.termswitch-track {',
       '.termswitch-knob {',
+      '.ctxgauge {',
+      '\n.ctxgauge-fill {',
       'prefers-reduced-motion',
     ]) {
       expect(素.indexOf(断片), `当たらない: ${断片}`).toBeGreaterThan(-1)
@@ -283,5 +285,94 @@ describe('ターミナルのトグルは、文字を落として絵にした', (
     const 透明へ = (本体.match(/transparent/g) ?? []).length
     expect(混ぜた).toBeGreaterThan(0)
     expect(透明へ).toBe(混ぜた)
+  })
+})
+
+describe('コンテキストの使い具合の帯（コンテキスト残量設計§6）', () => {
+  const 静けさ = "[data-quiet='calm'] .ctxgauge-fill"
+
+  it('塗りの色が、進行中の色（`DESIGN.md` §11.2 Primary Accent）と同じである', () => {
+    /*
+      **電源の輪と同じ判定である。** コンテキストが積み上がるのは会話が進んだ結果
+      なので、「進行中」という**同じ言葉で説明できる**——軸が違うことは色を分ける
+      理由にならない（同 §11.2）。
+
+      **色を2箇所へ書くと、片方だけ古くなる。** 役割表を差し替えたときに
+      ここが取り残されたら、このテストが落ちて教える。
+    */
+    const 当たり = /primary:\s*\{[\s\S]*?accent:\s*'([^']+)'/.exec(PROTOCOL)
+    expect(当たり, 'protocol.ts の primary.accent を拾えていない').not.toBeNull()
+    expect(素).toContain(`--ctxgauge-fill: ${当たり?.[1]}`)
+    expect(宣言('\n.ctxgauge-fill {', 'background')).toBe('var(--ctxgauge-fill)')
+  })
+
+  it('しきい値で色を差し替えていない', () => {
+    /*
+      **「減ったら琥珀・危なくなったら赤」を入れない。** 一覧では琥珀が
+      「あなたの番」、コーラルが「エラー」に埋まっているので、**残量が減っただけの
+      カードが「あなたの番」に見える**（同 §11.2 が「別の軸だから」を名指しで禁止）。
+
+      分けたいなら**形か位置で**——ここでは長さで表している。
+    */
+    expect(素, '帯の色を段階で切り替える規則が在る').not.toMatch(
+      /\.ctxgauge[a-z-]*\[data-(level|zone|danger)/,
+    )
+  })
+
+  it('色を抜いていない（無彩色だけで描いていない）', () => {
+    /*
+      **天井だけを見ると、実装はゼロへ落ちる。** §8.3・§11.3 が「抑制だけを課したら
+      色が丸ごと抜けて全部白一色になった」を実測の事故として記録しており、
+      §34.5 の「暗いIDE化」判定の最後は**抑制のしすぎ側**（ほぼ単色）である。
+
+      **「固定する」と「抜かない」は対で守る。**
+    */
+    const 塗り = 宣言('\n.ctxgauge-fill {', 'background')
+    expect(塗り).not.toBe('currentColor')
+    expect(塗り).not.toMatch(/var\(--color-(muted|border|foreground)/)
+  })
+
+  it('長さを演出で作っていない（幅そのものが値である）', () => {
+    // 演出は「変わるときの見せ方」だけに使う。**演出を止めた結果として値が
+    // 分からなくなってはいけない**（§6）
+    expect(宣言('\n.ctxgauge-fill {', 'transition')).toContain('inline-size')
+    expect(素, '帯の長さをアニメーションで作っている').not.toMatch(
+      /\.ctxgauge-fill\s*\{[^}]*animation:/,
+    )
+  })
+
+  it('静けさと OS の設定で、伸び縮みが止まる', () => {
+    expect(素.indexOf(静けさ)).toBeGreaterThan(-1)
+    expect(素).toContain("[data-quiet='still'] .ctxgauge-fill")
+    expect(素).toMatch(/prefers-reduced-motion[\s\S]*ctxgauge-fill/)
+  })
+
+  it('打ち消しが、打ち消される規則より後ろに在る', () => {
+    // **ここが構造で決まる壊れ方。** `transition` を打ち消しより後ろへ足すと、
+    // 詳細度が同じぶん**無言で効かなくなる**
+    expect(位置(静けさ)).toBeGreaterThan(位置('\n.ctxgauge-fill {'))
+    expect(位置('prefers-reduced-motion')).toBeGreaterThan(位置(静けさ))
+  })
+
+  it('止めても色と長さは残る（消さない）', () => {
+    // 静けさを選んでも「いまどれだけ使っているか」は読めなければならない
+    const at = 位置(静けさ)
+    const 本体 = 素.slice(素.indexOf('{', at), 素.indexOf('}', 素.indexOf('{', at)))
+    expect(本体).toContain('transition: none')
+    expect(本体).not.toContain('display: none')
+    expect(本体).not.toContain('background')
+  })
+
+  it('光を撒いていない（§27.1「常時 Glow させない」）', () => {
+    const at = 位置('\n.ctxgauge-fill {')
+    const 本体 = 素.slice(素.indexOf('{', at), 素.indexOf('}', 素.indexOf('{', at)))
+    expect(本体).not.toContain('box-shadow')
+  })
+
+  it('見た目の宣言は1箇所しか無い（カード側へ写していない）', () => {
+    // フェーズ5 でカードにも出すなら、**写さずにクラス名を付ける**
+    // ——`controls.css` は `index.css` から取り込まれて全画面に効く
+    const tile = 読む('tile.css').replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(tile, '.ctxgauge の見た目が tile.css へ写っている').not.toMatch(/\.ctxgauge\s*\{/)
   })
 })

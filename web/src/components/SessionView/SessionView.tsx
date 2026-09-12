@@ -34,6 +34,7 @@ import { ModelPicker } from '@/components/ModelPicker/ModelPicker'
 import { PermissionModePicker } from '@/components/PermissionModePicker/PermissionModePicker'
 import { TerminalPane } from '@/components/TerminalPane/TerminalPane'
 import { TranscriptTree } from '@/components/TranscriptTree/TranscriptTree'
+import { formatTokens } from '@/lib/contextUsage'
 import { dropDraft } from '@/lib/drafts'
 import { useSnapToFile } from '@/lib/snapToFile'
 import { formatElapsed, formatScreenInterval } from '@/lib/time'
@@ -56,7 +57,7 @@ import { useFilesPanel } from '@/lib/filesPanel'
 import { projectDisplayName } from '@/lib/path'
 import { backTargetFor, HOME, projectPath, sessionPath } from '@/lib/routes'
 import { hostOf } from '@/lib/reviveBudget'
-import type { CardId, SessionMeta } from '@/lib/protocol'
+import type { CardId, ContextUsage, SessionMeta } from '@/lib/protocol'
 import { useNow } from '@/lib/sessions'
 import { useAuthStore } from '@/stores/auth'
 import {
@@ -630,6 +631,25 @@ export function SessionView({
 
               **更新間隔もこの行へ。** ターミナルの話なので、トグルの隣が意味のまとまりに合う。
             */}
+            {/*
+              **コンテキストの使い具合はここ**（コンテキスト残量設計§6）。
+
+              **1行目には置かない。** あちらは「いまどうなっているか」と「押すもの」の
+              行で、右端の固定幅ボタンまで既に詰まっている。**ゲージは面を持つので、
+              入れると押すものを押し出す。**
+
+              **`ml-auto` の直前に置く。** 右端の固定幅（更新間隔）から遠ざけると、
+              数字の桁が変わっても右端が動かない——`ModelPicker` を左へ寄せているのと
+              同じ理由である。
+
+              **`compact` で分岐しない**（§39.3）。`session-ops` は横並び用の分岐の外に
+              あるので、ここへ1つ置けば単独画面と横並びの両方に出る。
+
+              終了したカードでは出さない。**2行目は「このセッションの設え」の行**で、
+              終了するとモデルもモードも消える——走っていないセッションの使い具合は
+              「いまの状態」ではない。
+            */}
+            {!isEnded(session.status) && <ContextGauge usage={session.context_usage} />}
             {/* **更新間隔だけが残る。** ボタンは1行目の操作の群へ移った（設計§17-6） */}
             <div className="ml-auto shrink-0">
               <ScreenInterval
@@ -749,6 +769,72 @@ function ScreenInterval({ remote, shown }: { remote: boolean; shown: boolean }) 
       title="別の PC の画面は、何もしていない間はこの間隔で届きます（入力した直後は細かく届きます）"
     >
       更新間隔 {formatScreenInterval(intervalMs)}
+    </span>
+  )
+}
+
+/**
+ * コンテキストウィンドウの使い具合（コンテキスト残量設計§6）。
+ *
+ * # 器は出したまま、中身だけを変える
+ *
+ * `usage` が `null`（まだ分からない）のときに**器ごと消すと、値が届いた瞬間に
+ * 行の高さが動く**。届くのは既定3秒ごとなので、消す作りにすると起こした直後の
+ * カードで**一度だけガタつく**。
+ *
+ * # 「まだ分からない」と「本当に 0%」を、同じ形で描かない
+ *
+ * どちらも `width: 0` で表すと**区別が消える**——起こした直後のカードが
+ * 「空っぽ」に見えてしまう。ここでは**塗りの要素そのものを出す／出さない**で
+ * 分けており、`0%` のときは**長さ0の塗りが在る**（要素は居る）。
+ *
+ * # 判定に使うのは `usage === null` の1本だけ
+ *
+ * 起動直後と `/compact` 直後は**届く形が同じ**なので（フェーズ0 で実測）、
+ * 場合分けは要らない。**`total_input_tokens === 0` を見てはいけない**——
+ * 起動直後と「本当に 0%」が区別できなくなる。
+ */
+function ContextGauge({ usage }: { usage: ContextUsage | null }) {
+  return (
+    <span
+      data-testid="ctx-gauge"
+      data-known={usage !== null ? 'true' : 'false'}
+      className="flex shrink-0 items-center gap-1.5 text-xs"
+      title={
+        usage === null
+          ? 'コンテキストの使い具合。まだ届いていません（起こした直後と /compact の直後は空になります）'
+          : 'コンテキストの使い具合。/context の見出しと同じ数字です'
+      }
+    >
+      <span aria-hidden className="ctxgauge">
+        {/*
+          **長さは `used_percentage` をそのまま使う。自分で割り直さない**（設計§3）。
+          分子と分母は両方届くので割ろうと思えば割れるが、丸めているのは CLI 側で、
+          こちらで割り直すと**丸めが二重になり `/context` の表示と1ずれる**。
+        */}
+        {usage !== null && (
+          <span
+            className="ctxgauge-fill"
+            style={{ inlineSize: `${usage.used_percentage}%` }}
+          />
+        )}
+      </span>
+      <span className="text-muted-foreground tabular-nums">
+        {usage === null ? '—' : `${usage.used_percentage}%`}
+      </span>
+      {/*
+        実数は**従**（要件）。**最後にパーセントが動いた時点の値**なので最大1%ぶん
+        古いが、これは意図した取引である（設計§3）——新しさを上げようとして
+        関門を細かくすると、3秒ごとの配信が戻ってくる。
+      */}
+      {usage !== null && (
+        <span
+          data-testid="ctx-gauge-raw"
+          className="text-muted-foreground/70 tabular-nums"
+        >
+          {formatTokens(usage.total_input_tokens)} / {formatTokens(usage.context_window_size)}
+        </span>
+      )}
     </span>
   )
 }

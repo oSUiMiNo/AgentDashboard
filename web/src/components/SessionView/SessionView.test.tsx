@@ -500,6 +500,9 @@ describe('SessionView の操作列は、区画の真上', () => {
         'zoom-toggle',
         'power-card',
         'close-card',
+        // コンテキストの使い具合も**セッションに効くもの**（コンテキスト残量設計§6）。
+        // `compact` で分岐していないので、1箇所置けば両方に出る
+        'ctx-gauge',
       ]) {
         expect(列の中(目印), `${目印} が操作列の外に居る（compact=${compact}）`).toBe(true)
       }
@@ -1051,5 +1054,183 @@ describe('単独のセッション専用画面には掴み手を出さない', (
     cleanup()
     renderView({ compact: true })
     expect(screen.queryByTestId('reorder-handle')).toBeNull()
+  })
+})
+
+describe('コンテキストの使い具合（コンテキスト残量設計§6）', () => {
+  function show(session: SessionMeta, compact = false) {
+    clearSessions()
+    applySessionSnapshot([session])
+    renderView({ compact })
+  }
+
+  /** 器の中に塗りが居るか。**「長さ0」ではなく「要素の有無」で見る** */
+  function 塗りが居る(): boolean {
+    return screen.getByTestId('ctx-gauge').querySelector('.ctxgauge-fill') !== null
+  }
+
+  it('2行目に居る（1行目の押すものを押し出さない）', () => {
+    /*
+      1行目は「いまどうなっているか」と「押すもの」の行で、右端の固定幅ボタンまで
+      既に詰まっている。**面を持つゲージをそこへ入れると、押すものを押し出す。**
+    */
+    show(meta())
+    expect(
+      screen.getByTestId('ctx-gauge').closest('[data-row]')?.getAttribute('data-row'),
+    ).toBe('2')
+  })
+
+  it('まだ分からないときは、器だけ出して塗らない', () => {
+    /*
+      **`0%` と同じ形で描かない。** どちらも `width: 0` で表すと区別が消え、
+      **起こした直後のカードが「空っぽ」に見える**。器を消さないのは、値が届いた
+      瞬間に行の高さが動くのを避けるため。
+    */
+    show(meta({ context_usage: null }))
+    expect(screen.getByTestId('ctx-gauge')).toHaveAttribute('data-known', 'false')
+    expect(塗りが居る(), 'まだ分からないのに塗りが居る').toBe(false)
+    expect(screen.getByTestId('ctx-gauge')).toHaveTextContent('—')
+    expect(screen.queryByTestId('ctx-gauge-raw'), '実数まで出ている').toBeNull()
+  })
+
+  it('本当に 0% のときは、長さ0の塗りが居る', () => {
+    // **ここが「まだ分からない」との分かれ目。** 要素の有無で分けている
+    show(
+      meta({
+        context_usage: {
+          used_percentage: 0,
+          total_input_tokens: 0,
+          context_window_size: 1_000_000,
+        },
+      }),
+    )
+    expect(screen.getByTestId('ctx-gauge')).toHaveAttribute('data-known', 'true')
+    expect(塗りが居る(), '0% なのに塗りが居ない').toBe(true)
+    expect(screen.getByTestId('ctx-gauge')).toHaveTextContent('0%')
+  })
+
+  it('入れて・見えて・消える（助っ人の既定値で空振りしないこと）', () => {
+    /*
+      **`meta()` は `context_usage: null` を既定で入れる。** そのため「まだ分からない」
+      だけを確かめると、**実装が値を1度も扱わなくてもテストが通る**。
+      値を入れて見えることまで確かめて初めて、空振りでなくなる。
+    */
+    show(meta({ context_usage: null }))
+    expect(塗りが居る()).toBe(false)
+    cleanup()
+
+    show(
+      meta({
+        context_usage: {
+          used_percentage: 24,
+          total_input_tokens: 241_479,
+          context_window_size: 1_000_000,
+        },
+      }),
+    )
+    expect(塗りが居る()).toBe(true)
+    cleanup()
+
+    show(meta({ context_usage: null }))
+    expect(塗りが居る()).toBe(false)
+  })
+
+  it('`/context` の見出しと同じ形で出す', () => {
+    // 実測した見出しは `241.5k / 1m tokens (24%)`。**利用者が突き合わせるのはここ**
+    show(
+      meta({
+        context_usage: {
+          used_percentage: 24,
+          total_input_tokens: 241_479,
+          context_window_size: 1_000_000,
+        },
+      }),
+    )
+    expect(screen.getByTestId('ctx-gauge')).toHaveTextContent('24%')
+    // 実数は従
+    expect(screen.getByTestId('ctx-gauge-raw')).toHaveTextContent('241.5k / 1m')
+  })
+
+  it('`used_percentage` をそのまま出す（自分で割り直さない）', () => {
+    /*
+      **割り直すと答えが変わる組を流す。** 分子と分母から出すと `24.6%` で、
+      四捨五入すれば `25%`——`used_percentage` をそのまま使ったときの `24%` と
+      食い違う。**割り直していれば、このテストが落ちる。**
+
+      丸めているのは CLI 側で、こちらで割り直すと**丸めが二重になり `/context` の
+      表示と1ずれる**（設計§3）。利用者が確かめるのは「`/context` の数字と一致するか」
+      なので、**ここがそのまま合否になる。**
+
+      なお実測では割合と実数がここまで食い違う組は出ていない。**食い違わせてあるのは、
+      実装がどちらを見ているかを分けるためである**——一致した組だけを流すと、
+      割り直す実装でも通ってしまう（実際、最初に書いた版がそうなっていた）。
+    */
+    show(
+      meta({
+        context_usage: {
+          used_percentage: 24,
+          total_input_tokens: 246_000,
+          context_window_size: 1_000_000,
+        },
+      }),
+    )
+    expect(screen.getByTestId('ctx-gauge')).toHaveTextContent('24%')
+    expect(screen.getByTestId('ctx-gauge')).not.toHaveTextContent('25%')
+  })
+
+  it('長さは `used_percentage` そのもの', () => {
+    show(
+      meta({
+        context_usage: {
+          used_percentage: 24,
+          total_input_tokens: 241_479,
+          context_window_size: 1_000_000,
+        },
+      }),
+    )
+    const 塗り = screen.getByTestId('ctx-gauge').querySelector('.ctxgauge-fill')
+    expect(塗り).not.toBeNull()
+    expect((塗り as HTMLElement).style.inlineSize).toBe('24%')
+  })
+
+  it('値が届いても、器の数は変わらない（行の高さを動かさない）', () => {
+    /*
+      **高さそのものは jsdom で測れない**（CSS が当たらない）ので、**器の有無**で
+      代替する。器が居続けることが、高さが動かないことの前提である。
+    */
+    show(meta({ context_usage: null }))
+    const 器の数 = screen.getByTestId('ctx-gauge').querySelectorAll('.ctxgauge').length
+    cleanup()
+
+    show(
+      meta({
+        context_usage: {
+          used_percentage: 50,
+          total_input_tokens: 500_000,
+          context_window_size: 1_000_000,
+        },
+      }),
+    )
+    expect(
+      screen.getByTestId('ctx-gauge').querySelectorAll('.ctxgauge').length,
+    ).toBe(器の数)
+  })
+
+  it('終了したカードには出さない（2行目の設えごと消える）', () => {
+    /*
+      2行目は「このセッションの設え」の行で、終了するとモデルもモードも消える。
+      **走っていないセッションの使い具合は「いまの状態」ではない。**
+    */
+    show(
+      meta({
+        status: { kind: 'ended', ok: true },
+        context_usage: {
+          used_percentage: 24,
+          total_input_tokens: 241_479,
+          context_window_size: 1_000_000,
+        },
+      }),
+    )
+    expect(screen.queryByTestId('ctx-gauge')).toBeNull()
   })
 })
