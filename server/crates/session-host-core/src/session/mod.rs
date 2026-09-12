@@ -347,15 +347,26 @@ fn display_form_moved<T, K: PartialEq>(
     前.map(&表示形) != 今.map(&表示形)
 }
 
-/// コンテキスト使用率の表示形（関門の鍵）。**整数パーセント1つだけ。**
+/// コンテキスト使用率の表示形（関門の鍵）。**整数パーセントと、分母。**
 ///
-/// **実数（分子・分母）を混ぜてはいけない。** 表示粒度が 0.1k なので、混ぜると
+/// **分子（実数）を混ぜてはいけない。** 表示粒度が 0.1k なので、混ぜると
 /// 100 トークン動くたびに鍵が変わり、[`display_form_moved`] の関門が効かなくなる。
+///
+/// # 分母は鍵に入れる
+///
+/// **分母はモデルを切り替えたときしか動かない**ので、入れても3秒ごとの配信は戻らない。
+/// 入れないと、**会話がほぼ空（0〜1%）の状態でモデルを切り替えたときに踏む**——
+/// `statusLine` は新しい分母を寄越すが、パーセントは 0→0 のままなので報告が落ち、
+/// `ModelPicker` は新しいモデルを示すのに**ゲージ横は古い分母を出し続ける**
+/// （レビュー対応 対応7）。
+///
+/// 「実数は最大1%ぶん古い」という割り切り（下記）は**同じ分母の中の古さの話**で、
+/// **別モデルの分母を出すことは含んでいない。**
 ///
 /// **関門のテストはこの関数を通して書く。** テスト側に同じ形の鍵を書き写すと、
 /// ここを変えてもテストが落ちない——**守っているつもりの検査が空になる**。
-fn context_display_form(usage: &ContextUsage) -> u8 {
-    usage.used_percentage
+fn context_display_form(usage: &ContextUsage) -> (u8, u64) {
+    (usage.used_percentage, usage.context_window_size)
 }
 
 /// 関門の本体。**画面に出る形が動いていれば控えて `true`、動いていなければ何もせず `false`。**
@@ -4225,7 +4236,7 @@ mod tests {
             "compact で分からなくなったら報告すること"
         );
         assert!(
-            !display_form_moved::<ContextUsage, u8>(None, None, context_display_form),
+            !display_form_moved::<ContextUsage, (u8, u64)>(None, None, context_display_form),
             "分からないままなら報告しないこと"
         );
     }
@@ -4333,9 +4344,58 @@ mod tests {
         };
 
         assert_eq!(
-            context_display_form(&届いた),
+            context_display_form(&届いた).0,
             31,
             "自分で割り直さず、CLI が寄越した値をそのまま使うこと"
+        );
+    }
+
+    /// **分母だけが変わった報告を、関門が落とさないこと**（レビュー対応 対応7）。
+    ///
+    /// 会話がほぼ空（0〜1%）の状態でモデルを切り替えると踏む。`statusLine` は新しい
+    /// 分母を寄越すが、パーセントは 0→0 のままなので、鍵にパーセントしか入っていないと
+    /// 報告が落ちる——**`ModelPicker` は新しいモデルを示すのに、ゲージ横は古い分母を
+    /// 出し続ける。**
+    #[test]
+    fn 分母だけ変わった報告は落とさない() {
+        let 切替前 = ContextUsage {
+            used_percentage: 0,
+            total_input_tokens: 0,
+            context_window_size: 200_000,
+        };
+        let 切替後 = ContextUsage {
+            used_percentage: 0,
+            total_input_tokens: 0,
+            // 拡張コンテキストのモデルへ切り替えた
+            context_window_size: 1_000_000,
+        };
+
+        assert!(
+            display_form_moved(Some(&切替前), Some(&切替後), context_display_form),
+            "パーセントが同じでも、分母が変われば報告すること"
+        );
+    }
+
+    /// **分母も同じなら、これまでどおり落ちること**（関門が効いていること）。
+    ///
+    /// 分母を鍵へ入れたせいで関門が素通しになっていないかを見る。分母は
+    /// モデルを切り替えたときしか動かないので、3秒ごとの配信は戻らない。
+    #[test]
+    fn 分母もパーセントも同じなら落ちる() {
+        let 同じ = ContextUsage {
+            used_percentage: 24,
+            total_input_tokens: 240_000,
+            context_window_size: 1_000_000,
+        };
+        // **実数だけが動いた形。** 鍵に分子は入っていないので落ちる
+        let 実数だけ動いた = ContextUsage {
+            total_input_tokens: 241_500,
+            ..同じ
+        };
+
+        assert!(
+            !display_form_moved(Some(&同じ), Some(&実数だけ動いた), context_display_form),
+            "パーセントと分母が同じなら、実数が動いても落ちること"
         );
     }
 }

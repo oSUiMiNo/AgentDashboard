@@ -150,9 +150,14 @@ pub async fn receive_model(
     //
     // 返り値（配る必要があったか）をここで使わないのは、**配るのは向こうの仕事**
     // だから。控えた値が正本で、動いたときだけ軽い便が出る（コンテキスト残量設計§2）
-    state
-        .manager
-        .apply_context_usage(&session, read_context_usage(&payload));
+    match read_context_usage(&payload) {
+        ContextRead::Read(usage) => {
+            state.manager.apply_context_usage(&session, usage);
+        }
+        // **読めなかったときは触らない。** 控えた値をそのまま残す——ここで
+        // `None` を渡すと、壊れた POST 1回でゲージが消える
+        ContextRead::Unreadable => {}
+    }
 
     let Some(id) = payload
         .get("model")
@@ -197,12 +202,34 @@ pub async fn receive_model(
 /// 分子と分母は両方届くので割ろうと思えば割れるが、**割ってはいけない**。丸めているのは
 /// CLI 側で、こちらで割り直すと丸めが二重になり `/context` の表示と1ずれる
 /// （コンテキスト残量設計§3）。
-fn read_context_usage(payload: &Value) -> Option<ContextUsage> {
-    let window = payload.get("context_window")?;
-    // **ここが「まだ分からない」の判定。** 割合が読めないなら、ほかが揃っていても `None`
-    let used_percentage = window.get("used_percentage").and_then(Value::as_u64)?;
-    Some(ContextUsage {
-        used_percentage: used_percentage.min(u64::from(u8::MAX)) as u8,
+fn read_context_usage(payload: &Value) -> ContextRead {
+    let Some(window) = payload.get("context_window") else {
+        // **欄ごと無い。** 壊れた JSON（`Value::Null`）もここへ落ちる。
+        // 「読めなかった」であって「値が無い」ではない
+        return ContextRead::Unreadable;
+    };
+    let Some(raw) = window.get("used_percentage") else {
+        return ContextRead::Unreadable;
+    };
+    if raw.is_null() {
+        // **ここが「まだ分からない」の判定。** 起動直後と `/compact` 直後は、
+        // どちらも割合が `null` で届く（フェーズ0 で実測）
+        return ContextRead::Read(None);
+    }
+    // **`as_f64` で受けて丸める**（コンテキスト残量設計§3）。`as_u64` だけで読むと、
+    // CLI の版が上がって `24.0` や `24.5` の形を吐いた瞬間、**全セッションのゲージが
+    // 恒久的に消える**——同じ payload から読むモデル名は動き続けるので、
+    // 「機能が消えた」という症状だけが残って原因が追えない。
+    //
+    // 実測では小数が1件も来ないが（フェーズ0・30サンプル）、**それはいまの版が
+    // そうだったという事実**であって、次の版がそうである保証ではない
+    let Some(percentage) = raw.as_f64() else {
+        // **読めない形（文字列など）。** 黙って消すと症状だけが残るので、1度だけ残す
+        warn_unreadable_percentage(raw);
+        return ContextRead::Unreadable;
+    };
+    ContextRead::Read(Some(ContextUsage {
+        used_percentage: percentage.round().clamp(0.0, f64::from(u8::MAX)) as u8,
         // 実数は鍵に入れない（設計§3）。読めないときは 0 として扱う——画面は割合を
         // 主に出すので、実数が欠けてもゲージは成立する
         total_input_tokens: window
@@ -213,7 +240,53 @@ fn read_context_usage(payload: &Value) -> Option<ContextUsage> {
             .get("context_window_size")
             .and_then(Value::as_u64)
             .unwrap_or(0),
-    })
+    }))
+}
+
+/// 読めない形で届いたことを、**同じ形が続くあいだ1度だけ**残す。
+///
+/// **毎回出すと3秒ごとに溢れる**（`statusLine` の周期）。形が変わったときだけ出せば、
+/// 「いつから読めなくなったか」は残り、量は増えない。
+fn warn_unreadable_percentage(raw: &Value) {
+    use std::sync::Mutex;
+    static 直前の形: Mutex<Option<String>> = Mutex::new(None);
+    // 値そのものではなく**型の名前**で見る。値で見ると、読めない値が毎回違う形
+    // （連番など）で来たときに溢れる
+    let 形 = match raw {
+        Value::String(_) => "string",
+        Value::Bool(_) => "bool",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+        // 数と null は上で捌いているので、ここへは来ない
+        _ => "other",
+    };
+    let mut 直前 = 直前の形.lock().expect("ロックが壊れていない");
+    if 直前.as_deref() == Some(形) {
+        return;
+    }
+    *直前 = Some(形.to_string());
+    tracing::warn!(
+        shape = 形,
+        "statusLine の used_percentage が読めない形で届きました。ゲージは据え置きます"
+    );
+}
+
+/// `statusLine` の payload から使い具合を読んだ結果。
+///
+/// # なぜ2段にするのか
+///
+/// **「割合が `null` で届いた」と「payload が読めなかった」は別物である。** 前者は
+/// `/compact` 直後の正しい経路で、控えた値を消すのが正しい。後者は壊れた JSON や
+/// 欄ごと無い形で、**消してはいけない**——1回の不正な POST で控えていた値が飛び、
+/// ゲージが一瞬「—」になって次の便で戻る、という点滅になる。
+///
+/// `Option<ContextUsage>` のままだと、この2つが同じ `None` に潰れる。**モデル側は
+/// 早期 return で前の値を保っている**ので、使用率だけが非対称だった。
+enum ContextRead {
+    /// 読めた。`None` は「割合が `null` で届いた」（起動直後と `/compact` 直後）
+    Read(Option<ContextUsage>),
+    /// **payload が読めなかった。控えた値を消さない**
+    Unreadable,
 }
 
 #[cfg(test)]
@@ -221,6 +294,20 @@ mod tests {
     #![allow(non_snake_case)]
 
     use super::*;
+
+    /// 読めた値を取り出す。**`Unreadable` はここで落とす**——テストが
+    /// 「読めなかった」を「値が無い」と取り違えないように、別の口にしてある
+    fn 読めた(result: ContextRead) -> Option<ContextUsage> {
+        match result {
+            ContextRead::Read(usage) => usage,
+            ContextRead::Unreadable => panic!("読める形のはずが Unreadable でした"),
+        }
+    }
+
+    /// 「読めなかった」かどうか。**控えた値を消さない側**である
+    fn 読めない(result: &ContextRead) -> bool {
+        matches!(result, ContextRead::Unreadable)
+    }
 
     /// 実測した payload の形（フェーズ0。値そのものは持ち込まない）。
     fn 実測の形(context_window: &str) -> Value {
@@ -244,7 +331,7 @@ mod tests {
                  "context_window_size": 1000000 }"#,
         );
 
-        let usage = read_context_usage(&payload).expect("読めること");
+        let usage = 読めた(read_context_usage(&payload)).expect("読めること");
         assert_eq!(usage.used_percentage, 24);
         assert_eq!(usage.total_input_tokens, 241_500);
         assert_eq!(usage.context_window_size, 1_000_000);
@@ -262,8 +349,9 @@ mod tests {
                  "context_window_size": 1000000 }"#,
         );
 
-        assert!(
-            read_context_usage(&payload).is_none(),
+        assert_eq!(
+            読めた(read_context_usage(&payload)),
+            None,
             "割合が null なら、分母が入っていても「まだ分からない」であること"
         );
     }
@@ -279,7 +367,8 @@ mod tests {
                  "context_window_size": 1000000 }"#,
         );
 
-        let usage = read_context_usage(&payload).expect("0% は値が届いている状態であること");
+        let usage =
+            読めた(read_context_usage(&payload)).expect("0% は値が届いている状態であること");
         assert_eq!(usage.used_percentage, 0);
     }
 
@@ -295,9 +384,11 @@ mod tests {
             r#"{"context_window": {"知らない欄": 1}}"#,
         ] {
             let value = serde_json::from_str::<Value>(payload).expect("JSON であること");
+            // **欄が無い形は「読めなかった」側**（レビュー対応 対応5）。控えた値を
+            // 消さないためで、`/compact` の `null` とは別物である
             assert!(
-                read_context_usage(&value).is_none(),
-                "{payload} で「まだ分からない」になること"
+                読めない(&read_context_usage(&value)),
+                "{payload} で「読めなかった」になること"
             );
         }
 
@@ -307,9 +398,86 @@ mod tests {
                  "context_window_size": 1000000, "あとから増えた欄": {"x": 1} }"#,
         );
         assert_eq!(
-            read_context_usage(&増えた).map(|u| u.used_percentage),
+            読めた(read_context_usage(&増えた)).map(|u| u.used_percentage),
             Some(7),
             "知らない欄は無視して読めること"
         );
+    }
+
+    /// **壊れた payload と「割合が null」を区別する**（レビュー対応 対応5）。
+    ///
+    /// 区別しないと、1回の不正な POST で控えていた値が消える。モデル側は
+    /// `model.id` が読めなければ早期 return で前の値を保っているのに、
+    /// 使用率だけが「読めなかった」を「値が無い」として扱っていた。
+    #[test]
+    fn 読めなかったことと値が無いことを区別する() {
+        // 壊れた JSON は `Value::Null` になって届く（受け口が握り潰すため）
+        assert!(
+            読めない(&read_context_usage(&Value::Null)),
+            "壊れた JSON は「読めなかった」であること"
+        );
+
+        // 欄ごと無い形も同じ
+        let 欄が無い = serde_json::json!({ "model": { "id": "claude-opus-5" } });
+        assert!(
+            読めない(&read_context_usage(&欄が無い)),
+            "context_window ごと無い形も「読めなかった」であること"
+        );
+
+        // **こちらは消してよい側。** `/compact` 直後の正しい経路
+        let compact直後 = 実測の形(
+            r#"{ "used_percentage": null, "total_input_tokens": 0,
+                 "context_window_size": 1000000 }"#,
+        );
+        assert_eq!(
+            読めた(read_context_usage(&compact直後)),
+            None,
+            "割合が null なら「値が無い」側であること"
+        );
+    }
+
+    /// **小数で届いても消えない**（レビュー対応 対応6）。
+    ///
+    /// `as_u64` だけで読んでいたので、CLI の版が上がって `24.0` を吐いた瞬間に
+    /// 全セッションのゲージが恒久的に消える形だった。実測では小数が1件も来ないが、
+    /// **それはいまの版がそうだったという事実**であって、次の版の保証ではない。
+    #[test]
+    fn 小数で届いても読める() {
+        for (形, 期待) in [
+            ("24.0", 24u8),
+            // **四捨五入**（コンテキスト残量設計§3）。`/context` の表示に最も近い側へ倒す
+            ("24.5", 25),
+            ("24.4", 24),
+            ("0.6", 1),
+        ] {
+            let payload = 実測の形(&format!(
+                r#"{{ "used_percentage": {形}, "total_input_tokens": 240000,
+                     "context_window_size": 1000000 }}"#
+            ));
+            assert_eq!(
+                読めた(read_context_usage(&payload)).map(|u| u.used_percentage),
+                Some(期待),
+                "{形} が {期待} として読めること"
+            );
+        }
+    }
+
+    /// 読めない形（文字列など）は「読めなかった」側になること。
+    ///
+    /// **黙って消すと、症状だけが残って原因が追えない**——同じ payload から読む
+    /// モデル名は動き続けるので、ゲージだけが消える。ログへ1度残す
+    /// （[`warn_unreadable_percentage`]）。
+    #[test]
+    fn 読めない形は控えた値を消さない() {
+        for 形 in [r#""24""#, "true", "[24]", "{}"] {
+            let payload = 実測の形(&format!(
+                r#"{{ "used_percentage": {形}, "total_input_tokens": 240000,
+                     "context_window_size": 1000000 }}"#
+            ));
+            assert!(
+                読めない(&read_context_usage(&payload)),
+                "{形} は「読めなかった」であること（控えた値を消さない）"
+            );
+        }
     }
 }

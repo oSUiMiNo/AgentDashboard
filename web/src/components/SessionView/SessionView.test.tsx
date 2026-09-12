@@ -1123,6 +1123,28 @@ describe('コンテキストの使い具合（コンテキスト残量設計§6�
     expect(screen.queryByTestId('ctx-gauge-raw'), '実数まで出ている').toBeNull()
   })
 
+  it('欄そのものが無い meta でも「まだ分からない」になる', () => {
+    /*
+      **欄を持たない古いサーバから来た形。** JS では `undefined` になり、
+      `usage !== null` を素通りして `undefined%` と `inlineSize: undefined%` が
+      描かれていた（レビュー対応 対応8）。
+
+      Rust 側は `#[serde(default)]` で耐性を入れてあるが、**版を上げずに済ませる
+      作りは両側が揃って初めて成り立つ**。踏むのはサーバ2台構成を1台ずつ
+      上げている最中である。
+    */
+    const 欄が無い = meta()
+    // 型の上では在る欄なので、実際に届く形（欄ごと無い）を作るには消すしかない
+    delete (欄が無い as Partial<SessionMeta>).context_usage
+    show(欄が無い)
+
+    expect(screen.getByTestId('ctx-gauge')).toHaveAttribute('data-known', 'false')
+    expect(塗りが居る(), '欄が無いのに塗りが居る').toBe(false)
+    // **`undefined%` が描かれないこと。** ここが症状そのもの
+    expect(screen.getByTestId('ctx-gauge')).not.toHaveTextContent('undefined')
+    expect(screen.getByTestId('ctx-gauge')).toHaveTextContent('—')
+  })
+
   it('本当に 0% のときは、長さ0の塗りが居る', () => {
     // **ここが「まだ分からない」との分かれ目。** 要素の有無で分けている
     show(

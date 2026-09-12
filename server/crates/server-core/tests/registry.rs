@@ -2117,6 +2117,94 @@ async fn 残量は消える向きも運ばれる() {
 /// 助っ人 `meta()` は `context_usage: None` を入れて組み立てるので、**`None` だけを
 /// 確かめると実装が値を1度も扱わなくても通る**。途中で見えていることを挟んで、
 /// 空振りを防ぐ。
+/// **読み直しても、控えた使い具合が消えないこと**（レビュー対応 対応4）。
+///
+/// `reload_account` は `meta_from_row` で meta を組み直して手元を上書きする。
+/// 列を持たないと決めた値なので、**かぶせないと読み直しのたびに消える**——同じ関数の
+/// 中で `branched_from` と `agent_connected` が、まったく同じ理由で引き直している。
+///
+/// # 戻る道が細いので、消えると長く空く
+///
+/// 戻るのは PC が名乗り直すか、整数パーセントが動いて軽い便が再送されたときだけ。
+/// **止まっているセッションはパーセントが動かない**ので、送る側の関門が再送を
+/// 抑えたまま空欄が残る。
+#[tokio::test]
+async fn 読み直しても残量は消えない() {
+    for backend in common::backends("ctx_reload").await {
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+        let card_id = CardId::new();
+        registry.apply(&local(), upsert(card_id)).await;
+        registry
+            .apply(&local(), context_usage(card_id, Some(24)))
+            .await;
+
+        // 2拍目。ここが無いと、実装が値を1度も扱わなくても下が通る
+        assert!(
+            registry.list(server_core::db::LOCAL_ACCOUNT_ID)[0]
+                .context_usage
+                .is_some(),
+            "[{}] 読み直す前に値が乗っていること",
+            backend.name
+        );
+
+        registry
+            .reload_account(server_core::db::LOCAL_ACCOUNT_ID)
+            .await
+            .expect("読み直せること");
+
+        assert_eq!(
+            registry.list(server_core::db::LOCAL_ACCOUNT_ID)[0]
+                .context_usage
+                .map(|u| u.used_percentage),
+            Some(24),
+            "[{}] 読み直しで値が消えている（引き直しが漏れている）",
+            backend.name
+        );
+    }
+}
+
+/// **手元に記録が無いカードでは、DB に無い値を捏造しないこと**（レビュー対応 対応4）。
+///
+/// 引き直しは `agent_connected` と同じ形——**手元の記録がある場合だけ引き継ぐ**。
+/// 別のインスタンスが持っているカードを読み直したときに、こちらの手元に無い値を
+/// でっち上げてはいけない。
+#[tokio::test]
+async fn 手元に記録が無いカードの残量は空のまま() {
+    for backend in common::backends("ctx_reload_cold").await {
+        let card_id = CardId::new();
+        {
+            let registry =
+                SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                    .await
+                    .expect("記録層を立てられること");
+            registry.apply(&local(), upsert(card_id)).await;
+            registry
+                .apply(&local(), context_usage(card_id, Some(24)))
+                .await;
+        }
+
+        // 手元を持たない別のインスタンスとして立て直す
+        let 立て直し =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("立て直せること");
+        立て直し
+            .reload_account(server_core::db::LOCAL_ACCOUNT_ID)
+            .await
+            .expect("読み直せること");
+
+        assert_eq!(
+            立て直し.list(server_core::db::LOCAL_ACCOUNT_ID)[0].context_usage,
+            None,
+            "[{}] DB に無い値を捏造している",
+            backend.name
+        );
+    }
+}
+
 #[tokio::test]
 async fn 残量は起こし直すと消えている() {
     for backend in common::backends("ctx_restart").await {

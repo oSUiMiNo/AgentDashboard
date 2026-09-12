@@ -1717,6 +1717,19 @@ impl SessionRegistry {
             meta.agent_connected = known
                 .as_ref()
                 .is_some_and(|record| record.meta().agent_connected);
+            // **コンテキストの使い具合も引き直す**（コンテキスト残量設計§4）。列を持たない
+            // と決めた値なので `meta_from_row` は必ず `None` を返す。上の2つと同じ理由で、
+            // かぶせないと**読み直しのたびに消える**。
+            //
+            // **戻る道が細いので、消えると長く空く。** 戻るのは PC が名乗り直すか、
+            // 整数パーセントが動いて軽い便が再送されたときだけ——**止まっている
+            // セッションはパーセントが動かない**ので、送る側の関門が再送を抑えたまま
+            // 空欄が残る。
+            //
+            // **手元に記録がある場合だけ引き継ぐ。** DB に無い値を捏造しない
+            meta.context_usage = known
+                .as_ref()
+                .and_then(|record| record.meta().context_usage);
             let record = match known {
                 Some(record) => record,
                 None => self.record_for(account_id, card_id).await?,

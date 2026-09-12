@@ -683,7 +683,17 @@ export function SessionView({
               終了するとモデルもモードも消える——走っていないセッションの使い具合は
               「いまの状態」ではない。
             */}
-            {!isEnded(session.status) && <ContextGauge usage={session.context_usage} />}
+            {!isEnded(session.status) && (
+              // **`?? null` を落とさない。** 欄を持たない古いサーバから来た meta は
+              // JS では `undefined` になり、`usage !== null` を素通りして
+              // `undefined%` が描かれる。Rust 側は `#[serde(default)]` で耐性を
+              // 入れてあるが、**版を上げずに済ませる作りは両側が揃って初めて成り立つ**
+              // （レビュー対応 対応8。同じファイルの `message.kind ?? 'other'` と同じ形）。
+              //
+              // **入口で寄せる。** 型を `| undefined` に広げると、`undefined` を扱う
+              // 責任が読む側すべてに散る
+              <ContextGauge usage={session.context_usage ?? null} />
+            )}
             {/* **更新間隔だけが残る。** ボタンは1行目の操作の群へ移った（設計§17-6） */}
             <div className="ml-auto shrink-0">
               <ScreenInterval
