@@ -255,3 +255,46 @@ describe('消す道', () => {
     expect(memoRemove).toHaveBeenCalledWith('あ')
   })
 })
+
+/*
+  **書いて送る道**（要件1・要件4）。
+
+  面の中でいちばん使われる動きなので、**確定が口まで届くこと**をここで固定する。
+  Ctrl+Enter は入力欄・ターミナルと同じ述語（`isComposerSubmit`）を通っている。
+*/
+describe('書いて送る', () => {
+  it('空のまま Ctrl+Enter を押しても送らない', () => {
+    const memoAdd = vi.fn()
+    useWsStore.setState({ memoAdd })
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" />)
+
+    fireEvent.keyDown(screen.getByTestId('memo-compose'), {
+      key: 'Enter',
+      ctrlKey: true,
+    })
+    // **空を積まない。** 押し間違いで空の吹き出しが増えない
+    expect(memoAdd).not.toHaveBeenCalled()
+  })
+
+  it('Ctrl を伴わない Enter では送らない（ブロックを割る側）', () => {
+    const memoAdd = vi.fn()
+    useWsStore.setState({ memoAdd })
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" />)
+
+    fireEvent.keyDown(screen.getByTestId('memo-compose'), { key: 'Enter' })
+    expect(memoAdd).not.toHaveBeenCalled()
+  })
+
+  it('変換中の Ctrl+Enter では送らない（IME の確定と取り違えない）', () => {
+    const memoAdd = vi.fn()
+    useWsStore.setState({ memoAdd })
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" />)
+
+    fireEvent.keyDown(screen.getByTestId('memo-compose'), {
+      key: 'Enter',
+      ctrlKey: true,
+      isComposing: true,
+    })
+    expect(memoAdd).not.toHaveBeenCalled()
+  })
+})
