@@ -282,7 +282,18 @@ export function foldDecision(text: string, kind: FoldKind): FoldDecision {
   //
   // **会話履歴の写しも同じ扱いである**（設計§12-2）。しきい値が3行しかないので、
   // ここで猶予（5行）を当てると**8行まで畳まれない**——線を狭めた意味が消える。
-  if (kind === 'machine_message' || kind === 'machine_history') {
+  if (
+    kind === 'machine_message' ||
+    kind === 'machine_history' ||
+    // **`/context` の描き替えもここへ入れる**（レビュー対応 対応3）。入っていないと
+    // 下の腕へ流れ、**実物（12,422文字）は `BODY_FOLD_LINES_EXCESSIVE` の腕に落ちて
+    // 10行で畳まれる**——絵を上に出したうえで原文が10行見えるので、同じ数字が
+    // 二重に出る。`CONTEXT_USAGE_FOLD_LINES` は一度も使われていなかった。
+    //
+    // **8行以下のほうは原則が破れていた。** 猶予（5行）に当たってまったく畳まれず、
+    // 「機械が入れたものは無条件に畳む」を1種だけすり抜けていた
+    kind === 'machine_context_usage'
+  ) {
     return total > first ? { fold: true, lines: first } : { fold: false, lines: total }
   }
   if (total > BODY_FOLD_LINES_EXCESSIVE) {

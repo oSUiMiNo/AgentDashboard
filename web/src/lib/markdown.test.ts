@@ -26,6 +26,7 @@ import {
   splitSoftBreaks,
   summarizeInput,
 } from './markdown'
+import { CONTEXT_USAGE_FOLD_LINES } from '@/lib/machineMessage'
 
 /**
  * 本文の畳み方と `<br>` の読み替え（テスト計画フェーズ2）。
@@ -455,6 +456,59 @@ describe('実効行数の数え方', () => {
 function linesOf(count: number): string {
   return Array.from({ length: count }, () => 'あ').join('\n')
 }
+
+describe('/context の描き替えは、実効行数によらず畳む（レビュー対応 対応3）', () => {
+  /*
+    **`machine_context_usage` が「機械が入れたものは無条件に畳む」分岐へ入っていなかった。**
+    下の腕へ流れるので、実効行数によって3通りに割れていた。
+
+    | 実効行数 | 起きていたこと | 意図 |
+    |---|---|---|
+    | 200行超（実物は 12,422 文字） | 度を超えて長い扱いで **10行**に畳まれる | 3行 |
+    | 9〜200行 | 猶予つきで 3行（意図どおり） | 3行 |
+    | 8行以下 | 猶予に当たり、**まったく畳まれない** | 畳む |
+
+    **これまでの材料は20行しか無く、真ん中の帯しか踏んでいなかった。** 3つとも置く。
+  */
+
+  it('実物の長さ（200行超）でも 3行に畳む', () => {
+    // ここが本命。**絵を上に出したうえで原文が10行見えると、同じ数字が二重に出る**
+    const decision = foldDecision(linesOf(BODY_FOLD_LINES_EXCESSIVE + 1), 'machine_context_usage')
+    expect(decision.fold).toBe(true)
+    expect(decision.lines).toBe(CONTEXT_USAGE_FOLD_LINES)
+  })
+
+  it('8行以下でも畳む（猶予を当てない）', () => {
+    // **「機械が入れたものは無条件に畳む」を1種だけすり抜けていた**
+    const decision = foldDecision(linesOf(CONTEXT_USAGE_FOLD_LINES + 1), 'machine_context_usage')
+    expect(decision.fold).toBe(true)
+    expect(decision.lines).toBe(CONTEXT_USAGE_FOLD_LINES)
+  })
+
+  it('しきい値ちょうどなら畳まない（縮まないので）', () => {
+    expect(foldDecision(linesOf(CONTEXT_USAGE_FOLD_LINES), 'machine_context_usage').fold).toBe(
+      false,
+    )
+  })
+
+  it('機械の発言と履歴の写しは、これまでどおり', () => {
+    // **同じ分岐に相乗りしたので、隣を壊していないことを見る。**
+    // この腕の約束は「**縮むなら畳む**（猶予を当てない）」で、しきい値ちょうどでは
+    // 畳まない——3種とも同じ形であることを、それぞれのしきい値で確かめる
+    for (const kind of ['machine_message', 'machine_history', 'machine_context_usage'] as const) {
+      const しきい値 = foldLinesFor(kind)
+      expect(foldDecision(linesOf(しきい値 + 1), kind).fold, `${kind}: 1行超えても畳まれない`).toBe(
+        true,
+      )
+      expect(foldDecision(linesOf(しきい値), kind).fold, `${kind}: ちょうどで畳まれる`).toBe(false)
+      // **度を超えて長い側の腕へ流れていないこと。** 流れると 10行に畳まれる
+      expect(
+        foldDecision(linesOf(BODY_FOLD_LINES_EXCESSIVE + 1), kind).lines,
+        `${kind}: 実物の長さで別の腕へ流れている`,
+      ).toBe(しきい値)
+    }
+  })
+})
 
 describe('しきい値の3段と猶予', () => {
   const 境目 = BODY_FOLD_LINES + BODY_FOLD_GRACE_LINES

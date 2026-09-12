@@ -61,6 +61,17 @@ const MODEL_LINE = /^\*\*Model:\*\*\s*(.+?)\s*$/m
 const CATEGORY_ROW = /^\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([\d.]+)%\s*\|\s*$/
 
 /**
+ * 内訳の節の見出し。実物は `### Estimated usage by category`。
+ *
+ * **ここから次の見出しまでを内訳とする**（レビュー対応 対応9）。文書全体を走査すると
+ * 末尾の3表まで拾ってしまう。
+ */
+const CATEGORY_HEADING = /^###\s+Estimated usage by category\s*$/m
+
+/** 次の見出し。内訳の節の終わりを決める。 */
+const NEXT_HEADING = /^#{1,3}\s+/m
+
+/**
  * `/context` の報告を読み取る。読めなければ `null`。
  *
  * **合計が読めることを必須にする。** 内訳だけあっても、何に対する割合かが分からない
@@ -85,10 +96,36 @@ export function readContextReport(text: string): ContextReport | null {
   }
 }
 
+/**
+ * 内訳の節だけを切り出す（レビュー対応 対応9）。
+ *
+ * **文書全体を走査すると、末尾の3表まで内訳として拾う。** MCP ツール78個・
+ * カスタムエージェント9個・スキル138個が3列（割合つき）で並んでいれば、
+ * **225行が内訳の絵に並ぶ**——畳むどころか、絵のほうが原文より長くなる。
+ * 要件はあの3表を「既定で畳む」と定めているので、絵へ出すのは筋が通らない。
+ *
+ * **壊れて見えるのではなく、長いまま出る**形の失敗なので、材料が2列だと気づけない。
+ * いまの検査材料の末尾表は2列で、実物が何列なのかは誰も確かめていない
+ * （実物には利用者のツール名が並ぶので、公開リポジトリへ持ち込まない判断）。
+ *
+ * **節が見つからなければ空でよい。** 「内訳が無くても合計が読めれば出す」という
+ * 倒れ方は、もとから変えていない。
+ */
+function categorySection(text: string): string {
+  const start = CATEGORY_HEADING.exec(text)
+  if (!start) {
+    return ''
+  }
+  const rest = text.slice(start.index + start[0].length)
+  // 次の見出しまで。**`###` で切る**——内訳の節の中に `####` は現れない
+  const end = NEXT_HEADING.exec(rest)
+  return end ? rest.slice(0, end.index) : rest
+}
+
 /** 内訳の表を読む。**読めた行だけを集める**——1行崩れても残りは出す。 */
 function readCategories(text: string): ContextCategory[] {
   const found: ContextCategory[] = []
-  for (const line of text.split('\n')) {
+  for (const line of categorySection(text).split('\n')) {
     const row = CATEGORY_ROW.exec(line)
     if (!row) {
       continue
