@@ -579,6 +579,7 @@ mod tests {
             position: 0,
             nickname: None,
             branched_from: None,
+            context_usage: None,
         }
     }
 

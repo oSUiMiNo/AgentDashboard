@@ -2257,6 +2257,7 @@ fn placeholder_meta(card_id: CardId) -> SessionMeta {
         position: 0,
         nickname: None,
         branched_from: None,
+        context_usage: None,
     }
 }
 
@@ -2286,5 +2287,6 @@ fn meta_from_row(row: entity::sessions::Model) -> SessionMeta {
         position: row.position,
         nickname: None,
         branched_from: None,
+        context_usage: None,
     }
 }

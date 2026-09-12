@@ -357,6 +357,45 @@ pub enum SessionStatus {
     Unknown,
 }
 
+/// コンテキストウィンドウの使い具合（コンテキスト残量設計§5）。
+///
+/// 注入した `statusLine` が既定3秒ごとに寄越す `context_window` を、画面に出す形だけ
+/// 抜き出したもの。**新しいデータ源ではない**——いままで読まずに捨てていた欄である。
+///
+/// # 「まだ分からない」は、この型が無いことで表す
+///
+/// 割合が届かない時間帯が必ずある。**起動直後**（最初の API 応答の前）と
+/// **`/compact` の直後**（次の API 呼び出しまで）で、実測するとどちらも同じ形だった
+/// ——割合は `null` で届き、トークン数だけが `0` になる。
+///
+/// **だから `Option<ContextUsage>` の `None` が「まだ分からない」で、0% とは別物**
+/// である。ここを1つに潰すと、起こした直後のカードが「空っぽ」に見える。
+///
+/// **判定に使うのは割合が `null` であることだけ。** トークン数の `0` を見てはいけない
+/// ——見ると、起動直後と「本当に 0%」が区別できなくなる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextUsage {
+    /// CLI が出した使用率（整数パーセント）。**主に出すのはこちら**。
+    ///
+    /// # 自分で割り直さない
+    ///
+    /// 分子（[`ContextUsage::total_input_tokens`]）と分母
+    /// （[`ContextUsage::context_window_size`]）は両方届くので**割ろうと思えば割れる**が、
+    /// 割ってはいけない。**丸めているのは CLI 側**で（実測では小数が1件も来ない）、
+    /// こちらで割り直すと**丸めが二重になり `/context` の表示と1ずれる**。
+    ///
+    /// 利用者が確かめるのは「`/context` の数字と一致するか」なので、**ここが
+    /// そのまま合否になる**。
+    pub used_percentage: u8,
+    /// いまコンテキストに入っている入力トークン数（`241.5k / 1m` の左側）。
+    pub total_input_tokens: u64,
+    /// コンテキストウィンドウの上限（`241.5k / 1m` の右側）。
+    ///
+    /// **自前の表を持たないのは、この欄が届くからである。** モデルごとの上限を
+    /// こちらで持つと、モデルが増えるたびに古くなる。
+    pub context_window_size: u64,
+}
+
 /// 一覧画面の小窓1枚分の情報。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionMeta {
@@ -547,6 +586,35 @@ pub struct SessionMeta {
     /// 上げない**ので、配ってある PC はそのまま繋がり続ける。
     #[serde(default)]
     pub branched_from: Option<ClaudeSessionId>,
+    /// コンテキストウィンドウの使い具合（コンテキスト残量設計§2）。
+    ///
+    /// `None` は「**まだ分からない**」であって 0% ではない（[`ContextUsage`]）。
+    ///
+    /// # ここが値の正本である
+    ///
+    /// この値は専用の軽い便でも運ばれるが、**正本はこちら**に置く。軽い便は
+    /// 「一部だけを更新する近道」でしかないので、**別の理由で全体の報告が飛んだときに
+    /// この欄が空だと、画面のゲージがそこで「まだ分からない」へ戻ってしまう**。
+    ///
+    /// 状態（[`SessionMeta::status`]）とまったく同じ構造である——あちらも欄であり、
+    /// かつ軽い便でも運ばれる。**片方だけに持たせると、もう片方が通ったときに食い違う。**
+    ///
+    /// # なぜ記録（DB）の列にしないのか
+    ///
+    /// **保存すると値が嘘になるから。** 落ちた瞬間の使用率が残るので、起こし直した
+    /// 直後の空のセッションに前回の 87% が出る。[`SessionMeta::agent_connected`] を
+    /// 列にしていないのと同じ判断で、「古い値が有用か、嘘か」で分けている。
+    ///
+    /// **書き込み量の話ではない**（記録は呼ばれれば行ごと書き直す）。回数を減らすのは
+    /// セッションホスト側の関門の仕事で、こちらとは別の理由である。
+    ///
+    /// # なぜ `#[serde(default)]` を書くのか
+    ///
+    /// **欄を持たない古い版の名乗りを `None` として受けるため。** これがあるので
+    /// **版（`A2S_VERSION`）を上げなくてよい**——配ってある PC はそのまま繋がり、
+    /// 新しい PC からだけこの欄が届く。**必須の欄にすると、この耐性がそのまま消える。**
+    #[serde(default)]
+    pub context_usage: Option<ContextUsage>,
 }
 
 /// 利用者が付けたものの**宛先**（名前付け設計§3-2）。
@@ -987,6 +1055,7 @@ mod tests {
             position: 0,
             nickname: None,
             branched_from: None,
+            context_usage: None,
         }
     }
 
@@ -1066,6 +1135,7 @@ mod tests {
             position: 0,
             nickname: None,
             branched_from: None,
+            context_usage: None,
         };
         assert_eq!(roundtrip(&meta), meta);
     }
@@ -1098,10 +1168,11 @@ mod tests {
             position: 0,
             nickname: None,
             branched_from: None,
+            context_usage: None,
         };
         assert_eq!(
             serde_json::to_string(&meta).unwrap(),
-            r#"{"card_id":"00000000-0000-0000-0000-000000000001","project":"/p","claude_session_id":null,"resumed_from":null,"permission_mode":null,"model":null,"model_label":null,"model_requested":null,"status":{"kind":"working"},"subagent_active":0,"last_activity_at":1,"last_assistant_message":null,"created_at":1,"hooks_seen":false,"agent_id":null,"agent_connected":true,"account":null,"toml_account":null,"session_title":null,"position":0,"nickname":null,"branched_from":null}"#
+            r#"{"card_id":"00000000-0000-0000-0000-000000000001","project":"/p","claude_session_id":null,"resumed_from":null,"permission_mode":null,"model":null,"model_label":null,"model_requested":null,"status":{"kind":"working"},"subagent_active":0,"last_activity_at":1,"last_assistant_message":null,"created_at":1,"hooks_seen":false,"agent_id":null,"agent_connected":true,"account":null,"toml_account":null,"session_title":null,"position":0,"nickname":null,"branched_from":null,"context_usage":null}"#
         );
     }
 
@@ -1426,6 +1497,7 @@ mod tests {
                 position: 0,
                 nickname: None,
                 branched_from: None,
+                context_usage: None,
             }
         };
         let back = roundtrip(&meta);
@@ -1485,6 +1557,7 @@ mod tests {
             position: 0,
             nickname: None,
             branched_from: None,
+            context_usage: None,
         };
         let back = roundtrip(&meta);
         assert_eq!(back.model, meta.model);
@@ -1522,6 +1595,7 @@ mod tests {
             position: 0,
             nickname: None,
             branched_from: None,
+            context_usage: None,
         };
         let text = serde_json::to_string(&meta).unwrap();
         assert!(text.contains(r#""model":null"#), "実際: {text}");

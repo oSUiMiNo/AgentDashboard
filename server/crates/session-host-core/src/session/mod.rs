@@ -2686,6 +2686,7 @@ impl SessionManager {
                 position: 0,
                 nickname: None,
                 branched_from: None,
+                context_usage: None,
             }),
             process,
             ring: Mutex::new(RingBuffer::new(self.config.pty_ring_buffer)),
