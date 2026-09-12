@@ -1362,6 +1362,30 @@ describe('札と復旧ボタンが物質を持つ（フェーズ20）', () => {
     expect(並び).toEqual(['nickname-edit', 'archive-card', 'power-tile'])
   })
 
+  it('メモは先頭に来る（押しても何も変えないから）', () => {
+    /*
+      **取り返しの付く順の続き**（メモ設計§6-3）。既存の3つはいずれも押すと何かが
+      変わる（名前が変わる・一覧から消える・claude が落ちる）が、**メモは面を開く
+      だけで記録も状態も動かさない**。だから最も先頭に来る。
+
+      **4つ目を足してよい理由は §15.2（要素は5個まで）である。** §15.3 の
+      「群は2〜3個まで」は**群の個数**——`.tile-ops` は等間隔の1列なので群は1個。
+      要素数と読むと §15.2 が意味を失う（3個までなら5個を超えようがない）。
+    */
+    renderTile(meta({ agent_connected: false, claude_session_id: 'sess-1' }))
+    const 群 = screen.getByTestId('tile-ops')
+    const 並び = [...群.querySelectorAll('[data-testid]')].map((e) =>
+      e.getAttribute('data-testid'),
+    )
+    expect(並び).toEqual(['memo-tile', 'nickname-edit', 'archive-card', 'power-tile'])
+  })
+
+  it('元の会話のIDが無いうちは、メモの印を出さない', () => {
+    // 紐づけ先が無いので読む中身も無い（設計 分かれ道1）
+    renderTile(meta({ agent_connected: false, claude_session_id: null }))
+    expect(screen.queryByTestId('memo-tile')).toBeNull()
+  })
+
   it('ゴミ箱はカードを外す（履歴は残る）', async () => {
     const archive = vi.fn()
     useWsStore.setState({ archive })

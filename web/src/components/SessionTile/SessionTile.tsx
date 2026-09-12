@@ -50,7 +50,10 @@ import { motion } from 'motion/react'
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { Badge } from '@/components/ui/badge'
-import { PencilGlyph, TrashGlyph } from '@/components/ui/glyphs'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { MemoPane } from '@/components/MemoPane/MemoPane'
+import { sessionTarget } from '@/lib/annotationTarget'
+import { NoteGlyph, PencilGlyph, TrashGlyph } from '@/components/ui/glyphs'
 import { dropDraft } from '@/lib/drafts'
 import { useAuthStore } from '@/stores/auth'
 import { NoticeBell } from '@/components/NoticeBell/NoticeBell'
@@ -990,6 +993,62 @@ export function SessionTile({
           §15.1 の「主要操作は1つだけ塗る」もここに効く——塗るのは電源だけである。
         */
         <div className="tile-ops" data-testid="tile-ops" data-no-grab="">
+          {/*
+            **メモは先頭**（メモ設計§6-3）。並びが「取り返しの付く順」なので、
+            **押しても何も変えないもの**が最も先頭に来る——既存の3つはいずれも押すと
+            何かが変わる（名前が変わる・一覧から消える・claude が落ちる）。
+
+            # 4つ目を足してよい理由（一度取り消して、読み直した）
+
+            **上限を決めているのは §15.2（要素は5個まで）であって、§15.3 ではない。**
+            §15.3 の「群は2〜3個まで」は**群の個数**である——直前の行が「間隔で群を
+            切る」で、節の題が「区切りは線より間隔」だから、**間隔で切ってできた塊の
+            数**を言っている。要素数と読むと「3個までなら5個を超えようがない」ので
+            **§15.2 が意味を失う。**
+
+            実物でも裏が取れる：`tile.css` の `.tile-ops` は等間隔の1列（`gap: 6px`）で、
+            **間隔で複数の塊に割れていない＝群は1個**。したがって要素4個（≤5）・
+            群1個（≤3）で、どちらにも当たらない。
+
+            **平常時の幅を取らない。** `tile.css` が既定で `opacity: 0` かつ
+            `pointer-events` を切り、選ばれているときと中に焦点があるときに出す。
+            `:hover` は「マウスを持つ環境」の中だけなので、**スマホは長押し → 選ぶ →
+            出る**。4つ目を足すだけで作法が効く（相方と 2026-09-13 合意）。
+          */}
+          {session.claude_session_id !== null && (
+            <Popover>
+              <PopoverTrigger asChild>
+                <button
+                  type="button"
+                  data-testid="memo-tile"
+                  data-no-grab=""
+                  title="このセッションのメモ"
+                  aria-label="このセッションのメモ"
+                  onClick={(event) => {
+                    // カードを開く動きへ伝えない（隣の3つと同じ作法）
+                    event.stopPropagation()
+                  }}
+                >
+                  <NoteGlyph className="size-4" />
+                </button>
+              </PopoverTrigger>
+              <PopoverContent
+                data-no-grab=""
+                className="w-80"
+                onClick={(event) => event.stopPropagation()}
+              >
+                {/*
+                  **一覧から開く面は読むだけ**（要件7「押すと吹き出しでメモが読める」）。
+                  書くのはセッションの区画とセッション専用画面から。
+                */}
+                <MemoPane
+                  target={sessionTarget(session.claude_session_id)}
+                  readOnly
+                  label="このセッションのメモ"
+                />
+              </PopoverContent>
+            </Popover>
+          )}
           <button
             type="button"
             data-testid="nickname-edit"
