@@ -110,6 +110,39 @@ describe('直すときにも貼れる（要件2）', () => {
   })
 })
 
+describe('いつ消えるかの表示（要件10・設計§11-3）', () => {
+  it('**設定で変えた値が文言に出る。** 固定文言に戻すと落ちる', async () => {
+    const { useSettingsStore } = await import('@/stores/settings')
+    const { settingsFixture } = await import('@/test/fixtures')
+
+    useSettingsStore.setState({
+      settings: settingsFixture({
+        memo_limits: { retention_days: 30, max_bytes: 1024 * 1024 * 1024 },
+      }),
+    })
+    render(<MemoPane target={sessionTarget('s-1')} label="このセッションのメモ" />)
+
+    /*
+      **90日のまま「3か月」と書いてあると、30日へ縮めた人には3倍の嘘になる**
+      （設計§11-3 が名指しで禁じている形）。文言を固定へ戻しても画面は動くので、
+      **機械は何も言わない**——ここで固定する。
+    */
+    const note = screen.getByTestId('memo-retention-note')
+    expect(note.textContent).toContain('1か月')
+    expect(note.textContent).not.toContain('3か月')
+  })
+
+  it('既定（90日）なら3か月と出る', async () => {
+    const { useSettingsStore } = await import('@/stores/settings')
+    const { settingsFixture } = await import('@/test/fixtures')
+
+    useSettingsStore.setState({ settings: settingsFixture() })
+    render(<MemoPane target={sessionTarget('s-1')} label="このセッションのメモ" />)
+
+    expect(screen.getByTestId('memo-retention-note').textContent).toContain('3か月')
+  })
+})
+
 describe('版切替の門（設計§8-2）', () => {
   it('運んでいる間は札が上がり、終わると下りる', () => {
     render(

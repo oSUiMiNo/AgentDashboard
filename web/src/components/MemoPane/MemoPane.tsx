@@ -31,9 +31,11 @@ import { markComposerBusy } from '@/lib/composerBusy'
 import { useDraft } from '@/lib/drafts'
 import { REHYPE_PLUGINS, REMARK_PLUGINS } from '@/lib/markdown'
 import { readMemoBody, sameMemoBody } from '@/lib/memoBody'
+import { 消えるまでの字 } from '@/lib/memoRetention'
 import { 画像を運ぶ as 一枚運ぶ, type 画像の置き場所 } from '@/lib/memoImage'
 import type { AnnotationTarget, MemoView } from '@/lib/protocol'
 import { useAuthStore } from '@/stores/auth'
+import { useSettingsStore } from '@/stores/settings'
 import { splitMemos, useMemos } from '@/stores/memos'
 import { useWsStore } from '@/stores/ws'
 import { MemoEditor } from './MemoEditor'
@@ -101,6 +103,14 @@ export function MemoPane({ target, readOnly = false, label, 保存先 }: Props) 
   */
   const account = useAuthStore((state) => state.auth.account)
   const [書きかけ, set書きかけ] = useDraft(key, account)
+
+  /*
+    **いつ消えるかは設定から引く**（設計§11-3）。**固定文言にしない**——
+    90日を30日へ縮めた人に「3か月で消えます」と言うと、3倍の嘘になる。
+  */
+  const 消えるまで = 消えるまでの字(
+    useSettingsStore((state) => state.settings.memo_limits.retention_days),
+  )
 
   /*
     **画像を運ぶ道**（設計§10-1）。保存先を渡されたときだけ組み立てる。
@@ -223,8 +233,13 @@ export function MemoPane({ target, readOnly = false, label, 保存先 }: Props) 
               set送った回数((前) => 前 + 1)
             }}
           />
-          <p className="text-muted-foreground mt-1 text-[0.65rem]">
-            Ctrl+Enter で送ります。最終更新から3か月経つと自動で消えます。
+          <p
+            data-testid="memo-retention-note"
+            className="text-muted-foreground mt-1 text-[0.65rem]"
+          >
+            Ctrl+Enter で送ります。
+            {消えるまで !== '' &&
+              `最終更新から${消えるまで}経つと自動で消えます。`}
           </p>
         </div>
       )}

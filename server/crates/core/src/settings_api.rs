@@ -70,6 +70,33 @@ pub struct SettingsView {
     pub intervals: IntervalsView,
     /// LAN 開放のパスワード（設計§8-3）。**ローカルモードでしか意味を持たない**
     pub lan_password: LanPasswordView,
+    /// メモと画像をどれだけ残すか（メモ設計§11-2・§11-3）。
+    ///
+    /// **画面が文言を出すために要る。** 要件10 は「3か月で消えます」的な説明を
+    /// メモの面へ出すことを求めており、設計§11-3 は**設定で変えた値を反映する**ことを
+    /// 定めている——**固定文言にすると、設定を変えた人に嘘を言う**。
+    ///
+    /// 持ち出し（`/api/settings/export`）は前から運んでいたが、**画面が読む口には
+    /// 載っていなかった**。値の出どころは同じ `db::settings::memo_limits` である。
+    pub memo_limits: MemoLimitsView,
+}
+
+/// メモと画像の保持（メモ設計§11-1）。
+#[derive(Debug, Serialize)]
+pub struct MemoLimitsView {
+    /// 何日残すか。**画面の「N か月で消えます」はこれを日から月へ直して出す**
+    pub retention_days: u64,
+    /// 画像を含めた合計の上限。**超えたら同意を取ってから古い順に消す**（§10-2）
+    pub max_bytes: u64,
+}
+
+impl From<db::settings::MemoLimits> for MemoLimitsView {
+    fn from(limits: db::settings::MemoLimits) -> Self {
+        Self {
+            retention_days: limits.retention_days,
+            max_bytes: limits.max_bytes,
+        }
+    }
 }
 
 /// 画面から変えられる間隔（設計§13-3）。
@@ -204,6 +231,10 @@ async fn api_server_settings(
         model_tables,
         agents: server_core::account::agents_of(&hub, identity.account_id).await?,
         intervals: intervals.into(),
+        memo_limits: db::settings::memo_limits(hub.db(), identity.account_id)
+            .await
+            .unwrap_or_default()
+            .into(),
         // セルフホストの鍵はアカウントのほう（§8-3 が LAN の検査から除外している）
         lan_password: LanPasswordView {
             supported: false,
@@ -320,6 +351,10 @@ pub async fn api_settings(
         agents: server_core::account::no_agents(),
         intervals: intervals.into(),
         lan_password: lan_password_view(&state.auth, &identity).await,
+        memo_limits: db::settings::memo_limits(state.auth.db(), identity.account_id)
+            .await
+            .unwrap_or_default()
+            .into(),
     }))
 }
 
@@ -404,6 +439,10 @@ pub async fn api_update_settings(
             agents: server_core::account::no_agents(),
             intervals: intervals.into(),
             lan_password: lan_password_view(&state.auth, &identity).await,
+            memo_limits: db::settings::memo_limits(state.auth.db(), identity.account_id)
+                .await
+                .unwrap_or_default()
+                .into(),
         }));
     }
     api_settings(State(state), Extension(identity)).await

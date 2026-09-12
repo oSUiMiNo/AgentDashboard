@@ -28,6 +28,7 @@ export function settingsFixture(overrides: Partial<Settings> = {}): Settings {
       screen_interval_ms: 20000,
       scrollback_lines: 1000,
     },
+    memo_limits: { retention_days: 90, max_bytes: 1024 * 1024 * 1024 },
     lan_password: { supported: true, configured: false, editable: true },
     ...overrides,
   }

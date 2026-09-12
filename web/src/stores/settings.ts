@@ -117,6 +117,22 @@ export interface Settings {
   agents: AgentInfo[]
   intervals: Intervals
   lan_password: LanPassword
+  /**
+   * メモと画像をどれだけ残すか（メモ設計§11-2・§11-3）。
+   *
+   * **メモの面が「N か月で消えます」を出すために読む。** 設計§11-3 は
+   * **設定で変えた値を反映する**ことを定めている——固定文言にすると、
+   * 設定を変えた人に嘘を言うことになる。
+   */
+  memo_limits: MemoLimits
+}
+
+/** メモと画像の保持（メモ設計§11-1）。 */
+export interface MemoLimits {
+  /** 何日残すか。既定は90日 */
+  retention_days: number
+  /** 画像を含めた合計の上限。既定は 1 GiB */
+  max_bytes: number
 }
 
 /** 触った項目だけを送る（他のタブの変更を巻き戻さないため）。 */
@@ -172,6 +188,8 @@ const FALLBACK: Settings = {
     scrollback_lines: 1000,
   },
   lan_password: { supported: false, configured: false, editable: false },
+  // **サーバの既定と同じ値を書く**（90日・1 GiB）。引く前に面が開いても嘘を言わない
+  memo_limits: { retention_days: 90, max_bytes: 1024 * 1024 * 1024 },
 }
 
 /** ローカルモードのモデル表のキー（設計§13-4）。 */
