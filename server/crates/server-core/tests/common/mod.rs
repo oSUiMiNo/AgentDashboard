@@ -220,6 +220,18 @@ impl SessionHostSocket {
             .expect("送れること");
     }
 
+    /// 型に無い報告を、そのまま線へ流す。
+    ///
+    /// **新しいセッションホストが増やした知らせ**を再現するための口である。
+    /// [`SessionHostSocket::send`] は `AgentMessage` しか受けないので、
+    /// 「サーバがまだ知らない種別」をこちらの型から作ることはできない。
+    pub async fn send_raw(&mut self, text: &str) {
+        self.socket
+            .send(tungstenite::Message::text(text.to_string()))
+            .await
+            .expect("送れること");
+    }
+
     /// 画面のフレームを送る（設計§4-3。JSON に包まずバイナリのまま）。
     pub async fn send_screen(
         &mut self,

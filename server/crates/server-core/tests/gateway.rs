@@ -311,6 +311,53 @@ async fn 報告は記録層へ入り帰属は接続が決める() {
 }
 
 #[tokio::test]
+async fn 知らない種別が来ても線は切れない() {
+    // **新しい PC ＋ 古いサーバ**の噛み合わせ（コンテキスト残量設計§2）。
+    //
+    // 版を上げずに種別を足せるのは、この耐性があるからである。ここが崩れると、
+    // **PC を先に更新した利用者の線が切れ続ける**——しかも版交渉は通っているので、
+    // 画面からは理由が分からない。
+    //
+    // 逆向き（古い PC ＋ 新しいサーバ）は、古い PC が新しい種別を**送らない**だけなので
+    // 値が来ないまま「まだ分からない」で成立する。試すものが無い。
+    for backend in common::backends("gw-unknown-kind").await {
+        let gateway = TestGateway::start(backend.db.clone()).await;
+        let (token, account_id) = issue(&backend.db, "みんとぶるー").await;
+        let mut socket = gateway.connect_as(&token, "仕事用ノート").await;
+        socket
+            .wait_for("名乗りの応答", |message| {
+                matches!(message, ServerToAgent::Hello { .. })
+            })
+            .await;
+
+        // 未来のセッションホストが増やした知らせ。**解釈できないが、落とさない**
+        socket
+            .send_raw(r#"{"t":"まだ知らない種別","card_id":"x"}"#)
+            .await;
+
+        // 線が生きている証拠は「**次の報告が普通に効くこと**」で見る。
+        // 落としていたら、この報告はどこにも届かない
+        let card_id = CardId::new();
+        socket
+            .send(&AgentMessage::SessionUpsert {
+                session: Box::new(meta(card_id)),
+            })
+            .await;
+
+        let listed = wait_for_listed(
+            &gateway.registry,
+            account_id,
+            "知らない種別のあとでも報告が通る",
+            |listed| listed.len() == 1,
+        )
+        .await;
+        assert_eq!(listed[0].card_id, card_id, "[{}]", backend.name);
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
 async fn 履歴のバッチは書けてから_ack_が返る() {
     // ack は「DB へ入った」の意味（設計§6-1）。ここが緩むと、セッションホストが
     // 書けていないものの位置を進めて履歴が欠ける

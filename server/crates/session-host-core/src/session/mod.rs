@@ -3340,13 +3340,26 @@ impl SessionManager {
     /// 画面に出る形が変わっていなければ何も起きない（[`Session::store_context_usage`]）。
     /// 3秒ごとに届くものをそのまま先へ流すと、セッション数ぶんの無駄が積み上がる。
     ///
-    /// # 返り値は「配る必要があるか」である
+    /// # 控えた値が正本で、便は近道である
     ///
-    /// **ここで控えた値が正本になる**（コンテキスト残量設計§2）。専用の軽い便ですぐ
-    /// 配る配線はまだ無いので、いまは**次に全体の報告が飛ぶときに一緒に運ばれる**。
-    /// 正本をこちらに置いてあるので、軽い便を足したあとも**無関係な報告で値が消えない**。
+    /// **ここで控えた値が正本になる**（コンテキスト残量設計§2）。そのうえで
+    /// [`ServerMessage::ContextUsage`] を出すのは、**記録を1行も書き換えずに配る**ため
+    /// である——全体の報告（`SessionUpsert`）で運ぶと、3秒ごとに動く値のせいで
+    /// セッション数ぶんの書き込みが積み上がる。
+    ///
+    /// **便だけに持たせてはいけない。** 正本をこちらに置いてあるので、無関係な
+    /// 全体報告が飛んでも値が消えない。便は一部だけ更新する近道であって、正本ではない。
+    ///
+    /// 返り値は「配る必要があったか」。呼び出し側が使わなくてもよい。
     pub fn apply_context_usage(&self, session: &Arc<Session>, usage: Option<ContextUsage>) -> bool {
-        session.store_context_usage(usage)
+        let changed = session.store_context_usage(usage);
+        if changed {
+            self.events.emit(ServerMessage::ContextUsage {
+                card_id: session.card_id,
+                usage,
+            });
+        }
+        changed
     }
 
     /// `statusLine` が知らせてきたモデルを取り込む（設計§4）。

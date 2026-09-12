@@ -43,6 +43,7 @@ function meta(cardId: string, overrides: Partial<SessionMeta> = {}): SessionMeta
     position: 0,
     nickname: null,
     branched_from: null,
+    context_usage: null,
     ...overrides,
   }
 }

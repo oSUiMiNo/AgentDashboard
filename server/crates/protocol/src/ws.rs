@@ -12,7 +12,9 @@
 //! 1ファイルで見渡せるようにするためと、フロントエンドとの型のズレをテストで
 //! 検出できるようにするため。ハンドラの実装は該当フェーズで足していく。
 
-use crate::{CardId, ModelId, PermissionMode, SessionMeta, SessionStatus, Timestamp, TreeNode};
+use crate::{
+    CardId, ContextUsage, ModelId, PermissionMode, SessionMeta, SessionStatus, Timestamp, TreeNode,
+};
 use serde::{Deserialize, Serialize};
 
 /// ターミナルのフロー制御の指示（設計§10 のウォーターマーク方式）。
@@ -355,6 +357,21 @@ pub enum ServerMessage {
         status: SessionStatus,
         subagent_active: u32,
         last_activity_at: Timestamp,
+    },
+    /// コンテキスト残量だけの差分更新（コンテキスト残量設計§2）。
+    ///
+    /// [`ServerMessage::Status`] と同じ「軽い便」。**記録を1行も書き換えずに配る**ために
+    /// 用意した種別で、[`ServerMessage::SessionUpsert`] で運ぶと3秒ごとに
+    /// セッション数ぶんの書き込みが積み上がる。
+    ///
+    /// `usage` が `None` のときは「**まだ分からない**」であって 0% ではない
+    /// （[`ContextUsage`]）。**消える向きも運ぶ**ので、`/compact` の直後に
+    /// ゲージが古い値のまま残ることがない。
+    ///
+    /// 正本は [`SessionMeta::context_usage`]。これは一部だけ更新する近道である。
+    ContextUsage {
+        card_id: CardId,
+        usage: Option<ContextUsage>,
     },
     /// 履歴の追記。
     ///
@@ -726,6 +743,19 @@ mod tests {
                 state: BusState::Degraded,
                 detail: Some("連絡係に繋がりません".to_string()),
             },
+            ServerMessage::ContextUsage {
+                card_id,
+                usage: Some(ContextUsage {
+                    used_percentage: 24,
+                    total_input_tokens: 241_479,
+                    context_window_size: 1_000_000,
+                }),
+            },
+            // 「まだ分からない」も運ぶ形（`/compact` の直後）
+            ServerMessage::ContextUsage {
+                card_id,
+                usage: None,
+            },
             ServerMessage::ParserStatus {
                 state: ParserState::Degraded,
                 detail: Some("パーサプロセスが応答しません".to_string()),
@@ -795,6 +825,44 @@ mod tests {
         assert_eq!(
             text,
             format!(r#"{{"t":"project_removed","project_id":"{id}"}}"#)
+        );
+    }
+
+    /// コンテキスト残量の便が、TypeScript 側と同じ JSON になること。
+    ///
+    /// **台帳（`cli_surface`）はここを見ていない。** あちらが突き合わせているのは
+    /// `ClientMessage` だけなので、`ServerMessage` に種別を足しても1つも落ちない
+    /// ——綴りを間違えても欄の形がずれても、誰も気づかない。**その穴を埋めるのが
+    /// この検査**で、`web/src/lib/protocol.test.ts` に同じ JSON を置いた対がある。
+    #[test]
+    fn コンテキスト残量の便は決まった綴りで線に乗る() {
+        let card_id = CardId::new();
+        let text = serde_json::to_string(&ServerMessage::ContextUsage {
+            card_id,
+            usage: Some(ContextUsage {
+                used_percentage: 24,
+                total_input_tokens: 241_479,
+                context_window_size: 1_000_000,
+            }),
+        })
+        .unwrap();
+        assert_eq!(
+            text,
+            format!(
+                r#"{{"t":"context_usage","card_id":"{card_id}","usage":{{"used_percentage":24,"total_input_tokens":241479,"context_window_size":1000000}}}}"#
+            )
+        );
+
+        // **「まだ分からない」は `null` で線に乗る。欄ごと消えるのではない。**
+        // 消える形にすると、受け取る側で「欄が無い」と「値が無い」が混ざる
+        let text = serde_json::to_string(&ServerMessage::ContextUsage {
+            card_id,
+            usage: None,
+        })
+        .unwrap();
+        assert_eq!(
+            text,
+            format!(r#"{{"t":"context_usage","card_id":"{card_id}","usage":null}}"#)
         );
     }
 

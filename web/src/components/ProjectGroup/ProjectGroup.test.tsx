@@ -75,6 +75,7 @@ function meta(cardId: string): SessionMeta {
     position: 0,
     nickname: null,
     branched_from: null,
+    context_usage: null,
   }
 }
 

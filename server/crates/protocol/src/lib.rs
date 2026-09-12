@@ -1177,6 +1177,48 @@ mod tests {
     }
 
     #[test]
+    fn 残量の欄が無い報告も受かる() {
+        /*
+            **版を上げずに欄を足すための約束**（コンテキスト残量設計§2）。この欄を
+            知らない古いセッションホストは送ってこないので、`#[serde(default)]` が
+            効いていないと**その PC からの報告が1件も受からなくなる**——繋がっている
+            のにカードが1枚も出ない、という形で表に出る。
+
+            **この耐性があるから A2S の版を上げずに済んでいる。** 必須欄にした瞬間、
+            古い PC と新しいサーバの組み合わせが壊れる。
+        */
+        let 欄を持たない報告 = r#"{"card_id":"00000000-0000-0000-0000-000000000001","project":"/p","claude_session_id":null,"resumed_from":null,"permission_mode":null,"model":null,"model_label":null,"model_requested":null,"status":{"kind":"working"},"subagent_active":0,"last_activity_at":1,"last_assistant_message":null,"created_at":1,"hooks_seen":false,"agent_id":null,"agent_connected":true,"account":null,"toml_account":null,"session_title":null,"position":0,"nickname":null,"branched_from":null}"#;
+        let meta: SessionMeta = serde_json::from_str(欄を持たない報告).expect("欄が無くても受かる");
+        // **欄が無いことと、値が無いことは同じ扱いでよい。** どちらも「まだ分からない」
+        // であって 0% ではない
+        assert_eq!(meta.context_usage, None);
+    }
+
+    #[test]
+    fn 残量は割合と実数の両方を運ぶ() {
+        // 対になる TypeScript 側：`web/src/lib/protocol.test.ts` の
+        // `SessionMeta はコンテキスト残量を運ぶ`。
+        //
+        // **実数（分子・分母）も運ぶ**のは、画面が `241.5k / 1m` を従として出すため。
+        // 割合だけにすると、自前で割り直すことになり `/context` と1ずれる
+        let mut meta = 生きたカード();
+        meta.context_usage = Some(ContextUsage {
+            used_percentage: 24,
+            total_input_tokens: 241_479,
+            context_window_size: 1_000_000,
+        });
+        let back = roundtrip(&meta);
+        let usage = back.context_usage.expect("残量が往復する");
+        assert_eq!(usage.used_percentage, 24);
+        assert_eq!(usage.total_input_tokens, 241_479);
+        assert_eq!(usage.context_window_size, 1_000_000);
+
+        // 「まだ分からない」も往復する（`/compact` の直後・起こした直後）
+        meta.context_usage = None;
+        assert_eq!(roundtrip(&meta).context_usage, None);
+    }
+
+    #[test]
     fn session_metaは利用者が付けた名前を運ぶ() {
         // 対になる TypeScript 側：`web/src/lib/protocol.test.ts` の
         // `SessionMeta は利用者が付けた名前を運ぶ`。

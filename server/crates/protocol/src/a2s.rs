@@ -18,8 +18,8 @@
 //! （[`A2S_PROTOCOL`]）で交渉するので、upgrade の段階で拒否できる。
 
 use crate::{
-    AgentId, CardId, ModelId, PermissionMode, SessionMeta, SessionStatus, Timestamp, TreeNode,
-    ws::ErrorKind,
+    AgentId, CardId, ContextUsage, ModelId, PermissionMode, SessionMeta, SessionStatus, Timestamp,
+    TreeNode, ws::ErrorKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -276,6 +276,27 @@ pub enum AgentMessage {
         status: SessionStatus,
         subagent_active: u32,
         last_activity_at: Timestamp,
+    },
+    /// コンテキスト残量だけの差分更新（コンテキスト残量設計§2）。
+    ///
+    /// [`AgentMessage::Status`] と同じ「軽い便」で、**記録を1行も書き換えずに配る**のが
+    /// この種別を作った理由である。値は3秒ごとに動きうるので、全体の報告
+    /// （[`AgentMessage::SessionUpsert`]）で運ぶと**セッション数ぶんの書き込みが積み上がる**。
+    ///
+    /// # `Option` で運ぶ
+    ///
+    /// **値が消える向きも運ぶ必要がある。** `/compact` の直後は「まだ分からない」へ
+    /// 戻る（[`ContextUsage`]）ので、`Some` しか運べないと**畳んだあともゲージが
+    /// 古い値のまま残る**。
+    ///
+    /// # 正本はこれではない
+    ///
+    /// 正本は [`SessionMeta::context_usage`] で、これは**一部だけ更新する近道**である。
+    /// 便だけに持たせると、無関係な [`AgentMessage::SessionUpsert`] が飛んだ瞬間に
+    /// 上書きされて値が消える。
+    ContextUsage {
+        card_id: CardId,
+        usage: Option<ContextUsage>,
     },
     /// 履歴のバッチ（§6-1）。**ack が返るまで再送責任はセッションホスト側**。
     ///
@@ -676,6 +697,20 @@ mod tests {
                 subagent_active: 0,
                 last_activity_at: 1_700_000_000_000,
             },
+            AgentMessage::ContextUsage {
+                card_id,
+                usage: Some(ContextUsage {
+                    used_percentage: 24,
+                    total_input_tokens: 241_479,
+                    context_window_size: 1_000_000,
+                }),
+            },
+            // **値が消える向きも運ぶ**（`/compact` の直後）。`Some` だけを固定すると、
+            // 畳んだあとゲージが古い値のまま残る形を誰も見ていないことになる
+            AgentMessage::ContextUsage {
+                card_id,
+                usage: None,
+            },
             AgentMessage::TranscriptBatch {
                 batch_id: BatchId(7),
                 card_id,
@@ -974,6 +1009,10 @@ mod tests {
         //
         // 能力は Hello の `#[serde(default)]` な欄で足す、というのがこの PJT の作法で、
         // それが守られているかどうかは**この数字が動いていないこと**でしか見られない
+        //
+        // **種別（バリアント）を足す場合も同じで、版は上げない。** 古い受け手は
+        // 知らない札を受けても接続を保つ（`gateway.rs` と `link.rs` の Err 分岐）ので、
+        // 上げる必要が無い——上げると、その耐性が働く前に門で弾かれる
         assert_eq!(A2S_VERSION, 1);
         assert_eq!(A2S_PROTOCOL, "adash-a2s-v1");
     }

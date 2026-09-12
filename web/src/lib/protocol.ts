@@ -172,6 +172,39 @@ export interface SessionMeta {
    * 機械が書き換えてはいけない）。
    */
   branched_from: string | null
+  /**
+   * **コンテキストウィンドウの使い具合**（コンテキスト残量設計§5）。
+   *
+   * `null` は「**まだ分からない**」であって 0% ではない。起動直後（最初の API 応答の
+   * 前）と `/compact` の直後は、実測するとどちらも同じ形で割合が届かない。
+   * **ここを 0% と同じに描くと、起こした直後のカードが「空っぽ」に見える。**
+   *
+   * `?`（省略可）ではなく `| null` なのは、Rust 側が `Option` を `null` として
+   * 出すからである。`?` にすると「欄が無い」と「値が無い」が型の上で混ざる。
+   */
+  context_usage: ContextUsage | null
+}
+
+/**
+ * コンテキストウィンドウの使い具合（コンテキスト残量設計§5）。
+ *
+ * 注入した `statusLine` が既定3秒ごとに寄越す `context_window` を、画面に出す形だけ
+ * 抜き出したもの。**新しいデータ源ではない**——いままで読まずに捨てていた欄である。
+ */
+export interface ContextUsage {
+  /**
+   * CLI が出した使用率（整数パーセント）。**主に出すのはこちら**。
+   *
+   * **自分で割り直さないこと。** 分子と分母は両方届くので割ろうと思えば割れるが、
+   * 丸めているのは CLI 側で（実測では小数が1件も来ない）、こちらで割り直すと
+   * **丸めが二重になり `/context` の表示と1ずれる**。利用者が確かめるのは
+   * 「`/context` の数字と一致するか」なので、ここがそのまま合否になる。
+   */
+  used_percentage: number
+  /** いまコンテキストに入っている入力トークン数（`241.5k / 1m` の左側） */
+  total_input_tokens: number
+  /** コンテキストウィンドウの上限（`241.5k / 1m` の右側） */
+  context_window_size: number
 }
 
 /**
@@ -500,6 +533,16 @@ export type ServerMessage =
       subagent_active: number
       last_activity_at: number
     }
+  /**
+   * コンテキスト残量だけの差分更新（コンテキスト残量設計§2）。
+   *
+   * `status` と同じ「軽い便」で、記録を1行も書き換えずに配るための種別。
+   * **`usage: null` は「まだ分からない」で 0% ではない**——`/compact` の直後に
+   * ゲージが古い値のまま残らないよう、**消える向きも運ぶ**。
+   *
+   * 正本は `SessionMeta.context_usage`。これは一部だけ更新する近道である。
+   */
+  | { t: 'context_usage'; card_id: CardId; usage: ContextUsage | null }
   | { t: 'transcript_append'; card_id: CardId; nodes: TreeNode[] }
   | { t: 'transcript_reset'; card_id: CardId }
   | { t: 'parser_status'; state: 'ok' | 'degraded'; detail: string | null }

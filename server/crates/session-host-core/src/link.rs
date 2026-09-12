@@ -329,6 +329,13 @@ fn to_agent_message(event: &ServerMessage) -> Option<AgentMessage> {
             subagent_active: *subagent_active,
             last_activity_at: *last_activity_at,
         },
+        // **写しを落とすと、セルフホストで値だけが永遠に届かない。** この関数は
+        // `Option` を返すので、写し先が無い種別は黙って捨てられる——コンパイルも
+        // テストも通ってしまう（コンテキスト残量設計§2）
+        ServerMessage::ContextUsage { card_id, usage } => AgentMessage::ContextUsage {
+            card_id: *card_id,
+            usage: *usage,
+        },
         ServerMessage::ParserStatus { state, detail } => AgentMessage::ParserStatus {
             state: *state,
             detail: detail.clone(),
@@ -1700,6 +1707,53 @@ mod tests {
             .iter()
             .filter(|message| matches!(message, AgentMessage::TranscriptReset { .. }))
             .count()
+    }
+
+    #[test]
+    fn ブラウザ向けの知らせは_サーバへの報告にも写される() {
+        /*
+            **写しを落とすと、セルフホストで値だけが永遠に届かない。**
+
+            [`to_agent_message`] は `Option` を返し、写し先の無い種別を黙って捨てる。
+            つまり足し忘れても**コンパイルは通るしテストも落ちない**——ローカルモードでは
+            そのまま届くので、手元で試すぶんには動いてしまう。**セルフホストの利用者だけが
+            「出ない」と言い、こちらは再現できない。**
+
+            そこで「運ぶと決めた種別が本当に写るか」をここで数える。
+
+            履歴（`TranscriptAppend` / `TranscriptReset`）と `Hello` は**わざと写さない**
+            ので、ここには置かない（前者は ack の要る別経路、後者はブラウザ専用）。
+        */
+        let card_id = CardId::new();
+        let 運ぶと決めたもの = vec![
+            ServerMessage::ContextUsage {
+                card_id,
+                usage: Some(protocol::ContextUsage {
+                    used_percentage: 24,
+                    total_input_tokens: 241_479,
+                    context_window_size: 1_000_000,
+                }),
+            },
+            // **消える向きも運ぶ。** ここが落ちると、`/compact` の直後に
+            // ゲージが古い値のまま残る
+            ServerMessage::ContextUsage {
+                card_id,
+                usage: None,
+            },
+        ];
+
+        for event in &運ぶと決めたもの {
+            let 写し = to_agent_message(event)
+                .unwrap_or_else(|| panic!("{event:?} の写しが無い。セルフホストでは届かない"));
+            // 中身まで見る。**種別だけ合っていて欄が落ちている**形を通さない
+            match (event, &写し) {
+                (
+                    ServerMessage::ContextUsage { usage: 元, .. },
+                    AgentMessage::ContextUsage { usage: 写, .. },
+                ) => assert_eq!(元, 写, "写しで値が変わっている"),
+                _ => panic!("{event:?} が別の種別へ写っている"),
+            }
+        }
     }
 
     #[test]

@@ -74,6 +74,61 @@ describe('サーバと同じ JSON になること', () => {
     }
   })
 
+  it('コンテキスト残量の便が Rust と同じ綴りで届く', () => {
+    // Rust 側 `コンテキスト残量の便は決まった綴りで線に乗る` と対になる。
+    //
+    // **台帳（cli_surface）はここを見ていない。** あちらが突き合わせているのは
+    // ClientMessage だけなので、ServerMessage に種別を足しても1つも落ちない。
+    // 綴りが食い違っても気づけないので、この対で止める
+    const raw =
+      '{"t":"context_usage","card_id":"' +
+      CARD_ID +
+      '","usage":{"used_percentage":24,"total_input_tokens":241479,' +
+      '"context_window_size":1000000}}'
+    const message = JSON.parse(raw) as ServerMessage
+    expect(message.t).toBe('context_usage')
+    if (message.t === 'context_usage') {
+      expect(message.usage?.used_percentage).toBe(24)
+      expect(message.usage?.total_input_tokens).toBe(241479)
+      expect(message.usage?.context_window_size).toBe(1000000)
+    }
+  })
+
+  it('「まだ分からない」は usage が null で届く', () => {
+    // **キーごと消えるのではなく null。** 起こした直後と /compact の直後がこれで、
+    // 0% とは別物である。消える形にすると「欄が無い」と「値が無い」が混ざり、
+    // 畳んだあともゲージが古い値のまま残る
+    const raw =
+      '{"t":"context_usage","card_id":"' + CARD_ID + '","usage":null}'
+    const message = JSON.parse(raw) as ServerMessage
+    expect(message.t).toBe('context_usage')
+    if (message.t === 'context_usage') {
+      expect(message.usage).toBeNull()
+    }
+  })
+
+  it('SessionMeta はコンテキスト残量を運ぶ', () => {
+    // Rust 側 `残量は割合と実数の両方を運ぶ` と対になる。
+    //
+    // **正本はこちら**で、上の便は一部だけ更新する近道である。便だけに持たせると、
+    // 無関係な session_upsert が飛んだ瞬間に値が消える
+    const raw =
+      '{"card_id":"' +
+      CARD_ID +
+      '","project":"/dev/app","claude_session_id":null,' +
+      '"permission_mode":null,"status":{"kind":"working"},"subagent_active":0,' +
+      '"last_activity_at":1,"last_assistant_message":null,"created_at":1,"hooks_seen":false,' +
+      '"agent_id":null,"agent_connected":true,"account":null,"toml_account":null,' +
+      '"context_usage":{"used_percentage":24,"total_input_tokens":241479,' +
+      '"context_window_size":1000000}}'
+    const meta = JSON.parse(raw) as SessionMeta
+    expect(meta.context_usage?.used_percentage).toBe(24)
+    // **実数も運ぶ。** 割合だけにすると画面が自前で割り直すことになり、
+    // 丸めが二重になって /context の表示と1ずれる
+    expect(meta.context_usage?.total_input_tokens).toBe(241479)
+    expect(meta.context_usage?.context_window_size).toBe(1000000)
+  })
+
   it('連絡係の縮退が Rust と同じ綴りで届く', () => {
     // 綴りが食い違うと、**バナーが出ないだけで繋がっているように見える**——
     // 「片方のブラウザにだけ更新が来ない」という一番読み解きにくい状態が、
@@ -656,6 +711,7 @@ describe('状態のラベル', () => {
       position: 0,
       nickname: null,
       branched_from: null,
+      context_usage: null,
     }
     expect(isHookSilent(base)).toBe(true)
     expect(isHookSilent({ ...base, hooks_seen: true })).toBe(false)
@@ -856,6 +912,7 @@ describe('戻せるかの判定', () => {
       position: 0,
       nickname: null,
       branched_from: null,
+      context_usage: null,
       ...overrides,
     }
   }

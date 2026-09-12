@@ -471,6 +471,7 @@ describe('起こし直しと購読', () => {
         position: 0,
         nickname: null,
         branched_from: null,
+        context_usage: null,
       },
     })
 
