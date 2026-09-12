@@ -61,11 +61,13 @@ function queuedOrigin(text: string): MessageOrigin {
       return { kind: 'task_notification' }
     case 'cross_session':
       return { kind: 'peer', name: peerNameOf(text) }
-    // 写し・フックの通知・断り書きは、どれも**機械が文脈のために差し込んだもの**
+    // 写し・フックの通知・断り書き・`/context` の報告は、どれも
+    // **機械が文脈のために差し込んだもの**
     case 'history':
     case 'stop_hook':
     case 'local_command_caveat':
     case 'local_command_stdout':
+    case 'context_usage':
       return { kind: 'injected' }
     default:
       return { kind: 'unmarked' }

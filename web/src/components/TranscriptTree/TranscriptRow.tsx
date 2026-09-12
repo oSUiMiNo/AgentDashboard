@@ -67,6 +67,9 @@ import {
 } from '@/lib/messageOrigin'
 import type { ActivityRow, FlatRow, NodeRow, QueuedMoreRow, RewoundRow } from '@/stores/transcript'
 import { toggleCommand } from '@/stores/transcript'
+import { machineShapeOf } from '@/lib/machineMessage'
+import { readContextReport } from '@/lib/contextReport'
+import { ContextUsageCard } from './ContextUsageCard'
 import { SlashCommandLine } from './SlashCommandLine'
 
 interface Props {
@@ -499,6 +502,31 @@ function SlashCommandHead({
   )
 }
 
+/**
+ * `/context` の報告なら、先頭を絵にして `head` へ出す。**それ以外の行では何も描かない。**
+ *
+ * # 二段で倒れる
+ *
+ * 1. **そもそも `/context` の報告か**（`machineShapeOf`）——違えば `null`
+ * 2. **中身が読めたか**（`readContextReport`）——読めなければ `null`
+ *
+ * 2つ目が要るのは、**分類が当たっても中身が読めないこと**があるためである（claude の
+ * 版が変わって見出しの字が変わる等）。そのときは**絵を出さず、原文だけが出る**——
+ * `machineMessage.ts` の作法（「読めなければ、元の字をそのまま返す」）と同じ側へ倒す。
+ *
+ * **hook を持たない**ので、[`SlashCommandHead`] のように別部品へ閉じ込める必要は無い。
+ */
+function ContextUsageHead({ node }: { node: Node }) {
+  if (!isMachine(node)) {
+    return null
+  }
+  const text = bodyTextOf(node)
+  if (machineShapeOf(text) !== 'context_usage') {
+    return null
+  }
+  return <ContextUsageCard report={readContextReport(text)} />
+}
+
 function ImageBody({
   node,
   cardId,
@@ -642,7 +670,11 @@ function RowBody({
           head={
             node.kind === 'user_message' && node.command ? (
               <SlashCommandHead cardId={cardId} row={row} typed={node.command.typed} />
-            ) : null
+            ) : (
+              // **`/context` の報告だけ、先頭を絵にする**（コンテキストの残量 設計§8）。
+              // 同じ `head` の口を使うので、**新しい畳み方も新しい記号も作っていない**
+              <ContextUsageHead node={node} />
+            )
           }
           onToggleBody={onToggleBody}
         />

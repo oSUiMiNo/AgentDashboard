@@ -58,7 +58,7 @@ import type { Element, Root, RootContent } from 'hast'
 import type { Root as MdastRoot, RootContent as MdastContent } from 'mdast'
 import remarkGfm from 'remark-gfm'
 
-import { HISTORY_FOLD_LINES, machineShapeOf } from '@/lib/machineMessage'
+import { CONTEXT_USAGE_FOLD_LINES, HISTORY_FOLD_LINES, machineShapeOf } from '@/lib/machineMessage'
 import { MACHINE_FOLD_LINES, bodyTextOf, isMachine } from '@/lib/messageOrigin'
 import type { Node } from '@/lib/protocol'
 
@@ -142,7 +142,7 @@ export const BODY_FOLD_LINES_BUBBLE = 50
  * 幅も同じなので、**しきい値も同じでなければならない**——ここで分けると、同じ文が
  * 読まれる前と後で違うところで畳まれ、**読まれた瞬間に行の高さが跳ねる**。
  */
-export type FoldKind = Node['kind'] | 'machine_message' | 'machine_history'
+export type FoldKind = Node['kind'] | 'machine_message' | 'machine_history' | 'machine_context_usage'
 
 /**
  * その行を、どの畳み方の表で見るか
@@ -158,15 +158,33 @@ export function foldKindOf(node: Node): FoldKind {
   if (!isMachine(node)) {
     return node.kind
   }
-  // **会話履歴の写しだけ、もっと強く畳む**（設計§12-2）。あれは画面の 76.3% を
-  // 占めており、しかも**機械が文脈のために入れた丸写し**なので普段読む必要が無い。
-  // `bodyTextOf` は写しを剥がさずそのまま返すので、剥がした後の字で見分けが付く。
-  return machineShapeOf(bodyTextOf(node)) === 'history' ? 'machine_history' : 'machine_message'
+  // **強く畳むものが2つある。** `bodyTextOf` はどちらも剥がさずそのまま返すので、
+  // 剥がした後の字で見分けが付く。
+  //
+  // **ここは `switch` で書く。** かつて `=== 'history' ? A : B` の二択の式だったが、
+  // その形だと**第3の型を足しても式が成立してしまう**——絵は出るのに原文が
+  // `machine_message`（10行）で畳まれたまま、という**黙った取りこぼし**になる。
+  // `switch` にしても `default` がある以上コンパイラは拾わないので、
+  // **消すと落ちるテストで守っている**（`machineMessage.test.ts`）。
+  switch (machineShapeOf(bodyTextOf(node))) {
+    // **会話履歴の写し**（設計§12-2）。画面の 76.3% を占めており、しかも
+    // **機械が文脈のために入れた丸写し**なので普段読む必要が無い
+    case 'history':
+      return 'machine_history'
+    // **`/context` の報告。** 先頭を絵にするので、原文は畳んでおく
+    case 'context_usage':
+      return 'machine_context_usage'
+    default:
+      return 'machine_message'
+  }
 }
 
 export function foldLinesFor(kind: FoldKind): number {
   if (kind === 'machine_history') {
     return HISTORY_FOLD_LINES
+  }
+  if (kind === 'machine_context_usage') {
+    return CONTEXT_USAGE_FOLD_LINES
   }
   if (kind === 'machine_message') {
     return MACHINE_FOLD_LINES

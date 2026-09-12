@@ -38,6 +38,7 @@ export type MachineShape =
   | 'stop_hook'
   | 'local_command_caveat'
   | 'local_command_stdout'
+  | 'context_usage'
   | 'plain'
 
 /**
@@ -53,8 +54,29 @@ export type MachineShape =
  */
 export const HISTORY_FOLD_LINES = 3
 
+/**
+ * `/context` の報告を畳む行数。
+ *
+ * **絵が上に出るので、下の原文は「開けば読める」と分かる高さがあれば足りる。**
+ * 実物は 12,422 文字あり、**末尾を占める3つの表**（MCP ツール・カスタムエージェント・
+ * スキル）が長さの正体である。**畳めば自動的に隠れる**ので、表を取り除く加工はしない
+ * （要件「元のテキストは捨てない」）。
+ *
+ * 根拠のある数ではないので、**実物を見て決め直せるようここに置く**
+ * （[`HISTORY_FOLD_LINES`] と同じ扱い）。
+ */
+export const CONTEXT_USAGE_FOLD_LINES = 3
+
 /** 会話履歴の写しの目印（レポート§5-6）。**先頭にしか出ない。** */
 const HISTORY_HEADS = ['## 会話履歴', '## 直近の会話履歴']
+
+/**
+ * `/context` の報告の目印。**先頭にしか出ない。**
+ *
+ * claude が `isMeta` のユーザーメッセージとして入れてくる。**打った本人以外には
+ * 読む値打ちが無いほど長い**ので、先頭だけを絵にして原文は畳む。
+ */
+const CONTEXT_USAGE_HEAD = '## Context Usage'
 
 /** `Stop hook feedback:` の毎回同じ2行（レポート§3-3・§5-3）。 */
 const STOP_HOOK_HEAD = 'Stop hook feedback:'
@@ -73,6 +95,10 @@ export function machineShapeOf(text: string): MachineShape {
   const head = text.trimStart()
   if (HISTORY_HEADS.some((h) => head.startsWith(h))) {
     return 'history'
+  }
+  // **先頭にしか出ない**ので、`history` と同じく先頭で見る
+  if (head.startsWith(CONTEXT_USAGE_HEAD)) {
+    return 'context_usage'
   }
   if (text.includes('<task-notification>')) {
     return 'task_notification'
@@ -123,6 +149,9 @@ export function wholeMachineShapeOf(text: string): MachineShape | null {
   if (HISTORY_HEADS.some((head) => trimmed.startsWith(head))) {
     return 'history'
   }
+  if (trimmed.startsWith(CONTEXT_USAGE_HEAD)) {
+    return 'context_usage'
+  }
   if (trimmed.startsWith(STOP_HOOK_HEAD)) {
     return 'stop_hook'
   }
@@ -168,6 +197,10 @@ export function formatMachineBody(text: string): string {
   switch (machineShapeOf(text)) {
     case 'history':
       // **中を解析しない**（レポート§4-2）。引用まで畳まないための線がここである
+      return text
+    case 'context_usage':
+      // **剥がす包みが無い。** 絵は別に描き（`ContextUsageCard`）、原文はそのまま
+      // 畳んで残す（要件「元のテキストは捨てない」）
       return text
     case 'task_notification':
       return keepOriginalIfEmpty(text, formatTaskNotification(text))

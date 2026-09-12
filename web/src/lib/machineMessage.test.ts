@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { HISTORY_FOLD_LINES, formatMachineBody, machineShapeOf } from './machineMessage'
+import { HISTORY_FOLD_LINES, formatMachineBody, machineShapeOf, wholeMachineShapeOf } from './machineMessage'
 import { foldDecision, foldKindOf, foldLinesFor } from './markdown'
 import { bodyTextOf } from './messageOrigin'
 import type { Node } from './protocol'
@@ -274,6 +274,87 @@ describe('待ちの行の畳み方（設計§17-3）', () => {
 
   it('写しの待ちは3行まで縮む', () => {
     const 決定 = foldDecision(bodyTextOf(待ち(長い写し)), foldKindOf(待ち(長い写し)))
+    expect(決定.fold).toBe(true)
+    expect(決定.lines).toBe(3)
+  })
+})
+
+/**
+ * `/context` の報告（コンテキストの残量 設計§8・段1）。
+ *
+ * **足し忘れが黙って通る箇所が3つある**ので、それぞれを別々に固定する。
+ *
+ * | 消すと落ちるもの | 守っている穴 |
+ * |---|---|
+ * | `machineShapeOf` の分岐 | 分類そのもの |
+ * | **`wholeMachineShapeOf` の分岐** | **待ち行列の行だけ分類が違う**（普通の履歴では気づけない） |
+ * | **`foldKindOf` の分岐** | **絵は出るのに原文が10行で畳まれたまま**（`machine_message` へ落ちる） |
+ *
+ * どれもコンパイラは拾わない——`formatMachineBody` の `switch` は `default` を持ち、
+ * `foldKindOf` も `default` を持つ。**3つとも、消して落ちることを確かめてある。**
+ */
+describe('/context の報告', () => {
+  /**
+   * 実物の骨格。**末尾3表の中身は合成である**——実物には利用者の MCP ツール78個・
+   * カスタムエージェント9個・スキル138個の**実名**が並ぶので、このリポジトリ
+   * （公開設定）へ持ち込まない。**構造と個数だけ似せてある。**
+   */
+  const 使い具合 = [
+    '## Context Usage',
+    '',
+    '**Model:** claude-opus-5',
+    '**Tokens:** 241.5k / 1m (24%)',
+    '',
+    '### Estimated usage by category',
+    '',
+    '| Category | Tokens | Percentage |',
+    '|----------|--------|------------|',
+    '| System prompt | 4.3k | 0.4% |',
+    '| System tools | 20.8k | 2.1% |',
+    '| Messages | 185.1k | 18.5% |',
+    '| Free space | 758.5k | 75.9% |',
+    '',
+    '### MCP tools',
+    '',
+    '| Tool | Tokens |',
+    '|------|--------|',
+    '| example__alpha | 1.2k |',
+    '| example__beta | 0.9k |',
+  ].join('\n')
+
+  it('報告だと分かる', () => {
+    expect(machineShapeOf(使い具合)).toBe('context_usage')
+  })
+
+  it('人が同じ見出しを引用しただけの文は、報告にしない', () => {
+    // **前後に地の文が付くので線を越えられない**（`wholeMachineShapeOf` の規律）
+    expect(wholeMachineShapeOf(`これを見てください\n\n${使い具合}`)).toBeNull()
+  })
+
+  it('待ち行列の行でも報告だと分かる', () => {
+    // **ここが `wholeMachineShapeOf` の穴。** 分岐を消しても普通の履歴では気づけない
+    expect(wholeMachineShapeOf(使い具合)).toBe('context_usage')
+    expect(foldKindOf({ kind: 'queued_message', text: 使い具合, taken: false })).toBe(
+      'machine_context_usage',
+    )
+  })
+
+  it('原文をそのまま残す（末尾の表も捨てない）', () => {
+    // 要件「元のテキストは捨てない」。**3表を取り除く加工はしていない**
+    expect(formatMachineBody(使い具合)).toBe(使い具合)
+    expect(formatMachineBody(使い具合)).toContain('example__alpha')
+  })
+
+  it('報告の表で畳む', () => {
+    // **ここが `foldKindOf` の穴。** 分岐を消すと `machine_message`（10行）へ落ち、
+    // **絵は出るのに原文が10行で畳まれたまま**になる
+    expect(foldKindOf(機械(使い具合))).toBe('machine_context_usage')
+    expect(foldLinesFor('machine_context_usage')).toBe(3)
+  })
+
+  it('畳むと、末尾の3表は隠れる', () => {
+    // **畳む行数を小さくすることで、3表を取り除かずに隠れる**（設計§8）
+    const 決定 = foldDecision(bodyTextOf(機械(使い具合)), foldKindOf(機械(使い具合)))
     expect(決定.fold).toBe(true)
     expect(決定.lines).toBe(3)
   })
