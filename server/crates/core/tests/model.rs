@@ -450,6 +450,83 @@ async fn statusLineを切るとモデルは不明のままになる() {
     assert_eq!(session.meta().model, None, "モデルは不明のまま");
 }
 
+/// `context_usage` が入るまで待つ。
+///
+/// モデルと違って**初期値が `None`** なので、待たずに見ると「まだ届いていないだけ」を
+/// 「出ていない」と読み違える。
+async fn wait_for_context_usage(
+    session: &std::sync::Arc<session_host_core::session::Session>,
+) -> protocol::ContextUsage {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(usage) = session.meta().context_usage {
+            return usage;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "10秒以内に context_usage が届きませんでした"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// **入るほう。** この2本は対で1つの検査になっている。
+///
+/// # 片方だけでは何も守れない
+///
+/// 下の「切ると届かない」だけを書くと、**設定を完全に無視する実装でも緑になる**
+/// ——`context_usage` の初期値が `None` だからで、「切ったから出ない」と
+/// 「そもそも来ていない」を区別できない。**擬似 claude が実際に送っていること**を
+/// こちらで押さえて初めて、下が意味を持つ。
+///
+/// これはこの機能にとって**初めての end-to-end** でもある。フェーズ1〜4 は
+/// すべて手で作った値で検査しており、payload が届いてから記録に載るまでを
+/// 通しで走らせたことがなかった。
+#[tokio::test]
+async fn statusLineが入っていればコンテキストの使い具合が届く() {
+    let (_path, server) = common::server_with_fake_global("ctx-on", GLOBAL, refresh_config()).await;
+    let (session, _watcher) = common::start_session(&server.manager).await;
+
+    let usage = wait_for_context_usage(&session).await;
+
+    // 擬似 claude が送った合成値がそのまま出ること。**割り直していないこと**も
+    // ここで固定される——240,000 / 1,000,000 を自分で割ると 24 になってしまい、
+    // 送られてきた値をそのまま使ったのか割ったのかが区別できないため、
+    // 実数と分母のほうも見る
+    assert_eq!(usage.used_percentage, 24, "割合は送られてきた値のまま");
+    assert_eq!(
+        usage.total_input_tokens, 240_000,
+        "実数も一緒に運ばれること"
+    );
+    assert_eq!(usage.context_window_size, 1_000_000, "分母も運ばれること");
+}
+
+/// **出ないほう。** 上の「入るほう」と対で読むこと。
+#[tokio::test]
+async fn statusLineを切るとコンテキストの使い具合は届かない() {
+    let config = Config {
+        inject_status_line: false,
+        status_line_refresh_secs: 1,
+        ..Config::default()
+    };
+    let (_path, server) = common::server_with_fake_global("ctx-off", GLOBAL, config).await;
+    let (session, _watcher) = common::start_session(&server.manager).await;
+
+    // 上のテストは 10秒まで待つので、届くなら 500ms でも十分に届く
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    assert_eq!(
+        session.meta().context_usage,
+        None,
+        "「まだ分からない」のまま据え置かれること。0% ではない"
+    );
+    assert_eq!(
+        session.meta().model,
+        None,
+        "同じ経路なので、モデルも不明のままになる"
+    );
+}
+
 #[tokio::test]
 async fn 確定が来なければ楽観更新は取り消される() {
     // **画面が嘘をつき続けないための歯止め**（設計§5）。CLI が切替を拒否すると

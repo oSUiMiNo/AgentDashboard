@@ -701,10 +701,48 @@ fn apply_model(out: &mut impl Write, injected: &Injected, target: &str) {
     let _ = out.flush();
 }
 
+/// `statusLine` へ渡す payload を組み立てる。
+///
+/// # 組み立てを散らさない
+///
+/// 呼ぶのは起動時（[`send_status_line`]）と `refreshInterval` の周期実行の**2箇所**だが、
+/// **組み立てはここ1箇所に寄せてある。** 2箇所に書くと、**欄を片方にだけ足したときへ
+/// 誰も気づけない**——型は通り、既存のテストも落ちない。実際この形の取りこぼしは
+/// 本 PJT で繰り返し出ている（包みの分類・`default` を持つ `switch`）。
+///
+/// # `context_window` は値が入った形で送る
+///
+/// 本物は**起動直後と `/compact` 直後だけ割合を `null` で寄越す**（フェーズ0 で実測）。
+/// 擬似 claude はそれを真似ず、**常に値が入った形**を送る——`inject_status_line` を
+/// 切ったときに `None` のままであることを、**入るほうと対で**確かめるためである。
+/// 送らないままだと、**設定を無視する実装でも「出ていない」テストが緑になる。**
+///
+/// 値は合成である（実測値は持ち込まない）。割合と実数は釣り合わせてあり、
+/// 240,000 / 1,000,000 = 24% になる。
+fn status_line_payload(
+    session_id: &str,
+    transcript: &str,
+    id: &str,
+    display_name: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "session_id": session_id,
+        "transcript_path": transcript,
+        "cwd": std::env::current_dir().unwrap_or_default().to_string_lossy(),
+        "model": { "id": id, "display_name": display_name },
+        "version": "2.1.220",
+        "context_window": {
+            "used_percentage": 24,
+            "total_input_tokens": 240_000,
+            "context_window_size": 1_000_000,
+        },
+    })
+}
+
 /// 注入された `statusLine` を子プロセスとして実行する（設計§4）。
 ///
-/// 本物と同じ形の JSON を標準入力へ渡す。キーは実測した12個のうち、ダッシュボードが
-/// 読む3つ（`session_id` / `transcript_path` / `model`）を中心に揃えてある。
+/// 本物と同じ形の JSON を標準入力へ渡す。**組み立ては [`status_line_payload`] 1箇所だけ**で、
+/// 起動時（ここ）と `refreshInterval` の周期実行の両方から呼ぶ。
 fn send_status_line(out: &mut impl Write, injected: &mut Injected, announce: bool) {
     // 本物と同じ 300ms のデバウンス。連続した契機は1回にまとめる
     let now = std::time::Instant::now();
@@ -719,13 +757,9 @@ fn send_status_line(out: &mut impl Write, injected: &mut Injected, announce: boo
     injected.last_status_line = Some(now);
     let alias = injected.model();
     let (id, display_name) = resolve_model(&alias);
-    let payload = serde_json::json!({
-        "session_id": injected.session_id(),
-        "transcript_path": transcript_path(injected),
-        "cwd": std::env::current_dir().unwrap_or_default().to_string_lossy(),
-        "model": { "id": id, "display_name": display_name },
-        "version": "2.1.220",
-    });
+    let session_id = injected.session_id();
+    let transcript = transcript_path(injected);
+    let payload = status_line_payload(&session_id, &transcript, &id, &display_name);
 
     let result = run_hook(&command, &payload.to_string());
     if announce {
@@ -769,12 +803,7 @@ fn start_refresh_ticker(injected: &Injected) {
                 .clone()
                 .unwrap_or_else(|| default_transcript_path(&id_now));
             let (id, display_name) = resolve_model(&alias);
-            let payload = serde_json::json!({
-                "session_id": id_now,
-                "transcript_path": transcript,
-                "model": { "id": id, "display_name": display_name },
-                "version": "2.1.220",
-            });
+            let payload = status_line_payload(&id_now, &transcript, &id, &display_name);
             let _ = run_hook(&command, &payload.to_string());
         }
     });

@@ -61,7 +61,8 @@ auto_sleep_idle_secs = 7200
 # 以後このキーは読まれない（アカウントごとの設定なので、どの端末で開いても同じ値になる）。
 always_bypass_permissions = false
 
-# セッションへ statusLine を注入するか。切るとモデルは「不明」のままになる
+# セッションへ statusLine を注入するか。切るとモデルは「不明」のままになり、
+# **コンテキスト残量のゲージも出なくなる**（同じ payload で届くため）
 inject_status_line = true
 
 # 注入する statusLine の実行間隔（秒）
