@@ -59,6 +59,7 @@ import type { Root as MdastRoot, RootContent as MdastContent } from 'mdast'
 import remarkGfm from 'remark-gfm'
 
 import { CONTEXT_USAGE_FOLD_LINES, HISTORY_FOLD_LINES, machineShapeOf } from '@/lib/machineMessage'
+import { assertNever } from '@/lib/never'
 import { MACHINE_FOLD_LINES, bodyTextOf, isMachine } from '@/lib/messageOrigin'
 import type { Node } from '@/lib/protocol'
 
@@ -166,7 +167,8 @@ export function foldKindOf(node: Node): FoldKind {
   // `machine_message`（10行）で畳まれたまま、という**黙った取りこぼし**になる。
   // `switch` にしても `default` がある以上コンパイラは拾わないので、
   // **消すと落ちるテストで守っている**（`machineMessage.test.ts`）。
-  switch (machineShapeOf(bodyTextOf(node))) {
+  const shape = machineShapeOf(bodyTextOf(node))
+  switch (shape) {
     // **会話履歴の写し**（設計§12-2）。画面の 76.3% を占めており、しかも
     // **機械が文脈のために入れた丸写し**なので普段読む必要が無い
     case 'history':
@@ -174,7 +176,19 @@ export function foldKindOf(node: Node): FoldKind {
     // **`/context` の報告。** 先頭を絵にするので、原文は畳んでおく
     case 'context_usage':
       return 'machine_context_usage'
+    // **ここから下は10行で畳む**（`MACHINE_FOLD_LINES`）。**「その他」で流さず
+    // 並べてある**のは、型が増えたときに**どちらの側か決めさせる**ためである
+    case 'task_notification':
+    case 'cross_session':
+    case 'stop_hook':
+    case 'local_command_caveat':
+    case 'local_command_stdout':
+    case 'plain':
+      return 'machine_message'
     default:
+      // **型を足したら、ここで `tsc` が落ちる**（`switch` の `default` だけでは
+      // 何も落ちなかった）。落ちたら「強く畳む相手か」を決めて上へ1行足すこと
+      assertNever(shape)
       return 'machine_message'
   }
 }

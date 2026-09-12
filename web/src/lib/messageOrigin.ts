@@ -13,6 +13,7 @@
  */
 
 import { formatMachineBody, peerNameOf, wholeMachineShapeOf } from './machineMessage'
+import { assertNever } from './never'
 import type { MessageOrigin, Node } from './protocol'
 
 /**
@@ -56,7 +57,8 @@ export function originOf(node: Node): MessageOrigin {
  * 人が待ち行列へ積んだ文は包みを持たないので、必ずこちらへ落ちる。
  */
 function queuedOrigin(text: string): MessageOrigin {
-  switch (wholeMachineShapeOf(text)) {
+  const shape = wholeMachineShapeOf(text)
+  switch (shape) {
     case 'task_notification':
       return { kind: 'task_notification' }
     case 'cross_session':
@@ -69,7 +71,16 @@ function queuedOrigin(text: string): MessageOrigin {
     case 'local_command_stdout':
     case 'context_usage':
       return { kind: 'injected' }
+    // **人の側へ倒すもの。** `null` は「包みで構成されていない」＝人が打った文、
+    // `plain` は整形しないと決めたもの。**どちらも印が無いので人である**
+    case null:
+    case 'plain':
+      return { kind: 'unmarked' }
     default:
+      // **型を足したら、ここで `tsc` が落ちる。** 落ちたら「機械が差し込んだものか」を
+      // 決めて上へ1行足すこと——**落とすと待ちの行だけ人の側へ倒れる**（実際に踏んだ）。
+      // 印が無いものを機械と読むことは要件が禁じているので、既定は人の側のままにする
+      assertNever(shape)
       return { kind: 'unmarked' }
   }
 }

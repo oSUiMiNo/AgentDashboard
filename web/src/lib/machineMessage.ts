@@ -25,6 +25,8 @@
  * 外したときに**中身が消えるほうが、生のタグが出るより悪い**。
  */
 
+import { assertNever } from './never'
+
 /**
  * 包みの型（レポート§2）。
  *
@@ -194,7 +196,8 @@ export function peerNameOf(text: string): string | null {
  * 空になった場合も、そのまま返す。
  */
 export function formatMachineBody(text: string): string {
-  switch (machineShapeOf(text)) {
+  const shape = machineShapeOf(text)
+  switch (shape) {
     case 'history':
       // **中を解析しない**（レポート§4-2）。引用まで畳まないための線がここである
       return text
@@ -218,7 +221,15 @@ export function formatMachineBody(text: string): string {
       // **中身は残す。** 断り書きと違い、ここに入っているのは利用者が見たい実行結果
       // そのものである（例：`Login successful`）。剥がすのは包みだけ
       return formatLocalCommandStdout(text)
+    case 'plain':
+      // **整形しないと決めたもの**（レポート§5-5）。`<system-reminder>` は中身が
+      // 1種類しか無く短いので、手を入れる価値が薄い
+      return text
     default:
+      // **型を足したら、ここで `tsc` が落ちる。** 落ちたら「剥がし方が要るか」を
+      // 決めて腕を足すこと——**「その他」で流さず、上に1行足して意思表示する**。
+      // **返り値はそのまま残す**：知らない型を元の字で出すのは倒れ方の設計である
+      assertNever(shape)
       return text
   }
 }
