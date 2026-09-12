@@ -24,7 +24,10 @@ import {
   useParams,
 } from 'react-router'
 import { Button } from '@/components/ui/button'
-import { GearGlyph } from '@/components/ui/glyphs'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { MemoPane } from '@/components/MemoPane/MemoPane'
+import { GLOBAL_TARGET } from '@/lib/annotationTarget'
+import { GearGlyph, NoteGlyph } from '@/components/ui/glyphs'
 import { ToastLayer } from '@/components/ToastLayer/ToastLayer'
 import { AppNoticeBell } from '@/components/AppNoticeBell/AppNoticeBell'
 import { LanAddressButton } from '@/components/LanAddress/LanAddressButton'
@@ -223,6 +226,49 @@ function Shell() {
                 文字のまま：要件が名指ししているのは「設定」だけで、**言われていない
                 ものを揃えるために変えない**。
               */}
+              {/*
+                **全体メモ**（メモ設計§6-4）。**歯車の隣**に置く。
+
+                # セッションメモと取り違えないこと
+
+                同じ画面に両方が映る場面がある（セッション画面の上に全体メモを開いた
+                とき）。**先例は隣のベル**——あちらはカードのベルとヘッダのベルが同時に
+                映るので、**置き場所・見た目・testid・読み上げの文言をすべて分けて
+                ある**。全体メモとセッションメモも同じ関係にする。
+
+                | | セッションメモ | 全体メモ |
+                |---|---|---|
+                | testid | `memo-toggle` | `global-memo-toggle` |
+                | 読み上げ | このセッションのメモ | 全体のメモ |
+                | 置き場所 | 操作列の1行目 | ヘッダの歯車の隣 |
+
+                # 幅の出し分けは、ここでは入れていない
+
+                設計は「狭い画面では印だけにして文字を落とす」としていたが、
+                **隣の3つ（ベル・LAN のアドレス・歯車）はどれも印だけで文字を持たない**。
+                こちらだけ広い窓で文字を出すと、**揃っていた並びがこの1つだけ崩れる**——
+                落とす文字がそもそも無いので、出し分けを入れる先が無い。
+
+                **代わりに、この帯は4つから5つになった。** 狭い画面で潰れていないかは
+                `DESIGN.md` §34 で数えるが、**相方のゲージも同じ帯に乗りうる**ので、
+                片方だけ数えても答えが出ない。**フェーズ7 で一緒に数える**（設計§15-5）。
+              */}
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon-xl"
+                    data-testid="global-memo-toggle"
+                    aria-label="全体のメモ"
+                    title="全体のメモ"
+                  >
+                    <NoteGlyph className="size-5" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-96" align="end">
+                  <MemoPane target={GLOBAL_TARGET} label="全体のメモ" />
+                </PopoverContent>
+              </Popover>
               <Button asChild variant="ghost" size="icon-xl">
                 <Link
                   to={SETTINGS}

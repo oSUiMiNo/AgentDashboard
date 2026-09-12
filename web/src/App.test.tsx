@@ -436,6 +436,46 @@ describe('通っていない間の見え方（セルフホスト化設計§8-2�
   })
 })
 
+describe('全体メモの入口', () => {
+  /*
+    **歯車の隣**（メモ設計§6-4）。行番号ではなく**並び**で見張る——ここは複数の
+    セッションが同時に触るので、行は着手する頃には動いている。
+  */
+  it('歯車の隣に居る', async () => {
+    render(<App />)
+    const メモ = await screen.findByTestId('global-memo-toggle')
+    const 歯車 = await screen.findByTestId('settings-link')
+    // **メモが先、歯車が後**
+    expect(
+      メモ.compareDocumentPosition(歯車) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+  })
+
+  /*
+    **セッションメモと取り違えないこと**（要件「気をつけること1」）。
+
+    同じ画面に両方が映る場面がある。先例のベル（カードのベルとヘッダのベル）と同じく、
+    **testid と読み上げの文言を分けてある**。ここが同じ綴りになると、
+    「どちらへ書いているか」が画面からも読み上げからも分からなくなる。
+  */
+  it('セッションメモと、testid も読み上げも分かれている', async () => {
+    render(<App />)
+    const メモ = await screen.findByTestId('global-memo-toggle')
+
+    expect(メモ.getAttribute('aria-label')).toBe('全体のメモ')
+    // セッション側は `memo-toggle` ／「このセッションのメモ」。**綴りが重ならない**
+    expect(メモ.getAttribute('data-testid')).not.toBe('memo-toggle')
+    expect(メモ.getAttribute('aria-label')).not.toBe('このセッションのメモ')
+  })
+
+  it('隣の3つと同じ段（40px）を使っている', async () => {
+    render(<App />)
+    const メモ = await screen.findByTestId('global-memo-toggle')
+    // **揃っていることが要件**（帯の押しボタンは同じ大きさ）。5つ目もそれに乗る
+    expect(メモ.className).toContain('size-10')
+  })
+})
+
 describe('帯の押しボタンは3つとも同じ大きさ', () => {
   /*
     **ベル・IP・設定を 1.5倍に揃えた**（2026-09-05・利用者の指定）。
