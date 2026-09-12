@@ -27,9 +27,11 @@ import ReactMarkdown from 'react-markdown'
 
 import { targetKey } from '@/lib/annotationTarget'
 import { copyToClipboard } from '@/lib/clipboard'
+import { useDraft } from '@/lib/drafts'
 import { REHYPE_PLUGINS, REMARK_PLUGINS } from '@/lib/markdown'
 import { readMemoBody, sameMemoBody } from '@/lib/memoBody'
 import type { AnnotationTarget, MemoView } from '@/lib/protocol'
+import { useAuthStore } from '@/stores/auth'
 import { splitMemos, useMemos } from '@/stores/memos'
 import { useWsStore } from '@/stores/ws'
 import { MemoEditor } from './MemoEditor'
@@ -65,6 +67,24 @@ export function MemoPane({ target, readOnly = false, label }: Props) {
   const { checked, unchecked } = splitMemos(memos)
   const [畳んだ上段, set畳んだ上段] = useState(true)
   const [下段を全部, set下段を全部] = useState(false)
+  /**
+   * 送った回数。**入力欄を作り直して空にするためだけに持つ**（§6-5）。
+   *
+   * 送ったのに字が残ると、**送れたのかどうかが分からない**。もう一度押して同じものが
+   * 2つ積まれるうえ、次に打った字が**前の続きとして同じ吹き出しへ入る**——E2E で
+   * 実際にそうなった（2件送ったつもりが、2件目が1件目に継ぎ足された1件になる）。
+   *
+   * **エディタは中身を外から差し替えられない**ので、`key` を変えて作り直す。
+   */
+  const [送った回数, set送った回数] = useState(0)
+  /*
+    **書きかけ**（設計§8-1）。鍵は宛先の綴り（`global` ／ `session:<id>`）で、
+    `targetKey()` が決める。**カードの書きかけと同じ表に同居する**が、押し出しの
+    対象からは外れている（`drafts.ts`）——全体メモは「どの画面からでも開く1つ」
+    なので、カードの枚数と寿命が連動する理由が無い。
+  */
+  const account = useAuthStore((state) => state.auth.account)
+  const [書きかけ, set書きかけ] = useDraft(key, account)
 
   const 隠れている数 = Math.max(0, unchecked.length - 下段に出す数)
   const 出す下段 = 下段を全部 ? unchecked : unchecked.slice(隠れている数)
@@ -121,15 +141,20 @@ export function MemoPane({ target, readOnly = false, label }: Props) {
       ) : (
         <div className="shrink-0">
           <MemoEditor
-            key={`compose:${key}`}
+            key={`compose:${key}:${送った回数}`}
             data-testid="memo-compose"
-            initial={{ blocks: [], markdown: '' }}
+            initial={{ blocks: [], markdown: 書きかけ }}
             label={`${label}に書く`}
+            onChange={set書きかけ}
             onSubmit={(body) => {
               if (body.markdown.trim() === '') {
                 return
               }
               memoAdd(target, body)
+              // **送ったぶんは書きかけではない。** 忘れさせてから入力欄を作り直す——
+              // 順が逆だと、作り直した入力欄へ送ったばかりの字が戻ってくる
+              set書きかけ('')
+              set送った回数((前) => 前 + 1)
             }}
           />
           <p className="text-muted-foreground mt-1 text-[0.65rem]">

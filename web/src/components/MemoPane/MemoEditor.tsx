@@ -55,6 +55,9 @@ export function MemoEditor({
     initialContent: initial.blocks.length > 0 ? (initial.blocks as never) : undefined,
   })
 
+  /** 開いた時点の中身。**戻すのは1度だけ**なので参照で持つ（毎回の再描画で走らせない） */
+  const initialRef = useRef(initial)
+
   /** 最新の確定先を持つ。**エディタは作り直さない**ので、参照で渡す */
   const submitRef = useRef(onSubmit)
   submitRef.current = onSubmit
@@ -92,6 +95,26 @@ export function MemoEditor({
     },
     [読み取る],
   )
+
+  /*
+    **書きかけを戻す**（設計§8-1）。
+
+    表が持っているのは**マークダウンの文字列だけ**なので、ブロックへ戻す一手が要る。
+    **`tryParseMarkdownToBlocks` は同期である**——`blocksToMarkdownLossy` と同じで、
+    名前から非同期に見えるが待たなくてよい（【実測 0.1.137 時点】型が `Block[]` を
+    返しており `then` が無い）。**待つ形で書くと `tsc` が落ちる。**
+  */
+  useEffect(() => {
+    const 戻す字 = initialRef.current.markdown
+    if (initialRef.current.blocks.length > 0 || 戻す字.trim() === '') {
+      return
+    }
+    const blocks = editor.tryParseMarkdownToBlocks(戻す字)
+    if (blocks.length === 0) {
+      return
+    }
+    editor.replaceBlocks(editor.document, blocks as never)
+  }, [editor])
 
   // 打つたびに書きかけを覚える。**確定していない字を失わない**（設計§8-1）
   useEffect(() => {
