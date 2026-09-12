@@ -16,6 +16,7 @@ mod m20260903_000007_session_nicknames;
 mod m20260905_000008_notices;
 mod m20260905_000009_session_branches;
 mod m20260910_000010_resumed_from;
+mod m20260913_000011_memos;
 
 use sea_orm_migration::prelude::*;
 
@@ -35,6 +36,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260905_000008_notices::Migration),
             Box::new(m20260905_000009_session_branches::Migration),
             Box::new(m20260910_000010_resumed_from::Migration),
+            Box::new(m20260913_000011_memos::Migration),
         ]
     }
 }
