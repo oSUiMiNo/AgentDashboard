@@ -167,14 +167,14 @@ mod tests {
     // --- 実際に効く根の組み立て ---
 
     #[test]
-    fn 開いているPJTはコードの側で足される() {
+    fn 開いているプロジェクトはコードの側で足される() {
         let effective = effective_roots(&[], Some("/dev/app"));
         assert_eq!(effective, roots(&["/dev/app"]));
         assert!(is_writable(&effective, "/dev/app/src/main.rs"));
     }
 
     #[test]
-    fn 設定の根とPJTの両方が効く() {
+    fn 設定の根とプロジェクトの両方が効く() {
         let effective = effective_roots(&roots(&["/home/u/notes"]), Some("/dev/app"));
         assert!(is_writable(&effective, "/dev/app/src/main.rs"));
         assert!(is_writable(&effective, "/home/u/notes/todo.md"));
@@ -188,7 +188,7 @@ mod tests {
     }
 
     #[test]
-    fn PJTが無くても設定の根だけで効く() {
+    fn プロジェクトが無くても設定の根だけで効く() {
         let effective = effective_roots(&roots(&["/home/u/notes"]), None);
         assert_eq!(effective, roots(&["/home/u/notes"]));
         assert!(!is_writable(&effective, "/dev/app/src/main.rs"));
