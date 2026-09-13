@@ -47,15 +47,30 @@ afterEach(() => {
 })
 
 describe('画像の口を開ける条件', () => {
-  it('**保存先を渡さなければ、口を開けない**（全体メモがこれ）', () => {
-    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" />)
+  it('保存先を渡さなければ、口を開けない', () => {
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ"
+        保存先={null}
+      />)
 
-    /*
-      **ここが落ちたら、どの PC へ置くかが決まらないまま画像を受けている。**
-      全体メモはどのカードにも属さないので、既定の PC へ黙って置くと
-      **別の機械から読めない画像**が残る（設計§10-1 の【未解決】）。
-    */
+    // **置き場所が決まっていないものを黙って既定へ倒さない**
     expect(渡ってきた[0]?.onUploadImage).toBeUndefined()
+  })
+
+  it('全体メモにも口が開く（保管はサーバの記録）', () => {
+    /*
+      **帰属と保管を揃える**（設計§10-1 の【決着】）。全体メモはアカウントに属する
+      ので、本文と同じ記録へ置く——**要件9（同じ部品・同じ口）は保たれており、
+      割れるのは保管先だけ**である。
+    */
+    render(
+      <MemoPane
+        target={GLOBAL_TARGET}
+        label="全体のメモ"
+        保存先={{ where: 'account' }}
+      />,
+    )
+
+    expect(渡ってきた[0]?.onUploadImage).toBeTypeOf('function')
   })
 
   it('保存先を渡すと口が開く（セッションメモ）', () => {
@@ -63,7 +78,7 @@ describe('画像の口を開ける条件', () => {
       <MemoPane
         target={sessionTarget('s-1')}
         label="このセッションのメモ"
-        保存先={{ host: 'local', cardId: 'card-1' }}
+        保存先={{ where: 'card', host: 'local', cardId: 'card-1' }}
       />,
     )
 
@@ -76,7 +91,7 @@ describe('画像の口を開ける条件', () => {
         target={sessionTarget('s-1')}
         label="このセッションのメモ"
         readOnly
-        保存先={{ host: 'local', cardId: 'card-1' }}
+        保存先={{ where: 'card', host: 'local', cardId: 'card-1' }}
       />,
     )
 
@@ -96,7 +111,7 @@ describe('直すときにも貼れる（要件2）', () => {
       <MemoPane
         target={target}
         label="このセッションのメモ"
-        保存先={{ host: 'local', cardId: 'card-1' }}
+        保存先={{ where: 'card', host: 'local', cardId: 'card-1' }}
       />,
     )
     渡ってきた.length = 0
@@ -123,7 +138,9 @@ describe('いつ消えるかの表示（要件10・設計§11-3）', () => {
         memo_limits: { retention_days: 30, max_bytes: 1024 * 1024 * 1024 },
       }),
     })
-    render(<MemoPane target={sessionTarget('s-1')} label="このセッションのメモ" />)
+    render(<MemoPane target={sessionTarget('s-1')} label="このセッションのメモ"
+        保存先={null}
+      />)
 
     /*
       **90日のまま「3か月」と書いてあると、30日へ縮めた人には3倍の嘘になる**
@@ -140,7 +157,9 @@ describe('いつ消えるかの表示（要件10・設計§11-3）', () => {
     const { settingsFixture } = await import('@/test/fixtures')
 
     useSettingsStore.setState({ settings: settingsFixture() })
-    render(<MemoPane target={sessionTarget('s-1')} label="このセッションのメモ" />)
+    render(<MemoPane target={sessionTarget('s-1')} label="このセッションのメモ"
+        保存先={null}
+      />)
 
     expect(screen.getByTestId('memo-retention-note').textContent).toContain('3か月')
   })
@@ -178,7 +197,7 @@ describe('溢れたときの同意（要件10・設計§10-2）', () => {
       <MemoPane
         target={sessionTarget('s-1')}
         label="このセッションのメモ"
-        保存先={{ host: 'local', cardId: 'card-1' }}
+        保存先={{ where: 'card', host: 'local', cardId: 'card-1' }}
       />,
     )
 
@@ -206,7 +225,7 @@ describe('溢れたときの同意（要件10・設計§10-2）', () => {
       <MemoPane
         target={sessionTarget('s-1')}
         label="このセッションのメモ"
-        保存先={{ host: 'local', cardId: 'card-1' }}
+        保存先={{ where: 'card', host: 'local', cardId: 'card-1' }}
       />,
     )
 
@@ -237,7 +256,7 @@ describe('溢れたときの同意（要件10・設計§10-2）', () => {
       <MemoPane
         target={sessionTarget('s-1')}
         label="このセッションのメモ"
-        保存先={{ host: 'local', cardId: 'card-1' }}
+        保存先={{ where: 'card', host: 'local', cardId: 'card-1' }}
       />,
     )
     await act(async () => {
@@ -263,7 +282,7 @@ describe('溢れたときの同意（要件10・設計§10-2）', () => {
       <MemoPane
         target={sessionTarget('s-1')}
         label="このセッションのメモ"
-        保存先={{ host: 'local', cardId: 'card-1' }}
+        保存先={{ where: 'card', host: 'local', cardId: 'card-1' }}
       />,
     )
     await act(async () => {
@@ -287,7 +306,7 @@ describe('版切替の門（設計§8-2）', () => {
       <MemoPane
         target={sessionTarget('s-1')}
         label="このセッションのメモ"
-        保存先={{ host: 'local', cardId: 'card-1' }}
+        保存先={{ where: 'card', host: 'local', cardId: 'card-1' }}
       />,
     )
     const 抱える = 渡ってきた[0]?.on抱える
@@ -309,7 +328,7 @@ describe('版切替の門（設計§8-2）', () => {
       <MemoPane
         target={sessionTarget('s-1')}
         label="このセッションのメモ"
-        保存先={{ host: 'local', cardId: 'card-1' }}
+        保存先={{ where: 'card', host: 'local', cardId: 'card-1' }}
       />,
     )
     渡ってきた[0]!.on抱える!(true)

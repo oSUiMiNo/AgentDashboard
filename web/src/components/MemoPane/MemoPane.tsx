@@ -45,6 +45,16 @@ import { splitMemos, useMemos } from '@/stores/memos'
 import { useWsStore } from '@/stores/ws'
 import { MemoEditor } from './MemoEditor'
 
+/**
+ * 掃く先。**全体メモは `null`（サーバの記録）、セッションメモはその PC。**
+ *
+ * **置き場所が2つあるのは帰属が違うから**（メモ設計§10-1 の【決着】）だが、
+ * **利用者から見ると「メモの画像が溢れた」は1つの出来事**なので、同意の画面は1つ。
+ */
+function 掃く先(保存先: 画像の置き場所): string | null {
+  return 保存先.where === 'account' ? null : 保存先.host
+}
+
 /** 下段に出す件数。超えたぶんは「ほか N 件」で畳む（§47.4 と同じ形）。 */
 export const 下段に出す数 = 8
 
@@ -72,7 +82,14 @@ interface Props {
    * **全体メモには渡せない**（カードが無く、どの PC かも決まらない）。
    * 設計§10-1 の【未解決】がここに出ている。
    */
-  保存先?: 画像の置き場所
+  /**
+   * **省略できない。** 渡し忘れても画面は動く（押しても貼れないだけ）ので、
+   * **言われるまで気づけない**——`assertNever` と同じ発想で、
+   * **「誰も捕まえない」を `make ci` が拾う側へ移してある。**
+   *
+   * 画像を置かない面（読むだけ）は `null` を**明示する**。
+   */
+  保存先: 画像の置き場所 | null
 }
 
 export function MemoPane({ target, readOnly = false, label, 保存先 }: Props) {
@@ -131,11 +148,13 @@ export function MemoPane({ target, readOnly = false, label, 保存先 }: Props) 
 
   /** 画像を置いたあとに1度だけ数える。**消さない。** */
   const 溢れを見る = useCallback(async () => {
-    if (保存先 === undefined) {
+    if (保存先 === null) {
       return
     }
     try {
-      const 下見 = await sweepAttachments(保存先.host, false)
+      // **掃く先も宛先で分かれる**（メモ設計§10-1 の【決着】）。全体メモは
+      // サーバの記録、セッションメモはその PC のディスク
+      const 下見 = await sweepAttachments(掃く先(保存先), false)
       // **収まっていれば何も出さない。** 出すと、押す必要のない確認が毎回挟まる
       set溢れ(下見.over_budget ? 下見 : null)
     } catch {
@@ -153,7 +172,7 @@ export function MemoPane({ target, readOnly = false, label, 保存先 }: Props) 
   */
   const 画像を運ぶ = useCallback(
     async (file: File): Promise<string> => {
-      if (保存先 === undefined) {
+      if (保存先 === null) {
         throw new Error('画像の置き場所が決まっていません')
       }
       const url = await 一枚運ぶ(保存先, file)
@@ -207,7 +226,7 @@ export function MemoPane({ target, readOnly = false, label, 保存先 }: Props) 
                   key={memo.id}
                   memo={memo}
                   readOnly={readOnly}
-                  画像を運ぶ={保存先 === undefined ? undefined : 画像を運ぶ}
+                  画像を運ぶ={保存先 === null ? undefined : 画像を運ぶ}
                   抱える={抱える}
                 />
               ))}
@@ -233,7 +252,7 @@ export function MemoPane({ target, readOnly = false, label, 保存先 }: Props) 
                   key={memo.id}
                   memo={memo}
                   readOnly={readOnly}
-                  画像を運ぶ={保存先 === undefined ? undefined : 画像を運ぶ}
+                  画像を運ぶ={保存先 === null ? undefined : 画像を運ぶ}
                   抱える={抱える}
                 />
         ))}
@@ -255,7 +274,7 @@ export function MemoPane({ target, readOnly = false, label, 保存先 }: Props) 
             initial={{ blocks: [], markdown: 書きかけ }}
             label={`${label}に書く`}
             onChange={set書きかけ}
-            onUploadImage={保存先 === undefined ? undefined : 画像を運ぶ}
+            onUploadImage={保存先 === null ? undefined : 画像を運ぶ}
             on抱える={抱える}
             onSubmit={(body) => {
               if (body.markdown.trim() === '') {
@@ -292,12 +311,12 @@ export function MemoPane({ target, readOnly = false, label, 保存先 }: Props) 
                   data-testid="memo-sweep-apply"
                   disabled={消している}
                   onClick={async () => {
-                    if (保存先 === undefined) {
+                    if (保存先 === null) {
                       return
                     }
                     set消している(true)
                     try {
-                      await sweepAttachments(保存先.host, true)
+                      await sweepAttachments(掃く先(保存先), true)
                       set溢れ(null)
                     } finally {
                       set消している(false)

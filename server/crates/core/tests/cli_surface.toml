@@ -162,6 +162,21 @@ command = "session sweep-attachments"
 
 [[entry]]
 kind = "rest"
+target = "POST /api/memo-blobs"
+command = "memo attach"
+
+[[entry]]
+kind = "rest"
+target = "GET /api/memo-blobs/{id}"
+command = "memo blob"
+
+[[entry]]
+kind = "rest"
+target = "POST /api/memo-blobs/sweep"
+command = "memo sweep"
+
+[[entry]]
+kind = "rest"
 target = "POST /api/login"
 skip = true
 reason = "CLI は札（ペアリングトークン）で名乗る（設計§5）。入館証（Cookie）を持たないので、入る口を叩く立場に無い"

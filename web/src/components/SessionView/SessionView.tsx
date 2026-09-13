@@ -743,7 +743,7 @@ export function SessionView({
                 宛先（`AnnotationTarget`）からは引けない——あちらが持っているのは
                 `claude_session_id` だけである。
               */
-              保存先={{ host, cardId }}
+              保存先={{ where: 'card', host, cardId }}
             />
           </div>
         )}

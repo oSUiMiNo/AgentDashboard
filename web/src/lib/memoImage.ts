@@ -21,18 +21,30 @@
 
 import { pickImages } from '@/lib/attachments'
 import { rawUrl, uploadAttachment } from '@/lib/hostfs'
+import { uploadMemoBlob } from '@/lib/memoBlobs'
 
 /**
- * 画像の置き場所。
+ * 画像の置き場所。**宛先によって2つある**（メモ設計§10-1 の【決着】）。
  *
- * **宛先（`AnnotationTarget`）からは引けない。** 添付は PC のディスクへ置くので
- * **どの PC か**が要るが、宛先が持っているのは `claude_session_id` だけである。
- * カードIDも同じ理由で呼ぶ側から渡す。
+ * # なぜ2つなのか——**帰属と保管を揃える**
+ *
+ * | 宛先 | 帰属 | 置き場所 |
+ * |---|---|---|
+ * | セッションメモ | **その PC の作業** | PC のディスク（既存の添付へ相乗り） |
+ * | 全体メモ | **アカウント** | サーバの記録 |
+ *
+ * **本文が既にサーバの記録に在るのに画像だけ PC に在ると、別の端末から開いたときに
+ * 画像だけ欠ける**——要件10 の「別の端末から開いても、同じ吹き出しが同じ順で出る」
+ * に反する。
+ *
+ * **要件9（同じ部品・同じ口）は保たれている。** 割れるのは保管先だけで、
+ * 貼る道（`pickImages` → 運ぶ → URL を返す）は1本のままである。
  */
-export interface 画像の置き場所 {
-  host: string
-  cardId: string
-}
+export type 画像の置き場所 =
+  /** セッションメモ。**どの PC のどのカードか**が要る */
+  | { where: 'card'; host: string; cardId: string }
+  /** 全体メモ。**PC を指名しない**（アカウントに属するので） */
+  | { where: 'account' }
 
 /**
  * 1枚運んで、**本文へ入れる URL** を返す。
@@ -45,11 +57,16 @@ export async function 画像を運ぶ(
   置き場所: 画像の置き場所,
   file: File,
 ): Promise<string> {
+  // **ふるいは宛先によらず1つ。** ここで分けると、片方だけ svg が通る
   const { accepted, rejected } = await pickImages([file])
   const one = accepted[0]
   if (one === undefined) {
     // **理由をそのまま投げる。** エディタが画面へ出す
     throw new Error(rejected[0] ?? '画像を添付できません')
+  }
+  if (置き場所.where === 'account') {
+    // 全体メモ。**PC を通らない**——記録へ直に置く
+    return uploadMemoBlob(one.bytes)
   }
   const written = await uploadAttachment(置き場所.host, 置き場所.cardId, one.bytes)
   return rawUrl(置き場所.host, written.path)

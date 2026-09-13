@@ -1049,6 +1049,65 @@ async fn memo_apply(
 }
 
 /// `memo add`。
+/// `memo attach`（メモ設計§10-1 の【決着】）。
+///
+/// **全体メモの画像はアカウントに属する**ので、PC を指名しない——`session attach`
+/// （PC のディスクへ置く）とは別の口である。
+pub async fn memo_attach(target: &Target, file: &std::path::Path) -> Result<Outcome, ClientError> {
+    let shown = file.display().to_string();
+    // **門は種別で見る。** `media_type_of` は表に無いものにも `text/plain` を返すので、
+    // あれを門にすると `.md` や `.txt` が置ける（`attach` と同じ判断）
+    if protocol::fs::kind_of(&shown) != protocol::fs::FileKind::Image {
+        return Err(ClientError::BadUrl(format!(
+            "{shown} は添付として送れる種別ではありません（png / jpg / jpeg / gif / webp）"
+        )));
+    }
+    let media_type = protocol::fs::media_type_of(&shown);
+    let data = std::fs::read(file)
+        .map_err(|err| ClientError::BadUrl(format!("{shown} を読めません: {err}")))?;
+
+    let raw = write_ok(
+        target,
+        "POST",
+        "/api/memo-blobs",
+        Some(http::Payload::bytes(media_type, data)),
+    )
+    .await?;
+    let written: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|err| ClientError::BadUrl(err.to_string()))?;
+    let url = written["url"].as_str().unwrap_or_default().to_string();
+    Ok(Outcome {
+        human: format!("画像を置きました：{url}"),
+        raw,
+    })
+}
+
+/// `memo blob`。**置いた画像をそのまま取り出す**（バイト列）。
+pub async fn memo_blob(target: &Target, id: &str) -> Result<Vec<u8>, ClientError> {
+    http::fetch_bytes(
+        target,
+        &format!("/api/memo-blobs/{}", http::percent_encode(id)),
+    )
+    .await
+}
+
+/// `memo sweep`（メモ設計§10-2）。**既定は下見**（`sweep_attachments` と同じ理由）。
+pub async fn memo_sweep(
+    target: &Target,
+    apply: bool,
+) -> Result<(protocol::AttachmentSweep, String), ClientError> {
+    let raw = write_ok(
+        target,
+        "POST",
+        &format!("/api/memo-blobs/sweep?apply={apply}"),
+        None,
+    )
+    .await?;
+    let swept: protocol::AttachmentSweep =
+        serde_json::from_str(&raw).map_err(|err| ClientError::BadUrl(err.to_string()))?;
+    Ok((swept, raw))
+}
+
 pub async fn memo_add(
     target: &Target,
     session: Option<&str>,

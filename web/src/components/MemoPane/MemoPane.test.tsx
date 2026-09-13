@@ -50,7 +50,9 @@ describe.each(宛先たち)('メモの面（%s宛て）', (名, target) => {
     const memoList = vi.fn()
     useWsStore.setState({ memoList })
 
-    render(<MemoPane target={target} label={`${名}のメモ`} />)
+    render(<MemoPane target={target} label={`${名}のメモ`}
+        保存先={null}
+      />)
 
     // **宛先ごとに別の口を叩いていない**こと。口は1つで、宛先は引数
     expect(memoList).toHaveBeenCalledWith(target)
@@ -68,7 +70,9 @@ describe.each(宛先たち)('メモの面（%s宛て）', (名, target) => {
       memo('先', { noted_at: 2_000 }),
       memo('後', { noted_at: 1_000 }),
     ])
-    render(<MemoPane target={target} label={名} />)
+    render(<MemoPane target={target} label={名}
+        保存先={null}
+      />)
 
     const 出た = screen.getAllByTestId('memo-bubble')
     expect(出た).toHaveLength(2)
@@ -82,7 +86,9 @@ describe.each(宛先たち)('メモの面（%s宛て）', (名, target) => {
       memo('未', {}),
       memo('済', { checked_at: 1_700_000_001_000 }),
     ])
-    render(<MemoPane target={target} label={名} />)
+    render(<MemoPane target={target} label={名}
+        保存先={null}
+      />)
 
     // 畳まれているので、上段の中身は出ていない
     expect(screen.queryByTestId('memo-checked')).toBeNull()
@@ -99,7 +105,9 @@ describe.each(宛先たち)('メモの面（%s宛て）', (名, target) => {
     const memoCheck = vi.fn()
     useWsStore.setState({ memoCheck })
     replaceMemos(target, [memo('あ')])
-    render(<MemoPane target={target} label={名} />)
+    render(<MemoPane target={target} label={名}
+        保存先={null}
+      />)
 
     const 片付ける = screen.getByTestId('memo-check')
 
@@ -121,7 +129,9 @@ describe.each(宛先たち)('メモの面（%s宛て）', (名, target) => {
     const memoCheck = vi.fn()
     useWsStore.setState({ memoCheck })
     replaceMemos(target, [memo('済', { checked_at: 1_700_000_001_000 })])
-    render(<MemoPane target={target} label={名} />)
+    render(<MemoPane target={target} label={名}
+        保存先={null}
+      />)
 
     fireEvent.click(screen.getByTestId('memo-checked-toggle'))
     fireEvent.mouseDown(screen.getByTestId('memo-check'))
@@ -131,7 +141,9 @@ describe.each(宛先たち)('メモの面（%s宛て）', (名, target) => {
   it('溜まったら畳み、押すと伸びる', () => {
     const 多い = Array.from({ length: 下段に出す数 + 3 }, (_, i) => memo(`m${i}`))
     replaceMemos(target, 多い)
-    render(<MemoPane target={target} label={名} />)
+    render(<MemoPane target={target} label={名}
+        保存先={null}
+      />)
 
     expect(screen.getAllByTestId('memo-bubble')).toHaveLength(下段に出す数)
     expect(screen.getByTestId('memo-more')).toHaveTextContent('ほか 3 件')
@@ -145,7 +157,9 @@ describe.each(宛先たち)('メモの面（%s宛て）', (名, target) => {
       memo(`m${i}`, { noted_at: 1_000 + i }),
     )
     replaceMemos(target, 多い)
-    render(<MemoPane target={target} label={名} />)
+    render(<MemoPane target={target} label={名}
+        保存先={null}
+      />)
 
     // **いちばん下が最新**なので、隠すのは先頭側
     expect(screen.queryByText('m0')).toBeNull()
@@ -159,7 +173,9 @@ describe.each(宛先たち)('メモの面（%s宛て）', (名, target) => {
 describe('抜け殻のカード', () => {
   it('入力欄が出ず、直す・片付けるも出ない', () => {
     replaceMemos(GLOBAL_TARGET, [memo('あ')])
-    render(<MemoPane target={GLOBAL_TARGET} readOnly label="終わったセッションのメモ" />)
+    render(<MemoPane target={GLOBAL_TARGET} readOnly label="終わったセッションのメモ"
+        保存先={null}
+      />)
 
     expect(screen.queryByTestId('memo-compose')).toBeNull()
     expect(screen.getByTestId('memo-readonly')).toBeInTheDocument()
@@ -169,14 +185,18 @@ describe('抜け殻のカード', () => {
 
   it('コピーはできる（読むためだけに開く面なので、持ち出す道は残す）', () => {
     replaceMemos(GLOBAL_TARGET, [memo('あ')])
-    render(<MemoPane target={GLOBAL_TARGET} readOnly label="終わったセッションのメモ" />)
+    render(<MemoPane target={GLOBAL_TARGET} readOnly label="終わったセッションのメモ"
+        保存先={null}
+      />)
 
     expect(screen.getByTestId('memo-copy')).toBeInTheDocument()
   })
 
   it('読めることは必須である（目的1）', () => {
     replaceMemos(GLOBAL_TARGET, [memo('復旧のときに読む')])
-    render(<MemoPane target={GLOBAL_TARGET} readOnly label="終わったセッションのメモ" />)
+    render(<MemoPane target={GLOBAL_TARGET} readOnly label="終わったセッションのメモ"
+        保存先={null}
+      />)
 
     expect(screen.getByText('復旧のときに読む')).toBeInTheDocument()
   })
@@ -199,7 +219,9 @@ describe('コピー', () => {
     })
 
     replaceMemos(GLOBAL_TARGET, [memo('取り出したい字')])
-    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" />)
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ"
+        保存先={null}
+      />)
 
     fireEvent.mouseDown(screen.getByTestId('memo-copy'))
 
@@ -214,7 +236,9 @@ describe('コピー', () => {
     vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } })
 
     replaceMemos(GLOBAL_TARGET, [memo('あ')])
-    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" />)
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ"
+        保存先={null}
+      />)
 
     fireEvent.mouseDown(screen.getByTestId('memo-copy'))
     await vi.waitFor(() => expect(writeText).toHaveBeenCalled())
@@ -233,7 +257,9 @@ describe('コピー', () => {
 describe('消す道', () => {
   it('吹き出しのボタンは3つのまま（消すは並ばない）', () => {
     replaceMemos(GLOBAL_TARGET, [memo('あ')])
-    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" />)
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ"
+        保存先={null}
+      />)
 
     const 並び = screen.getByTestId('memo-ops')
     expect(並び.querySelectorAll('button')).toHaveLength(3)
@@ -244,7 +270,9 @@ describe('消す道', () => {
     const memoRemove = vi.fn()
     useWsStore.setState({ memoRemove })
     replaceMemos(GLOBAL_TARGET, [memo('あ')])
-    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" />)
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ"
+        保存先={null}
+      />)
 
     fireEvent.mouseDown(screen.getByTestId('memo-edit'))
     fireEvent.mouseDown(screen.getByTestId('memo-remove'))
@@ -266,7 +294,9 @@ describe('書いて送る', () => {
   it('空のまま Ctrl+Enter を押しても送らない', () => {
     const memoAdd = vi.fn()
     useWsStore.setState({ memoAdd })
-    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" />)
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ"
+        保存先={null}
+      />)
 
     fireEvent.keyDown(screen.getByTestId('memo-compose'), {
       key: 'Enter',
@@ -279,7 +309,9 @@ describe('書いて送る', () => {
   it('Ctrl を伴わない Enter では送らない（ブロックを割る側）', () => {
     const memoAdd = vi.fn()
     useWsStore.setState({ memoAdd })
-    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" />)
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ"
+        保存先={null}
+      />)
 
     fireEvent.keyDown(screen.getByTestId('memo-compose'), { key: 'Enter' })
     expect(memoAdd).not.toHaveBeenCalled()
@@ -288,7 +320,9 @@ describe('書いて送る', () => {
   it('変換中の Ctrl+Enter では送らない（IME の確定と取り違えない）', () => {
     const memoAdd = vi.fn()
     useWsStore.setState({ memoAdd })
-    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" />)
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ"
+        保存先={null}
+      />)
 
     fireEvent.keyDown(screen.getByTestId('memo-compose'), {
       key: 'Enter',

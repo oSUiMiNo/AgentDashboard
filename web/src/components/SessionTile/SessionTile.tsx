@@ -1045,6 +1045,9 @@ export function SessionTile({
                   target={sessionTarget(session.claude_session_id)}
                   readOnly
                   label="このセッションのメモ"
+                  // **一覧から開く面は読むだけ**なので、置き場所は要らない。
+                  // 省略ではなく `null` を明示する（渡し忘れと区別するため）
+                  保存先={null}
                 />
               </PopoverContent>
             </Popover>

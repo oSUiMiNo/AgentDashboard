@@ -1,6 +1,10 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { 画像を運ぶ } from './memoImage'
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
 
 /*
   **ここが守っているのは「誰も捕まえない」側である**（メモ実行レポート・フェーズ3〜5）。
@@ -19,13 +23,25 @@ vi.mock('@/lib/hostfs', async () => {
   }
 })
 
-const 置き場所 = { host: 'local', cardId: 'card-1' }
+const 置き場所 = { where: 'card', host: 'local', cardId: 'card-1' } as const
 
 function 画像(type: string, bytes = 10): File {
   return new File([new Uint8Array(bytes)], `x.${type.split('/')[1]}`, { type })
 }
 
+const fetchMock = vi.fn()
+
 beforeEach(() => {
+  fetchMock.mockReset()
+  fetchMock.mockResolvedValue({
+    ok: true,
+    json: async () => ({
+      url: '/api/memo-blobs/blob-1',
+      media_type: 'image/png',
+      bytes: 10,
+    }),
+  })
+  vi.stubGlobal('fetch', fetchMock)
   uploadAttachment.mockReset()
   uploadAttachment.mockResolvedValue({
     path: '/home/u/.agentdashboard/attachments/card-1/20260913-010203-abcdef01.png',
@@ -65,6 +81,29 @@ describe('メモへ貼る画像', () => {
     await expect(画像を運ぶ(置き場所, 画像('application/pdf'))).rejects.toThrow(
       /application\/pdf/,
     )
+  })
+
+  it('**全体メモは PC を通らない。** 記録の口へ置く', async () => {
+    /*
+      **帰属と保管を揃える**（メモ設計§10-1 の【決着】）。全体メモはアカウントに
+      属するので、本文と同じ記録へ置く——**PC のディスクへ置くと、別の端末から
+      開いたときに画像だけ欠ける**（要件10）。
+
+      **口を取り違えても画面は動く**ので、機械は何も言わない。ここで固定する。
+    */
+    const url = await 画像を運ぶ({ where: 'account' }, 画像('image/png'))
+
+    expect(uploadAttachment).not.toHaveBeenCalled()
+    expect(fetchMock.mock.calls[0]![0]).toBe('/api/memo-blobs')
+    expect(url).toBe('/api/memo-blobs/blob-1')
+  })
+
+  it('全体メモでも、ふるいは同じものを通る（svg は断る）', async () => {
+    // **要件9（同じ部品・同じ口）。** 割れるのは保管先だけである
+    await expect(
+      画像を運ぶ({ where: 'account' }, 画像('image/svg+xml')),
+    ).rejects.toThrow(/添付できません/)
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('大きすぎるものは運ぶ前に断る（運んでから断ると待たされたぶんが無駄になる）', async () => {

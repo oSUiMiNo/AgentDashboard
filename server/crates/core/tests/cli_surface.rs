@@ -61,12 +61,14 @@ const WS_VARIANTS: usize = 21;
 // **鍵の内側**——機械のアドレスは、外から誰でも読めてよいものではない
 // 2026-09-13：メモの画像の掃除で1口増やした（メモ設計§10-2）。**鍵の内側**——
 // 他人の機械のファイルを消せる口なので、帰属を必ず通す（tenancy に総当たりを1本足した）
-const INSIDE_DOORS: usize = 33;
+// 2026-09-13：全体メモの画像で3口増やした（置く・読む・掃く。メモ設計§10-1 の【決着】）。
+// **鍵の内側**——アカウントに属するものなので、記録の側でも account で絞る
+const INSIDE_DOORS: usize = 36;
 const OUTSIDE_DOORS: usize = 5;
 
 /// tenancy.rs の総当たりの本数。口が増えないなら総当たりも増えない（§1-1）。
 /// enforcement を足したときだけ意識して上げる。
-const TENANCY_TESTS: usize = 29;
+const TENANCY_TESTS: usize = 30;
 
 /// `command` に書ける群の先頭語。誤記（存在しない群）を機械で捕まえる。
 const 群: &[&str] = &[

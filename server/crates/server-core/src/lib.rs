@@ -22,6 +22,7 @@ pub mod embed;
 pub mod gateway;
 pub mod hosts;
 pub mod lan_address;
+pub mod memo_blobs;
 pub mod notices;
 pub mod portable;
 pub mod projects;
@@ -74,6 +75,9 @@ pub fn routes(state: ws::AppState, auth: Arc<auth::AuthContext>) -> Router {
         )
         // 利用者の PC のフォルダとファイル（イシューグループ_2026_0805_0514 設計§10）。
         // **鍵の内側**に置く——中身のある口なので、素通しにしてよい理由が無い
+        .route("/api/memo-blobs", post(memo_blobs::api_put))
+        .route("/api/memo-blobs/sweep", post(memo_blobs::api_sweep))
+        .route("/api/memo-blobs/{id}", get(memo_blobs::api_get))
         .route("/api/hosts/{host}/attachments", post(hosts::api_attachment))
         .route(
             "/api/hosts/{host}/attachments/sweep",

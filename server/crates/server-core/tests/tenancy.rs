@@ -1648,6 +1648,75 @@ async fn 他人のpcの添付を掃けない() {
 }
 
 #[tokio::test]
+async fn 他人の全体メモの画像は読めないし掃けない() {
+    // メモ設計§10-1 の【決着】。**全体メモの画像はアカウントに属する**ので、
+    // 口と記録の両方で絞る（§8-6 の二重の鍵）。片方だけだと、口を1つ足したときに
+    // 素通しの経路が生まれる
+    for backend in common::backends("tenancy-memo-blob").await {
+        let arena = Arena::start(backend.db.clone()).await;
+        let (mine, _mine_agent) = arena.tenant("わたし").await;
+        let (theirs, _their_agent) = arena.tenant("よそのひと").await;
+        let browser = arena.browser(&mine).await;
+
+        // 相手の画像を1枚、記録へ直に置く
+        let theirs_id = server_core::db::memo_blobs::put(
+            &backend.db,
+            theirs.account_id,
+            "image/png",
+            vec![1, 2, 3],
+            server_core::db::now_ms(),
+        )
+        .await
+        .expect("置けること");
+
+        let (status, body) = browser
+            .request("GET", &format!("/api/memo-blobs/{theirs_id}"), None)
+            .await;
+        assert!(
+            status == 403 || status == 404,
+            "[{}] 他人の全体メモの画像を読めてしまった: {status} {body}",
+            backend.name
+        );
+
+        // **自分のぶんは読める。** ここを見ないと、口が丸ごと壊れていても上の主張だけは通る
+        let mine_id = server_core::db::memo_blobs::put(
+            &backend.db,
+            mine.account_id,
+            "image/png",
+            vec![9],
+            server_core::db::now_ms(),
+        )
+        .await
+        .expect("置けること");
+        let (status, body) = browser
+            .request("GET", &format!("/api/memo-blobs/{mine_id}"), None)
+            .await;
+        assert!(
+            status != 403 && status != 404,
+            "[{}] 自分の画像が帰属で断られた: {status} {body}",
+            backend.name
+        );
+
+        // **掃いても他人のぶんは消えない。** `apply=true` で試す——下見だけ見て通すと、
+        // 消すほうが素通しでも気づけない
+        let (status, _) = browser
+            .request("POST", "/api/memo-blobs/sweep?apply=true", Some(""))
+            .await;
+        assert_eq!(status, 200, "[{}] 自分の掃除が通らない", backend.name);
+        assert!(
+            server_core::db::memo_blobs::get(&backend.db, theirs.account_id, theirs_id)
+                .await
+                .expect("引けること")
+                .is_some(),
+            "[{}] 他人の画像を掃いてしまった",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
 async fn cliの札ではpcの受け口を通れない() {
     // 逆向きも同じ（§5-3）：CLI の札が漏れても `/agent/ws` は開かない
     for backend in common::backends("tenancy-cli-kind").await {

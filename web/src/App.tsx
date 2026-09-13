@@ -268,7 +268,17 @@ function Shell() {
                   </Button>
                 </PopoverTrigger>
                 <PopoverContent className="w-96" align="end">
-                  <MemoPane target={GLOBAL_TARGET} label="全体のメモ" />
+                  <MemoPane
+                    target={GLOBAL_TARGET}
+                    label="全体のメモ"
+                    /*
+                      **全体メモの画像はサーバの記録へ置く**（メモ設計§10-1 の
+                      【決着】）。PC を指名しないのは、**帰属がアカウントだから**
+                      ——本文が既に記録に在るのに画像だけ PC に在ると、
+                      別の端末から開いたときに画像だけ欠ける。
+                    */
+                    保存先={{ where: 'account' }}
+                  />
                 </PopoverContent>
               </Popover>
               <Button asChild variant="ghost" size="icon-xl">

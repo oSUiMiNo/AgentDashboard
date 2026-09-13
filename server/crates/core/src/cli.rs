@@ -549,6 +549,31 @@ enum MemoCmd {
         #[command(flatten)]
         out: OutputArgs,
     },
+    /// 全体メモへ貼る画像を置く（置いた URL を返す。本文へはそれを入れる）
+    ///
+    /// **`session attach` とは別の口である。** あちらは PC のディスクへ置くが、
+    /// 全体メモの画像は**アカウントに属する**ので記録へ置く（メモ設計§10-1）。
+    Attach {
+        /// 置く画像（png / jpg / jpeg / gif / webp）
+        file: String,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// 置いた画像をバイト列のまま取り出す（標準出力へ）
+    Blob {
+        /// 画像のID（`memo attach` が返す URL の末尾）
+        id: String,
+    },
+    /// 全体メモの画像を掃く。**既定は下見**（何がどれだけ消えるかを数えるだけ）
+    ///
+    /// 画面の同意ダイアログと同じ口。**消すには `--apply` が要る。**
+    Sweep {
+        /// **実際に消す。** 付けなければ1バイトも触らない
+        #[arg(long)]
+        apply: bool,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1351,6 +1376,36 @@ async fn client_memo(cmd: MemoCmd, target: &client::Target) -> Result<(), client
         MemoCmd::Check { id, off, out } => {
             let outcome = client::memo_check(target, None, &id, !off).await?;
             println!("{}", output::pick(out.json, &outcome.raw, &outcome.human));
+        }
+        MemoCmd::Attach { file, out } => {
+            let outcome = client::memo_attach(target, std::path::Path::new(&file)).await?;
+            println!("{}", output::pick(out.json, &outcome.raw, &outcome.human));
+        }
+        MemoCmd::Blob { id } => {
+            // **文字列を経由しない**（`host file --raw` と同じ）。途中で `String` に
+            // すると置き換え文字が混ざり、書き出したファイルが壊れる
+            let bytes = client::memo_blob(target, &id).await?;
+            use std::io::Write as _;
+            std::io::stdout()
+                .write_all(&bytes)
+                .map_err(|err| client::ClientError::BadUrl(err.to_string()))?;
+        }
+        MemoCmd::Sweep { apply, out } => {
+            let (swept, raw) = client::memo_sweep(target, apply).await?;
+            let human = if !swept.over_budget {
+                format!(
+                    "上限に収まっています（合計 {} バイト）。消すものはありません",
+                    swept.total
+                )
+            } else if swept.applied {
+                format!("{} 件（{} バイト）を消しました", swept.removed, swept.freed)
+            } else {
+                format!(
+                    "{} 件（{} バイト）が消えます。消すには --apply を付けてください",
+                    swept.removed, swept.freed
+                )
+            };
+            println!("{}", output::pick(out.json, &raw, &human));
         }
         MemoCmd::Rm { id, out } => {
             let outcome = client::memo_remove(target, None, &id).await?;

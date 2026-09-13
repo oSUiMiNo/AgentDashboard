@@ -38,13 +38,21 @@ export interface AttachmentSweep {
  * **既定は下見。** 消すほうを既定にすると、確かめるつもりで呼んだ関数が消してしまう。
  */
 export async function sweepAttachments(
-  host: string,
+  /**
+   * 掃く先。**`null` は全体メモ（サーバの記録）**、文字列はその PC。
+   *
+   * **置き場所が2つあるのは帰属が違うから**（メモ設計§10-1 の【決着】）だが、
+   * **利用者から見ると「メモの画像が溢れた」は1つの出来事**なので、
+   * 答えの型も同意の画面も1つにしてある。
+   */
+  host: string | null,
   apply = false,
 ): Promise<AttachmentSweep> {
-  const response = await fetch(
-    `/api/hosts/${encodeURIComponent(host)}/attachments/sweep?apply=${apply}`,
-    { method: 'POST' },
-  )
+  const path =
+    host === null
+      ? `/api/memo-blobs/sweep?apply=${apply}`
+      : `/api/hosts/${encodeURIComponent(host)}/attachments/sweep?apply=${apply}`
+  const response = await fetch(path, { method: 'POST' })
   if (!response.ok) {
     throw new HostFsError(
       response.status,
