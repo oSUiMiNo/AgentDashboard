@@ -47,6 +47,10 @@ const 器から取る印 = {
   // **エディタは `file-raw` を流用していない**（`ファイルビュアにエディタ機能を追加`
   // 設計§10-1）。生テキストの表示とエディタは別物で、同じ印だとここが区別できない
   'file-editor': 'file-editor',
+  // **書けない場所のファイルは、読み取り専用の生テキストで出す**（設計§8）。
+  // **表の外に置くと、この面だけ「大きさが効いているか」を誰も見ない**——
+  // それはこの表が作られた原因そのものなので、印として並べる
+  'file-raw': 'file-raw',
   'file-frame': 'file-frame',
   'file-image': 'file-image',
 } as const
@@ -142,7 +146,7 @@ function Viewer(props: Omit<Props, 埋める>) {
 }
 
 /** テキストの口と生の口の両方に答える。**種類で経路が変わるので、両方要る** */
-function 出す(text = '本文\nあか') {
+function 出す(text = '本文\nあか', 書ける = true) {
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url: string) => {
@@ -153,7 +157,13 @@ function 出す(text = '本文\nあか') {
         })
       }
       return new Response(
-        JSON.stringify({ path: 'x', text, truncated: false, bytes: text.length, writable: true }),
+        JSON.stringify({
+          path: 'x',
+          text,
+          truncated: false,
+          bytes: text.length,
+          writable: 書ける,
+        }),
         { status: 200 },
       )
     }),
@@ -392,5 +402,68 @@ describe('探すが、モードをまたいで生き残る', () => {
     const 宣言 = /const 探せる =([^\n]+)/.exec(src)
     expect(宣言, '探せる の宣言が見つからない').not.toBeNull()
     expect(宣言![1]!).not.toContain('mode')
+  })
+})
+
+/**
+ * **書けない場所のファイル**（設計§8。`writable_roots` の外にあるもの）。
+ *
+ * 打てる姿で出さない——**打てるのに保存できないのは「押せて何も起きない」と同じ形**に
+ * なる。代わりに**読み取り専用の生テキスト**（`file-raw`）を出す。
+ *
+ * **この面は長く表の外に居た。** 器から大きさを取っているか・直書きが無いかを
+ * 誰も見ていない状態で、**この表が作られた原因（文字サイズが黙って効かない）が
+ * そのまま再発しうる場所**だった。
+ */
+const 書けない表: { kind: string; path: string; 切り替える: boolean }[] = [
+  // **ビュアーを持たない**ので、開いた瞬間から読み取り専用の生テキスト
+  { kind: 'text', path: `${ROOT}/メモ.txt`, 切り替える: false },
+  // **ビュアーを持つ種類**は、切り替えた先が読み取り専用になる
+  { kind: 'markdown', path: `${ROOT}/計画.md`, 切り替える: true },
+  { kind: 'html', path: `${ROOT}/理解.html`, 切り替える: true },
+  { kind: 'svg', path: `${ROOT}/図.svg`, 切り替える: true },
+]
+
+describe('書けない場所のファイル', () => {
+  beforeEach(() => {
+    出す('本文\nあか', false)
+  })
+
+  it.each(書けない表)('$kind：打てる姿を出さず、読み取り専用で出る', async (行) => {
+    render(<Viewer host="local" root={ROOT} path={行.path} />)
+
+    if (行.切り替える) {
+      // **切替の言葉が「編集する」ではない。** 行き先が打てないので、言葉も嘘をつかない
+      const 切替 = await screen.findByTestId('file-toggle-mode')
+      expect(切替).toHaveTextContent('生テキスト')
+      await userEvent.click(切替)
+    }
+
+    await screen.findByTestId('file-raw')
+    // **打てる姿は1つも出ない**
+    expect(screen.queryByTestId('file-editor')).toBeNull()
+    expect(screen.queryByTestId('file-save')).toBeNull()
+  })
+
+  it.each(書けない表)('$kind：大きさが読み取り専用の面へ届いている', async (行) => {
+    render(<Viewer host="local" root={ROOT} path={行.path} />)
+    if (行.切り替える) {
+      await userEvent.click(await screen.findByTestId('file-toggle-mode'))
+    }
+
+    const 器 = await screen.findByTestId('file-view')
+    expect(器.className).toContain('file-zoom')
+
+    const 本体 = await screen.findByTestId('file-raw')
+    expect(
+      本体.className.split(/\s+/),
+      `${行.kind} の読み取り専用の面が、器から取る印を持っていない`,
+    ).toContain(器から取る印['file-raw'])
+    for (const 綴り of 直書き) {
+      expect(
+        本体.className.split(/\s+/),
+        `${行.kind} の読み取り専用の面に大きさが直書きされている`,
+      ).not.toContain(綴り)
+    }
   })
 })
