@@ -27,6 +27,11 @@ const PROJECT_DIR = path.join(WORK_DIR, "adash-e2e-files");
 const PLAN = "計画.md";
 /** 画面に収まらない長さの文書（`ファイルの中身をスクロールできない` 設計§8）。 */
 const LONG = "長い文書.md";
+/**
+ * **横に溢れる文書。** `LONG` は縦に長いだけで**横には溢れない**ので、
+ * 「内側が先に消費する」を確かめる材料には使えない。
+ */
+const WIDE = "横に長い表.md";
 /** 2段目のフォルダ。**掘った位置の記憶は、1段では確かめられない** */
 const DEEP = "設計";
 /** 末尾に置く目印。**辿り着けたこと**は、数ではなくこれが見えることで言う。 */
@@ -121,6 +126,15 @@ test.beforeAll(() => {
   fs.writeFileSync(
     path.join(docs, LONG),
     `# 長い文書\n\n${lines.join("")}\n## ${TAIL}\n`,
+    "utf8",
+  );
+
+  // **折り返さない長さの行**を並べる。動く余地が無いと、内側が消費したのか
+  // 誰も動かなかったのか言えない
+  const 広い行 = `| ${"長い見出しと値をつないだ列".repeat(12)} |`;
+  fs.writeFileSync(
+    path.join(docs, WIDE),
+    `${広い行}\n`.repeat(40),
     "utf8",
   );
 
@@ -1785,15 +1799,47 @@ test("中身の列の上で横へ回すと、セッションのレールが動�
 test("生テキストの上では、その中が横へ動く", async ({ page }) => {
   // 列の中に横スクロールを持つのはここだけ。**素通しにすると、読みたい行の続きが
   // 読めないままレールが流れる**（設計§8）
-  await openDashboard(page);
-  await openLongFile(page);
+  //
+  // **【2026-09-13・振る舞いを見る段を足した】** ここは長らく `overflowX` の指定を
+  // 見るだけで、**名前が約束している振る舞いを1度も確かめていなかった**。
+  // ホイールを回していないので、**外側が全子孫から奪う作りに変えても緑のまま通る**
+  // ——「ここは守られている」と読んだ人が、守られていないものを守られていると
+  // 思い込む形だった（`PJT画面の横スクロールをどこからでも効かせる`）。
+  //
+  // **材料も差し替えた。** `LONG` は縦に長いだけで**横には溢れない**ので、
+  // あれでは `scrollLeft` が動く余地が無い。
+  const panel = await 開いて選ぶ(page, WIDE);
+  // フォルダを畳む——被さったままだと列の上を押せない
+  await page.getByTestId("project-files-toggle").click();
+  await expect(panel).toBeHidden();
   await page.getByTestId("file-toggle-raw").click();
 
   const pre = page.getByTestId("file-raw");
   await expect(pre).toBeVisible();
 
+  // **CSS の指定は前提として残す。** 振る舞いと別に見ておくと、落ちたときに
+  // 「指定が消えた」と「動かなかった」を別の言い分にできる
   const 横へ動けるか = await pre.evaluate(
     (el) => getComputedStyle(el).overflowX,
   );
   expect(横へ動けるか, "生テキストは自分で横へ動く").toMatch(/auto|scroll/);
+
+  const 溢れ = await pre.evaluate((el) => el.scrollWidth - el.clientWidth);
+  expect(溢れ, "生テキストが横に溢れていること").toBeGreaterThan(0);
+
+  const 前 = await pre.evaluate((el) => el.scrollLeft);
+  await pre.hover();
+  await page.mouse.wheel(200, 0);
+
+  /*
+    **内側が先に消費する**のが既定の振る舞いで、ここは手を入れていない。
+    **外側が奪わないこと**は向きが逆の主張なので、`rail-pan.spec.ts` の
+    `生テキストの上では、レールは動かない` が別に持っている。**片方だけでは
+    いまの穴を塞げない。**
+  */
+  await expect
+    .poll(async () => pre.evaluate((el) => el.scrollLeft), {
+      message: "生テキストの中が、自分で横へ動くこと",
+    })
+    .toBeGreaterThan(前);
 });

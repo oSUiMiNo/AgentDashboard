@@ -9,7 +9,8 @@
  * `web/src/stores/roam.ts` が同じ罠を踏んで「測るのは呼び元」と分離した前例を持つ。
  *
  * したがってここには**ホイールの移動量と2点の座標を引数で受け取る純関数だけ**を置く。
- * `window` も `document` も読まない（`lib/panelWidth.ts` ／ `reorder.ts` と同じ作り）。
+ * `window` も `document` も読まない（`lib/panelWidth.ts` ／ `reorder.ts` ／ `touch.ts` ／
+ * `repeat.ts` ／ `fileTabs.ts` と同じ作り）。
  * レール要素の取得・`scrollLeft` の読み書き・購読と後始末・ポインタの捕捉は、測る側の
  * `lib/useRailPan.ts` が引き受ける。
  *
