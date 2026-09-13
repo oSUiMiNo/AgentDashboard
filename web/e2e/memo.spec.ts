@@ -117,6 +117,25 @@ async function 全体メモを開く(page: Page) {
   return 面
 }
 
+/**
+ * 吹き出しの操作（コピー・直す・片付ける）を押す。**先にマウスを乗せる。**
+ *
+ * 群はマウスのある端末では隠れており、**隠れている間は当たり判定も無い**（`memo.css`）。
+ * `click()` は押せるようになるまで待つが、**マウスを動かすのは待ち終わってから**なので、
+ * 乗せずに呼ぶと、出ないまま待ちきれずに落ちる。
+ *
+ * **実際の利用者と同じ順序である**——乗せて、出てから、押す。以前は乗せずに押せていたが、
+ * それは**見えないボタンが押せた**からで、指の画面では吹き出しの端に触れただけで
+ * 黙って片付いてしまう不具合だった。
+ *
+ * **指の端末では使わない。** あちらは `hover` が無く、群は常に出ている（実測：
+ * `hasTouch: true` だけで `hover: none` ／ `pointer: coarse` になる）。
+ */
+async function 操作を押す(吹き出し: Locator, 印: string) {
+  await 吹き出し.hover()
+  await 吹き出し.getByTestId(印).click()
+}
+
 /** 吹き出しの本文を、出ている順に並べて取る。 */
 async function 本文たち(面: Locator) {
   return await 面.getByTestId('memo-body').allInnerTexts()
@@ -223,7 +242,7 @@ test('直して確定すると時刻が更新されて一番下へ移る。変�
 
   // 「一番目」を直す → 一番下へ移る
   const 一番目 = 面.getByTestId('memo-bubble').filter({ hasText: '一番目' })
-  await 一番目.getByTestId('memo-edit').click()
+  await 操作を押す(一番目, 'memo-edit')
   await 打ち直す(面, '一番目（直した）')
 
   await expect
@@ -232,7 +251,7 @@ test('直して確定すると時刻が更新されて一番下へ移る。変�
 
   // 変えずに確定 → 動かない
   const 直したもの = 面.getByTestId('memo-bubble').filter({ hasText: '一番目（直した）' })
-  await 直したもの.getByTestId('memo-edit').click()
+  await 操作を押す(直したもの, 'memo-edit')
   await 面.getByTestId('memo-editing').locator('[contenteditable="true"]').first().click()
   await page.keyboard.press('Control+Enter')
 
@@ -272,7 +291,7 @@ test('片付けると上へ積まれ、戻すと下へ戻る', async ({ page }) 
   await expect(面.getByTestId('memo-bubble')).toHaveCount(2, { timeout: 30_000 })
 
   const 片付ける対象 = 面.getByTestId('memo-bubble').filter({ hasText: 'かたづける' })
-  await 片付ける対象.getByTestId('memo-check').click()
+  await 操作を押す(片付ける対象, 'memo-check')
 
   // 下段から消えて、上段（既定で畳んである）へ移る
   await expect
@@ -284,7 +303,7 @@ test('片付けると上へ積まれ、戻すと下へ戻る', async ({ page }) 
   await expect(面.getByTestId('memo-checked').getByTestId('memo-body')).toHaveText('かたづける')
 
   // 戻すと下段へ帰る
-  await 面.getByTestId('memo-checked').getByTestId('memo-check').click()
+  await 操作を押す(面.getByTestId('memo-checked').getByTestId('memo-bubble'), 'memo-check')
   await expect
     .poll(async () => await 面.getByTestId('memo-list').getByTestId('memo-body').allInnerTexts(), {
       timeout: 30_000,
@@ -303,7 +322,7 @@ test('コピーが効く', async ({ page, context }) => {
   await 書いて送る(page, 面, 'これを写す')
   await expect(面.getByTestId('memo-bubble')).toHaveCount(1, { timeout: 30_000 })
 
-  await 面.getByTestId('memo-copy').click()
+  await 操作を押す(面.getByTestId('memo-bubble'), 'memo-copy')
   const 写したもの = await page.evaluate(() => navigator.clipboard.readText())
   expect(写したもの.trim()).toBe('これを写す')
 })
@@ -321,11 +340,7 @@ test('別のブラウザコンテキストから開いても、同じ順・同�
   await expect(面.getByTestId('memo-bubble')).toHaveCount(1, { timeout: 30_000 })
   await 書いて送る(page, 面, 'あとで書いた')
   await expect(面.getByTestId('memo-bubble')).toHaveCount(2, { timeout: 30_000 })
-  await 面
-    .getByTestId('memo-bubble')
-    .filter({ hasText: 'さきに書いた' })
-    .getByTestId('memo-check')
-    .click()
+  await 操作を押す(面.getByTestId('memo-bubble').filter({ hasText: 'さきに書いた' }), 'memo-check')
   await expect
     .poll(async () => await 面.getByTestId('memo-list').getByTestId('memo-body').allInnerTexts(), {
       timeout: 30_000,
@@ -427,22 +442,20 @@ test('全体メモも、セッションメモと同じ筋がそのまま通る',
     .toEqual(['ぜんたい一つ目', 'ぜんたい二つ目'])
 
   // 直す → 一番下へ移る
-  await 開き直した
-    .getByTestId('memo-bubble')
-    .filter({ hasText: 'ぜんたい一つ目' })
-    .getByTestId('memo-edit')
-    .click()
+  await 操作を押す(
+    開き直した.getByTestId('memo-bubble').filter({ hasText: 'ぜんたい一つ目' }),
+    'memo-edit',
+  )
   await 打ち直す(開き直した, 'ぜんたい一つ目（直した）')
   await expect
     .poll(async () => await 本文たち(開き直した), { timeout: 30_000 })
     .toEqual(['ぜんたい二つ目', 'ぜんたい一つ目（直した）'])
 
   // 片付ける → 上段へ。戻す → 下段へ
-  await 開き直した
-    .getByTestId('memo-bubble')
-    .filter({ hasText: 'ぜんたい二つ目' })
-    .getByTestId('memo-check')
-    .click()
+  await 操作を押す(
+    開き直した.getByTestId('memo-bubble').filter({ hasText: 'ぜんたい二つ目' }),
+    'memo-check',
+  )
   await expect
     .poll(
       async () =>
@@ -454,7 +467,10 @@ test('全体メモも、セッションメモと同じ筋がそのまま通る',
   await expect(開き直した.getByTestId('memo-checked').getByTestId('memo-body')).toHaveText(
     'ぜんたい二つ目',
   )
-  await 開き直した.getByTestId('memo-checked').getByTestId('memo-check').click()
+  await 操作を押す(
+    開き直した.getByTestId('memo-checked').getByTestId('memo-bubble'),
+    'memo-check',
+  )
   /*
     **戻る先は「メモの時刻の位置」であって、末尾ではない**（設計§7-5）。
 
@@ -473,7 +489,7 @@ test('全体メモも、セッションメモと同じ筋がそのまま通る',
   // **後始末。** 全体メモはカードに紐づかないので `archiveAll` では消えない
   for (const 本文 of ['ぜんたい一つ目（直した）', 'ぜんたい二つ目']) {
     const 対象 = 開き直した.getByTestId('memo-bubble').filter({ hasText: 本文 })
-    await 対象.getByTestId('memo-edit').click()
+    await 操作を押す(対象, 'memo-edit')
     await 開き直した.getByTestId('memo-remove').click()
     await 開き直した.getByTestId('memo-remove-confirm').click()
   }
@@ -571,22 +587,14 @@ test('あとから片付けたものほど下に積まれる', async ({ page }) 
   await expect(面.getByTestId('memo-bubble')).toHaveCount(2, { timeout: 30_000 })
 
   // **先に「さきに片付ける」を片付ける。** 順を付けるので、1件ずつ着地を待つ
-  await 面
-    .getByTestId('memo-bubble')
-    .filter({ hasText: 'さきに片付ける' })
-    .getByTestId('memo-check')
-    .click()
+  await 操作を押す(面.getByTestId('memo-bubble').filter({ hasText: 'さきに片付ける' }), 'memo-check')
   await expect
     .poll(async () => await 面.getByTestId('memo-list').getByTestId('memo-body').allInnerTexts(), {
       timeout: 30_000,
     })
     .toEqual(['あとで片付ける'])
 
-  await 面
-    .getByTestId('memo-bubble')
-    .filter({ hasText: 'あとで片付ける' })
-    .getByTestId('memo-check')
-    .click()
+  await 操作を押す(面.getByTestId('memo-bubble').filter({ hasText: 'あとで片付ける' }), 'memo-check')
   await expect
     .poll(async () => await 面.getByTestId('memo-list').getByTestId('memo-body').allInnerTexts(), {
       timeout: 30_000,
@@ -670,7 +678,7 @@ test('全体メモは4つの画面のどこからでも開けて、同じ中身�
   expect(tile).toBeTruthy()
 
   // **後始末。** 全体メモはカードに紐づかないので、放っておくと次のテストへ残る
-  await 自分のだけ(設定で見えた).getByTestId('memo-edit').click()
+  await 操作を押す(自分のだけ(設定で見えた), 'memo-edit')
   await 設定で見えた.getByTestId('memo-remove').click()
   await 設定で見えた.getByTestId('memo-remove-confirm').click()
   await expect(自分のだけ(設定で見えた)).toHaveCount(0, { timeout: 30_000 })
@@ -736,7 +744,17 @@ test.describe('指で触る端末', () => {
     await page.keyboard.press('Control+Enter')
     await expect(面.getByTestId('memo-bubble')).toHaveCount(1, { timeout: 30_000 })
 
-    // **3つのボタンは `hover` が無くても出る**（`focus-within` でも出す作法）
+    /*
+      **3つのボタンは `hover` が無くても出る。**
+
+      マウスのある端末では隠して当たり判定も塞いでいる（`memo.css`）が、**指の端末には
+      `hover` が無い**ので、塞いだままだと永久に届かない。カードの `tile-ops` は
+      `[data-selected='true']` で逃げ道を作っているが、**吹き出しに「選んだ」状態は無い。**
+
+      **出ていることを先に見る。** 見ずに `tap()` だけ書くと、押せなかったのか
+      押しても効かなかったのかが区別できない。
+    */
+    await expect(面.getByTestId('memo-ops')).toHaveCSS('opacity', '1')
     await 面.getByTestId('memo-check').tap()
     await expect
       .poll(
