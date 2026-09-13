@@ -244,11 +244,17 @@ export function FileEditor({
           <div key={i}>{i + 1}</div>
         ))}
       </div>
-      {/* **色付きの層。** 打つ層の真下に重なる */}
+      {/* **色付きの層。** 打つ層の真下に重なる。
+
+          **行番号のぶんの空けかたを、打つ層と同じ `padding-left` で書く**（設計§6-2）。
+          片方を `left` で寄せると、**同じ位置に見えていても組版の値が食い違う**——
+          `padding` は器から継承されないので、**揃っていることを誰も見張れない**。
+          実ブラウザで両層の組版を突き合わせる検査（`打つ層と見せる層の組版が…`）は、
+          この食い違いを捕まえるために在る。 */}
       <pre
         aria-hidden
-        className="file-editor-paint pointer-events-none absolute top-0"
-        style={{ left: `${桁 + 1}ch` }}
+        className="file-editor-paint pointer-events-none absolute top-0 left-0"
+        style={{ paddingLeft: `${桁 + 1}ch` }}
         ref={色の層}
       >
         {色 === null

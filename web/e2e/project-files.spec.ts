@@ -1908,8 +1908,13 @@ test("打って保存すると、実ファイルが変わり、読み直して�
   await page.keyboard.press("End");
   await 欄.pressSequentially("と、足した行");
 
-  // **打っただけでは保存されていない。** 未保存の印が出ることまで見る
-  await expect(page.getByTestId("file-unsaved")).toBeVisible();
+  // **打っただけでは保存されていない。** 保存が押せる状態になることまで見る。
+  //
+  // **`file-unsaved` ではない。** あちらは「**前に開いたときの書きかけを復元した**」
+  // ときの印で、打った直後には出ない（`FileView` の `戻した`）。いま見たいのは
+  // 「ディスクと違う中身を抱えている」ことなので、**それを表しているのは
+  // `保存できる` の述語＝保存ボタンの活性**である（設計§6-7）。
+  await expect(page.getByTestId("file-save")).toBeEnabled();
   expect(
     fs.readFileSync(実物, "utf8"),
     "押す前はディスクが変わっていないこと",
@@ -1917,8 +1922,8 @@ test("打って保存すると、実ファイルが変わり、読み直して�
 
   await page.keyboard.press("Control+s");
 
-  // **印が消えることを待ってから**ディスクを見る。待たないと、書き終える前に読む
-  await expect(page.getByTestId("file-unsaved")).toHaveCount(0);
+  // **押せなくなるのを待ってから**ディスクを見る。待たないと、書き終える前に読む
+  await expect(page.getByTestId("file-save")).toBeDisabled();
   expect(
     fs.readFileSync(実物, "utf8"),
     "実ファイルへ届いていること",
