@@ -502,6 +502,9 @@ pub fn status_of(err: &HostAskError) -> StatusCode {
             // 415 へ寄せると「メディア型が非対応」という無関係な理由になり、
             // 押した人が何を直せばよいか分からない（コードレビュー対応8）
             HostFailure::Unavailable => StatusCode::NOT_IMPLEMENTED,
+            // **読んだあとに他所で書き換えられていた**（設計§8-3）。403 へ寄せると
+            // 権限の話に見えて、画面が「読み直す／上書きする」を出す手掛かりを失う
+            HostFailure::Conflict => StatusCode::CONFLICT,
         },
         // 頼み方が読めない。**PC は無関係**なので、相手のせいに見える 404 / 409 へ寄せない
         HostAskError::BadRequest(_) => StatusCode::BAD_REQUEST,

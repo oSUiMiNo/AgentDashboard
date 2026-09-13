@@ -7,10 +7,20 @@
 //! 近道を作ると「ローカルでは動くのにセルフホストで欠ける」という、経路の違いが原因で
 //! テストを増やしても見つからない壊れ方が残る（設計§19）。
 //!
-//! # 読むだけ
+//! # 読む口と、書く口は別である
 //!
-//! 書く口はこの工事では作らない（設計§9）。書ける口を1つ開けると、ブラウザから
-//! 利用者の機械へ任意の書き込みができることになり、鍵のかけ方の議論が丸ごと別物になる。
+//! かつてここには「**書く口はこの工事では作らない**」と書いてあった。理由は
+//! 「書ける口を1つ開けると、ブラウザから利用者の機械へ任意の書き込みができることになり、
+//! 鍵のかけ方の議論が丸ごと別物になる」であり、**その懸念はいまも正しい。**
+//!
+//! `ファイルビュアにエディタ機能を追加` で、その議論をしたうえで口を開けた（設計§3）。
+//! **無制限には開けていない**——[`write_file`] は**許可された根の配下だけ**を書く。
+//! 読み取りに範囲の制限が無いのに書き込みにはあるのは、**欠陥ではなく意図である**
+//! （設計§3-4）。壊せる範囲を、見られる範囲より狭く取っている。
+//!
+//! **そして上書きだけである。** 作る・消す・移すはしない（設計§11）。それを守って
+//! いるのは `tests/hostfs.rs` の構造の検査で、**書く道具の綴りがソースに現れていないか**
+//! を見ている。[`write_file`] が使ってよいのは `fs::write` 1つだけである。
 //!
 //! # 同期のまま置いてある
 //!
@@ -20,7 +30,7 @@
 use protocol::a2s::HostFailure;
 use protocol::fs::{
     DirEntry, DirListing, EntryKind, FileBlob, FileContent, FileKind, MAX_BLOB_BYTES, MAX_ENTRIES,
-    MAX_FILE_BYTES, MAX_LISTING_BYTES, kind_of, media_type_of,
+    MAX_FILE_BYTES, MAX_LISTING_BYTES, WrittenFile, kind_of, media_type_of,
 };
 use std::path::{Path, PathBuf};
 
@@ -327,5 +337,130 @@ pub fn read_file(path: &Path) -> Result<FileContent, HostFsError> {
         // 上限の内側で切ることは、いまはしない。**上限超えと意味を混ぜない**（設計§9）
         truncated: false,
         bytes,
+        // 読んだ時点の印。**保存のときにこれを持ってきてもらう**（設計§8-3）
+        stamp: stamp_of(&meta),
+    })
+}
+
+/// 読んだ時点と書く直前を突き合わせるための印（設計§8-3）。
+///
+/// # 形式を知るのはここだけである
+///
+/// `<バイト数>-<更新時刻のナノ秒>`。**サーバも画面も解釈しない**——受け取ってそのまま
+/// 返すだけなので、形式を変えてもこの関数の外は1行も直らない。だから `protocol` 側へ
+/// 組み立てを置いていない（置くと「解釈してよい」と読まれ、形式を知る場所が増える）。
+///
+/// # 中身の要約を混ぜていない
+///
+/// 混ぜれば取りこぼしは減るが、**保存のたびに古い中身を丸ごと読み直す**ことになる——
+/// 書くときは本来読まない。上限は 3 MiB あるので安くない。
+///
+/// **したがってこの印は完全ではない。** 同じ大きさで、かつ更新時刻の粒度の内側に収まる
+/// 書き換えは原理的に抜ける。塞ぎたくなったら要約を混ぜる道がある。
+///
+/// # 時刻は丸めない
+///
+/// OS が返す精度をそのまま使う。丸めると盲点が広がるだけで、得るものが無い。更新時刻を
+/// 持たない環境では大きさだけの印になり、**守りは弱くなるが壊れはしない。**
+fn stamp_of(meta: &std::fs::Metadata) -> String {
+    let nanos = meta
+        .modified()
+        .ok()
+        .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|since| since.as_nanos())
+        .unwrap_or(0);
+    format!("{}-{nanos}", meta.len())
+}
+
+/// ファイル1つを書き戻す（`ファイルビュアにエディタ機能を追加` 設計§2）。
+///
+/// # 上書きだけである
+///
+/// **作らない・消さない・移さない**（設計§11）。存在しないパスは断る——作る口は
+/// `フォルダとファイルを追加できるようにしてほしい` の担当で、そちらが乗るときに
+/// **同じ照合を通す**。
+///
+/// # 確かめる順序に意味がある
+///
+/// 実体 → 許可された根 → 印、の順に見る。**根を先に確かめる**のは、許可されていない
+/// 場所のファイルについて「印が違います」と教えると、**そこに何があるかを漏らす**ため。
+///
+/// # 規則は1つ、確かめる場所が2つ
+///
+/// サーバは**字句**で、ここは **`canonicalize` した実体**で確かめる（設計§3-1）。
+/// どちらも [`protocol::path::is_writable`] を呼ぶ。**二重実装ではない**——同じ規則へ
+/// 渡す材料が違うだけである。リンクを辿った先が根の外に在る形は、ここでしか塞げない。
+pub fn write_file(
+    path: &Path,
+    text: &str,
+    stamp: &str,
+    roots: &[String],
+) -> Result<WrittenFile, HostFsError> {
+    // **印の無い要求は断る**（設計§8-3）。省けば上書きできる道を残すと、競合の検知は
+    // 「印を付けた人だけが守られる」ものになる
+    if stamp.is_empty() {
+        return Err(HostFsError::new(
+            HostFailure::Conflict,
+            format!("{} を書くには、読んだ時点の印が要ります", path.display()),
+        ));
+    }
+
+    // **実体で確かめる。** `..` もリンクもここで畳まれる。`fs::write` はリンクを辿るので、
+    // **辿った先が根の内側か**を見ないとリンク1本で外へ抜けられる
+    let actual = std::fs::canonicalize(path).map_err(|err| HostFsError::from_io(&err, path))?;
+    let shown = actual.display().to_string();
+
+    if !protocol::path::is_writable(roots, &shown) {
+        return Err(HostFsError::new(
+            HostFailure::Denied,
+            format!("{shown} は、書き込みを許可された場所の外です"),
+        ));
+    }
+
+    let meta = std::fs::metadata(&actual).map_err(|err| HostFsError::from_io(&err, &actual))?;
+    if meta.is_dir() {
+        return Err(HostFsError::new(
+            HostFailure::Unsupported,
+            format!("{shown} はフォルダなので書き戻せません"),
+        ));
+    }
+
+    // **切り詰めて上書きする事故を塞ぐ**（設計§9）。いまは上限超えを丸ごと断っているので
+    // 発火しないが、部分読みが入ったときにここが効く
+    let bytes = meta.len();
+    if bytes > MAX_FILE_BYTES {
+        return Err(HostFsError::new(
+            HostFailure::TooLarge,
+            format!("{shown} は {bytes} バイトで、上限の {MAX_FILE_BYTES} バイトを超えています"),
+        ));
+    }
+
+    // **書く直前にもう一度取って照合する**（設計§8-3）。読んでから保存するまでに別の
+    // セッションの claude が同じファイルを書き換えているのは、この道具では日常である
+    let now = stamp_of(&meta);
+    if now != stamp {
+        return Err(HostFsError::new(
+            HostFailure::Conflict,
+            format!("{shown} は、読んだあとに他所で書き換えられています"),
+        ));
+    }
+
+    // 読む側が NUL を断っているので、書く側でも断る。**画面からは入らないが CLI からは入る**
+    if text.as_bytes().contains(&0) {
+        return Err(HostFsError::new(
+            HostFailure::Unsupported,
+            format!("{shown} へ NUL を含む中身は書けません"),
+        ));
+    }
+
+    // **文字コードは推定も変換もしない**（設計§9）。読めたものをそのまま書き戻す
+    std::fs::write(&actual, text).map_err(|err| HostFsError::from_io(&err, &actual))?;
+
+    // **書いたあとの印を返す。** 返さないと、2回目の保存が必ず断られる
+    let after = std::fs::metadata(&actual).map_err(|err| HostFsError::from_io(&err, &actual))?;
+    Ok(WrittenFile {
+        path: shown,
+        bytes: after.len(),
+        stamp: stamp_of(&after),
     })
 }

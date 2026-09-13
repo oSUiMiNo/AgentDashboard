@@ -1017,6 +1017,11 @@ async fn handshake(mut socket: Socket, config: &LinkConfig) -> anyhow::Result<(S
         // 同じで、**この実行ファイルは `attachments::survey`／`sweep` を持っている**
         // ので常に真
         supports_attachment_sweep: true,
+        // テキストを書き戻せる版であることを名乗る
+        // （`ファイルビュアにエディタ機能を追加` 設計§2-5）。上7つと同じで、
+        // **この実行ファイルは `hostfs::write_file` を持っている**ので常に真。
+        // 名乗らない PC には、サーバが**そもそも編集を出さない**
+        supports_file_write: true,
     };
     socket
         .send(tungstenite::Message::text(serde_json::to_string(&hello)?))
@@ -1197,6 +1202,14 @@ enum Ask {
     /// 一覧。`None` はその PC のホーム（設計§26-2）
     Dir(Option<String>),
     File(String),
+    /// テキストを書き戻す（`ファイルビュアにエディタ機能を追加` 設計§2）。
+    /// **`File` と別にしてある**——向きが逆で、**許可された根と印を一緒に運ぶ**
+    WriteFile {
+        path: String,
+        text: String,
+        stamp: String,
+        roots: Vec<String>,
+    },
     /// バイト列で読む（`ファイル閲覧で画像とHTMLも表示する` 設計§3-2）。
     /// **`File` と別にしてある**——契約（テキストだけ／表に載る種別だけ）が違う
     Blob(String),
@@ -1269,6 +1282,15 @@ fn answer_ask(outgoing: mpsc::UnboundedSender<Outgoing>, request_id: RequestId, 
             },
             Ask::Blob(path) => match crate::hostfs::read_blob(Path::new(&path)) {
                 Ok(blob) => HostReply::Blob(blob),
+                Err(err) => failed(err),
+            },
+            Ask::WriteFile {
+                path,
+                text,
+                stamp,
+                roots,
+            } => match crate::hostfs::write_file(Path::new(&path), &text, &stamp, &roots) {
+                Ok(written) => HostReply::Wrote(written),
                 Err(err) => failed(err),
             },
             Ask::Write(card, media_type, data, config) => {
@@ -1574,6 +1596,27 @@ fn apply_command(
         }
         ServerToAgent::ReadBlob { request_id, path } => {
             answer_ask(outgoing.clone(), request_id, Ask::Blob(path));
+        }
+        // テキストを書き戻す問い（`ファイルビュアにエディタ機能を追加` 設計§2）。
+        // **読む問いと同じ1本の問答の道に乗る。** 許可された根はサーバが組み立てて
+        // 渡してくる——**こちらで決めない**（決める場所が2つあると食い違う。設計§3-1）
+        ServerToAgent::WriteFile {
+            request_id,
+            path,
+            text,
+            stamp,
+            roots,
+        } => {
+            answer_ask(
+                outgoing.clone(),
+                request_id,
+                Ask::WriteFile {
+                    path,
+                    text,
+                    stamp,
+                    roots,
+                },
+            );
         }
         // 添付を置く問い（`メッセージに画像を添付できるようにする` 設計§4）。
         // **読む問いと同じ1本の問答の道に乗る。** 置き場所を知るのに設定が要るので、

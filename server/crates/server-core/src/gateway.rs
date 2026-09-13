@@ -289,6 +289,14 @@ pub struct Capabilities {
     /// 上の7つとまったく同じ形。
     #[serde(default)]
     pub supports_attachment_sweep: bool,
+    /// 任意のテキストファイルを**書き戻せる**か
+    /// （`ファイルビュアにエディタ機能を追加` 設計§2-5）。上の8つとまったく同じ形。
+    ///
+    /// **投げる前にここを見る。** 名乗らない PC は接続を保ったまま無視するので、
+    /// 投げると永遠に答えが返らない。**そして名乗らない PC には、そもそも編集を
+    /// 出さない**——押して断られるのではなく出さない。
+    #[serde(default)]
+    pub supports_file_write: bool,
 }
 
 /// 他インスタンスから回ってくる、PC への指示（設計§9-2 の `agent:{id}:cmd`）。
@@ -1236,6 +1244,7 @@ fn reply_kind(reply: &HostReply) -> &'static str {
         HostReply::Log(_) => "log",
         HostReply::Blob(_) => "blob",
         HostReply::Written(_) => "written",
+        HostReply::Wrote(_) => "wrote",
         HostReply::Resources(_) => "resources",
         HostReply::Sessions { .. } => "sessions",
         HostReply::Swept(_) => "swept",
@@ -1775,6 +1784,11 @@ enum Route {
 enum Need {
     HostFs,
     LogRead,
+    /// テキストを**書き戻せる**か（`ファイルビュアにエディタ機能を追加` 設計§2-5）。
+    ///
+    /// **`Blob`／`BlobWrite` と別にしてある**——添付を置く道は既に配ったホストが
+    /// 持っているが、任意のファイルを書き戻す道は持っていない
+    FileWrite,
     /// 抜け殻のカードを起こし直せるか（接続断のカードを復旧ボタンで戻す 設計§5-3）。
     ///
     /// **これだけは答えを待たない頼み**（`request_id` を持たない）にも関わらず名乗りを
@@ -1951,6 +1965,7 @@ impl RemoteSessionHost {
                 Need::Recall => capabilities.supports_recall,
                 Need::Resources => capabilities.supports_resources,
                 Need::AttachmentSweep => capabilities.supports_attachment_sweep,
+                Need::FileWrite => capabilities.supports_file_write,
             })
     }
 }
@@ -2090,6 +2105,7 @@ async fn agent_loop(
         supports_blob_write,
         supports_recall,
         supports_attachment_sweep,
+        supports_file_write,
     } = hello
     else {
         // next_hello が Hello 以外を返すことはない
@@ -2129,6 +2145,7 @@ async fn agent_loop(
         supports_blob_write,
         supports_recall,
         supports_attachment_sweep,
+        supports_file_write,
     };
     match serde_json::to_value(&capabilities) {
         Ok(value) => {

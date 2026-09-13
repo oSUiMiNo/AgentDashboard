@@ -99,6 +99,15 @@ pub enum HostReply {
     /// 書いた側だからなのかが読めなくなる（[`crate::fs::FileContent`] と
     /// [`crate::fs::FileBlob`] を分けたのと同じ理由）。
     Written(crate::fs::WrittenBlob),
+    /// 書き戻したファイル（`ファイルビュアにエディタ機能を追加` 設計§2）。
+    ///
+    /// **[`Self::Written`] と別の腕にしてある。** あちらは添付を置いた答えで
+    /// `media_type` を持つが、テキストの上書きに媒体型の意味は無い。同じ型に載せると
+    /// 「媒体型が空なのは、テキストだからなのか決まらなかったからなのか」が読めなくなる。
+    ///
+    /// **PC → サーバ方向なので [`A2S_VERSION`] は上げない。** 古い PC はこれを送らない
+    /// だけで、解けなくなるわけではない。
+    Wrote(crate::fs::WrittenFile),
     /// **履歴が実在する CLI セッション**（名前付け設計§8-3）。
     ///
     /// `Log` や `Resources` と同じ理由でここへ足した。別の答えの型を作ると、待ち口・
@@ -161,6 +170,20 @@ pub enum HostFailure {
     /// 古い PC は送らない。新しい PC が古いサーバへ送る組み合わせは、能力の名乗りが
     /// 閉じている（知らないサーバはそもそも聞かない）。
     Unavailable,
+    /// **読んだあとに、他所で書き換えられていた**
+    /// （`ファイルビュアにエディタ機能を追加` 設計§8-3）。
+    ///
+    /// `Denied` と分けてあるのは、**利用者が次に採る手が違うから**である。あちらは
+    /// 権限の話で画面にできることが無いが、こちらは**読み直すか上書きするかを選ばせる**
+    /// （設計§8-3）。まとめると、その選択肢を出す手掛かりが画面に残らない。
+    ///
+    /// 状態コードは 409。**`HostAskError::Unsupported` と同じ行き先**だが、あちらは
+    /// 「いまのこの相手ではできない」で、こちらは「中身が食い違った」である。
+    ///
+    /// **足しても `A2S_VERSION` は上げない。** `Unavailable` と同じ理由で、これは
+    /// PC → サーバ方向であり、古い PC は送らない。新しい PC が古いサーバへ送る
+    /// 組み合わせは、能力の名乗り（`supports_file_write`）が閉じている。
+    Conflict,
 }
 
 /// 画面と履歴の更新間隔（§13-3）。DB settings の値をセッションホストへ運ぶ。
@@ -276,6 +299,21 @@ pub enum AgentMessage {
         /// 接続を保ったまま無視する**ので、投げると永遠に答えが返らない。
         #[serde(default)]
         supports_attachment_sweep: bool,
+        /// **任意のテキストファイルを書き戻せる**か
+        /// （`ファイルビュアにエディタ機能を追加` 設計§2-5）。
+        ///
+        /// 上の8つとまったく同じ形。**`supports_blob_write` に相乗りさせない**——
+        /// 添付を置く道は既に配ったホストが持っているが、**任意のファイルを書き戻す道は
+        /// 持っていない**。まとめると「画像も置けません」と嘘をつく。置き場所を PC が
+        /// 決める添付と、呼ぶ側がパスを指定する上書きは、別物である。
+        ///
+        /// [`ServerToAgent::WriteFile`] は答えを返す種別だが、**名乗らない PC は接続を
+        /// 保ったまま無視する**ので、投げると永遠に答えが返らない。
+        ///
+        /// **名乗らない PC には、そもそも編集を出さない**（設計§2-5）。押して断られる
+        /// のではなく出さない——押せて何も起きないものは、壊れているのと見分けが付かない。
+        #[serde(default)]
+        supports_file_write: bool,
     },
     /// カード1枚の最新（意味は [`crate::ws::ServerMessage::SessionUpsert`] と同じ）。
     ///
@@ -574,10 +612,41 @@ pub enum ServerToAgent {
     },
     /// ファイルの中身を教えてほしい（設計§4・§9）。
     ///
-    /// **読むだけ。** 書く口はこの工事では作らない（設計§9）。
+    /// **読むだけ。** 書く口は [`Self::WriteFile`] という**別の口**にしてある
+    /// （`ファイルビュアにエディタ機能を追加` 設計§1-1）。**ここが両義になったのでは
+    /// ない**——[`Self::ReadBlob`] と [`Self::WriteBlob`] を分けたのと同じ作法である。
     ReadFile {
         request_id: RequestId,
         path: String,
+    },
+    /// ファイルを**書き戻してほしい**（`ファイルビュアにエディタ機能を追加` 設計§2）。
+    ///
+    /// **[`Self::ReadFile`] と別の種別にしてある**（設計§1-1）。読む口に書く動作を足すと、
+    /// あちらの doc が書いている「読むだけ」が嘘になる。[`Self::WriteBlob`] を足したときと
+    /// 同じ作法である。
+    ///
+    /// # 許可された根を、要求と一緒に運ぶ
+    ///
+    /// **PC 側が独自に根を決めない**（設計§3-1）。決める場所が2つあると食い違う。
+    /// サーバが設定と開いている PJT から組み立てたものを、そのまま渡す。PC 側は
+    /// `canonicalize` した**実体**でもう一度確かめる——**規則は1つ
+    /// （[`crate::path::is_writable`]）で、確かめる場所が2つあるだけ**である。
+    ///
+    /// 投げる前に**名乗り**（`supports_file_write`）を見ること。名乗らない PC は接続を
+    /// 保ったまま無視するので、投げると永遠に答えが返らない。
+    WriteFile {
+        request_id: RequestId,
+        path: String,
+        /// 書き戻す中身。**文字コードは推定も変換もしない**（設計§9）——読めたものを
+        /// そのまま書き戻す
+        text: String,
+        /// 読んだ時点の印（[`crate::fs::FileContent`] の `stamp`）。
+        ///
+        /// **空を受け取ったら断る**（設計§8-3）。省けば上書きできる道を残すと、
+        /// 競合の検知は「印を付けた人だけが守られる」ものになる
+        stamp: String,
+        /// 書いてよい場所の一覧。**サーバが組み立てたものをそのまま使う**
+        roots: Vec<String>,
     },
     /// ファイルを**バイト列で**教えてほしい（`ファイル閲覧で画像とHTMLも表示する` 設計§3-3）。
     ///
@@ -766,6 +835,7 @@ mod tests {
                 supports_blob_write: true,
                 supports_attachment_sweep: true,
                 supports_recall: true,
+                supports_file_write: true,
             },
             AgentMessage::SessionUpsert {
                 session: Box::new(sample_meta()),
@@ -1007,9 +1077,9 @@ mod tests {
     }
 
     #[test]
-    fn 答えの7種と理由の6値がすべて往復する() {
+    fn 答えの8種と理由の7値がすべて往復する() {
         // 断る側を1つでも落とすと、その理由だけが画面へ出せなくなる。
-        // 「まとめて駄目でした」に潰れるのを防ぐため、**6値を数え上げて**固定する
+        // 「まとめて駄目でした」に潰れるのを防ぐため、**7値を数え上げて**固定する
         let reasons = [
             HostFailure::NotFound,
             HostFailure::Denied,
@@ -1017,6 +1087,7 @@ mod tests {
             HostFailure::TooLarge,
             HostFailure::Unsupported,
             HostFailure::Unavailable,
+            HostFailure::Conflict,
         ];
         let mut all = vec![
             HostReply::Dir(sample_listing()),
@@ -1025,6 +1096,14 @@ mod tests {
                 text: "# 計画\n- [x] 済み\n".to_string(),
                 truncated: false,
                 bytes: 24,
+                stamp: "24-1700000000000000000".to_string(),
+            }),
+            // 書き戻した答え（`ファイルビュアにエディタ機能を追加` 設計§2）。
+            // **足したら必ずここへ足す**
+            HostReply::Wrote(crate::fs::WrittenFile {
+                path: "/home/example/dev/app/計画.md".to_string(),
+                bytes: 31,
+                stamp: "31-1700000000999999999".to_string(),
             }),
             HostReply::Log(sample_chunk()),
             // バイト列（`ファイル閲覧で画像とHTMLも表示する` 設計§3-3）。**足したら必ずここへ足す**
@@ -1055,7 +1134,7 @@ mod tests {
                 detail: "実際の理由がここに入る".to_string(),
             });
         }
-        assert_eq!(all.len(), 6 + reasons.len());
+        assert_eq!(all.len(), 7 + reasons.len());
         for reply in &all {
             assert_eq!(&roundtrip(reply), reply);
         }

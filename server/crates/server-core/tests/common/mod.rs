@@ -361,6 +361,7 @@ pub fn hello(name: &str) -> AgentMessage {
         supports_blob_write: true,
         supports_recall: true,
         supports_attachment_sweep: true,
+        supports_file_write: true,
     }
 }
 
