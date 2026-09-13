@@ -1929,9 +1929,13 @@ test("打って保存すると、実ファイルが変わり、読み直して�
     "実ファイルへ届いていること",
   ).toContain("足した行");
 
-  // **読み直しても残る。** 画面の中だけで完結していないことを、ここで否定する
+  // **読み直しても残る。** 画面の中だけで完結していないことを、ここで否定する。
+  //
+  // **辿り直さない。** 開いていたタブは `localStorage` から戻る（`lib/filesPlace.ts`）ので、
+  // 読み直した先では**既にこのファイルが開いている**。フォルダの一覧は出ていないため、
+  // ここで `開いて選ぶ` を呼ぶと、**出てくるはずのない入口を待ち続けて時間切れになる**。
   await page.reload();
-  await 開いて選ぶ(page, EDITABLE);
+  await expect(page.getByTestId("project-files-panel")).toBeVisible();
   await page.getByTestId("file-toggle-mode").click();
   await expect(page.getByTestId("file-editor")).toHaveValue(/足した行/);
 });
