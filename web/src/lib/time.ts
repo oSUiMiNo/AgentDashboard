@@ -115,3 +115,36 @@ export function formatUntil(remainingMs: number): string {
   }
   return `あと${Math.floor(seconds / DAY)}日`
 }
+
+/**
+ * 期間のミリ秒を日本語にする。[`formatElapsed`] [`formatUntil`] と違い**向きを持たない**。
+ *
+ * # なぜ [`formatElapsed`] を流用できないのか
+ *
+ * あちらは「〜前」を付ける**過去向きの相対**で、`total_duration_ms` のような**期間**へ
+ * 当てると「3分前」と出る。**所要時間ではなく最終更新時刻に読める**——数字が同じでも
+ * 意味が変わってしまう。向きのある語を持たない関数がここに無かったので足した。
+ *
+ * # 1時間を超えたら分を併記する
+ *
+ * 相対表現の2つは「2時間」で丸めてよい——あちらが答える問いは「**止まっていないか**」
+ * 「**あとどれだけ待つか**」で、分の精度が判断を変えないためである。
+ * 一方これは**積み上がった実績**なので、「2時間」と「2時間55分」を同じに見せると
+ * 費用や手間の見当が付かない。**粗さの許容が違うので、書式も違ってよい。**
+ */
+export function formatDuration(durationMs: number): string {
+  const seconds = Math.max(0, Math.floor(durationMs / 1000))
+
+  if (seconds < MINUTE) {
+    return `${seconds}秒`
+  }
+  if (seconds < HOUR) {
+    return `${Math.floor(seconds / MINUTE)}分`
+  }
+  const hours = Math.floor(seconds / HOUR)
+  const minutes = Math.floor((seconds % HOUR) / MINUTE)
+  if (minutes === 0) {
+    return `${hours}時間`
+  }
+  return `${hours}時間${minutes}分`
+}
