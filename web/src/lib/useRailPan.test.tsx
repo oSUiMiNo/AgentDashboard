@@ -2,6 +2,7 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import { useRef } from 'react'
 import { afterEach, describe, expect, it } from 'vitest'
 import { DELTA_LINE } from '@/lib/railPan'
+import { NO_GRAB_ATTR } from '@/lib/useGrip'
 import { useRailPan } from '@/lib/useRailPan'
 
 /**
@@ -43,14 +44,26 @@ function Harness() {
   useRailPan(railRef)
   return (
     <div ref={railRef} data-testid="group-rail">
-      <div
-        data-testid="terminal"
-        onWheel={(event) => {
-          記録.呼ばれた += 1
-          記録.既定が止まっていた = event.defaultPrevented
-        }}
-      >
-        端末の中身
+      <div data-testid="session-view">
+        <div
+          data-testid="terminal"
+          onWheel={(event) => {
+            記録.呼ばれた += 1
+            記録.既定が止まっていた = event.defaultPrevented
+          }}
+        >
+          端末の中身
+          {/*
+            **xterm が自分で作る隠しの入力欄**（`xterm-helper-textarea`）。
+            `isTextEntry` はこれを真と判定するので、**端末を先に見ているかどうか**が
+            この要素の上で分かれる
+          */}
+          <textarea data-testid="xterm-helper" className="xterm-helper-textarea" />
+        </div>
+        <input data-testid="composer" defaultValue="入力欄" />
+        <button type="button" data-testid="control" {...{ [NO_GRAB_ATTR]: '' }}>
+          押せるもの
+        </button>
       </div>
       <pre data-testid="file-raw">生テキスト</pre>
     </div>
@@ -143,6 +156,195 @@ describe('後始末', () => {
     const 端末 = screen.getByTestId('terminal')
     unmount()
     fireEvent.wheel(端末, { deltaX: 120 })
+    expect(rail.scrollLeft, '購読が外れている').toBe(0)
+  })
+})
+
+/** マウスの中ボタン。 */
+const 中ボタン = 1
+
+/** 中ドラッグを、掴むところまで進めておく。**送り量は 40px。** */
+function 掴んでおく() {
+  const { rail } = 置く()
+  const 端末 = screen.getByTestId('terminal')
+  fireEvent.pointerDown(端末, { pointerId: 1, button: 中ボタン, clientX: 300 })
+  fireEvent.pointerMove(端末, { pointerId: 1, clientX: 260 })
+  return { rail, 端末 }
+}
+
+describe('区画の中の中ドラッグで、レールを送る', () => {
+  it('中ドラッグすると、レールが動く', () => {
+    const { rail } = 掴んでおく()
+    expect(rail.scrollLeft, 'ポインタを左へ40動かすと、中身が右へ40流れる').toBe(40)
+  })
+
+  it('**レールの余白では効かない**', () => {
+    const { rail } = 置く()
+    fireEvent.pointerDown(rail, { pointerId: 1, button: 中ボタン, clientX: 300 })
+    fireEvent.pointerMove(rail, { pointerId: 1, clientX: 260 })
+    expect(rail.scrollLeft, '区画の外では掴まない').toBe(0)
+  })
+
+  it('**生テキストの上でも効かない**（区画の外だから）', () => {
+    const { rail } = 置く()
+    const 生テキスト = screen.getByTestId('file-raw')
+    fireEvent.pointerDown(生テキスト, { pointerId: 1, button: 中ボタン, clientX: 300 })
+    fireEvent.pointerMove(生テキスト, { pointerId: 1, clientX: 260 })
+    expect(rail.scrollLeft, '中身の列はレールの中だが、区画の中ではない').toBe(0)
+  })
+
+  it('**入力欄の上では掴まない**', () => {
+    const { rail } = 置く()
+    const 入力欄 = screen.getByTestId('composer')
+    fireEvent.pointerDown(入力欄, { pointerId: 1, button: 中ボタン, clientX: 300 })
+    fireEvent.pointerMove(入力欄, { pointerId: 1, clientX: 260 })
+    expect(rail.scrollLeft, 'Linux の中クリック貼り付けを残す').toBe(0)
+  })
+
+  it('**押せるものの上では掴まない**', () => {
+    const { rail } = 置く()
+    const 押せるもの = screen.getByTestId('control')
+    fireEvent.pointerDown(押せるもの, { pointerId: 1, button: 中ボタン, clientX: 300 })
+    fireEvent.pointerMove(押せるもの, { pointerId: 1, clientX: 260 })
+    expect(rail.scrollLeft, '鉛筆やゴミ箱の上で器の操作を発火させない').toBe(0)
+  })
+
+  it('**主ボタンでは掴まない**', () => {
+    const { rail } = 置く()
+    const 端末 = screen.getByTestId('terminal')
+    fireEvent.pointerDown(端末, { pointerId: 1, button: 0, clientX: 300 })
+    fireEvent.pointerMove(端末, { pointerId: 1, clientX: 260 })
+    expect(rail.scrollLeft, '左ドラッグは文字を選ぶ操作のまま').toBe(0)
+  })
+})
+
+describe('掴み始めるのは、しきい値に届いてから', () => {
+  it('**2px では掴まない**', () => {
+    const { rail } = 置く()
+    const 端末 = screen.getByTestId('terminal')
+    fireEvent.pointerDown(端末, { pointerId: 1, button: 中ボタン, clientX: 300 })
+    fireEvent.pointerMove(端末, { pointerId: 1, clientX: 298 })
+    expect(rail.scrollLeft, 'しきい値に届いていない').toBe(0)
+  })
+
+  it('**3px で掴む**（境界の対）', () => {
+    const { rail } = 置く()
+    const 端末 = screen.getByTestId('terminal')
+    fireEvent.pointerDown(端末, { pointerId: 1, button: 中ボタン, clientX: 300 })
+    fireEvent.pointerMove(端末, { pointerId: 1, clientX: 297 })
+    expect(rail.scrollLeft, '届いたら始まる').toBe(3)
+  })
+
+  it('**押して離すだけでは、レールが動かない**', () => {
+    const { rail } = 置く()
+    const 端末 = screen.getByTestId('terminal')
+    fireEvent.pointerDown(端末, { pointerId: 1, button: 中ボタン, clientX: 300 })
+    fireEvent.pointerUp(端末, { pointerId: 1, clientX: 300 })
+    /*
+      **貼り付けのつもりの中クリックが素通りすることの代理。** 貼り付けそのものは
+      OS の作法なので、ここでは「こちらが何もしなかった」ことまでしか言えない
+    */
+    expect(rail.scrollLeft, '動かしていないので掴んでいない').toBe(0)
+  })
+})
+
+describe('自動スクロールの丸いアイコンを止める', () => {
+  it('**区画の中で中ボタンを押すと、既定動作を止める**', () => {
+    置く()
+    const 止めた = !fireEvent.mouseDown(screen.getByTestId('terminal'), { button: 中ボタン })
+    // **丸いアイコンが出ないことを、自動で確かめられる唯一の代理**
+    expect(止めた, '押した瞬間に抑止する').toBe(true)
+  })
+
+  it('**入力欄の上では止めない**（貼り付けを残す）', () => {
+    置く()
+    const 止めた = !fireEvent.mouseDown(screen.getByTestId('composer'), { button: 中ボタン })
+    expect(止めた, '字を打つところでは OS の作法を優先する').toBe(false)
+  })
+
+  it('**端末の中の隠し `<textarea>` の上でも止める**', () => {
+    置く()
+    const 止めた = !fireEvent.mouseDown(screen.getByTestId('xterm-helper'), { button: 中ボタン })
+    /*
+      xterm は自分の中に `<textarea>` を作るので、入力欄の判定を先に見ると
+      **端末の上だけ抑止が抜ける**。端末を先に見ていることがここで分かる
+    */
+    expect(止めた, '端末は入力欄より先に見る').toBe(true)
+  })
+
+  it('**主ボタンでは止めない**', () => {
+    置く()
+    const 止めた = !fireEvent.mouseDown(screen.getByTestId('terminal'), { button: 0 })
+    expect(止めた, '止めると焦点が動かなくなる').toBe(false)
+  })
+})
+
+describe('掴んでいる間の見せ方と捕捉', () => {
+  it('掴んでいる間だけ、カーソルが `grabbing` になる', () => {
+    const { rail } = 置く()
+    const 端末 = screen.getByTestId('terminal')
+    fireEvent.pointerDown(端末, { pointerId: 1, button: 中ボタン, clientX: 300 })
+    expect(rail.style.cursor, '押しただけでは変わらない').toBe('')
+    fireEvent.pointerMove(端末, { pointerId: 1, clientX: 260 })
+    expect(rail.style.cursor, '掴んでいる間は grabbing').toBe('grabbing')
+    fireEvent.pointerUp(端末, { pointerId: 1, clientX: 260 })
+    expect(rail.style.cursor, '離すと戻る').toBe('')
+  })
+
+  it('**捕捉はレール自身に取る**（区画ではない）', () => {
+    const { rail } = 置く()
+    const 区画要素 = screen.getByTestId('session-view')
+    const 取った: string[] = []
+    // jsdom では読み取り専用なので、差し替えは `defineProperty` で
+    Object.defineProperty(rail, 'setPointerCapture', {
+      configurable: true,
+      value: () => 取った.push('rail'),
+    })
+    Object.defineProperty(区画要素, 'setPointerCapture', {
+      configurable: true,
+      value: () => 取った.push('session-view'),
+    })
+    const 端末 = screen.getByTestId('terminal')
+    fireEvent.pointerDown(端末, { pointerId: 1, button: 中ボタン, clientX: 300 })
+    fireEvent.pointerMove(端末, { pointerId: 1, clientX: 260 })
+    /*
+      **区画に取ってはいけない。** 区画は並べ替えで外して差し直される側なので、
+      差し直された瞬間に捕捉が落ちて掴みが解ける
+    */
+    expect(取った, 'レールに取る').toEqual(['rail'])
+  })
+})
+
+describe('中ドラッグを止める契機は3つ', () => {
+  it('`pointerup` で止まる', () => {
+    const { rail, 端末 } = 掴んでおく()
+    fireEvent.pointerUp(端末, { pointerId: 1, clientX: 260 })
+    fireEvent.pointerMove(端末, { pointerId: 1, clientX: 200 })
+    expect(rail.scrollLeft, '離したあとは追いかけない').toBe(40)
+  })
+
+  it('`pointercancel` で止まる', () => {
+    const { rail, 端末 } = 掴んでおく()
+    fireEvent.pointerCancel(端末, { pointerId: 1, clientX: 260 })
+    fireEvent.pointerMove(端末, { pointerId: 1, clientX: 200 })
+    expect(rail.scrollLeft, '中断されたら追いかけない').toBe(40)
+  })
+
+  it('`lostpointercapture` で止まる', () => {
+    const { rail, 端末 } = 掴んでおく()
+    fireEvent.lostPointerCapture(端末, { pointerId: 1, clientX: 260 })
+    fireEvent.pointerMove(端末, { pointerId: 1, clientX: 200 })
+    expect(rail.scrollLeft, '捕捉を失ったら追いかけない').toBe(40)
+  })
+})
+
+describe('中ドラッグの後始末', () => {
+  it('外したあとの中ドラッグでは、レールが動かない', () => {
+    const { rail, unmount } = 置く()
+    const 端末 = screen.getByTestId('terminal')
+    unmount()
+    fireEvent.pointerDown(端末, { pointerId: 1, button: 中ボタン, clientX: 300 })
+    fireEvent.pointerMove(端末, { pointerId: 1, clientX: 260 })
     expect(rail.scrollLeft, '購読が外れている').toBe(0)
   })
 })
