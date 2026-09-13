@@ -90,6 +90,8 @@ pub struct Config {
     pub revive_estimate_mb: u64,
     /// 起こし直しで使い切らずに残す余白（MB。起こし直し設計§18）
     pub revive_headroom_mb: u64,
+    /// WSL の外側（Windows）の空きを覚えておく期限（秒）。**0 なら外側を見ない**
+    pub revive_host_free_ttl_sec: u64,
 }
 
 impl Default for Config {
@@ -136,6 +138,7 @@ impl Default for Config {
             log_file_level: agent.log_file_level,
             revive_estimate_mb: agent.revive_estimate_mb,
             revive_headroom_mb: agent.revive_headroom_mb,
+            revive_host_free_ttl_sec: agent.revive_host_free_ttl_sec,
         }
     }
 }
@@ -264,6 +267,7 @@ impl Config {
             log_file_level: self.log_file_level.clone(),
             revive_estimate_mb: self.revive_estimate_mb,
             revive_headroom_mb: self.revive_headroom_mb,
+            revive_host_free_ttl_sec: self.revive_host_free_ttl_sec,
             // 接続の3つは `agent.toml` にだけ意味がある（セルフホスト化設計§21 読み替え8）。
             // ローカルモードは同じプロセスに同居していて、繋ぐ相手が自分自身になる
             server_url: None,

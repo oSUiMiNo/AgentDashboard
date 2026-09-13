@@ -135,6 +135,17 @@ const DEFAULT_REVIVE_ESTIMATE_MB: u64 = 780;
 /// 上に乗っている）のぶんである。**空きを 0 まで使う形にすると、戻したあとに
 /// 何も動かせない機械が残る。**
 const DEFAULT_REVIVE_HEADROOM_MB: u64 = 2048;
+
+/// WSL の外側（Windows）の空きを覚えておく期限（秒）。
+///
+/// **外側を聞くのに 6〜27 秒かかる**（実測。逼迫しているときほど遅い）ので、押される
+/// たびには聞けない。かといって定期的に聞き続けると、押されていないときも
+/// `powershell.exe` を立て続けることになる。**そこで、押されたときに期限切れなら
+/// 背景で取りに行き、答えそのものは待たない。**
+///
+/// **0 なら外側を見ない**（＝WSL でない機械と同じ答えになる）。判定そのものを
+/// 止めたいときの逃げ道である。
+const DEFAULT_REVIVE_HOST_FREE_TTL_SEC: u64 = 60;
 /// `statusLine` を再実行する間隔（秒）。
 ///
 /// 実測で `refreshInterval: 3` はきっちり3.0秒間隔で走った（設計§11 前提6）。
@@ -350,6 +361,16 @@ pub struct SessionHostConfig {
     /// ダッシュボード自身・パーサ・ブラウザ・ビルドのぶん。**空きを 0 まで使うと、
     /// 戻したあとに何も動かせない機械が残る。**
     pub revive_headroom_mb: u64,
+    /// WSL の外側（Windows）の空きを覚えておく期限（秒）。**0 なら外側を見ない。**
+    ///
+    /// **WSL の中から見える空きは、この機械で使える量ではない。** WSL がキャッシュを
+    /// 手放しても Windows 側の空きは増えないので、Windows が死にかけていても
+    /// `MemAvailable` は大きな数字を出し続ける（実測：ダッシュボードが「21 枚入る」と
+    /// 答えた同じ瞬間、Windows の物理空きは 1.75 GB だった）。
+    ///
+    /// **外側を聞くのは遅い**ので、覚えておいて使い回す。期限を切ったら背景で
+    /// 取りに行き、**答えは待たない**。
+    pub revive_host_free_ttl_sec: u64,
 }
 
 impl Default for SessionHostConfig {
@@ -384,6 +405,7 @@ impl Default for SessionHostConfig {
             agent_name: None,
             revive_estimate_mb: DEFAULT_REVIVE_ESTIMATE_MB,
             revive_headroom_mb: DEFAULT_REVIVE_HEADROOM_MB,
+            revive_host_free_ttl_sec: DEFAULT_REVIVE_HOST_FREE_TTL_SEC,
         }
     }
 }

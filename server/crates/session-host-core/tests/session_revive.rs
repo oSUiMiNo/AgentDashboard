@@ -578,6 +578,9 @@ impl session_host_core::resources::Probe for 名乗るメモリ {
             total_mb: 16_000,
             available_mb,
             swap_free_mb: 0,
+            // **外側を聞けたときは使われない値。** 揃えておけば、WSL でない機械の
+            // 答えと1ビットも変わらない
+            free_mb: available_mb,
         })
     }
 }
@@ -588,6 +591,31 @@ struct 読めないメモリ;
 
 impl session_host_core::resources::Probe for 読めないメモリ {
     fn read(&self) -> Option<session_host_core::resources::Memory> {
+        None
+    }
+}
+
+/// `MemAvailable` と `MemFree` が食い違う機械。**外側を聞けないときの抑えを試す**ため。
+#[derive(Debug)]
+struct 空きとフリーが違うメモリ(u64, u64);
+
+impl session_host_core::resources::Probe for 空きとフリーが違うメモリ {
+    fn read(&self) -> Option<session_host_core::resources::Memory> {
+        Some(session_host_core::resources::Memory {
+            total_mb: 16_000,
+            available_mb: self.0,
+            swap_free_mb: 0,
+            free_mb: self.1,
+        })
+    }
+}
+
+/// 外側を聞けない（WSL だが interop が届かない等）。
+#[derive(Debug)]
+struct 聞けない外側;
+
+impl session_host_core::resources::HostFreeProbe for 聞けない外側 {
+    fn read(&self) -> Option<u64> {
         None
     }
 }
@@ -651,12 +679,49 @@ async fn 空きが足りていれば起こし直せる() {
 #[tokio::test]
 async fn 読めない機械では床が効かない() {
     // Linux 以外では `/proc/meminfo` が無い。**分からないことを理由に止めない**
+    //
+    // **これは「メモリそのものを読めない」ときの話である。** 「WSL の外側
+    // （Windows）を読めない」は**別物**で、そちらは床が効いたまま**少なく言う側へ
+    // 倒れる**——[`wslで外側を読めなくても床は効く`] が見ている。
+    // **2つを1つに畳まないこと。** 畳むと、外側を聞けないだけの機械で歯止めが
+    // 丸ごと外れる（＝いちばん危ない側へ静かに倒れる）。
     let manager = common::manager_with(床の設定());
     manager.set_memory_probe(Arc::new(読めないメモリ));
 
     let card_id = CardId::new();
     頼む(&manager, card_id).await.expect("通ること");
     assert!(manager.host_resources().is_none(), "資源も答えられないこと");
+}
+
+/// **外側だけ読めない**ときは、床が効いたまま少なく言う側へ倒れる（設計§10-2）。
+///
+/// 上の [`読めない機械では床が効かない`] と**対になっている。** あちらは
+/// `Probe` が `None`（＝資源そのものを答えられない）、こちらは `Probe` は読めるが
+/// **外側だけ聞けていない**状態である。**答えの形が違う**ことを、ここで固定する。
+#[tokio::test]
+async fn wslで外側を読めなくても床は効く() {
+    let manager = common::manager_with(床の設定());
+    // 空き 12,000（＝抑えなければ 10 枚）だが、`MemFree` は 2,500 しかない
+    manager.set_memory_probe(Arc::new(空きとフリーが違うメモリ(
+        12_000, 2_500,
+    )));
+    manager.set_host_free(session_host_core::resources::HostFree::new(
+        true,
+        Arc::new(聞けない外側),
+        std::time::Duration::from_secs(60),
+    ));
+
+    let resources = manager
+        .host_resources()
+        .expect("★資源そのものは答えられること（読めない機械とは別の答えになる）");
+    // (2,500 − 2,000) / 1,000 = 0 枚。**抑えなければ 10 枚**
+    assert_eq!(
+        resources.fits_now,
+        Some(0),
+        "外側を聞けないぶん、少なく言う側へ倒れること"
+    );
+    assert_eq!(resources.host_free_mb, None, "まだ聞けていないこと");
+    assert_eq!(resources.counted_mb, Some(2_500), "MemFree で抑えたこと");
 }
 
 #[tokio::test]
@@ -734,10 +799,12 @@ impl session_host_core::resources::Probe for 生きている数で決まるメ�
             .as_ref()
             .and_then(std::sync::Weak::upgrade)
             .map_or(0, |manager| manager.list().len() as u64);
+        let available_mb = self.base_mb.saturating_sub(live * self.per_mb);
         Some(session_host_core::resources::Memory {
             total_mb: 16_000,
-            available_mb: self.base_mb.saturating_sub(live * self.per_mb),
+            available_mb,
             swap_free_mb: 0,
+            free_mb: available_mb,
         })
     }
 }

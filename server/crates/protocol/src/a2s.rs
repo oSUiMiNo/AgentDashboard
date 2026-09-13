@@ -1124,6 +1124,10 @@ mod tests {
                 estimate_mb: 780,
                 headroom_mb: 2_048,
                 fits_now: Some(7),
+                // WSL の外側で抑えた姿。**両方 `None` にすると「WSL でない機械」に
+                // なり、この2欄が線を通ることを確かめたことにならない**
+                host_free_mb: Some(6_000),
+                counted_mb: Some(6_000),
             }),
             // 実在する CLI セッション（名前付け設計§8-3）。**足したら必ずここへ足す**
             HostReply::Sessions {

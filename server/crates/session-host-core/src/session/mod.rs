@@ -2236,6 +2236,12 @@ pub struct SessionManager {
     /// 中身は変えられないので、固定していると**空きが足りないときの振る舞いを1行も
     /// 確かめられない**（ガイドライン「外の世界へ出る操作はトレイト越しにする」）。
     memory: Mutex<Arc<dyn crate::resources::Probe>>,
+    /// WSL の外側（Windows）の空きを知るための一式（設計§6）。
+    ///
+    /// **器をここで持つ。** [`crate::resources::Gauge`] は押されるたびに組み直されるので、
+    /// 覚えている値を向こうへ置くと**毎回消えて、押すたびに `powershell.exe` を
+    /// 立てることになる。**
+    host_free: Mutex<Arc<crate::resources::HostFree>>,
     /// 通したぶんを差し引いた**見込みの空き**（設計§19）。
     ///
     /// 席（[`SessionManager::revive_slots`]）とは**寿命が違う**ので別に持つ。席は
@@ -2370,6 +2376,16 @@ impl SessionManager {
         *self.memory.lock().expect("ロックが壊れていない") = probe;
     }
 
+    /// 外側（Windows）を知る一式を差し替える（テスト専用。設計§6）。
+    ///
+    /// **`set_memory_probe` とは別の差し替え口にしてある。** 「メモリそのものを
+    /// 読めない」と「WSL の外側を読めない」は**別の話**で、前者は床そのものが
+    /// 効かなくなるが、後者は**少なく言う側へ倒れるだけ**である。1つの口に
+    /// まとめると、この区別がテストから作れなくなる。
+    pub fn set_host_free(&self, host_free: Arc<crate::resources::HostFree>) {
+        *self.host_free.lock().expect("ロックが壊れていない") = host_free;
+    }
+
     /// いまの資源と、**いま何枚起こし直せるか**（設計§18-2）。
     ///
     /// **数えるのはここ1箇所。** 画面もこの数を受け取って比べるだけで、同じ規則を
@@ -2416,7 +2432,11 @@ impl SessionManager {
     /// **読む口と2つの数字を、ここでだけ束ねる。** 以前は3箇所が別々に組み立てており、
     /// **裸の `u64` が2つ並ぶ**ので見積もりと余白の取り違えを型が止められなかった。
     pub fn memory_gauge(&self) -> crate::resources::Gauge {
-        crate::resources::Gauge::from_config(self.memory_probe(), &self.config)
+        crate::resources::Gauge::from_config(
+            self.memory_probe(),
+            Arc::clone(&self.host_free.lock().expect("ロックが壊れていない")),
+            &self.config,
+        )
     }
 
     /// いま1枚も起こし直せないなら、その理由を返す（設計§18-3）。
@@ -2508,6 +2528,7 @@ impl SessionManager {
         aliases: Arc<crate::model_aliases::ModelAliases>,
         events: Arc<dyn EventSink>,
     ) -> Arc<Self> {
+        let host_free = crate::resources::HostFree::from_config(&config);
         Arc::new(Self {
             config,
             program,
@@ -2522,6 +2543,7 @@ impl SessionManager {
             reviving: Mutex::new(HashSet::new()),
             revive_slots: Arc::new(Semaphore::new(REVIVE_PARALLEL)),
             memory: Mutex::new(Arc::new(crate::resources::ProcMeminfo)),
+            host_free: Mutex::new(host_free),
             budget: Mutex::new(ReviveBudget::default()),
         })
     }
