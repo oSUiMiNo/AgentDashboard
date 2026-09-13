@@ -29,6 +29,7 @@ import { formatScreenInterval } from '@/lib/time'
 import { HOME } from '@/lib/routes'
 import { MOTION_QUIET_CHOICES, useSettingsStore } from '@/stores/settings'
 import type { MotionQuiet } from '@/stores/settings'
+import { RateLimitWindows } from '@/components/RateLimits/RateLimitWindows'
 import { AboutCard } from '@/components/Settings/AboutCard'
 import { PortableSettingsCard } from '@/components/Settings/PortableSettingsCard'
 import { VersionsCard } from '@/components/Settings/VersionsCard'
@@ -296,6 +297,26 @@ export function SettingsPage() {
       <AboutCard />
 
       <VersionsCard />
+
+      {/*
+        **使用上限の出し先は構成で割れる**（status 設計「置き場所」の 2026-09-13 訂正）。
+        セルフホストは PC の一覧の各行だが、**ローカルモードにはその一覧が無い**
+        （`no_agents()` が「`"local"` を1台として並べたりはしない」と禁じている）。
+        だからここへ出す——**`hasRemote` で排他**なので、同じ数字が2箇所に並ぶことはない。
+
+        判定は**既にある `hasRemote` を使い回す**。「`agents` が空ならローカル」という
+        判定を新しく作らない（`ProjectAdd` の `isLocal` と合わせて3つ目になる）。
+      */}
+      {!hasRemote && (
+        <div className="border-border flex flex-col gap-2 rounded-xl border p-4">
+          <h3 className="text-sm font-medium">この機械の使用上限</h3>
+          <p className="text-muted-foreground text-xs">
+            claude のログインに紐づく上限です。セッションごとではなくこの機械全体の
+            数字で、<code>/status</code> の Usage タブと同じものを出しています。
+          </p>
+          <RateLimitWindows limits={settings.machine_rate_limits ?? null} />
+        </div>
+      )}
 
       <div className="border-border flex flex-col gap-2 rounded-xl border p-4">
         <h3 className="text-sm font-medium">この CLI が受け付けるモード</h3>

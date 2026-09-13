@@ -643,14 +643,18 @@ function handleJson(raw: string, set: SetState) {
       // 動いたときだけ飛ぶので、`session_upsert` を待つと会話中は古い値で止まる
       patchSessionContextUsage(message.card_id, message.usage)
       break
-    // 【フェーズ2】腕だけを置いてある。**置き場所（ストア）と画面はフェーズ3・4 で足す。**
+    case 'rate_limits':
+      // **宛先はカードではなくアカウント内の全ブラウザ**（status設計「便」）。
+      // どの PC のものかはサーバが決めた帰属をそのまま使う——`null` はこの機械で、
+      // 設定画面の区画へ、`agent_id` が在れば PC の一覧のその行へ入る
+      useSettingsStore.getState().applyRateLimits(message.agent_id, message.limits)
+      break
+    // 【フェーズ2】腕だけを置いてある。**置き場所（ストア）と画面はフェーズ5 で足す。**
     //
     // **ここが空のあいだ、下の `assertNever` はもう守ってくれない。** 腕が在るだけで
     // 型検査は通るので、中身を入れ忘れても `tsc` は黙る——1件目で踏んだ
     // 「型も単体テストも台帳も緑で、画面にだけ何も届かない」と**同じ格好**である。
-    // 見張りを1回使い切った形なので、フェーズ3・4 は画面まで実物で通して確かめること
-    case 'rate_limits':
-      break
+    // 見張りを1回使い切った形なので、フェーズ5 は画面まで実物で通して確かめること
     case 'session_cost':
       break
     case 'transcript_append':

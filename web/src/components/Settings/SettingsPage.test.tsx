@@ -318,3 +318,62 @@ describe('メモの保持（要件10）', () => {
     expect(screen.getByRole('option', { name: '12か月' })).toBeInTheDocument()
   })
 })
+
+describe('この機械の使用上限（status 完了条件1）', () => {
+  beforeEach(() => {
+    vi.spyOn(useSettingsStore.getState(), 'load').mockResolvedValue(undefined)
+  })
+
+  /** いまから1時間後に戻る窓。**過ぎていない材料**を作るために未来を指す。 */
+  function future(percent: number, name = 'five_hour') {
+    return { name, used_percentage: percent, resets_at: Math.floor(Date.now() / 1000) + 3600 }
+  }
+
+  it('使用率が数字として読める（帯だけでは完了条件1 が落ちる）', () => {
+    // **帯は `aria-hidden` の装飾なので、帯の有無を見ても「読める」ことは確かめられない。**
+    // PC の一覧の点には「点が言っていることを文字で二度言わない」という約束があるが、
+    // **あれは点が2値だから冗長**なのであって、連続値の帯は正確な割合を伝えない。
+    // 写すと数字が落ち、**それでも make ci は緑になる**——だからこのテストが要る
+    show({ machine_rate_limits: { windows: [future(41)] } })
+
+    expect(screen.getByTestId('rate-limit-percent')).toHaveTextContent('41%')
+  })
+
+  it('過ぎていない窓のリセット時刻も読める', () => {
+    // **「リセット済み」のテストだけ置くと空振りする。** パーセントだけ並べて
+    // 期限切れ時だけ「リセット済み」と出す画面は、他の項目を全部満たしながら
+    // 完了条件1（使用率**とリセット時刻**が読める）を落とす
+    show({ machine_rate_limits: { windows: [future(41)] } })
+
+    const reset = screen.getByTestId('rate-limit-reset')
+    expect(reset).toHaveTextContent('で戻ります')
+    expect(reset).not.toHaveTextContent('リセット済み')
+  })
+
+  it('ローカルモード（PC が1台も無い）でこそ出る', () => {
+    // **実機はローカルモードである。** セルフホストの「PC の一覧の各行」だけに
+    // 出す形だと、実機では1つも読めない（`no_agents()` が行を作らない）
+    show({ agents: [], machine_rate_limits: { windows: [future(41)] } })
+
+    expect(screen.getByTestId('rate-limits')).toHaveAttribute('data-known', 'true')
+  })
+
+  it('PC が繋がっている構成では、ここには出さない（出し先は排他）', () => {
+    // **同じ数字が画面に2枚並ばないこと。** セルフホストでは PC の一覧の各行に
+    // 出るので、ここへも出すと同じ値が2箇所に見える
+    show({
+      ...remoteAgent('bbbbbbbb-0000-0000-0000-000000000002', '別の PC'),
+      machine_rate_limits: { windows: [future(41)] },
+    })
+
+    expect(screen.queryByTestId('rate-limits')).toBeNull()
+  })
+
+  it('まだ届いていないときは、0% と別に描く', () => {
+    // 届く形が同じなので、0% と区別できないと「使っていない」に見える——
+    // 実際は「まだ分からない」である
+    show({ machine_rate_limits: null })
+
+    expect(screen.getByTestId('rate-limits')).toHaveAttribute('data-known', 'false')
+  })
+})

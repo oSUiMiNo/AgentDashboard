@@ -4,6 +4,8 @@ import { clearSessions, getSession, getSessions, isReviving } from './sessions'
 import { clearAppNotices, getAppNotices, unreadCount } from './appNotices'
 import { clearMemos, memosFor } from './memos'
 import { useWsStore } from './ws'
+import { useSettingsStore } from './settings'
+import { remoteAgent, settingsFixture } from '@/test/fixtures'
 
 /**
  * 接続の作り直し（テスト計画フェーズ5「リロード復元」の単体側）。
@@ -730,5 +732,57 @@ describe('コンテキストの使い具合が、軽い便で届く', () => {
     // 知らないカードは捨てる（`session_upsert` が後から来る）。既にあるカードは無傷
     expect(getSessions()).toHaveLength(1)
     expect(getSession(CARD)?.context_usage).toEqual(使い具合)
+  })
+})
+
+describe('使用上限の便', () => {
+  const 上限 = { windows: [{ name: 'five_hour', used_percentage: 41, resets_at: 1 }] }
+
+  beforeEach(() => {
+    useSettingsStore.setState({ settings: settingsFixture(), loading: false })
+  })
+
+  it('この機械ぶん（宛先なし）は、設定の machine_rate_limits に入る', async () => {
+    // **腕が空でも型検査は通る**（`assertNever` は腕の有無しか見ない）。
+    // 1件目は同じ格好で「型も単体テストも台帳も緑、画面にだけ何も届かない」を踏んだ。
+    // **見張りを1回使い切っているので、ここが唯一の砦である**
+    await useWsStore.getState().connect()
+    latest().accept()
+
+    latest().deliver({ t: 'rate_limits', agent_id: null, limits: 上限 })
+
+    expect(useSettingsStore.getState().settings.machine_rate_limits).toEqual(上限)
+  })
+
+  it('PC を名指しした便は、その行に入る（宛先で置き場所が分かれる）', async () => {
+    const id = 'bbbbbbbb-0000-0000-0000-000000000002'
+    useSettingsStore.setState({
+      settings: settingsFixture(remoteAgent(id, '別の PC')),
+      loading: false,
+    })
+    await useWsStore.getState().connect()
+    latest().accept()
+
+    latest().deliver({ t: 'rate_limits', agent_id: id, limits: 上限 })
+
+    const { settings } = useSettingsStore.getState()
+    expect(settings.agents[0]?.rate_limits).toEqual(上限)
+    // **この機械の欄は触らない。** 両方へ入れると同じ数字が2箇所に出る
+    expect(settings.machine_rate_limits).toBeUndefined()
+  })
+
+  it('一覧に無い PC の便は捨てる（描く行が無い）', async () => {
+    await useWsStore.getState().connect()
+    latest().accept()
+
+    latest().deliver({
+      t: 'rate_limits',
+      agent_id: 'cccccccc-0000-0000-0000-000000000003',
+      limits: 上限,
+    })
+
+    // 落ちも増えもしない。次の `load()` で行ごと届く
+    expect(useSettingsStore.getState().settings.agents).toHaveLength(0)
+    expect(useSettingsStore.getState().settings.machine_rate_limits).toBeUndefined()
   })
 })

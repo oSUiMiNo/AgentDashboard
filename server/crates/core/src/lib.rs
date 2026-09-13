@@ -192,6 +192,7 @@ impl LocalServer {
                 store: self.settings.clone(),
                 manager: Arc::clone(&self.manager),
                 auth: Arc::clone(&self.auth),
+                registry: Arc::clone(&self.registry),
             }),
             Arc::clone(&self.auth),
         );

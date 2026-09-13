@@ -37,6 +37,7 @@ use server_core::{
     account::SessionHostView,
     auth::{AuthContext, AuthMode, Identity},
     db,
+    registry::SessionRegistry,
 };
 use session_host_core::{session::SessionManager, settings::SettingsStore};
 use std::{collections::BTreeMap, sync::Arc};
@@ -87,6 +88,32 @@ pub struct SettingsView {
     /// 画面はこれを**「保存ボタンを出すか」の判定にしか使わない。弾く責任はサーバ側**
     /// にある（設計§3-1）。
     pub writable_roots: Vec<String>,
+    /// **この機械**の使用上限（status設計）。まだ1本も届いていなければ `None`。
+    ///
+    /// # なぜ `agents` とは別の欄なのか
+    ///
+    /// セルフホストでは使用上限が [`SessionHostView::rate_limits`] に乗るが、
+    /// **ローカルモードには `agents` の行が1つも無い**（[`server_core::account::no_agents`]
+    /// が理由つきで禁じている——`"local"` を1台として並べると、他に PC があるように
+    /// 見える）。**行に乗せる形だけだと、実機では1つも読めない。**
+    ///
+    /// **`agents` に1行足す道は採れない。** 画面側に「`agents` が空ならローカルモード」
+    /// という判定が既に2箇所あり（`ProjectAdd` の `isLocal`、`SettingsPage` の
+    /// `hasRemote`）、1行入れると**別の PC 向けの設定が実機に現れる**。
+    ///
+    /// # 出し分けは排他である
+    ///
+    /// ローカルモードは**この欄**、セルフホストは**`agents` の各行**。同じ数字が
+    /// 2箇所に並ぶことはない。
+    ///
+    /// # DB には持たない
+    ///
+    /// [`SessionHostView::rate_limits`] と同じく、**応答のたびに手元の保管から
+    /// かぶせる**（`connected` と同じ性質）。**この欄が初期スナップショットの唯一の
+    /// 経路である**——カードの記録ではないので `SessionUpsert` には乗らず、
+    /// サーバ側の関門が「同じ表示形なら配らない」ので**次に値が動くまで便が飛ばない**
+    /// （5時間窓・7日窓なので数時間空く）。
+    pub machine_rate_limits: Option<protocol::RateLimits>,
 }
 
 /// メモと画像の保持（メモ設計§11-1）。
@@ -145,6 +172,9 @@ pub struct SettingsState {
     pub manager: Arc<SessionManager>,
     /// 入口の鍵（設計§8-1）。LAN パスワードの読み書きと、モードの出し分けに要る
     pub auth: Arc<AuthContext>,
+    /// 使用上限の保管（status設計）。**`SettingsView::machine_rate_limits` をかぶせるため
+    /// だけに要る**——DB には持たないので、応答を作るたびにここから引く。
+    pub registry: Arc<SessionRegistry>,
 }
 
 pub fn routes(state: SettingsState) -> Router {
@@ -244,6 +274,10 @@ async fn api_server_settings(
             .unwrap_or_default()
             .into(),
         writable_roots: db::settings::writable_roots(hub.db(), identity.account_id).await,
+        // **サーバモードに「この機械」は無い。** claude が走るのは繋いできた PC の
+        // 側だけなので、使用上限は1つ残らず上の `agents` の各行に乗る（`agents_of`
+        // がかぶせている）。**ここを埋めると、同じ数字が2箇所に並ぶ**
+        machine_rate_limits: None,
         // セルフホストの鍵はアカウントのほう（§8-3 が LAN の検査から除外している）
         lan_password: LanPasswordView {
             supported: false,
@@ -400,9 +434,8 @@ pub async fn api_settings(
         model_tables: store.local_model_tables(&state.manager.aliases().all()),
         // ローカルモードに PC という単位は無い（`"local"` を1台として並べない）。
         //
-        // **したがって使用上限もここから出ない**（status設計）。値は保管には
-        // `agent_id: None` で入っているが、**乗せる行が無い**。実機はローカルモードなので、
-        // 出し先を作るまで実機では読めない——`account::no_agents` の doc に詳しい
+        // **したがって使用上限はここから出ない**（status設計）。出し先は下の
+        // `machine_rate_limits` である——`account::no_agents` の doc に経緯がある
         agents: server_core::account::no_agents(),
         intervals: intervals.into(),
         lan_password: lan_password_view(&state.auth, &identity).await,
@@ -411,6 +444,11 @@ pub async fn api_settings(
             .unwrap_or_default()
             .into(),
         writable_roots: db::settings::writable_roots(state.auth.db(), identity.account_id).await,
+        // **手元の保管からかぶせる**（DB には無い）。`agents_of` が
+        // `Some(AgentId(..))` で引くのと対で、ローカルは `None` が鍵である。
+        // 届いていなければ `None` のまま——画面は「まだ分からない」と「0%」を
+        // 別に描く決まりなので、捏造しない
+        machine_rate_limits: state.registry.rate_limits_of(identity.account_id, None),
     }))
 }
 
@@ -520,6 +558,7 @@ pub async fn api_update_settings(
                 .into(),
             writable_roots: db::settings::writable_roots(state.auth.db(), identity.account_id)
                 .await,
+            machine_rate_limits: state.registry.rate_limits_of(identity.account_id, None),
         }));
     }
     api_settings(State(state), Extension(identity)).await

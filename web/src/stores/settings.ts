@@ -148,6 +148,23 @@ export interface Settings {
    * （設計§3-1）。正はサーバ側にあり、画面だけで弾いても REST と CLI を素通りする。
    */
   writable_roots: string[]
+  /**
+   * **この機械**の使用上限（status設計）。まだ1本も届いていなければ無い。
+   *
+   * # `agents[].rate_limits` とは出し分けで、同時には出ない
+   *
+   * ローカルモードには **`agents` の行が1つも無い**ので、行に乗せる形だけだと
+   * 実機で1つも読めない。**ローカルはこの欄、セルフホストは `agents` の各行**——
+   * `agents.length === 0` で分ける（`hasRemote` と同じ判定を使い回す）。
+   *
+   * **`agents` に1行足す道は採れない。** 「`agents` が空ならローカル」という判定が
+   * 画面に2箇所あり（`ProjectAdd` の `isLocal`、`SettingsPage` の `hasRemote`）、
+   * 1行入れると**別の PC 向けの設定が実機に現れる**。
+   *
+   * **省略可にしてあるのはサーバが古い場合のため**（`supports_revive` と同じ理由）。
+   * **無い＝まだ届いていない**で、`0%` とは別に描くこと。
+   */
+  machine_rate_limits?: RateLimits | null
 }
 
 /** メモと画像の保持（メモ設計§11-1）。 */
@@ -207,6 +224,25 @@ interface SettingsState {
   noteModelSeen: (model: string | null) => void
   /** 触った項目だけを保存する。 */
   update: (patch: SettingsPatch) => Promise<boolean>
+  /**
+   * 便で届いた使用上限を、手元へ当てる（status設計「便」）。
+   *
+   * # 取り直さずに一部だけ当てる
+   *
+   * `noteModelSeen` は `load()` を呼び直すが、こちらは**便が値そのものを運んでいる**
+   * ので取り直さない。3秒周期で届きうる値を REST の往復にすると、**設定画面を
+   * 開いているあいだ `/api/settings` を叩き続ける**ことになる。
+   *
+   * # 宛先で置き場所が分かれる
+   *
+   * `agentId === null` は**この機械**（ローカルモード）なので `machine_rate_limits`、
+   * `agentId` が在れば**その PC の行**。**REST の初期スナップショットと同じ2箇所**で、
+   * どちらに当てるかはサーバが決めた帰属をそのまま使う（画面が推測しない）。
+   *
+   * 知らない `agentId`（一覧に無い PC）は**捨てる**——行が無いので描きようがなく、
+   * 次の `load()` で行ごと届く。
+   */
+  applyRateLimits: (agentId: string | null, limits: RateLimits) => void
 }
 
 /**
@@ -248,6 +284,18 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   settings: FALLBACK,
   loading: true,
   lastError: null,
+
+  applyRateLimits: (agentId, limits) => {
+    set((state) => {
+      if (agentId === null) {
+        return { settings: { ...state.settings, machine_rate_limits: limits } }
+      }
+      const agents = state.settings.agents.map((agent) =>
+        agent.id === agentId ? { ...agent, rate_limits: limits } : agent,
+      )
+      return { settings: { ...state.settings, agents } }
+    })
+  },
 
   noteModelSeen: (model) => {
     if (model === null || asked.has(model)) {
