@@ -166,6 +166,8 @@ export function MemoPane({ target, readOnly = false, label, 保存先 }: Props) 
   */
   const [溢れ, set溢れ] = useState<AttachmentSweep | null>(null)
   const [消している, set消している] = useState(false)
+  /** 掃除が失敗したことを出す（レビュー対応7）。**黙って閉じない。** */
+  const [掃けなかった, set掃けなかった] = useState(false)
 
   /** 画像を置いたあとに1度だけ数える。**消さない。** */
   const 溢れを見る = useCallback(async () => {
@@ -211,14 +213,31 @@ export function MemoPane({ target, readOnly = false, label, 保存先 }: Props) 
     **面が画面外にありうる**ことに注意——PJT 専用画面はセッション全数を仮想化なしに
     描くので、横スクロールの外にあるメモの面が読み直しを止めうる。
   */
-  const 札を下ろす = useRef<(() => void) | null>(null)
+  /**
+   * **抱えている数を数える**（レビュー対応6）。
+   *
+   * 以前は `??=` で1枚だけ取っていたが、**2人目は自分の札を取らない**ので、
+   * **先に終わった側が下ろしていた**。その窓で版が切り替わると運搬中の画像が
+   * 消える——**この札が防ぐはずだった事故そのもの**である。
+   *
+   * **面は複数のエディタを抱えうる**（本体の入力欄と、直している吹き出し）。
+   * だから**数える**。0 になって初めて下ろす。
+   */
+  const 札 = useRef<{ 数: number; 下ろす: (() => void) | null }>({ 数: 0, 下ろす: null })
   const 抱える = useCallback((抱えている: boolean) => {
+    const いま = 札.current
     if (抱えている) {
-      札を下ろす.current ??= markComposerBusy()
+      いま.数 += 1
+      いま.下ろす ??= markComposerBusy()
       return
     }
-    札を下ろす.current?.()
-    札を下ろす.current = null
+    // **0 より下へ行かせない。** 面ごと消えるときの後始末が、抱えていない状態で
+    // 呼ばれることがある
+    いま.数 = Math.max(0, いま.数 - 1)
+    if (いま.数 === 0) {
+      いま.下ろす?.()
+      いま.下ろす = null
+    }
   }, [])
   // 面ごと消えるときに札を残さない。**残すと、以後どの版切替も止まる**
   useEffect(() => () => 抱える(false), [抱える])
@@ -362,6 +381,13 @@ export function MemoPane({ target, readOnly = false, label, 保存先 }: Props) 
                     try {
                       await sweepAttachments(掃く先(保存先), true)
                       set溢れ(null)
+                      set掃けなかった(false)
+                    } catch {
+                      // **黙って閉じない・黙って残さない**（レビュー対応7）。
+                      // 下見のほうには `catch` が在るのに、実行側だけ抜けていた。
+                      // 失敗すると `set溢れ(null)` に届かず、**ダイアログが押す前と
+                      // 同じ姿のまま残る**——押しても何も起きない無反応になる
+                      set掃けなかった(true)
                     } finally {
                       set消している(false)
                     }
@@ -379,6 +405,20 @@ export function MemoPane({ target, readOnly = false, label, 保存先 }: Props) 
                   そのままにする
                 </button>
               </div>
+              {/*
+                **掃除が失敗したことを出す**（レビュー対応7）。出さないと、押した人から
+                見て**ダイアログが押す前と同じ姿のまま残る**——「押しても何も起きない」
+                になる
+              */}
+              {掃けなかった && (
+                <p
+                  data-testid="memo-sweep-failed"
+                  role="status"
+                  className="text-destructive mt-1 text-xs"
+                >
+                  消せませんでした。そのままにして、しばらくしてからやり直してください。
+                </p>
+              )}
             </div>
           )}
           <p

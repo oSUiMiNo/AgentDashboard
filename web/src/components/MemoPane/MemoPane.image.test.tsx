@@ -323,6 +323,38 @@ describe('版切替の門（設計§8-2）', () => {
     expect(anyComposerBusy()).toBe(false)
   })
 
+  /*
+    **2人が同時に抱えている間は、片方が終わっても下りない**（レビュー対応6）。
+
+    以前は `??=` で1枚だけ取っていたので、**2人目は自分の札を取らず、先に終わった
+    側が下ろしていた**。その窓で版が切り替わると、**まだ運んでいる側の画像が黙って
+    消える**——この札が防ぐはずだった事故そのものである。
+
+    面は複数のエディタを抱えうる（本体の入力欄と、直している吹き出し）。
+  */
+  it('2人が抱えている間は、片方が終わっても札が下りない', () => {
+    render(
+      <MemoPane
+        target={sessionTarget('s-1')}
+        label="このセッションのメモ"
+        保存先={{ where: 'card', host: 'local', cardId: 'card-1' }}
+      />,
+    )
+    const 抱える = 渡ってきた[0]!.on抱える!
+
+    抱える(true)
+    抱える(true)
+    expect(anyComposerBusy()).toBe(true)
+
+    // 1人目が終わった。**もう1人がまだ運んでいるので下ろしてはいけない**
+    抱える(false)
+    expect(anyComposerBusy()).toBe(true)
+
+    // 2人目も終わって、初めて下りる
+    抱える(false)
+    expect(anyComposerBusy()).toBe(false)
+  })
+
   it('面が消えるときに札を残さない（残すと以後どの版切替も止まる）', () => {
     const { unmount } = render(
       <MemoPane
