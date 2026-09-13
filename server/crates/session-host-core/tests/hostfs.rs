@@ -819,3 +819,41 @@ fn 読む口が印を返す() {
     // 大きさが混ざっていることだけは確かめる（形式そのものは hostfs の内側の話）
     assert!(content.stamp.starts_with("3-"));
 }
+
+/// **ホームからの相対でも読める**（`statusコマンド相当の情報を画面から見えるようにする`
+/// 設計「引きの経路（Stats）」）。
+///
+/// **絶対パスだけで確かめると、起点を組み立てる道を1度も通らない。** ブラウザは
+/// ホームを知らないので、この道が無いと `~/.claude/...` を読む手段が無くなる。
+#[test]
+fn ホームからの相対でも読める() {
+    let sandbox = Sandbox::new("home-rel");
+    let body = "{\"version\":1}\n";
+    sandbox.file("覚書.json", body.as_bytes());
+
+    let 元 = std::env::var_os("HOME");
+    unsafe { std::env::set_var("HOME", sandbox.path()) };
+    let 読めたか = hostfs::read_file_from("~/覚書.json");
+    match 元 {
+        Some(値) => unsafe { std::env::set_var("HOME", 値) },
+        None => unsafe { std::env::remove_var("HOME") },
+    }
+
+    let content = 読めたか.expect("読めること");
+    assert_eq!(content.text, body);
+}
+
+/// **絶対パスは、これまでどおりそのまま読む。**
+///
+/// 起点を組み立てる道を足したことで、**既存の呼び出しの意味が変わっていない**ことを
+/// 見る。読む口はほとんどが絶対パスで呼ばれるので、ここが変わると全部に効く。
+#[test]
+fn 絶対パスは起点を組み立てずにそのまま読む() {
+    let sandbox = Sandbox::new("abs-keep");
+    let body = "そのまま\n";
+    let path = sandbox.file("直接.md", body.as_bytes());
+
+    let content = hostfs::read_file_from(&path.display().to_string()).expect("読めること");
+
+    assert_eq!(content.text, body);
+}

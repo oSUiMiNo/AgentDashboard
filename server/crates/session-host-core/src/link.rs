@@ -1276,7 +1276,7 @@ fn answer_ask(outgoing: mpsc::UnboundedSender<Outgoing>, request_id: RequestId, 
                 Ok(listing) => HostReply::Dir(listing),
                 Err(err) => failed(err),
             },
-            Ask::File(path) => match crate::hostfs::read_file(Path::new(&path)) {
+            Ask::File(path) => match crate::hostfs::read_file_from(&path) {
                 Ok(content) => HostReply::File(content),
                 Err(err) => failed(err),
             },

@@ -1,10 +1,22 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { SettingsPage } from '@/components/Settings/SettingsPage'
 import { remoteAgent, settingsFixture } from '@/test/fixtures'
 import { useSettingsStore, type Settings } from '@/stores/settings'
+import { loadStats } from '@/lib/stats'
+
+/*
+  活動の記録は PC のファイルを読む。**通信させない。**
+
+  **既定を「読めなかった」にしてある**——非公開の内部ファイルなので、
+  **読めない環境のほうが普通**である。読めた場合を見たいテストだけが差し替える。
+*/
+vi.mock('@/lib/stats', async (実物) => ({
+  ...(await 実物<typeof import('@/lib/stats')>()),
+  loadStats: vi.fn(() => Promise.resolve(null)),
+}))
 
 /**
  * サーバの応答を流し込む。
@@ -375,5 +387,68 @@ describe('この機械の使用上限（status 完了条件1）', () => {
     show({ machine_rate_limits: null })
 
     expect(screen.getByTestId('rate-limits')).toHaveAttribute('data-known', 'false')
+  })
+})
+
+describe('活動の記録', () => {
+  const 記録 = {
+    lastComputedDate: '2026-09-08',
+    totalSessions: 412,
+    totalMessages: 9001,
+    dailyActivity: [
+      { date: '2026-09-08', messageCount: 50, sessionCount: 5, toolCallCount: 200 },
+    ],
+    modelUsage: [
+      {
+        model: 'claude-sonnet-4-5-20250929',
+        totals: {
+          inputTokens: 1000,
+          outputTokens: 200,
+          cacheReadInputTokens: 50,
+          cacheCreationInputTokens: 10,
+        },
+      },
+    ],
+  }
+
+  beforeEach(() => {
+    vi.spyOn(useSettingsStore.getState(), 'load').mockResolvedValue(undefined)
+    // **既定へ戻す。** 前のテストが差し替えたまま残ると、読めない側の検査が空振りする
+    vi.mocked(loadStats).mockResolvedValue(null)
+    // **呼び出しの履歴も消す。** `mockResolvedValue` は戻り値を替えるだけなので、
+    // 消さないと**他の describe のぶんまで数えてしまい**「呼ばれていない」が成り立たない
+    vi.mocked(loadStats).mockClear()
+  })
+
+  it('読めたら区画が出る', async () => {
+    vi.mocked(loadStats).mockResolvedValue(記録)
+    show()
+
+    // **描画は非同期。** `useEffect` の解決を待たないと、まだ `null` のまま見ることになる
+    expect(await screen.findByTestId('stats-panel')).toBeInTheDocument()
+    expect(screen.getByTestId('stats-total-sessions').textContent).toBe('412')
+  })
+
+  it('読めなかったら区画ごと出さない', async () => {
+    show()
+
+    // **枠も見出しも出さない。** 部品だけ黙っても、空の枠が残ると「壊れている」に見える
+    await waitFor(() => {
+      expect(vi.mocked(loadStats)).toHaveBeenCalled()
+    })
+    expect(screen.queryByTestId('stats-panel')).toBeNull()
+    expect(screen.queryByText('活動の記録')).toBeNull()
+  })
+
+  it('別の PC が繋がっている構成では読みに行かない', async () => {
+    show(remoteAgent('pc-1', 'OMEN'))
+
+    // **どの機械の記録かが一意に決まらない**ので、選ばせる問いを作らずに出さない。
+    // 使用上限の区画と同じ `hasRemote` で分けてある
+    await waitFor(() => {
+      expect(screen.getByTestId('settings-page')).toBeInTheDocument()
+    })
+    expect(vi.mocked(loadStats)).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('stats-panel')).toBeNull()
   })
 })

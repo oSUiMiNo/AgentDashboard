@@ -286,6 +286,44 @@ pub fn read_blob(path: &Path) -> Result<FileBlob, HostFsError> {
     })
 }
 
+/// **ホームからの相対を、起点から組み立てる。** 当たらなければそのまま返す。
+///
+/// **これは記号の特別扱いではない。** 足しているのは「**ホームを起点にする道**」であって、
+/// `~` という綴りに意味を持たせているのではない——[`resolve_start`] が引数を省いたときに
+/// 既にやっていることを、読む口からも使えるようにしただけである。
+///
+/// **規則を2箇所に書かない。** ホームの決め方は [`resolve_start`] が既に持っているので
+/// **呼ぶだけ**にする（[`list_dir_from`] が `cwd::resolve` を呼ぶだけにしてあるのと同じ）。
+fn resolve_read_path(path: &str) -> PathBuf {
+    if path == "~" {
+        return resolve_start(None);
+    }
+    match path.strip_prefix("~/") {
+        Some(rel) => resolve_start(None).join(rel),
+        None => PathBuf::from(path),
+    }
+}
+
+/// **`~/` で始まるならホームから**ファイル1つを読む（`statusコマンド相当の情報を画面から
+/// 見えるようにする` 設計「引きの経路（Stats）」）。
+///
+/// **ホームを知っているのは PC 側だけ**（[`home`] の doc）なので、ブラウザが絶対パスを
+/// 組んで渡す道は無い。**展開はここでやる。**
+///
+/// # 書く側には効かせない
+///
+/// [`write_file`] からは呼ばない。書く口はサーバの入口が**字句**で照合し、PC 側が
+/// `canonicalize` した**実体**でもう一度確かめる形になっている（`server-core` の
+/// `hosts::api_write_file` の doc。規則は `protocol::path::is_writable` の1つで、
+/// 確かめる場所が2つ）。**ここで展開すると「照合した文字列」と「開いた対象」がずれる**
+/// ——サーバが `~/notes/x.md` を見て許し、PC が `/home/u/notes/x.md` を書く形になる。
+///
+/// **読む口（`hosts::api_file`）には照合が無い**ので、読む側だけなら前提を壊さない。
+/// 【実測 2026-09-13】`api_file` は `read_file` を呼ぶだけで、`writable_roots` を見ない。
+pub fn read_file_from(path: &str) -> Result<FileContent, HostFsError> {
+    read_file(&resolve_read_path(path))
+}
+
 /// ファイル1つの中身を返す（設計§9）。
 ///
 /// **テキストだけ。** 文字コードの推定はしない——外したときに文字化けした嘘を

@@ -306,8 +306,7 @@ impl SessionHost for LocalSessionHost {
     ) -> Result<protocol::fs::FileContent, server_core::session_host::HostAskError> {
         reject_target(&request)?;
         let path = path.to_string();
-        blocking_ask(move || session_host_core::hostfs::read_file(std::path::Path::new(&path)))
-            .await
+        blocking_ask(move || session_host_core::hostfs::read_file_from(&path)).await
     }
 
     /// この機械のファイルを**書き戻す**（`ファイルビュアにエディタ機能を追加` 設計§2-4）。

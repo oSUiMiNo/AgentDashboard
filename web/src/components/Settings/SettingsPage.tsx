@@ -20,13 +20,16 @@
  * 変えられないものを並べると「設定したのに効かない」になる。
  */
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { permissionModeInfo } from '@/lib/protocol'
 import { formatScreenInterval } from '@/lib/time'
-import { HOME } from '@/lib/routes'
+import { HOME, LOCAL_HOST } from '@/lib/routes'
+import { loadStats } from '@/lib/stats'
+import type { Stats } from '@/lib/stats'
+import { StatsPanel } from '@/components/Stats/StatsPanel'
 import { MOTION_QUIET_CHOICES, useSettingsStore } from '@/stores/settings'
 import type { MotionQuiet } from '@/stores/settings'
 import { RateLimitWindows } from '@/components/RateLimits/RateLimitWindows'
@@ -114,6 +117,30 @@ export function SettingsPage() {
 
   // 別の PC が繋がっている構成でだけ、画面配信の設定が意味を持つ
   const hasRemote = settings.agents.length > 0
+
+  const [stats, setStats] = useState<Stats | null>(null)
+
+  /*
+    **活動の記録は、この機械のファイルから読む**（status 設計「引きの経路（Stats）」）。
+
+    **ローカルモードだけで読む。** セルフホストでは PC が何台でもありうるので、
+    「どの機械の記録か」が一意に決まらない——**選ばせる問いを新しく作らない**
+    （設計「新しい能力も新しい問いも作らない」）。**使用上限の区画と同じ `hasRemote`
+    で分けてある**ので、判定を1つ増やしていない。
+
+    **読めなくても知らせない。** `loadStats` は投げずに `null` を返す——非公開の
+    内部ファイルなので**「無いのが普通」の環境がある。**
+  */
+  useEffect(() => {
+    if (hasRemote) return
+    let 生きている = true
+    void loadStats(LOCAL_HOST).then((読めた) => {
+      if (生きている) setStats(読めた)
+    })
+    return () => {
+      生きている = false
+    }
+  }, [hasRemote])
 
   return (
     <section
@@ -315,6 +342,26 @@ export function SettingsPage() {
             数字で、<code>/status</code> の Usage タブと同じものを出しています。
           </p>
           <RateLimitWindows limits={settings.machine_rate_limits ?? null} />
+        </div>
+      )}
+
+      {/*
+        **活動の記録は、読めたときだけ枠ごと出す**（status 設計「引きの経路（Stats）」）。
+
+        **`stats !== null` で枠ごと囲む。** 部品も `null` のとき何も返さないが、
+        **見出しと枠は部品の外に在る**ので、囲まないと空の枠だけが残る。
+
+        **読めないことを知らせない。** 非公開の内部ファイルなので「無いのが普通」の
+        環境があり、毎回「ありません」と言うと壊れているように見える。
+      */}
+      {!hasRemote && stats !== null && (
+        <div className="border-border flex flex-col gap-2 rounded-xl border p-4">
+          <h3 className="text-sm font-medium">活動の記録</h3>
+          <p className="text-muted-foreground text-xs">
+            claude が持っている集計です（<code>/status</code> の Stats タブと同じもの）。
+            claude が数え直したときだけ変わります。
+          </p>
+          <StatsPanel stats={stats} />
         </div>
       )}
 
