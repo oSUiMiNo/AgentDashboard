@@ -336,6 +336,20 @@ fn to_agent_message(event: &ServerMessage) -> Option<AgentMessage> {
             card_id: *card_id,
             usage: *usage,
         },
+        // **`agent_id` はここで落とす。** ブラウザ向けの便は「どの PC のものか」を
+        // 持つが、PC に名乗らせてはいけない——帰属を決めるのはサーバの仕事であり
+        // （`ReportOrigin`）、名乗れる形にすると他人の PC を騙る道ができる。
+        // サーバ側は受け取った接続から詰め直す（status 設計「帰属をどこで守るか」）
+        ServerMessage::RateLimits {
+            agent_id: _,
+            limits,
+        } => AgentMessage::RateLimits {
+            limits: limits.clone(),
+        },
+        ServerMessage::SessionCost { card_id, cost } => AgentMessage::SessionCost {
+            card_id: *card_id,
+            cost: *cost,
+        },
         ServerMessage::ParserStatus { state, detail } => AgentMessage::ParserStatus {
             state: *state,
             detail: detail.clone(),
@@ -1816,6 +1830,66 @@ mod tests {
                 ) => assert_eq!(元, 写, "写しで値が変わっている"),
                 _ => panic!("{event:?} が別の種別へ写っている"),
             }
+        }
+    }
+
+    /// 使用上限と費用も写ること。そして**帰属は写らないこと**。
+    ///
+    /// 上のテストと分けてあるのは、確かめることが1つ増えるからである。あちらは
+    /// 「値が変わらずに写るか」だけだが、こちらは**落ちるべきものが落ちているか**も見る。
+    ///
+    /// `agent_id` が A2S に載ると、**セッションホストが他人の PC を騙れる**。
+    /// 帰属を決めるのはサーバの仕事なので（`ReportOrigin`）、PC 側の便は運ばない。
+    /// **型で落としてあるが、線で確かめる**——欄を足しても型は通るので、
+    /// 「運べないこと」をコンパイラ任せにしない。
+    #[test]
+    fn 使用上限と費用も写り帰属は線に乗らない() {
+        let card_id = CardId::new();
+        let agent_id = protocol::AgentId::new();
+        let limits = protocol::RateLimits {
+            windows: vec![protocol::RateLimitWindow {
+                name: "five_hour".to_string(),
+                used_percentage: 41,
+                resets_at: 1_757_000_000,
+            }],
+        };
+        let cost = protocol::SessionCost {
+            total_cost_cents: 6477,
+            total_api_duration_ms: 812_345,
+            total_duration_ms: 3_600_000,
+            total_lines_added: 1240,
+            total_lines_removed: 318,
+        };
+
+        let 写し = to_agent_message(&ServerMessage::RateLimits {
+            agent_id: Some(agent_id),
+            limits: limits.clone(),
+        })
+        .expect("使用上限の写しが無い。セルフホストでは値だけが永遠に届かない");
+        match &写し {
+            AgentMessage::RateLimits { limits: 写 } => {
+                assert_eq!(&limits, 写, "写しで値が変わっている");
+            }
+            other => panic!("{other:?} へ写っている"),
+        }
+        let 線 = serde_json::to_string(&写し).expect("直列化できること");
+        assert!(
+            !線.contains(&agent_id.0.to_string()),
+            "帰属が線に乗っている。PC が名乗れると他人の PC を騙れる：{線}"
+        );
+
+        // 費用はカード宛なので、**こちらは `card_id` が落ちてはいけない**
+        let 写し = to_agent_message(&ServerMessage::SessionCost { card_id, cost })
+            .expect("費用の写しが無い。セルフホストでは値だけが永遠に届かない");
+        match &写し {
+            AgentMessage::SessionCost {
+                card_id: 写カード,
+                cost: 写,
+            } => {
+                assert_eq!(&card_id, 写カード, "宛先のカードが変わっている");
+                assert_eq!(&cost, 写, "写しで値が変わっている");
+            }
+            other => panic!("{other:?} へ写っている"),
         }
     }
 

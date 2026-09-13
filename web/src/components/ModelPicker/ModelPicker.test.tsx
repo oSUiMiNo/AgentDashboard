@@ -44,6 +44,8 @@ function meta(cardId: string, overrides: Partial<SessionMeta> = {}): SessionMeta
     nickname: null,
     branched_from: null,
     context_usage: null,
+    rate_limits: null,
+    cost: null,
     ...overrides,
   }
 }

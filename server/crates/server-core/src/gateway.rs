@@ -2351,6 +2351,29 @@ async fn handle_report(
                 .await;
         }
 
+        // **`agent_id` は `None` で渡す。** 詰めるのは `apply` の中（`origin` から引く）で、
+        // ここで `origin.agent_id` を読んで埋めてはいけない——帰属を決める場所を2箇所に
+        // すると、片方を直したときにもう片方が古い規則で動く（status 設計「帰属をどこで守るか」）。
+        //
+        // PC 側の便（[`AgentMessage::RateLimits`]）はそもそも `agent_id` を運ばないので、
+        // **PC が名乗った値がここへ流れ込む道は無い。**
+        AgentMessage::RateLimits { limits } => {
+            hub.registry
+                .apply(
+                    origin,
+                    ServerMessage::RateLimits {
+                        agent_id: None,
+                        limits,
+                    },
+                )
+                .await;
+        }
+        AgentMessage::SessionCost { card_id, cost } => {
+            hub.registry
+                .apply(origin, ServerMessage::SessionCost { card_id, cost })
+                .await;
+        }
+
         // **書けたときだけ ack を返す**（設計§6-1）。返さないことが「まだ書けていない」
         // の合図になり、セッションホストは持っているぶんを再送する
         AgentMessage::TranscriptBatch {

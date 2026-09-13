@@ -183,6 +183,27 @@ export interface SessionMeta {
    * 出すからである。`?` にすると「欄が無い」と「値が無い」が型の上で混ざる。
    */
   context_usage: ContextUsage | null
+  /**
+   * **その PC の使用上限**（`/status` の横棒グラフ。status 設計§5）。
+   *
+   * `null` は「**その PC でセッションが1本も走っていない**」。
+   * `context_usage` の `null`（まだ分からない）**とは意味が違う**——あちらは走っていても
+   * API を叩く前は空だが、こちらは走っていれば最初から値がある【実測 2026-09-13】。
+   *
+   * **セッションの状態ではなく PC の状態である。** 同じ PC のどのカードから届いても
+   * 値は同じなので、**カードごとに並べて出すと同じ数字が画面に何枚も出る**。
+   */
+  rate_limits: RateLimits | null
+  /**
+   * **そのセッションが使った費用と手間**（`/status` の Session 欄。status 設計§5）。
+   *
+   * `rate_limits` と**同じ payload から届くが、属する相手が違う**——あちらは PC、
+   * こちらはセッションである。出す場所も違う。
+   *
+   * 費用は**クライアント側が定価から計算した近似**で、公式が「実際の請求と異なりうる」と
+   * 明記している。**画面に出すときは断りを一緒に出すこと。**
+   */
+  cost: SessionCost | null
 }
 
 /**
@@ -205,6 +226,59 @@ export interface ContextUsage {
   total_input_tokens: number
   /** コンテキストウィンドウの上限（`241.5k / 1m` の右側） */
   context_window_size: number
+}
+
+/**
+ * 使用上限の窓1つ（`five_hour` ／ `seven_day` など。status 設計§5）。
+ */
+export interface RateLimitWindow {
+  /**
+   * CLI が名乗る窓の名前。**そのまま持つ。**
+   *
+   * **既知の2つに決め打ちしないこと。** 公式は `spend_limit` も挙げており、届くかどうかは
+   * 版ではなく構成で決まるとみられる——**いま2本しか来ないことと、2本前提で作ってよい
+   * ことは別である**【実測 2026-09-13】。
+   */
+  name: string
+  /** その窓を何%使ったか（整数パーセント） */
+  used_percentage: number
+  /**
+   * その窓がリセットされる時刻（**Unix エポック秒**）。
+   *
+   * **ミリ秒ではない。** 他の時刻欄（`last_activity_at` など）はミリ秒なので、
+   * `new Date()` へ直に渡すと1970年になる。
+   */
+  resets_at: number
+}
+
+/**
+ * **その PC の**使用上限（status 設計§5）。
+ */
+export interface RateLimits {
+  /** 窓の並び。**本数を固定しない**（`RateLimitWindow.name` の注） */
+  windows: RateLimitWindow[]
+}
+
+/**
+ * そのセッションが使った費用と手間（status 設計§5）。
+ */
+export interface SessionCost {
+  /**
+   * 合計費用。**セント単位の整数**である（ドルではない）。
+   *
+   * Rust 側がセントで持つのは、`SessionMeta` が `Eq` を導出しており小数を入れられない
+   * ことと、**毎ターン動く小数をそのまま関門の鍵にすると関門が素通しになる**ため。
+   * 画面へ出すときは100で割る。
+   */
+  total_cost_cents: number
+  /** API を待っていた時間（ミリ秒） */
+  total_api_duration_ms: number
+  /** 始めてからの実時間（ミリ秒） */
+  total_duration_ms: number
+  /** 足した行数 */
+  total_lines_added: number
+  /** 消した行数 */
+  total_lines_removed: number
 }
 
 /**
@@ -560,6 +634,28 @@ export type ServerMessage =
    * 正本は `SessionMeta.context_usage`。これは一部だけ更新する近道である。
    */
   | { t: 'context_usage'; card_id: CardId; usage: ContextUsage | null }
+  /**
+   * その PC の使用上限だけの差分更新（status 設計「便」）。
+   *
+   * `context_usage` と同じ「軽い便」だが、**`card_id` を持たない**——使用上限は
+   * その PC に入っている claude ログインのもので、セッションの状態ではない。
+   * 配られる先も**カードの購読者ではなくアカウント内の全ブラウザ**である。
+   *
+   * **`agent_id` が `null` のときは「この機械自身のもの」**（局所モードには PC の行が
+   * 無い）。「値が無い」ではない。
+   *
+   * 正本は `SessionMeta.rate_limits`。これは一部だけ更新する近道である。
+   */
+  | { t: 'rate_limits'; agent_id: string | null; limits: RateLimits }
+  /**
+   * そのセッションの費用と手間だけの差分更新（status 設計「便」）。
+   *
+   * 上の `rate_limits` と**同じ payload から届くが、属する相手が違う**ので別の便に
+   * してある。こちらはカード宛。
+   *
+   * 正本は `SessionMeta.cost`。
+   */
+  | { t: 'session_cost'; card_id: CardId; cost: SessionCost }
   | { t: 'transcript_append'; card_id: CardId; nodes: TreeNode[] }
   | { t: 'transcript_reset'; card_id: CardId }
   | { t: 'parser_status'; state: 'ok' | 'degraded'; detail: string | null }

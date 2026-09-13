@@ -3504,31 +3504,55 @@ impl SessionManager {
 
     /// `statusLine` が知らせてきた使用上限を取り込む。
     ///
-    /// # このフェーズでは、まだ配らない
-    ///
-    /// **関門を通っても何も送らない。** 出口は返り値の `bool` だけである。
-    /// 配るための便（新しい `ServerMessage`）は**共有境界の型**なので、
-    /// [`protocol`] を触るフェーズ2 で足す。**ここが空に見えるのは未完成だからではなく、
-    /// 段を分けてあるからである。**
-    ///
-    /// **フェーズ2 で足すのはこの中の1箇所**——[`SessionManager::apply_context_usage`]
-    /// と同じ形で、`changed` のときだけ `self.events.emit(...)` を呼ぶ。
-    ///
     /// # 宛先は1件目と違う
     ///
-    /// コンテキスト残量はカード宛でよかったが、**こちらはアカウント内の全ブラウザ宛**
-    /// である（PC の状態なので）。**便の形を1件目から写すときに、ここを一緒に写さない
-    /// こと**（設計「帰属をどこで守るか」）。
+    /// コンテキスト残量はカード宛だが、**こちらはアカウント内の全ブラウザ宛**である
+    /// ——[`RateLimits`] はその PC に入っている claude ログインの上限で、セッションの
+    /// 状態ではない。だから便（[`ServerMessage::RateLimits`]）は `card_id` を持たず、
+    /// 代わりに「どの PC のものか」を持つ。
+    ///
+    /// # `agent_id` はここで詰めない
+    ///
+    /// **自分がどの PC かを、セッションホストは知らないことがある**（サーバが接続から
+    /// 決める）。`None` を出し、受け口（`gateway` → `registry`）で詰め直す。
+    /// 局所モードはそのまま `None` で通り、**「この機械自身のもの」として描かれる**
+    /// （設計「帰属をどこで守るか」）。
+    ///
+    /// # 控えた値が正本で、便は近道である
+    ///
+    /// [`SessionManager::apply_context_usage`] と同じ。正本は [`SessionMeta::rate_limits`]
+    /// で、便を出すのは**記録を1行も書き換えずに配る**ためである。
+    ///
+    /// 返り値は「配る必要があったか」。
     pub fn apply_rate_limits(&self, session: &Arc<Session>, limits: RateLimits) -> bool {
-        session.store_rate_limits(limits)
+        // 控えるほうへ複製を渡し、元を便へ載せる。[`Session::store_rate_limits`] は
+        // 値で受けるので、どちらかを複製しないと便に載せるものが残らない
+        let changed = session.store_rate_limits(limits.clone());
+        if changed {
+            self.events.emit(ServerMessage::RateLimits {
+                agent_id: None,
+                limits,
+            });
+        }
+        changed
     }
 
     /// `statusLine` が知らせてきた費用と手間を取り込む。
     ///
-    /// **こちらもこのフェーズでは配らない**（理由は[`SessionManager::apply_rate_limits`]）。
-    /// ただし**宛先は使用上限と違ってカード側でよい**——費用はセッションごとの値である。
+    /// **宛先は使用上限と違ってカード側である**——費用はセッションごとの値なので、
+    /// 便も [`SessionManager::apply_context_usage`] と同じ形になる。
+    ///
+    /// **同じ payload から届くのに便を2つに分けてあるのはこのため。** 1つにまとめると、
+    /// カードに属さない使用上限がカードを名乗ることになる。
     pub fn apply_session_cost(&self, session: &Arc<Session>, cost: SessionCost) -> bool {
-        session.store_session_cost(cost)
+        let changed = session.store_session_cost(cost);
+        if changed {
+            self.events.emit(ServerMessage::SessionCost {
+                card_id: session.card_id,
+                cost,
+            });
+        }
+        changed
     }
 
     /// `statusLine` が知らせてきたモデルを取り込む（設計§4）。

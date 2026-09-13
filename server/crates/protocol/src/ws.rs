@@ -13,8 +13,8 @@
 //! 検出できるようにするため。ハンドラの実装は該当フェーズで足していく。
 
 use crate::{
-    AnnotationTarget, CardId, ContextUsage, MemoId, ModelId, PermissionMode, SessionMeta,
-    SessionStatus, Timestamp, TreeNode,
+    AgentId, AnnotationTarget, CardId, ContextUsage, MemoId, ModelId, PermissionMode, RateLimits,
+    SessionCost, SessionMeta, SessionStatus, Timestamp, TreeNode,
 };
 use serde::{Deserialize, Serialize};
 
@@ -411,6 +411,37 @@ pub enum ServerMessage {
         card_id: CardId,
         usage: Option<ContextUsage>,
     },
+    /// その PC の使用上限だけの差分更新（status 設計「便」）。
+    ///
+    /// [`ServerMessage::ContextUsage`] と同じ「軽い便」で、記録を1行も書き換えずに配る。
+    ///
+    /// # 宛先がカードではない
+    ///
+    /// **これは `card_id` を持たない。** [`RateLimits`] はその PC に入っている claude
+    /// ログインの上限であって、セッションの状態ではない。したがって配る先も
+    /// **カードの購読者ではなくアカウント内の全ブラウザ**になる（PC の一覧に出る値）。
+    ///
+    /// # `agent_id` が `None` のときは、局所モードの機械である
+    ///
+    /// **どの PC のものかはサーバが接続から決める**（`ReportOrigin`）。PC が自分で
+    /// 名乗る道は作っていない——[`crate::a2s::AgentMessage::RateLimits`] は
+    /// `agent_id` を運ばず、ここへ詰めるのは受け口の仕事である。
+    ///
+    /// 局所モード（1プロセスで両方を兼ねる構成）には PC の行が無いので `None` になる。
+    /// **`None` を「値が無い」と読まないこと**——「この機械自身のもの」である。
+    ///
+    /// 正本は [`SessionMeta::rate_limits`]。これは一部だけ更新する近道である。
+    RateLimits {
+        agent_id: Option<AgentId>,
+        limits: RateLimits,
+    },
+    /// そのセッションの費用と手間だけの差分更新（status 設計「便」）。
+    ///
+    /// 上の [`ServerMessage::RateLimits`] と**同じ payload から届くが、属する相手が違う**。
+    /// 費用はセッションごとの値なので、**こちらはカード宛**である。
+    ///
+    /// 正本は [`SessionMeta::cost`]。これは一部だけ更新する近道である。
+    SessionCost { card_id: CardId, cost: SessionCost },
     /// 履歴の追記。
     ///
     /// **同じ [`NodeId`] のノードは上書き（upsert）として扱うこと。**「追記」という名だが
@@ -640,7 +671,7 @@ mod tests {
     #![allow(non_snake_case)]
 
     use super::*;
-    use crate::{ClaudeSessionId, Node, NodeId, PermissionMode, ProjectId};
+    use crate::{ClaudeSessionId, Node, NodeId, PermissionMode, ProjectId, RateLimitWindow};
 
     fn roundtrip<T>(value: &T) -> T
     where
@@ -1051,6 +1082,76 @@ mod tests {
         assert_eq!(
             text,
             format!(r#"{{"t":"context_usage","card_id":"{card_id}","usage":null}}"#)
+        );
+    }
+
+    #[test]
+    fn 使用上限の便は決まった綴りで線に乗る() {
+        let agent_id = AgentId::new();
+        let uuid = agent_id.0;
+        let text = serde_json::to_string(&ServerMessage::RateLimits {
+            agent_id: Some(agent_id),
+            limits: RateLimits {
+                windows: vec![
+                    RateLimitWindow {
+                        name: "five_hour".to_string(),
+                        used_percentage: 41,
+                        resets_at: 1_757_000_000,
+                    },
+                    RateLimitWindow {
+                        name: "seven_day".to_string(),
+                        used_percentage: 63,
+                        resets_at: 1_757_400_000,
+                    },
+                ],
+            },
+        })
+        .unwrap();
+        assert_eq!(
+            text,
+            format!(
+                r#"{{"t":"rate_limits","agent_id":"{uuid}","limits":{{"windows":[{{"name":"five_hour","used_percentage":41,"resets_at":1757000000}},{{"name":"seven_day","used_percentage":63,"resets_at":1757400000}}]}}}}"#
+            )
+        );
+
+        // **`card_id` が線に乗らない。** 使用上限はその PC のものなので、カードを
+        // 名乗らせると「最後に報告したカード」という無意味な区別が線に乗る
+        assert!(!text.contains("card_id"));
+
+        // **局所モードは `agent_id` が `null` で乗る。** 欄ごと消える形にすると、
+        // 受け取る側で「どの PC か分からない」と「この機械自身のもの」が混ざる
+        let text = serde_json::to_string(&ServerMessage::RateLimits {
+            agent_id: None,
+            limits: RateLimits { windows: vec![] },
+        })
+        .unwrap();
+        assert_eq!(
+            text,
+            r#"{"t":"rate_limits","agent_id":null,"limits":{"windows":[]}}"#
+        );
+    }
+
+    #[test]
+    fn 費用の便は決まった綴りで線に乗る() {
+        let card_id = CardId::new();
+        let text = serde_json::to_string(&ServerMessage::SessionCost {
+            card_id,
+            cost: SessionCost {
+                // **セント単位の整数**（$64.77）。小数で持つと `SessionMeta` の `Eq` が
+                // 壊れ、毎ターン動く値をそのまま関門の鍵にすると関門が素通しになる
+                total_cost_cents: 6477,
+                total_api_duration_ms: 812_345,
+                total_duration_ms: 3_600_000,
+                total_lines_added: 1240,
+                total_lines_removed: 318,
+            },
+        })
+        .unwrap();
+        assert_eq!(
+            text,
+            format!(
+                r#"{{"t":"session_cost","card_id":"{card_id}","cost":{{"total_cost_cents":6477,"total_api_duration_ms":812345,"total_duration_ms":3600000,"total_lines_added":1240,"total_lines_removed":318}}}}"#
+            )
         );
     }
 

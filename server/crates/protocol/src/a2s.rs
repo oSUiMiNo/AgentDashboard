@@ -18,8 +18,8 @@
 //! （[`A2S_PROTOCOL`]）で交渉するので、upgrade の段階で拒否できる。
 
 use crate::{
-    AgentId, CardId, ContextUsage, ModelId, PermissionMode, SessionMeta, SessionStatus, Timestamp,
-    TreeNode, ws::ErrorKind,
+    AgentId, CardId, ContextUsage, ModelId, PermissionMode, RateLimits, SessionCost, SessionMeta,
+    SessionStatus, Timestamp, TreeNode, ws::ErrorKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -312,6 +312,45 @@ pub enum AgentMessage {
     ContextUsage {
         card_id: CardId,
         usage: Option<ContextUsage>,
+    },
+    /// その PC の使用上限だけの差分更新（status 設計「便」）。
+    ///
+    /// [`AgentMessage::ContextUsage`] と同じ「軽い便」で、**記録を1行も書き換えずに配る**。
+    /// 同じ `statusLine` の payload から届くので周期も同じ（既定3秒）。
+    ///
+    /// # カード宛ではない
+    ///
+    /// **[`AgentMessage::ContextUsage`] と違い、`card_id` を載せない。** これは
+    /// [`RateLimits`] がその PC に入っている claude ログインの上限であって、
+    /// セッションの状態ではないからである。どのセッションから届いても値は同じなので、
+    /// カードを名乗らせると**「最後に報告したカード」という無意味な区別**が線に乗る。
+    ///
+    /// # `agent_id` も載せない
+    ///
+    /// **どの PC のものかは、サーバが接続から決める。** PC に名乗らせると、
+    /// 他人の PC を騙る道ができる（`ReportOrigin` の doc が「帰属を決めるのはサーバの
+    /// 仕事」と明記している）。ブラウザ向けの [`crate::ws::ServerMessage::RateLimits`]
+    /// は `agent_id` を持つが、**詰めるのは受け口（`gateway.rs` → `registry`）である。**
+    ///
+    /// # `Option` で包まない
+    ///
+    /// [`AgentMessage::ContextUsage`] は消える向きも運ぶが（`/compact` の直後に
+    /// 「まだ分からない」へ戻る）、**こちらは消える向きが無い**——payload が届いている
+    /// なら値がある【実測 2026-09-13】。包むと「値が無い報告」という扱う必要のない
+    /// 枝が受け口に増える。
+    RateLimits {
+        limits: RateLimits,
+    },
+    /// そのセッションの費用と手間だけの差分更新（status 設計「便」）。
+    ///
+    /// 上の [`AgentMessage::RateLimits`] と**同じ payload から届くが、属する相手が違う**。
+    /// 費用はセッションごとの値なので、**こちらは `card_id` を載せる**。
+    ///
+    /// 1つの便にまとめないのは、宛先が違うからである——まとめると、カードに属さない
+    /// 上限がカードを名乗ることになる。
+    SessionCost {
+        card_id: CardId,
+        cost: SessionCost,
     },
     /// 履歴のバッチ（§6-1）。**ack が返るまで再送責任はセッションホスト側**。
     ///
@@ -619,7 +658,7 @@ mod tests {
     #![allow(non_snake_case)]
 
     use super::*;
-    use crate::{Node, NodeId, ProjectId, ws::ParserState, ws::SelfhealPhase};
+    use crate::{Node, NodeId, ProjectId, RateLimitWindow, ws::ParserState, ws::SelfhealPhase};
 
     fn roundtrip<T>(value: &T) -> T
     where
@@ -751,6 +790,34 @@ mod tests {
             AgentMessage::ContextUsage {
                 card_id,
                 usage: None,
+            },
+            // **窓を2本入れる。** 1本だけ置くと、並びが本当に並びとして往復するのか
+            // （本数を固定していないか）を誰も見ていないことになる
+            AgentMessage::RateLimits {
+                limits: RateLimits {
+                    windows: vec![
+                        RateLimitWindow {
+                            name: "five_hour".to_string(),
+                            used_percentage: 41,
+                            resets_at: 1_757_000_000,
+                        },
+                        RateLimitWindow {
+                            name: "seven_day".to_string(),
+                            used_percentage: 63,
+                            resets_at: 1_757_400_000,
+                        },
+                    ],
+                },
+            },
+            AgentMessage::SessionCost {
+                card_id,
+                cost: SessionCost {
+                    total_cost_cents: 6477,
+                    total_api_duration_ms: 812_345,
+                    total_duration_ms: 3_600_000,
+                    total_lines_added: 1240,
+                    total_lines_removed: 318,
+                },
             },
             AgentMessage::TranscriptBatch {
                 batch_id: BatchId(7),

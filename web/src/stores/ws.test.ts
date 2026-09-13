@@ -474,6 +474,8 @@ describe('起こし直しと購読', () => {
         nickname: null,
         branched_from: null,
         context_usage: null,
+        rate_limits: null,
+        cost: null,
       },
     })
 
@@ -619,6 +621,8 @@ describe('コンテキストの使い具合が、軽い便で届く', () => {
         nickname: null,
         branched_from: null,
         context_usage: null,
+        rate_limits: null,
+        cost: null,
       },
     })
   }

@@ -133,6 +133,93 @@ describe('サーバと同じ JSON になること', () => {
     expect(meta.context_usage?.context_window_size).toBe(1000000)
   })
 
+  it('使用上限の便が Rust と同じ綴りで届く', () => {
+    // Rust 側 `使用上限の便は決まった綴りで線に乗る` と対になる。
+    //
+    // **台帳（cli_surface）はここを見ていない**（ClientMessage だけ）。綴りが食い違っても
+    // 気づけないので、この対で止める
+    const raw =
+      '{"t":"rate_limits","agent_id":"' +
+      SESSION_ID +
+      '","limits":{"windows":[' +
+      '{"name":"five_hour","used_percentage":41,"resets_at":1757000000},' +
+      '{"name":"seven_day","used_percentage":63,"resets_at":1757400000}]}}'
+    const message = JSON.parse(raw) as ServerMessage
+    expect(message.t).toBe('rate_limits')
+    if (message.t === 'rate_limits') {
+      expect(message.agent_id).toBe(SESSION_ID)
+      // **本数で決め打ちしない。** 公式は `spend_limit` も挙げており、届くかどうかは
+      // 版ではなく構成で決まるとみられる。2本前提で書くとその構成で落ちる
+      expect(message.limits.windows).toHaveLength(2)
+      expect(message.limits.windows[0]?.name).toBe('five_hour')
+      expect(message.limits.windows[0]?.used_percentage).toBe(41)
+      // **秒である**（他の時刻欄はミリ秒）。Date へ直に渡すと1970年になる
+      expect(message.limits.windows[0]?.resets_at).toBe(1757000000)
+      expect(message.limits.windows[1]?.name).toBe('seven_day')
+    }
+  })
+
+  it('局所モードの使用上限は agent_id が null で届く', () => {
+    // **「どの PC か分からない」ではなく「この機械自身のもの」。** 欄ごと消える形に
+    // すると、受け取る側でこの2つが混ざる
+    const raw = '{"t":"rate_limits","agent_id":null,"limits":{"windows":[]}}'
+    const message = JSON.parse(raw) as ServerMessage
+    expect(message.t).toBe('rate_limits')
+    if (message.t === 'rate_limits') {
+      expect(message.agent_id).toBeNull()
+      expect(message.limits.windows).toHaveLength(0)
+    }
+  })
+
+  it('費用の便が Rust と同じ綴りで届く', () => {
+    // Rust 側 `費用の便は決まった綴りで線に乗る` と対になる。
+    //
+    // **使用上限とは別の便である。** 同じ payload から届くが属する相手が違うので、
+    // こちらは `card_id` を持ち、あちらは持たない
+    const raw =
+      '{"t":"session_cost","card_id":"' +
+      CARD_ID +
+      '","cost":{"total_cost_cents":6477,"total_api_duration_ms":812345,' +
+      '"total_duration_ms":3600000,"total_lines_added":1240,"total_lines_removed":318}}'
+    const message = JSON.parse(raw) as ServerMessage
+    expect(message.t).toBe('session_cost')
+    if (message.t === 'session_cost') {
+      // **セント単位の整数。** ドルだと思って出すと100倍になる
+      expect(message.cost.total_cost_cents).toBe(6477)
+      expect(message.cost.total_api_duration_ms).toBe(812345)
+      expect(message.cost.total_lines_added).toBe(1240)
+      expect(message.cost.total_lines_removed).toBe(318)
+    }
+  })
+
+  it('SessionMeta は使用上限と費用を運ぶ', () => {
+    // **正本はこちら**で、上の2つの便は一部だけ更新する近道である。
+    //
+    // **欄を2つに分けてあるのは、属する相手が違うから**——`rate_limits` はその PC、
+    // `cost` はそのセッションのものである。1つにまとめると出し先が溶ける
+    const raw =
+      '{"card_id":"' +
+      CARD_ID +
+      '","project":"/dev/app","claude_session_id":null,' +
+      '"permission_mode":null,"status":{"kind":"working"},"subagent_active":0,' +
+      '"last_activity_at":1,"last_assistant_message":null,"created_at":1,"hooks_seen":false,' +
+      '"agent_id":null,"agent_connected":true,"account":null,"toml_account":null,' +
+      '"context_usage":null,' +
+      '"rate_limits":{"windows":[{"name":"five_hour","used_percentage":41,' +
+      '"resets_at":1757000000}]},' +
+      '"cost":{"total_cost_cents":6477,"total_api_duration_ms":812345,' +
+      '"total_duration_ms":3600000,"total_lines_added":1240,"total_lines_removed":318}}'
+    const meta = JSON.parse(raw) as SessionMeta
+    expect(meta.rate_limits?.windows[0]?.used_percentage).toBe(41)
+    expect(meta.cost?.total_cost_cents).toBe(6477)
+    // **どちらも「まだ届いていない」を表せる。** ただし意味が違う——`rate_limits` の
+    // null は「その PC でセッションが1本も走っていない」であって、時間帯ではない
+    const 空 = JSON.parse(
+      raw.replace(/"rate_limits":\{[^}]*\}\]\}/, '"rate_limits":null'),
+    ) as SessionMeta
+    expect(空.rate_limits).toBeNull()
+  })
+
   it('連絡係の縮退が Rust と同じ綴りで届く', () => {
     // 綴りが食い違うと、**バナーが出ないだけで繋がっているように見える**——
     // 「片方のブラウザにだけ更新が来ない」という一番読み解きにくい状態が、
@@ -779,6 +866,8 @@ describe('状態のラベル', () => {
       nickname: null,
       branched_from: null,
       context_usage: null,
+      rate_limits: null,
+      cost: null,
     }
     expect(isHookSilent(base)).toBe(true)
     expect(isHookSilent({ ...base, hooks_seen: true })).toBe(false)
@@ -980,6 +1069,8 @@ describe('戻せるかの判定', () => {
       nickname: null,
       branched_from: null,
       context_usage: null,
+      rate_limits: null,
+      cost: null,
       ...overrides,
     }
   }
