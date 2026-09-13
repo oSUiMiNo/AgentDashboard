@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+
 import { cleanup, render, screen, fireEvent } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -395,4 +398,113 @@ describe('書いて送る', () => {
     expect(memoAdd).not.toHaveBeenCalled()
   })
 
+})
+
+/*
+  **確定すると表示が崩れる**（利用者の報告・2026-09-13、`v0.1.138`）。
+  原因は3つとも別で、経緯は `調査レポート/メモの確定後に表示が崩れる.md` に在る。
+
+  **どれも「本文が出ること」を見る検査では捕まらなかった。** 要素は出ていて、
+  スタイルだけが当たっていなかったためである。
+*/
+describe('吹き出しの見た目', () => {
+  function 描く(markdown: string): HTMLElement {
+    replaceMemos(GLOBAL_TARGET, [memo('m-1', { body: { blocks: [], markdown } })])
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" 保存先={null} />)
+    return screen.getByTestId('memo-body')
+  }
+
+  it('本文は、履歴やファイルビュアと同じ共用クラスで描く', () => {
+    /*
+      **`prose-sm` と書いてあったが、あれはどこにも無いクラスだった**——Tailwind
+      Typography はこの PJT に入っていない。**要素は出ているのにスタイルが1つも
+      当たらず**、表もコードブロックも平文に見えていた。
+
+      **`toContain` で見ない。** クラス名の部分一致は、別のクラスを含んだだけで
+      通ってしまう。**語として持っているか**を見る。
+    */
+    const 本文 = 描く('あ')
+    expect(本文.classList.contains('prose-dashboard')).toBe(true)
+    expect(本文.classList.contains('prose-sm')).toBe(false)
+  })
+
+  it('Tailwind Typography は入っていない（`prose-*` を当てにできない）', () => {
+    /*
+      **この前提が崩れたら、上の検査の理由も変わる。** 依存が入った日に気づけるよう、
+      前提そのものを数える。
+    */
+    const pkg = JSON.parse(readFileSync(resolve(process.cwd(), 'package.json'), 'utf8')) as {
+      dependencies?: Record<string, string>
+      devDependencies?: Record<string, string>
+    }
+    const 全部 = { ...pkg.dependencies, ...pkg.devDependencies }
+    expect(Object.keys(全部).some((name) => name.includes('typography'))).toBe(false)
+  })
+
+  it('GFM の表が、表として出る', () => {
+    // **実機の記録から採った**（`memos`・`noted_at=1789306252939` と同じ形）
+    const 本文 = 描く('| A | B |\n| --- | --- |\n| 1 | 2 |\n')
+    expect(本文.querySelector('table'), '表が出ていない').not.toBeNull()
+    expect(本文.querySelectorAll('td')).toHaveLength(2)
+  })
+
+  it('囲みコードが、コードとして出る', () => {
+    const 本文 = 描く('```text\nMyDocs/イシュー/\n```\n')
+    const pre = 本文.querySelector('pre')
+    expect(pre, 'コードブロックが出ていない').not.toBeNull()
+    expect(pre!.querySelector('code')).not.toBeNull()
+  })
+
+  it('ブロックの最終行に取り残された `\\` を出さない', () => {
+    /*
+      **BlockNote は段落内の改行を、行末のバックスラッシュ（hard break）で書き出す。**
+      ところが remark は `- ` で始まる行をリストの開始と読んで**段落を終わらせる**ので、
+      それまで hard break だった `\` が**ブロックの最終行**へ移る。
+
+      **CommonMark では、ブロックの最終行の `\` は hard break にならない**——
+      改行する相手が無いためで、**リテラルの文字として画面に出る。**
+
+      **材料は実機の記録そのもの**（`memos`・`noted_at=1789308676419`）。作り物の
+      1行では割れが起きず、**この検査は何も守らないまま緑になる。**
+    */
+    const 本文 = 描く(
+      'LAN内アドレスのボタンが応答なしになる\\\nのセッションへ\\\n \\\n' +
+        '- 調査レポートを念のため再調査させてブラッシュアップ\\\n- 実装を命じる\n',
+    )
+    expect(本文.textContent).not.toContain('\\')
+    // **消しすぎていないこと。** `\` ごと行が落ちていたら、これで捕まる
+    expect(本文.textContent).toContain('のセッションへ')
+    expect(本文.textContent).toContain('実装を命じる')
+  })
+
+  it('囲みコードの中の行継続（`\\`）は残す', () => {
+    /*
+      **文字列の置換で消すと、ここが壊れる。** シェルの行継続を書き留めたメモは
+      この道具の用途そのものなので、**壊してはいけない側**である。
+
+      mdast の段で `paragraph` と `heading` だけを見ているので、囲みコードは
+      **別のノード**として無傷で残る。
+    */
+    const 本文 = 描く('```bash\ntar -cf a.tar \\\n```\n')
+    expect(本文.querySelector('code')?.textContent).toContain('\\')
+  })
+
+  it('操作の群を、本文の上へ重ねない', () => {
+    /*
+      **絶対配置で本文へ重ねていたので、1行目が長いと必ず潜った。**
+      狭い画面だけの話ではない——1行目がボタン列の幅まで届けば、幅がいくつでも起きる。
+
+      **「重なりにくい」ではなく「重ねられない」ことを見る。** 余白や幅で避ける形だと、
+      中身しだいで再発するし、jsdom では 測れない。**普通の並びに居ること**を見れば、
+      幅にも中身にも依らない。
+    */
+    描く('あ')
+    const 群 = screen.getByTestId('memo-ops')
+    const 本文 = screen.getByTestId('memo-body')
+
+    expect(群.classList.contains('absolute'), '絶対配置に戻っている').toBe(false)
+    expect(本文.contains(群), '本文の中に居る').toBe(false)
+    // **時刻と同じ行に居る。** 時刻は短いので、右側は元から空いている
+    expect(群.parentElement?.querySelector('time'), '時刻と同じ行に居ない').not.toBeNull()
+  })
 })
