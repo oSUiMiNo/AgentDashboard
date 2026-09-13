@@ -201,32 +201,9 @@ pub async fn api_write_file(
 ) -> Result<axum::response::Response, (StatusCode, String)> {
     let target = parse_host(&host)?;
 
-    // **印が付いていない要求は断る**（設計§8-3）。省けば上書きできる道を残すと、
-    // 競合の検知は「印を付けた人だけが守られる」ものになる
-    if query.stamp.trim().is_empty() {
-        return Err(refuse(HostAskError::BadRequest(
-            "`stamp` が要ります（読んだときの印をそのまま渡してください）".to_string(),
-        )));
-    }
-
     let roots = writable_roots_for(&state, &identity, &host).await?;
-    let folded = fold_parents(&query.path);
-    if !protocol::path::is_writable(&roots, &folded) {
-        // **どこなら書けるかを添える**（設計§8-2）。利用者が設定で直せる相手なので、
-        // 「できません」で終わらせず足し方へ導く
-        let allowed = if roots.is_empty() {
-            "いまは1つもありません".to_string()
-        } else {
-            roots.join("\n  ")
-        };
-        return Err((
-            StatusCode::FORBIDDEN,
-            format!(
-                "{} は、保存を許可した場所の外です。\n\nいま許可されている場所：\n  {allowed}\n\n設定の writable_roots へ足すと書けるようになります。",
-                query.path
-            ),
-        ));
-    }
+    入口を通すか(&query.stamp, &query.path, &roots)
+        .map_err(|断り| 断り.応答(&query.path, &roots))?;
 
     let written = state
         .agent
@@ -243,6 +220,73 @@ pub async fn api_write_file(
         .await
         .map_err(refuse)?;
     Ok(Json(written).into_response())
+}
+
+/// 入口で断る理由（`ファイルビュアにエディタ機能を追加` 設計§8-1・§8-2）。
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum 入口の断り {
+    /// 印が付いていない（設計§8-3）
+    印が無い,
+    /// 許可された場所の外（設計§8-2）
+    許可の外,
+}
+
+impl 入口の断り {
+    /// 断り文を組み立てる。**画面へそのまま出る**ので、直せる相手には直し方を添える。
+    fn 応答(&self, path: &str, roots: &[String]) -> (StatusCode, String) {
+        match self {
+            Self::印が無い => (
+                StatusCode::BAD_REQUEST,
+                "`stamp` が要ります（読んだときの印をそのまま渡してください）".to_string(),
+            ),
+            // **どこなら書けるかを添える**（設計§8-2）。利用者が設定で直せる相手なので、
+            // 「できません」で終わらせず足し方へ導く
+            Self::許可の外 => {
+                let allowed = if roots.is_empty() {
+                    "いまは1つもありません".to_string()
+                } else {
+                    roots.join("\n  ")
+                };
+                (
+                    StatusCode::FORBIDDEN,
+                    format!(
+                        "{path} は、保存を許可した場所の外です。\n\nいま許可されている場所：\n  {allowed}\n\n設定の writable_roots へ足すと書けるようになります。"
+                    ),
+                )
+            }
+        }
+    }
+}
+
+/// 入口の判定（設計§3-1 の**字句**の段）。**純関数にしてある。**
+///
+/// # なぜ切り出すのか
+///
+/// この判定は**画面・REST・CLI の3経路すべてが通る唯一の門**である。ハンドラの中へ
+/// 書くと、**確かめるにはサーバを丸ごと起こす**ことになり、実際には誰も確かめない。
+/// 決める側を分けておけば、表を並べるだけで全経路ぶんの約束を固定できる
+/// （この PJT が並べ替えや効果線で採っているのと同じ型）。
+///
+/// # ここで見るのは字句だけである
+///
+/// `..` を畳んでから照合する。**リンクは辿らない**——実体の解決はファイルシステムに
+/// 触るので PC 側にしかできない（設計§3-1）。**規則そのもの
+/// （[`protocol::path::is_writable`]）は両方から呼ぶ1つだけ**で、ここは材料を用意する
+/// 側である。
+pub(crate) fn 入口を通すか(
+    stamp: &str,
+    path: &str,
+    roots: &[String],
+) -> Result<(), 入口の断り> {
+    // **印が付いていない要求は断る**（設計§8-3）。省けば上書きできる道を残すと、
+    // 競合の検知は「印を付けた人だけが守られる」ものになる
+    if stamp.trim().is_empty() {
+        return Err(入口の断り::印が無い);
+    }
+    if !protocol::path::is_writable(roots, &fold_parents(path)) {
+        return Err(入口の断り::許可の外);
+    }
+    Ok(())
 }
 
 /// 書いてよい場所の一覧を組み立てる（設計§3-5）。
@@ -657,6 +701,99 @@ mod tests {
     #![allow(non_snake_case)]
 
     use super::*;
+
+    /// 許可された根の一覧を作る
+    fn 根(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn 入口は許可された場所への書き込みを通す() {
+        // **断る検査しか無いと、照合が常に false を返すよう壊れていても緑になる。**
+        // 通る側を必ず1本置く
+        assert_eq!(
+            入口を通すか("24-17", "/dev/app/src/main.rs", &根(&["/dev/app"])),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn 入口は許可された場所の外を断る() {
+        assert_eq!(
+            入口を通すか("24-17", "/etc/passwd", &根(&["/dev/app"])),
+            Err(入口の断り::許可の外)
+        );
+    }
+
+    #[test]
+    fn 入口は畳んでから照合する() {
+        // **畳まずに素で照合すると、この綴りが前置きに一致して通ってしまう**
+        assert_eq!(
+            入口を通すか("24-17", "/dev/app/../../etc/passwd", &根(&["/dev/app"])),
+            Err(入口の断り::許可の外)
+        );
+        // 内側で行き来するだけなら通る
+        assert_eq!(
+            入口を通すか("24-17", "/dev/app/src/../README.md", &根(&["/dev/app"])),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn 入口は頭が同じ兄弟フォルダを断る() {
+        // **素の前方一致で書くと、ここが通ってしまう**（設計§3-2）
+        for 外 in ["/dev/app-old/x.md", "/dev/app2/x.md"] {
+            assert_eq!(
+                入口を通すか("24-17", 外, &根(&["/dev/app"])),
+                Err(入口の断り::許可の外),
+                "{外} は根の外である"
+            );
+        }
+    }
+
+    #[test]
+    fn 入口は印の無い要求を断る() {
+        // **省けば上書きできる道を残さない**（設計§8-3）
+        for 印 in ["", "   "] {
+            assert_eq!(
+                入口を通すか(印, "/dev/app/src/main.rs", &根(&["/dev/app"])),
+                Err(入口の断り::印が無い)
+            );
+        }
+    }
+
+    #[test]
+    fn 設定が空でもプロジェクトの根は効く() {
+        // **プロジェクトを足すのはコードの側である**（設計§3-5）。
+        // `writable_roots` の既定は空のまま
+        let roots = protocol::path::effective_roots(&[], &根(&["/dev/app"]));
+        assert_eq!(入口を通すか("24-17", "/dev/app/計画.md", &roots), Ok(()));
+        assert_eq!(
+            入口を通すか("24-17", "/dev/other/計画.md", &roots),
+            Err(入口の断り::許可の外)
+        );
+    }
+
+    #[test]
+    fn 根が1つも無ければどこへも書けない() {
+        // **既定を「空＝全部許可」にしてはいけない**（設計§3-5）
+        assert_eq!(
+            入口を通すか("24-17", "/dev/app/x.md", &[]),
+            Err(入口の断り::許可の外)
+        );
+    }
+
+    #[test]
+    fn 断り文は許可されている場所を添える() {
+        // 利用者が設定で直せる相手なので、「できません」で終わらせない（設計§8-2）
+        let (status, body) = 入口の断り::許可の外.応答("/etc/passwd", &根(&["/dev/app"]));
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            body.contains("/dev/app"),
+            "どこなら書けるかを出すこと: {body}"
+        );
+        assert!(body.contains("writable_roots"), "足し方へ導くこと: {body}");
+    }
 
     #[test]
     fn 生で返すときのcspは字で固定する() {
