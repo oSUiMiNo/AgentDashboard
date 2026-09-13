@@ -266,6 +266,16 @@ pub struct SettingsUpdate {
     /// **serde では絞れない**（ただの文字列なので）。`check()` で明示的に見る——
     /// ここを外すと、知らない綴りがそのまま記録へ入る。
     pub motion_quiet: Option<String>,
+    /// メモと画像を何日残すか（要件10・メモ設計§11-2）。
+    ///
+    /// **範囲は `check()` が見る**（1〜365日）。**0 を弾いているのは「無期限」に
+    /// あたる値を作らせないため**——要件が「無期限と無制限は必要無い」と明記している。
+    pub memo_retention_days: Option<u64>,
+    /// メモの画像の合計の上限（要件10・メモ設計§11-2）。
+    ///
+    /// **範囲は `check()` が見る**（1 MiB〜20 GB）。下限が 0 でないのは、
+    /// **書いた先から消える設定を作れると壊れているのと見分けが付かない**ため。
+    pub memo_max_bytes: Option<u64>,
 }
 
 impl SettingsUpdate {
@@ -279,6 +289,8 @@ impl SettingsUpdate {
             (db::settings::SYNC_INTERVAL_SECS, self.sync_interval_secs),
             (db::settings::SCREEN_INTERVAL_MS, self.screen_interval_ms),
             (db::settings::SCROLLBACK_LINES, self.scrollback_lines),
+            (db::settings::MEMO_RETENTION_DAYS, self.memo_retention_days),
+            (db::settings::MEMO_MAX_BYTES, self.memo_max_bytes),
         ] {
             if let Some(value) = value {
                 db::settings::check(key, &serde_json::json!(value))
@@ -299,6 +311,22 @@ impl SettingsUpdate {
         self.sync_interval_secs.is_some()
             || self.screen_interval_ms.is_some()
             || self.scrollback_lines.is_some()
+    }
+
+    /// メモの保持の指定が1つでもあるか。
+    fn touches_memo_limits(&self) -> bool {
+        self.memo_retention_days.is_some() || self.memo_max_bytes.is_some()
+    }
+
+    /// いまの値へ、指定されたぶんだけ被せる（メモの保持）。
+    ///
+    /// **`put_memo_limits` は2つまとめて書く形**なので、片方だけ指定されたときに
+    /// もう片方を既定へ落とさないよう、いまの値を土台にする。
+    fn merged_memo_limits(&self, current: db::settings::MemoLimits) -> db::settings::MemoLimits {
+        db::settings::MemoLimits {
+            retention_days: self.memo_retention_days.unwrap_or(current.retention_days),
+            max_bytes: self.memo_max_bytes.unwrap_or(current.max_bytes),
+        }
     }
 
     /// いまの値へ、指定されたぶんだけ被せる。
@@ -414,6 +442,19 @@ pub async fn api_update_settings(
             .map_err(save_failed)?;
     }
 
+    if update.touches_memo_limits() {
+        let current = db::settings::memo_limits(state.auth.db(), identity.account_id)
+            .await
+            .unwrap_or_default();
+        db::settings::put_memo_limits(
+            state.auth.db(),
+            identity.account_id,
+            update.merged_memo_limits(current),
+        )
+        .await
+        .map_err(save_failed)?;
+    }
+
     // **設定の持ち主が居なくても、DB のぶんは保存できている。** 居ないことを理由に
     // 404 を返すと、保存されたのに失敗したように見える（統合テストは画面を立てずに
     // セッションだけを確かめることがある）
@@ -502,6 +543,19 @@ async fn api_server_update_settings(
         db::settings::set_motion_quiet(hub.db(), identity.account_id, 段)
             .await
             .map_err(save_failed)?;
+    }
+
+    if update.touches_memo_limits() {
+        let current = db::settings::memo_limits(hub.db(), identity.account_id)
+            .await
+            .unwrap_or_default();
+        db::settings::put_memo_limits(
+            hub.db(),
+            identity.account_id,
+            update.merged_memo_limits(current),
+        )
+        .await
+        .map_err(save_failed)?;
     }
 
     api_server_settings(State(hub), Extension(identity)).await
@@ -604,6 +658,20 @@ async fn api_import(
             .await
             .map_err(save_failed)?;
     }
+    if parsed.touches_memo_limits() {
+        // **書き出せるのに読み戻せないのは非対称**（要件10）。同じファイルを往復
+        // させただけで、この2つだけ向こうの値が残る
+        let current = db::settings::memo_limits(state.auth.db(), identity.account_id)
+            .await
+            .unwrap_or_default();
+        db::settings::put_memo_limits(
+            state.auth.db(),
+            identity.account_id,
+            parsed.merged_memo_limits(current),
+        )
+        .await
+        .map_err(save_failed)?;
+    }
 
     Ok(Json(ImportOutcome {
         applied: parsed.applied(),
@@ -667,6 +735,19 @@ async fn api_server_import(
             .await
             .map_err(save_failed)?;
     }
+    if parsed.touches_memo_limits() {
+        // ローカルモードと同じ（要件10）。**両モードで同じ答えになる**ことが持ち出しの前提
+        let current = db::settings::memo_limits(hub.db(), identity.account_id)
+            .await
+            .unwrap_or_default();
+        db::settings::put_memo_limits(
+            hub.db(),
+            identity.account_id,
+            parsed.merged_memo_limits(current),
+        )
+        .await
+        .map_err(save_failed)?;
+    }
 
     Ok(Json(ImportOutcome {
         applied: parsed.applied(),
@@ -696,5 +777,105 @@ async fn lan_password_view(auth: &Arc<AuthContext>, identity: &Identity) -> LanP
         supported,
         configured: supported && server_core::auth::lan_password_set(auth.db()).await,
         editable: supported && identity.from_loopback,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(non_snake_case)]
+
+    use super::*;
+
+    fn 空() -> SettingsUpdate {
+        SettingsUpdate {
+            always_bypass_permissions: None,
+            project_autostart_session: None,
+            lan_password: None,
+            sync_interval_secs: None,
+            screen_interval_ms: None,
+            scrollback_lines: None,
+            motion_quiet: None,
+            memo_retention_days: None,
+            memo_max_bytes: None,
+        }
+    }
+
+    /// **範囲の外を断ること**（要件10）。
+    ///
+    /// # なぜここで見るのか
+    ///
+    /// **`check()` から1行外しても、機械は何も言わない**——型は通り、画面も動き、
+    /// **範囲外の値が黙って記録へ入る**。要件10 が「無期限・無制限を作らない」と
+    /// 定めているので、**入口で断ることそのものが要件の中身**である。
+    ///
+    /// REST は直に叩けるので、**画面が選択肢で絞っていることは担保にならない。**
+    #[test]
+    fn メモの保持は範囲の外を断る() {
+        for (name, update) in [
+            (
+                "無期限にあたる 0 日",
+                SettingsUpdate {
+                    memo_retention_days: Some(0),
+                    ..空()
+                },
+            ),
+            (
+                "12か月を超える日数",
+                SettingsUpdate {
+                    memo_retention_days: Some(366),
+                    ..空()
+                },
+            ),
+            (
+                "無制限にあたる 0 バイト",
+                SettingsUpdate {
+                    memo_max_bytes: Some(0),
+                    ..空()
+                },
+            ),
+            (
+                "20GB を超える容量",
+                SettingsUpdate {
+                    memo_max_bytes: Some(21 * 1024 * 1024 * 1024),
+                    ..空()
+                },
+            ),
+        ] {
+            let (status, reason) = update.check().expect_err(&format!("{name} を通した"));
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{name}");
+            // **断り文に範囲が入ること。** 「駄目です」だけでは直しようがない
+            assert!(reason.contains('〜'), "{name}: 範囲が読めない: {reason}");
+        }
+    }
+
+    #[test]
+    fn 範囲の中は通る() {
+        assert!(
+            SettingsUpdate {
+                memo_retention_days: Some(360),
+                memo_max_bytes: Some(20 * 1024 * 1024 * 1024),
+                ..空()
+            }
+            .check()
+            .is_ok()
+        );
+    }
+
+    /// **触っていない項目を書かないこと。** 片方だけ指定して、もう片方が既定へ
+    /// 落ちると、**他のタブの変更を巻き戻す**。
+    #[test]
+    fn 片方だけ指定してももう片方は残る() {
+        let いま = db::settings::MemoLimits {
+            retention_days: 30,
+            max_bytes: 5 * 1024 * 1024 * 1024,
+        };
+        let merged = SettingsUpdate {
+            memo_retention_days: Some(90),
+            ..空()
+        }
+        .merged_memo_limits(いま);
+
+        assert_eq!(merged.retention_days, 90, "指定したものは反映する");
+        assert_eq!(merged.max_bytes, いま.max_bytes, "指定していないものは残す");
     }
 }

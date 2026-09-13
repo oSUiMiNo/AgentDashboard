@@ -45,6 +45,52 @@ const SYNC_CHOICES = [5, 10, 20, 60]
 const SCREEN_CHOICES = [50, 300, 1000, 5000, 10000, 20000]
 
 /**
+ * メモと画像を残す期間の選択肢（日。要件10・メモ設計§11）。
+ *
+ * # 「無期限」を入れない
+ *
+ * 要件が明記している——**「これはあくまで作業のための一時的なメモ機能なので無期限と
+ * 無制限は必要無い」**。**上限は12か月**なので 365 で止める。
+ *
+ * # 自由入力にしない
+ *
+ * 要件の言い方が「**選択肢**に『無期限』『無制限』は含まない」なので、**選ばせる形**が
+ * 筋である。打ち込ませると範囲外を入れられ、**サーバに断られてから気づく**ことになる
+ * （`check()` が 1〜365 を見ているので安全ではあるが、押す前に分かるほうがよい）。
+ *
+ * # 上限が 365 ではなく 360 なのは、月で読める数に揃えるため
+ *
+ * **要件の言い方は「12カ月」である。** この道具は1か月を30日として数える
+ * （`lib/memoRetention.ts`）ので、**12か月 = 360日**になる。365 にすると、
+ * メモの面に「**365日**で消えます」と出て**要件の言い方と画面の言い方が食い違う**。
+ * サーバの上限（365）の内側なので、選べる範囲が狭まるだけで矛盾は生まない。
+ */
+const MEMO_RETENTION_CHOICES = [7, 30, 90, 180, 360]
+
+/**
+ * メモの画像の合計の上限（バイト。要件10）。
+ *
+ * **上限は 20GB。「無制限」は入れない**（上と同じ理由）。下限を 1GB にしているのは、
+ * **1枚 8 MiB なので、それより小さいと数枚で溢れる**ため。
+ */
+const MEMO_MAX_BYTES_CHOICES = [
+  1024 * 1024 * 1024,
+  5 * 1024 * 1024 * 1024,
+  10 * 1024 * 1024 * 1024,
+  20 * 1024 * 1024 * 1024,
+]
+
+/** 日数を人の言い方にする。**画面の「N か月で消えます」と綴りを揃える。** */
+function formatRetention(days: number): string {
+  return days % 30 === 0 ? `${days / 30}か月` : `${days}日`
+}
+
+/** バイトを人の言い方にする。 */
+function formatMemoBytes(bytes: number): string {
+  return `${bytes / 1024 / 1024 / 1024} GB`
+}
+
+/**
  * 静けさの3段の見せ方（カード設計§9-5-2）。
  *
  * **一時停止ボタン1つにしなかったのは、「全部止める」しか選べないため**——止めると
@@ -179,6 +225,40 @@ export function SettingsPage() {
             />
           </>
         )}
+      </div>
+
+      {/*
+        メモの保持（要件10・メモ設計§11-2）。
+
+        **設定はアカウントごとの記録に置く。** `always_bypass_permissions` が同じ
+        判断をしており、理由も同じ——**同じ画面に並ぶ1項目だけ保存先が違うと、
+        セルフホスト構成では画面から触れない**（書き戻す相手が利用者の PC のファイルで、
+        サーバから手が届かない）。
+
+        **「無期限」「無制限」は選択肢に無い**（要件10 の明記）。
+      */}
+      <div className="border-border flex flex-col gap-3 rounded-xl border p-4">
+        <h3 className="text-sm font-medium">メモの保持</h3>
+        <Choice
+          testId="memo-retention"
+          label="残す期間"
+          hint="最終更新からこの期間が経ったメモと画像は、自動で消えます。作業のための一時的なメモなので、無期限にはできません。"
+          value={settings.memo_limits.retention_days}
+          choices={MEMO_RETENTION_CHOICES}
+          format={formatRetention}
+          disabled={loading}
+          onSelect={(value) => void update({ memo_retention_days: value })}
+        />
+        <Choice
+          testId="memo-max-bytes"
+          label="画像の容量"
+          hint="メモに貼った画像の合計がこれを超えると、同意を求めたうえで古いものから消します。無制限にはできません。"
+          value={settings.memo_limits.max_bytes}
+          choices={MEMO_MAX_BYTES_CHOICES}
+          format={formatMemoBytes}
+          disabled={loading}
+          onSelect={(value) => void update({ memo_max_bytes: value })}
+        />
       </div>
 
       {/*

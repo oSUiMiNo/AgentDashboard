@@ -164,6 +164,36 @@ impl Parsed {
             scrollback_lines: pick(settings::SCROLLBACK_LINES, current.scrollback_lines),
         }
     }
+
+    /// メモの保持の指定が1つでも入っているか（要件10）。
+    ///
+    /// # なぜ足りていなかったのか
+    ///
+    /// **[`exported`] は最初から2つとも書き出していたのに、読み戻す側が無かった。**
+    /// 書き出せるのに読み込めないと、**同じファイルを往復させただけで設定が変わる**
+    /// ——持ち出し設計§7 が「別のアカウントで読み込んだときに向こうの既存の値が
+    /// 残らないこと」を求めているのに、この2つだけ残ってしまう。
+    pub fn touches_memo_limits(&self) -> bool {
+        [settings::MEMO_RETENTION_DAYS, settings::MEMO_MAX_BYTES]
+            .iter()
+            .any(|key| self.values.contains_key(*key))
+    }
+
+    /// いまの値へ、読み込んだぶんだけを被せる（メモの保持）。
+    ///
+    /// **足りないキーを既定で埋めない**（[`Self::merged_intervals`] と同じ）。
+    pub fn merged_memo_limits(&self, current: settings::MemoLimits) -> settings::MemoLimits {
+        let pick = |key: &str, fallback: u64| {
+            self.values
+                .get(key)
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(fallback)
+        };
+        settings::MemoLimits {
+            retention_days: pick(settings::MEMO_RETENTION_DAYS, current.retention_days),
+            max_bytes: pick(settings::MEMO_MAX_BYTES, current.max_bytes),
+        }
+    }
 }
 
 /// 読み込んで検査する。**1つでも通らなければ、何も返さない**（持ち出し設計§9）。
@@ -264,6 +294,59 @@ mod tests {
         assert_eq!(
             parsed.merged_intervals(Intervals::default()),
             Intervals::default()
+        );
+    }
+
+    #[test]
+    fn メモの保持も読み戻せる() {
+        /*
+          **書き出せるのに読み戻せない**という非対称が実際に在った（要件10）。
+          `exported` は最初から2つとも書き出していたのに、読む側の口が無かった
+          ——同じファイルを往復させただけで、**この2つだけ向こうの値が残る**。
+        */
+        let 変えた = settings::MemoLimits {
+            retention_days: 30,
+            max_bytes: 5 * 1024 * 1024 * 1024,
+        };
+        let text = serde_json::to_string_pretty(&exported(
+            Intervals::default(),
+            変えた,
+            true,
+            true,
+            "calm",
+            "0.0.0-test",
+        ))
+        .expect("書き出せること");
+
+        let parsed = parse(&text).expect("読めること");
+
+        assert!(parsed.touches_memo_limits(), "読み戻す口が無い");
+        // **既定を土台にしても、書き出した値が勝つこと**
+        assert_eq!(
+            parsed.merged_memo_limits(settings::MemoLimits::default()),
+            変えた,
+            "往復させたのに値が変わった"
+        );
+    }
+
+    #[test]
+    fn メモの保持が入っていなければ触らない() {
+        // **足りないキーを既定で埋めない**（`merged_intervals` と同じ）。
+        // 埋めると、古いファイルを読み込んだ人の設定が黙って既定へ戻る
+        let text = format!(
+            r#"{{"kind":"{KIND}","format":{FORMAT},"settings":{{"motion_quiet":"calm"}}}}"#
+        );
+        let parsed = parse(&text).expect("読めること");
+
+        assert!(!parsed.touches_memo_limits());
+        let いま = settings::MemoLimits {
+            retention_days: 30,
+            max_bytes: 5 * 1024 * 1024 * 1024,
+        };
+        assert_eq!(
+            parsed.merged_memo_limits(いま),
+            いま,
+            "触っていないものを変えた"
         );
     }
 

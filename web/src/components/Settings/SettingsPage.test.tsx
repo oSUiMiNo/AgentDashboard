@@ -254,3 +254,67 @@ describe('一覧の動き', () => {
     ).toBeInTheDocument()
   })
 })
+
+describe('メモの保持（要件10）', () => {
+  /** その選択の `<option>` の値を並べる。 */
+  function 選択肢(testId: string): string[] {
+    return Array.from(
+      screen.getByTestId(`${testId}-select`).querySelectorAll('option'),
+    ).map((option) => option.value)
+  }
+
+  it('**「無期限」を作らない。** 期間の上限は12か月である', () => {
+    /*
+      要件10 が明記している——**「これはあくまで作業のための一時的なメモ機能なので
+      無期限と無制限は必要無い」**。
+
+      **選択肢に足しても画面は動く**ので、機械は何も言わない。ここで固定する。
+    */
+    show()
+
+    const 日数 = 選択肢('memo-retention').map(Number)
+    expect(日数.length).toBeGreaterThan(0)
+    // **12か月 = 360日**（この道具は1か月を30日として数える）。365 にすると
+    // 面に「365日で消えます」と出て、要件の言い方と食い違う
+    expect(Math.max(...日数)).toBe(360)
+    expect(日数.every((日) => 日 > 0 && 日 <= 360)).toBe(true)
+  })
+
+  it('**「無制限」を作らない。** 容量の上限は 20GB である', () => {
+    show()
+
+    const バイト = 選択肢('memo-max-bytes').map(Number)
+    expect(バイト.length).toBeGreaterThan(0)
+    expect(Math.max(...バイト)).toBe(20 * 1024 * 1024 * 1024)
+    expect(バイト.every((b) => b > 0)).toBe(true)
+  })
+
+  it('いま効いている値が選ばれた状態で出る', () => {
+    show({ memo_limits: { retention_days: 30, max_bytes: 5 * 1024 * 1024 * 1024 } })
+
+    expect(screen.getByTestId('memo-retention-select')).toHaveValue('30')
+    expect(screen.getByTestId('memo-max-bytes-select')).toHaveValue(
+      String(5 * 1024 * 1024 * 1024),
+    )
+  })
+
+  it('選ぶと、その項目だけを送る', async () => {
+    const update = vi.fn().mockResolvedValue(true)
+    useSettingsStore.setState({ update })
+    show()
+
+    await userEvent.selectOptions(screen.getByTestId('memo-retention-select'), '30')
+
+    // **触っていない項目を送らない**（他のタブの変更を巻き戻さないため）
+    expect(update).toHaveBeenCalledWith({ memo_retention_days: 30 })
+  })
+
+  it('期間は「N か月」で読める（メモの面の文言と綴りを揃える）', () => {
+    show()
+
+    // **面には「N か月で消えます」と出る。** ここが「90日」だと、同じものが
+    // 2つの言い方で出ることになる
+    expect(screen.getByRole('option', { name: '3か月' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: '12か月' })).toBeInTheDocument()
+  })
+})

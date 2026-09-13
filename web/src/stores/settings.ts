@@ -144,6 +144,15 @@ export type SettingsPatch = Partial<{
   screen_interval_ms: number
   scrollback_lines: number
   motion_quiet: MotionQuiet
+  /**
+   * メモと画像を何日残すか（要件10）。**上限は365日**（サーバの `check()` が見る）。
+   *
+   * **「無期限」は作らない**——要件が「これはあくまで作業のための一時的なメモ機能
+   * なので無期限と無制限は必要無い」と明記している。
+   */
+  memo_retention_days: number
+  /** メモの画像の合計の上限（要件10）。**上限は 20GB。「無制限」は作らない。** */
+  memo_max_bytes: number
 }>
 
 interface SettingsState {
