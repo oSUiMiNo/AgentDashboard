@@ -17,10 +17,15 @@
 
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder,
+    QuerySelect,
 };
+use std::time::Duration;
 use uuid::Uuid;
 
 use super::entity::memo_blobs;
+
+/// 掃除の間隔。**既存の掃除と同じ1時間**（`memos` ／ `notices` ／ `web_session_store`）。
+const SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 /// 1枚の上限。**既存の添付と同じ値**（`protocol::fs::MAX_BLOB_BYTES`）。
 ///
@@ -142,4 +147,74 @@ pub async fn survey_or_sweep(
     }
     answer.over_budget = のこる.saturating_sub(answer.freed) > max_bytes;
     Ok(answer)
+}
+
+/// 期限切れの画像を落とす（レビュー対応2・設計§11）。**戻り値は消した件数。**
+///
+/// # 容量のぶんは掃かない
+///
+/// [`survey_or_sweep`] は期間と容量の2段を持つが、**ここで渡す `sweep_bytes` は 0**
+/// である。**容量で消すには同意が要る**（要件10）ので、**常駐の掃除が勝手に消しては
+/// いけない**——同意を求める画面が在るのに、その裏で消えていたら同意の意味が無い。
+///
+/// **期間で消えるぶんは黙って消す。** これは既存の振る舞いに合わせている
+/// （`attachments::sweep` と同じ）。
+///
+/// # 保持日数はアカウントごと
+///
+/// 行が無ければ `fallback_days` を使う（設計§11-2——toml のキーは消さず、初期値と
+/// して読み続ける）。`memos::sweep` と同じ形である。
+async fn sweep_expired(
+    db: &DatabaseConnection,
+    now_ms: i64,
+    fallback_days: u64,
+) -> Result<u64, DbErr> {
+    let mut removed = 0;
+    for account_id in accounts_with_blobs(db).await? {
+        let days = super::settings::memo_retention_days_or(db, account_id, fallback_days).await;
+        let limits = super::settings::memo_limits(db, account_id).await?;
+        // **`sweep_bytes` は 0。** 容量のぶんは同意を取ってからでないと消せない
+        let answer =
+            survey_or_sweep(db, account_id, now_ms, days, limits.max_bytes, 0, true).await?;
+        removed += u64::from(answer.expiring);
+    }
+    Ok(removed)
+}
+
+/// 画像を1枚でも持っているアカウントを引く。
+///
+/// **保持日数がアカウントごとに違いうる**ので、全体を1つの期限で消せない。
+/// `memos::accounts_with_memos` と同じ形である。
+async fn accounts_with_blobs(db: &DatabaseConnection) -> Result<Vec<Uuid>, DbErr> {
+    let mut ids: Vec<Uuid> = memo_blobs::Entity::find()
+        .select_only()
+        .column(memo_blobs::Column::AccountId)
+        .group_by(memo_blobs::Column::AccountId)
+        .into_tuple::<Uuid>()
+        .all(db)
+        .await?;
+    ids.sort_unstable();
+    Ok(ids)
+}
+
+/// 掃除を常駐させる（レビュー対応2）。
+///
+/// **`SessionRegistry::load()` から呼ぶ**——`memos::start_sweeper` ／
+/// `notices::start_sweeper` と同じ場所である。**呼び出し側に任せると忘れる。**
+///
+/// 実際、この関数が無かったせいで**消したメモや期限切れの画像が永久に残っていた**
+/// ——HTTP の口から `survey_or_sweep` を呼ぶ道しかなく、**画像を貼るのをやめた
+/// 利用者の blob は、保持期間を過ぎても掃かれなかった。**
+pub fn start_sweeper(db: DatabaseConnection, fallback_days: u64) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(SWEEP_INTERVAL);
+        loop {
+            ticker.tick().await;
+            let now = super::now_ms();
+            if let Err(err) = sweep_expired(&db, now, fallback_days).await {
+                // 掃除に失敗しても画像は読める。黙って止まらないよう記録だけ残す
+                tracing::warn!("メモの画像の掃除に失敗しました: {err}");
+            }
+        }
+    })
 }
