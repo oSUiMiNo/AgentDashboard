@@ -1235,6 +1235,8 @@ async fn 他人の_PC_の資源は引けない() {
                     estimate_mb: 780,
                     headroom_mb: 2_048,
                     fits_now: Some(7),
+                    host_free_mb: None,
+                    counted_mb: None,
                 }),
             })
             .await;

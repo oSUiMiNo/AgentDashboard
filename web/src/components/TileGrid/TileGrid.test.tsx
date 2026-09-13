@@ -324,8 +324,19 @@ describe('全て復旧のメモリの歯止め', () => {
     })
   }
 
-  /** `GET /api/hosts/{host}/resources` の答えを決める。 */
-  function 資源を答える(fits: number | null | 'エラー' | '入館証切れ') {
+  /**
+   * `GET /api/hosts/{host}/resources` の答えを決める。
+   *
+   * `外側` は WSL の外側（Windows）の状態。**既定は WSL でない機械**（両方 `null`）で、
+   * いまと同じ見た目になる。
+   */
+  function 資源を答える(
+    fits: number | null | 'エラー' | '入館証切れ',
+    外側: { host_free_mb: number | null; counted_mb: number | null } = {
+      host_free_mb: null,
+      counted_mb: null,
+    },
+  ) {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => {
@@ -345,6 +356,7 @@ describe('全て復旧のメモリの歯止め', () => {
             estimate_mb: 780,
             headroom_mb: 2_048,
             fits_now: fits,
+            ...外側,
           }),
         } as unknown as Response
       }),
@@ -371,6 +383,50 @@ describe('全て復旧のメモリの歯止め', () => {
 
     expect(screen.queryByTestId('revive-budget-dialog')).not.toBeInTheDocument()
     expect(revive).toHaveBeenCalledTimes(2)
+  })
+
+  it('WSL でない機械では、外側の行が出ない（いまと同じ見た目）', async () => {
+    // **`counted_mb` が null なら行そのものが出ない。** WSL でない機械の答えは
+    // 1ビットも変わらないという約束を、画面の側でも固定する
+    useWsStore.setState({ revive: vi.fn() })
+    資源を答える(1)
+    applySessionSnapshot([stale('a', 1), stale('b', 2), stale('c', 3)])
+    renderGrid()
+
+    await 選んで起こす()
+
+    expect(screen.getByTestId('revive-budget-dialog')).toBeInTheDocument()
+    expect(
+      screen.queryByTestId('revive-budget-outside'),
+    ).not.toBeInTheDocument()
+  })
+
+  it('WSL で外側を聞けたら、何で抑えたのかが画面に出る', async () => {
+    useWsStore.setState({ revive: vi.fn() })
+    資源を答える(1, { host_free_mb: 1_792, counted_mb: 1_792 })
+    applySessionSnapshot([stale('a', 1), stale('b', 2), stale('c', 3)])
+    renderGrid()
+
+    await 選んで起こす()
+
+    const 行 = screen.getByTestId('revive-budget-outside')
+    expect(行).toHaveTextContent('WSL の外側（Windows）の空き')
+    expect(行).toHaveTextContent('1.8 GB')
+  })
+
+  it('外側をまだ聞けていないときは、もう一度押せばよいと書く', async () => {
+    // **これを書かないと故障に見える。** 外側を聞くのに 6〜27 秒かかるので押した
+    // 瞬間は待たない設計で、**1回目だけ少なく出ることがある**
+    useWsStore.setState({ revive: vi.fn() })
+    資源を答える(1, { host_free_mb: null, counted_mb: 3_000 })
+    applySessionSnapshot([stale('a', 1), stale('b', 2), stale('c', 3)])
+    renderGrid()
+
+    await 選んで起こす()
+
+    const 行 = screen.getByTestId('revive-budget-outside')
+    expect(行).toHaveTextContent('まだ聞けていません')
+    expect(行).toHaveTextContent('もう一度押すと反映されます')
   })
 
   it('入りきらないとダイアログが出て、押すまで1枚も送らない', async () => {

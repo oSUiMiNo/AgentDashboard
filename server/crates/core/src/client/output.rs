@@ -436,15 +436,40 @@ pub fn render_resources(resources: &protocol::HostResources) -> String {
         None => "数えません（revive_estimate_mb = 0 で歯止めを外しています）".to_string(),
     };
     format!(
-        "空き {} MB ／ 積んでいる {} MB ／ スワップの空き {} MB\n\
+        "空き {} MB ／ 積んでいる {} MB ／ スワップの空き {} MB{}\n\
          1枚あたり {} MB ＋ 残す余白 {} MB → {}",
         resources.available_mb,
         resources.total_mb,
         resources.swap_free_mb,
+        render_outside(resources),
         resources.estimate_mb,
         resources.headroom_mb,
         枚数,
     )
+}
+
+/// WSL の外側（Windows）について1行。**WSL でなければ何も足さない。**
+///
+/// # なぜ書くのか
+///
+/// **数字だけ直すと、説明のつかない答えになる。** 「空き 18,983 MB」と出ているのに
+/// 「0 枚」では、**壊れているのと見分けが付かない。** 何で抑えたのかを言う。
+///
+/// **「まだ聞けていません」には次にどうすればよいかを添える。** 外側を聞くのに
+/// 6〜27 秒かかるので押した瞬間には待たない設計で、**1回目だけ少なく出ることがある**
+/// ——放置すると故障に見える。
+fn render_outside(resources: &protocol::HostResources) -> String {
+    match (resources.host_free_mb, resources.counted_mb) {
+        // WSL でない。**いまと同じ見た目**
+        (_, None) => String::new(),
+        (Some(host_free), Some(counted)) => {
+            format!("\nWSL の外側（Windows）の空き {host_free} MB → 数えたのは {counted} MB")
+        }
+        (None, Some(counted)) => format!(
+            "\nWSL の外側（Windows）の空きをまだ聞けていません\
+             （もう一度聞くと反映されます）→ 数えたのは {counted} MB"
+        ),
+    }
 }
 
 /// `version ls` の要約と表。
@@ -697,6 +722,15 @@ mod tests {
     }
 
     fn 資源(fits_now: Option<u32>) -> protocol::HostResources {
+        資源で外側が(fits_now, None, None)
+    }
+
+    /// WSL の外側まで指定して作る。**両方 `None` なら WSL でない機械。**
+    fn 資源で外側が(
+        fits_now: Option<u32>,
+        host_free_mb: Option<u64>,
+        counted_mb: Option<u64>,
+    ) -> protocol::HostResources {
         protocol::HostResources {
             total_mb: 15_696,
             available_mb: 12_000,
@@ -704,7 +738,35 @@ mod tests {
             estimate_mb: 780,
             headroom_mb: 2_048,
             fits_now,
+            host_free_mb,
+            counted_mb,
         }
+    }
+
+    #[test]
+    fn wslでない機械では外側の行を出さない() {
+        // **いまと同じ見た目。** 行が増えると、WSL でない利用者に無関係な話が出る
+        let out = render_resources(&資源(Some(12)));
+        assert!(!out.contains("WSL"), "{out}");
+    }
+
+    #[test]
+    fn 外側で抑えたときは何で抑えたのかを書く() {
+        // **数字だけ直すと説明のつかない答えになる。** 空き 12,000 MB と出ているのに
+        // 0 枚では、壊れているのと見分けが付かない
+        let out = render_resources(&資源で外側が(Some(0), Some(1_792), Some(1_792)));
+        assert!(out.contains("WSL の外側（Windows）の空き 1792 MB"), "{out}");
+        assert!(out.contains("数えたのは 1792 MB"), "{out}");
+    }
+
+    #[test]
+    fn 外側をまだ聞けていないときは次にどうすればよいか書く() {
+        // **放置すると故障に見える。** 押した瞬間は待たない設計なので、
+        // 1回目だけ少なく出ることがある
+        let out = render_resources(&資源で外側が(Some(1), None, Some(3_000)));
+        assert!(out.contains("まだ聞けていません"), "{out}");
+        assert!(out.contains("もう一度聞くと反映されます"), "{out}");
+        assert!(out.contains("数えたのは 3000 MB"), "{out}");
     }
 
     #[test]

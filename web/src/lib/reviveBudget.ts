@@ -38,6 +38,25 @@ export interface HostResources {
    * 以前は番兵（`u32::MAX`）が数として載っていた（コードレビュー対応2）。
    */
   fits_now: number | null
+  /**
+   * **WSL の外側（Windows）の空き**（MB）。
+   *
+   * **WSL でないなら `null`**（外側という概念が無い）。**WSL でもまだ聞けていない
+   * なら `null`**——外側を聞くのに 6〜27 秒かかるので、押した瞬間には待たずに答える。
+   */
+  host_free_mb: number | null
+  /**
+   * **数えるのに実際に使った空き**（MB）。**`available_mb` をそのまま使ったなら `null`。**
+   *
+   * [`host_free_mb`] と組にすると3つの状態が読み分けられる。
+   *
+   * | `host_free_mb` | `counted_mb` | 意味 |
+   * |---|---|---|
+   * | `null` | `null` | **WSL でない**（いまと同じ見た目） |
+   * | 数 | 数 | 外側のほうが少なかったので、そちらで抑えた |
+   * | `null` | 数 | **外側をまだ聞けていない**（もう一度押すと反映される） |
+   */
+  counted_mb: number | null
 }
 
 /** 起こし直す相手1枚ぶん。 */

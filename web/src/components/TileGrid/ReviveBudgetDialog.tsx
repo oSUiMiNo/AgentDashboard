@@ -86,6 +86,32 @@ export function ReviveBudgetDialog({ plan, onFitting, onAll, onCancel }: Props) 
                   {gb(resources.headroom_mb)}）
                 </span>
               </p>
+              {/*
+                **数字だけ直すと、説明のつかない画面になる。** 空きが潤沢に見えるのに
+                0枚では、壊れているのと見分けが付かない。**何で抑えたのか**を書く。
+                WSL でなければ `counted_mb` が null なので、**行そのものが出ない**
+              */}
+              {resources.counted_mb !== null && (
+                <p
+                  data-testid="revive-budget-outside"
+                  className="text-muted-foreground"
+                >
+                  {resources.host_free_mb === null ? (
+                    <>
+                      WSL の外側（Windows）の空きをまだ聞けていません
+                      <br />
+                      （もう一度押すと反映されます）／数えたのは{' '}
+                      <strong>{gb(resources.counted_mb)}</strong>
+                    </>
+                  ) : (
+                    <>
+                      WSL の外側（Windows）の空き{' '}
+                      <strong>{gb(resources.host_free_mb)}</strong>／数えたのは{' '}
+                      <strong>{gb(resources.counted_mb)}</strong>
+                    </>
+                  )}
+                </p>
+              )}
               <p data-testid="revive-budget-fits">
                 いま入るのは <strong>{host.fits}枚</strong>
               </p>

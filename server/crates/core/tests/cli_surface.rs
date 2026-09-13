@@ -45,6 +45,9 @@ const REST以外: &[&str] = &["/ws"];
 /// `ClientMessage` の置き場所。
 const WS_SOURCE: &str = "crates/protocol/src/ws.rs";
 
+/// `HostResources` の置き場所。**ブラウザ側の写しは `web/src/lib/reviveBudget.ts`。**
+const RESOURCES_SOURCE: &str = "crates/protocol/src/lib.rs";
+
 /// アカウント分離の総当たりの置き場所。
 const TENANCY_SOURCE: &str = "crates/server-core/tests/tenancy.rs";
 
@@ -683,6 +686,75 @@ fn wsの21種はブラウザ側の型にも全部ある() {
              増減するとき」）が破れる"
         );
     }
+}
+
+/// `protocol::HostResources` の欄が、ブラウザ側の型にも全部あること。
+///
+/// # なぜ要るのか
+///
+/// **Rust と TypeScript の手書きの二重定義で、いま見張りが1つも無い。**
+/// `protocol.test.ts` は JSON の一致を見ているが**固定値で組み立てている**ので、
+/// Rust 側に欄が増えたことを捕まえられない——そもそも `HostResources` は
+/// そちらの守備範囲に入っていない。
+///
+/// つまり**Rust 側だけ欄を増やしても `make ci` が緑のまま通る。** TypeScript は
+/// 余分な JSON の欄を黙って捨てるので、**画面に出ないことにも誰も気づかない。**
+///
+/// 形は [`wsの21種はブラウザ側の型にも全部ある`] からそのまま借りている。
+#[test]
+fn 資源の欄はブラウザ側の型にも全部ある() {
+    let path = repo_root().join("web/src/lib/reviveBudget.ts");
+    let ts = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("{} を読めること: {e}", path.display()));
+    let fields = scan_struct_fields(&読む(RESOURCES_SOURCE), "pub struct HostResources");
+    assert!(
+        fields.len() >= 6,
+        "HostResources の欄を1つも拾えていない。走査器が壊れている: {fields:?}"
+    );
+    for field in fields {
+        assert!(
+            ts.contains(&field),
+            "protocol::HostResources の欄 {field:?} が web/src/lib/reviveBudget.ts に\
+             見当たらない。**Rust 側だけ増やすと二重定義が破れる**——TypeScript は\
+             余分な JSON の欄を黙って捨てるので、画面に出ないことにも気づけない"
+        );
+    }
+}
+
+/// `pub struct <名前> { … }` の塊から `pub <欄名>:` を拾う。
+///
+/// コメントを潰してから走査する——**説明文の中の `pub` を拾わない**ため。
+fn scan_struct_fields(source: &str, header: &str) -> Vec<String> {
+    let clean = strip_comments(source);
+    let chars: Vec<char> = clean.chars().collect();
+    let start = find_from(&chars, 0, header).unwrap_or_else(|| panic!("{header} が居ること"));
+    let mut i = start;
+    while chars.get(i) != Some(&'{') {
+        i += 1;
+    }
+    i += 1;
+    let mut depth = 1;
+    let mut body = String::new();
+    while i < chars.len() && depth > 0 {
+        match chars[i] {
+            '{' => depth += 1,
+            '}' => depth -= 1,
+            _ => {}
+        }
+        if depth > 0 {
+            body.push(chars[i]);
+        }
+        i += 1;
+    }
+    body.split(',')
+        .filter_map(|piece| {
+            let piece = piece.trim();
+            let rest = piece.strip_prefix("pub ")?;
+            let name = rest.split(':').next()?.trim();
+            (!name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+                .then(|| name.to_string())
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

@@ -10,6 +10,9 @@ function resources(fits: number | null): HostResources {
     estimate_mb: 780,
     headroom_mb: 2_048,
     fits_now: fits,
+    // **WSL でない機械の姿。** 抑えていないので両方 `null`
+    host_free_mb: null,
+    counted_mb: null,
   }
 }
 
