@@ -1,3 +1,4 @@
+import { GLOBAL_TARGET } from '@/lib/annotationTarget'
 import type { ClientMessage, ServerMessage } from '@/lib/protocol'
 import { clearSessions, getSession, getSessions, isReviving } from './sessions'
 import { clearAppNotices, getAppNotices, unreadCount } from './appNotices'
@@ -198,6 +199,48 @@ describe('WebSocket ストア', () => {
       rows: 50,
     })
     expect(requests).toContainEqual({ t: 'sub_transcript', card_id: CARD })
+  })
+
+  /*
+    **メモも出し直す**（レビュー対応3）。
+
+    面を開いたままサーバが再起動すると、**古い一覧が残る**。切れている最中に開くと
+    「まだ何も書かれていません。」という**嘘の空状態が永続する**——サーバには在るのに、
+    画面だけが「無い」と言い続ける。
+  */
+  it('繋ぎ直したらメモも引き直す', async () => {
+    await useWsStore.getState().connect()
+    latest().accept()
+
+    useWsStore.getState().memoList(GLOBAL_TARGET)
+
+    latest().drop()
+    await vi.advanceTimersByTimeAsync(500)
+    const reconnected = latest()
+    reconnected.accept()
+
+    expect(reconnected.requests()).toContainEqual({
+      t: 'memo_list',
+      target: GLOBAL_TARGET,
+    })
+  })
+
+  it('閉じた面のメモは出し直さない（開いていない宛先まで引かない）', async () => {
+    await useWsStore.getState().connect()
+    latest().accept()
+
+    const store = useWsStore.getState()
+    store.memoList(GLOBAL_TARGET)
+    store.memoClose(GLOBAL_TARGET)
+
+    latest().drop()
+    await vi.advanceTimersByTimeAsync(500)
+    const reconnected = latest()
+    reconnected.accept()
+
+    expect(
+      reconnected.requests().filter((request) => request.t === 'memo_list'),
+    ).toEqual([])
   })
 
   it('画面から外した購読は出し直さない', async () => {

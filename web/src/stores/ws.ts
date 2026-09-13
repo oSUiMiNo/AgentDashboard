@@ -40,6 +40,7 @@
 
 import { create } from 'zustand'
 import { report } from '@/lib/clientLogs'
+import { targetKey } from '@/lib/annotationTarget'
 import { assertNever } from '@/lib/never'
 import { KIND_PTY_INPUT, decodeFrame, encodeFrame } from '@/lib/frame'
 import type {
@@ -130,6 +131,13 @@ interface WsState {
   memoEdit: (id: string, body: unknown) => boolean
   memoCheck: (id: string, checked: boolean) => boolean
   memoRemove: (id: string) => boolean
+  /**
+   * 面を閉じたことを伝える（レビュー対応3）。**線には何も流さない。**
+   *
+   * 台帳から外すだけなので `ClientMessage` は増えない——**画面の口ではないので
+   * `cli_surface.toml` にも載らない。**
+   */
+  memoClose: (target: AnnotationTarget) => void
   /**
    * セッションを起動する。
    *
@@ -247,6 +255,18 @@ const terminals = new Map<CardId, TerminalEntry>()
 const transcripts = new Set<CardId>()
 
 /**
+ * 開いているメモの台帳（レビュー対応3）。**鍵は宛先の綴り、値は宛先そのもの。**
+ *
+ * `terminals` / `transcripts` と同じ持ち方をする。**繋ぎ直したときに引き直さないと、
+ * 面を開いたままサーバが再起動した場合に古い一覧が残る**——切れている最中に開くと
+ * 「まだ何も書かれていません。」という**嘘の空状態が永続する**。
+ *
+ * 宛先そのものを持つのは、出し直すときに `memo_list` へ渡す必要があるからである
+ * （鍵からは復元できない）。
+ */
+const memoTargets = new Map<string, AnnotationTarget>()
+
+/**
  * カードごとの「前に見たとき生きていたか」。購読を出し直す合図を作るためだけに持つ。
  *
  * 起こし直しでは**カードIDが変わらない**ので、ブラウザもサーバも「同じカードだから
@@ -327,6 +347,10 @@ function resubscribe() {
   }
   for (const cardId of transcripts) {
     send({ t: 'sub_transcript', card_id: cardId })
+  }
+  // **メモも作り直す。** ここに居ないと、繋ぎ直しても古い一覧が残る
+  for (const target of memoTargets.values()) {
+    send({ t: 'memo_list', target })
   }
 }
 
@@ -485,7 +509,15 @@ export const useWsStore = create<WsState>((set) => ({
   kill: (cardId) => send({ t: 'kill', card_id: cardId }),
   archive: (cardId) => send({ t: 'archive', card_id: cardId }),
 
-  memoList: (target) => send({ t: 'memo_list', target }),
+  memoList: (target) => {
+    // **開いていることを覚える。** 繋ぎ直したときに出し直すため（レビュー対応3）
+    memoTargets.set(targetKey(target), target)
+    return send({ t: 'memo_list', target })
+  },
+  memoClose: (target) => {
+    // **閉じたら台帳から外す。** 残すと、開いていない宛先まで繋ぎ直しのたびに引く
+    memoTargets.delete(targetKey(target))
+  },
   memoAdd: (target, body) => send({ t: 'memo_add', target, body }),
   memoEdit: (id, body) => send({ t: 'memo_edit', id, body }),
   memoCheck: (id, checked) => send({ t: 'memo_check', id, checked }),

@@ -103,12 +103,15 @@ interface Props {
 
 export function MemoPane({ target, readOnly = false, label, 保存先 }: Props) {
   const memos = useMemos(target)
-  const { memoList, memoAdd } = useWsStore()
+  const { memoList, memoClose, memoAdd } = useWsStore()
 
   // 開いたら引き直す。**宛先が変わったら引き直す**のも同じ効果で足りる
   const key = targetKey(target)
   useEffect(() => {
     memoList(target)
+    // **閉じたら台帳から外す**（レビュー対応3）。外さないと、開いていない宛先まで
+    // 繋ぎ直しのたびに引く
+    return () => memoClose(target)
     // `target` は毎回新しい物になりうるので、**鍵で見る**
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key])
