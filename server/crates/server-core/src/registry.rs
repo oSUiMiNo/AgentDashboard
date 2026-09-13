@@ -28,7 +28,7 @@ use crate::{
 };
 use protocol::{
     AgentId, AnnotationTarget, CardId, ClaudeSessionId, ContextUsage, MemoId, ModelId, NodeId,
-    PermissionMode, ProjectId, SessionMeta, SessionStatus, TreeNode,
+    PermissionMode, ProjectId, RateLimits, SessionCost, SessionMeta, SessionStatus, TreeNode,
     ws::{ErrorKind, MemoView, NoticeView, ServerMessage},
 };
 use sea_orm::sea_query::OnConflict;
@@ -308,6 +308,23 @@ pub struct SessionRegistry {
     /// カードが乗り換えても印は消えない。写しを持つ理由も名前と同じ（報告のたびに
     /// カードの数だけ DB を引かないため）。
     branches: Mutex<HashMap<(Uuid, ClaudeSessionId), ClaudeSessionId>>,
+    /// PC ごとの使用上限（status設計「保管」）。鍵は **(アカウント, PC)**。
+    ///
+    /// # 鍵が `Option<AgentId>` なのは、局所モードに PC の行が無いから
+    ///
+    /// ローカルモードは `agents` の表そのものが空である（`account::no_agents` の
+    /// doc が「`"local"` を1台として並べたりはしない」と決めている）。だから
+    /// `None` を「この機械」として持つ。**捨てないこと**——捨てると、後から
+    /// 出し先を作っても値が無い。**保管は宛先を決めない。**
+    ///
+    /// # `nicknames` / `branches` と同じ形だが、あちらは写し、こちらは正本である
+    ///
+    /// 上の2つは**記録側（DB）が正**で、報告のたびに DB を引かないための写しを
+    /// ここに置いている。**こちらは DB に持たない**ので、ここが唯一の在り処になる。
+    /// 落ちれば消えるのが正しい——保存すると**繋がっていない PC の古い数字が残る**
+    /// （`context_usage` を保存しないのと同じ形だが、あちらは「空のセッションに
+    /// 前回の使用率」、こちらは「居ない PC の使用率」で、**誰の実態と食い違うかが違う**）。
+    rate_limits: Mutex<HashMap<(Uuid, Option<AgentId>), RateLimits>>,
 }
 
 impl SessionRegistry {
@@ -409,6 +426,7 @@ impl SessionRegistry {
             browsers: Mutex::new(HashMap::new()),
             nicknames: Mutex::new(nicknames),
             branches: Mutex::new(branches),
+            rate_limits: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -1566,6 +1584,36 @@ impl SessionRegistry {
                 self.publish_local(account_id, ServerMessage::ContextUsage { card_id, usage });
             }
 
+            // **こちらにも明示の腕が要る**（上と同じ理由）。バスから来た使用上限を
+            // 素通しにすると、**PC を抱えていないインスタンスに繋いだブラウザ**が
+            // REST で空を受け取る（サーバを2台以上並べたときだけ出る欠落）。
+            //
+            // **ここでは `agent_id` を便から採る。** `apply` が既に `origin` から
+            // 詰めたものがバスに乗っているので、こちら側では信頼してよい
+            ServerMessage::RateLimits { agent_id, limits } => {
+                {
+                    let mut store = self.rate_limits.lock().expect("ロックが壊れていない");
+                    let key = (account_id, agent_id);
+                    let merged = merge_rate_limits(store.get(&key), &limits);
+                    store.insert(key, merged);
+                }
+                // **`publish_local` を使う。** `publish` だと受け取ったものを配り直し、
+                // それがまた返ってきて止まらなくなる
+                self.publish_local(account_id, ServerMessage::RateLimits { agent_id, limits });
+            }
+
+            ServerMessage::SessionCost { card_id, cost } => {
+                let Some(record) = self.owned(account_id, card_id) else {
+                    return;
+                };
+                {
+                    let mut meta = record.meta.lock().expect("ロックが壊れていない");
+                    meta.cost = Some(cost);
+                }
+                record.live.store(true, Ordering::Relaxed);
+                self.publish_local(account_id, ServerMessage::SessionCost { card_id, cost });
+            }
+
             // **明示の腕にする。** 素通しの腕（下）へ落としても振る舞いは同じだが、
             // 落としたままにすると**次に誰かが宛先の扱いを変えたとき、コンパイラが
             // 何も言わない**。メモは宛先が2つ（全体・セッション）あり、取り違えると
@@ -1818,6 +1866,21 @@ impl SessionRegistry {
             // （しかも持ち主の検査も抜ける）。包括の腕があるのでコンパイラは拾わない
             ServerMessage::ContextUsage { card_id, usage } => {
                 self.context_usage(origin, card_id, usage);
+                Ok(())
+            }
+            // **素通しの腕へ落とさない**（上と同じ理由）。こちらは落とすと
+            // **手元の保管が埋まらず、後から開いた画面が REST で空を受け取る**。
+            // しかも量子化が効いているので、**窓が切り替わるまで空のまま**になる
+            // （5時間窓・7日窓なので、数時間空く）
+            ServerMessage::RateLimits { limits, .. } => {
+                // **便に乗ってきた `agent_id` は使わない。** 帰属を決めるのはサーバの
+                // 仕事で（`ReportOrigin` の doc）、**ここが唯一それを詰める場所**である。
+                // セッションホストが何を名乗っても、`origin` の値で上書きする
+                self.rate_limits(origin, limits);
+                Ok(())
+            }
+            ServerMessage::SessionCost { card_id, cost } => {
+                self.session_cost(origin, card_id, cost);
                 Ok(())
             }
             // **セッションホストからメモは来ない**（メモ設計§1-2。記録はサーバだけで
@@ -2199,6 +2262,97 @@ impl SessionRegistry {
         );
     }
 
+    /// 使用上限の軽い便。**記録（DB）を触らない**（status設計「保管」）。
+    ///
+    /// # 署名は [`SessionRegistry::context_usage`] と同じ理由で `async` でも `Result` でもない
+    ///
+    /// **「DB を触らない」という決定を、署名そのもので守る仕掛け**である。あちらの
+    /// doc を参照。
+    ///
+    /// # ★ 送る側にも関門があるのに、ここでも表示形を見る理由
+    ///
+    /// [`SessionRegistry::context_usage`] の doc は「**書き込みの回数を抑えるのは
+    /// 送る側の関門の仕事で、こちらとは別の理由による。混ぜて読むと、片方を外して
+    /// よいと誤解する**」と書いている。**その約束は、こちらには当てはまらない。**
+    ///
+    /// | | コンテキスト残量 | 使用上限 |
+    /// |---|---|---|
+    /// | 値の持ち主 | カード | **PC** |
+    /// | 届く経路の本数 | 1枚のカードにつき1本 | **セッションが N 本なら N 本** |
+    ///
+    /// `statusLine` も受け口も送る側の関門も、**すべてセッションごと**に在る。
+    /// つまり**関門はセッションごとにしか効かない**——別のセッションから同じ値が
+    /// 届くと、そちらの関門は「初めて見た値」として通す。**セッションを N 本
+    /// 走らせていれば、同じ値が N 回ここへ来る。**
+    ///
+    /// **だから外さないこと。** 「送る側にあるのだから要らない」と読むと、
+    /// セッションの本数だけ配信が増える。
+    fn rate_limits(&self, origin: &ReportOrigin, limits: RateLimits) {
+        let key = (origin.account_id, origin.agent_id);
+        let merged = {
+            let mut store = self.rate_limits.lock().expect("ロックが壊れていない");
+            let merged = merge_rate_limits(store.get(&key), &limits);
+            // **同じ表示形なら配らない**（上記）。`==` で見るので、窓の並び順が
+            // 変わっただけでも配ってしまう——`merge_rate_limits` が**既存の並びを
+            // 保つ**ことでそこを防いでいる
+            if store.get(&key) == Some(&merged) {
+                return;
+            }
+            store.insert(key, merged.clone());
+            merged
+        };
+        // **配り先はアカウント内の全ブラウザ**（カード宛ではない）。この値は PC の
+        // 状態なので、どのカードを見ている人にも同じものが要る
+        self.publish(
+            origin.account_id,
+            ServerMessage::RateLimits {
+                agent_id: origin.agent_id,
+                limits: merged,
+            },
+        );
+    }
+
+    /// そのセッションが使った費用と手間。**記録（DB）を触らない**（status設計「保管」）。
+    ///
+    /// # ここではサーバ側の関門を置かない
+    ///
+    /// 上の [`SessionRegistry::rate_limits`] と違い、**費用はカードに属する**ので
+    /// 経路が1枚につき1本しかない。**送る側の関門で足りる**——
+    /// [`SessionRegistry::context_usage`] と同じ形である。
+    fn session_cost(&self, origin: &ReportOrigin, card_id: CardId, cost: SessionCost) {
+        // **持ち主の検査をここで通す**（設計§8-6）。こちらは `card_id` を運ぶので
+        // `owned()` が引ける（使用上限のほうは運ばないので、鍵の `account_id` で絞る）
+        let Some(record) = self.owned(origin.account_id, card_id) else {
+            return;
+        };
+        {
+            let mut meta = record.meta.lock().expect("ロックが壊れていない");
+            meta.cost = Some(cost);
+        }
+        // 費用が届くということは、報告が続いている
+        record.live.store(true, Ordering::Relaxed);
+        self.publish(
+            record.account_id,
+            ServerMessage::SessionCost { card_id, cost },
+        );
+    }
+
+    /// その PC の使用上限を読む。**初期スナップショット（REST）のための口**。
+    ///
+    /// カードの記録ではないので `SessionUpsert` に乗らない。**乗せる先が REST しか
+    /// 無い**ので、`account::agents_of` がここから引いてかぶせる。
+    pub fn rate_limits_of(
+        &self,
+        account_id: Uuid,
+        agent_id: Option<AgentId>,
+    ) -> Option<RateLimits> {
+        self.rate_limits
+            .lock()
+            .expect("ロックが壊れていない")
+            .get(&(account_id, agent_id))
+            .cloned()
+    }
+
     async fn append(
         &self,
         origin: &ReportOrigin,
@@ -2466,6 +2620,48 @@ async fn load_branches(
 ///
 /// 直後に本物の [`SessionMeta`] で上書きされる。空の入れ物を作らないのは、
 /// 「まだ埋まっていない meta」を型で表すと、読む側が毎回 `Option` を剥がすことになるため。
+/// 届いた使用上限を、手元の値へ窓ごとに畳み込む（status設計「手当ては2つ」）。
+///
+/// # なぜ上書きではなく畳み込みなのか
+///
+/// **セッションが N 本走っていれば、同じ PC の値が N 本の経路から届く**。どれも
+/// その瞬間の真実だが、**届く順は保証されない**——あとから来たものが古いことがある。
+/// 素直に上書きすると、**使用率が行ったり来たりする画面**になる。
+///
+/// # 窓ごとの規則は3つ
+///
+/// | 届いた `resets_at` | どうするか | なぜ |
+/// |---|---|---|
+/// | 手元より**新しい** | **そのまま採る** | **窓が切り替わった。** パーセントは当然下がる |
+/// | 手元と**同じ** | **大きいほうを採る** | 同じ窓の中では減らない。小さい値は古い報告 |
+/// | 手元より**古い** | **捨てる** | 遅れて届いた報告 |
+///
+/// **`resets_at` を鍵に入れないと、窓が切り替わってパーセントが偶然同じだったときに
+/// 切替を配り落とす**（[`protocol::RateLimitWindow::resets_at`] の doc）。
+///
+/// # 並びは手元のものを保つ
+///
+/// 呼び手が `==` で「配るかどうか」を決めるので、**並び順が変わると中身が同じでも
+/// 配ってしまう**。だから手元の並びを崩さず、知らない窓だけを末尾へ足す。
+fn merge_rate_limits(current: Option<&RateLimits>, incoming: &RateLimits) -> RateLimits {
+    let Some(current) = current else {
+        return incoming.clone();
+    };
+    let mut windows = current.windows.clone();
+    for fresh in &incoming.windows {
+        match windows.iter_mut().find(|known| known.name == fresh.name) {
+            Some(known) if fresh.resets_at > known.resets_at => *known = fresh.clone(),
+            Some(known) if fresh.resets_at == known.resets_at => {
+                known.used_percentage = known.used_percentage.max(fresh.used_percentage);
+            }
+            // 古い `resets_at` は捨てる
+            Some(_) => {}
+            None => windows.push(fresh.clone()),
+        }
+    }
+    RateLimits { windows }
+}
+
 fn placeholder_meta(card_id: CardId) -> SessionMeta {
     SessionMeta {
         card_id,

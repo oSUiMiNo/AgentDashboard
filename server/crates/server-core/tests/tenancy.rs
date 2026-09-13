@@ -12,6 +12,7 @@
 //! | WS 購読 | `SubTranscript` / `SubPty` を他人のカードへ出す |
 //! | WS 操作 | `Kill` / `Archive` / `SetModel` / `SetPermissionMode` / `SendInput` / `Resize` / `PtyFlow` / **`SetNickname`** / **`BranchSession`** / 生の入力 / `Spawn`（他人の PC 宛て）を出す |
 //! | **カードIDを運ばない口** | **他人の CLI セッションを名指しして `RecallSession` を出す**（名前付け設計§11-4）。`target_card` の門が効かないので、記録を引くところで絞れていないと素通りする |
+//! | **カードIDを運ばない口（3件目）** | **使用上限**（status設計「保管」）。PC に属する値なので `card_id` を運ばず、`target_card` も `owned()` も効かない。**鍵の `account_id` で絞れていないと、他人の PC の使用率が読める** |
 //! | **過去のセッションの一覧** | `GET /api/sessions/past` に他人のぶんが混ざらない |
 //! | A2S | 自分の接続から**他人の card_id** を報告する |
 //! | 別の PC のログを引く口 | 他人の PC を宛先に `GET /api/hosts/{id}/logs` する（ログ設計§13-1） |
@@ -2288,6 +2289,133 @@ async fn 他人のメモは宛先を知っていても出てこない() {
             memos.len(),
             1,
             "[{}] 自分のぶんだけが見えるはず（実際: {memos:?}）",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+/// **他人の PC の使用上限は読めないこと**（status設計「保管」）。
+///
+/// # なぜ `crossings` に乗らないのか
+///
+/// 使用上限は**カードIDを運ばない**ので `target_card` の門が効かない。しかも**読む口が
+/// REST（PC の一覧）だけ**で、`ClientMessage` が無いから「断られる」形にもならない。
+/// メモと同じく、**守っているのは「断る」ではなく「絞り込む」**である。
+///
+/// 絞り込みの実体は**保管の鍵に `account_id` が入っていること**で、読む口
+/// （`rate_limits_of`）も `agents_of` も同じ鍵で引く。
+///
+/// # 断る側だけでは足りない
+///
+/// **全部空を返す実装でも「他人のが見えない」は通る。** だから**自分のぶんが見えること**を
+/// 対で置く——ここを外すと、分離が成立しているのか機能が死んでいるのか区別が付かない。
+#[tokio::test]
+async fn 他人のPCの使用上限は読めない() {
+    for backend in common::backends("tenancy-rate-limits").await {
+        let arena = Arena::start(backend.db.clone()).await;
+        let (mine, _mine_agent) = arena.tenant("わたし").await;
+        let (theirs, _their_agent) = arena.tenant("よそのひと").await;
+
+        // **それぞれの PC を DB から引く**（`tenant()` が繋いだときに行が出来ている）。
+        // **架空の id で流すと `agents_of` が1行も返さず、検査が空振りする**
+        let agent_of = |account_id: Uuid| {
+            let db = backend.db.clone();
+            async move {
+                use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+                server_core::db::entity::agents::Entity::find()
+                    .filter(server_core::db::entity::agents::Column::AccountId.eq(account_id))
+                    .one(&db)
+                    .await
+                    .expect("PC の行を読めること")
+                    .expect("PC の行が在ること")
+                    .id
+            }
+        };
+        let 私のPC = protocol::AgentId(agent_of(mine.account_id).await);
+        let 相手のPC = protocol::AgentId(agent_of(theirs.account_id).await);
+
+        // **相手の PC からだけ流す**
+        arena
+            .registry
+            .apply(
+                &server_core::registry::ReportOrigin {
+                    account_id: theirs.account_id,
+                    agent_id: Some(相手のPC),
+                    account: None,
+                },
+                ServerMessage::RateLimits {
+                    agent_id: None,
+                    limits: protocol::RateLimits {
+                        windows: vec![protocol::RateLimitWindow {
+                            name: "five_hour".to_string(),
+                            used_percentage: 91,
+                            resets_at: 1_000,
+                        }],
+                    },
+                },
+            )
+            .await;
+
+        // **断る側**：こちらの鍵では引けない（相手の PC を名指ししても）
+        assert!(
+            arena
+                .registry
+                .rate_limits_of(mine.account_id, Some(相手のPC))
+                .is_none(),
+            "[{}] 他人の PC の使用上限が、こちらのアカウントの鍵で読めている",
+            backend.name
+        );
+
+        // **REST も同じ**。こちらの一覧に相手の値は乗らない
+        let 私の一覧 = server_core::account::agents_of(&arena.hub, mine.account_id)
+            .await
+            .expect("PC の一覧を引けること");
+        assert!(
+            私の一覧.iter().all(|view| view.rate_limits.is_none()),
+            "[{}] こちらの PC 一覧に他人の使用上限が乗っている: {:?}",
+            backend.name,
+            私の一覧
+                .iter()
+                .map(|view| &view.rate_limits)
+                .collect::<Vec<_>>()
+        );
+
+        // **通る側**：自分の PC から流したものは、REST にちゃんと乗る。
+        // **ここが無いと、全部空を返す実装でも上の検査が通る**
+        arena
+            .registry
+            .apply(
+                &server_core::registry::ReportOrigin {
+                    account_id: mine.account_id,
+                    agent_id: Some(私のPC),
+                    account: None,
+                },
+                ServerMessage::RateLimits {
+                    agent_id: None,
+                    limits: protocol::RateLimits {
+                        windows: vec![protocol::RateLimitWindow {
+                            name: "five_hour".to_string(),
+                            used_percentage: 41,
+                            resets_at: 1_000,
+                        }],
+                    },
+                },
+            )
+            .await;
+        let 私の一覧 = server_core::account::agents_of(&arena.hub, mine.account_id)
+            .await
+            .expect("PC の一覧を引けること");
+        let 乗っている = 私の一覧
+            .iter()
+            .filter_map(|view| view.rate_limits.as_ref())
+            .flat_map(|limits| limits.windows.iter().map(|w| w.used_percentage))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            乗っている,
+            vec![41],
+            "[{}] 自分の PC の使用上限が REST に乗っていない（初期スナップショットの経路が切れている）",
             backend.name
         );
 

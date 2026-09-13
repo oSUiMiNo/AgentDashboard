@@ -25,6 +25,7 @@ use axum::{
     http::StatusCode,
     routing::get,
 };
+use protocol::{AgentId, RateLimits};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -94,6 +95,24 @@ pub struct SessionHostView {
     /// 相手にすると「応答の形を読めません」で落ちる（`TokenView::kind` で踏んだのと同じ）。
     #[serde(default)]
     pub supports_revive: bool,
+    /// その PC の使用上限（status設計「保管」）。まだ1本も届いていなければ `None`。
+    ///
+    /// # なぜ REST でかぶせるのか
+    ///
+    /// `connected` とまったく同じ性質である——**DB には持たない**（繋がっていない PC の
+    /// 古い数字が残るため）ので、手元の保管から都度かぶせる。
+    ///
+    /// **そして、ここに乗せないと長く空く。** この値はカードの記録ではないので
+    /// `SessionUpsert` に乗らず、**初期スナップショットの経路は REST だけ**である。
+    /// しかもサーバ側の関門が「同じ表示形なら配らない」ので、**次に値が動くまで便が
+    /// 飛ばない**——5時間窓・7日窓なので、**空けば数時間空く**。
+    /// （コンテキスト残量が `reload_account` で同じ手当てを要したのと同じ形。
+    /// あちらの doc が「戻る道が細いので、消えると長く空く」と書いている）
+    ///
+    /// **`default` は必須。** この型は CLI も読むので、返さない古いサーバを相手に
+    /// すると「応答の形を読めません」で落ちる（`supports_revive` と同じ理由）。
+    #[serde(default)]
+    pub rate_limits: Option<RateLimits>,
 }
 
 async fn list_tokens(
@@ -259,6 +278,12 @@ pub async fn agents_of(
                 supports_revive: capabilities
                     .as_ref()
                     .is_some_and(|capabilities| capabilities.supports_revive),
+                // **手元の保管からかぶせる**（DB には無い。上の doc）。
+                // 届いていなければ `None` のままでよい——画面は「まだ分からない」と
+                // 「0%」を別に描く決まりなので、捏造しない
+                rate_limits: hub
+                    .registry()
+                    .rate_limits_of(account_id, Some(AgentId(row.id))),
                 id: row.id,
                 name: row.name,
                 last_seen_at: row.last_seen_at,
@@ -272,6 +297,16 @@ pub async fn agents_of(
 /// **`agents` の行そのものが無い**（A2S の受け口を持たないので、繋いでくる PC が
 /// 存在しない）。空を返すのが正しく、`"local"` を1台として並べたりはしない——
 /// 一覧に「この PC」というバッジが出ると、他に PC があるように見える。
+///
+/// # ★ したがって、使用上限はローカルモードでは**ここから出ない**
+///
+/// 使用上限は上の [`SessionHostView::rate_limits`] に乗るので、**行が無い
+/// ローカルモードでは1つも出ない**。保管（`SessionRegistry::rate_limits`）には
+/// `agent_id: None` で**入っている**——出す先が無いだけである。
+///
+/// **実機はローカルモードなので、これは実機で値が読めないことを意味する。**
+/// 出し先をどう作るかは画面側の判断なので、ここでは決めない（status のフェーズ4）。
+/// **保管が値を捨てていないことだけが、この段の約束である。**
 pub fn no_agents() -> Vec<SessionHostView> {
     Vec::new()
 }

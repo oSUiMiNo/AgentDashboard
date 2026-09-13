@@ -20,7 +20,7 @@
 
 import { create } from 'zustand'
 import type { ModelAliasSeen, ModelCatalogEntry } from '@/lib/models'
-import { PERMISSION_MODES, type PermissionMode } from '@/lib/protocol'
+import { PERMISSION_MODES, type PermissionMode, type RateLimits } from '@/lib/protocol'
 import { useAuthStore } from '@/stores/auth'
 
 /** 登録済みの PC（セルフホスト化設計§11-1）。 */
@@ -40,6 +40,19 @@ export interface AgentInfo {
    * と読む（`false` と同じ扱いで、判定側が `?? false` する）。
    */
   supports_revive?: boolean
+  /**
+   * その PC の使用上限（status設計「保管」）。まだ1本も届いていなければ無い。
+   *
+   * **サーバは DB に持たず、REST のたびに手元の保管からかぶせている**（`connected`
+   * と同じ性質）。**この欄が初期スナップショットの唯一の経路**である——カードの
+   * 記録ではないので `SessionUpsert` には乗らず、しかもサーバ側の関門が「同じ
+   * 表示形なら配らない」ので、**次に値が動くまで便が飛ばない**（5時間窓・7日窓なので
+   * 数時間空く）。
+   *
+   * **省略可にしてあるのはサーバが古い場合のため**（`supports_revive` と同じ理由）。
+   * **無い＝まだ届いていない**で、`0%` とは別に描くこと。
+   */
+  rate_limits?: RateLimits | null
 }
 
 /** 1台の PC が名乗ったモデルの表（設計§13-4）。 */

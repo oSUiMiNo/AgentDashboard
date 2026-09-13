@@ -73,6 +73,58 @@ fn context_usage(card_id: CardId, percentage: Option<u8>) -> ServerMessage {
     }
 }
 
+/// 使用上限の便。**窓は (名前, 使用率, リセット時刻) で書く。**
+fn rate_limits(windows: &[(&str, u8, i64)]) -> ServerMessage {
+    ServerMessage::RateLimits {
+        // **ここは詰めない。** `apply` が `origin` から詰め直すので、便に何を
+        // 書いても無視される——それを確かめるテストが下に在る
+        agent_id: None,
+        limits: protocol::RateLimits {
+            windows: windows
+                .iter()
+                .map(
+                    |(name, used_percentage, resets_at)| protocol::RateLimitWindow {
+                        name: (*name).to_string(),
+                        used_percentage: *used_percentage,
+                        resets_at: *resets_at,
+                    },
+                )
+                .collect(),
+        },
+    }
+}
+
+/// その PC の窓を (名前, 使用率, リセット時刻) の並びで取り出す。
+fn windows_of(
+    registry: &SessionRegistry,
+    agent_id: Option<protocol::AgentId>,
+) -> Vec<(String, u8, i64)> {
+    registry
+        .rate_limits_of(server_core::db::LOCAL_ACCOUNT_ID, agent_id)
+        .map(|limits| {
+            limits
+                .windows
+                .into_iter()
+                .map(|w| (w.name, w.used_percentage, w.resets_at))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 費用の便。
+fn session_cost(card_id: CardId, cents: i64) -> ServerMessage {
+    ServerMessage::SessionCost {
+        card_id,
+        cost: protocol::SessionCost {
+            total_cost_cents: cents,
+            total_api_duration_ms: 1,
+            total_duration_ms: 2,
+            total_lines_added: 3,
+            total_lines_removed: 4,
+        },
+    }
+}
+
 fn text_node(id: &str) -> TreeNode {
     TreeNode {
         id: NodeId(id.to_string()),
@@ -2469,6 +2521,404 @@ async fn セッションホストが送ってきたメモの便は捨てる() {
             "[{}] セッションホストから来たメモが配られている（記録に無いものが画面へ出る）: {:?}",
             backend.name,
             leaked.map(|event| event.map(|e| e.message))
+        );
+
+        backend.finish().await;
+    }
+}
+
+/// **PC ごとに1つの欄へ入ること**（status設計「保管」）。
+///
+/// # 1セッションぶんだけ流すと、鍵が何であっても通る
+///
+/// この値はアカウントに1つではなく**PC ごと**である。ところが**セッションを1本しか
+/// 流さないと、鍵がアカウントだけでも PC ごとでも同じ結果になる**——鍵の形を
+/// 確かめたことにならない。だから**2台の PC から流して、互いを上書きしないことを見る。**
+///
+/// そして**同じ PC の別セッションから届いたものは同じ欄に入る**（経路は N 本あるが、
+/// 持ち主は1つ）。これも対で見る。
+#[tokio::test]
+async fn 使用上限はPCごとに分かれ同じPCなら1つにまとまる() {
+    for backend in common::backends("rl_per_agent").await {
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+
+        let 甲 = protocol::AgentId::new();
+        let 乙 = protocol::AgentId::new();
+        let 甲から = ReportOrigin {
+            agent_id: Some(甲),
+            ..local()
+        };
+        let 乙から = ReportOrigin {
+            agent_id: Some(乙),
+            ..local()
+        };
+
+        registry
+            .apply(&甲から, rate_limits(&[("five_hour", 41, 1_000)]))
+            .await;
+        registry
+            .apply(&乙から, rate_limits(&[("five_hour", 77, 1_000)]))
+            .await;
+
+        // **上書きし合わないこと**（アカウントに1つだと、あとの 77 が前を消す）
+        assert_eq!(
+            windows_of(&registry, Some(甲)),
+            vec![("five_hour".to_string(), 41, 1_000)],
+            "[{}] 甲の値が乙に上書きされている（鍵が PC ごとになっていない）",
+            backend.name
+        );
+        assert_eq!(
+            windows_of(&registry, Some(乙)),
+            vec![("five_hour".to_string(), 77, 1_000)],
+            "[{}] 乙の値が入っていない",
+            backend.name
+        );
+
+        // **同じ PC の別セッションから届いたぶんは、同じ欄に畳み込まれる。**
+        // 経路はセッションごとに在るが、持ち主は PC なので欄は増えない
+        registry
+            .apply(&甲から, rate_limits(&[("seven_day", 63, 2_000)]))
+            .await;
+        assert_eq!(
+            windows_of(&registry, Some(甲)),
+            vec![
+                ("five_hour".to_string(), 41, 1_000),
+                ("seven_day".to_string(), 63, 2_000),
+            ],
+            "[{}] 同じ PC の別の窓が畳み込まれていない",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+/// **帰属はサーバが決める。便に乗ってきた `agent_id` は使わない**（`ReportOrigin` の doc）。
+///
+/// # 便の側を偽っても、入る欄は変わらないこと
+///
+/// セッションホストが他人の PC を名乗る道を作らないための検査である。**`apply` が
+/// `origin` から詰め直しているかどうかは、便に嘘を書いて確かめるしかない**——
+/// 素直な値だけを流すと、どちらから詰めていても同じ結果になる。
+#[tokio::test]
+async fn 便が名乗ったPCではなく出どころのPCへ入る() {
+    for backend in common::backends("rl_origin_wins").await {
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+
+        let 本当の主 = protocol::AgentId::new();
+        let 騙り = protocol::AgentId::new();
+
+        // **便には「騙り」を書き、出どころは「本当の主」にする**
+        let ServerMessage::RateLimits { limits, .. } = rate_limits(&[("five_hour", 55, 1_000)])
+        else {
+            unreachable!("使用上限の便であること")
+        };
+        registry
+            .apply(
+                &ReportOrigin {
+                    agent_id: Some(本当の主),
+                    ..local()
+                },
+                ServerMessage::RateLimits {
+                    agent_id: Some(騙り),
+                    limits,
+                },
+            )
+            .await;
+
+        assert_eq!(
+            windows_of(&registry, Some(本当の主)),
+            vec![("five_hour".to_string(), 55, 1_000)],
+            "[{}] 出どころの PC へ入っていない",
+            backend.name
+        );
+        assert!(
+            windows_of(&registry, Some(騙り)).is_empty(),
+            "[{}] 便が名乗った PC へ入っている（他人の PC を名乗れてしまう）",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+/// **同じ窓なら大きいほうを採る**（status設計「手当ては2つ」）。
+///
+/// # 大きいほうを先に流すと、どちらの実装でも通る
+///
+/// 素直に上書きする実装でも、**大→小の順なら最後に小が入る**ので差が出る。
+/// だから**小さいほうを後に流す**——上書きなら 20 に、畳み込みなら 41 のままになる。
+///
+/// **届く順は保証されない**（セッションごとに別の経路で来る）ので、これが要る。
+#[tokio::test]
+async fn 同じ窓なら小さい報告で上書きされない() {
+    for backend in common::backends("rl_max_wins").await {
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+        let 甲 = protocol::AgentId::new();
+        let 甲から = ReportOrigin {
+            agent_id: Some(甲),
+            ..local()
+        };
+
+        registry
+            .apply(&甲から, rate_limits(&[("five_hour", 41, 1_000)]))
+            .await;
+        // **小さいほうを後から。** 遅れて届いた古い報告にあたる
+        registry
+            .apply(&甲から, rate_limits(&[("five_hour", 20, 1_000)]))
+            .await;
+
+        assert_eq!(
+            windows_of(&registry, Some(甲)),
+            vec![("five_hour".to_string(), 41, 1_000)],
+            "[{}] 小さい報告で上書きされている（使用率が行き来する画面になる）",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+/// **`resets_at` が新しければ採る。古ければ捨てる**（`RateLimitWindow::resets_at` の doc）。
+///
+/// # 使用率を同じにして `resets_at` だけ動かす
+///
+/// **`resets_at` を鍵から抜いた実装でも、使用率が動けば通ってしまう。** だから
+/// **使用率を据え置いて時刻だけ変える**——切替を見ているかどうかがこれで分かれる。
+///
+/// 窓が切り替われば使用率は当然下がるので、**「大きいほうを採る」より `resets_at` が
+/// 先に効く**ことも、ここで一緒に確かめている（41 → 新しい窓の 3 へ下がる）。
+#[tokio::test]
+async fn 窓が切り替わったら使用率が下がっても採る() {
+    for backend in common::backends("rl_window_switch").await {
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+        let 甲 = protocol::AgentId::new();
+        let 甲から = ReportOrigin {
+            agent_id: Some(甲),
+            ..local()
+        };
+
+        registry
+            .apply(&甲から, rate_limits(&[("five_hour", 41, 1_000)]))
+            .await;
+
+        // **使用率は同じで、時刻だけ古い** → 捨てる
+        registry
+            .apply(&甲から, rate_limits(&[("five_hour", 41, 500)]))
+            .await;
+        assert_eq!(
+            windows_of(&registry, Some(甲)),
+            vec![("five_hour".to_string(), 41, 1_000)],
+            "[{}] 古い `resets_at` の報告を採っている",
+            backend.name
+        );
+
+        // **窓が切り替わった** → 使用率が下がっても採る
+        registry
+            .apply(&甲から, rate_limits(&[("five_hour", 3, 2_000)]))
+            .await;
+        assert_eq!(
+            windows_of(&registry, Some(甲)),
+            vec![("five_hour".to_string(), 3, 2_000)],
+            "[{}] 窓の切替を採り落としている（`resets_at` が鍵に入っていない）",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+/// **同じ表示形なら配らない**（サーバ側の関門。status設計「手当ては2つ」）。
+///
+/// # 材料が同じで順が変わらないと、2回目が配られても気づけない
+///
+/// 値を見るだけでは「2回目も同じ値が入っている」ことしか分からない。**配信の回数を
+/// 数える**ことで、余計な便が飛んでいないかが分かる。
+///
+/// # なぜサーバ側にも関門が要るのか
+///
+/// 送る側の関門は**セッションごとにしか効かない**（`SessionRegistry::rate_limits` の doc）。
+/// **別のセッションから同じ値が届くと、そちらの関門は「初めて見た値」として通す**ので、
+/// セッションを N 本走らせていれば同じ値が N 回ここへ来る。
+#[tokio::test]
+async fn 同じ使用上限は二度配らない() {
+    for backend in common::backends("rl_quantize").await {
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+        let 甲 = protocol::AgentId::new();
+        let 甲から = ReportOrigin {
+            agent_id: Some(甲),
+            ..local()
+        };
+        let mut events = registry.subscribe_events();
+
+        registry
+            .apply(&甲から, rate_limits(&[("five_hour", 41, 1_000)]))
+            .await;
+        // 1回目は配られる
+        let first =
+            tokio::time::timeout(std::time::Duration::from_millis(200), events.recv()).await;
+        assert!(
+            first.is_ok(),
+            "[{}] 1回目が配られていない（腕が届いていない）",
+            backend.name
+        );
+
+        // **同じ値を、別のセッションのつもりでもう2回。** どちらも配ってはいけない
+        for _ in 0..2 {
+            registry
+                .apply(&甲から, rate_limits(&[("five_hour", 41, 1_000)]))
+                .await;
+        }
+        let leaked =
+            tokio::time::timeout(std::time::Duration::from_millis(200), events.recv()).await;
+        assert!(
+            leaked.is_err(),
+            "[{}] 同じ表示形が配り直されている（セッションの本数だけ配信が増える）: {:?}",
+            backend.name,
+            leaked.map(|event| event.map(|e| e.message))
+        );
+
+        backend.finish().await;
+    }
+}
+
+/// **使用上限は記録（DB）の行を書き換えない**（status設計「保管」）。
+///
+/// # 「列が無いこと」ではなく「行が動かないこと」を見る
+///
+/// 列の有無を見ると、**別の経路で書いていても通る**。`軽い便は記録の行を書き換えない`
+/// と同じ形で、**行そのものを前後で比べる。**
+///
+/// 保存すると**繋がっていない PC の古い数字が残る**——コンテキスト残量が「空の
+/// セッションに前回の使用率」を避けているのと同じ理由だが、**誰の実態と食い違うかが違う。**
+#[tokio::test]
+async fn 使用上限と費用は記録の行を書き換えない() {
+    use sea_orm::EntityTrait;
+
+    for backend in common::backends("rl_no_write").await {
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+        let card_id = CardId::new();
+        registry.apply(&local(), upsert(card_id)).await;
+
+        let 前 = server_core::db::entity::sessions::Entity::find_by_id(card_id.0)
+            .one(&backend.db)
+            .await
+            .expect("行を読めること")
+            .expect("カード行が在ること");
+
+        // **値が動く形で3回ずつ**（関門を通る）
+        for (i, 割合) in [10u8, 20, 30].into_iter().enumerate() {
+            registry
+                .apply(
+                    &local(),
+                    rate_limits(&[("five_hour", 割合, 1_000 + i as i64)]),
+                )
+                .await;
+            registry
+                .apply(&local(), session_cost(card_id, 100 * (i as i64 + 1)))
+                .await;
+        }
+
+        let あと = server_core::db::entity::sessions::Entity::find_by_id(card_id.0)
+            .one(&backend.db)
+            .await
+            .expect("行を読めること")
+            .expect("カード行が在ること");
+
+        assert_eq!(
+            前, あと,
+            "[{}] 使用上限か費用で記録の行が書き換わっている（DB を触らない決定が破れている）",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+/// **費用はカードの記録に入り、配られること。**
+///
+/// 使用上限と違って**カードに属する**ので、置き場所も宛先もカード側である
+/// （`SessionCost` の doc「出す場所が違う」）。
+#[tokio::test]
+async fn 費用はカードの記録に入る() {
+    for backend in common::backends("cost_apply").await {
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+        let card_id = CardId::new();
+        registry.apply(&local(), upsert(card_id)).await;
+
+        // **途中で見えていることを挟む**（助っ人 `meta()` は `cost: None` を入れるので、
+        // `None` だけを確かめると実装が値を1度も扱わなくても通る）
+        registry.apply(&local(), session_cost(card_id, 6_477)).await;
+        assert_eq!(
+            registry.list(server_core::db::LOCAL_ACCOUNT_ID)[0]
+                .cost
+                .map(|cost| cost.total_cost_cents),
+            Some(6_477),
+            "[{}] 費用がカードの記録に入っていない",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+/// **他インスタンスから来た便も、手元の保管へ入れること**（`adopt` の明示の腕）。
+///
+/// # 素通しにすると、サーバを2台以上並べたときだけ欠ける
+///
+/// バスから来た便を配るだけにすると、**PC を抱えていないインスタンスに繋いだ
+/// ブラウザ**が REST で空を受け取る。1台構成では差が出ないので、**保管に入った
+/// ことを直に見る。**
+#[tokio::test]
+async fn バスから来た使用上限も手元の保管へ入る() {
+    for backend in common::backends("rl_adopt").await {
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+        let 甲 = protocol::AgentId::new();
+
+        let ServerMessage::RateLimits { limits, .. } = rate_limits(&[("seven_day", 63, 3_000)])
+        else {
+            unreachable!("使用上限の便であること")
+        };
+        registry
+            .adopt(
+                server_core::db::LOCAL_ACCOUNT_ID,
+                ServerMessage::RateLimits {
+                    // **バス経由では `apply` が既に詰めてあるので、こちらは便の値を使う**
+                    agent_id: Some(甲),
+                    limits,
+                },
+            )
+            .await;
+
+        assert_eq!(
+            windows_of(&registry, Some(甲)),
+            vec![("seven_day".to_string(), 63, 3_000)],
+            "[{}] バスから来た使用上限が手元の保管へ入っていない（2台構成で欠ける）",
+            backend.name
         );
 
         backend.finish().await;

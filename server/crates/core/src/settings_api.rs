@@ -375,7 +375,11 @@ pub async fn api_settings(
         motion_quiet: db::settings::motion_quiet(state.auth.db(), identity.account_id).await,
         available_modes: store.available_modes().to_vec(),
         model_tables: store.local_model_tables(&state.manager.aliases().all()),
-        // ローカルモードに PC という単位は無い（`"local"` を1台として並べない）
+        // ローカルモードに PC という単位は無い（`"local"` を1台として並べない）。
+        //
+        // **したがって使用上限もここから出ない**（status設計）。値は保管には
+        // `agent_id: None` で入っているが、**乗せる行が無い**。実機はローカルモードなので、
+        // 出し先を作るまで実機では読めない——`account::no_agents` の doc に詳しい
         agents: server_core::account::no_agents(),
         intervals: intervals.into(),
         lan_password: lan_password_view(&state.auth, &identity).await,
