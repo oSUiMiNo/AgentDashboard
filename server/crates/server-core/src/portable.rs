@@ -51,6 +51,7 @@ pub fn exported(
     always_bypass: bool,
     project_autostart: bool,
     motion_quiet: &str,
+    file_modes: &BTreeMap<String, String>,
     exported_by: &str,
 ) -> Exported {
     Exported {
@@ -61,6 +62,13 @@ pub fn exported(
             (
                 settings::ALWAYS_BYPASS_PERMISSIONS.to_string(),
                 serde_json::json!(always_bypass),
+            ),
+            // **拡張子ごとの見せ方**（ファイルビュアにエディタ機能を追加 要件③）。
+            // **中身は拡張子と見せ方の対応**で、どの機械でも同じ意味になるので持ち出す
+            // ——絶対パスを持つ `writable_roots` を外したのとは、そこが違う
+            (
+                settings::FILE_MODES.to_string(),
+                serde_json::json!(file_modes),
             ),
             (
                 settings::PROJECT_AUTOSTART_SESSION.to_string(),
@@ -275,6 +283,7 @@ mod tests {
             true,
             true,
             "calm",
+            &BTreeMap::from([("md".to_string(), "editor".to_string())]),
             "0.0.0-test",
         );
         serde_json::to_string_pretty(&exported).expect("書き出せること")
@@ -314,6 +323,7 @@ mod tests {
             true,
             true,
             "calm",
+            &BTreeMap::new(),
             "0.0.0-test",
         ))
         .expect("書き出せること");

@@ -733,6 +733,7 @@ async fn api_export(
         always_bypass,
         db::settings::project_autostart_session(state.auth.db(), identity.account_id).await,
         &db::settings::motion_quiet(state.auth.db(), identity.account_id).await,
+        &db::settings::file_modes(state.auth.db(), identity.account_id).await,
         env!("CARGO_PKG_VERSION"),
     ))
 }
@@ -813,6 +814,7 @@ async fn api_server_export(
         always_bypass,
         db::settings::project_autostart_session(hub.db(), identity.account_id).await,
         &db::settings::motion_quiet(hub.db(), identity.account_id).await,
+        &db::settings::file_modes(hub.db(), identity.account_id).await,
         env!("CARGO_PKG_VERSION"),
     ))
 }

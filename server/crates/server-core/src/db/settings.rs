@@ -715,8 +715,8 @@ mod tests {
     /// **持ち出しの対象はこの並びで決まる。** キーを足したらこの数も動く——
     /// 書き換え忘れると、足したキーが書き出されないまま「揃っている」ことになる。
     #[test]
-    fn アカウントの設定は8つ() {
-        assert_eq!(ACCOUNT_KEYS.len(), 8);
+    fn アカウントの設定は9つ() {
+        assert_eq!(ACCOUNT_KEYS.len(), 9);
         assert!(ACCOUNT_KEYS.contains(&PROJECT_AUTOSTART_SESSION));
         assert!(ACCOUNT_KEYS.contains(&MOTION_QUIET));
         // サーバ全体スコープのものが混ざっていないこと（混ざると秘密が持ち出しへ乗る）
@@ -731,7 +731,10 @@ mod tests {
                     || check(key, &serde_json::json!(DEFAULT_MOTION_QUIET)).is_ok()
                     // 容量は下限が 1MiB なので、20 では通らない。**桁の違う値が
                     // 要る**——ここを足さないと「check() が知らない」と読める
-                    || check(key, &serde_json::json!(DEFAULT_MEMO_MAX_BYTES)).is_ok(),
+                    || check(key, &serde_json::json!(DEFAULT_MEMO_MAX_BYTES)).is_ok()
+                    // 拡張子ごとの見せ方は**対応**を取る。真偽でも数でも文字列でも
+                    // 通らないので、**候補に対応を足さないと「知らない」と読める**
+                    || check(key, &serde_json::json!({"md": "editor"})).is_ok(),
                 "{key} は check() が知らない"
             );
         }
