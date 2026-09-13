@@ -1866,3 +1866,136 @@ test("エディタの上では、その中が横へ動く", async ({ page }) => 
     })
     .toBeGreaterThan(前);
 });
+
+/* ============================================================================
+   エディタ（`ファイルビュアにエディタ機能を追加` テスト計画 11-1）
+
+   **ここでしか確かめられないもの**を3つ置く。単体（jsdom）は配置も組版も持たない
+   ので、**重ね方が崩れていないこと**は原理的に測れない。そして**保存が実ファイルまで
+   届いていること**は、応答を作り物にしている単体では何も言っていない。
+   ========================================================================== */
+
+/** 打って保存する材料。**他のテストが読む材料を書き換えない**ため、専用に分ける。 */
+const EDITABLE = "編集する.md";
+
+test.beforeAll(() => {
+  fs.writeFileSync(
+    path.join(PROJECT_DIR, "MyDocs", EDITABLE),
+    "# 編集する\n\nもとの行\n",
+    "utf8",
+  );
+});
+
+/**
+ * 端から端まで1本（テスト計画 11-1）。
+ *
+ * **画面 → REST → セッションホスト → 実ファイル**が繋がっていることは、ここでしか
+ * 言えない。単体は書く口の応答を作り物にしているので、**ディスクが変わったかどうかに
+ * ついては何も主張していない**。
+ */
+test("打って保存すると、実ファイルが変わり、読み直しても残る", async ({
+  page,
+}) => {
+  const 実物 = path.join(PROJECT_DIR, "MyDocs", EDITABLE);
+  await 開いて選ぶ(page, EDITABLE);
+
+  // `md` の既定はビュアー（要件⑦）なので、まず編集へ移す
+  await page.getByTestId("file-toggle-mode").click();
+  const 欄 = page.getByTestId("file-editor");
+  await expect(欄).toBeVisible();
+
+  await 欄.click();
+  await page.keyboard.press("End");
+  await 欄.pressSequentially("と、足した行");
+
+  // **打っただけでは保存されていない。** 未保存の印が出ることまで見る
+  await expect(page.getByTestId("file-unsaved")).toBeVisible();
+  expect(
+    fs.readFileSync(実物, "utf8"),
+    "押す前はディスクが変わっていないこと",
+  ).not.toContain("足した行");
+
+  await page.keyboard.press("Control+s");
+
+  // **印が消えることを待ってから**ディスクを見る。待たないと、書き終える前に読む
+  await expect(page.getByTestId("file-unsaved")).toHaveCount(0);
+  expect(
+    fs.readFileSync(実物, "utf8"),
+    "実ファイルへ届いていること",
+  ).toContain("足した行");
+
+  // **読み直しても残る。** 画面の中だけで完結していないことを、ここで否定する
+  await page.reload();
+  await 開いて選ぶ(page, EDITABLE);
+  await page.getByTestId("file-toggle-mode").click();
+  await expect(page.getByTestId("file-editor")).toHaveValue(/足した行/);
+});
+
+/**
+ * 重ね方が実ブラウザで崩れないこと（設計§6-1・§6-2）。
+ *
+ * # なぜ E2E でしか捕まらないのか
+ *
+ * 打つ層（透明な `<textarea>`）と見せる層（色付きの `<pre>`）は**別の要素**なので、
+ * 組版が1つでも食い違うと**カーソルが文字からずれる**。jsdom は `getComputedStyle` を
+ * 返しはするが**配置を持たない**ので、ずれを測れない。
+ *
+ * **器から取る**（`--file-raw-size`）形にしてあるのは、片方だけ直される余地を消すため
+ * （`FileView.matrix.test.tsx` の「器から取る印」と対）。
+ */
+test("打つ層と見せる層の組版が、実ブラウザで1つも食い違わない", async ({
+  page,
+}) => {
+  await 開いて選ぶ(page, EDITABLE);
+  await page.getByTestId("file-toggle-mode").click();
+  await expect(page.getByTestId("file-editor")).toBeVisible();
+
+  const 組版 = (el: Element) => {
+    const s = getComputedStyle(el);
+    return {
+      fontFamily: s.fontFamily,
+      fontSize: s.fontSize,
+      lineHeight: s.lineHeight,
+      letterSpacing: s.letterSpacing,
+      tabSize: s.tabSize,
+      whiteSpace: s.whiteSpace,
+      paddingTop: s.paddingTop,
+      paddingLeft: s.paddingLeft,
+    };
+  };
+
+  const 打つ層 = await page.getByTestId("file-editor").evaluate(組版);
+  const 見せる層 = await page.locator(".file-editor-paint").evaluate(組版);
+  expect(見せる層, "組版が1つでも違うとカーソルが文字からずれる").toEqual(
+    打つ層,
+  );
+
+  // **左上が同じ点から始まっていること。** 組版が同じでも、原点がずれれば意味が無い
+  const 位置 = (el: Element) => {
+    const r = el.getBoundingClientRect();
+    return { left: Math.round(r.left), top: Math.round(r.top) };
+  };
+  expect(
+    await page.locator(".file-editor-paint").evaluate(位置),
+    "2層の原点が揃っていること",
+  ).toEqual(await page.getByTestId("file-editor").evaluate(位置));
+});
+
+/**
+ * `text` をエディタのまま探せること（設計§5-4）。
+ *
+ * **撤回された判断へ戻らないための担保**である。かつて「エディタでは探すを出さない」と
+ * 決めかけたが、`text` は**表に無い拡張子すべての落ちどころ**でビュアーを持たないため、
+ * それを当てると**いちばん探したい相手から探す機能が消える**。
+ */
+test("拡張子が表に無いファイルを、エディタのまま探せる", async ({ page }) => {
+  await 開いて選ぶ(page, SCRIPTY);
+  // 表に無い拡張子なので、既定でエディタ（要件④）
+  await expect(page.getByTestId("file-editor")).toBeVisible();
+
+  await page.getByTestId("file-find-open").click();
+  await page.getByTestId("file-find-input").fill("実行されてしまった");
+
+  // **件数が出ること。** 0件のままなら、探す側が打つ層を見ていない
+  await expect(page.getByTestId("file-find-count")).toContainText(/[1-9]/);
+});
