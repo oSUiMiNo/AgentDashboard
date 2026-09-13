@@ -120,6 +120,11 @@ pub enum HostReply {
     /// **`Log` と同じ理由でここへ足した。** 別の答えの型を作ると、待ち口・答えの解決・
     /// 連絡係の封筒の5箇所が二重になる。
     Resources(crate::HostResources),
+    /// 添付の掃除の下見／結果（メモ設計§10-2）。
+    ///
+    /// **`Log` や `Resources` と同じ理由でここへ足した。** 別の答えの型を作ると、
+    /// 待ち口・答えの解決・連絡係の封筒の5箇所が二重になる。
+    Swept(crate::AttachmentSweep),
     /// 応えられなかった。**理由を分ける**のは、どれも利用者が直せるものだから（設計§8）
     Failed {
         reason: HostFailure,
@@ -261,6 +266,16 @@ pub enum AgentMessage {
         /// 無いと投げても永遠に何も起きず、画面に理由を出せない。
         #[serde(default)]
         supports_recall: bool,
+        /// 添付を**掃ける**か、掃いたらどうなるかを**数えられる**か（メモ設計§10-2）。
+        ///
+        /// 上の7つとまったく同じ形。**`supports_blob_write` に相乗りさせない**——
+        /// 書く道は既に配ったホストが持っているが、掃く道は持っていない。
+        /// まとめると「画像も置けません」と嘘をつく。
+        ///
+        /// [`ServerToAgent::SweepAttachments`] は答えを返す種別だが、**名乗らない PC は
+        /// 接続を保ったまま無視する**ので、投げると永遠に答えが返らない。
+        #[serde(default)]
+        supports_attachment_sweep: bool,
     },
     /// カード1枚の最新（意味は [`crate::ws::ServerMessage::SessionUpsert`] と同じ）。
     ///
@@ -574,6 +589,29 @@ pub enum ServerToAgent {
     HostResources {
         request_id: RequestId,
     },
+    /// 添付を掃く／掃いたらどうなるかを聞く（メモ設計§10-2）。
+    ///
+    /// # なぜ下見と本番が同じ種別なのか
+    ///
+    /// 要件10 は同意を取ってから消すことを求めており、**同意の画面に出した数の
+    /// とおりに消えること**が同意の意味そのものである。種別を分けると片方だけ
+    /// 直せてしまうので、**`apply` の真偽1つ**で分ける。
+    ///
+    /// # なぜ上限を引数で渡すのか
+    ///
+    /// **PC 側の toml ではなく、アカウントの設定（`memo_max_bytes`）を使う**
+    /// （メモ設計§11-2 の追記）。設定はサーバの記録に在るので、**サーバが読んで
+    /// 渡す**——PC 側に問い合わせる道を作ると、同じ値の出どころが2つになる。
+    ///
+    /// **起動時の掃除（`sweep_on_start`）は toml のままで、こちらは通らない。**
+    SweepAttachments {
+        request_id: RequestId,
+        retention_days: u64,
+        max_bytes: u64,
+        sweep_bytes: u64,
+        /// 真なら実際に消す。**偽なら1バイトも触らずに数だけ返す。**
+        apply: bool,
+    },
 }
 
 #[cfg(test)]
@@ -685,6 +723,7 @@ mod tests {
                 supports_revive: true,
                 supports_blob_read: true,
                 supports_blob_write: true,
+                supports_attachment_sweep: true,
                 supports_recall: true,
             },
             AgentMessage::SessionUpsert {

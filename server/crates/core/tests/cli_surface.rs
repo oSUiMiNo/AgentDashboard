@@ -59,12 +59,14 @@ const WS_VARIANTS: usize = 21;
 // ベルに溜めたものを消せないと、上限で流れるまで消えない
 // 2026-09-05：LAN の別端末から開ける番号で1口増やした（LANアドレス設計§5）。
 // **鍵の内側**——機械のアドレスは、外から誰でも読めてよいものではない
-const INSIDE_DOORS: usize = 32;
+// 2026-09-13：メモの画像の掃除で1口増やした（メモ設計§10-2）。**鍵の内側**——
+// 他人の機械のファイルを消せる口なので、帰属を必ず通す（tenancy に総当たりを1本足した）
+const INSIDE_DOORS: usize = 33;
 const OUTSIDE_DOORS: usize = 5;
 
 /// tenancy.rs の総当たりの本数。口が増えないなら総当たりも増えない（§1-1）。
 /// enforcement を足したときだけ意識して上げる。
-const TENANCY_TESTS: usize = 28;
+const TENANCY_TESTS: usize = 29;
 
 /// `command` に書ける群の先頭語。誤記（存在しない群）を機械で捕まえる。
 const 群: &[&str] = &[

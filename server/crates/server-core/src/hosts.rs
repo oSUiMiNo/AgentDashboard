@@ -398,6 +398,66 @@ pub async fn api_resources(
         .map_err(refuse)
 }
 
+/// `POST /api/hosts/{host}/attachments/sweep` — 添付を掃く／下見する（メモ設計§10-2）。
+///
+/// # なぜ下見と本番が同じ口なのか
+///
+/// 要件10 は「1GB を超えたら**利用者に同意のダイアログを出してから**消す」と定めて
+/// いる。**同意の画面に出した数のとおりに消えること**が同意の意味なので、口を分けると
+/// 片方だけ直せてしまう。`apply` の真偽1つで分ける。
+///
+/// # 上限はアカウントの設定から読む
+///
+/// **PC 側の toml ではない**（§11-2 の追記）。`memo_max_bytes` は画面から変えられる
+/// 設定で、**セルフホスト構成では toml に手が届かない**。
+///
+/// **起動時の掃除（`sweep_on_start`）はこの口を通らない**ので、**既存の振る舞いは
+/// 1バイトも変わっていない。**
+pub async fn api_attachment_sweep(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<Identity>,
+    Path(host): Path<String>,
+    Query(query): Query<SweepQuery>,
+) -> Result<Json<protocol::AttachmentSweep>, (StatusCode, String)> {
+    let target = parse_host(&host)?;
+    let limits = crate::db::settings::memo_limits(state.registry.db(), identity.account_id)
+        .await
+        .unwrap_or_default();
+    state
+        .agent
+        .sweep_attachments(
+            HostAskRequest {
+                account_id: identity.account_id,
+                target,
+            },
+            crate::session_host::AttachmentSweepLimits {
+                retention_days: limits.retention_days,
+                // **DB の値を渡す**（§11-2 の追記）。toml の `attachment_max_bytes` は
+                // 起動時の掃除が読んだまま——こちらは通らない
+                max_bytes: limits.max_bytes,
+                sweep_bytes: SWEEP_BYTES,
+                apply: query.apply,
+            },
+        )
+        .await
+        .map(Json)
+        .map_err(refuse)
+}
+
+/// 一度に掃く量（要件10 の 200MB）。
+///
+/// **「上限を下回るまで」ではない**——ここがログの掃除と違う（利用者の指定・2026-09-01）。
+const SWEEP_BYTES: u64 = 200 * 1024 * 1024;
+
+/// 掃除の下見か本番か。
+#[derive(serde::Deserialize)]
+pub struct SweepQuery {
+    /// **既定は下見**（`false`）。**消すほうを既定にしない**——問い合わせのつもりで
+    /// 叩いた口が消してしまう形は、同意を取る仕組みと矛盾する
+    #[serde(default)]
+    pub apply: bool,
+}
+
 /// `{host}` を宛先へ。**読めない綴りは「知らない PC」と同じ扱い**（設計§18）。
 ///
 /// 言い分けると、綴りを変えながら叩いて何かを探れる余地ができる。

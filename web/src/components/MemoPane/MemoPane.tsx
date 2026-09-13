@@ -26,6 +26,11 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 
 import { targetKey } from '@/lib/annotationTarget'
+import {
+  sweepAttachments,
+  大きさの字,
+  type AttachmentSweep,
+} from '@/lib/attachmentSweep'
 import { copyToClipboard } from '@/lib/clipboard'
 import { markComposerBusy } from '@/lib/composerBusy'
 import { useDraft } from '@/lib/drafts'
@@ -113,6 +118,33 @@ export function MemoPane({ target, readOnly = false, label, 保存先 }: Props) 
   )
 
   /*
+    **溢れたときの同意**（要件10・設計§10-2）。
+
+    **既存の `sweep()` を変えていない。** PC が起きたときの掃除は toml の値のまま
+    黙って走る——ここが挟むのは**メモから画像を置いたあと**の経路だけである。
+
+    **3か月の掃除には同意を求めない。** 期間で消えるのは既存の振る舞いで、
+    要件10 が同意を求めているのは**容量で溢れたとき**だけ。
+  */
+  const [溢れ, set溢れ] = useState<AttachmentSweep | null>(null)
+  const [消している, set消している] = useState(false)
+
+  /** 画像を置いたあとに1度だけ数える。**消さない。** */
+  const 溢れを見る = useCallback(async () => {
+    if (保存先 === undefined) {
+      return
+    }
+    try {
+      const 下見 = await sweepAttachments(保存先.host, false)
+      // **収まっていれば何も出さない。** 出すと、押す必要のない確認が毎回挟まる
+      set溢れ(下見.over_budget ? 下見 : null)
+    } catch {
+      // **数えられなくても書く道は塞がない。** 掃除は起動時にも走る（既存の振る舞い）
+      set溢れ(null)
+    }
+  }, [保存先])
+
+  /*
     **画像を運ぶ道**（設計§10-1）。保存先を渡されたときだけ組み立てる。
 
     **中身は `lib/memoImage.ts` に在る**——ふるいと置き場所の決め方を面から出して
@@ -124,9 +156,12 @@ export function MemoPane({ target, readOnly = false, label, 保存先 }: Props) 
       if (保存先 === undefined) {
         throw new Error('画像の置き場所が決まっていません')
       }
-      return 一枚運ぶ(保存先, file)
+      const url = await 一枚運ぶ(保存先, file)
+      // **置いたあとに数える。** 置く前に数えると、いま置くぶんが勘定に入らない
+      void 溢れを見る()
+      return url
     },
-    [保存先],
+    [保存先, 溢れを見る],
   )
 
   /*
@@ -233,6 +268,56 @@ export function MemoPane({ target, readOnly = false, label, 保存先 }: Props) 
               set送った回数((前) => 前 + 1)
             }}
           />
+          {/*
+            **溢れたときの同意**（要件10・設計§10-2）。**消す前に必ず押させる。**
+
+            既存の掃除は黙って消すが、**要件10 は容量で溢れたときだけ同意を求めて
+            いる**。3か月の掃除はここを通らない。
+          */}
+          {溢れ !== null && (
+            <div
+              data-testid="memo-sweep-consent"
+              role="alertdialog"
+              aria-label="画像の置き場所が上限を超えました"
+              className="border-destructive/50 mt-1 rounded border p-2 text-xs"
+            >
+              <p>
+                画像の置き場所が上限（{大きさの字(溢れ.total)} 使用中）を超えました。
+                <strong>古いものから {溢れ.removed} 件（{大きさの字(溢れ.freed)}）</strong>
+                を消すと空きます。
+              </p>
+              <div className="mt-2 flex gap-2">
+                <button
+                  type="button"
+                  data-testid="memo-sweep-apply"
+                  disabled={消している}
+                  onClick={async () => {
+                    if (保存先 === undefined) {
+                      return
+                    }
+                    set消している(true)
+                    try {
+                      await sweepAttachments(保存先.host, true)
+                      set溢れ(null)
+                    } finally {
+                      set消している(false)
+                    }
+                  }}
+                  className="border-destructive text-destructive rounded border px-2 py-0.5"
+                >
+                  {消している ? '消しています…' : '消す'}
+                </button>
+                <button
+                  type="button"
+                  data-testid="memo-sweep-dismiss"
+                  onClick={() => set溢れ(null)}
+                  className="text-muted-foreground rounded border px-2 py-0.5"
+                >
+                  そのままにする
+                </button>
+              </div>
+            </div>
+          )}
           <p
             data-testid="memo-retention-note"
             className="text-muted-foreground mt-1 text-[0.65rem]"

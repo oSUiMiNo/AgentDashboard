@@ -75,6 +75,10 @@ pub fn routes(state: ws::AppState, auth: Arc<auth::AuthContext>) -> Router {
         // 利用者の PC のフォルダとファイル（イシューグループ_2026_0805_0514 設計§10）。
         // **鍵の内側**に置く——中身のある口なので、素通しにしてよい理由が無い
         .route("/api/hosts/{host}/attachments", post(hosts::api_attachment))
+        .route(
+            "/api/hosts/{host}/attachments/sweep",
+            post(hosts::api_attachment_sweep),
+        )
         .route("/api/hosts/{host}/dir", get(hosts::api_dir))
         .route("/api/hosts/{host}/file", get(hosts::api_file))
         .route("/api/hosts/{host}/logs", get(hosts::api_logs))

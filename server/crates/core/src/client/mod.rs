@@ -454,6 +454,28 @@ pub async fn host_file_raw(
     http::fetch_bytes(target, &url).await
 }
 
+/// `POST /api/hosts/{host}/attachments/sweep`（メモ設計§10-2）。
+///
+/// **画面の同意ダイアログと同じ口を叩く。** 台帳（`cli_surface.toml`）が、画面に
+/// できることは CLI でもできることを求めている。
+///
+/// **既定は下見**（`apply = false`）。消すほうを既定にすると、確かめるつもりで
+/// 叩いた口が消してしまう。
+pub async fn sweep_attachments(
+    target: &Target,
+    host: &str,
+    apply: bool,
+) -> Result<(protocol::AttachmentSweep, String), ClientError> {
+    let path = format!(
+        "/api/hosts/{}/attachments/sweep?apply={apply}",
+        http::percent_encode(host),
+    );
+    let raw = write_ok(target, "POST", &path, None).await?;
+    let swept: protocol::AttachmentSweep =
+        serde_json::from_str(&raw).map_err(|err| ClientError::BadUrl(err.to_string()))?;
+    Ok((swept, raw))
+}
+
 /// `POST /api/hosts/{host}/attachments`（`メッセージに画像を添付できるようにする` 設計§3）。
 ///
 /// **画面の「＋」と同じ口を叩く。** 台帳（`cli_surface.toml`）が、画面にできることは

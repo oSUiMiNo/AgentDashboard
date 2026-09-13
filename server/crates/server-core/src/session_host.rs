@@ -295,6 +295,41 @@ pub trait SessionHost: Send + Sync + 'static {
         &self,
         request: HostAskRequest,
     ) -> Result<protocol::HostResources, HostAskError>;
+
+    /// 添付を掃く／掃いたらどうなるかを数える（メモ設計§10-2）。
+    ///
+    /// **ローカルモードもここを通る。** 理由は [`SessionHost::list_dir`] と同じ——
+    /// 添付を持っているのは**セッションを抱える機械**であって、サーバではない。
+    ///
+    /// # なぜ下見と本番が同じ口なのか
+    ///
+    /// 要件10 は「1GB を超えたら**利用者に同意のダイアログを出してから**消す」と
+    /// 定めている。**同意の画面に出した数のとおりに消えること**が同意の意味なので、
+    /// 口を分けると片方だけ直せてしまう。`apply` の真偽1つで分ける。
+    ///
+    /// # 上限を引数で受け取る理由
+    ///
+    /// **アカウントの設定（`memo_max_bytes`）を使う**（§11-2 の追記）。設定は
+    /// サーバの記録に在るので、**サーバが読んで渡す**——PC 側の toml を見に行くと、
+    /// 同じ値の出どころが2つになり、画面から変えても効かない項目が生まれる。
+    ///
+    /// **起動時の掃除（`sweep_on_start`）はこの口を通らない。** あちらは toml のまま
+    /// で、**既存の振る舞いを1バイトも変えていない。**
+    async fn sweep_attachments(
+        &self,
+        request: HostAskRequest,
+        limits: AttachmentSweepLimits,
+    ) -> Result<protocol::AttachmentSweep, HostAskError>;
+}
+
+/// 掃除に渡す値（メモ設計§10-2）。**呼ぶ側が組み立てる。**
+#[derive(Debug, Clone, Copy)]
+pub struct AttachmentSweepLimits {
+    pub retention_days: u64,
+    pub max_bytes: u64,
+    pub sweep_bytes: u64,
+    /// 真なら実際に消す。**偽なら1バイトも触らない。**
+    pub apply: bool,
 }
 
 /// 答えの要る問いに、応えられなかった理由（設計§10 の状態コードの表）。

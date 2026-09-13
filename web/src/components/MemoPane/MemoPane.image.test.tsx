@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { GLOBAL_TARGET, sessionTarget } from '@/lib/annotationTarget'
@@ -16,7 +16,10 @@ import { useWsStore } from '@/stores/ws'
   **本物を立てる筋は `MemoPane.test.tsx` に在る**（Ctrl+Enter の押し分けなど）。
   こちらは別ファイルにして、あちらのモックを汚さない。
 */
-const 渡ってきた: { onUploadImage?: unknown; on抱える?: (v: boolean) => void }[] = []
+const 渡ってきた: {
+  onUploadImage?: (file: File) => Promise<string>
+  on抱える?: (v: boolean) => void
+}[] = []
 vi.mock('./MemoEditor', () => ({
   MemoEditor: (props: Record<string, unknown>) => {
     渡ってきた.push(props as never)
@@ -140,6 +143,141 @@ describe('いつ消えるかの表示（要件10・設計§11-3）', () => {
     render(<MemoPane target={sessionTarget('s-1')} label="このセッションのメモ" />)
 
     expect(screen.getByTestId('memo-retention-note').textContent).toContain('3か月')
+  })
+})
+
+describe('溢れたときの同意（要件10・設計§10-2）', () => {
+  const fetchMock = vi.fn()
+
+  beforeEach(() => {
+    fetchMock.mockReset()
+    vi.stubGlobal('fetch', fetchMock)
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  function 下見(over: boolean) {
+    return {
+      ok: true,
+      json: async () => ({
+        total: 2_000_000_000,
+        expiring: 0,
+        expiring_bytes: 0,
+        over_budget: over,
+        removed: 3,
+        freed: 200_000_000,
+        applied: false,
+      }),
+    }
+  }
+
+  it('**溢れるまで同意を求めない。** 収まっているのに確認が出ると、毎回押させることになる', async () => {
+    fetchMock.mockResolvedValue(下見(false))
+    render(
+      <MemoPane
+        target={sessionTarget('s-1')}
+        label="このセッションのメモ"
+        保存先={{ host: 'local', cardId: 'card-1' }}
+      />,
+    )
+
+    /*
+      **`act` で包む。** 包まないと状態が落ち着く前に見ることになり、
+      **「溢れていても出さない」実装でも通る**——検査の形は正しいのに何も
+      守らない（実際に、包まずに書いたら壊しても落ちなかった）。
+    */
+    await act(async () => {
+      await 渡ってきた[0]!.onUploadImage!(new File([new Uint8Array(4)], 'x.png', {
+        type: 'image/png',
+      }))
+    })
+
+    expect(screen.queryByTestId('memo-sweep-consent')).toBeNull()
+    // **数えには行っている**（行かずに出さないのとは別物）
+    expect(
+      fetchMock.mock.calls.filter(([url]) => String(url).includes('/attachments/sweep')),
+    ).not.toHaveLength(0)
+  })
+
+  it('溢れたら同意を求める。**押すまで1バイトも消さない**', async () => {
+    fetchMock.mockResolvedValue(下見(true))
+    render(
+      <MemoPane
+        target={sessionTarget('s-1')}
+        label="このセッションのメモ"
+        保存先={{ host: 'local', cardId: 'card-1' }}
+      />,
+    )
+
+    await act(async () => {
+      await 渡ってきた[0]!.onUploadImage!(new File([new Uint8Array(4)], 'x.png', {
+        type: 'image/png',
+      }))
+    })
+
+    expect(screen.getByTestId('memo-sweep-consent')).toBeTruthy()
+    /*
+      **数えるだけの呼び出しはすべて `apply=false` であること。**
+      ここが `true` になると、**確認を出す前に消えている**——同意ダイアログが
+      「消しました」の事後報告になり、要件10 を満たさなくなる。
+    */
+    const 掃除の呼び出し = fetchMock.mock.calls.filter(([url]) =>
+      String(url).includes('/attachments/sweep'),
+    )
+    expect(掃除の呼び出し.length).toBeGreaterThan(0)
+    for (const [url] of 掃除の呼び出し) {
+      expect(url).toContain('apply=false')
+    }
+  })
+
+  it('「消す」を押して初めて本番になる', async () => {
+    fetchMock.mockResolvedValue(下見(true))
+    render(
+      <MemoPane
+        target={sessionTarget('s-1')}
+        label="このセッションのメモ"
+        保存先={{ host: 'local', cardId: 'card-1' }}
+      />,
+    )
+    await act(async () => {
+      await 渡ってきた[0]!.onUploadImage!(new File([new Uint8Array(4)], 'x.png', {
+        type: 'image/png',
+      }))
+    })
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('memo-sweep-apply'))
+    })
+
+    const 本番 = fetchMock.mock.calls.filter(([url]) =>
+      String(url).includes('apply=true'),
+    )
+    expect(本番).toHaveLength(1)
+    expect(screen.queryByTestId('memo-sweep-consent')).toBeNull()
+  })
+
+  it('「そのままにする」を押しても消えない（既存の振る舞いへ戻るだけ）', async () => {
+    fetchMock.mockResolvedValue(下見(true))
+    render(
+      <MemoPane
+        target={sessionTarget('s-1')}
+        label="このセッションのメモ"
+        保存先={{ host: 'local', cardId: 'card-1' }}
+      />,
+    )
+    await act(async () => {
+      await 渡ってきた[0]!.onUploadImage!(new File([new Uint8Array(4)], 'x.png', {
+        type: 'image/png',
+      }))
+    })
+
+    fireEvent.click(screen.getByTestId('memo-sweep-dismiss'))
+
+    expect(
+      fetchMock.mock.calls.filter(([url]) => String(url).includes('apply=true')),
+    ).toHaveLength(0)
+    expect(screen.queryByTestId('memo-sweep-consent')).toBeNull()
   })
 })
 

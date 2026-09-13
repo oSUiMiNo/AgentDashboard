@@ -360,6 +360,32 @@ pub struct HostResources {
     pub fits_now: Option<u32>,
 }
 
+/// 添付の掃除の下見・結果（メモ設計§10-2）。
+///
+/// # なぜ下見と結果が同じ型なのか
+///
+/// 要件10 は「1GB を超えたら**利用者に同意のダイアログを出してから**消す」と定めて
+/// いる。**同意を取るには先に「何がどれだけ消えるか」を言う必要がある**が、
+/// **言った数と消える数が食い違うと同意は形だけになる。**
+///
+/// 型を分けると、片方だけ直す変更ができてしまう。**同じ型・同じ経路**にして、
+/// 「下見か本番か」は呼ぶときの真偽1つで分ける。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AttachmentSweep {
+    /// いま置いてある合計（バイト）。
+    pub total: u64,
+    /// **期間で消える／消えたぶん。** ここに同意は要らない（既存の振る舞い）
+    pub expiring: u64,
+    pub expiring_bytes: u64,
+    /// 期間のぶんを除いても上限を超えているか。**偽なら同意を求めない。**
+    pub over_budget: bool,
+    /// **同意が要る件数**（下見）／**実際に消した件数**（本番）。
+    pub removed: u64,
+    pub freed: u64,
+    /// 本番だったか。**偽なら1バイトも消えていない。**
+    pub applied: bool,
+}
+
 /// 小窓に表示するセッションの状態（設計§5 の導出結果）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

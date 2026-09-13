@@ -285,6 +285,10 @@ pub struct Capabilities {
     /// （名前付け設計§7-2）。上の6つとまったく同じ形。
     #[serde(default)]
     pub supports_recall: bool,
+    /// 添付を掃けるか・掃いたらどうなるかを数えられるか（メモ設計§10-2）。
+    /// 上の7つとまったく同じ形。
+    #[serde(default)]
+    pub supports_attachment_sweep: bool,
 }
 
 /// 他インスタンスから回ってくる、PC への指示（設計§9-2 の `agent:{id}:cmd`）。
@@ -1234,6 +1238,7 @@ fn reply_kind(reply: &HostReply) -> &'static str {
         HostReply::Written(_) => "written",
         HostReply::Resources(_) => "resources",
         HostReply::Sessions { .. } => "sessions",
+        HostReply::Swept(_) => "swept",
         HostReply::Failed { .. } => "failed",
     }
 }
@@ -1722,6 +1727,33 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
             other => Err(wrong_answer(other)),
         }
     }
+
+    async fn sweep_attachments(
+        &self,
+        request: crate::session_host::HostAskRequest,
+        limits: crate::session_host::AttachmentSweepLimits,
+    ) -> Result<protocol::AttachmentSweep, crate::session_host::HostAskError> {
+        match self
+            // **`Need::BlobWrite` ではない。** 書く道は既に配ったホストが持っているが、
+            // 掃く道は持っていない。相乗りさせると「画像も置けません」と嘘をつく
+            .ask(request, Need::AttachmentSweep, move |request_id| {
+                ServerToAgent::SweepAttachments {
+                    request_id,
+                    retention_days: limits.retention_days,
+                    max_bytes: limits.max_bytes,
+                    sweep_bytes: limits.sweep_bytes,
+                    apply: limits.apply,
+                }
+            })
+            .await?
+        {
+            HostReply::Swept(swept) => Ok(swept),
+            HostReply::Failed { reason, detail } => {
+                Err(crate::session_host::HostAskError::Failed { reason, detail })
+            }
+            other => Err(wrong_answer(other)),
+        }
+    }
 }
 
 /// 問いの届け方。**宛先の解決と送信を分ける**ための中間の形。
@@ -1769,6 +1801,9 @@ enum Need {
     /// 添付を**書ける**か。**`Blob` に相乗りさせない**——読む道は既に配ったホストが
     /// 持っているが、書く道は持っていない（`メッセージに画像を添付できるようにする` 設計§4-1）
     BlobWrite,
+    /// 添付を**掃ける**か（メモ設計§10-2）。**`BlobWrite` に相乗りさせない**——
+    /// 書く道は既に配ったホストが持っているが、掃く道は持っていない
+    AttachmentSweep,
 }
 
 /// 答えを待つ上限（設計§23-3 の実測で決めた値）。
@@ -1915,6 +1950,7 @@ impl RemoteSessionHost {
                 Need::BlobWrite => capabilities.supports_blob_write,
                 Need::Recall => capabilities.supports_recall,
                 Need::Resources => capabilities.supports_resources,
+                Need::AttachmentSweep => capabilities.supports_attachment_sweep,
             })
     }
 }
@@ -2053,6 +2089,7 @@ async fn agent_loop(
         supports_blob_read,
         supports_blob_write,
         supports_recall,
+        supports_attachment_sweep,
     } = hello
     else {
         // next_hello が Hello 以外を返すことはない
@@ -2091,6 +2128,7 @@ async fn agent_loop(
         supports_blob_read,
         supports_blob_write,
         supports_recall,
+        supports_attachment_sweep,
     };
     match serde_json::to_value(&capabilities) {
         Ok(value) => {

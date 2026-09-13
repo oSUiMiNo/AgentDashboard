@@ -999,6 +999,10 @@ async fn handshake(mut socket: Socket, config: &LinkConfig) -> anyhow::Result<(S
         // **この実行ファイルは `hostfs::write_blob` を持っている**ので常に真
         supports_blob_write: true,
         supports_recall: true,
+        // 添付を掃ける・数えられる版であることを名乗る（メモ設計§10-2）。上6つと
+        // 同じで、**この実行ファイルは `attachments::survey`／`sweep` を持っている**
+        // ので常に真
+        supports_attachment_sweep: true,
     };
     socket
         .send(tungstenite::Message::text(serde_json::to_string(&hello)?))
@@ -1205,6 +1209,17 @@ enum Ask {
     /// 渡したIDのうち履歴が実在するもの（名前付け設計§8-3）。**設定は要らない**——
     /// 走査元は環境変数から引く（`claude_home`）
     Sessions(Vec<protocol::ClaudeSessionId>),
+    /// 添付を掃く／掃いたらどうなるかを数える（メモ設計§10-2）。
+    ///
+    /// **上限は引数で受け取る。** PC 側の toml ではなくアカウントの設定を使うため
+    /// （§11-2 の追記）——**起動時の掃除は toml のままで、こちらは通らない。**
+    Sweep {
+        state_dir: std::path::PathBuf,
+        retention_days: u64,
+        max_bytes: u64,
+        sweep_bytes: u64,
+        apply: bool,
+    },
 }
 
 /// 答えの要る問いに、**別のスレッドで**答える（設計§4・§8・§9、ログ設計§13-1）。
@@ -1271,6 +1286,27 @@ fn answer_ask(outgoing: mpsc::UnboundedSender<Outgoing>, request_id: RequestId, 
             },
             // **読めないことは異常ではない**（Linux 以外）。そう言えば、聞いた側は
             // 歯止め無しで進む——分からないことを理由に止めない（設計§18-4）
+            /*
+              **下見と本番が同じ経路を通る**（メモ設計§10-2）。同意の画面に出した
+              数のとおりに消えることが、同意の意味そのものである。
+            */
+            Ask::Sweep {
+                state_dir,
+                retention_days,
+                max_bytes,
+                sweep_bytes,
+                apply,
+            } => {
+                // **組み立ては `attachments` の1本に閉じてある**——ローカルモードも
+                // 同じ関数を呼ぶ。2度書くと、片方だけ直しても気づけない
+                HostReply::Swept(crate::attachments::survey_or_sweep(
+                    &state_dir,
+                    retention_days,
+                    max_bytes,
+                    sweep_bytes,
+                    apply,
+                ))
+            }
             Ask::Resources(gauge, projected) => {
                 match crate::resources::snapshot(&gauge, projected) {
                     Some(resources) => HostReply::Resources(resources),
@@ -1559,6 +1595,26 @@ fn apply_command(
                 outgoing.clone(),
                 request_id,
                 Ask::Resources(manager.memory_gauge(), manager.projected_available_mb()),
+            );
+        }
+        // 添付の掃除（メモ設計§10-2）。**同じ1本の問答の道に乗る。**
+        ServerToAgent::SweepAttachments {
+            request_id,
+            retention_days,
+            max_bytes,
+            sweep_bytes,
+            apply,
+        } => {
+            answer_ask(
+                outgoing.clone(),
+                request_id,
+                Ask::Sweep {
+                    state_dir: manager.config().resolved_state_dir(),
+                    retention_days,
+                    max_bytes,
+                    sweep_bytes,
+                    apply,
+                },
             );
         }
     }

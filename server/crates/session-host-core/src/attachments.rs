@@ -104,6 +104,21 @@ pub struct SweepOutcome {
     pub over_budget: bool,
 }
 
+/// 消さずに数えた結果（メモ設計§10-2）。**同意を取る画面がこれを読む。**
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SweepSurvey {
+    /// いま置いてある合計。
+    pub total: u64,
+    /// **期間で消えるぶん**（同意を取らない。既存の振る舞い）。
+    pub expiring: usize,
+    pub expiring_bytes: u64,
+    /// 期間で消したあとも上限を超えているか。**超えていなければ同意は要らない。**
+    pub over_budget: bool,
+    /// **同意が要る件数**（古い順に「決めた量だけ」）。
+    pub would_remove: usize,
+    pub would_free: u64,
+}
+
 /// 古いものと溢れたぶんを片付ける（設計§11）。
 ///
 /// 段は2つある。
@@ -129,16 +144,20 @@ pub fn sweep(
     )
 }
 
-pub(crate) fn sweep_at(
-    state_dir: &Path,
-    today: time::Date,
-    retention_days: u64,
-    max_bytes: u64,
-    sweep_bytes: u64,
-) -> SweepOutcome {
-    let mut outcome = SweepOutcome::default();
+/// 候補を集めて**古い順に**並べる。
+///
+/// # なぜ切り出したのか
+///
+/// **下見（[`survey_at`]）と実際の掃除（[`sweep_at`]）が同じ並びを見るため。**
+/// 別々に集めると、**同意の画面に出した数と、実際に消える数が食い違いうる**——
+/// 「N 件消します」と言って M 件消える形は、同意を取る意味そのものを壊す。
+///
+/// 並びの規則は**古い順**（日付 → 時刻 → それも同じなら名前）。**ここが揃っている
+/// ことが「古いものから消す」の根拠**なので、片方だけ並べ替えを変えられないように
+/// 1つにしてある。
+fn candidates_of(state_dir: &Path) -> Vec<(time::Date, time::Time, String, PathBuf, u64)> {
     let Ok(cards) = std::fs::read_dir(root(state_dir)) else {
-        return outcome;
+        return Vec::new();
     };
 
     // 見覚えのある名前だけを候補にする。合わないものには何があっても触らない
@@ -170,6 +189,132 @@ pub(crate) fn sweep_at(
             .then_with(|| left.1.cmp(&right.1))
             .then_with(|| left.2.cmp(&right.2))
     });
+    candidates
+}
+
+/// 消さずに数えるだけ（メモ設計§10-2）。
+///
+/// # なぜ要るのか
+///
+/// 要件10 は「1GB を超えたら**利用者に同意のダイアログを出してから**消す」と定めて
+/// いるが、**同意を取るには先に「何がどれだけ消えるか」を言えなければならない**。
+///
+/// # 実際の掃除と同じ並びを見る
+///
+/// [`candidates_of`] を共有しているので、**ここが出した数のとおりに [`sweep_at`] が
+/// 消す**（消せなかったファイルがあれば実際は下回るが、上回ることはない）。
+pub(crate) fn survey_at(
+    state_dir: &Path,
+    today: time::Date,
+    retention_days: u64,
+    max_bytes: u64,
+    sweep_bytes: u64,
+) -> SweepSurvey {
+    let candidates = candidates_of(state_dir);
+    let today_julian = today.to_julian_day();
+    let retention = i32::try_from(retention_days).unwrap_or(i32::MAX);
+
+    let mut survey = SweepSurvey::default();
+    let mut remaining: Vec<u64> = Vec::new();
+    for (date, _, _, _, size) in &candidates {
+        survey.total = survey.total.saturating_add(*size);
+        let removable = *date < today;
+        if removable && today_julian.saturating_sub(date.to_julian_day()) > retention {
+            // **期間で消えるぶんは同意を取らない**（既存の振る舞い。設計§10-2）
+            survey.expiring += 1;
+            survey.expiring_bytes = survey.expiring_bytes.saturating_add(*size);
+            continue;
+        }
+        if removable {
+            remaining.push(*size);
+        }
+    }
+
+    // 期間で消えたあとの合計が上限を超えているか
+    let 残る = survey.total.saturating_sub(survey.expiring_bytes);
+    survey.over_budget = 残る > max_bytes;
+    if !survey.over_budget {
+        return survey;
+    }
+    // **同意を取る対象はここだけ**——古い順に「決めた量だけ」
+    let mut freed: u64 = 0;
+    for size in remaining {
+        if freed >= sweep_bytes {
+            break;
+        }
+        survey.would_remove += 1;
+        survey.would_free = survey.would_free.saturating_add(size);
+        freed = freed.saturating_add(size);
+    }
+    survey
+}
+
+/// 下見して、頼まれていれば掃く（メモ設計§10-2）。
+///
+/// # なぜここに置くのか
+///
+/// **呼ぶ側が2つある**——ローカルモード（`core/src/local.rs`）と、PC 側の
+/// 受け口（`link.rs`）である。**同じ組み立てを2度書くと、片方だけ直したときに
+/// 食い違ってもコンパイルが通る**（このリポジトリが繰り返し踏んでいる形）。
+///
+/// **`apply` が偽なら1バイトも触らない。** 同意を取る前に消えていたら、
+/// 同意ダイアログは事後報告になる。
+pub fn survey_or_sweep(
+    state_dir: &Path,
+    retention_days: u64,
+    max_bytes: u64,
+    sweep_bytes: u64,
+    apply: bool,
+) -> protocol::AttachmentSweep {
+    let looked = survey(state_dir, retention_days, max_bytes, sweep_bytes);
+    let mut answer = protocol::AttachmentSweep {
+        total: looked.total,
+        expiring: looked.expiring as u64,
+        expiring_bytes: looked.expiring_bytes,
+        over_budget: looked.over_budget,
+        removed: looked.would_remove as u64,
+        freed: looked.would_free,
+        applied: apply,
+    };
+    if apply {
+        let outcome = sweep(state_dir, retention_days, max_bytes, sweep_bytes);
+        // **消えた数は実測で上書きする。** 消せなかったファイルがあれば下見を
+        // 下回る——嘘の数を残さない
+        answer.removed = outcome.removed as u64;
+        answer.freed = outcome.freed;
+        answer.over_budget = outcome.over_budget;
+    }
+    answer
+}
+
+/// 消さずに数える（メモ設計§10-2）。**同意を取る前に呼ぶ。**
+pub fn survey(
+    state_dir: &Path,
+    retention_days: u64,
+    max_bytes: u64,
+    sweep_bytes: u64,
+) -> SweepSurvey {
+    survey_at(
+        state_dir,
+        time::OffsetDateTime::now_utc().date(),
+        retention_days,
+        max_bytes,
+        sweep_bytes,
+    )
+}
+
+pub(crate) fn sweep_at(
+    state_dir: &Path,
+    today: time::Date,
+    retention_days: u64,
+    max_bytes: u64,
+    sweep_bytes: u64,
+) -> SweepOutcome {
+    let mut outcome = SweepOutcome::default();
+    let candidates = candidates_of(state_dir);
+    if candidates.is_empty() {
+        return outcome;
+    }
 
     let today_julian = today.to_julian_day();
     let retention = i32::try_from(retention_days).unwrap_or(i32::MAX);
@@ -513,6 +658,150 @@ mod tests {
             "20260830-000000-bbbbbbbb.png"
         ));
         std::fs::remove_dir_all(&state).ok();
+    }
+
+    /// 下見が「消す」と言った数のとおりに、実際の掃除が消すこと。
+    ///
+    /// **同意を取る意味は、ここが揃っていることに依っている**——「N 件消します」と
+    /// 言って M 件消えるなら、同意は形だけになる。
+    #[test]
+    fn 下見の数と実際に消える数が一致する() {
+        let state = 使い捨て("survey-agrees");
+        let card = CardId(uuid::Uuid::from_u128(7));
+        /*
+          **大きさを日付ごとに変える。** 全部同じ大きさにすると、
+          「古い順に消えたか」と「新しい順に消えたか」が**同じ数**になり、
+          検査の形は正しいのに何も守らない（フェーズ4 の空振りと同じ形）。
+
+          古い順に 10・20・40・80。上限 100・一度に掃く量 25 なら、
+          **消えるのは古い2枚（10+20=30）だけ**である——新しい順なら 80 の1枚に
+          なるので、**並びが逆になった瞬間に数が変わる**。
+        */
+        for (name, size) in [
+            ("20260820-000000-a0000000.png", 10),
+            ("20260821-000000-b0000000.png", 20),
+            ("20260822-000000-c0000000.png", 40),
+            ("20260823-000000-d0000000.png", 80),
+        ] {
+            置く(&state, card, name, size);
+        }
+        let today = 日("2026-08-24");
+
+        let 下見 = survey_at(&state, today, 3650, 100, 25);
+        let 実際 = sweep_at(&state, today, 3650, 100, 25);
+
+        assert!(下見.over_budget, "150 > 100 なので同意が要る");
+        assert_eq!(
+            下見.would_remove, 実際.removed,
+            "件数が食い違うと同意が形だけになる"
+        );
+        assert_eq!(下見.would_free, 実際.freed, "大きさも揃うこと");
+        // **古い順であることを、数そのもので固定する**（10+20。新しい順なら 80）
+        assert_eq!(下見.would_free, 30, "古いものから消えていない");
+        assert!(!残っている(
+            &state,
+            card,
+            "20260820-000000-a0000000.png"
+        ));
+        assert!(
+            残っている(&state, card, "20260823-000000-d0000000.png"),
+            "新しいほうを消している"
+        );
+    }
+
+    #[test]
+    fn 頼まれなければ1バイトも消さない() {
+        // **`apply` を取り違えると、確かめるつもりの呼び出しが消す。**
+        // 呼ぶ側が2つある（ローカルと PC 側）ので、判断はここ1つに閉じてある
+        let state = 使い捨て("apply-false");
+        let card = CardId(uuid::Uuid::from_u128(11));
+        置く(&state, card, "20260820-000000-a0000000.png", 100);
+        置く(&state, card, "20260821-000000-b0000000.png", 100);
+
+        let 答え = survey_or_sweep(&state, 3650, 50, 150, false);
+
+        assert!(答え.over_budget);
+        assert!(!答え.applied);
+        assert!(答え.removed > 0, "消えるはずの数は答える");
+        assert!(
+            残っている(&state, card, "20260820-000000-a0000000.png"),
+            "消してはいけない"
+        );
+        assert!(
+            残っている(&state, card, "20260821-000000-b0000000.png"),
+            "消してはいけない"
+        );
+    }
+
+    #[test]
+    fn 頼まれたら消して実測を返す() {
+        let state = 使い捨て("apply-true");
+        let card = CardId(uuid::Uuid::from_u128(12));
+        置く(&state, card, "20260820-000000-a0000000.png", 100);
+        置く(&state, card, "20260821-000000-b0000000.png", 100);
+
+        let 答え = survey_or_sweep(&state, 3650, 50, 150, true);
+
+        assert!(答え.applied);
+        assert_eq!(答え.removed, 2);
+        assert!(!残っている(
+            &state,
+            card,
+            "20260820-000000-a0000000.png"
+        ));
+    }
+
+    #[test]
+    fn 下見は1バイトも消さない() {
+        let state = 使い捨て("survey-keeps");
+        let card = CardId(uuid::Uuid::from_u128(8));
+        for name in [
+            "20260820-000000-a0000000.png",
+            "20260821-000000-b0000000.png",
+        ] {
+            置く(&state, card, name, 100);
+        }
+
+        let 下見 = survey_at(&state, 日("2026-08-24"), 3650, 50, 150);
+
+        // **同意を取る前に消えていたら、同意ダイアログは嘘の確認になる**
+        assert!(下見.over_budget);
+        assert!(残っている(
+            &state,
+            card,
+            "20260820-000000-a0000000.png"
+        ));
+        assert!(残っている(
+            &state,
+            card,
+            "20260821-000000-b0000000.png"
+        ));
+    }
+
+    #[test]
+    fn 上限に収まっていれば同意は要らない() {
+        let state = 使い捨て("survey-ok");
+        let card = CardId(uuid::Uuid::from_u128(9));
+        置く(&state, card, "20260820-000000-a0000000.png", 100);
+
+        let 下見 = survey_at(&state, 日("2026-08-24"), 3650, 1000, 150);
+
+        assert!(!下見.over_budget);
+        assert_eq!(下見.would_remove, 0, "収まっているのに同意を求めない");
+        assert_eq!(下見.total, 100);
+    }
+
+    #[test]
+    fn 期間で消えるぶんには同意を求めない() {
+        // 既存の振る舞い（黙って消す）を変えない。同意が要るのは溢れたぶんだけ
+        let state = 使い捨て("survey-expiry");
+        let card = CardId(uuid::Uuid::from_u128(10));
+        置く(&state, card, "20260101-000000-a0000000.png", 100);
+
+        let 下見 = survey_at(&state, 日("2026-08-24"), 90, 1000, 150);
+
+        assert_eq!(下見.expiring, 1, "期間で消えるぶんは数える");
+        assert_eq!(下見.would_remove, 0, "が、同意は求めない");
     }
 
     #[test]

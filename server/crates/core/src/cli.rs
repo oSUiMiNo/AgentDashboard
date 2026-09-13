@@ -294,6 +294,20 @@ enum SessionCmd {
         #[command(flatten)]
         out: OutputArgs,
     },
+    /// 添付の掃除。**既定は下見**（何がどれだけ消えるかを数えるだけ）。
+    ///
+    /// 画面の同意ダイアログと同じ口を叩く。**消すには `--apply` が要る**——
+    /// 確かめるつもりで叩いた口が消してしまう形にしない。
+    SweepAttachments {
+        /// どの PC のぶんか（繋がっている PC が2台以上のときは必須）
+        #[arg(long, value_name = "AGENT_ID", default_value = "local")]
+        host: String,
+        /// **実際に消す。** 付けなければ1バイトも触らない
+        #[arg(long)]
+        apply: bool,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
     /// **過去のセッションを並べる**。名前を付けたものは全部、付けていないものは最近のぶんだけ。
     /// PC が繋がっていないものは「確かめていない」と出ます（勝手に消しません）
     Past {
@@ -1128,6 +1142,23 @@ async fn client_session(
             let outcome = client::attach(target, &host, &id, std::path::Path::new(&file)).await?;
             println!("{}", output::pick(out.json, &outcome.raw, &outcome.human));
         }
+        SessionCmd::SweepAttachments { host, apply, out } => {
+            let (swept, raw) = client::sweep_attachments(target, &host, apply).await?;
+            let human = if !swept.over_budget {
+                format!(
+                    "上限に収まっています（合計 {} バイト）。消すものはありません",
+                    swept.total
+                )
+            } else if swept.applied {
+                format!("{} 件（{} バイト）を消しました", swept.removed, swept.freed)
+            } else {
+                format!(
+                    "{} 件（{} バイト）が消えます。消すには --apply を付けてください",
+                    swept.removed, swept.freed
+                )
+            };
+            println!("{}", output::pick(out.json, &raw, &human));
+        }
         SessionCmd::Reorder {
             host,
             path,
@@ -1837,6 +1868,10 @@ mod tests {
                 "send",
                 "show",
                 "spawn",
+                // 添付を掃く／下見する（メモ設計§10-2）。**生バイトは1つも運ばない**
+                // ——運ぶのは PC の名と `--apply` の真偽だけ。**既定は下見**で、
+                // 消すには明示が要る
+                "sweep-attachments",
                 "transcript",
             ],
             "session 群の口が増減している。生バイトの直送を作っていないか、台帳（フェーズ5）と照合すること"

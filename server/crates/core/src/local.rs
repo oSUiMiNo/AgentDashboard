@@ -386,6 +386,31 @@ impl SessionHost for LocalSessionHost {
         })
         .await
     }
+
+    async fn sweep_attachments(
+        &self,
+        request: server_core::session_host::HostAskRequest,
+        limits: server_core::session_host::AttachmentSweepLimits,
+    ) -> Result<protocol::AttachmentSweep, server_core::session_host::HostAskError> {
+        reject_target(&request)?;
+        let state_dir = self.manager.config().resolved_state_dir();
+        // ディレクトリを歩いてファイルを消すので、**配信と同じワーカーを止めない**
+        blocking_ask(move || {
+            // **組み立ては `attachments` の1本に閉じてある**——PC 側の受け口
+            // （`link.rs`）も同じ関数を呼ぶ。2度書くと、片方だけ直しても気づけない
+            let answer = session_host_core::attachments::survey_or_sweep(
+                &state_dir,
+                limits.retention_days,
+                limits.max_bytes,
+                limits.sweep_bytes,
+                limits.apply,
+            );
+            // **失敗の型を名指す。** 掃除そのものは落ちない（消せない1枚は
+            // ログへ出して数から外す）が、`blocking_ask` は失敗の型を要求する
+            Ok::<_, session_host_core::hostfs::HostFsError>(answer)
+        })
+        .await
+    }
 }
 
 /// ローカルモードで宛先を指名されたら断る（設計§19）。

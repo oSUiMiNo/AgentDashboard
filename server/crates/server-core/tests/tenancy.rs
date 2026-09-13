@@ -1592,6 +1592,62 @@ async fn 他人のpcへ添付を置けない() {
 }
 
 #[tokio::test]
+async fn 他人のpcの添付を掃けない() {
+    // メモ設計§10-2。**掃く口は帰属を必ず通る。** すり抜けると
+    // 「他人の機械のファイルを消せる」ことになり、置ける（上のテスト）より重い
+    for backend in common::backends("tenancy-sweep").await {
+        let arena = Arena::start(backend.db.clone()).await;
+        let (mine, _mine_agent) = arena.tenant("わたし").await;
+        let (theirs, _their_agent) = arena.tenant("よそのひと").await;
+        let browser = arena.browser(&mine).await;
+
+        let their_agent_id = arena
+            .registry
+            .list(theirs.account_id)
+            .first()
+            .and_then(|meta| meta.agent_id)
+            .expect("相手の PC が分かること");
+        let my_agent_id = arena
+            .registry
+            .list(mine.account_id)
+            .first()
+            .and_then(|meta| meta.agent_id)
+            .expect("自分の PC が分かること");
+
+        // **`apply=true` で試す。** 下見だけを見て通すと、消すほうが素通しでも気づけない
+        let (status, body) = browser
+            .request(
+                "POST",
+                &format!("/api/hosts/{their_agent_id}/attachments/sweep?apply=true"),
+                Some(""),
+            )
+            .await;
+        assert!(
+            status == 403 || status == 404,
+            "[{}] 他人の PC の添付を掃けてしまった: {status} {body}",
+            backend.name
+        );
+
+        // **自分の PC は帰属で断られない。** ここを見ないと、口が丸ごと壊れていても
+        // 上の主張だけは通ってしまう
+        let (status, body) = browser
+            .request(
+                "POST",
+                &format!("/api/hosts/{my_agent_id}/attachments/sweep"),
+                Some(""),
+            )
+            .await;
+        assert!(
+            status != 403 && status != 404,
+            "[{}] 自分の PC が帰属で断られた: {status} {body}",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
 async fn cliの札ではpcの受け口を通れない() {
     // 逆向きも同じ（§5-3）：CLI の札が漏れても `/agent/ws` は開かない
     for backend in common::backends("tenancy-cli-kind").await {
