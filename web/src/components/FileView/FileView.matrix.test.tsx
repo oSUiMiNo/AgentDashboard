@@ -153,7 +153,7 @@ function 出す(text = '本文\nあか') {
         })
       }
       return new Response(
-        JSON.stringify({ path: 'x', text, truncated: false, bytes: text.length }),
+        JSON.stringify({ path: 'x', text, truncated: false, bytes: text.length, writable: true }),
         { status: 200 },
       )
     }),

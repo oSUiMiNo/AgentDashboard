@@ -67,10 +67,25 @@ let written: string[] = [];
 const made: { url: string; size: number }[] = [];
 const revoked: string[] = [];
 
+/**
+ * 読み取りの応答を差し替える。
+ *
+ * **中身を返すときは、既定で「書ける」ことにする**（`ファイルビュアにエディタ機能を
+ * 追加` 設計§8）。**製品側は `writable` が付いていなければ「書けない」に倒れる**——
+ * 書けない相手に打てる姿を見せるより害が小さいからで、その向きは正しい。
+ * **ここで緩めるのは試験の材料だけ**である。ほとんどの試験は「書ける場所のファイルを
+ * 編集する」話なので、1本ずつ書くと本題が埋まる。
+ *
+ * **「書けない」を確かめる試験は、自分で `writable: false` を渡す。**
+ */
 function serve(body: unknown, status = 200) {
+  const 中身 =
+    typeof body === "object" && body !== null && "text" in body && !("writable" in body)
+      ? { ...body, writable: true }
+      : body;
   vi.stubGlobal(
     "fetch",
-    vi.fn(async () => new Response(JSON.stringify(body), { status })),
+    vi.fn(async () => new Response(JSON.stringify(中身), { status })),
   );
 }
 
@@ -259,6 +274,7 @@ describe("ファイルの見せ方", () => {
       path: `${ROOT}/大きい.md`,
       text: "# 大きい文書",
       truncated: false,
+      writable: true,
       bytes: 512 * 1024,
     });
     show(`${ROOT}/大きい.md`);
@@ -282,6 +298,7 @@ describe("ファイルの見せ方", () => {
       path: `${ROOT}/大きい.md`,
       text: "# 大きい文書",
       truncated: false,
+      writable: true,
       bytes: 512 * 1024,
     });
     show(`${ROOT}/大きい.md`);
@@ -299,6 +316,7 @@ describe("ファイルの見せ方", () => {
       path: `${ROOT}/計画.md`,
       text: "# 計画",
       truncated: false,
+      writable: true,
       bytes: 256 * 1024,
     });
     show();
@@ -571,6 +589,7 @@ describe("画像と HTML", () => {
             path: `${ROOT}/理解.html`,
             text: "<!doctype html><p>理解</p>",
             truncated: false,
+            writable: true,
             bytes: 26,
           }),
           { status: 200 },
@@ -604,6 +623,7 @@ describe("画像と HTML", () => {
             path: `${ROOT}/理解.html`,
             text: "<!doctype html><p>理解</p>",
             truncated: false,
+            writable: true,
             bytes: 2 * 1024 * 1024,
           }),
           { status: 200 },
@@ -635,6 +655,7 @@ describe("画像と HTML", () => {
             path: `${ROOT}/図.svg`,
             text: "<svg></svg>",
             truncated: false,
+            writable: true,
             bytes: 11,
           }),
           { status: 200 },
@@ -657,6 +678,7 @@ describe("画像と HTML", () => {
             path: `${ROOT}/理解.html`,
             text: "<!doctype html><p>理解</p>",
             truncated: false,
+            writable: true,
             bytes: 26,
           }),
           { status: 200 },
@@ -690,6 +712,7 @@ describe("画像と HTML", () => {
             path: `${ROOT}/理解.html`,
             text: "<!doctype html><p>理解</p>",
             truncated: false,
+            writable: true,
             bytes: 26,
           }),
           { status: 200 },
@@ -1144,6 +1167,9 @@ describe("編集と保存", () => {
             truncated: false,
             bytes: text.length,
             stamp: "まえ",
+            // **書ける場所のファイルとして返す**（設計§8）。製品側は付いていなければ
+            // 「書けない」に倒れる——この束は「編集して保存する」話なので、書ける側で置く
+            writable: true,
           }),
           { status: 200 },
         );
@@ -1298,7 +1324,14 @@ describe("編集と保存", () => {
         const 相手 = new URL(url, "http://x").searchParams.get("path") ?? "";
         const text = 相手 === コード ? "あ" : "ほか";
         return new Response(
-          JSON.stringify({ path: 相手, text, truncated: false, bytes: text.length, stamp: "まえ" }),
+          JSON.stringify({
+            path: 相手,
+            text,
+            truncated: false,
+            bytes: text.length,
+            stamp: "まえ",
+            writable: true,
+          }),
           { status: 200 },
         );
       }),
@@ -1352,6 +1385,7 @@ describe("編集と保存", () => {
               path: コード,
               text: "先頭だけ",
               truncated: true,
+              writable: true,
               bytes: 9999,
               stamp: "まえ",
             }),
@@ -1381,6 +1415,7 @@ describe("編集と保存", () => {
               path: コード,
               text: "あ",
               truncated: false,
+              writable: true,
               bytes: 1,
             }),
             { status: 200 },
@@ -1402,5 +1437,233 @@ describe("編集と保存", () => {
     await screen.findByTestId("file-markdown");
 
     expect(screen.queryByTestId("file-save")).toBeNull();
+  });
+});
+
+/**
+ * 失敗と競合の見せ方（`ファイルビュアにエディタ機能を追加` 設計§8）。
+ *
+ * **断って終わりにしない。** 競合したときに選べないと、利用者は編集を手で写すしかない。
+ */
+describe("失敗と競合の見せ方", () => {
+  const コード = `${ROOT}/src/index.ts`;
+
+  /**
+   * 読む口と書く口に答える。**読むたびに違う中身を返せる**——競合は
+   * 「読んでから保存するまでにディスクが変わった」場面なので、
+   * **変わらない材料では作れない。**
+   */
+  function 競合する(order: { 読み: string[]; 書き: Response[] }) {
+    let 読んだ = 0;
+    let 書いた = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        if (init?.method === "PUT") {
+          const r = order.書き[Math.min(書いた, order.書き.length - 1)];
+          書いた += 1;
+          return r.clone();
+        }
+        const text = order.読み[Math.min(読んだ, order.読み.length - 1)] ?? "";
+        読んだ += 1;
+        return new Response(
+          JSON.stringify({
+            path: コード,
+            text,
+            truncated: false,
+            bytes: text.length,
+            stamp: `印${読んだ}`,
+            writable: true,
+          }),
+          { status: 200 },
+        );
+      }),
+    );
+  }
+
+  const 断る = (status: number, 文: string) => new Response(文, { status });
+  const 書けた = () =>
+    new Response(JSON.stringify({ path: コード, bytes: 4, stamp: "あと" }), {
+      status: 200,
+    });
+
+  beforeEach(() => {
+    globalThis.localStorage.clear();
+  });
+
+  async function 打って保存() {
+    render(<Viewer host="local" root={ROOT} path={コード} />);
+    const 欄 = await screen.findByTestId("file-editor");
+    await userEvent.type(欄, "い");
+    await userEvent.click(screen.getByTestId("file-save"));
+    return 欄;
+  }
+
+  it("競合したら、読み直すと上書きするの2つが出る", async () => {
+    競合する({ 読み: ["あ"], 書き: [断る(409, "他所で書き換えられています")] });
+    await 打って保存();
+
+    expect(await screen.findByTestId("file-conflict-choice")).toBeInTheDocument();
+    expect(screen.getByTestId("file-reload")).toBeInTheDocument();
+    expect(screen.getByTestId("file-overwrite")).toBeInTheDocument();
+  });
+
+  it("競合でない断りでは、2つの道を出さない", async () => {
+    /*
+      **押せて何も起きないものを置かない。** 許可の外や権限では、読み直しても
+      上書きしても通らない——出すと「壊れている」と見分けが付かなくなる。
+    */
+    競合する({ 読み: ["あ"], 書き: [断る(403, "保存を許可した場所の外です")] });
+    await 打って保存();
+
+    expect(await screen.findByTestId("file-save-error")).toBeInTheDocument();
+    expect(screen.queryByTestId("file-conflict-choice")).toBeNull();
+  });
+
+  it("読み直すと、ディスクの中身に戻って書きかけが消える", async () => {
+    競合する({
+      読み: ["あ", "ほかの人が書いた"],
+      書き: [断る(409, "他所で書き換えられています")],
+    });
+    await 打って保存();
+    await userEvent.click(await screen.findByTestId("file-reload"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("file-editor")).toHaveValue("ほかの人が書いた");
+    });
+    expect(screen.queryByTestId("file-conflict-choice")).toBeNull();
+    expect(readEdit("local", コード, null)).toBeNull();
+  });
+
+  it("上書きすると、印を取り直して書きかけがディスクへ入る", async () => {
+    /*
+      **中身は書きかけのまま、印だけ新しくする**（設計§8-3）。読み直しを経由して
+      書きかけを消すと、直そうとした文が消える。
+    */
+    競合する({
+      読み: ["あ", "ほかの人が書いた"],
+      書き: [断る(409, "他所で書き換えられています"), 書けた()],
+    });
+    await 打って保存();
+    await userEvent.click(await screen.findByTestId("file-overwrite"));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("file-conflict-choice")).toBeNull();
+    });
+    // **打った文がそのまま入る**（読み直した中身に置き換わらない）
+    expect(screen.getByTestId("file-editor")).toHaveValue("あい");
+    expect(readEdit("local", コード, null)).toBeNull();
+  });
+
+  it("上書きしている間にまた変わっていたら、また断られる", async () => {
+    /*
+      **黙って通さない。** 印を取り直す間にも他所が書きうるので、
+      2度目の断りを飲み込むと「上書きすると必ず勝つ」になる。
+    */
+    競合する({
+      読み: ["あ", "1回目", "2回目"],
+      書き: [
+        断る(409, "他所で書き換えられています"),
+        断る(409, "また書き換えられています"),
+      ],
+    });
+    await 打って保存();
+    await userEvent.click(await screen.findByTestId("file-overwrite"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("file-save-error")).toHaveTextContent(
+        "また書き換えられています",
+      );
+    });
+    // **道は出たままである**（もう一度選べる）
+    expect(screen.getByTestId("file-conflict-choice")).toBeInTheDocument();
+    // **書きかけは消えていない**（設計§8-4）
+    expect(screen.getByTestId("file-editor")).toHaveValue("あい");
+  });
+
+  it("断り文の改行が、表示でも保たれる", async () => {
+    /*
+      **サーバは「どこなら書けるか」「どう足すか」を改行で3段に分けて返す。**
+      HTML の既定では改行が空白に潰れるので、**決めた効き目が表示で失われる。**
+
+      **「文字列が含まれる」だけの検査にしない**——潰れていても通ってしまう。
+      **器が改行を保つ指定を持っていること**まで見る。
+    */
+    const 断り = "x は、保存を許可した場所の外です。\n\nいま許可されている場所：\n  /dev/app";
+    競合する({ 読み: ["あ"], 書き: [断る403(断り)] });
+    await 打って保存();
+
+    const 欄 = await screen.findByTestId("file-save-error");
+    expect(欄).toHaveClass("whitespace-pre-line");
+    // 改行そのものが本文に残っている（潰す指定なら、見た目だけでなく意味も失う）
+    expect(欄.textContent).toContain("\n");
+  });
+
+  function 断る403(文: string) {
+    return new Response(文, { status: 403 });
+  }
+
+  it("書けない場所のファイルは、打てる姿で出さない", async () => {
+    /*
+      **打てるのに保存できないのは「押せて何も起きない」と同じ形**である
+      （`DESIGN.md` の原則）。**読み取り専用の生テキスト**で出す。
+    */
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              path: コード,
+              text: "よそのファイル",
+              truncated: false,
+              bytes: 7,
+              stamp: "まえ",
+              writable: false,
+            }),
+            { status: 200 },
+          ),
+      ),
+    );
+    render(<Viewer host="local" root={ROOT} path={コード} />);
+
+    expect(await screen.findByTestId("file-raw")).toHaveTextContent(
+      "よそのファイル",
+    );
+    expect(screen.queryByTestId("file-editor")).toBeNull();
+    expect(screen.queryByTestId("file-save")).toBeNull();
+  });
+
+  it("書けなくても、ソースは読める", async () => {
+    /*
+      **トグルを消さない。** 消すと、このイシュー以前にできていた
+      「整形を外して中を見る」を取り上げることになる。**行き先が読み取り専用になるだけ。**
+    */
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              path: `${ROOT}/計画.md`,
+              text: "# 計画",
+              truncated: false,
+              bytes: 6,
+              stamp: "まえ",
+              writable: false,
+            }),
+            { status: 200 },
+          ),
+      ),
+    );
+    render(<Viewer host="local" root={ROOT} path={`${ROOT}/計画.md`} />);
+
+    const 切替 = await screen.findByTestId("file-toggle-mode");
+    // **「編集する」とは言わない**（嘘になる）
+    expect(切替).toHaveAttribute("aria-label", "生テキスト");
+    await userEvent.click(切替);
+
+    expect(await screen.findByTestId("file-raw")).toHaveTextContent("# 計画");
+    expect(screen.queryByTestId("file-editor")).toBeNull();
   });
 });

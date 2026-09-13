@@ -215,7 +215,13 @@ export function FileView({
   /** 保存の最中か。**二重に走らせない** */
   const [保存中, set保存中] = useState(false)
   /** 保存が断られた理由。**出しても書きかけは捨てない**（設計§8-4） */
-  const [保存の断り, set保存の断り] = useState<string | null>(null)
+  /**
+   * 保存が断られた理由。**競合かどうかを一緒に持つ**（設計§8-3）。
+   *
+   * 文だけだと、**競合のときにだけ出す2つの道**（読み直す／上書きする）を出し分けられない。
+   * 競合以外で出すと、**押せて何も起きない**形になる。
+   */
+  const [保存の断り, set保存の断り] = useState<{ 文: string; 競合: boolean } | null>(null)
   /**
    * 次の保存が持っていく印（設計§8-3）。読んだ時点のものから始め、**保存のたびに更新する。**
    *
@@ -366,6 +372,18 @@ export function FileView({
   // 整形の逃げ道を出す相手（設計§7-4）。**画像には出さない**——テキストではないので、
   // 出しても読めない。代わりに大きさと種別を出す
   const モードを切り替えられる = markdown || boxed
+  /**
+   * このファイルを**書き戻せるか**（設計§8）。**決めるのはサーバ**で、画面は受け取るだけ
+   * ——効いている根は「設定の `writable_roots` ＋ その口座で引けるプロジェクト全部」で、
+   * **後者は記録を引かないと分からない**。**画面が自分で判定しない**（場所が2つあると食い違う）。
+   *
+   * 書けないファイルでも**ソースは読める**。トグルは残し、行き先を**読み取り専用の
+   * 生テキスト**にする——消すと、このイシュー以前にできていた「整形を外して中を見る」を
+   * 取り上げることになる。
+   */
+  const 書ける = content?.writable === true
+  /** トグルの言葉。**書けないファイルで「編集する」と言わない**（嘘になる） */
+  const 切替の言葉 = mode === 'editor' ? '見る' : 書ける ? '編集する' : '生テキスト'
   /** いま箱（`iframe`）で描いているか。**箱の中へは外から触れない** */
   const 箱で描いている = boxed && mode === 'viewer'
   /**
@@ -584,15 +602,20 @@ export function FileView({
    * PC 側が断る——**このダッシュボードは別のセッションの claude が同じファイルを
    * 触るのが日常**なので、黙って上書きすると**相手の作業が音もなく消える**。
    */
-  const 保存する = useCallback(async () => {
-    if (content === null || 書きかけ === null || 印 === undefined) {
+  const 保存する = useCallback(
+    async (印を取り直すか = false) => {
+    if (content === null || 書きかけ === null || (印 === undefined && !印を取り直すか)) {
       return
     }
     const 送る = 書きかけ
     set保存中(true)
     set保存の断り(null)
     try {
-      const 答え = await writeFile(host, path, 送る, 印)
+      // **「上書きする」のときだけ印を取り直す**（設計§8-3）。**中身は書きかけのまま**
+      // ——読み直しを経由して書きかけを消さない。**取り直す間にまた変わっていたら、
+      // また断られるのが正しい**（黙って通さない）
+      const 使う印 = 印を取り直すか ? ((await readFile(host, path)).stamp ?? '') : (印 ?? '')
+      const 答え = await writeFile(host, path, 送る, 使う印)
       set印(答え.stamp)
       setContent((now) =>
         now === null ? now : { ...now, text: 送る, bytes: 答え.bytes, stamp: 答え.stamp },
@@ -606,11 +629,45 @@ export function FileView({
     } catch (err) {
       // **失敗しても書きかけを捨てない**（設計§8-4）。捨てると、断られた瞬間に
       // 打った文が消える——直せるはずのものが直せなくなる
-      set保存の断り(err instanceof Error ? err.message : '保存できませんでした')
+      set保存の断り({
+        文: err instanceof Error ? err.message : '保存できませんでした',
+        // **競合だけは 409 で見分ける**（設計§8-3）。文で見分けると、断り文を
+        // 直した日に黙って壊れる
+        競合: err instanceof HostFsError && err.status === 409,
+      })
     } finally {
       set保存中(false)
     }
-  }, [content, 書きかけ, 印, host, path, account, 書き出しを取り消す])
+    },
+    [content, 書きかけ, 印, host, path, account, 書き出しを取り消す],
+  )
+
+  /**
+   * 競合のときの「読み直す」（設計§8-3）。**自分の編集を捨てて、ディスクの中身を取り直す。**
+   *
+   * **`編集を捨てる` と分けてある。** あちらは手元の `content` へ戻すだけで、
+   * **ディスクが変わっている競合の場面では、戻る先そのものが古い。**
+   */
+  const 読み直す = useCallback(async () => {
+    set保存中(true)
+    try {
+      const 最新 = await readFile(host, path)
+      setContent(最新)
+      set印(最新.stamp)
+      set書きかけ(null)
+      set戻した(false)
+      set保存の断り(null)
+      書き出しを取り消す()
+      dropEdit(host, path, account)
+    } catch (err) {
+      set保存の断り({
+        文: err instanceof Error ? err.message : '読み直せませんでした',
+        競合: false,
+      })
+    } finally {
+      set保存中(false)
+    }
+  }, [host, path, account, 書き出しを取り消す])
 
   /** 編集を捨ててディスクの中身へ戻す。**戻す先を必ず用意する**（設計§7-4） */
   const 編集を捨てる = useCallback(() => {
@@ -809,8 +866,8 @@ export function FileView({
               size="sm"
               data-testid="file-toggle-mode"
               aria-pressed={mode === 'editor'}
-              aria-label={mode === 'editor' ? '見る' : '編集する'}
-              title={mode === 'editor' ? '見る' : '編集する'}
+              aria-label={切替の言葉}
+              title={切替の言葉}
               onClick={() => {
                 setMode((now) => (now === 'viewer' ? 'editor' : 'viewer'))
                 // **人が自分で見せ方を変えたら、こちらの断りは消す。** そこから先は
@@ -821,14 +878,14 @@ export function FileView({
             >
               {/* **狭い窓では印だけ**（§39.6）。言葉は `aria-label` と `title` に残る */}
               <CodeGlyph className="md:hidden" />
-              <span className="hidden md:inline">{mode === 'editor' ? '見る' : '編集する'}</span>
+              <span className="hidden md:inline">{切替の言葉}</span>
             </Button>
           )}
           {/* **保存はエディタのときだけ出す。** ビュアーに出しても書く対象が無い。
 
               **押せる条件は `保存できる` 1つ**（設計§6-7）——ボタンと、のちに足す
               鍵盤の道が**同じ述語を読む**。別々に書くと食い違う。 */}
-          {mode === 'editor' && (
+          {mode === 'editor' && 書ける && (
             <Button
               type="button"
               variant="ghost"
@@ -959,8 +1016,52 @@ export function FileView({
           「許可されていない場所」「他所で書き換えられていた」は、**利用者が直せる
           ものと直せないものが違う**ので、こちらでまとめない */}
       {保存の断り !== null && (
-        <p data-testid="file-save-error" className="text-xs text-red-300">
-          保存できませんでした：{保存の断り}
+        <p
+          data-testid="file-save-error"
+          /* **改行を保つ**（設計§8-2）。サーバは「どこなら書けるか」「どう足すか」を
+             改行で3段に分けて返すのに、**HTML の既定では改行が空白に潰れる**——
+             決めた効き目が、表示で失われていた。**長いパスで横へはみ出させない**
+             ので `break-words` も要る */
+          className="text-xs break-words whitespace-pre-line text-red-300"
+        >
+          保存できませんでした：{保存の断り.文}
+        </p>
+      )}
+
+      {/* **競合のときだけ、2つの道を出す**（設計§8-3）。
+          **「他所で変わっています」と出して終わりにしない**——選べないと、利用者は
+          編集を手で写すしかなくなる。
+          **競合以外では出さない。** 権限や許可の外で「上書きする」を出しても通らず、
+          **押せて何も起きない**形になる */}
+      {保存の断り?.競合 === true && (
+        <p
+          data-testid="file-conflict-choice"
+          className="flex flex-wrap items-center gap-2 text-xs text-red-300"
+        >
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            data-testid="file-reload"
+            disabled={保存中}
+            onClick={() => {
+              void 読み直す()
+            }}
+          >
+            読み直す
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            data-testid="file-overwrite"
+            disabled={保存中}
+            onClick={() => {
+              void 保存する(true)
+            }}
+          >
+            自分の編集で上書きする
+          </Button>
         </p>
       )}
 
@@ -1165,6 +1266,19 @@ export function FileView({
                 {content.text}
               </ReactMarkdown>
             </div>
+          ) : !書ける ? (
+            /* **読み取り専用の生テキスト**（設計§8）。**保存を許可した場所の外**なので、
+               打てる姿で出さない——**打てるのに保存できないのは「押せて何も起きない」と
+               同じ形**になる（`DESIGN.md` の原則）。
+
+               **フェーズ3が `.file-zoom .file-raw` を消さずに残したのは、この用途のため。**
+               新しく作らずに、そのまま戻している。 */
+            <pre
+              data-testid="file-raw"
+              className="text-muted-foreground file-raw overflow-x-auto whitespace-pre-wrap"
+            >
+              {content.text}
+            </pre>
           ) : (
             /* **エディタ**（設計§6）。この段は**素の `textarea`**で、色付けと行番号は
                次のフェーズで重ねる。**それでも「編集して保存できる」状態として単独で
