@@ -844,6 +844,83 @@ function splitText(node: MdastRoot | MdastContent): void {
  */
 export const REMARK_PLUGINS = [remarkGfm, remarkSoftBreaks]
 
+/**
+ * ブロックの最終行に取り残された `\` を落とす remark プラグイン（**メモ専用**）。
+ *
+ * # なぜ要るのか
+ *
+ * BlockNote は1つの段落ブロックの中の改行を、CommonMark の hard break——**行末の
+ * バックスラッシュ**——として書き出す。行の区切りとしては正しい。
+ *
+ * **ところが remark は、同じ字を BlockNote と同じブロックには割らない。** 段落の中に
+ * `- ` で始まる行があると、remark はそこをリストの開始と読んで**段落を終わらせる**。
+ * すると、それまで hard break だった `\` が**ブロックの最終行**の位置へ移る。
+ *
+ * **CommonMark では、ブロックの最終行の `\` は hard break にならない**——改行する
+ * 相手が無いためである。**リテラルの文字として画面に出る。**
+ *
+ * **つまり `\` が余分に出ているのではなく、割れた拍子に意味が変わっている。**
+ *
+ * # なぜ mdast の段で落とすのか
+ *
+ * **文字列の置換では、囲みコードの中を守れない。** シェルの行継続（`cmd \`）を書いた
+ * メモが壊れる。mdast まで来ていれば、囲みコードは `code` ノードの値として**別の場所に
+ * 居る**ので、`paragraph` と `heading` だけを見ている限り触りようがない
+ * （[`remarkSoftBreaks`] と同じ理屈）。
+ *
+ * # なぜメモだけなのか
+ *
+ * **この `\` を作るのは BlockNote だけである。** 履歴とファイルビュアが描く `\` は
+ * **利用者や道具が本当に書いた字**なので、[`REMARK_PLUGINS`] へ足すと**あちらの本文を
+ * 書き換えてしまう。**
+ *
+ * # 割り切っていること
+ *
+ * **利用者が段落の末尾に本当に書いた `\`（`\\` と打ったもの）も一緒に消える。** mdast
+ * まで来ると、hard break の残骸と `\\` の解決結果は**どちらも同じ `text "\"`** なので、
+ * 木の形からは区別できない。**囲みコードの中は無傷**なので、行継続を書き留める用途は守れる。
+ */
+export function remarkDropTrailingBreakMark() {
+  return (tree: MdastRoot): void => {
+    dropTrailingBreakMark(tree)
+  }
+}
+
+function dropTrailingBreakMark(node: MdastRoot | MdastContent): void {
+  const parent = node as { type?: string; children?: MdastContent[] }
+  if (parent.children === undefined) {
+    return
+  }
+  for (const child of parent.children) {
+    dropTrailingBreakMark(child)
+  }
+
+  // **見るのは段落と見出しだけ。** hard break を置ける器がこの2つしかない。
+  // `listItem` や `blockquote` の中身は、上の再帰が段落として見ている
+  if (parent.type !== 'paragraph' && parent.type !== 'heading') {
+    return
+  }
+  const last = parent.children[parent.children.length - 1]
+  if (last === undefined || last.type !== 'text' || !last.value.endsWith('\\')) {
+    return
+  }
+  // **落とすのは1つだけ。** まとめて剥がすと、続けて打たれた分まで消える
+  last.value = last.value.slice(0, -1)
+  if (last.value === '') {
+    parent.children.pop()
+  }
+}
+
+/**
+ * メモの吹き出しを描くときのプラグイン。**[`REMARK_PLUGINS`] にもう1段だけ足したもの。**
+ *
+ * **足す段は1つだけで、他は共有する。** 改行の見え方をメモだけ別にすると、同じ字を貼った
+ * のに履歴と食い違う。**違ってよいのは、BlockNote が書いた `\` の始末だけである。**
+ *
+ * [`remarkSoftBreaks`] は**いちばん後ろのまま**（あちらの doc の約束）。
+ */
+export const MEMO_REMARK_PLUGINS = [remarkGfm, remarkDropTrailingBreakMark, remarkSoftBreaks]
+
 /** 上と対。生の HTML の `<br/>` を `br` 要素へ変える段。 */
 export const REHYPE_PLUGINS = [rehypeLineBreaks]
 
