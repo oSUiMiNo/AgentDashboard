@@ -77,6 +77,17 @@ export interface FileContent {
   truncated: boolean
   /** 元のファイルの大きさ */
   bytes: number
+  /**
+   * 読んだ時点の印（`ファイルビュアにエディタ機能を追加` 設計§8-3）。
+   *
+   * **中身を解釈しない不透明な文字列である。** 作るのも比べるのも PC 側だけで、
+   * こちらは受け取って、保存するときに**そのまま返すだけ**。読もうとしないこと——
+   * 読むと、次に形を変えたときに画面側も直すことになる。
+   *
+   * 古い PC は付けずに送ってくるので、**空でありうる**。空のまま保存しようとすると
+   * サーバが断る（省けば上書きできる道を残さないため）。
+   */
+  stamp?: string
 }
 
 /** 引けなかったときに投げるもの。`message` はそのまま画面へ出す。 */
@@ -201,6 +212,55 @@ export interface WrittenBlob {
   path: string
   media_type: string
   bytes: number
+}
+
+/**
+ * ファイル1つを**書き戻す**（`ファイルビュアにエディタ機能を追加` 設計§2-2）。
+ *
+ * # 印はそのまま返すだけ
+ *
+ * `readFile` で受け取った `stamp` を、中身を読まずにそのまま渡す。読んでから保存する
+ * までに他所で書き換えられていれば、**サーバが 409 で断る**（設計§8-3）。
+ *
+ * # 断り文はそのまま持ち上げる
+ *
+ * 403（許可された場所の外・権限が無い）・409（他所で変わっていた）・413（大きすぎ）を
+ * サーバが言い分けている。ここでまとめて「保存できません」にすると、**利用者が直せる
+ * もの（設定へ場所を足す・読み直す）まで直せなくなる。**
+ */
+export async function writeFile(
+  host: string,
+  path: string,
+  text: string,
+  stamp: string,
+): Promise<WrittenFile> {
+  let response: Response
+  try {
+    response = await fetch(
+      `/api/hosts/${encodeURIComponent(host)}/file?path=${encodeURIComponent(path)}&stamp=${encodeURIComponent(stamp)}`,
+      {
+        method: 'PUT',
+        // **本文はファイルの中身そのもの**（設計§2-1）。だから印は問い合わせ引数で渡す
+        headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+        body: text,
+      },
+    )
+  } catch (err) {
+    // **応答が1つも返らなかった。** `uploadAttachment` と同じ形で、状態コード 0 として扱う
+    throw new HostFsError(0, err instanceof Error ? err.message : String(err))
+  }
+  if (!response.ok) {
+    throw new HostFsError(response.status, await response.text())
+  }
+  return (await response.json()) as WrittenFile
+}
+
+/** 書き戻した答え（`ファイルビュアにエディタ機能を追加` 設計§2）。 */
+export interface WrittenFile {
+  path: string
+  bytes: number
+  /** **書いたあとの**印。次の保存はこれを持っていく */
+  stamp: string
 }
 
 /**
