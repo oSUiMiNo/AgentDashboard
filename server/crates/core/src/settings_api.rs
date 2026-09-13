@@ -861,7 +861,10 @@ mod tests {
             ("相対パス", 場所(&["notes"])),
             ("上へ遡る相対パス", 場所(&["../etc"])),
             ("空の場所", 場所(&[""])),
-            ("絶対パスに混ざった相対パス", 場所(&["/home/u/notes", "tmp"])),
+            (
+                "絶対パスに混ざった相対パス",
+                場所(&["/home/u/notes", "tmp"]),
+            ),
         ] {
             let update = SettingsUpdate {
                 writable_roots: roots,
