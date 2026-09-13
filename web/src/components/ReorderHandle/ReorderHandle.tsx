@@ -146,6 +146,25 @@ export function ReorderHandle({ label, kind, onGrab, onMove, onDrop, onTap }: Pr
       // 当たり判定は指かマウスかで変わるので、クラスではなく素のスタイルで渡す
       style={{ ...GRIP_STYLE, minWidth: `${hit}px`, minHeight: `${hit}px` }}
       onPointerDown={(event) => {
+        /*
+          **マウスは主ボタンでしか掴まない。**
+
+          **右ボタンも同時に外れる。** メニューを出そうとして並びが変わるのは誰も
+          頼んでいない。
+
+          **指とペンは今までどおり。** あちらの `button` は 0 で来るが、条件をマウスに
+          限っておかないと、`button` を持たない合成イベントで掴めなくなる端末が出る。
+
+          **中ボタンは、このイシューがレールの横送りに使う。** `useGrip.ts` は
+          `カードと枠を、中クリックで新しいタブに開く` で既にここを閉じていたが、
+          **掴み手だけが取り残されていた**。
+
+          **`useGrip` と違って、先頭に置いてよい。** あちらは `pointerdown` で降ろす印が
+          あるので手前で戻すと次の左クリックが1回食われるが、こちらに降ろす処理は無い。
+        */
+        if (event.pointerType === 'mouse' && event.button !== 0) {
+          return
+        }
         if (grip.current !== null) {
           // 既に別の指が掴んでいる。二本目で乗っ取らない
           return
