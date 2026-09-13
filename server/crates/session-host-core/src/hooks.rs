@@ -27,7 +27,7 @@ use axum::{
     http::StatusCode,
     routing::post,
 };
-use protocol::ContextUsage;
+use protocol::{ContextUsage, RateLimitWindow, RateLimits, SessionCost};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -159,6 +159,20 @@ pub async fn receive_model(
         ContextRead::Unreadable => {}
     }
 
+    // **使用上限と費用も、モデルの検査より前で読む。** 理由は上と同じで、
+    // モデル名が欠けた payload で一緒に落とさないため。
+    //
+    // **「読めなかった」ときは触らない。** `context_window` と違い、こちらには
+    // 「値が `null` で届く」という正しい経路が観測されていない（`rate_limits` は
+    // 起動直後から埋まっている——フェーズ0 実測）ので、2段の型は要らない。
+    // **`None` は「読めなかった」の1つの意味しか持たない。**
+    if let Some(limits) = read_rate_limits(&payload) {
+        state.manager.apply_rate_limits(&session, limits);
+    }
+    if let Some(cost) = read_cost(&payload) {
+        state.manager.apply_session_cost(&session, cost);
+    }
+
     let Some(id) = payload
         .get("model")
         .and_then(|model| model.get("id"))
@@ -241,6 +255,82 @@ fn read_context_usage(payload: &Value) -> ContextRead {
             .and_then(Value::as_u64)
             .unwrap_or(0),
     }))
+}
+
+/// `statusLine` の payload から**使用上限の窓**を取り出す。
+///
+/// **読めなければ `None`。** ここでの `None` は「**読めなかった**」の意味しか持たない
+/// ——控えた値をそのまま残す合図である。[`ContextRead`] のような2段の型を使わないのは、
+/// **`rate_limits` に「値が `null` で届く」正しい経路が観測されていない**ため
+/// （起動直後から埋まっている。フェーズ0 実測）。**`SessionMeta` 側の `None` は
+/// 「その PC でセッションが走っていない」の意味**で、こことは別の場所が決める。
+///
+/// # 窓の本数を固定しない
+///
+/// 【実測 2026-09-13・v2.1.270】いま来るのは `five_hour` と `seven_day` の2本だけだが、
+/// **名前を決め打って2本だけ読むと、3本目が来ても画面に出ない**。`spend_limit` の条件は
+/// 版ではなく構成で決まるとみられる（設計「窓の本数を固定しない」）。**キーをそのまま
+/// 窓の名前として読む。**
+///
+/// # 1つでも読めない窓があれば、丸ごと諦める
+///
+/// **読めた窓だけを拾うと、本数が黙って減る**——画面からは帯が1本消えたようにしか
+/// 見えず、壊れたのか上限が減ったのか区別できない。**控えた値を残すほうが安全**である。
+///
+/// # 名前で並べ替える
+///
+/// 表示形（関門の鍵）が**並び**なので、順序が揺れると中身が同じでも「動いた」と
+/// 判定され、**3秒ごとに配ることになる**。いまは `serde_json` の `Map` が整列済みだが、
+/// **`preserve_order` が入った瞬間に JSON の並び順に変わる**ので、ここで明示的に固定する。
+fn read_rate_limits(payload: &Value) -> Option<RateLimits> {
+    let entries = payload.get("rate_limits")?.as_object()?;
+    let mut windows = Vec::with_capacity(entries.len());
+    for (name, window) in entries {
+        // **`as_f64` で受けて丸める。** `as_u64` だけで読むと、CLI が `24.0` を
+        // 吐いた版で**全部の帯が消える**（`context_window` と同じ理由）
+        let used_percentage = window.get("used_percentage")?.as_f64()?;
+        let resets_at = window.get("resets_at")?.as_i64()?;
+        windows.push(RateLimitWindow {
+            name: name.clone(),
+            used_percentage: used_percentage.round().clamp(0.0, f64::from(u8::MAX)) as u8,
+            resets_at,
+        });
+    }
+    if windows.is_empty() {
+        // 空の辞書は「上限が無い」ではなく「読めなかった」として扱う。
+        // 控えた帯を空の便で消さない
+        return None;
+    }
+    windows.sort_by(|a, b| a.name.cmp(&b.name));
+    Some(RateLimits { windows })
+}
+
+/// `statusLine` の payload から**セッションの費用と手間**を取り出す。
+///
+/// **読めなければ `None`**（[`read_rate_limits`] と同じ意味）。
+///
+/// # 合計はセントの整数へ直す
+///
+/// 【実測 2026-09-13・v2.1.270】**`total_cost_usd` は `int` でも `float` でも来る**
+/// ——費用が `0` のあいだは整数、値が付くと小数になる。**`as_f64` は両方を受ける**
+/// ので場合分けは要らない。**`as_u64` で読むと起動直後しか通らない。**
+///
+/// セントへ直すのは `SessionMeta` が `Eq` を導出しているためで、**小数を持てない**。
+/// 画面に出すのもセント単位なので、ここで丸めても失うものは無い。
+fn read_cost(payload: &Value) -> Option<SessionCost> {
+    let cost = payload.get("cost")?;
+    let usd = cost.get("total_cost_usd")?.as_f64()?;
+    if !usd.is_finite() {
+        // JSON に無限大は書けないが、読めない形を通して 0 に化けさせない
+        return None;
+    }
+    Some(SessionCost {
+        total_cost_cents: (usd * 100.0).round() as i64,
+        total_api_duration_ms: cost.get("total_api_duration_ms")?.as_u64()?,
+        total_duration_ms: cost.get("total_duration_ms")?.as_u64()?,
+        total_lines_added: cost.get("total_lines_added")?.as_u64()?,
+        total_lines_removed: cost.get("total_lines_removed")?.as_u64()?,
+    })
 }
 
 /// 読めない形で届いたことを、**同じ形が続くあいだ1度だけ**残す。
@@ -479,5 +569,257 @@ mod tests {
                 "{形} は「読めなかった」であること（控えた値を消さない）"
             );
         }
+    }
+
+    /// 実測の形に `rate_limits` と `cost` を添えた payload を作る。
+    ///
+    /// **`None` を渡すとその欄ごと無くなる**——届かない環境（API キー利用・
+    /// `inject_status_line = false`）と同じ形にできる。
+    fn 上限と費用の形(rate_limits: Option<&str>, cost: Option<&str>) -> Value {
+        let mut payload = 実測の形(
+            r#"{ "used_percentage": 24, "total_input_tokens": 240000,
+                 "context_window_size": 1000000 }"#,
+        );
+        let 本体 = payload.as_object_mut().expect("辞書であること");
+        if let Some(limits) = rate_limits {
+            本体.insert(
+                "rate_limits".to_string(),
+                serde_json::from_str(limits).expect("rate_limits が JSON であること"),
+            );
+        }
+        if let Some(cost) = cost {
+            本体.insert(
+                "cost".to_string(),
+                serde_json::from_str(cost).expect("cost が JSON であること"),
+            );
+        }
+        payload
+    }
+
+    /// 【実測 2026-09-13・v2.1.270】実機で届く形がそのまま読めること。
+    #[test]
+    fn 実測の形の使用上限が読める() {
+        let payload = 上限と費用の形(
+            Some(
+                r#"{ "five_hour": { "used_percentage": 41, "resets_at": 1757000000 },
+                     "seven_day": { "used_percentage": 63, "resets_at": 1757400000 } }"#,
+            ),
+            None,
+        );
+        let limits = read_rate_limits(&payload).expect("実機の形が読めること");
+
+        assert_eq!(limits.windows.len(), 2, "窓は2本");
+        assert_eq!(limits.windows[0].name, "five_hour");
+        assert_eq!(limits.windows[0].used_percentage, 41);
+        assert_eq!(limits.windows[0].resets_at, 1_757_000_000);
+        assert_eq!(limits.windows[1].name, "seven_day");
+        assert_eq!(limits.windows[1].used_percentage, 63);
+    }
+
+    /// **窓の名前を決め打っていないことの証拠。**
+    ///
+    /// 実機では2本しか来ないが、`spend_limit` は構成次第で現れる（設計「窓の本数を
+    /// 固定しない」）。**知らない名前の窓も、そのまま読めること。**
+    #[test]
+    fn 知らない名前の窓も読める() {
+        let payload = 上限と費用の形(
+            Some(
+                r#"{ "five_hour": { "used_percentage": 41, "resets_at": 1757000000 },
+                     "seven_day": { "used_percentage": 63, "resets_at": 1757400000 },
+                     "まだ見たことのない窓": { "used_percentage": 8, "resets_at": 1757900000 } }"#,
+            ),
+            None,
+        );
+        let limits = read_rate_limits(&payload).expect("読めること");
+
+        assert_eq!(limits.windows.len(), 3, "3本目も落とさずに読むこと");
+        assert!(
+            limits
+                .windows
+                .iter()
+                .any(|w| w.name == "まだ見たことのない窓"),
+            "知らない名前も、そのまま窓の名前として読むこと"
+        );
+    }
+
+    /// **名前で並べてあることの証拠**（表示形が並びなので、順序が揺れると配り続ける）。
+    ///
+    /// いまは `serde_json` の `Map` が整列済みだが、**`preserve_order` が入ると
+    /// JSON の並び順になる**。ここで固定しておけば、そのとき落ちる。
+    #[test]
+    fn 窓は名前で並ぶ() {
+        let payload = 上限と費用の形(
+            Some(
+                r#"{ "seven_day": { "used_percentage": 63, "resets_at": 1757400000 },
+                     "five_hour": { "used_percentage": 41, "resets_at": 1757000000 } }"#,
+            ),
+            None,
+        );
+        let limits = read_rate_limits(&payload).expect("読めること");
+
+        let 名前: Vec<&str> = limits.windows.iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(
+            名前,
+            vec!["five_hour", "seven_day"],
+            "JSON の並び順ではなく名前の順であること"
+        );
+    }
+
+    /// `used_percentage` を**`as_f64` で受けていることの証拠**。
+    ///
+    /// 実機は `int` で来るが（フェーズ0 実測）、**`as_u64` だけで読むと CLI が
+    /// `41.0` を吐いた版で全部の帯が消える**。`context_window` と同じ理由である。
+    #[test]
+    fn 使用率は小数でも読める() {
+        for (形, 期待) in [("41", 41_u8), ("41.0", 41), ("40.6", 41), ("41.4", 41)] {
+            let payload = 上限と費用の形(
+                Some(&format!(
+                    r#"{{ "five_hour": {{ "used_percentage": {形}, "resets_at": 1757000000 }} }}"#
+                )),
+                None,
+            );
+            assert_eq!(
+                read_rate_limits(&payload).map(|l| l.windows[0].used_percentage),
+                Some(期待),
+                "{形} が {期待} として読めること"
+            );
+        }
+    }
+
+    /// **読めない形は控えた値を消さないこと。**
+    ///
+    /// **1つでも読めない窓があれば丸ごと諦める**——読めた窓だけを拾うと本数が黙って
+    /// 減り、画面からは帯が1本消えたようにしか見えない。
+    #[test]
+    fn 読めない使用上限は控えた値を消さない() {
+        for 形 in [
+            // 欄ごと無い（届かない環境）
+            None,
+            // 空（上限が無いのではなく、読めなかったとして扱う）
+            Some("{}"),
+            // 辞書ではない
+            Some("[]"),
+            Some("41"),
+            // 片方だけ読めない。**丸ごと諦めること**
+            Some(
+                r#"{ "five_hour": { "used_percentage": 41, "resets_at": 1757000000 },
+                     "seven_day": { "used_percentage": "63", "resets_at": 1757400000 } }"#,
+            ),
+            // resets_at が無い
+            Some(r#"{ "five_hour": { "used_percentage": 41 } }"#),
+            // used_percentage が無い
+            Some(r#"{ "five_hour": { "resets_at": 1757000000 } }"#),
+            // null で届いた
+            Some(r#"{ "five_hour": { "used_percentage": null, "resets_at": 1757000000 } }"#),
+        ] {
+            let payload = 上限と費用の形(形, None);
+            assert!(
+                read_rate_limits(&payload).is_none(),
+                "{形:?} は「読めなかった」であること（控えた帯を消さない）"
+            );
+        }
+    }
+
+    /// **`total_cost_usd` が `int` でも `float` でも読めること**（フェーズ0 実測）。
+    ///
+    /// **費用が `0` のあいだは整数で届き、値が付くと小数になる。** `as_u64` で読むと
+    /// **起動直後しか通らず**、`as_f64` 以外だと逆に起動直後で落ちる。
+    #[test]
+    fn 費用は整数でも小数でも読める() {
+        for (形, 期待セント) in [
+            // 起動直後。**整数で届く**
+            ("0", 0_i64),
+            // 1ターン後。小数になる
+            ("0.42", 42),
+            ("64.77", 6_477),
+            // セントより下は丸める
+            ("0.4249", 42),
+            ("0.4251", 43),
+        ] {
+            let payload = 上限と費用の形(
+                None,
+                Some(&format!(
+                    r#"{{ "total_cost_usd": {形}, "total_api_duration_ms": 1000,
+                         "total_duration_ms": 2000, "total_lines_added": 10,
+                         "total_lines_removed": 3 }}"#
+                )),
+            );
+            assert_eq!(
+                read_cost(&payload).map(|c| c.total_cost_cents),
+                Some(期待セント),
+                "{形} ドルが {期待セント} セントとして読めること"
+            );
+        }
+    }
+
+    /// 残る4つが、届いた整数のまま読めること（設計「整数の4つ」）。
+    #[test]
+    fn 費用の手間4つはそのまま読める() {
+        let payload = 上限と費用の形(
+            None,
+            Some(
+                r#"{ "total_cost_usd": 0.42, "total_api_duration_ms": 1234,
+                     "total_duration_ms": 5678, "total_lines_added": 10,
+                     "total_lines_removed": 3 }"#,
+            ),
+        );
+        let cost = read_cost(&payload).expect("読めること");
+
+        assert_eq!(cost.total_api_duration_ms, 1_234);
+        assert_eq!(cost.total_duration_ms, 5_678);
+        assert_eq!(cost.total_lines_added, 10);
+        assert_eq!(cost.total_lines_removed, 3);
+    }
+
+    /// 読めない費用は控えた値を消さないこと。
+    #[test]
+    fn 読めない費用は控えた値を消さない() {
+        for 形 in [
+            None,
+            Some("{}"),
+            Some("[]"),
+            // 合計が読めない
+            Some(
+                r#"{ "total_cost_usd": "0.42", "total_api_duration_ms": 1000,
+                     "total_duration_ms": 2000, "total_lines_added": 10,
+                     "total_lines_removed": 3 }"#,
+            ),
+            // 欄が1つ欠けている
+            Some(
+                r#"{ "total_cost_usd": 0.42, "total_duration_ms": 2000,
+                     "total_lines_added": 10, "total_lines_removed": 3 }"#,
+            ),
+        ] {
+            let payload = 上限と費用の形(None, 形);
+            assert!(
+                read_cost(&payload).is_none(),
+                "{形:?} は「読めなかった」であること"
+            );
+        }
+    }
+
+    /// **使用上限と費用は、互いに欠けても独立して読めること。**
+    ///
+    /// 片方しか届かない環境があるかは分からないが、**片方が無いともう片方も落ちる**
+    /// 作りにしてしまうと、そのとき2つ一緒に消える。
+    #[test]
+    fn 片方だけでも読める() {
+        let 上限のみ = 上限と費用の形(
+            Some(r#"{ "five_hour": { "used_percentage": 41, "resets_at": 1757000000 } }"#),
+            None,
+        );
+        assert!(read_rate_limits(&上限のみ).is_some());
+        assert!(read_cost(&上限のみ).is_none());
+
+        let 費用のみ = 上限と費用の形(
+            None,
+            Some(
+                r#"{ "total_cost_usd": 0, "total_api_duration_ms": 0,
+                     "total_duration_ms": 0, "total_lines_added": 0,
+                     "total_lines_removed": 0 }"#,
+            ),
+        );
+        assert!(read_rate_limits(&費用のみ).is_none());
+        assert!(read_cost(&費用のみ).is_some());
     }
 }

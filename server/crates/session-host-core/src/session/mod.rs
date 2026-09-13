@@ -35,8 +35,8 @@ use crate::{
 use bytes::Bytes;
 use hooks_settings::HookSettings;
 use protocol::{
-    CardId, ClaudeSessionId, ContextUsage, ModelId, PermissionMode, ProjectId, SessionMeta,
-    SessionStatus, Timestamp,
+    CardId, ClaudeSessionId, ContextUsage, ModelId, PermissionMode, ProjectId, RateLimits,
+    SessionCost, SessionMeta, SessionStatus, Timestamp,
     frame::{self, FrameKind},
     ipc::ParsedNode,
     ws::ServerMessage,
@@ -388,6 +388,106 @@ fn store_context_usage_into(meta: &mut SessionMeta, usage: Option<ContextUsage>)
         return false;
     }
     meta.context_usage = usage;
+    true
+}
+
+/// 使用上限の表示形（関門の鍵）。**窓ごとの（名前・整数パーセント・リセット時刻）の並び。**
+///
+/// # 並びで持つ。名前で2本だけ見てはいけない
+///
+/// 【実測 2026-09-13】いま届く窓は `five_hour` と `seven_day` の2本だけだが、
+/// **名前で2本だけを見る鍵にすると、3本目が来たときに鍵が変わらず配り落とす**。
+/// `spend_limit` の条件は版ではなく構成で決まるとみられるので、**本数は固定しない**。
+///
+/// # `resets_at` を入れる理由
+///
+/// **窓が切り替わると、パーセントが偶然同じでも別の窓である。** 入れないと、
+/// 5時間の窓が切り替わって 87% → 87% になったときに「動いていない」と判定し、
+/// **切替を配り落とす**——画面には古い窓のリセット時刻が residual として残る。
+///
+/// **関門のテストはこの関数を通して書く。** テスト側に同じ形の鍵を書き写すと、
+/// ここを変えてもテストが落ちない（[`context_display_form`] と同じ理由）。
+/// # 名前を借りずに複製している
+///
+/// `&str` を返すと**借りた寿命が入力に縛られ**、[`display_form_moved`] の
+/// `impl Fn(&T) -> K` に通らない（`K` は引数の寿命から独立していなければならない）。
+/// **無駄な複製に見えるが外せない。** 呼ばれるのは payload が届いたときだけ
+/// （1セッションあたり3秒に1回・窓は2本）なので、量は問題にならない。
+fn rate_limits_display_form(limits: &RateLimits) -> Vec<(String, u8, i64)> {
+    limits
+        .windows
+        .iter()
+        .map(|window| {
+            (
+                window.name.clone(),
+                window.used_percentage,
+                window.resets_at,
+            )
+        })
+        .collect()
+}
+
+/// 費用と手間の表示形（関門の鍵）。**セント単位の合計＋整数4つ**（設計「表示形」の表）。
+///
+/// # 小数のまま鍵にしてはいけない
+///
+/// `total_cost_usd` は**毎ターン動く小数**なので、そのままでは鍵にならない。
+/// [`SessionCost::total_cost_cents`]が既にセント単位の整数なので、ここでは丸め直さない。
+///
+/// # 残る4つは、届いた整数をそのまま使う
+///
+/// 設計が「整数の4つ」と決めている。**丸め直さない。**
+///
+/// # 【見立て・未実測】所要時間が3秒ごとに動くなら、この関門は素通しになる
+///
+/// `total_duration_ms` が**実時間**なら、`statusLine` の周期（3秒）ごとに必ず動くので、
+/// **関門が働かない**——毎周期そのまま配ることになる。**ただしこれは推測である。**
+/// ターンの合計として積まれるなら、ターンとターンのあいだは動かず、関門は効く。
+///
+/// **フェーズ0 では型（`int`）しか測っておらず、値がどう動くかは見ていない。**
+/// **粗く丸めて避けることはしない**——設計が「整数の4つ」と決めており、
+/// 実測の裏付けなしに逸脱すると、あとから読む人がどちらが正か判断できなくなる。
+///
+/// **確かめるのはフェーズ3 の先頭**（実機で複数セッションの値を観測する段）。
+/// 同じ観測で「セッションごとに値が食い違うか」も見るので、**追加の起動は要らない**。
+/// **動くと分かったら、ここを丸めるのではなく設計を直してから丸めること。**
+fn cost_display_form(cost: &SessionCost) -> (i64, u64, u64, u64, u64) {
+    (
+        cost.total_cost_cents,
+        cost.total_api_duration_ms,
+        cost.total_duration_ms,
+        cost.total_lines_added,
+        cost.total_lines_removed,
+    )
+}
+
+/// 使用上限の関門。**画面に出る形が動いていれば控えて `true`。**
+///
+/// [`store_context_usage_into`] と同じく **`&mut SessionMeta` を受ける純関数**にしてある
+/// （`Session` を組み立てずに落とせるようにするため）。
+fn store_rate_limits_into(meta: &mut SessionMeta, limits: Option<RateLimits>) -> bool {
+    if !display_form_moved(
+        meta.rate_limits.as_ref(),
+        limits.as_ref(),
+        rate_limits_display_form,
+    ) {
+        return false;
+    }
+    meta.rate_limits = limits;
+    true
+}
+
+/// 費用の関門。
+///
+/// # 使用上限とは別の関門にしてある
+///
+/// **2つは宛先が違う**——使用上限は PC の一覧、費用はカードである。**1つにまとめると、
+/// 費用が動くたびに使用上限の便が飛ぶ**（費用は毎ターン動く）。
+fn store_cost_into(meta: &mut SessionMeta, cost: Option<SessionCost>) -> bool {
+    if !display_form_moved(meta.cost.as_ref(), cost.as_ref(), cost_display_form) {
+        return false;
+    }
+    meta.cost = cost;
     true
 }
 
@@ -1260,6 +1360,33 @@ impl Session {
     pub fn store_context_usage(&self, usage: Option<ContextUsage>) -> bool {
         let mut meta = self.meta.lock().expect("ロックが壊れていない");
         store_context_usage_into(&mut meta, usage)
+    }
+
+    /// 使用上限を控える。**画面に出る形が動いていれば `true`。**
+    ///
+    /// 鍵は[`rate_limits_display_form`]（窓ごとの名前・整数パーセント・`resets_at` の並び）。
+    ///
+    /// # ここはセッションごとの記録である
+    ///
+    /// **`rate_limits` はセッションの状態ではなく、その PC の claude ログインの状態**
+    /// なので、**同じ値がセッションの数だけ独立して届く**（受け口はトークンから
+    /// セッションを引く）。**ここの関門は重複を1本ぶんしか減らせない。**
+    ///
+    /// **PC ごとに1つへ束ねるのはサーバ側の仕事**で、そちらには別の手当てが2つ要る
+    /// ——「同じ表示形なら配らない」と「同じ窓なら大きいほうを採る」（設計「手当ては
+    /// 2つ。どちらも欠かせない」）。**フェーズ3 で入れる。ここでやろうとしないこと。**
+    pub fn store_rate_limits(&self, limits: RateLimits) -> bool {
+        let mut meta = self.meta.lock().expect("ロックが壊れていない");
+        store_rate_limits_into(&mut meta, Some(limits))
+    }
+
+    /// 費用と手間を控える。**画面に出る形が動いていれば `true`。**
+    ///
+    /// 鍵は[`cost_display_form`]。**使用上限とは別の関門である**——1つにまとめると、
+    /// 毎ターン動く費用のせいで使用上限の便まで飛ぶ。
+    pub fn store_session_cost(&self, cost: SessionCost) -> bool {
+        let mut meta = self.meta.lock().expect("ロックが壊れていない");
+        store_cost_into(&mut meta, Some(cost))
     }
 
     /// 切替の要求値を立てる／落とす。
@@ -3375,6 +3502,35 @@ impl SessionManager {
         changed
     }
 
+    /// `statusLine` が知らせてきた使用上限を取り込む。
+    ///
+    /// # このフェーズでは、まだ配らない
+    ///
+    /// **関門を通っても何も送らない。** 出口は返り値の `bool` だけである。
+    /// 配るための便（新しい `ServerMessage`）は**共有境界の型**なので、
+    /// [`protocol`] を触るフェーズ2 で足す。**ここが空に見えるのは未完成だからではなく、
+    /// 段を分けてあるからである。**
+    ///
+    /// **フェーズ2 で足すのはこの中の1箇所**——[`SessionManager::apply_context_usage`]
+    /// と同じ形で、`changed` のときだけ `self.events.emit(...)` を呼ぶ。
+    ///
+    /// # 宛先は1件目と違う
+    ///
+    /// コンテキスト残量はカード宛でよかったが、**こちらはアカウント内の全ブラウザ宛**
+    /// である（PC の状態なので）。**便の形を1件目から写すときに、ここを一緒に写さない
+    /// こと**（設計「帰属をどこで守るか」）。
+    pub fn apply_rate_limits(&self, session: &Arc<Session>, limits: RateLimits) -> bool {
+        session.store_rate_limits(limits)
+    }
+
+    /// `statusLine` が知らせてきた費用と手間を取り込む。
+    ///
+    /// **こちらもこのフェーズでは配らない**（理由は[`SessionManager::apply_rate_limits`]）。
+    /// ただし**宛先は使用上限と違ってカード側でよい**——費用はセッションごとの値である。
+    pub fn apply_session_cost(&self, session: &Arc<Session>, cost: SessionCost) -> bool {
+        session.store_session_cost(cost)
+    }
+
     /// `statusLine` が知らせてきたモデルを取り込む（設計§4）。
     ///
     /// **ここが「いま何で動いているか」の唯一の入り口**。値が動いたときだけ配信する
@@ -4308,6 +4464,171 @@ mod tests {
                 .map(|u| (u.used_percentage, u.total_input_tokens)),
             Some((25, 250_000)),
             "パーセントが動いたら実数も一緒に新しくなること"
+        );
+    }
+
+    fn 窓(name: &str, 割合: u8, リセット: i64) -> protocol::RateLimitWindow {
+        use protocol::RateLimitWindow;
+        RateLimitWindow {
+            name: name.to_string(),
+            used_percentage: 割合,
+            resets_at: リセット,
+        }
+    }
+
+    fn 上限(windows: Vec<protocol::RateLimitWindow>) -> RateLimits {
+        RateLimits { windows }
+    }
+
+    fn 費用(usd_cents: i64, api_ms: u64, all_ms: u64, 追加: u64, 削除: u64) -> SessionCost {
+        SessionCost {
+            total_cost_cents: usd_cents,
+            total_api_duration_ms: api_ms,
+            total_duration_ms: all_ms,
+            total_lines_added: 追加,
+            total_lines_removed: 削除,
+        }
+    }
+
+    /// 使用上限も、画面が変わらないなら先へ進めないこと。
+    ///
+    /// **ここは1件目より効きが弱い。** `rate_limits` は PC の状態なので、同じ値が
+    /// セッションの数だけ独立して届く。この関門は**そのうち1本ぶんしか止められない**
+    /// （PC ごとに束ねるのはフェーズ3 のサーバ側）。
+    #[test]
+    fn 使用上限が同じなら報告しない() {
+        let 前 = 上限(vec![窓("five_hour", 41, 1_757_000_000)]);
+        let 今 = 上限(vec![窓("five_hour", 41, 1_757_000_000)]);
+
+        assert!(
+            !display_form_moved(Some(&前), Some(&今), rate_limits_display_form),
+            "同じ表示なら先へ進めないこと"
+        );
+    }
+
+    /// **`resets_at` が鍵に入っていることの証拠**（設計「表示形」の表）。
+    ///
+    /// **窓が切り替わると、パーセントが偶然同じでも別の窓である。** 入れ忘れると
+    /// 切替を配り落とし、**画面には古い窓のリセット時刻が残り続ける**。
+    ///
+    /// この検査は、鍵から `resets_at` を外した版で**落ちることを確かめてある**
+    /// （設計§13「足した検査はわざと壊して確かめる」）。
+    #[test]
+    fn 割合が同じでもリセット時刻が違えば報告する() {
+        // 5時間の窓が切り替わった。偶然どちらも 41%
+        let 前 = 上限(vec![窓("five_hour", 41, 1_757_000_000)]);
+        let 今 = 上限(vec![窓("five_hour", 41, 1_757_018_000)]);
+
+        assert!(
+            display_form_moved(Some(&前), Some(&今), rate_limits_display_form),
+            "resets_at を鍵に入れること（外すと窓の切替を配り落とす）"
+        );
+    }
+
+    /// **窓の本数を固定していないことの証拠**（設計「窓の本数を固定しない」）。
+    ///
+    /// 実機で来るのは2本だけだが、`spend_limit` は構成次第で現れる。**既知の2本だけを
+    /// 見る鍵にすると、3本目が増えても減っても画面が動かない。**
+    ///
+    /// **材料を2本以上にしてある。** 1本の材料で「並びが出る」を確かめても、
+    /// 本数が固定された実装でも通ってしまう（テスト計画「材料が足りない形」）。
+    #[test]
+    fn 窓の本数が変われば報告する() {
+        let 二本 = 上限(vec![
+            窓("five_hour", 41, 1_757_000_000),
+            窓("seven_day", 63, 1_757_400_000),
+        ]);
+        let 三本 = 上限(vec![
+            窓("five_hour", 41, 1_757_000_000),
+            窓("seven_day", 63, 1_757_400_000),
+            窓("spend_limit", 8, 1_757_900_000),
+        ]);
+
+        assert!(
+            display_form_moved(Some(&二本), Some(&三本), rate_limits_display_form),
+            "窓が増えたら報告すること"
+        );
+        assert!(
+            display_form_moved(Some(&三本), Some(&二本), rate_limits_display_form),
+            "窓が減ったら報告すること"
+        );
+
+        // **名前も鍵に入っていること。** 本数と数字が同じで名前だけ違う形
+        let 名前違い = 上限(vec![
+            窓("five_hour", 41, 1_757_000_000),
+            窓("spend_limit", 63, 1_757_400_000),
+        ]);
+        assert!(
+            display_form_moved(Some(&二本), Some(&名前違い), rate_limits_display_form),
+            "名前が違えば別の窓である"
+        );
+    }
+
+    /// **費用と使用上限が、互いの控えに手を出さないことの証拠**（テスト計画フェーズ1）。
+    ///
+    /// **費用は毎ターン動く。** 2つを1つの関門にまとめると、費用が動くたびに使用上限の
+    /// 便が飛び、**関門があっても3秒ごとに配ることになる**。
+    ///
+    /// # 返り値を見るだけでは、まとめた実装を捕まえられない
+    ///
+    /// 便の有無だけを見る検査にすると、**2つを1つの関門にまとめた実装でも通る**
+    /// ——呼ぶたびに両方の値を渡すので、まとめた鍵でも同じ判定になる。
+    /// **だから「互いの控えに手を出さない」を見る。** まとめた実装は必ず両方を書くので、
+    /// 片方を動かしたときにもう片方が書き換わる。
+    #[test]
+    fn 費用と使用上限は互いの控えに手を出さない() {
+        let 最初の上限 = 上限(vec![窓("five_hour", 41, 1_757_000_000)]);
+        let mut meta = 空のカード();
+        assert!(
+            store_rate_limits_into(&mut meta, Some(最初の上限.clone())),
+            "最初の値は控えること"
+        );
+        assert!(store_cost_into(&mut meta, Some(費用(0, 0, 0, 0, 0))));
+
+        // **費用だけが動いた。** 使用上限の控えは1バイトも動かないこと
+        assert!(
+            store_cost_into(&mut meta, Some(費用(42, 1_000, 2_000, 10, 3))),
+            "費用が動いたら費用の側は報告すること"
+        );
+        assert_eq!(
+            meta.rate_limits.as_ref(),
+            Some(&最初の上限),
+            "費用の関門が使用上限の控えを触ってはいけない"
+        );
+        assert!(
+            !store_rate_limits_into(&mut meta, Some(最初の上限.clone())),
+            "費用が動いても使用上限の便は出さないこと"
+        );
+
+        // **逆も見る。** 使用上限だけが動いたとき、費用の控えが動かないこと
+        let 控えた費用 = meta.cost;
+        assert!(store_rate_limits_into(
+            &mut meta,
+            Some(上限(vec![窓("five_hour", 42, 1_757_000_000)]))
+        ));
+        assert_eq!(
+            meta.cost, 控えた費用,
+            "使用上限の関門が費用の控えを触ってはいけない"
+        );
+    }
+
+    /// 費用も、画面が変わらないなら先へ進めないこと。
+    ///
+    /// **合計はセント単位**なので、**1セントに満たない違いでは動かない**。
+    #[test]
+    fn 費用の表示が同じなら報告しない() {
+        let mut meta = 空のカード();
+        assert!(store_cost_into(
+            &mut meta,
+            Some(費用(42, 1_000, 2_000, 10, 3))
+        ));
+        assert!(
+            !store_cost_into(&mut meta, Some(費用(42, 1_000, 2_000, 10, 3))),
+            "同じ表示なら先へ進めないこと"
+        );
+        assert!(
+            store_cost_into(&mut meta, Some(費用(43, 1_000, 2_000, 10, 3))),
+            "1セント動いたら報告すること"
         );
     }
 
