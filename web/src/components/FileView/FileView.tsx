@@ -498,21 +498,84 @@ export function FileView({
   /**
    * 打鍵を**まとめて**写す（設計§7-3）。1文字ごとには書かない。
    *
-   * ここまで済んでいれば、**タブを閉じる・別のファイルへ移る・版が切り替わって
-   * タブが読み直す**のすべてが無害になる。だから `beforeunload` は足さない
-   * （web 全体に1つも無く、`pagehide` を意図して選んでいる）。
+   * **まとめる以上、まとめた途中で離れるときに確定させなければならない。**
+   * 窓は 300ms なので、**その内側でタブを閉じる・別のファイルへ移る・PJT を移る・
+   * 版が切り替わって読み直す**と、打ったぶんが消える。だから `lib/drafts.ts` と
+   * 同じ**3点セット**で解く——**確定させる口**・**`pagehide` で確定**・**片付けで確定**。
+   *
+   * `beforeunload` は足さない（web 全体に1つも無く、`pagehide` を意図して
+   * 選んでいる——`beforeunload` はモバイルで発火しないことがある）。
    */
-  useEffect(() => {
-    if (書きかけ === null) {
+  /** まだ写していない中身。`null` は「写すものが無い」 */
+  const 未書き出し = useRef<string | null>(null)
+  const 書き出しの札 = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  /**
+   * 時計を止めて、**その場で写す**。
+   *
+   * **`host` ／ `path` ／ `account` を閉じ込めている**ので、鍵が変わる瞬間に呼ばれても
+   * **古い鍵へ書く**。ここを「いまの鍵」にすると、**別のファイルの書きかけとして
+   * 現れる**——最も気づきにくい壊れ方である。
+   */
+  const 書きかけを確定する = useCallback(() => {
+    if (書き出しの札.current !== null) {
+      clearTimeout(書き出しの札.current)
+      書き出しの札.current = null
+    }
+    if (未書き出し.current === null) {
       return
     }
-    const 札 = setTimeout(() => {
-      putEdit(host, path, 書きかけ, account)
-    }, WRITE_DEBOUNCE_MS)
-    return () => {
-      clearTimeout(札)
+    putEdit(host, path, 未書き出し.current, account)
+    未書き出し.current = null
+  }, [host, path, account])
+
+  useEffect(() => {
+    const 離れる = () => {
+      書きかけを確定する()
     }
-  }, [書きかけ, host, path, account])
+    globalThis.addEventListener('pagehide', 離れる)
+    return () => {
+      globalThis.removeEventListener('pagehide', 離れる)
+      // **消えるときも書き切る。** 画面を移っただけで失われないため
+      書きかけを確定する()
+    }
+  }, [書きかけを確定する])
+
+  /**
+   * 打鍵を受ける。**状態と「まだ写していない中身」の両方を進める。**
+   *
+   * 状態だけを効果の依存に置くと、**打鍵のたびに片付けが走って確定してしまい、
+   * まとめる意味が消える**（1文字ごとに書くのと同じになる）。だから写す側は
+   * 参照で持ち、窓が閉じたときだけ書く。
+   */
+  const 書きかけを打つ = useCallback(
+    (次: string) => {
+      set書きかけ(次)
+      未書き出し.current = 次
+      if (書き出しの札.current !== null) {
+        clearTimeout(書き出しの札.current)
+      }
+      書き出しの札.current = setTimeout(() => {
+        書き出しの札.current = null
+        書きかけを確定する()
+      }, WRITE_DEBOUNCE_MS)
+    },
+    [書きかけを確定する],
+  )
+
+  /**
+   * 写す予定を取り消す。**捨てたあとに古い値が書き戻らないようにする。**
+   *
+   * 保存に成功したときと編集を捨てたときに呼ぶ。呼ばないと、**窓の中で保存すると
+   * 直後に `putEdit` が走り、捨てたはずの書きかけが復活する。**
+   */
+  const 書き出しを取り消す = useCallback(() => {
+    if (書き出しの札.current !== null) {
+      clearTimeout(書き出しの札.current)
+      書き出しの札.current = null
+    }
+    未書き出し.current = null
+  }, [])
 
   /**
    * ディスクへ書き戻す（設計§2・§8）。
@@ -536,7 +599,9 @@ export function FileView({
       )
       set書きかけ(null)
       set戻した(false)
-      // **成功したときだけ捨てる**（設計§7-3）
+      // **成功したときだけ捨てる**（設計§7-3）。**写す予定も取り消す**——
+      // 窓の内側で保存すると、直後に書き戻って捨てたはずのものが復活する
+      書き出しを取り消す()
       dropEdit(host, path, account)
     } catch (err) {
       // **失敗しても書きかけを捨てない**（設計§8-4）。捨てると、断られた瞬間に
@@ -545,15 +610,17 @@ export function FileView({
     } finally {
       set保存中(false)
     }
-  }, [content, 書きかけ, 印, host, path, account])
+  }, [content, 書きかけ, 印, host, path, account, 書き出しを取り消す])
 
   /** 編集を捨ててディスクの中身へ戻す。**戻す先を必ず用意する**（設計§7-4） */
   const 編集を捨てる = useCallback(() => {
     set書きかけ(null)
     set戻した(false)
     set保存の断り(null)
+    // 捨てたあとに古い値が書き戻らないよう、**写す予定も取り消す**
+    書き出しを取り消す()
     dropEdit(host, path, account)
-  }, [host, path, account])
+  }, [host, path, account, 書き出しを取り消す])
 
   /*
     **Ctrl+F ／ Ctrl+G を奪うのは、探す入口があるときだけ。**
@@ -1115,7 +1182,7 @@ export function FileView({
                ここへ移る**（もとは `<pre>` が持っていた）。 */
             <FileEditor
               value={本文}
-              onChange={set書きかけ}
+              onChange={書きかけを打つ}
               onSave={() => {
                 void 保存する()
               }}
