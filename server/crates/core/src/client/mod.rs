@@ -1832,6 +1832,98 @@ pub async fn session_reorder(
     Ok(resolved)
 }
 
+/// `file_modes` の値（`md=editor,html=editor` の並び）を写像へ読む。
+///
+/// **丸ごと置き換える形にしてある。** サーバは値ごと差し替えるので、1組だけ渡すと
+/// **残りが黙って消える**——「足す」に見えて「置き換える」のがいちばん危ない形なので、
+/// **並びで全部を書かせる**。空文字は「1つも無い」＝全部消す。
+///
+/// # なぜここで断るのか
+///
+/// **綴りの検査をサーバまで往復させない**（`motion_quiet` と同じ理由）。引数の誤りは
+/// exit 2 の族に収まり、通信の失敗（1）と見分けが付く。
+///
+/// そして**ビュアーを持たない拡張子に「見る」を選ばれたら断る**。画面側は
+/// **選べないものを出さない**形にしてあるので（`web/src/lib/fileMode.ts`）、
+/// **CLI だけが黙って受けると食い違う**——受け取った利用者は「設定したのに効かない」
+/// としか見えない。
+fn file_modes_map(value: &str) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let mut 対応 = serde_json::Map::new();
+    for 組 in value.split(',').map(str::trim).filter(|組| !組.is_empty()) {
+        let (拡張子, 見せ方) = 組.split_once('=').ok_or_else(|| {
+            format!("`file_modes` は 拡張子=見せ方 の並びです（`{組}` は読めません）")
+        })?;
+        let 拡張子 = 拡張子.trim();
+        let 見せ方 = 見せ方.trim();
+        if 拡張子.is_empty() {
+            return Err("`file_modes` に空の拡張子は指定できません".to_string());
+        }
+        if 拡張子.starts_with('.') {
+            return Err(format!(
+                "`file_modes` の拡張子に先頭の . は付けないでください（`{拡張子}` が入っています）"
+            ));
+        }
+        if 拡張子.chars().any(|c| c.is_ascii_uppercase()) {
+            return Err(format!(
+                "`file_modes` の拡張子は小文字で指定してください（`{拡張子}` が入っています）"
+            ));
+        }
+        if !server_core::db::settings::FILE_MODE_CHOICES.contains(&見せ方) {
+            return Err(format!(
+                "`file_modes` の見せ方は {} のどちらかです（`{拡張子}` に `{見せ方}` が入っています）",
+                server_core::db::settings::FILE_MODE_CHOICES.join(" / ")
+            ));
+        }
+        if 見せ方 == "viewer" && !ビュアーがある(拡張子) {
+            return Err(format!(
+                "`{拡張子}` にビュアーはありません（`viewer` を選んでも編集の面で開きます）。\
+                 ビュアーを持つのは md / markdown / html / htm / svg です"
+            ));
+        }
+        対応.insert(
+            拡張子.to_string(),
+            serde_json::Value::String(見せ方.to_string()),
+        );
+    }
+    Ok(対応)
+}
+
+/// `writable_roots` の値（絶対パスの並び）を読む。
+///
+/// **持ち出し（`ACCOUNT_KEYS`）に入っていないことと、CLI から触れないことは別の軸である。**
+/// 持ち出しから外したのは**別の機械で同じ文字列が別の場所を指す**からであって、
+/// **この機械で変えられないという話ではない**。画面（`WritableRootsCard`）から変えられる
+/// ものが CLI から変えられないと、「画面でできることは CLI でもできる」が崩れる。
+///
+/// `file_modes` と同じく**丸ごと置き換える**（サーバが値ごと差し替える）。空文字は全部消す。
+fn writable_roots_list(value: &str) -> Result<Vec<serde_json::Value>, String> {
+    let mut 一覧 = Vec::new();
+    for 場所 in value
+        .split(',')
+        .map(str::trim)
+        .filter(|場所| !場所.is_empty())
+    {
+        if !場所.starts_with('/') {
+            return Err(format!(
+                "`writable_roots` には絶対パスを指定してください（`{場所}` が入っています）"
+            ));
+        }
+        一覧.push(serde_json::Value::String(場所.to_string()));
+    }
+    Ok(一覧)
+}
+
+/// その拡張子がビュアーを持つか。**表は [`protocol::fs`] に1つだけ**あるので、
+/// ここでは綴りを持たずに種別で見分ける。
+fn ビュアーがある(拡張子: &str) -> bool {
+    matches!(
+        protocol::fs::kind_of(&format!("x.{拡張子}")),
+        protocol::fs::FileKind::Markdown
+            | protocol::fs::FileKind::Html
+            | protocol::fs::FileKind::Svg
+    )
+}
+
 /// `settings set` の本文を組み立てる（CLI設計§12-1）。**触った1項目だけ**を持つ JSON。
 ///
 /// 純関数にしてあるのは「1項目だけが載っている」ことを机の上で確かめるため。
@@ -1848,7 +1940,7 @@ pub fn settings_update_body(key: &str, value: &str) -> Result<String, String> {
         server_core::db::settings::MEMO_RETENTION_DAYS,
         server_core::db::settings::MEMO_MAX_BYTES,
     ];
-    let listing = "受け付けるキー：always_bypass_permissions / project_autostart_session（true・false）、sync_interval_secs / screen_interval_ms / scrollback_lines / memo_retention_days / memo_max_bytes（数値）、motion_quiet（lively・calm・still）、lan_password（文字列）";
+    let listing = "受け付けるキー：always_bypass_permissions / project_autostart_session（true・false）、sync_interval_secs / screen_interval_ms / scrollback_lines / memo_retention_days / memo_max_bytes（数値）、motion_quiet（lively・calm・still）、lan_password（文字列）、file_modes（md=editor,html=editor の並び）、writable_roots（絶対パスの並び）";
     let json_value = if BOOL_KEYS.contains(&key) {
         match value {
             "true" => serde_json::Value::Bool(true),
@@ -1874,6 +1966,10 @@ pub fn settings_update_body(key: &str, value: &str) -> Result<String, String> {
             ));
         }
         serde_json::Value::String(value.to_string())
+    } else if key == server_core::db::settings::FILE_MODES {
+        serde_json::Value::Object(file_modes_map(value)?)
+    } else if key == server_core::db::settings::WRITABLE_ROOTS {
+        serde_json::Value::Array(writable_roots_list(value)?)
     } else if key == "lan_password" {
         serde_json::Value::String(value.to_string())
     } else {
@@ -2280,6 +2376,9 @@ mod tests {
                 settings::MOTION_QUIET => settings::DEFAULT_MOTION_QUIET,
                 // 容量は下限が 1MiB なので "20" では通らない。**桁の違う値が要る**
                 settings::MEMO_MAX_BYTES => "1073741824",
+                // 写像なので「拡張子=見せ方」の並び。**ビュアーを持つ拡張子を
+                // エディタで開く**のが、唯一選ぶ余地のある組み合わせ
+                settings::FILE_MODES => "md=editor",
                 _ => "20",
             }
         };
@@ -2291,6 +2390,78 @@ mod tests {
             assert_eq!(object.len(), 1, "触っていない項目が混ざっている: {body}");
             assert!(object.contains_key(key), "キーが違う: {body}");
         }
+    }
+
+    #[test]
+    fn 見せ方の並びは丸ごと置き換える形で読まれる() {
+        let body =
+            settings_update_body("file_modes", "md=editor, html=editor").expect("組めること");
+        let value: serde_json::Value = serde_json::from_str(&body).expect("JSON であること");
+        let 対応 = value["file_modes"].as_object().expect("写像であること");
+        assert_eq!(対応.len(), 2, "並びが全部載っていない: {body}");
+        assert_eq!(対応["md"], "editor");
+        assert_eq!(対応["html"], "editor");
+    }
+
+    #[test]
+    fn 見せ方を空にすると全部消える() {
+        let body = settings_update_body("file_modes", "").expect("組めること");
+        let value: serde_json::Value = serde_json::from_str(&body).expect("JSON であること");
+        assert_eq!(
+            value["file_modes"]
+                .as_object()
+                .expect("写像であること")
+                .len(),
+            0,
+            "空にならない: {body}"
+        );
+    }
+
+    /// **ビュアーを持たない拡張子に「見る」を選ばれたら断る。** 画面は選べないものを
+    /// 出さない形なので、**CLI だけ黙って受けると食い違う**（受けた側は「設定したのに
+    /// 効かない」としか見えない）。
+    #[test]
+    fn ビュアーの無い拡張子に見るを選ぶと断られる() {
+        let err = settings_update_body("file_modes", "rs=viewer").expect_err("断られること");
+        assert!(err.contains("ビュアーはありません"), "理由が無い: {err}");
+        assert!(err.contains("md"), "どれなら選べるかが無い: {err}");
+        // **エディタなら通る**——断る検査しか無いと、全部断るよう壊れていても緑になる
+        settings_update_body("file_modes", "rs=editor").expect("エディタは通ること");
+        settings_update_body("file_modes", "md=viewer").expect("ビュアーを持つ側は通ること");
+    }
+
+    #[test]
+    fn 見せ方の綴りと拡張子の形は直し方つきで断られる() {
+        for (値, 手掛かり) in [
+            ("md", "拡張子=見せ方"),
+            ("md=みる", "viewer"),
+            (".md=editor", "先頭の ."),
+            ("MD=editor", "小文字"),
+            ("=editor", "空の拡張子"),
+        ] {
+            let err = settings_update_body("file_modes", 値).expect_err("断られること");
+            assert!(err.contains(手掛かり), "{値}: 直し方が無い: {err}");
+        }
+    }
+
+    /// **持ち出しに入っていないことと、CLI から触れないことは別である。**
+    /// 画面（`WritableRootsCard`）から変えられる以上、CLI からも変えられる必要がある。
+    #[test]
+    fn 書ける場所は絶対パスの並びで受ける() {
+        let body =
+            settings_update_body("writable_roots", "/home/u/notes, /dev/app").expect("組めること");
+        let value: serde_json::Value = serde_json::from_str(&body).expect("JSON であること");
+        let 一覧 = value["writable_roots"].as_array().expect("並びであること");
+        assert_eq!(一覧.len(), 2, "並びが全部載っていない: {body}");
+        assert_eq!(一覧[0], "/home/u/notes");
+
+        let body = settings_update_body("writable_roots", "").expect("組めること");
+        let value: serde_json::Value = serde_json::from_str(&body).expect("JSON であること");
+        assert_eq!(value["writable_roots"].as_array().expect("並び").len(), 0);
+
+        // 相対パスはサーバまで往復させずに断る（引数の誤り＝exit 2 の族）
+        let err = settings_update_body("writable_roots", "notes").expect_err("断られること");
+        assert!(err.contains("絶対パス"), "直し方が無い: {err}");
     }
 
     #[test]
