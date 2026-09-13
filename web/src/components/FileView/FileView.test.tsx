@@ -5,12 +5,12 @@
  * とくに生の HTML は、通してしまっても画面は普通に見えるので、目視では気づけない。
  */
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { type ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FileView } from "@/components/FileView/FileView";
-import { putEdit, readEdit } from "@/lib/fileEdits";
+import { putEdit, readEdit, WRITE_DEBOUNCE_MS } from "@/lib/fileEdits";
 import { previewUrl, rawUrl } from "@/lib/hostfs";
 
 const ROOT = "/home/me/dev/app";
@@ -1246,6 +1246,96 @@ describe("編集と保存", () => {
     await screen.findByTestId("file-editor");
 
     expect(screen.getByTestId("file-save")).toBeDisabled();
+  });
+
+  /*
+    ここから下は、**書きかけが消える9本の経路**（設計§7-3）を確かめる。
+
+    **9本は同じ1つの根から来ている**——「まとめて書く」と決めたのに、**まとめた途中で
+    離れるときに確定させていない**こと。だから**代表1本で全部を覆える**。
+    タブの ✕ ／ 列ごと ✕ ／ 読めなかったタブの除去 ／ PJT を移る ／ 別ファイルを選ぶ ／
+    タブ帯で別タブ ／ `path` 変化での state リセット ／ 版の切替による読み直し——
+    **どれも「この器が消える」か「鍵が変わる」のどちらか**である。
+
+    9本目（ブラウザのタブを閉じる）だけは器が消えないので、`pagehide` で別に確かめる。
+  */
+
+  it("窓の内側で離れても、打ったぶんは残る", async () => {
+    読み書き("あ");
+    const { unmount } = render(<Viewer host="local" root={ROOT} path={コード} />);
+
+    const 欄 = await screen.findByTestId("file-editor");
+    await userEvent.type(欄, "い");
+    // **まとめる窓（300ms）の内側で消える。** 確定させていなければ、ここで失われる
+    unmount();
+
+    expect(readEdit("local", コード, null)).toBe("あい");
+  });
+
+  it("ブラウザのタブを閉じるときも、打ったぶんは残る", async () => {
+    // **`beforeunload` ではなく `pagehide`**——前者はモバイルで発火しないことがある
+    読み書き("あ");
+    render(<Viewer host="local" root={ROOT} path={コード} />);
+
+    const 欄 = await screen.findByTestId("file-editor");
+    await userEvent.type(欄, "い");
+    act(() => {
+      globalThis.dispatchEvent(new Event("pagehide"));
+    });
+
+    expect(readEdit("local", コード, null)).toBe("あい");
+  });
+
+  it("別のファイルへ移るとき、古いほうの鍵へ確定する", async () => {
+    /*
+      **新しい鍵へ書くと、別のファイルの書きかけとして現れる**——最も気づきにくい
+      壊れ方である。確定は「離れる側」の鍵で行わなければならない。
+    */
+    const ほか = `${ROOT}/src/other.ts`;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const 相手 = new URL(url, "http://x").searchParams.get("path") ?? "";
+        const text = 相手 === コード ? "あ" : "ほか";
+        return new Response(
+          JSON.stringify({ path: 相手, text, truncated: false, bytes: text.length, stamp: "まえ" }),
+          { status: 200 },
+        );
+      }),
+    );
+    const { rerender } = render(<Viewer host="local" root={ROOT} path={コード} />);
+
+    const 欄 = await screen.findByTestId("file-editor");
+    await userEvent.type(欄, "い");
+    rerender(<Viewer host="local" root={ROOT} path={ほか} />);
+    await waitFor(() => {
+      expect(screen.getByTestId("file-editor")).toHaveValue("ほか");
+    });
+
+    expect(readEdit("local", コード, null)).toBe("あい");
+    // **移った先を汚していない**
+    expect(readEdit("local", ほか, null)).toBeNull();
+  });
+
+  it("保存に成功したあと、窓に残っていたぶんが書き戻らない", async () => {
+    /*
+      写す予定を取り消さないと、**窓の内側で保存したときに直後の書き出しが走り、
+      捨てたはずの書きかけが復活する。** 次に開いた人は「未保存の変更があります」を
+      見るが、中身はディスクと同じ——**戻す意味の無い復元**になる。
+    */
+    読み書き("あ");
+    render(<Viewer host="local" root={ROOT} path={コード} />);
+
+    const 欄 = await screen.findByTestId("file-editor");
+    await userEvent.type(欄, "い");
+    await userEvent.click(screen.getByTestId("file-save"));
+    await waitFor(() => {
+      expect(screen.getByTestId("file-save")).toBeDisabled();
+    });
+
+    // まとめる窓を跨いでも、書き戻っていない
+    await new Promise((resolve) => setTimeout(resolve, WRITE_DEBOUNCE_MS + 60));
+    expect(readEdit("local", コード, null)).toBeNull();
   });
 
   it("切れている中身は保存させない", async () => {
