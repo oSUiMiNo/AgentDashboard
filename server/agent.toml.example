@@ -62,7 +62,8 @@ auto_sleep_idle_secs = 7200
 always_bypass_permissions = false
 
 # セッションへ statusLine を注入するか。切るとモデルは「不明」のままになり、
-# **コンテキスト残量のゲージも出なくなる**（同じ payload で届くため）
+# **コンテキスト残量のゲージ・使用上限・費用も出なくなる**（どれも同じ payload で
+# 届くため）。切ると「まだ分からない」のまま据え置かれる（空っぽの 0% にはならない）
 inject_status_line = true
 
 # 注入する statusLine の実行間隔（秒）

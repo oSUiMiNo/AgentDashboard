@@ -388,6 +388,39 @@ describe('この機械の使用上限（status 完了条件1）', () => {
 
     expect(screen.getByTestId('rate-limits')).toHaveAttribute('data-known', 'false')
   })
+
+  it('近似の断りが、この画面に1つだけ出る', () => {
+    // **画面ごとに一箇所。** 部品ごとに書くと同じ断りが何度も出るが、**画面をまたぐと
+    // 同時に目に入らない**ので、画面ごとには1つ要る（費用＝カードの区画／
+    // 使用上限と活動の記録＝この画面）。**1つだけであることを数える**——
+    // 部品ごとに足す実装へ戻ると2つ以上になる
+    show({ agents: [], machine_rate_limits: { windows: [future(41)] } })
+
+    expect(screen.getAllByTestId('approx-note')).toHaveLength(1)
+  })
+
+  it('概算であることと、請求と違うことが文字で読める', () => {
+    // **`title` に頼らない。** ホバーでしか読めず、狭い窓とタッチでは読めない。
+    // **要素を先に取る**——`?.textContent` の形で書くと、要素が無いとき `undefined` が
+    // 返って検査が素通りする（フェーズ6 で空振りを1件踏んだ）。
+    // **語1つではなく句で見る**——「概算」だけだと、請求との違いを消しても通る
+    show({ agents: [], machine_rate_limits: { windows: [future(41)] } })
+
+    const note = screen.getByTestId('approx-note')
+    expect(note).toHaveTextContent('概算')
+    expect(note).toHaveTextContent('実際の請求とは異なります')
+  })
+
+  it('PC が繋がっている構成では、断りも出さない（覆う数字がここに無い）', () => {
+    // **断りだけが残らないこと。** 使用上限と活動の記録は `hasRemote` で排他なので、
+    // 断りも同じ条件でなければ「何も無い画面に断りだけ」という形になる
+    show({
+      ...remoteAgent('bbbbbbbb-0000-0000-0000-000000000002', '別の PC'),
+      machine_rate_limits: { windows: [future(41)] },
+    })
+
+    expect(screen.queryByTestId('approx-note')).toBeNull()
+  })
 })
 
 describe('活動の記録', () => {
