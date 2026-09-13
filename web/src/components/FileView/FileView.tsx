@@ -60,8 +60,11 @@ import {
   readBlob,
   readFile,
   relativeOf,
+  writeFile,
   type FileContent,
 } from '@/lib/hostfs'
+import { dropEdit, putEdit, readEdit, WRITE_DEBOUNCE_MS } from '@/lib/fileEdits'
+import { useAuthStore } from '@/stores/auth'
 
 /**
  * **これより大きい Markdown は、整形を既定にしない**（`表示できるテキストの上限を3MBへ上げる`
@@ -104,6 +107,27 @@ import {
  * 直すなら分割か仮想化が要るが、それは上限の話とは別の設計になる（別イシュー）。
  */
 const FORMAT_DEFAULT_LIMIT = 256 * 1024
+
+/**
+ * いま何をしている面か（`ファイルビュアにエディタ機能を追加` 設計§5-1）。
+ *
+ * **2値である。**「ビュアーを持たない」は種別から導くので、状態には写さない——
+ * 導けるものを状態に持つと、片方だけ更新される余地が生まれる。
+ */
+export type FileMode = 'viewer' | 'editor'
+
+/**
+ * 開いたときにどちらで始めるか（設計§5-1・§10-2）。
+ *
+ * **ビュアーを持たない種別はエディタで始める。** `text` は表に無い拡張子すべての
+ * 落ちどころなので、**既定がエディタ**になる（要件「設定無しの拡張子はエディタ」）。
+ * `markdown` ／ `html` ／ `svg` はビュアーを持つので、**見たいものをまず見せる。**
+ *
+ * **`image` はどちらも持たない**（描画の手前で分かれるので、ここの値は使われない）。
+ */
+function 既定のモード(kind: ReturnType<typeof fileKind>): FileMode {
+  return kind === 'text' ? 'editor' : 'viewer'
+}
 
 interface Props {
   /** `agent_id` かローカルを表す `'local'` */
@@ -174,8 +198,39 @@ export function FileView({
   const [broken, setBroken] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
-  // 整形できる相手のときだけ意味を持つ。既定は整形（進捗を読むのが目的のため）
-  const [raw, setRaw] = useState(false)
+  /**
+   * いま**ビュアーで見ている**のか、**エディタで編集している**のか（設計§5-1）。
+   *
+   * **名前を `raw` のままにしなかった。** 意味が反転している——もとの `raw=true`
+   * （生テキスト）が、置き換え後は**エディタ**である。名前を残すと読めなくなる。
+   */
+  const [mode, setMode] = useState<FileMode>(() => 既定のモード(kind))
+  /**
+   * 編集中の中身。**`null` は「まだ触っていない」**で、ディスクの中身をそのまま出す。
+   *
+   * **空文字列と区別する**——全部消したのも編集である。
+   */
+  const [書きかけ, set書きかけ] = useState<string | null>(null)
+  /** 保存の最中か。**二重に走らせない** */
+  const [保存中, set保存中] = useState(false)
+  /** 保存が断られた理由。**出しても書きかけは捨てない**（設計§8-4） */
+  const [保存の断り, set保存の断り] = useState<string | null>(null)
+  /**
+   * 次の保存が持っていく印（設計§8-3）。読んだ時点のものから始め、**保存のたびに更新する。**
+   *
+   * **中身を解釈しない。** 作るのも比べるのも PC 側だけで、こちらは持ち回すだけ。
+   * **古い PC は付けてこないので、無いことがありうる**——そのときは保存できない
+   * （省けば上書きできる道を残さないため）。
+   */
+  const [印, set印] = useState<string | undefined>(undefined)
+  /** 書きかけを `localStorage` から戻したか。**黙って戻さない**（設計§7-4） */
+  const [戻した, set戻した] = useState(false)
+  /**
+   * 書きかけの置き場を口座ごとに分けるための名前（`lib/drafts.ts` と同じ作法）。
+   *
+   * **`lib/` から `stores/` は読めない**（依存の向きが逆流する）ので、**呼ぶ側で受けて渡す。**
+   */
+  const account = useAuthStore((state) => state.auth.account)
   /** 探す窓が開いているか（`ファイルビュアの中を Ctrl+F で探せるようにする` 設計） */
   const [find, setFind] = useState(false)
   /**
@@ -222,7 +277,12 @@ export function FileView({
     let made: string | null = null
     setLoading(true)
     setError(null)
-    setRaw(false)
+    setMode(既定のモード(kind))
+    set書きかけ(null)
+    set保存中(false)
+    set保存の断り(null)
+    set印(undefined)
+    set戻した(false)
     // **ファイルを切り替えたら探す窓を畳む。** 前のファイルで打った語がそのまま
     // 残ると、当たりの数だけが別の文書のものに見える
     setFind(false)
@@ -264,9 +324,13 @@ export function FileView({
             // 実際に取り違えて、**2 MB の HTML が `iframe` ではなく `<pre>` へ
             // 落ちた**（利用者の報告・2026-08-27）。しかも断り書きは Markdown に
             // 絞ってあるので、**理由も出ないまま整形が消えた**ように見えていた。
-            if (kind === 'markdown' && result.bytes > FORMAT_DEFAULT_LIMIT) {
-              setRaw(true)
-            }
+            // **ここで反転させない**（設計§5-3）。もとは「重いので生テキストで始める」
+            // だったが、生テキストの居場所は**エディタ**になった。そのまま移すと
+            // **「重いので編集で開く」**という別の意味になる——**重いものを黙って
+            // 編集させるほうが危ない**ので、**ビュアー既定のまま**にする。
+            //
+            // **代わりに、重いことは下の `file-heavy` で言う**（整形に時間がかかること
+            // と、編集へ切り替えれば整形せずに出ること）。**情報は落とさない。**
           }
         }
       } catch (err) {
@@ -298,9 +362,9 @@ export function FileView({
   const boxed = needsSandbox(kind)
   // 整形の逃げ道を出す相手（設計§7-4）。**画像には出さない**——テキストではないので、
   // 出しても読めない。代わりに大きさと種別を出す
-  const canShowSource = markdown || boxed
+  const モードを切り替えられる = markdown || boxed
   /** いま箱（`iframe`）で描いているか。**箱の中へは外から触れない** */
-  const 箱で描いている = boxed && !raw
+  const 箱で描いている = boxed && mode === 'viewer'
   /**
    * いま中を探せるか。**探せるのはテキストとして出している2つだけで、これは選択では
    * なく制約である**（`ファイルビュアの中を Ctrl+F で探せるようにする` 要件）。
@@ -309,6 +373,20 @@ export function FileView({
    * - HTML ／ SVG の箱は `allow-same-origin` を書いていないので**別の出自を名乗る**
    *   ——外から中身に触れないのは**隔離が効いている証拠**であって、直すべき不具合ではない
    */
+  /** いま出す本文。**触っていなければディスクの中身そのもの** */
+  const 本文 = 書きかけ ?? content?.text ?? ''
+  /** ディスクの中身と違うか。**空にしたのも違いである** */
+  const 変えた = 書きかけ !== null && content !== null && 書きかけ !== content.text
+  /**
+   * 保存を押せるか。**ボタンと鍵盤が同じ述語を読む**（設計§6-7）——別々に書くと
+   * 「ボタンは押せないのに鍵盤では保存できる」が起こる。
+   *
+   * - **切れている中身は保存させない**（設計§9）。一部しか読んでいないものを書くと
+   *   **ファイルを切り詰めて上書きする**
+   * - **印が無ければ保存させない**（設計§8-3）。省けば上書きできる道を残さない
+   */
+  const 保存できる =
+    変えた && !保存中 && content !== null && content.truncated !== true && 印 !== undefined
   const 探せる = !loading && content !== null && !箱で描いている
   /**
    * 探す入口を出すか。**プレビューでも出す**（利用者の指摘・2026-09-08）。
@@ -375,14 +453,92 @@ export function FileView({
     set探す合図((n) => n + 1)
   }, [箱で描いている, 箱の中で探せる])
 
-  /** 断りを受けて、生テキストへ切り替えてから探す（SVG だけが通る道） */
+  /** 断りを受けて、エディタへ切り替えてから探す（SVG だけが通る道） */
   const 切り替えて探す = useCallback(() => {
     set切り替えるか(false)
-    setRaw(true)
+    setMode('editor')
     set切替えた(true)
     setFind(true)
     set探す合図((n) => n + 1)
   }, [])
+
+  /**
+   * 読み終えたら、印を控え、**書きかけが残っていないか見る**（設計§7-4）。
+   *
+   * **黙って戻さない。** 戻したことは画面で言い、**捨てる道を必ず添える**——
+   * 黙って戻すと、ディスクの中身と違うものを見ているのに気づけない。
+   */
+  useEffect(() => {
+    if (content === null) {
+      return
+    }
+    set印(content.stamp)
+    const 残り = readEdit(host, path, account)
+    if (残り !== null && 残り !== content.text) {
+      set書きかけ(残り)
+      set戻した(true)
+    }
+  }, [content, host, path, account])
+
+  /**
+   * 打鍵を**まとめて**写す（設計§7-3）。1文字ごとには書かない。
+   *
+   * ここまで済んでいれば、**タブを閉じる・別のファイルへ移る・版が切り替わって
+   * タブが読み直す**のすべてが無害になる。だから `beforeunload` は足さない
+   * （web 全体に1つも無く、`pagehide` を意図して選んでいる）。
+   */
+  useEffect(() => {
+    if (書きかけ === null) {
+      return
+    }
+    const 札 = setTimeout(() => {
+      putEdit(host, path, 書きかけ, account)
+    }, WRITE_DEBOUNCE_MS)
+    return () => {
+      clearTimeout(札)
+    }
+  }, [書きかけ, host, path, account])
+
+  /**
+   * ディスクへ書き戻す（設計§2・§8）。
+   *
+   * **印を持っていく。** 読んでから保存するまでに他所で書き換えられていたら、
+   * PC 側が断る——**このダッシュボードは別のセッションの claude が同じファイルを
+   * 触るのが日常**なので、黙って上書きすると**相手の作業が音もなく消える**。
+   */
+  const 保存する = useCallback(async () => {
+    if (content === null || 書きかけ === null || 印 === undefined) {
+      return
+    }
+    const 送る = 書きかけ
+    set保存中(true)
+    set保存の断り(null)
+    try {
+      const 答え = await writeFile(host, path, 送る, 印)
+      set印(答え.stamp)
+      setContent((now) =>
+        now === null ? now : { ...now, text: 送る, bytes: 答え.bytes, stamp: 答え.stamp },
+      )
+      set書きかけ(null)
+      set戻した(false)
+      // **成功したときだけ捨てる**（設計§7-3）
+      dropEdit(host, path, account)
+    } catch (err) {
+      // **失敗しても書きかけを捨てない**（設計§8-4）。捨てると、断られた瞬間に
+      // 打った文が消える——直せるはずのものが直せなくなる
+      set保存の断り(err instanceof Error ? err.message : '保存できませんでした')
+    } finally {
+      set保存中(false)
+    }
+  }, [content, 書きかけ, 印, host, path, account])
+
+  /** 編集を捨ててディスクの中身へ戻す。**戻す先を必ず用意する**（設計§7-4） */
+  const 編集を捨てる = useCallback(() => {
+    set書きかけ(null)
+    set戻した(false)
+    set保存の断り(null)
+    dropEdit(host, path, account)
+  }, [host, path, account])
 
   /*
     **Ctrl+F ／ Ctrl+G を奪うのは、探す入口があるときだけ。**
@@ -556,17 +712,25 @@ export function FileView({
             </Button>
           </div>
 
-          {canShowSource && (
+          {/* **「生テキストで見る」を、見る／編集するのトグルへ置き換えた**（設計§5）。
+              綴りも `file-toggle-raw` から変えてある——**`raw` は意味が反転している**
+              ので、印に残すと次に読む人が取り違える。
+
+              **ビュアーを持たない種別には出さない**（`text` ／ `image`）。要件は
+              「押しても反応しない」と書いていたが、**この PJT は「出さない」を採る**
+              （押せて何も起きないものは壊れて見える）。**無いことは `DESIGN.md` の
+              総当たり表へ「意図して出さない」と記録してある。** */}
+          {モードを切り替えられる && (
             <Button
               type="button"
               variant="ghost"
               size="sm"
-              data-testid="file-toggle-raw"
-              aria-pressed={raw}
-              aria-label={raw ? '整形して見る' : '生テキストで見る'}
-              title={raw ? '整形して見る' : '生テキストで見る'}
+              data-testid="file-toggle-mode"
+              aria-pressed={mode === 'editor'}
+              aria-label={mode === 'editor' ? '見る' : '編集する'}
+              title={mode === 'editor' ? '見る' : '編集する'}
               onClick={() => {
-                setRaw((now) => !now)
+                setMode((now) => (now === 'viewer' ? 'editor' : 'viewer'))
                 // **人が自分で見せ方を変えたら、こちらの断りは消す。** そこから先は
                 // 押した人が選んだ見せ方であって、こちらが切り替えた結果ではない
                 set切替えた(false)
@@ -575,9 +739,27 @@ export function FileView({
             >
               {/* **狭い窓では印だけ**（§39.6）。言葉は `aria-label` と `title` に残る */}
               <CodeGlyph className="md:hidden" />
-              <span className="hidden md:inline">
-                {raw ? '整形して見る' : '生テキストで見る'}
-              </span>
+              <span className="hidden md:inline">{mode === 'editor' ? '見る' : '編集する'}</span>
+            </Button>
+          )}
+          {/* **保存はエディタのときだけ出す。** ビュアーに出しても書く対象が無い。
+
+              **押せる条件は `保存できる` 1つ**（設計§6-7）——ボタンと、のちに足す
+              鍵盤の道が**同じ述語を読む**。別々に書くと食い違う。 */}
+          {mode === 'editor' && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              data-testid="file-save"
+              aria-label="保存する"
+              title="保存する"
+              disabled={!保存できる}
+              onClick={() => {
+                void 保存する()
+              }}
+            >
+              {保存中 ? '保存中…' : '保存'}
             </Button>
           )}
           {/* **押す道はリンクにする**（設計§6-2）。`window.open` を呼ぶボタンにすると、
@@ -666,10 +848,37 @@ export function FileView({
         </p>
       )}
 
-      {切替えた && raw && (
+      {切替えた && mode === 'editor' && (
         <p data-testid="file-find-switched" className="text-xs text-amber-300">
-          中を探すために、生テキストに切り替えました（プレビューのままでは中に触れません）。
-          「整形して見る」で戻せます。
+          中を探すために、編集の面に切り替えました（プレビューのままでは中に触れません）。
+          「見る」で戻せます。
+        </p>
+      )}
+
+      {/* **黙って戻さない**（設計§7-4）。前に開いたときの書きかけが残っていたら
+          そう言い、**捨てる道を必ず添える**——添えないと、ディスクの中身へ戻る手が
+          無くなる */}
+      {戻した && (
+        <p data-testid="file-unsaved" className="text-xs text-amber-300">
+          未保存の変更があります（前に開いたときの続きです）。
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            data-testid="file-discard"
+            onClick={編集を捨てる}
+          >
+            編集を捨てる
+          </Button>
+        </p>
+      )}
+
+      {/* **断られても書きかけは消さない**（設計§8-4）。理由をそのまま出す——
+          「許可されていない場所」「他所で書き換えられていた」は、**利用者が直せる
+          ものと直せないものが違う**ので、こちらでまとめない */}
+      {保存の断り !== null && (
+        <p data-testid="file-save-error" className="text-xs text-red-300">
+          保存できませんでした：{保存の断り}
         </p>
       )}
 
@@ -690,10 +899,10 @@ export function FileView({
       {/* **なぜ整形されていないのかを言う**（`FORMAT_DEFAULT_LIMIT`）。
           黙って生テキストで出すと、整形が壊れたように見える。
           禁じてはいないので、押せば整形する——待つと決めるのは利用者 */}
-      {markdown && raw && content !== null && content.bytes > FORMAT_DEFAULT_LIMIT && (
+      {markdown && mode === 'viewer' && content !== null && content.bytes > FORMAT_DEFAULT_LIMIT && (
         <p data-testid="file-heavy" className="text-xs text-amber-300">
-          大きいので整形せずに出しています（{content.bytes} バイト）。整形すると時間が
-          かかります。
+          大きいので整形に時間がかかります（{content.bytes} バイト）。「編集する」に
+          切り替えると、整形せずに出します。
         </p>
       )}
 
@@ -791,7 +1000,7 @@ export function FileView({
           {find && (探せる || 箱の中で探せる) && (
             <FileFind
               /* **整形と生テキストでは木の形が違う**ので、切り替えたら探し直す */
-              contentKey={`${path}:${String(raw)}`}
+              contentKey={`${path}:${mode}`}
               合図={探す合図}
               bodyRef={bodyRef}
               /* **箱を見ているときは、中の係へ頼む**（親からは中に触れない） */
@@ -804,7 +1013,7 @@ export function FileView({
             data-testid="file-body"
             className="min-h-0 flex-1 overflow-auto"
           >
-          {boxed && !raw ? (
+          {boxed && mode === 'viewer' ? (
             /* **隔離した箱**（設計§6-1）。鍵は二重で、ここに書く `sandbox` 属性と、
                応答に付く CSP の `sandbox` 指令。後者は**URL を直接開かれたときにも
                効く**唯一の鍵になる。
@@ -846,7 +1055,7 @@ export function FileView({
                 className="file-frame border-0 bg-white"
               />
             </div>
-          ) : markdown && !raw ? (
+          ) : markdown && mode === 'viewer' ? (
             <div
               data-testid="file-markdown"
               /* **大きさを直書きしない**（もとは `text-sm leading-relaxed`）。
@@ -872,13 +1081,31 @@ export function FileView({
               </ReactMarkdown>
             </div>
           ) : (
-            <pre
-              data-testid="file-raw"
-              /* **同上。** `text-xs` を外して器から取る */
-              className="text-muted-foreground file-raw overflow-x-auto whitespace-pre-wrap"
-            >
-              {content.text}
-              </pre>
+            /* **エディタ**（設計§6）。この段は**素の `textarea`**で、色付けと行番号は
+               次のフェーズで重ねる。**それでも「編集して保存できる」状態として単独で
+               成立している。**
+
+               **`file-raw` を流用していない。** 生テキストの表示とエディタは別物で、
+               同じ印だと総当たり表が区別できない。
+
+               **大きさは器から取る**（`index.css` の `.file-zoom .file-editor`）。
+               直書きすると器の変数が勝てず、**この種類だけ拡大縮小が黙って効かなくなる**。
+               次のフェーズで重ねる `<pre>` は、**ここと同じ変数を同じ経路で読む**こと
+               ——片方だけ繋ぐと、ずれがカーソル位置に出る。
+
+               **`wrap="off"`。** 折り返さずに横へ送る——**横スクロールを持つ層が
+               ここへ移る**（もとは `<pre>` が持っていた）。 */
+            <textarea
+              data-testid="file-editor"
+              className="text-muted-foreground file-editor h-full w-full resize-none overflow-auto border-0 bg-transparent font-mono outline-none"
+              wrap="off"
+              spellCheck={false}
+              aria-label={`${relative} を編集`}
+              value={本文}
+              onChange={(event) => {
+                set書きかけ(event.target.value)
+              }}
+            />
             )}
           </div>
         </div>

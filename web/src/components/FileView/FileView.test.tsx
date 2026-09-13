@@ -10,6 +10,7 @@ import userEvent from "@testing-library/user-event";
 import { type ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FileView } from "@/components/FileView/FileView";
+import { putEdit, readEdit } from "@/lib/fileEdits";
 import { previewUrl, rawUrl } from "@/lib/hostfs";
 
 const ROOT = "/home/me/dev/app";
@@ -216,30 +217,31 @@ describe("ファイルの見せ方", () => {
     expect(screen.getByText(/1行目/).textContent).toContain("1行目\n2行目");
   });
 
-  it("生テキストへ切り替えられる", async () => {
+  it("エディタへ切り替えられる", async () => {
     serve(content("# 計画\n\n本文\n"));
     show();
 
     await screen.findByTestId("file-markdown");
-    await userEvent.click(screen.getByTestId("file-toggle-raw"));
+    await userEvent.click(screen.getByTestId("file-toggle-mode"));
 
-    // 整形が嘘をついたときに確かめる先が要る（設計§15）
-    expect(screen.getByTestId("file-raw")).toHaveTextContent("# 計画");
+    // 整形が嘘をついたときに確かめる先が要る（設計§15）。
+    // **いまはその面が編集もできる**（`ファイルビュアにエディタ機能を追加` 設計§5）
+    expect(screen.getByTestId("file-editor")).toHaveValue("# 計画\n\n本文\n");
     expect(screen.queryByTestId("file-markdown")).toBeNull();
 
-    await userEvent.click(screen.getByTestId("file-toggle-raw"));
+    await userEvent.click(screen.getByTestId("file-toggle-mode"));
     expect(await screen.findByTestId("file-markdown")).toBeInTheDocument();
   });
 
-  it("Markdown ではないファイルは、最初から生テキストで出る", async () => {
+  it("Markdown ではないファイルは、最初からエディタで出る", async () => {
     serve(content("const a = 1\n"));
     show(`${ROOT}/src/index.ts`);
 
-    expect(await screen.findByTestId("file-raw")).toHaveTextContent(
-      "const a = 1",
-    );
-    // 切り替える意味が無いので、切替そのものを出さない
-    expect(screen.queryByTestId("file-toggle-raw")).toBeNull();
+    // **ビュアーを持たない種別は、開いた瞬間からエディタである**（設計§5-1）。
+    // 表に無い拡張子はすべてここへ落ちるので、**既定がエディタ**になる
+    expect(await screen.findByTestId("file-editor")).toHaveValue("const a = 1\n");
+    // 切り替える先が無いので、切替そのものを出さない
+    expect(screen.queryByTestId("file-toggle-mode")).toBeNull();
   });
 
   it("打ち切られた中身が、打ち切られたと分かる", async () => {
@@ -250,7 +252,7 @@ describe("ファイルの見せ方", () => {
     expect(await screen.findByTestId("file-truncated")).toBeInTheDocument();
   });
 
-  it("大きい Markdown は整形せずに始まり、なぜそうしたかが出る", async () => {
+  it("大きい Markdown もビュアーで始まり、重いことが出る", async () => {
     // **`bytes` で決まる**ので、材料そのものを大きくしなくても道は通る。
     // 整形は大きさに対して超線形に伸び、3 MiB では終わらない（実測。`FileView.tsx`）
     serve({
@@ -261,15 +263,21 @@ describe("ファイルの見せ方", () => {
     });
     show(`${ROOT}/大きい.md`);
 
-    expect(await screen.findByTestId("file-raw")).toHaveTextContent(
-      "# 大きい文書",
-    );
-    expect(screen.queryByTestId("file-markdown")).toBeNull();
-    // **黙って生テキストにしない。** 何も言わずに出すと、整形が壊れたように見える
+    /*
+      **振る舞いが変わった**（`ファイルビュアにエディタ機能を追加` 設計§5-3）。
+
+      もとは「重いので生テキストで始める」だったが、**生テキストの居場所はエディタに
+      なった**。そのまま移すと**「重いので編集で開く」**という別の意味になる——
+      **重いものを黙って編集させるほうが危ない**ので、**ビュアー既定のまま**にしてある。
+
+      **情報は落としていない。** 重いことと、編集へ切り替えれば整形せずに出ることを言う。
+    */
+    expect(await screen.findByTestId("file-markdown")).toBeInTheDocument();
+    expect(screen.queryByTestId("file-editor")).toBeNull();
     expect(screen.getByTestId("file-heavy")).toBeInTheDocument();
   });
 
-  it("大きくても、整形そのものは禁じない", async () => {
+  it("大きくても、編集へ移れば整形せずに出る", async () => {
     serve({
       path: `${ROOT}/大きい.md`,
       text: "# 大きい文書",
@@ -278,11 +286,11 @@ describe("ファイルの見せ方", () => {
     });
     show(`${ROOT}/大きい.md`);
 
-    await screen.findByTestId("file-raw");
-    await userEvent.click(screen.getByTestId("file-toggle-raw"));
+    await screen.findByTestId("file-markdown");
+    await userEvent.click(screen.getByTestId("file-toggle-mode"));
 
-    // 待つと決めるのは利用者。押せば整形するし、断り書きは引っ込む
-    expect(await screen.findByTestId("file-markdown")).toBeInTheDocument();
+    // **整形を待たずに中身へ触れる道は残っている。** 断り書きは引っ込む
+    expect(await screen.findByTestId("file-editor")).toBeInTheDocument();
     expect(screen.queryByTestId("file-heavy")).toBeNull();
   });
 
@@ -425,7 +433,7 @@ describe("ブラウザで開く", () => {
     const 並び = [
       "file-find-open",
       "file-zoom",
-      "file-toggle-raw",
+      "file-toggle-mode",
       "file-open-tab",
       "file-close",
     ].map((id) => screen.getByTestId(id));
@@ -602,7 +610,7 @@ describe("画像と HTML", () => {
     render(<Viewer host="local" root={ROOT} path={`${ROOT}/理解.html`} />);
 
     expect(await screen.findByTestId("file-frame")).toBeInTheDocument();
-    expect(screen.queryByTestId("file-raw")).toBeNull();
+    expect(screen.queryByTestId("file-editor")).toBeNull();
     // 断り書きも出ない。**説明することが無い**（重くないので）
     expect(screen.queryByTestId("file-heavy")).toBeNull();
   });
@@ -672,7 +680,7 @@ describe("画像と HTML", () => {
     }
   });
 
-  it("HTML でも生テキストへ行き来できる", async () => {
+  it("HTML でもエディタへ行き来できる", async () => {
     record(
       () =>
         new Response(
@@ -688,9 +696,11 @@ describe("画像と HTML", () => {
     render(<Viewer host="local" root={ROOT} path={`${ROOT}/理解.html`} />);
     await screen.findByTestId("file-frame");
 
-    await userEvent.click(screen.getByTestId("file-toggle-raw"));
+    await userEvent.click(screen.getByTestId("file-toggle-mode"));
 
-    expect(screen.getByTestId("file-raw")).toHaveTextContent("<p>理解</p>");
+    expect(screen.getByTestId("file-editor")).toHaveValue(
+      "<!doctype html><p>理解</p>",
+    );
     expect(screen.queryByTestId("file-frame")).toBeNull();
   });
 });
@@ -721,10 +731,10 @@ describe("中を探す", () => {
     expect(await screen.findByTestId("file-find-open")).toBeInTheDocument();
   });
 
-  it("生テキストで見ているときも出る", async () => {
+  it("エディタで見ているときも出る", async () => {
     serve(content("# 計画"));
     show();
-    await userEvent.click(await screen.findByTestId("file-toggle-raw"));
+    await userEvent.click(await screen.findByTestId("file-toggle-mode"));
     expect(screen.getByTestId("file-find-open")).toBeInTheDocument();
   });
 
@@ -808,7 +818,7 @@ describe("中を探す", () => {
 
     await userEvent.click(screen.getByTestId("file-find-confirm-go"));
 
-    expect(await screen.findByTestId("file-raw")).toBeInTheDocument();
+    expect(await screen.findByTestId("file-editor")).toBeInTheDocument();
     expect(screen.getByTestId("file-find")).toBeInTheDocument();
     expect(screen.getByTestId("file-find-switched")).toBeInTheDocument();
   });
@@ -832,7 +842,7 @@ describe("中を探す", () => {
     await userEvent.click(screen.getByTestId("file-find-confirm-go"));
     expect(screen.getByTestId("file-find-switched")).toBeInTheDocument();
 
-    await userEvent.click(screen.getByTestId("file-toggle-raw"));
+    await userEvent.click(screen.getByTestId("file-toggle-mode"));
     expect(screen.queryByTestId("file-find-switched")).toBeNull();
   });
   it("入口を押すと窓が出て、すぐ打てる", async () => {
@@ -1020,12 +1030,16 @@ describe("文字の大きさ", () => {
     expect(本文.className).not.toContain("leading-relaxed");
   });
 
-  it("生テキストにも直書きが残っていない", async () => {
+  it("エディタにも直書きが残っていない", async () => {
+    /*
+      **次のフェーズで色付きの `<pre>` を重ねるとき、同じ変数を同じ経路で読ませる。**
+      片方だけ器に繋ぐと、**ずれがカーソル位置に出る**（設計§6-2）。
+    */
     serve(content("# 計画"));
     show();
-    await userEvent.click(await screen.findByTestId("file-toggle-raw"));
-    const 素 = screen.getByTestId("file-raw");
-    expect(素.className).toContain("file-raw");
+    await userEvent.click(await screen.findByTestId("file-toggle-mode"));
+    const 素 = screen.getByTestId("file-editor");
+    expect(素.className).toContain("file-editor");
     expect(素.className).not.toContain("text-xs");
   });
 
@@ -1081,7 +1095,7 @@ describe("ヘッダは1行", () => {
     expect(群?.className).toContain("shrink-0");
   });
 
-  it("狭い窓では「生テキストで見る」が印だけになる", async () => {
+  it("狭い窓では「編集する」が印だけになる", async () => {
     /*
       **折り返しを禁じたぶん、いちばん広い部品が入らなくなる**（約120px）。
       `DESIGN.md` §39.6 のターミナルトグルが同じことをしている。
@@ -1089,12 +1103,182 @@ describe("ヘッダは1行", () => {
     */
     serve(content("# 計画"));
     show();
-    const 切替 = await screen.findByTestId("file-toggle-raw");
-    expect(切替).toHaveAttribute("aria-label", "生テキストで見る");
+    const 切替 = await screen.findByTestId("file-toggle-mode");
+    expect(切替).toHaveAttribute("aria-label", "編集する");
     expect(切替.querySelector("svg")?.getAttribute("class")).toContain(
       "md:hidden",
     );
     expect(切替.querySelector("span")?.className).toContain("hidden");
     expect(切替.querySelector("span")?.className).toContain("md:inline");
+  });
+});
+
+/**
+ * 編集して保存する（`ファイルビュアにエディタ機能を追加` 設計§7・§8）。
+ *
+ * **この段のエディタは素の `textarea`** で、色付けも行番号も入っていない。
+ * それでも**「編集して保存できる」状態として単独で成立している**ことを、ここで固定する。
+ */
+describe("編集と保存", () => {
+  const コード = `${ROOT}/src/index.ts`;
+
+  /** 読む口と書く口の両方に答える。**書く側は `PUT` で来る** */
+  function 読み書き(text: string, 書いた?: () => Response) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        if (init?.method === "PUT") {
+          return 書いた
+            ? 書いた()
+            : new Response(
+                JSON.stringify({ path: コード, bytes: 3, stamp: "あと" }),
+                { status: 200 },
+              );
+        }
+        return new Response(
+          JSON.stringify({
+            path: コード,
+            text,
+            truncated: false,
+            bytes: text.length,
+            stamp: "まえ",
+          }),
+          { status: 200 },
+        );
+      }),
+    );
+  }
+
+  beforeEach(() => {
+    globalThis.localStorage.clear();
+  });
+
+  it("打った中身が保存でき、書きかけは消える", async () => {
+    読み書き("あ");
+    render(<Viewer host="local" root={ROOT} path={コード} />);
+
+    const 欄 = await screen.findByTestId("file-editor");
+    await userEvent.clear(欄);
+    await userEvent.type(欄, "いろは");
+
+    await userEvent.click(screen.getByTestId("file-save"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("file-save")).toBeDisabled();
+    });
+    // **成功したときだけ捨てる**（設計§7-3）
+    await waitFor(() => {
+      expect(readEdit("local", コード, null)).toBeNull();
+    });
+  });
+
+  it("保存が断られても、書きかけは捨てない", async () => {
+    /*
+      **捨てると、断られた瞬間に打った文が消える**（設計§8-4）——直せるはずのものが
+      直せなくなる。「許可されていない場所」も「他所で書き換えられていた」も、
+      **人が次の手を打てる**種類の断りである。
+    */
+    読み書き("あ", () => new Response("許可されていない場所です", { status: 403 }));
+    render(<Viewer host="local" root={ROOT} path={コード} />);
+
+    const 欄 = await screen.findByTestId("file-editor");
+    await userEvent.type(欄, "い");
+    await userEvent.click(screen.getByTestId("file-save"));
+
+    expect(await screen.findByTestId("file-save-error")).toHaveTextContent(
+      "許可されていない場所です",
+    );
+    // **打った文はそのまま残っている**
+    expect(screen.getByTestId("file-editor")).toHaveValue("あい");
+  });
+
+  it("前の書きかけが残っていたら、そう言って捨てる道を出す", async () => {
+    // **黙って戻さない**（設計§7-4）。ディスクの中身と違うものを見ていると気づけない
+    putEdit("local", コード, "前の続き", null);
+    読み書き("ディスクの中身");
+    render(<Viewer host="local" root={ROOT} path={コード} />);
+
+    expect(await screen.findByTestId("file-unsaved")).toBeInTheDocument();
+    expect(screen.getByTestId("file-editor")).toHaveValue("前の続き");
+
+    await userEvent.click(screen.getByTestId("file-discard"));
+
+    expect(screen.getByTestId("file-editor")).toHaveValue("ディスクの中身");
+    expect(screen.queryByTestId("file-unsaved")).toBeNull();
+    expect(readEdit("local", コード, null)).toBeNull();
+  });
+
+  it("触っていなければ保存は押せない", async () => {
+    読み書き("あ");
+    render(<Viewer host="local" root={ROOT} path={コード} />);
+    await screen.findByTestId("file-editor");
+
+    expect(screen.getByTestId("file-save")).toBeDisabled();
+  });
+
+  it("切れている中身は保存させない", async () => {
+    /*
+      **一部しか読んでいないものを書くと、ファイルを切り詰めて上書きする**（設計§9）。
+      いまは上限超えを丸ごと断る作りなので `truncated` は立たないが、**備えは先に置く。**
+    */
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              path: コード,
+              text: "先頭だけ",
+              truncated: true,
+              bytes: 9999,
+              stamp: "まえ",
+            }),
+            { status: 200 },
+          ),
+      ),
+    );
+    render(<Viewer host="local" root={ROOT} path={コード} />);
+
+    const 欄 = await screen.findByTestId("file-editor");
+    await userEvent.type(欄, "い");
+
+    expect(screen.getByTestId("file-save")).toBeDisabled();
+  });
+
+  it("印が無ければ保存させない", async () => {
+    /*
+      **古い PC は印を付けてこない**（設計§8-3）。省いたまま書けると、
+      **他所の書き換えを黙って踏み潰す道**が残る。
+    */
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              path: コード,
+              text: "あ",
+              truncated: false,
+              bytes: 1,
+            }),
+            { status: 200 },
+          ),
+      ),
+    );
+    render(<Viewer host="local" root={ROOT} path={コード} />);
+
+    const 欄 = await screen.findByTestId("file-editor");
+    await userEvent.type(欄, "い");
+
+    expect(screen.getByTestId("file-save")).toBeDisabled();
+  });
+
+  it("ビュアーで見ているときは、保存を出さない", async () => {
+    // 書く対象が無い面に出しても、押せて何も起きないものになる
+    読み書き("# 計画");
+    render(<Viewer host="local" root={ROOT} path={`${ROOT}/計画.md`} />);
+    await screen.findByTestId("file-markdown");
+
+    expect(screen.queryByTestId("file-save")).toBeNull();
   });
 });

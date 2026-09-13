@@ -44,7 +44,9 @@ const ROOT = '/home/me/dev/app'
  */
 const 器から取る印 = {
   'file-markdown': 'file-prose',
-  'file-raw': 'file-raw',
+  // **エディタは `file-raw` を流用していない**（`ファイルビュアにエディタ機能を追加`
+  // 設計§10-1）。生テキストの表示とエディタは別物で、同じ印だとここが区別できない
+  'file-editor': 'file-editor',
   'file-frame': 'file-frame',
   'file-image': 'file-image',
 } as const
@@ -62,8 +64,8 @@ interface 行 {
   path: string
   /** 何で描かれるか（`data-testid`） */
   本体: keyof typeof 器から取る印
-  /** 生テキストで見る */
-  生テキスト: '出る' | '意図して出さない'
+  /** 見る／編集するのトグル（もとの「生テキストで見る」） */
+  モード切替: '出る' | '意図して出さない'
   /** 探す入口 */
   探す: 'その場で' | '切り替えて' | '意図して出さない'
   /** 備考（**別のイシューの担当**はここへ繋ぐ） */
@@ -81,15 +83,16 @@ const 表: 行[] = [
     kind: 'markdown',
     path: `${ROOT}/計画.md`,
     本体: 'file-markdown',
-    生テキスト: '出る',
+    モード切替: '出る',
     探す: 'その場で',
   },
   {
     kind: 'text',
     path: `${ROOT}/メモ.txt`,
-    本体: 'file-raw',
-    // **既に生テキストなので、切り替える先が無い**
-    生テキスト: '意図して出さない',
+    // **ビュアーを持たないので、開いた瞬間からエディタである**（設計§5-1）
+    本体: 'file-editor',
+    // **切り替える先（ビュアー）が無い。** 押せて何も起きないものは出さない
+    モード切替: '意図して出さない',
     探す: 'その場で',
     備考:
       '表に無い拡張子はすべてここへ落ちる（コード・構造化データ・PDF・中身が読めないもの）。' +
@@ -99,7 +102,7 @@ const 表: 行[] = [
     kind: 'html',
     path: `${ROOT}/理解.html`,
     本体: 'file-frame',
-    生テキスト: '出る',
+    モード切替: '出る',
     // **箱の中に係を置いてある**ので、見ている姿のまま探せる
     探す: 'その場で',
   },
@@ -107,16 +110,16 @@ const 表: 行[] = [
     kind: 'svg',
     path: `${ROOT}/図.svg`,
     本体: 'file-frame',
-    生テキスト: '出る',
-    // **`</svg>` の外に要素を置けない**ので係を足せない。先に断って生テキストへ
+    モード切替: '出る',
+    // **`</svg>` の外に要素を置けない**ので係を足せない。先に断ってエディタへ
     探す: '切り替えて',
   },
   {
     kind: 'image',
     path: `${ROOT}/撮った.png`,
     本体: 'file-image',
-    // **テキストではない**ので、切り替える先が無い
-    生テキスト: '意図して出さない',
+    // **テキストではない**ので、編集も整形も無い
+    モード切替: '意図して出さない',
     // **文字を持たない**ので、探す先が無い
     探す: '意図して出さない',
   },
@@ -236,15 +239,15 @@ describe('種類 × 帯の機能（総当たり）', () => {
     }
   })
 
-  it.each(表)('$kind：生テキストの切替は、表のとおりに出る／出ない', async (行) => {
+  it.each(表)('$kind：見る／編集するの切替は、表のとおりに出る／出ない', async (行) => {
     render(<Viewer host="local" root={ROOT} path={行.path} />)
     await screen.findByTestId(行.本体)
 
-    if (行.生テキスト === '出る') {
-      expect(screen.getByTestId('file-toggle-raw')).toBeInTheDocument()
+    if (行.モード切替 === '出る') {
+      expect(screen.getByTestId('file-toggle-mode')).toBeInTheDocument()
     } else {
       // **意図して出していない。** 切り替える先が無い種類
-      expect(screen.queryByTestId('file-toggle-raw')).toBeNull()
+      expect(screen.queryByTestId('file-toggle-mode')).toBeNull()
     }
   })
 
@@ -270,18 +273,18 @@ describe('種類 × 帯の機能（総当たり）', () => {
   })
 })
 
-describe('生テキストへ切り替えたとき', () => {
-  it.each(表.filter((r) => r.生テキスト === '出る'))(
+describe('エディタへ切り替えたとき', () => {
+  it.each(表.filter((r) => r.モード切替 === '出る'))(
     '$kind：切り替えた先でも、大きさは本体へ届く',
     async (行) => {
-      // **描く経路は「種類 × 生テキストか」で決まる。** 切り替えた先も同じ道に居ること
+      // **描く経路は「種類 × モード」で決まる。** 切り替えた先も同じ道に居ること
       render(<Viewer host="local" root={ROOT} path={行.path} />)
       await screen.findByTestId(行.本体)
 
-      await userEvent.click(screen.getByTestId('file-toggle-raw'))
+      await userEvent.click(screen.getByTestId('file-toggle-mode'))
 
-      const 本体 = await screen.findByTestId('file-raw')
-      expect(本体.className.split(/\s+/)).toContain('file-raw')
+      const 本体 = await screen.findByTestId('file-editor')
+      expect(本体.className.split(/\s+/)).toContain('file-editor')
       for (const 綴り of 直書き) {
         expect(本体.className.split(/\s+/)).not.toContain(綴り)
       }

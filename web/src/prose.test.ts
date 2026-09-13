@@ -165,8 +165,14 @@ describe("構造化ビューの文字の大きさ（細かい修正 項目11・1
     // **直書きが残っていると、器の変数は勝てない**（このファイルの他の節と同じ落とし穴）
     expect(src).not.toContain("prose-dashboard text-sm");
     expect(src).toContain("prose-dashboard file-prose");
-    expect(src).not.toContain('data-testid="file-raw"\n              className="text-muted-foreground overflow-x-auto text-xs');
-    expect(src).toContain("file-raw overflow-x-auto whitespace-pre-wrap");
+    /*
+      **生テキストの `<pre>` は、エディタへ置き換わった**（`ファイルビュアにエディタ機能を
+      追加` 設計§5）。見る先を移してあるが、**守りたかったこと（本体に大きさを直書き
+      しない）は変わっていない。**
+    */
+    expect(src).toContain('data-testid="file-editor"');
+    expect(src).toContain("file-editor h-full w-full");
+    expect(src).not.toContain("file-editor text-xs");
   });
 
   it("ファイルビュアの器は、構造化ビューのトークンを読まない", () => {
@@ -177,6 +183,11 @@ describe("構造化ビューの文字の大きさ（細かい修正 項目11・1
       "font-size: var(--file-prose-size)",
     );
     expect(規則(".file-zoom .file-raw")).toContain(
+      "font-size: var(--file-raw-size)",
+    );
+    // **エディタも同じ変数から取る。** 面によって大きさが変わると、切り替えるたびに
+    // 字が跳ぶ。**次のフェーズで重ねる `<pre>` も、ここと同じ変数を読む**
+    expect(規則(".file-zoom .file-editor")).toContain(
       "font-size: var(--file-raw-size)",
     );
   });
