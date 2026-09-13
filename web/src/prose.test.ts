@@ -169,10 +169,28 @@ describe("構造化ビューの文字の大きさ（細かい修正 項目11・1
       **生テキストの `<pre>` は、エディタへ置き換わった**（`ファイルビュアにエディタ機能を
       追加` 設計§5）。見る先を移してあるが、**守りたかったこと（本体に大きさを直書き
       しない）は変わっていない。**
+
+      **2026-09-13 にもう一度移した。** エディタが3層（行番号・色付きの `<pre>`・打つ
+      `<textarea>`）になり、`FileEditor.tsx` へ切り出されたためである。**守りたいことは
+      同じ**なので、見る先だけを移す。
     */
-    expect(src).toContain('data-testid="file-editor"');
-    expect(src).toContain("file-editor h-full w-full");
-    expect(src).not.toContain("file-editor text-xs");
+    const editor = 読む("components/FileView/FileEditor.tsx");
+    expect(editor).toContain('data-testid="file-editor"');
+    expect(editor).toContain("file-editor");
+    /*
+      **3層のどれにも大きさを直書きしない。** 1層でも持つと、器の変数を変えたときに
+      その層だけ動かず、**ずれがカーソル位置に出る**。
+
+      **層の綴りと同じ `class` の中だけを見る。** ファイル全体で `text-*` を禁じると、
+      **注意書きのような、層ではない要素まで巻き添えにする**（それらは他の面と同じで、
+      自分の大きさを持ってよい）。
+    */
+    for (const 層 of ["file-editor", "file-editor-paint", "file-editor-gutter"]) {
+      expect(
+        editor,
+        `${層} に大きさが直書きされている`,
+      ).not.toMatch(new RegExp(`${層}[^"]*\\btext-(xs|sm|base|lg)\\b`));
+    }
   });
 
   it("ファイルビュアの器は、構造化ビューのトークンを読まない", () => {
@@ -185,10 +203,22 @@ describe("構造化ビューの文字の大きさ（細かい修正 項目11・1
     expect(規則(".file-zoom .file-raw")).toContain(
       "font-size: var(--file-raw-size)",
     );
-    // **エディタも同じ変数から取る。** 面によって大きさが変わると、切り替えるたびに
-    // 字が跳ぶ。**次のフェーズで重ねる `<pre>` も、ここと同じ変数を読む**
-    expect(規則(".file-zoom .file-editor")).toContain(
+    /*
+      **エディタも同じ変数から取る。** 面によって大きさが変わると、切り替えるたびに
+      字が跳ぶ。
+
+      **2026-09-13 に見る先が器へ移った。** 3層になったので、組版は器
+      （`.file-editor-stack`）へ1回だけ書き、3層は継承で受け取る——同じ指定を3箇所へ
+      書くと、**2箇所だけ直されて1箇所が取り残される余地**が残るためである。
+
+      **したがって鎖を2つとも見る。** 器が変数を読んでいることと、**層が器から継いで
+      いること**。片方だけでは、鎖が途中で切れていても緑になる。
+    */
+    expect(規則(".file-zoom .file-editor-stack")).toContain(
       "font-size: var(--file-raw-size)",
+    );
+    expect(規則(".file-zoom .file-editor-stack > *")).toContain(
+      "font-size: inherit",
     );
   });
 
