@@ -80,3 +80,15 @@ const ICONS: Record<FileKind, string> = {
 export function fileIcon(path: string): string {
   return ICONS[fileKind(path)]
 }
+
+/**
+ * 表に載っている拡張子（小文字・先頭の `.` は含まない）。
+ *
+ * **設定の画面が「見せ方を選べる相手」を数えるために要る。** 表に無い拡張子は
+ * すべて `text` へ落ち、`text` はビュアーを持たないので**選ぶ余地が無い**。
+ *
+ * **表そのものは増やさない**——ここは読むだけの口である。
+ */
+export function 知っている拡張子(): string[] {
+  return Object.keys(TABLE)
+}

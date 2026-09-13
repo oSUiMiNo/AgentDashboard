@@ -34,7 +34,9 @@ import { MOTION_QUIET_CHOICES, useSettingsStore } from '@/stores/settings'
 import type { MotionQuiet } from '@/stores/settings'
 import { RateLimitWindows } from '@/components/RateLimits/RateLimitWindows'
 import { AboutCard } from '@/components/Settings/AboutCard'
+import { FileModesCard } from '@/components/Settings/FileModesCard'
 import { PortableSettingsCard } from '@/components/Settings/PortableSettingsCard'
+import { WritableRootsCard } from '@/components/Settings/WritableRootsCard'
 import { VersionsCard } from '@/components/Settings/VersionsCard'
 
 /** 履歴を送る間隔の選択肢（秒。設計§13-3）。 */
@@ -388,6 +390,10 @@ export function SettingsPage() {
           <StatsPanel stats={stats} />
         </div>
       )}
+
+      <WritableRootsCard />
+
+      <FileModesCard />
 
       <div className="border-border flex flex-col gap-2 rounded-xl border p-4">
         <h3 className="text-sm font-medium">この CLI が受け付けるモード</h3>
