@@ -156,11 +156,21 @@ pub async fn api_file(
 
     match query.shape.as_deref() {
         None => {
-            let content = state
+            let mut content = state
                 .agent
                 .read_file(ask(), &query.path)
                 .await
                 .map_err(refuse)?;
+            // **書けるかを決めるのはここだけ**（設計§8）。根を知っているのはサーバで、
+            // PC は自分がどの口座に見えているかを知らない。**打てない相手に打てる姿を
+            // 見せない**ために、読むときに一緒に返す。
+            //
+            // **`api_write_file` と同じ材料で判定する。** 別の綴りで判定すると
+            // 「書けると言ったのに保存で断られる」が起きる——照合の入力を1つに揃える。
+            // **だから `書けるか` を通す**（中で `..` を畳む）。畳まずに照合すると
+            // `/dev/app/../../etc/passwd` が根の内側に見え、読みでは通って保存で断られる。
+            let roots = writable_roots_for(&state, &identity, &host).await?;
+            content.writable = 書けるか(&query.path, &roots);
             Ok(Json(content).into_response())
         }
         Some("raw") => raw_file(&state, ask(), &query.path, false).await,
@@ -283,10 +293,23 @@ pub(crate) fn 入口を通すか(
     if stamp.trim().is_empty() {
         return Err(入口の断り::印が無い);
     }
-    if !protocol::path::is_writable(roots, &fold_parents(path)) {
+    if !書けるか(path, roots) {
         return Err(入口の断り::許可の外);
     }
     Ok(())
+}
+
+/// 場所として書いてよいか（**印は見ない**）。
+///
+/// # 読む側と書く側で、同じものを呼ぶ
+///
+/// [`api_file`] は「打てる姿で出してよいか」を決めるためにこれを呼び、
+/// [`入口を通すか`] は実際に断るために呼ぶ。**2つが別々に書かれていると、
+/// 「書けると言ったのに保存で断られる」が起きる**——とくに `..` の扱いで割れる。
+/// 畳む前の綴りで照合すると `/dev/app/../../etc/passwd` が根の内側に見えるので、
+/// **畳むところまでを1つにまとめてある。**
+pub(crate) fn 書けるか(path: &str, roots: &[String]) -> bool {
+    protocol::path::is_writable(roots, &fold_parents(path))
 }
 
 /// 書いてよい場所の一覧を組み立てる（設計§3-5）。
@@ -705,6 +728,50 @@ mod tests {
     /// 許可された根の一覧を作る
     fn 根(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// **読むときの判定と、書くときの入口が、同じ答えを出すこと**（設計§8）。
+    ///
+    /// 画面は読むときの答えで「打てる姿を出すか」を決め、保存は入口で断る。
+    /// **2つがずれると「書けると言ったのに保存で断られる」**——打った文が無駄になる。
+    /// **実際に一度ずれた**：入口は `..` を畳んでから照合していたのに、読む側が
+    /// 畳まずに照合していたので、`/dev/app/../../etc/passwd` が読みでは通っていた。
+    #[test]
+    fn 読むときの判定と入口の判定は一致する() {
+        let roots = 根(&["/dev/app", "/home/u/notes"]);
+        for path in [
+            "/dev/app/src/main.rs",
+            "/home/u/notes/todo.md",
+            "/etc/passwd",
+            "/dev/app-old/src/main.rs",
+            "/dev/app2/x",
+            "/dev/app/../../etc/passwd",
+            "/dev/app/src/../README.md",
+            "/dev/app",
+        ] {
+            let 読み = 書けるか(path, &roots);
+            let 書き = 入口を通すか("24-17", path, &roots).is_ok();
+            assert_eq!(読み, 書き, "読みと書きで答えが割れた：{path}");
+        }
+    }
+
+    /// **読む側も親を畳んでから照合する。**
+    ///
+    /// 畳まないと、頭が根と同じ綴りなら何でも内側に見える。
+    #[test]
+    fn 読むときも親を畳んでから照合する() {
+        let roots = 根(&["/dev/app"]);
+        assert!(!書けるか("/dev/app/../../etc/passwd", &roots));
+        assert!(書けるか("/dev/app/src/../README.md", &roots));
+    }
+
+    /// **根が1つも無ければ、どこも書けないと答える。**
+    ///
+    /// 既定が「書けない」に倒れることの担保（`FileContent::writable` の
+    /// `#[serde(default)]` と同じ向き）。
+    #[test]
+    fn 根が無ければ読むときも書けないと答える() {
+        assert!(!書けるか("/home/u/notes/todo.md", &[]));
     }
 
     #[test]
