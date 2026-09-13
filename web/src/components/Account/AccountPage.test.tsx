@@ -100,3 +100,37 @@ describe('札の一覧の用途（CLI設計§5-3・テスト計画F6）', () => 
     )
   })
 })
+
+describe('PC の一覧に出す使用上限（status テスト計画フェーズ4）', () => {
+  /** 1台ぶんの行。`rate_limits` は省略可なので、渡さない場合も作れる。 */
+  function agent(rateLimits?: unknown) {
+    return {
+      id: '22222222-2222-4222-8222-222222222222',
+      name: 'ノート',
+      last_seen_at: null,
+      connected: true,
+      ...(rateLimits === undefined ? {} : { rate_limits: rateLimits }),
+    }
+  }
+
+  it('PC の行に使用上限が出る', async () => {
+    // **これが「出し先への登録を消すと落ちる」テストである。**
+    // `AccountPage` から `<RateLimitWindows>` を外すと、部品側の8本は緑のままで
+    // ここだけが落ちる——**登録漏れは緑のまま通る**ので、行の側にも1本要る
+    show(
+      [],
+      [agent({ windows: [{ name: 'five_hour', used_percentage: 41, resets_at: 9_999_999_999 }] })],
+    )
+
+    await waitFor(() => expect(screen.getAllByTestId('agent-row')).toHaveLength(1))
+    expect(screen.getByTestId('rate-limit-percent')).toHaveTextContent('41%')
+  })
+
+  it('届いていない PC は「0%」と混ざらない', async () => {
+    show([], [agent()])
+
+    await waitFor(() => expect(screen.getAllByTestId('agent-row')).toHaveLength(1))
+    // **省略（サーバが古い）と 0% を同じに描かない。** 部品が `data-known` で分ける
+    expect(screen.getByTestId('rate-limits')).toHaveAttribute('data-known', 'false')
+  })
+})

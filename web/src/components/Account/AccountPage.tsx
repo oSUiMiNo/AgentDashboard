@@ -23,6 +23,8 @@ import { formatElapsed } from '@/lib/time'
 import { HOME } from '@/lib/routes'
 import { useNow } from '@/lib/sessions'
 import { useAuthStore } from '@/stores/auth'
+import { RateLimitWindows } from '@/components/RateLimits/RateLimitWindows'
+import type { RateLimits } from '@/lib/protocol'
 import { useSettingsStore } from '@/stores/settings'
 import { isNewer } from '@/stores/versions'
 
@@ -46,6 +48,13 @@ interface AgentRow {
   connected: boolean
   /** その PC のセッションホストの版（CICD設計§16）。名乗っていなければ無い */
   version?: string | null
+  /**
+   * その PC に入っている claude ログインの使用上限（status 設計）。
+   *
+   * **省略可なのはサーバが古い場合のため。** `null` は「まだ届いていない」で、
+   * **0% とは別に描く**（部品側が `data-known` で分ける）。
+   */
+  rate_limits?: RateLimits | null
 }
 
 export function AccountPage() {
@@ -252,8 +261,9 @@ export function AccountPage() {
               key={agent.id}
               data-testid="agent-row"
               data-connected={agent.connected}
-              className="flex items-center gap-2"
+              className="flex flex-col gap-1"
             >
+              <div className="flex items-center gap-2">
               {/*
                 **アプリの版番号の横と同じ印を使う**（細かい修正 要件19・設計§3-6）。
                 緑（`emerald`）は役割色の表に無い色だったので、繋がっているときは
@@ -301,7 +311,14 @@ export function AccountPage() {
                 {!agent.connected && agent.last_seen_at !== null
                   ? `最終 ${formatElapsed(now - agent.last_seen_at)}`
                   : null}
-              </span>
+                </span>
+              </div>
+              {/*
+                **使用上限はこの行に出す**（status 設計「置き場所」）。ローカルモードには
+                この一覧そのものが無いので、あちらは設定画面の区画へ出す——**同じ部品を
+                2箇所から使う**ので、片方だけ直ることがない。
+              */}
+              <RateLimitWindows limits={agent.rate_limits ?? null} />
             </li>
           ))}
           {agents.length === 0 && (

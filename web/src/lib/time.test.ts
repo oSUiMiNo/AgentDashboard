@@ -1,4 +1,4 @@
-import { formatDateTime, formatElapsed, formatScreenInterval } from './time'
+import { formatDateTime, formatElapsed, formatScreenInterval, formatUntil } from './time'
 
 /**
  * 経過時間の表示（テスト計画フェーズ5「小窓」の経過時間表示）。
@@ -68,5 +68,26 @@ describe('formatDateTime', () => {
     expect(formatDateTime(0)).toBeNull()
     expect(formatDateTime(-1)).toBeNull()
     expect(formatDateTime(Number.NaN)).toBeNull()
+  })
+})
+
+describe('formatUntil', () => {
+  it('5秒未満は「まもなく」', () => {
+    expect(formatUntil(0)).toBe('まもなく')
+    expect(formatUntil(4_999)).toBe('まもなく')
+  })
+
+  it('分・時間・日で切り替わる', () => {
+    expect(formatUntil(30_000)).toBe('あと30秒')
+    expect(formatUntil(5 * 60_000)).toBe('あと5分')
+    expect(formatUntil(3 * 3_600_000)).toBe('あと3時間')
+    expect(formatUntil(2 * 86_400_000)).toBe('あと2日')
+  })
+
+  it('過ぎている（負）ときは 0 へ丸める', () => {
+    // **「リセット済み」はここで言わない。** 使用上限固有の言い回しなので、
+    // 時刻の書式化には混ぜず、呼ぶ側が判定する
+    expect(formatUntil(-1)).toBe('まもなく')
+    expect(formatUntil(-86_400_000)).toBe('まもなく')
   })
 })

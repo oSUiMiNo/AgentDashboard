@@ -82,3 +82,36 @@ export function formatDateTime(epochMs: number | null | undefined): string | nul
     minute: '2-digit',
   }).format(at)
 }
+
+/**
+ * 残りミリ秒を日本語の相対表現にする。[`formatElapsed`] と対になる**未来向き**。
+ *
+ * # なぜ絶対時刻ではなく相対を主に出すのか
+ *
+ * 使用上限の窓が戻る時刻は、**知りたいのが「いつ」ではなく「あとどれだけ待つか」**である
+ * （status 設計「上限が近いことを知らせたいなら、色ではなく形か位置で分ける」）。
+ * 「05:10」と出されても、いまが何時かを別に見なければ待ち時間が分からない。
+ * **絶対時刻は `title` に添える**——正確さが要るのはそちらで、日常の判断は相対で足りる。
+ *
+ * # 過ぎている場合はここで扱わない
+ *
+ * 負の残りを「リセット済み」と言うかどうかは**呼ぶ側の言い回し**なので、ここは
+ * 0 へ丸めて「まもなく」を返すに留める。時刻の書式化に、使用上限固有の語を混ぜない。
+ */
+export function formatUntil(remainingMs: number): string {
+  const seconds = Math.max(0, Math.floor(remainingMs / 1000))
+
+  if (seconds < 5) {
+    return 'まもなく'
+  }
+  if (seconds < MINUTE) {
+    return `あと${seconds}秒`
+  }
+  if (seconds < HOUR) {
+    return `あと${Math.floor(seconds / MINUTE)}分`
+  }
+  if (seconds < DAY) {
+    return `あと${Math.floor(seconds / HOUR)}時間`
+  }
+  return `あと${Math.floor(seconds / DAY)}日`
+}
