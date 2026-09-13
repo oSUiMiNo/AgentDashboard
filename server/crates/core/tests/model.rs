@@ -535,30 +535,6 @@ async fn statusLineから使用上限と費用が届く() {
     assert_eq!(cost.total_duration_ms, 0);
 }
 
-/// **出ないほう。** 上と対で読むこと。
-///
-/// 片方だけでは何も守れない——`rate_limits` の初期値が `None` なので、
-/// 「切ったから出ない」と「そもそも来ていない」が区別できない。
-#[tokio::test]
-async fn statusLineを切ると使用上限も届かない() {
-    let config = Config {
-        inject_status_line: false,
-        status_line_refresh_secs: 1,
-        ..Config::default()
-    };
-    let (_path, server) = common::server_with_fake_global("limits-off", GLOBAL, config).await;
-    let (session, _watcher) = common::start_session(&server.manager).await;
-
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    assert_eq!(
-        session.meta().rate_limits,
-        None,
-        "経路が丸ごと無いので届かないこと"
-    );
-    assert_eq!(session.meta().cost, None, "費用も同じ経路である");
-}
-
 /// **欄ごと届かない環境でも、画面が壊れないこと。**
 ///
 /// `rate_limits` が API キー利用や第三者プロバイダで届くかは未検証（要件§5）。
@@ -574,7 +550,8 @@ async fn 使用上限の欄が無くてもモデルは届く() {
     common::send_line(&session, "limits none");
     デバウンスをまたぐ().await;
     common::send_line(&session, "cost none");
-    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    // 周期を1回またげば、欄が無い payload が控えを消すなら消えている
+    tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
 
     // **控えた値は消えない。** 欄が無いのは「読めなかった」であって「上限が無い」
     // ではない——1回の不正な payload で帯が消えると点滅になる
@@ -628,8 +605,9 @@ async fn 動かした使用上限が周期をまたいでも戻らない() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 
-    // **周期（1秒）を2回以上またぐ。** 複製していれば、ここで既定の2本へ戻る
-    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    // **周期（1秒）を1回またぐ。** 複製していれば**最初の1回で**既定の2本へ戻るので、
+    // 2回待つ必要はない。**待ち時間は他人のテストから枠を奪う**ので短いほどよい
+    tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
 
     let limits = session.meta().rate_limits.expect("控えが残っていること");
     assert_eq!(
@@ -755,6 +733,16 @@ async fn statusLineを切るとコンテキストの使い具合は届かない(
         None,
         "同じ経路なので、モデルも不明のままになる"
     );
+    // **使用上限と費用も同じ経路である。** 別のテストを立てずにここへ相乗りさせてある
+    // ——待ち時間を持つテストは、待っている間ずっと枠を握り、**他人のテストを落とす**
+    // （ガイドライン「通しのときだけ落ちるを、回数で当てにいかない」）。
+    // **この3つは同じ設定・同じ待ちで確かめられる**ので、1本で足りる
+    assert_eq!(
+        session.meta().rate_limits,
+        None,
+        "経路が丸ごと無いので使用上限も届かないこと"
+    );
+    assert_eq!(session.meta().cost, None, "費用も同じ経路である");
 }
 
 #[tokio::test]
