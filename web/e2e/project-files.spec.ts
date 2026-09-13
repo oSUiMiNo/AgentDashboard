@@ -688,15 +688,28 @@ test("長い文書を末尾まで辿れる（整形と編集の両方）", async
   // **数だけでは「遡れた」と言い切れない。** 末尾の目印が実際に見えるところまで見る
   await expect(page.getByRole("heading", { name: TAIL })).toBeInViewport();
 
-  // 編集で見るとき（**同じ箱の中で中身だけが入れ替わる**ので、片方だけ直る
-  // 形にはならない。ただし「なるはず」で済ませずに、両方で測る）
+  // 編集で見るとき。**層が3つになった**（行番号・色付きの `<pre>`・打つ `<textarea>`）。
   //
-  // **この段のエディタは1層（素の `textarea`）**なので、ここで見るのは
-  // 「エディタが末尾まで行く」ことである。**次のフェーズで色付きの `<pre>` と
-  // 行番号が重なったら、3層が同期して末尾まで行くところまで強めること。**
+  // **送りを持っているのは打つ層**で、見せる2層はそれに合わせて動く（設計§6-1 の
+  // 条件3）。したがって「箱が遡れる」では足りない——**3層が同じだけ動いている**ことまで
+  // 見る。ずれると、行番号と本文の行が合わなくなる。
   await page.getByTestId("file-toggle-mode").click();
-  await expect(page.getByTestId("file-editor")).toBeVisible();
-  await expectScrollable(body);
+  const editor = page.getByTestId("file-editor");
+  await expect(editor).toBeVisible();
+  await expectScrollable(editor);
+
+  const 送り = await editor.evaluate(
+    (el) => (el as HTMLTextAreaElement).scrollTop,
+  );
+  expect(送り, "打つ層が実際に遡れていること").toBeGreaterThan(0);
+  for (const 綴り of [".file-editor-paint", ".file-editor-gutter"]) {
+    const 動き = await page.locator(綴り).evaluate((el) => {
+      const 行列 = new DOMMatrixReadOnly(getComputedStyle(el).transform);
+      // 上へ送るので、写した値は負になる
+      return -行列.m42;
+    });
+    expect(動き, `${綴り} が打つ層と同じだけ動いていない`).toBeCloseTo(送り, 0);
+  }
 });
 
 /**
