@@ -47,6 +47,37 @@ describe('設定ストア', () => {
     expect(useSettingsStore.getState().loading).toBe(false)
   })
 
+  /*
+    **旧版へ巻き戻したときに、面が落ちない**（レビュー対応5）。
+
+    `version select` は実在する道なので、**古いサーバが `memo_limits` を返さない**
+    ことがある。`undefined` のまま持つと**メモの面が丸ごと落ちる**——`??=` の列に
+    他の4つが並んでいるのは、まさにこの事故を防ぐためである。
+  */
+  it('memo_limits を返さない旧版でも、既定で埋めて面を落とさない', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              always_bypass_permissions: false,
+              available_modes: ['default'],
+              // **memo_limits が無い。** 旧版のサーバはこのキーを知らない
+            }),
+            { status: 200 },
+          ),
+      ),
+    )
+
+    await useSettingsStore.getState().load()
+
+    const limits = useSettingsStore.getState().settings.memo_limits
+    expect(limits).toBeDefined()
+    expect(limits.retention_days).toBeGreaterThan(0)
+    expect(limits.max_bytes).toBeGreaterThan(0)
+  })
+
   it('読めなくても既定値のまま動く', async () => {
     // サーバが居なくても画面は出す。既定は**スキップしない側**（設計§9）
     vi.stubGlobal(

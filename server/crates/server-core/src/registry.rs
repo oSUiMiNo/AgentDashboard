@@ -415,6 +415,11 @@ impl SessionRegistry {
         // 保持日数はアカウントごとの設定なので、ここで渡すのは**行が無いときの初期値**
         db::memos::start_sweeper(db.clone(), db::settings::DEFAULT_MEMO_RETENTION_DAYS);
 
+        // **画像の掃除も同じ場所で起こす**（レビュー対応2）。**呼び出し側に任せると
+        // 忘れる**——実際、これが無かったせいで**消したメモや期限切れの画像が永久に
+        // 残っていた**。容量のぶんは同意が要るので、ここで掃くのは期間ぶんだけである
+        db::memo_blobs::start_sweeper(db.clone(), db::settings::DEFAULT_MEMO_RETENTION_DAYS);
+
         Ok(Arc::new(Self {
             db,
             records: Mutex::new(records),

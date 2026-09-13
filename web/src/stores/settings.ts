@@ -259,6 +259,9 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       settings.agents ??= []
       settings.intervals ??= FALLBACK.intervals
       settings.lan_password ??= FALLBACK.lan_password
+      // **メモの保持も5つ目として埋める**（レビュー対応5）。`version select` は実在
+      // する道なので、**旧版へ巻き戻すとメモの面が丸ごと落ちる**
+      settings.memo_limits ??= FALLBACK.memo_limits
       set({ settings, loading: false })
     } catch {
       // 読めなくても画面は出す。既定値のまま（＝スキップしない側）で動く
