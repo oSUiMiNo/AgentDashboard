@@ -114,4 +114,34 @@ describe('メモへ貼る画像', () => {
     await expect(画像を運ぶ(置き場所, 大きい)).rejects.toThrow()
     expect(uploadAttachment).not.toHaveBeenCalled()
   })
+
+  /*
+    **作ったら捨てる**（レビュー対応4）。
+
+    `pickImages` は**通した1枚ごとに object URL を1本作る**。ここは `bytes` しか
+    使わないので、**捨てなければ貼るたびに溜まり、タブの寿命いっぱい残る**。
+
+    **メモ側のファイルを `createObjectURL` で引くと0件**なので、ここで止めると
+    「割り当てが無いのだから漏れようがない」と読める——**割り当ては1つ下の共有
+    ヘルパに在る。** 呼び先まで辿らないと見えない形だった。
+  */
+  it('運び終えたら object URL を捨てる（成功したとき）', async () => {
+    const revoke = vi.fn()
+    vi.stubGlobal('URL', { ...URL, createObjectURL: () => 'blob:x', revokeObjectURL: revoke })
+
+    await 画像を運ぶ(置き場所, 画像('image/png'))
+
+    expect(revoke).toHaveBeenCalledWith('blob:x')
+  })
+
+  it('運びに失敗しても object URL を捨てる', async () => {
+    const revoke = vi.fn()
+    vi.stubGlobal('URL', { ...URL, createObjectURL: () => 'blob:y', revokeObjectURL: revoke })
+    uploadAttachment.mockRejectedValueOnce(new Error('置けません'))
+
+    await expect(画像を運ぶ(置き場所, 画像('image/png'))).rejects.toThrow()
+
+    // **失敗した道でも捨てる。** 捨て漏らすのは、たいてい例外の側である
+    expect(revoke).toHaveBeenCalledWith('blob:y')
+  })
 })

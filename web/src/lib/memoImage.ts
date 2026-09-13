@@ -19,7 +19,7 @@
  * 潰さない。**撮り直せば済むものまで直せなくなる。**
  */
 
-import { pickImages } from '@/lib/attachments'
+import { pickImages, releasePreview } from '@/lib/attachments'
 import { rawUrl, uploadAttachment } from '@/lib/hostfs'
 import { uploadMemoBlob } from '@/lib/memoBlobs'
 
@@ -64,10 +64,28 @@ export async function 画像を運ぶ(
     // **理由をそのまま投げる。** エディタが画面へ出す
     throw new Error(rejected[0] ?? '画像を添付できません')
   }
-  if (置き場所.where === 'account') {
-    // 全体メモ。**PC を通らない**——記録へ直に置く
-    return uploadMemoBlob(one.bytes)
+  /*
+    **作ったら捨てる**（レビュー対応4）。
+
+    `pickImages` は**通した1枚ごとに `URL.createObjectURL` を1本作る**（`attachments.ts`）。
+    ここは `bytes` しか使わないので、**捨てなければ貼るたびに1本ずつ溜まり、タブの
+    寿命いっぱい残る**——最大 8 MiB の写しである。
+
+    **`Composer` は5箇所で解放しているが、こちらは1箇所でよい。** あちらは小窓に絵を
+    出すので、付け外し・送信のたびに要る。**倣うのは約束（作ったら捨てる）であって、
+    箇所数ではない。**
+
+    **成功しても失敗しても捨てる**ので `finally` に置く——運ぶ道は2つあり、どちらも
+    投げうる。
+  */
+  try {
+    if (置き場所.where === 'account') {
+      // 全体メモ。**PC を通らない**——記録へ直に置く
+      return await uploadMemoBlob(one.bytes)
+    }
+    const written = await uploadAttachment(置き場所.host, 置き場所.cardId, one.bytes)
+    return rawUrl(置き場所.host, written.path)
+  } finally {
+    releasePreview(one)
   }
-  const written = await uploadAttachment(置き場所.host, 置き場所.cardId, one.bytes)
-  return rawUrl(置き場所.host, written.path)
 }
