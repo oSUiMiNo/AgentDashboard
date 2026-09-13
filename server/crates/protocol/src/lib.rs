@@ -10,6 +10,7 @@ pub mod frame;
 pub mod fs;
 pub mod ipc;
 pub mod logs;
+pub mod path;
 pub mod ws;
 
 use serde::{Deserialize, Serialize};
