@@ -232,7 +232,11 @@ pub trait SessionHost: Send + Sync + 'static {
         start: Option<&str>,
     ) -> Result<DirListing, HostAskError>;
 
-    /// ファイル1つの中身（設計§5・§9）。**読むだけ**で、書く口は持たない。
+    /// ファイル1つの中身（設計§5・§9）。**読むだけ。**
+    ///
+    /// 書く口は [`SessionHost::write_file`] という**別の口**にしてある
+    /// （`ファイルビュアにエディタ機能を追加` 設計§1-1）。**ここが両義になったのでは
+    /// ない**——[`SessionHost::write_blob`] を別に足したときと同じ作法である。
     ///
     /// パスは必須。中身の読み取りに「始まり」は無いので、省略できる形にしない。
     async fn read_file(
@@ -240,6 +244,31 @@ pub trait SessionHost: Send + Sync + 'static {
         request: HostAskRequest,
         path: &str,
     ) -> Result<FileContent, HostAskError>;
+
+    /// ファイル1つを**書き戻す**（`ファイルビュアにエディタ機能を追加` 設計§2-3）。
+    ///
+    /// # 上書きだけである
+    ///
+    /// 作らない・消さない・移さない（設計§11）。存在しないパスは断る。
+    ///
+    /// # 許可された根は、呼ぶ側が組み立てて渡す
+    ///
+    /// **PC 側が独自に決めない**（設計§3-1）。決める場所が2つあると食い違う。
+    /// 渡された根に対して、PC 側は `canonicalize` した**実体**で確かめる——
+    /// **規則は1つ（`protocol::path::is_writable`）で、確かめる場所が2つあるだけ**。
+    ///
+    /// # 印は不透明である
+    ///
+    /// 読んだときに受け取った `stamp` をそのまま渡す（設計§8-3）。**中身を解釈しない。**
+    /// 食い違えば `HostFailure::Conflict` で断られる。
+    async fn write_file(
+        &self,
+        request: HostAskRequest,
+        path: &str,
+        text: &str,
+        stamp: &str,
+        roots: &[String],
+    ) -> Result<protocol::fs::WrittenFile, HostAskError>;
 
     /// ファイル1つを**バイト列で**（`ファイル閲覧で画像とHTMLも表示する` 設計§3）。
     ///

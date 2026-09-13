@@ -1617,6 +1617,43 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
         }
     }
 
+    /// 書き戻す（`ファイルビュアにエディタ機能を追加` 設計§2-4）。
+    ///
+    /// **投げる前に名乗りを見る**（`Need::FileWrite`）。名乗らない PC は接続を保ったまま
+    /// 無視するので、投げると永遠に答えが返らない。**そういう PC には、そもそも編集を
+    /// 出さない**（設計§2-5）ので、ここへ来ること自体が想定外である。
+    async fn write_file(
+        &self,
+        request: crate::session_host::HostAskRequest,
+        path: &str,
+        text: &str,
+        stamp: &str,
+        roots: &[String],
+    ) -> Result<protocol::fs::WrittenFile, crate::session_host::HostAskError> {
+        let path = path.to_string();
+        let text = text.to_string();
+        let stamp = stamp.to_string();
+        let roots = roots.to_vec();
+        match self
+            .ask(request, Need::FileWrite, move |request_id| {
+                ServerToAgent::WriteFile {
+                    request_id,
+                    path,
+                    text,
+                    stamp,
+                    roots,
+                }
+            })
+            .await?
+        {
+            HostReply::Wrote(written) => Ok(written),
+            HostReply::Failed { reason, detail } => {
+                Err(crate::session_host::HostAskError::Failed { reason, detail })
+            }
+            other => Err(wrong_answer(other)),
+        }
+    }
+
     async fn read_file(
         &self,
         request: crate::session_host::HostAskRequest,

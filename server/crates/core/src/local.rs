@@ -310,6 +310,34 @@ impl SessionHost for LocalSessionHost {
             .await
     }
 
+    /// この機械のファイルを**書き戻す**（`ファイルビュアにエディタ機能を追加` 設計§2-4）。
+    ///
+    /// **ローカルモードでも同じ道を通す。** 近道を作ると「ローカルでは動くのに
+    /// セルフホストで欠ける」という、経路の違いが原因の壊れ方が残る。
+    async fn write_file(
+        &self,
+        request: server_core::session_host::HostAskRequest,
+        path: &str,
+        text: &str,
+        stamp: &str,
+        roots: &[String],
+    ) -> Result<protocol::fs::WrittenFile, server_core::session_host::HostAskError> {
+        reject_target(&request)?;
+        let path = path.to_string();
+        let text = text.to_string();
+        let stamp = stamp.to_string();
+        let roots = roots.to_vec();
+        blocking_ask(move || {
+            session_host_core::hostfs::write_file(
+                std::path::Path::new(&path),
+                &text,
+                &stamp,
+                &roots,
+            )
+        })
+        .await
+    }
+
     /// この機械のファイルを**バイト列で**（`ファイル閲覧で画像とHTMLも表示する` 設計§3-5）。
     ///
     /// **近道を作らない。** サーバ側で「同じプロセスなら自分で読む」と書くと、
