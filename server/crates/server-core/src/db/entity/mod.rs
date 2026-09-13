@@ -8,6 +8,7 @@
 
 pub mod accounts;
 pub mod agents;
+pub mod memo_blobs;
 pub mod memos;
 pub mod notices;
 pub mod pairing_tokens;

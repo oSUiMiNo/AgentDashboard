@@ -591,3 +591,195 @@ async fn 保持の設定は上限を超える値と無期限を断る() {
         "文字列は断ること"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 全体メモの画像（メモ設計§10-1 の【決着】・§10-2）
+// ---------------------------------------------------------------------------
+
+/// 画像を1枚置いて、時刻を指定の値へ寄せる。
+///
+/// **`put` は時刻を引数に取る**ので寄せ直しは要らないが、**大きさは中身で決まる**
+/// ——古い順の掃除を確かめるには、**枚ごとに違う大きさ**にする必要がある
+/// （全部同じにすると、古い順でも新しい順でも同じ数になり**並びを1バイトも
+/// 守らない**。フェーズ6 の段4 で実際に踏んだ空振り）。
+async fn 画像を置く(
+    db: &DatabaseConnection,
+    account_id: Uuid,
+    size: usize,
+    created_at: i64,
+) -> Uuid {
+    db::memo_blobs::put(db, account_id, "image/png", vec![0u8; size], created_at)
+        .await
+        .expect("置けること")
+}
+
+#[tokio::test]
+async fn 全体メモの画像は記録へ置かれ_同じ中身が読み戻せる() {
+    // **本文と同じ記録に在ることが要件10 の担保である**——別の端末から開いたときに
+    // 画像だけ欠けないのは、PC ではなくここに在るからである
+    for backend in common::backends("memo-blob-roundtrip").await {
+        let db = &backend.db;
+        let me = account(db, "わたし").await;
+
+        let id = db::memo_blobs::put(db, me, "image/png", vec![1, 2, 3, 4], db::now_ms())
+            .await
+            .expect("置けること");
+
+        let got = db::memo_blobs::get(db, me, id)
+            .await
+            .expect("引けること")
+            .expect("在ること");
+        assert_eq!(
+            got.data,
+            vec![1, 2, 3, 4],
+            "[{}] 中身が変わった",
+            backend.name
+        );
+        assert_eq!(got.media_type, "image/png");
+        assert_eq!(got.bytes, 4, "大きさを列で持っている");
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 他人の画像は引けない() {
+    // **口の帰属とは別に、記録の側でも絞る**（§8-6 の二重の鍵）。
+    // 口だけで守ると、口を1つ足したときに素通しの経路が生まれる
+    for backend in common::backends("memo-blob-tenancy").await {
+        let db = &backend.db;
+        let me = account(db, "わたし").await;
+        let them = account(db, "よそのひと").await;
+
+        let theirs = db::memo_blobs::put(db, them, "image/png", vec![9], db::now_ms())
+            .await
+            .expect("置けること");
+
+        let got = db::memo_blobs::get(db, me, theirs)
+            .await
+            .expect("引けること");
+        assert!(
+            got.is_none(),
+            "[{}] 他人の画像を引けてしまった",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 溢れたら古い順に決めた量だけ消える() {
+    for backend in common::backends("memo-blob-sweep").await {
+        let db = &backend.db;
+        let me = account(db, "わたし").await;
+        let now = db::now_ms();
+
+        /*
+          **大きさを枚ごとに変える。** 全部同じにすると、古い順に消えても
+          新しい順に消えても同じ数になり、**並びを1バイトも守らない**。
+
+          古い順に 10・20・40・80（合計 150）。上限 100・一度に掃く量 25 なら
+          **消えるのは古い2枚（10+20=30）だけ**——新しい順なら 80 の1枚になる。
+        */
+        let 古1 = 画像を置く(db, me, 10, now - 4 * DAY_MS).await;
+        let 古2 = 画像を置く(db, me, 20, now - 3 * DAY_MS).await;
+        let 新1 = 画像を置く(db, me, 40, now - 2 * DAY_MS).await;
+        let 新2 = 画像を置く(db, me, 80, now - DAY_MS).await;
+
+        // まず下見。**1バイトも消えないこと**
+        let 下見 = db::memo_blobs::survey_or_sweep(db, me, now, 3650, 100, 25, false)
+            .await
+            .expect("数えられること");
+        assert!(
+            下見.over_budget,
+            "[{}] 150 > 100 なので同意が要る",
+            backend.name
+        );
+        assert_eq!(
+            下見.freed, 30,
+            "[{}] 古いものから消えていない",
+            backend.name
+        );
+        assert!(!下見.applied);
+        assert!(
+            db::memo_blobs::get(db, me, 古1).await.unwrap().is_some(),
+            "[{}] 下見で消えた",
+            backend.name
+        );
+
+        // 本番。**下見と同じ数だけ消えること**
+        let 本番 = db::memo_blobs::survey_or_sweep(db, me, now, 3650, 100, 25, true)
+            .await
+            .expect("掃けること");
+        assert_eq!(
+            本番.removed, 下見.removed,
+            "[{}] 同意に出した数と違う",
+            backend.name
+        );
+        assert_eq!(本番.freed, 下見.freed);
+        assert!(db::memo_blobs::get(db, me, 古1).await.unwrap().is_none());
+        assert!(db::memo_blobs::get(db, me, 古2).await.unwrap().is_none());
+        assert!(
+            db::memo_blobs::get(db, me, 新1).await.unwrap().is_some(),
+            "新しいほうを消した"
+        );
+        assert!(db::memo_blobs::get(db, me, 新2).await.unwrap().is_some());
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 期間で消えるぶんには同意を求めない() {
+    // 既存の振る舞い（黙って消す）に合わせる。同意が要るのは容量で溢れたときだけ
+    for backend in common::backends("memo-blob-expiry").await {
+        let db = &backend.db;
+        let me = account(db, "わたし").await;
+        let now = db::now_ms();
+
+        let 古い = 画像を置く(db, me, 10, now - 200 * DAY_MS).await;
+
+        let 答え = db::memo_blobs::survey_or_sweep(db, me, now, 90, 1_000_000, 25, true)
+            .await
+            .expect("掃けること");
+
+        assert_eq!(
+            答え.expiring, 1,
+            "[{}] 期間で消えるぶんを数える",
+            backend.name
+        );
+        assert_eq!(答え.removed, 0, "[{}] が、同意は求めない", backend.name);
+        assert!(
+            db::memo_blobs::get(db, me, 古い).await.unwrap().is_none(),
+            "[{}] 期間のぶんは黙って消える",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 上限に収まっていれば同意は要らない() {
+    for backend in common::backends("memo-blob-ok").await {
+        let db = &backend.db;
+        let me = account(db, "わたし").await;
+        let now = db::now_ms();
+        画像を置く(db, me, 10, now - DAY_MS).await;
+
+        let 答え = db::memo_blobs::survey_or_sweep(db, me, now, 3650, 1_000_000, 25, false)
+            .await
+            .expect("数えられること");
+
+        assert!(!答え.over_budget);
+        assert_eq!(
+            答え.removed, 0,
+            "[{}] 収まっているのに同意を求めない",
+            backend.name
+        );
+        assert_eq!(答え.total, 10);
+
+        backend.finish().await;
+    }
+}
