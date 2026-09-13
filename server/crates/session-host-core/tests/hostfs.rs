@@ -611,3 +611,211 @@ fn 作る消す移す口が存在しない() {
         "ファイルを書く呼び出しは write_file の1箇所だけであること"
     );
 }
+
+// ───── 書き戻す口（`ファイルビュアにエディタ機能を追加` 設計§2・§3・§8-3）─────
+
+/// その場所を根として許可した一覧を作る。**実体で照合する**ので、根も実体にしておく
+fn 根(path: &Path) -> Vec<String> {
+    vec![
+        std::fs::canonicalize(path)
+            .expect("実体を引けること")
+            .display()
+            .to_string(),
+    ]
+}
+
+fn 印を取る(path: &Path) -> String {
+    hostfs::read_file(path).expect("読めること").stamp
+}
+
+#[test]
+fn 書いて読み直すと同じになる() {
+    let sandbox = Sandbox::new("write-roundtrip");
+    let file = sandbox.file(
+        "計画.md",
+        "# å¤ã
+"
+        .as_bytes(),
+    );
+    let roots = 根(sandbox.path());
+
+    let written = hostfs::write_file(
+        &file,
+        "# 新しい
+",
+        &印を取る(&file),
+        &roots,
+    )
+    .expect("許可された場所なので書けること");
+
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("読めること"),
+        "# 新しい
+"
+    );
+    // **書いたあとの印を返す。** 返さないと2回目の保存が必ず断られる
+    assert!(!written.stamp.is_empty());
+    assert_eq!(
+        written.bytes,
+        "# 新しい
+"
+        .len() as u64
+    );
+}
+
+#[test]
+fn 書いたあとの印で続けて書ける() {
+    let sandbox = Sandbox::new("write-twice");
+    let file = sandbox.file("a.md", b"1");
+    let roots = 根(sandbox.path());
+
+    let first = hostfs::write_file(&file, "22", &印を取る(&file), &roots).expect("1回目");
+    // **返ってきた印をそのまま使う。** 読み直さずに続けて書けることが、返す理由そのもの
+    hostfs::write_file(&file, "333", &first.stamp, &roots).expect("2回目も通ること");
+    assert_eq!(std::fs::read_to_string(&file).expect("読めること"), "333");
+}
+
+#[test]
+fn 許可された場所の外へは書けない() {
+    let sandbox = Sandbox::new("write-outside");
+    let inside = sandbox.dir("内");
+    let file = sandbox.file("外.md", b"x");
+    // 根は「内」だけ。**兄弟は外である**
+    let roots = 根(&inside);
+
+    let err = hostfs::write_file(&file, "y", &印を取る(&file), &roots).expect_err("断ること");
+
+    assert_eq!(err.reason, HostFailure::Denied);
+    assert_eq!(std::fs::read_to_string(&file).expect("読めること"), "x");
+}
+
+#[test]
+fn 頭が同じ兄弟フォルダは根の内側ではない() {
+    let sandbox = Sandbox::new("write-sibling");
+    let app = sandbox.dir("app");
+    let old = sandbox.dir("app-old");
+    let file = std::fs::write(old.join("x.md"), b"x")
+        .map(|()| old.join("x.md"))
+        .expect("作れること");
+    let roots = 根(&app);
+
+    let err = hostfs::write_file(&file, "y", &印を取る(&file), &roots).expect_err("断ること");
+
+    // **素の前方一致で書くと、ここが通ってしまう**（設計§3-2）
+    assert_eq!(err.reason, HostFailure::Denied);
+}
+
+#[cfg(unix)]
+#[test]
+fn リンクで根の外へ抜けられない() {
+    let sandbox = Sandbox::new("write-symlink");
+    let inside = sandbox.dir("内");
+    let outside = sandbox.file("外.md", b"x");
+    let link = inside.join("わたり.md");
+    std::os::unix::fs::symlink(&outside, &link).expect("リンクを張れること");
+    let roots = 根(&inside);
+
+    // リンクそのものは根の内側に在るが、**辿った先が外**である。
+    // 実体で確かめないと、リンク1本で許可の外へ書けてしまう
+    let err = hostfs::write_file(&link, "y", &印を取る(&link), &roots).expect_err("断ること");
+
+    assert_eq!(err.reason, HostFailure::Denied);
+    assert_eq!(std::fs::read_to_string(&outside).expect("読めること"), "x");
+}
+
+#[test]
+fn 読んだあとに他所で書き換えられていたら断る() {
+    let sandbox = Sandbox::new("write-conflict");
+    let file = sandbox.file("競合.md", "はじめ".as_bytes());
+    let roots = 根(sandbox.path());
+    let stamp = 印を取る(&file);
+
+    // **別の誰かが書いた**（このダッシュボードでは別セッションの claude が日常的にやる）
+    std::fs::write(&file, "よそが書いた内容".as_bytes()).expect("書けること");
+
+    let err = hostfs::write_file(&file, "わたしの編集", &stamp, &roots).expect_err("断ること");
+
+    assert_eq!(err.reason, HostFailure::Conflict);
+    // **黙って上書きしない。** 相手の作業が音もなく消えるのがいちばん困る
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("読めること"),
+        "よそが書いた内容"
+    );
+}
+
+#[test]
+fn 印の無い要求は断る() {
+    let sandbox = Sandbox::new("write-nostamp");
+    let file = sandbox.file("a.md", b"x");
+    let roots = 根(sandbox.path());
+
+    let err = hostfs::write_file(&file, "y", "", &roots).expect_err("断ること");
+
+    // **省けば上書きできる道を残さない。** 残すと、競合の検知は
+    // 「印を付けた人だけが守られる」ものになる
+    assert_eq!(err.reason, HostFailure::Conflict);
+    assert_eq!(std::fs::read_to_string(&file).expect("読めること"), "x");
+}
+
+#[test]
+fn フォルダには書き戻せない() {
+    let sandbox = Sandbox::new("write-dir");
+    let dir = sandbox.dir("中身");
+    let roots = 根(sandbox.path());
+
+    let err = hostfs::write_file(&dir, "x", "なにか", &roots).expect_err("断ること");
+
+    assert_eq!(err.reason, HostFailure::Unsupported);
+}
+
+#[test]
+fn 存在しないファイルは作らない() {
+    let sandbox = Sandbox::new("write-missing");
+    let roots = 根(sandbox.path());
+
+    let err = hostfs::write_file(&sandbox.path().join("まだ無い.md"), "x", "なにか", &roots)
+        .expect_err("断ること");
+
+    // **上書きだけ**（設計§11）。作る口は別のイシューの担当である
+    assert_eq!(err.reason, HostFailure::NotFound);
+    assert!(!sandbox.path().join("まだ無い.md").exists());
+}
+
+#[test]
+fn NULを含む中身は書けない() {
+    let sandbox = Sandbox::new("write-nul");
+    let file = sandbox.file("a.md", b"x");
+    let roots = 根(sandbox.path());
+
+    let err =
+        hostfs::write_file(&file, "あ\u{0}い", &印を取る(&file), &roots).expect_err("断ること");
+
+    // 読む側が断っているので、書く側でも断る。**画面からは入らないが CLI からは入る**
+    assert_eq!(err.reason, HostFailure::Unsupported);
+    assert_eq!(std::fs::read_to_string(&file).expect("読めること"), "x");
+}
+
+#[test]
+fn 根が空ならどこへも書けない() {
+    let sandbox = Sandbox::new("write-noroots");
+    let file = sandbox.file("a.md", b"x");
+
+    let err = hostfs::write_file(&file, "y", &印を取る(&file), &[]).expect_err("断ること");
+
+    // **既定を「空＝全部許可」にしてはいけない**（設計§3-5）。設定を書き忘れた
+    // 利用者が、いちばん緩い状態で使うことになる
+    assert_eq!(err.reason, HostFailure::Denied);
+}
+
+#[test]
+fn 読む口が印を返す() {
+    let sandbox = Sandbox::new("read-stamp");
+    let file = sandbox.file("a.md", b"xyz");
+
+    let content = hostfs::read_file(&file).expect("読めること");
+
+    // **印が空だと、保存が必ず断られる**（印の無い要求は断るため）
+    assert!(!content.stamp.is_empty());
+    // 大きさが混ざっていることだけは確かめる（形式そのものは hostfs の内側の話）
+    assert!(content.stamp.starts_with("3-"));
+}

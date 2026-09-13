@@ -47,6 +47,14 @@ pub struct PathQuery {
     pub shape: Option<String>,
 }
 
+/// `?path=…&stamp=…`。**印は問い合わせ引数で渡す**——本文はファイルの中身そのものなので
+/// 混ぜられない（`ファイルビュアにエディタ機能を追加` 設計§8-3）。
+#[derive(Debug, serde::Deserialize)]
+pub struct WriteQuery {
+    pub path: String,
+    pub stamp: String,
+}
+
 /// `?card=<カードID>`。**どのカードへの添付か**を決める（設計§3）。
 #[derive(Debug, serde::Deserialize)]
 pub struct CardQuery {
@@ -160,6 +168,139 @@ pub async fn api_file(
         Some(other) => Err(refuse(HostAskError::BadRequest(format!(
             "`as` を読めません：{other}\n合うのは raw と preview です。"
         )))),
+    }
+}
+
+/// `PUT /api/hosts/{host}/file?path=…&stamp=…` — ファイル1つを書き戻す
+/// （`ファイルビュアにエディタ機能を追加` 設計§2-1）。
+///
+/// # なぜ新しい口なのか
+///
+/// [`api_file`] が `as=raw` で済ませたのは**同じ資源を別の形で返すだけ**だったからで、
+/// こちらは**向きが逆**である。読む口に書く動作を足すと、
+/// [`crate::session_host::SessionHost::read_file`] の doc が書いている「読むだけ」が
+/// 嘘になる（[`api_attachment`] を別に作ったときと同じ作法）。
+///
+/// # 本文はファイルの中身そのもの
+///
+/// だから**印は問い合わせ引数で渡す**（設計§8-3）。本文へ混ぜられない。引数なら
+/// CLI からも同じ形で渡せるので、台帳の1行に収まる。
+///
+/// # 入口で字句の照合をする
+///
+/// **画面だけで弾いても意味が無い**——同じ口は CLI と REST から直接叩ける。ここでは
+/// `..` を畳んだ**字句**で確かめ、PC 側が `canonicalize` した**実体**でもう一度確かめる
+/// （設計§3-1）。**規則は1つ（[`protocol::path::is_writable`]）で、確かめる場所が2つ**
+/// あるだけである。**判定をここへ直接書かないこと。**
+pub async fn api_write_file(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<Identity>,
+    Path(host): Path<String>,
+    Query(query): Query<WriteQuery>,
+    text: String,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    let target = parse_host(&host)?;
+
+    // **印が付いていない要求は断る**（設計§8-3）。省けば上書きできる道を残すと、
+    // 競合の検知は「印を付けた人だけが守られる」ものになる
+    if query.stamp.trim().is_empty() {
+        return Err(refuse(HostAskError::BadRequest(
+            "`stamp` が要ります（読んだときの印をそのまま渡してください）".to_string(),
+        )));
+    }
+
+    let roots = writable_roots_for(&state, &identity, &host).await?;
+    let folded = fold_parents(&query.path);
+    if !protocol::path::is_writable(&roots, &folded) {
+        // **どこなら書けるかを添える**（設計§8-2）。利用者が設定で直せる相手なので、
+        // 「できません」で終わらせず足し方へ導く
+        let allowed = if roots.is_empty() {
+            "いまは1つもありません".to_string()
+        } else {
+            roots.join("\n  ")
+        };
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!(
+                "{} は、保存を許可した場所の外です。\n\nいま許可されている場所：\n  {allowed}\n\n設定の writable_roots へ足すと書けるようになります。",
+                query.path
+            ),
+        ));
+    }
+
+    let written = state
+        .agent
+        .write_file(
+            HostAskRequest {
+                account_id: identity.account_id,
+                target,
+            },
+            &query.path,
+            &text,
+            &query.stamp,
+            &roots,
+        )
+        .await
+        .map_err(refuse)?;
+    Ok(Json(written).into_response())
+}
+
+/// 書いてよい場所の一覧を組み立てる（設計§3-5）。
+///
+/// **設定の根に、その利用者のプロジェクトの配下を足す。** プロジェクトを足すのは
+/// **コードの側**で、`writable_roots` の既定は空のまま。
+///
+/// **「いま開いているプロジェクト」を画面に申告させない**——サーバはその文脈を持って
+/// おらず、申告させると**客体が申告した値で照合の範囲が決まる**ことになる。一覧は
+/// 既にアカウントと PC で絞られているので、そこから引けば勝手には広がらない。
+async fn writable_roots_for(
+    state: &AppState,
+    identity: &Identity,
+    host: &str,
+) -> Result<Vec<String>, (StatusCode, String)> {
+    let db = state.registry.db();
+    let configured = crate::db::settings::writable_roots(db, identity.account_id).await;
+    let rows = crate::db::projects::list(db, identity.account_id)
+        .await
+        .map_err(|err| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("記録を読めません: {err}"),
+            )
+        })?;
+    let projects: Vec<String> = rows
+        .iter()
+        .filter(|row| {
+            match crate::db::projects::from_column(row.agent_id) {
+                Some(agent) => agent.0.to_string() == host,
+                // ローカルモードの行。`local` を指しているときだけ効かせる
+                None => host == LOCAL_HOST,
+            }
+        })
+        .map(|row| row.path.clone())
+        .collect();
+    Ok(protocol::path::effective_roots(&configured, &projects))
+}
+
+/// `..` を畳む（**字句だけ。リンクは辿らない**）。実体の解決は PC 側の仕事である
+/// （設計§3-1）。
+///
+/// **畳むのは呼ぶ側の仕事**で、規則そのもの（`protocol::path`）は文字列しか見ない。
+fn fold_parents(path: &str) -> String {
+    let mut stack: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                stack.pop();
+            }
+            other => stack.push(other),
+        }
+    }
+    if path.starts_with('/') {
+        format!("/{}", stack.join("/"))
+    } else {
+        stack.join("/")
     }
 }
 

@@ -437,6 +437,41 @@ pub async fn host_file(
     http::fetch_as(target, &url).await
 }
 
+/// `PUT /api/hosts/{host}/file?path=…&stamp=…`
+/// （`ファイルビュアにエディタ機能を追加` 設計§2-2）。
+///
+/// **印は問い合わせ引数で渡す。** 本文はファイルの中身そのものなので混ぜられない。
+/// 印は `host file --json` の `stamp` をそのまま持ってくる。**空では断られる。**
+pub async fn host_write(
+    target: &Target,
+    host: &str,
+    path: &str,
+    stamp: &str,
+    text: Vec<u8>,
+) -> Result<(protocol::fs::WrittenFile, String), ClientError> {
+    let url = format!(
+        "/api/hosts/{}/file?path={}&stamp={}",
+        http::percent_encode(host),
+        http::percent_encode(path),
+        http::percent_encode(stamp)
+    );
+    let (status, body) = http::request(
+        target,
+        "PUT",
+        &url,
+        Some(http::Payload::bytes("text/plain; charset=utf-8", text)),
+    )
+    .await?;
+    if !(200..300).contains(&status) {
+        return Err(ClientError::from_status(status, body));
+    }
+    let typed = serde_json::from_str(&body).map_err(|err| ClientError::Refused {
+        status,
+        message: format!("応答の形を読めません（{err}）。相手は本当にダッシュボードですか"),
+    })?;
+    Ok((typed, body))
+}
+
 /// `GET /api/hosts/{host}/file?path=…&as=raw`（`ファイル閲覧で画像とHTMLも表示する` 設計§9）。
 ///
 /// **画面が `<img>` と `<iframe>` の宛先にしているのと同じ口**を叩く。口を分けると、

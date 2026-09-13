@@ -636,6 +636,22 @@ enum HostCmd {
         #[command(flatten)]
         out: OutputArgs,
     },
+    /// PC のファイルを**書き戻す**（上書きだけ。作成・削除はしない）
+    Write {
+        /// どの PC か。この機械なら `local`
+        host: String,
+        /// 書き戻すファイルのパス。**既に在るものだけ**
+        path: String,
+        /// 書き込む中身の入ったファイル
+        #[arg(long)]
+        from: std::path::PathBuf,
+        /// 読んだときの印。**`host file --json` の `stamp` をそのまま渡す**。
+        /// 省くと断られる——省けば上書きできる道を残さないため
+        #[arg(long)]
+        stamp: String,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
     /// PC の空きメモリと、**いま何枚起こし直せるか**（`session revive` の歯止めと同じ数）
     Resources {
         /// どの PC か。この機械なら `local`
@@ -1549,6 +1565,28 @@ async fn client_host(cmd: HostCmd, target: &client::Target) -> Result<(), client
                         content.bytes
                     );
                 }
+            }
+        }
+        HostCmd::Write {
+            host,
+            path,
+            from,
+            stamp,
+            out,
+        } => {
+            // **文字列を経由しない。** 読めたものをそのまま運ぶ——途中で `String` にすると
+            // 文字コードを推定しないという約束（設計§9）を CLI 側で破ることになる
+            let text = std::fs::read(&from)
+                .map_err(|err| client::ClientError::Config(format!("読めません: {err}")))?;
+            let (written, raw) = client::host_write(target, &host, &path, &stamp, text).await?;
+            if out.json {
+                println!("{raw}");
+            } else {
+                // **次の保存に要るので印を出す。** 出さないと2回目が必ず断られる
+                println!(
+                    "{} へ {} バイト書きました（次の印: {}）",
+                    written.path, written.bytes, written.stamp
+                );
             }
         }
         HostCmd::Resources { host, out } => {

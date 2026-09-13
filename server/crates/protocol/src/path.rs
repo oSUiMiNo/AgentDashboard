@@ -47,18 +47,27 @@ pub fn is_writable(roots: &[String], path: &str) -> bool {
     roots.iter().any(|root| is_under(root, path))
 }
 
-/// 実際に効く根の一覧——**設定の根に、開いている PJT の配下を足したもの**。
+/// 実際に効く根の一覧——**設定の根に、その利用者のプロジェクトの配下を足したもの**。
 ///
-/// **PJT を足すのはコードの側である**（設計§3-5）。設定に PJT を書かせると、
-/// PJT を足すたびに設定も直す必要が出る。
-pub fn effective_roots(configured: &[String], project_root: Option<&str>) -> Vec<String> {
-    let mut roots: Vec<String> = Vec::with_capacity(configured.len() + 1);
-    if let Some(project) = project_root {
-        if !project.is_empty() {
-            roots.push(trim_end(project).to_string());
-        }
-    }
-    for root in configured {
+/// # プロジェクトを足すのはコードの側である（設計§3-5）
+///
+/// 設定に書かせると、プロジェクトを足すたびに設定も直す必要が出る。
+/// **`writable_roots` の既定は空のまま**で、ここで足す。
+///
+/// # 「いま開いているもの1つ」ではなく、引ける全部を足す
+///
+/// かつてここは根を1つ（`Option<&str>`）しか取らなかった。**画面が「いま開いている
+/// プロジェクト」を申告する形を想定していた**が、採らない。
+///
+/// - **サーバはその文脈を持っていない。** 申告させると、**客体が申告した値で照合の
+///   範囲が決まる**ことになる
+/// - **得られる安全が薄い。** 弾きたいのは「他人の機械・他人の領域」であって、
+///   **同じ利用者の別のプロジェクトではない**
+/// - **呼ぶ側が持っている一覧は、既にアカウントと PC で絞られている。** そこから引けば
+///   **申告に頼らず、かつ勝手に広がらない**
+pub fn effective_roots(configured: &[String], projects: &[String]) -> Vec<String> {
+    let mut roots: Vec<String> = Vec::with_capacity(configured.len() + projects.len());
+    for root in projects.iter().chain(configured.iter()) {
         if root.is_empty() {
             continue;
         }
@@ -168,14 +177,14 @@ mod tests {
 
     #[test]
     fn 開いているプロジェクトはコードの側で足される() {
-        let effective = effective_roots(&[], Some("/dev/app"));
+        let effective = effective_roots(&[], &roots(&["/dev/app"]));
         assert_eq!(effective, roots(&["/dev/app"]));
         assert!(is_writable(&effective, "/dev/app/src/main.rs"));
     }
 
     #[test]
     fn 設定の根とプロジェクトの両方が効く() {
-        let effective = effective_roots(&roots(&["/home/u/notes"]), Some("/dev/app"));
+        let effective = effective_roots(&roots(&["/home/u/notes"]), &roots(&["/dev/app"]));
         assert!(is_writable(&effective, "/dev/app/src/main.rs"));
         assert!(is_writable(&effective, "/home/u/notes/todo.md"));
         assert!(!is_writable(&effective, "/etc/passwd"));
@@ -183,13 +192,23 @@ mod tests {
 
     #[test]
     fn 同じ根を二重に持たない() {
-        let effective = effective_roots(&roots(&["/dev/app", "/dev/app/"]), Some("/dev/app"));
+        let effective = effective_roots(&roots(&["/dev/app", "/dev/app/"]), &roots(&["/dev/app"]));
         assert_eq!(effective, roots(&["/dev/app"]));
     }
 
     #[test]
+    fn 引けるプロジェクトは全部効く() {
+        // **「いま開いているもの1つ」に絞らない**（設計§3-5）。申告させると、
+        // 客体が申告した値で照合の範囲が決まることになる
+        let effective = effective_roots(&[], &roots(&["/dev/app", "/dev/other"]));
+        assert!(is_writable(&effective, "/dev/app/src/main.rs"));
+        assert!(is_writable(&effective, "/dev/other/README.md"));
+        assert!(!is_writable(&effective, "/dev/third/x.md"));
+    }
+
+    #[test]
     fn プロジェクトが無くても設定の根だけで効く() {
-        let effective = effective_roots(&roots(&["/home/u/notes"]), None);
+        let effective = effective_roots(&roots(&["/home/u/notes"]), &[]);
         assert_eq!(effective, roots(&["/home/u/notes"]));
         assert!(!is_writable(&effective, "/dev/app/src/main.rs"));
     }

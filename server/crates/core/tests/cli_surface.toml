@@ -220,6 +220,11 @@ command = "version install"
 
 [[entry]]
 kind = "rest"
+target = "PUT /api/hosts/{host}/file"
+command = "host write"
+
+[[entry]]
+kind = "rest"
 target = "PUT /api/projects/order"
 command = "project reorder"
 
