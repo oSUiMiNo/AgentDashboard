@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { Terminal as TerminalClass } from '@xterm/xterm'
 import type { IBufferLine, Terminal } from '@xterm/xterm'
 import { TERMINAL_GRID, TERMINAL_OPTIONS, TerminalPane } from './TerminalPane'
 import { KIND_PTY_OUTPUT, KIND_PTY_SNAPSHOT } from '@/lib/frame'
@@ -1148,5 +1149,55 @@ describe('TerminalPane の文字選択', () => {
     expect(blur).not.toHaveBeenCalled()
     expect(helper.inputMode).toBe('text')
     よそ.remove()
+  })
+})
+
+describe('TerminalPane のホイール', () => {
+  /**
+   * 登録された横取りの口を捕まえる。**端末が起きる前に張らないと間に合わない。**
+   */
+  async function 口を捕まえる() {
+    let 口: ((event: WheelEvent) => boolean) | null = null
+    const spy = vi
+      .spyOn(TerminalClass.prototype, 'attachCustomWheelEventHandler')
+      .mockImplementation(function (this: Terminal, handler) {
+        口 = handler
+      })
+    const { container } = render(<TerminalPane cardId={CARD} />)
+    const box = container.querySelector('[data-testid="terminal"]') as HTMLElement
+    await 描かれた端末(box)
+    spy.mockRestore()
+    return 口 as unknown as (event: WheelEvent) => boolean
+  }
+
+  /*
+    **ここで確かめられるのは、返り値の分岐だけである。**
+
+    塞ぐ相手（矢印キーの送出）は**スクロールバックがまだ無いあいだ**しか働かないので、
+    出力が溜まった端末では**壊し方を当てても緑のまま通る**。実機で本当に止まっている
+    ことの確認はテスト計画フェーズ8に置いてある。
+  */
+  it('**Shift ＋ 縦は端末に食わせない**（claude へ矢印キーを送らせない）', async () => {
+    const 口 = await 口を捕まえる()
+
+    expect(口({ shiftKey: true, deltaY: 100 } as WheelEvent)).toBe(false)
+  })
+
+  it('修飾なしの縦は、端末に渡す（遡りを壊さない）', async () => {
+    const 口 = await 口を捕まえる()
+
+    expect(口({ shiftKey: false, deltaY: 100 } as WheelEvent)).toBe(true)
+  })
+
+  it('純粋な横回しも、端末に渡す（向こうが自ら抜ける）', async () => {
+    const 口 = await 口を捕まえる()
+
+    expect(口({ shiftKey: false, deltaX: 120, deltaY: 0 } as WheelEvent)).toBe(true)
+  })
+
+  it('Shift でも、縦が動いていなければ渡す', async () => {
+    const 口 = await 口を捕まえる()
+
+    expect(口({ shiftKey: true, deltaX: 120, deltaY: 0 } as WheelEvent)).toBe(true)
   })
 })

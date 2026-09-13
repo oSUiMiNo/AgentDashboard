@@ -47,6 +47,7 @@ import { projectDisplayName } from '@/lib/path'
 import { backTargetFor, HOME } from '@/lib/routes'
 import { saveCardOrder, useProjectCards } from '@/stores/sessions'
 import { useReorder, type Scroller } from '@/lib/useReorder'
+import { useRailPan } from '@/lib/useRailPan'
 import { toggleSelect } from '@/stores/selection'
 import { useProjects } from '@/stores/projects'
 
@@ -85,6 +86,13 @@ export function GroupView({ host, project }: Props) {
       return reason
     },
   })
+  /*
+    **端末の上のホイールも、このレールへ渡す**（`lib/useRailPan.ts`）。端末を包む箱は
+    自前で `overflowX: auto` を持つので、手渡しが無いと**端末の中身だけが横へ動く**。
+    渡す先は `scroller` と同じ `railRef`——**並べ替えが見ている箱と別のものを動かすと、
+    運んでいる最中の補正がずれる**（並べ替え設計§15-11）
+  */
+  useRailPan(railRef)
   const [filesOpen, toggleFiles] = useFilesPanel()
   const projects = useProjects()
   const navigate = useNavigate()
