@@ -224,3 +224,41 @@ export function scrollOffsetFor(
   const 箱の中 = いまの位置 + (上 - 箱.top)
   return Math.max(0, 箱の中 - (箱.height - 当たり.height) / 2)
 }
+
+/**
+ * 文字列の中の当たりを、**位置の対**で返す。**打つ層（`<textarea>`）のための道。**
+ *
+ * # なぜ `Range` ではないのか
+ *
+ * `<textarea>` の中身は**値**であって DOM の文字節点ではない——外から `Range` を
+ * 張れない。しかも打つ層の下には**色付きの `<pre>`** が敷いてあり、そちらには同じ
+ * 字が文字節点として在るが、**色付けのたびに作り直される**ので張った `Range` は
+ * すぐ無効になる。
+ *
+ * **値の中の位置で持てば、どちらの問題も起きない**——示すのは
+ * `setSelectionRange` の仕事で、色付けが何度走っても選択は消えない。
+ *
+ * 畳み方は [`findMatches`] と同じ（**長さを変えずに大文字小文字を畳む**）ので、
+ * 同じ語に対して**どちらの道でも同じ数**が当たる。
+ */
+export function findTextMatches(text: string, query: string): [number, number][] {
+  if (query === '') {
+    return []
+  }
+  const hay = 畳む(text)
+  const needle = 畳む(query)
+  if (needle === '') {
+    return []
+  }
+  const out: [number, number][] = []
+  let from = 0
+  for (;;) {
+    const at = hay.indexOf(needle, from)
+    if (at < 0) {
+      break
+    }
+    out.push([at, at + needle.length])
+    from = at + needle.length
+  }
+  return out
+}

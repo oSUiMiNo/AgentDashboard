@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   clearMatches,
   findMatches,
+  findTextMatches,
   paintMatches,
   scrollOffsetFor,
   supportsHighlight,
@@ -117,5 +118,56 @@ describe('lib/fileSearch', () => {
         scrollOffsetFor(箱の矩形, { top: -1000, height: 20 }, 0),
       ).toBeGreaterThanOrEqual(0)
     })
+  })
+})
+
+/**
+ * 打つ層（`<textarea>`）のための道（`ファイルビュアにエディタ機能を追加` 設計§5-4）。
+ *
+ * **値の中の位置で持つ。** `Range` を張れないし、下に敷いた色の層は色付けのたびに
+ * 作り直されるので、張っても残らない。
+ */
+describe('lib/fileSearch の findTextMatches', () => {
+  it('当たった位置の対を、前から順に返す', () => {
+    expect(findTextMatches('あかあおあか', 'あか')).toEqual([
+      [0, 2],
+      [4, 6],
+    ])
+  })
+
+  it('空の語では1つも返さない', () => {
+    expect(findTextMatches('あかあお', '')).toEqual([])
+  })
+
+  it('重なる当たりは、進めた先から数える', () => {
+    // `aaaa` の中の `aa` は 0-2 と 2-4 の2つ（1-3 は数えない）
+    expect(findTextMatches('aaaa', 'aa')).toEqual([
+      [0, 2],
+      [2, 4],
+    ])
+  })
+
+  it('大文字小文字を区別しない', () => {
+    expect(findTextMatches('Hello hello', 'HELLO')).toEqual([
+      [0, 5],
+      [6, 11],
+    ])
+  })
+
+  /**
+   * **どちらの道でも同じ数が当たる**ことを、同じ字で確かめる。
+   *
+   * 畳み方がずれると、**見る姿とエディタで件数が食い違う**——利用者からは
+   * 「同じファイルなのに数が違う」としか見えず、原因に辿り着けない。
+   */
+  it('DOM を遡る道と、同じ字に同じ数だけ当たる', () => {
+    const 字 = 'Foo foo FOO'
+    const 箱 = document.createElement('div')
+    箱.textContent = 字
+    expect(findTextMatches(字, 'foo')).toHaveLength(findMatches(箱, 'foo').length)
+  })
+
+  it('改行をまたいでも位置がずれない', () => {
+    expect(findTextMatches('one\ntwo\nthree', 'two')).toEqual([[4, 7]])
   })
 })
