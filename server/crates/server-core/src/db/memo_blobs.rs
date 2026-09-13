@@ -176,7 +176,7 @@ async fn sweep_expired(
         // **`sweep_bytes` は 0。** 容量のぶんは同意を取ってからでないと消せない
         let answer =
             survey_or_sweep(db, account_id, now_ms, days, limits.max_bytes, 0, true).await?;
-        removed += u64::from(answer.expiring);
+        removed += answer.expiring;
     }
     Ok(removed)
 }
