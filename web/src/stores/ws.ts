@@ -114,12 +114,22 @@ interface WsState {
    *
    * 一覧を引くのと足すのだけが宛先を運ぶ。直す・片付ける・消すは `id` が1件を指すので、
    * **宛先を知らなくてよい**——面の中が宛先を1度も見ないのはこのためである。
+   *
+   * # 送れたかを返す
+   *
+   * **`void` にしてはいけない。** ここを `void` にしていたせいで、`MemoPane` は
+   * 線が切れていても書きかけを消していた——**打った文が消え、サーバには1行も残らず、
+   * 画面にも何も出ない**という、`send` の doc が名指しで禁じている形である。
+   *
+   * **型で塞ぐ。** 戻り値を返せば、呼ぶ側は確かめざるを得ない。テストで守るより強い
+   * のは、**テストは書いた人が想定した壊し方しか捕まえない**のに対し、型は**呼び方
+   * そのものを縛る**からである（`targetKey` の `assertNever` と同じ手）。
    */
-  memoList: (target: AnnotationTarget) => void
-  memoAdd: (target: AnnotationTarget, body: unknown) => void
-  memoEdit: (id: string, body: unknown) => void
-  memoCheck: (id: string, checked: boolean) => void
-  memoRemove: (id: string) => void
+  memoList: (target: AnnotationTarget) => boolean
+  memoAdd: (target: AnnotationTarget, body: unknown) => boolean
+  memoEdit: (id: string, body: unknown) => boolean
+  memoCheck: (id: string, checked: boolean) => boolean
+  memoRemove: (id: string) => boolean
   /**
    * セッションを起動する。
    *

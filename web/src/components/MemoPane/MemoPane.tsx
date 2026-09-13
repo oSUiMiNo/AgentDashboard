@@ -38,6 +38,15 @@ import { REHYPE_PLUGINS, REMARK_PLUGINS } from '@/lib/markdown'
 import { readMemoBody, sameMemoBody } from '@/lib/memoBody'
 import { 消えるまでの字 } from '@/lib/memoRetention'
 import { 画像を運ぶ as 一枚運ぶ, type 画像の置き場所 } from '@/lib/memoImage'
+
+/**
+ * 送れなかったときの断り。**`Composer` と同じ事象なので、同じ文面を使う。**
+ *
+ * 別の文面を作ると、利用者から見て**同じことが2通りの言い方で出る**。同じものは同じ
+ * 言葉で言う。
+ */
+const 送れていない文言 =
+  '送れていません（つながりが切れています）。打った文はそのまま残してあるので、つながり直してから送り直してください'
 import type { AnnotationTarget, MemoView } from '@/lib/protocol'
 import { useAuthStore } from '@/stores/auth'
 import { useSettingsStore } from '@/stores/settings'
@@ -117,6 +126,18 @@ export function MemoPane({ target, readOnly = false, label, 保存先 }: Props) 
    * **エディタは中身を外から差し替えられない**ので、`key` を変えて作り直す。
    */
   const [送った回数, set送った回数] = useState(0)
+  /**
+   * 送れなかったことを、**面の中に出す**（レビュー対応1）。
+   *
+   * **`Composer` は黙っていられる**——あちらは `SessionView` が `card-error` で
+   * 出してくれるからである。**独立した面には、出してくれる親が居ない。** 全体メモは
+   * 設定画面の上にも出るので、なおさら外に頼れない。
+   *
+   * **宛先で出し分けない。** セッションメモだけ `card-error` に乗せる形も採れるが、
+   * それをすると**面の中が宛先を見る**ことになる——この部品が守っている「面の中は
+   * 宛先を1度も見ない」（要件9）が崩れる。
+   */
+  const [送れなかった, set送れなかった] = useState<string | null>(null)
   /*
     **書きかけ**（設計§8-1）。鍵は宛先の綴り（`global` ／ `session:<id>`）で、
     `targetKey()` が決める。**カードの書きかけと同じ表に同居する**が、押し出しの
@@ -280,13 +301,36 @@ export function MemoPane({ target, readOnly = false, label, 保存先 }: Props) 
               if (body.markdown.trim() === '') {
                 return
               }
-              memoAdd(target, body)
+              // **送れたときだけ消す。** 送れていない文が消えるのが、いちばん困る
+              // 形である（`Composer.tsx` の同じ約束・`send` の doc が名指しで禁じて
+              // いる）。**型が `boolean` を返すので、確かめずに進む道が無い**
+              if (!memoAdd(target, body)) {
+                set送れなかった(送れていない文言)
+                return
+              }
+              set送れなかった(null)
               // **送ったぶんは書きかけではない。** 忘れさせてから入力欄を作り直す——
               // 順が逆だと、作り直した入力欄へ送ったばかりの字が戻ってくる
               set書きかけ('')
               set送った回数((前) => 前 + 1)
             }}
           />
+          {/*
+            **送れなかったことを、面の中に出す**（レビュー対応1）。**黙って戻らない**——
+            押したのに何も起きないのが、利用者から見ていちばん困る。
+
+            **打った文は消していない**ので、つながり直して押し直せばよい。そのことも
+            書いて渡す。
+          */}
+          {送れなかった !== null && (
+            <p
+              data-testid="memo-send-failed"
+              role="status"
+              className="text-destructive mt-1 text-xs"
+            >
+              {送れなかった}
+            </p>
+          )}
           {/*
             **溢れたときの同意**（要件10・設計§10-2）。**消す前に必ず押させる。**
 
@@ -377,6 +421,13 @@ function MemoBubble({
   const [直している, set直している] = useState(false)
   const [写せなかった値, set写せなかった値] = useState<string | null>(null)
   const [消す確認, set消す確認] = useState(false)
+  /**
+   * この吹き出しで送れなかったことを出す（レビュー対応1）。**本体とは別に持つ。**
+   *
+   * 直す・片付ける・消すは**この吹き出しの中で完結する**ので、断りも同じ場所に出す。
+   * 本体の入力欄の下へ出すと、**どの吹き出しの話か分からない。**
+   */
+  const [送れなかった, set送れなかった] = useState<string | null>(null)
 
   const body = readMemoBody(memo.body)
   const チェック済み = memo.checked_at !== undefined
@@ -400,8 +451,15 @@ function MemoBubble({
             // 中身が同じなら送らない。**時刻を動かすかどうかの判定はサーバがする**
             // （設計§7-3）が、線を1往復無駄にする必要も無い
             if (!sameMemoBody(body, 次)) {
-              memoEdit(memo.id, 次)
+              // **送れなければ閉じない。** 閉じると直した内容が消え、しかも
+              // サーバには1行も残らない（`Composer` の「送れたときだけ消す」と
+              // 同じ約束）
+              if (!memoEdit(memo.id, 次)) {
+                set送れなかった(送れていない文言)
+                return
+              }
             }
+            set送れなかった(null)
             set直している(false)
           }}
         />
@@ -418,7 +476,11 @@ function MemoBubble({
                 data-testid="memo-remove-confirm"
                 onMouseDown={(event) => {
                   event.preventDefault()
-                  memoRemove(memo.id)
+                  if (!memoRemove(memo.id)) {
+                    set送れなかった(送れていない文言)
+                    return
+                  }
+                  set送れなかった(null)
                 }}
                 className="text-destructive text-xs"
               >
@@ -459,6 +521,20 @@ function MemoBubble({
             やめる
           </button>
         </div>
+        {/*
+          **編集中の枝にも断りが要る。** ここは早期 return なので、下の枝に置いた
+          断りは描画されない——**消す・直すはこの枝の中で押される**ので、断りも
+          ここに無いと「押しても何も起きない」に戻る
+        */}
+        {送れなかった !== null && (
+          <p
+            data-testid="memo-row-send-failed"
+            role="status"
+            className="text-destructive mt-1 text-xs"
+          >
+            {送れなかった}
+          </p>
+        )}
       </div>
     )
   }
@@ -522,7 +598,11 @@ function MemoBubble({
               aria-label={チェック済み ? '戻す' : '片付ける'}
               onMouseDown={(event) => {
                 event.preventDefault()
-                memoCheck(memo.id, !チェック済み)
+                if (!memoCheck(memo.id, !チェック済み)) {
+                  set送れなかった(送れていない文言)
+                  return
+                }
+                set送れなかった(null)
               }}
               className="text-muted-foreground hover:text-foreground text-xs"
             >
@@ -537,6 +617,21 @@ function MemoBubble({
         （スマホから LAN のアドレスで開いた場合）でも**値を取れる形**にする。
         **消すのは人の手だけ**——時間で消すと、選んで取る前に逃げ道が消える
       */}
+      {/*
+        **この吹き出しで送れなかったことを出す**（レビュー対応1）。**黙って戻らない。**
+
+        直す・片付ける・消すは、押しても画面が変わらないと**押せていないのか、
+        送れていないのかが区別できない**。
+      */}
+      {送れなかった !== null && (
+        <p
+          data-testid="memo-row-send-failed"
+          role="status"
+          className="text-destructive mt-1 text-xs"
+        >
+          {送れなかった}
+        </p>
+      )}
       {写せなかった値 !== null && (
         <p className="mt-1 flex items-start gap-1 text-xs">
           <span className="min-w-0 flex-1">

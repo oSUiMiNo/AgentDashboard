@@ -29,14 +29,26 @@ const 宛先たち: [string, AnnotationTarget][] = [
   ['セッション', sessionTarget('s-1')],
 ]
 
+/*
+  **既定は「送れた」にする。**
+
+  口はどれも**送れたかを返す**（`ws.ts`）。`vi.fn()` の戻り値は `undefined` なので、
+  **既定のままだと全部のテストが「送れなかった」経路を通る**——呼ばれたことしか見て
+  いない検査は緑のままなので、**成功経路を1度も通らずに通ってしまう**。
+
+  このイシューで**3度目の「材料が揃っていて何も守らない」**である（1度目は時刻、
+  2度目は画像の大きさ）。**戻り値を持つ口をモックするときは、戻り値も与える。**
+*/
+const 送れた = () => vi.fn(() => true)
+
 beforeEach(() => {
   clearMemos()
   useWsStore.setState({
-    memoList: vi.fn(),
-    memoAdd: vi.fn(),
-    memoEdit: vi.fn(),
-    memoCheck: vi.fn(),
-    memoRemove: vi.fn(),
+    memoList: 送れた(),
+    memoAdd: 送れた(),
+    memoEdit: 送れた(),
+    memoCheck: 送れた(),
+    memoRemove: 送れた(),
   })
 })
 
@@ -47,7 +59,7 @@ afterEach(() => {
 
 describe.each(宛先たち)('メモの面（%s宛て）', (名, target) => {
   it('開いたら一覧を引く。**宛先を引数で渡している**', () => {
-    const memoList = vi.fn()
+    const memoList = 送れた()
     useWsStore.setState({ memoList })
 
     render(<MemoPane target={target} label={`${名}のメモ`}
@@ -102,7 +114,7 @@ describe.each(宛先たち)('メモの面（%s宛て）', (名, target) => {
   })
 
   it('3つのボタンは onMouseDown で押す（onClick では効かない）', () => {
-    const memoCheck = vi.fn()
+    const memoCheck = 送れた()
     useWsStore.setState({ memoCheck })
     replaceMemos(target, [memo('あ')])
     render(<MemoPane target={target} label={名}
@@ -126,7 +138,7 @@ describe.each(宛先たち)('メモの面（%s宛て）', (名, target) => {
   })
 
   it('チェック済みを押すと、外す側で送る', () => {
-    const memoCheck = vi.fn()
+    const memoCheck = 送れた()
     useWsStore.setState({ memoCheck })
     replaceMemos(target, [memo('済', { checked_at: 1_700_000_001_000 })])
     render(<MemoPane target={target} label={名}
@@ -164,6 +176,57 @@ describe.each(宛先たち)('メモの面（%s宛て）', (名, target) => {
     // **いちばん下が最新**なので、隠すのは先頭側
     expect(screen.queryByText('m0')).toBeNull()
     expect(screen.getByText(`m${下段に出す数}`)).toBeInTheDocument()
+  })
+  /*
+    **送れなかったときに、黙って戻らない**（レビュー対応1）。
+
+    `Composer` は「送れたときだけ消す。送れていない文が消えるのが、いちばん困る形」
+    という約束を持っており、`send` の doc も同じことを名指しで禁じている。**メモの面
+    だけがこれを破っていた**——口の型が `void` で、**呼ぶ側が確かめる道が塞がれていた**
+    ためである。
+
+    **型を `boolean` へ変えたので、確かめずに進む道はもう無い。** ここで守るのは
+    「**確かめた結果をどう出すか**」——**面の中に断りを出す**ことである。
+
+    **宛先で出し分けない。** セッションメモだけ `card-error` に乗せる形も採れるが、
+    それをすると**面の中が宛先を見る**ことになり、この部品の約束（要件9）が崩れる。
+  */
+  it('片付けが送れなかったら、面の中で断る（黙って戻らない）', () => {
+    const memoCheck = vi.fn(() => false)
+    useWsStore.setState({ memoCheck })
+    replaceMemos(target, [memo('あ')])
+    render(<MemoPane target={target} label={名} 保存先={null} />)
+
+    expect(screen.queryByTestId('memo-row-send-failed')).toBeNull()
+    fireEvent.mouseDown(screen.getByTestId('memo-check'))
+
+    expect(memoCheck).toHaveBeenCalledWith('あ', true)
+    expect(screen.getByTestId('memo-row-send-failed')).toHaveTextContent('送れていません')
+  })
+
+  it('消すのが送れなかったら、面の中で断る', () => {
+    const memoRemove = vi.fn(() => false)
+    useWsStore.setState({ memoRemove })
+    replaceMemos(target, [memo('あ')])
+    render(<MemoPane target={target} label={名} 保存先={null} />)
+
+    fireEvent.mouseDown(screen.getByTestId('memo-edit'))
+    fireEvent.mouseDown(screen.getByTestId('memo-remove'))
+    fireEvent.mouseDown(screen.getByTestId('memo-remove-confirm'))
+
+    expect(memoRemove).toHaveBeenCalledWith('あ')
+    expect(screen.getByTestId('memo-row-send-failed')).toHaveTextContent('送れていません')
+  })
+
+  it('送れたときは断らない（成功の経路も通す）', () => {
+    const memoCheck = 送れた()
+    useWsStore.setState({ memoCheck })
+    replaceMemos(target, [memo('あ')])
+    render(<MemoPane target={target} label={名} 保存先={null} />)
+
+    fireEvent.mouseDown(screen.getByTestId('memo-check'))
+
+    expect(screen.queryByTestId('memo-row-send-failed')).toBeNull()
   })
 })
 
@@ -267,7 +330,7 @@ describe('消す道', () => {
   })
 
   it('確認を1回挟んでから消す', () => {
-    const memoRemove = vi.fn()
+    const memoRemove = 送れた()
     useWsStore.setState({ memoRemove })
     replaceMemos(GLOBAL_TARGET, [memo('あ')])
     render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ"
@@ -292,7 +355,7 @@ describe('消す道', () => {
 */
 describe('書いて送る', () => {
   it('空のまま Ctrl+Enter を押しても送らない', () => {
-    const memoAdd = vi.fn()
+    const memoAdd = 送れた()
     useWsStore.setState({ memoAdd })
     render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ"
         保存先={null}
@@ -307,7 +370,7 @@ describe('書いて送る', () => {
   })
 
   it('Ctrl を伴わない Enter では送らない（ブロックを割る側）', () => {
-    const memoAdd = vi.fn()
+    const memoAdd = 送れた()
     useWsStore.setState({ memoAdd })
     render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ"
         保存先={null}
@@ -318,7 +381,7 @@ describe('書いて送る', () => {
   })
 
   it('変換中の Ctrl+Enter では送らない（IME の確定と取り違えない）', () => {
-    const memoAdd = vi.fn()
+    const memoAdd = 送れた()
     useWsStore.setState({ memoAdd })
     render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ"
         保存先={null}
@@ -331,4 +394,5 @@ describe('書いて送る', () => {
     })
     expect(memoAdd).not.toHaveBeenCalled()
   })
+
 })
