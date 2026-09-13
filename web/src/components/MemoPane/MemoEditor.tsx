@@ -173,6 +173,9 @@ export function MemoEditor({
     if (blocks.length === 0) {
       return
     }
+    // **ここは検証しない。** `blocks` は `tryParseMarkdownToBlocks` が作ったもので、
+    // **エディタ自身の出力**である。記録から来た `unknown` を渡す93行とは出所が違う
+    // ——あちらは `readMemoBody` が要素まで検証している（レビュー対応8）
     editor.replaceBlocks(editor.document, blocks as never)
   }, [editor])
 

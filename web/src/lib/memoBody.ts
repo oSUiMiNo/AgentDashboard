@@ -44,9 +44,35 @@ export function readMemoBody(body: unknown): MemoBody {
     return { blocks: [], markdown: '' }
   }
   const record = body as Record<string, unknown>
-  const blocks = Array.isArray(record.blocks) ? record.blocks : []
+  const blocks = Array.isArray(record.blocks) ? record.blocks.filter(ブロックらしいか) : []
   const markdown = typeof record.markdown === 'string' ? record.markdown : ''
   return { blocks, markdown }
+}
+
+/**
+ * 1件がブロックの形をしているか（レビュー対応8）。
+ *
+ * # 最上位だけ見ても足りなかった
+ *
+ * 以前は `Array.isArray` しか見ておらず、**要素が不正でも配列でありさえすれば通した**。
+ * その配列はエディタへ**そのまま渡る**ので、**描画の最中に投げる**——この web には
+ * エラー境界が1つも無いので、**面が丸ごと消える**。
+ *
+ * **`readMemoBody` が防ごうとした壊れ方が、鉛筆を押した経路から戻ってくる形**だった。
+ *
+ * # 倒れない形は保つ
+ *
+ * **1件を捨てて残りを出す。** 投げない——「1件が読めないことより、全部が消えること
+ * のほうが悪い」という、この関数の約束は変えない。
+ *
+ * # なぜ `type` だけ見るのか
+ *
+ * ブロックの中身は版によって変わりうるが、**`type` を持つことはエディタが前提に
+ * している**。ここを厳しくしすぎると、**新しい版が書いたブロックを古い版が捨てる**
+ * ——直せるはずのものが直せなくなる。
+ */
+function ブロックらしいか(one: unknown): boolean {
+  return typeof one === 'object' && one !== null && typeof (one as { type?: unknown }).type === 'string'
 }
 
 /**
