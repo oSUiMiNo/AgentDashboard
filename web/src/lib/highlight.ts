@@ -164,3 +164,42 @@ export async function tokenizeHunks(
     return null
   }
 }
+
+/**
+ * ファイル1枚を、行ごとのトークン列へ色付けする（`ファイルビュアにエディタ機能を追加`
+ * 設計§6-3）。**エディタの色付き層が使う。**
+ *
+ * # ハイライタは作り直さない
+ *
+ * [`ensureHighlighter`] を通すので、**差分の色付けと同じ1つを使い回す**。ここで
+ * `createHighlighterCore` を呼ぶと**2つ目が立ち**、「1度だけ作って使い回す」という
+ * このモジュールの意図が黙って壊れる。
+ *
+ * # 末尾に1行足して返す理由
+ *
+ * 色付き層は打つ層（`textarea`）に重ねる。`textarea` は**末尾の改行のぶんも1行と
+ * して数える**が、色付けした側は数えない——**足さないと最終行だけ縦にずれる**。
+ *
+ * 言語が分からない・ハイライタが用意できない・色付けに失敗した、のいずれでも
+ * `null` を返す。**色が付かないだけで中身は読めるので、ここで画面を壊さない。**
+ */
+export async function tokenizeFile(text: string, filePath: string): Promise<TokenNode[][] | null> {
+  const lang = languageOf(filePath)
+  if (!lang) {
+    return null
+  }
+  const shiki = await ensureHighlighter()
+  if (!shiki) {
+    return null
+  }
+  try {
+    const lines = linesOf(shiki.codeToHast(text, { lang, theme: THEME }))
+    // **末尾の改行を補う**（設計§6-1 の条件4）
+    if (text.endsWith('\n')) {
+      lines.push([])
+    }
+    return lines
+  } catch {
+    return null
+  }
+}
