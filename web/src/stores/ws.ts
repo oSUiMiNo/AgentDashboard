@@ -61,6 +61,7 @@ import {
   markBranching,
   markReviving,
   patchSessionContextUsage,
+  patchSessionCost,
   patchSessionStatus,
   removeSession,
   setCardError,
@@ -649,13 +650,15 @@ function handleJson(raw: string, set: SetState) {
       // 設定画面の区画へ、`agent_id` が在れば PC の一覧のその行へ入る
       useSettingsStore.getState().applyRateLimits(message.agent_id, message.limits)
       break
-    // 【フェーズ2】腕だけを置いてある。**置き場所（ストア）と画面はフェーズ5 で足す。**
+    // **宛先はカードである**（上の `rate_limits` と対。status 設計「便」）。
+    // あちらはアカウント内の全ブラウザ、こちらは1枚のカードに属する値なので、
+    // **同じ payload から届くのに出す場所が違う**。
     //
-    // **ここが空のあいだ、下の `assertNever` はもう守ってくれない。** 腕が在るだけで
-    // 型検査は通るので、中身を入れ忘れても `tsc` は黙る——1件目で踏んだ
-    // 「型も単体テストも台帳も緑で、画面にだけ何も届かない」と**同じ格好**である。
-    // 見張りを1回使い切った形なので、フェーズ5 は画面まで実物で通して確かめること
+    // **`assertNever` はこの腕を守らない。** 腕が在るだけで型検査は通るので、
+    // 中身を消しても `tsc` は黙る（フェーズ2 で1度使い切った）。**守っているのは
+    // `ws.test.ts` の「便が届いたらストアの中身が変わる」検査だけ**である。
     case 'session_cost':
+      patchSessionCost(message.card_id, message.cost)
       break
     case 'transcript_append':
       appendNodes(message.card_id, message.nodes)

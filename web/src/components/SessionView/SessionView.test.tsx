@@ -1288,3 +1288,117 @@ describe('コンテキストの使い具合（コンテキスト残量設計§6�
     expect(screen.queryByTestId('ctx-gauge')).toBeNull()
   })
 })
+
+/**
+ * セッションごとの費用と手間（status 設計§5。テスト計画フェーズ5）。
+ *
+ * **ゲージと同じ行の同じ場所に入るが、終了時の扱いだけが逆である。** 写して `!isEnded`
+ * で囲むと**要件の完了条件2 が終了後に読めなくなる**ので、そこを名指しで見る。
+ */
+describe('セッションごとの費用（status 設計§5）', () => {
+  function show(session: SessionMeta, compact = false) {
+    clearSessions()
+    applySessionSnapshot([session])
+    renderView({ compact })
+  }
+
+  const 費用 = {
+    total_cost_cents: 6_477,
+    total_api_duration_ms: 1_234_567,
+    total_duration_ms: 8_100_000,
+    total_lines_added: 320,
+    total_lines_removed: 97,
+  }
+
+  it('費用・所要時間・変更行数の3つが出る（完了条件2）', () => {
+    show(meta({ cost: 費用 }))
+
+    // **3つを別々に見る。** 1つだけ確かめると、残り2つを落としても緑になる。
+    // **整形済みの文字列で探す**——数値だけ見ると桁や単位の誤りを見逃す
+    expect(screen.getByTestId('session-cost-usd')).toHaveTextContent('$64.77')
+    expect(screen.getByTestId('session-cost-duration')).toHaveTextContent('2時間15分')
+    expect(screen.getByTestId('session-cost-lines')).toHaveTextContent('+320')
+    expect(screen.getByTestId('session-cost-lines')).toHaveTextContent('-97')
+  })
+
+  it('所要時間に「前」を付けない（formatElapsed との取り違え）', () => {
+    show(meta({ cost: 費用 }))
+
+    // **整形のテストが緑でも、画面が別の関数を呼んでいれば意味が無い。**
+    // `lib/time.test.ts` 側と対で置く
+    const 時間 = screen.getByTestId('session-cost-duration')
+    expect(時間).not.toHaveTextContent('前')
+    expect(時間).not.toHaveTextContent('あと')
+  })
+
+  it('★ 終了したカードでも出る（ゲージとは逆。累計だから終わってから読みたい）', () => {
+    /*
+      **ゲージを隠す理由が、そのまま反証になっている。** あちらは「走っていない
+      セッションの使い具合は『いまの状態』ではない」から隠すが、費用は**累計**で
+      「このセッションはいくらかかったか」は終わってからこそ読みたい。
+
+      **同じ行に `isEnded` のときだけ出すもの（revive-mode）が既に在る**ので、
+      「2行目は終了したら空になる行」でもない。
+    */
+    show(meta({ status: { kind: 'ended', ok: true }, cost: 費用 }))
+
+    expect(screen.getByTestId('session-cost')).toBeInTheDocument()
+    expect(screen.getByTestId('session-cost-usd')).toHaveTextContent('$64.77')
+    // ゲージのほうは消えている（判定が逆であることを対で固める）
+    expect(screen.queryByTestId('ctx-gauge')).toBeNull()
+  })
+
+  it('2行目に居る（1行目の押すものを押し出さない）', () => {
+    show(meta({ cost: 費用 }))
+
+    // **2行目に在ることだけ見ると弱い。** 1行目に無いことを対で見る
+    expect(
+      screen.getByTestId('session-cost').closest('[data-row]')?.getAttribute('data-row'),
+    ).toBe('2')
+    const 一行目 = screen.getByTestId('power-card').closest('[data-row]')
+    expect(一行目?.getAttribute('data-row')).toBe('1')
+    expect(一行目?.querySelector('[data-testid="session-cost"]')).toBeNull()
+  })
+
+  it('届いていなければ行ごと出さない（0円を並べない）', () => {
+    show(meta({ cost: null }))
+
+    expect(screen.queryByTestId('session-cost')).toBeNull()
+  })
+
+  it('欄を持たない古いサーバの meta でも壊れない', () => {
+    // `?? null` を落とすと `undefined` が素通りして `$NaN` が描かれる
+    const 古い = meta()
+    delete (古い as { cost?: unknown }).cost
+    show(古い)
+
+    expect(screen.queryByTestId('session-cost')).toBeNull()
+  })
+
+  it('横並びでも出る（compact で分岐していない）', () => {
+    for (const compact of [false, true]) {
+      show(meta({ cost: 費用 }), compact)
+      expect(
+        screen.getByTestId('session-cost-usd'),
+        `compact=${compact} で出ていない`,
+      ).toHaveTextContent('$64.77')
+      cleanup()
+    }
+  })
+
+  it('アカウント単位の値（使用上限）を、この区画に混ぜない（完了条件6）', () => {
+    // **「セッションの区画に出ている」だけを見ると空になる。**
+    // 同じ区画に PC の使用上限が出ていないことまで見る（出す場所が違う）
+    show(
+      meta({
+        cost: 費用,
+        rate_limits: { windows: [{ name: 'five_hour', used_percentage: 41, resets_at: 1 }] },
+      }),
+    )
+
+    const 区画 = screen.getByTestId('session-cost')
+    expect(区画).toHaveTextContent('$64.77')
+    expect(区画).not.toHaveTextContent('41')
+    expect(screen.queryByTestId('rate-limit-windows')).toBeNull()
+  })
+})

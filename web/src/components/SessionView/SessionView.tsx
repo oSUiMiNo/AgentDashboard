@@ -39,7 +39,7 @@ import { TranscriptTree } from '@/components/TranscriptTree/TranscriptTree'
 import { formatTokens } from '@/lib/contextUsage'
 import { dropDraft } from '@/lib/drafts'
 import { useSnapToFile } from '@/lib/snapToFile'
-import { formatElapsed, formatScreenInterval } from '@/lib/time'
+import { formatDuration, formatElapsed, formatScreenInterval } from '@/lib/time'
 import {
   isEnded,
   isHookSilent,
@@ -59,7 +59,7 @@ import { useFilesPanel } from '@/lib/filesPanel'
 import { projectDisplayName } from '@/lib/path'
 import { backTargetFor, HOME, projectPath, sessionPath } from '@/lib/routes'
 import { hostOf } from '@/lib/reviveBudget'
-import type { CardId, ContextUsage, SessionMeta } from '@/lib/protocol'
+import type { CardId, ContextUsage, SessionCost, SessionMeta } from '@/lib/protocol'
 import { useNow } from '@/lib/sessions'
 import { useAuthStore } from '@/stores/auth'
 import {
@@ -706,6 +706,22 @@ export function SessionView({
               // 責任が読む側すべてに散る
               <ContextGauge usage={session.context_usage ?? null} />
             )}
+            {/*
+              費用と手間（status 設計§5。要件の完了条件2）。
+
+              **ゲージと違い `!isEnded` で囲まない。** 同じ行の同じ場所へ同じ形で入るので
+              写したくなるが、**上のゲージがそうしている理由がそのまま反証になる**——
+              あちらを隠すのは「**走っていないセッションの使い具合は『いまの状態』では
+              ない**」からで、こちらは**累計**（費用・所要時間・行数はすべて積み上げ）で
+              ある。**「このセッションはいくらかかったか」は終わってからこそ読みたい。**
+
+              **2行目は終了したら空になる行ではない。** 同じ `data-row="2"` に
+              `isEnded` のときだけ出すもの（`revive-mode`）が既に在る。
+
+              **`?? null` はゲージと同じ理由で落とさない**（古いサーバの meta では
+              `undefined` になる）。
+            */}
+            <SessionCostLine cost={session.cost ?? null} />
             {/* **更新間隔だけが残る。** ボタンは1行目の操作の群へ移った（設計§17-6） */}
             <div className="ml-auto shrink-0">
               <ScreenInterval
@@ -914,6 +930,53 @@ function ContextGauge({ usage }: { usage: ContextUsage | null }) {
           {formatTokens(usage.total_input_tokens)} / {formatTokens(usage.context_window_size)}
         </span>
       )}
+    </span>
+  )
+}
+
+/**
+ * そのセッションが使った費用と手間（status 設計§5。要件の完了条件2）。
+ *
+ * # 届いていないときは出さない
+ *
+ * ゲージは「まだ分からない」を `—` で描き分けるが（起こした直後と `/compact` 直後に
+ * **空と不明が別物**だから）、**こちらは累計なので届いていない＝まだ何も使っていない**
+ * であり、0 と同じ意味になる。**「0円・0分・0行」を並べても読む人の判断は変わらない**
+ * ので、行そのものを出さない。
+ *
+ * # 費用はセントで届く
+ *
+ * `total_cost_cents` が整数なのは、Rust 側の `SessionMeta` が `Eq` を導出していて
+ * 小数を持てないことと、**毎ターン動く小数を関門の鍵にすると関門が素通しになる**ため
+ * （protocol の doc）。**ここで 100 で割る**——桁は画面側の都合なので、運ぶ側は
+ * 整数のままでよい。
+ *
+ * # 近似の断りはここに書かない
+ *
+ * 公式が「クライアント側の計算で実際の請求と異なりうる」と明記しているので断りが要るが、
+ * **出す場所は画面の一箇所にまとめる**（フェーズ7）。**部品ごとに書くと、同じ断りが
+ * 画面に何度も出る。** いまは `title` に最小限だけ添えてある。
+ */
+function SessionCostLine({ cost }: { cost: SessionCost | null }) {
+  if (cost === null) {
+    return null
+  }
+  const dollars = (cost.total_cost_cents / 100).toFixed(2)
+  return (
+    <span
+      data-testid="session-cost"
+      className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground tabular-nums"
+      title="このセッションが使った費用と手間。費用はクライアント側の計算による概算です"
+    >
+      <span data-testid="session-cost-usd">${dollars}</span>
+      <span data-testid="session-cost-duration">{formatDuration(cost.total_duration_ms)}</span>
+      {/*
+        **足した行と消した行を1つにまとめない。** 「差し引き +3行」は、300行足して
+        297行消した工事と、3行足しただけの工事を同じに見せる。
+      */}
+      <span data-testid="session-cost-lines" className="text-muted-foreground/70">
+        +{cost.total_lines_added} -{cost.total_lines_removed}
+      </span>
     </span>
   )
 }

@@ -26,7 +26,14 @@
  */
 
 import { useSyncExternalStore } from 'react'
-import type { CardId, ContextUsage, ErrorKind, SessionMeta, SessionStatus } from '@/lib/protocol'
+import type {
+  CardId,
+  ContextUsage,
+  ErrorKind,
+  SessionCost,
+  SessionMeta,
+  SessionStatus,
+} from '@/lib/protocol'
 import { LOCAL_HOST } from '@/lib/routes'
 import { getProjects, subscribeProjects } from '@/stores/projects'
 
@@ -66,6 +73,14 @@ type Op =
   | { kind: 'remove'; cardId: CardId }
   | { kind: 'status'; patch: StatusPatch }
   | { kind: 'context_usage'; cardId: CardId; usage: ContextUsage | null }
+  /**
+   * **`| null` を付けない。** 便が運ぶのは素の値で、**消える向きが無い**
+   * （status 設計「便」。フェーズ2 で判定済み）。コンテキスト残量は `/compact` で
+   * `null` へ戻るので上の行が `| null` を持つが、費用は累計なので**一度届いたら
+   * 減りも消えもしない**。`SessionMeta.cost` 側が `| null` のままなのは
+   * 「**まだ一度も届いていない**」を表すためで、**この非対称は意図である**。
+   */
+  | { kind: 'session_cost'; cardId: CardId; cost: SessionCost }
 
 /** 確定済みの状態。読むのは購読者だけで、書き換えるのは [`flush`] だけ。 */
 const metas = new Map<CardId, SessionMeta>()
@@ -433,6 +448,16 @@ function flush() {
         touched.add(op.cardId)
         break
       }
+      case 'session_cost': {
+        const known = metas.get(op.cardId)
+        if (!known) {
+          // 上と同じ。`session_upsert` が後から来るので捨ててよい
+          break
+        }
+        metas.set(op.cardId, { ...known, cost: op.cost })
+        touched.add(op.cardId)
+        break
+      }
     }
   }
 
@@ -560,6 +585,17 @@ export function patchSessionStatus(patch: StatusPatch) {
  */
 export function patchSessionContextUsage(cardId: CardId, usage: ContextUsage | null) {
   enqueue({ kind: 'context_usage', cardId, usage })
+}
+
+/**
+ * そのセッションが使った費用と手間だけを当てる（status 設計§5）。
+ *
+ * 上と同じ「一部だけ更新する近道」だが、**運ぶ値の性質が違う**——あちらは
+ * **いまの状態**なので `null` へ戻ることがあり、こちらは**累計**なので戻らない。
+ * だから引数に `| null` が無い（`Op` の定義に理由を書いた）。
+ */
+export function patchSessionCost(cardId: CardId, cost: SessionCost) {
+  enqueue({ kind: 'session_cost', cardId, cost })
 }
 
 /**

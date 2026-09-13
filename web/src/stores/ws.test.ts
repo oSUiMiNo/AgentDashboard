@@ -786,3 +786,116 @@ describe('使用上限の便', () => {
     expect(useSettingsStore.getState().settings.machine_rate_limits).toBeUndefined()
   })
 })
+
+/**
+ * 費用の便（status 設計§5。テスト計画フェーズ5）。
+ *
+ * **`assertNever` はこの腕を守らない。** 腕はフェーズ2 で置いてあり、中身を消しても
+ * 型検査は通る（見張りを1回使い切った形）。**ここが唯一の砦である。**
+ *
+ * **「呼ばれたこと」ではなく「ストアの中身が変わったこと」を見る。** モックの戻り値は
+ * 既定で `undefined` なので、呼び出しだけ数えると**中身が空でも通る**。
+ */
+describe('費用の便', () => {
+  /** カードを1枚立ててから、軽い便を流せる状態にする。 */
+  async function カードを1枚立てる(cardId = CARD) {
+    await useWsStore.getState().connect()
+    latest().accept()
+    latest().deliver({
+      t: 'session_upsert',
+      session: {
+        card_id: cardId,
+        project: '/tmp/x',
+        claude_session_id: null,
+        resumed_from: null,
+        permission_mode: null,
+        model: null,
+        model_label: null,
+        model_requested: null,
+        status: { kind: 'waiting_input' },
+        subagent_active: 0,
+        last_activity_at: 0,
+        last_assistant_message: null,
+        created_at: 0,
+        hooks_seen: false,
+        agent_id: null,
+        agent_connected: true,
+        account: null,
+        toml_account: null,
+        session_title: null,
+        position: 0,
+        nickname: null,
+        branched_from: null,
+        context_usage: null,
+        rate_limits: null,
+        cost: null,
+      },
+    })
+  }
+
+  const 費用 = {
+    total_cost_cents: 6_477,
+    total_api_duration_ms: 1_234_567,
+    total_duration_ms: 8_100_000,
+    total_lines_added: 320,
+    total_lines_removed: 97,
+  }
+
+  it('便を流すと、そのカードの費用が変わる', async () => {
+    await カードを1枚立てる()
+    expect(getSession(CARD)?.cost).toBeNull()
+
+    latest().deliver({ t: 'session_cost', card_id: CARD, cost: 費用 })
+
+    expect(getSession(CARD)?.cost).toEqual(費用)
+  })
+
+  it('その欄だけを当てる（他の欄を巻き戻さない）', async () => {
+    await カードを1枚立てる()
+    latest().deliver({
+      t: 'status',
+      card_id: CARD,
+      status: { kind: 'working' },
+      subagent_active: 2,
+      last_activity_at: 99,
+    })
+
+    latest().deliver({ t: 'session_cost', card_id: CARD, cost: 費用 })
+
+    const 手元 = getSession(CARD)
+    expect(手元?.cost).toEqual(費用)
+    expect(手元?.status).toEqual({ kind: 'working' })
+    expect(手元?.subagent_active).toBe(2)
+    expect(手元?.last_activity_at).toBe(99)
+  })
+
+  it('コンテキスト残量とは別の欄に入る（同じ payload から届くが属する相手が違う）', async () => {
+    await カードを1枚立てる()
+    latest().deliver({
+      t: 'context_usage',
+      card_id: CARD,
+      usage: { used_percentage: 24, total_input_tokens: 1, context_window_size: 2 },
+    })
+
+    latest().deliver({ t: 'session_cost', card_id: CARD, cost: 費用 })
+
+    const 手元 = getSession(CARD)
+    expect(手元?.cost).toEqual(費用)
+    // **片方がもう片方を潰さない**
+    expect(手元?.context_usage?.used_percentage).toBe(24)
+  })
+
+  it('知らないカードIDの便が来ても、他のカードが壊れない', async () => {
+    await カードを1枚立てる()
+    latest().deliver({ t: 'session_cost', card_id: CARD, cost: 費用 })
+
+    latest().deliver({
+      t: 'session_cost',
+      card_id: 'ffffffff-0000-0000-0000-00000000ffff',
+      cost: { ...費用, total_cost_cents: 1 },
+    })
+
+    expect(getSessions()).toHaveLength(1)
+    expect(getSession(CARD)?.cost).toEqual(費用)
+  })
+})
