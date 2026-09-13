@@ -361,6 +361,44 @@ test('別のブラウザコンテキストから開いても、同じ順・同�
   }
 })
 
+test('「いつ消えるか」は、サーバが持っている値がそのまま画面に出る', async ({ page }) => {
+  /*
+    **端から端まで繋がっているかを見る**（要件10・設計§11-3）。
+
+    面には元々「3か月」が**固定で**書かれていた。保持期間は設定で変えられるので、
+    **30日へ縮めた人には3倍の嘘**になる——設計§11-3 が名指しで禁じている形である。
+
+    # なぜ「3か月と出ること」だけを見ないのか
+
+    **既定が90日なので、固定文言へ戻しても同じ字が出る。** 見るだけでは
+    **原文ごと捨てる実装でも通ってしまう**ので、**サーバが値を運んでいること**と
+    **その値どおりの字が出ていること**を1本で見る。
+
+    値は `GET /api/settings` に載っている（この工事で `SettingsView` へ足した）。
+    **欄ごと落とすと、ここが最初に落ちる。**
+  */
+  await openDashboard(page)
+
+  const settings = await page.request.get('/api/settings')
+  expect(settings.ok()).toBe(true)
+  const body = (await settings.json()) as {
+    memo_limits?: { retention_days: number; max_bytes: number }
+  }
+
+  // **サーバが運んでいること。** 欄を落とすとここで落ちる
+  expect(body.memo_limits, 'GET /api/settings が memo_limits を運んでいない').toBeTruthy()
+  const 日 = body.memo_limits!.retention_days
+  expect(日).toBeGreaterThan(0)
+
+  // **その値どおりの字が出ていること。** 30 で割り切れるなら月、でなければ日
+  const 期待 = 日 % 30 === 0 ? `${日 / 30}か月` : `${日}日`
+
+  const 面 = await 全体メモを開く(page)
+  await expect(面.getByTestId('memo-retention-note')).toContainText(期待, {
+    timeout: 30_000,
+  })
+})
+
 test('全体メモも、セッションメモと同じ筋がそのまま通る', async ({ page }) => {
   /*
     **要件9（2つのメモを同じ部品・同じ口・同じ記録で作る／利用者の指定）を、
