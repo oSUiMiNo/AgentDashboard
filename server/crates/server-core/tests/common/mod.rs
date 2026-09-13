@@ -390,5 +390,7 @@ pub fn meta(card_id: CardId) -> SessionMeta {
         nickname: None,
         branched_from: None,
         context_usage: None,
+        rate_limits: None,
+        cost: None,
     }
 }

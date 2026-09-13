@@ -449,6 +449,80 @@ pub struct ContextUsage {
     pub context_window_size: u64,
 }
 
+/// 使用上限の窓ひとつ（5時間ぶん・7日ぶんなど）。
+///
+/// # 名前を持たせてあるのは、本数を固定しないため
+///
+/// 【実測 2026-09-13・claude v2.1.270】いま届くのは `five_hour` と `seven_day` の
+/// **2本だけ**で、公式が挙げている `spend_limit` は来ない。**それでも本数で決め打ちしない。**
+/// `spend_limit` の条件は公式では「Claude apps gateway 配下のとき」で、**版ではなく
+/// 構成で決まる**とみられる——**いま2本しか来ないことと、2本前提で作ってよいことは別**である。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RateLimitWindow {
+    /// CLI が名乗る窓の名前（`five_hour` ／ `seven_day` など）。**そのまま持つ。**
+    pub name: String,
+    /// その窓を何%使ったか。
+    pub used_percentage: u8,
+    /// その窓がリセットされる時刻（Unix エポック秒）。
+    ///
+    /// **これを関門の鍵に入れる。** 入れないと、**窓が切り替わってパーセントが偶然
+    /// 同じだったときに、切替を配り落とす**。
+    pub resets_at: i64,
+}
+
+/// **その PC の**使用上限（`/status` の横棒グラフ）。
+///
+/// # コンテキスト残量と違い、これは PC に属する
+///
+/// [`ContextUsage`] はそのセッションの状態だが、**こちらはその PC に入っている claude
+/// ログインの上限**である。アカウント単位の1つの数字として持つと、**最後に届いた PC の
+/// 値が他の PC の欄を上書きする**（ペアリングで PC が複数ぶら下がる構成で壊れる）。
+///
+/// # `None` の意味も、コンテキスト残量とは違う
+///
+/// あちらの `None` は「まだ分からない」（起動直後と `/compact` 直後に割合が `null` で届く
+/// 時間帯）。**こちらは最初の payload から埋まっている**ので【実測 2026-09-13】、
+/// **`None` は「その PC でセッションが1本も走っていない」**——payload が届いていれば
+/// 値がある。**時間帯による場合分けは要らない。**
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RateLimits {
+    /// 窓の並び。**本数を固定しない**（上記）。
+    pub windows: Vec<RateLimitWindow>,
+}
+
+/// そのセッションが使った費用と手間（`/status` の Session 欄）。
+///
+/// # 費用をセント単位の整数で持つ理由
+///
+/// 【実測 2026-09-13】`cost.total_cost_usd` は**値によって型が変わる**——起動直後は
+/// `int`（`0`）、1ターン後は `float`。**読むときは `as_f64` で受ける**（`as_u64` だけだと
+/// 起動直後しか読めない）が、**持つのはセント単位の整数**にしてある。
+///
+/// 理由は2つ。**[`SessionMeta`] が `Eq` を導出している**ので `f64` を入れると壊れること。
+/// そして**関門の鍵がどのみち丸めた形**であること——毎ターン動く小数をそのまま鍵にすると、
+/// 関門が素通しになる。**画面に出すのもセント単位**（`$64.77`）なので、丸めて困らない。
+///
+/// # これはセッションに属する
+///
+/// [`RateLimits`] が PC の状態なのに対し、**費用はそのセッションのもの**である。
+/// 出す場所が違う（あちらは PC の一覧、こちらはカード）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionCost {
+    /// 合計費用。**セント単位**（上記）。
+    ///
+    /// **公式が「クライアント側で定価から計算しており、実際の請求と異なりうる」と
+    /// 明記している。** 画面に出すときは、その断りを一緒に出すこと。
+    pub total_cost_cents: i64,
+    /// API を待っていた時間（ミリ秒）。
+    pub total_api_duration_ms: u64,
+    /// 始めてからの実時間（ミリ秒）。
+    pub total_duration_ms: u64,
+    /// 足した行数。
+    pub total_lines_added: u64,
+    /// 消した行数。
+    pub total_lines_removed: u64,
+}
+
 /// 一覧画面の小窓1枚分の情報。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionMeta {
@@ -668,6 +742,25 @@ pub struct SessionMeta {
     /// 新しい PC からだけこの欄が届く。**必須の欄にすると、この耐性がそのまま消える。**
     #[serde(default)]
     pub context_usage: Option<ContextUsage>,
+    /// **その PC の**使用上限（`/status` の横棒グラフ）。
+    ///
+    /// `None` は「**その PC でセッションが1本も走っていない**」。
+    /// [`SessionMeta::context_usage`] の `None`（まだ分からない）**とは意味が違う**
+    /// ——あちらは走っていても API を叩く前は空だが、こちらは走っていれば最初から
+    /// 値がある【実測 2026-09-13】。**変わるのは意味であって、型ではない。**
+    ///
+    /// `#[serde(default)]` の理由は [`SessionMeta::context_usage`] と同じ。
+    #[serde(default)]
+    pub rate_limits: Option<RateLimits>,
+    /// そのセッションが使った費用と手間。
+    ///
+    /// **[`SessionMeta::rate_limits`] とは宛先が違う**——あちらは PC の一覧、
+    /// こちらはカードである。**同じ payload から届くが、属する相手が別**なので、
+    /// 関門も別に置いてある。
+    ///
+    /// `#[serde(default)]` の理由は [`SessionMeta::context_usage`] と同じ。
+    #[serde(default)]
+    pub cost: Option<SessionCost>,
 }
 
 /// 利用者が付けたものの**宛先**（名前付け設計§3-2）。
@@ -1109,6 +1202,8 @@ mod tests {
             nickname: None,
             branched_from: None,
             context_usage: None,
+            rate_limits: None,
+            cost: None,
         }
     }
 
@@ -1189,6 +1284,8 @@ mod tests {
             nickname: None,
             branched_from: None,
             context_usage: None,
+            rate_limits: None,
+            cost: None,
         };
         assert_eq!(roundtrip(&meta), meta);
     }
@@ -1222,10 +1319,12 @@ mod tests {
             nickname: None,
             branched_from: None,
             context_usage: None,
+            rate_limits: None,
+            cost: None,
         };
         assert_eq!(
             serde_json::to_string(&meta).unwrap(),
-            r#"{"card_id":"00000000-0000-0000-0000-000000000001","project":"/p","claude_session_id":null,"resumed_from":null,"permission_mode":null,"model":null,"model_label":null,"model_requested":null,"status":{"kind":"working"},"subagent_active":0,"last_activity_at":1,"last_assistant_message":null,"created_at":1,"hooks_seen":false,"agent_id":null,"agent_connected":true,"account":null,"toml_account":null,"session_title":null,"position":0,"nickname":null,"branched_from":null,"context_usage":null}"#
+            r#"{"card_id":"00000000-0000-0000-0000-000000000001","project":"/p","claude_session_id":null,"resumed_from":null,"permission_mode":null,"model":null,"model_label":null,"model_requested":null,"status":{"kind":"working"},"subagent_active":0,"last_activity_at":1,"last_assistant_message":null,"created_at":1,"hooks_seen":false,"agent_id":null,"agent_connected":true,"account":null,"toml_account":null,"session_title":null,"position":0,"nickname":null,"branched_from":null,"context_usage":null,"rate_limits":null,"cost":null}"#
         );
     }
 
@@ -1593,6 +1692,8 @@ mod tests {
                 nickname: None,
                 branched_from: None,
                 context_usage: None,
+                rate_limits: None,
+                cost: None,
             }
         };
         let back = roundtrip(&meta);
@@ -1653,6 +1754,8 @@ mod tests {
             nickname: None,
             branched_from: None,
             context_usage: None,
+            rate_limits: None,
+            cost: None,
         };
         let back = roundtrip(&meta);
         assert_eq!(back.model, meta.model);
@@ -1691,6 +1794,8 @@ mod tests {
             nickname: None,
             branched_from: None,
             context_usage: None,
+            rate_limits: None,
+            cost: None,
         };
         let text = serde_json::to_string(&meta).unwrap();
         assert!(text.contains(r#""model":null"#), "実際: {text}");

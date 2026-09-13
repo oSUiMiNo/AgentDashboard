@@ -2784,6 +2784,8 @@ impl SessionManager {
                 nickname: None,
                 branched_from: None,
                 context_usage: None,
+                rate_limits: None,
+                cost: None,
             }),
             process,
             ring: Mutex::new(RingBuffer::new(self.config.pty_ring_buffer)),
@@ -4163,6 +4165,8 @@ mod tests {
             nickname: None,
             branched_from: None,
             context_usage: None,
+            rate_limits: None,
+            cost: None,
         }
     }
 
