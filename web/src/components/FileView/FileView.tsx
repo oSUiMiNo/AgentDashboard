@@ -38,6 +38,7 @@
 
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
 import ReactMarkdown from 'react-markdown'
+import { FileEditor } from './FileEditor'
 import { FileFind } from '@/components/FileView/FileFind'
 import { FileTabs } from '@/components/FileView/FileTabs'
 import { Button } from '@/components/ui/button'
@@ -1095,16 +1096,15 @@ export function FileView({
 
                **`wrap="off"`。** 折り返さずに横へ送る——**横スクロールを持つ層が
                ここへ移る**（もとは `<pre>` が持っていた）。 */
-            <textarea
-              data-testid="file-editor"
-              className="text-muted-foreground file-editor h-full w-full resize-none overflow-auto border-0 bg-transparent font-mono outline-none"
-              wrap="off"
-              spellCheck={false}
-              aria-label={`${relative} を編集`}
+            <FileEditor
               value={本文}
-              onChange={(event) => {
-                set書きかけ(event.target.value)
+              onChange={set書きかけ}
+              onSave={() => {
+                void 保存する()
               }}
+              保存できる={保存できる}
+              path={path}
+              ラベル={`${relative} を編集`}
             />
             )}
           </div>

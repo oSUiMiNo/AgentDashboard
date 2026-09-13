@@ -367,8 +367,64 @@
   片方だけ器に繋ぐと、**ずれがカーソル位置に出る**——総当たり表が作られた原因
   （文字サイズが黙って効かない）と同じ形が、より見つけにくい姿で戻る。
 */
-.file-zoom .file-editor {
+.file-zoom .file-editor-stack {
   font-size: var(--file-raw-size);
+  line-height: 1.5;
+  tab-size: 2;
+}
+/*
+  **3層は継承で受け取る。** ここに書かず器から継がせるのは、**ずれる余地を構造から
+  消す**ためである——同じ指定を3箇所へ書くと、2箇所だけ直されて1箇所が取り残される。
+  取り残されたぶんは**カーソルが文字の上から外れる**という、原因に辿り着きにくい
+  姿で出る。
+
+  **`<textarea>` は継承しない。** フォーム部品は既定で親の字面を継がないので、
+  明示的に継がせる必要がある。
+*/
+.file-zoom .file-editor-stack > * {
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  letter-spacing: inherit;
+  tab-size: inherit;
+}
+/* **打つ層。** 文字は透明にし、見えているのは下の色付き層である */
+.file-editor-stack > .file-editor {
+  z-index: 1;
+  color: transparent;
+  caret-color: var(--foreground);
+  white-space: pre;
+}
+/* **色付き層。** 言語が分からないときは素の字が出る（色が付かないだけ） */
+.file-editor-stack > .file-editor-paint {
+  z-index: 0;
+  margin: 0;
+  color: var(--muted-foreground);
+  white-space: pre;
+}
+/*
+  **行番号。** 打つ層より上に置くが `pointer-events: none` なので押せる相手は下に届く。
+  上に置くのは、**横へ送ったときに本文が番号の下へ潜る**ようにするためで、
+  地の色を敷いていないと文字が重なって読めなくなる。
+*/
+.file-editor-stack > .file-editor-gutter {
+  z-index: 2;
+  padding-right: 0.5ch;
+  text-align: right;
+  background: var(--background);
+  color: var(--muted-foreground);
+  opacity: 0.6;
+}
+/* **逃げ道は、焦点があるときだけ言う**（設計§6-6） */
+.file-editor-stack > .file-editor-hint {
+  z-index: 3;
+  font-size: 0.9em;
+  color: var(--muted-foreground);
+  background: var(--background);
+  transition: opacity 120ms ease;
+}
+.file-editor-stack:focus-within > .file-editor-hint {
+  opacity: 0.7;
 }
 /*
   **プレビュー（HTML ／ SVG）の拡大縮小**（利用者の指摘・2026-09-08）。
