@@ -501,6 +501,236 @@ async fn statusLineが入っていればコンテキストの使い具合が届�
     assert_eq!(usage.context_window_size, 1_000_000, "分母も運ばれること");
 }
 
+/// **使用上限と費用の、初めての end-to-end。**
+///
+/// # 1件目の最大の反省がここにある
+///
+/// 1件目（コンテキスト残量）は**フェーズ1〜4 をすべて手で作った値で検査しており**、
+/// 擬似 claude を通した経路が1度も走っていなかった。判明したのはフェーズ7 で、
+/// **最初の end-to-end がそこだった。** だからこちらは**フェーズ1 で通す。**
+///
+/// ここで見るのは控えた値だけである。**便はまだ出ない**——配るための
+/// `ServerMessage` は共有境界の型なのでフェーズ2 で足す。**便の検査はそこで足す。**
+#[tokio::test]
+async fn statusLineから使用上限と費用が届く() {
+    let (_path, server) =
+        common::server_with_fake_global("limits-on", GLOBAL, refresh_config()).await;
+    let (session, _watcher) = common::start_session(&server.manager).await;
+
+    let limits = wait_for_rate_limits(&session).await;
+
+    // 擬似 claude の既定（実機と同じ2本）がそのまま出ること
+    assert_eq!(limits.windows.len(), 2, "窓が2本とも届くこと");
+    assert_eq!(limits.windows[0].name, "five_hour");
+    assert_eq!(limits.windows[0].used_percentage, 41);
+    assert_eq!(limits.windows[0].resets_at, 1_757_000_000);
+    assert_eq!(limits.windows[1].name, "seven_day");
+    assert_eq!(limits.windows[1].used_percentage, 63);
+    assert_eq!(limits.windows[1].resets_at, 1_757_400_000);
+
+    // **費用は 0 から始まり、そのとき JSON の整数で届く**（フェーズ0 実測）。
+    // `as_u64` で読む実装でも通るが、**小数だけを想定した実装はここで落ちる**
+    let cost = session.meta().cost.expect("費用も届くこと");
+    assert_eq!(cost.total_cost_cents, 0, "起動直後は 0");
+    assert_eq!(cost.total_duration_ms, 0);
+}
+
+/// **出ないほう。** 上と対で読むこと。
+///
+/// 片方だけでは何も守れない——`rate_limits` の初期値が `None` なので、
+/// 「切ったから出ない」と「そもそも来ていない」が区別できない。
+#[tokio::test]
+async fn statusLineを切ると使用上限も届かない() {
+    let config = Config {
+        inject_status_line: false,
+        status_line_refresh_secs: 1,
+        ..Config::default()
+    };
+    let (_path, server) = common::server_with_fake_global("limits-off", GLOBAL, config).await;
+    let (session, _watcher) = common::start_session(&server.manager).await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    assert_eq!(
+        session.meta().rate_limits,
+        None,
+        "経路が丸ごと無いので届かないこと"
+    );
+    assert_eq!(session.meta().cost, None, "費用も同じ経路である");
+}
+
+/// **欄ごと届かない環境でも、画面が壊れないこと。**
+///
+/// `rate_limits` が API キー利用や第三者プロバイダで届くかは未検証（要件§5）。
+/// **届かない形は「読めなかった」として控えを触らない**ので、`None` のまま据え置く。
+#[tokio::test]
+async fn 使用上限の欄が無くてもモデルは届く() {
+    let (_path, server) =
+        common::server_with_fake_global("limits-absent", GLOBAL, refresh_config()).await;
+    let (session, _watcher) = common::start_session(&server.manager).await;
+
+    wait_for_rate_limits(&session).await;
+    // 欄ごと無い形にする（届かない環境と同じ）
+    common::send_line(&session, "limits none");
+    デバウンスをまたぐ().await;
+    common::send_line(&session, "cost none");
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+    // **控えた値は消えない。** 欄が無いのは「読めなかった」であって「上限が無い」
+    // ではない——1回の不正な payload で帯が消えると点滅になる
+    assert!(
+        session.meta().rate_limits.is_some(),
+        "欄が無くなっても控えた帯を消さないこと"
+    );
+    // **同じ payload から読むモデルは動き続けること。** 一緒に落ちていないことの証拠
+    assert!(
+        session.meta().model.is_some(),
+        "使用上限が読めなくてもモデルは届くこと（読む順の証拠）"
+    );
+}
+
+/// **周期側と値を共有していることの証拠**（テスト計画フェーズ1）。
+///
+/// # これが無いと、複製した実装が素通りする
+///
+/// 擬似 claude は起動時と `refreshInterval` の周期の2箇所から payload を組み立てる。
+/// **周期側へ値を複製して渡すと、`limits` で動かしても周期側が古い値を送り続ける**
+/// ——動かした直後は新しい値が見えるので、**1回だけ見る検査では気づけない。**
+///
+/// **だから周期を1つ以上またいで見る。** 複製していれば、次の周期で元の値へ戻る。
+#[tokio::test]
+async fn 動かした使用上限が周期をまたいでも戻らない() {
+    let (_path, server) =
+        common::server_with_fake_global("limits-shared", GLOBAL, refresh_config()).await;
+    let (session, _watcher) = common::start_session(&server.manager).await;
+
+    wait_for_rate_limits(&session).await;
+
+    // 3本へ動かす。**本数も名前も既定と違う形**にして、戻ったら必ず分かるようにする
+    common::send_line(
+        &session,
+        "limits five_hour=88@1757111111 seven_day=77@1757222222 spend_limit=9@1757333333",
+    );
+    デバウンスをまたぐ().await;
+    common::send_line(&session, "cost 0.42 1000 2000 10 3");
+
+    // 動いたことを待つ
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let 窓 = session.meta().rate_limits.map(|l| l.windows.len());
+        if 窓 == Some(3) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "10秒以内に窓が3本にならなかった：{窓:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    // **周期（1秒）を2回以上またぐ。** 複製していれば、ここで既定の2本へ戻る
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+
+    let limits = session.meta().rate_limits.expect("控えが残っていること");
+    assert_eq!(
+        limits.windows.len(),
+        3,
+        "周期側が古い値を送り返していないこと（値を共有していること）"
+    );
+    assert_eq!(limits.windows[0].used_percentage, 88);
+    assert_eq!(
+        session.meta().cost.map(|c| c.total_cost_cents),
+        Some(42),
+        "費用も周期側と共有していること"
+    );
+}
+
+/// **モデルの検査より前に読んでいることの証拠**（コンテキスト残量設計§1）。
+///
+/// # 順序だけが約束になっている
+///
+/// 受け口は `model.id` が読めないと早期 return する。**使用率・使用上限・費用の読み取りを
+/// その下へ置くと、モデル名が欠けた payload で全部が一緒に落ちる**——モデル名が
+/// 読めないことと、ほかが読めないことは別の事情である。
+///
+/// **コメントだけでは守れない。** 下へ動かしても単体テストは全部緑のままなので、
+/// **ここが唯一の歯止めである。**
+///
+/// 擬似 claude の `drop-model` は**本物に無い形**だが、約束を検査で留めるために置いた。
+#[tokio::test]
+async fn モデル名が欠けても使用上限と費用は届く() {
+    let (_path, server) =
+        common::server_with_fake_global("limits-order", GLOBAL, refresh_config()).await;
+    let (session, _watcher) = common::start_session(&server.manager).await;
+
+    // **まず `model` を落としてから、値を動かす。** 先に届かせてしまうと、
+    // 「落ちたあとに届いた」のか「落ちる前に届いていた」のかが区別できない
+    common::send_line(&session, "drop-model");
+    デバウンスをまたぐ().await;
+    common::send_line(
+        &session,
+        "limits five_hour=55@1757555555 seven_day=66@1757666666",
+    );
+    デバウンスをまたぐ().await;
+    common::send_line(&session, "cost 1.23 1000 2000 10 3");
+
+    // **2つとも待つ。** 片方だけで抜けると、もう片方は届く前に判定することになる
+    // ——`limits` の便には古い費用が乗っているので、そこで抜けると費用が 0 のまま
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let meta = session.meta();
+        let 割合 = meta
+            .rate_limits
+            .and_then(|l| l.windows.first().map(|w| w.used_percentage));
+        let 費用 = meta.cost.map(|c| c.total_cost_cents);
+        if (割合, 費用) == (Some(55), Some(123)) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "モデル名が欠けた payload で届かなかった（読む順が逆になっている）：\
+             使用上限 {割合:?} ／ 費用 {費用:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        session.meta().context_usage.map(|u| u.used_percentage),
+        Some(24),
+        "1件目のコンテキスト残量も同じ約束に載っていること"
+    );
+}
+
+/// 擬似 claude のデバウンス（300ms）をまたぐための間。
+///
+/// # 空けないと、検査が別の経路に相乗りする
+///
+/// 擬似 claude は本物と同じ 300ms で `statusLine` をまとめる。**続けて2つ打つと
+/// 2つ目の送信が飲み込まれる**ので、その値は `refreshInterval` の周期まで届かない。
+///
+/// **周期で届いても緑にはなる。** だから気づけないが、**そのテストは「打った値が
+/// その場で届く」ではなく「周期側が値を共有している」を確かめていることになる**
+/// ——1つの壊し方で2本落ちて、どちらが本命か分からなくなる（実際にそうなった）。
+async fn デバウンスをまたぐ() {
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+}
+
+/// 待ち合わせ。[`wait_for_context_usage`] と同じ形。
+async fn wait_for_rate_limits(
+    session: &std::sync::Arc<session_host_core::session::Session>,
+) -> protocol::RateLimits {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(limits) = session.meta().rate_limits {
+            return limits;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "10秒以内に rate_limits が届きませんでした"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 /// **出ないほう。** 上の「入るほう」と対で読むこと。
 #[tokio::test]
 async fn statusLineを切るとコンテキストの使い具合は届かない() {

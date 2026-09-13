@@ -54,6 +54,37 @@ use testkit::fake_claude::{
 };
 
 /// 起動時に受け取った、フック実行に必要な情報。
+/// 使用上限の窓1本。**（名前・割合・リセット時刻）**。
+///
+/// `protocol::RateLimitWindow` を使わないのは、**擬似 claude は本物の CLI の側**
+/// であって、ダッシュボードの型を知らないほうが正しいため。**本物と同じ JSON を
+/// 書けることだけが約束**である。
+type StatusWindow = (String, u64, i64);
+
+/// 使用上限の窓の並び。`None` は **`rate_limits` の欄ごと無い形**。
+type SharedWindows = Arc<Mutex<Option<Vec<StatusWindow>>>>;
+
+/// 費用と手間。**（合計ドル・api 所要ms・全体所要ms・追加行・削除行）**。
+type StatusCost = (f64, u64, u64, u64, u64);
+
+/// `None` は **`cost` の欄ごと無い形**。
+type SharedCost = Arc<Mutex<Option<StatusCost>>>;
+
+/// `statusLine` の payload に載せる、**動く値の一式**。
+///
+/// # まとめてある理由
+///
+/// 組み立てを1箇所に寄せてあるので、**値が増えるたびに引数が増える**。
+/// ここへ入れておけば、足すのは1行で済み、**2つの呼び出し側（起動時と周期）の
+/// 片方だけに足して食い違う**ことも起きない。
+struct StatusValues {
+    context_percentage: Option<u64>,
+    windows: Option<Vec<StatusWindow>>,
+    cost: Option<StatusCost>,
+    /// payload から `model` の欄ごと落とす（受け口の読む順を確かめるため）
+    drop_model: bool,
+}
+
 struct Injected {
     /// いま名乗っている CLI 側のセッションID。
     ///
@@ -86,6 +117,34 @@ struct Injected {
     /// 消える形が端から端まで1度も流れない**——便を出す関門が効いているかを、
     /// 結合テストの水準で確かめられなかった（レビュー対応 対応2）。
     context_percentage: Arc<Mutex<Option<u64>>>,
+    /// 使用上限の窓。**（名前・割合・リセット時刻）の並び**で、`None` は
+    /// 「`rate_limits` の欄ごと無い」形（届かない環境）。
+    ///
+    /// # 本数を動かせるようにしてある
+    ///
+    /// **これが無いと、窓を2本に決め打った実装が素通りする。** 実機では2本しか
+    /// 来ないので（フェーズ0 実測）、**3本で試せるのはここだけ**である。
+    ///
+    /// **`context_percentage` と同じく共有して持つ**——周期実行が別スレッドで走る。
+    rate_limit_windows: SharedWindows,
+    /// セッションの費用と手間。`None` は「`cost` の欄ごと無い」形。
+    ///
+    /// **合計はドルで持つ**（本物と同じ形で出すため。下の[`status_line_payload`] が
+    /// `0` のときだけ整数として書く）。残る4つは順に
+    /// api 所要・全体所要・追加行・削除行。
+    cost: SharedCost,
+    /// `true` のあいだ、payload から **`model` の欄ごと落とす**。
+    ///
+    /// # 何を確かめるために在るのか
+    ///
+    /// 受け口は**モデルの検査より前**に使用率・使用上限・費用を読む。順序を入れ替えると
+    /// **モデル名が欠けた payload で、ほかも一緒に落ちる**——モデル名が読めないことと
+    /// 使用率が読めないことは別の事情である（コンテキスト残量設計§1）。
+    ///
+    /// **本物でこの形が出るかは分からない。** ただ受け口は「欄が無ければ分からない」
+    /// として書かれており、**順序だけが約束になっている**。約束を検査で留めるために、
+    /// ここだけ本物に無い形を作れるようにしてある。
+    drop_model: Arc<Mutex<bool>>,
 }
 
 /// statusLine のデバウンス幅。
@@ -241,6 +300,15 @@ fn main() {
         // 既定は 24%。**これまでの振る舞いを変えない**ための初期値で、
         // 240,000 / 1,000,000 と釣り合っている
         context_percentage: Arc::new(Mutex::new(Some(24))),
+        // **使用上限は起動直後から埋まっている**（フェーズ0 実測。`context_window` と
+        // 違い `None` から始まらない）。既定は実機と同じ2本
+        rate_limit_windows: Arc::new(Mutex::new(Some(vec![
+            ("five_hour".to_string(), 41, 1_757_000_000),
+            ("seven_day".to_string(), 63, 1_757_400_000),
+        ]))),
+        // **費用は 0 から始まる。** 本物は `0` のあいだ整数で届く
+        cost: Arc::new(Mutex::new(Some((0.0, 0, 0, 0, 0)))),
+        drop_model: Arc::new(Mutex::new(false)),
     };
 
     // 行編集を切る。Shift+Tab は改行を伴わないので、これが無いと切替のキーが届かない。
@@ -505,6 +573,83 @@ fn main() {
             continue;
         }
 
+        // 使用上限を動かす。**本数も動かせる**——`limits` に渡した件数がそのまま窓の数。
+        //
+        // ```
+        // limits five_hour=41@1757000000 seven_day=63@1757400000
+        // limits five_hour=41@1757000000 seven_day=63@1757400000 spend_limit=8@1757900000
+        // limits none      ← rate_limits の欄ごと無い形（届かない環境）
+        // ```
+        //
+        // **名前を固定していない。** 3本目の名前を当てずに試せるようにしてある。
+        if let Some(rest) = line.strip_prefix("limits") {
+            let rest = rest.trim();
+            let 次 = if rest == "none" {
+                None
+            } else if rest.is_empty() {
+                let _ = writeln!(out, "[fake-claude] limits: 窓の指定がありません");
+                let _ = out.flush();
+                continue;
+            } else {
+                match 窓を読む(rest) {
+                    Ok(windows) => Some(windows),
+                    Err(reason) => {
+                        let _ = writeln!(out, "[fake-claude] limits: {reason}");
+                        let _ = out.flush();
+                        continue;
+                    }
+                }
+            };
+            *injected
+                .rate_limit_windows
+                .lock()
+                .expect("ロックが壊れていない") = 次;
+            send_status_line(&mut out, &mut injected, false);
+            continue;
+        }
+
+        // 費用を動かす。**合計だけ動かすのが既定**——残る4つは省くと据え置く。
+        //
+        // ```
+        // cost 0.42                      ← 合計だけ動かす（関門の鍵に入っていないことの確認）
+        // cost 0.42 1000 2000 10 3       ← 5つすべて
+        // cost none                      ← cost の欄ごと無い形
+        // ```
+        if let Some(rest) = line.strip_prefix("cost ") {
+            let rest = rest.trim();
+            let mut 控え = injected.cost.lock().expect("ロックが壊れていない");
+            if rest == "none" {
+                *控え = None;
+            } else {
+                let mut 語 = rest.split_whitespace();
+                let Some(Ok(usd)) = 語.next().map(str::parse::<f64>) else {
+                    let _ = writeln!(out, "[fake-claude] cost: 読めない値 {rest}");
+                    let _ = out.flush();
+                    continue;
+                };
+                // 省かれた欄は控えた値を引き継ぐ（無ければ 0）
+                let (_, api_ms, all_ms, 追加, 削除) = 控え.unwrap_or((0.0, 0, 0, 0, 0));
+                let 数 =
+                    |語: Option<&str>, 既定: u64| 語.and_then(|v| v.parse().ok()).unwrap_or(既定);
+                let api_ms = 数(語.next(), api_ms);
+                let all_ms = 数(語.next(), all_ms);
+                let 追加 = 数(語.next(), 追加);
+                let 削除 = 数(語.next(), 削除);
+                *控え = Some((usd, api_ms, all_ms, 追加, 削除));
+            }
+            drop(控え);
+            send_status_line(&mut out, &mut injected, false);
+            continue;
+        }
+
+        // payload から `model` の欄ごと落とす／戻す。**受け口の読む順を確かめるため**
+        // （[`Injected::drop_model`]）。本物には無い形である。
+        if line == "drop-model" || line == "keep-model" {
+            *injected.drop_model.lock().expect("ロックが壊れていない") = line == "drop-model";
+            send_status_line(&mut out, &mut injected, false);
+            continue;
+        }
+
         if line == "dump" {
             dump(&mut out);
             continue;
@@ -761,23 +906,49 @@ fn apply_model(out: &mut impl Write, injected: &Injected, target: &str) {
 ///
 /// 値は合成である（実測値は持ち込まない）。割合と実数は釣り合わせてあり、
 /// 240,000 / 1,000,000 = 24% になる。
+/// `limits` の引数を窓の並びへ直す。`名前=割合@リセット時刻` を空白区切りで並べた形。
+///
+/// **1つでも読めなければ全部を捨てる。** 半分だけ効くと、テストが「3本渡したのに
+/// 2本しか来ない」という形で黙って通る。
+fn 窓を読む(rest: &str) -> Result<Vec<StatusWindow>, String> {
+    let mut windows = Vec::new();
+    for 語 in rest.split_whitespace() {
+        let Some((name, 残り)) = 語.split_once('=') else {
+            return Err(format!("`名前=割合@時刻` の形ではありません：{語}"));
+        };
+        let Some((割合, リセット)) = 残り.split_once('@') else {
+            return Err(format!("`@リセット時刻` がありません：{語}"));
+        };
+        let Ok(割合) = 割合.parse::<u64>() else {
+            return Err(format!("割合が読めません：{語}"));
+        };
+        let Ok(リセット) = リセット.parse::<i64>() else {
+            return Err(format!("リセット時刻が読めません：{語}"));
+        };
+        windows.push((name.to_string(), 割合, リセット));
+    }
+    Ok(windows)
+}
+
 fn status_line_payload(
     session_id: &str,
     transcript: &str,
     id: &str,
     display_name: &str,
-    percentage: Option<u64>,
+    values: &StatusValues,
 ) -> serde_json::Value {
     // **割合と実数を釣り合わせる。** ずれていると、画面の帯と実数表示が食い違う形を
     // テストが見逃す。分母は 1,000,000 で固定なので、実数は割合から作れる
     let 上限: u64 = 1_000_000;
-    let (割合, 実数) = match percentage {
+    let (割合, 実数) = match values.context_percentage {
         Some(p) => (serde_json::json!(p), serde_json::json!(上限 / 100 * p)),
         // **本物と同じ形。** 起動直後と `/compact` 直後は割合が `null` で、
         // 実数だけが `0` で届く（フェーズ0 の実測）
         None => (serde_json::Value::Null, serde_json::json!(0)),
     };
-    serde_json::json!({
+    // **欄ごと無い形を作れるようにしてある。** `null` を入れるのとは別物で、
+    // 届かない環境（API キー利用・`inject_status_line = false`）はキーが無い
+    let mut payload = serde_json::json!({
         "session_id": session_id,
         "transcript_path": transcript,
         "cwd": std::env::current_dir().unwrap_or_default().to_string_lossy(),
@@ -788,7 +959,42 @@ fn status_line_payload(
             "total_input_tokens": 実数,
             "context_window_size": 上限,
         },
-    })
+    });
+    let 本体 = payload.as_object_mut().expect("いま作った辞書である");
+    if values.drop_model {
+        本体.remove("model");
+    }
+    if let Some(windows) = &values.windows {
+        let mut 並び = serde_json::Map::new();
+        for (name, 割合, リセット) in windows {
+            並び.insert(
+                name.clone(),
+                serde_json::json!({ "used_percentage": 割合, "resets_at": リセット }),
+            );
+        }
+        本体.insert("rate_limits".to_string(), serde_json::Value::Object(並び));
+    }
+    if let Some((usd, api_ms, all_ms, 追加, 削除)) = values.cost {
+        // **`0` のときは整数で書く。** 本物がそうだから——費用が付くまで整数で、
+        // 付くと小数になる（フェーズ0 実測）。**ここを常に小数にすると、
+        // 整数しか来ない起動直後で落ちる実装が素通りする**
+        let 合計 = if usd == 0.0 {
+            serde_json::json!(0)
+        } else {
+            serde_json::json!(usd)
+        };
+        本体.insert(
+            "cost".to_string(),
+            serde_json::json!({
+                "total_cost_usd": 合計,
+                "total_api_duration_ms": api_ms,
+                "total_duration_ms": all_ms,
+                "total_lines_added": 追加,
+                "total_lines_removed": 削除,
+            }),
+        );
+    }
+    payload
 }
 
 /// 注入された `statusLine` を子プロセスとして実行する（設計§4）。
@@ -811,11 +1017,20 @@ fn send_status_line(out: &mut impl Write, injected: &mut Injected, announce: boo
     let (id, display_name) = resolve_model(&alias);
     let session_id = injected.session_id();
     let transcript = transcript_path(injected);
-    let 割合 = *injected
-        .context_percentage
-        .lock()
-        .expect("ロックが壊れていない");
-    let payload = status_line_payload(&session_id, &transcript, &id, &display_name, 割合);
+    let values = StatusValues {
+        context_percentage: *injected
+            .context_percentage
+            .lock()
+            .expect("ロックが壊れていない"),
+        windows: injected
+            .rate_limit_windows
+            .lock()
+            .expect("ロックが壊れていない")
+            .clone(),
+        cost: *injected.cost.lock().expect("ロックが壊れていない"),
+        drop_model: *injected.drop_model.lock().expect("ロックが壊れていない"),
+    };
+    let payload = status_line_payload(&session_id, &transcript, &id, &display_name, &values);
 
     let result = run_hook(&command, &payload.to_string());
     if announce {
@@ -850,6 +1065,11 @@ fn start_refresh_ticker(injected: &Injected) {
     // **割合も共有して持つ。** 複製すると `context <N>` で動かしても周期側が古い値を
     // 送り続け、「値が動いたら便が出る」を端から端まで確かめられない
     let context_percentage = Arc::clone(&injected.context_percentage);
+    // **窓と費用も同じ理由で共有する。** 複製すると `limits` ／ `cost` で動かしても
+    // 周期側が古い値を送り続け、**関門を通ったあと実際に配られるかが確かめられない**
+    let rate_limit_windows = Arc::clone(&injected.rate_limit_windows);
+    let cost = Arc::clone(&injected.cost);
+    let drop_model = Arc::clone(&injected.drop_model);
     // 書き出し先はIDから決まるので、こちらも都度引き直す（`--transcript` 指定時は固定）
     let transcript_override = injected.transcript.clone();
 
@@ -862,8 +1082,16 @@ fn start_refresh_ticker(injected: &Injected) {
                 .clone()
                 .unwrap_or_else(|| default_transcript_path(&id_now));
             let (id, display_name) = resolve_model(&alias);
-            let 割合 = *context_percentage.lock().expect("ロックが壊れていない");
-            let payload = status_line_payload(&id_now, &transcript, &id, &display_name, 割合);
+            let values = StatusValues {
+                context_percentage: *context_percentage.lock().expect("ロックが壊れていない"),
+                windows: rate_limit_windows
+                    .lock()
+                    .expect("ロックが壊れていない")
+                    .clone(),
+                cost: *cost.lock().expect("ロックが壊れていない"),
+                drop_model: *drop_model.lock().expect("ロックが壊れていない"),
+            };
+            let payload = status_line_payload(&id_now, &transcript, &id, &display_name, &values);
             let _ = run_hook(&command, &payload.to_string());
         }
     });
