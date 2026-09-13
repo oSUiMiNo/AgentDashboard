@@ -34,7 +34,7 @@ import {
 import { copyToClipboard } from '@/lib/clipboard'
 import { markComposerBusy } from '@/lib/composerBusy'
 import { useDraft } from '@/lib/drafts'
-import { REHYPE_PLUGINS, REMARK_PLUGINS } from '@/lib/markdown'
+import { MEMO_REMARK_PLUGINS, REHYPE_PLUGINS } from '@/lib/markdown'
 import { readMemoBody, sameMemoBody } from '@/lib/memoBody'
 import { 消えるまでの字 } from '@/lib/memoRetention'
 import { 画像を運ぶ as 一枚運ぶ, type 画像の置き場所 } from '@/lib/memoImage'
@@ -586,73 +586,87 @@ function MemoBubble({
     <div
       data-testid="memo-bubble"
       data-checked={チェック済み ? 'true' : 'false'}
-      className="group bg-muted/40 relative rounded px-2 py-1"
+      className="memo-bubble bg-muted/40 rounded px-2 py-1"
     >
-      <div data-testid="memo-body" className="prose-sm min-w-0 text-sm break-words">
-        <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS}>
+      {/*
+        **本文は `prose-dashboard` で描く**——履歴（`TranscriptRow`）とファイルビュア
+        （`FileView`）が使っているのと同じ共用クラスである。
+
+        **`prose-sm` と書いてあったが、あれはどこにも無いクラスだった**——Tailwind
+        Typography はこの PJT に入っていない。要素は出ているのに**スタイルが1つも
+        当たらず**、表もコードブロックも平文に見えていた（利用者の報告・2026-09-13）。
+
+        **文字サイズは `text-sm` のまま効く。** `prose-dashboard` は自分で文字サイズを
+        決めず、見出しもコードも `em` 指定なので**入れ物に追随する**。
+      */}
+      <div data-testid="memo-body" className="prose-dashboard min-w-0 text-sm break-words">
+        <ReactMarkdown remarkPlugins={MEMO_REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS}>
           {body.markdown}
         </ReactMarkdown>
       </div>
-      <time className="text-muted-foreground text-[0.65rem]">
-        {new Date(memo.noted_at).toLocaleString()}
-      </time>
 
       {/*
+        **時刻と3つのボタンを同じ行に置く。** 以前はボタンを本文の上へ重ねていたが、
+        **1行目が長いと必ず潜った**（`memo.css` に理由がある）。時刻は短いので右側は
+        元から空いており、**重なりが起こせなくなる。**
+
         **3つ**（コピー・鉛筆・チェック）。要件3 が数を決めているので増やさない。
-        **マウスオーバーで出すが、指で触る画面には `:hover` が無い**ので、
-        `focus-within` でも出す（カードの `tile-ops` と同じ作法）
+        **出し入れは `.memo-ops` が群ごと持つ**（カードの `tile-ops` と同じ作法）——
+        ここで個別に持つと、指の画面への配慮が片方だけ抜ける。
       */}
-      <div
-        data-testid="memo-ops"
-        className="absolute top-1 right-1 flex gap-1 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100"
-      >
-        <button
-          type="button"
-          data-testid="memo-copy"
-          title="この吹き出しをコピー"
-          aria-label="この吹き出しをコピー"
-          onMouseDown={(event) => {
-            event.preventDefault()
-            void 写す(body.markdown)
-          }}
-          className="text-muted-foreground hover:text-foreground text-xs"
-        >
-          コピー
-        </button>
-        {!readOnly && (
-          <>
-            <button
-              type="button"
-              data-testid="memo-edit"
-              title="この吹き出しを直す"
-              aria-label="この吹き出しを直す"
-              onMouseDown={(event) => {
-                event.preventDefault()
-                set直している(true)
-              }}
-              className="text-muted-foreground hover:text-foreground text-xs"
-            >
-              直す
-            </button>
-            <button
-              type="button"
-              data-testid="memo-check"
-              title={チェック済み ? '戻す' : '片付ける'}
-              aria-label={チェック済み ? '戻す' : '片付ける'}
-              onMouseDown={(event) => {
-                event.preventDefault()
-                if (!memoCheck(memo.id, !チェック済み)) {
-                  set送れなかった(送れていない文言)
-                  return
-                }
-                set送れなかった(null)
-              }}
-              className="text-muted-foreground hover:text-foreground text-xs"
-            >
-              {チェック済み ? '戻す' : '片付ける'}
-            </button>
-          </>
-        )}
+      <div className="mt-0.5 flex items-center gap-2">
+        <time className="text-muted-foreground text-[0.65rem]">
+          {new Date(memo.noted_at).toLocaleString()}
+        </time>
+        <div data-testid="memo-ops" className="memo-ops ml-auto flex gap-1">
+          <button
+            type="button"
+            data-testid="memo-copy"
+            title="この吹き出しをコピー"
+            aria-label="この吹き出しをコピー"
+            onMouseDown={(event) => {
+              event.preventDefault()
+              void 写す(body.markdown)
+            }}
+            className="text-muted-foreground hover:text-foreground text-xs"
+          >
+            コピー
+          </button>
+          {!readOnly && (
+            <>
+              <button
+                type="button"
+                data-testid="memo-edit"
+                title="この吹き出しを直す"
+                aria-label="この吹き出しを直す"
+                onMouseDown={(event) => {
+                  event.preventDefault()
+                  set直している(true)
+                }}
+                className="text-muted-foreground hover:text-foreground text-xs"
+              >
+                直す
+              </button>
+              <button
+                type="button"
+                data-testid="memo-check"
+                title={チェック済み ? '戻す' : '片付ける'}
+                aria-label={チェック済み ? '戻す' : '片付ける'}
+                onMouseDown={(event) => {
+                  event.preventDefault()
+                  if (!memoCheck(memo.id, !チェック済み)) {
+                    set送れなかった(送れていない文言)
+                    return
+                  }
+                  set送れなかった(null)
+                }}
+                className="text-muted-foreground hover:text-foreground text-xs"
+              >
+                {チェック済み ? '戻す' : '片付ける'}
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       {/*
