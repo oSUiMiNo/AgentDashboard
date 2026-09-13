@@ -1174,6 +1174,36 @@ describe("編集と保存", () => {
     });
   });
 
+  /**
+   * 探した直後に保存しても壊れない（`ファイルビュアにエディタ機能を追加` テスト計画 7-3）。
+   *
+   * **当たりは `setSelectionRange` で示している**ので、保存の瞬間に選択が動いても
+   * **保存そのものには関わらない**——保存が読むのは値であって選択ではない。
+   */
+  it("探した直後でも、保存は効く", async () => {
+    読み書き("あかあお");
+    render(<Viewer host="local" root={ROOT} path={コード} />);
+
+    const 欄 = await screen.findByTestId("file-editor");
+    await userEvent.type(欄, "あか");
+
+    // 探して当たりを選択させる
+    await userEvent.click(screen.getByTestId("file-find-open"));
+    await userEvent.type(screen.getByTestId("file-find-input"), "あか");
+    await waitFor(() => {
+      expect(screen.getByTestId("file-find-count")).toHaveTextContent("1 / 2");
+    });
+
+    await userEvent.click(screen.getByTestId("file-save"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("file-save")).toBeDisabled();
+    });
+    await waitFor(() => {
+      expect(readEdit("local", コード, null)).toBeNull();
+    });
+  });
+
   it("保存が断られても、書きかけは捨てない", async () => {
     /*
       **捨てると、断られた瞬間に打った文が消える**（設計§8-4）——直せるはずのものが
