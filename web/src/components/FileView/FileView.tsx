@@ -270,6 +270,8 @@ export function FileView({
   const bodyRef = useRef<HTMLDivElement>(null)
   /** プレビューの箱。**中を探すときは、ここへ便りを送る** */
   const frameRef = useRef<HTMLIFrameElement>(null)
+  /** 打つ層（`<textarea>`）。**探す窓が当たりを選択で示すのに要る** */
+  const editorRef = useRef<HTMLTextAreaElement>(null)
   const [zoom, 大きさ] = useFileZoom()
   // `CopyPath`（`FolderBrowser`）と同じ3つの状態。**片方だけ黙る作りにしない**
 
@@ -431,6 +433,18 @@ export function FileView({
    * 生テキストへ切り替える道が残る。
    */
   const 箱の中で探せる = 箱で描いている && kind === 'html'
+  /**
+   * 打つ層で当たりを示す形か。**エディタを出しているときだけ。**
+   *
+   * **描き分けと同じ条件から導く**——別々に書くと、片方だけ直したときに「探せると
+   * 言っているのに打つ層が無い」が起こる。下の描き分けは
+   * 「箱 → 整形 Markdown → それ以外はエディタ」の順なので、**その「それ以外」がここ**。
+   *
+   * **`探せる` に `mode` を混ぜていない**ことに注意（設計§5-4）。探せるかどうかは
+   * 今までどおりで、**どの道で探すか**だけがモードで変わる。
+   */
+  const 打つ層で探せる =
+    探せる && picture === null && !(markdown && mode === 'viewer')
   const 探す入口 = !loading && content !== null
 
   /**
@@ -1006,6 +1020,9 @@ export function FileView({
               bodyRef={bodyRef}
               /* **箱を見ているときは、中の係へ頼む**（親からは中に触れない） */
               {...(箱の中で探せる ? { frameRef } : {})}
+              /* **エディタのときは、値の中を探して選択で示す**（設計§5-4）。
+                 DOM を遡ると行番号と色の層に当たるので、そちらへは行かせない */
+              {...(打つ層で探せる ? { editorRef, 本文 } : {})}
               onClose={() => setFind(false)}
             />
           )}
@@ -1105,6 +1122,7 @@ export function FileView({
               保存できる={保存できる}
               path={path}
               ラベル={`${relative} を編集`}
+              打つ層Ref={editorRef}
             />
             )}
           </div>

@@ -24,7 +24,14 @@
  * 打っている本人の入力が詰まる。**止まってから**付ける（[`WRITE_DEBOUNCE_MS`]）。
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from 'react'
 import type { TokenNode } from 'react-diff-view'
 
 import { WRITE_DEBOUNCE_MS } from '@/lib/drafts'
@@ -58,6 +65,15 @@ interface Props {
   ラベル: string
   /** 字下げ1つぶん */
   インデント?: string
+  /**
+   * 打つ層（`<textarea>`）を外から掴むための道。**探す窓が当たりを示すのに要る。**
+   *
+   * **送り（スクロール）を持っているのは打つ層だけ**なので、当たりへ飛ぶときは
+   * ここを動かす。色の層・番号の層は `transform` で追従しており、**直接動かすと
+   * 次の送りで上書きされる**——一瞬だけ合ってすぐずれる、という最も追いにくい
+   * 壊れ方になる。
+   */
+  打つ層Ref?: RefObject<HTMLTextAreaElement | null>
 }
 
 /** HAST の `style="a:b;c:d"` を React の形へ。**文字列のままでは React が受け取らない。** */
@@ -112,8 +128,11 @@ export function FileEditor({
   path,
   ラベル,
   インデント = DEFAULT_INDENT,
+  打つ層Ref,
 }: Props) {
-  const 打つ層 = useRef<HTMLTextAreaElement>(null)
+  const 内なる打つ層 = useRef<HTMLTextAreaElement>(null)
+  /** **渡されたらそれを使う。** 2つ持つと、外から掴めるものと中で使うものがずれる */
+  const 打つ層 = 打つ層Ref ?? 内なる打つ層
   const 色の層 = useRef<HTMLPreElement>(null)
   const 番号の層 = useRef<HTMLDivElement>(null)
   const [色, set色] = useState<TokenNode[][] | null>(null)
@@ -166,7 +185,7 @@ export function FileEditor({
     if (番号の層.current) {
       番号の層.current.style.transform = `translateY(${-打つ.scrollTop}px)`
     }
-  }, [])
+  }, [打つ層])
 
   // 中身が入れ替わったとき（別のファイルを開いた・保存した）も合わせ直す
   useEffect(() => {
