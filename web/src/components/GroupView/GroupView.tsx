@@ -91,8 +91,14 @@ export function GroupView({ host, project }: Props) {
     自前で `overflowX: auto` を持つので、手渡しが無いと**端末の中身だけが横へ動く**。
     渡す先は `scroller` と同じ `railRef`——**並べ替えが見ている箱と別のものを動かすと、
     運んでいる最中の補正がずれる**（並べ替え設計§15-11）
+
+    **購読はレールではなく、この画面の外枠（`rootRef`）へ張る。** レールに張っていた
+    間は、**その外側にあるもの——タイトルの帯と、レールより下の余白——の上でホイールを
+    回しても何も起きなかった**（利用者の報告）。要件は「**カーソルがどこに置いてあっても**」
+    なので、帯も余白も範囲の中である。**張る先と送る先が違うので、引数も2つに分かれる。**
   */
-  useRailPan(railRef)
+  const rootRef = useRef<HTMLElement>(null)
+  useRailPan(rootRef, railRef)
   const [filesOpen, toggleFiles] = useFilesPanel()
   const projects = useProjects()
   const navigate = useNavigate()
@@ -125,6 +131,7 @@ export function GroupView({ host, project }: Props) {
 
   return (
     <section
+      ref={rootRef}
       data-testid="group-view"
       data-project={project}
       data-host={host}

@@ -13,6 +13,29 @@
  * スクロールバーも一緒に消える**。あの2つは「端末の横をホイールでは読めなくする」と
  * 決めたときの代償の担保そのものなので、ここは JS で横取りするほうを選んだ。
  *
+ * # 張るのは画面ぜんぶ、動かすのはレール
+ *
+ * **購読はレールではなく、画面の外枠（`data-testid="group-view"`）に張る。**
+ * レールに張っていた間は、**その外側にあるもの——タイトルの帯と、レールより下の余白——の
+ * 上でホイールを回しても何も起きなかった**（利用者の報告）。要件は「**PJT 専用画面の中
+ * なら、カーソルがどこに置いてあっても**」なので、帯と余白は範囲の中である。
+ *
+ * **動かす先はレールのまま。** 張る場所を広げても、送る相手を変えてはいけない
+ * （並べ替えが見ている箱と別のものを動かすと、運んでいる最中の補正がずれる）。
+ *
+ * そのうえで、カーソルの居場所で3つに分かれる。
+ *
+ * | どこ | どうする | なぜ |
+ * |---|---|---|
+ * | **端末の中** | 横取りしてレールを送る | 端末が自前の `overflowX: auto` で食うため |
+ * | **レールの中（端末以外）** | **何もしない** | レール自身が `overflow-x-auto` なので、**ブラウザの連鎖がそのまま動かす**。ここで足すと二重に動く |
+ * | **レールの外**（帯・下の余白・サイドバー） | **横へ動ける内側が無ければ**レールを送る | 連鎖の届かない場所なので、手で渡すしかない |
+ *
+ * **3つめで「横へ動ける内側が無ければ」と条件を付けるのが要点である。** 付けないと、
+ * **自分の中を横へ動かすのが正しいもの**——ファイルのタブ帯や生テキスト——まで奪う。
+ * **名指しで除外を書かない**のは、名指しは増えるたびに書き足しが要るのに対し、
+ * 「横へ動けるか」は**その性質を持つものすべてに自動で当たる**ためである。
+ *
  * # 測るのはここ、決めるのは `lib/railPan.ts`
  *
  * このファイルが持つのは4つだけ——**購読の張り／外し**、**実測**（見え幅と行の高さ）、
@@ -95,6 +118,38 @@ function 行の高さ(element: Element): number {
 }
 
 /**
+ * `target` から `境界` までの祖先に、**自分の中を横へ動かせるもの**があるか。
+ *
+ * # なぜ名指しではなく性質で見るのか
+ *
+ * レールの外から渡すとき、**内側で消費されるべきものまで奪ってはいけない**——
+ * ファイルのタブ帯（`components/ProjectFiles/FileTabs`）と生テキストがそれである。
+ *
+ * **名指し（`closest('[data-testid=...]')`）で除外を並べる形にはしない。** 名指しは
+ * **増えるたびに書き足しが要る**うえ、**足し忘れても静かに壊れる**（奪われた側は
+ * 「なぜか動かない」としか見えない）。**「横へ動けるか」という性質で見れば、その性質を
+ * 持つものすべてに自動で当たる。**
+ *
+ * # 溢れているかまで見る
+ *
+ * `overflow-x` の指定だけでは足りない。**溢れていない箱は `auto` を持っていても動かない**
+ * ので、そこで譲ると**誰も動かさないまま終わる**。`scrollWidth > clientWidth` を対で見る。
+ */
+function 横へ動ける内側があるか(target: Element, 境界: Element): boolean {
+  let node: Element | null = target
+  while (node !== null && node !== 境界) {
+    if (node.scrollWidth > node.clientWidth) {
+      const 横の溢れ方 = getComputedStyle(node).overflowX
+      if (横の溢れ方 === 'auto' || 横の溢れ方 === 'scroll') {
+        return true
+      }
+    }
+    node = node.parentElement
+  }
+  return false
+}
+
+/**
  * その合図で、レールを掴んでよいか。**ホイールとは別の判定である**（あちらは端末だけ、
  * こちらは区画の中ぜんぶ）。
  *
@@ -149,7 +204,11 @@ interface 掴みの状態 {
 }
 
 /**
- * レールの上のホイールを、横送りへ渡す。
+ * 画面の上のホイールと中ドラッグを、レールの横送りへ渡す。
+ *
+ * **第1引数は購読を張る先**（画面の外枠）、**第2引数は動かす先**（レール）。
+ * **2つに分けてあるのは、張る場所と送る相手が違うからである**——`closest` で親を
+ * 辿って外枠を探す形にすると、**どこに張っているかがコードから読めなくなる。**
  *
  * **購読はキャプチャ段で張る。** 端末の中の購読より**先に**走らないと、あちらが
  * 自分で横へ動かしたあとになり、レールと端末が二重に動く。
@@ -158,21 +217,42 @@ interface 掴みの状態 {
  * （生テキストの `<pre>` が自分の中を横へ動かすなど）まで奪ってしまう。止めたいのは
  * 既定動作だけなので `preventDefault()` で足りる。
  */
-export function useRailPan(railRef: RefObject<HTMLDivElement | null>): void {
+export function useRailPan(
+  rootRef: RefObject<HTMLElement | null>,
+  railRef: RefObject<HTMLDivElement | null>,
+): void {
   useEffect(() => {
+    const root = rootRef.current
     const rail = railRef.current
-    if (!rail) {
+    if (!root || !rail) {
       return
     }
 
     const 横へ渡す = (event: WheelEvent) => {
-      /*
-        **相手を名指しする。** 全子孫から奪うと、生テキストのように「自分の中を
-        横へ動かすのが正しい」ものまで動かなくなる。横取りしてよいのは端末だけ
-      */
       const target = event.target
-      if (!(target instanceof Element) || !target.closest(端末)) {
+      if (!(target instanceof Element)) {
         return
+      }
+
+      /*
+        **カーソルの居場所で3つに分かれる**（見出しの表）。分岐の順序に意味がある——
+        端末はレールの中に居るので、**先に端末を見ないとレールの中として素通りする**
+      */
+      if (!target.closest(端末)) {
+        if (rail.contains(target)) {
+          /*
+            **レールの中は、ブラウザの連鎖に任せる。** レール自身が `overflow-x-auto`
+            を持つので放っておいても動く。ここで足すと**二重に動く**
+          */
+          return
+        }
+        /*
+          **レールの外**（タイトルの帯・下の余白・サイドバー）。連鎖が届かないので
+          手で渡す。ただし**自分の中を横へ動かせるものが途中に居るなら、そちらが先**
+        */
+        if (横へ動ける内側があるか(target, root)) {
+          return
+        }
       }
 
       const 送り量 = wheelPanDelta(
@@ -202,12 +282,12 @@ export function useRailPan(railRef: RefObject<HTMLDivElement | null>): void {
 
     // **`passive: false` でないと `preventDefault()` が効かない。**
     // 効かないと端末の箱が自分でも横へ動き、二重になる
-    rail.addEventListener('wheel', 横へ渡す, { passive: false, capture: true })
+    root.addEventListener('wheel', 横へ渡す, { passive: false, capture: true })
     return () => {
       // **外すときにも `capture` を渡す。** 渡さないと別の購読とみなされて外れない
-      rail.removeEventListener('wheel', 横へ渡す, { capture: true })
+      root.removeEventListener('wheel', 横へ渡す, { capture: true })
     }
-  }, [railRef])
+  }, [rootRef, railRef])
 
   useEffect(() => {
     const rail = railRef.current

@@ -40,11 +40,24 @@ afterEach(() => {
   （`lib/useGrip.test.tsx` に同じ断り書きがある）。
 */
 function Harness() {
+  const rootRef = useRef<HTMLElement>(null)
   const railRef = useRef<HTMLDivElement>(null)
-  useRailPan(railRef)
+  useRailPan(rootRef, railRef)
   return (
-    <div ref={railRef} data-testid="group-rail">
-      <div data-testid="session-view">
+    <section ref={rootRef} data-testid="group-view">
+      {/*
+        **レールの外にあるもの。** ここが効かないという報告から、購読先を
+        レールから外枠へ広げた
+      */}
+      <header data-testid="group-header">
+        <h2>PJT の名前</h2>
+        {/* **横へ動ける内側**（ファイルのタブ帯に相当）。幅は各試験で細工する */}
+        <div data-testid="tab-strip" style={{ overflowX: 'auto' }}>
+          タブの帯
+        </div>
+      </header>
+      <div ref={railRef} data-testid="group-rail">
+        <div data-testid="session-view">
         <div
           data-testid="terminal"
           onWheel={(event) => {
@@ -65,8 +78,11 @@ function Harness() {
           押せるもの
         </button>
       </div>
-      <pre data-testid="file-raw">生テキスト</pre>
-    </div>
+        <pre data-testid="file-raw">生テキスト</pre>
+      </div>
+      {/* **レールより下の余白。** 利用者が「効かない」と言ったもう一方 */}
+      <div data-testid="below-rail">下の余白</div>
+    </section>
   )
 }
 
@@ -117,6 +133,67 @@ describe('横取りしてよい相手だけを名指ししている', () => {
       横取りしなくてもブラウザが動かす。ここで足すと二重になる
     */
     expect(rail.scrollLeft, '横取りするのは端末の上だけ').toBe(0)
+  })
+})
+
+/**
+ * jsdom は幅を全部 0 で返すので、**横へ動ける箱**は自分で作る。
+ *
+ * `scrollWidth > clientWidth` と `overflow-x` の**両方**が要る——片方だけでは
+ * 「溢れていない `auto` の箱」と見分けが付かない。
+ */
+function 横へ動けるようにする(element: Element): void {
+  Object.defineProperty(element, 'scrollWidth', { value: 400, configurable: true })
+  Object.defineProperty(element, 'clientWidth', { value: 100, configurable: true })
+}
+
+describe('レールの外でも、横ホイールが効く', () => {
+  it('**タイトルの帯の上で、レールが動く**', () => {
+    const { rail } = 置く()
+    fireEvent.wheel(screen.getByTestId('group-header'), { deltaX: 120 })
+    expect(rail.scrollLeft, '帯はレールの外だが、画面の中である').toBe(120)
+  })
+
+  it('**レールより下の余白でも、レールが動く**', () => {
+    const { rail } = 置く()
+    fireEvent.wheel(screen.getByTestId('below-rail'), { deltaX: 120 })
+    expect(rail.scrollLeft, '下の余白も画面の中である').toBe(120)
+  })
+
+  it('外枠そのものの上でも、レールが動く', () => {
+    const { rail } = 置く()
+    fireEvent.wheel(screen.getByTestId('group-view'), { deltaX: 120 })
+    expect(rail.scrollLeft, '祖先を辿り切っても横へ動ける箱が無い').toBe(120)
+  })
+
+  it('**修飾なしの縦では動かない**（レールの外でも同じ）', () => {
+    const { rail } = 置く()
+    fireEvent.wheel(screen.getByTestId('group-header'), { deltaY: 100 })
+    expect(rail.scrollLeft, '横だけを渡すのは、どこでも変わらない').toBe(0)
+  })
+})
+
+describe('横へ動ける内側が居るときは、そちらに譲る', () => {
+  it('**タブの帯の上では、レールが動かない**', () => {
+    const { rail } = 置く()
+    const 帯 = screen.getByTestId('tab-strip')
+    横へ動けるようにする(帯)
+    fireEvent.wheel(帯, { deltaX: 120 })
+    expect(rail.scrollLeft, '自分の中を横へ動かせるものが先').toBe(0)
+  })
+
+  it('**溢れていない箱には譲らない**（`overflow-x` だけでは足りない）', () => {
+    const { rail } = 置く()
+    // `overflow-x: auto` は持つが、溢れていない（jsdom の既定のまま 0 対 0）
+    fireEvent.wheel(screen.getByTestId('tab-strip'), { deltaX: 120 })
+    expect(rail.scrollLeft, '動けない箱へ譲ると、誰も動かさないまま終わる').toBe(120)
+  })
+
+  it('譲るのは、その箱の子孫の上だけ', () => {
+    const { rail } = 置く()
+    横へ動けるようにする(screen.getByTestId('tab-strip'))
+    fireEvent.wheel(screen.getByTestId('below-rail'), { deltaX: 120 })
+    expect(rail.scrollLeft, '祖先に居ない箱は関係ない').toBe(120)
   })
 })
 
