@@ -1,5 +1,5 @@
-import type { RateLimits } from "@/lib/protocol";
-import { formatDateTime, formatUntil } from "@/lib/time";
+import type { RateLimits } from '@/lib/protocol'
+import { formatDateTime, formatUntil } from '@/lib/time'
 
 /**
  * 窓の名前を読める形にする。**既知の2つだけを訳し、それ以外はそのまま出す。**
@@ -12,11 +12,11 @@ import { formatDateTime, formatUntil } from "@/lib/time";
 function windowLabel(name: string): string {
   switch (name) {
     case "five_hour":
-      return "5時間";
+      return '5時間'
     case "seven_day":
-      return "7日";
+      return '7日'
     default:
-      return name;
+      return name
   }
 }
 
@@ -54,13 +54,13 @@ export function RateLimitWindows({
   limits,
   now = Date.now(),
 }: {
-  limits: RateLimits | null;
+  limits: RateLimits | null
   /** 「あと何時間か」の基準。**テストが時刻を固定するために受ける。** */
-  now?: number;
+  now?: number
 }) {
   // **「無い」と「0%」を別に描く**（1件目と同じ判断）。届く形が同じなので、
   // 0% と区別できないと「使っていない」に見える——実際は「まだ分からない」
-  const known = limits !== null && limits.windows.length > 0;
+  const known = limits !== null && limits.windows.length > 0
 
   if (!known) {
     return (
@@ -71,7 +71,7 @@ export function RateLimitWindows({
       >
         まだ届いていません
       </p>
-    );
+    )
   }
 
   return (
@@ -81,9 +81,9 @@ export function RateLimitWindows({
       className="flex flex-col gap-1.5"
     >
       {limits.windows.map((window) => {
-        const resetsAtMs = window.resets_at * 1000;
-        const passed = resetsAtMs <= now;
-        const absolute = formatDateTime(resetsAtMs);
+        const resetsAtMs = window.resets_at * 1000
+        const passed = resetsAtMs <= now
+        const absolute = formatDateTime(resetsAtMs)
 
         return (
           <li
@@ -114,8 +114,8 @@ export function RateLimitWindows({
                 : `${formatUntil(resetsAtMs - now)}で戻ります`}
             </span>
           </li>
-        );
+        )
       })}
     </ul>
-  );
+  )
 }
