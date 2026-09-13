@@ -1,6 +1,6 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { useRef } from 'react'
+import { useRef, useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { FileFind } from '@/components/FileView/FileFind'
 
@@ -119,5 +119,139 @@ describe('探す窓', () => {
     置く('<p><b>太</b>字である</p>')
     await userEvent.type(screen.getByTestId('file-find-input'), '太字')
     await 件数('1 / 1')
+  })
+})
+
+/**
+ * 打つ層（`<textarea>`）の中を探す（`ファイルビュアにエディタ機能を追加` 設計§5-4）。
+ *
+ * **ここが撤回された判断へ戻らないための担保である。** いちど「エディタでは探すを
+ * 出さない」と決めかけたが、`text` は表に無い拡張子すべての落ちどころで、**今日その場で
+ * 探せている**——消すと最も探したい相手から探す機能が消える。
+ */
+function 打つ層に置く(値 = 'あか\nあお\nあか') {
+  function Harness() {
+    const bodyRef = useRef<HTMLDivElement>(null)
+    const editorRef = useRef<HTMLTextAreaElement>(null)
+    const [本文, set本文] = useState(値)
+    return (
+      <div>
+        {/* **3層をそのまま置く。** 遡ると番号と色の層に当たってしまう相手 */}
+        <div ref={bodyRef} data-testid="body">
+          <div data-testid="gutter">
+            {['1', '2', '3'].map((n) => (
+              <div key={n}>{n}</div>
+            ))}
+          </div>
+          <pre data-testid="paint">{本文}</pre>
+          <textarea
+            ref={editorRef}
+            data-testid="ta"
+            value={本文}
+            onChange={(e) => set本文(e.target.value)}
+          />
+        </div>
+        <FileFind
+          bodyRef={bodyRef}
+          editorRef={editorRef}
+          本文={本文}
+          contentKey="x"
+          合図={1}
+          onClose={vi.fn()}
+        />
+      </div>
+    )
+  }
+  render(<Harness />)
+  return {
+    打つ層: () => screen.getByTestId('ta') as HTMLTextAreaElement,
+  }
+}
+
+describe('探す窓（打つ層）', () => {
+  it('値の中を探して、件数を出す', async () => {
+    打つ層に置く()
+    await userEvent.type(screen.getByTestId('file-find-input'), 'あか')
+    await 件数('1 / 2')
+  })
+
+  /**
+   * **これが「DOM を遡っていない」ことの証拠である。**
+   *
+   * 番号の層には `1` が在るので、遡る道なら当たってしまう。**値には `1` が無い**ので、
+   * 値を見ているなら0件になる。
+   */
+  it('行番号や色の層には当たらない', async () => {
+    打つ層に置く()
+    await userEvent.type(screen.getByTestId('file-find-input'), '1')
+    await 件数('見つかりません')
+  })
+
+  it('当たりを選択で示す', async () => {
+    const { 打つ層 } = 打つ層に置く()
+    await userEvent.type(screen.getByTestId('file-find-input'), 'あお')
+    await waitFor(() => {
+      expect(打つ層().selectionStart).toBe(3)
+    })
+    expect(打つ層().selectionEnd).toBe(5)
+  })
+
+  it('次へで、次の当たりへ選択が移る', async () => {
+    const { 打つ層 } = 打つ層に置く()
+    await userEvent.type(screen.getByTestId('file-find-input'), 'あか')
+    await 件数('1 / 2')
+    await userEvent.click(screen.getByTestId('file-find-next'))
+    await waitFor(() => {
+      expect(打つ層().selectionStart).toBe(6)
+    })
+  })
+
+  it('末尾の次は先頭へ回る', async () => {
+    const { 打つ層 } = 打つ層に置く()
+    await userEvent.type(screen.getByTestId('file-find-input'), 'あか')
+    await 件数('1 / 2')
+    await userEvent.click(screen.getByTestId('file-find-next'))
+    await 件数('2 / 2')
+    await userEvent.click(screen.getByTestId('file-find-next'))
+    await waitFor(() => {
+      expect(打つ層().selectionStart).toBe(0)
+    })
+    // **終わりまで見る。** 既定の選択位置も 0 なので、始まりだけでは
+    // 「選択が壊れている」と「先頭へ回った」を見分けられない
+    expect(打つ層().selectionEnd).toBe(2)
+  })
+
+  /**
+   * **打っている間は件数が古くてよい**（テスト計画 7-3）。
+   *
+   * **デバウンスを外すとこの検査が落ちる**——落ちることを確かめたうえで戻してある。
+   * 外すと長い文書で打鍵のたびに全文を走査することになる。
+   */
+  it('打った直後は数え直さず、止まってから落ち着く', async () => {
+    const { 打つ層 } = 打つ層に置く()
+    await userEvent.type(screen.getByTestId('file-find-input'), 'あか')
+    await 件数('1 / 2')
+    // **同期で書き換える。** ここで時間を進めないのが要点
+    fireEvent.change(打つ層(), { target: { value: 'あか\nあお\nあか\nあか' } })
+    expect(screen.getByTestId('file-find-count')).toHaveTextContent('1 / 2')
+    await 件数('1 / 3')
+  })
+
+  /**
+   * **色付けが何度走っても当たりが消えない**——`setSelectionRange` を選んだ理由その
+   * ものである。**落ちたら方式の前提が崩れている。**
+   */
+  it('色の層が描き直されても、選択は残る', async () => {
+    const { 打つ層 } = 打つ層に置く()
+    await userEvent.type(screen.getByTestId('file-find-input'), 'あお')
+    await waitFor(() => {
+      expect(打つ層().selectionStart).toBe(3)
+    })
+    // **文字節点を作り直す。** 色付けのたびに実際に起きていること——
+    // `Range` を張る道なら、ここで当たりが無効になる
+    const 色の層 = screen.getByTestId('paint')
+    色の層.replaceChildren(document.createTextNode(色の層.textContent ?? ''))
+    expect(打つ層().selectionStart).toBe(3)
+    expect(打つ層().selectionEnd).toBe(5)
   })
 })

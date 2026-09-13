@@ -352,3 +352,45 @@ describe('種類をまたいで切り替えたとき', () => {
     expect(screen.getByTestId('file-image')).toHaveAttribute('data-measured', 'true')
   })
 })
+
+/**
+ * 探すが、モードをまたいで生き残る（`ファイルビュアにエディタ機能を追加` 設計§5-4）。
+ *
+ * # なぜ独立した節にしてあるのか
+ *
+ * **いちど「エディタでは探すを出さない」と決めかけて、撤回した。** `text` は
+ * **表に無い拡張子すべての落ちどころ**（コード・JSON・YAML・ログ）で、**今日その場で
+ * 探せている**——旧案のままなら、**最も探したい相手から探す機能が消えていた**。
+ *
+ * 上の総当たり表は「**入口が出るか**」までしか見ない。ここで見るのは「**本当に当たるか**」。
+ */
+describe('探すが、モードをまたいで生き残る', () => {
+  it('text は、エディタのまま当たる', async () => {
+    // **`text` はビュアーを持たないので、開いた瞬間からエディタ**（設計§5-1）
+    render(<Viewer host="local" root={ROOT} path={`${ROOT}/メモ.txt`} />)
+    await screen.findByTestId('file-editor')
+
+    await userEvent.click(screen.getByTestId('file-find-open'))
+    await userEvent.type(screen.getByTestId('file-find-input'), 'あか')
+
+    await waitFor(() => {
+      expect(screen.getByTestId('file-find-count')).toHaveTextContent('1 / 1')
+    })
+  })
+
+  /**
+   * **`探せる` に `mode` を混ぜた瞬間、撤回した判断へ戻る。**
+   *
+   * 探せるかどうかは**種類と中身だけ**で決まる。**どの道で探すか**だけがモードで
+   * 変わる——混ぜると `text` が常にエディタなので、そこから探す機能が消える。
+   */
+  it('「探せるか」の判定に、モードが混ざっていない', () => {
+    const src = readFileSync(
+      resolve(process.cwd(), 'src/components/FileView/FileView.tsx'),
+      'utf8',
+    )
+    const 宣言 = /const 探せる =([^\n]+)/.exec(src)
+    expect(宣言, '探せる の宣言が見つからない').not.toBeNull()
+    expect(宣言![1]!).not.toContain('mode')
+  })
+})
