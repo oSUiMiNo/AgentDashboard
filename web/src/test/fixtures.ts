@@ -30,6 +30,9 @@ export function settingsFixture(overrides: Partial<Settings> = {}): Settings {
     },
     memo_limits: { retention_days: 90, max_bytes: 1024 * 1024 * 1024 },
     lan_password: { supported: true, configured: false, editable: true },
+    // **既定は空。** 書ける場所を持った状態を既定にすると、テストが
+    // 「許可されていないから断られた」を確かめられなくなる
+    writable_roots: [],
     ...overrides,
   }
 }

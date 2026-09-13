@@ -79,6 +79,14 @@ pub struct SettingsView {
     /// 持ち出し（`/api/settings/export`）は前から運んでいたが、**画面が読む口には
     /// 載っていなかった**。値の出どころは同じ `db::settings::memo_limits` である。
     pub memo_limits: MemoLimitsView,
+    /// 書き込みを許可する場所（ファイルビュアにエディタ機能を追加 設計§3-5）。
+    ///
+    /// **既定は空。** 空でも「開いている PJT の配下」はコードの側が常に足すので、
+    /// **空＝どこへも書けない、ではない**（[`protocol::path::effective_roots`]）。
+    ///
+    /// 画面はこれを**「保存ボタンを出すか」の判定にしか使わない。弾く責任はサーバ側**
+    /// にある（設計§3-1）。
+    pub writable_roots: Vec<String>,
 }
 
 /// メモと画像の保持（メモ設計§11-1）。
@@ -235,6 +243,7 @@ async fn api_server_settings(
             .await
             .unwrap_or_default()
             .into(),
+        writable_roots: db::settings::writable_roots(hub.db(), identity.account_id).await,
         // セルフホストの鍵はアカウントのほう（§8-3 が LAN の検査から除外している）
         lan_password: LanPasswordView {
             supported: false,
@@ -276,6 +285,14 @@ pub struct SettingsUpdate {
     /// **範囲は `check()` が見る**（1 MiB〜20 GB）。下限が 0 でないのは、
     /// **書いた先から消える設定を作れると壊れているのと見分けが付かない**ため。
     pub memo_max_bytes: Option<u64>,
+    /// 書き込みを許可する場所（設計§3-5）。**一覧ごと差し替える。**
+    ///
+    /// **1件ずつ足し引きする形にしない。** 同時に2つのタブが開いていると、
+    /// **消したはずの場所が相手の送信で戻る**——書ける範囲がそうやって広がるのは、
+    /// いちばん気づきにくい広がり方である。
+    ///
+    /// **中身は `check()` が見る**（絶対パスであること・空でないこと）。
+    pub writable_roots: Option<Vec<String>>,
 }
 
 impl SettingsUpdate {
@@ -301,6 +318,12 @@ impl SettingsUpdate {
         // ただの文字列なので、ここを通さないと知らない綴りがそのまま記録へ入る
         if let Some(段) = &self.motion_quiet {
             db::settings::check(db::settings::MOTION_QUIET, &serde_json::json!(段))
+                .map_err(|reason| (StatusCode::BAD_REQUEST, reason))?;
+        }
+        // **一覧も serde では絞れない。** 絶対パスかどうかは型に出ないので、ここを
+        // 通さないと相対パスがそのまま記録へ入る——**どこからの相対かが決まらない**
+        if let Some(roots) = &self.writable_roots {
+            db::settings::check(db::settings::WRITABLE_ROOTS, &serde_json::json!(roots))
                 .map_err(|reason| (StatusCode::BAD_REQUEST, reason))?;
         }
         Ok(())
@@ -387,6 +410,7 @@ pub async fn api_settings(
             .await
             .unwrap_or_default()
             .into(),
+        writable_roots: db::settings::writable_roots(state.auth.db(), identity.account_id).await,
     }))
 }
 
@@ -446,6 +470,12 @@ pub async fn api_update_settings(
             .map_err(save_failed)?;
     }
 
+    if let Some(roots) = &update.writable_roots {
+        db::settings::set_writable_roots(state.auth.db(), identity.account_id, roots)
+            .await
+            .map_err(save_failed)?;
+    }
+
     if update.touches_memo_limits() {
         let current = db::settings::memo_limits(state.auth.db(), identity.account_id)
             .await
@@ -488,6 +518,8 @@ pub async fn api_update_settings(
                 .await
                 .unwrap_or_default()
                 .into(),
+            writable_roots: db::settings::writable_roots(state.auth.db(), identity.account_id)
+                .await,
         }));
     }
     api_settings(State(state), Extension(identity)).await
@@ -545,6 +577,12 @@ async fn api_server_update_settings(
 
     if let Some(段) = &update.motion_quiet {
         db::settings::set_motion_quiet(hub.db(), identity.account_id, 段)
+            .await
+            .map_err(save_failed)?;
+    }
+
+    if let Some(roots) = &update.writable_roots {
+        db::settings::set_writable_roots(hub.db(), identity.account_id, roots)
             .await
             .map_err(save_failed)?;
     }
@@ -801,7 +839,63 @@ mod tests {
             motion_quiet: None,
             memo_retention_days: None,
             memo_max_bytes: None,
+            writable_roots: None,
         }
+    }
+
+    fn 場所(values: &[&str]) -> Option<Vec<String>> {
+        Some(values.iter().map(|value| (*value).to_string()).collect())
+    }
+
+    /// **書き込みを許可する場所は、絶対パスだけを受ける**（設計§3-5）。
+    ///
+    /// # なぜここで見るのか
+    ///
+    /// **相対パスを受けると「どこからの相対か」が決まらない。** 画面は絶対パスしか
+    /// 送らないが、**REST と CLI は直に叩ける**ので、画面が絞っていることは担保に
+    /// ならない。しかも**ここは間違えると書ける範囲が広がる側**なので、
+    /// 「受けたふりをして効かない」では済まない。
+    #[test]
+    fn 許可する場所は絶対パスだけを受ける() {
+        for (name, roots) in [
+            ("相対パス", 場所(&["notes"])),
+            ("上へ遡る相対パス", 場所(&["../etc"])),
+            ("空の場所", 場所(&[""])),
+            ("絶対パスに混ざった相対パス", 場所(&["/home/u/notes", "tmp"])),
+        ] {
+            let update = SettingsUpdate {
+                writable_roots: roots,
+                ..空()
+            };
+            let (status, reason) = update.check().expect_err(&format!("{name} を通した"));
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{name}");
+            assert!(
+                reason.contains("writable_roots"),
+                "{name}: どの設定の話か読めない: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn 許可する場所は絶対パスなら通り空の一覧も通る() {
+        assert!(
+            SettingsUpdate {
+                writable_roots: 場所(&["/home/u/notes", "/dev/app"]),
+                ..空()
+            }
+            .check()
+            .is_ok()
+        );
+        // **空は「どこへも足さない」であって、誤りではない。** 開いている PJT の
+        // 配下はコードの側が足すので、空でも書けなくなるわけではない
+        assert!(
+            SettingsUpdate {
+                writable_roots: Some(Vec::new()),
+                ..空()
+            }
+            .check()
+            .is_ok()
+        );
     }
 
     /// **範囲の外を断ること**（要件10）。

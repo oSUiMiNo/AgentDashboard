@@ -138,6 +138,16 @@ export interface Settings {
    * 設定を変えた人に嘘を言うことになる。
    */
   memo_limits: MemoLimits
+  /**
+   * 書き込みを許可する場所（ファイルビュアにエディタ機能を追加 設計§3-5）。
+   *
+   * **既定は空。** ただし空でも「開いている PJT の配下」はサーバ側が常に足すので、
+   * **空＝どこへも書けない、ではない。**
+   *
+   * **画面はこれを「保存ボタンを出すか」にしか使わない。弾く責任は持たない**
+   * （設計§3-1）。正はサーバ側にあり、画面だけで弾いても REST と CLI を素通りする。
+   */
+  writable_roots: string[]
 }
 
 /** メモと画像の保持（メモ設計§11-1）。 */
@@ -166,6 +176,17 @@ export type SettingsPatch = Partial<{
   memo_retention_days: number
   /** メモの画像の合計の上限（要件10）。**上限は 20GB。「無制限」は作らない。** */
   memo_max_bytes: number
+  /**
+   * 書き込みを許可する場所（設計§3-5）。**一覧ごと差し替える。**
+   *
+   * **1件ずつ足し引きする形にしない。** 2つのタブを同時に開いていると、
+   * **消したはずの場所が相手の送信で戻る**——書ける範囲がそうやって広がるのは、
+   * いちばん気づきにくい広がり方である。
+   *
+   * **絶対パスだけを入れる**（サーバの `check()` が断る）。相対パスは「どこからの
+   * 相対か」が決まらない。
+   */
+  writable_roots: string[]
 }>
 
 interface SettingsState {
@@ -212,6 +233,9 @@ const FALLBACK: Settings = {
   lan_password: { supported: false, configured: false, editable: false },
   // **サーバの既定と同じ値を書く**（90日・1 GiB）。引く前に面が開いても嘘を言わない
   memo_limits: { retention_days: 90, max_bytes: 1024 * 1024 * 1024 },
+  // **読めるまでは空にする。** 推測で埋めると、まだ許可されていない場所に
+  // 保存ボタンが出て、押してからサーバに断られることになる
+  writable_roots: [],
 }
 
 /** ローカルモードのモデル表のキー（設計§13-4）。 */
@@ -262,6 +286,9 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       // **メモの保持も5つ目として埋める**（レビュー対応5）。`version select` は実在
       // する道なので、**旧版へ巻き戻すとメモの面が丸ごと落ちる**
       settings.memo_limits ??= FALLBACK.memo_limits
+      // **旧版のサーバはこのキーを知らない。** undefined のまま持つと、
+      // 保存ボタンの判定が例外で落ちる
+      settings.writable_roots ??= FALLBACK.writable_roots
       set({ settings, loading: false })
     } catch {
       // 読めなくても画面は出す。既定値のまま（＝スキップしない側）で動く

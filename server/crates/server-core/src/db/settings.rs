@@ -108,11 +108,33 @@ pub const DEFAULT_MEMO_RETENTION_DAYS: u64 = 90;
 pub const MEMO_MAX_BYTES: &str = "memo_max_bytes";
 pub const DEFAULT_MEMO_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 
+/// 書き込みを許可する場所の一覧（ファイルビュアにエディタ機能を追加 設計§3-5）。
+///
+/// **既定は空。** 空でも「開いている PJT の配下」はコードの側が常に足すので
+/// （[`protocol::path::effective_roots`]）、**空＝どこへも書けない、ではない。**
+/// 逆に**空を「全部許可」と読んではいけない**——設定を書き忘れた利用者が、
+/// いちばん緩い状態で使うことになる。
+///
+/// # なぜ持ち出し（[`ACCOUNT_KEYS`]）に入れないのか
+///
+/// **値が機械ごとに違う意味を持つから。** ほかのアカウント設定は真偽や数値で、
+/// どの機械へ持って行っても同じ意味になる。**ここに入るのは絶対パスである。**
+///
+/// 別の機械へ持ち出して読み込むと、**そこには存在しない場所や、まったく別の中身の
+/// 場所へ書き込みを許すことになる。** 設定の持ち出しで**書ける範囲が黙って広がる**のは、
+/// 利用者が意図しようのない広がり方なので、構造的に起こらないようにしてある。
+pub const WRITABLE_ROOTS: &str = "writable_roots";
+
 /// アカウントに属する設定のキー（持ち出し設計§7）。**書き出す対象はこれで決まる。**
 ///
 /// サーバ全体スコープのもの（LAN パスワード・更新確認）はここに入らないので、
 /// **秘密が持ち出しへ混ざる余地が構造的に無い**。裏返すと、**アカウントスコープへ
 /// 秘密を置いてはいけない**——ここが持ち出しの対象そのものになる。
+///
+/// **アカウントスコープなのに、ここへ入らないものが1つある。** [`WRITABLE_ROOTS`] は
+/// 絶対パスを持つので、**別の機械では同じ文字列が別の場所を指す**。持ち出しで
+/// 書ける範囲が広がらないよう、意図して外してある（理由は [`WRITABLE_ROOTS`] に）。
+/// **アカウントスコープのキーを足すときは、ここへ入れるかどうかを必ず決めること。**
 pub const ACCOUNT_KEYS: [&str; 8] = [
     ALWAYS_BYPASS_PERMISSIONS,
     PROJECT_AUTOSTART_SESSION,
@@ -180,6 +202,27 @@ pub fn check(key: &str, value: &serde_json::Value) -> Result<(), String> {
                 MOTION_QUIET_CHOICES.join(" / ")
             )),
             None => Err(format!("{key} には文字列を指定してください")),
+        },
+        // 絶対パスの一覧。**相対パスを受けない**——どこからの相対かが決まらないので、
+        // 受けると「設定したのに効かない」か、**意図しない場所が当たる**かのどちらかになる。
+        WRITABLE_ROOTS => match value.as_array() {
+            Some(paths) => {
+                for path in paths {
+                    let Some(path) = path.as_str() else {
+                        return Err(format!("{key} には文字列の一覧を指定してください"));
+                    };
+                    if path.is_empty() {
+                        return Err(format!("{key} に空の場所は指定できません"));
+                    }
+                    if !path.starts_with('/') {
+                        return Err(format!(
+                            "{key} には絶対パスを指定してください（{path} が入っています）"
+                        ));
+                    }
+                }
+                Ok(())
+            }
+            None => Err(format!("{key} には文字列の一覧を指定してください")),
         },
         _ => Err(format!("{key} は知らない設定です")),
     }
@@ -465,6 +508,44 @@ pub async fn set_motion_quiet(
     value: &str,
 ) -> Result<(), DbErr> {
     put(db, account, MOTION_QUIET, serde_json::json!(value)).await
+}
+
+/// 書き込みを許可する場所の一覧。**行が無ければ空**（設計§3-5）。
+///
+/// **読めなかったときも空へ倒す。** ほかの設定は既定へ倒すと使い勝手が変わるだけだが、
+/// ここは**倒し方を間違えると書ける範囲が広がる**。記録が読めないときに広い側へ
+/// 倒す道を作らない。
+///
+/// **文字列でない要素と相対パスは、読む側でも落とす。** 入口は `check()` が守っているが、
+/// 古い版が書いた行や手で書き換えられた行が残りうる。
+pub async fn writable_roots(db: &DatabaseConnection, account: Uuid) -> Vec<String> {
+    match get(db, account, WRITABLE_ROOTS).await {
+        Ok(value) => value
+            .as_ref()
+            .and_then(serde_json::Value::as_array)
+            .map(|paths| {
+                paths
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .filter(|path| path.starts_with('/'))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        Err(err) => {
+            tracing::warn!("書き込みを許可する場所を読めません: {err}");
+            Vec::new()
+        }
+    }
+}
+
+/// 書き込みを許可する場所を決める。**ここで行ができ、以後は記録が正になる。**
+pub async fn set_writable_roots(
+    db: &DatabaseConnection,
+    account: Uuid,
+    value: &[String],
+) -> Result<(), DbErr> {
+    put(db, account, WRITABLE_ROOTS, serde_json::json!(value)).await
 }
 
 /// LAN 開放の共有パスワード（ハッシュ）。設定されていなければ `None`。
