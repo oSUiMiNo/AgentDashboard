@@ -88,6 +88,12 @@ pub struct SettingsView {
     /// 画面はこれを**「保存ボタンを出すか」の判定にしか使わない。弾く責任はサーバ側**
     /// にある（設計§3-1）。
     pub writable_roots: Vec<String>,
+    /// 拡張子ごとに、開いたときどちらで始めるか（ファイルビュアにエディタ機能を追加 要件③）。
+    ///
+    /// **拡張子（小文字・`.` 無し）→ `"viewer"` か `"editor"`。既定は空。**
+    /// 載っていない拡張子は画面が種別から導く——**ここを埋めるのは、利用者が
+    /// 既定と違う見せ方を選んだ拡張子だけ**である。
+    pub file_modes: std::collections::BTreeMap<String, String>,
     /// **この機械**の使用上限（status設計）。まだ1本も届いていなければ `None`。
     ///
     /// # なぜ `agents` とは別の欄なのか
@@ -274,6 +280,7 @@ async fn api_server_settings(
             .unwrap_or_default()
             .into(),
         writable_roots: db::settings::writable_roots(hub.db(), identity.account_id).await,
+        file_modes: db::settings::file_modes(hub.db(), identity.account_id).await,
         // **サーバモードに「この機械」は無い。** claude が走るのは繋いできた PC の
         // 側だけなので、使用上限は1つ残らず上の `agents` の各行に乗る（`agents_of`
         // がかぶせている）。**ここを埋めると、同じ数字が2箇所に並ぶ**
@@ -327,6 +334,13 @@ pub struct SettingsUpdate {
     ///
     /// **中身は `check()` が見る**（絶対パスであること・空でないこと）。
     pub writable_roots: Option<Vec<String>>,
+    /// 拡張子ごとの見せ方（要件③）。**対応ごと差し替える。**
+    ///
+    /// **1件ずつ足し引きする形にしない**のは [`Self::writable_roots`] と同じ理由で、
+    /// 2つのタブが開いていると**消したはずの行が相手の送信で戻る**。
+    ///
+    /// **中身は `check()` が見る**（見せ方が2つのどちらか・拡張子が小文字で `.` 無し）。
+    pub file_modes: Option<std::collections::BTreeMap<String, String>>,
 }
 
 impl SettingsUpdate {
@@ -358,6 +372,13 @@ impl SettingsUpdate {
         // 通さないと相対パスがそのまま記録へ入る——**どこからの相対かが決まらない**
         if let Some(roots) = &self.writable_roots {
             db::settings::check(db::settings::WRITABLE_ROOTS, &serde_json::json!(roots))
+                .map_err(|reason| (StatusCode::BAD_REQUEST, reason))?;
+        }
+        // **対応も serde では絞れない。** 見せ方はただの文字列なので、ここを通さないと
+        // 知らない綴りが記録へ入る——画面は知らない値を既定へ落として描くので、
+        // **「設定したのに効かない」だけに見える**
+        if let Some(対応) = &self.file_modes {
+            db::settings::check(db::settings::FILE_MODES, &serde_json::json!(対応))
                 .map_err(|reason| (StatusCode::BAD_REQUEST, reason))?;
         }
         Ok(())
@@ -444,6 +465,7 @@ pub async fn api_settings(
             .unwrap_or_default()
             .into(),
         writable_roots: db::settings::writable_roots(state.auth.db(), identity.account_id).await,
+        file_modes: db::settings::file_modes(state.auth.db(), identity.account_id).await,
         // **手元の保管からかぶせる**（DB には無い）。`agents_of` が
         // `Some(AgentId(..))` で引くのと対で、ローカルは `None` が鍵である。
         // 届いていなければ `None` のまま——画面は「まだ分からない」と「0%」を
@@ -514,6 +536,12 @@ pub async fn api_update_settings(
             .map_err(save_failed)?;
     }
 
+    if let Some(対応) = &update.file_modes {
+        db::settings::set_file_modes(state.auth.db(), identity.account_id, 対応)
+            .await
+            .map_err(save_failed)?;
+    }
+
     if update.touches_memo_limits() {
         let current = db::settings::memo_limits(state.auth.db(), identity.account_id)
             .await
@@ -558,6 +586,7 @@ pub async fn api_update_settings(
                 .into(),
             writable_roots: db::settings::writable_roots(state.auth.db(), identity.account_id)
                 .await,
+            file_modes: db::settings::file_modes(state.auth.db(), identity.account_id).await,
             machine_rate_limits: state.registry.rate_limits_of(identity.account_id, None),
         }));
     }
@@ -622,6 +651,12 @@ async fn api_server_update_settings(
 
     if let Some(roots) = &update.writable_roots {
         db::settings::set_writable_roots(hub.db(), identity.account_id, roots)
+            .await
+            .map_err(save_failed)?;
+    }
+
+    if let Some(対応) = &update.file_modes {
+        db::settings::set_file_modes(hub.db(), identity.account_id, 対応)
             .await
             .map_err(save_failed)?;
     }
@@ -879,11 +914,60 @@ mod tests {
             memo_retention_days: None,
             memo_max_bytes: None,
             writable_roots: None,
+            file_modes: None,
         }
     }
 
     fn 場所(values: &[&str]) -> Option<Vec<String>> {
         Some(values.iter().map(|value| (*value).to_string()).collect())
+    }
+
+    fn 見せ方(values: &[(&str, &str)]) -> Option<std::collections::BTreeMap<String, String>> {
+        Some(
+            values
+                .iter()
+                .map(|(拡張子, 見せ方)| ((*拡張子).to_string(), (*見せ方).to_string()))
+                .collect(),
+        )
+    }
+
+    /// **拡張子ごとの見せ方は、2つの綴りだけを受ける**（要件③）。
+    ///
+    /// 知らない綴りを黙って入れると、**画面は既定へ落として描くので「設定したのに
+    /// 効かない」だけに見える**。拡張子の形も揃える——`MD` と `md` が別の行として
+    /// 残ると、**どちらが効いているか利用者に分からなくなる**。
+    #[test]
+    fn 拡張子ごとの見せ方は形の揃ったものだけ受ける() {
+        for (なぜ, 対応) in [
+            ("知らない見せ方", 見せ方(&[("md", "block")])),
+            ("大文字の拡張子", 見せ方(&[("MD", "viewer")])),
+            ("先頭の点", 見せ方(&[(".md", "viewer")])),
+            ("空の拡張子", 見せ方(&[("", "viewer")])),
+        ] {
+            let update = SettingsUpdate {
+                file_modes: 対応,
+                ..空()
+            };
+            let Err((code, reason)) = update.check() else {
+                panic!("{なぜ} が通ってしまった");
+            };
+            assert_eq!(code, StatusCode::BAD_REQUEST, "{なぜ}");
+            assert!(reason.contains("file_modes"), "{なぜ}：{reason}");
+        }
+
+        // **通る側も見る。** 断る検査しか無いと、全部断るよう壊れていても緑になる
+        let update = SettingsUpdate {
+            file_modes: 見せ方(&[("md", "editor"), ("json", "viewer")]),
+            ..空()
+        };
+        assert!(update.check().is_ok());
+
+        // **空の対応も通る**——「設定を全部消す」ができないと、一度入れた行を外せない
+        let update = SettingsUpdate {
+            file_modes: Some(std::collections::BTreeMap::new()),
+            ..空()
+        };
+        assert!(update.check().is_ok());
     }
 
     /// **書き込みを許可する場所は、絶対パスだけを受ける**（設計§3-5）。

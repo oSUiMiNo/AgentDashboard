@@ -125,6 +125,22 @@ pub const DEFAULT_MEMO_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 /// 利用者が意図しようのない広がり方なので、構造的に起こらないようにしてある。
 pub const WRITABLE_ROOTS: &str = "writable_roots";
 
+/// 拡張子ごとに、開いたときどちらで始めるか（ファイルビュアにエディタ機能を追加 要件③）。
+///
+/// 形は **拡張子（小文字・先頭の `.` を含まない）→ `"viewer"` か `"editor"`**。
+/// **既定は空**で、載っていない拡張子は種別から導く（`md` ／ `html` ／ `svg` はビュアー、
+/// それ以外はエディタ）——要件の「設定無しの拡張子はエディタ」がそれに当たる。
+///
+/// # こちらは持ち出し（[`ACCOUNT_KEYS`]）に入れる
+///
+/// [`WRITABLE_ROOTS`] を外したのは**中身が絶対パスで、機械ごとに別の場所を指す**
+/// からだった。**こちらは拡張子と見せ方の対応**で、どの機械でも同じ意味になる。
+/// **持ち出しで広がるものが無い**ので、外す理由がない。
+pub const FILE_MODES: &str = "file_modes";
+
+/// [`FILE_MODES`] に入れてよい見せ方。
+pub const FILE_MODE_CHOICES: [&str; 2] = ["viewer", "editor"];
+
 /// アカウントに属する設定のキー（持ち出し設計§7）。**書き出す対象はこれで決まる。**
 ///
 /// サーバ全体スコープのもの（LAN パスワード・更新確認）はここに入らないので、
@@ -135,7 +151,7 @@ pub const WRITABLE_ROOTS: &str = "writable_roots";
 /// 絶対パスを持つので、**別の機械では同じ文字列が別の場所を指す**。持ち出しで
 /// 書ける範囲が広がらないよう、意図して外してある（理由は [`WRITABLE_ROOTS`] に）。
 /// **アカウントスコープのキーを足すときは、ここへ入れるかどうかを必ず決めること。**
-pub const ACCOUNT_KEYS: [&str; 8] = [
+pub const ACCOUNT_KEYS: [&str; 9] = [
     ALWAYS_BYPASS_PERMISSIONS,
     PROJECT_AUTOSTART_SESSION,
     SYNC_INTERVAL_SECS,
@@ -144,6 +160,7 @@ pub const ACCOUNT_KEYS: [&str; 8] = [
     MOTION_QUIET,
     MEMO_RETENTION_DAYS,
     MEMO_MAX_BYTES,
+    FILE_MODES,
 ];
 
 /// 入れてよい間隔の範囲。画面の選択肢を含む、余裕のある幅にしてある。
@@ -223,6 +240,43 @@ pub fn check(key: &str, value: &serde_json::Value) -> Result<(), String> {
                 Ok(())
             }
             None => Err(format!("{key} には文字列の一覧を指定してください")),
+        },
+        // 拡張子 → 見せ方の対応。**知らない綴りを黙って入れない**——画面は知らない値を
+        // 既定へ落として描くので、入れてしまうと「設定したのに効かない」だけに見える。
+        // **拡張子の形も揃える**（小文字・`.` を含まない）。揃えないと `MD` と `md` が
+        // 別の行として残り、**どちらが効いているか利用者に分からなくなる**。
+        FILE_MODES => match value.as_object() {
+            Some(対応) => {
+                for (拡張子, 見せ方) in 対応 {
+                    if 拡張子.is_empty() {
+                        return Err(format!("{key} に空の拡張子は指定できません"));
+                    }
+                    if 拡張子.starts_with('.') {
+                        return Err(format!(
+                            "{key} の拡張子に先頭の . は付けないでください（{拡張子} が入っています）"
+                        ));
+                    }
+                    if 拡張子.chars().any(|c| c.is_ascii_uppercase()) {
+                        return Err(format!(
+                            "{key} の拡張子は小文字で指定してください（{拡張子} が入っています）"
+                        ));
+                    }
+                    match 見せ方.as_str() {
+                        Some(見せ方) if FILE_MODE_CHOICES.contains(&見せ方) => {}
+                        Some(見せ方) => {
+                            return Err(format!(
+                                "{key} は {} のどちらかで指定してください（{拡張子} に {見せ方} が入っています）",
+                                FILE_MODE_CHOICES.join(" / ")
+                            ));
+                        }
+                        None => {
+                            return Err(format!("{key} には文字列を指定してください（{拡張子}）"));
+                        }
+                    }
+                }
+                Ok(())
+            }
+            None => Err(format!("{key} には拡張子と見せ方の対応を指定してください")),
         },
         _ => Err(format!("{key} は知らない設定です")),
     }
@@ -546,6 +600,51 @@ pub async fn set_writable_roots(
     value: &[String],
 ) -> Result<(), DbErr> {
     put(db, account, WRITABLE_ROOTS, serde_json::json!(value)).await
+}
+
+/// 拡張子ごとの見せ方（要件③）。**行が無ければ空**で、呼ぶ側が種別から導く。
+///
+/// **読めなかったときも空へ倒す。** ここは倒し方を間違えても危なくない（見せ方が
+/// 既定に戻るだけ）が、[`writable_roots`] と同じ形にしておくほうが読む人が迷わない。
+///
+/// **知らない見せ方と、形の違う拡張子は読む側でも落とす。** 入口は [`check`] が
+/// 守っているが、古い版が書いた行や手で書き換えられた行が残りうる。
+pub async fn file_modes(
+    db: &DatabaseConnection,
+    account: Uuid,
+) -> std::collections::BTreeMap<String, String> {
+    match get(db, account, FILE_MODES).await {
+        Ok(value) => value
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .map(|対応| {
+                対応
+                    .iter()
+                    .filter_map(|(拡張子, 見せ方)| {
+                        let 見せ方 = 見せ方.as_str()?;
+                        (!拡張子.is_empty()
+                            && !拡張子.starts_with('.')
+                            && !拡張子.chars().any(|c| c.is_ascii_uppercase())
+                            && FILE_MODE_CHOICES.contains(&見せ方))
+                        .then(|| (拡張子.clone(), 見せ方.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        Err(err) => {
+            tracing::warn!("拡張子ごとの見せ方を読めません: {err}");
+            std::collections::BTreeMap::new()
+        }
+    }
+}
+
+/// 拡張子ごとの見せ方を決める。**一覧ごと差し替える**（[`set_writable_roots`] と同じ理由）。
+pub async fn set_file_modes(
+    db: &DatabaseConnection,
+    account: Uuid,
+    value: &std::collections::BTreeMap<String, String>,
+) -> Result<(), DbErr> {
+    put(db, account, FILE_MODES, serde_json::json!(value)).await
 }
 
 /// LAN 開放の共有パスワード（ハッシュ）。設定されていなければ `None`。

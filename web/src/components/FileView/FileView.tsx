@@ -66,6 +66,8 @@ import {
 } from '@/lib/hostfs'
 import { dropEdit, putEdit, readEdit, WRITE_DEBOUNCE_MS } from '@/lib/fileEdits'
 import { useAuthStore } from '@/stores/auth'
+import { useSettingsStore } from '@/stores/settings'
+import { 既定のモード, type FileMode } from '@/lib/fileMode'
 
 /**
  * **これより大きい Markdown は、整形を既定にしない**（`表示できるテキストの上限を3MBへ上げる`
@@ -115,21 +117,6 @@ const FORMAT_DEFAULT_LIMIT = 256 * 1024
  * **2値である。**「ビュアーを持たない」は種別から導くので、状態には写さない——
  * 導けるものを状態に持つと、片方だけ更新される余地が生まれる。
  */
-export type FileMode = 'viewer' | 'editor'
-
-/**
- * 開いたときにどちらで始めるか（設計§5-1・§10-2）。
- *
- * **ビュアーを持たない種別はエディタで始める。** `text` は表に無い拡張子すべての
- * 落ちどころなので、**既定がエディタ**になる（要件「設定無しの拡張子はエディタ」）。
- * `markdown` ／ `html` ／ `svg` はビュアーを持つので、**見たいものをまず見せる。**
- *
- * **`image` はどちらも持たない**（描画の手前で分かれるので、ここの値は使われない）。
- */
-function 既定のモード(kind: ReturnType<typeof fileKind>): FileMode {
-  return kind === 'text' ? 'editor' : 'viewer'
-}
-
 interface Props {
   /** `agent_id` かローカルを表す `'local'` */
   host: string
@@ -188,6 +175,20 @@ export function FileView({
 }: Props) {
   const kind = fileKind(path)
   /**
+   * 拡張子ごとに、開いたときどちらで始めるか（要件③）。**載っていない拡張子は
+   * 種別から導く**ので、空でも既定の見せ方はそのまま出る。
+   *
+   * **開いた瞬間の決めにしか使わない。** あとからトグルで変えたものを、設定が
+   * 上書きしに来ることはない——**見ている最中に面が入れ替わるほうが害が大きい。**
+   */
+  const 拡張子ごとの見せ方 = useSettingsStore((state) => state.settings.file_modes)
+  /**
+   * その控え。**効果の依存に入れない**——設定を変えた瞬間に、開いている面が
+   * 読み直されて**見ている最中に入れ替わる**。**開いた瞬間の決めにしか使わない。**
+   */
+  const 見せ方の控え = useRef(拡張子ごとの見せ方)
+  見せ方の控え.current = 拡張子ごとの見せ方
+  /**
    * 最新の知らせ先。**効果の依存に入れない**——渡し方が変わるたびに読み直しが走り、
    * 同じファイルをもう一度取りに行くことになる。
    */
@@ -205,7 +206,7 @@ export function FileView({
    * **名前を `raw` のままにしなかった。** 意味が反転している——もとの `raw=true`
    * （生テキスト）が、置き換え後は**エディタ**である。名前を残すと読めなくなる。
    */
-  const [mode, setMode] = useState<FileMode>(() => 既定のモード(kind))
+  const [mode, setMode] = useState<FileMode>(() => 既定のモード(kind, path, 拡張子ごとの見せ方))
   /**
    * 編集中の中身。**`null` は「まだ触っていない」**で、ディスクの中身をそのまま出す。
    *
@@ -286,7 +287,7 @@ export function FileView({
     let made: string | null = null
     setLoading(true)
     setError(null)
-    setMode(既定のモード(kind))
+    setMode(既定のモード(kind, path, 見せ方の控え.current))
     set書きかけ(null)
     set保存中(false)
     set保存の断り(null)

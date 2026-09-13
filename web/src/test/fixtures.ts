@@ -33,6 +33,9 @@ export function settingsFixture(overrides: Partial<Settings> = {}): Settings {
     // **既定は空。** 書ける場所を持った状態を既定にすると、テストが
     // 「許可されていないから断られた」を確かめられなくなる
     writable_roots: [],
+    // **既定は空。** 行を持った状態を既定にすると、「設定が無いときの見せ方」を
+    // 確かめられなくなる（要件③の「設定無しの拡張子はエディタ」がそれ）
+    file_modes: {},
     ...overrides,
   }
 }
