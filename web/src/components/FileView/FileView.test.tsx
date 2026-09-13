@@ -500,8 +500,10 @@ describe("画像と HTML", () => {
     // **二度運ばない**（設計§7-2）。`as=raw` の1本だけが叩かれていること
     expect(calls).toHaveLength(1);
     expect(calls[0]).toContain("as=raw");
-    // 生テキストは出さず、代わりに素性を出す（設計§7-4）
-    expect(screen.queryByTestId("file-toggle-raw")).toBeNull();
+    // モードの切替は出さず、代わりに素性を出す（設計§7-4）。
+    // **綴りを追随させること**——`file-toggle-raw` は既に存在しないので、
+    // 古い綴りのまま残すと**何も見ていないのに緑になる**
+    expect(screen.queryByTestId("file-toggle-mode")).toBeNull();
     expect(screen.getByTestId("file-meta")).toHaveTextContent("image/png");
   });
 

@@ -672,7 +672,7 @@ test("狭い画面でファイルを開いても、セッションの面が潰�
  * しかも症状は「上のほうしか出ない」——**短い文書を開いたときと見分けが付かない**ので、
  * 目で見てもすぐには壊れていると分からない。
  */
-test("長い文書を末尾まで辿れる（整形と生テキストの両方）", async ({ page }) => {
+test("長い文書を末尾まで辿れる（整形と編集の両方）", async ({ page }) => {
   await openDashboard(page);
   const panel = await openLongFile(page);
 
@@ -688,10 +688,14 @@ test("長い文書を末尾まで辿れる（整形と生テキストの両方�
   // **数だけでは「遡れた」と言い切れない。** 末尾の目印が実際に見えるところまで見る
   await expect(page.getByRole("heading", { name: TAIL })).toBeInViewport();
 
-  // 生テキストで見るとき（**同じ箱の中で中身だけが入れ替わる**ので、片方だけ直る
+  // 編集で見るとき（**同じ箱の中で中身だけが入れ替わる**ので、片方だけ直る
   // 形にはならない。ただし「なるはず」で済ませずに、両方で測る）
-  await page.getByTestId("file-toggle-raw").click();
-  await expect(page.getByTestId("file-raw")).toBeVisible();
+  //
+  // **この段のエディタは1層（素の `textarea`）**なので、ここで見るのは
+  // 「エディタが末尾まで行く」ことである。**次のフェーズで色付きの `<pre>` と
+  // 行番号が重なったら、3層が同期して末尾まで行くところまで強めること。**
+  await page.getByTestId("file-toggle-mode").click();
+  await expect(page.getByTestId("file-editor")).toBeVisible();
   await expectScrollable(body);
 });
 
@@ -1125,7 +1129,7 @@ test("狭い窓でも、操作の列が横へはみ出さない", async ({ page 
     "file-zoom-out",
     "file-zoom-reset",
     "file-zoom-in",
-    "file-toggle-raw",
+    "file-toggle-mode",
     "file-open-tab",
     "file-close",
   ]) {
@@ -1167,15 +1171,16 @@ test("上限を超える画像は、理由と大きさが出る", async ({ page 
   }
 });
 
-test("HTML でも生テキストと整形を行き来できる", async ({ page }) => {
+test("HTML でも編集と整形を行き来できる", async ({ page }) => {
   await 開いて選ぶ(page, DOCUMENT);
   await expect(page.getByTestId("file-frame")).toBeVisible();
 
-  await page.getByTestId("file-toggle-raw").click();
-  await expect(page.getByTestId("file-raw")).toContainText('<h1 id="見出し">');
+  await page.getByTestId("file-toggle-mode").click();
+  // **`textarea` の中身は `value` であって字ではない。** `toContainText` は当たらない
+  await expect(page.getByTestId("file-editor")).toHaveValue(/<h1 id="見出し">/);
   await expect(page.getByTestId("file-frame")).toHaveCount(0);
 
-  await page.getByTestId("file-toggle-raw").click();
+  await page.getByTestId("file-toggle-mode").click();
   await expect(page.getByTestId("file-frame")).toBeVisible();
 });
 
@@ -1796,7 +1801,7 @@ test("中身の列の上で横へ回すと、セッションのレールが動�
     .toBeGreaterThan(前);
 });
 
-test("生テキストの上では、その中が横へ動く", async ({ page }) => {
+test("エディタの上では、その中が横へ動く", async ({ page }) => {
   // 列の中に横スクロールを持つのはここだけ。**素通しにすると、読みたい行の続きが
   // 読めないままレールが流れる**（設計§8）
   //
@@ -1812,9 +1817,14 @@ test("生テキストの上では、その中が横へ動く", async ({ page }) 
   // フォルダを畳む——被さったままだと列の上を押せない
   await page.getByTestId("project-files-toggle").click();
   await expect(panel).toBeHidden();
-  await page.getByTestId("file-toggle-raw").click();
+  //
+  // **【2026-09-13・横スクロールを持つ層が移った】** 生テキストの `<pre>` は
+  // エディタ（`<textarea wrap="off">`）へ置き換わった。**折り返さずに横へ送るのは
+  // こちらになった**ので、見る相手を移してある——**振る舞いを見る段と材料は
+  // そのまま引き継いでいる。**
+  await page.getByTestId("file-toggle-mode").click();
 
-  const pre = page.getByTestId("file-raw");
+  const pre = page.getByTestId("file-editor");
   await expect(pre).toBeVisible();
 
   // **CSS の指定は前提として残す。** 振る舞いと別に見ておくと、落ちたときに
@@ -1822,10 +1832,10 @@ test("生テキストの上では、その中が横へ動く", async ({ page }) 
   const 横へ動けるか = await pre.evaluate(
     (el) => getComputedStyle(el).overflowX,
   );
-  expect(横へ動けるか, "生テキストは自分で横へ動く").toMatch(/auto|scroll/);
+  expect(横へ動けるか, "エディタは自分で横へ動く").toMatch(/auto|scroll/);
 
   const 溢れ = await pre.evaluate((el) => el.scrollWidth - el.clientWidth);
-  expect(溢れ, "生テキストが横に溢れていること").toBeGreaterThan(0);
+  expect(溢れ, "エディタが横に溢れていること").toBeGreaterThan(0);
 
   const 前 = await pre.evaluate((el) => el.scrollLeft);
   await pre.hover();
@@ -1839,7 +1849,7 @@ test("生テキストの上では、その中が横へ動く", async ({ page }) 
   */
   await expect
     .poll(async () => pre.evaluate((el) => el.scrollLeft), {
-      message: "生テキストの中が、自分で横へ動くこと",
+      message: "エディタの中が、自分で横へ動くこと",
     })
     .toBeGreaterThan(前);
 });

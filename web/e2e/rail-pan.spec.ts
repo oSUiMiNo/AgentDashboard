@@ -266,9 +266,12 @@ test('生テキストの上では、レールは動かない', async ({ page }) 
   // フォルダを畳む——被さったままだと列の上を押せない
   await page.getByTestId('project-files-toggle').click()
   await expect(panel).toBeHidden()
-  await page.getByTestId('file-toggle-raw').click()
+  // **生テキストの面はエディタへ置き換わった**（`ファイルビュアにエディタ機能を追加`）。
+  // **横スクロールを持つ層がこちらへ移っている**ので、見る相手だけを移した——
+  // ホイールを回す段と材料はそのまま
+  await page.getByTestId('file-toggle-mode').click()
 
-  const pre = page.getByTestId('file-raw')
+  const pre = page.getByTestId('file-editor')
   await expect(pre).toBeVisible()
   const 生の溢れ = await pre.evaluate((el) => el.scrollWidth - el.clientWidth)
   expect(生の溢れ, '生テキストが横に溢れていること').toBeGreaterThan(0)
