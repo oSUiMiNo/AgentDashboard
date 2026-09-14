@@ -89,3 +89,117 @@ export async function 画像を運ぶ(
     releasePreview(one)
   }
 }
+
+/**
+ * 貼った直後の幅を、**入る場所の何割にするか**（利用者の要望・2026-09-14
+ * 「画像を張ると一旦横幅いっぱいのサイズで貼られるが、初期は横幅の4割サイズで
+ * 貼ってほしい。大きくしたい場合はユーザーがサイズ調整するので」）。
+ */
+export const 貼るときの割合 = 0.4
+
+/**
+ * 掴み手が許す下限（`@blocknote/core` の実測。`Math.max(r, 64)`）。
+ *
+ * **貼った幅は、人が掴んで作れる幅の中に収める。** 狭い窓で4割を素直に取ると
+ * ここを下回るので、**掴んでも二度と作れない幅**が最初から入ることになる。
+ */
+const 下限 = 64
+
+/**
+ * 貼った直後に入れる幅（px）。決められなければ `undefined`。
+ *
+ * # なぜ入れるのか——**入れないと必ず横幅いっぱいになる**
+ *
+ * ブロックエディタの `previewWidth` は**既定が `undefined`** で、そのとき絵の器は
+ * `width: fit-content` になる（`@blocknote/core` の実測）。器には `max-width: 100%`、
+ * 中の `<img>` には `width: 100%` が当たっているので、**原寸が入る幅より広い絵は
+ * 必ず 100% まで伸びる**——スクリーンショットは例外なくこれに当たる。
+ *
+ * つまり「横幅いっぱい」は既定の幅が広いのではなく、**幅が決まっていないこと**の
+ * 結果である。だから**貼る時点で数字を入れる**のが直し方になる。
+ *
+ * # 原寸より大きくしない
+ *
+ * **小さい絵を引き伸ばさない。** 4割をそのまま入れると、入る幅が 800px のときに
+ * 100px のアイコンが 320px へ膨らむ——器の幅がそのまま `<img>` の幅になるためで、
+ * **いま正しく出ているものが、この変更で初めて壊れる**。
+ *
+ * 「横幅いっぱいで貼られる」と言われているのは**原寸が入る幅より広い絵**の話なので、
+ * 原寸で頭打ちにしても要望は満たせる。**直す対象だけが動き、それ以外は動かない。**
+ *
+ * # 測れなければ何も入れない
+ *
+ * 幅か原寸のどちらかが測れなければ、**いままでどおり**（`previewWidth` を入れない）に
+ * 倒す。ここで4割だけを入れると、**原寸を測れなかった小さい絵が引き伸ばされる**——
+ * 要望が通らないだけの状態より、**無かった壊れ方が増えるほうが悪い。**
+ */
+export function 貼るときの幅(
+  入る幅: number | undefined,
+  原寸: number | undefined,
+): number | undefined {
+  if (入る幅 === undefined || !Number.isFinite(入る幅) || 入る幅 <= 0) {
+    return undefined
+  }
+  if (原寸 === undefined || !Number.isFinite(原寸) || 原寸 <= 0) {
+    return undefined
+  }
+  return Math.min(Math.max(Math.round(入る幅 * 貼るときの割合), 下限), Math.round(原寸))
+}
+
+/**
+ * 絵の原寸（横）を測る。測れなければ `undefined`。
+ *
+ * **運び終えてから測る。** 先に測ると、運ぶ前に中身をもう一度読むことになる——
+ * `attachments.ts` が書いているとおり、`File` は**その場で読める保証が無い**ので、
+ * 読む回数は増やさないほうがよい。ここで測れなくても運びは済んでいる。
+ *
+ * **投げない。** 原寸が測れないことは「幅を決められない」だけで、貼れないことでは
+ * ない。ここで投げると、**運び終えた絵が貼れずに消える。**
+ */
+export async function 原寸を測る(blob: Blob): Promise<number | undefined> {
+  // **無い環境がある**（jsdom・古い WebView）。呼ぶ前に確かめる
+  if (typeof createImageBitmap !== 'function') {
+    return undefined
+  }
+  let 絵: ImageBitmap
+  try {
+    絵 = await createImageBitmap(blob)
+  } catch {
+    return undefined
+  }
+  try {
+    return 絵.width > 0 ? 絵.width : undefined
+  } finally {
+    // **作ったら捨てる**（この模組の `画像を運ぶ` と同じ約束）
+    絵.close?.()
+  }
+}
+
+/**
+ * 貼った直後に、画像のブロックへ渡すもの。
+ *
+ * # なぜ文字列と物体の2つを返すのか
+ *
+ * エディタの `uploadFile` は**返り値が文字列なら URL として、物体ならブロックの
+ * 差分として**扱う（`@blocknote/core` の型どおり：`Promise<string | Record<string, any>>`）。
+ * 落とす・貼り付ける・選ぶの3経路がどれもこの1箇所を通るので、**ここへ幅を載せれば
+ * 3経路とも直る。**
+ *
+ * **`name` を自分で載せるのは、物体を返すと経路によって落ちるからである。**
+ * 文字列を返したときだけ、選ぶ経路（ファイルの面）はエディタ側で
+ * `{ props: { name, url } }` を組み立てている——物体を返すとその組み立てを通らないので、
+ * **載せ忘れると絵の名前（`alt`）だけが経路によって消える。**
+ *
+ * 幅が決まらなければ**文字列のまま返す**。いままでと1バイトも変わらない道になる。
+ */
+export async function 貼るときのブロック(
+  file: File,
+  url: string,
+  入る幅: number | undefined,
+): Promise<string | { props: { name: string; url: string; previewWidth: number } }> {
+  const 幅 = 貼るときの幅(入る幅, await 原寸を測る(file))
+  if (幅 === undefined) {
+    return url
+  }
+  return { props: { name: file.name, url, previewWidth: 幅 } }
+}

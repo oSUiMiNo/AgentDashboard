@@ -30,6 +30,9 @@
  * **ふるいは `pickImages` を通す。** 種別と大きさの線を入力欄と揃えるためで、
  * ここで独自に判定すると **svg が片方だけ通る**ような食い違いが生まれる。
  *
+ * **貼った直後の幅もここで決める**（`lib/memoImage.ts` の [`貼るときの幅`]）。
+ * 3経路が1箇所へ寄っているので、**幅を載せるのも1箇所で済む。**
+ *
  * **保存先を渡されなければ、画像は貼れない。** 全体メモにはカードが無く、
  * **どの PC のディスクへ置くかが決まらない**（設計§10-1 の【未解決】）。
  * 決まっていないものを黙って既定の PC へ置くと、**別の機械から読めない画像**が
@@ -45,6 +48,26 @@ import '@blocknote/shadcn/style.css'
 
 import { isComposerSubmit } from '@/lib/keys'
 import type { MemoBody } from '@/lib/memoBody'
+import { 貼るときのブロック } from '@/lib/memoImage'
+
+/**
+ * 貼った絵が**入る場所**の横幅（px）。測れなければ `undefined`。
+ *
+ * **掴み手が上限に使っているのと同じ場所を測る**（`@blocknote/core` の実測——
+ * `t.domElement?.firstElementChild?.clientWidth`）。`domElement` は文字を打つ面
+ * そのもので**左右に余白を持っている**ので、そちらを測ると余白のぶんだけ広い数字に
+ * なる。**貼った幅と、掴んで作れる最大の幅が、同じものさしで測られる。**
+ *
+ * **決める側はここに置かない**（`lib/memoImage.ts` の [`貼るときの幅`]）。jsdom は
+ * CSS を1バイトも当てないので、測る側と混ぜると**何も確かめないまま緑になる。**
+ */
+function 入る幅を測る(面: HTMLElement | undefined): number | undefined {
+  const 内側 = 面?.firstElementChild
+  if (内側 === null || 内側 === undefined) {
+    return undefined
+  }
+  return 内側.clientWidth > 0 ? 内側.clientWidth : undefined
+}
 
 interface Props {
   /** 初期の中身。**空なら新規、入っていれば編集。** */
@@ -105,7 +128,14 @@ export function MemoEditor({
             運び中.current += 1
             抱えるRef.current?.(true)
             try {
-              return await uploadRef.current!(file)
+              /*
+                **落とした瞬間の幅で決める**（`lib/memoImage.ts` の [`貼るときの幅`]）。
+                運び終えてから測ると、8 MiB を運んでいる間に面の幅を変えられた場合に
+                **貼った覚えのない幅**が入る。
+              */
+              const 入る幅 = 入る幅を測る(editor.domElement)
+              const url = await uploadRef.current!(file)
+              return await 貼るときのブロック(file, url, 入る幅)
             } finally {
               運び中.current -= 1
               if (運び中.current === 0) {
