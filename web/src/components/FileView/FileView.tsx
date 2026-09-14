@@ -36,7 +36,9 @@
  * SVG にも同じ理由が当てはまるので、そちらにも出す（設計§7-4）。
  */
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
+import type { MarkdownEditorHandle } from './MarkdownBlockEditor'
+import type { FileSearchAdapter } from '@/lib/fileSearch'
 import ReactMarkdown from 'react-markdown'
 import { FileEditor } from './FileEditor'
 import { FileFind } from '@/components/FileView/FileFind'
@@ -111,6 +113,8 @@ import { 既定のモード, type FileMode } from '@/lib/fileMode'
  * **多バイトの文書を整形で開けるようにすることは、これでは解決していない。**
  * 直すなら分割か仮想化が要るが、それは上限の話とは別の設計になる（別イシュー）。
  */
+const MarkdownBlockEditor = lazy(() => import('./MarkdownBlockEditor'))
+
 const FORMAT_DEFAULT_LIMIT = 256 * 1024
 
 /**
@@ -261,6 +265,16 @@ export function FileView({
   const 文書 = useRef<FileEditSession | null>(null)
   const 次の世代 = useRef(0)
   const [読込世代, set読込世代] = useState(0)
+  const markdownEditorRef = useRef<MarkdownEditorHandle | null>(null)
+  const markdownSearchRef = useRef<HTMLElement | null>(null)
+  const markdownSearchApiRef = useRef<FileSearchAdapter | null>(null)
+  const [blockOpened, setBlockOpened] = useState(false)
+  const [sourceOpened, setSourceOpened] = useState(false)
+  const sourceDisplayValue = useRef('')
+  const [markdownComposing, setMarkdownComposing] = useState(false)
+  const [markdownRevision, setMarkdownRevision] = useState(0)
+  const pendingMarkdownMode = useRef(false)
+  const pendingMarkdownSave = useRef(false)
   const 次の依頼 = useRef(0)
   const 保存の門 = useRef(new Map<string, { id: number; done: Promise<void> }>())
   /**
@@ -342,6 +356,13 @@ export function FileView({
     }
     文書.current = 対象
     set読込世代(対象.generation)
+    setBlockOpened(false)
+    setSourceOpened(false)
+    sourceDisplayValue.current = ''
+    setMarkdownComposing(false)
+    setMarkdownRevision(0)
+    pendingMarkdownMode.current = false
+    pendingMarkdownSave.current = false
     const 読込依頼 = 対象.request
     const 読込中か = () => 現在の文書か(対象) && 対象.request === 読込依頼
     let made: string | null = null
@@ -472,7 +493,13 @@ export function FileView({
    */
   const 書ける = content?.writable === true
   /** トグルの言葉。**書けないファイルで「編集する」と言わない**（嘘になる） */
-  const 切替の言葉 = mode === 'editor' ? '見る' : 書ける ? '編集する' : '生テキスト'
+  const 切替の言葉 = markdown && 書ける ? (mode === 'editor' ? 'ブロック編集に切り替える' : 'Markdownソースに切り替える')
+    : mode === 'editor' ? '見る' : 書ける ? '編集する' : '生テキスト'
+  useEffect(() => {
+    if (!markdown || loading) return
+    if (mode === 'viewer') setBlockOpened(true)
+    else setSourceOpened(true)
+  }, [markdown, mode, loading])
   /**
    * トグルの印。**`切替の言葉` と同じ3つに分かれる**（`DESIGN.md` §39.6）。
    *
@@ -483,8 +510,8 @@ export function FileView({
    * **書けないファイルはペンにしない。** `切替の言葉` が「編集する」と言わないのと
    * 同じ理由で、保存できないのにペンを出すと嘘になる。
    */
-  const 切替の印 =
-    mode === 'editor' ? <EyeGlyph /> : 書ける ? <PencilGlyph /> : <CodeGlyph />
+  const 切替の印 = markdown && mode === 'viewer' ? <CodeGlyph />
+    : mode === 'editor' ? <EyeGlyph /> : 書ける ? <PencilGlyph /> : <CodeGlyph />
   /** いま箱（`iframe`）で描いているか。**箱の中へは外から触れない** */
   const 箱で描いている = boxed && mode === 'viewer'
   /**
@@ -497,6 +524,7 @@ export function FileView({
    */
   /** いま出す本文。**触っていなければディスクの中身そのもの** */
   const 本文 = 書きかけ ?? content?.text ?? ''
+  if (mode === 'editor') sourceDisplayValue.current = 本文
   /** ディスクの中身と違うか。**空にしたのも違いである** */
   const 変えた = 書きかけ !== null && content !== null && 書きかけ !== content.text
   /**
@@ -750,6 +778,30 @@ export function FileView({
     書きかけを確定する(対象)
   }, [読込世代, 現在の文書か, 書き出しを取り消す, 書きかけを確定する])
 
+  const requestSave = () => {
+    if (markdown && mode === 'viewer') {
+      if (markdownEditorRef.current?.isComposing()) {
+        pendingMarkdownSave.current = true
+        return
+      }
+      if (markdownEditorRef.current && !markdownEditorRef.current.flush()) return
+    }
+    void 保存する()
+  }
+
+  const toggleMode = () => {
+    if (markdown && mode === 'viewer') {
+      if (markdownEditorRef.current?.isComposing()) {
+        pendingMarkdownMode.current = true
+        return
+      }
+      if (markdownEditorRef.current && !markdownEditorRef.current.flush()) return
+    }
+    setMode((now) => now === 'viewer' ? 'editor' : 'viewer')
+    set切替えた(false)
+    set切り替えるか(false)
+  }
+
   /*
     **Ctrl+F ／ Ctrl+G を奪うのは、探す入口があるときだけ。**
 
@@ -765,7 +817,7 @@ export function FileView({
     打鍵の邪魔にならない。**窓の中の Ctrl+G は窓自身が先に食う**（あちらでは「次へ」）
     ので、ここへは来ない。
   */
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!探す入口) {
       return
     }
@@ -936,16 +988,10 @@ export function FileView({
               variant="ghost"
               size="icon-sm"
               data-testid="file-toggle-mode"
-              aria-pressed={mode === 'editor'}
+              aria-pressed={markdown ? mode === 'viewer' : mode === 'editor'}
               aria-label={切替の言葉}
               title={切替の言葉}
-              onClick={() => {
-                setMode((now) => (now === 'viewer' ? 'editor' : 'viewer'))
-                // **人が自分で見せ方を変えたら、こちらの断りは消す。** そこから先は
-                // 押した人が選んだ見せ方であって、こちらが切り替えた結果ではない
-                set切替えた(false)
-                set切り替えるか(false)
-              }}
+              onClick={toggleMode}
             >
               {/* **印だけにする**（§39.6）。言葉は `aria-label` と `title` に残る */}
               {切替の印}
@@ -955,7 +1001,7 @@ export function FileView({
 
               **押せる条件は `保存できる` 1つ**（設計§6-7）——ボタンと、のちに足す
               鍵盤の道が**同じ述語を読む**。別々に書くと食い違う。 */}
-          {mode === 'editor' && 書ける && (
+          {(mode === 'editor' || markdown) && 書ける && (
             <Button
               type="button"
               variant="ghost"
@@ -963,10 +1009,8 @@ export function FileView({
               data-testid="file-save"
               aria-label="保存する"
               title="保存する"
-              disabled={!保存できる}
-              onClick={() => {
-                void 保存する()
-              }}
+              disabled={!保存できる || markdownComposing}
+              onClick={requestSave}
             >
               {保存中 ? '保存中…' : '保存'}
             </Button>
@@ -1260,15 +1304,27 @@ export function FileView({
           {find && (探せる || 箱の中で探せる) && (
             <FileFind
               /* **整形と生テキストでは木の形が違う**ので、切り替えたら探し直す */
-              contentKey={`${path}:${mode}`}
+              contentKey={`${path}:${mode}:${markdownRevision}`}
               合図={探す合図}
               bodyRef={bodyRef}
+              本文={本文}
+              searchRef={markdown && 書ける && mode === 'viewer' ? markdownSearchRef : undefined}
+              searchApiRef={markdown && 書ける && mode === 'viewer' ? markdownSearchApiRef : undefined}
               /* **箱を見ているときは、中の係へ頼む**（親からは中に触れない） */
               {...(箱の中で探せる ? { frameRef } : {})}
               /* **エディタのときは、値の中を探して選択で示す**（設計§5-4）。
                  DOM を遡ると行番号と色の層に当たるので、そちらへは行かせない */
-              {...(打つ層で探せる ? { editorRef, 本文 } : {})}
-              onClose={() => setFind(false)}
+              {...(打つ層で探せる ? { editorRef } : {})}
+              onClose={() => {
+                setFind(false)
+                const current = 文書.current
+                const generation = current?.generation
+                requestAnimationFrame(() => {
+                  if (文書.current !== current || current?.generation !== generation) return
+                  if (markdown && mode === 'viewer') markdownEditorRef.current?.focus()
+                  else editorRef.current?.focus()
+                })
+              }}
             />
           )}
           <div
@@ -1318,6 +1374,51 @@ export function FileView({
                 className="file-frame border-0 bg-white"
               />
             </div>
+          ) : markdown && 書ける ? (
+            <>
+              {(mode === 'viewer' || blockOpened) && <div hidden={mode !== 'viewer'} data-testid="file-markdown" className="file-prose">
+                <Suspense fallback={<p role="status" className="text-xs text-muted-foreground">編集面を準備しています…</p>}>
+                  <MarkdownBlockEditor
+                    value={本文}
+                    onChange={書きかけを打つ}
+                    onSave={() => { void 保存する() }}
+                    readOnly={!canWriteFile(content)}
+                    active={mode === 'viewer'}
+                    label={`${relative} をブロック編集`}
+                    documentKey={JSON.stringify([account, host, path, 読込世代])}
+                    handleRef={markdownEditorRef}
+                    searchRef={markdownSearchRef}
+                    searchApiRef={markdownSearchApiRef}
+                    onDocumentChange={() => setMarkdownRevision((revision) => revision + 1)}
+                    onSourceRequested={() => setMode('editor')}
+                    onCompositionChange={(busy) => {
+                      setMarkdownComposing(busy)
+                      if (busy) return
+                      if (pendingMarkdownSave.current) {
+                        pendingMarkdownSave.current = false
+                        requestSave()
+                      }
+                      if (pendingMarkdownMode.current) {
+                        pendingMarkdownMode.current = false
+                        toggleMode()
+                      }
+                    }}
+                  />
+                </Suspense>
+              </div>}
+              {(mode === 'editor' || sourceOpened) && <div hidden={mode !== 'editor'} className="h-full">
+                <FileEditor
+                  value={sourceDisplayValue.current}
+                  readOnly={!canWriteFile(content)}
+                  onChange={書きかけを打つ}
+                  onSave={() => { void 保存する() }}
+                  保存できる={保存できる}
+                  path={path}
+                  ラベル={`${relative} を編集`}
+                  打つ層Ref={editorRef}
+                />
+              </div>}
+            </>
           ) : markdown && mode === 'viewer' ? (
             <div
               data-testid="file-markdown"
@@ -1373,6 +1474,7 @@ export function FileView({
                ここへ移る**（もとは `<pre>` が持っていた）。 */
             <FileEditor
               value={本文}
+              readOnly={!canWriteFile(content)}
               onChange={書きかけを打つ}
               onSave={() => {
                 void 保存する()

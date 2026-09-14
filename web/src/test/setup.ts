@@ -1,6 +1,37 @@
 // Vitest の共通セットアップ。toBeInTheDocument などの DOM 向けマッチャを有効にする。
 import '@testing-library/jest-dom/vitest'
 
+if (typeof globalThis.IntersectionObserver === 'undefined') {
+  globalThis.IntersectionObserver = class implements IntersectionObserver {
+    readonly root = null
+    readonly rootMargin = '0px'
+    readonly scrollMargin = '0px'
+    readonly thresholds = [0]
+    private readonly targets = new Set<Element>()
+    private readonly callback: IntersectionObserverCallback
+
+    constructor(callback: IntersectionObserverCallback) {
+      this.callback = callback
+    }
+
+    observe(target: Element) {
+      this.targets.add(target)
+      queueMicrotask(() => {
+        if (!this.targets.has(target)) return
+        const rect = target.getBoundingClientRect()
+        this.callback([{
+          target, time: performance.now(), isIntersecting: true, intersectionRatio: 1,
+          boundingClientRect: rect, intersectionRect: rect, rootBounds: null,
+        }], this)
+      })
+    }
+
+    unobserve(target: Element) { this.targets.delete(target) }
+    disconnect() { this.targets.clear() }
+    takeRecords(): IntersectionObserverEntry[] { return [] }
+  }
+}
+
 /**
  * jsdom に足りないものを補う。
  *

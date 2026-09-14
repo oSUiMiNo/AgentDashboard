@@ -36,6 +36,12 @@
  * 分かれている）。
  */
 
+export interface FileSearchAdapter {
+  search: (query: string) => number
+  show: (index: number) => void
+  clear: () => void
+}
+
 /** 全部の当たりに付ける印の名前。 */
 const ALL = 'file-find'
 /** いま見ている1つに付ける印の名前。**上の印と重ねて出す。** */
@@ -69,7 +75,9 @@ function 索引を作る(root: Node): 索引 {
   let text = ''
   for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
     const t = node as Text
-    if (t.data === '') {
+    if (t.data === '' || t.parentElement?.closest(
+      '[data-file-find-skip], [hidden], [aria-hidden="true"], button, input, select, textarea, script, style, .cm-gutters, .cm-tooltip, .milkdown-code-block .tools, .milkdown-slash-menu, .milkdown-toolbar, .milkdown-link-tooltip',
+    )) {
       continue
     }
     starts.push(text.length)

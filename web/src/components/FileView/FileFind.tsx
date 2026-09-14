@@ -21,7 +21,7 @@
  * ここは「何番目を見ているか」だけを持ち、**DOM は1つも書き換えない。**
  */
 
-import { useEffect, useRef, useState, type RefObject } from 'react'
+import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import { Button } from '@/components/ui/button'
 import { ChevronGlyph, CloseGlyph } from '@/components/ui/glyphs'
 import {
@@ -30,6 +30,7 @@ import {
   findTextMatches,
   paintMatches,
   scrollOffsetFor,
+  type FileSearchAdapter,
 } from '@/lib/fileSearch'
 import { findKeyAction } from '@/lib/keys'
 
@@ -39,6 +40,8 @@ const 待ち = 150
 interface Props {
   /** 遡る箱（`file-body`）。**探す相手であり、送る相手でもある** */
   bodyRef: RefObject<HTMLDivElement | null>
+  searchRef?: RefObject<HTMLElement | null>
+  searchApiRef?: RefObject<FileSearchAdapter | null>
   /**
    * プレビューの箱。**渡されたときは、こちらが探すのではなく箱の中の係へ頼む。**
    *
@@ -90,6 +93,8 @@ interface Props {
 
 export function FileFind({
   bodyRef,
+  searchRef,
+  searchApiRef,
   frameRef,
   editorRef,
   本文,
@@ -97,10 +102,11 @@ export function FileFind({
   合図,
   onClose,
 }: Props) {
+  const adapterで探す = searchApiRef !== undefined
   /** 箱の中の係へ頼む形か。**渡された時点で決まる** */
-  const 箱に頼む = frameRef !== undefined
+  const 箱に頼む = !adapterで探す && frameRef !== undefined
   /** 打つ層の値を探して選択で示す形か。**`frameRef` と同じく渡された時点で決まる** */
-  const 打つ層で示す = editorRef !== undefined
+  const 打つ層で示す = !adapterで探す && editorRef !== undefined
   const [query, setQuery] = useState('')
   /** 待ってから写した語。**探すのはこちら** */
   const [探す語, set探す語] = useState('')
@@ -114,6 +120,7 @@ export function FileFind({
    * 持つほうが、どちらの筋も真っ直ぐ読める。**
    */
   const [文字の当たり, set文字の当たり] = useState<[number, number][]>([])
+  const [adapterResult, setAdapterResult] = useState<{ adapter: FileSearchAdapter | null; total: number }>({ adapter: null, total: 0 })
   const [index, setIndex] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -158,13 +165,13 @@ export function FileFind({
   })
 
   /** 箱の中の係へ頼む。**答えは便りで返る** */
-  const 箱へ頼む = (query: string, index: number) => {
+  const 箱へ頼む = useCallback((query: string, index: number) => {
     最後の依頼.current = { query, index }
     frameRef?.current?.contentWindow?.postMessage(
       { __fileFind: 'search', query, index },
       '*',
     )
-  }
+  }, [frameRef])
 
   /*
     **箱からの便りを受ける。**
@@ -206,10 +213,16 @@ export function FileFind({
     }
     globalThis.addEventListener('message', 受ける)
     return () => globalThis.removeEventListener('message', 受ける)
-  }, [箱に頼む, frameRef])
+  }, [箱に頼む, frameRef, 箱へ頼む])
 
   // 探す。**中身が変わったときも探し直す**
   useEffect(() => {
+    if (searchApiRef !== undefined) {
+      const adapter = searchApiRef.current
+      setAdapterResult({ adapter, total: adapter?.search(探す語) ?? 0 })
+      setIndex(0)
+      return () => adapter?.clear()
+    }
     if (箱に頼む) {
       箱へ頼む(探す語, 0)
       return
@@ -220,10 +233,14 @@ export function FileFind({
       setIndex(0)
       return
     }
-    const box = bodyRef.current
+    const box = searchRef === undefined ? bodyRef.current : searchRef.current
     setMatches(box === null ? [] : findMatches(box, 探す語))
     setIndex(0)
-  }, [箱に頼む, 打つ層で示す, frameRef, bodyRef, 探す語, 待った本文, contentKey])
+  }, [箱に頼む, 打つ層で示す, frameRef, bodyRef, searchRef, searchApiRef, 探す語, 待った本文, contentKey, 箱へ頼む])
+
+  useEffect(() => {
+    if (adapterで探す && adapterResult.total > 0) adapterResult.adapter?.show(index)
+  }, [adapterで探す, adapterResult, index])
 
   /*
     **打つ層では、選択で示して打つ層を送る。**
@@ -261,7 +278,7 @@ export function FileFind({
 
   // 印を塗り、いま見ている当たりまで箱を送る。**箱に頼む形では係がやる**
   useEffect(() => {
-    if (箱に頼む || 打つ層で示す) {
+    if (adapterで探す || 箱に頼む || 打つ層で示す) {
       return
     }
     paintMatches(matches, index)
@@ -277,7 +294,7 @@ export function FileFind({
       { top: 当たり.top, height: 当たり.height },
       box.scrollTop,
     )
-  }, [箱に頼む, 打つ層で示す, bodyRef, matches, index])
+  }, [adapterで探す, 箱に頼む, 打つ層で示す, bodyRef, matches, index])
 
   /*
     **閉じたら必ず消す。** 残すと、次に開いたファイルへ古い印が乗ったままになる。
@@ -285,23 +302,26 @@ export function FileFind({
     **箱に頼む形では、印を持っているのは箱の中の係である**——こちら側だけを消すと、
     窓を閉じてもプレビューに印が乗ったままになる。**空の語を1通送って消させる。**
   */
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    if (adapterで探す) return
+    const frame = frameRef?.current?.contentWindow
+    return () => {
       clearMatches()
-      frameRef?.current?.contentWindow?.postMessage(
+      frame?.postMessage(
         { __fileFind: 'search', query: '', index: 0 },
         '*',
       )
-    },
-    [frameRef],
-  )
+    }
+  }, [adapterで探す, frameRef])
 
   /** いま何件当たっているか。**3通りのどの形でも同じ言い方にする** */
-  const 総数 = 箱に頼む
-    ? 箱の総数
-    : 打つ層で示す
-      ? 文字の当たり.length
-      : matches.length
+  const 総数 = adapterで探す
+    ? adapterResult.total
+    : 箱に頼む
+      ? 箱の総数
+      : 打つ層で示す
+        ? 文字の当たり.length
+        : matches.length
 
   const 送る = (向き: 1 | -1) => {
     if (総数 === 0) {

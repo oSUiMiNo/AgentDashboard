@@ -1,0 +1,200 @@
+.markdown-block-editor .ProseMirror {
+  position: relative;
+  white-space: break-spaces;
+  font-variant-ligatures: none;
+  font-feature-settings: 'liga' 0;
+}
+.markdown-block-editor .ProseMirror pre { white-space: pre-wrap; }
+.markdown-block-editor .ProseMirror li { position: relative; }
+.markdown-block-editor .ProseMirror-hideselection *::selection { background: transparent; }
+.markdown-block-editor .ProseMirror-hideselection { caret-color: transparent; }
+.markdown-block-editor .ProseMirror [draggable][contenteditable='false'] { user-select: text; }
+.markdown-block-editor .ProseMirror-selectednode { outline: 2px solid #3dd9e6; }
+.markdown-block-editor li.ProseMirror-selectednode { outline: none; }
+.markdown-block-editor li.ProseMirror-selectednode::after {
+  content: '';
+  position: absolute;
+  inset: -2px -2px -2px -2rem;
+  border: 2px solid #3dd9e6;
+  pointer-events: none;
+}
+.markdown-block-editor img.ProseMirror-separator { display: inline !important; border: none !important; margin: 0 !important; }
+
+.markdown-block-editor {
+  position: relative;
+  min-width: 0;
+  min-height: 100%;
+  color: var(--foreground);
+  --md-accent: #3dd9e6;
+  --md-muted: #98a7b8;
+  --md-surface: #151c25;
+  --md-border: #2c3949;
+}
+
+.markdown-block-editor .milkdown {
+  --crepe-color-background: transparent;
+  --crepe-color-on-background: var(--foreground, #e6ebf1);
+  --crepe-color-surface: #1a232e;
+  --crepe-color-surface-low: #141c25;
+  --crepe-color-on-surface: #e6ebf1;
+  --crepe-color-on-surface-variant: #a5b4c6;
+  --crepe-color-outline: #344455;
+  --crepe-color-primary: #3dd9e6;
+  --crepe-color-secondary: #173d48;
+  --crepe-color-on-secondary: #baf5f9;
+  --crepe-color-inverse: #e6ebf1;
+  --crepe-color-on-inverse: #12161d;
+  --crepe-color-inline-code: #9fd6dd;
+  --crepe-color-error: #ff8585;
+  --crepe-color-hover: #243544;
+  --crepe-color-selected: #1b4350;
+  --crepe-color-inline-area: #101720;
+  --crepe-base-font-size: var(--file-prose-size, 1rem);
+  --crepe-font-title: inherit;
+  --crepe-font-default: inherit;
+  --crepe-font-code: ui-monospace, SFMono-Regular, Consolas, monospace;
+  --crepe-shadow-1: 0 5px 18px #0005, inset 0 1px #ffffff08;
+  --crepe-shadow-2: 0 12px 32px #0007, inset 0 1px #ffffff0d;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+}
+
+.md-editor-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .5rem;
+  min-height: 1.75rem;
+  margin-inline: .25rem;
+  padding-block: .125rem .25rem;
+  user-select: none;
+}
+.md-editor-mode {
+  font-size: .65rem;
+  font-weight: 650;
+  letter-spacing: .04em;
+  color: var(--md-muted);
+  border-inline-start: 3px solid var(--md-accent);
+  padding-inline-start: .5rem;
+}
+.md-editor-actions { display: flex; align-items: center; gap: .125rem; }
+.md-editor-actions button { width: 1.75rem; height: 1.75rem; }
+
+.markdown-block-editor .milkdown .ProseMirror {
+  padding: .65rem clamp(1rem, 4%, 2.25rem) 4rem;
+  min-height: 12rem;
+  max-width: 56rem;
+  margin-inline: auto;
+  outline: none;
+  font-size: var(--file-prose-size, 1rem);
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  caret-color: var(--md-accent);
+}
+.markdown-block-editor .milkdown .ProseMirror > :first-child { margin-top: .25rem; }
+.markdown-block-editor .milkdown .ProseMirror > p { padding-block: .2em; }
+.markdown-block-editor .milkdown .ProseMirror :is(h1, h2, h3, h4, h5, h6) {
+  font-family: inherit;
+  font-weight: 720;
+  letter-spacing: -.02em;
+  line-height: 1.4;
+  padding-block: .2em;
+  margin-block: 1.1em .35em;
+}
+.markdown-block-editor .milkdown .ProseMirror h1 { font-size: 2.15em; }
+.markdown-block-editor .milkdown .ProseMirror h2 { font-size: 1.7em; }
+.markdown-block-editor .milkdown .ProseMirror h3 { font-size: 1.35em; }
+.markdown-block-editor .milkdown .ProseMirror :is(h4, h5, h6) { font-size: 1.1em; }
+.markdown-block-editor .milkdown .ProseMirror blockquote {
+  border-inline-start: 3px solid #3dd9e666;
+  border-radius: 0 .4rem .4rem 0;
+  background: #3dd9e609;
+  padding: .35em .9em;
+  margin-block: .75em;
+}
+.markdown-block-editor .milkdown .ProseMirror a { color: #6edee7; text-underline-offset: .2em; }
+.markdown-block-editor .milkdown .ProseMirror ::selection { background: #3dd9e63b; }
+.markdown-block-editor .milkdown :is(.milkdown-code-block, .milkdown-table-block) {
+  max-width: 100%;
+  min-width: 0;
+  margin-block: 1em;
+}
+.markdown-block-editor .milkdown .cm-editor { font-size: .92em; max-width: 100%; }
+.markdown-block-editor .milkdown .cm-scroller { overflow: auto; font-family: var(--crepe-font-code); }
+.markdown-block-editor .milkdown .tableWrapper { overflow-x: auto; max-width: 100%; }
+.markdown-block-editor .milkdown img { max-width: 100%; height: auto; border-radius: .35rem; }
+.markdown-block-editor .milkdown .image-resize-handle,
+.markdown-block-editor .milkdown .image-edit .uploader,
+.markdown-block-editor .milkdown .image-edit input[type='file'] { display: none; }
+.markdown-block-editor .milkdown .image-edit .link-input-area { min-width: 0; width: 100%; }
+
+.markdown-block-editor .milkdown :is(.milkdown-slash-menu, .milkdown-toolbar, .milkdown-link-tooltip) {
+  font-size: .8rem;
+  max-width: min(24rem, calc(100vw - 2rem));
+  border: 1px solid var(--md-border);
+  border-radius: .6rem;
+}
+.markdown-block-editor .milkdown .milkdown-block-handle {
+  font-size: .8rem;
+  background: #151c25ed;
+  border: 1px solid #2c394999;
+  border-radius: .4rem;
+}
+.markdown-block-editor .milkdown .milkdown-slash-menu { max-height: min(25rem, 65vh); overflow-y: auto; }
+.markdown-block-editor .milkdown :is(button, [role='button']):focus-visible {
+  outline: 2px solid var(--md-accent);
+  outline-offset: 2px;
+}
+
+.markdown-block-editor .md-find-hit { background: #3dd9e626; }
+.markdown-block-editor .md-find-current { background: #3dd9e64a; outline: 1px solid #3dd9e6; border-radius: 2px; }
+.markdown-block-editor .milkdown .cm-editor .cm-selectionBackground { background: #3dd9e64a !important; }
+
+.md-source-block {
+  margin-block: .85em;
+  padding: .65em .85em;
+  border: 1px dashed var(--md-border);
+  border-radius: .45rem;
+  background: #ffffff03;
+}
+.md-source-label { display: block; margin-bottom: .4em; font-size: .65rem; font-weight: 600; line-height: 1.5; color: var(--md-muted); }
+.md-source-text { margin: 0; font: .88em/1.7 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; color: #aab7c6; max-height: 14rem; overflow: auto; }
+.md-source-spacer { min-height: 1em; }
+.md-source-block.ProseMirror-selectednode { outline: 2px solid var(--md-accent); background: #3dd9e612; }
+.md-editor-loading { padding: 2rem 1rem; color: var(--md-muted); font-size: .8rem; }
+.md-editor-notice { padding: .6rem .8rem; margin-block: .4rem; border-inline-start: 3px solid #f5a623; background: #f5a6230c; color: #eed3a8; font-size: .75rem; line-height: 1.7; overflow-wrap: anywhere; }
+.md-editor-preserved { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; padding: .5rem .75rem; font-size: .65rem; color: var(--md-muted); }
+.md-editor-preserved button { color: #74dee7; text-decoration: underline; text-underline-offset: .2em; cursor: pointer; }
+
+.md-command-menu {
+  z-index: 150;
+  width: 14.5rem;
+  max-width: calc(100vw - 2rem);
+  max-height: min(70vh, 32rem);
+  overflow-y: auto;
+  padding: .35rem;
+  background: #1a232e;
+  border: 1px solid #344455;
+  border-radius: .6rem;
+  box-shadow: 0 12px 32px #0007, inset 0 1px #ffffff0d;
+  color: #e6ebf1;
+  font: .78rem/1.5 var(--font-sans, sans-serif);
+}
+.md-command-label { padding: .35rem .5rem; color: #98a7b8; font-size: .65rem; }
+.md-command-menu [role='menuitem'] { display: flex; align-items: center; gap: .6rem; padding: .55rem .6rem; border-radius: .3rem; outline: none; cursor: default; }
+.md-command-menu [role='menuitem'][data-highlighted] { background: #1b4350; color: #baf5f9; }
+.md-command-menu [role='menuitem'][data-disabled] { opacity: .35; }
+.md-command-menu [role='separator'] { height: 1px; margin: .3rem; background: #344455; }
+.md-command-menu .md-command-danger { color: #ff9494; }
+
+@media (max-width: 480px) {
+  .markdown-block-editor .milkdown .ProseMirror { padding-inline: 1.6rem .6rem; }
+  .markdown-block-editor .milkdown .milkdown-block-handle { scale: .85; transform-origin: right center; }
+  .md-editor-controls { min-height: 2rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .markdown-block-editor *, .md-command-menu { transition-duration: 0s !important; animation-duration: 0s !important; }
+}

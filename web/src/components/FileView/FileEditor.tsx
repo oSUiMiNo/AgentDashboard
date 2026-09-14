@@ -51,6 +51,7 @@ export const DEFAULT_INDENT = '  '
 
 interface Props {
   value: string
+  readOnly?: boolean
   onChange: (次: string) => void
   /** `Ctrl+S`／`Cmd+S` の行き先。**押せるかは呼ぶ側が決める** */
   onSave: () => void
@@ -122,6 +123,7 @@ function 描く(node: TokenNode, 鍵: number): React.ReactNode {
 
 export function FileEditor({
   value,
+  readOnly = false,
   onChange,
   onSave,
   保存できる,
@@ -203,6 +205,7 @@ export function FileEditor({
         }
         return
       }
+      if (readOnly) return
       if (出来事.key === 'Escape') {
         // **止めない。** 探す帯など、外側が `Escape` で閉じる道を塞がない
         set逃げる(true)
@@ -228,7 +231,7 @@ export function FileEditor({
         set逃げる(false)
       }
     },
-    [逃げる, インデント, onChange, onSave, 保存できる],
+    [逃げる, インデント, onChange, onSave, 保存できる, readOnly],
   )
 
   return (
@@ -271,11 +274,12 @@ export function FileEditor({
         spellCheck={false}
         aria-label={ラベル}
         value={value}
+        readOnly={readOnly}
         ref={打つ層}
         onScroll={送りを合わせる}
         onKeyDown={鍵盤}
         onChange={(出来事) => {
-          onChange(出来事.target.value)
+          if (!readOnly) onChange(出来事.target.value)
         }}
       />
       {/* **逃げ道は、存在を知られて初めて逃げ道になる**（設計§6-6）。焦点があるときだけ出す */}
@@ -283,7 +287,7 @@ export function FileEditor({
         data-testid="file-editor-hint"
         className="file-editor-hint pointer-events-none absolute right-1 bottom-1 opacity-0"
       >
-        Tab で字下げ／Escape のあと Tab で次へ
+        {readOnly ? '読み取り専用' : 'Tab で字下げ／Escape のあと Tab で次へ'}
       </p>
       {重い && (
         <p data-testid="file-paint-heavy" className="absolute top-1 right-1 text-xs text-amber-300">

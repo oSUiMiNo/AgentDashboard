@@ -161,35 +161,19 @@ describe("ファイルの見せ方", () => {
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("計画");
   });
 
-  it("生の HTML が実行も表示もされない", async () => {
-    serve(
-      content(
-        '# 見出し\n\n<img src="x" onerror="alert(1)">\n\n<script>alert(2)</script>\n\n```html\n<div>コードブロックの中</div>\n```\n',
-      ),
-    );
-    const { container } = render(
-      <Viewer host="local" root={ROOT} path={`${ROOT}/計画.md`} />,
-    );
-    await screen.findByTestId("file-markdown");
-
-    // **タグとして出ていないこと**を見る
+  it("生のHTMLは実行せず、原文として保持する", async () => {
+    serve(content('# 見出し\n\n<img src="x" onerror="alert(1)">\n\n<script>alert(2)</script>\n\n```html\n<div>コードブロックの中</div>\n```\n'));
+    const { container } = render(<Viewer host="local" root={ROOT} path={`${ROOT}/計画.md`} />);
+    await waitFor(() => {
+      expect(screen.queryByRole("alert")?.textContent).toBeUndefined();
+      expect(screen.getByTestId("file-markdown-editor")).toBeInTheDocument();
+    });
     expect(container.querySelector("img")).toBeNull();
     expect(container.querySelector("script")).toBeNull();
-    // **字面としても出ていないこと**（`skipHtml`。設計§27）。フェーズ0 で
-    // 「字面が無いこと」を条件にして落ちたのは、逃がされて残っていたため——
-    // いまは木から取り除いているので、無いことが正しい条件になる
-    expect(screen.getByTestId("file-markdown").textContent).not.toContain(
-      "onerror",
-    );
-    // **コードブロックの中は消えない。** 取り除くのは HTML のノードだけで、
-    // 囲まれた中身はただの文字列として残る（ここを壊すのが唯一の怖い副作用）
-    expect(
-      screen.getByText("<div>コードブロックの中</div>"),
-    ).toBeInTheDocument();
-    // 整形自体は効いている（丸ごと素通ししているわけではない）
-    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(
-      "見出し",
-    );
+    expect(container.querySelector("[onerror]")).toBeNull();
+    expect(Array.from(container.querySelectorAll(".md-source-text"), (node) => node.textContent).join("\n")).toContain("onerror");
+    await waitFor(() => expect(container.querySelector(".cm-content")).toHaveTextContent("<div>コードブロックの中</div>"));
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("見出し");
   });
 
   it("素の改行が、改行として出る", async () => {
@@ -226,10 +210,12 @@ describe("ファイルの見せ方", () => {
     const { container } = render(
       <Viewer host="local" root={ROOT} path={`${ROOT}/計画.md`} />,
     );
-    await screen.findByTestId("file-markdown");
-
-    expect(container.querySelectorAll("br")).toHaveLength(0);
-    expect(screen.getByText(/1行目/).textContent).toContain("1行目\n2行目");
+    await waitFor(() => {
+      expect(screen.queryByRole("alert")?.textContent).toBeUndefined();
+      expect(screen.getByTestId("file-markdown-editor")).toBeInTheDocument();
+    });
+    expect(container.querySelectorAll(".milkdown-code-block br")).toHaveLength(0);
+    await waitFor(() => expect(Array.from(container.querySelectorAll(".cm-content .cm-line"), (line) => line.textContent)).toEqual(["1行目", "2行目"]));
   });
 
   it("エディタへ切り替えられる", async () => {
@@ -242,10 +228,10 @@ describe("ファイルの見せ方", () => {
     // 整形が嘘をついたときに確かめる先が要る（設計§15）。
     // **いまはその面が編集もできる**（`ファイルビュアにエディタ機能を追加` 設計§5）
     expect(screen.getByTestId("file-editor")).toHaveValue("# 計画\n\n本文\n");
-    expect(screen.queryByTestId("file-markdown")).toBeNull();
+    expect(screen.getByTestId("file-markdown")).not.toBeVisible();
 
     await userEvent.click(screen.getByTestId("file-toggle-mode"));
-    expect(await screen.findByTestId("file-markdown")).toBeInTheDocument();
+    expect(await screen.findByTestId("file-markdown")).toBeVisible();
   });
 
   it("Markdown ではないファイルは、最初からエディタで出る", async () => {
@@ -1132,8 +1118,8 @@ describe("ヘッダは1行", () => {
     serve(content("# 計画"));
     show();
     const 切替 = await screen.findByTestId("file-toggle-mode");
-    expect(切替).toHaveAttribute("aria-label", "編集する");
-    expect(切替).toHaveAttribute("title", "編集する");
+    expect(切替).toHaveAttribute("aria-label", "Markdownソースに切り替える");
+    expect(切替).toHaveAttribute("title", "Markdownソースに切り替える");
     // **見える文字は持たない**
     expect(切替.textContent).toBe("");
     expect(切替.querySelector("svg")).not.toBeNull();
@@ -1167,13 +1153,11 @@ describe("ヘッダは1行", () => {
     show();
     const 切替 = await screen.findByTestId("file-toggle-mode");
 
-    // 書ける場所を見ている → 行き先は編集なので**ペン**
-    expect(切替).toHaveAttribute("aria-label", "編集する");
-    expect(印の名前(切替)).toBe("ペン");
+    expect(切替).toHaveAttribute("aria-label", "Markdownソースに切り替える");
+    expect(印の名前(切替)).toBe("山形");
 
-    // 編集している → 行き先は整形した姿なので**目**
     await userEvent.click(切替);
-    expect(切替).toHaveAttribute("aria-label", "見る");
+    expect(切替).toHaveAttribute("aria-label", "ブロック編集に切り替える");
     expect(印の名前(切替)).toBe("目");
   });
 
@@ -1482,12 +1466,20 @@ describe("編集と保存", () => {
     expect(screen.getByTestId("file-save")).toBeDisabled();
   });
 
-  it("ビュアーで見ているときは、保存を出さない", async () => {
-    // 書く対象が無い面に出しても、押せて何も起きないものになる
+  it("ブロック編集にも保存を出し、未変更なら無効にする", async () => {
     読み書き("# 計画");
     render(<Viewer host="local" root={ROOT} path={`${ROOT}/計画.md`} />);
-    await screen.findByTestId("file-markdown");
+    await waitFor(() => {
+      expect(screen.queryByRole("alert")?.textContent).toBeUndefined();
+      expect(screen.getByTestId("file-markdown-editor")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("file-save")).toBeDisabled();
+  });
 
+  it("HTMLプレビューには保存を出さない", async () => {
+    読み書き("<h1>計画</h1>");
+    render(<Viewer host="local" root={ROOT} path={`${ROOT}/計画.html`} />);
+    await screen.findByTestId("file-frame");
     expect(screen.queryByTestId("file-save")).toBeNull();
   });
 });
