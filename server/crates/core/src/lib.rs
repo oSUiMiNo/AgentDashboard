@@ -19,6 +19,7 @@ pub mod children;
 pub mod cli;
 pub mod client;
 pub mod client_logs;
+pub mod compact_api;
 pub mod config;
 pub mod gate;
 pub mod local;
@@ -78,6 +79,9 @@ pub struct LocalServer {
     state_dir: Option<std::path::PathBuf>,
     /// 版の口の残りの材料（CICD設計§9・§10）。`state_dir` と一緒に入る。
     versions: Option<VersionsWiring>,
+    /// 縮小の設定（縮小設計§8）。**居なくても動く**ので、既存の統合テストは
+    /// 縮小の口を立てずにセッションの検証だけができる。
+    compact: Option<session_host_core::compact::CompactConfig>,
     /// ブラウザで起きたことの書き出し先（設計§12）。**居なくても動く**ので、
     /// 既存の統合テストはログの口を立てずにセッションの検証だけができる。
     client_logs: Option<Arc<dyn server_core::client_logs::ClientLogSink>>,
@@ -110,8 +114,15 @@ impl LocalServer {
             auth,
             state_dir: None,
             versions: None,
+            compact: None,
             client_logs: None,
         }
+    }
+
+    /// 縮小の口を繋いだ状態にする（縮小設計§9）。
+    pub fn with_compact(mut self, compact: session_host_core::compact::CompactConfig) -> Self {
+        self.compact = Some(compact);
+        self
     }
 
     /// パーサを繋いだ状態にする。
@@ -225,6 +236,22 @@ impl LocalServer {
                 }),
                 Arc::clone(&self.auth),
             ));
+            // 縮小の口（縮小設計§9）。**`state_dir` と一緒に入る**——印も覚えていることも
+            // あそこへ置くので、置き場所が決まっていなければ口だけ在っても意味がない
+            if let Some(compact) = &self.compact {
+                router = router.merge(server_core::guard(
+                    compact_api::routes(compact_api::CompactApiState {
+                        state_dir: state_dir.clone(),
+                        cfg: compact.clone(),
+                        quiet: Arc::new(session_host_core::compact::RealQuiet),
+                        slack: Arc::new(session_host_core::compact::RealSlack),
+                        launcher: Arc::new(session_host_core::compact::RealLauncher),
+                        // **こちらは PTY の持ち主**。落とすと道連れになるカードを数える
+                        registry: Some(Arc::clone(&self.registry)),
+                    }),
+                    Arc::clone(&self.auth),
+                ));
+            }
         }
         server_core::auth::with_sessions(router, &self.auth)
     }
@@ -325,6 +352,19 @@ pub async fn serve_server(
                     // **落とすのではなく入れ替える。** 常駐に載っていない機械
                     // （ソースビルド）では、落ちると誰も起こさない
                     stop: versions_api::hand_over_process(config.agent().resolved_state_dir()),
+                }))
+                // 縮小の口は**サーバモードにも生やす**（縮小設計§9）。サーバは機械を
+                // 持たないので必ず 501 で断るが、**断る道そのものが台帳に載る**——
+                // 口が片方のモードにしか無いと、台帳を読む人が「remote はどうなるのか」
+                // に答えられない
+                .merge(compact_api::routes(compact_api::CompactApiState {
+                    state_dir: config.agent().resolved_state_dir(),
+                    cfg: config.compact(),
+                    quiet: Arc::new(session_host_core::compact::RealQuiet),
+                    slack: Arc::new(session_host_core::compact::RealSlack),
+                    launcher: Arc::new(session_host_core::compact::RealLauncher),
+                    // **PTY を持たないので道連れにするものが無い**（版の口と同じ）
+                    registry: None,
                 })),
             Arc::clone(&auth),
         ));
@@ -550,6 +590,9 @@ pub async fn serve(config: Config, config_arg: Option<std::path::PathBuf>) -> an
         // `agentdashboard logs` は経路を意識せずに混ぜて出せる
         .with_client_logs(client_logs::LoggingSink::open(&agent_config))
         .with_state_dir(agent_config.resolved_state_dir())
+        // 縮小の口（縮小設計§9）。**ローカルモードが本番**——縮めるのはこの機械の
+        // 仮想ディスクなので、PTY を持っている側だけが道連れを数えられる
+        .with_compact(config.compact())
         .with_versions(VersionsWiring {
             config_arg,
             // 記録への口は**型を書かずに関数で受け取る**（設計§23-9 と同じ形）

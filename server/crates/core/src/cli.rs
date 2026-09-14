@@ -659,6 +659,39 @@ enum HostCmd {
         #[command(flatten)]
         out: OutputArgs,
     },
+    /// 仮想ディスクの空洞を Windows へ返す（**走っている claude が全部落ちる**）
+    Compact {
+        /// どの PC か。**この機械（`local`）にだけ効く**
+        host: String,
+        #[command(subcommand)]
+        cmd: CompactCmd,
+    },
+}
+
+/// `host compact` の中身（縮小設計§9）。
+#[derive(Subcommand)]
+enum CompactCmd {
+    /// 打ってよいか・空洞はいくつか
+    Status {
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// いま縮める。**生きたカードがあれば数を言って止まる**
+    Run {
+        /// 道連れを承知で打つ。**飛ばすのは生きたカードだけ**——claude と端末は飛ばさない
+        #[arg(long)]
+        force: bool,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// 自動の縮小をいつまで止めるか
+    Pause {
+        /// いつまで（RFC3339。例 `2026-09-20T00:00:00Z`）
+        #[arg(long)]
+        until: String,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1595,8 +1628,56 @@ async fn client_host(cmd: HostCmd, target: &client::Target) -> Result<(), client
             let human = output::render_resources(&resources);
             println!("{}", output::pick(out.json, &raw, &human));
         }
+        HostCmd::Compact { host, cmd } => match cmd {
+            CompactCmd::Status { out } => {
+                let (view, raw) = client::compact_status(target, &host).await?;
+                println!("{}", output::pick(out.json, &raw, &render_compact(&view)));
+            }
+            CompactCmd::Run { force, out } => {
+                let raw = client::compact_run(target, &host, force).await?;
+                println!(
+                    "{}",
+                    output::pick(out.json, &raw, "縮小を撃ちました。この後 WSL が落ちます")
+                );
+            }
+            CompactCmd::Pause { until, out } => {
+                let raw = client::compact_pause(target, &host, &until).await?;
+                println!(
+                    "{}",
+                    output::pick(out.json, &raw, &format!("{until} まで自動を止めました"))
+                );
+            }
+        },
     }
     Ok(())
+}
+
+/// `host compact status` の人が読む側。
+fn render_compact(view: &serde_json::Value) -> String {
+    let 数 = |key: &str| view.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
+    let mut lines = vec![format!(
+        "生きたカード {} 枚／claude {} 本／端末 {} 本",
+        数("alive_cards"),
+        数("claude_procs"),
+        数("interactive_shells")
+    )];
+    match view.get("slack_bytes").and_then(|v| v.as_u64()) {
+        Some(bytes) => lines.push(format!(
+            "空洞 {} GiB（いま縮めれば、これだけ Windows へ返る見込み）",
+            bytes / (1024 * 1024 * 1024)
+        )),
+        None => lines.push("空洞：読めません（仮想ディスクのパスが設定されていない）".to_string()),
+    }
+    // **打てない理由は、打てるときこそ黙る。** 出しっぱなしにすると読み飛ばされる
+    for (札, 見出し) in [
+        ("manual_blocker", "手では打てません"),
+        ("auto_blocker", "自動では打ちません"),
+    ] {
+        if let Some(理由) = view.get(札).and_then(|v| v.as_str()) {
+            lines.push(format!("{見出し}：{理由}"));
+        }
+    }
+    lines.join("\n")
 }
 
 /// `agentdashboard address` — 同じ Wi-Fi の別端末から開けるアドレス（設計§6）。

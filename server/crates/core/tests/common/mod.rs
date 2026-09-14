@@ -489,7 +489,11 @@ impl TestServer {
         )
         // 版の口も本番と同じ形で立てる。**置き場所は使い捨て**なので、開発者の
         // 実環境の保管庫を読むことはない（CICD設計§21-6）
-        .with_state_dir(agent_config.resolved_state_dir());
+        .with_state_dir(agent_config.resolved_state_dir())
+        // 縮小の口も本番と同じ形で立てる。**既定のまま**なので `auto` は `false`、
+        // 仮想ディスクのパスも未指定——**テストから本物を撃つ道は無い**（撃つのは
+        // `RealLauncher` だが、`host compact run` はその前に道連れの判定で止まる）
+        .with_compact(config.compact());
         let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
         server = server.with_versions(agentdashboard_core::VersionsWiring {
             // 門が行き先へ渡す `--config`。テストは設定ファイルを持たないので渡さない

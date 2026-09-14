@@ -924,3 +924,87 @@ async fn 過去の一覧は_CLI_からも枠で絞れる() {
         全部.iter().map(|r| r.project.0.clone()).collect::<Vec<_>>()
     );
 }
+
+/// `host compact status` が様子を JSON で返す（縮小設計§9・テスト 2-11）。
+///
+/// **1-7 がここへ移ってきたもの。** 口はフェーズ2でまとめて作ったので、判定だけが
+/// 在ったフェーズ1では確かめようがなかった。
+#[tokio::test]
+async fn 縮小の様子は生きたカードを数えて返る() {
+    let server = TestServer::start().await;
+    let (session, _watcher) = common::start_session(&server.manager).await;
+    let _card = listed_card(&server, &session).await;
+    let target = target_of(&server);
+
+    let (view, raw) = client::compact_status(&target, "local")
+        .await
+        .expect("様子が返ること");
+
+    assert_eq!(
+        view.get("alive_cards").and_then(|v| v.as_u64()),
+        Some(1),
+        "生きたカードを数えていない: {raw}"
+    );
+    // **仮想ディスクのパスは既定で未指定**なので、空洞は読めない側に倒れる
+    assert!(
+        view.get("slack_bytes").is_some_and(|v| v.is_null()),
+        "パスが無いのに空洞が出ている: {raw}"
+    );
+    // **既定は `auto = false`。** 自分を殺す操作の既定を on にしない（設計§7）
+    assert_eq!(
+        view.get("auto_enabled").and_then(|v| v.as_bool()),
+        Some(false),
+        "自動の既定が on になっている: {raw}"
+    );
+    assert!(
+        view.get("manual_blocker")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s.contains("生きたセッション")),
+        "生きたカードが1枚あるのに、手で打てない理由が出ていない: {raw}"
+    );
+}
+
+/// 縮小は `local` にだけ効き、ほかの宛先は 501 で断る（縮小設計§9・テスト 2-7）。
+///
+/// **remote を作らないという判断そのものを、口の側にも残す。** 台帳にも行が在る。
+#[tokio::test]
+async fn 縮小はlocal以外の宛先を断る() {
+    let server = TestServer::start().await;
+    let target = target_of(&server);
+
+    let err = client::compact_status(&target, "よその機械")
+        .await
+        .expect_err("断ること");
+    assert!(
+        err.to_string().contains("local"),
+        "どの宛先なら効くのかが断りに無い: {err}"
+    );
+}
+
+/// `host compact run` は、生きたカードがあれば撃たずに止まる（縮小設計§3・テスト 2-3）。
+///
+/// **`version restart` と同じ文面で断る**（`refuse_if_alive` を共用しているため）。
+#[tokio::test]
+async fn 縮小は生きたカードを数えて撃たずに止まる() {
+    let server = TestServer::start().await;
+    let (session, _watcher) = common::start_session(&server.manager).await;
+    let _card = listed_card(&server, &session).await;
+    let target = target_of(&server);
+
+    let err = client::compact_run(&target, "local", false)
+        .await
+        .expect_err("止まること");
+    assert_eq!(err.exit_code(), 1);
+    assert!(
+        err.to_string().contains("1 本"),
+        "何本道連れになるかが無い: {err}"
+    );
+    // **印が書かれていないこと。** 撃っていないのに印が残ると、次の起動が
+    // 「前回は縮小を撃った」と読んでしまう
+    let 印 = session_host_core::compact::attempt_path(&server.config.agent().resolved_state_dir());
+    assert!(
+        !印.is_file(),
+        "撃っていないのに印が残っている: {}",
+        印.display()
+    );
+}

@@ -423,6 +423,37 @@ pub async fn host_resources(
     http::fetch_as(target, &url).await
 }
 
+/// `GET /api/hosts/{host}/compact`（縮小の様子）。
+pub async fn compact_status(
+    target: &Target,
+    host: &str,
+) -> Result<(serde_json::Value, String), ClientError> {
+    let url = format!("/api/hosts/{}/compact", http::percent_encode(host));
+    http::fetch_as(target, &url).await
+}
+
+/// `POST /api/hosts/{host}/compact`（いま縮める）。
+///
+/// **断り方は [`refuse_if_alive`] が持つ**（`version restart` と同じ文面）。ここで先に
+/// 断るのは、サーバまで行かずに手元で止めるため——撃つ前に止まるほうが安全側である。
+pub async fn compact_run(target: &Target, host: &str, force: bool) -> Result<String, ClientError> {
+    refuse_if_alive(target, force).await?;
+    let url = format!("/api/hosts/{}/compact", http::percent_encode(host));
+    let body = serde_json::json!({ "force": force }).to_string();
+    write_ok(target, "POST", &url, Some(http::Payload::json(body))).await
+}
+
+/// `POST /api/hosts/{host}/compact/pause`（自動を止める）。
+pub async fn compact_pause(
+    target: &Target,
+    host: &str,
+    until: &str,
+) -> Result<String, ClientError> {
+    let url = format!("/api/hosts/{}/compact/pause", http::percent_encode(host));
+    let body = serde_json::json!({ "until": until }).to_string();
+    write_ok(target, "POST", &url, Some(http::Payload::json(body))).await
+}
+
 /// `GET /api/hosts/{host}/file`（ファイルを読む）。
 pub async fn host_file(
     target: &Target,
@@ -2074,30 +2105,41 @@ pub async fn alive_cards(target: &Target) -> Result<Vec<String>, ClientError> {
         .collect())
 }
 
-/// `version restart`（`POST /api/versions/restart`）。
+/// 生きたカードが1枚でもあれば、件数を言って断る。
+///
+/// **`version restart` と `host compact run` が共用する。** どちらも「落とすと走っている
+/// claude が道連れになる」操作で、**文面を2つ持つと片方を直したとき静かに食い違う**。
+/// [`version_restart`] の doc が言う「判定の実装をここ1箇所に集める」の延長である。
 ///
 /// **数えた結果で実際に止まる**（PJTガイドライン「現物の状態を数えるとき」）。
-/// ローカルモードでは落とすと走っている claude が道連れになるため、生きたカードが
-/// 1枚でもあれば件数を言って止まり、`force` のときだけ生きたまま落とす。
-/// 判定の実装をここ1箇所に集めるのが `積み残し_運用` 項目11 の求めていた形。
-pub async fn version_restart(target: &Target, force: bool) -> Result<String, ClientError> {
-    if !force {
-        let alive = alive_cards(target).await?;
-        if !alive.is_empty() {
-            let ids: Vec<&str> = alive
-                .iter()
-                .map(|id| output::short_id(id.as_str()))
-                .collect();
-            return Err(ClientError::Refused {
-                status: 409,
-                message: format!(
-                    "生きたセッションが {} 本あります（{}）。落とすと道連れになります。それでも落とすなら --force",
-                    alive.len(),
-                    ids.join(", ")
-                ),
-            });
-        }
+/// `force` のときだけ、生きたまま落とすことを承知で素通しする。
+pub async fn refuse_if_alive(target: &Target, force: bool) -> Result<(), ClientError> {
+    if force {
+        return Ok(());
     }
+    let alive = alive_cards(target).await?;
+    if alive.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<&str> = alive
+        .iter()
+        .map(|id| output::short_id(id.as_str()))
+        .collect();
+    Err(ClientError::Refused {
+        status: 409,
+        message: format!(
+            "生きたセッションが {} 本あります（{}）。落とすと道連れになります。それでも落とすなら --force",
+            alive.len(),
+            ids.join(", ")
+        ),
+    })
+}
+
+/// `version restart`（`POST /api/versions/restart`）。
+///
+/// 断り方は [`refuse_if_alive`] が持つ（`host compact run` と同じ文面を使うため）。
+pub async fn version_restart(target: &Target, force: bool) -> Result<String, ClientError> {
+    refuse_if_alive(target, force).await?;
     write_ok(target, "POST", "/api/versions/restart", None).await
 }
 

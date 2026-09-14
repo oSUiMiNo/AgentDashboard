@@ -201,6 +201,20 @@ class = "by-design"
 reason = "畳む前の待ち合わせ。相手のタスクが既に落ちていることを意味するだけで、閉じる処理の中で言うことが無い"
 
 [[entry]]
+path = "server/crates/session-host-core/src/compact.rs"
+fn = "clear_attempt"
+expr = '''std::fs::remove_file(attempt_path(state_dir))'''
+class = "by-design"
+reason = "撃てなかった印を消すだけ。無ければ目的は達成されている"
+
+[[entry]]
+path = "server/crates/session-host-core/src/compact.rs"
+fn = "take_attempt"
+expr = '''std::fs::remove_file(&path)'''
+class = "by-design"
+reason = "読み終えた印を消すだけ。消せなくても中身は既に手元にあり、次の起動で読み直すだけ"
+
+[[entry]]
 path = "server/crates/session-host-core/src/events.rs"
 fn = "emit"
 expr = '''self.events.send(event)'''

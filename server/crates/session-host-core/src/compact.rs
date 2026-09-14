@@ -516,6 +516,166 @@ pub fn 静かさを進める(state: &mut CompactState, 静か: bool, now: System
     }
 }
 
+// ---------------------------------------------------------------------------
+// Windows のタスクを起こす口
+
+/// 縮小の台本を抱えた Windows のタスクを起こす口。
+///
+/// **トレイトにしてあるのはテストのため**（[`QuietProbe`] と同じ理由）。差し替えられないと
+/// **印を書いてから撃つ順序を1行も確かめられない**——本物を撃つと走っている claude が
+/// 全部落ちるので、テストからは絶対に呼べない。
+pub trait TaskLauncher: Send + Sync + std::fmt::Debug {
+    /// 起動を頼む。**返るのは「頼めたか」であって、台本が終わったかではない。**
+    fn run(&self, task_name: &str) -> bool;
+}
+
+/// 本物。`schtasks.exe` へ起動を頼む。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RealLauncher;
+
+/// **絶対パスで指す。** `PATH` に Windows の道が載らない構成（`appendWindowsPath=false`）
+/// でも通るようにするためで、[`crate::resources`] の `POWERSHELL` と同じ理由・同じ形。
+const SCHTASKS: &str = "/mnt/c/Windows/System32/schtasks.exe";
+
+/// `schtasks.exe /Run` の応答を待つ上限。
+///
+/// **台本の長さではない。** `/Run` は起動を頼んで即座に返るコマンドで、縮小そのものは
+/// 10〜15分かかる。ここで待っているのは「頼めたかどうか」の応答だけである。
+const RUN_TIMEOUT: Duration = Duration::from_secs(30);
+
+impl TaskLauncher for RealLauncher {
+    fn run(&self, task_name: &str) -> bool {
+        // **`schtasks.exe /Run` は即座に返る。** これはタスクの起動を頼むコマンドで、
+        // 台本の完了は待たない。だから普通に待ってよく、**終了コードも普通に見てよい**。
+        //
+        // 「撃ちっぱなし」とは**台本の完了を待たない**という意味であって、`schtasks` の
+        // 応答まで捨てることではない。取り違えて結果を捨てると、**頼めなかったことに
+        // 気づけないまま印だけが残る**うえ、`swallowed.toml` へ載せる義務まで生む。
+        let outcome = crate::proc::run(
+            std::process::Command::new(SCHTASKS).args(["/Run", "/TN", task_name]),
+            RUN_TIMEOUT,
+        );
+        // **出力は CP932 なので文字列で判定しない。** 化けた文字を読んで判定すると、
+        // 成功しているのに失敗と読む（またはその逆）。終了コードだけを見る。
+        outcome.success
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 撃った印
+
+/// 縮小を撃った印（`<state_dir>/compact-attempt`）。
+///
+/// **起き直った側がこれを拾う**（フェーズ3）。打った本人は `wsl --shutdown` で死ぬので
+/// 結果を自分では受け取れない——**印が無いと「縮小が走ったのか、ただ落ちただけか」を
+/// 後から区別できない。**
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CompactAttempt {
+    /// 撃った時刻。
+    ///
+    /// **結果 JSON の `finished_at` と比べて新旧を決める。** `/mnt/c` 越しのファイルの
+    /// 更新時刻は当てにならないので、そちらでは判定しない。
+    pub at: Option<SystemTime>,
+    /// 撃つ直前の空洞。`compact_done` で前後を並べるため。
+    pub slack_bytes: u64,
+}
+
+/// RFC3339 の文字列を [`SystemTime`] へ。**純関数。**
+///
+/// **`core` ではなくここに置くのは、`time` を持っているのがこちらだから。** 一時停止の
+/// 期限は口（`compact_api`）が受け取るが、あちらの依存に時刻の道具は無い。
+///
+/// 紀元前は `None`（[`SystemTime::UNIX_EPOCH`] より前の期限に意味が無い）。
+pub fn 時刻を読む(text: &str) -> Option<SystemTime> {
+    let parsed =
+        time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339).ok()?;
+    let secs = parsed.unix_timestamp();
+    if secs < 0 {
+        return None;
+    }
+    Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs as u64))
+}
+
+/// 覚えていることの場所。
+pub fn state_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(COMPACT_STATE)
+}
+
+/// 覚えていることを読む。**読めなければ既定値**（[`CompactState`] の doc の作法）。
+pub fn load_state(state_dir: &Path) -> CompactState {
+    crate::jsonfile::load_or_default(&state_path(state_dir))
+}
+
+/// 覚えていることを書く。
+pub fn save_state(state_dir: &Path, state: &CompactState) {
+    crate::jsonfile::save(&state_path(state_dir), state);
+}
+
+/// 印の場所。
+pub fn attempt_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(COMPACT_ATTEMPT)
+}
+
+/// 撃った印を書く。
+pub fn write_attempt(state_dir: &Path, attempt: &CompactAttempt) {
+    crate::jsonfile::save(&attempt_path(state_dir), attempt);
+}
+
+/// 印が残っていれば取り出して消す。**残っていたら前回の起動で縮小を撃っている。**
+pub fn take_attempt(state_dir: &Path) -> Option<CompactAttempt> {
+    let path = attempt_path(state_dir);
+    if !path.is_file() {
+        return None;
+    }
+    let attempt: CompactAttempt = crate::jsonfile::load_or_default(&path);
+    let _ = std::fs::remove_file(&path);
+    Some(attempt)
+}
+
+/// 撃つのに失敗したので印を消す。
+pub fn clear_attempt(state_dir: &Path) {
+    let _ = std::fs::remove_file(attempt_path(state_dir));
+}
+
+/// 撃った結果。**呼ぶ側（`compact_api`）が記録を出すために読む。**
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FireResult {
+    /// 頼めた。**この後どこかで自分が死ぬ。**
+    Fired,
+    /// 頼めなかった。印は消してある。
+    Failed,
+}
+
+/// 印を書いてから撃つ（設計§3-2 の④⑤）。
+///
+/// # ④と⑤が逆になってはいけない
+///
+/// **印を書く前に撃つと、撃った直後に死んだとき印が残らない。** そうなると起き直った側は
+/// 「縮小が走ったのか、ただ落ちただけか」を区別できず、往復の記録が丸ごと成り立たなくなる。
+/// だから**必ず書いてから撃つ**。頼めなかったときだけ、後から消す。
+pub fn 印を書いてから撃つ(
+    state_dir: &Path,
+    launcher: &dyn TaskLauncher,
+    task_name: &str,
+    slack_bytes: u64,
+    now: SystemTime,
+) -> FireResult {
+    write_attempt(
+        state_dir,
+        &CompactAttempt {
+            at: Some(now),
+            slack_bytes,
+        },
+    );
+    if launcher.run(task_name) {
+        FireResult::Fired
+    } else {
+        clear_attempt(state_dir);
+        FireResult::Failed
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -906,5 +1066,158 @@ mod tests {
 
         let 読めない = 名乗る空洞(None);
         assert_eq!(読めない.read(None, None), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // 撃つ口と印
+
+    /// 使い終わったら消える一時フォルダ。
+    ///
+    /// **`tempfile` を足さないのは、依存を1つ増やすと `dependencies.rs` の台帳にも
+    /// 足す義務が生じるため。** 作り方は `selfheal::ops` の `tempdir` に揃えてある。
+    struct 捨てるフォルダ(PathBuf);
+
+    impl 捨てるフォルダ {
+        fn 作る() -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "agentdashboard-compact-{}-{}",
+                std::process::id(),
+                protocol::CardId::new()
+            ));
+            std::fs::create_dir_all(&dir).expect("一時フォルダ");
+            Self(dir)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for 捨てるフォルダ {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// 撃たれた瞬間に**印が在るかどうかを見る**偽のランチャ。
+    ///
+    /// # なぜ「撃たれた瞬間」でなければならないのか
+    ///
+    /// **後から印の有無を確かめる書き方では、④と⑤が逆でも緑になる**——撃ってから印を
+    /// 書いても、テストが見るころには印が在るからである。**順序そのものを見るには、
+    /// 撃たれた最中に覗くしかない。**
+    #[derive(Debug)]
+    struct 撃たれたとき印を覗く {
+        state_dir: PathBuf,
+        /// 撃たれた瞬間に印が在ったか。
+        印が在った: std::sync::Mutex<Option<bool>>,
+        /// 撃つのに成功したことにするか。
+        成功: bool,
+    }
+
+    impl TaskLauncher for 撃たれたとき印を覗く {
+        fn run(&self, _task_name: &str) -> bool {
+            let 在った = attempt_path(&self.state_dir).is_file();
+            *self.印が在った.lock().unwrap() = Some(在った);
+            self.成功
+        }
+    }
+
+    fn 覗く口(dir: &Path, 成功: bool) -> 撃たれたとき印を覗く {
+        撃たれたとき印を覗く {
+            state_dir: dir.to_path_buf(),
+            印が在った: std::sync::Mutex::new(None),
+            成功,
+        }
+    }
+
+    #[test]
+    fn 印は撃つより先に書かれている() {
+        let dir = 捨てるフォルダ::作る();
+        let 口 = 覗く口(dir.path(), true);
+        let result =
+            印を書いてから撃つ(dir.path(), &口, "偽タスク", 70 * GIB, SystemTime::now());
+
+        assert_eq!(result, FireResult::Fired);
+        assert_eq!(
+            *口.印が在った.lock().unwrap(),
+            Some(true),
+            "撃たれた瞬間に印が無い。**④と⑤が逆になっている**——撃った直後に死ぬと、\
+             起き直った側は「縮小が走ったのか、ただ落ちただけか」を区別できなくなる"
+        );
+    }
+
+    #[test]
+    fn 撃てなければ印は残らない() {
+        let dir = 捨てるフォルダ::作る();
+        let 口 = 覗く口(dir.path(), false);
+        let result =
+            印を書いてから撃つ(dir.path(), &口, "偽タスク", 70 * GIB, SystemTime::now());
+
+        assert_eq!(result, FireResult::Failed);
+        assert_eq!(
+            *口.印が在った.lock().unwrap(),
+            Some(true),
+            "撃つ前には書かれているはず"
+        );
+        assert!(
+            !attempt_path(dir.path()).is_file(),
+            "撃てなかったのに印が残っている。**次の起動が「前回は縮小を撃った」と読む**"
+        );
+    }
+
+    #[test]
+    fn 印は読んだら消える() {
+        let dir = 捨てるフォルダ::作る();
+        write_attempt(
+            dir.path(),
+            &CompactAttempt {
+                at: Some(SystemTime::UNIX_EPOCH),
+                slack_bytes: 42,
+            },
+        );
+
+        let 取れた = take_attempt(dir.path()).expect("印が在るはず");
+        assert_eq!(取れた.slack_bytes, 42);
+        assert_eq!(取れた.at, Some(SystemTime::UNIX_EPOCH));
+        assert!(
+            take_attempt(dir.path()).is_none(),
+            "2回目も取れている。**消えないと、起き直るたびに同じ結果を記録し続ける**"
+        );
+    }
+
+    #[test]
+    fn 覚えていることは往復できる() {
+        let dir = 捨てるフォルダ::作る();
+        assert_eq!(
+            load_state(dir.path()),
+            CompactState::default(),
+            "無ければ既定値"
+        );
+
+        let state = CompactState {
+            paused_until: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000)),
+            ..CompactState::default()
+        };
+        save_state(dir.path(), &state);
+        assert_eq!(load_state(dir.path()), state);
+    }
+
+    #[test]
+    fn 一時停止の期限はrfc3339で読める() {
+        let 読めた = 時刻を読む("2026-09-20T00:00:00Z").expect("読めるはず");
+        assert_eq!(
+            読めた
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .expect("紀元後")
+                .as_secs(),
+            1_789_862_400
+        );
+        assert_eq!(時刻を読む("あした"), None, "読めない綴りは None");
+        assert_eq!(
+            時刻を読む("1960-01-01T00:00:00Z"),
+            None,
+            "紀元前の期限に意味は無い"
+        );
     }
 }
