@@ -508,3 +508,226 @@ describe('吹き出しの見た目', () => {
     expect(群.parentElement?.querySelector('time'), '時刻と同じ行に居ない').not.toBeNull()
   })
 })
+
+/*
+  **実機で触った利用者から出た、見た目の直し**（2026-09-14）。
+
+  | 言われたこと | どこで見張るか |
+  |---|---|
+  | カードの背景と面の背景が近すぎて見にくい | 地の色（下） |
+  | カード同士の隙間を3倍に | 隙間（下） |
+  | 面が小さすぎる。横1.4倍・縦2倍、ただし窓が小さければ収縮 | 置き場所（`置き場所の作法`） |
+  | 画像の幅が確定後に失われる | 画像の幅（下）と `lib/memoBody.test.ts` |
+  | 表の空白カラムだけ細い | `置き場所の作法`（CSS） |
+  | 入力欄が一番下まで繰らないと出ない | 縮む側（下）と `置き場所の作法` |
+
+  **どれも「直した値」ではなく「直した理由が生きているか」を見る。** 例えば隙間は
+  `gap-3` という綴りではなく、**上段と下段が同じであること**まで見る——片方だけ
+  戻ると、畳みを開いた瞬間に詰まって見える。
+*/
+describe('面の見た目（利用者の報告・2026-09-14）', () => {
+  function 面を描く(): void {
+    replaceMemos(GLOBAL_TARGET, [
+      memo('m-1'),
+      memo('m-2', { checked_at: 1_700_000_001_000 }),
+    ])
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" 保存先={null} />)
+  }
+
+  it('吹き出しの地は、面の地と混ぜない', () => {
+    /*
+      **`bg-muted/40` は薄すぎた。** 面は `bg-popover`（`oklch(0.205)`）、
+      `--muted` は `oklch(0.269)` なので、40% で混ぜた実効は `oklch(0.231)`
+      ——**差は 0.026** しかなく、利用者から「近すぎて見にくい」と言われた。
+
+      **語として見る。** `bg-muted/40` は「`bg-muted/40`」という1語のクラスなので、
+      部分一致で見ると透かした版も通ってしまう。
+    */
+    面を描く()
+    const 吹き出し = screen.getAllByTestId('memo-bubble')[0]
+    expect(吹き出し.classList.contains('bg-muted'), '不透明の地になっていない').toBe(true)
+    expect(吹き出し.classList.contains('bg-muted/40'), '透かした地に戻っている').toBe(false)
+    // **縁で1枚として切り出す。** 地の差だけでは、隣り合ったカードの境が読めない
+    expect(吹き出し.classList.contains('border'), '縁が無い').toBe(true)
+  })
+
+  it('カード同士の隙間は、上段と下段で揃える', () => {
+    /*
+      **利用者の指定は「3倍」**（`gap-1` = 0.25rem → `gap-3` = 0.75rem）。
+
+      **上段（片付けたもの）も同じカードである。** 片方だけ変えると、畳みを開いた
+      瞬間に詰まって見える——**同じものが場所によって違う隙間で並ぶ**。
+    */
+    面を描く()
+    fireEvent.click(screen.getByTestId('memo-checked-toggle'))
+    const 下段 = screen.getByTestId('memo-list')
+    const 上段 = screen.getByTestId('memo-checked')
+    expect(下段.classList.contains('gap-3'), '下段が3倍になっていない').toBe(true)
+    expect(上段.classList.contains('gap-3'), '上段が下段と揃っていない').toBe(true)
+    expect(下段.classList.contains('gap-1'), '下段が元の隙間に戻っている').toBe(false)
+    expect(上段.classList.contains('gap-1'), '上段が元の隙間に戻っている').toBe(false)
+  })
+
+  it('面は、置き場所の高さに合わせて縮む側になる', () => {
+    /*
+      **入力欄が常に見えるための土台**（利用者の報告「メッセージ入力欄が、一番下まで
+      スクロールしないと表示されない」）。
+
+      面が縮まなければ、溢れたぶんは**外側**がスクロールする——入力欄はこの面の
+      いちばん下にあるので、下まで繰らないと現れない。**`flex-1` と `min-h-0` は対**で、
+      片方だけでは縮まない。
+    */
+    面を描く()
+    const 面 = screen.getByTestId('memo-pane')
+    expect(面.classList.contains('flex-1'), '伸びる側のままになっている').toBe(true)
+    expect(面.classList.contains('min-h-0'), '中身の高さで押し広げられる').toBe(true)
+    // **繰るのは一覧だけ。** ここが外れると、入力欄がまた押し出される
+    const 下段 = screen.getByTestId('memo-list')
+    expect(下段.classList.contains('overflow-y-auto'), '一覧が繰れない').toBe(true)
+    expect(下段.classList.contains('flex-1'), '一覧が縮まない').toBe(true)
+  })
+
+  it('入力欄は、一覧の外に居る（一緒に繰られない）', () => {
+    /*
+      **一覧の中に入力欄が居ると、一覧を繰るたびに一緒に流れる。**
+      メッセンジャーの入力欄は動かない場所に在るので、**一覧の兄弟**でなければならない。
+    */
+    面を描く()
+    const 下段 = screen.getByTestId('memo-list')
+    const 入力欄 = screen.getByTestId('memo-compose')
+    expect(下段.contains(入力欄), '入力欄が一覧の中に居る').toBe(false)
+  })
+
+  it('確定した画像に、編集で決めた幅が効く', () => {
+    /*
+      **Markdown には幅の置き場が無い**ので、隣に置いてある `blocks` から引く
+      （`lib/memoBody.ts` の `画像の幅`）。引けないと元の大きさで描かれ、
+      スクリーンショットは面より大きいので**必ず横幅いっぱいに見える。**
+    */
+    const url = '/api/memo-blobs/48b5d4c5'
+    replaceMemos(GLOBAL_TARGET, [
+      memo('m-1', {
+        body: {
+          blocks: [{ type: 'image', props: { url, previewWidth: 197 } }],
+          markdown: `![image.png](${url})`,
+        },
+      }),
+    ])
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" 保存先={null} />)
+
+    const 画像 = screen.getByTestId('memo-body').querySelector('img')
+    expect(画像, '画像が出ていない').not.toBeNull()
+    expect(画像?.style.width, '編集で決めた幅が効いていない').toBe('197px')
+  })
+
+  it('幅を変えていない画像には、幅を与えない', () => {
+    /*
+      **いままで正しく出ていたものを動かさない。** `previewWidth` が無いのは
+      「幅を変えていない」という意味で（実測）、そのときは元の大きさが正しい。
+    */
+    const url = '/api/memo-blobs/f082e1e2'
+    replaceMemos(GLOBAL_TARGET, [
+      memo('m-1', {
+        body: { blocks: [{ type: 'image', props: { url } }], markdown: `![image.png](${url})` },
+      }),
+    ])
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" 保存先={null} />)
+
+    expect(screen.getByTestId('memo-body').querySelector('img')?.style.width).toBe('')
+  })
+})
+
+/*
+  **面の大きさと、外側のスクロールは、面の外で決まっている。**
+
+  `MemoPane` を置いている場所は3つあり（全体メモ・セッションの区画・一覧の吹き出し）、
+  **大きさも、繰る／繰らないも、そちらの `className` が持っている。** jsdom では
+  そこまで組み立てないので、**置き場所のソースを読んで数える。**
+
+  **3箇所を配列で回す。** 1箇所だけ直し忘れると、同じ面が開く場所によって違う
+  振る舞いをする——利用者から見ると「直っているときと直っていないときがある」に
+  なり、いちばん追いにくい形の壊れ方になる。
+*/
+describe('置き場所の作法（利用者の報告・2026-09-14）', () => {
+  /** `<MemoPane` の直前にある `className` を抜く。**置き場所そのものの綴り。** */
+  function 置き場所の綴り(パス: string): string {
+    const src = readFileSync(resolve(process.cwd(), パス), 'utf8')
+    const i = src.indexOf('<MemoPane')
+    expect(i, `${パス} に MemoPane が居ない`).toBeGreaterThan(0)
+    const 直前 = [...src.slice(0, i).matchAll(/className="([^"]*)"/g)].pop()
+    expect(直前, `${パス} の置き場所に className が無い`).toBeDefined()
+    return 直前?.[1] ?? ''
+  }
+
+  const 置き場所たち: [string, string][] = [
+    ['全体メモ', 'src/App.tsx'],
+    ['セッションの区画', 'src/components/SessionView/SessionView.tsx'],
+    ['一覧の吹き出し', 'src/components/SessionTile/SessionTile.tsx'],
+  ]
+
+  it.each(置き場所たち)('%s：外側では繰らない', (_名, パス) => {
+    /*
+      **ここが外れると、入力欄が一番下まで繰らないと出てこない**（利用者の報告）。
+      `PopoverContent` は既定で `overflow-y-auto` を持っているので、**黙っていると
+      外側がスクロール容器になる。**
+
+      **`overflow-hidden` では足りない。** あれは `overflow`、既定は `overflow-y` で
+      別の綴りなので、`tailwind-merge` が競合と見なさず**両方残って既定が後勝ちする。**
+      同じ `overflow-y` で打ち消す。
+    */
+    expect(置き場所の綴り(パス)).toContain('overflow-y-hidden')
+  })
+
+  it.each(置き場所たち)('%s：高さに上限を持つ', (_名, パス) => {
+    // 上限が無ければ中身の数だけ縦に伸び、入力欄が画面の下へ出ていく
+    expect(置き場所の綴り(パス)).toContain('max-h-[')
+  })
+
+  it.each(置き場所たち)('%s：窓が小さければ縮む', (_名, パス) => {
+    /*
+      **利用者の指定**——「ダッシュボードのウィンドウそのものが小さい場合は臨機応変に
+      収縮するように」。決め打ちの高さだけを書くと、低い窓では面が画面からはみ出す。
+      `min()` で、決めた大きさと**実際に空いている分**の小さいほうを採る。
+    */
+    expect(置き場所の綴り(パス)).toMatch(/max-h-\[min\(/)
+  })
+
+  it.each(置き場所たち)('%s：面が縮む側になれる（親が flex）', (_名, パス) => {
+    // `MemoPane` の `flex-1` は、**親が flex のときだけ**効く
+    expect(置き場所の綴り(パス)).toContain('flex')
+  })
+
+  it('Popover の面は、横も 1.4 倍で、窓に合わせて縮む', () => {
+    /*
+      **利用者の指定は「横幅を1.4倍」**。元は全体メモ `w-96`（24rem）、一覧の吹き出し
+      `w-80`（20rem）だったので、それぞれ 33.6rem・28rem になる。
+
+      **セッションの区画は横を広げない。** あそこは端末や履歴と横幅を分け合っており、
+      **面だけ広げると隣が潰れる**——Popover のように浮いていないので、逃げ場が無い。
+    */
+    expect(置き場所の綴り('src/App.tsx')).toContain('w-[min(33.6rem,90vw)]')
+    expect(置き場所の綴り('src/components/SessionTile/SessionTile.tsx')).toContain(
+      'w-[min(28rem,90vw)]',
+    )
+  })
+
+  it('表は、空の列も同じ幅を受け取る', () => {
+    /*
+      **利用者の報告**——「表が表として見えるようにはなったが、空白カラムだけ小さく
+      表示されるのは気持ち悪い」。共用の `.prose-dashboard table` は `display: block`
+      なので**列幅が中身の量だけで決まり**、空のセルは余白ぶんまで縮む。
+
+      **共用クラスへ直接書かない。** あれは履歴とファイルビュアも使っている
+      （`index.css` の注意書き）ので、**メモの吹き出しの中だけ**に効かせる。
+    */
+    const css = readFileSync(resolve(process.cwd(), 'src/memo.css'), 'utf8')
+    const 規則 = css.match(/\.memo-bubble\s+\.prose-dashboard\s+table\s*\{([^}]*)\}/)
+    expect(規則, 'メモの吹き出しに限った表の規則が無い').not.toBeNull()
+    const 中身 = 規則?.[1] ?? ''
+    // 等分して固定する。**中身では動かさない**のが `fixed` の意味
+    expect(中身).toMatch(/table-layout:\s*fixed/)
+    expect(中身).toMatch(/width:\s*100%/)
+    // `display: block` のままでは `table-layout` も `width` も効かない
+    expect(中身).toMatch(/display:\s*table/)
+  })
+})

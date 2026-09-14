@@ -275,7 +275,29 @@ function Shell() {
                     <NoteGlyph className="size-5" />
                   </Button>
                 </PopoverTrigger>
-                <PopoverContent className="w-96" align="end">
+                {/*
+                  **面を大きくする**（利用者の指定・2026-09-14「横幅を1.4倍、縦幅を
+                  2倍に。ただしダッシュボードのウィンドウそのものが小さい場合は
+                  臨機応変に収縮するように」）。
+
+                  | どこ | 前 | 後 |
+                  |---|---|---|
+                  | 横 | `w-96`（24rem） | `33.6rem`（24 × 1.4） |
+                  | 縦 | `PopoverContent` の既定 `24rem` | `48rem`（24 × 2） |
+
+                  **収縮は `min()` が持つ。** 横は `90vw`、縦は Radix が測って
+                  くれる `--radix-popover-content-available-height`（画面の端まで
+                  の残り）と小さいほうを採る——**窓を縮めれば面も縮む。**
+
+                  **`overflow-y-hidden` は、入力欄を常に見せるために要る。**
+                  既定の `overflow-y-auto` のままだと、**外側がスクロール容器に
+                  なって入力欄が下へ押し出される**（`MemoPane` の根に理由がある）。
+                  スクロールは中の一覧だけが持つ。
+                */}
+                <PopoverContent
+                  className="flex w-[min(33.6rem,90vw)] flex-col overflow-y-hidden max-h-[min(48rem,var(--radix-popover-content-available-height))]"
+                  align="end"
+                >
                   <MemoPane
                     target={GLOBAL_TARGET}
                     label="全体のメモ"

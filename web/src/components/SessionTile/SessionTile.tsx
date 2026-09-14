@@ -1032,9 +1032,19 @@ export function SessionTile({
                   <NoteGlyph className="size-4" />
                 </button>
               </PopoverTrigger>
+              {/*
+                **一覧から開く面も、同じ倍率で大きくする**（利用者の指定・
+                2026-09-14）。横 `w-80`（20rem）→ `28rem`（20 × 1.4）、縦は
+                `PopoverContent` の既定 24rem → `48rem`（× 2）。
+
+                **収縮と、外側のスクロールを止める理由は全体メモと同じ**
+                （`App.tsx` の同じ場所に書いてある）。ここは読むだけの面なので
+                入力欄は出ないが、**面の大きさだけ別の値にすると、同じものが
+                開く場所によって違う大きさに見える。**
+              */}
               <PopoverContent
                 data-no-grab=""
-                className="w-80"
+                className="flex w-[min(28rem,90vw)] flex-col overflow-y-hidden max-h-[min(48rem,var(--radix-popover-content-available-height))]"
                 onClick={(event) => event.stopPropagation()}
               >
                 {/*

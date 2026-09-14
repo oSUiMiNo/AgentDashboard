@@ -57,3 +57,41 @@
     pointer-events: auto;
   }
 }
+
+/*
+  **表は、列を均等に割る**（利用者の報告・2026-09-14「表が表として見えるように
+  はなったが、空白カラムだけ小さく表示されるのは気持ち悪い」）。
+
+  # なぜ空の列だけ細くなっていたのか
+
+  共用の `.prose-dashboard table` は `display: block; overflow-x: auto` で、
+  **横に溢れたら繰れる**ようにしてある。ところが `display: block` の表は
+  `table-layout` も `width` も効かないので、**列幅は中身の量だけで決まる**
+  ——中身が空のセルは左右の余白ぶんまで縮み、隣とまるで釣り合わなくなる。
+
+  # 何に替えたか
+
+  **表に戻して（`display: table`）、幅を均等に固定する。** `table-layout: fixed`
+  は「1行目の列数で等分し、中身では動かさない」規則なので、**空の列も同じ幅を
+  受け取る。**
+
+  **横スクロールを失うが、困らない。** 等分した列は必ず面の幅に収まり、長い語は
+  下の `overflow-wrap` が折る——**溢れないものに、繰る道は要らない。**
+
+  # 共用クラスへ直接書かない
+
+  `.prose-dashboard` は履歴（`TranscriptRow`）とファイルビュア（`FileView`）が
+  使っている（`index.css` の同じ注意書き）。**あちらの表は幅いっぱいに広げる
+  ものではない**ので、メモの吹き出しの中だけに効かせる。`.speech-bubble` が
+  同じ形で色を上書きしているのと同じ作法である。
+*/
+.memo-bubble .prose-dashboard table {
+  display: table;
+  width: 100%;
+  table-layout: fixed;
+}
+.memo-bubble .prose-dashboard th,
+.memo-bubble .prose-dashboard td {
+  /* 等分した列から長い語がはみ出さないように、どこででも折る */
+  overflow-wrap: anywhere;
+}

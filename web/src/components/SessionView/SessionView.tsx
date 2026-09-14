@@ -749,7 +749,17 @@ export function SessionView({
           居ないうえ、読むためだけに開いた面で誤って書けると事故になる。
         */}
         {メモを開いている && session.claude_session_id !== null && (
-          <div className="shrink-0 rounded border p-2">
+          /*
+            **ここは Popover ではないので、高さの上限を自分で持つ**（利用者の
+            報告・2026-09-14「入力欄が、一番下までスクロールしないと表示され
+            ない」）。上限が無いと**中身の数だけ縦に伸び**、入力欄が画面の下へ
+            出ていく——外側（セッションの区画）を繰らないと書けない。
+
+            **`60vh` と対で採る。** セッションの区画は端末や履歴と縦を分け合う
+            ので、**窓が低いときに 48rem を押し通すと他が潰れる。**
+            スクロールは中の一覧だけが持つ（`MemoPane` の根に理由がある）。
+          */
+          <div className="flex max-h-[min(48rem,60vh)] shrink-0 flex-col overflow-y-hidden rounded border p-2">
             <MemoPane
               target={sessionTarget(session.claude_session_id)}
               readOnly={isEnded(session.status)}

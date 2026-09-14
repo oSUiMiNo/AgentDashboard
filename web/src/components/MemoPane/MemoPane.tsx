@@ -22,8 +22,8 @@
  * 「片付ける」が達成感にならない。
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
-import ReactMarkdown from 'react-markdown'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import ReactMarkdown, { type Components } from 'react-markdown'
 
 import { targetKey } from '@/lib/annotationTarget'
 import {
@@ -35,7 +35,7 @@ import { copyToClipboard } from '@/lib/clipboard'
 import { markComposerBusy } from '@/lib/composerBusy'
 import { useDraft } from '@/lib/drafts'
 import { MEMO_REMARK_PLUGINS, REHYPE_PLUGINS } from '@/lib/markdown'
-import { readMemoBody, sameMemoBody } from '@/lib/memoBody'
+import { readMemoBody, sameMemoBody, 画像の幅 } from '@/lib/memoBody'
 import { 消えるまでの字 } from '@/lib/memoRetention'
 import { 画像を運ぶ as 一枚運ぶ, type 画像の置き場所 } from '@/lib/memoImage'
 
@@ -249,7 +249,24 @@ export function MemoPane({ target, readOnly = false, label, 保存先 }: Props) 
   const 出す下段 = 下段を全部 ? unchecked : unchecked.slice(隠れている数)
 
   return (
-    <div data-testid="memo-pane" className="flex min-h-0 flex-col gap-2" aria-label={label}>
+    /*
+      **`flex-1` は、入力欄を常に見せるために要る**（利用者の報告・2026-09-14
+      「メッセージ入力欄が、一番下までスクロールしないと表示されない」）。
+
+      **置き場所（`PopoverContent`）が自分でスクロールしていた。** あちらは
+      `max-h` と `overflow-y-auto` を既定で持つので、**面の高さが頭打ちになった
+      とき、溢れたぶんを外側がスクロールする**——入力欄はこの面のいちばん下に
+      あるので、下まで繰らないと現れない。**メッセンジャーではない。**
+
+      **中の `memo-list` だけがスクロールする形にする。** そのためには、
+      この面自身が親の高さに合わせて縮まなければならない——`flex-1` と
+      `min-h-0` の対で、伸びずに縮む側になる。置き場所の側は
+      `overflow-y-hidden` で外側のスクロールを止める（3箇所とも）。
+
+      **親が flex でないときは何も起きない**（`flex-1` は親が flex のときだけ
+      効く）ので、置き場所ごとに書き分けなくてよい。
+    */
+    <div data-testid="memo-pane" className="flex min-h-0 flex-1 flex-col gap-2" aria-label={label}>
       {/* ------- 上段：片付けたもの。既定で畳む ------- */}
       {checked.length > 0 && (
         <div className="shrink-0">
@@ -263,7 +280,7 @@ export function MemoPane({ target, readOnly = false, label, 保存先 }: Props) 
             片付けたもの {checked.length} 件
           </button>
           {!畳んだ上段 && (
-            <div data-testid="memo-checked" className="mt-1 flex flex-col gap-1">
+            <div data-testid="memo-checked" className="mt-1 flex flex-col gap-3">
               {checked.map((memo) => (
                 <MemoBubble
                   key={memo.id}
@@ -279,7 +296,13 @@ export function MemoPane({ target, readOnly = false, label, 保存先 }: Props) 
       )}
 
       {/* ------- 下段：いま関係のあるもの ------- */}
-      <div data-testid="memo-list" className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto">
+      {/*
+        **隙間は `gap-3`**（0.75rem）。`gap-1`（0.25rem）の3倍で、利用者の指定
+        ——「メモカード同士の隙間を3倍に開いて」（2026-09-14）。上段（片付けた
+        もの）も同じカードなので、**両方を同じ値にする**。片方だけ変えると、
+        畳みを開いた瞬間に詰まって見える。
+      */}
+      <div data-testid="memo-list" className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
         {隠れている数 > 0 && !下段を全部 && (
           <button
             type="button"
@@ -473,6 +496,38 @@ function MemoBubble({
   const [送れなかった, set送れなかった] = useState<string | null>(null)
 
   const body = readMemoBody(memo.body)
+  /*
+    **確定した本文には幅が書いていない**ので、隣に置いてある `blocks` から引く
+    （`lib/memoBody.ts` の [`画像の幅`] に、なぜ表示側で引くのかが書いてある）。
+
+    **`memo.body` が変わったときだけ引き直す。** 描くたびに走らせると、画像を
+    持たないメモでも本文の長さぶん舐めることになる——溜まるほど効く場所である。
+  */
+  const 画像の幅表 = useMemo(() => 画像の幅(body.blocks), [body.blocks])
+  /*
+    **`components` は毎回作らない。** `react-markdown` は渡されたものが別物だと
+    木を作り直すので、**幅が変わっていないのに画像が読み込み直る**（一瞬消える）。
+  */
+  const 描き方 = useMemo<Components>(
+    () => ({
+      img: ({ node: _node, style, src, ...ほか }) => {
+        const 幅 = typeof src === 'string' ? 画像の幅表.get(src) : undefined
+        return (
+          <img
+            {...ほか}
+            src={src}
+            /*
+              **`width` だけを足す。** 高さは指定しない——`height: auto` のまま
+              なら縦横の比が保たれる。**面より広い幅を指定されても溢れない**
+              （`max-width: 100%` が効く）。
+            */
+            style={幅 === undefined ? style : { ...style, width: `${幅}px` }}
+          />
+        )
+      },
+    }),
+    [画像の幅表],
+  )
   const チェック済み = memo.checked_at !== undefined
 
   const 写す = useCallback(async (value: string) => {
@@ -586,7 +641,19 @@ function MemoBubble({
     <div
       data-testid="memo-bubble"
       data-checked={チェック済み ? 'true' : 'false'}
-      className="memo-bubble bg-muted/40 rounded px-2 py-1"
+      /*
+        **地の色は、面から離す**（利用者の報告・2026-09-14「各メモカードの背景と
+        メモ画面自体の背景色が近すぎて見にくい」）。
+
+        **`bg-muted/40` は薄すぎた。** 面は `bg-popover`（`oklch(0.205)`）で、
+        `--muted` は `oklch(0.269)`。40% で混ぜると実効 `oklch(0.231)` ——
+        **差は 0.026 しかない**。透かした意味がほとんど無かった。
+
+        **不透明の `bg-muted` にして、輪郭を足す。** 差は 0.064（2.5倍）になり、
+        さらに縁が付くことで**1枚のカードとして切り出される**——メッセンジャーの
+        吹き出しが必ず持っている手掛かりである。隙間（`gap-3`）と対で効く。
+      */
+      className="memo-bubble bg-muted border-border rounded border px-2 py-1"
     >
       {/*
         **本文は `prose-dashboard` で描く**——履歴（`TranscriptRow`）とファイルビュア
@@ -600,7 +667,11 @@ function MemoBubble({
         決めず、見出しもコードも `em` 指定なので**入れ物に追随する**。
       */}
       <div data-testid="memo-body" className="prose-dashboard min-w-0 text-sm break-words">
-        <ReactMarkdown remarkPlugins={MEMO_REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS}>
+        <ReactMarkdown
+          remarkPlugins={MEMO_REMARK_PLUGINS}
+          rehypePlugins={REHYPE_PLUGINS}
+          components={描き方}
+        >
           {body.markdown}
         </ReactMarkdown>
       </div>
