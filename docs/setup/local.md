@@ -93,6 +93,76 @@ agentdashboard address --json   # 候補ぜんぶと、待ち受けが広がっ�
 <br/>
 <br/>
 
+## WSL で常駐させる
+**これは WSL で動かしているときだけの話。** Linux や macOS で直に動かしているなら、普通の systemd の設定でよい。
+
+WSL は既定で systemd を使わないので、**そのままでは「落ちたら誰も起こさない」機械**になる。次で縮小（下の節）を自動化するなら、先にここを済ませておくこと——**縮小は WSL ごと落とすので、起こす係が居ないと戻ってこない。**
+
+**【要人間】が2つある。** どちらも `sudo` か、走っている作業を落とす操作である。
+
+### 1. WSL で systemd を有効にする
+`/etc/wsl.conf` に2行足す。
+
+```toml
+[boot]
+systemd=true
+```
+
+**書いただけでは効かない。** WSL を再起動して初めて効き、**その再起動は走っている claude を全部落とす**。「足した」を「効いている」と数えないこと——確かめ方は `systemctl is-system-running` が `offline` 以外を返すかどうかである。
+
+### 2. 常駐の雛形を置いて有効にする
+雛形は `docs/service/agentdashboard-local.service` にある。**書き換えるのは利用者名だけ**（`User=` と、`WorkingDirectory=` / `ExecStart=` のパス）。
+
+```
+sudo cp docs/service/agentdashboard-local.service /etc/systemd/system/
+sudo systemctl enable --now agentdashboard-local
+```
+
+**実機ツリーを指すこと。** 開発ツリーで `make build` しても、実機の画面は変わらない。
+
+---
+<br/>
+<br/>
+
+## 使ったぶんを Windows へ返す（WSL）
+**WSL の中でファイルを消しても、Windows から見た空きは戻らない。** 仮想ディスクは一度膨らむと縮まず、`fstrim` を打っても1バイトも返らない（2026-09-14 実測）。**返す道は「WSL を止めて、仮想ディスクを縮める」だけ**である。
+
+止めるということは、**走っている claude が全部落ちる**ということである。だから機械が勝手に打つのは「静かなとき」だけで、**既定では自動は切ってある**。
+
+### 【要人間】はタスクの登録1回だけ
+縮小には管理者権限が要る。毎回 UAC を押すのでは自動にならないので、**「最上位の特権で実行」のタスクを一度だけ登録する**。以後はダッシュボードがそれを起動するだけなので、UAC は出ない。
+
+台本は `docs/service/compact-wsl.ps1` にある。**管理者の PowerShell で1回だけ**次を流す。
+
+```powershell
+$script = "C:\path\to\AgentDashboard\docs\service\compact-wsl.ps1"
+$arg = '-NoProfile -ExecutionPolicy Bypass -File "' + $script + '"'
+$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arg
+# 実行時間の上限を外す。既定のままだと、圧縮の途中で殺されうる
+$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero)
+# -User は自分のアカウント。SYSTEM で登録すると「別の WSL」を起こしてしまう
+Register-ScheduledTask -TaskName "AgentDashboard Compact WSL" -Action $action -Settings $settings -RunLevel Highest -User $env:USERNAME
+```
+
+**実行時間の上限を外す行が、ここでいちばん大事である。** 圧縮には10〜15分まったく無反応な時間があり、既定の上限を残すと**その途中で殺される**——縮小の失敗としては唯一、実害のある形になる。
+
+**`-User` を自分のアカウントにすること。** WSL は Windows の利用者ごとに別の仮想マシンなので、SYSTEM で登録すると誰も使っていない WSL を起こして終わる。
+
+### 押す
+| やりたいこと | 打つもの |
+|---|---|
+| いま縮める | 設定画面の「いま縮める」、または `agentdashboard host compact run` |
+| 打てるかどうかを見る | `agentdashboard host compact status` |
+| しばらく打たせない | `agentdashboard host compact pause --until <時刻>` |
+
+**生きたセッションが1つでもあれば、数を言って止まる。** それでも打つなら `--force` を付ける。
+
+自動で打たせるかどうか、しきい値、打ってよい時間帯は設定で決める。全キーの一覧は `server/config.toml.example` が兼ねている。
+
+---
+<br/>
+<br/>
+
 ## うまくいかないとき
 | 症状 | 見るところ |
 |---|---|

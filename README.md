@@ -906,7 +906,7 @@ scripts/               cargo・dist のラッパー、フィクスチャ採取�
 |---|---|
 | `docs/setup/` | セットアップの手順書4種（ローカル・セルフホスト・ペアリング・リバースプロキシ）と、消し方 |
 | `docs/proxy/` | Caddy と nginx の設定。**検証で実際に読ませているファイルそのもの** |
-| `docs/service/` | 常駐（systemd）の雛形。セルフホストを実行ファイルだけで立てたときに使う |
+| `docs/service/` | 常駐（systemd）の雛形2種（セルフホストのサーバ用と、実機のローカルモード用）と、WSL の空きを Windows へ返す台本 |
 | `.claude/CLAUDE.md` | プロジェクトの概要と品質ガイドライン |
 | `.claude/docs/guideline.md` | 「この場面ではこうする」という約束事 |
 | `.claude/docs/knowledge/` | 開発環境・ツールチェーン・依存バージョン方針 |

@@ -37,6 +37,12 @@ const REPO_ROOTS: &[&str] = &["docs/", "server/", "docker/", "web/", "scripts/"]
 /// 常駐の雛形（セルフホストの道①）。
 const UNIT: &str = "docs/service/agentdashboard.service";
 
+/// Windows へ空きを返す台本。
+///
+/// **人が居ないところ（タスクスケジューラ）から走る**ので、確認待ちが1つでもあると
+/// 誰も答えず永久に止まる。しかも止まったことに気づく人も居ない。
+const COMPACT_SCRIPT: &str = "docs/service/compact-wsl.ps1";
+
 #[test]
 fn 手順書がそろっている() {
     // 検収条件が数えているのは最初の4つ。名前を変えるならこちらも変える
@@ -143,6 +149,120 @@ fn 常駐の雛形が手順書と同じ起こし方をしている() {
         unit.contains("Environment=AGENTDASHBOARD_BIND_ADDR=0.0.0.0"),
         "待ち受けを広げる指定が無い（常駐させても外から届かない）"
     );
+}
+
+#[test]
+fn 縮小の台本が確認待ちを持たない() {
+    // タスクから走ったときに確認待ちがあると、**誰も答えないので永久に止まる**。
+    // しかも人が見ていないので、止まったことにも気づけない。
+    //
+    // 注釈は落としてから探す。台本は「確認待ちを持たない」理由を自分の説明に
+    // 書いており、そこに出てくる名前で落ちては意味が無い
+    let script = 台本を読む();
+    let code = 注釈を落とす(&script).to_lowercase();
+
+    for 待つもの in [
+        "read-host",
+        "[console]::readkey",
+        "cmd /c pause",
+        "cmd.exe /c pause",
+    ] {
+        assert!(
+            !code.contains(待つもの),
+            "縮小の台本に確認待ちがある: {待つもの}（タスクから走ると永久に止まる）"
+        );
+    }
+    // 単独の `Pause` も同じ。行として置かれているものだけを見る
+    for line in code.lines() {
+        assert!(
+            line.trim() != "pause",
+            "縮小の台本に確認待ち（単独の Pause）がある"
+        );
+    }
+}
+
+#[test]
+fn 縮小の台本が仮想ディスクを読み取り専用で付けている() {
+    // `attach vdisk readonly` は**安全形**である。これがファイルシステム対応の
+    // 圧縮を有効にし、かつ書き込みを弾く。実際に報告されている破損事例は、
+    // どれも readonly を省いた形のものである。
+    //
+    // **「readonly が1回在る」だけを見てはいけない。** 2枚のうち片方にだけ
+    // 付けた台本が通ってしまう。**readonly を伴わない `attach vdisk` が
+    // 1つも無いこと**まで見て、初めて意味がある
+    let script = 台本を読む();
+    let code = 注釈を落とす(&script).to_lowercase();
+
+    assert!(
+        code.contains("attach vdisk readonly"),
+        "縮小の台本が仮想ディスクを読み取り専用で付けていない"
+    );
+
+    let mut at = 0;
+    while let Some(found) = code[at..].find("attach vdisk") {
+        let head = at + found;
+        let rest = &code[head..];
+        assert!(
+            rest.starts_with("attach vdisk readonly"),
+            "readonly を伴わない attach vdisk がある（破損事例と同じ条件）: {}",
+            rest.lines().next().unwrap_or("")
+        );
+        at = head + "attach vdisk".len();
+    }
+}
+
+#[test]
+fn 縮小の台本が圧縮より先に切り離していない() {
+    // **圧縮の完了前に切り離すと、そこで失敗する**（Microsoft の仕様）。
+    // 順番が入れ替わっただけで、縮小は一度も成功しなくなる
+    let script = 台本を読む();
+    let code = 注釈を落とす(&script).to_lowercase();
+
+    let compact = code
+        .find("compact vdisk")
+        .expect("台本に compact vdisk があること");
+    let detach = code
+        .find("detach vdisk")
+        .expect("台本に detach vdisk があること");
+
+    assert!(
+        compact < detach,
+        "圧縮より先に切り離している（圧縮が必ず失敗する）"
+    );
+}
+
+fn 台本を読む() -> String {
+    std::fs::read_to_string(repo_root().join(COMPACT_SCRIPT)).expect("縮小の台本を読めること")
+}
+
+/// PowerShell の注釈（`<# … #>` と、行中の `#` から行末まで）を落とす。
+///
+/// **台本は自分の作法を説明に書いている**ので、注釈ごと探すと「説明に出てくる
+/// 名前」で落ちる。落とす側が雑だと検査が意味を失うが、ここで見たいのは
+/// **実際に走る行だけ**なので、多めに落として困ることはない（落としすぎれば
+/// 「1回以上在る」の確認が先に落ちる）。
+fn 注釈を落とす(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("<#") {
+        out.push_str(&rest[..start]);
+        match rest[start..].find("#>") {
+            Some(end) => rest = &rest[start + end + 2..],
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+
+    out.lines()
+        .map(|line| match line.find('#') {
+            Some(at) => &line[..at],
+            None => line,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// `[表示](行き先)` の行き先を集める。

@@ -1,0 +1,62 @@
+# 実機（ローカルモード）のダッシュボードを常駐させる（セットアップガイド `docs/setup/local.md`）。
+#
+# # 既存の `agentdashboard.service` と何が違うか（3点）
+#
+# 1. **実行ファイルのパスが実機ツリーを指す。** あちらは配布版（`~/.local/bin`）を
+#    起こすが、こちらは `make build` で建てたものを起こす
+# 2. **`--mode server` を付けない。** ローカルモードで動かす（PTY もブラウザ配信も
+#    1つのプロセスが持つ）
+# 3. **`AGENTDASHBOARD_BIND_ADDR` を書かない。** 待ち受けを広げるかは `config.toml`
+#    で決める。unit が上書きすると、設定の在り処が2つになる
+#
+# # なぜ要るのか
+#
+# 縮小（`agentdashboard host compact run`）は WSL ごと落とす。**落ちた後に誰かが
+# 起こさないと、ダッシュボードは戻ってこない。** WSL の systemd に起こさせるために置く。
+#
+# **`/etc/wsl.conf` に `[boot] systemd=true` が要る**（WSL の既定では無効）。書いた
+# だけでは効かず、WSL を再起動して初めて効く——そして再起動は**走っている claude を
+# 全部落とす**。手順は `docs/setup/local.md` の「WSL で常駐させる」を読むこと。
+#
+# # 使い方
+#
+#   sudo cp docs/service/agentdashboard-local.service /etc/systemd/system/
+#   sudo systemctl enable --now agentdashboard-local
+#
+# # 書き換えるところは2つ
+#
+# `User=` と、`WorkingDirectory=` / `ExecStart=` の利用者名。
+
+[Unit]
+Description=AgentDashboard（実機・ローカルモード）
+Documentation=https://github.com/oSUiMiNo/AgentDashboard
+# **`network-online.target` にしない。** WSL には待ち合わせ用のサービスが居ない
+# ことがあり、その場合この unit は永久に上がらない——「縮めたのにダッシュボードが
+# 起きない」という、この機能で最悪の形になる。待ち受けは localhost が中心なので
+# `network.target` で足りる
+After=network.target
+
+[Service]
+Type=simple
+
+# ここを書き換える（1/2）
+User=youruser
+
+# ここを書き換える（2/2）。**実機ツリー**を指すこと。開発ツリー
+# （`~/Dev/AgentDashboard`）を指しても、そちらで建てたものは実機に効かない
+WorkingDirectory=/home/youruser/AgentDashboard
+ExecStart=/home/youruser/AgentDashboard/server/target/release/agentdashboard
+
+# **落ちたら起こし直す。**
+#
+# 走行中の入れ替え（`agentdashboard version restart`）とは喧嘩しない——あれは
+# 同じ PID のまま中身だけ入れ替わるので、systemd から見て主プロセスは生き続ける
+Restart=always
+RestartSec=5
+
+# 起動に失敗し続ける版を選んでしまったときに、無限に起こし直さない
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target
