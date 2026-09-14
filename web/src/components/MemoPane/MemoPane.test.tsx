@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
-import { cleanup, render, screen, fireEvent } from '@testing-library/react'
+import { act, cleanup, render, screen, fireEvent } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { GLOBAL_TARGET, sessionTarget } from '@/lib/annotationTarget'
@@ -760,5 +760,271 @@ describe('置き場所の作法（利用者の報告・2026-09-14）', () => {
     expect(中身).toMatch(/box-sizing:\s*content-box/)
     // 等分した列は横へ逃げられない（繰る道を捨てた）ので、長い語はどこででも折る
     expect(中身).toMatch(/overflow-wrap:\s*anywhere/)
+  })
+})
+
+/*
+  **直している最中に、外から変えられたとき**（メモ設計§7-7）。
+
+  # ここで守るのは「消えないこと」と「黙らないこと」
+
+  **実測（0.1.143）では、3通りのうち2通りで書きかけが消えていた**——外でかたづけられた
+  ときと消されたときは、**吹き出しごと一覧から外れて編集欄が建て直された**。本文が
+  書き換わったときは書きかけこそ残るが、**知らせが1つも出なかった**ので、利用者は
+  自分が何を踏み潰すのか知らないまま確定できた。
+
+  **jsdom は CSS を1バイトも当てない**ので、ここで確かめるのは**組み立て**だけ
+  ——編集欄が建ったままか、断りが出ているか、道が2つあるか。**書きかけの字そのものが
+  残るか**はブロックエディタへ打ち込まないと分からないので、`e2e/memo.spec.ts` が見る。
+*/
+describe('直している最中に外から変えられたとき', () => {
+  /**
+   * サーバからの配信。**`act` で包む。**
+   *
+   * 包まないと `useSyncExternalStore` の更新が当たらず、**配ったつもりで何も起きない**
+   * ——「編集欄が建ったまま」の類はそれでも緑になるので、**検査が空になる。**
+   * 実際に一度そうなっていた（包む前は3件とも配信が届かないまま通っていた）。
+   */
+  function 配る(memos: MemoView[]) {
+    act(() => replaceMemos(GLOBAL_TARGET, memos))
+  }
+
+  /** 直しに入る。**編集欄が建ったことまで確かめる**（建っていなければ以後は無意味） */
+  function 直しに入る() {
+    fireEvent.mouseDown(screen.getByTestId('memo-edit'))
+    expect(screen.getByTestId('memo-editing')).toBeInTheDocument()
+  }
+
+  it('外で本文が書き換わっても、編集欄は建ったまま', () => {
+    配る([memo('あ')])
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" 保存先={null} />)
+    直しに入る()
+
+    配る([memo('あ', { body: { blocks: [], markdown: '外で直した' } })])
+
+    expect(screen.getByTestId('memo-editing')).toBeInTheDocument()
+  })
+
+  it('外でかたづけられても、編集欄は建ったまま（＝書きかけを捨てない）', () => {
+    /*
+      **ここが実測で消えていた側。** かたづけると吹き出しは上段へ移り、上段は既定で
+      畳まれているので**面から丸ごと外れる**——建て直しどころか描かれなくなる。
+    */
+    配る([memo('あ')])
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" 保存先={null} />)
+    直しに入る()
+
+    配る([memo('あ', { checked_at: 1_700_000_001_000 })])
+
+    expect(screen.getByTestId('memo-editing')).toBeInTheDocument()
+    // **留める先は直し始めた段。** 押してもいない利用者の目の前で段をまたがせない
+    expect(screen.getByTestId('memo-list')).toContainElement(screen.getByTestId('memo-editing'))
+  })
+
+  it('外で消されても、編集欄は建ったまま（＝書きかけを捨てない）', () => {
+    配る([memo('あ')])
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" 保存先={null} />)
+    直しに入る()
+
+    配る([])
+
+    expect(screen.getByTestId('memo-editing')).toBeInTheDocument()
+  })
+
+  it('留めた1件を、上段と下段で二重に描かない', () => {
+    /*
+      **上段に別の1件を置いておく。** 直しているぶんだけを上段に入れると、留めた
+      結果いなくなって畳みのボタンごと消え、**開いて確かめる道が無くなる。**
+    */
+    配る([memo('あ'), memo('い', { checked_at: 1_700_000_001_000 })])
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" 保存先={null} />)
+    直しに入る()
+
+    配る([
+      memo('あ', { checked_at: 1_700_000_002_000 }),
+      memo('い', { checked_at: 1_700_000_001_000 }),
+    ])
+    // 上段を開いても、留めたぶんがもう1つ出てはいけない
+    fireEvent.click(screen.getByTestId('memo-checked-toggle'))
+
+    expect(screen.getAllByTestId('memo-editing')).toHaveLength(1)
+    // 直していない「い」だけが吹き出しとして残る（「あ」は編集欄になっている）
+    expect(screen.getAllByTestId('memo-bubble')).toHaveLength(1)
+  })
+
+  it('上段で直していたものは、外で戻されても上段に留まる', () => {
+    配る([memo('あ', { checked_at: 1_700_000_001_000 })])
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" 保存先={null} />)
+    fireEvent.click(screen.getByTestId('memo-checked-toggle'))
+    直しに入る()
+
+    配る([memo('あ')])
+
+    expect(screen.getByTestId('memo-checked')).toContainElement(screen.getByTestId('memo-editing'))
+  })
+
+  it('黙って入れ替えない——何が起きたかを断りに出す', () => {
+    配る([memo('あ')])
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" 保存先={null} />)
+    直しに入る()
+    // 直しに入った時点では何も言わない（言うと、開くたびに断りが出る）
+    expect(screen.queryByTestId('memo-outside-change')).toBeNull()
+
+    配る([memo('あ', { body: { blocks: [], markdown: '外で直した' } })])
+
+    const 断り = screen.getByTestId('memo-outside-change')
+    expect(断り).toHaveTextContent('別の画面で書き換えられました')
+    // **書きかけが無事であることまで言う。** 言わないと、押す道を選べない
+    expect(断り).toHaveTextContent('書きかけはそのまま残してあります')
+  })
+
+  it('消す道が2つある（§47.5）', () => {
+    配る([memo('あ')])
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" 保存先={null} />)
+    直しに入る()
+    配る([memo('あ', { body: { blocks: [], markdown: '外で直した' } })])
+
+    expect(screen.getByTestId('memo-outside-take')).toBeInTheDocument()
+    expect(screen.getByTestId('memo-outside-keep')).toBeInTheDocument()
+  })
+
+  it('「外の内容を取る」を押すと、直すのをやめて外の内容が出る', () => {
+    配る([memo('あ')])
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" 保存先={null} />)
+    直しに入る()
+    配る([memo('あ', { body: { blocks: [], markdown: '外で直した' } })])
+
+    fireEvent.mouseDown(screen.getByTestId('memo-outside-take'))
+
+    expect(screen.queryByTestId('memo-editing')).toBeNull()
+    expect(screen.getByTestId('memo-body')).toHaveTextContent('外で直した')
+  })
+
+  it('「書きかけを残す」を押すと、断りだけが消えて編集欄は建ったまま', () => {
+    配る([memo('あ')])
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" 保存先={null} />)
+    直しに入る()
+    配る([memo('あ', { body: { blocks: [], markdown: '外で直した' } })])
+
+    fireEvent.mouseDown(screen.getByTestId('memo-outside-keep'))
+
+    expect(screen.queryByTestId('memo-outside-change')).toBeNull()
+    expect(screen.getByTestId('memo-editing')).toBeInTheDocument()
+  })
+
+  it('見送ったあとに、もう一度外から変えられたら、また断る', () => {
+    /*
+      **「もう見た」を旗1つで持つと、ここが黙る**——黙って踏み潰す形へ戻る。
+      印で持っている理由がこれである。
+    */
+    配る([memo('あ')])
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" 保存先={null} />)
+    直しに入る()
+    配る([memo('あ', { body: { blocks: [], markdown: '一度目' } })])
+    fireEvent.mouseDown(screen.getByTestId('memo-outside-keep'))
+    expect(screen.queryByTestId('memo-outside-change')).toBeNull()
+
+    配る([memo('あ', { body: { blocks: [], markdown: '二度目' } })])
+
+    expect(screen.getByTestId('memo-outside-change')).toBeInTheDocument()
+  })
+
+  it('一度見送った状態へ外が戻ってきても、開き直したあとなら断る', () => {
+    /*
+      **見送りは「開いているその1回」のもの。** 持ち越すと、**前に見送ったのと同じ
+      中身へ外が戻ったとき**に印が一致して黙る——直し始めた中身とは違うのに、
+      書きかけが黙って踏み潰せる状態になる。
+
+      筋：B を見送る → やめる → 外が C になる → C から直し始める → 外が B へ戻る。
+      **B は「一度見送った印」なので、持ち越していると黙る。**
+    */
+    const 本文 = (字: string) => ({ body: { blocks: [], markdown: 字 } })
+    配る([memo('あ', 本文('A'))])
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" 保存先={null} />)
+    直しに入る()
+    配る([memo('あ', 本文('B'))])
+    fireEvent.mouseDown(screen.getByTestId('memo-outside-keep'))
+    fireEvent.mouseDown(screen.getByTestId('memo-edit-cancel'))
+
+    配る([memo('あ', 本文('C'))])
+    直しに入る()
+    配る([memo('あ', 本文('B'))])
+
+    expect(screen.getByTestId('memo-outside-change')).toBeInTheDocument()
+  })
+
+  it('消されたときは「外の内容を取る」と言わない（取る中身が無い）', () => {
+    配る([memo('あ')])
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" 保存先={null} />)
+    直しに入る()
+
+    配る([])
+
+    expect(screen.getByTestId('memo-outside-change')).toHaveTextContent('別の画面で消されました')
+    expect(screen.getByTestId('memo-outside-take')).not.toHaveTextContent('外の内容')
+  })
+
+  it('外で消されたあと「受け入れる」を押すと、面から消える', () => {
+    配る([memo('あ')])
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" 保存先={null} />)
+    直しに入る()
+    配る([])
+
+    fireEvent.mouseDown(screen.getByTestId('memo-outside-take'))
+
+    expect(screen.queryByTestId('memo-editing')).toBeNull()
+    expect(screen.queryByTestId('memo-bubble')).toBeNull()
+  })
+
+  it('自分が確定したぶんでは断らない（自分の操作が外から来たように見えない）', () => {
+    /*
+      **自分の確定も全タブへ配られて返ってくる。** 返りで断りが出ると、**直すたびに
+      毎回断りが出る**ことになり、本当の衝突と見分けられなくなる。
+    */
+    配る([memo('あ')])
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" 保存先={null} />)
+    直しに入る()
+    fireEvent.mouseDown(screen.getByTestId('memo-edit-cancel'))
+    // 確定して閉じたあとに、そのぶんが配られて戻ってくる
+    配る([memo('あ', { body: { blocks: [], markdown: '自分で直した' } })])
+
+    expect(screen.queryByTestId('memo-outside-change')).toBeNull()
+  })
+})
+
+/*
+  **自分の操作を「外から来た」と言わない。**
+
+  直している1件を面が留めるようにした（§7-7）副作用で、**自分で消しても編集欄が
+  居残る**ようになった——留める前は、消えた行ごと編集欄が外れていたので閉じる必要が
+  無かった。居残ると、自分が押した「消す」を**「別の画面で消されました」と言い出す。**
+  E2E で踏んで足した。
+*/
+describe('自分でした操作は、外から来たことにしない', () => {
+  it('自分で消したら、編集欄は閉じる', () => {
+    act(() => replaceMemos(GLOBAL_TARGET, [memo('あ')]))
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" 保存先={null} />)
+
+    fireEvent.mouseDown(screen.getByTestId('memo-edit'))
+    fireEvent.mouseDown(screen.getByTestId('memo-remove'))
+    fireEvent.mouseDown(screen.getByTestId('memo-remove-confirm'))
+    // 消したぶんがサーバから配られて返ってくる
+    act(() => replaceMemos(GLOBAL_TARGET, []))
+
+    expect(screen.queryByTestId('memo-editing')).toBeNull()
+    expect(screen.queryByTestId('memo-outside-change')).toBeNull()
+  })
+
+  it('送れなかったときは閉じない（打った字を捨てない）', () => {
+    useWsStore.setState({ memoRemove: vi.fn(() => false) })
+    act(() => replaceMemos(GLOBAL_TARGET, [memo('あ')]))
+    render(<MemoPane target={GLOBAL_TARGET} label="全体のメモ" 保存先={null} />)
+
+    fireEvent.mouseDown(screen.getByTestId('memo-edit'))
+    fireEvent.mouseDown(screen.getByTestId('memo-remove'))
+    fireEvent.mouseDown(screen.getByTestId('memo-remove-confirm'))
+
+    expect(screen.getByTestId('memo-editing')).toBeInTheDocument()
+    expect(screen.getByTestId('memo-row-send-failed')).toHaveTextContent('送れていません')
   })
 })

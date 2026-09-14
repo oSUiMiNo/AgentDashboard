@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page } from '@playwright/test'
+import { expect, test, type Browser, type Locator, type Page } from '@playwright/test'
 import { addProject, archiveAll, holdTouch, openDashboard, openSession, spawnSession } from './helpers'
 
 /**
@@ -826,4 +826,218 @@ test.describe('指で触る端末', () => {
       )
       .toEqual([])
   })
+})
+
+/* ==========================================================================
+   直している最中に、外から変えられたとき（メモ設計§7-7）
+
+   **ここでしか測れないものがある。** 守りたいのは「**打った字が消えないこと**」で、
+   ブロックエディタへ打ち込めるのは実ブラウザだけである（jsdom では打てない）。
+   組み立て——編集欄が建ったままか・断りが出ているか——は
+   `MemoPane.test.tsx` が見ているので、**ここでは字そのものを見る。**
+
+   **実測（0.1.143）で、3通りのうち2通りは字が消えていた。** 外でかたづけられた
+   ときと消されたときは、吹き出しごと一覧から外れて編集欄が建て直されていた。
+   ========================================================================== */
+
+/** 直しに入って、いまの字の後ろへ打ち足す（**確定しない**）。 */
+async function 直して打ち足す(面: Locator, 吹き出し: Locator, 足す字: string) {
+  await 操作を押す(吹き出し, 'memo-edit')
+  const 欄 = 面.getByTestId('memo-editing').locator('[contenteditable="true"]').first()
+  await expect(欄).toBeVisible()
+  await 欄.click()
+  await 欄.press('End')
+  await 欄.pressSequentially(足す字)
+  // **打てたことを確かめてから先へ進む。** 打てていないまま外を動かすと、
+  // 「消えなかった」ではなく「最初から無かった」を見て緑になる
+  await expect(欄).toContainText(足す字)
+  return 欄
+}
+
+/** 上段（かたづけたもの）を開く。畳みのボタンが無ければ何もしない。 */
+async function 上段を開く(面: Locator) {
+  const トグル = 面.getByTestId('memo-checked-toggle')
+  if ((await トグル.count()) > 0 && (await トグル.getAttribute('aria-expanded')) === 'false') {
+    await トグル.click()
+  }
+}
+
+/**
+ * この筋で作った全体メモを片付ける。
+ *
+ * **次のテストが件数で見ている**ので、置いていくと隣が落ちる。
+ */
+async function 全体メモを片付ける(面: Locator, 印: string) {
+  // 直しかけが残っていたら閉じる（開いたままだと吹き出しとして数えられない）
+  const やめる = 面.getByTestId('memo-edit-cancel')
+  if ((await やめる.count()) > 0) {
+    await やめる.click()
+  }
+  await 上段を開く(面)
+  const 対象 = 面.getByTestId('memo-bubble').filter({ hasText: 印 })
+  for (let i = 0; i < 10 && (await 対象.count()) > 0; i += 1) {
+    await 操作を押す(対象.first(), 'memo-edit')
+    await 面.getByTestId('memo-remove').click()
+    await 面.getByTestId('memo-remove-confirm').click()
+    await expect(面.getByTestId('memo-editing')).toHaveCount(0, { timeout: 20_000 })
+  }
+  await expect(対象).toHaveCount(0, { timeout: 20_000 })
+}
+
+/** 2つの端末（ブラウザコンテキスト）で全体メモを開く。**「別の端末」はこれでしか作れない。** */
+async function 二つの端末で全体メモを開く(page: Page, browser: Browser) {
+  await openDashboard(page)
+  const 面 = await 全体メモを開く(page)
+  const 別の端末 = await browser.newContext()
+  const 別のページ = await 別の端末.newPage()
+  await openDashboard(別のページ)
+  const 別の面 = await 全体メモを開く(別のページ)
+  return { 面, 別の面, 別の端末 }
+}
+
+/**
+ * 「こちらで直しかけ → 外から何かされる」の筋を1本通す。
+ *
+ * **3通りを1本のテストに詰めると 120 秒に収まらない**（実測で時間切れ）ので、
+ * 呼ぶ側を3つに割って**同じ筋を流す**。
+ */
+async function 外から変えられる筋(
+  page: Page,
+  browser: Browser,
+  名: string,
+  書きかけ: string,
+  外でする: (別の面: Locator, 別の吹き出し: Locator) => Promise<void>,
+  出るはずの字: string,
+  /** 断りが出た状態のまま、さらに確かめたいこと（片付ける前に走る）。 */
+  さらに確かめる?: (面: Locator) => Promise<void>,
+) {
+  const { 面, 別の面, 別の端末 } = await 二つの端末で全体メモを開く(page, browser)
+  const 印 = `ZZ衝突${名}`
+  try {
+    await 書いて送る(page, 面, 印)
+    const 対象 = 面.getByTestId('memo-bubble').filter({ hasText: 印 })
+    await expect(対象).toHaveCount(1, { timeout: 30_000 })
+    const 欄 = await 直して打ち足す(面, 対象, 書きかけ)
+
+    const 別の対象 = 別の面.getByTestId('memo-bubble').filter({ hasText: 印 })
+    await expect(別の対象).toHaveCount(1, { timeout: 30_000 })
+    await 外でする(別の面, 別の対象)
+
+    // **黙って入れ替えない。** 何が起きたのかまで言う
+    await expect(面.getByTestId('memo-outside-change')).toContainText(出るはずの字, {
+      timeout: 30_000,
+    })
+    // **打った字がそのまま残っている。** ここがこの筋の芯である
+    await expect(欄).toContainText(書きかけ)
+    await さらに確かめる?.(面)
+  } finally {
+    await 全体メモを片付ける(面, 印)
+    await 別の端末.close()
+  }
+}
+
+test('外で本文を書き換えられても、打った字は消えず、断りが出る', async ({ page, browser }) => {
+  await 外から変えられる筋(
+    page,
+    browser,
+    'かきかえ',
+    '＿こちらの書きかけ',
+    async (別の面, 別の吹き出し) => {
+      await 操作を押す(別の吹き出し, 'memo-edit')
+      await 打ち直す(別の面, 'ZZ衝突かきかえ（外で直した）')
+    },
+    '別の画面で書き換えられました',
+  )
+})
+
+test('外でかたづけられても、打った字は消えない', async ({ page, browser }) => {
+  /*
+    **実測（0.1.143）で消えていた側。** かたづけると吹き出しは上段へ移り、上段は
+    既定で畳まれているので**面から丸ごと外れ、編集欄ごと消えていた。**
+  */
+  await 外から変えられる筋(
+    page,
+    browser,
+    'かたづけ',
+    '＿かたづけ中の書きかけ',
+    async (_別の面, 別の吹き出し) => {
+      await 操作を押す(別の吹き出し, 'memo-check')
+    },
+    '別の画面でかたづけられました',
+  )
+})
+
+test('外で消されても、打った字は消えない', async ({ page, browser }) => {
+  /*
+    **実測（0.1.143）で消えていた側。** 吹き出しごと外れて編集欄が建て直されていた。
+  */
+  await 外から変えられる筋(
+    page,
+    browser,
+    'けす',
+    '＿消される側の書きかけ',
+    async (別の面, 別の吹き出し) => {
+      await 操作を押す(別の吹き出し, 'memo-edit')
+      await 別の面.getByTestId('memo-remove').click()
+      await 別の面.getByTestId('memo-remove-confirm').click()
+    },
+    '別の画面で消されました',
+    async (面) => {
+      // **取る中身が無いので札も変える**（「外の内容を取る」だと元に戻ると読まれる）
+      await expect(面.getByTestId('memo-outside-take')).toHaveText('消えたことを受け入れる')
+    },
+  )
+})
+
+
+test('外から変えられたときの消す道が、2つとも効く（§47.5）', async ({ page, browser }) => {
+  await openDashboard(page)
+  const 面 = await 全体メモを開く(page)
+  const 別の端末 = await browser.newContext()
+  const 印 = 'ZZ道'
+
+  try {
+    const 別のページ = await 別の端末.newPage()
+    await openDashboard(別のページ)
+    const 別の面 = await 全体メモを開く(別のページ)
+
+    /** 外から書き換えて、断りが出るところまで持っていく。 */
+    async function 断りを出す(名: string, 書きかけ: string) {
+      await 書いて送る(page, 面, `${印}${名}`)
+      const 対象 = 面.getByTestId('memo-bubble').filter({ hasText: `${印}${名}` })
+      await expect(対象).toHaveCount(1, { timeout: 30_000 })
+      const 欄 = await 直して打ち足す(面, 対象, 書きかけ)
+      const 別の対象 = 別の面.getByTestId('memo-bubble').filter({ hasText: `${印}${名}` })
+      await expect(別の対象).toHaveCount(1, { timeout: 30_000 })
+      await 操作を押す(別の対象, 'memo-edit')
+      await 打ち直す(別の面, `${印}${名}（外の内容）`)
+      await expect(面.getByTestId('memo-outside-change')).toBeVisible({ timeout: 30_000 })
+      return 欄
+    }
+
+    /* ---------- 道1：外の内容を取る（書きかけを捨てて、外の字が出る） ---------- */
+    await 断りを出す('とる', '＿捨てられる書きかけ')
+    await 面.getByTestId('memo-outside-take').click()
+    await expect(面.getByTestId('memo-editing')).toHaveCount(0)
+    await expect(
+      面.getByTestId('memo-bubble').filter({ hasText: `${印}とる（外の内容）` }),
+    ).toHaveCount(1, { timeout: 30_000 })
+    await 全体メモを片付ける(面, 印)
+
+    /* ---------- 道2：書きかけを残す（断りだけ消えて、打った字は残る） ---------- */
+    const 欄 = await 断りを出す('のこす', '＿残す書きかけ')
+    await 面.getByTestId('memo-outside-keep').click()
+    await expect(面.getByTestId('memo-outside-change')).toHaveCount(0)
+    await expect(面.getByTestId('memo-editing')).toHaveCount(1)
+    await expect(欄).toContainText('＿残す書きかけ')
+
+    // **そのまま確定できる（後勝ち・§7-7）。** 残すと言った字がそのまま記録になる
+    await 欄.press('Control+Enter')
+    await expect(
+      面.getByTestId('memo-bubble').filter({ hasText: '＿残す書きかけ' }),
+    ).toHaveCount(1, { timeout: 30_000 })
+  } finally {
+    await 全体メモを片付ける(面, 印)
+    await 別の端末.close()
+  }
 })
