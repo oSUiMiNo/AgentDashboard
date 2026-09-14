@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 import { BASE_TITLE } from '@/lib/documentTitle'
@@ -165,17 +165,49 @@ describe('見ていた会話が移ったら、付いて行く', () => {
     開く(`/s/${見ている席}`)
     await screen.findByTestId('session-view')
 
-    枝にする()
-    元が戻る()
+    /*
+      **ここから偽の時計にする。** 移るまでには待ちが2段ある——戻り先を探す巡回
+      （`探す間隔`）と、**一言を読ませる間**（`読み直すまでの間`）で、合わせて
+      実時間で 1.5 秒かかる。どちらも製品が意図して置いた待ちなので、テストが
+      実時間で過ごす理由が無い。
 
-    // **一言出してから移る**（承認は求めない）
-    expect(
-      await screen.findByTestId('conversation-moved-banner'),
-    ).toHaveAttribute('data-state', 'found')
-    await waitFor(
-      () => expect(window.location.pathname).toBe(`/s/${戻った席}`),
-      { timeout: 4_000 },
-    )
+      **素の時計だと、この 1.5 秒が持ち時間 5 秒の 3 割を占める。** 混んだ回に
+      手前の描画が遅れるだけで全体が尽きるので、**通しでだけ落ちて単独では緑**に
+      なる（2026-09-14 に実測。同じ通しで落ちる本が毎回入れ替わった）。
+
+      **待ちを伸ばして直さない。** 伸ばすと落ちる条件を残したまま隠すことになり、
+      次は別の本が同じ理由で倒れる。**実時間に頼るのをやめるのが直し方である。**
+
+      進める量は書かない——`runOnlyPendingTimers` が「次に控えている時計」を
+      そのまま進めるので、**製品側の秒数を変えてもテストは追従する。**
+    */
+    vi.useFakeTimers()
+    try {
+      // 戻り先がまだ無い時点で枝になるので、ここでは `searching` から始まる
+      act(() => {
+        枝にする()
+      })
+      act(() => {
+        元が戻る()
+      })
+
+      // 席は現れたが、気づくのは次の巡回である
+      act(() => {
+        vi.runOnlyPendingTimers()
+      })
+      expect(screen.getByTestId('conversation-moved-banner')).toHaveAttribute(
+        'data-state',
+        'found',
+      )
+
+      // **一言出してから移る**（承認は求めない）
+      act(() => {
+        vi.runOnlyPendingTimers()
+      })
+      expect(window.location.pathname).toBe(`/s/${戻った席}`)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('元の会話がまだ立っていない間は、待つ（勝手に飛ばない）', async () => {
