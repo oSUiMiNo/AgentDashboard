@@ -59,7 +59,7 @@
 #
 # ## 
 
-min_entries = 139
+min_entries = 141
 
 [[entry]]
 issue       = "イシューグループ_2026-0821-1953/セッションごとにも全体にも自分用のメモを残せるようにする"
@@ -69,6 +69,16 @@ tests       = [
   { file = "web/e2e/memo.spec.ts", name = "表は、空のセルも中身のあるセルと同じ高さで出る" },
 ]
 breaks_when = "memo.css のセルの規則から box-sizing: content-box か height: 1lh のどちらかを外す（6通り壊して6通りとも落ちることを実測した）。jsdom は CSS を当てないので、効いたかを見ているのはこちらだけである"
+verified    = true
+
+[[entry]]
+issue       = "イシューグループ_2026-0821-1953/セッションごとにも全体にも自分用のメモを残せるようにする"
+behavior    = "メモカードを bg-muted へ変えたあとでも、確定後の囲みコードはカードと違う背景を持つ"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/memo.spec.ts", name = "確定後の囲みコードは、メモカードの地へ溶けない" },
+]
+breaks_when = "memo.css の .memo-bubble から --code-ground を外す（実機の v0.1.144 ではカードと pre がどちらも oklch(0.269 0 0) になり、正しい pre/code が在っても囲みが平文のように見えた。宣言を外すと単体も1本落ちることを実測した）"
 verified    = true
 
 [[entry]]
@@ -1575,4 +1585,15 @@ tests       = [
   { file = "web/src/stores/ws.test.ts", name = "線を張り直したら、断られた記録は持ち越さない" },
 ]
 breaks_when = "ws.ts の noteRefusal から 断られた への登録を外す（単体3件と E2E が落ちることを実測した）"
+verified    = true
+
+[[entry]]
+issue       = "止まっていて入力待ちのはずのセッションがが停滞ステータスになっている"
+behavior    = "フォークの一覧が残ったままメインが作業を再開したときでも、カードはサブ待ちから作業中へ戻る"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/session-host-core/src/state.rs", name = "一覧が残っていてもメインが動けば作業中へ戻る" },
+  { file = "server/crates/session-host-core/src/state.rs", name = "作業中へ戻ったあとは一覧が残っていてもサブ待ちへ戻らない" },
+]
+breaks_when = "sync_subagent_wait の出口を !waiting の場合だけに戻す（waiting=true / main_running=true / WaitingSubagents の組み合わせに出口が無くなる。旧実装へ戻すと新規2本だけが落ち、修正へ戻すと状態遷移61本が緑になることを実測した）"
 verified    = true
