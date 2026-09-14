@@ -1093,7 +1093,7 @@ describe('探す窓が開いている間', () => {
     expect(findKeyAction(探すキー({ key: 'Enter', ctrlKey: true }))).toBeNull()
   })
 
-  it('IME の変換中は何もしない', () => {
+  it('IME の変換中は、開いている窓の操作も受けない', () => {
     expect(
       findKeyAction(探すキー({ key: 'Enter', isComposing: true })),
     ).toBeNull()

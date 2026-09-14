@@ -709,7 +709,7 @@ describe('フェードの段', () => {
 })
 
 describe('行数で切る', () => {
-  it('しきい値以下なら畳まない', () => {
+  it('しきい値以下なら行数で切らない', () => {
     const text = linesOf(3)
     expect(foldMarkdownByLines(text, 5)).toEqual({ head: text, folded: false })
   })
