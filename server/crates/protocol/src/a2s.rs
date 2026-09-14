@@ -18,8 +18,8 @@
 //! （[`A2S_PROTOCOL`]）で交渉するので、upgrade の段階で拒否できる。
 
 use crate::{
-    AgentId, CardId, ContextUsage, ModelId, PermissionMode, RateLimits, SessionCost, SessionMeta,
-    SessionStatus, Timestamp, TreeNode, ws::ErrorKind,
+    AgentId, CardId, ClaudeLoginFingerprint, ContextUsage, ModelId, PermissionMode, RateLimits,
+    SessionCost, SessionMeta, SessionStatus, Timestamp, TreeNode, ws::ErrorKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -376,8 +376,23 @@ pub enum AgentMessage {
     /// 「まだ分からない」へ戻る）、**こちらは消える向きが無い**——payload が届いている
     /// なら値がある【実測 2026-09-13】。包むと「値が無い報告」という扱う必要のない
     /// 枝が受け口に増える。
+    ///
+    /// # ログインの指紋だけは PC が名乗る
+    ///
+    /// `agent_id` を名乗らせない理由（帰属はサーバが決める）は、こちらには当たらない。
+    /// **サーバは「その PC の claude がどのログインで動いているか」を知る道を持たない**
+    /// ——`~/.claude.json` は利用者の PC にしか無い。名乗れるのは PC だけである。
+    ///
+    /// 騙りの心配も無い。この値で決まるのは**自分の欄を合流させるか入れ替えるか**
+    /// だけで、他人の欄には触れない（鍵は接続から決めた `agent_id` のまま）。
     RateLimits {
         limits: RateLimits,
+        /// どの claude ログインの上限か（[`crate::ClaudeLoginFingerprint`]）。
+        ///
+        /// **版は上げない。** 欄を持たない古い PC からは `None` で届き、
+        /// そのときは今までどおり合流する。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        login: Option<ClaudeLoginFingerprint>,
     },
     /// そのセッションの費用と手間だけの差分更新（status 設計「便」）。
     ///
@@ -878,6 +893,9 @@ mod tests {
                         },
                     ],
                 },
+                // **指紋も往復させる。** ここが落ちると、セルフホストでだけ
+                // 別アカウントへの切り替えが受け口へ伝わらない
+                login: Some(ClaudeLoginFingerprint("0123456789abcdef".to_string())),
             },
             AgentMessage::SessionCost {
                 card_id,

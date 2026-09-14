@@ -17,6 +17,8 @@ protocol.workspace = true
 bytes.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# claude のログインを突き合わせる指紋（`claude_login`）。**元の値は運ばない**
+sha2.workspace = true
 uuid.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true

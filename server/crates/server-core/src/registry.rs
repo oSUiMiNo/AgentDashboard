@@ -27,8 +27,9 @@ use crate::{
     transcript::TranscriptWindow,
 };
 use protocol::{
-    AgentId, AnnotationTarget, CardId, ClaudeSessionId, ContextUsage, MemoId, ModelId, NodeId,
-    PermissionMode, ProjectId, RateLimits, SessionCost, SessionMeta, SessionStatus, TreeNode,
+    AgentId, AnnotationTarget, CardId, ClaudeLoginFingerprint, ClaudeSessionId, ContextUsage,
+    MemoId, ModelId, NodeId, PermissionMode, ProjectId, RateLimits, SessionCost, SessionMeta,
+    SessionStatus, TreeNode,
     ws::{ErrorKind, MemoView, NoticeView, ServerMessage},
 };
 use sea_orm::sea_query::OnConflict;
@@ -324,7 +325,24 @@ pub struct SessionRegistry {
     /// 落ちれば消えるのが正しい——保存すると**繋がっていない PC の古い数字が残る**
     /// （`context_usage` を保存しないのと同じ形だが、あちらは「空のセッションに
     /// 前回の使用率」、こちらは「居ない PC の使用率」で、**誰の実態と食い違うかが違う**）。
-    rate_limits: Mutex<HashMap<(Uuid, Option<AgentId>), RateLimits>>,
+    rate_limits: Mutex<HashMap<(Uuid, Option<AgentId>), StoredRateLimits>>,
+}
+
+/// 保管している使用上限と、**それが誰のものか**。
+///
+/// # 値だけを持っていると、切り替えを取り逃がす
+///
+/// [`merge_rate_limits`] は「リセット時刻は前へ戻らない」を頼りに遅れて届いた報告を
+/// 捨てるが、**その約束は1つの claude ログインの中でしか成り立たない**。別アカウントへ
+/// ログインし直すと新しい窓が手前で戻ることがあり、合流はそれを「遅れて届いたもの」と
+/// 読んで捨てる——**画面に前のアカウントの数字が残り続ける**（2026-09-14 申告）。
+///
+/// だから**誰のものかを値と一緒に控える**。違う相手から届いたら合流させず入れ替える。
+#[derive(Debug, Clone, PartialEq)]
+struct StoredRateLimits {
+    /// どの claude ログインのものか。**読めない環境では `None`**（[`ClaudeLoginFingerprint`]）。
+    login: Option<ClaudeLoginFingerprint>,
+    limits: RateLimits,
 }
 
 impl SessionRegistry {
@@ -1595,16 +1613,44 @@ impl SessionRegistry {
             //
             // **ここでは `agent_id` を便から採る。** `apply` が既に `origin` から
             // 詰めたものがバスに乗っているので、こちら側では信頼してよい
-            ServerMessage::RateLimits { agent_id, limits } => {
+            ServerMessage::RateLimits {
+                agent_id,
+                limits,
+                login,
+            } => {
                 {
                     let mut store = self.rate_limits.lock().expect("ロックが壊れていない");
                     let key = (account_id, agent_id);
-                    let merged = merge_rate_limits(store.get(&key), &limits);
-                    store.insert(key, merged);
+                    let (前の指紋, 前の値) = match store.get(&key) {
+                        Some(stored) => (stored.login.clone(), Some(stored.limits.clone())),
+                        None => (None, None),
+                    };
+                    // **こちらでも入れ替えを見る。** 便を出した側で入れ替え済みでも、
+                    // こちらの保管には前のアカウントの値が残っているので、合流させると
+                    // また混ざる（サーバが2台以上のときだけ出る）
+                    let merged = if login_changed(前の指紋.as_ref(), login.as_ref()) {
+                        limits.clone()
+                    } else {
+                        merge_rate_limits(前の値.as_ref(), &limits)
+                    };
+                    store.insert(
+                        key,
+                        StoredRateLimits {
+                            login: login.clone().or(前の指紋),
+                            limits: merged,
+                        },
+                    );
                 }
                 // **`publish_local` を使う。** `publish` だと受け取ったものを配り直し、
                 // それがまた返ってきて止まらなくなる
-                self.publish_local(account_id, ServerMessage::RateLimits { agent_id, limits });
+                self.publish_local(
+                    account_id,
+                    ServerMessage::RateLimits {
+                        agent_id,
+                        limits,
+                        login,
+                    },
+                );
             }
 
             ServerMessage::SessionCost { card_id, cost } => {
@@ -1877,11 +1923,15 @@ impl SessionRegistry {
             // **手元の保管が埋まらず、後から開いた画面が REST で空を受け取る**。
             // しかも量子化が効いているので、**窓が切り替わるまで空のまま**になる
             // （5時間窓・7日窓なので、数時間空く）
-            ServerMessage::RateLimits { limits, .. } => {
+            ServerMessage::RateLimits { limits, login, .. } => {
                 // **便に乗ってきた `agent_id` は使わない。** 帰属を決めるのはサーバの
                 // 仕事で（`ReportOrigin` の doc）、**ここが唯一それを詰める場所**である。
-                // セッションホストが何を名乗っても、`origin` の値で上書きする
-                self.rate_limits(origin, limits);
+                // セッションホストが何を名乗っても、`origin` の値で上書きする。
+                //
+                // **`login` のほうは名乗りを採る。** あちらは「他人の PC を騙れるか」の
+                // 話だが、こちらで決まるのは自分の欄を入れ替えるかどうかだけで、
+                // **サーバには知る道が無い**（`AgentMessage::RateLimits` の doc）
+                self.rate_limits(origin, limits, login);
                 Ok(())
             }
             ServerMessage::SessionCost { card_id, cost } => {
@@ -2292,27 +2342,71 @@ impl SessionRegistry {
     ///
     /// **だから外さないこと。** 「送る側にあるのだから要らない」と読むと、
     /// セッションの本数だけ配信が増える。
-    fn rate_limits(&self, origin: &ReportOrigin, limits: RateLimits) {
+    fn rate_limits(
+        &self,
+        origin: &ReportOrigin,
+        limits: RateLimits,
+        login: Option<ClaudeLoginFingerprint>,
+    ) {
         let key = (origin.account_id, origin.agent_id);
         let merged = {
             let mut store = self.rate_limits.lock().expect("ロックが壊れていない");
-            let merged = merge_rate_limits(store.get(&key), &limits);
+            let (前の指紋, 前の値) = match store.get(&key) {
+                Some(stored) => (stored.login.clone(), Some(stored.limits.clone())),
+                None => (None, None),
+            };
+
+            // **別のログインから届いたら、合流させずに入れ替える。** 合流は
+            // 「リセット時刻は前へ戻らない」を頼りにしているが、**その約束は1つの
+            // ログインの中でしか成り立たない**（[`StoredRateLimits`]）
+            let merged = if login_changed(前の指紋.as_ref(), login.as_ref()) {
+                limits
+            } else {
+                merge_rate_limits(前の値.as_ref(), &limits)
+            };
+
+            // **読めなかった報告で控えを消さない。** `None` は「変わった」ではなく
+            // 「分からない」なので、いま知っていることを残す
+            let 次の指紋 = login.or_else(|| 前の指紋.clone());
+
             // **同じ表示形なら配らない**（上記）。`==` で見るので、窓の並び順が
             // 変わっただけでも配ってしまう——`merge_rate_limits` が**既存の並びを
             // 保つ**ことでそこを防いでいる
-            if store.get(&key) == Some(&merged) {
+            if 前の値.as_ref() == Some(&merged) {
+                // 指紋だけが動いたときは、**控えだけ直して配らない**。画面に出る
+                // ものが1文字も変わらないのに配ると、関門を置いた意味が無くなる
+                if 次の指紋 != 前の指紋 {
+                    store.insert(
+                        key,
+                        StoredRateLimits {
+                            login: 次の指紋,
+                            limits: merged,
+                        },
+                    );
+                }
                 return;
             }
-            store.insert(key, merged.clone());
-            merged
+            store.insert(
+                key,
+                StoredRateLimits {
+                    login: 次の指紋.clone(),
+                    limits: merged.clone(),
+                },
+            );
+            (merged, 次の指紋)
         };
         // **配り先はアカウント内の全ブラウザ**（カード宛ではない）。この値は PC の
         // 状態なので、どのカードを見ている人にも同じものが要る
+        //
+        // **指紋も一緒に配る。** この便はバス（サーバが2台以上のとき）にも乗るので、
+        // ここで落とすと**もう1台の保管が切り替えを取り逃がす**——そちらへ繋いだ
+        // ブラウザにだけ前のアカウントの数字が残る。画面はこの欄を読まない
         self.publish(
             origin.account_id,
             ServerMessage::RateLimits {
                 agent_id: origin.agent_id,
-                limits: merged,
+                limits: merged.0,
+                login: merged.1,
             },
         );
     }
@@ -2355,7 +2449,9 @@ impl SessionRegistry {
             .lock()
             .expect("ロックが壊れていない")
             .get(&(account_id, agent_id))
-            .cloned()
+            // **指紋は返さない。** これは REST の初期値を作る口で、行き先はブラウザ
+            // である。画面はこの値を読まないので、渡す理由が無い
+            .map(|stored| stored.limits.clone())
     }
 
     async fn append(
@@ -2648,6 +2744,30 @@ async fn load_branches(
 ///
 /// 呼び手が `==` で「配るかどうか」を決めるので、**並び順が変わると中身が同じでも
 /// 配ってしまう**。だから手元の並びを崩さず、知らない窓だけを末尾へ足す。
+/// **claude のログインが別のものへ変わったと言い切れるか。**
+///
+/// # 「分からない」を「変わった」と読まない
+///
+/// 指紋は読めないことがある（ログインしていない・ファイルが無い・API キー利用・
+/// 欄を持たない古い PC）。**`None` は「変わった」ではなく「分からない」**なので、
+/// 片方でも `None` なら**変わっていない扱い**にする。
+///
+/// 逆にすると壊れ方がひどい。読めない環境では**3秒ごとに `None` が届く**ので、
+/// 毎回「切り替わった」と判定して合流が丸ごと効かなくなり、**セッションを N 本
+/// 走らせているときに数字が跳ね回る**（合流はそれを防ぐために在る）。
+///
+/// # 知らなかった相手を初めて知ったときも、変わっていない
+///
+/// `None` → `Some` は「切り替わった」ではなく「読めるようになった」である。
+/// **古い PC が新しい版へ上がった直後がこれに当たる**——ここで入れ替えると、
+/// 版を上げるたびに数字が1回飛ぶ。
+fn login_changed(
+    stored: Option<&ClaudeLoginFingerprint>,
+    incoming: Option<&ClaudeLoginFingerprint>,
+) -> bool {
+    matches!((stored, incoming), (Some(前), Some(いま)) if 前 != いま)
+}
+
 fn merge_rate_limits(current: Option<&RateLimits>, incoming: &RateLimits) -> RateLimits {
     let Some(current) = current else {
         return incoming.clone();

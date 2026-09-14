@@ -2349,6 +2349,7 @@ async fn 他人のPCの使用上限は読めない() {
                 },
                 ServerMessage::RateLimits {
                     agent_id: None,
+                    login: None,
                     limits: protocol::RateLimits {
                         windows: vec![protocol::RateLimitWindow {
                             name: "five_hour".to_string(),
@@ -2396,6 +2397,7 @@ async fn 他人のPCの使用上限は読めない() {
                 },
                 ServerMessage::RateLimits {
                     agent_id: None,
+                    login: None,
                     limits: protocol::RateLimits {
                         windows: vec![protocol::RateLimitWindow {
                             name: "five_hour".to_string(),

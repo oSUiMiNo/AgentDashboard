@@ -2411,13 +2411,14 @@ async fn handle_report(
         //
         // PC 側の便（[`AgentMessage::RateLimits`]）はそもそも `agent_id` を運ばないので、
         // **PC が名乗った値がここへ流れ込む道は無い。**
-        AgentMessage::RateLimits { limits } => {
+        AgentMessage::RateLimits { limits, login } => {
             hub.registry
                 .apply(
                     origin,
                     ServerMessage::RateLimits {
                         agent_id: None,
                         limits,
+                        login,
                     },
                 )
                 .await;

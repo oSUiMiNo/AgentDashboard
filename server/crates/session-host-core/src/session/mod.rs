@@ -3559,6 +3559,10 @@ impl SessionManager {
             self.events.emit(ServerMessage::RateLimits {
                 agent_id: None,
                 limits,
+                // **ここでしか読めない。** `~/.claude.json` は利用者の PC にしか
+                // 無いので、サーバは「どのログインの上限か」を知る道を持たない
+                // （[`crate::claude_login`]）。**控えを見るだけなので軽い**
+                login: crate::claude_login::fingerprint(),
             });
         }
         changed

@@ -340,11 +340,16 @@ fn to_agent_message(event: &ServerMessage) -> Option<AgentMessage> {
         // 持つが、PC に名乗らせてはいけない——帰属を決めるのはサーバの仕事であり
         // （`ReportOrigin`）、名乗れる形にすると他人の PC を騙る道ができる。
         // サーバ側は受け取った接続から詰め直す（status 設計「帰属をどこで守るか」）
+        // **`login` のほうは落とさない。** サーバは利用者の PC の `~/.claude.json` を
+        // 読めないので、**ログインが変わったことを知る道がここしか無い**。落とすと
+        // セルフホスト構成でだけ、別アカウントへ切り替えても値が入れ替わらない
         ServerMessage::RateLimits {
             agent_id: _,
             limits,
+            login,
         } => AgentMessage::RateLimits {
             limits: limits.clone(),
+            login: login.clone(),
         },
         ServerMessage::SessionCost { card_id, cost } => AgentMessage::SessionCost {
             card_id: *card_id,
@@ -1904,14 +1909,23 @@ mod tests {
             total_lines_removed: 318,
         };
 
+        let 指紋 = protocol::ClaudeLoginFingerprint("0123456789abcdef".to_string());
         let 写し = to_agent_message(&ServerMessage::RateLimits {
             agent_id: Some(agent_id),
             limits: limits.clone(),
+            login: Some(指紋.clone()),
         })
         .expect("使用上限の写しが無い。セルフホストでは値だけが永遠に届かない");
         match &写し {
-            AgentMessage::RateLimits { limits: 写 } => {
+            AgentMessage::RateLimits { limits: 写, login } => {
                 assert_eq!(&limits, 写, "写しで値が変わっている");
+                // **指紋は落とさない。** サーバは利用者の PC の `~/.claude.json` を
+                // 読めないので、落とすとセルフホストでだけ切り替えが伝わらない
+                assert_eq!(
+                    login.as_ref(),
+                    Some(&指紋),
+                    "ログインの指紋が写しで落ちている"
+                );
             }
             other => panic!("{other:?} へ写っている"),
         }

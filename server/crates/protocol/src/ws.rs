@@ -13,8 +13,8 @@
 //! 検出できるようにするため。ハンドラの実装は該当フェーズで足していく。
 
 use crate::{
-    AgentId, AnnotationTarget, CardId, ContextUsage, MemoId, ModelId, PermissionMode, RateLimits,
-    SessionCost, SessionMeta, SessionStatus, Timestamp, TreeNode,
+    AgentId, AnnotationTarget, CardId, ClaudeLoginFingerprint, ContextUsage, MemoId, ModelId,
+    PermissionMode, RateLimits, SessionCost, SessionMeta, SessionStatus, Timestamp, TreeNode,
 };
 use serde::{Deserialize, Serialize};
 
@@ -434,6 +434,34 @@ pub enum ServerMessage {
     RateLimits {
         agent_id: Option<AgentId>,
         limits: RateLimits,
+        /// **どの claude ログインの上限か**を表す指紋（[`crate::RateLimits`] の
+        /// 「ログインが変わったことは、値からは分からない」）。
+        ///
+        /// # ダッシュボードのアカウントとは別物
+        ///
+        /// 同じ画面に `account_id`（ダッシュボードの利用者）と `agent_id`（PC）が
+        /// 既に居るので、**3つ目の「誰」を `account` と名付けない**。ここが指すのは
+        /// **その PC に入っている claude が、いまどのログインで動いているか**である。
+        ///
+        /// # 中身は指紋だけ
+        ///
+        /// 元の値（アカウントUUID）は個人を指すので運ばない。**要るのは「前と同じか」
+        /// だけ**なので、突き合わせに足りる長さの hex に潰してある。
+        ///
+        /// # `None` は「分からない」
+        ///
+        /// 読めない環境（ログインしていない・ファイルが無い・API キー利用）では
+        /// `None` になる。**受け取る側は、`None` を「変わった」と読んではいけない**
+        /// ——読めないだけで切り替えを起こすと、値が3秒ごとに入れ替わる。
+        ///
+        /// # なぜ `#[serde(default)]` を書くのか
+        ///
+        /// 欄を持たない古い名乗りを `None` として受けるため。**版
+        /// （`PROTOCOL_VERSION` ／ `A2S_VERSION`）は上げない**ので、欠けた名乗りが
+        /// 来る道が残る。`skip_serializing_if` を添えてあるので、**`None` のときは
+        /// 線に何も乗らない**——既存の綴りを1文字も変えない。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        login: Option<ClaudeLoginFingerprint>,
     },
     /// そのセッションの費用と手間だけの差分更新（status 設計「便」）。
     ///
@@ -1105,6 +1133,9 @@ mod tests {
                     },
                 ],
             },
+            // **指紋が無いときは、線に欄ごと現れない。** 既存の綴りを1文字も
+            // 変えないための約束（`ServerMessage::RateLimits` の doc）
+            login: None,
         })
         .unwrap();
         assert_eq!(
@@ -1123,11 +1154,46 @@ mod tests {
         let text = serde_json::to_string(&ServerMessage::RateLimits {
             agent_id: None,
             limits: RateLimits { windows: vec![] },
+            login: None,
         })
         .unwrap();
         assert_eq!(
             text,
             r#"{"t":"rate_limits","agent_id":null,"limits":{"windows":[]}}"#
+        );
+    }
+
+    /// **ログインの指紋は、在るときだけ線に乗り、往復して戻る。**
+    ///
+    /// 欄を足したのに載らない・戻らないと、受け口はいつまでも「分からない」を
+    /// 受け取り、**別アカウントへ切り替えても使用上限が入れ替わらない**（元の不具合）。
+    #[test]
+    fn ログインの指紋は在るときだけ線に乗る() {
+        let 便 = ServerMessage::RateLimits {
+            agent_id: None,
+            limits: RateLimits { windows: vec![] },
+            login: Some(ClaudeLoginFingerprint("0123456789abcdef".to_string())),
+        };
+        let text = serde_json::to_string(&便).unwrap();
+        assert_eq!(
+            text,
+            r#"{"t":"rate_limits","agent_id":null,"limits":{"windows":[]},"login":"0123456789abcdef"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<ServerMessage>(&text).unwrap(),
+            便,
+            "往復で指紋が落ちている"
+        );
+
+        // **欄を持たない古い名乗りも受ける。** 版を上げないので、欠けた便が来る道が残る
+        let 古い = r#"{"t":"rate_limits","agent_id":null,"limits":{"windows":[]}}"#;
+        assert_eq!(
+            serde_json::from_str::<ServerMessage>(古い).unwrap(),
+            ServerMessage::RateLimits {
+                agent_id: None,
+                limits: RateLimits { windows: vec![] },
+                login: None,
+            }
         );
     }
 

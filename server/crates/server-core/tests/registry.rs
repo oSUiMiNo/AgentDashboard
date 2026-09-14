@@ -77,6 +77,7 @@ fn context_usage(card_id: CardId, percentage: Option<u8>) -> ServerMessage {
 fn rate_limits(windows: &[(&str, u8, i64)]) -> ServerMessage {
     ServerMessage::RateLimits {
         // **ここは詰めない。** `apply` が `origin` から詰め直すので、便に何を
+        login: None,
         // 書いても無視される——それを確かめるテストが下に在る
         agent_id: None,
         limits: protocol::RateLimits {
@@ -91,6 +92,23 @@ fn rate_limits(windows: &[(&str, u8, i64)]) -> ServerMessage {
                 )
                 .collect(),
         },
+    }
+}
+
+/// **どの claude ログインから届いたか**を添えた使用上限の便。
+///
+/// 素の [`rate_limits`] は指紋を持たない（欄を持たない古い PC からの便と同じ形）。
+/// 切り替えを見るテストは、**誰から届いたか**が要る。
+fn rate_limits_as(login: &str, windows: &[(&str, u8, i64)]) -> ServerMessage {
+    match rate_limits(windows) {
+        ServerMessage::RateLimits {
+            agent_id, limits, ..
+        } => ServerMessage::RateLimits {
+            agent_id,
+            limits,
+            login: Some(protocol::ClaudeLoginFingerprint(login.to_string())),
+        },
+        other => panic!("{other:?} が返っている"),
     }
 }
 
@@ -2627,6 +2645,7 @@ async fn 便が名乗ったPCではなく出どころのPCへ入る() {
                 },
                 ServerMessage::RateLimits {
                     agent_id: Some(騙り),
+                    login: None,
                     limits,
                 },
             )
@@ -2733,6 +2752,159 @@ async fn 窓が切り替わったら使用率が下がっても採る() {
             windows_of(&registry, Some(甲)),
             vec![("five_hour".to_string(), 3, 2_000)],
             "[{}] 窓の切替を採り落としている（`resets_at` が鍵に入っていない）",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+/// **別のアカウントへログインし直したら、前のアカウントの数字を残さない**
+/// （2026-09-14 申告の修正）。
+///
+/// # なぜ壊れていたのか
+///
+/// 合流（`merge_rate_limits`）は「**リセット時刻は前へ戻らない**」を頼りに、遅れて
+/// 届いた報告を捨てている。同じ PC で N 本のセッションが同じ値を報告するので、この
+/// 関門が無いと数字が跳ね回る——**1つのログインの中では正しい**。
+///
+/// **破れるのはログインが変わったときだけ。** 新しいアカウントの窓は前のアカウントより
+/// **手前で戻る**ことがあり（使い始めたばかりなら当然そうなる）、合流はそれを
+/// 「遅れて届いたもの」と読んで捨てる。**画面には前のアカウントの数字が残り続ける。**
+///
+/// 値だけを見ても切り替えと遅延は見分けられないので、**誰の上限かを添えて**判別する。
+#[tokio::test]
+async fn 別のログインへ切り替わったら使用上限を入れ替える() {
+    for backend in common::backends("rl_login_switch").await {
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+
+        // 前のアカウント。7日窓をだいぶ使っている
+        registry
+            .apply(
+                &local(),
+                rate_limits_as("1111aaaa1111aaaa", &[("seven_day", 56, 2_000)]),
+            )
+            .await;
+
+        // **別のアカウントへログインし直した。** 使い始めたばかりなので、
+        // 戻り時刻は前のアカウントより手前になる
+        registry
+            .apply(
+                &local(),
+                rate_limits_as("2222bbbb2222bbbb", &[("seven_day", 3, 1_000)]),
+            )
+            .await;
+
+        assert_eq!(
+            windows_of(&registry, None),
+            vec![("seven_day".to_string(), 3, 1_000)],
+            "[{}] 前のアカウントの数字が残っている（合流が切り替えを遅延と読んでいる）",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+/// **同じログインの中では、いままでどおり数字を戻さない。**
+///
+/// 切り替えを入れ替えにしたことで、**合流そのものを壊していないか**を見る。ここが
+/// 緩むと、セッションを N 本走らせているときに数字が跳ね回る（合流はそのために在る）。
+#[tokio::test]
+async fn 同じログインなら遅れて届いた報告で数字は戻らない() {
+    for backend in common::backends("rl_same_login").await {
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+
+        let 同じ = "1111aaaa1111aaaa";
+
+        // 腕1：手元より**新しい**窓はそのまま採る
+        registry
+            .apply(&local(), rate_limits_as(同じ, &[("five_hour", 41, 1_000)]))
+            .await;
+        registry
+            .apply(&local(), rate_limits_as(同じ, &[("five_hour", 4, 2_000)]))
+            .await;
+        assert_eq!(
+            windows_of(&registry, None),
+            vec![("five_hour".to_string(), 4, 2_000)],
+            "[{}] 窓が切り替わったのに採られていない",
+            backend.name
+        );
+
+        // 腕2：**同じ**窓なら大きいほうを採る（小さい値は古い報告）
+        registry
+            .apply(&local(), rate_limits_as(同じ, &[("five_hour", 2, 2_000)]))
+            .await;
+        assert_eq!(
+            windows_of(&registry, None),
+            vec![("five_hour".to_string(), 4, 2_000)],
+            "[{}] 遅れて届いた小さい値で数字が戻っている",
+            backend.name
+        );
+
+        // 腕3：手元より**古い**窓は捨てる
+        registry
+            .apply(&local(), rate_limits_as(同じ, &[("five_hour", 99, 1_000)]))
+            .await;
+        assert_eq!(
+            windows_of(&registry, None),
+            vec![("five_hour".to_string(), 4, 2_000)],
+            "[{}] 遅れて届いた古い窓が採られている",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+/// **指紋が読めない報告は「切り替わった」ではない。**
+///
+/// 読めない環境（ログインしていない・API キー・欄を持たない古い PC）では `None` が
+/// **3秒ごとに**届く。これを切り替えと読むと合流が丸ごと効かなくなり、数字が跳ね回る。
+#[tokio::test]
+async fn 指紋が読めない報告では入れ替えない() {
+    for backend in common::backends("rl_login_unknown").await {
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+
+        registry
+            .apply(
+                &local(),
+                rate_limits_as("1111aaaa1111aaaa", &[("five_hour", 41, 2_000)]),
+            )
+            .await;
+
+        // 指紋を持たない便（`login` が無い）。**入れ替えず、合流する**
+        registry
+            .apply(&local(), rate_limits(&[("five_hour", 4, 1_000)]))
+            .await;
+        assert_eq!(
+            windows_of(&registry, None),
+            vec![("five_hour".to_string(), 41, 2_000)],
+            "[{}] 読めなかっただけの報告で入れ替えている",
+            backend.name
+        );
+
+        // **知らなかった相手を初めて知ったときも、切り替えではない。**
+        // 版を上げた直後の古い PC がこの形になる
+        registry
+            .apply(
+                &local(),
+                rate_limits_as("1111aaaa1111aaaa", &[("five_hour", 4, 1_000)]),
+            )
+            .await;
+        assert_eq!(
+            windows_of(&registry, None),
+            vec![("five_hour".to_string(), 41, 2_000)],
+            "[{}] 指紋を初めて受け取っただけで入れ替えている",
             backend.name
         );
 
@@ -2908,6 +3080,7 @@ async fn バスから来た使用上限も手元の保管へ入る() {
                 server_core::db::LOCAL_ACCOUNT_ID,
                 ServerMessage::RateLimits {
                     // **バス経由では `apply` が既に詰めてあるので、こちらは便の値を使う**
+                    login: None,
                     agent_id: Some(甲),
                     limits,
                 },

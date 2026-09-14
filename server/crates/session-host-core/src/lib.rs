@@ -20,7 +20,9 @@
 
 pub mod attachments;
 pub mod claude_home;
+pub mod claude_login;
 pub mod claude_settings;
+pub mod compact;
 pub mod config;
 pub mod events;
 pub mod hook_post;
