@@ -21,12 +21,18 @@ use std::collections::BTreeSet;
 /// 台帳の本体。コンパイル時に埋め込む（実行時にパスを探して読み損ねる形を作らない）。
 const LEDGER: &str = include_str!("cli_surface.toml");
 
-/// 鍵の内側のルータを持つファイル（§11-3）。`require_identity` を通る口はこの4つの
-/// 外には無い。増えたら「口の数が設計から動いていない」が先に落ちて気づける。
+/// 鍵の内側のルータを持つファイル（§11-3）。`require_identity` を通る口はこの5つの
+/// 外には無い。
+///
+/// **「増えたら『口の数が設計から動いていない』が先に落ちて気づける」は、既に載って
+/// いるファイルへ足したときだけ成り立つ。** 一覧に無い新しいファイルへルータを書くと
+/// 走査対象にならないので、口の数も増えず**何も落ちない**。そちらは
+/// `ルータを持つファイルが全部どれかの一覧に載っている` が捕まえる。
 const 鍵の内側: &[&str] = &[
     "crates/server-core/src/lib.rs",
     "crates/core/src/settings_api.rs",
     "crates/core/src/versions_api.rs",
+    "crates/core/src/compact_api.rs",
     "crates/server-core/src/account.rs",
 ];
 
@@ -36,6 +42,19 @@ const 鍵の内側: &[&str] = &[
 const 鍵の外側: &[&str] = &[
     "crates/server-core/src/auth.rs",
     "crates/server-core/src/client_logs.rs",
+];
+
+/// ルータを持つことを**承知のうえで**台帳の対象外にしているファイル。
+///
+/// ここに書いてあるものは「画面の口ではない」ので数えない。**一覧に書くこと自体が
+/// 判断の記録**であり、`ルータを持つファイルが全部どれかの一覧に載っている` が
+/// 「知らないうちに増えたファイル」と区別するために読む。
+const 走査の対象外: &[&str] = &[
+    // PC 側の受け口（§11-3）。ブラウザは叩かない
+    "crates/server-core/src/gateway.rs",
+    "crates/session-host-core/src/hooks.rs",
+    // 試験用の擬似サーバ。製品には出ない
+    "crates/testkit/src/lib.rs",
 ];
 
 /// REST として数えない口。`/ws` は WebSocket の入口そのもので、そこを流れる操作は
@@ -69,7 +88,7 @@ const WS_VARIANTS: usize = 21;
 // 2026-09-13：ファイルを書き戻す口を1つ増やした（`ファイルビュアにエディタ機能を追加`
 // 設計§2-1）。**鍵の内側**——利用者の機械へ書く口なので、帰属を必ず通す。読む口
 // （`GET /api/hosts/{host}/file`）と同じパスに動詞を足した形で、資源は同じ・向きが逆
-const INSIDE_DOORS: usize = 37;
+const INSIDE_DOORS: usize = 40;
 const OUTSIDE_DOORS: usize = 5;
 
 /// tenancy.rs の総当たりの本数。口が増えないなら総当たりも増えない（§1-1）。
@@ -669,6 +688,93 @@ fn 口の数が設計から動いていない() {
         "tenancy.rs の総当たりが {TENANCY_TESTS} 本から動いている。CLI はブラウザと同じ席に\
          座るので、CLI の作業でこの数が増える理由は無い（設計§1-1）。enforcement を足した\
          のなら、この数字を意識して上げること"
+    );
+}
+
+/// ルータを持つファイルが、`鍵の内側` / `鍵の外側` / `走査の対象外` のどれかに載っているか。
+///
+/// # なぜこれが要るのか
+///
+/// **`鍵の内側` はハードコードの一覧なので、一覧に無いファイルへルータを書くと、
+/// この台帳は何も言わない。** `内側の口()` は一覧に載ったファイルしか走査しないので、
+/// **口の数（`INSIDE_DOORS`）も増えず、緑のまま通る。**
+///
+/// 一覧の doc コメントは「増えたら『口の数が設計から動いていない』が先に落ちて気づける」
+/// と書いているが、**それは既に載っているファイルへ足したときだけ成り立つ。**
+/// 新しいファイルを作った場合は、**そのファイル自体が走査対象外なので何も起きない。**
+///
+/// 実際に踏んで確かめた：`crates/core/src/compact_api.rs` に REST を3本足した状態で
+/// この検査が無いと、**16本すべて緑で通った**（縮小イシューの実行レポート・フェーズ2）。
+#[test]
+fn ルータを持つファイルが全部どれかの一覧に載っている() {
+    let mut 野良 = Vec::new();
+    for crate_dir in std::fs::read_dir(server_root().join("crates"))
+        .expect("crates を読めること")
+        .flatten()
+    {
+        let src = crate_dir.path().join("src");
+        if !src.is_dir() {
+            continue;
+        }
+        探す(&src, &mut 野良);
+    }
+    野良.sort();
+    assert!(
+        野良.is_empty(),
+        "ルータ（`.route(`）を持つのに、どの一覧にも載っていないファイルがある：{野良:?}\n\
+         **載せないと、その口は台帳に1行も出ないまま本番へ出る。** 画面の口なら\n\
+         `鍵の内側`（帰属を通す）か `鍵の外側`（素通し）へ、画面の口でないなら\n\
+         `走査の対象外` へ理由つきで足すこと"
+    );
+}
+
+/// `.route(` を持つファイルを集める（コメントの中は数えない）。
+fn 探す(dir: &std::path::Path, out: &mut Vec<String>) {
+    for entry in std::fs::read_dir(dir).expect("src を読めること").flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            探す(&path, out);
+            continue;
+        }
+        if path.extension().is_none_or(|ext| ext != "rs") {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).unwrap_or_default();
+        // **コメントを落としてから探す。** 落とさないと、この検査の説明文そのものが
+        // 引っかかる（`コメントの中のrouteは拾わない` と同じ流儀）
+        if !strip_comments(&source).contains(".route(") {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(server_root())
+            .expect("server の下")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let 既知 = 鍵の内側.contains(&rel.as_str())
+            || 鍵の外側.contains(&rel.as_str())
+            || 走査の対象外.contains(&rel.as_str());
+        if !既知 {
+            out.push(rel);
+        }
+    }
+}
+
+/// 落とす操作の断り文面が、製品コードに1つしか無い（縮小設計§3-1・テスト 2-2）。
+///
+/// `version restart` と `host compact run` は**どちらも走っている claude を道連れに
+/// する**ので、同じ文面で断る（`client::refuse_if_alive`）。**2箇所に書くと、片方を
+/// 直したときに静かに食い違う**——利用者から見ると「同じ操作なのに言うことが違う」。
+///
+/// 切り出しの消し残しもここで捕まる。元の `version_restart` の中に `if !force { … }` が
+/// 残っていると、この数が2になる。
+#[test]
+fn 道連れを断る文面は製品コードに1つしか無い() {
+    let clean = strip_comments(&読む("crates/core/src/client/mod.rs"));
+    let count = 製品側(&clean).matches("生きたセッションが").count();
+    assert_eq!(
+        count, 1,
+        "断り文面が {count} 箇所にある。**1箇所へ集めること**（切り出した後に元の\
+         かたまりが残っていると2になる）"
     );
 }
 
