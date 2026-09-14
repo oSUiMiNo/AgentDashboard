@@ -879,6 +879,17 @@ struct Entry {
     tests: Vec<テスト>,
     manual_check: Option<String>,
     breaks_when: String,
+    /// **`breaks_when` を実際に壊して、落ちるのを見たか。**
+    ///
+    /// 変異検査はやらないので、`breaks_when` に書いてあることを機械は確かめていない。
+    /// 確かめたのは**閉じるときの人（エージェント）の1回だけ**である。
+    ///
+    /// **その1回すら無い行がある。** 2026-09-14 に70件を遡って載せたぶんは、
+    /// 実装を読んで「ここを戻せば落ちるはず」と書いたもので、**当てていない**。
+    /// 両者が同じ見た目だと、**読む人は全部が確かめ済みだと思う**——それがいちばん困る。
+    ///
+    /// だから欄で分ける。閉じるときに壊した行だけが `true` を名乗れる。
+    verified: bool,
     retired_by: Option<String>,
 }
 
@@ -920,6 +931,7 @@ fn 台帳() -> (usize, Vec<Entry>) {
                         "tests",
                         "manual_check",
                         "breaks_when",
+                        "verified",
                         "retired",
                     ]
                     .contains(&key.as_str()),
@@ -977,6 +989,18 @@ fn 台帳() -> (usize, Vec<Entry>) {
                     .and_then(toml::Value::as_str)
                     .map(str::to_string),
                 breaks_when: 文字列("breaks_when"),
+                // **既定値を置かない。** 書き忘れを `false` で受けると、
+                // 「確かめていない」と「書き忘れた」が同じ顔になる
+                verified: item
+                    .get("verified")
+                    .and_then(toml::Value::as_bool)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{}: verified（breaks_when を実際に壊して落ちるのを見たか）を \
+                             true か false で書くこと",
+                            文字列("issue")
+                        )
+                    }),
                 retired_by,
             }
         })
@@ -1031,8 +1055,15 @@ fn 約束破り(entries: &[Entry], 走査結果: &BTreeMap<String, 走査>) -> V
         let 誰 = format!("{} / {}", entry.issue, entry.behavior);
 
         // 約束2：空欄と逃げ文句
+        //
+        // **`issue` はここで見ない。** あれは理由を書く欄ではなく**パス**なので、
+        // 最低文字数も逃げ文句の判定も当たらない——`クローズ/CICD`（7文字）や
+        // `クローズ/初期実装`（9文字）は実在する正しいパスである。
+        // 空でないことだけを見て、実在するかは MyDocs があるときに別途見る。
+        if entry.issue.trim().is_empty() {
+            out.push(format!("{誰}: issue が空です"));
+        }
         for (label, text) in [
-            ("issue", &entry.issue),
             ("behavior", &entry.behavior),
             ("breaks_when", &entry.breaks_when),
         ] {
@@ -1401,6 +1432,22 @@ fn 守られている数を数える() {
     println!(
         "  畳んだ（retired）           : {}",
         entries.len() - 生きている.len()
+    );
+
+    // **「載っている」と「確かめてある」を同じ数で語らない。**
+    //
+    // `breaks_when` は記録であって検査ではない（台帳の頭に書いてある）。そのうえ
+    // **遡って載せたぶんは、その1回の記録すら無い**——実装を読んで「ここを戻せば
+    // 落ちるはず」と書いただけで、当てていない。
+    //
+    // 分けて出すのは、**この数が減っていくことを次に読む人へ渡すため**である。
+    // 1つの数にまとめると、台帳が育つほど「守られている」に見えて、確かめていない
+    // 行が埋もれる。
+    let 確かめた = 生きている.iter().filter(|e| e.verified).count();
+    println!(
+        "  うち実際に壊して確かめた    : {確かめた} / {}（残り {} 行は実装から書いた推定）",
+        生きている.len(),
+        生きている.len() - 確かめた
     );
 
     if MyDocsがある() {

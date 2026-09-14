@@ -28,7 +28,22 @@
 # tests        [{ file, name }]。manual 以外は必須
 # manual_check 人がどう確かめるか。manual のときだけ必須。**空なら落ちる**
 # breaks_when  閉じるときに**実際に壊した内容**
+# verified     **breaks_when を実際に壊して、落ちるのを見たか**（true / false・必須）
 # retired      { by, on }。意図して覆したときだけ。**行は消さない**
+#
+# ## verified を欄にしている理由
+#
+# **「載っている」と「確かめてある」は違う。**
+#
+# 閉じるときに書く行は、その場で壊して落ちるのを見てから載せるので `true` を名乗れる。
+# 一方、**2026-09-14 に70件を遡って載せたぶんは `false` である**——実装を読んで
+# 「ここを戻せば落ちるはず」と書いたもので、**当てていない**。
+#
+# 両方を同じ見た目で並べると、読む人は全部が確かめ済みだと思う。**台帳が育つほど
+# 「守られている」に見えて、確かめていない行が埋もれる**——それがいちばん困る。
+#
+# 書き忘れは既定値で受けずに落とす。「確かめていない」と「書き忘れた」が
+# 同じ顔になると、分ける意味が無くなる。
 #
 # ## breaks_when は記録であって検査ではない
 #
@@ -42,14 +57,1200 @@
 # **`retired.by` が空の行でテストが消えていれば落ちる**——つまり
 # **覆す側のイシューを名指しできないなら、それは仕様変更ではない。**
 #
-# ## min_entries は「黙って行を消す」を止めるためにある
-#
-# 行を消せば、その行に関する検査は何も走らない。だから**行数の下限を台帳自身に持たせる**。
-# 消す側は min_entries を下げるしかなく、**その差分はレビューで見える**。
-# `retired` で畳めば行は残るので、下限は下がらない。
-#
-# ## 並び順
-#
-# issue → behavior の昇順。**位置ではなく名前で並べる**（行が動いても並びが変わらない）。
+# ## 
 
-min_entries = 0
+min_entries = 110
+
+[[entry]]
+issue       = "クローズ/CICD"
+behavior    = "新しい版を取ってきただけのときは、選ばれている版を切り替えない"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/versions.rs", name = "取ってきても選ばれない" },
+]
+breaks_when = "取ってくる処理の最後で、取ってきた版を選択済みとして書き込むようにする"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/CICD"
+behavior    = "版を入れ替えるとき、抜け殻になるカードの枚数が押す前に分かる"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/versions.rs", name = "入れ替えで抜け殻になる枚数が押す前に分かる" },
+]
+breaks_when = "抜け殻の枚数を数える処理を、生きたカードを見ずに常に0を返す形へ変える"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/LLMモデル切り替えUI"
+behavior    = "モデルを切り替えたあとでも、既に起こしてあるセッションは元の既定のまま始まる"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/model.rs", name = "切り替えたあとに起こしたセッションは元の既定で始まる" },
+]
+breaks_when = "切替のときに起動済みセッションの既定も上書きする形へ戻す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/LLMモデル切り替えUI"
+behavior    = "同じモデルを選んだときは、切り替えの指示を送らない"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/model.rs", name = "同じモデルを選んだときは送らない" },
+]
+breaks_when = "選んだ値と現在値を比べる分岐を外し、毎回送る形へ戻す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/PCでも、選択中に別の種類を押したら解くだけにする"
+behavior    = "別の種類を選んでいる間に押しても、選択を解くだけで新しくは選ばない"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/press.test.ts", name = "別の種類を選んでいる間は、解くだけ" },
+  { file = "web/src/lib/press.test.ts", name = "別の種類を押したら、選択を解くだけ（開かない）" },
+  { file = "web/src/lib/press.test.ts", name = "「解くだけ」の状態でも、長押しは選べる（これが1動作の選び直し）" },
+]
+breaks_when = "press.ts の、別の種類を押したらそちらへ選び直す分岐へ戻す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/あらゆる経路のログを開発エージェントが読みやすいように整備"
+behavior    = "伏せる設定を入れても、ログの欄の並びは変わらない"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/session-host-core/src/logs.rs", name = "伏せても欄の並びが変わらない" },
+]
+breaks_when = "伏せるときに欄を空文字で置き換えるのをやめ、欄そのものを落とすようにする"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/あらゆる経路のログを開発エージェントが読みやすいように整備"
+behavior    = "途中で読めなくなったファイルがあっても、黙って終わらずに理由を残す"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/session-host-core/src/logs.rs", name = "途中で読めなくなったファイルは黙って終わらない" },
+]
+breaks_when = "読み取りの失敗を握り潰して、理由を残さずそのまま終了するようにする"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026-0813-1804/フォルダを掘った位置がリロードで失われる"
+behavior    = "サイドバーで掘った位置を、読み込み直したあとでも PC と PJT の組ごとに分けて覚えている"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/filesPlace.test.ts", name = "掘った位置と開いていたファイルが、同じ行に載る" },
+  { file = "web/src/lib/filesPlace.test.ts", name = "PC が違えば別の行。PJT が同じでも混ざらない" },
+  { file = "web/src/lib/filesPlace.test.ts", name = "PJT が違えば別の行。PC が同じでも混ざらない" },
+]
+breaks_when = "filesPlace.ts の行の鍵から PJT を抜く（実行レポート フェーズ2 の表で8本が落ちた）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026-0813-1804/フォルダを掘った位置がリロードで失われる"
+behavior    = "覚えていた場所が消えていたときでも、画面を壊さず黙って起点へ落ちる"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/project-files.spec.ts", name = "掘った位置は、読み込み直しても残る" },
+  { file = "web/e2e/project-files.spec.ts", name = "覚えていた場所が消えていたら、黙って起点へ落ちる" },
+]
+breaks_when = "filesPlace.ts の isUnder の判定を外す（実行レポート フェーズ2 の表で2本が落ちた）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026-0813-1804/リロードするとファイルビューが勝手に閉じる"
+behavior    = "開いていたファイルを、読み込み直したあとでも開いたまま復元する"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/project-files.spec.ts", name = "開いていたファイルは、読み込み直しても残る" },
+]
+breaks_when = "useFilesParts の picked から復元の経路を外す（filesPlace を読まずに起点だけで開く形へ戻す）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026-0813-1804/入力中のメッセージがリロードやページ移動で消える"
+behavior    = "読み込み直しやページ移動のあとでも、カードごとに分かれた書きかけが残る"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/drafts.test.ts", name = "カードごとに分かれ、混ざらない" },
+  { file = "web/src/lib/drafts.test.ts", name = "覚えていた文から始まる" },
+  { file = "web/src/lib/drafts.test.ts", name = "アカウントが違えば表が分かれる" },
+]
+breaks_when = "drafts.ts の localStorage への書き出しを外す（覚える側を殺す）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026-0813-1804/入力中のメッセージがリロードやページ移動で消える"
+behavior    = "送信に成功したときだけ書きかけを忘れ、失敗したときでも残す"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/drafts.test.ts", name = "空を渡したら忘れる（送信に成功したとき）" },
+  { file = "web/src/lib/drafts.test.ts", name = "渡さなければ残る（送信に失敗したとき）" },
+]
+breaks_when = "送信の戻り値を見ずに、送った時点で常に書きかけを消す形へ戻す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026-0813-2125/スマホ側でセッション画面の上の各情報を4行構成に整える"
+behavior    = "いきなり開いた（読み込み直した）ときでも、戻るの行き先がアプリの外へ出ない"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/routes.test.ts", name = "いきなり開いた（リロードした）ときに、アプリの外へ出る答えを返さない" },
+  { file = "web/src/lib/routes.test.ts", name = "最初のエントリなら、一覧へ落ちると答える" },
+]
+breaks_when = "戻る先の判定を「履歴の件数」へ壊す（routes.test.ts に壊し方を見る行が対で在る）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026-0813-2125/スマホ側でセッション画面の上の各情報を4行構成に整える"
+behavior    = "狭い画面で深いパスを出すときでも、末尾2階層は必ず残し、1文字も落とさずに割る"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/path.test.ts", name = "深いパスは、前半と末尾2階層に割れる" },
+  { file = "web/src/lib/path.test.ts", name = "末尾は必ず2階層である" },
+  { file = "web/src/lib/path.test.ts", name = "割っても1文字も落とさない（head + tail が元と一致する）" },
+]
+breaks_when = "path.ts の割り方を、末尾1階層だけ残す形へ変える"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026-0813-2125/モデルとモードのドロップダウンを短くする"
+behavior    = "畳んでいるときは、いま動いているモデルを版番号つきで1行に収めて出す"
+gate        = "unit"
+tests       = [
+  { file = "web/src/components/ModelPicker/ModelPicker.test.tsx", name = "閉じているときは、いま動いているモデルが版番号つきで出る" },
+  { file = "web/src/components/ModelPicker/ModelPicker.test.tsx", name = "表に無いモデルが来ても、いま何で動いているかは出し続ける" },
+]
+breaks_when = "ModelPicker の畳んだ表示から版番号の欄を落とす（※壊し方の記録が無く、実装から書いた）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026-0813-2125/上の行数が最終活動時間の表記によって動く"
+behavior    = "最終活動の表記が「たった今」から「3時間前」へ変わっても、帯の高さが動かない"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/dashboard.spec.ts", name = "帯の高さは、最終活動の表記が変わっても変わらない" },
+]
+breaks_when = "帯の高さを固定している指定を外し、中身の文字数なりに伸びる形へ戻す（※壊し方の記録が無く、実装から書いた）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026-0813-2208/構造化ビューでアシスタントの本文をマークダウンで表示する"
+behavior    = "本文を整形して出すときも、br 以外の生 HTML はそのまま残す"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/markdown.test.ts", name = "`<br>` 以外の HTML はそのまま残る" },
+  { file = "web/src/lib/markdown.test.ts", name = "囲みコードの中は触らない" },
+]
+breaks_when = "br 以外の HTML も消すようにする（親の実行レポート フェーズ2 壊し方6。当てると5本落ちた）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026-0813-2208/構造化ビューの本文を折りたたみ式にする"
+behavior    = "本文がしきい値ちょうどのときは畳まず、超えたときだけ畳む"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/markdown.test.ts", name = "しきい値ちょうどでも畳まない" },
+]
+breaks_when = "畳む判定の比較を <= から < へ取り違える（親の実行レポート フェーズ2 壊し方4。当てると1本だけ落ちた）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026-0820-2129/構造化ビューで利用者の発言を吹き出しにする"
+behavior    = "利用者の発言が届いたときだけ右寄せの吹き出しにし、アシスタントの本文は吹き出しにしない"
+gate        = "unit"
+tests       = [
+  { file = "web/src/components/TranscriptTree/TranscriptTree.test.tsx", name = "利用者の発言は右寄せの吹き出しになる" },
+  { file = "web/src/components/TranscriptTree/TranscriptTree.test.tsx", name = "アシスタントの本文は吹き出しにしない" },
+  { file = "web/src/components/TranscriptTree/TranscriptTree.test.tsx", name = "吹き出しは幅いっぱいにならない" },
+]
+breaks_when = "吹き出しの出し分けから役割の判定を外し、全部の本文へ同じ見た目を当てる"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026-0820-2129/構造化ビューの畳み方と開き方を作り直す"
+behavior    = "しきい値の境目に絵文字が跨ったときでも、末尾を壊さずに切る"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/markdown.test.ts", name = "しきい値の境目に絵文字が跨っても、末尾が壊れない" },
+  { file = "web/src/lib/markdown.test.ts", name = "実装・設計・実機で同じ値" },
+]
+breaks_when = "切る位置をコードポイントではなくバイト位置で取る形へ変える"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026-0820-2129/構造化ビューの畳み方と開き方を作り直す"
+behavior    = "しきい値を超えたときだけ畳み、境目ちょうどでは畳まない"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/markdown.test.ts", name = "しきい値以下なら畳まない" },
+  { file = "web/src/lib/markdown.test.ts", name = "しきい値ちょうどでも畳まない" },
+  { file = "web/src/lib/markdown.test.ts", name = "しきい値を超えたら、最後の改行まで戻して切る" },
+]
+breaks_when = "畳む判定を > から >= へ寄せる（実行レポート フェーズ3 の壊し方1・2。猶予の中を突く項目を足して分離してある）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026-0820-2129/畳み込みの見た目をグラデーションに"
+behavior    = "まとめ行を開け閉めしたあとでも、本文そのものは隠れず、入れ子の深さも増えない"
+gate        = "unit"
+tests       = [
+  { file = "web/src/components/TranscriptTree/TranscriptTree.test.tsx", name = "まとめ行を開くと、束ねられていたツールコールが並ぶ" },
+  { file = "web/src/components/TranscriptTree/TranscriptTree.test.tsx", name = "まとめ行を開け閉めしても、本文は隠れない" },
+  { file = "web/src/components/TranscriptTree/TranscriptTree.test.tsx", name = "入れ子の深さが行に出る" },
+]
+breaks_when = "まとめ行の開閉で本文側の表示も一緒に切り替える形へ戻す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026-0826-1146/ファイルの中身を左端の広い区画で見せる"
+behavior    = "中身の列の上で横へ回したときも、その回転はセッションのレールへ渡る"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/project-files.spec.ts", name = "中身の列の上で横へ回すと、セッションのレールが動く" },
+]
+breaks_when = "中身の列で横ホイールを止めている購読を外す（※壊し方の記録が無く、実装から書いた）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026-0826-1146/フォルダのパネルの幅をドラッグで変えられるようにする"
+behavior    = "フォルダの区画を開いているときは、その幅ぶんだけ場所取りが場所を確保する"
+gate        = "unit"
+tests       = [
+  { file = "web/src/components/ProjectFiles/useFilesParts.test.tsx", name = "場所取りは、フォルダの幅ぶんの場所を取る" },
+]
+breaks_when = "場所取りの幅をフォルダの幅ではなく固定値へ戻す（※壊し方の記録が無く、実装から書いた）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026-0826-1146/フォルダのパネルの幅をドラッグで変えられるようにする"
+behavior    = "幅を変えたあとで読み込み直しても、変えた幅が残る"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/project-files.spec.ts", name = "変えた幅は、読み込み直しても残る" },
+  { file = "web/e2e/project-files.spec.ts", name = "縁は指でも掴める" },
+]
+breaks_when = "変えた幅を localStorage へ書く行を外す（※壊し方の記録が無く、実装から書いた）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026-0903-0422/ファイルビュアに別のタブで開くボタンを追加"
+behavior    = "ブラウザで開くボタンを押したとき、宛先は rawUrl と字で一致し、画面側で継ぎ足さない"
+gate        = "unit"
+tests       = [
+  { file = "web/src/components/FileView/FileView.test.tsx", name = "宛先は rawUrl と字で一致する——画面で継ぎ足さない" },
+  { file = "web/src/components/FileView/FileView.test.tsx", name = "種別で出し分けない——どのファイルでも出る" },
+]
+breaks_when = "FileView.tsx の href を rawUrl から組み立て直す形（クエリを足す等）へ変える"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026-0903-0422/ファイルビュアに別のタブで開くボタンを追加"
+behavior    = "新しいタブで開いたときでも、ファイルビューの中と同じく script が動き、描けない種別でも字が出る"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/project-files.spec.ts", name = "ブラウザで開くと、新しいタブでも script が動く" },
+  { file = "web/e2e/project-files.spec.ts", name = "描けない種別も、新しいタブで字が出る" },
+]
+breaks_when = "media_type_of を Option へ戻し、表に無い種別を 415 で断る形へ戻す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026-0903-0422/ファイルビューでHTMLのインラインscriptが動かない"
+behavior    = "script を通したあとでも、箱は出自を名乗れない（allow-same-origin を足さない）"
+gate        = "unit"
+tests       = [
+  { file = "web/src/components/FileView/FileView.test.tsx", name = "箱は出自を名乗れない——allow-same-origin を書かない" },
+  { file = "server/crates/server-core/src/hosts.rs", name = "緩めたのはscriptの1段だけである" },
+]
+breaks_when = "CSP へ allow-same-origin を足す（実行レポート フェーズ6 の表で1本が落ちた。sed で字ごと書き換えると字を固定する側は通るので、性質で見るこの行が要る）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026-0903-0422/ファイルビューでHTMLのインラインscriptが動かない"
+behavior    = "script を通す型を広げたあとでも、js を実行できる型では生で返さない（型を決める側）"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/protocol/src/fs.rs", name = "jsを実行できる型で返さない" },
+]
+breaks_when = "protocol::fs の表で js に application/javascript を与える"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026-0903-0422/ファイルビューでHTMLのインラインscriptが動かない"
+behavior    = "script を通す型を広げたあとでも、生で返した js は script として実行できない（実ブラウザで見る側）"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/project-files.spec.ts", name = "生で返した .js は、script として実行できない" },
+]
+breaks_when = "protocol::fs の表で js に application/javascript を与える"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026-0903-0422/ファイルビューでHTMLのインラインscriptが動かない"
+behavior    = "ファイルビューの箱に入れた HTML でも script は動き、それでいて外への持ち出しは1件も通さない"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/project-files.spec.ts", name = "script は動くが、外へは1件も出ない" },
+  { file = "web/e2e/project-files.spec.ts", name = "箱の側から allow-scripts を外すと、script は動かなくなる" },
+]
+breaks_when = "CSP から allow-scripts を落とす（実行レポート フェーズ6 の表で2本が落ちた）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026_0804_2219/権限確認スキップの既定を他の設定と揃える"
+behavior    = "記録を消したときは、権限モードの既定が設定ファイルの値へ戻る"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/permission_mode.rs", name = "記録を消すと設定ファイルの値へ戻る" },
+]
+breaks_when = "権限モードの既定を、設定ファイルではなくコード内の定数から引く形へ戻す（※壊し方の記録が無く、実装から書いた）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026_0804_2219/自分のダッシュボード設定の値をファイルとしてインポートエクスポート可能に"
+behavior    = "取り込んだ設定に知らないキーが混ざっていても、無視したことを呼び手へ伝える"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/server-core/src/portable.rs", name = "知らないキーは無視して伝える" },
+  { file = "server/crates/server-core/src/portable.rs", name = "足りないキーは既定で埋めない" },
+]
+breaks_when = "portable.rs の未知キーの収集をやめ、黙って捨てる形へ戻す（※壊し方の記録が無く、実装から書いた）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026_0804_2219/自分のダッシュボード設定の値をファイルとしてインポートエクスポート可能に"
+behavior    = "書き出しを押したときは、画面が組み立てた値ではなくサーバの口を直に指す"
+gate        = "unit"
+tests       = [
+  { file = "web/src/components/Settings/PortableSettingsCard.test.tsx", name = "書き出しはサーバの口を直に指す" },
+]
+breaks_when = "書き出しのリンク先を、画面の手元の値から組み立てる形へ戻す（※壊し方の記録が無く、実装から書いた）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026_0805_0514/セッション専用画面からプロジェクト内のフォルダを閲覧する機能"
+behavior    = "セッション専用画面からフォルダを辿るとき、起点より上へは抜けられない"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/project-files.spec.ts", name = "左パネルを開き、ファイルを読み、相対パスをコピーできる" },
+]
+breaks_when = "FolderBrowser の起点より上を弾く判定を外す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026_0805_0514/セッション起動時にPJTをクリックで選択する機能"
+behavior    = "サイドバーを開き直したあとでも、開閉の状態が保たれる"
+gate        = "unit"
+tests       = [
+  { file = "web/src/components/GroupView/GroupView.test.tsx", name = "開閉が覚えられ、開き直しても保たれる" },
+]
+breaks_when = "開閉の状態を覚える保存を外し、開くたびに既定の開閉で描くようにする"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026_0805_0514/セッション起動時にPJTをクリックで選択する機能"
+behavior    = "セッションが0本の枠でも画面が開き、追加の記号だけが出る"
+gate        = "unit"
+tests       = [
+  { file = "web/src/components/GroupView/GroupView.test.tsx", name = "セッションが0本でも画面が開き、「+」だけが出る" },
+]
+breaks_when = "セッションが0本の枠を一覧から落とし、画面を開けないようにする"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026_0805_0514/プロジェクトとセッションの追加方式を変更"
+behavior    = "枠から起こすとき、選んだ権限モードと枠が持つ宛先でサーバへ要求し、ローカルのときは宛先を指名しない"
+gate        = "unit"
+tests       = [
+  { file = "web/src/components/SessionAdd/SessionAdd.test.tsx", name = "選んだモードと、枠が持つ宛先でサーバへ起動を要求する" },
+  { file = "web/src/components/SessionAdd/SessionAdd.test.tsx", name = "ローカルは宛先として指名しない" },
+]
+breaks_when = "SessionAdd から agent_id の引き渡しを外す（宛先を常に null にする）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026_0805_0514/プロジェクトとセッションの追加方式を変更"
+behavior    = "枠を足したあとでも、並びは position だけで決まり、セッションが起動しても動かない"
+gate        = "unit"
+tests       = [
+  { file = "web/src/stores/projects.test.ts", name = "並びは position だけで決まり、セッションが起動しても動かない" },
+  { file = "web/src/stores/projects.test.ts", name = "枠は created_at ではなく position の順に並ぶ" },
+  { file = "web/src/stores/projects.test.ts", name = "カードが0枚でも枠の箱が出る" },
+]
+breaks_when = "projects ストアの並べ替えを created_at 順へ戻す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026_0805_1530/稼働中のセッションが終了扱いになっていた"
+behavior    = "呼び戻しで session_end が先に届いたときでも、稼働中のセッションを終了扱いにしない"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/hooks_state.rs", name = "resume相当はsession_endが先でも終了扱いにならない" },
+  { file = "server/crates/core/tests/hooks_state.rs", name = "resume相当はsession_startが先でも終了扱いにならない" },
+]
+breaks_when = "SessionEnd => set(Ended) の腕を戻す（実行レポート の壊し方 Y で2本とも落ちた）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026_0805_1530/稼働中のセッションが終了扱いになっていた"
+behavior    = "猶予の境目ちょうどまでは、終わりの申告を捨てずに残す"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/session-host-core/src/session/mod.rs", name = "猶予の境目までは申告を残す" },
+]
+breaks_when = "猶予の比較を > から >= へ寄せる（実行レポート の壊し方 C でこの1本だけが落ちた）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026_0805_1530/稼働中のセッションが終了扱いになっていた"
+behavior    = "終わりの申告が取り消されたあとで異常終了したときは、正常終了に丸めず異常終了として出す"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/hooks_state.rs", name = "申告が取り消されたあとの異常終了は異常終了として出る" },
+  { file = "server/crates/core/tests/hooks_state.rs", name = "申告の直後に終わったら正常終了のまま" },
+]
+breaks_when = "handle_hook の _ => clear_end_report() を消す（実行レポート の壊し方 B でこの1本だけが落ちた）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026_0805_1530/送信以外の操作もCtrl+Enterになっている"
+behavior    = "画面を読むのは素の Enter のときだけで、それ以外の打鍵では読まない"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/keys.test.ts", name = "画面を読むのは素の Enter のときだけ" },
+  { file = "web/src/lib/keys.test.ts", name = "❯ と番号の間の空白は種類を問わない" },
+]
+breaks_when = "除外の前に画面を読む順序へ戻す（実行レポート の壊し方 E で1本だけが落ちた）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/イシューグループ_2026_0805_1530/送信以外の操作もCtrl+Enterになっている"
+behavior    = "選択ダイアログが出ている最中は、素の Enter を送信ではなく確定として扱う"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/keys.test.ts", name = "番号つきの選択肢があれば選択待ちと判定する" },
+  { file = "web/src/lib/keys.test.ts", name = "番号を持たないメニューは案内文で拾う" },
+  { file = "web/src/lib/keys.test.ts", name = "素の Enter は送信しない" },
+]
+breaks_when = "選択待ちの判定を常に false にする（実行レポート の壊し方 A で7本が落ちた）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/カードと枠を、中クリックで新しいタブに開く"
+behavior    = "カードや枠を中クリックしたときでも、開くタブは1枚だけで、選択は変わらない"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/newtab.spec.ts", name = "カードを中クリックすると、セッション専用画面が新しいタブに開く" },
+  { file = "web/e2e/newtab.spec.ts", name = "カードを中クリックしても、開くタブは1枚だけ——枠のぶんまで開かない" },
+  { file = "web/e2e/newtab.spec.ts", name = "中クリックしても、選択が変わらない" },
+]
+breaks_when = "中クリックの腕から stopPropagation を外し、枠側のハンドラまで走らせる"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/サイドバーで開いたファイルを、タブで並べて切り替える"
+behavior    = "前の版が書いた pick だけの行から読んだときでも、1枚のタブとして復元する"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/filesPlace.test.ts", name = "前の版が書いた行（`pick` だけ）は、1枚のタブになる" },
+  { file = "web/src/lib/filesPlace.test.ts", name = "`picks` が配列でなければ、前の版の行として読む" },
+]
+breaks_when = "picks が無い行を読めない行として捨てる（前の版との互換を外す）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/サイドバーで開いたファイルを、タブで並べて切り替える"
+behavior    = "読み込み直したあとでも、開いていたタブが順序ごと戻り、見ていた1枚が選ばれている"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/filesPlace.test.ts", name = "並びを書いて読むと、順序ごと戻る" },
+  { file = "web/src/lib/filesPlace.test.ts", name = "同じパスが二重に入っていたら、先に出たほうを残す" },
+  { file = "web/src/lib/filesPlace.test.ts", name = "選択が並びの外を指していたら、末尾へ足して選ぶ" },
+]
+breaks_when = "filesPlace の picks を捨てて pick だけを覚える形（前の版）へ戻す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/サイドバーのファイルを、中クリックでブラウザの新しいタブに開く"
+behavior    = "中クリックしたあと、本当に新しいタブが開いて中身まで出る"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/folder-menu.spec.ts", name = "押すと、本当に新しいタブが開いて中身が出る" },
+]
+breaks_when = "ファイルの行を a 要素から div へ戻し、href を持たせない形にする（※壊し方の記録が無く、実装から書いた）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/サイドバーのファイルを、中クリックでブラウザの新しいタブに開く"
+behavior    = "中クリックや修飾キー付きで押されたときは、既定を止めずにブラウザへ任せる"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/openInNewTab.test.tsx", name = "Cmd＋Enter も新しいタブ" },
+]
+breaks_when = "押した経路で preventDefault を呼ぶようにする（実行レポート：判定はすべて fireEvent の戻り値で見ている）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/サイドバーの一覧を、リロードせずに新しくする"
+behavior    = "サイドバーを畳んでいる間・タブが裏にいる間は問い合わせず、表へ戻ったときに引き直す"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/poll.test.ts", name = "隠れている間は引かない。表へ戻ったら引く" },
+  { file = "web/src/lib/poll.test.ts", name = "時報のたびに引き、引き終わってから次を測る" },
+  { file = "web/src/lib/poll.test.ts", name = "**引いている最中に stop すると、解けても積み直さない**（世代の役目）" },
+]
+breaks_when = "poll.ts の visibility を見る条件を外し、裏にいても引き続ける形にする"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/サイドバーの一覧を、リロードせずに新しくする"
+behavior    = "引き直した一覧の中身が前と同じときは画面を作り直さず、並び順が変わったときだけ違うと見る"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/hostfs.test.ts", name = "中身が同じなら同じと言う" },
+  { file = "web/src/lib/hostfs.test.ts", name = "**並び順が変わったら違う**（押そうとした的が逃げるため）" },
+  { file = "web/src/lib/hostfs.test.ts", name = "名前が同じでも、種別が変わったら違う" },
+]
+breaks_when = "sameListing から並び順の比較を外し、集合として同じなら同じと言う形にする"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/スマホでターミナルの文字をコピーできない"
+behavior    = "端末の上をなぞったときは焦点を動かさず、選択が片側しか端末に入っていないときでも選択中と見る"
+gate        = "unit"
+tests       = [
+  { file = "web/src/components/TerminalPane/TerminalPane.test.tsx", name = "なぞったときは、焦点を動かさないこと" },
+  { file = "web/src/components/TerminalPane/TerminalPane.test.tsx", name = "選択の端が片方しか端末に入っていなくても、選択中と見ること" },
+  { file = "web/src/components/TerminalPane/TerminalPane.test.tsx", name = "端が逆向き（中から外へ）でも、選択中と見ること" },
+]
+breaks_when = "なぞりの判定を外し、触れたら常に焦点を渡す形（前のイシューの状態）へ戻す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/スマホでターミナルビュー内に触れるとキーボードが出てくる"
+behavior    = "マウスで押したときは焦点を渡し、なぞっただけのときは焦点を動かさない"
+gate        = "unit"
+tests       = [
+  { file = "web/src/components/TerminalPane/TerminalPane.test.tsx", name = "マウスで押したときは焦点を渡すこと" },
+  { file = "web/src/components/TerminalPane/TerminalPane.test.tsx", name = "なぞったときは、焦点を動かさないこと" },
+  { file = "web/src/components/TerminalPane/TerminalPane.test.tsx", name = "焦点が外れたら塞ぎ直すこと" },
+]
+breaks_when = "隠しテキストエリアへ属性を当てる行を消す（実行レポート ⛳壊し方：4本落ちる）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/スマホでファイルビュアを開くと画面が崩れる"
+behavior    = "狭い画面でファイルを開いたときでも、セッションの面が潰れない"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/project-files.spec.ts", name = "狭い画面でファイルを開いても、セッションの面が潰れない" },
+]
+breaks_when = "ファイルビュアの幅の指定を、狭い画面を考えない固定値へ戻す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/セッション画面とPJT画面を行き来できるようにする"
+behavior    = "単独画面から押したときも横並びから押したときも、もう一方の画面へ行き来できる"
+gate        = "unit"
+tests       = [
+  { file = "web/src/components/SessionView/SessionView.test.tsx", name = "押すと行き来する" },
+  { file = "web/src/components/SessionView/SessionView.test.tsx", name = "単独画面では、押すと PJT の画面へ移る" },
+]
+breaks_when = "SessionView.tsx の切替ボタンから、行き先を画面の種類で分ける判断を外す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/セルフホスト化・マルチテナント対応"
+behavior    = "カードを一覧から外したあとでも、遅れて届いた報告でそのカードが戻らない"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/server-core/tests/registry.rs", name = "外したカードは後から届いた報告で戻らない" },
+]
+breaks_when = "registry.rs の、外した印を見てから受け入れる判断を外す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/セルフホスト化・マルチテナント対応"
+behavior    = "偽装したヘッダで来たときでも、入口の鍵の免除を得られない"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/auth.rs", name = "偽装したヘッダでは免除を得られない" },
+]
+breaks_when = "auth.rs の、ヘッダ由来の申告をそのまま信用する形へ戻す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/セルフホスト化・マルチテナント対応"
+behavior    = "手順書が名指ししているファイルが、配るときに実在する"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/dist/tests/guides.rs", name = "手順書が名指ししているファイルが実在する" },
+]
+breaks_when = "手順書から名指ししているファイルを1つ消すか、名前を変える"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/ダッシュボードでセッションを動かすとWSLが落ちやすい"
+behavior    = "自分の読み取りで上がる通知が来たときでも、輪にならないよう通さない"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/transcript-parser/src/tail.rs", name = "自分の読み取りで上がる開くは通さない" },
+  { file = "server/crates/transcript-parser/src/tail.rs", name = "メタデータだけの変更は通さない" },
+  { file = "server/crates/transcript-parser/src/tail.rs", name = "中身が増えたら通す" },
+]
+breaks_when = "tail.rs の通知の選別を外し、全てのイベントを通す形へ戻す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/トーストを、指で払って消せるようにする"
+behavior    = "境目を越えて払ったときだけ消し、届かなければ戻す。下へ払っても消さない"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/swipeDismiss.test.ts", name = "境目に届かなければ消さない" },
+  { file = "web/src/lib/swipeDismiss.test.ts", name = "**下へはどれだけ運んでも消さない**" },
+  { file = "web/src/components/ToastLayer/ToastLayer.test.tsx", name = "触った1枚だけが消える" },
+  { file = "web/src/components/ToastLayer/ToastLayer.test.tsx", name = "払って消しても、ベルには残る" },
+]
+breaks_when = "swipeDismiss の境目の比較を外し、動いた時点で消す形にする"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/バージョン表示"
+behavior    = "版の切替が使える構成でも、版の欄には同じ3つが出る"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/versions.rs", name = "使える構成でも同じ3つが出る" },
+]
+breaks_when = "構成によって版の欄の作り方を変える分岐を戻す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/ビルドの置き場所を適切なときに自動で片付ける"
+behavior    = "上限以下のときは何も消さず、置き場所が違えばロックも別になる"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/prune_target.rs", name = "上限以下では何もしない" },
+  { file = "server/crates/core/tests/prune_target.rs", name = "置き場所が違えばロックも別になる" },
+]
+breaks_when = "prune_target.rs の上限の判定を外し、常に片付ける形へ戻す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/ファイルの中身をスクロールできない"
+behavior    = "画面が狭いときでも、ファイルの中身を遡れる"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/project-files.spec.ts", name = "狭い画面でも、ファイルの中身を遡れる" },
+  { file = "web/e2e/project-files.spec.ts", name = "狭い画面で、セッション専用画面が横にはみ出さない" },
+]
+breaks_when = "FileView.tsx のいちばん外側の section から h-full を外す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/ファイルビュアの中を Ctrl+F で探せるようにする"
+behavior    = "ファイルビュアを開いているときに Ctrl+F を押すと探す窓が出るが、IME の変換中は何も起きない"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/keys.test.ts", name = "IME の変換中は何もしない" },
+  { file = "web/src/lib/keys.test.ts", name = "Ctrl+Enter は奪わない" },
+  { file = "web/src/lib/keys.test.ts", name = "Alt / Meta が付いていたら渡さない" },
+  { file = "web/src/components/FileView/FileView.test.tsx", name = "Ctrl+G でも開く" },
+]
+breaks_when = "keys.ts の変換中（isComposing）の判定を外す（※壊し方の記録が無く、実装から書いた）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/ファイルビュアの中を Ctrl+F で探せるようにする"
+behavior    = "語に印を付けるときも、DOM を1つも書き換えずに済ませる"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/fileSearch.test.ts", name = "DOM を1つも書き換えない" },
+]
+breaks_when = "fileSearch.ts の CSS.highlights を使う実装を、当たりを span で囲む形へ戻す（※壊し方の記録が無く、実装から書いた）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/ファイルビュアの文字を小さめに始め、その場で大きさを変えられるようにする"
+behavior    = "倍率を押して動かしたあとでも、上限と下限で止まり、押し戻せば必ず元の値へ戻る"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/fileZoom.test.ts", name = "上限で止まる" },
+  { file = "web/src/lib/fileZoom.test.ts", name = "下限で止まる" },
+  { file = "web/src/lib/fileZoom.test.ts", name = "押し戻すと、必ず元の値へ戻る" },
+]
+breaks_when = "fileZoom.ts の、文字列と数値を同じ門に通す処理を外す（数値が既定へ落ちて上限も下限も効かなくなる。実行レポートに実際にこの形で落ちた記録がある）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/ファイルビュアの文字を小さめに始め、その場で大きさを変えられるようにする"
+behavior    = "別のタブで倍率を変えたあとでも、開いている側が同じ倍率へ揃う"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/fileZoom.test.ts", name = "別のタブの合図を拾って揃う" },
+  { file = "web/src/lib/fileZoom.test.ts", name = "覚えた値が次に読んだときに戻る" },
+]
+breaks_when = "他のタブからの合図を拾う購読を外す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/ファイル一覧で名前にマウスオーバーしたら全体を出す"
+behavior    = "名前が省略されているときでも、マウスを載せれば全体が読める指定が付く"
+gate        = "unit"
+tests       = [
+  { file = "web/src/components/FolderBrowser/FolderBrowser.test.tsx", name = "名前に、全体が読める指定が付く" },
+  { file = "web/src/components/FolderBrowser/FolderBrowser.test.tsx", name = "長押し（右クリック）のメニューに、名前の全体が見出しとして出る" },
+]
+breaks_when = "FolderBrowser.tsx から、名前に全体を読ませる指定を外す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/ファイル閲覧で画像とHTMLも表示する"
+behavior    = "画像や SVG を開いたときも、箱の中で実際に絵として描かれる"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/project-files.spec.ts", name = "画像が実際に描かれる" },
+  { file = "web/e2e/project-files.spec.ts", name = "SVG も箱の中で描かれる" },
+]
+breaks_when = "sandbox 属性を外す（実行レポート：箱の属性を見る2本が落ちる）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/フォルダとファイル一覧のコピーボタンが効かない"
+behavior    = "新しい写す口が無いときでも、古い方法へ落ちて実物のブラウザで写る"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/project-files.spec.ts", name = "新しい口が無いとき、古い方法が実物のブラウザで写す" },
+  { file = "web/e2e/project-files.spec.ts", name = "写す口が古い方法だけでも、右クリックから本当に写る" },
+  { file = "web/e2e/project-files.spec.ts", name = "どちらの口も無いとき、一覧とファイルの両方で値を選べる形が出る" },
+]
+breaks_when = "navigator.clipboard が無いときの退避（execCommand への落ち）を外す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/ブラウザのタブに、開いているPJTの名前を出す"
+behavior    = "PJT 専用画面を開いたときは、タブの名前に PJT 名が先に出る"
+gate        = "unit"
+tests       = [
+  { file = "web/src/App.title.test.tsx", name = "PJT 専用画面では、その PJT の名前が先に出る" },
+  { file = "web/src/App.title.test.tsx", name = "セッション専用画面では、そのカードが属する PJT の名前が出る" },
+]
+breaks_when = "App.tsx からタブ名を書く呼び出しを消す（親の実行レポート フェーズ4 で同じ形を当てて落ちることを確認済み）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/ブラウザのタブに、開いているPJTの名前を出す"
+behavior    = "同名の PJT を開いたときでも、タブの名前に区別の番号が付く"
+gate        = "unit"
+tests       = [
+  { file = "web/src/App.title.test.tsx", name = "同名の PJT を開くと、タブにも番号が付く" },
+  { file = "web/src/lib/documentTitle.test.ts", name = "同名の PJT に付く番号は、そのままタブの名前に乗る" },
+]
+breaks_when = "projectDisplayName を通さずパスの末尾をそのまま取る（実行レポートの記録：この1本を足すまでは、同じ壊し方で0本しか落ちなかった）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/ブランチセッションを、元を残したままボタン1つで作る"
+behavior    = "作業中に押したときでも、ターンが終わってから枝になる"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/branch.rs", name = "作業中に押すとターンが終わってから枝になる" },
+  { file = "server/crates/core/tests/branch.rs", name = "同じ親から続けて枝を作れる" },
+]
+breaks_when = "branch.rs の、ターンの終わりを待つ段を外して即座に枝を作る形へ戻す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/メッセージに画像を添付できるようにする"
+behavior    = "付けた時点で読めなければ、送る前でもその場で断る"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/attachments.test.ts", name = "付けた時点で読めなければ、その場で断る" },
+  { file = "web/src/lib/attachments.test.ts", name = "小窓の絵も写しから作る" },
+]
+breaks_when = "添付を受け取るときの読み取り確認を外し、送信時まで遅らせる（※壊し方の記録が無く、実装から書いた）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/メッセージに画像を添付できるようにする"
+behavior    = "受け取った名前に制御文字が混ざっていても、保存する名前には入らない"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/session-host-core/src/attachments.rs", name = "名前に制御文字が入らない" },
+]
+breaks_when = "attachments.rs の名前の掃除（制御文字の除去）を外す（※壊し方の記録が無く、実装から書いた）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/ユーザがGUIから行える全ての事をエージェントがCLIで行えるように提供"
+behavior    = "ローカルモードのときは、札を持っていても入口を素通しのままにする"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/cli_auth.rs", name = "ローカルモードは札を持っていても素通しのまま" },
+]
+breaks_when = "ローカルモードでも札の検証を通すようにする"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/ユーザがGUIから行える全ての事をエージェントがCLIで行えるように提供"
+behavior    = "画面に口を足したときは、CLI にも同じ口があるか台帳と突き合わせて落ちる"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/cli_surface.rs", name = "台帳と画面の口が一致する" },
+  { file = "server/crates/core/tests/cli_surface.rs", name = "台帳のすべての行が約束を守っている" },
+]
+breaks_when = "cli_surface.toml から行を1つ消す（実コードの口は残したまま）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/一覧のカードのレイアウトを変える"
+behavior    = "カードの形をどう変えたときでも、当たり判定が 44px の床を割らない"
+gate        = "unit"
+tests       = [
+  { file = "web/src/tile.test.ts", name = "当たり判定が 44px の床を割らない" },
+]
+breaks_when = "カードの押せる領域に置いた最小の高さの指定を外し、中身なりの高さにする"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/一覧のカードのレイアウトを変える"
+behavior    = "接続が切れているときは、最終活動と同じ行に印を出す"
+gate        = "unit"
+tests       = [
+  { file = "web/src/components/SessionTile/SessionTile.test.tsx", name = "接続断は①行（最終活動と同じ行）に出る" },
+  { file = "web/src/components/SessionTile/SessionTile.test.tsx", name = "繋がっていない印が、中身だけでなく器にも出る" },
+]
+breaks_when = "接続断の印を別の行へ移し、器側の印を消す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/上部に居座る知らせを、最前面のトーストとベルへ移す"
+behavior    = "トーストを積んだあとでも、7秒たてば自動で消える"
+gate        = "unit"
+tests       = [
+  { file = "web/src/stores/appNotices.test.ts", name = "トーストは7秒で消える" },
+]
+breaks_when = "appNotices.ts の、時間で消す段を外して居座らせる"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/上部に居座る知らせを、最前面のトーストとベルへ移す"
+behavior    = "他人の知らせが届いたときでも、一覧にも未読の数にも出ない"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/server-core/tests/notices.rs", name = "他人の知らせは一覧にも未読にも出ない" },
+]
+breaks_when = "知らせを引くときのアカウントの絞り込みを外す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/人が打っていないものを、人の発言として出さない"
+behavior    = "人が打っていない入力が届いたときでも、人の発言と同じ側の吹き出しには出さない"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/transcript.spec.ts", name = "人が打っていないものが、逆側の吹き出しで並ぶ" },
+]
+breaks_when = "差出人の判定を、記録の中身を見ずに一律で人とする形へ戻す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/作業中に送った追加メッセージが構造化ビューに出ない"
+behavior    = "あとから履歴が届いても、待っている指示はいちばん下に残る"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/transcript.spec.ts", name = "あとから履歴が届いても、待っている指示はいちばん下に残る" },
+  { file = "web/e2e/transcript.spec.ts", name = "待っている指示が出て、読まれると消える" },
+]
+breaks_when = "待っている指示を末尾へ置く並べ替えを外し、届いた順のまま並べる"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/作業中に送った追加メッセージが構造化ビューに出ない"
+behavior    = "同じ本文の発言が先に届いていても、読まれたあとに二重に並べない"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/transcript-parser/src/thread.rs", name = "同じ本文の発言が先に来ても畳まれる" },
+]
+breaks_when = "待ち行列から取り出すときの、同じ本文を畳む判定を外す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/入れ替えのあとフックの宛先が消えたパスのまま固まる"
+behavior    = "渡されたフックの入口が実在しないときだけ、入れる側の入口へ入れ替える"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/version.rs", name = "実在しない指定は入れる側の入口へ入れ替える" },
+  { file = "server/crates/core/tests/version.rs", name = "実在する指定は上書きしない" },
+  { file = "server/crates/core/src/boot.rs", name = "渡すフックの入口は実在しないときだけ入れ替える" },
+]
+breaks_when = "入れ替えの判定から実在の確認（is_file）を外し、常に据え置く形へ戻す（実行レポート：この形にしたら壊し方3が落ちるようになった）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/入力欄でスラッシュコマンドの候補が出ない"
+behavior    = "行頭で / を打ったときは候補が出るが、語の途中の / では出ない"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/slashCandidates.test.ts", name = "表に載せた名前は、打てば必ず当たる" },
+  { file = "web/src/lib/slashCandidates.test.ts", name = "絞り込みで並びが入れ替わらない" },
+  { file = "web/src/lib/slashCandidates.test.ts", name = "よく打つものが抜けていない" },
+]
+breaks_when = "候補を出す判定から、直前の文字が空白か行頭かの確認を外す（※壊し方の記録が無く、実装から書いた）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/初期実装"
+behavior    = "パースが壊れて自己修復に入る場面でも、修復のためのセッションを新しく起こさない"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/selfheal.rs", name = "修復セッションは起こさない" },
+  { file = "server/crates/core/tests/selfheal.rs", name = "パーサが居なくなってもターミナルと状態表示は無傷" },
+]
+breaks_when = "修復の入口からセッションを起こす呼び出しを足す（※壊し方の記録が無く、実装から書いた）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/手元の新しい版をGUIだけで効かせる"
+behavior    = "予約が1つも無くても、手元の実行ファイルのほうが新しければ入れ替えを押せる"
+gate        = "unit"
+tests       = [
+  { file = "web/src/components/Settings/VersionsCard.test.tsx", name = "予約が1つも無くても、手元が新しければ押せる" },
+]
+breaks_when = "押せる条件を「予約があること」へ戻す（実行レポート：戻すとこの1本が落ちる）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/手元の新しい版をGUIだけで効かせる"
+behavior    = "生きたカードが1枚でもある場合は入れ替えを断り、force を付けたときだけ落とす"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/cli_ops.rs", name = "入れ替えは生きたカードを数えて止まりforceでだけ落ちる" },
+]
+breaks_when = "installed_binary が実在を確かめずにパスを返す形へ戻す（実行レポート：この形だと門が 409 を返してこの1本が落ちた）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/手元の新しい版をGUIだけで効かせる"
+behavior    = "走っている版と次に起こす版が違うときは、2つを別々に出す"
+gate        = "unit"
+tests       = [
+  { file = "web/src/components/Settings/VersionsCard.test.tsx", name = "いま動いている版と次に起こす版を別々に出す" },
+]
+breaks_when = "走っている版を保管庫の行から探す形へ戻す（実行レポート：戻すとこの1本が落ちる）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/枠とカードをドラッグで並べ替えダブルクリックで開く"
+behavior    = "並べ替えを頼まれたときは、丸ごと受け取って0から番号を詰め直す"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/server-core/tests/db.rs", name = "並べ替えは丸ごと受け取って0から詰め直す" },
+  { file = "server/crates/server-core/tests/db.rs", name = "カードの並びは枠の中で閉じ外したカードにも番号が付く" },
+]
+breaks_when = "受け取った並びのうち動いたものだけを更新し、詰め直しをやめる"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/枠とカードをドラッグで並べ替えダブルクリックで開く"
+behavior    = "同じ向きへ続けて動かしても、運んでいる最中に掴みが解けない"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/reorder-feel.spec.ts", name = "右（下）へ3回続けて動かしても、掴みが解けない" },
+]
+breaks_when = "運んでいる間に DOM を並べ替えるようにする（掴んでいるノードが差し直される）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/構造化ビューでメッセージの改行が反映されない"
+behavior    = "行が空いていなくても、ブラウザの画面で改行が改行として見える"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/transcript.spec.ts", name = "行が空いていなくても、改行が改行として見える" },
+]
+breaks_when = "素の改行を break へ変える段を外す（木の段を外すと画面まで届かなくなる）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/構造化ビューでメッセージの改行が反映されない"
+behavior    = "行を空けていない本文でも、素の改行が改行として木に現れる"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/markdown.test.ts", name = "改行のところで割れる" },
+  { file = "web/src/lib/markdown.test.ts", name = "囲みコードの中は触らない" },
+  { file = "web/src/lib/markdown.test.ts", name = "生の HTML の中は触らない" },
+]
+breaks_when = "markdown.ts の、素の改行を break へ変える段を外す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/構造化ビューを開いたら最新のところから見せる"
+behavior    = "構造化ビューを開いたときも、別のページから戻ってきたときも、いちばん下から見せる"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/transcript.spec.ts", name = "開いたら、いちばん下（最新）から見せる" },
+  { file = "web/e2e/transcript.spec.ts", name = "リロードしても、最新から始まる" },
+  { file = "web/e2e/transcript.spec.ts", name = "別のページへ行って戻ってきても、最新から始まる" },
+]
+breaks_when = "TranscriptTree の初回描画で末尾へ寄せる処理を外し、anchorTo の指定だけに戻す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/構造化ビューを開いたら最新のところから見せる"
+behavior    = "遡っている最中に履歴が増えても、見ている位置へ引き戻されない"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/transcript.spec.ts", name = "遡っている最中に履歴が増えても、引き戻されない" },
+]
+breaks_when = "末尾に居るかどうかを見ずに、追記のたび末尾へ寄せるようにする"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/権限確認省略モードでセッションを立ち上げる機能"
+behavior    = "全承認スキップで起こしたときは、確認の問いに自動で答える"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/permission_mode.rs", name = "全承認スキップの確認に自動で答える" },
+]
+breaks_when = "全承認スキップのときに確認へ自動で答える処理を外す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/版が切り替わったらタブを自動で読み直す"
+behavior    = "版が変わったあとでも、押さずにタブが自分で読み直す。ただし添付を抱えたタブは読み直さずバナーを出す"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/reload.spec.ts", name = "版が変わると、押さずに読み直す" },
+  { file = "web/e2e/reload.spec.ts", name = "添付を抱えたタブは読み直さず、バナーを出す" },
+  { file = "web/e2e/reload.spec.ts", name = "見送ったあと、添付を外して次の版が来ると読み直す" },
+]
+breaks_when = "composerBusy の門を無視して、版が変われば常に読み直す形にする"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/細かい修正_2026-0903"
+behavior    = "大きい丸ボタンを使うときも、外が 40px で中の絵が 20px に保たれる"
+gate        = "unit"
+tests       = [
+  { file = "web/src/components/ui/button.test.tsx", name = "icon-xl が 40px で、中の絵が 20px" },
+]
+breaks_when = "icon-xl の中の絵を 16px へ戻す（実行レポート ⛳壊し方：この1本が落ちる）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/細かい修正_2026-0903"
+behavior    = "製品コードへ絵文字を足したときは、台帳と実物が食い違ったことが分かる"
+gate        = "unit"
+tests       = [
+  { file = "web/src/emoji.test.ts", name = "台帳と実物が食い違っていない" },
+]
+breaks_when = "製品コードへ絵文字を1つ足す（実行レポート ⛳壊し方：この1本が落ちる）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/細かい修正_2026-0905"
+behavior    = "カードを復旧したあとでも、一覧の中で元の位置へ戻る"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/server-core/tests/registry.rs", name = "復旧したカードは元の位置へ戻る" },
+]
+breaks_when = "復旧のときに並び順の値を作り直す形へ戻す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/終わった claude がゾンビのまま溜まり続ける"
+behavior    = "前から溜まっていた場合でも、終わった claude をゾンビのまま残さず引き取る"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/src/children.rs", name = "ゾンビだけを数える" },
+  { file = "server/crates/core/src/children.rs", name = "前から溜まっていたゾンビも引き取る" },
+]
+breaks_when = "children.rs の引き取りの呼び出しを外す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/表示できるテキストの上限を3MBへ上げる"
+behavior    = "上限いっぱいの大きさのときでも、テキストが線を往復して届く"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/a2s.rs", name = "上限いっぱいのテキストが線を往復する" },
+  { file = "server/crates/core/tests/hostfs_raw.rs", name = "htmlにはテキストの上限が効く" },
+]
+breaks_when = "守りの3行を外す（実行レポートの記録：当てると前2本が落ち、3本目は逆側を見張るものなので通ったまま）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/表示できるテキストの上限を3MBへ上げる"
+behavior    = "上限の内側のときは、これまでどおり整形して表示を始める"
+gate        = "unit"
+tests       = [
+  { file = "web/src/components/FileView/FileView.test.tsx", name = "上限の内側なら、今までどおり整形で始まる" },
+  { file = "web/src/components/FileView/FileView.test.tsx", name = "大きい HTML も箱に入る（整形を止める線を持ち込まない）" },
+]
+breaks_when = "kind === markdown の条件を外す（実行レポートの記録：当てるとこの1本だけが落ちた）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/読み込まれた瞬間に、いちばん下まで送れなくなる"
+behavior    = "横に広い画像を添えたときでも、構造化ビューが横へはみ出さない"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/transcript-image.spec.ts", name = "横に広い画像を添えても、構造化ビューは横へはみ出さない" },
+]
+breaks_when = "構造化ビューの画像へ当てている max-width を外す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/選択を解くつもりのタップで、画面を飛ばさない"
+behavior    = "何かを選んでいるときに同格でないものを触ったら、画面へ飛ばずに選択を解く"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/usePress.test.tsx", name = "同じ種類を選んでいれば、いままでどおり選ぶ" },
+]
+breaks_when = "press.ts の single から clear の分岐を外し、open と select の2分岐へ戻す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/電源ボタンで起こし直すと、ターミナルがリロードするまで描かれない"
+behavior    = "写しで生死を種付けしても、線を張り直す側が消すので当てにしない"
+gate        = "unit"
+tests       = [
+  { file = "web/src/stores/ws.test.ts", name = "写しは生死を種付けしない（種付けしても線を張り直す側が消す）" },
+]
+breaks_when = "applySessionSnapshot で alive を種付けする案Aを入れ直す（resubscribe が消すので効かない）"
+verified    = true
+
+[[entry]]
+issue       = "クローズ/電源ボタンで起こし直すと、ターミナルがリロードするまで描かれない"
+behavior    = "止まっていたカードが動き出したときは、線を張り直さずに端末と履歴を出し直す"
+gate        = "unit"
+tests       = [
+  { file = "web/src/stores/ws.test.ts", name = "止まっていたカードが動き出したら、端末と履歴を出し直す" },
+  { file = "web/src/stores/ws.test.ts", name = "繰り返し止めて起こしても、そのつど出し直す" },
+  { file = "web/src/stores/ws.test.ts", name = "開いていない口には送らない" },
+  { file = "web/src/stores/ws.test.ts", name = "カード全体が届く形（session_upsert）でも合図になる" },
+]
+breaks_when = "ws.ts の noteLiveness の呼び出し2行を外す（実行レポートの記録：当てると追加8件のうちこの4件が落ちた）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/電源ボタンで起こし直すと、ターミナルがリロードするまで描かれない"
+behavior    = "起こし直したあとでも、タブを読み直さずに端末へ文字が出る"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/terminal.spec.ts", name = "起こし直したあと、読み直さずに端末へ文字が出る" },
+]
+breaks_when = "ws.ts の noteRefusal から 断られた への登録を外す（受信の文字が最後まで現れず落ちることを実測した）"
+verified    = true
+
+[[entry]]
+issue       = "クローズ/電源ボタンで起こし直すと、ターミナルがリロードするまで描かれない"
+behavior    = "起こし直しの最中に購読を断られたあとでも、次に状態が動いたときに出し直して端末を描き直す"
+gate        = "unit"
+tests       = [
+  { file = "web/src/stores/ws.test.ts", name = "起こし直しで購読を断られたら、次の状態変化でもう一度出す" },
+  { file = "web/src/stores/ws.test.ts", name = "端末がまだ開けない断りでも、もう一度出す" },
+  { file = "web/src/stores/ws.test.ts", name = "断られ続けても、出し直しは上限で止まる" },
+  { file = "web/src/stores/ws.test.ts", name = "端末の絵が届いたら、断られた記録は消える" },
+  { file = "web/src/stores/ws.test.ts", name = "線を張り直したら、断られた記録は持ち越さない" },
+]
+breaks_when = "ws.ts の noteRefusal から 断られた への登録を外す（単体3件と E2E が落ちることを実測した）"
+verified    = true
