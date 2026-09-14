@@ -129,7 +129,7 @@ export default function MarkdownBlockEditor(props: Props) {
     setError(null)
     void crepe.editor.remove(uploadPlugin).then(() => alive ? crepe.create() : null).then(() => {
       if (!alive) {
-        void crepe.destroy()
+        void crepe.destroy().catch(() => {})
         return
       }
       crepe.editor.action((ctx) => {
@@ -188,7 +188,7 @@ export default function MarkdownBlockEditor(props: Props) {
       if (current?.crepe === crepe) {
         if (searchDomRef?.current === current.view.dom) searchDomRef.current = null
         controller.current = null
-        void crepe.destroy()
+        void crepe.destroy().catch(() => {})
       }
     }
   }, [documentKey])
