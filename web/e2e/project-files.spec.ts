@@ -684,6 +684,12 @@ test("長い文書を末尾まで辿れる（整形と編集の両方）", async
 
   // 整形して見るとき
   await expect(page.getByTestId("file-markdown")).toBeVisible();
+  // **編集面（Milkdown/Crepe）は遅延読み込み＋非同期初期化。** `file-markdown` の器は
+  // 用意が終わる前から見えているので、高さを測る前に中身の用意が整うのを待つ
+  // （長い文書は読み込みに数秒かかるため timeout を延ばす）。
+  await expect(page.getByTestId("file-markdown-editor")).toBeVisible({
+    timeout: 60_000,
+  });
   await expectScrollable(body);
   // **数だけでは「遡れた」と言い切れない。** 末尾の目印が実際に見えるところまで見る
   await expect(page.getByRole("heading", { name: TAIL })).toBeInViewport();
@@ -725,6 +731,10 @@ test("狭い画面でも、ファイルの中身を遡れる", async ({ page }) 
 
   const body = page.getByTestId("file-body");
   await expect(page.getByTestId("file-markdown")).toBeVisible();
+  // 編集面の用意が整ってから測る（上のテストと同じ理由。設計上 §8 参照）
+  await expect(page.getByTestId("file-markdown-editor")).toBeVisible({
+    timeout: 60_000,
+  });
   await expectScrollable(body);
   // 下端が画面の外へ出ていないこと。**在るが届かない**を、位置まで見て否定する
   await expect(page.getByRole("heading", { name: TAIL })).toBeInViewport();
