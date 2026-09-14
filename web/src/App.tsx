@@ -357,10 +357,14 @@ function Shell() {
         サーバ側の作り（設計§8-2）と、画面側でも形を揃えてある
       */}
       {authLoading ? null : entered ? (
-        {/*
+        /*
           **画面の外枠をここから下へ配る**（`lib/screenRoot.tsx`）。PJT 専用画面は
           `Shell` から3段下に居るので、prop で降ろすと途中が「ただ渡すだけ」の引数を持つ
-        */}
+
+          **ここは三項演算子の `(` の直後＝式の位置なので、波括弧で囲むコメント記法は
+          使えない。** あれは JSX の子要素の位置でしか成り立たず、波括弧を見たパーサが
+          オブジェクトリテラルと読んで落ちる（2026-09-14 に main を壊した）
+        */
         <ScreenRootProvider value={mainRef}>
           <Routes>
             <Route path="/" element={<HomePage />} />
