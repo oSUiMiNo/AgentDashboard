@@ -390,6 +390,15 @@ fn set(meta: &mut SessionMeta, next: SessionStatus, changed: &mut Changed) {
 /// **同じ1枚の画面から両方を取ること**——別々に読むと、あいだに1ターン挟まって
 /// 「走行中かつ一覧在り」が両立して見える。
 ///
+/// **その「走行中かつ一覧在り」が実際に起きたら、一覧を待たずに作業中へ戻す**
+/// （2026-09-14・利用者が実機で踏んだ）。サブ（フォーク）を投げっぱなしにしたまま
+/// メインが自分の作業（測定・ビルド待ちの `Bash` など）を続けることがあり、
+/// **メインのスピナーは戻っているのに、フォークの一覧はまだ残っている**——この
+/// 組み合わせを直す道が無かった。旧コードは `!waiting` を出口の唯一の条件にして
+/// いたので、一覧が消えるまで「サブ待ち」に固まったまま——**入り口（`!main_running`
+/// が要る）と出口が非対称**だった。**メインが走っているかどうかを、入るときと
+/// 同じ重みで出るときにも見る。**
+///
 /// # 画面読みは版で壊れる前提
 ///
 /// 壊れたときに残るのは「サブ待ちのまま解けない」側で、**人が指示を打てば
@@ -399,14 +408,16 @@ pub fn sync_subagent_wait(meta: &mut SessionMeta, waiting: bool, main_running: b
         meta.status,
         SessionStatus::WaitingInput | SessionStatus::Working
     );
+    let in_subwait = meta.status == SessionStatus::WaitingSubagents;
     let next = if waiting && !main_running && entering {
         SessionStatus::WaitingSubagents
-    } else if !waiting && meta.status == SessionStatus::WaitingSubagents {
-        if main_running {
-            SessionStatus::Working
-        } else {
-            SessionStatus::WaitingInput
-        }
+    } else if in_subwait && main_running {
+        // **一覧がまだ残っていても、メインが動き出していれば作業中へ戻す。**
+        // 一覧が消えるのだけを待つと、メインが新しいツールを叩き続けているのに
+        // 「サブ待ち」の札が下りない（実機で踏んだ壊れ方そのもの）
+        SessionStatus::Working
+    } else if in_subwait && !waiting {
+        SessionStatus::WaitingInput
     } else {
         return false;
     };
@@ -1274,6 +1285,32 @@ mod tests {
         let mut meta = meta_with(SessionStatus::WaitingSubagents);
         assert!(sync_subagent_wait(&mut meta, false, false));
         assert_eq!(meta.status, SessionStatus::WaitingInput);
+    }
+
+    /// **一覧が残っていても、メインが動き出していれば作業中へ戻る**（2026-09-14）。
+    ///
+    /// フォークを投げっぱなしにしたままメインが自分の作業を続けることがあり、
+    /// そのときメインのスピナーは戻っているのに一覧はまだ残る。旧コードは
+    /// `!waiting` を出口の唯一の条件にしていたので、この組み合わせでは
+    /// 「サブ待ち」に固まったまま二度と戻らなかった（利用者が実機で踏んだ）。
+    #[test]
+    fn 一覧が残っていてもメインが動けば作業中へ戻る() {
+        let mut meta = meta_with(SessionStatus::WaitingSubagents);
+        assert!(sync_subagent_wait(&mut meta, true, true));
+        assert_eq!(meta.status, SessionStatus::Working);
+    }
+
+    /// メインが再び走り出して作業中へ戻ったあと、**一覧がまだ残っているだけでは
+    /// サブ待ちへ引き戻されない**（入り口は `!main_running` を要求するため）。
+    #[test]
+    fn 作業中へ戻ったあとは一覧が残っていてもサブ待ちへ戻らない() {
+        let mut meta = meta_with(SessionStatus::WaitingSubagents);
+        assert!(sync_subagent_wait(&mut meta, true, true));
+        assert_eq!(meta.status, SessionStatus::Working);
+
+        // 同じ入力をもう一度与えても、Working のまま据え置かれる
+        assert!(!sync_subagent_wait(&mut meta, true, true));
+        assert_eq!(meta.status, SessionStatus::Working);
     }
 
     /// 変化を返し続けると、配信が無駄に増える（[`sweep_stalled_idle`] と同じ作法）。
