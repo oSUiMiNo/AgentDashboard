@@ -59,7 +59,64 @@
 #
 # ## 
 
-min_entries = 110
+min_entries = 115
+
+[[entry]]
+issue       = "イシューグループ_2026-0821-1953/セッションごとにも全体にも自分用のメモを残せるようにする"
+behavior    = "セルの中身が空でも、表の行は中身のある行と同じ1行ぶんの高さで描かれる"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/memo.spec.ts", name = "表は、空のセルも中身のあるセルと同じ高さで出る" },
+]
+breaks_when = "memo.css のセルの規則から box-sizing: content-box か height: 1lh のどちらかを外す（6通り壊して6通りとも落ちることを実測した）。jsdom は CSS を当てないので、効いたかを見ているのはこちらだけである"
+verified    = true
+
+[[entry]]
+issue       = "イシューグループ_2026-0821-1953/セッションごとにも全体にも自分用のメモを残せるようにする"
+behavior    = "共用側の表が display: block でも、メモの吹き出しの中では列が等分になり、中身が空の列だけ細くならない"
+gate        = "unit"
+tests       = [
+  { file = "web/src/components/MemoPane/MemoPane.test.tsx", name = "表は、空の列も同じ幅を受け取る" },
+]
+breaks_when = "memo.css の .memo-bubble .prose-dashboard table から table-layout: fixed を外す（共用側が display: block なので、列幅が中身の量だけで決まる状態へ戻る）"
+verified    = true
+
+[[entry]]
+issue       = "イシューグループ_2026-0821-1953/セッションごとにも全体にも自分用のメモを残せるようにする"
+behavior    = "原寸が入る幅より広い絵を貼ったときでも、画像は入る幅の4割から始まる（原寸は超えない）"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/memoImage.test.ts", name = "入る幅の4割になる" },
+  { file = "web/src/lib/memoImage.test.ts", name = "原寸を超えない（小さい絵を引き伸ばさない）" },
+  { file = "web/src/lib/memoImage.test.ts", name = "掴み手が許す下限（64px）を下回らない" },
+  { file = "web/src/lib/memoImage.test.ts", name = "入る幅が測れなければ、何も入れない（いままでどおりに倒す）" },
+  { file = "web/src/lib/memoImage.test.ts", name = "**幅を載せて返す。** 載せないと必ず横幅いっぱいになる" },
+  { file = "web/src/components/MemoPane/MemoEditor.test.tsx", name = "**運び手の返り値を素通ししない。** 幅を載せた物体を返す" },
+  { file = "web/src/components/MemoPane/MemoEditor.test.tsx", name = "**面の幅を測って渡している**（決め打ちの数字ではない）" },
+]
+breaks_when = "uploadFile が URL の文字列だけを返す形へ戻す（previewWidth の既定は undefined で、そのとき器が fit-content になり、img の width: 100% と合わさって原寸が入る幅より広い絵は必ず面いっぱいへ伸びる）"
+verified    = true
+
+[[entry]]
+issue       = "イシューグループ_2026-0821-1953/セッションごとにも全体にも自分用のメモを残せるようにする"
+behavior    = "確定して Markdown へ写したあとでも、メモの画像に編集で決めた幅が効く"
+gate        = "unit"
+tests       = [
+  { file = "web/src/components/MemoPane/MemoPane.test.tsx", name = "確定した画像に、編集で決めた幅が効く" },
+  { file = "web/src/components/MemoPane/MemoPane.test.tsx", name = "幅を変えていない画像には、幅を与えない" },
+]
+breaks_when = "表示のたびに blocks から previewWidth を引く処理を外す（Markdown の画像記法に幅を書く場所が無いので、blocksToMarkdownLossy を通った時点で幅が消える）"
+verified    = true
+
+[[entry]]
+issue       = "イシューグループ_2026-0821-1953/セッションごとにも全体にも自分用のメモを残せるようにする"
+behavior    = "規則の注釈にその規則の字が引用されていても、空のセルの高さを保つ宣言がメモの吹き出しに限って書かれていることを見張る"
+gate        = "unit"
+tests       = [
+  { file = "web/src/components/MemoPane/MemoPane.test.tsx", name = "表は、空のセルも1行ぶんの高さを保つ" },
+]
+breaks_when = "memo.css のセルの規則から box-sizing: content-box か height: 1lh のどちらかを外す。この単体は宣言の字が在るかを読むので、外せば落ちる（効いたかは測っていない）"
+verified    = true
 
 [[entry]]
 issue       = "クローズ/CICD"
@@ -1253,52 +1310,4 @@ tests       = [
   { file = "web/src/stores/ws.test.ts", name = "線を張り直したら、断られた記録は持ち越さない" },
 ]
 breaks_when = "ws.ts の noteRefusal から 断られた への登録を外す（単体3件と E2E が落ちることを実測した）"
-verified    = true
-
-[[entry]]
-issue       = "イシューグループ_2026-0821-1953/セッションごとにも全体にも自分用のメモを残せるようにする"
-behavior    = "表の列は等分で、中身が空の列だけ細くならない"
-gate        = "unit"
-tests       = [
-  { file = "web/src/components/MemoPane/MemoPane.test.tsx", name = "表は、空の列も同じ幅を受け取る" },
-]
-breaks_when = "memo.css の .memo-bubble .prose-dashboard table から table-layout: fixed を外す（共用側が display: block なので、列幅が中身の量だけで決まる状態へ戻る）"
-verified    = true
-
-[[entry]]
-issue       = "イシューグループ_2026-0821-1953/セッションごとにも全体にも自分用のメモを残せるようにする"
-behavior    = "表の行は、中身が空のセルでも1行ぶんの高さを保つ"
-gate        = "e2e"
-tests       = [
-  { file = "web/e2e/memo.spec.ts", name = "表は、空のセルも中身のあるセルと同じ高さで出る" },
-  { file = "web/src/components/MemoPane/MemoPane.test.tsx", name = "表は、空のセルも1行ぶんの高さを保つ" },
-]
-breaks_when = "memo.css のセルの規則から box-sizing: content-box か height: 1lh のどちらかを外す（6通り壊して6通りとも落ちることを実測した）。jsdom は CSS を当てないので、効いたかを見ているのは e2e のほうだけである"
-verified    = true
-
-[[entry]]
-issue       = "イシューグループ_2026-0821-1953/セッションごとにも全体にも自分用のメモを残せるようにする"
-behavior    = "確定したメモの画像に、編集で決めた幅が効く"
-gate        = "unit"
-tests       = [
-  { file = "web/src/components/MemoPane/MemoPane.test.tsx", name = "確定した画像に、編集で決めた幅が効く" },
-  { file = "web/src/components/MemoPane/MemoPane.test.tsx", name = "幅を変えていない画像には、幅を与えない" },
-]
-breaks_when = "表示のたびに blocks から previewWidth を引く処理を外す（Markdown の画像記法に幅を書く場所が無いので、blocksToMarkdownLossy を通った時点で幅が消える）"
-verified    = true
-
-[[entry]]
-issue       = "イシューグループ_2026-0821-1953/セッションごとにも全体にも自分用のメモを残せるようにする"
-behavior    = "貼った画像は、入る幅の4割から始まる（原寸は超えない）"
-gate        = "unit"
-tests       = [
-  { file = "web/src/lib/memoImage.test.ts", name = "入る幅の4割になる" },
-  { file = "web/src/lib/memoImage.test.ts", name = "原寸を超えない（小さい絵を引き伸ばさない）" },
-  { file = "web/src/lib/memoImage.test.ts", name = "掴み手が許す下限（64px）を下回らない" },
-  { file = "web/src/lib/memoImage.test.ts", name = "入る幅が測れなければ、何も入れない（いままでどおりに倒す）" },
-  { file = "web/src/lib/memoImage.test.ts", name = "**幅を載せて返す。** 載せないと必ず横幅いっぱいになる" },
-  { file = "web/src/components/MemoPane/MemoEditor.test.tsx", name = "**運び手の返り値を素通ししない。** 幅を載せた物体を返す" },
-  { file = "web/src/components/MemoPane/MemoEditor.test.tsx", name = "**面の幅を測って渡している**（決め打ちの数字ではない）" },
-]
-breaks_when = "uploadFile が URL の文字列だけを返す形へ戻す（previewWidth の既定は undefined で、そのとき器が fit-content になり、img の width: 100% と合わさって原寸が入る幅より広い絵は必ず面いっぱいへ伸びる）"
 verified    = true
