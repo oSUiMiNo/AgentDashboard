@@ -36,6 +36,7 @@ import { markComposerBusy } from '@/lib/composerBusy'
 import { useDraft } from '@/lib/drafts'
 import { MEMO_REMARK_PLUGINS, REHYPE_PLUGINS } from '@/lib/markdown'
 import { readMemoBody, sameMemoBody, 画像の幅 } from '@/lib/memoBody'
+import { 外の印, 外の文言, 外を取る札, 外で何が起きたか, type 外の変化 } from '@/lib/memoOutside'
 import { 消えるまでの字 } from '@/lib/memoRetention'
 import { 画像を運ぶ as 一枚運ぶ, type 画像の置き場所 } from '@/lib/memoImage'
 
@@ -116,9 +117,22 @@ export function MemoPane({ target, readOnly = false, label, 保存先 }: Props) 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key])
 
-  const { checked, unchecked } = splitMemos(memos)
+  const 配られた = splitMemos(memos)
   const [畳んだ上段, set畳んだ上段] = useState(true)
   const [下段を全部, set下段を全部] = useState(false)
+  /**
+   * いま直している吹き出しの**写し**（設計§7-7）。
+   *
+   * # なぜ吹き出しではなく面が持つのか
+   *
+   * **編集欄がサーバの配る一覧の中に建っている**と、外でかたづけられた・消された
+   * 瞬間に**行ごと外れて書きかけが消える**（実測 0.1.143。`lib/memoOutside.ts` の表）。
+   * 面が持てば、**配られた一覧から居なくなっても行を留めておける。**
+   *
+   * **写しを持つのは、消されたときに描くものが要るから。** id だけ持つと、
+   * 外で消された瞬間に描く材料が無くなる。
+   */
+  const [直している, set直している] = useState<MemoView | null>(null)
   /**
    * 送った回数。**入力欄を作り直して空にするためだけに持つ**（§6-5）。
    *
@@ -245,6 +259,47 @@ export function MemoPane({ target, readOnly = false, label, 保存先 }: Props) 
   // 面ごと消えるときに札を残さない。**残すと、以後どの版切替も止まる**
   useEffect(() => () => 抱える(false), [抱える])
 
+  /*
+    **直している1件は、サーバが何を配ってきても下段に留める**（設計§7-7）。
+
+    留めないと、外でかたづけられた・消された瞬間に**編集欄ごと外れて書きかけが
+    消える**。留めたうえで「外でこうなった」と知らせ、**外の内容を取るか書きかけを
+    残すかを利用者に選ばせる**（§47.5 と同じく、消す道を2つ残す）。
+
+    **本文が書き換わっただけなら留める必要は無い**（行は下段に残るのでエディタも
+    生きている）が、**知らせる相手を見つける道は同じ**なので一緒に通す。
+  */
+  const 直しているID = 直している?.id ?? null
+  const いまの直している =
+    直しているID === null ? undefined : memos.find((memo) => memo.id === 直しているID)
+  const 外の変化 = 直している === null ? null : 外で何が起きたか(直している, いまの直している)
+  const 直している印 = 直している === null ? '' : 外の印(いまの直している)
+
+  /*
+    **留める先は「直し始めた段」。** いまサーバがどちらに置いているかでは決めない——
+    外でかたづけられた瞬間に段をまたがせると、**押してもいない利用者の目の前で
+    吹き出しが飛ぶ**うえ、上段は既定で畳まれているので**そのまま消えたように見える。**
+  */
+  const 留める先が上段 = 直している?.checked_at !== undefined
+  const 留める = (段: readonly MemoView[], ここへ留めるか: boolean): readonly MemoView[] => {
+    const 写し = 直している
+    if (写し === null) {
+      return 段
+    }
+    if (!ここへ留めるか) {
+      // **もう一方の段からは外す。** 外さないと同じメモが2つ描かれる
+      return 段.filter((memo) => memo.id !== 写し.id)
+    }
+    if (段.some((memo) => memo.id === 写し.id)) {
+      return 段
+    }
+    // **配られた中に居ない＝外で段を移されたか消された。** 末尾へ留める
+    // （末尾＝いちばん新しい側なので、`出す下段` の切り出しからも落ちない）
+    return [...段, いまの直している ?? 写し]
+  }
+  const checked = 留める(配られた.checked, 留める先が上段)
+  const unchecked = 留める(配られた.unchecked, !留める先が上段)
+
   const 隠れている数 = Math.max(0, unchecked.length - 下段に出す数)
   const 出す下段 = 下段を全部 ? unchecked : unchecked.slice(隠れている数)
 
@@ -288,6 +343,11 @@ export function MemoPane({ target, readOnly = false, label, 保存先 }: Props) 
                   readOnly={readOnly}
                   画像を運ぶ={保存先 === null ? undefined : 画像を運ぶ}
                   抱える={抱える}
+                  直している={
+                    直しているID === memo.id ? { 外の変化, 外の印: 直している印 } : null
+                  }
+                  on直す={() => set直している(memo)}
+                  on閉じる={() => set直している(null)}
                 />
               ))}
             </div>
@@ -315,12 +375,15 @@ export function MemoPane({ target, readOnly = false, label, 保存先 }: Props) 
         )}
         {出す下段.map((memo) => (
           <MemoBubble
-                  key={memo.id}
-                  memo={memo}
-                  readOnly={readOnly}
-                  画像を運ぶ={保存先 === null ? undefined : 画像を運ぶ}
-                  抱える={抱える}
-                />
+            key={memo.id}
+            memo={memo}
+            readOnly={readOnly}
+            画像を運ぶ={保存先 === null ? undefined : 画像を運ぶ}
+            抱える={抱える}
+            直している={直しているID === memo.id ? { 外の変化, 外の印: 直している印 } : null}
+            on直す={() => set直している(memo)}
+            on閉じる={() => set直している(null)}
+          />
         ))}
         {memos.length === 0 && (
           <p className="text-muted-foreground text-xs">まだ何も書かれていません。</p>
@@ -476,16 +539,34 @@ function MemoBubble({
   readOnly,
   画像を運ぶ,
   抱える,
+  直している,
+  on直す,
+  on閉じる,
 }: {
   memo: MemoView
   readOnly: boolean
   /** 直すときにも画像を貼れる（要件2）。**渡されなければ貼れない。** */
   画像を運ぶ?: (file: File) => Promise<string>
   抱える: (抱えている: boolean) => void
+  /**
+   * 直しているなら、**外で何が起きたか**（設計§7-7）。直していなければ `null`。
+   *
+   * **どれを直しているかは面が持つ**（面の側に理由が書いてある）。ここで持つと、
+   * 外でかたづけられた・消された瞬間に**この部品ごと外れて書きかけが消える。**
+   */
+  直している: { 外の変化: 外の変化 | null; 外の印: string } | null
+  on直す: () => void
+  on閉じる: () => void
 }) {
   const { memoEdit, memoCheck, memoRemove } = useWsStore()
-  const [直している, set直している] = useState(false)
   const [写せなかった値, set写せなかった値] = useState<string | null>(null)
+  /**
+   * 知らせを見送った相手の**印**（設計§7-7）。
+   *
+   * **真偽値で持ってはいけない。** 「もう見た」を旗1つで持つと、見送ったあとに
+   * **もう一度別の端末が書き換えても二度と知らせない**——黙って踏み潰す形へ戻る。
+   */
+  const [見送った印, set見送った印] = useState<string | null>(null)
   const [消す確認, set消す確認] = useState(false)
   /**
    * この吹き出しで送れなかったことを出す（レビュー対応1）。**本体とは別に持つ。**
@@ -537,9 +618,57 @@ function MemoBubble({
     set写せなかった値(写せた ? null : value)
   }, [])
 
-  if (直している) {
+  if (直している !== null) {
+    /** 知らせる相手。**見送ったのと同じ印なら黙る**（別の変化が来れば印が変わる） */
+    const 知らせ = 見送った印 === 直している.外の印 ? null : 直している.外の変化
     return (
       <div data-testid="memo-editing" className="rounded border p-1">
+        {/*
+          **外から変わったことを知らせる**（設計§7-7）。**書きかけは捨てない**ので、
+          ここに出るのは「入れ替えました」ではなく「入れ替わっていますが、あなたの
+          書きかけは残してあります」という断りである。
+
+          **消す道を2つ置く**（§47.5）。1つしか無いと、それを知らない人が知らせを
+          消せないまま、覆われた側をずっと読めない——ここでは**確定してよいのか
+          どうかを決められないまま**になる。
+        */}
+        {知らせ !== null && (
+          <div
+            data-testid="memo-outside-change"
+            role="status"
+            className="border-border bg-muted/60 mb-1 rounded border px-2 py-1"
+          >
+            <p className="text-muted-foreground text-xs">
+              {外の文言(知らせ)}書きかけはそのまま残してあります。
+            </p>
+            <div className="mt-1 flex gap-3">
+              <button
+                type="button"
+                data-testid="memo-outside-take"
+                onMouseDown={(event) => {
+                  event.preventDefault()
+                  // **書きかけを捨てて閉じる。** 閉じれば外の内容がそのまま出る
+                  on閉じる()
+                }}
+                className="text-muted-foreground hover:text-foreground text-xs underline"
+              >
+                {外を取る札(知らせ)}
+              </button>
+              <button
+                type="button"
+                data-testid="memo-outside-keep"
+                onMouseDown={(event) => {
+                  event.preventDefault()
+                  // **断りだけを消す。** 直しているものには触らない（後勝ち＝§7-7）
+                  set見送った印(直している.外の印)
+                }}
+                className="text-muted-foreground hover:text-foreground text-xs underline"
+              >
+                書きかけを残す
+              </button>
+            </div>
+          </div>
+        )}
         <MemoEditor
           initial={body}
           label="メモを直す"
@@ -558,7 +687,7 @@ function MemoBubble({
               }
             }
             set送れなかった(null)
-            set直している(false)
+            on閉じる()
           }}
         />
         <div className="mt-1 flex items-center gap-2">
@@ -579,6 +708,15 @@ function MemoBubble({
                     return
                   }
                   set送れなかった(null)
+                  /*
+                    **自分で消したら、自分で閉じる。**
+
+                    以前は消えた行ごと編集欄が外れたので、閉じる必要が無かった。
+                    いまは直している1件を**面が留めている**（§7-7）ので、閉じないと
+                    **編集欄が居残り、自分の操作を「別の画面で消されました」と
+                    言い出す。** E2E で踏んだ。
+                  */
+                  on閉じる()
                 }}
                 className="text-destructive text-xs"
               >
@@ -610,9 +748,14 @@ function MemoBubble({
           )}
           <button
             type="button"
+            /*
+              **「消す」の確認にも同じ字の「やめる」が出る**ので、印を付けて見分ける
+              ——付けないと、確認が開いている間は文字で指せない（E2E で踏んだ）
+            */
+            data-testid="memo-edit-cancel"
             onMouseDown={(event) => {
               event.preventDefault()
-              set直している(false)
+              on閉じる()
             }}
             className="text-muted-foreground ml-auto text-xs"
           >
@@ -712,7 +855,10 @@ function MemoBubble({
                 aria-label="この吹き出しを直す"
                 onMouseDown={(event) => {
                   event.preventDefault()
-                  set直している(true)
+                  // **前に見送った印を持ち越さない。** 持ち越すと、開き直した
+                  // ときに同じ変化を二度と知らせない
+                  set見送った印(null)
+                  on直す()
                 }}
                 className="text-muted-foreground hover:text-foreground text-xs"
               >
