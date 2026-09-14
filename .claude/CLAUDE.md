@@ -267,6 +267,7 @@ agentdashboard version restart      # 生きたカードがあればここで止
 - 各フェーズの終わりには ⛳チェックポイントがあり、対応するテスト計画のフェーズを消化してから次へ進む
 - 自己修復機構の制約上、`crates/protocol` は共有境界であり変更のハードルが高い。未知の構造は `Node::Unknown` へ写像して吸収する
 - **原因を追うときは、コードを読む前に `agentdashboard logs` を読む。** 残す側の約束は `.claude/docs/guideline.md`「ログを残すとき」に集めてある（利用者向けの読み方は `README.md`）
+- **イシューを閉じるときは、守っているテストを台帳（`server/crates/core/tests/regressions.toml`）へ名指しで載せる。** 作法は `.claude/docs/guideline.md`「クローズするとき、守っているテストを台帳へ名指しで載せる」
 - コミットは作業別に分けて段階的に行う。プッシュはしない
 
 ---
