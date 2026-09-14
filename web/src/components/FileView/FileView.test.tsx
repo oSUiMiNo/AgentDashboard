@@ -153,6 +153,9 @@ describe("ファイルの見せ方", () => {
     serve(content("# 計画\n\n- [x] 済んだこと\n- [ ] まだのこと\n"));
     show();
 
+    // ブロック編集面は非同期で用意される。中身（チェックボックス）を探す前に
+    // 編集面そのものが用意できるのを待つ（他のテストと同じ形）
+    await screen.findByTestId("file-markdown-editor");
     const boxes = await screen.findAllByRole("checkbox");
     // 進捗そのものなので、入り／未入りが**別々に読める**ことまで見る
     expect(boxes).toHaveLength(2);
