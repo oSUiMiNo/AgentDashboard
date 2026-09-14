@@ -551,6 +551,24 @@ describe('面の見た目（利用者の報告・2026-09-14）', () => {
     expect(吹き出し.classList.contains('border'), '縁が無い').toBe(true)
   })
 
+  it('囲みコードの地は、メモカードの地へ溶けない', () => {
+    /*
+      **保存形式や DOM が正しくても、同じ色なら囲みは見えない。** 実機では
+      メモカードと `<pre>` がどちらも `oklch(0.269 0 0)` になり、編集時に見えた
+      コードブロックが確定後だけ平文のように見えていた（利用者の報告・2026-09-14）。
+
+      jsdom は CSS を当てないので、ここは**宣言の字が在ることだけ**を見る。
+      実際に背景が分かれることは `e2e/memo.spec.ts` が実ブラウザで測る。
+    */
+    const css = readFileSync(resolve(process.cwd(), 'src/memo.css'), 'utf8').replace(
+      /\/\*[\s\S]*?\*\//g,
+      '',
+    )
+    const 規則 = css.match(/\.memo-bubble\s*\{([^}]*)\}/)
+    expect(規則, 'メモカードに限った色の規則が無い').not.toBeNull()
+    expect(規則?.[1] ?? '').toMatch(/--code-ground:\s*var\(--color-card\)/)
+  })
+
   it('カード同士の隙間は、上段と下段で揃える', () => {
     /*
       **利用者の指定は「3倍」**（`gap-1` = 0.25rem → `gap-3` = 0.75rem）。

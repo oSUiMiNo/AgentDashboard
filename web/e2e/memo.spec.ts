@@ -283,6 +283,40 @@ test('表は、空のセルも中身のあるセルと同じ高さで出る', as
   expect(右, `列が ${左}px と ${右}px で等分になっていない`).toBeCloseTo(左, 1)
 })
 
+/*
+  **確定後の囲みコードは、メモカードの地へ溶けない。**
+
+  保存された `blocks` は `codeBlock`、Markdown も fenced code、DOM も `<pre><code>`
+  だった。それでも平文に見えたのは、**メモカードと `<pre>` の背景がどちらも
+  `oklch(0.269 0 0)` だったため**（利用者の実データで実測）。つまり変換ではなく
+  CSS の不具合であり、**本物の描画器で色を比較しなければ捕まらない。**
+*/
+test('確定後の囲みコードは、メモカードの地へ溶けない', async ({ page }) => {
+  await openDashboard(page)
+  const { tile } = await メモを書けるセッション(page)
+  await openSession(page, tile)
+
+  const 面 = await セッションのメモを開く(page)
+  await 書いて送る(page, 面, 'コードの地を見る')
+  const 本文 = 面.getByTestId('memo-body')
+  await expect(本文).toContainText('コードの地を見る', { timeout: 30_000 })
+
+  const 色 = await 本文.first().evaluate((host) => {
+    const 仮 = document.createElement('pre')
+    仮.innerHTML = '<code>MyDocs/イシュー/</code>'
+    host.appendChild(仮)
+    const 吹き出し = host.closest('[data-testid="memo-bubble"]')!
+    const result = {
+      カード: getComputedStyle(吹き出し).backgroundColor,
+      囲み: getComputedStyle(仮).backgroundColor,
+    }
+    仮.remove()
+    return result
+  })
+
+  expect(色.囲み, `カードと囲みがどちらも ${色.カード} で同化している`).not.toBe(色.カード)
+})
+
 test('直して確定すると時刻が更新されて一番下へ移る。変えずに確定したら動かない', async ({
   page,
 }) => {
