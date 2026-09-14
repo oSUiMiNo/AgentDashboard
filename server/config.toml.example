@@ -239,3 +239,42 @@ revive_headroom_mb = 2048
 # 取りに行き、**答えは待たない**（押した瞬間は必ず即答する）。
 # 0 にすると外側を見ない（＝WSL でない機械と同じ答えに戻る）
 revive_host_free_ttl_sec = 60
+
+# --- 仮想ディスクの縮小（Windows へ空きを返す） ---------------------------------
+
+# WSL の中でファイルを消しても、Windows の空きは1バイトも戻らない。仮想ディスクは
+# 一度膨らむと縮まないためで、**返すには `wsl --shutdown` を伴う縮小が要る**
+# （`fstrim` は効かないことを 2026-09-14 に実測で確定した）。
+#
+# 縮小は**走っている claude を全部落とす**。だから既定は切ってあり、条件が全部
+# そろった静かなときにだけ打つ。
+
+# 静かなときに機械が自分で打つか。**既定は切ってある**（自分を殺す操作なので）
+compact_auto = false
+
+# 生きたカード・claude・開いている端末が全部0になってから、この分数だけ待つ
+compact_quiet_minutes = 30
+
+# 空洞（仮想ディスクの大きさ − 中の使用量）がこの GiB を超えていなければ打たない
+compact_threshold_gb = 50
+
+# 打ってよい時間帯（機械の地方時）。**日をまたぐ指定（"22:00-03:00"）も読む。**
+# 読めない綴りは起動時に断る——素通しすると「夜が来ても走らない」という
+# 分かりにくい形になるため
+compact_window = "02:00-05:00"
+
+# 前回の縮小からこの時間が経つまで打たない
+compact_min_interval_hours = 24
+
+# Windows のタスクスケジューラに登録したタスク名。**登録は人が1回行う**
+# （手順は docs/setup/local.md）
+compact_script_task = "AgentDashboard Compact WSL"
+
+# 台本が結果を書く先（Windows のパスを WSL から見たもの）。
+# **未指定なら、縮小の結果を記録へ移せない**
+# compact_result_path = "/mnt/c/Users/you/AppData/Local/AgentDashboard/compact-result.json"
+
+# 縮める仮想ディスク2枚。**自動では探さない**（機械ごとに置き場所が違う）。
+# 未指定なら空洞を出さず、画面にも区画が出ない
+# compact_ext4_vhdx = "/mnt/c/Users/you/AppData/Local/Packages/CanonicalGroupLimited.Ubuntu24.04LTS_79rhkp1fndgsc/LocalState/ext4.vhdx"
+# compact_docker_vhdx = "/mnt/c/Users/you/AppData/Local/Docker/wsl/disk/docker_data.vhdx"

@@ -16,6 +16,7 @@
 
 use serde::{Deserialize, Serialize};
 use server_core::config::ServerConfig;
+use session_host_core::compact::CompactConfig;
 use session_host_core::config::{SessionHostConfig, env};
 use std::path::{Path, PathBuf};
 
@@ -92,6 +93,18 @@ pub struct Config {
     pub revive_headroom_mb: u64,
     /// WSL の外側（Windows）の空きを覚えておく期限（秒）。**0 なら外側を見ない**
     pub revive_host_free_ttl_sec: u64,
+
+    // --- 縮小（設計§8）---
+    // 意味は射影先の [`CompactConfig`] を参照する。
+    pub compact_auto: bool,
+    pub compact_quiet_minutes: u64,
+    pub compact_threshold_gb: u64,
+    pub compact_window: String,
+    pub compact_min_interval_hours: u64,
+    pub compact_script_task: String,
+    pub compact_result_path: Option<PathBuf>,
+    pub compact_ext4_vhdx: Option<PathBuf>,
+    pub compact_docker_vhdx: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -100,6 +113,7 @@ impl Default for Config {
     fn default() -> Self {
         let agent = SessionHostConfig::default();
         let server = ServerConfig::default();
+        let compact = CompactConfig::default();
         Self {
             port: server.port,
             bind_addr: server.bind_addr,
@@ -139,6 +153,15 @@ impl Default for Config {
             revive_estimate_mb: agent.revive_estimate_mb,
             revive_headroom_mb: agent.revive_headroom_mb,
             revive_host_free_ttl_sec: agent.revive_host_free_ttl_sec,
+            compact_auto: compact.auto,
+            compact_quiet_minutes: compact.quiet_minutes,
+            compact_threshold_gb: compact.threshold_gb,
+            compact_window: compact.window,
+            compact_min_interval_hours: compact.min_interval_hours,
+            compact_script_task: compact.script_task,
+            compact_result_path: compact.result_path,
+            compact_ext4_vhdx: compact.ext4_vhdx,
+            compact_docker_vhdx: compact.docker_vhdx,
         }
     }
 }
@@ -229,6 +252,9 @@ impl Config {
             claude_settings_path: Some(PathBuf::from("/probe")),
             database_url: Some("sqlite://probe".to_string()),
             valkey_url: Some("redis://probe".to_string()),
+            compact_result_path: Some(PathBuf::from("/probe")),
+            compact_ext4_vhdx: Some(PathBuf::from("/probe")),
+            compact_docker_vhdx: Some(PathBuf::from("/probe")),
             ..Config::default()
         };
         env::shapes_of(&probe).expect("既定値を TOML へ変換できること")
@@ -296,6 +322,26 @@ impl Config {
             lan_session_ttl_hours: self.lan_session_ttl_hours,
             notice_retention_days: self.notice_retention_days,
             notice_max_rows: self.notice_max_rows,
+        }
+    }
+
+    /// 縮小が使う分だけを取り出す（設計§8）。
+    ///
+    /// **3つ目の射影である。** 縮小のキーは [`SessionHostConfig`] にも [`ServerConfig`]
+    /// にも属さない——`agent.toml` は**別の PC へ配る**ファイルなので、そこに「この機械の
+    /// 仮想ディスクを縮める設定」を置くと「remote でも縮められるのか」と読めてしまう
+    /// （remote は 501 で断る）。
+    pub fn compact(&self) -> CompactConfig {
+        CompactConfig {
+            auto: self.compact_auto,
+            quiet_minutes: self.compact_quiet_minutes,
+            threshold_gb: self.compact_threshold_gb,
+            window: self.compact_window.clone(),
+            min_interval_hours: self.compact_min_interval_hours,
+            script_task: self.compact_script_task.clone(),
+            result_path: self.compact_result_path.clone(),
+            ext4_vhdx: self.compact_ext4_vhdx.clone(),
+            docker_vhdx: self.compact_docker_vhdx.clone(),
         }
     }
 
@@ -407,6 +453,15 @@ impl Config {
                 "log_max_bytes は 1 以上である必要があります".to_string(),
             ));
         }
+        // 読めない綴りをここで断るのは、**素通しすると「夜が来ても走らない」という
+        // 分かりにくい形になる**ため。窓が読めなければ時間帯の判定は必ず偽になり、
+        // 自動の縮小は一度も走らないまま、どこにも理由が出ない
+        if session_host_core::compact::窓を読む(&self.compact_window).is_none() {
+            return Err(ConfigError::Invalid(format!(
+                "compact_window が読めません: {}（例: \"02:00-05:00\"）",
+                self.compact_window
+            )));
+        }
         // `log_file_level` はここで断らない。読めない綴りは logging 側が `debug` へ
         // 落として**そのことをログに残す**（黙って落ちるのがこのイシューの敵）
         Ok(())
@@ -499,6 +554,9 @@ mod tests {
             "state_dir",
             "claude_settings_path",
             "database_url",
+            "compact_result_path",
+            "compact_ext4_vhdx",
+            "compact_docker_vhdx",
         ] {
             assert!(
                 !with_values.contains_key(key),
@@ -639,6 +697,15 @@ mod tests {
             log_retention_days = 3
             log_max_bytes = 4096
             log_file_level = "trace"
+            compact_auto = true
+            compact_quiet_minutes = 77
+            compact_threshold_gb = 88
+            compact_window = "22:00-03:00"
+            compact_min_interval_hours = 99
+            compact_script_task = "Probe Task"
+            compact_result_path = "/tmp/compact-result.json"
+            compact_ext4_vhdx = "/tmp/ext4.vhdx"
+            compact_docker_vhdx = "/tmp/docker.vhdx"
             "#,
         )
         .unwrap();
@@ -680,6 +747,24 @@ mod tests {
         assert!(server.cookie_secure);
         assert_eq!(server.lan_session_ttl_hours, 3);
         assert_eq!(server.valkey_url.as_deref(), Some("redis://127.0.0.1:6379"));
+
+        // **3つ目の射影。** ここへ足し忘れても、この検査は緑のまま通る——TOML 本文も
+        // 下の確認も1行ずつ手書きだからである。写し忘れると、利用者が書いた値が
+        // **黙って既定値に戻る**（この機能では「慎重側に倒したつもりの設定が効かず、
+        // 意図より頻繁に claude が落ちる」という形で出る）
+        let compact = config.compact();
+        assert!(compact.auto);
+        assert_eq!(compact.quiet_minutes, 77);
+        assert_eq!(compact.threshold_gb, 88);
+        assert_eq!(compact.window, "22:00-03:00");
+        assert_eq!(compact.min_interval_hours, 99);
+        assert_eq!(compact.script_task, "Probe Task");
+        assert_eq!(
+            compact.result_path,
+            Some(PathBuf::from("/tmp/compact-result.json"))
+        );
+        assert_eq!(compact.ext4_vhdx, Some(PathBuf::from("/tmp/ext4.vhdx")));
+        assert_eq!(compact.docker_vhdx, Some(PathBuf::from("/tmp/docker.vhdx")));
     }
 
     /// そのキーへ入れて意味のある値（既定と必ず違うもの）。
@@ -689,6 +774,10 @@ mod tests {
             // 破って値エラーになり、**上書きが効いたのか値が弾かれたのか**が分からなくなる
             ("flow_high", _) => "999999".to_string(),
             ("flow_low", _) => "42".to_string(),
+            // 窓は `validate()` が綴りを見るので、適当な文字列を入れると
+            // **上書きが効いたのか値が弾かれたのか**が分からなくなる（フロー制御と同じ）。
+            // 既定（`02:00-05:00`）と違う、読める綴りを渡す
+            ("compact_window", _) => "22:00-03:00".to_string(),
             (_, toml::Value::Integer(_)) => "4242".to_string(),
             // 既定の逆を入れる。同じ値だと「上書きが効いた」ことにならない
             (_, toml::Value::Boolean(value)) => (!value).to_string(),
