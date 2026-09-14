@@ -342,6 +342,11 @@ pub struct CompactStatus {
     pub in_window: bool,
     /// 空洞。**読めなければ `None`。**
     pub slack_bytes: Option<u64>,
+    /// 2枚の仮想ディスクが C: の上で占めている合計。**読めなければ `None`。**
+    ///
+    /// **空洞と並べて初めて「どれだけ無駄か」が読める。** 「80 GiB 空洞」だけでは
+    /// それが全体の何割なのかが分からず、押しどきの判断にならない（縮小設計§10-3）。
+    pub vhdx_bytes: Option<u64>,
     pub last_compact: Option<SystemTime>,
     pub auto_enabled: bool,
     pub paused_until: Option<SystemTime>,
@@ -619,6 +624,22 @@ pub fn 時刻を読む(text: &str) -> Option<SystemTime> {
         return None;
     }
     Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs as u64))
+}
+
+/// epoch ミリ秒を RFC3339 の文字列へ。**[`時刻を読む`] の対。**
+///
+/// **同じ場所に置くのは、読む側と書く側がずれないようにするため。** 片方だけ別の
+/// crate にあると、綴りが変わったときにもう片方が黙って古いままになる。
+///
+/// **`core` から使う。** あちらの依存に `time` が無いので、口や CLI が時刻を人へ
+/// 見せたいときはここを通る。読めない値（紀元前など）は `None`。
+pub fn 時刻を書く(epoch_ms: i64) -> Option<String> {
+    if epoch_ms < 0 {
+        return None;
+    }
+    let at = time::OffsetDateTime::from_unix_timestamp(epoch_ms / 1000).ok()?;
+    at.format(&time::format_description::well_known::Rfc3339)
+        .ok()
 }
 
 /// 覚えていることの場所。
@@ -905,6 +926,7 @@ mod tests {
             quiet_since: Some(now - Duration::from_secs(3600)),
             in_window: true,
             slack_bytes: Some(100 * GIB),
+            vhdx_bytes: Some(300 * GIB),
             last_compact: None,
             auto_enabled: true,
             paused_until: None,
@@ -1091,6 +1113,7 @@ mod tests {
             quiet_since: None,
             in_window: false,
             slack_bytes: Some(0),
+            vhdx_bytes: Some(0),
             last_compact: Some(now),
             auto_enabled: false,
             paused_until: Some(now + Duration::from_secs(60)),

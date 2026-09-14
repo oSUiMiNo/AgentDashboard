@@ -1662,11 +1662,30 @@ fn render_compact(view: &serde_json::Value) -> String {
         数("interactive_shells")
     )];
     match view.get("slack_bytes").and_then(|v| v.as_u64()) {
-        Some(bytes) => lines.push(format!(
-            "空洞 {} GiB（いま縮めれば、これだけ Windows へ返る見込み）",
-            bytes / (1024 * 1024 * 1024)
-        )),
+        Some(bytes) => {
+            // **合計と並べて初めて「どれだけ無駄か」が読める。** 空洞だけでは
+            // それが全体の何割なのかが分からない（縮小設計§10-3）
+            let 合計 = view
+                .get("vhdx_bytes")
+                .and_then(|v| v.as_u64())
+                .map(|全体| format!("／仮想ディスクは {} GiB", 全体 / (1024 * 1024 * 1024)))
+                .unwrap_or_default();
+            lines.push(format!(
+                "空洞 {} GiB（いま縮めれば、これだけ Windows へ返る見込み）{合計}",
+                bytes / (1024 * 1024 * 1024)
+            ));
+        }
         None => lines.push("空洞：読めません（仮想ディスクのパスが設定されていない）".to_string()),
+    }
+    // **一度も縮めていないことを黙らない。** 「前回から何日経ったか」は押しどきの
+    // 材料なので、無いなら無いと言う
+    match view
+        .get("last_compact")
+        .and_then(|v| v.as_i64())
+        .and_then(session_host_core::compact::時刻を書く)
+    {
+        Some(いつ) => lines.push(format!("最後に縮めたのは {いつ}")),
+        None => lines.push("まだ一度も縮めていません".to_string()),
     }
     // **打てない理由は、打てるときこそ黙る。** 出しっぱなしにすると読み飛ばされる
     for (札, 見出し) in [

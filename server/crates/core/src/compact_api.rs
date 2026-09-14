@@ -108,19 +108,20 @@ fn 様子(state: &CompactApiState, account_id: Uuid) -> CompactStatus {
         // **読めなければ「外」に倒す。** 時間帯が分からないのに打つ理由が無い
         _ => false,
     };
+    // **1回だけ読んで、2つとも写す。** 空洞と合計は同じ測定から出る値なので、
+    // 別々に読むと**同じ瞬間の話ではなくなる**（画面には並べて出る）。
+    let slack = state.slack.read(
+        state.cfg.ext4_vhdx.as_deref(),
+        state.cfg.docker_vhdx.as_deref(),
+    );
     CompactStatus {
         alive_cards: alive_cards(state, account_id),
         claude_procs,
         interactive_shells,
         quiet_since: remembered.quiet_since,
         in_window,
-        slack_bytes: state
-            .slack
-            .read(
-                state.cfg.ext4_vhdx.as_deref(),
-                state.cfg.docker_vhdx.as_deref(),
-            )
-            .map(|slack| slack.slack_bytes()),
+        slack_bytes: slack.map(|slack| slack.slack_bytes()),
+        vhdx_bytes: slack.map(|slack| slack.vhdx_bytes()),
         last_compact: remembered.last_compact,
         auto_enabled: state.cfg.auto,
         paused_until: remembered.paused_until,
@@ -135,11 +136,26 @@ pub struct CompactView {
     pub interactive_shells: usize,
     pub in_window: bool,
     pub slack_bytes: Option<u64>,
+    /// 2枚の仮想ディスクが C: の上で占めている合計（`null` なら読めない）。
+    pub vhdx_bytes: Option<u64>,
+    /// 最後に縮めた時刻（epoch ミリ秒。`null` なら一度も縮めていない）。
+    ///
+    /// **`protocol::Timestamp` と同じ形で載せる。** このリポジトリは時刻を i64 の
+    /// エポックで運んでおり、`SystemTime` をそのまま `Serialize` すると
+    /// `{ secs_since_epoch, nanos_since_epoch }` という別の形で出てしまう。
+    pub last_compact: Option<protocol::Timestamp>,
     pub auto_enabled: bool,
     /// 自動で打てない理由（`null` なら打てる）。
     pub auto_blocker: Option<String>,
     /// 手で打てない理由（`null` なら打てる）。
     pub manual_blocker: Option<String>,
+}
+
+/// `SystemTime` を epoch ミリ秒へ。**読めない時刻は載せない**（`None` にする）。
+fn epoch_ms(time: SystemTime) -> Option<protocol::Timestamp> {
+    time.duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|elapsed| elapsed.as_millis() as protocol::Timestamp)
 }
 
 fn view(status: &CompactStatus, cfg: &CompactConfig, now: SystemTime) -> CompactView {
@@ -149,6 +165,8 @@ fn view(status: &CompactStatus, cfg: &CompactConfig, now: SystemTime) -> Compact
         interactive_shells: status.interactive_shells,
         in_window: status.in_window,
         slack_bytes: status.slack_bytes,
+        vhdx_bytes: status.vhdx_bytes,
+        last_compact: status.last_compact.and_then(epoch_ms),
         auto_enabled: status.auto_enabled,
         auto_blocker: status.blocker(cfg, now).map(|b| b.言い分()),
         manual_blocker: status.manual_blocker(false).map(|b| b.言い分()),
