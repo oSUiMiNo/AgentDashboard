@@ -707,6 +707,10 @@ function handleJson(raw: string, set: SetState) {
       removeSession(message.card_id)
       // 台帳に残すと、同じIDが二度と来ないのに死んだ値を持ち続ける
       alive.delete(message.card_id)
+      // **断りの記録も同じ。** 生死の台帳だけ消して断りを残すと、仮にそのIDが
+      // もう一度現れたとき、**生死は「初めて見る」なのに断りだけ古い**という
+      // 食い違った状態から始まる
+      断られた.delete(message.card_id)
       break
     case 'status':
       // 状態だけの差分。フックはツールコールのたびに飛んでくるので、
