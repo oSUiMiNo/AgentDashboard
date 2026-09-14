@@ -301,3 +301,63 @@ test('生テキストの上では、レールは動かない', async ({ page }) 
     'レールは動かないこと（動いたら、全子孫から奪っている）',
   ).toBe(レール前)
 })
+
+/*
+  **画面の外枠（`<main>`）へ張っていることを、実ブラウザで確かめる3本。**
+
+  **単体では捕まらない。** 配線を誤った形（`section` へ張る）へ戻しても、単体は
+  54本すべて緑のままだった（実測 2026-09-14）——器が `<main>` の階層を持たないため、
+  **section の外という概念がテストの世界に存在しない。**
+
+  **どの要素が画面のどこを占めているかは、実ブラウザでしか分からない。**
+*/
+test('アプリの帯の上で横へ回すと、レールが動く', async ({ page }) => {
+  const rail = await 三本並べて開く(page)
+  const 前 = await rail.evaluate((el) => el.scrollLeft)
+
+  // **アプリ共通の帯**（`App.tsx` の `<header>`）。**PJT 名の帯ではない**——
+  // 同じ画面に帯が2つあり、利用者が指していたのはこちら
+  await page.getByTestId('app-version').hover()
+  await page.mouse.wheel(200, 0)
+
+  await expect
+    .poll(async () => rail.evaluate((el) => el.scrollLeft), {
+      message: 'アプリの帯（レールの外・section の兄弟）でも、レールへ届くこと',
+    })
+    .toBeGreaterThan(前)
+})
+
+test('レールより下の余白の上で横へ回すと、レールが動く', async ({ page }) => {
+  const rail = await 三本並べて開く(page)
+  const 前 = await rail.evaluate((el) => el.scrollLeft)
+
+  // **`<main>` の下パディング。** レールの下端より下、窓の底より上を突く
+  const box = await rail.boundingBox()
+  expect(box, 'レールが画面に出ていること').not.toBeNull()
+  const 底 = page.viewportSize()
+  expect(底, '窓の大きさが取れること').not.toBeNull()
+  const y = (box!.y + box!.height + 底!.height) / 2
+  await page.mouse.move(box!.x + box!.width / 2, y)
+  await page.mouse.wheel(200, 0)
+
+  await expect
+    .poll(async () => rail.evaluate((el) => el.scrollLeft), {
+      message: 'レールより下の余白（main のパディング）でも、レールへ届くこと',
+    })
+    .toBeGreaterThan(前)
+})
+
+test('画面いちばん上の余白の上で横へ回すと、レールが動く', async ({ page }) => {
+  const rail = await 三本並べて開く(page)
+  const 前 = await rail.evaluate((el) => el.scrollLeft)
+
+  // **`<main>` の上パディング**（`pt-2` ／ `md:pt-4`）。帯より更に上の細い帯状の領域
+  await page.mouse.move(200, 2)
+  await page.mouse.wheel(200, 0)
+
+  await expect
+    .poll(async () => rail.evaluate((el) => el.scrollLeft), {
+      message: '画面の上パディングでも、レールへ届くこと',
+    })
+    .toBeGreaterThan(前)
+})
