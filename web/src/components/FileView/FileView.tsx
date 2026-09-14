@@ -36,7 +36,7 @@
  * SVG にも同じ理由が当てはまるので、そちらにも出す（設計§7-4）。
  */
 
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { FileEditor } from './FileEditor'
 import { FileFind } from '@/components/FileView/FileFind'
@@ -66,7 +66,7 @@ import {
   writeFile,
   type FileContent,
 } from '@/lib/hostfs'
-import { dropEdit, putEdit, readEdit, WRITE_DEBOUNCE_MS } from '@/lib/fileEdits'
+import { dropEdit, putEdit, readEditDetails, WRITE_DEBOUNCE_MS, type FileEditDetails } from '@/lib/fileEdits'
 import { useAuthStore } from '@/stores/auth'
 import { useSettingsStore } from '@/stores/settings'
 import { 既定のモード, type FileMode } from '@/lib/fileMode'
@@ -163,6 +163,28 @@ interface Picture {
   mediaType: string
 }
 
+interface FileEditSession {
+  key: string
+  host: string
+  path: string
+  account: string | null
+  generation: number
+  active: boolean
+  revision: number
+  content: FileContent | null
+  text: string | null
+  stamp: string | undefined
+  conflict: boolean
+  request: number | null
+  pending: FileEditDetails | null | undefined
+  timer: ReturnType<typeof setTimeout> | null
+}
+
+function canWriteFile(content: FileContent | null): content is FileContent & { stamp: string } {
+  return content !== null && content.writable === true && content.truncated !== true &&
+    typeof content.stamp === 'string' && content.stamp !== ''
+}
+
 export function FileView({
   host,
   root,
@@ -228,13 +250,19 @@ export function FileView({
   /**
    * 次の保存が持っていく印（設計§8-3）。読んだ時点のものから始め、**保存のたびに更新する。**
    *
-   * **中身を解釈しない。** 作るのも比べるのも PC 側だけで、こちらは持ち回すだけ。
+   * **中身を解釈しない。** 下書きの元の印と一致するかだけを比べ、保存時の判定は PC 側に任せる。
    * **古い PC は付けてこないので、無いことがありうる**——そのときは保存できない
    * （省けば上書きできる道を残さないため）。
    */
   const [印, set印] = useState<string | undefined>(undefined)
   /** 書きかけを `localStorage` から戻したか。**黙って戻さない**（設計§7-4） */
   const [戻した, set戻した] = useState(false)
+  const [下書きの断り, set下書きの断り] = useState<string | null>(null)
+  const 文書 = useRef<FileEditSession | null>(null)
+  const 次の世代 = useRef(0)
+  const [読込世代, set読込世代] = useState(0)
+  const 次の依頼 = useRef(0)
+  const 保存の門 = useRef(new Map<string, { id: number; done: Promise<void> }>())
   /**
    * 書きかけの置き場を口座ごとに分けるための名前（`lib/drafts.ts` と同じ作法）。
    *
@@ -284,8 +312,38 @@ export function FileView({
   const [zoom, 大きさ] = useFileZoom()
   // `CopyPath`（`FolderBrowser`）と同じ3つの状態。**片方だけ黙る作りにしない**
 
-  useEffect(() => {
-    let alive = true
+  const 現在の文書か = useCallback((対象: FileEditSession) =>
+    対象.active && 文書.current === 対象, [])
+
+  const 書きかけを確定する = useCallback((対象: FileEditSession) => {
+    if (対象.timer !== null) {
+      clearTimeout(対象.timer)
+      対象.timer = null
+    }
+    if (対象.pending === undefined) return
+    const 残り = 対象.pending
+    const 成功 = 残り === null
+      ? dropEdit(対象.host, 対象.path, 対象.account)
+      : putEdit(対象.host, 対象.path, 残り.text, 対象.account, 残り.baseStamp)
+    if (成功) 対象.pending = undefined
+    if (現在の文書か(対象)) {
+      set下書きの断り(成功 ? null : 残り === null
+        ? '下書きをこのブラウザから削除できません。次に開くと以前の下書きが残っていることがあります。'
+        : '下書きをこのブラウザに保存できません。入力は残っていますが、この画面を閉じると失われるおそれがあります。')
+    }
+  }, [現在の文書か])
+
+  useLayoutEffect(() => {
+    const 対象: FileEditSession = {
+      key: JSON.stringify([account, host, path]), host, path, account,
+      generation: ++次の世代.current, active: true, revision: 0,
+      content: null, text: null, stamp: undefined, conflict: false,
+      request: ++次の依頼.current, pending: undefined, timer: null,
+    }
+    文書.current = 対象
+    set読込世代(対象.generation)
+    const 読込依頼 = 対象.request
+    const 読込中か = () => 現在の文書か(対象) && 対象.request === 読込依頼
     let made: string | null = null
     setLoading(true)
     setError(null)
@@ -295,6 +353,7 @@ export function FileView({
     set保存の断り(null)
     set印(undefined)
     set戻した(false)
+    set下書きの断り(null)
     // **ファイルを切り替えたら探す窓を畳む。** 前のファイルで打った語がそのまま
     // 残ると、当たりの数だけが別の文書のものに見える
     setFind(false)
@@ -313,7 +372,7 @@ export function FileView({
           // あちらは UTF-8 として読めないものを断るので、必ず失敗する
           const found = await readBlob(host, path)
           made = found.url
-          if (alive) {
+          if (読込中か()) {
             setPicture(found)
           } else {
             // 外れたあとに届いたぶんも捨てる（下の後始末は `made` を見る）
@@ -324,8 +383,30 @@ export function FileView({
           // **HTML と SVG も、まずここを通る**（設計§7-3）。断りの理由と
           // 「生テキストで見る」の中身が、この1回で揃う
           const result = await readFile(host, path)
-          if (alive) {
+          if (読込中か()) {
+            対象.content = result
+            対象.stamp = result.stamp
             setContent(result)
+            const 残り = readEditDetails(host, path, account)
+            if (残り !== null && 残り.text !== result.text) {
+              対象.text = 残り.text
+              対象.stamp = 残り.baseStamp ?? undefined
+              対象.conflict = 残り.baseStamp === null || 残り.baseStamp !== result.stamp
+              set書きかけ(残り.text)
+              set戻した(true)
+              if (対象.conflict) {
+                set保存の断り({
+                  文: 残り.baseStamp === null
+                    ? '下書きの元の版が分かりません。読み直すか、確認して自分の編集で上書きしてください。'
+                    : '下書きを書き始めたあとにファイルが変わっています。読み直すか、自分の編集で上書きしてください。',
+                  競合: true,
+                })
+              }
+            } else if (残り !== null) {
+              対象.pending = null
+              書きかけを確定する(対象)
+            }
+            set印(対象.stamp)
             // **大きい Markdown だけを生テキストで始める**（`FORMAT_DEFAULT_LIMIT`）。
             //
             // **種別を見ずに掛けてはいけない。** ここは HTML と SVG も通るが、
@@ -346,27 +427,32 @@ export function FileView({
           }
         }
       } catch (err) {
-        if (alive) {
+        if (読込中か()) {
           setError(err instanceof Error ? err.message : '読めませんでした')
-          // **`if (alive)` の中で呼ぶ。** 外で呼ぶと、既に外れた古い `FileView` が
+          // **`if (読込中か())` の中で呼ぶ。** 外で呼ぶと、既に外れた古い `FileView` が
           // 親へ「読めなかった」を報告し、いま開いている列を巻き添えに畳む
           知らせ先.current?.(err instanceof HostFsError ? err.status : null)
         }
       } finally {
-        if (alive) {
+        if (読込中か()) {
+          対象.request = null
           setLoading(false)
         }
       }
     })()
 
+    const 離れる = () => 書きかけを確定する(対象)
+    globalThis.addEventListener('pagehide', 離れる)
     return () => {
-      alive = false
+      対象.active = false
+      globalThis.removeEventListener('pagehide', 離れる)
+      書きかけを確定する(対象)
       // **作った URL は必ず捨てる。** 忘れると、開くたびにブラウザの中で溜まる
       if (made !== null) {
         URL.revokeObjectURL(made)
       }
     }
-  }, [host, path, kind])
+  }, [host, path, kind, account, 現在の文書か, 書きかけを確定する])
 
   const relative = relativeOf(root, path)
 
@@ -422,7 +508,8 @@ export function FileView({
    * - **印が無ければ保存させない**（設計§8-3）。省けば上書きできる道を残さない
    */
   const 保存できる =
-    変えた && !保存中 && content !== null && content.truncated !== true && 印 !== undefined
+    変えた && !保存中 && canWriteFile(content) && 印 !== undefined && 印 !== '' &&
+    保存の断り?.競合 !== true
   const 探せる = !loading && content !== null && !箱で描いている
   /**
    * 探す入口を出すか。**プレビューでも出す**（利用者の指摘・2026-09-08）。
@@ -510,189 +597,158 @@ export function FileView({
     set探す合図((n) => n + 1)
   }, [])
 
-  /**
-   * 読み終えたら、印を控え、**書きかけが残っていないか見る**（設計§7-4）。
-   *
-   * **黙って戻さない。** 戻したことは画面で言い、**捨てる道を必ず添える**——
-   * 黙って戻すと、ディスクの中身と違うものを見ているのに気づけない。
-   */
-  useEffect(() => {
-    if (content === null) {
-      return
+  const 書き出しを取り消す = useCallback((対象: FileEditSession) => {
+    if (対象.timer !== null) {
+      clearTimeout(対象.timer)
+      対象.timer = null
     }
-    set印(content.stamp)
-    const 残り = readEdit(host, path, account)
-    if (残り !== null && 残り !== content.text) {
-      set書きかけ(残り)
-      set戻した(true)
-    }
-  }, [content, host, path, account])
-
-  /**
-   * 打鍵を**まとめて**写す（設計§7-3）。1文字ごとには書かない。
-   *
-   * **まとめる以上、まとめた途中で離れるときに確定させなければならない。**
-   * 窓は 300ms なので、**その内側でタブを閉じる・別のファイルへ移る・PJT を移る・
-   * 版が切り替わって読み直す**と、打ったぶんが消える。だから `lib/drafts.ts` と
-   * 同じ**3点セット**で解く——**確定させる口**・**`pagehide` で確定**・**片付けで確定**。
-   *
-   * `beforeunload` は足さない（web 全体に1つも無く、`pagehide` を意図して
-   * 選んでいる——`beforeunload` はモバイルで発火しないことがある）。
-   */
-  /** まだ写していない中身。`null` は「写すものが無い」 */
-  const 未書き出し = useRef<string | null>(null)
-  const 書き出しの札 = useRef<ReturnType<typeof setTimeout> | null>(null)
-
-  /**
-   * 時計を止めて、**その場で写す**。
-   *
-   * **`host` ／ `path` ／ `account` を閉じ込めている**ので、鍵が変わる瞬間に呼ばれても
-   * **古い鍵へ書く**。ここを「いまの鍵」にすると、**別のファイルの書きかけとして
-   * 現れる**——最も気づきにくい壊れ方である。
-   */
-  const 書きかけを確定する = useCallback(() => {
-    if (書き出しの札.current !== null) {
-      clearTimeout(書き出しの札.current)
-      書き出しの札.current = null
-    }
-    if (未書き出し.current === null) {
-      return
-    }
-    putEdit(host, path, 未書き出し.current, account)
-    未書き出し.current = null
-  }, [host, path, account])
-
-  useEffect(() => {
-    const 離れる = () => {
-      書きかけを確定する()
-    }
-    globalThis.addEventListener('pagehide', 離れる)
-    return () => {
-      globalThis.removeEventListener('pagehide', 離れる)
-      // **消えるときも書き切る。** 画面を移っただけで失われないため
-      書きかけを確定する()
-    }
-  }, [書きかけを確定する])
-
-  /**
-   * 打鍵を受ける。**状態と「まだ写していない中身」の両方を進める。**
-   *
-   * 状態だけを効果の依存に置くと、**打鍵のたびに片付けが走って確定してしまい、
-   * まとめる意味が消える**（1文字ごとに書くのと同じになる）。だから写す側は
-   * 参照で持ち、窓が閉じたときだけ書く。
-   */
-  const 書きかけを打つ = useCallback(
-    (次: string) => {
-      set書きかけ(次)
-      未書き出し.current = 次
-      if (書き出しの札.current !== null) {
-        clearTimeout(書き出しの札.current)
-      }
-      書き出しの札.current = setTimeout(() => {
-        書き出しの札.current = null
-        書きかけを確定する()
-      }, WRITE_DEBOUNCE_MS)
-    },
-    [書きかけを確定する],
-  )
-
-  /**
-   * 写す予定を取り消す。**捨てたあとに古い値が書き戻らないようにする。**
-   *
-   * 保存に成功したときと編集を捨てたときに呼ぶ。呼ばないと、**窓の中で保存すると
-   * 直後に `putEdit` が走り、捨てたはずの書きかけが復活する。**
-   */
-  const 書き出しを取り消す = useCallback(() => {
-    if (書き出しの札.current !== null) {
-      clearTimeout(書き出しの札.current)
-      書き出しの札.current = null
-    }
-    未書き出し.current = null
+    対象.pending = undefined
   }, [])
 
-  /**
-   * ディスクへ書き戻す（設計§2・§8）。
-   *
-   * **印を持っていく。** 読んでから保存するまでに他所で書き換えられていたら、
-   * PC 側が断る——**このダッシュボードは別のセッションの claude が同じファイルを
-   * 触るのが日常**なので、黙って上書きすると**相手の作業が音もなく消える**。
-   */
-  const 保存する = useCallback(
-    async (印を取り直すか = false) => {
-    if (content === null || 書きかけ === null || (印 === undefined && !印を取り直すか)) {
-      return
-    }
-    const 送る = 書きかけ
+  const 書きかけを打つ = useCallback((次: string) => {
+    const 対象 = 文書.current
+    if (対象 === null || 対象.generation !== 読込世代 || !現在の文書か(対象) || !canWriteFile(対象.content)) return
+    if (次 === (対象.text ?? 対象.content.text)) return
+    対象.revision += 1
+    対象.text = 次
+    set書きかけ(次)
+    対象.pending = 次 === 対象.content.text && !対象.conflict && 対象.request === null
+      ? null : { text: 次, baseStamp: 対象.stamp ?? null }
+    if (対象.timer !== null) clearTimeout(対象.timer)
+    対象.timer = setTimeout(() => 書きかけを確定する(対象), WRITE_DEBOUNCE_MS)
+  }, [読込世代, 現在の文書か, 書きかけを確定する])
+
+  const 保存を始める = useCallback((対象: FileEditSession) => {
+    if (!現在の文書か(対象) || 対象.request !== null) return null
+    const id = ++次の依頼.current
+    const 世代 = 対象.generation
+    const 前 = 保存の門.current.get(対象.key)?.done
+    let 終える!: () => void
+    const done = new Promise<void>((resolve) => { 終える = resolve })
+    保存の門.current.set(対象.key, { id, done })
+    対象.request = id
     set保存中(true)
+    const 有効 = () => 現在の文書か(対象) && 対象.generation === 世代 && 対象.request === id
+    return {
+      前,
+      有効,
+      終える: () => {
+        if (現在の文書か(対象) && 対象.request === id) {
+          対象.request = null
+          set保存中(false)
+        }
+        if (保存の門.current.get(対象.key)?.id === id) 保存の門.current.delete(対象.key)
+        終える()
+      },
+    }
+  }, [現在の文書か])
+
+  const 保存する = useCallback(async (印を取り直すか = false) => {
+    const 対象 = 文書.current
+    if (対象 === null || 対象.generation !== 読込世代 || !canWriteFile(対象.content) || 対象.text === null) return
+    if (!印を取り直すか && (対象.conflict || !対象.stamp || 対象.text === 対象.content.text)) return
+    const 送る = 対象.text
+    const 元の印 = 対象.stamp
+    const 元の中身 = 対象.content
+    const revision = 対象.revision
+    const 依頼 = 保存を始める(対象)
+    if (依頼 === null) return
     set保存の断り(null)
     try {
-      // **「上書きする」のときだけ印を取り直す**（設計§8-3）。**中身は書きかけのまま**
-      // ——読み直しを経由して書きかけを消さない。**取り直す間にまた変わっていたら、
-      // また断られるのが正しい**（黙って通さない）
-      const 使う印 = 印を取り直すか ? ((await readFile(host, path)).stamp ?? '') : (印 ?? '')
-      const 答え = await writeFile(host, path, 送る, 使う印)
+      if (依頼.前 !== undefined) await 依頼.前
+      if (!依頼.有効()) return
+      let 使う印 = 元の印
+      if (印を取り直すか) {
+        const 最新 = await readFile(対象.host, 対象.path)
+        if (!依頼.有効()) return
+        if (!canWriteFile(最新)) throw new Error('書き込み可能なファイル全体と版を確認できないため、上書きできません。')
+        使う印 = 最新.stamp
+      }
+      if (!使う印) return
+      const 答え = await writeFile(対象.host, 対象.path, 送る, 使う印)
+      if (!依頼.有効()) return
+      対象.content = { ...元の中身, text: 送る, bytes: 答え.bytes, stamp: 答え.stamp }
+      対象.stamp = 答え.stamp
+      対象.conflict = false
+      setContent(対象.content)
       set印(答え.stamp)
-      setContent((now) =>
-        now === null ? now : { ...now, text: 送る, bytes: 答え.bytes, stamp: 答え.stamp },
-      )
-      set書きかけ(null)
       set戻した(false)
-      // **成功したときだけ捨てる**（設計§7-3）。**写す予定も取り消す**——
-      // 窓の内側で保存すると、直後に書き戻って捨てたはずのものが復活する
-      書き出しを取り消す()
-      dropEdit(host, path, account)
+      書き出しを取り消す(対象)
+      if (対象.revision === revision || 対象.text === 送る) {
+        対象.text = null
+        set書きかけ(null)
+        対象.pending = null
+      } else {
+        対象.pending = { text: 対象.text ?? 元の中身.text, baseStamp: 答え.stamp }
+      }
+      書きかけを確定する(対象)
     } catch (err) {
-      // **失敗しても書きかけを捨てない**（設計§8-4）。捨てると、断られた瞬間に
-      // 打った文が消える——直せるはずのものが直せなくなる
+      if (!依頼.有効()) return
+      対象.conflict = 対象.conflict || (err instanceof HostFsError && err.status === 409)
       set保存の断り({
         文: err instanceof Error ? err.message : '保存できませんでした',
-        // **競合だけは 409 で見分ける**（設計§8-3）。文で見分けると、断り文を
-        // 直した日に黙って壊れる
-        競合: err instanceof HostFsError && err.status === 409,
+        競合: 対象.conflict,
       })
     } finally {
-      set保存中(false)
+      依頼.終える()
     }
-    },
-    [content, 書きかけ, 印, host, path, account, 書き出しを取り消す],
-  )
+  }, [読込世代, 保存を始める, 書き出しを取り消す, 書きかけを確定する])
 
-  /**
-   * 競合のときの「読み直す」（設計§8-3）。**自分の編集を捨てて、ディスクの中身を取り直す。**
-   *
-   * **`編集を捨てる` と分けてある。** あちらは手元の `content` へ戻すだけで、
-   * **ディスクが変わっている競合の場面では、戻る先そのものが古い。**
-   */
   const 読み直す = useCallback(async () => {
-    set保存中(true)
+    const 対象 = 文書.current
+    if (対象 === null || 対象.generation !== 読込世代) return
+    const revision = 対象.revision
+    const 依頼 = 保存を始める(対象)
+    if (依頼 === null) return
     try {
-      const 最新 = await readFile(host, path)
+      if (依頼.前 !== undefined) await 依頼.前
+      if (!依頼.有効()) return
+      const 最新 = await readFile(対象.host, 対象.path)
+      if (!依頼.有効()) return
+      if (対象.revision !== revision) {
+        set保存の断り({ 文: '読み直している間に入力があったため、編集を残しました。', 競合: 対象.conflict })
+        return
+      }
+      対象.content = 最新
+      対象.stamp = 最新.stamp
+      対象.text = null
+      対象.conflict = false
+      対象.generation = ++次の世代.current
+      set読込世代(対象.generation)
       setContent(最新)
       set印(最新.stamp)
       set書きかけ(null)
       set戻した(false)
       set保存の断り(null)
-      書き出しを取り消す()
-      dropEdit(host, path, account)
+      書き出しを取り消す(対象)
+      対象.pending = null
+      書きかけを確定する(対象)
     } catch (err) {
+      if (!依頼.有効()) return
       set保存の断り({
         文: err instanceof Error ? err.message : '読み直せませんでした',
-        競合: false,
+        競合: 対象.conflict,
       })
     } finally {
-      set保存中(false)
+      依頼.終える()
     }
-  }, [host, path, account, 書き出しを取り消す])
+  }, [読込世代, 保存を始める, 書き出しを取り消す, 書きかけを確定する])
 
-  /** 編集を捨ててディスクの中身へ戻す。**戻す先を必ず用意する**（設計§7-4） */
   const 編集を捨てる = useCallback(() => {
+    const 対象 = 文書.current
+    if (対象 === null || 対象.generation !== 読込世代 || !現在の文書か(対象) || 対象.request !== null) return
+    対象.revision += 1
+    対象.text = null
+    対象.stamp = 対象.content?.stamp
+    対象.conflict = false
     set書きかけ(null)
+    set印(対象.stamp)
     set戻した(false)
     set保存の断り(null)
-    // 捨てたあとに古い値が書き戻らないよう、**写す予定も取り消す**
-    書き出しを取り消す()
-    dropEdit(host, path, account)
-  }, [host, path, account, 書き出しを取り消す])
+    書き出しを取り消す(対象)
+    対象.pending = null
+    書きかけを確定する(対象)
+  }, [読込世代, 現在の文書か, 書き出しを取り消す, 書きかけを確定する])
 
   /*
     **Ctrl+F ／ Ctrl+G を奪うのは、探す入口があるときだけ。**
@@ -1019,6 +1075,7 @@ export function FileView({
             variant="ghost"
             size="xs"
             data-testid="file-discard"
+            disabled={保存中}
             onClick={編集を捨てる}
           >
             編集を捨てる
@@ -1039,6 +1096,12 @@ export function FileView({
           className="text-xs break-words whitespace-pre-line text-red-300"
         >
           保存できませんでした：{保存の断り.文}
+        </p>
+      )}
+
+      {下書きの断り !== null && (
+        <p data-testid="file-draft-error" className="text-xs break-words whitespace-pre-line text-red-300">
+          {下書きの断り}
         </p>
       )}
 

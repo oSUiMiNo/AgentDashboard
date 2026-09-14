@@ -49,7 +49,12 @@ export const MAX_EDITS = 20
 /** 書き出しをまとめる窓（ミリ秒）。**1文字ごとに書かない。** */
 export const WRITE_DEBOUNCE_MS = 300
 
-type Table = Record<string, string>
+export interface FileEditDetails {
+  text: string
+  baseStamp: string | null
+}
+
+type Table = Record<string, string | FileEditDetails>
 
 function keyFor(account: string | null): string {
   return PREFIX + (account ?? NO_ACCOUNT)
@@ -72,13 +77,14 @@ export function editKey(host: string, path: string): string {
 let 控え: { raw: string; table: Table } | null = null
 
 /** 表を読む。**壊れていても落ちない**——読めなければ空として扱う。 */
-function readTable(account: string | null): Table {
+function readTable(account: string | null): Table | null {
   let raw: string | null = null
   try {
-    raw = globalThis.localStorage?.getItem(keyFor(account)) ?? null
+    if (!globalThis.localStorage) return null
+    raw = globalThis.localStorage.getItem(keyFor(account))
   } catch {
-    // private window や設定でブロックされていると throw する。**既定へ落ちる**
-    return {}
+    // private window や設定でブロックされていると throw する。**書き戻しも止める**
+    return null
   }
   if (raw === null) {
     return {}
@@ -95,6 +101,15 @@ function readTable(account: string | null): Table {
     for (const [key, text] of Object.entries(parsed)) {
       if (typeof text === 'string') {
         table[key] = text
+      } else if (
+        typeof text === 'object' && text !== null && !Array.isArray(text) &&
+        'text' in text && typeof text.text === 'string'
+      ) {
+        table[key] = {
+          text: text.text,
+          baseStamp: 'baseStamp' in text && typeof text.baseStamp === 'string' && text.baseStamp !== ''
+            ? text.baseStamp : null,
+        }
       }
     }
     控え = { raw, table }
@@ -105,18 +120,30 @@ function readTable(account: string | null): Table {
   }
 }
 
-function writeTable(account: string | null, table: Table): void {
+function writeTable(account: string | null, table: Table): boolean {
   try {
-    globalThis.localStorage?.setItem(keyFor(account), JSON.stringify(table))
+    if (!globalThis.localStorage) return false
+    globalThis.localStorage.setItem(keyFor(account), JSON.stringify(table))
+    return true
   } catch {
-    // 置けない設定のブラウザ。**覚えられないだけで、その回の編集は成立する**
+    // 置けない設定のブラウザ。**呼ぶ側へ失敗を戻し、その回の編集は保持する**
+    return false
   }
 }
 
 /** 書きかけを読む。無ければ `null`（**空文字列と区別する**——空にしたのも編集である）。 */
 export function readEdit(host: string, path: string, account: string | null): string | null {
-  const table = readTable(account)
-  return table[editKey(host, path)] ?? null
+  return readEditDetails(host, path, account)?.text ?? null
+}
+
+export function readEditDetails(
+  host: string,
+  path: string,
+  account: string | null,
+): FileEditDetails | null {
+  const value = readTable(account)?.[editKey(host, path)]
+  if (value === undefined) return null
+  return typeof value === 'string' ? { text: value, baseStamp: null } : { ...value }
 }
 
 /**
@@ -131,17 +158,20 @@ export function putEdit(
   path: string,
   text: string,
   account: string | null,
-): void {
+  baseStamp?: string | null,
+): boolean {
   const key = editKey(host, path)
-  const table = { ...readTable(account) }
+  const existing = readTable(account)
+  if (existing === null) return false
+  const table = { ...existing }
   // 並びを更新するため、一度消してから入れ直す
   delete table[key]
-  table[key] = text
+  table[key] = { text, baseStamp: baseStamp || null }
   const keys = Object.keys(table)
   for (const 古い of keys.slice(0, Math.max(0, keys.length - MAX_EDITS))) {
     delete table[古い]
   }
-  writeTable(account, table)
+  return writeTable(account, table)
 }
 
 /**
@@ -150,13 +180,14 @@ export function putEdit(
  * **呼ぶのは「保存に成功したとき」と「編集を破棄したとき」だけ。**
  * **保存に失敗したときに呼んではいけない**——失敗した瞬間に編集が消える。
  */
-export function dropEdit(host: string, path: string, account: string | null): void {
+export function dropEdit(host: string, path: string, account: string | null): boolean {
   const key = editKey(host, path)
   const table = readTable(account)
+  if (table === null) return false
   if (!(key in table)) {
-    return
+    return true
   }
   const next = { ...table }
   delete next[key]
-  writeTable(account, next)
+  return writeTable(account, next)
 }

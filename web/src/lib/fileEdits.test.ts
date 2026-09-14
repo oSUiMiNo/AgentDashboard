@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { dropEdit, editKey, MAX_EDITS, putEdit, readEdit } from '@/lib/fileEdits'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { dropEdit, editKey, MAX_EDITS, putEdit, readEdit, readEditDetails } from '@/lib/fileEdits'
 
 /**
  * ファイルビュアの書きかけ（`ファイルビュアにエディタ機能を追加` 設計§7）。
@@ -12,6 +12,10 @@ import { dropEdit, editKey, MAX_EDITS, putEdit, readEdit } from '@/lib/fileEdits
 
 beforeEach(() => {
   globalThis.localStorage.clear()
+})
+
+afterEach(() => {
+  vi.restoreAllMocks()
 })
 
 describe('書きかけの置き場', () => {
@@ -74,18 +78,79 @@ describe('上限', () => {
 
 describe('壊れていても落ちない', () => {
   it('置けない設定のブラウザでも、その回の編集は成立する', () => {
-    const 壊す = vi.spyOn(globalThis.localStorage, 'setItem').mockImplementation(() => {
+    const 壊す = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
       throw new Error('拒まれた')
     })
-    expect(() => {
-      putEdit('local', '/home/me/a.md', 'あ', null)
-    }).not.toThrow()
+    expect(putEdit('local', '/home/me/a.md', 'あ', null)).toBe(false)
+    expect(readEdit('local', '/home/me/a.md', null)).toBeNull()
     壊す.mockRestore()
   })
 
   it('中身が壊れていたら、空として扱う', () => {
     globalThis.localStorage.setItem('agentdashboard.file-edits.local', '{壊れている')
     expect(readEdit('local', '/home/me/a.md', null)).toBeNull()
+  })
+})
+
+describe('元の版を保つ', () => {
+  const path = '/home/me/a.md'
+  const storageKey = 'agentdashboard.file-edits.local'
+
+  it('元のstampを本文と一緒に戻し、文字列だけ読む既存の口も保つ', () => {
+    expect(putEdit('local', path, '書きかけ', null, '元の版')).toBe(true)
+    expect(readEditDetails('local', path, null)).toEqual({ text: '書きかけ', baseStamp: '元の版' })
+    expect(readEdit('local', path, null)).toBe('書きかけ')
+    const restored = readEditDetails('local', path, null)!
+    restored.baseStamp = '変更してはいけない'
+    expect(readEditDetails('local', path, null)?.baseStamp).toBe('元の版')
+  })
+
+  it('旧形式の文字列とメタデータ付きの行が同居できる', () => {
+    globalThis.localStorage.setItem(storageKey, JSON.stringify({
+      [editKey('local', path)]: '旧形式',
+      [editKey('local', '/b.txt')]: { text: '新形式', baseStamp: 's1' },
+    }))
+    expect(readEditDetails('local', path, null)).toEqual({ text: '旧形式', baseStamp: null })
+    expect(readEditDetails('local', '/b.txt', null)).toEqual({ text: '新形式', baseStamp: 's1' })
+    putEdit('local', '/c.txt', '別の編集', null, 's2')
+    expect(readEdit('local', path, null)).toBe('旧形式')
+    expect(readEdit('local', '/b.txt', null)).toBe('新形式')
+  })
+
+  it('stampなしで呼ぶ既存のputEditは基準不明として保持する', () => {
+    putEdit('local', path, '', null)
+    expect(readEditDetails('local', path, null)).toEqual({ text: '', baseStamp: null })
+  })
+
+  it.each([undefined, null, '', 42])('壊れたstampを確認済みの版として扱わない（%s）', (baseStamp) => {
+    globalThis.localStorage.setItem(storageKey, JSON.stringify({
+      [editKey('local', path)]: { text: '失くせない文', baseStamp },
+    }))
+    expect(readEditDetails('local', path, null)).toEqual({ text: '失くせない文', baseStamp: null })
+  })
+
+  it('読めない表へ書き戻して他の下書きを失くさない', () => {
+    putEdit('local', path, '元の編集', null, 's1')
+    const set = vi.spyOn(Storage.prototype, 'setItem')
+    const get = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new Error('読めない')
+    })
+    expect(putEdit('local', '/b.txt', '新しい編集', null, 's2')).toBe(false)
+    expect(dropEdit('local', path, null)).toBe(false)
+    expect(set).not.toHaveBeenCalled()
+    get.mockRestore()
+    set.mockRestore()
+    expect(readEdit('local', path, null)).toBe('元の編集')
+  })
+
+  it('削除を書き戻せないときも失敗を返す', () => {
+    putEdit('local', path, '残る文', null, 's1')
+    const set = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('容量不足')
+    })
+    expect(dropEdit('local', path, null)).toBe(false)
+    set.mockRestore()
+    expect(readEdit('local', path, null)).toBe('残る文')
   })
 })
 
