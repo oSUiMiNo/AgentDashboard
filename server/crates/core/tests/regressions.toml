@@ -62,6 +62,77 @@
 min_entries = 110
 
 [[entry]]
+issue = "イシューグループ_2026-0913-2234/空きメモリの判定が、WSLの中だけを見ている"
+behavior = "WSL でない機械で枚数を数えるとき、外側を見に行かず、答えが1ビットも変わらない（docker コンテナの中に居るときも WSL と判定しない）"
+gate = "unit"
+tests = [
+  { file = "server/crates/session-host-core/src/resources.rs", name = "wslでない機械の答えは1ビットも変わらない" },
+  { file = "server/crates/session-host-core/src/resources.rs", name = "dockerコンテナの中は偽" },
+  { file = "server/crates/session-host-core/src/resources.rs", name = "run_wslだけ在っても偽" },
+]
+breaks_when = "WSL の判定を /proc/version の microsoft だけへ戻す（/run/WSL を見ない形にすると、docker の中で真になる）"
+verified = true
+
+[[entry]]
+issue = "イシューグループ_2026-0913-2234/空きメモリの判定が、WSLの中だけを見ている"
+behavior = "WSL の中に居るが外側の空きを聞けなかったとき、MemFree で抑えて枚数が増えない（既存の「そもそも読めない」＝歯止めを外す側とは別の状態にする）"
+gate = "unit"
+tests = [
+  { file = "server/crates/session-host-core/src/resources.rs", name = "外側を聞けなければmemfreeで抑える" },
+  { file = "server/crates/session-host-core/src/resources.rs", name = "外側を聞けないときはmemfreeで抑えて枚数が増えない" },
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "wslで外側を読めなくても床は効く" },
+]
+breaks_when = "counted_available の Outside::Unknown を None（歯止めを外す側）へ書き換える（実行レポート フェーズ2 で2本が落ちた）"
+verified = true
+
+[[entry]]
+issue = "イシューグループ_2026-0913-2234/空きメモリの判定が、WSLの中だけを見ている"
+behavior = "WSL の中に居るとき、機械の外側（Windows）の空きも見て、内側と外側の少ないほうで起こせる枚数を数える"
+gate = "unit"
+tests = [
+  { file = "server/crates/session-host-core/src/resources.rs", name = "外側が小さければ外側で数える" },
+  { file = "server/crates/session-host-core/src/resources.rs", name = "外側が大きければ内側で数える" },
+  { file = "server/crates/session-host-core/src/resources.rs", name = "実測の再現_外側が逼迫していれば0枚" },
+]
+breaks_when = "counted_available が外側を見ずに MemAvailable だけで割る形へ戻す"
+verified = true
+
+[[entry]]
+issue = "イシューグループ_2026-0913-2234/返す口が、dockerの外のビルドに届かない"
+behavior = "/docker と箱の両方にキャッシュが在るとき、しきい値を合計で判定して両方返す（片方だけ大きいときも返す）"
+gate = "unit"
+tests = [
+  { file = "server/crates/core/tests/build_cgroup.rs", name = "しきい値は合計で判定される" },
+  { file = "server/crates/core/tests/build_cgroup.rs", name = "片方だけ大きくても返す" },
+  { file = "server/crates/core/tests/build_cgroup.rs", name = "箱しか無い機械でも返す" },
+]
+breaks_when = "しきい値を片方ずつ見る形へ戻す／返す先を /docker だけへ戻す（実行レポート フェーズ5 で3本が落ちた）"
+verified = true
+
+[[entry]]
+issue = "イシューグループ_2026-0913-2234/返す口が、dockerの外のビルドに届かない"
+behavior = "WSL の中で包みを通して命令を走らせたとき、自分を返せる箱へ入れてから走らせる（WSL でなければ箱を作りに行かない）"
+gate = "unit"
+tests = [
+  { file = "server/crates/core/tests/build_cgroup.rs", name = "wslなら箱を作って自分を入れる" },
+  { file = "server/crates/core/tests/build_cgroup.rs", name = "wslでなければ箱を作りに行かない" },
+  { file = "server/crates/core/tests/build_cgroup.rs", name = "二回目は箱を作り直さない" },
+]
+breaks_when = "包みから WSL の判定を外す（実行レポート フェーズ5 で `wslでなければ箱を作りに行かない` が落ちた）"
+verified = true
+
+[[entry]]
+issue = "イシューグループ_2026-0913-2234/返す口が、dockerの外のビルドに届かない"
+behavior = "箱を作れない機械でも命令はそのまま走り、返す口が落ちても呼び元の終了コードが変わらない"
+gate = "unit"
+tests = [
+  { file = "server/crates/core/tests/build_cgroup.rs", name = "箱が無くても命令は走り終了コードがそのまま返る" },
+  { file = "server/crates/core/tests/build_cgroup.rs", name = "箱へ移せなくても命令は走る" },
+  { file = "server/crates/core/tests/build_cgroup.rs", name = "返す口が落ちても呼び元の終了コードは変わらない" },
+]
+breaks_when = "包みから終了コードの退避を外す（実行レポート フェーズ5 で5本が落ちた）"
+verified = true
+[[entry]]
 issue       = "クローズ/CICD"
 behavior    = "新しい版を取ってきただけのときは、選ばれている版を切り替えない"
 gate        = "unit"
@@ -1322,3 +1393,4 @@ tests       = [
 ]
 breaks_when = "login_changed に stored.is_some() != incoming.is_some() を足す。指紋を読めない環境では3秒ごとに None が届くので、毎回入れ替えになり合流が丸ごと効かなくなる（数字が跳ね回る）"
 verified    = true
+
