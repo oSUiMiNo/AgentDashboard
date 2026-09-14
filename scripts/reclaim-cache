@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+# ビルドが残したページキャッシュを、育ちすぎたときだけ Windows へ返す。
+#
+# **`scripts/cargo` はリポジトリを bind-mount して走るので、ビルドの読み書きが
+# `/docker` cgroup のページキャッシュとして課金される。** コンテナが終わっても消えず、
+# WSL は一度掴んだぶんを Windows へ返さないので、**機械全体が痩せていく。**
+# 実測（2026-09-14）では `make ci` 1回で 8.87 GiB 積まれ、`vmmemWSL` の Private は
+# 7.99 GiB → 19.18 GiB、Windows の物理空きは 11.83 GiB → 6.64 GiB まで落ちた。
+#
+# **返ることは実測で確かめてある**（調査レポート/03- §7）。`/docker` の `file` を
+# 8.87 GiB → 5.4 MiB まで返したところ、`vmmemWSL` の Private が 5.92 GiB 縮み、
+# Windows の空きが 1.74 GiB 増えた。
+#
+# 使い方:
+#   scripts/reclaim-cache <置き場所>            しきい値と間隔を見て、要るときだけ返す
+#   scripts/reclaim-cache --force <置き場所>    どちらも見ずに返す（make reclaim 用）
+#
+# **消す（scripts/prune-target）とは別物である。** あちらはビルドの成果物を削除して
+# 作り直しになるが、こちらは**捨てるだけで中身は残る**——次のビルドは読み直すだけで済む。
+# 取り返しのつきやすさが違うので、同じターゲットに混ぜない（設計§12-2）。
+#
+# 挙動は次の 3 つで変えられる（`AGENTDASHBOARD_CARGO_*` は**このラッパー自身の制御**の
+# 名前空間で、コンテナへは持ち込まれない。scripts/cargo と scripts/prune-target の
+# 決まりに合わせてある）。
+#   AGENTDASHBOARD_CARGO_RECLAIM               0 で自動の回収を止める（既定 1）
+#   AGENTDASHBOARD_CARGO_RECLAIM_MIN_GB        file がこの GB を超えていたら返す（既定 2）
+#   AGENTDASHBOARD_CARGO_RECLAIM_INTERVAL_SEC  返す間隔（既定 900）
+set -euo pipefail
+
+FORCE=0
+TARGET=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --force)
+            FORCE=1
+            shift
+            ;;
+        -*)
+            echo "エラー: 知らない指定です: $1" >&2
+            exit 1
+            ;;
+        *)
+            if [ -n "${TARGET}" ]; then
+                echo "エラー: 置き場所は 1 つだけ指定してください: ${TARGET} と $1" >&2
+                exit 1
+            fi
+            TARGET="$1"
+            shift
+            ;;
+    esac
+done
+
+# **渡されなければ何もしない。** 既定値へ落ちる道を作らない（prune-target と同じ理由）。
+if [ -z "${TARGET}" ]; then
+    echo "エラー: 置き場所を指定してください（例: scripts/reclaim-cache server/target）" >&2
+    exit 1
+fi
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CGROUP="/sys/fs/cgroup/docker"
+IMAGE_TAG="agentdashboard-rust:1.97.1-2"
+
+# --- 0. そもそも返せる機械か。**返せないなら静かに 0 で抜ける** -----------------
+#
+# ここを「エラー」にしてはいけない。WSL でない機械・cgroup v1 の機械・docker を
+# 使っていない機械では**返す物が無いのが普通**であって、異常ではない。
+
+# cgroup v2 でなければ `memory.reclaim` そのものが無い
+if [ "$(stat -fc %T /sys/fs/cgroup 2>/dev/null || echo unknown)" != "cgroup2fs" ]; then
+    exit 0
+fi
+if [ ! -e "${CGROUP}/memory.reclaim" ] || [ ! -r "${CGROUP}/memory.stat" ]; then
+    exit 0
+fi
+# ビルドしていない置き場所には、返すべき残骸も無い
+if [ ! -d "${TARGET}" ]; then
+    exit 0
+fi
+
+STATE_FILE="${TARGET}/.reclaim-stamp"
+# **prune-target と同じ鍵を借りる。** 新しい鍵を作ると、ビルドと回収が互いを
+# 知らないまま走る（`scripts/cargo` はこの鍵の共有ロックを持って走っている）
+LOCK_FILE="${TARGET}/.prune-lock"
+LOG_FILE="${TARGET}/.reclaim-cache.log"
+
+RECLAIM_ENABLED="${AGENTDASHBOARD_CARGO_RECLAIM:-1}"
+MIN_GB="${AGENTDASHBOARD_CARGO_RECLAIM_MIN_GB:-2}"
+INTERVAL_SEC="${AGENTDASHBOARD_CARGO_RECLAIM_INTERVAL_SEC:-900}"
+
+case "${INTERVAL_SEC}" in
+    '' | *[!0-9]*)
+        echo "エラー: INTERVAL_SEC には 0 以上の整数を指定してください: ${INTERVAL_SEC}" >&2
+        exit 1
+        ;;
+esac
+# **しきい値だけは小数を受ける。** 整数の GB しか受けないと、検査で実物大の GB を
+# 積む羽目になる（prune-target の CAP_GB と同じ理由）。
+case "${MIN_GB}" in
+    '' | *[!0-9.]* | *.*.*)
+        echo "エラー: MIN_GB には 0 以上の数を指定してください: ${MIN_GB}" >&2
+        exit 1
+        ;;
+esac
+
+# **標準出力へは何も書かない。** cargo の出力へ混ざると、出力を読んでいる別の仕組みを
+# 壊す（ガイドライン「ログを残すとき」）。
+記録() {
+    printf '%s\t%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" >>"${LOG_FILE}"
+    printf 'reclaim-cache: %s\n' "$1" >&2
+}
+
+人が読める嵩() {
+    awk -v b="$1" 'BEGIN {
+        if (b >= 1073741824) { printf "%.1fGB", b / 1073741824 }
+        else if (b >= 1048576) { printf "%.1fMB", b / 1048576 }
+        else { printf "%dB", b }
+    }'
+}
+
+# 返せるページキャッシュの量（バイト）。**`file_mapped` などに釣られないよう完全一致で拾う。**
+いまのfile() {
+    awk '$1 == "file" { print $2 }' "${CGROUP}/memory.stat" 2>/dev/null || echo 0
+}
+
+if [ "${FORCE}" -eq 0 ]; then
+    if [ "${RECLAIM_ENABLED}" = "0" ]; then
+        exit 0
+    fi
+
+    # --- 1. しきい値を先に見る（設計§19-4）--------------------------------------
+    #
+    # **prune-target とは順序が逆である。** あちらは `du` で 55 万ファイルを数えるので
+    # 測ること自体が高く、間隔で守る必要がある。**こちらは `memory.stat` を1回読むだけ
+    # でほぼ只**なので、先に測ってよい。
+    before=$(いまのfile)
+    min_bytes=$(awk -v g="${MIN_GB}" 'BEGIN { printf "%d", g * 1073741824 }')
+    if [ "${before}" -le "${min_bytes}" ]; then
+        exit 0
+    fi
+
+    # --- 2. そのうえで間隔を見る（設計§19-4）------------------------------------
+    #
+    # **取りこぼし防止ではなく、暴走防止として置いている。** 返せないページばかりで
+    # `file` が下がらない状況では、しきい値だけだと cargo のたびに返そうとして
+    # I/O が跳ね続ける（実測で 15,394 フォールト/秒）。
+    now=$(date '+%s')
+    if [ -f "${STATE_FILE}" ]; then
+        last=$(cat "${STATE_FILE}" 2>/dev/null || echo 0)
+        case "${last}" in
+            '' | *[!0-9]*) last=0 ;;
+        esac
+        if [ "$((now - last))" -lt "${INTERVAL_SEC}" ]; then
+            exit 0
+        fi
+    fi
+    # **返すと決めた時点で刻む。** しきい値に届かない呼び出しで刻むと、本当に返したい
+    # `make ci` の直後が「さっき刻んだから」で見送られる（設計§19-4）。
+    printf '%s\n' "${now}" >"${STATE_FILE}"
+else
+    before=$(いまのfile)
+fi
+
+# --- 3. docker が届くか。**届かないなら静かに 0 で抜ける** -----------------------
+#
+# 「docker が無い」と「cgroup に書けない」を同じ文言へ潰さないため、既存の入口を通す。
+if ! "${REPO_ROOT}/scripts/require-docker" 2>/dev/null; then
+    記録 "見送り	docker が呼べない"
+    exit 0
+fi
+if ! docker image inspect "${IMAGE_TAG}" >/dev/null 2>&1; then
+    記録 "見送り	${IMAGE_TAG} が無い（make setup-rust がまだ）"
+    exit 0
+fi
+
+# --- 4. 書く直前にだけ排他を取る。取れなければ**待たずに諦める** -----------------
+#
+# ビルドは共有ロックを持って走るので、1本でも走っていれば取れない。待たないのは、
+# ビルドが数十分続くことがあり、待つと次の cargo がその間ずっと止まるため。
+# **取りこぼしても次の回で拾える。**
+exec 9>"${LOCK_FILE}"
+if ! flock --exclusive --nonblock 9; then
+    記録 "見送り	ビルドが走っているためロックを取れなかった（$(人が読める嵩 "${before}")）"
+    exit 0
+fi
+
+# --- 5. 返す --------------------------------------------------------------------
+#
+# **root が要る。** `sudo` はパスワードを聞くので自動化と両立しない。docker で uid 0 に
+# なって書く——**`--user` を渡さない**ことが肝で、`--privileged` は要らない（cgroup を
+# rw で持ち込み、uid 0 で書くだけで通ることを実測で確かめてある）。
+#
+# **箱は `scripts/cargo` と同じものを使う。** 新しいイメージを引いてこないためで、
+# 手元に在ることは上の検査が保証している。
+#
+# **終了コードで判断しない**（設計§19-6）。要求量に届かないと `-EAGAIN` が返るが、
+# **実際には返る物は返っている**——残り 4.7 GiB に 8G を要求して `-EAGAIN` になった
+# 回でも、`file` は 5.4 MiB まで落ちていた。何が起きたかは前後の `file` にしか出ない。
+docker run --rm \
+    --volume /sys/fs/cgroup:/hostcg:rw \
+    "${IMAGE_TAG}" \
+    sh -c "echo ${before} > /hostcg/docker/memory.reclaim" >/dev/null 2>&1 || true
+
+after=$(いまのfile)
+
+# --- 6. 記録する ----------------------------------------------------------------
+#
+# **Windows へ返ったかどうかは、ここでは確かめない**（設計§19-5）。効くのが遅れるので、
+# 返した直後に `vmmemWSL` を見ると「効いていない」という誤った答えしか出ない
+# （4 GiB 返した5秒後で Private は 1.4% しか動かず、30 秒後に 5.77 GiB 縮んだ）。
+記録 "回収	$(人が読める嵩 "${before}") → $(人が読める嵩 "${after}")	Windows 側へ返るのは遅れる（30秒ほど待ってから vmmemWSL の Private を見ること）"
+exit 0

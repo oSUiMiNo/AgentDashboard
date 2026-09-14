@@ -212,3 +212,12 @@ prune: ## ビルドの置き場所を、作り直しを最小にして減らす
 	./scripts/prune-target --all server/target
 	@echo "減らした後:"
 	@du -sh server/target 2>/dev/null || true
+
+# **`prune` とは別のターゲットにしてある。** あちらは成果物を**消す**ので次のビルドが
+# 作り直しになるが、こちらは**捨てるだけで中身は残る**——次のビルドは読み直すだけで済む。
+# 取り返しのつきやすさが違うものを1つにまとめると、軽いつもりで重いほうを踏む（設計§12-2）。
+#
+# **返す規則は scripts/reclaim-cache が1つだけ持つ。** ここに docker の呼び出しを書き戻すと、
+# 自動の回収（scripts/cargo が呼ぶ）と手で叩く回収で規則が2つになる。
+reclaim: ## ビルドが残したページキャッシュを Windows へ返す
+	./scripts/reclaim-cache --force server/target

@@ -137,4 +137,11 @@ exec 9>&-
 # 掃除が失敗しても cargo の結果は通す——掃除の不調でビルドが失敗扱いになってはならない。
 "${REPO_ROOT}/scripts/prune-target" "${TARGET_ABS}" || true
 
+# **ビルドが残したページキャッシュを、育ちすぎたときだけ返す。** リポジトリを
+# bind-mount して走るので読み書きが `/docker` cgroup に課金され、コンテナが終わっても
+# 残る（実測：`make ci` 1回で 8.87 GiB）。WSL は一度掴んだぶんを Windows へ返さないので、
+# 放っておくと機械全体が痩せる。**消す（prune-target）とは別物で、捨てるだけ・中身は残る。**
+# こちらも失敗を通す理由は上と同じ。
+"${REPO_ROOT}/scripts/reclaim-cache" "${TARGET_ABS}" || true
+
 exit "${CARGO_STATUS}"
