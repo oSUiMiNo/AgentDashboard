@@ -1120,21 +1120,73 @@ describe("ヘッダは1行", () => {
     expect(群?.className).toContain("shrink-0");
   });
 
-  it("狭い窓では「編集する」が印だけになる", async () => {
+  it("「編集する」は印だけで、言葉は aria-label と title に残る", async () => {
     /*
       **折り返しを禁じたぶん、いちばん広い部品が入らなくなる**（約120px）。
       `DESIGN.md` §39.6 のターミナルトグルが同じことをしている。
+
+      **どの幅でも印だけにした。** もとは狭い窓でだけ印に落としていたが、
+      両隣（探す・外で開く・閉じる）がどれも印なので、ここだけ文字だと揃わない。
       **言葉は `aria-label` と `title` に残る。**
     */
     serve(content("# 計画"));
     show();
     const 切替 = await screen.findByTestId("file-toggle-mode");
     expect(切替).toHaveAttribute("aria-label", "編集する");
-    expect(切替.querySelector("svg")?.getAttribute("class")).toContain(
-      "md:hidden",
-    );
-    expect(切替.querySelector("span")?.className).toContain("hidden");
-    expect(切替.querySelector("span")?.className).toContain("md:inline");
+    expect(切替).toHaveAttribute("title", "編集する");
+    // **見える文字は持たない**
+    expect(切替.textContent).toBe("");
+    expect(切替.querySelector("svg")).not.toBeNull();
+  });
+
+  /**
+   * どの印が出ているか。
+   *
+   * **印は `glyphs.tsx` の手書き SVG なので、`path` の形で見分ける**——
+   * `FolderBrowser.test.tsx` が山形の向きを同じやり方で見ている。
+   */
+  function 印の名前(ボタン: HTMLElement) {
+    const svg = ボタン.querySelector("svg");
+    if (svg === null) return "無い";
+    // **目だけが瞳の丸を持つ**
+    if (svg.querySelector("circle") !== null) return "目";
+    const d = svg.querySelector("path")?.getAttribute("d") ?? "";
+    if (d.startsWith("M16.5")) return "ペン";
+    if (d.startsWith("m9 7")) return "山形";
+    return "不明";
+  }
+
+  it("トグルの印は、行き先ごとに変わる", async () => {
+    /*
+      **3状態それぞれに印を持たせる**（`DESIGN.md` §39.6）。文字を落としておきながら
+      絵を片方にしか置かないと、**押すまで行き先が読めない**——§39.6 が
+      ターミナルトグルで一度踏んで訂正した穴で、ここも直前まで**狭い窓では
+      3状態とも同じ山形**を出していた。
+    */
+    serve(content("# 計画"));
+    show();
+    const 切替 = await screen.findByTestId("file-toggle-mode");
+
+    // 書ける場所を見ている → 行き先は編集なので**ペン**
+    expect(切替).toHaveAttribute("aria-label", "編集する");
+    expect(印の名前(切替)).toBe("ペン");
+
+    // 編集している → 行き先は整形した姿なので**目**
+    await userEvent.click(切替);
+    expect(切替).toHaveAttribute("aria-label", "見る");
+    expect(印の名前(切替)).toBe("目");
+  });
+
+  it("書けないファイルの印は、ペンにしない", async () => {
+    /*
+      **保存できないのにペンを出すと嘘になる**——`切替の言葉` が「編集する」と
+      言わないのと同じ理由である。
+    */
+    serve({ ...content("# 計画"), writable: false });
+    show();
+    const 切替 = await screen.findByTestId("file-toggle-mode");
+    expect(切替).toHaveAttribute("aria-label", "生テキスト");
+    expect(印の名前(切替)).toBe("山形");
   });
 });
 

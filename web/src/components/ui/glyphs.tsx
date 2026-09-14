@@ -445,6 +445,36 @@ export function SearchGlyph({ className }: { className?: string }) {
 }
 
 /**
+ * 「見る（整形して見る）」の印。ファイルビュアのトグルが、書ける／書けないで
+ * 行き先を変える3状態の一角を占める（`書ける` 判定と並べて足した設計）。
+ *
+ * **[`SearchGlyph`]（虫眼鏡）と見分けが付くこと**が条件である（§18.4 の門）。
+ * 同じツールバーに並ぶうえ、どちらも丸を持つので取り違えやすい組——あちらは
+ * 正円1つに柄が生えた形、こちらは**横長のアーモンド＋瞳の丸**で、外形そのものが
+ * 縦横比から違う。
+ *
+ * アーモンド（輪郭）と瞳の丸（`r=3`）の2要素だけ（`DESIGN.md` §18.2 の「要素数は
+ * 3つ以下」）。外接の横幅は 3→21（24 のうち18＝75%）で、下限の70%を満たす。
+ */
+export function EyeGlyph({ className }: { className?: string }) {
+  return (
+    <svg
+      aria-hidden
+      viewBox="0 0 24 24"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M3 12C3 12 7 5.5 12 5.5C17 5.5 21 12 21 12C21 12 17 18.5 12 18.5C7 18.5 3 12 3 12Z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  )
+}
+
+/**
  * 「生テキストで見る／整形して見る」の印。
  *
  * **狭い窓で文字を落とすために要る**（`DESIGN.md` §39.6 のターミナルトグルと同じ手）。

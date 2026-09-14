@@ -46,7 +46,9 @@ import {
   CloseGlyph,
   CodeGlyph,
   ExternalLinkGlyph,
+  EyeGlyph,
   MinusGlyph,
+  PencilGlyph,
   PlusGlyph,
   SearchGlyph,
 } from '@/components/ui/glyphs'
@@ -385,6 +387,18 @@ export function FileView({
   const 書ける = content?.writable === true
   /** トグルの言葉。**書けないファイルで「編集する」と言わない**（嘘になる） */
   const 切替の言葉 = mode === 'editor' ? '見る' : 書ける ? '編集する' : '生テキスト'
+  /**
+   * トグルの印。**`切替の言葉` と同じ3つに分かれる**（`DESIGN.md` §39.6）。
+   *
+   * **3状態とも印を持たせる。** 文字を落としておきながら絵を片方にしか置かないと、
+   * **押すまで行き先が読めない**——§39.6 がターミナルトグルで一度踏んで訂正した穴で、
+   * ここも直前まで**狭い窓では3状態とも同じ `< >`** を出していた。
+   *
+   * **書けないファイルはペンにしない。** `切替の言葉` が「編集する」と言わないのと
+   * 同じ理由で、保存できないのにペンを出すと嘘になる。
+   */
+  const 切替の印 =
+    mode === 'editor' ? <EyeGlyph /> : 書ける ? <PencilGlyph /> : <CodeGlyph />
   /** いま箱（`iframe`）で描いているか。**箱の中へは外から触れない** */
   const 箱で描いている = boxed && mode === 'viewer'
   /**
@@ -864,7 +878,7 @@ export function FileView({
             <Button
               type="button"
               variant="ghost"
-              size="sm"
+              size="icon-sm"
               data-testid="file-toggle-mode"
               aria-pressed={mode === 'editor'}
               aria-label={切替の言葉}
@@ -877,9 +891,8 @@ export function FileView({
                 set切り替えるか(false)
               }}
             >
-              {/* **狭い窓では印だけ**（§39.6）。言葉は `aria-label` と `title` に残る */}
-              <CodeGlyph className="md:hidden" />
-              <span className="hidden md:inline">{切替の言葉}</span>
+              {/* **印だけにする**（§39.6）。言葉は `aria-label` と `title` に残る */}
+              {切替の印}
             </Button>
           )}
           {/* **保存はエディタのときだけ出す。** ビュアーに出しても書く対象が無い。

@@ -433,9 +433,10 @@ describe('書けない場所のファイル', () => {
     render(<Viewer host="local" root={ROOT} path={行.path} />)
 
     if (行.切り替える) {
-      // **切替の言葉が「編集する」ではない。** 行き先が打てないので、言葉も嘘をつかない
+      // **切替の言葉が「編集する」ではない。** 行き先が打てないので、言葉も嘘をつかない。
+      // **印だけになったので、言葉は `aria-label` で見る**（§39.6）
       const 切替 = await screen.findByTestId('file-toggle-mode')
-      expect(切替).toHaveTextContent('生テキスト')
+      expect(切替).toHaveAttribute('aria-label', '生テキスト')
       await userEvent.click(切替)
     }
 
