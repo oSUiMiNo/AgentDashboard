@@ -48,6 +48,7 @@ import { backTargetFor, HOME } from '@/lib/routes'
 import { saveCardOrder, useProjectCards } from '@/stores/sessions'
 import { useReorder, type Scroller } from '@/lib/useReorder'
 import { useRailPan } from '@/lib/useRailPan'
+import { useScreenRoot } from '@/lib/screenRoot'
 import { toggleSelect } from '@/stores/selection'
 import { useProjects } from '@/stores/projects'
 
@@ -98,7 +99,20 @@ export function GroupView({ host, project }: Props) {
     なので、帯も余白も範囲の中である。**張る先と送る先が違うので、引数も2つに分かれる。**
   */
   const rootRef = useRef<HTMLElement>(null)
-  useRailPan(rootRef, railRef)
+  /*
+    **張る先は画面の外枠（`<main>`）であって、この画面の枠ではない。**
+
+    一度この `rootRef`（`data-testid="group-view"`）へ張って配ったが、**利用者の言う
+    「アプリタイトル帯」と「横スクロールバーより下」は、どちらもこの枠の外**だった——
+    帯は `App.tsx` が描くアプリ共通のもので**兄弟**、下の余白は `<main>` の**親の
+    パディング**である。**キャプチャ段で張っても、子孫で起きたものしか通らない。**
+
+    **枠が無いとき（Provider の外＝単体テスト）は自分の枠へ落とす。** ここで例外を
+    投げると、枠を持たないテストが落ちて「この hook を呼ばない」で回避され、
+    **本番だけが効かない状態へ戻る。**
+  */
+  const 画面の外枠 = useScreenRoot()
+  useRailPan(画面の外枠 ?? rootRef, railRef)
   const [filesOpen, toggleFiles] = useFilesPanel()
   const projects = useProjects()
   const navigate = useNavigate()

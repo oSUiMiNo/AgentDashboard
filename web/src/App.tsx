@@ -42,6 +42,7 @@ import { ProjectAdd } from '@/components/ProjectAdd/ProjectAdd'
 import { RoamLayer } from '@/components/RoamLayer/RoamLayer'
 import { report } from '@/lib/clientLogs'
 import { composerBusyCount } from '@/lib/composerBusy'
+import { ScreenRootProvider } from '@/lib/screenRoot'
 import { useDocumentTitle } from '@/lib/documentTitle'
 import { projectDisplayName } from '@/lib/path'
 import { connectionDot } from '@/lib/protocol'
@@ -106,6 +107,12 @@ function App() {
 }
 
 function Shell() {
+  /*
+    **画面の外枠。** ホイールを拾う購読はここへ張る（`lib/screenRoot.tsx`）。
+    レールや PJT 画面の枠へ張ると、**その外側——アプリの帯と上下の余白——で回しても
+    何も起きない**（利用者の報告で2度踏んだ）。要件は「カーソルがどこに置いてあっても」
+  */
+  const mainRef = useRef<HTMLElement>(null)
   const status = useWsStore((state) => state.status)
   const parserState = useWsStore((state) => state.parserState)
   const parserDetail = useWsStore((state) => state.parserDetail)
@@ -144,6 +151,7 @@ function Shell() {
 
   return (
     <main
+      ref={mainRef}
       /*
         **外周と段の間隔**（帯設計§17-2・`DESIGN.md` §39.4）。ここが**いちばん外**なので、
         内側はここから半分以下に細くしていく。**上だけ更に詰めてある**——利用者の言葉が
@@ -349,14 +357,20 @@ function Shell() {
         サーバ側の作り（設計§8-2）と、画面側でも形を揃えてある
       */}
       {authLoading ? null : entered ? (
-        <Routes>
-          <Route path="/" element={<HomePage />} />
-          <Route path="/p/:host/:projectId" element={<GroupPage />} />
-          <Route path="/s/:cardId" element={<SessionPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
-          <Route path="/account" element={<AccountPage />} />
-          <Route path="*" element={<NotFoundPage />} />
-        </Routes>
+        {/*
+          **画面の外枠をここから下へ配る**（`lib/screenRoot.tsx`）。PJT 専用画面は
+          `Shell` から3段下に居るので、prop で降ろすと途中が「ただ渡すだけ」の引数を持つ
+        */}
+        <ScreenRootProvider value={mainRef}>
+          <Routes>
+            <Route path="/" element={<HomePage />} />
+            <Route path="/p/:host/:projectId" element={<GroupPage />} />
+            <Route path="/s/:cardId" element={<SessionPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/account" element={<AccountPage />} />
+            <Route path="*" element={<NotFoundPage />} />
+          </Routes>
+        </ScreenRootProvider>
       ) : (
         <AuthGate />
       )}
