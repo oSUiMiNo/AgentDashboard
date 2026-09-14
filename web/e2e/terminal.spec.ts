@@ -790,36 +790,77 @@ test('自分から終わったカードは「スリープ」として残り、�
  * `local.rs` の生存確認が擬似ターミナルの実体を直に見ているためである。
  *
  * **再現しない土台に置いたテストは、直す前でも緑・直したあとも緑になる。**
+ *
+ * # 続けて2回走らせると落ちることがある
+ *
+ * 起こし直しの席は、カードが `Starting` を抜けるまで（＝最初のフックが届くまで、
+ * 天井は60秒）保たれる。擬似 claude は頼まれないとフックを打たないので、**この
+ * テストが起こしたカードは席を60秒抱えたまま片付く**。間を置かずに走らせ直すと
+ * 席が空いておらず、復旧が始まらないまま待ち時間を使い切る。
+ * **落ちたら、まず1分あけてからもう一度走らせること。**
  */
 test('起こし直したあと、読み直さずに端末へ文字が出る', async ({ page }) => {
   await openDashboard(page)
   const tile = await spawnSession(page)
   await openSession(page, tile)
 
-  // 起こし直すには呼び戻し先が要る。フックが `session_id` を運ぶので、
-  // 1本通しておかないと復旧そのものが断られる
+  // 起こし直すには呼び戻し先が要る。**CLI が名乗ってから載る**ので、名乗る前に
+  // 眠らせると「戻す先が無い」カードになり、押しても起き上がらない
   await typeLine(page, 'おはよう')
   await expectTerminalToContain(page, '[fake-claude] received: おはよう')
-  await fireHook(page, 'UserPromptSubmit')
+  await fireHook(page, 'SessionStart')
 
   const cardId = await page
     .getByTestId('session-view')
     .getAttribute('data-card-id')
-  const 電源 = page.getByTestId('power-tile')
+
+  await expect
+    .poll(
+      async () => {
+        const response = await page.request.get('/api/sessions')
+        const list = (await response.json()) as {
+          card_id: string
+          claude_session_id: string | null
+        }[]
+        return list.find((card) => card.card_id === cardId)?.claude_session_id ?? null
+      },
+      { message: '呼び戻し先が載ること', timeout: 60_000 },
+    )
+    .not.toBeNull()
+  // **一覧の小窓ではなくセッション専用画面の電源を押す。** 一覧へ戻ると端末が
+  // 外れてしまい、確かめたい形（線は無事のまま実体だけが入れ替わる）にならない
+  const 電源 = page.getByTestId('power-card')
 
   // 眠らせて抜け殻にする
   await expect(電源).toHaveAttribute('data-power', 'on')
   await 電源.click()
   await expect(電源).toHaveAttribute('data-power', 'off', { timeout: 20_000 })
 
+  // **電源には連打よけが入っている**（`power-button.tsx`）。眠らせた直後に押すと
+  // その窓に入り、**何事も無かったように無視される**——押した形跡も断りも残らないので、
+  // 待たずに書くと「復旧が効かない」に見える
+  await page.waitForTimeout(700)
+
   // **ここから先、ページは一度も読み直さない。** 読み直すと購読が張り直されて
   // しまい、まさに直したかった経路（線は無事のまま実体だけが入れ替わる）を
   // 通らなくなる
   await 電源.click()
-  await expect(電源).toHaveAttribute('data-power', 'on', { timeout: 60_000 })
 
-  // 起こし直した実体が描いた文字が、読み直さずに届く。
-  // **断られた購読を覚えていないと、ここで端末は空のまま**になる
+  /*
+    **見るのは「電源が点いたか」ではなく「端末がまた通じているか」である。**
+
+    起こし直した席はカードが `Starting` を抜けるまで（＝最初のフックが届くまで）
+    保たれる。擬似 claude は頼まれないとフックを打たないので、電源の見た目を待つと
+    端末が直っていても落ちる。
+
+    **画面に残っている文字でも判定できない。** スクロールバックは消えないので、
+    眠る前の文は購読が死んでいても生きていても残る。
+
+    したがって**新しい実体へ打ち込んで、返事が返ってくるか**を見る。打ち込みは購読と
+    別の道を通るのでサーバまでは届くが、**返事を受け取るのは購読の側**である。
+    断られた購読を覚えていないと、ここで返事は永久に来ない——利用者から見た
+    「読み直すまで描かれない」そのものになる。
+  */
   await typeLine(page, 'ただいま')
   await expectTerminalToContain(page, '[fake-claude] received: ただいま')
 
