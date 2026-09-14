@@ -86,6 +86,119 @@ function Harness() {
   )
 }
 
+/*
+  **本番と同じ階層で組んだ器。**
+
+  上の `Harness` は `<section data-testid="group-view">` を**最上位**に置き、帯と余白を
+  **その中**へ入れている。**本番はそうなっていない**——アプリの帯は `App.tsx` が描く
+  `<main>` の直下で **section の兄弟**、下の余白は **`<main>` のパディング**である。
+
+  **この食い違いのせいで、37本の緑が実機の不具合をすり抜けた。** 「帯の上で回すと
+  レールが動く」という試験は、**section の中に置いた偽の帯**を見ていた。
+
+  **位置関係が意味を持つものを試すときは、階層まで本番に合わせること。**
+*/
+function ProductionHarness() {
+  const mainRef = useRef<HTMLElement>(null)
+  const railRef = useRef<HTMLDivElement>(null)
+  useRailPan(mainRef, railRef)
+  return (
+    <main ref={mainRef} data-testid="app-main">
+      {/* **アプリ共通の帯**（`App.tsx`）。section の**外**＝兄弟である */}
+      <header data-testid="app-header">
+        <h1>AgentDashboard</h1>
+      </header>
+      <section data-testid="group-view">
+        <header data-testid="group-header">PJT の名前</header>
+        <div ref={railRef} data-testid="group-rail">
+          <div data-testid="session-view">
+            <div data-testid="terminal">端末の中身</div>
+          </div>
+        </div>
+      </section>
+      {/* **`<main>` の下パディングに当たる領域。** これも section の外 */}
+      <div data-testid="below-main">下の余白</div>
+    </main>
+  )
+}
+
+/** 本番と同じ階層で置く。 */
+function 本番の形で置く() {
+  const { unmount } = render(<ProductionHarness />)
+  return { rail: screen.getByTestId('group-rail'), unmount }
+}
+
+describe('画面の外枠に張る（section の外でも効く）', () => {
+  it('**アプリの帯**の上で横へ回すと、レールが動く', () => {
+    const { rail, unmount } = 本番の形で置く()
+    fireEvent.wheel(screen.getByTestId('app-header'), { deltaX: 120 })
+    expect(rail.scrollLeft).toBe(120)
+    unmount()
+  })
+
+  it('**レールより下の余白**の上で横へ回すと、レールが動く', () => {
+    const { rail, unmount } = 本番の形で置く()
+    fireEvent.wheel(screen.getByTestId('below-main'), { deltaX: 120 })
+    expect(rail.scrollLeft).toBe(120)
+    unmount()
+  })
+
+  it('**外枠そのもの**の上で横へ回しても、レールが動く', () => {
+    const { rail, unmount } = 本番の形で置く()
+    fireEvent.wheel(screen.getByTestId('app-main'), { deltaX: 120 })
+    expect(rail.scrollLeft).toBe(120)
+    unmount()
+  })
+
+  /*
+    **古い形では捕まらなかったことの証拠。**
+
+    購読先を `section` にすると、**その外側で起きたホイールは一度も届かない**。
+    この試験が緑であるかぎり、「帯の上で効く」を section 単位の器で確かめても
+    意味がないことが、コードの側に残る。
+  */
+  it('購読先が section だと、その外側では届かない（前回の不具合そのもの）', () => {
+    function SectionOnlyHarness() {
+      const sectionRef = useRef<HTMLElement>(null)
+      const railRef = useRef<HTMLDivElement>(null)
+      useRailPan(sectionRef, railRef)
+      return (
+        <main>
+          <header data-testid="外の帯">帯</header>
+          <section ref={sectionRef}>
+            <div ref={railRef} data-testid="中のレール" />
+          </section>
+        </main>
+      )
+    }
+    render(<SectionOnlyHarness />)
+    fireEvent.wheel(screen.getByTestId('外の帯'), { deltaX: 120 })
+    expect(screen.getByTestId('中のレール').scrollLeft).toBe(0)
+  })
+})
+
+describe('分岐の順序：端末は「内側に譲る」より先に見る', () => {
+  /*
+    **境界を `<main>` へ広げると、横に溢れた箱はどれも「譲る」条件を満たす。**
+    端末はまさにそれ（自前の `overflowX: auto` で横に溢れている）なので、
+    **端末の判定を先に置いていないと、端末の上でレールが動かなくなる。**
+
+    順序はコメントでは守られない。ここで固定する。
+  */
+  it('端末が横に溢れていても、端末の上ではレールが動く', () => {
+    const { rail, unmount } = 本番の形で置く()
+    const 端末 = screen.getByTestId('terminal')
+    端末.style.overflowX = 'auto'
+    Object.defineProperty(端末, 'scrollWidth', { value: 2000, configurable: true })
+    Object.defineProperty(端末, 'clientWidth', { value: 300, configurable: true })
+
+    fireEvent.wheel(端末, { deltaX: 120 })
+
+    expect(rail.scrollLeft).toBe(120)
+    unmount()
+  })
+})
+
 /** レールを取り出す。`clientWidth` は jsdom では 0 なので、送り量は px 単位で確かめる。 */
 function 置く() {
   const { unmount } = render(<Harness />)
