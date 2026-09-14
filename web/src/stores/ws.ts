@@ -47,6 +47,7 @@ import type {
   AnnotationTarget,
   CardId,
   ClientMessage,
+  ErrorKind,
   FlowState,
   ModelId,
   PermissionMode,
@@ -279,6 +280,35 @@ const memoTargets = new Map<string, AnnotationTarget>()
  */
 const alive = new Map<CardId, boolean>()
 
+/**
+ * 購読を**断られた**カードと、残りの再試行回数。
+ *
+ * # なぜ要るのか
+ *
+ * [`noteLiveness`] の合図は正しく発火している。**発火したあとに断られて、そこで
+ * 消えていた。** 起こし直しの段取りはサーバ側でこう進む——印を立てる（画面へは
+ * `starting` が届く）→ **席が空くまで待つ** → 古い実体を畳む → 新しい実体を入れる。
+ * 畳んでから入れるまでの窓に `sub_pty` が着くと、カードの実体が居ないので
+ * `not_found` で断られる。畳む前に着いた場合も、古い擬似ターミナルはもう閉じているので
+ * 端末は開けない。
+ *
+ * **窓はミリ秒ではない。** 手前に席待ちがあるので、他のカードが起き上がりきるまで
+ * 開いたままになる。
+ *
+ * 断られた側の腕はカードに印を出すだけだったので、**出し直しは1回で使い切られていた**。
+ * ここに積んでおいて、次に状態が動いたときにもう一度出す。
+ */
+const 断られた = new Map<CardId, number>()
+
+/**
+ * 断られたカードを出し直す上限（1つの接続につき）。
+ *
+ * **上限が無いと永久に往復する。** 別の PC のカードは、セルフホストの画面では
+ * 生バイトの購読口そのものが無いので（セルフホスト化設計§7）**原理的に開けない**。
+ * 上限が無ければ、状態が動くたびに断られては送り直すことになる。
+ */
+const 出し直しの上限 = 3
+
 /** 自分から切ったのか、落ちたのか。落ちたときだけ繋ぎ直す。 */
 let closedByUs = false
 let retryTimer: ReturnType<typeof setTimeout> | undefined
@@ -325,6 +355,11 @@ async function loadSnapshot() {
       return
     }
     applySessionSnapshot((await response.json()) as SessionMeta[])
+    // **ここで `alive` を種付けしても意味が無い**（設計§7 の案 A を実装して分かった）。
+    // この直後に `onopen` が [`resubscribe`] を呼び、そこで `alive` は消される。
+    // 種付けを効かせるには消す側か消す時期を変えることになり、それは
+    // 「繋ぎ直した直後は出し直さない」という別の約束と正面からぶつかる。
+    // **断られたぶんを覚えておく道**（[`断られた`]）が本体なので、ここは触らない。
     // 枠も同じ契機で取り直す。**カードと枠が揃って初めて一覧の箱が作れる**（設計§13）
     void loadProjects()
   } catch {
@@ -343,6 +378,9 @@ function resubscribe() {
   // **ここで全部出し直すので、それ以前の生死は用済み。** 残すと、切れている間に
   // 起こし直されたカードで「出し直したばかりなのにもう一度出す」が起きて画面が明滅する
   alive.clear()
+  // **断られた記録も接続とともに捨てる。** 断りは「あの接続のあのときの返事」であって、
+  // 新しい線では成り立たない。持ち越すと、既に開けているカードを出し直すことになる
+  断られた.clear()
   for (const [cardId, entry] of terminals) {
     send({ t: 'sub_pty', card_id: cardId, cols: entry.cols, rows: entry.rows })
   }
@@ -393,6 +431,42 @@ function noteLiveness(cardId: CardId, status: SessionStatus) {
   alive.set(cardId, now)
   if (before === false && now) {
     resubscribeCard(cardId)
+    return
+  }
+  // **断られたぶんは、生死が変わらなくても出し直す。**
+  //
+  // 上の判定に相乗りさせると効かない——起こし直しの最中に届くのは
+  // `starting`（生）→ `running`（生）で、**生死そのものは動かない**。断られたのは
+  // 席待ちや畳み替えの最中だったからで、そこを抜けたことは次の状態が教えてくれる。
+  const 残り = 断られた.get(cardId)
+  if (残り !== undefined && 残り > 0 && now) {
+    // **使い切っても記録は消さない。** 消すと次の断りが上限を満タンに戻してしまい、
+    // 「1つの接続につき3回」が「断られるたびに3回」になる
+    断られた.set(cardId, 残り - 1)
+    resubscribeCard(cardId)
+  }
+}
+
+/**
+ * 購読を断られたことを控える。**次に状態が動いたとき、もう一度出すため。**
+ *
+ * 積むのは**まだ端末を見たがっているカードだけ**である。閉じたあとに遅れて届いた
+ * 断りで積むと、誰も見ていない面の購読を出し直すことになる。
+ *
+ * 種別を2つ見るのは、断られ方が2通りあるため——カードの実体が居ない間は
+ * `not_found`、居るが古い擬似ターミナルが閉じている間は `sub_pty` が返る。
+ * **どちらも「いまはまだ開けない」であって、「二度と開けない」ではない。**
+ */
+function noteRefusal(cardId: CardId, kind: ErrorKind | undefined) {
+  if (kind !== 'not_found' && kind !== 'sub_pty') {
+    return
+  }
+  if (!terminals.has(cardId)) {
+    return
+  }
+  // 既に控えているなら数を戻さない。**戻すと上限が上限でなくなる**
+  if (!断られた.has(cardId)) {
+    断られた.set(cardId, 出し直しの上限)
   }
 }
 
@@ -491,6 +565,7 @@ export const useWsStore = create<WsState>((set) => ({
     terminals.clear()
     transcripts.clear()
     alive.clear()
+    断られた.clear()
     set({ status: 'closed' })
   },
 
@@ -711,6 +786,7 @@ function handleJson(raw: string, set: SetState) {
         // **種別は運ばれてこないことがある**（欄を持たない古いサーバ）。既定は `other` で、
         // 5秒で消える側に落ちる（細かい修正 設計§7-2）
         setCardError(message.card_id, message.message, message.kind ?? 'other')
+        noteRefusal(message.card_id, message.kind)
       }
       break
     default:
@@ -739,5 +815,11 @@ function handleBinary(buffer: ArrayBuffer) {
     // 入力フレームはブラウザ→サーバの向きにしか存在しない
     return
   }
+  // **絵が来たら、断られた記録は用済み。**
+  //
+  // 忘れる合図を「送った回数」ではなく**届いたこと**に置くのは、送ったことと
+  // 届いたことが別の問いだからである。**今回の再発はまさにその取り違えで起きた**
+  // ——出し直しは送られていたのに、届いた先で断られていた。
+  断られた.delete(frame.cardId)
   terminals.get(frame.cardId)?.listener(frame.kind, frame.payload)
 }

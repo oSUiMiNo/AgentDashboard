@@ -1,5 +1,6 @@
 import { GLOBAL_TARGET } from '@/lib/annotationTarget'
-import type { ClientMessage, ServerMessage } from '@/lib/protocol'
+import type { ClientMessage, ServerMessage, SessionMeta, SessionStatus } from '@/lib/protocol'
+import { KIND_PTY_SNAPSHOT } from '@/lib/frame'
 import { clearSessions, getSession, getSessions, isReviving } from './sessions'
 import { clearAppNotices, getAppNotices, unreadCount } from './appNotices'
 import { clearMemos, memosFor } from './memos'
@@ -91,6 +92,15 @@ function snapshots(): number {
   return fetched.filter((url) => url.includes('/api/sessions')).length
 }
 
+/**
+ * `GET /api/sessions` が返す写し。**既定は空**（ほとんどのテストは中身を要らない）。
+ *
+ * 差し替え可能にしてあるのは、**写しでも生死を種付けする**ようになったため——
+ * その振る舞いを確かめるには実物のカードが1枚要る。既定を変えると、写しを
+ * 前提にしていない既存のテストが巻き添えで動く
+ */
+let 写し: SessionMeta[] = []
+
 beforeEach(() => {
   clearSessions()
   clearAppNotices()
@@ -102,9 +112,11 @@ beforeEach(() => {
     callback(0)
     return 0
   })
+  写し = []
   vi.stubGlobal('fetch', async (url: string) => {
     fetched.push(String(url))
-    return { ok: true, json: async () => [] } as unknown as Response
+    const body = String(url).includes('/api/sessions') ? 写し : []
+    return { ok: true, json: async () => body } as unknown as Response
   })
 })
 
@@ -390,6 +402,37 @@ describe('起こし直しと購読', () => {
     void ok
   }
 
+  /** 写しに載せる1枚ぶん。 */
+  function カードの写し(status: SessionStatus): SessionMeta {
+    return {
+      card_id: CARD,
+      project: '/tmp/x',
+      claude_session_id: null,
+      resumed_from: null,
+      permission_mode: null,
+      model: null,
+      model_label: null,
+      model_requested: null,
+      status,
+      subagent_active: 0,
+      last_activity_at: 0,
+      last_assistant_message: null,
+      created_at: 0,
+      hooks_seen: false,
+      agent_id: null,
+      agent_connected: true,
+      account: null,
+      toml_account: null,
+      session_title: null,
+      position: 0,
+      nickname: null,
+      branched_from: null,
+      context_usage: null,
+      rate_limits: null,
+      cost: null,
+    }
+  }
+
   /** そのカードが止まったことにする。 */
   function ended() {
     latest().deliver({
@@ -401,11 +444,58 @@ describe('起こし直しと購読', () => {
     })
   }
 
+  /**
+   * 任意の状態を1通配る。
+   *
+   * `status()` は `working` と `waiting_input` しか配れないが、**起こし直しで実際に
+   * 流れるのは `starting` → `running`** で、どちらも「生きている」側である。
+   * 生死が動かない遷移を組めないと、断られたぶんの出し直しが効いているのか、
+   * 既存の「止まり→動き」の腕に相乗りしているだけなのかを見分けられない。
+   */
+  function 状態(status: SessionStatus) {
+    latest().deliver({
+      t: 'status',
+      card_id: CARD,
+      status,
+      subagent_active: 0,
+      last_activity_at: 0,
+    })
+  }
+
+  /** サーバが購読を断った（起こし直しの最中はこれが返る）。 */
+  function 断る(kind: 'not_found' | 'sub_pty' = 'not_found') {
+    latest().deliver({
+      t: 'error',
+      card_id: CARD,
+      message: kind === 'not_found' ? 'カードが見つかりません' : 'この PC の端末はまだ開けません',
+      kind,
+    })
+  }
+
+  /** 端末の絵が1枚届いた。 */
+  function 絵が届く() {
+    const payload = new Uint8Array([0x41])
+    const buffer = new ArrayBuffer(1 + 16 + payload.length)
+    const view = new DataView(buffer)
+    view.setUint8(0, KIND_PTY_SNAPSHOT)
+    const hex = CARD.replace(/-/g, '')
+    for (let i = 0; i < 16; i += 1) {
+      view.setUint8(1 + i, Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16))
+    }
+    new Uint8Array(buffer, 1 + 16).set(payload)
+    latest().onmessage?.({ data: buffer } as MessageEvent)
+  }
+
   /** 購読したあとに送られたものだけを見る。 */
   function 購読を出し直したか(): ClientMessage[] {
     return latest()
       .requests()
       .filter((request) => request.t === 'sub_pty' || request.t === 'sub_transcript')
+  }
+
+  /** 出し直しの `sub_pty` だけを数える。 */
+  function 出し直した回数(): number {
+    return 購読を出し直したか().filter((request) => request.t === 'sub_pty').length
   }
 
   async function 開いて購読する() {
@@ -547,6 +637,116 @@ describe('起こし直しと購読', () => {
     status('working')
 
     expect(購読を出し直したか()).toEqual([])
+  })
+
+  /*
+    ここから下は、**断られる世界**を持つテストである。
+
+    既存の8件はどれも「合図が来たら出し直しを送るか」しか見ていない。偽サーバは
+    `sub_pty` に必ず応じるので、**断られる世界そのものがテストの中に無かった**。
+    再発はその隙間で起きた——出し直しは送られていて、届いた先で断られ、捨てられた。
+  */
+
+  it('起こし直しで購読を断られたら、次の状態変化でもう一度出す', async () => {
+    await 開いて購読する()
+
+    // 電源を押した直後。生死は「止まり → 生きている」なので出し直しは発火する
+    ended()
+    状態({ kind: 'starting' })
+    expect(出し直した回数()).toBe(1)
+
+    // ところがサーバは席待ちと畳み替えの最中で、その1通を断る
+    断る()
+
+    // **ここが肝。** `starting`（生）→ `running`（生）で生死は動かないので、
+    // 既存の腕に相乗りしていると、この遷移では何も起きない
+    状態({ kind: 'working' })
+
+    expect(出し直した回数()).toBe(2)
+  })
+
+  it('端末がまだ開けない断りでも、もう一度出す', async () => {
+    // 畳む前に着いた場合は種別が変わる。**どちらも「いまはまだ」であって
+    // 「二度と」ではない**
+    await 開いて購読する()
+
+    ended()
+    状態({ kind: 'starting' })
+    断る('sub_pty')
+    状態({ kind: 'working' })
+
+    expect(出し直した回数()).toBe(2)
+  })
+
+  it('断られ続けても、出し直しは上限で止まる', async () => {
+    // 別の PC のカードは原理的に端末を開けないので、上限が無いと永久に往復する
+    await 開いて購読する()
+
+    ended()
+    状態({ kind: 'starting' })
+    expect(出し直した回数()).toBe(1)
+
+    for (let i = 0; i < 6; i += 1) {
+      断る()
+      状態({ kind: 'working' })
+    }
+
+    // 最初の1回（生死の変化）＋ 上限の3回
+    expect(出し直した回数()).toBe(4)
+  })
+
+  it('端末の絵が届いたら、断られた記録は消える', async () => {
+    // **忘れる合図は、送った回数ではなく届いたことに置いてある**
+    await 開いて購読する()
+
+    ended()
+    状態({ kind: 'starting' })
+    断る()
+    絵が届く()
+
+    状態({ kind: 'working' })
+
+    // 絵が来た時点で用は済んでいるので、1回目のぶんから増えない
+    expect(出し直した回数()).toBe(1)
+  })
+
+  it('線を張り直したら、断られた記録は持ち越さない', async () => {
+    // 断りは「あの接続のあのときの返事」であって、新しい線では成り立たない
+    await 開いて購読する()
+
+    ended()
+    状態({ kind: 'starting' })
+    断る()
+
+    latest().drop()
+    await vi.advanceTimersByTimeAsync(500)
+    latest().accept()
+    // 繋ぎ直しがまとめて出し直したぶんを捨てる
+    latest().sent = []
+
+    状態({ kind: 'working' })
+
+    expect(出し直した回数()).toBe(0)
+  })
+
+  it('写しは生死を種付けしない（種付けしても線を張り直す側が消す）', async () => {
+    // **設計§7 の案 A を実装して分かったことを、そのまま固定しておく。**
+    // 写しで `alive` を種付けしても、直後の `onopen` が `resubscribe()` を呼んで
+    // 消してしまうので効かない。ここが将来「効くはず」と読まれると、断られたぶんを
+    // 覚える本体（案 B）のほうを薄くする判断に繋がりかねない
+    写し = [カードの写し({ kind: 'ended', ok: true })]
+
+    await useWsStore.getState().connect()
+    latest().accept()
+    const store = useWsStore.getState()
+    store.subscribeTerminal(CARD, 120, 50, () => {})
+    store.subscribeTranscript(CARD)
+    latest().sent = []
+
+    状態({ kind: 'starting' })
+
+    // 種が残っていれば「止まり→動き」で1回出るが、消されているので出ない
+    expect(出し直した回数()).toBe(0)
   })
 })
 

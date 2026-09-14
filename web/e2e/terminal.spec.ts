@@ -5,6 +5,7 @@ import {
   addProject,
   archiveAll,
   expectTerminalToContain,
+  fireHook,
   openDashboard,
   openSession,
   scrollTerminalToBottom,
@@ -774,4 +775,53 @@ test('自分から終わったカードは「スリープ」として残り、�
       { message: 'スリープのカードを消せること', timeout: 20_000 },
     )
     .toBe(false)
+})
+
+/**
+ * 起こし直したカードの端末が、読み直さずに描かれるか（イシュー
+ * `起こし直したカードの端末が、また読み直すまで描かれない`）。
+ *
+ * **ここに置いてある理由が、このテストの半分である。**
+ *
+ * 同じ症状の E2E を `revive.spec.ts` へ足すと**永久に緑のまま何も守らない**。
+ * あちらは `chromium-fleet`（PC を3台つないだ構成）に載っており、リモート側の
+ * 生存確認は記録（`registry`）を見るので、**起こし直しをまたいでもカードの記録は
+ * 残る**——断られる窓がそもそも開かない。窓が開くのはローカル側だけで、
+ * `local.rs` の生存確認が擬似ターミナルの実体を直に見ているためである。
+ *
+ * **再現しない土台に置いたテストは、直す前でも緑・直したあとも緑になる。**
+ */
+test('起こし直したあと、読み直さずに端末へ文字が出る', async ({ page }) => {
+  await openDashboard(page)
+  const tile = await spawnSession(page)
+  await openSession(page, tile)
+
+  // 起こし直すには呼び戻し先が要る。フックが `session_id` を運ぶので、
+  // 1本通しておかないと復旧そのものが断られる
+  await typeLine(page, 'おはよう')
+  await expectTerminalToContain(page, '[fake-claude] received: おはよう')
+  await fireHook(page, 'UserPromptSubmit')
+
+  const cardId = await page
+    .getByTestId('session-view')
+    .getAttribute('data-card-id')
+  const 電源 = page.getByTestId('power-tile')
+
+  // 眠らせて抜け殻にする
+  await expect(電源).toHaveAttribute('data-power', 'on')
+  await 電源.click()
+  await expect(電源).toHaveAttribute('data-power', 'off', { timeout: 20_000 })
+
+  // **ここから先、ページは一度も読み直さない。** 読み直すと購読が張り直されて
+  // しまい、まさに直したかった経路（線は無事のまま実体だけが入れ替わる）を
+  // 通らなくなる
+  await 電源.click()
+  await expect(電源).toHaveAttribute('data-power', 'on', { timeout: 60_000 })
+
+  // 起こし直した実体が描いた文字が、読み直さずに届く。
+  // **断られた購読を覚えていないと、ここで端末は空のまま**になる
+  await typeLine(page, 'ただいま')
+  await expectTerminalToContain(page, '[fake-claude] received: ただいま')
+
+  expect(cardId).toBeTruthy()
 })
