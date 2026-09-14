@@ -59,7 +59,7 @@
 #
 # ## 
 
-min_entries = 130
+min_entries = 135
 
 [[entry]]
 issue       = "イシューグループ_2026-0821-1953/セッションごとにも全体にも自分用のメモを残せるようにする"
@@ -70,7 +70,6 @@ tests       = [
 ]
 breaks_when = "memo.css のセルの規則から box-sizing: content-box か height: 1lh のどちらかを外す（6通り壊して6通りとも落ちることを実測した）。jsdom は CSS を当てないので、効いたかを見ているのはこちらだけである"
 verified    = true
-
 [[entry]]
 issue       = "イシューグループ_2026-0821-1953/セッションごとにも全体にも自分用のメモを残せるようにする"
 behavior    = "共用側の表が display: block でも、メモの吹き出しの中では列が等分になり、中身が空の列だけ細くならない"
@@ -80,7 +79,6 @@ tests       = [
 ]
 breaks_when = "memo.css の .memo-bubble .prose-dashboard table から table-layout: fixed を外す（共用側が display: block なので、列幅が中身の量だけで決まる状態へ戻る）"
 verified    = true
-
 [[entry]]
 issue       = "イシューグループ_2026-0821-1953/セッションごとにも全体にも自分用のメモを残せるようにする"
 behavior    = "原寸が入る幅より広い絵を貼ったときでも、画像は入る幅の4割から始まる（原寸は超えない）"
@@ -96,7 +94,6 @@ tests       = [
 ]
 breaks_when = "uploadFile が URL の文字列だけを返す形へ戻す（previewWidth の既定は undefined で、そのとき器が fit-content になり、img の width: 100% と合わさって原寸が入る幅より広い絵は必ず面いっぱいへ伸びる）"
 verified    = true
-
 [[entry]]
 issue       = "イシューグループ_2026-0821-1953/セッションごとにも全体にも自分用のメモを残せるようにする"
 behavior    = "確定して Markdown へ写したあとでも、メモの画像に編集で決めた幅が効く"
@@ -107,7 +104,6 @@ tests       = [
 ]
 breaks_when = "表示のたびに blocks から previewWidth を引く処理を外す（Markdown の画像記法に幅を書く場所が無いので、blocksToMarkdownLossy を通った時点で幅が消える）"
 verified    = true
-
 [[entry]]
 issue       = "イシューグループ_2026-0821-1953/セッションごとにも全体にも自分用のメモを残せるようにする"
 behavior    = "規則の注釈にその規則の字が引用されていても、空のセルの高さを保つ宣言がメモの吹き出しに限って書かれていることを見張る"
@@ -117,7 +113,6 @@ tests       = [
 ]
 breaks_when = "memo.css のセルの規則から box-sizing: content-box か height: 1lh のどちらかを外す。この単体は宣言の字が在るかを読むので、外せば落ちる（効いたかは測っていない）"
 verified    = true
-
 [[entry]]
 issue       = "イシューグループ_2026-0904-0120/statusコマンド相当の情報を画面から見えるようにする"
 behavior    = "claude を別のアカウントへログインし直したときは、前のログインの使用上限を残さず入れ替える（新しい窓の戻り時刻が手前でも捨てない）"
@@ -127,7 +122,6 @@ tests       = [
 ]
 breaks_when = "server-core の registry.rs の login_changed を常に false にする（合流が切り替えを「遅れて届いた報告」と読む、修正前の振る舞いへ戻る）。実際に戻すと、前のアカウントの seven_day 56% が残ったまま新しい 3% が捨てられる"
 verified    = true
-
 [[entry]]
 issue       = "イシューグループ_2026-0904-0120/statusコマンド相当の情報を画面から見えるようにする"
 behavior    = "ログインの指紋が読めない報告が届いたときでも、使用上限を入れ替えず合流させる（読めないことを「切り替わった」と読まない）"
@@ -137,7 +131,6 @@ tests       = [
 ]
 breaks_when = "login_changed に stored.is_some() != incoming.is_some() を足す。指紋を読めない環境では3秒ごとに None が届くので、毎回入れ替えになり合流が丸ごと効かなくなる（数字が跳ね回る）"
 verified    = true
-
 [[entry]]
 issue = "イシューグループ_2026-0913-2234/空きメモリの判定が、WSLの中だけを見ている"
 behavior = "WSL でない機械で枚数を数えるとき、外側を見に行かず、答えが1ビットも変わらない（docker コンテナの中に居るときも WSL と判定しない）"
@@ -149,7 +142,6 @@ tests = [
 ]
 breaks_when = "WSL の判定を /proc/version の microsoft だけへ戻す（/run/WSL を見ない形にすると、docker の中で真になる）"
 verified = true
-
 [[entry]]
 issue = "イシューグループ_2026-0913-2234/空きメモリの判定が、WSLの中だけを見ている"
 behavior = "WSL の中に居るが外側の空きを聞けなかったとき、MemFree で抑えて枚数が増えない（既存の「そもそも読めない」＝歯止めを外す側とは別の状態にする）"
@@ -161,7 +153,6 @@ tests = [
 ]
 breaks_when = "counted_available の Outside::Unknown を None（歯止めを外す側）へ書き換える（実行レポート フェーズ2 で2本が落ちた）"
 verified = true
-
 [[entry]]
 issue = "イシューグループ_2026-0913-2234/空きメモリの判定が、WSLの中だけを見ている"
 behavior = "WSL の中に居るとき、機械の外側（Windows）の空きも見て、内側と外側の少ないほうで起こせる枚数を数える"
@@ -173,7 +164,6 @@ tests = [
 ]
 breaks_when = "counted_available が外側を見ずに MemAvailable だけで割る形へ戻す"
 verified = true
-
 [[entry]]
 issue = "イシューグループ_2026-0913-2234/返す口が、dockerの外のビルドに届かない"
 behavior = "/docker と箱の両方にキャッシュが在るとき、しきい値を合計で判定して両方返す（片方だけ大きいときも返す）"
@@ -185,7 +175,6 @@ tests = [
 ]
 breaks_when = "しきい値を片方ずつ見る形へ戻す／返す先を /docker だけへ戻す（実行レポート フェーズ5 で3本が落ちた）"
 verified = true
-
 [[entry]]
 issue = "イシューグループ_2026-0913-2234/返す口が、dockerの外のビルドに届かない"
 behavior = "WSL の中で包みを通して命令を走らせたとき、自分を返せる箱へ入れてから走らせる（WSL でなければ箱を作りに行かない）"
@@ -197,7 +186,6 @@ tests = [
 ]
 breaks_when = "包みから WSL の判定を外す（実行レポート フェーズ5 で `wslでなければ箱を作りに行かない` が落ちた）"
 verified = true
-
 [[entry]]
 issue = "イシューグループ_2026-0913-2234/返す口が、dockerの外のビルドに届かない"
 behavior = "箱を作れない機械でも命令はそのまま走り、返す口が落ちても呼び元の終了コードが変わらない"
@@ -209,7 +197,6 @@ tests = [
 ]
 breaks_when = "包みから終了コードの退避を外す（実行レポート フェーズ5 で5本が落ちた）"
 verified = true
-
 [[entry]]
 issue       = "クローズ/CICD"
 behavior    = "新しい版を取ってきただけのときは、選ばれている版を切り替えない"
@@ -219,7 +206,6 @@ tests       = [
 ]
 breaks_when = "取ってくる処理の最後で、取ってきた版を選択済みとして書き込むようにする"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/CICD"
 behavior    = "版を入れ替えるとき、抜け殻になるカードの枚数が押す前に分かる"
@@ -229,7 +215,6 @@ tests       = [
 ]
 breaks_when = "抜け殻の枚数を数える処理を、生きたカードを見ずに常に0を返す形へ変える"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/LLMモデル切り替えUI"
 behavior    = "モデルを切り替えたあとでも、既に起こしてあるセッションは元の既定のまま始まる"
@@ -239,7 +224,6 @@ tests       = [
 ]
 breaks_when = "切替のときに起動済みセッションの既定も上書きする形へ戻す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/LLMモデル切り替えUI"
 behavior    = "同じモデルを選んだときは、切り替えの指示を送らない"
@@ -249,7 +233,6 @@ tests       = [
 ]
 breaks_when = "選んだ値と現在値を比べる分岐を外し、毎回送る形へ戻す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/PCでも、選択中に別の種類を押したら解くだけにする"
 behavior    = "別の種類を選んでいる間に押しても、選択を解くだけで新しくは選ばない"
@@ -261,7 +244,6 @@ tests       = [
 ]
 breaks_when = "press.ts の、別の種類を押したらそちらへ選び直す分岐へ戻す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/PJT画面の横スクロールをどこからでも効かせる"
 behavior    = "PJT 専用画面で、アプリの帯・レールより下の余白・画面いちばん上の余白の上にカーソルがあるときも、横ホイールでセッションのレールが横へ送られる"
@@ -273,7 +255,6 @@ tests       = [
 ]
 breaks_when = "useRailPan の購読先を、画面の外枠（Shell が持つ main）から group-view の section へ戻す。帯も余白も section の外側（帯は兄弟・余白は親のパディング）なので、キャプチャ段で張っても子孫のイベントしか通らず、この3本だけが落ちる。**web の単体テストは54本すべて緑のまま通るので、単体では原理的に捕まらない。**"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/PJT画面の横スクロールをどこからでも効かせる"
 behavior    = "Shift を押しながら縦へ回したとき、スクロールバックがまだ無い端末でも、claude へ矢印キーが飛ばない"
@@ -283,7 +264,6 @@ tests       = [
 ]
 breaks_when = "TerminalPane の attachCustomWheelEventHandler を外すか、false を返す条件から shiftKey を落とす。xterm はスクロールバックが無いあいだ deltaY を矢印キーへ換えて claude へ送るので、起こした直後のセッションで選択肢が勝手に動く。**出力が溜まった端末では再現しないため、テストは起こした直後に何も打たずに測る。**"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/PJT画面の横スクロールをどこからでも効かせる"
 behavior    = "Shift を押しながら縦へ回したときも、レールが横へ送られる"
@@ -293,7 +273,6 @@ tests       = [
 ]
 breaks_when = "railPan の畳み込みから shiftKey の枝を落とす。ブラウザは Shift ＋ 縦を deltaX ではなく deltaY ＋ shiftKey で届けるので、deltaX だけを見ていると送り量が 0 になる"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/PJT画面の横スクロールをどこからでも効かせる"
 behavior    = "セッションの区画の中で中ボタンをドラッグしたときレールが動き、区画の外（レールの余白）では動かない"
@@ -304,7 +283,6 @@ tests       = [
 ]
 breaks_when = "useRailPan の中ドラッグから closest('[data-testid=\"session-view\"]') の名指しを外す。区画の外でも掴めるようになり、要件の「各セッションの区画の中なら、どこでも（画面全体ではない）」に反する"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/PJT画面の横スクロールをどこからでも効かせる"
 behavior    = "入力欄の上で中ボタンのドラッグをしても、レールは動かない"
@@ -314,7 +292,6 @@ tests       = [
 ]
 breaks_when = "useRailPan の掴む判定から isTextEntry の枝を落とす。入力欄では Linux の中クリック貼り付けを優先するという既決の判断が消える（端末の中だけは、その中クリック貼り付けを止める側が要件なので順序が逆になる）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/PJT画面の横スクロールをどこからでも効かせる"
 behavior    = "生テキストの上で横へ回したとき、レールは動かず、内側の器が横へ動く"
@@ -324,7 +301,6 @@ tests       = [
 ]
 breaks_when = "useRailPan の「内側に横スクロールできる要素があれば譲る」判定（scrollWidth > clientWidth かつ overflowX が auto か scroll）を外す。外側が全子孫からホイールを奪い、内側で読むはずのものが読めなくなる"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/PJT画面の横スクロールをどこからでも効かせる"
 behavior    = "端末の上にカーソルがあるとき、横ホイールはレールを動かし、端末の中身は動かない"
@@ -335,7 +311,6 @@ tests       = [
 ]
 breaks_when = "useRailPan の購読をキャプチャ段からバブル段へ戻すか、passive: false を外す。端末を包む箱は overflowX: auto を意図的に持ち cols:120 固定で必ず横に溢れるので、先に preventDefault しないと端末とレールが二重に動く"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/あらゆる経路のログを開発エージェントが読みやすいように整備"
 behavior    = "伏せる設定を入れても、ログの欄の並びは変わらない"
@@ -345,7 +320,6 @@ tests       = [
 ]
 breaks_when = "伏せるときに欄を空文字で置き換えるのをやめ、欄そのものを落とすようにする"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/あらゆる経路のログを開発エージェントが読みやすいように整備"
 behavior    = "途中で読めなくなったファイルがあっても、黙って終わらずに理由を残す"
@@ -355,7 +329,6 @@ tests       = [
 ]
 breaks_when = "読み取りの失敗を握り潰して、理由を残さずそのまま終了するようにする"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026-0813-1804/フォルダを掘った位置がリロードで失われる"
 behavior    = "サイドバーで掘った位置を、読み込み直したあとでも PC と PJT の組ごとに分けて覚えている"
@@ -367,7 +340,6 @@ tests       = [
 ]
 breaks_when = "filesPlace.ts の行の鍵から PJT を抜く（実行レポート フェーズ2 の表で8本が落ちた）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026-0813-1804/フォルダを掘った位置がリロードで失われる"
 behavior    = "覚えていた場所が消えていたときでも、画面を壊さず黙って起点へ落ちる"
@@ -378,7 +350,6 @@ tests       = [
 ]
 breaks_when = "filesPlace.ts の isUnder の判定を外す（実行レポート フェーズ2 の表で2本が落ちた）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026-0813-1804/リロードするとファイルビューが勝手に閉じる"
 behavior    = "開いていたファイルを、読み込み直したあとでも開いたまま復元する"
@@ -388,7 +359,6 @@ tests       = [
 ]
 breaks_when = "useFilesParts の picked から復元の経路を外す（filesPlace を読まずに起点だけで開く形へ戻す）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026-0813-1804/入力中のメッセージがリロードやページ移動で消える"
 behavior    = "読み込み直しやページ移動のあとでも、カードごとに分かれた書きかけが残る"
@@ -400,7 +370,6 @@ tests       = [
 ]
 breaks_when = "drafts.ts の localStorage への書き出しを外す（覚える側を殺す）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026-0813-1804/入力中のメッセージがリロードやページ移動で消える"
 behavior    = "送信に成功したときだけ書きかけを忘れ、失敗したときでも残す"
@@ -411,7 +380,6 @@ tests       = [
 ]
 breaks_when = "送信の戻り値を見ずに、送った時点で常に書きかけを消す形へ戻す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026-0813-2125/スマホ側でセッション画面の上の各情報を4行構成に整える"
 behavior    = "いきなり開いた（読み込み直した）ときでも、戻るの行き先がアプリの外へ出ない"
@@ -422,7 +390,6 @@ tests       = [
 ]
 breaks_when = "戻る先の判定を「履歴の件数」へ壊す（routes.test.ts に壊し方を見る行が対で在る）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026-0813-2125/スマホ側でセッション画面の上の各情報を4行構成に整える"
 behavior    = "狭い画面で深いパスを出すときでも、末尾2階層は必ず残し、1文字も落とさずに割る"
@@ -434,7 +401,6 @@ tests       = [
 ]
 breaks_when = "path.ts の割り方を、末尾1階層だけ残す形へ変える"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026-0813-2125/モデルとモードのドロップダウンを短くする"
 behavior    = "畳んでいるときは、いま動いているモデルを版番号つきで1行に収めて出す"
@@ -445,7 +411,6 @@ tests       = [
 ]
 breaks_when = "ModelPicker の畳んだ表示から版番号の欄を落とす（※壊し方の記録が無く、実装から書いた）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026-0813-2125/上の行数が最終活動時間の表記によって動く"
 behavior    = "最終活動の表記が「たった今」から「3時間前」へ変わっても、帯の高さが動かない"
@@ -455,7 +420,6 @@ tests       = [
 ]
 breaks_when = "帯の高さを固定している指定を外し、中身の文字数なりに伸びる形へ戻す（※壊し方の記録が無く、実装から書いた）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026-0813-2208/構造化ビューでアシスタントの本文をマークダウンで表示する"
 behavior    = "本文を整形して出すときも、br 以外の生 HTML はそのまま残す"
@@ -466,7 +430,6 @@ tests       = [
 ]
 breaks_when = "br 以外の HTML も消すようにする（親の実行レポート フェーズ2 壊し方6。当てると5本落ちた）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026-0813-2208/構造化ビューの本文を折りたたみ式にする"
 behavior    = "本文がしきい値ちょうどのときは畳まず、超えたときだけ畳む"
@@ -476,7 +439,6 @@ tests       = [
 ]
 breaks_when = "畳む判定の比較を <= から < へ取り違える（親の実行レポート フェーズ2 壊し方4。当てると1本だけ落ちた）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026-0820-2129/構造化ビューで利用者の発言を吹き出しにする"
 behavior    = "利用者の発言が届いたときだけ右寄せの吹き出しにし、アシスタントの本文は吹き出しにしない"
@@ -488,7 +450,6 @@ tests       = [
 ]
 breaks_when = "吹き出しの出し分けから役割の判定を外し、全部の本文へ同じ見た目を当てる"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026-0820-2129/構造化ビューの畳み方と開き方を作り直す"
 behavior    = "しきい値の境目に絵文字が跨ったときでも、末尾を壊さずに切る"
@@ -499,7 +460,6 @@ tests       = [
 ]
 breaks_when = "切る位置をコードポイントではなくバイト位置で取る形へ変える"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026-0820-2129/構造化ビューの畳み方と開き方を作り直す"
 behavior    = "しきい値を超えたときだけ畳み、境目ちょうどでは畳まない"
@@ -511,7 +471,6 @@ tests       = [
 ]
 breaks_when = "畳む判定を > から >= へ寄せる（実行レポート フェーズ3 の壊し方1・2。猶予の中を突く項目を足して分離してある）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026-0820-2129/畳み込みの見た目をグラデーションに"
 behavior    = "まとめ行を開け閉めしたあとでも、本文そのものは隠れず、入れ子の深さも増えない"
@@ -523,7 +482,6 @@ tests       = [
 ]
 breaks_when = "まとめ行の開閉で本文側の表示も一緒に切り替える形へ戻す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026-0826-1146/ファイルの中身を左端の広い区画で見せる"
 behavior    = "中身の列の上で横へ回したときも、その回転はセッションのレールへ渡る"
@@ -533,7 +491,6 @@ tests       = [
 ]
 breaks_when = "中身の列で横ホイールを止めている購読を外す（※壊し方の記録が無く、実装から書いた）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026-0826-1146/フォルダのパネルの幅をドラッグで変えられるようにする"
 behavior    = "フォルダの区画を開いているときは、その幅ぶんだけ場所取りが場所を確保する"
@@ -543,7 +500,6 @@ tests       = [
 ]
 breaks_when = "場所取りの幅をフォルダの幅ではなく固定値へ戻す（※壊し方の記録が無く、実装から書いた）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026-0826-1146/フォルダのパネルの幅をドラッグで変えられるようにする"
 behavior    = "幅を変えたあとで読み込み直しても、変えた幅が残る"
@@ -554,7 +510,6 @@ tests       = [
 ]
 breaks_when = "変えた幅を localStorage へ書く行を外す（※壊し方の記録が無く、実装から書いた）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026-0903-0422/ファイルビュアに別のタブで開くボタンを追加"
 behavior    = "ブラウザで開くボタンを押したとき、宛先は rawUrl と字で一致し、画面側で継ぎ足さない"
@@ -565,7 +520,6 @@ tests       = [
 ]
 breaks_when = "FileView.tsx の href を rawUrl から組み立て直す形（クエリを足す等）へ変える"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026-0903-0422/ファイルビュアに別のタブで開くボタンを追加"
 behavior    = "新しいタブで開いたときでも、ファイルビューの中と同じく script が動き、描けない種別でも字が出る"
@@ -576,7 +530,6 @@ tests       = [
 ]
 breaks_when = "media_type_of を Option へ戻し、表に無い種別を 415 で断る形へ戻す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026-0903-0422/ファイルビューでHTMLのインラインscriptが動かない"
 behavior    = "script を通したあとでも、箱は出自を名乗れない（allow-same-origin を足さない）"
@@ -587,7 +540,6 @@ tests       = [
 ]
 breaks_when = "CSP へ allow-same-origin を足す（実行レポート フェーズ6 の表で1本が落ちた。sed で字ごと書き換えると字を固定する側は通るので、性質で見るこの行が要る）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026-0903-0422/ファイルビューでHTMLのインラインscriptが動かない"
 behavior    = "script を通す型を広げたあとでも、js を実行できる型では生で返さない（型を決める側）"
@@ -597,7 +549,6 @@ tests       = [
 ]
 breaks_when = "protocol::fs の表で js に application/javascript を与える"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026-0903-0422/ファイルビューでHTMLのインラインscriptが動かない"
 behavior    = "script を通す型を広げたあとでも、生で返した js は script として実行できない（実ブラウザで見る側）"
@@ -607,7 +558,6 @@ tests       = [
 ]
 breaks_when = "protocol::fs の表で js に application/javascript を与える"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026-0903-0422/ファイルビューでHTMLのインラインscriptが動かない"
 behavior    = "ファイルビューの箱に入れた HTML でも script は動き、それでいて外への持ち出しは1件も通さない"
@@ -618,7 +568,52 @@ tests       = [
 ]
 breaks_when = "CSP から allow-scripts を落とす（実行レポート フェーズ6 の表で2本が落ちた）"
 verified    = false
-
+[[entry]]
+issue       = "クローズ/イシューグループ_2026-0914-1041/イシューを閉じる条件に「戻すと落ちる」を入れる"
+behavior    = "閉じる作法を書いたあとでも、台帳へ書く前に札を取ることが節の中に残っている"
+gate        = "manual"
+manual_check = ".claude/docs/guideline.md の「クローズするとき、守っているテストを台帳へ名指しで載せる」に、札を取る手順と、覆すときに retired で畳む決まりが在ることを読んで確かめる。CLAUDE.md の品質ガイドラインから1行で辿れることも見る"
+breaks_when = "節そのものを消す（機械の検査は無い。文書なので人が読んで確かめるしかない）"
+verified    = false
+[[entry]]
+issue       = "クローズ/イシューグループ_2026-0914-1041/直した振る舞いを守る台帳と、食い違うと落ちる検査"
+behavior    = "台帳の行が実コードと食い違ったときは、黙って通らずに落ちる"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/regressions.rs", name = "台帳は約束どおり" },
+  { file = "server/crates/core/tests/regressions.rs", name = "約束はわざと破ると落ちる" },
+]
+breaks_when = "約束破り() から約束を1つ外す（約束はわざと破ると落ちる が、その約束の変異で鳴らなくなって落ちる）"
+verified    = true
+[[entry]]
+issue       = "クローズ/イシューグループ_2026-0914-1041/直した振る舞いを守る台帳と、食い違うと落ちる検査"
+behavior    = "紛らわしい書き方が混ざっていても、テスト名の走査は騙されず、壊れたら黙って数が減らずに落ちる"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/regressions.rs", name = "走査器は紛らわしい書き方に騙されない" },
+  { file = "server/crates/core/tests/regressions.rs", name = "走査器が見つけたテストが十分に多い" },
+  { file = "server/crates/core/tests/regressions.rs", name = "別の綴りでテストを書いていない" },
+]
+breaks_when = "語境界の判定を緩める（submit( を it( と読むようになり、標本の検査が落ちる）"
+verified    = true
+[[entry]]
+issue       = "クローズ/イシューグループ_2026-0914-1041/起こし直したカードの端末が、また読み直すまで描かれない"
+behavior    = "起こし直したあとでも、タブを読み直さずに端末へ文字が出る（実ブラウザで見る側）"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/terminal.spec.ts", name = "起こし直したあと、読み直さずに端末へ文字が出る" },
+]
+breaks_when = "ws.ts の noteRefusal から 断られた への登録を外す（受信の文字が最後まで現れず落ちることを実測した）"
+verified    = true
+[[entry]]
+issue       = "クローズ/イシューグループ_2026-0914-1041/閉じたイシュー70件を遡って、守っているテストを名指しする"
+behavior    = "台帳が育ったあとでも、守られている数と、いまのコードに当てた数を分けて出す"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/regressions.rs", name = "守られている数を数える" },
+]
+breaks_when = "verified を数えずに1つの数へまとめる（載っていることと確かめてあることが同じ顔になる）"
+verified    = false
 [[entry]]
 issue       = "クローズ/イシューグループ_2026_0804_2219/権限確認スキップの既定を他の設定と揃える"
 behavior    = "記録を消したときは、権限モードの既定が設定ファイルの値へ戻る"
@@ -628,7 +623,6 @@ tests       = [
 ]
 breaks_when = "権限モードの既定を、設定ファイルではなくコード内の定数から引く形へ戻す（※壊し方の記録が無く、実装から書いた）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026_0804_2219/自分のダッシュボード設定の値をファイルとしてインポートエクスポート可能に"
 behavior    = "取り込んだ設定に知らないキーが混ざっていても、無視したことを呼び手へ伝える"
@@ -639,7 +633,6 @@ tests       = [
 ]
 breaks_when = "portable.rs の未知キーの収集をやめ、黙って捨てる形へ戻す（※壊し方の記録が無く、実装から書いた）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026_0804_2219/自分のダッシュボード設定の値をファイルとしてインポートエクスポート可能に"
 behavior    = "書き出しを押したときは、画面が組み立てた値ではなくサーバの口を直に指す"
@@ -649,7 +642,6 @@ tests       = [
 ]
 breaks_when = "書き出しのリンク先を、画面の手元の値から組み立てる形へ戻す（※壊し方の記録が無く、実装から書いた）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026_0805_0514/セッション専用画面からプロジェクト内のフォルダを閲覧する機能"
 behavior    = "セッション専用画面からフォルダを辿るとき、起点より上へは抜けられない"
@@ -659,7 +651,6 @@ tests       = [
 ]
 breaks_when = "FolderBrowser の起点より上を弾く判定を外す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026_0805_0514/セッション起動時にPJTをクリックで選択する機能"
 behavior    = "サイドバーを開き直したあとでも、開閉の状態が保たれる"
@@ -669,7 +660,6 @@ tests       = [
 ]
 breaks_when = "開閉の状態を覚える保存を外し、開くたびに既定の開閉で描くようにする"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026_0805_0514/セッション起動時にPJTをクリックで選択する機能"
 behavior    = "セッションが0本の枠でも画面が開き、追加の記号だけが出る"
@@ -679,7 +669,6 @@ tests       = [
 ]
 breaks_when = "セッションが0本の枠を一覧から落とし、画面を開けないようにする"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026_0805_0514/プロジェクトとセッションの追加方式を変更"
 behavior    = "枠から起こすとき、選んだ権限モードと枠が持つ宛先でサーバへ要求し、ローカルのときは宛先を指名しない"
@@ -690,7 +679,6 @@ tests       = [
 ]
 breaks_when = "SessionAdd から agent_id の引き渡しを外す（宛先を常に null にする）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026_0805_0514/プロジェクトとセッションの追加方式を変更"
 behavior    = "枠を足したあとでも、並びは position だけで決まり、セッションが起動しても動かない"
@@ -702,7 +690,6 @@ tests       = [
 ]
 breaks_when = "projects ストアの並べ替えを created_at 順へ戻す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026_0805_1530/稼働中のセッションが終了扱いになっていた"
 behavior    = "呼び戻しで session_end が先に届いたときでも、稼働中のセッションを終了扱いにしない"
@@ -713,7 +700,6 @@ tests       = [
 ]
 breaks_when = "SessionEnd => set(Ended) の腕を戻す（実行レポート の壊し方 Y で2本とも落ちた）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026_0805_1530/稼働中のセッションが終了扱いになっていた"
 behavior    = "猶予の境目ちょうどまでは、終わりの申告を捨てずに残す"
@@ -723,7 +709,6 @@ tests       = [
 ]
 breaks_when = "猶予の比較を > から >= へ寄せる（実行レポート の壊し方 C でこの1本だけが落ちた）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026_0805_1530/稼働中のセッションが終了扱いになっていた"
 behavior    = "終わりの申告が取り消されたあとで異常終了したときは、正常終了に丸めず異常終了として出す"
@@ -734,7 +719,6 @@ tests       = [
 ]
 breaks_when = "handle_hook の _ => clear_end_report() を消す（実行レポート の壊し方 B でこの1本だけが落ちた）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026_0805_1530/送信以外の操作もCtrl+Enterになっている"
 behavior    = "画面を読むのは素の Enter のときだけで、それ以外の打鍵では読まない"
@@ -745,7 +729,6 @@ tests       = [
 ]
 breaks_when = "除外の前に画面を読む順序へ戻す（実行レポート の壊し方 E で1本だけが落ちた）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/イシューグループ_2026_0805_1530/送信以外の操作もCtrl+Enterになっている"
 behavior    = "選択ダイアログが出ている最中は、素の Enter を送信ではなく確定として扱う"
@@ -757,7 +740,6 @@ tests       = [
 ]
 breaks_when = "選択待ちの判定を常に false にする（実行レポート の壊し方 A で7本が落ちた）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/カードと枠を、中クリックで新しいタブに開く"
 behavior    = "カードや枠を中クリックしたときでも、開くタブは1枚だけで、選択は変わらない"
@@ -769,7 +751,6 @@ tests       = [
 ]
 breaks_when = "中クリックの腕から stopPropagation を外し、枠側のハンドラまで走らせる"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/サイドバーで開いたファイルを、タブで並べて切り替える"
 behavior    = "前の版が書いた pick だけの行から読んだときでも、1枚のタブとして復元する"
@@ -780,7 +761,6 @@ tests       = [
 ]
 breaks_when = "picks が無い行を読めない行として捨てる（前の版との互換を外す）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/サイドバーで開いたファイルを、タブで並べて切り替える"
 behavior    = "読み込み直したあとでも、開いていたタブが順序ごと戻り、見ていた1枚が選ばれている"
@@ -792,7 +772,6 @@ tests       = [
 ]
 breaks_when = "filesPlace の picks を捨てて pick だけを覚える形（前の版）へ戻す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/サイドバーのファイルを、中クリックでブラウザの新しいタブに開く"
 behavior    = "中クリックしたあと、本当に新しいタブが開いて中身まで出る"
@@ -802,7 +781,6 @@ tests       = [
 ]
 breaks_when = "ファイルの行を a 要素から div へ戻し、href を持たせない形にする（※壊し方の記録が無く、実装から書いた）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/サイドバーのファイルを、中クリックでブラウザの新しいタブに開く"
 behavior    = "中クリックや修飾キー付きで押されたときは、既定を止めずにブラウザへ任せる"
@@ -812,7 +790,6 @@ tests       = [
 ]
 breaks_when = "押した経路で preventDefault を呼ぶようにする（実行レポート：判定はすべて fireEvent の戻り値で見ている）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/サイドバーの一覧を、リロードせずに新しくする"
 behavior    = "サイドバーを畳んでいる間・タブが裏にいる間は問い合わせず、表へ戻ったときに引き直す"
@@ -824,7 +801,6 @@ tests       = [
 ]
 breaks_when = "poll.ts の visibility を見る条件を外し、裏にいても引き続ける形にする"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/サイドバーの一覧を、リロードせずに新しくする"
 behavior    = "引き直した一覧の中身が前と同じときは画面を作り直さず、並び順が変わったときだけ違うと見る"
@@ -836,7 +812,6 @@ tests       = [
 ]
 breaks_when = "sameListing から並び順の比較を外し、集合として同じなら同じと言う形にする"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/スマホでターミナルの文字をコピーできない"
 behavior    = "端末の上をなぞったときは焦点を動かさず、選択が片側しか端末に入っていないときでも選択中と見る"
@@ -848,7 +823,6 @@ tests       = [
 ]
 breaks_when = "なぞりの判定を外し、触れたら常に焦点を渡す形（前のイシューの状態）へ戻す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/スマホでターミナルビュー内に触れるとキーボードが出てくる"
 behavior    = "マウスで押したときは焦点を渡し、なぞっただけのときは焦点を動かさない"
@@ -860,7 +834,6 @@ tests       = [
 ]
 breaks_when = "隠しテキストエリアへ属性を当てる行を消す（実行レポート ⛳壊し方：4本落ちる）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/スマホでファイルビュアを開くと画面が崩れる"
 behavior    = "狭い画面でファイルを開いたときでも、セッションの面が潰れない"
@@ -870,7 +843,6 @@ tests       = [
 ]
 breaks_when = "ファイルビュアの幅の指定を、狭い画面を考えない固定値へ戻す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/セッション画面とPJT画面を行き来できるようにする"
 behavior    = "単独画面から押したときも横並びから押したときも、もう一方の画面へ行き来できる"
@@ -881,7 +853,6 @@ tests       = [
 ]
 breaks_when = "SessionView.tsx の切替ボタンから、行き先を画面の種類で分ける判断を外す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/セルフホスト化・マルチテナント対応"
 behavior    = "カードを一覧から外したあとでも、遅れて届いた報告でそのカードが戻らない"
@@ -891,7 +862,6 @@ tests       = [
 ]
 breaks_when = "registry.rs の、外した印を見てから受け入れる判断を外す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/セルフホスト化・マルチテナント対応"
 behavior    = "偽装したヘッダで来たときでも、入口の鍵の免除を得られない"
@@ -901,7 +871,6 @@ tests       = [
 ]
 breaks_when = "auth.rs の、ヘッダ由来の申告をそのまま信用する形へ戻す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/セルフホスト化・マルチテナント対応"
 behavior    = "手順書が名指ししているファイルが、配るときに実在する"
@@ -911,7 +880,6 @@ tests       = [
 ]
 breaks_when = "手順書から名指ししているファイルを1つ消すか、名前を変える"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/ダッシュボードでセッションを動かすとWSLが落ちやすい"
 behavior    = "自分の読み取りで上がる通知が来たときでも、輪にならないよう通さない"
@@ -923,7 +891,6 @@ tests       = [
 ]
 breaks_when = "tail.rs の通知の選別を外し、全てのイベントを通す形へ戻す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/トーストを、指で払って消せるようにする"
 behavior    = "境目を越えて払ったときだけ消し、届かなければ戻す。下へ払っても消さない"
@@ -936,7 +903,6 @@ tests       = [
 ]
 breaks_when = "swipeDismiss の境目の比較を外し、動いた時点で消す形にする"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/バージョン表示"
 behavior    = "版の切替が使える構成でも、版の欄には同じ3つが出る"
@@ -946,7 +912,6 @@ tests       = [
 ]
 breaks_when = "構成によって版の欄の作り方を変える分岐を戻す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/ビルドの置き場所を適切なときに自動で片付ける"
 behavior    = "上限以下のときは何も消さず、置き場所が違えばロックも別になる"
@@ -957,7 +922,6 @@ tests       = [
 ]
 breaks_when = "prune_target.rs の上限の判定を外し、常に片付ける形へ戻す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/ファイルの中身をスクロールできない"
 behavior    = "画面が狭いときでも、ファイルの中身を遡れる"
@@ -968,7 +932,6 @@ tests       = [
 ]
 breaks_when = "FileView.tsx のいちばん外側の section から h-full を外す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/ファイルビュアの中を Ctrl+F で探せるようにする"
 behavior    = "ファイルビュアを開いているときに Ctrl+F を押すと探す窓が出るが、IME の変換中は何も起きない"
@@ -981,7 +944,6 @@ tests       = [
 ]
 breaks_when = "keys.ts の変換中（isComposing）の判定を外す（※壊し方の記録が無く、実装から書いた）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/ファイルビュアの中を Ctrl+F で探せるようにする"
 behavior    = "語に印を付けるときも、DOM を1つも書き換えずに済ませる"
@@ -991,7 +953,6 @@ tests       = [
 ]
 breaks_when = "fileSearch.ts の CSS.highlights を使う実装を、当たりを span で囲む形へ戻す（※壊し方の記録が無く、実装から書いた）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/ファイルビュアの文字を小さめに始め、その場で大きさを変えられるようにする"
 behavior    = "倍率を押して動かしたあとでも、上限と下限で止まり、押し戻せば必ず元の値へ戻る"
@@ -1003,7 +964,6 @@ tests       = [
 ]
 breaks_when = "fileZoom.ts の、文字列と数値を同じ門に通す処理を外す（数値が既定へ落ちて上限も下限も効かなくなる。実行レポートに実際にこの形で落ちた記録がある）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/ファイルビュアの文字を小さめに始め、その場で大きさを変えられるようにする"
 behavior    = "別のタブで倍率を変えたあとでも、開いている側が同じ倍率へ揃う"
@@ -1014,7 +974,6 @@ tests       = [
 ]
 breaks_when = "他のタブからの合図を拾う購読を外す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/ファイル一覧で名前にマウスオーバーしたら全体を出す"
 behavior    = "名前が省略されているときでも、マウスを載せれば全体が読める指定が付く"
@@ -1025,7 +984,6 @@ tests       = [
 ]
 breaks_when = "FolderBrowser.tsx から、名前に全体を読ませる指定を外す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/ファイル閲覧で画像とHTMLも表示する"
 behavior    = "画像や SVG を開いたときも、箱の中で実際に絵として描かれる"
@@ -1036,7 +994,6 @@ tests       = [
 ]
 breaks_when = "sandbox 属性を外す（実行レポート：箱の属性を見る2本が落ちる）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/フォルダとファイル一覧のコピーボタンが効かない"
 behavior    = "新しい写す口が無いときでも、古い方法へ落ちて実物のブラウザで写る"
@@ -1048,7 +1005,6 @@ tests       = [
 ]
 breaks_when = "navigator.clipboard が無いときの退避（execCommand への落ち）を外す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/ブラウザのタブに、開いているPJTの名前を出す"
 behavior    = "PJT 専用画面を開いたときは、タブの名前に PJT 名が先に出る"
@@ -1059,7 +1015,6 @@ tests       = [
 ]
 breaks_when = "App.tsx からタブ名を書く呼び出しを消す（親の実行レポート フェーズ4 で同じ形を当てて落ちることを確認済み）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/ブラウザのタブに、開いているPJTの名前を出す"
 behavior    = "同名の PJT を開いたときでも、タブの名前に区別の番号が付く"
@@ -1070,7 +1025,6 @@ tests       = [
 ]
 breaks_when = "projectDisplayName を通さずパスの末尾をそのまま取る（実行レポートの記録：この1本を足すまでは、同じ壊し方で0本しか落ちなかった）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/ブランチセッションを、元を残したままボタン1つで作る"
 behavior    = "作業中に押したときでも、ターンが終わってから枝になる"
@@ -1081,7 +1035,6 @@ tests       = [
 ]
 breaks_when = "branch.rs の、ターンの終わりを待つ段を外して即座に枝を作る形へ戻す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/メッセージに画像を添付できるようにする"
 behavior    = "付けた時点で読めなければ、送る前でもその場で断る"
@@ -1092,7 +1045,6 @@ tests       = [
 ]
 breaks_when = "添付を受け取るときの読み取り確認を外し、送信時まで遅らせる（※壊し方の記録が無く、実装から書いた）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/メッセージに画像を添付できるようにする"
 behavior    = "受け取った名前に制御文字が混ざっていても、保存する名前には入らない"
@@ -1102,7 +1054,6 @@ tests       = [
 ]
 breaks_when = "attachments.rs の名前の掃除（制御文字の除去）を外す（※壊し方の記録が無く、実装から書いた）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/ユーザがGUIから行える全ての事をエージェントがCLIで行えるように提供"
 behavior    = "ローカルモードのときは、札を持っていても入口を素通しのままにする"
@@ -1112,7 +1063,6 @@ tests       = [
 ]
 breaks_when = "ローカルモードでも札の検証を通すようにする"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/ユーザがGUIから行える全ての事をエージェントがCLIで行えるように提供"
 behavior    = "画面に口を足したときは、CLI にも同じ口があるか台帳と突き合わせて落ちる"
@@ -1123,7 +1073,6 @@ tests       = [
 ]
 breaks_when = "cli_surface.toml から行を1つ消す（実コードの口は残したまま）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/一覧のカードのレイアウトを変える"
 behavior    = "カードの形をどう変えたときでも、当たり判定が 44px の床を割らない"
@@ -1133,7 +1082,6 @@ tests       = [
 ]
 breaks_when = "カードの押せる領域に置いた最小の高さの指定を外し、中身なりの高さにする"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/一覧のカードのレイアウトを変える"
 behavior    = "接続が切れているときは、最終活動と同じ行に印を出す"
@@ -1144,7 +1092,6 @@ tests       = [
 ]
 breaks_when = "接続断の印を別の行へ移し、器側の印を消す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/上部に居座る知らせを、最前面のトーストとベルへ移す"
 behavior    = "トーストを積んだあとでも、7秒たてば自動で消える"
@@ -1154,7 +1101,6 @@ tests       = [
 ]
 breaks_when = "appNotices.ts の、時間で消す段を外して居座らせる"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/上部に居座る知らせを、最前面のトーストとベルへ移す"
 behavior    = "他人の知らせが届いたときでも、一覧にも未読の数にも出ない"
@@ -1164,7 +1110,6 @@ tests       = [
 ]
 breaks_when = "知らせを引くときのアカウントの絞り込みを外す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/人が打っていないものを、人の発言として出さない"
 behavior    = "人が打っていない入力が届いたときでも、人の発言と同じ側の吹き出しには出さない"
@@ -1174,7 +1119,6 @@ tests       = [
 ]
 breaks_when = "差出人の判定を、記録の中身を見ずに一律で人とする形へ戻す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/作業中に送った追加メッセージが構造化ビューに出ない"
 behavior    = "あとから履歴が届いても、待っている指示はいちばん下に残る"
@@ -1185,7 +1129,6 @@ tests       = [
 ]
 breaks_when = "待っている指示を末尾へ置く並べ替えを外し、届いた順のまま並べる"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/作業中に送った追加メッセージが構造化ビューに出ない"
 behavior    = "同じ本文の発言が先に届いていても、読まれたあとに二重に並べない"
@@ -1195,7 +1138,6 @@ tests       = [
 ]
 breaks_when = "待ち行列から取り出すときの、同じ本文を畳む判定を外す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/入れ替えのあとフックの宛先が消えたパスのまま固まる"
 behavior    = "渡されたフックの入口が実在しないときだけ、入れる側の入口へ入れ替える"
@@ -1207,7 +1149,6 @@ tests       = [
 ]
 breaks_when = "入れ替えの判定から実在の確認（is_file）を外し、常に据え置く形へ戻す（実行レポート：この形にしたら壊し方3が落ちるようになった）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/入力欄でスラッシュコマンドの候補が出ない"
 behavior    = "行頭で / を打ったときは候補が出るが、語の途中の / では出ない"
@@ -1219,7 +1160,6 @@ tests       = [
 ]
 breaks_when = "候補を出す判定から、直前の文字が空白か行頭かの確認を外す（※壊し方の記録が無く、実装から書いた）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/初期実装"
 behavior    = "パースが壊れて自己修復に入る場面でも、修復のためのセッションを新しく起こさない"
@@ -1230,7 +1170,6 @@ tests       = [
 ]
 breaks_when = "修復の入口からセッションを起こす呼び出しを足す（※壊し方の記録が無く、実装から書いた）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/手元の新しい版をGUIだけで効かせる"
 behavior    = "予約が1つも無くても、手元の実行ファイルのほうが新しければ入れ替えを押せる"
@@ -1240,7 +1179,6 @@ tests       = [
 ]
 breaks_when = "押せる条件を「予約があること」へ戻す（実行レポート：戻すとこの1本が落ちる）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/手元の新しい版をGUIだけで効かせる"
 behavior    = "生きたカードが1枚でもある場合は入れ替えを断り、force を付けたときだけ落とす"
@@ -1250,7 +1188,6 @@ tests       = [
 ]
 breaks_when = "installed_binary が実在を確かめずにパスを返す形へ戻す（実行レポート：この形だと門が 409 を返してこの1本が落ちた）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/手元の新しい版をGUIだけで効かせる"
 behavior    = "走っている版と次に起こす版が違うときは、2つを別々に出す"
@@ -1260,7 +1197,6 @@ tests       = [
 ]
 breaks_when = "走っている版を保管庫の行から探す形へ戻す（実行レポート：戻すとこの1本が落ちる）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/枠とカードをドラッグで並べ替えダブルクリックで開く"
 behavior    = "並べ替えを頼まれたときは、丸ごと受け取って0から番号を詰め直す"
@@ -1271,7 +1207,6 @@ tests       = [
 ]
 breaks_when = "受け取った並びのうち動いたものだけを更新し、詰め直しをやめる"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/枠とカードをドラッグで並べ替えダブルクリックで開く"
 behavior    = "同じ向きへ続けて動かしても、運んでいる最中に掴みが解けない"
@@ -1281,7 +1216,6 @@ tests       = [
 ]
 breaks_when = "運んでいる間に DOM を並べ替えるようにする（掴んでいるノードが差し直される）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/構造化ビューでメッセージの改行が反映されない"
 behavior    = "行が空いていなくても、ブラウザの画面で改行が改行として見える"
@@ -1291,7 +1225,6 @@ tests       = [
 ]
 breaks_when = "素の改行を break へ変える段を外す（木の段を外すと画面まで届かなくなる）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/構造化ビューでメッセージの改行が反映されない"
 behavior    = "行を空けていない本文でも、素の改行が改行として木に現れる"
@@ -1303,7 +1236,6 @@ tests       = [
 ]
 breaks_when = "markdown.ts の、素の改行を break へ変える段を外す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/構造化ビューを開いたら最新のところから見せる"
 behavior    = "構造化ビューを開いたときも、別のページから戻ってきたときも、いちばん下から見せる"
@@ -1315,7 +1247,6 @@ tests       = [
 ]
 breaks_when = "TranscriptTree の初回描画で末尾へ寄せる処理を外し、anchorTo の指定だけに戻す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/構造化ビューを開いたら最新のところから見せる"
 behavior    = "遡っている最中に履歴が増えても、見ている位置へ引き戻されない"
@@ -1325,7 +1256,6 @@ tests       = [
 ]
 breaks_when = "末尾に居るかどうかを見ずに、追記のたび末尾へ寄せるようにする"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/権限確認省略モードでセッションを立ち上げる機能"
 behavior    = "全承認スキップで起こしたときは、確認の問いに自動で答える"
@@ -1335,7 +1265,6 @@ tests       = [
 ]
 breaks_when = "全承認スキップのときに確認へ自動で答える処理を外す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/版が切り替わったらタブを自動で読み直す"
 behavior    = "版が変わったあとでも、押さずにタブが自分で読み直す。ただし添付を抱えたタブは読み直さずバナーを出す"
@@ -1347,7 +1276,6 @@ tests       = [
 ]
 breaks_when = "composerBusy の門を無視して、版が変われば常に読み直す形にする"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/細かい修正_2026-0903"
 behavior    = "大きい丸ボタンを使うときも、外が 40px で中の絵が 20px に保たれる"
@@ -1357,7 +1285,6 @@ tests       = [
 ]
 breaks_when = "icon-xl の中の絵を 16px へ戻す（実行レポート ⛳壊し方：この1本が落ちる）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/細かい修正_2026-0903"
 behavior    = "製品コードへ絵文字を足したときは、台帳と実物が食い違ったことが分かる"
@@ -1367,7 +1294,6 @@ tests       = [
 ]
 breaks_when = "製品コードへ絵文字を1つ足す（実行レポート ⛳壊し方：この1本が落ちる）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/細かい修正_2026-0905"
 behavior    = "カードを復旧したあとでも、一覧の中で元の位置へ戻る"
@@ -1377,7 +1303,6 @@ tests       = [
 ]
 breaks_when = "復旧のときに並び順の値を作り直す形へ戻す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/終わった claude がゾンビのまま溜まり続ける"
 behavior    = "前から溜まっていた場合でも、終わった claude をゾンビのまま残さず引き取る"
@@ -1388,7 +1313,6 @@ tests       = [
 ]
 breaks_when = "children.rs の引き取りの呼び出しを外す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/表示できるテキストの上限を3MBへ上げる"
 behavior    = "上限いっぱいの大きさのときでも、テキストが線を往復して届く"
@@ -1399,7 +1323,6 @@ tests       = [
 ]
 breaks_when = "守りの3行を外す（実行レポートの記録：当てると前2本が落ち、3本目は逆側を見張るものなので通ったまま）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/表示できるテキストの上限を3MBへ上げる"
 behavior    = "上限の内側のときは、これまでどおり整形して表示を始める"
@@ -1410,7 +1333,6 @@ tests       = [
 ]
 breaks_when = "kind === markdown の条件を外す（実行レポートの記録：当てるとこの1本だけが落ちた）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/読み込まれた瞬間に、いちばん下まで送れなくなる"
 behavior    = "横に広い画像を添えたときでも、構造化ビューが横へはみ出さない"
@@ -1420,7 +1342,6 @@ tests       = [
 ]
 breaks_when = "構造化ビューの画像へ当てている max-width を外す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/選択を解くつもりのタップで、画面を飛ばさない"
 behavior    = "何かを選んでいるときに同格でないものを触ったら、画面へ飛ばずに選択を解く"
@@ -1430,7 +1351,6 @@ tests       = [
 ]
 breaks_when = "press.ts の single から clear の分岐を外し、open と select の2分岐へ戻す"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/電源ボタンで起こし直すと、ターミナルがリロードするまで描かれない"
 behavior    = "写しで生死を種付けしても、線を張り直す側が消すので当てにしない"
@@ -1440,7 +1360,6 @@ tests       = [
 ]
 breaks_when = "applySessionSnapshot で alive を種付けする案Aを入れ直す（resubscribe が消すので効かない）"
 verified    = true
-
 [[entry]]
 issue       = "クローズ/電源ボタンで起こし直すと、ターミナルがリロードするまで描かれない"
 behavior    = "止まっていたカードが動き出したときは、線を張り直さずに端末と履歴を出し直す"
@@ -1453,7 +1372,6 @@ tests       = [
 ]
 breaks_when = "ws.ts の noteLiveness の呼び出し2行を外す（実行レポートの記録：当てると追加8件のうちこの4件が落ちた）"
 verified    = false
-
 [[entry]]
 issue       = "クローズ/電源ボタンで起こし直すと、ターミナルがリロードするまで描かれない"
 behavior    = "起こし直したあとでも、タブを読み直さずに端末へ文字が出る"
@@ -1463,7 +1381,6 @@ tests       = [
 ]
 breaks_when = "ws.ts の noteRefusal から 断られた への登録を外す（受信の文字が最後まで現れず落ちることを実測した）"
 verified    = true
-
 [[entry]]
 issue       = "クローズ/電源ボタンで起こし直すと、ターミナルがリロードするまで描かれない"
 behavior    = "起こし直しの最中に購読を断られたあとでも、次に状態が動いたときに出し直して端末を描き直す"
