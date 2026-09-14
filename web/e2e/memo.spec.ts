@@ -221,6 +221,68 @@ test('マークダウン記法が、打ったそばから見た目になる', as
   await expect(本文.locator('h1')).toHaveText('見出しになるはず', { timeout: 30_000 })
 })
 
+/*
+  **表は、空のセルでも中身のあるセルと同じ大きさで出る。**
+
+  # なぜ単体テストではなく、ここに置くのか
+
+  **jsdom は CSS を1バイトも当てない。** `memo.css` の中身を文字列として照合する
+  検査は単体テストにも在るが、**あれが確かめているのは「その字が書いてあること」
+  だけ**で、**規則が実際に効いたかは何も言っていない**。現に、列を等分する規則は
+  文字列の検査を通ったまま、**行の高さが揃っていない状態で配られた**（利用者の
+  報告・2026-09-14）。**本物の描画器で測らないと、この種の抜けは捕まらない。**
+
+  # なぜ表を差し込んで測るのか
+
+  編集欄から表を作る道は記法の変換に依っており、**そちらが変わると、確かめたい
+  ものと関係の無い理由で落ちる**。ここで守りたいのは**CSS の規則が効くこと**
+  なので、**実際に描かれたメモ本文の中へ表を入れて測る**——祖先も読み込まれた
+  スタイルシートも本物のまま、表だけを用意する形にしてある。
+*/
+test('表は、空のセルも中身のあるセルと同じ高さで出る', async ({ page }) => {
+  await openDashboard(page)
+  const { tile } = await メモを書けるセッション(page)
+  await openSession(page, tile)
+
+  const 面 = await セッションのメモを開く(page)
+  await 打つ(page, 面, '表の高さを見る')
+  await page.keyboard.press('Control+Enter')
+  const 本文 = 面.getByTestId('memo-body')
+  await expect(本文).toContainText('表の高さを見る', { timeout: 30_000 })
+
+  const 測定 = await 本文.first().evaluate((host) => {
+    const 仮 = document.createElement('div')
+    仮.innerHTML =
+      '<table><tbody>' +
+      '<tr><td>あ</td><td></td></tr>' +
+      '<tr><td></td><td></td></tr>' +
+      '<tr><td>とても長い文章を入れて折り返させる。とても長い文章を入れて折り返させる。とても長い文章を入れて折り返させる。</td><td></td></tr>' +
+      '</tbody></table>'
+    host.appendChild(仮)
+    const 表 = 仮.querySelector('table')!
+    const 行 = [...表.querySelectorAll('tr')].map((tr) => tr.getBoundingClientRect().height)
+    const 列 = [...表.querySelectorAll('tr')[0].children].map(
+      (td) => td.getBoundingClientRect().width,
+    )
+    仮.remove()
+    return { 一行の行たち: [行[0], 行[1]], 折り返す行: 行[2], 列 }
+  })
+
+  // **空だけが縮まない。** 中身のある行と、空だけの行が同じ高さになる
+  const [中身あり, 空だけ] = 測定.一行の行たち
+  expect(空だけ, `空の行が ${空だけ}px、中身のある行が ${中身あり}px で揃っていない`).toBeCloseTo(
+    中身あり,
+    1,
+  )
+
+  // **最小値であって上限ではない。** 折り返す行は伸びたままである
+  expect(測定.折り返す行).toBeGreaterThan(中身あり)
+
+  // **列も等分のまま**（こちらが戻ると、元の「空白カラムだけ細い」に逆戻りする）
+  const [左, 右] = 測定.列
+  expect(右, `列が ${左}px と ${右}px で等分になっていない`).toBeCloseTo(左, 1)
+})
+
 test('直して確定すると時刻が更新されて一番下へ移る。変えずに確定したら動かない', async ({
   page,
 }) => {

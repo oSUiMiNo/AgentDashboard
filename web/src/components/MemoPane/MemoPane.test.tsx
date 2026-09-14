@@ -730,4 +730,35 @@ describe('置き場所の作法（利用者の報告・2026-09-14）', () => {
     // `display: block` のままでは `table-layout` も `width` も効かない
     expect(中身).toMatch(/display:\s*table/)
   })
+
+  it('表は、空のセルも1行ぶんの高さを保つ', () => {
+    /*
+      **列を等分しただけでは、同じ気持ち悪さが行に残る。** 空の行は中身の高さが
+      ゼロなので、余白ぶんの細い帯になる（実測：中身のある行 29.4px に対し 9.4px）。
+
+      **ここで確かめられるのは「その字が書いてあること」だけである。** 効いたかは
+      実ブラウザでしか測れないので、**本物の見張りは `e2e/memo.spec.ts` に在る**
+      ——現に、列の規則はこの形の検査を通ったまま、行が揃わない状態で配られた。
+    */
+    /*
+      **注釈を先に落とす。** 規則の中に置いた説明文には、その規則の字がそのまま
+      引用されている——**落とさずに照合すると、宣言ではなく説明文に当たって、
+      宣言を消しても素通りする**（実際に踏んだ）。
+    */
+    const css = readFileSync(resolve(process.cwd(), 'src/memo.css'), 'utf8').replace(
+      /\/\*[\s\S]*?\*\//g,
+      '',
+    )
+    const 規則 = css.match(
+      /\.memo-bubble\s+\.prose-dashboard\s+th,\s*\.memo-bubble\s+\.prose-dashboard\s+td\s*\{([^}]*)\}/,
+    )
+    expect(規則, 'メモの吹き出しに限ったセルの規則が無い').not.toBeNull()
+    const 中身 = 規則?.[1] ?? ''
+    // セルの `height` は上限ではなく最小値なので、中身が増えれば伸びる
+    expect(中身).toMatch(/height:\s*1lh/)
+    // 全体が border-box なので、戻さないと余白が高さに食い込んで揃わない
+    expect(中身).toMatch(/box-sizing:\s*content-box/)
+    // 等分した列は横へ逃げられない（繰る道を捨てた）ので、長い語はどこででも折る
+    expect(中身).toMatch(/overflow-wrap:\s*anywhere/)
+  })
 })
