@@ -1416,6 +1416,147 @@ fn 台帳は約束どおり() {
     );
 }
 
+/// 約束が**本当に発火するか**を、1つずつわざと破って確かめる。
+///
+/// # なぜ要るのか
+///
+/// 台帳の行が全部正しければ [`約束破り`] は空を返す。**つまり緑は「約束が効いている」を
+/// 意味しない**——約束を1本まるごと消しても、台帳が正しい限り緑のままである。
+///
+/// これはこのイシューグループが問題にしている形そのもの（在るだけで効かない見張り）
+/// なので、**見張りの側にも見張りを置く**。
+///
+/// # 土台が正しいことを先に主張する
+///
+/// 合成した見本が最初から違反していると、**どの変異も「落ちた」になって何も確かめない。**
+/// だから見本そのものが0件であることを先に assert する。
+#[test]
+fn 約束はわざと破ると落ちる() {
+    let 走査結果 = 全走査();
+
+    // 実在する行を見本にする。**作り話の行だと、実在しないファイルを指した時点で
+    // 別の約束が先に鳴ってしまい、狙った約束を確かめられない。**
+    let 見本 = || Entry {
+        issue: "クローズ/電源ボタンで起こし直すと、ターミナルがリロードするまで描かれない"
+            .to_string(),
+        behavior: "起こし直しの最中に購読を断られたあとでも、次に状態が動いたときに出し直す"
+            .to_string(),
+        gate: "unit".to_string(),
+        tests: vec![テスト {
+            file: "web/src/stores/ws.test.ts".to_string(),
+            name: "起こし直しで購読を断られたら、次の状態変化でもう一度出す".to_string(),
+        }],
+        manual_check: None,
+        breaks_when: "ws.ts の noteRefusal から 断られた への登録を外す".to_string(),
+        verified: true,
+        retired_by: None,
+    };
+
+    assert!(
+        約束破り(&[見本()], &走査結果).is_empty(),
+        "見本そのものが約束を破っています。これでは、どの変異も落ちてしまい何も確かめられません"
+    );
+
+    // (名前, その行をどう壊すか, 出てほしいメッセージの断片)
+    let 変異: Vec<(&str, Box<dyn Fn(&mut Entry)>, &str)> = vec![
+        (
+            "約束2：breaks_when が逃げ文句",
+            Box::new(|e: &mut Entry| e.breaks_when = "不要".to_string()),
+            "breaks_when が中身を持っていません",
+        ),
+        (
+            "約束2：behavior が短すぎる",
+            Box::new(|e: &mut Entry| e.behavior = "短い".to_string()),
+            "behavior が中身を持っていません",
+        ),
+        (
+            "約束3：条件語が無い",
+            Box::new(|e: &mut Entry| e.behavior = "購読を出し直すようにする".to_string()),
+            "「どの条件で」が書かれていません",
+        ),
+        (
+            "約束4：知らない門",
+            Box::new(|e: &mut Entry| e.gate = "なにか".to_string()),
+            "gate は",
+        ),
+        (
+            "約束4：門がパスと食い違う",
+            Box::new(|e: &mut Entry| e.gate = "e2e".to_string()),
+            "で走ります",
+        ),
+        (
+            "約束5：ファイルが無い",
+            Box::new(|e: &mut Entry| {
+                e.tests[0].file = "web/src/stores/ありえない.test.ts".to_string()
+            }),
+            "が在りません",
+        ),
+        (
+            "約束6と9：名前が無く、覆した側も名指ししていない",
+            Box::new(|e: &mut Entry| {
+                e.tests[0].name = "ぜったいに存在しないテストの名前".to_string()
+            }),
+            "retired.by に覆した側のイシューを書くこと",
+        ),
+        (
+            "約束7：飛ばしているテストを指している",
+            Box::new(|e: &mut Entry| {
+                e.tests[0] = テスト {
+                    file: "server/crates/core/tests/real_cli.rs".to_string(),
+                    name: "ヘッドレスで起動するとフックが届き必須フィールドが揃う".to_string(),
+                }
+            }),
+            "飛ばしているテストは守っていません",
+        ),
+        (
+            "約束8：manual なのに確かめ方が無い",
+            Box::new(|e: &mut Entry| {
+                e.gate = "manual".to_string();
+                e.tests.clear();
+            }),
+            "manual_check",
+        ),
+        (
+            "約束8：manual でないのにテストが1本も無い",
+            Box::new(|e: &mut Entry| e.tests.clear()),
+            "tests",
+        ),
+        (
+            "約束12：同じ名前が2本あるテストを指している",
+            Box::new(|e: &mut Entry| {
+                e.tests[0] = テスト {
+                    file: "web/src/lib/press.test.ts".to_string(),
+                    name: "選べない箱も、選択中は解くだけ".to_string(),
+                }
+            }),
+            "本あります",
+        ),
+    ];
+
+    for (名前, 壊す, 断片) in 変異 {
+        let mut e = 見本();
+        壊す(&mut e);
+        let 破り = 約束破り(&[e], &走査結果);
+        assert!(
+            破り.iter().any(|m| m.contains(断片)),
+            "{名前} を破ったのに、その約束が鳴りませんでした。\
+             **約束が効いていません。** 出たのは: {破り:?}"
+        );
+    }
+
+    // 並び順は1行では破れないので、2行にして入れ替える
+    let mut 上 = 見本();
+    上.behavior = "あ".repeat(20);
+    let mut 下 = 見本();
+    下.behavior = "ん".repeat(20);
+    assert!(
+        約束破り(&[下, 上], &走査結果)
+            .iter()
+            .any(|m| m.contains("並びが崩れています")),
+        "約束11：並び順を崩したのに鳴りませんでした"
+    );
+}
+
 #[test]
 fn 守られている数を数える() {
     let (_, entries) = 台帳();
