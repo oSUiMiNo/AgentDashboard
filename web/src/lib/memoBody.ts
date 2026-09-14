@@ -87,3 +87,75 @@ function ブロックらしいか(one: unknown): boolean {
 export function sameMemoBody(a: MemoBody, b: MemoBody): boolean {
   return a.markdown === b.markdown && JSON.stringify(a.blocks) === JSON.stringify(b.blocks)
 }
+
+/**
+ * 確定した本文の中から、**画像の幅**を引く（利用者の報告・2026-09-14
+ * 「編集画面で画像幅を変えても、確定済みのビューを見ると常に横幅いっぱいに
+ * 表示されている」）。
+ *
+ * # なぜ表示側で引くのか
+ *
+ * **幅は落ちていない。落としているのは Markdown への変換である。**
+ * ブロックエディタは `props.previewWidth` に幅を持っている（実測した記録に
+ * `197` `246` `185` `163` が入っていた）が、確定のときに通す
+ * `blocksToMarkdownLossy` は——**名前のとおり**——`![alt](url)` しか書けない。
+ * Markdown の画像記法に幅の置き場が無いからである。
+ *
+ * そして描く側は幅を知らないまま `<img>` を出すので、**元の大きさのまま**
+ * 面に載る。スクリーンショットは面より大きいので、`max-width: 100%` に当たって
+ * **必ず横幅いっぱいになる**——「常に」と見えていたのはこれである。
+ *
+ * # 記録を書き換える道は採らなかった
+ *
+ * Markdown の側へ幅を埋め込む手もあるが、**それでは既に書かれたメモが直らない**
+ * ——書き直すまで幅が戻らない。[`MemoBody`] は `blocks` も一緒に持っている
+ * （この模組の冒頭に理由がある）ので、**表示のたびにそちらから引けば、
+ * 昔のメモもその場で直る。**
+ *
+ * # 鍵は URL
+ *
+ * 画像1枚ごとに別の置き場所（`/api/memo-blobs/<UUID>`）が振られるので、
+ * **同じ URL が2枚を指すことはない。** 同じ絵を2回貼っても、運ばれた先は別になる。
+ *
+ * **読めないものは黙って飛ばす。** ここも「1件が読めないことより、全部が消える
+ * ことのほうが悪い」——幅が引けなければ、幅が無かったときと同じに描けばよい。
+ */
+export function 画像の幅(blocks: unknown[]): Map<string, number> {
+  const 表 = new Map<string, number>()
+  集める(blocks, 表)
+  return 表
+}
+
+/**
+ * **入れ子も見る。** 画像は箇条書きの項目の下など、`children` の側にも置ける。
+ * 最上位だけ見ると、そこに置いた1枚だけ幅が戻らない——**直った絵と直らない絵が
+ * 混ざるほうが、全部直らないより分かりにくい。**
+ */
+function 集める(blocks: unknown[], 表: Map<string, number>): void {
+  for (const one of blocks) {
+    if (typeof one !== 'object' || one === null) {
+      continue
+    }
+    const ブロック = one as { type?: unknown; props?: unknown; children?: unknown }
+    if (Array.isArray(ブロック.children)) {
+      集める(ブロック.children, 表)
+    }
+    if (ブロック.type !== 'image') {
+      continue
+    }
+    const props = ブロック.props
+    if (typeof props !== 'object' || props === null) {
+      continue
+    }
+    const { url, previewWidth } = props as { url?: unknown; previewWidth?: unknown }
+    // **幅を変えていない画像には `previewWidth` が入っていない**（実測）。
+    // そのときは元のまま描く＝いままでどおりで正しい
+    if (typeof url !== 'string' || url === '') {
+      continue
+    }
+    if (typeof previewWidth !== 'number' || !Number.isFinite(previewWidth) || previewWidth <= 0) {
+      continue
+    }
+    表.set(url, previewWidth)
+  }
+}
