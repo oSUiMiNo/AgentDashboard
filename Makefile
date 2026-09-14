@@ -7,6 +7,10 @@
 
 SHELL := /bin/bash
 CARGO := ./scripts/cargo
+# **docker の外で走る重い仕事を、あとで返せる箱の中で走らせる包み。**
+# web のビルドと検査・e2e はホストでそのまま走るので `/docker` cgroup を通らず、
+# 返す口（scripts/reclaim-cache）が届かない。`cd web &&` の後ろから呼ぶので絶対パス。
+BOX := $(CURDIR)/scripts/in-build-cgroup
 # scripts/cargo の IMAGE_TAG と必ず揃えること（食い違うと作ったイメージが使われない）
 DOCKER_IMAGE := agentdashboard-rust:1.97.1-2
 RELEASE_BIN := server/target/release/agentdashboard
@@ -60,7 +64,7 @@ test-rust: ## Rust テスト（コンテナ内・nextest でテスト毎にプ�
 	$(CARGO) nextest run
 
 test-web: ## web の単体テスト（Vitest）
-	cd web && npm run test
+	cd web && $(BOX) npm run test
 
 # 本物の claude を相手にする統合テスト（テスト計画フェーズ4）。
 # ビルドはコンテナ、実行はホスト。認証情報をコンテナへ渡さずに済ませるための分担で、
@@ -96,8 +100,9 @@ e2e-compose: build build-debug ## サーバ2台＋PostgreSQL＋Valkey をブラ�
 # `-w 3600` は、前の走行が固まったときに永久に待たないため。待ちきれなければ
 # `make` が落ちるので、黙って詰まるより気づける。
 # 鍵はカーネルが持つので、**持ち主が死ねば自動で外れる**（消し忘れで詰まらない）。
+# **包みは `flock` の内側に置く。** 鍵を待っている間ずっと箱の住人でいることにならない。
 e2e: build-web build-debug ## E2E テスト（Playwright / chromium・実サーバに接続）
-	cd web && flock -w 3600 /tmp/agentdashboard-e2e.lock npm run e2e
+	cd web && flock -w 3600 /tmp/agentdashboard-e2e.lock $(BOX) npm run e2e
 
 build-debug: ## core をデバッグビルドする（E2E が使うバイナリ）
 	$(CARGO) build
@@ -126,8 +131,8 @@ lint-rust: ## rustfmt の差分チェックと clippy
 	$(CARGO) clippy --all-targets --all-features -- -D warnings
 
 lint-web: ## 型チェックと oxlint
-	cd web && npx tsc -b
-	cd web && npm run lint
+	cd web && $(BOX) npx tsc -b
+	cd web && $(BOX) npm run lint
 
 fmt: ## Rust の書式を自動整形する
 	$(CARGO) fmt --all
@@ -137,7 +142,7 @@ fmt: ## Rust の書式を自動整形する
 build: build-web build-server ## 単一バイナリを作る（web ビルド → rust-embed 同梱）
 
 build-web: ## フロントエンドを web/dist へビルドする
-	cd web && npm run build
+	cd web && $(BOX) npm run build
 
 # 配布物を手元で1つだけ実際に作る（セルフホスト化設計§14-3）。
 #

@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+# docker の外で走る重い仕事を、**あとで返せる箱の中で**走らせるための包み。
+#
+# **`scripts/cargo` が返せるのは `/docker` cgroup のぶんだけである。** web のビルドと検査
+# （`npx tsc -b`・oxlint・vitest）と e2e はホストでそのまま走るので、**ルート cgroup**に
+# 積まれる。そしてルート cgroup は**機械全体**なので、狙って返すと走っている claude と
+# ダッシュボード自身の熱いキャッシュまで巻き込む——`/proc/sys/vm/drop_caches` と同じ害に
+# なるため、禁じてある。**返すには先に「返せる箱の中で走らせる」が要る。**
+#
+# 実測（2026-09-14 11:20）では、返す口が効いている 80 分の間にルート cgroup が
+# 2.90 GB → 9.93 GiB まで育っていた。**育っていたのは、届かない側だった。**
+#
+# 使い方:
+#   scripts/in-build-cgroup <命令と引数...>
+#
+# **PID を受ける引数は作っていない。** 書くのは常に自分の `$$` だけである——PID を外から
+# 受ける口は、ダッシュボードや claude を間違って箱へ入れられる口でもある。
+#
+# ## この機械に何が残るか（起こし直しで全部消える）
+# 箱を作るとき、docker で root になって次の**2ファイルだけ**の持ち主を利用者に変える。
+#   /sys/fs/cgroup/agentdashboard-build/cgroup.procs   … 箱へ自分を入れるため
+#   /sys/fs/cgroup/cgroup.procs                        … cgroup v2 は**移動元と移動先の
+#                                                         共通の祖先**への書き込み権を要求する
+# **`chown -R` はしない。** まとめて変えると `cgroup.freeze` や `memory.max` まで書けるように
+# なり、書き間違い1つで箱の中身が凍る。**`chmod` もしない**（他人には開けない）。
+# **上限（`memory.max` / `memory.high`）は付けない**——付けると中のビルドが OOM で殺される。
+#
+# どちらも `/sys/fs/cgroup` の上にしかないので、**`wsl --shutdown` で全部消える。**
+# 手で戻すなら docker 経由で（root が要る）：
+#   docker run --rm -v /sys/fs/cgroup:/hostcg:rw agentdashboard-rust:1.97.1-2 \
+#       sh -c 'rmdir /hostcg/agentdashboard-build; chown root:root /hostcg/cgroup.procs'
+#
+# 挙動は次の 4 つで変えられる（`AGENTDASHBOARD_CARGO_*` は**このラッパー自身の制御**の
+# 名前空間で、コンテナへは持ち込まれない。scripts/cargo と scripts/reclaim-cache の
+# 決まりに合わせてある）。
+#   AGENTDASHBOARD_CARGO_CGROUP           0 で箱を使わない（既定 1）
+#   AGENTDASHBOARD_CARGO_CGROUP_ROOT      /sys/fs/cgroup の場所（既定 /sys/fs/cgroup・検査用）
+#   AGENTDASHBOARD_CARGO_WSL_MARKER       WSL の目印（既定 /run/WSL・検査用）
+#   AGENTDASHBOARD_CARGO_RECLAIM_TARGET   返す口へ渡す置き場所（既定 server/target・検査用）
+set -euo pipefail
+
+if [ $# -eq 0 ]; then
+    echo "エラー: 走らせる命令を指定してください（例: scripts/in-build-cgroup npm run build）" >&2
+    exit 1
+fi
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BOX_NAME="agentdashboard-build"
+IMAGE_TAG="agentdashboard-rust:1.97.1-2"
+
+CGROUP_ENABLED="${AGENTDASHBOARD_CARGO_CGROUP:-1}"
+CGROUP_ROOT="${AGENTDASHBOARD_CARGO_CGROUP_ROOT:-}"
+WSL_MARKER="${AGENTDASHBOARD_CARGO_WSL_MARKER:-/run/WSL}"
+RECLAIM_TARGET="${AGENTDASHBOARD_CARGO_RECLAIM_TARGET:-server/target}"
+case "${RECLAIM_TARGET}" in
+    /*) ;;
+    *) RECLAIM_TARGET="${REPO_ROOT}/${RECLAIM_TARGET}" ;;
+esac
+
+# **根を差し替えられたかどうかを覚えておく。** 差し替えられているなら docker を起こさない
+# ——`docker run` は `/sys/fs/cgroup` を持ち込むので、偽の木を指したつもりで**本物を叩く**
+# ことになる（設計§6-2）。
+CGROUP_ROOT_OVERRIDDEN=0
+if [ -n "${CGROUP_ROOT}" ]; then
+    CGROUP_ROOT_OVERRIDDEN=1
+else
+    CGROUP_ROOT="/sys/fs/cgroup"
+fi
+BOX_DIR="${CGROUP_ROOT}/${BOX_NAME}"
+
+# **標準出力へは何も書かない。** 命令の出力へ混ざると、出力を読んでいる別の仕組みを壊す
+# （ガイドライン「ログを残すとき」）。置き場所がまだ無ければファイルへは書かない——
+# web だけを走らせるときに server/target を作るのは筋が違う。
+記録() {
+    if [ -d "${RECLAIM_TARGET}" ]; then
+        printf '%s\t%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" \
+            >>"${RECLAIM_TARGET}/.build-cgroup.log" 2>/dev/null || true
+    fi
+    printf 'in-build-cgroup: %s\n' "$1" >&2
+}
+
+# 箱へ入る。**何が起きても 0 で返る**——箱は「返せるようにする」ための道具であって、
+# 箱が無いからビルドが落ちるのは本末転倒である（要件 §直すこと 2）。
+箱へ入る() {
+    if [ "${CGROUP_ENABLED}" = "0" ]; then
+        記録 "見送り	AGENTDASHBOARD_CARGO_CGROUP=0 で止めてある"
+        return 0
+    fi
+
+    # **WSL の中でだけ効かせる。** GitHub Actions の CI も Linux で cgroup v2 を持つので、
+    # 機械の形だけで判定すると**箱を作りに行って毎回失敗する**。ここは静かに抜ける——
+    # WSL でない機械では飛ばすのが普通であって、異常ではない。
+    if [ ! -e "${WSL_MARKER}" ]; then
+        return 0
+    fi
+
+    # 偽の木を指されているときは、そこに何があるか承知のうえなので検査しない。
+    if [ "${CGROUP_ROOT_OVERRIDDEN}" -eq 0 ] \
+        && [ "$(stat -fc %T "${CGROUP_ROOT}" 2>/dev/null || echo unknown)" != "cgroup2fs" ]; then
+        記録 "見送り	cgroup v2 ではない"
+        return 0
+    fi
+
+    # **親が既に入っていれば、子は継ぐ。** make の入れ子でここを何度も通っても、
+    # docker が起きるのは最初の1回だけになる。
+    if [ "$(cat /proc/self/cgroup 2>/dev/null || true)" = "0::/${BOX_NAME}" ]; then
+        return 0
+    fi
+
+    # **「箱が在るか」ではなく「2つの cgroup.procs が書けるか」で見る。** 箱が在っても
+    # 持ち主が戻っていれば移せないので、書けるかどうかが正しい問いである。
+    if [ ! -w "${BOX_DIR}/cgroup.procs" ] || [ ! -w "${CGROUP_ROOT}/cgroup.procs" ]; then
+        if ! 箱を作る; then
+            return 0
+        fi
+    fi
+
+    if printf '%s\n' "$$" >"${BOX_DIR}/cgroup.procs" 2>/dev/null; then
+        記録 "箱へ移った	${BOX_NAME}"
+    else
+        記録 "移れなかった	${BOX_DIR}/cgroup.procs へ書けない（このまま走らせる）"
+    fi
+    return 0
+}
+
+箱を作る() {
+    # 偽の木なら自分のものなので、そのまま作れる。持ち主を変える必要も無い。
+    if [ "${CGROUP_ROOT_OVERRIDDEN}" -eq 1 ]; then
+        mkdir -p "${BOX_DIR}" 2>/dev/null || return 1
+        [ -e "${BOX_DIR}/cgroup.procs" ] || : >"${BOX_DIR}/cgroup.procs"
+        [ -e "${CGROUP_ROOT}/cgroup.procs" ] || : >"${CGROUP_ROOT}/cgroup.procs"
+        記録 "箱を作った	${BOX_DIR}"
+        return 0
+    fi
+
+    # 「docker が無い」と「cgroup に書けない」を同じ文言へ潰さないため、既存の入口を通す。
+    if ! "${REPO_ROOT}/scripts/require-docker" 2>/dev/null; then
+        記録 "見送り	docker が呼べない"
+        return 1
+    fi
+    if ! docker image inspect "${IMAGE_TAG}" >/dev/null 2>&1; then
+        記録 "見送り	${IMAGE_TAG} が無い（make setup-rust がまだ）"
+        return 1
+    fi
+
+    # **root が要る。** `sudo` はパスワードを聞くので自動化と両立しない。docker で uid 0 に
+    # なる——**`--user` を渡さない**ことが肝で、**`--privileged` は要らない**（cgroup を rw で
+    # 持ち込み、uid 0 で書くだけで通ることを実測で確かめてある）。箱は `scripts/cargo` と
+    # 同じイメージで作る（新しいイメージを引いてこないため）。
+    if ! docker run --rm \
+        --volume /sys/fs/cgroup:/hostcg:rw \
+        "${IMAGE_TAG}" \
+        sh -c "mkdir -p /hostcg/${BOX_NAME} \
+            && chown $(id -u):$(id -g) /hostcg/${BOX_NAME}/cgroup.procs \
+            && chown $(id -u):$(id -g) /hostcg/cgroup.procs" >/dev/null 2>&1; then
+        記録 "見送り	箱を作れなかった（${BOX_DIR}）"
+        return 1
+    fi
+    記録 "箱を作った	${BOX_DIR}"
+    return 0
+}
+
+箱へ入る
+
+# **終了コードを退避する。** 返す口を後ろに足したせいで命令の失敗が 0 に化けると、
+# `make ci` が失敗を見逃す（`scripts/cargo` と同じ約束）。
+set +e
+"$@"
+STATUS=$?
+set -e
+
+# **ビルドが残したページキャッシュを、育ちすぎたときだけ返す。** 返す規則の本体は
+# `scripts/reclaim-cache` だけが持つ——ここには書かない。返す口の不調で命令が失敗扱いに
+# なってはならないので、結果は通す。
+"${REPO_ROOT}/scripts/reclaim-cache" "${RECLAIM_TARGET}" || true
+
+exit "${STATUS}"
