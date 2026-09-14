@@ -374,6 +374,13 @@ pub async fn serve_server(
     // 乗り換えの印を消す（CICD設計§11）。**サーバモードでも同じ**——PTY は持たないが、
     // 版を切り替えられる主体であることは変わらない
     session_host_core::version::confirm_started(&config.agent().resolved_state_dir());
+    // **縮小の印も拾う**（設計§4-1）。サーバモードで縮小は起きないが、**片方だけに
+    // 置くとサーバモードで起動したとき印が永久に残る**——次にローカルで起きたとき、
+    // 前回のものを今回の結果として読んでしまう
+    session_host_core::compact::settle_compact(
+        &config.agent().resolved_state_dir(),
+        config.compact().result_path.as_deref(),
+    );
     tokio::spawn(watch_updates(
         config.agent().resolved_state_dir(),
         move || {
@@ -613,6 +620,13 @@ pub async fn serve(config: Config, config_arg: Option<std::path::PathBuf>) -> an
     // **待ち受けを確保できた時点で、乗り換えの印を消す**（CICD設計§11）。ここより後ろへ
     // ずらすと、印を消す前に落ちる隙間が広がる
     session_host_core::version::confirm_started(&agent_config.resolved_state_dir());
+    // **待ち受けを確保できたここで、縮小の結果も確定させる**（設計§4-1）。`boot.rs`
+    // へ置けないのは、あそこがログの初期化より前に走るからである——`kind=compact_done`
+    // を出しても、どこにも残らない
+    session_host_core::compact::settle_compact(
+        &agent_config.resolved_state_dir(),
+        config.compact().result_path.as_deref(),
+    );
     tokio::spawn(watch_updates(
         agent_config.resolved_state_dir(),
         move || {

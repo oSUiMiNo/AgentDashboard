@@ -676,6 +676,178 @@ pub fn 印を書いてから撃つ(
     }
 }
 
+// ---------------------------------------------------------------------------
+// 起き直った側（設計§4）
+
+/// 台本（`docs/service/compact-wsl.ps1`）が残す1行 JSON。
+///
+/// # 数値の欄が全部 [`Option`] である理由
+///
+/// 台本は**結果の入れ物を先に組んで `finally` で書く**作りなので、**測る前に倒れた欄は
+/// `null` のまま出る**。ここを `u64` で受けると `serde_json` がその行ごと弾き、
+/// **いちばん理由を知りたい回——倒れた回——の結果だけが読めなくなる。**
+///
+/// フェーズ0 で BOM について踏んだのと同じ形である。**壊れた回の記録が読めないのが
+/// いちばん困る**ので、欄が欠けていても読めるほうへ倒す。
+///
+/// **時刻を [`String`] で受けるのも同じ理由。** `serde` に解釈させると、読めない綴りが
+/// 1つ来ただけで構造体ごと落ちる。読むのは [`時刻を読む`] の仕事にして、読めなければ
+/// その欄だけ諦める。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CompactResult {
+    /// 縮小が最後まで進んだか。**成否はこれだけで決める**（`woke` では決めない）。
+    pub ok: bool,
+    pub started_at: Option<String>,
+    /// 終わった時刻。**印の時刻と比べて新旧を決める。**
+    pub finished_at: Option<String>,
+    pub c_before_bytes: Option<u64>,
+    pub c_after_bytes: Option<u64>,
+    pub ext4_before_bytes: Option<u64>,
+    pub ext4_after_bytes: Option<u64>,
+    pub docker_before_bytes: Option<u64>,
+    pub docker_after_bytes: Option<u64>,
+    /// WSL を起こし直せたか。**記録には載せるが、成否の判定には使わない**——台本は
+    /// 「起こせなくても `ok` は真のまま」と決めている。
+    pub woke: bool,
+    pub reason: Option<String>,
+}
+
+/// 起き直ったときに何が分かったか。**記録に出す中身そのもの。**
+///
+/// 返り値にしているのは、テストが**記録の中身を確かめられる**ようにするためである。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettleOutcome {
+    /// 縮小が走り、結果も読めた。
+    Done(Box<CompactResult>),
+    /// 縮小の結果を確定できなかった。**理由は必ず載る。**
+    Failed(String),
+}
+
+/// バイトを GiB へ。**切り捨て。**
+///
+/// 丸めるのは読む側の仕事である（設計§5-2 は「バイトで書く」と決めている）。
+/// `compact_start` の `slack_gb` と**同じ丸め方**にしてあるので、前後を並べて比べられる。
+///
+/// **測れなかった欄は `-1`。** `0` にすると「測れなかった」と「本当に空き0」が同じ
+/// 見た目になり、記録を読んだ人が区別できない。
+fn gib(bytes: Option<u64>) -> i64 {
+    match bytes {
+        Some(value) => (value / GIB) as i64,
+        None => -1,
+    }
+}
+
+/// 結果が印より新しいか。**純関数。ファイルの更新時刻は見ない。**
+///
+/// # なぜ更新時刻で判定しないのか
+///
+/// 結果は `/mnt/c` 越しに置かれる。**Windows と Linux で時計の基準も粒度も違う**ので、
+/// あの更新時刻は当てにならない。**印に書いた時刻と、台本が書いた `finished_at` だけ**で
+/// 決める。
+///
+/// **どちらかが読めなければ「古い」側へ倒す。** 判断できないときに新しいほうへ倒すと、
+/// **前回の成功を今回の成功として記録する**——このフェーズで唯一の「嘘の記録」が
+/// そこから出る。
+pub fn 結果は印より新しいか(
+    attempt_at: Option<SystemTime>,
+    finished_at: Option<SystemTime>,
+) -> bool {
+    match (attempt_at, finished_at) {
+        (Some(撃った), Some(終わった)) => 終わった >= 撃った,
+        _ => false,
+    }
+}
+
+/// 結果 JSON を読む。**[`crate::jsonfile::load_or_default`] を使わない。**
+///
+/// あちらは「読めなければ既定値」なので、**無いことと壊れていることが同じ答えになる**。
+/// ここでは5つの分岐のうち2つがその区別に懸かっているので、自分で読んで理由を書き分ける。
+fn 結果を読む(path: Option<&Path>) -> Result<CompactResult, String> {
+    let Some(path) = path else {
+        return Err("結果の置き場所が設定されていない".to_string());
+    };
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err("台本の記録が見つからない".to_string());
+        }
+        Err(err) => return Err(format!("台本の記録を読めない：{err}")),
+    };
+    // **BOM は台本側で付けないようにしてある**（フェーズ0）が、念のため落とす。
+    // 付いていたときに理由が「JSON として読めない」としか出ず、詰まるのを防ぐ。
+    let text = text.trim_start_matches('\u{feff}');
+    serde_json::from_str(text).map_err(|err| format!("台本の記録が JSON として読めない：{err}"))
+}
+
+/// 印と結果から結末を決める（設計§4-2 の5つの分岐）。
+///
+/// # 順序に意味がある
+///
+/// **「印より古いか」を「`ok=false` か」より先に見る。** 逆にすると、古い結果の
+/// `ok=true` を今回の成功として記録してしまう。他の失敗枝は「記録が出ない」で済むが、
+/// **この枝だけは嘘の成功が記録に残り、読んだ人が信じる。**
+fn 結末を決める(attempt: &CompactAttempt, result_path: Option<&Path>) -> SettleOutcome {
+    let result = match 結果を読む(result_path) {
+        Ok(result) => result,
+        Err(why) => return SettleOutcome::Failed(why),
+    };
+    let 終わった = result.finished_at.as_deref().and_then(時刻を読む);
+    if !結果は印より新しいか(attempt.at, 終わった) {
+        return SettleOutcome::Failed("台本の記録が印より古い（前回のもの）".to_string());
+    }
+    if !result.ok {
+        let why = result
+            .reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+            .unwrap_or("台本が理由を書いていない");
+        return SettleOutcome::Failed(why.to_string());
+    }
+    SettleOutcome::Done(Box::new(result))
+}
+
+/// 起き直った側が、Windows の残した結果を記録へ移す（設計§4）。
+///
+/// **印が無ければ何もしない。** 縮小を撃っていない普通の起動では、この関数はファイルを
+/// 1つ見て帰るだけである。
+///
+/// # なぜ起動のたびに呼ぶのか
+///
+/// 撃った本人は `wsl --shutdown` で死ぬので、**結果を自分では受け取れない**。印
+/// （`compact-attempt`）が残っていることだけが「前回の起動で縮小を撃った」証拠で、
+/// **それを拾えるのは次に起きた者しかいない。**
+///
+/// # どの枝でも印は消える
+///
+/// [`take_attempt`] が読んだ時点で消すので、**分岐の中に「消す」を書かない**——構造で
+/// 保証されている。消し忘れると、次の起動でも同じ記録が出続ける。
+pub fn settle_compact(state_dir: &Path, result_path: Option<&Path>) -> Option<SettleOutcome> {
+    let attempt = take_attempt(state_dir)?;
+    let outcome = 結末を決める(&attempt, result_path);
+    match &outcome {
+        SettleOutcome::Done(result) => tracing::info!(
+            kind = "compact_done",
+            slack_before_gb = gib(Some(attempt.slack_bytes)),
+            c_before_gb = gib(result.c_before_bytes),
+            c_after_gb = gib(result.c_after_bytes),
+            ext4_before_gb = gib(result.ext4_before_bytes),
+            ext4_after_gb = gib(result.ext4_after_bytes),
+            docker_before_gb = gib(result.docker_before_bytes),
+            docker_after_gb = gib(result.docker_after_bytes),
+            woke = result.woke,
+            "縮小が終わりました"
+        ),
+        SettleOutcome::Failed(reason) => tracing::warn!(
+            kind = "compact_failed",
+            reason = %reason,
+            "縮小の結果を確定できませんでした"
+        ),
+    }
+    Some(outcome)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1219,5 +1391,325 @@ mod tests {
             None,
             "紀元前の期限に意味は無い"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // 起き直った側（設計§4）
+
+    /// 撃った時刻。テストの基準点。
+    fn 撃った時刻() -> SystemTime {
+        時刻を読む("2026-09-15T02:00:00Z").expect("読めること")
+    }
+
+    /// 印を置く。
+    fn 印を置く(dir: &Path, at: Option<SystemTime>) {
+        write_attempt(
+            dir,
+            &CompactAttempt {
+                at,
+                slack_bytes: 68 * GIB,
+            },
+        );
+    }
+
+    /// 結果 JSON を置いて、そのパスを返す。
+    fn 結果を置く(dir: &Path, json: &str) -> PathBuf {
+        let path = dir.join("compact-result.json");
+        std::fs::write(&path, json).expect("書けること");
+        path
+    }
+
+    /// 成功した回の結果（すべての欄が埋まっている）。
+    fn 成功の結果(finished: &str) -> String {
+        format!(
+            r#"{{"ok":true,"started_at":"2026-09-15T02:00:11Z","finished_at":"{finished}",
+               "c_before_bytes":22467641344,"c_after_bytes":124302397440,
+               "ext4_before_bytes":320335773696,"ext4_after_bytes":247000000000,
+               "docker_before_bytes":38312869888,"docker_after_bytes":30000000000,
+               "woke":true,"reason":null}}"#
+        )
+        .replace('\n', "")
+    }
+
+    #[test]
+    fn 印が無ければ起き直りは何もしない() {
+        // **普通の起動はここで帰る。** 縮小を撃っていないのに記録が出ると、
+        // 起こすたびに読まれない行が増える
+        let dir = 捨てるフォルダ::作る();
+        assert_eq!(settle_compact(dir.path(), None), None);
+    }
+
+    #[test]
+    fn 結果が新しければ前後の量ごと成功が残る() {
+        let dir = 捨てるフォルダ::作る();
+        印を置く(dir.path(), Some(撃った時刻()));
+        let path = 結果を置く(dir.path(), &成功の結果("2026-09-15T02:19:48Z"));
+
+        let 結末 = settle_compact(dir.path(), Some(&path)).expect("印が在るので何か返る");
+
+        let SettleOutcome::Done(result) = 結末 else {
+            panic!("成功のはず: {結末:?}");
+        };
+        assert_eq!(result.c_before_bytes, Some(22_467_641_344));
+        assert_eq!(result.c_after_bytes, Some(124_302_397_440));
+        assert!(result.woke);
+    }
+
+    #[test]
+    fn 結果が印より古ければ前回のものとして退ける() {
+        // **このフェーズで唯一の「嘘の記録」を止める枝。** 他の失敗枝は「記録が
+        // 出ない」で済むが、ここだけは**前回の成功を今回の成功として残す**——
+        // 記録を読んだ人が信じてしまう
+        let dir = 捨てるフォルダ::作る();
+        印を置く(dir.path(), Some(撃った時刻()));
+        // 撃つより前に終わっている＝前回のもの
+        let path = 結果を置く(dir.path(), &成功の結果("2026-09-14T09:53:00Z"));
+
+        let 結末 = settle_compact(dir.path(), Some(&path)).expect("印が在る");
+
+        assert_eq!(
+            結末,
+            SettleOutcome::Failed("台本の記録が印より古い（前回のもの）".to_string()),
+            "古い ok=true を成功として記録してはいけない"
+        );
+    }
+
+    #[test]
+    fn 古い結果は台本の理由より先に前回のものとして退ける() {
+        // **順序そのものを見る唯一のテスト。**
+        //
+        // 「古い」と「ok=false」が両方あてはまる回で、どちらを先に見るかが分かれる。
+        // `ok` を先に見ると、**前回の失敗理由を今回の理由として記録する**——読んだ人は
+        // 具体的な理由が書いてあるので信じるが、それは別の回の話である。
+        //
+        // 古い側を先に見れば「前回のものだ」と正しく言える。**上の
+        // `結果が印より古ければ…` は ok=true なのでどちらの順序でも通る**ので、
+        // この1本が無いと順序は1つも守られない（実際に入れ替えて確かめた）。
+        let dir = 捨てるフォルダ::作る();
+        印を置く(dir.path(), Some(撃った時刻()));
+        let path = 結果を置く(
+            dir.path(),
+            r#"{"ok":false,"finished_at":"2026-09-14T09:53:00Z","reason":"前回ここで倒れた"}"#,
+        );
+
+        assert_eq!(
+            settle_compact(dir.path(), Some(&path)),
+            Some(SettleOutcome::Failed(
+                "台本の記録が印より古い（前回のもの）".to_string()
+            )),
+            "前回の理由を今回の理由として記録してはいけない"
+        );
+    }
+
+    #[test]
+    fn 結果が無ければ見つからないと記録する() {
+        let dir = 捨てるフォルダ::作る();
+        印を置く(dir.path(), Some(撃った時刻()));
+        let path = dir.path().join("どこにも無い.json");
+
+        assert_eq!(
+            settle_compact(dir.path(), Some(&path)),
+            Some(SettleOutcome::Failed(
+                "台本の記録が見つからない".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn 結果の置き場所が無ければその理由が残る() {
+        // 「見つからない」と「そもそも設定されていない」は別の困りごとである
+        let dir = 捨てるフォルダ::作る();
+        印を置く(dir.path(), Some(撃った時刻()));
+
+        assert_eq!(
+            settle_compact(dir.path(), None),
+            Some(SettleOutcome::Failed(
+                "結果の置き場所が設定されていない".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn 台本が失敗を書いていればその理由が残る() {
+        let dir = 捨てるフォルダ::作る();
+        印を置く(dir.path(), Some(撃った時刻()));
+        let path = 結果を置く(
+            dir.path(),
+            r#"{"ok":false,"finished_at":"2026-09-15T02:05:00Z","reason":"90 秒待っても Running が消えなかった"}"#,
+        );
+
+        assert_eq!(
+            settle_compact(dir.path(), Some(&path)),
+            Some(SettleOutcome::Failed(
+                "90 秒待っても Running が消えなかった".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn 台本が理由を書いていなくても空欄では残さない() {
+        // 理由が空の compact_failed が残ると、読んだ人は何も分からない
+        let dir = 捨てるフォルダ::作る();
+        印を置く(dir.path(), Some(撃った時刻()));
+        let path = 結果を置く(
+            dir.path(),
+            r#"{"ok":false,"finished_at":"2026-09-15T02:05:00Z","reason":"   "}"#,
+        );
+
+        assert_eq!(
+            settle_compact(dir.path(), Some(&path)),
+            Some(SettleOutcome::Failed(
+                "台本が理由を書いていない".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn 結果の数値が空でも読める() {
+        // **倒れた回ほど理由を知りたい。** 台本は入れ物を先に組んで finally で書くので、
+        // 測る前に倒れた欄は null のまま出る。u64 で受けると serde がその行ごと弾き、
+        // **いちばん読みたい回だけが読めなくなる**（フェーズ0 の BOM と同じ形）
+        let dir = 捨てるフォルダ::作る();
+        印を置く(dir.path(), Some(撃った時刻()));
+        let path = 結果を置く(
+            dir.path(),
+            r#"{"ok":false,"started_at":"2026-09-15T02:00:01Z","finished_at":"2026-09-15T02:00:30Z",
+                "c_before_bytes":null,"c_after_bytes":null,
+                "ext4_before_bytes":null,"ext4_after_bytes":null,
+                "docker_before_bytes":null,"docker_after_bytes":null,
+                "woke":false,"reason":"最後まで進まなかった"}"#,
+        );
+
+        assert_eq!(
+            settle_compact(dir.path(), Some(&path)),
+            Some(SettleOutcome::Failed("最後まで進まなかった".to_string())),
+            "null の欄があっても読めること"
+        );
+    }
+
+    #[test]
+    fn 壊れた結果は見つからないと区別して残す() {
+        // load_or_default を使うと「無い」と「壊れている」が同じ答えになる
+        let dir = 捨てるフォルダ::作る();
+        印を置く(dir.path(), Some(撃った時刻()));
+        let path = 結果を置く(dir.path(), "{壊れている");
+
+        let 結末 = settle_compact(dir.path(), Some(&path)).expect("印が在る");
+        let SettleOutcome::Failed(why) = 結末 else {
+            panic!("失敗のはず");
+        };
+        assert!(
+            why.contains("JSON として読めない"),
+            "「見つからない」と区別できること: {why}"
+        );
+    }
+
+    #[test]
+    fn どの枝でも印は消える() {
+        // 消し忘れると、次の起動でも同じ記録が出続ける
+        let dir = 捨てるフォルダ::作る();
+        let 良い結果 = 成功の結果("2026-09-15T02:19:48Z");
+        let 枝: [(&str, Option<&str>); 5] = [
+            ("結果なし", None),
+            ("壊れている", Some("{壊れている")),
+            ("古い", Some(&成功の結果("2026-09-14T09:53:00Z"))),
+            (
+                "ok=false",
+                Some(r#"{"ok":false,"finished_at":"2026-09-15T02:05:00Z","reason":"だめ"}"#),
+            ),
+            ("成功", Some(&良い結果)),
+        ];
+        for (名前, json) in 枝 {
+            印を置く(dir.path(), Some(撃った時刻()));
+            let path = json.map(|json| 結果を置く(dir.path(), json));
+            let _ = settle_compact(dir.path(), path.as_deref());
+            assert!(
+                !attempt_path(dir.path()).is_file(),
+                "{名前} の枝で印が残った"
+            );
+        }
+    }
+
+    #[test]
+    fn 新旧の判定はファイルの更新時刻を見ない() {
+        // /mnt/c 越しの更新時刻は当てにならない。印の時刻と finished_at だけで決める
+        let 撃った = 撃った時刻();
+        let 後 = 撃った + Duration::from_secs(600);
+        let 前 = 撃った - Duration::from_secs(600);
+
+        assert!(結果は印より新しいか(Some(撃った), Some(後)));
+        assert!(
+            結果は印より新しいか(Some(撃った), Some(撃った)),
+            "同時刻は新しい側"
+        );
+        assert!(!結果は印より新しいか(Some(撃った), Some(前)));
+        // **読めないときは古い側へ倒す。** 判断できないのに新しいほうへ倒すと、
+        // 嘘の成功が残る
+        assert!(
+            !結果は印より新しいか(Some(撃った), None),
+            "終了時刻が読めない"
+        );
+        assert!(!結果は印より新しいか(None, Some(後)), "印の時刻が読めない");
+        assert!(!結果は印より新しいか(None, None));
+    }
+
+    #[test]
+    fn 測れなかった量は0と区別して残る() {
+        // 0 にすると「測れなかった」と「本当に空き0」が同じ見た目になる
+        assert_eq!(gib(Some(68 * GIB)), 68);
+        assert_eq!(gib(Some(0)), 0);
+        assert_eq!(gib(None), -1);
+    }
+
+    /// 記録の綴りそのものを確かめる。
+    ///
+    /// **返り値のテストでは `kind` の綴りを守れない**——`compact_done` を打ち間違えても
+    /// 返り値は変わらないので、全部緑のまま通る。**後から記録を読む道（`agentdashboard
+    /// logs --grep 'kind=compact'`）が、綴り1つで丸ごと空振りする。**
+    mod 記録に出る綴り {
+        use super::*;
+        use crate::logging::capture;
+
+        #[test]
+        fn 成功はcompact_doneとして残る() {
+            let dir = 捨てるフォルダ::作る();
+            印を置く(dir.path(), Some(撃った時刻()));
+            let path = 結果を置く(dir.path(), &成功の結果("2026-09-15T02:19:48Z"));
+
+            let sink = capture::sink();
+            let mark = sink.mark();
+            let _ = settle_compact(dir.path(), Some(&path));
+
+            let lines = sink.matching(mark, "kind", "compact_done");
+            assert_eq!(lines.len(), 1, "{lines:#?}");
+            assert_eq!(lines[0]["c_after_gb"], 115, "前後の量が載ること");
+            assert_eq!(lines[0]["woke"], true);
+        }
+
+        #[test]
+        fn 失敗はcompact_failedとして理由ごと残る() {
+            let dir = 捨てるフォルダ::作る();
+            印を置く(dir.path(), Some(撃った時刻()));
+
+            let sink = capture::sink();
+            let mark = sink.mark();
+            let _ = settle_compact(dir.path(), None);
+
+            let lines = sink.matching(mark, "kind", "compact_failed");
+            assert_eq!(lines.len(), 1, "{lines:#?}");
+            assert_eq!(lines[0]["reason"], "結果の置き場所が設定されていない");
+        }
+
+        #[test]
+        fn 印が無ければ行は1つも出ない() {
+            let dir = 捨てるフォルダ::作る();
+            let sink = capture::sink();
+            let mark = sink.mark();
+
+            assert_eq!(settle_compact(dir.path(), None), None);
+
+            assert!(sink.matching(mark, "kind", "compact_done").is_empty());
+            assert!(sink.matching(mark, "kind", "compact_failed").is_empty());
+        }
     }
 }
