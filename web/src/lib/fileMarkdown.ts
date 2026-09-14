@@ -53,17 +53,23 @@ export function parseFileMarkdown(source: string): Root {
 }
 
 export function safeMarkdownUrl(value: string): boolean {
-  const compact = value.replace(/[\s\x00-\x1f\x7f]/g, '')
+  const compact = Array.from(value)
+    .filter((character) => character.charCodeAt(0) > 32 && character.charCodeAt(0) !== 127 && !/\s/u.test(character))
+    .join('')
   const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(compact)
   return scheme === null || /^(https?|mailto|tel)$/i.test(scheme[1] ?? '')
 }
 
-function protectedSyntax(node: MarkdownNode): boolean {
+function protectedSyntax(node: MarkdownNode, refs: Map<string, MarkdownNode>): boolean {
+  if (node.type === 'linkReference' || node.type === 'imageReference') {
+    const reference = refs.get((node.identifier ?? '').toLowerCase())
+    if (reference && !safeMarkdownUrl(reference.url ?? '')) return true
+  }
   if (node.type === 'html') return !/^(?:\s*<br\s*\/?\s*>\s*)+$/i.test(node.value ?? '')
   if (!supportedNodes.has(node.type)) return true
   if (node.type === 'code' && node.meta) return true
   if ((node.type === 'image' || node.type === 'link') && !safeMarkdownUrl(node.url ?? '')) return true
-  return node.children?.some(protectedSyntax) ?? false
+  return node.children?.some((child) => protectedSyntax(child, refs)) ?? false
 }
 
 function definitions(tree: Root): Map<string, MarkdownNode> {
@@ -152,7 +158,7 @@ export class MarkdownSource {
         raw,
         gap: index === tree.children.length - 1 ? '' : source.slice(end, tree.children[index + 1]?.position?.start.offset),
         type: node.type,
-        protected: protectedSyntax(node as MarkdownNode) || node.type === 'html',
+        protected: protectedSyntax(node as MarkdownNode, this.refs) || node.type === 'html',
         pinned: index === 0 && ['yaml', 'toml'].includes(node.type),
         spacer: node.type === 'html' && /^(?:\s*<br\s*\/?\s*>\s*)+$/i.test(raw),
       }
@@ -233,6 +239,7 @@ export class MarkdownSource {
       return normalized
     })
     let output = this.prefix
+    if (this.initialNodes.length === 0 && /[\t ]$/.test(output)) output += this.newline
     for (let index = 0; index < nodes.length; index++) {
       if (index > 0) {
         const previous = this.originals.get(nodes[index - 1]!.attrs.sourceId as string)

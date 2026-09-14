@@ -47,6 +47,8 @@ describe('Markdownの原文保持', () => {
   it.each([
     '', '  \r\n\r\n', '# 日本語\n\n本文です。', '﻿# 見出し\r\n\r\n段落\r\n',
     '見出し\n=======\n\n* そのまま\n* 残す\n',
+    '5. 最初\n5. 次\n9. 最後\n',
+    '1. 一つ目\n\n2. 二つ目\n\n   続きの段落\n',
     '---\ntitle: 試験\n---\n\n# 本文\n\n<!-- 保持 -->\n\n<br/>\n<br/>\n\n次の段落\n',
     '~~~typescript\nconst value = "```"\n~~~\n\n[参照][link]\n\n[link]: https://example.com "例"\n',
     '| 列1 | 列2 |\n| :--- | ---: |\n| 値 | a\\|b |\n\n- [x] 済み\n- [ ] まだ\n',
@@ -55,6 +57,23 @@ describe('Markdownの原文保持', () => {
     const { text, changed } = await open(source)
     expect(text()).toBe(source)
     expect(changed).not.toHaveBeenCalled()
+  })
+
+  it.each(['    ', '\t', '\r\n    '])('空白だけの文書にも入力できる：%j', async (source) => {
+    const { view, text } = await open(source)
+    view.dispatch(view.state.tr.insertText('本文', 1))
+    expect(view.state.doc.textContent).toBe('本文')
+    expect(text()).toContain('本文')
+    undo(view.state, view.dispatch)
+    expect(text()).toBe(source)
+  })
+
+  it.each(['[リンク][danger]', '![画像][danger]'])('参照形式でも危険なURLを初期描画しない：%s', async (reference) => {
+    const source = `${reference}\n\n[danger]: javascript:alert(1)\n`
+    const { view, text } = await open(source)
+    expect(view.dom.querySelector('a[href], img[src]')).toBeNull()
+    expect(view.state.doc.firstChild!.type.name).toBe('markdown_source')
+    expect(text()).toBe(source)
   })
 
   it('主要ブロックは原文保護に逃げず編集ノードになる', async () => {
