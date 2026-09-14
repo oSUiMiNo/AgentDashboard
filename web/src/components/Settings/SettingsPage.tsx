@@ -35,6 +35,7 @@ import type { MotionQuiet } from '@/stores/settings'
 import { RateLimitWindows } from '@/components/RateLimits/RateLimitWindows'
 import { AboutCard } from '@/components/Settings/AboutCard'
 import { FileModesCard } from '@/components/Settings/FileModesCard'
+import { MachineCard } from '@/components/Settings/MachineCard'
 import { PortableSettingsCard } from '@/components/Settings/PortableSettingsCard'
 import { WritableRootsCard } from '@/components/Settings/WritableRootsCard'
 import { VersionsCard } from '@/components/Settings/VersionsCard'
@@ -394,6 +395,8 @@ export function SettingsPage() {
       <WritableRootsCard />
 
       <FileModesCard />
+
+      <MachineCard />
 
       <div className="border-border flex flex-col gap-2 rounded-xl border p-4">
         <h3 className="text-sm font-medium">この CLI が受け付けるモード</h3>
