@@ -59,7 +59,7 @@
 #
 # ## 
 
-min_entries = 123
+min_entries = 130
 
 [[entry]]
 issue       = "イシューグループ_2026-0821-1953/セッションごとにも全体にも自分用のメモを残せるようにする"
@@ -260,6 +260,80 @@ tests       = [
   { file = "web/src/lib/press.test.ts", name = "「解くだけ」の状態でも、長押しは選べる（これが1動作の選び直し）" },
 ]
 breaks_when = "press.ts の、別の種類を押したらそちらへ選び直す分岐へ戻す"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/PJT画面の横スクロールをどこからでも効かせる"
+behavior    = "PJT 専用画面で、アプリの帯・レールより下の余白・画面いちばん上の余白の上にカーソルがあるときも、横ホイールでセッションのレールが横へ送られる"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/rail-pan.spec.ts", name = "アプリの帯の上で横へ回すと、レールが動く" },
+  { file = "web/e2e/rail-pan.spec.ts", name = "レールより下の余白の上で横へ回すと、レールが動く" },
+  { file = "web/e2e/rail-pan.spec.ts", name = "画面いちばん上の余白の上で横へ回すと、レールが動く" },
+]
+breaks_when = "useRailPan の購読先を、画面の外枠（Shell が持つ main）から group-view の section へ戻す。帯も余白も section の外側（帯は兄弟・余白は親のパディング）なので、キャプチャ段で張っても子孫のイベントしか通らず、この3本だけが落ちる。**web の単体テストは54本すべて緑のまま通るので、単体では原理的に捕まらない。**"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/PJT画面の横スクロールをどこからでも効かせる"
+behavior    = "Shift を押しながら縦へ回したとき、スクロールバックがまだ無い端末でも、claude へ矢印キーが飛ばない"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/rail-pan.spec.ts", name = "Shift ＋ 縦回しで、claude へ矢印キーが飛ばない" },
+]
+breaks_when = "TerminalPane の attachCustomWheelEventHandler を外すか、false を返す条件から shiftKey を落とす。xterm はスクロールバックが無いあいだ deltaY を矢印キーへ換えて claude へ送るので、起こした直後のセッションで選択肢が勝手に動く。**出力が溜まった端末では再現しないため、テストは起こした直後に何も打たずに測る。**"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/PJT画面の横スクロールをどこからでも効かせる"
+behavior    = "Shift を押しながら縦へ回したときも、レールが横へ送られる"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/rail-pan.spec.ts", name = "Shift ＋ 縦回しでも、レールが動く" },
+]
+breaks_when = "railPan の畳み込みから shiftKey の枝を落とす。ブラウザは Shift ＋ 縦を deltaX ではなく deltaY ＋ shiftKey で届けるので、deltaX だけを見ていると送り量が 0 になる"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/PJT画面の横スクロールをどこからでも効かせる"
+behavior    = "セッションの区画の中で中ボタンをドラッグしたときレールが動き、区画の外（レールの余白）では動かない"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/rail-pan.spec.ts", name = "区画の中で中ドラッグすると、レールが動く" },
+  { file = "web/e2e/rail-pan.spec.ts", name = "区画の外では、中ドラッグが効かない" },
+]
+breaks_when = "useRailPan の中ドラッグから closest('[data-testid=\"session-view\"]') の名指しを外す。区画の外でも掴めるようになり、要件の「各セッションの区画の中なら、どこでも（画面全体ではない）」に反する"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/PJT画面の横スクロールをどこからでも効かせる"
+behavior    = "入力欄の上で中ボタンのドラッグをしても、レールは動かない"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/rail-pan.spec.ts", name = "入力欄の上では、中ドラッグで動かない" },
+]
+breaks_when = "useRailPan の掴む判定から isTextEntry の枝を落とす。入力欄では Linux の中クリック貼り付けを優先するという既決の判断が消える（端末の中だけは、その中クリック貼り付けを止める側が要件なので順序が逆になる）"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/PJT画面の横スクロールをどこからでも効かせる"
+behavior    = "生テキストの上で横へ回したとき、レールは動かず、内側の器が横へ動く"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/rail-pan.spec.ts", name = "生テキストの上では、レールは動かない" },
+]
+breaks_when = "useRailPan の「内側に横スクロールできる要素があれば譲る」判定（scrollWidth > clientWidth かつ overflowX が auto か scroll）を外す。外側が全子孫からホイールを奪い、内側で読むはずのものが読めなくなる"
+verified    = false
+
+[[entry]]
+issue       = "クローズ/PJT画面の横スクロールをどこからでも効かせる"
+behavior    = "端末の上にカーソルがあるとき、横ホイールはレールを動かし、端末の中身は動かない"
+gate        = "e2e"
+tests       = [
+  { file = "web/e2e/rail-pan.spec.ts", name = "端末の上で横へ回すと、レールが動く" },
+  { file = "web/e2e/rail-pan.spec.ts", name = "端末の上で横へ回しても、端末の中身は動かない" },
+]
+breaks_when = "useRailPan の購読をキャプチャ段からバブル段へ戻すか、passive: false を外す。端末を包む箱は overflowX: auto を意図的に持ち cols:120 固定で必ず横に溢れるので、先に preventDefault しないと端末とレールが二重に動く"
 verified    = false
 
 [[entry]]
