@@ -331,6 +331,10 @@ async fn 満ちない待ちは時間切れの三で終わる() {
 /// ローカルモードでは実体が居るあいだ必ず `agent_connected` が立つので、記録へ直に
 /// 1枚置いて倒す。**サーバを畳んで起こし直す形は `restart.rs` が持っている**ので、
 /// ここでは「CLI が何をするか」だけに絞る。
+///
+/// **渡したセッションはここで落ちる。** 抜け殻とは「実体が居ないカード」なので、
+/// 実体を生かしたまま `agent_connected = false` だけ偽ると、本物の報告とのあいだで
+/// 競りになる（下記）。呼び出し側が後片付けでもう一度 `kill()` しても害は無い。
 async fn 抜け殻を1枚(
     server: &TestServer,
     session: &std::sync::Arc<session_host_core::session::Session>,
@@ -339,13 +343,36 @@ async fn 抜け殻を1枚(
     let listed = server
         .wait_for_listed("1枚出る", |listed| !listed.is_empty())
         .await;
-    let mut 抜け殻 = listed
+    let card_id = listed
         .into_iter()
         .find(|meta| meta.card_id.to_string() == card)
-        .expect("いま起こしたカードが居ること");
+        .expect("いま起こしたカードが居ること")
+        .card_id;
+
+    // **偽の状態を置く前に、本物を黙らせる。**
+    //
+    // 実体が生きているあいだは本物の報告が流れ続けるので、`claude_session_id` を
+    // 置いた直後に `None` で上書きされる。**`revivable()` が一瞬しか真にならない**ので、
+    // 並列度が上がると呼び戻しが間に合わない——2026-09-14 に実際に落ちた。
+    // `--test-threads 1` では隠れるので、**直列で通ることを確認材料にしない**こと。
+    //
+    // 先に落として `Ended` を見てから置けば、上書きする側がもう居ない。
+    session.kill();
+    let listed = server
+        .wait_for_listed("実体が終わる", |listed| {
+            listed.iter().any(|meta| {
+                meta.card_id == card_id
+                    && matches!(meta.status, protocol::SessionStatus::Ended { .. })
+            })
+        })
+        .await;
+
+    let mut 抜け殻 = listed
+        .into_iter()
+        .find(|meta| meta.card_id == card_id)
+        .expect("落としたカードが居ること");
     抜け殻.claude_session_id = Some(protocol::ClaudeSessionId::new());
     抜け殻.agent_connected = false;
-    let card_id = 抜け殻.card_id;
     server
         .registry
         .apply(
