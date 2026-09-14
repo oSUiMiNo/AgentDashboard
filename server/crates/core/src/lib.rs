@@ -638,6 +638,20 @@ pub async fn serve(config: Config, config_arg: Option<std::path::PathBuf>) -> an
             }
         },
     ));
+    // **静かなときの自動は、ローカルモードにだけ生やす**（設計§7）。縮小は機械に効く
+    // 操作で、サーバは機械を持たない。
+    //
+    // **口（`compact_api::routes`）が両モードに在るのとは違う。** あちらは「remote は
+    // どうなるのか」に台帳で答えるために、断る道ごと両方へ置いてある。見回りに同じ
+    // 理屈は当てはまらない——サーバモードで回しても、縮める相手が無い
+    tokio::spawn(compact_api::watch_compact(compact_api::CompactApiState {
+        state_dir: agent_config.resolved_state_dir(),
+        cfg: config.compact(),
+        quiet: Arc::new(session_host_core::compact::RealQuiet),
+        slack: Arc::new(session_host_core::compact::RealSlack),
+        launcher: Arc::new(session_host_core::compact::RealLauncher),
+        registry: Some(Arc::clone(&server.registry)),
+    }));
     let address = listener.local_addr()?;
 
     tracing::info!("AgentDashboard を起動しました: http://{address}");

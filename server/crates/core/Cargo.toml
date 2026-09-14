@@ -32,6 +32,9 @@ clap.workspace = true
 tokio.workspace = true
 axum.workspace = true
 tracing.workspace = true
+# 自動の見回りはアカウントを名指しできない（HTTP の身元が無い）ので、ローカルの
+# 1つ（`server_core::db::LOCAL_ACCOUNT_ID`）を渡す。その型を書くためだけに要る
+uuid.workspace = true
 # CLI がダッシュボードを叩く HTTP の1往復（CLI設計§6-1）。ブラウザと同じ席に座る側
 # なので、置き場所はサーバ側でも PC 側でもなくここになる（CLI設計§2-1）。
 # 接続プールは持たない——1回の呼び出しで「繋ぐ→送る→切る」を閉じる（CLI設計§1-2）

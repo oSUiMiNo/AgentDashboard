@@ -516,6 +516,30 @@ pub fn 静かさを進める(state: &mut CompactState, 静か: bool, now: System
     }
 }
 
+/// 見送りを記録に残すか。**純関数。**
+///
+/// 自動の見回りは5分ごとなので、見送るたびに書くと**1日 288 行**になる。読む人が
+/// 埋もれるだけなので、**理由が変わったとき**と、**前回から1日経ったとき**だけ残す。
+///
+/// # 鍵にするのは [`Blocker::理由の名前`] であって [`Blocker::言い分`] ではない
+///
+/// 言い分は `"生きたセッションが 3 本あります"` のように**数が入った文**を返す。これを
+/// 鍵にすると、**枚数が1枚変わるたびに「理由が変わった」と判定されて毎回書かれる**——
+/// 間引いているつもりで、間引けていない形になる。記録の本文には言い分を出してよい。
+pub fn 見送りを残すか(last: Option<&LastSkip>, reason: &str, now: SystemTime) -> bool {
+    let Some(last) = last else {
+        // 初めての見送り。これは残す
+        return true;
+    };
+    if last.reason != reason {
+        return true;
+    }
+    // **時計が巻き戻っていたら残す側へ倒す。** 記録が増えるだけで害が無い
+    now.duration_since(last.at)
+        .map(|経過| 経過.as_secs() >= 24 * 3600)
+        .unwrap_or(true)
+}
+
 // ---------------------------------------------------------------------------
 // Windows のタスクを起こす口
 
@@ -823,8 +847,24 @@ fn 結末を決める(attempt: &CompactAttempt, result_path: Option<&Path>) -> S
 ///
 /// [`take_attempt`] が読んだ時点で消すので、**分岐の中に「消す」を書かない**——構造で
 /// 保証されている。消し忘れると、次の起動でも同じ記録が出続ける。
+///
+/// # 「最後に打った時刻」はここでも埋める
+///
+/// 撃った側（`記録して撃つ`）も書くが、**撃った直後に機械が落ちるので、書き終える前に
+/// 死ぬことがある**。そのまま起き直ると「最後に打った時刻」が空のままになり、間隔の
+/// 判定（[`Blocker::TooSoon`]）が効かず、**次の見回りでまた撃つ**。
+///
+/// 印は**撃つ前に必ず書かれていて、撃った時刻を持っている**ので、ここで埋め直せる。
 pub fn settle_compact(state_dir: &Path, result_path: Option<&Path>) -> Option<SettleOutcome> {
     let attempt = take_attempt(state_dir)?;
+    if let Some(at) = attempt.at {
+        let mut remembered = load_state(state_dir);
+        // **前へ戻さない。** 撃った後に別の経路が新しい時刻を書いていたら、そちらが正しい
+        if remembered.last_compact.is_none_or(|前| 前 < at) {
+            remembered.last_compact = Some(at);
+            save_state(state_dir, &remembered);
+        }
+    }
     let outcome = 結末を決める(&attempt, result_path);
     match &outcome {
         SettleOutcome::Done(result) => tracing::info!(
@@ -1167,6 +1207,85 @@ mod tests {
         // 1つでも増えたら消す
         静かさを進める(&mut state, false, now + Duration::from_secs(700));
         assert_eq!(state.quiet_since, None, "うるさくなったら消す");
+    }
+
+    #[test]
+    fn 同じ理由の見送りは一日に一度しか残さない() {
+        let now = SystemTime::now();
+        let 前 = LastSkip {
+            reason: "生きたカード".to_string(),
+            at: now,
+        };
+
+        // 初めては残す
+        assert!(
+            見送りを残すか(None, "生きたカード", now),
+            "初めての見送りが残らない"
+        );
+
+        // 同じ理由で5分後・1時間後・23時間後は残さない（5分ごとに書くと1日 288 行になる）
+        for 秒 in [300, 3600, 23 * 3600] {
+            assert!(
+                !見送りを残すか(Some(&前), "生きたカード", now + Duration::from_secs(秒)),
+                "{秒} 秒後に同じ理由が残ってしまった"
+            );
+        }
+
+        // 1日経てば残す
+        assert!(
+            見送りを残すか(
+                Some(&前),
+                "生きたカード",
+                now + Duration::from_secs(24 * 3600)
+            ),
+            "1日経っても残らない"
+        );
+    }
+
+    #[test]
+    fn 理由が変わればその場で見送りを残す() {
+        let now = SystemTime::now();
+        let 前 = LastSkip {
+            reason: "生きたカード".to_string(),
+            at: now,
+        };
+        assert!(
+            見送りを残すか(Some(&前), "自動が切ってある", now + Duration::from_secs(1)),
+            "理由が変わったのに残らない"
+        );
+    }
+
+    #[test]
+    fn 見送りの鍵に言い分を使うと間引けなくなる() {
+        // **これは実装の取り違えを見張る検査である。**
+        //
+        // `理由の名前()` は札（枚数を含まない）、`言い分()` は文（枚数を含む）。鍵に
+        // 言い分を選ぶと、**枚数が1枚変わるだけで「理由が変わった」になり毎回書かれる**。
+        // ここでその差を固定しておく。
+        let 三枚 = Blocker::AliveCards(3);
+        let 四枚 = Blocker::AliveCards(4);
+
+        assert_eq!(
+            三枚.理由の名前(),
+            四枚.理由の名前(),
+            "枚数が違うだけで札まで変わっては、間引きが効かない"
+        );
+        assert_ne!(
+            三枚.言い分(),
+            四枚.言い分(),
+            "言い分に枚数が入っていない。入っていないなら、この検査の前提が崩れている"
+        );
+
+        // 札を鍵にすれば間引ける
+        let now = SystemTime::now();
+        let 前 = LastSkip {
+            reason: 三枚.理由の名前().to_string(),
+            at: now,
+        };
+        assert!(
+            !見送りを残すか(Some(&前), 四枚.理由の名前(), now + Duration::from_secs(300)),
+            "札を鍵にしても間引けていない"
+        );
     }
 
     #[test]

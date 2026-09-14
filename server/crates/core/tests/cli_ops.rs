@@ -1060,3 +1060,519 @@ fn 起き直りの拾い上げは両方のモードから呼ばれる() {
          いまの呼び出し回数: {回数}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 静かなときの自動（縮小設計§7・テスト計画フェーズ4）
+
+use agentdashboard_core::compact_api::{CompactApiState, 一回り, 見回りの結果};
+use session_host_core::compact::{CompactConfig, QuietProbe, Slack, SlackProbe, TaskLauncher};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::SystemTime;
+
+const GIB: u64 = 1024 * 1024 * 1024;
+
+/// 好きな静けさを名乗るだけの口。
+#[derive(Debug)]
+struct 名乗る静けさ {
+    claude: usize,
+    shells: usize,
+    分: Option<u16>,
+}
+
+impl QuietProbe for 名乗る静けさ {
+    fn claude_procs(&self) -> Option<usize> {
+        Some(self.claude)
+    }
+    fn interactive_shells(&self) -> Option<usize> {
+        Some(self.shells)
+    }
+    fn local_minutes(&self) -> Option<u16> {
+        self.分
+    }
+}
+
+/// 好きな空洞を名乗るだけの口。
+#[derive(Debug)]
+struct 名乗る空洞(u64);
+
+impl SlackProbe for 名乗る空洞 {
+    fn read(&self, _ext4: Option<&Path>, _docker: Option<&Path>) -> Option<Slack> {
+        Some(Slack {
+            ext4_bytes: self.0,
+            docker_bytes: 0,
+            used_bytes: 0,
+        })
+    }
+}
+
+/// 撃たれた回数を数えるだけの口。**本物は絶対に呼ばない。**
+///
+/// # なぜ回数を持たせるのか
+///
+/// 「**撃たない**」ことを見るテスト（4-1・4-5・4-6）は、**返り値だけでは何も
+/// 確かめられない**——`見送った` を返しながら裏で撃っていても緑になる。
+/// **呼ばれた回数が0であることを見るのが唯一効く形。**
+#[derive(Debug, Default)]
+struct 数える起動役 {
+    回数: AtomicUsize,
+}
+
+impl TaskLauncher for 数える起動役 {
+    fn run(&self, _task_name: &str) -> bool {
+        self.回数.fetch_add(1, Ordering::SeqCst);
+        true
+    }
+}
+
+/// 一時の `state_dir`。
+fn 縮小の置き場(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "agentdashboard-compact-auto-{name}-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("置き場所を作れること");
+    dir
+}
+
+/// 全部そろって打てる設定（ここから1つずつ崩す）。
+fn 打てる設定() -> CompactConfig {
+    CompactConfig {
+        auto: true,
+        quiet_minutes: 30,
+        threshold_gb: 50,
+        window: "00:00-23:59".to_string(),
+        min_interval_hours: 24,
+        script_task: "テスト用".to_string(),
+        result_path: None,
+        // **空洞を測れる形にしておく**（`None` だと見回りが降りてしまう）
+        ext4_vhdx: Some(PathBuf::from("/dev/null")),
+        docker_vhdx: None,
+    }
+}
+
+/// 打てる状態の見回り一式。`registry` は `None`（＝生きたカード0枚）。
+fn 打てる見回り(
+    dir: &Path,
+    cfg: CompactConfig,
+) -> (CompactApiState, Arc<数える起動役>) {
+    let 起動役 = Arc::new(数える起動役::default());
+    let state = CompactApiState {
+        state_dir: dir.to_path_buf(),
+        cfg,
+        quiet: Arc::new(名乗る静けさ {
+            claude: 0,
+            shells: 0,
+            分: Some(3 * 60),
+        }),
+        slack: Arc::new(名乗る空洞(100 * GIB)),
+        launcher: Arc::clone(&起動役) as Arc<dyn TaskLauncher>,
+        registry: None,
+    };
+    (state, 起動役)
+}
+
+/// 静かさが積み上がった状態にする（`quiet_minutes` を満たす）。
+fn 静かにしておく(dir: &Path, now: SystemTime) {
+    let mut state = session_host_core::compact::load_state(dir);
+    state.quiet_since = Some(now - Duration::from_secs(3600));
+    session_host_core::compact::save_state(dir, &state);
+}
+
+/// **自動の既定は「何もしない」**（縮小設計§7・テスト 4-1）。
+///
+/// # 返り値だけでは足りない
+///
+/// `見送った` を返しながら裏で撃っていても、返り値を見るだけなら緑になる。
+/// **起動役が1度も呼ばれていないこと**まで見て初めて「撃っていない」と言える。
+#[test]
+fn 自動は既定で何もしない() {
+    let dir = 縮小の置き場("既定");
+    let now = SystemTime::now();
+    静かにしておく(&dir, now);
+    // **既定の設定をそのまま使う**（`auto` は `false` のはず）。空洞だけは測れる形に
+    // しておく——`ext4_vhdx` が `None` だと、`auto` を見る前に降りてしまう
+    let cfg = CompactConfig {
+        ext4_vhdx: Some(PathBuf::from("/dev/null")),
+        ..CompactConfig::default()
+    };
+    let (state, 起動役) = 打てる見回り(&dir, cfg);
+
+    let 結果 = 一回り(&state, now);
+
+    assert!(
+        matches!(
+            結果,
+            見回りの結果::見送った {
+                理由: session_host_core::compact::Blocker::AutoDisabled,
+                ..
+            }
+        ),
+        "既定で見送っていない: {結果:?}"
+    );
+    assert_eq!(
+        起動役.回数.load(Ordering::SeqCst),
+        0,
+        "既定なのに撃っている。**自分を殺す操作の既定を on にしてはいけない**"
+    );
+}
+
+/// 静かなら見回りのたびに静かさが進む（縮小設計§7・テスト 4-2）。
+///
+/// # これが無いと機能が黙って死ぬ
+///
+/// `quiet_since` を書く場所は**見回りの中にしかない**。落とすと値は永久に `None` の
+/// ままで、`blocker()` が必ず `NotQuietLongEnough` を返し、**自動は一度も走らない**。
+/// しかも落ちも警告も出ないので、「設定を on にしたのに何も起きない」という形でしか
+/// 気づけない。
+#[test]
+fn 静かなら見回りのたびに静かさが進む() {
+    let dir = 縮小の置き場("静かさ");
+    let now = SystemTime::now();
+    let (state, _) = 打てる見回り(&dir, 打てる設定());
+
+    assert_eq!(
+        session_host_core::compact::load_state(&dir).quiet_since,
+        None,
+        "まだ誰も静かさを書いていないはず"
+    );
+
+    一回り(&state, now);
+
+    assert_eq!(
+        session_host_core::compact::load_state(&dir).quiet_since,
+        Some(now),
+        "見回りが静かさを進めていない。**これが無いと自動は永久に走らない**"
+    );
+
+    // 続けて静かなら**上書きしない**（数え直すと永久に30分が経たない）
+    一回り(&state, now + Duration::from_secs(600));
+    assert_eq!(
+        session_host_core::compact::load_state(&dir).quiet_since,
+        Some(now),
+        "静かなままなのに時刻が進んでいる"
+    );
+}
+
+/// うるさくなれば静かさは消える（縮小設計§7・テスト 4-3）。
+#[test]
+fn うるさくなれば静かさは消える() {
+    let dir = 縮小の置き場("うるさい");
+    let now = SystemTime::now();
+    let (静か, _) = 打てる見回り(&dir, 打てる設定());
+    一回り(&静か, now);
+    assert!(
+        session_host_core::compact::load_state(&dir)
+            .quiet_since
+            .is_some(),
+        "前提が崩れている"
+    );
+
+    // claude が1本立った
+    let 起動役 = Arc::new(数える起動役::default());
+    let うるさい = CompactApiState {
+        quiet: Arc::new(名乗る静けさ {
+            claude: 1,
+            shells: 0,
+            分: Some(3 * 60),
+        }),
+        launcher: Arc::clone(&起動役) as Arc<dyn TaskLauncher>,
+        ..静か.clone()
+    };
+
+    let 結果 = 一回り(&うるさい, now + Duration::from_secs(60));
+
+    assert_eq!(
+        session_host_core::compact::load_state(&dir).quiet_since,
+        None,
+        "うるさくなったのに静かさが消えていない"
+    );
+    assert!(
+        matches!(結果, 見回りの結果::見送った { .. }),
+        "うるさいのに見送っていない: {結果:?}"
+    );
+    assert_eq!(
+        起動役.回数.load(Ordering::SeqCst),
+        0,
+        "うるさいのに撃っている"
+    );
+}
+
+/// 夜が来て静かなら自動で撃つ（縮小設計§7・テスト 4-4）。
+#[test]
+fn 夜が来て静かなら自動で撃つ() {
+    let dir = 縮小の置き場("撃つ");
+    let now = SystemTime::now();
+    静かにしておく(&dir, now);
+    let (state, 起動役) = 打てる見回り(&dir, 打てる設定());
+
+    let 結果 = 一回り(&state, now);
+
+    assert_eq!(結果, 見回りの結果::撃った, "そろっているのに撃っていない");
+    assert_eq!(
+        起動役.回数.load(Ordering::SeqCst),
+        1,
+        "撃ったと言いながら起動役を呼んでいない"
+    );
+    // **打った時刻を控えていないと、間隔の判定が永久に効かない**
+    assert!(
+        session_host_core::compact::load_state(&dir)
+            .last_compact
+            .is_some(),
+        "撃ったのに「最後に打った時刻」を控えていない"
+    );
+}
+
+/// 夜でも一枚生きていれば撃たない（縮小設計§7・テスト 4-5）。
+///
+/// **ここだけは本物の記録（registry）を使う。** 生きたカードの枚数は registry が
+/// 数えるので、`None` のままでは0枚にしかならず、この条件を確かめられない。
+#[tokio::test]
+async fn 夜でも一枚生きていれば撃たない() {
+    let server = TestServer::start().await;
+    let (session, _watcher) = common::start_session(&server.manager).await;
+    let _card = listed_card(&server, &session).await;
+
+    let dir = 縮小の置き場("生きている");
+    let now = SystemTime::now();
+    静かにしておく(&dir, now);
+    let 起動役 = Arc::new(数える起動役::default());
+    let state = CompactApiState {
+        state_dir: dir.clone(),
+        cfg: 打てる設定(),
+        quiet: Arc::new(名乗る静けさ {
+            claude: 0,
+            shells: 0,
+            分: Some(3 * 60),
+        }),
+        slack: Arc::new(名乗る空洞(100 * GIB)),
+        launcher: Arc::clone(&起動役) as Arc<dyn TaskLauncher>,
+        registry: Some(Arc::clone(&server.registry)),
+    };
+
+    let 結果 = 一回り(&state, now);
+
+    assert!(
+        matches!(
+            結果,
+            見回りの結果::見送った {
+                理由: session_host_core::compact::Blocker::AliveCards(1),
+                ..
+            }
+        ),
+        "生きたカードが1枚あるのに見送っていない: {結果:?}"
+    );
+    assert_eq!(
+        起動役.回数.load(Ordering::SeqCst),
+        0,
+        "生きたカードがあるのに撃っている。**道連れになる**"
+    );
+
+    session.kill();
+}
+
+/// 切ってあれば夜が来ても撃たない（縮小設計§7・テスト 4-6）。
+#[test]
+fn 切ってあれば夜が来ても撃たない() {
+    let dir = 縮小の置き場("切ってある");
+    let now = SystemTime::now();
+    静かにしておく(&dir, now);
+    let mut cfg = 打てる設定();
+    cfg.auto = false; // ← ここだけ崩す
+    let (state, 起動役) = 打てる見回り(&dir, cfg);
+
+    let 結果 = 一回り(&state, now);
+
+    assert!(
+        matches!(
+            結果,
+            見回りの結果::見送った {
+                理由: session_host_core::compact::Blocker::AutoDisabled,
+                ..
+            }
+        ),
+        "切ってあるのに見送っていない: {結果:?}"
+    );
+    assert_eq!(
+        起動役.回数.load(Ordering::SeqCst),
+        0,
+        "切ってあるのに撃っている"
+    );
+}
+
+/// 一時停止の期限内は自動も撃たない（縮小設計§7・テスト 4-7）。
+#[test]
+fn 一時停止の期限内は自動も撃たない() {
+    let dir = 縮小の置き場("停止中");
+    let now = SystemTime::now();
+    静かにしておく(&dir, now);
+    let mut 記憶 = session_host_core::compact::load_state(&dir);
+    記憶.paused_until = Some(now + Duration::from_secs(3600));
+    session_host_core::compact::save_state(&dir, &記憶);
+    let (state, 起動役) = 打てる見回り(&dir, 打てる設定());
+
+    let 結果 = 一回り(&state, now);
+
+    assert!(
+        matches!(
+            結果,
+            見回りの結果::見送った {
+                理由: session_host_core::compact::Blocker::Paused { .. },
+                ..
+            }
+        ),
+        "一時停止中なのに見送っていない: {結果:?}"
+    );
+    assert_eq!(
+        起動役.回数.load(Ordering::SeqCst),
+        0,
+        "一時停止中なのに撃っている"
+    );
+}
+
+/// 期限を過ぎれば一時停止は自然に解ける（縮小設計§7・テスト 4-8）。
+#[test]
+fn 期限を過ぎれば一時停止は自然に解ける() {
+    let dir = 縮小の置き場("停止解除");
+    let now = SystemTime::now();
+    静かにしておく(&dir, now);
+    let mut 記憶 = session_host_core::compact::load_state(&dir);
+    記憶.paused_until = Some(now - Duration::from_secs(1)); // 1秒前に切れた
+    session_host_core::compact::save_state(&dir, &記憶);
+    let (state, 起動役) = 打てる見回り(&dir, 打てる設定());
+
+    let 結果 = 一回り(&state, now);
+
+    assert_eq!(
+        結果,
+        見回りの結果::撃った,
+        "期限が切れているのに止まったまま: {結果:?}"
+    );
+    assert_eq!(
+        起動役.回数.load(Ordering::SeqCst),
+        1,
+        "解けたのに撃っていない"
+    );
+}
+
+/// 同じ理由の見送りは一日に一度しか残らない（縮小設計§7-3・テスト 4-9）。
+///
+/// **5分ごとに見回るので、そのまま書くと1日 288 行になる。**
+#[test]
+fn 同じ理由の見送りは一日に一度しか記録に残らない() {
+    let dir = 縮小の置き場("間引き");
+    let now = SystemTime::now();
+    静かにしておく(&dir, now);
+    let mut cfg = 打てる設定();
+    cfg.auto = false;
+    let (state, _) = 打てる見回り(&dir, cfg);
+
+    let 一度目 = 一回り(&state, now);
+    assert!(
+        matches!(
+            一度目,
+            見回りの結果::見送った {
+                記録した: true, ..
+            }
+        ),
+        "初めての見送りが記録されていない: {一度目:?}"
+    );
+
+    // 5分後・1時間後は同じ理由なので残さない
+    for 秒 in [300, 3600] {
+        let 次 = 一回り(&state, now + Duration::from_secs(秒));
+        assert!(
+            matches!(
+                次,
+                見回りの結果::見送った {
+                    記録した: false,
+                    ..
+                }
+            ),
+            "{秒} 秒後に同じ理由が記録されてしまった: {次:?}"
+        );
+    }
+
+    // 1日経てば残す
+    let 翌日 = 一回り(&state, now + Duration::from_secs(24 * 3600));
+    assert!(
+        matches!(
+            翌日,
+            見回りの結果::見送った {
+                記録した: true, ..
+            }
+        ),
+        "1日経っても記録されない: {翌日:?}"
+    );
+}
+
+/// 理由が変わればその場で見送りが残る（縮小設計§7-3・テスト 4-10）。
+#[test]
+fn 理由が変わればその場で見送りが記録に残る() {
+    let dir = 縮小の置き場("理由が変わる");
+    let now = SystemTime::now();
+    静かにしておく(&dir, now);
+    let mut 切ってある = 打てる設定();
+    切ってある.auto = false;
+    let (state, _) = 打てる見回り(&dir, 切ってある);
+    一回り(&state, now);
+    assert_eq!(
+        session_host_core::compact::load_state(&dir)
+            .last_skip
+            .map(|s| s.reason),
+        // **控えるのは札（`理由の名前`）であって言い分ではない。** 言い分には枚数が
+        // 入るので、鍵にすると枚数が変わるたび「理由が変わった」になって間引けない
+        Some("auto_disabled".to_string()),
+        "最初の理由が控えられていない"
+    );
+
+    // 自動は入れたが、今度は claude が1本立っている
+    let 起動役 = Arc::new(数える起動役::default());
+    let うるさい = CompactApiState {
+        cfg: 打てる設定(),
+        quiet: Arc::new(名乗る静けさ {
+            claude: 1,
+            shells: 0,
+            分: Some(3 * 60),
+        }),
+        launcher: Arc::clone(&起動役) as Arc<dyn TaskLauncher>,
+        ..state.clone()
+    };
+
+    let 次 = 一回り(&うるさい, now + Duration::from_secs(300));
+
+    assert!(
+        matches!(
+            次,
+            見回りの結果::見送った {
+                記録した: true, ..
+            }
+        ),
+        "理由が変わったのに記録されていない（5分しか経っていなくても残すこと）: {次:?}"
+    );
+    assert_eq!(
+        起動役.回数.load(Ordering::SeqCst),
+        0,
+        "見送ったのに撃っている"
+    );
+}
+
+/// 見回りは**ローカルモードにだけ**生えている（縮小設計§7-1）。
+///
+/// # なぜ本文を読むのか
+///
+/// 口（`compact_api::routes`）は**両モードに在る**（断る道を台帳へ載せるため）。
+/// そのすぐ隣に見回りを足すと、**「口が両方だから見回りも両方」と読んで**サーバモードへ
+/// 生やしてしまう。サーバは機械を持たないので、縮める相手が無いまま5分ごとに回り続ける。
+#[test]
+fn 見回りはローカルモードにだけ生えている() {
+    let lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs");
+    let text = std::fs::read_to_string(&lib).expect("lib.rs が読めること");
+    let 回数 = text.matches("watch_compact(").count();
+    assert_eq!(
+        回数, 1,
+        "見回りはローカルモードの1箇所だけから生やすこと（設計§7-1）。\
+         いまの呼び出し回数: {回数}"
+    );
+}
