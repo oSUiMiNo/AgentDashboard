@@ -746,8 +746,14 @@ test("ファイルでも、素の改行と `<br/>` が改行として出る", as
 
   const view = page.getByTestId("file-markdown");
   await expect(view).toBeVisible();
-  // 行頭の `<br/>` が2つ ＋ 折り返しの改行が1つ
-  await expect(view.locator("br")).toHaveCount(3);
+  // 行頭の `<br/>` が2つ ＋ 折り返しの改行が1つ。
+  // ブロック編集面（ProseMirror）は文末に自分で足す空の段落を持ち、
+  // そこへカーソルを置けるように `<br class="ProseMirror-trailingBreak">` を
+  // 内部的に挿入する——これは編集面の都合であって文書側の改行ではないので、
+  // 数える対象から外す
+  await expect(
+    view.locator("br:not(.ProseMirror-trailingBreak)"),
+  ).toHaveCount(3);
   // 囲みコードの中では増えない
   await expect(view.locator("pre br")).toHaveCount(0);
   // `skipHtml` は効いたまま（字面としては出ない）
