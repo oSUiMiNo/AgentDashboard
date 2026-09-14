@@ -1302,3 +1302,23 @@ tests       = [
 ]
 breaks_when = "uploadFile が URL の文字列だけを返す形へ戻す（previewWidth の既定は undefined で、そのとき器が fit-content になり、img の width: 100% と合わさって原寸が入る幅より広い絵は必ず面いっぱいへ伸びる）"
 verified    = true
+
+[[entry]]
+issue       = "イシューグループ_2026-0904-0120/statusコマンド相当の情報を画面から見えるようにする"
+behavior    = "claude を別のアカウントへログインし直したときは、前のログインの使用上限を残さず入れ替える（新しい窓の戻り時刻が手前でも捨てない）"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/server-core/tests/registry.rs", name = "別のログインへ切り替わったら使用上限を入れ替える" },
+]
+breaks_when = "server-core の registry.rs の login_changed を常に false にする（合流が切り替えを「遅れて届いた報告」と読む、修正前の振る舞いへ戻る）。実際に戻すと、前のアカウントの seven_day 56% が残ったまま新しい 3% が捨てられる"
+verified    = true
+
+[[entry]]
+issue       = "イシューグループ_2026-0904-0120/statusコマンド相当の情報を画面から見えるようにする"
+behavior    = "ログインの指紋が読めない報告が届いたときでも、使用上限を入れ替えず合流させる（読めないことを「切り替わった」と読まない）"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/server-core/tests/registry.rs", name = "指紋が読めない報告では入れ替えない" },
+]
+breaks_when = "login_changed に stored.is_some() != incoming.is_some() を足す。指紋を読めない環境では3秒ごとに None が届くので、毎回入れ替えになり合流が丸ごと効かなくなる（数字が跳ね回る）"
+verified    = true
