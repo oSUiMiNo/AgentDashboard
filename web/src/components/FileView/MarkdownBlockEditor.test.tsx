@@ -22,6 +22,8 @@ describe('Markdownブロック編集面', () => {
     expect(editor).toHaveAttribute('contenteditable', 'true')
     expect(editor.querySelector('h1')).toHaveTextContent('見出し')
     expect(editor.querySelector('p')).toHaveTextContent('本文')
+    expect(editor).not.toHaveClass('virtual-cursor-enabled')
+    expect(editor.querySelector('.prosemirror-virtual-cursor')).toBeNull()
     expect(screen.getByTestId('markdown-value')).toHaveTextContent('# 見出し')
   })
 

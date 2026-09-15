@@ -11,6 +11,7 @@ export function markdownEditorConfig(root: HTMLElement, onError: (message: strin
       [Crepe.Feature.TopBar]: false,
     },
     featureConfigs: {
+      [Crepe.Feature.Cursor]: { virtual: false },
       [Crepe.Feature.Placeholder]: { text: '書きはじめる。 / でブロックを追加', mode: 'block' },
       [Crepe.Feature.BlockEdit]: {
         textGroup: {

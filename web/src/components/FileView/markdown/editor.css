@@ -142,7 +142,20 @@
   border: 1px solid #2c394999;
   border-radius: .4rem;
 }
-.markdown-block-editor .milkdown .milkdown-slash-menu { max-height: min(25rem, 65vh); overflow-y: auto; }
+.markdown-block-editor .milkdown .milkdown-slash-menu {
+  max-height: min(25rem, 65vh);
+  overflow: hidden;
+}
+.markdown-block-editor .milkdown .milkdown-slash-menu .tab-group ul {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: none;
+}
+.markdown-block-editor .milkdown .milkdown-slash-menu .tab-group ul::-webkit-scrollbar { display: none; }
+.markdown-block-editor .milkdown .milkdown-slash-menu .menu-groups {
+  max-height: calc(min(25rem, 65vh) - 4rem);
+}
 .markdown-block-editor .milkdown :is(button, [role='button']):focus-visible {
   outline: 2px solid var(--md-accent);
   outline-offset: 2px;
