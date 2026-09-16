@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+set -u -o pipefail
+
+dry_run=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run)
+      dry_run=1
+      shift
+      ;;
+    *)
+      echo "state-doc-update: unknown argument: $1" >&2
+      exit 64
+      ;;
+  esac
+done
+
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+repo="$(cd "$script_dir/../../../.." && pwd)"
+running_state_bin="$(cd "$script_dir/../../_shared/bin" && pwd)/running-state"
+html_path="$repo/.claude/docs/knowledge/いま動いているもの.html"
+
+if ! state_json="$("$running_state_bin" --json)"; then
+  echo "state-doc-update: running-state --json が失敗した" >&2
+  exit 1
+fi
+
+export SDU_HTML="$html_path"
+export SDU_DRY_RUN="$dry_run"
+export SDU_NOW_ISO="$(date -Iseconds)"
+export SDU_STATE_JSON="$state_json"
+
+python3 <<'PY'
+import json
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime
+
+html_path = os.environ["SDU_HTML"]
+dry_run = os.environ["SDU_DRY_RUN"] == "1"
+now_iso = os.environ["SDU_NOW_ISO"]
+state = json.loads(os.environ["SDU_STATE_JSON"])
+
+try:
+    with open(html_path, "r", encoding="utf-8") as f:
+        html = f.read()
+except OSError as exc:
+    print(f"state-doc-update: {html_path} を読めない（{exc}）", file=sys.stderr)
+    sys.exit(1)
+
+def first_group(pattern, text, default=None):
+    m = re.search(pattern, text)
+    return m.group(1) if m else default
+
+running_version = first_group(r"走行\s*([0-9][^\s／/]*)", state.get("version", ""))
+disk_version = state.get("disk_version", "")
+pid = first_group(r"PID\s*(\d+)", state.get("pid_parent", ""))
+reservation = first_group(r"予約[:：]\s*([^\s／/、)）]+)", state.get("state_dir", ""), "なし")
+
+start_time = None
+if pid:
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", pid],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        dt = datetime.strptime(out, "%a %b %d %H:%M:%S %Y")
+        start_time = dt.strftime("%m-%d %H:%M:%S")
+    except Exception:
+        start_time = None
+
+fields = []
+
+if running_version and disk_version:
+    version_pattern = r"走行\s*[0-9][^\s／/、)）]*\s*[／/]\s*ディスク\s*[0-9][^\s、)）]*"
+    version_new = f"走行 {running_version}／ディスク {disk_version}"
+    fields.append(("走行版・ディスクの版", version_pattern, version_new))
+
+if pid and start_time:
+    pidtime_pattern = r"PID\s*\d+・[0-9]{2}-[0-9]{2}\s+[0-9:]{8}\s*起動"
+    pidtime_new = f"PID {pid}・{start_time} 起動"
+    fields.append(("PID・起動時刻", pidtime_pattern, pidtime_new))
+
+reservation_pattern = r"予約は無い|予約が無い|予約[:：]\s*[^\s／/、)）]+"
+reservation_new = "予約：なし" if reservation == "なし" else f"予約：{reservation}"
+fields.append(("予約の有無", reservation_pattern, reservation_new))
+
+failed = []
+edits = []
+for label, pattern, new_value in fields:
+    matches = re.findall(pattern, html)
+    if len(matches) != 1:
+        failed.append(f"手で直す：{label}（{len(matches)}件）")
+        continue
+    old_value = matches[0]
+    edits.append((label, old_value, new_value))
+
+if failed:
+    for line in failed:
+        print(line)
+    print("差分が確定しない欄があるため何も書かない")
+    sys.exit(4)
+
+changed = [(label, old_value, new_value) for label, old_value, new_value in edits if old_value != new_value]
+
+for label, old_value, new_value in changed:
+    print(f"{label}｜before：{old_value[:40]}")
+    print(f"{label}｜after ：{new_value[:40]}")
+
+if not changed:
+    print("差分なし")
+
+if dry_run:
+    sys.exit(0)
+
+applied = 0
+for label, old_value, new_value in changed:
+    if html.count(old_value) != 1:
+        print(f"手で直す：{label}（書き込み直前に件数が変わった）")
+        sys.exit(4)
+    html = html.replace(old_value, new_value, 1)
+    applied += 1
+
+footer_pattern = r"<!-- 最終実測：.*?-->"
+footer_new = f"<!-- 最終実測：{now_iso} version_release -->"
+if re.search(footer_pattern, html):
+    html = re.sub(footer_pattern, footer_new, html, count=1)
+elif "</body>" in html:
+    html = html.replace("</body>", footer_new + "\n</body>", 1)
+else:
+    html = html + "\n" + footer_new + "\n"
+
+with open(html_path, "w", encoding="utf-8") as f:
+    f.write(html)
+
+print(f"適用件数：{applied}")
+PY

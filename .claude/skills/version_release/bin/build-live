@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -u -o pipefail
+
+dry_run=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run)
+      dry_run=1
+      shift
+      ;;
+    *)
+      echo "build-live: unknown argument: $1" >&2
+      exit 64
+      ;;
+  esac
+done
+
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+claim_bin="$(cd "$script_dir/../../_shared/bin" && pwd)/claim"
+live_tree="$HOME/AgentDashboard"
+
+session_id="${CLAUDE_SESSION_ID:-nosession}"
+identity="${session_id:0:8}-build-live"
+lock_key="__重いテスト__"
+reason="版上げの実機ビルド"
+
+if [ "$dry_run" -eq 1 ]; then
+  echo "$claim_bin $identity take $lock_key \"$reason\""
+  echo "git -C $live_tree pull --ff-only"
+  echo "make -C $live_tree build"
+  echo "$claim_bin $identity free $lock_key"
+  exit 0
+fi
+
+"$claim_bin" "$identity" take "$lock_key" "$reason"
+claim_status=$?
+if [ "$claim_status" -eq 3 ]; then
+  echo "build-live: claim が終了3を返した（$lock_key を他セッションが保持）" >&2
+  exit 3
+fi
+if [ "$claim_status" -ne 0 ]; then
+  echo "build-live: claim take が失敗（終了 $claim_status）" >&2
+  exit "$claim_status"
+fi
+
+build_status=0
+if ! git -C "$live_tree" pull --ff-only; then
+  build_status=1
+fi
+if [ "$build_status" -eq 0 ]; then
+  if ! make -C "$live_tree" build; then
+    build_status=1
+  fi
+fi
+
+"$claim_bin" "$identity" free "$lock_key"
+
+exit "$build_status"

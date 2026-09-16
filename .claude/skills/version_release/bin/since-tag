@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+set -u -o pipefail
+
+repo=""
+json=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --repo)
+      repo="$2"
+      shift 2
+      ;;
+    --json)
+      json=1
+      shift
+      ;;
+    *)
+      echo "since-tag: unknown argument: $1" >&2
+      exit 64
+      ;;
+  esac
+done
+
+if [ -z "$repo" ]; then
+  script_dir="$(cd "$(dirname "$0")" && pwd)"
+  repo="$(cd "$script_dir/../../../.." && pwd)"
+fi
+
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '%s' "$s"
+}
+
+commits_json() {
+  local log="$1"
+  local first=1
+  local out="["
+  local line hash title
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    hash="${line%% *}"
+    title="${line#* }"
+    if [ "$first" -eq 1 ]; then
+      first=0
+    else
+      out="${out},"
+    fi
+    out="${out}{\"hash\":\"$(json_escape "$hash")\",\"title\":\"$(json_escape "$title")\"}"
+  done <<<"$log"
+  out="${out}]"
+  printf '%s' "$out"
+}
+
+last_tag="$(git -C "$repo" describe --tags --abbrev=0 --match 'v*' 2>/dev/null)"
+if [ -z "$last_tag" ]; then
+  echo "since-tag: タグが見つかりません" >&2
+  exit 1
+fi
+
+since_log="$(git -C "$repo" log "${last_tag}..HEAD" --oneline 2>/dev/null)"
+since_count=0
+if [ -n "$since_log" ]; then
+  since_count="$(printf '%s\n' "$since_log" | wc -l | tr -d ' ')"
+fi
+
+unpushed_known=0
+unpushed_log=""
+unpushed_count=""
+if git -C "$repo" rev-parse --verify --quiet refs/remotes/origin/main >/dev/null 2>&1; then
+  unpushed_known=1
+  unpushed_log="$(git -C "$repo" log origin/main..HEAD --oneline 2>/dev/null)"
+  unpushed_count=0
+  if [ -n "$unpushed_log" ]; then
+    unpushed_count="$(printf '%s\n' "$unpushed_log" | wc -l | tr -d ' ')"
+  fi
+fi
+
+if [ "$json" -eq 1 ]; then
+  since_commits="$(commits_json "$since_log")"
+  if [ "$unpushed_known" -eq 1 ]; then
+    unpushed_commits="$(commits_json "$unpushed_log")"
+    unpushed_block="{\"known\":true,\"count\":$unpushed_count,\"commits\":$unpushed_commits}"
+  else
+    unpushed_block="{\"known\":false,\"count\":null,\"commits\":null}"
+  fi
+  printf '{"last_tag":"%s","since_tag":{"count":%s,"commits":%s},"unpushed":%s}\n' \
+    "$(json_escape "$last_tag")" "$since_count" "$since_commits" "$unpushed_block"
+  exit 0
+fi
+
+echo "last_tag: $last_tag"
+echo "since_tag: ${since_count}件"
+if [ -n "$since_log" ]; then
+  printf '%s\n' "$since_log" | sed 's/^/  /'
+fi
+if [ "$unpushed_known" -eq 1 ]; then
+  echo "unpushed: ${unpushed_count}件"
+  if [ -n "$unpushed_log" ]; then
+    printf '%s\n' "$unpushed_log" | sed 's/^/  /'
+  fi
+else
+  echo "unpushed: 不明（origin/main が見つかりません）"
+fi
