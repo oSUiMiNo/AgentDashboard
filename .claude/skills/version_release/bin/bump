@@ -77,6 +77,21 @@ fi
 lock_version_line_no=$((lock_name_line_no + 1))
 old_lock_version="$(sed -n "${lock_version_line_no}p" "$cargo_lock" | sed -E 's/^version = "([^"]+)".*/\1/')"
 
+lock_version_lines="$(awk '
+  /^\[\[package\]\]$/ {
+    if (pending > 0 && !hassrc) print pending
+    pending = 0; hassrc = 0; next
+  }
+  /^version = "/ { if (pending == 0) pending = NR }
+  /^source = / { hassrc = 1 }
+  END { if (pending > 0 && !hassrc) print pending }
+' "$cargo_lock")"
+if [ -z "$lock_version_lines" ]; then
+  echo "bump: server/Cargo.lock に workspace メンバの version 行が見つかりません" >&2
+  exit 1
+fi
+lock_member_count="$(printf '%s\n' "$lock_version_lines" | grep -c '.')"
+
 last_tag="$(git -C "$repo" describe --tags --abbrev=0 --match 'v*' 2>/dev/null)"
 commit_titles=""
 if [ -n "$last_tag" ]; then
@@ -95,7 +110,7 @@ block_tmp="$(mktemp)"
       if printf '%s' "$title" | grep -qE 'crate|fn|\.rs|\.ts|web/|server/|test\(|chore\('; then
         printf '<!-- 実装語 --> - %s\n' "$title"
       else
-        printf '- %s\n' "$title"
+        printf -- '- %s\n' "$title"
       fi
     done <<<"$commit_titles"
   fi
@@ -112,8 +127,8 @@ if [ "$dry_run" -eq 1 ]; then
   echo "+ image: ghcr.io/osuimino/agentdashboard:$new_version"
   echo
   echo "[server/Cargo.lock]"
-  echo "- version = \"$old_lock_version\""
-  echo "+ version = \"$new_version\""
+  echo "- version = \"$old_lock_version\" (workspace メンバ ${lock_member_count} 件)"
+  echo "+ version = \"$new_version\" (workspace メンバ ${lock_member_count} 件)"
   echo
   echo "[CHANGELOG.md]"
   cat "$block_tmp"
@@ -125,9 +140,15 @@ sed -i "${toml_line_no}s/.*/version = \"$new_version\"/" "$cargo_toml"
 sed -i "${compose_line_no}s/agentdashboard:${old_compose_version}/agentdashboard:${new_version}/" "$compose_yml"
 
 lock_tmp="$(mktemp)"
-awk -v n="$lock_version_line_no" -v newv="$new_version" '
-  NR==n { sub(/version = ".*"/, "version = \"" newv "\"") }
-  { print }
+awk -v newv="$new_version" -v lines="$lock_version_lines" '
+  BEGIN {
+    n = split(lines, arr, "\n")
+    for (i = 1; i <= n; i++) target[arr[i]] = 1
+  }
+  {
+    if (NR in target) sub(/version = ".*"/, "version = \"" newv "\"")
+    print
+  }
 ' "$cargo_lock" >"$lock_tmp" && mv "$lock_tmp" "$cargo_lock"
 
 first_heading_line="$(grep -n '^## ' "$changelog" | head -1 | cut -d: -f1)"
