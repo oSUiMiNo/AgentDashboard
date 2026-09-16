@@ -10,6 +10,8 @@
 
 issue-sync は、ユーザーが行うので不要。必要かどうかユーザーに尋ねる必要もない。
 
+**PJT 専用スキルが7つ入った（2026-09-17）。** 版上げは `version_release` が行う（6時間ごとの巡回と明示依頼。段4「効かせる」は頼まれたときだけ）。新機能を push した後・イシューを閉じた後は `proposal_submit` を呼ぶ（振り返って無ければ「無し」でよい）。閉じる前は `issue-close_verify` を通す。共有ツリーでのコミットは `shared-tree_commit` を使う（自分のワーカが書いたものも「自分が触った」に数える）。見た目を触ったら出す前に `ui_verify`。原因を追うときは `cause_investigate_log-first` から入る。共通部品は `.claude/skills/_shared/bin/`（`running-state`＝いま動いているものを撮る／`claim`＝札のラッパ／`our-servers`／`sandbox-dashboard`／`periodic`）。設計の正は `MyDocs/イシュー/PJTスコープに本PJT専用の開発効率化スキルを作成/設計.md`。
+
 ---
 <br/>
 <br/>
@@ -266,9 +268,10 @@ agentdashboard version restart      # 生きたカードがあればここで止
 - タスク完了の定義は「テストが通ること」。`make ci`（lint → test → build）が通って初めて完了とみなす
 - 各フェーズの終わりには ⛳チェックポイントがあり、対応するテスト計画のフェーズを消化してから次へ進む
 - 自己修復機構の制約上、`crates/protocol` は共有境界であり変更のハードルが高い。未知の構造は `Node::Unknown` へ写像して吸収する
-- **原因を追うときは、コードを読む前に `agentdashboard logs` を読む。** 残す側の約束は `.claude/docs/guideline.md`「ログを残すとき」に集めてある（利用者向けの読み方は `README.md`）
+- **原因を追うときは、コードを読む前に `agentdashboard logs` を読む。** 残す側の約束は `.claude/docs/guideline.md`「ログを残すとき」に集めてある（利用者向けの読み方は `README.md`）——引き当てる場所は `cause_investigate_log-first`
 - **イシューを閉じるときは、守っているテストを台帳（`server/crates/core/tests/regressions.toml`）へ名指しで載せる。** 作法は `.claude/docs/guideline.md`「クローズするとき、守っているテストを台帳へ名指しで載せる」
 - コミットは作業別に分けて段階的に行う。プッシュはしない
+- **【要判断】冒頭の節（push を許可する）と食い違っている。`version_release` は冒頭の側を前提に push する。どちらに揃えるかは利用者が決める（設計 §15）。**
 
 ---
 <br/>
