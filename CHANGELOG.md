@@ -7,6 +7,12 @@
 スキーマを知っているか」で判定するので、**記録の形が変わると画面から戻れなくなる**
 ——黙って配ると、利用者は理由の分からない拒否を見ることになる。
 
+## 0.1.147
+**利用者が触る画面と動作は変わらない版。開発用の PJT 専用スキル7つが入った。**
+
+- **画面・API・記録の形に変更は無い。** 版を上げたのは、開発の道具がリポジトリに入ったため
+- 開発者向け：`.claude/skills/` に `version_release`（配る）・`shared-tree_commit`（共有ツリーで自分の変更だけをコミット）・`issue-close_verify`（閉じる前の検収）・`ui_verify`（画面の検収）・`cause_investigate_log-first`（ログから原因を絞る）・`proposal_submit`／`proposal_maintain`（改善案の提出と整備）と、共通部品 `_shared/bin/`（`running-state`・`claim`・`our-servers`・`sandbox-dashboard`・`periodic`）
+
 ## 0.1.146
 **Markdown編集のカーソルとメニューが素直になった版。**
 
