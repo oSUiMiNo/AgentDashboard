@@ -1,0 +1,322 @@
+#!/usr/bin/env bash
+set -u
+set -o pipefail
+
+usage() {
+  cat >&2 <<'USAGE_EOF'
+使い方：touched-files --session <ID> [--project-dir <path>] [--porcelain]
+
+  --session <ID>         セッションの記録（jsonl）を選ぶ ID。
+                          省略時は $CLAUDE_SESSION_ID を見る。どちらも無ければエラー
+                          本体（<ID>.jsonl）に加え、配下の subagents/agent-*.jsonl も
+                          全て読み、同じ群へ合流させる
+  --project-dir <path>   記録のスラッグを作るための作業ディレクトリ（既定：カレント）
+  --porcelain             git status --porcelain -uall と突き合わせ、
+                           「触った かつ dirty」「触った が dirty でない」
+                           「dirty で言及あり（読み書き不明）」
+                           「dirty だが触れた形跡なし」の4群に分けて出す
+                           （git リポジトリの中でしか使えない）
+
+終了コード：
+  0  正常終了
+  2  引数の誤り
+  4  セッション記録ファイルが見つからない
+USAGE_EOF
+}
+
+project_dir="$(pwd)"
+session_id="${CLAUDE_SESSION_ID:-}"
+porcelain=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --session)
+      session_id="${2:?--session には値が要る}"
+      shift 2
+      ;;
+    --project-dir)
+      project_dir="${2:?--project-dir には値が要る}"
+      shift 2
+      ;;
+    --porcelain)
+      porcelain=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "不明な引数：$1" >&2
+      usage
+      exit 2
+      ;;
+  esac
+done
+
+if [ -z "$session_id" ]; then
+  echo "エラー：--session が要る（\$CLAUDE_SESSION_ID も空だった）" >&2
+  exit 2
+fi
+
+slug="$(printf '%s' "$project_dir" | sed 's#/#-#g')"
+record="$HOME/.claude/projects/$slug/$session_id.jsonl"
+
+if [ ! -f "$record" ]; then
+  echo "記録が見つからない：$record（作業ディレクトリを変えてセッションを開いたか、--resume で場所が変わった可能性がある。§10-4 の手作業判定に切り替えること）" >&2
+  exit 4
+fi
+
+records=("main:$record")
+subagents_dir="$HOME/.claude/projects/$slug/$session_id/subagents"
+if [ -d "$subagents_dir" ]; then
+  while IFS= read -r -d '' f; do
+    origin="$(basename "$f" .jsonl)"
+    records+=("$origin:$f")
+  done < <(find "$subagents_dir" -maxdepth 1 -name 'agent-*.jsonl' -print0 2>/dev/null | sort -z)
+fi
+
+repo_root="$(git -C "$project_dir" rev-parse --show-toplevel 2>/dev/null)"
+
+to_relative() {
+  local p="$1"
+  if [ -n "$repo_root" ]; then
+    case "$p" in
+      "$repo_root"/*) printf '%s\n' "${p#"$repo_root"/}" ;;
+      *) printf '%s\n' "$p" ;;
+    esac
+  else
+    printf '%s\n' "$p"
+  fi
+}
+
+strip_quotes() {
+  local p="$1"
+  case "$p" in
+    \"*\") p="${p#\"}"; p="${p%\"}" ;;
+    \'*\') p="${p#\'}"; p="${p%\'}" ;;
+  esac
+  printf '%s\n' "$p"
+}
+
+resolve_var_ref() {
+  local full="$1" ref="$2" varname val
+  case "$ref" in
+    '${'*'}') varname="${ref#\$\{}"; varname="${varname%\}}" ;;
+    '$'*) varname="${ref#\$}" ;;
+    *) return 1 ;;
+  esac
+  case "$varname" in
+    [A-Za-z_]*) : ;;
+    *) return 1 ;;
+  esac
+  case "$varname" in
+    *[!A-Za-z0-9_]*) return 1 ;;
+  esac
+  val="$(printf '%s\n' "$full" \
+    | grep -oE "(^|[;[:space:]])${varname}=[^[:space:];|&]+" \
+    | tail -n1 \
+    | sed -E "s/^.*${varname}=//")"
+  [ -n "$val" ] || return 1
+  printf '%s\n' "$val"
+}
+
+extract_bash_targets() {
+  local cmd="$1"
+  printf '%s\n' "$cmd" \
+    | grep -oE '(^|[^0-9])>>?[[:space:]]*[^[:space:]|&;<>]+' \
+    | sed -E 's/^[^>]*>>?[[:space:]]*//'
+  printf '%s\n' "$cmd" \
+    | grep -oE '\btee\b[[:space:]]+(-a[[:space:]]+)?[^[:space:]|&;]+' \
+    | sed -E 's/^tee[[:space:]]+(-a[[:space:]]+)?//'
+  printf '%s\n' "$cmd" \
+    | grep -oE '\bsed\b[[:space:]]+-i[^[:space:]]*[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]|&;]+' \
+    | awk '{print $NF}'
+  printf '%s\n' "$cmd" \
+    | grep -oE '\b(mv|cp)\b[[:space:]]+[^|&;]+' \
+    | awk '{print $NF}'
+  printf '%s\n' "$cmd" \
+    | grep -oE '\bchmod\b[[:space:]]+[^|&;]+' \
+    | awk '{for (i=2;i<=NF;i++) print $i}'
+  printf '%s\n' "$cmd" \
+    | grep -oE '\binstall\b[[:space:]]+[^|&;]+' \
+    | awk '{print $NF}'
+  printf '%s\n' "$cmd" \
+    | grep -oE "Path\(['\"][^'\"]+['\"]\)\.write_text" \
+    | sed -E "s/Path\(['\"]//; s/['\"]\)\.write_text\$//"
+  printf '%s\n' "$cmd" \
+    | grep -oE "open\(['\"][^'\"]+['\"][[:space:]]*,[[:space:]]*['\"]w" \
+    | sed -E "s/open\(['\"]//; s/['\"][[:space:]]*,[[:space:]]*['\"]w\$//"
+}
+
+filter_bash_candidate() {
+  local p="$1"
+  [ -n "$p" ] || return 1
+  case "$p" in *'"'*) return 1 ;; esac
+  case "$p" in *"'"*) return 1 ;; esac
+  case "$p" in *'\'*) return 1 ;; esac
+  case "$p" in *'='*) return 1 ;; esac
+  case "$p" in *'$'*) return 1 ;; esac
+  case "$p" in *[[:space:]]*) return 1 ;; esac
+  case "$p" in *[A-Za-z0-9_]*) : ;; *) return 1 ;; esac
+  case "$p" in */*) return 0 ;; esac
+  case "$p" in *.[A-Za-z0-9_]*) return 0 ;; esac
+  return 1
+}
+
+bash_relative_or_drop() {
+  local p="$1"
+  case "$p" in
+    "~/"*) p="$HOME/${p#\~/}" ;;
+    "~") p="$HOME" ;;
+  esac
+  case "$p" in
+    /*)
+      if [ -n "$repo_root" ]; then
+        case "$p" in
+          "$repo_root"/*)
+            printf '%s\n' "${p#"$repo_root"/}"
+            return 0
+            ;;
+        esac
+      fi
+      return 1
+      ;;
+    *)
+      printf '%s\n' "$p"
+      return 0
+      ;;
+  esac
+}
+
+certain_raw=""
+uncertain_raw=""
+all_cmd_raw=""
+
+for entry in "${records[@]}"; do
+  rec_file="${entry#*:}"
+
+  c="$(jq -r '
+    select(.type=="assistant")
+    | .message.content[]?
+    | select(.type=="tool_use")
+    | select(.name=="Edit" or .name=="Write")
+    | .input.file_path // empty
+  ' "$rec_file" 2>/dev/null)"
+
+  n="$(jq -r '
+    select(.type=="assistant")
+    | .message.content[]?
+    | select(.type=="tool_use")
+    | select(.name=="NotebookEdit")
+    | .input.notebook_path // empty
+  ' "$rec_file" 2>/dev/null)"
+
+  certain_raw="$(printf '%s\n%s\n%s\n' "$certain_raw" "$c" "$n")"
+
+  while IFS= read -r b64; do
+    [ -n "$b64" ] || continue
+    cmd="$(printf '%s' "$b64" | base64 -d 2>/dev/null)"
+    [ -n "$cmd" ] || continue
+    all_cmd_raw="$(printf '%s\n%s\n' "$all_cmd_raw" "$cmd")"
+    while IFS= read -r cand; do
+      cand="$(printf '%s' "$cand" | tr -d '\r')"
+      [ -n "$cand" ] || continue
+      cand="$(strip_quotes "$cand")"
+      case "$cand" in
+        '$'*)
+          resolved="$(resolve_var_ref "$cmd" "$cand" 2>/dev/null)" && [ -n "$resolved" ] && cand="$(strip_quotes "$resolved")"
+          ;;
+      esac
+      filter_bash_candidate "$cand" || continue
+      rel="$(bash_relative_or_drop "$cand")" || continue
+      uncertain_raw="$(printf '%s\n%s\n' "$uncertain_raw" "$rel")"
+    done < <(extract_bash_targets "$cmd")
+  done < <(jq -r '
+    select(.type=="assistant")
+    | .message.content[]?
+    | select(.type=="tool_use")
+    | select(.name=="Bash")
+    | (.input.command // "") | @base64
+  ' "$rec_file" 2>/dev/null)
+done
+
+certain_list="$(printf '%s\n' "$certain_raw" | sed '/^$/d' | while IFS= read -r p; do to_relative "$p"; done | sort -u)"
+uncertain_list="$(printf '%s\n' "$uncertain_raw" | sed '/^$/d' | sort -u)"
+uncertain_list="$(comm -23 <(printf '%s\n' "$uncertain_list") <(printf '%s\n' "$certain_list") 2>/dev/null)"
+
+if [ "$porcelain" -eq 0 ]; then
+  echo "# 確実（Edit / Write / NotebookEdit）"
+  if [ -n "$certain_list" ]; then
+    printf '%s\n' "$certain_list"
+  else
+    echo "（無し）"
+  fi
+  echo
+  echo "# Bash由来（不確か）"
+  if [ -n "$uncertain_list" ]; then
+    printf '%s\n' "$uncertain_list"
+  else
+    echo "（無し）"
+  fi
+  exit 0
+fi
+
+if [ -z "$repo_root" ]; then
+  echo "エラー：--porcelain は git リポジトリの中でしか使えない（$project_dir はリポジトリではない）" >&2
+  exit 2
+fi
+
+touched_list="$(printf '%s\n%s\n' "$certain_list" "$uncertain_list" | sed '/^$/d' | grep -v '^/' | sort -u)"
+
+dirty_list=""
+while IFS= read -r -d '' entry; do
+  xy="${entry:0:2}"
+  path="${entry:3}"
+  dirty_list="$(printf '%s\n%s\n' "$dirty_list" "$path")"
+  case "$xy" in
+    R*|*R|C*|*C)
+      IFS= read -r -d '' _orig || true
+      ;;
+  esac
+done < <(git -C "$repo_root" status --porcelain=v1 -uall -z)
+dirty_list="$(printf '%s\n' "$dirty_list" | sed '/^$/d' | sort -u)"
+
+touched_and_dirty="$(comm -12 <(printf '%s\n' "$touched_list") <(printf '%s\n' "$dirty_list") 2>/dev/null)"
+touched_not_dirty="$(comm -23 <(printf '%s\n' "$touched_list") <(printf '%s\n' "$dirty_list") 2>/dev/null)"
+dirty_not_touched="$(comm -13 <(printf '%s\n' "$touched_list") <(printf '%s\n' "$dirty_list") 2>/dev/null)"
+
+write_corpus="$(printf '%s\n' "$all_cmd_raw" \
+  | grep -viE '^[[:space:]]*grep([[:space:]]|$)' \
+  | grep -viE '(^|[|;]|&&)[[:space:]]*sed[[:space:]]+-n\b')"
+
+mentioned_unclear=""
+still_untouched=""
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  abs="$repo_root/$f"
+  if printf '%s\n' "$write_corpus" | grep -qF -- "$f" \
+     || printf '%s\n' "$write_corpus" | grep -qF -- "$abs"; then
+    mentioned_unclear="$(printf '%s\n%s\n' "$mentioned_unclear" "$f")"
+  else
+    still_untouched="$(printf '%s\n%s\n' "$still_untouched" "$f")"
+  fi
+done <<EOF_LOOP
+$dirty_not_touched
+EOF_LOOP
+mentioned_unclear="$(printf '%s\n' "$mentioned_unclear" | sed '/^$/d' | sort -u)"
+still_untouched="$(printf '%s\n' "$still_untouched" | sed '/^$/d' | sort -u)"
+
+echo "# 触った かつ dirty"
+if [ -n "$touched_and_dirty" ]; then printf '%s\n' "$touched_and_dirty"; else echo "（無し）"; fi
+echo
+echo "# 触った が dirty でない（既にコミット済み等）"
+if [ -n "$touched_not_dirty" ]; then printf '%s\n' "$touched_not_dirty"; else echo "（無し）"; fi
+echo
+echo "# dirty で言及あり（読み書き不明。目で判定）"
+if [ -n "$mentioned_unclear" ]; then printf '%s\n' "$mentioned_unclear"; else echo "（無し）"; fi
+echo
+echo "# dirty だが触れた形跡なし（他人のものの疑い。消してはいけない）"
+if [ -n "$still_untouched" ]; then printf '%s\n' "$still_untouched"; else echo "（無し）"; fi
+
+exit 0
