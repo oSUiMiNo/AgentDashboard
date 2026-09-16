@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+
+set -u -o pipefail
+
+AD_BIN="$HOME/.claude/skills/dashboard_operate/bin/ad"
+PROD_TREE="$HOME/AgentDashboard"
+
+TITLE=""
+OUT=""
+TREE="$PROD_TREE"
+REPRO=""
+PATHTXT=""
+UNCONFIRMED_TEXT=""
+CODE_LOCS_TEXT=""
+SINCE=""
+CARD=""
+GREP=""
+LEVEL="info"
+LINES_TEXT=""
+
+usage() {
+  cat <<'EOF'
+使い方: report-draft --title <タイトル> [オプション]
+
+「再現条件・経路・該当行・次に読むコードの場所・確かめていないこと」の枠で
+調査レポートの下書き（Markdown）を1本書き出す。
+
+必須:
+  --title <文字列>          レポートのタイトル（ファイル名の元にもなる）
+
+内容を埋めるオプション（すべて省略可。埋めなかった枠は空欄のまま出す）:
+  --repro <文字列>          再現条件
+  --path <文字列>           経路（例：セッションホスト／ブラウザ など。knowledge/paths.md の表に合わせる）
+  --code <文字列>           次に読むコードの場所。複数回指定で箇条書きが増える
+  --unconfirmed <文字列>    確かめていないこと。複数回指定で箇条書きが増える
+
+該当行の取得（このいずれかを指定すると、ad logs --sanitize を実際に叩いて
+サニタイズ済みの行を埋め込む。省略すると該当行の枠は空欄のまま出す）:
+  --since <期間>            ad logs --since と同じ書式
+  --card <ID>               card_id で絞る
+  --grep <正規表現>         メッセージを正規表現で絞る
+  --level <水位>            trace/debug/info/warn/error（既定: info）
+  --tree <path>             実機ツリー（既定: ~/AgentDashboard）
+  --lines-text <文字列>     ad logs を叩く代わりに、呼び出し側が用意した
+                            （既に sanitize 済みの）行をそのまま埋め込む
+
+出力先:
+  --out <path>              .md で終われば、そのファイルへそのまま書く。
+                             ディレクトリ（または省略）なら、そのディレクトリ配下に
+                             NN-<タイトルのスラッグ>.md という名前で新規に作る。
+                             省略時は一時フォルダの下に作る（実イシューへは書かない）。
+  -h, --help                このヘルプ
+EOF
+}
+
+CODE_LOCS=()
+UNCONFIRMED=()
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --title) TITLE="$2"; shift 2 ;;
+    --out) OUT="$2"; shift 2 ;;
+    --tree) TREE="$2"; shift 2 ;;
+    --repro) REPRO="$2"; shift 2 ;;
+    --path) PATHTXT="$2"; shift 2 ;;
+    --code) CODE_LOCS+=("$2"); shift 2 ;;
+    --unconfirmed) UNCONFIRMED+=("$2"); shift 2 ;;
+    --since) SINCE="$2"; shift 2 ;;
+    --card) CARD="$2"; shift 2 ;;
+    --grep) GREP="$2"; shift 2 ;;
+    --level) LEVEL="$2"; shift 2 ;;
+    --lines-text) LINES_TEXT="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "未知の引数: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if [ -z "$TITLE" ]; then
+  echo "--title が必要です" >&2
+  usage >&2
+  exit 2
+fi
+
+slug() {
+  printf '%s' "$1" | tr -s ' \t/' '-' | tr -d '\n'
+}
+
+if [ -z "$OUT" ]; then
+  DIR="$(mktemp -d "${TMPDIR:-/tmp}/cause_investigate_log-first-report.XXXXXX")"
+  OUT="$DIR/01-$(slug "$TITLE").md"
+elif [[ "$OUT" == *.md ]]; then
+  mkdir -p "$(dirname "$OUT")" || { echo "出力先ディレクトリを作れません: $(dirname "$OUT")" >&2; exit 3; }
+else
+  mkdir -p "$OUT" || { echo "出力フォルダを作れません: $OUT" >&2; exit 3; }
+  NEXT=1
+  for f in "$OUT"/[0-9][0-9]-*.md; do
+    [ -e "$f" ] || continue
+    n=$(basename "$f" | sed -E 's/^([0-9]+)-.*/\1/')
+    [[ "$n" =~ ^[0-9]+$ ]] || continue
+    if [ "$((10#$n + 1))" -gt "$NEXT" ]; then NEXT=$((10#$n + 1)); fi
+  done
+  OUT="$OUT/$(printf '%02d' "$NEXT")-$(slug "$TITLE").md"
+fi
+
+LINES_BLOCK=""
+if [ -n "$LINES_TEXT" ]; then
+  LINES_BLOCK="$LINES_TEXT"
+elif [ -n "$SINCE" ] || [ -n "$CARD" ] || [ -n "$GREP" ]; then
+  if [ -z "$SINCE" ]; then SINCE="2h"; fi
+  STATE_DIR="$(cd "$TREE" 2>/dev/null && timeout 10 "$AD_BIN" state-dir 2>/dev/null)"
+  if [ -z "$STATE_DIR" ]; then
+    echo "state-dir を解決できませんでした（--tree $TREE）。該当行は空欄のまま出します。" >&2
+  else
+    declare -a LOGS_ARGS=(logs --json --sanitize --state-dir "$STATE_DIR" --since "$SINCE" --level "$LEVEL")
+    [ -n "$CARD" ] && LOGS_ARGS+=(--card "$CARD")
+    [ -n "$GREP" ] && LOGS_ARGS+=(--grep "$GREP")
+    LINES_BLOCK="$(timeout 60 "$AD_BIN" "${LOGS_ARGS[@]}" 2>/dev/null)"
+    if [ -z "$LINES_BLOCK" ]; then
+      LINES_BLOCK="（該当する行は無かった。これ自体が成果——条件を確かめること）"
+    fi
+  fi
+fi
+
+{
+  echo "# $TITLE"
+  echo ""
+  echo "---"
+  echo "<br/>"
+  echo "<br/>"
+  echo ""
+  echo "## 再現条件"
+  if [ -n "$REPRO" ]; then echo "$REPRO"; else echo "（未記入）"; fi
+  echo ""
+  echo "---"
+  echo "<br/>"
+  echo "<br/>"
+  echo ""
+  echo "## 経路"
+  if [ -n "$PATHTXT" ]; then echo "$PATHTXT"; else echo "（未記入。knowledge/paths.md の表と対応させること）"; fi
+  echo ""
+  echo "---"
+  echo "<br/>"
+  echo "<br/>"
+  echo ""
+  echo "## 該当行"
+  echo "\`ad logs --sanitize\` を通した行（ホームのパス・利用者名・メール・トークン・ホスト名は伏せてある）。"
+  echo ""
+  echo '```json'
+  if [ -n "$LINES_BLOCK" ]; then echo "$LINES_BLOCK"; else echo "（未取得）"; fi
+  echo '```'
+  echo ""
+  echo "---"
+  echo "<br/>"
+  echo "<br/>"
+  echo ""
+  echo "## 次に読むコードの場所"
+  if [ ${#CODE_LOCS[@]} -gt 0 ]; then
+    for loc in "${CODE_LOCS[@]}"; do echo "- $loc"; done
+  else
+    echo "（未記入。コードを読むのはここより後——段4の後であることを守る）"
+  fi
+  echo ""
+  echo "---"
+  echo "<br/>"
+  echo "<br/>"
+  echo ""
+  echo "## 確かめていないこと"
+  if [ ${#UNCONFIRMED[@]} -gt 0 ]; then
+    for u in "${UNCONFIRMED[@]}"; do echo "- $u"; done
+  else
+    echo "（未記入）"
+  fi
+} > "$OUT"
+
+echo "書き出し先: $OUT"
+if [ -n "$LINES_BLOCK" ] && [ "$LINES_BLOCK" != "（該当する行は無かった。これ自体が成果——条件を確かめること）" ] && [ -z "$LINES_TEXT" ]; then
+  echo "該当行は ad logs --sanitize を通して取得した（$(echo "$LINES_BLOCK" | wc -l)行）。"
+fi

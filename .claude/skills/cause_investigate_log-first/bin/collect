@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+
+set -u -o pipefail
+
+AD_BIN="$HOME/.claude/skills/dashboard_operate/bin/ad"
+RUNNING_STATE_BIN="$HOME/Dev/AgentDashboard/.claude/skills/_shared/bin/running-state"
+PROD_TREE="$HOME/AgentDashboard"
+JQ_BIN="/usr/bin/jq"
+
+SINCE="2h"
+SPLIT=""
+CARD=""
+GREP=""
+LEVEL="debug"
+PROC=""
+TREE="$PROD_TREE"
+OUT=""
+
+usage() {
+  cat <<'EOF'
+使い方: collect --since <期間> [オプション]
+
+段0（running-state）と段1（ad logs）を1つの作業フォルダへ落とす。
+
+オプション:
+  --since <期間>     ad logs の --since と同じ書式。90s/30m/1h/2d（既定: 2h）
+  --split <分>       取れた行を ts で <分> 分刻みにファイル分割する（ワーカ1体に1窓）
+  --card <ID>        card_id で絞る
+  --grep <正規表現>  ad logs の --grep と同じ
+  --level <水位>     trace/debug/info/warn/error（既定: debug）
+  --proc <名前>      dashboard/session-host/browser/browser-anon で絞る
+  --tree <path>      実機ツリー。ad state-dir をこのディレクトリから解決する（既定: ~/AgentDashboard）
+  --out <path>       出力フォルダ（既定: 一時フォルダを新規作成して使う。
+                      呼ぶ側がスクラッチパッド配下のパスを持っているなら、それを渡すこと）
+  -h, --help         このヘルプ
+
+出力フォルダの中身:
+  running-state.json    段0：どの版・どの実行ファイル・どの state_dir で走っているか
+  state-dir.txt          解決した state_dir（1行）
+  window-01.jsonl 以降    段1：ad logs --json の生ログ（--split 無しなら window-01.jsonl のみ）
+  meta.json               集めた条件（since/level/card/grep/proc/state_dir/window数/行数）
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --since) SINCE="$2"; shift 2 ;;
+    --split) SPLIT="$2"; shift 2 ;;
+    --card) CARD="$2"; shift 2 ;;
+    --grep) GREP="$2"; shift 2 ;;
+    --level) LEVEL="$2"; shift 2 ;;
+    --proc) PROC="$2"; shift 2 ;;
+    --tree) TREE="$2"; shift 2 ;;
+    --out) OUT="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "未知の引数: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if [ ! -x "$AD_BIN" ]; then
+  echo "ad が見つかりません: $AD_BIN" >&2
+  exit 3
+fi
+
+if [ -z "$OUT" ]; then
+  OUT="$(mktemp -d "${TMPDIR:-/tmp}/cause_investigate_log-first.XXXXXX")"
+fi
+mkdir -p "$OUT" || { echo "出力フォルダを作れません: $OUT" >&2; exit 3; }
+
+if [ -x "$RUNNING_STATE_BIN" ]; then
+  timeout 20 "$RUNNING_STATE_BIN" --json > "$OUT/running-state.json" 2>"$OUT/running-state.err"
+  RC=$?
+  if [ $RC -ne 0 ]; then
+    echo "running-state が失敗しました（rc=$RC）。$OUT/running-state.err を見てください。" >&2
+  fi
+else
+  echo "running-state が見つかりません: $RUNNING_STATE_BIN（段0を飛ばします）" >&2
+fi
+
+STATE_DIR="$(cd "$TREE" 2>/dev/null && timeout 10 "$AD_BIN" state-dir 2>"$OUT/state-dir.err")"
+RC=$?
+if [ $RC -ne 0 ] || [ -z "$STATE_DIR" ]; then
+  echo "state-dir を解決できませんでした（--tree $TREE）。$OUT/state-dir.err を見てください。" >&2
+  exit 4
+fi
+printf '%s\n' "$STATE_DIR" > "$OUT/state-dir.txt"
+
+RAW="$OUT/.raw.jsonl"
+declare -a LOGS_ARGS=(logs --json --state-dir "$STATE_DIR" --since "$SINCE" --level "$LEVEL")
+[ -n "$CARD" ] && LOGS_ARGS+=(--card "$CARD")
+[ -n "$GREP" ] && LOGS_ARGS+=(--grep "$GREP")
+[ -n "$PROC" ] && LOGS_ARGS+=(--proc "$PROC")
+
+timeout 90 "$AD_BIN" "${LOGS_ARGS[@]}" > "$RAW" 2>"$OUT/logs.err"
+RC=$?
+if [ $RC -ne 0 ]; then
+  echo "ad logs が失敗しました（rc=$RC）。$OUT/logs.err を見てください。" >&2
+  exit 5
+fi
+
+LINE_COUNT=$(wc -l < "$RAW" | tr -d ' ')
+WINDOW_COUNT=0
+
+if [ "$LINE_COUNT" -eq 0 ]; then
+  : > "$OUT/window-01.jsonl"
+  WINDOW_COUNT=1
+elif [ -n "$SPLIT" ]; then
+  "$JQ_BIN" -s -r --argjson gran "$((SPLIT * 60))" '
+    ( map(.ts | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) | min ) as $min
+    | .[]
+    | ( (.ts | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) - $min ) as $rel
+    | ( ($rel / $gran) | floor ) as $b
+    | "\($b)\t\(. | tostring)"
+  ' "$RAW" 2>"$OUT/split.err" | \
+  awk -v outdir="$OUT" '
+    {
+      idx = index($0, "\t")
+      bucket = substr($0, 1, idx - 1)
+      line = substr($0, idx + 1)
+      file = sprintf("%s/window-%02d.jsonl", outdir, bucket + 1)
+      print line >> file
+      count[file]++
+    }
+    END {
+      for (f in count) print f > "/dev/stderr"
+    }
+  ' 2>"$OUT/.windows.list"
+  RC=$?
+  if [ $RC -ne 0 ]; then
+    echo "窓分割に失敗しました（rc=$RC）。$OUT/split.err を見てください。生ログは $RAW に残しています。" >&2
+    exit 6
+  fi
+  WINDOW_COUNT=$(wc -l < "$OUT/.windows.list" | tr -d ' ')
+  rm -f "$OUT/.windows.list"
+else
+  cp "$RAW" "$OUT/window-01.jsonl"
+  WINDOW_COUNT=1
+fi
+rm -f "$RAW"
+
+"$JQ_BIN" -n \
+  --arg since "$SINCE" \
+  --arg split "$SPLIT" \
+  --arg card "$CARD" \
+  --arg grep "$GREP" \
+  --arg level "$LEVEL" \
+  --arg proc "$PROC" \
+  --arg tree "$TREE" \
+  --arg state_dir "$STATE_DIR" \
+  --argjson line_count "$LINE_COUNT" \
+  --argjson window_count "$WINDOW_COUNT" \
+  '{since:$since, split:$split, card:$card, grep:$grep, level:$level, proc:$proc,
+    tree:$tree, state_dir:$state_dir, line_count:$line_count, window_count:$window_count}' \
+  > "$OUT/meta.json"
+
+echo "出力フォルダ: $OUT"
+echo "state_dir: $STATE_DIR"
+echo "行数: $LINE_COUNT / 窓数: $WINDOW_COUNT"
+if [ "$LINE_COUNT" -eq 0 ]; then
+  echo "この窓にログは無かった（--sinceを広げるか、--card/--grep/--procを緩めて確かめること）。"
+fi

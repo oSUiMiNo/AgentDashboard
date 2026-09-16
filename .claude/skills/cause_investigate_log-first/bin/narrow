@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+
+set -u -o pipefail
+
+JQ_BIN="/usr/bin/jq"
+
+FOLDER=""
+CARD=""
+TOP=20
+AS_JSON=0
+
+usage() {
+  cat <<'EOF'
+使い方: narrow <collectの出力フォルダ> [オプション]
+
+オプション:
+  --card <ID>   card_id で1枚に絞る
+  --top <N>     error/warn の先頭表示件数（既定: 20）
+  --json        表ではなく JSON で出す
+  -h, --help    このヘルプ
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --card) CARD="$2"; shift 2 ;;
+    --top) TOP="$2"; shift 2 ;;
+    --json) AS_JSON=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *)
+      if [ -z "$FOLDER" ]; then FOLDER="$1"; shift; else
+        echo "未知の引数: $1" >&2; usage >&2; exit 2
+      fi
+      ;;
+  esac
+done
+
+if [ -z "$FOLDER" ]; then
+  echo "collect の出力フォルダを指定してください" >&2
+  usage >&2
+  exit 2
+fi
+if [ ! -d "$FOLDER" ]; then
+  echo "フォルダが無い: $FOLDER" >&2
+  exit 2
+fi
+
+shopt -s nullglob
+WINDOWS=("$FOLDER"/window-*.jsonl)
+shopt -u nullglob
+if [ ${#WINDOWS[@]} -eq 0 ]; then
+  echo "窓ファイル（window-*.jsonl）が無い: $FOLDER" >&2
+  exit 3
+fi
+
+CLASSIFY='
+  def path_of:
+    if .target == "browser" then "ブラウザ"
+    elif (.target | startswith("server_core::")) or .target == "agentdashboard_core::cli" or .target == "tower_sessions::service" then "サーバ"
+    elif .target == "session_host_core::parser" then "パーサ"
+    elif (.target | startswith("session_host_core::")) then "セッションホスト"
+    else "不明"
+    end;
+'
+
+CARD_FILTER='true'
+if [ -n "$CARD" ]; then
+  CARD_FILTER='(.card_id // "") == $card'
+fi
+
+if [ "$AS_JSON" -eq 1 ]; then
+  cat "${WINDOWS[@]}" | "$JQ_BIN" -s --arg card "$CARD" "
+    $CLASSIFY
+    [ .[] | select($CARD_FILTER) ] as \$rows
+    | {
+        total: (\$rows | length),
+        by_path: (\$rows | group_by(path_of) | map({path: (.[0]|path_of), target_count: (group_by(.target)|length), count: length}) | sort_by(-.count)),
+        top_errors: (\$rows | map(select(.level==\"ERROR\")) | .[0:$TOP]),
+        top_warns: (\$rows | map(select(.level==\"WARN\")) | .[0:$TOP])
+      }
+  "
+  exit 0
+fi
+
+TOTAL=$(cat "${WINDOWS[@]}" | "$JQ_BIN" -s --arg card "$CARD" "$CLASSIFY [ .[] | select($CARD_FILTER) ] | length")
+echo "対象: $FOLDER（窓 ${#WINDOWS[@]} 本）$([ -n "$CARD" ] && echo "／card=$CARD")"
+echo "総行数: $TOTAL"
+echo ""
+echo "## 経路ごとの件数（target が真の識別子。proc は3経路が dashboard に重なる）"
+printf '%-10s %-8s %-8s %s\n' "経路" "件数" "target数" "代表target"
+cat "${WINDOWS[@]}" | "$JQ_BIN" -s -r --arg card "$CARD" "
+  $CLASSIFY
+  [ .[] | select($CARD_FILTER) ]
+  | group_by(path_of)
+  | map({
+      path: (.[0] | path_of),
+      count: length,
+      target_count: (group_by(.target) | length),
+      top_target: (group_by(.target) | max_by(length) | .[0].target // \"\")
+    })
+  | sort_by(-.count)
+  | .[]
+  | \"\(.path)\t\(.count)\t\(.target_count)\t\(.top_target)\"
+" | while IFS=$'\t' read -r path count tcount top_target; do
+  printf '%-10s %-8s %-8s %s\n' "$path" "$count" "$tcount" "$top_target"
+done
+
+echo ""
+echo "## error（先頭 $TOP 件）"
+cat "${WINDOWS[@]}" | "$JQ_BIN" -r --arg card "$CARD" "
+  select(($CARD_FILTER))
+  | select(.level==\"ERROR\")
+  | \"\(.ts)\t\(.target)\t\(.card_id // \"-\")\t\(.msg)\"
+" 2>/dev/null | head -n "$TOP"
+
+echo ""
+echo "## warn（先頭 $TOP 件）"
+cat "${WINDOWS[@]}" | "$JQ_BIN" -r --arg card "$CARD" "
+  select(($CARD_FILTER))
+  | select(.level==\"WARN\")
+  | \"\(.ts)\t\(.target)\t\(.card_id // \"-\")\t\(.msg)\"
+" 2>/dev/null | head -n "$TOP"
+
+if [ "$TOTAL" -eq 0 ]; then
+  echo ""
+  echo "この条件（フォルダ／card）に該当する行は無かった。「無い」も成果として報告すること。"
+fi
