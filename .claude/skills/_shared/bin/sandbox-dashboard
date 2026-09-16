@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+set -u -o pipefail
+
+PJT_ROOT="$HOME/Dev/AgentDashboard"
+BIN_DIR="$PJT_ROOT/.claude/skills/_shared/bin"
+STATE_ROOT="$PJT_ROOT/.claude/skills/_shared/state"
+SANDBOX_STATE_ROOT="$STATE_ROOT/sandbox"
+SANDBOX_JSON="$STATE_ROOT/sandbox.json"
+OUR_SERVERS="$BIN_DIR/our-servers"
+SERVER_BIN="$PJT_ROOT/server/target/debug/agentdashboard"
+FAKE_CLAUDE_BIN="$PJT_ROOT/server/target/debug/fake-claude"
+PROD_PORT=8787
+RESERVED_LOW=4173
+RESERVED_HIGH=4179
+DEFAULT_START_PORT=8790
+
+port_in_use() {
+  local port="$1"
+  ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE ":${port}\$"
+}
+
+pick_port() {
+  local port="$1"
+  while :; do
+    if [[ "$port" -eq "$PROD_PORT" ]]; then
+      port=$((port + 1))
+      continue
+    fi
+    if [[ "$port" -ge "$RESERVED_LOW" && "$port" -le "$RESERVED_HIGH" ]]; then
+      port=$((RESERVED_HIGH + 1))
+      continue
+    fi
+    if port_in_use "$port"; then
+      port=$((port + 1))
+      continue
+    fi
+    printf '%s\n' "$port"
+    return 0
+  done
+}
+
+cmd_up() {
+  local requested_start=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --port)
+        shift
+        if [[ $# -eq 0 ]]; then
+          echo "sandbox-dashboard up: --port には値が要ります" >&2
+          return 2
+        fi
+        requested_start="$1"
+        shift
+        ;;
+      *)
+        echo "sandbox-dashboard up: 不明な引数：$1" >&2
+        return 2
+        ;;
+    esac
+  done
+
+  if [[ -x "$OUR_SERVERS" ]]; then
+    "$OUR_SERVERS" count >/dev/null 2>&1
+    if [[ $? -eq 1 ]]; then
+      echo "残骸がある" >&2
+      return 1
+    fi
+  else
+    echo "our-servers が見つからないので残骸チェックを省略します" >&2
+  fi
+
+  if [[ ! -x "$SERVER_BIN" || ! -x "$FAKE_CLAUDE_BIN" ]]; then
+    echo "make build-web build-debug が必要です" >&2
+    return 2
+  fi
+
+  local port
+  port=$(pick_port "${requested_start:-$DEFAULT_START_PORT}")
+
+  local state_dir="$SANDBOX_STATE_ROOT/$port"
+  local claude_home="$state_dir/claude-home"
+  mkdir -p "$claude_home"
+
+  local config_file="$state_dir/config.toml"
+  cat > "$config_file" <<EOF
+port = $port
+bind_addr = "127.0.0.1"
+state_dir = "$state_dir"
+selfheal_enabled = false
+stalled_threshold_secs = 15
+always_bypass_permissions = true
+EOF
+
+  local log_file="$state_dir/server.log"
+  AGENTDASHBOARD_CLAUDE_BIN="$FAKE_CLAUDE_BIN" \
+  AGENTDASHBOARD_CLAUDE_HOME="$claude_home" \
+  RUST_LOG="info" \
+  AGENTDASHBOARD_VERSION_HANDED_OVER="1" \
+  AGENTDASHBOARD_VERSION_SUPPORTED="0" \
+  nohup "$SERVER_BIN" --config "$config_file" >"$log_file" 2>&1 &
+  local pid=$!
+  disown "$pid" 2>/dev/null
+
+  local ok=0
+  local i
+  for ((i = 0; i < 20; i++)); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      echo "サーバプロセスが起動直後に終了しました。ログ：$log_file" >&2
+      return 1
+    fi
+    local code
+    code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/api/me" 2>/dev/null)
+    if [[ "$code" == "200" ]]; then
+      ok=1
+      break
+    fi
+    sleep 1
+  done
+
+  if [[ "$ok" -ne 1 ]]; then
+    echo "20秒待っても /api/me が200を返しませんでした。ログ：$log_file" >&2
+    kill -TERM "$pid" 2>/dev/null
+    sleep 3
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null
+    fi
+    return 1
+  fi
+
+  local started_at
+  started_at=$(date -Iseconds)
+  jq -n \
+    --argjson pid "$pid" \
+    --argjson port "$port" \
+    --arg state_dir "$state_dir" \
+    --arg log "$log_file" \
+    --arg started_at "$started_at" \
+    '{pid: $pid, port: $port, state_dir: $state_dir, log: $log, started_at: $started_at}' \
+    > "$SANDBOX_JSON"
+
+  printf 'http://127.0.0.1:%s/\n' "$port"
+  return 0
+}
+
+cmd_down() {
+  if [[ ! -f "$SANDBOX_JSON" ]]; then
+    echo "立っていない"
+    return 0
+  fi
+
+  local pid state_dir
+  pid=$(jq -r '.pid // empty' "$SANDBOX_JSON" 2>/dev/null)
+  state_dir=$(jq -r '.state_dir // empty' "$SANDBOX_JSON" 2>/dev/null)
+
+  if [[ -n "$pid" ]]; then
+    if [[ -x "$OUR_SERVERS" ]]; then
+      "$OUR_SERVERS" stop "$pid"
+    else
+      kill -TERM "$pid" 2>/dev/null
+      sleep 3
+      if kill -0 "$pid" 2>/dev/null; then
+        kill -KILL "$pid" 2>/dev/null
+      fi
+    fi
+  fi
+
+  if [[ -n "$state_dir" && -d "$state_dir" ]]; then
+    rm -rf "$state_dir"
+  fi
+
+  rm -f "$SANDBOX_JSON"
+  return 0
+}
+
+cmd_status() {
+  if [[ ! -f "$SANDBOX_JSON" ]]; then
+    echo "立っていない"
+    return 0
+  fi
+
+  cat "$SANDBOX_JSON"
+
+  local pid
+  pid=$(jq -r '.pid // empty' "$SANDBOX_JSON" 2>/dev/null)
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    echo "生きている：PID $pid"
+  else
+    echo "死んでいる：PID $pid"
+  fi
+  return 0
+}
+
+main() {
+  local cmd="${1:-}"
+  case "$cmd" in
+    up)
+      shift
+      cmd_up "$@"
+      ;;
+    down)
+      shift
+      cmd_down "$@"
+      ;;
+    status)
+      shift
+      cmd_status "$@"
+      ;;
+    *)
+      echo "使い方：sandbox-dashboard up [--port N] | down | status" >&2
+      return 2
+      ;;
+  esac
+}
+
+main "$@"
+exit $?

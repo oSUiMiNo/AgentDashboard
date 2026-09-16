@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DESIGN_MD="${DESIGN_MD:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)/DESIGN.md}"
+
+if [[ ! -f "$DESIGN_MD" ]]; then
+  echo "design-sections: DESIGN.md が見つからない（$DESIGN_MD）" >&2
+  exit 1
+fi
+
+if [[ $# -eq 0 ]]; then
+  echo "使い方：design-sections <触ったファイルのパス>..." >&2
+  exit 1
+fi
+
+find_heading() {
+  local id="$1"
+  local pattern
+  if [[ "$id" == *.* ]]; then
+    pattern="^#+ ${id//./\\.} "
+  else
+    pattern="^#+ ${id}\\. "
+  fi
+  grep -n -E "$pattern" "$DESIGN_MD" | head -1
+}
+
+print_section() {
+  local id="$1"
+  local indent="${2:-}"
+  local hit
+  hit="$(find_heading "$id")"
+  if [[ -z "$hit" ]]; then
+    echo "${indent}§${id}  (見出しが見つからない。DESIGN.md の見出しが変わった可能性がある)" >&2
+    return
+  fi
+  local line title
+  line="${hit%%:*}"
+  title="${hit#*:}"
+  title="$(echo "$title" | sed -E 's/^#+\s*[0-9.]+\s*//')"
+  printf '%s§%-6s %5s  %s\n' "$indent" "$id" "$line" "$title"
+}
+
+ICON_KEYWORDS=(icon Icon sticker Sticker filekind FileKind badge Badge)
+LAYOUT_KEYWORDS=(layout Layout sidebar Sidebar SessionView session-view PjtView pjt-view screen.tsx App.tsx)
+
+is_icon_file=0
+is_layout_file=0
+for arg in "$@"; do
+  for kw in "${ICON_KEYWORDS[@]}"; do
+    if [[ "$arg" == *"$kw"* ]]; then
+      is_icon_file=1
+    fi
+  done
+  for kw in "${LAYOUT_KEYWORDS[@]}"; do
+    if [[ "$arg" == *"$kw"* ]]; then
+      is_layout_file=1
+    fi
+  done
+done
+
+echo "# 読む順（§0.4）— 対象：$*"
+echo
+print_section "0.2"
+print_section "4"
+print_section "6"
+print_section "8"
+print_section "34"
+print_section "34.1" "  "
+print_section "34.2" "  "
+print_section "34.3" "  "
+print_section "34.4" "  "
+print_section "34.5" "  "
+
+if [[ "$is_icon_file" -eq 1 ]]; then
+  echo
+  echo "# アイコンに関わるファイルのため追加（§0.4）"
+  print_section "16"
+  print_section "22"
+fi
+
+if [[ "$is_layout_file" -eq 1 ]]; then
+  echo
+  echo "# 配置に関わるファイルのため追加（§0.4）"
+  print_section "39"
+fi

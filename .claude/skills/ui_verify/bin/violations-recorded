@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+DESIGN_MD="${DESIGN_MD:-$ROOT/DESIGN.md}"
+
+if [[ ! -d "$ROOT" ]]; then
+  echo "エラー：リポジトリルートが見つかりません：$ROOT" >&2
+  exit 1
+fi
+
+if [[ ! -f "$DESIGN_MD" ]]; then
+  echo "エラー：DESIGN.md が見つかりません：$DESIGN_MD" >&2
+  exit 1
+fi
+
+echo "## コード側（web/src/**/*.test.ts* のテスト名）"
+if [[ -d "$ROOT/web/src" ]]; then
+  grep -rnE "(it|test)\(['\"].*(違反|床を割|承知のうえ)" \
+    "$ROOT/web/src" \
+    --include='*.test.ts' --include='*.test.tsx' \
+    || echo "（該当なし）"
+else
+  echo "（web/src が見つかりません：$ROOT/web/src）"
+fi
+
+echo ""
+echo "## DESIGN.md 本文側"
+grep -nE "(違反|承知のうえで)" "$DESIGN_MD" || echo "（該当なし）"

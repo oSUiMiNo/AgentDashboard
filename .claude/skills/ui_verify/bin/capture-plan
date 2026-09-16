@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -lt 4 ]]; then
+  echo "使い方：capture-plan <サンドボックスのベースURL> <ホスト名> <プロジェクト名> <カードID> [フェーズ番号] [保存先ディレクトリ]" >&2
+  exit 1
+fi
+
+BASE_URL="${1%/}"
+HOST_NAME="$2"
+PROJECT_NAME="$3"
+CARD_ID="$4"
+PHASE="${5:-計画}"
+SAVE_DIR="${6:-参考}"
+
+DATE="$(date +%Y-%m-%d)"
+
+declare -A SCREEN_URLS=(
+  [PJT専用画面]="${BASE_URL}/p/${HOST_NAME}/${PROJECT_NAME}"
+  [セッション専用画面]="${BASE_URL}/s/${CARD_ID}"
+)
+
+declare -A WIDTHS=(
+  [PC幅]=1440
+  [約400px]=400
+)
+
+for screen in PJT専用画面 セッション専用画面; do
+  for width_label in PC幅 約400px; do
+    url="${SCREEN_URLS[$screen]}"
+    width="${WIDTHS[$width_label]}"
+    filename="${SAVE_DIR}/${DATE}_${PHASE}_${screen}_${width_label}.png"
+    printf '%s\t%s\t%s\n' "$url" "$width" "$filename"
+  done
+done
