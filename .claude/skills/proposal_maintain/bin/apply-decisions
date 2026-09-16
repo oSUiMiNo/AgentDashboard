@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import re
+import sys
+from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
+
+FIELD_RE = re.compile(r"^(提案|担当イシュー|背景|特記事項)：")
+
+
+def read_lines(path: Path):
+    return path.read_text(encoding="utf-8").splitlines(keepends=True)
+
+
+def split_table_row(line: str):
+    return [c.strip() for c in line.strip().strip("|\n").split("|")]
+
+
+def is_separator_row(cells):
+    return all(set(c) <= set("-: ") and c != "" for c in cells)
+
+
+def find_row_line(lines, no):
+    in_section = False
+    header = None
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s.startswith("## 概要表"):
+            in_section = True
+            continue
+        if in_section and s.startswith("## "):
+            break
+        if not in_section or not s.startswith("|"):
+            continue
+        cells = split_table_row(line)
+        if header is None:
+            header = cells
+            continue
+        if is_separator_row(cells):
+            continue
+        if cells and cells[0] == str(no):
+            return i, header
+    return None, header
+
+
+def set_cell(lines, line_no, header, col_name, new_value):
+    cells = split_table_row(lines[line_no])
+    idx = header.index(col_name)
+    cells[idx] = new_value
+    lines[line_no] = "| " + " | ".join(cells) + " |\n"
+
+
+def find_detail_section(lines, no):
+    pat = re.compile(r"^###\s+" + re.escape(str(no)) + r"\s*$")
+    start = None
+    for i, line in enumerate(lines):
+        if pat.match(line.strip()):
+            start = i
+            break
+    if start is None:
+        return None, None
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        s = lines[j].strip()
+        if s.startswith("### ") or s.startswith("## ") or s.startswith("<!--"):
+            end = j
+            break
+    return start, end
+
+
+def find_field(lines, start, end, field_label):
+    for i in range(start, end):
+        if lines[i].strip().startswith(field_label):
+            j = i + 1
+            while j < end and not FIELD_RE.match(lines[j].strip()):
+                j += 1
+            return i, j
+    return None, None
+
+
+def append_field_text(lines, start, end, field_label, extra_text):
+    fi, fend = find_field(lines, start, end, field_label)
+    if fi is None:
+        return False
+    insert_at = fend
+    while insert_at > fi + 1 and lines[insert_at - 1].strip() == "":
+        insert_at -= 1
+    lines.insert(insert_at, extra_text.rstrip("\n") + "\n")
+    return True
+
+
+def replace_field_text(lines, start, end, field_label, new_text):
+    fi, fend = find_field(lines, start, end, field_label)
+    if fi is None:
+        return False
+    lines[fi:fend] = [field_label + new_text.rstrip("\n") + "\n"]
+    return True
+
+
+def append_changelog(lines, timestamp, summary):
+    in_section = False
+    insert_at = len(lines)
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s.startswith("## 変更ログ"):
+            in_section = True
+            continue
+        if in_section:
+            if s.startswith("## "):
+                break
+            if s.startswith("|"):
+                insert_at = i + 1
+    lines.insert(insert_at, f"| {timestamp} | {summary} |\n")
+
+
+def process_file(path: Path, file_decisions, now_ts):
+    lines = read_lines(path)
+    summaries = []
+
+    for d in file_decisions:
+        no = d["no"]
+        action = d["action"]
+        line_no, header = find_row_line(lines, no)
+        if line_no is None:
+            print(f"警告：{path} に #{no} の行が見つからない。スキップする。", file=sys.stderr)
+            continue
+
+        if action == "merge":
+            into = d["into"]
+            set_cell(lines, line_no, header, "完了ステータス", "[x]")
+            start, end = find_detail_section(lines, no)
+            if start is not None:
+                if not append_field_text(lines, start, end, "特記事項：", f"→ #{into} へ統合。"):
+                    print(f"警告：{path} #{no} の特記事項が見つからず反映できなかった。", file=sys.stderr)
+            into_line_no, _ = find_row_line(lines, into)
+            if into_line_no is not None:
+                into_start, into_end = find_detail_section(lines, into)
+                if into_start is not None:
+                    note = d.get("note") or f"#{no} を統合"
+                    if not append_field_text(lines, into_start, into_end, "特記事項：", note):
+                        print(f"警告：{path} #{into} の特記事項が見つからず反映できなかった。", file=sys.stderr)
+            summaries.append(f"#{no} を #{into} へ統合")
+
+        elif action == "close":
+            set_cell(lines, line_no, header, "完了ステータス", "[x]")
+            start, end = find_detail_section(lines, no)
+            reason = d.get("note", "（理由未記入）")
+            if start is not None:
+                if not append_field_text(lines, start, end, "特記事項：", f"クローズ：{reason}"):
+                    print(f"警告：{path} #{no} の特記事項が見つからず反映できなかった。", file=sys.stderr)
+            summaries.append(f"#{no} をクローズ")
+
+        elif action == "edit":
+            start, end = find_detail_section(lines, no)
+            new_text = d.get("text", "")
+            if start is not None and new_text:
+                if not replace_field_text(lines, start, end, "提案：", new_text):
+                    print(f"警告：{path} #{no} の提案欄が見つからず反映できなかった。", file=sys.stderr)
+            summaries.append(f"#{no} を編集")
+
+        else:
+            print(f"警告：未知の action「{action}」（#{no}）。スキップする。", file=sys.stderr)
+
+    if summaries:
+        append_changelog(lines, now_ts, "、".join(summaries))
+        path.write_text("".join(lines), encoding="utf-8")
+    return summaries
+
+
+def main():
+    ap = argparse.ArgumentParser(description="decisions JSON を PROPOSAL.md へ機械的に反映する")
+    ap.add_argument("decisions", help="decisions JSON ファイル")
+    ap.add_argument("--root", default=".", help="PJT ルート（既定：カレントディレクトリ）")
+    ap.add_argument("--now", help="変更ログに書く時刻（yyyy-mmdd-hhmm。省略時は現在時刻）")
+    args = ap.parse_args()
+
+    root = Path(args.root).resolve()
+    try:
+        decisions = json.loads(Path(args.decisions).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"エラー：decisions が読めない：{e}", file=sys.stderr)
+        return 2
+
+    now_ts = args.now or datetime.now().strftime("%Y-%m%d-%H%M")
+
+    by_file = defaultdict(list)
+    for d in decisions:
+        by_file[d["file"]].append(d)
+
+    total = 0
+    for rel, ds in by_file.items():
+        path = (root / rel).resolve()
+        if not path.is_file():
+            print(f"警告：{rel} が見つからない。スキップする。", file=sys.stderr)
+            continue
+        summaries = process_file(path, ds, now_ts)
+        print(f"{rel}：{len(summaries)} 件反映。")
+        total += len(summaries)
+
+    return 0 if total > 0 else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

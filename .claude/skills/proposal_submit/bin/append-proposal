@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+set -u
+set -o pipefail
+
+usage() {
+  cat >&2 <<'USAGE_EOF'
+使い方：
+  append-proposal <PROPOSAL.md のパス> --proposal <提案の説明> \
+      [--session <セッションID>] [--issue <担当イシュー>] \
+      [--background <背景>] [--note <特記事項>]
+
+  <PROPOSAL.md のパス>   追記先。無ければ _shared/templates/PROPOSAL.md から作る
+  --proposal <text>      提案の説明（必須）。概要表の要約もこれから自動生成する
+  --session <ID>         問い合わせ先セッションID。省略時は $CLAUDE_SESSION_ID を見る。
+                          どちらも無ければエラー
+  --issue <text>         担当イシュー名（省略時「無し」）
+  --background <text>    背景（省略時「無し」）
+  --note <text>          特記事項（省略時「無し」）
+
+終了コード：
+  0  正常終了
+  1  claim が他セッションに握られていて、待っても取れなかった
+  2  引数の誤り
+  4  自己検証に失敗（追記後の読み直しで行・節が1つずつ見つからない）
+USAGE_EOF
+}
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SKILLS_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+TEMPLATE="$SKILLS_DIR/_shared/templates/PROPOSAL.md"
+CLAIM_BIN="$SKILLS_DIR/_shared/bin/claim"
+
+dest=""
+session_id="${CLAUDE_SESSION_ID:-}"
+proposal=""
+issue=""
+background=""
+note=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --session)
+      session_id="${2:?--session には値が要る}"; shift 2 ;;
+    --proposal)
+      proposal="${2:?--proposal には値が要る}"; shift 2 ;;
+    --issue)
+      issue="${2:?--issue には値が要る}"; shift 2 ;;
+    --background)
+      background="${2:?--background には値が要る}"; shift 2 ;;
+    --note)
+      note="${2:?--note には値が要る}"; shift 2 ;;
+    -h|--help)
+      usage; exit 0 ;;
+    -*)
+      echo "不明な引数：$1" >&2; usage; exit 2 ;;
+    *)
+      if [ -n "$dest" ]; then
+        echo "余分な引数：$1" >&2; usage; exit 2
+      fi
+      dest="$1"; shift ;;
+  esac
+done
+
+if [ -z "$dest" ]; then
+  echo "追記先のパスが要る" >&2; usage; exit 2
+fi
+if [ -z "$proposal" ]; then
+  echo "--proposal は必須" >&2; usage; exit 2
+fi
+if [ -z "$session_id" ]; then
+  echo "--session か \$CLAUDE_SESSION_ID のどちらかが要る" >&2; usage; exit 2
+fi
+
+issue="${issue:-無し}"
+background="${background:-無し}"
+note="${note:-無し}"
+
+mkdir -p "$(dirname "$dest")"
+dest_dir="$(cd "$(dirname "$dest")" && pwd)"
+dest_abs="$dest_dir/$(basename "$dest")"
+
+identity="${session_id:0:8}-proposal_submit"
+
+took=0
+if [ -x "$CLAIM_BIN" ]; then
+  claim_out=""
+  claim_status=0
+  claim_out="$("$CLAIM_BIN" "$identity" take "$dest_abs" "proposal_submit 追記" 2>&1)" || claim_status=$?
+  if [ "$claim_status" -eq 1 ]; then
+    tries=0
+    while [ "$claim_status" -eq 1 ] && [ "$tries" -lt 5 ]; do
+      sleep 1
+      tries=$((tries + 1))
+      claim_out="$("$CLAIM_BIN" "$identity" take "$dest_abs" "proposal_submit 追記" 2>&1)" && claim_status=0 || claim_status=$?
+    done
+  fi
+  case "$claim_status" in
+    0) took=1 ;;
+    1)
+      echo "claim が取れない（他セッションが保持、待っても解放されなかった）：$claim_out" >&2
+      exit 1
+      ;;
+    3)
+      echo "警告：claim の仕組みが無いか決められない（$claim_out）。排他なしで進める" >&2
+      ;;
+    *)
+      echo "警告：claim が想定外の終了コード $claim_status（$claim_out）。排他なしで進める" >&2
+      ;;
+  esac
+else
+  echo "警告：claim ラッパが見当たらない（$CLAIM_BIN）。排他なしで進める" >&2
+fi
+
+if [ ! -e "$dest_abs" ]; then
+  if [ ! -e "$TEMPLATE" ]; then
+    echo "テンプレが無い：$TEMPLATE" >&2
+    [ "$took" -eq 1 ] && "$CLAIM_BIN" "$identity" free "$dest_abs" >/dev/null 2>&1
+    exit 2
+  fi
+  cp "$TEMPLATE" "$dest_abs"
+fi
+
+max_n=0
+while IFS= read -r n; do
+  [ -n "$n" ] || continue
+  if [ "$n" -gt "$max_n" ] 2>/dev/null; then
+    max_n="$n"
+  fi
+done < <(grep -oE '^### [0-9]+$' "$dest_abs" | grep -oE '[0-9]+$')
+n=$((max_n + 1))
+
+datetime="$(date +%Y-%m%d-%H%M)"
+
+summary="$proposal"
+if [ "${#summary}" -gt 60 ]; then
+  summary="${summary:0:60}…"
+fi
+
+newrow="| ${n} | [ ] | ${datetime} | ${session_id} | ${summary} |"
+newsec="$(printf '\n### %s\n提案：%s\n担当イシュー：%s\n背景：%s\n特記事項：%s\n' \
+  "$n" "$proposal" "$issue" "$background" "$note")"
+
+tmp="$(mktemp "${dest_abs}.XXXXXX")"
+awk -v newrow="$newrow" -v newsec="$newsec" \
+  -v summ_marker='<!-- proposal_submit:summary-rows -->' \
+  -v det_marker='<!-- proposal_submit:detail-sections -->' '
+  $0 == summ_marker { print newrow; print; next }
+  $0 == det_marker  { print newsec; print; next }
+  { print }
+' "$dest_abs" > "$tmp" && mv "$tmp" "$dest_abs"
+
+if [ "$took" -eq 1 ]; then
+  "$CLAIM_BIN" "$identity" free "$dest_abs" >/dev/null 2>&1 || true
+fi
+
+row_count="$(grep -cE "^\| ${n} \|" "$dest_abs")"
+sec_count="$(grep -cE "^### ${n}\$" "$dest_abs")"
+if [ "$row_count" -ne 1 ] || [ "$sec_count" -ne 1 ]; then
+  echo "自己検証に失敗：#${n} の行が ${row_count} 件、節が ${sec_count} 件（それぞれ1件のはず）" >&2
+  exit 4
+fi
+
+echo "追記完了：${dest_abs} に #${n} を追加"
+exit 0
