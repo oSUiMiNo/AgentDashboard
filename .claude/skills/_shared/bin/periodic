@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import sys
+import tempfile
+from datetime import datetime, timedelta
+from pathlib import Path
+
+DEFAULT_INTERVAL_HOURS = 6
+COLLISION_WINDOW = timedelta(minutes=15)
+MINUTE_AVOID = (0, 30)
+MINUTE_AVOID_SHIFT = timedelta(minutes=7)
+DISABLE_CRON_ENV = "CLAUDE_CODE_DISABLE_CRON"
+SESSION_ENV = "CLAUDE_SESSION_ID"
+
+
+def default_state_path():
+    return Path(__file__).resolve().parent.parent / "state" / "periodic.json"
+
+
+def parse_dt(value):
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        dt = dt.astimezone()
+    return dt
+
+
+def now_value(args):
+    if getattr(args, "now", None):
+        return parse_dt(args.now)
+    return datetime.now().astimezone()
+
+
+def state_path_value(args):
+    return Path(args.state) if args.state else default_state_path()
+
+
+def load_state(path):
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def write_state_atomic(path, state):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".periodic-", suffix=".tmp")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2, sort_keys=True)
+            f.write("\n")
+        os.replace(str(tmp_path), str(path))
+    except BaseException:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
+
+
+def get_record(state, skill):
+    return dict(state.get(skill, {}))
+
+
+def round_up_to_minute(dt):
+    if dt.second or dt.microsecond:
+        dt = dt.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    return dt
+
+
+def cmd_arm(args):
+    if os.environ.get(DISABLE_CRON_ENV):
+        print(
+            "打てない：環境変数 {} が立っているため cron を打てません".format(DISABLE_CRON_ENV),
+            file=sys.stderr,
+        )
+        return 5
+
+    state_path = state_path_value(args)
+    state = load_state(state_path)
+    record = get_record(state, args.skill)
+
+    now = now_value(args)
+    interval_h = (
+        args.interval_hours if args.interval_hours is not None else record.get("interval_h", DEFAULT_INTERVAL_HOURS)
+    )
+    interval = timedelta(hours=interval_h)
+
+    last_run_raw = record.get("last_run")
+    if last_run_raw:
+        last_run = parse_dt(last_run_raw)
+        candidate = max(last_run + interval, now + timedelta(minutes=1))
+    else:
+        candidate = now + timedelta(minutes=1)
+    candidate = round_up_to_minute(candidate)
+
+    others = []
+    for name, other_record in state.items():
+        if name == args.skill:
+            continue
+        other_next_raw = other_record.get("next_run")
+        if not other_next_raw:
+            continue
+        others.append(parse_dt(other_next_raw))
+
+    shifted = True
+    guard = 0
+    while shifted and guard < 1000:
+        shifted = False
+        guard += 1
+        for other_next in others:
+            if abs(candidate - other_next) < COLLISION_WINDOW:
+                candidate = round_up_to_minute(other_next + COLLISION_WINDOW)
+                shifted = True
+
+    if candidate.minute in MINUTE_AVOID:
+        candidate = round_up_to_minute(candidate + MINUTE_AVOID_SHIFT)
+
+    armed_by = args.by if args.by else os.environ.get(SESSION_ENV, "")
+
+    record["next_run"] = candidate.isoformat()
+    record["armed_by"] = armed_by
+    record["interval_h"] = interval_h
+    state[args.skill] = record
+    write_state_atomic(state_path, state)
+
+    local_candidate = candidate.astimezone()
+    cron = "{} {} {} {} *".format(
+        local_candidate.minute, local_candidate.hour, local_candidate.day, local_candidate.month
+    )
+
+    print(candidate.isoformat())
+    print(cron)
+    return 0
+
+
+def cmd_tick(args):
+    state_path = state_path_value(args)
+    state = load_state(state_path)
+    record = get_record(state, args.skill)
+
+    now = now_value(args)
+    last_run_raw = record.get("last_run")
+
+    if last_run_raw:
+        last_run = parse_dt(last_run_raw)
+        interval_h = record.get("interval_h", DEFAULT_INTERVAL_HOURS)
+        half = timedelta(hours=interval_h) / 2
+        if now < last_run + half:
+            print("skip")
+            return 0
+
+    record["last_run"] = now.isoformat()
+    record["phase"] = 0
+    state[args.skill] = record
+    write_state_atomic(state_path, state)
+
+    print("run")
+    return 0
+
+
+def cmd_status(args):
+    state_path = state_path_value(args)
+    state = load_state(state_path)
+    record = get_record(state, args.skill)
+
+    next_run_raw = record.get("next_run")
+    if not next_run_raw:
+        print("unarmed")
+        return 0
+
+    now = now_value(args)
+    next_run = parse_dt(next_run_raw)
+    if now >= next_run:
+        print("run-now")
+    else:
+        print("wait {}".format(next_run.isoformat()))
+    return 0
+
+
+def cmd_stop(args):
+    state_path = state_path_value(args)
+    state = load_state(state_path)
+    record = get_record(state, args.skill)
+
+    record.pop("armed_by", None)
+    record.pop("next_run", None)
+    state[args.skill] = record
+    write_state_atomic(state_path, state)
+
+    print("stopped")
+    return 0
+
+
+def cmd_phase(args):
+    state_path = state_path_value(args)
+    state = load_state(state_path)
+    record = get_record(state, args.skill)
+
+    if args.value is not None:
+        record["phase"] = args.value
+        state[args.skill] = record
+        write_state_atomic(state_path, state)
+        print(args.value)
+    else:
+        print(record.get("phase", 0))
+    return 0
+
+
+def cmd_show(args):
+    state_path = state_path_value(args)
+    state = load_state(state_path)
+
+    if args.skill:
+        print(json.dumps(state.get(args.skill, {}), ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="periodic",
+        description=(
+            "PJT 専用スキルの定期実行（6時間ごと等）の状態を、ディスク上の1ファイルで管理する。"
+            "Claude Code の cron はセッション内・単発でしか打てないため、"
+            "前回時刻と次回予定をここに置き、単発の CronCreate を毎回打ち直す運用を支える。"
+        ),
+        epilog=(
+            "cron が実際に生きているか（CronList に載っているか）はこのコマンドからは見えない。"
+            "その確認は呼ぶ側（スキル本体）の仕事。"
+        ),
+    )
+
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--state",
+        help="状態ファイルのパス（既定：<PJT>/.claude/skills/_shared/state/periodic.json）",
+    )
+
+    with_now = argparse.ArgumentParser(add_help=False, parents=[common])
+    with_now.add_argument(
+        "--now",
+        help="現在時刻をタイムゾーン付き ISO 8601 で差し替える（テスト用。省略時はローカルの現在時刻）",
+    )
+
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_arm = sub.add_parser(
+        "arm",
+        parents=[with_now],
+        help="次回の実行予定を決めて cron に打つ時刻を出す（他スキルと15分以上離す・分は00/30を避ける）",
+    )
+    p_arm.add_argument("skill", help="スキル名")
+    p_arm.add_argument("--by", help="cron を打つセッションID（省略時は環境変数 CLAUDE_SESSION_ID）")
+    p_arm.add_argument("--interval-hours", type=float, default=None, help="周期（時間単位、既定6）")
+    p_arm.set_defaults(func=cmd_arm)
+
+    p_tick = sub.add_parser(
+        "tick",
+        parents=[with_now],
+        help="cron から呼ばれたときの入口。前回から半周期未満なら skip、そうでなければ last_run を書いて run と出す",
+    )
+    p_tick.add_argument("skill", help="スキル名")
+    p_tick.set_defaults(func=cmd_tick)
+
+    p_status = sub.add_parser(
+        "status",
+        parents=[with_now],
+        help="次回予定を過ぎているかを調べる（unarmed / run-now / wait <時刻>）。CronList は見られないのでここでは確認しない",
+    )
+    p_status.add_argument("skill", help="スキル名")
+    p_status.set_defaults(func=cmd_status)
+
+    p_stop = sub.add_parser("stop", parents=[common], help="armed_by と next_run を消す（利用者の明示的な停止指示のときだけ呼ぶ）")
+    p_stop.add_argument("skill", help="スキル名")
+    p_stop.set_defaults(func=cmd_stop)
+
+    p_phase = sub.add_parser(
+        "phase",
+        parents=[common],
+        help="本処理の段番号を読み書きする（途中で落ちたときの復旧用）。引数が無ければ現在値を読む",
+    )
+    p_phase.add_argument("skill", help="スキル名")
+    p_phase.add_argument("value", nargs="?", type=int, default=None, help="書き込む段番号（省略で読み取りのみ）")
+    p_phase.set_defaults(func=cmd_phase)
+
+    p_show = sub.add_parser("show", parents=[common], help="状態を JSON で出す（skill 省略で全スキル分）")
+    p_show.add_argument("skill", nargs="?", default=None, help="スキル名（省略可）")
+    p_show.set_defaults(func=cmd_show)
+
+    return parser
+
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+    sys.exit(args.func(args))
+
+
+if __name__ == "__main__":
+    main()
