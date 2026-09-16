@@ -1,0 +1,346 @@
+#!/usr/bin/env bash
+set -u
+set -o pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+ISSUE_ROOT="$REPO_ROOT/MyDocs/イシュー"
+
+usage() {
+  echo "使い方：check-docs <イシューまたはイシューグループのパス>" >&2
+  echo "  パスは絶対パス・相対パス・フォルダ名のいずれでもよい" >&2
+}
+
+if [ "$#" -ne 1 ]; then
+  usage
+  exit 2
+fi
+INPUT="${1%/}"
+
+resolve_target() {
+  local input="$1"
+  local -a candidates=()
+  [ -d "$input" ] && candidates+=("$input")
+  [ -d "$REPO_ROOT/$input" ] && candidates+=("$REPO_ROOT/$input")
+  [ -d "$ISSUE_ROOT/$input" ] && candidates+=("$ISSUE_ROOT/$input")
+  [ -d "$ISSUE_ROOT/クローズ/$input" ] && candidates+=("$ISSUE_ROOT/クローズ/$input")
+  local base
+  base="$(basename "$input")"
+  while IFS= read -r -d '' d; do
+    candidates+=("$d")
+  done < <(find "$ISSUE_ROOT" -mindepth 1 -type d -name "$base" -print0 2>/dev/null)
+  if [ "${#candidates[@]}" -eq 0 ]; then
+    return 1
+  fi
+  realpath -m "${candidates[0]}"
+}
+
+TARGET="$(resolve_target "$INPUT")"
+if [ -z "${TARGET:-}" ] || [ ! -d "$TARGET" ]; then
+  echo "判定：不足"
+  echo "- 入力エラー：\`$INPUT\` を \`MyDocs/イシュー/\` 配下で解決できなかった"
+  exit 3
+fi
+
+IS_GROUP=0
+if [ -f "$TARGET/メタ.md" ]; then
+  IS_GROUP=1
+elif [ -f "$TARGET/要件.md" ]; then
+  IS_GROUP=0
+else
+  echo "判定：不足"
+  echo "- 入力エラー：\`$TARGET\` の直下に \`メタ.md\` も \`要件.md\` も無い（イシューでもグループでもない）"
+  exit 3
+fi
+
+MISSING_LINES=()
+OK_LINES=()
+HITOJIN_LINES=()
+UNMATCHED_LINES=()
+
+add_missing() { MISSING_LINES+=("$1"); }
+add_ok() { OK_LINES+=("$1"); }
+add_unmatched() { UNMATCHED_LINES+=("$1"); }
+
+check_release_mention() {
+  local dir="$1" label="$2"
+  local plan="$dir/計画.md"
+  local report="$dir/実行レポート.md"
+
+  if [ ! -f "$plan" ]; then
+    check_release_via_close_report "$dir" "$label"
+    return
+  fi
+
+  local start_line
+  start_line="$(grep -n '^## フェーズ' "$plan" | tail -1 | cut -d: -f1)"
+  if [ -z "$start_line" ]; then
+    check_release_via_close_report "$dir" "$label"
+    return
+  fi
+  local heading
+  heading="$(sed -n "${start_line}p" "$plan")"
+
+  local end_line
+  end_line="$(awk -v s="$start_line" 'NR>s && /^## /{print NR; exit}' "$plan")"
+  local section
+  if [ -n "$end_line" ]; then
+    section="$(sed -n "${start_line},$((end_line-1))p" "$plan")"
+  else
+    section="$(sed -n "${start_line},\$p" "$plan")"
+  fi
+
+  local found_problem=0
+  local -a unchecked_lines=()
+  local uline
+  while IFS= read -r uline; do
+    [ -z "$uline" ] && continue
+    printf '%s' "$uline" | grep -qF '【要人間】' && continue
+    unchecked_lines+=("$uline")
+  done < <(printf '%s\n' "$section" | grep -P '^\s*-\s*\[ \]')
+
+  if [ "${#unchecked_lines[@]}" -gt 0 ]; then
+    found_problem=1
+    local u
+    for u in "${unchecked_lines[@]}"; do
+      add_missing "[$label] §9-2-1：不足：最終フェーズの未消化 $u"
+    done
+  fi
+
+  local phase_no
+  phase_no="$(printf '%s' "$heading" | grep -oP 'フェーズ\K[0-9]+' | head -1)"
+
+  if [ ! -f "$report" ]; then
+    found_problem=1
+    add_missing "[$label] §9-2-1：不足：実行レポートに最終フェーズの中身が無い（$report が無い）"
+  else
+    local rep_line
+    rep_line="$(grep -nP "^## フェーズ${phase_no}([^0-9]|\$)" "$report" | head -1 | cut -d: -f1)"
+    if [ -z "$rep_line" ]; then
+      found_problem=1
+      add_missing "[$label] §9-2-1：不足：実行レポートに最終フェーズの中身が無い（## フェーズ${phase_no} 見出しが無い）"
+    else
+      local next_heading_line
+      next_heading_line="$(awk -v s="$rep_line" 'NR>s && /^## /{print NR; exit}' "$report")"
+      local impl_line
+      impl_line="$(awk -v s="$rep_line" 'NR>s && /^### 実装概要/{print NR; exit}' "$report")"
+      if [ -n "$next_heading_line" ] && [ -n "$impl_line" ] && [ "$impl_line" -gt "$next_heading_line" ]; then
+        impl_line=""
+      fi
+      if [ -z "$impl_line" ]; then
+        found_problem=1
+        add_missing "[$label] §9-2-1：不足：実行レポートに最終フェーズの中身が無い（### 実装概要 が無い）"
+      else
+        local body_end
+        body_end="$(awk -v s="$impl_line" 'NR>s && /^##/{print NR; exit}' "$report")"
+        local body
+        if [ -n "$body_end" ]; then
+          body="$(sed -n "$((impl_line+1)),$((body_end-1))p" "$report" | grep -vP '^\s*$')"
+        else
+          body="$(sed -n "$((impl_line+1)),\$p" "$report" | grep -vP '^\s*$')"
+        fi
+        if [ -z "$body" ]; then
+          found_problem=1
+          add_missing "[$label] §9-2-1：不足：実行レポートに最終フェーズの中身が無い（### 実装概要 の本文が空）"
+        fi
+      fi
+    fi
+  fi
+
+  if [ "$found_problem" -eq 0 ]; then
+    add_ok "[$label] §9-2-1：最終フェーズ（フェーズ${phase_no}）の未消化なし、実行レポートに実装概要の記載あり"
+  fi
+}
+
+check_release_via_close_report() {
+  local dir="$1" label="$2"
+  local report="$dir/実行レポート.md"
+  local kw='配る|手元|リリース|release|タグ|tag|version_release|版'
+  local found=0
+  local where=""
+
+  if [ -f "$report" ]; then
+    local last_heading_line
+    last_heading_line="$(grep -n '^## ' "$report" | tail -1 | cut -d: -f1)"
+    if [ -n "$last_heading_line" ]; then
+      if tail -n "+$last_heading_line" "$report" | grep -qiP "$kw"; then
+        found=1
+        where="実行レポート.md の最終フェーズ"
+      fi
+    fi
+  fi
+
+  if [ "$found" -eq 0 ] && [ -f "$dir/クローズレポート.md" ]; then
+    if grep -n '^## ' "$dir/クローズレポート.md" | grep -qiP "$kw"; then
+      found=1
+      where="クローズレポート.md の見出し（版の同梱等）"
+    fi
+  fi
+
+  if [ "$found" -eq 1 ]; then
+    add_ok "[$label] §9-2-1：配る・手元への言及あり（$where。計画.md が無いため語の一致で判定）"
+  else
+    if [ -f "$report" ]; then
+      add_missing "[$label] §9-2-1：実行レポート.md の最終フェーズにも クローズレポート.md にも「配る・手元」相当の言及が無い（$report）"
+    else
+      add_missing "[$label] §9-2-1：実行レポート.md が無い（$dir）"
+    fi
+  fi
+}
+
+extract_checkbox_tests() {
+  local doc="$1"
+  [ -f "$doc" ] || return 0
+  grep -P '^\s*-\s*\[x\]' "$doc" | grep -oP '`[^`]+`' | sed -E 's/^`//; s/`$//' | while IFS= read -r frag; do
+    [ -z "$frag" ] && continue
+    printf '%s' "$frag" | grep -qF '(' && continue
+    printf '%s' "$frag" | grep -qF ')' && continue
+    printf '%s' "$frag" | grep -qF '...' && continue
+    printf '%s' "$frag" | grep -qF '…' && continue
+    printf '%s' "$frag" | grep -qF '.each' && continue
+    printf '%s' "$frag" | grep -qF '#[' && continue
+    printf '%s' "$frag" | grep -qP '/' && continue
+    printf '%s' "$frag" | grep -qP '\.[A-Za-z0-9]{1,5}$' && continue
+    printf '%s\n' "$frag"
+  done
+}
+
+is_real_test_declaration() {
+  local name="$1"
+  [ -z "$name" ] && return 1
+  if grep -RqF "fn ${name}(" server/crates 2>/dev/null; then
+    return 0
+  fi
+  if grep -RqF "fn ${name} (" server/crates 2>/dev/null; then
+    return 0
+  fi
+  local q
+  for q in "'" '"'; do
+    if grep -RqF "it(${q}${name}${q}" web/src web/e2e 2>/dev/null; then
+      return 0
+    fi
+    if grep -RqF "test(${q}${name}${q}" web/src web/e2e 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+check_named_tests() {
+  local dir="$1" label="$2"
+  local -a docs=()
+  [ -f "$dir/計画.md" ] && docs+=("$dir/計画.md")
+  [ -f "$dir/テスト計画.md" ] && docs+=("$dir/テスト計画.md")
+  [ -f "$dir/TS.md" ] && docs+=("$dir/TS.md")
+
+  local -a names=()
+  local d
+  for d in "${docs[@]}"; do
+    while IFS= read -r n; do
+      [ -n "$n" ] && names+=("$n")
+    done < <(extract_checkbox_tests "$d")
+  done
+
+  if [ "${#names[@]}" -eq 0 ]; then
+    add_ok "[$label] §9-2-2：named test の記載なし（計画・テスト計画・TS に該当箇所なし。検査対象なし）"
+    return
+  fi
+
+  local -a uniq_names=()
+  while IFS= read -r n; do uniq_names+=("$n"); done < <(printf '%s\n' "${names[@]}" | sort -u)
+
+  local n
+  local -a matched=()
+  local -a unmatched=()
+  for n in "${uniq_names[@]}"; do
+    if is_real_test_declaration "$n"; then
+      matched+=("$n")
+    else
+      unmatched+=("$n")
+    fi
+  done
+
+  if [ "${#matched[@]}" -gt 0 ]; then
+    add_ok "[$label] §9-2-2：named test ${#matched[@]}件が server/crates・web/src・web/e2e のテスト宣言と完全一致で確認できた"
+  fi
+  if [ "${#unmatched[@]}" -gt 0 ]; then
+    local m
+    for m in "${unmatched[@]}"; do
+      add_unmatched "[$label] §9-2-2：named test \`$m\` が server/crates・web/src・web/e2e のテスト宣言と完全一致しない"
+    done
+  fi
+}
+collect_hitojin() {
+  local dir="$1" label="$2"
+  local f
+  for f in "$dir"/*.md; do
+    [ -f "$f" ] || continue
+    while IFS= read -r line; do
+      HITOJIN_LINES+=("[$label] $(basename "$f"):$line")
+    done < <(grep -n '【要人間】\|【保留】' "$f" 2>/dev/null | sed -E 's/^([0-9]+):/\1: /')
+  done
+}
+
+run_single() {
+  local dir="$1" label="$2" fallback_report_dir="${3:-}"
+  if [ -n "$fallback_report_dir" ] && [ ! -f "$dir/実行レポート.md" ]; then
+    check_release_mention "$fallback_report_dir" "$label（グループ共有の実行レポートを参照）"
+  else
+    check_release_mention "$dir" "$label"
+  fi
+  check_named_tests "$dir" "$label"
+  collect_hitojin "$dir" "$label"
+  [ -n "$fallback_report_dir" ] && collect_hitojin "$fallback_report_dir" "$label（グループ共有）"
+}
+
+if [ "$IS_GROUP" -eq 0 ]; then
+  LABEL="$(basename "$TARGET")"
+  run_single "$TARGET" "$LABEL"
+else
+  LABEL="$(basename "$TARGET")（グループ）"
+  check_release_mention "$TARGET" "$LABEL"
+  check_named_tests "$TARGET" "$LABEL"
+  collect_hitojin "$TARGET" "$LABEL"
+
+  CHILD_COUNT=0
+  while IFS= read -r -d '' child; do
+    CHILD_COUNT=$((CHILD_COUNT+1))
+    run_single "$child" "$(basename "$child")" "$TARGET"
+  done < <(find "$TARGET" -mindepth 1 -maxdepth 1 -type d -exec test -f "{}/要件.md" \; -print0 2>/dev/null)
+
+  if [ "$CHILD_COUNT" -eq 0 ]; then
+    add_missing "[$LABEL] メタ.md はあるが、要件.md を持つ子イシューが1つも見つからない"
+  fi
+fi
+
+if [ "${#MISSING_LINES[@]}" -eq 0 ]; then
+  echo "判定：OK"
+else
+  echo "判定：不足"
+fi
+echo
+echo "対象：$TARGET"
+echo "種別：$([ "$IS_GROUP" -eq 1 ] && echo イシューグループ || echo 単一イシュー)"
+echo
+if [ "${#OK_LINES[@]}" -gt 0 ]; then
+  echo "### OK"
+  printf -- '- %s\n' "${OK_LINES[@]}"
+fi
+if [ "${#MISSING_LINES[@]}" -gt 0 ]; then
+  echo
+  echo "### 不足"
+  printf -- '- %s\n' "${MISSING_LINES[@]}"
+fi
+if [ "${#UNMATCHED_LINES[@]}" -gt 0 ]; then
+  echo
+  echo "### 照合できなかった候補"
+  printf -- '- %s\n' "${UNMATCHED_LINES[@]}"
+fi
+echo
+echo "### 【要人間】／【保留】一覧"
+if [ "${#HITOJIN_LINES[@]}" -eq 0 ]; then
+  echo "無し"
+else
+  printf -- '- %s\n' "${HITOJIN_LINES[@]}"
+fi
+
+[ "${#MISSING_LINES[@]}" -eq 0 ] && exit 0 || exit 1

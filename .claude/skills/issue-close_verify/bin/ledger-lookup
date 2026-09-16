@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+set -u
+set -o pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+ISSUE_ROOT="$REPO_ROOT/MyDocs/イシュー"
+LEDGER="$REPO_ROOT/server/crates/core/tests/regressions.toml"
+
+usage() {
+  echo "使い方：ledger-lookup <イシューまたはイシューグループのパス>" >&2
+}
+
+if [ "$#" -ne 1 ]; then
+  usage
+  exit 2
+fi
+INPUT="${1%/}"
+
+resolve_target() {
+  local input="$1"
+  local -a candidates=()
+  [ -d "$input" ] && candidates+=("$input")
+  [ -d "$REPO_ROOT/$input" ] && candidates+=("$REPO_ROOT/$input")
+  [ -d "$ISSUE_ROOT/$input" ] && candidates+=("$ISSUE_ROOT/$input")
+  [ -d "$ISSUE_ROOT/クローズ/$input" ] && candidates+=("$ISSUE_ROOT/クローズ/$input")
+  local base
+  base="$(basename "$input")"
+  while IFS= read -r -d '' d; do
+    candidates+=("$d")
+  done < <(find "$ISSUE_ROOT" -mindepth 1 -type d -name "$base" -print0 2>/dev/null)
+  if [ "${#candidates[@]}" -eq 0 ]; then
+    return 1
+  fi
+  realpath -m "${candidates[0]}"
+}
+
+TARGET="$(resolve_target "$INPUT")"
+if [ -z "${TARGET:-}" ] || [ ! -d "$TARGET" ]; then
+  echo "判定：不足（入力エラー）"
+  echo "- \`$INPUT\` を \`MyDocs/イシュー/\` 配下で解決できなかった"
+  exit 3
+fi
+
+IS_GROUP=0
+[ -f "$TARGET/メタ.md" ] && IS_GROUP=1
+if [ "$IS_GROUP" -eq 0 ] && [ ! -f "$TARGET/要件.md" ]; then
+  echo "判定：不足（入力エラー）"
+  echo "- \`$TARGET\` の直下に \`メタ.md\` も \`要件.md\` も無い"
+  exit 3
+fi
+
+if [ ! -f "$LEDGER" ]; then
+  echo "判定：不足"
+  echo "- 台帳ファイルが見つからない：$LEDGER"
+  exit 3
+fi
+
+REL_PATH="${TARGET#"$ISSUE_ROOT/"}"
+
+echo "対象：$TARGET"
+echo "種別：$([ "$IS_GROUP" -eq 1 ] && echo イシューグループ || echo 単一イシュー)"
+echo "台帳：$LEDGER"
+echo
+
+extract_entries() {
+  awk -v rel="$REL_PATH" -v is_group="$IS_GROUP" '
+    BEGIN { block=""; in_entry=0; match_flag=0 }
+    /^\[\[entry\]\]/ {
+      if (in_entry && match_flag) print block "\n"
+      block = $0 "\n"
+      in_entry = 1
+      match_flag = 0
+      next
+    }
+    in_entry {
+      block = block $0 "\n"
+      if ($0 ~ /^issue[ \t]*=/) {
+        line = $0
+        sub(/^issue[ \t]*=[ \t]*"/, "", line)
+        sub(/"[ \t]*$/, "", line)
+        if (is_group == 1) {
+          prefix = rel "/"
+          if (index(line, prefix) == 1) match_flag = 1
+        } else {
+          if (line == rel) match_flag = 1
+        }
+      }
+    }
+    END {
+      if (in_entry && match_flag) print block
+    }
+  ' "$LEDGER"
+}
+
+ENTRIES="$(extract_entries)"
+
+if [ -z "$ENTRIES" ]; then
+  echo "判定：台帳に行なし"
+  echo
+  echo "### 下書き雛形（クローズ後のパスを issue に持つ。まだ書き込んでいない）"
+  echo '```toml'
+  echo "[[entry]]"
+  if [ "$IS_GROUP" -eq 1 ]; then
+    echo "issue       = \"クローズ/$(basename "$TARGET")/<子イシュー名>\""
+  else
+    PARENT_REL="$(dirname "$REL_PATH")"
+    if [ "$PARENT_REL" = "." ]; then
+      echo "issue       = \"クローズ/$(basename "$TARGET")\""
+    else
+      echo "issue       = \"クローズ/$(basename "$TARGET")\"  # 現在地：$REL_PATH（クローズ後は クローズ/ 配下へ移る想定）"
+    fi
+  fi
+  echo 'behavior    = "<直した振る舞い。「どの条件で」を含む1文>"'
+  echo 'gate        = "unit"  # unit ／ e2e ／ manual のいずれか'
+  echo 'tests       = ['
+  echo '  { file = "<相対パス>", name = "<テスト名>" },'
+  echo ']'
+  echo '# manual のときは tests の代わりに manual_check = "<確かめ方>" を書く'
+  echo 'breaks_when = "<閉じるときに実際に壊した内容>"'
+  echo 'verified    = false  # 実際に壊して落ちるのを見たら true に変える'
+  echo '```'
+  echo
+  echo "> このツールは台帳に一切書き込まない。実際に書くのは閉じる本人の仕事で、その際は本人が claim で札を取ってから書く。"
+  exit 1
+fi
+
+echo "判定：台帳に行あり"
+echo
+echo "### 見つかった行"
+echo '```toml'
+echo "$ENTRIES"
+echo '```'
+echo
+
+echo "### tests[].file の実在確認"
+MISSING_FILES=0
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
+  if [ -f "$REPO_ROOT/$f" ]; then
+    echo "- OK：$f"
+  else
+    echo "- 不在：$f"
+    MISSING_FILES=$((MISSING_FILES+1))
+  fi
+done < <(printf '%s\n' "$ENTRIES" | grep -oP '(?<=file = ")[^"]+')
+
+if [ "$MISSING_FILES" -gt 0 ]; then
+  echo
+  echo "判定（実体確認）：不足（tests[].file が $MISSING_FILES 件見つからない）"
+  exit 1
+fi
+
+exit 0

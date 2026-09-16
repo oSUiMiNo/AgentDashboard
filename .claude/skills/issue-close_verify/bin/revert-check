@@ -1,0 +1,243 @@
+#!/usr/bin/env bash
+set -u
+set -o pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+SCRATCH_BASE="${AD_SCRATCHPAD:-/tmp/claude-1000/-home-osuim-Dev-AgentDashboard/fe0d452b-4983-4d7c-bd20-3513cf9352ab/scratchpad}"
+
+DRY_RUN=0
+STRONG=0
+COMMITS=()
+TESTS=()
+STRONG_COMMITS=()
+
+usage() {
+  cat >&2 <<'USAGE'
+使い方：
+  revert-check --dry-run --commits <hash> [<hash>...] --tests <file:name> [<file:name>...] [--strong-commits <hash>...]
+  revert-check --commits <hash> [<hash>...] --tests <file:name> [<file:name>...] [--strong [--strong-commits <hash>...]]
+
+  --dry-run         手順を印字するだけで、何も実行しない
+  --commits         逆当て（git revert --no-commit）するコミットのハッシュ（複数可）
+  --tests           赤くなることを確かめる named test。file:name の形（複数可、file は .rs か .ts/.tsx）
+  --strong          --commits の部分集合（または --strong-commits で渡した別の壊し方）でも同様に赤くなることを追加で確かめる
+  --strong-commits  --strong のときに使う「別の壊し方」のコミット一覧（省略時は --commits の先頭1つを使う）
+USAGE
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1; shift ;;
+    --strong) STRONG=1; shift ;;
+    --commits)
+      shift
+      while [ "$#" -gt 0 ] && [[ "$1" != --* ]]; do COMMITS+=("$1"); shift; done
+      ;;
+    --tests)
+      shift
+      while [ "$#" -gt 0 ] && [[ "$1" != --* ]]; do TESTS+=("$1"); shift; done
+      ;;
+    --strong-commits)
+      shift
+      while [ "$#" -gt 0 ] && [[ "$1" != --* ]]; do STRONG_COMMITS+=("$1"); shift; done
+      ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "不明な引数：$1" >&2; usage; exit 2 ;;
+  esac
+done
+
+if [ "${#COMMITS[@]}" -eq 0 ] || [ "${#TESTS[@]}" -eq 0 ]; then
+  echo "エラー：--commits と --tests は両方とも1つ以上必要" >&2
+  usage
+  exit 2
+fi
+
+if [ "$STRONG" -eq 1 ] && [ "${#STRONG_COMMITS[@]}" -eq 0 ]; then
+  STRONG_COMMITS=("${COMMITS[0]}")
+fi
+
+WORKTREE_NAME="revert-check-$(date +%Y%m%d-%H%M%S)-$$"
+WORKTREE_DIR="$SCRATCH_BASE/worktrees/$WORKTREE_NAME"
+
+split_test() {
+  local spec="$1"
+  T_FILE="${spec%%:*}"
+  T_NAME="${spec#*:}"
+}
+
+runner_for() {
+  local file="$1"
+  case "$file" in
+    *.rs) echo "scripts/cargo test" ;;
+    *.ts|*.tsx) echo "npx vitest run -t" ;;
+    *) echo "unknown" ;;
+  esac
+}
+
+print_plan() {
+  echo "## revert-check 手順（$([ "$DRY_RUN" -eq 1 ] && echo dry-run／未実行 || echo 実行)）"
+  echo
+  echo "対象コミット：${COMMITS[*]}"
+  echo "確かめる named test：${TESTS[*]}"
+  [ "$STRONG" -eq 1 ] && echo "--strong：別の壊し方 ${STRONG_COMMITS[*]} でも追加確認"
+  echo "一時 worktree：$WORKTREE_DIR"
+  echo
+  echo "1. \`git worktree add --detach \"$WORKTREE_DIR\" HEAD\`（$REPO_ROOT の下で）"
+  echo "2. worktree 内で、各コミットを逆当てする（commit はしない）："
+  local c
+  for c in "${COMMITS[@]}"; do
+    echo "   - \`git -C \"$WORKTREE_DIR\" revert --no-commit $c\`"
+  done
+  echo "3. \`(cd \"$WORKTREE_DIR\" && make build-web build-debug)\`"
+  echo "4. \`.claude/skills/_shared/bin/our-servers count --bin \"$WORKTREE_DIR/<実行ファイルの相対パス>\"\`"
+  echo "   → 0 でなければ、それ以上進まず中止し検出した PID を報告する（自動では殺さない）"
+  echo "5. 各 named test を worktree 内で実行する："
+  local spec runner
+  for spec in "${TESTS[@]}"; do
+    split_test "$spec"
+    runner="$(runner_for "$T_FILE")"
+    case "$T_FILE" in
+      *.rs)
+        echo "   - \`(cd \"$WORKTREE_DIR\" && $runner -- $T_FILE $T_NAME)\`  （実際は cargo のテスト名指定に合わせて調整）"
+        ;;
+      *.ts|*.tsx)
+        echo "   - \`(cd \"$WORKTREE_DIR/web\" && $runner \"$T_NAME\")\`"
+        ;;
+      *)
+        echo "   - 不明な拡張子：$T_FILE（.rs か .ts/.tsx のみ対応）"
+        ;;
+    esac
+  done
+  echo "6. 各テストが赤くなっていることを確認する。赤くならなければ「不成立」として"
+  echo "   knowledge/why-not-red.md の4項目の疑う順序で切り分ける材料（何が緑のままだったか）を報告する"
+  if [ "$STRONG" -eq 1 ]; then
+    echo "6.5 --strong：別の壊し方 ${STRONG_COMMITS[*]} でも 2〜6 を繰り返し、同様に赤くなることを確かめる"
+  fi
+  echo "7. 成功・失敗を問わず、trap で \`git worktree remove --force \"$WORKTREE_DIR\"\` を実行してから終了する"
+}
+
+if [ "$DRY_RUN" -eq 1 ]; then
+  print_plan
+  echo
+  echo "（--dry-run のため、上記は印字のみ。何も実行していない）"
+  exit 0
+fi
+
+
+print_plan
+echo
+echo "---- 実行開始 ----"
+
+cleanup() {
+  if [ -d "$WORKTREE_DIR" ]; then
+    echo "後始末：git worktree remove --force \"$WORKTREE_DIR\""
+    git -C "$REPO_ROOT" worktree remove --force "$WORKTREE_DIR" 2>/dev/null || \
+      git -C "$REPO_ROOT" worktree remove --force "$WORKTREE_DIR"
+  fi
+}
+trap cleanup EXIT
+
+mkdir -p "$(dirname "$WORKTREE_DIR")"
+if ! git -C "$REPO_ROOT" worktree add --detach "$WORKTREE_DIR" HEAD; then
+  echo "エラー：git worktree add に失敗した" >&2
+  exit 1
+fi
+
+for c in "${COMMITS[@]}"; do
+  if ! git -C "$WORKTREE_DIR" revert --no-commit "$c"; then
+    echo "エラー：$c の逆当てに失敗した（コンフリクト等）。worktree を確認するか、逆当ての手が違う可能性がある" >&2
+    exit 1
+  fi
+done
+
+echo "-- make build-web build-debug --"
+if ! (cd "$WORKTREE_DIR" && make build-web build-debug); then
+  echo "エラー：ビルドに失敗した" >&2
+  exit 1
+fi
+
+BIN_PATH="$(find "$WORKTREE_DIR/target" -maxdepth 3 -type f -name 'agentdashboard*' -executable 2>/dev/null | head -1)"
+if [ -z "$BIN_PATH" ]; then
+  echo "警告：worktree の実行ファイルが見つからなかった。our-servers count をスキップする" >&2
+else
+  COUNT_OUTPUT="$("$REPO_ROOT/.claude/skills/_shared/bin/our-servers" count --bin "$BIN_PATH" 2>&1)"
+  COUNT_RC=$?
+  echo "$COUNT_OUTPUT"
+  COUNT_VAL="$(echo "$COUNT_OUTPUT" | tail -1)"
+  if [ "$COUNT_RC" -ne 0 ] || [ "${COUNT_VAL:-0}" != "0" ]; then
+    echo "中止：自分が建てたバイナリと思われるプロセスが既に動いている（count=$COUNT_VAL）。衝突の可能性があるため、これ以上進まない" >&2
+    exit 1
+  fi
+fi
+
+RED_RESULTS=()
+run_tests_against() {
+  local -n _results="$1"
+  local spec runner rc
+  for spec in "${TESTS[@]}"; do
+    split_test "$spec"
+    case "$T_FILE" in
+      *.rs)
+        (cd "$WORKTREE_DIR" && scripts/cargo test "$T_NAME")
+        rc=$?
+        ;;
+      *.ts|*.tsx)
+        (cd "$WORKTREE_DIR/web" && npx vitest run -t "$T_NAME")
+        rc=$?
+        ;;
+      *)
+        echo "不明な拡張子：$T_FILE" >&2
+        rc=2
+        ;;
+    esac
+    if [ "$rc" -ne 0 ]; then
+      _results+=("赤：$spec")
+    else
+      _results+=("緑のまま：$spec（不成立の疑い）")
+    fi
+  done
+}
+
+run_tests_against RED_RESULTS
+
+echo
+echo "### 結果"
+printf -- '- %s\n' "${RED_RESULTS[@]}"
+
+FAILCOUNT=0
+for r in "${RED_RESULTS[@]}"; do
+  [[ "$r" == 緑のまま* ]] && FAILCOUNT=$((FAILCOUNT+1))
+done
+
+if [ "$FAILCOUNT" -gt 0 ]; then
+  echo
+  echo "判定：不成立（$FAILCOUNT 件が赤くならなかった）。knowledge/why-not-red.md の順序で切り分けること"
+  exit 1
+fi
+
+if [ "$STRONG" -eq 1 ]; then
+  echo
+  echo "-- --strong：別の壊し方 ${STRONG_COMMITS[*]} で追試 --"
+  git -C "$WORKTREE_DIR" reset --hard HEAD >/dev/null 2>&1 || true
+  for c in "${STRONG_COMMITS[@]}"; do
+    if ! git -C "$WORKTREE_DIR" revert --no-commit "$c"; then
+      echo "エラー：--strong の逆当てに失敗した（$c）" >&2
+      exit 1
+    fi
+  done
+  if ! (cd "$WORKTREE_DIR" && make build-web build-debug); then
+    echo "エラー：--strong 用ビルドに失敗した" >&2
+    exit 1
+  fi
+  STRONG_RESULTS=()
+  run_tests_against STRONG_RESULTS
+  echo "### --strong 結果"
+  printf -- '- %s\n' "${STRONG_RESULTS[@]}"
+  for r in "${STRONG_RESULTS[@]}"; do
+    [[ "$r" == 緑のまま* ]] && { echo "判定：--strong で不成立"; exit 1; }
+  done
+fi
+
+echo
+echo "判定：確認済み（指定された named test が赤くなった）"
+exit 0
