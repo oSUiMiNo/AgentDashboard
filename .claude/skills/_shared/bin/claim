@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -u
+set -o pipefail
+
+resolve_claim() {
+  if [ -n "${AGENTDASHBOARD_CLAIM:-}" ]; then
+    if [ -e "$AGENTDASHBOARD_CLAIM" ]; then
+      printf '%s\n' "$AGENTDASHBOARD_CLAIM"
+      return 0
+    fi
+    return 1
+  fi
+
+  local matches=()
+  local f
+  shopt -s nullglob
+  for f in "$HOME"/.claude/coord/*/claim; do
+    matches+=("$f")
+  done
+  shopt -u nullglob
+
+  case "${#matches[@]}" in
+    0) return 1 ;;
+    1) printf '%s\n' "${matches[0]}"; return 0 ;;
+    *) printf '%s\n' "${matches[@]}"; return 2 ;;
+  esac
+}
+
+main() {
+  local where=0
+  if [ "${1:-}" = "--where" ]; then
+    where=1
+    shift
+  fi
+
+  local output status
+  output="$(resolve_claim)"
+  status=$?
+
+  if [ "$status" -eq 1 ]; then
+    echo "札の仕組みが無い：$HOME/.claude/coord/*/claim が見つからない" >&2
+    exit 3
+  fi
+
+  if [ "$status" -eq 2 ]; then
+    echo "どれか決められない：候補が複数ある" >&2
+    printf '%s\n' "$output" >&2
+    exit 3
+  fi
+
+  if [ "$where" -eq 1 ]; then
+    printf '%s\n' "$output"
+    exit 0
+  fi
+
+  exec "$output" "$@"
+}
+
+main "$@"

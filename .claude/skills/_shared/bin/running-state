@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+set -u -o pipefail
+
+AD_BIN="$HOME/.claude/skills/dashboard_operate/bin/ad"
+WHOAMI_BIN="$HOME/.claude/skills/dashboard_operate/bin/whoami-card"
+PROD_TREE="$HOME/AgentDashboard"
+DEV_TREE="$HOME/Dev/AgentDashboard"
+JQ_BIN="/usr/bin/jq"
+
+JSON_OUT=0
+CONTAINS_COMMIT=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --json)
+      JSON_OUT=1
+      shift
+      ;;
+    --contains)
+      CONTAINS_COMMIT="${2:-}"
+      if [ $# -ge 2 ]; then
+        shift 2
+      else
+        shift
+      fi
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+EXE=""
+EXE_ERR=""
+EXE=$(timeout 2 "$AD_BIN" --resolve 2>&1)
+EXE_RC=$?
+if [ $EXE_RC -ne 0 ]; then
+  EXE_ERR="$EXE"
+  EXE=""
+fi
+
+if [ -n "$EXE" ]; then
+  F2="$EXE"
+else
+  F2="取れない：${EXE_ERR:-ad --resolve に失敗}"
+fi
+
+if [ -n "$EXE" ] && [ -x "$EXE" ]; then
+  DISK_VER_RAW=$(timeout 2 "$EXE" --version 2>&1)
+  DISK_VER_RC=$?
+  if [ $DISK_VER_RC -eq 0 ]; then
+    DISK_VER_DISP=$(printf '%s' "$DISK_VER_RAW" | awk '{print $NF}')
+    [ -z "$DISK_VER_DISP" ] && DISK_VER_DISP="不明"
+  else
+    DISK_VER_DISP="取れない：${DISK_VER_RAW:-実行ファイルが --version に応答しません}"
+  fi
+else
+  DISK_VER_DISP="取れない：実行ファイル未解決"
+fi
+
+RUNNING_VER=""
+RESERVED_VER=""
+LOCAL_LATEST_VER=""
+VLS=$(timeout 2 "$AD_BIN" version ls 2>&1)
+VLS_RC=$?
+if [ $VLS_RC -ne 0 ]; then
+  RUNNING_VER_DISP="取れない：${VLS:-ad version ls に失敗}"
+  LOCAL_LATEST_VER_DISP="取れない：${VLS:-ad version ls に失敗}"
+else
+  RUNNING_VER=$(printf '%s\n' "$VLS" | sed -n 's/^稼働中の版[^:：]*[:：][ \t]*//p' | head -1)
+  RESERVED_VER=$(printf '%s\n' "$VLS" | sed -n 's/^予約[^:：]*[:：][ \t]*//p' | head -1)
+  LOCAL_LATEST_VER=$(printf '%s\n' "$VLS" | awk '/^VERSION/{found=1; next} found && NF>0 {print $1; exit}')
+  [ -z "$RUNNING_VER" ] && RUNNING_VER="不明"
+  [ -z "$LOCAL_LATEST_VER" ] && LOCAL_LATEST_VER="不明"
+  RUNNING_VER_DISP="$RUNNING_VER"
+  LOCAL_LATEST_VER_DISP="$LOCAL_LATEST_VER"
+fi
+
+F1="走行 ${RUNNING_VER_DISP}／ディスク ${DISK_VER_DISP}／保管庫最新 ${LOCAL_LATEST_VER_DISP}"
+
+SELF_PID=$$
+SELF_PPID=$(awk '/^PPid:/{print $2}' "/proc/$$/status" 2>/dev/null)
+[ -z "${SELF_PPID:-}" ] && SELF_PPID="不明"
+WC_OUT=$(timeout 2 "$WHOAMI_BIN" 2>&1)
+WC_RC=$?
+case "$WC_RC" in
+  0)
+    CHILD_DESC="子：はい（カード ${WC_OUT}）"
+    ;;
+  1)
+    CHILD_DESC="子：いいえ"
+    ;;
+  2)
+    CHILD_DESC="子：はい（カードID不明・安全側で停止扱い）"
+    ;;
+  *)
+    CHILD_DESC="取れない：whoami-card 終了コード ${WC_RC}"
+    ;;
+esac
+F3="PID ${SELF_PID}（親 ${SELF_PPID}）／${CHILD_DESC}"
+
+SD=$(timeout 2 "$AD_BIN" state-dir 2>&1)
+SD_RC=$?
+if [ $SD_RC -ne 0 ] || [ -z "$SD" ]; then
+  F4="取れない：${SD:-ad state-dir に失敗}"
+else
+  VC="$SD/version-current"
+  if [ -f "$VC" ]; then
+    VC_CONTENT=$(cat "$VC" 2>&1)
+    F4="${SD}／予約：${VC_CONTENT}"
+  else
+    F4="${SD}／予約：なし"
+  fi
+fi
+
+SESS_JSON=$(timeout 3 "$AD_BIN" session ls --json 2>&1)
+SESS_RC=$?
+if [ $SESS_RC -ne 0 ]; then
+  F5="取れない：${SESS_JSON:-ad session ls に失敗}"
+else
+  TOTAL=$(printf '%s' "$SESS_JSON" | "$JQ_BIN" 'length' 2>&1)
+  if ! [[ "$TOTAL" =~ ^[0-9]+$ ]]; then
+    F5="取れない：JSON解析に失敗（${TOTAL}）"
+  else
+    ALIVE=$(printf '%s' "$SESS_JSON" | "$JQ_BIN" '[.[] | select(.status.kind != "ended")] | length')
+    BREAKDOWN=$(printf '%s' "$SESS_JSON" | "$JQ_BIN" -r '.[].status.kind' | sort | uniq -c | awk '{printf "%s=%s ", $2, $1}' | sed 's/ $//')
+    [ -z "$BREAKDOWN" ] && BREAKDOWN="なし"
+    F5="生きたカード ${ALIVE}／全${TOTAL}（内訳：${BREAKDOWN}）"
+  fi
+fi
+
+PROD_HEAD=$(timeout 2 git -C "$PROD_TREE" rev-parse --short HEAD 2>&1)
+PROD_RC=$?
+if [ $PROD_RC -ne 0 ]; then
+  PROD_HEAD="取れない：${PROD_HEAD}"
+fi
+
+DEV_HEAD=$(timeout 2 git -C "$DEV_TREE" rev-parse --short HEAD 2>&1)
+DEV_RC=$?
+if [ $DEV_RC -ne 0 ]; then
+  DEV_HEAD="取れない：${DEV_HEAD}"
+fi
+
+if [ -n "$EXE" ] && [ -e "$EXE" ]; then
+  MTIME_EPOCH=$(stat -c '%Y' "$EXE" 2>&1)
+  if [[ "$MTIME_EPOCH" =~ ^[0-9]+$ ]]; then
+    MTIME_H=$(date -d "@$MTIME_EPOCH" '+%Y-%m-%d %H:%M:%S' 2>&1)
+  else
+    MTIME_H="取れない：${MTIME_EPOCH}"
+  fi
+else
+  MTIME_H="取れない：実行ファイル未解決"
+fi
+
+F6="実機HEAD ${PROD_HEAD}／開発HEAD ${DEV_HEAD}／実行ファイル更新 ${MTIME_H}"
+
+if [ -z "$CONTAINS_COMMIT" ]; then
+  F7="指定なし（--contains 未指定）"
+else
+  if [ -z "$RUNNING_VER" ] || [ "$RUNNING_VER" = "不明" ]; then
+    F7="判定できない：走行版が不明"
+  else
+    TAG="v${RUNNING_VER}"
+    if git -C "$DEV_TREE" rev-parse -q --verify "refs/tags/${TAG}" >/dev/null 2>&1; then
+      MB_OUT=$(timeout 2 git -C "$DEV_TREE" merge-base --is-ancestor "$CONTAINS_COMMIT" "$TAG" 2>&1)
+      MB_RC=$?
+      case "$MB_RC" in
+        0)
+          F7="含まれる（${TAG}）"
+          ;;
+        1)
+          F7="含まれない（${TAG}）"
+          ;;
+        *)
+          F7="判定できない：${MB_OUT:-コミットを解決できません}"
+          ;;
+      esac
+    else
+      F7="判定できない（タグ ${TAG} が無い）"
+    fi
+  fi
+fi
+
+WT=$(timeout 2 git -C "$DEV_TREE" worktree list 2>&1)
+WT_RC=$?
+if [ $WT_RC -ne 0 ]; then
+  F8_WT="取れない：${WT}"
+else
+  WT_COUNT=$(printf '%s\n' "$WT" | grep -c '.')
+  WT_LIST=$(printf '%s\n' "$WT" | tr '\n' ';' | sed 's/;$//; s/;/ ; /g')
+  F8_WT="${WT_COUNT}本：${WT_LIST}"
+fi
+
+ST=$(timeout 2 git -C "$DEV_TREE" status --porcelain 2>&1)
+ST_RC=$?
+if [ $ST_RC -ne 0 ]; then
+  F8_ST="取れない：${ST}"
+else
+  ST_COUNT=$(printf '%s\n' "$ST" | grep -c '.')
+  F8_ST="${ST_COUNT}行"
+fi
+
+F8="worktree ${F8_WT}／汚れ ${F8_ST}"
+
+print_table() {
+  printf '%s｜%s\n' "走行版・手元の版" "$F1"
+  printf '%s｜%s\n' "実行ファイルの絶対パス" "$F2"
+  printf '%s｜%s\n' "PIDと親子関係" "$F3"
+  printf '%s｜%s\n' "state_dirと予約" "$F4"
+  printf '%s｜%s\n' "生きたカード数と状態の内訳" "$F5"
+  printf '%s｜%s\n' "実機HEAD・開発HEAD・実行ファイル更新時刻" "$F6"
+  printf '%s｜%s\n' "指定コミットが走行版に含まれるか" "$F7"
+  printf '%s｜%s\n' "作業木の一覧と汚れ" "$F8"
+}
+
+print_json() {
+  "$JQ_BIN" -n \
+    --arg version "$F1" \
+    --arg disk_version "$DISK_VER_DISP" \
+    --arg exe_path "$F2" \
+    --arg pid_parent "$F3" \
+    --arg state_dir "$F4" \
+    --arg sessions "$F5" \
+    --arg heads_mtime "$F6" \
+    --arg contains "$F7" \
+    --arg worktrees "$F8" \
+    '{version:$version, disk_version:$disk_version, exe_path:$exe_path, pid_parent:$pid_parent, state_dir:$state_dir, sessions:$sessions, heads_mtime:$heads_mtime, contains:$contains, worktrees:$worktrees}'
+}
+
+if [ "$JSON_OUT" = "1" ]; then
+  print_json
+else
+  print_table
+fi
