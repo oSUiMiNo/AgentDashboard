@@ -34,14 +34,20 @@ fi
 
 "$claim_bin" "$identity" take "$lock_key" "$reason"
 claim_status=$?
+if [ "$claim_status" -eq 1 ]; then
+  echo "build-live: $lock_key を他セッションが握っている。待つか、その相手へ頼む" >&2
+  exit 1
+fi
 if [ "$claim_status" -eq 3 ]; then
-  echo "build-live: claim が終了3を返した（$lock_key を他セッションが保持）" >&2
+  echo "build-live: 札の仕組みが無い（または複数あって決められない）" >&2
   exit 3
 fi
 if [ "$claim_status" -ne 0 ]; then
   echo "build-live: claim take が失敗（終了 $claim_status）" >&2
   exit "$claim_status"
 fi
+
+trap '"$claim_bin" "$identity" free "$lock_key" >/dev/null 2>&1' INT TERM EXIT
 
 build_status=0
 if ! git -C "$live_tree" pull --ff-only; then

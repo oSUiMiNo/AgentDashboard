@@ -65,8 +65,34 @@ if [ "$dry_run" -eq 1 ]; then
   exit 0
 fi
 
-"${add_cmd[@]}"
-"${commit_cmd[@]}"
-"${tag_cmd[@]}"
-"${push_main_cmd[@]}"
-"${push_tag_cmd[@]}"
+if ! "${add_cmd[@]}"; then
+  echo "ship: add が失敗した" >&2
+  exit 1
+fi
+
+if ! "${commit_cmd[@]}"; then
+  echo "ship: commit が失敗した" >&2
+  exit 1
+fi
+
+head_subject="$(git -C "$repo" log -1 --format=%s)"
+expected_subject="chore(release): ${version}"
+if [ "$head_subject" != "$expected_subject" ]; then
+  echo "ship: commit 後の HEAD が想定と違う（期待：${expected_subject} ／実際：${head_subject}）" >&2
+  exit 1
+fi
+
+if ! "${tag_cmd[@]}"; then
+  echo "ship: tag が失敗した" >&2
+  exit 1
+fi
+
+if ! "${push_main_cmd[@]}"; then
+  echo "ship: push origin main が失敗した（タグは push しない）" >&2
+  exit 1
+fi
+
+if ! "${push_tag_cmd[@]}"; then
+  echo "ship: push origin ${tag} が失敗した" >&2
+  exit 1
+fi

@@ -30,6 +30,19 @@ export SDU_DRY_RUN="$dry_run"
 export SDU_NOW_ISO="$(date -Iseconds)"
 export SDU_STATE_JSON="$state_json"
 
+dash_pid=""
+dash_pid_reason=""
+ss_out="$(ss -ltnp 2>/dev/null | grep ':8787[[:space:]]' || true)"
+if [ -n "$ss_out" ]; then
+  dash_pid="$(printf '%s\n' "$ss_out" | grep -o 'pid=[0-9]*' | head -1)"
+  dash_pid="${dash_pid#pid=}"
+fi
+if [ -z "$dash_pid" ]; then
+  dash_pid_reason="8787 で待受中のプロセスの pid を特定できない"
+fi
+export SDU_DASH_PID="$dash_pid"
+export SDU_DASH_PID_REASON="$dash_pid_reason"
+
 python3 <<'PY'
 import json
 import os
@@ -56,10 +69,11 @@ def first_group(pattern, text, default=None):
 
 running_version = first_group(r"走行\s*([0-9][^\s／/]*)", state.get("version", ""))
 disk_version = state.get("disk_version", "")
-pid = first_group(r"PID\s*(\d+)", state.get("pid_parent", ""))
+pid = os.environ.get("SDU_DASH_PID", "").strip()
 reservation = first_group(r"予約[:：]\s*([^\s／/、)）]+)", state.get("state_dir", ""), "なし")
 
 start_time = None
+pid_reason = None
 if pid:
     try:
         out = subprocess.run(
@@ -68,10 +82,13 @@ if pid:
         ).stdout.strip()
         dt = datetime.strptime(out, "%a %b %d %H:%M:%S %Y")
         start_time = dt.strftime("%m-%d %H:%M:%S")
-    except Exception:
-        start_time = None
+    except Exception as exc:
+        pid_reason = f"ps -p {pid} が失敗した（{exc}）"
+else:
+    pid_reason = os.environ.get("SDU_DASH_PID_REASON", "8787 で待受中のプロセスの pid を特定できない")
 
 fields = []
+failed = []
 
 if running_version and disk_version:
     version_pattern = r"走行\s*[0-9][^\s／/、)）]*\s*[／/]\s*ディスク\s*[0-9][^\s、)）]*"
@@ -82,12 +99,13 @@ if pid and start_time:
     pidtime_pattern = r"PID\s*\d+・[0-9]{2}-[0-9]{2}\s+[0-9:]{8}\s*起動"
     pidtime_new = f"PID {pid}・{start_time} 起動"
     fields.append(("PID・起動時刻", pidtime_pattern, pidtime_new))
+else:
+    failed.append(f"手で直す：PID・起動時刻（{pid_reason}）")
 
 reservation_pattern = r"予約は無い|予約が無い|予約[:：]\s*[^\s／/、)）]+"
 reservation_new = "予約：なし" if reservation == "なし" else f"予約：{reservation}"
 fields.append(("予約の有無", reservation_pattern, reservation_new))
 
-failed = []
 edits = []
 for label, pattern, new_value in fields:
     matches = re.findall(pattern, html)

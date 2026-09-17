@@ -15,9 +15,11 @@
 <br/>
 
 ## 門の一覧
+設計 §6-3 は「札・検査・残存・汚れ」の4つを門と呼ぶ。ここでの門1〜4はそれを段ごとに並べ直したもので、札は各段の「止まる条件」、汚れは門0にあたる。
 
 | 門 | どの段で通すか | 何を確認するか | 緑の条件 |
 |---|---|---|---|
+| 門0：汚れ | §6-3（段2） | `bin/bump` 前に4ファイル（`server/Cargo.toml`・`server/Cargo.lock`・`docker/compose.yml`・`CHANGELOG.md`）が未コミットでないか（`git status --porcelain`） | 4ファイルとも変更なし（クリーン） |
 | 門1：テスト | §6-2（段1） | `make ci`（lint → test → build） | 全項目が緑で終わる |
 | 門2：タグ整合 | §6-3（段2） | `bin/bump` 後の4ファイル（`server/Cargo.toml`・`server/Cargo.lock`・`docker/compose.yml`・`CHANGELOG.md`）の版番号が一致しているか | すべて同じ版番号を指している |
 | 門3：サニタイズ | §6-4（段3） | `scripts/sanitize-fixtures.py` による機微情報の残存検査 | 「機微情報の残存なし」が返る |

@@ -4,6 +4,7 @@ set -u -o pipefail
 repo=""
 dry_run=0
 version_arg=""
+force=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -18,6 +19,10 @@ while [ $# -gt 0 ]; do
     --version)
       version_arg="$2"
       shift 2
+      ;;
+    --force)
+      force=1
+      shift
       ;;
     *)
       echo "bump: unknown argument: $1" >&2
@@ -47,6 +52,19 @@ for f in "$cargo_toml" "$compose_yml" "$cargo_lock" "$changelog"; do
     exit 1
   fi
 done
+
+dirty="$(git -C "$repo" status --porcelain -- "$cargo_toml" "$compose_yml" "$cargo_lock" "$changelog" 2>/dev/null)"
+if [ -n "$dirty" ]; then
+  dirty_paths="$(printf '%s\n' "$dirty" | awk '{print $2}' | paste -sd '、' -)"
+  if [ "$dry_run" -eq 1 ]; then
+    echo "bump: 他セッションが触っている可能性：${dirty_paths}（--dry-run のため続行）" >&2
+  elif [ "$force" -eq 1 ]; then
+    echo "bump: 他セッションが触っている可能性：${dirty_paths}（--force のため続行）" >&2
+  else
+    echo "bump: 他セッションが触っている可能性：${dirty_paths}。shared-tree_commit で切り分けるか、相手の作業が終わるのを待つ" >&2
+    exit 4
+  fi
+fi
 
 toml_line_no="$(grep -n '^version = "' "$cargo_toml" | head -1 | cut -d: -f1)"
 if [ -z "$toml_line_no" ]; then

@@ -54,8 +54,17 @@ commits_json() {
 }
 
 is_code_commit() {
-  local hash="$1" path files
-  files="$(git -c core.quotepath=false -C "$repo" show --name-only --format= "$hash" 2>/dev/null)"
+  local hash="$1" path files parent_count
+  parent_count="$(git -C "$repo" rev-list --parents -n 1 "$hash" | wc -w)"
+  parent_count=$((parent_count - 1))
+  if [ "$parent_count" -ge 2 ]; then
+    files="$(git -c core.quotepath=false -C "$repo" diff-tree -m --first-parent --name-only -r --format= "$hash" 2>/dev/null)"
+    if [ -z "$files" ]; then
+      return 0
+    fi
+  else
+    files="$(git -c core.quotepath=false -C "$repo" show --name-only --format= "$hash" 2>/dev/null)"
+  fi
   while IFS= read -r path; do
     [ -z "$path" ] && continue
     case "$path" in
