@@ -53,6 +53,17 @@ commits_json() {
   printf '%s' "$out"
 }
 
+is_code_commit() {
+  case "$1" in
+    docs\(*|docs:*|chore\(release\)*|chore\(skills\)*|test\(*|ci\(*)
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
 last_tag="$(git -C "$repo" describe --tags --abbrev=0 --match 'v*' 2>/dev/null)"
 if [ -z "$last_tag" ]; then
   echo "since-tag: タグが見つかりません" >&2
@@ -63,6 +74,17 @@ since_log="$(git -C "$repo" log "${last_tag}..HEAD" --oneline 2>/dev/null)"
 since_count=0
 if [ -n "$since_log" ]; then
   since_count="$(printf '%s\n' "$since_log" | wc -l | tr -d ' ')"
+fi
+
+code_count=0
+if [ -n "$since_log" ]; then
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    title="${line#* }"
+    if is_code_commit "$title"; then
+      code_count=$((code_count + 1))
+    fi
+  done <<<"$since_log"
 fi
 
 unpushed_known=0
@@ -85,13 +107,13 @@ if [ "$json" -eq 1 ]; then
   else
     unpushed_block="{\"known\":false,\"count\":null,\"commits\":null}"
   fi
-  printf '{"last_tag":"%s","since_tag":{"count":%s,"commits":%s},"unpushed":%s}\n' \
-    "$(json_escape "$last_tag")" "$since_count" "$since_commits" "$unpushed_block"
+  printf '{"last_tag":"%s","since_tag":{"count":%s,"commits":%s},"code_commits":%s,"unpushed":%s}\n' \
+    "$(json_escape "$last_tag")" "$since_count" "$since_commits" "$code_count" "$unpushed_block"
   exit 0
 fi
 
 echo "last_tag: $last_tag"
-echo "since_tag: ${since_count}件"
+echo "since_tag: ${since_count}件（コード: ${code_count}件）"
 if [ -n "$since_log" ]; then
   printf '%s\n' "$since_log" | sed 's/^/  /'
 fi
