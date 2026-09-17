@@ -2,75 +2,66 @@
 set -u -o pipefail
 
 AD_BIN="${AD_BIN:-$HOME/.claude/skills/dashboard_operate/bin/ad}"
+DEV_TREE="${AD_DEV_TREE:-$HOME/Dev/AgentDashboard}"
 
-declare -a ALL_PIDS
-declare -A PPID_OF
-declare -A ARGS_OF
-declare -A RESOLVED_EXE_OF
-declare -a REAL_PIDS
+declare -A PID_ARGS_OF
+declare -A PID_PPID_OF
+declare -i PS_SNAPSHOT_LOADED=0
+
+declare -a REAL_PIDS=()
 declare -i REAL_PIDS_KNOWN=0
+declare -i RESOLVE_CHECKABLE=0
+declare -i PORT_CHECKABLE=0
+RESOLVED_BIN_PATH=""
 RESOLVE_FAIL_REASON=""
 PORT_FAIL_REASON=""
+PORT_PID_RESULT=""
 
 load_ps_snapshot() {
-  ALL_PIDS=()
-  PPID_OF=()
-  ARGS_OF=()
-  RESOLVED_EXE_OF=()
+  [[ $PS_SNAPSHOT_LOADED -eq 1 ]] && return 0
   local line pid ppid args
   while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
-    if [[ "$line" =~ ^[[:space:]]*([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+(.*)$ ]]; then
-      pid="${BASH_REMATCH[1]}"
-      ppid="${BASH_REMATCH[2]}"
-      args="${BASH_REMATCH[3]}"
-      PPID_OF["$pid"]="$ppid"
-      ARGS_OF["$pid"]="$args"
-      ALL_PIDS+=("$pid")
-    fi
+    pid="${line%% *}"
+    line="${line#* }"
+    ppid="${line%% *}"
+    args="${line#* }"
+    [[ -z "$pid" ]] && continue
+    PID_PPID_OF["$pid"]="$ppid"
+    PID_ARGS_OF["$pid"]="$args"
   done < <(ps -eo pid=,ppid=,args=)
+  PS_SNAPSHOT_LOADED=1
 }
 
 first_token_of() {
   local args="$1"
-  case "$args" in
-    *' '*) printf '%s\n' "${args%% *}" ;;
-    *) printf '%s\n' "$args" ;;
-  esac
+  args="${args#"${args%%[![:space:]]*}"}"
+  printf '%s\n' "${args%%[[:space:]]*}"
 }
 
 resolved_exe_path() {
   local pid="$1"
-  if [[ -n "${RESOLVED_EXE_OF[$pid]+x}" ]]; then
-    printf '%s\n' "${RESOLVED_EXE_OF[$pid]}"
+  local exe token cwd
+  exe=$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)
+  if [[ -n "$exe" ]]; then
+    printf '%s\n' "$exe"
     return 0
   fi
-  local token cwd resolved
-  token=$(first_token_of "${ARGS_OF[$pid]:-}")
-  if [[ -z "$token" ]]; then
-    RESOLVED_EXE_OF["$pid"]=""
-    printf '%s\n' ""
-    return 1
-  fi
+  token=$(first_token_of "${PID_ARGS_OF[$pid]:-}")
+  [[ -z "$token" ]] && return 1
   if [[ "$token" == /* ]]; then
-    resolved="$token"
-  else
-    cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null)
-    if [[ -z "$cwd" ]]; then
-      resolved="$token"
-    else
-      resolved="$cwd/${token#./}"
-    fi
+    printf '%s\n' "$token"
+    return 0
   fi
-  RESOLVED_EXE_OF["$pid"]="$resolved"
-  printf '%s\n' "$resolved"
+  cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)
+  [[ -z "$cwd" ]] && return 1
+  printf '%s\n' "$cwd/$token"
   return 0
 }
 
 pid_matches_bin() {
-  local pid="$1" target="$2" resolved
-  resolved=$(resolved_exe_path "$pid")
-  [[ -n "$resolved" && "$resolved" == "$target" ]]
+  local pid="$1" bin_path="$2" resolved
+  resolved=$(resolved_exe_path "$pid") || return 1
+  [[ "$resolved" == "$bin_path" ]]
 }
 
 resolve_real_bin_path() {
@@ -80,11 +71,15 @@ resolve_real_bin_path() {
   out=$("$AD_BIN" --resolve 2>&1)
   rc=$?
   if [[ $rc -ne 0 ]]; then
-    RESOLVE_FAIL_REASON="ad --resolve が実行できないか失敗した（終了コード $rc）：${out:-出力なし}"
+    RESOLVE_FAIL_REASON="ad --resolve が失敗した（終了コード $rc）：${out:-出力なし}"
     return 1
   fi
   if [[ -z "$out" ]]; then
     RESOLVE_FAIL_REASON="ad --resolve の出力が空だった"
+    return 1
+  fi
+  if [[ "$out" != /* ]]; then
+    RESOLVE_FAIL_REASON="ad --resolve の出力が絶対パスではない：$out"
     return 1
   fi
   RESOLVED_BIN_PATH="$out"
@@ -92,10 +87,9 @@ resolve_real_bin_path() {
 }
 
 pid_by_bin_path() {
-  local target="$1"
-  local pid
-  for pid in "${ALL_PIDS[@]}"; do
-    if pid_matches_bin "$pid" "$target"; then
+  local bin_path="$1" pid
+  for pid in "${!PID_ARGS_OF[@]}"; do
+    if pid_matches_bin "$pid" "$bin_path"; then
       printf '%s\n' "$pid"
       return 0
     fi
@@ -103,7 +97,8 @@ pid_by_bin_path() {
   return 1
 }
 
-pid_by_port_8787() {
+pid_by_port() {
+  local port="${1:-8787}"
   PORT_FAIL_REASON=""
   PORT_PID_RESULT=""
   local hit token ss_out rc
@@ -111,16 +106,14 @@ pid_by_port_8787() {
   rc=$?
   if [[ $rc -ne 0 ]]; then
     PORT_FAIL_REASON="ss -ltnp が失敗した（終了コード $rc）：${ss_out:-出力なし}"
-    return 1
+    return 2
   fi
-  hit=$(printf '%s\n' "$ss_out" | grep ':8787[[:space:]]')
+  hit=$(printf '%s\n' "$ss_out" | grep ":${port}[[:space:]]")
   if [[ -z "$hit" ]]; then
-    PORT_FAIL_REASON="ss -ltnp の出力にポート 8787 の行が無い"
     return 1
   fi
   token=$(printf '%s\n' "$hit" | grep -o 'pid=[0-9]*' | head -1)
   if [[ -z "$token" ]]; then
-    PORT_FAIL_REASON="ポート 8787 の行に pid= が無い"
     return 1
   fi
   PORT_PID_RESULT="${token#pid=}"
@@ -130,50 +123,56 @@ pid_by_port_8787() {
 compute_real_pids() {
   REAL_PIDS=()
   REAL_PIDS_KNOWN=0
-  local path_pid already rp
+  RESOLVE_CHECKABLE=0
+  PORT_CHECKABLE=0
+  local path_pid already rp port_rc
   if resolve_real_bin_path; then
+    RESOLVE_CHECKABLE=1
     if path_pid=$(pid_by_bin_path "$RESOLVED_BIN_PATH"); then
       REAL_PIDS+=("$path_pid")
     fi
   fi
-  if pid_by_port_8787; then
-    already=0
-    for rp in "${REAL_PIDS[@]}"; do
-      [[ "$rp" == "$PORT_PID_RESULT" ]] && already=1
-    done
-    [[ $already -eq 0 ]] && REAL_PIDS+=("$PORT_PID_RESULT")
+  pid_by_port "${1:-8787}"
+  port_rc=$?
+  if [[ $port_rc -ne 2 ]]; then
+    PORT_CHECKABLE=1
+    if [[ $port_rc -eq 0 ]]; then
+      already=0
+      for rp in "${REAL_PIDS[@]}"; do
+        [[ "$rp" == "$PORT_PID_RESULT" ]] && already=1
+      done
+      [[ $already -eq 0 ]] && REAL_PIDS+=("$PORT_PID_RESULT")
+    fi
   fi
-  if [[ ${#REAL_PIDS[@]} -gt 0 ]]; then
+  if [[ $RESOLVE_CHECKABLE -eq 1 || $PORT_CHECKABLE -eq 1 ]]; then
     REAL_PIDS_KNOWN=1
   fi
 }
 
 is_real_or_descendant() {
-  local pid="$1"
-  local cur="$pid"
-  local rp hops
-  hops=0
-  while [[ -n "$cur" && "$cur" != "0" ]]; do
+  local pid="$1" rp cur hops=0
+  for rp in "${REAL_PIDS[@]}"; do
+    [[ "$pid" == "$rp" ]] && return 0
+  done
+  cur="$pid"
+  while [[ $hops -lt 200 ]]; do
+    cur="${PID_PPID_OF[$cur]:-}"
+    [[ -z "$cur" || "$cur" == "0" || "$cur" == "1" ]] && return 1
     for rp in "${REAL_PIDS[@]}"; do
       [[ "$cur" == "$rp" ]] && return 0
     done
-    cur="${PPID_OF[$cur]:-}"
     hops=$((hops + 1))
-    [[ $hops -gt 100000 ]] && break
   done
   return 1
 }
 
 cmd_count() {
-  local -a bins=()
+  local bins=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --bin)
         shift
-        if [[ $# -eq 0 ]]; then
-          echo "our-servers count: --bin には値が要ります" >&2
-          return 2
-        fi
+        [[ $# -eq 0 ]] && { echo "our-servers count: --bin には値が要ります" >&2; return 2; }
         bins+=("$1")
         shift
         ;;
@@ -184,129 +183,204 @@ cmd_count() {
     esac
   done
 
-  if [[ ${#bins[@]} -eq 0 ]]; then
-    bins=(
-      "$HOME/Dev/AgentDashboard/server/target/debug/agentdashboard"
-      "$HOME/Dev/AgentDashboard/server/target/debug/fake-claude"
-      "$HOME/Dev/AgentDashboard/server/target/release/agentdashboard"
-    )
-  fi
-
   load_ps_snapshot
   compute_real_pids
 
   if [[ $REAL_PIDS_KNOWN -eq 0 ]]; then
-    echo "実機を特定できていないので、実機が一覧に混ざっている可能性がある：ad --resolve（${RESOLVE_FAIL_REASON:-理由不明}）／ss -ltnp（${PORT_FAIL_REASON:-理由不明}）" >&2
+    echo "実機を特定できない" >&2
+    echo "  ad --resolve（${RESOLVE_FAIL_REASON:-理由不明}）／ss -ltnp（${PORT_FAIL_REASON:-理由不明}）" >&2
+    return 3
   fi
 
-  local pid args matched_bin b found
-  found=0
-  for pid in "${ALL_PIDS[@]}"; do
-    args="${ARGS_OF[$pid]}"
-    matched_bin=""
-    for b in "${bins[@]}"; do
-      if pid_matches_bin "$pid" "$b"; then
-        matched_bin="$b"
+  if [[ ${#bins[@]} -eq 0 ]]; then
+    bins=("$DEV_TREE/server/target/debug/agentdashboard"
+          "$DEV_TREE/server/target/debug/fake-claude"
+          "$DEV_TREE/server/target/release/agentdashboard")
+  fi
+
+  local pid count=0 bin_path match
+  for pid in "${!PID_ARGS_OF[@]}"; do
+    is_real_or_descendant "$pid" && continue
+    match=0
+    for bin_path in "${bins[@]}"; do
+      if pid_matches_bin "$pid" "$bin_path"; then
+        match=1
         break
       fi
     done
-    [[ -z "$matched_bin" ]] && continue
-    if is_real_or_descendant "$pid"; then
-      echo "除外した：$pid $matched_bin" >&2
-      continue
+    if [[ $match -eq 1 ]]; then
+      count=$((count + 1))
+      printf '%s\t%s\t%s\n' "$pid" "$bin_path" "${PID_ARGS_OF[$pid]}"
     fi
-    printf '%s\t%s\t%s\n' "$pid" "$matched_bin" "$args"
-    found=$((found + 1))
   done
 
-  echo "$found"
-  if [[ $found -eq 0 ]]; then
-    return 0
-  fi
+  printf '%s\n' "$count"
+  [[ $count -eq 0 ]] && return 0
   return 1
 }
 
 cmd_stop() {
-  local -a pids=("$@")
-  if [[ ${#pids[@]} -eq 0 ]]; then
-    return 0
+  if [[ $# -eq 0 ]]; then
+    echo "our-servers stop: PID を1つ以上指定してください" >&2
+    return 2
   fi
 
   load_ps_snapshot
   compute_real_pids
 
   if [[ $REAL_PIDS_KNOWN -eq 0 ]]; then
-    echo "実機を特定できないので止めない：ad --resolve と ss -ltnp の両方が失敗した" >&2
-    echo "  ad --resolve：${RESOLVE_FAIL_REASON:-理由不明}" >&2
-    echo "  ss -ltnp：${PORT_FAIL_REASON:-理由不明}" >&2
+    echo "実機を特定できないので止めない" >&2
+    if [[ $RESOLVE_CHECKABLE -eq 0 ]]; then
+      echo "  ad --resolve：${RESOLVE_FAIL_REASON:-理由不明}" >&2
+    fi
+    if [[ $PORT_CHECKABLE -eq 0 ]]; then
+      echo "  ss -ltnp：${PORT_FAIL_REASON:-理由不明}" >&2
+    fi
     return 3
   fi
 
-  local pid
-  for pid in "${pids[@]}"; do
-    if is_real_or_descendant "$pid"; then
-      echo "拒否した：PID $pid は実機またはその子孫です" >&2
-      return 2
+  local pid rp blocked=0
+  for pid in "$@"; do
+    for rp in "${REAL_PIDS[@]}"; do
+      if [[ "$pid" == "$rp" ]]; then
+        echo "our-servers stop: PID $pid は実機なので止めない" >&2
+        blocked=1
+      fi
+    done
+  done
+  if [[ $blocked -eq 1 ]]; then
+    return 2
+  fi
+
+  local rc=0
+  for pid in "$@"; do
+    if ! kill -TERM "$pid" 2>/dev/null; then
+      echo "our-servers stop: PID $pid へ TERM を送れなかった" >&2
+      rc=1
     fi
   done
 
-  for pid in "${pids[@]}"; do
-    kill -TERM "$pid" 2>/dev/null
+  local waited alive
+  for ((waited = 0; waited < 30; waited++)); do
+    alive=0
+    for pid in "$@"; do
+      kill -0 "$pid" 2>/dev/null && alive=1
+    done
+    [[ $alive -eq 0 ]] && return $rc
+    sleep 0.1
   done
 
-  sleep 3
+  for pid in "$@"; do
+    kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
+  done
 
-  for pid in "${pids[@]}"; do
+  for ((waited = 0; waited < 20; waited++)); do
+    alive=0
+    for pid in "$@"; do
+      kill -0 "$pid" 2>/dev/null && alive=1
+    done
+    [[ $alive -eq 0 ]] && return $rc
+    sleep 0.1
+  done
+
+  for pid in "$@"; do
     if kill -0 "$pid" 2>/dev/null; then
-      kill -KILL "$pid" 2>/dev/null
+      echo "our-servers stop: PID $pid が KILL 後も残っている" >&2
+      rc=1
     fi
   done
+  return $rc
+}
 
+cmd_real_pid() {
+  local port=8787
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --port)
+        shift
+        if [[ $# -eq 0 ]]; then
+          echo "our-servers real-pid: --port には値が要ります" >&2
+          return 2
+        fi
+        port="$1"
+        shift
+        ;;
+      *)
+        echo "our-servers real-pid: 不明な引数：$1" >&2
+        return 2
+        ;;
+    esac
+  done
+
+  load_ps_snapshot
+  compute_real_pids "$port"
+
+  if [[ $REAL_PIDS_KNOWN -eq 0 ]]; then
+    echo "実機を特定できない" >&2
+    if [[ $RESOLVE_CHECKABLE -eq 0 ]]; then
+      echo "  ad --resolve：${RESOLVE_FAIL_REASON:-理由不明}" >&2
+    fi
+    if [[ $PORT_CHECKABLE -eq 0 ]]; then
+      echo "  ss -ltnp：${PORT_FAIL_REASON:-理由不明}" >&2
+    fi
+    return 3
+  fi
+
+  if [[ ${#REAL_PIDS[@]} -eq 0 ]]; then
+    echo "実機は動いていない" >&2
+    return 1
+  fi
+
+  printf '%s\n' "${REAL_PIDS[0]}"
   return 0
 }
 
 cmd_webserver_log_check() {
-  local log="${1:-}"
-  if [[ -z "$log" ]]; then
+  if [[ $# -eq 0 ]]; then
     echo "our-servers webserver-log-check: ログファイルを指定してください" >&2
     return 2
   fi
-  if [[ ! -f "$log" ]]; then
-    echo "our-servers webserver-log-check: ファイルが見つかりません：$log" >&2
+  local log_file="$1"
+  if [[ ! -f "$log_file" ]]; then
+    echo "our-servers webserver-log-check: $log_file が見つからない" >&2
     return 2
   fi
-
-  local count
-  count=$(grep -c '\[WebServer\]' "$log")
-
-  if [[ "$count" -eq 0 ]]; then
-    echo "自分でサーバを起こしていない（前の走行の孤児を再利用した疑い）"
+  if grep -qE 'panic|PANIC' "$log_file"; then
+    echo "webserver ログに panic の痕跡がある：$log_file" >&2
     return 1
   fi
   return 0
 }
 
 main() {
-  local cmd="${1:-}"
-  case "$cmd" in
+  if [[ $# -eq 0 ]]; then
+    echo "使い方：our-servers count [--bin <パス>]... | stop <PID>... | real-pid [--port <ポート>] | webserver-log-check <ログファイル>" >&2
+    exit 2
+  fi
+  local sub="$1"
+  shift
+  case "$sub" in
     count)
-      shift
       cmd_count "$@"
+      exit $?
       ;;
     stop)
-      shift
       cmd_stop "$@"
+      exit $?
+      ;;
+    real-pid)
+      cmd_real_pid "$@"
+      exit $?
       ;;
     webserver-log-check)
-      shift
       cmd_webserver_log_check "$@"
+      exit $?
       ;;
     *)
-      echo "使い方：our-servers count [--bin <パス>]... | stop <PID>... | webserver-log-check <ログファイル>" >&2
-      return 2
+      echo "使い方：our-servers count [--bin <パス>]... | stop <PID>... | real-pid [--port <ポート>] | webserver-log-check <ログファイル>" >&2
+      exit 2
       ;;
   esac
 }
 
 main "$@"
-exit $?

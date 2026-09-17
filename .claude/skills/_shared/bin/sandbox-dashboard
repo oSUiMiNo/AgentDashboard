@@ -43,25 +43,41 @@ migrate_legacy_sandbox_json() {
   if [[ ! -f "$SANDBOX_JSON" ]]; then
     return 0
   fi
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "sandbox-dashboard: jq が無いので $SANDBOX_JSON を残したまま移行を見送ります" >&2
+    return 1
+  fi
   local pid port state_dir log started_at
   pid=$(jq -r '.pid // empty' "$SANDBOX_JSON" 2>/dev/null)
   port=$(jq -r '.port // empty' "$SANDBOX_JSON" 2>/dev/null)
   state_dir=$(jq -r '.state_dir // empty' "$SANDBOX_JSON" 2>/dev/null)
   log=$(jq -r '.log // empty' "$SANDBOX_JSON" 2>/dev/null)
   started_at=$(jq -r '.started_at // empty' "$SANDBOX_JSON" 2>/dev/null)
-  if [[ -n "$port" ]]; then
-    mkdir -p "$SANDBOX_STATE_ROOT"
-    jq -n \
-      --argjson pid "${pid:-null}" \
-      --argjson port "$port" \
-      --arg state_dir "${state_dir:-}" \
-      --arg log "${log:-}" \
-      --arg started_at "${started_at:-}" \
-      '{pid: $pid, port: $port, state_dir: $state_dir, log: $log, started_at: $started_at}' \
-      > "$SANDBOX_STATE_ROOT/$port.json"
+  if [[ ! "$port" =~ ^[0-9]+$ ]]; then
+    echo "sandbox-dashboard: $SANDBOX_JSON の port が数値でないので残したまま移行を見送ります" >&2
+    return 1
   fi
-  rm -f "$SANDBOX_JSON"
-  return 0
+  mkdir -p "$SANDBOX_STATE_ROOT"
+  local tmp_file
+  tmp_file=$(mktemp "$SANDBOX_STATE_ROOT/.migrate.XXXXXX") || {
+    echo "sandbox-dashboard: 一時ファイルを作れないので $SANDBOX_JSON を残したまま移行を見送ります" >&2
+    return 1
+  }
+  if jq -n \
+    --argjson pid "${pid:-null}" \
+    --argjson port "$port" \
+    --arg state_dir "${state_dir:-}" \
+    --arg log "${log:-}" \
+    --arg started_at "${started_at:-}" \
+    '{pid: $pid, port: $port, state_dir: $state_dir, log: $log, started_at: $started_at}' \
+    > "$tmp_file" 2>/dev/null && [[ -s "$tmp_file" ]]; then
+    mv "$tmp_file" "$SANDBOX_STATE_ROOT/$port.json"
+    rm -f "$SANDBOX_JSON"
+    return 0
+  fi
+  rm -f "$tmp_file"
+  echo "sandbox-dashboard: 新しい記録の書き込みに失敗したので $SANDBOX_JSON を残します" >&2
+  return 1
 }
 
 list_record_files() {
@@ -104,6 +120,14 @@ stop_record() {
   pid=$(jq -r '.pid // empty' "$record_file" 2>/dev/null)
   state_dir=$(jq -r '.state_dir // empty' "$record_file" 2>/dev/null)
 
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    if ! can_self_verify_and_kill "$pid" "$state_dir"; then
+      echo "sandbox-dashboard down: PID $pid を自己検証できないので停止しません（別プロセスになっている可能性）：$record_file" >&2
+      echo "PID $pid: $(ps -p "$pid" -o args= 2>/dev/null)" >&2
+      return 1
+    fi
+  fi
+
   local rc=0
   if [[ -n "$pid" ]]; then
     if [[ -x "$OUR_SERVERS" ]]; then
@@ -119,17 +143,12 @@ stop_record() {
   fi
 
   if [[ $rc -eq 3 ]]; then
-    if can_self_verify_and_kill "$pid" "$state_dir"; then
-      kill -TERM "$pid" 2>/dev/null
-      sleep 3
-      if kill -0 "$pid" 2>/dev/null; then
-        kill -KILL "$pid" 2>/dev/null
-      fi
-      rc=0
-    else
-      echo "sandbox-dashboard down: PID $pid を自己検証できないので手で止めて（記録は残す）：$record_file" >&2
-      return 1
+    kill -TERM "$pid" 2>/dev/null
+    sleep 3
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null
     fi
+    rc=0
   fi
 
   if [[ $rc -ne 0 ]]; then
@@ -170,10 +189,34 @@ cmd_up() {
   done
 
   if [[ -x "$OUR_SERVERS" ]]; then
-    "$OUR_SERVERS" count >/dev/null 2>&1
-    if [[ $? -eq 1 ]]; then
-      echo "残骸がある" >&2
-      return 1
+    local count_output count_rc
+    count_output=$("$OUR_SERVERS" count 2>/dev/null)
+    count_rc=$?
+    if [[ $count_rc -eq 1 ]]; then
+      local -A known_port_by_pid=()
+      local rf rpid rport
+      while IFS= read -r rf; do
+        [[ -n "$rf" ]] || continue
+        rpid=$(jq -r '.pid // empty' "$rf" 2>/dev/null)
+        rport=$(jq -r '.port // empty' "$rf" 2>/dev/null)
+        [[ -n "$rpid" ]] && known_port_by_pid["$rpid"]="$rport"
+      done < <(list_record_files)
+
+      local unknown_debris=0
+      local dpid drest
+      while IFS=$'\t' read -r dpid drest; do
+        [[ -n "$dpid" ]] || continue
+        if [[ -n "${known_port_by_pid[$dpid]+set}" ]]; then
+          echo "already running (port ${known_port_by_pid[$dpid]}, pid $dpid)" >&2
+        else
+          unknown_debris=1
+        fi
+      done < <(printf '%s\n' "$count_output" | grep -F $'\t')
+
+      if [[ "$unknown_debris" -eq 1 ]]; then
+        echo "残骸がある" >&2
+        return 1
+      fi
     fi
   else
     echo "our-servers が見つからないので残骸チェックを省略します" >&2
@@ -254,7 +297,7 @@ EOF
 }
 
 cmd_down() {
-  local requested_port=""
+  local requested_port="" all_flag=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --port)
@@ -264,6 +307,10 @@ cmd_down() {
           return 2
         fi
         requested_port="$1"
+        shift
+        ;;
+      --all)
+        all_flag=1
         shift
         ;;
       *)
@@ -289,6 +336,18 @@ cmd_down() {
   if [[ ${#files[@]} -eq 0 ]]; then
     echo "立っていない"
     return 0
+  fi
+
+  if [[ "$all_flag" -ne 1 && ${#files[@]} -ge 2 ]]; then
+    echo "複数立っている。--port <番号> で指定せよ" >&2
+    local f pid port state_dir
+    for f in "${files[@]}"; do
+      pid=$(jq -r '.pid // empty' "$f" 2>/dev/null)
+      port=$(jq -r '.port // empty' "$f" 2>/dev/null)
+      state_dir=$(jq -r '.state_dir // empty' "$f" 2>/dev/null)
+      echo "port=$port pid=$pid state_dir=$state_dir" >&2
+    done
+    return 2
   fi
 
   local rc=0 f
@@ -342,7 +401,7 @@ main() {
       cmd_status "$@"
       ;;
     *)
-      echo "使い方：sandbox-dashboard up [--port N] | down [--port N] | status" >&2
+      echo "使い方：sandbox-dashboard up [--port N] | down [--port N | --all] | status" >&2
       return 2
       ;;
   esac
