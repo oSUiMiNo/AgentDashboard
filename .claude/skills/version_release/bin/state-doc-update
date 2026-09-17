@@ -18,6 +18,7 @@ done
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$script_dir/../../../.." && pwd)"
 running_state_bin="$(cd "$script_dir/../../_shared/bin" && pwd)/running-state"
+our_servers_bin="${OUR_SERVERS_BIN:-$(cd "$script_dir/../../_shared/bin" && pwd)/our-servers}"
 html_path="$repo/.claude/docs/knowledge/いま動いているもの.html"
 
 if ! state_json="$("$running_state_bin" --json)"; then
@@ -32,14 +33,19 @@ export SDU_STATE_JSON="$state_json"
 
 dash_pid=""
 dash_pid_reason=""
-ss_out="$(ss -ltnp 2>/dev/null | grep ':8787[[:space:]]' || true)"
-if [ -n "$ss_out" ]; then
-  dash_pid="$(printf '%s\n' "$ss_out" | grep -o 'pid=[0-9]*' | head -1)"
-  dash_pid="${dash_pid#pid=}"
-fi
-if [ -z "$dash_pid" ]; then
-  dash_pid_reason="8787 で待受中のプロセスの pid を特定できない"
-fi
+rp_out="$("$our_servers_bin" real-pid 2>&1)"
+rp_rc=$?
+case "$rp_rc" in
+  0)
+    dash_pid="$rp_out"
+    ;;
+  1|3)
+    dash_pid_reason="$rp_out"
+    ;;
+  *)
+    dash_pid_reason="our-servers real-pid が想定外の終了コード（$rp_rc）：$rp_out"
+    ;;
+esac
 export SDU_DASH_PID="$dash_pid"
 export SDU_DASH_PID_REASON="$dash_pid_reason"
 
@@ -49,7 +55,6 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime
 
 html_path = os.environ["SDU_HTML"]
 dry_run = os.environ["SDU_DRY_RUN"] == "1"
@@ -75,20 +80,28 @@ reservation = first_group(r"予約[:：]\s*([^\s／/、)）]+)", state.get("stat
 start_time = None
 pid_reason = None
 if pid:
+    lstart = ""
     try:
-        out = subprocess.run(
+        lstart = subprocess.run(
             ["ps", "-o", "lstart=", "-p", pid],
             capture_output=True, text=True, check=True,
         ).stdout.strip()
-        dt = datetime.strptime(out, "%a %b %d %H:%M:%S %Y")
-        start_time = dt.strftime("%m-%d %H:%M:%S")
     except Exception as exc:
         pid_reason = f"ps -p {pid} が失敗した（{exc}）"
+    if lstart:
+        try:
+            start_time = subprocess.run(
+                ["date", "-d", lstart, "+%m-%d %H:%M:%S"],
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+        except Exception as exc:
+            pid_reason = f"起動時刻を変換できなかった（{exc}）"
 else:
     pid_reason = os.environ.get("SDU_DASH_PID_REASON", "8787 で待受中のプロセスの pid を特定できない")
 
 fields = []
 failed = []
+pid_missing_reason = None
 
 if running_version and disk_version:
     version_pattern = r"走行\s*[0-9][^\s／/、)）]*\s*[／/]\s*ディスク\s*[0-9][^\s、)）]*"
@@ -100,7 +113,8 @@ if pid and start_time:
     pidtime_new = f"PID {pid}・{start_time} 起動"
     fields.append(("PID・起動時刻", pidtime_pattern, pidtime_new))
 else:
-    failed.append(f"手で直す：PID・起動時刻（{pid_reason}）")
+    pid_missing_reason = pid_reason or "PID または起動時刻を取得できなかった"
+    print(f"state-doc-update: PID・起動時刻は引けなかった：{pid_missing_reason}", file=sys.stderr)
 
 reservation_pattern = r"予約は無い|予約が無い|予約[:：]\s*[^\s／/、)）]+"
 reservation_new = "予約：なし" if reservation == "なし" else f"予約：{reservation}"
@@ -115,9 +129,10 @@ for label, pattern, new_value in fields:
     old_value = matches[0]
     edits.append((label, old_value, new_value))
 
-if failed:
-    for line in failed:
-        print(line)
+for line in failed:
+    print(line)
+
+if not edits:
     print("差分が確定しない欄があるため何も書かない")
     sys.exit(4)
 
@@ -142,7 +157,8 @@ for label, old_value, new_value in changed:
     applied += 1
 
 footer_pattern = r"<!-- 最終実測：.*?-->"
-footer_new = f"<!-- 最終実測：{now_iso} version_release -->"
+footer_suffix = "（PID は未取得）" if pid_missing_reason else ""
+footer_new = f"<!-- 最終実測：{now_iso} version_release{footer_suffix} -->"
 if re.search(footer_pattern, html):
     html = re.sub(footer_pattern, footer_new, html, count=1)
 elif "</body>" in html:

@@ -47,7 +47,12 @@ if [ "$claim_status" -ne 0 ]; then
   exit "$claim_status"
 fi
 
-trap '"$claim_bin" "$identity" free "$lock_key" >/dev/null 2>&1' INT TERM EXIT
+release_lock() {
+  "$claim_bin" "$identity" free "$lock_key" >/dev/null 2>&1
+}
+trap release_lock EXIT
+trap 'release_lock; exit 130' INT
+trap 'release_lock; exit 143' TERM
 
 build_status=0
 if ! git -C "$live_tree" pull --ff-only; then

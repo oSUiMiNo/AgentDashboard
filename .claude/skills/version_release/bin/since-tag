@@ -58,7 +58,7 @@ is_code_commit() {
   parent_count="$(git -C "$repo" rev-list --parents -n 1 "$hash" | wc -w)"
   parent_count=$((parent_count - 1))
   if [ "$parent_count" -ge 2 ]; then
-    files="$(git -c core.quotepath=false -C "$repo" diff-tree -m --first-parent --name-only -r --format= "$hash" 2>/dev/null)"
+    files="$(git -c core.quotepath=false -C "$repo" diff-tree --diff-merges=first-parent --name-only -r --format= "$hash" 2>/dev/null)"
     if [ -z "$files" ]; then
       return 0
     fi

@@ -50,45 +50,70 @@ fi
 
 files=(server/Cargo.toml docker/compose.yml server/Cargo.lock CHANGELOG.md)
 
-add_cmd=(git -C "$repo" add "${files[@]}")
-commit_cmd=(git -C "$repo" commit -m "chore(release): ${version}")
+expected_subject="chore(release): ${version}"
+commit_cmd=(git -C "$repo" commit --only -m "${expected_subject}" -- "${files[@]}")
 tag_cmd=(git -C "$repo" tag "${tag}")
 push_main_cmd=(git -C "$repo" push origin main)
 push_tag_cmd=(git -C "$repo" push origin "${tag}")
 
+head_subject="$(git -C "$repo" log -1 --format=%s 2>/dev/null)"
+skip_commit=0
+if [ "$head_subject" = "$expected_subject" ] \
+  && git -C "$repo" diff --quiet -- "${files[@]}" \
+  && git -C "$repo" diff --cached --quiet -- "${files[@]}"; then
+  skip_commit=1
+fi
+
 if [ "$dry_run" -eq 1 ]; then
-  printf '%q ' "${add_cmd[@]}"; echo
-  printf '%q ' "${commit_cmd[@]}"; echo
-  printf '%q ' "${tag_cmd[@]}"; echo
+  if [ "$skip_commit" -eq 0 ]; then
+    printf '%q ' "${commit_cmd[@]}"; echo
+  fi
   printf '%q ' "${push_main_cmd[@]}"; echo
+  printf '%q ' "${tag_cmd[@]}"; echo
   printf '%q ' "${push_tag_cmd[@]}"; echo
   exit 0
 fi
 
-if ! "${add_cmd[@]}"; then
-  echo "ship: add が失敗した" >&2
-  exit 1
+if [ "$skip_commit" -eq 0 ]; then
+  if ! "${commit_cmd[@]}"; then
+    echo "ship: commit が失敗した" >&2
+    exit 1
+  fi
+
+  head_subject="$(git -C "$repo" log -1 --format=%s)"
+  if [ "$head_subject" != "$expected_subject" ]; then
+    echo "ship: commit 後の HEAD が想定と違う（期待：${expected_subject} ／実際：${head_subject}）" >&2
+    exit 1
+  fi
+
+  mapfile -t shown_files < <(git -C "$repo" show --stat --name-only --format= HEAD | grep -v '^$')
+  extra_files=()
+  for shown in "${shown_files[@]}"; do
+    matched=0
+    for expected in "${files[@]}"; do
+      if [ "$shown" = "$expected" ]; then
+        matched=1
+        break
+      fi
+    done
+    if [ "$matched" -eq 0 ]; then
+      extra_files+=("$shown")
+    fi
+  done
+
+  if [ "${#shown_files[@]}" -ne "${#files[@]}" ] || [ "${#extra_files[@]}" -gt 0 ]; then
+    echo "ship: commit に想定外のファイルが載った：${extra_files[*]}" >&2
+    exit 5
+  fi
 fi
 
-if ! "${commit_cmd[@]}"; then
-  echo "ship: commit が失敗した" >&2
-  exit 1
-fi
-
-head_subject="$(git -C "$repo" log -1 --format=%s)"
-expected_subject="chore(release): ${version}"
-if [ "$head_subject" != "$expected_subject" ]; then
-  echo "ship: commit 後の HEAD が想定と違う（期待：${expected_subject} ／実際：${head_subject}）" >&2
+if ! "${push_main_cmd[@]}"; then
+  echo "ship: push origin main が失敗した（tag はまだ作っていない）" >&2
   exit 1
 fi
 
 if ! "${tag_cmd[@]}"; then
   echo "ship: tag が失敗した" >&2
-  exit 1
-fi
-
-if ! "${push_main_cmd[@]}"; then
-  echo "ship: push origin main が失敗した（タグは push しない）" >&2
   exit 1
 fi
 
