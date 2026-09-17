@@ -59,7 +59,7 @@ if [ -z "$session_id" ]; then
   exit 2
 fi
 
-slug="$(printf '%s' "$project_dir" | sed 's#[/._]#-#g')"
+slug="$(printf '%s' "$project_dir" | sed 's#[^A-Za-z0-9-]#-#g')"
 record="$HOME/.claude/projects/$slug/$session_id.jsonl"
 
 if [ ! -f "$record" ]; then
@@ -198,6 +198,21 @@ bash_relative_or_drop() {
   esac
 }
 
+run_jq_or_die() {
+  local filter="$1" file="$2" out rc
+  out="$(jq -r "$filter" "$file" 2>/dev/null)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ -n "$out" ]; then
+      echo "警告：$file の記録の末尾が書き込み中のため一部を読み飛ばした（jq exit $rc）" >&2
+    else
+      echo "エラー：$file の解析に失敗した（jq）。§10-4 の手作業判定に切り替えること" >&2
+      exit 4
+    fi
+  fi
+  printf '%s' "$out"
+}
+
 certain_raw=""
 uncertain_raw=""
 all_cmd_raw=""
@@ -205,31 +220,31 @@ all_cmd_raw=""
 for entry in "${records[@]}"; do
   rec_file="${entry#*:}"
 
-  c="$(jq -r '
+  c="$(run_jq_or_die '
     select(.type=="assistant")
     | .message.content[]?
     | select(.type=="tool_use")
     | select(.name=="Edit" or .name=="Write")
     | .input.file_path // empty
-  ' "$rec_file" 2>/dev/null)" || { echo "エラー：$rec_file の解析に失敗した（jq）。§10-4 の手作業判定に切り替えること" >&2; exit 4; }
+  ' "$rec_file")"
 
-  n="$(jq -r '
+  n="$(run_jq_or_die '
     select(.type=="assistant")
     | .message.content[]?
     | select(.type=="tool_use")
     | select(.name=="NotebookEdit")
     | .input.notebook_path // empty
-  ' "$rec_file" 2>/dev/null)" || { echo "エラー：$rec_file の解析に失敗した（jq）。§10-4 の手作業判定に切り替えること" >&2; exit 4; }
+  ' "$rec_file")"
 
   certain_raw="$(printf '%s\n%s\n%s\n' "$certain_raw" "$c" "$n")"
 
-  cmds_b64="$(jq -r '
+  cmds_b64="$(run_jq_or_die '
     select(.type=="assistant")
     | .message.content[]?
     | select(.type=="tool_use")
     | select(.name=="Bash")
     | (.input.command // "") | @base64
-  ' "$rec_file" 2>/dev/null)" || { echo "エラー：$rec_file の解析に失敗した（jq）。§10-4 の手作業判定に切り替えること" >&2; exit 4; }
+  ' "$rec_file")"
 
   while IFS= read -r b64; do
     [ -n "$b64" ] || continue

@@ -156,8 +156,8 @@ if ! (cd "$WORKTREE_DIR" && make build-web build-debug); then
   exit 1
 fi
 
-BIN_PATH="$(find "$WORKTREE_DIR/server/target" -maxdepth 3 -type f -name 'agentdashboard*' -executable 2>/dev/null | head -1)"
-if [ -z "$BIN_PATH" ]; then
+BIN_PATH="$WORKTREE_DIR/server/target/debug/agentdashboard"
+if [ ! -x "$BIN_PATH" ]; then
   echo "警告：worktree の実行ファイルが見つからなかった。our-servers count をスキップする" >&2
 else
   COUNT_OUTPUT="$("$REPO_ROOT/.claude/skills/_shared/bin/our-servers" count --bin "$BIN_PATH" 2>&1)"
