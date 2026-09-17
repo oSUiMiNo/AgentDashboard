@@ -54,14 +54,28 @@ commits_json() {
 }
 
 is_code_commit() {
-  case "$1" in
-    docs\(*|docs:*|chore\(release\)*|chore\(skills\)*|test\(*|ci\(*)
-      return 1
-      ;;
-    *)
-      return 0
-      ;;
-  esac
+  local hash="$1" path files
+  files="$(git -c core.quotepath=false -C "$repo" show --name-only --format= "$hash" 2>/dev/null)"
+  while IFS= read -r path; do
+    [ -z "$path" ] && continue
+    case "$path" in
+      .claude/*|MyDocs/*|docs/*|.github/*.md)
+        continue
+        ;;
+    esac
+    case "$path" in
+      */*)
+        return 0
+        ;;
+      *.md)
+        continue
+        ;;
+      *)
+        return 0
+        ;;
+    esac
+  done <<<"$files"
+  return 1
 }
 
 last_tag="$(git -C "$repo" describe --tags --abbrev=0 --match 'v*' 2>/dev/null)"
@@ -80,8 +94,8 @@ code_count=0
 if [ -n "$since_log" ]; then
   while IFS= read -r line; do
     [ -z "$line" ] && continue
-    title="${line#* }"
-    if is_code_commit "$title"; then
+    hash="${line%% *}"
+    if is_code_commit "$hash"; then
       code_count=$((code_count + 1))
     fi
   done <<<"$since_log"
