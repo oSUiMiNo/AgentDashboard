@@ -140,17 +140,18 @@ def cmd_tick(args):
     record = get_record(state, args.skill)
 
     now = now_value(args)
+    interval_h = record.get("interval_h", DEFAULT_INTERVAL_HOURS)
     last_run_raw = record.get("last_run")
 
     if last_run_raw:
         last_run = parse_dt(last_run_raw)
-        interval_h = record.get("interval_h", DEFAULT_INTERVAL_HOURS)
         half = timedelta(hours=interval_h) / 2
         if now < last_run + half:
             print("skip")
             return 0
 
     record["last_run"] = now.isoformat()
+    record["next_run"] = (now + timedelta(hours=interval_h)).isoformat()
     record["phase"] = 0
     state[args.skill] = record
     write_state_atomic(state_path, state)
@@ -259,7 +260,7 @@ def build_parser():
     p_tick = sub.add_parser(
         "tick",
         parents=[with_now],
-        help="cron から呼ばれたときの入口。前回から半周期未満なら skip、そうでなければ last_run を書いて run と出す",
+        help="cron から呼ばれたときの入口。前回から半周期未満なら skip、そうでなければ last_run を書いて run と出す。次回予定も暫定で now + interval へ進める（途中で止まっても巡回が詰まらないように）",
     )
     p_tick.add_argument("skill", help="スキル名")
     p_tick.set_defaults(func=cmd_tick)

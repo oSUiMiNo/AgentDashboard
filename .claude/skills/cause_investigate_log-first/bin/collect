@@ -31,7 +31,8 @@ usage() {
   --proc <名前>      dashboard/session-host/browser/browser-anon で絞る
   --tree <path>      実機ツリー。ad state-dir をこのディレクトリから解決する（既定: ~/AgentDashboard）
   --out <path>       出力フォルダ（既定: 一時フォルダを新規作成して使う。
-                      呼ぶ側がスクラッチパッド配下のパスを持っているなら、それを渡すこと）
+                      呼ぶ側がスクラッチパッド配下のパスを持っているなら、それを渡すこと。
+                      既存の window-*.jsonl は消してから書く）
   -h, --help         このヘルプ
 
 出力フォルダの中身:
@@ -66,6 +67,14 @@ if [ -z "$OUT" ]; then
   OUT="$(mktemp -d "${TMPDIR:-/tmp}/cause_investigate_log-first.XXXXXX")"
 fi
 mkdir -p "$OUT" || { echo "出力フォルダを作れません: $OUT" >&2; exit 3; }
+
+CLEARED=0
+for f in "$OUT"/window-*.jsonl "$OUT/meta.json"; do
+  [ -e "$f" ] || continue
+  CLEARED=$((CLEARED + 1))
+done
+rm -f "$OUT"/window-*.jsonl "$OUT/meta.json"
+echo "既存ファイルを削除: ${CLEARED}件" >&2
 
 if [ -x "$RUNNING_STATE_BIN" ]; then
   timeout 20 "$RUNNING_STATE_BIN" --json > "$OUT/running-state.json" 2>"$OUT/running-state.err"
