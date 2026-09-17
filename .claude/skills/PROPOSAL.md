@@ -6,6 +6,7 @@
 | # | 完了ステータス | 追加日時 | 問い合わせ先セッションID | 要約 |
 |---|---|---|---|---|
 | 1 | [ ] | 2026-0917-1000 | fe0d452b-4983-4d7c-bd20-3513cf9352ab | ワーカ（Sonnet）への依頼文の定型「読む量の上限」を `_shared/templates/worker-limit… |
+| 2 | [ ] | 2026-0917-1308 | fe0d452b-4983-4d7c-bd20-3513cf9352ab | 全スキルの bin/* で --help の扱いを揃える（引数を取るものも --help だけは使い方を出す） |
 <!-- proposal_submit:summary-rows -->
 
 ---
@@ -19,6 +20,12 @@
 担当イシュー：PJTスコープに本PJT専用の開発効率化スキルを作成
 背景：初回実装で計5体が大きいファイルの丸読みで文脈溢れ（autocompact thrashing）を起こして落ちた。落とした素材は `いま動いているもの.html`（51KB・1行）・`_イシューの見取り図.json`（98KB）・`CHANGELOG.md`（886行）・`Cargo.lock`・`~/.claude/coord/*/台帳.md`（131KB）。「全出力に `| head -30`」「開いてはいけないファイルの名指し」「1体の仕事は bin 3本以下」の3つを書いてからは中断ゼロ。
 特記事項：無し
+
+### 2
+提案：全スキルの bin/* で --help の扱いを揃える（引数を取るものも --help だけは使い方を出す）
+担当イシュー：PJTスコープに本PJT専用の開発効率化スキルを作成
+背景：レビュー対応の通し確認で、version_release の5本と ui_verify の2本が --help を未知の引数として扱い、口を確かめられなかった。cause_investigate_log-first の mainflow.md は「各道具の引数は --help」と書いており、スキルをまたぐと前提が崩れる。
+特記事項：design-sections のように第1引数がパスのものは、--help だけを特別扱いすればよい。
 <!-- proposal_submit:detail-sections -->
 
 ---
