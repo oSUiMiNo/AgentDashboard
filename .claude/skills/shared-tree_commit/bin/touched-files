@@ -59,12 +59,21 @@ if [ -z "$session_id" ]; then
   exit 2
 fi
 
-slug="$(printf '%s' "$project_dir" | sed 's#/#-#g')"
+slug="$(printf '%s' "$project_dir" | sed 's#[/._]#-#g')"
 record="$HOME/.claude/projects/$slug/$session_id.jsonl"
 
 if [ ! -f "$record" ]; then
-  echo "記録が見つからない：$record（作業ディレクトリを変えてセッションを開いたか、--resume で場所が変わった可能性がある。§10-4 の手作業判定に切り替えること）" >&2
-  exit 4
+  fallback_matches=()
+  while IFS= read -r f; do
+    [ -n "$f" ] && fallback_matches+=("$f")
+  done < <(find "$HOME/.claude/projects" -maxdepth 2 -type f -name "$session_id.jsonl" 2>/dev/null)
+  if [ "${#fallback_matches[@]}" -eq 1 ]; then
+    record="${fallback_matches[0]}"
+    slug="$(basename "$(dirname "$record")")"
+  else
+    echo "記録が見つからない：$record（作業ディレクトリを変えてセッションを開いたか、--resume で場所が変わった可能性がある。§10-4 の手作業判定に切り替えること）" >&2
+    exit 4
+  fi
 fi
 
 records=("main:$record")
@@ -202,7 +211,7 @@ for entry in "${records[@]}"; do
     | select(.type=="tool_use")
     | select(.name=="Edit" or .name=="Write")
     | .input.file_path // empty
-  ' "$rec_file" 2>/dev/null)"
+  ' "$rec_file" 2>/dev/null)" || { echo "エラー：$rec_file の解析に失敗した（jq）。§10-4 の手作業判定に切り替えること" >&2; exit 4; }
 
   n="$(jq -r '
     select(.type=="assistant")
@@ -210,9 +219,17 @@ for entry in "${records[@]}"; do
     | select(.type=="tool_use")
     | select(.name=="NotebookEdit")
     | .input.notebook_path // empty
-  ' "$rec_file" 2>/dev/null)"
+  ' "$rec_file" 2>/dev/null)" || { echo "エラー：$rec_file の解析に失敗した（jq）。§10-4 の手作業判定に切り替えること" >&2; exit 4; }
 
   certain_raw="$(printf '%s\n%s\n%s\n' "$certain_raw" "$c" "$n")"
+
+  cmds_b64="$(jq -r '
+    select(.type=="assistant")
+    | .message.content[]?
+    | select(.type=="tool_use")
+    | select(.name=="Bash")
+    | (.input.command // "") | @base64
+  ' "$rec_file" 2>/dev/null)" || { echo "エラー：$rec_file の解析に失敗した（jq）。§10-4 の手作業判定に切り替えること" >&2; exit 4; }
 
   while IFS= read -r b64; do
     [ -n "$b64" ] || continue
@@ -232,13 +249,7 @@ for entry in "${records[@]}"; do
       rel="$(bash_relative_or_drop "$cand")" || continue
       uncertain_raw="$(printf '%s\n%s\n' "$uncertain_raw" "$rel")"
     done < <(extract_bash_targets "$cmd")
-  done < <(jq -r '
-    select(.type=="assistant")
-    | .message.content[]?
-    | select(.type=="tool_use")
-    | select(.name=="Bash")
-    | (.input.command // "") | @base64
-  ' "$rec_file" 2>/dev/null)
+  done <<< "$cmds_b64"
 done
 
 certain_list="$(printf '%s\n' "$certain_raw" | sed '/^$/d' | while IFS= read -r p; do to_relative "$p"; done | sort -u)"

@@ -207,18 +207,18 @@ extract_checkbox_tests() {
 is_real_test_declaration() {
   local name="$1"
   [ -z "$name" ] && return 1
-  if grep -RqF "fn ${name}(" server/crates 2>/dev/null; then
+  if grep -RqF "fn ${name}(" "$REPO_ROOT/server/crates" 2>/dev/null; then
     return 0
   fi
-  if grep -RqF "fn ${name} (" server/crates 2>/dev/null; then
+  if grep -RqF "fn ${name} (" "$REPO_ROOT/server/crates" 2>/dev/null; then
     return 0
   fi
   local q
   for q in "'" '"'; do
-    if grep -RqF "it(${q}${name}${q}" web/src web/e2e 2>/dev/null; then
+    if grep -RqF "it(${q}${name}${q}" "$REPO_ROOT/web/src" "$REPO_ROOT/web/e2e" 2>/dev/null; then
       return 0
     fi
-    if grep -RqF "test(${q}${name}${q}" web/src web/e2e 2>/dev/null; then
+    if grep -RqF "test(${q}${name}${q}" "$REPO_ROOT/web/src" "$REPO_ROOT/web/e2e" 2>/dev/null; then
       return 0
     fi
   done
@@ -247,6 +247,12 @@ check_named_tests() {
 
   local -a uniq_names=()
   while IFS= read -r n; do uniq_names+=("$n"); done < <(printf '%s\n' "${names[@]}" | sort -u)
+
+  if [ ! -d "$REPO_ROOT/server/crates" ] || [ ! -d "$REPO_ROOT/web/src" ] || [ ! -d "$REPO_ROOT/web/e2e" ]; then
+    echo "判定不能：[$label] named test の照合先（server/crates・web/src・web/e2e）が \$REPO_ROOT 配下に見つからない（REPO_ROOT=$REPO_ROOT）" >&2
+    add_missing "[$label] §9-2-2：named test ${#uniq_names[@]}件を判定できない（照合先ディレクトリが REPO_ROOT 配下に無い）"
+    return
+  fi
 
   local n
   local -a matched=()

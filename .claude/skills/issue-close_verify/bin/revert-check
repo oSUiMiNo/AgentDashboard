@@ -3,7 +3,7 @@ set -u
 set -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-SCRATCH_BASE="${AD_SCRATCHPAD:-/tmp/claude-1000/-home-osuim-Dev-AgentDashboard/fe0d452b-4983-4d7c-bd20-3513cf9352ab/scratchpad}"
+SCRATCH_BASE="${AD_SCRATCHPAD:-${TMPDIR:-/tmp}/agentdashboard-revert-check.$$}"
 
 DRY_RUN=0
 STRONG=0
@@ -156,7 +156,7 @@ if ! (cd "$WORKTREE_DIR" && make build-web build-debug); then
   exit 1
 fi
 
-BIN_PATH="$(find "$WORKTREE_DIR/target" -maxdepth 3 -type f -name 'agentdashboard*' -executable 2>/dev/null | head -1)"
+BIN_PATH="$(find "$WORKTREE_DIR/server/target" -maxdepth 3 -type f -name 'agentdashboard*' -executable 2>/dev/null | head -1)"
 if [ -z "$BIN_PATH" ]; then
   echo "警告：worktree の実行ファイルが見つからなかった。our-servers count をスキップする" >&2
 else
