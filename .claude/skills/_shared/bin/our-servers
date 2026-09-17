@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 set -u -o pipefail
 
-AD_BIN="$HOME/.claude/skills/dashboard_operate/bin/ad"
+AD_BIN="${AD_BIN:-$HOME/.claude/skills/dashboard_operate/bin/ad}"
 
 declare -a ALL_PIDS
 declare -A PPID_OF
 declare -A ARGS_OF
 declare -A RESOLVED_EXE_OF
 declare -a REAL_PIDS
+declare -i REAL_PIDS_KNOWN=0
+RESOLVE_FAIL_REASON=""
+PORT_FAIL_REASON=""
 
 load_ps_snapshot() {
   ALL_PIDS=()
@@ -71,7 +74,20 @@ pid_matches_bin() {
 }
 
 resolve_real_bin_path() {
-  "$AD_BIN" --resolve 2>/dev/null
+  RESOLVE_FAIL_REASON=""
+  RESOLVED_BIN_PATH=""
+  local out rc
+  out=$("$AD_BIN" --resolve 2>&1)
+  rc=$?
+  if [[ $rc -ne 0 ]]; then
+    RESOLVE_FAIL_REASON="ad --resolve が実行できないか失敗した（終了コード $rc）：${out:-出力なし}"
+    return 1
+  fi
+  if [[ -z "$out" ]]; then
+    RESOLVE_FAIL_REASON="ad --resolve の出力が空だった"
+    return 1
+  fi
+  RESOLVED_BIN_PATH="$out"
   return 0
 }
 
@@ -88,30 +104,47 @@ pid_by_bin_path() {
 }
 
 pid_by_port_8787() {
-  local hit token
-  hit=$(ss -ltnp 2>/dev/null | grep ':8787[[:space:]]')
-  [[ -z "$hit" ]] && return 1
+  PORT_FAIL_REASON=""
+  PORT_PID_RESULT=""
+  local hit token ss_out rc
+  ss_out=$(ss -ltnp 2>&1)
+  rc=$?
+  if [[ $rc -ne 0 ]]; then
+    PORT_FAIL_REASON="ss -ltnp が失敗した（終了コード $rc）：${ss_out:-出力なし}"
+    return 1
+  fi
+  hit=$(printf '%s\n' "$ss_out" | grep ':8787[[:space:]]')
+  if [[ -z "$hit" ]]; then
+    PORT_FAIL_REASON="ss -ltnp の出力にポート 8787 の行が無い"
+    return 1
+  fi
   token=$(printf '%s\n' "$hit" | grep -o 'pid=[0-9]*' | head -1)
-  [[ -z "$token" ]] && return 1
-  printf '%s\n' "${token#pid=}"
+  if [[ -z "$token" ]]; then
+    PORT_FAIL_REASON="ポート 8787 の行に pid= が無い"
+    return 1
+  fi
+  PORT_PID_RESULT="${token#pid=}"
   return 0
 }
 
 compute_real_pids() {
   REAL_PIDS=()
-  local resolved path_pid port_pid already rp
-  resolved=$(resolve_real_bin_path)
-  if [[ -n "$resolved" ]]; then
-    if path_pid=$(pid_by_bin_path "$resolved"); then
+  REAL_PIDS_KNOWN=0
+  local path_pid already rp
+  if resolve_real_bin_path; then
+    if path_pid=$(pid_by_bin_path "$RESOLVED_BIN_PATH"); then
       REAL_PIDS+=("$path_pid")
     fi
   fi
-  if port_pid=$(pid_by_port_8787); then
+  if pid_by_port_8787; then
     already=0
     for rp in "${REAL_PIDS[@]}"; do
-      [[ "$rp" == "$port_pid" ]] && already=1
+      [[ "$rp" == "$PORT_PID_RESULT" ]] && already=1
     done
-    [[ $already -eq 0 ]] && REAL_PIDS+=("$port_pid")
+    [[ $already -eq 0 ]] && REAL_PIDS+=("$PORT_PID_RESULT")
+  fi
+  if [[ ${#REAL_PIDS[@]} -gt 0 ]]; then
+    REAL_PIDS_KNOWN=1
   fi
 }
 
@@ -162,6 +195,10 @@ cmd_count() {
   load_ps_snapshot
   compute_real_pids
 
+  if [[ $REAL_PIDS_KNOWN -eq 0 ]]; then
+    echo "実機を特定できていないので、実機が一覧に混ざっている可能性がある：ad --resolve（${RESOLVE_FAIL_REASON:-理由不明}）／ss -ltnp（${PORT_FAIL_REASON:-理由不明}）" >&2
+  fi
+
   local pid args matched_bin b found
   found=0
   for pid in "${ALL_PIDS[@]}"; do
@@ -197,6 +234,13 @@ cmd_stop() {
 
   load_ps_snapshot
   compute_real_pids
+
+  if [[ $REAL_PIDS_KNOWN -eq 0 ]]; then
+    echo "実機を特定できないので止めない：ad --resolve と ss -ltnp の両方が失敗した" >&2
+    echo "  ad --resolve：${RESOLVE_FAIL_REASON:-理由不明}" >&2
+    echo "  ss -ltnp：${PORT_FAIL_REASON:-理由不明}" >&2
+    return 3
+  fi
 
   local pid
   for pid in "${pids[@]}"; do

@@ -39,6 +39,116 @@ pick_port() {
   done
 }
 
+migrate_legacy_sandbox_json() {
+  if [[ ! -f "$SANDBOX_JSON" ]]; then
+    return 0
+  fi
+  local pid port state_dir log started_at
+  pid=$(jq -r '.pid // empty' "$SANDBOX_JSON" 2>/dev/null)
+  port=$(jq -r '.port // empty' "$SANDBOX_JSON" 2>/dev/null)
+  state_dir=$(jq -r '.state_dir // empty' "$SANDBOX_JSON" 2>/dev/null)
+  log=$(jq -r '.log // empty' "$SANDBOX_JSON" 2>/dev/null)
+  started_at=$(jq -r '.started_at // empty' "$SANDBOX_JSON" 2>/dev/null)
+  if [[ -n "$port" ]]; then
+    mkdir -p "$SANDBOX_STATE_ROOT"
+    jq -n \
+      --argjson pid "${pid:-null}" \
+      --argjson port "$port" \
+      --arg state_dir "${state_dir:-}" \
+      --arg log "${log:-}" \
+      --arg started_at "${started_at:-}" \
+      '{pid: $pid, port: $port, state_dir: $state_dir, log: $log, started_at: $started_at}' \
+      > "$SANDBOX_STATE_ROOT/$port.json"
+  fi
+  rm -f "$SANDBOX_JSON"
+  return 0
+}
+
+list_record_files() {
+  local f
+  local -a files=()
+  if [[ -d "$SANDBOX_STATE_ROOT" ]]; then
+    for f in "$SANDBOX_STATE_ROOT"/*.json; do
+      [[ -e "$f" ]] || continue
+      files+=("$f")
+    done
+  fi
+  (( ${#files[@]} )) && printf '%s\n' "${files[@]}"
+  return 0
+}
+
+can_self_verify_and_kill() {
+  local pid="$1" state_dir="$2"
+  if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+    return 1
+  fi
+  if [[ -z "$state_dir" ]]; then
+    return 1
+  fi
+  local hit
+  hit=$(ss -ltnp 2>/dev/null | grep ":${PROD_PORT}[[:space:]]")
+  if [[ -n "$hit" ]] && printf '%s\n' "$hit" | grep -q "pid=${pid}[,)]"; then
+    return 1
+  fi
+  local args
+  args=$(ps -p "$pid" -o args= 2>/dev/null)
+  case "$args" in
+    *"$state_dir"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+stop_record() {
+  local record_file="$1"
+  local pid state_dir
+  pid=$(jq -r '.pid // empty' "$record_file" 2>/dev/null)
+  state_dir=$(jq -r '.state_dir // empty' "$record_file" 2>/dev/null)
+
+  local rc=0
+  if [[ -n "$pid" ]]; then
+    if [[ -x "$OUR_SERVERS" ]]; then
+      "$OUR_SERVERS" stop "$pid"
+      rc=$?
+    else
+      kill -TERM "$pid" 2>/dev/null
+      sleep 3
+      if kill -0 "$pid" 2>/dev/null; then
+        kill -KILL "$pid" 2>/dev/null
+      fi
+    fi
+  fi
+
+  if [[ $rc -eq 3 ]]; then
+    if can_self_verify_and_kill "$pid" "$state_dir"; then
+      kill -TERM "$pid" 2>/dev/null
+      sleep 3
+      if kill -0 "$pid" 2>/dev/null; then
+        kill -KILL "$pid" 2>/dev/null
+      fi
+      rc=0
+    else
+      echo "sandbox-dashboard down: PID $pid を自己検証できないので手で止めて（記録は残す）：$record_file" >&2
+      return 1
+    fi
+  fi
+
+  if [[ $rc -ne 0 ]]; then
+    echo "sandbox-dashboard down: PID $pid の停止に失敗したので記録を残す：$record_file" >&2
+    return 1
+  fi
+
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    echo "sandbox-dashboard down: PID $pid がまだ生きているので記録を残す：$record_file" >&2
+    return 1
+  fi
+
+  if [[ -n "$state_dir" && -d "$state_dir" ]]; then
+    rm -rf "$state_dir"
+  fi
+  rm -f "$record_file"
+  return 0
+}
+
 cmd_up() {
   local requested_start=""
   while [[ $# -gt 0 ]]; do
@@ -129,6 +239,7 @@ EOF
 
   local started_at
   started_at=$(date -Iseconds)
+  mkdir -p "$SANDBOX_STATE_ROOT"
   jq -n \
     --argjson pid "$pid" \
     --argjson port "$port" \
@@ -136,61 +247,86 @@ EOF
     --arg log "$log_file" \
     --arg started_at "$started_at" \
     '{pid: $pid, port: $port, state_dir: $state_dir, log: $log, started_at: $started_at}' \
-    > "$SANDBOX_JSON"
+    > "$SANDBOX_STATE_ROOT/$port.json"
 
   printf 'http://127.0.0.1:%s/\n' "$port"
   return 0
 }
 
 cmd_down() {
-  if [[ ! -f "$SANDBOX_JSON" ]]; then
+  local requested_port=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --port)
+        shift
+        if [[ $# -eq 0 ]]; then
+          echo "sandbox-dashboard down: --port には値が要ります" >&2
+          return 2
+        fi
+        requested_port="$1"
+        shift
+        ;;
+      *)
+        echo "sandbox-dashboard down: 不明な引数：$1" >&2
+        return 2
+        ;;
+    esac
+  done
+
+  if [[ -n "$requested_port" ]]; then
+    local record_file="$SANDBOX_STATE_ROOT/$requested_port.json"
+    if [[ ! -f "$record_file" ]]; then
+      echo "立っていない：ポート $requested_port"
+      return 0
+    fi
+    stop_record "$record_file"
+    return $?
+  fi
+
+  local -a files=()
+  mapfile -t files < <(list_record_files)
+
+  if [[ ${#files[@]} -eq 0 ]]; then
     echo "立っていない"
     return 0
   fi
 
-  local pid state_dir
-  pid=$(jq -r '.pid // empty' "$SANDBOX_JSON" 2>/dev/null)
-  state_dir=$(jq -r '.state_dir // empty' "$SANDBOX_JSON" 2>/dev/null)
-
-  if [[ -n "$pid" ]]; then
-    if [[ -x "$OUR_SERVERS" ]]; then
-      "$OUR_SERVERS" stop "$pid"
-    else
-      kill -TERM "$pid" 2>/dev/null
-      sleep 3
-      if kill -0 "$pid" 2>/dev/null; then
-        kill -KILL "$pid" 2>/dev/null
-      fi
+  local rc=0 f
+  for f in "${files[@]}"; do
+    stop_record "$f"
+    if [[ $? -ne 0 ]]; then
+      rc=1
     fi
-  fi
-
-  if [[ -n "$state_dir" && -d "$state_dir" ]]; then
-    rm -rf "$state_dir"
-  fi
-
-  rm -f "$SANDBOX_JSON"
-  return 0
+  done
+  return $rc
 }
 
 cmd_status() {
-  if [[ ! -f "$SANDBOX_JSON" ]]; then
+  local -a files=()
+  mapfile -t files < <(list_record_files)
+
+  if [[ ${#files[@]} -eq 0 ]]; then
     echo "立っていない"
     return 0
   fi
 
-  cat "$SANDBOX_JSON"
-
-  local pid
-  pid=$(jq -r '.pid // empty' "$SANDBOX_JSON" 2>/dev/null)
-  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-    echo "生きている：PID $pid"
-  else
-    echo "死んでいる：PID $pid"
-  fi
+  local f pid port state_dir alive
+  for f in "${files[@]}"; do
+    pid=$(jq -r '.pid // empty' "$f" 2>/dev/null)
+    port=$(jq -r '.port // empty' "$f" 2>/dev/null)
+    state_dir=$(jq -r '.state_dir // empty' "$f" 2>/dev/null)
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      alive="生きている"
+    else
+      alive="死んでいる"
+    fi
+    echo "port=$port pid=$pid $alive state_dir=$state_dir"
+  done
   return 0
 }
 
 main() {
+  migrate_legacy_sandbox_json
   local cmd="${1:-}"
   case "$cmd" in
     up)
@@ -206,7 +342,7 @@ main() {
       cmd_status "$@"
       ;;
     *)
-      echo "使い方：sandbox-dashboard up [--port N] | down | status" >&2
+      echo "使い方：sandbox-dashboard up [--port N] | down [--port N] | status" >&2
       return 2
       ;;
   esac
