@@ -1,9 +1,25 @@
 #!/usr/bin/env bash
 set -u -o pipefail
 
+usage() {
+  cat >&2 <<'USAGE'
+使い方：
+  state-doc-update [--dry-run]
+
+  --dry-run    書き換えず、差分だけを表示する
+終了コード：0 正常 / 1 running-state か html の読み込みに失敗 / 4 差分が確定しない欄がある、または書き込み直前に件数が変わった / 64 引数が不正
+
+警告：現況 doc を書き換える。--dry-run で差分だけ見られる
+USAGE
+}
+
 dry_run=0
 while [ $# -gt 0 ]; do
   case "$1" in
+    --help|-h)
+      usage
+      exit 0
+      ;;
     --dry-run)
       dry_run=1
       shift

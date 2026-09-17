@@ -352,9 +352,28 @@ cmd_webserver_log_check() {
   return 0
 }
 
+usage() {
+  cat >&2 <<'USAGE'
+使い方：
+  our-servers count [--bin <パス>]...
+  our-servers stop <PID>...
+  our-servers real-pid [--port <ポート>]
+  our-servers webserver-log-check <ログファイル>
+
+  count                  実プロセスと一致する PID の数を数える（読むだけ）
+  stop                   警告：渡した PID を実際に kill する（破壊的。実機の PID は保護される）
+  real-pid               実プロセスの PID を解決する（読むだけ）
+  webserver-log-check    ログファイルを検査する（読むだけ）
+終了コード：0 正常 / 2 使い方誤り
+USAGE
+}
+
 main() {
+  case "${1:-}" in
+    --help|-h) usage; exit 0 ;;
+  esac
   if [[ $# -eq 0 ]]; then
-    echo "使い方：our-servers count [--bin <パス>]... | stop <PID>... | real-pid [--port <ポート>] | webserver-log-check <ログファイル>" >&2
+    usage
     exit 2
   fi
   local sub="$1"
@@ -377,7 +396,7 @@ main() {
       exit $?
       ;;
     *)
-      echo "使い方：our-servers count [--bin <パス>]... | stop <PID>... | real-pid [--port <ポート>] | webserver-log-check <ログファイル>" >&2
+      usage
       exit 2
       ;;
   esac

@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+case "${1:-}" in
+  --help|-h)
+    cat >&2 <<'USAGE'
+使い方：capture-plan <サンドボックスのベースURL> <ホスト名> <プロジェクト名> <カードID> [フェーズ番号] [保存先ディレクトリ]
+  引数：BASE_URL HOST_NAME PROJECT_NAME CARD_ID [PHASE=計画] [SAVE_DIR=参考]
+  出力：PJT専用画面／セッション専用画面 × PC幅／約400px の撮影計画をタブ区切りで標準出力へ
+終了コード：0=成功 / 1=引数不足
+USAGE
+    exit 0
+    ;;
+esac
+
 if [[ $# -lt 4 ]]; then
   echo "使い方：capture-plan <サンドボックスのベースURL> <ホスト名> <プロジェクト名> <カードID> [フェーズ番号] [保存先ディレクトリ]" >&2
   exit 1

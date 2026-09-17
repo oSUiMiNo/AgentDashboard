@@ -7,11 +7,27 @@ PROD_TREE="$HOME/AgentDashboard"
 DEV_TREE="$HOME/Dev/AgentDashboard"
 JQ_BIN="/usr/bin/jq"
 
+usage() {
+  cat >&2 <<'USAGE'
+使い方：
+  running-state [--json] [--contains <コミット>]
+
+  --json        表を人向けの表ではなく JSON で出す
+  --contains    渡したコミットが、いま走行中の版のタグに含まれるか判定する（読むだけ）
+何も壊さない読み取り専用のコマンド。ダッシュボード・セッションホスト・作業木の現在地を7〜8行にまとめて表示する。
+終了コード：0 正常
+USAGE
+}
+
 JSON_OUT=0
 CONTAINS_COMMIT=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
     --json)
       JSON_OUT=1
       shift

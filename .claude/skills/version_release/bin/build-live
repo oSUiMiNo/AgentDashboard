@@ -1,9 +1,25 @@
 #!/usr/bin/env bash
 set -u -o pipefail
 
+usage() {
+  cat >&2 <<'USAGE'
+使い方：
+  build-live [--dry-run]
+
+  --dry-run    実行はせず、実行するコマンド列を表示するだけ
+終了コード：0 正常 / 1 pull または build が失敗 / 3 札の仕組みが無い、または複数あって決められない
+
+警告：実機ツリー（~/AgentDashboard）で git pull と make build を実行する。--dry-run でコマンドだけ見られる
+USAGE
+}
+
 dry_run=0
 while [ $# -gt 0 ]; do
   case "$1" in
+    --help|-h)
+      usage
+      exit 0
+      ;;
     --dry-run)
       dry_run=1
       shift

@@ -1,6 +1,21 @@
 #!/usr/bin/env bash
 set -u -o pipefail
 
+usage() {
+  cat >&2 <<'USAGE'
+使い方：
+  bump [--dry-run] [--version <版>] [--force] [--repo <パス>]
+
+  --version    上げる先の版番号（例：0.1.199）。省略時はパッチ番号を自動で+1
+  --dry-run    実際には書き換えず、差分だけを表示する
+  --force      他セッションが触っている可能性があっても続行する
+  --repo       対象リポジトリのパス（省略時はこのスクリプトから辿った既定の場所）
+終了コード：0 正常 / 1 対象ファイルが見つからない等 / 2 引数なしで安全策が働いた / 4 他セッションが触っている可能性 / 64 引数が不正
+
+警告：server/Cargo.toml・server/Cargo.lock・docker/compose.yml・CHANGELOG.md の版を書き換える。--dry-run で差分だけ見られる
+USAGE
+}
+
 repo=""
 dry_run=0
 version_arg=""
@@ -8,6 +23,10 @@ force=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    --help|-h)
+      usage
+      exit 0
+      ;;
     --repo)
       repo="$2"
       shift 2
@@ -30,6 +49,11 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
+
+if [ "$dry_run" -eq 0 ] && [ -z "$version_arg" ] && [ "$force" -eq 0 ]; then
+  echo "bump: 版を上げるなら --dry-run で確かめてから --version <版> を渡すか、--force を付けよ" >&2
+  exit 2
+fi
 
 if [ -n "$version_arg" ] && ! printf '%s' "$version_arg" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
   echo "bump: --version の形式が不正です: $version_arg" >&2

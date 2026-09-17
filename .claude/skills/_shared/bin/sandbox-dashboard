@@ -385,6 +385,18 @@ cmd_status() {
 }
 
 main() {
+  case "${1:-}" in
+    --help|-h)
+      cat >&2 <<'USAGE'
+使い方：sandbox-dashboard up [--port N] | down [--port N | --all] | status
+  up      使い捨てのダッシュボードを起こす（ポートを取る）
+  down    起こしたダッシュボードを止める
+  status  いま起きているダッシュボードを読むだけ（起こさない）
+終了コード：0=成功 / 2=引数不正 / それ以外=各サブコマンドの失敗
+USAGE
+      return 0
+      ;;
+  esac
   migrate_legacy_sandbox_json
   local cmd="${1:-}"
   case "$cmd" in

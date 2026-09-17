@@ -2,6 +2,18 @@
 set -u
 set -o pipefail
 
+usage() {
+  cat >&2 <<'USAGE'
+使い方：
+  claim [--where]
+  claim <サブコマンド> [引数...]
+
+  --where    解決した札（claim ファイル）のパスを表示するだけで、実行はしない
+  それ以外の引数は、解決した札スクリプトへそのまま渡して実行する（exec）
+終了コード：0 正常 / 3 札の仕組みが無い、または候補が複数あって決められない
+USAGE
+}
+
 resolve_claim() {
   if [ -n "${AGENTDASHBOARD_CLAIM:-}" ]; then
     if [ -e "$AGENTDASHBOARD_CLAIM" ]; then
@@ -27,6 +39,10 @@ resolve_claim() {
 }
 
 main() {
+  case "${1:-}" in
+    --help|-h) usage; exit 0 ;;
+  esac
+
   local where=0
   if [ "${1:-}" = "--where" ]; then
     where=1

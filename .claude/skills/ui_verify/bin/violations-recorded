@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+case "${1:-}" in
+  --help|-h)
+    cat >&2 <<'USAGE'
+使い方：violations-recorded [リポジトリルート]
+  引数省略時はこのスクリプトの位置からリポジトリルートを自動判定する
+  出力：コード側テスト名と DESIGN.md 本文の「違反」「承知のうえで」記載を標準出力へ列挙
+終了コード：0=成功 / 1=ROOT または DESIGN.md が見つからない
+USAGE
+    exit 0
+    ;;
+esac
+
 ROOT="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
 DESIGN_MD="${DESIGN_MD:-$ROOT/DESIGN.md}"
 
