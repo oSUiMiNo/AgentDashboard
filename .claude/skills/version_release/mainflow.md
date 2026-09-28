@@ -66,7 +66,7 @@ model: "sonnet"
 
 門3（サニタイズ）：`scripts/sanitize-fixtures.py` を対象ディレクトリに対して回し、「機微情報の残存なし」を確認する。赤ならコミットせずに `phase: 3`・`version`・`red` を状態ファイルへ書いて止まる。
 
-緑なら段2の変更をコミットし、**`main` とタグの両方を push** する（タグを push すると `release.yml` から `dist` が呼ばれてリリース本体が作られる。**人が手で `gh release create` を叩かない**）。押し終えたら `bin/ship --dry-run --version <版>` で確認してから `bin/ship --version <版>` を実行する。
+緑なら `bin/ship --dry-run --version <版>` で確認してから `bin/ship --version <版>` を実行する。**`ship` 自身が、段2の4ファイルのコミット → `main` の push → タグ → タグの push を一続きで行う**（タグを push すると `release.yml` から `dist` が呼ばれてリリース本体が作られる。**人が手で `gh release create` を叩かない**）。**`ship` の前に手でコミットや push をしないこと**——先にタグが在ると `ship` は「タグが既に存在します」（終了コード2）で止まる。~~緑なら段2の変更をコミットし、main とタグの両方を push する。押し終えたら `bin/ship` を実行する~~ 【2026-09-28 に覆った】手で押したあとに `ship` を呼ぶ順序は、`ship` が同じことを繰り返そうとして必ず2で止まる。
 
 **止まる条件**：門3が赤
 
