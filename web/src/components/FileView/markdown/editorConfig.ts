@@ -2,7 +2,11 @@ import type { CrepeConfig } from '@milkdown/crepe'
 import { Crepe } from '@milkdown/crepe'
 import { safeMarkdownUrl } from '../../../lib/fileMarkdown'
 
-export function markdownEditorConfig(root: HTMLElement, onError: (message: string) => void): CrepeConfig {
+export function markdownEditorConfig(
+  root: HTMLElement,
+  onError: (message: string) => void,
+  resolveImage: (src: string) => Promise<string> | string = (src) => src,
+): CrepeConfig {
   return {
     root,
     features: {
@@ -42,7 +46,7 @@ export function markdownEditorConfig(root: HTMLElement, onError: (message: strin
       [Crepe.Feature.ImageBlock]: {
         blockConfirmButton: '画像を挿入', blockCaptionPlaceholderText: '画像の説明（代替テキスト）',
         blockUploadPlaceholderText: '画像のURLを貼り付け', inlineUploadPlaceholderText: '画像のURLを貼り付け',
-        proxyDomURL: (url) => safeMarkdownUrl(url) ? url : '',
+        proxyDomURL: (url) => safeMarkdownUrl(url) ? resolveImage(url) : '',
         onUpload: async () => {
           onError('画像はURLで指定してください。ファイルのアップロードには対応していません。')
           throw new Error('画像はURLで指定してください。')

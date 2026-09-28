@@ -48,6 +48,7 @@ type Props = {
   onCompositionChange?: (composing: boolean) => void
   onSourceRequested?: () => void
   onDocumentChange?: () => void
+  resolveImage?: (src: string) => Promise<string> | string
 }
 
 type Controller = {
@@ -121,7 +122,11 @@ export default function MarkdownBlockEditor(props: Props) {
     const search = markdownSearch()
     const searchApiRef = latest.current.searchApiRef
     const searchDomRef = latest.current.searchRef
-    const crepe = new Crepe(markdownEditorConfig(root, (message) => { if (alive) setError(message) }))
+    const crepe = new Crepe(markdownEditorConfig(
+      root,
+      (message) => { if (alive) setError(message) },
+      (src) => latest.current.resolveImage?.(src) ?? src,
+    ))
     crepe.editor.use(protectedSourceSchema).use(sourceIdentityPlugin(session)).use(search.plugin).config((ctx) => configureSourceSchema(ctx, true))
     setReady(false)
     setComposing(false)

@@ -55,6 +55,7 @@ import {
   SearchGlyph,
 } from '@/components/ui/glyphs'
 import { fileKind, needsSandbox } from '@/lib/fileKind'
+import { markdownAssetPath } from '@/lib/markdownAsset'
 import { useFileZoom, ZOOM_STEPS } from '@/lib/fileZoom'
 import { isFindOpen } from '@/lib/keys'
 import { REHYPE_PLUGINS, REMARK_PLUGINS } from '@/lib/markdown'
@@ -268,6 +269,24 @@ export function FileView({
   const markdownEditorRef = useRef<MarkdownEditorHandle | null>(null)
   const markdownSearchRef = useRef<HTMLElement | null>(null)
   const markdownSearchApiRef = useRef<FileSearchAdapter | null>(null)
+  const markdownImages = useRef(new Map<string, Promise<string>>())
+  useEffect(() => {
+    const images = markdownImages.current
+    return () => {
+      for (const image of images.values()) void image.then((url) => { if (url.startsWith('blob:')) URL.revokeObjectURL(url) })
+      images.clear()
+    }
+  }, [host, path])
+  const markdownImage = useCallback((src: string): Promise<string> | string => {
+    const file = markdownAssetPath(path, src)
+    if (file === null) return src
+    let image = markdownImages.current.get(file)
+    if (!image) {
+      image = readBlob(host, file).then((found) => found.url, () => src)
+      markdownImages.current.set(file, image)
+    }
+    return image
+  }, [host, path])
   const [blockOpened, setBlockOpened] = useState(false)
   const [sourceOpened, setSourceOpened] = useState(false)
   const sourceDisplayValue = useRef('')
@@ -1390,6 +1409,7 @@ export function FileView({
                     searchRef={markdownSearchRef}
                     searchApiRef={markdownSearchApiRef}
                     onDocumentChange={() => setMarkdownRevision((revision) => revision + 1)}
+                    resolveImage={markdownImage}
                     onSourceRequested={() => setMode('editor')}
                     onCompositionChange={(busy) => {
                       setMarkdownComposing(busy)

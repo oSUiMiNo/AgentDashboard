@@ -8,6 +8,7 @@ import { setBlockType } from '@milkdown/kit/prose/commands'
 import { EditorState, TextSelection } from '@milkdown/kit/prose/state'
 import { configureSourceSchema, protectedSourceSchema, sourceIdentityPlugin, type SourceSession } from '../components/FileView/markdown/sourcePlugin'
 import { MarkdownSource, safeMarkdownUrl } from './fileMarkdown'
+import { markdownAssetPath } from './markdownAsset'
 
 const editors: Editor[] = []
 
@@ -197,5 +198,21 @@ describe('Markdownのリンク', () => {
   })
   it.each(['javascript:alert(1)', 'JaVa\nScript:alert(1)', 'data:text/html,hello', 'file:///private'])('実行を伴う参照を許可しない：%s', (url) => {
     expect(safeMarkdownUrl(url)).toBe(false)
+  })
+})
+
+describe('文書に書かれた画像の場所', () => {
+  it.each([
+    ['参考/画面.png', '/home/u/イシュー/参考/画面.png'],
+    ['./参考/画面.png', '/home/u/イシュー/参考/画面.png'],
+    ['../共有/図.png', '/home/u/共有/図.png'],
+    ['/var/data/a.png', '/var/data/a.png'],
+    ['/var/data/../b.png', '/var/data/../b.png'.replace('/data/..', '')],
+    ['%E7%94%BB%E9%9D%A2.png?v=1#top', '/home/u/イシュー/画面.png'],
+  ])('%s は文書の場所から解決する', (reference, expected) => {
+    expect(markdownAssetPath('/home/u/イシュー/計画.md', reference)).toBe(expected)
+  })
+  it.each(['https://example.com/a.png', 'data:image/png;base64,AAAA', '//cdn.example.com/a.png', '', '../../../../etc/passwd'])('URL・空・根より上は解決しない：%j', (reference) => {
+    expect(markdownAssetPath('/home/u/イシュー/計画.md', reference)).toBeNull()
   })
 })
