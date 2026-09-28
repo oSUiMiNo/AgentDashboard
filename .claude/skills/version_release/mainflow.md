@@ -111,6 +111,8 @@ model: "sonnet"
 ## §6-7：段6（periodic の後始末）
 **誰がやるか**：メイン
 
+**`--now` で入ったときは、先に `.claude/skills/_shared/bin/periodic tick version_release` を1回実行して、前回の実行時刻をいまへ進める。** `--now` は `tick` を通らないので実行時刻が記録されず、そのまま `arm` すると次回が「いま＋1分」になり、配った直後に定期実行がもう一度起動する（2026-09-28 に実測）。`tick` の出力が `run` でも、ここでは段1へ戻らない（記録を進めるためだけに呼ぶ）。
+
 通しの実行（引数なし／`--now`／`--tick`）が終わったら、`.claude/skills/_shared/bin/periodic arm version_release` を実行して次回の実行時刻を予約する（他スキルの実行時刻と15分以上離す、`:00`／`:30` は避ける、という `periodic` 自身の既定に従う）。
 
 `arm` が出す cron 式で、`CronCreate` を `recurring:false` で1本作る。プロンプトは `/version_release --tick` を渡す。次回もこの段6で次々回ぶんを arm し直すので、常駐のスケジューラではなく都度1本の使い捨て cron で回す。
