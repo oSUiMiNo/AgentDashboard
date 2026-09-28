@@ -188,6 +188,13 @@ test('ハンドルは本文の左余白に収まり、コードの道具は普�
   await expect(copy).toBeVisible()
   await expect(copy).toHaveCSS('font-size', '0px')
   await expectLanguagePickerInside(page, code)
+  await code.hover()
+  await code.locator('.language-button').click()
+  await page.locator('.language-picker input').first().fill('plain')
+  await page.locator('.language-list-item').filter({ hasText: /^\s*text\s*$/ }).first().click()
+  await expect(code.locator('.language-button')).toContainText('text')
+  await page.getByTestId('file-save').click()
+  await expect.poll(() => fs.readFileSync(file, 'utf8')).toContain('```text\nconst value = 1')
 })
 
 async function expectLanguagePickerInside(page: Page, code: Locator) {

@@ -1,6 +1,23 @@
 import type { CrepeConfig } from '@milkdown/crepe'
 import { Crepe } from '@milkdown/crepe'
+import { LanguageDescription, LanguageSupport, StreamLanguage } from '@codemirror/language'
+import { languages } from '@codemirror/language-data'
 import { safeMarkdownUrl } from '../../../lib/fileMarkdown'
+
+const plainText = LanguageDescription.of({
+  name: 'text',
+  alias: ['text', 'txt', 'plain', 'plaintext'],
+  extensions: ['txt'],
+  support: new LanguageSupport(StreamLanguage.define({
+    name: 'text',
+    token: (stream) => {
+      stream.skipToEnd()
+      return null
+    },
+  })),
+})
+
+export const codeLanguages = [plainText, ...languages]
 
 export function markdownEditorConfig(
   root: HTMLElement,
@@ -39,6 +56,7 @@ export function markdownEditorConfig(
         codeLabel: 'インラインコード', linkLabel: 'リンク',
       },
       [Crepe.Feature.CodeMirror]: {
+        languages: codeLanguages,
         searchPlaceholder: '言語を検索', copyText: '', noResultText: '見つかりません',
         previewToggleText: (only) => only ? 'コードを編集' : 'プレビューを隠す',
       },
