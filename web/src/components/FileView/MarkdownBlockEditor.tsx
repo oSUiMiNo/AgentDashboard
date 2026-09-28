@@ -5,15 +5,14 @@ import { uploadPlugin } from '@milkdown/kit/plugin/upload'
 import { undo, redo, undoDepth, redoDepth } from '@milkdown/kit/prose/history'
 import { EditorState, TextSelection } from '@milkdown/kit/prose/state'
 import type { EditorView } from '@milkdown/kit/prose/view'
-import { DropdownMenu } from 'radix-ui'
-import { ArrowDown, ArrowUp, Copy, MoreHorizontal, Plus, Redo2, Trash2, Undo2 } from 'lucide-react'
+import { Redo2, Undo2 } from 'lucide-react'
 import { MarkdownSource } from '../../lib/fileMarkdown'
 import { Button } from '../ui/button'
 import { markdownEditorConfig } from './markdown/editorConfig'
 import { markdownSearch } from './markdown/search'
 import type { FileSearchAdapter } from '../../lib/fileSearch'
 import { configureSourceSchema, protectedSourceSchema, sourceIdentityPlugin, type SourceSession } from './markdown/sourcePlugin'
-import { deleteSelectedBlock, duplicateSelectedBlock, editTable, insertParagraphAfter, moveSelectedBlock, selectedBlock } from './markdown/blockCommands'
+import { moveSelectedBlock } from './markdown/blockCommands'
 import '@milkdown/crepe/theme/common/reset.css'
 import '@milkdown/crepe/theme/common/block-edit.css'
 import '@milkdown/crepe/theme/common/code-mirror.css'
@@ -70,14 +69,11 @@ export default function MarkdownBlockEditor(props: Props) {
   const [composing, setComposing] = useState(false)
   const [historyDepth, setHistoryDepth] = useState({ undo: 0, redo: 0 })
   const [protectedCount, setProtectedCount] = useState(0)
-  const [position, setPosition] = useState({ first: true, last: true, pinned: false, table: false })
   const pendingSave = useRef(false)
   const deferred = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   function refreshControls(view: EditorView) {
     setHistoryDepth({ undo: undoDepth(view.state), redo: redoDepth(view.state) })
-    const block = selectedBlock(view)
-    setPosition({ first: block.index === 0, last: block.index === view.state.doc.childCount - 1, pinned: Boolean(block.node.attrs.pinned), table: block.node.type.name === 'table' })
   }
 
   function flush() {
@@ -284,29 +280,6 @@ export default function MarkdownBlockEditor(props: Props) {
             onClick={() => command((view) => { undo(view.state, view.dispatch); view.focus() })}><Undo2 size={15} /></Button>
           <Button variant="ghost" size="icon-sm" aria-label="やり直す" title="やり直す（Ctrl+Shift+Z）" disabled={!ready || composing || historyDepth.redo === 0}
             onClick={() => command((view) => { redo(view.state, view.dispatch); view.focus() })}><Redo2 size={15} /></Button>
-          <DropdownMenu.Root onOpenChange={(open) => { if (open && controller.current) refreshControls(controller.current.view) }}>
-            <DropdownMenu.Trigger asChild>
-              <Button variant="ghost" size="icon-sm" aria-label="選択中のブロック操作" title="選択中のブロック操作" disabled={!ready || composing}><MoreHorizontal size={17} /></Button>
-            </DropdownMenu.Trigger>
-            <DropdownMenu.Portal>
-              <DropdownMenu.Content className="md-command-menu" align="end" sideOffset={6} onCloseAutoFocus={(event) => event.preventDefault()}>
-                <DropdownMenu.Label className="md-command-label">選択中のブロック</DropdownMenu.Label>
-                {position.table && <>
-                  <DropdownMenu.Item onSelect={() => command((view) => editTable(view, 'addRowAfter'))}><Plus size={16} />下に行を追加</DropdownMenu.Item>
-                  <DropdownMenu.Item onSelect={() => command((view) => editTable(view, 'addColumnAfter'))}><Plus size={16} />右に列を追加</DropdownMenu.Item>
-                  <DropdownMenu.Item onSelect={() => command((view) => editTable(view, 'deleteRow'))}><Trash2 size={16} />この行を削除</DropdownMenu.Item>
-                  <DropdownMenu.Item onSelect={() => command((view) => editTable(view, 'deleteColumn'))}><Trash2 size={16} />この列を削除</DropdownMenu.Item>
-                  <DropdownMenu.Separator />
-                </>}
-                <DropdownMenu.Item onSelect={() => command(insertParagraphAfter)}><Plus size={16} />下にテキストを追加</DropdownMenu.Item>
-                <DropdownMenu.Item disabled={position.first || position.pinned} onSelect={() => command((view) => moveSelectedBlock(view, -1))}><ArrowUp size={16} />上へ移動</DropdownMenu.Item>
-                <DropdownMenu.Item disabled={position.last || position.pinned} onSelect={() => command((view) => moveSelectedBlock(view, 1))}><ArrowDown size={16} />下へ移動</DropdownMenu.Item>
-                <DropdownMenu.Item disabled={position.pinned} onSelect={() => command(duplicateSelectedBlock)}><Copy size={16} />複製</DropdownMenu.Item>
-                <DropdownMenu.Separator />
-                <DropdownMenu.Item className="md-command-danger" onSelect={() => command(deleteSelectedBlock)}><Trash2 size={16} />削除</DropdownMenu.Item>
-              </DropdownMenu.Content>
-            </DropdownMenu.Portal>
-          </DropdownMenu.Root>
         </div>}
       </div>
       {error && <div className="md-editor-notice" role="alert" data-file-find-skip="true">{error}</div>}

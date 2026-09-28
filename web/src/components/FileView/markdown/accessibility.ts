@@ -28,7 +28,7 @@ export function enhanceEditorControls(root: HTMLElement, readOnly: () => boolean
       button.setAttribute('title', '言語を変える')
     }
     for (const button of root.querySelectorAll<HTMLElement>('.milkdown-block-handle .operation-item:nth-child(2)')) {
-      button.setAttribute('title', 'ドラッグして移動。キーボードではブロック操作メニューを使えます。')
+      button.setAttribute('title', 'ドラッグして移動（キーボードでは Ctrl+Alt+↑↓）')
     }
   }
   let frame = 0

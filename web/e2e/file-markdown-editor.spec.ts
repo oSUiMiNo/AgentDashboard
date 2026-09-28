@@ -137,16 +137,15 @@ test('表の行列操作とコード編集が実ファイルへ戻る', async ({
   const editor = await openFile(page)
   const cell = editor.locator('td p').first()
   await cell.fill('更新した値')
-  const controls = page.getByRole('button', { name: '選択中のブロック操作' })
-  await controls.click()
-  await page.getByRole('menuitem', { name: '下に行を追加', exact: true }).click()
+  await addTableLine(page, editor.locator('td').first(), 'row')
   await expect(editor.locator('tr')).toHaveCount(3)
-  await editor.locator('td p').first().click()
-  await controls.click()
-  await page.getByRole('menuitem', { name: '右に列を追加', exact: true }).click()
+  await addTableLine(page, editor.locator('td').first(), 'col')
   await expect(editor.locator('tr').first().locator('th, td')).toHaveCount(3)
   const code = editor.locator('.cm-content')
-  await code.fill('const value = 2\nconsole.log(value)')
+  await code.locator('.cm-line').first().click()
+  await page.keyboard.press('Control+a')
+  await page.keyboard.insertText('const value = 2\nconsole.log(value)')
+  await expect(code).toHaveText('const value = 2console.log(value)')
   await page.keyboard.press('Control+s')
   await expect.poll(() => fs.readFileSync(file, 'utf8')).toContain('const value = 2')
   expect(fs.readFileSync(file, 'utf8')).toContain('更新した値')
@@ -158,6 +157,11 @@ test('ハンドルは本文の左余白に収まり、コードの道具は普�
   const editor = await openFile(page)
   const body = page.getByTestId('file-body')
   const paragraph = editor.locator('p').filter({ hasText: '本文の目印' }).first()
+  await expect.poll(async () => {
+    const before = (await paragraph.boundingBox())!.x
+    await page.waitForTimeout(80)
+    return (await paragraph.boundingBox())!.x - before
+  }).toBe(0)
   const box = (await paragraph.boundingBox())!
   await page.mouse.move(box.x + 12, box.y + 6)
   await page.mouse.move(box.x + 16, box.y + 8)
@@ -200,6 +204,17 @@ test('ハンドルは本文の左余白に収まり、コードの道具は普�
   await page.getByTestId('file-save').click()
   await expect.poll(() => fs.readFileSync(file, 'utf8')).toContain('```text\nconst value = 1')
 })
+
+async function addTableLine(page: Page, cell: Locator, direction: 'row' | 'col') {
+  const box = (await cell.boundingBox())!
+  const x = direction === 'col' ? box.x + box.width - 3 : box.x + box.width / 2
+  const y = direction === 'row' ? box.y + box.height - 3 : box.y + box.height / 2
+  await page.mouse.move(x - 1, y - 1)
+  await page.mouse.move(x, y)
+  const line = page.locator(`.line-handle[data-role="${direction === 'row' ? 'x' : 'y'}-line-drag-handle"][data-show="true"]`)
+  await expect(line).toHaveCount(1)
+  await line.locator('.add-button').click()
+}
 
 async function expectLanguagePickerInside(page: Page, code: Locator) {
   const body = page.getByTestId('file-body')
@@ -279,7 +294,7 @@ test('長いコードの未表示行を検索して編集と保存へ戻れる',
 })
 
 for (const single of [false, true]) {
-  test(`${single ? 'セッション' : 'PJT'}専用画面の狭い幅でも本文と操作メニューが収まる`, async ({ page }) => {
+  test(`${single ? 'セッション' : 'PJT'}専用画面の狭い幅でも本文と挿入メニューが収まる`, async ({ page }) => {
     await page.setViewportSize({ width: 400, height: 900 })
     const editor = await openFile(page, single)
     const body = page.getByTestId('file-body')
@@ -294,12 +309,20 @@ for (const single of [false, true]) {
     await code.scrollIntoViewIfNeeded()
     await expect(code.locator('.cm-line').first()).toBeVisible()
     await expectLanguagePickerInside(page, code)
+    const cell = editor.locator('td').first()
+    await cell.scrollIntoViewIfNeeded()
+    await addTableLine(page, cell, 'row')
+    await expect(editor.locator('tr')).toHaveCount(3)
+    expect(await body.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1)
     await editor.locator('p').filter({ hasText: '本文の目印' }).first().scrollIntoViewIfNeeded()
     const before = await editor.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize))
     await page.getByTestId('file-zoom-in').click()
     await expect.poll(() => editor.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize))).toBeGreaterThan(before)
-    await page.getByRole('button', { name: '選択中のブロック操作' }).click()
-    const menu = page.getByRole('menu')
+    await editor.locator('p').filter({ hasText: '本文の目印' }).first().click()
+    await page.keyboard.press('End')
+    await page.keyboard.press('Enter')
+    await page.keyboard.insertText('/')
+    const menu = page.locator('.milkdown-slash-menu')
     await expect(menu).toBeVisible()
     const rect = await menu.boundingBox()
     expect(rect).not.toBeNull()

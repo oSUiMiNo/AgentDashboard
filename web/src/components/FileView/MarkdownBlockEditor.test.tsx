@@ -62,22 +62,20 @@ describe('Markdownブロック編集面', () => {
     expect(changed).not.toHaveBeenCalled()
   })
 
-  it('操作メニューは日本語でキーボードから開ける', async () => {
+  it('ブロックはキーボード（Ctrl+Alt+↑↓）で並べ替えられる', async () => {
     const user = userEvent.setup()
-    render(<Harness source="本文" />)
-    await screen.findByRole('textbox', { name: '文書を編集' })
-    const trigger = screen.getByRole('button', { name: '選択中のブロック操作' })
-    trigger.focus()
-    await user.keyboard('{Enter}')
-    expect(await screen.findByRole('menuitem', { name: '複製' })).toBeVisible()
-    expect(screen.getByRole('menuitem', { name: '上へ移動' })).toHaveAttribute('data-disabled')
+    render(<Harness source={'一つ目\n\n二つ目'} />)
+    const editor = await screen.findByRole('textbox', { name: '文書を編集' })
+    await user.click(editor.querySelector('p')!)
+    fireEvent.keyDown(editor, { key: 'ArrowDown', ctrlKey: true, altKey: true })
+    await waitFor(() => expect(screen.getByTestId('markdown-value').textContent).toBe('二つ目\n\n一つ目'))
   })
 
   it('読み取り専用なら操作群を出さず入力も許可しない', async () => {
     render(<Harness readOnly />)
     const editor = await screen.findByRole('textbox', { name: '文書を編集' })
     expect(editor).toHaveAttribute('contenteditable', 'false')
-    expect(screen.queryByRole('button', { name: '選択中のブロック操作' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '元に戻す' })).toBeNull()
   })
 
   it('同じ値の通知や非表示への切替で編集DOMを作り直さない', async () => {
