@@ -83,6 +83,20 @@ describe('Markdownの原文保持', () => {
     expect(types).toEqual(['heading', 'paragraph', 'bullet_list', 'blockquote', 'code_block', 'table'])
   })
 
+  it('空のセルを含む表も編集できる表になり、書き戻しで空セルに改行を入れない', async () => {
+    const source = '| # | 区分 | 工数 |\n|---|---|:---:|\n| 1 | 構築 | 6h |\n|   | **合計** | **119h** |\n'
+    const { view, text } = await open(source)
+    expect(view.state.doc.firstChild!.type.name).toBe('table')
+    expect(text()).toBe(source)
+    let pos = -1
+    view.state.doc.descendants((node, at) => {
+      if (pos < 0 && node.isText && node.text === '構築') pos = at
+    })
+    view.dispatch(view.state.tr.insertText('環境', pos))
+    expect(text()).toContain('環境構築')
+    expect(text()).not.toMatch(/<br/i)
+  })
+
   it('一段落だけ変えると他の記法と空行はそのまま残る', async () => {
     const source = '見出し\n=======\n\n\n同じ本文\n\n* そのまま\n* 残す\n\n<!-- 消さない -->\n'
     const { view, text } = await open(source)

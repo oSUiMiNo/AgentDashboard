@@ -5,7 +5,7 @@ import {
   blockquoteSchema, bulletListSchema, codeBlockSchema, hardbreakSchema, headingSchema,
   hrSchema, htmlSchema, orderedListSchema, paragraphSchema,
 } from '@milkdown/kit/preset/commonmark'
-import { tableSchema } from '@milkdown/kit/preset/gfm'
+import { tableCellSchema, tableHeaderSchema, tableSchema } from '@milkdown/kit/preset/gfm'
 import { Plugin, PluginKey } from '@milkdown/kit/prose/state'
 import { Mapping } from '@milkdown/kit/prose/transform'
 import type { Node as ProseNode } from '@milkdown/kit/prose/model'
@@ -103,6 +103,24 @@ export function configureSourceSchema(ctx: Ctx, imageBlock = false) {
     ...factory(inner),
     toDOM: (node) => ['br', { 'data-type': 'hardbreak', 'data-is-inline': node.attrs.isInline }],
   }))
+  for (const cell of [tableCellSchema, tableHeaderSchema]) {
+    ctx.update(cell.key, (factory) => (inner) => {
+      const previous = factory(inner)
+      return {
+        ...previous,
+        toMarkdown: {
+          match: previous.toMarkdown.match,
+          runner: (state, node) => {
+            if (node.content.size > 0 && node.childCount === 1 && node.firstChild!.content.size === 0) {
+              state.openNode('tableCell').closeNode()
+              return
+            }
+            previous.toMarkdown.runner(state, node)
+          },
+        },
+      }
+    })
+  }
 }
 
 export type SourceSession = {
