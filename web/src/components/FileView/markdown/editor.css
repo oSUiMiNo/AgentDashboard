@@ -178,6 +178,10 @@
 .markdown-block-editor .milkdown .milkdown-code-block .list-wrapper {
   width: min(15rem, calc(100cqi - 2rem));
 }
+.markdown-block-editor .milkdown .milkdown-code-block .language-list {
+  height: auto;
+  max-height: 16rem;
+}
 .markdown-block-editor .milkdown .milkdown-link-preview > .link-preview > .link-display {
   width: auto;
   min-width: 0;
