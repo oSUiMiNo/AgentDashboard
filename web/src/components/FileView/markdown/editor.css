@@ -45,7 +45,7 @@
   --crepe-color-on-secondary: #baf5f9;
   --crepe-color-inverse: #e6ebf1;
   --crepe-color-on-inverse: #12161d;
-  --crepe-color-inline-code: #9fd6dd;
+  --crepe-color-inline-code: #c9d3de;
   --crepe-color-error: #ff8585;
   --crepe-color-hover: #243544;
   --crepe-color-selected: #1b4350;
@@ -131,7 +131,6 @@
 }
 .markdown-block-editor .milkdown .milkdown-list-item-block li .label-wrapper { color: #7d8da0; }
 .markdown-block-editor .milkdown .milkdown-list-item-block li .label-wrapper svg { fill: #7d8da0; }
-.markdown-block-editor .milkdown .milkdown-list-item-block li .label-wrapper .label.checked svg { fill: var(--md-accent); }
 .markdown-block-editor .milkdown .milkdown-list-item-block li.list-item:has(> .label-wrapper[aria-checked='true']) > .children > .content-dom > p {
   color: var(--md-muted);
 }
