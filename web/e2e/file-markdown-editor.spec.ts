@@ -334,6 +334,14 @@ test('文書からの相対パスの画像を表示し、横に長い表は表�
   await expect(image).toHaveAttribute('src', /^blob:/)
   await expect.poll(() => image.evaluate((element) => (element as HTMLImageElement).naturalWidth)).toBe(120)
   expect(fs.readFileSync(file, 'utf8')).toContain('](参考/図.png)')
+  const caption = editor.locator('.milkdown-image-block .caption-input').first()
+  await caption.click()
+  await page.keyboard.press('End')
+  await page.keyboard.insertText('・改')
+  await editor.locator('h1').click()
+  await page.getByTestId('file-save').click()
+  await expect.poll(() => fs.readFileSync(file, 'utf8')).toContain('![相対の図・改](参考/図.png)')
+  expect(fs.readFileSync(file, 'utf8')).not.toContain('blob:')
 
   const body = page.getByTestId('file-body')
   const wrapper = editor.locator('.milkdown-table-block .table-wrapper').first()
@@ -341,7 +349,11 @@ test('文書からの相対パスの画像を表示し、横に長い表は表�
   expect(await wrapper.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeGreaterThan(0)
   await editor.locator('td').last().click()
   const row = (await editor.locator('tr').nth(1).boundingBox())!
-  for (const dy of [-1, 0, 1]) await page.mouse.move(row.x + 30, row.y + dy)
-  await page.waitForTimeout(300)
+  const visible = (await wrapper.boundingBox())!
+  for (const dy of [-2, -1, 0, 1]) {
+    await page.mouse.move(visible.x + 30, row.y + dy)
+    await page.waitForTimeout(120)
+  }
+  await expect.poll(() => page.locator('.line-handle[data-show="true"]').count()).toBeGreaterThan(0)
   expect(await body.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1)
 })
