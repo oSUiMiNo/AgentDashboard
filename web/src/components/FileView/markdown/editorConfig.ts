@@ -1,5 +1,6 @@
 import type { CrepeConfig } from '@milkdown/crepe'
 import { Crepe } from '@milkdown/crepe'
+import { CodeMirrorBlock } from '@milkdown/kit/component/code-block'
 import { LanguageDescription, LanguageSupport, StreamLanguage } from '@codemirror/language'
 import { languages } from '@codemirror/language-data'
 import { safeMarkdownUrl } from '../../../lib/fileMarkdown'
@@ -18,6 +19,8 @@ const plainText = LanguageDescription.of({
 })
 
 export const codeLanguages = [plainText, ...languages]
+
+Object.assign(CodeMirrorBlock.prototype, { ignoreMutation: () => true })
 
 export function markdownEditorConfig(
   root: HTMLElement,
