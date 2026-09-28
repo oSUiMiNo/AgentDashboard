@@ -92,6 +92,7 @@
   line-height: 1.8;
   overflow-wrap: anywhere;
   word-break: normal;
+  overflow-x: clip;
   caret-color: var(--md-accent);
 }
 .markdown-block-editor .milkdown .ProseMirror > :first-child { margin-top: .25rem; }
@@ -115,13 +116,30 @@
   padding: .35em .9em;
   margin-block: .75em;
 }
+.markdown-block-editor .milkdown .milkdown-list-item-block li { gap: max(10px, .6em); }
 .markdown-block-editor .milkdown .milkdown-list-item-block li .label-wrapper,
 .markdown-block-editor .milkdown .milkdown-list-item-block li .label-wrapper .label {
+  width: max(24px, 1.6em);
   height: 1lh;
   padding-block: 0;
 }
+.markdown-block-editor .milkdown .milkdown-list-item-block li .label-wrapper svg {
+  width: max(24px, 1.6em);
+  height: max(24px, 1.6em);
+}
 .markdown-block-editor .milkdown .milkdown-list-item-block li .label-wrapper { color: #7d8da0; }
 .markdown-block-editor .milkdown .milkdown-list-item-block li .label-wrapper svg { fill: #7d8da0; }
+.markdown-block-editor .milkdown .milkdown-list-item-block li .label-wrapper .label.checked svg { fill: var(--md-accent); }
+.markdown-block-editor .milkdown .milkdown-list-item-block li.list-item:has(> .label-wrapper[aria-checked='true']) > .children > .content-dom > p {
+  color: var(--md-muted);
+}
+.markdown-block-editor .milkdown .ProseMirror :not(pre) > code {
+  padding: .08em .35em;
+  border-radius: .3em;
+  background: #ffffff10;
+  box-shadow: inset 0 0 0 1px #ffffff0d;
+  font-size: .9em;
+}
 .markdown-block-editor .milkdown .ProseMirror a { color: #6edee7; text-underline-offset: .2em; }
 .markdown-block-editor .milkdown .ProseMirror ::selection { background: #3dd9e63b; }
 .markdown-block-editor .milkdown :is(.milkdown-code-block, .milkdown-table-block) {
@@ -189,8 +207,26 @@
 }
 .markdown-block-editor .milkdown .cm-editor { font-size: .92em; max-width: 100%; }
 .markdown-block-editor .milkdown .cm-scroller { overflow: auto; font-family: var(--crepe-font-code); line-height: 1.65; }
-.markdown-block-editor .milkdown .tableWrapper { overflow-x: auto; max-width: 100%; }
-.markdown-block-editor :is(.cm-scroller, .tableWrapper, .md-source-text) {
+.markdown-block-editor .milkdown .milkdown-table-block .table-wrapper { overflow-x: auto; max-width: 100%; }
+.markdown-block-editor .milkdown .milkdown-table-block table.children {
+  table-layout: auto;
+  width: max-content;
+  min-width: 100%;
+}
+.markdown-block-editor .milkdown .milkdown-table-block :is(th, td) {
+  min-width: 4em;
+  vertical-align: top;
+}
+.markdown-block-editor .milkdown .milkdown-table-block :is(th, td) > p { max-width: clamp(10em, 45cqi, 32em); }
+.markdown-block-editor .milkdown .milkdown-table-block th { background: #ffffff08; }
+.markdown-block-editor .milkdown .milkdown-table-block .line-handle[data-show='false'] { display: none; }
+.markdown-block-editor .milkdown .ProseMirror img.image-inline {
+  max-height: 8em;
+  width: auto;
+  vertical-align: middle;
+}
+.markdown-block-editor .milkdown .milkdown-table-block :is(th, td) code { white-space: nowrap; }
+.markdown-block-editor :is(.cm-scroller, .table-wrapper, .md-source-text) {
   scrollbar-width: thin;
   scrollbar-color: #3a4a5c transparent;
 }

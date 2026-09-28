@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import zlib from 'node:zlib'
 import path from 'node:path'
 import { expect, test, type Locator, type Page } from '@playwright/test'
 import { addProject, archiveAll, openDashboard, spawnSession, WORK_DIR } from './helpers'
@@ -295,3 +296,52 @@ for (const single of [false, true]) {
     expect(rect!.x + rect!.width).toBeLessThanOrEqual(400)
   })
 }
+
+function png(width: number, height: number) {
+  const crc = (bytes: Buffer) => {
+    let value = ~0
+    for (const byte of bytes) {
+      value ^= byte
+      for (let bit = 0; bit < 8; bit++) value = (value >>> 1) ^ (0xedb88320 & -(value & 1))
+    }
+    return ~value >>> 0
+  }
+  const chunk = (type: string, data: Buffer) => {
+    const head = Buffer.alloc(4)
+    head.writeUInt32BE(data.length)
+    const body = Buffer.concat([Buffer.from(type), data])
+    const tail = Buffer.alloc(4)
+    tail.writeUInt32BE(crc(body))
+    return Buffer.concat([head, body, tail])
+  }
+  const header = Buffer.alloc(13)
+  header.writeUInt32BE(width, 0)
+  header.writeUInt32BE(height, 4)
+  header.set([8, 2, 0, 0, 0], 8)
+  const rows = Buffer.alloc((width * 3 + 1) * height, 0x80)
+  for (let row = 0; row < height; row++) rows[row * (width * 3 + 1)] = 0
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', header), chunk('IDAT', zlib.deflateSync(rows)), chunk('IEND', Buffer.alloc(0))])
+}
+
+test('文書からの相対パスの画像を表示し、横に長い表は表の中だけで送る', async ({ page }) => {
+  await page.setViewportSize({ width: 400, height: 900 })
+  fs.mkdirSync(path.join(projectDir, 'MyDocs', '参考'), { recursive: true })
+  fs.writeFileSync(path.join(projectDir, 'MyDocs', '参考', '図.png'), png(120, 60))
+  const wide = '| 列1 | 列2 | 列3 | 列4 | 列5 | 列6 |\n| --- | --- | --- | --- | --- | --- |\n| 左 | 中 | 右 | `code` | **太字** | 長いセルの文章を入れて横に広がる表を確かめる |\n| 二行目 | 値 | 値 | 値 | 値 | 値 |\n'
+  fs.writeFileSync(file, `# 画像と表\n\n![相対の図](参考/図.png)\n\n${wide}`, 'utf8')
+  const editor = await openFile(page)
+  const image = editor.locator('.milkdown-image-block img').first()
+  await expect(image).toHaveAttribute('src', /^blob:/)
+  await expect.poll(() => image.evaluate((element) => (element as HTMLImageElement).naturalWidth)).toBe(120)
+  expect(fs.readFileSync(file, 'utf8')).toContain('](参考/図.png)')
+
+  const body = page.getByTestId('file-body')
+  const wrapper = editor.locator('.milkdown-table-block .table-wrapper').first()
+  await wrapper.scrollIntoViewIfNeeded()
+  expect(await wrapper.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeGreaterThan(0)
+  await editor.locator('td').last().click()
+  const row = (await editor.locator('tr').nth(1).boundingBox())!
+  for (const dy of [-1, 0, 1]) await page.mouse.move(row.x + 30, row.y + dy)
+  await page.waitForTimeout(300)
+  expect(await body.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1)
+})
