@@ -83,7 +83,7 @@
 .md-editor-actions button { width: 1.75rem; height: 1.75rem; }
 
 .markdown-block-editor .milkdown .ProseMirror {
-  padding: .65rem clamp(1.25rem, 4%, 2.25rem) 4rem 4.75rem;
+  padding: .65rem clamp(1.25rem, 4%, 2.25rem) 4rem calc(74px + .5rem);
   min-height: 12rem;
   max-width: 56rem;
   margin-inline: auto;
@@ -169,6 +169,20 @@
 .markdown-block-editor .milkdown .milkdown-code-block .cm-editor:not(.cm-focused) :is(.cm-activeLine, .cm-activeLineGutter) {
   background: transparent;
 }
+.markdown-block-editor .milkdown .milkdown-code-block .tools .language-picker {
+  left: auto !important;
+  right: 0;
+  top: calc(100% + .25rem) !important;
+  padding-top: 0;
+}
+.markdown-block-editor .milkdown .milkdown-code-block .list-wrapper {
+  width: min(15rem, calc(100cqi - 2rem));
+}
+.markdown-block-editor .milkdown .milkdown-link-preview > .link-preview > .link-display {
+  width: auto;
+  min-width: 0;
+  max-width: 15rem;
+}
 .markdown-block-editor .milkdown .cm-editor { font-size: .92em; max-width: 100%; }
 .markdown-block-editor .milkdown .cm-scroller { overflow: auto; font-family: var(--crepe-font-code); line-height: 1.65; }
 .markdown-block-editor .milkdown .tableWrapper { overflow-x: auto; max-width: 100%; }
@@ -182,9 +196,9 @@
 .markdown-block-editor .milkdown .image-edit input[type='file'] { display: none; }
 .markdown-block-editor .milkdown .image-edit .link-input-area { min-width: 0; width: 100%; }
 
-.markdown-block-editor .milkdown :is(.milkdown-slash-menu, .milkdown-toolbar, .milkdown-link-tooltip) {
+.markdown-block-editor .milkdown :is(.milkdown-slash-menu, .milkdown-toolbar, .milkdown-link-preview, .milkdown-link-edit) {
   font-size: .8rem;
-  max-width: min(24rem, calc(100vw - 2rem));
+  max-width: min(24rem, calc(100cqi - 1rem));
   border: 1px solid var(--md-border);
   border-radius: .6rem;
 }

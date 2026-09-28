@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { expect, test, type Page } from '@playwright/test'
+import { expect, test, type Locator, type Page } from '@playwright/test'
 import { addProject, archiveAll, openDashboard, spawnSession, WORK_DIR } from './helpers'
 
 const FILE = '編集する文書.md'
@@ -186,7 +186,25 @@ test('ハンドルは本文の左余白に収まり、コードの道具は普�
   const copy = code.getByRole('button', { name: 'コードをコピー' })
   await expect(copy).toBeVisible()
   await expect(copy).toHaveCSS('font-size', '0px')
+  await expectLanguagePickerInside(page, code)
 })
+
+async function expectLanguagePickerInside(page: Page, code: Locator) {
+  const body = page.getByTestId('file-body')
+  await code.hover()
+  await code.locator('.language-button').click()
+  const list = page.locator('.language-picker .list-wrapper')
+  await expect(list).toBeVisible()
+  const listBox = (await list.boundingBox())!
+  const bodyBox = (await body.boundingBox())!
+  expect(listBox.x).toBeGreaterThanOrEqual(bodyBox.x)
+  expect(listBox.x + listBox.width).toBeLessThanOrEqual(bodyBox.x + bodyBox.width)
+  expect(await body.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1)
+  await page.locator('.language-picker input').first().fill('python')
+  await page.locator('.language-list-item').filter({ hasText: /^\s*Python\s*$/ }).first().click()
+  await expect(list).toHaveCount(0)
+  await expect(code.locator('.language-button')).toContainText('Python')
+}
 
 test('保存前のブロック編集を読み直しても復元する', async ({ page }) => {
   const editor = await openFile(page)
@@ -260,6 +278,11 @@ for (const single of [false, true]) {
     await page.waitForTimeout(500)
     await expect(page.locator('.milkdown-block-handle:visible')).toHaveCount(0)
     expect(await body.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1)
+    const code = editor.locator('.milkdown-code-block').first()
+    await code.scrollIntoViewIfNeeded()
+    await expect(code.locator('.cm-line').first()).toBeVisible()
+    await expectLanguagePickerInside(page, code)
+    await editor.locator('p').filter({ hasText: '本文の目印' }).first().scrollIntoViewIfNeeded()
     const before = await editor.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize))
     await page.getByTestId('file-zoom-in').click()
     await expect.poll(() => editor.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize))).toBeGreaterThan(before)
