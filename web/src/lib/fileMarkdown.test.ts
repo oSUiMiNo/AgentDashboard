@@ -22,7 +22,7 @@ async function open(source: string) {
   document.body.append(root)
   const changed = vi.fn()
   const failed = vi.fn()
-  const session: SourceSession = { book: null, serialize: null, composing: false, lastValue: source, onChange: changed, onError: failed }
+  const session: SourceSession = { book: null, serialize: null, composing: false, lastValue: source, echoes: [], onChange: changed, onError: failed }
   const editor = Editor.make()
     .use(commonmark).use(gfm).use(history)
     .use(protectedSourceSchema).use(sourceIdentityPlugin(session))

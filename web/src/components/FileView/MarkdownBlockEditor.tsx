@@ -84,6 +84,8 @@ export default function MarkdownBlockEditor(props: Props) {
       const text = current.session.book.serialize(current.view.state.doc, current.session.serialize)
       if (text !== current.session.lastValue) {
         current.session.lastValue = text
+        current.session.echoes.push(text)
+        if (current.session.echoes.length > 64) current.session.echoes.shift()
         latest.current.onChange(text)
       }
       return true
@@ -107,7 +109,7 @@ export default function MarkdownBlockEditor(props: Props) {
     root.inert = true
     const removeAccessibility = enhanceEditorControls(root, () => latest.current.readOnly)
     const session: SourceSession = {
-      book: null, serialize: null, composing: false, lastValue: latest.current.value,
+      book: null, serialize: null, composing: false, lastValue: latest.current.value, echoes: [],
       onChange: (text) => {
         if (!alive || !initialized || latest.current.readOnly || latest.current.documentKey !== documentKey) return
         latest.current.onChange(text)
@@ -147,6 +149,7 @@ export default function MarkdownBlockEditor(props: Props) {
             const doc = book.createDoc(parse, serialize, view.state.schema)
             session.book = book
             session.lastValue = source
+            session.echoes = []
             view.updateState(EditorState.create({ doc, plugins: view.state.plugins, selection: TextSelection.atStart(doc) }))
             let count = 0
             doc.forEach((node) => { if (node.type.name === 'markdown_source' && !node.attrs.spacer) count++ })
@@ -204,7 +207,9 @@ export default function MarkdownBlockEditor(props: Props) {
   useEffect(() => {
     const current = controller.current
     if (!current) return
-    if (active && (value !== current.session.lastValue || !current.canFlush) && !current.session.composing) {
+    if (!active || value === current.session.lastValue) current.session.echoes = []
+    const echo = current.canFlush && current.session.echoes.includes(value)
+    if (active && !echo && (value !== current.session.lastValue || !current.canFlush) && !current.session.composing) {
       if (current.load(value)) latest.current.onDocumentChange?.()
     }
   }, [value, active])

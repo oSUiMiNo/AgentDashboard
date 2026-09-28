@@ -71,6 +71,43 @@ describe('Markdownブロック編集面', () => {
     await waitFor(() => expect(screen.getByTestId('markdown-value').textContent).toBe('二つ目\n\n一つ目'))
   })
 
+  it('自分が渡した古い本文が遅れて戻ってきても、編集を巻き戻さない', async () => {
+    const user = userEvent.setup()
+    const emitted: string[] = []
+    const props = { onSave: vi.fn(), readOnly: false, label: '文書を編集', documentKey: 'echo', onChange: (text: string) => { emitted.push(text) } }
+    const { rerender } = render(<MarkdownBlockEditor {...props} value="本文" />)
+    const editor = await screen.findByRole('textbox', { name: '文書を編集' })
+    await user.click(editor.querySelector('p')!)
+    await user.keyboard('一二')
+    await waitFor(() => expect(emitted.length).toBeGreaterThanOrEqual(2))
+    const paragraph = editor.querySelector('p')!
+    rerender(<MarkdownBlockEditor {...props} value={emitted[0]!} />)
+    expect(editor.querySelector('p')).toBe(paragraph)
+    expect(editor.querySelector('p')!.textContent).toMatch(/一二/)
+  })
+
+  it('追いついた後に、前に渡した本文へ戻されたら読み込み直す', async () => {
+    const user = userEvent.setup()
+    const emitted: string[] = []
+    const props = { onSave: vi.fn(), readOnly: false, label: '文書を編集', documentKey: 'discard', onChange: (text: string) => { emitted.push(text) } }
+    const { rerender } = render(<MarkdownBlockEditor {...props} value="本文" />)
+    const editor = await screen.findByRole('textbox', { name: '文書を編集' })
+    await user.click(editor.querySelector('p')!)
+    await user.keyboard('一二')
+    await waitFor(() => expect(emitted.length).toBeGreaterThanOrEqual(2))
+    rerender(<MarkdownBlockEditor {...props} value={emitted.at(-1)!} />)
+    rerender(<MarkdownBlockEditor {...props} value={emitted[0]!} />)
+    await waitFor(() => expect(editor.querySelector('p')!.textContent).not.toMatch(/一二/))
+  })
+
+  it('外から別の本文が来たら読み込み直す', async () => {
+    const props = { onSave: vi.fn(), readOnly: false, label: '文書を編集', documentKey: 'outer', onChange: vi.fn() }
+    const { rerender } = render(<MarkdownBlockEditor {...props} value="本文" />)
+    const editor = await screen.findByRole('textbox', { name: '文書を編集' })
+    rerender(<MarkdownBlockEditor {...props} value="差し替えた本文" />)
+    await waitFor(() => expect(editor.querySelector('p')).toHaveTextContent('差し替えた本文'))
+  })
+
   it('読み取り専用なら操作群を出さず入力も許可しない', async () => {
     render(<Harness readOnly />)
     const editor = await screen.findByRole('textbox', { name: '文書を編集' })

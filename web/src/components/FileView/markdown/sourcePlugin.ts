@@ -128,6 +128,7 @@ export type SourceSession = {
   serialize: ((node: ProseNode) => string) | null
   composing: boolean
   lastValue: string
+  echoes: string[]
   onChange: (value: string) => void
   onError: (message: string | null) => void
   onReady?: (view: EditorView) => void
@@ -224,6 +225,8 @@ export function sourceIdentityPlugin(session: SourceSession) {
       const value = book.serialize(view.state.doc, session.serialize)
       if (value !== session.lastValue) {
         session.lastValue = value
+        session.echoes.push(value)
+        if (session.echoes.length > 64) session.echoes.shift()
         session.onChange(value)
       }
       session.onError(null)
