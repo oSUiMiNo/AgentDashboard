@@ -108,7 +108,9 @@
 .markdown-block-editor .milkdown .ProseMirror h1 { font-size: 2.15em; }
 .markdown-block-editor .milkdown .ProseMirror h2 { font-size: 1.7em; }
 .markdown-block-editor .milkdown .ProseMirror h3 { font-size: 1.35em; }
-.markdown-block-editor .milkdown .ProseMirror :is(h4, h5, h6) { font-size: 1.1em; }
+.markdown-block-editor .milkdown .ProseMirror h4 { font-size: 1.15em; }
+.markdown-block-editor .milkdown .ProseMirror h5 { font-size: 1.05em; }
+.markdown-block-editor .milkdown .ProseMirror h6 { font-size: 1em; color: var(--md-muted); }
 .markdown-block-editor .milkdown .ProseMirror blockquote {
   border-inline-start: 3px solid #3dd9e666;
   border-radius: 0 .4rem .4rem 0;
@@ -261,6 +263,18 @@
 .markdown-block-editor .milkdown .milkdown-slash-menu .tab-group ul::-webkit-scrollbar { display: none; }
 .markdown-block-editor .milkdown .milkdown-slash-menu .menu-groups {
   max-height: calc(min(25rem, 65vh) - 4rem);
+}
+.markdown-block-editor .milkdown .milkdown-slash-menu .menu-groups .menu-group h6 { padding: 10px 10px 4px; }
+.markdown-block-editor .milkdown .milkdown-slash-menu .menu-groups .menu-group li {
+  min-width: 0;
+  gap: 12px;
+  padding: 7px 10px;
+}
+.markdown-block-editor .milkdown .milkdown-slash-menu .menu-groups .menu-group li svg {
+  width: 20px;
+  height: 20px;
+  color: #7d8da0;
+  fill: #7d8da0;
 }
 .markdown-block-editor .milkdown :is(button, [role='button']):focus-visible {
   outline: 2px solid var(--md-accent);
