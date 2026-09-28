@@ -149,7 +149,43 @@ test('表の行列操作とコード編集が実ファイルへ戻る', async ({
   await page.keyboard.press('Control+s')
   await expect.poll(() => fs.readFileSync(file, 'utf8')).toContain('const value = 2')
   expect(fs.readFileSync(file, 'utf8')).toContain('更新した値')
+  expect(fs.readFileSync(file, 'utf8').split('\n').filter((line) => line.startsWith('|')).join('\n')).not.toMatch(/<br/i)
   expect(fs.readFileSync(file, 'utf8')).toContain('<!-- 変更しないコメント -->')
+})
+
+test('ハンドルは本文の左余白に収まり、コードの道具は普段は場所を取らない', async ({ page }) => {
+  const editor = await openFile(page)
+  const body = page.getByTestId('file-body')
+  const paragraph = editor.locator('p').filter({ hasText: '本文の目印' }).first()
+  const box = (await paragraph.boundingBox())!
+  await page.mouse.move(box.x + 12, box.y + 6)
+  await page.mouse.move(box.x + 16, box.y + 8)
+  const handle = page.locator('.milkdown-block-handle[data-show="true"]')
+  await expect(handle).toBeVisible()
+  const handleBox = (await handle.boundingBox())!
+  const bodyBox = (await body.boundingBox())!
+  expect(handleBox.x).toBeGreaterThanOrEqual(bodyBox.x)
+  expect(handleBox.x + handleBox.width).toBeLessThanOrEqual(box.x)
+  expect(await body.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1)
+
+  const code = editor.locator('.milkdown-code-block').first()
+  await code.scrollIntoViewIfNeeded()
+  await expect(code.locator('.cm-line').first()).toBeVisible()
+  await page.mouse.move(bodyBox.x + 2, bodyBox.y + 2)
+  const tools = code.locator('.tools')
+  await expect(tools).toHaveCSS('opacity', '0')
+  await expect(tools).toHaveCSS('position', 'absolute')
+  const gaps = await code.evaluate((element) => {
+    const block = element.getBoundingClientRect()
+    const lines = element.querySelectorAll('.cm-line')
+    return { top: lines[0]!.getBoundingClientRect().top - block.top, bottom: block.bottom - lines[lines.length - 1]!.getBoundingClientRect().bottom }
+  })
+  expect(Math.abs(gaps.top - gaps.bottom)).toBeLessThanOrEqual(2)
+  await code.hover()
+  await expect(tools).toHaveCSS('opacity', '1')
+  const copy = code.getByRole('button', { name: 'コードをコピー' })
+  await expect(copy).toBeVisible()
+  await expect(copy).toHaveCSS('font-size', '0px')
 })
 
 test('保存前のブロック編集を読み直しても復元する', async ({ page }) => {
@@ -218,6 +254,12 @@ for (const single of [false, true]) {
     const editor = await openFile(page, single)
     const body = page.getByTestId('file-body')
     await expect.poll(() => body.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1)
+    const paragraph = (await editor.locator('p').filter({ hasText: '本文の目印' }).first().boundingBox())!
+    await page.mouse.move(paragraph.x + 12, paragraph.y + 6)
+    await page.mouse.move(paragraph.x + 16, paragraph.y + 8)
+    await page.waitForTimeout(500)
+    await expect(page.locator('.milkdown-block-handle:visible')).toHaveCount(0)
+    expect(await body.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1)
     const before = await editor.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize))
     await page.getByTestId('file-zoom-in').click()
     await expect.poll(() => editor.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize))).toBeGreaterThan(before)

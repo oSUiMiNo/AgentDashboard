@@ -24,6 +24,7 @@
   position: relative;
   min-width: 0;
   min-height: 100%;
+  container: md-editor / inline-size;
   color: var(--foreground);
   --md-accent: #3dd9e6;
   --md-muted: #98a7b8;
@@ -82,7 +83,7 @@
 .md-editor-actions button { width: 1.75rem; height: 1.75rem; }
 
 .markdown-block-editor .milkdown .ProseMirror {
-  padding: .65rem clamp(1rem, 4%, 2.25rem) 4rem;
+  padding: .65rem clamp(1.25rem, 4%, 2.25rem) 4rem 4.75rem;
   min-height: 12rem;
   max-width: 56rem;
   margin-inline: auto;
@@ -114,16 +115,67 @@
   padding: .35em .9em;
   margin-block: .75em;
 }
+.markdown-block-editor .milkdown .milkdown-list-item-block li .label-wrapper,
+.markdown-block-editor .milkdown .milkdown-list-item-block li .label-wrapper .label {
+  height: 1lh;
+  padding-block: 0;
+}
+.markdown-block-editor .milkdown .milkdown-list-item-block li .label-wrapper { color: #7d8da0; }
+.markdown-block-editor .milkdown .milkdown-list-item-block li .label-wrapper svg { fill: #7d8da0; }
 .markdown-block-editor .milkdown .ProseMirror a { color: #6edee7; text-underline-offset: .2em; }
 .markdown-block-editor .milkdown .ProseMirror ::selection { background: #3dd9e63b; }
 .markdown-block-editor .milkdown :is(.milkdown-code-block, .milkdown-table-block) {
   max-width: 100%;
   min-width: 0;
-  margin-block: 1em;
+  margin-block: .9em;
+}
+.markdown-block-editor .milkdown .milkdown-code-block {
+  padding: .6rem .75rem .6rem .25rem;
+  border: 1px solid #243140;
+  border-radius: .55rem;
+}
+.markdown-block-editor .milkdown .milkdown-code-block .tools {
+  position: absolute;
+  top: .3rem;
+  right: .3rem;
+  z-index: 3;
+  gap: .25rem;
+  padding: .15rem;
+  border-radius: .45rem;
+  background: #1a232ef0;
+  box-shadow: 0 2px 8px #0006;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .15s ease;
+}
+.markdown-block-editor .milkdown .milkdown-code-block:is(:hover, :focus-within) .tools,
+.markdown-block-editor .milkdown .milkdown-code-block .tools:has([data-expanded='true']) {
+  opacity: 1;
+  pointer-events: auto;
+}
+.markdown-block-editor .milkdown .milkdown-code-block .tools .language-button,
+.markdown-block-editor .milkdown .milkdown-code-block .tools .tools-button-group button {
+  opacity: 1;
+  margin: 0;
+  height: 1.6rem;
+}
+.markdown-block-editor .milkdown .milkdown-code-block .tools .tools-button-group button {
+  width: 1.6rem;
+  padding: 0;
+  font-size: 0;
+  justify-content: center;
+  border-radius: .35rem;
+}
+.markdown-block-editor .milkdown .milkdown-code-block .cm-editor:not(.cm-focused) :is(.cm-activeLine, .cm-activeLineGutter) {
+  background: transparent;
 }
 .markdown-block-editor .milkdown .cm-editor { font-size: .92em; max-width: 100%; }
-.markdown-block-editor .milkdown .cm-scroller { overflow: auto; font-family: var(--crepe-font-code); }
+.markdown-block-editor .milkdown .cm-scroller { overflow: auto; font-family: var(--crepe-font-code); line-height: 1.65; }
 .markdown-block-editor .milkdown .tableWrapper { overflow-x: auto; max-width: 100%; }
+.markdown-block-editor :is(.cm-scroller, .tableWrapper, .md-source-text) {
+  scrollbar-width: thin;
+  scrollbar-color: #3a4a5c transparent;
+}
 .markdown-block-editor .milkdown img { max-width: 100%; height: auto; border-radius: .35rem; }
 .markdown-block-editor .milkdown .image-resize-handle,
 .markdown-block-editor .milkdown .image-edit .uploader,
@@ -202,9 +254,14 @@
 .md-command-menu [role='separator'] { height: 1px; margin: .3rem; background: #344455; }
 .md-command-menu .md-command-danger { color: #ff9494; }
 
+@container md-editor (max-width: 32rem) {
+  .markdown-block-editor .milkdown .ProseMirror { padding-inline: 1rem; }
+  .markdown-block-editor .milkdown .milkdown-block-handle { display: none; }
+  .markdown-block-editor .milkdown .ProseMirror h1 { font-size: 1.75em; }
+  .markdown-block-editor .milkdown .ProseMirror h2 { font-size: 1.45em; }
+  .markdown-block-editor .milkdown .ProseMirror h3 { font-size: 1.2em; }
+}
 @media (max-width: 480px) {
-  .markdown-block-editor .milkdown .ProseMirror { padding-inline: 1.6rem .6rem; }
-  .markdown-block-editor .milkdown .milkdown-block-handle { scale: .85; transform-origin: right center; }
   .md-editor-controls { min-height: 2rem; }
 }
 

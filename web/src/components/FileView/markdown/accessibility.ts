@@ -18,6 +18,15 @@ export function enhanceEditorControls(root: HTMLElement, readOnly: () => boolean
       button.setAttribute('tabindex', readOnly() ? '-1' : '0')
       button.dataset.mdKeyboard = 'pointerup'
     }
+    for (const button of root.querySelectorAll<HTMLElement>('.milkdown-code-block .copy-button')) {
+      button.setAttribute('aria-label', 'コードをコピー')
+      button.setAttribute('title', 'コードをコピー')
+    }
+    for (const button of root.querySelectorAll<HTMLElement>('.milkdown-code-block .language-button')) {
+      const language = button.textContent?.trim() || 'text'
+      button.setAttribute('aria-label', `言語：${language}。押すと変える`)
+      button.setAttribute('title', '言語を変える')
+    }
     for (const button of root.querySelectorAll<HTMLElement>('.milkdown-block-handle .operation-item:nth-child(2)')) {
       button.setAttribute('title', 'ドラッグして移動。キーボードではブロック操作メニューを使えます。')
     }

@@ -14,6 +14,7 @@ export function markdownEditorConfig(root: HTMLElement, onError: (message: strin
       [Crepe.Feature.Cursor]: { virtual: false },
       [Crepe.Feature.Placeholder]: { text: '書きはじめる。 / でブロックを追加', mode: 'block' },
       [Crepe.Feature.BlockEdit]: {
+        blockHandle: { getOffset: () => 6 },
         textGroup: {
           label: '基本', text: { label: 'テキスト' },
           h1: { label: '見出し 1' }, h2: { label: '見出し 2' }, h3: { label: '見出し 3' },
@@ -34,7 +35,7 @@ export function markdownEditorConfig(root: HTMLElement, onError: (message: strin
         codeLabel: 'インラインコード', linkLabel: 'リンク',
       },
       [Crepe.Feature.CodeMirror]: {
-        searchPlaceholder: '言語を検索', copyText: 'コピー', noResultText: '見つかりません',
+        searchPlaceholder: '言語を検索', copyText: '', noResultText: '見つかりません',
         previewToggleText: (only) => only ? 'コードを編集' : 'プレビューを隠す',
       },
       [Crepe.Feature.LinkTooltip]: { inputPlaceholder: 'URLまたは相対パス' },
