@@ -8,7 +8,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { type ComponentProps } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { FileView } from "@/components/FileView/FileView";
 import { putEdit, readEdit, WRITE_DEBOUNCE_MS } from "@/lib/fileEdits";
 import { previewUrl, rawUrl } from "@/lib/hostfs";
@@ -108,6 +108,8 @@ afterEach(() => {
 function show(path = `${ROOT}/計画.md`) {
   render(<Viewer host="local" root={ROOT} path={path} />);
 }
+
+beforeAll(() => import("./MarkdownBlockEditor"), 60_000);
 
 describe("ファイルの見せ方", () => {
   it("タブに名前が出て、絶対パスと基準は title に残る", async () => {

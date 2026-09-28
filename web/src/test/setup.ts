@@ -1,5 +1,24 @@
 // Vitest の共通セットアップ。toBeInTheDocument などの DOM 向けマッチャを有効にする。
 import '@testing-library/jest-dom/vitest'
+import { afterAll } from 'vitest'
+
+/**
+ * Milkdown の時計（`@milkdown/ctx` の Timer）は、待ち合わせが済んだ後も**3秒経つと必ず**
+ * `removeEventListener` を呼ぶ。ファイルの最後の3秒に編集面を作ると、それが jsdom を畳んだ
+ * 後に走り、`removeEventListener is not defined` の捕まえられない例外になる。
+ * 時計は窓へ `…Ready` の名前で聞き耳を立てるので、その最後の時刻から3秒が過ぎるまでだけ待つ。
+ */
+const milkdownTimerMs = 3_000
+let lastMilkdownTimer = 0
+const addListener = globalThis.addEventListener
+globalThis.addEventListener = function (...args: Parameters<typeof addListener>) {
+  if (/Ready$/.test(args[0])) lastMilkdownTimer = Date.now()
+  return addListener.apply(globalThis, args)
+} as typeof addListener
+afterAll(async () => {
+  const remaining = lastMilkdownTimer + milkdownTimerMs + 100 - Date.now()
+  if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining))
+}, milkdownTimerMs + 2_000)
 
 if (typeof globalThis.IntersectionObserver === 'undefined') {
   globalThis.IntersectionObserver = class implements IntersectionObserver {

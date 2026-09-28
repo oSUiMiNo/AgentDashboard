@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { type ComponentProps } from 'react'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FileView } from '@/components/FileView/FileView'
 
 /**
@@ -191,6 +191,8 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals()
 })
+
+beforeAll(() => import('./MarkdownBlockEditor'), 60_000)
 
 describe('種類 × 帯の機能（総当たり）', () => {
   it('表が、実装の見分ける種類を1つ残らず覆っている', () => {
