@@ -83,7 +83,7 @@
 .md-editor-actions button { width: 1.75rem; height: 1.75rem; }
 
 .markdown-block-editor .milkdown .ProseMirror {
-  padding: .65rem clamp(1.25rem, 4%, 2.25rem) 4rem calc(74px + .5rem);
+  padding: .65rem clamp(1.25rem, 4%, 2.25rem) 4rem calc(44px + .5rem);
   min-height: 12rem;
   max-width: 56rem;
   margin-inline: auto;
@@ -245,10 +245,22 @@
 }
 .markdown-block-editor .milkdown .milkdown-block-handle {
   font-size: .8rem;
-  background: #151c25ed;
-  border: 1px solid #2c394999;
-  border-radius: .4rem;
+  gap: 0;
 }
+.markdown-block-editor .milkdown .milkdown-block-handle .operation-item {
+  width: 20px;
+  height: 24px;
+  padding: 3px 1px;
+  border-radius: .3rem;
+}
+.markdown-block-editor .milkdown .milkdown-block-handle .operation-item svg {
+  width: 18px;
+  height: 18px;
+  fill: #5d6b7c;
+}
+.markdown-block-editor .milkdown .milkdown-block-handle .operation-item:hover { background: #ffffff0f; }
+.markdown-block-editor .milkdown .milkdown-block-handle .operation-item:hover svg { fill: #a5b4c6; }
+.markdown-block-editor .milkdown .milkdown-block-handle .operation-item.active { background: #ffffff14; }
 .markdown-block-editor .milkdown .milkdown-slash-menu {
   max-height: min(25rem, 65vh);
   overflow: hidden;

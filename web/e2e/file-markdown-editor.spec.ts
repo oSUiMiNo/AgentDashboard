@@ -167,6 +167,10 @@ test('ハンドルは本文の左余白に収まり、コードの道具は普�
   const bodyBox = (await body.boundingBox())!
   expect(handleBox.x).toBeGreaterThanOrEqual(bodyBox.x)
   expect(handleBox.x + handleBox.width).toBeLessThanOrEqual(box.x)
+  expect(handleBox.width).toBeLessThanOrEqual(44)
+  await expect(handle).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)')
+  await expect(handle).toHaveCSS('border-top-width', '0px')
+  expect(box.x - bodyBox.x).toBeLessThanOrEqual(60)
   expect(await body.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1)
 
   const code = editor.locator('.milkdown-code-block').first()

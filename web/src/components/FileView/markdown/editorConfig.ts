@@ -35,7 +35,7 @@ export function markdownEditorConfig(
       [Crepe.Feature.Cursor]: { virtual: false },
       [Crepe.Feature.Placeholder]: { text: '書きはじめる。 / でブロックを追加', mode: 'block' },
       [Crepe.Feature.BlockEdit]: {
-        blockHandle: { getOffset: () => 6 },
+        blockHandle: { getOffset: () => 4 },
         textGroup: {
           label: '基本', text: { label: 'テキスト' },
           h1: { label: '見出し 1' }, h2: { label: '見出し 2' }, h3: { label: '見出し 3' },
