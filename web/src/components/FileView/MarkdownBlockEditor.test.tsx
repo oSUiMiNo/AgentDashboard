@@ -112,7 +112,21 @@ describe('Markdownブロック編集面', () => {
     render(<Harness readOnly />)
     const editor = await screen.findByRole('textbox', { name: '文書を編集' })
     expect(editor).toHaveAttribute('contenteditable', 'false')
+    expect(screen.getByText('読み取り専用')).toBeInTheDocument()
+  })
+
+  it('編集すると右下に元に戻すが出て、押すと戻り、やり直しが押せる', async () => {
+    const user = userEvent.setup()
+    render(<Harness source="本文" />)
+    const editor = await screen.findByRole('textbox', { name: '文書を編集' })
     expect(screen.queryByRole('button', { name: '元に戻す' })).toBeNull()
+    await user.click(editor.querySelector('p')!)
+    await user.keyboard('追記')
+    const 戻す = await screen.findByRole('button', { name: '元に戻す' })
+    expect(戻す.closest('.md-editor-history')).not.toBeNull()
+    await user.click(戻す)
+    await waitFor(() => expect(screen.getByTestId('markdown-value').textContent).not.toContain('追記'))
+    expect(screen.getByRole('button', { name: 'やり直す' })).toBeEnabled()
   })
 
   it('同じ値の通知や非表示への切替で編集DOMを作り直さない', async () => {

@@ -290,15 +290,6 @@ export default function MarkdownBlockEditor(props: Props) {
         }
       }}
     >
-      <div className="md-editor-controls" data-file-find-skip="true">
-        <span className="md-editor-mode">{readOnly ? '読み取り専用' : 'ブロック編集'}</span>
-        {!readOnly && <div className="md-editor-actions">
-          <Button variant="ghost" size="icon-sm" aria-label="元に戻す" title="元に戻す（Ctrl+Z）" disabled={!ready || composing || historyDepth.undo === 0}
-            onClick={() => command((view) => { undo(view.state, view.dispatch); view.focus() })}><Undo2 size={15} /></Button>
-          <Button variant="ghost" size="icon-sm" aria-label="やり直す" title="やり直す（Ctrl+Shift+Z）" disabled={!ready || composing || historyDepth.redo === 0}
-            onClick={() => command((view) => { redo(view.state, view.dispatch); view.focus() })}><Redo2 size={15} /></Button>
-        </div>}
-      </div>
       {error && <div className="md-editor-notice" role="alert" data-file-find-skip="true">{error}</div>}
       {!ready && !error && <div className="md-editor-loading" role="status">編集面を準備しています…</div>}
       <div ref={mountRef} className="md-editor-mount" />
@@ -306,6 +297,13 @@ export default function MarkdownBlockEditor(props: Props) {
         <span>{protectedCount}箇所の特殊な記法は、原文のまま保持しています。</span>
         {props.onSourceRequested && <button type="button" disabled={composing} onClick={() => { if (flush()) latest.current.onSourceRequested?.() }}>ソースで編集</button>}
       </div>}
+      {readOnly && <div className="md-editor-history" data-file-find-skip="true"><span className="md-editor-readonly">読み取り専用</span></div>}
+      {!readOnly && historyDepth.undo + historyDepth.redo > 0 && <div className="md-editor-history" data-file-find-skip="true"><div className="md-editor-actions">
+          <Button variant="ghost" size="icon-sm" aria-label="元に戻す" title="元に戻す（Ctrl+Z）" disabled={!ready || composing || historyDepth.undo === 0}
+            onClick={() => command((view) => { undo(view.state, view.dispatch); view.focus() })}><Undo2 size={15} /></Button>
+          <Button variant="ghost" size="icon-sm" aria-label="やり直す" title="やり直す（Ctrl+Shift+Z）" disabled={!ready || composing || historyDepth.redo === 0}
+            onClick={() => command((view) => { redo(view.state, view.dispatch); view.focus() })}><Redo2 size={15} /></Button>
+        </div></div>}
     </div>
   )
 }
