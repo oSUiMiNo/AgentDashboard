@@ -88,6 +88,7 @@
 
 import type { CSSProperties } from 'react'
 import {
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -193,7 +194,7 @@ export function FileTabs({
     ごと動いて**押した的が逃げる**。`scrollLeft` への代入なら帯の中だけで閉じる
     （`lib/snapToFile.ts` が同じ理由で `scrollTo` を避けている）。
   */
-  useEffect(() => {
+  const 見えるところへ送る = useCallback(() => {
     const 帯 = stripRef.current
     /*
       **運んでいる間は動かさない。** 帯が横に流れると全タブの位置が変わり、
@@ -216,7 +217,7 @@ export function FileTabs({
       return
     }
     const 帯の矩形 = 帯.getBoundingClientRect()
-    const タブの矩形 = タブ.getBoundingClientRect()
+    const タブの矩形 = (タブ.parentElement ?? タブ).getBoundingClientRect()
     帯.scrollLeft = stripScrollFor(
       { 幅: 帯.clientWidth, いまの位置: 帯.scrollLeft },
       {
@@ -224,7 +225,20 @@ export function FileTabs({
         幅: タブの矩形.width,
       },
     )
-  }, [current, tabs, 運び中])
+  }, [current, 運び中])
+
+  useEffect(() => {
+    見えるところへ送る()
+  }, [見えるところへ送る, tabs])
+
+  useEffect(() => {
+    const 帯 = stripRef.current
+    if (帯 === null || typeof ResizeObserver === 'undefined') return
+    const 見張り = new ResizeObserver(() => 見えるところへ送る())
+    見張り.observe(帯)
+    for (const 子 of 帯.children) 見張り.observe(子)
+    return () => 見張り.disconnect()
+  }, [見えるところへ送る, tabs])
 
   /**
    * ← → Home End で移る。**選択と焦点を一緒に動かす。**
