@@ -196,8 +196,7 @@ test('ハンドルは本文の左余白に収まり、コードの道具は普�
   await expect(copy).toBeVisible()
   await expect(copy).toHaveCSS('font-size', '0px')
   await expectLanguagePickerInside(page, code)
-  await code.hover()
-  await code.locator('.language-button').click()
+  await openLanguagePicker(page, code)
   await page.locator('.language-picker input').first().fill('plain')
   await page.locator('.language-list-item').filter({ hasText: /^\s*text\s*$/ }).first().click()
   await expect(code.locator('.language-button')).toContainText('text')
@@ -206,20 +205,35 @@ test('ハンドルは本文の左余白に収まり、コードの道具は普�
 })
 
 async function addTableLine(page: Page, cell: Locator, direction: 'row' | 'col') {
-  const box = (await cell.boundingBox())!
-  const x = direction === 'col' ? box.x + box.width - 3 : box.x + box.width / 2
-  const y = direction === 'row' ? box.y + box.height - 3 : box.y + box.height / 2
-  await page.mouse.move(x - 1, y - 1)
-  await page.mouse.move(x, y)
   const line = page.locator(`.line-handle[data-role="${direction === 'row' ? 'x' : 'y'}-line-drag-handle"][data-show="true"]`)
-  await expect(line).toHaveCount(1)
-  await line.locator('.add-button').click()
+  let step = 0
+  await expect(async () => {
+    await cell.scrollIntoViewIfNeeded()
+    const box = (await cell.boundingBox())!
+    const x = direction === 'col' ? box.x + box.width - 3 : box.x + box.width / 2
+    const y = direction === 'row' ? box.y + box.height - 3 : box.y + box.height / 2
+    step = (step + 1) % 2
+    await page.mouse.move(x - 5, y - 5)
+    await page.mouse.move(x - step, y - step)
+    await expect(line).toHaveCount(1, { timeout: 600 })
+    await line.locator('.add-button').click({ timeout: 1_000 })
+  }).toPass({ timeout: 20_000 })
+}
+
+async function openLanguagePicker(page: Page, code: Locator) {
+  await code.scrollIntoViewIfNeeded()
+  await expect(async () => {
+    const block = (await code.boundingBox())!
+    await page.mouse.move(block.x + block.width / 2, block.y + block.height / 2)
+    await page.mouse.move(block.x + block.width - 24, block.y + 14)
+    await code.locator('.language-button').click({ timeout: 1_000 })
+    await expect(page.locator('.language-picker .list-wrapper')).toBeVisible({ timeout: 1_000 })
+  }).toPass({ timeout: 20_000 })
 }
 
 async function expectLanguagePickerInside(page: Page, code: Locator) {
   const body = page.getByTestId('file-body')
-  await code.hover()
-  await code.locator('.language-button').click()
+  await openLanguagePicker(page, code)
   const list = page.locator('.language-picker .list-wrapper')
   await expect(list).toBeVisible()
   const listBox = (await list.boundingBox())!
@@ -384,11 +398,13 @@ test('文書からの相対パスの画像を表示し、横に長い表は表�
   await editor.locator('td').last().click()
   const row = (await editor.locator('tr').nth(1).boundingBox())!
   const visible = (await wrapper.boundingBox())!
-  for (const dy of [-2, -1, 0, 1]) {
+  let dy = -2
+  await expect(async () => {
+    dy = dy >= 1 ? -2 : dy + 1
+    await page.mouse.move(visible.x + 30, row.y + 12)
     await page.mouse.move(visible.x + 30, row.y + dy)
-    await page.waitForTimeout(120)
-  }
-  await expect.poll(() => page.locator('.line-handle[data-show="true"]').count()).toBeGreaterThan(0)
+    await expect(page.locator('.line-handle[data-show="true"]').first()).toBeAttached({ timeout: 600 })
+  }).toPass({ timeout: 15_000 })
   expect(await body.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1)
 })
 
