@@ -48,6 +48,7 @@ type Props = {
   onSourceRequested?: () => void
   onDocumentChange?: () => void
   resolveImage?: (src: string) => Promise<string> | string
+  onOpenLink?: (href: string) => boolean
 }
 
 type Controller = {
@@ -263,6 +264,17 @@ export default function MarkdownBlockEditor(props: Props) {
       }}
       onKeyUp={() => { const view = controller.current?.view; if (view) refreshControls(view) }}
       onPointerUp={() => { const view = controller.current?.view; if (view) refreshControls(view) }}
+      onClickCapture={(event) => {
+        const link = (event.target as Element).closest('a[href]')
+        const href = link?.getAttribute('href')
+        if (!link || !href) return
+        const inPreview = link.closest('.milkdown-link-preview') !== null
+        if (!inPreview && !(event.ctrlKey || event.metaKey)) return
+        event.preventDefault()
+        event.stopPropagation()
+        if (latest.current.onOpenLink?.(href)) return
+        if (/^(https?:|mailto:)/i.test(href)) window.open(href, '_blank', 'noopener,noreferrer')
+      }}
       onPasteCapture={(event) => {
         if (event.clipboardData.files.length > 0) {
           event.preventDefault()

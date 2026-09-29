@@ -456,6 +456,7 @@ export function useFilesParts({
           path={現在.path}
           tabs={見えている.map((tab) => tab.path)}
           onSelectTab={タブを選ぶ}
+          onOpenFile={ファイルを選ぶ}
           onCloseTab={タブを閉じる}
           onReorderTab={タブを並べ替える}
           onReorderTabCommit={並べ替えを確定する}

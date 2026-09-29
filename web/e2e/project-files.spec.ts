@@ -825,7 +825,7 @@ test("画像が実際に描かれる", async ({ page }) => {
   await expect
     .poll(async () => image.evaluate((el: HTMLImageElement) => el.naturalWidth))
     .toBeGreaterThan(0);
-  await expect(page.getByTestId("file-meta")).toContainText("image/png");
+  await expect(page.getByTestId("file-meta")).toContainText(/^PNG ・ \d+ × \d+ px ・ \d/);
 });
 
 test("理解doc と同じ作りの HTML が、箱の中で読める", async ({ page }) => {

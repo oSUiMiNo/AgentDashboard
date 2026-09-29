@@ -62,6 +62,7 @@ interface Props {
   /** 開いているタブの絶対パス（左から右の順）。**素通しするだけ** */
   tabs: string[]
   onSelectTab: (path: string) => void
+  onOpenFile?: (path: string) => void
   onCloseTab: (path: string) => void
   onReorderTab: (path: string, to: number) => void
   onReorderTabCommit: () => void
@@ -89,6 +90,7 @@ export function FileColumn({
   path,
   tabs,
   onSelectTab,
+  onOpenFile,
   onCloseTab,
   onReorderTab,
   onReorderTabCommit,
@@ -139,6 +141,7 @@ export function FileColumn({
           path={path}
           tabs={tabs}
           onSelectTab={onSelectTab}
+          onOpenFile={onOpenFile}
           onCloseTab={onCloseTab}
           onReorderTab={onReorderTab}
           onReorderTabCommit={onReorderTabCommit}

@@ -36,10 +36,10 @@
  * SVG にも同じ理由が当てはまるので、そちらにも出す（設計§7-4）。
  */
 
-import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import type { MarkdownEditorHandle } from './MarkdownBlockEditor'
 import type { FileSearchAdapter } from '@/lib/fileSearch'
-import ReactMarkdown from 'react-markdown'
+import ReactMarkdown, { type Components } from 'react-markdown'
 import { FileEditor, type 打つ層の印 as 打つ層の印型 } from './FileEditor'
 import { FileFind } from '@/components/FileView/FileFind'
 import { FileTabs } from '@/components/FileView/FileTabs'
@@ -56,11 +56,13 @@ import {
 } from '@/components/ui/glyphs'
 import { fileKind, needsSandbox } from '@/lib/fileKind'
 import { markdownAssetPath } from '@/lib/markdownAsset'
+import { formatBytes } from '@/lib/format'
 import { useFileZoom, ZOOM_STEPS } from '@/lib/fileZoom'
 import { isFindOpen } from '@/lib/keys'
 import { REHYPE_PLUGINS, REMARK_PLUGINS } from '@/lib/markdown'
 import {
   HostFsError,
+  isUnder,
   previewUrl,
   rawUrl,
   readBlob,
@@ -135,6 +137,7 @@ interface Props {
   tabs: string[]
   /** タブを押した。**並びは動かさず、選び直すだけ** */
   onSelectTab: (path: string) => void
+  onOpenFile?: (path: string) => void
   /** タブの ✕。**1枚だけ閉じる**（下の `onClose` は列ごと） */
   onCloseTab: (path: string) => void
   /** タブを並べ替えた（掴んで運ぶ／Ctrl+Shift+← →）。**動かすものはパスで渡す** */
@@ -201,8 +204,37 @@ export function FileView({
   onReorderTabCommit,
   onClose,
   onUnreadable,
+  onOpenFile,
 }: Props) {
   const kind = fileKind(path)
+  const リンクを開く = useCallback(
+    (href: string): boolean => {
+      const 先 = markdownAssetPath(path, href)
+      if (先 === null || onOpenFile === undefined || !isUnder(root, 先)) return false
+      onOpenFile(先)
+      return true
+    },
+    [path, root, onOpenFile],
+  )
+  const 記事の部品 = useMemo<Components>(
+    () => ({
+      a: ({ node: _node, href, children, ...rest }) => (
+        <a
+          {...rest}
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(event) => {
+            if (href === undefined) return
+            if (リンクを開く(href) || !/^(https?:|mailto:)/i.test(href)) event.preventDefault()
+          }}
+        >
+          {children}
+        </a>
+      ),
+    }),
+    [リンクを開く],
+  )
   /**
    * 拡張子ごとに、開いたときどちらで始めるか（要件③）。**載っていない拡張子は
    * 種別から導く**ので、空でも既定の見せ方はそのまま出る。
@@ -228,6 +260,7 @@ export function FileView({
   /** 拡張子は画像なのに、中身が画像として読めなかった（設計§7-2） */
   const [broken, setBroken] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [テキストでない, setテキストでない] = useState(false)
   const [loading, setLoading] = useState(true)
   /**
    * いま**ビュアーで見ている**のか、**エディタで編集している**のか（設計§5-1）。
@@ -332,6 +365,7 @@ export function FileView({
   const [原寸, set原寸] = useState(false)
   /** 読み込んだ画像の原寸の幅（px）。**無いうちは器に収まる**（CSS のフォールバック） */
   const [画像の幅, set画像の幅] = useState<number | null>(null)
+  const [画像の高さ, set画像の高さ] = useState<number | null>(null)
   /**
    * 探す合図の回数。**窓が既に開いているときに、もう一度押された**ことを
    * 窓へ伝えるために要る（入力を選び直して打ち直せる状態にする）。
@@ -388,6 +422,7 @@ export function FileView({
     let made: string | null = null
     setLoading(true)
     setError(null)
+    setテキストでない(false)
     setMode(既定のモード(kind, path, 見せ方の控え.current))
     set書きかけ(null)
     set保存中(false)
@@ -402,6 +437,7 @@ export function FileView({
     set切り替えるか(false)
     set原寸(false)
     set画像の幅(null)
+    set画像の高さ(null)
     setBroken(false)
     setContent(null)
     setPicture(null)
@@ -469,7 +505,8 @@ export function FileView({
         }
       } catch (err) {
         if (読込中か()) {
-          setError(err instanceof Error ? err.message : '読めませんでした')
+          if (err instanceof HostFsError && err.status === 415) setテキストでない(true)
+          else setError(err instanceof Error ? err.message : '読めませんでした')
           // **`if (読込中か())` の中で呼ぶ。** 外で呼ぶと、既に外れた古い `FileView` が
           // 親へ「読めなかった」を報告し、いま開いている列を巻き添えに畳む
           知らせ先.current?.(err instanceof HostFsError ? err.status : null)
@@ -954,6 +991,7 @@ export function FileView({
           */}
           <div
             data-testid="file-zoom"
+            hidden={テキストでない}
             className="border-border flex shrink-0 items-center rounded-md border"
           >
             <Button
@@ -1080,6 +1118,15 @@ export function FileView({
         <p data-testid="file-error" className="text-xs text-red-400">
           {error}
         </p>
+      )}
+
+      {テキストでない && (
+        <div data-testid="file-unsupported" className="text-muted-foreground flex flex-col items-center gap-2 py-10 text-center text-xs">
+          <p>テキストではないので、ここでは中身を表示できません。</p>
+          <a className="text-primary underline underline-offset-2" href={rawUrl(host, path)} target="_blank" rel="noopener">
+            ブラウザで開く
+          </a>
+        </div>
       )}
 
       {/* **黙って見せ方を変えない。** 箱の中は外から触れないので、探すには生テキストへ
@@ -1259,7 +1306,10 @@ export function FileView({
             }
             src={picture.url}
             alt={relative}
-            onLoad={(event) => set画像の幅(event.currentTarget.naturalWidth)}
+            onLoad={(event) => {
+              set画像の幅(event.currentTarget.naturalWidth)
+              set画像の高さ(event.currentTarget.naturalHeight)
+            }}
             onError={() => setBroken(true)}
           />
           {/* 画像には生テキストが無いので、代わりに素性を出す（設計§7-4）。
@@ -1269,7 +1319,11 @@ export function FileView({
             className="file-meta text-muted-foreground mt-1 flex flex-wrap items-center gap-2 text-[11px]"
           >
             <span>
-              {picture.mediaType} ／ {picture.bytes} バイト
+              {[
+                picture.mediaType.replace(/^image\//, '').replace('svg+xml', 'svg').toUpperCase(),
+                画像の幅 !== null && 画像の高さ !== null ? `${画像の幅} × ${画像の高さ} px` : null,
+                formatBytes(picture.bytes),
+              ].filter(Boolean).join(' ・ ')}
             </span>
             <Button
               type="button"
@@ -1411,6 +1465,7 @@ export function FileView({
                     searchApiRef={markdownSearchApiRef}
                     onDocumentChange={() => setMarkdownRevision((revision) => revision + 1)}
                     resolveImage={markdownImage}
+                    onOpenLink={リンクを開く}
                     onSourceRequested={() => setMode('editor')}
                     onCompositionChange={(busy) => {
                       setMarkdownComposing(busy)
@@ -1461,7 +1516,7 @@ export function FileView({
                   反映されない` 設計§5）。同じ配列を使うので、同じ字を貼れば同じ見え方に
                   なる。`skipHtml` は rehype が走った**あと**に効くので、`<br/>` は先に
                   `br` 要素へ変わって残り、残りの生 HTML はいままでどおり落ちる */}
-              <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS} skipHtml>
+              <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS} components={記事の部品} skipHtml>
                 {content.text}
               </ReactMarkdown>
             </div>

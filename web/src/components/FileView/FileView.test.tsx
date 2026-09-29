@@ -513,7 +513,7 @@ describe("画像と HTML", () => {
     // **綴りを追随させること**——`file-toggle-raw` は既に存在しないので、
     // 古い綴りのまま残すと**何も見ていないのに緑になる**
     expect(screen.queryByTestId("file-toggle-mode")).toBeNull();
-    expect(screen.getByTestId("file-meta")).toHaveTextContent("image/png");
+    expect(screen.getByTestId("file-meta")).toHaveTextContent(/^PNG ・ \d+ B/);
   });
 
   it("断られたら、本文をそのまま断り欄へ出す", async () => {
@@ -740,6 +740,52 @@ function CtrlF(): boolean {
  * 画像は文字を持たず、HTML ／ SVG の箱は外から中身に触れない——**触れないのは隔離が
  * 効いている証拠**であって、直すべき不具合ではない。
  */
+describe("テキストでないファイル", () => {
+  it("赤い誤りではなく、表示できない理由とブラウザで開く道を出す", async () => {
+    serve({ error: "/home/me/dev/app/data.bin はテキストではありません" }, 415);
+    show(`${ROOT}/data.bin`);
+    const 案内 = await screen.findByTestId("file-unsupported");
+    expect(案内).toHaveTextContent("テキストではないので、ここでは中身を表示できません。");
+    expect(screen.queryByTestId("file-error")).toBeNull();
+    expect(screen.getByTestId("file-zoom")).not.toBeVisible();
+    expect(案内.querySelector("a")).toHaveAttribute("href", rawUrl("local", `${ROOT}/data.bin`));
+  });
+});
+
+describe("文書の中のリンク", () => {
+  function 読むだけで開く(text: string) {
+    serve({ ...content(text), writable: false });
+    const onOpenFile = vi.fn();
+    render(<Viewer host="local" root={ROOT} path={`${ROOT}/docs/計画.md`} onOpenFile={onOpenFile} />);
+    return onOpenFile;
+  }
+
+  it("読むだけの文書で、PJT の中の相対リンクはファイルのタブで開く", async () => {
+    const onOpenFile = 読むだけで開く("[設計](設計/概要.md#目的) と [上](../README.md)");
+    const 設計 = await screen.findByRole("link", { name: "設計" });
+    expect(fireEvent.click(設計)).toBe(false);
+    expect(onOpenFile).toHaveBeenLastCalledWith(`${ROOT}/docs/設計/概要.md`);
+    fireEvent.click(screen.getByRole("link", { name: "上" }));
+    expect(onOpenFile).toHaveBeenLastCalledWith(`${ROOT}/README.md`);
+  });
+
+  it("PJT の外を指す相対リンクは、画面を離れずに何もしない", async () => {
+    const onOpenFile = 読むだけで開く("[外](../../外.md)");
+    const 外 = await screen.findByRole("link", { name: "外" });
+    expect(fireEvent.click(外)).toBe(false);
+    expect(onOpenFile).not.toHaveBeenCalled();
+  });
+
+  it("外部の URL は新しいタブで開き、ダッシュボードを離れない", async () => {
+    const onOpenFile = 読むだけで開く("[外部](https://example.com/a)");
+    const 外部 = await screen.findByRole("link", { name: "外部" });
+    expect(外部).toHaveAttribute("target", "_blank");
+    expect(外部).toHaveAttribute("rel", "noopener noreferrer");
+    expect(fireEvent.click(外部)).toBe(true);
+    expect(onOpenFile).not.toHaveBeenCalled();
+  });
+});
+
 describe("中を探す", () => {
   it("整形した Markdown では入口が出る", async () => {
     serve(content("# 計画"));
