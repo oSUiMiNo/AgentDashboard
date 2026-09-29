@@ -130,3 +130,54 @@ test('サイドバーのパンくずは、PJT より上を1つにまとめる', 
   await expect(sidebar.getByTestId('folder-crumb').first()).toHaveAttribute('title', `起点より上：${path.dirname(projectDir)}`)
   expect((await crumbs.boundingBox())!.height).toBeLessThanOrEqual(40)
 })
+
+test('ファイルの上部は1段で、器を持つのは選んだタブだけ', async ({ page }) => {
+  const sidebar = await openProject(page)
+  for (let i = 0; i < 9; i++) await sidebar.getByTestId('folder-entry').filter({ hasText: `長いタブの名前_${i}.txt` }).click()
+  await sidebar.getByTestId('folder-entry').filter({ hasText: 'README.md' }).click()
+  await closeSidebar(page)
+  const strip = page.getByTestId('file-tabs')
+  await expect(strip).toHaveAttribute('data-overflow', /start|both/)
+  expect((await page.getByTestId('file-view').locator('header').boundingBox())!.height).toBeLessThanOrEqual(28)
+  expect(await strip.evaluate((element) => {
+    const style = getComputedStyle(element)
+    return element.getBoundingClientRect().height + parseFloat(style.marginTop) + parseFloat(style.marginBottom)
+  })).toBe(28)
+  expect(await strip.evaluate((element) => element.scrollHeight <= element.clientHeight)).toBe(true)
+  const faces = await page.locator('[data-tab-slot]').evaluateAll((slots) => slots.map((slot) => [slot.hasAttribute('data-selected'), getComputedStyle(slot).backgroundColor]))
+  for (const [selected, color] of faces) {
+    if (selected) expect(color).not.toBe('rgba(0, 0, 0, 0)')
+    else expect(color).toBe('rgba(0, 0, 0, 0)')
+  }
+  expect(faces.filter(([selected]) => selected)).toHaveLength(1)
+  const selectedFace = faces.find(([selected]) => selected)![1] as string
+  const [r, g, b] = selectedFace.replace(/^color\(srgb /, '').match(/[\d.]+/g)!.map(Number)
+  const scale = selectedFace.startsWith('color(') ? 1 : 255
+  expect(g! / scale).toBeGreaterThan(r! / scale + 0.04)
+  expect(b! / scale).toBeGreaterThan(r! / scale + 0.04)
+  const save = page.getByTestId('file-save')
+  await expect(save).toHaveAccessibleName('保存する')
+  expect((await save.innerText()).trim()).toBe('')
+  const editor = page.getByTestId('file-markdown-editor')
+  await expect(editor).toHaveAttribute('contenteditable', 'true')
+  await expect(page.locator('.md-editor-history')).toHaveCount(0)
+  const header = (await page.getByTestId('file-view').locator('header').boundingBox())!
+  const body = (await page.getByTestId('file-body').boundingBox())!
+  expect(body.y - (header.y + header.height)).toBeLessThanOrEqual(10)
+  await editor.locator('h1').click()
+  await page.keyboard.press('End')
+  await page.keyboard.insertText('追記')
+  await expect(save).toHaveAttribute('data-unsaved', 'true')
+  const undo = page.locator('.md-editor-history').getByRole('button', { name: '元に戻す' })
+  await expect(undo).toBeVisible()
+  const undoBox = (await undo.boundingBox())!
+  expect(undoBox.y + undoBox.height).toBeLessThanOrEqual(body.y + body.height)
+  expect(body.y + body.height - (undoBox.y + undoBox.height)).toBeLessThanOrEqual(16)
+  expect(undoBox.x + undoBox.width).toBeLessThanOrEqual(body.x + body.width)
+  await undo.click()
+  await expect(editor.locator('h1')).toHaveText('読む')
+  const before = await strip.evaluate((element) => element.scrollLeft)
+  await strip.hover()
+  await page.mouse.wheel(0, -300)
+  await expect.poll(() => strip.evaluate((element) => element.scrollLeft)).toBeLessThan(before)
+})
