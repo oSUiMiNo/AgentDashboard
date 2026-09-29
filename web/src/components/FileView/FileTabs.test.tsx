@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -574,6 +574,46 @@ describe('帯の手触り', () => {
     expect(器).toHaveAttribute('data-landing', 'true')
     expect(器.className).toContain('data-[landing=true]:bg-secondary')
     await waitFor(() => expect(器).not.toHaveAttribute('data-landing'))
+  })
+
+  it('親が同じ並びで描き直しても、手で送った帯を選んだタブへ引き戻さない', () => {
+    const props = { current: 三枚[0]!, root: ROOT, onSelect: vi.fn(), onClose: vi.fn(), onReorder: vi.fn(), onReorderCommit: vi.fn() }
+    const { rerender } = render(<FileTabs {...props} tabs={[...三枚]} />)
+    const 帯 = screen.getByTestId('file-tabs')
+    寸法を持たせる(帯, 600, 200, 0)
+    Object.defineProperty(帯, 'getBoundingClientRect', { configurable: true, value: () => ({ left: 0, right: 200, width: 200, top: 0, bottom: 28, height: 28, x: 0, y: 0, toJSON: () => ({}) }) })
+    const 器 = screen.getAllByTestId('file-tab')[0]!.parentElement!
+    Object.defineProperty(器, 'getBoundingClientRect', { configurable: true, value: () => ({ left: -帯.scrollLeft, right: 100 - 帯.scrollLeft, width: 100, top: 0, bottom: 28, height: 28, x: 0, y: 0, toJSON: () => ({}) }) })
+    帯.scrollLeft = 300
+    rerender(<FileTabs {...props} tabs={[...三枚]} />)
+    expect(帯.scrollLeft).toBe(300)
+  })
+
+  it('押して焦点が入ったタブでは、Delete／Backspace で閉じない', () => {
+    const { onClose } = 置く(三枚, 三枚[1])
+    const タブ = screen.getAllByTestId('file-tab')[1]!
+    fireEvent.pointerDown(タブ, { pointerType: 'mouse', button: 0, clientX: 10 })
+    タブ.focus()
+    fireEvent.keyDown(タブ, { key: 'Backspace' })
+    fireEvent.keyDown(タブ, { key: 'Delete' })
+    expect(onClose).not.toHaveBeenCalled()
+    fireEvent.blur(タブ)
+    タブ.focus()
+    fireEvent.keyDown(タブ, { key: 'Delete' })
+    expect(onClose).toHaveBeenCalledWith(三枚[1])
+  })
+
+  it('選んでいるタブを運んで離しても、滑り終わるまで前に出す', async () => {
+    置く(三枚, `${ROOT}/c.md`)
+    const タブ = screen.getAllByTestId('file-tab')[2]!
+    const 器 = タブ.parentElement!
+    const 帯 = screen.getByTestId('file-tabs')
+    fireEvent.pointerDown(タブ, { pointerType: 'mouse', button: 0, clientX: 300 })
+    fireEvent.pointerMove(帯, { pointerType: 'mouse', buttons: 1, clientX: 100 })
+    fireEvent.pointerUp(帯, { pointerType: 'mouse', clientX: 100 })
+    expect(器).toHaveAttribute('data-landing', 'true')
+    expect(器.className).toContain('data-[landing=true]:z-10')
+    await act(async () => { await new Promise((done) => setTimeout(done, 250)) })
   })
 
   it('あふれているときだけ、縦のホイールで横へ送る', () => {

@@ -97,6 +97,7 @@
       色が「選択」ではなく「状態」を表してしまう。**カードごとに変わる値を、種別や
       状態と無関係な用途へ流用しない**、という一般の話である。
     */
+    --accent-solid: #3dd9e6;
     --accent-face: color-mix(in oklch, #3dd9e6 18%, transparent);
     --accent-edge: color-mix(in oklch, #3dd9e6 40%, transparent);
 
@@ -423,13 +424,13 @@
 }
 .file-tab-selected,
 .file-save[data-unsaved]:not(:disabled) {
-  background-color: color-mix(in srgb, #3dd9e6 20%, var(--background));
+  background-color: color-mix(in srgb, var(--accent-solid) 20%, var(--background));
 }
 .file-save[data-unsaved]:not(:disabled) {
   color: var(--foreground);
 }
 .file-save[data-unsaved]:not(:disabled):hover {
-  background-color: color-mix(in srgb, #3dd9e6 30%, var(--background));
+  background-color: color-mix(in srgb, var(--accent-solid) 30%, var(--background));
 }
 @supports not selector(::-webkit-scrollbar) {
   .file-scroll {

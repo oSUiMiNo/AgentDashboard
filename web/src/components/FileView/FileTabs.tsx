@@ -173,6 +173,10 @@ export function FileTabs({
     着地?: string
   } | null>(null)
   const 運び中 = 運び?.path ?? null
+  const 運び中の控え = useRef<string | null>(null)
+  運び中の控え.current = 運び中
+  const ポインタで入った = useRef(false)
+  const 並びの鍵 = tabs.join('\n')
   /** 滑り終わるのを待っている印。**外れたら止める**（`setTimeout` を残さない） */
   const 落ち着き待ち = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(
@@ -209,7 +213,7 @@ export function FileTabs({
     const 帯 = stripRef.current
     if (帯 === null) return
     const 回した = (event: WheelEvent) => {
-      if (運び中 !== null || event.shiftKey || event.ctrlKey) return
+      if (運び中の控え.current !== null || event.shiftKey || event.ctrlKey) return
       if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return
       if (帯.scrollWidth <= 帯.clientWidth) return
       const 量 = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 帯.clientWidth : 1)
@@ -220,7 +224,7 @@ export function FileTabs({
     }
     帯.addEventListener('wheel', 回した, { passive: false })
     return () => 帯.removeEventListener('wheel', 回した)
-  }, [運び中])
+  }, [])
 
   const 見えるところへ送る = useCallback(() => {
     const 帯 = stripRef.current
@@ -260,7 +264,7 @@ export function FileTabs({
 
   useEffect(() => {
     見えるところへ送る()
-  }, [見えるところへ送る, tabs])
+  }, [見えるところへ送る, 並びの鍵])
 
   useEffect(() => {
     const 帯 = stripRef.current
@@ -269,7 +273,7 @@ export function FileTabs({
     見張り.observe(帯)
     for (const 子 of 帯.children) 見張り.observe(子)
     return () => 見張り.disconnect()
-  }, [見えるところへ送る, tabs])
+  }, [見えるところへ送る, 並びの鍵])
 
   /**
    * ← → Home End で移る。**選択と焦点を一緒に動かす。**
@@ -318,6 +322,7 @@ export function FileTabs({
       return
     }
     if (event.key === 'Delete' || event.key === 'Backspace') {
+      if (ポインタで入った.current) return
       const 閉じるもの = (event.target as HTMLElement | null)?.closest<HTMLElement>('[data-path]')?.dataset.path
       if (閉じるもの === undefined) return
       event.preventDefault()
@@ -630,10 +635,10 @@ export function FileTabs({
                 : ({ '--reorder-dx': `${運び.dx[path] ?? 0}px` } as CSSProperties)
             }
             data-selected={selected || undefined}
-            className={`flex h-7 shrink-0 items-center rounded-md transition-colors data-[dragging=true]:ring-2 data-[dragging=true]:ring-ring/60 ${
+            className={`flex h-7 shrink-0 items-center rounded-md transition-colors data-[dragging=true]:ring-2 data-[dragging=true]:ring-ring/60 data-[landing=true]:relative data-[landing=true]:z-10 ${
               selected
                 ? 'file-tab-selected text-foreground'
-                : 'text-muted-foreground hover:bg-secondary hover:text-foreground data-[dragging=true]:bg-secondary data-[landing=true]:relative data-[landing=true]:z-10 data-[landing=true]:bg-secondary'
+                : 'text-muted-foreground hover:bg-secondary hover:text-foreground data-[dragging=true]:bg-secondary data-[landing=true]:bg-secondary'
             }`}
           >
             <button
@@ -648,7 +653,13 @@ export function FileTabs({
               /* **ポインタ以外の道を、押す本人が見つけられるようにする**（WCAG 2.5.7）。
                  並べ替えは掴んで運べるが、それだけだとキーボードの人に道が無い */
               title={`${path}（${root} からの相対パス）\n並べ替え：Ctrl+Shift+← →　閉じる：Delete`}
-              onPointerDown={(event) => 押した(event, path)}
+              onPointerDown={(event) => {
+                ポインタで入った.current = true
+                押した(event, path)
+              }}
+              onBlur={() => {
+                ポインタで入った.current = false
+              }}
               onClick={() => {
                 // **運んだあとの押下は、選び直しではない**
                 if (運んだ.current) {
@@ -657,7 +668,7 @@ export function FileTabs({
                 }
                 onSelect(path)
               }}
-              className="h-full max-w-[12rem] cursor-pointer truncate rounded-l-md pr-1 pl-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-[#3dd9e6]"
+              className="h-full max-w-[12rem] cursor-pointer truncate rounded-l-md pr-1 pl-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--accent-solid)]"
             >
               {label}
             </button>
@@ -676,7 +687,7 @@ export function FileTabs({
                 event.stopPropagation()
                 onClose(path)
               }}
-              className="mr-0.5 grid size-6 shrink-0 cursor-pointer place-items-center rounded outline-none hover:bg-black/20 focus-visible:ring-2 focus-visible:ring-[#3dd9e6]"
+              className="mr-0.5 grid size-6 shrink-0 cursor-pointer place-items-center rounded outline-none hover:bg-black/20 focus-visible:ring-2 focus-visible:ring-[color:var(--accent-solid)]"
             >
               <CloseGlyph className="size-3" />
             </button>
