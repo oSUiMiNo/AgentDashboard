@@ -22,6 +22,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
+import type { 打つ層の印 } from './FileEditor'
 import { Button } from '@/components/ui/button'
 import { ChevronGlyph, CloseGlyph } from '@/components/ui/glyphs'
 import {
@@ -89,6 +90,7 @@ interface Props {
    */
   合図: number
   onClose: () => void
+  on打つ層の印?: (印: 打つ層の印 | null) => void
 }
 
 export function FileFind({
@@ -101,6 +103,7 @@ export function FileFind({
   contentKey,
   合図,
   onClose,
+  on打つ層の印,
 }: Props) {
   const adapterで探す = searchApiRef !== undefined
   /** 箱の中の係へ頼む形か。**渡された時点で決まる** */
@@ -256,25 +259,13 @@ export function FileFind({
     if (!打つ層で示す) {
       return
     }
-    // **見る姿の印が残らないように消す**（モードを行き来したときの取り残し）
     clearMatches()
-    const 打つ = editorRef?.current
     const 当たり = 文字の当たり[index]
-    if (打つ == null || 当たり === undefined) {
-      return
-    }
-    打つ.focus()
-    打つ.setSelectionRange(当たり[0], 当たり[1])
-    // **行の高さは実測から割り出す。** 器から取った字の大きさに追随させるため
-    const 全行 = 待った本文.split('\n').length
-    const 行の高さ = 打つ.scrollHeight / Math.max(1, 全行)
-    const 行 = 待った本文.slice(0, 当たり[0]).split('\n').length - 1
-    打つ.scrollTop = scrollOffsetFor(
-      { top: 0, height: 打つ.clientHeight },
-      { top: 行 * 行の高さ - 打つ.scrollTop, height: 行の高さ },
-      打つ.scrollTop,
-    )
-  }, [打つ層で示す, editorRef, 文字の当たり, index, 待った本文])
+    if (当たり !== undefined) editorRef?.current?.setSelectionRange(当たり[0], 当たり[1])
+    on打つ層の印?.(探す語 === '' ? null : { 当たり: 文字の当たり, いま: index })
+  }, [打つ層で示す, editorRef, 文字の当たり, index, 探す語, on打つ層の印])
+
+  useEffect(() => () => on打つ層の印?.(null), [on打つ層の印])
 
   // 印を塗り、いま見ている当たりまで箱を送る。**箱に頼む形では係がやる**
   useEffect(() => {

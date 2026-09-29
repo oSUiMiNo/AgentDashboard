@@ -404,6 +404,21 @@
   color: var(--muted-foreground);
   white-space: pre;
 }
+.file-editor-stack > .file-editor-marks {
+  z-index: 0;
+  margin: 0;
+  color: transparent;
+  white-space: pre;
+}
+.file-editor-marks > mark {
+  color: transparent;
+  border-radius: 2px;
+  background-color: color-mix(in oklch, var(--primary) 28%, transparent);
+}
+.file-editor-marks > mark[data-current] {
+  background-color: color-mix(in oklch, var(--primary) 55%, transparent);
+  box-shadow: 0 0 0 1px var(--primary);
+}
 /*
   **行番号。** 打つ層より上に置くが `pointer-events: none` なので押せる相手は下に届く。
   上に置くのは、**横へ送ったときに本文が番号の下へ潜る**ようにするためで、
@@ -411,7 +426,7 @@
 */
 .file-editor-stack > .file-editor-gutter {
   z-index: 2;
-  padding-right: 0.5ch;
+  padding-right: 1ch;
   text-align: right;
   background: var(--background);
   color: var(--muted-foreground);

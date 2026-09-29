@@ -77,7 +77,7 @@ describe('行番号', () => {
     // 999 → 1000 で本文が横へずれないこと（設計§6-5）
     出す({ value: Array.from({ length: 1000 }, (_, i) => String(i)).join('\n') })
     const 番号 = document.querySelector('.file-editor-gutter') as HTMLElement
-    expect(番号.style.width).toBe('5ch')
+    expect(番号.style.width).toBe('6ch')
   })
 
   it('読み上げの対象にしない', () => {

@@ -75,6 +75,12 @@ interface Props {
    * 壊れ方になる。
    */
   打つ層Ref?: RefObject<HTMLTextAreaElement | null>
+  印?: 打つ層の印 | null
+}
+
+export interface 打つ層の印 {
+  当たり: readonly (readonly [number, number])[]
+  いま: number
 }
 
 /** HAST の `style="a:b;c:d"` を React の形へ。**文字列のままでは React が受け取らない。** */
@@ -131,12 +137,14 @@ export function FileEditor({
   ラベル,
   インデント = DEFAULT_INDENT,
   打つ層Ref,
+  印 = null,
 }: Props) {
   const 内なる打つ層 = useRef<HTMLTextAreaElement>(null)
   /** **渡されたらそれを使う。** 2つ持つと、外から掴めるものと中で使うものがずれる */
   const 打つ層 = 打つ層Ref ?? 内なる打つ層
   const 色の層 = useRef<HTMLPreElement>(null)
   const 番号の層 = useRef<HTMLDivElement>(null)
+  const 印の層 = useRef<HTMLPreElement>(null)
   const [色, set色] = useState<TokenNode[][] | null>(null)
   /**
    * 次の `Tab` を焦点移動に譲るか（設計§6-6）。
@@ -150,6 +158,7 @@ export function FileEditor({
   const 行数 = useMemo(() => value.split('\n').length, [value])
   /** 桁が増えても本文が横へずれないよう、**総行数から先に幅を決める**（設計§6-5）。 */
   const 桁 = String(行数).length
+  const 字の余白 = `${桁 + 2.5}ch`
 
   /**
    * 止まってから色を付ける。
@@ -181,8 +190,8 @@ export function FileEditor({
     if (!打つ) {
       return
     }
-    if (色の層.current) {
-      色の層.current.style.transform = `translate(${-打つ.scrollLeft}px, ${-打つ.scrollTop}px)`
+    for (const 層 of [色の層.current, 印の層.current]) {
+      if (層) 層.style.transform = `translate(${-打つ.scrollLeft}px, ${-打つ.scrollTop}px)`
     }
     if (番号の層.current) {
       番号の層.current.style.transform = `translateY(${-打つ.scrollTop}px)`
@@ -193,6 +202,38 @@ export function FileEditor({
   useEffect(() => {
     送りを合わせる()
   }, [value, 送りを合わせる])
+
+  const 塗る印 = useMemo(() => {
+    if (印 === null || 印.当たり.length === 0) return null
+    const 片: React.ReactNode[] = []
+    let 先頭 = 0
+    印.当たり.forEach(([から, まで], i) => {
+      if (から > 先頭) 片.push(value.slice(先頭, から))
+      片.push(
+        <mark key={i} data-current={i === 印.いま || undefined}>
+          {value.slice(から, まで)}
+        </mark>,
+      )
+      先頭 = まで
+    })
+    片.push(value.slice(先頭))
+    return 片
+  }, [印, value])
+
+  useEffect(() => {
+    const 打つ = 打つ層.current
+    const いま = 印の層.current?.querySelector<HTMLElement>('mark[data-current]')
+    if (!打つ || !いま) return
+    const 左の余白 = 番号の層.current?.offsetWidth ?? 0
+    const 行の高さ = いま.offsetHeight
+    if (いま.offsetTop < 打つ.scrollTop || いま.offsetTop + 行の高さ > 打つ.scrollTop + 打つ.clientHeight) {
+      打つ.scrollTop = Math.max(0, いま.offsetTop - 打つ.clientHeight / 3)
+    }
+    if (いま.offsetLeft < 打つ.scrollLeft + 左の余白 || いま.offsetLeft + いま.offsetWidth > 打つ.scrollLeft + 打つ.clientWidth) {
+      打つ.scrollLeft = Math.max(0, いま.offsetLeft - 左の余白 - 打つ.clientWidth / 4)
+    }
+    送りを合わせる()
+  }, [塗る印, 打つ層, 送りを合わせる])
 
   const 鍵盤 = useCallback(
     (出来事: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -240,7 +281,7 @@ export function FileEditor({
       <div
         aria-hidden
         className="file-editor-gutter pointer-events-none absolute top-0 left-0 select-none"
-        style={{ width: `${桁 + 1}ch` }}
+        style={{ width: `${桁 + 2}ch` }}
         ref={番号の層}
       >
         {Array.from({ length: 行数 }, (_, i) => (
@@ -254,10 +295,21 @@ export function FileEditor({
           `padding` は器から継承されないので、**揃っていることを誰も見張れない**。
           実ブラウザで両層の組版を突き合わせる検査（`打つ層と見せる層の組版が…`）は、
           この食い違いを捕まえるために在る。 */}
+      {塗る印 !== null && (
+        <pre
+          aria-hidden
+          data-testid="file-editor-marks"
+          className="file-editor-marks pointer-events-none absolute top-0 left-0"
+          style={{ paddingLeft: 字の余白 }}
+          ref={印の層}
+        >
+          {塗る印}
+        </pre>
+      )}
       <pre
         aria-hidden
         className="file-editor-paint pointer-events-none absolute top-0 left-0"
-        style={{ paddingLeft: `${桁 + 1}ch` }}
+        style={{ paddingLeft: 字の余白 }}
         ref={色の層}
       >
         {色 === null
@@ -269,7 +321,7 @@ export function FileEditor({
       <textarea
         data-testid="file-editor"
         className="file-editor absolute top-0 h-full w-full resize-none overflow-auto border-0 bg-transparent outline-none"
-        style={{ paddingLeft: `${桁 + 1}ch` }}
+        style={{ paddingLeft: 字の余白 }}
         wrap="off"
         spellCheck={false}
         aria-label={ラベル}

@@ -754,6 +754,36 @@ describe("中を探す", () => {
     expect(screen.getByTestId("file-find-open")).toBeInTheDocument();
   });
 
+  it("エディタで探して Enter で送っても、焦点は探す欄に残り本文を書き換えない", async () => {
+    serve(content("total = 0\ntotal += 1\nreturn total\n"));
+    show(`${ROOT}/src/app.py`);
+    const 欄 = await screen.findByTestId("file-editor");
+    await userEvent.click(await screen.findByTestId("file-find-open"));
+    const 入力 = screen.getByTestId("file-find-input");
+    await userEvent.type(入力, "total");
+    await waitFor(() => expect(screen.getByTestId("file-find-count")).toHaveTextContent("1 / 3"));
+    await userEvent.keyboard("{Enter}{Enter}{Shift>}{Enter}{/Shift}");
+    expect(入力).toHaveFocus();
+    expect(欄).toHaveValue("total = 0\ntotal += 1\nreturn total\n");
+    expect(screen.getByTestId("file-find-count")).toHaveTextContent("2 / 3");
+    const 印 = screen.getByTestId("file-editor-marks").querySelectorAll("mark");
+    expect(印).toHaveLength(3);
+    expect([...印].map((m) => m.hasAttribute("data-current"))).toEqual([false, true, false]);
+  });
+
+  it("探す欄を閉じると印が消え、本文へ戻った焦点は当たりを選んでいる", async () => {
+    serve(content("abc total\n"));
+    show(`${ROOT}/src/app.py`);
+    const 欄 = await screen.findByTestId("file-editor");
+    await userEvent.click(await screen.findByTestId("file-find-open"));
+    await userEvent.type(screen.getByTestId("file-find-input"), "total");
+    await waitFor(() => expect(screen.getByTestId("file-editor-marks")).toBeInTheDocument());
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByTestId("file-editor-marks")).toBeNull();
+    await waitFor(() => expect(欄).toHaveFocus());
+    expect([(欄 as HTMLTextAreaElement).selectionStart, (欄 as HTMLTextAreaElement).selectionEnd]).toEqual([4, 9]);
+  });
+
   it("画像のときは出ない", async () => {
     // **押せるのに何も起きないものは、壊れているのと見分けが付かない**
     serve(content("なにか"));

@@ -40,7 +40,7 @@ import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useSta
 import type { MarkdownEditorHandle } from './MarkdownBlockEditor'
 import type { FileSearchAdapter } from '@/lib/fileSearch'
 import ReactMarkdown from 'react-markdown'
-import { FileEditor } from './FileEditor'
+import { FileEditor, type 打つ層の印 as 打つ層の印型 } from './FileEditor'
 import { FileFind } from '@/components/FileView/FileFind'
 import { FileTabs } from '@/components/FileView/FileTabs'
 import { Button } from '@/components/ui/button'
@@ -235,6 +235,7 @@ export function FileView({
    * **名前を `raw` のままにしなかった。** 意味が反転している——もとの `raw=true`
    * （生テキスト）が、置き換え後は**エディタ**である。名前を残すと読めなくなる。
    */
+  const [打つ層の印, set打つ層の印] = useState<打つ層の印型 | null>(null)
   const [mode, setMode] = useState<FileMode>(() => 既定のモード(kind, path, 拡張子ごとの見せ方))
   /**
    * 編集中の中身。**`null` は「まだ触っていない」**で、ディスクの中身をそのまま出す。
@@ -1333,7 +1334,7 @@ export function FileView({
               {...(箱の中で探せる ? { frameRef } : {})}
               /* **エディタのときは、値の中を探して選択で示す**（設計§5-4）。
                  DOM を遡ると行番号と色の層に当たるので、そちらへは行かせない */
-              {...(打つ層で探せる ? { editorRef } : {})}
+              {...(打つ層で探せる ? { editorRef, on打つ層の印: set打つ層の印 } : {})}
               onClose={() => {
                 setFind(false)
                 const current = 文書.current
@@ -1503,6 +1504,7 @@ export function FileView({
               path={path}
               ラベル={`${relative} を編集`}
               打つ層Ref={editorRef}
+              印={打つ層の印}
             />
             )}
           </div>
