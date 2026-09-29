@@ -208,6 +208,9 @@
   max-width: 15rem;
 }
 .markdown-block-editor .milkdown .cm-editor { font-size: .92em; max-width: 100%; }
+.markdown-block-editor .milkdown .milkdown-code-block .cm-gutters { color: #56657a; font-variant-numeric: tabular-nums; user-select: none; }
+.markdown-block-editor .milkdown .milkdown-code-block .cm-lineNumbers .cm-gutterElement { padding: 0 .9em 0 .35em; min-width: 1.5ch; }
+.markdown-block-editor .milkdown .milkdown-code-block .cm-editor.cm-focused .cm-activeLineGutter { color: #8a9bb0; }
 .markdown-block-editor .milkdown .cm-scroller { overflow: auto; font-family: var(--crepe-font-code); line-height: 1.65; }
 .markdown-block-editor .milkdown .milkdown-table-block .table-wrapper { overflow-x: auto; max-width: 100%; }
 .markdown-block-editor .milkdown .milkdown-table-block table.children {

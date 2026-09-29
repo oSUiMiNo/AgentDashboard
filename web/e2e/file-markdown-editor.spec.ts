@@ -395,6 +395,8 @@ test('文書からの相対パスの画像を表示し、横に長い表は表�
   const wrapper = editor.locator('.milkdown-table-block .table-wrapper').first()
   await wrapper.scrollIntoViewIfNeeded()
   expect(await wrapper.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeGreaterThan(0)
+  await expect(wrapper).toHaveAttribute('data-edge', 'end')
+  expect(await wrapper.evaluate((element) => element.offsetHeight - element.clientHeight)).toBe(0)
   await editor.locator('td').last().click()
   const row = (await editor.locator('tr').nth(1).boundingBox())!
   const visible = (await wrapper.boundingBox())!
@@ -436,4 +438,21 @@ test('段落からコードを押すとコードへ入り、矢印でコード�
   await page.keyboard.press('Control+s')
   await expect.poll(() => fs.readFileSync(file, 'utf8')).toContain('console.log(value) // 入った\n```')
   expect(fs.readFileSync(file, 'utf8')).toContain('外の段落')
+})
+
+test('1行の長いコードは横スクロールバーを出さず、見切れた側をぼかし、行番号は控えめに出す', async ({ page }) => {
+  fs.writeFileSync(file, `# 長い行\n\n\`\`\`text\n${'x'.repeat(400)} 末尾\n2行目\n\`\`\`\n`, 'utf8')
+  const editor = await openFile(page)
+  const scroller = editor.locator('.milkdown-code-block .cm-scroller').first()
+  await expect(scroller).toHaveAttribute('data-edge', 'end')
+  expect(await scroller.evaluate((element) => element.offsetHeight - element.clientHeight)).toBe(0)
+  expect(await scroller.evaluate((element) => getComputedStyle(element).maskImage)).toContain('linear-gradient')
+  await scroller.evaluate((element) => { element.scrollLeft = element.scrollWidth })
+  await expect(scroller).toHaveAttribute('data-edge', 'start')
+  expect(Number.parseFloat(await scroller.evaluate((element) => element.style.getPropertyValue('--edge-start')))).toBeGreaterThan(0)
+  const [gutter, code] = await scroller.evaluate((element) => [
+    getComputedStyle(element.querySelector('.cm-lineNumbers .cm-gutterElement:not([style*="visibility"])')!).color,
+    getComputedStyle(element.querySelector('.cm-line')!).color,
+  ])
+  expect(gutter).not.toBe(code)
 })
