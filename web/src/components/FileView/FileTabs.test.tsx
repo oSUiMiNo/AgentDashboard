@@ -57,9 +57,9 @@ describe('タブ帯', () => {
     const タブ = screen.getAllByTestId('file-tab')
     expect(タブ[0]).toHaveAttribute('aria-selected', 'false')
     expect(タブ[1]).toHaveAttribute('aria-selected', 'true')
-    // 面で出ていること（`bg-primary` は器の側に付く）
-    expect(タブ[1]?.parentElement?.className).toContain('bg-primary')
-    expect(タブ[0]?.parentElement?.className).not.toContain('bg-primary')
+    // 面で出ていること（面は器の側に付く）
+    expect(タブ[1]?.parentElement?.className).toContain('file-tab-selected')
+    expect(タブ[0]?.parentElement?.className).not.toContain('file-tab-selected')
   })
 
   it('タブを押すと、選び直しの合図が出る', async () => {
@@ -523,5 +523,93 @@ describe('タブの並べ替え', () => {
     await waitFor(() => {
       expect(onReorder).toHaveBeenCalled()
     })
+  })
+})
+
+describe('帯の手触り', () => {
+  const 三枚 = [`${ROOT}/a.md`, `${ROOT}/b.md`, `${ROOT}/c.md`]
+
+  function 寸法を持たせる(帯: HTMLElement, 中身: number, 見える: number, いま = 0) {
+    Object.defineProperty(帯, 'scrollWidth', { configurable: true, value: 中身 })
+    Object.defineProperty(帯, 'clientWidth', { configurable: true, value: 見える })
+    帯.scrollLeft = いま
+  }
+
+  it('Tab で入れるのは選んでいる1枚だけで、✕ は Tab の順に入らない', () => {
+    置く(三枚, 三枚[1])
+    const タブ = screen.getAllByTestId('file-tab')
+    expect(タブ.map((t) => t.tabIndex)).toEqual([-1, 0, -1])
+    for (const 閉じる of screen.getAllByTestId('file-tab-close')) expect(閉じる.tabIndex).toBe(-1)
+  })
+
+  it('焦点のあるタブで Delete を押すと、そのタブを閉じる', async () => {
+    const { onClose } = 置く(三枚, 三枚[1])
+    screen.getAllByTestId('file-tab')[1]!.focus()
+    await userEvent.keyboard('{Delete}')
+    expect(onClose).toHaveBeenCalledWith(三枚[1])
+    expect(screen.getAllByTestId('file-tab')[1]!.title).toContain('閉じる：Delete')
+  })
+
+  it('Backspace でも閉じ、✕ に焦点があっても閉じる', async () => {
+    const { onClose } = 置く(三枚, 三枚[1])
+    screen.getAllByTestId('file-tab')[1]!.focus()
+    await userEvent.keyboard('{Backspace}')
+    expect(onClose).toHaveBeenLastCalledWith(三枚[1])
+    screen.getAllByTestId('file-tab-close')[2]!.focus()
+    await userEvent.keyboard('{Delete}')
+    expect(onClose).toHaveBeenLastCalledWith(三枚[2])
+    expect(screen.getAllByTestId('file-tab')[0]).toHaveAttribute('aria-keyshortcuts', 'Delete Backspace')
+  })
+
+  it('運んで離したあと、滑り終わるまで運んだタブの地を残す', async () => {
+    置く(三枚, `${ROOT}/a.md`)
+    const タブ = screen.getAllByTestId('file-tab')[2]!
+    const 器 = タブ.parentElement!
+    const 帯 = screen.getByTestId('file-tabs')
+    fireEvent.pointerDown(タブ, { pointerType: 'mouse', button: 0, clientX: 300 })
+    fireEvent.pointerMove(帯, { pointerType: 'mouse', buttons: 1, clientX: 100 })
+    expect(器).toHaveAttribute('data-dragging', 'true')
+    fireEvent.pointerUp(帯, { pointerType: 'mouse', clientX: 100 })
+    expect(器).not.toHaveAttribute('data-dragging')
+    expect(器).toHaveAttribute('data-landing', 'true')
+    expect(器.className).toContain('data-[landing=true]:bg-secondary')
+    await waitFor(() => expect(器).not.toHaveAttribute('data-landing'))
+  })
+
+  it('あふれているときだけ、縦のホイールで横へ送る', () => {
+    置く(三枚)
+    const 帯 = screen.getByTestId('file-tabs')
+    寸法を持たせる(帯, 600, 200)
+    const 送った = !fireEvent.wheel(帯, { deltaY: 100 })
+    expect(送った).toBe(true)
+    expect(帯.scrollLeft).toBe(100)
+    寸法を持たせる(帯, 200, 200)
+    expect(fireEvent.wheel(帯, { deltaY: 100 })).toBe(true)
+    寸法を持たせる(帯, 600, 200, 0)
+    expect(fireEvent.wheel(帯, { deltaY: 100, shiftKey: true })).toBe(true)
+    expect(fireEvent.wheel(帯, { deltaY: -100 })).toBe(true)
+  })
+
+  it('続きがある側だけを印にし、あふれていなければ印を付けない', () => {
+    置く(三枚)
+    const 帯 = screen.getByTestId('file-tabs')
+    寸法を持たせる(帯, 600, 200, 0)
+    fireEvent.scroll(帯)
+    expect(帯).toHaveAttribute('data-overflow', 'end')
+    寸法を持たせる(帯, 600, 200, 150)
+    fireEvent.scroll(帯)
+    expect(帯).toHaveAttribute('data-overflow', 'both')
+    寸法を持たせる(帯, 600, 200, 400)
+    fireEvent.scroll(帯)
+    expect(帯).toHaveAttribute('data-overflow', 'start')
+    寸法を持たせる(帯, 200, 200, 0)
+    fireEvent.scroll(帯)
+    expect(帯).not.toHaveAttribute('data-overflow')
+  })
+
+  it('帯の横スクロールバーは CSS で隠し、Chromium には標準のプロパティを渡さない', () => {
+    const css = readFileSync(resolve(__dirname, '../../index.css'), 'utf8')
+    expect(css).toMatch(/\.file-tabs::-webkit-scrollbar\s*\{\s*display:\s*none;/)
+    expect(css).toMatch(/@supports not selector\(::-webkit-scrollbar\)\s*\{\s*\.file-tabs\s*\{\s*scrollbar-width:\s*none;/)
   })
 })

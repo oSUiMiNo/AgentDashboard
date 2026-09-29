@@ -320,7 +320,7 @@ export function FileEditor({
       </pre>
       <textarea
         data-testid="file-editor"
-        className="file-editor absolute top-0 h-full w-full resize-none overflow-auto border-0 bg-transparent outline-none"
+        className="file-editor file-scroll absolute top-0 h-full w-full resize-none overflow-auto border-0 bg-transparent outline-none"
         style={{ paddingLeft: 字の余白 }}
         wrap="off"
         spellCheck={false}

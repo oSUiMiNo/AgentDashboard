@@ -106,6 +106,7 @@ import { useSettingsStore } from '@/stores/settings'
  * 文字列になり、掴んでいない間は `0ms`** なので、待つ側からは使えない。
  */
 const 滑り = 200
+const FADE = 24
 
 interface Props {
   /** 開いているタブの絶対パス（左から右の順） */
@@ -169,6 +170,7 @@ export function FileTabs({
     /** 掴んでいる1枚。**離して滑らせている間は `null`**（浮きを落とすため） */
     path: string | null
     dx: Record<string, number>
+    着地?: string
   } | null>(null)
   const 運び中 = 運び?.path ?? null
   /** 滑り終わるのを待っている印。**外れたら止める**（`setTimeout` を残さない） */
@@ -194,6 +196,32 @@ export function FileTabs({
     ごと動いて**押した的が逃げる**。`scrollLeft` への代入なら帯の中だけで閉じる
     （`lib/snapToFile.ts` が同じ理由で `scrollTo` を避けている）。
   */
+  const [あふれ, setあふれ] = useState<'start' | 'end' | 'both' | null>(null)
+  const あふれを測る = useCallback(() => {
+    const 帯 = stripRef.current
+    if (帯 === null) return
+    const 左に = 帯.scrollLeft > 1
+    const 右に = 帯.scrollLeft + 帯.clientWidth < 帯.scrollWidth - 1
+    setあふれ(左に && 右に ? 'both' : 左に ? 'start' : 右に ? 'end' : null)
+  }, [])
+
+  useEffect(() => {
+    const 帯 = stripRef.current
+    if (帯 === null) return
+    const 回した = (event: WheelEvent) => {
+      if (運び中 !== null || event.shiftKey || event.ctrlKey) return
+      if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return
+      if (帯.scrollWidth <= 帯.clientWidth) return
+      const 量 = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 帯.clientWidth : 1)
+      const 余り = 量 > 0 ? 帯.scrollWidth - 帯.clientWidth - 帯.scrollLeft : 帯.scrollLeft
+      if (余り <= 0) return
+      event.preventDefault()
+      帯.scrollLeft += 量
+    }
+    帯.addEventListener('wheel', 回した, { passive: false })
+    return () => 帯.removeEventListener('wheel', 回した)
+  }, [運び中])
+
   const 見えるところへ送る = useCallback(() => {
     const 帯 = stripRef.current
     /*
@@ -218,14 +246,17 @@ export function FileTabs({
     }
     const 帯の矩形 = 帯.getBoundingClientRect()
     const タブの矩形 = (タブ.parentElement ?? タブ).getBoundingClientRect()
+    const 左 = 帯.scrollLeft + (タブの矩形.left - 帯の矩形.left)
+    const ぼかし = 帯.scrollWidth > 帯.clientWidth ? Math.max(0, Math.min(FADE, (帯.clientWidth - タブの矩形.width) / 2)) : 0
     帯.scrollLeft = stripScrollFor(
       { 幅: 帯.clientWidth, いまの位置: 帯.scrollLeft },
       {
-        左: 帯.scrollLeft + (タブの矩形.left - 帯の矩形.left),
-        幅: タブの矩形.width,
+        左: Math.max(0, 左 - ぼかし),
+        幅: Math.min(帯.scrollWidth, 左 + タブの矩形.width + ぼかし) - Math.max(0, 左 - ぼかし),
       },
     )
-  }, [current, 運び中])
+    あふれを測る()
+  }, [current, 運び中, あふれを測る])
 
   useEffect(() => {
     見えるところへ送る()
@@ -284,6 +315,14 @@ export function FileTabs({
       return
     }
     if (event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) {
+      return
+    }
+    if (event.key === 'Delete' || event.key === 'Backspace') {
+      const 閉じるもの = (event.target as HTMLElement | null)?.closest<HTMLElement>('[data-path]')?.dataset.path
+      if (閉じるもの === undefined) return
+      event.preventDefault()
+      onClose(閉じるもの)
+      requestAnimationFrame(() => stripRef.current?.querySelector<HTMLElement>('[data-testid="file-tab"][aria-selected="true"]')?.focus())
       return
     }
     const 先 =
@@ -474,7 +513,7 @@ export function FileTabs({
       (g.枠.find((w) => w.path === g.枠[仮]?.path)?.left ?? 0) -
       (g.枠[元]?.left ?? 0)
     // **持ち上げは落とす**（`data-dragging` を外す）ので、滑りの規則が効く
-    set運び({ path: null, dx: 落ち着き })
+    set運び({ path: null, dx: 落ち着き, 着地: path })
 
     const 確定する = () => {
       /*
@@ -501,6 +540,8 @@ export function FileTabs({
     <div
       ref={stripRef}
       data-testid="file-tabs"
+      data-overflow={運び === null ? (あふれ ?? undefined) : undefined}
+      onScroll={あふれを測る}
       role="tablist"
       aria-label="開いているファイル"
       onKeyDown={矢印}
@@ -552,7 +593,7 @@ export function FileTabs({
         始まる**（下の本文は端に届いている）。端のタブを運ぶ向きは必ず内側なので、
         指を動かした最初の数 px で切られなくなる——**永続する食い違いのほうが高くつく。**
       */
-      className="flex min-w-0 flex-1 select-none items-center gap-1 overflow-x-auto overscroll-x-contain py-1.5 -my-1.5"
+      className="file-tabs flex min-w-0 flex-1 select-none items-center gap-1 overflow-x-auto overscroll-x-contain py-1.5 -my-1.5"
     >
       {tabs.map((path, i) => {
         const selected = path === current
@@ -580,6 +621,7 @@ export function FileTabs({
             data-reorder-kind="tab"
             data-reordering={運び !== null ? 'true' : 'false'}
             data-dragging={path === 運び中 ? 'true' : undefined}
+            data-landing={path === 運び?.着地 ? 'true' : undefined}
             // **賑やかのときは属性ごと出さない。**「静止」なら滑らせない
             data-quiet={quiet === 'lively' ? undefined : quiet}
             style={
@@ -587,22 +629,25 @@ export function FileTabs({
                 ? undefined
                 : ({ '--reorder-dx': `${運び.dx[path] ?? 0}px` } as CSSProperties)
             }
+            data-selected={selected || undefined}
             className={`flex h-7 shrink-0 items-center rounded-md transition-colors data-[dragging=true]:ring-2 data-[dragging=true]:ring-ring/60 ${
               selected
-                ? 'bg-primary text-primary-foreground'
-                : 'bg-muted text-muted-foreground hover:bg-secondary hover:text-foreground'
+                ? 'file-tab-selected text-foreground'
+                : 'text-muted-foreground hover:bg-secondary hover:text-foreground data-[dragging=true]:bg-secondary data-[landing=true]:relative data-[landing=true]:z-10 data-[landing=true]:bg-secondary'
             }`}
           >
             <button
               type="button"
               role="tab"
               aria-selected={selected}
+              tabIndex={selected ? 0 : -1}
+              aria-keyshortcuts="Delete Backspace"
               data-testid="file-tab"
               data-path={path}
               // **基準は画面に出さず `title` へ**（もとの chip から引き継ぐ）
               /* **ポインタ以外の道を、押す本人が見つけられるようにする**（WCAG 2.5.7）。
                  並べ替えは掴んで運べるが、それだけだとキーボードの人に道が無い */
-              title={`${path}（${root} からの相対パス）\n並べ替え：Ctrl+Shift+← →`}
+              title={`${path}（${root} からの相対パス）\n並べ替え：Ctrl+Shift+← →　閉じる：Delete`}
               onPointerDown={(event) => 押した(event, path)}
               onClick={() => {
                 // **運んだあとの押下は、選び直しではない**
@@ -612,7 +657,7 @@ export function FileTabs({
                 }
                 onSelect(path)
               }}
-              className="h-full max-w-[12rem] cursor-pointer truncate rounded-l-md pr-1 pl-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+              className="h-full max-w-[12rem] cursor-pointer truncate rounded-l-md pr-1 pl-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-[#3dd9e6]"
             >
               {label}
             </button>
@@ -620,6 +665,7 @@ export function FileTabs({
               type="button"
               data-testid="file-tab-close"
               data-path={path}
+              tabIndex={-1}
               aria-label={`${label} を閉じる`}
               title={`${label} を閉じる`}
               /*
@@ -630,7 +676,7 @@ export function FileTabs({
                 event.stopPropagation()
                 onClose(path)
               }}
-              className="mr-0.5 grid size-6 shrink-0 cursor-pointer place-items-center rounded outline-none hover:bg-black/20 focus-visible:ring-2 focus-visible:ring-ring/50"
+              className="mr-0.5 grid size-6 shrink-0 cursor-pointer place-items-center rounded outline-none hover:bg-black/20 focus-visible:ring-2 focus-visible:ring-[#3dd9e6]"
             >
               <CloseGlyph className="size-3" />
             </button>

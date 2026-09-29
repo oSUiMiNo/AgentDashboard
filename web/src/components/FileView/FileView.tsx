@@ -52,6 +52,7 @@ import {
   MinusGlyph,
   PencilGlyph,
   PlusGlyph,
+  SaveGlyph,
   SearchGlyph,
 } from '@/components/ui/glyphs'
 import { fileKind, needsSandbox } from '@/lib/fileKind'
@@ -992,7 +993,7 @@ export function FileView({
           <div
             data-testid="file-zoom"
             hidden={テキストでない}
-            className="border-border flex shrink-0 items-center rounded-md border"
+            className="flex shrink-0 items-center"
           >
             <Button
               type="button"
@@ -1013,7 +1014,7 @@ export function FileView({
               data-testid="file-zoom-reset"
               aria-label={`文字の大きさ ${zoom}%。押すと既定へ戻す`}
               title="押すと既定の大きさへ戻す"
-              className="min-w-11 px-1 text-[11px] tabular-nums"
+              className="min-w-9 px-1 text-[11px] tabular-nums"
               onClick={大きさ.戻す}
             >
               {zoom}%
@@ -1049,6 +1050,7 @@ export function FileView({
               aria-pressed={markdown ? mode === 'viewer' : mode === 'editor'}
               aria-label={切替の言葉}
               title={切替の言葉}
+              className="ml-1.5"
               onClick={toggleMode}
             >
               {/* **印だけにする**（§39.6）。言葉は `aria-label` と `title` に残る */}
@@ -1063,14 +1065,17 @@ export function FileView({
             <Button
               type="button"
               variant="ghost"
-              size="sm"
+              size="icon-sm"
               data-testid="file-save"
-              aria-label="保存する"
-              title="保存する"
+              data-unsaved={保存できる || undefined}
+              aria-label={保存中 ? '保存中' : '保存する'}
+              aria-busy={保存中 || undefined}
+              title={保存中 ? '保存中…' : 保存できる ? '保存する（未保存の変更があります）' : '保存する（変更はありません）'}
               disabled={!保存できる || markdownComposing}
+              className={`${モードを切り替えられる ? '' : 'ml-1.5 '}file-save`}
               onClick={requestSave}
             >
-              {保存中 ? '保存中…' : '保存'}
+              <SaveGlyph className={保存中 ? 'animate-pulse' : undefined} />
             </Button>
           )}
           {/* **押す道はリンクにする**（設計§6-2）。`window.open` を呼ぶボタンにすると、
@@ -1084,7 +1089,7 @@ export function FileView({
 
               **ここでいう「タブ」はブラウザのタブである**——左のタブ帯（アプリの中の
               タブ）とは別物なので、同じ帯に2つの意味の「タブ」が並ぶ */}
-          <Button asChild variant="ghost" size="icon-sm">
+          <Button asChild variant="ghost" size="icon-sm" className="ml-1.5">
             <a
               data-testid="file-open-tab"
               href={rawUrl(host, path)}
@@ -1102,6 +1107,7 @@ export function FileView({
               variant="ghost"
               size="icon-sm"
               data-testid="file-close"
+              className="ml-1.5"
               /* **タブの ✕ は1枚だけ、こちらは列ごと。** 2つの「閉じる」が同じ帯に
                  並ぶので、ラベルで書き分ける（要件の完了条件5） */
               aria-label="ファイルの列を閉じる"
@@ -1282,7 +1288,7 @@ export function FileView({
       )}
 
       {!loading && picture !== null && (
-        <div data-testid="file-body" className="min-h-0 flex-1 overflow-auto">
+        <div data-testid="file-body" className="file-scroll min-h-0 flex-1 overflow-auto">
           {/*
             **既定は入れ物の幅まで縮める**（設計§8）。原寸で出すと横スクロールが二重に
             なる——ただし**倍率と原寸の切り替えでそこを越えられる**（`index.css` の
@@ -1404,7 +1410,7 @@ export function FileView({
           <div
             ref={bodyRef}
             data-testid="file-body"
-            className="min-h-0 flex-1 overflow-auto"
+            className="file-scroll min-h-0 flex-1 overflow-auto"
           >
           {boxed && mode === 'viewer' ? (
             /* **隔離した箱**（設計§6-1）。鍵は二重で、ここに書く `sandbox` 属性と、
@@ -1450,7 +1456,7 @@ export function FileView({
             </div>
           ) : markdown && 書ける ? (
             <>
-              {(mode === 'viewer' || blockOpened) && <div hidden={mode !== 'viewer'} data-testid="file-markdown" className="file-prose">
+              {(mode === 'viewer' || blockOpened) && <div hidden={mode !== 'viewer'} data-testid="file-markdown" className="file-prose flex min-h-full flex-col">
                 <Suspense fallback={<p role="status" className="text-xs text-muted-foreground">編集面を準備しています…</p>}>
                   <MarkdownBlockEditor
                     value={本文}

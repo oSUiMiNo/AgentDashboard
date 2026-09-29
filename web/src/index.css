@@ -404,6 +404,59 @@
   color: var(--muted-foreground);
   white-space: pre;
 }
+.file-tabs::-webkit-scrollbar {
+  display: none;
+}
+@supports not selector(::-webkit-scrollbar) {
+  .file-tabs {
+    scrollbar-width: none;
+  }
+}
+.file-tabs[data-overflow='end'] {
+  mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+}
+.file-tabs[data-overflow='start'] {
+  mask-image: linear-gradient(to left, #000 calc(100% - 24px), transparent);
+}
+.file-tabs[data-overflow='both'] {
+  mask-image: linear-gradient(to right, transparent, #000 24px, #000 calc(100% - 24px), transparent);
+}
+.file-tab-selected,
+.file-save[data-unsaved]:not(:disabled) {
+  background-color: color-mix(in srgb, #3dd9e6 20%, var(--background));
+}
+.file-save[data-unsaved]:not(:disabled) {
+  color: var(--foreground);
+}
+.file-save[data-unsaved]:not(:disabled):hover {
+  background-color: color-mix(in srgb, #3dd9e6 30%, var(--background));
+}
+@supports not selector(::-webkit-scrollbar) {
+  .file-scroll {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(255 255 255 / 19%) transparent;
+  }
+}
+.file-scroll::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+.file-scroll::-webkit-scrollbar-track,
+.file-scroll::-webkit-scrollbar-corner {
+  background: transparent;
+}
+.file-scroll::-webkit-scrollbar-button {
+  display: none;
+}
+.file-scroll::-webkit-scrollbar-thumb {
+  background: rgb(255 255 255 / 19%);
+  border-radius: 99px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+.file-scroll::-webkit-scrollbar-thumb:hover {
+  background-color: rgb(255 255 255 / 30%);
+}
 .file-editor-stack > .file-editor-marks {
   z-index: 0;
   margin: 0;
