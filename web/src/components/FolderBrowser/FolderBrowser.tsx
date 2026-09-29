@@ -392,6 +392,8 @@ export function FolderBrowser({
     出られなくすれば基準は壊れないので、**設計を覆さずに要件3を満たせる**。
     判定は既存のパンくずと同じ `isUnder` に寄せる——別の書き方をすると挙動がずれる。
   */
+  const 外側 = root === undefined ? undefined : crumbs.filter((crumb) => !isUnder(root, crumb.path)).at(-1)
+  const 内側 = root === undefined ? crumbs : crumbs.filter((crumb) => isUnder(root, crumb.path))
   const ひとつ上 = 全部.length >= 2 ? 全部[全部.length - 2] : undefined
   const 上へ行ける =
     ひとつ上 !== undefined &&
@@ -443,14 +445,25 @@ export function FolderBrowser({
           <ArrowUpGlyph className="size-3.5" />
         </Button>
 
-        {crumbs.map((crumb, at) => (
+        {外側 !== undefined && (
+          <button
+            type="button"
+            data-testid="folder-crumb"
+            disabled
+            title={`起点より上：${外側.path}`}
+            aria-label={`起点より上：${外側.path}`}
+            className="text-muted-foreground rounded px-1 py-0.5"
+          >
+            …
+          </button>
+        )}
+        {内側.map((crumb, at) => (
           <span key={crumb.path} className="flex items-center gap-1">
-            {at > 0 && <span className="text-muted-foreground">/</span>}
+            {(at > 0 ? 内側[at - 1]?.label !== '/' : 外側 !== undefined) && <span className="text-muted-foreground">/</span>}
             <button
               type="button"
               data-testid="folder-crumb"
-              disabled={root !== undefined && !isUnder(root, crumb.path)}
-              className="hover:text-primary disabled:text-muted-foreground rounded px-1 py-0.5 underline disabled:no-underline"
+              className="hover:text-primary rounded px-1 py-0.5 underline"
               onClick={() => void go(crumb.path)}
             >
               {crumb.label}

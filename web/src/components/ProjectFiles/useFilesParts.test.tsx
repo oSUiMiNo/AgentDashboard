@@ -173,7 +173,9 @@ describe('サイドバー', () => {
     // 上の段は出るが押せない。**出しても押せない段は作らない**のではなく、
     // 現在地までの道筋は見せたうえで、外側だけを塞ぐ
     const crumbs = screen.getAllByTestId('folder-crumb')
-    expect(crumbs.map((crumb) => crumb.textContent)).toContain('app')
+    expect(crumbs.map((crumb) => crumb.textContent)).toEqual(['…', 'app'])
+    expect(crumbs[0]).toHaveAttribute('title', '起点より上：/home/me/dev')
+    expect(screen.getByTestId('folder-crumbs').textContent).toBe('…/app')
     for (const crumb of crumbs) {
       if (crumb.textContent === 'app') {
         expect(crumb).toBeEnabled()

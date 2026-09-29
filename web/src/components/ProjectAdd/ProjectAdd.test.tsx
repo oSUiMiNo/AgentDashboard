@@ -131,6 +131,7 @@ describe('PJT を追加', () => {
       ),
     )
 
+    expect(screen.getByTestId('folder-crumbs').textContent).toBe('/home/me/dev')
     const crumbs = screen.getAllByTestId('folder-crumb')
     await userEvent.click(crumbs[1])
     await waitFor(() =>
