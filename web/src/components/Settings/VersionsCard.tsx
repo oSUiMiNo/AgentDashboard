@@ -283,6 +283,7 @@ export function VersionsCard() {
           </p>
           <pre
             data-testid="versions-confirm-escape"
+            data-edge-fade=""
             className="text-muted-foreground overflow-x-auto text-[11px]"
           >
             {`cat  ${versions.pointer_path}\nrm   ${versions.pointer_path}`}

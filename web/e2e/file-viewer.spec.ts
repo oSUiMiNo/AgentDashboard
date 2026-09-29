@@ -181,3 +181,17 @@ test('ファイルの上部は1段で、器を持つのは選んだタブだけ'
   await page.mouse.wheel(0, -300)
   await expect.poll(() => strip.evaluate((element) => element.scrollLeft)).toBeLessThan(before)
 })
+
+test('テキストのエディタも、横に長い行は横スクロールバーを出さずにぼかす', async ({ page }) => {
+  fs.writeFileSync(path.join(projectDir, '長い行.txt'), `${'y'.repeat(500)}\n短い\n`, 'utf8')
+  const sidebar = await openProject(page)
+  await sidebar.getByTestId('folder-entry').filter({ hasText: '長い行.txt' }).click()
+  await closeSidebar(page)
+  const editor = page.getByTestId('file-editor')
+  await expect(editor).toBeVisible()
+  const stack = page.locator('.file-editor-stack')
+  await expect(stack).toHaveAttribute('data-edge', 'end')
+  expect(await editor.evaluate((element) => element.offsetHeight - element.clientHeight)).toBe(0)
+  await editor.evaluate((element) => { element.scrollLeft = element.scrollWidth })
+  await expect(stack).toHaveAttribute('data-edge', 'start')
+})

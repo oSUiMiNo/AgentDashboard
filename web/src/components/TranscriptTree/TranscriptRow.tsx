@@ -1013,10 +1013,12 @@ function DiffView({ diff }: { diff: NonNullable<ReturnType<typeof toDiffSource>>
         <span className="text-emerald-400">+{added}</span>{' '}
         <span className="text-red-400">-{removed}</span>
       </div>
-      <div className="overflow-x-auto rounded border border-border/60 text-xs">
+      <div className="rounded border border-border/60 text-xs">
+        <div data-edge-fade="" className="overflow-x-auto">
         <Diff viewType="unified" diffType={diff.diffType} hunks={diff.hunks} tokens={tokens}>
           {(hunks) => hunks.map((hunk) => <Hunk key={hunk.content} hunk={hunk} />)}
         </Diff>
+        </div>
       </div>
     </div>
   )

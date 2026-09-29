@@ -228,10 +228,15 @@
   vertical-align: middle;
 }
 .markdown-block-editor .milkdown .milkdown-table-block :is(th, td) code { white-space: nowrap; }
-.markdown-block-editor :is(.cm-scroller, .table-wrapper, .md-source-text) {
-  scrollbar-width: thin;
-  scrollbar-color: #3a4a5c transparent;
+@supports not selector(::-webkit-scrollbar) {
+  .markdown-block-editor .md-source-text {
+    scrollbar-width: thin;
+    scrollbar-color: #3a4a5c transparent;
+  }
 }
+.markdown-block-editor .md-source-text::-webkit-scrollbar { width: 10px; height: 10px; }
+.markdown-block-editor .md-source-text::-webkit-scrollbar-track { background: transparent; }
+.markdown-block-editor .md-source-text::-webkit-scrollbar-thumb { background: #3a4a5c; border: 3px solid transparent; border-radius: 99px; background-clip: content-box; }
 .markdown-block-editor .milkdown img { max-width: 100%; height: auto; border-radius: .35rem; }
 .markdown-block-editor .milkdown .image-resize-handle,
 .markdown-block-editor .milkdown .image-edit .uploader,
@@ -270,7 +275,9 @@
   max-width: 100%;
   overflow-x: auto;
   overscroll-behavior-inline: contain;
-  scrollbar-width: none;
+}
+@supports not selector(::-webkit-scrollbar) {
+  .markdown-block-editor .milkdown .milkdown-slash-menu .tab-group ul { scrollbar-width: none; }
 }
 .markdown-block-editor .milkdown .milkdown-slash-menu .tab-group ul::-webkit-scrollbar { display: none; }
 .markdown-block-editor .milkdown .milkdown-slash-menu .menu-groups {

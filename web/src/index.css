@@ -405,6 +405,34 @@
   color: var(--muted-foreground);
   white-space: pre;
 }
+.prose-dashboard pre > code::-webkit-scrollbar,
+.prose-dashboard table::-webkit-scrollbar,
+.markdown-block-editor .cm-scroller::-webkit-scrollbar,
+.markdown-block-editor .table-wrapper::-webkit-scrollbar,
+[data-edge-fade]::-webkit-scrollbar {
+  display: none;
+}
+.file-scroll.file-editor::-webkit-scrollbar {
+  height: 0;
+}
+@supports not selector(::-webkit-scrollbar) {
+  .prose-dashboard pre > code,
+  .prose-dashboard table,
+  .markdown-block-editor .cm-scroller,
+  .markdown-block-editor .table-wrapper,
+  [data-edge-fade] {
+    scrollbar-width: none;
+  }
+}
+[data-edge='start'] {
+  mask-image: linear-gradient(to right, #000 var(--edge-start, 0px), transparent var(--edge-start, 0px), #000 calc(var(--edge-start, 0px) + 24px));
+}
+[data-edge='end'] {
+  mask-image: linear-gradient(to right, #000 calc(100% - var(--edge-end, 0px) - 24px), transparent calc(100% - var(--edge-end, 0px)), #000 calc(100% - var(--edge-end, 0px)));
+}
+[data-edge='both'] {
+  mask-image: linear-gradient(to right, #000 var(--edge-start, 0px), transparent var(--edge-start, 0px), #000 calc(var(--edge-start, 0px) + 24px), #000 calc(100% - var(--edge-end, 0px) - 24px), transparent calc(100% - var(--edge-end, 0px)), #000 calc(100% - var(--edge-end, 0px)));
+}
 .file-tabs::-webkit-scrollbar {
   display: none;
 }
@@ -708,7 +736,7 @@
   background: var(--code-ground, var(--color-muted));
   border-radius: 10px;
   padding: 0.85em 1em;
-  overflow-x: auto;
+  overflow: hidden;
 }
 /*
   **横スクロールバーは参考そのままを再現する**（利用者の指定・2026-09-06）。
@@ -730,31 +758,7 @@
   **`@supports not selector(...)` で分ける**のは、ブラウザ名を書かずに
   「その書き方が効くか」で分けるためである。
 */
-@supports not selector(::-webkit-scrollbar) {
-  .prose-dashboard pre,
-  .prose-dashboard table {
-    scrollbar-width: thin;
-    scrollbar-color: var(--code-thumb, rgb(255 255 255 / 22%)) transparent;
-  }
-}
-.prose-dashboard pre::-webkit-scrollbar,
-.prose-dashboard table::-webkit-scrollbar {
-  height: 12px;
-  width: 12px;
-}
-.prose-dashboard pre::-webkit-scrollbar-track,
-.prose-dashboard table::-webkit-scrollbar-track {
-  background: transparent;
-}
-.prose-dashboard pre::-webkit-scrollbar-thumb,
-.prose-dashboard table::-webkit-scrollbar-thumb {
-  background: var(--code-thumb, rgb(255 255 255 / 22%));
-  border-radius: 99px;
-  /* 帯12px のうち、見えるつまみを6pxにする（参考の実測） */
-  border: 3px solid transparent;
-  background-clip: content-box;
-}
-.prose-dashboard pre code { background: none; padding: 0; }
+.prose-dashboard pre code { display: block; overflow-x: auto; background: none; padding: 0; }
 .prose-dashboard blockquote {
   border-left: 3px solid var(--color-border);
   padding-left: 0.8em;

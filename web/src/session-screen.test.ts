@@ -152,34 +152,20 @@ describe('コードの見せ方（2026-09-06・参考へそっくり寄せた）
     expect(規則![0]).toContain('in srgb, var(--bubble-ground) 81%, white')
   })
 
-  it('横スクロールバーは参考どおりの寸法で、軌道は透明', () => {
+  it('コードと表は横スクロールバーを出さず、見切れている側をぼかす', () => {
     /*
-      **参考の実測どおりに当てる**（2026-09-06）。画面写しは2倍で撮られており、
-      つまみは純色10px・ぼけ込み14px ＝ **CSS で6px**。帯12px の中へ縁3pxぶん
-      透かして置くと、この見え方になる。
-
-      **`INDEX` 全体に対して探さないこと。** 同じ字は `.slash-card` にもあるので、
-      **コードブロックから消しても文字列は残る**——実際それで壊し方が空振りした
-      （2026-09-06）。**規則の中身を取り出してから見る。**
+      **2026-09-30 に覆った。** 前は参考（2026-09-06）どおり 12px の帯を出していたが、
+      利用者の指定で出さなくした（見切れている側をぼかせば送れることは分かる、帯の分だけ
+      下に余白ができる）。スクロールしているのは `pre` ではなく中の `code`——`pre` の地と
+      角丸まで一緒に薄くしないため。
     */
-    // **ここも規則の中身を取り出す。** `[\s\S]*?` で `{` の先を探すと、規則の外へ
-    // 滑って `.slash-card` 側の同じ字に当たる——**実際それで空振りした**（2026-09-06）
-    const 帯 =
-      /\.prose-dashboard pre::-webkit-scrollbar,\n\.prose-dashboard table::-webkit-scrollbar \{([\s\S]*?)\n\}/.exec(
-        INDEX,
-      )
-    expect(帯, 'コードブロックの帯の規則が見つからない').not.toBeNull()
-    expect(帯![1]).toContain('height: 12px')
-    const つまみ =
-      /\.prose-dashboard pre::-webkit-scrollbar-thumb,\n\.prose-dashboard table::-webkit-scrollbar-thumb \{([\s\S]*?)\n\}/.exec(
-        INDEX,
-      )
-    expect(つまみ, 'コードブロックのつまみの規則が見つからない').not.toBeNull()
-    expect(つまみ![1]).toContain('var(--code-thumb')
-    // 帯12px から見えるつまみ6px を作るのは、この2行の組（片方だけでは効かない）
-    expect(つまみ![1]).toContain('border: 3px solid transparent')
-    expect(つまみ![1]).toContain('background-clip: content-box')
-    expect(INDEX).toMatch(/::-webkit-scrollbar-track[\s\S]*?background:\s*transparent/)
+    expect(INDEX).toMatch(/\.prose-dashboard pre \{[^}]*overflow: hidden;/)
+    expect(INDEX).toMatch(/\.prose-dashboard pre code \{[^}]*display: block; overflow-x: auto;/)
+    const 隠す = /\.prose-dashboard pre > code::-webkit-scrollbar,\n\.prose-dashboard table::-webkit-scrollbar,[\s\S]*?\{\n\s*display: none;\n\}/.exec(INDEX)
+    expect(隠す, 'コードと表のスクロールバーを隠す規則が見つからない').not.toBeNull()
+    expect(INDEX).toMatch(/\[data-edge='end'\] \{\n\s*mask-image: linear-gradient\(to right/)
+    expect(INDEX).toMatch(/\[data-edge='start'\] \{\n\s*mask-image: linear-gradient\(to right/)
+    expect(INDEX).not.toMatch(/\.prose-dashboard pre::-webkit-scrollbar/)
   })
 
   it('標準プロパティは、擬似要素を持たないブラウザにだけ渡す', () => {
