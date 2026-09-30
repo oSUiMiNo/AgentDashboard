@@ -30,29 +30,31 @@
   container: md-editor / inline-size;
   color: var(--foreground);
   --md-accent: #3dd9e6;
-  --md-muted: #98a7b8;
-  --md-surface: #151c25;
-  --md-border: #2c3949;
+  --md-muted: var(--muted-foreground);
+  --md-surface: var(--card);
+  --md-border: color-mix(in srgb, white 12%, var(--background));
+  --md-faint: color-mix(in srgb, var(--muted-foreground) 55%, var(--background));
+  --md-raised: color-mix(in srgb, white 8%, var(--card));
 }
 
 .markdown-block-editor .milkdown {
   --crepe-color-background: transparent;
-  --crepe-color-on-background: var(--foreground, #e6ebf1);
-  --crepe-color-surface: #1a232e;
-  --crepe-color-surface-low: #141c25;
-  --crepe-color-on-surface: #e6ebf1;
-  --crepe-color-on-surface-variant: #a5b4c6;
-  --crepe-color-outline: #344455;
+  --crepe-color-on-background: var(--foreground);
+  --crepe-color-surface: var(--card);
+  --crepe-color-surface-low: var(--card);
+  --crepe-color-on-surface: var(--foreground);
+  --crepe-color-on-surface-variant: var(--muted-foreground);
+  --crepe-color-outline: var(--md-border);
   --crepe-color-primary: #3dd9e6;
-  --crepe-color-secondary: #173d48;
-  --crepe-color-on-secondary: #baf5f9;
-  --crepe-color-inverse: #e6ebf1;
-  --crepe-color-on-inverse: #12161d;
-  --crepe-color-inline-code: #c9d3de;
+  --crepe-color-secondary: color-mix(in srgb, var(--accent-solid) 20%, var(--background));
+  --crepe-color-on-secondary: var(--foreground);
+  --crepe-color-inverse: var(--foreground);
+  --crepe-color-on-inverse: var(--background);
+  --crepe-color-inline-code: var(--foreground);
   --crepe-color-error: #ff8585;
-  --crepe-color-hover: #243544;
-  --crepe-color-selected: #1b4350;
-  --crepe-color-inline-area: #101720;
+  --crepe-color-hover: var(--md-raised);
+  --crepe-color-selected: color-mix(in srgb, var(--accent-solid) 20%, var(--background));
+  --crepe-color-inline-area: var(--background);
   --crepe-base-font-size: var(--file-prose-size, 1rem);
   --crepe-font-title: inherit;
   --crepe-font-default: inherit;
@@ -130,8 +132,8 @@
   width: max(24px, 1.6em);
   height: max(24px, 1.6em);
 }
-.markdown-block-editor .milkdown .milkdown-list-item-block li .label-wrapper { color: #7d8da0; }
-.markdown-block-editor .milkdown .milkdown-list-item-block li .label-wrapper svg { fill: #7d8da0; }
+.markdown-block-editor .milkdown .milkdown-list-item-block li .label-wrapper { color: var(--md-faint); }
+.markdown-block-editor .milkdown .milkdown-list-item-block li .label-wrapper svg { fill: var(--md-faint); }
 .markdown-block-editor .milkdown .milkdown-list-item-block li.list-item:has(> .label-wrapper[aria-checked='true']) > .children > .content-dom > p {
   color: var(--md-muted);
 }
@@ -151,8 +153,9 @@
 }
 .markdown-block-editor .milkdown .milkdown-code-block {
   padding: .6rem .75rem .6rem .25rem;
-  border: 1px solid #243140;
+  border: 0;
   border-radius: .55rem;
+  background: var(--md-surface);
 }
 .markdown-block-editor .milkdown .milkdown-code-block .tools {
   position: absolute;
@@ -162,8 +165,8 @@
   gap: .25rem;
   padding: .15rem;
   border-radius: .45rem;
-  background: #1a232ef0;
-  box-shadow: 0 2px 8px #0006;
+  background: var(--popover);
+  box-shadow: 0 0 0 1px var(--md-border), 0 2px 8px #0006;
   opacity: 0;
   pointer-events: none;
   transition: opacity .15s ease;
@@ -208,9 +211,9 @@
   max-width: 15rem;
 }
 .markdown-block-editor .milkdown .cm-editor { font-size: .92em; max-width: 100%; }
-.markdown-block-editor .milkdown .milkdown-code-block .cm-gutters { color: #56657a; font-variant-numeric: tabular-nums; user-select: none; }
+.markdown-block-editor .milkdown .milkdown-code-block .cm-gutters { color: var(--md-faint); font-variant-numeric: tabular-nums; user-select: none; }
 .markdown-block-editor .milkdown .milkdown-code-block .cm-lineNumbers .cm-gutterElement { padding: 0 .9em 0 .35em; min-width: 1.5ch; }
-.markdown-block-editor .milkdown .milkdown-code-block .cm-editor.cm-focused .cm-activeLineGutter { color: #8a9bb0; }
+.markdown-block-editor .milkdown .milkdown-code-block .cm-editor.cm-focused .cm-activeLineGutter { color: var(--muted-foreground); }
 .markdown-block-editor .milkdown .cm-scroller { overflow: auto; font-family: var(--crepe-font-code); line-height: 1.65; }
 .markdown-block-editor .milkdown .milkdown-table-block .table-wrapper { overflow-x: auto; max-width: 100%; }
 .markdown-block-editor .milkdown .milkdown-table-block table.children {
@@ -234,12 +237,12 @@
 @supports not selector(::-webkit-scrollbar) {
   .markdown-block-editor .md-source-text {
     scrollbar-width: thin;
-    scrollbar-color: #3a4a5c transparent;
+    scrollbar-color: var(--md-border) transparent;
   }
 }
 .markdown-block-editor .md-source-text::-webkit-scrollbar { width: 10px; height: 10px; }
 .markdown-block-editor .md-source-text::-webkit-scrollbar-track { background: transparent; }
-.markdown-block-editor .md-source-text::-webkit-scrollbar-thumb { background: #3a4a5c; border: 3px solid transparent; border-radius: 99px; background-clip: content-box; }
+.markdown-block-editor .md-source-text::-webkit-scrollbar-thumb { background: var(--md-border); border: 3px solid transparent; border-radius: 99px; background-clip: content-box; }
 .markdown-block-editor .milkdown img { max-width: 100%; height: auto; border-radius: .35rem; }
 .markdown-block-editor .milkdown .image-resize-handle,
 .markdown-block-editor .milkdown .image-edit .uploader,
@@ -265,10 +268,10 @@
 .markdown-block-editor .milkdown .milkdown-block-handle .operation-item svg {
   width: 18px;
   height: 18px;
-  fill: #5d6b7c;
+  fill: var(--md-faint);
 }
 .markdown-block-editor .milkdown .milkdown-block-handle .operation-item:hover { background: #ffffff0f; }
-.markdown-block-editor .milkdown .milkdown-block-handle .operation-item:hover svg { fill: #a5b4c6; }
+.markdown-block-editor .milkdown .milkdown-block-handle .operation-item:hover svg { fill: var(--muted-foreground); }
 .markdown-block-editor .milkdown .milkdown-block-handle .operation-item.active { background: #ffffff14; }
 .markdown-block-editor .milkdown .milkdown-slash-menu {
   max-height: min(25rem, 65vh);
@@ -295,8 +298,8 @@
 .markdown-block-editor .milkdown .milkdown-slash-menu .menu-groups .menu-group li svg {
   width: 20px;
   height: 20px;
-  color: #7d8da0;
-  fill: #7d8da0;
+  color: var(--md-faint);
+  fill: var(--md-faint);
 }
 .markdown-block-editor .milkdown :is(button, [role='button']):focus-visible {
   outline: 2px solid var(--md-accent);
@@ -315,7 +318,7 @@
   background: #ffffff03;
 }
 .md-source-label { display: block; margin-bottom: .4em; font-size: .65rem; font-weight: 600; line-height: 1.5; color: var(--md-muted); }
-.md-source-text { margin: 0; font: .88em/1.7 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; color: #aab7c6; max-height: 14rem; overflow: auto; }
+.md-source-text { margin: 0; font: .88em/1.7 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted-foreground); max-height: 14rem; overflow: auto; }
 .md-source-spacer { min-height: 1em; }
 .md-source-block.ProseMirror-selectednode { outline: 2px solid var(--md-accent); background: #3dd9e612; }
 .md-editor-loading { padding: 2rem 1rem; color: var(--md-muted); font-size: .8rem; }

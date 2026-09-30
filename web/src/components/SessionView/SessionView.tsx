@@ -841,7 +841,7 @@ function SessionRail({
         **相殺はセッションの面が持つ**（下の `px-3 md:px-0`）ので、あちらの中身は
         1ピクセルも動かない。**ここで相殺すると、読む面まで元へ戻ってしまう。**
       */
-      className="-mx-3 flex min-h-0 min-w-0 flex-1 snap-x snap-mandatory gap-4 overflow-x-auto overscroll-x-contain md:mx-0"
+      className="file-scroll -mx-3 flex min-h-0 min-w-0 flex-1 snap-x snap-mandatory gap-4 overflow-x-auto overscroll-x-contain md:mx-0"
     >
       {column}
       {children}

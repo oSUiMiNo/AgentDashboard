@@ -356,9 +356,10 @@
 }
 .file-zoom .file-prose {
   font-size: var(--file-prose-size);
-  line-height: 1.625;
+  line-height: 1.7;
 }
 .file-zoom .file-raw {
+  --code-ground: var(--card);
   font-size: var(--file-raw-size);
 }
 /*
@@ -539,6 +540,13 @@
 
   中へ触れないので、**`iframe` という箱そのものを `transform` で拡大縮小する**。
   そのままでは箱が小さく（大きく）なるだけなので、**倍率の逆数で寸法を伸ばして
+.file-editor-stack > .file-editor-note {
+  z-index: 3;
+  font-size: 0.75rem;
+  padding: 0 0.4em;
+  border-radius: 4px;
+  background: var(--background);
+}
   打ち消す**——`scale(0.5)` なら幅を 2倍にしておけば、見た目は入れ物ちょうどに収まる。
 
   **これはブラウザの拡大と同じ効き方になる。** 中の文書から見える幅が変わるので、

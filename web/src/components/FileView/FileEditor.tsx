@@ -226,7 +226,8 @@ export function FileEditor({
     if (!打つ || !いま) return
     const 左の余白 = 番号の層.current?.offsetWidth ?? 0
     const 行の高さ = いま.offsetHeight
-    if (いま.offsetTop < 打つ.scrollTop || いま.offsetTop + 行の高さ > 打つ.scrollTop + 打つ.clientHeight) {
+    const 窓の下 = 48
+    if (いま.offsetTop < 打つ.scrollTop + 窓の下 || いま.offsetTop + 行の高さ > 打つ.scrollTop + 打つ.clientHeight) {
       打つ.scrollTop = Math.max(0, いま.offsetTop - 打つ.clientHeight / 3)
     }
     if (いま.offsetLeft < 打つ.scrollLeft + 左の余白 || いま.offsetLeft + いま.offsetWidth > 打つ.scrollLeft + 打つ.clientWidth) {
@@ -342,7 +343,7 @@ export function FileEditor({
         {readOnly ? '読み取り専用' : 'Tab で字下げ／Escape のあと Tab で次へ'}
       </p>
       {重い && (
-        <p data-testid="file-paint-heavy" className="absolute top-1 right-1 text-xs text-amber-300">
+        <p data-testid="file-paint-heavy" className="file-editor-note pointer-events-none absolute bottom-1 left-1 text-amber-300">
           大きいので色を付けていません
         </p>
       )}

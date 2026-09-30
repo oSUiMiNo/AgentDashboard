@@ -248,7 +248,7 @@ export function GroupView({ host, project }: Props) {
             12px の寄りは見た目に出ない（実測で確認）。相殺の余白を札へ足すと、
             **札の中の端末の桁が変わる**ので足さない。
           */
-          className="-mx-3 flex min-h-0 min-w-0 flex-1 gap-4 overflow-x-auto pb-2 md:mx-0 [overflow-anchor:none]"
+          className="file-scroll -mx-3 flex min-h-0 min-w-0 flex-1 gap-4 overflow-x-auto pb-2 md:mx-0 [overflow-anchor:none]"
         >
           {/*
             **いちばん左。セッションの札と同じ扱い**（設計§8 の 2026-08-27 の変更）。
