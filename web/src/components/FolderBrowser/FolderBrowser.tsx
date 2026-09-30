@@ -33,6 +33,7 @@ import {
 import { ArrowUpGlyph, CloseGlyph, CopyGlyph } from '@/components/ui/glyphs'
 import { copyToClipboard } from '@/lib/clipboard'
 import { fileIcon } from '@/lib/fileKind'
+import { FileTypeIcon } from '@/components/ui/fileTypeIcon'
 import {
   childOf,
   crumbsOf,
@@ -93,6 +94,7 @@ interface Props {
   onPathChange?: (path: string) => void
   /** ファイルを押したとき。省略するとファイルは押せない（選ぶ対象がフォルダだけの場面） */
   onPickFile?: (path: string) => void
+  current?: string
 }
 
 /**
@@ -112,6 +114,7 @@ export function FolderBrowser({
   fallback,
   onPathChange,
   onPickFile,
+  current,
 }: Props) {
   const [listing, setListing] = useState<DirListing | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -552,6 +555,7 @@ export function FolderBrowser({
                 host={host}
                 root={root}
                 onOpen={() => void go(full)}
+                current={current === full}
                 onPickFile={
                   onPickFile === undefined ? undefined : () => onPickFile(full)
                 }
@@ -648,9 +652,11 @@ function Row({
   root,
   onOpen,
   onPickFile,
+  current = false,
   copyState,
   onCopy,
 }: {
+  current?: boolean
   entry: DirEntry
   /** この行が指す絶対パス */
   full: string
@@ -671,19 +677,18 @@ function Row({
 
   // 的はできるだけ大きく取る。高さも狭い画面で押しやすい値にしてある
   const 行のクラス =
-    "h-auto min-w-0 flex-1 justify-start gap-2 px-2 py-2 text-left font-normal"
+    `h-auto min-w-0 flex-1 justify-start gap-2 px-2 py-2 text-left font-normal${current ? " folder-entry-current" : ""}`
 
   const 中身 = (
     <>
       {/* **開く前に、何が起きるかが分かる印。** 画像とテキストが同じ印だと、
           押してみるまで箱が出るのか字が出るのか分からない（種別ごとに見せ方が
           違うと決めてあるので、印もそこへ合わせる） */}
-      <span aria-hidden data-testid="folder-entry-icon" className="shrink-0">
-        {entry.kind === "dir"
-          ? "📁"
-          : entry.kind === "symlink"
-            ? "🔗"
-            : fileIcon(entry.name)}
+      <span aria-hidden data-testid="folder-entry-icon" className="grid shrink-0 place-items-center">
+        <FileTypeIcon
+          className="size-[18px]"
+          type={entry.kind === "dir" ? "folder" : entry.kind === "symlink" ? "link" : fileIcon(entry.name)}
+        />
       </span>
       {/*
           **切った先を、乗せれば読める。** 幅が狭いと末尾が見切れるが、切ること自体は
@@ -738,6 +743,7 @@ function Row({
             <Button asChild variant="ghost" className={行のクラス}>
               <a
                 data-testid="folder-entry"
+                aria-current={current ? "page" : undefined}
                 data-kind={entry.kind}
                 data-name={entry.name}
                 href={rawUrl(host, full)}

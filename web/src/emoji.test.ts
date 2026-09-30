@@ -50,12 +50,9 @@ function 素(text: string): string {
  * | 種類 | どれ |
  * |---|---|
  * | **状態と向きの記号**（意図して出している） | `▶` `☕` `◀`——`README.md` の状態の表と、十字ボタンの向き |
- * | **`DESIGN.md` §35.1 の既知違反**（直す先は別のイシュー） | `fileKind.ts` と `FolderBrowser.tsx` のファイル種別の絵 |
  */
 const 台帳: Readonly<Record<string, string>> = {
   'components/Dpad/Dpad.tsx': '▶◀',
-  'components/FolderBrowser/FolderBrowser.tsx': '📁🔗',
-  'lib/fileKind.ts': '🌐📄📝🖼',
   'lib/keys.ts': '▶',
   'lib/protocol.ts': '▶☕',
 }

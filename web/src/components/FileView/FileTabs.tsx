@@ -96,6 +96,9 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from 'react'
 import { CloseGlyph } from '@/components/ui/glyphs'
+import { EDITS_CHANGED } from '@/lib/fileEdits'
+import { fileIcon } from '@/lib/fileKind'
+import { FileTypeIcon } from '@/components/ui/fileTypeIcon'
 import { dropIndexFor, moveTab, stripScrollFor, tabLabels } from '@/lib/fileTabs'
 import { useSettingsStore } from '@/stores/settings'
 
@@ -133,6 +136,8 @@ interface Props {
    * 読み書きする**ことになり、タブが多いほど運びがカクつく。
    */
   onReorderCommit: () => void
+  unsaved?: (path: string) => boolean
+  onOverflowChange?: (overflowing: boolean) => void
 }
 
 export function FileTabs({
@@ -143,6 +148,8 @@ export function FileTabs({
   onClose,
   onReorder,
   onReorderCommit,
+  unsaved,
+  onOverflowChange,
 }: Props) {
   const labels = tabLabels(tabs)
   const stripRef = useRef<HTMLDivElement>(null)
@@ -177,6 +184,17 @@ export function FileTabs({
   運び中の控え.current = 運び中
   const ポインタで入った = useRef(false)
   const 並びの鍵 = tabs.join('\n')
+  const [, 書きかけが変わった] = useState(0)
+  useEffect(() => {
+    if (unsaved === undefined) return
+    const 聞く = () => 書きかけが変わった((n) => n + 1)
+    globalThis.addEventListener(EDITS_CHANGED, 聞く)
+    globalThis.addEventListener('storage', 聞く)
+    return () => {
+      globalThis.removeEventListener(EDITS_CHANGED, 聞く)
+      globalThis.removeEventListener('storage', 聞く)
+    }
+  }, [unsaved])
   /** 滑り終わるのを待っている印。**外れたら止める**（`setTimeout` を残さない） */
   const 落ち着き待ち = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(
@@ -201,12 +219,15 @@ export function FileTabs({
     （`lib/snapToFile.ts` が同じ理由で `scrollTo` を避けている）。
   */
   const [あふれ, setあふれ] = useState<'start' | 'end' | 'both' | null>(null)
+  const あふれを知らせる = useRef(onOverflowChange)
+  あふれを知らせる.current = onOverflowChange
   const あふれを測る = useCallback(() => {
     const 帯 = stripRef.current
     if (帯 === null) return
     const 左に = 帯.scrollLeft > 1
     const 右に = 帯.scrollLeft + 帯.clientWidth < 帯.scrollWidth - 1
     setあふれ(左に && 右に ? 'both' : 左に ? 'start' : 右に ? 'end' : null)
+    あふれを知らせる.current?.(左に || 右に)
   }, [])
 
   useEffect(() => {
@@ -603,6 +624,7 @@ export function FileTabs({
       {tabs.map((path, i) => {
         const selected = path === current
         const label = labels[i] ?? path
+        const 未保存 = unsaved?.(path) === true
         return (
           <div
             key={path}
@@ -645,6 +667,8 @@ export function FileTabs({
               type="button"
               role="tab"
               aria-selected={selected}
+              aria-label={未保存 ? `${label}（未保存）` : undefined}
+              data-unsaved={未保存 || undefined}
               tabIndex={selected ? 0 : -1}
               aria-keyshortcuts="Delete Backspace"
               data-testid="file-tab"
@@ -670,7 +694,9 @@ export function FileTabs({
               }}
               className="h-full max-w-[12rem] cursor-pointer truncate rounded-l-md pr-1 pl-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--accent-solid)]"
             >
+              <FileTypeIcon type={fileIcon(path)} className="mr-1.5 inline-block size-4 shrink-0 align-[-3px]" />
               {label}
+              {未保存 && <span aria-hidden className="file-tab-dot ml-1.5" />}
             </button>
             <button
               type="button"

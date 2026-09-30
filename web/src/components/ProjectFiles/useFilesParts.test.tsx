@@ -11,7 +11,7 @@
 
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useFilesParts } from '@/components/ProjectFiles/useFilesParts'
 
@@ -323,6 +323,9 @@ describe('ファイルの中身の列', () => {
     const view = await screen.findByTestId('file-view')
     expect(view).toHaveAttribute('data-path', `${ROOT}/計画.md`)
     expect(screen.getByTestId('file-column')).toBeInTheDocument()
+    const 行 = screen.getByRole('link', { name: '計画.md' })
+    expect(行).toHaveAttribute('aria-current', 'page')
+    expect(行.className).toContain('folder-entry-current')
     // 基準は枠のパス。パネルの起点と同じものであることが要る
     // **基準は画面から `title` へ移り**（要件26・設計§8-6）、**その `title` は
     // 相対パスの chip からタブ帯へ引き継がれた**（タブの要件）

@@ -653,3 +653,21 @@ describe('帯の手触り', () => {
     expect(css).toMatch(/@supports not selector\(::-webkit-scrollbar\)\s*\{\s*\.file-tabs\s*\{\s*scrollbar-width:\s*none;/)
   })
 })
+
+describe('未保存の印', () => {
+  const 三枚 = [`${ROOT}/a.md`, `${ROOT}/b.md`, `${ROOT}/c.md`]
+
+  it('書きかけのあるタブにだけ点を出し、読み上げ名にも「未保存」と入れる', () => {
+    let 書きかけ = new Set([三枚[2]!])
+    render(
+      <FileTabs tabs={三枚} current={三枚[0]!} root={ROOT} onSelect={vi.fn()} onClose={vi.fn()} onReorder={vi.fn()} onReorderCommit={vi.fn()} unsaved={(p) => 書きかけ.has(p)} />,
+    )
+    const タブ = screen.getAllByTestId('file-tab')
+    expect(タブ.map((t) => t.hasAttribute('data-unsaved'))).toEqual([false, false, true])
+    expect(タブ[2]).toHaveAccessibleName('c.md（未保存）')
+    expect(タブ[2]!.querySelector('.file-tab-dot')).not.toBeNull()
+    書きかけ = new Set([三枚[0]!])
+    act(() => { globalThis.dispatchEvent(new Event('agentdashboard:file-edits')) })
+    expect(screen.getAllByTestId('file-tab').map((t) => t.hasAttribute('data-unsaved'))).toEqual([true, false, false])
+  })
+})

@@ -122,6 +122,7 @@ interface Props {
   /** 縁を掴んでいるか。**場所取りの動きを止めるためだけに使う** */
   dragging: boolean
   onPickFile: (path: string) => void
+  current?: string
   /** 切り替えボタンと同じ手。狭い窓ではあちらが隠れる位置に来るので、ここにも出す */
   onClose: () => void
   onGrab: () => void
@@ -137,6 +138,7 @@ export function Sidebar({
   width,
   dragging,
   onPickFile,
+  current,
   onClose,
   onGrab,
   onMove,
@@ -217,6 +219,7 @@ export function Sidebar({
             fallback={project}
             onPathChange={onPathChange}
             onPickFile={onPickFile}
+            current={current}
           />
         </div>
 

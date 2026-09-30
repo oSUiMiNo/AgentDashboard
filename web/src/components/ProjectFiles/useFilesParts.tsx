@@ -313,6 +313,22 @@ export function useFilesParts({
    *
    * **選択は動かさない。** 動かしたのは並びであって、見ているものではない。
    */
+  const タブをまとめて閉じる = useCallback(
+    (paths: string[]) => {
+      const now = 最新.current
+      const 閉じる = new Set(paths)
+      const tabs = now.tabs.filter((tab) => !閉じる.has(tab.path))
+      if (tabs.length === now.tabs.length) return
+      const 位置 = now.tabs.findIndex((tab) => tab.path === now.選択)
+      const 選択 = now.選択 !== null && 閉じる.has(now.選択) ? 次に選ぶ(tabs, Math.min(位置, tabs.length)) : now.選択
+      const 次の状態 = { tabs, 選択 }
+      最新.current = 次の状態
+      set開いている(次の状態)
+      覚える(tabs, 選択)
+    },
+    [覚える],
+  )
+
   const タブを並べ替える = useCallback(
     (path: string, to: number) => {
       const now = 最新.current
@@ -441,6 +457,7 @@ export function useFilesParts({
               **ファイルを選んでも畳まない**（利用者の判断・2026-08-24）。続けて別の
               ファイルを開けるようにするため（設計§2）
             */
+            current={現在?.path}
             onPickFile={ファイルを選ぶ}
             onClose={onToggle}
             {...grip}
@@ -458,6 +475,7 @@ export function useFilesParts({
           onSelectTab={タブを選ぶ}
           onOpenFile={ファイルを選ぶ}
           onCloseTab={タブを閉じる}
+          onCloseTabs={タブをまとめて閉じる}
           onReorderTab={タブを並べ替える}
           onReorderTabCommit={並べ替えを確定する}
           width={widths.file}

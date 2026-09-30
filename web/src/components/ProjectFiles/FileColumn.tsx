@@ -64,6 +64,7 @@ interface Props {
   onSelectTab: (path: string) => void
   onOpenFile?: (path: string) => void
   onCloseTab: (path: string) => void
+  onCloseTabs?: (paths: string[]) => void
   onReorderTab: (path: string, to: number) => void
   onReorderTabCommit: () => void
   width: number
@@ -92,6 +93,7 @@ export function FileColumn({
   onSelectTab,
   onOpenFile,
   onCloseTab,
+  onCloseTabs,
   onReorderTab,
   onReorderTabCommit,
   width,
@@ -143,6 +145,7 @@ export function FileColumn({
           onSelectTab={onSelectTab}
           onOpenFile={onOpenFile}
           onCloseTab={onCloseTab}
+          onCloseTabs={onCloseTabs}
           onReorderTab={onReorderTab}
           onReorderTabCommit={onReorderTabCommit}
           onClose={onClose}

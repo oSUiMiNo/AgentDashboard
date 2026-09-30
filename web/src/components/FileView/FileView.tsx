@@ -45,6 +45,7 @@ import { FileFind } from '@/components/FileView/FileFind'
 import { FileTabs } from '@/components/FileView/FileTabs'
 import { Button } from '@/components/ui/button'
 import {
+  ChevronGlyph,
   CloseGlyph,
   CodeGlyph,
   ExternalLinkGlyph,
@@ -55,9 +56,13 @@ import {
   SaveGlyph,
   SearchGlyph,
 } from '@/components/ui/glyphs'
-import { fileKind, needsSandbox } from '@/lib/fileKind'
+import { fileIcon, fileKind, needsSandbox } from '@/lib/fileKind'
 import { markdownAssetPath } from '@/lib/markdownAsset'
 import { formatBytes } from '@/lib/format'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { tabLabels } from '@/lib/fileTabs'
+import { FileTypeIcon } from '@/components/ui/fileTypeIcon'
+import { usePoll } from '@/lib/poll'
 import { useFileZoom, ZOOM_STEPS } from '@/lib/fileZoom'
 import { isFindOpen } from '@/lib/keys'
 import { REHYPE_PLUGINS, REMARK_PLUGINS } from '@/lib/markdown'
@@ -72,7 +77,7 @@ import {
   writeFile,
   type FileContent,
 } from '@/lib/hostfs'
-import { dropEdit, putEdit, readEditDetails, WRITE_DEBOUNCE_MS, type FileEditDetails } from '@/lib/fileEdits'
+import { dropEdit, hasEdit, putEdit, readEditDetails, WRITE_DEBOUNCE_MS, type FileEditDetails } from '@/lib/fileEdits'
 import { useAuthStore } from '@/stores/auth'
 import { useSettingsStore } from '@/stores/settings'
 import { 既定のモード, type FileMode } from '@/lib/fileMode'
@@ -120,6 +125,8 @@ import { 既定のモード, type FileMode } from '@/lib/fileMode'
 const MarkdownBlockEditor = lazy(() => import('./MarkdownBlockEditor'))
 
 const FORMAT_DEFAULT_LIMIT = 256 * 1024
+const 外を見る間隔 = 4000
+const 外を見る上限 = 2 * 1024 * 1024
 
 /**
  * いま何をしている面か（`ファイルビュアにエディタ機能を追加` 設計§5-1）。
@@ -141,6 +148,7 @@ interface Props {
   onOpenFile?: (path: string) => void
   /** タブの ✕。**1枚だけ閉じる**（下の `onClose` は列ごと） */
   onCloseTab: (path: string) => void
+  onCloseTabs?: (paths: string[]) => void
   /** タブを並べ替えた（掴んで運ぶ／Ctrl+Shift+← →）。**動かすものはパスで渡す** */
   onReorderTab: (path: string, to: number) => void
   /** 並べ替えが確定した。**覚えるのはここだけ** */
@@ -206,6 +214,7 @@ export function FileView({
   onClose,
   onUnreadable,
   onOpenFile,
+  onCloseTabs,
 }: Props) {
   const kind = fileKind(path)
   const リンクを開く = useCallback(
@@ -286,7 +295,7 @@ export function FileView({
    * 文だけだと、**競合のときにだけ出す2つの道**（読み直す／上書きする）を出し分けられない。
    * 競合以外で出すと、**押せて何も起きない**形になる。
    */
-  const [保存の断り, set保存の断り] = useState<{ 文: string; 競合: boolean } | null>(null)
+  const [保存の断り, set保存の断り] = useState<{ 文: string; 競合: boolean; 外?: boolean } | null>(null)
   /**
    * 次の保存が持っていく印（設計§8-3）。読んだ時点のものから始め、**保存のたびに更新する。**
    *
@@ -585,6 +594,9 @@ export function FileView({
   if (mode === 'editor') sourceDisplayValue.current = 本文
   /** ディスクの中身と違うか。**空にしたのも違いである** */
   const 変えた = 書きかけ !== null && content !== null && 書きかけ !== content.text
+  const 未保存か = (タブ: string) => (タブ === path ? 変えた : hasEdit(host, タブ, account))
+  const タブの名前 = useMemo(() => tabLabels(tabs), [tabs])
+  const [タブがあふれた, setタブがあふれた] = useState(false)
   /**
    * 保存を押せるか。**ボタンと鍵盤が同じ述語を読む**（設計§6-7）——別々に書くと
    * 「ボタンは押せないのに鍵盤では保存できる」が起こる。
@@ -820,6 +832,53 @@ export function FileView({
     }
   }, [読込世代, 保存を始める, 書き出しを取り消す, 書きかけを確定する])
 
+  const [外で読み直した, set外で読み直した] = useState(false)
+  useEffect(() => {
+    if (!外で読み直した) return
+    const 待ち = setTimeout(() => set外で読み直した(false), 8000)
+    return () => clearTimeout(待ち)
+  }, [外で読み直した])
+
+  const 外の変更を見る = useCallback(async () => {
+    const 対象 = 文書.current
+    if (対象 === null || 対象.generation !== 読込世代 || 対象.request !== null || 対象.conflict) return
+    const いまの中身 = 対象.content
+    if (いまの中身 === null || いまの中身.truncated === true || いまの中身.bytes > 外を見る上限) return
+    let 最新: FileContent
+    try {
+      最新 = await readFile(対象.host, 対象.path)
+    } catch {
+      return
+    }
+    if (文書.current !== 対象 || 対象.generation !== 読込世代 || 対象.request !== null || 対象.content !== いまの中身) return
+    if (!最新.stamp || 最新.stamp === 対象.stamp) return
+    if (最新.text === いまの中身.text) {
+      対象.content = 最新
+      対象.stamp = 最新.stamp
+      setContent(最新)
+      set印(最新.stamp)
+      return
+    }
+    if (対象.text !== null && 対象.text !== いまの中身.text) {
+      対象.conflict = true
+      set保存の断り({ 文: '開いている間に、外でこのファイルが書き換わりました。書きかけは残してあります。どちらを採るか選んでください。', 競合: true, 外: true })
+      return
+    }
+    対象.content = 最新
+    対象.stamp = 最新.stamp
+    setContent(最新)
+    set印(最新.stamp)
+    if (対象.text !== null) {
+      対象.text = null
+      set書きかけ(null)
+      書き出しを取り消す(対象)
+      対象.pending = null
+      書きかけを確定する(対象)
+    }
+    set外で読み直した(true)
+  }, [読込世代, 書き出しを取り消す, 書きかけを確定する])
+  usePoll(外の変更を見る, 外を見る間隔)
+
   const 編集を捨てる = useCallback(() => {
     const 対象 = 文書.current
     if (対象 === null || 対象.generation !== 読込世代 || !現在の文書か(対象) || 対象.request !== null) return
@@ -923,7 +982,7 @@ export function FileView({
         （`FileTabs.tsx`・`DESIGN.md` §48.18）。**ここを詰めると、はみ出した箱が
         下の本文へ被さる**——帯は `onPointerMove` を持つので、当たり判定も一緒に降りる。
       */
-      className="file-zoom border-border flex h-full min-h-0 flex-col gap-2 border-t pt-2"
+      className="file-zoom border-border relative flex h-full min-h-0 flex-col gap-2 border-t pt-2"
     >
       {/*
         **1行に保つ**（`flex-nowrap`）。3つの工事（タブ・探す・文字の大きさ）が同じ帯へ
@@ -956,7 +1015,80 @@ export function FileView({
           onClose={onCloseTab}
           onReorder={onReorderTab}
           onReorderCommit={onReorderTabCommit}
+          unsaved={未保存か}
+          onOverflowChange={setタブがあふれた}
         />
+        {タブがあふれた && tabs.length > 1 && (
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                data-testid="file-tab-list-open"
+                aria-label={`開いているファイルの一覧（${tabs.length}件）`}
+                title={`開いているファイルの一覧（${tabs.length}件）`}
+                className="h-7 shrink-0 gap-0.5 px-1.5 text-xs tabular-nums"
+              >
+                {tabs.length}
+                <ChevronGlyph direction="down" className="size-3" />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="start" className="w-[min(20rem,90vw)] p-1" data-testid="file-tab-list">
+              <ul className="flex flex-col">
+                {tabs.map((タブ, i) => (
+                  <li key={タブ} className="flex items-center">
+                    <button
+                      type="button"
+                      data-testid="file-tab-list-item"
+                      data-current={タブ === path || undefined}
+                      title={タブ}
+                      onClick={() => onSelectTab(タブ)}
+                      className={`hover:bg-secondary flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs ${タブ === path ? 'file-tab-selected text-foreground' : 'text-muted-foreground'}`}
+                    >
+                      <FileTypeIcon type={fileIcon(タブ)} className="size-4 shrink-0" />
+                      <span className="truncate">{タブの名前[i]}</span>
+                      {未保存か(タブ) && <span aria-hidden className="file-tab-dot" />}
+                      {未保存か(タブ) && <span className="sr-only">（未保存）</span>}
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`${タブの名前[i]} を閉じる`}
+                      title={`${タブの名前[i]} を閉じる`}
+                      onClick={() => onCloseTab(タブ)}
+                      className="hover:bg-secondary text-muted-foreground grid size-7 shrink-0 cursor-pointer place-items-center rounded"
+                    >
+                      <CloseGlyph className="size-3" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+              {onCloseTabs !== undefined && (
+                <div className="border-border mt-1 flex gap-1 border-t pt-1">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="xs"
+                    data-testid="file-tab-close-others"
+                    onClick={() => onCloseTabs(tabs.filter((タブ) => タブ !== path))}
+                  >
+                    ほかを閉じる
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="xs"
+                    data-testid="file-tab-close-saved"
+                    disabled={tabs.every((タブ) => タブ === path || 未保存か(タブ))}
+                    onClick={() => onCloseTabs(tabs.filter((タブ) => タブ !== path && !未保存か(タブ)))}
+                  >
+                    保存済みを閉じる
+                  </Button>
+                </div>
+              )}
+            </PopoverContent>
+          </Popover>
+        )}
 
         <div className="ml-auto flex shrink-0 items-center gap-1">
           {探す入口 && (
@@ -1126,6 +1258,16 @@ export function FileView({
         </p>
       )}
 
+      {外で読み直した && (
+        <p
+          role="status"
+          data-testid="file-external-reload"
+          className="bg-popover text-muted-foreground border-border pointer-events-none absolute bottom-3 left-1/2 z-20 -translate-x-1/2 rounded-md border px-2.5 py-1 text-xs shadow-md"
+        >
+          外で書き換わったので、読み直しました
+        </p>
+      )}
+
       {テキストでない && (
         <div data-testid="file-unsupported" className="text-muted-foreground flex flex-col items-center gap-2 py-10 text-center text-xs">
           <p>テキストではないので、ここでは中身を表示できません。</p>
@@ -1210,9 +1352,9 @@ export function FileView({
              改行で3段に分けて返すのに、**HTML の既定では改行が空白に潰れる**——
              決めた効き目が、表示で失われていた。**長いパスで横へはみ出させない**
              ので `break-words` も要る */
-          className="text-xs break-words whitespace-pre-line text-red-300"
+          className={`text-xs break-words whitespace-pre-line ${保存の断り.外 ? 'text-amber-300' : 'text-red-300'}`}
         >
-          保存できませんでした：{保存の断り.文}
+          {保存の断り.外 ? '' : '保存できませんでした：'}{保存の断り.文}
         </p>
       )}
 

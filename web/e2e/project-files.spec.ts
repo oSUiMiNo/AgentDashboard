@@ -1241,16 +1241,17 @@ test("一覧の印が、種別ごとに分かれている", async ({ page }) => 
     panel
       .locator(`[data-testid="folder-entry"][data-name="${name}"]`)
       .getByTestId("folder-entry-icon")
-      .textContent();
+      .locator("svg")
+      .getAttribute("data-icon");
 
   const 画像 = await 印(PICTURE);
   const 文書 = await 印(DOCUMENT);
   const 計画 = await 印(PLAN);
   const 図 = await 印(VECTOR);
 
-  expect(画像, "画像は画像の印").toBe("🖼️");
-  expect(文書, "HTML はそれと分かる印").toBe("🌐");
-  expect(計画, "Markdown はそれと分かる印").toBe("📝");
+  expect(画像, "画像は画像の印").toBe("image");
+  expect(文書, "HTML はそれと分かる印").toBe("code");
+  expect(計画, "Markdown はそれと分かる印").toBe("document");
   expect(図, "SVG は画像と同じ印").toBe(画像);
   // **3つが互いに違うこと。** 片方だけ変えて同じに戻すのを防ぐ
   expect(new Set([画像, 文書, 計画]).size).toBe(3);

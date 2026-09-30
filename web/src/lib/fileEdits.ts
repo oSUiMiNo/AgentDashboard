@@ -124,6 +124,7 @@ function writeTable(account: string | null, table: Table): boolean {
   try {
     if (!globalThis.localStorage) return false
     globalThis.localStorage.setItem(keyFor(account), JSON.stringify(table))
+    globalThis.dispatchEvent?.(new Event(EDITS_CHANGED))
     return true
   } catch {
     // 置けない設定のブラウザ。**呼ぶ側へ失敗を戻し、その回の編集は保持する**
@@ -132,6 +133,12 @@ function writeTable(account: string | null, table: Table): boolean {
 }
 
 /** 書きかけを読む。無ければ `null`（**空文字列と区別する**——空にしたのも編集である）。 */
+export const EDITS_CHANGED = 'agentdashboard:file-edits'
+
+export function hasEdit(host: string, path: string, account: string | null): boolean {
+  return readTable(account)?.[editKey(host, path)] !== undefined
+}
+
 export function readEdit(host: string, path: string, account: string | null): string | null {
   return readEditDetails(host, path, account)?.text ?? null
 }

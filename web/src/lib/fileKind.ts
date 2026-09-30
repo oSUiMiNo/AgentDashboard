@@ -68,16 +68,18 @@ export function needsSandbox(kind: FileKind): boolean {
  * `svg` を画像と同じ印にしてあるのは、**利用者から見れば画像だから**である。
  * 中で隔離した箱を通ることは実装の都合で、押す前に知りたいことではない。
  */
-const ICONS: Record<FileKind, string> = {
-  markdown: '📝',
-  html: '🌐',
-  svg: '🖼️',
-  image: '🖼️',
-  text: '📄',
+export type FileIconType = 'document' | 'code' | 'image' | 'text'
+
+const ICONS: Record<FileKind, FileIconType> = {
+  markdown: 'document',
+  html: 'code',
+  svg: 'image',
+  image: 'image',
+  text: 'text',
 }
 
 /** ファイル1つの印。**フォルダとリンクは呼ぶ側が決める**（種別の話ではない）。 */
-export function fileIcon(path: string): string {
+export function fileIcon(path: string): FileIconType {
   return ICONS[fileKind(path)]
 }
 

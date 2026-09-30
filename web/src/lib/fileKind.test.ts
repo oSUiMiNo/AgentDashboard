@@ -102,13 +102,13 @@ describe('一覧の印', () => {
   it('画像とテキストが別の印になる', () => {
     // **これが直したかったこと。** 同じ印だと、押してみるまで何が出るか分からない
     expect(fileIcon('撮った.png')).not.toBe(fileIcon('メモ.txt'))
-    expect(fileIcon('撮った.png')).toBe('🖼️')
-    expect(fileIcon('メモ.txt')).toBe('📄')
+    expect(fileIcon('撮った.png')).toBe('image')
+    expect(fileIcon('メモ.txt')).toBe('text')
   })
 
   it('HTML と Markdown もそれと分かる印になる', () => {
-    expect(fileIcon('理解.html')).toBe('🌐')
-    expect(fileIcon('計画.md')).toBe('📝')
+    expect(fileIcon('理解.html')).toBe('code')
+    expect(fileIcon('計画.md')).toBe('document')
     // 3つとも互いに違うこと。**片方だけ変えて同じに戻す**のを防ぐ
     const 印 = [fileIcon('理解.html'), fileIcon('計画.md'), fileIcon('メモ.txt')]
     expect(new Set(印).size).toBe(3)

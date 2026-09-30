@@ -740,6 +740,69 @@ function CtrlF(): boolean {
  * 画像は文字を持たず、HTML ／ SVG の箱は外から中身に触れない——**触れないのは隔離が
  * 効いている証拠**であって、直すべき不具合ではない。
  */
+describe("外で書き換わったとき", () => {
+  function 版を並べる(版: { text: string; stamp: string }[]) {
+    let 何回目 = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        const いま = 版[Math.min(何回目, 版.length - 1)]!;
+        何回目 += 1;
+        return new Response(JSON.stringify({ path: `${ROOT}/src/app.py`, text: いま.text, truncated: false, bytes: いま.text.length, writable: true, stamp: いま.stamp }));
+      }),
+    );
+  }
+
+  beforeEach(() => {
+    globalThis.localStorage.clear();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    globalThis.localStorage.clear();
+  });
+
+  it("書きかけが無ければ、見に行った時に新しい中身へ差し替えて知らせる", async () => {
+    版を並べる([{ text: "古い\n", stamp: "s1" }, { text: "新しい\n", stamp: "s2" }]);
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    show(`${ROOT}/src/app.py`);
+    const 欄 = await screen.findByTestId("file-editor");
+    await waitFor(() => expect(欄).toHaveValue("古い\n"));
+    await act(async () => { await vi.advanceTimersByTimeAsync(4_100); });
+    await waitFor(() => expect(欄).toHaveValue("新しい\n"));
+    expect(screen.getByTestId("file-external-reload")).toHaveTextContent("外で書き換わったので、読み直しました");
+    expect(screen.queryByTestId("file-conflict-choice")).toBeNull();
+  });
+
+  it("書いて元に戻した（中身が同じ）ときは、書きかけ扱いにせず差し替える", async () => {
+    版を並べる([{ text: "古い\n", stamp: "s1" }, { text: "新しい\n", stamp: "s2" }]);
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    show(`${ROOT}/src/app.py`);
+    const 欄 = await screen.findByTestId("file-editor");
+    await waitFor(() => expect(欄).toHaveValue("古い\n"));
+    fireEvent.change(欄, { target: { value: "古い\nあ" } });
+    fireEvent.change(欄, { target: { value: "古い\n" } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(4_100); });
+    await waitFor(() => expect(欄).toHaveValue("新しい\n"));
+    expect(screen.queryByTestId("file-conflict-choice")).toBeNull();
+    expect(screen.getByTestId("file-external-reload")).toBeInTheDocument();
+  });
+
+  it("書きかけがあれば差し替えず、競合の道を出す", async () => {
+    版を並べる([{ text: "古い\n", stamp: "s1" }, { text: "新しい\n", stamp: "s2" }]);
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    show(`${ROOT}/src/app.py`);
+    const 欄 = await screen.findByTestId("file-editor");
+    await waitFor(() => expect(欄).toHaveValue("古い\n"));
+    fireEvent.change(欄, { target: { value: "古い\n書きかけ" } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(4_100); });
+    await waitFor(() => expect(screen.getByTestId("file-conflict-choice")).toBeInTheDocument());
+    expect(欄).toHaveValue("古い\n書きかけ");
+    expect(screen.getByTestId("file-save-error")).not.toHaveTextContent("保存できませんでした");
+    expect(screen.queryByTestId("file-external-reload")).toBeNull();
+  });
+});
+
 describe("テキストでないファイル", () => {
   it("赤い誤りではなく、表示できない理由とブラウザで開く道を出す", async () => {
     serve({ error: "/home/me/dev/app/data.bin はテキストではありません" }, 415);

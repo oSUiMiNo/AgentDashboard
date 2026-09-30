@@ -98,6 +98,10 @@
       状態と無関係な用途へ流用しない**、という一般の話である。
     */
     --accent-solid: #3dd9e6;
+    --type-folder: #d7a64c;
+    --type-document: #a3abb6;
+    --type-code: #a58bd6;
+    --type-image: #d48b98;
     --accent-face: color-mix(in oklch, #3dd9e6 18%, transparent);
     --accent-edge: color-mix(in oklch, #3dd9e6 40%, transparent);
 
@@ -355,11 +359,11 @@
   --file-raw-size: calc(0.75rem * var(--file-shrink) * var(--file-zoom, 1));
 }
 .file-zoom .file-prose {
+  --code-ground: var(--card);
   font-size: var(--file-prose-size);
   line-height: 1.7;
 }
 .file-zoom .file-raw {
-  --code-ground: var(--card);
   font-size: var(--file-raw-size);
 }
 /*
@@ -451,6 +455,19 @@
 .file-tabs[data-overflow='both'] {
   mask-image: linear-gradient(to right, transparent, #000 24px, #000 calc(100% - 24px), transparent);
 }
+.folder-entry-current,
+.folder-entry-current:hover {
+  background-color: color-mix(in srgb, var(--accent-solid) 20%, var(--background));
+}
+.file-tab-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 99px;
+  background: var(--accent-solid);
+  vertical-align: 1px;
+}
 .file-tab-selected,
 .file-save[data-unsaved]:not(:disabled) {
   background-color: color-mix(in srgb, var(--accent-solid) 20%, var(--background));
@@ -523,6 +540,13 @@
   background: var(--background);
   transition: opacity 120ms ease;
 }
+.file-editor-stack > .file-editor-note {
+  z-index: 3;
+  font-size: 0.75rem;
+  padding: 0 0.4em;
+  border-radius: 4px;
+  background: var(--background);
+}
 .file-editor-stack:focus-within > .file-editor-hint {
   opacity: 0.7;
 }
@@ -540,13 +564,6 @@
 
   中へ触れないので、**`iframe` という箱そのものを `transform` で拡大縮小する**。
   そのままでは箱が小さく（大きく）なるだけなので、**倍率の逆数で寸法を伸ばして
-.file-editor-stack > .file-editor-note {
-  z-index: 3;
-  font-size: 0.75rem;
-  padding: 0 0.4em;
-  border-radius: 4px;
-  background: var(--background);
-}
   打ち消す**——`scale(0.5)` なら幅を 2倍にしておけば、見た目は入れ物ちょうどに収まる。
 
   **これはブラウザの拡大と同じ効き方になる。** 中の文書から見える幅が変わるので、
