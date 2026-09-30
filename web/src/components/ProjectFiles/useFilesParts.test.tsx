@@ -9,6 +9,7 @@
  * 位置から幅を出す経路は縮退した同じ数字しか通らない。当たることは E2E でしか言えない。
  */
 
+import { requestOpenFile } from '@/lib/openFile'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { act, render, screen, waitFor } from '@testing-library/react'
@@ -157,6 +158,17 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals()
+})
+
+describe('会話からファイルを開く', () => {
+  it('PJT の中のパスはファイルの列で開き、外のパスは開かない', async () => {
+    置く()
+    await waitFor(() => expect(screen.getByTestId('folder-browser')).toHaveAttribute('data-path', ROOT))
+    act(() => requestOpenFile('/home/me/dev/other/外.md'))
+    expect(screen.queryByTestId('file-view')).toBeNull()
+    act(() => requestOpenFile(`${ROOT}/計画.md`))
+    expect(await screen.findByTestId('file-view')).toHaveAttribute('data-path', `${ROOT}/計画.md`)
+  })
 })
 
 describe('サイドバー', () => {

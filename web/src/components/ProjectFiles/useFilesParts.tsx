@@ -32,11 +32,13 @@
  */
 
 import { AnimatePresence } from 'motion/react'
-import { useCallback, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { FileColumn } from '@/components/ProjectFiles/FileColumn'
 import { Sidebar } from '@/components/ProjectFiles/Sidebar'
 import { usePanelWidths } from '@/lib/filesPanel'
 import { moveTab } from '@/lib/fileTabs'
+import { isUnder } from '@/lib/hostfs'
+import { OPEN_FILE } from '@/lib/openFile'
 import { putDir, putPicks, readPlace } from '@/lib/filesPlace'
 
 /**
@@ -269,6 +271,15 @@ export function useFilesParts({
     },
     [覚える],
   )
+
+  useEffect(() => {
+    const 開く = (event: Event) => {
+      const path = (event as CustomEvent<string>).detail
+      if (typeof path === 'string' && path.startsWith('/') && isUnder(project, path)) ファイルを選ぶ(path)
+    }
+    globalThis.addEventListener(OPEN_FILE, 開く)
+    return () => globalThis.removeEventListener(OPEN_FILE, 開く)
+  }, [project, ファイルを選ぶ])
 
   /** タブを押した。**並びは動かさず、選び直すだけ。** */
   const タブを選ぶ = useCallback(

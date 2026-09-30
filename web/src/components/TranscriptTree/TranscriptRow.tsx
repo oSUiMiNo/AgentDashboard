@@ -38,6 +38,7 @@
  * **大きさが逆に見えても戻さないこと。** 主従はウェイトと色が引き続き担っている。
  */
 
+import { requestOpenFile } from '@/lib/openFile'
 import { memo, useEffect, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import type { HunkTokens } from 'react-diff-view'
@@ -1009,7 +1010,15 @@ function DiffView({ diff }: { diff: NonNullable<ReturnType<typeof toDiffSource>>
   return (
     <div data-testid="diff-view" data-highlighted={tokens !== null}>
       <div className="text-muted-foreground mb-1 text-xs">
-        <span className="font-mono">{diff.filePath}</span>{' '}
+        <button
+          type="button"
+          data-testid="diff-open-file"
+          title="ファイルの列で開く"
+          onClick={() => requestOpenFile(diff.filePath)}
+          className="hover:text-foreground cursor-pointer font-mono underline decoration-dotted underline-offset-2"
+        >
+          {diff.filePath}
+        </button>{' '}
         <span className="text-emerald-400">+{added}</span>{' '}
         <span className="text-red-400">-{removed}</span>
       </div>
