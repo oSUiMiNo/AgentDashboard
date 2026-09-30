@@ -398,11 +398,11 @@ test('文書からの相対パスの画像を表示し、横に長い表は表�
   await expect(wrapper).toHaveAttribute('data-edge', 'end')
   expect(await wrapper.evaluate((element) => element.offsetHeight - element.clientHeight)).toBe(0)
   await editor.locator('td').last().click()
-  const row = (await editor.locator('tr').nth(1).boundingBox())!
-  const visible = (await wrapper.boundingBox())!
   let dy = -2
   await expect(async () => {
-    dy = dy >= 1 ? -2 : dy + 1
+    const row = (await editor.locator('tr').nth(1).boundingBox())!
+    const visible = (await wrapper.boundingBox())!
+    dy = dy >= 1 ? -1 : dy + 1
     await page.mouse.move(visible.x + 30, row.y + 12)
     await page.mouse.move(visible.x + 30, row.y + dy)
     await expect(page.locator('.line-handle[data-show="true"]').first()).toBeAttached({ timeout: 600 })
