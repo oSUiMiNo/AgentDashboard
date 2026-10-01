@@ -933,7 +933,7 @@ describe('settleHostResources', () => {
     expect(fetch).toHaveBeenCalledTimes(1)
   })
 
-  it('聞き直しに入るたびに、何を待っているかを知らせる', async () => {
+  it('何を待っているかは、全台の最初の答えが揃ってから、中身が変わったときだけ知らせる', async () => {
     vi.useFakeTimers()
     偽の口({ a: [wsl(1, 'checking'), wsl(1, 'fresh')], b: ['投げる', '投げる', wsl(1, 'fresh')] })
     const onWaiting = vi.fn()

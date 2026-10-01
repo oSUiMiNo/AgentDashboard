@@ -1757,7 +1757,7 @@ tests       = [
   { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "確かめ直しの1周目で通信が失敗しても、全部送らずにダイアログを残す" },
   { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "最初から答えが来なければ、全部送らずに聞き直し、締切でダイアログを出す" },
 ]
-breaks_when = "reviveBudget.ts で通信の失敗を null に戻す＝catch を return null にする（10本が「答えが来なかった」の期待・見出し・送られていないことの検査で落ちた）。答えの無い PC をダイアログから消す（1本）。いずれも直した担当が実測した。自分でも catch を return null にし、名指しの5本が「答えが来なかった」の期待・送られていないこと・ダイアログが出ることの検査で落ちることを当て直した"
+breaks_when = "reviveBudget.ts の fetchHostResources で通信の失敗を null に戻す＝catch を return null にする（いまのコードでは2ファイルで14本落ち、名指しの5本は「答えが来なかった」の期待・送られていないこと・ダイアログが出ることの検査 test:403・620・641、TileGrid test:1117・1142 で落ちる。2026-10-01 に 422ad8c の後のコードへ当てて実測した）。答えの無い PC をダイアログから消す（1本。直した担当の実測で、ダイアログ側は 422ad8c で変わっていないので当て直していない）"
 verified    = true
 
 [[entry]]
@@ -1787,7 +1787,7 @@ tests       = [
   { file = "web/src/lib/reviveBudget.test.ts", name = "単調時計が止まっていても（寝ていた間）、壁時計が進んだぶんは経ったとみなす" },
   { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "ブラウザの時計が巻き戻ったら、残りがあっても古くなったとみなして確かめ直す" },
 ]
-breaks_when = "reviveBudget.ts の elapsedMs を壁時計だけにする（1〜3・5・7本目 test:858・880・896・972、TileGrid test:1409）。巻き戻りの規則だけを外す（2・3・5・7本目）。締切を壁時計で測る（4本目 test:908）。Number.isFinite の守りを外す（3本目 test:896）。単調時計だけで測る（6本目 test:980）。いずれも直した担当が実測した。自分でも Number.isFinite の守りを外し、3本目が古さの欄を空にする検査（test:896）で落ちることを当て直した"
+breaks_when = "reviveBudget.ts の elapsedMs を壁時計だけにする（return wall。2ファイルで5本落ち、1〜3・5・7本目が test:990・1014・1033・1110、TileGrid test:1409 で落ちる）。巻き戻りの規則（wall < 0 なら Infinity）だけを外す（同じ5本。1本目は b を聞き直した回数の検査 test:994 で落ちる）。Number.isFinite の守りを外す（3本目だけが古さの欄を空にする検査 test:1033 で落ちる）。単調時計だけで測る（6本目だけが test:1118 で落ちる）。締切（deadlineIn・締切までの残り）を壁時計で測るだけでは1本も落ちない——締切の時計（setTimeout）が単調な 65 秒で切るため。締切の時計だけを外しても（締切は単調時計のまま）1本も落ちない。両方を当てて初めて4本目が test:1045、3本目が test:1033 で落ちる——4本目は、2つの守りのどちらか片方が残っていれば緑のままである。いずれも 2026-10-01 に 422ad8c の後のコード（PC ごとに聞き直す形）へ当てて実測した"
 verified    = true
 
 [[entry]]
@@ -1819,7 +1819,7 @@ gate        = "unit"
 tests       = [
   { file = "web/src/lib/reviveBudget.test.ts", name = "答える時間の違う2台では、遅い PC を待つ間も先に答えた PC を1秒おきに聞き直し、最後の答えで返す" },
 ]
-breaks_when = "落ち着いた PC の前の周の答えを持ち越す形へ戻す（2台のテストが、期待 fits_now 1 に対し 5 で落ちた）。直した担当が実測した。自分でも、落ち着いた PC へは聞き直さず前の周の答えを持ち越す形にし、名指しの1本が PC ごとの問い合わせ回数の検査で落ちることを当て直した"
+breaks_when = "reviveBudget.ts の 聞き続ける で、自分の答えが落ち着いた PC はもう聞き直さない（抜ける）形にする → 名指しの1本が PC ごとの問い合わせ回数の検査（test:750）で { a: 1, b: 3 } になって落ちる（2ファイルで7本）。最後.set で、落ち着いた前の答えを新しい答えより優先して残す（前の答えを使い回す）形にする → 回数の検査は通り、a が fresh・1 枚であることの検査（test:751）で落ちる（2ファイルで6本）。どちらも 2026-10-01 に 422ad8c の後のコード（PC ごとに聞き直す形）へ当てて実測した"
 verified    = true
 
 [[entry]]
@@ -1859,7 +1859,7 @@ tests       = [
   { file = "web/src/lib/reviveBudget.test.ts", name = "期限を持つ答えが無ければ、有効期限は付かない（WSL でない・古い PC・数えない PC）" },
   { file = "web/src/lib/reviveBudget.test.ts", name = "返す瞬間に古くなっていた PC は、有効期限に数えない（確かめられていない側にいる）" },
 ]
-breaks_when = "TileGrid.tsx の 数えた枚数で送る の期限の判定を外す（1・3本目が送っていない／確かめ直した回数の検査 test:1288・1346 で落ちる）。期限内でも確かめ直す（2本目 test:1315）。「それでも全部戻す」も同じ道へ通す（4本目 test:1367）。reviveBudget.ts の 新しいうち で欄の無い答えを残り0とみなす（5本目 test:1384・7本目 test:943）。最も早いものではなく最も遅いものを選ぶ（6本目 test:924）。返す瞬間の読み直し前の答えで期限を作る（8本目 test:956）。いずれも直した担当が実測した。自分でも reviveBudget.ts で有効期限を最も遅いものから選ぶ形（比較の < を > にする）にし、6本目が残り27秒の検査（test:924）で落ちることを当て直した"
+breaks_when = "TileGrid.tsx の 数えた枚数で送る の期限の判定を外す（1・3本目が送っていない／確かめ直した回数の検査 test:1288・1346 で落ちる。巻き戻りの行の TileGrid test:1409 も落ち、計3本）。期限内でも確かめ直す（2本目だけ test:1315）。「それでも全部戻す」も 数えた枚数で送る へ通す（4本目だけ test:1367）。reviveBudget.ts の 新しいうち で欄の無い答えを残り0とみなす（7本目 test:1081・5本目 test:1384、ほかに名指しでない TileGrid の3本、計5本）。有効期限を最も早いものではなく最も遅いものから選ぶ（比較の < を > にする。6本目だけが残り27秒の検査 test:1062 で 49000 になって落ちる）。返す瞬間の読み直し前の答え（got.answer）で期限を作る（8本目だけ test:1094）。いずれも 2026-10-01 に 422ad8c の後のコード（PC ごとに聞き直す形）へ当てて実測した"
 verified    = true
 
 [[entry]]
@@ -1873,7 +1873,7 @@ tests       = [
   { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "PC が2台で片方が止まっても、締切で、答えた PC のぶんだけを「入るぶん」に入れる" },
   { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "画面を離れたら、進行中の問い合わせを切る" },
 ]
-breaks_when = "1回の問い合わせの上限を外す（4本が、打ち切られたか・締切後のダイアログの検査で落ちた）。画面を離れたときの打ち切りを外す（1本）。やめる・閉じるの打ち切りを外す（2本）。いずれも直した担当が実測した。自分でも1回の上限を外し、名指しのうち3本（reviveBudget の2本と、TileGrid の「問い合わせが止まっても」）が打ち切られたか・聞き直した回数の検査で落ちることを当て直した"
+breaks_when = "reviveBudget.ts の 一回聞く から1回の上限（ASK_LIMIT_MS のタイマー）を外す → 1本目が打ち切られたかの検査（test:654）、TileGrid の「問い合わせが止まっても」が test:1165 で落ちる（ほかに test:816、計3本）。2本目（片方が止まる2台）と TileGrid の2台の1本は、上限を外しても落ちない——締切の時計と、先に答えた PC の聞き直しの締切の検査が、止まった問い合わせを締切で切るため。2本目は、先に答えた PC を聞き直さない形（聞き続ける で落ち着いた PC は抜ける）にすると回数の検査（test:668）で落ちる。2台の2本は、締切そのもの（締切の時計と 締切に達した）を外すと test:665・1185 で落ちる（計21本）。以上は 2026-10-01 に 422ad8c の後のコード（PC ごとに聞き直す形）へ当てて実測した。画面を離れたときの打ち切りを外す（1本）・やめる・閉じるの打ち切りを外す（2本）は直した担当の実測で、TileGrid.tsx は 422ad8c でコメントしか変わっておらず TileGrid.test.tsx は変わっていないので当て直していない"
 verified    = true
 
 [[entry]]
@@ -1891,7 +1891,7 @@ issue       = "寝ているカードばかりなのに、メモリ不足でセ�
 behavior    = "まとめて復旧の聞き直しで、何を待っているかの知らせ（onWaiting）は、全台の最初の答えが揃うまで出さず、その後は中身が変わったときだけ出す"
 gate        = "unit"
 tests       = [
-  { file = "web/src/lib/reviveBudget.test.ts", name = "聞き直しに入るたびに、何を待っているかを知らせる" },
+  { file = "web/src/lib/reviveBudget.test.ts", name = "何を待っているかは、全台の最初の答えが揃ってから、中身が変わったときだけ知らせる" },
 ]
 breaks_when = "reviveBudget.ts の 待っているもの で、全台の最初の答えを待ち合わせない（['answer','windows','answer'] で落ちる）。知らせの重複をまとめない（['windows','windows','answer'] で落ちる）。どちらも直した担当が実測した。自分でも 聞き続ける の重複をまとめる条件（待ち !== 知らせた）を外し、名指しの1本が知らせの並びの検査（test:943）で ['windows','windows','answer'] になって落ちることを当て直した"
 verified    = true
@@ -1924,7 +1924,7 @@ tests       = [
   { file = "web/src/lib/reviveBudget.test.ts", name = "締切の直前に始めた周が締切で切られても、直前の周で確かめられていた PC を「答え無し」にしない" },
   { file = "web/src/lib/reviveBudget.test.ts", name = "締切で切った周でも、切る前に答えが来なかった PC は「答え無し」のまま" },
 ]
-breaks_when = "reviveBudget.ts で前の周へ戻す行を 最後の周.set(host, got) にする（1本目が a の no_answer で落ちる）。切られた印を周の始めの 締切で切る で見る（2本目が前の周の fresh へ戻って落ちる）。どちらも直した担当が実測した。自分でも前の周へ戻す行を 最後の周.set(host, got) にし、1本目が a の no_answer（test:696）で落ちることを当て直した"
+breaks_when = "reviveBudget.ts の 聞き続ける で、締切で切られた問い合わせを前の答えへ戻す行を 最後.set(host, got) にする → 1本目だけが a の答えの検査（test:773）で「答え無し」になって落ちる。切られたかを見ずに、答えが来なかったら前の答えへ戻す形（got.answer === NO_ANSWER なら前）にする → 2本目が test:802 で前の fresh へ戻って落ちる（ほかに test:632・816、計3本）。どちらも 2026-10-01 に 422ad8c の後のコード（PC ごとに聞き直す形）へ当てて実測した"
 verified    = true
 
 [[entry]]
@@ -1937,7 +1937,7 @@ tests       = [
   { file = "web/src/lib/reviveBudget.test.ts", name = "最後の周の後に眠って締切を迎えたら、返す瞬間の時刻で新しさを確かめる" },
   { file = "web/src/lib/reviveBudget.test.ts", name = "新しさの残りを送ってこない古い PC は、いまどおり古くなったと読まず、他の PC が答えた時点で返す" },
 ]
-breaks_when = "reviveBudget.ts で周の終わりの読み直し（今の答え）を外す（1・2本目）。返す瞬間の読み直しを外す（2・3本目）。== null を === null にする（4本目）。いずれも直した担当が実測した。自分でも周の終わりの読み直し（今の答え）を外し、1本目が「ここで返さない」の検査（test:741）、2本目が聞き直した回数の検査（test:760）で落ちることを当て直した"
+breaks_when = "reviveBudget.ts の 聞き続ける で、答えが届くたびの読み直しをやめる（落ち着いた の 今の答え(got, いま) を got.answer にする）→ 1本目が「ここで返さない」の検査（test:840）、2本目が聞き直した回数の検査（test:880）で落ちる（巻き戻りの行の test:990・1014 も落ち、計4本）。返す瞬間の読み直しを外す（返す時刻 の 今の答え を got.answer にする）→ 2本目が stale の検査（test:865）、3本目が test:894 で落ちる（計4本）。今の答え の == null を === null にする → 4本目が test:910 で落ちる（計4本）。いずれも 2026-10-01 に 422ad8c の後のコード（PC ごとに聞き直す形）へ当てて実測した"
 verified    = true
 
 [[entry]]

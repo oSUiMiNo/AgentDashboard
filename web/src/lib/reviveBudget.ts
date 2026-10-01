@@ -619,7 +619,7 @@ export interface SettleOptions {
   signal: AbortSignal
   /** 前に聞けた答え（確かめ直しのとき）。**表示にだけ使い、数えない** */
   previous?: ReadonlyMap<string, HostResources | null>
-  /** 聞き直しに入るたびに呼ぶ。何を待っているかを渡す */
+  /** 何を待っているかを渡す。**全台の最初の答えが揃ってから**、中身が変わったときだけ呼ぶ */
   onWaiting?: (waitingFor: WaitingFor) => void
 }
 
