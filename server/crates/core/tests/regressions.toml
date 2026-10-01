@@ -59,7 +59,7 @@
 #
 # ## 
 
-min_entries = 173
+min_entries = 179
 
 [[entry]]
 issue       = "イシューグループ_2026-0821-1953/セッションごとにも全体にも自分用のメモを残せるようにする"
@@ -1613,6 +1613,16 @@ verified    = true
 
 [[entry]]
 issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "PC が「外した」と報告したのに記録を書けなかったとき、報告を捨てずに取り込み直し、記録を書けるようになれば一覧から外れる"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/restart.rs", name = "寝かせた抜け殻を外したとき記録を書けなくても書けるようになれば一覧から外れる" },
+]
+breaks_when = "registry.rs の apply で、外した報告（SessionRemoved）を書けなかったときの取り込み直し（retry_removal）を呼ばない（★で落ちる）。直した担当が実測した。自分でもその条件を false && で潰し、名指しの1本が★（記録を書けるようになっても一覧から外していない）で落ちることを当て直した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
 behavior    = "PC が知らない外側の様子の綴りを送ってきたときでも、サーバは資源の答えを捨てずに Unknown として読み、CLI は「確かめられていない」側で言う"
 gate        = "unit"
 tests       = [
@@ -1709,6 +1719,22 @@ verified    = true
 
 [[entry]]
 issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "まとめて復旧で、答えの新しさは単調時計と壁時計の長いほうで測り、壁時計が巻き戻ったら期限切れとして読む（古さの欄は空にし、Infinity を画面へ渡さない）。65 秒の締切は単調時計だけで測り、巻き戻っても伸びない"
+gate        = "unit"
+tests       = [
+  { file = "web/src/lib/reviveBudget.test.ts", name = "聞いている間にブラウザの時計が巻き戻っても、新しさの残りを使い切った fresh を新しいと読まない" },
+  { file = "web/src/lib/reviveBudget.test.ts", name = "壁時計が巻き戻ったら、単調時計で残りがあっても期限切れとして聞き直す" },
+  { file = "web/src/lib/reviveBudget.test.ts", name = "壁時計が巻き戻って古くなった答えは、何秒前の値かを言わない（Infinity を画面へ渡さない）" },
+  { file = "web/src/lib/reviveBudget.test.ts", name = "ブラウザの時計が巻き戻っても、65 秒の締切は伸びない" },
+  { file = "web/src/lib/reviveBudget.test.ts", name = "新しさの経過は単調時計で測り、壁時計の巻き戻りは期限切れとして扱う" },
+  { file = "web/src/lib/reviveBudget.test.ts", name = "単調時計が止まっていても（寝ていた間）、壁時計が進んだぶんは経ったとみなす" },
+  { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "ブラウザの時計が巻き戻ったら、残りがあっても古くなったとみなして確かめ直す" },
+]
+breaks_when = "reviveBudget.ts の elapsedMs を壁時計だけにする（1〜3・5・7本目 test:858・880・896・972、TileGrid test:1409）。巻き戻りの規則だけを外す（2・3・5・7本目）。締切を壁時計で測る（4本目 test:908）。Number.isFinite の守りを外す（3本目 test:896）。単調時計だけで測る（6本目 test:980）。いずれも直した担当が実測した。自分でも Number.isFinite の守りを外し、3本目が古さの欄を空にする検査（test:896）で落ちることを当て直した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
 behavior    = "まとめて復旧でもう一度確かめた結果、全部入ると分かったときでも、黙って送らずダイアログで押させる"
 gate        = "unit"
 tests       = [
@@ -1753,6 +1779,34 @@ verified    = true
 
 [[entry]]
 issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "まとめて復旧のダイアログに、枚数を数えない PC（fits_now が null＝見積もり0）が出るとき、その行に空いた数を出さず数えない理由を出し、「必要 0.0 GB」も出さない。足元は「全部入ります」と言わず、数えない PC のぶんは空きを確かめずに送ると言う（501・409 の PC に「設定」と言わない）"
+gate        = "unit"
+tests       = [
+  { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "確かめ直しで、枚数を数えない設定の PC が返ったら、空いた数ではなく数えない理由を出す" },
+  { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "「この機械では数えない」と答えた PC は、足元の文で「設定」と言わない" },
+]
+breaks_when = "ReviveBudgetDialog.tsx の 入る行 で数えない設定の分岐を外す（1本目 test:1439）。「必要」の条件から fits_now を外す（1本目 test:1442）。足元の「全部入ります」の出し分けを外す（1本目 test:1445）。足元の文に「設定」を戻す（1本目 test:1446・2本目 test:1462）。いずれも直した担当が実測した。自分でも 入る行 の数えない設定の分岐を外し、1本目が「いま入るのは」を出さない検査（test:1439）で落ちることを当て直した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "まとめて復旧のダイアログを開けている間に、数えた枚数の有効期限（最後の周で聞き始めた時刻＋host_free_fresh_for_sec の最も早いもの）が過ぎたら、「入るぶんだけ戻す」と確かめ直しの後の「全部戻す」は送らずに確かめ直し、結果をダイアログに出す。「それでも全部戻す」はいまどおり送る。欄を送らない古い PC はいまどおり期限なし"
+gate        = "unit"
+tests       = [
+  { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "「入るぶんだけ戻す」を押しても送らずに確かめ直し、結果をダイアログに出す" },
+  { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "期限の内なら、いまどおり数えたぶんを送る" },
+  { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "確かめ直しの後の「全部戻す」も、古くなっていたら送らずに確かめ直す" },
+  { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "「それでも全部戻す」は枚数を見ない操作なので、古くなっていてもそのまま送る" },
+  { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "新しさの残りを送ってこない古い PC は、いまどおり期限が付かない" },
+  { file = "web/src/lib/reviveBudget.test.ts", name = "数えた枚数の有効期限は、PC ごとの「最後の周で聞き始めた時刻＋新しさの残り」の最も早いもの" },
+  { file = "web/src/lib/reviveBudget.test.ts", name = "期限を持つ答えが無ければ、有効期限は付かない（WSL でない・古い PC・数えない PC）" },
+  { file = "web/src/lib/reviveBudget.test.ts", name = "返す瞬間に古くなっていた PC は、有効期限に数えない（確かめられていない側にいる）" },
+]
+breaks_when = "TileGrid.tsx の 数えた枚数で送る の期限の判定を外す（1・3本目が送っていない／確かめ直した回数の検査 test:1288・1346 で落ちる）。期限内でも確かめ直す（2本目 test:1315）。「それでも全部戻す」も同じ道へ通す（4本目 test:1367）。reviveBudget.ts の 新しいうち で欄の無い答えを残り0とみなす（5本目 test:1384・7本目 test:943）。最も早いものではなく最も遅いものを選ぶ（6本目 test:924）。返す瞬間の読み直し前の答えで期限を作る（8本目 test:956）。いずれも直した担当が実測した。自分でも reviveBudget.ts で有効期限を最も遅いものから選ぶ形（比較の < を > にする）にし、6本目が残り27秒の検査（test:924）で落ちることを当て直した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
 behavior    = "まとめて復旧の空きの問い合わせが止まったときでも、1回ごとの上限と締切で切り、止まった1台に合わせて待ち続けない（画面を離れたときも進行中の問い合わせを切る）"
 gate        = "unit"
 tests       = [
@@ -1775,7 +1829,7 @@ tests       = [
   { file = "web/src/lib/reviveBudget.test.ts", name = "最後の周の後に眠って締切を迎えたら、返す瞬間の時刻で新しさを確かめる" },
   { file = "web/src/lib/reviveBudget.test.ts", name = "新しさの残りを送ってこない古い PC は、いまどおり1つの周の答えで返す" },
 ]
-breaks_when = "reviveBudget.ts で周の終わりの読み直し（今の答え）を外す（1・2本目）。返す瞬間の読み直しを外す（2・3本目）。== null を === null にする（4本目）。いずれも直した担当が実測した。自分でも周の終わりの読み直し（今の答え）を外し、1本目が「ここで返さない」の検査（test:728）、2本目が聞き直した回数の検査（test:747）で落ちることを当て直した"
+breaks_when = "reviveBudget.ts で周の終わりの読み直し（今の答え）を外す（1・2本目）。返す瞬間の読み直しを外す（2・3本目）。== null を === null にする（4本目）。いずれも直した担当が実測した。自分でも周の終わりの読み直し（今の答え）を外し、1本目が「ここで返さない」の検査（test:741）、2本目が聞き直した回数の検査（test:760）で落ちることを当て直した"
 verified    = true
 
 [[entry]]
@@ -1786,7 +1840,7 @@ tests       = [
   { file = "web/src/lib/reviveBudget.test.ts", name = "締切の直前に始めた周が締切で切られても、直前の周で確かめられていた PC を「答え無し」にしない" },
   { file = "web/src/lib/reviveBudget.test.ts", name = "締切で切った周でも、切る前に答えが来なかった PC は「答え無し」のまま" },
 ]
-breaks_when = "reviveBudget.ts で前の周へ戻す行を 最後の周.set(host, got) にする（1本目が a の no_answer で落ちる）。切られた印を周の始めの 締切で切る で見る（2本目が前の周の fresh へ戻って落ちる）。どちらも直した担当が実測した。自分でも前の周へ戻す行を 最後の周.set(host, got) にし、1本目が a の no_answer（test:683）で落ちることを当て直した"
+breaks_when = "reviveBudget.ts で前の周へ戻す行を 最後の周.set(host, got) にする（1本目が a の no_answer で落ちる）。切られた印を周の始めの 締切で切る で見る（2本目が前の周の fresh へ戻って落ちる）。どちらも直した担当が実測した。自分でも前の周へ戻す行を 最後の周.set(host, got) にし、1本目が a の no_answer（test:696）で落ちることを当て直した"
 verified    = true
 
 [[entry]]
@@ -1889,6 +1943,36 @@ tests       = [
   { file = "server/crates/core/src/client/wait.rs", name = "外す待ちは取り下げた起こし直しの断りでは落ちず外れた知らせで終わる" },
 ]
 breaks_when = "ws.rs の forget 呼び出しを外す（ローカルの1本・セルフホストの1本が★）。link.rs の Forget の処理を外す（セルフホストの1本が★）。archive() の取り下げを外す（寝かせた抜け殻の1本が★）。wait.rs の外す待ちの例外を外す（単体が★。ローカルの1本は「外せること: Refused」で落ちた）。いずれも直した担当が実測した。自分でも wait.rs の外す待ちの例外を外し、単体の1本が★で落ちることを当て直した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "確かめ待ちの間や起こしている最中に終了を頼んだとき、起こし直しを取り下げて新しいプロセスを起こさず、起こし終えた実体は止めるだけで畳まず外した印も残さないので後から起こし直せる（CLI の終了は、取り下げた起こし直しの断りで満ちる）"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "確かめを待っている間に終了を頼むと確かめが済んでも起こさず後から起こし直せる" },
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "起こしている最中に終了を頼むと断らずに起こした実体を止めてカードは残る" },
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "終了の頼みの後に外されたら外した側の断りになり逆には戻らない" },
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "何も持っていないカードを外し始めても断らない" },
+  { file = "server/crates/core/tests/restart.rs", name = "寝かせた抜け殻を確かめ中に終了させると確かめが済んでも起こさない" },
+  { file = "server/crates/core/tests/restart.rs", name = "作業中のまま残った抜け殻を確かめ中に終了させると待ち切らずに止まる" },
+  { file = "server/crates/core/src/client/wait.rs", name = "終了待ちは起こし直しが終わった断りで止まったと満ち競合では待ち続ける" },
+]
+breaks_when = "session/mod.rs の kill を、実体だけを止める以前の形へ戻す（session_revive の2本が★席を握って待っている／★見つからないと断っている、restart の2本が★新しいプロセスを起こしている／★終了できなかったと返している で落ちる）。起こし終えた実体を止めずに畳む形にする（★起こした実体を畳んでいる）。札を下ろす理由を強さを見ずに上書きする（★外した断りを上書きしている）。CLI の終了待ち（wait.rs）を以前の扱いへ戻す（wait.rs の単体と restart の「作業中のまま残った抜け殻を確かめ中に終了させると待ち切らずに止まる」が★）。いずれも直した担当が実測した。自分でも ReviveTicket::withdraw で理由を max を取らずに上書きする形にし、session_revive の「終了の頼みの後に外されたら外した側の断りになり逆には戻らない」が★（外した後に届いた弱い理由で、外した断りを上書きしている）で落ちることを当て直した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "記録だけを外すとき、記録を外せなければカードは一覧に残り、外し始めに取り下げた起こし直しは戻らず新しい起こし直しは通り、外せたときだけ外した印が立つ（ローカル・セルフホストとも）"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/restart.rs", name = "記録を外せなかった抜け殻は一覧に残り外す前の起こし直しは戻らず後から起こし直せる" },
+  { file = "server/crates/core/tests/restart.rs", name = "前回の起動が残した抜け殻を確かめ中に外すと確かめが済んでも起こさない" },
+  { file = "server/crates/core/tests/a2s.rs", name = "接続断のカードの記録を外せなければ_PC_は取り下げた起こし直しを戻さず新しい頼みは通す" },
+  { file = "server/crates/core/tests/a2s.rs", name = "接続断のカードを起こし直しの確かめ中に外すと_PC_は確かめが済んでも起こさない" },
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "外し始めの取り下げは印を残さず記録を外せなければ後から起こし直せる" },
+]
+breaks_when = "ws.rs で、記録を外す前に forget を送る以前の形へ戻す（restart・a2s とも★「一覧から外されたので…」で断っている）。stop_for_removal を効かなくする（★取り下げた起こし直しを起こしている）。stop_for_removal で外した印も立てる（★外し始めただけのカードを、外したカードとして断っている）。記録を外せた後の forget を外す（確かめ中に外す試験2本＝ローカル・セルフホストが★外した印が立っていない）。いずれも直した担当が実測した。自分でも stop_for_removal で外した印（mark_removed）も立てる形にし、session_revive の「外し始めの取り下げは印を残さず記録を外せなければ後から起こし直せる」が★（外し始めただけのカードを、外したカードとして断っている）で落ちることを当て直した"
 verified    = true
 
 [[entry]]
