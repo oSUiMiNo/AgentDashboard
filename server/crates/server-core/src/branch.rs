@@ -450,61 +450,15 @@ impl Branch {
         断りを拾う: Option<(CardId, u64)>,
         条件: impl Fn(&SessionMeta) -> bool,
     ) -> Result<Option<SessionMeta>, String> {
-        let 期限 = tokio::time::Instant::now() + 限度;
-        loop {
-            // 記録を直に確かめる（取りこぼしの保険であり、既に満たしている場合の近道）
-            if let Some(meta) = self
-                .registry
-                .list(self.account_id)
-                .into_iter()
-                .find(|meta| 条件(meta))
-            {
-                return Ok(Some(meta));
-            }
-            if let Some((拾うカード, 目印)) = 断りを拾う {
-                // **待っている相手が一覧から外されたら、もう起きてこない。** 外したカードは
-                // 記録ごと消えるので、断りも残らない——待ち続けると上限まで黙る
-                if self.registry.owned(self.account_id, 拾うカード).is_none() {
-                    return Err("一覧から外されました".to_string());
-                }
-                if let Some(理由) =
-                    self.registry
-                        .revive_refusal_since(self.account_id, 拾うカード, 目印)
-                {
-                    return Err(理由);
-                }
-            }
-            if tokio::time::Instant::now() >= 期限 {
-                return Ok(None);
-            }
-            let 待つ = POLL.min(期限 - tokio::time::Instant::now());
-            // **待つ間隔が過ぎただけなら、次の周回で記録を直に確かめる。**
-            // ここを `Err(_) => {}` と書くと「別の綴りで結果を捨てている」ことになる
-            let Ok(受け取った) = tokio::time::timeout(待つ, events.recv()).await else {
-                continue;
-            };
-            match 受け取った {
-                Ok(event) => {
-                    if event.account_id != self.account_id {
-                        continue;
-                    }
-                    if let Some((拾うカード, _)) = 断りを拾う
-                        && let Some(理由) = 起こし直しの断り(&event.message, 拾うカード)
-                    {
-                        return Err(理由.to_string());
-                    }
-                    if let ServerMessage::SessionUpsert { session } = event.message
-                        && 条件(&session)
-                    {
-                        return Ok(Some(*session));
-                    }
-                }
-                // 取りこぼした。次の周回で記録を直に確かめるので、ここでは待ちへ戻る
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                // 配信そのものが閉じた。記録の確認だけで続ける意味は無い
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(None),
-            }
-        }
+        wait_for(
+            &self.registry,
+            self.account_id,
+            events,
+            限度,
+            断りを拾う,
+            条件,
+        )
+        .await
     }
 
     /// 元をその席へ戻し、枝をその**1つ右隣**へ置く（§3-3）。
@@ -662,6 +616,76 @@ fn pushable(status: SessionStatus) -> Result<(), String> {
     }
 }
 
+/// [`Branch::wait_for`] の本体。段取りの他の持ち物（`SessionHost`）に触らないので、待ち方だけを
+/// 記録層と組んで確かめられる。
+///
+/// **配信で受けた断りも目印より後のものだけを拾う**（実装レビュー第5回 Astra 4）。購読してから
+/// 目印を控えるまでに届いた先の断りは購読の列に残る。記録から引く側は目印で除いていたが、
+/// 配信の側は目印を見ずに拾っていたので、新しい起こし直しが受け付けられても古い断りで止まった。
+/// 記録層は配る前に断りを番号付きで残す（`publish_local`）ので、受け取った時点で必ず引ける。
+async fn wait_for(
+    registry: &SessionRegistry,
+    account_id: uuid::Uuid,
+    events: &mut tokio::sync::broadcast::Receiver<crate::registry::AccountEvent>,
+    限度: Duration,
+    断りを拾う: Option<(CardId, u64)>,
+    条件: impl Fn(&SessionMeta) -> bool,
+) -> Result<Option<SessionMeta>, String> {
+    let 期限 = tokio::time::Instant::now() + 限度;
+    loop {
+        // 記録を直に確かめる（取りこぼしの保険であり、既に満たしている場合の近道）
+        if let Some(meta) = registry
+            .list(account_id)
+            .into_iter()
+            .find(|meta| 条件(meta))
+        {
+            return Ok(Some(meta));
+        }
+        if let Some((拾うカード, 目印)) = 断りを拾う {
+            // **待っている相手が一覧から外されたら、もう起きてこない。** 外したカードは
+            // 記録ごと消えるので、断りも残らない——待ち続けると上限まで黙る
+            if registry.owned(account_id, 拾うカード).is_none() {
+                return Err("一覧から外されました".to_string());
+            }
+            if let Some(理由) = registry.revive_refusal_since(account_id, 拾うカード, 目印)
+            {
+                return Err(理由);
+            }
+        }
+        if tokio::time::Instant::now() >= 期限 {
+            return Ok(None);
+        }
+        let 待つ = POLL.min(期限 - tokio::time::Instant::now());
+        // **待つ間隔が過ぎただけなら、次の周回で記録を直に確かめる。**
+        // ここを `Err(_) => {}` と書くと「別の綴りで結果を捨てている」ことになる
+        let Ok(受け取った) = tokio::time::timeout(待つ, events.recv()).await else {
+            continue;
+        };
+        match 受け取った {
+            Ok(event) => {
+                if event.account_id != account_id {
+                    continue;
+                }
+                if let Some((拾うカード, 目印)) = 断りを拾う
+                    && 起こし直しの断り(&event.message, 拾うカード).is_some()
+                    && let Some(理由) = registry.revive_refusal_since(account_id, 拾うカード, 目印)
+                {
+                    return Err(理由);
+                }
+                if let ServerMessage::SessionUpsert { session } = event.message
+                    && 条件(&session)
+                {
+                    return Ok(Some(*session));
+                }
+            }
+            // 取りこぼした。次の周回で記録を直に確かめるので、ここでは待ちへ戻る
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            // 配信そのものが閉じた。記録の確認だけで続ける意味は無い
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(None),
+        }
+    }
+}
+
 /// そのカードの起こし直しが**終わった断り**で返ってきたなら、その文面を返す
 /// （寝ているカードばかりなのに、メモリ不足でセッションを起こせない 設計§7-3）。
 ///
@@ -815,6 +839,108 @@ mod tests {
         assert!(断り.contains("会話"), "理由が読めない: {断り}");
 
         branchable(true).expect("履歴があれば通ること");
+    }
+
+    fn 寝ている元(card_id: CardId, status: SessionStatus) -> ServerMessage {
+        ServerMessage::SessionUpsert {
+            session: Box::new(SessionMeta {
+                card_id,
+                project: protocol::ProjectId("/tmp/project".to_string()),
+                claude_session_id: None,
+                resumed_from: None,
+                permission_mode: None,
+                model: None,
+                model_label: None,
+                model_requested: None,
+                status,
+                subagent_active: 0,
+                last_activity_at: 1,
+                last_assistant_message: None,
+                created_at: 1,
+                hooks_seen: false,
+                agent_id: None,
+                agent_connected: true,
+                account: None,
+                toml_account: None,
+                session_title: None,
+                position: 0,
+                nickname: None,
+                branched_from: None,
+                context_usage: None,
+                rate_limits: None,
+                cost: None,
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn 目印より前に届いた断りは配信から受けても拾わない() {
+        // 実装レビュー第5回 Astra 4。「購読 → 先の頼みの断り → 目印 → 新しい起こし直し」の順。
+        // 段取りは購読と目印の間で待たないが、別の糸の配信はその間にも入りうる。**時計は使わず、
+        // 待ちを手で1回だけ進めて順を固定する**——1回目で列に残った先の断りを受け取る
+        let path = std::env::temp_dir().join(format!(
+            "agentdashboard-branch-refusal-{}.db",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let db = crate::db::connect(&format!("sqlite://{}", path.display()))
+            .await
+            .expect("SQLite へ繋げること");
+        let registry =
+            SessionRegistry::load(db, 100, None, crate::registry::NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+        let origin = crate::registry::ReportOrigin::local();
+        let account_id = origin.account_id;
+        let card_id = CardId::new();
+        assert!(
+            registry
+                .apply(
+                    &origin,
+                    寝ている元(card_id, SessionStatus::Ended { ok: true })
+                )
+                .await
+        );
+
+        let mut events = registry.subscribe_events();
+        registry
+            .apply(
+                &origin,
+                ServerMessage::Error {
+                    card_id: Some(card_id),
+                    message: "先の頼みの断り".to_string(),
+                    kind: ErrorKind::Revive,
+                    busy: Some(false),
+                    withdrawn: None,
+                },
+            )
+            .await;
+        let 目印 = registry.revive_refusal_mark();
+
+        let mut 待ち = std::pin::pin!(wait_for(
+            &registry,
+            account_id,
+            &mut events,
+            WAKE_TIMEOUT,
+            Some((card_id, 目印)),
+            move |meta| meta.card_id == card_id && 整った(meta.status),
+        ));
+        let 一回目 =
+            std::future::poll_fn(|cx| std::task::Poll::Ready(待ち.as_mut().poll(cx))).await;
+        assert!(
+            一回目.is_pending(),
+            "★目印より前の断りを配信から拾って止まった: {一回目:?}"
+        );
+
+        // 新しい起こし直しが受け付けられて起きた（手元に記録があるので DB を通らない）
+        registry
+            .adopt(account_id, 寝ている元(card_id, SessionStatus::WaitingInput))
+            .await;
+        let 起きた = 待ち
+            .await
+            .expect("新しい起こし直しは断られていない")
+            .expect("起きたことを受け取ること");
+        assert_eq!(起きた.card_id, card_id);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

@@ -3199,3 +3199,144 @@ async fn 起こし直しの終わった断りは配った後も記録から引�
         backend.finish().await;
     }
 }
+
+/// 外したと記録へ書けなくする（`archived` を立てる更新だけを断る）。**報告の更新は通る**——
+/// `write_session` の更新列に `archived` は無いので、この仕掛けには掛からない。
+async fn 外すのを断らせる(backend: &common::Backend) {
+    use sea_orm::ConnectionTrait as _;
+    let statements: &[&str] = if backend.name == "sqlite" {
+        &[
+            "CREATE TRIGGER refuse_archive BEFORE UPDATE OF archived ON sessions \
+           WHEN NEW.archived BEGIN SELECT RAISE(ABORT, 'test: archive refused'); END",
+        ]
+    } else {
+        &[
+            "CREATE FUNCTION refuse_archive() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN RAISE EXCEPTION 'test: archive refused'; END $$",
+            "CREATE TRIGGER refuse_archive BEFORE UPDATE OF archived ON sessions \
+             FOR EACH ROW WHEN (NEW.archived) EXECUTE FUNCTION refuse_archive()",
+        ]
+    };
+    for statement in statements {
+        backend
+            .db
+            .execute_unprepared(statement)
+            .await
+            .unwrap_or_else(|err| panic!("[{}] 仕掛けを張れること: {err}", backend.name));
+    }
+}
+
+async fn 外すのを断らせない(backend: &common::Backend) {
+    use sea_orm::ConnectionTrait as _;
+    let statement = if backend.name == "sqlite" {
+        "DROP TRIGGER refuse_archive"
+    } else {
+        "DROP TRIGGER refuse_archive ON sessions"
+    };
+    backend
+        .db
+        .execute_unprepared(statement)
+        .await
+        .unwrap_or_else(|err| panic!("[{}] 仕掛けを外せること: {err}", backend.name));
+}
+
+#[tokio::test]
+async fn 外した報告の取り込み直しと行き違った更新は外したカードを一覧へ戻さない() {
+    // 実装レビュー第5回 Astra 1。外した報告を記録へ書けず、取り込み直しが待っている間に、遅れて
+    // 届いた更新が入ってくる。「更新が止まっている → 取り込み直しが外し終える → 更新が再開」の順を
+    // 止める口で固定する。止める所は2つ——記録を取る前（更新が記録を作り直す）と、配る前（外した
+    // 知らせの後に更新の知らせが届く）
+    use sea_orm::EntityTrait;
+    use server_core::registry::更新の止め所;
+    for 止め所 in [更新の止め所::記録を取る前, 更新の止め所::配る前] {
+        for backend in common::backends("removal-retry-race").await {
+            let registry =
+                SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                    .await
+                    .expect("記録層を立てられること");
+            let 名札 = format!("{} / {止め所:?}", backend.name);
+            // 取り込み直しは急かす口でだけ進める（時計に頼らない）
+            registry.外した報告の取り込み直しの間隔(
+                std::time::Duration::from_secs(3_600),
+            );
+            let card_id = CardId::new();
+            assert!(registry.apply(&local(), upsert(card_id)).await);
+
+            外すのを断らせる(&backend).await;
+            assert!(
+                !registry
+                    .apply(&local(), ServerMessage::SessionRemoved { card_id })
+                    .await,
+                "[{名札}] 外したと書けないこと"
+            );
+            assert!(
+                registry.get(card_id).is_some(),
+                "[{名札}] 書けないうちは残る"
+            );
+            外すのを断らせない(&backend).await;
+
+            let mut events = registry.subscribe_events();
+            let mut 止めた = registry.更新を止める(止め所);
+            let 更新 = tokio::spawn({
+                let registry = std::sync::Arc::clone(&registry);
+                async move { registry.apply(&local(), upsert(card_id)).await }
+            });
+            止めた.止まるまで待つ().await;
+
+            // 更新が止まっている間に、取り込み直しが外し終える
+            let 外れた = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    registry.外した報告の取り込み直しを急かす();
+                    if let Ok(Ok(event)) =
+                        tokio::time::timeout(std::time::Duration::from_millis(200), events.recv())
+                            .await
+                        && matches!(
+                            event.message,
+                            ServerMessage::SessionRemoved { card_id: id } if id == card_id
+                        )
+                    {
+                        return;
+                    }
+                }
+            })
+            .await;
+            assert!(外れた.is_ok(), "[{名札}] 取り込み直しが外し終えること");
+
+            止めた.進める();
+            assert!(
+                更新.await.expect("落ちないこと"),
+                "[{名札}] 更新には ack を返す（二度と書けないものを再送させない）"
+            );
+            assert!(
+                registry.get(card_id).is_none(),
+                "[{名札}] ★外したカードの記録を、行き違った更新が作り直している"
+            );
+            // 上の待ちは外した知らせを受け取って抜けたので、そこから数え始める
+            let mut 最後 = Some("外した");
+            while let Ok(event) = events.try_recv() {
+                match event.message {
+                    ServerMessage::SessionUpsert { session } if session.card_id == card_id => {
+                        最後 = Some("更新");
+                    }
+                    ServerMessage::SessionRemoved { card_id: id } if id == card_id => {
+                        最後 = Some("外した");
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                最後,
+                Some("外した"),
+                "[{名札}] ★最後に配られたのが外した知らせではない（ブラウザの一覧に戻る）"
+            );
+            let row = server_core::db::entity::sessions::Entity::find_by_id(card_id.0)
+                .one(&backend.db)
+                .await
+                .expect("引けること")
+                .expect("行は消さない");
+            assert!(row.archived, "[{名札}] DB で外れていること");
+
+            backend.finish().await;
+        }
+    }
+}

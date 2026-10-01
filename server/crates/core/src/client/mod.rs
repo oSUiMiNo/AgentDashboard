@@ -866,7 +866,11 @@ pub async fn kill(target: &Target, prefix: &str) -> Result<Outcome, ClientError>
     ws.send(&ClientMessage::Kill { card_id: card }).await?;
     let outcome = wait::run(
         &mut ws,
-        Goal::Ended { card, entity: None },
+        Goal::Ended {
+            card,
+            entity: None,
+            ended_at_snapshot: false,
+        },
         "セッションの終了",
         wait::KILL_CAP,
     )

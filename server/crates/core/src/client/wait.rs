@@ -126,7 +126,24 @@ pub enum Goal {
     /// `Ended` でない＝生きた実体がある）。**まだ1枚も見ていない（`None`）なら満ちない**
     /// ——止まったと言い切れないことを言わない。`Status`（差分）は `agent_connected` を
     /// 運ばないので見ない。
-    Ended { card: CardId, entity: Option<bool> },
+    ///
+    /// # 接続直後の写しの `Ended` では満ちない（実装レビュー第5回 Astra 2）
+    ///
+    /// **寝ているカードを起こし直している最中も、写しは `Ended` である。** 写しで満ちると、
+    /// 終了の頼みが起こし直しを取り下げたかを読まずに成功し、頼みが後から断られても気づかない。
+    /// そこで1枚目の `SessionUpsert`（写し。`entity` が `None` の間に届く）は実体の有無を控える
+    /// だけにし、**頼みへの答え**で満ちる。答えは PC が頼み1回につき必ず1つ配る
+    /// （`SessionManager::kill`）：取り下げの断り・止めた実体の `Ended`・既に終わっていた実体の
+    /// 配り直し・見つからないという断り。
+    ///
+    /// `ended_at_snapshot` は写しが `Ended` だったか。**そのカードへの終了の断り（種別 `kill`）を、
+    /// 止めるものが無かった答えとして満たす**のはこのときだけ——動いていたカードの終了が断られた
+    /// なら、それは失敗である。
+    Ended {
+        card: CardId,
+        entity: Option<bool>,
+        ended_at_snapshot: bool,
+    },
     /// `session nickname`：そのカードの `SessionUpsert` が、頼んだ名前を持って返る
     /// （名前付け設計§11-2）。
     ///
@@ -214,7 +231,7 @@ impl Goal {
         // （下の規則のまま読むと、止まったのに「終了できませんでした」と言う）。聞き流して、
         // `Ended` か取り下げを待ち続ける
         if let (
-            Self::Ended { card, entity },
+            Self::Ended { card, entity, .. },
             ServerMessage::Error {
                 card_id: Some(errored),
                 message: text,
@@ -255,6 +272,26 @@ impl Goal {
             && errored == origin
         {
             return Step::Note(format!("（元のセッションの起こし直しの知らせ）{message}"));
+        }
+        // **写しが終わっていたカードで終了そのものが断られたら、止めるものが無かったとして満ちる**
+        // （実装レビュー第5回 Astra 2）。前回の起動が残した抜け殻（PC に実体も起こし直しも無い）
+        // への終了がこの道を通る。以前は写しの `Ended` で満ちていたので、成功で返していた
+        if let (
+            Self::Ended {
+                card,
+                ended_at_snapshot: true,
+                ..
+            },
+            ServerMessage::Error {
+                card_id: Some(errored),
+                message: text,
+                kind: ErrorKind::Kill,
+                ..
+            },
+        ) = (&*self, message)
+            && errored == card
+        {
+            return done(format!("既に終了しています（{text}）"), message);
         }
         // Error はどの Goal でも同じ扱い（CLI設計§8-2・§7-3）：
         // 対象カード宛てか宛先なし（Spawn の失敗・解釈不能）は即座に落ち、
@@ -310,14 +347,22 @@ impl Goal {
                     None => Step::Continue,
                 }
             }
-            Self::Ended { card, entity } => {
+            Self::Ended {
+                card,
+                entity,
+                ended_at_snapshot,
+            } => {
                 if let ServerMessage::SessionUpsert { session } = message
                     && session.card_id == *card
                 {
-                    *entity = Some(
-                        session.agent_connected
-                            && !matches!(session.status, SessionStatus::Ended { .. }),
-                    );
+                    let 写し = entity.is_none();
+                    let ended = matches!(session.status, SessionStatus::Ended { .. });
+                    *entity = Some(session.agent_connected && !ended);
+                    // 1枚目は接続直後の写し。**終わっていても満たさない**（上の doc）
+                    if 写し {
+                        *ended_at_snapshot = ended;
+                        return Step::Continue;
+                    }
                 }
                 match status_of(message, card) {
                     Some(SessionStatus::Ended { ok }) => done(
@@ -779,7 +824,11 @@ mod tests {
     #[test]
     fn 対象カードのエラーと宛先なしのエラーは待ちを打ち切る() {
         let card = CardId::new();
-        let mut goal = Goal::Ended { card, entity: None };
+        let mut goal = Goal::Ended {
+            card,
+            entity: None,
+            ended_at_snapshot: false,
+        };
         assert!(matches!(
             goal.observe(&ServerMessage::Error {
                 card_id: Some(card),
@@ -824,7 +873,11 @@ mod tests {
 
     /// 終了の待ちに、接続直後の写しを1枚見せる。`entity` が真なら生きた実体があるカード。
     fn 写しを見た終了の待ち(card: CardId, entity: bool) -> Goal {
-        let mut goal = Goal::Ended { card, entity: None };
+        let mut goal = Goal::Ended {
+            card,
+            entity: None,
+            ended_at_snapshot: false,
+        };
         let mut 写し = meta(card, SessionStatus::Working);
         写し.agent_connected = entity;
         assert!(matches!(goal.observe(&upsert(写し)), Step::Continue));
@@ -943,7 +996,11 @@ mod tests {
         }
 
         // **まだ写しを見ていないなら満ちない**——止まったと言い切れない
-        let mut goal = Goal::Ended { card, entity: None };
+        let mut goal = Goal::Ended {
+            card,
+            entity: None,
+            ended_at_snapshot: false,
+        };
         assert!(
             matches!(goal.observe(&取り下げ), Step::Note(_)),
             "★実体の有無を知らないのに、取り下げの断りで止まったと言っている"
@@ -1073,12 +1130,102 @@ mod tests {
 
     #[test]
     fn 終了待ちは正常異常を言い分けて満ちる() {
+        // 写しの後に届いた `Ended` で満ちる（写しの `Ended` では満ちない。下のテスト）
         let card = CardId::new();
-        let mut goal = Goal::Ended { card, entity: None };
+        let mut goal = 写しを見た終了の待ち(card, true);
         match goal.observe(&upsert(meta(card, SessionStatus::Ended { ok: false }))) {
             Step::Done(outcome) => assert!(outcome.human.contains("異常終了")),
             _ => panic!("Ended で満ちること"),
         }
+    }
+
+    /// 終了の待ちに、`Ended` の写しを1枚見せる（寝ているカード。実体は生きていない）。
+    fn 終わった写しを見た終了の待ち(card: CardId) -> Goal {
+        let mut goal = Goal::Ended {
+            card,
+            entity: None,
+            ended_at_snapshot: false,
+        };
+        let mut 写し = meta(card, SessionStatus::Ended { ok: true });
+        写し.agent_connected = true;
+        assert!(
+            matches!(goal.observe(&upsert(写し)), Step::Continue),
+            "★接続直後の写しが Ended だというだけで、終了の頼みへの答えを待たずに満ちている"
+        );
+        goal
+    }
+
+    #[test]
+    fn 終了待ちは接続直後の写しのendedでは満ちず頼みへの答えで満ちる() {
+        // 実装レビュー第5回 Astra 2。寝ているカードを起こし直している最中も写しは `Ended` なので、
+        // 写しで満ちると取り下げを待たずに成功する。答えは PC が頼み1回につき1つ配る
+        let card = CardId::new();
+
+        // 起こし直しを取り下げた：取り下げの断りで満ちる
+        let mut goal = 終わった写しを見た終了の待ち(card);
+        match goal.observe(&起こし直しの断り(
+            card,
+            "終了を頼まれたので、起こし直しをやめました",
+            Some(protocol::ws::Withdrawal::Kill),
+        )) {
+            Step::Done(outcome) => {
+                assert!(outcome.human.contains("起こし直しは止まりました"));
+                assert!(
+                    outcome.raw.contains(r#""withdrawn": "kill""#),
+                    "{}",
+                    outcome.raw
+                );
+            }
+            _ => panic!("取り下げの断りで満ちること"),
+        }
+
+        // 既に終わっていた実体：PC が配り直した姿で満ちる
+        let mut goal = 終わった写しを見た終了の待ち(card);
+        assert!(matches!(
+            goal.observe(&upsert(meta(card, SessionStatus::Ended { ok: true }))),
+            Step::Done(_)
+        ));
+
+        // 何も無かった（前回の起動が残した抜け殻）：終了の断りは、止めるものが無かった答え
+        let mut goal = 終わった写しを見た終了の待ち(card);
+        match goal.observe(&ServerMessage::Error {
+            card_id: Some(card),
+            message: "セッションが見つかりません".to_string(),
+            kind: ErrorKind::Kill,
+            busy: None,
+            withdrawn: None,
+        }) {
+            Step::Done(outcome) => assert!(
+                outcome.human.contains("既に終了しています"),
+                "{}",
+                outcome.human
+            ),
+            _ => panic!("★終わっていたカードの終了を、止めるものが無かったのに失敗と言っている"),
+        }
+
+        // 起こし直しの他の断り（メモリ不足など）では満ちない——取り下げを待つ
+        let mut goal = 終わった写しを見た終了の待ち(card);
+        assert!(matches!(
+            goal.observe(&起こし直しの断り(
+                card,
+                "メモリが足りないので起こし直せません",
+                None
+            )),
+            Step::Note(_)
+        ));
+
+        // **動いていたカード**の終了の断りは、従来どおり失敗
+        let mut goal = 写しを見た終了の待ち(card, true);
+        assert!(matches!(
+            goal.observe(&ServerMessage::Error {
+                card_id: Some(card),
+                message: "セッションが見つかりません".to_string(),
+                kind: ErrorKind::Kill,
+                busy: None,
+                withdrawn: None,
+            }),
+            Step::Fail(_)
+        ));
     }
 
     #[test]

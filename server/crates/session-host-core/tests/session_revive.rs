@@ -2465,3 +2465,44 @@ async fn 何も持っていないカードを外し始めても断らない() {
         "終了の頼みは従来どおり、何も無ければ見つからないと断る"
     );
 }
+
+#[tokio::test]
+async fn 判定の断りと終了の取り下げが同時に用意できたら取り下げを返す() {
+    // 実装レビュー第5回 Astra 3。確かめた直後に終了の頼みが届き、その周の判定はメモリ不足で
+    // 断る形。**同じ poll の中で判定の失敗と取り下げが揃う**ので、`select!` がどちらの腕から
+    // 見ても判定の腕が選ばれる。以前は通常の断りを返し、終了の待ちは取り下げを受け取れなかった
+    // （実体の無いカードでは `Ended` も来ないので、CLI は時間切れまで待った）
+    let manager = common::manager_with(実機の設定());
+    暖まったwsl(&manager);
+    // (1,792 − 2,048) で1枚も入らない
+    外側を差す(&manager, 名乗る外側::作る(1_792));
+    let card_id = CardId::new();
+    {
+        let manager_weak = Arc::downgrade(&manager);
+        manager.確認の後に差し込む(Arc::new(move || {
+            if let Some(manager) = manager_weak.upgrade() {
+                manager
+                    .kill(card_id)
+                    .expect("起こし直しの札があるので、終了の頼みは通ること");
+            }
+        }));
+    }
+
+    let in_flight = manager.begin_revive(card_id).expect("印が立つこと");
+    let 断り = manager
+        .revive(
+            in_flight,
+            &common::work_dir(),
+            None,
+            ClaudeSessionId(uuid::Uuid::new_v4()),
+        )
+        .await
+        .expect_err("起こさずに断ること");
+    assert_eq!(
+        断り.withdrawal(),
+        Some(protocol::ws::Withdrawal::Kill),
+        "★終了で取り下げたのに、判定の断り（{断り}）を返している"
+    );
+    assert!(manager.get(card_id).is_none(), "実体を作らないこと");
+    assert_eq!(manager.reserved_revives(), 0, "予約を残していない");
+}

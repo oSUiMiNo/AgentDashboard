@@ -2677,6 +2677,16 @@ struct ReviveTable {
     removed_order: std::collections::VecDeque<CardId>,
 }
 
+/// 止める頼み（[`SessionManager::halt`]）で何を止めたか。
+enum Halted {
+    /// 進んでいた起こし直しの札を下ろした（実体があれば、それも止めた）
+    Withdrew,
+    /// 札は無く、実体だけを止めた（既に終わっていた実体も含む）
+    Stopped(Arc<Session>),
+    /// 止めるものが無かった
+    Nothing,
+}
+
 /// 外した印を、どんなときに残すか（[`SessionManager::retire`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Retire {
@@ -3643,11 +3653,31 @@ impl SessionManager {
     ///
     /// 実体が無くても、取り下げた起こし直しがあれば断らない。起こしている最中は古い実体を
     /// 畳み終え、新しい実体がまだ表に無いので、実体だけを見ると止めたのに見つからないと言う。
+    ///
+    /// # 頼み1回につき、答えを必ず1つ配る（実装レビュー第5回 Astra 2）
+    ///
+    /// 終了を待つ CLI は、接続直後の写しで満ちてはいけない（確かめ待ちのカードも写しは `Ended`
+    /// なので、取り下げを待たずに成功していた）。写しの後に何が来れば済んだと言えるかを、ここが
+    /// 決める。
+    ///
+    /// | この PC で | 答え |
+    /// |---|---|
+    /// | 起こし直しを取り下げた | 起こし直しが返す取り下げの断り（`withdrawn: kill`） |
+    /// | 生きた実体を止めた | プロセスが落ちて届く `Ended` |
+    /// | 既に終わっていた実体 | **いまの姿を配り直す**（止めるものが無く、`Ended` が届かないため） |
+    /// | 何も無い | 見つからないという断り |
+    ///
+    /// 取り下げた場合は配り直さない。配り直すと、取り下げを確かめる前に CLI が満ちる。
     pub fn kill(&self, card_id: CardId) -> Result<(), SessionError> {
-        if self.halt(card_id, WithdrawReason::Kill) {
-            Ok(())
-        } else {
-            Err(SessionError::NotFound(card_id))
+        match self.halt(card_id, WithdrawReason::Kill) {
+            Halted::Withdrew => Ok(()),
+            Halted::Stopped(session) => {
+                if matches!(session.status(), SessionStatus::Ended { .. }) {
+                    self.broadcast_meta(&session);
+                }
+                Ok(())
+            }
+            Halted::Nothing => Err(SessionError::NotFound(card_id)),
         }
     }
 
@@ -3658,15 +3688,18 @@ impl SessionManager {
     /// 印を立てるのは、記録を外せた後に届く [`SessionManager::forget`] の仕事である。ここで
     /// 立てると、記録を外せなかったとき一覧に残ったカードを二度と起こせなくなる。
     pub fn stop_for_removal(&self, card_id: CardId) -> bool {
-        self.halt(card_id, WithdrawReason::Removing)
+        !matches!(
+            self.halt(card_id, WithdrawReason::Removing),
+            Halted::Nothing
+        )
     }
 
-    /// 進んでいる起こし直しを取り下げ、実体があれば止める。**印は残さない。** 止めたもの
-    /// （札か実体）があったかを返す。
+    /// 進んでいる起こし直しを取り下げ、実体があれば止める。**印は残さない。** 何を止めたかを
+    /// 返す（[`Halted`]）。
     ///
     /// 札を下ろしてから実体を止める。逆にすると、止めた直後に確かめを終えた起こし直しが
     /// 新しい実体を作る。
-    fn halt(&self, card_id: CardId, reason: WithdrawReason) -> bool {
+    fn halt(&self, card_id: CardId, reason: WithdrawReason) -> Halted {
         let ticket = self
             .reviving
             .lock()
@@ -3696,7 +3729,11 @@ impl SessionManager {
         if let Some(session) = &session {
             session.kill();
         }
-        ticket.is_some() || session.is_some()
+        match (ticket, session) {
+            (Some(_), _) => Halted::Withdrew,
+            (None, Some(session)) => Halted::Stopped(session),
+            (None, None) => Halted::Nothing,
+        }
     }
 
     /// 実体を畳む。**カードが消えたことは配らない。**
@@ -3983,8 +4020,20 @@ impl SessionManager {
         // **確かめを待っている間に外されたら、待ち終わるのを待たずにやめる**（実装レビュー
         // Astra 1）。席を握ったまま最大 65 秒待つと、ほかのカードの起こし直しまで止まる。
         // 確かめの途中で手放しても、予約はまだ取っていない（取るのは確かめた後の同期の段）
+        //
+        // **判定の断りを返す前に、下ろされていないかを見る**（実装レビュー第5回 Astra 3）。
+        // 判定の失敗と取り下げが同時に用意できると `select!` は判定の腕を選びうる。そのまま
+        // 断ると、終了で止めたのに「メモリ不足」で終わり、終了の待ちは取り下げを受け取れない
         let reservation = tokio::select! {
-            judged = self.judge_memory(card_id, &seat, &物差し) => judged?,
+            judged = self.judge_memory(card_id, &seat, &物差し) => match judged {
+                Ok(reservation) => reservation,
+                Err(refusal) => match ticket.withdrawn_reason() {
+                    Some(reason) => {
+                        return Err(withdrawn(card_id, reason, "Windows 側の空きを確かめている間"));
+                    }
+                    None => return Err(refusal),
+                },
+            },
             reason = ticket.withdrawn() => {
                 return Err(withdrawn(card_id, reason, "Windows 側の空きを確かめている間"));
             }

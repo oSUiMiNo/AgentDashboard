@@ -261,6 +261,49 @@ describe('サーバと同じ JSON になること', () => {
     }
   })
 
+  it('取り下げの理由が Rust と同じ綴りで往復する', () => {
+    // Rust 側は `ws.rs` の `取り下げの理由は綴りのまま運ばれ_欠けと知らない綴りは取り下げではないと読む`
+    const raw =
+      '{"t":"error","card_id":null,"message":"起こし直しをやめました","kind":"revive","busy":false,"withdrawn":"kill"}'
+    const message = JSON.parse(raw) as ServerMessage
+    expect(message.t).toBe('error')
+    if (message.t === 'error') {
+      expect(message.withdrawn).toBe('kill')
+    }
+    const sent: ServerMessage = {
+      t: 'error',
+      card_id: null,
+      message: '起こし直しをやめました',
+      kind: 'revive',
+      busy: false,
+      withdrawn: 'kill',
+    }
+    expect(JSON.stringify(sent)).toBe(raw)
+  })
+
+  it('取り下げの理由の欠けは undefined と読み、取り下げとは読まない', () => {
+    // サーバは `None` を書き出さない。欠けを「終了で取り下げた」と読んではいけない
+    const old = JSON.parse(
+      '{"t":"error","card_id":null,"message":"x","kind":"revive","busy":false}',
+    ) as ServerMessage
+    expect(old.t).toBe('error')
+    if (old.t === 'error') {
+      expect(old.withdrawn).toBeUndefined()
+    }
+  })
+
+  it('サーバが知らない綴りを受けて中継した unknown を読め、終了の取り下げとは読まない', () => {
+    // Rust は知らない綴りを `Unknown` で受け、`"unknown"` と書き出して中継する
+    const relayed = JSON.parse(
+      '{"t":"error","card_id":null,"message":"x","kind":"revive","busy":false,"withdrawn":"unknown"}',
+    ) as ServerMessage
+    expect(relayed.t).toBe('error')
+    if (relayed.t === 'error') {
+      expect(relayed.withdrawn).toBe('unknown')
+      expect(relayed.withdrawn).not.toBe('kill')
+    }
+  })
+
   it('hello を解釈できる', () => {
     const raw = '{"t":"hello","flow_high":262144,"flow_low":32768}'
     const message = JSON.parse(raw) as ServerMessage

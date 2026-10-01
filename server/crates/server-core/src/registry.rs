@@ -39,14 +39,14 @@ use sea_orm::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet, VecDeque},
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, oneshot, watch};
 use uuid::Uuid;
 
 /// 一覧の更新通知の待ち行列（メッセージ数）。
@@ -59,6 +59,10 @@ const EVENT_QUEUE_MESSAGES: usize = 256;
 /// 失敗するたびに倍にする。DB が止まっている間、1分に1回より多くは叩かない。
 const REMOVAL_RETRY_FIRST: Duration = Duration::from_secs(1);
 const REMOVAL_RETRY_MAX: Duration = Duration::from_secs(60);
+
+/// 外したカードの印を覚えておく枚数（[`RemovedCards`]）。1枚 16 バイトの ID を2か所に持つだけ
+/// なので、上限まで溜まっても数十 KB に収まる。
+const REMOVED_CARDS_KEPT: usize = 1024;
 
 /// 在席の印がこれだけ古くなったら死んだものとみなす（ミリ秒。設計§9-4）。
 ///
@@ -329,6 +333,9 @@ pub(crate) const MEMO_NOT_FOUND: &str = "そのメモは見つかりません";
 pub struct SessionRegistry {
     db: DatabaseConnection,
     records: Mutex<HashMap<CardId, Arc<SessionRecord>>>,
+    /// 一覧から外したカードの印（実装レビュー第5回 Astra 1）。**`records` のロックを握ったまま
+    /// 見る・立てる**（[`Self::drop_record`]・[`Self::record_for`]）。
+    removed: Mutex<RemovedCards>,
     events: broadcast::Sender<AccountEvent>,
     /// 失効した札（cli）の知らせ。**このインスタンスの `/ws` 接続を畳むためだけ**の道
     /// （コードレビュー対応3）。PC 側の失効（gateway の `disconnect_token`）と同じく
@@ -393,6 +400,96 @@ pub struct SessionRegistry {
     removal_retry_first: Mutex<Duration>,
     /// 取り込み直しを急かす口（**テスト用**）。値は回数で、変わったら待たずに次を試す
     removal_retry_kick: watch::Sender<u64>,
+    /// 更新（[`Self::upsert`]）を決めた所で1回止める口（**テスト用**）
+    update_pause: Mutex<Option<UpdatePause>>,
+}
+
+/// 一覧から外したカードの印（実装レビュー第5回 Astra 1）。
+///
+/// # なぜ要るのか
+///
+/// 外す処理と遅れて届いた更新が行き違うと、更新側が記録を作り直して一覧へ戻していた。更新側は
+/// 記録が手元にあるうちに「外したか」の確かめ（DB）を済ませ、DB へ書くのを待っている間に外れても
+/// 気づかない。書き終えると、記録が無いので作り直して配る——**DB では外れているのに一覧に戻り、
+/// PC では起こし直しを断られるカード**になる。書けなかった「外した」の報告の取り込み直し
+/// （[`SessionRegistry::retry_removal`]）が更新と並んで走るので、この行き違いが起きる。
+///
+/// 印は記録を消すのと同じロックの中で立て、記録を作る側も同じロックの中で見る。「見てから作る」の
+/// 間にすり抜けない。
+///
+/// # 寿命と量
+///
+/// 外したことは取り消されない（`archived` を戻す道は無く、カード ID は UUIDv4 で使い回されない）
+/// ので、時間で失効させる理由は無い。量の上限（[`REMOVED_CARDS_KEPT`]）は**メモリを守るためだけ**
+/// で、溢れたら古い順に忘れる——忘れたカードへの報告も、手元に記録が無ければ [`SessionRegistry::upsert`]
+/// が DB で外したことを確かめて捨てる。
+#[derive(Default)]
+struct RemovedCards {
+    cards: HashSet<CardId>,
+    /// 外した順（溢れたときに古いものから忘れるため）
+    order: VecDeque<CardId>,
+}
+
+impl RemovedCards {
+    fn mark(&mut self, card_id: CardId) {
+        if !self.cards.insert(card_id) {
+            return;
+        }
+        self.order.push_back(card_id);
+        while self.order.len() > REMOVED_CARDS_KEPT {
+            if let Some(oldest) = self.order.pop_front() {
+                self.cards.remove(&oldest);
+            }
+        }
+    }
+}
+
+/// 記録の姿をどこまで配るか（[`SessionRegistry::publish_record`]）。
+#[derive(Clone, Copy)]
+enum Reach {
+    /// 手元のブラウザと連絡係の両方（自分が書いた報告）
+    AllInstances,
+    /// 手元のブラウザだけ（他インスタンスから回ってきたもの・DB から読み直したもの）
+    ThisInstance,
+}
+
+/// 更新（[`SessionRegistry::upsert`]）をどこで止めるか（**テスト専用**）。
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum 更新の止め所 {
+    /// DB へ書き終え、手元の記録を取る（無ければ作る）前
+    記録を取る前,
+    /// 手元の記録へ入れ終え、配る前
+    配る前,
+}
+
+struct UpdatePause {
+    at: 更新の止め所,
+    reached: oneshot::Sender<()>,
+    resume: oneshot::Receiver<()>,
+}
+
+/// 止めた更新の手綱（**テスト専用**。[`SessionRegistry::更新を止める`]）。
+#[doc(hidden)]
+pub struct 止めた更新 {
+    reached: oneshot::Receiver<()>,
+    resume: oneshot::Sender<()>,
+}
+
+impl 止めた更新 {
+    /// 更新が止め所まで来るのを待つ。
+    pub async fn 止まるまで待つ(&mut self) {
+        (&mut self.reached)
+            .await
+            .expect("止め所まで来る前に、止める口ごと捨てられていない");
+    }
+
+    /// 止めた更新を先へ進める。
+    pub fn 進める(self) {
+        self.resume
+            .send(())
+            .expect("止めた更新が、進めるのを待っていること");
+    }
 }
 
 /// 保管している使用上限と、**それが誰のものか**。
@@ -508,6 +605,7 @@ impl SessionRegistry {
         Ok(Arc::new_cyclic(|me| Self {
             db,
             records: Mutex::new(records),
+            removed: Mutex::new(RemovedCards::default()),
             events: broadcast::channel(EVENT_QUEUE_MESSAGES).0,
             revocations: broadcast::channel(EVENT_QUEUE_MESSAGES).0,
             window_nodes,
@@ -521,6 +619,7 @@ impl SessionRegistry {
             me: me.clone(),
             removal_retry_first: Mutex::new(REMOVAL_RETRY_FIRST),
             removal_retry_kick: watch::channel(0).0,
+            update_pause: Mutex::new(None),
         }))
     }
 
@@ -1625,7 +1724,9 @@ impl SessionRegistry {
                     return;
                 }
                 let record = match self.record_for(account_id, card_id).await {
-                    Ok(record) => record,
+                    Ok(Some(record)) => record,
+                    // 外したカード（実装レビュー第5回 Astra 1）
+                    Ok(None) => return,
                     Err(err) => {
                         tracing::warn!(%card_id, "跨ぎで届いたカードを用意できません: {err}");
                         return;
@@ -1638,22 +1739,14 @@ impl SessionRegistry {
                     return;
                 }
                 record.store_meta(*session);
-                self.publish_local(
-                    account_id,
-                    ServerMessage::SessionUpsert {
-                        session: Box::new(record.meta()),
-                    },
-                );
+                self.publish_record(&record, Reach::ThisInstance);
             }
 
             ServerMessage::SessionRemoved { card_id } => {
                 if self.owned(account_id, card_id).is_none() {
                     return;
                 }
-                self.records
-                    .lock()
-                    .expect("ロックが壊れていない")
-                    .remove(&card_id);
+                self.drop_record(card_id);
                 self.publish_local(account_id, ServerMessage::SessionRemoved { card_id });
             }
 
@@ -1896,6 +1989,9 @@ impl SessionRegistry {
             .filter(|record| record.account_id == account_id && !alive.contains(&record.card_id))
             .map(|record| record.card_id)
             .collect();
+        // **外した印は立てない**（実装レビュー第5回 Astra 1 の [`Self::drop_record`] を使わない）。
+        // 読んだ後に生まれたカードも「読みに無い」に入るので、外した証拠にならない。印を立てると、
+        // DB では生きているのにこのインスタンスの一覧へ二度と戻らない
         for card_id in stale {
             self.records
                 .lock()
@@ -1944,15 +2040,14 @@ impl SessionRegistry {
                 .and_then(|record| record.meta().context_usage);
             let record = match known {
                 Some(record) => record,
-                None => self.record_for(account_id, card_id).await?,
+                None => match self.record_for(account_id, card_id).await? {
+                    Some(record) => record,
+                    // 読んだ後に外れた（実装レビュー第5回 Astra 1）
+                    None => continue,
+                },
             };
             record.store_meta(meta);
-            self.publish_local(
-                account_id,
-                ServerMessage::SessionUpsert {
-                    session: Box::new(record.meta()),
-                },
-            );
+            self.publish_record(&record, Reach::ThisInstance);
         }
         Ok(())
     }
@@ -2286,15 +2381,98 @@ impl SessionRegistry {
 
         self.write_session(origin, &meta).await?;
 
-        let record = self.record_for(origin.account_id, meta.card_id).await?;
+        self.止め口(更新の止め所::記録を取る前).await;
+        // **外したカードの記録は作り直さない**（実装レビュー第5回 Astra 1）。上の確かめは記録が
+        // 手元にあれば DB を引かないので、書くのを待っている間に外れても通ってくる
+        let Some(record) = self.record_for(origin.account_id, meta.card_id).await? else {
+            tracing::info!(
+                card_id = %meta.card_id,
+                "一覧から外した後に届いた報告なので、記録を作り直しません"
+            );
+            return Ok(());
+        };
         record.store_meta(meta);
-        self.publish(
-            record.account_id,
-            ServerMessage::SessionUpsert {
-                session: Box::new(record.meta()),
-            },
-        );
+        self.止め口(更新の止め所::配る前).await;
+        self.publish_record(&record, Reach::AllInstances);
         Ok(())
+    }
+
+    /// 記録のいまの姿を配る。**配った後に外されていたら、外した知らせを配り直す**（実装レビュー
+    /// 第5回 Astra 1）。
+    ///
+    /// 記録を取ってから配るまでの間に外す処理が済むと、ブラウザには「外した」→「更新」の順で
+    /// 届き、外したカードが一覧へ戻る。配るのを記録の表のロックの中で行えば順は揃うが、配る口は
+    /// 断りを記録へ残すときに同じロックを取る（[`Self::publish_local`]）ので、ロックの外で配って
+    /// から見直す。
+    fn publish_record(&self, record: &SessionRecord, reach: Reach) {
+        let send = |message: ServerMessage| match reach {
+            Reach::AllInstances => self.publish(record.account_id, message),
+            Reach::ThisInstance => self.publish_local(record.account_id, message),
+        };
+        send(ServerMessage::SessionUpsert {
+            session: Box::new(record.meta()),
+        });
+        let removed = self
+            .removed
+            .lock()
+            .expect("ロックが壊れていない")
+            .cards
+            .contains(&record.card_id);
+        if removed {
+            send(ServerMessage::SessionRemoved {
+                card_id: record.card_id,
+            });
+        }
+    }
+
+    /// 手元の記録を外し、外した印を立てる（実装レビュー第5回 Astra 1）。**同じロックの中で行う**
+    /// ——分けると、その間に [`Self::record_for`] が記録を作り直せる。知らせは呼んだ側が配る。
+    fn drop_record(&self, card_id: CardId) {
+        let mut records = self.records.lock().expect("ロックが壊れていない");
+        records.remove(&card_id);
+        self.removed
+            .lock()
+            .expect("ロックが壊れていない")
+            .mark(card_id);
+    }
+
+    /// 更新を決めた所で1回止める（**テスト専用**）。止めるのは、次にそこへ来た更新1本だけ。
+    #[doc(hidden)]
+    pub fn 更新を止める(&self, at: 更新の止め所) -> 止めた更新 {
+        let (reached_tx, reached_rx) = oneshot::channel();
+        let (resume_tx, resume_rx) = oneshot::channel();
+        *self.update_pause.lock().expect("ロックが壊れていない") = Some(UpdatePause {
+            at,
+            reached: reached_tx,
+            resume: resume_rx,
+        });
+        止めた更新 {
+            reached: reached_rx,
+            resume: resume_tx,
+        }
+    }
+
+    async fn 止め口(&self, at: 更新の止め所) {
+        let pause = {
+            let mut slot = self.update_pause.lock().expect("ロックが壊れていない");
+            match slot.take() {
+                Some(pause) if pause.at == at => Some(pause),
+                other => {
+                    *slot = other;
+                    None
+                }
+            }
+        };
+        let Some(pause) = pause else {
+            return;
+        };
+        if pause.reached.send(()).is_err() {
+            return;
+        }
+        // 手綱を捨てられたら（試験が落ちた）、止まったままにせず進める
+        if pause.resume.await.is_err() {
+            tracing::warn!(?at, "止めた更新の手綱が捨てられたので、そのまま進めます");
+        }
     }
 
     /// 他人のカードへの報告を断るか（設計§8-6 の A2S の行）。
@@ -2438,10 +2616,7 @@ impl SessionRegistry {
             .filter(entity::sessions::Column::AccountId.eq(origin.account_id))
             .exec(&self.db)
             .await?;
-        self.records
-            .lock()
-            .expect("ロックが壊れていない")
-            .remove(&card_id);
+        self.drop_record(card_id);
         self.publish(origin.account_id, ServerMessage::SessionRemoved { card_id });
         Ok(())
     }
@@ -2808,14 +2983,15 @@ impl SessionRegistry {
             }))
     }
 
-    /// そのカードの記録を取り出す。無ければ作る。
+    /// そのカードの記録を取り出す。無ければ作る。**一覧から外したカードは作らず `None` を返す**
+    /// （実装レビュー第5回 Astra 1。[`RemovedCards`]）。
     async fn record_for(
         &self,
         account_id: Uuid,
         card_id: CardId,
-    ) -> Result<Arc<SessionRecord>, DbErr> {
+    ) -> Result<Option<Arc<SessionRecord>>, DbErr> {
         if let Some(record) = self.get(card_id) {
-            return Ok(record);
+            return Ok(Some(record));
         }
         // 作るには DB を読むので、ロックの外で用意してから入れ直す
         let next_seq = db_transcript::next_seq(&self.db, card_id).await?;
@@ -2824,7 +3000,17 @@ impl SessionRegistry {
         let mut records = self.records.lock().expect("ロックが壊れていない");
         // 待っている間に別の報告が作っていることがある
         if let Some(record) = records.get(&card_id) {
-            return Ok(Arc::clone(record));
+            return Ok(Some(Arc::clone(record)));
+        }
+        // **外した印は記録の表のロックを握ったまま見る**（[`Self::drop_record`] と対）
+        if self
+            .removed
+            .lock()
+            .expect("ロックが壊れていない")
+            .cards
+            .contains(&card_id)
+        {
+            return Ok(None);
         }
         let record = Arc::new(SessionRecord::new(
             placeholder_meta(card_id),
@@ -2839,7 +3025,7 @@ impl SessionRegistry {
             .expect("ロックが壊れていない")
             .fill(latest);
         records.insert(card_id, Arc::clone(&record));
-        Ok(record)
+        Ok(Some(record))
     }
 }
 

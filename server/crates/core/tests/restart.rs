@@ -901,7 +901,14 @@ async fn 確かめ中に終了を頼む(server: &common::TestServer, card_id: pr
     )
     .await
     .expect("★終了の頼みが、起こし直しを止めた後も上限まで待ち続けている");
-    終了.expect("★起こし直しを止めたのに、終了できなかったと返している");
+    let 終了 = 終了.expect("★起こし直しを止めたのに、終了できなかったと返している");
+    // **取り下げの答えで満ちたこと**（実装レビュー第5回 Astra 2）。寝ているカードの写しは
+    // `Ended` なので、写しで満ちると取り下げを読まずに成功する
+    assert!(
+        終了.raw.contains(r#""withdrawn": "kill""#),
+        "★終了の頼みへの答え（取り下げ）ではなく、接続直後の写しで満ちている: {}",
+        終了.raw
+    );
 
     外.開ける();
     common::取得が終わるまで待つ(&host_free).await;
@@ -947,6 +954,75 @@ async fn 寝かせた抜け殻を確かめ中に終了させると確かめが�
 }
 
 #[tokio::test]
+async fn 起こし直していない寝たカードの終了は写しの後に届く答えですぐ満ちる() {
+    // 実装レビュー第5回 Astra 2。CLI は接続直後の写しの `Ended` では満ちなくなったので、
+    // **起こし直しが無いときの答え**が要る。終わっていた実体なら PC がいまの姿を配り直し、
+    // 何も無い（前回の起動が残した）なら見つからないという断りが答えになる。どちらも上限
+    // （30 秒）まで待たずに成功で返ること
+    let server = common::TestServer::start_with(config_for("kill-asleep-no-revive")).await;
+    let (session, _) = 呼び戻し先つきで起こす(&server).await;
+    let card_id = session.card_id;
+    session.kill();
+    server
+        .wait_for_listed("寝る", |listed| {
+            listed.iter().any(|meta| {
+                meta.card_id == card_id && matches!(meta.status, SessionStatus::Ended { .. })
+            })
+        })
+        .await;
+    assert!(
+        server.manager.get(card_id).is_some(),
+        "終わった実体が残っていること（配り直す側を通す）"
+    );
+    let 終了 = tokio::time::timeout(
+        Duration::from_secs(10),
+        agentdashboard_core::client::kill(&target_of(&server), &card_id.to_string()),
+    )
+    .await
+    .expect("★終わっていた実体への終了に答えが無く、上限まで待っている")
+    .expect("終わっていたカードの終了は成功で返すこと");
+    assert!(終了.human.contains("終了しました"), "{}", 終了.human);
+}
+
+#[tokio::test]
+async fn 前回の起動が残した抜け殻の終了は止めるものが無くても成功で返る() {
+    // 実体も起こし直しも無い（PC は見つからないと断る）。以前は写しの `Ended` で満ちていた
+    let config = config_for("kill-left-over");
+    let card_id = {
+        let server = common::TestServer::start_with(config.clone()).await;
+        let (session, _) = 呼び戻し先つきで起こす(&server).await;
+        let card_id = session.card_id;
+        session.kill();
+        server
+            .wait_for_listed("寝る", |listed| {
+                listed.iter().any(|meta| {
+                    meta.card_id == card_id && matches!(meta.status, SessionStatus::Ended { .. })
+                })
+            })
+            .await;
+        card_id
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let server = common::TestServer::start_with(config).await;
+    let listed = server
+        .wait_for_listed("抜け殻が1枚戻る", |listed| listed.len() == 1)
+        .await;
+    assert!(
+        matches!(listed[0].status, SessionStatus::Ended { .. }),
+        "寝た姿で戻ること（写しが Ended の側を通す）"
+    );
+    assert!(server.manager.get(card_id).is_none(), "実体が無いこと");
+    let 終了 = tokio::time::timeout(
+        Duration::from_secs(10),
+        agentdashboard_core::client::kill(&target_of(&server), &card_id.to_string()),
+    )
+    .await
+    .expect("上限まで待たないこと")
+    .expect("★止めるものが無かっただけなのに、終了できなかったと返している");
+    assert!(終了.human.contains("既に終了しています"), "{}", 終了.human);
+}
+
+#[tokio::test]
 async fn 作業中のまま残った抜け殻を確かめ中に終了させると待ち切らずに止まる() {
     // 実体が無いカード（ローカルでは終了の頼みが PC へ届く）で、**最後の既知状態が `Ended`
     // でない**もの（サーバだけが落ちた形）。`Ended` は来ないので、CLI は取り下げた起こし直しの
@@ -972,7 +1048,8 @@ async fn 作業中のまま残った抜け殻を確かめ中に終了させる�
         .wait_for_listed("抜け殻が1枚戻る", |listed| listed.len() == 1)
         .await;
     assert!(listed[0].revivable(), "戻せる状態として見えていない");
-    // **ここが `Ended` だと、CLI は接続直後の写しで満ちてしまい、断りの道を通らない**
+    // 最後の既知状態が `Ended` でない形。`Ended` の形は `寝かせた抜け殻を確かめ中に…` が見る
+    // （第5回 Astra 2 までは、`Ended` だと CLI が接続直後の写しで満ち、断りの道を通らなかった）
     assert_eq!(listed[0].status, SessionStatus::Working, "最後の既知状態");
     assert!(server.manager.get(card_id).is_none(), "実体が無いこと");
 
