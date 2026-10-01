@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest'
  *
  * # なぜ画面ではなくソースを読むのか
  *
- * ここで守りたいのは**1つの画面の中身ではなく、9箇所に散った線引き**である。
+ * ここで守りたいのは**1つの画面の中身ではなく、11箇所に散った線引き（閉じる7・やめる4）**である。
  * 画面から見ると、それぞれの部品に別々のテストを書くことになり、**線引きそのものは
  * どこにも書かれない**——1箇所を戻しても、他が緑なら気づけない。
  *
@@ -48,9 +48,13 @@ const 閉じる: ReadonlyArray<readonly [string, string]> = [
   ['components/GroupView/GroupView.tsx', 'close-group'],
 ]
 
-/** 操作をやめるもの。**3箇所とも文字のまま**（ダイアログの選択肢） */
+/**
+ * 操作をやめるもの。**4箇所とも文字のまま**（ダイアログの選択肢と、まとめて復旧の聞き直しを
+ * 打ち切る帯のボタン）。帯の他の部品は印だけだが、これは**待っている文の続き**として読む
+ */
 const やめる: ReadonlyArray<readonly [string, string]> = [
   ['components/TileGrid/ReviveBudgetDialog.tsx', 'revive-budget-cancel'],
+  ['components/TileGrid/TileGrid.tsx', 'bulk-revive-stop'],
   ['components/Settings/VersionsCard.tsx', 'versions-confirm-cancel'],
   ['components/SessionAdd/SessionAdd.tsx', 'spawn-cancel'],
 ]

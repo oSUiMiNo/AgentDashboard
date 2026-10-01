@@ -1,9 +1,14 @@
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
-import { ANNOUNCE_DEBOUNCE_MS, TileGrid, 移動の文言 } from './TileGrid'
+import {
+  ANNOUNCE_DEBOUNCE_MS,
+  TileGrid,
+  WAITING_SHOW_DELAY_MS,
+  移動の文言,
+} from './TileGrid'
 import type { SessionMeta } from '@/lib/protocol'
-import type { HostResources } from '@/lib/reviveBudget'
+import { ASK_LIMIT_MS, type HostResources } from '@/lib/reviveBudget'
 import {
   applySessionSnapshot,
   clearSessions,
@@ -175,6 +180,16 @@ describe('全て復旧', () => {
     clearSelection()
     useSettingsStore.setState({ settings: settingsFixture(), loading: false })
     useWsStore.setState({ revive: vi.fn() })
+    /*
+      **メモリの歯止めはここでは見ない**（下の「メモリの歯止め」の describe が見る）。
+      PC は「この機械では数えない」（501）と答える＝歯止め無しで進む。
+      以前は `fetch` を偽らず、相対 URL で投げた失敗を「聞けなかった＝歯止め無し」に
+      頼っていた——**通信の失敗はもう歯止め無しに倒れない**ので、意図を名指しする
+    */
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: false, status: 501 }) as Response),
+    )
   })
 
   it('起こせるカードが1枚も無ければ、帯の電源は押せない', () => {
@@ -332,7 +347,7 @@ describe('全て復旧のメモリの歯止め', () => {
    * いまと同じ見た目になる。
    */
   function 資源を答える(
-    fits: number | null | 'エラー' | '入館証切れ',
+    fits: number | null | 'エラー' | '入館証切れ' | { status: number },
     外側: Partial<HostResources> = {
       host_free_mb: null,
       counted_mb: null,
@@ -343,6 +358,9 @@ describe('全て復旧のメモリの歯止め', () => {
       vi.fn(async () => {
         if (fits === 'エラー') {
           return { ok: false, status: 503 } as Response
+        }
+        if (fits !== null && typeof fits === 'object') {
+          return { ok: false, status: fits.status } as Response
         }
         // **401 だけは「聞けなかった」と別扱い**（コードレビュー対応13）
         if (fits === '入館証切れ') {
@@ -573,11 +591,13 @@ describe('全て復旧のメモリの歯止め', () => {
     ])
   })
 
-  it('聞けなかったら、歯止め無しで進む（分からないことを理由に止めない）', async () => {
-    // 読めない機械（Linux 以外）や版の古い PC がここに当たる
+  it.each([
+    [501, '読めない機械（Linux 以外）'],
+    [409, '資源を聞く口を持たない古い版の PC'],
+  ])('「この機械では数えない」（%i：%s）なら、歯止め無しで進む（分からないことを理由に止めない）', async (status) => {
     const revive = vi.fn()
     useWsStore.setState({ revive })
-    資源を答える('エラー')
+    資源を答える({ status })
     applySessionSnapshot([stale('a', 1), stale('b', 2)])
     renderGrid()
 
@@ -684,16 +704,46 @@ describe('まとめて復旧は、Windows 側の空きを確かめてから数�
     }
   }
 
-  /** PC ごとに答えを順に返す。尽きたら最後のものを返し続ける */
-  function 順に答える(列: Record<string, HostResources[]>) {
+  /**
+   * PC ごとに答えを順に返す。尽きたら最後のものを返し続ける。
+   *
+   * `'止まる'` は打ち切られるまで答えない、`'投げる'` は通信が失敗する、`{ status }` は
+   * その状態コードで答える。**打ち切りの印を受けたら、本物と同じく reject する**
+   */
+  type 一手 = HostResources | { status: number } | '止まる' | '投げる'
+  const 渡された印: AbortSignal[] = []
+  function 順に答える(列: Record<string, 一手[]>) {
     const 回数: Record<string, number> = {}
-    const fetch = vi.fn(async (url: string) => {
+    const fetch = vi.fn((url: string, init?: RequestInit) => {
       const host = decodeURIComponent(url.split('/')[3])
       const answers = 列[host]
       const at = 回数[host] ?? 0
       回数[host] = at + 1
-      const answer = answers[Math.min(at, answers.length - 1)]
-      return { ok: true, status: 200, json: async () => answer } as unknown as Response
+      const 手 = answers[Math.min(at, answers.length - 1)]
+      const signal = init?.signal ?? null
+      if (signal !== null) {
+        渡された印.push(signal)
+      }
+      return new Promise<Response>((resolve, reject) => {
+        const 断る = () => reject(new DOMException('aborted', 'AbortError'))
+        if (signal?.aborted) {
+          断る()
+          return
+        }
+        signal?.addEventListener('abort', 断る)
+        if (手 === '止まる') {
+          return
+        }
+        if (手 === '投げる') {
+          reject(new TypeError('Failed to fetch'))
+          return
+        }
+        if ('status' in 手) {
+          resolve({ ok: false, status: 手.status } as Response)
+          return
+        }
+        resolve({ ok: true, status: 200, json: async () => 手 } as unknown as Response)
+      })
     })
     vi.stubGlobal('fetch', fetch)
     return fetch
@@ -722,6 +772,7 @@ describe('まとめて復旧は、Windows 側の空きを確かめてから数�
   beforeEach(() => {
     vi.useFakeTimers()
     clearSelection()
+    渡された印.length = 0
     useSettingsStore.setState({
       settings: settingsFixture(remoteAgent(PC, 'OMEN')),
       loading: false,
@@ -876,7 +927,7 @@ describe('まとめて復旧は、Windows 側の空きを確かめてから数�
     expect(revive.mock.calls.map((call) => call[0]).toSorted()).toEqual(['b1', 'b2'])
   })
 
-  it('起こしている途中のぶんが制約なら、差し引いた空きを添える', async () => {
+  it('起こしている途中のぶんが制約なら、使える空きは差し引いた値で、引いたぶんを言う', async () => {
     useWsStore.setState({ revive: vi.fn() })
     順に答える({ local: [答え(0, 'fresh', { effective_mb: 2_400 })] })
     applySessionSnapshot([stale('a', 1)])
@@ -884,13 +935,57 @@ describe('まとめて復旧は、Windows 側の空きを確かめてから数�
 
     await 押す('a')
 
+    // **「使える空き」は CLI・断りの文面と同じく `effective_mb`**（予約を引く前の 5.3 GB ではない）
+    const outside = screen.getByTestId('revive-budget-outside')
+    expect(outside).toHaveTextContent('／使える空き 2.3 GB')
+    expect(outside).not.toHaveTextContent('使える空き 5.3 GB')
+    // 引いたぶん（5408 − 2400 MB）を、何から引いたのかと一緒に言う
     expect(screen.getByTestId('revive-budget-reserved')).toHaveTextContent(
-      'うち起こしている途中のぶんを差し引いて 2.3 GB',
+      '使える空きは、起こしている途中のぶん 2.9 GB を差し引いた値です',
     )
     expect(screen.getByTestId('revive-budget-dialog')).toHaveAttribute(
       'aria-label',
       '起こし直せますが、メモリが足りません',
     )
+  })
+
+  it('WSL でない機械で起こしている途中のぶんが制約なら、使える空きを値ごと出す', async () => {
+    // 外側の行が出ない機械では、使える空きはここでしか読めない（差分だけだと結果が消える）
+    useWsStore.setState({ revive: vi.fn() })
+    順に答える({
+      local: [
+        答え(0, 'fresh', {
+          host_free_state: null,
+          host_free_mb: null,
+          host_free_age_sec: null,
+          counted_mb: null,
+          effective_mb: 9_000,
+        }),
+      ],
+    })
+    applySessionSnapshot([stale('a', 1)])
+    renderGrid()
+
+    await 押す('a')
+
+    expect(screen.queryByTestId('revive-budget-outside')).not.toBeInTheDocument()
+    // 19072 − 9000 MB を差し引いて 9000 MB
+    expect(screen.getByTestId('revive-budget-reserved')).toHaveTextContent(
+      '使える空き 8.8 GB（起こしている途中のぶん 9.8 GB を差し引いた値）',
+    )
+  })
+
+  it('確かめられていない PC には、起こしている途中のぶんの行を出さない', async () => {
+    // 数えていないので、引いた値も判断材料にならない
+    useWsStore.setState({ revive: vi.fn() })
+    順に答える({ local: [答え(99, 'failed', { effective_mb: 1_000 })] })
+    applySessionSnapshot([stale('a', 1)])
+    renderGrid()
+
+    await 押す('a')
+
+    expect(screen.getByTestId('revive-budget-dialog')).toBeInTheDocument()
+    expect(screen.queryByTestId('revive-budget-reserved')).not.toBeInTheDocument()
   })
 
   it('聞き直しの途中で画面を離れたら、遅れて届いた答えで送らない', async () => {
@@ -929,7 +1024,7 @@ describe('まとめて復旧は、Windows 側の空きを確かめてから数�
     expect(revive.mock.calls.map((call) => call[0])).toEqual(['a'])
   })
 
-  it('もう一度確かめて新しい値で全部入るなら、送って閉じる', async () => {
+  it('もう一度確かめて新しい値で全部入ると分かっても、黙って送らず、押させる', async () => {
     const revive = vi.fn()
     useWsStore.setState({ revive })
     const fetch = 順に答える({ local: [答え(99, 'failed'), 答え(0, 'checking'), 答え(5, 'fresh')] })
@@ -947,8 +1042,21 @@ describe('まとめて復旧は、Windows 側の空きを確かめてから数�
     await 進める(1_000)
 
     expect(fetch).toHaveBeenCalledTimes(3)
-    expect(screen.queryByTestId('revive-budget-dialog')).not.toBeInTheDocument()
+    // **押したのは「確かめる」で「戻す」ではない。** 計画を見せて、押すまで送らない
+    expect(revive).not.toHaveBeenCalled()
+    const dialog = screen.getByTestId('revive-budget-dialog')
+    expect(dialog).toHaveAttribute('aria-label', '全部起こし直せます')
+    expect(screen.getByTestId('revive-budget-fits')).toHaveTextContent('5枚')
+    // 押す場所は1つ。「入るぶんだけ」と「それでも全部」を二重に出さない
+    expect(screen.queryByTestId('revive-budget-fitting')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('revive-budget-recheck')).not.toBeInTheDocument()
+    expect(dialog).not.toHaveTextContent('新しい順')
+    expect(screen.getByTestId('revive-budget-all')).toHaveTextContent('全部戻す（2枚）')
+    expect(screen.getByTestId('revive-budget-all')).not.toHaveTextContent('それでも')
+
+    fireEvent.click(screen.getByTestId('revive-budget-all'))
     expect(revive.mock.calls.map((call) => call[0]).toSorted()).toEqual(['a', 'b'])
+    expect(screen.queryByTestId('revive-budget-dialog')).not.toBeInTheDocument()
   })
 
   it('確かめ直している途中でやめたら、遅れた答えで送らず、開き直さない', async () => {
@@ -987,6 +1095,168 @@ describe('まとめて復旧は、Windows 側の空きを確かめてから数�
     expect(screen.getByTestId('revive-budget-fits')).toHaveTextContent('2枚')
     expect(screen.queryByTestId('revive-budget-recheck')).not.toBeInTheDocument()
     expect(revive).not.toHaveBeenCalled()
+  })
+  it('確かめ直しの1周目で通信が失敗しても、全部送らずにダイアログを残す', async () => {
+    // **前回の PC 別の答えを引き継ぎ、新しい有効な答えを得るまで確かめられていないまま**
+    // （Astra 3）。以前は答え無しを「歯止め無し」と読み、閉じて全部送っていた
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    順に答える({ local: [答え(99, 'failed'), '投げる'] })
+    applySessionSnapshot([stale('a', 1), stale('b', 2)])
+    renderGrid()
+
+    await 押す('a', 'b')
+    fireEvent.click(screen.getByTestId('revive-budget-recheck'))
+    await 進める(0)
+    expect(revive).not.toHaveBeenCalled()
+    expect(screen.getByTestId('revive-budget-dialog')).toBeInTheDocument()
+
+    await 進める(66_000)
+    expect(revive).not.toHaveBeenCalled()
+    expect(screen.getByTestId('revive-budget-dialog')).toHaveAttribute(
+      'aria-label',
+      'PC の空きメモリを聞けませんでした',
+    )
+    expect(screen.getByTestId('revive-budget-fits')).toHaveTextContent('0枚')
+    expect(screen.getByTestId('revive-budget-recheck')).toBeEnabled()
+  })
+
+  it('最初から答えが来なければ、全部送らずに聞き直し、締切でダイアログを出す', async () => {
+    // **「この機械では数えない」（501・409）以外の失敗は、WSL の PC でも起こる。**
+    // 歯止め無しへ倒すと、確かめていない数のまま全部送る
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    順に答える({ local: [{ status: 504 }, '投げる'] })
+    applySessionSnapshot([stale('a', 1), stale('b', 2)])
+    renderGrid()
+
+    await 押す('a', 'b')
+    expect(revive).not.toHaveBeenCalled()
+    // 答えそのものが来ていないので「Windows 側」とは言わない
+    const 帯の文 = screen.getByTestId('bulk-count')
+    expect(帯の文).toHaveTextContent('空きメモリの答えを待っています…')
+    expect(帯の文).not.toHaveTextContent('Windows')
+
+    await 進める(66_000)
+    expect(revive).not.toHaveBeenCalled()
+    const dialog = screen.getByTestId('revive-budget-dialog')
+    expect(dialog).toHaveAttribute('aria-label', 'PC の空きメモリを聞けませんでした')
+    expect(screen.getByTestId('revive-budget-outside')).toHaveTextContent(
+      'この PC から空きメモリの答えが来ませんでした',
+    )
+    expect(dialog).not.toHaveTextContent('Windows')
+    // 前に聞けた答えが無くても、対象と 0 枚は出す（画面から消さない）
+    expect(screen.getByTestId('revive-budget-targets')).toHaveTextContent('2枚')
+    expect(screen.getByTestId('revive-budget-fits')).toHaveTextContent('0枚')
+    expect(screen.getByTestId('revive-budget-fitting')).toBeDisabled()
+  })
+
+  it('問い合わせが止まっても、締切でダイアログを出し、止まった問い合わせを切る', async () => {
+    // 以前は `fetch()` に打ち切りが無く、65 秒を過ぎても「確かめています」のままだった（Astra 2）
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    順に答える({ local: ['止まる'] })
+    applySessionSnapshot([stale('a', 1)])
+    renderGrid()
+
+    await 押す('a')
+    await 進める(ASK_LIMIT_MS)
+    expect(渡された印[0].aborted).toBe(true)
+    await 進める(66_000 - ASK_LIMIT_MS)
+
+    expect(screen.getByTestId('revive-budget-dialog')).toHaveAttribute(
+      'aria-label',
+      'PC の空きメモリを聞けませんでした',
+    )
+    expect(revive).not.toHaveBeenCalled()
+  })
+
+  it('PC が2台で片方が止まっても、締切で、答えた PC のぶんだけを「入るぶん」に入れる', async () => {
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    順に答える({ local: [答え(5, 'fresh')], [PC]: ['止まる'] })
+    applySessionSnapshot([stale('a1', 1), stale('a2', 2), stale('b1', 1, PC)])
+    renderGrid()
+
+    await 押す('a1', 'a2', 'b1')
+    await 進める(66_000)
+
+    expect(screen.getByTestId('revive-budget-fitting')).toHaveTextContent('2枚')
+    fireEvent.click(screen.getByTestId('revive-budget-fitting'))
+    expect(revive.mock.calls.map((call) => call[0]).toSorted()).toEqual(['a1', 'a2'])
+  })
+
+  it('画面を離れたら、進行中の問い合わせを切る', async () => {
+    useWsStore.setState({ revive: vi.fn() })
+    順に答える({ local: ['止まる'] })
+    applySessionSnapshot([stale('a', 1)])
+    const view = renderGrid()
+
+    await 押す('a')
+    expect(渡された印[0].aborted).toBe(false)
+    view.unmount()
+    expect(渡された印[0].aborted).toBe(true)
+  })
+
+  it('聞き直している間は帯に何を待っているかと「やめる」を出し、やめたら打ち切って送らない', async () => {
+    // **最長 65 秒聞き直すので、止める手段が要る**（Fable 5）
+    const revive = vi.fn()
+    useWsStore.setState({ revive })
+    const fetch = 順に答える({ local: [答え(0, 'checking'), 答え(0, 'checking'), 答え(5, 'fresh')] })
+    applySessionSnapshot([stale('a', 1), stale('b', 2)])
+    renderGrid()
+
+    await 押す('a', 'b')
+    expect(screen.getByTestId('bulk-count')).toHaveTextContent('Windows 側の空きを確かめています…')
+    const やめる = screen.getByTestId('bulk-revive-stop')
+    expect(やめる).toHaveTextContent('やめる')
+    expect(screen.getByTestId('bulk-revive')).toBeDisabled()
+
+    fireEvent.click(やめる)
+    await 進める(5_000)
+
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(revive).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('revive-budget-dialog')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('bulk-revive-stop')).not.toBeInTheDocument()
+    // 忙しさも戻り、数の文へ戻る
+    expect(screen.getByTestId('bulk-revive')).toBeEnabled()
+    expect(screen.getByTestId('bulk-count')).toHaveTextContent('2枚を選んでいます')
+  })
+
+  it('1周目の答えが遅いときも、少し待ってから「やめる」を出し、押せば止まった問い合わせを切る', async () => {
+    // **押した瞬間には出さない**（普段は数十ミリ秒で返るので、帯の文が一瞬入れ替わって戻る）
+    useWsStore.setState({ revive: vi.fn() })
+    順に答える({ local: ['止まる'] })
+    applySessionSnapshot([stale('a', 1)])
+    renderGrid()
+
+    await 押す('a')
+    expect(screen.queryByTestId('bulk-revive-stop')).not.toBeInTheDocument()
+    await 進める(WAITING_SHOW_DELAY_MS)
+    expect(screen.getByTestId('bulk-count')).toHaveTextContent('空きメモリを確かめています…')
+
+    fireEvent.click(screen.getByTestId('bulk-revive-stop'))
+    expect(渡された印[0].aborted).toBe(true)
+    expect(screen.queryByTestId('bulk-revive-stop')).not.toBeInTheDocument()
+  })
+
+  it('待っている間に選択を外しても、帯と「やめる」は隠れない', async () => {
+    // 隠すと、裏で聞き直しが続いたまま止める手段が見えなくなる
+    useWsStore.setState({ revive: vi.fn() })
+    順に答える({ local: [答え(0, 'checking')] })
+    applySessionSnapshot([stale('a', 1)])
+    renderGrid()
+
+    await 押す('a')
+    act(() => {
+      clearSelection()
+    })
+
+    const 帯 = screen.getByTestId('bulk-row')
+    expect(帯).not.toHaveClass('invisible')
+    expect(帯).toHaveAttribute('aria-hidden', 'false')
+    expect(screen.getByTestId('bulk-revive-stop')).toBeInTheDocument()
   })
 })
 

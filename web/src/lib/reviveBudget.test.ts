@@ -5,13 +5,18 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   ago,
-  fetchSettledHostResources,
+  ASK_LIMIT_MS,
+  fetchHostResources,
   hostOf,
+  NO_ANSWER,
   needsRecheck,
+  noAnswer,
   planRevive,
   RECHECK_INTERVAL_MS,
   RECHECK_LIMIT_MS,
+  settleHostResources,
   SIGNED_OUT,
+  type HostAnswer,
   type HostFreeState,
   type HostResources,
 } from '@/lib/reviveBudget'
@@ -93,7 +98,7 @@ describe('planRevive', () => {
     expect(plan.fitting).toEqual([])
   })
 
-  it('聞けなかった PC は数えない（分からないことを理由に止めない）', () => {
+  it('「この機械では数えない」と答えた PC は数えない（分からないことを理由に止めない）', () => {
     const plan = planRevive(
       [target('a', 'old-pc', 1), target('b', 'old-pc', 2)],
       new Map([['old-pc', null]]),
@@ -289,7 +294,8 @@ describe('host_free_state の綴り', () => {
   })
 
   it('綴り違いは、確かめられていない側（0枚）へ倒れる', () => {
-    for (const 綴り of ['Fresh', 'FRESH', 'fresh ', 'ok', '']) {
+    // `unknown` はサーバの受け口（`#[serde(other)]`）が送り直す綴りで、実際に届きうる
+    for (const 綴り of ['unknown', 'Fresh', 'FRESH', 'fresh ', 'ok', '']) {
       const plan = planRevive(三枚, new Map([['local', 生の答え(綴り)]]))
       expect(plan.over, 綴り).toBe(true)
       expect(plan.fitting, 綴り).toEqual([])
@@ -308,16 +314,36 @@ describe('host_free_state の綴り', () => {
     )
     // **該当0件で黙って通さない**
     expect(本体, 'HostFreeState が見つからない').not.toBeNull()
-    const 腕 = [...(本体?.[1] ?? '').matchAll(/^\s{4}([A-Z][A-Za-z]*),?\s*$/gm)].map((m) =>
-      m[1].replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase(),
-    )
+    /*
+      **`#[serde(other)]` の腕（知らない綴りの受け口）は数えない。** PC は作らないが、
+      **ブラウザへは届きうる**——新しい PC の知らない状態を古いサーバが読むとこの腕になり、
+      書き出すときは腕の名前（`unknown`）で送り直す。ブラウザ側は知らない綴りを
+      「確かめられていない」へ倒している（上の「綴り違いは…」が `unknown` も見ている）ので、
+      型に持たなくても同じ側に倒れる
+    */
+    const 腕: string[] = []
+    let 受け口 = false
+    for (const 行 of (本体?.[1] ?? '').split('\n')) {
+      if (/^\s{4}#\[serde\(other\)\]\s*$/.test(行)) {
+        受け口 = true
+        continue
+      }
+      const 名前 = /^\s{4}([A-Z][A-Za-z]*),?\s*$/.exec(行)?.[1]
+      if (名前 === undefined) {
+        continue
+      }
+      if (!受け口) {
+        腕.push(名前.replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase())
+      }
+      受け口 = false
+    }
     const 期待: HostFreeState[] = ['fresh', 'stale', 'checking', 'failed']
     expect(腕).toEqual(期待)
   })
 })
 
 describe('needsRecheck', () => {
-  it('見積もり0・聞けなかった・状態なしは聞き直さない', () => {
+  it('見積もり0・数えない・状態なしは聞き直さない', () => {
     expect(needsRecheck(null)).toBe(false)
     expect(needsRecheck(wsl(null, 'checking'))).toBe(false)
     expect(needsRecheck(resources(3))).toBe(false)
@@ -333,33 +359,181 @@ describe('ago', () => {
 })
 
 /**
- * 聞き直し（設計§6-3）。**1秒おき、上限 65 秒。**
+ * 資源を聞く口の答えの読み分け（Astra 3）。**通信の失敗を「数えない」と読まない。**
  */
-describe('fetchSettledHostResources', () => {
+describe('fetchHostResources', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  function 答える(response: Partial<Response> | 'throw') {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        if (response === 'throw') {
+          throw new TypeError('Failed to fetch')
+        }
+        return response as Response
+      }),
+    )
+  }
+
+  it('「この機械では数えない」（501・409）だけが null（歯止め無し）', async () => {
+    // 501：メモリの空きを読めない機械（Linux 以外）。409：資源を聞く口を持たない古い PC
+    for (const status of [501, 409]) {
+      答える({ ok: false, status })
+      expect(await fetchHostResources('local'), String(status)).toBeNull()
+    }
+  })
+
+  it('それ以外の失敗は、答えが来なかったとして言い分ける', async () => {
+    // **どれも WSL の PC でも起こる。** null へ畳むと、確かめていない数のまま全部送る
+    for (const status of [503, 504, 404, 500, 415]) {
+      答える({ ok: false, status })
+      expect(await fetchHostResources('local'), String(status)).toBe(NO_ANSWER)
+    }
+    答える('throw')
+    expect(await fetchHostResources('local')).toBe(NO_ANSWER)
+    答える({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new SyntaxError('本文が途中で切れた')
+      },
+    })
+    expect(await fetchHostResources('local')).toBe(NO_ANSWER)
+  })
+
+  it('問い合わせに打ち切りの印を渡す', async () => {
+    const fetch = vi.fn(async () => ({ ok: false, status: 503 }) as Response)
+    vi.stubGlobal('fetch', fetch)
+    const controller = new AbortController()
+    await fetchHostResources('local', controller.signal)
+    expect(fetch.mock.calls[0]).toEqual([
+      '/api/hosts/local/resources',
+      { signal: controller.signal },
+    ])
+  })
+})
+
+describe('planRevive の答えが来なかった PC', () => {
+  it('0 枚として over を立て、前に聞けた答えは表示にだけ使う', () => {
+    // 前に聞けた答えは「全部入る」と言っている。**それで数えない**
+    const 前 = wsl(99, 'fresh')
+    const plan = planRevive(
+      [target('a', 'local', 1), target('b', 'local', 2)],
+      new Map([['local', noAnswer(前)]]),
+    )
+    expect(plan.over).toBe(true)
+    expect(plan.fitting).toEqual([])
+    expect(plan.hosts[0]).toMatchObject({ fits: 0, unconfirmed: 'no_answer', resources: 前 })
+  })
+
+  it('前に聞けた答えが無くても 0 枚', () => {
+    const plan = planRevive([target('a', 'local', 1)], new Map([['local', noAnswer(null)]]))
+    expect(plan.over).toBe(true)
+    expect(plan.hosts[0]).toMatchObject({ fits: 0, unconfirmed: 'no_answer', resources: null })
+  })
+})
+
+/**
+ * 聞き直し（設計§6-3）。**1秒おき、上限 65 秒。毎周すべての PC を聞く。**
+ */
+describe('settleHostResources', () => {
   afterEach(() => {
     vi.useRealTimers()
     vi.unstubAllGlobals()
   })
 
-  /** 答えを順に返す。尽きたら最後のものを返し続ける */
-  function 順に答える(...answers: (HostResources | 'エラー')[]) {
-    let at = 0
-    const fetch = vi.fn(async () => {
-      const answer = answers[Math.min(at, answers.length - 1)]
-      at += 1
-      if (answer === 'エラー') {
-        return { ok: false, status: 503 } as Response
+  /**
+   * PC ごとの答えの順番。尽きたら最後のものを繰り返す。
+   *
+   * - `HostResources`：すぐ答える
+   * - `{ 遅れて, 答え }`：`遅れて` ミリ秒後に答える
+   * - `{ status }`：その状態コードで答える
+   * - `'止まる'`：打ち切られるまで答えない
+   * - `'投げる'`：通信が失敗する
+   *
+   * **打ち切りの印を受けたら、本物と同じく reject する。** そうしないと止まる場面の
+   * テストは何をしても終わらない
+   */
+  type 一手 =
+    | HostResources
+    | { 遅れて: number; 答え: HostResources }
+    | { status: number }
+    | '止まる'
+    | '投げる'
+
+  function 偽の口(列: Record<string, 一手[]>) {
+    const 回数: Record<string, number> = {}
+    const 印: AbortSignal[] = []
+    const fetch = vi.fn((url: string, init?: RequestInit) => {
+      const host = decodeURIComponent(url.split('/')[3])
+      const at = 回数[host] ?? 0
+      回数[host] = at + 1
+      const 手 = 列[host][Math.min(at, 列[host].length - 1)]
+      const signal = init?.signal ?? null
+      if (signal !== null) {
+        印.push(signal)
       }
-      return { ok: true, status: 200, json: async () => answer } as unknown as Response
+      return new Promise<Response>((resolve, reject) => {
+        const 断る = () => reject(new DOMException('aborted', 'AbortError'))
+        if (signal?.aborted) {
+          断る()
+          return
+        }
+        signal?.addEventListener('abort', 断る)
+        const 返す = (answer: HostResources) =>
+          resolve({ ok: true, status: 200, json: async () => answer } as unknown as Response)
+        if (手 === '止まる') {
+          return
+        }
+        if (手 === '投げる') {
+          reject(new TypeError('Failed to fetch'))
+          return
+        }
+        if ('status' in 手) {
+          resolve({ ok: 手.status < 300, status: 手.status } as Response)
+          return
+        }
+        if ('遅れて' in 手) {
+          setTimeout(() => 返す(手.答え), 手.遅れて)
+          return
+        }
+        返す(手)
+      })
     })
     vi.stubGlobal('fetch', fetch)
-    return fetch
+    return { fetch, 回数, 印 }
+  }
+
+  /** 締切まで聞かせて、答えを受け取る箱を返す（promise を await しない——止まる場面で終わらないため） */
+  function 聞かせる(
+    hosts: string[],
+    options: Partial<Parameters<typeof settleHostResources>[1]> = {},
+  ) {
+    const controller = new AbortController()
+    const 箱: { answer?: Awaited<ReturnType<typeof settleHostResources>> } = {}
+    void settleHostResources(hosts, {
+      deadline: Date.now() + RECHECK_LIMIT_MS,
+      signal: controller.signal,
+      ...options,
+    }).then((got) => {
+      箱.answer = got
+    })
+    return { 箱, controller }
+  }
+
+  /** 1台ぶんの答えを取り出す */
+  function 台(箱: { answer?: unknown }, host: string): HostAnswer | undefined {
+    const answer = 箱.answer
+    return answer instanceof Map ? (answer.get(host) as HostAnswer) : undefined
   }
 
   it('新しい値が返るまで1秒おきに聞き直す', async () => {
     vi.useFakeTimers()
-    const fetch = 順に答える(wsl(1, 'checking'), wsl(1, 'stale'), wsl(4, 'fresh'))
-    const settled = fetchSettledHostResources('local', Date.now() + RECHECK_LIMIT_MS, () => false)
+    const { fetch } = 偽の口({ local: [wsl(1, 'checking'), wsl(1, 'stale'), wsl(4, 'fresh')] })
+    const { 箱 } = 聞かせる(['local'])
 
     await vi.advanceTimersByTimeAsync(0)
     expect(fetch).toHaveBeenCalledTimes(1)
@@ -368,80 +542,160 @@ describe('fetchSettledHostResources', () => {
     await vi.advanceTimersByTimeAsync(RECHECK_INTERVAL_MS)
     expect(fetch).toHaveBeenCalledTimes(3)
 
-    const answer = await settled
-    expect(answer).toMatchObject({ host_free_state: 'fresh', fits_now: 4 })
+    expect(台(箱, 'local')).toMatchObject({ host_free_state: 'fresh', fits_now: 4 })
   })
 
   it('failed は聞き直さない', async () => {
-    const fetch = 順に答える(wsl(1, 'failed'))
-    const answer = await fetchSettledHostResources('local', Date.now() + RECHECK_LIMIT_MS, () => false)
+    vi.useFakeTimers()
+    const { fetch } = 偽の口({ local: [wsl(1, 'failed')] })
+    const { 箱 } = 聞かせる(['local'])
+    await vi.advanceTimersByTimeAsync(0)
     expect(fetch).toHaveBeenCalledTimes(1)
-    expect(answer).toMatchObject({ host_free_state: 'failed' })
+    expect(台(箱, 'local')).toMatchObject({ host_free_state: 'failed' })
   })
 
   it('見積もり0なら、checking でも1回で終わる', async () => {
-    const fetch = 順に答える(wsl(null, 'checking'))
-    await fetchSettledHostResources('local', Date.now() + RECHECK_LIMIT_MS, () => false)
+    vi.useFakeTimers()
+    const { fetch } = 偽の口({ local: [wsl(null, 'checking')] })
+    聞かせる(['local'])
+    await vi.advanceTimersByTimeAsync(RECHECK_INTERVAL_MS * 3)
     expect(fetch).toHaveBeenCalledTimes(1)
   })
 
-  it('上限 65 秒に達したら、最後の答えのまま返す', async () => {
+  it('上限 65 秒に達したら、最後の周の答えのまま返す', async () => {
     vi.useFakeTimers()
-    const fetch = 順に答える(wsl(9, 'checking'))
-    let answer: unknown = undefined
-    void fetchSettledHostResources('local', Date.now() + RECHECK_LIMIT_MS, () => false).then(
-      (got) => {
-        answer = got
-      },
-    )
+    const { fetch } = 偽の口({ local: [wsl(9, 'checking')] })
+    const { 箱 } = 聞かせる(['local'])
     await vi.advanceTimersByTimeAsync(RECHECK_LIMIT_MS - RECHECK_INTERVAL_MS)
-    expect(answer).toBeUndefined()
+    expect(箱.answer).toBeUndefined()
     await vi.advanceTimersByTimeAsync(RECHECK_INTERVAL_MS * 2)
-    expect(answer).toMatchObject({ host_free_state: 'checking' })
+    expect(台(箱, 'local')).toMatchObject({ host_free_state: 'checking' })
     // 1秒おきに 65 回前後。**上限より先に諦めない**
     expect(fetch.mock.calls.length).toBeGreaterThanOrEqual(RECHECK_LIMIT_MS / RECHECK_INTERVAL_MS)
     expect(fetch.mock.calls.length).toBeLessThanOrEqual(RECHECK_LIMIT_MS / RECHECK_INTERVAL_MS + 2)
   })
 
-  it('聞き直しの途中で聞けなくなっても、歯止め無しへ格下げしない', async () => {
-    // `null` へ格下げすると、塞ぎたい道（黙って全部送る）が開く
+  it('「この機械では数えない」と答えたら、いまどおり null（歯止め無し）で1回で終わる', async () => {
     vi.useFakeTimers()
-    順に答える(wsl(9, 'checking'), 'エラー')
-    let answer: unknown = undefined
-    void fetchSettledHostResources('local', Date.now() + RECHECK_LIMIT_MS, () => false).then(
-      (got) => {
-        answer = got
-      },
-    )
-    await vi.advanceTimersByTimeAsync(RECHECK_LIMIT_MS + RECHECK_INTERVAL_MS * 2)
-    expect(answer).not.toBeNull()
-    expect(answer).toMatchObject({ host_free_state: 'checking' })
-  })
-
-  it('最初から聞けなければ、いまどおり null（歯止め無し）', async () => {
-    順に答える('エラー')
-    const answer = await fetchSettledHostResources('local', Date.now() + RECHECK_LIMIT_MS, () => false)
-    expect(answer).toBeNull()
-  })
-
-  it('入館証が切れたら、その場で打ち切る', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => ({ ok: false, status: 401 }) as Response),
-    )
-    const answer = await fetchSettledHostResources('local', Date.now() + RECHECK_LIMIT_MS, () => false)
-    expect(answer).toBe(SIGNED_OUT)
-  })
-
-  it('打ち切られたら cancelled を返し、それ以上聞かない', async () => {
-    vi.useFakeTimers()
-    const fetch = 順に答える(wsl(9, 'checking'), wsl(9, 'checking'), wsl(9, 'fresh'))
-    let cancelled = false
-    const settled = fetchSettledHostResources('local', Date.now() + RECHECK_LIMIT_MS, () => cancelled)
+    const { fetch } = 偽の口({ local: [{ status: 501 }] })
+    const { 箱 } = 聞かせる(['local'])
     await vi.advanceTimersByTimeAsync(0)
-    cancelled = true
-    await vi.advanceTimersByTimeAsync(RECHECK_INTERVAL_MS * 3)
-    expect(await settled).toBe('cancelled')
     expect(fetch).toHaveBeenCalledTimes(1)
+    expect(台(箱, 'local')).toBeNull()
+  })
+
+  it('最初から答えが来なければ、null にせず締切まで聞き直して「答え無し」で返す', async () => {
+    // **null へ畳むと歯止め無し＝全部送る側になる。** WSL の PC でも通信は失敗する
+    vi.useFakeTimers()
+    const { fetch } = 偽の口({ local: [{ status: 503 }, '投げる'] })
+    const { 箱 } = 聞かせる(['local'])
+    await vi.advanceTimersByTimeAsync(RECHECK_INTERVAL_MS * 3)
+    expect(箱.answer).toBeUndefined()
+    expect(fetch.mock.calls.length).toBeGreaterThanOrEqual(3)
+    await vi.advanceTimersByTimeAsync(RECHECK_LIMIT_MS)
+    expect(台(箱, 'local')).toEqual(noAnswer(null))
+  })
+
+  it('聞き直しの途中で答えが来なくなっても、歯止め無しへ格下げしない', async () => {
+    vi.useFakeTimers()
+    偽の口({ local: [wsl(9, 'checking'), { status: 503 }] })
+    const { 箱 } = 聞かせる(['local'])
+    await vi.advanceTimersByTimeAsync(RECHECK_LIMIT_MS + RECHECK_INTERVAL_MS * 2)
+    // 前に聞けた答えは表示用に持ち回すだけで、数えない
+    expect(台(箱, 'local')).toEqual(noAnswer(wsl(9, 'checking')))
+  })
+
+  it('確かめ直しで1周目から答えが来なくても、前回の答えを持ったまま確かめられていない側に留まる', async () => {
+    vi.useFakeTimers()
+    偽の口({ local: ['投げる'] })
+    const 前回 = wsl(9, 'failed')
+    const { 箱 } = 聞かせる(['local'], { previous: new Map([['local', 前回]]) })
+    await vi.advanceTimersByTimeAsync(RECHECK_LIMIT_MS + RECHECK_INTERVAL_MS * 2)
+    expect(台(箱, 'local')).toEqual(noAnswer(前回))
+    const plan = planRevive([target('a', 'local', 1)], 箱.answer as Map<string, HostAnswer>)
+    expect(plan.hosts[0]).toMatchObject({ fits: 0, unconfirmed: 'no_answer' })
+  })
+
+  it('1回の問い合わせが止まっても、上限で切って次の周へ進む', async () => {
+    vi.useFakeTimers()
+    const { fetch, 印 } = 偽の口({ local: ['止まる', wsl(4, 'fresh')] })
+    const { 箱 } = 聞かせる(['local'])
+    await vi.advanceTimersByTimeAsync(ASK_LIMIT_MS - 1)
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(印[0].aborted).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(印[0].aborted).toBe(true)
+    await vi.advanceTimersByTimeAsync(RECHECK_INTERVAL_MS)
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(台(箱, 'local')).toMatchObject({ host_free_state: 'fresh', fits_now: 4 })
+  })
+
+  it('PC が2台で片方が止まっても、締切で返す（先に答えた PC は毎周聞き直す）', async () => {
+    vi.useFakeTimers()
+    const { 回数 } = 偽の口({ a: [wsl(3, 'fresh')], b: ['止まる'] })
+    const { 箱 } = 聞かせる(['a', 'b'])
+    await vi.advanceTimersByTimeAsync(RECHECK_LIMIT_MS + RECHECK_INTERVAL_MS)
+    expect(台(箱, 'a')).toMatchObject({ host_free_state: 'fresh', fits_now: 3 })
+    expect(台(箱, 'b')).toEqual(noAnswer(null))
+    // 1周は「1回の上限＋1秒」。**止まった1台に合わせて周を締切まで延ばさない**
+    expect(回数.a).toBeGreaterThanOrEqual(Math.floor(RECHECK_LIMIT_MS / (ASK_LIMIT_MS + RECHECK_INTERVAL_MS)))
+  })
+
+  it('答える時間の違う2台では、毎周すべての PC を聞き、最後の周の答えで返す', async () => {
+    // A は即答、B は1回3秒かかり、しばらく checking。**先に答えた A の最初の `fresh` は、
+    // B が落ち着く頃には期限切れ**（A は途中で stale を返し、取り直して 1 枚に減っている）
+    vi.useFakeTimers()
+    const { 回数 } = 偽の口({
+      a: [wsl(5, 'fresh', { host_free_age_sec: 58 }), wsl(5, 'stale'), wsl(1, 'fresh')],
+      b: [
+        { 遅れて: 3_000, 答え: wsl(0, 'checking') },
+        { 遅れて: 3_000, 答え: wsl(0, 'checking') },
+        { 遅れて: 3_000, 答え: wsl(5, 'fresh') },
+      ],
+    })
+    const { 箱 } = 聞かせる(['a', 'b'])
+    await vi.advanceTimersByTimeAsync(3 * 3_000 + 2 * RECHECK_INTERVAL_MS)
+
+    expect(回数).toEqual({ a: 3, b: 3 })
+    expect(台(箱, 'a')).toMatchObject({ host_free_state: 'fresh', fits_now: 1 })
+    expect(台(箱, 'b')).toMatchObject({ host_free_state: 'fresh', fits_now: 5 })
+    // 計画も最後の周の数で立つ（A は 2 枚のうち 1 枚しか入らない）
+    const plan = planRevive(
+      [target('a1', 'a', 1), target('a2', 'a', 2), target('b1', 'b', 1)],
+      箱.answer as Map<string, HostAnswer>,
+    )
+    expect(plan.over).toBe(true)
+    expect(plan.fitting.toSorted()).toEqual(['a2', 'b1'])
+  })
+
+  it('入館証が切れたら、その場で打ち切り、同じ周の他の問い合わせも切る', async () => {
+    vi.useFakeTimers()
+    const { 印 } = 偽の口({ a: [{ status: 401 }], b: ['止まる'] })
+    const { 箱 } = 聞かせる(['a', 'b'])
+    await vi.advanceTimersByTimeAsync(0)
+    expect(箱.answer).toBe(SIGNED_OUT)
+    expect(印.every((signal) => signal.aborted)).toBe(true)
+  })
+
+  it('打ち切られたら cancelled を返し、進行中の問い合わせも切る', async () => {
+    vi.useFakeTimers()
+    const { fetch, 印 } = 偽の口({ local: ['止まる'] })
+    const { 箱, controller } = 聞かせる(['local'])
+    await vi.advanceTimersByTimeAsync(0)
+    controller.abort()
+    await vi.advanceTimersByTimeAsync(RECHECK_INTERVAL_MS * 3)
+    expect(箱.answer).toBe('cancelled')
+    expect(印[0].aborted).toBe(true)
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('聞き直しに入るたびに、何を待っているかを知らせる', async () => {
+    vi.useFakeTimers()
+    偽の口({ a: [wsl(1, 'checking'), wsl(1, 'fresh')], b: ['投げる', '投げる', wsl(1, 'fresh')] })
+    const onWaiting = vi.fn()
+    聞かせる(['a', 'b'], { onWaiting })
+    await vi.advanceTimersByTimeAsync(RECHECK_INTERVAL_MS * 3)
+    // 1周目：a が Windows 側を確かめている。2周目：答えが来ないのは b だけ
+    expect(onWaiting.mock.calls.map((call) => call[0])).toEqual(['windows', 'answer'])
   })
 })

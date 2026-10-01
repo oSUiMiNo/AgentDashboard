@@ -21,15 +21,15 @@ import { moveItem } from '@/lib/reorder'
 import { nicknameOf } from '@/lib/protocol'
 import { reviveState } from '@/lib/protocol'
 import {
-  fetchSettledHostResources,
   hostOf,
   planRevive,
   RECHECK_LIMIT_MS,
+  settleHostResources,
   SIGNED_OUT,
   type HostResources,
-  type SettledAnswer,
   type RevivePlan,
   type ReviveTarget,
+  type WaitingFor,
 } from '@/lib/reviveBudget'
 import {
   getSession,
@@ -47,6 +47,31 @@ import { useWsStore } from '@/stores/ws'
 
 /** 読み上げの文言を差し替えるまでの待ち（ms）。連打を1回にまとめる（設計§15-6） */
 export const ANNOUNCE_DEBOUNCE_MS = 100
+
+/**
+ * 押してから、帯に「確かめています」と「やめる」を出すまでの待ち（ms）。
+ *
+ * **答えは普段なら数十ミリ秒で返る。** 押した瞬間に出すと、帯の文字が一瞬だけ入れ替わって
+ * 戻るので、壊れたように見える。かといって聞き直しに入るまで出さないと、1周目の問い合わせが
+ * 止まったとき（最長 [`ASK_LIMIT_MS`]）にやめる手段が無い
+ */
+export const WAITING_SHOW_DELAY_MS = 400
+
+/**
+ * 帯に出す「いま何を待っているか」の文（設計§6-3）。
+ *
+ * **答えそのものが来ていないときは「Windows 側」と言わない。** WSL でない PC でも起こる
+ */
+function 待ちの文言(waiting: WaitingFor | 'first'): string {
+  switch (waiting) {
+    case 'windows':
+      return 'Windows 側の空きを確かめています…'
+    case 'answer':
+      return '空きメモリの答えを待っています…'
+    case 'first':
+      return '空きメモリを確かめています…'
+  }
+}
 
 /**
  * 「前へ／後ろへ」で動かした結果の文言（並べ替え設計§15-6）。**純関数。**
@@ -177,6 +202,11 @@ export function TileGrid() {
     対象: ReviveTarget[]
   } | null>(null)
   const [asking, setAsking] = useState(false)
+  /**
+   * 帯で待っているもの。**出ている間は帯に「やめる」がある**（最長 65 秒聞き直すので）。
+   * `'first'` は1周目の答えがまだ来ていない
+   */
+  const [waiting, setWaiting] = useState<WaitingFor | 'first' | null>(null)
   /** ダイアログの「もう一度確かめる」が聞き直している間 */
   const [rechecking, setRechecking] = useState(false)
   /*
@@ -190,9 +220,21 @@ export function TileGrid() {
     自分の世代が古ければ**送らないし、ダイアログも開き直さない**（設計§6-3）
   */
   const 世代 = useRef(0)
+  /*
+    **進行中の問い合わせを切る口。** 世代だけ進めても、`fetch` は裏で走り続ける——
+    通信が止まっていると、閉じた後も締切まで握ったままになる
+  */
+  const 中断 = useRef<AbortController | null>(null)
+  /** 聞き直しを打ち切る。**遅れた答えを捨て、進行中の問い合わせも切る** */
+  const 打ち切る = () => {
+    世代.current += 1
+    中断.current?.abort()
+    中断.current = null
+  }
   useEffect(() => {
     return () => {
       世代.current += 1
+      中断.current?.abort()
     }
   }, [])
 
@@ -332,6 +374,12 @@ export function TileGrid() {
           return group !== undefined && group.cards.length === 0
         })
 
+  /*
+    **待っている間は、選択が外れても帯を隠さない。** 隠すと「やめる」が見えなくなり、
+    裏で聞き直しが続いたまま、後からダイアログが出たり送られたりする
+  */
+  const 帯を隠す = 選択.ids.length === 0 && waiting === null
+
   const まとめて外す = async () => {
     if (選択.kind === 'card') {
       for (const cardId of 消せる) {
@@ -358,47 +406,55 @@ export function TileGrid() {
    * 片方だけ保護が付いている状態を作らない**。
    */
   /**
-   * 資源を聞き、計画を立てる。**`checking`・`stale` の PC は聞き直してから**
+   * 資源を聞き、計画を立てる。**`checking`・`stale`・答えが来なかった PC は聞き直してから**
    * （設計§6-3）。遅れた答え（世代が進んだ）なら `'cancelled'`。
+   *
+   * `前回` は確かめ直しのときの PC 別の答え。**1周目の通信が失敗しても、前回の答えを
+   * 持ったまま「確かめられていない」に留める**——歯止め無しへ倒して全部送らない
    */
   const 計画する = async (
     対象: ReviveTarget[],
     自分の世代: number,
+    前回?: ReadonlyMap<string, HostResources | null>,
+    onWaiting?: (waitingFor: WaitingFor) => void,
   ): Promise<RevivePlan | typeof SIGNED_OUT | 'cancelled'> => {
     const 外れた = () => 世代.current !== 自分の世代
-    // **締切は押した時点で1回だけ作り、PC 全台で共有する**
-    const deadline = Date.now() + RECHECK_LIMIT_MS
-    const hosts = [...new Set(対象.map((target) => target.host))]
-    const answers = await Promise.all(
-      hosts.map(
-        async (host) =>
-          [host, await fetchSettledHostResources(host, deadline, 外れた)] as [
-            string,
-            SettledAnswer,
-          ],
-      ),
+    中断.current?.abort()
+    const 打ち切り = new AbortController()
+    中断.current = 打ち切り
+    const 答え = await settleHostResources(
+      [...new Set(対象.map((target) => target.host))],
+      {
+        // **締切は押した時点で1回だけ作り、PC 全台・全周で共有する**
+        deadline: Date.now() + RECHECK_LIMIT_MS,
+        signal: 打ち切り.signal,
+        previous: 前回,
+        onWaiting: (waitingFor) => {
+          if (!外れた()) {
+            onWaiting?.(waitingFor)
+          }
+        },
+      },
     )
-    if (外れた() || answers.some(([, answer]) => answer === 'cancelled')) {
+    if (中断.current === 打ち切り) {
+      中断.current = null
+    }
+    if (外れた() || 答え === 'cancelled') {
       return 'cancelled'
     }
     // **入館証が切れていたら1枚も送らない**（コードレビュー対応13）。
-    // `null`（聞けなかった）は歯止め無しで進む側だが、こちらは進んではいけない
-    // ——ログイン画面へ落ちずに26枚流すことになる。`markSignedOut()` は
+    // ログイン画面へ落ちずに26枚流すことになる。`markSignedOut()` は
     // `fetchHostResources` が呼んでいるので、ここは送らずに返るだけでよい
-    if (answers.some(([, answer]) => answer === SIGNED_OUT)) {
+    if (答え === SIGNED_OUT) {
       return SIGNED_OUT
     }
-    // `planRevive` の契約は変えない。`SIGNED_OUT`・`'cancelled'` は上で弾いてある
-    const 数えた = new Map(
-      answers.map(([host, answer]) => [host, answer as HostResources | null]),
-    )
     // **対象は押した時点の集合から減らすだけ**（聞き直しの間に増えたカードを足さない）
     const いま戻せる = new Set(
       最新の対象.current.map((target) => target.cardId),
     )
     return planRevive(
       対象.filter((target) => いま戻せる.has(target.cardId)),
-      数えた,
+      答え,
     )
   }
 
@@ -415,8 +471,13 @@ export function TileGrid() {
     }
     const 自分の世代 = ++世代.current
     setAsking(true)
+    const 合図 = setTimeout(() => {
+      if (世代.current === 自分の世代) {
+        setWaiting((now) => now ?? 'first')
+      }
+    }, WAITING_SHOW_DELAY_MS)
     try {
-      const 立てた = await 計画する(対象, 自分の世代)
+      const 立てた = await 計画する(対象, 自分の世代, undefined, setWaiting)
       if (立てた === 'cancelled' || 立てた === SIGNED_OUT) {
         return
       }
@@ -427,10 +488,23 @@ export function TileGrid() {
       }
       setPlan({ plan: 立てた, 対象 })
     } finally {
+      clearTimeout(合図)
       if (世代.current === 自分の世代) {
         setAsking(false)
+        setWaiting(null)
       }
     }
+  }
+
+  /**
+   * 帯の「やめる」。押した後の聞き直しを打ち切る（ダイアログの「やめる」と同じ道）。
+   *
+   * **ここで `asking` を戻す。** 世代を進めたので、`押した` の `finally` はもう戻さない
+   */
+  const 確かめるのをやめる = () => {
+    打ち切る()
+    setAsking(false)
+    setWaiting(null)
   }
 
   /** ダイアログの「もう一度確かめる」。**開けたまま**聞き直し、答えで計画を立て直す */
@@ -441,7 +515,11 @@ export function TileGrid() {
     const 自分の世代 = ++世代.current
     setRechecking(true)
     try {
-      const 立てた = await 計画する(plan.対象, 自分の世代)
+      const 立てた = await 計画する(
+        plan.対象,
+        自分の世代,
+        new Map(plan.plan.hosts.map((host) => [host.host, host.resources])),
+      )
       if (立てた === 'cancelled') {
         return
       }
@@ -449,11 +527,8 @@ export function TileGrid() {
         setPlan(null)
         return
       }
-      if (!立てた.over) {
-        送る(立てた.all)
-        setPlan(null)
-        return
-      }
+      // **全部入ると分かっても、黙って送らない。** 押したのは「確かめる」で「戻す」ではない
+      // ——確かめた結果を見てから押したい人の手を飛ばさない（初回の門が黙って送るのとは別）
       setPlan({ plan: 立てた, 対象: plan.対象 })
     } finally {
       if (世代.current === 自分の世代) {
@@ -462,9 +537,9 @@ export function TileGrid() {
     }
   }
 
-  /** ダイアログを閉じる。**聞き直しの途中なら、遅れた答えを捨てる** */
+  /** ダイアログを閉じる。**聞き直しの途中なら、遅れた答えを捨て、問い合わせも切る** */
   const 閉じる = () => {
-    世代.current += 1
+    打ち切る()
     setRechecking(false)
     setPlan(null)
   }
@@ -573,7 +648,7 @@ export function TileGrid() {
         </div>
         <div
           data-testid="bulk-row"
-          aria-hidden={選択.ids.length === 0}
+          aria-hidden={帯を隠す}
           /*
             **高さを固定する。** 場所を空けるだけでは足りなかった——中身が変わると
             行の高さが変わり（文字が折り返す・ボタンの分だけ背が伸びる）、**選んだ
@@ -584,15 +659,34 @@ export function TileGrid() {
             同じ理由。**数が増えて2行になった瞬間に、また同じ壊れ方をする。**
           */
           className={`border-primary/30 bg-primary/5 flex h-10 flex-nowrap items-center gap-3 overflow-hidden rounded-md border px-2 text-xs ${
-            選択.ids.length === 0 ? 'invisible' : ''
+            帯を隠す ? 'invisible' : ''
           }`}
           onClick={(event) => event.stopPropagation()}
         >
+          {/*
+            **待っている間は、数の代わりに何を待っているかを出し、すぐ右に「やめる」を置く。**
+            聞き直しは最長 65 秒かかるので、止める手段が無いと固まったと読まれる（設計§6-3）。
+            文字の器を増やさない——同じ場所の文を入れ替えるだけにして、帯の高さを崩さない
+          */}
           <span data-testid="bulk-count" className="text-muted-foreground truncate">
-            {選択.kind === 'card'
-              ? `${選択.ids.length}枚を選んでいます（起こせるのは ${起こせる.length}枚／走っている ${選択.ids.length - 起こせる.length}枚は触りません）`
-              : `${選択.ids.length}枠を選んでいます`}
+            {waiting !== null
+              ? 待ちの文言(waiting)
+              : 選択.kind === 'card'
+                ? `${選択.ids.length}枚を選んでいます（起こせるのは ${起こせる.length}枚／走っている ${選択.ids.length - 起こせる.length}枚は触りません）`
+                : `${選択.ids.length}枠を選んでいます`}
           </span>
+          {waiting !== null && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="xs"
+              data-testid="bulk-revive-stop"
+              className="shrink-0"
+              onClick={確かめるのをやめる}
+            >
+              やめる
+            </Button>
+          )}
           <div className="ml-auto flex items-center gap-1">
             {一つの居場所 !== null && (
               <>

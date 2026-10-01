@@ -84,12 +84,14 @@ export interface ReviveTarget {
 }
 
 /**
- * その PC の Windows 側の空きを、確かめられなかったわけ（設計§6-3）。
+ * その PC の空きを、確かめられなかったわけ（設計§6-3）。
  *
  * - `gave_up`：聞き直しの上限（[`RECHECK_LIMIT_MS`]）に達しても新しい値が来なかった
- * - `failed`：PC が「聞けなかった」と答えた（理由は `host_free_error`）
+ * - `failed`：PC が「Windows 側を聞けなかった」と答えた（理由は `host_free_error`）
+ * - `no_answer`：**PC の答えそのものが来なかった**（通信の失敗・時間切れ。[`NO_ANSWER`]）。
+ *   WSL でない PC でも起こるので、画面はこれを「Windows 側」と呼ばない
  */
-export type Unconfirmed = 'gave_up' | 'failed'
+export type Unconfirmed = 'gave_up' | 'failed' | 'no_answer'
 
 /** PC 1台ぶんの内訳。 */
 export interface HostBudget {
@@ -97,13 +99,17 @@ export interface HostBudget {
   /** その PC に居る対象の枚数 */
   targets: number
   /**
-   * その PC がいま受け入れられる枚数。**聞けなかったら `null`**。
+   * その PC がいま受け入れられる枚数。**PC が「数えない」と答えたら `null`**。
    *
    * **確かめられていない PC は `0`**——床で数えた参考値で戻す枚数を決めない（設計§6-3）
    */
   fits: number | null
   /** 確かめられていないなら、そのわけ。確かめられた（または確かめる必要が無い）なら `null` */
   unconfirmed: Unconfirmed | null
+  /**
+   * 表示に使う答え。**`no_answer` のときは前に聞けた答え**（無ければ `null`）で、
+   * 数えるのには使っていない
+   */
   resources: HostResources | null
 }
 
@@ -149,7 +155,7 @@ export function needsRecheck(resources: HostResources | null): boolean {
  */
 function 確かめ(found: HostResources | null): Unconfirmed | null {
   if (found === null || found.fits_now == null) {
-    // 聞けなかった・見積もり0（歯止めを外している）：制限なし（いまどおり）
+    // この機械では数えない・見積もり0（歯止めを外している）：制限なし（いまどおり）
     return null
   }
   const state = found.host_free_state
@@ -172,11 +178,42 @@ function 確かめ(found: HostResources | null): Unconfirmed | null {
 }
 
 /**
+ * 答えが来なかった PC（[`NO_ANSWER`]）を、計画へ渡す形。
+ *
+ * `last` は前に聞けた答えで、**表示にだけ使い、数えない**。確かめ直しで1周目の通信が
+ * 失敗しても、前回の答えを持ったまま「確かめられていない」に留めるために持ち回す
+ */
+export interface NoAnswer {
+  readonly no_answer: true
+  readonly last: HostResources | null
+}
+
+export function noAnswer(last: HostResources | null): NoAnswer {
+  return { no_answer: true, last }
+}
+
+/**
+ * 計画へ渡す PC 1台ぶんの答え。
+ *
+ * - `HostResources`：答えが来た
+ * - `null`：**PC が「この機械では数えない」と答えた**（[`fetchHostResources`]）。歯止め無し
+ * - [`NoAnswer`]：**答えが来なかった**。確かめられていない側
+ */
+export type HostAnswer = HostResources | null | NoAnswer
+
+function isNoAnswer(answer: HostAnswer): answer is NoAnswer {
+  return answer !== null && 'no_answer' in answer
+}
+
+/**
  * 押したときの計画を立てる。
  *
- * **聞けなかった PC は数えない**（`fits` が `null`）。読めない機械（Linux 以外）や
+ * **「数えない」と答えた PC は数えない**（`fits` が `null`）。読めない機械（Linux 以外）や
  * 版の古い PC がここに当たる——**分からないことを理由に止めない**ので、その PC の
  * 対象は「入る」側として扱う。
+ *
+ * **答えが来なかった PC（[`NoAnswer`]）は、それとは別。** 通信が失敗しただけで、WSL の
+ * 確認が要る PC かどうかも分からないので、確かめられていない PC として 0 枚に数える。
  *
  * **Windows 側の空きを確かめられていない PC は 0 枚**として `over` を立てる
  * （設計§6-3）。PC が「聞けなかった」と言っているのに床で「全部入る」と数えて
@@ -188,7 +225,7 @@ function 確かめ(found: HostResources | null): Unconfirmed | null {
  */
 export function planRevive(
   targets: ReviveTarget[],
-  resources: ReadonlyMap<string, HostResources | null>,
+  resources: ReadonlyMap<string, HostAnswer>,
 ): RevivePlan {
   const byHost = new Map<string, ReviveTarget[]>()
   for (const target of targets) {
@@ -205,16 +242,17 @@ export function planRevive(
   let over = false
 
   for (const [host, list] of byHost) {
-    const found = resources.get(host) ?? null
-    const unconfirmed = 確かめ(found)
-    // **「聞けなかった」と「数えない」を同じ `null` に畳むのは正しい。** どちらも
-    // 歯止め無しで進む側で、画面のふるまいは同じでよい（**CLI は言い分ける**——
-    // あちらは人が読む答えなので、外しているのか聞けなかったのかは別の話）
+    const answer = resources.get(host) ?? null
+    const found = isNoAnswer(answer) ? answer.last : answer
+    const unconfirmed = isNoAnswer(answer) ? 'no_answer' : 確かめ(found)
+    // **「この機械では数えない」と「歯止めを外している」を同じ `null` に畳むのは正しい。**
+    // どちらも歯止め無しで進む側で、画面のふるまいは同じでよい（**CLI は言い分ける**——
+    // あちらは人が読む答えなので、外しているのか読めない機械なのかは別の話）
     const fits = unconfirmed !== null ? 0 : (found?.fits_now ?? null)
     hosts.push({ host, targets: list.length, fits, unconfirmed, resources: found })
 
     if (fits === null || list.length <= fits) {
-      // 聞けなかった、または全部入る。**間引かない**
+      // 数えない、または全部入る。**間引かない**
       for (const target of list) {
         fitting.push(target.cardId)
       }
@@ -245,49 +283,75 @@ export function gb(mb: number): string {
 /**
  * 入館証が切れていた、という答え（コードレビュー対応13）。
  *
- * **「聞けなかった」（`null`）と混ぜてはいけない。** あちらは歯止め無しで進む側だが、
+ * **「数えない」（`null`）と混ぜてはいけない。** あちらは歯止め無しで進む側だが、
  * こちらで進むと**ログイン画面へ落ちずに26枚流す**ことになる。
  */
 export const SIGNED_OUT = 'signed-out' as const
+
+/**
+ * 聞いたのに答えが来なかった（通信の失敗・時間切れ・本文が読めない）。
+ *
+ * **「数えない」（`null`）と混ぜてはいけない。** `null` は PC が「この機械では数えない」と
+ * 答えた確定の答えで、歯止め無しで進む。こちらは**答えそのものが無い**——WSL の確認が
+ * 要る PC でも起こるので、歯止め無しへ倒すと、確かめていない数のまま全部送ることになる。
+ */
+export const NO_ANSWER = 'no-answer' as const
 
 /** [`fetchHostResources`] の答え。 */
 export type HostResourcesAnswer =
   | HostResources
   | null
   | typeof SIGNED_OUT
+  | typeof NO_ANSWER
+
+/**
+ * 「その PC は数えない」という確定の答えの状態コード。**歯止め無しで進む**（いまどおり）。
+ *
+ * - 501：メモリの空きを読めない機械（Linux 以外。`HostFailure::Unavailable`）
+ * - 409：資源を聞く口を持たない古い版の PC（`HostAskError::Unsupported`）
+ *
+ * **これ以外の失敗はすべて「答えが来なかった」**（[`NO_ANSWER`]）。503・504・404・500・415
+ * （ローカルモードで読み取りの処理が落ちたとき）は、どれも WSL の PC でも起こる。
+ */
+const 数えない状態コード: ReadonlySet<number> = new Set([501, 409])
 
 /**
  * その PC の資源を聞く（`GET /api/hosts/{host}/resources`）。
  *
  * **押した瞬間にだけ聞く。** 常時持っていると古い値で判断することになる。
- * 聞けなければ `null`——**歯止め無しで進む**ので、投げるのではなく畳んで返す。
  *
- * # 401 だけは言い分ける
+ * # 失敗を3つに言い分ける
  *
- * cookie が切れているときに `null` へ畳むと、**歯止め無しで全部流す**ことになる。
- * 他の取得口（`stores/settings.ts` ／ `stores/versions.ts` ／ `stores/ws.ts`）は
- * 401 で `markSignedOut()` を呼ぶ約束なので、ここも揃える。
+ * - 401 → [`SIGNED_OUT`]。他の取得口（`stores/settings.ts` ／ `stores/versions.ts` ／
+ *   `stores/ws.ts`）と同じく `markSignedOut()` を呼ぶ
+ * - 501・409 → `null`（この機械では数えない。歯止め無し）
+ * - それ以外・投げた・打ち切られた・本文が読めない → [`NO_ANSWER`]
  *
- * **例外にしない。** `Promise.all` で投げると押した流れの他の分岐まで巻き込むうえ、
- * 「聞けなかったら進む」という既存の契約と混ざる。**返り値で言い分けるほうが読める。**
+ * **例外にしない。** 複数の PC を同時に聞くので、投げると他の PC の答えまで巻き込む。
+ * **返り値で言い分けるほうが読める。**
  */
 export async function fetchHostResources(
   host: string,
+  signal?: AbortSignal,
 ): Promise<HostResourcesAnswer> {
   try {
     const response = await fetch(
       `/api/hosts/${encodeURIComponent(host)}/resources`,
+      { signal },
     )
     if (response.status === 401) {
       useAuthStore.getState().markSignedOut()
       return SIGNED_OUT
     }
-    if (!response.ok) {
+    if (数えない状態コード.has(response.status)) {
       return null
+    }
+    if (!response.ok) {
+      return NO_ANSWER
     }
     return (await response.json()) as HostResources
   } catch {
-    return null
+    return NO_ANSWER
   }
 }
 
@@ -301,50 +365,178 @@ export const RECHECK_INTERVAL_MS = 1_000
 export const RECHECK_LIMIT_MS = 65_000
 
 /**
- * 聞き直しを済ませた答え。`'cancelled'` は途中で閉じられた・画面を離れた。
+ * 1回の問い合わせの上限。**サーバが PC へ聞くときの時間切れ（5 秒）より長く**取る。
+ *
+ * これを超えても答えないのは、ブラウザとサーバのあいだで止まっているときである。
+ * 上限が締切しか無いと、止まった1台に合わせて周が締切まで延び、**先に答えた PC の値が
+ * 1分以上前のものになる**——古い値で何枚戻すかを決めることになる
  */
-export type SettledAnswer = HostResourcesAnswer | 'cancelled'
+export const ASK_LIMIT_MS = 10_000
 
 /**
- * その PC の資源を、**新しい値（または `failed`）が返るまで聞き直す**（設計§6-3）。
+ * 何を待って聞き直しているか（画面の言い方を分けるため）。
+ *
+ * - `windows`：PC が Windows 側の空きを確かめている（`checking`・`stale`）
+ * - `answer`：PC の答えそのものが来ていない。**WSL でない PC でも起こる**ので「Windows 側」と言わない
+ */
+export type WaitingFor = 'windows' | 'answer'
+
+/** 1周ぶんの答え（入館証切れは周の外で扱う） */
+type RoundAnswer = HostResources | null | typeof NO_ANSWER
+
+/** この答えなら、もう1周聞く */
+function 落ち着いていない(answer: RoundAnswer): boolean {
+  return answer === NO_ANSWER || needsRecheck(answer)
+}
+
+/**
+ * 全台へ1回ずつ聞く。**同じ周の問い合わせは同時に始め、同じ打ち切りを共有する。**
+ *
+ * - 1回の上限は [`ASK_LIMIT_MS`] と締切の近いほう。超えた PC は [`NO_ANSWER`]
+ * - **1台が 401 を返したら、残りも打ち切る**——入館証が切れているなら、他の答えを待っても1枚も送らない
+ */
+async function 一周(
+  hosts: readonly string[],
+  deadline: number,
+  outer: AbortSignal,
+): Promise<Map<string, RoundAnswer> | typeof SIGNED_OUT> {
+  const 周 = new AbortController()
+  const 打ち切る = () => {
+    周.abort()
+  }
+  const timer = setTimeout(
+    打ち切る,
+    Math.max(0, Math.min(ASK_LIMIT_MS, deadline - Date.now())),
+  )
+  outer.addEventListener('abort', 打ち切る)
+  if (outer.aborted) {
+    周.abort()
+  }
+  try {
+    const answers = await Promise.all(
+      hosts.map(async (host) => {
+        const answer = await fetchHostResources(host, 周.signal)
+        if (answer === SIGNED_OUT) {
+          周.abort()
+        }
+        return [host, answer] as const
+      }),
+    )
+    const 揃った = new Map<string, RoundAnswer>()
+    for (const [host, answer] of answers) {
+      if (answer === SIGNED_OUT) {
+        return SIGNED_OUT
+      }
+      揃った.set(host, answer)
+    }
+    return 揃った
+  } finally {
+    clearTimeout(timer)
+    outer.removeEventListener('abort', 打ち切る)
+  }
+}
+
+/** 次の周まで待つ。**打ち切られたらすぐ起きる** */
+function 眠る(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | undefined = undefined
+    const 起きる = () => {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', 起きる)
+      resolve()
+    }
+    if (signal.aborted) {
+      resolve()
+      return
+    }
+    timer = setTimeout(起きる, ms)
+    signal.addEventListener('abort', 起きる)
+  })
+}
+
+/** [`settleHostResources`] の頼み方 */
+export interface SettleOptions {
+  /** 締切（`Date.now()` の値）。**押した時点で1回だけ作り**、全周で共有する */
+  deadline: number
+  /** 閉じた・やめた・画面を離れたら打ち切る。**進行中の問い合わせも切る** */
+  signal: AbortSignal
+  /** 前に聞けた答え（確かめ直しのとき）。**表示にだけ使い、数えない** */
+  previous?: ReadonlyMap<string, HostResources | null>
+  /** 聞き直しに入るたびに呼ぶ。何を待っているかを渡す */
+  onWaiting?: (waitingFor: WaitingFor) => void
+}
+
+/**
+ * 全台の資源を、**1つの周の中で全台が落ち着くまで聞き直す**（設計§6-3）。
  *
  * **確かめられていない数で「何枚戻すか」を決めない。** `checking`・`stale` の答えは
  * `MemFree` の床や前回の値で数えた参考で、そのまま計画へ渡すと、床が「全部入る」と
  * 言った PC へ黙って全部送ることになる。
  *
- * - 締切（`deadline`。`Date.now()` の値）は**押した時点で1回だけ作り**、PC 全台で共有する
- * - 上限に達したら、最後の答え（`checking`・`stale` のまま）を返す。[`planRevive`] が
- *   それを「確かめられていない」として 0 枚に数える
- * - **聞き直しの途中で `null`（聞けなかった）が返っても、歯止め無しへ格下げしない。**
- *   格下げすると、塞ぎたい道（黙って全部送る）が開く。直前の答えを持ったまま締切まで回す
- * - `SIGNED_OUT` は、その場で打ち切って返す（1枚も送らない側）
- * - `isCancelled()` が真になったら `'cancelled'` を返す。**遅れた答えで送らないため**
+ * # 毎周、全台へ聞き直す
+ *
+ * 遅い PC を待つ間に、**先に答えた PC の `fresh` が古くなる**。落ち着いていない PC だけを
+ * 聞き直すと、揃ったときには先に答えた PC の値が数十秒前のものになっている。PC 側は
+ * 期限内なら即答するので、全台へ聞き直しても負荷はほぼ無い。
+ *
+ * - 落ち着いた＝新しい値・`failed`・状態の欄が無い・「数えない」。`checking`・`stale`・
+ *   答えが来なかった PC が1台でも居れば、1秒おいて**全台**をもう1周聞く
+ * - 締切に達したら、**最後の周の答え**を返す。[`planRevive`] が落ち着いていない PC を
+ *   「確かめられていない」として 0 枚に数える
+ * - **答えが来なかった PC は、前の周や前回の答えを持ち回しても数えない**（[`NoAnswer`]）。
+ *   前の周の `fresh` を使い回すと、古い値で数えることになる
+ * - 1台でも 401 なら [`SIGNED_OUT`]（1枚も送らない側）
+ * - 打ち切られたら `'cancelled'`。**遅れた答えで送らないため**
  */
-export async function fetchSettledHostResources(
-  host: string,
-  deadline: number,
-  isCancelled: () => boolean,
-): Promise<SettledAnswer> {
-  let last = await fetchHostResources(host)
-  for (;;) {
-    if (isCancelled()) {
-      return 'cancelled'
-    }
-    if (last === SIGNED_OUT || !needsRecheck(last)) {
-      return last
-    }
-    if (Date.now() >= deadline) {
-      return last
-    }
-    await new Promise((resolve) => setTimeout(resolve, RECHECK_INTERVAL_MS))
-    if (isCancelled()) {
-      return 'cancelled'
-    }
-    const next = await fetchHostResources(host)
-    if (next !== null) {
-      last = next
+export async function settleHostResources(
+  hosts: readonly string[],
+  { deadline, signal, previous, onWaiting }: SettleOptions,
+): Promise<Map<string, HostAnswer> | typeof SIGNED_OUT | 'cancelled'> {
+  const 前に聞けた = new Map<string, HostResources>()
+  for (const [host, found] of previous ?? []) {
+    if (found !== null) {
+      前に聞けた.set(host, found)
     }
   }
+  let 最後の周 = new Map<string, RoundAnswer>()
+  for (;;) {
+    const 周 = await 一周(hosts, deadline, signal)
+    if (signal.aborted) {
+      return 'cancelled'
+    }
+    if (周 === SIGNED_OUT) {
+      return SIGNED_OUT
+    }
+    最後の周 = 周
+    for (const [host, answer] of 周) {
+      if (answer !== null && answer !== NO_ANSWER) {
+        前に聞けた.set(host, answer)
+      }
+    }
+    const 待つ = [...周.values()].filter(落ち着いていない)
+    if (待つ.length === 0 || Date.now() >= deadline) {
+      break
+    }
+    onWaiting?.(待つ.every((answer) => answer === NO_ANSWER) ? 'answer' : 'windows')
+    await 眠る(RECHECK_INTERVAL_MS, signal)
+    if (signal.aborted) {
+      return 'cancelled'
+    }
+    // **眠った後にも締切を見る。** 残り0ミリ秒で次の周を始めると、全台が答え無しになる
+    if (Date.now() >= deadline) {
+      break
+    }
+  }
+  return new Map(
+    hosts.map((host): [string, HostAnswer] => {
+      // **`??` で既定を当てない。** `null`（数えない）まで答え無しに化ける
+      const answer = 最後の周.has(host) ? (最後の周.get(host) as RoundAnswer) : NO_ANSWER
+      return [
+        host,
+        answer === NO_ANSWER ? noAnswer(前に聞けた.get(host) ?? null) : answer,
+      ]
+    }),
+  )
 }
 
 /** 何秒前かを、人が読む形にする（「12 秒前」「4 分前」「2 時間前」） */
