@@ -1237,7 +1237,15 @@ enum Ask {
     ///
     /// 2つめは**通したぶんを差し引いた見込みの空き**（設計§19）。床の判定と同じ数を
     /// 渡さないと、**画面が「入る」と言ったものを PC が断る**ことになる。
-    Resources(crate::resources::Gauge, Option<u64>),
+    ///
+    /// 3つめは**失効の境界**（寝ているカードばかりなのに、メモリ不足でセッションを
+    /// 起こせない 設計§12-1）。予約が0件になった直後に、表示が境界より前の観測を
+    /// `fresh` と言わないため。
+    Resources(
+        crate::resources::Gauge,
+        Option<u64>,
+        Option<std::time::Instant>,
+    ),
     /// 渡したIDのうち履歴が実在するもの（名前付け設計§8-3）。**設定は要らない**——
     /// 走査元は環境変数から引く（`claude_home`）
     Sessions(Vec<protocol::ClaudeSessionId>),
@@ -1348,8 +1356,8 @@ fn answer_ask(outgoing: mpsc::UnboundedSender<Outgoing>, request_id: RequestId, 
                     apply,
                 ))
             }
-            Ask::Resources(gauge, projected) => {
-                match crate::resources::snapshot(&gauge, projected) {
+            Ask::Resources(gauge, projected, required_after) => {
+                match crate::resources::snapshot(&gauge, projected, required_after) {
                     Some(resources) => HostReply::Resources(resources),
                     None => {
                         let err = crate::resources::ReadError::unreadable();
@@ -1653,11 +1661,12 @@ fn apply_command(
 
         // 資源の問い（起こし直し設計§18-4）。**同じ1本の問答の道に乗る。**
         ServerToAgent::HostResources { request_id } => {
-            answer_ask(
-                outgoing.clone(),
-                request_id,
-                Ask::Resources(manager.memory_gauge(), manager.projected_available_mb()),
-            );
+            answer_ask(outgoing.clone(), request_id, {
+                // **台帳のロックは1回だけ取る**——見込みと境界を別々に読むと、
+                // 間で予約が落ちて食い違った組を渡しうる
+                let (projected, required_after) = manager.budget_view();
+                Ask::Resources(manager.memory_gauge(), projected, required_after)
+            });
         }
         // 添付の掃除（メモ設計§10-2）。**同じ1本の問答の道に乗る。**
         ServerToAgent::SweepAttachments {

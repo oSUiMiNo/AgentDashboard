@@ -507,19 +507,128 @@ pub enum SessionError {
     ///
     /// **数を添える。** 「メモリが足りません」だけだと、あと1枚なのか10枚ぶん
     /// 足りないのかが分からず、利用者は何をすればよいか決められない。
+    ///
+    /// **出す空きは判定に使った値**（寝ているカードばかりなのに、メモリ不足でセッションを
+    /// 起こせない 設計§6-1）。以前は判定に使っていない `MemAvailable` を「空き」と出して
+    /// いたので、「20GB 空いているのにメモリ不足」という矛盾した断りになっていた。
+    /// 何が制約だったか（`limit`）で、利用者がすることが変わるので文面を分ける。
+    #[error("{}", out_of_memory_text(*effective_mb, *limit, *host_free_age_sec, *reserved, *estimate_mb, *headroom_mb))]
+    OutOfMemory {
+        /// 判定に使った空き（予約後の見込みも引いた値）
+        effective_mb: u64,
+        /// 何が制約だったか
+        limit: crate::resources::Limit,
+        /// Windows 側の値が何秒前のものか（Windows が制約のとき）
+        host_free_age_sec: Option<u64>,
+        /// いま起こしている途中の本数
+        reserved: u32,
+        estimate_mb: u64,
+        headroom_mb: u64,
+    },
+    /// Windows 側の空きを確かめられなかったので、起こし直しを見送った（設計§4-2・§6-1）。
+    ///
+    /// **メモリ不足とは言わない。** 足りないと判定したわけではない——数えずに断っている。
+    /// `MemFree` で数えて「0 枚」と言うと、暖まった WSL では必ず断る（原因調査）。
     // **継続の `\` を落とさないこと。** 落とすと字下げの半角スペースがそのまま本文へ
     // 入り、画面のカードとログに出る（コードレビュー対応5）。飛ばされるのは ASCII の
     // 空白だけなので、この行頭に全角スペースを使ってはいけない
     #[error(
-        "メモリが足りないので起こし直せません（空き {available_mb} MB／\
-         1枚あたり {estimate_mb} MB ＋ 残す余白 {headroom_mb} MB）。\
-         動いているセッションを終了させてから、もう一度押してください"
+        "Windows 側の空きメモリを確かめられなかったので、起こし直しを見送りました\
+         （メモリ不足と判定したわけではありません。理由：{reason}）。\
+         少し待ってからもう一度押してください。\
+         毎回こうなる場合は、Windows 側を聞けない構成の可能性があります\
+         （設定 revive_host_free_ttl_sec = 0 で Windows 側を見なくなりますが、\
+         Windows が詰まっていても止まらなくなります）"
     )]
-    OutOfMemory {
-        available_mb: u64,
+    HostMemoryUnconfirmed {
+        reason: String,
         estimate_mb: u64,
         headroom_mb: u64,
     },
+}
+
+/// メモリ不足の断りの文面（設計§6-1）。**制約ごとに、利用者がすることを言い分ける。**
+///
+/// **WSL でない機械の文面は、以前の形と数を保つ**（「空き N MB／1枚あたり…」）。
+fn out_of_memory_text(
+    effective_mb: u64,
+    limit: crate::resources::Limit,
+    host_free_age_sec: Option<u64>,
+    reserved: u32,
+    estimate_mb: u64,
+    headroom_mb: u64,
+) -> String {
+    use crate::resources::Limit;
+    let per = format!("1枚あたり {estimate_mb} MB ＋ 残す余白 {headroom_mb} MB");
+    match limit {
+        Limit::Windows => {
+            let age = host_free_age_sec
+                .map(|age| format!("・{age} 秒前に確認"))
+                .unwrap_or_default();
+            format!(
+                "メモリが足りないので起こし直せません（使える空き {effective_mb} MB＝\
+                 Windows 側の空き{age}／{per}）。Windows 側でメモリを使っているアプリを\
+                 閉じるか、動いているセッションを終了させてから、もう一度押してください"
+            )
+        }
+        Limit::Reserved => format!(
+            "メモリが足りないので起こし直せません（使える空き {effective_mb} MB＝\
+             起こしている途中の {reserved} 枚ぶんを差し引いた値／{per}）。\
+             起こしている途中のセッションのメモリが載りきるまで、1分ほど待ってから、\
+             もう一度押してください"
+        ),
+        Limit::Wsl | Limit::Floor => format!(
+            "メモリが足りないので起こし直せません（空き {effective_mb} MB／{per}）。\
+             動いているセッションを終了させてから、もう一度押してください"
+        ),
+    }
+}
+
+/// 判定の1行（寝ているカードばかりなのに、メモリ不足でセッションを起こせない 設計§6-6）。
+///
+/// **通したときも残す。** 押されたときにしか走らないので、1件ごとに回る経路ではない。
+fn log_memory_verdict(
+    card_id: CardId,
+    decision: &'static str,
+    verdict: &MemoryVerdict,
+    waited_ms: u64,
+    refusal: Option<&SessionError>,
+) {
+    let limit = verdict.limit.map(crate::resources::Limit::as_str);
+    match refusal {
+        None => tracing::info!(
+            %card_id,
+            kind = "revive_memory",
+            decision,
+            limit,
+            effective_mb = verdict.effective_mb,
+            counted_mb = verdict.counted_mb,
+            host_free_mb = verdict.host_free_mb,
+            host_free_age_sec = verdict.host_free_age_sec,
+            available_mb = verdict.available_mb,
+            free_mb = verdict.free_mb,
+            projected_mb = verdict.projected_mb,
+            outstanding = verdict.outstanding,
+            waited_ms,
+            "起こし直しをメモリの判定で通しました"
+        ),
+        Some(refusal) => tracing::warn!(
+            %card_id,
+            kind = "revive_memory",
+            decision,
+            limit,
+            effective_mb = verdict.effective_mb,
+            counted_mb = verdict.counted_mb,
+            host_free_mb = verdict.host_free_mb,
+            host_free_age_sec = verdict.host_free_age_sec,
+            available_mb = verdict.available_mb,
+            free_mb = verdict.free_mb,
+            projected_mb = verdict.projected_mb,
+            outstanding = verdict.outstanding,
+            waited_ms,
+            "{refusal}"
+        ),
+    }
 }
 
 /// 権限モードの切替に失敗した理由（設計§6）。
@@ -2252,6 +2361,37 @@ pub struct SessionManager {
     /// **見るのと取るのは、このロックの中で不可分に行う**（[`SessionManager::reserve_memory`]）。
     /// 分けると、同時に席を取った2本が**両方「入る」と読んでから両方予約する**。
     budget: Mutex<ReviveBudget>,
+    /// 判定で、外側を確かめた後・予約台帳のロックを取る前に1回呼ぶ（**テスト専用**）。
+    ///
+    /// 「確かめた観測が、ロックを取るまでに使えなくなる」を決定的に作るための口。
+    /// 時間でずらすと不安定になり、確かめる口の中から台帳へ触ると同じロックで詰まる。
+    after_confirm: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+}
+
+/// 判定の結果（寝ているカードばかりなのに、メモリ不足でセッションを起こせない 設計§6-6）。
+///
+/// **判定の1行に載せるもの。** 成功した判定も残すので、断られた瞬間だけでなく通した瞬間の
+/// Windows 側の値も後から読める（原因調査の「確かめられていないこと」を消す）。
+#[derive(Debug, Default)]
+struct MemoryVerdict {
+    limit: Option<crate::resources::Limit>,
+    effective_mb: Option<u64>,
+    counted_mb: Option<u64>,
+    host_free_mb: Option<u64>,
+    host_free_age_sec: Option<u64>,
+    available_mb: Option<u64>,
+    free_mb: Option<u64>,
+    projected_mb: Option<u64>,
+    outstanding: u32,
+}
+
+/// 予約できなかった理由（[`SessionManager::reserve_memory`]）。
+enum ReserveError {
+    /// 確かめた観測が、ロックの中で使えなくなっていた（境界が立った・期限が切れた）。
+    /// **外へは出さない**——判定が1周だけやり直す
+    Stale,
+    /// 断る。**箱に入れる**——断りと判定の欄を並べると大きく、通る道の返り値まで太る
+    Refused(Box<(SessionError, MemoryVerdict)>),
 }
 
 /// 通したぶんを差し引いた見込みの空き（設計§19）。
@@ -2270,6 +2410,17 @@ struct ReviveBudget {
     outstanding: u32,
     /// 通したぶんを引いた見込み。**枠が1つも無ければ `None`**。
     projected_mb: Option<u64>,
+    /// **この時刻より前に始めた外側の観測は、判定に使わない**（寝ているカードばかりなのに、
+    /// メモリ不足でセッションを起こせない 設計§4-3）。予約が0件になった瞬間に立つ。
+    ///
+    /// 予約が1件でも残っている間は、見込みが「通したぶん」を全部引いたまま持っている。
+    /// 守りが切れるのは0件になった瞬間だけなので、そこで観測を失効させれば、**こちらが
+    /// 通したのに観測にも見込みにも映っていないぶん**は生まれない——期限と予約時間の
+    /// 大小に依存しない約束になる。
+    ///
+    /// **`HostFree` には置かない。** ここに置き、判定の口へ引数で渡す——測る道具と予約の
+    /// 台帳を分けておけば、ロックの入れ子が生まれない。
+    required_after: Option<std::time::Instant>,
 }
 
 /// 起こし直し1枚ぶんのメモリを押さえていることの印（設計§19）。落ちると枠が返る。
@@ -2287,6 +2438,14 @@ impl Drop for MemoryReservation {
         if budget.outstanding == 0 {
             // 誰も待っていないなら、見込みは捨てて**実測だけ**に戻す
             budget.projected_mb = None;
+            // **同じロックの中で、それより前に始めた外側の観測を失効させる**（設計§4-3）。
+            // 見込みを捨てた瞬間から、通したぶんを引いているのは観測だけになる
+            let now = std::time::Instant::now();
+            budget.required_after = Some(budget.required_after.map_or(now, |at| at.max(now)));
+            tracing::debug!(
+                kind = "revive_memory_expire",
+                "起こしている途中の予約が0件になったので、それより前の Windows 側の観測を失効させました"
+            );
         }
     }
 }
@@ -2395,7 +2554,10 @@ impl SessionManager {
     /// 読めなければ `None`。**読めないことは異常ではない**（Linux 以外）。
     /// そのときは歯止めそのものが効かない——**分からないことを理由に止めない。**
     pub fn host_resources(&self) -> Option<protocol::HostResources> {
-        crate::resources::snapshot(&self.memory_gauge(), self.projected_available_mb())
+        // **台帳のロックは1回だけ短く取る**（設計§12-1）。見込みと境界を別々に読むと、
+        // 間で予約が落ちて食い違った組で答えうる
+        let (projected, required_after) = self.budget_view();
+        crate::resources::snapshot(&self.memory_gauge(), projected, required_after)
     }
 
     /// 通したぶんを差し引いた見込みの空き（設計§19）。枠が1つも無ければ `None`。
@@ -2404,10 +2566,14 @@ impl SessionManager {
     /// `local.rs`）も、床の判定と**同じ数**を使うためにこれを通す。片方だけ引くと、
     /// 画面が「入る」と言ったものを PC が断ることになる。
     pub fn projected_available_mb(&self) -> Option<u64> {
-        self.budget
-            .lock()
-            .expect("ロックが壊れていない")
-            .projected_mb
+        self.budget_view().0
+    }
+
+    /// 見込みの空きと、**失効の境界**（予約が0件になった時刻。設計§4-3・§12-1）を、
+    /// 台帳のロックを1回だけ取って読む。表示の口（`host_resources`・`link.rs` の資源の問い）が使う。
+    pub fn budget_view(&self) -> (Option<u64>, Option<std::time::Instant>) {
+        let budget = self.budget.lock().expect("ロックが壊れていない");
+        (budget.projected_mb, budget.required_after)
     }
 
     /// いま枠を握っている本数（テストと、ログのため）。
@@ -2439,9 +2605,130 @@ impl SessionManager {
         )
     }
 
-    /// いま1枚も起こし直せないなら、その理由を返す（設計§18-3）。
+    /// 判定で、外側を確かめた後・ロックを取る前に呼ぶ口を差し込む（**テスト専用**）。
+    #[doc(hidden)]
+    pub fn 確認の後に差し込む(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *self.after_confirm.lock().expect("ロックが壊れていない") = Some(hook);
+    }
+
+    /// 予約が0件になったときと同じく、いまより前に始めた外側の観測を失効させる（**テスト専用**）。
+    #[doc(hidden)]
+    pub fn 観測を失効させる(&self) {
+        self.budget
+            .lock()
+            .expect("ロックが壊れていない")
+            .required_after = Some(std::time::Instant::now());
+    }
+
+    /// 起こし直してよいかを決める（寝ているカードばかりなのに、メモリ不足でセッションを
+    /// 起こせない 設計§3）。通れば1枚ぶんの予約を返す。
     ///
-    /// 読めなかった場合は `None`＝**通す**。
+    /// # 順序
+    ///
+    /// 1. `/proc/meminfo` が読めない → **通す**（歯止めが効かない機械。分からないことを理由に止めない）
+    /// 2. 見積もり 0（歯止めを外す設定）→ **外側を確かめずに通す**（使わない値のために待たない）
+    /// 3. 外側を確かめられない → **数えずに断る**（`MemFree` で数えない・メモリ不足と言わない）
+    /// 4. それ以外 → 数える（[`crate::resources::assess`]）
+    ///
+    /// # 締切は1回だけ作る
+    ///
+    /// 確かめた観測がロックの中で使えなくなっていたら1周だけやり直すが、**2周目も同じ締切の
+    /// 残りを使う。** 各周で作り直すと待ちが倍になる。
+    ///
+    /// # 席を持ったまま待つ
+    ///
+    /// 取得は1本で全員が結果を共有し、同じ PC の起こし直しはどれも同じ外側の値を要る。
+    /// 他のカードの操作は止まらない。**台帳のロック（std の `Mutex`）は握ったまま待たない**
+    /// ——確かめるのはロックの外で済ませ、結果を引数で渡す。
+    async fn judge_memory(
+        self: &Arc<Self>,
+        card_id: CardId,
+        seat: &tokio::sync::OwnedSemaphorePermit,
+        物差し: &crate::resources::Gauge,
+    ) -> Result<Option<MemoryReservation>, SessionError> {
+        // **確かめるのを飛ばすかは、`/proc/meminfo` を読まずに決まる**（設計§12-4）。
+        // 見積もり 0 は数えないので待たない。WSL でない・期限 0 は `confirm` がすぐ返す
+        if 物差し.estimate_mb() == 0 {
+            return Ok(None);
+        }
+        let began = std::time::Instant::now();
+        let deadline = tokio::time::Instant::now() + 物差し.host_free().wait();
+        let mut retried = false;
+        // **やり直しは回数ではなく締切で打ち切る**（設計§12-3）。やり直すたびに新しい取得が
+        // 要るので、回数を数えなくても自然に抑えられる
+        loop {
+            let required_after = self
+                .budget
+                .lock()
+                .expect("ロックが壊れていない")
+                .required_after;
+            let confirmed = 物差し.host_free().confirm(required_after, deadline).await;
+            let hook = self
+                .after_confirm
+                .lock()
+                .expect("ロックが壊れていない")
+                .clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+            let waited_ms = u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX);
+            // **やり直している間に締切を過ぎたなら、取得の失敗とは言い分ける**
+            let churned = retried
+                && tokio::time::Instant::now() >= deadline
+                && matches!(
+                    confirmed.checked(),
+                    crate::resources::Checked::Unconfirmed(_)
+                );
+            let outcome = if churned {
+                Err(ReserveError::Stale)
+            } else {
+                self.reserve_memory(seat, 物差し, &confirmed)
+            };
+            match outcome {
+                Ok(None) => return Ok(None),
+                Ok(Some((reservation, verdict))) => {
+                    log_memory_verdict(card_id, "pass", &verdict, waited_ms, None);
+                    return Ok(Some(reservation));
+                }
+                Err(ReserveError::Stale) if tokio::time::Instant::now() < deadline => {
+                    tracing::info!(
+                        %card_id,
+                        kind = "revive_memory_retry",
+                        waited_ms,
+                        "確かめた Windows 側の空きが判定の前に使えなくなったので、確かめ直します"
+                    );
+                    retried = true;
+                }
+                Err(ReserveError::Stale) => {
+                    let refusal = SessionError::HostMemoryUnconfirmed {
+                        reason: "確かめている間に、ほかの起こし直しの予約が入れ替わり続けました"
+                            .to_string(),
+                        estimate_mb: 物差し.estimate_mb(),
+                        headroom_mb: 物差し.headroom_mb(),
+                    };
+                    log_memory_verdict(
+                        card_id,
+                        "unconfirmed",
+                        &MemoryVerdict::default(),
+                        waited_ms,
+                        Some(&refusal),
+                    );
+                    return Err(refusal);
+                }
+                Err(ReserveError::Refused(refused)) => {
+                    let (refusal, verdict) = *refused;
+                    let decision = match refusal {
+                        SessionError::HostMemoryUnconfirmed { .. } => "unconfirmed",
+                        _ => "out_of_memory",
+                    };
+                    log_memory_verdict(card_id, decision, &verdict, waited_ms, Some(&refusal));
+                    return Err(refusal);
+                }
+            }
+        }
+    }
+
+    /// 確かめた結果で数え、通れば1枚ぶん予約する（設計§4-2・§18-3・§19）。
     ///
     /// # なぜ席を引数で受け取るのか（使わないのに）
     ///
@@ -2451,11 +2738,20 @@ impl SessionManager {
     ///
     /// **これをテストで押さえようとして、押さえられなかった。** 3枚を同時に頼んでも、
     /// 実際にはタスクが順に走るので、受付時に見る実装でも3枚目は既に2枚起きた後の
-    /// 空きを読む——**壊し方を当てても落ちない**（当てて確かめた）。同時に読ませる
-    /// 仕掛けを作るには、同期の `read()` の中で待つ必要があり、そこで走行時を止める。
+    /// 空きを読む——**壊し方を当てても落ちない**（当てて確かめた）。
     ///
     /// **だから検査ではなくコンパイラに見張らせる。** 席より前へ動かすと、渡すものが
     /// 無くてコンパイルが通らない。
+    ///
+    /// # なぜ `Confirmed` を受け取るのか
+    ///
+    /// **確認を通っていない外側の値を、判定へ渡す道を作らないため**（設計§2-3）。表示の
+    /// 値（古くてもよい）で判定する形へ戻すと、期限切れの直後に `MemFree` で断っていた
+    /// 誤りが戻る。
+    ///
+    /// ただし型は「確認を通った」ことしか保証しない。**ロックの中で [`crate::resources::usable`]
+    /// をもう一度見る**——確かめてからロックを取るまでに、予約が0件になって境界が立った
+    /// かもしれない。
     ///
     /// # 見るのと取るのは不可分（設計§19）
     ///
@@ -2463,38 +2759,98 @@ impl SessionManager {
     /// 席を取った2本が**両方「入る」と読んでから両方予約する**——席は2つあるので、
     /// これは日常的に起こる。
     ///
-    /// 読めなかった場合は `Ok`＝**通す**（予約もしない）。**分からないことを理由に止めない。**
+    /// **見込みの起点は判定に使った空き**（`effective`）。`MemAvailable` から引くと、
+    /// 外側で抑えていたぶんが見込みから抜け落ち、まとめて投げたときに外側で数えた枚数を
+    /// 超えて通る（設計§1-2）。
+    ///
+    /// # `/proc/meminfo` はロックの中で1回だけ読む（設計§12-4）
+    ///
+    /// 確かめるのを待った後で読む——待つ前に読むと、最大 65 秒前の `MemAvailable` で判定する。
+    /// 読めなければ `Ok(None)`＝**通す**（歯止めが効かない機械。分からないことを理由に止めない）。
     fn reserve_memory(
         self: &Arc<Self>,
         _seat: &tokio::sync::OwnedSemaphorePermit,
-    ) -> Result<Option<MemoryReservation>, SessionError> {
-        // **台帳のロックを取る前に読む口を複製しておく。** `memory_probe()` は別の
-        // ロックを取るので、入れ子にすると順序の約束が要る
-        let 物差し = self.memory_gauge();
-
+        物差し: &crate::resources::Gauge,
+        confirmed: &crate::resources::Confirmed,
+    ) -> Result<Option<(MemoryReservation, MemoryVerdict)>, ReserveError> {
+        use crate::resources::{Basis, Checked};
         let mut budget = self.budget.lock().expect("ロックが壊れていない");
-        let Some(resources) = crate::resources::snapshot(&物差し, budget.projected_mb) else {
-            // 読めない機械（Linux 以外）。歯止めそのものが効かない
+        let Some(memory) = 物差し.read_memory() else {
             return Ok(None);
+        };
+        let memory = &memory;
+        let reading = match confirmed.checked() {
+            Checked::NotWsl => None,
+            Checked::Known(reading) => {
+                if !物差し
+                    .host_free()
+                    .usable_now(reading, budget.required_after)
+                {
+                    return Err(ReserveError::Stale);
+                }
+                Some(*reading)
+            }
+            Checked::Unconfirmed(reason) => {
+                let verdict = MemoryVerdict {
+                    available_mb: Some(memory.available_mb),
+                    free_mb: Some(memory.free_mb),
+                    projected_mb: budget.projected_mb,
+                    outstanding: budget.outstanding,
+                    ..MemoryVerdict::default()
+                };
+                return Err(ReserveError::Refused(Box::new((
+                    SessionError::HostMemoryUnconfirmed {
+                        reason: reason.clone(),
+                        estimate_mb: 物差し.estimate_mb(),
+                        headroom_mb: 物差し.headroom_mb(),
+                    },
+                    verdict,
+                ))));
+            }
+        };
+        let basis = reading.map_or(Basis::NoOutside, |reading| Basis::Outside(reading.mb));
+        let assessment = crate::resources::assess(
+            memory,
+            basis,
+            budget.projected_mb,
+            物差し.estimate_mb(),
+            物差し.headroom_mb(),
+        );
+        let host_free_age_sec =
+            reading.map(|reading| reading.age(crate::resources::Now::current()).as_secs());
+        let verdict = MemoryVerdict {
+            limit: Some(assessment.limit),
+            effective_mb: Some(assessment.effective_mb),
+            counted_mb: assessment.counted_mb,
+            host_free_mb: reading.map(|reading| reading.mb),
+            host_free_age_sec,
+            available_mb: Some(memory.available_mb),
+            free_mb: Some(memory.free_mb),
+            projected_mb: budget.projected_mb,
+            outstanding: budget.outstanding,
         };
         // **`None` は「数えない」**（歯止めを外している）ので通す。断るのは
         // 「数えたうえで 0 枚」のときだけ（コードレビュー対応2）
-        if resources.fits_now == Some(0) {
-            return Err(SessionError::OutOfMemory {
-                available_mb: resources.available_mb,
-                estimate_mb: resources.estimate_mb,
-                headroom_mb: resources.headroom_mb,
-            });
+        if assessment.fits == Some(0) {
+            let refusal = SessionError::OutOfMemory {
+                effective_mb: assessment.effective_mb,
+                limit: assessment.limit,
+                host_free_age_sec,
+                reserved: budget.outstanding,
+                estimate_mb: 物差し.estimate_mb(),
+                headroom_mb: 物差し.headroom_mb(),
+            };
+            return Err(ReserveError::Refused(Box::new((refusal, verdict))));
         }
-        // 通したぶんを見込みから引く。**実測が既に下がっていれば、そちらが採られている**
-        // （`snapshot` が小さいほうを使う）ので、二重には引かれない
-        let base = crate::resources::projected(resources.available_mb, budget.projected_mb);
-        budget.projected_mb = Some(base.saturating_sub(物差し.estimate_mb()));
+        budget.projected_mb = Some(assessment.next_mb);
         budget.outstanding += 1;
         drop(budget);
-        Ok(Some(MemoryReservation {
-            manager: Arc::clone(self),
-        }))
+        Ok(Some((
+            MemoryReservation {
+                manager: Arc::clone(self),
+            },
+            verdict,
+        )))
     }
 
     /// 利用者の PC 上のファイル（グローバル既定・別名の実測）を開く。
@@ -2545,6 +2901,7 @@ impl SessionManager {
             memory: Mutex::new(Arc::new(crate::resources::ProcMeminfo)),
             host_free: Mutex::new(host_free),
             budget: Mutex::new(ReviveBudget::default()),
+            after_confirm: Mutex::new(None),
         })
     }
 
@@ -3140,6 +3497,19 @@ impl SessionManager {
         claude_session_id: ClaudeSessionId,
     ) -> Result<Arc<Session>, SessionError> {
         let card_id = in_flight.card_id;
+        // **受付の時点で外側を取りに行かせる**（寝ているカードばかりなのに、メモリ不足で
+        // セッションを起こせない 設計§2-6）。取得と席待ちが重なるので、席が空くころには
+        // 答えが出ていることが多い。待たない
+        let 物差し = self.memory_gauge();
+        // 見積もり 0（歯止めを外す設定）では外側を使わないので、取りに行かせない
+        if 物差し.estimate_mb() != 0 {
+            let required_after = self
+                .budget
+                .lock()
+                .expect("ロックが壊れていない")
+                .required_after;
+            物差し.host_free().prefetch(required_after);
+        }
         // 席が空くまで待つ。**ここは切り離されたタスクの中**なので、待っても他の指示は
         // 止まらない（設計§8-3）
         let seat = Arc::clone(&self.revive_slots)
@@ -3154,13 +3524,7 @@ impl SessionManager {
         //
         // 通ったら1枚ぶん予約が返る。**この先で失敗したら、そこで落ちて枠が返る**
         // （RAII。60秒ぶん多く見積もったまま残さない）
-        let reservation = match self.reserve_memory(&seat) {
-            Ok(reservation) => reservation,
-            Err(refusal) => {
-                tracing::warn!(%card_id, "{refusal}");
-                return Err(refusal);
-            }
-        };
+        let reservation = self.judge_memory(card_id, &seat, &物差し).await?;
 
         // **必ず起こす前に畳む**（設計§7-1）。理由は [`SessionManager::fold`] に書いてある
         if self.fold(card_id).is_some() {
@@ -4013,19 +4377,88 @@ mod tests {
     /// 継続の書き方を変えただけで落ちる——確かめたいのは書き方ではなく、出る文である。
     #[test]
     fn 断りの文に連続した半角スペースを混ぜない() {
-        let 文 = SessionError::OutOfMemory {
-            available_mb: 2500,
-            estimate_mb: 1000,
-            headroom_mb: 2000,
+        use crate::resources::Limit;
+        // **新しい文面の全組み合わせ**（寝ているカードばかりなのに、メモリ不足で
+        // セッションを起こせない 設計§8-3）。制約4つ × 古さの有無、と確認できない断り
+        let mut 文たち = Vec::new();
+        for limit in [Limit::Wsl, Limit::Windows, Limit::Floor, Limit::Reserved] {
+            for age in [None, Some(3)] {
+                文たち.push(
+                    SessionError::OutOfMemory {
+                        effective_mb: 2500,
+                        limit,
+                        host_free_age_sec: age,
+                        reserved: 2,
+                        estimate_mb: 1000,
+                        headroom_mb: 2000,
+                    }
+                    .to_string(),
+                );
+            }
         }
-        .to_string();
-
-        assert!(
-            !文.contains("  "),
-            "連続した半角スペースが入っている（継続の `\\` が落ちている）: {文:?}"
+        文たち.push(
+            SessionError::HostMemoryUnconfirmed {
+                reason: "起動できません".to_string(),
+                estimate_mb: 1000,
+                headroom_mb: 2000,
+            }
+            .to_string(),
         );
+
+        for 文 in &文たち {
+            assert!(
+                !文.contains("  "),
+                "連続した半角スペースが入っている（継続の `\\` が落ちている）: {文:?}"
+            );
+            assert!(!文.contains('\n'), "改行が入っている: {文:?}");
+        }
         // 数を添えるという約束（型の doc）も、ここで一緒に固定する
-        assert!(文.contains("2500"), "空きの数が出ていない: {文:?}");
+        for 文 in &文たち[..8] {
+            assert!(文.contains("2500"), "空きの数が出ていない: {文:?}");
+            assert!(
+                文.contains("1000") && 文.contains("2000"),
+                "1枚あたりと余白が出ていない: {文:?}"
+            );
+        }
+        assert!(
+            !文たち[8].contains("メモリが足りない"),
+            "確かめられなかった断りでメモリ不足と言わないこと: {:?}",
+            文たち[8]
+        );
+    }
+
+    #[test]
+    fn メモリ不足の断りは制約ごとに利用者がすることを言い分ける() {
+        use crate::resources::Limit;
+        let 文 = |limit, age| {
+            SessionError::OutOfMemory {
+                effective_mb: 1792,
+                limit,
+                host_free_age_sec: age,
+                reserved: 2,
+                estimate_mb: 780,
+                headroom_mb: 2048,
+            }
+            .to_string()
+        };
+        let windows = 文(Limit::Windows, Some(3));
+        assert!(
+            windows.contains("Windows 側の空き・3 秒前に確認"),
+            "{windows}"
+        );
+        assert!(windows.contains("アプリを閉じる"), "{windows}");
+        let reserved = 文(Limit::Reserved, None);
+        assert!(
+            reserved.contains("起こしている途中の 2 枚ぶん"),
+            "{reserved}"
+        );
+        assert!(reserved.contains("1分ほど待って"), "{reserved}");
+        // **WSL でない機械の文面は以前の形を保つ**
+        assert_eq!(
+            文(Limit::Wsl, None),
+            "メモリが足りないので起こし直せません（空き 1792 MB／1枚あたり 780 MB ＋ 残す余白 2048 MB）。\
+             動いているセッションを終了させてから、もう一度押してください"
+        );
     }
 
     /// 端末への書き込みは、声を持つ口だけを通ること（設計§10-3）。

@@ -615,8 +615,8 @@ impl session_host_core::resources::Probe for 空きとフリーが違うメモ�
 struct 聞けない外側;
 
 impl session_host_core::resources::HostFreeProbe for 聞けない外側 {
-    fn read(&self) -> Option<u64> {
-        None
+    fn read(&self) -> Result<u64, String> {
+        Err("起動できません: テストの口".to_string())
     }
 }
 
@@ -1057,4 +1057,613 @@ async fn 画面へ答える枚数にも予約が乗る() {
         resources.available_mb, 5_000,
         "空きそのものは書き換えないこと（機械が報告した値である）"
     );
+}
+
+// ---------------------------------------------------------------------------
+// WSL の外側の空きで判定する（寝ているカードばかりなのに、メモリ不足でセッションを
+// 起こせない 設計§8-1）
+// ---------------------------------------------------------------------------
+//
+// **期限切れの値を捨てて `MemFree` で数えていた**ので、60 秒空けた後の1回目は
+// 暖まった WSL では必ず 0 枚で断られていた。判定は新しい値を待ってから数える。
+
+/// 好きな外側を名乗る口。**呼ばれるたびに1つ数える**（取りに行った本数を確かめるため）。
+#[derive(Debug)]
+struct 名乗る外側 {
+    mb: u64,
+    回数: std::sync::atomic::AtomicUsize,
+}
+
+impl 名乗る外側 {
+    fn 作る(mb: u64) -> Arc<Self> {
+        Arc::new(Self {
+            mb,
+            回数: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+}
+
+impl session_host_core::resources::HostFreeProbe for 名乗る外側 {
+    fn read(&self) -> Result<u64, String> {
+        self.回数.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(self.mb)
+    }
+}
+
+/// 暖まった WSL の姿。`MemAvailable` 20,000・`MemFree` 400（原因調査の実測に近い値）。
+fn 暖まったwsl(manager: &Arc<SessionManager>) {
+    manager.set_memory_probe(Arc::new(空きとフリーが違うメモリ(20_000, 400)));
+}
+
+/// 実機の既定（1枚 780MB・余白 2,048MB）。
+fn 実機の設定() -> SessionHostConfig {
+    SessionHostConfig {
+        revive_estimate_mb: 780,
+        revive_headroom_mb: 2_048,
+        ..SessionHostConfig::default()
+    }
+}
+
+#[tokio::test]
+async fn 期限切れのあとの1回目でも聞けた外側で数えて起こせる() {
+    // 利用者が踏んだ形そのもの。**1時間前に聞けた値は期限（60 秒）を過ぎている**が、
+    // 外側の口は聞けば 6,000MB を返す。(6,000 − 2,048) / 780 = 5 枚入る
+    let manager = common::manager_with(実機の設定());
+    暖まったwsl(&manager);
+    let 外 = 名乗る外側::作る(6_000);
+    let host_free = session_host_core::resources::HostFree::new(
+        true,
+        Arc::clone(&外) as Arc<dyn session_host_core::resources::HostFreeProbe>,
+        Duration::from_secs(60),
+    );
+    host_free.覚えさせる(
+        6_000,
+        std::time::Instant::now() - Duration::from_secs(3_600),
+    );
+    manager.set_host_free(host_free);
+
+    let card_id = CardId::new();
+    let session = 頼む(&manager, card_id)
+        .await
+        .expect("★期限切れの直後でも、取り直した外側の空きで数えて起こせること");
+    assert_eq!(session.card_id, card_id);
+    assert_eq!(
+        外.回数.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "古い値をそのまま使ったのではなく、取り直してから数えたこと"
+    );
+}
+
+#[tokio::test]
+async fn 一度も聞けていない起動直後でも取り直しを待って起こせる() {
+    let manager = common::manager_with(実機の設定());
+    暖まったwsl(&manager);
+    let 外 = 名乗る外側::作る(6_000);
+    manager.set_host_free(session_host_core::resources::HostFree::new(
+        true,
+        Arc::clone(&外) as Arc<dyn session_host_core::resources::HostFreeProbe>,
+        Duration::from_secs(60),
+    ));
+
+    let card_id = CardId::new();
+    頼む(&manager, card_id)
+        .await
+        .expect("★一度も聞けていなくても、取り直しを待ってから数えて起こせること");
+    assert_eq!(外.回数.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn wslでまとめて投げても外側で数えた枚数を超えない() {
+    // 外側 4,000（期限内）・`MemAvailable` 20,000・余白 2,000・1枚 1,000。
+    // **正しくは (4,000 − 2,000) / 1,000 = 2 枚。** 見込みの起点が `MemAvailable` だと
+    // 20,000 から引いていくので、外側の 4,000 で抑えたまま 18 枚通る（設計§1-2）
+    let manager = common::manager_with(予約の設定());
+    manager.set_memory_probe(名乗るメモリ::一定(20_000));
+    let host_free = session_host_core::resources::HostFree::new(
+        true,
+        名乗る外側::作る(4_000),
+        Duration::from_secs(60),
+    );
+    host_free.覚えさせる(4_000, std::time::Instant::now());
+    manager.set_host_free(host_free);
+
+    let ids: Vec<CardId> = (0..26).map(|_| CardId::new()).collect();
+    let 回す = {
+        let manager = Arc::clone(&manager);
+        let ids = ids.clone();
+        tokio::spawn(async move {
+            loop {
+                for card_id in &ids {
+                    if let Some(session) = manager.get(*card_id)
+                        && session.status() == SessionStatus::Starting
+                    {
+                        立ち上がりきらせる(&manager, &session);
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+    };
+
+    let (起きた, 断り) = 同時に頼む(&manager, &ids).await;
+    回す.abort();
+
+    assert_eq!(
+        起きた, 2,
+        "★外側で数えた (4,000 − 2,000) / 1,000 = 2 枚を超えないこと"
+    );
+    assert_eq!(断り.len(), 24, "残りは断られること");
+}
+
+#[tokio::test]
+async fn wslでも画面へ答える枚数に予約が乗る() {
+    let manager = common::manager_with(予約の設定());
+    manager.set_memory_probe(名乗るメモリ::一定(20_000));
+    let host_free = session_host_core::resources::HostFree::new(
+        true,
+        名乗る外側::作る(5_000),
+        Duration::from_secs(60),
+    );
+    host_free.覚えさせる(5_000, std::time::Instant::now());
+    manager.set_host_free(host_free);
+
+    assert_eq!(
+        manager.host_resources().expect("読めること").fits_now,
+        Some(3),
+        "(5,000 − 2,000) / 1,000 = 3"
+    );
+
+    頼む(&manager, CardId::new()).await.expect("通ること");
+    wait_until("予約が立つ", || manager.reserved_revives() == 1).await;
+
+    assert_eq!(
+        manager.host_resources().expect("読めること").fits_now,
+        Some(2),
+        "★外側で抑えていても、通した1枚ぶんが引かれていること"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 確かめてから数える（寝ているカードばかりなのに、メモリ不足でセッションを
+// 起こせない 設計§8-3）
+// ---------------------------------------------------------------------------
+
+/// 前から順に名乗り、尽きたら最後の値を言い続ける外側。**呼ばれた回数も数える。**
+#[derive(Debug)]
+struct 順に名乗る外側 {
+    残り: std::sync::Mutex<std::collections::VecDeque<u64>>,
+    最後: u64,
+    回数: std::sync::atomic::AtomicUsize,
+}
+
+impl 順に名乗る外側 {
+    fn 作る(values: &[u64], 尽きたら: u64) -> Arc<Self> {
+        Arc::new(Self {
+            残り: std::sync::Mutex::new(values.iter().copied().collect()),
+            最後: 尽きたら,
+            回数: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    fn 回数(&self) -> usize {
+        self.回数.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl session_host_core::resources::HostFreeProbe for 順に名乗る外側 {
+    fn read(&self) -> Result<u64, String> {
+        self.回数.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(self
+            .残り
+            .lock()
+            .expect("ロックが壊れていない")
+            .pop_front()
+            .unwrap_or(self.最後))
+    }
+}
+
+/// WSL の一式を差し込む。
+fn 外側を差す(
+    manager: &Arc<SessionManager>,
+    probe: Arc<dyn session_host_core::resources::HostFreeProbe>,
+) -> Arc<session_host_core::resources::HostFree> {
+    let host_free =
+        session_host_core::resources::HostFree::new(true, probe, Duration::from_secs(60));
+    manager.set_host_free(Arc::clone(&host_free));
+    host_free
+}
+
+#[tokio::test]
+async fn 確認できなければ確かめられなかったと断りメモリ不足とは言わない() {
+    let manager = common::manager_with(実機の設定());
+    暖まったwsl(&manager);
+    外側を差す(&manager, Arc::new(聞けない外側));
+
+    let card_id = CardId::new();
+    let refusal = 頼む(&manager, card_id).await.expect_err("断られること");
+    assert!(
+        refusal.contains("確かめられなかった"),
+        "確かめられなかったと言うこと: {refusal}"
+    );
+    assert!(
+        !refusal.contains("メモリが足りない"),
+        "★足りないと判定したわけではないのだから、メモリ不足と言わないこと: {refusal}"
+    );
+    assert!(
+        refusal.contains("起動できません"),
+        "聞けなかった理由を運ぶこと: {refusal}"
+    );
+    assert!(manager.get(card_id).is_none(), "実体を作らないこと");
+}
+
+#[tokio::test]
+async fn memfreeが大きくても確認できなければ通さない() {
+    // **床で通す道が無いこと。** キャッシュを手放した直後は MemFree が跳ね上がるが、
+    // Windows 側の空きとは無関係である
+    let manager = common::manager_with(実機の設定());
+    manager.set_memory_probe(Arc::new(空きとフリーが違うメモリ(
+        20_000, 15_000,
+    )));
+    外側を差す(&manager, Arc::new(聞けない外側));
+
+    let refusal = 頼む(&manager, CardId::new())
+        .await
+        .expect_err("★MemFree が大きくても、確かめられなければ通さないこと");
+    assert!(refusal.contains("確かめられなかった"), "{refusal}");
+}
+
+#[tokio::test]
+async fn windows側が本当に逼迫していればその値を添えて断る() {
+    // 2026-09-13 22:07:11 の実測。Windows の物理空きは 1,792MB しかない
+    let manager = common::manager_with(実機の設定());
+    manager.set_memory_probe(Arc::new(空きとフリーが違うメモリ(18_983, 465)));
+    外側を差す(&manager, 名乗る外側::作る(1_792));
+
+    let refusal = 頼む(&manager, CardId::new())
+        .await
+        .expect_err("断られること");
+    assert!(refusal.contains("メモリが足りない"), "{refusal}");
+    assert!(
+        refusal.contains("使える空き 1792 MB＝Windows 側の空き"),
+        "判定に使った Windows 側の値を添えること: {refusal}"
+    );
+    assert!(
+        refusal.contains("秒前に確認"),
+        "値の古さを添えること: {refusal}"
+    );
+}
+
+#[tokio::test]
+async fn メモリ不足の断りは判定に使った空きを出しmemavailableを出さない() {
+    let manager = common::manager_with(実機の設定());
+    manager.set_memory_probe(Arc::new(空きとフリーが違うメモリ(18_983, 465)));
+    外側を差す(&manager, 名乗る外側::作る(1_792));
+
+    let refusal = 頼む(&manager, CardId::new())
+        .await
+        .expect_err("断られること");
+    assert!(
+        !refusal.contains("18983"),
+        "★判定に使っていない MemAvailable を空きとして出さないこと: {refusal}"
+    );
+    assert!(refusal.contains("1792"), "{refusal}");
+}
+
+#[tokio::test]
+async fn 予約が0件になった後それより前に始めた観測で次を通さない() {
+    // 設計§12-8 の時刻の順をそのまま再現する。
+    //
+    // | 時刻 | 出来事 |
+    // |---|---|
+    // | 0 | A を通す（5,000 で聞けた。予約1本） |
+    // | 30 | 表示が取り直す（A は確保の途中。観測は 5,000 のまま） |
+    // | 70 | A の予約が落ちる（見込みを捨てる） |
+    // | 75 | B を頼む。**30 の観測は期限内だが、予約が0件になる前に始めたので使わない** |
+    //
+    // 取り直すと 2,500 しか無いので断る。失効が無ければ 30 の 5,000 を見込み無しで数えて
+    // 通してしまう（設計§4-3）
+    let manager = common::manager_with(予約の設定());
+    manager.set_memory_probe(名乗るメモリ::一定(20_000));
+    let 外 = 順に名乗る外側::作る(&[5_000, 5_000], 2_500);
+    let host_free = 外側を差す(
+        &manager,
+        Arc::clone(&外) as Arc<dyn session_host_core::resources::HostFreeProbe>,
+    );
+
+    // 0：A を通す
+    let 一枚目 = CardId::new();
+    頼む(&manager, 一枚目).await.expect("1枚目は通ること");
+    assert_eq!(外.回数(), 1);
+    wait_until("予約が立つ", || manager.reserved_revives() == 1).await;
+
+    // 30：A の予約が残っている間に、表示が取り直す（A の観測を古くして、表示に取り直させる）
+    host_free.覚えさせる(
+        5_000,
+        std::time::Instant::now() - Duration::from_secs(3_600),
+    );
+    let 表示 = manager.host_resources().expect("読めること");
+    assert_eq!(
+        表示.host_free_state,
+        Some(protocol::HostFreeState::Stale),
+        "古い値を見て取り直すこと"
+    );
+    wait_until("表示の取り直しが終わる", || {
+        host_free.聞き終えた回数() >= 2
+    })
+    .await;
+    assert_eq!(外.回数(), 2);
+    assert_eq!(
+        manager
+            .host_resources()
+            .expect("読めること")
+            .host_free_state,
+        Some(protocol::HostFreeState::Fresh),
+        "予約の間に取り直した観測は、まだ新しいこと"
+    );
+
+    // 70：A の予約が落ちる
+    manager.kill(一枚目).expect("落とせること");
+    wait_until("予約が0件になる", || manager.reserved_revives() == 0).await;
+
+    // 75：B を頼む
+    let refusal = 頼む(&manager, CardId::new())
+        .await
+        .expect_err("★0件になる前に始めた観測を使い回さず、取り直した値で断ること");
+    assert_eq!(外.回数(), 3, "取り直したこと");
+    assert!(
+        refusal.contains("2500"),
+        "取り直した値で数えたこと: {refusal}"
+    );
+}
+
+#[tokio::test]
+async fn 確かめた観測がロックまでに使えなくなったら1周だけやり直す() {
+    let manager = common::manager_with(予約の設定());
+    manager.set_memory_probe(名乗るメモリ::一定(20_000));
+    let 外 = 順に名乗る外側::作る(&[5_000, 6_000], 6_000);
+    外側を差す(
+        &manager,
+        Arc::clone(&外) as Arc<dyn session_host_core::resources::HostFreeProbe>,
+    );
+    // 1回目に確かめた直後だけ、予約が0件になったときと同じ失効を立てる
+    let 呼ばれた = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    {
+        let manager_weak = Arc::downgrade(&manager);
+        let 呼ばれた = Arc::clone(&呼ばれた);
+        manager.確認の後に差し込む(Arc::new(move || {
+            if 呼ばれた.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+                && let Some(manager) = manager_weak.upgrade()
+            {
+                manager.観測を失効させる();
+            }
+        }));
+    }
+
+    let sink = session_host_core::logging::capture::sink();
+    let mark = sink.mark();
+    let card_id = CardId::new();
+    頼む(&manager, card_id)
+        .await
+        .expect("2周目で確かめ直して通ること");
+    assert_eq!(
+        呼ばれた.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "2周したこと"
+    );
+    assert_eq!(外.回数(), 2, "2周目は取り直したこと");
+    let 行 = sink.matching(mark, "card_id", &card_id.to_string());
+    let 判定 = 行
+        .iter()
+        .find(|line| line["kind"] == "revive_memory")
+        .expect("判定の1行が残ること");
+    assert_eq!(判定["host_free_mb"], 6_000, "2周目の値で数えたこと: {判定}");
+}
+
+#[tokio::test]
+async fn 確かめ直しても使えなければ締切で諦める() {
+    // **やり直しは回数ではなく締切で打ち切る**（設計§12-3）。確認段階の上限を 1 秒に縮める
+    let manager = common::manager_with(予約の設定());
+    manager.set_memory_probe(名乗るメモリ::一定(20_000));
+    let 外 = 順に名乗る外側::作る(&[], 6_000);
+    manager.set_host_free(session_host_core::resources::HostFree::with_wait(
+        true,
+        Arc::clone(&外) as Arc<dyn session_host_core::resources::HostFreeProbe>,
+        Duration::from_secs(60),
+        Duration::from_secs(1),
+    ));
+    {
+        let manager_weak = Arc::downgrade(&manager);
+        manager.確認の後に差し込む(Arc::new(move || {
+            if let Some(manager) = manager_weak.upgrade() {
+                manager.観測を失効させる();
+            }
+        }));
+    }
+
+    let card_id = CardId::new();
+    let refusal = 頼む(&manager, card_id)
+        .await
+        .expect_err("締切までに使える観測が得られなければ断ること");
+    assert!(refusal.contains("確かめられなかった"), "{refusal}");
+    assert!(
+        refusal.contains("予約が入れ替わり続けました"),
+        "★取得の失敗とは言い分けること: {refusal}"
+    );
+    assert!(外.回数() >= 2, "締切まではやり直すこと");
+    assert!(manager.get(card_id).is_none());
+}
+
+/// 眠ってから答える外側。**待ったかどうか**を時間で見るため。
+#[derive(Debug)]
+struct 遅い外側(std::sync::atomic::AtomicUsize);
+
+impl session_host_core::resources::HostFreeProbe for 遅い外側 {
+    fn read(&self) -> Result<u64, String> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(1_500));
+        Ok(6_000)
+    }
+}
+
+#[tokio::test]
+async fn 見積もり0の設定では外側を確かめずに通す() {
+    // **歯止めを外す設定。** 使わない値のために待たない
+    let manager = common::manager_with(SessionHostConfig {
+        revive_estimate_mb: 0,
+        ..SessionHostConfig::default()
+    });
+    暖まったwsl(&manager);
+    let 外 = Arc::new(遅い外側(std::sync::atomic::AtomicUsize::new(0)));
+    外側を差す(
+        &manager,
+        Arc::clone(&外) as Arc<dyn session_host_core::resources::HostFreeProbe>,
+    );
+
+    // **待たないことは回数で確かめる**（口は 1.5 秒眠るので、呼ばれていれば待っている）。
+    // 時間の上限で縛ると、擬似 claude の起動を含むので負荷で赤になる
+    頼む(&manager, CardId::new()).await.expect("通ること");
+    assert_eq!(
+        外.0.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "外側を聞きに行かないこと"
+    );
+}
+
+#[tokio::test]
+async fn 判定の1行がログに残る() {
+    // **通したときも残す**（設計§6-6）。断られた瞬間だけでなく、通した瞬間の
+    // Windows 側の値も後から読めるように
+    let manager = common::manager_with(実機の設定());
+    暖まったwsl(&manager);
+    外側を差す(&manager, 名乗る外側::作る(6_000));
+
+    let sink = session_host_core::logging::capture::sink();
+    let mark = sink.mark();
+    let 通る = CardId::new();
+    頼む(&manager, 通る).await.expect("通ること");
+    let 行 = sink.matching(mark, "card_id", &通る.to_string());
+    let 判定 = 行
+        .iter()
+        .find(|line| line["kind"] == "revive_memory")
+        .unwrap_or_else(|| panic!("通した判定の1行が残ること: {行:?}"));
+    assert_eq!(判定["decision"], "pass", "{判定}");
+    assert_eq!(判定["limit"], "windows", "{判定}");
+    assert_eq!(判定["host_free_mb"], 6_000, "{判定}");
+    assert_eq!(判定["effective_mb"], 6_000, "{判定}");
+    assert_eq!(判定["available_mb"], 20_000, "{判定}");
+    assert_eq!(判定["free_mb"], 400, "{判定}");
+    assert!(
+        判定.get("waited_ms").is_some(),
+        "待った時間が載ること: {判定}"
+    );
+
+    // 断ったときも残す
+    let manager = common::manager_with(実機の設定());
+    暖まったwsl(&manager);
+    外側を差す(&manager, Arc::new(聞けない外側));
+    let mark = sink.mark();
+    let 断られる = CardId::new();
+    頼む(&manager, 断られる).await.expect_err("断られること");
+    let 行 = sink.matching(mark, "card_id", &断られる.to_string());
+    assert!(
+        行.iter()
+            .any(|line| line["kind"] == "revive_memory" && line["decision"] == "unconfirmed"),
+        "確かめられなかった判定の1行が残ること: {行:?}"
+    );
+}
+
+/// 読んだ回数を数えるメモリ（設計§12-4）。
+#[derive(Debug)]
+struct 数えるメモリ {
+    available_mb: u64,
+    回数: std::sync::atomic::AtomicUsize,
+}
+
+impl session_host_core::resources::Probe for 数えるメモリ {
+    fn read(&self) -> Option<session_host_core::resources::Memory> {
+        self.回数.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Some(session_host_core::resources::Memory {
+            total_mb: 24_000,
+            available_mb: self.available_mb,
+            swap_free_mb: 0,
+            free_mb: 400,
+        })
+    }
+}
+
+#[tokio::test]
+async fn meminfoは判定ごとに1回だけ読む() {
+    // **確かめるのを待った後、ロックの中で読む**（設計§12-4）。待つ前にも読むと、
+    // 読むたびに値の変わる口で1枚の判定が2つの値を消費し、最大 65 秒前の値で判定する
+    let manager = common::manager_with(実機の設定());
+    let メモリ = Arc::new(数えるメモリ {
+        available_mb: 20_000,
+        回数: std::sync::atomic::AtomicUsize::new(0),
+    });
+    manager.set_memory_probe(Arc::clone(&メモリ) as Arc<dyn session_host_core::resources::Probe>);
+    外側を差す(&manager, 名乗る外側::作る(6_000));
+
+    頼む(&manager, CardId::new()).await.expect("通ること");
+    assert_eq!(
+        メモリ.回数.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "★1回の判定で読むのは1回だけであること"
+    );
+
+    // やり直しが1回入れば、判定も2回なので2回
+    let manager = common::manager_with(実機の設定());
+    let メモリ = Arc::new(数えるメモリ {
+        available_mb: 20_000,
+        回数: std::sync::atomic::AtomicUsize::new(0),
+    });
+    manager.set_memory_probe(Arc::clone(&メモリ) as Arc<dyn session_host_core::resources::Probe>);
+    外側を差す(&manager, 名乗る外側::作る(6_000));
+    let 呼ばれた = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    {
+        let manager_weak = Arc::downgrade(&manager);
+        let 呼ばれた = Arc::clone(&呼ばれた);
+        manager.確認の後に差し込む(Arc::new(move || {
+            if 呼ばれた.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+                && let Some(manager) = manager_weak.upgrade()
+            {
+                manager.観測を失効させる();
+            }
+        }));
+    }
+    頼む(&manager, CardId::new()).await.expect("通ること");
+    assert_eq!(メモリ.回数.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn 予約が0件になった直後表示が境界より前の観測でfreshと答えない() {
+    // 設計§12-1。**判定はその観測を使わないので、表示が fresh と言うと食い違う**
+    let manager = common::manager_with(予約の設定());
+    manager.set_memory_probe(名乗るメモリ::一定(20_000));
+    let 外 = 順に名乗る外側::作る(&[5_000], 2_500);
+    外側を差す(
+        &manager,
+        Arc::clone(&外) as Arc<dyn session_host_core::resources::HostFreeProbe>,
+    );
+
+    let card_id = CardId::new();
+    頼む(&manager, card_id).await.expect("通ること");
+    wait_until("予約が立つ", || manager.reserved_revives() == 1).await;
+    assert_eq!(
+        manager
+            .host_resources()
+            .expect("読めること")
+            .host_free_state,
+        Some(protocol::HostFreeState::Fresh),
+        "予約の間は、その観測を新しいと言ってよい"
+    );
+
+    manager.kill(card_id).expect("落とせること");
+    wait_until("予約が0件になる", || manager.reserved_revives() == 0).await;
+    let 表示 = manager.host_resources().expect("読めること");
+    assert_eq!(
+        表示.host_free_state,
+        Some(protocol::HostFreeState::Stale),
+        "★境界より前の観測を fresh と言わないこと: {表示:?}"
+    );
+    wait_until("表示が取り直す", || 外.回数() == 2).await;
 }

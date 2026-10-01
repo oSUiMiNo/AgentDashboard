@@ -23,8 +23,34 @@ use super::ws::Ws;
 pub const SPAWN_CAP: Duration = Duration::from_secs(60);
 pub const KILL_CAP: Duration = Duration::from_secs(30);
 pub const REMOVE_CAP: Duration = Duration::from_secs(30);
-/// `revive`：起動を待つのと同じ長さ。**やっていることが起動そのもの**なので揃える
-pub const REVIVE_CAP: Duration = Duration::from_secs(60);
+/// `revive`：起動を待つ長さ ＋ 起こし直しの判定が Windows 側の空きを確かめる上限
+/// （寝ているカードばかりなのに、メモリ不足でセッションを起こせない 設計§6-5）。
+///
+/// **確かめる上限は `session-host-core` の定数を参照する。** 2箇所に数を書くと、片方だけ
+/// 直したときに CLI が裏の判定より先に諦める。
+///
+/// **断りは `Error{kind: Revive}` で届いてその場で落ちる**ので、長くなるのは通る道だけ。
+/// **席待ちは含まれない**——まとめて投げると行列は長くなりうるので、上限をいくら上げても
+/// 全部は吸収できない。**時間切れの文面（[`note_revive_timeout`]）が本体である。**
+pub const REVIVE_CAP: Duration =
+    Duration::from_secs(SPAWN_CAP.as_secs() + session_host_core::resources::CONFIRM_WAIT.as_secs());
+
+/// 起こし直しの時間切れに、**裏ではまだ続いているかもしれない**ことと確かめ方を添える。
+///
+/// 時間切れは「断られた」ではない。添えないと、利用者もエージェントも送り直して
+/// 「このカードは復旧中です」に当たる。
+pub fn note_revive_timeout(error: ClientError) -> ClientError {
+    match error {
+        ClientError::Timeout { what, secs, .. } => ClientError::Timeout {
+            what,
+            secs,
+            note: Some(
+                "裏ではまだ続いている可能性があります（session ls で確かめられます）".to_string(),
+            ),
+        },
+        other => other,
+    }
+}
 pub const MODEL_CAP: Duration = Duration::from_secs(60);
 pub const MODE_CAP: Duration = Duration::from_secs(60);
 /// 名前を付ける（名前付け設計§11-2）。**記録へ書くだけ**なので PTY を待たない
@@ -361,6 +387,7 @@ pub async fn run(
     .map_err(|_| ClientError::Timeout {
         what: what.to_string(),
         secs: cap.as_secs(),
+        note: None,
     })?
 }
 
@@ -368,6 +395,41 @@ pub async fn run(
 mod tests {
     use super::*;
     use protocol::{ProjectId, SessionMeta, ws::ErrorKind};
+
+    /// 復旧待ちの上限は、起動の上限と判定の確認段階の上限から組む（寝ているカードばかり
+    /// なのに、メモリ不足でセッションを起こせない 設計§6-5）。
+    #[test]
+    fn 復旧待ちの上限は定数から組まれる() {
+        assert_eq!(
+            REVIVE_CAP,
+            SPAWN_CAP + session_host_core::resources::CONFIRM_WAIT,
+            "★裏の判定より先に CLI が諦めないこと"
+        );
+        assert_eq!(REVIVE_CAP, Duration::from_secs(125));
+    }
+
+    #[test]
+    fn 復旧の時間切れは裏で続いている可能性と確かめ方を添える() {
+        let error = note_revive_timeout(ClientError::Timeout {
+            what: "セッションの起こし直し".to_string(),
+            secs: REVIVE_CAP.as_secs(),
+            note: None,
+        });
+        assert_eq!(error.exit_code(), 3, "時間切れのまま（断られたと混ぜない）");
+        let text = error.to_string();
+        assert!(text.contains("125 秒以内に終わりませんでした"), "{text}");
+        assert!(
+            text.contains("裏ではまだ続いている可能性があります"),
+            "{text}"
+        );
+        assert!(text.contains("session ls"), "{text}");
+        // 時間切れ以外は触らない
+        let refused = note_revive_timeout(ClientError::Refused {
+            status: 400,
+            message: "断り".to_string(),
+        });
+        assert_eq!(refused.to_string(), "断り");
+    }
 
     fn meta(card: CardId, status: SessionStatus) -> SessionMeta {
         SessionMeta {

@@ -1146,6 +1146,12 @@ mod tests {
                 // なり、この2欄が線を通ることを確かめたことにならない**
                 host_free_mb: Some(6_000),
                 counted_mb: Some(6_000),
+                // 新しい4欄（寝ているカードばかりなのに、メモリ不足でセッションを起こせない
+                // 設計§5）。**`None` にすると線を通ることを確かめたことにならない**
+                host_free_age_sec: Some(240),
+                host_free_state: Some(crate::HostFreeState::Failed),
+                host_free_error: Some("起動できません: 見つかりません".to_string()),
+                effective_mb: Some(5_000),
             }),
             // 実在する CLI セッション（名前付け設計§8-3）。**足したら必ずここへ足す**
             HostReply::Sessions {

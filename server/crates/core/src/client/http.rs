@@ -70,6 +70,7 @@ pub async fn request(
         Err(_) => Err(ClientError::Timeout {
             what: format!("{method} {path} の応答"),
             secs: REQUEST_TIMEOUT.as_secs(),
+            note: None,
         }),
     }
 }
@@ -97,6 +98,7 @@ pub async fn fetch_bytes(target: &Target, path: &str) -> Result<Vec<u8>, ClientE
             return Err(ClientError::Timeout {
                 what: format!("GET {path} の応答"),
                 secs: REQUEST_TIMEOUT.as_secs(),
+                note: None,
             });
         }
     };

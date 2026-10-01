@@ -9,6 +9,9 @@
 //! 戻せるかの判定（設計§3-3）は二重に持ってよいと決めたが、**あちらはずれても
 //! 「押せてしまってサーバが断る」に倒れる**だけだった。**こちらはずれると機械が死ぬ。**
 
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
+
 /// いま読めたメモリの姿。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Memory {
@@ -115,24 +118,57 @@ pub fn is_wsl(sense: &WslSense) -> bool {
     sense.osrelease.to_ascii_lowercase().contains("microsoft") && sense.run_wsl_exists
 }
 
-/// 外側（WSL から見た Windows）の空きの状態。
+/// 外側（WSL から見た Windows）の空きを、**表示のために**どう読んだか（寝ているカード
+/// ばかりなのに、メモリ不足でセッションを起こせない 設計§2-5）。
 ///
-/// **3通りしかない。** どれに当たるかで、数えるのに使う値が変わる（[`counted_available`]）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// **判定はこれを使わない。** 表示（`snapshot`）は同期の経路にいて待てないので、古い値も
+/// 古さを添えて見せる。判定は [`HostFree::confirm`] が返す [`Confirmed`] を使い、
+/// **新しい値でしか通さない。**
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outside {
-    /// WSL ではない。**外側という概念が無い**ので、いまと1ビットも変わらない
+    /// WSL ではない（または期限 0 の設定）。**外側という概念が無い**ので、いまと1ビットも変わらない
     NotWsl,
-    /// WSL で、外側の空きを聞けた（MB）
-    Known(u64),
-    /// WSL だが、外側をまだ聞けていない。**少なく言う側へ倒れる**
-    Unknown,
+    /// 期限内に聞けた値（MB）と、その古さ
+    Fresh { mb: u64, age: Duration },
+    /// 期限を過ぎた値と、その古さ。**取り直しは起こしてある**（か、走っている）
+    Stale { mb: u64, age: Duration },
+    /// 一度も聞けていないので、いま聞いている
+    Checking,
+    /// 聞けなかったので、次の取得まで空けている。`last` は最後に聞けた値と古さ（参考）
+    Failed {
+        reason: String,
+        last: Option<(u64, Duration)>,
+    },
+}
+
+impl Outside {
+    /// 表示で数えるときの土台。**確かめられていない状態は `MemFree` の床で数える**（設計§2-5）。
+    pub fn basis(&self) -> Basis {
+        match self {
+            Outside::NotWsl => Basis::NoOutside,
+            Outside::Fresh { mb, .. } | Outside::Stale { mb, .. } => Basis::Outside(*mb),
+            Outside::Checking | Outside::Failed { .. } => Basis::Floor,
+        }
+    }
+}
+
+/// 数えるときに、`MemAvailable` を何で抑えるか（設計§4-1）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Basis {
+    /// 抑えない（WSL でない・期限 0）
+    NoOutside,
+    /// 外側（Windows）の値（MB）で抑える
+    Outside(u64),
+    /// 外側を確かめられていないので `MemFree` で抑える。**表示の経路でだけ使う**——
+    /// 判定は床で数えずに「確かめられなかった」と断る
+    Floor,
 }
 
 /// 数えるのに使う空き（MB）。**抑えていないなら `None`**（＝`available_mb` をそのまま使う）。
 ///
 /// **外の世界へ出ない純関数。** [`parse_meminfo`] と同じ作法で、テストから総当たりできる。
 ///
-/// # なぜ `Unknown` で `MemFree` を使うのか
+/// # なぜ床で `MemFree` を使うのか
 ///
 /// 理由は3つ。
 ///
@@ -142,11 +178,92 @@ pub enum Outside {
 ///    `MemFree` 0.44 GiB）。**キャッシュを当てにしない値**なので保守的
 /// 3. **0 枚固定ではない。** 「WSL だが interop の無い構成」でも使えなくならず、
 ///    機械が空いていれば素直に増える
-pub fn counted_available(memory: &Memory, outside: Outside) -> Option<u64> {
-    match outside {
-        Outside::NotWsl => None,
-        Outside::Known(host_mb) => Some(memory.available_mb.min(host_mb)),
-        Outside::Unknown => Some(memory.available_mb.min(memory.free_mb)),
+///
+/// **ただし床は表示の案内であって門番ではない**（設計§1-1）。暖まった WSL では常に
+/// 余白を下回り、キャッシュを手放した直後は Windows 側と無関係に跳ね上がる——
+/// Windows 側の空きの代わりにはならないので、判定には使わない。
+pub fn counted_available(memory: &Memory, basis: Basis) -> Option<u64> {
+    match basis {
+        Basis::NoOutside => None,
+        Basis::Outside(host_mb) => Some(memory.available_mb.min(host_mb)),
+        Basis::Floor => Some(memory.available_mb.min(memory.free_mb)),
+    }
+}
+
+/// 何が枚数を決めたか（設計§4-1）。断りの文面・画面・CLI で言い分けるために持つ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Limit {
+    /// WSL の中の空き（`MemAvailable`）。WSL でない機械もここ
+    Wsl,
+    /// Windows 側の空き
+    Windows,
+    /// 外側を聞けないときの `MemFree` の床。**表示の経路でだけ出る**
+    Floor,
+    /// 起こしている途中のぶん（予約）
+    Reserved,
+}
+
+impl Limit {
+    /// ログに載せる綴り。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Limit::Wsl => "wsl",
+            Limit::Windows => "windows",
+            Limit::Floor => "floor",
+            Limit::Reserved => "reserved",
+        }
+    }
+}
+
+/// 数えた結果（設計§4-1）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Assessment {
+    /// 観測から数える空き。**抑えていないなら `None`**（`available_mb` をそのまま使った）
+    pub counted_mb: Option<u64>,
+    /// 予約後の見込みも引いた、判定に使う空き
+    pub effective_mb: u64,
+    /// 起こせる枚数。**見積もり 0 なら `None`**＝数えない
+    pub fits: Option<u32>,
+    /// 1枚通したあとの見込み。**起点は `effective_mb`**——`available_mb` へ戻ると、
+    /// 外側で抑えていたぶんが見込みから抜け落ちる（設計§1-2）
+    pub next_mb: u64,
+    /// 何が枚数を決めたか
+    pub limit: Limit,
+}
+
+/// 数える規則の1本（設計§4-1）。**表示（[`snapshot`]）も判定（`reserve_memory`）もこれを通す。**
+///
+/// ```text
+/// counted   = min(MemAvailable, 外側)   （床なら MemFree、外側なしなら MemAvailable）
+/// effective = min(counted, 予約後の見込み)
+/// fits      = max(effective − 余白, 0) ÷ 1枚の見積もり
+/// next      = max(effective − 1枚の見積もり, 0)
+/// ```
+pub fn assess(
+    memory: &Memory,
+    basis: Basis,
+    projected_mb: Option<u64>,
+    estimate_mb: u64,
+    headroom_mb: u64,
+) -> Assessment {
+    let counted = counted_available(memory, basis);
+    let base = counted.unwrap_or(memory.available_mb);
+    let effective = projected(base, projected_mb);
+    let limit = if effective < base {
+        Limit::Reserved
+    } else {
+        match basis {
+            Basis::Outside(host_mb) if host_mb < memory.available_mb => Limit::Windows,
+            Basis::Floor if memory.free_mb < memory.available_mb => Limit::Floor,
+            _ => Limit::Wsl,
+        }
+    };
+    Assessment {
+        counted_mb: counted,
+        effective_mb: effective,
+        fits: fits(effective, headroom_mb, estimate_mb),
+        next_mb: effective.saturating_sub(estimate_mb),
+        limit,
     }
 }
 
@@ -155,11 +272,14 @@ pub fn counted_available(memory: &Memory, outside: Outside) -> Option<u64> {
 /// **トレイトにしてあるのはテストのため**（[`Probe`] と同じ理由）。「聞けた」
 /// 「聞けなかった」の2通りを、**外の世界へ出ずに**作れる。
 ///
-/// **同期で書いてある。** 呼ぶのは背景の仕事の中（[`HostFree::outside`]）なので、
-/// **呼ぶ側が待つことはない。**
+/// **同期で書いてある。** 呼ぶのは切り離したスレッドの中（[`HostFree`] の取得）なので、
+/// 表示の経路が待つことはない。
 pub trait HostFreeProbe: Send + Sync + std::fmt::Debug {
-    /// 外側の空き（MB）。**聞けなければ `None`。**
-    fn read(&self) -> Option<u64>;
+    /// 外側の空き（MB）。**聞けなければ理由の文。**
+    ///
+    /// 理由は断りの文面・画面・CLI まで運ぶ（設計§2-1）。「起動できません」と
+    /// 「30s を過ぎても終わりませんでした」では、利用者がすることが違う。
+    fn read(&self) -> Result<u64, String>;
 }
 
 /// `powershell.exe` の置き場所（**絶対パス**）。
@@ -170,9 +290,43 @@ const POWERSHELL: &str = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powersh
 
 /// 外側を聞くのを諦めるまでの時間。
 ///
-/// 実測は 6〜27 秒で、**逼迫しているときほど遅い**。**待つのは背景の仕事なので
-/// 長めでよい**——画面は待たない。
-const HOST_FREE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// 実測は 6〜27 秒（2026-09）、静かな機械では約 1 秒（2026-10-01）で、**逼迫している
+/// ときほど遅い**。
+const HOST_FREE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// 判定の確認段階全体の上限（設計§3）。
+///
+/// **`2 × HOST_FREE_TIMEOUT + 5 秒`。** 失効の境界より前に始まった取得の終わりを待ち、
+/// もう1本取る——いちばん長い場合でも、正常な取得を時間切れにしない。
+///
+/// **CLI の復旧待ち（`agentdashboard-core` の `REVIVE_CAP`）もこれを参照する**（設計§6-5）。
+/// 2箇所に数を書くと、片方だけ直したときに CLI が裏の判定より先に諦める。
+pub const CONFIRM_WAIT: Duration = Duration::from_secs(HOST_FREE_TIMEOUT.as_secs() * 2 + 5);
+
+/// 取り終えてからこの間は、期限より長くかかった取得でも新しいとみなす（設計§2-4）。
+///
+/// **取得そのものが期限より長くかかった**場合に、延々と取り直さないための道。
+const FRESH_AFTER_FINISH: Duration = Duration::from_secs(5);
+
+/// 「終えてから5秒」の例外を使ってよい、取得にかかった時間の上限（設計§12-2）。
+///
+/// **取得中に PC がスリープすると、開始は昔・終了は今の観測ができる。** それを「終えてから
+/// 0 秒」と読むと、寝る前の値を新しいとみなしてしまう。打ち切り（[`HOST_FREE_TIMEOUT`]）を
+/// 越えて続く取得は本来ありえないので、それより長くかかった観測には例外を使わせない。
+const MAX_FETCH_SPAN: Duration =
+    Duration::from_secs(HOST_FREE_TIMEOUT.as_secs() + FRESH_AFTER_FINISH.as_secs());
+
+/// 失敗が続いたときに、次の取得まで空ける秒数（設計§2-2）。以後は最後の値を使い続ける。
+const RETRY_STEPS_SEC: [u64; 4] = [2, 5, 10, 30];
+
+/// `failures_in_row` 回続けて失敗したあとに空ける長さ（設計§2-2）。
+///
+/// **押すたび・聞き直すたびに `powershell.exe` を立てない**ため。interop が無い構成の
+/// ようにすぐ失敗する機械では、抑えないと押すたびに1本立つ。
+pub fn retry_delay(failures_in_row: u32) -> Duration {
+    let index = (failures_in_row.max(1) as usize - 1).min(RETRY_STEPS_SEC.len() - 1);
+    Duration::from_secs(RETRY_STEPS_SEC[index])
+}
 
 /// 本物。`powershell.exe` に `Win32_OperatingSystem` を聞く。
 ///
@@ -182,10 +336,13 @@ const HOST_FREE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30
 pub struct PowerShellHostFree;
 
 impl HostFreeProbe for PowerShellHostFree {
-    fn read(&self) -> Option<u64> {
+    fn read(&self) -> Result<u64, String> {
         // **打ち切りは `proc::run` に任せる。** 同じものを2つ持つと片方だけ
         // 打ち切りを忘れる（`proc` のモジュール説明がそう言っている）。
         // 中で `kill` してから `wait` するので、**時間切れでもゾンビにならない。**
+        //
+        // **ここでは行を残さない。** 成否・所要時間・理由は取得の終わり
+        // （[`HostFree`] の `finish`）で1行にまとめる——2行出すと同じ失敗が2件に見える
         let outcome = crate::proc::run(
             std::process::Command::new(POWERSHELL).args([
                 "-NoProfile",
@@ -196,15 +353,33 @@ impl HostFreeProbe for PowerShellHostFree {
             HOST_FREE_TIMEOUT,
         );
         if !outcome.success {
-            tracing::warn!(
-                program = POWERSHELL,
-                timeout = ?HOST_FREE_TIMEOUT,
-                detail = %outcome.output.trim(),
-                "WSL の外側（Windows）の空きを聞けませんでした"
-            );
-            return None;
+            return Err(short_reason(
+                outcome.output.trim(),
+                "powershell.exe が失敗しました",
+            ));
         }
-        parse_host_free(&outcome.output)
+        parse_host_free(&outcome.output).ok_or_else(|| {
+            format!(
+                "答えを数として読めませんでした: {}",
+                short_reason(outcome.output.trim(), "（空）")
+            )
+        })
+    }
+}
+
+/// 理由の文を、画面とログに載せられる長さへ詰める。**空なら `empty` を返す。**
+///
+/// `powershell.exe` のエラーは数十行になることがあり、そのまま運ぶと断りの文面が
+/// 読めなくなる。
+fn short_reason(text: &str, empty: &str) -> String {
+    const MAX_CHARS: usize = 200;
+    let first = text.lines().map(str::trim).find(|line| !line.is_empty());
+    match first {
+        None => empty.to_string(),
+        Some(line) if line.chars().count() > MAX_CHARS => {
+            format!("{}…", line.chars().take(MAX_CHARS).collect::<String>())
+        }
+        Some(line) => line.to_string(),
     }
 }
 
@@ -219,131 +394,513 @@ pub fn parse_host_free(text: &str) -> Option<u64> {
         .map(|kb| kb / 1024)
 }
 
-/// 外側を知るための一式——**判定・聞く口・覚えている値**。
+/// いまの時刻を、単調時計と壁時計の組で持つ（設計§2-1）。
+///
+/// **片方だけでは古さを数えられない。** Linux の `Instant` は `CLOCK_MONOTONIC` で、
+/// 止まっていた（PC がスリープしていた）時間を数えないことがある。寝る前の値が
+/// 「数秒前」に見えないよう、壁時計の経過も見て大きいほうを採る。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Now {
+    pub mono: Instant,
+    pub wall: SystemTime,
+}
+
+impl Now {
+    pub fn current() -> Self {
+        Self {
+            mono: Instant::now(),
+            wall: SystemTime::now(),
+        }
+    }
+}
+
+/// `then` からの古さ。**壁時計が巻き戻っていたら `None`**（＝期限切れとして扱う）。
+///
+/// 単調時計の経過と壁時計の経過の**大きいほう**。
+pub fn age_since(then: Now, now: Now) -> Option<Duration> {
+    let mono = now.mono.saturating_duration_since(then.mono);
+    let wall = now.wall.duration_since(then.wall).ok()?;
+    Some(mono.max(wall))
+}
+
+/// 聞けた1回（設計§2-1）。**時刻は取得を始めた時点で刻む。**
+///
+/// 取得に 1〜27 秒かかる間に通した起こし直しが「値より前」に見えないようにするため
+/// （以前は取り終えた時点で刻んでいた）。終えた時点も持つのは、期限より長くかかった
+/// 取得を延々と取り直さないため（[`usable`] の2つ目の道）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reading {
+    /// 外側の空き（MB）
+    pub mb: u64,
+    /// 取得を始めた時刻
+    pub started: Now,
+    /// 取得を終えた時刻
+    pub finished: Now,
+}
+
+impl Reading {
+    /// 始めた時点からの古さ。**壁時計が巻き戻っていたら単調時計の経過**（表示用）。
+    pub fn age(&self, now: Now) -> Duration {
+        age_since(self.started, now)
+            .unwrap_or_else(|| now.mono.saturating_duration_since(self.started.mono))
+    }
+}
+
+/// この観測を判定に使ってよいか（設計§2-4）。**`confirm` の中でも、予約台帳のロックの中でも
+/// これで確かめる**——2箇所で別の条件を書くと、確認を通った値がロックの中で通らない
+/// （あるいは逆）ことが起こる。
+///
+/// 1. **失効の境界より後に始めた取得である**（境界が無ければ満たす）
+/// 2. **新しい**：始めた時点からの古さが期限未満、**または**終えた時点からの古さが
+///    [`FRESH_AFTER_FINISH`] 未満
+///
+/// 2つ目の道を「自分が待ち始めた後に始まった取得」にしないのは、`prefetch` で席待ちの前に
+/// 起こした取得を捨てることになり、同じ取得を待った2人で採否が変わるため。
+///
+/// **2つ目の道は、取得にかかった時間が単調時計でも壁時計でも [`MAX_FETCH_SPAN`] 以内で、
+/// 壁時計が巻き戻っていない観測にだけ使う**（設計§12-2）。取得中のスリープで「開始は昔・
+/// 終了は今」になった観測を、新しいとみなさないため。
+///
+/// **表示（[`HostFree::outside`]）もこれで「新しい」を決める**（設計§12-1）。表示だけ別の
+/// 条件にすると、判定が使わない値を表示が `fresh` と言う。
+pub fn usable(reading: &Reading, required_after: Option<Instant>, ttl: Duration, now: Now) -> bool {
+    if required_after.is_some_and(|boundary| reading.started.mono < boundary) {
+        return false;
+    }
+    let fresh_from_start = age_since(reading.started, now).is_some_and(|age| age < ttl);
+    let span_mono = reading
+        .finished
+        .mono
+        .saturating_duration_since(reading.started.mono);
+    let span_ok = reading
+        .finished
+        .wall
+        .duration_since(reading.started.wall)
+        .is_ok_and(|span_wall| span_wall <= MAX_FETCH_SPAN && span_mono <= MAX_FETCH_SPAN);
+    let fresh_from_finish =
+        span_ok && age_since(reading.finished, now).is_some_and(|age| age < FRESH_AFTER_FINISH);
+    fresh_from_start || fresh_from_finish
+}
+
+/// 判定が受け取る、確かめた結果（設計§2-3）。**作れるのは [`HostFree::confirm`] だけ。**
+///
+/// 判定（`reserve_memory`）はこれを引数に取るので、**確認を通っていない値を判定へ渡す道が
+/// コンパイルで通らない。** ただし型が保証するのは「確認を通った」ことだけで、「今も有効」
+/// ではない——予約台帳のロックの中で [`usable`] をもう一度見る。
+#[derive(Debug, Clone)]
+pub struct Confirmed {
+    checked: Checked,
+    waited: Duration,
+}
+
+impl Confirmed {
+    /// 確かめた中身。
+    pub fn checked(&self) -> &Checked {
+        &self.checked
+    }
+
+    /// 確かめるのに待った長さ（判定のログに載せる）。
+    pub fn waited(&self) -> Duration {
+        self.waited
+    }
+}
+
+/// 確かめた中身。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Checked {
+    /// 外側を見ない（WSL でない・期限 0）。いまと1ビットも変わらない
+    NotWsl,
+    /// 判定に使ってよい観測
+    Known(Reading),
+    /// 確かめられなかった（理由）。**判定は数えずに断る**
+    Unconfirmed(String),
+}
+
+/// 聞いた結果（設計§2-1）。取得が終わるたびに `round` が1つ進み、待ち手が起きる。
+#[derive(Debug, Clone, Default)]
+struct Heard {
+    /// 最後に成功した観測
+    last_ok: Option<Reading>,
+    /// 最後の失敗（時刻と理由）。成功で消える
+    last_failure: Option<(Instant, String)>,
+    /// 取得中なら、その取得を始めた時刻（同時に1本だけ）
+    fetching_since: Option<Instant>,
+    /// 失敗が続いたときに、次の取得を許す時刻
+    retry_after: Option<Instant>,
+    /// 連続失敗の回数
+    failures_in_row: u32,
+    /// 取得が終わるたびに1つ進む
+    round: u64,
+}
+
+/// 外側を知るための一式——**聞く口・聞いた結果・待ち合わせ**（設計§2）。
 ///
 /// # なぜ覚えるのか
 ///
-/// 外側を聞くのに 6〜27 秒かかるので、**押されるたびに聞くと画面が固まる。**
-/// かといって定期的に聞き続けると、押されていないときも `powershell.exe` を
-/// 立て続けることになる（**CPU を食う件と噛み合わない**）。
+/// 外側を聞くのに約 1〜27 秒かかるので、**表示のたびに聞くと画面が固まる。** かといって
+/// 定期的に聞き続けると、押されていないときも `powershell.exe` を立て続けることになる
+/// （**CPU を食う件と噛み合わない**）。
 ///
-/// そこで**押されたときに、期限切れなら背景で取りに行き、答えそのものは待たない。**
-/// 次に押したときには新しい値が在る。
+/// # 表示と判定で振る舞いが違う
 ///
-/// # 弱点と、その手当て
+/// - **表示**（[`HostFree::outside`]）は待たない。古い値も古さを添えて見せ、期限切れなら
+///   取り直しを起こすだけ
+/// - **判定**（[`HostFree::confirm`]）は、**新しい値が来るまで待つ。** 期限切れの値では
+///   通さないし、聞けなければ数えずに「確かめられなかった」と断る
 ///
-/// **一度も読めていないうちは、機械が健康でも少なく言う。** 放置すると「壊れている」と
-/// 読まれるので、**画面と CLI に「まだ聞けていません」と出す**（`HostResources` の
-/// `host_free_mb` が `None` のまま `counted_mb` が入っている状態）。
+/// 以前は判定も表示と同じく待たず、期限切れなら `MemFree` で数えていた。暖まった WSL では
+/// `MemFree` が常に余白を下回るので、**60 秒空けたあとの1回目は必ず 0 枚で断っていた**
+/// （寝ているカードばかりなのに、メモリ不足でセッションを起こせない 原因調査）。
+///
+/// # 待ち合わせは `watch`
+///
+/// `Notify::notify_waiters` は呼んだ瞬間に待っている相手しか起こさないので、「状態を見る→
+/// 待ち始める」の間に取得が終わると知らせを取りこぼし、上限まで眠って「確かめられなかった」
+/// で断る——直そうとしている症状と同じ顔になる。`watch` は `borrow_and_update` 以後の変更を
+/// `changed` が取りこぼさない。
+///
+/// # 予約を知らない
+///
+/// 失効の境界（予約が0件になった時刻）は予約台帳（`session::ReviveBudget`）が持ち、
+/// [`HostFree::confirm`] へ引数で渡す。**測る道具と予約の台帳は別物**で、ロックの入れ子を作らない。
 #[derive(Debug)]
 pub struct HostFree {
     is_wsl: bool,
-    probe: std::sync::Arc<dyn HostFreeProbe>,
-    /// 覚えておく期限。**0 なら外側を見ない**（＝いまの振る舞いに戻る逃げ道）
-    ttl: std::time::Duration,
-    last: std::sync::Mutex<Option<(u64, std::time::Instant)>>,
-    /// **いま取りに行っているか。** 同時に2本起こさないための印
-    fetching: std::sync::atomic::AtomicBool,
+    probe: Arc<dyn HostFreeProbe>,
+    /// 覚えた値をそのまま使ってよい期間。**0 なら外側を見ない**（＝いまの振る舞いに戻る逃げ道）
+    ttl: Duration,
+    /// 判定の確認段階全体の上限（設計§3）。テストで差し替える
+    wait: Duration,
+    heard: tokio::sync::watch::Sender<Heard>,
 }
 
 impl HostFree {
-    /// 材料を全部渡して作る。**テストの入口でもある。**
-    pub fn new(
+    /// 材料を全部渡して作る。**テストの入口でもある。** 確認段階の上限は [`CONFIRM_WAIT`]。
+    pub fn new(is_wsl: bool, probe: Arc<dyn HostFreeProbe>, ttl: Duration) -> Arc<Self> {
+        Self::with_wait(is_wsl, probe, ttl, CONFIRM_WAIT)
+    }
+
+    /// 確認段階の上限まで渡して作る（**テストが短くするため**）。
+    pub fn with_wait(
         is_wsl: bool,
-        probe: std::sync::Arc<dyn HostFreeProbe>,
-        ttl: std::time::Duration,
-    ) -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self {
+        probe: Arc<dyn HostFreeProbe>,
+        ttl: Duration,
+        wait: Duration,
+    ) -> Arc<Self> {
+        Arc::new(Self {
             is_wsl,
             probe,
             ttl,
-            last: std::sync::Mutex::new(None),
-            fetching: std::sync::atomic::AtomicBool::new(false),
+            wait,
+            heard: tokio::sync::watch::Sender::new(Heard::default()),
         })
     }
 
-    /// 実機から作る。**ここで1回だけ温めておく**（設計§6-2）。
+    /// 実機から作る。**ここで1回だけ温めておく**（設計§2-6）。
     ///
-    /// 温めておくと、常駐しているダッシュボードでは**利用者が最初に押すときには
-    /// もう値が在る**。温めなくても正しく動く（`Unknown` へ倒れるだけ）が、
-    /// 1回目だけ少なく言う場面が減る。
-    pub fn from_config(config: &crate::config::SessionHostConfig) -> std::sync::Arc<Self> {
+    /// 温めなくても正しく動く——判定は新しい値を待つので、温めに失敗しても最初の
+    /// 起こし直しは通る。温めておくと、その待ちが要らない場面が増える。
+    pub fn from_config(config: &crate::config::SessionHostConfig) -> Arc<Self> {
         let host_free = Self::new(
             is_wsl(&WslSense::read()),
-            std::sync::Arc::new(PowerShellHostFree),
-            std::time::Duration::from_secs(config.revive_host_free_ttl_sec),
+            Arc::new(PowerShellHostFree),
+            Duration::from_secs(config.revive_host_free_ttl_sec),
         );
-        host_free.kick();
+        host_free.kick(None);
         host_free
     }
 
-    /// いまの外側の状態。**待たない。**
+    /// 外側を見るか。**WSL でない・`ttl = 0` なら見ない**（いまの振る舞いへ戻す逃げ道）。
+    fn watching(&self) -> bool {
+        self.is_wsl && !self.ttl.is_zero()
+    }
+
+    /// 判定の確認段階全体の上限。**締切は呼ぶ側が1回だけ作る**（設計§3）。
+    pub fn wait(&self) -> Duration {
+        self.wait
+    }
+
+    /// この観測を、いま判定に使ってよいか（[`usable`] に自分の期限を渡す）。
+    pub fn usable_now(&self, reading: &Reading, required_after: Option<Instant>) -> bool {
+        usable(reading, required_after, self.ttl, Now::current())
+    }
+
+    /// いまの外側の状態（設計§2-5・§12-1）。**待たない。** 上から順に最初に当たったものを返す。
     ///
-    /// 期限切れの値は使わない——**古すぎる値で答えるくらいなら、少なく言うほうがよい。**
-    pub fn outside(self: &std::sync::Arc<Self>) -> Outside {
-        // **`ttl = 0` は「外側を見ない」。** いまの振る舞いへ戻す逃げ道で、
-        // WSL でない機械と同じ答えになる
-        if !self.is_wsl || self.ttl.is_zero() {
+    /// | 順 | 状態 | 答え | 取得を起こすか |
+    /// |---|---|---|---|
+    /// | 1 | WSL でない／期限 0 | `NotWsl` | 起こさない |
+    /// | 2 | [`usable`] を満たす成功値がある | `Fresh` | 起こさない |
+    /// | 3 | 取得中 | 成功値があれば `Stale`、無ければ `Checking` | 起こさない（既に1本） |
+    /// | 4 | 抑え中（直前が失敗） | `Failed` | 起こさない |
+    /// | 5 | それ以外 | 成功値があれば `Stale`、無ければ `Checking` | **起こす** |
+    ///
+    /// **失効の境界（`required_after`）を受け取る。** 予約が0件になった直後に、境界より前の
+    /// 観測を `fresh` と言わないため——判定はそれを使わないので、表示と判定が食い違う。
+    /// 境界を持つのは予約台帳なので、呼ぶ側が引数で渡す（`HostFree` は予約を知らない）。
+    pub fn outside(self: &Arc<Self>, required_after: Option<Instant>) -> Outside {
+        if !self.watching() {
             return Outside::NotWsl;
         }
-        let fresh = self
-            .last
-            .lock()
-            .expect("ロックが壊れていない")
-            .and_then(|(mb, at)| (at.elapsed() < self.ttl).then_some(mb));
-        match fresh {
-            Some(mb) => Outside::Known(mb),
-            None => {
-                self.kick();
-                Outside::Unknown
+        let now = Now::current();
+        let heard = self.heard.borrow().clone();
+        if let Some(reading) = &heard.last_ok
+            && usable(reading, required_after, self.ttl, now)
+        {
+            return Outside::Fresh {
+                mb: reading.mb,
+                age: reading.age(now),
+            };
+        }
+        let last = heard.last_ok.map(|reading| (reading.mb, reading.age(now)));
+        let stale_or_checking = |last: Option<(u64, Duration)>| match last {
+            Some((mb, age)) => Outside::Stale { mb, age },
+            None => Outside::Checking,
+        };
+        if heard.fetching_since.is_some() {
+            return stale_or_checking(last);
+        }
+        if heard.retry_after.is_some_and(|at| now.mono < at) {
+            return Outside::Failed {
+                reason: failure_reason(&heard),
+                last,
+            };
+        }
+        self.kick(required_after);
+        stale_or_checking(last)
+    }
+
+    /// 起こし直しの受付時に、**判定に使える値が無ければ取りに行かせるだけ**（設計§2-3・§12-1）。
+    ///
+    /// 席待ちと取得を重ねるため。待たない。**起こす条件は [`HostFree::outside`] と同じ**
+    /// （取得中・抑え中なら起こさない。境界より前の観測しかなければ起こす）——条件は
+    /// [`HostFree::kick`] の1箇所にある。
+    pub fn prefetch(self: &Arc<Self>, required_after: Option<Instant>) {
+        self.kick(required_after);
+    }
+
+    /// 判定に使ってよい観測が得られるまで待つ（設計§2-4）。**期限切れの値は返さない。**
+    ///
+    /// | 場合 | 答え |
+    /// |---|---|
+    /// | WSL でない／期限 0 | すぐ `NotWsl` |
+    /// | 条件（[`usable`]）を満たす観測がある | すぐ `Known` |
+    /// | 満たさない | 取得中の1本があればその終わりを、無ければ起こして終わりを待つ |
+    /// | 取得が失敗・抑え中・`deadline` を過ぎた | `Unconfirmed(理由)` |
+    ///
+    /// **締切は呼ぶ側が作って渡す。** 判定が2周しても、確認段階全体で [`HostFree::wait`] を
+    /// 超えないようにするため（各周で作り直すと倍になる）。
+    pub async fn confirm(
+        self: &Arc<Self>,
+        required_after: Option<Instant>,
+        deadline: tokio::time::Instant,
+    ) -> Confirmed {
+        let began = Instant::now();
+        let done = |checked: Checked| Confirmed {
+            checked,
+            waited: began.elapsed(),
+        };
+        if !self.watching() {
+            return done(Checked::NotWsl);
+        }
+        let mut changes = self.heard.subscribe();
+        loop {
+            let heard = changes.borrow_and_update().clone();
+            let now = Now::current();
+            if let Some(reading) = heard.last_ok
+                && usable(&reading, required_after, self.ttl, now)
+            {
+                return done(Checked::Known(reading));
+            }
+            if heard.fetching_since.is_none() {
+                if heard.retry_after.is_some_and(|at| now.mono < at) {
+                    return done(Checked::Unconfirmed(failure_reason(&heard)));
+                }
+                // **起こせなかったら、状態を見直す。** 起こせない理由は「他の誰かが今まさに
+                // 起こした」か「今まさに失敗・成功が記録された」のどれかで、次の周がそれを見る
+                // （実行時の取っ手はこの async の中では必ず在る）
+                self.kick(required_after);
+                continue;
+            }
+            match tokio::time::timeout_at(deadline, changes.changed()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => {
+                    // 送り手は `self` が持っているので閉じない。閉じていたら、待っても何も来ない
+                    return done(Checked::Unconfirmed(
+                        "Windows 側の空きを聞く仕組みが止まっていました".to_string(),
+                    ));
+                }
+                Err(_) => {
+                    return done(Checked::Unconfirmed(format!(
+                        "{} 秒以内に答えが返りませんでした",
+                        self.wait.as_secs()
+                    )));
+                }
             }
         }
     }
 
-    /// 背景で取りに行く。**答えは待たない。**
+    /// 要れば取得を1本起こす。**起こせたら `true`。** 答えは待たない。
     ///
-    /// **実行時の取っ手が無ければ、静かに何もしない。** 取りに行けないことは
-    /// 異常ではない（テストなど）——`Outside::Unknown` へ倒れるだけで、
-    /// **答えは安全側に出る。**
-    fn kick(self: &std::sync::Arc<Self>) {
-        if !self.is_wsl || self.ttl.is_zero() {
-            return;
+    /// **起こす条件はここ1箇所**（設計§12-1）。起こさないのは：外側を見ない／実行時の
+    /// 取っ手が無い／判定に使える成功値がある（境界を見る）／既に1本走っている／抑え中。
+    ///
+    /// **確かめるのと印を立てるのは、`watch` の中で一度に行う**——見てから書くと2本立つ。
+    /// **印を立てただけでは待ち手を起こさない**（閉包が `false` を返す）。待ち手が気にするのは
+    /// 取得が終わったこと（`round` が進むこと）だけで、立てただけで起こすと空回りする。
+    fn kick(self: &Arc<Self>, required_after: Option<Instant>) -> bool {
+        if !self.watching() {
+            return false;
         }
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
-            return;
+            return false;
         };
-        // **既に1本走っていれば増やさない。** 6〜27 秒かかるものを、押すたびに
-        // 積み上げない
-        if self
-            .fetching
-            .swap(true, std::sync::atomic::Ordering::SeqCst)
-        {
-            return;
-        }
-        let me = std::sync::Arc::clone(self);
-        handle.spawn_blocking(move || {
-            let read = me.probe.read();
-            if let Some(mb) = read {
-                *me.last.lock().expect("ロックが壊れていない") =
-                    Some((mb, std::time::Instant::now()));
+        let started = Now::current();
+        let ttl = self.ttl;
+        let mut kicked = false;
+        self.heard.send_if_modified(|heard| {
+            let fresh = heard
+                .last_ok
+                .is_some_and(|reading| usable(&reading, required_after, ttl, started));
+            if fresh
+                || heard.fetching_since.is_some()
+                || heard.retry_after.is_some_and(|at| started.mono < at)
+            {
+                return false;
             }
-            // **印は必ず戻す。** 戻し忘れると、以後1度も取りに行かなくなる
-            me.fetching
-                .store(false, std::sync::atomic::Ordering::SeqCst);
+            heard.fetching_since = Some(started.mono);
+            kicked = true;
+            false
+        });
+        if !kicked {
+            return false;
+        }
+        let me = Arc::clone(self);
+        // **終わりは同じ閉包の中で記録する。** 結果を別の async タスクで待つ形にすると、
+        // そのタスクが落とされたとき（起こした実行時が畳まれたときなど）に取得中の印が
+        // 戻らず、以後1度も取りに行かなくなる——判定は毎回締切まで待って断ることになる
+        handle.spawn_blocking(move || {
+            // **パニックも失敗として記録する**（設計§2-1）
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| me.probe.read()))
+                .unwrap_or_else(|panic| {
+                    Err(format!(
+                        "聞いている途中で落ちました: {}",
+                        panic_text(&*panic)
+                    ))
+                });
+            me.finish(started, result);
+        });
+        true
+    }
+
+    /// 取得の終わり。**成功・失敗・パニックのどれでも必ず通る**（設計§2-1）。
+    ///
+    /// 取得中の印を戻し、`round` を進めて待ち手を起こす。
+    fn finish(&self, started: Now, result: Result<u64, String>) {
+        let finished = Now::current();
+        // **理由は先頭の1行・200字までに詰める**（設計§12-5）。PowerShell の標準エラーが
+        // そのまま入りうるうえ、資源を聞くたびに画面と CLI へ運ばれる
+        let result = result.map_err(|reason| {
+            short_reason(
+                &reason,
+                "Windows 側の空きを聞けませんでした（理由の文がありません）",
+            )
+        });
+        let took_ms = u64::try_from(
+            finished
+                .mono
+                .saturating_duration_since(started.mono)
+                .as_millis(),
+        )
+        .unwrap_or(u64::MAX);
+        match &result {
+            Ok(mb) => tracing::info!(
+                kind = "host_free_probe",
+                ok = true,
+                host_free_mb = *mb,
+                took_ms,
+                "Windows 側の空きを聞きました"
+            ),
+            Err(reason) => tracing::warn!(
+                kind = "host_free_probe",
+                ok = false,
+                took_ms,
+                reason = %reason,
+                program = POWERSHELL,
+                "Windows 側の空きを聞けませんでした"
+            ),
+        }
+        self.heard.send_modify(|heard| {
+            heard.fetching_since = None;
+            heard.round += 1;
+            match result {
+                Ok(mb) => {
+                    heard.last_ok = Some(Reading {
+                        mb,
+                        started,
+                        finished,
+                    });
+                    heard.last_failure = None;
+                    heard.retry_after = None;
+                    heard.failures_in_row = 0;
+                }
+                Err(reason) => {
+                    heard.failures_in_row = heard.failures_in_row.saturating_add(1);
+                    heard.retry_after = Some(finished.mono + retry_delay(heard.failures_in_row));
+                    heard.last_failure = Some((finished.mono, reason));
+                }
+            }
         });
     }
 
-    /// 覚えている値を直に入れる（**テスト専用**）。期限の判定はそのまま効く。
+    /// 覚えている値を直に入れる（**テスト専用**）。**始めた時点も終えた時点も `at`**——
+    /// 終えた時点を今にすると「終えてから5秒」の道で古い値が新しく見える。
     #[doc(hidden)]
-    pub fn 覚えさせる(&self, mb: u64, at: std::time::Instant) {
-        *self.last.lock().expect("ロックが壊れていない") = Some((mb, at));
+    pub fn 覚えさせる(&self, mb: u64, at: Instant) {
+        let now = Now::current();
+        let ago = now.mono.saturating_duration_since(at);
+        let then = Now {
+            mono: at,
+            wall: now.wall.checked_sub(ago).unwrap_or(now.wall),
+        };
+        self.heard.send_modify(|heard| {
+            heard.last_ok = Some(Reading {
+                mb,
+                started: then,
+                finished: then,
+            });
+        });
     }
 
     /// いま取りに行っているか（**テスト専用**）。
     #[doc(hidden)]
     pub fn 取りに行っているか(&self) -> bool {
-        self.fetching.load(std::sync::atomic::Ordering::SeqCst)
+        self.heard.borrow().fetching_since.is_some()
     }
+
+    /// 取得が終わった回数（**テスト専用**）。
+    #[doc(hidden)]
+    pub fn 聞き終えた回数(&self) -> u64 {
+        self.heard.borrow().round
+    }
+}
+
+/// パニックの中身を文にする（`panic!` の文字列か、分からなければ一般的な文）。
+fn panic_text(panic: &(dyn std::any::Any + Send)) -> String {
+    panic
+        .downcast_ref::<&str>()
+        .map(|text| (*text).to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "理由の分からないパニック".to_string())
+}
+
+/// 直前の失敗の理由。**無ければ一般的な文**（理由の無い断りを出さない）。
+fn failure_reason(heard: &Heard) -> String {
+    heard
+        .last_failure
+        .as_ref()
+        .map(|(_, reason)| reason.clone())
+        .unwrap_or_else(|| "Windows 側の空きを聞けませんでした".to_string())
 }
 
 /// いま何枚起こし直せるか。**数えないときは `None`。**
@@ -427,9 +984,25 @@ impl Gauge {
         self.estimate_mb
     }
 
-    /// いまの外側の状態。**待たない**（期限切れなら背景で取りに行くだけ）。
-    pub fn outside(&self) -> Outside {
-        self.host_free.outside()
+    /// 使い切らずに残す余白（MB）。
+    pub fn headroom_mb(&self) -> u64 {
+        self.headroom_mb
+    }
+
+    /// メモリを読む。**読めなければ `None`**（Linux 以外。異常ではない）。
+    pub fn read_memory(&self) -> Option<Memory> {
+        self.probe.read()
+    }
+
+    /// 外側を知る一式。判定（`revive`）は確認をこれに頼む。
+    pub fn host_free(&self) -> &Arc<HostFree> {
+        &self.host_free
+    }
+
+    /// いまの外側の状態。**待たない**（期限切れなら背景で取りに行くだけ）。表示用。
+    /// 失効の境界は予約台帳が持つので、呼ぶ側が渡す（設計§12-1）。
+    pub fn outside(&self, required_after: Option<Instant>) -> Outside {
+        self.host_free.outside(required_after)
     }
 }
 
@@ -474,14 +1047,53 @@ impl ReadError {
 ///
 /// 枠が1つも無ければ `None`＝実測をそのまま使う。
 ///
+/// `required_after` は**失効の境界**（予約が0件になった時刻。設計§4-3・§12-1）。表示も
+/// 判定と同じく、境界より前に始めた観測を `fresh` と言わない。
+///
 /// 読めなければ `None`。**読めないことは異常ではない**（Linux 以外）。
-pub fn snapshot(gauge: &Gauge, projected_mb: Option<u64>) -> Option<protocol::HostResources> {
+pub fn snapshot(
+    gauge: &Gauge,
+    projected_mb: Option<u64>,
+    required_after: Option<Instant>,
+) -> Option<protocol::HostResources> {
     // **ここは触らない。** `Probe` が読めなければ、この `?` で早く返る——
     // 外側の判定にも取得にも1度も到達しないので、**「メモリそのものを読めない」と
     // 「WSL の外側を読めない」が混ざらない**（設計§10-1）
     let memory = gauge.probe.read()?;
-    let outside = gauge.outside();
-    let counted = counted_available(&memory, outside);
+    let outside = gauge.outside(required_after);
+    // **表示は案内であって門番ではない**（寝ているカードばかりなのに、メモリ不足で
+    // セッションを起こせない 設計§2-5）。確かめられていない状態は床で数えて見せるが、
+    // 判定は新しい値でしか通さない
+    let assessment = assess(
+        &memory,
+        outside.basis(),
+        projected_mb,
+        gauge.estimate_mb,
+        gauge.headroom_mb,
+    );
+    let (host_free_mb, host_free_age_sec, host_free_state, host_free_error) = match &outside {
+        Outside::NotWsl => (None, None, None, None),
+        Outside::Fresh { mb, age } => (
+            Some(*mb),
+            Some(age.as_secs()),
+            Some(protocol::HostFreeState::Fresh),
+            None,
+        ),
+        Outside::Stale { mb, age } => (
+            Some(*mb),
+            Some(age.as_secs()),
+            Some(protocol::HostFreeState::Stale),
+            None,
+        ),
+        Outside::Checking => (None, None, Some(protocol::HostFreeState::Checking), None),
+        // 前回の成功値は**参考として**添える（設計§2-5 の順4）。数えるのは床
+        Outside::Failed { reason, last } => (
+            last.map(|(mb, _)| mb),
+            last.map(|(_, age)| age.as_secs()),
+            Some(protocol::HostFreeState::Failed),
+            Some(reason.clone()),
+        ),
+    };
     Some(protocol::HostResources {
         total_mb: memory.total_mb,
         // **機械が報告した値は書き換えない。** 見込みは数えるためのもので、
@@ -490,18 +1102,13 @@ pub fn snapshot(gauge: &Gauge, projected_mb: Option<u64>) -> Option<protocol::Ho
         swap_free_mb: memory.swap_free_mb,
         estimate_mb: gauge.estimate_mb,
         headroom_mb: gauge.headroom_mb,
-        host_free_mb: match outside {
-            Outside::Known(mb) => Some(mb),
-            Outside::NotWsl | Outside::Unknown => None,
-        },
-        counted_mb: counted,
-        fits_now: fits(
-            // **抑えているならそちらで数える。** `projected` も `fits` も1文字も
-            // 変えていない——渡す値が変わるだけである
-            projected(counted.unwrap_or(memory.available_mb), projected_mb),
-            gauge.headroom_mb,
-            gauge.estimate_mb,
-        ),
+        host_free_mb,
+        counted_mb: assessment.counted_mb,
+        fits_now: assessment.fits,
+        host_free_age_sec,
+        host_free_state,
+        host_free_error,
+        effective_mb: Some(assessment.effective_mb),
     })
 }
 
@@ -580,8 +1187,9 @@ mod tests {
     struct 外側(Option<u64>);
 
     impl HostFreeProbe for 外側 {
-        fn read(&self) -> Option<u64> {
+        fn read(&self) -> Result<u64, String> {
             self.0
+                .ok_or_else(|| "聞けませんでした（テスト）".to_string())
         }
     }
 
@@ -633,9 +1241,10 @@ mod tests {
     #[test]
     fn 通したぶんを引いた見込みで数える() {
         // (12,000 − 2,000) / 1,000 = 10 枚。3枚ぶん通してあれば見込みは 9,000
-        let 見込みなし = snapshot(&物差し(12_000, 1_000, 2_000), None).expect("読めること");
+        let 見込みなし = snapshot(&物差し(12_000, 1_000, 2_000), None, None).expect("読めること");
         assert_eq!(見込みなし.fits_now, Some(10));
-        let 見込みあり = snapshot(&物差し(12_000, 1_000, 2_000), Some(9_000)).expect("読めること");
+        let 見込みあり =
+            snapshot(&物差し(12_000, 1_000, 2_000), Some(9_000), None).expect("読めること");
         assert_eq!(見込みあり.fits_now, Some(7));
         // **空きそのものは動かさない。** 見込みは数えるためのもので、機械が報告した
         // 空きを書き換えてよいわけではない
@@ -657,7 +1266,7 @@ mod tests {
 
     #[test]
     fn 見込みが余白を割っても負にならない() {
-        let resources = snapshot(&物差し(3_000, 1_000, 2_000), Some(0)).expect("読めること");
+        let resources = snapshot(&物差し(3_000, 1_000, 2_000), Some(0), None).expect("読めること");
         assert_eq!(resources.fits_now, Some(0));
     }
 
@@ -770,14 +1379,14 @@ mod tests {
     fn wslでなければ抑えない() {
         // **`None` は「抑えていない」。** WSL でない機械の答えが1ビットも変わらない
         // ことを、ここで固定する
-        assert_eq!(counted_available(&姿(18_000, 500), Outside::NotWsl), None);
+        assert_eq!(counted_available(&姿(18_000, 500), Basis::NoOutside), None);
     }
 
     #[test]
     fn 外側が小さければ外側で数える() {
         // 要件が引いている 2026-09-13 22:07:11 の実測。**いまの式なら 21 枚と答える**
         assert_eq!(
-            counted_available(&姿(18_983, 465), Outside::Known(1_792)),
+            counted_available(&姿(18_983, 465), Basis::Outside(1_792)),
             Some(1_792)
         );
     }
@@ -786,7 +1395,7 @@ mod tests {
     fn 外側が大きければ内側で数える() {
         // **`min` が効く。** 外側が潤沢でも、WSL の中が細ければそちらが天井になる
         assert_eq!(
-            counted_available(&姿(4_000, 500), Outside::Known(20_000)),
+            counted_available(&姿(4_000, 500), Basis::Outside(20_000)),
             Some(4_000)
         );
     }
@@ -795,10 +1404,7 @@ mod tests {
     fn 外側を聞けなければmemfreeで抑える() {
         // **キャッシュを当てにしない値で抑える。** 0 枚固定ではないので、機械が
         // 空いていれば素直に増える
-        assert_eq!(
-            counted_available(&姿(18_983, 465), Outside::Unknown),
-            Some(465)
-        );
+        assert_eq!(counted_available(&姿(18_983, 465), Basis::Floor), Some(465));
     }
 
     #[test]
@@ -811,60 +1417,534 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // 覚えておく仕組み（設計§6）
+    // 覚えておく仕組み（寝ているカードばかりなのに、メモリ不足でセッションを
+    // 起こせない 設計§2・§8-2）
     // -----------------------------------------------------------------------
+
+    /// 呼ばれた回数を数える口。**眠り・答え・パニックを選べる**ので、取得の終わり方を
+    /// 1つずつ作れる。
+    #[derive(Debug)]
+    struct 数える外側 {
+        回数: std::sync::atomic::AtomicUsize,
+        眠り: Duration,
+        答え: Option<u64>,
+        落ちる: bool,
+    }
+
+    impl 数える外側 {
+        fn 答える(mb: u64) -> Arc<Self> {
+            Self::作る(Some(mb), Duration::ZERO, false)
+        }
+        fn 遅れて答える(mb: u64, 眠り: Duration) -> Arc<Self> {
+            Self::作る(Some(mb), 眠り, false)
+        }
+        fn 聞けない() -> Arc<Self> {
+            Self::作る(None, Duration::ZERO, false)
+        }
+        fn 落ちる() -> Arc<Self> {
+            Self::作る(None, Duration::ZERO, true)
+        }
+        fn 作る(答え: Option<u64>, 眠り: Duration, 落ちる: bool) -> Arc<Self> {
+            Arc::new(Self {
+                回数: std::sync::atomic::AtomicUsize::new(0),
+                眠り,
+                答え,
+                落ちる,
+            })
+        }
+        fn 回数(&self) -> usize {
+            self.回数.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl HostFreeProbe for 数える外側 {
+        fn read(&self) -> Result<u64, String> {
+            self.回数.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // **眠りは有限にする。** 実行時は落ちるときに blocking の仕事を待つので、
+            // 終わらない口はテストの最後で固まる
+            std::thread::sleep(self.眠り);
+            assert!(!self.落ちる, "わざと落ちる口");
+            self.答え
+                .ok_or_else(|| "起動できません: テストの口".to_string())
+        }
+    }
+
+    fn wslの一式(probe: Arc<数える外側>, ttl: Duration) -> Arc<HostFree> {
+        HostFree::new(true, probe, ttl)
+    }
+
+    fn 締切() -> tokio::time::Instant {
+        tokio::time::Instant::now() + CONFIRM_WAIT
+    }
+
+    /// 取得が1回終わるまで待つ（表示の経路は待たないので、テストの側で待つ）。
+    async fn 聞き終えるまで(host_free: &Arc<HostFree>, 回: u64) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while host_free.聞き終えた回数() < 回 {
+            assert!(tokio::time::Instant::now() < deadline, "取得が終わらない");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
 
     #[test]
     fn wslでなければ外側を見ない() {
-        assert_eq!(wslでない().outside(), Outside::NotWsl);
+        assert_eq!(wslでない().outside(None), Outside::NotWsl);
     }
 
     #[test]
     fn 期限内なら覚えている値を使う() {
         let host_free = wslで外側が(Some(1_792));
-        assert_eq!(host_free.outside(), Outside::Known(1_792));
+        assert!(matches!(
+            host_free.outside(None),
+            Outside::Fresh { mb: 1_792, .. }
+        ));
+    }
+
+    /// 以前の `期限が切れたら古すぎる値で答えない` を置き換えた1本目（設計§8-2）。
+    ///
+    /// **表示は古い値も古さを添えて見せる。** 判定はこれを使わない（次の2本）。
+    #[tokio::test]
+    async fn 期限切れの値は古さを添えて表示に使い取得を起こす() {
+        let probe = 数える外側::答える(5_000);
+        let host_free = wslの一式(Arc::clone(&probe), Duration::from_secs(60));
+        host_free.覚えさせる(1_792, Instant::now() - Duration::from_secs(3_600));
+
+        match host_free.outside(None) {
+            Outside::Stale { mb, age } => {
+                assert_eq!(mb, 1_792, "古い値を見せること");
+                assert!(
+                    age >= Duration::from_secs(3_600),
+                    "古さを添えること: {age:?}"
+                );
+            }
+            other => panic!("期限切れの値は Stale で見せること: {other:?}"),
+        }
+        聞き終えるまで(&host_free, 1).await;
+        assert_eq!(probe.回数(), 1, "取り直しを起こしていること");
+        assert!(matches!(
+            host_free.outside(None),
+            Outside::Fresh { mb: 5_000, .. }
+        ));
+    }
+
+    /// 置き換えた2本目。**判定は期限切れの値で数えず、取り直しを待つ。**
+    #[tokio::test]
+    async fn 判定は期限切れの値を使わず取得を待つ() {
+        let probe = 数える外側::遅れて答える(5_000, Duration::from_millis(100));
+        let host_free = wslの一式(Arc::clone(&probe), Duration::from_secs(60));
+        host_free.覚えさせる(1_792, Instant::now() - Duration::from_secs(3_600));
+
+        let confirmed = host_free.confirm(None, 締切()).await;
+        match confirmed.checked() {
+            Checked::Known(reading) => assert_eq!(reading.mb, 5_000, "取り直した値で答えること"),
+            other => panic!("取り直しを待って答えること: {other:?}"),
+        }
+        assert_eq!(probe.回数(), 1);
+        assert!(
+            confirmed.waited() >= Duration::from_millis(100),
+            "待ったこと"
+        );
+    }
+
+    #[tokio::test]
+    async fn 取得が失敗したら古い値で答えない() {
+        let probe = 数える外側::聞けない();
+        let host_free = wslの一式(Arc::clone(&probe), Duration::from_secs(60));
+        host_free.覚えさせる(1_792, Instant::now() - Duration::from_secs(3_600));
+
+        match host_free.confirm(None, 締切()).await.checked() {
+            Checked::Unconfirmed(reason) => assert!(
+                reason.contains("起動できません"),
+                "聞けなかった理由を運ぶこと: {reason}"
+            ),
+            other => panic!("★古い値で答えないこと: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn 取得が時間切れなら待つのをやめる() {
+        // **眠りは上限より少し長いだけ。** 無期限に眠らせると、実行時が落ちるときに固まる
+        let probe = 数える外側::遅れて答える(5_000, Duration::from_secs(3));
+        let wait = Duration::from_millis(300);
+        let host_free = HostFree::with_wait(true, probe, Duration::from_secs(60), wait);
+
+        let began = Instant::now();
+        let confirmed = host_free
+            .confirm(None, tokio::time::Instant::now() + host_free.wait())
+            .await;
+        let Checked::Unconfirmed(reason) = confirmed.checked() else {
+            panic!("時間切れなら確かめられなかったと答えること: {confirmed:?}");
+        };
+        assert!(reason.contains("答えが返りませんでした"), "{reason}");
+        assert!(
+            began.elapsed() < Duration::from_secs(2),
+            "上限で待つのをやめること（取得の終わりまで待たない）: {:?}",
+            began.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn 期限内の値は取り直さない() {
+        let probe = 数える外側::答える(5_000);
+        let host_free = wslの一式(Arc::clone(&probe), Duration::from_secs(60));
+        host_free.覚えさせる(4_000, Instant::now());
+
+        let confirmed = host_free.confirm(None, 締切()).await;
+        assert!(matches!(
+            confirmed.checked(),
+            Checked::Known(Reading { mb: 4_000, .. })
+        ));
+        host_free.prefetch(None);
+        let _ = host_free.outside(None);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(probe.回数(), 0, "期限内なら外へ聞かないこと");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn 判定する人が何人いても外へ聞くのは1本() {
+        let probe = 数える外側::遅れて答える(5_000, Duration::from_millis(200));
+        let host_free = wslの一式(Arc::clone(&probe), Duration::from_secs(60));
+
+        let waiters: Vec<_> = (0..8)
+            .map(|_| {
+                let host_free = Arc::clone(&host_free);
+                tokio::spawn(async move { host_free.confirm(None, 締切()).await })
+            })
+            .collect();
+        for waiter in waiters {
+            let confirmed = waiter.await.expect("落ちていないこと");
+            assert!(
+                matches!(
+                    confirmed.checked(),
+                    Checked::Known(Reading { mb: 5_000, .. })
+                ),
+                "全員が同じ1本の結果を受け取ること: {confirmed:?}"
+            );
+        }
+        assert_eq!(probe.回数(), 1, "外へ聞くのは1本だけであること");
     }
 
     #[test]
-    fn 期限が切れたら古すぎる値で答えない() {
-        // **古すぎる値で答えるくらいなら、少なく言うほうがよい**
-        let host_free = HostFree::new(
+    fn 失敗が続くと次の取得を空ける() {
+        let 秒 = |n| retry_delay(n).as_secs();
+        assert_eq!(
+            [秒(1), 秒(2), 秒(3), 秒(4), 秒(5), 秒(100)],
+            [2, 5, 10, 30, 30, 30]
+        );
+    }
+
+    #[tokio::test]
+    async fn 抑え中は取得を起こさずすぐ確認不能() {
+        let probe = 数える外側::聞けない();
+        let host_free = wslの一式(Arc::clone(&probe), Duration::from_secs(60));
+
+        assert!(matches!(
+            host_free.confirm(None, 締切()).await.checked(),
+            Checked::Unconfirmed(_)
+        ));
+        assert_eq!(probe.回数(), 1);
+
+        let began = Instant::now();
+        let again = host_free.confirm(None, 締切()).await;
+        assert!(matches!(again.checked(), Checked::Unconfirmed(_)));
+        assert!(
+            began.elapsed() < Duration::from_secs(1),
+            "待たずに答えること"
+        );
+        assert!(
+            matches!(host_free.outside(None), Outside::Failed { .. }),
+            "表示も失敗を言うこと"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            probe.回数(),
+            1,
+            "★抑え中は外へ聞かないこと（押すたびに powershell.exe を立てない）"
+        );
+    }
+
+    #[tokio::test]
+    async fn 取得を始めた時点で刻む() {
+        let probe = 数える外側::遅れて答える(5_000, Duration::from_secs(1));
+        let host_free = wslの一式(probe, Duration::from_secs(60));
+
+        let before = Instant::now();
+        let confirmed = host_free.confirm(None, 締切()).await;
+        let Checked::Known(reading) = confirmed.checked() else {
+            panic!("聞けること: {confirmed:?}");
+        };
+        assert!(
+            reading.started.mono < before + Duration::from_millis(500),
+            "★始めた時点で刻むこと（取り終えた時点ではない）"
+        );
+        assert!(
+            reading.finished.mono.duration_since(reading.started.mono) >= Duration::from_secs(1),
+            "終えた時点も持つこと"
+        );
+    }
+
+    #[tokio::test]
+    async fn 失効境界より前に始めた観測は判定に使わない() {
+        let probe = 数える外側::答える(2_000);
+        let host_free = wslの一式(Arc::clone(&probe), Duration::from_secs(60));
+        host_free.覚えさせる(9_000, Instant::now() - Duration::from_millis(10));
+
+        let confirmed = host_free.confirm(Some(Instant::now()), 締切()).await;
+        match confirmed.checked() {
+            Checked::Known(reading) => assert_eq!(
+                reading.mb, 2_000,
+                "★境界より前に始めた 9,000 を使わず、取り直した値で答えること"
+            ),
+            other => panic!("取り直して答えること: {other:?}"),
+        }
+        assert_eq!(probe.回数(), 1);
+    }
+
+    #[test]
+    fn 壁時計の経過が単調時計より大きければそちらで古さを数える() {
+        // PC のスリープ明け。**単調時計は 1 秒しか進んでいないが、壁時計は 100 秒進んだ**
+        let then = Now::current();
+        let now = Now {
+            mono: then.mono + Duration::from_secs(1),
+            wall: then.wall + Duration::from_secs(100),
+        };
+        assert_eq!(age_since(then, now), Some(Duration::from_secs(100)));
+        let reading = Reading {
+            mb: 5_000,
+            started: then,
+            finished: then,
+        };
+        assert!(
+            !usable(&reading, None, Duration::from_secs(60), now),
+            "★寝る前の値を「1 秒前」と読まないこと"
+        );
+    }
+
+    #[tokio::test]
+    async fn 取得がパニックしても取得中の印が戻り待ち手が起きる() {
+        let probe = 数える外側::落ちる();
+        let host_free = wslの一式(probe, Duration::from_secs(60));
+
+        let confirmed = host_free.confirm(None, 締切()).await;
+        let Checked::Unconfirmed(reason) = confirmed.checked() else {
+            panic!("落ちたら確かめられなかったと答えること: {confirmed:?}");
+        };
+        assert!(reason.contains("落ちました"), "{reason}");
+        assert!(
+            !host_free.取りに行っているか(),
+            "★取得中の印が戻っていること（戻らないと以後1度も取りに行かない）"
+        );
+    }
+
+    /// `watch` を選んだ理由を固定する（設計§2-1）。**すぐ終わる取得でも、待ちが上限まで
+    /// 伸びない**——状態を見てから待ち始めるまでの間に終わった知らせを取りこぼすと、
+    /// 待ちは締切まで眠る。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn 状態を見た直後に取得が終わっても待ち手が起きる() {
+        for _ in 0..50 {
+            let host_free = wslの一式(数える外側::答える(5_000), Duration::from_secs(60));
+            let began = Instant::now();
+            let confirmed = host_free.confirm(None, 締切()).await;
+            assert!(matches!(confirmed.checked(), Checked::Known(_)));
+            assert!(
+                began.elapsed() < Duration::from_secs(5),
+                "★知らせを取りこぼして待ちが伸びていないこと: {:?}",
+                began.elapsed()
+            );
+        }
+    }
+
+    #[test]
+    fn usableの総当たり() {
+        let ttl = Duration::from_secs(60);
+        let t0 = Now::current();
+        let at = |secs: f64| Now {
+            mono: t0.mono + Duration::from_secs_f64(secs),
+            wall: t0.wall + Duration::from_secs_f64(secs),
+        };
+        let 読み = |started: Now, finished: Now| Reading {
+            mb: 5_000,
+            started,
+            finished,
+        };
+
+        // 境界の前後
+        let reading = 読み(at(0.0), at(1.0));
+        assert!(
+            usable(&reading, Some(t0.mono), ttl, at(2.0)),
+            "境界ちょうどに始めたものは使える"
+        );
+        assert!(
+            usable(
+                &reading,
+                Some(t0.mono - Duration::from_millis(1)),
+                ttl,
+                at(2.0)
+            ),
+            "境界より後に始めたものは使える"
+        );
+        assert!(
+            !usable(&reading, Some(at(0.001).mono), ttl, at(2.0)),
+            "境界より前に始めたものは使わない"
+        );
+
+        // 始めた時点からの古さが期限の前後（終えてから5秒は過ぎている）
+        let reading = 読み(at(0.0), at(0.0));
+        assert!(usable(&reading, None, ttl, at(59.9)));
+        assert!(!usable(&reading, None, ttl, at(60.0)));
+
+        // 終えた時点から5秒の前後（期限 10 秒より長くかかった 30 秒の取得）
+        let short_ttl = Duration::from_secs(10);
+        let reading = 読み(at(0.0), at(30.0));
+        assert!(
+            usable(&reading, None, short_ttl, at(34.9)),
+            "終えてから5秒未満なら使う"
+        );
+        assert!(
+            !usable(&reading, None, short_ttl, at(35.0)),
+            "5秒を過ぎたら使わない"
+        );
+        // 取得に打ち切り＋5秒（35 秒）より長くかかった観測には例外を使わない（設計§12-2）
+        let reading = 読み(at(0.0), at(70.0));
+        assert!(
+            !usable(&reading, None, ttl, at(70.1)),
+            "取得にかかった時間が長すぎる観測は、終えたばかりでも使わない"
+        );
+
+        // 壁時計の巻き戻し
+        let rewound = Now {
+            mono: at(1.0).mono,
+            wall: t0.wall - Duration::from_secs(10),
+        };
+        assert!(
+            !usable(&読み(at(0.0), at(0.5)), None, ttl, rewound),
+            "壁時計が巻き戻っていたら期限切れとして扱う"
+        );
+    }
+
+    #[tokio::test]
+    async fn prefetchで始めた取得の値をconfirmが使う() {
+        // **期限（100ms）より取得（300ms）が長い。** 「始めた時点から」では期限切れだが、
+        // 終えてから5秒の道で使える——席待ちの前に起こした取得を捨てない
+        let probe = 数える外側::遅れて答える(3_000, Duration::from_millis(300));
+        let host_free = wslの一式(Arc::clone(&probe), Duration::from_millis(100));
+
+        host_free.prefetch(None);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let confirmed = host_free.confirm(None, 締切()).await;
+
+        assert!(
+            matches!(
+                confirmed.checked(),
+                Checked::Known(Reading { mb: 3_000, .. })
+            ),
+            "{confirmed:?}"
+        );
+        assert_eq!(probe.回数(), 1, "★prefetch の1本をそのまま使うこと");
+    }
+
+    #[tokio::test]
+    async fn 締切は確認段階全体で1回() {
+        // 1周目が 1 秒、失効で2周目に入ってもう 1 秒。締切 1.8 秒を共有していれば
+        // 2周目は間に合わずに確かめられないで終わり、**合計は締切を大きく超えない**
+        let probe = 数える外側::遅れて答える(3_000, Duration::from_secs(1));
+        let host_free = HostFree::with_wait(
             true,
-            std::sync::Arc::new(外側(Some(1_792))),
-            std::time::Duration::from_millis(1),
+            probe,
+            Duration::from_secs(60),
+            Duration::from_millis(1_800),
         );
-        host_free.覚えさせる(
-            1_792,
-            std::time::Instant::now() - std::time::Duration::from_secs(3_600),
+        let began = Instant::now();
+        let deadline = tokio::time::Instant::now() + host_free.wait();
+
+        let first = host_free.confirm(None, deadline).await;
+        assert!(matches!(first.checked(), Checked::Known(_)));
+        let second = host_free.confirm(Some(Instant::now()), deadline).await;
+        assert!(
+            matches!(second.checked(), Checked::Unconfirmed(_)),
+            "{second:?}"
         );
-        assert_eq!(host_free.outside(), Outside::Unknown);
+        assert!(
+            began.elapsed() < Duration::from_millis(2_600),
+            "★合計の待ちが上限を超えないこと: {:?}",
+            began.elapsed()
+        );
     }
 
-    #[test]
-    fn 一度も読めていなければ聞けていないと言う() {
-        // 起動直後。**背景で取りに行くが、答えは待たない**
-        let host_free = wslで外側が(None);
-        assert_eq!(host_free.outside(), Outside::Unknown);
-    }
+    // 表示の優先順位（設計§2-5 の表の5行）
 
-    /// **逃げ道が効くこと。** いまの振る舞いへ戻せないと、判定が外れたときに
-    /// 設定で回避できない。
     #[test]
     fn 期限が0なら外側を見ない() {
-        let host_free = HostFree::new(
-            true,
-            std::sync::Arc::new(外側(Some(1_792))),
-            std::time::Duration::ZERO,
-        );
-        assert_eq!(host_free.outside(), Outside::NotWsl);
+        // 順1。**逃げ道が効くこと**
+        let host_free = HostFree::new(true, Arc::new(外側(Some(1_792))), Duration::ZERO);
+        assert_eq!(host_free.outside(None), Outside::NotWsl);
     }
 
-    /// **実行時の取っ手が無くても落ちない。** 取りに行けないことは異常ではない——
-    /// `Unknown` へ倒れるだけで、**答えは安全側に出る。**
+    #[tokio::test]
+    async fn 表示の優先順位() {
+        // 順2：期限内の成功値 → Fresh（起こさない）
+        let probe = 数える外側::遅れて答える(5_000, Duration::from_secs(1));
+        let host_free = wslの一式(Arc::clone(&probe), Duration::from_secs(60));
+        host_free.覚えさせる(4_000, Instant::now());
+        assert!(matches!(
+            host_free.outside(None),
+            Outside::Fresh { mb: 4_000, .. }
+        ));
+        assert_eq!(probe.回数(), 0);
+
+        // 順5 → 順3：期限切れ・取得中でない → Stale で起こす。次は取得中なので Stale のまま起こさない
+        host_free.覚えさせる(4_000, Instant::now() - Duration::from_secs(120));
+        assert!(matches!(
+            host_free.outside(None),
+            Outside::Stale { mb: 4_000, .. }
+        ));
+        assert!(host_free.取りに行っているか(), "順5 は取得を起こすこと");
+        assert!(matches!(
+            host_free.outside(None),
+            Outside::Stale { mb: 4_000, .. }
+        ));
+        聞き終えるまで(&host_free, 1).await;
+        assert_eq!(probe.回数(), 1, "取得中は2本目を起こさないこと");
+
+        // 順3（成功値なし）：取得中 → Checking
+        let probe = 数える外側::遅れて答える(5_000, Duration::from_secs(1));
+        let host_free = wslの一式(Arc::clone(&probe), Duration::from_secs(60));
+        assert_eq!(host_free.outside(None), Outside::Checking);
+        assert_eq!(host_free.outside(None), Outside::Checking);
+        聞き終えるまで(&host_free, 1).await;
+        assert_eq!(probe.回数(), 1);
+
+        // 順4：抑え中 → Failed（前回の成功値を参考に添える・起こさない）
+        let probe = 数える外側::聞けない();
+        let host_free = wslの一式(Arc::clone(&probe), Duration::from_secs(60));
+        host_free.覚えさせる(4_000, Instant::now() - Duration::from_secs(120));
+        let _ = host_free.outside(None);
+        聞き終えるまで(&host_free, 1).await;
+        match host_free.outside(None) {
+            Outside::Failed { reason, last } => {
+                assert!(reason.contains("起動できません"), "{reason}");
+                assert_eq!(
+                    last.map(|(mb, _)| mb),
+                    Some(4_000),
+                    "前回の値を参考に添えること"
+                );
+            }
+            other => panic!("抑え中は Failed: {other:?}"),
+        }
+        assert_eq!(probe.回数(), 1, "抑え中は起こさないこと");
+    }
+
+    #[test]
+    fn 一度も読めていなければ確かめていると言う() {
+        let host_free = wslで外側が(None);
+        assert_eq!(host_free.outside(None), Outside::Checking);
+    }
+
+    /// **実行時の取っ手が無くても落ちない。** 取りに行けないことは異常ではない。
     #[test]
     fn 取っ手が無い場面でも落ちない() {
         let host_free = wslで外側が(None);
-        assert_eq!(host_free.outside(), Outside::Unknown);
+        assert_eq!(host_free.outside(None), Outside::Checking);
         assert!(
             !host_free.取りに行っているか(),
             "取っ手が無いのだから、取りに行った印も立たないこと"
@@ -873,33 +1953,201 @@ mod tests {
 
     #[tokio::test]
     async fn 同時に2本取りに行かない() {
-        // **6〜27 秒かかるものを、押すたびに積み上げない**
-        #[derive(Debug)]
-        struct 終わらない外側(std::sync::Arc<std::sync::atomic::AtomicUsize>);
-        impl HostFreeProbe for 終わらない外側 {
-            fn read(&self) -> Option<u64> {
-                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                std::thread::sleep(std::time::Duration::from_millis(300));
-                Some(1_000)
-            }
-        }
-        let 回数 = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let host_free = HostFree::new(
-            true,
-            std::sync::Arc::new(終わらない外側(std::sync::Arc::clone(&回数))),
-            std::time::Duration::from_secs(60),
-        );
+        // **1〜27 秒かかるものを、押すたびに積み上げない**
+        let probe = 数える外側::遅れて答える(1_000, Duration::from_secs(1));
+        let host_free = wslの一式(Arc::clone(&probe), Duration::from_secs(60));
         for _ in 0..5 {
-            assert_eq!(host_free.outside(), Outside::Unknown);
+            assert_eq!(host_free.outside(None), Outside::Checking);
         }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        聞き終えるまで(&host_free, 1).await;
         assert_eq!(
-            回数.load(std::sync::atomic::Ordering::SeqCst),
+            probe.回数(),
             1,
             "5回押しても、外側へ聞きに行くのは1本だけであること"
         );
         // 取れたら次からは覚えている値で即答する
-        assert_eq!(host_free.outside(), Outside::Known(1_000));
+        assert!(matches!(
+            host_free.outside(None),
+            Outside::Fresh { mb: 1_000, .. }
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // 第4回の検分で改めたこと（設計§12）
+    // -----------------------------------------------------------------------
+
+    /// 取得中に PC がスリープした観測（設計§12-2）。**開始は1時間前（壁時計）、終了は今、
+    /// 単調時計では数秒。** 「終えてから0秒」と読んで判定に使ってはいけない。
+    #[test]
+    fn 取得中にスリープを挟んだ観測は終えてから5秒の例外を使わない() {
+        let now = Now::current();
+        let started = Now {
+            mono: now.mono - Duration::from_secs(3),
+            wall: now.wall - Duration::from_secs(3_600),
+        };
+        let reading = Reading {
+            mb: 5_000,
+            started,
+            finished: now,
+        };
+        assert!(
+            !usable(&reading, None, Duration::from_secs(60), now),
+            "★寝る前に始めた取得を、終えたばかりだからと新しいとみなさないこと"
+        );
+        // 取得にかかった時間が上限ちょうどまでなら、例外を使う
+        let started = Now {
+            mono: now.mono - MAX_FETCH_SPAN,
+            wall: now.wall - MAX_FETCH_SPAN,
+        };
+        let reading = Reading {
+            mb: 5_000,
+            started,
+            finished: now,
+        };
+        assert!(usable(&reading, None, Duration::from_secs(1), now));
+    }
+
+    /// 予約が0件になった直後、表示が境界より前の観測で `fresh` と答えない（設計§12-1）。
+    #[tokio::test]
+    async fn 表示も境界より前の観測をfreshと言わず取得を起こす() {
+        let probe = 数える外側::答える(2_000);
+        let host_free = wslの一式(Arc::clone(&probe), Duration::from_secs(60));
+        host_free.覚えさせる(5_000, Instant::now() - Duration::from_millis(10));
+        assert!(matches!(
+            host_free.outside(None),
+            Outside::Fresh { mb: 5_000, .. }
+        ));
+
+        let boundary = Instant::now();
+        match host_free.outside(Some(boundary)) {
+            Outside::Stale { mb, .. } => assert_eq!(mb, 5_000, "古い値は参考に見せる"),
+            other => panic!("★境界より前の観測を fresh と言わないこと: {other:?}"),
+        }
+        聞き終えるまで(&host_free, 1).await;
+        assert_eq!(probe.回数(), 1, "取得を起こしていること");
+        assert!(matches!(
+            host_free.outside(Some(boundary)),
+            Outside::Fresh { mb: 2_000, .. }
+        ));
+    }
+
+    /// `prefetch` は `outside` と同じ条件で起こす（設計§12-1）。
+    #[tokio::test]
+    async fn prefetchは境界より前の観測しかなければ起こし取得中なら起こさない() {
+        let probe = 数える外側::遅れて答える(2_000, Duration::from_millis(500));
+        let host_free = wslの一式(Arc::clone(&probe), Duration::from_secs(60));
+        host_free.覚えさせる(5_000, Instant::now() - Duration::from_millis(10));
+
+        host_free.prefetch(None);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(probe.回数(), 0, "境界が無く期限内なら起こさない");
+
+        let boundary = Some(Instant::now());
+        host_free.prefetch(boundary);
+        host_free.prefetch(boundary);
+        let _ = host_free.outside(boundary);
+        聞き終えるまで(&host_free, 1).await;
+        assert_eq!(
+            probe.回数(),
+            1,
+            "★境界より前の観測しか無ければ起こし、取得中は2本目を起こさない"
+        );
+    }
+
+    /// 印を立てただけでは待ち手を起こさない（設計§12-1）。待ち手が気にするのは取得の終わりだけ。
+    #[tokio::test]
+    async fn 印を立てただけでは待ち手を起こさない() {
+        let probe = 数える外側::遅れて答える(2_000, Duration::from_millis(300));
+        let host_free = wslの一式(probe, Duration::from_secs(60));
+        let mut changes = host_free.heard.subscribe();
+        changes.borrow_and_update();
+
+        host_free.prefetch(None);
+        assert!(host_free.取りに行っているか());
+        assert!(
+            !changes.has_changed().expect("送り手が居ること"),
+            "★印を立てただけで待ち手を起こさないこと"
+        );
+        聞き終えるまで(&host_free, 1).await;
+        assert!(
+            changes.has_changed().expect("送り手が居ること"),
+            "取得の終わりでは起こすこと"
+        );
+    }
+
+    /// 聞けなかった理由は先頭の1行・200字まで（設計§12-5）。
+    #[tokio::test]
+    async fn 聞けなかった理由は先頭の1行200字までに詰める() {
+        #[derive(Debug)]
+        struct 長い失敗;
+        impl HostFreeProbe for 長い失敗 {
+            fn read(&self) -> Result<u64, String> {
+                Err(format!("\n{}\n2行目のスタック\n3行目", "あ".repeat(500)))
+            }
+        }
+        let host_free = HostFree::new(true, Arc::new(長い失敗), Duration::from_secs(60));
+        let confirmed = host_free.confirm(None, 締切()).await;
+        let Checked::Unconfirmed(reason) = confirmed.checked() else {
+            panic!("聞けないこと: {confirmed:?}");
+        };
+        assert!(!reason.contains('\n'), "1行にすること: {reason:?}");
+        assert!(!reason.contains("2行目"), "先頭の1行だけ: {reason:?}");
+        assert!(
+            reason.chars().count() <= 201,
+            "200字まで（＋省略の印）: {}",
+            reason.chars().count()
+        );
+        match host_free.outside(None) {
+            Outside::Failed { reason, .. } => assert!(reason.chars().count() <= 201),
+            other => panic!("抑え中は Failed: {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 数える規則の1本（設計§4-1）
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn assessの総当たり() {
+        // 中が制約（WSL でない機械もここ）
+        let a = assess(&姿(5_000, 500), Basis::NoOutside, None, 1_000, 2_000);
+        assert_eq!(
+            (a.counted_mb, a.effective_mb, a.fits, a.next_mb, a.limit),
+            (None, 5_000, Some(3), 4_000, Limit::Wsl)
+        );
+        let a = assess(&姿(5_000, 500), Basis::Outside(9_000), None, 1_000, 2_000);
+        assert_eq!((a.counted_mb, a.limit), (Some(5_000), Limit::Wsl));
+
+        // Windows が制約。**見込みの起点は effective**（MemAvailable 20,000 へ戻らない）
+        let a = assess(&姿(20_000, 400), Basis::Outside(4_000), None, 1_000, 2_000);
+        assert_eq!(
+            (a.counted_mb, a.effective_mb, a.fits, a.next_mb, a.limit),
+            (Some(4_000), 4_000, Some(2), 3_000, Limit::Windows)
+        );
+
+        // 床が制約（表示の経路でだけ出る）
+        let a = assess(&姿(20_000, 2_500), Basis::Floor, None, 1_000, 2_000);
+        assert_eq!(
+            (a.counted_mb, a.effective_mb, a.fits, a.limit),
+            (Some(2_500), 2_500, Some(0), Limit::Floor)
+        );
+
+        // 予約が制約
+        let a = assess(
+            &姿(20_000, 400),
+            Basis::Outside(5_000),
+            Some(3_500),
+            1_000,
+            2_000,
+        );
+        assert_eq!(
+            (a.counted_mb, a.effective_mb, a.fits, a.next_mb, a.limit),
+            (Some(5_000), 3_500, Some(1), 2_500, Limit::Reserved)
+        );
+
+        // 見積もり 0 は数えない
+        let a = assess(&姿(20_000, 400), Basis::Outside(5_000), None, 0, 2_000);
+        assert_eq!(a.fits, None);
     }
 
     // -----------------------------------------------------------------------
@@ -908,7 +2156,7 @@ mod tests {
 
     #[test]
     fn wslでない機械の答えは1ビットも変わらない() {
-        let resources = snapshot(&物差し(12_000, 1_000, 2_000), None).expect("読めること");
+        let resources = snapshot(&物差し(12_000, 1_000, 2_000), None, None).expect("読めること");
         assert_eq!(resources.fits_now, Some(10));
         assert_eq!(resources.host_free_mb, None);
         assert_eq!(resources.counted_mb, None, "抑えていないこと");
@@ -917,7 +2165,7 @@ mod tests {
     #[test]
     fn 外側を聞けたら少ないほうで数える() {
         let gauge = 物差しで外側が(12_000, 1_000, 2_000, wslで外側が(Some(5_000)));
-        let resources = snapshot(&gauge, None).expect("読めること");
+        let resources = snapshot(&gauge, None, None).expect("読めること");
         // (5,000 − 2,000) / 1,000 = 3 枚。**外側で抑えなければ 10 枚**
         assert_eq!(resources.fits_now, Some(3));
         assert_eq!(resources.host_free_mb, Some(5_000));
@@ -933,7 +2181,7 @@ mod tests {
     #[test]
     fn 実測の再現_外側が逼迫していれば0枚() {
         let gauge = 物差しで外側が(18_983, 780, 2_048, wslで外側が(Some(1_792)));
-        let resources = snapshot(&gauge, None).expect("読めること");
+        let resources = snapshot(&gauge, None, None).expect("読めること");
         assert_eq!(
             resources.fits_now,
             Some(0),
@@ -970,6 +2218,7 @@ mod tests {
                 &config,
             ),
             None,
+            None,
         )
         .expect("読めること");
         let 抑えない = snapshot(
@@ -978,6 +2227,7 @@ mod tests {
                 wslでない(),
                 &config,
             ),
+            None,
             None,
         )
         .expect("読めること");

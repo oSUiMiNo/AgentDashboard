@@ -226,7 +226,13 @@ pub enum ClientError {
     /// サーバに断られた（見つからない・権限・不正な値）。**送り直しても同じ**
     Refused { status: u16, message: String },
     /// 時間切れ。**投げたが確かめられなかった**——送り直す前に状態を見ること
-    Timeout { what: String, secs: u64 },
+    ///
+    /// `note` は時間切れの後に添える一言（例：裏ではまだ続いている可能性と、確かめ方）。
+    Timeout {
+        what: String,
+        secs: u64,
+        note: Option<String>,
+    },
     /// 相手が居ない（繋げない）
     Unreachable { target: String, detail: String },
     /// サーバは動いているが記録（DB）が応じていない（503）
@@ -294,8 +300,12 @@ impl fmt::Display for ClientError {
             Self::Refused { message, .. } | Self::Unavailable { message } => {
                 write!(f, "{message}")
             }
-            Self::Timeout { what, secs } => {
-                write!(f, "{what}が {secs} 秒以内に終わりませんでした")
+            Self::Timeout { what, secs, note } => {
+                write!(f, "{what}が {secs} 秒以内に終わりませんでした")?;
+                match note {
+                    Some(note) => write!(f, "。{note}"),
+                    None => Ok(()),
+                }
             }
             Self::Unreachable { target, detail } => {
                 write!(
@@ -1257,7 +1267,8 @@ async fn revive_one(target: &Target, card: CardId) -> Result<Outcome, ClientErro
         "セッションの起こし直し",
         wait::REVIVE_CAP,
     )
-    .await;
+    .await
+    .map_err(wait::note_revive_timeout);
     ws.close().await;
     outcome
 }
@@ -1475,6 +1486,7 @@ pub async fn screen(
             Err(ClientError::Timeout {
                 what: "画面のスナップショット".to_string(),
                 secs: SCREEN_CAP.as_secs(),
+                note: None,
             })
         });
     ws.close().await;
@@ -2307,6 +2319,7 @@ mod tests {
         let timeout = ClientError::Timeout {
             what: "応答の待ち".to_string(),
             secs: 30,
+            note: None,
         };
         let refused = ClientError::from_status(404, String::new());
         assert_eq!(timeout.exit_code(), 3);

@@ -77,6 +77,7 @@ impl Ws {
                 .map_err(|_| ClientError::Timeout {
                     what: format!("{url} への接続"),
                     secs: CONNECT_TIMEOUT.as_secs(),
+                    note: None,
                 })?;
         let (socket, _) = connected.map_err(|err| match err {
             // upgrade が HTTP の答えで断られた形（401 など）は、REST と同じ言葉へ写す
@@ -111,6 +112,7 @@ impl Ws {
         .map_err(|_| ClientError::Timeout {
             what: "サーバの名乗り（Hello）".to_string(),
             secs: CONNECT_TIMEOUT.as_secs(),
+            note: None,
         })??;
         Ok(ws)
     }

@@ -430,14 +430,33 @@ pub fn render_dir(listing: &protocol::fs::DirListing) -> String {
 /// 「いま 4294967295 枚まで起こし直せます」と出していた。
 ///
 /// **人向けの出力に Markdown を混ぜない**（同 対応11）。`**` は端末では字のまま出る。
+///
+/// **WSL のときは1行目を「WSL の中の空き」と呼び分ける**（寝ているカードばかりなのに、
+/// メモリ不足でセッションを起こせない 設計§6-4）。`MemAvailable` は判定に使う空き
+/// そのものではないので、単に「空き」と呼ぶと「空いているのに断られた」に見える。
 pub fn render_resources(resources: &protocol::HostResources) -> String {
     let 枚数 = match resources.fits_now {
         Some(fits) => format!("いま {fits} 枚まで起こし直せます"),
         None => "数えません（revive_estimate_mb = 0 で歯止めを外しています）".to_string(),
     };
+    // 確かめられていない数で決めないことを添える（設計§6-3）。**起こすときの判定は
+    // 取り直してから数える**ので、ここに出る枚数は案内である
+    let 確かめ直す = match resources.host_free_state {
+        Some(
+            protocol::HostFreeState::Stale
+            | protocol::HostFreeState::Checking
+            | protocol::HostFreeState::Failed,
+        ) if resources.fits_now.is_some() => "（起こすときは確かめ直してから決めます）",
+        _ => "",
+    };
+    let 中の空き = if resources.counted_mb.is_some() {
+        "WSL の中の空き"
+    } else {
+        "空き"
+    };
     format!(
-        "空き {} MB ／ 積んでいる {} MB ／ スワップの空き {} MB{}\n\
-         1枚あたり {} MB ＋ 残す余白 {} MB → {}",
+        "{中の空き} {} MB ／ 積んでいる {} MB ／ スワップの空き {} MB{}\n\
+         1枚あたり {} MB ＋ 残す余白 {} MB → {}{確かめ直す}",
         resources.available_mb,
         resources.total_mb,
         resources.swap_free_mb,
@@ -448,27 +467,85 @@ pub fn render_resources(resources: &protocol::HostResources) -> String {
     )
 }
 
-/// WSL の外側（Windows）について1行。**WSL でなければ何も足さない。**
+/// 秒を、読みやすい単位へ繰り上げる（`3 秒`・`4 分`・`2 時間`）。
+fn render_age(seconds: u64) -> String {
+    match seconds {
+        0..60 => format!("{seconds} 秒"),
+        60..3_600 => format!("{} 分", seconds / 60),
+        _ => format!("{} 時間", seconds / 3_600),
+    }
+}
+
+/// WSL の外側（Windows）について1行。**WSL でなければ何も足さない**（予約が制約のとき
+/// だけ、そのことを1行足す）。
 ///
 /// # なぜ書くのか
 ///
 /// **数字だけ直すと、説明のつかない答えになる。** 「空き 18,983 MB」と出ているのに
-/// 「0 枚」では、**壊れているのと見分けが付かない。** 何で抑えたのかを言う。
+/// 「0 枚」では、**壊れているのと見分けが付かない。** 何で抑えたのか・その値が
+/// いつのものか・確かめられているかを言う（設計§6-4 の4状態）。
 ///
-/// **「まだ聞けていません」には次にどうすればよいかを添える。** 外側を聞くのに
-/// 6〜27 秒かかるので押した瞬間には待たない設計で、**1回目だけ少なく出ることがある**
-/// ——放置すると故障に見える。
+/// **使える空き（`effective_mb`）も出す。** 起こしている途中のぶんが制約なら、
+/// そう添える——外側の値だけを見ると「まだ入る」と読めてしまう。
 fn render_outside(resources: &protocol::HostResources) -> String {
-    match (resources.host_free_mb, resources.counted_mb) {
-        // WSL でない。**いまと同じ見た目**
-        (_, None) => String::new(),
-        (Some(host_free), Some(counted)) => {
-            format!("\nWSL の外側（Windows）の空き {host_free} MB → 数えたのは {counted} MB")
+    let base = resources.counted_mb.unwrap_or(resources.available_mb);
+    let effective = resources.effective_mb.unwrap_or(base);
+    let 使える = if effective < base {
+        format!("使える空き {effective} MB（起こしている途中のぶんを差し引いた値）")
+    } else {
+        format!("使える空き {effective} MB")
+    };
+    let age = |seconds: Option<u64>| seconds.map(render_age);
+    match (resources.host_free_state, resources.counted_mb) {
+        // WSL でない。**いまと同じ見た目**。予約が制約のときだけ1行足す
+        (None, None) if effective < base => format!("\n→ {使える}"),
+        (None, None) => String::new(),
+        (Some(protocol::HostFreeState::Fresh), _) => {
+            let host_free = resources.host_free_mb.unwrap_or(base);
+            let when = age(resources.host_free_age_sec)
+                .map(|age| format!("（{age}前に確認）"))
+                .unwrap_or_default();
+            // 括弧の直後は空けない（Stale の行と揃える）
+            let arrow = if when.is_empty() { " → " } else { "→ " };
+            format!("\nWindows 側の空き {host_free} MB{when}{arrow}{使える}")
         }
-        (None, Some(counted)) => format!(
-            "\nWSL の外側（Windows）の空きをまだ聞けていません\
-             （もう一度聞くと反映されます）→ 数えたのは {counted} MB"
+        (Some(protocol::HostFreeState::Stale), _) => {
+            let host_free = resources.host_free_mb.unwrap_or(base);
+            let when = age(resources.host_free_age_sec)
+                .map(|age| format!("{age}前の値・"))
+                .unwrap_or_default();
+            format!("\nWindows 側の空き {host_free} MB（{when}確かめ直しています）→ {使える}")
+        }
+        (Some(protocol::HostFreeState::Checking), _) => format!(
+            "\nWindows 側の空きを確かめています → いまは WSL の中のキャッシュを除いた空きで\
+             数えています（{使える}）"
         ),
+        (Some(protocol::HostFreeState::Failed), _) => {
+            let reason = resources
+                .host_free_error
+                .as_deref()
+                .map(|reason| format!("（理由：{reason}）"))
+                .unwrap_or_default();
+            let last = match (resources.host_free_mb, resources.host_free_age_sec) {
+                (Some(mb), Some(seconds)) => {
+                    format!("。最後に聞けたのは {mb} MB（{}前）", render_age(seconds))
+                }
+                _ => String::new(),
+            };
+            format!(
+                "\nWindows 側の空きを確かめられませんでした{reason}{last} → いまは WSL の中の\
+                 キャッシュを除いた空きで数えています（{使える}）"
+            )
+        }
+        // **状態の欄を送ってこない古い PC。** 以前の読み分け（2欄の組）で答える
+        (None, Some(counted)) => match resources.host_free_mb {
+            Some(host_free) => {
+                format!("\nWindows 側の空き {host_free} MB → 数えたのは {counted} MB")
+            }
+            None => format!(
+                "\nWindows 側の空きをまだ聞けていません（古い版の PC です）→ 数えたのは {counted} MB"
+            ),
+        },
     }
 }
 
@@ -725,7 +802,8 @@ mod tests {
         資源で外側が(fits_now, None, None)
     }
 
-    /// WSL の外側まで指定して作る。**両方 `None` なら WSL でない機械。**
+    /// WSL の外側まで指定して作る。**両方 `None` なら WSL でない機械。** 状態の欄は
+    /// 送ってこない（古い PC の形）。
     fn 資源で外側が(
         fits_now: Option<u32>,
         host_free_mb: Option<u64>,
@@ -740,6 +818,37 @@ mod tests {
             fits_now,
             host_free_mb,
             counted_mb,
+            host_free_age_sec: None,
+            host_free_state: None,
+            host_free_error: None,
+            effective_mb: None,
+        }
+    }
+
+    /// 4状態のどれかを作る（寝ているカードばかりなのに、メモリ不足でセッションを起こせない
+    /// 設計§6-4）。`WSL の中の空き` 19,072・Windows 側 5,408。
+    fn 資源の状態(
+        state: protocol::HostFreeState,
+        host_free_mb: Option<u64>,
+        age: Option<u64>,
+        counted_mb: u64,
+        effective_mb: u64,
+        fits_now: u32,
+    ) -> protocol::HostResources {
+        protocol::HostResources {
+            total_mb: 24_000,
+            available_mb: 19_072,
+            swap_free_mb: 6_144,
+            estimate_mb: 780,
+            headroom_mb: 2_048,
+            fits_now: Some(fits_now),
+            host_free_mb,
+            counted_mb: Some(counted_mb),
+            host_free_age_sec: age,
+            host_free_state: Some(state),
+            host_free_error: (state == protocol::HostFreeState::Failed)
+                .then(|| "起動できません: No such file or directory".to_string()),
+            effective_mb: Some(effective_mb),
         }
     }
 
@@ -748,24 +857,116 @@ mod tests {
         // **いまと同じ見た目。** 行が増えると、WSL でない利用者に無関係な話が出る
         let out = render_resources(&資源(Some(12)));
         assert!(!out.contains("WSL"), "{out}");
+        assert!(!out.contains("Windows"), "{out}");
+        assert!(out.starts_with("空き 12000 MB"), "{out}");
+    }
+
+    #[test]
+    fn 新しい値で数えたときはいつ確かめたかを書く() {
+        let out = render_resources(&資源の状態(
+            protocol::HostFreeState::Fresh,
+            Some(5_408),
+            Some(12),
+            5_408,
+            5_408,
+            4,
+        ));
+        assert!(out.starts_with("WSL の中の空き 19072 MB"), "{out}");
+        assert!(
+            out.contains("Windows 側の空き 5408 MB（12 秒前に確認）→ 使える空き 5408 MB"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("確かめ直して"),
+            "新しい値なら確かめ直すと言わない: {out}"
+        );
+    }
+
+    #[test]
+    fn 古い値で数えたときは古さと確かめ直していることを書く() {
+        let out = render_resources(&資源の状態(
+            protocol::HostFreeState::Stale,
+            Some(5_408),
+            Some(240),
+            5_408,
+            5_408,
+            4,
+        ));
+        assert_eq!(
+            out,
+            "WSL の中の空き 19072 MB ／ 積んでいる 24000 MB ／ スワップの空き 6144 MB\n\
+             Windows 側の空き 5408 MB（4 分前の値・確かめ直しています）→ 使える空き 5408 MB\n\
+             1枚あたり 780 MB ＋ 残す余白 2048 MB → いま 4 枚まで起こし直せます\
+             （起こすときは確かめ直してから決めます）"
+        );
+    }
+
+    #[test]
+    fn 確かめている途中は床で数えていることを書く() {
+        let out = render_resources(&資源の状態(
+            protocol::HostFreeState::Checking,
+            None,
+            None,
+            400,
+            400,
+            0,
+        ));
+        assert!(out.contains("Windows 側の空きを確かめています"), "{out}");
+        assert!(out.contains("使える空き 400 MB"), "{out}");
+        assert!(
+            out.contains("起こすときは確かめ直してから決めます"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn 確かめられなかったときは理由を書く() {
+        let out = render_resources(&資源の状態(
+            protocol::HostFreeState::Failed,
+            Some(5_408),
+            Some(600),
+            400,
+            400,
+            0,
+        ));
+        assert!(
+            out.contains("Windows 側の空きを確かめられませんでした"),
+            "{out}"
+        );
+        assert!(out.contains("理由：起動できません"), "{out}");
+        assert!(out.contains("最後に聞けたのは 5408 MB（10 分前）"), "{out}");
+    }
+
+    #[test]
+    fn 予約が制約なら差し引いた値だと書く() {
+        let out = render_resources(&資源の状態(
+            protocol::HostFreeState::Fresh,
+            Some(5_408),
+            Some(3),
+            5_408,
+            3_848,
+            2,
+        ));
+        assert!(
+            out.contains("使える空き 3848 MB（起こしている途中のぶんを差し引いた値）"),
+            "{out}"
+        );
     }
 
     #[test]
     fn 外側で抑えたときは何で抑えたのかを書く() {
-        // **数字だけ直すと説明のつかない答えになる。** 空き 12,000 MB と出ているのに
-        // 0 枚では、壊れているのと見分けが付かない
+        // **古い PC（状態の欄なし）。** 空き 12,000 MB と出ているのに 0 枚では、
+        // 壊れているのと見分けが付かない
         let out = render_resources(&資源で外側が(Some(0), Some(1_792), Some(1_792)));
-        assert!(out.contains("WSL の外側（Windows）の空き 1792 MB"), "{out}");
+        assert!(out.contains("Windows 側の空き 1792 MB"), "{out}");
         assert!(out.contains("数えたのは 1792 MB"), "{out}");
     }
 
     #[test]
     fn 外側をまだ聞けていないときは次にどうすればよいか書く() {
-        // **放置すると故障に見える。** 押した瞬間は待たない設計なので、
-        // 1回目だけ少なく出ることがある
+        // **古い PC（状態の欄なし）。** 外側を聞けていないことを言う
         let out = render_resources(&資源で外側が(Some(1), None, Some(3_000)));
         assert!(out.contains("まだ聞けていません"), "{out}");
-        assert!(out.contains("もう一度聞くと反映されます"), "{out}");
         assert!(out.contains("数えたのは 3000 MB"), "{out}");
     }
 

@@ -335,7 +335,10 @@ pub struct VersionEntry {
 /// 「押せてしまってサーバが断る」に倒れるだけだった。**こちらはずれると機械が死ぬ。**
 ///
 /// だから**数えるのは PC 側の1箇所**にして、画面は受け取った数と対象の枚数を比べるだけにする。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// **`Copy` ではない。** 外側を聞けなかった理由（[`Self::host_free_error`]）を文字列で
+/// 運ぶため（寝ているカードばかりなのに、メモリ不足でセッションを起こせない 設計§5）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostResources {
     /// 積んでいるメモリ（MB）
     pub total_mb: u64,
@@ -359,28 +362,66 @@ pub struct HostResources {
     /// 理由に止めない）。画面から見ると「聞けなかった」と同じふるまいでよいが、
     /// **CLI は言い分ける**——人が読む答えなので、外しているのか聞けなかったのかは別の話。
     pub fits_now: Option<u32>,
-    /// **WSL の外側（Windows）の空き**（MB）。
+    /// **WSL の外側（Windows）の空き**（MB）。**最後に聞けた値があれば、古くても入る。**
     ///
-    /// **WSL でないなら `None`**（外側という概念が無い）。**WSL でもまだ聞けていない
-    /// なら `None`**——外側を聞くのに 6〜27 秒かかるので、押した瞬間には待たずに答える。
-    ///
-    /// この2つは [`Self::counted_mb`] と組にすると読み分けられる（下記）。
+    /// **WSL でないなら `None`**（外側という概念が無い）。**WSL でも一度も聞けていない
+    /// なら `None`**。古いかどうかは [`Self::host_free_state`] と [`Self::host_free_age_sec`]
+    /// で読む——**表示は待てない**（聞くのに約1秒〜27秒かかる）ので古い値も見せるが、
+    /// **起こし直しの判定は新しい値を待ってから数える**（設計§2-4）。
     pub host_free_mb: Option<u64>,
     /// **数えるのに実際に使った空き**（MB）。**`available_mb` をそのまま使ったなら `None`。**
     ///
-    /// # なぜ2欄あるのか
+    /// # なぜ欄がこれだけあるのか
     ///
     /// **枚数だけを直すと、説明のつかない画面になる。** 「空き 18,983 MB」と出ている
     /// のに「0 枚」では、**壊れているのと見分けが付かない。**
     ///
-    /// 2欄あると3つの状態が読み分けられる。
+    /// 状態の欄と組にすると、次のように読み分けられる。
     ///
-    /// | `host_free_mb` | `counted_mb` | 意味 |
-    /// |---|---|---|
-    /// | `None` | `None` | **WSL でない**（いまと同じ見た目） |
-    /// | `Some` | `Some` | 外側のほうが少なかったので、そちらで抑えた |
-    /// | `None` | `Some` | **外側をまだ聞けていない**（もう一度押すと反映される） |
+    /// | `host_free_state` | `host_free_mb` | `counted_mb` | 意味 |
+    /// |---|---|---|---|
+    /// | `None` | `None` | `None` | **WSL でない**（または期限 0 の設定）。いまと同じ見た目 |
+    /// | `fresh` | `Some` | `Some` | 期限内の外側の値と `MemAvailable` の小さいほうで数えた |
+    /// | `stale` | `Some` | `Some` | 期限を過ぎた値で数えた（**確かめ直している**。判定は取り直してから） |
+    /// | `checking` | `None` | `Some` | 一度も聞けていないので聞いている。`MemFree` の床で数えた |
+    /// | `failed` | 前回の値か `None` | `Some` | 聞けなかった（理由は `host_free_error`）。`MemFree` の床で数えた |
+    ///
+    /// **`checking`・`failed`・`stale` の数で「何枚戻すか」を決めてはいけない**（設計§6-3）。
+    /// 参考として見せるだけで、確かめられていない。
     pub counted_mb: Option<u64>,
+    /// 外側の値が何秒前のものか。値が無ければ `None`。
+    ///
+    /// **古い PC は送ってこない**ので `serde(default)`（版は上げない）。以下3欄も同じ
+    #[serde(default)]
+    pub host_free_age_sec: Option<u64>,
+    /// 外側の値の様子。**WSL でない・期限 0 なら `None`**
+    #[serde(default)]
+    pub host_free_state: Option<HostFreeState>,
+    /// 最後に外側を聞けなかった理由（`failed` のとき）
+    #[serde(default)]
+    pub host_free_error: Option<String>,
+    /// **予約を引いた後の、判定に使う空き**（MB）。`counted_mb`（無ければ `available_mb`）
+    /// より小さければ、起こしている途中のぶんが制約になっている
+    #[serde(default)]
+    pub effective_mb: Option<u64>,
+}
+
+/// 外側（Windows）の空きの様子（寝ているカードばかりなのに、メモリ不足でセッションを
+/// 起こせない 設計§2-5・§5）。
+///
+/// **`HostResources::fits_now` の `None` とは別の話である。** あちらは「歯止め無しで
+/// 全部通す」の意味で使われているので、確認中をそこへ流用しない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostFreeState {
+    /// 期限内に聞けた値がある
+    Fresh,
+    /// 期限を過ぎた値しか無い（取り直している）
+    Stale,
+    /// 一度も聞けていないので、いま聞いている
+    Checking,
+    /// 聞けなかった（次の取得まで少し空けている）
+    Failed,
 }
 
 /// 添付の掃除の下見・結果（メモ設計§10-2）。
@@ -1204,6 +1245,38 @@ mod tests {
 
     use super::*;
     use serde_json::json;
+
+    /// 古い PC は新しい4欄を送ってこない（寝ているカードばかりなのに、メモリ不足で
+    /// セッションを起こせない 設計§5）。**版を上げずに読めること。**
+    #[test]
+    fn 資源の新しい欄が欠けた古いPCの答えも読める() {
+        let old = json!({
+            "total_mb": 16000, "available_mb": 12000, "swap_free_mb": 0,
+            "estimate_mb": 780, "headroom_mb": 2048, "fits_now": 12,
+            "host_free_mb": null, "counted_mb": null
+        });
+        let resources: HostResources = serde_json::from_value(old).expect("読めること");
+        assert_eq!(resources.host_free_state, None);
+        assert_eq!(resources.host_free_age_sec, None);
+        assert_eq!(resources.host_free_error, None);
+        assert_eq!(resources.effective_mb, None);
+    }
+
+    /// 外側の様子の綴りは4つ（画面と CLI が読む）。
+    #[test]
+    fn 外側の様子は小文字の綴りで運ぶ() {
+        for (state, text) in [
+            (HostFreeState::Fresh, "fresh"),
+            (HostFreeState::Stale, "stale"),
+            (HostFreeState::Checking, "checking"),
+            (HostFreeState::Failed, "failed"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(state).expect("書けること"),
+                json!(text)
+            );
+        }
+    }
 
     fn roundtrip<T>(value: &T) -> T
     where
