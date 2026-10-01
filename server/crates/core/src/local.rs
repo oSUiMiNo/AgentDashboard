@@ -150,6 +150,9 @@ impl SessionHost for LocalSessionHost {
                     // **終わった断り**（設計§7-3）。起きるのを待っている枝分かれは、
                     // これを見て 180 秒待たずに失敗する
                     busy: Some(false),
+                    // 取り下げた理由（実装レビュー第4回 Astra 1）。CLI の終了の待ちは、終了の
+                    // 頼みで取り下げた断りでだけ満ちる（`link.rs` と同じ写し方）
+                    withdrawn: err.withdrawal(),
                 });
             }
         });
@@ -189,7 +192,7 @@ impl SessionHost for LocalSessionHost {
         .unwrap_or_default())
     }
 
-    fn kill(&self, card_id: CardId) -> Result<(), String> {
+    async fn kill(&self, _account_id: uuid::Uuid, card_id: CardId) -> Result<(), String> {
         self.manager.kill(card_id).map_err(|err| err.to_string())
     }
 

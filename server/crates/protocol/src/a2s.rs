@@ -450,6 +450,11 @@ pub enum AgentMessage {
         /// 起きた断りはこの型でサーバへ渡る
         #[serde(default, skip_serializing_if = "Option::is_none")]
         busy: Option<bool>,
+        /// 取り下げた理由（`ServerMessage::Error` の同名の欄を参照）。
+        ///
+        /// **ここを運ばないと、セルフホストでだけ CLI の終了が取り下げで満ちない**
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        withdrawn: Option<crate::ws::Withdrawal>,
     },
     /// モデルの表（§13-4）。接続直後と、変化した時だけ送る。定期送信はしない。
     ///
@@ -972,6 +977,7 @@ mod tests {
                 message: "切替中です".to_string(),
                 kind: ErrorKind::Model,
                 busy: None,
+                withdrawn: None,
             },
             // 起こし直しの競合と終わった断り（寝ているカードばかりなのに、メモリ不足で
             // セッションを起こせない 設計§7-3）。**3値とも運べないと、セルフホストでだけ
@@ -981,12 +987,23 @@ mod tests {
                 message: "このカードは復旧中です".to_string(),
                 kind: ErrorKind::Revive,
                 busy: Some(true),
+                withdrawn: None,
             },
             AgentMessage::Error {
                 card_id: Some(card_id),
                 message: "メモリが足りないので起こし直せません".to_string(),
                 kind: ErrorKind::Revive,
                 busy: Some(false),
+                withdrawn: None,
+            },
+            // 終了の頼みで取り下げた断り（実装レビュー第4回 Astra 1）。**運べないと、セルフホスト
+            // でだけ CLI の終了が取り下げで満ちない**
+            AgentMessage::Error {
+                card_id: Some(card_id),
+                message: "終了を頼まれたので、起こし直しをやめました".to_string(),
+                kind: ErrorKind::Revive,
+                busy: Some(false),
+                withdrawn: Some(crate::ws::Withdrawal::Kill),
             },
             AgentMessage::ModelTable {
                 cli_version: "2.1.220".to_string(),
@@ -1294,9 +1311,37 @@ mod tests {
             message: "x".to_string(),
             kind: ErrorKind::Revive,
             busy: None,
+            withdrawn: None,
         })
         .unwrap();
         assert!(!json.contains("busy"), "{json}");
+    }
+
+    #[test]
+    fn 取り下げの理由を持たない古い_pc_の知らせは取り下げではないと読む() {
+        // 実装レビュー第4回 Astra 1。PC → サーバの間は別の型が運ぶ。欠けは `None`（終了の待ちを
+        // 満たさない）、`None` は書き出さない、知らない綴りでも `Error` ごと落とさない
+        let 古い = r#"{"t":"error","card_id":null,"message":"x","kind":"revive","busy":false}"#;
+        let AgentMessage::Error { withdrawn, .. } = serde_json::from_str(古い).unwrap() else {
+            panic!("error として読めていない");
+        };
+        assert_eq!(withdrawn, None);
+        let 知らない綴り = r#"{"t":"error","card_id":null,"message":"x","kind":"revive","busy":false,"withdrawn":"paused"}"#;
+        let AgentMessage::Error { withdrawn, .. } =
+            serde_json::from_str(知らない綴り).expect("知らない綴りでも error として読めること")
+        else {
+            panic!("error として読めていない");
+        };
+        assert_eq!(withdrawn, Some(crate::ws::Withdrawal::Unknown));
+        let json = serde_json::to_string(&AgentMessage::Error {
+            card_id: None,
+            message: "x".to_string(),
+            kind: ErrorKind::Revive,
+            busy: Some(false),
+            withdrawn: None,
+        })
+        .unwrap();
+        assert!(!json.contains("withdrawn"), "{json}");
     }
 
     #[test]

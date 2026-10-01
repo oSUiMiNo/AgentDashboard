@@ -95,6 +95,29 @@ pub enum ErrorKind {
     Other,
 }
 
+/// 起こし直しを**なぜ取り下げたか**（寝ているカードばかりなのに、メモリ不足でセッションを
+/// 起こせない 実装レビュー第4回 Astra 1）。
+///
+/// 終わった断り（`busy: Some(false)`）には、メモリ不足・確かめられなかった・取り下げたが
+/// 混ざっている。CLI の終了の待ちは**終了の頼みで取り下げた断り**でだけ満ちてよく、文面の
+/// 部分一致では見分けない（文面は直すたびに変わる）。
+///
+/// **知らない綴りは [`Withdrawal::Unknown`] で受ける**（[`crate::HostFreeState`] と同じ理由）。
+/// 新しい PC が理由を足しても、古いサーバが `Error` ごと読めなくなることはない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Withdrawal {
+    /// 終了を頼まれた
+    Kill,
+    /// 記録の側から一覧から外し始めた（外し終えたかはまだ分からない）
+    Removing,
+    /// 一覧から外した
+    Remove,
+    /// 知らない綴り。**どの理由でもない側として読む**（終了の待ちを満たさない）
+    #[serde(other)]
+    Unknown,
+}
+
 /// 自己修復の進み具合（設計§9）。
 ///
 /// 文字列ではなく型にしてあるのは、送り手と受け手が別々の言語で手書きされているため。
@@ -541,6 +564,13 @@ pub enum ServerMessage {
         /// 知らせを読めなくなるため。欄なら古い側は黙って読み飛ばす
         #[serde(default, skip_serializing_if = "Option::is_none")]
         busy: Option<bool>,
+        /// 起こし直しを取り下げた断りなら、その理由（実装レビュー第4回 Astra 1）。
+        ///
+        /// `None`＝取り下げではない、または判別できない（古い相手）。**欠けを「取り下げ
+        /// ではない」と読む側に倒すのは安全側**——終了の待ちは満ちず、実体が無ければ時間切れで
+        /// 終わるだけで、止まっていないものを「止まった」とは言わない。`busy` と同じく欄にする
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        withdrawn: Option<Withdrawal>,
     },
     /// PJT 枠1枚の最新（イシューグループ_2026_0805_0514 設計§11）。
     ///
@@ -888,6 +918,7 @@ mod tests {
             message: "起こせません".to_string(),
             kind: ErrorKind::Revive,
             busy: None,
+            withdrawn: None,
         })
         .unwrap();
         assert!(json.contains(r#""kind":"revive""#), "{json}");
@@ -914,6 +945,7 @@ mod tests {
                 message: "復旧中です".to_string(),
                 kind: ErrorKind::Revive,
                 busy: Some(true),
+                withdrawn: None,
             })
             .unwrap(),
             r#"{"t":"error","card_id":null,"message":"復旧中です","kind":"revive","busy":true}"#
@@ -929,11 +961,61 @@ mod tests {
                 message: "起こせません".to_string(),
                 kind: ErrorKind::Revive,
                 busy,
+                withdrawn: None,
             };
             let json = serde_json::to_string(&message).unwrap();
             match 綴り {
                 Some(綴り) => assert!(json.contains(綴り), "{json}"),
                 None => assert!(!json.contains("busy"), "None を書き出している：{json}"),
+            }
+            assert_eq!(roundtrip(&message), message);
+        }
+    }
+
+    #[test]
+    fn 取り下げの理由は綴りのまま運ばれ_欠けと知らない綴りは取り下げではないと読む() {
+        /*
+            実装レビュー第4回 Astra 1。**欠けを「終了の頼みで取り下げた」と読まない**——古い
+            相手の終わった断りにはメモリ不足も混ざるので、CLI の終了が満ちてはいけない。
+            知らない綴りは `Unknown` に落ち、**`Error` ごと読めなくならない**こと（`serde(other)`
+            が無いと、新しい PC が理由を足した途端に古いサーバが断りを1件も配れなくなる）
+        */
+        let 古い名乗り =
+            r#"{"t":"error","card_id":null,"message":"x","kind":"revive","busy":false}"#;
+        let ServerMessage::Error { withdrawn, .. } = serde_json::from_str(古い名乗り).unwrap()
+        else {
+            panic!("error として読めていない");
+        };
+        assert_eq!(withdrawn, None, "欄の無い名乗りを取り下げと読んでいる");
+
+        let 知らない綴り = r#"{"t":"error","card_id":null,"message":"x","kind":"revive","busy":false,"withdrawn":"paused"}"#;
+        let ServerMessage::Error { withdrawn, .. } =
+            serde_json::from_str(知らない綴り).expect("知らない綴りでも error として読めること")
+        else {
+            panic!("error として読めていない");
+        };
+        assert_eq!(withdrawn, Some(Withdrawal::Unknown));
+
+        for (withdrawn, 綴り) in [
+            (Some(Withdrawal::Kill), Some(r#""withdrawn":"kill""#)),
+            (
+                Some(Withdrawal::Removing),
+                Some(r#""withdrawn":"removing""#),
+            ),
+            (Some(Withdrawal::Remove), Some(r#""withdrawn":"remove""#)),
+            (None, None),
+        ] {
+            let message = ServerMessage::Error {
+                card_id: Some(CardId::new()),
+                message: "起こし直しをやめました".to_string(),
+                kind: ErrorKind::Revive,
+                busy: Some(false),
+                withdrawn,
+            };
+            let json = serde_json::to_string(&message).unwrap();
+            match 綴り {
+                Some(綴り) => assert!(json.contains(綴り), "{json}"),
+                None => assert!(!json.contains("withdrawn"), "None を書き出している：{json}"),
             }
             assert_eq!(roundtrip(&message), message);
         }
@@ -1006,6 +1088,7 @@ mod tests {
                 kind: ErrorKind::NotFound,
 
                 busy: None,
+                withdrawn: None,
             },
             ServerMessage::Error {
                 card_id: None,
@@ -1013,18 +1096,21 @@ mod tests {
                 kind: ErrorKind::Other,
 
                 busy: None,
+                withdrawn: None,
             },
             ServerMessage::Error {
                 card_id: Some(card_id),
                 message: "このカードは復旧中です".to_string(),
                 kind: ErrorKind::Revive,
                 busy: Some(true),
+                withdrawn: None,
             },
             ServerMessage::Error {
                 card_id: Some(card_id),
                 message: "メモリが足りないので起こし直せません".to_string(),
                 kind: ErrorKind::Revive,
                 busy: Some(false),
+                withdrawn: None,
             },
             ServerMessage::ProjectUpsert {
                 project: ProjectView {

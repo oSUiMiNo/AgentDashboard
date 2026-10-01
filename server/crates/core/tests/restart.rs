@@ -655,6 +655,7 @@ async fn 外した知らせが起こし直しの頼みより先に届いても�
                     kind: protocol::ws::ErrorKind::Revive,
                     busy,
                     message,
+                    ..
                 }) if id == card_id => return (busy, message),
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                     panic!("配信が閉じた")

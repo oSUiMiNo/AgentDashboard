@@ -174,6 +174,7 @@ impl Branch {
                 message: message.to_string(),
                 kind: ErrorKind::Branch,
                 busy: None,
+                withdrawn: None,
             },
         );
     }
@@ -393,7 +394,7 @@ impl Branch {
         // **並べ替えが失敗していても寝かせる。** 席は2つとも在るので、寝かせて困ることが
         // 無い——並びが崩れているだけである（§4-2）。
         if もともと寝ていた {
-            if let Err(reason) = self.agent.kill(元の席.card_id) {
+            if let Err(reason) = self.agent.kill(self.account_id, 元の席.card_id).await {
                 // **段取りは成功として終える。** 寝かせ直せなくても**席も会話も無事**で、
                 // 人が寝かせられる（§3-6「迷ったら起きている側へ倒す」）
                 tracing::warn!(
@@ -693,6 +694,7 @@ mod tests {
             message: "メモリが足りないので起こし直せません".to_string(),
             kind,
             busy,
+            withdrawn: None,
         }
     }
 
@@ -732,6 +734,7 @@ mod tests {
                     message: "x".to_string(),
                     kind: ErrorKind::Revive,
                     busy: Some(false),
+                    withdrawn: None,
                 },
             ),
         ] {

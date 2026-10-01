@@ -154,6 +154,15 @@ async fn instance(db: &sea_orm::DatabaseConnection, broker: &Arc<MemoryBroker>) 
 
 /// セッションホストとして繋ぎ、名乗りまで済ませる。
 async fn connect_agent(addr: SocketAddr, token: &str, name: &str) -> common::SessionHostSocket {
+    connect_agent_with(addr, token, common::hello(name)).await
+}
+
+/// 名乗りを選んで繋ぐ（古い版の PC を作るため）。
+async fn connect_agent_with(
+    addr: SocketAddr,
+    token: &str,
+    hello: protocol::a2s::AgentMessage,
+) -> common::SessionHostSocket {
     let mut request =
         tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(format!(
             "ws://{addr}/agent/ws"
@@ -175,7 +184,7 @@ async fn connect_agent(addr: SocketAddr, token: &str, name: &str) -> common::Ses
         .await
         .expect("繋げること");
     let mut socket = common::SessionHostSocket { socket };
-    socket.send(&common::hello(name)).await;
+    socket.send(&hello).await;
     socket
 }
 
@@ -573,6 +582,159 @@ async fn 別のインスタンスに繋がった_PC_の抜け殻も起こし直�
         assert_eq!(
             got, claude_session_id,
             "[{}] 呼び戻し先が渡っていない",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 別のインスタンスに繋がった_PC_の実体の無いカードへも終了の頼みが届く() {
+    // 実装レビュー第4回 Astra 2。ブラウザは A、PC は B。**カードの実体が無い**（鮮度が
+    // 落ちている）とき、PC はその起こし直しの確かめを待っていることがある。起こし直しの頼みは
+    // 持ち主の PC への道（`route`）で届くのに、終了の頼みは `relay` → `remote_agent_of` が
+    // 「繋がっていません」で断っていたので、起こし直しを止められなかった
+    for backend in common::backends("cluster-kill").await {
+        let broker = MemoryBroker::new();
+        let (a, _b, mut agent, card_id, account_id) = split(&backend.db, &broker).await;
+        let host = RemoteSessionHost::new(Arc::clone(&a.hub));
+
+        // 生きたカードは、いまどおり連絡係へ回って届く
+        host.kill(account_id, card_id)
+            .await
+            .expect("生きたカードへの終了の頼みが届くこと");
+        agent
+            .wait_for("跨ぎで届く終了（生きたカード）", |message| {
+                matches!(message, protocol::a2s::ServerToAgent::Kill { card_id: got } if *got == card_id)
+            })
+            .await;
+
+        // 鮮度だけを落とす（＝PC が実体を失った・起こし直しの確かめを待っている形）
+        let agent_id = a
+            .registry
+            .get(card_id)
+            .expect("記録があること")
+            .meta()
+            .agent_id
+            .expect("PC を名乗っていること");
+        a.registry.set_agent_live(agent_id, false);
+        assert!(
+            !a.registry
+                .get(card_id)
+                .expect("記録があること")
+                .meta()
+                .agent_connected,
+            "A から見て実体が無いこと"
+        );
+
+        host.kill(account_id, card_id).await.unwrap_or_else(|err| {
+            panic!(
+                "[{}] ★実体の無いカードへの終了の頼みが、持ち主の PC へ届かず断られた：{err}",
+                backend.name
+            )
+        });
+        agent
+            .wait_for("跨ぎで届く終了（実体の無いカード）", |message| {
+                matches!(message, protocol::a2s::ServerToAgent::Kill { card_id: got } if *got == card_id)
+            })
+            .await;
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 古い_PC_の生きたカードは跨いで止められ実体の無いカードは以前の言葉で断る() {
+    // 実装レビュー第4回 Astra 2 の副作用の見張り。実体の無いカードの宛先は起こし直しと同じく
+    // 名乗りを見て引くが、**生きたカードの終了は名乗りを見ない**（古い PC も止められる）。
+    // 名乗らない PC は起こし直しをしないので、実体の無いカードには止めるものが無い——「版が
+    // 古い」と言うと、止めるものが無いのに更新を促すことになる
+    for backend in common::backends("cluster-kill-old").await {
+        let broker = MemoryBroker::new();
+        let (token, account_id) = issue(&backend.db).await;
+        let a = instance(&backend.db, &broker).await;
+        let b = instance(&backend.db, &broker).await;
+        let mut 古い名乗り = common::hello("PC-B");
+        if let protocol::a2s::AgentMessage::Hello {
+            supports_revive, ..
+        } = &mut 古い名乗り
+        {
+            *supports_revive = false;
+        }
+        let mut agent = connect_agent_with(b.addr, &token, 古い名乗り).await;
+        a.attach_browser(account_id).await;
+        let card_id = CardId::new();
+        agent
+            .send(&protocol::a2s::AgentMessage::SessionUpsert {
+                session: Box::new(common::meta(card_id)),
+            })
+            .await;
+        wait_card(&a.registry, card_id).await;
+        let host = RemoteSessionHost::new(Arc::clone(&a.hub));
+
+        host.kill(account_id, card_id)
+            .await
+            .expect("★名乗らない PC の生きたカードを、跨いで止められない");
+        agent
+            .wait_for("跨ぎで届く終了（名乗らない PC の生きたカード）", |message| {
+                matches!(message, protocol::a2s::ServerToAgent::Kill { card_id: got } if *got == card_id)
+            })
+            .await;
+
+        let agent_id = a
+            .registry
+            .get(card_id)
+            .expect("記録があること")
+            .meta()
+            .agent_id
+            .expect("PC を名乗っていること");
+        a.registry.set_agent_live(agent_id, false);
+        let err = host
+            .kill(account_id, card_id)
+            .await
+            .expect_err("止めるものの無いカードは断ること");
+        assert!(
+            err.contains("繋がっていません") && !err.contains("版が古い"),
+            "[{}] ★止めるものが無いのに、以前と違う言葉で断っている：{err}",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 終了の頼みで取り下げた断りは理由を落とさず跨いで届く() {
+    // 実装レビュー第4回 Astra 1・2。PC が B で起こし直しを取り下げた断りは、B が受けて連絡係で
+    // A のブラウザへ回る。**どこかで `withdrawn` を落とすと、セルフホストでだけ CLI の終了が
+    // 取り下げで満ちず**、実体の無いカードで上限まで待ち切る
+    for backend in common::backends("cluster-withdrawn").await {
+        let broker = MemoryBroker::new();
+        let (a, _b, mut agent, card_id, _account_id) = split(&backend.db, &broker).await;
+        let mut events = a.subscribe_events();
+
+        agent
+            .send(&protocol::a2s::AgentMessage::Error {
+                card_id: Some(card_id),
+                message: "終了を頼まれたので、起こし直しをやめました".to_string(),
+                kind: ErrorKind::Revive,
+                busy: Some(false),
+                withdrawn: Some(protocol::ws::Withdrawal::Kill),
+            })
+            .await;
+
+        let message = wait_event(&mut events, "取り下げた断り", |message| {
+            matches!(
+                message,
+                ServerMessage::Error { card_id: Some(got), kind: ErrorKind::Revive, .. } if *got == card_id
+            )
+        })
+        .await;
+        assert_eq!(
+            server_core::registry::kill_withdrawal_of(&message),
+            Some(card_id),
+            "[{}] ★跨いだ先で、終了の頼みで取り下げた断りとして読めない：{message:?}",
             backend.name
         );
 
@@ -1004,6 +1166,7 @@ async fn 知らせは_7_種類とも跨ぐ() {
                 message: "しくじりました".to_string(),
                 kind: ErrorKind::Other,
                 busy: None,
+                withdrawn: None,
             },
         )
         .await;

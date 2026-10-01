@@ -143,7 +143,16 @@ pub trait SessionHost: Send + Sync + 'static {
         ids: &[protocol::ClaudeSessionId],
     ) -> Result<Vec<protocol::ClaudeSessionId>, HostAskError>;
 
-    fn kill(&self, card_id: CardId) -> Result<(), String>;
+    /// カードの実体を止める。進んでいる起こし直しも取り下げる（実装レビュー第3回 Astra 2）。
+    ///
+    /// **宛先はカードの接続の旗ではなく、持ち主の PC の繋がりで引く**（実装レビュー第4回
+    /// Astra 2）。サーバから見て実体の無いカード（`agent_connected == false`）でも、PC は
+    /// その起こし直しの確かめを待っていることがある。旗で断ると、起こし直しは届くのに
+    /// 止める頼みが届かず、確かめが済んだ後に起きてしまう。
+    ///
+    /// **待つ形にしてある**のは、宛先を決めるのに連絡係と DB を引くことがあるため
+    /// （[`SessionHost::revive`] と同じ）。`account_id` は、その道を引くのに要る。
+    async fn kill(&self, account_id: uuid::Uuid, card_id: CardId) -> Result<(), String>;
     fn archive(&self, card_id: CardId) -> Result<(), String>;
 
     /// **記録の側だけで外す**カードを、持ち主の PC にも知らせる（実装レビュー Astra 1）。

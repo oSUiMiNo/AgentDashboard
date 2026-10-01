@@ -3329,6 +3329,92 @@ async fn 接続断のカードを起こし直しの確かめ中に外すと_PC_�
 }
 
 #[tokio::test]
+async fn 接続断のカードを起こし直しの確かめ中に終了させると_CLI_は止まったと返し_PC_は起こさない() {
+    // 実装レビュー第4回 Astra 1（セルフホスト）。実体の無いカードでは `Ended` が来ないので、
+    // CLI の終了は「終了の頼みで取り下げた断り」で満ちる。その見分けは `withdrawn` の欄で、
+    // **PC → サーバ（`AgentMessage`）→ ブラウザの口（`ServerMessage`）のどこかで落とすと、
+    // セルフホストでだけ上限まで待ち切る**。`wait_for` へ直に差し込む単体では、この継ぎ目を通らない
+    let a2s = A2s::start("revive-killed").await;
+    let (session, card_id) = 抜け殻にする(&a2s).await;
+    let agent_id = a2s
+        .registry
+        .get(card_id)
+        .and_then(|record| record.meta().agent_id)
+        .expect("PC を名乗っていること");
+    // PC が実体を失ったカードにする（`接続断のカードを起こし直しの確かめ中に外すと…` と同じ形）
+    a2s.manager.実体だけを畳む(card_id);
+    session.kill();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    a2s.registry.set_agent_live(agent_id, false);
+    let (外, host_free, _門) = common::確かめで止める(&a2s.manager);
+
+    let mut events = a2s.registry.subscribe_events();
+    a2s.browser
+        .revive(server_core::session_host::ReviveRequest {
+            account_id: a2s.account_id,
+            card_id,
+        })
+        .await
+        .expect("頼みは PC まで渡ること");
+    外.聞かれるまで待つ(0).await;
+    assert!(
+        !a2s.browser.exists(card_id),
+        "サーバから見て実体が無いこと（ここが崩れると、CLI は Ended を待つ側へ回る）"
+    );
+
+    let target = agentdashboard_core::client::Target::from_url(&format!("http://{}", a2s.addr))
+        .expect("接続先を読めること");
+    let 終了 = tokio::time::timeout(
+        Duration::from_secs(10),
+        agentdashboard_core::client::kill(&target, &card_id.to_string()),
+    )
+    .await
+    .expect("★取り下げの断りが終了の頼みとして読めず、CLI が上限まで待ち続けている")
+    .expect("★起こし直しを止めたのに、終了できなかったと返している");
+    assert!(
+        終了.human.contains("起こし直しは止まりました"),
+        "{}",
+        終了.human
+    );
+    // 断りは取り下げた起こし直しが返したもの——その時点で起こし直しは起こさずに終わっている
+    assert!(
+        a2s.manager.get(card_id).is_none(),
+        "★終了を頼んだのに、PC が起こし直しの実体を起こしている"
+    );
+    // CLI が受け取った時点で、同じ配信はこちらの受け口にも入っている
+    let mut 取り下げの理由 = None;
+    loop {
+        let event = match events.try_recv() {
+            Ok(event) => event,
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+            Err(_) => break,
+        };
+        if let protocol::ws::ServerMessage::Error {
+            card_id: Some(id),
+            kind: protocol::ws::ErrorKind::Revive,
+            withdrawn,
+            ..
+        } = event.message
+            && id == card_id
+        {
+            取り下げの理由 = withdrawn;
+        }
+    }
+    assert_eq!(
+        取り下げの理由,
+        Some(protocol::ws::Withdrawal::Kill),
+        "取り下げの理由がサーバの配信まで届いていること"
+    );
+
+    外.開ける();
+    common::取得が終わるまで待つ(&host_free).await;
+    assert!(
+        a2s.registry.get(card_id).is_some(),
+        "終了しただけのカードは一覧に残ること"
+    );
+}
+
+#[tokio::test]
 async fn 接続断のカードの記録を外せなければ_PC_は取り下げた起こし直しを戻さず新しい頼みは通す() {
     // 実装レビュー第3回 Astra 1（セルフホスト）。以前は記録を外す**前に** `Forget` を送って
     // 外した印を立てさせていたので、記録を外す書き込みが DB の失敗で落ちると、カードは一覧に

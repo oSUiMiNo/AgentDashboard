@@ -627,6 +627,12 @@ export type ServerMessage =
       message: string
       kind?: ErrorKind
       busy?: boolean
+      /**
+       * 起こし直しを取り下げた理由（実装レビュー第4回 Astra 1）。欠けは取り下げではないか
+       * 判別できない。`unknown` はサーバが知らない綴りを受けて中継したもの。画面はいまこの欄を
+       * 使わない（読むのは CLI の終了の待ち）
+       */
+      withdrawn?: 'kill' | 'removing' | 'remove' | 'unknown'
     }
   // 以下は初期実装でフェーズ2〜5に回したもの。**いまは全部サーバ側も配線済み**
   | {

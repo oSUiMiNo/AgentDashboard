@@ -1493,8 +1493,58 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
         }
     }
 
-    fn kill(&self, card_id: CardId) -> Result<(), String> {
-        self.relay(card_id, ServerToAgent::Kill { card_id })
+    /// 終了の頼みを、カードの持ち主の PC へ届ける（実装レビュー第4回 Astra 2）。
+    ///
+    /// **[`RemoteSessionHost::relay`] を使えない場面がある。** あちらは自分の接続表に PC が
+    /// 無いと [`RemoteSessionHost::remote_agent_of`] へ落ち、そこは `agent_connected == true`
+    /// を要求する。ブラウザがこのインスタンス・PC が別のインスタンスに繋がっていて、カードの
+    /// 実体が無い（`false`）とき——**まさに起こし直しの確かめを待っている間**——終了の頼みは
+    /// 「繋がっていません」で断られる。起こし直しの頼みは [`RemoteSessionHost::route`] で
+    /// 届くので、起こし直しは始まるのに止められず、確かめが済んだ後に起きてしまう。
+    ///
+    /// 引き方は3段。
+    ///
+    /// 1. 自分の接続表に持ち主が居れば、そこへ（いまどおり）
+    /// 2. 記録が「繋がっている」と言えば、連絡係へ回す（いまどおり。能力は見ない——古い
+    ///    PC の生きたカードも止められなければならない）
+    /// 3. 「繋がっていない」なら、持ち主の PC への道を起こし直しと同じく `route` で引く。
+    ///    **起こし直しを名乗る PC にだけ送る**（`Need::Revive`）——名乗らない PC は起こし
+    ///    直しをしておらず、止めるものが無い。そのときは以前と同じく「繋がっていません」と
+    ///    断る（「版が古い」と言うと、止めるものが無いのに更新を促すことになる）
+    async fn kill(&self, account_id: Uuid, card_id: CardId) -> Result<(), String> {
+        use crate::session_host::HostAskError;
+
+        let message = ServerToAgent::Kill { card_id };
+        if let Some(conn) = self.hub.conn_for_card(card_id) {
+            conn.send(&message);
+            return Ok(());
+        }
+        let meta = self
+            .hub
+            .registry
+            .owned(account_id, card_id)
+            .map(|record| record.meta())
+            .ok_or_else(|| NOT_FOUND.to_string())?;
+        let target = meta.agent_id.ok_or_else(|| NOT_CONNECTED.to_string())?;
+        if meta.agent_connected {
+            return self
+                .hub
+                .relay_across(target, SessionHostCommand::Message(Box::new(message)));
+        }
+        let route = match self.route(account_id, target, Need::Revive).await {
+            Ok(route) => route,
+            Err(HostAskError::Unsupported) => return Err(NOT_CONNECTED.to_string()),
+            Err(err) => return Err(err.message()),
+        };
+        match route {
+            Route::Here(conn) => {
+                conn.send(&message);
+                Ok(())
+            }
+            Route::Across => self
+                .hub
+                .relay_across(target, SessionHostCommand::Message(Box::new(message))),
+        }
     }
 
     fn archive(&self, card_id: CardId) -> Result<(), String> {
@@ -2531,10 +2581,12 @@ async fn handle_report(
             message,
             kind,
             busy,
+            withdrawn,
         } => {
             // **`busy` を落とさない**（寝ているカードばかりなのに、メモリ不足で
             // セッションを起こせない 設計§7-3）。落とすとセルフホストでだけ、競合と
-            // 終わった断りの見分けが付かなくなる
+            // 終わった断りの見分けが付かなくなる。**`withdrawn` も同じ**（実装レビュー
+            // 第4回 Astra 1）——落とすとセルフホストでだけ、CLI の終了が取り下げで満ちない
             hub.registry
                 .apply(
                     origin,
@@ -2543,6 +2595,7 @@ async fn handle_report(
                         message,
                         kind,
                         busy,
+                        withdrawn,
                     },
                 )
                 .await;

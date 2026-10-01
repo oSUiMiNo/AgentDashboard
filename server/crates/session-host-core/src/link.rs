@@ -368,11 +368,13 @@ fn to_agent_message(event: &ServerMessage) -> Option<AgentMessage> {
             message,
             kind,
             busy,
+            withdrawn,
         } => AgentMessage::Error {
             card_id: *card_id,
             message: message.clone(),
             kind: *kind,
             busy: *busy,
+            withdrawn: *withdrawn,
         },
         // `BusStatus` はサーバ同士の話（インスタンスの間の連絡係。設計§12）。
         // **PC は自分が繋いだ1台としか話さない**ので、運ぶ意味も運ぶ手段も無い。
@@ -1429,6 +1431,7 @@ fn apply_command(
                     message: err.to_string(),
                     kind: ErrorKind::Other,
                     busy: None,
+                    withdrawn: None,
                 });
             }
         }
@@ -1450,7 +1453,7 @@ fn apply_command(
                 // **競合と名乗る**（寝ているカードばかりなのに、メモリ不足でセッションを
                 // 起こせない 設計§7-3）。先に起こしている側が居るので、待てば起きる——
                 // 枝分かれはこれで失敗してはいけない
-                report_revive(manager, card_id, ALREADY_REVIVING.to_string(), true);
+                report_revive(manager, card_id, ALREADY_REVIVING.to_string(), true, None);
                 return;
             };
             let manager = Arc::clone(manager);
@@ -1464,7 +1467,8 @@ fn apply_command(
                     //
                     // **終わった断りと名乗る**（設計§7-3）。待っても起きないので、起きるのを
                     // 待っている枝分かれはこれを見てすぐ失敗する
-                    report_revive(&manager, card_id, err.to_string(), false);
+                    let withdrawn = err.withdrawal();
+                    report_revive(&manager, card_id, err.to_string(), false, withdrawn);
                 }
             });
         }
@@ -1486,6 +1490,7 @@ fn apply_command(
                     message: err.to_string(),
                     kind: ErrorKind::Other,
                     busy: None,
+                    withdrawn: None,
                 });
             }
         }
@@ -1721,19 +1726,28 @@ fn report_error(manager: &Arc<SessionManager>, card_id: CardId, message: String,
         message,
         kind,
         busy: None,
+        withdrawn: None,
     });
 }
 
 /// 起こし直しの断りを上へ返す。`busy` は競合なら真、終わった断りなら偽（設計§7-3）。
+/// `withdrawn` は取り下げた断りならその理由（実装レビュー第4回 Astra 1）。
 ///
 /// **起こし直しだけ別の口にする。** 他の断りは性質を名乗る必要が無く、`None` のまま
 /// （待つ側はいまどおり待つ）にしておくのが安全なため
-fn report_revive(manager: &Arc<SessionManager>, card_id: CardId, message: String, busy: bool) {
+fn report_revive(
+    manager: &Arc<SessionManager>,
+    card_id: CardId,
+    message: String,
+    busy: bool,
+    withdrawn: Option<protocol::ws::Withdrawal>,
+) {
     manager.broadcast(ServerMessage::Error {
         card_id: Some(card_id),
         message,
         kind: ErrorKind::Revive,
         busy: Some(busy),
+        withdrawn,
     });
 }
 

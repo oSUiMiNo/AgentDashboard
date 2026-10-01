@@ -457,6 +457,7 @@ async fn client_loop(state: AppState, identity: Identity, socket: WebSocket) {
                             message: format!("解釈できないメッセージです: {text}"),
                             kind: ErrorKind::Other,
                             busy: None,
+                            withdrawn: None,
                         },
                     )
                     .await;
@@ -558,6 +559,7 @@ async fn handle_request(
                         message,
                         kind: ErrorKind::Other,
                         busy: None,
+                        withdrawn: None,
                     },
                 )
                 .await;
@@ -836,7 +838,7 @@ async fn handle_request(
         }
 
         ClientMessage::Kill { card_id } => {
-            if let Err(message) = state.agent.kill(card_id) {
+            if let Err(message) = state.agent.kill(identity.account_id, card_id).await {
                 send_error(outbound, Some(card_id), message, ErrorKind::Kill).await;
             }
         }
@@ -1287,6 +1289,7 @@ async fn send_error(
             kind,
             // 同期で返す断りは性質を名乗らない（枝分かれが読むのは配信のほうだけ）
             busy: None,
+            withdrawn: None,
         },
     )
     .await;

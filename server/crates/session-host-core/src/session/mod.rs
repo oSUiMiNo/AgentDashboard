@@ -569,6 +569,22 @@ pub enum SessionError {
     StoppedByRemoval(CardId),
 }
 
+impl SessionError {
+    /// 起こし直しを取り下げた断りなら、その理由（実装レビュー第4回 Astra 1）。断りを配る
+    /// 2箇所（`link.rs` とローカルの配線）が同じ写し方を使うよう、ここに1つだけ置く。
+    ///
+    /// **終了の頼みで取り下げた断りを、メモリ不足などの断りと機械で見分けるため**に運ぶ。
+    /// CLI の終了の待ちは、実体の無いカードでこれを受けて満ちる。
+    pub fn withdrawal(&self) -> Option<protocol::ws::Withdrawal> {
+        match self {
+            Self::StoppedByKill(_) => Some(protocol::ws::Withdrawal::Kill),
+            Self::StoppedByRemoval(_) => Some(protocol::ws::Withdrawal::Removing),
+            Self::Withdrawn(_) => Some(protocol::ws::Withdrawal::Remove),
+            _ => None,
+        }
+    }
+}
+
 /// 起こし直しを取り下げたことを1行残し、断りを作る（実装レビュー Astra 1）。
 ///
 /// どの段で気づいたかを残す。席待ち・確かめの途中で気づけば、席や待ち時間を

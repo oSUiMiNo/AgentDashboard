@@ -93,7 +93,29 @@ pub fn revive_refusal_of(message: &ServerMessage) -> Option<(CardId, &str)> {
             message,
             kind: ErrorKind::Revive,
             busy: Some(false),
+            ..
         } => Some((*card_id, message.as_str())),
+        _ => None,
+    }
+}
+
+/// 起こし直しが**終了の頼みで**取り下げられた断りなら、宛先のカード（寝ているカードばかり
+/// なのに、メモリ不足でセッションを起こせない 実装レビュー第4回 Astra 1）。
+///
+/// [`revive_refusal_of`] は終わった断りを全部拾う——メモリ不足・確かめられなかった・外した
+/// も含む。終了の待ち（CLI の `session kill`）はそれでは満ちてはいけない。生きた実体が
+/// 残るカードで、関係の無い断りが終了の結果より先に届くと、プロセスが動いたまま「止まった」
+/// と言うことになる。**見分けは `withdrawn` の欄だけで行う**（文面の部分一致では見分けない）。
+/// 欄の無い古い相手の断りは拾わない——止まったと言い切れないので、待つ側は待ち続ける。
+pub fn kill_withdrawal_of(message: &ServerMessage) -> Option<CardId> {
+    match message {
+        ServerMessage::Error {
+            card_id: Some(card_id),
+            kind: ErrorKind::Revive,
+            busy: Some(false),
+            withdrawn: Some(protocol::ws::Withdrawal::Kill),
+            ..
+        } => Some(*card_id),
         _ => None,
     }
 }
@@ -2055,6 +2077,7 @@ impl SessionRegistry {
                 ref message,
                 kind,
                 busy,
+                withdrawn,
             } => {
                 self.record_notice(origin, None, "error", kind.as_str(), message)
                     .await;
@@ -2065,6 +2088,7 @@ impl SessionRegistry {
                         message: message.clone(),
                         kind,
                         busy,
+                        withdrawn,
                     },
                 );
                 Ok(())
@@ -2103,6 +2127,7 @@ impl SessionRegistry {
                         message: format!("記録を保存できませんでした: {err}"),
                         kind: ErrorKind::Other,
                         busy: None,
+                        withdrawn: None,
                     },
                 );
                 false

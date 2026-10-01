@@ -893,6 +893,7 @@ fn 起こし直しの知らせを配る(server: &TestServer, card_id: CardId, bu
             message: "差し込んだ起こし直しの知らせ".to_string(),
             kind: protocol::ws::ErrorKind::Revive,
             busy,
+            withdrawn: None,
         });
 }
 
@@ -915,6 +916,7 @@ async fn 溢れさせて配る(server: &TestServer, card_id: CardId, busy: Optio
             message: "差し込んだ起こし直しの知らせ".to_string(),
             kind: protocol::ws::ErrorKind::Revive,
             busy,
+            withdrawn: None,
         });
     // 溜まりは 256 件。それを超えれば、先頭の知らせは必ず押し出される
     for _ in 0..400 {
@@ -925,6 +927,7 @@ async fn 溢れさせて配る(server: &TestServer, card_id: CardId, busy: Optio
                 message: "溢れさせるための便".to_string(),
                 kind: protocol::ws::ErrorKind::Other,
                 busy: None,
+                withdrawn: None,
             });
     }
 }
