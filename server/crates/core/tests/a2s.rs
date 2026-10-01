@@ -3582,7 +3582,8 @@ async fn 指示の列が詰まっていても外した知らせは_PC_へ届き�
 async fn 取り下げの知らせを約束の列にも積めなければ届けたと言わない() {
     // 実装レビュー第7回 Astra 1。取り下げの知らせは約束の列（溢れても捨てない）へ乗せたが、
     // その列も満杯なら積めない。**積めなかったことを成功と言わない**——外す口はその断りをログへ
-    // 残して記録を外し、PC がそのカードを名乗ったときの照合に任せる
+    // 残して記録を外す。そのうえで接続をその場で畳み、PC が繋ぎ直して名乗ったときの照合に任せる
+    // （実装レビュー第8回 Astra 1）
     let a2s = A2s::start_with("removal-promise-full", true).await;
     let sniffer = a2s.sniffer.as_ref().expect("覗き見の中継を挟んである");
     let (session, _transcript) = a2s.start_session();
@@ -3630,25 +3631,36 @@ async fn 取り下げの知らせを約束の列にも積めなければ届け�
     );
 
     let owner = Some(agent_id);
-    for (what, result) in [
-        (
-            "外し始めた知らせ",
-            a2s.browser
-                .stop_for_removal(a2s.account_id, session.card_id, owner)
-                .await,
-        ),
-        (
-            "外した知らせ",
-            a2s.browser
-                .forget(a2s.account_id, session.card_id, owner)
-                .await,
-        ),
-    ] {
-        let 断り = result.expect_err(&format!(
-            "★約束の列に積めなかった{what}を、届けたと答えている"
-        ));
-        assert!(断り.contains("詰まって"), "{what}: {断り}");
-    }
+    let mark = session_host_core::logging::capture::sink().mark();
+    let 断り = a2s
+        .browser
+        .stop_for_removal(a2s.account_id, session.card_id, owner)
+        .await
+        .expect_err("★約束の列に積めなかった外し始めた知らせを、届けたと答えている");
+    assert!(断り.contains("詰まって"), "{断り}");
+    // **積めなかったら、その場で接続を畳むと決める**（実装レビュー第8回 Astra 1）。断りを返すだけ
+    // だと接続は保たれ、PC がそのカードを二度と名乗らなければ取り下げは二度と送られない。理由は
+    // 送った側が1行残す。**時間では見ない**——深さ1では次の生存確認も積めずに畳まれるので、
+    // 待つとどちらが畳んだのか分からなくなる
+    assert!(
+        声(mark, "agent_id", &agent_id.to_string())
+            .iter()
+            .any(|line| line["msg"]
+                .as_str()
+                .is_some_and(|msg| msg.contains("取り下げの知らせを積めません"))),
+        "★約束の列に積めなかった取り下げの知らせで、接続を畳むと決めていない"
+    );
+    a2s.wait_until("接続が畳まれる", || {
+        a2s.hub
+            .conn(agent_id)
+            .is_none_or(|now| !Arc::ptr_eq(&now, &conn))
+    })
+    .await;
+    // 畳んだ後の知らせも、届けたとは言わない（繋がっていない）
+    a2s.browser
+        .forget(a2s.account_id, session.card_id, owner)
+        .await
+        .expect_err("★畳んだ接続へ外した知らせを、届けたと答えている");
     session.kill();
 }
 
@@ -3773,13 +3785,16 @@ async fn 接続断のカードを起こし直しの確かめ中に終了させ�
         a2s.manager.get(card_id).is_none(),
         "★終了を頼んだのに、PC が起こし直しの実体を起こしている"
     );
-    // CLI が受け取った時点で、同じ配信はこちらの受け口にも入っている
+    // 起こし直しの断りは**届くまで待つ**。CLI が満ちる終了の答えは PC が頼みを受けたその場で
+    // 返し、起こし直しの断りは起こし直しの作業が目を覚ましてから返すので、CLI が受け取った
+    // 時点でこちらに届いているとは限らない（以前は届いている前提で読み、通しのときに落ちた）
     let mut 取り下げの理由 = None;
-    loop {
-        let event = match events.try_recv() {
-            Ok(event) => event,
-            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
-            Err(_) => break,
+    let 期限 = tokio::time::Instant::now() + Duration::from_secs(10);
+    while 取り下げの理由.is_none() {
+        let event = match tokio::time::timeout_at(期限, events.recv()).await {
+            Ok(Ok(event)) => event,
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+            Ok(Err(_)) | Err(_) => break,
         };
         if let protocol::ws::ServerMessage::Error {
             card_id: Some(id),

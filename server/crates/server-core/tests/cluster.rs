@@ -876,6 +876,116 @@ async fn 手元で外すのが先に済んでも受け付けた頼みの答え�
 }
 
 #[tokio::test]
+async fn 跨いで届いた取り下げを約束の列に積めなければ_PC_の接続を畳む() {
+    // 寝ているカードばかりなのに、メモリ不足でセッションを起こせない 実装レビュー第8回 Astra 1
+    // （ループの外の道）。外す画面は A、PC は B。外す知らせ（`Forget`）は連絡係で B へ回り、B が PC の
+    // 約束の列へ積む。以前は積めなければ1行残して捨て、接続を保った——列が空いた後も PC がその
+    // カードを名乗らなければ、取り下げは二度と送られない。
+    //
+    // **順は目印で固定する。** B は跨ぎの指示を1本の列で順に処理するので、取り下げの後に別の PC へ
+    // 回した目印が届けば、取り下げの処理は済んでいる。その後に詰まった PC に読ませて列を空ける
+    // ——空いた列では生存確認が積めるので、直す前のコードは畳まない（生存確認に頼らない）
+    for backend in common::backends("cluster-removal-full").await {
+        let broker = MemoryBroker::new();
+        let (token, account_id) = issue(&backend.db).await;
+        let a = instance(&backend.db, &broker).await;
+        let b = instance(&backend.db, &broker).await;
+        b.hub.set_lane_depths(server_core::gateway::LaneDepths {
+            promise: 1,
+            command: 2,
+        });
+        let mut 詰まる = connect_agent(b.addr, &token, "PC-詰まる").await;
+        let mut 見張り = connect_agent(b.addr, &token, "PC-見張り").await;
+        a.attach_browser(account_id).await;
+        let (外す, 目印) = (CardId::new(), CardId::new());
+        詰まる
+            .send(&protocol::a2s::AgentMessage::SessionUpsert {
+                session: Box::new(common::meta(外す)),
+            })
+            .await;
+        見張り
+            .send(&protocol::a2s::AgentMessage::SessionUpsert {
+                session: Box::new(common::meta(目印)),
+            })
+            .await;
+        wait_card(&a.registry, 外す).await;
+        wait_card(&a.registry, 目印).await;
+        let agent_id = a
+            .registry
+            .get(外す)
+            .and_then(|record| record.meta().agent_id)
+            .expect("PC を名乗っていること");
+        let conn = b.hub.conn(agent_id).expect("B に繋がっていること");
+
+        // B の書き手を止め、約束の列（深さ1）を害の無い取り下げで埋める（Close で埋めない）
+        RemoteSessionHost::new(Arc::clone(&b.hub))
+            .send_input(外す, "x".repeat(4 * 1024 * 1024), Vec::new(), false)
+            .await
+            .expect("宛先が引けること");
+        let deadline = tokio::time::Instant::now() + TIMEOUT;
+        while conn.queued_command() > 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "[{}] 書き手が大きな指示を掴みませんでした",
+                backend.name
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(conn.send(&protocol::a2s::ServerToAgent::Forget {
+            card_id: CardId::new()
+        }));
+        assert_eq!(
+            conn.queued_promise(),
+            1,
+            "[{}] 約束の列が埋まっていない",
+            backend.name
+        );
+
+        // A から外す知らせを回し、続けて別の PC へ目印を回す
+        let 画面 = RemoteSessionHost::new(Arc::clone(&a.hub));
+        画面
+            .forget(account_id, 外す, Some(agent_id))
+            .await
+            .expect("連絡係へ回せること");
+        画面
+            .kill(account_id, 目印, None)
+            .await
+            .expect("目印を回せること");
+        見張り
+            .wait_for("目印", |message| {
+                matches!(message, protocol::a2s::ServerToAgent::Kill { card_id, .. } if *card_id == 目印)
+            })
+            .await;
+
+        // 詰まった PC に読ませて列を空ける。畳まれていれば、読み切った先で閉じる
+        let deadline = tokio::time::Instant::now() + TIMEOUT;
+        loop {
+            let next = tokio::time::timeout_at(
+                deadline,
+                futures_util::StreamExt::next(&mut 詰まる.socket),
+            )
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "[{}] ★跨いで届いた取り下げを約束の列に積めなかったのに、PC の接続を保っている（列が空いても、PC がそのカードを名乗らなければ二度と送られない）",
+                        backend.name
+                    )
+                });
+            match next {
+                Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_)))
+                | None
+                | Some(Err(_)) => {
+                    break;
+                }
+                Some(Ok(_)) => {}
+            }
+        }
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
 async fn 起こし直しの答えは跨いだ先で番号付きの状態として届く() {
     // 実装レビュー第6回（`session revive` の待ち）。CLI は A、PC は B。PC の答え
     // （`ReviveAnswer`）は B が受けて記録の状態に番号を添え、連絡係で A へ回る。**答えか番号を

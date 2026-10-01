@@ -899,8 +899,7 @@ impl EndReportCell {
     }
 }
 
-/// 一覧画面の小窓1枚に対応する、生きているセッション。
-/// 終了を待っている頼み（[`Session::await_end`]）。
+/// 終了を待っている頼み（[`KillJoint::attach`]）。
 ///
 /// **実体（[`Session`]）と寿命を分けて持つ**（実装レビュー第7回 Astra 2）。終わりを見届ける
 /// 見張り（[`SessionManager::spawn_with_args`] が立てる）も同じものを強く握る。実体の中にだけ
@@ -910,19 +909,116 @@ impl EndReportCell {
 struct EndWaiters {
     /// プロセスが終わったか。**`on_exit` だけが立てる**
     ended: bool,
-    ops: Vec<OpId>,
+    joints: Vec<Arc<KillJoint>>,
 }
 
 impl EndWaiters {
-    /// 終わったことを記し、預かっていた番号を返す（[`SessionManager::answer_end_waiters`] だけが
+    /// 終わったことを記し、預かっていた頼みを返す（[`SessionManager::answer_end_waiters`] だけが
     /// 呼ぶ）。
-    fn close(waiters: &Mutex<EndWaiters>) -> Vec<OpId> {
+    fn close(waiters: &Mutex<EndWaiters>) -> Vec<Arc<KillJoint>> {
         let mut waiters = waiters.lock().expect("ロックが壊れていない");
         waiters.ended = true;
-        std::mem::take(&mut waiters.ops)
+        std::mem::take(&mut waiters.joints)
     }
 }
 
+/// 番号付きの終了の頼み1つと、それが止める実体の全部（寝ているカードばかりなのに、メモリ不足で
+/// セッションを起こせない 実装レビュー第8回 Astra 2）。
+///
+/// # なぜ実体ごとではなく頼みごとに数えるのか
+///
+/// 起こしている最中（[`ReviveStage::Spawning`]）の終了は、**古い実体と新しい実体の両方**を
+/// 止める。以前は番号を新しい実体にだけ預けていたので、新しい実体を作れなかったときはその場で
+/// 「取り下げた」と答え、両方作れたときは新しい実体が終わった時点で答えた——**古いプロセスが
+/// まだ終わっていないのに、CLI は止まったと受け取った**。頼み1つが待つ実体を全部数え、全部の
+/// 終わりを見届けてから1回だけ答える。
+///
+/// # 答える条件
+///
+/// 預け先が出揃ったこと（[`KillJoint::seal`]）と、預けた実体が全部終わったこと（[`KillJoint::ended`]）
+/// の両方。出揃う前に数が0になっても答えない——その後に預ける実体があるかもしれない。答えは
+/// 1回だけで、預けた実体が1つでもあれば「止めた」、無ければ出揃えた側が渡した答え。
+///
+/// ロックの順は「実体の預け先 → これ」。答える（`answer_kill`）ときはどちらも握らない。
+struct KillJoint {
+    card_id: CardId,
+    op: OpId,
+    state: Mutex<KillJointState>,
+}
+
+#[derive(Default)]
+struct KillJointState {
+    /// 預けて、まだ終わりを見届けていない実体の数
+    pending: usize,
+    /// 実体を1つでも預けたか（止めた実体がある）
+    stopped: bool,
+    /// 預け先が出揃ったか。出揃えた側が、預けた実体が無かったときの答えを置く
+    sealed: Option<KillOutcome>,
+    answered: bool,
+}
+
+impl KillJoint {
+    fn new(card_id: CardId, op: OpId) -> Arc<Self> {
+        Arc::new(Self {
+            card_id,
+            op,
+            state: Mutex::default(),
+        })
+    }
+
+    /// 実体の終わりを待つ預け先に加える。**既に終わっていれば加えずに `false`**。
+    ///
+    /// 止める（[`Session::kill`]）より**前に**預けること。後にすると、止めた直後に終わった
+    /// 実体を、終わりを見届ける側が知らないまま見落とす。
+    fn attach(self: &Arc<Self>, waiters: &Mutex<EndWaiters>) -> bool {
+        let mut waiters = waiters.lock().expect("ロックが壊れていない");
+        if waiters.ended {
+            return false;
+        }
+        {
+            let mut state = self.state.lock().expect("ロックが壊れていない");
+            state.pending += 1;
+            state.stopped = true;
+        }
+        waiters.joints.push(Arc::clone(self));
+        true
+    }
+
+    /// 預け先が出揃った。預けた実体が無ければ `fallback` で答える。
+    fn seal(&self, manager: &SessionManager, fallback: KillOutcome) {
+        self.settle(manager, |state| state.sealed = Some(fallback));
+    }
+
+    /// 預けた実体が1つ終わった（[`SessionManager::answer_end_waiters`] だけが呼ぶ）。
+    fn ended(&self, manager: &SessionManager) {
+        self.settle(manager, |state| {
+            state.pending = state.pending.saturating_sub(1)
+        });
+    }
+
+    fn settle(&self, manager: &SessionManager, change: impl FnOnce(&mut KillJointState)) {
+        let outcome = {
+            let mut state = self.state.lock().expect("ロックが壊れていない");
+            change(&mut state);
+            match state.sealed {
+                Some(fallback) if state.pending == 0 && !state.answered => {
+                    state.answered = true;
+                    Some(if state.stopped {
+                        KillOutcome::Stopped
+                    } else {
+                        fallback
+                    })
+                }
+                _ => None,
+            }
+        };
+        if let Some(outcome) = outcome {
+            manager.answer_kill(self.card_id, self.op, outcome);
+        }
+    }
+}
+
+/// 一覧画面の小窓1枚に対応する、生きているセッション。
 pub struct Session {
     pub card_id: CardId,
     meta: Mutex<SessionMeta>,
@@ -2032,21 +2128,6 @@ impl Session {
         self.process.is_paused()
     }
 
-    /// 終了の頼みの番号を預ける（実装レビュー第6回 Astra 1）。終わったら
-    /// [`SessionManager::on_exit`] が答える。**既に終わっていたら預からずに `false`**——呼んだ側が
-    /// その場で答える。
-    ///
-    /// 止める（[`Session::kill`]）より**前に**預けること。後にすると、止めた直後に終わった
-    /// 実体の番号を、終わりを見届ける側が知らないまま答え損ねる。
-    fn await_end(&self, op: OpId) -> bool {
-        let mut waiters = self.end_waiters.lock().expect("ロックが壊れていない");
-        if waiters.ended {
-            return false;
-        }
-        waiters.ops.push(op);
-        true
-    }
-
     pub fn kill(&self) {
         // 「利用者が終わらせた」ことを先に記録してから落とす。逆順だと、終了検知が
         // 先に走って異常終了として表示されてしまう
@@ -2511,7 +2592,8 @@ pub struct SessionManager {
     ///
     /// 「起こしている最中に外される」を決定的に作るための口。
     before_spawn: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    /// 終わりを見届けた見張りが、実体を引き直す前に待つ門（**テスト専用**）。
+    /// 終わりを見届けた見張りが、実体を引き直す前に待つ門（**テスト専用**）。作った時点の値を
+    /// 見張りが持つ。
     ///
     /// 「実体への強い参照が全部消えてから終わりが届く」を決定的に作るための口（実装レビュー
     /// 第7回 Astra 2）。時間でずらすと、合流タスクが実体を手放すのと終わりの知らせの
@@ -2994,11 +3076,19 @@ impl SessionManager {
 
     /// 終わりを見届けた見張りを、実体を引き直す前で止める（**テスト専用**）。返した門に
     /// `add_permits` で許しを足すと、待っている見張りが1つずつ進む。
+    ///
+    /// **止まるのは、これを呼んだ後に作った実体だけ**（見張りは作った時点で門を取る）。
     #[doc(hidden)]
     pub fn 終わりの見届けを止める(&self) -> Arc<Semaphore> {
         let gate = Arc::new(Semaphore::new(0));
         *self.exit_gate.lock().expect("ロックが壊れていない") = Some(Arc::clone(&gate));
         gate
+    }
+
+    /// これから作る実体の終わりは止めない（**テスト専用**）。既に作った実体は門を持ったまま。
+    #[doc(hidden)]
+    pub fn 終わりの見届けを止めるのをやめる(&self) {
+        *self.exit_gate.lock().expect("ロックが壊れていない") = None;
     }
 
     /// 進んでいる起こし直しの終わった断りが運ぶ頼みの番号（**テスト専用**）。札が無ければ空。
@@ -3775,17 +3865,14 @@ impl SessionManager {
         // プロセスは止まったのに頼みへ誰も答えない
         let 自分 = Arc::downgrade(&session);
         let 待ち手 = Arc::clone(&session.end_waiters);
+        // 試験の門は**作った時点で**取る（門を差した後に作った実体だけが止まる）
+        let gate = self.exit_gate.lock().expect("ロックが壊れていない").clone();
         tokio::spawn(async move {
             let Ok(exit) = exit_rx.await else {
                 // 待ちスレッドが終わりを知らせずに消えた。止まったかを確かめられないので、
                 // 預かった番号には答えない（待つ側は時間切れで終わり、止まったとは言わない）
                 return;
             };
-            let gate = manager
-                .exit_gate
-                .lock()
-                .expect("ロックが壊れていない")
-                .clone();
             if let Some(gate) = gate
                 && gate.acquire().await.is_err()
             {
@@ -3793,7 +3880,7 @@ impl SessionManager {
             }
             match 自分.upgrade() {
                 Some(session) => manager.on_exit(&session, exit),
-                None => manager.answer_end_waiters(card_id, &待ち手),
+                None => manager.answer_end_waiters(&待ち手),
             }
         });
 
@@ -3866,7 +3953,7 @@ impl SessionManager {
     /// | この PC で | 答え（[`KillOutcome`]） | いつ |
     /// |---|---|---|
     /// | 確かめ・席を待っている起こし直しを取り下げた | `Withdrew` | その場で |
-    /// | 起こしている最中の起こし直しを取り下げた | 作った実体を止めて `Stopped`／作れなければ `Withdrew` | 起こす側が作り終えた後 |
+    /// | 起こしている最中の起こし直しを取り下げた | 畳んだ古い実体・作った実体のどちらかを止めていれば `Stopped`／どちらも無い（終わっていた）なら `Withdrew` | 起こす側が作り終え、**止めた実体が全部終わった後**（実装レビュー第8回 Astra 2。[`KillJoint`]） |
     /// | 生きた実体を止めた（起こし終えた札が残っていても） | `Stopped` | プロセスが終わった後 |
     /// | 実体は既に終わっていた（同上） | `AlreadyEnded` | その場で |
     /// | 何も無い | `Nothing` | その場で |
@@ -3929,8 +4016,10 @@ impl SessionManager {
         }
         let session = self.get(card_id);
         match stage {
-            // **起こしている最中。** 答えは札へ預けた（`withdraw`）——作り終えた起こす側が、作った
-            // 実体を止めてから答える。表に居る実体は古いものか作りたてで、どちらも止めてよい
+            // **起こしている最中。** 答えは札へ預けた（`withdraw`）——作り終えた起こす側が、古い実体と
+            // 作った実体の両方を数えて答える（実装レビュー第8回 Astra 2）。ここでは数えない：
+            // 表に居る実体は古いものか作りたてで、どちらも起こす側の手元にある。ここでも数えると、
+            // 起こす側が出揃えた後に預ける道ができる。止めるのはどちらでもよい
             Some(ReviveStage::Spawning) => {
                 if let Some(session) = &session {
                     session.kill();
@@ -3940,32 +4029,29 @@ impl SessionManager {
             // **確かめ・席を待っている。** 起こす側は作る前に札を見るので、もう実体は作られない。
             // 表に残る古い実体が生きていれば、それが止まるのを見届けてから答える
             Some(ReviveStage::Waiting) => {
-                match &session {
-                    Some(session) => {
-                        if let Some(op) = op
-                            && !session.await_end(op)
-                        {
-                            self.answer_kill(card_id, op, KillOutcome::Withdrew);
-                        }
-                        session.kill();
+                let joint = op.map(|op| KillJoint::new(card_id, op));
+                if let Some(session) = &session {
+                    if let Some(joint) = &joint {
+                        joint.attach(&session.end_waiters);
                     }
-                    None => {
-                        if let Some(op) = op {
-                            self.answer_kill(card_id, op, KillOutcome::Withdrew);
-                        }
-                    }
+                    session.kill();
+                }
+                if let Some(joint) = joint {
+                    joint.seal(self, KillOutcome::Withdrew);
                 }
                 Halted::Withdrew
             }
             // 起こし終えている、または札が無い。**実体の話**
             Some(ReviveStage::Spawned) | None => match session {
                 Some(session) => {
-                    if let Some(op) = op
-                        && !session.await_end(op)
-                    {
-                        self.answer_kill(card_id, op, KillOutcome::AlreadyEnded);
+                    let joint = op.map(|op| KillJoint::new(card_id, op));
+                    if let Some(joint) = &joint {
+                        joint.attach(&session.end_waiters);
                     }
                     session.kill();
+                    if let Some(joint) = joint {
+                        joint.seal(self, KillOutcome::AlreadyEnded);
+                    }
                     Halted::Stopped(session)
                 }
                 None => {
@@ -4376,7 +4462,11 @@ impl SessionManager {
         }
 
         // **必ず起こす前に畳む**（設計§7-1）。理由は [`SessionManager::fold`] に書いてある
-        if self.fold(card_id).is_some() {
+        //
+        // 畳んだ実体は手元に残す（実装レビュー第8回 Astra 2）。起こしている最中に届いた終了の
+        // 頼みは、これの終わりも待つ——畳むのは止めることでもあり、プロセスが終わるのは後になる
+        let 古い実体 = self.fold(card_id);
+        if 古い実体.is_some() {
             tracing::info!(%card_id, "起こし直す前に、古い実体を畳みました");
         }
         let args = lifecycle::permission_mode_args(mode.as_ref());
@@ -4400,13 +4490,20 @@ impl SessionManager {
             state.stage = ReviveStage::Spawned;
             (state.withdrawn, std::mem::take(&mut state.kill_ops))
         };
-        // 作った実体があれば、止める前に番号を預ける（終わるのを見届けてから答える）。作れて
-        // いなければ、何も起きていないので取り下げたと答える
+        // **止める実体を全部数えてから答える**（実装レビュー第8回 Astra 2）。畳んだ古い実体と
+        // 作った実体の両方へ、止める前に預ける。以前は作った実体にだけ預けていたので、作れなければ
+        // 古いプロセスの終わりを待たずに「取り下げた」と答え、作れれば新しい実体が先に終わった
+        // 時点で答えていた。どちらも終わっていれば（作れなかった・古い実体は既に終わっていた）、
+        // 何も止めていないので取り下げたと答える
         for op in 終了の頼み {
-            let 預けた = spawned.as_ref().is_ok_and(|session| session.await_end(op));
-            if !預けた {
-                self.answer_kill(card_id, op, KillOutcome::Withdrew);
+            let joint = KillJoint::new(card_id, op);
+            if let Some(old) = &古い実体 {
+                joint.attach(&old.end_waiters);
             }
+            if let Ok(session) = &spawned {
+                joint.attach(&session.end_waiters);
+            }
+            joint.seal(self, KillOutcome::Withdrew);
         }
         if let Some(reason) = 作っている間に下ろされた {
             // 下ろした側は片付けずに戻っている。**ここで片付けないと、頼まれていない実体が残る。**
@@ -5122,7 +5219,7 @@ impl SessionManager {
         // 答えを受けたサーバが記録のいまの状態を添えて配るため（ローカルもセルフホストも、
         // 報告と答えは同じ順の道を通る）。**二重に届いた形でも答える**——預かった番号を
         // 残したまま抜けると、その頼みには誰も答えない
-        self.answer_end_waiters(card_id, &session.end_waiters);
+        self.answer_end_waiters(&session.end_waiters);
     }
 
     /// 終わった実体に預けられていた終了の頼みへ、止めたと答える（実装レビュー第6回 Astra 1・
@@ -5131,9 +5228,11 @@ impl SessionManager {
     /// **実体が既に解放されていても呼ばれる。** 終了を頼んだ直後に外されると、表も合流タスクも
     /// 実体を手放し、終わりを見届けた見張りは実体を引き直せない。番号は実体と別に持っている
     /// （[`EndWaiters`]）ので、ここで答えられる。プロセスが終わったことは本当である。
-    fn answer_end_waiters(&self, card_id: CardId, waiters: &Mutex<EndWaiters>) {
-        for op in EndWaiters::close(waiters) {
-            self.answer_kill(card_id, op, KillOutcome::Stopped);
+    ///
+    /// 答えるのは頼み（[`KillJoint`]）の側。同じ頼みが他の実体も待っていれば、ここでは答えない。
+    fn answer_end_waiters(&self, waiters: &Mutex<EndWaiters>) {
+        for joint in EndWaiters::close(waiters) {
+            joint.ended(self);
         }
     }
 

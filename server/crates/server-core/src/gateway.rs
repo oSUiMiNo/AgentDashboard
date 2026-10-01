@@ -45,7 +45,10 @@ use protocol::{
 use sea_orm::EntityTrait as _;
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -71,9 +74,11 @@ const COMMAND_QUEUE_MESSAGES: usize = 256;
 ///
 /// **取り下げの知らせ（`StopForRemoval`・`Forget`）も乗る**（寝ているカードばかりなのに、
 /// メモリ不足でセッションを起こせない 実装レビュー第7回 Astra 1。[`lane_of`]）。こちらは下の式の
-/// 外にあり、数は利用者が外した枚数で決まる（1枚につき2つ・照合で1つ）。書き手が詰まっている
-/// 間に外し続けて溢れたら、他の約束と同じく生存確認が積めずに畳まれ、繋ぎ直しで PC が手持ちを
-/// 名乗り直したところで照合が片付ける（[`handle_report`] の `SessionUpsert`）。
+/// 外にあり、数は利用者が外した枚数で決まる（1枚につき2つ・照合で1つ）。**積めなければ、その場で
+/// 接続を畳む**（実装レビュー第8回 Astra 1。[`SessionHostConn::send_or_refuse`]）。繋ぎ直しで PC が
+/// 手持ちを名乗り直したところで照合が片付ける（[`handle_report`] の `SessionUpsert`）。次の
+/// 生存確認が積めずに畳まれることには頼らない——それより前に列が空けば接続は保たれ、PC が
+/// そのカードを二度と名乗らなければ、取り下げは二度と送られない。
 ///
 /// 深さは**式で上から抑えられる**。ack は「同時に未 ack にできるバッチの数」を超えて
 /// 生まれず、それは送る側の窓（`session-host-core` の `Limits::window` = 32）で決まる。
@@ -126,6 +131,12 @@ pub struct SessionHostConn {
     pub available_modes: Vec<PermissionMode>,
     pub always_bypass_permissions: bool,
     lanes: Lanes,
+    /// 接続を畳むよう頼まれたか（実装レビュー第8回 Astra 1。[`SessionHostConn::close_now`]）。
+    /// 接続のループが毎周の初めに見る
+    closing: AtomicBool,
+    /// 畳むよう頼まれたことを、待っている接続のループへ知らせる。**待っていなくても知らせを
+    /// 1つ残す**（`notify_one`）ので、ループが別の報告を処理している間に頼まれても落とさない
+    close_wake: tokio::sync::Notify,
 }
 
 /// サーバ→PC の送り口。**約束と指示を別の列で持つ**（設計§5-2）。
@@ -203,9 +214,25 @@ impl SessionHostConn {
     /// **詰まっているのか、接続を畳んでいる途中なのかを言い分ける。** 線が切れた直後は、
     /// 接続表から外れる前に書き手が終わっていて、送り口が閉じている。それを「詰まって」と
     /// 言うと、押した人は待てば通ると読む。
+    ///
+    /// **取り下げの知らせ（約束のレーン）を積めなければ、その場で接続を畳む**（寝ているカード
+    /// ばかりなのに、メモリ不足でセッションを起こせない 実装レビュー第8回 Astra 1）。断りを返す
+    /// だけだと接続は保たれ、PC がそのカードを二度と名乗らなければ（入力待ちで止まっている）、
+    /// 一覧に出ないプロセスが残る。畳めば PC は繋ぎ直して手持ちを全部名乗り直し、照合
+    /// （[`handle_report`] の `SessionUpsert`）が空いた列で送り直す。
     pub fn send_or_refuse(&self, message: &ServerToAgent) -> Result<(), String> {
         match self.queue(message) {
             Ok(()) => Ok(()),
+            Err(NotQueued::Full) if lane_of(message) == Lane::Promise => {
+                if self.close_now() {
+                    tracing::warn!(
+                        agent_id = %self.agent_id,
+                        queued_promise = self.queued_promise(),
+                        "約束のレーンが満杯で取り下げの知らせを積めません。切断します（繋ぎ直しの名乗り直しで照合します）"
+                    );
+                }
+                Err(NOT_QUEUED.to_string())
+            }
             Err(NotQueued::Full) => {
                 tracing::warn!(
                     agent_id = %self.agent_id,
@@ -226,6 +253,22 @@ impl SessionHostConn {
                 Err("PC への指示を組み立てられませんでした".to_string())
             }
         }
+    }
+
+    /// 接続を畳むよう頼む（実装レビュー第8回 Astra 1）。**送り口を使わない**——`Close` は約束の
+    /// レーンに積むので、そこが満杯のときは積めない（[`SessionHostConn::disconnect`] では畳めない）。
+    /// 接続のループが次の周の初めに抜ける。初めて頼んだときだけ `true`。
+    fn close_now(&self) -> bool {
+        if self.closing.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+        self.close_wake.notify_one();
+        true
+    }
+
+    /// 畳むよう頼まれているか（接続のループが毎周の初めに見る）。
+    fn close_requested(&self) -> bool {
+        self.closing.load(Ordering::SeqCst)
     }
 
     /// 生の入力（PTY のキー入力）を送る。**指示のレーン。**
@@ -737,16 +780,16 @@ impl SessionHostHub {
                 // 別のインスタンスから頼まれた画面も**掃除の対象に入れる**。
                 // 入れ忘れると、頼んだ側が落ちたときに誰も止められなくなる
                 self.note_streaming(&message);
-                // 頼んだインスタンスへ断りを返す道は無い。**取り下げの知らせ（約束のレーン）を
-                // 捨てたときだけ1行残す**（PC が手持ちを名乗ったときの照合で後から片付く）。
-                // 指示は溢れたら捨てる作りなので、1件ごとには残さない（ガイドライン「ログを
-                // 残すとき」§3）
-                if !conn.send(&message) && lane_of(&message) == Lane::Promise {
-                    tracing::warn!(
-                        %agent_id,
-                        queued_promise = conn.queued_promise(),
-                        "跨ぎで届いた取り下げの知らせを PC へ積めませんでした（PC がそのカードを名乗ったときの照合で片付けます）"
-                    );
+                // 頼んだインスタンスへ断りを返す道は無い。**取り下げの知らせ（約束のレーン）は
+                // 積めなければ接続を畳む**（`send_or_refuse` が理由を1行残す。実装レビュー第8回
+                // Astra 1）——繋ぎ直しの名乗り直しで照合が片付ける。指示は溢れたら捨てる作り
+                // なので、1件ごとには残さない（ガイドライン「ログを残すとき」§3）
+                if lane_of(&message) == Lane::Promise {
+                    if let Err(reason) = conn.send_or_refuse(&message) {
+                        tracing::debug!(%agent_id, %reason, "跨ぎで届いた取り下げの知らせを積めませんでした");
+                    }
+                } else {
+                    conn.send(&message);
                 }
             }
             SessionHostCommand::Input { data } => {
@@ -2405,6 +2448,8 @@ async fn agent_loop(
         available_modes,
         always_bypass_permissions,
         lanes: lanes.clone(),
+        closing: AtomicBool::new(false),
+        close_wake: tokio::sync::Notify::new(),
     });
     // 同じ PC が繋ぎ直してきた場合、古い接続は**静かに置き換える**。半分死んだ TCP を
     // 掴んだまま新しい接続を断ると、その PC は二度と繋がらなくなる
@@ -2448,7 +2493,14 @@ async fn agent_loop(
     let mut last_seen = tokio::time::Instant::now();
 
     loop {
+        // **畳むよう頼まれていたら、次の報告を読む前に抜ける**（実装レビュー第8回 Astra 1）。
+        // 照合で取り下げの知らせを積めなかった報告の直後に抜けるので、その後の報告は繋ぎ直しの
+        // 名乗り直しで届く（理由は頼んだ側が1行残している）
+        if conn.close_requested() {
+            break;
+        }
         tokio::select! {
+            () = conn.close_wake.notified() => {}
             incoming = stream.next() => match incoming {
                 Some(Ok(message)) => {
                     last_seen = tokio::time::Instant::now();
@@ -2583,7 +2635,9 @@ async fn handle_report(
             // 外したことは DB に残っている（記録を外すのは DB に書けたときだけ）ので、PC が
             // そのカードを名乗った時点で照合し、外した知らせを送り直す。PC は繋ぎ直すたびに
             // 手持ちを全部名乗り直すので、繋がっていなかった間に起きたプロセスもここで片付く。
-            // 送り直しも届かなければ、次に名乗ったときにまた送る（知らせは何度届いても同じ結果）。
+            // 列が満杯で送り直せなければ、`send_or_refuse` がその場で接続を畳む（実装レビュー第8回
+            // Astra 1）。繋ぎ直しの名乗り直しで、空いた列からもう一度送る（知らせは何度届いても
+            // 同じ結果）。畳まずに次に名乗るのを待つと、入力待ちで止まったカードは二度と名乗らない。
             //
             // 1行残すのは、外す知らせがどこかで落ちていた証拠だから。`Forget` を知らない古い PC
             // では名乗るたびに出るが、名乗るのはカードの姿が変わったときだけで、1件ごとに回る

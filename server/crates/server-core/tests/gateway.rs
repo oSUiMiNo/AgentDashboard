@@ -958,6 +958,149 @@ async fn 指示が詰まっても_ack_は捨てられず先に出て線も切れ
 }
 
 #[tokio::test]
+async fn 照合のときだけ約束の列が満杯でも外したカードの取り下げは名乗り直しで届く() {
+    // 寝ているカードばかりなのに、メモリ不足でセッションを起こせない 実装レビュー第8回 Astra 1。
+    // PC が一覧から外したカードを名乗ると、サーバは照合して取り下げ（`Forget`）を送り直す。以前は
+    // 約束の列が満杯だと送れずに**接続を保った**。次の生存確認より前に列が空けば接続は切れず、
+    // そのカードが入力待ちで以後名乗らなければ、取り下げは二度と送られない——一覧に出ない
+    // プロセスが残る。
+    //
+    // **偽の PC で作る。** 本物の PC は見張りが状態を変えて名乗り直すことがあり、壊れ方が隠れる。
+    // 生存確認（10 秒ごと）にも頼らない：照合の直後に畳んだかを、次の報告を処理したかで見る
+    for backend in common::backends("gw-reconcile-full").await {
+        let gateway = TestGateway::start(backend.db.clone()).await;
+        gateway
+            .hub
+            .set_lane_depths(server_core::gateway::LaneDepths {
+                promise: 1,
+                command: 2,
+            });
+        let (token, account_id) = issue(&backend.db, "テスト用").await;
+        let mut socket = gateway.connect_as(&token, "仕事用ノート").await;
+        socket
+            .wait_for("名乗りの応答", |message| {
+                matches!(message, ServerToAgent::Hello { .. })
+            })
+            .await;
+        let 外す = CardId::new();
+        socket
+            .send(&AgentMessage::SessionUpsert {
+                session: Box::new(meta(外す)),
+            })
+            .await;
+        let conn = wait_for_conn(&gateway, 外す).await;
+        let agent_id = conn.agent_id;
+
+        // --- 1. 読まない PC へ大きな指示を積んで、書き手を止める ---------------
+        let browser = server_core::gateway::RemoteSessionHost::new(Arc::clone(&gateway.hub));
+        server_core::session_host::SessionHost::send_input(
+            &browser,
+            外す,
+            "x".repeat(4 * 1024 * 1024),
+            Vec::new(),
+            false,
+        )
+        .await
+        .expect("宛先が引けること");
+        let deadline = tokio::time::Instant::now() + TIMEOUT;
+        while conn.queued_command() > 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "[{}] 書き手が大きな指示を掴みませんでした",
+                backend.name
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // --- 2. 約束の列（深さ1）を、害の無い取り下げ（PC に無いカード）で埋める ----
+        // **Close で埋めない。** 列が空いたときに Close が出て接続が畳まれ、直す前のコードでも
+        // 名乗り直しが起きる
+        assert!(
+            conn.send(&ServerToAgent::Forget {
+                card_id: CardId::new()
+            }),
+            "[{}] 約束の列に積めること",
+            backend.name
+        );
+        assert_eq!(
+            conn.queued_promise(),
+            1,
+            "[{}] 約束の列が埋まっていない",
+            backend.name
+        );
+
+        // --- 3. 記録の側だけで外す（外す知らせが PC へ届かなかった形） --------------
+        gateway
+            .registry
+            .archive_owned(account_id, 外す)
+            .await
+            .expect("外せること");
+
+        // --- 4. PC が外したカードを名乗り、続けて別のカードを名乗る -----------------
+        // 報告は1本の接続で順に処理されるので、後のカードが載れば、前の照合は済んでいる
+        let 後 = CardId::new();
+        for card_id in [外す, 後] {
+            socket
+                .send(&AgentMessage::SessionUpsert {
+                    session: Box::new(meta(card_id)),
+                })
+                .await;
+        }
+        let 畳んだ = || {
+            gateway
+                .hub
+                .conn(agent_id)
+                .is_none_or(|now| !Arc::ptr_eq(&now, &conn))
+        };
+        let deadline = tokio::time::Instant::now() + TIMEOUT;
+        while gateway.registry.get(後).is_none() && !畳んだ() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "[{}] 後のカードも載らず、接続も畳まれない",
+                backend.name
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            畳んだ(),
+            "[{}] ★照合で取り下げを積めなかったのに接続を保っている（列が空いても、PC がそのカードを名乗らなければ二度と送られない）",
+            backend.name
+        );
+        assert!(
+            gateway.registry.get(後).is_none(),
+            "[{}] 畳むと決めた後に、次の報告を処理している",
+            backend.name
+        );
+
+        // --- 5. PC は繋ぎ直して手持ちを名乗り直す。空いた列から取り下げが届く ----------
+        // 深さは既定へ戻す。深さ1のままだと、繋いだ直後の生存確認が列に居る間に照合の知らせが
+        // 来て、それだけで満杯になる
+        gateway
+            .hub
+            .set_lane_depths(server_core::gateway::LaneDepths::default());
+        drop(socket);
+        let mut socket = gateway.connect_as(&token, "仕事用ノート").await;
+        socket
+            .wait_for("名乗りの応答", |message| {
+                matches!(message, ServerToAgent::Hello { .. })
+            })
+            .await;
+        socket
+            .send(&AgentMessage::SessionUpsert {
+                session: Box::new(meta(外す)),
+            })
+            .await;
+        socket
+            .wait_for(
+                "外したカードの取り下げ",
+                |message| matches!(message, ServerToAgent::Forget { card_id } if *card_id == 外す),
+            )
+            .await;
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
 async fn 答えない_PC_への問いは時間切れになる() {
     // **「確かめられなかった」の3つ目**（名前付け設計§8-5）。寝ている・版が古いは
     // 投げる前に断るが、**繋がっているのに黙る**相手には投げてから待つしかない。

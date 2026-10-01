@@ -2716,6 +2716,136 @@ async fn 番号付きの終了の直後に外されて実体が解放されて�
     assert_eq!(答えを取る(&mut answers), None, "答えは1回だけ");
 }
 
+/// 生きた古い実体のカードを、起こしている最中に番号付きで止める形を作る（実装レビュー第8回
+/// Astra 2）。起こす直前に1回だけ `直前に` を呼んでから終了を頼む。返すのは古い実体・答えの
+/// 受け口・起こし直しの結果。
+async fn 起こしている最中に止める(
+    manager: &Arc<SessionManager>,
+    op: OpId,
+    作業場所: &str,
+    直前に: impl Fn(&SessionManager) + Send + Sync + 'static,
+) -> (
+    Arc<Session>,
+    tokio::sync::broadcast::Receiver<KillAnswered>,
+    String,
+) {
+    let 古い実体 = manager
+        .spawn(&common::work_dir())
+        .expect("古い実体を起こせること");
+    let card_id = 古い実体.card_id;
+    let 頼んだ: Arc<std::sync::atomic::AtomicBool> = Arc::default();
+    {
+        let manager_weak = Arc::downgrade(manager);
+        let 頼んだ = Arc::clone(&頼んだ);
+        manager.起こす直前に差し込む(Arc::new(move || {
+            if 頼んだ.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            if let Some(manager) = manager_weak.upgrade() {
+                直前に(&manager);
+                manager.kill_answering(card_id, op);
+            }
+        }));
+    }
+    let answers = manager.subscribe_kill_answers();
+    let in_flight = manager
+        .begin_revive(card_id, None)
+        .expect("起こし直しの札は無いので立つこと");
+    let 断り = manager
+        .revive(in_flight, 作業場所, None, ClaudeSessionId::new())
+        .await
+        .expect_err("終了を頼まれたのだから断ること")
+        .to_string();
+    assert!(
+        頼んだ.load(std::sync::atomic::Ordering::SeqCst),
+        "起こしている最中に頼んだこと（形を作れていない）"
+    );
+    (古い実体, answers, 断り)
+}
+
+#[tokio::test]
+async fn 起こしている最中の終了は新しい実体を作れなくても古い実体の終わりを見届けてから答える() {
+    // 実装レビュー第8回 Astra 2。PC に古い実体が残るカードを起こし直している最中の終了は、古い
+    // 実体を止めるだけで終わりを待たず、新しい実体にだけ番号を預けていた。**新しい実体を作れないと
+    // その場で「取り下げた」と答え**、古いプロセスがまだ終わっていなくても CLI は成功した。
+    //
+    // 古い実体の終わりは門で遅らせる（門の後に作った実体だけが止まる）。作業場所が無いので、
+    // 新しい実体はプロセスを産む前に作れずに終わる
+    let manager = common::manager();
+    let 門 = manager.終わりの見届けを止める();
+    let op = OpId::new();
+    let (古い実体, mut answers, 断り) =
+        起こしている最中に止める(&manager, op, "/存在しない/作業場所", |_| {}).await;
+    assert!(断り.contains("終了を頼まれた"), "{断り}");
+    assert!(
+        manager.get(古い実体.card_id).is_none(),
+        "新しい実体が作れている（形を作れていない）"
+    );
+    assert_eq!(
+        答えを取る(&mut answers),
+        None,
+        "★新しい実体を作れなかったとき、古い実体の終わりを見届ける前に答えている"
+    );
+
+    門.add_permits(10);
+    assert_eq!(
+        答えを待つ(&mut answers, "古い実体の終わり").await,
+        KillAnswered {
+            card_id: 古い実体.card_id,
+            op,
+            outcome: KillOutcome::Stopped,
+        },
+        "古い実体を止めたのだから、止めたと答えること"
+    );
+    assert_eq!(答えを取る(&mut answers), None, "答えは1回だけ");
+}
+
+#[tokio::test]
+async fn 起こしている最中の終了は新しい実体が先に終わっても古い実体の終わりまで答えない() {
+    // 実装レビュー第8回 Astra 2。両方の実体が作れたときも、**先に終わった片方だけで答えない。**
+    // 以前は新しい実体にだけ番号を預けていたので、新しい実体が終わった時点で答えていた。
+    //
+    // 古い実体だけ終わりを門で遅らせる：門を差してから古い実体を作り、新しい実体を作る直前に
+    // 門を外す。答えの段は同期なので、新しい実体の状態が終わったと見えた時点で、答えるなら
+    // 既に答えている
+    let manager = common::manager();
+    let 門 = manager.終わりの見届けを止める();
+    let op = OpId::new();
+    let (古い実体, mut answers, 断り) =
+        起こしている最中に止める(&manager, op, &common::work_dir(), |manager| {
+            manager.終わりの見届けを止めるのをやめる();
+        })
+        .await;
+    assert!(断り.contains("終了を頼まれた"), "{断り}");
+    let 新しい実体 = manager
+        .get(古い実体.card_id)
+        .expect("作った実体は表に残る（止めるだけで畳まない）");
+    assert!(
+        !Arc::ptr_eq(&新しい実体, &古い実体),
+        "新しい実体が作れていない（形を作れていない）"
+    );
+    wait_until("新しい実体が終わる", || {
+        matches!(新しい実体.status(), SessionStatus::Ended { .. })
+    })
+    .await;
+    assert_eq!(
+        答えを取る(&mut answers),
+        None,
+        "★新しい実体が先に終わった時点で答えている（古いプロセスの終わりを見届けていない）"
+    );
+
+    門.add_permits(10);
+    assert_eq!(
+        答えを待つ(&mut answers, "古い実体の終わり").await,
+        KillAnswered {
+            card_id: 古い実体.card_id,
+            op,
+            outcome: KillOutcome::Stopped,
+        }
+    );
+    assert_eq!(答えを取る(&mut answers), None, "答えは1回だけ");
+}
+
 #[tokio::test]
 async fn 確かめを待っている起こし直しを番号付きで止めるとその場で取り下げたと答える() {
     // 実装レビュー第6回 Astra 1。確かめ・席を待っている起こし直しは、札を見て作る前にやめる
@@ -2745,6 +2875,53 @@ async fn 確かめを待っている起こし直しを番号付きで止める�
         "★止めたのに、確かめが済んだ後に新しいプロセスを起こしている"
     );
     assert_eq!(答えを取る(&mut answers), None, "答えは1回だけ");
+}
+
+#[tokio::test]
+async fn 確かめを待っている間に番号付きで止めると生きた古い実体の終わりを見届けてから答える() {
+    // 実装レビュー第8回（Astra 2 の書き換えで見つけた穴）。確かめ・席を待っている間の終了は、
+    // 表に残る古い実体が生きていれば、止まるのを見届けてから答える（§18 の表）。**この段を守る
+    // 試験が無かった**——既存の試験は古い実体が既に終わった形しか作っていない。
+    //
+    // 古い実体の終わりは門で遅らせる（門の後に作った実体だけが止まる）
+    let manager = common::manager_with(実機の設定());
+    let 終わりの門 = manager.終わりの見届けを止める();
+    let 古い実体 = manager
+        .spawn(&common::work_dir())
+        .expect("古い実体を起こせること");
+    let card_id = 古い実体.card_id;
+    let (外, _host_free, _門) = common::確かめで止める(&manager);
+    let 起こし直し = 切り離して頼む(&manager, card_id);
+    外.聞かれるまで待つ(0).await;
+
+    let mut answers = manager.subscribe_kill_answers();
+    let op = OpId::new();
+    manager.kill_answering(card_id, op);
+    assert_eq!(
+        答えを取る(&mut answers),
+        None,
+        "★確かめ待ちの間に生きた古い実体を止めたのに、終わりを見届ける前に答えている"
+    );
+
+    終わりの門.add_permits(10);
+    assert_eq!(
+        答えを待つ(&mut answers, "古い実体の終わり").await,
+        KillAnswered {
+            card_id,
+            op,
+            outcome: KillOutcome::Stopped,
+        }
+    );
+    assert_eq!(答えを取る(&mut answers), None, "答えは1回だけ");
+    外.開ける();
+    let 結果 = timeout(common::TIMEOUT, 起こし直し)
+        .await
+        .expect("取り下げた起こし直しが終わること")
+        .expect("起こし直しの作業が落ちていないこと");
+    assert!(
+        結果.is_err_and(|断り| 断り.contains("終了を頼まれた")),
+        "止めたのに起こしている"
+    );
 }
 
 #[tokio::test]
