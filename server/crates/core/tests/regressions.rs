@@ -80,7 +80,7 @@ fn repo_root() -> PathBuf {
 const WEB単体: (&str, &[&str]) = ("web/src", &[".test.ts", ".test.tsx"]);
 /// ブラウザを通す E2E（Playwright）。**`make ci` には入っていない。**
 const E2E: (&str, &[&str]) = ("web/e2e", &[".spec.ts"]);
-/// Rust。`#[test]` ／ `#[tokio::test]` が付いた関数を数える。
+/// Rust。`#[test]` ／ `#[tokio::test]` ／ `#[tokio::test(…)]` が付いた関数を数える。
 const RUST: (&str, &[&str]) = ("server/crates", &[".rs"]);
 
 /// 走査器が壊れたときに気づくための下限。**台帳を削って揃えてはいけない。**
@@ -700,7 +700,14 @@ fn scan_rs(source: &str) -> 走査 {
             .iter()
             .collect();
         let 中身 = 中身.trim().to_string();
-        let テスト属性 = 中身 == "test" || 中身 == "tokio::test";
+        // **引数付きの `#[tokio::test(flavor = "multi_thread", …)]` も数える。** 中身が
+        // ちょうど `tokio::test` のときだけ数えていたので、多スレッドで流すテストを
+        // 台帳から名指しできなかった（寝ているカードばかりなのに、メモリ不足で
+        // セッションを起こせない の台帳づけで踏んだ）
+        let テスト属性 = 中身 == "test"
+            || 中身 == "tokio::test"
+            || (中身.starts_with("tokio::test")
+                && 中身["tokio::test".len()..].trim_start().starts_with('('));
         if !テスト属性 {
             i = j;
             continue;
@@ -1673,4 +1680,32 @@ fn 守られている数を数える() {
         println!("  MyDocs/ が無いので、イシューの実在に関する検査2件を畳みました");
         println!("  （retired.by と issue の実在／台帳に無いクローズ済みイシューの数）");
     }
+}
+
+#[test]
+fn 引数付きの_tokio_test_も数える() {
+    // 多スレッドで流すテストを台帳から名指しできるように。引数の無い形・`#[test]` は
+    // いままでどおり数え、似た綴りの別の属性は数えない
+    let source = r#"
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn 多スレッドの待ち手() {}
+
+#[tokio::test]
+async fn 単スレッドの待ち手() {}
+
+#[test]
+fn 素のテスト() {}
+
+#[tokio::testing_helper]
+fn テストではない() {}
+"#;
+    let names = scan_rs(source).names;
+    assert_eq!(
+        names,
+        vec![
+            "多スレッドの待ち手".to_string(),
+            "単スレッドの待ち手".to_string(),
+            "素のテスト".to_string(),
+        ]
+    );
 }

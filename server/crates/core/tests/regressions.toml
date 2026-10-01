@@ -59,7 +59,7 @@
 #
 # ## 
 
-min_entries = 141
+min_entries = 152
 
 [[entry]]
 issue       = "イシューグループ_2026-0821-1953/セッションごとにも全体にも自分用のメモを残せるようにする"
@@ -210,14 +210,14 @@ verified = true
 
 [[entry]]
 issue = "イシューグループ_2026-0913-2234/空きメモリの判定が、WSLの中だけを見ている"
-behavior = "WSL の中に居るが外側の空きを聞けなかったとき、MemFree で抑えて枚数が増えない（既存の「そもそも読めない」＝歯止めを外す側とは別の状態にする）"
+behavior = "WSL の中に居るが外側の空きを聞けなかったとき、表示の経路で MemFree で抑えて枚数が増えない（既存の「そもそも読めない」＝歯止めを外す側とは別の状態にする。判定の経路は数えずに「確かめられなかった」と断る——寝ているカードばかりなのに、メモリ不足でセッションを起こせない で改めた）"
 gate = "unit"
 tests = [
   { file = "server/crates/session-host-core/src/resources.rs", name = "外側を聞けなければmemfreeで抑える" },
   { file = "server/crates/session-host-core/src/resources.rs", name = "外側を聞けないときはmemfreeで抑えて枚数が増えない" },
   { file = "server/crates/session-host-core/tests/session_revive.rs", name = "wslで外側を読めなくても床は効く" },
 ]
-breaks_when = "counted_available の Outside::Unknown を None（歯止めを外す側）へ書き換える（実行レポート フェーズ2 で2本が落ちた）"
+breaks_when = "外側を確かめられていない腕（Outside::Checking・Failed）が写る Basis::Floor の数え方を、counted_available で None（歯止めを外す側）へ書き換える（2026-10-01 に当て直し、3本とも床の効きの検査で落ちることを実測した。元の腕の名前は Outside::Unknown で、実行レポート フェーズ2 で2本が落ちた）"
 verified = true
 
 [[entry]]
@@ -1589,6 +1589,66 @@ verified    = true
 
 [[entry]]
 issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "WSL で外側の値で抑えて数えるとき、まとめて起こし直しても通したぶんが引かれ、外側で数えた枚数を超えて通さない（画面へ答える枚数にも予約が乗る）"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "wslでまとめて投げても外側で数えた枚数を超えない" },
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "wslでも画面へ答える枚数に予約が乗る" },
+  { file = "server/crates/session-host-core/src/resources.rs", name = "assessの総当たり" },
+]
+breaks_when = "assess の見込みの起点 next_mb を effective から memory.available_mb へ戻す（3本とも狙った検査で落ちることを実測した。前のイシューの「まとめて投げても入る枚数を超えない」も同じ壊しで落ちる）"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "WSL で外側の値の期限が切れたあと起こし直すとき、MemFree の床で 0 枚と断らず、取り直した外側の空きで数えて起こせる（一度も聞けていない起動直後も同じ）"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "期限切れのあとの1回目でも聞けた外側で数えて起こせる" },
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "一度も聞けていない起動直後でも取り直しを待って起こせる" },
+  { file = "server/crates/session-host-core/src/resources.rs", name = "判定は期限切れの値を使わず取得を待つ" },
+]
+breaks_when = "判定が取り直しを待たない形にする：resources.rs の confirm の待ちを timeout_at(Instant::now(), 決して終わらない future) へ替え、session/mod.rs の受付時の prefetch も外す（3本とも落ちることを実測した。結合2本は★の検査、単体は「取り直しを待って答えること」の検査で落ちた。待ちを約 1ms へ縮めるだけでは、即答する口の結合2本は取得が先に終わって緑のままだった）"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "WSL で外側を確かめられなかったとき、古い値でも MemFree の床でも通さず、メモリ不足ではなく「確かめられなかった」と断る"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "確認できなければ確かめられなかったと断りメモリ不足とは言わない" },
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "memfreeが大きくても確認できなければ通さない" },
+  { file = "server/crates/session-host-core/src/resources.rs", name = "取得が失敗したら古い値で答えない" },
+]
+breaks_when = "古い値の道：confirm の抑え中の返り（Checked::Unconfirmed）を、覚えている成功値があれば Known で返す形へ替える（単体の1本が★で落ちた）。床の道：reserve_memory で Checked::Unconfirmed を NotWsl と同じ腕へ寄せ、外側なしの土台を Basis::Floor にする（結合の2本が落ち、断りの文は「空き 400 MB」＝MemFree の床で数えた元の不具合の形になった）。どちらも実測した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "Windows 側の取得が即座に終わったときでも、判定の待ち手は取得の終わりで起き、確認段階の上限（65 秒）まで待たない"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/session-host-core/src/resources.rs", name = "状態を見た直後に取得が終わっても待ち手が起きる" },
+]
+breaks_when = "取得の終わりで待ち手を起こさない形にする（watch の更新で知らせない）と、65 秒待ったあと Known の検査で落ちることを実測した。待つ直前に購読し直す形（Notify の取りこぼしと同じ形）は 5 回×50 周で一度も捕まらず、このテストは取りこぼしを確率的にしか踏めない"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "まとめて復旧で Windows 側の空きを確かめられない PC（failed・聞き直しの上限到達）があるとき、その PC を 0 枚として必ずダイアログを出し、床が「全部入る」と言っても黙って全部送らない"
+gate        = "unit"
+tests       = [
+  { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "上限 65 秒まで確かめられなければ、0 枚としてダイアログを必ず出す" },
+  { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "failed なら聞き直さず、理由を添えてダイアログを出す" },
+  { file = "web/src/components/TileGrid/TileGrid.test.tsx", name = "PC が2台で片方だけ確かめられないとき、入るぶんには確かめられた PC のぶんだけが入る" },
+  { file = "web/src/lib/reviveBudget.test.ts", name = "failed の PC は、床が「全部入る」と言っても 0 枚として over を立てる" },
+  { file = "web/src/lib/reviveBudget.test.ts", name = "聞き直した後も checking・stale のままなら、上限到達として 0 枚" },
+]
+breaks_when = "reviveBudget.ts の planRevive で、確かめられていない PC を 0 枚にする分岐を外し fits = found?.fits_now ?? null にする（2ファイルで12本落ち、名指しの5本はダイアログが出ない・over が立たない検査で落ちることを実測した）"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
 behavior    = "セルフホストで、PC 側で起きた起こし直しの競合は busy が真のまま、終わった断りは偽のままサーバの配信まで届き、枝分かれは競合で失敗しない"
 gate        = "unit"
 tests       = [
@@ -1598,6 +1658,16 @@ tests       = [
   { file = "server/crates/protocol/src/ws.rs", name = "断りの性質は3値とも運ばれ_欠けは判別できないと読む" },
 ]
 breaks_when = "gateway.rs の AgentMessage::Error から ServerMessage::Error へ移すところで busy を None に落とす（a2s の2本が狙った検査で落ちることを実測した）"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "ローカルモードで起こし直しが断られたとき、その断りは revive 種別で配られる（Other だと押し直しても古い断りが画面に残る）"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/restart.rs", name = "ローカルモードの起こし直しの断りはrevive種別で配られる" },
+]
+breaks_when = "local.rs の断りの配信を ErrorKind::Other へ戻す（★の検査で left: Other ／ right: Revive と落ちることを実測した）"
 verified    = true
 
 [[entry]]
@@ -1614,6 +1684,39 @@ tests       = [
   { file = "server/crates/server-core/src/branch.rs", name = "拾うのはそのカードの起こし直しの終わった断りだけ" },
 ]
 breaks_when = "branch.rs の wait_for から断りの腕を外す（本物の断りの1本と差し込みの対照1本が狙った検査で落ちることを実測した）。起こし直しの断りの busy の照合を外す（競合・判別できないの2本）、宛先の照合を外す（他カードの1本）、ターン待ちの段にも断りを拾わせる（ターン待ちの1本）もそれぞれ実測した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "起こしている途中の予約が0件になったあと、それより前に始めた外側の観測を使い回さず、取り直した値で次の起こし直しを判定する"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "予約が0件になった後それより前に始めた観測で次を通さない" },
+  { file = "server/crates/session-host-core/src/resources.rs", name = "失効境界より前に始めた観測は判定に使わない" },
+]
+breaks_when = "MemoryReservation::drop の失効（budget.required_after への書き込み）を外す（結合の1本が★で落ちた）。usable の境界の照合（reading.started.mono < boundary）を外す（単体・結合の2本とも★で落ちた）。どちらも実測した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "起こしている途中の予約が0件になった直後に資源を聞いたとき、表示は境界より前の観測を fresh と答えず、Stale として取り直しを起こす"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "予約が0件になった直後表示が境界より前の観測でfreshと答えない" },
+  { file = "server/crates/session-host-core/src/resources.rs", name = "表示も境界より前の観測をfreshと言わず取得を起こす" },
+]
+breaks_when = "HostFree::outside の新しさの判定で usable へ境界の代わりに None を渡す（表示の2本が★で落ち、判定の「予約が0件になった後それより前に始めた観測で次を通さない」は緑のままだった＝表示に固有の壊しであることを実測した）"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "起こし直しをメモリ不足で断るとき、文面には判定に使った空きと何が枚数を決めたか（Windows 側など）を出し、判定に使っていない MemAvailable を空きとして出さない"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "メモリ不足の断りは判定に使った空きを出しmemavailableを出さない" },
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "windows側が本当に逼迫していればその値を添えて断る" },
+]
+breaks_when = "reserve_memory の OutOfMemory へ effective_mb として memory.available_mb を渡す形へ戻す（2本とも落ち、文面が「使える空き 18983 MB」になった）。limit を Limit::Wsl に固定する（Windows 側の1本が「＝Windows 側の空き」の検査で落ちた）。どちらも実測した"
 verified    = true
 
 [[entry]]
