@@ -966,6 +966,103 @@ describe('settleHostResources', () => {
     expect(fetch).toHaveBeenCalledTimes(抜けたとき)
   })
 
+  it('対象が尽きて外した PC は聞くのも待つのもやめ、残った PC が落ち着いていればその場で返す', async () => {
+    // a は即答で落ち着いている。b は答えない。2 秒で b のカードが別の画面から全部外された
+    // （実装レビュー第9回 Astra 4）。**外さなければ締切の 65 秒まで a の結果が出ない**
+    vi.useFakeTimers()
+    const { 回数, 印 } = 偽の口({ a: [wsl(3, 'fresh')], b: ['止まる'] })
+    const bを外す = new AbortController()
+    const { 箱 } = 聞かせる(['a', 'b'], {
+      hostSignals: new Map([['b', bを外す.signal]]),
+    })
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(箱.answer).toBeUndefined()
+    // b への問い合わせは最初の1本（a より後に聞き始めた2本目）
+    const bの印 = 印[1]
+    expect(bの印.aborted).toBe(false)
+
+    bを外す.abort()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(台(箱, 'a')).toMatchObject({ host_free_state: 'fresh', fits_now: 3 })
+    expect(bの印.aborted).toBe(true)
+    await vi.advanceTimersByTimeAsync(RECHECK_INTERVAL_MS * 5)
+    expect(回数.b).toBe(1)
+  })
+
+  it('外した PC は、表から消さずに「答え無し」で返す（計画に紛れても数えない）', async () => {
+    // **表に無い PC を planRevive は「数えない」（歯止め無し）と読む。** 消すと、その PC の
+    // カードが計画に紛れたとき、確かめていない数のまま全部送る
+    vi.useFakeTimers()
+    偽の口({ a: [wsl(3, 'fresh')], b: ['止まる'] })
+    const 前回 = wsl(9, 'fresh')
+    const bを外す = new AbortController()
+    const { 箱 } = 聞かせる(['a', 'b'], {
+      previous: new Map([['b', 前回]]),
+      hostSignals: new Map([['b', bを外す.signal]]),
+    })
+    await vi.advanceTimersByTimeAsync(500)
+    bを外す.abort()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(台(箱, 'b')).toEqual(noAnswer(前回))
+    const plan = planRevive([target('a1', 'a', 1), target('b1', 'b', 1)], 表(箱)!)
+    expect(plan.hosts.find((host) => host.host === 'b')).toMatchObject({
+      fits: 0,
+      unconfirmed: 'no_answer',
+    })
+    expect(plan.fitting).toEqual(['a1'])
+  })
+
+  it('始めた時点で外れている PC には1回も聞かず、全台が外れていればすぐ返す', async () => {
+    vi.useFakeTimers()
+    const { 回数 } = 偽の口({ a: [wsl(3, 'fresh')], b: ['止まる'] })
+    const 外れている = new AbortController()
+    外れている.abort()
+    const 片方 = 聞かせる(['a', 'b'], {
+      hostSignals: new Map([['b', 外れている.signal]]),
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(台(片方.箱, 'a')).toMatchObject({ host_free_state: 'fresh', fits_now: 3 })
+    expect(台(片方.箱, 'b')).toEqual(noAnswer(null))
+    expect(回数.b).toBeUndefined()
+
+    const 両方 = 聞かせる(['a', 'b'], {
+      hostSignals: new Map([
+        ['a', 外れている.signal],
+        ['b', 外れている.signal],
+      ]),
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(表(両方.箱)).toEqual(
+      new Map([
+        ['a', noAnswer(null)],
+        ['b', noAnswer(null)],
+      ]),
+    )
+    // a へ聞いたのは片方の1回だけ
+    expect(回数).toEqual({ a: 1 })
+  })
+
+  it('PC を外したら、何を待っているかを残った PC で言い直す', async () => {
+    // a は Windows 側を確かめていて、b は答えが来ない。aを外すと、待っているのは b の答えだけ
+    vi.useFakeTimers()
+    const { 回数 } = 偽の口({ a: [wsl(1, 'checking')], b: ['投げる'] })
+    const aを外す = new AbortController()
+    const onWaiting = vi.fn()
+    聞かせる(['a', 'b'], {
+      onWaiting,
+      hostSignals: new Map([['a', aを外す.signal]]),
+    })
+    await vi.advanceTimersByTimeAsync(500)
+    expect(onWaiting.mock.calls.map((call) => call[0])).toEqual(['windows'])
+    aを外す.abort()
+    // **次の答えを待たずに言い直す**（b が次に答えるのは 1 秒後）
+    expect(onWaiting.mock.calls.map((call) => call[0])).toEqual(['windows', 'answer'])
+    // 外した a は、b を待ち続けている間も聞き直さない（眠りも切る）
+    await vi.advanceTimersByTimeAsync(RECHECK_INTERVAL_MS * 3)
+    expect(回数.a).toBe(1)
+  })
+
   /** 壁時計（`Date.now()`）だけを `ms` 戻す。**単調時計（`performance.now()`）は動かない** */
   function 時計を巻き戻す(ms: number) {
     vi.setSystemTime(Date.now() - ms)

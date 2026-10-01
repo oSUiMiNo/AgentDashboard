@@ -202,7 +202,10 @@ export function TileGrid() {
   */
   const [plan, setPlan] = useState<{
     plan: RevivePlan
-    /** 押した時点の対象。「もう一度確かめる」は**ここから減らすだけ**（設計§6-3） */
+    /**
+     * 確かめ終えた時点の対象（押した時点から縮めたもの）。「もう一度確かめる」は**ここから
+     * 減らすだけ**（設計§6-3・実装レビュー第9回 Astra 4）
+     */
     対象: ReviveTarget[]
     /**
      * 数えた枚数の有効期限（`Settled.freshUntil`）。**過ぎてから枚数で送らない**
@@ -229,6 +232,16 @@ export function TileGrid() {
   */
   const 最新の対象 = useRef(targets)
   最新の対象.current = targets
+  /*
+    **待っている間も対象を縮める口**（実装レビュー第9回 Astra 4）。聞き直しの間だけ入っている。
+    描き直すたびに呼び、別の画面で外された・戻されたカードを対象から落とす——落とすのを
+    確かめ終えた後だけにすると、答えない PC のカードが全部外されても締切まで待ち続ける。
+    **打ち切るのは副作用なので、描画の後（effect）で呼ぶ**
+  */
+  const 対象を縮める = useRef<(() => void) | null>(null)
+  useEffect(() => {
+    対象を縮める.current?.()
+  })
   /*
     **聞き直しの世代。** 閉じた・画面を離れたら進める。遅れて届いた答えは、
     自分の世代が古ければ**送らないし、ダイアログも開き直さない**（設計§6-3）
@@ -425,6 +438,16 @@ export function TileGrid() {
    *
    * `前回` は確かめ直しのときの PC 別の答え。**最初の通信が失敗しても、前回の答えを
    * 持ったまま「確かめられていない」に留める**——歯止め無しへ倒して全部送らない
+   *
+   * # 対象は減らすだけ
+   *
+   * **始める時点・待っている間・計画を立てる直前に、いま戻せるカードへ縮める**（設計§6-3・
+   * 実装レビュー第9回 Astra 4）。一度落としたカードは、戻ってきても足さない——その PC へは
+   * もう聞いていないので、足すと確かめていない数で送ることになる。縮めた対象は返り値に載せ、
+   * 「もう一度確かめる」はそこから始める（確かめ直しを何度挟んでも減るだけ）
+   *
+   * **対象が尽きた PC は、聞くのも待つのもやめる。** 組み直さずに外すだけなので、残った PC を
+   * 待つのは元の締切までである
    */
   const 計画する = async (
     対象: ReviveTarget[],
@@ -432,7 +455,7 @@ export function TileGrid() {
     前回?: ReadonlyMap<string, HostResources | null>,
     onWaiting?: (waitingFor: WaitingFor) => void,
   ): Promise<
-    | { plan: RevivePlan; 新しいうち: FreshUntil | null }
+    | { plan: RevivePlan; 新しいうち: FreshUntil | null; 対象: ReviveTarget[] }
     | typeof SIGNED_OUT
     | 'cancelled'
   > => {
@@ -440,20 +463,44 @@ export function TileGrid() {
     中断.current?.abort()
     const 打ち切り = new AbortController()
     中断.current = 打ち切り
-    const 答え = await settleHostResources(
-      [...new Set(対象.map((target) => target.host))],
-      {
-        // **締切は押した時点で1回だけ作り、PC 全台で共有する**
-        deadline: deadlineIn(RECHECK_LIMIT_MS),
-        signal: 打ち切り.signal,
-        previous: 前回,
-        onWaiting: (waitingFor) => {
-          if (!外れた()) {
-            onWaiting?.(waitingFor)
-          }
-        },
+    let 残す = 対象
+    const PCごと = new Map<string, AbortController>()
+    const 縮める = () => {
+      const いま戻せる = new Set(
+        最新の対象.current.map((target) => target.cardId),
+      )
+      残す = 残す.filter((target) => いま戻せる.has(target.cardId))
+      const 残るPC = new Set(残す.map((target) => target.host))
+      for (const [host, 口] of PCごと) {
+        if (!残るPC.has(host)) {
+          口.abort()
+        }
+      }
+    }
+    縮める()
+    for (const target of 残す) {
+      PCごと.set(target.host, PCごと.get(target.host) ?? new AbortController())
+    }
+    対象を縮める.current = 縮める
+    const 答え = await settleHostResources([...PCごと.keys()], {
+      // **締切は押した時点で1回だけ作り、PC 全台で共有する**
+      deadline: deadlineIn(RECHECK_LIMIT_MS),
+      signal: 打ち切り.signal,
+      previous: 前回,
+      onWaiting: (waitingFor) => {
+        if (!外れた()) {
+          onWaiting?.(waitingFor)
+        }
       },
-    )
+      hostSignals: new Map(
+        [...PCごと].map(([host, 口]) => [host, 口.signal]),
+      ),
+    }).finally(() => {
+      // **終わった聞き直しの口を残さない。** 次の聞き直しが始まっていれば、そちらのもの
+      if (対象を縮める.current === 縮める) {
+        対象を縮める.current = null
+      }
+    })
     if (中断.current === 打ち切り) {
       中断.current = null
     }
@@ -466,16 +513,13 @@ export function TileGrid() {
     if (答え === SIGNED_OUT) {
       return SIGNED_OUT
     }
-    // **対象は押した時点の集合から減らすだけ**（聞き直しの間に増えたカードを足さない）
-    const いま戻せる = new Set(
-      最新の対象.current.map((target) => target.cardId),
-    )
+    // **計画を立てる直前にもう一度縮める**（最後に描き直してから答えが届くまでのぶん）。
+    // 聞き直しの間に増えたカードは足さない
+    縮める()
     return {
-      plan: planRevive(
-        対象.filter((target) => いま戻せる.has(target.cardId)),
-        答え.answers,
-      ),
+      plan: planRevive(残す, 答え.answers),
       新しいうち: 答え.freshUntil,
+      対象: 残す,
     }
   }
 
@@ -507,7 +551,7 @@ export function TileGrid() {
         送る(立てた.plan.all)
         return
       }
-      setPlan({ ...立てた, 対象, 古くて確かめ直した: false })
+      setPlan({ ...立てた, 古くて確かめ直した: false })
     } finally {
       clearTimeout(合図)
       if (世代.current === 自分の世代) {
@@ -552,9 +596,15 @@ export function TileGrid() {
         setPlan(null)
         return
       }
+      // **戻す相手が1枚も残っていなければ閉じる。** 別の画面で全部戻された・外されたとき、
+      // 「全部戻す（0枚）」を押させても何も起きない
+      if (立てた.対象.length === 0) {
+        setPlan(null)
+        return
+      }
       // **全部入ると分かっても、黙って送らない。** 押したのは「確かめる」で「戻す」ではない
       // ——確かめた結果を見てから押したい人の手を飛ばさない（初回の門が黙って送るのとは別）
-      setPlan({ ...立てた, 対象: plan.対象, 古くて確かめ直した: 古かった })
+      setPlan({ ...立てた, 古くて確かめ直した: 古かった })
     } finally {
       if (世代.current === 自分の世代) {
         setRechecking(false)

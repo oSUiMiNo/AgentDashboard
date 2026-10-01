@@ -621,6 +621,13 @@ export interface SettleOptions {
   previous?: ReadonlyMap<string, HostResources | null>
   /** 何を待っているかを渡す。**全台の最初の答えが揃ってから**、中身が変わったときだけ呼ぶ */
   onWaiting?: (waitingFor: WaitingFor) => void
+  /**
+   * PC ごとの打ち切り。**その PC へ起こし直す対象が尽きたら、呼ぶ側が止める**（実装レビュー
+   * 第9回 Astra 4）。止めた PC へは聞くのも待つのもやめ、答えは「答え無し」で返す（数えない）。
+   *
+   * **締切はそのまま。** 外した後に組み直さないので、残った PC を待つのは元の締切までである
+   */
+  hostSignals?: ReadonlyMap<string, AbortSignal>
 }
 
 /**
@@ -662,10 +669,17 @@ export interface SettleOptions {
  * - **数えた枚数の有効期限を添えて返す**（[`Settled`]）
  * - `onWaiting` は**全台が1回答えてから**、待っているものが変わったときだけ呼ぶ——
  *   届いた順で知らせると、答えの遅い PC が居るだけで中身の違う知らせが入れ替わる
+ * - **`hostSignals` で止めた PC は外す**（実装レビュー第9回 Astra 4）。その PC への問い合わせと
+ *   眠りを切り、遅れて届いた答えは記録しない。残った PC だけで落ち着いたかを見直し、落ち着いて
+ *   いればその場で返す——答えない PC のカードが外されたのに締切まで待つと、答えた PC の起こし
+ *   直しまで最大 65 秒遅れる。始めた時点で止まっている PC には1回も聞かない
+ * - **外した PC の答えは表から消さず、「答え無し」で返す。** [`planRevive`] は表に無い PC を
+ *   「数えない」（歯止め無し）と読むので、消すと、その PC のカードが計画に紛れたとき確かめて
+ *   いない数のまま全部送ることになる。有効期限にも数えない
  */
 export async function settleHostResources(
   hosts: readonly string[],
-  { deadline, signal, previous, onWaiting }: SettleOptions,
+  { deadline, signal, previous, onWaiting, hostSignals }: SettleOptions,
 ): Promise<Settled | typeof SIGNED_OUT | 'cancelled'> {
   const 前に聞けた = new Map<string, HostResources>()
   for (const [host, found] of previous ?? []) {
@@ -695,15 +709,26 @@ export async function settleHostResources(
     全体.abort()
   }
 
+  /** 外した PC。**減るだけで、戻さない** */
+  const 外した = new Set<string>()
+  /** PC ごとの打ち切り。全体を止めたら全部止まり、外したらその PC だけ止まる */
+  const PCの口 = new Map(hosts.map((host) => [host, new AbortController()]))
+  全体.signal.addEventListener('abort', () => {
+    for (const 口 of PCの口.values()) {
+      口.abort()
+    }
+  })
+  const 残っている = () => hosts.filter((host) => !外した.has(host))
+
   const 落ち着いた = (いま: Instant) =>
-    hosts.every((host) => {
+    残っている().every((host) => {
       const got = 最後.get(host)
       return got !== undefined && !落ち着いていない(今の答え(got, いま))
     })
 
   const 待っているもの = (いま: Instant): WaitingFor | null => {
     const 待つ: RoundAnswer[] = []
-    for (const host of hosts) {
+    for (const host of 残っている()) {
       const got = 最後.get(host)
       if (got === undefined) {
         return null
@@ -719,12 +744,61 @@ export async function settleHostResources(
     return 待つ.every((answer) => answer === NO_ANSWER) ? 'answer' : 'windows'
   }
 
+  const 知らせる = (いま: Instant) => {
+    const 待ち = 待っているもの(いま)
+    if (待ち !== null && 待ち !== 知らせた) {
+      知らせた = 待ち
+      onWaiting?.(待ち)
+    }
+  }
+
+  /**
+   * その PC を外す。**残った PC だけで見直す**——他の PC が眠っている最中でも、落ち着いて
+   * いればここで返す（答えが届くのを待つと、最大で1秒遅れる）
+   */
+  const 外す = (host: string) => {
+    if (終わり !== null || 全体.signal.aborted || 外した.has(host)) {
+      return
+    }
+    外した.add(host)
+    PCの口.get(host)?.abort()
+    const いま = instantNow()
+    if (落ち着いた(いま)) {
+      終わり = 'settled'
+      全体.abort()
+      return
+    }
+    知らせる(いま)
+  }
+  const 外す口を外す: Array<() => void> = []
+  for (const host of hosts) {
+    const 印 = hostSignals?.get(host)
+    if (印 === undefined) {
+      continue
+    }
+    const 外れた = () => {
+      外す(host)
+    }
+    印.addEventListener('abort', 外れた)
+    外す口を外す.push(() => {
+      印.removeEventListener('abort', 外れた)
+    })
+    if (印.aborted) {
+      外す(host)
+    }
+  }
+
   const 聞き続ける = async (host: string) => {
+    const 口 = PCの口.get(host)!
     for (;;) {
-      const got = await 一回聞く(host, 全体.signal, () => 締切を迎えた)
-      // **締切で切ったものだけを記録する。** 落ち着いた・入館証切れ・打ち切りで切った答えは
-      // 聞くのをやめた結果で、PC の答えではない
-      if (signal.aborted || 終わり !== null) {
+      // **外した PC・止めた後には聞かない。** 切れた印で聞いても、何も聞けずに断られるだけ
+      if (口.signal.aborted) {
+        return
+      }
+      const got = await 一回聞く(host, 口.signal, () => 締切を迎えた)
+      // **締切で切ったものだけを記録する。** 落ち着いた・入館証切れ・打ち切り・外したことで
+      // 切った答えは、聞くのをやめた結果で、PC の答えではない
+      if (signal.aborted || 終わり !== null || 外した.has(host)) {
         return
       }
       if (got === SIGNED_OUT) {
@@ -751,13 +825,9 @@ export async function settleHostResources(
         締切で止める()
         return
       }
-      const 待ち = 待っているもの(いま)
-      if (待ち !== null && 待ち !== 知らせた) {
-        知らせた = 待ち
-        onWaiting?.(待ち)
-      }
-      await 眠る(RECHECK_INTERVAL_MS, 全体.signal)
-      if (全体.signal.aborted) {
+      知らせる(いま)
+      await 眠る(RECHECK_INTERVAL_MS, 口.signal)
+      if (口.signal.aborted) {
         return
       }
       // **眠った後にも締切を見る。** 残り0ミリ秒で聞き始めても、何も聞けずに切られるだけ
@@ -776,6 +846,9 @@ export async function settleHostResources(
     全体.abort()
     clearTimeout(締切の時計)
     signal.removeEventListener('abort', やめる)
+    for (const 外し口 of 外す口を外す) {
+      外し口()
+    }
   }
   if (signal.aborted) {
     return 'cancelled'
@@ -788,6 +861,11 @@ export async function settleHostResources(
   const answers = new Map<string, HostAnswer>()
   let freshUntil: FreshUntil | null = null
   for (const host of hosts) {
+    if (外した.has(host)) {
+      // **確かめ終えていないので数えない。** 前に聞けた答えは表示にだけ使う
+      answers.set(host, noAnswer(前に聞けた.get(host) ?? null))
+      continue
+    }
     const got = 最後.get(host)
     // **`??` で既定を当てない。** `null`（数えない）まで答え無しに化ける
     const answer = got === undefined ? NO_ANSWER : 今の答え(got, 返す時刻)
