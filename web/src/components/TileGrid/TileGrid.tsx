@@ -56,7 +56,7 @@ export const ANNOUNCE_DEBOUNCE_MS = 100
  * 押してから、帯に「確かめています」と「やめる」を出すまでの待ち（ms）。
  *
  * **答えは普段なら数十ミリ秒で返る。** 押した瞬間に出すと、帯の文字が一瞬だけ入れ替わって
- * 戻るので、壊れたように見える。かといって聞き直しに入るまで出さないと、1周目の問い合わせが
+ * 戻るので、壊れたように見える。かといって聞き直しに入るまで出さないと、最初の問い合わせが
  * 止まったとき（最長 [`ASK_LIMIT_MS`]）にやめる手段が無い
  */
 export const WAITING_SHOW_DELAY_MS = 400
@@ -218,7 +218,7 @@ export function TileGrid() {
   const [asking, setAsking] = useState(false)
   /**
    * 帯で待っているもの。**出ている間は帯に「やめる」がある**（最長 65 秒聞き直すので）。
-   * `'first'` は1周目の答えがまだ来ていない
+   * `'first'` は、全台の最初の答えがまだ揃っていない
    */
   const [waiting, setWaiting] = useState<WaitingFor | 'first' | null>(null)
   /** ダイアログの「もう一度確かめる」が聞き直している間 */
@@ -423,7 +423,7 @@ export function TileGrid() {
    * 資源を聞き、計画を立てる。**`checking`・`stale`・答えが来なかった PC は聞き直してから**
    * （設計§6-3）。遅れた答え（世代が進んだ）なら `'cancelled'`。
    *
-   * `前回` は確かめ直しのときの PC 別の答え。**1周目の通信が失敗しても、前回の答えを
+   * `前回` は確かめ直しのときの PC 別の答え。**最初の通信が失敗しても、前回の答えを
    * 持ったまま「確かめられていない」に留める**——歯止め無しへ倒して全部送らない
    */
   const 計画する = async (
@@ -443,7 +443,7 @@ export function TileGrid() {
     const 答え = await settleHostResources(
       [...new Set(対象.map((target) => target.host))],
       {
-        // **締切は押した時点で1回だけ作り、PC 全台・全周で共有する**
+        // **締切は押した時点で1回だけ作り、PC 全台で共有する**
         deadline: deadlineIn(RECHECK_LIMIT_MS),
         signal: 打ち切り.signal,
         previous: 前回,

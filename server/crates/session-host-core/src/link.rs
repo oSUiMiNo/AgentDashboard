@@ -282,6 +282,27 @@ impl EventSink for SessionHostLink {
         let _ = self.outgoing.send(Outgoing::Reset(card_id));
     }
 
+    /// **報告（`emit`）と同じ列に積む。** 止めた実体の `Ended` を配ってから答えるので、
+    /// サーバは答えを受けた時点で記録が終わっている（記録のいまの状態を添えて配る）
+    fn kill_answered(&self, answer: crate::events::KillAnswered) {
+        let message = AgentMessage::KillAnswer {
+            card_id: answer.card_id,
+            op: answer.op,
+            outcome: answer.outcome,
+        };
+        let _ = self.outgoing.send(Outgoing::Volatile(message));
+    }
+
+    /// 終了の答えと同じく、報告（`emit`）と同じ列に積む。作った実体の姿（`SessionUpsert`）を
+    /// 配ってから答えるので、サーバは答えを受けた時点で記録が新しい実体を指している
+    fn revive_answered(&self, answer: crate::events::ReviveAnswered) {
+        let message = AgentMessage::ReviveAnswer {
+            card_id: answer.card_id,
+            op: answer.op,
+        };
+        let _ = self.outgoing.send(Outgoing::Volatile(message));
+    }
+
     fn model_aliases_changed(&self, aliases: serde_json::Value) {
         let message = {
             let mut table = self.model_table.lock().expect("ロックが壊れていない");
@@ -318,11 +339,13 @@ fn to_agent_message(event: &ServerMessage) -> Option<AgentMessage> {
         ServerMessage::SessionRemoved { card_id } => {
             AgentMessage::SessionRemoved { card_id: *card_id }
         }
+        // `op`（頼みへの答えの番号）はサーバが付けるもので、PC の報告は付けない
         ServerMessage::Status {
             card_id,
             status,
             subagent_active,
             last_activity_at,
+            op: _,
         } => AgentMessage::Status {
             card_id: *card_id,
             status: *status,
@@ -369,12 +392,14 @@ fn to_agent_message(event: &ServerMessage) -> Option<AgentMessage> {
             kind,
             busy,
             withdrawn,
+            ops,
         } => AgentMessage::Error {
             card_id: *card_id,
             message: message.clone(),
             kind: *kind,
             busy: *busy,
             withdrawn: *withdrawn,
+            ops: ops.clone(),
         },
         // `BusStatus` はサーバ同士の話（インスタンスの間の連絡係。設計§12）。
         // **PC は自分が繋いだ1台としか話さない**ので、運ぶ意味も運ぶ手段も無い。
@@ -1432,6 +1457,7 @@ fn apply_command(
                     kind: ErrorKind::Other,
                     busy: None,
                     withdrawn: None,
+                    ops: Vec::new(),
                 });
             }
         }
@@ -1445,17 +1471,27 @@ fn apply_command(
             cwd,
             permission_mode,
             claude_session_id,
+            op,
         } => {
-            let Some(in_flight) = manager.begin_revive(card_id) else {
+            let Some(in_flight) = manager.begin_revive(card_id, op) else {
                 // 待ち行列に並ばせない。同じカードが2つ並ぶと、席が空いたとき
                 // 両方とも通る（設計§8-1）
                 //
                 // **競合と名乗る**（寝ているカードばかりなのに、メモリ不足でセッションを
                 // 起こせない 設計§7-3）。先に起こしている側が居るので、待てば起きる——
-                // 枝分かれはこれで失敗してはいけない
-                report_revive(manager, card_id, ALREADY_REVIVING.to_string(), true, None);
+                // 枝分かれはこれで失敗してはいけない。番号は先の札へ束ねてあるので、先の
+                // 起こし直しが断られればその断りでも答える（実装レビュー第6回 Astra 3）
+                report_revive(
+                    manager,
+                    card_id,
+                    ALREADY_REVIVING.to_string(),
+                    true,
+                    None,
+                    op.into_iter().collect(),
+                );
                 return;
             };
+            let answers = in_flight.answers();
             let manager = Arc::clone(manager);
             tokio::spawn(async move {
                 if let Err(err) = manager
@@ -1467,8 +1503,18 @@ fn apply_command(
                     //
                     // **終わった断りと名乗る**（設計§7-3）。待っても起きないので、起きるのを
                     // 待っている枝分かれはこれを見てすぐ失敗する
+                    //
+                    // **答える頼みの番号を添える**（実装レビュー第6回 Astra 3）。札が表から
+                    // 外れた後に読むので、後から受け付けた別の起こし直しの番号は混ざらない
                     let withdrawn = err.withdrawal();
-                    report_revive(&manager, card_id, err.to_string(), false, withdrawn);
+                    report_revive(
+                        &manager,
+                        card_id,
+                        err.to_string(),
+                        false,
+                        withdrawn,
+                        answers.ops(),
+                    );
                 }
             });
         }
@@ -1491,6 +1537,7 @@ fn apply_command(
                     kind: ErrorKind::Other,
                     busy: None,
                     withdrawn: None,
+                    ops: Vec::new(),
                 });
             }
         }
@@ -1498,7 +1545,12 @@ fn apply_command(
         ServerToAgent::SessionsExist { request_id, ids } => {
             answer_ask(outgoing.clone(), request_id, Ask::Sessions(ids));
         }
-        ServerToAgent::Kill { card_id } => {
+        // 番号付きの頼みは断らない——何も無かったことも答え（`KillAnswer`）で返る
+        ServerToAgent::Kill {
+            card_id,
+            op: Some(op),
+        } => manager.kill_answering(card_id, op),
+        ServerToAgent::Kill { card_id, op: None } => {
             if let Err(err) = manager.kill(card_id) {
                 report_error(manager, card_id, err.to_string(), ErrorKind::Kill);
             }
@@ -1727,11 +1779,13 @@ fn report_error(manager: &Arc<SessionManager>, card_id: CardId, message: String,
         kind,
         busy: None,
         withdrawn: None,
+        ops: Vec::new(),
     });
 }
 
 /// 起こし直しの断りを上へ返す。`busy` は競合なら真、終わった断りなら偽（設計§7-3）。
-/// `withdrawn` は取り下げた断りならその理由（実装レビュー第4回 Astra 1）。
+/// `withdrawn` は取り下げた断りならその理由（実装レビュー第4回 Astra 1）。`ops` は答える
+/// 頼みの番号（実装レビュー第6回 Astra 3）。
 ///
 /// **起こし直しだけ別の口にする。** 他の断りは性質を名乗る必要が無く、`None` のまま
 /// （待つ側はいまどおり待つ）にしておくのが安全なため
@@ -1741,6 +1795,7 @@ fn report_revive(
     message: String,
     busy: bool,
     withdrawn: Option<protocol::ws::Withdrawal>,
+    ops: Vec<protocol::ws::OpId>,
 ) {
     manager.broadcast(ServerMessage::Error {
         card_id: Some(card_id),
@@ -1748,6 +1803,7 @@ fn report_revive(
         kind: ErrorKind::Revive,
         busy: Some(busy),
         withdrawn,
+        ops,
     });
 }
 

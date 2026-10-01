@@ -1431,6 +1431,7 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
             cwd: meta.project.0.clone(),
             permission_mode: meta.permission_mode.clone(),
             claude_session_id,
+            op: request.op,
         };
         match route {
             Route::Here(conn) => {
@@ -1511,10 +1512,15 @@ impl crate::session_host::SessionHost for RemoteSessionHost {
     ///    **起こし直しを名乗る PC にだけ送る**（`Need::Revive`）——名乗らない PC は起こし
     ///    直しをしておらず、止めるものが無い。そのときは以前と同じく「繋がっていません」と
     ///    断る（「版が古い」と言うと、止めるものが無いのに更新を促すことになる）
-    async fn kill(&self, account_id: Uuid, card_id: CardId) -> Result<(), String> {
+    async fn kill(
+        &self,
+        account_id: Uuid,
+        card_id: CardId,
+        op: Option<protocol::ws::OpId>,
+    ) -> Result<(), String> {
         use crate::session_host::HostAskError;
 
-        let message = ServerToAgent::Kill { card_id };
+        let message = ServerToAgent::Kill { card_id, op };
         if let Some(conn) = self.hub.conn_for_card(card_id) {
             conn.send(&message);
             return Ok(());
@@ -2498,6 +2504,7 @@ async fn handle_report(
                         status,
                         subagent_active,
                         last_activity_at,
+                        op: None,
                     },
                 )
                 .await;
@@ -2582,11 +2589,13 @@ async fn handle_report(
             kind,
             busy,
             withdrawn,
+            ops,
         } => {
             // **`busy` を落とさない**（寝ているカードばかりなのに、メモリ不足で
             // セッションを起こせない 設計§7-3）。落とすとセルフホストでだけ、競合と
             // 終わった断りの見分けが付かなくなる。**`withdrawn` も同じ**（実装レビュー
-            // 第4回 Astra 1）——落とすとセルフホストでだけ、CLI の終了が取り下げで満ちない
+            // 第4回 Astra 1）。**`ops` も同じ**（第6回 Astra 3）——落とすとセルフホストでだけ、
+            // 枝分かれが自分の起こし直しの断りを拾えない
             hub.registry
                 .apply(
                     origin,
@@ -2596,9 +2605,26 @@ async fn handle_report(
                         kind,
                         busy,
                         withdrawn,
+                        ops,
                     },
                 )
                 .await;
+        }
+
+        // 終了の頼みへの答え（実装レビュー第6回 Astra 1）。合否は記録層が記録と合わせて決める。
+        // **報告と同じ接続の順で処理する**——止めた実体の `Ended` は、答えより先にここを通って
+        // 記録へ書かれている
+        AgentMessage::KillAnswer {
+            card_id,
+            op,
+            outcome,
+        } => {
+            hub.registry.answer_kill(origin, card_id, op, outcome);
+        }
+        // 起こし直しの頼みへの成功の答え（実装レビュー第6回）。作った実体の姿は、答えより先に
+        // ここを通って記録へ書かれている
+        AgentMessage::ReviveAnswer { card_id, op } => {
+            hub.registry.answer_revive(origin, card_id, op);
         }
 
         // 問いへの答え（イシューグループ_2026_0805_0514 設計§7）。

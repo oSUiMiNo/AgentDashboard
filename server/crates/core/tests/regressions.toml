@@ -59,7 +59,7 @@
 #
 # ## 
 
-min_entries = 185
+min_entries = 189
 
 [[entry]]
 issue       = "イシューグループ_2026-0821-1953/セッションごとにも全体にも自分用のメモを残せるようにする"
@@ -1616,6 +1616,46 @@ tests       = [
 ]
 breaks_when = "wait.rs の終了の待ちの判定を、旧来の revive_refusal_of（終わった断りなら何でも）へ戻す（wait.rs の「終了待ちは終了の頼み以外の起こし直しの断りでは満ちない」が★メモリ不足の断りで、終了の待ちが満ちたか落ちた で落ちる）。実体の有無を見ずに取り下げで満ちる形（Some(false) → _）にする（「終了待ちは生きた実体があれば取り下げの断りでは満ちず終了を待つ」が★生きた実体があるのに、取り下げの断りで止まったと言っている）。gateway.rs の中継で withdrawn を None に落とす（cluster の「終了の頼みで取り下げた断りは理由を落とさず跨いで届く」が★跨いだ先で、終了の頼みで取り下げた断りとして読めない、a2s の1本が★取り下げの断りが終了の頼みとして読めず、CLI が上限まで待ち続けている）。link.rs で理由を None にする（a2s の1本が同じ★）。local.rs で理由を None にする（restart の1本が★終了の頼みが、起こし直しを止めた後も上限まで待ち続けている）。いずれも直した担当が実測した。自分でも wait.rs の kill_withdrawal_of で見分ける条件を false にして、そのカードの起こし直しの断りを全部満ちる側へ通し、「終了待ちは終了の頼み以外の起こし直しの断りでは満ちない」が★メモリ不足の断りで、終了の待ちが満ちたか落ちた（実体がある：false）で、第3回の「終了待ちは起こし直しが終わった断りで止まったと満ち競合では待ち続ける」が「競合で満ちも落ちもしないこと」で落ちることを当て直した"
 verified    = true
+retired     = { by = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない", on = "2026-10-01" }
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "CLI で終了を待つとき、頼みの番号が付いた答えでだけ決まり、写しの状態・起こし直しの取り下げの断り・他の頼みや番号の無い断りでは満ちも落ちもせず、届かなかった断り（持ち主の門・配送の失敗）は番号付きで返ってその場で落ちる。番号と答えは PC→サーバ→CLI のどの段でも落ちない"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/src/client/wait.rs", name = "終了待ちは自分の番号を含む断りでだけ落ち配送の失敗を成功に変えない" },
+  { file = "server/crates/core/src/client/wait.rs", name = "終了待ちは終了の頼み以外の起こし直しの断りでは満ちない" },
+  { file = "server/crates/core/src/client/wait.rs", name = "終了待ちは生きた実体があれば取り下げの断りでは満ちず終了を待つ" },
+  { file = "server/crates/core/src/client/wait.rs", name = "終了は番号を振って送りその番号で待つ" },
+  { file = "server/crates/core/tests/cli_ops.rs", name = "持ち主の門で断られた番号付きの終了はその場で落ちる" },
+  { file = "server/crates/server-core/tests/registry.rs", name = "終了の答えは記録と合わせて合否にし番号を添えて配る" },
+  { file = "server/crates/server-core/tests/cluster.rs", name = "終了の答えは跨いだ先で番号付きの状態として届く" },
+  { file = "server/crates/core/tests/a2s.rs", name = "接続断のカードを起こし直しの確かめ中に終了させると_CLI_は止まったと返し_PC_は起こさない" },
+  { file = "server/crates/protocol/src/ws.rs", name = "頼みの番号は欠けても読め_無ければ書き出さず_あれば綴りのまま往復する" },
+  { file = "server/crates/protocol/src/a2s.rs", name = "頼みの番号と終了の答えは欠けても読め_知らない答えは成功と読まない" },
+]
+breaks_when = "次を壊して、それぞれ狙った検査で落ちることを確かめた（第6回）。wait.rs で写しが Ended のときに種別 kill の断りを成功に変える以前の規則を戻す（wait.rs の「終了待ちは自分の番号を含む断りでだけ落ち…」が「★終了の頼みが届かなかった断りを、成功に変えている」）。wait.rs で終了の頼みで取り下げた起こし直しの断り（withdrawn: kill）で満ちる以前の規則を戻す（wait.rs の2本が「★終了の頼みで取り下げたの起こし直しの断りで…」「★生きた実体があるのに、取り下げの断りで止まったと言っている」）。ws.rs の持ち主の門の断りから番号を外す（cli_ops の1本が「★門の断りに終了の頼みの番号が無く、CLI が上限まで待ち続けている」）。gateway.rs で KillAnswer を捨てる（cluster の1本が「番号付きの状態 が届きませんでした」、a2s の1本が上限まで待って Elapsed）。registry.rs の answer_kill で「何も無かった」を常に成功にする（registry の1本が★）"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "CLI で起こし直しを待つとき、写しが何枚届いても満ちず（連絡係を使う構成で2枚届いても）、頼みの番号が付いた答えで満ち、断りはどの道（門・動いている・呼び戻し先が無い・競合・届かない・PC の断り）でも番号を運んでその場で落ちる。古い相手と混ざったときは時間切れで終わり、起こせたとは言わない"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/src/client/wait.rs", name = "起こし直しは写しが何枚届いても番号の付いた答えでだけ満ちる" },
+  { file = "server/crates/core/src/client/wait.rs", name = "起こし直しは自分の番号を含む断りでその場で落ち他の断りは聞き流す" },
+  { file = "server/crates/core/src/client/wait.rs", name = "起こし直しの時間切れは答えが届かなかっただけかもしれないことと確かめ方を添える" },
+  { file = "server/crates/core/src/client/wait.rs", name = "起こし直しは番号を振って送りその番号で待つ" },
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "番号付きの起こし直しは実体を作り終えたら番号付きで1回だけ答え番号の無い頼みには答えない" },
+  { file = "server/crates/server-core/tests/registry.rs", name = "起こし直しの成功の答えは記録の状態に番号を添えて配り記録が無ければ番号付きで断る" },
+  { file = "server/crates/server-core/tests/cluster.rs", name = "起こし直しの答えは跨いだ先で番号付きの状態として届く" },
+  { file = "server/crates/server-core/tests/cluster.rs", name = "別のインスタンスに繋がった_PC_の抜け殻も起こし直せる" },
+  { file = "server/crates/core/tests/cli_ops.rs", name = "起こし直しの断りは時間切れを待たずに一で落ちる" },
+  { file = "server/crates/core/tests/restart.rs", name = "動いているカードは起こし直せない" },
+  { file = "server/crates/core/tests/restart.rs", name = "抜け殻のカードは同じidのまま起こし直せる" },
+]
+breaks_when = "次を壊して、それぞれ狙った検査で落ちることを確かめた（第6回）。wait.rs で写しを1枚だけ見送り、その後の「起動中かつ繋がっている」写しで満ちる以前の形を戻す（wait.rs の1本が「★2枚目の写しで満ちた」）。session/mod.rs の revive で作り終えても答えない（session_revive の1本が「★実体を作り終えたのに、番号付きで答えていない」）。gateway.rs で ReviveAnswer を捨てる（cluster の1本が「番号付きの状態 が届きませんでした」）。ws.rs の「動いている」の断りから番号を外す（cli_ops の1本と restart の「動いているカードは起こし直せない」が 125 秒の時間切れで落ちる）。local.rs の revive_answered で答えを運ばない（restart の「抜け殻のカードは同じidのまま起こし直せる」が 125 秒の時間切れで落ちる）"
+verified    = true
 
 [[entry]]
 issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
@@ -1943,7 +1983,7 @@ verified    = true
 
 [[entry]]
 issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
-behavior    = "寝ているカードの終了を待つとき、接続直後の写しの Ended では満ちず、頼みへの答え（取り下げ・配り直し・見つからない断り）で満ちる"
+behavior    = "寝ているカードの終了を待つとき、接続直後の写しの Ended では満ちず（連絡係を使う構成で写しが2枚届いても満ちない）、終了の頼みの番号が付いた答えで満ちる。止めるものが無かったカードは、記録が終わっていれば成功になる"
 gate        = "unit"
 tests       = [
   { file = "server/crates/core/src/client/wait.rs", name = "終了待ちは接続直後の写しのendedでは満ちず頼みへの答えで満ちる" },
@@ -1951,7 +1991,7 @@ tests       = [
   { file = "server/crates/core/tests/restart.rs", name = "起こし直していない寝たカードの終了は写しの後に届く答えですぐ満ちる" },
   { file = "server/crates/core/tests/restart.rs", name = "前回の起動が残した抜け殻の終了は止めるものが無くても成功で返る" },
 ]
-breaks_when = "wait.rs で写しを見送らない（単体1本と restart の確かめ中の1本が★）。session/mod.rs の kill で終わっていた実体を配り直さない（起こし直していない寝たカードの1本が Elapsed で★）。写しが Ended のときの種別 kill の断りで満ちる規則を外す（単体1本と前回の起動の1本が★）。いずれも直した担当が実測した。自分でも wait.rs で1枚目の写しを見送る分岐に入らない形にし、wait.rs の単体が「★接続直後の写しが Ended だというだけで、終了の頼みへの答えを待たずに満ちている」で落ちることを当て直した"
+breaks_when = "第6回で番号の答えへ改めた後に、自分で次を壊して落ちることを確かめた。wait.rs で写しを1枚だけ見送り、その後の Ended で満ちる以前の形へ戻す（wait.rs の単体が「★2枚目の写しの `Ended` で満ちた」）。local.rs の kill_answered で答えを運ばない（restart の「起こし直していない寝たカード…」が「★終わっていた実体への終了に答えが無く、上限まで待っている」、「前回の起動が残した抜け殻…」が上限まで待って Elapsed）。registry.rs の answer_kill で「何も無かった」を記録の状態を見ずに成功にする（registry の「終了の答えは記録と合わせて合否にし番号を添えて配る」が「★記録の上で動いているカードに何も無いのを成功にしている」。抜け殻の成功と食い違いの失敗を見分ける側の見張り）"
 verified    = true
 
 [[entry]]
@@ -1972,6 +2012,23 @@ verified    = true
 
 [[entry]]
 issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "寝ている元から枝分かれするとき、拾う断りは段取りが振った頼みの番号を運ぶものだけで、先の起こし直しの断りが後の受付の後に届いても・取りこぼして記録から引き直しても取り違えず、競合で先の起こし直しへ束ねられたらその断りで止まる。番号は PC→サーバの間でも落ちない"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/server-core/src/branch.rs", name = "拾うのはそのカードの起こし直しの終わった断りだけ" },
+  { file = "server/crates/server-core/src/branch.rs", name = "先の起こし直しの断りが後の受付の後に届いても自分の結果と取り違えない" },
+  { file = "server/crates/server-core/src/branch.rs", name = "競合で先の起こし直しへ束ねられたらその断りで止まる" },
+  { file = "server/crates/server-core/src/branch.rs", name = "取りこぼした断りも記録から番号で引き直す" },
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "起こし直しの断りは受け付けた頼みと競合で束ねた頼みの番号を運ぶ" },
+  { file = "server/crates/server-core/tests/registry.rs", name = "起こし直しの終わった断りは配った後も記録から引ける" },
+  { file = "server/crates/server-core/tests/cluster.rs", name = "終了の頼みで取り下げた断りは理由を落とさず跨いで届く" },
+  { file = "server/crates/core/tests/branch.rs", name = "起きる待ちで別の頼みへの終わった断りを受けても待ち続けて枝を作る" },
+]
+breaks_when = "次を壊して、それぞれ狙った検査で落ちることを確かめた（第6回）。branch.rs と registry.rs で番号を見ずに拾う形（通し番号の目印の頃と同じく、そのカードの断りなら拾う）にする（branch.rs の3本が「★別の頼みへの断りで拾っている」「★記録に残った別の頼みの断りを、自分の結果として引いている」「★先の起こし直しの断りを、自分の起こし直しの結果と取り違えて止まった」）。branch.rs だけ番号を見ない形にする（core の branch の1本が「★[inject-other-op] 段取り自身の頼みへの答えではない断りで、枝分かれを断っている」）。session/mod.rs の begin_revive で競合の頼みの番号を先の札へ束ねない（session_revive の1本が「★先の起こし直しの断りが、束ねた頼みの番号を運ばない／後の頼みの番号が混ざった」）。gateway.rs で PC の断りの番号を落とす（cluster の1本が「★跨いだ先で、答える頼みの番号を落としている：[]」）"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
 behavior    = "寝ている元から枝分かれするとき、配信を取りこぼしても記録に残った終わった断りを引き直してその理由で断り（競合では断らない）、起きる待ちの間に元が外されたら上限を待たずに断る"
 gate        = "unit"
 tests       = [
@@ -1980,7 +2037,7 @@ tests       = [
   { file = "server/crates/core/tests/branch.rs", name = "起きる待ちの間に元が一覧から外されたら上限を待たずに枝分かれを断る" },
   { file = "server/crates/server-core/tests/registry.rs", name = "起こし直しの終わった断りは配った後も記録から引ける" },
 ]
-breaks_when = "branch.rs で記録から断りを引くのをやめる＝目印を u64::MAX にする（取りこぼしの1本が★。配信を溢れさせる便を 400 件流し、取りこぼしが実際に起きていることも確かめた）。publish_local で断りを残すのをやめる（registry の1本が★）。owned().is_none() の照合を外す（外されたの1本が★）。いずれも直した担当が実測した。自分でも publish_local で断りを残すのをやめ、registry の1本が★で落ちることを当て直した"
+breaks_when = "第6回で記録の断りを頼みの番号で引く形へ改めた後に、registry.rs の revive_refusal_for が常に空を返す形（＝記録から断りを引くのをやめる）にし、branch の取りこぼしの1本が「★取りこぼした断りを記録から引き直していない」、registry の1本が「★配った断りが記録に残っていない」で落ちることを確かめた（配信を溢れさせる便を 400 件流して取りこぼしを起こす仕掛けは前の担当が確かめたもの）。owned().is_none() の照合を外す（外されたの1本が★）は前の担当の実測"
 verified    = true
 
 [[entry]]
@@ -2002,6 +2059,7 @@ tests       = [
 ]
 breaks_when = "branch.rs の wait_for の配信の腕を、目印を見ずに起こし直しの断りの文面で返す形へ戻す（★Ready(Err(\"先の頼みの断り\"))）。直した担当が実測した。自分でも配信の腕で revive_refusal_since の代わりに配信で受けた断りの文面をそのまま返す形にし、名指しの1本が「★目印より前の断りを配信から拾って止まった: Ready(Err(\"先の頼みの断り\"))」で落ちることを当て直した"
 verified    = true
+retired     = { by = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない", on = "2026-10-01" }
 
 [[entry]]
 issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
@@ -2018,7 +2076,7 @@ verified    = true
 
 [[entry]]
 issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
-behavior    = "確かめ待ちの間や起こしている最中に終了を頼んだとき、起こし直しを取り下げて新しいプロセスを起こさず、起こし終えた実体は止めるだけで畳まず外した印も残さないので後から起こし直せる（CLI の終了は、終了の頼みで取り下げた断りで満ち、それも実体の無いカードに限る）"
+behavior    = "確かめ待ちの間や起こしている最中に終了を頼んだとき、起こし直しを取り下げて新しいプロセスを起こさず、起こし終えた実体は止めるだけで畳まず外した印も残さないので後から起こし直せる（CLI の終了は、終了の頼みの番号が付いた答えで満ちる）"
 gate        = "unit"
 tests       = [
   { file = "server/crates/session-host-core/tests/session_revive.rs", name = "確かめを待っている間に終了を頼むと確かめが済んでも起こさず後から起こし直せる" },
@@ -2027,9 +2085,9 @@ tests       = [
   { file = "server/crates/session-host-core/tests/session_revive.rs", name = "何も持っていないカードを外し始めても断らない" },
   { file = "server/crates/core/tests/restart.rs", name = "寝かせた抜け殻を確かめ中に終了させると確かめが済んでも起こさない" },
   { file = "server/crates/core/tests/restart.rs", name = "作業中のまま残った抜け殻を確かめ中に終了させると待ち切らずに止まる" },
-  { file = "server/crates/core/src/client/wait.rs", name = "終了待ちは起こし直しが終わった断りで止まったと満ち競合では待ち続ける" },
+  { file = "server/crates/core/src/client/wait.rs", name = "終了待ちは終了の頼み以外の起こし直しの断りでは満ちない" },
 ]
-breaks_when = "session/mod.rs の kill を、実体だけを止める以前の形へ戻す（session_revive の2本が★席を握って待っている／★見つからないと断っている、restart の2本が★新しいプロセスを起こしている／★終了できなかったと返している で落ちる）。起こし終えた実体を止めずに畳む形にする（★起こした実体を畳んでいる）。札を下ろす理由を強さを見ずに上書きする（★外した断りを上書きしている）。CLI の終了待ち（wait.rs）を以前の扱いへ戻す（wait.rs の単体と restart の「作業中のまま残った抜け殻を確かめ中に終了させると待ち切らずに止まる」が★）。いずれも直した担当が実測した。自分でも ReviveTicket::withdraw で理由を max を取らずに上書きする形にし、session_revive の「終了の頼みの後に外されたら外した側の断りになり逆には戻らない」が★（外した後に届いた弱い理由で、外した断りを上書きしている）で落ちることを当て直した。第4回で wait.rs の単体を、写しと withdrawn を前提にする中身へ書き換えた後も、kill_withdrawal_of で見分ける条件を false にすると「競合で満ちも落ちもしないこと」で落ちることを当て直した"
+breaks_when = "session/mod.rs の kill を、実体だけを止める以前の形へ戻す（session_revive の2本が★席を握って待っている／★見つからないと断っている、restart の2本が★新しいプロセスを起こしている／★終了できなかったと返している で落ちる）。起こし終えた実体を止めずに畳む形にする（★起こした実体を畳んでいる）。札を下ろす理由を強さを見ずに上書きする（★外した断りを上書きしている）。いずれも直した担当が実測した。自分でも ReviveTicket::withdraw で理由を max を取らずに上書きする形にし、session_revive の「終了の頼みの後に外されたら外した側の断りになり逆には戻らない」が★（外した後に届いた弱い理由で、外した断りを上書きしている）で落ちることを当て直した。第6回で CLI の終了待ちを頼みの番号で決める形へ改めた後、wait.rs で終了の頼みで取り下げた起こし直しの断り（withdrawn: kill）で満ちる以前の規則を戻すと、名指しの wait.rs の1本が「★終了の頼みで取り下げたの起こし直しの断りで、終了の待ちが満ちたか落ちた」で落ちることを当て直した"
 verified    = true
 
 [[entry]]
@@ -2121,6 +2179,19 @@ tests       = [
   { file = "server/crates/session-host-core/tests/session_revive.rs", name = "起こし終えた後に外すと取り下げたとは記録しない" },
 ]
 breaks_when = "session/mod.rs の retire で段ごとに言い分けず、以前の1文（取り下げます）に戻す（★で落ちる）。直した担当が実測した。自分でも起こし終えた段の文を「取り下げます」の1文に戻し、名指しの1本が★で落ちることを当て直した"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "起こし終えた札が残っている間に実体が終わってから終了を頼んだときでも答えが返り、番号付きの終了には段（確かめ待ち・起こしている最中・起こし終えた・実体だけ・何も無い）ごとに1回だけ答え、生きた実体には止まるのを見届けてから答える"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "起こし終えた札が残っている間に実体が終わってから終了を頼んでも答えが返る" },
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "番号付きの終了は何をしたかを番号付きで1回だけ答える" },
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "確かめを待っている起こし直しを番号付きで止めるとその場で取り下げたと答える" },
+  { file = "server/crates/session-host-core/tests/session_revive.rs", name = "起こしている最中に番号付きで止めると作った実体が止まってから答える" },
+]
+breaks_when = "session/mod.rs の halt で、起こし終えた札（Spawned）が在るときに実体を見ずに取り下げたことにする以前の形を戻すと、session_revive の「起こし終えた札が残っている間に…」が「★起こし終えた札が残っている間に、終わっていた実体への終了に何も配っていない」で落ちることを確かめた（第6回）。札が下りる前（見張りの1周＝100ms）に頼む形を作れたかはこの試験の中で確かめ、作れなければやり直す。単独で10回流して10回とも通った"
 verified    = true
 
 [[entry]]

@@ -399,7 +399,9 @@ async fn 復旧では添付を畳まない() {
     let one = dir.join("20200101-000000-aaaaaaaa.png");
     std::fs::write(&one, "x").expect("書けること");
 
-    let in_flight = manager.begin_revive(session.card_id).expect("印が立つこと");
+    let in_flight = manager
+        .begin_revive(session.card_id, None)
+        .expect("印が立つこと");
     manager
         .revive(in_flight, &common::work_dir(), None, ClaudeSessionId::new())
         .await

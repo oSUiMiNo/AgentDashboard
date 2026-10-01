@@ -124,10 +124,14 @@ impl SessionHost for LocalSessionHost {
         // 戻せるかは入口（`server_core::ws`）が確かめてある。ここで見るのは
         // 「材料が揃っているか」だけ——呼び戻し先が無ければ `--resume` に渡す値が無い
         let claude_session_id = meta.claude_session_id.ok_or(NO_RESUME_TARGET)?;
+        // 競合で断るときも、番号は先に進んでいる札へ束ねてある（実装レビュー第6回 Astra 3）。
+        // ローカルの競合はここで同期に返るので、断りの番号を添える先が無い——束ねておけば、
+        // 先の起こし直しが断られたときにその断りがこの番号も運ぶ
         let in_flight = self
             .manager
-            .begin_revive(request.card_id)
+            .begin_revive(request.card_id, request.op)
             .ok_or(session::ALREADY_REVIVING)?;
+        let answers = in_flight.answers();
 
         let manager = Arc::clone(&self.manager);
         let cwd = meta.project.0.clone();
@@ -150,9 +154,11 @@ impl SessionHost for LocalSessionHost {
                     // **終わった断り**（設計§7-3）。起きるのを待っている枝分かれは、
                     // これを見て 180 秒待たずに失敗する
                     busy: Some(false),
-                    // 取り下げた理由（実装レビュー第4回 Astra 1）。CLI の終了の待ちは、終了の
-                    // 頼みで取り下げた断りでだけ満ちる（`link.rs` と同じ写し方）
+                    // 取り下げた理由（実装レビュー第4回 Astra 1）
                     withdrawn: err.withdrawal(),
+                    // 答える頼みの番号（実装レビュー第6回 Astra 3）。札が表から外れた後に読む
+                    // （`link.rs` と同じ写し方）
+                    ops: answers.ops(),
                 });
             }
         });
@@ -192,8 +198,20 @@ impl SessionHost for LocalSessionHost {
         .unwrap_or_default())
     }
 
-    async fn kill(&self, _account_id: uuid::Uuid, card_id: CardId) -> Result<(), String> {
-        self.manager.kill(card_id).map_err(|err| err.to_string())
+    async fn kill(
+        &self,
+        _account_id: uuid::Uuid,
+        card_id: CardId,
+        op: Option<protocol::ws::OpId>,
+    ) -> Result<(), String> {
+        match op {
+            // 番号付きの頼みは断らない——何をしたかは答え（`ReportingSink::kill_answered`）で返る
+            Some(op) => {
+                self.manager.kill_answering(card_id, op);
+                Ok(())
+            }
+            None => self.manager.kill(card_id).map_err(|err| err.to_string()),
+        }
     }
 
     fn archive(&self, card_id: CardId) -> Result<(), String> {
@@ -581,6 +599,11 @@ pub struct ReportingSink {
 enum Report {
     /// 状態や自己修復の知らせ。取り込めたかどうかで何かが変わることはない
     Volatile(ServerMessage),
+    /// 終了の頼みへの答え（実装レビュー第6回 Astra 1）。**報告と同じ列に積む**——止めた実体の
+    /// `Ended` を記録へ書いてから答えを配るため
+    KillAnswer(session_host_core::events::KillAnswered),
+    /// 起こし直しの頼みへの成功の答え（実装レビュー第6回）。同じ理由で報告と同じ列に積む
+    ReviveAnswer(session_host_core::events::ReviveAnswered),
     Transcript(TranscriptReport),
     Reset(protocol::CardId),
 }
@@ -605,6 +628,14 @@ impl EventSink for ReportingSink {
 
     fn reset_transcript(&self, card_id: protocol::CardId) {
         let _ = self.reports.send(Report::Reset(card_id));
+    }
+
+    fn kill_answered(&self, answer: session_host_core::events::KillAnswered) {
+        let _ = self.reports.send(Report::KillAnswer(answer));
+    }
+
+    fn revive_answered(&self, answer: session_host_core::events::ReviveAnswered) {
+        let _ = self.reports.send(Report::ReviveAnswer(answer));
     }
 }
 
@@ -631,6 +662,12 @@ pub fn reporting(registry: Arc<SessionRegistry>, offsets: Arc<OffsetStore>) -> A
             match report {
                 Report::Volatile(message) => {
                     registry.apply(&origin, message).await;
+                }
+                Report::KillAnswer(answer) => {
+                    registry.answer_kill(&origin, answer.card_id, answer.op, answer.outcome);
+                }
+                Report::ReviveAnswer(answer) => {
+                    registry.answer_revive(&origin, answer.card_id, answer.op);
                 }
                 Report::Transcript(report) => {
                     let TranscriptReport {

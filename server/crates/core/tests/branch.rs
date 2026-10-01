@@ -20,6 +20,7 @@
 mod common;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use agentdashboard_core::client::{self, ws::Ws};
@@ -884,8 +885,24 @@ async fn 寝ている元の起こし直しが断られたら待たずにその�
     );
 }
 
+/// 差し込む知らせに、どの頼みの番号を添えるか（実装レビュー第6回 Astra 3）。
+#[derive(Clone, Copy)]
+enum 番号 {
+    /// 段取りが元を起こすときに振った番号（＝段取り自身の頼みへの答え）
+    枝分かれの頼み,
+    /// 別の頼みの番号（先に押した人の起こし直しの断りが遅れて届いた形）
+    別の頼み,
+    /// 番号無し（古い PC）
+    無し,
+}
+
 /// 起こし直しの知らせを、PC 側から配られたのと同じ口で差し込む。
-fn 起こし直しの知らせを配る(server: &TestServer, card_id: CardId, busy: Option<bool>) {
+fn 起こし直しの知らせを配る(
+    server: &TestServer,
+    card_id: CardId,
+    busy: Option<bool>,
+    ops: Vec<protocol::ws::OpId>,
+) {
     server
         .manager
         .broadcast(protocol::ws::ServerMessage::Error {
@@ -894,6 +911,7 @@ fn 起こし直しの知らせを配る(server: &TestServer, card_id: CardId, bu
             kind: protocol::ws::ErrorKind::Revive,
             busy,
             withdrawn: None,
+            ops,
         });
 }
 
@@ -903,7 +921,12 @@ fn 起こし直しの知らせを配る(server: &TestServer, card_id: CardId, bu
 /// 必要がある。[`起こし直しの知らせを配る`] は取り込みのタスクを挟むので、途中で段取りが
 /// 読みに来て溢れ方が決まらない。ここでは記録層の配り口（`announce`）を同期で叩く——
 /// 配るのに通る関数（`publish_local`）は本物の知らせと同じである。
-async fn 溢れさせて配る(server: &TestServer, card_id: CardId, busy: Option<bool>) {
+async fn 溢れさせて配る(
+    server: &TestServer,
+    card_id: CardId,
+    busy: Option<bool>,
+    ops: Vec<protocol::ws::OpId>,
+) {
     // `announce` はブラウザが繋がっているアカウントにだけ配る
     server
         .registry
@@ -917,6 +940,7 @@ async fn 溢れさせて配る(server: &TestServer, card_id: CardId, busy: Optio
             kind: protocol::ws::ErrorKind::Revive,
             busy,
             withdrawn: None,
+            ops,
         });
     // 溜まりは 256 件。それを超えれば、先頭の知らせは必ず押し出される
     for _ in 0..400 {
@@ -928,6 +952,7 @@ async fn 溢れさせて配る(server: &TestServer, card_id: CardId, busy: Optio
                 kind: protocol::ws::ErrorKind::Other,
                 busy: None,
                 withdrawn: None,
+                ops: Vec::new(),
             });
     }
 }
@@ -967,11 +992,15 @@ async fn 見張りを閉じる(
 ///
 /// `溢れさせる` が真なら、知らせの直後に配信の溜まり（256件）を超える便を**一度も譲らずに**
 /// 流し、段取りの購読に知らせを取りこぼさせる（`Lagged`。実装レビュー Astra 4）。
+///
+/// `番号` は知らせに添える頼みの番号（実装レビュー第6回 Astra 3）。段取りは自分の番号の断り
+/// だけを拾うので、拾わせたいときは段取りが振った番号を、元を起こす直前に控えて添える。
 async fn 起きる待ちの段で差し込む(
     label: &str,
     busy: Option<bool>,
     他のカード宛て: bool,
     溢れさせる: bool,
+    番号: 番号,
 ) -> (bool, Option<String>) {
     let server = TestServer::start().await;
     let target = target_of(&server);
@@ -982,6 +1011,18 @@ async fn 起きる待ちの段で差し込む(
     寝るまで待つ(&server, &card).await;
     let card_id = 載っているカードID(&server, &card);
 
+    // 段取りが振った番号を、元を起こす直前（札が必ず表に居る間）に控える
+    let 控え: Arc<std::sync::Mutex<Vec<protocol::ws::OpId>>> = Arc::default();
+    {
+        let manager = Arc::downgrade(&server.manager);
+        let 控え = Arc::clone(&控え);
+        server.manager.起こす直前に差し込む(Arc::new(move || {
+            if let Some(manager) = manager.upgrade() {
+                *控え.lock().expect("ロックが壊れていない") =
+                    manager.起こし直しの頼みの番号(card_id);
+            }
+        }));
+    }
     let 見張り = 枝分かれの断りを見張る(&server, card_id);
     枝分かれを頼む(&target, card_id).await;
 
@@ -1000,10 +1041,21 @@ async fn 起きる待ちの段で差し込む(
     } else {
         card_id
     };
+    let 段取りの番号 = 控え.lock().expect("ロックが壊れていない").clone();
+    assert_eq!(
+        段取りの番号.len(),
+        1,
+        "段取りが番号を振って元を起こしたこと"
+    );
+    let ops = match 番号 {
+        番号::枝分かれの頼み => 段取りの番号,
+        番号::別の頼み => vec![protocol::ws::OpId::new()],
+        番号::無し => Vec::new(),
+    };
     if 溢れさせる {
-        溢れさせて配る(&server, 宛先, busy).await;
+        溢れさせて配る(&server, 宛先, busy, ops).await;
     } else {
-        起こし直しの知らせを配る(&server, 宛先, busy);
+        起こし直しの知らせを配る(&server, 宛先, busy, ops);
     }
     // 段取りが知らせを読むだけの間を置く（失敗するなら、ここで既に失敗している）
     tokio::time::sleep(Duration::from_millis(800)).await;
@@ -1026,8 +1078,14 @@ async fn 起きる待ちの段で差し込む(
 async fn 起きる待ちで元の終わった断りを受けたら枝分かれを断る() {
     // 下の「断らない」3本の対照（設計§8-4）。**差し込みが段取りまで届いていることの
     // 確かめ**であり、これが通らないと「断らない」側は何も確かめずに緑になる
-    let (済んだ, 断り) =
-        起きる待ちの段で差し込む("inject-refused", Some(false), false, false).await;
+    let (済んだ, 断り) = 起きる待ちの段で差し込む(
+        "inject-refused",
+        Some(false),
+        false,
+        false,
+        番号::枝分かれの頼み,
+    )
+    .await;
     let 断り = 断り.expect("★元宛ての終わった断りを拾っていない");
     assert!(断り.contains("差し込んだ起こし直しの知らせ"), "{断り}");
     assert!(!済んだ, "断ったのに段取りが先へ進んでいる");
@@ -1038,8 +1096,14 @@ async fn 起きる待ちで元の断りを取りこぼしても記録から引�
     // 実装レビュー Astra 4。**配信の溜まりを溢れさせて、段取りに断りを取りこぼさせる。**
     // 報せだけを見ていると断りを失い、上限（180 秒）まで待ってから事実と違う理由で終わる
     // ——ここでは入力待ちへ倒すので、断られたはずの段取りが先へ進んで枝を作ってしまう
-    let (済んだ, 断り) =
-        起きる待ちの段で差し込む("inject-lagged", Some(false), false, true).await;
+    let (済んだ, 断り) = 起きる待ちの段で差し込む(
+        "inject-lagged",
+        Some(false),
+        false,
+        true,
+        番号::枝分かれの頼み,
+    )
+    .await;
     let 断り = 断り.expect("★取りこぼした断りを記録から引き直していない");
     assert!(断り.contains("差し込んだ起こし直しの知らせ"), "{断り}");
     assert!(!済んだ, "断ったのに段取りが先へ進んでいる");
@@ -1090,8 +1154,14 @@ async fn 起きる待ちの間に元が一覧から外されたら上限を待�
 async fn 起きる待ちで取りこぼしても競合の知らせでは待ち続けて枝を作る() {
     // 上の対照。**記録から引き直すのは終わった断りだけ**——競合まで拾うと、人が先に
     // 起こしていただけで枝分かれが失敗する
-    let (済んだ, 断り) =
-        起きる待ちの段で差し込む("inject-lagged-busy", Some(true), false, true).await;
+    let (済んだ, 断り) = 起きる待ちの段で差し込む(
+        "inject-lagged-busy",
+        Some(true),
+        false,
+        true,
+        番号::枝分かれの頼み,
+    )
+    .await;
     assert_eq!(断り, None, "★取りこぼした競合で枝分かれを断っている");
     assert!(済んだ, "競合の後に起きてきたのに枝を作っていない");
 }
@@ -1099,8 +1169,14 @@ async fn 起きる待ちで取りこぼしても競合の知らせでは待ち�
 #[tokio::test]
 async fn 起きる待ちで競合の知らせを受けても待ち続けて枝を作る() {
     // 設計§7-2。**人が先に起こしていたら、待てば起きる**——失敗させてはいけない
-    let (済んだ, 断り) =
-        起きる待ちの段で差し込む("inject-busy", Some(true), false, false).await;
+    let (済んだ, 断り) = 起きる待ちの段で差し込む(
+        "inject-busy",
+        Some(true),
+        false,
+        false,
+        番号::枝分かれの頼み,
+    )
+    .await;
     assert_eq!(断り, None, "★競合で枝分かれを断っている");
     assert!(済んだ, "競合の後に起きてきたのに枝を作っていない");
 }
@@ -1109,17 +1185,49 @@ async fn 起きる待ちで競合の知らせを受けても待ち続けて枝�
 async fn 起きる待ちで判別できない知らせを受けても待ち続けて枝を作る() {
     // 設計§7-3。**古い PC は `busy` を名乗らない。** 欠けを断りと読むと、古い PC の
     // 競合で枝分かれを止める
-    let (済んだ, 断り) = 起きる待ちの段で差し込む("inject-unknown", None, false, false).await;
+    let (済んだ, 断り) = 起きる待ちの段で差し込む(
+        "inject-unknown",
+        None,
+        false,
+        false,
+        番号::枝分かれの頼み,
+    )
+    .await;
     assert_eq!(断り, None, "★判別できない知らせで枝分かれを断っている");
     assert!(済んだ, "起きてきたのに枝を作っていない");
 }
 
 #[tokio::test]
 async fn 起きる待ちで他のカードの断りを受けても待ち続けて枝を作る() {
-    let (済んだ, 断り) =
-        起きる待ちの段で差し込む("inject-other", Some(false), true, false).await;
+    let (済んだ, 断り) = 起きる待ちの段で差し込む(
+        "inject-other",
+        Some(false),
+        true,
+        false,
+        番号::枝分かれの頼み,
+    )
+    .await;
     assert_eq!(断り, None, "★他のカードの断りで枝分かれを断っている");
     assert!(済んだ, "起きてきたのに枝を作っていない");
+}
+
+#[tokio::test]
+async fn 起きる待ちで別の頼みへの終わった断りを受けても待ち続けて枝を作る() {
+    // 実装レビュー第6回 Astra 3。先に押した人の起こし直しの断りが、段取りの起こし直しを受け付けた
+    // **後に**届いた形。以前は取り込んだ時点の通し番号で拾っていたので、古い断りを自分の結果と
+    // 取り違えて枝分かれを止めた。番号の無い断り（古い PC）も、誰への答えとも言えないので拾わない
+    for (label, 何の番号) in [
+        ("inject-other-op", 番号::別の頼み),
+        ("inject-no-op", 番号::無し),
+    ] {
+        let (済んだ, 断り) =
+            起きる待ちの段で差し込む(label, Some(false), false, false, 何の番号).await;
+        assert_eq!(
+            断り, None,
+            "★[{label}] 段取り自身の頼みへの答えではない断りで、枝分かれを断っている"
+        );
+        assert!(済んだ, "[{label}] 起きてきたのに枝を作っていない");
+    }
 }
 
 #[tokio::test]
@@ -1146,7 +1254,13 @@ async fn ターンの終わりを待つ段では元の起こし直しの断り�
     枝分かれを頼む(&target, card_id).await;
     // 段取りがターンの終わりを待つ段へ入るまで置く（`作業中に押すと…` と同じ間）
     tokio::time::sleep(Duration::from_millis(1500)).await;
-    起こし直しの知らせを配る(&server, card_id, Some(false));
+    // 寝ていないので段取りは元を起こしておらず、番号も振っていない。どの番号を添えても拾わない
+    起こし直しの知らせを配る(
+        &server,
+        card_id,
+        Some(false),
+        vec![protocol::ws::OpId::new()],
+    );
     tokio::time::sleep(Duration::from_millis(800)).await;
 
     client::send_input(
@@ -1226,7 +1340,7 @@ async fn cliの枝分かれは元の起こし直しの競合の知らせで落�
             })
         })
         .await;
-    起こし直しの知らせを配る(&server, card_id, Some(true));
+    起こし直しの知らせを配る(&server, card_id, Some(true), Vec::new());
     // CLI が知らせを読むだけの間を置く（落ちるなら、ここで既に落ちている）
     tokio::time::sleep(Duration::from_millis(800)).await;
     client::send_input(

@@ -520,7 +520,7 @@ async fn 確かめ中に外す(server: &common::TestServer, card_id: protocol::C
     // 外す側では、外した印は記録を外せた後の知らせ（`forget`）が立てる（第3回 Astra 1）
     let in_flight = server
         .manager
-        .begin_revive(card_id)
+        .begin_revive(card_id, None)
         .expect("外したカードへの頼みを、競合（復旧中）として断らないこと");
     let 断り = server
         .manager
@@ -637,6 +637,7 @@ async fn 外した知らせが起こし直しの頼みより先に届いても�
         server_core::session_host::ReviveRequest {
             account_id: server_core::db::LOCAL_ACCOUNT_ID,
             card_id,
+            op: None,
         },
     )
     .await
@@ -902,11 +903,11 @@ async fn 確かめ中に終了を頼む(server: &common::TestServer, card_id: pr
     .await
     .expect("★終了の頼みが、起こし直しを止めた後も上限まで待ち続けている");
     let 終了 = 終了.expect("★起こし直しを止めたのに、終了できなかったと返している");
-    // **取り下げの答えで満ちたこと**（実装レビュー第5回 Astra 2）。寝ているカードの写しは
-    // `Ended` なので、写しで満ちると取り下げを読まずに成功する
+    // **終了の頼みへの答え（番号付きの状態）で満ちたこと**（実装レビュー第5回 Astra 2・第6回
+    // Astra 1）。寝ているカードの写しは `Ended` なので、写しで満ちると取り下げを読まずに成功する
     assert!(
-        終了.raw.contains(r#""withdrawn": "kill""#),
-        "★終了の頼みへの答え（取り下げ）ではなく、接続直後の写しで満ちている: {}",
+        終了.raw.contains(r#""t": "status""#) && 終了.raw.contains(r#""op": ""#),
+        "★終了の頼みへの答えではなく、接続直後の写しで満ちている: {}",
         終了.raw
     );
 
@@ -955,10 +956,10 @@ async fn 寝かせた抜け殻を確かめ中に終了させると確かめが�
 
 #[tokio::test]
 async fn 起こし直していない寝たカードの終了は写しの後に届く答えですぐ満ちる() {
-    // 実装レビュー第5回 Astra 2。CLI は接続直後の写しの `Ended` では満ちなくなったので、
-    // **起こし直しが無いときの答え**が要る。終わっていた実体なら PC がいまの姿を配り直し、
-    // 何も無い（前回の起動が残した）なら見つからないという断りが答えになる。どちらも上限
-    // （30 秒）まで待たずに成功で返ること
+    // 実装レビュー第5回 Astra 2・第6回 Astra 1。CLI は接続直後の写しの `Ended` では満ちないので、
+    // **起こし直しが無いときの答え**が要る。終わっていた実体なら PC が「既に終わっていた」、
+    // 何も無い（前回の起動が残した）なら「何も無かった」と番号付きで答え、記録層が記録と合わせて
+    // 成功にする。どちらも上限（30 秒）まで待たずに成功で返ること
     let server = common::TestServer::start_with(config_for("kill-asleep-no-revive")).await;
     let (session, _) = 呼び戻し先つきで起こす(&server).await;
     let card_id = session.card_id;
@@ -986,7 +987,7 @@ async fn 起こし直していない寝たカードの終了は写しの後に�
 
 #[tokio::test]
 async fn 前回の起動が残した抜け殻の終了は止めるものが無くても成功で返る() {
-    // 実体も起こし直しも無い（PC は見つからないと断る）。以前は写しの `Ended` で満ちていた
+    // 実体も起こし直しも無い（PC は何も無かったと答える）。以前は写しの `Ended` で満ちていた
     let config = config_for("kill-left-over");
     let card_id = {
         let server = common::TestServer::start_with(config.clone()).await;
@@ -1017,9 +1018,16 @@ async fn 前回の起動が残した抜け殻の終了は止めるものが無�
         agentdashboard_core::client::kill(&target_of(&server), &card_id.to_string()),
     )
     .await
-    .expect("上限まで待たないこと")
+    .expect("★止めるものが無かったという答えが CLI まで届かず、上限まで待っている")
     .expect("★止めるものが無かっただけなのに、終了できなかったと返している");
-    assert!(終了.human.contains("既に終了しています"), "{}", 終了.human);
+    // PC は「何も無かった」と答え、記録が終わっているので記録層が成功にして配る（実装レビュー
+    // 第6回 Astra 1。以前は CLI が写しの `Ended` で見分けていた）
+    assert!(終了.human.contains("終了しました"), "{}", 終了.human);
+    assert!(
+        終了.raw.contains(r#""op": ""#),
+        "★終了の頼みへの番号付きの答えではないもので満ちている: {}",
+        終了.raw
+    );
 }
 
 #[tokio::test]

@@ -30,7 +30,8 @@ use protocol::{
     AgentId, AnnotationTarget, CardId, ClaudeLoginFingerprint, ClaudeSessionId, ContextUsage,
     MemoId, ModelId, NodeId, PermissionMode, ProjectId, RateLimits, SessionCost, SessionMeta,
     SessionStatus, TreeNode,
-    ws::{ErrorKind, MemoView, NoticeView, ServerMessage},
+    a2s::KillOutcome,
+    ws::{ErrorKind, MemoView, NoticeView, OpId, ServerMessage},
 };
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
@@ -42,7 +43,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{
         Arc, Mutex, Weak,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
@@ -64,6 +65,12 @@ const REMOVAL_RETRY_MAX: Duration = Duration::from_secs(60);
 /// なので、上限まで溜まっても数十 KB に収まる。
 const REMOVED_CARDS_KEPT: usize = 1024;
 
+/// 1枚のカードにつき残す起こし直しの終わった断りの件数（[`SessionRecord::revive_refusals`]）。
+///
+/// 待っている枝分かれが取りこぼした後に引き直せればよいので、同じカードへ立て続けに来た
+/// 断りの数だけあれば足りる。溢れたら古い順に忘れる。
+const REVIVE_REFUSALS_KEPT: usize = 8;
+
 /// 在席の印がこれだけ古くなったら死んだものとみなす（ミリ秒。設計§9-4）。
 ///
 /// 記す側（[`crate::gateway`]）と同じ値でなければならない。ずれると、記し直す前に
@@ -84,42 +91,25 @@ pub struct TranscriptPage {
     pub has_more: bool,
 }
 
-/// 起こし直しの**終わった断り**なら、宛先のカードと文面（寝ているカードばかりなのに、
-/// メモリ不足でセッションを起こせない 設計§7-3）。
+/// 起こし直しの**終わった断り**なら、宛先のカード・答える頼みの番号・文面（寝ているカード
+/// ばかりなのに、メモリ不足でセッションを起こせない 設計§7-3・実装レビュー第6回 Astra 3）。
 ///
 /// 競合（`busy: Some(true)`）と判別できない知らせ（`None`）は含めない——待てば起きるか、
 /// 起きるかどうか分からないので、待っている側を止めてはいけない。**見分けの正本はここ**
 /// （記録へ残す側と、配信で拾う枝分かれの側が同じ規則を使う）。
-pub fn revive_refusal_of(message: &ServerMessage) -> Option<(CardId, &str)> {
+///
+/// **どの頼みへの答えかは番号で決める。** 番号の無い断り（古い PC）は、誰の頼みへの答えとも
+/// 言えないので、待つ側はどれも拾わない。
+pub fn revive_refusal_of(message: &ServerMessage) -> Option<(CardId, &[OpId], &str)> {
     match message {
         ServerMessage::Error {
             card_id: Some(card_id),
             message,
             kind: ErrorKind::Revive,
             busy: Some(false),
+            ops,
             ..
-        } => Some((*card_id, message.as_str())),
-        _ => None,
-    }
-}
-
-/// 起こし直しが**終了の頼みで**取り下げられた断りなら、宛先のカード（寝ているカードばかり
-/// なのに、メモリ不足でセッションを起こせない 実装レビュー第4回 Astra 1）。
-///
-/// [`revive_refusal_of`] は終わった断りを全部拾う——メモリ不足・確かめられなかった・外した
-/// も含む。終了の待ち（CLI の `session kill`）はそれでは満ちてはいけない。生きた実体が
-/// 残るカードで、関係の無い断りが終了の結果より先に届くと、プロセスが動いたまま「止まった」
-/// と言うことになる。**見分けは `withdrawn` の欄だけで行う**（文面の部分一致では見分けない）。
-/// 欄の無い古い相手の断りは拾わない——止まったと言い切れないので、待つ側は待ち続ける。
-pub fn kill_withdrawal_of(message: &ServerMessage) -> Option<CardId> {
-    match message {
-        ServerMessage::Error {
-            card_id: Some(card_id),
-            kind: ErrorKind::Revive,
-            busy: Some(false),
-            withdrawn: Some(protocol::ws::Withdrawal::Kill),
-            ..
-        } => Some(*card_id),
+        } => Some((*card_id, ops.as_slice(), message.as_str())),
         _ => None,
     }
 }
@@ -231,14 +221,22 @@ pub struct SessionRecord {
     /// ローカルモードでは「前回の起動が残した記録」が `false` になる。PTY は
     /// 再起動で道連れなので、戻ってきたカードは履歴だけが読める抜け殻になる。
     live: AtomicBool,
-    /// 最後に配った**起こし直しの終わった断り**と、そのときの通し番号（実装レビュー
-    /// Astra 4）。
+    /// 配った**起こし直しの終わった断り**と、それが答える頼みの番号（実装レビュー Astra 4・
+    /// 第6回 Astra 3）。新しい順に最大 [`REVIVE_REFUSALS_KEPT`] 件。
     ///
     /// 配信は取りこぼしうる（`Lagged`）。起きるのを待っている枝分かれが断りを
     /// 取りこぼすと、上限（180 秒）まで待ってから事実と違う理由で終わる——配った後も
     /// 引けるように、ここへ残す。**DB には持たない**（揮発の知らせで、待っている側も
     /// このインスタンスの中にしか居ない）。
-    revive_refusal: Mutex<Option<(u64, String)>>,
+    ///
+    /// # 番号で引く（以前は通し番号の目印だった）
+    ///
+    /// 以前は1枚につき最新の1件を、記録へ取り込んだ時点の通し番号付きで持ち、待つ側は控えた
+    /// 目印より後のものを拾っていた。通し番号は取り込んだ順でしかないので、先の起こし直しの
+    /// 断りが遅れて取り込まれると、後から受け付けた起こし直しを待っている枝分かれの目印より
+    /// 大きい番号が付き、古い断りを自分の結果と取り違えた。しかも1件しか持たないので、遅れた
+    /// 断りが後の断りを上書きする。**どの頼みへの答えかは、断りが運ぶ頼みの番号で決める。**
+    revive_refusals: Mutex<VecDeque<(Vec<OpId>, String)>>,
 }
 
 impl SessionRecord {
@@ -257,7 +255,7 @@ impl SessionRecord {
             transcript_tx: broadcast::channel(TRANSCRIPT_QUEUE_MESSAGES).0,
             next_seq: tokio::sync::Mutex::new(next_seq),
             live: AtomicBool::new(live),
-            revive_refusal: Mutex::new(None),
+            revive_refusals: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -388,11 +386,6 @@ pub struct SessionRegistry {
     /// （`context_usage` を保存しないのと同じ形だが、あちらは「空のセッションに
     /// 前回の使用率」、こちらは「居ない PC の使用率」で、**誰の実態と食い違うかが違う**）。
     rate_limits: Mutex<HashMap<(Uuid, Option<AgentId>), StoredRateLimits>>,
-    /// 起こし直しの終わった断りに振る通し番号（[`SessionRecord::revive_refusal`]）。
-    ///
-    /// 待つ側は始める前の値を控え（[`Self::revive_refusal_mark`]）、それより後に残った
-    /// 断りだけを拾う。時刻にしないのは、同じ時刻に並ぶと前後を決められないため。
-    refusal_seq: AtomicU64,
     /// 自分への弱い参照。`apply` は `&self` で呼ばれるので、書けなかった「外した」の報告を
     /// 切り離して取り込み直す（[`Self::retry_removal`]）ための `Arc` を自分で引く
     me: Weak<Self>,
@@ -615,7 +608,6 @@ impl SessionRegistry {
             nicknames: Mutex::new(nicknames),
             branches: Mutex::new(branches),
             rate_limits: Mutex::new(HashMap::new()),
-            refusal_seq: AtomicU64::new(0),
             me: me.clone(),
             removal_retry_first: Mutex::new(REMOVAL_RETRY_FIRST),
             removal_retry_kick: watch::channel(0).0,
@@ -1590,8 +1582,8 @@ impl SessionRegistry {
         // **配る前に残す**（実装レビュー Astra 4）。手元からの報告（`publish`）も、
         // 他インスタンスから回ってきたもの（`adopt`）もここを通るので、残すのは1箇所で足りる。
         // 待つ側が取りこぼした後に引いても、配ったものは必ず残っている
-        if let Some((card_id, 理由)) = revive_refusal_of(&message) {
-            self.note_revive_refusal(account_id, card_id, 理由);
+        if let Some((card_id, ops, 理由)) = revive_refusal_of(&message) {
+            self.note_revive_refusal(account_id, card_id, ops, 理由);
         }
         let _ = self.events.send(AccountEvent {
             account_id,
@@ -1602,37 +1594,145 @@ impl SessionRegistry {
     /// 起こし直しの終わった断りを、そのカードの記録へ残す（実装レビュー Astra 4）。
     ///
     /// **記録が無ければ残さない。** 外したカードの断りを引く者は居ない（待っている側は
-    /// 記録が消えたこと自体で終わる）。持ち主の違うカードにも残さない（§8-6）。
-    fn note_revive_refusal(&self, account_id: Uuid, card_id: CardId, 理由: &str) {
+    /// 記録が消えたこと自体で終わる）。持ち主の違うカードにも残さない（§8-6）。**番号の無い
+    /// 断りも残さない**——番号で引くので、誰にも引かれない（実装レビュー第6回 Astra 3）。
+    fn note_revive_refusal(&self, account_id: Uuid, card_id: CardId, ops: &[OpId], 理由: &str) {
+        if ops.is_empty() {
+            return;
+        }
         let Some(record) = self.owned(account_id, card_id) else {
             return;
         };
-        let seq = self.refusal_seq.fetch_add(1, Ordering::SeqCst) + 1;
-        *record.revive_refusal.lock().expect("ロックが壊れていない") =
-            Some((seq, 理由.to_string()));
+        let mut refusals = record.revive_refusals.lock().expect("ロックが壊れていない");
+        refusals.push_front((ops.to_vec(), 理由.to_string()));
+        refusals.truncate(REVIVE_REFUSALS_KEPT);
     }
 
-    /// いまの通し番号。**待ち始める前に**控え、[`Self::revive_refusal_since`] へ渡す。
-    pub fn revive_refusal_mark(&self) -> u64 {
-        self.refusal_seq.load(Ordering::SeqCst)
-    }
-
-    /// `mark` を控えた後に配られた、そのカードの起こし直しの終わった断り。
+    /// 頼み `op` に答えた、そのカードの起こし直しの終わった断り（実装レビュー第6回 Astra 3）。
     ///
-    /// 配信を取りこぼした待ち手が、**配られたはずの断りを引き直す**ための口。控える前に
-    /// 配られたもの（前に押した人の断り）は返さない。
-    pub fn revive_refusal_since(
+    /// 配信を取りこぼした待ち手が、**配られたはずの断りを引き直す**ための口。他の頼みへの
+    /// 断り（前に押した人の・後から受け付けた別の起こし直しの）は返さない。
+    pub fn revive_refusal_for(
         &self,
         account_id: Uuid,
         card_id: CardId,
-        mark: u64,
+        op: OpId,
     ) -> Option<String> {
         let record = self.owned(account_id, card_id)?;
-        let refusal = record.revive_refusal.lock().expect("ロックが壊れていない");
-        refusal
-            .as_ref()
-            .filter(|(seq, _)| *seq > mark)
+        let refusals = record.revive_refusals.lock().expect("ロックが壊れていない");
+        refusals
+            .iter()
+            .find(|(ops, _)| ops.contains(&op))
             .map(|(_, 理由)| 理由.clone())
+    }
+
+    /// 起こし直しの頼み（番号付き）への PC の成功の答えを配る（実装レビュー第6回）。
+    ///
+    /// 配る形は終了と同じ——記録のいまの状態に番号を添えた `Status`。**状態は合否に使わない**
+    /// （起動直後に落ちた実体なら `Ended` で届きうるが、起こせたこと自体は本当である）。失敗の
+    /// 答えは PC の断り（`Error{ops}`）がそのまま運ぶので、ここは通らない。
+    ///
+    /// 記録が無い（答えが届く前に外された）ときは、番号付きの断りにする。黙って捨てると、
+    /// 待っている CLI は上限まで待つ。
+    pub fn answer_revive(&self, origin: &ReportOrigin, card_id: CardId, op: OpId) {
+        let Some(record) = self.owned(origin.account_id, card_id) else {
+            self.publish(
+                origin.account_id,
+                ServerMessage::Error {
+                    card_id: Some(card_id),
+                    message: "一覧から外されたので、起こし直しを確かめられません".to_string(),
+                    kind: ErrorKind::Revive,
+                    busy: None,
+                    withdrawn: None,
+                    ops: vec![op],
+                },
+            );
+            return;
+        };
+        let meta = record.meta();
+        self.publish(
+            origin.account_id,
+            ServerMessage::Status {
+                card_id,
+                status: meta.status,
+                subagent_active: meta.subagent_active,
+                last_activity_at: meta.last_activity_at,
+                op: Some(op),
+            },
+        );
+    }
+
+    /// 終了の頼み（番号付き）への PC の答えを、合否にして配る（実装レビュー第6回 Astra 1・2）。
+    ///
+    /// PC は「何をしたか」だけを言う（[`KillOutcome`]）。**合否はここで決める**：
+    ///
+    /// | PC の答え | 配るもの |
+    /// |---|---|
+    /// | 取り下げた・止めた・既に終わっていた | 記録のいまの状態に番号を添えた `Status`（成功） |
+    /// | 何も無かった | カードの記録が終わっていれば成功、そうでなければ番号付きの断り |
+    /// | 知らない綴り | 番号付きの断り（成功とは読まない） |
+    ///
+    /// 「何も無かった」を PC の側で合否にしないのは、前回の起動が残した抜け殻（止めるものが
+    /// 無くて当然）と、記録の上では動いているのに PC に実体が無い食い違いを、PC は見分けられない
+    /// ため。以前は CLI が接続直後の写しで見分けていたが、写しは頼む前の姿で、届かなかった
+    /// 頼みの断りまで成功に変えていた。
+    ///
+    /// **連絡係にも流す**（`publish`）。CLI が別のインスタンスに繋がっていても届くように。
+    /// 成功の `Status` の値は記録のいまの姿なので、番号を知らない画面が受けても何も変わらない。
+    /// 止めた実体の `Ended` は答えより先に同じ順の道で届いて記録に書かれている（ローカルは
+    /// `ReportingSink` の1本の列、セルフホストは PC の送り出しの1本の列）が、**合否には状態を
+    /// 使わない**——答えが番号付きで届いたこと自体が根拠である。
+    pub fn answer_kill(
+        &self,
+        origin: &ReportOrigin,
+        card_id: CardId,
+        op: OpId,
+        outcome: KillOutcome,
+    ) {
+        let refuse = |message: &str| {
+            self.publish(
+                origin.account_id,
+                ServerMessage::Error {
+                    card_id: Some(card_id),
+                    message: message.to_string(),
+                    kind: ErrorKind::Kill,
+                    busy: None,
+                    withdrawn: None,
+                    ops: vec![op],
+                },
+            );
+        };
+        // 記録が無い（外した・持ち主違い）。状態を添えられないので、確かめられなかったと言う
+        let Some(record) = self.owned(origin.account_id, card_id) else {
+            refuse("一覧から外されたので、終了を確かめられません");
+            return;
+        };
+        let meta = record.meta();
+        let ended = matches!(meta.status, SessionStatus::Ended { .. });
+        let 止まった = match outcome {
+            KillOutcome::Withdrew | KillOutcome::Stopped | KillOutcome::AlreadyEnded => true,
+            KillOutcome::Nothing => ended,
+            KillOutcome::Unknown => false,
+        };
+        if !止まった {
+            refuse(match outcome {
+                KillOutcome::Nothing => {
+                    "セッションが見つかりません（PC にこのカードの実体がありません）"
+                }
+                _ => "PC の答えを読めませんでした（session ls で確かめられます）",
+            });
+            return;
+        }
+        self.publish(
+            origin.account_id,
+            ServerMessage::Status {
+                card_id,
+                status: meta.status,
+                subagent_active: meta.subagent_active,
+                last_activity_at: meta.last_activity_at,
+                op: Some(op),
+            },
+        );
     }
 
     /// いま繋がっている全ブラウザへ知らせる（連絡係の縮退など、カードに紐づかない話）。
@@ -1750,11 +1850,26 @@ impl SessionRegistry {
                 self.publish_local(account_id, ServerMessage::SessionRemoved { card_id });
             }
 
+            // **頼みへの答え（番号付き）は記録を書き換えない**（実装レビュー第6回 Astra 1）。値は
+            // 発信元の記録のいまの姿で、こちらの状態は別の便（報告）で揃う。番号を落とさずに
+            // 手元へ配るだけ——CLI がこちらのインスタンスに繋がっていても答えが届くように
+            ServerMessage::Status {
+                card_id,
+                op: Some(_),
+                ..
+            } => {
+                if self.owned(account_id, card_id).is_none() {
+                    return;
+                }
+                self.publish_local(account_id, message);
+            }
+
             ServerMessage::Status {
                 card_id,
                 status,
                 subagent_active,
                 last_activity_at,
+                op: None,
             } => {
                 let Some(record) = self.owned(account_id, card_id) else {
                     return;
@@ -1774,6 +1889,7 @@ impl SessionRegistry {
                         status,
                         subagent_active,
                         last_activity_at,
+                        op: None,
                     },
                 );
             }
@@ -2113,11 +2229,14 @@ impl SessionRegistry {
                 }
                 outcome
             }
+            // `op`（頼みへの答えの番号）はサーバが付けるもので、PC の報告は付けない。付いていても
+            // 記録の書き換えとして扱う（番号は落とす）
             ServerMessage::Status {
                 card_id,
                 status,
                 subagent_active,
                 last_activity_at,
+                op: _,
             } => {
                 self.status(origin, card_id, status, subagent_active, last_activity_at)
                     .await
@@ -2173,6 +2292,7 @@ impl SessionRegistry {
                 kind,
                 busy,
                 withdrawn,
+                ref ops,
             } => {
                 self.record_notice(origin, None, "error", kind.as_str(), message)
                     .await;
@@ -2184,6 +2304,7 @@ impl SessionRegistry {
                         kind,
                         busy,
                         withdrawn,
+                        ops: ops.clone(),
                     },
                 );
                 Ok(())
@@ -2223,6 +2344,7 @@ impl SessionRegistry {
                         kind: ErrorKind::Other,
                         busy: None,
                         withdrawn: None,
+                        ops: Vec::new(),
                     },
                 );
                 false
@@ -2665,6 +2787,7 @@ impl SessionRegistry {
                 status,
                 subagent_active,
                 last_activity_at,
+                op: None,
             },
         );
         Ok(())

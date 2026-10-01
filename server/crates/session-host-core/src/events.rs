@@ -20,7 +20,11 @@
 //! のは、**一覧の更新がセッションの実行を遅らせてはいけない**ため。取りこぼした側は
 //! 状態を取り直せばよく、そのための入口（`GET /api/sessions`）は別にある。
 
-use protocol::{CardId, TreeNode, ws::ServerMessage};
+use protocol::{
+    CardId, TreeNode,
+    a2s::KillOutcome,
+    ws::{OpId, ServerMessage},
+};
 use tokio::sync::broadcast;
 
 /// 一覧の更新通知の待ち行列（メッセージ数）。
@@ -88,12 +92,44 @@ pub trait EventSink: Send + Sync + 'static {
         false
     }
 
+    /// 終了の頼み（番号付き）に、何をしたかを答える（寝ているカードばかりなのに、メモリ不足で
+    /// セッションを起こせない 実装レビュー第6回 Astra 1・2）。番号1つにつき1回だけ呼ばれる。
+    ///
+    /// [`EventSink::emit`] と分けたのは、**運ぶ便が `ServerMessage` に無い**ため。終わったことを
+    /// 合否として配るのはサーバで（記録のいまの状態と合わせて決める）、ここは「何をしたか」を
+    /// 運ぶだけである。
+    ///
+    /// **既定を持たせない。** 運び忘れると、CLI は答えを待って時間切れになるだけで、どこにも
+    /// 失敗が出ない——実装ごとに運ぶか運ばないかを書かせる。
+    fn kill_answered(&self, answer: KillAnswered);
+
+    /// 起こし直しの頼み（番号付き）が実体を作り終えたことを答える（実装レビュー第6回）。番号
+    /// 1つにつき1回だけ呼ばれる。失敗の答えは断り（`Error{ops}`）が運ぶので、ここは成功だけ。
+    ///
+    /// **既定を持たせない**（[`EventSink::kill_answered`] と同じ理由）。
+    fn revive_answered(&self, answer: ReviveAnswered);
+
     /// 画面のフレーム（0x04 / 0x05）を上へ運ぶ（設計§7-3・§4-3）。
     ///
     /// 組み立て済みのバイナリフレームをそのまま渡す。**揮発**でよい——切断中に捨てても、
     /// 繋ぎ直したときに全画面から送り直すので取り返せる（履歴と違って、画面は
     /// 「いま」しか意味を持たない）。
     fn screen_frame(&self, _frame: Vec<u8>) {}
+}
+
+/// 終了の頼みへの答え1件（[`EventSink::kill_answered`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KillAnswered {
+    pub card_id: CardId,
+    pub op: OpId,
+    pub outcome: KillOutcome,
+}
+
+/// 起こし直しの頼みへの成功の答え1件（[`EventSink::revive_answered`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReviveAnswered {
+    pub card_id: CardId,
+    pub op: OpId,
 }
 
 /// 記録の持ち主が居ない報告先：プロセス内の配信そのもの。
@@ -143,6 +179,13 @@ impl EventSink for LocalEventBus {
     fn reset_transcript(&self, card_id: CardId) {
         let _ = self.events.send(ServerMessage::TranscriptReset { card_id });
     }
+
+    /// **運ぶ相手が居ない。** 答えを待つ CLI は記録の持ち主（サーバ）を通してしか繋がらない。
+    /// 同じプロセスの中で見たいときは `SessionManager::subscribe_kill_answers` で見える
+    fn kill_answered(&self, _answer: KillAnswered) {}
+
+    /// 運ぶ相手が居ない（[`LocalEventBus::kill_answered`] と同じ）
+    fn revive_answered(&self, _answer: ReviveAnswered) {}
 }
 
 #[cfg(test)]
@@ -206,6 +249,10 @@ mod tests {
                 .expect("ロックが壊れていない")
                 .push(ServerMessage::TranscriptReset { card_id });
         }
+
+        fn kill_answered(&self, _answer: KillAnswered) {}
+
+        fn revive_answered(&self, _answer: ReviveAnswered) {}
     }
 
     #[test]

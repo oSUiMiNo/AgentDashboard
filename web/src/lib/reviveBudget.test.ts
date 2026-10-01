@@ -457,8 +457,11 @@ describe('settleHostResources', () => {
    *
    * - `HostResources`：すぐ答える
    * - `{ 遅れて, 答え }`：`遅れて` ミリ秒後に答える
+   * - `{ 聞かれたら }`：聞かれた時刻で答えを作り、すぐ答える（状態を持つ PC）
    * - `{ status }`：その状態コードで答える
    * - `'止まる'`：打ち切られるまで答えない
+   * - `{ 断るまで }`：答えない。打ち切られたら、`断るまで` ミリ秒おいて断る（本物の fetch は
+   *   打ち切りをすぐには断らない）
    * - `'投げる'`：通信が失敗する
    *
    * **打ち切りの印を受けたら、本物と同じく reject する。** そうしないと止まる場面の
@@ -467,7 +470,9 @@ describe('settleHostResources', () => {
   type 一手 =
     | HostResources
     | { 遅れて: number; 答え: HostResources }
+    | { 聞かれたら: () => HostResources }
     | { status: number }
+    | { 断るまで: number }
     | '止まる'
     | '投げる'
 
@@ -489,6 +494,10 @@ describe('settleHostResources', () => {
           断る()
           return
         }
+        if (typeof 手 === 'object' && '断るまで' in 手) {
+          signal?.addEventListener('abort', () => setTimeout(断る, 手.断るまで))
+          return
+        }
         signal?.addEventListener('abort', 断る)
         const 返す = (answer: HostResources) =>
           resolve({ ok: true, status: 200, json: async () => answer } as unknown as Response)
@@ -505,6 +514,10 @@ describe('settleHostResources', () => {
         }
         if ('遅れて' in 手) {
           setTimeout(() => 返す(手.答え), 手.遅れて)
+          return
+        }
+        if ('聞かれたら' in 手) {
+          返す(手.聞かれたら())
           return
         }
         返す(手)
@@ -655,6 +668,69 @@ describe('settleHostResources', () => {
     expect(回数.a).toBeGreaterThanOrEqual(Math.floor(RECHECK_LIMIT_MS / (ASK_LIMIT_MS + RECHECK_INTERVAL_MS)))
   })
 
+  /**
+   * 新しさの窓が短い、正常な PC。PC 側の規則（設計§2-4・§2-5）を写す：
+   *
+   * - 期限 1 秒・取得 1 秒。観測は**取得を終えてから 5 秒**まで新しい（`FRESH_AFTER_FINISH`）
+   * - 新しい観測があれば `fresh`（残りは切り捨ての秒）。無ければ取得を起こして `stale`
+   *   （一度も聞けていなければ `checking`）。取得中に聞かれても2本目は起こさない
+   */
+  function 窓の短い正常な_PC(): () => HostResources {
+    const 期限 = 1_000
+    const 取得 = 1_000
+    const 終えてから = 5_000
+    let 観測: { 始め: number; 終わり: number } | null = null
+    let 取得中: { 始め: number; 終わり: number } | null = null
+    return () => {
+      const t = performance.now()
+      if (取得中 !== null && t >= 取得中.終わり) {
+        観測 = 取得中
+        取得中 = null
+      }
+      if (観測 !== null) {
+        const 残り = Math.max(期限 - (t - 観測.始め), 終えてから - (t - 観測.終わり))
+        if (残り > 0) {
+          return wsl(4, 'fresh', {
+            host_free_age_sec: Math.floor((t - 観測.始め) / 1_000),
+            host_free_fresh_for_sec: Math.floor(残り / 1_000),
+          })
+        }
+      }
+      if (取得中 === null) {
+        取得中 = { 始め: t, 終わり: t + 取得 }
+      }
+      // 床は「全部入る」と言っている。**数えるのは fresh のときだけ**
+      return wsl(9, 観測 === null ? 'checking' : 'stale')
+    }
+  }
+
+  it('新しさの窓が短い正常な PC は、答えない PC が居ても1秒おきに聞き直し、締切で数えられる', async () => {
+    // a は正常だが、観測が新しいのは取得を終えてから 5 秒だけ。b は答えない（1回の上限で切られる）。
+    // **全台の答えを揃えてから次を聞くと、a への間隔が約 11 秒に延び**、聞くたびに窓を使い切って
+    // stale と取り直しを繰り返し、直接起こせば起こせる a まで締切で 0 枚になっていた（実装レビュー第6回 Astra 4）
+    //
+    // **締切の瞬間の a の姿は、取り直しのどこに当たるかで決まる。** 1秒おきに聞くと a は 6 秒ごと
+    // （6・12…60 秒）に stale を返して取り直す。締切の 65 秒はその隙間に当たらない——最後に聞いた
+    // 64 秒の答えは 61 秒に終えた観測で、あと 2 秒新しい
+    vi.useFakeTimers()
+    const { 回数 } = 偽の口({ a: [{ 聞かれたら: 窓の短い正常な_PC() }], b: ['止まる'] })
+    const { 箱 } = 聞かせる(['a', 'b'])
+    await vi.advanceTimersByTimeAsync(RECHECK_LIMIT_MS + RECHECK_INTERVAL_MS)
+
+    // **b に合わせて a の間隔を延ばさない**——0〜64 秒の 65 回（揃えてから聞くと 6 回）
+    expect(回数.a).toBe(RECHECK_LIMIT_MS / RECHECK_INTERVAL_MS)
+    const plan = planRevive([target('a1', 'a', 1), target('b1', 'b', 1)], 表(箱)!)
+    expect(plan.hosts.find((host) => host.host === 'a')).toMatchObject({
+      fits: 4,
+      unconfirmed: null,
+    })
+    expect(plan.hosts.find((host) => host.host === 'b')).toMatchObject({
+      fits: 0,
+      unconfirmed: 'no_answer',
+    })
+    expect(plan.fitting).toEqual(['a1'])
+  })
+
   it('答える時間の違う2台では、毎周すべての PC を聞き、最後の周の答えで返す', async () => {
     // A は即答、B は1回3秒かかり、しばらく checking。**先に答えた A の最初の `fresh` は、
     // B が落ち着く頃には期限切れ**（A は途中で stale を返し、取り直して 1 枚に減っている）
@@ -670,7 +746,8 @@ describe('settleHostResources', () => {
     const { 箱 } = 聞かせる(['a', 'b'])
     await vi.advanceTimersByTimeAsync(3 * 3_000 + 2 * RECHECK_INTERVAL_MS)
 
-    expect(回数).toEqual({ a: 3, b: 3 })
+    // **A の間隔を B に合わせて延ばさない**——B の 3 回（11 秒）の間に、A は 0〜10 秒の 11 回
+    expect(回数).toEqual({ a: 11, b: 3 })
     expect(台(箱, 'a')).toMatchObject({ host_free_state: 'fresh', fits_now: 1 })
     expect(台(箱, 'b')).toMatchObject({ host_free_state: 'fresh', fits_now: 5 })
     // 計画も最後の周の数で立つ（A は 2 枚のうち 1 枚しか入らない）
@@ -725,13 +802,35 @@ describe('settleHostResources', () => {
     expect(台(箱, 'a')).toEqual(noAnswer(前))
   })
 
+  it('1回の上限で切った問い合わせは、断りが届く前に締切が来ても「答え無し」のまま（前の答えへ戻さない）', async () => {
+    // 2回目の問い合わせ（1 秒に聞き始める）は 11 秒に上限で切られ、断りは 50ms 遅れて届く。
+    // その間（11.02 秒）に締切が来る。**切ったのは上限で、締切ではない**——戻ってきた時点で
+    // 締切を見ると、答えなかった PC を前の答え（checking＝待っても確かめられなかった）と取り違える
+    vi.useFakeTimers()
+    偽の口({ a: [wsl(9, 'checking'), { 断るまで: 50 }] })
+    const { 箱 } = 聞かせる(['a'], {
+      deadline: deadlineIn(RECHECK_INTERVAL_MS + ASK_LIMIT_MS + 20),
+    })
+    await vi.advanceTimersByTimeAsync(RECHECK_INTERVAL_MS + ASK_LIMIT_MS + 100)
+
+    expect(台(箱, 'a')).toEqual(noAnswer(wsl(9, 'checking')))
+  })
+
   it('先に答えた PC の fresh が、同じ周の中で新しさの残りを使い切ったら、聞き直してから返す', async () => {
-    // a は即答するが、あと 2 秒しか新しくない。b は答えるのに 3 秒かかる
+    // a は答えるのに 1.5 秒かかり、最初の答えはあと 2 秒しか新しくない（聞き始めた 0 秒から
+    // 2 秒まで）。b は答えるのに 3 秒かかる。**b が答えた 3 秒の時点で、a の手元の答えは
+    // 使い切っている**——a の次の答え（4 秒に届く）を待たずに返してはいけない
     vi.useFakeTimers()
     const { 回数 } = 偽の口({
       a: [
-        wsl(5, 'fresh', { host_free_age_sec: 58, host_free_fresh_for_sec: 2 }),
-        wsl(1, 'fresh', { host_free_age_sec: 0, host_free_fresh_for_sec: 60 }),
+        {
+          遅れて: 1_500,
+          答え: wsl(5, 'fresh', { host_free_age_sec: 58, host_free_fresh_for_sec: 2 }),
+        },
+        {
+          遅れて: 1_500,
+          答え: wsl(1, 'fresh', { host_free_age_sec: 0, host_free_fresh_for_sec: 60 }),
+        },
       ],
       b: [{ 遅れて: 3_000, 答え: wsl(5, 'fresh', { host_free_fresh_for_sec: 48 }) }],
     })
@@ -739,25 +838,30 @@ describe('settleHostResources', () => {
     await vi.advanceTimersByTimeAsync(3_000)
     // 全台が答えたが、a の値はもう新しくない。**ここで返さない**
     expect(箱.answer).toBeUndefined()
-    await vi.advanceTimersByTimeAsync(RECHECK_INTERVAL_MS + 3_000)
+    await vi.advanceTimersByTimeAsync(RECHECK_INTERVAL_MS)
 
-    expect(回数).toEqual({ a: 2, b: 2 })
+    expect(回数.a).toBe(2)
     expect(台(箱, 'a')).toMatchObject({ host_free_state: 'fresh', fits_now: 1 })
     expect(台(箱, 'b')).toMatchObject({ host_free_state: 'fresh', fits_now: 5 })
   })
 
   it('締切までに新しい値で確かめ直せなければ、その PC は確かめられていない（0 枚）', async () => {
-    // 1周は 3 秒＋1秒。a は毎回あと 2 秒しか新しくないので、b を待つ間に毎周期限を越える
+    // a は答えるのに 3 秒かかるのに、毎回あと 2 秒しか新しくない——**届いた時点で毎回使い切って
+    // いる**。何度聞き直しても新しい値で確かめられない。1回は 3 秒＋1秒
     vi.useFakeTimers()
     const 一周の長さ = 3_000 + RECHECK_INTERVAL_MS
     const { 回数 } = 偽の口({
-      a: [wsl(5, 'fresh', { host_free_age_sec: 58, host_free_fresh_for_sec: 2 })],
+      a: [
+        {
+          遅れて: 3_000,
+          答え: wsl(5, 'fresh', { host_free_age_sec: 58, host_free_fresh_for_sec: 2 }),
+        },
+      ],
       b: [{ 遅れて: 3_000, 答え: wsl(5, 'fresh', { host_free_fresh_for_sec: 48 }) }],
     })
     const { 箱 } = 聞かせる(['a', 'b'], { deadline: deadlineIn(2 * 一周の長さ + 3_500) })
     await vi.advanceTimersByTimeAsync(3 * 一周の長さ)
 
-    expect(回数).toEqual({ a: 3, b: 3 })
     expect(台(箱, 'a')).toMatchObject({ host_free_state: 'stale' })
     const plan = planRevive(
       [target('a1', 'a', 1), target('b1', 'b', 1)],
@@ -772,6 +876,8 @@ describe('settleHostResources', () => {
       unconfirmed: null,
     })
     expect(plan.fitting).toEqual(['b1'])
+    // 締切まで聞き直した（0・4・8 秒）
+    expect(回数).toEqual({ a: 3, b: 3 })
   })
 
   it('最後の周の後に眠って締切を迎えたら、返す瞬間の時刻で新しさを確かめる', async () => {
@@ -793,14 +899,14 @@ describe('settleHostResources', () => {
     // 古い PC は欄そのものを送ってこない（`null` ではなく、読むと `undefined`）
     const 古い = { ...wsl(5, 'fresh', { host_free_age_sec: 58 }) } as Partial<HostResources>
     delete 古い.host_free_fresh_for_sec
-    const { 回数 } = 偽の口({
+    偽の口({
       a: [古い as HostResources],
       b: [{ 遅れて: 3_000, 答え: wsl(5, 'fresh') }],
     })
     const { 箱 } = 聞かせる(['a', 'b'])
     await vi.advanceTimersByTimeAsync(3_000)
 
-    expect(回数).toEqual({ a: 1, b: 1 })
+    // **b が答えた 3 秒で返る。** a を古くなったと読むと、ここで返らずに聞き直し続ける
     expect(台(箱, 'a')).toMatchObject({ host_free_state: 'fresh', fits_now: 5 })
   })
 
@@ -810,7 +916,9 @@ describe('settleHostResources', () => {
     const { 箱 } = 聞かせる(['a', 'b'])
     await vi.advanceTimersByTimeAsync(0)
     expect(箱.answer).toBe(SIGNED_OUT)
-    expect(印.every((signal) => signal.aborted)).toBe(true)
+    // 1本目は a（答え終えている）。**切るのは、まだ答えていない b**
+    expect(印).toHaveLength(2)
+    expect(印[1].aborted).toBe(true)
   })
 
   it('打ち切られたら cancelled を返し、進行中の問い合わせも切る', async () => {
@@ -835,19 +943,67 @@ describe('settleHostResources', () => {
     expect(onWaiting.mock.calls.map((call) => call[0])).toEqual(['windows', 'answer'])
   })
 
+  it('知らせ（onWaiting）が投げて抜けても、残りの PC への聞き直しを裏に残さない', async () => {
+    // a は 0 秒に答えて眠る。b が 0.5 秒に答えて全台が揃い、知らせが投げる
+    vi.useFakeTimers()
+    const { fetch } = 偽の口({
+      a: [wsl(9, 'checking')],
+      b: [{ 遅れて: 500, 答え: wsl(9, 'checking') }],
+    })
+    const 落ちた = vi.fn()
+    void settleHostResources(['a', 'b'], {
+      deadline: deadlineIn(RECHECK_LIMIT_MS),
+      signal: new AbortController().signal,
+      onWaiting: () => {
+        throw new Error('知らせが落ちた')
+      },
+    }).catch(落ちた)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(落ちた).toHaveBeenCalledTimes(1)
+    const 抜けたとき = fetch.mock.calls.length
+    await vi.advanceTimersByTimeAsync(RECHECK_INTERVAL_MS * 5)
+
+    expect(fetch).toHaveBeenCalledTimes(抜けたとき)
+  })
+
   /** 壁時計（`Date.now()`）だけを `ms` 戻す。**単調時計（`performance.now()`）は動かない** */
   function 時計を巻き戻す(ms: number) {
     vi.setSystemTime(Date.now() - ms)
   }
 
   it('聞いている間にブラウザの時計が巻き戻っても、新しさの残りを使い切った fresh を新しいと読まない', async () => {
-    // a は即答するが、あと 2 秒しか新しくない。b は答えるのに 3 秒かかる。その間に時計が 30 秒戻る。
-    // **壁時計だけで測ると経過が負になり**、3 秒経った a を新しいと読んで1周で返していた（Astra 4）
+    // a は答えるのに 1.5 秒かかり、最初の答えはあと 2 秒しか新しくない。b は答えるのに 3 秒かかる。
+    // a が答える前に時計が 30 秒戻る。**壁時計だけで測ると経過が負になり**、b が答えた 3 秒の時点で
+    // 3 秒前に聞いた a を新しいと読んで返していた（Astra 4）
     vi.useFakeTimers()
     const { 回数 } = 偽の口({
       a: [
-        wsl(5, 'fresh', { host_free_fresh_for_sec: 2 }),
-        wsl(1, 'fresh', { host_free_fresh_for_sec: 60 }),
+        { 遅れて: 1_500, 答え: wsl(5, 'fresh', { host_free_fresh_for_sec: 2 }) },
+        { 遅れて: 1_500, 答え: wsl(1, 'fresh', { host_free_fresh_for_sec: 60 }) },
+      ],
+      b: [{ 遅れて: 3_000, 答え: wsl(5, 'fresh', { host_free_fresh_for_sec: 48 }) }],
+    })
+    const { 箱 } = 聞かせる(['a', 'b'])
+    await vi.advanceTimersByTimeAsync(1_000)
+    時計を巻き戻す(30_000)
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(箱.answer).toBeUndefined()
+    // b の最初の答えも巻き戻りの前に聞いたもの。b が聞き直して答える 7 秒まで返らない
+    await vi.advanceTimersByTimeAsync(RECHECK_INTERVAL_MS + 3_000)
+
+    expect(回数.b).toBe(2)
+    expect(台(箱, 'a')).toMatchObject({ host_free_state: 'fresh', fits_now: 1 })
+  })
+
+  it('壁時計が巻き戻ったら、単調時計で残りがあっても期限切れとして聞き直す', async () => {
+    // a はあと 60 秒新しい。a が答える前に時計が戻ると、何秒経ったのか言えない——切れた側へ倒す。
+    // a は答えるのに 1.5 秒かかるので、b が答えた 3 秒の時点で a の手元にあるのは巻き戻りの前に
+    // 聞いた答えだけである
+    vi.useFakeTimers()
+    const { 回数 } = 偽の口({
+      a: [
+        { 遅れて: 1_500, 答え: wsl(5, 'fresh', { host_free_fresh_for_sec: 60 }) },
+        { 遅れて: 1_500, 答え: wsl(2, 'fresh', { host_free_fresh_for_sec: 60 }) },
       ],
       b: [{ 遅れて: 3_000, 答え: wsl(5, 'fresh', { host_free_fresh_for_sec: 48 }) }],
     })
@@ -858,26 +1014,7 @@ describe('settleHostResources', () => {
     expect(箱.answer).toBeUndefined()
     await vi.advanceTimersByTimeAsync(RECHECK_INTERVAL_MS + 3_000)
 
-    expect(回数).toEqual({ a: 2, b: 2 })
-    expect(台(箱, 'a')).toMatchObject({ host_free_state: 'fresh', fits_now: 1 })
-  })
-
-  it('壁時計が巻き戻ったら、単調時計で残りがあっても期限切れとして聞き直す', async () => {
-    // a はあと 60 秒新しい。待っている間に時計が戻ると、何秒経ったのか言えない——切れた側へ倒す
-    vi.useFakeTimers()
-    const { 回数 } = 偽の口({
-      a: [
-        wsl(5, 'fresh', { host_free_fresh_for_sec: 60 }),
-        wsl(2, 'fresh', { host_free_fresh_for_sec: 60 }),
-      ],
-      b: [{ 遅れて: 3_000, 答え: wsl(5, 'fresh', { host_free_fresh_for_sec: 48 }) }],
-    })
-    const { 箱 } = 聞かせる(['a', 'b'])
-    await vi.advanceTimersByTimeAsync(1_000)
-    時計を巻き戻す(30_000)
-    await vi.advanceTimersByTimeAsync(2_000 + RECHECK_INTERVAL_MS + 3_000)
-
-    expect(回数).toEqual({ a: 2, b: 2 })
+    expect(回数.b).toBe(2)
     expect(台(箱, 'a')).toMatchObject({ host_free_state: 'fresh', fits_now: 2 })
   })
 
@@ -910,10 +1047,11 @@ describe('settleHostResources', () => {
   })
 
   it('数えた枚数の有効期限は、PC ごとの「最後の周で聞き始めた時刻＋新しさの残り」の最も早いもの', async () => {
+    // 先に切れるのは、答えるのに 3 秒かかる b のほう（a は即答で、1 秒おきに聞き直している）
     vi.useFakeTimers()
     偽の口({
-      a: [wsl(5, 'fresh', { host_free_fresh_for_sec: 30 })],
-      b: [{ 遅れて: 3_000, 答え: wsl(5, 'fresh', { host_free_fresh_for_sec: 50 }) }],
+      a: [wsl(5, 'fresh', { host_free_fresh_for_sec: 50 })],
+      b: [{ 遅れて: 3_000, 答え: wsl(5, 'fresh', { host_free_fresh_for_sec: 30 }) }],
     })
     const { 箱 } = 聞かせる(['a', 'b'])
     await vi.advanceTimersByTimeAsync(3_000)

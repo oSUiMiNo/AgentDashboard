@@ -859,22 +859,25 @@ pub async fn send_input(
     outcome
 }
 
-/// `session kill`。`Ended` まで待つ。
+/// `session kill`。頼みに番号を振り、その番号が付いた答えまで待つ（寝ているカードばかりなのに、
+/// メモリ不足でセッションを起こせない 実装レビュー第6回 Astra 1。待ち方は [`Goal::Ended`]）。
 pub async fn kill(target: &Target, prefix: &str) -> Result<Outcome, ClientError> {
     let card = resolve_card_id(target, prefix).await?;
+    let op = protocol::ws::OpId::new();
     let mut ws = ws::Ws::connect(target).await?;
-    ws.send(&ClientMessage::Kill { card_id: card }).await?;
+    ws.send(&ClientMessage::Kill {
+        card_id: card,
+        op: Some(op),
+    })
+    .await?;
     let outcome = wait::run(
         &mut ws,
-        Goal::Ended {
-            card,
-            entity: None,
-            ended_at_snapshot: false,
-        },
+        Goal::Ended { card, op },
         "セッションの終了",
         wait::KILL_CAP,
     )
-    .await;
+    .await
+    .map_err(wait::note_kill_timeout);
     ws.close().await;
     outcome
 }
@@ -1261,21 +1264,25 @@ pub async fn revive(target: &Target, prefix: &str) -> Result<Outcome, ClientErro
 }
 
 /// 1枚を起こし直して待つ。`--all` と単数で共有する。
+///
+/// 頼みに番号を振り、その番号が付いた答えまで待つ（寝ているカードばかりなのに、メモリ不足で
+/// セッションを起こせない 実装レビュー第6回。待ち方は [`Goal::Revived`]）。
 async fn revive_one(target: &Target, card: CardId) -> Result<Outcome, ClientError> {
+    let op = protocol::ws::OpId::new();
     let mut ws = ws::Ws::connect(target).await?;
-    ws.send(&ClientMessage::ReviveSession { card_id: card })
-        .await?;
+    ws.send(&ClientMessage::ReviveSession {
+        card_id: card,
+        op: Some(op),
+    })
+    .await?;
     let outcome = wait::run(
         &mut ws,
-        Goal::Revived {
-            card,
-            seen_snapshot: false,
-        },
+        Goal::Revived { card, op },
         "セッションの起こし直し",
         wait::REVIVE_CAP,
     )
     .await
-    .map_err(wait::note_revive_timeout);
+    .map_err(wait::note_revive_answer_timeout);
     ws.close().await;
     outcome
 }

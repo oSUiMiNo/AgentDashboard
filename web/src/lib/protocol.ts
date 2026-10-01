@@ -544,7 +544,11 @@ export type ClientMessage =
    * 記録が持っている。ここに材料を載せると、画面が抱えている古い写しで起こし直す
    * 経路ができる。
    */
-  | { t: 'revive_session'; card_id: CardId }
+  /**
+   * `op` は頼みの番号（実装レビュー第6回）。付けると、答えがこの番号を運んで返る
+   * （`status.op`・`error.ops`）。**画面は付けない**——付けるのは答えを待つ CLI だけ
+   */
+  | { t: 'revive_session'; card_id: CardId; op?: string }
   /**
    * カードに付いている CLI セッションへ、利用者の名前を付ける（名前付け設計§5-1）。
    *
@@ -576,7 +580,12 @@ export type ClientMessage =
    * UUID を扱わせないことがこの機能の芯である。
    */
   | { t: 'branch_session'; card_id: CardId }
-  | { t: 'kill'; card_id: CardId }
+  /**
+   * `op` は頼みの番号（寝ているカードばかりなのに、メモリ不足でセッションを起こせない 実装
+   * レビュー第6回 Astra 1）。付けると、答えがこの番号を運んで返る（`status.op`・`error.ops`）。
+   * **画面は付けない**——状態の変化を見ていれば足り、答えを待たない。付けるのは CLI だけ
+   */
+  | { t: 'kill'; card_id: CardId; op?: string }
   | { t: 'archive'; card_id: CardId }
   // 以下は初期実装でフェーズ3〜4に回した3つ。**いまは全部サーバ側も配線済み**
   | { t: 'sub_transcript'; card_id: CardId }
@@ -633,6 +642,12 @@ export type ServerMessage =
        * 使わない（読むのは CLI の終了の待ち）
        */
       withdrawn?: 'kill' | 'removing' | 'remove' | 'unknown'
+      /**
+       * この断りが答えている頼みの番号（実装レビュー第6回 Astra 1・3）。複数ありうる（起こし直しは
+       * 競合で断った頼みを先の起こし直しへ束ねる）。欠け＝どの頼みへの答えとも言えない。画面は
+       * いまこの欄を使わない（読むのは CLI の終了の待ちと、サーバの枝分かれ）
+       */
+      ops?: string[]
     }
   // 以下は初期実装でフェーズ2〜5に回したもの。**いまは全部サーバ側も配線済み**
   | {
@@ -641,6 +656,12 @@ export type ServerMessage =
       status: SessionStatus
       subagent_active: number
       last_activity_at: number
+      /**
+       * 頼みへの答えなら、その番号（実装レビュー第6回 Astra 1）。サーバが終了の頼みに答えるとき、
+       * カードの記録のいまの状態に添えて配る。値は記録のいまの姿なので、画面はこの欄を見ずに
+       * いつもどおり当ててよい
+       */
+      op?: string
     }
   /**
    * コンテキスト残量だけの差分更新（コンテキスト残量設計§2）。

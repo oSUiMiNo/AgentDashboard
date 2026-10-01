@@ -432,7 +432,7 @@ async fn 他人のカードへの購読と操作は全部断られる() {
                     attachments: Vec::new(),
                 },
             ),
-            ("終了", ClientMessage::Kill { card_id }),
+            ("終了", ClientMessage::Kill { card_id, op: None }),
             ("一覧から外す", ClientMessage::Archive { card_id }),
             (
                 "大きさの変更",
@@ -453,7 +453,10 @@ async fn 他人のカードへの購読と操作は全部断られる() {
             ("端末の取り下げ", ClientMessage::UnsubPty { card_id }),
             // 起こし直しは**他人の PC で本物の claude を起動させる**操作なので、
             // 越えられると被害がいちばん大きい
-            ("起こし直し", ClientMessage::ReviveSession { card_id }),
+            (
+                "起こし直し",
+                ClientMessage::ReviveSession { card_id, op: None },
+            ),
             // 名前を付ける口（名前付け設計§11-4）。**書き込みなので越えられると
             // 他人のカードの見た目を変えられる**
             (
@@ -559,6 +562,7 @@ async fn 他人の戻せるカードも同じ言葉で断られる() {
             .expect_refused(
                 ClientMessage::ReviveSession {
                     card_id: theirs.card_id,
+                    op: None,
                 },
                 "他人の戻せるカードの起こし直し",
             )

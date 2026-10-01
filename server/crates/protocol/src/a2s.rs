@@ -70,6 +70,28 @@ impl std::fmt::Display for RequestId {
     }
 }
 
+/// 終了の頼みに PC が何をしたか（[`AgentMessage::KillAnswer`]。実装レビュー第6回 Astra 1・2）。
+///
+/// **合否は言わない。** 「何も無かった」が成功か失敗かは、カードがいま終わっているかで決まり、
+/// それを知っているのはサーバの記録である。
+///
+/// **知らない綴りは [`KillOutcome::Unknown`] で受ける**（[`crate::ws::Withdrawal`] と同じ理由）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KillOutcome {
+    /// 進んでいた起こし直しを取り下げた。実体は作られない（作りかけは止めてから答える）
+    Withdrew,
+    /// 生きていた実体を止め、終わったのを見届けた
+    Stopped,
+    /// 実体は既に終わっていた
+    AlreadyEnded,
+    /// この PC には、そのカードの起こし直しも実体も無かった
+    Nothing,
+    /// 知らない綴り。**成功とは読まない**
+    #[serde(other)]
+    Unknown,
+}
+
 /// 問いへの答え（設計§4）。
 ///
 /// **1種類にまとめてある。** 一覧と中身で別々の答えを作ると、対応づけの仕組みを
@@ -455,6 +477,38 @@ pub enum AgentMessage {
         /// **ここを運ばないと、セルフホストでだけ CLI の終了が取り下げで満ちない**
         #[serde(default, skip_serializing_if = "Option::is_none")]
         withdrawn: Option<crate::ws::Withdrawal>,
+        /// 答えている頼みの番号（`ServerMessage::Error` の同名の欄を参照）。
+        ///
+        /// **ここを運ばないと、セルフホストでだけ枝分かれが自分の起こし直しの断りを拾えない**
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ops: Vec<crate::ws::OpId>,
+    },
+    /// 終了の頼みへの答え（実装レビュー第6回 Astra 1・2）。番号付きの
+    /// [`ServerToAgent::Kill`] 1回につき、**必ず1回だけ**返す。
+    ///
+    /// # 種別を足した理由
+    ///
+    /// 終わったことを運ぶ既存の便が無い。`Error` に載せると古いサーバが断りとして画面へ
+    /// 出し、`SessionUpsert` に載せると実体の無いカード（起こし直しを取り下げただけ・PC に
+    /// 何も無い）で運ぶ姿が無い。**合否はサーバが記録と合わせて決める**——PC は「何をしたか」
+    /// だけを言う（[`KillOutcome`]）。
+    ///
+    /// **古いサーバは知らない種別を接続を保ったまま読み飛ばす**（`gateway::handle_message`）。
+    /// そのとき CLI には答えが届かず、時間切れで終わる（止まったとは言わない側）。
+    KillAnswer {
+        card_id: CardId,
+        op: crate::ws::OpId,
+        outcome: KillOutcome,
+    },
+    /// 起こし直しの頼み（番号付き）への**成功の**答え（実装レビュー第6回）。PC が実体を作り
+    /// 終えたときに1回だけ返す。
+    ///
+    /// 失敗の答えは既にある `Error{ops}`（札に束ねた番号）が運ぶので、ここは成功だけを運ぶ。
+    /// [`AgentMessage::KillAnswer`] と同じく、古いサーバは知らない種別を接続を保ったまま
+    /// 読み飛ばす（そのとき CLI は時間切れで終わる）。
+    ReviveAnswer {
+        card_id: CardId,
+        op: crate::ws::OpId,
     },
     /// モデルの表（§13-4）。接続直後と、変化した時だけ送る。定期送信はしない。
     ///
@@ -523,6 +577,14 @@ pub enum ServerToAgent {
         cwd: String,
         permission_mode: Option<PermissionMode>,
         claude_session_id: crate::ClaudeSessionId,
+        /// 頼みの番号（実装レビュー第6回 Astra 3）。終わった断りがこの番号を運んで返り、
+        /// 待っている枝分かれは自分の番号の断りだけを拾う。
+        ///
+        /// 欠けたら PC が受付時に振る（画面からの起こし直しは答えを待たないので付けない）。
+        /// 古い PC はこの欄を読み飛ばし、断りに番号が付かない——枝分かれは拾えず、上限まで
+        /// 待って終わる
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        op: Option<crate::ws::OpId>,
     },
     /// **過去の CLI セッションを指定して、新しいカードで起こす**（名前付け設計§7-1）。
     ///
@@ -554,6 +616,10 @@ pub enum ServerToAgent {
     },
     Kill {
         card_id: CardId,
+        /// 頼みの番号（実装レビュー第6回 Astra 1）。付いていれば、PC は
+        /// [`AgentMessage::KillAnswer`] を必ず1回返す。古い PC は読み飛ばして答えない
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        op: Option<crate::ws::OpId>,
     },
     Archive {
         card_id: CardId,
@@ -978,6 +1044,7 @@ mod tests {
                 kind: ErrorKind::Model,
                 busy: None,
                 withdrawn: None,
+                ops: Vec::new(),
             },
             // 起こし直しの競合と終わった断り（寝ているカードばかりなのに、メモリ不足で
             // セッションを起こせない 設計§7-3）。**3値とも運べないと、セルフホストでだけ
@@ -988,6 +1055,7 @@ mod tests {
                 kind: ErrorKind::Revive,
                 busy: Some(true),
                 withdrawn: None,
+                ops: Vec::new(),
             },
             AgentMessage::Error {
                 card_id: Some(card_id),
@@ -995,6 +1063,7 @@ mod tests {
                 kind: ErrorKind::Revive,
                 busy: Some(false),
                 withdrawn: None,
+                ops: Vec::new(),
             },
             // 終了の頼みで取り下げた断り（実装レビュー第4回 Astra 1）。**運べないと、セルフホスト
             // でだけ CLI の終了が取り下げで満ちない**
@@ -1004,6 +1073,7 @@ mod tests {
                 kind: ErrorKind::Revive,
                 busy: Some(false),
                 withdrawn: Some(crate::ws::Withdrawal::Kill),
+                ops: Vec::new(),
             },
             AgentMessage::ModelTable {
                 cli_version: "2.1.220".to_string(),
@@ -1050,8 +1120,9 @@ mod tests {
                 cwd: "/home/example/dev/app".to_string(),
                 permission_mode: Some(PermissionMode::new("bypassPermissions")),
                 claude_session_id: crate::ClaudeSessionId::new(),
+                op: None,
             },
-            ServerToAgent::Kill { card_id },
+            ServerToAgent::Kill { card_id, op: None },
             ServerToAgent::Archive { card_id },
             ServerToAgent::Forget { card_id },
             ServerToAgent::StopForRemoval { card_id },
@@ -1312,6 +1383,7 @@ mod tests {
             kind: ErrorKind::Revive,
             busy: None,
             withdrawn: None,
+            ops: Vec::new(),
         })
         .unwrap();
         assert!(!json.contains("busy"), "{json}");
@@ -1339,9 +1411,87 @@ mod tests {
             kind: ErrorKind::Revive,
             busy: Some(false),
             withdrawn: None,
+            ops: Vec::new(),
         })
         .unwrap();
         assert!(!json.contains("withdrawn"), "{json}");
+    }
+
+    #[test]
+    fn 頼みの番号と終了の答えは欠けても読め_知らない答えは成功と読まない() {
+        // 実装レビュー第6回 Astra 1・3。PC ⇄ サーバの間も別の型が運ぶ。頼み（`Kill.op`・
+        // `ReviveSession.op`）と断り（`Error.ops`）は欠けても読め、無ければ書き出さない。
+        // 答え（`KillAnswer`）の知らない綴りは `Unknown` に落ちて種別ごと読めなくならない
+        let op = crate::ws::OpId::new();
+        let 古い終了 = r#"{"t":"kill","card_id":"00000000-0000-0000-0000-000000000001"}"#;
+        let ServerToAgent::Kill { op: 欠け, .. } = serde_json::from_str(古い終了).unwrap()
+        else {
+            panic!("kill として読めていない");
+        };
+        assert_eq!(欠け, None);
+        let 番号付き = ServerToAgent::Kill {
+            card_id: CardId::new(),
+            op: Some(op),
+        };
+        assert_eq!(roundtrip(&番号付き), 番号付き);
+        let json = serde_json::to_string(&ServerToAgent::Kill {
+            card_id: CardId::new(),
+            op: None,
+        })
+        .unwrap();
+        assert!(!json.contains(r#""op""#), "{json}");
+
+        let 答え = AgentMessage::ReviveAnswer {
+            card_id: CardId::new(),
+            op,
+        };
+        assert_eq!(roundtrip(&答え), 答え);
+        let 起こし直し = ServerToAgent::ReviveSession {
+            card_id: CardId::new(),
+            cwd: "/tmp".to_string(),
+            permission_mode: None,
+            claude_session_id: crate::ClaudeSessionId(uuid::Uuid::new_v4()),
+            op: Some(op),
+        };
+        assert_eq!(roundtrip(&起こし直し), 起こし直し);
+
+        let 古い断り = r#"{"t":"error","card_id":null,"message":"x","kind":"revive","busy":false}"#;
+        let AgentMessage::Error { ops, .. } = serde_json::from_str(古い断り).unwrap() else {
+            panic!("error として読めていない");
+        };
+        assert!(ops.is_empty());
+        let 断り = AgentMessage::Error {
+            card_id: None,
+            message: "x".to_string(),
+            kind: ErrorKind::Revive,
+            busy: Some(false),
+            withdrawn: None,
+            ops: vec![op],
+        };
+        assert_eq!(roundtrip(&断り), 断り);
+
+        for outcome in [
+            KillOutcome::Withdrew,
+            KillOutcome::Stopped,
+            KillOutcome::AlreadyEnded,
+            KillOutcome::Nothing,
+        ] {
+            let 答え = AgentMessage::KillAnswer {
+                card_id: CardId::new(),
+                op,
+                outcome,
+            };
+            assert_eq!(roundtrip(&答え), 答え);
+        }
+        let 知らない答え = format!(
+            r#"{{"t":"kill_answer","card_id":"00000000-0000-0000-0000-000000000001","op":"{op}","outcome":"paused"}}"#
+        );
+        let AgentMessage::KillAnswer { outcome, .. } =
+            serde_json::from_str(&知らない答え).expect("知らない答えでも種別ごと読めること")
+        else {
+            panic!("kill_answer として読めていない");
+        };
+        assert_eq!(outcome, KillOutcome::Unknown);
     }
 
     #[test]

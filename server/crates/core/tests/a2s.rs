@@ -361,6 +361,14 @@ impl EventSink for CountingSink {
         self.inner.reset_transcript(card_id);
     }
 
+    fn kill_answered(&self, answer: session_host_core::events::KillAnswered) {
+        self.inner.kill_answered(answer);
+    }
+
+    fn revive_answered(&self, answer: session_host_core::events::ReviveAnswered) {
+        self.inner.revive_answered(answer);
+    }
+
     fn model_aliases_changed(&self, aliases: serde_json::Value) {
         self.inner.model_aliases_changed(aliases);
     }
@@ -2144,6 +2152,7 @@ async fn 接続断のカードでも宛先が解決できて指示が届く() {
         .revive(server_core::session_host::ReviveRequest {
             account_id: a2s.account_id,
             card_id,
+            op: None,
         })
         .await
         .expect("接続断のカードでも宛先が解決できること");
@@ -2204,6 +2213,7 @@ async fn 起こし直しの宛先が無い_PC_は理由が返る() {
         .revive(server_core::session_host::ReviveRequest {
             account_id: a2s.account_id,
             card_id,
+            op: None,
         })
         .await
         .expect_err("断ること");
@@ -2236,6 +2246,7 @@ async fn 起こし直しを名乗らない_PC_へは投げない() {
         .revive(server_core::session_host::ReviveRequest {
             account_id: a2s.account_id,
             card_id,
+            op: None,
         })
         .await
         .expect_err("断ること");
@@ -3187,11 +3198,15 @@ async fn PC_側の起こし直しの競合は競合のままサーバの配信�
     let mut events = a2s.registry.subscribe_events();
 
     // PC 側で先に起こし直しが進んでいる、という状態を作る（席を握ったまま放さない）
-    let 先に起こしている = a2s.manager.begin_revive(card_id).expect("席を取れること");
+    let 先に起こしている = a2s
+        .manager
+        .begin_revive(card_id, None)
+        .expect("席を取れること");
     a2s.browser
         .revive(server_core::session_host::ReviveRequest {
             account_id: a2s.account_id,
             card_id,
+            op: None,
         })
         .await
         .expect("頼みは PC まで渡ること");
@@ -3219,6 +3234,7 @@ async fn PC_側の起こし直しの断りは終わった断りとしてサー�
         .revive(server_core::session_host::ReviveRequest {
             account_id: a2s.account_id,
             card_id,
+            op: None,
         })
         .await
         .expect("頼みは PC まで渡ること");
@@ -3264,6 +3280,7 @@ async fn 接続断のカードを起こし直しの確かめ中に外すと_PC_�
         .revive(server_core::session_host::ReviveRequest {
             account_id: a2s.account_id,
             card_id,
+            op: None,
         })
         .await
         .expect("頼みは PC まで渡ること");
@@ -3310,7 +3327,7 @@ async fn 接続断のカードを起こし直しの確かめ中に外すと_PC_�
     // 印は、記録を外せた後の `Forget` が立てる（第3回 Astra 1）。宛先は外す前に引いてある
     let in_flight = a2s
         .manager
-        .begin_revive(card_id)
+        .begin_revive(card_id, None)
         .expect("外したカードへの頼みを、競合（復旧中）として断らないこと");
     let 断り = a2s
         .manager
@@ -3330,10 +3347,11 @@ async fn 接続断のカードを起こし直しの確かめ中に外すと_PC_�
 
 #[tokio::test]
 async fn 接続断のカードを起こし直しの確かめ中に終了させると_CLI_は止まったと返し_PC_は起こさない() {
-    // 実装レビュー第4回 Astra 1（セルフホスト）。実体の無いカードでは `Ended` が来ないので、
-    // CLI の終了は「終了の頼みで取り下げた断り」で満ちる。その見分けは `withdrawn` の欄で、
-    // **PC → サーバ（`AgentMessage`）→ ブラウザの口（`ServerMessage`）のどこかで落とすと、
-    // セルフホストでだけ上限まで待ち切る**。`wait_for` へ直に差し込む単体では、この継ぎ目を通らない
+    // 実装レビュー第4回 Astra 1・第6回 Astra 1（セルフホスト）。実体の無いカードでは `Ended` が
+    // 来ないので、CLI の終了は PC の答え（`KillAnswer`）を記録層が合否にした**番号付きの状態**で
+    // 満ちる。**PC → サーバ（`AgentMessage`）→ CLI の口（`ServerMessage`）のどこかで答えか番号を
+    // 落とすと、セルフホストでだけ上限まで待ち切る**。`wait_for` へ直に差し込む単体では、この
+    // 継ぎ目を通らない。取り下げの理由（`withdrawn`）は、起こし直しの断りとして配信に残る（下で見る）
     let a2s = A2s::start("revive-killed").await;
     let (session, card_id) = 抜け殻にする(&a2s).await;
     let agent_id = a2s
@@ -3353,6 +3371,7 @@ async fn 接続断のカードを起こし直しの確かめ中に終了させ�
         .revive(server_core::session_host::ReviveRequest {
             account_id: a2s.account_id,
             card_id,
+            op: None,
         })
         .await
         .expect("頼みは PC まで渡ること");
@@ -3369,12 +3388,14 @@ async fn 接続断のカードを起こし直しの確かめ中に終了させ�
         agentdashboard_core::client::kill(&target, &card_id.to_string()),
     )
     .await
-    .expect("★取り下げの断りが終了の頼みとして読めず、CLI が上限まで待ち続けている")
+    .expect("★終了の頼みへの番号付きの答えが PC から CLI まで届かず、CLI が上限まで待ち続けている")
     .expect("★起こし直しを止めたのに、終了できなかったと返している");
+    // **頼みへの答え（番号付きの状態）で満ちたこと**（実装レビュー第6回 Astra 1）。PC の答え
+    // （`KillAnswer`）が A2S を通り、記録層が合否にして配っている
     assert!(
-        終了.human.contains("起こし直しは止まりました"),
-        "{}",
-        終了.human
+        終了.raw.contains(r#""t": "status""#) && 終了.raw.contains(r#""op": ""#),
+        "★終了の頼みへの番号付きの答えではないもので満ちている: {}",
+        終了.raw
     );
     // 断りは取り下げた起こし直しが返したもの——その時点で起こし直しは起こさずに終わっている
     assert!(
@@ -3438,6 +3459,7 @@ async fn 接続断のカードの記録を外せなければ_PC_は取り下げ�
         .revive(server_core::session_host::ReviveRequest {
             account_id: a2s.account_id,
             card_id,
+            op: None,
         })
         .await
         .expect("頼みは PC まで渡ること");
@@ -3492,6 +3514,7 @@ async fn 接続断のカードの記録を外せなければ_PC_は取り下げ�
         .revive(server_core::session_host::ReviveRequest {
             account_id: a2s.account_id,
             card_id,
+            op: None,
         })
         .await
         .expect("頼みは PC まで渡ること");
@@ -3544,6 +3567,7 @@ async fn 外した知らせが起こし直しの頼みより先に_PC_へ届い�
         .revive(server_core::session_host::ReviveRequest {
             account_id: a2s.account_id,
             card_id,
+            op: None,
         })
         .await
         .expect("頼みは PC まで渡ること");

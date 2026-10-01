@@ -37,9 +37,10 @@ use hooks_settings::HookSettings;
 use protocol::{
     CardId, ClaudeSessionId, ContextUsage, ModelId, PermissionMode, ProjectId, RateLimits,
     SessionCost, SessionMeta, SessionStatus, Timestamp,
+    a2s::KillOutcome,
     frame::{self, FrameKind},
     ipc::ParsedNode,
-    ws::ServerMessage,
+    ws::{OpId, ServerMessage},
 };
 use pty::{PtyExit, PtyProcess};
 use std::path::Path;
@@ -288,6 +289,10 @@ const REVIVE_PARALLEL: usize = 2;
 /// 値は CLI の起動を待つ既存の上限と揃えてある。
 const REVIVE_SETTLE: Duration = Duration::from_secs(60);
 const REVIVE_STEP: Duration = Duration::from_millis(100);
+
+/// 頼みへの答えを手元で配る待ち行列（[`SessionManager::subscribe_kill_answers`]・
+/// [`SessionManager::subscribe_revive_answers`]）。答えは頼み1つにつき1件しか出ないので、浅くてよい
+const KILL_ANSWER_QUEUE: usize = 64;
 
 /// 起こし直した1本のメモリが `MemAvailable` に現れきるまでの見込み（設計§19）。
 ///
@@ -895,6 +900,14 @@ impl EndReportCell {
 }
 
 /// 一覧画面の小窓1枚に対応する、生きているセッション。
+/// 終了を待っている頼み（[`Session::await_end`]）。
+#[derive(Default)]
+struct EndWaiters {
+    /// プロセスが終わったか。**`on_exit` だけが立てる**
+    ended: bool,
+    ops: Vec<OpId>,
+}
+
 pub struct Session {
     pub card_id: CardId,
     meta: Mutex<SessionMeta>,
@@ -924,6 +937,13 @@ pub struct Session {
     /// プロセスが生き続ける場面でも飛ぶので**取り消しうる**印であり、下りない印と混ぜると
     /// 呼び戻したあとに本当に落ちたときまで正常終了として表示される。器は `end_report`。
     expected_exit: AtomicBool,
+    /// 終了を待っている頼みの番号（寝ているカードばかりなのに、メモリ不足でセッションを
+    /// 起こせない 実装レビュー第6回 Astra 1）。プロセスが終わったら [`SessionManager::on_exit`] が
+    /// 答える。
+    ///
+    /// **終わったかの印も同じロックで持つ。** 状態（`meta`）で「もう終わったか」を見てから
+    /// 預けると、その間に終わった実体の番号を誰も答えない。
+    end_waiters: Mutex<EndWaiters>,
     /// CLI からの終了の申告。**立っている間も状態は動かさない。**
     ///
     /// 取り消されるのは、次のフックが1件届いたとき（死んだプロセスはフックを出さない）か、
@@ -1995,6 +2015,28 @@ impl Session {
         self.process.is_paused()
     }
 
+    /// 終了の頼みの番号を預ける（実装レビュー第6回 Astra 1）。終わったら
+    /// [`SessionManager::on_exit`] が答える。**既に終わっていたら預からずに `false`**——呼んだ側が
+    /// その場で答える。
+    ///
+    /// 止める（[`Session::kill`]）より**前に**預けること。後にすると、止めた直後に終わった
+    /// 実体の番号を、終わりを見届ける側が知らないまま答え損ねる。
+    fn await_end(&self, op: OpId) -> bool {
+        let mut waiters = self.end_waiters.lock().expect("ロックが壊れていない");
+        if waiters.ended {
+            return false;
+        }
+        waiters.ops.push(op);
+        true
+    }
+
+    /// 終わったことを記し、預かっていた番号を返す（[`SessionManager::on_exit`] だけが呼ぶ）。
+    fn take_end_waiters(&self) -> Vec<OpId> {
+        let mut waiters = self.end_waiters.lock().expect("ロックが壊れていない");
+        waiters.ended = true;
+        std::mem::take(&mut waiters.ops)
+    }
+
     pub fn kill(&self) {
         // 「利用者が終わらせた」ことを先に記録してから落とす。逆順だと、終了検知が
         // 先に走って異常終了として表示されてしまう
@@ -2387,6 +2429,10 @@ pub struct SessionManager {
     /// ローカルモードはプロセス内の配信そのもの、セルフホストモードでは A2S 越しの
     /// 実装に差し替わる。**流し先をここに焼き付けない**ためにトレイトで持つ。
     events: Arc<dyn EventSink>,
+    /// 終了の頼みへの答えの手元の配信（[`SessionManager::subscribe_kill_answers`]）
+    kill_answers: broadcast::Sender<crate::events::KillAnswered>,
+    /// 起こし直しの頼みへの成功の答えの手元の配信（[`SessionManager::subscribe_revive_answers`]）
+    revive_answers: broadcast::Sender<crate::events::ReviveAnswered>,
     /// パーサへ監視を頼む口。パーサが立ち上がってから差し込まれる。
     ///
     /// 逆参照（パーサ → SessionManager）はここには持たせない。フックの処理を止めない
@@ -2547,6 +2593,38 @@ pub struct ReviveInFlight {
     manager: Arc<SessionManager>,
     card_id: CardId,
     ticket: Arc<ReviveTicket>,
+    /// 実体を作り終えたら成功を答える頼みの番号（実装レビュー第6回）。**頼んだ側が番号を渡した
+    /// ときだけ**持つ——受付時に振った番号には待っている者が居ないので、答えても配りものが
+    /// 増えるだけである。答えるのは [`SessionManager::revive`] の1か所
+    reply: Option<OpId>,
+}
+
+impl ReviveInFlight {
+    /// 終わった断りに添える番号を、後から読むための控え（実装レビュー第6回 Astra 3）。
+    /// **[`SessionManager::revive`] へ渡す前に取っておく。**
+    pub fn answers(&self) -> ReviveAnswers {
+        ReviveAnswers(Arc::clone(&self.ticket))
+    }
+}
+
+/// 起こし直しの終わった断りが答える頼みの番号（[`ReviveInFlight::answers`]）。
+pub struct ReviveAnswers(Arc<ReviveTicket>);
+
+impl ReviveAnswers {
+    /// **[`SessionManager::revive`] が断りで返った後に読む。** 断りで返るときには札は表から
+    /// 外れている（[`ReviveInFlight`] の `Drop`）ので、もう誰も束ねない——ここで読んだものが
+    /// 全部である。外れる前に読むと、その後に束ねられた頼みの番号を落とす。
+    ///
+    /// 逆に、外れた後に受け付けた頼みは新しい札を持つので、ここには混ざらない。先の起こし
+    /// 直しの断りが遅れて届いても、後の頼みの答えと取り違えられない
+    pub fn ops(&self) -> Vec<OpId> {
+        self.0
+            .state
+            .lock()
+            .expect("ロックが壊れていない")
+            .ops
+            .clone()
+    }
 }
 
 /// 起こし直しを、まだ続けてよいかの札（実装レビュー Astra 1）。
@@ -2579,6 +2657,16 @@ struct TicketState {
     /// 下ろされたか、なぜ下ろされたか
     withdrawn: Option<WithdrawReason>,
     stage: ReviveStage,
+    /// この起こし直しの終わった断りが答える頼みの番号（実装レビュー第6回 Astra 3）。
+    ///
+    /// 受け付けた頼みの番号に、**進んでいる間に届いて競合で断った頼み**の番号を束ねる。競合で
+    /// 断られた側（人が先に起こしていたときの枝分かれ）は、先の起こし直しが断られれば同じく
+    /// 起きてこないので、その理由ですぐ終わってよい。札が表から外れた後は誰も束ねない
+    /// （[`ReviveAnswers`]）
+    ops: Vec<OpId>,
+    /// 起こしている最中（[`ReviveStage::Spawning`]）に届いた終了の頼みの番号（実装レビュー
+    /// 第6回 Astra 1）。作り終えた起こす側が引き取り、作った実体を止めてから答える
+    kill_ops: Vec<OpId>,
 }
 
 /// 札を下ろした理由（実装レビュー第3回）。**起こしている最中に下ろされたとき、起こし終えた
@@ -2622,10 +2710,19 @@ enum ReviveStage {
 impl ReviveTicket {
     /// 札を下ろし、**下ろした時点の段**を返す。待たない。既に下ろされていれば、理由は
     /// 強いほうを残す（[`WithdrawReason`]）。
-    fn withdraw(&self, reason: WithdrawReason) -> ReviveStage {
+    ///
+    /// 終了の頼みの番号（`kill_op`）は、**起こしている最中なら札へ預ける**（作り終えた起こす側が
+    /// 答える）。段を読むのと預けるのを同じロックの中で行うので、起こす側が作り終えた印を
+    /// 立てた後には預からない——そのときは呼んだ側が実体を見て答える。
+    fn withdraw(&self, reason: WithdrawReason, kill_op: Option<OpId>) -> ReviveStage {
         let stage = {
             let mut state = self.state.lock().expect("ロックが壊れていない");
             state.withdrawn = state.withdrawn.max(Some(reason));
+            if let Some(op) = kill_op
+                && state.stage == ReviveStage::Spawning
+            {
+                state.kill_ops.push(op);
+            }
             state.stage
         };
         // **待っている者が居なくても知らせを1つ残す**（`notify_one`）。見てから待ち始める
@@ -2679,9 +2776,11 @@ struct ReviveTable {
 
 /// 止める頼み（[`SessionManager::halt`]）で何を止めたか。
 enum Halted {
-    /// 進んでいた起こし直しの札を下ろした（実体があれば、それも止めた）
+    /// 進んでいた起こし直しの札を下ろした（実体があれば、それも止めた）。起こし終えた札だけが
+    /// 残り、実体が無いときもこちら
     Withdrew,
-    /// 札は無く、実体だけを止めた（既に終わっていた実体も含む）
+    /// 実体を止めた（既に終わっていた実体も含む）。起こし終えた札が残っていてもこちら
+    /// （実装レビュー第6回 Astra 2）
     Stopped(Arc<Session>),
     /// 止めるものが無かった
     Nothing,
@@ -2875,6 +2974,29 @@ impl SessionManager {
     #[doc(hidden)]
     pub fn 起こす直前に差し込む(&self, hook: Arc<dyn Fn() + Send + Sync>) {
         *self.before_spawn.lock().expect("ロックが壊れていない") = Some(hook);
+    }
+
+    /// 進んでいる起こし直しの終わった断りが運ぶ頼みの番号（**テスト専用**）。札が無ければ空。
+    ///
+    /// 枝分かれは自分で振った番号の断りだけを拾う（実装レビュー第6回 Astra 3）ので、段取りの外から
+    /// 断りを差し込む試験は、その番号を知らないと差し込めない。
+    #[doc(hidden)]
+    pub fn 起こし直しの頼みの番号(&self, card_id: CardId) -> Vec<OpId> {
+        let ticket = self
+            .reviving
+            .lock()
+            .expect("ロックが壊れていない")
+            .tickets
+            .get(&card_id)
+            .cloned();
+        ticket.map_or_else(Vec::new, |ticket| {
+            ticket
+                .state
+                .lock()
+                .expect("ロックが壊れていない")
+                .ops
+                .clone()
+        })
     }
 
     /// 予約が0件になったときと同じく、いまより前に始めた外側の観測を失効させる（**テスト専用**）。
@@ -3165,6 +3287,8 @@ impl SessionManager {
             sessions: Mutex::new(HashMap::new()),
             tokens: Mutex::new(HashMap::new()),
             events,
+            kill_answers: broadcast::channel(KILL_ANSWER_QUEUE).0,
+            revive_answers: broadcast::channel(KILL_ANSWER_QUEUE).0,
             parser: Mutex::new(None),
             claude_settings,
             aliases,
@@ -3574,6 +3698,7 @@ impl SessionManager {
             settings,
             transcript_path: Mutex::new(None),
             expected_exit: AtomicBool::new(false),
+            end_waiters: Mutex::new(EndWaiters::default()),
             end_report: EndReportCell::default(),
             saw_output: AtomicBool::new(false),
             hook_silence_noted: AtomicBool::new(false),
@@ -3668,8 +3793,15 @@ impl SessionManager {
     /// | 何も無い | 見つからないという断り |
     ///
     /// 取り下げた場合は配り直さない。配り直すと、取り下げを確かめる前に CLI が満ちる。
+    ///
+    /// 上の表は**番号の無い頼み**（画面・古い CLI）の答え方で、いまも残してある。番号付きの
+    /// 頼みは [`SessionManager::kill_answering`] が受ける。
+    ///
+    /// **起こし終えた札が残っていても、実体の話として扱う**（実装レビュー第6回 Astra 2）。以前は
+    /// 札が在るだけで取り下げたことにして配り直さなかったので、立ち上がりきる前に終わった実体への
+    /// 終了には何も届かなかった（[`SessionManager::halt`]）。
     pub fn kill(&self, card_id: CardId) -> Result<(), SessionError> {
-        match self.halt(card_id, WithdrawReason::Kill) {
+        match self.halt(card_id, WithdrawReason::Kill, None) {
             Halted::Withdrew => Ok(()),
             Halted::Stopped(session) => {
                 if matches!(session.status(), SessionStatus::Ended { .. }) {
@@ -3681,6 +3813,26 @@ impl SessionManager {
         }
     }
 
+    /// 番号付きの終了の頼み（寝ているカードばかりなのに、メモリ不足でセッションを起こせない
+    /// 実装レビュー第6回 Astra 1・2）。止め方は [`SessionManager::kill`] と同じで、**何をしたかを
+    /// 番号付きで必ず1回答える**（[`EventSink::kill_answered`]）。待つ側は番号でしか満ちないので、
+    /// 写しの重複や他の頼みの断りを取り違えない。
+    ///
+    /// | この PC で | 答え（[`KillOutcome`]） | いつ |
+    /// |---|---|---|
+    /// | 確かめ・席を待っている起こし直しを取り下げた | `Withdrew` | その場で |
+    /// | 起こしている最中の起こし直しを取り下げた | 作った実体を止めて `Stopped`／作れなければ `Withdrew` | 起こす側が作り終えた後 |
+    /// | 生きた実体を止めた（起こし終えた札が残っていても） | `Stopped` | プロセスが終わった後 |
+    /// | 実体は既に終わっていた（同上） | `AlreadyEnded` | その場で |
+    /// | 何も無い | `Nothing` | その場で |
+    ///
+    /// **断らない。** 何も無かったことも答えで返る——成功か失敗かは、サーバがカードの記録と
+    /// 合わせて決める。番号の無い頼みの答え（取り下げの断り・`Ended`・配り直し・見つからない）は
+    /// 出さない：番号を持つ待ち手はそれを読まず、画面は状態の変化で足りる。
+    pub fn kill_answering(&self, card_id: CardId, op: OpId) {
+        self.halt(card_id, WithdrawReason::Kill, Some(op));
+    }
+
     /// 記録の側から一覧から外し始めたカードを、この PC で止める（実装レビュー第3回 Astra 1）。
     /// **記録を外す前に**届く。止め方は終了（[`SessionManager::kill`]）と同じで、外した印は
     /// 残さない。何も無くても断らない（サーバはこの PC が持っているかを知らずに送る）。
@@ -3689,17 +3841,24 @@ impl SessionManager {
     /// 立てると、記録を外せなかったとき一覧に残ったカードを二度と起こせなくなる。
     pub fn stop_for_removal(&self, card_id: CardId) -> bool {
         !matches!(
-            self.halt(card_id, WithdrawReason::Removing),
+            self.halt(card_id, WithdrawReason::Removing, None),
             Halted::Nothing
         )
     }
 
     /// 進んでいる起こし直しを取り下げ、実体があれば止める。**印は残さない。** 何を止めたかを
-    /// 返す（[`Halted`]）。
+    /// 返す（[`Halted`]）。`op` があれば、その答えを出す（[`SessionManager::kill`] の表）。
     ///
     /// 札を下ろしてから実体を止める。逆にすると、止めた直後に確かめを終えた起こし直しが
     /// 新しい実体を作る。
-    fn halt(&self, card_id: CardId, reason: WithdrawReason) -> Halted {
+    ///
+    /// # 起こし終えた札は、取り下げの相手ではない（実装レビュー第6回 Astra 2）
+    ///
+    /// 札は起こし終えた後も、立ち上がりきるまで（見張りが下ろすまで）表に残る。以前は札が在る
+    /// だけで取り下げたことにしていたので、その間に実体が終わっていると、取り下げの断りも
+    /// 配り直しも来ず、終了を待つ CLI は時間切れになった。**段で分ける**：取り下げになるのは
+    /// 確かめ・席を待っている間と起こしている最中だけで、起こし終えていれば実体の話として扱う。
+    fn halt(&self, card_id: CardId, reason: WithdrawReason, op: Option<OpId>) -> Halted {
         let ticket = self
             .reviving
             .lock()
@@ -3708,32 +3867,108 @@ impl SessionManager {
             .get(&card_id)
             .cloned();
         // 下ろすのは表のロックを離してから（[`SessionManager::retire`] と同じ）
-        if let Some(ticket) = &ticket {
-            let what = match reason {
-                WithdrawReason::Kill => "終了を頼まれたので",
-                _ => "一覧から外し始めたので",
-            };
-            match ticket.withdraw(reason) {
-                ReviveStage::Waiting => {
-                    tracing::info!(%card_id, "{what}、進んでいた起こし直しを取り下げます");
-                }
-                ReviveStage::Spawning => tracing::info!(
-                    %card_id,
-                    "起こしている最中に{what}、起こし終えたところで止めさせます"
-                ),
-                // 起こし終えていれば、下の実体を止めるだけ（いつもの終了と同じ）
-                ReviveStage::Spawned => {}
+        let stage = ticket.as_ref().map(|ticket| ticket.withdraw(reason, op));
+        let what = match reason {
+            WithdrawReason::Kill => "終了を頼まれたので",
+            _ => "一覧から外し始めたので",
+        };
+        match stage {
+            Some(ReviveStage::Waiting) => {
+                tracing::info!(%card_id, "{what}、進んでいた起こし直しを取り下げます");
             }
+            Some(ReviveStage::Spawning) => tracing::info!(
+                %card_id,
+                "起こしている最中に{what}、起こし終えたところで止めさせます"
+            ),
+            Some(ReviveStage::Spawned) | None => {}
         }
         let session = self.get(card_id);
-        if let Some(session) = &session {
-            session.kill();
+        match stage {
+            // **起こしている最中。** 答えは札へ預けた（`withdraw`）——作り終えた起こす側が、作った
+            // 実体を止めてから答える。表に居る実体は古いものか作りたてで、どちらも止めてよい
+            Some(ReviveStage::Spawning) => {
+                if let Some(session) = &session {
+                    session.kill();
+                }
+                Halted::Withdrew
+            }
+            // **確かめ・席を待っている。** 起こす側は作る前に札を見るので、もう実体は作られない。
+            // 表に残る古い実体が生きていれば、それが止まるのを見届けてから答える
+            Some(ReviveStage::Waiting) => {
+                match &session {
+                    Some(session) => {
+                        if let Some(op) = op
+                            && !session.await_end(op)
+                        {
+                            self.answer_kill(card_id, op, KillOutcome::Withdrew);
+                        }
+                        session.kill();
+                    }
+                    None => {
+                        if let Some(op) = op {
+                            self.answer_kill(card_id, op, KillOutcome::Withdrew);
+                        }
+                    }
+                }
+                Halted::Withdrew
+            }
+            // 起こし終えている、または札が無い。**実体の話**
+            Some(ReviveStage::Spawned) | None => match session {
+                Some(session) => {
+                    if let Some(op) = op
+                        && !session.await_end(op)
+                    {
+                        self.answer_kill(card_id, op, KillOutcome::AlreadyEnded);
+                    }
+                    session.kill();
+                    Halted::Stopped(session)
+                }
+                None => {
+                    if let Some(op) = op {
+                        self.answer_kill(card_id, op, KillOutcome::Nothing);
+                    }
+                    // 起こし終えた札だけが残り、実体が無い（作るのに失敗した・畳まれた）。
+                    // 番号の無い頼みには、以前どおり断らない（起こす側が断りを配る）
+                    if stage.is_some() {
+                        Halted::Withdrew
+                    } else {
+                        Halted::Nothing
+                    }
+                }
+            },
         }
-        match (ticket, session) {
-            (Some(_), _) => Halted::Withdrew,
-            (None, Some(session)) => Halted::Stopped(session),
-            (None, None) => Halted::Nothing,
-        }
+    }
+
+    /// 終了の頼みに答える（[`SessionManager::kill`] の表）。番号1つにつき1回だけ呼ぶ。
+    fn answer_kill(&self, card_id: CardId, op: OpId, outcome: KillOutcome) {
+        tracing::info!(%card_id, %op, ?outcome, "終了の頼みに答えます");
+        let answer = crate::events::KillAnswered {
+            card_id,
+            op,
+            outcome,
+        };
+        let _ = self.kill_answers.send(answer);
+        self.events.kill_answered(answer);
+    }
+
+    /// 起こし直しの頼み（番号付き）が実体を作り終えたことを答える（[`SessionManager::revive`]）。
+    fn answer_revive(&self, card_id: CardId, op: OpId) {
+        tracing::info!(%card_id, %op, "起こし直しの頼みに、起こせたと答えます");
+        let answer = crate::events::ReviveAnswered { card_id, op };
+        let _ = self.revive_answers.send(answer);
+        self.events.revive_answered(answer);
+    }
+
+    /// 起こし直しの頼みへの成功の答えを、同じプロセスの中で見る（いまはテストだけが使う）。
+    pub fn subscribe_revive_answers(&self) -> broadcast::Receiver<crate::events::ReviveAnswered> {
+        self.revive_answers.subscribe()
+    }
+
+    /// 終了の頼みへの答えを、同じプロセスの中で見る（いまはテストだけが使う）。
+    ///
+    /// 報告先（[`EventSink`]）は答えをサーバへ運ぶだけで、手元の購読口を持たない。
+    pub fn subscribe_kill_answers(&self) -> broadcast::Receiver<crate::events::KillAnswered> {
+        self.kill_answers.subscribe()
     }
 
     /// 実体を畳む。**カードが消えたことは配らない。**
@@ -3840,27 +4075,62 @@ impl SessionManager {
     /// **外した印は、表に札が居るかより先に見る。** 外す前の起こし直しの札は立ち上がりきるまで
     /// 表に残るので、後に見ると、その間に届いた頼みが競合に化ける。下ろした札は表に入れない
     /// （表の行は、その行の札を持つ者だけが消す。[`ReviveInFlight`] の `Drop`）。
-    pub fn begin_revive(self: &Arc<Self>, card_id: CardId) -> Option<ReviveInFlight> {
+    ///
+    /// # 頼みの番号（実装レビュー第6回 Astra 3）
+    ///
+    /// `op` は頼んだ側の番号で、欠けていればここで振る（受け付けた時点で決まる）。競合で断る
+    /// ときは、**先に進んでいる札へ番号を束ねてから** `None` を返す——先の起こし直しが断られたら、
+    /// その断りがこの番号も運ぶ（[`TicketState::ops`]）。
+    pub fn begin_revive(
+        self: &Arc<Self>,
+        card_id: CardId,
+        op: Option<OpId>,
+    ) -> Option<ReviveInFlight> {
+        let given = op;
+        let op = op.unwrap_or_else(OpId::new);
         let mut reviving = self.reviving.lock().expect("ロックが壊れていない");
         if reviving.removed.contains(&card_id) {
             let ticket = ReviveTicket::default();
-            ticket.state.lock().expect("ロックが壊れていない").withdrawn =
-                Some(WithdrawReason::Remove);
+            {
+                let mut state = ticket.state.lock().expect("ロックが壊れていない");
+                state.withdrawn = Some(WithdrawReason::Remove);
+                state.ops.push(op);
+            }
             return Some(ReviveInFlight {
                 manager: Arc::clone(self),
                 card_id,
                 ticket: Arc::new(ticket),
+                reply: given,
             });
         }
-        let std::collections::hash_map::Entry::Vacant(slot) = reviving.tickets.entry(card_id)
-        else {
-            return None;
+        let slot = match reviving.tickets.entry(card_id) {
+            std::collections::hash_map::Entry::Vacant(slot) => slot,
+            std::collections::hash_map::Entry::Occupied(ahead) => {
+                // **表のロックの中で束ねる。** 札が表に居る間しか束ねないので、外れた後
+                // （断りの番号を読み始めた後）に束ねて落とすことはない
+                ahead
+                    .get()
+                    .state
+                    .lock()
+                    .expect("ロックが壊れていない")
+                    .ops
+                    .push(op);
+                return None;
+            }
         };
-        let ticket = Arc::clone(slot.insert(Arc::new(ReviveTicket::default())));
+        let ticket = ReviveTicket::default();
+        ticket
+            .state
+            .lock()
+            .expect("ロックが壊れていない")
+            .ops
+            .push(op);
+        let ticket = Arc::clone(slot.insert(Arc::new(ticket)));
         Some(ReviveInFlight {
             manager: Arc::clone(self),
             card_id,
             ticket,
+            reply: given,
         })
     }
 
@@ -3893,7 +4163,7 @@ impl SessionManager {
             return Some(None);
         };
         // 下ろすのは表のロックを離してから（札のロックは短いが、入れ子にしない）
-        let stage = ticket.withdraw(WithdrawReason::Remove);
+        let stage = ticket.withdraw(WithdrawReason::Remove, None);
         // **段で言い分ける**（実装レビュー第2回 Fable 3）。止まったかどうかの本人の言い分は、
         // 起こす側の `revive_withdrawn`（段付き）が残す
         match stage {
@@ -3977,6 +4247,7 @@ impl SessionManager {
     ) -> Result<Arc<Session>, SessionError> {
         let card_id = in_flight.card_id;
         let ticket = Arc::clone(&in_flight.ticket);
+        let reply = in_flight.reply;
         // **一覧から外したカードへの頼みは、何も始めずに断る**（実装レビュー第2回 Astra 1）。
         // 外した知らせが頼みより先に届いた場合がこれで、札は下ろされた状態で渡ってくる。
         // 下の席待ちの `select!` に任せると、席が空いているときは席の腕が選ばれうる
@@ -4076,11 +4347,22 @@ impl SessionManager {
         );
         // **作り終えた印を立てるのと、作っている間に下ろされたかを見るのは一度に行う。**
         // この後に下ろされたら、片付けるのは下ろした側になる
-        let 作っている間に下ろされた = {
+        //
+        // **預かった終了の頼みの番号も一緒に引き取る**（実装レビュー第6回 Astra 1）。印を立てた
+        // 後に届いた終了の頼みは札へ預けず、実体を見て自分で答える（[`ReviveTicket::withdraw`]）
+        let (作っている間に下ろされた, 終了の頼み) = {
             let mut state = ticket.state.lock().expect("ロックが壊れていない");
             state.stage = ReviveStage::Spawned;
-            state.withdrawn
+            (state.withdrawn, std::mem::take(&mut state.kill_ops))
         };
+        // 作った実体があれば、止める前に番号を預ける（終わるのを見届けてから答える）。作れて
+        // いなければ、何も起きていないので取り下げたと答える
+        for op in 終了の頼み {
+            let 預けた = spawned.as_ref().is_ok_and(|session| session.await_end(op));
+            if !預けた {
+                self.answer_kill(card_id, op, KillOutcome::Withdrew);
+            }
+        }
         if let Some(reason) = 作っている間に下ろされた {
             // 下ろした側は片付けずに戻っている。**ここで片付けないと、頼まれていない実体が残る。**
             // 作るのに失敗していれば片付けるものは無く、断りは下ろされたことのほうを返す
@@ -4112,6 +4394,12 @@ impl SessionManager {
             return Err(withdrawn(card_id, reason, "起こしている間"));
         }
         let session = spawned?;
+        // **作り終えたら答える**（実装レビュー第6回）。作った実体の姿は `spawn_as` が配り終えて
+        // いるので、答えはその後ろに並ぶ。立ち上がりきるのは待たない——以前の CLI も、起動中で
+        // 繋がった姿を見た時点で「起こし直しました」と言っていた
+        if let Some(op) = reply {
+            self.answer_revive(card_id, op);
+        }
 
         // 立ち上がりきるまで席と印を持つ見張りを、**切り離してから**返す。
         //
@@ -4616,6 +4904,7 @@ impl SessionManager {
                 status,
                 subagent_active,
                 last_activity_at,
+                op: None,
             });
         }
     }
@@ -4769,6 +5058,7 @@ impl SessionManager {
             meta.status = SessionStatus::Ended { ok };
             meta.last_activity_at = now_ms();
         }
+        let waiters = session.take_end_waiters();
         // **報告してよいのは、いま表に載っている実体だけ。** 畳まれた古い実体の終了を
         // 配ると、同じ札で「終了」が飛び、起こし直したばかりのカードが終了扱いになる。
         // 自分の meta を直すところまでは通す——あの実体は本当に終わっているので、
@@ -4778,6 +5068,13 @@ impl SessionManager {
             .is_some_and(|live| Arc::ptr_eq(&live, session))
         {
             self.broadcast_meta(session);
+        }
+        // **終了の頼みには、表に居なくても答える**（実装レビュー第6回 Astra 1）。止めるよう
+        // 頼まれた実体が終わったことは本当で、答えは状態を配らない。配った後に答えるのは、
+        // 答えを受けたサーバが記録のいまの状態を添えて配るため（ローカルもセルフホストも、
+        // 報告と答えは同じ順の道を通る）
+        for op in waiters {
+            self.answer_kill(card_id, op, KillOutcome::Stopped);
         }
     }
 

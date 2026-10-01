@@ -34,7 +34,7 @@ async fn revive(
     card_id: CardId,
     claude_session_id: ClaudeSessionId,
 ) -> Arc<Session> {
-    let in_flight = manager.begin_revive(card_id).expect("印が立つこと");
+    let in_flight = manager.begin_revive(card_id, None).expect("印が立つこと");
     manager
         .revive(in_flight, &common::work_dir(), None, claude_session_id)
         .await
@@ -395,7 +395,7 @@ async fn 三枚を同時に頼む(
     let ids: Vec<CardId> = (0..3).map(|_| CardId::new()).collect();
     let mut handles = Vec::new();
     for card_id in &ids {
-        let in_flight = manager.begin_revive(*card_id).expect("印が立つこと");
+        let in_flight = manager.begin_revive(*card_id, None).expect("印が立つこと");
         let manager = Arc::clone(manager);
         let cwd = common::work_dir();
         handles.push(tokio::spawn(async move {
@@ -460,13 +460,15 @@ async fn 同じカードへ二度頼むと二度目は断られる() {
     let manager = common::manager();
     let card_id = CardId::new();
 
-    let 一枚目 = manager.begin_revive(card_id).expect("1回目は取れること");
+    let 一枚目 = manager
+        .begin_revive(card_id, None)
+        .expect("1回目は取れること");
     assert!(
-        manager.begin_revive(card_id).is_none(),
+        manager.begin_revive(card_id, None).is_none(),
         "同じカードへの2回目が通っています"
     );
     // 別のカードは影響を受けない
-    assert!(manager.begin_revive(CardId::new()).is_some());
+    assert!(manager.begin_revive(CardId::new(), None).is_some());
 
     drop(一枚目);
 }
@@ -483,14 +485,14 @@ async fn 終わったら印は外れる() {
 
     let session = revive(&manager, card_id, ClaudeSessionId::new()).await;
     assert!(
-        manager.begin_revive(card_id).is_none(),
+        manager.begin_revive(card_id, None).is_none(),
         "立ち上がりきる前に印が外れています"
     );
 
     立ち上がりきらせる(&manager, &session);
 
     wait_until("印が外れる", || {
-        manager.begin_revive(card_id).is_some()
+        manager.begin_revive(card_id, None).is_some()
     })
     .await;
 }
@@ -630,7 +632,7 @@ fn 床の設定() -> SessionHostConfig {
 }
 
 async fn 頼む(manager: &Arc<SessionManager>, card_id: CardId) -> Result<Arc<Session>, String> {
-    let in_flight = manager.begin_revive(card_id).expect("印が立つこと");
+    let in_flight = manager.begin_revive(card_id, None).expect("印が立つこと");
     manager
         .revive(
             in_flight,
@@ -829,7 +831,7 @@ async fn 席を待ったカードにも床が効く() {
     let ids: Vec<CardId> = (0..3).map(|_| CardId::new()).collect();
     let mut handles = Vec::new();
     for card_id in &ids {
-        let in_flight = manager.begin_revive(*card_id).expect("印が立つこと");
+        let in_flight = manager.begin_revive(*card_id, None).expect("印が立つこと");
         let manager = Arc::clone(&manager);
         let cwd = common::work_dir();
         handles.push(tokio::spawn(async move {
@@ -890,7 +892,7 @@ fn 予約の設定() -> SessionHostConfig {
 async fn 同時に頼む(manager: &Arc<SessionManager>, ids: &[CardId]) -> (usize, Vec<String>) {
     let mut handles = Vec::new();
     for card_id in ids {
-        let in_flight = manager.begin_revive(*card_id).expect("印が立つこと");
+        let in_flight = manager.begin_revive(*card_id, None).expect("印が立つこと");
         let manager = Arc::clone(manager);
         let cwd = common::work_dir();
         handles.push(tokio::spawn(async move {
@@ -1766,7 +1768,7 @@ fn 切り離して頼む(
     manager: &Arc<SessionManager>,
     card_id: CardId,
 ) -> tokio::task::JoinHandle<Result<(), String>> {
-    let in_flight = manager.begin_revive(card_id).expect("印が立つこと");
+    let in_flight = manager.begin_revive(card_id, None).expect("印が立つこと");
     let manager = Arc::clone(manager);
     tokio::spawn(async move {
         manager
@@ -1822,7 +1824,7 @@ async fn 確かめを待っている間に外したカードは確かめが済�
     // 外したカードへ後から届いた頼みは、「復旧中」（競合）ではなく外したと断る（実装レビュー
     // 第2回 Astra 1）。外していないカードの印が下りることは `終わったら印は外れる` が見ている
     let in_flight = manager
-        .begin_revive(card_id)
+        .begin_revive(card_id, None)
         .expect("外したカードへの頼みを、競合（復旧中）として断らないこと");
     let 断り = manager
         .revive(
@@ -2217,7 +2219,7 @@ async fn 外す前の起こし直しの札が残っている間に届いた頼�
     manager.archive(card_id).expect("外せること");
 
     let in_flight = manager
-        .begin_revive(card_id)
+        .begin_revive(card_id, None)
         .expect("★外したカードへの頼みを、競合（復旧中）として断っている");
     let 断り = manager
         .revive(
@@ -2488,7 +2490,7 @@ async fn 判定の断りと終了の取り下げが同時に用意できたら�
         }));
     }
 
-    let in_flight = manager.begin_revive(card_id).expect("印が立つこと");
+    let in_flight = manager.begin_revive(card_id, None).expect("印が立つこと");
     let 断り = manager
         .revive(
             in_flight,
@@ -2505,4 +2507,378 @@ async fn 判定の断りと終了の取り下げが同時に用意できたら�
     );
     assert!(manager.get(card_id).is_none(), "実体を作らないこと");
     assert_eq!(manager.reserved_revives(), 0, "予約を残していない");
+}
+
+// ---------------------------------------------------------------------------
+// 実装レビュー第6回（Astra 1・2・3）：頼みの番号と、その答え
+// ---------------------------------------------------------------------------
+
+use protocol::{a2s::KillOutcome, ws::OpId};
+use session_host_core::events::KillAnswered;
+
+/// 番号付きの答えを1件、待たずに取る（答えは頼みの中で同期に出るか、後から出る）。
+fn 答えを取る(
+    answers: &mut tokio::sync::broadcast::Receiver<KillAnswered>,
+) -> Option<KillAnswered> {
+    answers.try_recv().ok()
+}
+
+/// 番号付きの答えを1件、上限まで待つ。
+async fn 答えを待つ(
+    answers: &mut tokio::sync::broadcast::Receiver<KillAnswered>,
+    what: &str,
+) -> KillAnswered {
+    timeout(common::TIMEOUT, answers.recv())
+        .await
+        .unwrap_or_else(|_| panic!("{what}の答えが届かない"))
+        .expect("答えの配信が閉じていない")
+}
+
+#[tokio::test]
+async fn 起こし終えた札が残っている間に実体が終わってから終了を頼んでも答えが返る() {
+    // 実装レビュー第6回 Astra 2。起こし終えた札は、見張りが立ち上がりを見届けるまで（最大
+    // `REVIVE_STEP`＝100ms ごとに見る）表に残る。その間に実体が終わってから終了を頼むと、以前は
+    // **札が在るだけで取り下げたことにして**何も配らなかった——取り下げの断りも `Ended` の配り直しも
+    // 来ず、CLI は時間切れになった。
+    //
+    // **順を固定する。** 試験は current_thread で動くので、終わった知らせを受けてから頼むまでに
+    // `await` を挟まなければ、見張りは割り込めない。見張りの方が先に起きて札を下ろしていたら、
+    // その回はやり直す（札が在る形を確かめてから頼む）
+    let manager = common::manager();
+    for _ in 0..10 {
+        let card_id = CardId::new();
+        let session = revive(&manager, card_id, ClaudeSessionId(uuid::Uuid::new_v4())).await;
+        let mut bus = manager.subscribe_events();
+        session.kill();
+        timeout(common::TIMEOUT, async {
+            loop {
+                if let Ok(ServerMessage::SessionUpsert { session }) = bus.recv().await
+                    && session.card_id == card_id
+                    && matches!(session.status, SessionStatus::Ended { .. })
+                {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("実体が終わったことが配られること");
+
+        // **札がまだ残っているか。** 残っていれば競合で断られる（番号を束ねるだけで害は無い）
+        if let Some(取れた) = manager.begin_revive(card_id, None) {
+            drop(取れた);
+            continue;
+        }
+        let mut answers = manager.subscribe_kill_answers();
+        let mut bus = manager.subscribe_events();
+
+        // 番号の無い頼み（画面・古い CLI）：終わっていた実体のいまの姿を配り直す
+        manager
+            .kill(card_id)
+            .expect("終わった実体があるので、終了の頼みは通ること");
+        assert!(
+            matches!(
+                bus.try_recv(),
+                Ok(ServerMessage::SessionUpsert { session })
+                    if session.card_id == card_id
+                        && matches!(session.status, SessionStatus::Ended { .. })
+            ),
+            "★起こし終えた札が残っている間に、終わっていた実体への終了に何も配っていない"
+        );
+
+        // 番号付きの頼み：その場で「既に終わっていた」と答える
+        let op = OpId::new();
+        manager.kill_answering(card_id, op);
+        assert_eq!(
+            答えを取る(&mut answers),
+            Some(KillAnswered {
+                card_id,
+                op,
+                outcome: KillOutcome::AlreadyEnded,
+            }),
+            "★起こし終えた札が残っている間に、終わっていた実体への番号付きの終了に答えていない"
+        );
+        assert_eq!(答えを取る(&mut answers), None, "答えは1回だけ");
+        return;
+    }
+    panic!("10回とも、見張りが札を下ろす前に頼めなかった（形を作れていない）");
+}
+
+#[tokio::test]
+async fn 番号付きの終了は何をしたかを番号付きで1回だけ答える() {
+    // 実装レビュー第6回 Astra 1。待つ側（CLI）は番号でしか満ちないので、PC は頼み1つにつき必ず
+    // 1回答える。**何も無かったことも答える**（成否はサーバが記録と合わせて決める）
+    let manager = common::manager();
+    let mut answers = manager.subscribe_kill_answers();
+
+    // 何も無い
+    let 無い = CardId::new();
+    let op = OpId::new();
+    manager.kill_answering(無い, op);
+    assert_eq!(
+        答えを取る(&mut answers),
+        Some(KillAnswered {
+            card_id: 無い,
+            op,
+            outcome: KillOutcome::Nothing,
+        })
+    );
+
+    // 生きた実体：**止まるのを見届けてから**答える（頼んだ瞬間には答えない）
+    let card_id = CardId::new();
+    let session = revive(&manager, card_id, ClaudeSessionId(uuid::Uuid::new_v4())).await;
+    立ち上がりきらせる(&manager, &session);
+    let op = OpId::new();
+    manager.kill_answering(card_id, op);
+    assert_eq!(
+        答えを取る(&mut answers),
+        None,
+        "★止まるのを見届ける前に答えている"
+    );
+    assert_eq!(
+        答えを待つ(&mut answers, "生きた実体の終了").await,
+        KillAnswered {
+            card_id,
+            op,
+            outcome: KillOutcome::Stopped,
+        }
+    );
+    assert!(matches!(session.status(), SessionStatus::Ended { .. }));
+
+    // 既に終わった実体：その場で答える。2つの頼みには、それぞれの番号で答える
+    let (一つ目, 二つ目) = (OpId::new(), OpId::new());
+    manager.kill_answering(card_id, 一つ目);
+    manager.kill_answering(card_id, 二つ目);
+    assert_eq!(
+        [答えを取る(&mut answers), 答えを取る(&mut answers)],
+        [
+            Some(KillAnswered {
+                card_id,
+                op: 一つ目,
+                outcome: KillOutcome::AlreadyEnded,
+            }),
+            Some(KillAnswered {
+                card_id,
+                op: 二つ目,
+                outcome: KillOutcome::AlreadyEnded,
+            }),
+        ]
+    );
+    tokio::time::sleep(QUIET).await;
+    assert_eq!(答えを取る(&mut answers), None, "答えは頼み1つにつき1回だけ");
+}
+
+#[tokio::test]
+async fn 確かめを待っている起こし直しを番号付きで止めるとその場で取り下げたと答える() {
+    // 実装レビュー第6回 Astra 1。確かめ・席を待っている起こし直しは、札を見て作る前にやめる
+    // ので、もう実体は作られない——その場で答えてよい。**起こし直しの断りは起こし直しの番号を
+    // 運び、終了の番号は運ばない**（終了の答えは別に出る）
+    let manager = common::manager_with(実機の設定());
+    暖まったwsl(&manager);
+    let card_id = CardId::new();
+    let (外, host_free, 古い実体, _, _門) = 寝かせて確かめ中にする(&manager, card_id).await;
+    let mut answers = manager.subscribe_kill_answers();
+    let op = OpId::new();
+    manager.kill_answering(card_id, op);
+    assert_eq!(
+        答えを取る(&mut answers),
+        Some(KillAnswered {
+            card_id,
+            op,
+            outcome: KillOutcome::Withdrew,
+        }),
+        "★確かめ待ちの起こし直しを止めたのに、その場で答えていない"
+    );
+    外.開ける();
+    wait_until("取得が済む", || host_free.聞き終えた回数() >= 1).await;
+    tokio::time::sleep(QUIET).await;
+    assert!(
+        Arc::ptr_eq(&manager.get(card_id).expect("抜け殻は残る"), &古い実体),
+        "★止めたのに、確かめが済んだ後に新しいプロセスを起こしている"
+    );
+    assert_eq!(答えを取る(&mut answers), None, "答えは1回だけ");
+}
+
+#[tokio::test]
+async fn 起こしている最中に番号付きで止めると作った実体が止まってから答える() {
+    // 実装レビュー第6回 Astra 1。起こしている最中は、作り終えた起こす側が作った実体を止める。
+    // **答えはその実体が止まってから**——先に答えると、まだ動いているプロセスを「止めた」と言う
+    let manager = common::manager_with(実機の設定());
+    暖まったwsl(&manager);
+    外側を差す(
+        &manager,
+        common::止める外側::開いたまま() as Arc<dyn session_host_core::resources::HostFreeProbe>,
+    );
+    let card_id = CardId::new();
+    let op = OpId::new();
+    let 頼んだ: Arc<std::sync::atomic::AtomicBool> = Arc::default();
+    {
+        let manager_weak = Arc::downgrade(&manager);
+        let 頼んだ = Arc::clone(&頼んだ);
+        manager.起こす直前に差し込む(Arc::new(move || {
+            if 頼んだ.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            if let Some(manager) = manager_weak.upgrade() {
+                manager.kill_answering(card_id, op);
+            }
+        }));
+    }
+    let mut answers = manager.subscribe_kill_answers();
+    let 断り = 頼む(&manager, card_id)
+        .await
+        .expect_err("終了を頼まれたのだから断ること");
+    assert!(断り.contains("終了を頼まれた"), "{断り}");
+    assert!(
+        頼んだ.load(std::sync::atomic::Ordering::SeqCst),
+        "起こしている最中に頼んだこと"
+    );
+    let 答え = 答えを待つ(&mut answers, "起こしている最中の終了").await;
+    assert_eq!((答え.card_id, 答え.op), (card_id, op));
+    assert_eq!(
+        答え.outcome,
+        KillOutcome::Stopped,
+        "作った実体を止めてから答えること"
+    );
+    let 実体 = manager.get(card_id).expect("カードは残る");
+    assert!(
+        matches!(実体.status(), SessionStatus::Ended { .. }),
+        "★答えた時点で、作った実体がまだ止まっていない"
+    );
+}
+
+#[tokio::test]
+async fn 起こし直しの断りは受け付けた頼みと競合で束ねた頼みの番号を運ぶ() {
+    // 実装レビュー第6回 Astra 3。先の起こし直し A が進んでいる間に来た頼み B は競合で断られるが、
+    // **番号は A の札へ束ねる**——A が断られれば B も起きないので、B を待つ枝分かれはその理由で
+    // すぐ終わってよい。A の札が表から外れた後に受け付けた頼み C は、A の断りに混ざらない
+    let manager = common::manager_with(床の設定());
+    manager.set_memory_probe(名乗るメモリ::一定(2_500));
+    let card_id = CardId::new();
+    let (a, b, c) = (OpId::new(), OpId::new(), OpId::new());
+
+    let 先の頼み = manager
+        .begin_revive(card_id, Some(a))
+        .expect("印が立つこと");
+    let 先の答え = 先の頼み.answers();
+    assert!(
+        manager.begin_revive(card_id, Some(b)).is_none(),
+        "進んでいる間の頼みは競合で断ること"
+    );
+    let 断り = manager
+        .revive(
+            先の頼み,
+            &common::work_dir(),
+            None,
+            ClaudeSessionId(uuid::Uuid::new_v4()),
+        )
+        .await
+        .expect_err("メモリ不足で断ること");
+    assert!(断り.to_string().contains("メモリが足りない"), "{断り}");
+
+    // A の札は表から外れた。C は新しい札で受け付けられる
+    let 後の頼み = manager
+        .begin_revive(card_id, Some(c))
+        .expect("新しい印が立つこと");
+    assert_eq!(
+        先の答え.ops(),
+        vec![a, b],
+        "★先の起こし直しの断りが、束ねた頼みの番号を運ばない／後の頼みの番号が混ざった"
+    );
+    assert_eq!(後の頼み.answers().ops(), vec![c]);
+
+    // 番号を渡さない頼み（画面）でも、受け付けた時点で番号が振られる
+    drop(後の頼み);
+    let 画面の頼み = manager.begin_revive(card_id, None).expect("印が立つこと");
+    assert_eq!(
+        画面の頼み.answers().ops().len(),
+        1,
+        "受付時に番号を振ること"
+    );
+}
+
+#[tokio::test]
+async fn 番号付きの起こし直しは実体を作り終えたら番号付きで1回だけ答え番号の無い頼みには答えない() {
+    // 実装レビュー第6回（`session revive` の待ち）。CLI は番号の付いた答えでだけ満ちるので、
+    // PC は作り終えたら必ず1回答える。**作った実体の姿を配ってから答える**（サーバは答えを受けた
+    // 時点で記録が新しい実体を指している）。画面からの頼み（番号無し）には答えない——待っている
+    // 者が居ないので、配りものが増えるだけ
+    use session_host_core::events::ReviveAnswered;
+    let manager = common::manager();
+    let mut answers = manager.subscribe_revive_answers();
+    let mut bus = manager.subscribe_events();
+
+    let card_id = CardId::new();
+    let op = OpId::new();
+    let in_flight = manager
+        .begin_revive(card_id, Some(op))
+        .expect("印が立つこと");
+    manager
+        .revive(
+            in_flight,
+            &common::work_dir(),
+            None,
+            ClaudeSessionId(uuid::Uuid::new_v4()),
+        )
+        .await
+        .expect("起こし直せること");
+    assert_eq!(
+        answers.try_recv().ok(),
+        Some(ReviveAnswered { card_id, op }),
+        "★実体を作り終えたのに、番号付きで答えていない"
+    );
+    assert!(answers.try_recv().is_err(), "答えは1回だけ");
+    let mut 姿を配った = false;
+    while let Ok(message) = bus.try_recv() {
+        if let ServerMessage::SessionUpsert { session } = message
+            && session.card_id == card_id
+            && session.agent_connected
+        {
+            姿を配った = true;
+        }
+    }
+    assert!(姿を配った, "作った実体の姿を、答えより前に配っていること");
+    manager.get(card_id).expect("実体があること").kill();
+
+    // 番号の無い頼み（画面）には答えない
+    let 画面のカード = CardId::new();
+    let in_flight = manager
+        .begin_revive(画面のカード, None)
+        .expect("印が立つこと");
+    manager
+        .revive(
+            in_flight,
+            &common::work_dir(),
+            None,
+            ClaudeSessionId(uuid::Uuid::new_v4()),
+        )
+        .await
+        .expect("起こし直せること");
+    assert!(
+        answers.try_recv().is_err(),
+        "★番号の無い頼みに、待つ者の居ない答えを配っている"
+    );
+    manager.get(画面のカード).expect("実体があること").kill();
+
+    // 断ったときは成功を答えない（断りの番号は束が運ぶ）
+    let 断るカード = CardId::new();
+    let 断る頼み = OpId::new();
+    let in_flight = manager
+        .begin_revive(断るカード, Some(断る頼み))
+        .expect("印が立つこと");
+    let 束 = in_flight.answers();
+    manager.forget(断るカード);
+    manager
+        .revive(
+            in_flight,
+            &common::work_dir(),
+            None,
+            ClaudeSessionId(uuid::Uuid::new_v4()),
+        )
+        .await
+        .expect_err("外したカードは断ること");
+    assert!(
+        answers.try_recv().is_err(),
+        "★断ったのに、起こせたと答えている"
+    );
+    assert_eq!(束.ops(), vec![断る頼み], "断りは頼みの番号を運ぶ");
 }

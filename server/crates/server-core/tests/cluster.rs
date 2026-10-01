@@ -556,10 +556,14 @@ async fn 別のインスタンスに繋がった_PC_の抜け殻も起こし直�
             .expect("PC を名乗っていること");
         a.registry.set_agent_live(agent_id, false);
 
+        // **頼みの番号も落とさない**（実装レビュー第6回。落とすとセルフホストでだけ PC が答えず、
+        // CLI の `session revive` が時間切れになる）
+        let op = protocol::ws::OpId::new();
         RemoteSessionHost::new(Arc::clone(&a.hub))
             .revive(server_core::session_host::ReviveRequest {
                 account_id,
                 card_id,
+                op: Some(op),
             })
             .await
             .expect("接続表に無い PC の抜け殻でも宛先が解決できること");
@@ -574,6 +578,7 @@ async fn 別のインスタンスに繋がった_PC_の抜け殻も起こし直�
             .await;
         let protocol::a2s::ServerToAgent::ReviveSession {
             claude_session_id: got,
+            op: got_op,
             ..
         } = message
         else {
@@ -582,6 +587,12 @@ async fn 別のインスタンスに繋がった_PC_の抜け殻も起こし直�
         assert_eq!(
             got, claude_session_id,
             "[{}] 呼び戻し先が渡っていない",
+            backend.name
+        );
+        assert_eq!(
+            got_op,
+            Some(op),
+            "[{}] ★頼みの番号が PC まで渡っていない",
             backend.name
         );
 
@@ -600,13 +611,15 @@ async fn 別のインスタンスに繋がった_PC_の実体の無いカード�
         let (a, _b, mut agent, card_id, account_id) = split(&backend.db, &broker).await;
         let host = RemoteSessionHost::new(Arc::clone(&a.hub));
 
-        // 生きたカードは、いまどおり連絡係へ回って届く
-        host.kill(account_id, card_id)
+        // 生きたカードは、いまどおり連絡係へ回って届く。**頼みの番号も落とさない**（実装レビュー
+        // 第6回 Astra 1。落とすとセルフホストでだけ、PC が答えを返さず CLI が時間切れになる）
+        let op = protocol::ws::OpId::new();
+        host.kill(account_id, card_id, Some(op))
             .await
             .expect("生きたカードへの終了の頼みが届くこと");
         agent
-            .wait_for("跨ぎで届く終了（生きたカード）", |message| {
-                matches!(message, protocol::a2s::ServerToAgent::Kill { card_id: got } if *got == card_id)
+            .wait_for("跨ぎで届く終了（生きたカード・番号付き）", |message| {
+                matches!(message, protocol::a2s::ServerToAgent::Kill { card_id: got, op: Some(got_op) } if *got == card_id && *got_op == op)
             })
             .await;
 
@@ -628,15 +641,17 @@ async fn 別のインスタンスに繋がった_PC_の実体の無いカード�
             "A から見て実体が無いこと"
         );
 
-        host.kill(account_id, card_id).await.unwrap_or_else(|err| {
-            panic!(
-                "[{}] ★実体の無いカードへの終了の頼みが、持ち主の PC へ届かず断られた：{err}",
-                backend.name
-            )
-        });
+        host.kill(account_id, card_id, None)
+            .await
+            .unwrap_or_else(|err| {
+                panic!(
+                    "[{}] ★実体の無いカードへの終了の頼みが、持ち主の PC へ届かず断られた：{err}",
+                    backend.name
+                )
+            });
         agent
             .wait_for("跨ぎで届く終了（実体の無いカード）", |message| {
-                matches!(message, protocol::a2s::ServerToAgent::Kill { card_id: got } if *got == card_id)
+                matches!(message, protocol::a2s::ServerToAgent::Kill { card_id: got, .. } if *got == card_id)
             })
             .await;
 
@@ -673,12 +688,12 @@ async fn 古い_PC_の生きたカードは跨いで止められ実体の無い�
         wait_card(&a.registry, card_id).await;
         let host = RemoteSessionHost::new(Arc::clone(&a.hub));
 
-        host.kill(account_id, card_id)
+        host.kill(account_id, card_id, None)
             .await
             .expect("★名乗らない PC の生きたカードを、跨いで止められない");
         agent
             .wait_for("跨ぎで届く終了（名乗らない PC の生きたカード）", |message| {
-                matches!(message, protocol::a2s::ServerToAgent::Kill { card_id: got } if *got == card_id)
+                matches!(message, protocol::a2s::ServerToAgent::Kill { card_id: got, .. } if *got == card_id)
             })
             .await;
 
@@ -691,7 +706,7 @@ async fn 古い_PC_の生きたカードは跨いで止められ実体の無い�
             .expect("PC を名乗っていること");
         a.registry.set_agent_live(agent_id, false);
         let err = host
-            .kill(account_id, card_id)
+            .kill(account_id, card_id, None)
             .await
             .expect_err("止めるものの無いカードは断ること");
         assert!(
@@ -706,13 +721,14 @@ async fn 古い_PC_の生きたカードは跨いで止められ実体の無い�
 
 #[tokio::test]
 async fn 終了の頼みで取り下げた断りは理由を落とさず跨いで届く() {
-    // 実装レビュー第4回 Astra 1・2。PC が B で起こし直しを取り下げた断りは、B が受けて連絡係で
-    // A のブラウザへ回る。**どこかで `withdrawn` を落とすと、セルフホストでだけ CLI の終了が
-    // 取り下げで満ちず**、実体の無いカードで上限まで待ち切る
+    // 実装レビュー第4回 Astra 1・2・第6回 Astra 3。PC が B で起こし直しを取り下げた断りは、B が
+    // 受けて連絡係で A のブラウザへ回る。**どこかで `withdrawn` や `ops` を落とすと、セルフホスト
+    // でだけ**枝分かれが自分の起こし直しの断りを拾えず、上限まで待ち切る
     for backend in common::backends("cluster-withdrawn").await {
         let broker = MemoryBroker::new();
-        let (a, _b, mut agent, card_id, _account_id) = split(&backend.db, &broker).await;
+        let (a, _b, mut agent, card_id, account_id) = split(&backend.db, &broker).await;
         let mut events = a.subscribe_events();
+        let 起こす頼み = protocol::ws::OpId::new();
 
         agent
             .send(&protocol::a2s::AgentMessage::Error {
@@ -721,6 +737,7 @@ async fn 終了の頼みで取り下げた断りは理由を落とさず跨い�
                 kind: ErrorKind::Revive,
                 busy: Some(false),
                 withdrawn: Some(protocol::ws::Withdrawal::Kill),
+                ops: vec![起こす頼み],
             })
             .await;
 
@@ -731,10 +748,93 @@ async fn 終了の頼みで取り下げた断りは理由を落とさず跨い�
             )
         })
         .await;
+        let ServerMessage::Error { withdrawn, ops, .. } = &message else {
+            unreachable!("断りを待った");
+        };
         assert_eq!(
-            server_core::registry::kill_withdrawal_of(&message),
-            Some(card_id),
-            "[{}] ★跨いだ先で、終了の頼みで取り下げた断りとして読めない：{message:?}",
+            *withdrawn,
+            Some(protocol::ws::Withdrawal::Kill),
+            "[{}] ★跨いだ先で、取り下げの理由を落としている：{message:?}",
+            backend.name
+        );
+        assert_eq!(
+            server_core::registry::revive_refusal_of(&message).map(|(_, ops, _)| ops.to_vec()),
+            Some(vec![起こす頼み]),
+            "[{}] ★跨いだ先で、答える頼みの番号を落としている：{ops:?}",
+            backend.name
+        );
+        assert_eq!(
+            a.registry
+                .revive_refusal_for(account_id, card_id, 起こす頼み)
+                .as_deref(),
+            Some("終了を頼まれたので、起こし直しをやめました"),
+            "[{}] ★跨いだ先の記録から、番号で引き直せない",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 終了の答えは跨いだ先で番号付きの状態として届く() {
+    // 実装レビュー第6回 Astra 1。ブラウザ（CLI）は A、PC は B。PC の答え（`KillAnswer`）は B が
+    // 受けて合否にし、連絡係で A へ回る。**番号を落とすと、セルフホストでだけ CLI が時間切れになる**
+    for backend in common::backends("cluster-kill-answer").await {
+        let broker = MemoryBroker::new();
+        let (a, _b, mut agent, card_id, _account_id) = split(&backend.db, &broker).await;
+        let mut events = a.subscribe_events();
+        let op = protocol::ws::OpId::new();
+
+        agent
+            .send(&protocol::a2s::AgentMessage::KillAnswer {
+                card_id,
+                op,
+                outcome: protocol::a2s::KillOutcome::Stopped,
+            })
+            .await;
+
+        let message = wait_event(&mut events, "番号付きの状態", |message| {
+            matches!(
+                message,
+                ServerMessage::Status { card_id: got, op: Some(_), .. } if *got == card_id
+            )
+        })
+        .await;
+        assert!(
+            matches!(message, ServerMessage::Status { op: Some(got), .. } if got == op),
+            "[{}] ★跨いだ先で、答えの番号が別物になっている：{message:?}",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 起こし直しの答えは跨いだ先で番号付きの状態として届く() {
+    // 実装レビュー第6回（`session revive` の待ち）。CLI は A、PC は B。PC の答え
+    // （`ReviveAnswer`）は B が受けて記録の状態に番号を添え、連絡係で A へ回る。**答えか番号を
+    // 落とすと、セルフホストでだけ CLI が時間切れになる**
+    for backend in common::backends("cluster-revive-answer").await {
+        let broker = MemoryBroker::new();
+        let (a, _b, mut agent, card_id, _account_id) = split(&backend.db, &broker).await;
+        let mut events = a.subscribe_events();
+        let op = protocol::ws::OpId::new();
+
+        agent
+            .send(&protocol::a2s::AgentMessage::ReviveAnswer { card_id, op })
+            .await;
+        let message = wait_event(&mut events, "番号付きの状態", |message| {
+            matches!(
+                message,
+                ServerMessage::Status { card_id: got, op: Some(_), .. } if *got == card_id
+            )
+        })
+        .await;
+        assert!(
+            matches!(message, ServerMessage::Status { op: Some(got), .. } if got == op),
+            "[{}] ★跨いだ先で、答えの番号が別物になっている：{message:?}",
             backend.name
         );
 
@@ -1097,6 +1197,7 @@ async fn 知らせは_7_種類とも跨ぐ() {
                 status: SessionStatus::WaitingInput,
                 subagent_active: 2,
                 last_activity_at: 42,
+                op: None,
             },
         )
         .await;
@@ -1167,6 +1268,7 @@ async fn 知らせは_7_種類とも跨ぐ() {
                 kind: ErrorKind::Other,
                 busy: None,
                 withdrawn: None,
+                ops: Vec::new(),
             },
         )
         .await;

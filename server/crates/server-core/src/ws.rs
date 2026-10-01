@@ -458,6 +458,7 @@ async fn client_loop(state: AppState, identity: Identity, socket: WebSocket) {
                             kind: ErrorKind::Other,
                             busy: None,
                             withdrawn: None,
+                            ops: Vec::new(),
                         },
                     )
                     .await;
@@ -524,11 +525,20 @@ async fn handle_request(
     {
         // **他人のカードと知らないカードを呼び分けない**（IDの総当たりで存在を
         // 調べられないように）
-        send_error(
+        //
+        // **頼みの番号があれば添える**（寝ているカードばかりなのに、メモリ不足でセッションを
+        // 起こせない 実装レビュー第6回 Astra 1）。番号で待つ CLI は、番号の無い断りを自分への
+        // 答えと読まないので、添えないと「見つからない」をその場で返せず時間切れまで待つ
+        send_json(
             outbound,
-            Some(card_id),
-            NOT_FOUND.to_string(),
-            ErrorKind::NotFound,
+            ServerMessage::Error {
+                card_id: Some(card_id),
+                message: NOT_FOUND.to_string(),
+                kind: ErrorKind::NotFound,
+                busy: None,
+                withdrawn: None,
+                ops: request_op(&request).into_iter().collect(),
+            },
         )
         .await;
         return;
@@ -560,6 +570,7 @@ async fn handle_request(
                         kind: ErrorKind::Other,
                         busy: None,
                         withdrawn: None,
+                        ops: Vec::new(),
                     },
                 )
                 .await;
@@ -621,7 +632,10 @@ async fn handle_request(
         // で済ませているが、それは画面の話でしかなく CLI には効かない。走っているカードへ
         // 撃つと、向こう側は**走っている claude を畳んでから**起こし直す——要件が守りたい
         // ものと正反対で、しかも押した人には「戻した」としか見えない
-        ClientMessage::ReviveSession { card_id } => {
+        // **断りには、どの道でも頼みの番号を添える**（実装レビュー第6回）。番号で待つ CLI は、
+        // 番号の無い断りを自分への答えと読まないので、添え忘れた道ではその場で落ちずに上限まで待つ
+        ClientMessage::ReviveSession { card_id, op } => {
+            let ops: Vec<protocol::ws::OpId> = op.into_iter().collect();
             // 門（この関数の冒頭）を通っているので、持ち主は確かめ済み
             let meta = state
                 .registry
@@ -630,11 +644,12 @@ async fn handle_request(
             match meta {
                 // 門を通った直後に外された、という細い隙間。**黙って何もしない道を作らない**
                 None => {
-                    send_error(
+                    send_error_for(
                         outbound,
-                        Some(card_id),
+                        card_id,
                         NOT_FOUND.to_string(),
                         ErrorKind::NotFound,
+                        ops,
                     )
                     .await
                 }
@@ -646,11 +661,12 @@ async fn handle_request(
                     } else {
                         ALREADY_LIVE
                     };
-                    send_error(
+                    send_error_for(
                         outbound,
-                        Some(card_id),
+                        card_id,
                         message.to_string(),
                         ErrorKind::Revive,
+                        ops,
                     )
                     .await;
                 }
@@ -660,12 +676,14 @@ async fn handle_request(
                         .revive(crate::session_host::ReviveRequest {
                             account_id: identity.account_id,
                             card_id,
+                            op,
                         })
                         .await
                     {
                         // **カードを名指しする**（設計§7-5）。`Spawn` が名指ししないのは
-                        // 採番前に失敗しうるからで、復旧はIDが最初から確定している
-                        send_error(outbound, Some(card_id), message, ErrorKind::Revive).await;
+                        // 採番前に失敗しうるからで、復旧はIDが最初から確定している。
+                        // ローカルの競合（同期で返る）と、セルフホストの届かない道がここを通る
+                        send_error_for(outbound, card_id, message, ErrorKind::Revive, ops).await;
                     }
                 }
             }
@@ -837,9 +855,20 @@ async fn handle_request(
             });
         }
 
-        ClientMessage::Kill { card_id } => {
-            if let Err(message) = state.agent.kill(identity.account_id, card_id).await {
-                send_error(outbound, Some(card_id), message, ErrorKind::Kill).await;
+        // **届けられなかったことは、番号を添えて頼んだ接続へ返す**（寝ているカードばかりなのに、
+        // メモリ不足でセッションを起こせない 実装レビュー第6回 Astra 1）。番号付きの頼みに PC が
+        // 何をしたかは、PC の答えを記録層が合否にして配る（`registry::answer_kill`）——ここで
+        // 返すのは「PC へ届かなかった」だけで、成功に化ける道は無い
+        ClientMessage::Kill { card_id, op } => {
+            if let Err(message) = state.agent.kill(identity.account_id, card_id, op).await {
+                send_error_for(
+                    outbound,
+                    card_id,
+                    message,
+                    ErrorKind::Kill,
+                    op.into_iter().collect(),
+                )
+                .await;
             }
         }
 
@@ -1054,6 +1083,16 @@ async fn handle_request(
 
 /// そのメッセージが名指ししているカード（無ければ `None`）。
 ///
+/// 答えを番号で待つ頼みなら、その番号（実装レビュー第6回 Astra 1）。**断りを返す口は、
+/// ここから引いて番号を添える**——添え忘れた断りは、番号で待つ CLI に届かない。番号を運ぶ
+/// 頼みを足したら、ここにも足すこと。
+fn request_op(request: &ClientMessage) -> Option<protocol::ws::OpId> {
+    match request {
+        ClientMessage::Kill { op, .. } | ClientMessage::ReviveSession { op, .. } => *op,
+        _ => None,
+    }
+}
+
 /// **持ち主の確認を1箇所で済ませるための一覧**（設計§8-6）。ここに載せ忘れた種別は
 /// 検査を通らずに素通りするので、`ClientMessage` を増やしたら必ず足すこと——
 /// 網羅の match にしてあるのは、足し忘れをコンパイラに数えさせるため。
@@ -1068,10 +1107,10 @@ fn target_card(request: &ClientMessage) -> Option<CardId> {
         | ClientMessage::SendInput { card_id, .. }
         | ClientMessage::Resize { card_id, .. }
         | ClientMessage::PtyFlow { card_id, .. }
-        | ClientMessage::ReviveSession { card_id }
+        | ClientMessage::ReviveSession { card_id, .. }
         | ClientMessage::SetNickname { card_id, .. }
         | ClientMessage::BranchSession { card_id }
-        | ClientMessage::Kill { card_id }
+        | ClientMessage::Kill { card_id, .. }
         | ClientMessage::Archive { card_id } => Some(*card_id),
         // まだカードが無い（作る側）。
         //
@@ -1275,6 +1314,28 @@ async fn send_json(outbound: &mpsc::Sender<Message>, message: ServerMessage) -> 
 /// **`kind` は「何をしようとして断られたか」**（細かい修正 設計§7-2）。エラーの原因では
 /// なく操作で割るのは、解消の判定が「次に同じ操作が通ったか」になるためである。
 /// **寿命はブラウザ側がこの値から引く**ので、増やしたら向こうの表にも足すこと。
+/// カード宛ての断りに、答える頼みの番号を添えて返す（実装レビュー第6回）。
+async fn send_error_for(
+    outbound: &mpsc::Sender<Message>,
+    card_id: CardId,
+    message: String,
+    kind: ErrorKind,
+    ops: Vec<protocol::ws::OpId>,
+) {
+    send_json(
+        outbound,
+        ServerMessage::Error {
+            card_id: Some(card_id),
+            message,
+            kind,
+            busy: None,
+            withdrawn: None,
+            ops,
+        },
+    )
+    .await;
+}
+
 async fn send_error(
     outbound: &mpsc::Sender<Message>,
     card_id: Option<CardId>,
@@ -1290,6 +1351,7 @@ async fn send_error(
             // 同期で返す断りは性質を名乗らない（枝分かれが読むのは配信のほうだけ）
             busy: None,
             withdrawn: None,
+            ops: Vec::new(),
         },
     )
     .await;

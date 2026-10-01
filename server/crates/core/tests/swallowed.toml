@@ -76,6 +76,13 @@ reason = "記録層が落ちていても手元の購読者へは配り続ける�
 
 [[entry]]
 path = "server/crates/core/src/local.rs"
+fn = "kill_answered"
+expr = '''self.reports.send(Report::KillAnswer(answer))'''
+class = "send"
+reason = "記録層の受け口が閉じているのは落ちる途中だけ。答えを待つ CLI はその記録層に繋がっているので、届けられなくても待つ相手が居ない"
+
+[[entry]]
+path = "server/crates/core/src/local.rs"
 fn = "report_transcript"
 expr = '''self.reports.send(Report::Transcript(report))'''
 class = "send"
@@ -94,6 +101,13 @@ fn = "resize"
 expr = '''session.resize(cols, rows)'''
 class = "by-design"
 reason = "大きさの指定は次に開いたときにまた送られる。届かなくても画面の桁が合わないだけで、作業は続く"
+
+[[entry]]
+path = "server/crates/core/src/local.rs"
+fn = "revive_answered"
+expr = '''self.reports.send(Report::ReviveAnswer(answer))'''
+class = "send"
+reason = "同上（kill_answered）。起こし直しの答えを待つ CLI も、その記録層に繋がっている"
 
 [[entry]]
 path = "server/crates/server-core/src/bus/memory.rs"
@@ -272,6 +286,13 @@ reason = "線が切れているだけ。繋ぎ直したときに名乗り直し�
 
 [[entry]]
 path = "server/crates/session-host-core/src/link.rs"
+fn = "kill_answered"
+expr = '''self.outgoing.send(Outgoing::Volatile(message))'''
+class = "send"
+reason = "線が切れているだけ。終了の答えは繋ぎ直しても送り直さないが、待つ CLI は時間切れで終わり、止まったとは言わない（実装レビュー第6回 Astra 1）"
+
+[[entry]]
+path = "server/crates/session-host-core/src/link.rs"
 fn = "model_aliases_changed"
 expr = '''self.outgoing.send(Outgoing::ModelTable(message))'''
 class = "send"
@@ -290,6 +311,13 @@ fn = "reset_transcript"
 expr = '''self.outgoing.send(Outgoing::Reset(card_id))'''
 class = "send"
 reason = "同上。読み直しの合図は繋ぎ直しでやり直す"
+
+[[entry]]
+path = "server/crates/session-host-core/src/link.rs"
+fn = "revive_answered"
+expr = '''self.outgoing.send(Outgoing::Volatile(message))'''
+class = "send"
+reason = "同上（kill_answered）。起こし直しの答えも繋ぎ直しで送り直さないが、待つ CLI は時間切れで終わり、起こせたとは言わない（実装レビュー第6回）"
 
 [[entry]]
 path = "server/crates/session-host-core/src/link.rs"
@@ -410,6 +438,20 @@ fn = "cleanup"
 expr = '''std::fs::remove_dir_all(&settings.dir)'''
 class = "by-design"
 reason = "一時ディレクトリの掃除。消せなくても実害は無く、起動の失敗と混同させたくない"
+
+[[entry]]
+path = "server/crates/session-host-core/src/session/mod.rs"
+fn = "answer_kill"
+expr = '''self.kill_answers.send(answer)'''
+class = "send"
+reason = "手元の配信（試験が見る口）に購読者が居ないのは異常ではない。答えそのものは報告先（`kill_answered`）が運ぶ"
+
+[[entry]]
+path = "server/crates/session-host-core/src/session/mod.rs"
+fn = "answer_revive"
+expr = '''self.revive_answers.send(answer)'''
+class = "send"
+reason = "同上（answer_kill）。答えそのものは報告先（`revive_answered`）が運ぶ"
 
 [[entry]]
 path = "server/crates/session-host-core/src/session/mod.rs"

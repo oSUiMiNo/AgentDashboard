@@ -1995,6 +1995,7 @@ async fn 名指し先の無いエラーは記録に残る() {
                     kind: ErrorKind::Revive,
                     busy: None,
                     withdrawn: None,
+                    ops: Vec::new(),
                 },
             )
             .await;
@@ -2094,6 +2095,7 @@ async fn カードを名指しするエラーは記録に残らない() {
                     kind: ErrorKind::SendInput,
                     busy: None,
                     withdrawn: None,
+                    ops: Vec::new(),
                 },
             )
             .await;
@@ -3106,6 +3108,7 @@ fn 起こし直しの知らせ(
     card_id: CardId,
     message: &str,
     busy: Option<bool>,
+    ops: &[protocol::ws::OpId],
 ) -> ServerMessage {
     ServerMessage::Error {
         card_id: Some(card_id),
@@ -3113,13 +3116,16 @@ fn 起こし直しの知らせ(
         kind: ErrorKind::Revive,
         busy,
         withdrawn: None,
+        ops: ops.to_vec(),
     }
 }
 
 #[tokio::test]
 async fn 起こし直しの終わった断りは配った後も記録から引ける() {
-    // 実装レビュー Astra 4。配信を取りこぼした待ち手（枝分かれ）が、配られたはずの断りを
-    // 引き直すための口。**手元の報告（`apply`）も、他インスタンスからの便（`adopt`）も残す**
+    // 実装レビュー Astra 4・第6回 Astra 3。配信を取りこぼした待ち手（枝分かれ）が、配られた
+    // はずの断りを引き直すための口。**手元の報告（`apply`）も、他インスタンスからの便（`adopt`）
+    // も残す**。引くのは頼みの番号で——他の頼みへの断りは、いつ取り込まれても返さない
+    use protocol::ws::OpId;
     for backend in common::backends("revive-refusal").await {
         let registry =
             SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
@@ -3127,69 +3133,93 @@ async fn 起こし直しの終わった断りは配った後も記録から引�
                 .expect("記録層を立てられること");
         let account = server_core::db::LOCAL_ACCOUNT_ID;
         let card_id = CardId::new();
+        let 頼み = OpId::new();
         registry.apply(&local(), upsert(card_id)).await;
 
-        // 控える前に配られた断り（前に押した人のもの）は返さない
+        // 別の頼みへの断り（前に押した人のもの）は返さない
         registry
             .apply(
                 &local(),
-                起こし直しの知らせ(card_id, "前の断り", Some(false)),
+                起こし直しの知らせ(card_id, "前の断り", Some(false), &[OpId::new()]),
             )
             .await;
-        let 目印 = registry.revive_refusal_mark();
         assert_eq!(
-            registry.revive_refusal_since(account, card_id, 目印),
+            registry.revive_refusal_for(account, card_id, 頼み),
             None,
-            "[{}] 控える前の断りを拾っている",
+            "[{}] 別の頼みへの断りを拾っている",
             backend.name
         );
 
-        // 競合と判別できない知らせは残さない（待てば起きるかもしれない）
+        // 競合と判別できない知らせ・番号の無い知らせは残さない
         registry
-            .apply(&local(), 起こし直しの知らせ(card_id, "競合", Some(true)))
+            .apply(
+                &local(),
+                起こし直しの知らせ(card_id, "競合", Some(true), &[頼み]),
+            )
             .await;
         registry
-            .apply(&local(), 起こし直しの知らせ(card_id, "古い PC", None))
+            .apply(
+                &local(),
+                起こし直しの知らせ(card_id, "古い PC", None, &[頼み]),
+            )
+            .await;
+        registry
+            .apply(
+                &local(),
+                起こし直しの知らせ(card_id, "番号の無い断り", Some(false), &[]),
+            )
             .await;
         assert_eq!(
-            registry.revive_refusal_since(account, card_id, 目印),
+            registry.revive_refusal_for(account, card_id, 頼み),
             None,
-            "[{}] 終わった断りでないものを残している",
+            "[{}] 終わった断りでないもの・番号の無いものを残している",
             backend.name
         );
 
         registry
             .apply(
                 &local(),
-                起こし直しの知らせ(card_id, "メモリが足りない", Some(false)),
+                起こし直しの知らせ(
+                    card_id,
+                    "メモリが足りない",
+                    Some(false),
+                    &[OpId::new(), 頼み],
+                ),
+            )
+            .await;
+        // **後から別の頼みの断りが来ても上書きしない**（以前は1枚1件で、遅れた断りが消していた）
+        registry
+            .apply(
+                &local(),
+                起こし直しの知らせ(card_id, "後の断り", Some(false), &[OpId::new()]),
             )
             .await;
         assert_eq!(
             registry
-                .revive_refusal_since(account, card_id, 目印)
+                .revive_refusal_for(account, card_id, 頼み)
                 .as_deref(),
             Some("メモリが足りない"),
-            "[{}] ★配った断りが記録に残っていない",
+            "[{}] ★配った断りが記録に残っていない（束ねられた番号でも引けること）",
             backend.name
         );
         assert_eq!(
-            registry.revive_refusal_since(account, CardId::new(), 目印),
+            registry.revive_refusal_for(account, CardId::new(), 頼み),
             None,
             "[{}] 他のカードの断りとして返している",
             backend.name
         );
 
         // 他インスタンスから回ってきた断りも残す（ブラウザ→A・PC→B の配置）
-        let 目印 = registry.revive_refusal_mark();
+        let 跨ぎの頼み = OpId::new();
         registry
             .adopt(
                 account,
-                起こし直しの知らせ(card_id, "跨いできた断り", Some(false)),
+                起こし直しの知らせ(card_id, "跨いできた断り", Some(false), &[跨ぎの頼み]),
             )
             .await;
         assert_eq!(
             registry
-                .revive_refusal_since(account, card_id, 目印)
+                .revive_refusal_for(account, card_id, 跨ぎの頼み)
                 .as_deref(),
             Some("跨いできた断り"),
             "[{}] ★連絡係から来た断りが記録に残っていない",
@@ -3338,5 +3368,194 @@ async fn 外した報告の取り込み直しと行き違った更新は外し�
 
             backend.finish().await;
         }
+    }
+}
+
+/// 配られた知らせを全部取る（待たない）。
+fn 配られたもの(
+    events: &mut tokio::sync::broadcast::Receiver<server_core::registry::AccountEvent>,
+) -> Vec<ServerMessage> {
+    let mut seen = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        seen.push(event.message);
+    }
+    seen
+}
+
+#[tokio::test]
+async fn 終了の答えは記録と合わせて合否にし番号を添えて配る() {
+    // 実装レビュー第6回 Astra 1。PC は「何をしたか」だけを言い、合否はここで決める。以前は
+    // CLI が接続直後の写しで「止めるものが無かった」を見分け、**届かなかった頼みの断りまで成功に
+    // 変えていた**。成功は記録のいまの状態に番号を添えた `Status`、失敗は番号付きの断り
+    use protocol::{a2s::KillOutcome, ws::OpId};
+    for backend in common::backends("kill-answer").await {
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+        let 動いている = CardId::new();
+        let 寝ている = CardId::new();
+        registry.apply(&local(), upsert(動いている)).await;
+        let mut 寝た姿 = meta(寝ている);
+        寝た姿.status = SessionStatus::Ended { ok: true };
+        registry
+            .apply(
+                &local(),
+                ServerMessage::SessionUpsert {
+                    session: Box::new(寝た姿),
+                },
+            )
+            .await;
+        let mut events = registry.subscribe_events();
+
+        let 成功 = |card_id: CardId, op: OpId, seen: &[ServerMessage]| {
+            matches!(
+                seen,
+                [ServerMessage::Status { card_id: got, op: Some(got_op), .. }]
+                    if *got == card_id && *got_op == op
+            )
+        };
+        let 失敗 = |card_id: CardId, op: OpId, seen: &[ServerMessage]| {
+            matches!(
+                seen,
+                [ServerMessage::Error { card_id: Some(got), kind: ErrorKind::Kill, ops, .. }]
+                    if *got == card_id && ops == &vec![op]
+            )
+        };
+
+        // 止めた・取り下げた・既に終わっていた：記録の状態を問わず成功
+        for outcome in [
+            KillOutcome::Stopped,
+            KillOutcome::Withdrew,
+            KillOutcome::AlreadyEnded,
+        ] {
+            let op = OpId::new();
+            registry.answer_kill(&local(), 動いている, op, outcome);
+            let seen = 配られたもの(&mut events);
+            assert!(
+                成功(動いている, op, &seen),
+                "[{}] ★{outcome:?} を成功として番号付きで配っていない: {seen:?}",
+                backend.name
+            );
+        }
+
+        // 何も無かった：記録が終わっていれば成功（前回の起動が残した抜け殻）
+        let op = OpId::new();
+        registry.answer_kill(&local(), 寝ている, op, KillOutcome::Nothing);
+        let seen = 配られたもの(&mut events);
+        assert!(
+            成功(寝ている, op, &seen),
+            "[{}] ★止めるものが無かっただけの抜け殻を成功にしていない: {seen:?}",
+            backend.name
+        );
+        // 記録の上では動いているのに PC に何も無い：失敗（食い違い）
+        let op = OpId::new();
+        registry.answer_kill(&local(), 動いている, op, KillOutcome::Nothing);
+        let seen = 配られたもの(&mut events);
+        assert!(
+            失敗(動いている, op, &seen),
+            "[{}] ★記録の上で動いているカードに何も無いのを成功にしている: {seen:?}",
+            backend.name
+        );
+        // 知らない綴り：成功とは読まない
+        let op = OpId::new();
+        registry.answer_kill(&local(), 寝ている, op, KillOutcome::Unknown);
+        let seen = 配られたもの(&mut events);
+        assert!(
+            失敗(寝ている, op, &seen),
+            "[{}] ★知らない答えを成功にしている: {seen:?}",
+            backend.name
+        );
+        // 記録が無い（外した）：状態を添えられないので失敗
+        let 外した = CardId::new();
+        let op = OpId::new();
+        registry.answer_kill(&local(), 外した, op, KillOutcome::Stopped);
+        let seen = 配られたもの(&mut events);
+        assert!(
+            失敗(外した, op, &seen),
+            "[{}] ★記録の無いカードの答えを黙って捨てている: {seen:?}",
+            backend.name
+        );
+
+        // **答えは記録を書き換えない**（値は記録のいまの姿。跨いで届いた答えも同じ）
+        let op = OpId::new();
+        registry
+            .adopt(
+                server_core::db::LOCAL_ACCOUNT_ID,
+                ServerMessage::Status {
+                    card_id: 寝ている,
+                    status: SessionStatus::Working,
+                    subagent_active: 0,
+                    last_activity_at: 1,
+                    op: Some(op),
+                },
+            )
+            .await;
+        let seen = 配られたもの(&mut events);
+        assert!(
+            成功(寝ている, op, &seen),
+            "[{}] ★跨いで届いた答えの番号を落としている: {seen:?}",
+            backend.name
+        );
+        assert!(
+            matches!(
+                registry
+                    .get(寝ている)
+                    .expect("記録があること")
+                    .meta()
+                    .status,
+                SessionStatus::Ended { .. }
+            ),
+            "[{}] ★答えの便で記録の状態を書き換えている",
+            backend.name
+        );
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 起こし直しの成功の答えは記録の状態に番号を添えて配り記録が無ければ番号付きで断る() {
+    // 実装レビュー第6回（`session revive` の待ち）。PC は起こせたことだけを言い、ここで記録の
+    // いまの状態に番号を添えて配る（終了の答えと同じ形）。答えが届く前に外されたら、黙って捨てず
+    // 番号付きの断りにする——捨てると CLI は上限まで待つ
+    use protocol::ws::OpId;
+    for backend in common::backends("revive-answer").await {
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+        let card_id = CardId::new();
+        registry.apply(&local(), upsert(card_id)).await;
+        let mut events = registry.subscribe_events();
+
+        let op = OpId::new();
+        registry.answer_revive(&local(), card_id, op);
+        let seen = 配られたもの(&mut events);
+        assert!(
+            matches!(
+                seen.as_slice(),
+                [ServerMessage::Status { card_id: got, op: Some(got_op), status: SessionStatus::Working, .. }]
+                    if *got == card_id && *got_op == op
+            ),
+            "[{}] ★起こし直しの答えを番号付きで配っていない: {seen:?}",
+            backend.name
+        );
+
+        let 外した = CardId::new();
+        let op = OpId::new();
+        registry.answer_revive(&local(), 外した, op);
+        let seen = 配られたもの(&mut events);
+        assert!(
+            matches!(
+                seen.as_slice(),
+                [ServerMessage::Error { card_id: Some(got), ops, .. }]
+                    if *got == 外した && ops == &vec![op]
+            ),
+            "[{}] ★記録の無いカードへの答えを黙って捨てている: {seen:?}",
+            backend.name
+        );
+
+        backend.finish().await;
     }
 }

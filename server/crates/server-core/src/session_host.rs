@@ -72,6 +72,10 @@ pub struct RecallRequest {
 pub struct ReviveRequest {
     pub account_id: uuid::Uuid,
     pub card_id: CardId,
+    /// 頼みの番号（寝ているカードばかりなのに、メモリ不足でセッションを起こせない 実装レビュー
+    /// 第6回 Astra 3）。終わった断りがこの番号を運ぶ。**答えを待つ者だけが振る**（枝分かれ）。
+    /// 欠けていれば PC が受付時に振る
+    pub op: Option<protocol::ws::OpId>,
 }
 
 #[async_trait::async_trait]
@@ -152,7 +156,16 @@ pub trait SessionHost: Send + Sync + 'static {
     ///
     /// **待つ形にしてある**のは、宛先を決めるのに連絡係と DB を引くことがあるため
     /// （[`SessionHost::revive`] と同じ）。`account_id` は、その道を引くのに要る。
-    async fn kill(&self, account_id: uuid::Uuid, card_id: CardId) -> Result<(), String>;
+    ///
+    /// `op` は頼みの番号（実装レビュー第6回 Astra 1）。付いていれば PC が何をしたかを番号付きで
+    /// 答え、記録層がそれを合否にして配る（[`crate::registry::SessionRegistry::answer_kill`]）。
+    /// **`Err` は届けられなかったことだけを言う**——番号付きの頼みを PC が断ることは無い。
+    async fn kill(
+        &self,
+        account_id: uuid::Uuid,
+        card_id: CardId,
+        op: Option<protocol::ws::OpId>,
+    ) -> Result<(), String>;
     fn archive(&self, card_id: CardId) -> Result<(), String>;
 
     /// **記録の側だけで外す**カードを、持ち主の PC にも知らせる（実装レビュー Astra 1）。

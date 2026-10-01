@@ -2239,6 +2239,7 @@ impl Browser {
                 status,
                 subagent_active,
                 last_activity_at,
+                ..
             } => {
                 if let Some(card) = self.card.as_mut()
                     && card.card_id == *card_id

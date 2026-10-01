@@ -531,6 +531,10 @@ mod tests {
 
         fn reset_transcript(&self, _card_id: CardId) {}
 
+        fn kill_answered(&self, _answer: crate::events::KillAnswered) {}
+
+        fn revive_answered(&self, _answer: crate::events::ReviveAnswered) {}
+
         fn screens_enabled(&self) -> bool {
             true
         }

@@ -228,7 +228,10 @@ async fn 自動で寝たカードも起こし直せる() {
     server.manager.sweep_once();
     common::wait_for_status(&session, SessionStatus::Ended { ok: true }).await;
 
-    let in_flight = server.manager.begin_revive(card_id).expect("印が立つこと");
+    let in_flight = server
+        .manager
+        .begin_revive(card_id, None)
+        .expect("印が立つこと");
     let revived = server
         .manager
         .revive(in_flight, &common::work_dir(), None, ClaudeSessionId::new())

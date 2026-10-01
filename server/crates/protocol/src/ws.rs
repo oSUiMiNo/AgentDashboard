@@ -118,6 +118,32 @@ pub enum Withdrawal {
     Unknown,
 }
 
+/// 頼みの番号（寝ているカードばかりなのに、メモリ不足でセッションを起こせない 実装レビュー
+/// 第6回）。**頼む側が振り、答え（断り・取り下げ・完了）が運ぶ。**
+///
+/// 待つ側は、自分の番号が付いた答えでだけ満ちる。受け取った枚数・接続直後の写しの状態・
+/// 記録層の通し番号から「どの頼みへの答えか」を推し量ると、写しの重複や遅れて届いた古い断りを
+/// 自分の答えと取り違える（第5回までに3回直して、3回とも別の順で破れた）。
+///
+/// **運ぶ欄はどれも欠けても読める。** 古い相手は番号を運ばず、番号の無い答えでは誰も満ちない
+/// ——待つ側は時間切れで終わり、止まっていないものを「止まった」とは言わない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct OpId(pub uuid::Uuid);
+
+impl OpId {
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+}
+
+impl std::fmt::Display for OpId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// 自己修復の進み具合（設計§9）。
 ///
 /// 文字列ではなく型にしてあるのは、送り手と受け手が別々の言語で手書きされているため。
@@ -258,6 +284,13 @@ pub enum ClientMessage {
     /// （設計§3-3・§3-5）。ずれても「押せてしまってサーバが断る」に倒れる。
     ReviveSession {
         card_id: CardId,
+        /// 頼みの番号（[`OpId`]。実装レビュー第6回）。付けると、答えがこの番号を運んで返る——
+        /// 起こせたら `Status{op}`、起こせなかったら `Error{ops}`。
+        ///
+        /// **画面は付けない**（起きたかは状態の変化で分かる）。付けるのは答えを待つ CLI だけ。
+        /// 古いサーバ・古い PC は番号を運ばないので答えが来ず、CLI は時間切れで終わる
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        op: Option<OpId>,
     },
     /// **過去の CLI セッションを指定して、新しいカードで起こす**（名前付け設計§7-1）。
     ///
@@ -314,6 +347,13 @@ pub enum ClientMessage {
     /// セッションを終了させる（PTY プロセスを落とす）
     Kill {
         card_id: CardId,
+        /// 頼みの番号（[`OpId`]）。付けると、答えがこの番号を運んで返る——終わったら
+        /// `Status{op}`、止められなかったら `Error{ops}`（実装レビュー第6回 Astra 1）。
+        ///
+        /// **画面は付けない。** 画面は状態の変化を見ていれば足り、答えを待たない。付けるのは
+        /// 1回で終わる CLI だけ
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        op: Option<OpId>,
     },
     /// 終了済みのカードを一覧から消す
     Archive {
@@ -418,6 +458,16 @@ pub enum ServerMessage {
         status: SessionStatus,
         subagent_active: u32,
         last_activity_at: Timestamp,
+        /// **頼みへの答え**なら、その番号（[`OpId`]。実装レビュー第6回 Astra 1）。
+        ///
+        /// 終了の頼み（`ClientMessage::Kill{op}`）が済んだとき、サーバがそのカードの記録の
+        /// いまの状態に番号を添えて配る。**値そのものは記録のいまの姿**なので、番号を知らない
+        /// 画面が受けても何も変わらない。セッションホストからの報告は付けない。
+        ///
+        /// 種別を足さずに欄にしたのは、画面（`web/src/stores/ws.ts`）が知らない種別を型の
+        /// 網羅で拒むため。欄なら古い画面は黙って読み飛ばす
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        op: Option<OpId>,
     },
     /// コンテキスト残量だけの差分更新（コンテキスト残量設計§2）。
     ///
@@ -571,6 +621,14 @@ pub enum ServerMessage {
         /// 終わるだけで、止まっていないものを「止まった」とは言わない。`busy` と同じく欄にする
         #[serde(default, skip_serializing_if = "Option::is_none")]
         withdrawn: Option<Withdrawal>,
+        /// この知らせが答えている頼みの番号（[`OpId`]。実装レビュー第6回 Astra 1・3）。
+        ///
+        /// **複数ありうる。** 起こし直しは、先に進んでいる起こし直しへ後から来た頼みを束ねる
+        /// （競合で断った頼みも、先の起こし直しが終われば同じ結果になる）ので、終わった断りは
+        /// 束ねた番号を全部運ぶ。空＝どの頼みへの答えとも言えない（古い相手・頼みと関係の
+        /// 無い知らせ）。**空の知らせでは誰も満ちない**
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ops: Vec<OpId>,
     },
     /// PJT 枠1枚の最新（イシューグループ_2026_0805_0514 設計§11）。
     ///
@@ -834,7 +892,11 @@ mod tests {
                 card_id,
                 state: FlowState::Resume,
             },
-            ClientMessage::ReviveSession { card_id },
+            ClientMessage::ReviveSession { card_id, op: None },
+            ClientMessage::ReviveSession {
+                card_id,
+                op: Some(OpId::new()),
+            },
             ClientMessage::RecallSession {
                 claude_session_id: crate::ClaudeSessionId::new(),
                 permission_mode: None,
@@ -853,7 +915,7 @@ mod tests {
                 card_id,
                 nickname: None,
             },
-            ClientMessage::Kill { card_id },
+            ClientMessage::Kill { card_id, op: None },
             ClientMessage::Archive { card_id },
             // **宛先2つとも往復させる。** `AnnotationTarget` の欄の形には見張りが
             // 無く（`cli_surface` が見るのは種別の綴りだけ）、ここと
@@ -919,6 +981,7 @@ mod tests {
             kind: ErrorKind::Revive,
             busy: None,
             withdrawn: None,
+            ops: Vec::new(),
         })
         .unwrap();
         assert!(json.contains(r#""kind":"revive""#), "{json}");
@@ -946,6 +1009,7 @@ mod tests {
                 kind: ErrorKind::Revive,
                 busy: Some(true),
                 withdrawn: None,
+                ops: Vec::new(),
             })
             .unwrap(),
             r#"{"t":"error","card_id":null,"message":"復旧中です","kind":"revive","busy":true}"#
@@ -962,6 +1026,7 @@ mod tests {
                 kind: ErrorKind::Revive,
                 busy,
                 withdrawn: None,
+                ops: Vec::new(),
             };
             let json = serde_json::to_string(&message).unwrap();
             match 綴り {
@@ -1011,12 +1076,84 @@ mod tests {
                 kind: ErrorKind::Revive,
                 busy: Some(false),
                 withdrawn,
+                ops: Vec::new(),
             };
             let json = serde_json::to_string(&message).unwrap();
             match 綴り {
                 Some(綴り) => assert!(json.contains(綴り), "{json}"),
                 None => assert!(!json.contains("withdrawn"), "None を書き出している：{json}"),
             }
+            assert_eq!(roundtrip(&message), message);
+        }
+    }
+
+    #[test]
+    fn 頼みの番号は欠けても読め_無ければ書き出さず_あれば綴りのまま往復する() {
+        /*
+            実装レビュー第6回 Astra 1・3。頼み（`Kill.op`）・断り（`Error.ops`）・成功の答え
+            （`Status.op`）。**欠けた古い名乗りが読めること**（版は上げない）と、**無いときに書き
+            出さないこと**（古い相手へ空の欄を送らない）。番号は uuid の文字列そのまま
+        */
+        let op = OpId::new();
+        let 綴り = format!(r#""{op}""#);
+
+        let 古い終了 = r#"{"t":"kill","card_id":"00000000-0000-0000-0000-000000000001"}"#;
+        let ClientMessage::Kill { op: 欠け, .. } = serde_json::from_str(古い終了).unwrap()
+        else {
+            panic!("kill として読めていない");
+        };
+        assert_eq!(欠け, None, "欄の無い終了の頼みを番号付きと読んでいる");
+        for (頼み, 書く) in [(Some(op), true), (None, false)] {
+            let message = ClientMessage::Kill {
+                card_id: CardId::new(),
+                op: 頼み,
+            };
+            let json = serde_json::to_string(&message).unwrap();
+            assert_eq!(json.contains(r#""op":"#), 書く, "{json}");
+            if 書く {
+                assert!(json.contains(&綴り), "{json}");
+            }
+            assert_eq!(roundtrip(&message), message);
+        }
+
+        let 古い状態 = r#"{"t":"status","card_id":"00000000-0000-0000-0000-000000000001","status":{"kind":"working"},"subagent_active":0,"last_activity_at":1}"#;
+        let ServerMessage::Status { op: 欠け, .. } = serde_json::from_str(古い状態).unwrap()
+        else {
+            panic!("status として読めていない");
+        };
+        assert_eq!(欠け, None, "欄の無い状態を答えと読んでいる");
+        for (頼み, 書く) in [(Some(op), true), (None, false)] {
+            let message = ServerMessage::Status {
+                card_id: CardId::new(),
+                status: SessionStatus::Ended { ok: true },
+                subagent_active: 0,
+                last_activity_at: 1,
+                op: 頼み,
+            };
+            let json = serde_json::to_string(&message).unwrap();
+            assert_eq!(json.contains(r#""op":"#), 書く, "{json}");
+            assert_eq!(roundtrip(&message), message);
+        }
+
+        let 古い断り = r#"{"t":"error","card_id":null,"message":"x","kind":"revive","busy":false}"#;
+        let ServerMessage::Error { ops, .. } = serde_json::from_str(古い断り).unwrap() else {
+            panic!("error として読めていない");
+        };
+        assert!(
+            ops.is_empty(),
+            "欄の無い断りを、どれかの頼みへの答えと読んでいる"
+        );
+        for (束, 書く) in [(vec![op, OpId::new()], true), (Vec::new(), false)] {
+            let message = ServerMessage::Error {
+                card_id: Some(CardId::new()),
+                message: "起こし直しをやめました".to_string(),
+                kind: ErrorKind::Revive,
+                busy: Some(false),
+                withdrawn: None,
+                ops: 束,
+            };
+            let json = serde_json::to_string(&message).unwrap();
+            assert_eq!(json.contains(r#""ops":"#), 書く, "{json}");
             assert_eq!(roundtrip(&message), message);
         }
     }
@@ -1038,6 +1175,7 @@ mod tests {
                 status: SessionStatus::Ended { ok: true },
                 subagent_active: 0,
                 last_activity_at: 1_700_000_000_000,
+                op: None,
             },
             ServerMessage::TranscriptAppend {
                 card_id,
@@ -1089,6 +1227,7 @@ mod tests {
 
                 busy: None,
                 withdrawn: None,
+                ops: Vec::new(),
             },
             ServerMessage::Error {
                 card_id: None,
@@ -1097,6 +1236,7 @@ mod tests {
 
                 busy: None,
                 withdrawn: None,
+                ops: Vec::new(),
             },
             ServerMessage::Error {
                 card_id: Some(card_id),
@@ -1104,6 +1244,7 @@ mod tests {
                 kind: ErrorKind::Revive,
                 busy: Some(true),
                 withdrawn: None,
+                ops: Vec::new(),
             },
             ServerMessage::Error {
                 card_id: Some(card_id),
@@ -1111,6 +1252,7 @@ mod tests {
                 kind: ErrorKind::Revive,
                 busy: Some(false),
                 withdrawn: None,
+                ops: Vec::new(),
             },
             ServerMessage::ProjectUpsert {
                 project: ProjectView {
@@ -1457,11 +1599,23 @@ mod tests {
         );
 
         // 起こし直しはカードIDだけを運ぶ。**欄が増えていないこと**もここで固定する——
-        // 材料をブラウザに持たせると、古い写しで起こし直す経路ができる（設計§4-1）
-        let text = serde_json::to_string(&ClientMessage::ReviveSession { card_id }).unwrap();
+        // 材料をブラウザに持たせると、古い写しで起こし直す経路ができる（設計§4-1）。
+        // 頼みの番号（実装レビュー第6回）は材料ではなく答えの宛名で、画面は付けない
+        let text =
+            serde_json::to_string(&ClientMessage::ReviveSession { card_id, op: None }).unwrap();
         assert_eq!(
             text,
             format!(r#"{{"t":"revive_session","card_id":"{card_id}"}}"#)
+        );
+        let op = OpId::new();
+        let text = serde_json::to_string(&ClientMessage::ReviveSession {
+            card_id,
+            op: Some(op),
+        })
+        .unwrap();
+        assert_eq!(
+            text,
+            format!(r#"{{"t":"revive_session","card_id":"{card_id}","op":"{op}"}}"#)
         );
 
         // 過去から起こす口は**カードIDを持たない**（カードはまだ無い）。`agent_id` は

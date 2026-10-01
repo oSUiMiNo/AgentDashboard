@@ -174,6 +174,44 @@ async fn waitを付けるとターンの終わりまで待つ() {
 }
 
 #[tokio::test]
+async fn 持ち主の門で断られた番号付きの終了はその場で落ちる() {
+    // 寝ているカードばかりなのに、メモリ不足でセッションを起こせない 実装レビュー第6回 Astra 1。
+    // CLI の終了は自分の番号を含む答えでしか決まらない。**持ち主の門（`target_card`）の断りに
+    // 番号を添えないと**、解決した後に外されたカードへの終了が、その場で落ちずに上限（30 秒）まで
+    // 待つ。CLI は送る前に一覧から引いて解決するので、ここでは記録に無いカードへ直に頼んで、
+    // 解決と頼みの間に外された形を作る
+    let server = TestServer::start().await;
+    let target = target_of(&server);
+    let card = protocol::CardId::new();
+    let op = protocol::ws::OpId::new();
+    let mut ws = Ws::connect(&target).await.expect("繋がること");
+    ws.send(&ClientMessage::Kill {
+        card_id: card,
+        op: Some(op),
+    })
+    .await
+    .expect("送れること");
+    let 結果 = tokio::time::timeout(
+        Duration::from_secs(10),
+        wait::run(
+            &mut ws,
+            wait::Goal::Ended { card, op },
+            "セッションの終了",
+            wait::KILL_CAP,
+        ),
+    )
+    .await
+    .expect("★門の断りに終了の頼みの番号が無く、CLI が上限まで待ち続けている");
+    match 結果 {
+        Err(client::ClientError::Refused { message, .. }) => {
+            assert!(message.contains("見つかりません"), "{message}")
+        }
+        other => panic!("★門で断られたのに、断りとして返していない: {other:?}"),
+    }
+    ws.close().await;
+}
+
+#[tokio::test]
 async fn killは終了の知らせまで待つ() {
     let server = TestServer::start().await;
     let (session, _watcher) = common::start_session(&server.manager).await;
@@ -608,6 +646,7 @@ async fn helloを受け取ってから送る() {
         .expect("Hello まで待って繋がること");
     ws.send(&ClientMessage::Kill {
         card_id: protocol::CardId::new(),
+        op: None,
     })
     .await
     .expect("送れること");

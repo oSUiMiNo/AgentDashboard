@@ -304,6 +304,48 @@ describe('サーバと同じ JSON になること', () => {
     }
   })
 
+  it('頼みの番号が Rust と同じ綴りで往復する（終了の頼み・断り・成功の答え）', () => {
+    // Rust 側は `ws.rs` の `頼みの番号は欠けても読め_無ければ書き出さず_あれば綴りのまま往復する`
+    const op = '0f8fad5b-d9cb-469f-a165-70867728950e'
+    const kill: ClientMessage = { t: 'kill', card_id: 'c', op }
+    expect(JSON.stringify(kill)).toBe(`{"t":"kill","card_id":"c","op":"${op}"}`)
+
+    const error = JSON.parse(
+      `{"t":"error","card_id":"c","message":"x","kind":"kill","ops":["${op}"]}`,
+    ) as ServerMessage
+    expect(error.t).toBe('error')
+    if (error.t === 'error') {
+      expect(error.ops).toEqual([op])
+    }
+
+    const answer = JSON.parse(
+      `{"t":"status","card_id":"c","status":{"kind":"ended","ok":true},"subagent_active":0,"last_activity_at":1,"op":"${op}"}`,
+    ) as ServerMessage
+    expect(answer.t).toBe('status')
+    if (answer.t === 'status') {
+      expect(answer.op).toBe(op)
+      expect(answer.status).toEqual({ kind: 'ended', ok: true })
+    }
+  })
+
+  it('頼みの番号の欠けは undefined と読む（どの頼みへの答えでもない）', () => {
+    // サーバは空の番号を書き出さない。画面の送る終了の頼みにも付けない
+    const kill: ClientMessage = { t: 'kill', card_id: 'c' }
+    expect(JSON.stringify(kill)).toBe('{"t":"kill","card_id":"c"}')
+    const error = JSON.parse(
+      '{"t":"error","card_id":"c","message":"x","kind":"kill"}',
+    ) as ServerMessage
+    if (error.t === 'error') {
+      expect(error.ops).toBeUndefined()
+    }
+    const status = JSON.parse(
+      '{"t":"status","card_id":"c","status":{"kind":"working"},"subagent_active":0,"last_activity_at":1}',
+    ) as ServerMessage
+    if (status.t === 'status') {
+      expect(status.op).toBeUndefined()
+    }
+  })
+
   it('hello を解釈できる', () => {
     const raw = '{"t":"hello","flow_high":262144,"flow_low":32768}'
     const message = JSON.parse(raw) as ServerMessage
@@ -452,6 +494,12 @@ describe('サーバと同じ JSON になること', () => {
     const message: ClientMessage = { t: 'revive_session', card_id: CARD_ID }
     expect(JSON.stringify(message)).toBe(
       `{"t":"revive_session","card_id":"${CARD_ID}"}`,
+    )
+    // 頼みの番号（実装レビュー第6回）は材料ではなく答えの宛名。CLI だけが付ける
+    const op = '0f8fad5b-d9cb-469f-a165-70867728950e'
+    const withOp: ClientMessage = { t: 'revive_session', card_id: CARD_ID, op }
+    expect(JSON.stringify(withOp)).toBe(
+      `{"t":"revive_session","card_id":"${CARD_ID}","op":"${op}"}`,
     )
   })
 
