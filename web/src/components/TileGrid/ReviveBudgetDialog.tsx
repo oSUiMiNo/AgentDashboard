@@ -55,7 +55,7 @@ function 見出し(plan: RevivePlan): string {
  * **状態の欄が無い**のは古い PC の答えで、外側の値があるかだけで言い分ける
  * （「もう一度押すと反映されます」は出さない——押し直す必要は無くなった）
  */
-function 外側の行(resources: HostResources) {
+function 外側の行(resources: HostResources, 打ち切った: boolean) {
   const state = resources.host_free_state
   const age =
     resources.host_free_age_sec == null
@@ -79,12 +79,17 @@ function 外側の行(resources: HostResources) {
     return (
       <>
         Windows 側の空き <strong>{gb(resources.host_free_mb)}</strong>
-        （{age !== '' ? `${age}の値・` : ''}確かめ直しています）
+        （{age !== '' ? `${age}の値・` : ''}
+        {打ち切った ? '確かめ直しましたが答えが来ませんでした' : '確かめ直しています'}）
       </>
     )
   }
   if (state === 'checking' || state === 'stale') {
-    return <>Windows 側の空きを確かめています</>
+    return 打ち切った ? (
+      <>Windows 側の空きを確かめられていません（待っても答えが来ませんでした）</>
+    ) : (
+      <>Windows 側の空きを確かめています</>
+    )
   }
   if (state === 'failed') {
     const 理由 = resources.host_free_error
@@ -236,7 +241,7 @@ export function ReviveBudgetDialog({
                   data-testid="revive-budget-outside"
                   className="text-muted-foreground"
                 >
-                  {外側の行(resources)}
+                  {外側の行(resources, host.unconfirmed === 'gave_up')}
                 </p>
               )}
               {抑えた !== null && (
@@ -262,9 +267,9 @@ export function ReviveBudgetDialog({
           )}
           {確かめられていない && (
             <>
-              確かめられていない PC のぶんは「入るぶんだけ戻す」に含めません。
-              「それでも全部戻す」を押しても、起こすときに PC 側が確かめ直し、
-              足りなければ断ります。
+              {
+                '確かめられていない PC のぶんは「入るぶんだけ戻す」に含めません。「それでも全部戻す」を押しても、起こすときに PC 側が確かめ直し、足りなければ断ります。'
+              }
               <br />
             </>
           )}

@@ -791,7 +791,7 @@ describe('まとめて復旧は、Windows 側の空きを確かめてから数�
       'Windows 側の空きを確かめられていません',
     )
     expect(screen.getByTestId('revive-budget-outside')).toHaveTextContent(
-      'Windows 側の空き 5.3 GB（4 分前の値・確かめ直しています）',
+      'Windows 側の空き 5.3 GB（4 分前の値・確かめ直しましたが答えが来ませんでした）',
     )
     expect(screen.getByTestId('revive-budget-fits')).toHaveTextContent('0枚')
     expect(screen.getByTestId('revive-budget-fitting')).toBeDisabled()
@@ -826,7 +826,8 @@ describe('まとめて復旧は、Windows 側の空きを確かめてから数�
     expect(revive).not.toHaveBeenCalled()
   })
 
-  it('checking のまま上限に達したら「確かめています」と出す', async () => {
+  it('checking のまま上限に達したら、確かめている途中ではなく「確かめられていない」と出す', async () => {
+    // 打ち切った後に「確かめています」と出すと、まだ待てば答えが来るように読める
     useWsStore.setState({ revive: vi.fn() })
     順に答える({ local: [答え(99, 'checking')] })
     applySessionSnapshot([stale('a', 1)])
@@ -835,9 +836,11 @@ describe('まとめて復旧は、Windows 側の空きを確かめてから数�
     await 押す('a')
     await 進める(66_000)
 
-    expect(screen.getByTestId('revive-budget-outside')).toHaveTextContent(
-      'Windows 側の空きを確かめています',
-    )
+    const outside = screen.getByTestId('revive-budget-outside')
+    expect(outside).toHaveTextContent('Windows 側の空きを確かめられていません')
+    expect(outside).not.toHaveTextContent('確かめています')
+    // 注意書きの文の途中に、改行由来の半角スペースを混ぜない
+    expect(screen.getByRole('dialog').textContent).not.toMatch(/[。、] [^ ]/)
   })
 
   it('見積もり0なら、checking でも待たずに全部送る', async () => {
