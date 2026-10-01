@@ -1209,6 +1209,337 @@ async fn 確かめられなかったカードを片付ける(急かす: bool) {
     }
 }
 
+/// 外したカードを名乗らせ、照合の DB の読み取りを1回失敗させて、**確かめられなかったカード**
+/// としてその接続に持たせる（実装レビュー第9回 Astra 3 の形）。
+async fn 確かめられないカードを持たせる(
+    gateway: &TestGateway,
+    socket: &mut common::SessionHostSocket,
+    account_id: Uuid,
+) -> CardId {
+    let card_id = CardId::new();
+    socket
+        .send(&AgentMessage::SessionUpsert {
+            session: Box::new(meta(card_id)),
+        })
+        .await;
+    wait_for_conn(gateway, card_id).await;
+    gateway
+        .registry
+        .archive_owned(account_id, card_id)
+        .await
+        .expect("外せること");
+    gateway.registry.照合の読みを1回失敗させる();
+    socket
+        .send(&AgentMessage::SessionUpsert {
+            session: Box::new(meta(card_id)),
+        })
+        .await;
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    while !gateway.registry.照合の読みの失敗が使われた() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "差し込んだ失敗が照合で使われない（形を作れていない）"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    card_id
+}
+
+/// 繋いで名乗りの応答まで受け取り、生きたカードを1枚名乗らせる。
+async fn 繋いで1枚名乗る(
+    gateway: &TestGateway,
+    token: &str,
+) -> (
+    common::SessionHostSocket,
+    CardId,
+    Arc<server_core::gateway::SessionHostConn>,
+) {
+    let mut socket = gateway.connect_as(token, "仕事用ノート").await;
+    socket
+        .wait_for("名乗りの応答", |message| {
+            matches!(message, ServerToAgent::Hello { .. })
+        })
+        .await;
+    let 生きている = CardId::new();
+    socket
+        .send(&AgentMessage::SessionUpsert {
+            session: Box::new(meta(生きている)),
+        })
+        .await;
+    let conn = wait_for_conn(gateway, 生きている).await;
+    (socket, 生きている, conn)
+}
+
+/// 条件が満たされるまで待つ。満たされなければ `what` で落とす。
+async fn 満ちるまで待つ(what: &str, mut ok: impl FnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    while !ok() {
+        assert!(tokio::time::Instant::now() < deadline, "{what}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn 確かめ直しの_DB_の答えが遅くてもふだんの受信は続く() {
+    // 寝ているカードばかりなのに、メモリ不足でセッションを起こせない 実装レビュー第10回 Astra 1。
+    // 照合で確かめられなかったカードの確かめ直しを、接続の受信のループの中で1枚ずつ待っていた。
+    // DB の答えが遅いと、その間この接続の生存確認も報告も止まり、**DB の不調が正常な PC の切断へ
+    // 広がる**。確かめ直しの読み取りを止めた間も、ふだんの報告が処理されることを見る
+    for backend in common::backends("gw-recheck-slow-db").await {
+        let gateway = TestGateway::start(backend.db.clone()).await;
+        // 止めている間に上限を過ぎないようにする（過ぎると、この試験が見たいものとは別の道へ行く）
+        gateway
+            .hub
+            .set_recheck_limits(server_core::gateway::RecheckLimits {
+                timeout: Duration::from_secs(60),
+                parallel: 4,
+            });
+        let (token, account_id) = issue(&backend.db, "テスト用").await;
+        let (mut socket, 生きている, conn) = 繋いで1枚名乗る(&gateway, &token).await;
+        let 外す = 確かめられないカードを持たせる(&gateway, &mut socket, account_id).await;
+
+        let 止め所 = gateway.registry.照合の読みを止める();
+        conn.確かめ直しを急かす();
+        満ちるまで待つ(
+            "確かめ直しが DB の読み取りまで来ない（形を作れていない）",
+            || 止め所.来た数() >= 1,
+        )
+        .await;
+
+        // DB を使わない便（残量）と、DB に書いて ack を返す便（履歴）
+        socket
+            .send(&AgentMessage::ContextUsage {
+                card_id: 生きている,
+                usage: Some(protocol::ContextUsage {
+                    used_percentage: 42,
+                    total_input_tokens: 420_000,
+                    context_window_size: 1_000_000,
+                }),
+            })
+            .await;
+        満ちるまで待つ(
+            &format!(
+                "[{}] ★確かめ直しの DB の答えを待つ間、接続の報告を処理していない（残量の便が届かない）",
+                backend.name
+            ),
+            || {
+                gateway
+                    .registry
+                    .get(生きている)
+                    .is_some_and(|record| record.meta().context_usage.is_some())
+            },
+        )
+        .await;
+        socket
+            .send(&AgentMessage::TranscriptBatch {
+                batch_id: BatchId(1),
+                card_id: 生きている,
+                nodes: vec![protocol::TreeNode {
+                    id: protocol::NodeId("n1".to_string()),
+                    parent: None,
+                    node: protocol::Node::AssistantText {
+                        text: "まだ生きている".to_string(),
+                        error: false,
+                    },
+                    ts: 1,
+                    branch: 0,
+                }],
+            })
+            .await;
+        socket
+            .wait_for("★（確かめ直しの DB の答えを待つ間、履歴の ack が返らない）BatchAck", |message| {
+                matches!(message, ServerToAgent::BatchAck { batch_id } if *batch_id == BatchId(1))
+            })
+            .await;
+
+        止め所.開ける();
+        socket
+            .wait_for(
+                "DB が答えた後の取り下げ",
+                |message| matches!(message, ServerToAgent::Forget { card_id } if *card_id == 外す),
+            )
+            .await;
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 確かめ直しは同時に走らせる数に上限がある() {
+    // 実装レビュー第10回 Astra 1。DB が遅い間に持っているカードを全部同時に問い合わせると、DB の
+    // 接続を取り合ってふだんの報告の書き込みまで待たせる。同時に走らせる数を絞る
+    for backend in common::backends("gw-recheck-parallel").await {
+        let gateway = TestGateway::start(backend.db.clone()).await;
+        gateway
+            .hub
+            .set_recheck_limits(server_core::gateway::RecheckLimits {
+                timeout: Duration::from_secs(60),
+                parallel: 2,
+            });
+        let (token, account_id) = issue(&backend.db, "テスト用").await;
+        let (mut socket, _, conn) = 繋いで1枚名乗る(&gateway, &token).await;
+        let mut 外す = Vec::new();
+        for _ in 0..5 {
+            外す.push(確かめられないカードを持たせる(&gateway, &mut socket, account_id).await);
+        }
+
+        let 止め所 = gateway.registry.照合の読みを止める();
+        conn.確かめ直しを急かす();
+        満ちるまで待つ(
+            "確かめ直しが DB の読み取りまで来ない（形を作れていない）",
+            || 止め所.来た数() >= 2,
+        )
+        .await;
+        // 同時に始めるものは1回の巡りでまとめて門まで来る（試験は1本のスレッドで回る）。門が
+        // 閉じている間は1つも終わらないので、3つ目が来るなら上限が効いていない
+        assert_eq!(
+            止め所.来た数(),
+            2,
+            "[{}] ★確かめ直しを上限（2）を超えて同時に走らせている",
+            backend.name
+        );
+
+        止め所.開ける();
+        let mut 届いた = std::collections::HashSet::new();
+        while 届いた.len() < 外す.len() {
+            if let ServerToAgent::Forget { card_id } = socket
+                .wait_for("確かめ直した後の取り下げ", |message| {
+                    matches!(message, ServerToAgent::Forget { card_id } if 外す.contains(card_id))
+                })
+                .await
+            {
+                届いた.insert(card_id);
+            }
+        }
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 確かめ直しが時間の上限を過ぎたら持ち続けて次の周で確かめる() {
+    // 実装レビュー第10回 Astra 1。答えない DB を待ち続けると、確かめ直しの周が終わらず、次の周も
+    // 始まらない。上限を過ぎたら「確かめられなかった」として持ち続け、次の周で確かめる
+    for backend in common::backends("gw-recheck-timeout").await {
+        let gateway = TestGateway::start(backend.db.clone()).await;
+        gateway
+            .hub
+            .set_recheck_limits(server_core::gateway::RecheckLimits {
+                timeout: Duration::from_millis(300),
+                parallel: 4,
+            });
+        let (token, account_id) = issue(&backend.db, "テスト用").await;
+        let (mut socket, _, conn) = 繋いで1枚名乗る(&gateway, &token).await;
+        let 外す = 確かめられないカードを持たせる(&gateway, &mut socket, account_id).await;
+
+        let 止め所 = gateway.registry.照合の読みを止める();
+        conn.確かめ直しを急かす();
+        満ちるまで待つ(
+            "確かめ直しが DB の読み取りまで来ない（形を作れていない）",
+            || 止め所.来た数() >= 1,
+        )
+        .await;
+        // 次の周を急かす。上限を過ぎて前の周が終われば、もう一度読み取りまで来る
+        conn.確かめ直しを急かす();
+        満ちるまで待つ(
+            &format!(
+                "[{}] ★答えない DB を上限を過ぎても待ち続け、次の周の確かめ直しが始まらない",
+                backend.name
+            ),
+            || 止め所.来た数() >= 2,
+        )
+        .await;
+
+        止め所.開ける();
+        conn.確かめ直しを急かす();
+        socket
+            .wait_for(
+                "DB が答えた後の取り下げ",
+                |message| matches!(message, ServerToAgent::Forget { card_id } if *card_id == 外す),
+            )
+            .await;
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn 名乗りの照合の_DB_の答えが遅くても時間の上限で受信へ戻る() {
+    // 実装レビュー第10回 Astra 1。名乗りの照合は、名乗りの順を守るために接続の受信の中で行う
+    // （畳むと決めたら次の報告を読まない。第8回 Astra 1）。ここで答えない DB を待ち続けると、この
+    // 接続の受信が止まる。上限を過ぎたら確かめられなかったとして持ち続け、受信へ戻る
+    for backend in common::backends("gw-reconcile-timeout").await {
+        let gateway = TestGateway::start(backend.db.clone()).await;
+        gateway
+            .hub
+            .set_recheck_limits(server_core::gateway::RecheckLimits {
+                timeout: Duration::from_millis(300),
+                parallel: 4,
+            });
+        let (token, account_id) = issue(&backend.db, "テスト用").await;
+        let (mut socket, 生きている, conn) = 繋いで1枚名乗る(&gateway, &token).await;
+        let 外す = CardId::new();
+        socket
+            .send(&AgentMessage::SessionUpsert {
+                session: Box::new(meta(外す)),
+            })
+            .await;
+        wait_for_conn(&gateway, 外す).await;
+        gateway
+            .registry
+            .archive_owned(account_id, 外す)
+            .await
+            .expect("外せること");
+
+        let 止め所 = gateway.registry.照合の読みを止める();
+        socket
+            .send(&AgentMessage::SessionUpsert {
+                session: Box::new(meta(外す)),
+            })
+            .await;
+        満ちるまで待つ(
+            "名乗りの照合が DB の読み取りまで来ない（形を作れていない）",
+            || 止め所.来た数() >= 1,
+        )
+        .await;
+        socket
+            .send(&AgentMessage::ContextUsage {
+                card_id: 生きている,
+                usage: Some(protocol::ContextUsage {
+                    used_percentage: 7,
+                    total_input_tokens: 70_000,
+                    context_window_size: 1_000_000,
+                }),
+            })
+            .await;
+        満ちるまで待つ(
+            &format!(
+                "[{}] ★名乗りの照合の DB の答えを上限を過ぎても待ち続け、次の報告を処理していない",
+                backend.name
+            ),
+            || {
+                gateway
+                    .registry
+                    .get(生きている)
+                    .is_some_and(|record| record.meta().context_usage.is_some())
+            },
+        )
+        .await;
+
+        止め所.開ける();
+        // 上限を過ぎた照合は確かめ直しへ回っている。生存確認の周期を待たずに進める
+        conn.確かめ直しを急かす();
+        socket
+            .wait_for(
+                "DB が答えた後の取り下げ",
+                |message| matches!(message, ServerToAgent::Forget { card_id } if *card_id == 外す),
+            )
+            .await;
+
+        backend.finish().await;
+    }
+}
+
 #[tokio::test]
 async fn 答えない_PC_への問いは時間切れになる() {
     // **「確かめられなかった」の3つ目**（名前付け設計§8-5）。寝ている・版が古いは

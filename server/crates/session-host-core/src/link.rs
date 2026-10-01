@@ -33,7 +33,7 @@
 use crate::{
     events::{EventSink, LocalEventBus, TranscriptReport},
     offsets::OffsetStore,
-    session::{ALREADY_REVIVING, SessionManager},
+    session::{ALREADY_REVIVING, ReviveContention, SessionManager, TOO_MANY_REVIVE_REQUESTS},
 };
 use futures_util::{SinkExt as _, StreamExt as _};
 use protocol::{
@@ -1473,7 +1473,8 @@ fn apply_command(
             claude_session_id,
             op,
         } => {
-            let Some(in_flight) = manager.begin_revive(card_id, op) else {
+            let in_flight = match manager.begin_revive_or_refuse(card_id, op) {
+                Ok(in_flight) => in_flight,
                 // 待ち行列に並ばせない。同じカードが2つ並ぶと、席が空いたとき
                 // 両方とも通る（設計§8-1）
                 //
@@ -1481,15 +1482,30 @@ fn apply_command(
                 // 起こせない 設計§7-3）。先に起こしている側が居るので、待てば起きる——
                 // 枝分かれはこれで失敗してはいけない。番号は先の札へ束ねてあるので、先の
                 // 起こし直しが断られればその断りでも答える（実装レビュー第6回 Astra 3）
-                report_revive(
-                    manager,
-                    card_id,
-                    ALREADY_REVIVING.to_string(),
-                    true,
-                    None,
-                    op.into_iter().collect(),
-                );
-                return;
+                Err(ReviveContention::Busy) => {
+                    report_revive(
+                        manager,
+                        card_id,
+                        ALREADY_REVIVING.to_string(),
+                        true,
+                        None,
+                        op.into_iter().collect(),
+                    );
+                    return;
+                }
+                // 束が満ちていて番号を束ねられなかった（実装レビュー第10回 Astra 2）。先の
+                // 起こし直しの結果はこの番号を運ばないので、**ここで終わった断りを返す**
+                Err(ReviveContention::Overflow) => {
+                    report_revive(
+                        manager,
+                        card_id,
+                        TOO_MANY_REVIVE_REQUESTS.to_string(),
+                        false,
+                        None,
+                        op.into_iter().collect(),
+                    );
+                    return;
+                }
             };
             let answers = in_flight.answers();
             let manager = Arc::clone(manager);

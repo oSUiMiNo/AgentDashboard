@@ -142,6 +142,8 @@ pub struct SessionHostConn {
     unverified: Mutex<HashSet<CardId>>,
     /// 確かめ直しを今すぐ行わせる（**テスト専用**の口が鳴らす。[`SessionHostConn::確かめ直しを急かす`]）
     recheck_wake: tokio::sync::Notify,
+    /// 繋いだ時点の照合の上限（実装レビュー第10回 Astra 1。[`RecheckLimits`]）
+    recheck_limits: RecheckLimits,
 }
 
 /// サーバ→PC の送り口。**約束と指示を別の列で持つ**（設計§5-2）。
@@ -513,7 +515,38 @@ pub struct SessionHostHub {
     /// レーンの深さ。**既定は本物の値**で、[`SessionHostHub::set_lane_depths`] でだけ
     /// 小さくできる。
     depths: Mutex<LaneDepths>,
+    /// 照合の時間と、確かめ直しを同時に走らせる数の上限（実装レビュー第10回 Astra 1。
+    /// [`RecheckLimits`]）。**既定は本物の値**で、[`SessionHostHub::set_recheck_limits`] でだけ変える
+    recheck_limits: Mutex<RecheckLimits>,
 }
+
+/// 照合の時間と、確かめ直しを同時に走らせる数の上限（寝ているカードばかりなのに、メモリ不足で
+/// セッションを起こせない 実装レビュー第10回 Astra 1）。
+///
+/// DB が不調のとき、照合の答えを待つ時間がそのまま積み上がらないようにする。上限を過ぎたら
+/// 「確かめられなかった」として持ち続け、次の確かめ直しで試す。
+#[derive(Debug, Clone, Copy)]
+pub struct RecheckLimits {
+    /// 照合1件の DB の読み取りを待つ上限（名乗りの照合・確かめ直しの両方）
+    pub timeout: Duration,
+    /// 確かめ直しを同時に走らせる数。DB の接続の取り合いで、ふだんの報告の書き込みを
+    /// 待たせないため
+    pub parallel: usize,
+}
+
+impl Default for RecheckLimits {
+    fn default() -> Self {
+        Self {
+            timeout: RECONCILE_TIMEOUT,
+            parallel: RECHECK_PARALLEL,
+        }
+    }
+}
+
+/// 照合1件の DB の読み取りを待つ上限。主キーでの1行なので、ふだんは数ミリ秒で返る。
+const RECONCILE_TIMEOUT: Duration = Duration::from_secs(2);
+/// 確かめ直しを同時に走らせる数。
+const RECHECK_PARALLEL: usize = 4;
 
 /// 約束と指示、それぞれのレーンの深さ（設計§5-2）。
 #[derive(Debug, Clone, Copy)]
@@ -541,6 +574,7 @@ impl SessionHostHub {
             streaming: Mutex::new(HashSet::new()),
             pending: Mutex::new(HashMap::new()),
             depths: Mutex::new(LaneDepths::default()),
+            recheck_limits: Mutex::new(RecheckLimits::default()),
         })
     }
 
@@ -558,6 +592,17 @@ impl SessionHostHub {
 
     fn lane_depths(&self) -> LaneDepths {
         *self.depths.lock().expect("ロックが壊れていない")
+    }
+
+    /// 照合の時間と、確かめ直しを同時に走らせる数の上限を変える（テスト専用の口）。
+    ///
+    /// **繋ぎ始める前に呼ぶこと。** 接続ごとに、繋いだ時点の値を持つ。
+    pub fn set_recheck_limits(&self, limits: RecheckLimits) {
+        *self.recheck_limits.lock().expect("ロックが壊れていない") = limits;
+    }
+
+    fn recheck_limits(&self) -> RecheckLimits {
+        *self.recheck_limits.lock().expect("ロックが壊れていない")
     }
 
     /// 連絡係が切れているか。**居ない（1台構成）ときは偽**——切れているのではなく、
@@ -2463,6 +2508,7 @@ async fn agent_loop(
         close_wake: tokio::sync::Notify::new(),
         unverified: Mutex::new(HashSet::new()),
         recheck_wake: tokio::sync::Notify::new(),
+        recheck_limits: hub.recheck_limits(),
     });
     // 同じ PC が繋ぎ直してきた場合、古い接続は**静かに置き換える**。半分死んだ TCP を
     // 掴んだまま新しい接続を断ると、その PC は二度と繋がらなくなる
@@ -2505,6 +2551,15 @@ async fn agent_loop(
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_seen = tokio::time::Instant::now();
 
+    // **確かめ直しは、この接続の受信とは別のタスクで行う**（実装レビュー第10回 Astra 1）。受信の中で
+    // 待つと、DB の答えが遅い間この接続の生存確認も報告も止まり、DB の不調が正常な PC の切断へ
+    // 広がる。接続が終わったら一緒に止める
+    let recheck = tokio::spawn(recheck_loop(
+        Arc::clone(&hub),
+        Arc::clone(&conn),
+        origin.clone(),
+    ));
+
     loop {
         // **畳むよう頼まれていたら、次の報告を読む前に抜ける**（実装レビュー第8回 Astra 1）。
         // 照合で取り下げの知らせを積めなかった報告の直後に抜けるので、その後の報告は繋ぎ直しの
@@ -2514,7 +2569,6 @@ async fn agent_loop(
         }
         tokio::select! {
             () = conn.close_wake.notified() => {}
-            () = conn.recheck_wake.notified() => recheck_unverified(&hub, &conn, &origin).await,
             incoming = stream.next() => match incoming {
                 Some(Ok(message)) => {
                     last_seen = tokio::time::Instant::now();
@@ -2554,9 +2608,6 @@ async fn agent_loop(
                     );
                     break;
                 }
-                // 照合で確かめられなかったカードを確かめ直す（実装レビュー第9回 Astra 3）。
-                // そのカードを PC がもう名乗らなくても、ここで片付く
-                recheck_unverified(&hub, &conn, &origin).await;
             }
         }
     }
@@ -2570,6 +2621,7 @@ async fn agent_loop(
         }
         tracing::info!(%agent_id, %agent_name, "PC が切断しました");
     }
+    recheck.abort();
     drop(lanes);
     writer.abort();
 }
@@ -2579,51 +2631,108 @@ async fn agent_loop(
 ///
 /// **確かめられなかったら、その接続に持ち続けて確かめ直す**（第9回 Astra 3）。以前は DB を読めない
 /// ことを「外していない」と同じに扱っていたので、入力待ちで以後名乗らないカードは、DB が戻っても
-/// 二度と照合されなかった。確かめ直すのは生存確認のたび（[`recheck_unverified`]）。接続は畳まない
+/// 二度と照合されなかった。確かめ直すのは別のタスク（[`recheck_loop`]）。接続は畳まない
 /// ——DB が止まっている間に名乗るたび畳むと、DB の断が PC の断に化ける（設計§12 の DB 断の行は
 /// 「ack を返さない」で持ちこたえる作りである）。
+///
+/// **ここは接続の受信の中で走る**（名乗りの順に照合する。畳むと決めたら次の報告を読まない）ので、
+/// 待つ時間に上限がある（実装レビュー第10回 Astra 1。[`RecheckLimits::timeout`]）。過ぎたら
+/// 確かめられなかったとして持ち続ける。
 async fn reconcile(
     hub: &Arc<SessionHostHub>,
     conn: &Arc<SessionHostConn>,
     origin: &ReportOrigin,
     card_id: CardId,
 ) {
-    match hub.registry.removed_card(origin.account_id, card_id).await {
-        Ok(removed) => {
-            conn.unverified
-                .lock()
-                .expect("ロックが壊れていない")
-                .remove(&card_id);
-            if removed
-                && conn
-                    .send_or_refuse(&ServerToAgent::Forget { card_id })
-                    .is_ok()
-            {
-                tracing::info!(
-                    %card_id,
-                    agent_id = %conn.agent_id,
-                    "一覧から外したカードを PC がまだ持っていたので、片付けるよう知らせました"
-                );
-            }
+    let checked = tokio::time::timeout(
+        conn.recheck_limits.timeout,
+        hub.registry.removed_card(origin.account_id, card_id),
+    )
+    .await;
+    settle_reconcile(conn, card_id, checked);
+}
+
+/// 照合の答えを受けて、外した知らせを送るか、持ち続けるかを決める。
+fn settle_reconcile(
+    conn: &SessionHostConn,
+    card_id: CardId,
+    checked: Result<Result<bool, sea_orm::DbErr>, tokio::time::error::Elapsed>,
+) {
+    let removed = match checked {
+        Ok(Ok(removed)) => removed,
+        Ok(Err(err)) => {
+            hold_unverified(conn, card_id, &err.to_string());
+            return;
         }
-        Err(err) => {
-            let first = conn
-                .unverified
-                .lock()
-                .expect("ロックが壊れていない")
-                .insert(card_id);
-            if first {
-                tracing::warn!(
-                    %card_id,
-                    agent_id = %conn.agent_id,
-                    "一覧から外したカードかを確かめられません。生存確認のたびに確かめ直します: {err}"
-                );
-            }
+        Err(_) => {
+            hold_unverified(
+                conn,
+                card_id,
+                &format!(
+                    "{:?} 以内に DB が答えませんでした",
+                    conn.recheck_limits.timeout
+                ),
+            );
+            return;
         }
+    };
+    conn.unverified
+        .lock()
+        .expect("ロックが壊れていない")
+        .remove(&card_id);
+    if removed
+        && conn
+            .send_or_refuse(&ServerToAgent::Forget { card_id })
+            .is_ok()
+    {
+        tracing::info!(
+            %card_id,
+            agent_id = %conn.agent_id,
+            "一覧から外したカードを PC がまだ持っていたので、片付けるよう知らせました"
+        );
     }
 }
 
-/// 照合で確かめられなかったカードを、もう一度確かめる（実装レビュー第9回 Astra 3）。
+/// 確かめられなかったカードを持ち続ける。**1行残すのは初めて持ったときだけ**（確かめ直しのたびに
+/// 出すと、DB の断の間ずっと同じ行で埋まる）。
+fn hold_unverified(conn: &SessionHostConn, card_id: CardId, reason: &str) {
+    let first = conn
+        .unverified
+        .lock()
+        .expect("ロックが壊れていない")
+        .insert(card_id);
+    if first {
+        tracing::warn!(
+            %card_id,
+            agent_id = %conn.agent_id,
+            "一覧から外したカードかを確かめられません。確かめ直します: {reason}"
+        );
+    }
+}
+
+/// 照合で確かめられなかったカードを、接続とは別のタスクで確かめ直す（実装レビュー第9回 Astra 3・
+/// 第10回 Astra 1）。
+///
+/// 以前は接続の受信のループの中で、持っているカードを1枚ずつ待っていた。DB の答えが遅いと、その
+/// 合計の時間だけ生存確認も報告も止まった。いまは：
+///
+/// - 接続の受信とは別のタスクで行う（接続が終われば止まる）
+/// - 同時に走らせる数（[`RecheckLimits::parallel`]）と、1件の時間（[`RecheckLimits::timeout`]）に
+///   上限がある。過ぎたものはまた持ち続ける
+/// - 確かめ直すのは生存確認と同じ間隔（[`PING_INTERVAL`]）と、急かされたとき
+async fn recheck_loop(hub: Arc<SessionHostHub>, conn: Arc<SessionHostConn>, origin: ReportOrigin) {
+    let mut tick = tokio::time::interval(PING_INTERVAL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {}
+            () = conn.recheck_wake.notified() => {}
+        }
+        recheck_unverified(&hub, &conn, &origin).await;
+    }
+}
+
+/// 持っているカードを1回ずつ確かめ直す（[`recheck_loop`] の1周）。
 async fn recheck_unverified(
     hub: &Arc<SessionHostHub>,
     conn: &Arc<SessionHostConn>,
@@ -2636,9 +2745,16 @@ async fn recheck_unverified(
         .iter()
         .copied()
         .collect();
-    for card_id in cards {
-        reconcile(hub, conn, origin, card_id).await;
-    }
+    futures_util::stream::iter(cards)
+        .for_each_concurrent(conn.recheck_limits.parallel, |card_id| async move {
+            let checked = tokio::time::timeout(
+                conn.recheck_limits.timeout,
+                hub.registry.removed_card(origin.account_id, card_id),
+            )
+            .await;
+            settle_reconcile(conn, card_id, checked);
+        })
+        .await;
 }
 
 /// 最初の [`AgentMessage::Hello`] だけを待つ。それ以外は読み飛ばす。

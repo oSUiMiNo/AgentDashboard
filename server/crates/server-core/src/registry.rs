@@ -344,6 +344,8 @@ pub struct SessionRegistry {
     removed: Mutex<RemovedCards>,
     /// 次の照合の読み取りを1回失敗させる（**テスト専用**。[`Self::照合の読みを1回失敗させる`]）
     reconcile_fail_once: AtomicBool,
+    /// 照合の読み取りを止める門（**テスト専用**。[`Self::照合の読みを止める`]）
+    reconcile_hold: Mutex<Option<照合の止め所>>,
     /// 番号付きの頼みの控え（実装レビュー第7回 Astra 3・4。[`OpLedger`]）。**他のロックと跨がない**
     ops: Mutex<OpLedger>,
     events: broadcast::Sender<AccountEvent>,
@@ -460,6 +462,27 @@ impl RemovedCards {
     }
 }
 
+/// 照合の DB の読み取りを止める門（**テスト専用**。[`SessionRegistry::照合の読みを止める`]）。
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct 照合の止め所 {
+    gate: Arc<tokio::sync::Semaphore>,
+    reached: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl 照合の止め所 {
+    /// 門まで来た照合の数（通った数ではない。一度来たら数え続ける）。
+    pub fn 来た数(&self) -> usize {
+        self.reached.load(Ordering::SeqCst)
+    }
+
+    /// 門を開ける。待っている照合も、これから来るものも通る。
+    pub fn 開ける(&self) {
+        self.gate
+            .add_permits(tokio::sync::Semaphore::MAX_PERMITS / 2);
+    }
+}
+
 /// 番号付きの頼みの控え（寝ているカードばかりなのに、メモリ不足でセッションを起こせない
 /// 実装レビュー第7回 Astra 3・4）。
 ///
@@ -490,7 +513,9 @@ struct OpLedger {
 struct OpEntry {
     account_id: Uuid,
     card_id: CardId,
-    answer: Option<ServerMessage>,
+    /// **答えの本体は、同じ答えが運ぶ番号のあいだで1つを分け合う**（実装レビュー第10回 Astra 2）。
+    /// 断り1件は束ねた番号を全部運ぶので、番号ごとに写すと束の大きさの2乗で育つ
+    answer: Option<Arc<ServerMessage>>,
 }
 
 impl OpLedger {
@@ -528,22 +553,36 @@ impl OpLedger {
         let Some((card_id, ops)) = op_answer_of(message) else {
             return;
         };
+        let mut shared: Option<Arc<ServerMessage>> = None;
         for op in ops {
             if let Some(entry) = self.entries.get_mut(op)
                 && entry.account_id == account_id
                 && card_id.is_none_or(|card_id| card_id == entry.card_id)
                 && entry.answer.is_none()
             {
-                entry.answer = Some(message.clone());
+                let body = shared.get_or_insert_with(|| Arc::new(message.clone()));
+                entry.answer = Some(Arc::clone(body));
             }
         }
     }
 
+    /// 写すのは引かれたときだけ（取りこぼした接続が引き直すとき）。
     fn answer(&self, account_id: Uuid, op: OpId) -> Option<ServerMessage> {
         self.entries
             .get(&op)
             .filter(|entry| entry.account_id == account_id)
-            .and_then(|entry| entry.answer.clone())
+            .and_then(|entry| entry.answer.as_deref().cloned())
+    }
+
+    /// 控えた答えの本体が運ぶ番号の数の合計（本体ごとに1回だけ数える。**テスト専用**の口が使う）。
+    fn kept_answer_ops(&self) -> usize {
+        let mut seen = HashSet::new();
+        self.entries
+            .values()
+            .filter_map(|entry| entry.answer.as_ref())
+            .filter(|body| seen.insert(Arc::as_ptr(body)))
+            .map(|body| op_answer_of(body).map_or(0, |(_, ops)| ops.len()))
+            .sum()
     }
 }
 
@@ -728,6 +767,7 @@ impl SessionRegistry {
             records: Mutex::new(records),
             removed: Mutex::new(RemovedCards::default()),
             reconcile_fail_once: AtomicBool::new(false),
+            reconcile_hold: Mutex::new(None),
             ops: Mutex::new(OpLedger::default()),
             events: broadcast::channel(EVENT_QUEUE_MESSAGES).0,
             revocations: broadcast::channel(EVENT_QUEUE_MESSAGES).0,
@@ -1773,6 +1813,16 @@ impl SessionRegistry {
             .lock()
             .expect("ロックが壊れていない")
             .accept(account_id, card_id, op);
+    }
+
+    /// 控えた答えの本体が運ぶ番号の数の合計（**テスト専用**。実装レビュー第10回 Astra 2）。本体を
+    /// 番号ごとに写すと、束ねた番号の数の2乗になる。
+    #[doc(hidden)]
+    pub fn 控えの答えが持つ番号の数(&self) -> usize {
+        self.ops
+            .lock()
+            .expect("ロックが壊れていない")
+            .kept_answer_ops()
     }
 
     /// 受け付けた頼み `op` への答え（実装レビュー第7回 Astra 4）。まだ答えが無ければ `None`。
@@ -3342,6 +3392,17 @@ impl SessionRegistry {
         if self.reconcile_fail_once.swap(false, Ordering::SeqCst) {
             return Err(DbErr::Custom("試験で差し込んだ読み取りの失敗".to_string()));
         }
+        let hold = self
+            .reconcile_hold
+            .lock()
+            .expect("ロックが壊れていない")
+            .clone();
+        if let Some(hold) = hold {
+            hold.reached.fetch_add(1, Ordering::SeqCst);
+            if hold.gate.acquire().await.is_err() {
+                tracing::warn!(%card_id, "照合の読み取りを止める門が閉じられました（試験の作り）");
+            }
+        }
         Ok(matches!(
             self.stored(card_id).await?,
             Some((owner, true, _, _)) if owner == account_id
@@ -3353,6 +3414,18 @@ impl SessionRegistry {
     #[doc(hidden)]
     pub fn 照合の読みを1回失敗させる(&self) {
         self.reconcile_fail_once.store(true, Ordering::SeqCst);
+    }
+
+    /// 照合（[`Self::removed_card`]）の DB の読み取りを、開けるまで止める（**テスト専用**。実装
+    /// レビュー第10回 Astra 1）。「DB の答えが遅い」形を作る。
+    #[doc(hidden)]
+    pub fn 照合の読みを止める(&self) -> 照合の止め所 {
+        let hold = 照合の止め所 {
+            gate: Arc::new(tokio::sync::Semaphore::new(0)),
+            reached: Arc::default(),
+        };
+        *self.reconcile_hold.lock().expect("ロックが壊れていない") = Some(hold.clone());
+        hold
     }
 
     /// 差し込んだ失敗が、もう使われたか（**テスト専用**。形を作れたかを確かめる）。

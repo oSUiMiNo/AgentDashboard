@@ -3979,3 +3979,78 @@ async fn 外した知らせが起こし直しの頼みより先に_PC_へ届い�
         "外したカードのために Windows 側を聞きに行かないこと"
     );
 }
+
+#[tokio::test]
+async fn 束が満ちた後の起こし直しの頼みには_PC_がその番号への終わった断りを返す() {
+    // 実装レビュー第10回 Astra 2（セルフホスト）。競合で断った頼みの番号は PC の札へ束ねるが、
+    // 束には上限がある。満ちた後の頼みの番号はどこにも残らないので、PC はその場で終わった断り
+    // （`busy: Some(false)`）を番号付きで返す。束ねた頼みは従来どおり競合（`busy: Some(true)`）
+    use session_host_core::session::{REVIVE_OPS_KEPT, TOO_MANY_REVIVE_REQUESTS};
+    let a2s = A2s::start("revive-ops-overflow").await;
+    let (session, card_id) = 抜け殻にする(&a2s).await;
+    // 先に起こしている札を PC の表に置いたままにする
+    let _先の起こし直し = a2s
+        .manager
+        .begin_revive(card_id, None)
+        .expect("先の札が立つこと");
+    let mut events = a2s.registry.subscribe_events();
+
+    let 頼み: Vec<protocol::ws::OpId> = (0..REVIVE_OPS_KEPT + 3)
+        .map(|_| protocol::ws::OpId::new())
+        .collect();
+    for op in &頼み {
+        a2s.browser
+            .revive(server_core::session_host::ReviveRequest {
+                account_id: a2s.account_id,
+                card_id,
+                op: Some(*op),
+            })
+            .await
+            .expect("頼みは PC まで渡ること");
+    }
+    let mut 答え: HashMap<protocol::ws::OpId, (Option<bool>, String)> = HashMap::new();
+    let 期限 = tokio::time::Instant::now() + Duration::from_secs(10);
+    while 答え.len() < 頼み.len() {
+        match tokio::time::timeout_at(期限, events.recv()).await {
+            Ok(Ok(event)) => {
+                if let protocol::ws::ServerMessage::Error {
+                    card_id: Some(id),
+                    kind: protocol::ws::ErrorKind::Revive,
+                    busy,
+                    message,
+                    ops,
+                    ..
+                } = event.message
+                    && id == card_id
+                    && let [op] = ops.as_slice()
+                {
+                    答え.insert(*op, (busy, message));
+                }
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+            Ok(Err(_)) | Err(_) => break,
+        }
+    }
+    let 溢れた: Vec<_> = 頼み
+        .iter()
+        .filter(|op| {
+            答え.get(op).is_some_and(|(busy, message)| {
+                *busy == Some(false) && message == TOO_MANY_REVIVE_REQUESTS
+            })
+        })
+        .collect();
+    let 束ねた = 頼み
+        .iter()
+        .filter(|op| 答え.get(op).is_some_and(|(busy, _)| *busy == Some(true)))
+        .count();
+    assert!(
+        !溢れた.is_empty(),
+        "★束が満ちた後の頼みの番号へ、PC が終わった断りを返していない: {答え:?}"
+    );
+    assert_eq!(
+        溢れた.len() + 束ねた,
+        頼み.len(),
+        "どの頼みにも、競合か終わった断りのどちらかで答えること: {答え:?}"
+    );
+    session.kill();
+}

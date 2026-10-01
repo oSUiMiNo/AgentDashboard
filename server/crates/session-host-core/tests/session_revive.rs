@@ -530,7 +530,9 @@ fn 印は仕事を切り離す前に立てる() {
         .expect("復旧の腕があること");
     let 腕 = &腕[..腕.find("ServerToAgent::Kill").expect("次の腕があること")];
 
-    let 印 = 腕.find("begin_revive(").expect("印を立てていること");
+    // 印を立てる口は、競合の理由を言い分ける `begin_revive_or_refuse` を通る（実装レビュー
+    // 第10回 Astra 2）。`begin_revive` で始まる名前なら、どちらでも印を立てる
+    let 印 = 腕.find("begin_revive").expect("印を立てていること");
     let 切り離し = 腕.find("tokio::spawn(").expect("仕事を切り離していること");
     assert!(
         印 < 切り離し,
@@ -2970,6 +2972,75 @@ async fn 起こしている最中に番号付きで止めると作った実体�
         matches!(実体.status(), SessionStatus::Ended { .. }),
         "★答えた時点で、作った実体がまだ止まっていない"
     );
+}
+
+#[tokio::test]
+async fn 競合で断った頼みを繰り返しても束ねる番号は上限に収まり同じ番号は重ねない() {
+    // 実装レビュー第10回 Astra 2。競合で断った起こし直しの頼みの番号は、先の札へ全部束ねていた
+    // （頼んだ側が番号を振っていなくても、ここで振った番号まで）。自動の試し直しや押し直しが
+    // 続くと束が際限なく育ち、先の起こし直しが断られたときの断り1件がそれを丸ごと運んだ——
+    // **資源不足を防ぐための仕組み自身がメモリを食い続ける**
+    use session_host_core::session::{REVIVE_OPS_KEPT, ReviveContention};
+    let manager = common::manager_with(実機の設定());
+    暖まったwsl(&manager);
+    let card_id = CardId::new();
+    let (外, _host_free, _古い実体, _起こし直し, _門) =
+        寝かせて確かめ中にする(&manager, card_id).await;
+    let 最初の束 = manager.起こし直しの頼みの番号(card_id).len();
+
+    // 同じ番号を重ねて頼んでも、束には1回だけ
+    let 重ねる = OpId::new();
+    for _ in 0..3 {
+        assert_eq!(
+            manager.begin_revive_or_refuse(card_id, Some(重ねる)).err(),
+            Some(ReviveContention::Busy)
+        );
+    }
+    assert_eq!(
+        manager
+            .起こし直しの頼みの番号(card_id)
+            .iter()
+            .filter(|op| **op == 重ねる)
+            .count(),
+        1,
+        "★同じ番号の頼みを、束へ重ねて足している"
+    );
+
+    // 番号を振らない頼み（画面）は束を育てない。**回数は上限より少なくする**——束が満ちると
+    // 溢れたと答えるので、育てたかどうかを数で見られなくなる
+    for _ in 0..5 {
+        assert_eq!(
+            manager.begin_revive_or_refuse(card_id, None).err(),
+            Some(ReviveContention::Busy)
+        );
+    }
+    assert_eq!(
+        manager.起こし直しの頼みの番号(card_id).len(),
+        最初の束 + 1,
+        "★誰も待っていない番号（ここで振った番号）を束ねている"
+    );
+
+    // 番号の違う頼みを上限を超えて重ねる
+    let mut 溢れた = 0;
+    for _ in 0..100 {
+        match manager.begin_revive_or_refuse(card_id, Some(OpId::new())) {
+            Err(ReviveContention::Busy) => {}
+            Err(ReviveContention::Overflow) => 溢れた += 1,
+            Ok(_) => panic!("先に起こしている札があるのに受け付けている"),
+        }
+    }
+    let 束 = manager.起こし直しの頼みの番号(card_id);
+    assert!(
+        束.len() <= REVIVE_OPS_KEPT,
+        "★束ねた番号が上限（{REVIVE_OPS_KEPT}）を超えている（{} 個）",
+        束.len()
+    );
+    assert_eq!(
+        溢れた,
+        100 - (REVIVE_OPS_KEPT - 最初の束 - 1),
+        "上限を超えた頼みを、溢れたと言い分けていない"
+    );
+    外.開ける();
 }
 
 #[tokio::test]

@@ -3610,6 +3610,57 @@ async fn 別のサーバで外したカードは手元に古い記録があっ�
 }
 
 #[tokio::test]
+async fn 多くの番号を運ぶ断りを控えても本体は1つを分け合う() {
+    // 実装レビュー第10回 Astra 2。断り1件は束ねた頼みの番号を全部運ぶ。控えは番号ごとに答えを
+    // 持つので、本体を番号ごとに写すと束の大きさの2乗で育っていた（番号 200 個なら 40,000 個ぶん）
+    use protocol::ws::OpId;
+    for backend in common::backends("op-answer-shared").await {
+        let registry =
+            SessionRegistry::load(backend.db.clone(), WINDOW, None, NoticeLimits::default())
+                .await
+                .expect("記録層を立てられること");
+        let account = server_core::db::LOCAL_ACCOUNT_ID;
+        let card_id = CardId::new();
+        registry.apply(&local(), upsert(card_id)).await;
+        let ops: Vec<OpId> = (0..200).map(|_| OpId::new()).collect();
+        for op in &ops {
+            registry.accept_op(account, card_id, *op);
+        }
+        registry
+            .apply(
+                &local(),
+                ServerMessage::Error {
+                    card_id: Some(card_id),
+                    message: "起こし直せませんでした".to_string(),
+                    kind: ErrorKind::Revive,
+                    busy: Some(false),
+                    withdrawn: None,
+                    ops: ops.clone(),
+                },
+            )
+            .await;
+        assert_eq!(
+            registry.控えの答えが持つ番号の数(),
+            ops.len(),
+            "[{}] ★答えの本体を番号ごとに写している",
+            backend.name
+        );
+        for op in [ops[0], ops[199]] {
+            assert!(
+                matches!(
+                    registry.op_answer(account, op),
+                    Some(ServerMessage::Error { ops: got, .. }) if got.len() == 200
+                ),
+                "[{}] 分け合った本体から、番号で引けること",
+                backend.name
+            );
+        }
+
+        backend.finish().await;
+    }
+}
+
+#[tokio::test]
 async fn 受け付けた頼みの答えは配る前に控え配信が溢れても外した後でも番号で引き直せる() {
     // 実装レビュー第7回 Astra 4。番号付きの答えは1回しか出ないのに、ふだんの知らせと同じ配信
     // （溢れたら古いものを捨てる）へ流すだけだった。捨てられると後の知らせには番号が無く、

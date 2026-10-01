@@ -127,10 +127,29 @@ impl SessionHost for LocalSessionHost {
         // 競合で断るときも、番号は先に進んでいる札へ束ねてある（実装レビュー第6回 Astra 3）。
         // ローカルの競合はここで同期に返るので、断りの番号を添える先が無い——束ねておけば、
         // 先の起こし直しが断られたときにその断りがこの番号も運ぶ
-        let in_flight = self
+        let in_flight = match self
             .manager
-            .begin_revive(request.card_id, request.op)
-            .ok_or(session::ALREADY_REVIVING)?;
+            .begin_revive_or_refuse(request.card_id, request.op)
+        {
+            Ok(in_flight) => in_flight,
+            Err(session::ReviveContention::Busy) => {
+                return Err(session::ALREADY_REVIVING.to_string());
+            }
+            // **束が満ちていて番号を束ねられなかった**（実装レビュー第10回 Astra 2）。同期の断り
+            // （`Err`）は頼んだ接続にしか届かず記録層を通らないので、起きるのを待つ枝分かれが
+            // 拾えない。終わった断りとして配る（`link.rs` と同じ形）
+            Err(session::ReviveContention::Overflow) => {
+                self.manager.broadcast(ServerMessage::Error {
+                    card_id: Some(request.card_id),
+                    message: session::TOO_MANY_REVIVE_REQUESTS.to_string(),
+                    kind: ErrorKind::Revive,
+                    busy: Some(false),
+                    withdrawn: None,
+                    ops: request.op.into_iter().collect(),
+                });
+                return Ok(());
+            }
+        };
         let answers = in_flight.answers();
 
         let manager = Arc::clone(&self.manager);

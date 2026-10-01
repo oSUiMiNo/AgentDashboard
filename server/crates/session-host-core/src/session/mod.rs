@@ -312,11 +312,36 @@ const REVIVE_MEMORY_SETTLE: Duration = Duration::from_secs(60);
 
 /// 同じカードへ二度目の頼みが来たときの言い分（設計§8-1）。
 ///
-/// **待ち行列に並ばせない**ので、断り方は1つで済む。ここに置いてあるのは、
-/// [`SessionManager::begin_revive`] が `None` を返す唯一の理由だからで、**頼み手ごとに
-/// 書くと言い方が食い違う**——リモート（`crate::link`）とローカル（`agentdashboard_core::local`）で
-/// 別の文が出ると、利用者には別々の不調に見える。
+/// **待ち行列に並ばせない**ので、競合の断り方は1つで済む（[`ReviveContention::Busy`]）。ここに
+/// 置いてあるのは、**頼み手ごとに書くと言い方が食い違う**ため——リモート（`crate::link`）と
+/// ローカル（`agentdashboard_core::local`）で別の文が出ると、利用者には別々の不調に見える。
+/// 束が満ちたときの断りは別の文（[`TOO_MANY_REVIVE_REQUESTS`]）。
 pub const ALREADY_REVIVING: &str = "このカードは復旧中です";
+
+/// 1枚のカードの起こし直しの札に束ねる、頼みの番号の上限（寝ているカードばかりなのに、
+/// メモリ不足でセッションを起こせない 実装レビュー第10回 Astra 2。[`TicketState::ops`]）。
+///
+/// 競合で断った頼みの番号を束ねるのは、先の起こし直しが断られたときにその頼みにも同じ理由で
+/// 答えるため。束が際限なく育つと、資源不足を防ぐための仕組み自身がメモリを食い、断り1件の
+/// 大きさも育つ。答えを待っている頼み（番号を振る CLI・枝分かれ）は1枚のカードへ同時に数本しか
+/// 来ないので、これで足りる。
+pub const REVIVE_OPS_KEPT: usize = 16;
+
+/// 束が上限に達した後に来た頼みへの断り（[`ReviveContention::Overflow`]）。
+pub const TOO_MANY_REVIVE_REQUESTS: &str =
+    "このカードへの起こし直しの頼みが多すぎます（先に進んでいる起こし直しの結果を待ってください）";
+
+/// 起こし直しを受け付けなかった理由（[`SessionManager::begin_revive_or_refuse`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviveContention {
+    /// 先に起こしている札がある。頼みの番号はその札へ束ねた（番号が無ければ束ねない）。
+    /// **待てば起きる**ので、競合と名乗る（[`ALREADY_REVIVING`]・`busy: Some(true)`）
+    Busy,
+    /// 先の札の束が上限（[`REVIVE_OPS_KEPT`]）に達している。この頼みの番号は束ねず、**その番号への
+    /// 終わった断り**を返す（[`TOO_MANY_REVIVE_REQUESTS`]・`busy: Some(false)`）——束ねなければ、
+    /// 先の起こし直しが断られても誰もこの番号に答えない
+    Overflow,
+}
 
 pub fn now_ms() -> Timestamp {
     SystemTime::now()
@@ -2761,6 +2786,9 @@ struct TicketState {
     /// 断られた側（人が先に起こしていたときの枝分かれ）は、先の起こし直しが断られれば同じく
     /// 起きてこないので、その理由ですぐ終わってよい。札が表から外れた後は誰も束ねない
     /// （[`ReviveAnswers`]）
+    ///
+    /// 束ねるのは頼んだ側が振った番号だけで、同じ番号は1回だけ、数は [`REVIVE_OPS_KEPT`] まで
+    /// （実装レビュー第10回 Astra 2。[`SessionManager::begin_revive_or_refuse`]）
     ops: Vec<OpId>,
     /// 起こしている最中（[`ReviveStage::Spawning`]）に届いた終了の頼みの番号（実装レビュー
     /// 第6回 Astra 1）。作り終えた起こす側が引き取り、作った実体を止めてから答える
@@ -4212,11 +4240,34 @@ impl SessionManager {
     /// `op` は頼んだ側の番号で、欠けていればここで振る（受け付けた時点で決まる）。競合で断る
     /// ときは、**先に進んでいる札へ番号を束ねてから** `None` を返す——先の起こし直しが断られたら、
     /// その断りがこの番号も運ぶ（[`TicketState::ops`]）。
+    ///
+    /// 競合を「束ねた」と「束が満ちていた」で分けて知りたい頼み手は
+    /// [`SessionManager::begin_revive_or_refuse`] を使う。
     pub fn begin_revive(
         self: &Arc<Self>,
         card_id: CardId,
         op: Option<OpId>,
     ) -> Option<ReviveInFlight> {
+        self.begin_revive_or_refuse(card_id, op).ok()
+    }
+
+    /// [`SessionManager::begin_revive`] と同じ。競合で断るとき、理由を返す（実装レビュー第10回
+    /// Astra 2）。
+    ///
+    /// # 束に上限を設け、重ねて束ねない
+    ///
+    /// 以前は競合で断った頼みの番号を全部束ね、**頼んだ側が番号を振っていなくても**ここで振った
+    /// 番号を束ねていた（画面は番号を振らない）。自動の試し直しや押し直しが続くと束が際限なく
+    /// 育ち、先の起こし直しが断られたときの断り1件がその束を丸ごと運んだ。いまは：
+    ///
+    /// - 束ねるのは**頼んだ側が振った番号だけ**（ここで振った番号は誰も待っていない）
+    /// - 同じ番号は1回だけ
+    /// - 上限（[`REVIVE_OPS_KEPT`]）に達したら束ねず [`ReviveContention::Overflow`]
+    pub fn begin_revive_or_refuse(
+        self: &Arc<Self>,
+        card_id: CardId,
+        op: Option<OpId>,
+    ) -> Result<ReviveInFlight, ReviveContention> {
         let given = op;
         let op = op.unwrap_or_else(OpId::new);
         let mut reviving = self.reviving.lock().expect("ロックが壊れていない");
@@ -4227,7 +4278,7 @@ impl SessionManager {
                 state.withdrawn = Some(WithdrawReason::Remove);
                 state.ops.push(op);
             }
-            return Some(ReviveInFlight {
+            return Ok(ReviveInFlight {
                 manager: Arc::clone(self),
                 card_id,
                 ticket: Arc::new(ticket),
@@ -4239,14 +4290,18 @@ impl SessionManager {
             std::collections::hash_map::Entry::Occupied(ahead) => {
                 // **表のロックの中で束ねる。** 札が表に居る間しか束ねないので、外れた後
                 // （断りの番号を読み始めた後）に束ねて落とすことはない
-                ahead
-                    .get()
-                    .state
-                    .lock()
-                    .expect("ロックが壊れていない")
-                    .ops
-                    .push(op);
-                return None;
+                let Some(given) = given else {
+                    return Err(ReviveContention::Busy);
+                };
+                let mut state = ahead.get().state.lock().expect("ロックが壊れていない");
+                if state.ops.contains(&given) {
+                    return Err(ReviveContention::Busy);
+                }
+                if state.ops.len() >= REVIVE_OPS_KEPT {
+                    return Err(ReviveContention::Overflow);
+                }
+                state.ops.push(given);
+                return Err(ReviveContention::Busy);
             }
         };
         let ticket = ReviveTicket::default();
@@ -4257,7 +4312,7 @@ impl SessionManager {
             .ops
             .push(op);
         let ticket = Arc::clone(slot.insert(Arc::new(ticket)));
-        Some(ReviveInFlight {
+        Ok(ReviveInFlight {
             manager: Arc::clone(self),
             card_id,
             ticket,
