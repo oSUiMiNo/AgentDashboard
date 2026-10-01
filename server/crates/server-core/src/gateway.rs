@@ -2472,7 +2472,11 @@ async fn handle_report(
             card_id,
             message,
             kind,
+            busy,
         } => {
+            // **`busy` を落とさない**（寝ているカードばかりなのに、メモリ不足で
+            // セッションを起こせない 設計§7-3）。落とすとセルフホストでだけ、競合と
+            // 終わった断りの見分けが付かなくなる
             hub.registry
                 .apply(
                     origin,
@@ -2480,6 +2484,7 @@ async fn handle_report(
                         card_id,
                         message,
                         kind,
+                        busy,
                     },
                 )
                 .await;

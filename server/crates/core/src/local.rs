@@ -147,6 +147,9 @@ impl SessionHost for LocalSessionHost {
                     card_id: Some(request.card_id),
                     message: err.to_string(),
                     kind: ErrorKind::Revive,
+                    // **終わった断り**（設計§7-3）。起きるのを待っている枝分かれは、
+                    // これを見て 180 秒待たずに失敗する
+                    busy: Some(false),
                 });
             }
         });

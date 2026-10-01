@@ -1003,6 +1003,7 @@ async fn 知らせは_7_種類とも跨ぐ() {
                 card_id: Some(card_id),
                 message: "しくじりました".to_string(),
                 kind: ErrorKind::Other,
+                busy: None,
             },
         )
         .await;

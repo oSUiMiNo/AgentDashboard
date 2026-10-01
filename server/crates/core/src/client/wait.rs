@@ -570,6 +570,7 @@ mod tests {
                 card_id: Some(card),
                 message: "駄目でした".to_string(),
                 kind: ErrorKind::Other,
+                busy: None,
             }),
             Step::Fail(_)
         ));
@@ -583,6 +584,7 @@ mod tests {
                 card_id: None,
                 message: "起こせませんでした".to_string(),
                 kind: ErrorKind::Other,
+                busy: None,
             }),
             Step::Fail(_)
         ));
@@ -604,6 +606,7 @@ mod tests {
             card_id: Some(押した席),
             message: "まだ枝分かれできません".to_string(),
             kind: ErrorKind::Branch,
+            busy: None,
         });
         match step {
             Step::Fail(理由) => assert!(
@@ -629,6 +632,7 @@ mod tests {
                     card_id: Some(無関係),
                     message: "別件".to_string(),
                     kind: ErrorKind::Other,
+                    busy: None,
                 }),
                 Step::Note(_)
             ),
@@ -648,6 +652,7 @@ mod tests {
             card_id: Some(other),
             message: "よそで何か".to_string(),
             kind: ErrorKind::Other,
+            busy: None,
         }) {
             // 黙って失敗させないための Note（CLI設計§7-3）。待ちそのものは続く
             Step::Note(text) => assert!(text.contains("よそで何か"), "本文が残ること: {text}"),
@@ -728,6 +733,7 @@ mod tests {
                 card_id: Some(card),
                 message: "このセッションは動いています（復旧は要りません）".to_string(),
                 kind: ErrorKind::Other,
+                busy: None,
             }),
             Step::Fail(_)
         ));

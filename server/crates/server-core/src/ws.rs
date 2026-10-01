@@ -456,6 +456,7 @@ async fn client_loop(state: AppState, identity: Identity, socket: WebSocket) {
                             card_id: None,
                             message: format!("解釈できないメッセージです: {text}"),
                             kind: ErrorKind::Other,
+                            busy: None,
                         },
                     )
                     .await;
@@ -556,6 +557,7 @@ async fn handle_request(
                         card_id: None,
                         message,
                         kind: ErrorKind::Other,
+                        busy: None,
                     },
                 )
                 .await;
@@ -1246,6 +1248,8 @@ async fn send_error(
             card_id,
             message,
             kind,
+            // 同期で返す断りは性質を名乗らない（枝分かれが読むのは配信のほうだけ）
+            busy: None,
         },
     )
     .await;

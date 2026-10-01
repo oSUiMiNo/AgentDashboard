@@ -1957,6 +1957,7 @@ impl SessionRegistry {
                 card_id: None,
                 ref message,
                 kind,
+                busy,
             } => {
                 self.record_notice(origin, None, "error", kind.as_str(), message)
                     .await;
@@ -1966,6 +1967,7 @@ impl SessionRegistry {
                         card_id: None,
                         message: message.clone(),
                         kind,
+                        busy,
                     },
                 );
                 Ok(())
@@ -2003,6 +2005,7 @@ impl SessionRegistry {
                         card_id: None,
                         message: format!("記録を保存できませんでした: {err}"),
                         kind: ErrorKind::Other,
+                        busy: None,
                     },
                 );
                 false

@@ -529,6 +529,18 @@ pub enum ServerMessage {
         /// **版（`PROTOCOL_VERSION`）は上げない**ので、欠けた名乗りが来る道が残る。
         #[serde(default)]
         kind: ErrorKind,
+        /// その知らせの性質（寝ているカードばかりなのに、メモリ不足でセッションを
+        /// 起こせない 設計§7-3）。
+        ///
+        /// - `Some(true)`＝既に同じ操作が進んでいる（競合。待ってよい）
+        /// - `Some(false)`＝その操作は終わった断り（待っても起きない）
+        /// - `None`＝判別できない（古い相手・起こし直し以外）。待つ側はいまどおり待つ
+        ///
+        /// **欠けを `false` と読まない。** 古い PC の競合を失敗と誤読する。
+        /// [`ErrorKind`] の腕を足さないのは、閉じた列挙なので古いサーバが新しい PC の
+        /// 知らせを読めなくなるため。欄なら古い側は黙って読み飛ばす
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        busy: Option<bool>,
     },
     /// PJT 枠1枚の最新（イシューグループ_2026_0805_0514 設計§11）。
     ///
@@ -875,9 +887,56 @@ mod tests {
             card_id: None,
             message: "起こせません".to_string(),
             kind: ErrorKind::Revive,
+            busy: None,
         })
         .unwrap();
         assert!(json.contains(r#""kind":"revive""#), "{json}");
+    }
+
+    #[test]
+    fn 断りの性質は3値とも運ばれ_欠けは判別できないと読む() {
+        /*
+            設計§7-3。**欠けを `false` と読むと、古い PC の競合を失敗と誤読する**ので、
+            欄の無い名乗りは `None` に落ちなければならない。`None` は書き出さない——
+            書くと、欄を知らない相手（画面の突き合わせ）の文字列が1文字ずれる
+        */
+        let 古い名乗り = r#"{"t":"error","card_id":null,"message":"復旧中です","kind":"revive"}"#;
+        let ServerMessage::Error { busy, .. } = serde_json::from_str(古い名乗り).unwrap()
+        else {
+            panic!("error として読めていない");
+        };
+        assert_eq!(busy, None, "欄の無い名乗りを判別できたことにしている");
+
+        // 画面側（`web/src/lib/protocol.test.ts` の同じ綴りの検査）と1文字も違わないこと
+        assert_eq!(
+            serde_json::to_string(&ServerMessage::Error {
+                card_id: None,
+                message: "復旧中です".to_string(),
+                kind: ErrorKind::Revive,
+                busy: Some(true),
+            })
+            .unwrap(),
+            r#"{"t":"error","card_id":null,"message":"復旧中です","kind":"revive","busy":true}"#
+        );
+
+        for (busy, 綴り) in [
+            (Some(true), Some(r#""busy":true"#)),
+            (Some(false), Some(r#""busy":false"#)),
+            (None, None),
+        ] {
+            let message = ServerMessage::Error {
+                card_id: Some(CardId::new()),
+                message: "起こせません".to_string(),
+                kind: ErrorKind::Revive,
+                busy,
+            };
+            let json = serde_json::to_string(&message).unwrap();
+            match 綴り {
+                Some(綴り) => assert!(json.contains(綴り), "{json}"),
+                None => assert!(!json.contains("busy"), "None を書き出している：{json}"),
+            }
+            assert_eq!(roundtrip(&message), message);
+        }
     }
 
     #[test]
@@ -945,11 +1004,27 @@ mod tests {
                 card_id: Some(card_id),
                 message: "作業ディレクトリが存在しません".to_string(),
                 kind: ErrorKind::NotFound,
+
+                busy: None,
             },
             ServerMessage::Error {
                 card_id: None,
                 message: "claude を起動できませんでした".to_string(),
                 kind: ErrorKind::Other,
+
+                busy: None,
+            },
+            ServerMessage::Error {
+                card_id: Some(card_id),
+                message: "このカードは復旧中です".to_string(),
+                kind: ErrorKind::Revive,
+                busy: Some(true),
+            },
+            ServerMessage::Error {
+                card_id: Some(card_id),
+                message: "メモリが足りないので起こし直せません".to_string(),
+                kind: ErrorKind::Revive,
+                busy: Some(false),
             },
             ServerMessage::ProjectUpsert {
                 project: ProjectView {

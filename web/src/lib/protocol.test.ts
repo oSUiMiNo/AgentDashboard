@@ -234,6 +234,33 @@ describe('サーバと同じ JSON になること', () => {
     }
   })
 
+  it('断りの性質が Rust と同じ綴りで往復する', () => {
+    // Rust 側は `ws.rs` の `断りの性質は3値とも運ばれ_欠けは判別できないと読む`。
+    // 欠けは「判別できない」で、`false`（終わった断り）と読んではいけない
+    const raw =
+      '{"t":"error","card_id":null,"message":"復旧中です","kind":"revive","busy":true}'
+    const message = JSON.parse(raw) as ServerMessage
+    expect(message.t).toBe('error')
+    if (message.t === 'error') {
+      expect(message.busy).toBe(true)
+    }
+    const sent: ServerMessage = {
+      t: 'error',
+      card_id: null,
+      message: '復旧中です',
+      kind: 'revive',
+      busy: true,
+    }
+    expect(JSON.stringify(sent)).toBe(raw)
+
+    const old = JSON.parse(
+      '{"t":"error","card_id":null,"message":"復旧中です","kind":"revive"}',
+    ) as ServerMessage
+    if (old.t === 'error') {
+      expect(old.busy).toBeUndefined()
+    }
+  })
+
   it('hello を解釈できる', () => {
     const raw = '{"t":"hello","flow_high":262144,"flow_low":32768}'
     const message = JSON.parse(raw) as ServerMessage

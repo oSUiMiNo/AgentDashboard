@@ -615,7 +615,19 @@ export type ServerMessage =
   | { t: 'hello'; flow_high: number; flow_low: number }
   | { t: 'session_upsert'; session: SessionMeta }
   | { t: 'session_removed'; card_id: CardId }
-  | { t: 'error'; card_id: CardId | null; message: string; kind?: ErrorKind }
+  /**
+   * `busy` はその知らせの性質（寝ているカードばかりなのに、メモリ不足でセッションを
+   * 起こせない 設計§7-3）。`true`＝競合（待てば起きる）、`false`＝終わった断り、
+   * 欠け＝判別できない（古い PC・起こし直し以外）。**サーバは欠けを書き出さない。**
+   * 画面はいまこの欄を使わない（読むのはサーバの枝分かれ）
+   */
+  | {
+      t: 'error'
+      card_id: CardId | null
+      message: string
+      kind?: ErrorKind
+      busy?: boolean
+    }
   // 以下は初期実装でフェーズ2〜5に回したもの。**いまは全部サーバ側も配線済み**
   | {
       t: 'status'

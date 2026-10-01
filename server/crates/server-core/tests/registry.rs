@@ -1993,6 +1993,7 @@ async fn 名指し先の無いエラーは記録に残る() {
                     card_id: None,
                     message: "起こせませんでした".to_string(),
                     kind: ErrorKind::Revive,
+                    busy: None,
                 },
             )
             .await;
@@ -2090,6 +2091,7 @@ async fn カードを名指しするエラーは記録に残らない() {
                     card_id: Some(CardId::new()),
                     message: "このカードだけの断り".to_string(),
                     kind: ErrorKind::SendInput,
+                    busy: None,
                 },
             )
             .await;

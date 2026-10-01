@@ -444,6 +444,12 @@ pub enum AgentMessage {
         /// [`ErrorKind::Other`] として受かる。**版は上げない。**
         #[serde(default)]
         kind: ErrorKind,
+        /// 競合か・終わった断りか（`ServerMessage::Error` の同名の欄を参照）。
+        ///
+        /// **ここを運ばないと、セルフホストでだけ枝分かれが断りを拾えない**——PC 側で
+        /// 起きた断りはこの型でサーバへ渡る
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        busy: Option<bool>,
     },
     /// モデルの表（§13-4）。接続直後と、変化した時だけ送る。定期送信はしない。
     ///
@@ -937,6 +943,22 @@ mod tests {
                 card_id: Some(card_id),
                 message: "切替中です".to_string(),
                 kind: ErrorKind::Model,
+                busy: None,
+            },
+            // 起こし直しの競合と終わった断り（寝ているカードばかりなのに、メモリ不足で
+            // セッションを起こせない 設計§7-3）。**3値とも運べないと、セルフホストでだけ
+            // 枝分かれが断りを拾えない**
+            AgentMessage::Error {
+                card_id: Some(card_id),
+                message: "このカードは復旧中です".to_string(),
+                kind: ErrorKind::Revive,
+                busy: Some(true),
+            },
+            AgentMessage::Error {
+                card_id: Some(card_id),
+                message: "メモリが足りないので起こし直せません".to_string(),
+                kind: ErrorKind::Revive,
+                busy: Some(false),
             },
             AgentMessage::ModelTable {
                 cli_version: "2.1.220".to_string(),
@@ -1176,6 +1198,27 @@ mod tests {
         let id = RequestId::new();
         assert_eq!(roundtrip(&id), id);
         assert_eq!(serde_json::to_string(&id).unwrap(), format!("\"{}\"", id.0));
+    }
+
+    #[test]
+    fn 断りの性質を持たない古い_pc_の知らせは判別できないと読む() {
+        // 設計§7-3。**欠けを `false` と読むと、古い PC の競合を「終わった断り」と誤読し、
+        // 待てば起きる枝分かれを失敗させる**。`None` は書き出さない（古いサーバへ余計な
+        // 欄を送らない）
+        let 古い =
+            r#"{"t":"error","card_id":null,"message":"このカードは復旧中です","kind":"revive"}"#;
+        let AgentMessage::Error { busy, .. } = serde_json::from_str(古い).unwrap() else {
+            panic!("error として読めていない");
+        };
+        assert_eq!(busy, None);
+        let json = serde_json::to_string(&AgentMessage::Error {
+            card_id: None,
+            message: "x".to_string(),
+            kind: ErrorKind::Revive,
+            busy: None,
+        })
+        .unwrap();
+        assert!(!json.contains("busy"), "{json}");
     }
 
     #[test]

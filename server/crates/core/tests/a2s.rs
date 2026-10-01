@@ -3131,3 +3131,103 @@ async fn 書き足す(
         .await;
     外す(a2s, meta.card_id).await;
 }
+
+// ---------------------------------------------------------------------------
+// 起こし直しの知らせの性質（寝ているカードばかりなのに、メモリ不足でセッションを
+// 起こせない 設計§7-3・§8-4）
+// ---------------------------------------------------------------------------
+
+/// そのカード宛ての起こし直しの知らせが配信に現れるまで待ち、`busy` を返す。
+async fn 起こし直しの知らせを待つ(
+    events: &mut tokio::sync::broadcast::Receiver<server_core::registry::AccountEvent>,
+    card_id: CardId,
+) -> Option<bool> {
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let event = tokio::time::timeout(remaining, events.recv())
+            .await
+            .unwrap_or_else(|_| panic!("{TIMEOUT:?} 以内に起こし直しの知らせが届きませんでした"))
+            .expect("配信が閉じていないこと");
+        if let protocol::ws::ServerMessage::Error {
+            card_id: Some(id),
+            kind: protocol::ws::ErrorKind::Revive,
+            busy,
+            ..
+        } = event.message
+            && id == card_id
+        {
+            return busy;
+        }
+    }
+}
+
+/// 空きが足りない機械（PC 側の起こし直しを本物の断りで終わらせるため）。
+#[derive(Debug)]
+struct 足りないメモリ;
+
+impl session_host_core::resources::Probe for 足りないメモリ {
+    fn read(&self) -> Option<session_host_core::resources::Memory> {
+        Some(session_host_core::resources::Memory {
+            total_mb: 16_000,
+            available_mb: 1_000,
+            swap_free_mb: 0,
+            free_mb: 1_000,
+        })
+    }
+}
+
+#[tokio::test]
+async fn PC_側の起こし直しの競合は競合のままサーバの配信まで届く() {
+    // 設計§8-4・§12-7。**PC → サーバの間は別の型（`AgentMessage::Error`）が運ぶ。**
+    // どこかで `busy` を落とすと、セルフホストでだけ競合が「判別できない」に化け、
+    // 断りの側は拾えなくなる。`wait_for` へ直に差し込むテストでは、この継ぎ目を通らない
+    let a2s = A2s::start("revive-busy").await;
+    let (session, card_id) = 抜け殻にする(&a2s).await;
+    let mut events = a2s.registry.subscribe_events();
+
+    // PC 側で先に起こし直しが進んでいる、という状態を作る（席を握ったまま放さない）
+    let 先に起こしている = a2s.manager.begin_revive(card_id).expect("席を取れること");
+    a2s.browser
+        .revive(server_core::session_host::ReviveRequest {
+            account_id: a2s.account_id,
+            card_id,
+        })
+        .await
+        .expect("頼みは PC まで渡ること");
+
+    assert_eq!(
+        起こし直しの知らせを待つ(&mut events, card_id).await,
+        Some(true),
+        "★PC 側の競合が競合のまま届いていない（枝分かれを失敗させる恐れ）"
+    );
+
+    drop(先に起こしている);
+    session.kill();
+}
+
+#[tokio::test]
+async fn PC_側の起こし直しの断りは終わった断りとしてサーバの配信まで届く() {
+    // 設計§7-3。競合の裏側。**終わった断りが `None` に化けると、セルフホストの枝分かれは
+    // 180 秒待ってから事実と違う理由で終わる**
+    let a2s = A2s::start("revive-refused").await;
+    let (session, card_id) = 抜け殻にする(&a2s).await;
+    a2s.manager.set_memory_probe(Arc::new(足りないメモリ));
+    let mut events = a2s.registry.subscribe_events();
+
+    a2s.browser
+        .revive(server_core::session_host::ReviveRequest {
+            account_id: a2s.account_id,
+            card_id,
+        })
+        .await
+        .expect("頼みは PC まで渡ること");
+
+    assert_eq!(
+        起こし直しの知らせを待つ(&mut events, card_id).await,
+        Some(false),
+        "★PC 側の断りが終わった断りとして届いていない"
+    );
+
+    session.kill();
+}
