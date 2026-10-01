@@ -767,3 +767,322 @@ async fn 起きていた元は枝を作っても寝かされない() {
         "起きていた元を勝手に寝かせている"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 寝ている元の起こし直しが断られたとき（寝ているカードばかりなのに、メモリ不足で
+// セッションを起こせない 設計§7・§8-4）
+// ---------------------------------------------------------------------------
+
+/// 空きが足りない機械（起こし直しの床を切らせて、本物の断りを出させるため）。
+#[derive(Debug)]
+struct 足りないメモリ;
+
+impl session_host_core::resources::Probe for 足りないメモリ {
+    fn read(&self) -> Option<session_host_core::resources::Memory> {
+        Some(session_host_core::resources::Memory {
+            total_mb: 16_000,
+            available_mb: 1_000,
+            swap_free_mb: 0,
+            free_mb: 1_000,
+        })
+    }
+}
+
+/// Windows 側を見ない設定で立てる。
+///
+/// **docker の中でもカーネル名から WSL と判定されうる。** そのとき `powershell.exe` が
+/// 無いので、メモリ不足ではなく「確かめられなかった」の断りに化け、文面の検査がぶれる
+fn 外側を見ない設定() -> agentdashboard_core::config::Config {
+    agentdashboard_core::config::Config {
+        revive_host_free_ttl_sec: 0,
+        ..agentdashboard_core::config::Config::default()
+    }
+}
+
+/// そのカード宛ての、指定した種別の断りが届くまで待つ。上限を過ぎたら `None`。
+async fn 断りを待つ(
+    events: &mut tokio::sync::broadcast::Receiver<server_core::registry::AccountEvent>,
+    card_id: CardId,
+    kind: protocol::ws::ErrorKind,
+    限度: Duration,
+) -> Option<String> {
+    let 期限 = tokio::time::Instant::now() + 限度;
+    loop {
+        let 残り = 期限.saturating_duration_since(tokio::time::Instant::now());
+        let 受け取った = tokio::time::timeout(残り, events.recv()).await.ok()?;
+        let Ok(event) = 受け取った else {
+            continue;
+        };
+        if let protocol::ws::ServerMessage::Error {
+            card_id: Some(id),
+            message,
+            kind: 来た種別,
+            ..
+        } = event.message
+            && id == card_id
+            && 来た種別 == kind
+        {
+            return Some(message);
+        }
+    }
+}
+
+#[tokio::test]
+async fn 寝ている元の起こし直しが断られたら待たずにその理由で枝分かれを断る() {
+    // §7-1。**断りを拾えないと、180 秒待ってから「起きてきませんでした」と事実と違う
+    // 理由で終わる。** ここでは本物の起こし直しの断り（メモリ不足）を出させる
+    let server = TestServer::start_with(外側を見ない設定()).await;
+    let target = target_of(&server);
+    let (card, _) = 入力待ちのカード(&server, &target, &work_dir("refused-wake")).await;
+    client::kill(&target, &card[..8])
+        .await
+        .expect("寝かせられること");
+    寝るまで待つ(&server, &card).await;
+    let card_id = 載っているカードID(&server, &card);
+
+    server
+        .manager
+        .set_memory_probe(std::sync::Arc::new(足りないメモリ));
+    let mut events = server.registry.subscribe_events();
+    枝分かれを頼む(&target, card_id).await;
+
+    // (a) 起こし直しの断りが実際に配られている（ここが無いと、時間切れで落ちても
+    //     狙った壊れ方の再現にならない）
+    let 起こし直しの断り = 断りを待つ(
+        &mut events,
+        card_id,
+        protocol::ws::ErrorKind::Revive,
+        Duration::from_secs(20),
+    )
+    .await
+    .expect("起こし直しの断りが配られること");
+    assert!(
+        起こし直しの断り.contains("メモリが足りない"),
+        "{起こし直しの断り}"
+    );
+
+    // (b) 枝分かれは上限（180 秒）を待たずに、その理由で断る
+    let 枝分かれの断り = 断りを待つ(
+        &mut events,
+        card_id,
+        protocol::ws::ErrorKind::Branch,
+        Duration::from_secs(30),
+    )
+    .await
+    .expect("★起こし直しが断られたのに、枝分かれが断りを拾わずに待ち続けている");
+    assert!(
+        枝分かれの断り.contains("メモリが足りない"),
+        "起こし直しの文面が添えられていない：{枝分かれの断り}"
+    );
+    assert!(
+        !枝分かれの断り.contains("起きてきませんでした"),
+        "事実と違う理由で断っている：{枝分かれの断り}"
+    );
+    assert!(
+        matches!(引く(&server, &card).status, SessionStatus::Ended { .. }),
+        "断られたのに寝ていない"
+    );
+}
+
+/// 起こし直しの知らせを、PC 側から配られたのと同じ口で差し込む。
+fn 起こし直しの知らせを配る(server: &TestServer, card_id: CardId, busy: Option<bool>) {
+    server
+        .manager
+        .broadcast(protocol::ws::ServerMessage::Error {
+            card_id: Some(card_id),
+            message: "差し込んだ起こし直しの知らせ".to_string(),
+            kind: protocol::ws::ErrorKind::Revive,
+            busy,
+        });
+}
+
+/// 枝分かれの断りを見張る。段取りが済んだ後に [`見張りを閉じる`] で中身を引く。
+fn 枝分かれの断りを見張る(
+    server: &TestServer,
+    card_id: CardId,
+) -> tokio::task::JoinHandle<Option<String>> {
+    let mut events = server.registry.subscribe_events();
+    tokio::spawn(async move {
+        断りを待つ(
+            &mut events,
+            card_id,
+            protocol::ws::ErrorKind::Branch,
+            Duration::from_secs(120),
+        )
+        .await
+    })
+}
+
+/// 見張りを閉じ、その間に枝分かれの断りが来ていたら返す。
+async fn 見張りを閉じる(
+    見張り: tokio::task::JoinHandle<Option<String>>
+) -> Option<String> {
+    if 見張り.is_finished() {
+        return 見張り.await.expect("見張りが落ちていないこと");
+    }
+    見張り.abort();
+    None
+}
+
+/// 寝かせた元から枝分かれを頼み、起きてくる途中（起きる待ちの段）で知らせを
+/// 差し込む。差し込んだ後に入力待ちへ倒し、**段取りが最後まで進んだか**を返す。
+///
+/// `他のカード宛て` が真なら、元ではない（記録に居ない）カード宛ての知らせにする。
+async fn 起きる待ちの段で差し込む(
+    label: &str,
+    busy: Option<bool>,
+    他のカード宛て: bool,
+) -> (bool, Option<String>) {
+    let server = TestServer::start().await;
+    let target = target_of(&server);
+    let (card, _) = 入力待ちのカード(&server, &target, &work_dir(label)).await;
+    client::kill(&target, &card[..8])
+        .await
+        .expect("寝かせられること");
+    寝るまで待つ(&server, &card).await;
+    let card_id = 載っているカードID(&server, &card);
+
+    let 見張り = 枝分かれの断りを見張る(&server, card_id);
+    枝分かれを頼む(&target, card_id).await;
+
+    // **起きてきた後・入力待ちに倒す前**＝段取りは起きる待ちの段に居る
+    let 目当て = card.clone();
+    server
+        .wait_for_listed("寝ていた席が起きてくる", move |list| {
+            list.iter().any(|meta| {
+                meta.card_id.to_string() == 目当て
+                    && !matches!(meta.status, SessionStatus::Ended { .. })
+            })
+        })
+        .await;
+    let 宛先 = if 他のカード宛て {
+        CardId::new()
+    } else {
+        card_id
+    };
+    起こし直しの知らせを配る(&server, 宛先, busy);
+    // 段取りが知らせを読むだけの間を置く（失敗するなら、ここで既に失敗している）
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    client::send_input(
+        &target,
+        &card[..8],
+        r#"hook Stop {"last_assistant_message":"はい"}"#,
+        false,
+        5,
+    )
+    .await
+    .expect("起きた席へ指示を送れること");
+
+    let 済んだ = 二枚になるまで待つ(&server).await;
+    (済んだ, 見張りを閉じる(見張り).await)
+}
+
+#[tokio::test]
+async fn 起きる待ちで元の終わった断りを受けたら枝分かれを断る() {
+    // 下の「断らない」3本の対照（設計§8-4）。**差し込みが段取りまで届いていることの
+    // 確かめ**であり、これが通らないと「断らない」側は何も確かめずに緑になる
+    let (済んだ, 断り) = 起きる待ちの段で差し込む("inject-refused", Some(false), false).await;
+    let 断り = 断り.expect("★元宛ての終わった断りを拾っていない");
+    assert!(断り.contains("差し込んだ起こし直しの知らせ"), "{断り}");
+    assert!(!済んだ, "断ったのに段取りが先へ進んでいる");
+}
+
+#[tokio::test]
+async fn 起きる待ちで競合の知らせを受けても待ち続けて枝を作る() {
+    // 設計§7-2。**人が先に起こしていたら、待てば起きる**——失敗させてはいけない
+    let (済んだ, 断り) = 起きる待ちの段で差し込む("inject-busy", Some(true), false).await;
+    assert_eq!(断り, None, "★競合で枝分かれを断っている");
+    assert!(済んだ, "競合の後に起きてきたのに枝を作っていない");
+}
+
+#[tokio::test]
+async fn 起きる待ちで判別できない知らせを受けても待ち続けて枝を作る() {
+    // 設計§7-3。**古い PC は `busy` を名乗らない。** 欠けを断りと読むと、古い PC の
+    // 競合で枝分かれを止める
+    let (済んだ, 断り) = 起きる待ちの段で差し込む("inject-unknown", None, false).await;
+    assert_eq!(断り, None, "★判別できない知らせで枝分かれを断っている");
+    assert!(済んだ, "起きてきたのに枝を作っていない");
+}
+
+#[tokio::test]
+async fn 起きる待ちで他のカードの断りを受けても待ち続けて枝を作る() {
+    let (済んだ, 断り) = 起きる待ちの段で差し込む("inject-other", Some(false), true).await;
+    assert_eq!(断り, None, "★他のカードの断りで枝分かれを断っている");
+    assert!(済んだ, "起きてきたのに枝を作っていない");
+}
+
+#[tokio::test]
+async fn ターンの終わりを待つ段では元の起こし直しの断りを拾わない() {
+    // 設計§7-3。**断りを拾うのは起きる待ちの段だけ。** ここで拾うと、無関係な
+    // 起こし直しの断り（別の頼みの残り）で段取りを止める
+    let server = TestServer::start().await;
+    let target = target_of(&server);
+    let (card, 元の会話) = 入力待ちのカード(&server, &target, &work_dir("inject-turn")).await;
+    client::send_input(&target, &card[..8], "hook UserPromptSubmit", false, 5)
+        .await
+        .expect("指示を送れること");
+    let 目当て = card.clone();
+    server
+        .wait_for_listed("作業中になる", move |list| {
+            list.iter().any(|meta| {
+                meta.card_id.to_string() == 目当て && meta.status == SessionStatus::Working
+            })
+        })
+        .await;
+    let card_id = 引く(&server, &card).card_id;
+
+    let 見張り = 枝分かれの断りを見張る(&server, card_id);
+    枝分かれを頼む(&target, card_id).await;
+    // 段取りがターンの終わりを待つ段へ入るまで置く（`作業中に押すと…` と同じ間）
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    起こし直しの知らせを配る(&server, card_id, Some(false));
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    client::send_input(
+        &target,
+        &card[..8],
+        r#"hook Stop {"last_assistant_message":"終わりました"}"#,
+        false,
+        5,
+    )
+    .await
+    .expect("指示を送れること");
+    // **断りの有無を先に見る。** 2枚になるのを先に待つと、拾ってしまったときに
+    // 「2枚にならない」で落ち、何が起きたのかが読めない
+    let 済んだ = 二枚になるまで待つ(&server).await;
+    assert_eq!(
+        見張りを閉じる(見張り).await,
+        None,
+        "★ターン待ちの段で起こし直しの断りを拾っている"
+    );
+    assert!(済んだ, "ターンが終わっても枝を作っていない");
+    assert!(
+        server
+            .registry
+            .list(server_core::db::LOCAL_ACCOUNT_ID)
+            .iter()
+            .any(|meta| meta.claude_session_id == Some(元の会話)),
+        "元の会話が席を持って戻っていない"
+    );
+}
+
+/// カードが2枚になるまで待つ（枝分かれが済んだ印）。断られていれば2枚にならないので、
+/// 短めに見切って偽を返す。
+async fn 二枚になるまで待つ(server: &TestServer) -> bool {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if server
+                .registry
+                .list(server_core::db::LOCAL_ACCOUNT_ID)
+                .len()
+                == 2
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .is_ok()
+}

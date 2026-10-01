@@ -1588,6 +1588,35 @@ breaks_when = "ws.ts の noteRefusal から 断られた への登録を外す�
 verified    = true
 
 [[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "セルフホストで、PC 側で起きた起こし直しの競合は busy が真のまま、終わった断りは偽のままサーバの配信まで届き、枝分かれは競合で失敗しない"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/a2s.rs", name = "PC_側の起こし直しの競合は競合のままサーバの配信まで届く" },
+  { file = "server/crates/core/tests/a2s.rs", name = "PC_側の起こし直しの断りは終わった断りとしてサーバの配信まで届く" },
+  { file = "server/crates/protocol/src/a2s.rs", name = "断りの性質を持たない古い_pc_の知らせは判別できないと読む" },
+  { file = "server/crates/protocol/src/ws.rs", name = "断りの性質は3値とも運ばれ_欠けは判別できないと読む" },
+]
+breaks_when = "gateway.rs の AgentMessage::Error から ServerMessage::Error へ移すところで busy を None に落とす（a2s の2本が狙った検査で落ちることを実測した）"
+verified    = true
+
+[[entry]]
+issue       = "寝ているカードばかりなのに、メモリ不足でセッションを起こせない"
+behavior    = "寝ている元から枝分かれするとき、元の起こし直しが断られたら 180 秒待たずにその理由で失敗し、競合や判別できない知らせ・他カード宛て・ターンの終わりを待つ段では失敗せずに待ち続ける"
+gate        = "unit"
+tests       = [
+  { file = "server/crates/core/tests/branch.rs", name = "寝ている元の起こし直しが断られたら待たずにその理由で枝分かれを断る" },
+  { file = "server/crates/core/tests/branch.rs", name = "起きる待ちで元の終わった断りを受けたら枝分かれを断る" },
+  { file = "server/crates/core/tests/branch.rs", name = "起きる待ちで競合の知らせを受けても待ち続けて枝を作る" },
+  { file = "server/crates/core/tests/branch.rs", name = "起きる待ちで判別できない知らせを受けても待ち続けて枝を作る" },
+  { file = "server/crates/core/tests/branch.rs", name = "起きる待ちで他のカードの断りを受けても待ち続けて枝を作る" },
+  { file = "server/crates/core/tests/branch.rs", name = "ターンの終わりを待つ段では元の起こし直しの断りを拾わない" },
+  { file = "server/crates/server-core/src/branch.rs", name = "拾うのはそのカードの起こし直しの終わった断りだけ" },
+]
+breaks_when = "branch.rs の wait_for から断りの腕を外す（本物の断りの1本と差し込みの対照1本が狙った検査で落ちることを実測した）。起こし直しの断りの busy の照合を外す（競合・判別できないの2本）、宛先の照合を外す（他カードの1本）、ターン待ちの段にも断りを拾わせる（ターン待ちの1本）もそれぞれ実測した"
+verified    = true
+
+[[entry]]
 issue       = "止まっていて入力待ちのはずのセッションがが停滞ステータスになっている"
 behavior    = "フォークの一覧が残ったままメインが作業を再開したときでも、カードはサブ待ちから作業中へ戻る"
 gate        = "unit"

@@ -173,6 +173,7 @@ impl Branch {
                 card_id: Some(self.card_id),
                 message: message.to_string(),
                 kind: ErrorKind::Branch,
+                busy: None,
             },
         );
     }
@@ -233,10 +234,14 @@ impl Branch {
                 }
             }
             let card_id = self.card_id;
-            self.wait_for(&mut events, WAKE_TIMEOUT, move |meta| {
+            // **起こし直しの終わった断りを拾うのは、この段だけ**（寝ているカードばかり
+            // なのに、メモリ不足でセッションを起こせない 設計§7-3）。拾わないと、
+            // 断られた後も上限（180 秒）まで待ち、事実と違う理由で終わる
+            self.wait_for(&mut events, WAKE_TIMEOUT, Some(card_id), move |meta| {
                 meta.card_id == card_id && 整った(meta.status)
             })
             .await
+            .map_err(|reason| format!("元のセッションを起こせませんでした：{reason}"))?
             .ok_or_else(|| {
                 // **元の会話は失われていない。** 起きたまま残るだけで、人が寝かせられる
                 "元のセッションが起きてきませんでした（会話は残っています）".to_string()
@@ -262,11 +267,11 @@ impl Branch {
         ) {
             tracing::info!(card_id = %self.card_id, "作業中なので、ターンの終わりを待ちます");
             let card_id = self.card_id;
-            self.wait_for(&mut events, TURN_TIMEOUT, move |meta| {
+            self.wait_for(&mut events, TURN_TIMEOUT, None, move |meta| {
                 meta.card_id == card_id
                     && !matches!(meta.status, SessionStatus::Working | SessionStatus::Stalled)
             })
-            .await
+            .await?
             .ok_or_else(|| {
                 "作業が終わらないので枝分かれを見送りました（もう一度押せます）".to_string()
             })?;
@@ -293,11 +298,11 @@ impl Branch {
         // ── ④ 待ち①：席の CLI 側IDが別物へ張り替わる ────────────────
         let card_id = self.card_id;
         let 枝 = match self
-            .wait_for(&mut events, BRANCH_TIMEOUT, move |meta| {
+            .wait_for(&mut events, BRANCH_TIMEOUT, None, move |meta| {
                 meta.card_id == card_id
                     && meta.claude_session_id.is_some_and(|id| id != 元の会話)
             })
-            .await
+            .await?
         {
             Some(枝) => 枝,
             // **待ちが明けた＝枝になっていない、とは限らない。** 記録を引き直して確かめる
@@ -361,10 +366,10 @@ impl Branch {
 
         // ── ⑦ 待ち②：元の会話を持つ、別のカードが立つ ─────────────────
         let 元の席 = self
-            .wait_for(&mut events, RECALL_TIMEOUT, move |meta| {
+            .wait_for(&mut events, RECALL_TIMEOUT, None, move |meta| {
                 meta.card_id != card_id && meta.claude_session_id == Some(元の会話)
             })
-            .await
+            .await?
             .ok_or_else(|| "元の会話の席が立ちませんでした。もう一度呼び戻せます".to_string())?;
         tracing::info!(
             card_id = %self.card_id,
@@ -422,12 +427,18 @@ impl Branch {
     ///
     /// **購読と記録の両方を見る。** 配信は `Lagged` で取りこぼしうるので、報せを待つ
     /// 傍らで一定の間隔で記録層を直に確かめる。
+    ///
+    /// `断りを拾う` にカードを渡すと、そのカード宛ての**起こし直しの終わった断り**が
+    /// 届いた時点で、その文面を `Err` で返す（[`起こし直しの断り`]）。渡すのは起きるのを
+    /// 待つ段だけ——他の段で拾うと、無関係な断りで段取りを止めてしまう。
+    /// `Ok(None)` は上限まで待っても現れなかったこと。
     async fn wait_for(
         &self,
         events: &mut tokio::sync::broadcast::Receiver<crate::registry::AccountEvent>,
         限度: Duration,
+        断りを拾う: Option<CardId>,
         条件: impl Fn(&SessionMeta) -> bool,
-    ) -> Option<SessionMeta> {
+    ) -> Result<Option<SessionMeta>, String> {
         let 期限 = tokio::time::Instant::now() + 限度;
         loop {
             // 記録を直に確かめる（取りこぼしの保険であり、既に満たしている場合の近道）
@@ -437,10 +448,10 @@ impl Branch {
                 .into_iter()
                 .find(|meta| 条件(meta))
             {
-                return Some(meta);
+                return Ok(Some(meta));
             }
             if tokio::time::Instant::now() >= 期限 {
-                return None;
+                return Ok(None);
             }
             let 待つ = POLL.min(期限 - tokio::time::Instant::now());
             // **待つ間隔が過ぎただけなら、次の周回で記録を直に確かめる。**
@@ -453,16 +464,21 @@ impl Branch {
                     if event.account_id != self.account_id {
                         continue;
                     }
+                    if let Some(拾うカード) = 断りを拾う
+                        && let Some(理由) = 起こし直しの断り(&event.message, 拾うカード)
+                    {
+                        return Err(理由.to_string());
+                    }
                     if let ServerMessage::SessionUpsert { session } = event.message
                         && 条件(&session)
                     {
-                        return Some(*session);
+                        return Ok(Some(*session));
                     }
                 }
                 // 取りこぼした。次の周回で記録を直に確かめるので、ここでは待ちへ戻る
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 // 配信そのものが閉じた。記録の確認だけで続ける意味は無い
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(None),
             }
         }
     }
@@ -622,9 +638,90 @@ fn pushable(status: SessionStatus) -> Result<(), String> {
     }
 }
 
+/// そのカードの起こし直しが**終わった断り**で返ってきたなら、その文面を返す
+/// （寝ているカードばかりなのに、メモリ不足でセッションを起こせない 設計§7-3）。
+///
+/// **見分けは `busy` の欄だけで行う。文面の部分一致では見分けない**——競合の文
+/// （`ALREADY_REVIVING`）は `session-host-core` にあり、依存の向きで参照できない。
+///
+/// - `Some(true)`（競合）：先に起こしている側が居るので、待てば起きる。拾わない
+/// - `None`（古い PC・判別できない）：**欠けを断りと読まない**。拾わない（いまどおり待つ）
+/// - 他のカード・起こし直し以外の種別：拾わない
+fn 起こし直しの断り(message: &ServerMessage, card_id: CardId) -> Option<&str> {
+    match message {
+        ServerMessage::Error {
+            card_id: Some(宛先),
+            message,
+            kind: ErrorKind::Revive,
+            busy: Some(false),
+        } if *宛先 == card_id => Some(message),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn 起こし直しの知らせ(
+        card_id: CardId,
+        kind: ErrorKind,
+        busy: Option<bool>,
+    ) -> ServerMessage {
+        ServerMessage::Error {
+            card_id: Some(card_id),
+            message: "メモリが足りないので起こし直せません".to_string(),
+            kind,
+            busy,
+        }
+    }
+
+    #[test]
+    fn 拾うのはそのカードの起こし直しの終わった断りだけ() {
+        // 設計§7-3。競合（`Some(true)`）は待てば起きる、古い PC の知らせ（`None`）は
+        // 判別できない——どちらも失敗にすると、起きるはずの枝分かれを止める
+        let card_id = CardId::new();
+        assert_eq!(
+            起こし直しの断り(
+                &起こし直しの知らせ(card_id, ErrorKind::Revive, Some(false)),
+                card_id
+            ),
+            Some("メモリが足りないので起こし直せません")
+        );
+        for (理由, message) in [
+            (
+                "競合",
+                起こし直しの知らせ(card_id, ErrorKind::Revive, Some(true)),
+            ),
+            (
+                "判別できない",
+                起こし直しの知らせ(card_id, ErrorKind::Revive, None),
+            ),
+            (
+                "他のカード",
+                起こし直しの知らせ(CardId::new(), ErrorKind::Revive, Some(false)),
+            ),
+            (
+                "起こし直し以外",
+                起こし直しの知らせ(card_id, ErrorKind::Kill, Some(false)),
+            ),
+            (
+                "宛先なし",
+                ServerMessage::Error {
+                    card_id: None,
+                    message: "x".to_string(),
+                    kind: ErrorKind::Revive,
+                    busy: Some(false),
+                },
+            ),
+        ] {
+            assert_eq!(
+                起こし直しの断り(&message, card_id),
+                None,
+                "{理由}で拾っている"
+            );
+        }
+    }
 
     #[test]
     fn 待てば押せるようになるものは通す() {
